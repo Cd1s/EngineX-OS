@@ -1,0 +1,11 @@
+[Unit]
+Description=Reapply SC5000 affinity for newly created Engine threads
+
+[Timer]
+OnBootSec=2s
+OnUnitInactiveSec=15s
+AccuracySec=1s
+Unit=sc5000-perf-tune.service
+
+[Install]
+WantedBy=timers.target

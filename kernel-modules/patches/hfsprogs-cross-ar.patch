@@ -1,0 +1,6 @@
+Use the target archiver when cross-compiling the HFS checker library.
+--- a/fsck_hfs.tproj/dfalib/Makefile.lnx
++++ b/fsck_hfs.tproj/dfalib/Makefile.lnx
+@@ -12 +12 @@
+-	ar rc $@ $?
++	$(AR) rc $@ $?
