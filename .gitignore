@@ -4,6 +4,16 @@
 *.iso
 *.squashfs
 *.ext4
+*.ext2
+*.ext3
+*.img.xz
+*.xz
+*.payload
+*.qcow2
+*.raw
+*.vmdk
+*.vhd
+*.vhdx
 *.dtb
 *.ko
 firmware/

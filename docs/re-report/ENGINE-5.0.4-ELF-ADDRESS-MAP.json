@@ -1,0 +1,66 @@
+{
+  "provenance": "Independent read-only ELF32 program-header inspection, not an REA observation",
+  "source_file": "/root/build/sc5000-lab/5.0.4/tree/usr/Engine/Engine",
+  "source_sha256": "e1eb0e2b858880016daa3ad14538426204f8e698d855a274aebc924a5f9a5caa",
+  "ghidra_session_image_base": "0x10000",
+  "original_elf_image_base": "0x0",
+  "file_offset_formula": "p_offset + original_elf_va - p_vaddr, only inside file-backed PT_LOAD range",
+  "records": [
+    {
+      "name": "PerformanceData DDL",
+      "ghidra_va": "0x1db8a50",
+      "original_elf_va": "0x1da8a50",
+      "file_offset": "0x1da8a50",
+      "pt_load": {
+        "index": 2,
+        "p_offset": 0,
+        "p_vaddr": 0,
+        "p_filesz": 43019300,
+        "p_memsz": 43019300
+      },
+      "first_64_bytes_hex": "435245415445205441424c4520506572666f726d616e6365446174612028200a09747261636b496420494e5445474552205052494d415259204b45592c200a09"
+    },
+    {
+      "name": "Information DDL",
+      "ghidra_va": "0x1db78f8",
+      "original_elf_va": "0x1da78f8",
+      "file_offset": "0x1da78f8",
+      "pt_load": {
+        "index": 2,
+        "p_offset": 0,
+        "p_vaddr": 0,
+        "p_filesz": 43019300,
+        "p_memsz": 43019300
+      },
+      "first_64_bytes_hex": "435245415445205441424c4520496e666f726d6174696f6e2028200a09696420494e5445474552205052494d415259204b4559204155544f494e4352454d454e"
+    },
+    {
+      "name": "SQL registry scan window 1",
+      "ghidra_va": "0x293ba04",
+      "original_elf_va": "0x292ba04",
+      "file_offset": "0x292aa04",
+      "pt_load": {
+        "index": 3,
+        "p_offset": 43022144,
+        "p_vaddr": 43026240,
+        "p_filesz": 1595268,
+        "p_memsz": 1810164
+      },
+      "first_64_bytes_hex": "fe000000f878da01ff0100005f000000f879da01ff01000033000000587ada01ff0100009a0000008c7ada0101000000c9000000287bda0101000000b8000000"
+    },
+    {
+      "name": "SQL registry scan window 2",
+      "ghidra_va": "0x293bc5c",
+      "original_elf_va": "0x292bc5c",
+      "file_offset": "0x292ac5c",
+      "pt_load": {
+        "index": 3,
+        "p_offset": 43022144,
+        "p_vaddr": 43026240,
+        "p_filesz": 1595268,
+        "p_memsz": 1810164
+      },
+      "first_64_bytes_hex": "fe000000f878da01ff0100005f000000f879da01ff01000033000000587ada01ff0100009a0000008c7ada0101000000c9000000287bda0101000000b8000000"
+    }
+  ]
+}
