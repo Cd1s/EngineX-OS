@@ -1,0 +1,7 @@
+[Unit]
+Description=SC5000 background work on CPU3
+
+[Slice]
+AllowedCPUs=3
+CPUWeight=10
+IOWeight=10
