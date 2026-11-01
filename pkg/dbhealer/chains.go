@@ -262,11 +262,19 @@ func materialize(tx *sql.Tx) error {
 		if err := tx.QueryRow("SELECT sql FROM sqlite_master WHERE type='view' AND name='PlaylistPath'").Scan(&ddl); err != nil {
 			return err
 		}
-		as := strings.Index(strings.ToUpper(ddl), " AS ")
+		upper := strings.ToUpper(ddl)
+		nameIdx := strings.Index(upper, "PLAYLISTPATH")
+		as := -1
+		if nameIdx >= 0 {
+			rest := upper[nameIdx+len("PLAYLISTPATH"):]
+			if rel := strings.Index(rest, "AS"); rel >= 0 {
+				as = nameIdx + len("PLAYLISTPATH") + rel
+			}
+		}
 		if as < 0 {
 			return fmt.Errorf("unsupported PlaylistPath definition")
 		}
-		if _, err := tx.Exec("CREATE VIEW GuardianOriginalPlaylistPath AS " + ddl[as+4:]); err != nil {
+		if _, err := tx.Exec("CREATE VIEW GuardianOriginalPlaylistPath AS " + ddl[as+2:]); err != nil {
 			return err
 		}
 	}
