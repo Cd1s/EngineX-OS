@@ -27,3 +27,7 @@ __pycache__/
 *.arl
 .env
 .DS_Store
+
+# Stream Sync build outputs
+/bin/
+/stream-sync
