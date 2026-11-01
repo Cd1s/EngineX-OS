@@ -1,0 +1,4 @@
+#!/bin/sh
+# util-linux mount helper; -i prevents recursively invoking mount.hfsplus.
+# Filesystem checking and journaled force,rw policy belong to the storage worker.
+exec /bin/mount -i -t hfsplus "$@"

@@ -1,0 +1,9 @@
+[Unit]
+Description=SC5000 foreground Engine and real-time audio
+
+[Slice]
+# The process includes both GUI (1-2) and RT audio (0) threads.
+# sc5000-perf-tune sets each thread's affinity inside this cpuset.
+AllowedCPUs=0-2
+CPUWeight=1000
+IOWeight=1000

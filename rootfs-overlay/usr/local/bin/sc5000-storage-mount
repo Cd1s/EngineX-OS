@@ -1,0 +1,221 @@
+#!/bin/bash
+# Run from the systemd worker, never in udev's private mount namespace.
+set -euo pipefail
+umask 022
+
+SYS=${SC5000_SYS_ROOT:-/sys}
+RUN=${SC5000_RUN_ROOT:-/run/sc5000-storage}
+MEDIA=${SC5000_MEDIA_ROOT:-/media}
+SD=$MEDIA/sc5000-sd-cache
+FALLBACK=${SC5000_INTERNAL_CACHE:-/var/cache/sc5000}
+BRIDGE=${SC5000_RB_BRIDGE:-/usr/local/bin/rb-bridge}
+NOTIFY=${SC5000_STORAGE_NOTIFY:-/usr/local/libexec/sc5000-storage-notify}
+log() { printf 'sc5000-storage: %s\n' "$*" >&2; }
+die() { log "$*"; exit 1; }
+safe_dir() {
+    # Reject symlinks in removable-media cache paths, including ancestors.
+    local path=$1 part current=
+    local -a parts
+    [[ $path == /* ]] || die "cache path must be absolute: $path"
+    IFS=/ read -r -a parts <<< "$path"
+    for part in "${parts[@]}"; do
+        [[ -n $part ]] || continue
+        [[ $part != . && $part != .. ]] || die 'relative cache component'
+        current+=/$part
+        [[ ! -L $current ]] || die "symlink in cache path: $current"
+    done
+    mkdir -p -- "$path"
+}
+safe_dir "$RUN"
+exec 9>"$RUN/lock"
+flock -x 9
+
+is_sd() {
+    local parent=${1%%p[0-9]*}
+    [[ $parent =~ ^mmcblk[0-9]+$ ]] || return 1
+    [[ $(cat "$SYS/class/block/$parent/device/type" 2>/dev/null) == SD ]] || return 1
+    [[ -z ${SC5000_FRONT_SD_DEVICE:-} || $parent == "$SC5000_FRONT_SD_DEVICE" ]]
+}
+mounted() { mountpoint -q -- "$1"; }
+cache_usable() {
+    local type
+    type=$(findmnt -n -o FSTYPE -T "$1") || return 1
+    # FAT/exFAT/NTFS cannot provide OverlayFS upperdir's Unix/xattr semantics.
+    [[ $type == ext4 || $type == f2fs || $type == xfs || $type == overlay ]] && [[ -w $1 ]]
+}
+mount_library() {
+    local public=$1 lower=$2 cache=$3 library_lower=$2/Engine\ Library
+    safe_dir "$public/Engine Library"
+    [[ ! -L $library_lower ]] || die 'APFS library is a symlink'
+    if [[ ! -d $library_lower ]]; then
+        [[ ! -e $library_lower ]] || die 'APFS library is not a directory'
+        library_lower=$RUN/empty/${lower##*/}
+        safe_dir "$library_lower"
+    fi
+    mount -t overlay overlay \
+        -o "lowerdir=$library_lower,upperdir=$cache/upper,workdir=$cache/work,nodev,nosuid" \
+        "$public/Engine Library"
+}
+
+remove_volume() {
+    local file=$RUN/$name.state public lower cache library_unmounted=0
+    [[ -f $file ]] || return 0
+    { IFS= read -r public; IFS= read -r lower; IFS= read -r cache; } < "$file"
+    if [[ $public == "$SD" ]]; then
+        local entry other_cache
+        for entry in "$RUN"/*.state; do
+            [[ $entry != "$file" ]] || continue
+            other_cache=$(sed -n '3p' "$entry")
+            [[ $other_cache != "$SD/"* ]] || die 'SD cache still used by an APFS overlay; eject APFS first'
+        done
+    fi
+    # No lazy/forced unmount: a busy public mount must retain its lower/cache.
+    if [[ -n $lower ]] && mounted "$public/Engine Library"; then
+        umount -- "$public/Engine Library"
+        library_unmounted=1
+    fi
+    if mounted "$public" && ! umount -- "$public"; then
+        # A track may keep the root view busy after library unmount succeeds.
+        # Restore library access, including saved cues, before reporting busy.
+        if [[ $library_unmounted == 1 ]]; then
+            mount_library "$public" "$lower" "$cache" || log 'library restore failed; retry add before using Engine'
+        fi
+        die 'public view busy; lower and cache retained'
+    fi
+    if [[ -n $lower ]] && mounted "$lower"; then umount -- "$lower"; fi
+    rm -f -- "$file"
+}
+
+action=${1:-${ACTION:-add}}
+if [[ $action == --discover ]]; then
+    # Release the global lock before invoking workers. SD comes first.
+    flock -u 9
+    result=0
+    for node in "$SYS"/class/block/mmcblk* "$SYS"/class/block/sd*; do
+        [[ -e $node ]] || continue
+        "$0" add "/dev/${node##*/}" || result=1
+    done
+    exit "$result"
+fi
+dev=${2:-${DEVNAME:-}}
+[[ $dev =~ ^/dev/(sd[a-z]+[0-9]*|mmcblk[0-9]+(p[0-9]+)?)$ ]] || die "unsupported device: $dev"
+name=${dev##*/}
+[[ $action == add || $action == change || $action == remove ]] || die "unsupported action: $action"
+if [[ $action == remove ]]; then remove_volume; exit 0; fi
+[[ -e $SYS/class/block/$name ]] || die "device disappeared: $dev"
+# Never claim the internal eMMC or its root filesystem.
+if [[ $name == mmcblk* ]] && ! is_sd "$name"; then exit 0; fi
+if [[ -f $RUN/$name.state ]]; then
+    { IFS= read -r previous; IFS= read -r previous_lower; IFS= read -r previous_cache; } < "$RUN/$name.state"
+    if mounted "$previous"; then
+        if [[ -n $previous_lower ]] && ! mounted "$previous/Engine Library"; then
+            mount_library "$previous" "$previous_lower" "$previous_cache"
+        fi
+        exit 0
+    fi
+    remove_volume
+fi
+type=$(blkid -p -s TYPE -o value "$dev" 2>/dev/null) || exit 0
+case $type in hfsplus|apfs|vfat|exfat|ntfs|ext4|f2fs) ;; *) exit 0 ;; esac
+# fsck must never run against a filesystem already mounted by another manager.
+if [[ -n $(findmnt -rn -S "$dev" -o TARGET) ]]; then die "already mounted elsewhere: $dev"; fi
+public=$MEDIA/sc5000-$name
+if is_sd "$name" && [[ $type != apfs ]]; then
+    mounted "$SD" && die 'another front SD partition is already mounted'
+    public=$SD
+fi
+safe_dir "$public"
+lower='' cache='' new_public='' new_lower='' new_library=''
+cleanup() {
+    local status=$?
+    if [[ -n $new_library ]]; then
+        umount -- "$public/Engine Library" || return "$status"
+    fi
+    if [[ -n $new_public ]]; then
+        # If cleanup cannot unmount the overlay, preserve the lower as well.
+        umount -- "$public" || return "$status"
+    fi
+    if [[ -n $new_lower ]]; then umount -- "$lower" || true; fi
+    return "$status"
+}
+trap cleanup EXIT
+if [[ $type == apfs ]]; then
+    uuid=$(blkid -p -s UUID -o value "$dev") || die 'APFS UUID probing failed'
+    [[ $uuid =~ ^[a-zA-Z0-9-]+$ ]] || die 'APFS requires a safe, persistent filesystem UUID'
+    # Concurrent clones with the same UUID must never share an upper/work pair.
+    for entry in "$RUN"/*.state; do
+        [[ -f $entry ]] || continue
+        [[ $(sed -n '3p' "$entry") != */apfs-overlays/"$uuid" ]] || die 'APFS UUID already active'
+    done
+    base=$FALLBACK
+    if mounted "$SD" && cache_usable "$SD"; then
+        base=$SD
+        # Retain an existing internal library when SD was absent on first use.
+        # Switching to a fresh upper would hide previously saved cues/history.
+        if [[ ! -d $SD/apfs-overlays/$uuid/upper && -d $FALLBACK/apfs-overlays/$uuid/upper ]]; then
+            base=$FALLBACK
+        fi
+    fi
+    safe_dir "$base"
+    cache_usable "$base" || die 'no OverlayFS-compatible writable cache'
+    cache=$base/apfs-overlays/$uuid
+    [[ $cache != *[,:\\]* ]] || die 'unsupported OverlayFS cache path'
+    safe_dir "$cache/upper"
+    safe_dir "$cache/work"
+    safe_dir "$cache/view-upper"
+    safe_dir "$cache/view-work"
+    chown 1000:1000 "$cache/upper" "$cache/view-upper"
+    chmod 0777 "$cache/upper" "$cache/view-upper"
+    lower=$RUN/lower/$name
+    safe_dir "$lower"
+    modprobe apfs
+    modprobe overlay
+    # Never pass rw/write/experimental options, even if the module supports them.
+    mount -t apfs -o ro,nodev,nosuid "$dev" "$lower"
+    new_lower=1
+    mount -t overlay overlay -o "lowerdir=$lower,upperdir=$cache/view-upper,workdir=$cache/view-work,nodev,nosuid" "$public"
+    new_public=1
+    safe_dir "$public/Engine Library"
+    mount_library "$public" "$lower" "$cache"
+    new_library=1
+elif [[ $type == hfsplus ]]; then
+    modprobe hfsplus
+    # Pinned hfsprogs returns 0 on success, including successful repair.
+    # Unlike generic fsck, 1 is a usage failure; reject every nonzero status.
+    rc=0
+    fsck.hfsplus -f "$dev" </dev/null || rc=$?
+    [[ $rc == 0 ]] || die "HFS+ check failed ($rc): $dev"
+    mount -t hfsplus -o force,rw,uid=1000,gid=1000,umask=0000,nodev,nosuid "$dev" "$public"
+    new_public=1
+else
+    opts=rw,nodev,nosuid
+    case $type in vfat|exfat|ntfs) opts+=,uid=1000,gid=1000,umask=0000 ;; esac
+    mount_type=$type
+    if [[ $type == ntfs ]]; then modprobe ntfs3; mount_type=ntfs3; fi
+    mount -t "$mount_type" -o "$opts" "$dev" "$public"
+    new_public=1
+fi
+# This creates missing library directories in the overlay, never on APFS lower.
+safe_dir "$public/Engine Library"
+chown 1000:1000 "$public/Engine Library"
+if [[ $public == "$SD" ]]; then
+    safe_dir "$SD/Downloads"
+    safe_dir "$SD/apfs-overlays"
+    chown 1000:1000 "$SD/Downloads"
+fi
+printf '%s\n%s\n%s\n' "$public" "$lower" "$cache" > "$RUN/$name.state.tmp"
+mv -- "$RUN/$name.state.tmp" "$RUN/$name.state"
+new_public='' new_lower='' new_library=''
+# The worker has CPUAffinity=3, CPUWeight=10, IOWeight=10; children inherit it.
+# A failed conversion must not prevent a DJ from accessing the original files.
+if [[ -f $public/PIONEER/rekordbox/export.pdb ]]; then
+    if [[ -x $BRIDGE ]]; then
+        timeout --signal=TERM --kill-after=2s "${SC5000_BRIDGE_TIMEOUT:-10s}" \
+            taskset -c 3 "$BRIDGE" --mount-path "$public" || log 'rb-bridge failed/timed out; exposing original files'
+    else
+        log 'rb-bridge unavailable; exposing original files'
+    fi
+fi
+# Firmware-specific notification hook runs only after conversion has finished.
+if [[ -x $NOTIFY ]]; then "$NOTIFY" --mount-path "$public" || log 'Engine notification failed'; fi
+log "ready: $dev ($type) at $public"
