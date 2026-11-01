@@ -126,6 +126,9 @@ CREATE TABLE Track (
 
 CREATE INDEX index_AlbumArt_hash ON AlbumArt (hash);
 
+CREATE INDEX index_PlaylistEntity_listId_nextEntityId ON PlaylistEntity(listId, nextEntityId);
+CREATE INDEX index_PlaylistEntity_trackId ON PlaylistEntity(trackId);
+
 CREATE INDEX index_PlaylistEntity_nextEntityId_listId ON PlaylistEntity(nextEntityId, listId);
 
 CREATE INDEX index_PreparelistEntity_trackId ON PreparelistEntity (trackId);
@@ -224,7 +227,7 @@ FROM Playlist c
 LEFT JOIN NameConcat g USING (id);
 
 CREATE TRIGGER trigger_PerformanceData_after_update_Track_timestamp
-	AFTER UPDATE OF trackData, isAnalyzed, overviewWaveFormData, beatData, quickCues, loops, activeOnLoadLoops
+	AFTER UPDATE OF trackData, overviewWaveFormData, beatData, quickCues, loops, activeOnLoadLoops
 	ON PerformanceData
 	FOR EACH ROW
 BEGIN
@@ -351,12 +354,12 @@ END;
 
 CREATE TRIGGER trigger_before_delete_PlaylistEntity
 BEFORE DELETE ON PlaylistEntity
-WHEN OLD.trackId > 0
 BEGIN
 	UPDATE PlaylistEntity SET
-		nextEntityId = OLD.nextEntityId
+		nextEntityId = CASE WHEN OLD.nextEntityId = OLD.id THEN 0 ELSE OLD.nextEntityId END
 	WHERE nextEntityId = OLD.id
-	AND listId = OLD.listId;
+	AND listId IS OLD.listId
+    AND id <> OLD.id;
 END;
 
 CREATE TRIGGER trigger_before_insert_List

@@ -148,10 +148,13 @@ func flacHeader(f *os.File, size int64) (AudioInfo, error) {
 			a.Channels = int(v>>41&7) + 1
 			a.BitDepth = int(v>>36&31) + 1
 			a.Samples = v & 0xfffffffff
-			if a.SampleRate == 0 {
-				return a, fmt.Errorf("flac: zero sample rate")
+			if a.SampleRate == 0 || a.SampleRate > 768000 {
+				return a, fmt.Errorf("flac: invalid sample rate")
 			}
 			a.Duration = float64(a.Samples) / float64(a.SampleRate)
+			if a.Duration > 1e7 {
+				return a, fmt.Errorf("flac: invalid duration")
+			}
 			found = true
 		}
 		off += 4 + n

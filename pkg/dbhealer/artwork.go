@@ -2,7 +2,6 @@ package dbhealer
 
 import (
 	"bytes"
-	"crypto/sha1"
 	"database/sql"
 	"fmt"
 	"image"
@@ -96,11 +95,8 @@ func healArtwork(tx *sql.Tx, r *Report) error {
 			if err = jpeg.Encode(&out, thumbnail(src), &jpeg.Options{Quality: 80}); err != nil {
 				return err
 			}
-			hash := fmt.Sprintf("%x", sha1.Sum(out.Bytes()))
-			if _, err = tx.Exec("UPDATE AlbumArt SET albumArt=?,hash=? WHERE id=?", out.Bytes(), hash, a.id); err != nil {
-				return err
-			}
-			if _, err = tx.Exec("UPDATE Track SET albumArtSourceHash=? WHERE albumArtId=?", hash, a.id); err != nil {
+			// Hashes identify the original source for bridge deduplication.
+			if _, err = tx.Exec("UPDATE AlbumArt SET albumArt=? WHERE id=?", out.Bytes(), a.id); err != nil {
 				return err
 			}
 			r.Artwork++

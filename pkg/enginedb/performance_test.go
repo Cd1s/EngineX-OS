@@ -3,6 +3,7 @@ package enginedb_test
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 	"reflect"
 	"testing"
 
@@ -91,5 +92,50 @@ func TestExactContainerSamplesAndLegacyCueColor(t *testing.T) {
 	}
 	if !bytes.Equal(q[8+9:8+13], []byte{0, 0, 0, 0}) {
 		t.Fatal("empty A was painted")
+	}
+}
+
+func TestWaveformIndexAndShortAnalysisBoundaries(t *testing.T) {
+	for _, entry := range []uint32{0, 0x80000000, 0xffffffff} {
+		_, err := enginedb.EncodePerformance(rekordbox.Track{}, &rekordbox.Analysis{Waveforms: []rekordbox.Waveform{{Tag: "PWAV", EntryBytes: entry, Data: []byte{1}}}})
+		if err == nil {
+			t.Fatalf("accepted entry size %d", entry)
+		}
+	}
+	data := make([]byte, 3_000_001) // i*n exceeds a signed 32-bit int in later bins.
+	data[len(data)-1] = 31
+	cases := []struct {
+		name    string
+		a       rekordbox.Analysis
+		minimum uint64
+	}{
+		{"large", rekordbox.Analysis{Waveforms: []rekordbox.Waveform{{Tag: "PWAV", EntryBytes: 1, Data: data}}}, uint64(len(data))},
+		{"short", rekordbox.Analysis{Waveforms: []rekordbox.Waveform{{Tag: "PWAV", EntryBytes: 1, Data: []byte{31}}}}, 1024},
+		{"beat", rekordbox.Analysis{Beats: []rekordbox.Beat{{TimeMS: 2000}}}, 88201},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := enginedb.EncodePerformance(rekordbox.Track{}, &tc.a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := enginedb.QUncompress(p.TrackData, 1000)
+			if err != nil || binary.BigEndian.Uint64(raw[8:]) < tc.minimum {
+				t.Fatalf("missing positive sample fallback: %x %v", raw, err)
+			}
+			if len(p.Overview) > 0 {
+				raw, err = enginedb.QUncompress(p.Overview, 10000)
+				if err != nil {
+					t.Fatal(err)
+				}
+				step := math.Float64frombits(binary.BigEndian.Uint64(raw[16:]))
+				if step <= 0 {
+					t.Fatal("nonpositive samples per bin", step)
+				}
+				if !bytes.Equal(raw[24+1023*3:24+1024*3], []byte{255, 255, 255}) {
+					t.Fatal("last waveform peak lost")
+				}
+			}
+		})
 	}
 }

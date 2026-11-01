@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -57,6 +58,13 @@ func TestEngine504AtomicImport(t *testing.T) {
 	id, err := library.Import(ctx, input)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var storedPath string
+	if err = db.QueryRow("SELECT path FROM Track WHERE id=?", id).Scan(&storedPath); err != nil {
+		t.Fatal(err)
+	}
+	if storedPath != "../first.wav" || filepath.Clean(filepath.Join(root, "Engine Library", filepath.FromSlash(storedPath))) != file {
+		t.Fatal("track path is not relative to Engine Library", storedPath)
 	}
 	var track, overview, beats, cues []byte
 	if err = db.QueryRow("SELECT trackData,overviewWaveFormData,beatData,quickCues FROM PerformanceData WHERE trackId=?", id).Scan(&track, &overview, &beats, &cues); err != nil {
@@ -185,7 +193,7 @@ func TestUnanalyzedLockedTrackGetsWaveformsAndMetadata(t *testing.T) {
 	file := filepath.Join(root, "old.wav")
 	song := testaudio.Song(4)
 	os.WriteFile(file, testaudio.WAV(song), 0600)
-	_, err := db.Exec("INSERT INTO Track(path,title,isAnalyzed,isBeatGridLocked,bpm,bpmAnalyzed) VALUES('old.wav','Old title',0,1,121,121)")
+	_, err := db.Exec("INSERT INTO Track(path,title,isAnalyzed,isBeatGridLocked,bpm,bpmAnalyzed) VALUES('../old.wav','Old title',0,1,121,121)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,5 +226,77 @@ func TestUnanalyzedLockedTrackGetsWaveformsAndMetadata(t *testing.T) {
 	}
 	if title != "Fresh title" || format != "wav" || analyzed != 1 || bpm != 121 || size == 0 || len(track) == 0 || len(wave) == 0 || string(beat) != "locked grid" || string(cue) != "DJ cues" {
 		t.Fatalf("incomplete or destructive reimport: %s %s %d %d", title, format, analyzed, bpm)
+	}
+}
+
+func TestLibraryImportRejectsInvalidAnalysisBounds(t *testing.T) {
+	path, root, db := testlibrary.Create(t)
+	l, err := OpenLibrary(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	file := filepath.Join(root, "bounds.wav")
+	if err := os.WriteFile(file, testaudio.WAV(testaudio.Song(4)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	base := Result{
+		SampleRate: testaudio.Rate, TotalSamples: 4 * testaudio.Rate, Duration: 4, BPM: 120,
+		OverviewSamplesPerEntry: 4.0 * testaudio.Rate / OverviewEntries,
+		Overview:                make([]WavePoint, OverviewEntries),
+		Beatgrid:                buildBeatgrid(120, .25, testaudio.Rate, 4*testaudio.Rate),
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*Result)
+	}{
+		{"rate_zero", func(r *Result) { r.SampleRate = 0 }},
+		{"rate_low", func(r *Result) { r.SampleRate = 7999 }},
+		{"rate_high", func(r *Result) { r.SampleRate = 384001 }},
+		{"overview_zero", func(r *Result) { r.OverviewSamplesPerEntry = 0 }},
+		{"overview_negative", func(r *Result) { r.OverviewSamplesPerEntry = -1 }},
+		{"overview_nan", func(r *Result) { r.OverviewSamplesPerEntry = math.NaN() }},
+		{"overview_positive_inf", func(r *Result) { r.OverviewSamplesPerEntry = math.Inf(1) }},
+		{"overview_negative_inf", func(r *Result) { r.OverviewSamplesPerEntry = math.Inf(-1) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := base
+			tc.change(&r)
+			id, err := l.Import(context.Background(), Import{Path: file, Playlist: "Bounds", Result: &r})
+			if err == nil || err.Error() != "library: incomplete analysis" || id != 0 {
+				t.Fatalf("invalid analysis was not rejected before import: id=%d err=%v", id, err)
+			}
+		})
+	}
+	var count int
+	if err := db.QueryRow("SELECT count(*) FROM Track").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("invalid analysis changed Track: count=%d err=%v", count, err)
+	}
+	// Both endpoints are valid and must survive serialization into Engine blobs.
+	for _, sr := range []int{8000, 384000} {
+		// A separate track is required: reimport preserves an existing analysis.
+		rateFile := filepath.Join(root, fmt.Sprintf("%d.wav", sr))
+		if err := os.WriteFile(rateFile, testaudio.WAV(testaudio.Song(4)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		r := base
+		r.SampleRate = sr
+		r.TotalSamples = int64(sr * 4)
+		r.OverviewSamplesPerEntry = float64(r.TotalSamples) / OverviewEntries
+		r.Beatgrid = buildBeatgrid(120, .25, sr, r.TotalSamples)
+		id, err := l.Import(context.Background(), Import{Path: rateFile, Playlist: "Bounds", Result: &r})
+		if err != nil {
+			t.Fatalf("valid sample rate %d rejected: %v", sr, err)
+		}
+		var track, overview []byte
+		if err := db.QueryRow("SELECT trackData,overviewWaveFormData FROM PerformanceData WHERE trackId=?", id).Scan(&track, &overview); err != nil {
+			t.Fatal(err)
+		}
+		if got := math.Float64frombits(binary.BigEndian.Uint64(uncompress(t, track)[:8])); got != float64(sr) {
+			t.Fatalf("serialized sample rate = %v, want %d", got, sr)
+		}
+		if got := math.Float64frombits(binary.BigEndian.Uint64(uncompress(t, overview)[16:24])); got != r.OverviewSamplesPerEntry {
+			t.Fatalf("serialized overview scale = %v, want %v", got, r.OverviewSamplesPerEntry)
+		}
 	}
 }

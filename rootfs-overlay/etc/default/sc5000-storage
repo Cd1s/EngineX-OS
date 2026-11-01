@@ -4,3 +4,5 @@
 SC5000_INTERNAL_CACHE=/var/cache/sc5000
 # Executable adapter for the stock Engine mount notification protocol:
 SC5000_STORAGE_NOTIFY=/usr/local/libexec/sc5000-storage-notify
+SC5000_ENGINE_GUARDIAN=/usr/local/bin/engine-guardian
+SC5000_GUARDIAN_TIMEOUT=10s

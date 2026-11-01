@@ -191,6 +191,9 @@ func sourceFiles(res *compat.Resolver, t rekordbox.Track) ([]analysisFile, *anal
 		if e != nil {
 			return nil, nil, e
 		}
+		if !s.Mode().IsRegular() || s.Size() > 32<<20 {
+			return nil, nil, fmt.Errorf("artwork not a regular file within 32 MiB: %s", rel)
+		}
 		art = &analysisFileExport{rel, s.Size(), s.ModTime().UnixNano()}
 	}
 	return files, art, nil
@@ -337,6 +340,9 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			if e != nil {
 				return result, e
 			}
+			if len(data) > 32<<20 {
+				return result, fmt.Errorf("artwork exceeds 32 MiB")
+			}
 			h := sha1.Sum(data)
 			artHash := hex.EncodeToString(h[:])
 			var n int64
@@ -409,7 +415,15 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return result, err
 	}
-	if oldHash != playlistHash {
+	expectedPlaylists := len(l.Playlists)
+	if opts.SmartMatch {
+		expectedPlaylists++
+	}
+	var actualPlaylists, validPlaylists int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*),count(p.id) FROM BridgePlaylist b LEFT JOIN Playlist p ON p.id=b.listId`).Scan(&actualPlaylists, &validPlaylists); err != nil {
+		return result, err
+	}
+	if oldHash != playlistHash || actualPlaylists != expectedPlaylists || validPlaylists != expectedPlaylists {
 		if err = writePlaylists(ctx, tx, l, opts, mapping, databaseUUID, recommendations); err != nil {
 			return result, err
 		}
@@ -472,6 +486,9 @@ func writePlaylists(ctx context.Context, tx *sql.Tx, l *rekordbox.Library, opts 
 		}
 	}
 	if _, e = tx.ExecContext(ctx, `DELETE FROM BridgePlaylist`); e != nil {
+		return e
+	}
+	if e = normalizePlaylistTails(ctx, tx); e != nil {
 		return e
 	}
 	byParent := map[uint32][]rekordbox.Playlist{}

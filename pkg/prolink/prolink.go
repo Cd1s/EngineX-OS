@@ -63,9 +63,13 @@ type Discovery struct {
 }
 
 func NewDiscovery() *Discovery { return &Discovery{devices: map[string]Device{}} }
-func (d *Discovery) Observe(device Device) {
+func (d *Discovery) Observe(device Device) Device {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.devices == nil {
+		d.devices = map[string]Device{}
+	}
+	d.prune(time.Now())
 	key := fmt.Sprintf("%s/%d", device.Address, device.Number)
 	if old, ok := d.devices[key]; ok && device.PacketType == 6 {
 		device.TrackID = old.TrackID
@@ -73,10 +77,12 @@ func (d *Discovery) Observe(device Device) {
 		device.SourceSlot = old.SourceSlot
 	}
 	d.devices[key] = device
+	return device
 }
 func (d *Discovery) Devices(now time.Time) []Device {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.prune(now)
 	var out []Device
 	for _, v := range d.devices {
 		if now.Sub(v.LastSeen) <= 10*time.Second {
@@ -84,6 +90,15 @@ func (d *Discovery) Devices(now time.Time) []Device {
 		}
 	}
 	return out
+}
+
+// prune runs while the discovery mutex is held.
+func (d *Discovery) prune(now time.Time) {
+	for key, device := range d.devices {
+		if now.Sub(device.LastSeen) > 10*time.Second {
+			delete(d.devices, key)
+		}
+	}
 }
 
 // Listen listens to discovery and status broadcasts on the selected interface
@@ -129,7 +144,7 @@ func (d *Discovery) Listen(ctx context.Context, address net.IP, notify func(Devi
 				if e != nil {
 					continue
 				}
-				d.Observe(device)
+				device = d.Observe(device)
 				if notify != nil {
 					notify(device)
 				}
