@@ -1,0 +1,16 @@
+[Unit]
+Description=SC5000 library guardian
+After=engine.service sc5000-debloat.service
+
+[Service]
+ExecStart=/usr/local/bin/engine-guardian --watch
+Restart=on-failure
+RestartSec=30
+Nice=19
+CPUSchedulingPolicy=idle
+CPUAffinity=3
+IOSchedulingClass=idle
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target
