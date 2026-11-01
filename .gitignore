@@ -27,3 +27,7 @@ __pycache__/
 *.arl
 .env
 .DS_Store
+
+# Local Go caches and cross-compiled artifacts
+/bin/
+/.cache/
