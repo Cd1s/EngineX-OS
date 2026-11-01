@@ -18,3 +18,6 @@ Denon DJ SC5000 Prime (`JP07` / Rockchip RK3288 / Engine OS 5.0.4) 深度定制�
 6. **`sim/qengine/`**：基于 `Peyton-C/QEngine` 的 QEMU `JP07` 模拟刷机与自动化联调套件。
 
 详见 [REQUIREMENTS_AND_PLAN.md](./REQUIREMENTS_AND_PLAN.md)。
+
+rb-bridge 的实际支持范围、命令、数据保留方式及尚未完成的原厂/局域网验证，见
+[rb-bridge 使用与验证说明](docs/RB-BRIDGE.md)。
