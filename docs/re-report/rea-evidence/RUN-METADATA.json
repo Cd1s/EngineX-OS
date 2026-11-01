@@ -1,0 +1,231 @@
+{
+  "repository": {
+    "commit": "1d343a88e53af51101a408d437641c60b7bb34e4",
+    "version": "6.8.0",
+    "working_tree_clean": true
+  },
+  "runtime": {
+    "rea_npm": "6.8.0",
+    "node": "22.23.4",
+    "ghidra": "12.1.4",
+    "jdk": "21.0.13+9"
+  },
+  "identity": {
+    "agent_id": "f2b652a9-dc5f-4c7d-b398-a5747e50d61e",
+    "workspace_id": "wks_47ec13a6655df8ca",
+    "codex_session_id": "01a19804-d418-7270-8276-22f1e2bc6073",
+    "cwd": "/root/build/sc5000-lab/rea"
+  },
+  "target_execution": false,
+  "input_modification": false,
+  "targets": [
+    {
+      "path": "/root/build/sc5000-lab/5.0.4/tree/usr/Engine/Engine",
+      "sha256": "e1eb0e2b858880016daa3ad14538426204f8e698d855a274aebc924a5f9a5caa",
+      "unique_evidence_records": 79,
+      "observed_operations": [
+        "binary_overview",
+        "procedure_callees",
+        "procedure_callers",
+        "procedure_info",
+        "procedure_pseudo_code",
+        "read_binary_inventory_summary",
+        "read_bytes",
+        "resolve_containing_procedure",
+        "search_bytes",
+        "search_procedures",
+        "search_strings",
+        "xrefs"
+      ]
+    },
+    {
+      "path": "/root/build/sc5000-lab/5.0.4/tree/usr/Engine/OfflineAnalyzer",
+      "sha256": "fb4871f11f5969e7dea848192735aed8c29d021aa6ff187ee4e4144113597bab",
+      "unique_evidence_records": 88,
+      "observed_operations": [
+        "binary_overview",
+        "inspect_native_load_image",
+        "list_names",
+        "list_procedures",
+        "procedure_callees",
+        "procedure_callers",
+        "procedure_info",
+        "procedure_pseudo_code",
+        "read_binary_inventory_summary",
+        "read_bytes",
+        "resolve_containing_procedure",
+        "search_procedures",
+        "search_strings",
+        "xrefs"
+      ]
+    },
+    {
+      "path": "/root/build/sc5000-lab/5.0.4/tree/usr/Engine/MidiDeviceScanner",
+      "sha256": "b65c82063a7c414be7b06f5160488426215badff32cdedea404939a3f03a63ea",
+      "unique_evidence_records": 13,
+      "observed_operations": [
+        "binary_overview",
+        "list_procedures",
+        "procedure_callees",
+        "procedure_pseudo_code",
+        "read_binary_inventory_summary",
+        "search_procedures",
+        "search_strings",
+        "xrefs"
+      ]
+    },
+    {
+      "path": "/root/build/sc5000-lab/5.0.4/tree/usr/lib/libaz01-prog.so.1.3",
+      "sha256": "5cac6b2aa1f6f748d38b1439275667227b5f8f806b06320e63ea1bd507b80dbf",
+      "unique_evidence_records": 31,
+      "observed_operations": [
+        "list_names",
+        "list_procedures",
+        "procedure_callees",
+        "procedure_pseudo_code",
+        "read_bytes",
+        "search_procedures",
+        "search_strings"
+      ]
+    },
+    {
+      "path": "/root/build/sc5000-lab/5.0.4/tree/usr/lib/libaz0x-info.so.0.8",
+      "sha256": "62b88d1d0694dc1bdde68f2a2ca714ab0ca044f0ba17c6e006ba9163d4e6acc2",
+      "unique_evidence_records": 20,
+      "observed_operations": [
+        "binary_overview",
+        "list_procedures",
+        "procedure_callees",
+        "procedure_pseudo_code",
+        "read_binary_inventory_summary",
+        "search_strings",
+        "xrefs"
+      ]
+    }
+  ],
+  "downloads": {
+    "ghidra": {
+      "url": "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip",
+      "sha256": "sha256:ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db",
+      "verified": true
+    },
+    "jdk": {
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz",
+      "sha256": "d7f5d5cf865a2902b70ff549b97586a7d3f234e016f041ab447ea740c7d66d1c",
+      "verified": true
+    }
+  },
+  "intended_scope": "Only /root/build/sc5000-lab writes; static analysis of caller-selected files",
+  "scope_exception": "Initial npm view used default npm cache; known new task log moved into lab; shared cache state not restored without baseline. See npm-default-cache-audit.json.",
+  "status": "bounded static investigation completed; explicit unknowns retained",
+  "executed_npm_package_source_commit": "NOT_ENOUGH_INFO: npm 6.8.0 metadata does not advertise gitHead; repository commit is separately pinned reference source",
+  "input_hashes_unchanged": true,
+  "evidence_index": {
+    "path": "EVIDENCE-INDEX.json",
+    "sha256": "0b2594eba0753e017e9effd27ecdf48ebf8ab4312192bac704903d87d224c395",
+    "records": 267,
+    "unique_evidence_ids": 231,
+    "normalized_result_conflicts": []
+  },
+  "analysis_profiles": [
+    {
+      "name": "Engine default",
+      "status": "provider_timeout",
+      "startup_timeout_ms": 1800000,
+      "result_file": "0088-list_procedures.evidence.json"
+    },
+    {
+      "name": "Engine 46501 EHABI seeds",
+      "status": "resource_constraint",
+      "reported_reason": "java.lang.OutOfMemoryError: Java heap space",
+      "configured_jvm_max_heap": "4G",
+      "result_file": "engine-focused/0004-search_strings.evidence.json"
+    },
+    {
+      "name": "Engine targeted",
+      "status": "success",
+      "startup_seed_addresses": [
+        "0x1274568",
+        "0x130de4c"
+      ],
+      "requested_disabled_analyzers": [
+        "Decompiler Switch Analysis",
+        "ARM Constant Reference Analyzer"
+      ],
+      "image_base": "0x10000",
+      "procedure_inventory_count": 19785,
+      "defined_string_count": 42470,
+      "bundle": "engine-targeted/complete.bundle.json",
+      "snapshot": "engine-targeted/complete.snapshot.json",
+      "reported_seed_application": {
+        "format": "rea-ghidra-seeds-v1",
+        "sha256": "f9d33ffd0b21991715f883ceae3acc4287bd45efa823633a9c267ff1990015c2",
+        "entries": 2,
+        "function_created": 2,
+        "function_existing": 0,
+        "function_failed": 0,
+        "code_decoded": 0,
+        "code_failed": 0,
+        "label_applied": 0,
+        "label_failed": 0,
+        "unmapped": 0
+      },
+      "reported_analysis_total_time": "Total Time   355 secs"
+    },
+    {
+      "name": "libaz01 ops-seeded",
+      "status": "success",
+      "reported_seed_application": {
+        "format": "rea-ghidra-seeds-v1",
+        "sha256": "6d8eaf1842d26ea831c89c529c520f4c798e9c5e478d21d0f4e28a007b6003a0",
+        "entries": 28,
+        "function_created": 28,
+        "function_existing": 0,
+        "function_failed": 0,
+        "code_decoded": 0,
+        "code_failed": 0,
+        "label_applied": 0,
+        "label_failed": 0,
+        "unmapped": 0
+      },
+      "reported_analysis_total_time": "Total Time   19 secs"
+    },
+    {
+      "name": "Offline EHABI-seeded",
+      "status": "success",
+      "reported_seed_application": {
+        "format": "rea-ghidra-seeds-v1",
+        "sha256": "ff153b0ed97a78f2aa6a6c414d321f617f7356df19ea7f348d9ca8439779cf22",
+        "entries": 1733,
+        "function_created": 1617,
+        "function_existing": 3,
+        "function_failed": 113,
+        "code_decoded": 0,
+        "code_failed": 0,
+        "label_applied": 0,
+        "label_failed": 0,
+        "unmapped": 0
+      },
+      "reported_analysis_total_time": "Total Time   85 secs"
+    }
+  ],
+  "sessions_closed": true,
+  "unresolved": [
+    "SQL module mask consumer semantics",
+    "Exact boundaries/version ownership of overlapping SQL scan windows",
+    "Actual rbm/rbp SQLite schema and file binding",
+    "USBANLZ parsing/application",
+    "exportLibrary.db support",
+    "Exact JP07 product mapping",
+    "Current worker track payload versus legacy Demo precision/version conversion"
+  ],
+  "external_ghidra_directory": {
+    "action": "read-only inventory; not moved",
+    "ownership": "not established; log attributes DumpMain.java/az01-script-runner, not REA bridge",
+    "evidence": [
+      "live-java-isolation.json",
+      "external-ghidra-inventory-before.json",
+      "external-ghidra-log-attribution.txt"
+    ]
+  }
+}

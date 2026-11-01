@@ -1,0 +1,442 @@
+{
+  "source_binary": "/usr/Engine/Engine",
+  "source_sha256": "e1eb0e2b858880016daa3ad14538426204f8e698d855a274aebc924a5f9a5caa",
+  "method": "Direct ASCII SQL literal extraction, not REA output; file offsets; fragments/templates and runtime database variants are not automatically standalone schemas",
+  "literals": [
+    {
+      "file_offset": 30853392,
+      "file_offset_hex": "0x1d6c910",
+      "text": "CREATE TABLE event (\n\tid INTEGER PRIMARY KEY,\n\tsession_id INT NOT NULL,\n\ttimestamp INT NOT NULL,\n\tpayload TEXT NOT NULL)"
+    },
+    {
+      "file_offset": 31095032,
+      "file_offset_hex": "0x1da78f8",
+      "text": "CREATE TABLE Information ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tuuid TEXT, \n\tschemaVersionMajor INTEGER, \n\tschemaVersionMinor INTEGER, \n\tschemaVersionPatch INTEGER, \n\tcurrentPlayedIndiciator INTEGER, \n\tlastRekordBoxLibraryImportReadCounter INTEGER\n)"
+    },
+    {
+      "file_offset": 31095288,
+      "file_offset_hex": "0x1da79f8",
+      "text": "CREATE TABLE AlbumArt ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\thash TEXT, \n\talbumArt BLOB \n)"
+    },
+    {
+      "file_offset": 31095384,
+      "file_offset_hex": "0x1da7a58",
+      "text": "CREATE INDEX index_AlbumArt_hash ON AlbumArt (hash)"
+    },
+    {
+      "file_offset": 31095436,
+      "file_offset_hex": "0x1da7a8c",
+      "text": "CREATE TABLE Pack ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tpackId TEXT, \n\tchangeLogDatabaseUuid TEXT, \n\tchangeLogId INTEGER, \n\tlastPackTime DATETIME \n)"
+    },
+    {
+      "file_offset": 31095592,
+      "file_offset_hex": "0x1da7b28",
+      "text": "CREATE TRIGGER trigger_after_insert_Pack_timestamp \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.lastPackTime IS NULL \nBEGIN \n\tUPDATE Pack SET lastPackTime = strftime('%s') WHERE ROWID = NEW.ROWID; \nEND"
+    },
+    {
+      "file_offset": 31095796,
+      "file_offset_hex": "0x1da7bf4",
+      "text": "CREATE TRIGGER trigger_after_insert_Pack_changeLogId \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.changeLogId = 0 \nBEGIN \n\tUPDATE Pack SET changeLogId = 1 WHERE ROWID = NEW.ROWID; \nEND"
+    },
+    {
+      "file_offset": 31095984,
+      "file_offset_hex": "0x1da7cb0",
+      "text": "CREATE VIEW ChangeLog (id, trackId) AS SELECT 0, 0 WHERE FALSE"
+    },
+    {
+      "file_offset": 31096048,
+      "file_offset_hex": "0x1da7cf0",
+      "text": "CREATE TABLE Track ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tplayOrder INTEGER, \n\tlength INTEGER, \n\tbpm INTEGER, \n\tyear INTEGER, \n\tpath TEXT, \n\tfilename TEXT, \n\tbitrate INTEGER, \n\tbpmAnalyzed REAL, \n\talbumArtId INTEGER, \n\tfileBytes INTEGER, \n\ttitle TEXT, \n\tartist TEXT, \n\talbum TEXT, \n\tgenre TEXT, \n\tcomment TEXT, \n\tlabel TEXT, \n\tcomposer TEXT, \n\tremixer TEXT, \n\tkey INTEGER, \n\trating INTEGER, \n\talbumArt TEXT, \n\ttimeLastPlayed DATETIME, \n\tisPlayed BOOLEAN, \n\tfileType TEXT, \n\tisAnalyzed BOOLEAN, \n\tdateCreated DATETIME, \n\tdateAdded DATETIME, \n\tisAvailable BOOLEAN, \n\tisMetadataOfPackedTrackChanged BOOLEAN, \n\tisPerfomanceDataOfPackedTrackChanged BOOLEAN, \n\tplayedIndicator INTEGER, \n\tisMetadataImported BOOLEAN, \n\tpdbImportKey INTEGER, \n\tstreamingSource TEXT, \n\turi TEXT, \n\tisBeatGridLocked BOOLEAN, \n\toriginDatabaseUuid TEXT, \n\toriginTrackId INTEGER, \n\tstreamingFlags INTEGER, \n\texplicitLyrics BOOLEAN, \n\tlastEditTime DATETIME, \n\talbumArtSourceHash CHAR(40), \n\tCONSTRAINT C_originDatabaseUuid_originTrackId UNIQUE (originDatabaseUuid, originTrackId), \n\tCONSTRAINT C_path UNIQUE (path), \n\tFOREIGN KEY (albumArtId) REFERENCES AlbumArt (id) ON DELETE RESTRICT \n)"
+    },
+    {
+      "file_offset": 31097212,
+      "file_offset_hex": "0x1da817c",
+      "text": "CREATE INDEX index_Track_filename ON Track (filename)"
+    },
+    {
+      "file_offset": 31097268,
+      "file_offset_hex": "0x1da81b4",
+      "text": "CREATE INDEX index_Track_albumArtId ON Track (albumArtId)"
+    },
+    {
+      "file_offset": 31097328,
+      "file_offset_hex": "0x1da81f0",
+      "text": "CREATE INDEX index_Track_uri ON Track (uri)"
+    },
+    {
+      "file_offset": 31097372,
+      "file_offset_hex": "0x1da821c",
+      "text": "CREATE INDEX index_Track_title ON Track(title)"
+    },
+    {
+      "file_offset": 31097420,
+      "file_offset_hex": "0x1da824c",
+      "text": "CREATE INDEX index_Track_length ON Track(length)"
+    },
+    {
+      "file_offset": 31097472,
+      "file_offset_hex": "0x1da8280",
+      "text": "CREATE INDEX index_Track_rating ON Track(rating)"
+    },
+    {
+      "file_offset": 31097524,
+      "file_offset_hex": "0x1da82b4",
+      "text": "CREATE INDEX index_Track_year ON Track(year)"
+    },
+    {
+      "file_offset": 31097572,
+      "file_offset_hex": "0x1da82e4",
+      "text": "CREATE INDEX index_Track_dateAdded ON Track(dateAdded)"
+    },
+    {
+      "file_offset": 31097628,
+      "file_offset_hex": "0x1da831c",
+      "text": "CREATE INDEX index_Track_genre ON Track(genre)"
+    },
+    {
+      "file_offset": 31097676,
+      "file_offset_hex": "0x1da834c",
+      "text": "CREATE INDEX index_Track_artist ON Track(artist)"
+    },
+    {
+      "file_offset": 31097728,
+      "file_offset_hex": "0x1da8380",
+      "text": "CREATE INDEX index_Track_album ON Track(album)"
+    },
+    {
+      "file_offset": 31097776,
+      "file_offset_hex": "0x1da83b0",
+      "text": "CREATE INDEX index_Track_key ON Track(key)"
+    },
+    {
+      "file_offset": 31097820,
+      "file_offset_hex": "0x1da83dc",
+      "text": "CREATE INDEX index_Track_bpmAnalyzed ON Track(CAST(bpmAnalyzed + 0.5 AS int))"
+    },
+    {
+      "file_offset": 31097900,
+      "file_offset_hex": "0x1da842c",
+      "text": "CREATE TRIGGER trigger_after_insert_Track_check_id \nAFTER INSERT ON Track \n\tWHEN NEW.id <= (SELECT seq FROM sqlite_sequence WHERE name = 'Track') \nBEGIN \n\tSELECT RAISE(ABORT, 'Recycling deleted track id''s are not allowed'); \nEND"
+    },
+    {
+      "file_offset": 31098132,
+      "file_offset_hex": "0x1da8514",
+      "text": "CREATE TRIGGER trigger_after_update_Track_check_Id \nBEFORE UPDATE ON Track \n\tWHEN NEW.id <> OLD.id \nBEGIN \n\tSELECT RAISE(ABORT, 'Changing track id''s are not allowed'); \nEND"
+    },
+    {
+      "file_offset": 31098308,
+      "file_offset_hex": "0x1da85c4",
+      "text": "CREATE TRIGGER trigger_after_insert_Track_fix_origin \nAFTER INSERT ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND"
+    },
+    {
+      "file_offset": 31098612,
+      "file_offset_hex": "0x1da86f4",
+      "text": "CREATE TRIGGER trigger_after_update_Track_fix_origin \nAFTER UPDATE ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND"
+    },
+    {
+      "file_offset": 31098916,
+      "file_offset_hex": "0x1da8824",
+      "text": "CREATE TRIGGER trigger_after_update_only_Track_timestamp \n\tAFTER UPDATE OF\tlength, bpm, year, filename, bitrate, bpmAnalyzed, albumArtId, \n\ttitle, artist, album, genre, comment, label, composer, remixer, key, rating, albumArt, \n\tfileType, isAnalyzed, isBeatgridLocked, explicitLyrics \n\tON Track \n\tFOR EACH ROW \nBEGIN \n\tUPDATE Track SET lastEditTime = strftime('%s') WHERE ROWID=NEW.ROWID; \nEND"
+    },
+    {
+      "file_offset": 31099312,
+      "file_offset_hex": "0x1da89b0",
+      "text": "CREATE TRIGGER trigger_after_insert_Track_insert_performance_data \nAFTER INSERT ON Track \nBEGIN \n\tINSERT INTO PerformanceData(trackId) VALUES(NEW.id); \nEND \n"
+    },
+    {
+      "file_offset": 31099472,
+      "file_offset_hex": "0x1da8a50",
+      "text": "CREATE TABLE PerformanceData ( \n\ttrackId INTEGER PRIMARY KEY, \n\ttrackData BLOB, \n\toverviewWaveFormData BLOB, \n\tbeatData BLOB, \n\tquickCues BLOB, \n\tloops BLOB, \n\tthirdPartySourceId INTEGER, \n\tactiveOnLoadLoops INTEGER, \n\tFOREIGN KEY(trackId) REFERENCES Track(id) ON DELETE CASCADE ON UPDATE CASCADE \n)"
+    },
+    {
+      "file_offset": 31099772,
+      "file_offset_hex": "0x1da8b7c",
+      "text": "CREATE TRIGGER trigger_PerformanceData_after_update_Track_timestamp \n\tAFTER UPDATE OF trackData, isAnalyzed, overviewWaveFormData, beatData, quickCues, loops, activeOnLoadLoops \n\tON PerformanceData \n\tFOR EACH ROW \nBEGIN \n\tUPDATE Track \n\tSET lastEditTime = strftime('%s') \n\tWHERE id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31100076,
+      "file_offset_hex": "0x1da8cac",
+      "text": "CREATE TABLE Playlist ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\ttitle TEXT, \n\tparentListId INTEGER, \n\tisPersisted BOOLEAN, \n\tnextListId INTEGER, \n\tlastEditTime DATETIME, \n\tisExplicitlyExported BOOLEAN, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_PARENT UNIQUE (title, parentListId), \n\tCONSTRAINT C_NEXT_LIST_ID_UNIQUE_FOR_PARENT UNIQUE (parentListId, nextListId) \n)"
+    },
+    {
+      "file_offset": 31100432,
+      "file_offset_hex": "0x1da8e10",
+      "text": "CREATE TRIGGER trigger_before_insert_List \nBEFORE INSERT ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = -(1 + nextListId) \n\tWHERE nextListId = NEW.nextListId \n\tAND parentListId = NEW.parentListId; \nEND"
+    },
+    {
+      "file_offset": 31100660,
+      "file_offset_hex": "0x1da8ef4",
+      "text": "CREATE TRIGGER trigger_after_insert_List \nAFTER INSERT ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = NEW.id \n\tWHERE nextListId = -(1 + NEW.nextListId) \n\tAND parentListId = NEW.parentListId; \nEND"
+    },
+    {
+      "file_offset": 31100880,
+      "file_offset_hex": "0x1da8fd0",
+      "text": "CREATE TRIGGER trigger_after_delete_List \nAFTER DELETE ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = OLD.nextListId \n\tWHERE nextListId = OLD.id; \n\tDELETE FROM Playlist \n\tWHERE parentListId = OLD.id; \nEND"
+    },
+    {
+      "file_offset": 31101108,
+      "file_offset_hex": "0x1da90b4",
+      "text": "CREATE TRIGGER trigger_after_update_isPersistParent \nAFTER UPDATE ON Playlist \n\tWHEN (old.isPersisted = 0 \n\tAND new.isPersisted = 1) \n\tOR (old.parentListId != new.parentListId \n\tAND new.isPersisted = 1) \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 1 \n\tWHERE id IN (SELECT parentListId FROM PlaylistAllParent WHERE id=new.id); \nEND"
+    },
+    {
+      "file_offset": 31101440,
+      "file_offset_hex": "0x1da9200",
+      "text": "CREATE TRIGGER trigger_after_update_isPersistChild \nAFTER UPDATE ON Playlist \n\tWHEN old.isPersisted = 1 \n\tAND new.isPersisted = 0 \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 0 \n\tWHERE id IN (SELECT childListId FROM PlaylistAllChildren WHERE id=new.id); \nEND"
+    },
+    {
+      "file_offset": 31101700,
+      "file_offset_hex": "0x1da9304",
+      "text": "CREATE TRIGGER trigger_after_insert_isPersist \nAFTER INSERT ON Playlist \n\tWHEN new.isPersisted = 1 \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 1 \n\tWHERE id IN (SELECT parentListId FROM PlaylistAllParent WHERE id=new.id); \nEND"
+    },
+    {
+      "file_offset": 31101928,
+      "file_offset_hex": "0x1da93e8",
+      "text": "CREATE VIEW PlaylistAllParent AS \nWITH FindAllParent AS ( \n\tSELECT id, parentListId FROM Playlist \n\tUNION ALL \n\tSELECT recursiveCTE.id, Plist.parentListId FROM Playlist Plist \n\tINNER JOIN FindAllParent recursiveCTE \n\tON recursiveCTE.parentListId = Plist.id \n) \nSELECT * FROM FindAllParent"
+    },
+    {
+      "file_offset": 31102220,
+      "file_offset_hex": "0x1da950c",
+      "text": "CREATE VIEW PlaylistAllChildren AS \nWITH FindAllChild AS ( \nSELECT id, id as childListId FROM Playlist \nUNION ALL \nSELECT recursiveCTE.id, Plist.id FROM Playlist Plist \nINNER JOIN FindAllChild recursiveCTE \nON recursiveCTE.childListId = Plist.parentListId \n) \nSELECT * FROM FindAllChild WHERE id <> childListId"
+    },
+    {
+      "file_offset": 31102532,
+      "file_offset_hex": "0x1da9644",
+      "text": "CREATE VIEW PlaylistPath AS \nWITH RECURSIVE Heirarchy AS \n( \n\tSELECT id AS child, parentListId AS parent, title AS name, 1 AS depth FROM Playlist \n\tUNION ALL \n\tSELECT child, parentListId AS parent, title AS name, h.depth + 1 AS depth FROM Playlist c \n\tJOIN Heirarchy h ON h.parent = c.id \n\tORDER BY depth DESC \n), \nOrderedList AS \n( \n\tSELECT id , nextListId, 1 AS position \n\tFROM Playlist \n\tWHERE nextListId = 0 \n\tUNION ALL \n\tSELECT c.id , c.nextListId , l.position + 1 \n\tFROM Playlist c \n\tINNER JOIN OrderedList l \n\tON c.nextListId = l.id \n), \nNameConcat AS \n( \n\tSELECT \n\t\tchild AS id, \n\t\tGROUP_CONCAT(name ,';') || ';' AS path \n\tFROM \n\t( \n\t\tSELECT child, name \n\t\tFROM Heirarchy \n\t\tORDER BY depth DESC \n\t) \n\tGROUP BY child \n) \nSELECT \n\tid, \n\tpath, \n\tROW_NUMBER() OVER \n\t( \n\t\tORDER BY \n\t\t(SELECT COUNT(*) FROM (SELECT * FROM Heirarchy WHERE child = id) ) DESC, \n\t\t(SELECT position FROM OrderedList ol WHERE ol.id = c.id) ASC \n\t) AS position \nFROM Playlist c \nLEFT JOIN NameConcat g USING (id)"
+    },
+    {
+      "file_offset": 31103528,
+      "file_offset_hex": "0x1da9a28",
+      "text": "CREATE TABLE Historylist ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tsessionId TEXT, \n\ttitle TEXT, \n\tstartTime DATETIME, \n\ttimezone TEXT, \n\toriginDriveName TEXT, \n\toriginDatabaseUuid TEXT, \n\toriginListId INTEGER, \n\tisDeleted BOOLEAN, \n\teditTime DATETIME, \n\tCONSTRAINT C_UNIQUE_ORIGIN_UUID_AND_LIST_ID UNIQUE (originDatabaseUuid, originListId) \n)"
+    },
+    {
+      "file_offset": 31103876,
+      "file_offset_hex": "0x1da9b84",
+      "text": "CREATE TRIGGER trigger_after_update_Historylist \nAFTER UPDATE ON Historylist \n\tWHEN COALESCE(NEW.title != OLD.title, OLD.title IS NULL AND NEW.title IS NOT NULL) \nBEGIN \n\tUPDATE Historylist SET \n\t\teditTime = strftime('%s','now') \n\tWHERE id = NEW.id; \nEND"
+    },
+    {
+      "file_offset": 31104132,
+      "file_offset_hex": "0x1da9c84",
+      "text": "CREATE TABLE PlaylistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tlistId INTEGER, \n\ttrackId INTEGER, \n\tdatabaseUuid TEXT, \n\tnextEntityId INTEGER, \n\tmembershipReference INTEGER, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_LIST UNIQUE (listId, databaseUuid, trackId), \n\tFOREIGN KEY (listId) REFERENCES Playlist (id) ON DELETE CASCADE \n)"
+    },
+    {
+      "file_offset": 31104460,
+      "file_offset_hex": "0x1da9dcc",
+      "text": "CREATE INDEX index_PlaylistEntity_nextEntityId_listId ON PlaylistEntity(nextEntityId, listId)"
+    },
+    {
+      "file_offset": 31104556,
+      "file_offset_hex": "0x1da9e2c",
+      "text": "CREATE TRIGGER trigger_before_delete_PlaylistEntity \nBEFORE DELETE ON PlaylistEntity \nWHEN OLD.trackId > 0 \nBEGIN \n\tUPDATE PlaylistEntity SET \n\t\tnextEntityId = OLD.nextEntityId \n\tWHERE nextEntityId = OLD.id \n\tAND listId = OLD.listId; \nEND"
+    },
+    {
+      "file_offset": 31104796,
+      "file_offset_hex": "0x1da9f1c",
+      "text": "CREATE TABLE HistorylistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tlistId INTEGER, \n\ttrackId INTEGER, \n\tstartTime DATETIME, \n\tFOREIGN KEY (listId) REFERENCES Historylist (id) ON DELETE CASCADE, \n\tFOREIGN KEY (trackId) REFERENCES Track (id) ON DELETE CASCADE \n)"
+    },
+    {
+      "file_offset": 31105068,
+      "file_offset_hex": "0x1daa02c",
+      "text": "CREATE INDEX index_HistorylistEntity_listId ON HistorylistEntity (listId)"
+    },
+    {
+      "file_offset": 31105144,
+      "file_offset_hex": "0x1daa078",
+      "text": "CREATE INDEX index_HistorylistEntity_trackId ON HistorylistEntity (trackId)"
+    },
+    {
+      "file_offset": 31105220,
+      "file_offset_hex": "0x1daa0c4",
+      "text": "CREATE TABLE PreparelistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\ttrackId INTEGER, \n\ttrackNumber INTEGER, \n\tFOREIGN KEY (trackId) REFERENCES Track (id) ON DELETE CASCADE \n)"
+    },
+    {
+      "file_offset": 31105404,
+      "file_offset_hex": "0x1daa17c",
+      "text": "CREATE INDEX index_PreparelistEntity_trackId ON PreparelistEntity (trackId)"
+    },
+    {
+      "file_offset": 31105480,
+      "file_offset_hex": "0x1daa1c8",
+      "text": "CREATE TABLE Smartlist ( \n\tlistUuid TEXT NOT NULL PRIMARY KEY, \n\ttitle TEXT, \n\tparentPlaylistPath TEXT, \n\tnextPlaylistPath TEXT, \n\tnextListUuid TEXT, \n\trules TEXT, \n\tlastEditTime DATETIME, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_PARENT UNIQUE (title, parentPlaylistPath), \n\tCONSTRAINT C_NEXT_LIST_UNIQUE_FOR_PARENT UNIQUE (parentPlaylistPath, nextPlaylistPath, nextListUuid) \n)"
+    },
+    {
+      "file_offset": 31105852,
+      "file_offset_hex": "0x1daa33c",
+      "text": "CREATE TABLE Track ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tplayOrder INTEGER, \n\tlength INTEGER, \n\tbpm INTEGER, \n\tyear INTEGER, \n\tpath TEXT, \n\tfilename TEXT, \n\tbitrate INTEGER, \n\tbpmAnalyzed REAL, \n\talbumArtId INTEGER, \n\tfileBytes INTEGER, \n\ttitle TEXT, \n\tartist TEXT, \n\talbum TEXT, \n\tgenre TEXT, \n\tcomment TEXT, \n\tlabel TEXT, \n\tcomposer TEXT, \n\tremixer TEXT, \n\tkey INTEGER, \n\trating INTEGER, \n\talbumArt TEXT, \n\ttimeLastPlayed DATETIME, \n\tisPlayed BOOLEAN, \n\tfileType TEXT, \n\tisAnalyzed BOOLEAN, \n\tdateCreated DATETIME, \n\tdateAdded DATETIME, \n\tisAvailable BOOLEAN, \n\tisMetadataOfPackedTrackChanged BOOLEAN, \n\tisPerfomanceDataOfPackedTrackChanged BOOLEAN, \n\tplayedIndicator INTEGER, \n\tisMetadataImported BOOLEAN, \n\tpdbImportKey INTEGER, \n\tstreamingSource TEXT, \n\turi TEXT, \n\tisBeatGridLocked BOOLEAN, \n\toriginDatabaseUuid TEXT, \n\toriginTrackId INTEGER, \n\tstreamingFlags INTEGER, \n\texplicitLyrics BOOLEAN, \n\tlastEditTime DATETIME, \n\tCONSTRAINT C_originDatabaseUuid_originTrackId UNIQUE (originDatabaseUuid, originTrackId), \n\tCONSTRAINT C_path UNIQUE (path), \n\tFOREIGN KEY (albumArtId) REFERENCES AlbumArt (id) ON DELETE RESTRICT \n)"
+    },
+    {
+      "file_offset": 31106988,
+      "file_offset_hex": "0x1daa7ac",
+      "text": "CREATE TRIGGER trigger_after_update_Track_timestamp \n\tAFTER UPDATE OF\tlength, bpm, year, filename, bitrate, bpmAnalyzed, albumArtId, \n\ttitle, artist, album, genre, comment, label, composer, remixer, key, rating, albumArt, \n\tfileType, isAnalyzed, isBeatgridLocked, trackData, overviewWaveformData, beatData, quickCues, \n\tloops, explicitLyrics, activeOnLoadLoops \n\tON Track \n\tFOR EACH ROW \nBEGIN \n\tUPDATE Track SET lastEditTime = strftime('%s') WHERE ROWID=NEW.ROWID; \nEND"
+    },
+    {
+      "file_offset": 31107460,
+      "file_offset_hex": "0x1daa984",
+      "text": "CREATE TABLE Track ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tplayOrder INTEGER, \n\tlength INTEGER, \n\tbpm INTEGER, \n\tyear INTEGER, \n\tpath TEXT, \n\tfilename TEXT, \n\tbitrate INTEGER, \n\tbpmAnalyzed REAL, \n\talbumArtId INTEGER, \n\tfileBytes INTEGER, \n\ttitle TEXT, \n\tartist TEXT, \n\talbum TEXT, \n\tgenre TEXT, \n\tcomment TEXT, \n\tlabel TEXT, \n\tcomposer TEXT, \n\tremixer TEXT, \n\tkey INTEGER, \n\trating INTEGER, \n\talbumArt TEXT, \n\ttimeLastPlayed DATETIME, \n\tisPlayed BOOLEAN, \n\tfileType TEXT, \n\tisAnalyzed BOOLEAN, \n\tdateCreated DATETIME, \n\tdateAdded DATETIME, \n\tisAvailable BOOLEAN, \n\tisMetadataOfPackedTrackChanged BOOLEAN, \n\tisPerfomanceDataOfPackedTrackChanged BOOLEAN, \n\tplayedIndicator INTEGER, \n\tisMetadataImported BOOLEAN, \n\tpdbImportKey INTEGER, \n\tstreamingSource TEXT, \n\turi TEXT, \n\tisBeatGridLocked BOOLEAN, \n\toriginDatabaseUuid TEXT, \n\toriginTrackId INTEGER, \n\ttrackData BLOB, \n\toverviewWaveFormData BLOB, \n\tbeatData BLOB, \n\tquickCues BLOB, \n\tloops BLOB, \n\tthirdPartySourceId INTEGER, \n\tstreamingFlags INTEGER, \n\texplicitLyrics BOOLEAN, \n\tactiveOnLoadLoops INTEGER, \n\tlastEditTime DATETIME, \n\tCONSTRAINT C_originDatabaseUuid_originTrackId UNIQUE (originDatabaseUuid, originTrackId), \n\tCONSTRAINT C_path UNIQUE (path), \n\tFOREIGN KEY (albumArtId) REFERENCES AlbumArt (id) ON DELETE RESTRICT \n)"
+    },
+    {
+      "file_offset": 31108748,
+      "file_offset_hex": "0x1daae8c",
+      "text": "CREATE VIEW PerformanceData AS SELECT \n\tid AS trackId, \n\tisAnalyzed, \n\ttrackData, \n\toverviewWaveFormData, \n\tbeatData, \n\tquickCues, \n\tloops, \n\tthirdPartySourceId, \n\tactiveOnLoadLoops \nFROM Track"
+    },
+    {
+      "file_offset": 31108944,
+      "file_offset_hex": "0x1daaf50",
+      "text": "CREATE TRIGGER trigger_instead_update_thirdPartySourceId_PerformanceData \nINSTEAD OF UPDATE OF thirdPartySourceId ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\tthirdPartySourceId = NEW.thirdPartySourceId \n\tWHERE Track.id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31109200,
+      "file_offset_hex": "0x1dab050",
+      "text": "CREATE TRIGGER trigger_instead_insert_PerformanceData \nINSTEAD OF INSERT ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\tisAnalyzed = IFNULL(NEW.isAnalyzed, isAnalyzed), \n\t\ttrackData = NEW.trackData, \n\t\toverviewWaveFormData = NEW.overviewWaveFormData, \n\t\tbeatData = NEW.beatData, \n\t\tquickCues = NEW.quickCues, \n\t\tloops = NEW.loops, \n\t\tthirdPartySourceId = NEW.thirdPartySourceId, \n\t\tactiveOnLoadLoops = NEW.activeOnLoadLoops \n\tWHERE Track.id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31109676,
+      "file_offset_hex": "0x1dab22c",
+      "text": "CREATE TRIGGER trigger_instead_update_isAnalyzed_PerformanceData \nINSTEAD OF UPDATE OF isAnalyzed ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\tisAnalyzed = NEW.isAnalyzed \n\tWHERE Track.id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31109900,
+      "file_offset_hex": "0x1dab30c",
+      "text": "CREATE TRIGGER trigger_instead_update_trackData_PerformanceData \nINSTEAD OF UPDATE OF trackData ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\ttrackData = NEW.trackData \n\tWHERE Track.id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31110120,
+      "file_offset_hex": "0x1dab3e8",
+      "text": "CREATE TRIGGER trigger_instead_update_overviewWaveFormData_PerformanceData \nINSTEAD OF UPDATE OF overviewWaveFormData ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\toverviewWaveFormData = NEW.overviewWaveFormData \n\tWHERE Track.id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31110384,
+      "file_offset_hex": "0x1dab4f0",
+      "text": "CREATE TRIGGER trigger_instead_update_beatData_PerformanceData \nINSTEAD OF UPDATE OF beatData ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\tbeatData = NEW.beatData \n\tWHERE Track.id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31110600,
+      "file_offset_hex": "0x1dab5c8",
+      "text": "CREATE TRIGGER trigger_instead_update_quickCues_PerformanceData \nINSTEAD OF UPDATE OF quickCues ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\tquickCues = NEW.quickCues \n\tWHERE Track.id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31110820,
+      "file_offset_hex": "0x1dab6a4",
+      "text": "CREATE TRIGGER trigger_instead_update_loops_PerformanceData \nINSTEAD OF UPDATE OF loops ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\tloops = NEW.loops \n\tWHERE Track.id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31111024,
+      "file_offset_hex": "0x1dab770",
+      "text": "CREATE TRIGGER trigger_instead_delete_PerformanceData \nINSTEAD OF DELETE ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\tisAnalyzed = NULL, \n\t\ttrackData = NULL, \n\t\toverviewWaveFormData = NULL, \n\t\tbeatData = NULL, \n\t\tquickCues = NULL, \n\t\tloops = NULL, \n\t\tthirdPartySourceId = NULL \n\tWHERE Track.id = OLD.trackId; \nEND"
+    },
+    {
+      "file_offset": 31111356,
+      "file_offset_hex": "0x1dab8bc",
+      "text": "CREATE TRIGGER trigger_instead_update_activeOnLoadLoops_PerformanceData \nINSTEAD OF UPDATE OF activeOnLoadLoops ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\tactiveOnLoadLoops = NEW.activeOnLoadLoops \n\tWHERE Track.id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31111608,
+      "file_offset_hex": "0x1dab9b8",
+      "text": "CREATE TRIGGER trigger_instead_insert_PerformanceData \nINSTEAD OF INSERT ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\tisAnalyzed = NEW.isAnalyzed, \n\t\ttrackData = NEW.trackData, \n\t\toverviewWaveFormData = NEW.overviewWaveFormData, \n\t\tbeatData = NEW.beatData, \n\t\tquickCues = NEW.quickCues, \n\t\tloops = NEW.loops, \n\t\tthirdPartySourceId = NEW.thirdPartySourceId, \n\t\tactiveOnLoadLoops = NEW.activeOnLoadLoops \n\tWHERE Track.id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31112064,
+      "file_offset_hex": "0x1dabb80",
+      "text": "CREATE INDEX index_Track_bpmAnalyzed ON Track(bpmAnalyzed)"
+    },
+    {
+      "file_offset": 31112124,
+      "file_offset_hex": "0x1dabbbc",
+      "text": "CREATE TABLE Pack ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tpackId TEXT, \n\tchangeLogDatabaseUuid TEXT, \n\tchangeLogId INTEGER \n)"
+    },
+    {
+      "file_offset": 31112256,
+      "file_offset_hex": "0x1dabc40",
+      "text": "CREATE TABLE ChangeLog ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\ttrackId INTEGER, \n\tFOREIGN KEY (trackId) REFERENCES Track (id) ON DELETE SET NULL \n)"
+    },
+    {
+      "file_offset": 31112408,
+      "file_offset_hex": "0x1dabcd8",
+      "text": "CREATE INDEX index_ChangeLog_trackId ON ChangeLog(trackId)"
+    },
+    {
+      "file_offset": 31112468,
+      "file_offset_hex": "0x1dabd14",
+      "text": "CREATE TABLE Track ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tplayOrder INTEGER, \n\tlength INTEGER, \n\tbpm INTEGER, \n\tyear INTEGER, \n\tpath TEXT, \n\tfilename TEXT, \n\tbitrate INTEGER, \n\tbpmAnalyzed REAL, \n\talbumArtId INTEGER, \n\tfileBytes INTEGER, \n\ttitle TEXT, \n\tartist TEXT, \n\talbum TEXT, \n\tgenre TEXT, \n\tcomment TEXT, \n\tlabel TEXT, \n\tcomposer TEXT, \n\tremixer TEXT, \n\tkey INTEGER, \n\trating INTEGER, \n\talbumArt TEXT, \n\ttimeLastPlayed DATETIME, \n\tisPlayed BOOLEAN, \n\tfileType TEXT, \n\tisAnalyzed BOOLEAN, \n\tdateCreated DATETIME, \n\tdateAdded DATETIME, \n\tisAvailable BOOLEAN, \n\tisMetadataOfPackedTrackChanged BOOLEAN, \n\tisPerfomanceDataOfPackedTrackChanged BOOLEAN, \n\tplayedIndicator INTEGER, \n\tisMetadataImported BOOLEAN, \n\tpdbImportKey INTEGER, \n\tstreamingSource TEXT, \n\turi TEXT, \n\tisBeatGridLocked BOOLEAN, \n\toriginDatabaseUuid TEXT, \n\toriginTrackId INTEGER, \n\ttrackData BLOB, \n\toverviewWaveFormData BLOB, \n\tbeatData BLOB, \n\tquickCues BLOB, \n\tloops BLOB, \n\tthirdPartySourceId INTEGER, \n\tstreamingFlags INTEGER, \n\texplicitLyrics BOOLEAN, \n\tactiveOnLoadLoops INTEGER, \n\tCONSTRAINT C_originDatabaseUuid_originTrackId UNIQUE (originDatabaseUuid, originTrackId), \n\tCONSTRAINT C_path UNIQUE (path), \n\tFOREIGN KEY (albumArtId) REFERENCES AlbumArt (id) ON DELETE RESTRICT \n)"
+    },
+    {
+      "file_offset": 31113732,
+      "file_offset_hex": "0x1dac204",
+      "text": "CREATE TRIGGER trigger_after_update_Track \nAFTER UPDATE ON Track \nFOR EACH ROW BEGIN \n\tINSERT INTO ChangeLog (trackId) VALUES(NEW.id); \nEND"
+    },
+    {
+      "file_offset": 31113872,
+      "file_offset_hex": "0x1dac290",
+      "text": "CREATE TABLE Track ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tplayOrder INTEGER, \n\tlength INTEGER, \n\tbpm INTEGER, \n\tyear INTEGER, \n\tpath TEXT, \n\tfilename TEXT, \n\tbitrate INTEGER, \n\tbpmAnalyzed REAL, \n\talbumArtId INTEGER, \n\tfileBytes INTEGER, \n\ttitle TEXT, \n\tartist TEXT, \n\talbum TEXT, \n\tgenre TEXT, \n\tcomment TEXT, \n\tlabel TEXT, \n\tcomposer TEXT, \n\tremixer TEXT, \n\tkey INTEGER, \n\trating INTEGER, \n\talbumArt TEXT, \n\ttimeLastPlayed DATETIME, \n\tisPlayed BOOLEAN, \n\tfileType TEXT, \n\tisAnalyzed BOOLEAN, \n\tdateCreated DATETIME, \n\tdateAdded DATETIME, \n\tisAvailable BOOLEAN, \n\tisMetadataOfPackedTrackChanged BOOLEAN, \n\tisPerfomanceDataOfPackedTrackChanged BOOLEAN, \n\tplayedIndicator INTEGER, \n\tisMetadataImported BOOLEAN, \n\tpdbImportKey INTEGER, \n\tstreamingSource TEXT, \n\turi TEXT, \n\tisBeatGridLocked BOOLEAN, \n\toriginDatabaseUuid TEXT, \n\toriginTrackId INTEGER, \n\ttrackData BLOB, \n\toverviewWaveFormData BLOB, \n\tbeatData BLOB, \n\tquickCues BLOB, \n\tloops BLOB, \n\tthirdPartySourceId INTEGER, \n\tstreamingFlags INTEGER, \n\texplicitLyrics BOOLEAN, \n\tCONSTRAINT C_originDatabaseUuid_originTrackId UNIQUE (originDatabaseUuid, originTrackId), \n\tCONSTRAINT C_path UNIQUE (path), \n\tFOREIGN KEY (albumArtId) REFERENCES AlbumArt (id) ON DELETE RESTRICT \n)"
+    },
+    {
+      "file_offset": 31115108,
+      "file_offset_hex": "0x1dac764",
+      "text": "CREATE VIEW PerformanceData AS SELECT \n\tid AS trackId, \n\tisAnalyzed, \n\ttrackData, \n\toverviewWaveFormData, \n\tbeatData, \n\tquickCues, \n\tloops, \n\tthirdPartySourceId \nFROM Track"
+    },
+    {
+      "file_offset": 31115284,
+      "file_offset_hex": "0x1dac814",
+      "text": "CREATE TRIGGER trigger_instead_insert_PerformanceData \nINSTEAD OF INSERT ON PerformanceData \nFOR EACH ROW BEGIN \n\tUPDATE Track SET \n\t\tisAnalyzed = NEW.isAnalyzed, \n\t\ttrackData = NEW.trackData, \n\t\toverviewWaveFormData = NEW.overviewWaveFormData, \n\t\tbeatData = NEW.beatData, \n\t\tquickCues = NEW.quickCues, \n\t\tloops = NEW.loops, \n\t\tthirdPartySourceId = NEW.thirdPartySourceId \n\tWHERE Track.id = NEW.trackId; \nEND"
+    },
+    {
+      "file_offset": 31131728,
+      "file_offset_hex": "0x1db0850",
+      "text": "CREATE TABLE TEMP_"
+    },
+    {
+      "file_offset": 31131936,
+      "file_offset_hex": "0x1db0920",
+      "text": "CREATE INDEX IF NOT EXISTS"
+    },
+    {
+      "file_offset": 31343300,
+      "file_offset_hex": "0x1de42c4",
+      "text": "CREATE TABLE {} (id PRIMARY KEY,name VARCHAR(200),artists VARCHAR(255),num_plays INTEGER,length_ms INTEGER,stream_quality VARCHAR(32),bpm INTEGER,notes TEXT,key VARCHAR(32),rating INTEGER,album_artwork VARCHAR(2048),release_name VARCHAR(200),genre VARCHAR(200),date_added INTEGER,location VARCHAR(2048),json TEXT)"
+    },
+    {
+      "file_offset": 31343616,
+      "file_offset_hex": "0x1de4400",
+      "text": "CREATE TABLE {} (id PRIMARY KEY)"
+    },
+    {
+      "file_offset": 31343960,
+      "file_offset_hex": "0x1de4558",
+      "text": "CREATE TABLE IF NOT EXISTS {} ({} PRIMARY KEY, {} TEXT NOT NULL, {} TEXT NOT NULL)"
+    },
+    {
+      "file_offset": 31347080,
+      "file_offset_hex": "0x1de5188",
+      "text": "CREATE TABLE event (id INTEGER PRIMARY KEY, payload TEXT)"
+    },
+    {
+      "file_offset": 31417532,
+      "file_offset_hex": "0x1df64bc",
+      "text": "CREATE TABLE %Q.sqlite_sequence(name,seq)"
+    },
+    {
+      "file_offset": 31418788,
+      "file_offset_hex": "0x1df69a4",
+      "text": "CREATE TABLE x(type text,name text,tbl_name text,rootpage int,sql text)"
+    },
+    {
+      "file_offset": 31423747,
+      "file_offset_hex": "0x1df7d03",
+      "text": "CREATE TRIGGER %q')"
+    },
+    {
+      "file_offset": 31423800,
+      "file_offset_hex": "0x1df7d38",
+      "text": "CREATE TABLE %Q.%s(%s)"
+    },
+    {
+      "file_offset": 31427000,
+      "file_offset_hex": "0x1df89b8",
+      "text": "CREATE TABLE x"
+    },
+    {
+      "file_offset": 31427060,
+      "file_offset_hex": "0x1df89f4",
+      "text": "CREATE TABLE x(key,value,type,atom,id,parent,fullkey,path,json HIDDEN,root HIDDEN)"
+    }
+  ]
+}

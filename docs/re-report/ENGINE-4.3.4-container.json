@@ -1,0 +1,32 @@
+{
+  "magic": "FIT/FDT",
+  "fdt_version": 17,
+  "size": 148662367,
+  "description": "JP07 upgrade image",
+  "version": "4.3.4",
+  "sha256": "ddcaf95100fd142c25dc6595ebf0d6b0504439c8c6baf69cdd51233133fcdc4e",
+  "partitions": [
+    {
+      "name": "splash",
+      "compression": "xz",
+      "offset": 240,
+      "size": 5252,
+      "sha1": "b4d130882147a1e4e7b02130ab89558dd6c1238f"
+    },
+    {
+      "name": "recoverysplash",
+      "compression": "xz",
+      "offset": 5672,
+      "size": 5504,
+      "sha1": "f48fe31ca9d64549c9bf418ed2f8867b2d179bce"
+    },
+    {
+      "name": "rootfs",
+      "compression": "xz",
+      "offset": 11344,
+      "size": 148649904,
+      "sha1": "71398a66e997ccc775663b00b62b39a9cda1eb28"
+    }
+  ],
+  "verified": true
+}

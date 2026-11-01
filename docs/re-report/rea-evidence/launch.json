@@ -1,0 +1,16 @@
+{
+  "command": [
+    "/root/build/sc5000-lab/rea-tools/node_modules/node/bin/node",
+    "/root/build/sc5000-lab/rea-tools/node_modules/rea-agents/scripts/rea.mjs",
+    "mcp"
+  ],
+  "cwd": "/root/build/sc5000-lab",
+  "selected_environment": {
+    "TMPDIR": "/root/build/sc5000-lab/rea-tools/tmp",
+    "XDG_CACHE_HOME": "/root/build/sc5000-lab/rea-tools/cache",
+    "JAVA_HOME": "/root/build/sc5000-lab/rea-tools/jdk-21.0.13+9",
+    "GHIDRA_INSTALL_DIR": "/root/build/sc5000-lab/rea-tools/ghidra_12.1.4_PUBLIC",
+    "REA_GHIDRA_STARTUP_TIMEOUT_MS": "1800000",
+    "REA_GHIDRA_DECOMPILE_TIMEOUT_SECONDS": "90"
+  }
+}

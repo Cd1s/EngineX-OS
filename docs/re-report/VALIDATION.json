@@ -1,0 +1,126 @@
+{
+  "timestamp_utc": "2026-11-01T17:36:11.551391+00:00",
+  "scope": "offline validation, no vendor binary execution or flash",
+  "unit_tests": {
+    "command": "python3 -m unittest discover -s tools/az01-packer -v",
+    "passed": 24,
+    "failed": 0,
+    "skipped": 0,
+    "log": "/root/build/sc5000-lab/az01-unit-final.log"
+  },
+  "qengine": {
+    "bash_syntax": "passed",
+    "shellcheck": "passed in implementation agent",
+    "dry_run": "passed",
+    "guest_boot": "not run",
+    "preflight_exit": 3,
+    "missing": [
+      "system QEMU",
+      "binwalk 3",
+      "lab-contained DockerRootDir",
+      "JP07 instance",
+      "caller supplied Rekordbox USB image"
+    ]
+  },
+  "real_5_0_4": {
+    "original_sha256": "52e8526bbfd273e5185b5d8c2a9cbe32436c3acd1c77dcfde97e40a34c5b24d7",
+    "no_op_identity_reserialization": true,
+    "no_op_roundtrip_file_sha256": "52e8526bbfd273e5185b5d8c2a9cbe32436c3acd1c77dcfde97e40a34c5b24d7",
+    "protected_entries": 81,
+    "protected_content_and_inode_metadata_equal": true,
+    "latest_prepare_and_units_match": true,
+    "non_rootfs_prefix_equal": true,
+    "xz_check": "CRC32",
+    "recarved_rootfs_sha256": "1cf128df871a2c5f95a795203e3f7c880c68890e4099cce7655b0feb5cf34fbc",
+    "patched_image_sha256": "dcaf736bc2ccc201c05e4bd5c7d31fd9ca35a06f59e612a33974a657e8e57629",
+    "e2fsck_fn": "passed",
+    "artifact": "/root/build/sc5000-lab/5.0.4/patched-current.img",
+    "ssh_key_scope": "temporary validation public key, not a production image",
+    "stock_geometry_uuid_features_equal": true
+  },
+  "sql_schema_replay": [
+    {
+      "file": "ENGINE-4.3.4-hm.db-schema.sql",
+      "replayed_objects": 43,
+      "integrity": "ok"
+    },
+    {
+      "file": "ENGINE-4.3.4-m.db-schema.sql",
+      "replayed_objects": 45,
+      "integrity": "ok"
+    },
+    {
+      "file": "ENGINE-4.3.4-sm.db-schema.sql",
+      "replayed_objects": 38,
+      "integrity": "ok"
+    },
+    {
+      "file": "ENGINE-4.3.4-stm.db-schema.sql",
+      "replayed_objects": 38,
+      "integrity": "ok"
+    },
+    {
+      "file": "ENGINE-5.0.4-hm.db-schema.sql",
+      "replayed_objects": 43,
+      "integrity": "ok"
+    },
+    {
+      "file": "ENGINE-5.0.4-m.db-schema.sql",
+      "replayed_objects": 45,
+      "integrity": "ok"
+    },
+    {
+      "file": "ENGINE-5.0.4-sm.db-schema.sql",
+      "replayed_objects": 38,
+      "integrity": "ok"
+    },
+    {
+      "file": "ENGINE-5.0.4-stm.db-schema.sql",
+      "replayed_objects": 38,
+      "integrity": "ok"
+    }
+  ],
+  "source_hashes": {
+    "tools/az01-packer/az01_packer.py": "95ffe0939453fcac19fe26805d613a6cbaaac2ad36728935ca573613d25711c5",
+    "tools/az01-packer/test_az01_packer.py": "b09c13de379ee7c111a4e1d0c78f95e9311a0f47b5f10a2160e0c315ad1babb7",
+    "sim/qengine/run_qengine.sh": "053634455f075702faef6f08cd10ac109996f03021543d0da5c448a2eda14b0a"
+  },
+  "review": {
+    "profile": "\u4e25DE\u00b7\u5ba1\u67e5\u5458\u00b7S55",
+    "model_family": "Claude Sonnet",
+    "agent_id": "1ecacd7d-e4bf-4364-a639-dd39abe70322",
+    "scope": "static safety review of packer, QEngine wrapper and architecture report; separate six-claim REA evidence audit",
+    "outcome": "no P1/P2 blockers",
+    "reviewed_geometry_packet_sha256": "e3f2093ad6a443b784f20cb26990f68b53cfc3ac576863480246adf7b49ee613",
+    "test_execution": "reviewer did not run tests; IN validation recorded separately",
+    "followups": [
+      "protected names extension landed after review packet and passed path rejection tests",
+      "unproven volume-label/default-mount-option dependency noted as non-blocking"
+    ],
+    "workspace_id": "wks_97a396cc096a28e3",
+    "rea_evidence_audit": {
+      "outcome": "no documentation blockers; two P3 attribution gaps corrected by primary agent",
+      "packet_sha256": "fcf81f2747e3857a4fcb104a8f23d7c23b21fbdedd96d624579328723310e094",
+      "full_evidence_ids_resolved": 10,
+      "fixes": [
+        "Independent original-ELF PT_LOAD mapping evidence distinguishes file offsets from REA addresses",
+        "trp.db is a byte candidate; classifier helper object remains unverified"
+      ],
+      "fix_verification": "primary agent, not an additional reviewer pass",
+      "log": "/root/build/sc5000-lab/sc5000-qa-rea-result.txt",
+      "log_sha256": "456c44f0b1d2ef166a6a32eae9c2a1d77a84f7e5fc5200edfba98611cb0b605f",
+      "reviewer_scope_deviation": "Read-only reproduction scripts placed in remote review/repro-scripts rather than requested rea subdirectory"
+    }
+  },
+  "rea_portable_evidence": {
+    "source_index_entries": 267,
+    "unique_evidence_ids": 231,
+    "portable_records": 268,
+    "diagnostic_summaries": 37,
+    "all_normalized_results_match_originals": true,
+    "all_full_report_evidence_ids_resolve": true,
+    "final_source_index_sha256": "0b2594eba0753e017e9effd27ecdf48ebf8ab4312192bac704903d87d224c395",
+    "bundle_retained_records_included": true,
+    "audit_timestamp_utc": "2026-11-01T18:22:44.089016+00:00"
+  }
+}
