@@ -45,6 +45,26 @@ func run() error {
 		flag.Usage()
 		return fmt.Errorf("specify --mount-path, --watch or --prolink")
 	}
+	var ip net.IP
+	if *link {
+		ip = net.ParseIP(*bind)
+		if ip == nil || ip.To4() == nil {
+			return fmt.Errorf("bind must be IPv4")
+		}
+	}
+	var rs []string
+	if *watch {
+		rs = strings.Split(*roots, ",")
+		if *mount != "" {
+			rs = []string{*mount}
+		}
+		for i, root := range rs {
+			rs[i] = strings.TrimSpace(root)
+			if rs[i] == "" {
+				return fmt.Errorf("watch roots must not be empty")
+			}
+		}
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	var mu sync.Mutex
@@ -64,10 +84,6 @@ func run() error {
 	workers := 0
 	if *watch {
 		workers++
-		rs := strings.Split(*roots, ",")
-		if *mount != "" {
-			rs = []string{*mount}
-		}
 		go func() {
 			errs <- bridge.Watch(ctx, rs, opts, *poll, func(e bridge.WatchEvent) {
 				if e.Err != nil {
@@ -79,11 +95,6 @@ func run() error {
 		}()
 	}
 	if *link {
-		ip := net.ParseIP(*bind)
-		if ip == nil || ip.To4() == nil {
-			cancel()
-			return fmt.Errorf("bind must be IPv4")
-		}
 		workers++
 		go func() { errs <- prolink.NewDiscovery().Listen(ctx, ip, func(d prolink.Device) { emit(d) }) }()
 	}

@@ -2,6 +2,9 @@ package rekordbox
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -75,5 +78,29 @@ func TestCueMergeLoopLengthsAndReverseActivity(t *testing.T) {
 	a.mergeCue(Cue{TimeMS: 1000, EndMS: 2000, Loop: true, Name: "long", Extended: true})
 	if len(a.Cues) != 2 {
 		t.Fatal("distinct memory loops merged", a.Cues)
+	}
+}
+
+func TestSQLiteEmptyFilenameStaysEmptyAndIsRejected(t *testing.T) {
+	for _, folder := range []string{"", "/MUSIC"} {
+		p := filepath.Join(t.TempDir(), "exportLibrary.db")
+		db, e := sql.Open("sqlite", p)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = db.Exec(`CREATE TABLE content(id INTEGER,title TEXT,folder_path TEXT,file_name TEXT); INSERT INTO content VALUES(1,'Bad',?,'')`, folder); e != nil {
+			t.Fatal(e)
+		}
+		l, e := (OneLibraryAdapter{}).Read(context.Background(), db)
+		db.Close()
+		if e != nil {
+			t.Fatal(e)
+		}
+		if l.Tracks[0].Path != "" {
+			t.Fatal("invented path from missing filename", l.Tracks[0].Path)
+		}
+		if _, e = ReadSQLite(context.Background(), p, nil); e == nil {
+			t.Fatal("accepted track without filename")
+		}
 	}
 }

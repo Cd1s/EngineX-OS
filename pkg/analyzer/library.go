@@ -68,7 +68,11 @@ type Import struct {
 // membership. quickCues/loops are deliberately omitted, including on reimport.
 func (l *Library) Import(ctx context.Context, in Import) (int64, error) {
 	r := in.Result
-	if r == nil || r.SampleRate <= 0 || r.TotalSamples <= 0 || r.Duration <= 0 || math.IsNaN(r.Duration) || math.IsInf(r.Duration, 0) || r.BPM <= 0 || math.IsNaN(r.BPM) || math.IsInf(r.BPM, 0) || len(r.Overview) != OverviewEntries || len(r.Beatgrid) < 2 {
+	if r == nil || r.SampleRate < 8000 || r.SampleRate > 384000 || r.TotalSamples <= 0 ||
+		r.Duration <= 0 || math.IsNaN(r.Duration) || math.IsInf(r.Duration, 0) ||
+		r.BPM <= 0 || math.IsNaN(r.BPM) || math.IsInf(r.BPM, 0) ||
+		r.OverviewSamplesPerEntry <= 0 || math.IsNaN(r.OverviewSamplesPerEntry) || math.IsInf(r.OverviewSamplesPerEntry, 0) ||
+		len(r.Overview) != OverviewEntries || len(r.Beatgrid) < 2 {
 		return 0, errors.New("library: incomplete analysis")
 	}
 	if in.Playlist == "" {
@@ -90,6 +94,12 @@ func (l *Library) Import(ctx context.Context, in Import) (int64, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return 0, errors.New("library: audio must reside on the same SD volume")
 	}
+	// Engine resolves Track.path from Engine Library, not the volume root.
+	engineRel, err := filepath.Rel(filepath.Join(root, "Engine Library"), p)
+	if err != nil {
+		return 0, err
+	}
+	enginePath := filepath.ToSlash(engineRel)
 	st, err := os.Stat(p)
 	if err != nil {
 		return 0, err
@@ -112,10 +122,10 @@ func (l *Library) Import(ctx context.Context, in Import) (int64, error) {
 	if format == "" {
 		format = strings.TrimPrefix(strings.ToLower(filepath.Ext(p)), ".")
 	}
-	err = tx.QueryRowContext(ctx, "SELECT id FROM Track WHERE path=?", filepath.ToSlash(rel)).Scan(&id)
+	err = tx.QueryRowContext(ctx, "SELECT id FROM Track WHERE path=?", enginePath).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		result, e := tx.ExecContext(ctx, `INSERT INTO Track(path,filename,title,artist,album,comment,length,bpm,bpmAnalyzed,key,fileBytes,bitrate,fileType,isAnalyzed,isAvailable,isMetadataImported,isBeatGridLocked,dateCreated,dateAdded,lastEditTime)
- VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,1,0,strftime('%s'),strftime('%s'),strftime('%s'))`, filepath.ToSlash(rel), filepath.Base(p), in.Title, in.Artist, in.Album, in.Comment, int(math.Round(r.Duration)), int(math.Round(r.BPM)), r.BPM, r.Key.EngineID, st.Size(), int(float64(st.Size())*8/r.Duration), format)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,1,0,strftime('%s'),strftime('%s'),strftime('%s'))`, enginePath, filepath.Base(p), in.Title, in.Artist, in.Album, in.Comment, int(math.Round(r.Duration)), int(math.Round(r.BPM)), r.BPM, r.Key.EngineID, st.Size(), int(float64(st.Size())*8/r.Duration), format)
 		if e != nil {
 			return 0, e
 		}

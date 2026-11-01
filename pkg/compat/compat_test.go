@@ -1,6 +1,7 @@
 package compat_test
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -74,6 +75,23 @@ func TestWAVExtensibleAndFLACLargeCover(t *testing.T) {
 		testfixture.Write(t, root, tc.name, tc.b)
 		if _, e := compat.AudioHeader(filepath.Join(root, tc.name)); e == nil {
 			t.Errorf("accepted truncated %s", tc.name)
+		}
+	}
+}
+
+func TestFLACHeaderRejectsImplausibleRateAndDuration(t *testing.T) {
+	for _, tc := range []struct {
+		rate    uint64
+		samples uint64
+	}{{768001, 48000}, {1, 10_000_001}} {
+		data := testfixture.FLAC()
+		binary.BigEndian.PutUint64(data[18:], tc.rate<<44|1<<41|15<<36|tc.samples)
+		p := filepath.Join(t.TempDir(), "bad.flac")
+		if err := os.WriteFile(p, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := compat.AudioHeader(p); err == nil {
+			t.Fatal("accepted implausible FLAC", tc)
 		}
 	}
 }
