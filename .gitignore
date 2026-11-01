@@ -1,0 +1,29 @@
+# Firmware images & extracted rootfs (never commit binary firmware images)
+*.img
+*.bin
+*.iso
+*.squashfs
+*.ext4
+*.dtb
+*.ko
+firmware/
+extracted/
+rootfs/
+worktrees/
+build/
+out/
+dist/
+target/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+
+# Secrets & local credentials
+*.key
+*.pem
+*token*.json
+*secret*
+*.arl
+.env
+.DS_Store
