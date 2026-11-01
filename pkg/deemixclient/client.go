@@ -217,6 +217,11 @@ func (c *Client) downloadDirectory(ctx context.Context, t providers.Track, progr
 			if e != nil {
 				return nil, e
 			}
+			if st.Size() == 0 {
+				// A preallocated download name is not a completed audio file.
+				stable = 0
+				continue
+			}
 			if lastPath == path && lastSize == st.Size() && lastMod.Equal(st.ModTime()) {
 				stable++
 			} else {

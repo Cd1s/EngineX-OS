@@ -452,7 +452,9 @@ func (s *Server) tracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	v.tracks = make(map[string]providers.Track, len(tracks))
+	if v.tracks == nil {
+		v.tracks = make(map[string]providers.Track, len(tracks))
+	}
 	for _, t := range tracks {
 		v.tracks[t.ID] = t
 	}

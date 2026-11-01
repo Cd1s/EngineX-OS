@@ -3,7 +3,9 @@
 set -u
 SYS=${SC5000_SYS_ROOT:-/sys}
 PROC=${SC5000_PROC_ROOT:-/proc}
-AUDIO_IRQ=${SC5000_AUDIO_IRQ_PATTERN:-snd|alsa|i2s|spdif|audio}
+AUDIO_IRQ=${SC5000_AUDIO_IRQ_PATTERN:-ffb20000|snd|alsa|i2s|spdif|audio}
+GPU_IRQ=${SC5000_GPU_IRQ_PATTERN:-ffa30000}
+IO_IRQ=${SC5000_IO_IRQ_PATTERN:-ehci_hcd|ff540000|eth0}
 AUDIO_THREAD=${SC5000_AUDIO_THREAD_PATTERN:-audio|alsa|jack}
 export LC_ALL=C
 log() { printf 'sc5000-perf: %s\n' "$*" >&2; }
@@ -50,12 +52,17 @@ done
 
 # Route movable non-audio interrupts away from CPU0. Per-CPU/managed IRQs may
 # reject writes, which is expected. PREEMPT_RT IRQ threads are pinned below too.
+declare -A irq_cpus=()
 if [[ -r $PROC/interrupts ]]; then
     while IFS= read -r line; do
         [[ $line =~ ^[[:space:]]*([0-9]+): ]] || continue
         irq=${BASH_REMATCH[1]}
-        mask=e
-        [[ ${line,,} =~ $AUDIO_IRQ ]] && mask=1
+        mask=6; cpu=1-2
+        if [[ ${line,,} =~ $AUDIO_IRQ ]]; then mask=1; cpu=0
+        elif [[ ${line,,} =~ $GPU_IRQ ]]; then mask=2; cpu=1
+        elif [[ ${line,,} =~ $IO_IRQ ]]; then mask=4; cpu=2
+        fi
+        irq_cpus[$irq]=$cpu
         write_knob "$PROC/irq/$irq/smp_affinity" "$mask" quiet
     done < "$PROC/interrupts"
 fi
@@ -67,8 +74,22 @@ for process in "$PROC"/[0-9]*; do
     [[ -d $process ]] || continue
     exe=$(readlink "$process/exe" 2>/dev/null) || exe=
     comm=$(cat "$process/comm" 2>/dev/null) || comm=
-    if [[ $comm == irq/* && ${comm,,} =~ $AUDIO_IRQ ]]; then
-        pin 0 "${process##*/}"
+    if [[ $comm == irq/* ]]; then
+        # comm is limited to 15 bytes: irq/148-ffb20000 loses its last digit.
+        # Use the IRQ number to recover the classification from interrupts.
+        cpu=
+        if [[ $comm =~ ^irq/([0-9]+)- ]]; then cpu=${irq_cpus[${BASH_REMATCH[1]}]:-}; fi
+        if [[ -z $cpu ]]; then
+            if [[ ${comm,,} =~ $AUDIO_IRQ ]]; then cpu=0
+            elif [[ ${comm,,} =~ $GPU_IRQ ]]; then cpu=1
+            elif [[ ${comm,,} =~ $IO_IRQ ]]; then cpu=2
+            else cpu=1-2
+            fi
+        fi
+        pin "$cpu" "${process##*/}"
+        if [[ $cpu == 0 ]]; then
+            chrt -f -p 99 "${process##*/}" >/dev/null 2>&1 || log "IRQ priority unavailable: ${process##*/}"
+        fi
     fi
     [[ $exe == /usr/Engine/* ]] || continue
     for thread in "$process"/task/[0-9]*; do

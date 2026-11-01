@@ -27,6 +27,17 @@ def inspect(data):
     end = offset + tree_size
     stack, nodes = [], {}
 
+    def decode(value, encoding='utf-8'):
+        try:
+            return value.decode(encoding)
+        except UnicodeDecodeError as exc:
+            raise SafetyError('invalid FDT text encoding') from exc
+
+    def prop(path, name):
+        require(path in nodes, 'missing FDT node: '+path)
+        require(name in nodes[path], 'missing FDT property: '+path+'/'+name)
+        return nodes[path][name][1]
+
     def word():
         nonlocal offset
         require(offset+4 <= end, 'truncated FDT token')
@@ -39,8 +50,10 @@ def inspect(data):
         if token == 1:
             stop = data.find(b'\0', offset, end)
             require(stop >= offset, 'unterminated node')
-            name = data[offset:stop].decode('ascii')
+            name = decode(data[offset:stop], 'ascii')
             require('/' not in name and name not in ('.', '..'), 'invalid node name')
+            require((not nodes and name == '') if not stack else name != '',
+                    'invalid FDT root/child node')
             stack.append(name)
             offset = (stop+4) & ~3
             path = '/'.join(stack)
@@ -54,7 +67,8 @@ def inspect(data):
             require(offset+size <= end and key < len(strings), 'property outside FDT')
             stop = strings.find(b'\0', key)
             require(stop >= key and stack, 'invalid property name')
-            name = strings[key:stop].decode('ascii')
+            name = decode(strings[key:stop], 'ascii')
+            require(name, 'empty FDT property name')
             path = '/'.join(stack)
             require(name not in nodes[path], 'duplicate property')
             nodes[path][name] = (offset, data[offset:offset+size])
@@ -64,25 +78,25 @@ def inspect(data):
             break
         else:
             require(token == 4, 'unknown FDT token')
-    require(nodes['']['compatible'][1] == b'inmusic,jp07\0', 'not official JP07 FIT layout')
+    require(prop('', 'compatible') == b'inmusic,jp07\0', 'not official JP07 FIT layout')
     parts = []
     for path, props in nodes.items():
         if 'data' not in props:
             continue
-        hashes = [n for p, n in nodes.items() if p.startswith(path+'/') and 'algo' in n]
-        require(hashes and all(h['algo'][1] == b'sha1\0' for h in hashes), 'unknown FIT hash')
+        hashes = [p for p in nodes if p.startswith(path+'/')]
+        require(hashes and all(prop(p, 'algo') == b'sha1\0' for p in hashes), 'unknown FIT hash')
         pos, payload = props['data']
         digest = hashlib.sha1(payload).digest()
-        require(all(h['value'][1] == digest for h in hashes), 'FIT hash mismatch')
-        parts.append(dict(name=props['partition'][1].rstrip(b'\0').decode(),
-                          compression=props['compression'][1].rstrip(b'\0').decode(),
+        require(all(prop(p, 'value') == digest for p in hashes), 'FIT hash mismatch')
+        parts.append(dict(name=decode(prop(path, 'partition').rstrip(b'\0')),
+                          compression=decode(prop(path, 'compression').rstrip(b'\0')),
                           offset=pos, size=len(payload), sha1=digest.hex()))
     require([p['name'] for p in parts] == ['splash', 'recoverysplash', 'rootfs'],
             'unknown/protected FIT partitions')
     require(not any('signature' in p for p in nodes), 'signed FIT not supported')
     return dict(magic='FIT/FDT', fdt_version=version, size=total,
-                description=nodes['']['description'][1].rstrip(b'\0').decode(),
-                version=nodes['']['inmusic,version'][1].rstrip(b'\0').decode(),
+                description=decode(prop('', 'description').rstrip(b'\0')),
+                version=decode(prop('', 'inmusic,version').rstrip(b'\0')),
                 sha256=hashlib.sha256(data).hexdigest(), partitions=parts, verified=True)
 
 
@@ -105,7 +119,7 @@ def main():
                 ExtFS(temp)
                 os.link(temp, output)
         print(json.dumps(metadata, indent=2))
-    except (SafetyError, ValueError, OSError, KeyError, lzma.LZMAError) as exc:
+    except (SafetyError, ValueError, OSError, lzma.LZMAError) as exc:
         parser.exit(2, 'refused: '+str(exc)+'\n')
 
 

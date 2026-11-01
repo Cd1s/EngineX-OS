@@ -341,12 +341,70 @@ class ExtFS:
         self.cmd(f'set_inode_field "{path}" gid 0', True)
         require(self.read(path) == data, 'write verification failed: '+path)
 
-    def link(self, path, target):
+    def validate_link(self, path, target, overlay=None):
+        """Resolve guest links component by component, without following host links."""
         writable(path)
-        safe_path(target)
+        overlay = dict(overlay or {})
+        overlay[path] = target
+        parents = {'/': None}
+        resolved = []
+        pending = target.split('/') if isinstance(target, str) else []
+        if isinstance(target, str) and not target.startswith('/'):
+            pending = list(PurePosixPath(path).parts[1:-1]) + pending
+        hops = 0
+        while True:
+            require(isinstance(target, str) and target and
+                    not any(c in target for c in '\\\"\n\r\x00') and
+                    all(ord(c) >= 32 for c in target), 'unsafe symlink target')
+            if target.startswith('/'):
+                resolved = []
+            while pending:
+                name = pending.pop(0)
+                if name in ('', '.'):
+                    continue
+                if name == '..':
+                    require(resolved, 'symlink escapes guest root: '+path)
+                    resolved.pop()
+                    continue
+                current = '/'+'/'.join([*resolved, name])
+                writable(current)
+                parent = '/'+'/'.join(resolved)
+                if parents[parent] is None:
+                    parents[parent] = self.entries(parent)
+                meta = parents[parent].get(name)
+                if current in overlay:
+                    link = overlay[current]
+                else:
+                    link = None
+                    if meta and stat.S_ISLNK(meta[1]):
+                        info = self.cmd(f'stat "{current}"')
+                        fast = re.search(r'^Fast link dest: "(.*)"$', info, re.M)
+                        if fast:
+                            link = fast[1]
+                        else:
+                            try:
+                                link = self.read(current).decode('utf-8')
+                            except UnicodeDecodeError as exc:
+                                raise SafetyError('invalid guest symlink encoding') from exc
+                if link is not None:
+                    hops += 1
+                    require(hops <= 40, 'symlink loop or excessive chain: '+path)
+                    target = link
+                    pending = link.split('/') + pending
+                    break
+                parents[current] = None if meta and stat.S_ISDIR(meta[1]) else {}
+                resolved.append(name)
+            else:
+                return '/'+'/'.join(resolved)
+
+    def link(self, path, target, overlay=None):
+        self.validate_link(path, target, overlay)
         self.ensure_parents(path)
-        require(PurePosixPath(path).name not in self.entries(str(PurePosixPath(path).parent)),
-                'enablement path already exists: '+path)
+        parent, name = str(PurePosixPath(path).parent), PurePosixPath(path).name
+        existing = self.entries(parent).get(name)
+        if existing:
+            require(not stat.S_ISDIR(existing[1]), 'refuse replacing directory: '+path)
+            self.cmd(f'rm "{path}"', True)
         self.cmd(f'symlink "{path}" "{target}"', True)
 
 
@@ -445,7 +503,7 @@ def public_key(data):
 
 
 def inject(fs, key, services=(), overlay=None):
-    additions = {}
+    additions, links, planned = {}, {}, {}
     if overlay:
         root = Path(overlay)
         require(root.is_dir() and not root.is_symlink(), 'overlay must be a real directory')
@@ -453,12 +511,31 @@ def inject(fs, key, services=(), overlay=None):
             s = source.lstat()
             dest = '/'+source.relative_to(root).as_posix()
             writable(dest)
-            require(stat.S_ISDIR(s.st_mode) or (stat.S_ISREG(s.st_mode) and s.st_nlink == 1),
-                    'overlay symlinks, hardlinks and special files forbidden: '+dest)
-            if stat.S_ISREG(s.st_mode):
+            require(stat.S_ISDIR(s.st_mode) or stat.S_ISLNK(s.st_mode) or
+                    (stat.S_ISREG(s.st_mode) and s.st_nlink == 1),
+                    'overlay hardlinks and special files forbidden: '+dest)
+            planned[dest] = None
+            if stat.S_ISLNK(s.st_mode):
+                links[dest] = planned[dest] = os.readlink(source)
+            elif stat.S_ISREG(s.st_mode):
                 additions[dest] = (source.read_bytes(), stat.S_IMODE(s.st_mode) & 0o755)
+        for path, target in links.items():
+            fs.validate_link(path, target, planned)
+    service_data = {}
+    for source in services:
+        source = Path(source)
+        require((re.fullmatch(r'sc5000-[a-z0-9-]+@?\.service', source.name) or
+                 source.name == 'engine-guardian.service') and
+                source.name not in UNITS and source.name not in service_data,
+                'custom service must have a unique supported service name')
+        data = source.read_bytes()
+        require(b'[Service]' in data and b'ExecStart=' in data and b'\x00' not in data,
+                'invalid custom service')
+        service_data[source.name] = data
     for path, (data, mode) in additions.items():
         fs.write(path, data, mode)
+    for path, target in links.items():
+        fs.link(path, target, planned)
     fs.write('/usr/share/sc5000-custom/authorized_keys', key, 0o600)
     fs.write('/usr/share/sc5000-custom/sshd_config', SSHD_CONFIG)
     fs.write('/usr/libexec/sc5000-custom-prepare', PREPARE, 0o755)
@@ -480,19 +557,14 @@ def inject(fs, key, services=(), overlay=None):
         fs.write('/usr/lib/systemd/system/'+name, content.encode())
     fs.link('/usr/lib/systemd/system/multi-user.target.wants/sc5000-custom.target',
             '/usr/lib/systemd/system/sc5000-custom.target')
-    for source in services:
-        source = Path(source)
-        require(re.fullmatch(r'sc5000-[a-z0-9-]+\.service', source.name) and
-                source.name not in UNITS, 'custom service must have a unique sc5000-*.service name')
-        data = source.read_bytes()
-        require(b'[Service]' in data and b'ExecStart=' in data and b'\x00' not in data,
-                'invalid custom service')
-        fs.write('/usr/lib/systemd/system/'+source.name, data)
-        fs.write('/usr/lib/systemd/system/'+source.name+'.d/sc5000-ordering.conf',
+    for name, data in service_data.items():
+        fs.write('/usr/lib/systemd/system/'+name, data)
+        fs.write('/usr/lib/systemd/system/'+name+'.d/sc5000-ordering.conf',
                  b'[Unit]\nRequires=sc5000-custom-prepare.service\n'
                  b'After=sc5000-custom-prepare.service etc.mount var.mount\n')
-        fs.link('/usr/lib/systemd/system/sc5000-custom.target.wants/'+source.name,
-                '/usr/lib/systemd/system/'+source.name)
+        if not name.endswith('@.service'):
+            fs.link('/usr/lib/systemd/system/sc5000-custom.target.wants/'+name,
+                    '/usr/lib/systemd/system/'+name)
 
 
 def new_output(path):

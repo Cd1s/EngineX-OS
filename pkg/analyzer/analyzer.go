@@ -97,6 +97,9 @@ func Analyze(a *Audio, opts Options) (*Result, error) {
 	if a == nil || a.SampleRate <= 0 || a.Duration() < 4 {
 		return nil, ErrTooShort
 	}
+	if a.SampleRate < 8000 || a.SampleRate > 384000 {
+		return nil, errors.New("analyzer: invalid sample rate (8000..384000)")
+	}
 	tick := tickerFunc(opts.Ticker)
 	res := &Result{SampleRate: a.SampleRate, TotalSamples: int64(len(a.Samples)), Duration: a.Duration()}
 
@@ -165,6 +168,12 @@ func buildBeatgrid(bpm, firstBeat float64, sr int, total int64) []BeatMarker {
 // computeWaveforms 用 IIR 分频（低 < 200 Hz < 中 < 2.5 kHz < 高）计算每个
 // 波形点各频段的峰值与 RMS，再按全曲最大值归一化。
 func computeWaveforms(a *Audio, res *Result, tick func(int) error) error {
+	if a == nil || len(a.Samples) == 0 {
+		return ErrTooShort
+	}
+	if a.SampleRate < 8000 || a.SampleRate > 384000 {
+		return errors.New("analyzer: invalid sample rate (8000..384000)")
+	}
 	sr := float64(a.SampleRate)
 	spe := sr / WaveformEntriesPerSecond
 	entries := int(math.Ceil(float64(len(a.Samples)) / spe))
@@ -236,7 +245,7 @@ func computeWaveforms(a *Audio, res *Result, tick func(int) error) error {
 	res.Overview = make([]WavePoint, OverviewEntries)
 	for i := range res.Overview {
 		o := &res.Overview[i]
-		start := min(len(res.Waveform)-1, int(float64(i)*res.OverviewSamplesPerEntry/spe))
+		start := max(0, min(len(res.Waveform)-1, int(float64(i)*res.OverviewSamplesPerEntry/spe)))
 		end := min(len(res.Waveform), max(start+1, int(math.Ceil(float64(i+1)*res.OverviewSamplesPerEntry/spe))))
 		for _, p := range res.Waveform[start:end] {
 			o.LowValue, o.LowOpacity = max(o.LowValue, p.LowValue), max(o.LowOpacity, p.LowOpacity)

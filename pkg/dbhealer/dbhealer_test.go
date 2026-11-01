@@ -11,8 +11,10 @@ import (
 	"image/jpeg"
 	"image/png"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -329,8 +331,9 @@ func TestEOS09ArtworkResizeHashAndOrphan(t *testing.T) {
 	if err := png.Encode(&buf, img); err != nil {
 		t.Fatal(err)
 	}
-	mustExec(t, db, "INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,'old',?)", buf.Bytes())
-	mustExec(t, db, "UPDATE Track SET albumArtId=1,albumArtSourceHash='old' WHERE id=1")
+	originalHash := fmt.Sprintf("%x", sha1.Sum(buf.Bytes()))
+	mustExec(t, db, "INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,?,?)", originalHash, buf.Bytes())
+	mustExec(t, db, "UPDATE Track SET albumArtId=1,albumArtSourceHash=? WHERE id=1", originalHash)
 	mustExec(t, db, "PRAGMA foreign_keys=OFF")
 	mustExec(t, db, "UPDATE Track SET albumArtId=999 WHERE id=2")
 	mustExec(t, db, "PRAGMA foreign_keys=ON")
@@ -352,7 +355,7 @@ func TestEOS09ArtworkResizeHashAndOrphan(t *testing.T) {
 	if thumb.Bounds().Dx() != 512 || thumb.Bounds().Dy() != 256 || len(blob) > 1<<20 {
 		t.Fatal(thumb.Bounds())
 	}
-	if hash != fmt.Sprintf("%x", sha1.Sum(blob)) || source != hash {
+	if hash != originalHash || source != hash {
 		t.Fatal("hashes inconsistent")
 	}
 	var orphan sql.NullInt64
@@ -485,5 +488,137 @@ func TestEOS02IndexesAndTuning(t *testing.T) {
 		if err := db.QueryRow("PRAGMA " + p.name).Scan(&value); err != nil || value != p.want {
 			t.Fatalf("%s: %d %v", p.name, value, err)
 		}
+	}
+}
+
+func TestPlaylistPathCachePreservesVendorPositions(t *testing.T) {
+	db, _ := newLibrary(t)
+	mustExec(t, db, `INSERT INTO Playlist(id,title,parentListId,nextListId) VALUES(1,'A',0,0),(2,'B',0,0),(3,'C',1,0),(4,'D',1,0),(5,'E',3,0),(6,'F',2,0),(7,'Z',0,0),(8,NULL,0,0),(9,'Child',8,0),(10,NULL,9,0)`)
+	type entry struct {
+		id, position int
+		path         sql.NullString
+	}
+	read := func(view string) []entry {
+		t.Helper()
+		rows, err := db.Query("SELECT id,path,position FROM " + view + " ORDER BY id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var result []entry
+		for rows.Next() {
+			var e entry
+			if err = rows.Scan(&e.id, &e.path, &e.position); err != nil {
+				t.Fatal(err)
+			}
+			result = append(result, e)
+		}
+		if err = rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	expected := read("PlaylistPath")
+	if err := HealPlaylistTree(db); err != nil {
+		t.Fatal(err)
+	}
+	if got := read("PlaylistPath"); !reflect.DeepEqual(got, expected) {
+		t.Fatalf("cache changed vendor positions: got %v want %v", got, expected)
+	}
+	mustExec(t, db, `UPDATE Playlist SET title='Edited' WHERE id=1`)
+	expected = read("GuardianOriginalPlaylistPath")
+	if got := read("PlaylistPath"); !reflect.DeepEqual(got, expected) {
+		t.Fatalf("dirty fallback changed vendor positions: got %v want %v", got, expected)
+	}
+	if err := HealPlaylistTree(db); err != nil {
+		t.Fatal(err)
+	}
+	if got := read("PlaylistPath"); !reflect.DeepEqual(got, expected) {
+		t.Fatalf("refreshed cache changed vendor positions: got %v want %v", got, expected)
+	}
+	// A native edit may temporarily leave a NULL tail before the next healer pass.
+	mustExec(t, db, `UPDATE Playlist SET nextListId=NULL WHERE id=8`)
+	expected = read("GuardianOriginalPlaylistPath")
+	if got := read("PlaylistPath"); !reflect.DeepEqual(got, expected) {
+		t.Fatalf("NULL-tail fallback changed vendor positions: got %v want %v", got, expected)
+	}
+	if err := HealPlaylistTree(db); err != nil {
+		t.Fatal(err)
+	}
+	expected = read("GuardianOriginalPlaylistPath")
+	if got := read("PlaylistPath"); !reflect.DeepEqual(got, expected) {
+		t.Fatalf("NULL-tail rebuild changed vendor positions: got %v want %v", got, expected)
+	}
+	// Upgrade a previously installed cache and view even when its dirty flag is clean.
+	mustExec(t, db, `DROP VIEW GuardianLivePlaylistPath; CREATE VIEW GuardianLivePlaylistPath AS SELECT id,path,position FROM MaterializedPlaylistPath; UPDATE MaterializedPlaylistPath SET position=position+100`)
+	if err := HealPlaylistTree(db); err != nil {
+		t.Fatal(err)
+	}
+	if got := read("PlaylistPath"); !reflect.DeepEqual(got, expected) {
+		t.Fatalf("legacy cache was not upgraded: got %v want %v", got, expected)
+	}
+}
+
+func TestPlaylistPathCacheMatchesVendorAcrossTrees(t *testing.T) {
+	for seed := int64(0); seed < 50; seed++ {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) {
+			db, _ := newLibrary(t)
+			rng := rand.New(rand.NewSource(seed))
+			ids := rng.Perm(24)
+			for i, id := range ids {
+				parent := 0
+				if i > 0 && rng.Intn(3) != 0 {
+					parent = ids[rng.Intn(i)] + 1
+				}
+				var title any = fmt.Sprintf("T%d", id)
+				if rng.Intn(7) == 0 {
+					title = nil
+				}
+				mustExec(t, db, `INSERT INTO Playlist(id,title,parentListId,nextListId) VALUES(?,?,?,0)`, id+1, title, parent)
+			}
+			type entry struct {
+				id, position int
+				path         sql.NullString
+			}
+			read := func(view string) []entry {
+				t.Helper()
+				rows, err := db.Query("SELECT id,path,position FROM " + view + " ORDER BY id")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer rows.Close()
+				var result []entry
+				for rows.Next() {
+					var e entry
+					if err = rows.Scan(&e.id, &e.path, &e.position); err != nil {
+						t.Fatal(err)
+					}
+					result = append(result, e)
+				}
+				if err = rows.Err(); err != nil {
+					t.Fatal(err)
+				}
+				return result
+			}
+			expected := read("PlaylistPath")
+			if err := HealPlaylistTree(db); err != nil {
+				t.Fatal(err)
+			}
+			if got := read("PlaylistPath"); !reflect.DeepEqual(got, expected) {
+				t.Fatalf("clean cache differs: got %v want %v", got, expected)
+			}
+			mustExec(t, db, `UPDATE Playlist SET nextListId=NULL WHERE parentListId=0 AND nextListId=0`)
+			expected = read("GuardianOriginalPlaylistPath")
+			if got := read("PlaylistPath"); !reflect.DeepEqual(got, expected) {
+				t.Fatalf("dirty fallback differs: got %v want %v", got, expected)
+			}
+			if err := HealPlaylistTree(db); err != nil {
+				t.Fatal(err)
+			}
+			expected = read("GuardianOriginalPlaylistPath")
+			if got := read("PlaylistPath"); !reflect.DeepEqual(got, expected) {
+				t.Fatalf("refreshed cache differs: got %v want %v", got, expected)
+			}
+		})
 	}
 }

@@ -64,3 +64,22 @@ func TestLibrarySyncInterface(t *testing.T) {
 		t.Fatal(e, s)
 	}
 }
+
+func TestObserveReturnsMergedStatusAndExpiresOldTrack(t *testing.T) {
+	d := prolink.NewDiscovery()
+	now := time.Now()
+	status := prolink.Device{Address: "192.168.1.2", Number: 1, PacketType: 10, TrackID: 42, SourcePlayer: 2, SourceSlot: 3, LastSeen: now}
+	d.Observe(status)
+	status.PacketType = 6
+	status.TrackID = 0
+	status.SourcePlayer = 0
+	status.SourceSlot = 0
+	merged := d.Observe(status)
+	if merged.TrackID != 42 || merged.SourcePlayer != 2 || merged.SourceSlot != 3 {
+		t.Fatal("notification lost status", merged)
+	}
+	d.Devices(now.Add(11 * time.Second))
+	if got := d.Observe(status); got.TrackID != 0 {
+		t.Fatal("expired status was resurrected", got)
+	}
+}

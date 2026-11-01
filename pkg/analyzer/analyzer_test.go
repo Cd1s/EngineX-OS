@@ -141,3 +141,44 @@ func TestDecodeID3PrefixedFLACRegardlessOfExtension(t *testing.T) {
 		t.Fatalf("tagged decode %v", err)
 	}
 }
+
+func TestComputeWaveformsRejectsEmptyAudio(t *testing.T) {
+	for _, a := range []*Audio{nil, {SampleRate: 44100}} {
+		if err := computeWaveforms(a, &Result{}, tickerFunc(nil)); !errors.Is(err, ErrTooShort) {
+			t.Fatalf("empty waveform input: %v", err)
+		}
+	}
+}
+
+func TestComputeWaveformsSingleSample(t *testing.T) {
+	for _, sr := range []int{8000, 44100, 384000} {
+		a := &Audio{SampleRate: sr, Samples: []float32{.5}}
+		r := &Result{}
+		if err := computeWaveforms(a, r, tickerFunc(nil)); err != nil {
+			t.Fatal(err)
+		}
+		if len(r.Waveform) != 1 || len(r.Overview) != OverviewEntries || r.OverviewSamplesPerEntry != 1.0/OverviewEntries || math.IsNaN(r.Loudness) {
+			t.Fatalf("invalid one-sample waveform at %d Hz", sr)
+		}
+		if r.Waveform[0] == (WavePoint{}) {
+			t.Fatal("non-silent sample lost")
+		}
+		for i, got := range r.Overview {
+			if got != r.Waveform[0] {
+				t.Fatalf("overview[%d] at %d Hz = %+v, want %+v", i, sr, got, r.Waveform[0])
+			}
+		}
+	}
+}
+
+func TestAnalyzerRejectsUnsupportedSampleRates(t *testing.T) {
+	for _, sr := range []int{1, 7999, 384001} {
+		a := &Audio{SampleRate: sr, Samples: make([]float32, sr*4)}
+		if _, err := Analyze(a, Options{}); err == nil {
+			t.Fatalf("analysis accepted %d Hz", sr)
+		}
+		if err := computeWaveforms(a, &Result{}, tickerFunc(nil)); err == nil {
+			t.Fatalf("waveform accepted %d Hz", sr)
+		}
+	}
+}

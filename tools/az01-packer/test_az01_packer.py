@@ -260,7 +260,7 @@ class FilesystemTests(unittest.TestCase):
         self.assertIn('sc5000-test.service', self.fs.entries(
             '/usr/lib/systemd/system/sc5000-custom.target.wants'))
 
-    def test_overlay_mcu_and_symlinks_rejected(self):
+    def test_overlay_mcu_and_protected_symlinks_rejected(self):
         overlay = self.root/'overlay'
         target = overlay/'usr/Engine/Firmware'
         target.mkdir(parents=True)
@@ -269,9 +269,132 @@ class FilesystemTests(unittest.TestCase):
             az.inject(self.fs, b'key', overlay=overlay)
         shutil.rmtree(overlay)
         overlay.mkdir()
-        (overlay/'alias').symlink_to('/etc')
+        (overlay/'alias').symlink_to('/boot')
         with self.assertRaises(az.SafetyError):
             az.inject(self.fs, b'key', overlay=overlay)
+
+    def test_overlay_safe_relative_absolute_and_chained_links(self):
+        overlay = self.root/'overlay'
+        scripts = overlay/'usr/Engine/Scripts'
+        scripts.mkdir(parents=True)
+        (scripts/'cleanup-JP07.sh').write_bytes(b'#!/bin/sh\nexit 0\n')
+        (scripts/'cleanup').symlink_to('cleanup-JP07.sh')
+        (overlay/'absolute').symlink_to('/usr/Engine/Scripts/cleanup')
+        (overlay/'relative').symlink_to('absolute')
+        (overlay/'dangling').symlink_to('/missing/allowed-file')
+        wants = overlay/'etc/systemd/system/multi-user.target.wants'
+        wants.mkdir(parents=True)
+        unit = wants.parent/'engine-guardian.service'
+        unit.write_text('[Service]\nExecStart=/usr/bin/true\n')
+        (wants/unit.name).symlink_to('../'+unit.name)
+        before = self.fs.snapshot()
+        az.inject(self.fs, b'key', overlay=overlay)
+        self.assertEqual(self.fs.snapshot(), before)
+        for path, target in (('/usr/Engine/Scripts/cleanup', 'cleanup-JP07.sh'),
+                             ('/absolute', '/usr/Engine/Scripts/cleanup'),
+                             ('/relative', 'absolute'),
+                             ('/dangling', '/missing/allowed-file'),
+                             ('/etc/systemd/system/multi-user.target.wants/'+unit.name,
+                              '../'+unit.name)):
+            self.assertIn('Fast link dest: "'+target+'"', self.fs.cmd(f'stat "{path}"'))
+
+    def test_link_replaces_existing_nondirectory_but_preserves_directory(self):
+        self.fs.write('/etc/enable', b'old')
+        self.fs.link('/etc/enable', 'shadow')
+        self.fs.link('/etc/enable', '/etc/shadow')
+        self.assertIn('Fast link dest: "/etc/shadow"', self.fs.cmd('stat /etc/enable'))
+        self.fs.cmd('link /etc/shadow /etc/hard', True)
+        self.fs.cmd('set_inode_field /etc/shadow links_count 2', True)
+        self.fs.link('/etc/hard', '/etc/shadow')
+        self.assertIn(b'root:!', self.fs.read('/etc/shadow'))
+        self.assertRegex(self.fs.cmd('stat /etc/shadow'), r'Links:\s+1\b')
+        with self.assertRaises(az.SafetyError):
+            self.fs.link('/etc', '/usr')
+
+    def test_overlay_link_escape_protection_chains_and_cycles_refused_before_write(self):
+        overlay = self.root/'overlay'
+        attacks = [
+            {'link': '../outside'}, {'link': '/../../etc/shadow'},
+            {'link': '/boot/uboot'}, {'link': '/usr/Engine/Firmware/motor.bin'},
+            {'link': 'other', 'other': '/boot/uboot'},
+            {'link': '/alias/motor.bin', 'alias': '/usr/Engine/Firmware'},
+            {'link': '/alias/../boot/uboot', 'alias': '/etc'},
+            {'link': 'other', 'other': 'link'}, {'link': 'link'},
+            {'link': 'bad"target'}, {'link': 'bad\\target'}, {'link': 'bad\ntarget'},
+        ]
+        before = self.fs.snapshot()
+        for links in attacks:
+            with self.subTest(links=links):
+                overlay.mkdir()
+                (overlay/'aaa-should-not-be-written').write_bytes(b'no')
+                for path, target in links.items():
+                    (overlay/path).symlink_to(target)
+                with self.assertRaises(az.SafetyError):
+                    az.inject(self.fs, b'key', overlay=overlay)
+                self.assertNotIn('aaa-should-not-be-written', self.fs.entries('/'))
+                self.assertEqual(self.fs.snapshot(), before)
+                shutil.rmtree(overlay)
+
+    def test_links_cannot_bypass_existing_guest_symlinks(self):
+        self.fs.cmd('symlink /guest /usr/Engine/Firmware', True)
+        self.fs.cmd('symlink /guest-chain guest', True)
+        for target in ('/guest/motor.bin', '/guest-chain/motor.bin',
+                       '/guest-chain/../outside', '/boot/../etc/shadow'):
+            with self.subTest(target=target), self.assertRaises(az.SafetyError):
+                self.fs.link('/safe-link', target)
+        long_target = '/'+('a'*65)+'/../../boot/uboot'
+        self.fs.cmd(f'symlink /long "{long_target}"', True)
+        with self.assertRaises(az.SafetyError):
+            self.fs.link('/safe-link', '/long')
+        self.fs.cmd('symlink /guest-safe /etc/shadow', True)
+        self.fs.link('/safe-link', '/guest-safe')
+        self.assertIn('Fast link dest: "/guest-safe"', self.fs.cmd('stat /safe-link'))
+
+    def test_complete_repository_overlay_is_accepted(self):
+        overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
+        before = self.fs.snapshot()
+        az.inject(self.fs, b'key', overlay=overlay)
+        self.assertEqual(self.fs.snapshot(), before)
+        for source in overlay.rglob('*'):
+            dest = '/'+source.relative_to(overlay).as_posix()
+            if source.is_symlink():
+                self.assertIn('Fast link dest: "'+str(source.readlink())+'"',
+                              self.fs.cmd(f'stat "{dest}"'))
+            elif source.is_file():
+                self.assertEqual(self.fs.read(dest), source.read_bytes())
+        # Re-injection must replace existing wants links without corrupting ext2.
+        az.inject(self.fs, b'key', overlay=overlay)
+        self.assertEqual(self.fs.snapshot(), before)
+        az.check_fs(self.disk)
+
+    def test_guardian_and_template_services(self):
+        services = []
+        for name in ('engine-guardian.service', 'sc5000-storage@.service'):
+            source = self.root/name
+            source.write_text('[Service]\nExecStart=/usr/bin/true\n')
+            services.append(source)
+        az.inject(self.fs, b'key', services)
+        wants = self.fs.entries('/usr/lib/systemd/system/sc5000-custom.target.wants')
+        self.assertIn('engine-guardian.service', wants)
+        self.assertNotIn('sc5000-storage@.service', wants)
+        for source in services:
+            dest = '/usr/lib/systemd/system/'+source.name
+            self.assertEqual(self.fs.read(dest), source.read_bytes())
+            self.assertIn(b'After=sc5000-custom-prepare.service',
+                          self.fs.read(dest+'.d/sc5000-ordering.conf'))
+
+    def test_invalid_and_duplicate_services_refused_before_write(self):
+        for name in ('sshd.service', 'sc5000-custom-prepare.service',
+                     'sc5000-bad@@.service', 'sc5000-foo@bar.service'):
+            source = self.root/name
+            source.write_text('[Service]\nExecStart=/usr/bin/true\n')
+            with self.subTest(name=name), self.assertRaises(az.SafetyError):
+                az.inject(self.fs, b'key', [source])
+        source = self.root/'sc5000-ok.service'
+        source.write_text('[Service]\nExecStart=/usr/bin/true\n')
+        with self.assertRaises(az.SafetyError):
+            az.inject(self.fs, b'key', [source, source])
+        self.assertNotIn('share', self.fs.entries('/usr'))
 
     def test_cli_unpack_noop_repack_and_failed_repack_publishes_nothing(self):
         original = self.root/'original.img'

@@ -152,6 +152,9 @@ func TestDirectoryAdapterWatchesOnlyRequestedID(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := &Client{Mode: "directory", BaseURL: srv.URL, DownloadDir: root, PollInterval: time.Millisecond}
+	if err := os.WriteFile(filepath.Join(root, "123.flac"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	if _, err := c.Download(ctx, providers.Track{ID: "123", Provider: "deezer"}, nil); !errors.Is(err, context.DeadlineExceeded) {

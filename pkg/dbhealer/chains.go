@@ -286,23 +286,35 @@ func materialize(tx *sql.Tx) error {
  CREATE INDEX IF NOT EXISTS index_MaterializedPlaylistPath_parent_position ON MaterializedPlaylistPath(parentListId,position);`); err != nil {
 		return err
 	}
-	// The vendor GROUP_CONCAT ordering is not stable across SQLite versions.
-	// Use a linear traversal plus one sort while the materialized cache is dirty.
-	if _, err := tx.Exec(`CREATE VIEW IF NOT EXISTS GuardianLivePlaylistPath AS
-    WITH RECURSIVE ReverseOrder(id,parentListId,nextListId,title,distance) AS (
-      SELECT id,COALESCE(parentListId,0),COALESCE(nextListId,0),COALESCE(title,''),0 FROM Playlist WHERE COALESCE(nextListId,0)=0
-      UNION ALL
-      SELECT p.id,COALESCE(p.parentListId,0),p.nextListId,COALESCE(p.title,''),r.distance+1
-      FROM Playlist p JOIN ReverseOrder r ON p.nextListId=r.id AND COALESCE(p.parentListId,0)=r.parentListId
-    ), Ranked AS (
-      SELECT *,ROW_NUMBER() OVER(PARTITION BY parentListId ORDER BY distance DESC,id) AS sibling FROM ReverseOrder
-    ), Paths(id,path,depth,sortKey) AS (
-      SELECT id,title||';',1,printf('%016x',sibling) FROM Ranked WHERE parentListId=0
-      UNION ALL
-      SELECT c.id,p.path||c.title||';',p.depth+1,p.sortKey||'.'||printf('%016x',c.sibling)
-      FROM Ranked c JOIN Paths p ON c.parentListId=p.id
-    ) SELECT id,path,ROW_NUMBER() OVER(ORDER BY depth,sortKey) AS position FROM Paths;`); err != nil {
+	// Preserve the vendor depth-descending, chain-tail-first position order.
+	// Build paths once instead of running an ancestry subquery for every row.
+	var liveDDL string
+	err := tx.QueryRow("SELECT sql FROM sqlite_master WHERE type='view' AND name='GuardianLivePlaylistPath'").Scan(&liveDDL)
+	if err != nil && err != sql.ErrNoRows {
 		return err
+	}
+	// NULL-terminated chains have no vendor OrderedList row: their distance
+	// stays NULL. Equal ranks follow the captured parent/next covering index.
+	if !strings.Contains(liveDDL, "p.depth DESC,r.distance,r.parentListId,r.nextListId,p.id") {
+		if _, err = tx.Exec(`DROP VIEW IF EXISTS GuardianLivePlaylistPath;
+ CREATE VIEW GuardianLivePlaylistPath AS
+ WITH RECURSIVE ReverseOrder(id,parentListId,nextListId,title,distance) AS (
+   SELECT id,parentListId,nextListId,title,
+     CASE WHEN nextListId IS NULL THEN NULL ELSE 0 END FROM Playlist WHERE nextListId=0 OR nextListId IS NULL
+   UNION ALL
+   SELECT p.id,p.parentListId,p.nextListId,p.title,r.distance+1
+   FROM Playlist p JOIN ReverseOrder r ON p.nextListId=r.id AND COALESCE(p.parentListId,0)=COALESCE(r.parentListId,0)
+ ), Paths(id,path,depth) AS (
+   SELECT id,CASE WHEN title IS NULL THEN '' ELSE title||';' END,1 FROM ReverseOrder WHERE COALESCE(parentListId,0)=0
+   UNION ALL
+   SELECT c.id,p.path||CASE WHEN c.title IS NULL THEN '' ELSE c.title||';' END,p.depth+1
+   FROM ReverseOrder c JOIN Paths p ON c.parentListId=p.id
+ ) SELECT p.id,NULLIF(p.path,'') AS path,
+   ROW_NUMBER() OVER(ORDER BY p.depth DESC,r.distance,r.parentListId,r.nextListId,p.id) AS position
+ FROM Paths p JOIN ReverseOrder r ON r.id=p.id;
+ UPDATE GuardianCacheState SET dirty=1 WHERE id=1;`); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(`DROP VIEW IF EXISTS PlaylistPath;
  CREATE VIEW PlaylistPath AS
@@ -323,50 +335,18 @@ func materialize(tx *sql.Tx) error {
 	if dirty == 0 {
 		return nil
 	}
-	rows, err := tx.Query("SELECT id,COALESCE(parentListId,0),COALESCE(nextListId,0),COALESCE(title,'') FROM Playlist")
-	if err != nil {
+	if _, err := tx.Exec(`DELETE FROM MaterializedPlaylistPath;
+ INSERT INTO MaterializedPlaylistPath(id,parentListId,nextListId,position,path)
+ SELECT p.id,COALESCE(p.parentListId,0),COALESCE(p.nextListId,0),v.position,v.path
+ FROM Playlist p JOIN GuardianLivePlaylistPath v ON v.id=p.id;`); err != nil {
 		return err
 	}
-	byID := map[int64]link{}
-	groups := map[int64][]link{}
-	for rows.Next() {
-		var n link
-		if err = rows.Scan(&n.id, &n.group, &n.next, &n.title); err != nil {
-			rows.Close()
-			return err
-		}
-		byID[n.id] = n
-		groups[n.group] = append(groups[n.group], n)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
+	var total, cached int
+	if err := tx.QueryRow(`SELECT (SELECT count(*) FROM Playlist),(SELECT count(*) FROM MaterializedPlaylistPath)`).Scan(&total, &cached); err != nil {
 		return err
 	}
-	if _, err = tx.Exec("DELETE FROM MaterializedPlaylistPath"); err != nil {
-		return err
-	}
-	type pending struct {
-		id     int64
-		prefix string
-	}
-	queue := []pending{{0, ""}}
-	position := 0
-	// Breadth-first traversal uses the repaired sibling topology and emits each
-	// path once, avoiding PlaylistPath's recursive per-row subqueries.
-	for i := 0; i < len(queue); i++ {
-		p := queue[i]
-		for _, n := range order(groups[p.id]) {
-			position++
-			path := p.prefix + n.title + ";"
-			if _, err = tx.Exec("INSERT INTO MaterializedPlaylistPath VALUES(?,?,?,?,?)", n.id, n.group, n.next, position, path); err != nil {
-				return err
-			}
-			queue = append(queue, pending{n.id, path})
-		}
-	}
-	if position != len(byID) {
-		return fmt.Errorf("playlist tree is not rooted: %d of %d cached", position, len(byID))
+	if total != cached {
+		return fmt.Errorf("playlist tree is not rooted: %d of %d cached", cached, total)
 	}
 	_, err = tx.Exec("UPDATE GuardianCacheState SET dirty=0 WHERE id=1")
 	return err
