@@ -27,3 +27,8 @@ __pycache__/
 *.arl
 .env
 .DS_Store
+
+# rb-bridge local builds and verification scratch
+/bin/
+/rb-bridge
+/.tmp/
