@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stream Sync · SC5000</title>
+<style>
+:root{color-scheme:dark;font:18px system-ui,sans-serif;background:#0b0e13;color:#e7edf5}*{box-sizing:border-box}body{margin:0;padding:18px;max-width:1100px;margin:auto}header{display:flex;justify-content:space-between;align-items:center}h1{font-size:25px;margin:8px 0;color:#5ce4d5}h2{font-size:20px}button,select,input{font:inherit;min-height:52px;border-radius:9px;border:1px solid #374151;padding:10px;background:#1b2330;color:inherit}button{cursor:pointer}button:hover{border-color:#5ce4d5}button:disabled{opacity:.5}input[type=checkbox]{min-height:28px;width:28px;vertical-align:middle}nav,.bar{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}.card{background:#131a24;border-radius:12px;padding:14px;margin:12px 0}.rows{display:grid;gap:8px;max-height:45vh;overflow:auto}.row{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:10px;background:#1b2330;border-radius:8px}.row span{flex:1;overflow-wrap:anywhere}small{display:block;color:#a4b1c5;font-size:14px}progress{width:100%;height:14px;accent-color:#5ce4d5}.badge{color:#5ce4d5}#notice{color:#f6cc71;min-height:24px}#qr{width:220px;max-width:70vw;background:white}a{color:#5ce4d5}#login{display:none}#guard{font-size:13px;max-width:65%;color:#9caec4}canvas{width:100%;height:70px}label{align-self:center}@media(max-width:600px){body{padding:10px}.row{flex-wrap:wrap}.row button{width:100%}header{align-items:start}#guard{max-width:55%;font-size:11px}}
+</style>
+<header><h1>STREAM SYNC</h1><span id="guard">后台工作队列</span></header>
+<details><summary>手机扫码打开控制台</summary><img src="/api/console-qr" width="220" alt="局域网控制台二维码"><small>同一局域网连接，使用终端显示的控制台访问码登录。</small></details>
+<div class="card"><div class="bar"><label><input type="checkbox" id="guest"> 访客临时加歌</label><input id="user" placeholder="Deezer 公开用户 ID" aria-label="Deezer 用户 ID"></div>
+<nav><button data-provider="netease">网易云 · 扫码</button><button data-provider="spotify">Spotify · 扫码</button><button data-provider="deezer">Deezer</button></nav>
+<div class="bar"><select id="sessions" aria-label="账号"></select><button id="browse">浏览歌单</button><button id="relogin">重新扫码登录</button><button id="logout">结束账号会话</button></div>
+<small>访客凭据仅保存在内存，8 小时后失效；下载进入 [Guest / 临时加歌]。原有 Hot Cue 保留。</small></div>
+<div id="notice" role="status"></div>
+<div id="login" class="card"><img id="qr" alt="登录二维码"><p><a id="auth" target="_blank" rel="noreferrer">在此手机打开登录</a></p><button id="check">检查网易云扫码状态</button><small id="loginStatus"></small></div>
+<div class="card"><h2 id="heading">歌单</h2><div class="bar"><input id="playlistID" placeholder="Deezer 公开歌单 ID" aria-label="公开歌单 ID"><button id="open">打开歌单 ID</button></div><div id="rows" class="rows"></div></div>
+<div class="card"><h2>下载与分析</h2><div id="jobs"></div><canvas id="wave" width="1024" height="70" aria-label="RGB 波形"></canvas></div>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);let current='',loginSession='',lastWave='',sessions=[],qrTimer=null,qrChecking=false;
+function notice(t){$('notice').textContent=t||''}
+async function api(path,opts={}){const r=await fetch('/api/'+path,{...opts,headers:{'Content-Type':'application/json'}});const v=await r.json();if(!r.ok)throw Error(v.error||r.status);return v}
+const post=(p,v={})=>api(p,{method:'POST',body:JSON.stringify(v)});
+async function action(fn){try{notice('');await fn()}catch(e){notice(e.message)}}
+async function refreshSessions(){sessions=await api('sessions');const selected=current;$('sessions').replaceChildren();for(const s of sessions){const o=document.createElement('option');o.value=s.id;o.textContent=s.provider+' · '+(s.guest?'访客':'主人')+(s.ready?' ✓':' · 待登录');$('sessions').append(o)}current=sessions.some(s=>s.id===selected)?selected:(sessions[0]?.id||'');$('sessions').value=current}
+$('sessions').onchange=()=>{current=$('sessions').value;$('rows').replaceChildren()};
+async function beginLogin(id){
+ const q=await post('sessions/'+id+'/login');loginSession=id;clearInterval(qrTimer);
+ const session=sessions.find(s=>s.id===id);
+ if(session?.provider==='netease')qrTimer=setInterval(()=>action(checkLogin),2500);
+ $('login').style.display='block';$('qr').src='/api/sessions/'+id+'/qr';$('auth').href=q.url;
+ $('check').hidden=session?.provider!=='netease';$('loginStatus').textContent='请用手机扫码；Spotify 登录后点“浏览歌单”';
+}
+for(const b of document.querySelectorAll('[data-provider]'))b.onclick=()=>action(async()=>{
+ const s=await post('sessions',{provider:b.dataset.provider,guest:$('guest').checked,userId:$('user').value.trim()});
+ current=s.id;await refreshSessions();
+ if(s.provider==='deezer'||s.ready){await playlists();return}
+ await beginLogin(s.id);
+});
+$('relogin').onclick=()=>action(()=>{if(!current)throw Error('先选择账号');return beginLogin(current)});
+async function checkLogin(){
+ if(qrChecking||!loginSession)return;qrChecking=true;
+ try{
+  const r=await post('sessions/'+loginSession+'/poll');
+  $('loginStatus').textContent=({800:'二维码已过期，请重新登录',801:'等待扫码',802:'等待手机确认',803:'登录成功'})[r.code]||'请重试';
+  if(r.code===800||r.code===803)clearInterval(qrTimer);
+  if(r.code===803){$('login').style.display='none';await refreshSessions();await playlists()}
+ }catch(e){clearInterval(qrTimer);throw e}finally{qrChecking=false}
+}
+$('check').onclick=()=>action(checkLogin);
+function row(title,detail,label,fn){const d=document.createElement('div');d.className='row';const s=document.createElement('span');s.textContent=title;const small=document.createElement('small');small.textContent=detail;s.append(small);const b=document.createElement('button');b.textContent=label;b.onclick=()=>action(async()=>{b.disabled=true;try{await fn()}finally{b.disabled=false}});d.append(s,b);return d}
+async function playlists(){if(!current)throw Error('先选择账号');await refreshSessions();const all=await api('sessions/'+current+'/playlists');$('heading').textContent='歌单';$('rows').replaceChildren();for(const p of all)$('rows').append(row(p.title,p.count+' 首','打开',()=>tracks(p.id,p.title)));$('login').style.display='none'}
+async function tracks(id,title='曲目'){const account=current;const all=await api('sessions/'+account+'/tracks?playlist='+encodeURIComponent(id));$('heading').textContent=title;$('rows').replaceChildren();for(const t of all)$('rows').append(row(t.title,t.artist+' · '+Math.round(t.durationMs/1000)+' 秒','下载并分析入库',async()=>{await post('jobs',{sessionId:account,trackId:t.id});notice('已加入后台队列');await jobs()}))}
+$('browse').onclick=()=>action(playlists);$('open').onclick=()=>action(()=>tracks($('playlistID').value.trim()));
+$('logout').onclick=()=>action(async()=>{await api('sessions/'+current,{method:'DELETE'});current='';clearInterval(qrTimer);await refreshSessions();$('rows').replaceChildren();$('login').style.display='none'});
+async function jobs(){
+ const data=await api('jobs');$('jobs').replaceChildren();
+ const states={queued:'排队',matching:'匹配录音',downloading:'下载',analyzing:'分析 BPM / Key / RGB',importing:'写入 SD 曲库',done:'可加载播放',error:'失败'};
+ for(const j of data.jobs||[]){
+  const d=document.createElement('div');d.className='card';
+  const title=document.createElement('div');title.textContent=j.track.title+' · '+(states[j.state]||j.state)+' '+(j.quality||'');
+  const p=document.createElement('progress');p.max=1;p.value=j.progress;
+  const detail=document.createElement('small');detail.textContent=j.error||j.playlist;
+  d.append(title,p,detail);$('jobs').append(d);
+ }
+ const newest=(data.jobs||[]).find(j=>j.state==='done');
+ if(newest&&lastWave!==newest.id){
+  const v=await api('jobs/'+newest.id+'/waveform');lastWave=newest.id;
+  const c=$('wave').getContext('2d');c.clearRect(0,0,1024,70);
+  v.overview.forEach((p,i)=>{c.fillStyle='rgb('+p.LowValue+','+p.MidValue+','+p.HighValue+')';const h=Math.max(p.LowValue,p.MidValue,p.HighValue)*70/255;c.fillRect(i,(70-h)/2,1,h)});
+ }
+ const g=data.resourceGuard;
+ if(g)$('guard').textContent='CPU '+(g.cpus||[]).join(',')+' · nice '+g.nice+(g.degraded?.length?' · 降级：'+g.degraded.join('; '):' · 后台低优先级');
+}
+
+action(async()=>{await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(e=>notice(e.message))},2000);
+</script></html>
