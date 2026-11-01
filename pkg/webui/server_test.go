@@ -27,7 +27,10 @@ type fixtureProvider struct{}
 func (fixtureProvider) Playlists(context.Context) ([]providers.Playlist, error) {
 	return []providers.Playlist{{ID: "p1", Title: "Friend", Count: 1}}, nil
 }
-func (fixtureProvider) Tracks(context.Context, string) ([]providers.Track, error) {
+func (fixtureProvider) Tracks(_ context.Context, playlist string) ([]providers.Track, error) {
+	if playlist == "p2" {
+		return []providers.Track{{ID: "s2", Title: "Other song", Provider: "spotify"}}, nil
+	}
 	return []providers.Track{{ID: "s1", Title: "Song", Artist: "Artist", ISRC: "US123", DurationMS: 8000, Provider: "spotify"}}, nil
 }
 
@@ -96,6 +99,7 @@ func TestGuestDownloadAnalyzeImportEndToEnd(t *testing.T) {
 	json.Unmarshal(data, &session)
 	request(t, c, srv.URL, "GET", "/api/sessions/"+session.ID+"/playlists", nil, 200)
 	request(t, c, srv.URL, "GET", "/api/sessions/"+session.ID+"/tracks?playlist=p1", nil, 200)
+	request(t, c, srv.URL, "GET", "/api/sessions/"+session.ID+"/tracks?playlist=p2", nil, 200)
 	request(t, c, srv.URL, "POST", "/api/jobs", map[string]string{"sessionId": session.ID, "trackId": "forged-ID"}, 400)
 	data = request(t, c, srv.URL, "POST", "/api/jobs", map[string]string{"sessionId": session.ID, "trackId": "s1"}, 200)
 	var job Job

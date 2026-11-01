@@ -97,6 +97,18 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 	if sampleCount == 0 {
 		sampleCount = uint64(math.Round(t.Duration * float64(sr)))
 	}
+	if sampleCount == 0 {
+		// Short exports may omit duration/sample count but still contain analysis.
+		sampleCount = 1024
+		if len(a.Beats) > 0 {
+			sampleCount = max(sampleCount, uint64(a.Beats[len(a.Beats)-1].TimeMS)*uint64(sr)/1000+1)
+		}
+		for _, w := range a.Waveforms {
+			if w.EntryBytes > 0 {
+				sampleCount = max(sampleCount, uint64(len(w.Data))/uint64(w.EntryBytes))
+			}
+		}
+	}
 	samples := float64(sampleCount)
 	p := Performance{}
 	var track bytes.Buffer
@@ -153,7 +165,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 		}
 	}
 	if wave != nil {
-		if wave.EntryBytes == 0 || len(wave.Data)%int(wave.EntryBytes) != 0 {
+		if wave.EntryBytes == 0 || uint64(wave.EntryBytes) > uint64(len(wave.Data)) || uint64(len(wave.Data))%uint64(wave.EntryBytes) != 0 {
 			return p, fmt.Errorf("invalid waveform entries")
 		}
 		var b bytes.Buffer
@@ -161,16 +173,16 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 		put(&b, big, uint64(bins))
 		put(&b, big, uint64(bins))
 		put(&b, big, samples/bins)
-		n := len(wave.Data) / int(wave.EntryBytes)
+		n := uint64(len(wave.Data)) / uint64(wave.EntryBytes)
 		// Preserve peaks when downsampling. PWV5 uses 5-bit height and 3-bit RGB.
 		for i := 0; i < bins; i++ {
-			lo, hi := i*n/bins, (i+1)*n/bins
+			lo, hi := uint64(i)*n/bins, uint64(i+1)*n/bins
 			if hi <= lo {
 				hi = lo + 1
 			}
 			var peak [3]byte
 			for j := lo; j < hi && j < n; j++ {
-				v := waveRGB(*wave, j)
+				v := waveRGB(*wave, int(j))
 				for c := 0; c < 3; c++ {
 					if v[c] > peak[c] {
 						peak[c] = v[c]
@@ -287,7 +299,11 @@ func cueColor(c rekordbox.Cue) [4]byte {
 }
 
 func waveRGB(w rekordbox.Waveform, i int) [3]byte {
-	p := w.Data[i*int(w.EntryBytes):]
+	offset := uint64(i) * uint64(w.EntryBytes)
+	if i < 0 || w.EntryBytes == 0 || offset >= uint64(len(w.Data)) || uint64(w.EntryBytes) > uint64(len(w.Data))-offset {
+		return [3]byte{}
+	}
+	p := w.Data[int(offset):]
 	switch w.Tag {
 	case "PWV7":
 		if w.EntryBytes >= 3 {

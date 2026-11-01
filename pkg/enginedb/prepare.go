@@ -72,6 +72,7 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack) 
 		source uint32
 	}
 	var moves []move
+	var removed []int64
 	owned := map[uint32]int64{}
 	for rows.Next() {
 		var id int64
@@ -83,6 +84,7 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack) 
 		}
 		target, ok := targets[source]
 		if !ok {
+			removed = append(removed, id)
 			continue
 		}
 		if _, duplicate := owned[source]; duplicate {
@@ -98,6 +100,18 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack) 
 	rows.Close()
 	if e != nil {
 		return nil, e
+	}
+	// Release obsolete paths before moving or inserting their replacements.
+	for _, id := range removed {
+		for _, query := range []string{
+			`DELETE FROM PlaylistEntity WHERE trackId=? AND (databaseUuid IS NULL OR databaseUuid='' OR databaseUuid=(SELECT uuid FROM Information))`,
+			`DELETE FROM BridgeState WHERE trackId=?`,
+			`DELETE FROM Track WHERE id=?`,
+		} {
+			if _, e = tx.ExecContext(ctx, query, id); e != nil {
+				return nil, e
+			}
+		}
 	}
 	prefix := ".rb-bridge-pending-" + uuid.NewString() + "/"
 	for _, m := range moves {

@@ -311,36 +311,46 @@ try:
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"launcher exited early: {proc.returncode}")
-        if sock is None and (work / "qmp.sock").exists():
-            candidate = socket.socket(socket.AF_UNIX)
-            candidate.settimeout(min(1.0, max(0.01, deadline - time.monotonic())))
-            try:
-                candidate.connect(str(work / "qmp.sock"))
-            except OSError:
-                candidate.close()
-            else:
-                sock = candidate
-                stream = sock.makefile("rb")
-                receive()  # greeting
-                command("qmp_capabilities")
-        if sock is not None:
-            sock.settimeout(min(1.0, max(0.01, deadline - time.monotonic())))
-            status = command("query-status")
-            blocks = command("query-block")
-            readonly_usb = any(b.get("device") == "rekordbox" and
-                               b.get("inserted", {}).get("ro") is True for b in blocks)
-            tree = command("human-monitor-command", {"command-line": "info qtree"})
-            usb_device = 'drive = "rekordbox"' in tree and 'usb-storage' in tree
-            serial = work / "serial.log"
-            text = serial.read_text(errors="replace") if serial.exists() else ""
-            kernel = bool(re.search(r"Linux version \d", text))
-            userspace = bool(re.search(r"systemd\[1\]:|Welcome to (?:Debian|Engine)|"
-                                       r"login:", text))
-            result.update(qmp_status=status, readonly_usb=readonly_usb,
-                          usb_device=usb_device, kernel_console=kernel, userspace_console=userspace)
-            if status.get("running") is True and readonly_usb and usb_device and kernel and userspace:
-                result["result"] = "PASS"
-                break
+        try:
+            if sock is None and (work / "qmp.sock").exists():
+                candidate = socket.socket(socket.AF_UNIX)
+                candidate.settimeout(min(1.0, max(0.01, deadline - time.monotonic())))
+                try:
+                    candidate.connect(str(work / "qmp.sock"))
+                except OSError:
+                    candidate.close()
+                else:
+                    sock = candidate
+                    stream = sock.makefile("rb")
+                    receive()  # greeting
+                    command("qmp_capabilities")
+            if sock is not None:
+                sock.settimeout(min(1.0, max(0.01, deadline - time.monotonic())))
+                status = command("query-status")
+                blocks = command("query-block")
+                readonly_usb = any(b.get("device") == "rekordbox" and
+                                   b.get("inserted", {}).get("ro") is True for b in blocks)
+                tree = command("human-monitor-command", {"command-line": "info qtree"})
+                usb_device = 'drive = "rekordbox"' in tree and 'usb-storage' in tree
+                serial = work / "serial.log"
+                text = serial.read_text(errors="replace") if serial.exists() else ""
+                kernel = bool(re.search(r"Linux version \d", text))
+                userspace = bool(re.search(r"systemd\[1\]:|Welcome to (?:Debian|Engine)|"
+                                           r"login:", text))
+                result.update(qmp_status=status, readonly_usb=readonly_usb,
+                              usb_device=usb_device, kernel_console=kernel, userspace_console=userspace)
+                if status.get("running") is True and readonly_usb and usb_device and kernel and userspace:
+                    result["result"] = "PASS"
+                    break
+        except (TimeoutError, OSError):
+            # A timed-out buffered socket cannot safely resume readline().
+            # Reconnect and negotiate QMP again on the next attempt.
+            if stream is not None:
+                stream.close()
+            if sock is not None:
+                sock.close()
+            stream = None
+            sock = None
         time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
     else:
         result["reason"] = "deadline reached before all evidence was present"

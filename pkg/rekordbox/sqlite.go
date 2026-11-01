@@ -169,8 +169,8 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	}
 	for _, r := range tracks {
 		path := r.get("file_path", "path", "location")
-		if path == "" {
-			path = strings.TrimRight(r.get("folder_path"), "/") + "/" + r.get("file_name", "filename")
+		if filename := r.get("file_name", "filename"); path == "" && filename != "" {
+			path = strings.TrimRight(r.get("folder_path"), "/") + "/" + filename
 		}
 		bpm := r.decimal("bpmx100", "bpm", "tempo")
 		if r.get("bpmx100") != "" || bpm > 1000 {

@@ -196,9 +196,18 @@ func decodeWAVData(r io.Reader, format, channels, sampleRate, bits int) (*Audio,
 		for off := 0; off < n; off += frame {
 			sum := 0.0
 			for c := 0; c < channels; c++ {
-				sum += conv(buf[off+c*bps:])
+				v := conv(buf[off+c*bps:])
+				if math.IsNaN(v) || math.IsInf(v, 0) {
+					return nil, errors.New("analyzer: wav: non-finite sample")
+				}
+				// Average before summing to avoid overflowing finite float64 PCM.
+				sum += v * inv
 			}
-			a.Samples = append(a.Samples, float32(sum*inv))
+			mono := float32(sum)
+			if math.IsInf(float64(mono), 0) {
+				return nil, errors.New("analyzer: wav: sample exceeds float32 range")
+			}
+			a.Samples = append(a.Samples, mono)
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			return a, nil
@@ -220,6 +229,9 @@ func DecodeFLAC(r io.Reader) (*Audio, error) {
 		return nil, fmt.Errorf("analyzer: flac: %w", err)
 	}
 	info := stream.Info
+	if info.BitsPerSample < 8 || info.BitsPerSample > 32 || info.NChannels < 1 || info.NChannels > 8 {
+		return nil, errors.New("analyzer: flac: invalid sample format")
+	}
 	if info.NSamples > MaxDecodedSamples || info.SampleRate < 8000 || info.SampleRate > 192000 {
 		return nil, errors.New("analyzer: FLAC exceeds sample/rate limit")
 	}
@@ -234,11 +246,24 @@ func DecodeFLAC(r io.Reader) (*Audio, error) {
 	}
 	scale := 1 / (float64(int64(1)<<(info.BitsPerSample-1)) * float64(info.NChannels))
 	for {
-		fr, err := stream.ParseNext()
+		fr, err := stream.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			return nil, fmt.Errorf("analyzer: flac: %w", err)
+		}
+		// A zero frame field inherits STREAMINFO; ParseNext does not resolve it.
+		if fr.BitsPerSample == 0 {
+			fr.BitsPerSample = info.BitsPerSample
+		}
+		if fr.SampleRate == 0 {
+			fr.SampleRate = info.SampleRate
+		}
+		if fr.BitsPerSample != info.BitsPerSample || fr.SampleRate != info.SampleRate || fr.Channels.Count() != int(info.NChannels) {
+			return nil, errors.New("analyzer: flac: frame format differs from STREAMINFO")
+		}
+		if err := fr.Parse(); err != nil {
 			return nil, fmt.Errorf("analyzer: flac: %w", err)
 		}
 		n := fr.Subframes[0].NSamples
@@ -270,7 +295,11 @@ func DecodeMP3(r io.Reader) (*Audio, error) {
 	if err != nil {
 		return nil, fmt.Errorf("analyzer: mp3: %w", err)
 	}
-	a := &Audio{SampleRate: dec.SampleRate(), Channels: 2, BitsPerSample: 16, Format: "mp3"}
+	sampleRate := dec.SampleRate()
+	if sampleRate < 8000 || sampleRate > 192000 {
+		return nil, errors.New("analyzer: mp3: invalid sample rate")
+	}
+	a := &Audio{SampleRate: sampleRate, Channels: 2, BitsPerSample: 16, Format: "mp3"}
 	buf := make([]byte, 4*4096)
 	for {
 		n, err := io.ReadFull(dec, buf)

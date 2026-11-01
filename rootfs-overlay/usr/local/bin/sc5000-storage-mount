@@ -9,6 +9,7 @@ MEDIA=${SC5000_MEDIA_ROOT:-/media}
 SD=$MEDIA/sc5000-sd-cache
 FALLBACK=${SC5000_INTERNAL_CACHE:-/var/cache/sc5000}
 BRIDGE=${SC5000_RB_BRIDGE:-/usr/local/bin/rb-bridge}
+GUARDIAN=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
 NOTIFY=${SC5000_STORAGE_NOTIFY:-/usr/local/libexec/sc5000-storage-notify}
 log() { printf 'sc5000-storage: %s\n' "$*" >&2; }
 die() { log "$*"; exit 1; }
@@ -93,7 +94,10 @@ if [[ $action == --discover ]]; then
     result=0
     for node in "$SYS"/class/block/mmcblk* "$SYS"/class/block/sd*; do
         [[ -e $node ]] || continue
-        "$0" add "/dev/${node##*/}" || result=1
+        candidate=${node##*/}
+        # eMMC boot0/boot1/RPMB are auxiliary devices, not mount candidates.
+        [[ $candidate =~ ^(sd[a-z]+[0-9]*|mmcblk[0-9]+(p[0-9]+)?)$ ]] || continue
+        "$0" add "/dev/$candidate" || result=1
     done
     exit "$result"
 fi
@@ -208,7 +212,16 @@ mv -- "$RUN/$name.state.tmp" "$RUN/$name.state"
 new_public='' new_lower='' new_library=''
 # The worker has CPUAffinity=3, CPUWeight=10, IOWeight=10; children inherit it.
 # A failed conversion must not prevent a DJ from accessing the original files.
-if [[ -f $public/PIONEER/rekordbox/export.pdb ]]; then
+# Match relative paths so media-root glob bytes and parent names stay literal.
+has_export() {
+    local candidate relative LC_ALL=C
+    while IFS= read -r -d '' candidate; do
+        relative=${candidate#"$public"/}
+        [[ ${relative,,} == pioneer/rekordbox/export* ]] && return 0
+    done < <(find "$public" -mindepth 3 -maxdepth 3 -type f -iname 'export*' -print0 2>/dev/null)
+    return 1
+}
+if has_export; then
     if [[ -x $BRIDGE ]]; then
         timeout --signal=TERM --kill-after=2s "${SC5000_BRIDGE_TIMEOUT:-10s}" \
             taskset -c 3 "$BRIDGE" --mount-path "$public" || log 'rb-bridge failed/timed out; exposing original files'
@@ -217,5 +230,9 @@ if [[ -f $public/PIONEER/rekordbox/export.pdb ]]; then
     fi
 fi
 # Firmware-specific notification hook runs only after conversion has finished.
+if [[ -f $public/Engine\ Library/Database2/m.db && -x $GUARDIAN ]]; then
+    timeout --signal=TERM --kill-after=2s "${SC5000_GUARDIAN_TIMEOUT:-10s}" \
+        taskset -c 3 "$GUARDIAN" --heal-mount "$public" || log 'engine-guardian failed/timed out; continuing notification'
+fi
 if [[ -x $NOTIFY ]]; then "$NOTIFY" --mount-path "$public" || log 'Engine notification failed'; fi
 log "ready: $dev ($type) at $public"

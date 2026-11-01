@@ -53,8 +53,13 @@ case $tool in
             mkdir -p "$target/Engine Library"
         fi
         if [[ ${MOCK_PDB:-0} == 1 && $type != apfs ]]; then
-            mkdir -p "$target/PIONEER/rekordbox"
-            touch "$target/PIONEER/rekordbox/export.pdb"
+            export_dir=${MOCK_EXPORT_DIR:-PIONEER/rekordbox}
+            mkdir -p "$target/$export_dir"
+            touch "$target/$export_dir/${MOCK_EXPORT_NAME:-export.pdb}"
+        fi
+        if [[ ${MOCK_FAKE_EXPORT:-0} == 1 ]]; then
+            mkdir -p "$target/other/data"
+            touch "$target/other/data/export.pdb"
         fi
         if [[ ${MOCK_LIB_SYMLINK:-0} == 1 ]]; then
             ln -s "$MOCK_ROOT/outside" "$target/Engine Library"
@@ -71,13 +76,20 @@ case $tool in
         if [[ $1 == -c ]]; then shift 2; exec "$@"; fi ;;
     rb-bridge)
         [[ -z ${MOCK_BRIDGE_SLEEP:-} ]] || sleep "$MOCK_BRIDGE_SLEEP"
+        if [[ ${MOCK_ENGINE_DB:-0} == 1 ]]; then
+            mkdir -p "$2/Engine Library/Database2"
+            touch "$2/Engine Library/Database2/m.db"
+        fi
         exit "${MOCK_BRIDGE_RC:-0}" ;;
-    notify|chown) exit 0 ;;
+    engine-guardian)
+        [[ -z ${MOCK_GUARDIAN_SLEEP:-} ]] || sleep "$MOCK_GUARDIAN_SLEEP"
+        exit "${MOCK_GUARDIAN_RC:-0}" ;;
+    notify|chown|chrt) exit 0 ;;
     *) exit 127 ;;
 esac
 MOCK
 chmod +x "$TMP/bin/mock"
-for tool in blkid findmnt mountpoint mount umount fsck.hfsplus modprobe taskset rb-bridge notify chown; do
+for tool in blkid findmnt mountpoint mount umount fsck.hfsplus modprobe taskset rb-bridge engine-guardian notify chown chrt; do
     ln -s mock "$TMP/bin/$tool"
 done
 export PATH="$TMP/bin:$PATH"
@@ -94,15 +106,16 @@ fixture() {
     export SC5000_SYS_ROOT=$MOCK_ROOT/sys SC5000_PROC_ROOT=$MOCK_ROOT/proc
     export SC5000_RUN_ROOT=$MOCK_ROOT/run SC5000_MEDIA_ROOT=$MOCK_ROOT/media
     export SC5000_INTERNAL_CACHE=$MOCK_ROOT/internal
+    export SC5000_ENGINE_GUARDIAN=$TMP/bin/engine-guardian
     export SC5000_RB_BRIDGE=$TMP/bin/rb-bridge SC5000_STORAGE_NOTIFY=$TMP/bin/notify
     : > "$MOCK_ROOT/log"
     : > "$MOCK_ROOT/mounts"
     printf 'ext4\n' > "$MOCK_ROOT/sd-type"
     printf 'ext4\n' > "$MOCK_ROOT/internal-type"
-    unset MOCK_FSCK_RC MOCK_MOUNT_FAIL MOCK_MOD_FAIL MOCK_BUSY_TARGET MOCK_PDB
+    unset MOCK_FSCK_RC MOCK_MOUNT_FAIL MOCK_MOD_FAIL MOCK_BUSY_TARGET MOCK_PDB MOCK_FAKE_EXPORT
     unset MOCK_MOUNT_FAIL_TARGET MOCK_APFS_LIBRARY
     unset MOCK_LIB_SYMLINK MOCK_BRIDGE_RC MOCK_BRIDGE_SLEEP MOCK_TASKSET_FAIL SC5000_FRONT_SD_DEVICE
-    unset SC5000_BRIDGE_TIMEOUT
+    unset SC5000_BRIDGE_TIMEOUT SC5000_GUARDIAN_TIMEOUT MOCK_ENGINE_DB MOCK_EXPORT_NAME MOCK_EXPORT_DIR MOCK_GUARDIAN_SLEEP MOCK_GUARDIAN_RC
 }
 device() {
     mkdir -p "$SC5000_SYS_ROOT/class/block/$1"
@@ -286,6 +299,12 @@ has 'notify <--mount-path>' "$MOCK_ROOT/log"
 ok 'hung bridge is bounded and does not block original-file notification'
 
 fixture
+mkdir -p "$SC5000_SYS_ROOT/class/block/"{mmcblk0boot0,mmcblk0boot1,mmcblk0rpmb}
+run_storage --discover
+lacks 'blkid ' "$MOCK_ROOT/log"
+ok 'coldplug ignores internal eMMC boot and RPMB auxiliary nodes'
+
+fixture
 sd_device
 device sda1 apfs
 bash "$STORAGE" --discover > "$MOCK_ROOT/output" 2>&1
@@ -317,6 +336,41 @@ has "<$SC5000_MEDIA_ROOT/sc5000-mmcblk1p1/Engine Library>" "$MOCK_ROOT/log"
 has "upperdir=$SC5000_INTERNAL_CACHE/apfs-overlays/SD-1234/upper" "$MOCK_ROOT/log"
 ok 'APFS SD is protected as an external volume rather than a writable cache'
 
+for export_name in EXPORT.PDB exportLibrary.db exportOneLibrary.db; do
+    fixture
+    device sda1 exfat
+    MOCK_PDB=1 MOCK_ENGINE_DB=1 MOCK_EXPORT_DIR=pIoNeEr/ReKoRdBoX MOCK_EXPORT_NAME=$export_name run_storage add /dev/sda1
+    has 'rb-bridge <--mount-path>' "$MOCK_ROOT/log"
+    has 'engine-guardian <--heal-mount>' "$MOCK_ROOT/log"
+    has "taskset <-c> <3> <$TMP/bin/engine-guardian>" "$MOCK_ROOT/log"
+    bridge_line=$(grep -n '^rb-bridge ' "$MOCK_ROOT/log" | cut -d: -f1)
+    heal_line=$(grep -n '^engine-guardian ' "$MOCK_ROOT/log" | cut -d: -f1)
+    notify_line=$(grep -n '^notify ' "$MOCK_ROOT/log" | cut -d: -f1)
+    ((bridge_line < heal_line && heal_line < notify_line)) || fail 'bridge/healer/notify ordering'
+    ok "$export_name converted and healed before notification"
+done
+fixture
+device sda1 exfat
+MOCK_PDB=1 MOCK_ENGINE_DB=1 MOCK_GUARDIAN_SLEEP=2 SC5000_GUARDIAN_TIMEOUT=0.05s run_storage add /dev/sda1
+has 'notify <--mount-path>' "$MOCK_ROOT/log"
+ok 'guardian timeout never blocks notification'
+
+fixture
+export SC5000_MEDIA_ROOT="$MOCK_ROOT/media[1]"
+device sda1 exfat
+MOCK_PDB=1 run_storage add /dev/sda1
+has 'rb-bridge <--mount-path>' "$MOCK_ROOT/log"
+ok 'export detection treats media root glob characters as literal path bytes'
+
+fixture
+export SC5000_MEDIA_ROOT="$MOCK_ROOT/pioneer/rekordbox/export-root"
+device sda1 exfat
+MOCK_FAKE_EXPORT=1 run_storage add /dev/sda1
+lacks 'rb-bridge ' "$MOCK_ROOT/log"
+ok 'parent directory names cannot make unrelated files look like a Rekordbox export'
+
+
+
 fixture
 mkdir -p "$SC5000_PROC_ROOT/sys/"{vm,fs}
 for knob in vm/swappiness vm/dirty_background_ratio vm/dirty_ratio fs/file-max; do
@@ -339,7 +393,9 @@ for dev in sda mmcblk1; do mkdir -p "$SC5000_SYS_ROOT/block/$dev/queue"; done
 printf '[none] mq-deadline kyber\n' > "$SC5000_SYS_ROOT/block/sda/queue/scheduler"
 printf '[none]\n' > "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
 printf ' CPU0 CPU1 CPU2 CPU3\n 42: 1 0 0 0 GIC i2s-audio\n 43: 0 1 0 0 GIC ehci\n' > "$SC5000_PROC_ROOT/interrupts"
-for irq in 42 43; do mkdir -p "$SC5000_PROC_ROOT/irq/$irq"; printf 'f\n' > "$SC5000_PROC_ROOT/irq/$irq/smp_affinity"; done
+printf ' 44: 0 1 0 0 GIC ffa30000.gpu\n 45: 0 1 0 0 GIC ehci_hcd\n 46: 0 1 0 0 GIC ffb20000\n' >> "$SC5000_PROC_ROOT/interrupts"
+printf ' 144: 0 1 0 0 GIC ffa30000.gpu\n 145: 0 1 0 0 GIC ff540000\n 146: 0 1 0 0 GIC ffb20000\n' >> "$SC5000_PROC_ROOT/interrupts"
+for irq in 42 43 44 45 46 144 145 146; do mkdir -p "$SC5000_PROC_ROOT/irq/$irq"; printf 'f\n' > "$SC5000_PROC_ROOT/irq/$irq/smp_affinity"; done
 mkdir -p "$SC5000_PROC_ROOT/100/task/"{100,101,102} "$SC5000_PROC_ROOT/200"
 ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
 printf 'Engine\n' > "$SC5000_PROC_ROOT/100/comm"
@@ -355,6 +411,11 @@ for tid in 100 101 102; do
         printf ' %s\n' "$policy"
     } > "$SC5000_PROC_ROOT/100/task/$tid/stat"
 done
+for entry in '201 144-ffa3000' '202 145-ff54000' '203 99-eth0' '204 99-other' '205 146-ffb2000'; do
+    read -r pid name <<< "$entry"
+    mkdir -p "$SC5000_PROC_ROOT/$pid"
+    printf 'irq/%s\n' "$name" > "$SC5000_PROC_ROOT/$pid/comm"
+done
 bash "$PERF" > "$MOCK_ROOT/output" 2>&1
 for cpu in 0 1 2 3; do
     has performance "$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_governor"
@@ -368,11 +429,25 @@ has 1048576 "$SC5000_PROC_ROOT/sys/fs/file-max"
 has mq-deadline "$SC5000_SYS_ROOT/block/sda/queue/scheduler"
 has none "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
 has 1 "$SC5000_PROC_ROOT/irq/42/smp_affinity"
-has e "$SC5000_PROC_ROOT/irq/43/smp_affinity"
+has 6 "$SC5000_PROC_ROOT/irq/43/smp_affinity"
 has 'taskset <-pc> <0> <101>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <1-2> <100>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <1-2> <102>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <0> <200>' "$MOCK_ROOT/log"
+has 'chrt <-f> <-p> <99> <200>' "$MOCK_ROOT/log"
+has 2 "$SC5000_PROC_ROOT/irq/44/smp_affinity"
+has 4 "$SC5000_PROC_ROOT/irq/45/smp_affinity"
+has 1 "$SC5000_PROC_ROOT/irq/46/smp_affinity"
+has 'taskset <-pc> <1> <201>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <2> <202>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <2> <203>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <1-2> <204>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <0> <205>' "$MOCK_ROOT/log"
+has 'chrt <-f> <-p> <99> <205>' "$MOCK_ROOT/log"
+has 1 "$SC5000_PROC_ROOT/irq/146/smp_affinity"
+has 2 "$SC5000_PROC_ROOT/irq/144/smp_affinity"
+has 4 "$SC5000_PROC_ROOT/irq/145/smp_affinity"
+lacks 'taskset <-pc> <3>' "$MOCK_ROOT/log"
 find "$SC5000_SYS_ROOT" "$SC5000_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/before"
 bash "$PERF" > "$MOCK_ROOT/output" 2>&1
 find "$SC5000_SYS_ROOT" "$SC5000_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/after"
@@ -405,4 +480,5 @@ fixture
 expect_fail env TARGET_CONFIG= TARGET_SYMVERS= bash "$ROOT/kernel-modules/build_modules.sh" modules
 has 'TARGET_CONFIG' "$MOCK_ROOT/output"
 ok 'module build refuses missing target ABI inputs before building'
+python3 -m unittest discover -s "$ROOT/sim/qengine" -p test_smoke.py >/dev/null
 printf 'PASS: %d tests (mocked storage and hardware; no privileged operations)\n' "$count"

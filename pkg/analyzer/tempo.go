@@ -78,19 +78,9 @@ func detectTempo(x []float32, sr int, minBPM, maxBPM float64, tick func(int) err
 	}
 	minLag := int(math.Floor(60 * fps / maxBPM))
 	maxLag := int(math.Ceil(60 * fps / minBPM))
-	if maxLag*2 >= len(env) {
-		return 0, 0, ErrTooShort
-	}
-	ac := make([]float64, 2*maxLag+2)
-	for lag := minLag; lag < len(ac); lag++ {
-		sum := 0.0
-		for i := 0; i+lag < len(env); i++ {
-			sum += env[i] * env[i+lag]
-		}
-		ac[lag] = sum / float64(len(env)-lag)
-		if err := tick(lag * tickEvery); err != nil {
-			return 0, 0, err
-		}
+	ac, err := onsetAutocorrelation(env, minLag, maxLag, tick)
+	if err != nil {
+		return 0, 0, err
 	}
 	bestLag, bestScore := minLag, -1.0
 	for lag := minLag; lag <= maxLag; lag++ {
@@ -104,10 +94,13 @@ func detectTempo(x []float32, sr int, minBPM, maxBPM float64, tick func(int) err
 	if bestLag > minLag && bestLag < maxLag {
 		a, b, c := ac[bestLag-1], ac[bestLag], ac[bestLag+1]
 		if d := a - 2*b + c; d < 0 {
-			lag += 0.5 * (a - c) / d
+			lag += math.Max(-0.5, math.Min(0.5, 0.5*(a-c)/d))
 		}
 	}
 	coarse := foldBPM(60*fps/lag, minBPM, maxBPM)
+	if coarse <= 0 {
+		return 0, 0, ErrTooShort
+	}
 
 	bpm, phase := coarse, 0.0
 	var ok bool
@@ -135,12 +128,44 @@ func detectTempo(x []float32, sr int, minBPM, maxBPM float64, tick func(int) err
 	return bpm, first, nil
 }
 
+// onsetAutocorrelation includes the doubled lags used to score tempo harmonics.
+func onsetAutocorrelation(env []float64, minLag, maxLag int, tick func(int) error) ([]float64, error) {
+	if minLag < 1 || maxLag < minLag || maxLag > (len(env)-1)/2 {
+		return nil, ErrTooShort
+	}
+	ac := make([]float64, 2*maxLag+1)
+	for lag := minLag; lag <= 2*maxLag; lag++ {
+		sum := 0.0
+		for i := 0; i+lag < len(env); i++ {
+			sum += env[i] * env[i+lag]
+		}
+		ac[lag] = sum / float64(len(env)-lag)
+		if err := tick(lag * tickEvery); err != nil {
+			return nil, err
+		}
+	}
+	return ac, nil
+}
+
 // combSearch 在 center±span 范围内搜索使全曲拍点 onset 能量和最大的速度与相位（帧）。
 func combSearch(env []float64, fps, center, span, step, phaseStep float64, tick func(int) error) (bpm, phase float64, ok bool, err error) {
+	// A zero BPM produces an infinite phase period, so reject before iterating.
+	for _, v := range []float64{fps, center, step, phaseStep} {
+		if v <= 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			return 0, 0, false, ErrTooShort
+		}
+	}
+	if span < 0 || math.IsNaN(span) || math.IsInf(span, 0) || center-span <= 0 || math.IsInf(center+span, 0) || (center-span)+step == center-span {
+		return 0, 0, false, ErrTooShort
+	}
+
 	best := -1.0
 	it := 0
 	for b := center - span; b <= center+span+1e-9; b += step {
 		p := 60 * fps / b
+		if p <= 0 || math.IsInf(p, 0) || math.IsNaN(p) {
+			return 0, 0, false, ErrTooShort
+		}
 		for ph := 0.0; ph < p; ph += phaseStep {
 			sum := 0.0
 			for t := ph; t < float64(len(env)-1); t += p {
@@ -162,8 +187,14 @@ func combSearch(env []float64, fps, center, span, step, phaseStep float64, tick 
 
 // foldBPM 把 bpm 折叠到 [lo, hi]。
 func foldBPM(bpm, lo, hi float64) float64 {
-	for bpm < lo && bpm > 0 {
+	if bpm <= 0 || math.IsNaN(bpm) || math.IsInf(bpm, 0) || lo <= 0 || hi < lo || math.IsNaN(lo) || math.IsNaN(hi) || math.IsInf(lo, 0) || math.IsInf(hi, 0) {
+		return 0
+	}
+	for bpm < lo {
 		bpm *= 2
+		if math.IsInf(bpm, 0) {
+			return 0
+		}
 	}
 	for bpm > hi {
 		bpm /= 2
