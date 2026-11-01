@@ -1,0 +1,258 @@
+package deemixclient
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
+)
+
+type Client struct {
+	// Mode is "queue" (REST bridge) or "directory" (POST /api/download,
+	// then watch exact <Deezer ID>.flac/.mp3 final names).
+	Mode         string
+	BaseURL      string
+	QueuePath    string
+	DownloadDir  string
+	HTTP         *http.Client
+	PollInterval time.Duration
+	// AllowLossy must be explicitly enabled to accept MP3 from a FLAC request.
+	AllowLossy bool
+}
+type QueueStatus struct {
+	ID       string  `json:"id"`
+	State    string  `json:"state"`
+	Progress float64 `json:"progress"`
+	Path     string  `json:"path"`
+	Error    string  `json:"error"`
+}
+type Download struct {
+	Path    string
+	Quality Quality
+}
+
+func UnixHTTP(socket string) *http.Client {
+	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+	}}}
+}
+func (c *Client) base() string {
+	if c.BaseURL != "" {
+		return strings.TrimRight(c.BaseURL, "/")
+	}
+	return "http://127.0.0.1:6595"
+}
+func (c *Client) queue() string {
+	if c.QueuePath != "" {
+		return "/" + strings.Trim(c.QueuePath, "/")
+	}
+	return "/api/queue"
+}
+
+// SafePath rejects queue paths outside the configured SD download tree,
+// including symlink escapes. The queue must report an existing regular file.
+func (c *Client) SafePath(path string) (string, error) {
+	root, err := filepath.EvalSymlinks(c.DownloadDir)
+	if err != nil {
+		return "", err
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	p, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	p, err = filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("deemix: result outside download directory")
+	}
+	st, err := os.Stat(p)
+	if err != nil {
+		return "", err
+	}
+	if !st.Mode().IsRegular() || st.Size() == 0 {
+		return "", errors.New("deemix: result is not a nonempty regular file")
+	}
+	return p, nil
+}
+
+// Download enqueues FLAC and polls the local REST/IPC bridge described in
+// docs/stream-sync.md. Native Deemix Socket.IO is intentionally not guessed.
+func (c *Client) Download(ctx context.Context, t providers.Track, progress func(QueueStatus)) (*Download, error) {
+	if t.Provider != "deezer" || t.ID == "" {
+		return nil, errors.New("deemix: resolve a Deezer track first")
+	}
+	if id, e := strconv.ParseUint(t.ID, 10, 64); e != nil || id == 0 {
+		return nil, errors.New("deemix: invalid numeric track ID")
+	}
+	if c.Mode == "directory" {
+		return c.downloadDirectory(ctx, t, progress)
+	}
+	if c.Mode != "" && c.Mode != "queue" {
+		return nil, errors.New("deemix: unsupported adapter mode")
+	}
+	data, _ := json.Marshal(map[string]any{"url": "https://www.deezer.com/track/" + url.PathEscape(t.ID), "bitrate": 9, "quality": "FLAC", "allowLossy": c.AllowLossy})
+	var q QueueStatus
+	if err := providers.JSON(ctx, c.HTTP, "POST", c.base()+c.queue(), strings.NewReader(string(data)), http.Header{"Content-Type": {"application/json"}}, &q); err != nil {
+		return nil, err
+	}
+	if q.ID == "" || strings.ContainsAny(q.ID, "/?#") {
+		return nil, errors.New("deemix: invalid queue ID")
+	}
+	jobID := q.ID
+	interval := c.PollInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	for {
+		if q.Error != "" {
+			return nil, errors.New("deemix: queue reported an error; check CantStream/FLAC availability")
+		}
+		if progress != nil {
+			progress(q)
+		}
+		switch strings.ToLower(q.State) {
+		case "error", "failed", "cancelled", "cantstream":
+			return nil, fmt.Errorf("deemix: download failed (%s); FLAC may be unavailable/CantStream", q.State)
+		case "completed", "complete", "done":
+			p, err := c.SafePath(q.Path)
+			if err != nil {
+				return nil, err
+			}
+			quality, err := Inspect(p)
+			if err != nil {
+				return nil, err
+			}
+			if !quality.Lossless && !c.AllowLossy {
+				return nil, errors.New("deemix: MP3 fallback needs explicit --allow-320k")
+			}
+			return &Download{Path: p, Quality: quality}, nil
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		if err := providers.JSON(ctx, c.HTTP, "GET", c.base()+c.queue()+"/"+url.PathEscape(jobID), nil, nil, &q); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// downloadDirectory supports services with a submission endpoint but no HTTP
+// queue status API. Configure their output template as <id>.<ext> and publish
+// final names only after download completion. Never select an unrelated newest
+// file: exact catalog ID, containment, stability and actual headers are required.
+func (c *Client) downloadDirectory(ctx context.Context, t providers.Track, progress func(QueueStatus)) (*Download, error) {
+	payload, _ := json.Marshal(map[string]any{"url": "https://www.deezer.com/track/" + t.ID, "bitrate": 9, "allowLossy": c.AllowLossy})
+	req, err := http.NewRequestWithContext(ctx, "POST", c.base()+"/api/download", strings.NewReader(string(payload)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	h := c.HTTP
+	if h == nil {
+		h = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := h.Do(req)
+	if err != nil {
+		return nil, errors.New("deemix: submission transport failed")
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20+1))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || len(raw) > 1<<20 {
+		return nil, errors.New("deemix: submission rejected")
+	}
+	var result struct {
+		Error  string `json:"error"`
+		ErrID  string `json:"errid"`
+		Result *bool  `json:"result"`
+	}
+	if json.Unmarshal(raw, &result) == nil && (result.Error != "" || result.ErrID != "" || (result.Result != nil && !*result.Result)) {
+		return nil, errors.New("deemix: submission failed; check CantStream/FLAC availability")
+	}
+	interval := c.PollInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	lastPath := ""
+	var lastSize int64
+	var lastMod time.Time
+	stable := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for _, ext := range []string{".flac", ".mp3"} {
+			path := filepath.Join(c.DownloadDir, t.ID+ext)
+			st, e := os.Stat(path)
+			if os.IsNotExist(e) {
+				continue
+			}
+			if e != nil {
+				return nil, e
+			}
+			if lastPath == path && lastSize == st.Size() && lastMod.Equal(st.ModTime()) {
+				stable++
+			} else {
+				stable = 0
+				lastPath = path
+				lastSize = st.Size()
+				lastMod = st.ModTime()
+			}
+			if stable < 2 {
+				break
+			}
+			p, e := c.SafePath(path)
+			if e != nil {
+				return nil, e
+			}
+			q, e := Inspect(p)
+			if e != nil {
+				return nil, e
+			}
+			if !q.Lossless && !c.AllowLossy {
+				return nil, errors.New("deemix: MP3 fallback needs explicit --allow-320k")
+			}
+			if progress != nil {
+				progress(QueueStatus{ID: t.ID, State: "completed", Progress: 1, Path: p})
+			}
+			return &Download{Path: p, Quality: q}, nil
+		}
+		if progress != nil {
+			progress(QueueStatus{ID: t.ID, State: "downloading"})
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
