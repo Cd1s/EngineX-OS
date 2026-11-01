@@ -1,0 +1,14 @@
+[Unit]
+Description=SC5000 RK3288 clocks, audio IRQ and Engine thread affinity
+After=local-fs.target
+Conflicts=irqbalance.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/sc5000-perf
+ExecStart=/usr/local/bin/sc5000-perf-tune
+CPUAffinity=3
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

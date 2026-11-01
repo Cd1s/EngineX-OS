@@ -1,0 +1,4 @@
+# Match actual /proc/interrupts names and existing RT Engine thread comm names.
+# Only SCHED_FIFO/SCHED_RR audio threads are moved to CPU0.
+SC5000_AUDIO_IRQ_PATTERN=snd|alsa|i2s|spdif|audio
+SC5000_AUDIO_THREAD_PATTERN=audio|alsa|jack
