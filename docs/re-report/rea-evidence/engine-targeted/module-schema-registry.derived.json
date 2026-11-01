@@ -1,0 +1,2160 @@
+{
+  "derivation": "LE32 module triples (value,length,pointer) and SQL triples (length,pointer,numeric mask), decoded from exact REA loaded-memory byte records. Mask semantics need consumer verification.",
+  "source_evidence_ids": [
+    "ev_77c0eaeff959574e37fe4cacf1f814a453605aa7cab12c21f9925078f89cd12e",
+    "ev_4b6c95f9885db668f032c16a5f42dea097ad02b9323e54d7f206e9107290afa9",
+    "ev_d25960c2d67677703ee4d3df3e1075065fa96ee641f5d4cac978240a18262c52",
+    "ev_33eeec353b44ab192524983c933aab39c5ca2a0f66030c8d0e7703d57f449371"
+  ],
+  "modules": [
+    {
+      "descriptor_ghidra_va": "0x293b85c",
+      "value": 1,
+      "value_hex": "0x1",
+      "filename": "m.db",
+      "string_ghidra_va": "0x1dbc9b0",
+      "length": 4
+    },
+    {
+      "descriptor_ghidra_va": "0x293b868",
+      "value": 2,
+      "value_hex": "0x2",
+      "filename": "fsm.db",
+      "string_ghidra_va": "0x1dbc9b8",
+      "length": 6
+    },
+    {
+      "descriptor_ghidra_va": "0x293b874",
+      "value": 4,
+      "value_hex": "0x4",
+      "filename": "itm.db",
+      "string_ghidra_va": "0x1dbc9c0",
+      "length": 6
+    },
+    {
+      "descriptor_ghidra_va": "0x293b880",
+      "value": 8,
+      "value_hex": "0x8",
+      "filename": "sm.db",
+      "string_ghidra_va": "0x1dbc9c8",
+      "length": 5
+    },
+    {
+      "descriptor_ghidra_va": "0x293b88c",
+      "value": 16,
+      "value_hex": "0x10",
+      "filename": "trm.db",
+      "string_ghidra_va": "0x1dbc9d0",
+      "length": 6
+    },
+    {
+      "descriptor_ghidra_va": "0x293b898",
+      "value": 32,
+      "value_hex": "0x20",
+      "filename": "stm.db",
+      "string_ghidra_va": "0x1dbc9d8",
+      "length": 6
+    },
+    {
+      "descriptor_ghidra_va": "0x293b8a4",
+      "value": 64,
+      "value_hex": "0x40",
+      "filename": "rbm.db",
+      "string_ghidra_va": "0x1dbc9e0",
+      "length": 6
+    },
+    {
+      "descriptor_ghidra_va": "0x293b8b0",
+      "value": 256,
+      "value_hex": "0x100",
+      "filename": "hm.db",
+      "string_ghidra_va": "0x1dbc9e8",
+      "length": 5
+    }
+  ],
+  "registry_view_warning": "These are overlapping scan windows, NOT two independently complete schemas. The second begins 50 triples into the first; deduplicate by entry_ghidra_va. Array lengths and mask application remain unverified.",
+  "registries": [
+    {
+      "kind": "overlapping-scan-window",
+      "start_ghidra_va": "0x293ba04",
+      "entries": [
+        {
+          "entry_ghidra_va": "0x293ba04",
+          "sql_ghidra_va": "0x1db78f8",
+          "length": 254,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Information",
+          "sql": "CREATE TABLE Information ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tuuid TEXT, \n\tschemaVersionMajor INTEGER, \n\tschemaVersionMinor INTEGER, \n\tschemaVersionPatch INTEGER, \n\tcurrentPlayedIndiciator INTEGER, \n\tlastRekordBoxLibraryImportReadCounter INTEGER\n)",
+          "sql_sha256": "31cea6cb5bc7990550a7a16da5e3a720a6fd97ea8eda8f46a62c6950f8be5a06"
+        },
+        {
+          "entry_ghidra_va": "0x293ba10",
+          "sql_ghidra_va": "0x1db79f8",
+          "length": 95,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "AlbumArt",
+          "sql": "CREATE TABLE AlbumArt ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\thash TEXT, \n\talbumArt BLOB \n)",
+          "sql_sha256": "f127715e837877720f7032eae40f9faae6ed4c72917108378c596b13391df182"
+        },
+        {
+          "entry_ghidra_va": "0x293ba1c",
+          "sql_ghidra_va": "0x1db7a58",
+          "length": 51,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_AlbumArt_hash ON AlbumArt (hash)",
+          "sql_sha256": "c5e7bd488ab3b95bb163779205a95f72868cf4e91c8022b0babd7fe1d662ff33"
+        },
+        {
+          "entry_ghidra_va": "0x293ba28",
+          "sql_ghidra_va": "0x1db7a8c",
+          "length": 154,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": "Pack",
+          "sql": "CREATE TABLE Pack ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tpackId TEXT, \n\tchangeLogDatabaseUuid TEXT, \n\tchangeLogId INTEGER, \n\tlastPackTime DATETIME \n)",
+          "sql_sha256": "7a22907f4d9920c7661f820b75eb51c2dd04c3e1ca5ac51443dce79511452ec3"
+        },
+        {
+          "entry_ghidra_va": "0x293ba34",
+          "sql_ghidra_va": "0x1db7b28",
+          "length": 201,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Pack_timestamp \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.lastPackTime IS NULL \nBEGIN \n\tUPDATE Pack SET lastPackTime = strftime('%s') WHERE ROWID = NEW.ROWID; \nEND",
+          "sql_sha256": "9f0e85b8833c573616b0e02a03a74cb503db0e0902178e1351b041f945289084"
+        },
+        {
+          "entry_ghidra_va": "0x293ba40",
+          "sql_ghidra_va": "0x1db7bf4",
+          "length": 184,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Pack_changeLogId \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.changeLogId = 0 \nBEGIN \n\tUPDATE Pack SET changeLogId = 1 WHERE ROWID = NEW.ROWID; \nEND",
+          "sql_sha256": "4e577b28cc1c25947fd0ddd15271e946964f29e706348fd9a029017c68ba9fb3"
+        },
+        {
+          "entry_ghidra_va": "0x293ba4c",
+          "sql_ghidra_va": "0x1db7cb0",
+          "length": 62,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE VIEW ChangeLog (id, trackId) AS SELECT 0, 0 WHERE FALSE",
+          "sql_sha256": "34d7be9e67802f757b0e53eed51d1e7e93fc690bbe8231ae9dd13465c9e1f03e"
+        },
+        {
+          "entry_ghidra_va": "0x293ba58",
+          "sql_ghidra_va": "0x1db7cf0",
+          "length": 1163,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Track",
+          "sql": "CREATE TABLE Track ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tplayOrder INTEGER, \n\tlength INTEGER, \n\tbpm INTEGER, \n\tyear INTEGER, \n\tpath TEXT, \n\tfilename TEXT, \n\tbitrate INTEGER, \n\tbpmAnalyzed REAL, \n\talbumArtId INTEGER, \n\tfileBytes INTEGER, \n\ttitle TEXT, \n\tartist TEXT, \n\talbum TEXT, \n\tgenre TEXT, \n\tcomment TEXT, \n\tlabel TEXT, \n\tcomposer TEXT, \n\tremixer TEXT, \n\tkey INTEGER, \n\trating INTEGER, \n\talbumArt TEXT, \n\ttimeLastPlayed DATETIME, \n\tisPlayed BOOLEAN, \n\tfileType TEXT, \n\tisAnalyzed BOOLEAN, \n\tdateCreated DATETIME, \n\tdateAdded DATETIME, \n\tisAvailable BOOLEAN, \n\tisMetadataOfPackedTrackChanged BOOLEAN, \n\tisPerfomanceDataOfPackedTrackChanged BOOLEAN, \n\tplayedIndicator INTEGER, \n\tisMetadataImported BOOLEAN, \n\tpdbImportKey INTEGER, \n\tstreamingSource TEXT, \n\turi TEXT, \n\tisBeatGridLocked BOOLEAN, \n\toriginDatabaseUuid TEXT, \n\toriginTrackId INTEGER, \n\tstreamingFlags INTEGER, \n\texplicitLyrics BOOLEAN, \n\tlastEditTime DATETIME, \n\talbumArtSourceHash CHAR(40), \n\tCONSTRAINT C_originDatabaseUuid_originTrackId UNIQUE (originDatabaseUuid, originTrackId), \n\tCONSTRAINT C_path UNIQUE (path), \n\tFOREIGN KEY (albumArtId) REFERENCES AlbumArt (id) ON DELETE RESTRICT \n)",
+          "sql_sha256": "66ded8ddb91a0ea677c5d497a50d28d6475e7a1abad67e2aff64e7d8c51276ac"
+        },
+        {
+          "entry_ghidra_va": "0x293ba64",
+          "sql_ghidra_va": "0x1db817c",
+          "length": 53,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_filename ON Track (filename)",
+          "sql_sha256": "a7311a67af19cc844b80e25e9cf14bae130b1d544d8ab510286f97ffd583b177"
+        },
+        {
+          "entry_ghidra_va": "0x293ba70",
+          "sql_ghidra_va": "0x1db81b4",
+          "length": 57,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_albumArtId ON Track (albumArtId)",
+          "sql_sha256": "f6bab9ed51e7433817daa8a13cc45f2b0176d5033079079effc11f202fcbf4a4"
+        },
+        {
+          "entry_ghidra_va": "0x293ba7c",
+          "sql_ghidra_va": "0x1db81f0",
+          "length": 43,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_uri ON Track (uri)",
+          "sql_sha256": "870f220cb9ea6442ef721cb82e0afce85acfd8e6a8cd485dd6ebda4030e8cfff"
+        },
+        {
+          "entry_ghidra_va": "0x293ba88",
+          "sql_ghidra_va": "0x1db821c",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_title ON Track(title)",
+          "sql_sha256": "7e19ed5dd87a326869b9329bdcc7949fa831bb437e6411381231ca1387a6502a"
+        },
+        {
+          "entry_ghidra_va": "0x293ba94",
+          "sql_ghidra_va": "0x1db824c",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_length ON Track(length)",
+          "sql_sha256": "702e4e640bca98fa6944c546c1d1547376e7f9f27a350a9d9bfff2f40ed674a0"
+        },
+        {
+          "entry_ghidra_va": "0x293baa0",
+          "sql_ghidra_va": "0x1db8280",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_rating ON Track(rating)",
+          "sql_sha256": "aed7d13667d1022e4ed447d78a776f1423d663869ca6b5ce98a8ed0ffa6c83da"
+        },
+        {
+          "entry_ghidra_va": "0x293baac",
+          "sql_ghidra_va": "0x1db82b4",
+          "length": 44,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_year ON Track(year)",
+          "sql_sha256": "1df707fb77aa4d41a9df45a153a6aff239cf6a366ccf1a16bffbd8eb6719c7d0"
+        },
+        {
+          "entry_ghidra_va": "0x293bab8",
+          "sql_ghidra_va": "0x1db82e4",
+          "length": 54,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_dateAdded ON Track(dateAdded)",
+          "sql_sha256": "2003f13604860adb142cb96afb613b33b8e908303da2a440fb58d5652a9a4f76"
+        },
+        {
+          "entry_ghidra_va": "0x293bac4",
+          "sql_ghidra_va": "0x1db831c",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_genre ON Track(genre)",
+          "sql_sha256": "e94602091717b76cba9912b0755bd84293d1e6dbf7b230249088594604b18d0d"
+        },
+        {
+          "entry_ghidra_va": "0x293bad0",
+          "sql_ghidra_va": "0x1db834c",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_artist ON Track(artist)",
+          "sql_sha256": "41ce7f32c5dab59d8e8dd34e9365e58ef218cf5ca8e71dfa7e882b8a8b011399"
+        },
+        {
+          "entry_ghidra_va": "0x293badc",
+          "sql_ghidra_va": "0x1db8380",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_album ON Track(album)",
+          "sql_sha256": "0c29887ec3d183619d3c5d410821adcc1971b1b6a6d5da76694275270012fa0f"
+        },
+        {
+          "entry_ghidra_va": "0x293bae8",
+          "sql_ghidra_va": "0x1db83b0",
+          "length": 42,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_key ON Track(key)",
+          "sql_sha256": "dace240839b31339269a1a74c966fb69e209e1cdac827b6c8313a90b2e1ce6eb"
+        },
+        {
+          "entry_ghidra_va": "0x293baf4",
+          "sql_ghidra_va": "0x1db83dc",
+          "length": 77,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_bpmAnalyzed ON Track(CAST(bpmAnalyzed + 0.5 AS int))",
+          "sql_sha256": "4083985d17cc037c687ee0ff85160932f295664c49dcad3dd3dc3f32ab0cd087"
+        },
+        {
+          "entry_ghidra_va": "0x293bb00",
+          "sql_ghidra_va": "0x1db842c",
+          "length": 229,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_check_id \nAFTER INSERT ON Track \n\tWHEN NEW.id <= (SELECT seq FROM sqlite_sequence WHERE name = 'Track') \nBEGIN \n\tSELECT RAISE(ABORT, 'Recycling deleted track id''s are not allowed'); \nEND",
+          "sql_sha256": "3850812f83d7f6e36c6c35d897bf8d80480c4c6a7961a3ad6a92371d5436c274"
+        },
+        {
+          "entry_ghidra_va": "0x293bb0c",
+          "sql_ghidra_va": "0x1db8514",
+          "length": 173,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_check_Id \nBEFORE UPDATE ON Track \n\tWHEN NEW.id <> OLD.id \nBEGIN \n\tSELECT RAISE(ABORT, 'Changing track id''s are not allowed'); \nEND",
+          "sql_sha256": "73b2c23713816cb429d876de0b8d7ffd0d400e56eec71a83b22e14fe8bd514f0"
+        },
+        {
+          "entry_ghidra_va": "0x293bb18",
+          "sql_ghidra_va": "0x1db85c4",
+          "length": 300,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_fix_origin \nAFTER INSERT ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND",
+          "sql_sha256": "6ffe9b76fb4742fe9b42ca2e81af4596fe17dafc8f9c14682da2bf6823532c7f"
+        },
+        {
+          "entry_ghidra_va": "0x293bb24",
+          "sql_ghidra_va": "0x1db86f4",
+          "length": 300,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_fix_origin \nAFTER UPDATE ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND",
+          "sql_sha256": "8c55bcf7aa002a3727c14a0fe33749c5993454a94bddf8a8be2882f194471a2e"
+        },
+        {
+          "entry_ghidra_va": "0x293bb30",
+          "sql_ghidra_va": "0x1db8824",
+          "length": 393,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_only_Track_timestamp \n\tAFTER UPDATE OF\tlength, bpm, year, filename, bitrate, bpmAnalyzed, albumArtId, \n\ttitle, artist, album, genre, comment, label, composer, remixer, key, rating, albumArt, \n\tfileType, isAnalyzed, isBeatgridLocked, explicitLyrics \n\tON Track \n\tFOR EACH ROW \nBEGIN \n\tUPDATE Track SET lastEditTime = strftime('%s') WHERE ROWID=NEW.ROWID; \nEND",
+          "sql_sha256": "b842095439e5fd468b5c80cedc4958544304e46a64de86c3b6a6c6b2526996d4"
+        },
+        {
+          "entry_ghidra_va": "0x293bb3c",
+          "sql_ghidra_va": "0x1db89b0",
+          "length": 157,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_insert_performance_data \nAFTER INSERT ON Track \nBEGIN \n\tINSERT INTO PerformanceData(trackId) VALUES(NEW.id); \nEND \n",
+          "sql_sha256": "c850e10e24050c37987a5d0f4b74e1b081066a0a26ed89cd0ce247b198a4c472"
+        },
+        {
+          "entry_ghidra_va": "0x293bb48",
+          "sql_ghidra_va": "0x1db8a50",
+          "length": 299,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "PerformanceData",
+          "sql": "CREATE TABLE PerformanceData ( \n\ttrackId INTEGER PRIMARY KEY, \n\ttrackData BLOB, \n\toverviewWaveFormData BLOB, \n\tbeatData BLOB, \n\tquickCues BLOB, \n\tloops BLOB, \n\tthirdPartySourceId INTEGER, \n\tactiveOnLoadLoops INTEGER, \n\tFOREIGN KEY(trackId) REFERENCES Track(id) ON DELETE CASCADE ON UPDATE CASCADE \n)",
+          "sql_sha256": "f05319e4b8f4560d81d41169180ceca290d4c78a34b162ac70418c4143d03142"
+        },
+        {
+          "entry_ghidra_va": "0x293bb54",
+          "sql_ghidra_va": "0x1db8b7c",
+          "length": 301,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_PerformanceData_after_update_Track_timestamp \n\tAFTER UPDATE OF trackData, isAnalyzed, overviewWaveFormData, beatData, quickCues, loops, activeOnLoadLoops \n\tON PerformanceData \n\tFOR EACH ROW \nBEGIN \n\tUPDATE Track \n\tSET lastEditTime = strftime('%s') \n\tWHERE id = NEW.trackId; \nEND",
+          "sql_sha256": "46b127506fa4745476a5a3e0e82cb9fe47c9af947a4ae4b3f9a749d7152d8887"
+        },
+        {
+          "entry_ghidra_va": "0x293bb60",
+          "sql_ghidra_va": "0x1db8cac",
+          "length": 354,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Playlist",
+          "sql": "CREATE TABLE Playlist ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\ttitle TEXT, \n\tparentListId INTEGER, \n\tisPersisted BOOLEAN, \n\tnextListId INTEGER, \n\tlastEditTime DATETIME, \n\tisExplicitlyExported BOOLEAN, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_PARENT UNIQUE (title, parentListId), \n\tCONSTRAINT C_NEXT_LIST_ID_UNIQUE_FOR_PARENT UNIQUE (parentListId, nextListId) \n)",
+          "sql_sha256": "d6b2089e9e2c34c0debe3d6850b69afaffca9d6de4e261de751e02e198ed96bc"
+        },
+        {
+          "entry_ghidra_va": "0x293bb6c",
+          "sql_ghidra_va": "0x1db8e10",
+          "length": 224,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_before_insert_List \nBEFORE INSERT ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = -(1 + nextListId) \n\tWHERE nextListId = NEW.nextListId \n\tAND parentListId = NEW.parentListId; \nEND",
+          "sql_sha256": "1c46d837c3b31fc58d29ef7156930873b75c8d117a241b849ba90d118bdd1757"
+        },
+        {
+          "entry_ghidra_va": "0x293bb78",
+          "sql_ghidra_va": "0x1db8ef4",
+          "length": 218,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_List \nAFTER INSERT ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = NEW.id \n\tWHERE nextListId = -(1 + NEW.nextListId) \n\tAND parentListId = NEW.parentListId; \nEND",
+          "sql_sha256": "1a475f093eb5d88ee20407cfc30d3fd70f3586879c24418edc4bfb282971c099"
+        },
+        {
+          "entry_ghidra_va": "0x293bb84",
+          "sql_ghidra_va": "0x1db8fd0",
+          "length": 227,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_delete_List \nAFTER DELETE ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = OLD.nextListId \n\tWHERE nextListId = OLD.id; \n\tDELETE FROM Playlist \n\tWHERE parentListId = OLD.id; \nEND",
+          "sql_sha256": "71176df6949f8c7832a991961753a7a64ee22fa2d59d28c12dfcd168e57e4821"
+        },
+        {
+          "entry_ghidra_va": "0x293bb90",
+          "sql_ghidra_va": "0x1db90b4",
+          "length": 331,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_isPersistParent \nAFTER UPDATE ON Playlist \n\tWHEN (old.isPersisted = 0 \n\tAND new.isPersisted = 1) \n\tOR (old.parentListId != new.parentListId \n\tAND new.isPersisted = 1) \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 1 \n\tWHERE id IN (SELECT parentListId FROM PlaylistAllParent WHERE id=new.id); \nEND",
+          "sql_sha256": "f3a446ce2fd25955ff716e1f8e3e803573da6631029c714e1dd50b1b7bd23f9a"
+        },
+        {
+          "entry_ghidra_va": "0x293bb9c",
+          "sql_ghidra_va": "0x1db9200",
+          "length": 259,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_isPersistChild \nAFTER UPDATE ON Playlist \n\tWHEN old.isPersisted = 1 \n\tAND new.isPersisted = 0 \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 0 \n\tWHERE id IN (SELECT childListId FROM PlaylistAllChildren WHERE id=new.id); \nEND",
+          "sql_sha256": "b70b9acf6049b43c95a65976117a1ea3d831750a08afe29d4a2ec167edbd6acb"
+        },
+        {
+          "entry_ghidra_va": "0x293bba8",
+          "sql_ghidra_va": "0x1db9304",
+          "length": 227,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_isPersist \nAFTER INSERT ON Playlist \n\tWHEN new.isPersisted = 1 \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 1 \n\tWHERE id IN (SELECT parentListId FROM PlaylistAllParent WHERE id=new.id); \nEND",
+          "sql_sha256": "e708e5807054811e7ec083bf188e479b66fcc9cf0b3cbe1a75b6d14e34a418c3"
+        },
+        {
+          "entry_ghidra_va": "0x293bbb4",
+          "sql_ghidra_va": "0x1db93e8",
+          "length": 288,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE VIEW PlaylistAllParent AS \nWITH FindAllParent AS ( \n\tSELECT id, parentListId FROM Playlist \n\tUNION ALL \n\tSELECT recursiveCTE.id, Plist.parentListId FROM Playlist Plist \n\tINNER JOIN FindAllParent recursiveCTE \n\tON recursiveCTE.parentListId = Plist.id \n) \nSELECT * FROM FindAllParent",
+          "sql_sha256": "87680aaefc25885a2c6f9cc5a766e341fdb39b686ecf840824568b49930627cc"
+        },
+        {
+          "entry_ghidra_va": "0x293bbc0",
+          "sql_ghidra_va": "0x1db950c",
+          "length": 310,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE VIEW PlaylistAllChildren AS \nWITH FindAllChild AS ( \nSELECT id, id as childListId FROM Playlist \nUNION ALL \nSELECT recursiveCTE.id, Plist.id FROM Playlist Plist \nINNER JOIN FindAllChild recursiveCTE \nON recursiveCTE.childListId = Plist.parentListId \n) \nSELECT * FROM FindAllChild WHERE id <> childListId",
+          "sql_sha256": "ba5b46ebe6cc153c28363c20cc54d2bc55fb1ec55cd617b461b61345d55b470a"
+        },
+        {
+          "entry_ghidra_va": "0x293bbcc",
+          "sql_ghidra_va": "0x1db9644",
+          "length": 992,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE VIEW PlaylistPath AS \nWITH RECURSIVE Heirarchy AS \n( \n\tSELECT id AS child, parentListId AS parent, title AS name, 1 AS depth FROM Playlist \n\tUNION ALL \n\tSELECT child, parentListId AS parent, title AS name, h.depth + 1 AS depth FROM Playlist c \n\tJOIN Heirarchy h ON h.parent = c.id \n\tORDER BY depth DESC \n), \nOrderedList AS \n( \n\tSELECT id , nextListId, 1 AS position \n\tFROM Playlist \n\tWHERE nextListId = 0 \n\tUNION ALL \n\tSELECT c.id , c.nextListId , l.position + 1 \n\tFROM Playlist c \n\tINNER JOIN OrderedList l \n\tON c.nextListId = l.id \n), \nNameConcat AS \n( \n\tSELECT \n\t\tchild AS id, \n\t\tGROUP_CONCAT(name ,';') || ';' AS path \n\tFROM \n\t( \n\t\tSELECT child, name \n\t\tFROM Heirarchy \n\t\tORDER BY depth DESC \n\t) \n\tGROUP BY child \n) \nSELECT \n\tid, \n\tpath, \n\tROW_NUMBER() OVER \n\t( \n\t\tORDER BY \n\t\t(SELECT COUNT(*) FROM (SELECT * FROM Heirarchy WHERE child = id) ) DESC, \n\t\t(SELECT position FROM OrderedList ol WHERE ol.id = c.id) ASC \n\t) AS position \nFROM Playlist c \nLEFT JOIN NameConcat g USING (id)",
+          "sql_sha256": "962abde8b613a9e07f183dd5523228ba0daaaa18a3609ca69cacfb152e977a80"
+        },
+        {
+          "entry_ghidra_va": "0x293bbd8",
+          "sql_ghidra_va": "0x1db9a28",
+          "length": 345,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": "Historylist",
+          "sql": "CREATE TABLE Historylist ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tsessionId TEXT, \n\ttitle TEXT, \n\tstartTime DATETIME, \n\ttimezone TEXT, \n\toriginDriveName TEXT, \n\toriginDatabaseUuid TEXT, \n\toriginListId INTEGER, \n\tisDeleted BOOLEAN, \n\teditTime DATETIME, \n\tCONSTRAINT C_UNIQUE_ORIGIN_UUID_AND_LIST_ID UNIQUE (originDatabaseUuid, originListId) \n)",
+          "sql_sha256": "54faa721a51ee494416b0c052bb533cc9c0e11f054881b12b8014a9c9fdaa900"
+        },
+        {
+          "entry_ghidra_va": "0x293bbe4",
+          "sql_ghidra_va": "0x1db9b84",
+          "length": 254,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Historylist \nAFTER UPDATE ON Historylist \n\tWHEN COALESCE(NEW.title != OLD.title, OLD.title IS NULL AND NEW.title IS NOT NULL) \nBEGIN \n\tUPDATE Historylist SET \n\t\teditTime = strftime('%s','now') \n\tWHERE id = NEW.id; \nEND",
+          "sql_sha256": "e52569c803ebbc7cf609e4cb9575d12ce87f5c4f18f70f465893f23f93b000c2"
+        },
+        {
+          "entry_ghidra_va": "0x293bbf0",
+          "sql_ghidra_va": "0x1db9c84",
+          "length": 327,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "PlaylistEntity",
+          "sql": "CREATE TABLE PlaylistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tlistId INTEGER, \n\ttrackId INTEGER, \n\tdatabaseUuid TEXT, \n\tnextEntityId INTEGER, \n\tmembershipReference INTEGER, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_LIST UNIQUE (listId, databaseUuid, trackId), \n\tFOREIGN KEY (listId) REFERENCES Playlist (id) ON DELETE CASCADE \n)",
+          "sql_sha256": "9e93a51be6aec8be6040abc6a38810c4ccc12309ddde0ac1c78736d3638b3f7b"
+        },
+        {
+          "entry_ghidra_va": "0x293bbfc",
+          "sql_ghidra_va": "0x1db9dcc",
+          "length": 93,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_PlaylistEntity_nextEntityId_listId ON PlaylistEntity(nextEntityId, listId)",
+          "sql_sha256": "dd02de440437f678f064ab9b86a607bf8c0e556c62935435fe632479f3f36105"
+        },
+        {
+          "entry_ghidra_va": "0x293bc08",
+          "sql_ghidra_va": "0x1db9e2c",
+          "length": 238,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_before_delete_PlaylistEntity \nBEFORE DELETE ON PlaylistEntity \nWHEN OLD.trackId > 0 \nBEGIN \n\tUPDATE PlaylistEntity SET \n\t\tnextEntityId = OLD.nextEntityId \n\tWHERE nextEntityId = OLD.id \n\tAND listId = OLD.listId; \nEND",
+          "sql_sha256": "a52de759882f7b2e11d7b9444817be84647ed22d030e6747a99eff2a1ad9648b"
+        },
+        {
+          "entry_ghidra_va": "0x293bc14",
+          "sql_ghidra_va": "0x1db9f1c",
+          "length": 268,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": "HistorylistEntity",
+          "sql": "CREATE TABLE HistorylistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tlistId INTEGER, \n\ttrackId INTEGER, \n\tstartTime DATETIME, \n\tFOREIGN KEY (listId) REFERENCES Historylist (id) ON DELETE CASCADE, \n\tFOREIGN KEY (trackId) REFERENCES Track (id) ON DELETE CASCADE \n)",
+          "sql_sha256": "0e863bdd23b532f01d1d821b1c433db0d0cdb0bb99d017e047a24eb232b7ba89"
+        },
+        {
+          "entry_ghidra_va": "0x293bc20",
+          "sql_ghidra_va": "0x1dba02c",
+          "length": 73,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": null,
+          "sql": "CREATE INDEX index_HistorylistEntity_listId ON HistorylistEntity (listId)",
+          "sql_sha256": "f1d79b01151a108b2de1549720fcfb97678968c3babe51265333124519ab4c16"
+        },
+        {
+          "entry_ghidra_va": "0x293bc2c",
+          "sql_ghidra_va": "0x1dba078",
+          "length": 75,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": null,
+          "sql": "CREATE INDEX index_HistorylistEntity_trackId ON HistorylistEntity (trackId)",
+          "sql_sha256": "803bfd91e40655cad2383adb3474b93ebf062bb4ffddaf1916e129d61ae39965"
+        },
+        {
+          "entry_ghidra_va": "0x293bc38",
+          "sql_ghidra_va": "0x1dba0c4",
+          "length": 181,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": "PreparelistEntity",
+          "sql": "CREATE TABLE PreparelistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\ttrackId INTEGER, \n\ttrackNumber INTEGER, \n\tFOREIGN KEY (trackId) REFERENCES Track (id) ON DELETE CASCADE \n)",
+          "sql_sha256": "da926ac7cbfae731d4e1051b491f8830dfb30f8b5baa6281f9d0a2c0025f801b"
+        },
+        {
+          "entry_ghidra_va": "0x293bc44",
+          "sql_ghidra_va": "0x1dba17c",
+          "length": 75,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE INDEX index_PreparelistEntity_trackId ON PreparelistEntity (trackId)",
+          "sql_sha256": "48a14874f3887acb6734d3ede0acf53bb433b6c742188bc082201e2f5f3e7c12"
+        },
+        {
+          "entry_ghidra_va": "0x293bc50",
+          "sql_ghidra_va": "0x1dba1c8",
+          "length": 368,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": "Smartlist",
+          "sql": "CREATE TABLE Smartlist ( \n\tlistUuid TEXT NOT NULL PRIMARY KEY, \n\ttitle TEXT, \n\tparentPlaylistPath TEXT, \n\tnextPlaylistPath TEXT, \n\tnextListUuid TEXT, \n\trules TEXT, \n\tlastEditTime DATETIME, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_PARENT UNIQUE (title, parentPlaylistPath), \n\tCONSTRAINT C_NEXT_LIST_UNIQUE_FOR_PARENT UNIQUE (parentPlaylistPath, nextPlaylistPath, nextListUuid) \n)",
+          "sql_sha256": "bf0cb4bb020e22dabd54ee67ebcd4f79340a66cceb1cda2317caa1bcbbf23e3d"
+        },
+        {
+          "entry_ghidra_va": "0x293bc5c",
+          "sql_ghidra_va": "0x1db78f8",
+          "length": 254,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Information",
+          "sql": "CREATE TABLE Information ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tuuid TEXT, \n\tschemaVersionMajor INTEGER, \n\tschemaVersionMinor INTEGER, \n\tschemaVersionPatch INTEGER, \n\tcurrentPlayedIndiciator INTEGER, \n\tlastRekordBoxLibraryImportReadCounter INTEGER\n)",
+          "sql_sha256": "31cea6cb5bc7990550a7a16da5e3a720a6fd97ea8eda8f46a62c6950f8be5a06"
+        },
+        {
+          "entry_ghidra_va": "0x293bc68",
+          "sql_ghidra_va": "0x1db79f8",
+          "length": 95,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "AlbumArt",
+          "sql": "CREATE TABLE AlbumArt ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\thash TEXT, \n\talbumArt BLOB \n)",
+          "sql_sha256": "f127715e837877720f7032eae40f9faae6ed4c72917108378c596b13391df182"
+        },
+        {
+          "entry_ghidra_va": "0x293bc74",
+          "sql_ghidra_va": "0x1db7a58",
+          "length": 51,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_AlbumArt_hash ON AlbumArt (hash)",
+          "sql_sha256": "c5e7bd488ab3b95bb163779205a95f72868cf4e91c8022b0babd7fe1d662ff33"
+        },
+        {
+          "entry_ghidra_va": "0x293bc80",
+          "sql_ghidra_va": "0x1db7a8c",
+          "length": 154,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": "Pack",
+          "sql": "CREATE TABLE Pack ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tpackId TEXT, \n\tchangeLogDatabaseUuid TEXT, \n\tchangeLogId INTEGER, \n\tlastPackTime DATETIME \n)",
+          "sql_sha256": "7a22907f4d9920c7661f820b75eb51c2dd04c3e1ca5ac51443dce79511452ec3"
+        },
+        {
+          "entry_ghidra_va": "0x293bc8c",
+          "sql_ghidra_va": "0x1db7b28",
+          "length": 201,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Pack_timestamp \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.lastPackTime IS NULL \nBEGIN \n\tUPDATE Pack SET lastPackTime = strftime('%s') WHERE ROWID = NEW.ROWID; \nEND",
+          "sql_sha256": "9f0e85b8833c573616b0e02a03a74cb503db0e0902178e1351b041f945289084"
+        },
+        {
+          "entry_ghidra_va": "0x293bc98",
+          "sql_ghidra_va": "0x1db7bf4",
+          "length": 184,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Pack_changeLogId \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.changeLogId = 0 \nBEGIN \n\tUPDATE Pack SET changeLogId = 1 WHERE ROWID = NEW.ROWID; \nEND",
+          "sql_sha256": "4e577b28cc1c25947fd0ddd15271e946964f29e706348fd9a029017c68ba9fb3"
+        },
+        {
+          "entry_ghidra_va": "0x293bca4",
+          "sql_ghidra_va": "0x1db7cb0",
+          "length": 62,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE VIEW ChangeLog (id, trackId) AS SELECT 0, 0 WHERE FALSE",
+          "sql_sha256": "34d7be9e67802f757b0e53eed51d1e7e93fc690bbe8231ae9dd13465c9e1f03e"
+        },
+        {
+          "entry_ghidra_va": "0x293bcb0",
+          "sql_ghidra_va": "0x1dba33c",
+          "length": 1132,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Track",
+          "sql": "CREATE TABLE Track ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tplayOrder INTEGER, \n\tlength INTEGER, \n\tbpm INTEGER, \n\tyear INTEGER, \n\tpath TEXT, \n\tfilename TEXT, \n\tbitrate INTEGER, \n\tbpmAnalyzed REAL, \n\talbumArtId INTEGER, \n\tfileBytes INTEGER, \n\ttitle TEXT, \n\tartist TEXT, \n\talbum TEXT, \n\tgenre TEXT, \n\tcomment TEXT, \n\tlabel TEXT, \n\tcomposer TEXT, \n\tremixer TEXT, \n\tkey INTEGER, \n\trating INTEGER, \n\talbumArt TEXT, \n\ttimeLastPlayed DATETIME, \n\tisPlayed BOOLEAN, \n\tfileType TEXT, \n\tisAnalyzed BOOLEAN, \n\tdateCreated DATETIME, \n\tdateAdded DATETIME, \n\tisAvailable BOOLEAN, \n\tisMetadataOfPackedTrackChanged BOOLEAN, \n\tisPerfomanceDataOfPackedTrackChanged BOOLEAN, \n\tplayedIndicator INTEGER, \n\tisMetadataImported BOOLEAN, \n\tpdbImportKey INTEGER, \n\tstreamingSource TEXT, \n\turi TEXT, \n\tisBeatGridLocked BOOLEAN, \n\toriginDatabaseUuid TEXT, \n\toriginTrackId INTEGER, \n\tstreamingFlags INTEGER, \n\texplicitLyrics BOOLEAN, \n\tlastEditTime DATETIME, \n\tCONSTRAINT C_originDatabaseUuid_originTrackId UNIQUE (originDatabaseUuid, originTrackId), \n\tCONSTRAINT C_path UNIQUE (path), \n\tFOREIGN KEY (albumArtId) REFERENCES AlbumArt (id) ON DELETE RESTRICT \n)",
+          "sql_sha256": "8bcdbcec78772d33d8f28ef1c417f2e015e9c73f163464cab9f8acd987565855"
+        },
+        {
+          "entry_ghidra_va": "0x293bcbc",
+          "sql_ghidra_va": "0x1db817c",
+          "length": 53,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_filename ON Track (filename)",
+          "sql_sha256": "a7311a67af19cc844b80e25e9cf14bae130b1d544d8ab510286f97ffd583b177"
+        },
+        {
+          "entry_ghidra_va": "0x293bcc8",
+          "sql_ghidra_va": "0x1db81b4",
+          "length": 57,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_albumArtId ON Track (albumArtId)",
+          "sql_sha256": "f6bab9ed51e7433817daa8a13cc45f2b0176d5033079079effc11f202fcbf4a4"
+        },
+        {
+          "entry_ghidra_va": "0x293bcd4",
+          "sql_ghidra_va": "0x1db81f0",
+          "length": 43,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_uri ON Track (uri)",
+          "sql_sha256": "870f220cb9ea6442ef721cb82e0afce85acfd8e6a8cd485dd6ebda4030e8cfff"
+        },
+        {
+          "entry_ghidra_va": "0x293bce0",
+          "sql_ghidra_va": "0x1db821c",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_title ON Track(title)",
+          "sql_sha256": "7e19ed5dd87a326869b9329bdcc7949fa831bb437e6411381231ca1387a6502a"
+        },
+        {
+          "entry_ghidra_va": "0x293bcec",
+          "sql_ghidra_va": "0x1db824c",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_length ON Track(length)",
+          "sql_sha256": "702e4e640bca98fa6944c546c1d1547376e7f9f27a350a9d9bfff2f40ed674a0"
+        },
+        {
+          "entry_ghidra_va": "0x293bcf8",
+          "sql_ghidra_va": "0x1db8280",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_rating ON Track(rating)",
+          "sql_sha256": "aed7d13667d1022e4ed447d78a776f1423d663869ca6b5ce98a8ed0ffa6c83da"
+        },
+        {
+          "entry_ghidra_va": "0x293bd04",
+          "sql_ghidra_va": "0x1db82b4",
+          "length": 44,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_year ON Track(year)",
+          "sql_sha256": "1df707fb77aa4d41a9df45a153a6aff239cf6a366ccf1a16bffbd8eb6719c7d0"
+        },
+        {
+          "entry_ghidra_va": "0x293bd10",
+          "sql_ghidra_va": "0x1db82e4",
+          "length": 54,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_dateAdded ON Track(dateAdded)",
+          "sql_sha256": "2003f13604860adb142cb96afb613b33b8e908303da2a440fb58d5652a9a4f76"
+        },
+        {
+          "entry_ghidra_va": "0x293bd1c",
+          "sql_ghidra_va": "0x1db831c",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_genre ON Track(genre)",
+          "sql_sha256": "e94602091717b76cba9912b0755bd84293d1e6dbf7b230249088594604b18d0d"
+        },
+        {
+          "entry_ghidra_va": "0x293bd28",
+          "sql_ghidra_va": "0x1db834c",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_artist ON Track(artist)",
+          "sql_sha256": "41ce7f32c5dab59d8e8dd34e9365e58ef218cf5ca8e71dfa7e882b8a8b011399"
+        },
+        {
+          "entry_ghidra_va": "0x293bd34",
+          "sql_ghidra_va": "0x1db8380",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_album ON Track(album)",
+          "sql_sha256": "0c29887ec3d183619d3c5d410821adcc1971b1b6a6d5da76694275270012fa0f"
+        },
+        {
+          "entry_ghidra_va": "0x293bd40",
+          "sql_ghidra_va": "0x1db83b0",
+          "length": 42,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_key ON Track(key)",
+          "sql_sha256": "dace240839b31339269a1a74c966fb69e209e1cdac827b6c8313a90b2e1ce6eb"
+        },
+        {
+          "entry_ghidra_va": "0x293bd4c",
+          "sql_ghidra_va": "0x1db83dc",
+          "length": 77,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_bpmAnalyzed ON Track(CAST(bpmAnalyzed + 0.5 AS int))",
+          "sql_sha256": "4083985d17cc037c687ee0ff85160932f295664c49dcad3dd3dc3f32ab0cd087"
+        },
+        {
+          "entry_ghidra_va": "0x293bd58",
+          "sql_ghidra_va": "0x1db842c",
+          "length": 229,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_check_id \nAFTER INSERT ON Track \n\tWHEN NEW.id <= (SELECT seq FROM sqlite_sequence WHERE name = 'Track') \nBEGIN \n\tSELECT RAISE(ABORT, 'Recycling deleted track id''s are not allowed'); \nEND",
+          "sql_sha256": "3850812f83d7f6e36c6c35d897bf8d80480c4c6a7961a3ad6a92371d5436c274"
+        },
+        {
+          "entry_ghidra_va": "0x293bd64",
+          "sql_ghidra_va": "0x1db8514",
+          "length": 173,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_check_Id \nBEFORE UPDATE ON Track \n\tWHEN NEW.id <> OLD.id \nBEGIN \n\tSELECT RAISE(ABORT, 'Changing track id''s are not allowed'); \nEND",
+          "sql_sha256": "73b2c23713816cb429d876de0b8d7ffd0d400e56eec71a83b22e14fe8bd514f0"
+        },
+        {
+          "entry_ghidra_va": "0x293bd70",
+          "sql_ghidra_va": "0x1db85c4",
+          "length": 300,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_fix_origin \nAFTER INSERT ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND",
+          "sql_sha256": "6ffe9b76fb4742fe9b42ca2e81af4596fe17dafc8f9c14682da2bf6823532c7f"
+        },
+        {
+          "entry_ghidra_va": "0x293bd7c",
+          "sql_ghidra_va": "0x1db86f4",
+          "length": 300,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_fix_origin \nAFTER UPDATE ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND",
+          "sql_sha256": "8c55bcf7aa002a3727c14a0fe33749c5993454a94bddf8a8be2882f194471a2e"
+        },
+        {
+          "entry_ghidra_va": "0x293bd88",
+          "sql_ghidra_va": "0x1db8824",
+          "length": 393,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_only_Track_timestamp \n\tAFTER UPDATE OF\tlength, bpm, year, filename, bitrate, bpmAnalyzed, albumArtId, \n\ttitle, artist, album, genre, comment, label, composer, remixer, key, rating, albumArt, \n\tfileType, isAnalyzed, isBeatgridLocked, explicitLyrics \n\tON Track \n\tFOR EACH ROW \nBEGIN \n\tUPDATE Track SET lastEditTime = strftime('%s') WHERE ROWID=NEW.ROWID; \nEND",
+          "sql_sha256": "b842095439e5fd468b5c80cedc4958544304e46a64de86c3b6a6c6b2526996d4"
+        },
+        {
+          "entry_ghidra_va": "0x293bd94",
+          "sql_ghidra_va": "0x1db89b0",
+          "length": 157,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_insert_performance_data \nAFTER INSERT ON Track \nBEGIN \n\tINSERT INTO PerformanceData(trackId) VALUES(NEW.id); \nEND \n",
+          "sql_sha256": "c850e10e24050c37987a5d0f4b74e1b081066a0a26ed89cd0ce247b198a4c472"
+        },
+        {
+          "entry_ghidra_va": "0x293bda0",
+          "sql_ghidra_va": "0x1db8a50",
+          "length": 299,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "PerformanceData",
+          "sql": "CREATE TABLE PerformanceData ( \n\ttrackId INTEGER PRIMARY KEY, \n\ttrackData BLOB, \n\toverviewWaveFormData BLOB, \n\tbeatData BLOB, \n\tquickCues BLOB, \n\tloops BLOB, \n\tthirdPartySourceId INTEGER, \n\tactiveOnLoadLoops INTEGER, \n\tFOREIGN KEY(trackId) REFERENCES Track(id) ON DELETE CASCADE ON UPDATE CASCADE \n)",
+          "sql_sha256": "f05319e4b8f4560d81d41169180ceca290d4c78a34b162ac70418c4143d03142"
+        },
+        {
+          "entry_ghidra_va": "0x293bdac",
+          "sql_ghidra_va": "0x1db8b7c",
+          "length": 301,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_PerformanceData_after_update_Track_timestamp \n\tAFTER UPDATE OF trackData, isAnalyzed, overviewWaveFormData, beatData, quickCues, loops, activeOnLoadLoops \n\tON PerformanceData \n\tFOR EACH ROW \nBEGIN \n\tUPDATE Track \n\tSET lastEditTime = strftime('%s') \n\tWHERE id = NEW.trackId; \nEND",
+          "sql_sha256": "46b127506fa4745476a5a3e0e82cb9fe47c9af947a4ae4b3f9a749d7152d8887"
+        },
+        {
+          "entry_ghidra_va": "0x293bdb8",
+          "sql_ghidra_va": "0x1db8cac",
+          "length": 354,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Playlist",
+          "sql": "CREATE TABLE Playlist ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\ttitle TEXT, \n\tparentListId INTEGER, \n\tisPersisted BOOLEAN, \n\tnextListId INTEGER, \n\tlastEditTime DATETIME, \n\tisExplicitlyExported BOOLEAN, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_PARENT UNIQUE (title, parentListId), \n\tCONSTRAINT C_NEXT_LIST_ID_UNIQUE_FOR_PARENT UNIQUE (parentListId, nextListId) \n)",
+          "sql_sha256": "d6b2089e9e2c34c0debe3d6850b69afaffca9d6de4e261de751e02e198ed96bc"
+        },
+        {
+          "entry_ghidra_va": "0x293bdc4",
+          "sql_ghidra_va": "0x1db8e10",
+          "length": 224,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_before_insert_List \nBEFORE INSERT ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = -(1 + nextListId) \n\tWHERE nextListId = NEW.nextListId \n\tAND parentListId = NEW.parentListId; \nEND",
+          "sql_sha256": "1c46d837c3b31fc58d29ef7156930873b75c8d117a241b849ba90d118bdd1757"
+        },
+        {
+          "entry_ghidra_va": "0x293bdd0",
+          "sql_ghidra_va": "0x1db8ef4",
+          "length": 218,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_List \nAFTER INSERT ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = NEW.id \n\tWHERE nextListId = -(1 + NEW.nextListId) \n\tAND parentListId = NEW.parentListId; \nEND",
+          "sql_sha256": "1a475f093eb5d88ee20407cfc30d3fd70f3586879c24418edc4bfb282971c099"
+        },
+        {
+          "entry_ghidra_va": "0x293bddc",
+          "sql_ghidra_va": "0x1db8fd0",
+          "length": 227,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_delete_List \nAFTER DELETE ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = OLD.nextListId \n\tWHERE nextListId = OLD.id; \n\tDELETE FROM Playlist \n\tWHERE parentListId = OLD.id; \nEND",
+          "sql_sha256": "71176df6949f8c7832a991961753a7a64ee22fa2d59d28c12dfcd168e57e4821"
+        },
+        {
+          "entry_ghidra_va": "0x293bde8",
+          "sql_ghidra_va": "0x1db90b4",
+          "length": 331,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_isPersistParent \nAFTER UPDATE ON Playlist \n\tWHEN (old.isPersisted = 0 \n\tAND new.isPersisted = 1) \n\tOR (old.parentListId != new.parentListId \n\tAND new.isPersisted = 1) \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 1 \n\tWHERE id IN (SELECT parentListId FROM PlaylistAllParent WHERE id=new.id); \nEND",
+          "sql_sha256": "f3a446ce2fd25955ff716e1f8e3e803573da6631029c714e1dd50b1b7bd23f9a"
+        },
+        {
+          "entry_ghidra_va": "0x293bdf4",
+          "sql_ghidra_va": "0x1db9200",
+          "length": 259,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_isPersistChild \nAFTER UPDATE ON Playlist \n\tWHEN old.isPersisted = 1 \n\tAND new.isPersisted = 0 \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 0 \n\tWHERE id IN (SELECT childListId FROM PlaylistAllChildren WHERE id=new.id); \nEND",
+          "sql_sha256": "b70b9acf6049b43c95a65976117a1ea3d831750a08afe29d4a2ec167edbd6acb"
+        },
+        {
+          "entry_ghidra_va": "0x293be00",
+          "sql_ghidra_va": "0x1db9304",
+          "length": 227,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_isPersist \nAFTER INSERT ON Playlist \n\tWHEN new.isPersisted = 1 \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 1 \n\tWHERE id IN (SELECT parentListId FROM PlaylistAllParent WHERE id=new.id); \nEND",
+          "sql_sha256": "e708e5807054811e7ec083bf188e479b66fcc9cf0b3cbe1a75b6d14e34a418c3"
+        },
+        {
+          "entry_ghidra_va": "0x293be0c",
+          "sql_ghidra_va": "0x1db93e8",
+          "length": 288,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE VIEW PlaylistAllParent AS \nWITH FindAllParent AS ( \n\tSELECT id, parentListId FROM Playlist \n\tUNION ALL \n\tSELECT recursiveCTE.id, Plist.parentListId FROM Playlist Plist \n\tINNER JOIN FindAllParent recursiveCTE \n\tON recursiveCTE.parentListId = Plist.id \n) \nSELECT * FROM FindAllParent",
+          "sql_sha256": "87680aaefc25885a2c6f9cc5a766e341fdb39b686ecf840824568b49930627cc"
+        },
+        {
+          "entry_ghidra_va": "0x293be18",
+          "sql_ghidra_va": "0x1db950c",
+          "length": 310,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE VIEW PlaylistAllChildren AS \nWITH FindAllChild AS ( \nSELECT id, id as childListId FROM Playlist \nUNION ALL \nSELECT recursiveCTE.id, Plist.id FROM Playlist Plist \nINNER JOIN FindAllChild recursiveCTE \nON recursiveCTE.childListId = Plist.parentListId \n) \nSELECT * FROM FindAllChild WHERE id <> childListId",
+          "sql_sha256": "ba5b46ebe6cc153c28363c20cc54d2bc55fb1ec55cd617b461b61345d55b470a"
+        },
+        {
+          "entry_ghidra_va": "0x293be24",
+          "sql_ghidra_va": "0x1db9644",
+          "length": 992,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE VIEW PlaylistPath AS \nWITH RECURSIVE Heirarchy AS \n( \n\tSELECT id AS child, parentListId AS parent, title AS name, 1 AS depth FROM Playlist \n\tUNION ALL \n\tSELECT child, parentListId AS parent, title AS name, h.depth + 1 AS depth FROM Playlist c \n\tJOIN Heirarchy h ON h.parent = c.id \n\tORDER BY depth DESC \n), \nOrderedList AS \n( \n\tSELECT id , nextListId, 1 AS position \n\tFROM Playlist \n\tWHERE nextListId = 0 \n\tUNION ALL \n\tSELECT c.id , c.nextListId , l.position + 1 \n\tFROM Playlist c \n\tINNER JOIN OrderedList l \n\tON c.nextListId = l.id \n), \nNameConcat AS \n( \n\tSELECT \n\t\tchild AS id, \n\t\tGROUP_CONCAT(name ,';') || ';' AS path \n\tFROM \n\t( \n\t\tSELECT child, name \n\t\tFROM Heirarchy \n\t\tORDER BY depth DESC \n\t) \n\tGROUP BY child \n) \nSELECT \n\tid, \n\tpath, \n\tROW_NUMBER() OVER \n\t( \n\t\tORDER BY \n\t\t(SELECT COUNT(*) FROM (SELECT * FROM Heirarchy WHERE child = id) ) DESC, \n\t\t(SELECT position FROM OrderedList ol WHERE ol.id = c.id) ASC \n\t) AS position \nFROM Playlist c \nLEFT JOIN NameConcat g USING (id)",
+          "sql_sha256": "962abde8b613a9e07f183dd5523228ba0daaaa18a3609ca69cacfb152e977a80"
+        },
+        {
+          "entry_ghidra_va": "0x293be30",
+          "sql_ghidra_va": "0x1db9a28",
+          "length": 345,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": "Historylist",
+          "sql": "CREATE TABLE Historylist ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tsessionId TEXT, \n\ttitle TEXT, \n\tstartTime DATETIME, \n\ttimezone TEXT, \n\toriginDriveName TEXT, \n\toriginDatabaseUuid TEXT, \n\toriginListId INTEGER, \n\tisDeleted BOOLEAN, \n\teditTime DATETIME, \n\tCONSTRAINT C_UNIQUE_ORIGIN_UUID_AND_LIST_ID UNIQUE (originDatabaseUuid, originListId) \n)",
+          "sql_sha256": "54faa721a51ee494416b0c052bb533cc9c0e11f054881b12b8014a9c9fdaa900"
+        },
+        {
+          "entry_ghidra_va": "0x293be3c",
+          "sql_ghidra_va": "0x1db9b84",
+          "length": 254,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Historylist \nAFTER UPDATE ON Historylist \n\tWHEN COALESCE(NEW.title != OLD.title, OLD.title IS NULL AND NEW.title IS NOT NULL) \nBEGIN \n\tUPDATE Historylist SET \n\t\teditTime = strftime('%s','now') \n\tWHERE id = NEW.id; \nEND",
+          "sql_sha256": "e52569c803ebbc7cf609e4cb9575d12ce87f5c4f18f70f465893f23f93b000c2"
+        },
+        {
+          "entry_ghidra_va": "0x293be48",
+          "sql_ghidra_va": "0x1db9c84",
+          "length": 327,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "PlaylistEntity",
+          "sql": "CREATE TABLE PlaylistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tlistId INTEGER, \n\ttrackId INTEGER, \n\tdatabaseUuid TEXT, \n\tnextEntityId INTEGER, \n\tmembershipReference INTEGER, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_LIST UNIQUE (listId, databaseUuid, trackId), \n\tFOREIGN KEY (listId) REFERENCES Playlist (id) ON DELETE CASCADE \n)",
+          "sql_sha256": "9e93a51be6aec8be6040abc6a38810c4ccc12309ddde0ac1c78736d3638b3f7b"
+        },
+        {
+          "entry_ghidra_va": "0x293be54",
+          "sql_ghidra_va": "0x1db9dcc",
+          "length": 93,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_PlaylistEntity_nextEntityId_listId ON PlaylistEntity(nextEntityId, listId)",
+          "sql_sha256": "dd02de440437f678f064ab9b86a607bf8c0e556c62935435fe632479f3f36105"
+        },
+        {
+          "entry_ghidra_va": "0x293be60",
+          "sql_ghidra_va": "0x1db9e2c",
+          "length": 238,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_before_delete_PlaylistEntity \nBEFORE DELETE ON PlaylistEntity \nWHEN OLD.trackId > 0 \nBEGIN \n\tUPDATE PlaylistEntity SET \n\t\tnextEntityId = OLD.nextEntityId \n\tWHERE nextEntityId = OLD.id \n\tAND listId = OLD.listId; \nEND",
+          "sql_sha256": "a52de759882f7b2e11d7b9444817be84647ed22d030e6747a99eff2a1ad9648b"
+        },
+        {
+          "entry_ghidra_va": "0x293be6c",
+          "sql_ghidra_va": "0x1db9f1c",
+          "length": 268,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": "HistorylistEntity",
+          "sql": "CREATE TABLE HistorylistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tlistId INTEGER, \n\ttrackId INTEGER, \n\tstartTime DATETIME, \n\tFOREIGN KEY (listId) REFERENCES Historylist (id) ON DELETE CASCADE, \n\tFOREIGN KEY (trackId) REFERENCES Track (id) ON DELETE CASCADE \n)",
+          "sql_sha256": "0e863bdd23b532f01d1d821b1c433db0d0cdb0bb99d017e047a24eb232b7ba89"
+        },
+        {
+          "entry_ghidra_va": "0x293be78",
+          "sql_ghidra_va": "0x1dba02c",
+          "length": 73,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": null,
+          "sql": "CREATE INDEX index_HistorylistEntity_listId ON HistorylistEntity (listId)",
+          "sql_sha256": "f1d79b01151a108b2de1549720fcfb97678968c3babe51265333124519ab4c16"
+        },
+        {
+          "entry_ghidra_va": "0x293be84",
+          "sql_ghidra_va": "0x1dba078",
+          "length": 75,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": null,
+          "sql": "CREATE INDEX index_HistorylistEntity_trackId ON HistorylistEntity (trackId)",
+          "sql_sha256": "803bfd91e40655cad2383adb3474b93ebf062bb4ffddaf1916e129d61ae39965"
+        },
+        {
+          "entry_ghidra_va": "0x293be90",
+          "sql_ghidra_va": "0x1dba0c4",
+          "length": 181,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": "PreparelistEntity",
+          "sql": "CREATE TABLE PreparelistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\ttrackId INTEGER, \n\ttrackNumber INTEGER, \n\tFOREIGN KEY (trackId) REFERENCES Track (id) ON DELETE CASCADE \n)",
+          "sql_sha256": "da926ac7cbfae731d4e1051b491f8830dfb30f8b5baa6281f9d0a2c0025f801b"
+        },
+        {
+          "entry_ghidra_va": "0x293be9c",
+          "sql_ghidra_va": "0x1dba17c",
+          "length": 75,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE INDEX index_PreparelistEntity_trackId ON PreparelistEntity (trackId)",
+          "sql_sha256": "48a14874f3887acb6734d3ede0acf53bb433b6c742188bc082201e2f5f3e7c12"
+        },
+        {
+          "entry_ghidra_va": "0x293bea8",
+          "sql_ghidra_va": "0x1dba1c8",
+          "length": 368,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": "Smartlist",
+          "sql": "CREATE TABLE Smartlist ( \n\tlistUuid TEXT NOT NULL PRIMARY KEY, \n\ttitle TEXT, \n\tparentPlaylistPath TEXT, \n\tnextPlaylistPath TEXT, \n\tnextListUuid TEXT, \n\trules TEXT, \n\tlastEditTime DATETIME, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_PARENT UNIQUE (title, parentPlaylistPath), \n\tCONSTRAINT C_NEXT_LIST_UNIQUE_FOR_PARENT UNIQUE (parentPlaylistPath, nextPlaylistPath, nextListUuid) \n)",
+          "sql_sha256": "bf0cb4bb020e22dabd54ee67ebcd4f79340a66cceb1cda2317caa1bcbbf23e3d"
+        },
+        {
+          "entry_ghidra_va": "0x293beb4",
+          "sql_ghidra_va": "0x1db78f8",
+          "length": 254,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Information",
+          "sql": "CREATE TABLE Information ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tuuid TEXT, \n\tschemaVersionMajor INTEGER, \n\tschemaVersionMinor INTEGER, \n\tschemaVersionPatch INTEGER, \n\tcurrentPlayedIndiciator INTEGER, \n\tlastRekordBoxLibraryImportReadCounter INTEGER\n)",
+          "sql_sha256": "31cea6cb5bc7990550a7a16da5e3a720a6fd97ea8eda8f46a62c6950f8be5a06"
+        },
+        {
+          "entry_ghidra_va": "0x293bec0",
+          "sql_ghidra_va": "0x1db79f8",
+          "length": 95,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "AlbumArt",
+          "sql": "CREATE TABLE AlbumArt ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\thash TEXT, \n\talbumArt BLOB \n)",
+          "sql_sha256": "f127715e837877720f7032eae40f9faae6ed4c72917108378c596b13391df182"
+        },
+        {
+          "entry_ghidra_va": "0x293becc",
+          "sql_ghidra_va": "0x1db7a58",
+          "length": 51,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_AlbumArt_hash ON AlbumArt (hash)",
+          "sql_sha256": "c5e7bd488ab3b95bb163779205a95f72868cf4e91c8022b0babd7fe1d662ff33"
+        },
+        {
+          "entry_ghidra_va": "0x293bed8",
+          "sql_ghidra_va": "0x1db7a8c",
+          "length": 154,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": "Pack",
+          "sql": "CREATE TABLE Pack ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tpackId TEXT, \n\tchangeLogDatabaseUuid TEXT, \n\tchangeLogId INTEGER, \n\tlastPackTime DATETIME \n)",
+          "sql_sha256": "7a22907f4d9920c7661f820b75eb51c2dd04c3e1ca5ac51443dce79511452ec3"
+        },
+        {
+          "entry_ghidra_va": "0x293bee4",
+          "sql_ghidra_va": "0x1db7b28",
+          "length": 201,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Pack_timestamp \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.lastPackTime IS NULL \nBEGIN \n\tUPDATE Pack SET lastPackTime = strftime('%s') WHERE ROWID = NEW.ROWID; \nEND",
+          "sql_sha256": "9f0e85b8833c573616b0e02a03a74cb503db0e0902178e1351b041f945289084"
+        },
+        {
+          "entry_ghidra_va": "0x293bef0",
+          "sql_ghidra_va": "0x1db7bf4",
+          "length": 184,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Pack_changeLogId \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.changeLogId = 0 \nBEGIN \n\tUPDATE Pack SET changeLogId = 1 WHERE ROWID = NEW.ROWID; \nEND",
+          "sql_sha256": "4e577b28cc1c25947fd0ddd15271e946964f29e706348fd9a029017c68ba9fb3"
+        },
+        {
+          "entry_ghidra_va": "0x293befc",
+          "sql_ghidra_va": "0x1db7cb0",
+          "length": 62,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE VIEW ChangeLog (id, trackId) AS SELECT 0, 0 WHERE FALSE",
+          "sql_sha256": "34d7be9e67802f757b0e53eed51d1e7e93fc690bbe8231ae9dd13465c9e1f03e"
+        },
+        {
+          "entry_ghidra_va": "0x293bf08",
+          "sql_ghidra_va": "0x1dba33c",
+          "length": 1132,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Track",
+          "sql": "CREATE TABLE Track ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tplayOrder INTEGER, \n\tlength INTEGER, \n\tbpm INTEGER, \n\tyear INTEGER, \n\tpath TEXT, \n\tfilename TEXT, \n\tbitrate INTEGER, \n\tbpmAnalyzed REAL, \n\talbumArtId INTEGER, \n\tfileBytes INTEGER, \n\ttitle TEXT, \n\tartist TEXT, \n\talbum TEXT, \n\tgenre TEXT, \n\tcomment TEXT, \n\tlabel TEXT, \n\tcomposer TEXT, \n\tremixer TEXT, \n\tkey INTEGER, \n\trating INTEGER, \n\talbumArt TEXT, \n\ttimeLastPlayed DATETIME, \n\tisPlayed BOOLEAN, \n\tfileType TEXT, \n\tisAnalyzed BOOLEAN, \n\tdateCreated DATETIME, \n\tdateAdded DATETIME, \n\tisAvailable BOOLEAN, \n\tisMetadataOfPackedTrackChanged BOOLEAN, \n\tisPerfomanceDataOfPackedTrackChanged BOOLEAN, \n\tplayedIndicator INTEGER, \n\tisMetadataImported BOOLEAN, \n\tpdbImportKey INTEGER, \n\tstreamingSource TEXT, \n\turi TEXT, \n\tisBeatGridLocked BOOLEAN, \n\toriginDatabaseUuid TEXT, \n\toriginTrackId INTEGER, \n\tstreamingFlags INTEGER, \n\texplicitLyrics BOOLEAN, \n\tlastEditTime DATETIME, \n\tCONSTRAINT C_originDatabaseUuid_originTrackId UNIQUE (originDatabaseUuid, originTrackId), \n\tCONSTRAINT C_path UNIQUE (path), \n\tFOREIGN KEY (albumArtId) REFERENCES AlbumArt (id) ON DELETE RESTRICT \n)",
+          "sql_sha256": "8bcdbcec78772d33d8f28ef1c417f2e015e9c73f163464cab9f8acd987565855"
+        },
+        {
+          "entry_ghidra_va": "0x293bf14",
+          "sql_ghidra_va": "0x1db817c",
+          "length": 53,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_filename ON Track (filename)",
+          "sql_sha256": "a7311a67af19cc844b80e25e9cf14bae130b1d544d8ab510286f97ffd583b177"
+        },
+        {
+          "entry_ghidra_va": "0x293bf20",
+          "sql_ghidra_va": "0x1db81b4",
+          "length": 57,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_albumArtId ON Track (albumArtId)",
+          "sql_sha256": "f6bab9ed51e7433817daa8a13cc45f2b0176d5033079079effc11f202fcbf4a4"
+        },
+        {
+          "entry_ghidra_va": "0x293bf2c",
+          "sql_ghidra_va": "0x1db81f0",
+          "length": 43,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_uri ON Track (uri)",
+          "sql_sha256": "870f220cb9ea6442ef721cb82e0afce85acfd8e6a8cd485dd6ebda4030e8cfff"
+        },
+        {
+          "entry_ghidra_va": "0x293bf38",
+          "sql_ghidra_va": "0x1db821c",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_title ON Track(title)",
+          "sql_sha256": "7e19ed5dd87a326869b9329bdcc7949fa831bb437e6411381231ca1387a6502a"
+        },
+        {
+          "entry_ghidra_va": "0x293bf44",
+          "sql_ghidra_va": "0x1db824c",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_length ON Track(length)",
+          "sql_sha256": "702e4e640bca98fa6944c546c1d1547376e7f9f27a350a9d9bfff2f40ed674a0"
+        },
+        {
+          "entry_ghidra_va": "0x293bf50",
+          "sql_ghidra_va": "0x1db8280",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_rating ON Track(rating)",
+          "sql_sha256": "aed7d13667d1022e4ed447d78a776f1423d663869ca6b5ce98a8ed0ffa6c83da"
+        },
+        {
+          "entry_ghidra_va": "0x293bf5c",
+          "sql_ghidra_va": "0x1db82b4",
+          "length": 44,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_year ON Track(year)",
+          "sql_sha256": "1df707fb77aa4d41a9df45a153a6aff239cf6a366ccf1a16bffbd8eb6719c7d0"
+        },
+        {
+          "entry_ghidra_va": "0x293bf68",
+          "sql_ghidra_va": "0x1db82e4",
+          "length": 54,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_dateAdded ON Track(dateAdded)",
+          "sql_sha256": "2003f13604860adb142cb96afb613b33b8e908303da2a440fb58d5652a9a4f76"
+        },
+        {
+          "entry_ghidra_va": "0x293bf74",
+          "sql_ghidra_va": "0x1db831c",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_genre ON Track(genre)",
+          "sql_sha256": "e94602091717b76cba9912b0755bd84293d1e6dbf7b230249088594604b18d0d"
+        },
+        {
+          "entry_ghidra_va": "0x293bf80",
+          "sql_ghidra_va": "0x1db834c",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_artist ON Track(artist)",
+          "sql_sha256": "41ce7f32c5dab59d8e8dd34e9365e58ef218cf5ca8e71dfa7e882b8a8b011399"
+        },
+        {
+          "entry_ghidra_va": "0x293bf8c",
+          "sql_ghidra_va": "0x1db8380",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_album ON Track(album)",
+          "sql_sha256": "0c29887ec3d183619d3c5d410821adcc1971b1b6a6d5da76694275270012fa0f"
+        },
+        {
+          "entry_ghidra_va": "0x293bf98",
+          "sql_ghidra_va": "0x1db83b0",
+          "length": 42,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_key ON Track(key)",
+          "sql_sha256": "dace240839b31339269a1a74c966fb69e209e1cdac827b6c8313a90b2e1ce6eb"
+        },
+        {
+          "entry_ghidra_va": "0x293bfa4",
+          "sql_ghidra_va": "0x1db83dc",
+          "length": 77,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_bpmAnalyzed ON Track(CAST(bpmAnalyzed + 0.5 AS int))",
+          "sql_sha256": "4083985d17cc037c687ee0ff85160932f295664c49dcad3dd3dc3f32ab0cd087"
+        },
+        {
+          "entry_ghidra_va": "0x293bfb0",
+          "sql_ghidra_va": "0x1db842c",
+          "length": 229,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_check_id \nAFTER INSERT ON Track \n\tWHEN NEW.id <= (SELECT seq FROM sqlite_sequence WHERE name = 'Track') \nBEGIN \n\tSELECT RAISE(ABORT, 'Recycling deleted track id''s are not allowed'); \nEND",
+          "sql_sha256": "3850812f83d7f6e36c6c35d897bf8d80480c4c6a7961a3ad6a92371d5436c274"
+        },
+        {
+          "entry_ghidra_va": "0x293bfbc",
+          "sql_ghidra_va": "0x1db8514",
+          "length": 173,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_check_Id \nBEFORE UPDATE ON Track \n\tWHEN NEW.id <> OLD.id \nBEGIN \n\tSELECT RAISE(ABORT, 'Changing track id''s are not allowed'); \nEND",
+          "sql_sha256": "73b2c23713816cb429d876de0b8d7ffd0d400e56eec71a83b22e14fe8bd514f0"
+        },
+        {
+          "entry_ghidra_va": "0x293bfc8",
+          "sql_ghidra_va": "0x1db85c4",
+          "length": 300,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_fix_origin \nAFTER INSERT ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND",
+          "sql_sha256": "6ffe9b76fb4742fe9b42ca2e81af4596fe17dafc8f9c14682da2bf6823532c7f"
+        },
+        {
+          "entry_ghidra_va": "0x293bfd4",
+          "sql_ghidra_va": "0x1db86f4",
+          "length": 300,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_fix_origin \nAFTER UPDATE ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND",
+          "sql_sha256": "8c55bcf7aa002a3727c14a0fe33749c5993454a94bddf8a8be2882f194471a2e"
+        },
+        {
+          "entry_ghidra_va": "0x293bfe0",
+          "sql_ghidra_va": "0x1dba7ac",
+          "length": 470,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_timestamp \n\tAFTER UPDATE OF\tlength, bpm, year, filename, bitrate, bpmAnalyzed, albumArtId, \n\ttitle, artist, album, genre, comment, label, composer, remixer, key, rating, albumArt, \n\tfileType, isAnalyzed, isBeatgridLocked, trackData, overviewWaveformData, beatData, quickCues, \n\tloops, explicitLyrics, activeOnLoadLoops \n\tON Track \n\tFOR EACH ROW \nBEGIN \n\tUPDATE Track SET lastEditTime = strftime('%s') WHERE ROWID=NEW.ROWID; \nEND",
+          "sql_sha256": "2441d99870f2931c88ae32c43b1a45e22f140d24b6ce58bf793f2b4fa3406eb5"
+        },
+        {
+          "entry_ghidra_va": "0x293bfec",
+          "sql_ghidra_va": "0x1db89b0",
+          "length": 157,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_insert_performance_data \nAFTER INSERT ON Track \nBEGIN \n\tINSERT INTO PerformanceData(trackId) VALUES(NEW.id); \nEND \n",
+          "sql_sha256": "c850e10e24050c37987a5d0f4b74e1b081066a0a26ed89cd0ce247b198a4c472"
+        },
+        {
+          "entry_ghidra_va": "0x293bff8",
+          "sql_ghidra_va": "0x1db8a50",
+          "length": 299,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "PerformanceData",
+          "sql": "CREATE TABLE PerformanceData ( \n\ttrackId INTEGER PRIMARY KEY, \n\ttrackData BLOB, \n\toverviewWaveFormData BLOB, \n\tbeatData BLOB, \n\tquickCues BLOB, \n\tloops BLOB, \n\tthirdPartySourceId INTEGER, \n\tactiveOnLoadLoops INTEGER, \n\tFOREIGN KEY(trackId) REFERENCES Track(id) ON DELETE CASCADE ON UPDATE CASCADE \n)",
+          "sql_sha256": "f05319e4b8f4560d81d41169180ceca290d4c78a34b162ac70418c4143d03142"
+        }
+      ],
+      "window_end_ghidra_va": "0x293c004",
+      "complete": false,
+      "array_boundaries_verified": false,
+      "mask_semantics_verified": false,
+      "stop_reason": "capture boundary or first undecoded tuple, not proof of array end"
+    },
+    {
+      "kind": "overlapping-scan-window",
+      "start_ghidra_va": "0x293bc5c",
+      "entries": [
+        {
+          "entry_ghidra_va": "0x293bc5c",
+          "sql_ghidra_va": "0x1db78f8",
+          "length": 254,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Information",
+          "sql": "CREATE TABLE Information ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tuuid TEXT, \n\tschemaVersionMajor INTEGER, \n\tschemaVersionMinor INTEGER, \n\tschemaVersionPatch INTEGER, \n\tcurrentPlayedIndiciator INTEGER, \n\tlastRekordBoxLibraryImportReadCounter INTEGER\n)",
+          "sql_sha256": "31cea6cb5bc7990550a7a16da5e3a720a6fd97ea8eda8f46a62c6950f8be5a06"
+        },
+        {
+          "entry_ghidra_va": "0x293bc68",
+          "sql_ghidra_va": "0x1db79f8",
+          "length": 95,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "AlbumArt",
+          "sql": "CREATE TABLE AlbumArt ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\thash TEXT, \n\talbumArt BLOB \n)",
+          "sql_sha256": "f127715e837877720f7032eae40f9faae6ed4c72917108378c596b13391df182"
+        },
+        {
+          "entry_ghidra_va": "0x293bc74",
+          "sql_ghidra_va": "0x1db7a58",
+          "length": 51,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_AlbumArt_hash ON AlbumArt (hash)",
+          "sql_sha256": "c5e7bd488ab3b95bb163779205a95f72868cf4e91c8022b0babd7fe1d662ff33"
+        },
+        {
+          "entry_ghidra_va": "0x293bc80",
+          "sql_ghidra_va": "0x1db7a8c",
+          "length": 154,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": "Pack",
+          "sql": "CREATE TABLE Pack ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tpackId TEXT, \n\tchangeLogDatabaseUuid TEXT, \n\tchangeLogId INTEGER, \n\tlastPackTime DATETIME \n)",
+          "sql_sha256": "7a22907f4d9920c7661f820b75eb51c2dd04c3e1ca5ac51443dce79511452ec3"
+        },
+        {
+          "entry_ghidra_va": "0x293bc8c",
+          "sql_ghidra_va": "0x1db7b28",
+          "length": 201,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Pack_timestamp \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.lastPackTime IS NULL \nBEGIN \n\tUPDATE Pack SET lastPackTime = strftime('%s') WHERE ROWID = NEW.ROWID; \nEND",
+          "sql_sha256": "9f0e85b8833c573616b0e02a03a74cb503db0e0902178e1351b041f945289084"
+        },
+        {
+          "entry_ghidra_va": "0x293bc98",
+          "sql_ghidra_va": "0x1db7bf4",
+          "length": 184,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Pack_changeLogId \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.changeLogId = 0 \nBEGIN \n\tUPDATE Pack SET changeLogId = 1 WHERE ROWID = NEW.ROWID; \nEND",
+          "sql_sha256": "4e577b28cc1c25947fd0ddd15271e946964f29e706348fd9a029017c68ba9fb3"
+        },
+        {
+          "entry_ghidra_va": "0x293bca4",
+          "sql_ghidra_va": "0x1db7cb0",
+          "length": 62,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE VIEW ChangeLog (id, trackId) AS SELECT 0, 0 WHERE FALSE",
+          "sql_sha256": "34d7be9e67802f757b0e53eed51d1e7e93fc690bbe8231ae9dd13465c9e1f03e"
+        },
+        {
+          "entry_ghidra_va": "0x293bcb0",
+          "sql_ghidra_va": "0x1dba33c",
+          "length": 1132,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Track",
+          "sql": "CREATE TABLE Track ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tplayOrder INTEGER, \n\tlength INTEGER, \n\tbpm INTEGER, \n\tyear INTEGER, \n\tpath TEXT, \n\tfilename TEXT, \n\tbitrate INTEGER, \n\tbpmAnalyzed REAL, \n\talbumArtId INTEGER, \n\tfileBytes INTEGER, \n\ttitle TEXT, \n\tartist TEXT, \n\talbum TEXT, \n\tgenre TEXT, \n\tcomment TEXT, \n\tlabel TEXT, \n\tcomposer TEXT, \n\tremixer TEXT, \n\tkey INTEGER, \n\trating INTEGER, \n\talbumArt TEXT, \n\ttimeLastPlayed DATETIME, \n\tisPlayed BOOLEAN, \n\tfileType TEXT, \n\tisAnalyzed BOOLEAN, \n\tdateCreated DATETIME, \n\tdateAdded DATETIME, \n\tisAvailable BOOLEAN, \n\tisMetadataOfPackedTrackChanged BOOLEAN, \n\tisPerfomanceDataOfPackedTrackChanged BOOLEAN, \n\tplayedIndicator INTEGER, \n\tisMetadataImported BOOLEAN, \n\tpdbImportKey INTEGER, \n\tstreamingSource TEXT, \n\turi TEXT, \n\tisBeatGridLocked BOOLEAN, \n\toriginDatabaseUuid TEXT, \n\toriginTrackId INTEGER, \n\tstreamingFlags INTEGER, \n\texplicitLyrics BOOLEAN, \n\tlastEditTime DATETIME, \n\tCONSTRAINT C_originDatabaseUuid_originTrackId UNIQUE (originDatabaseUuid, originTrackId), \n\tCONSTRAINT C_path UNIQUE (path), \n\tFOREIGN KEY (albumArtId) REFERENCES AlbumArt (id) ON DELETE RESTRICT \n)",
+          "sql_sha256": "8bcdbcec78772d33d8f28ef1c417f2e015e9c73f163464cab9f8acd987565855"
+        },
+        {
+          "entry_ghidra_va": "0x293bcbc",
+          "sql_ghidra_va": "0x1db817c",
+          "length": 53,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_filename ON Track (filename)",
+          "sql_sha256": "a7311a67af19cc844b80e25e9cf14bae130b1d544d8ab510286f97ffd583b177"
+        },
+        {
+          "entry_ghidra_va": "0x293bcc8",
+          "sql_ghidra_va": "0x1db81b4",
+          "length": 57,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_albumArtId ON Track (albumArtId)",
+          "sql_sha256": "f6bab9ed51e7433817daa8a13cc45f2b0176d5033079079effc11f202fcbf4a4"
+        },
+        {
+          "entry_ghidra_va": "0x293bcd4",
+          "sql_ghidra_va": "0x1db81f0",
+          "length": 43,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_uri ON Track (uri)",
+          "sql_sha256": "870f220cb9ea6442ef721cb82e0afce85acfd8e6a8cd485dd6ebda4030e8cfff"
+        },
+        {
+          "entry_ghidra_va": "0x293bce0",
+          "sql_ghidra_va": "0x1db821c",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_title ON Track(title)",
+          "sql_sha256": "7e19ed5dd87a326869b9329bdcc7949fa831bb437e6411381231ca1387a6502a"
+        },
+        {
+          "entry_ghidra_va": "0x293bcec",
+          "sql_ghidra_va": "0x1db824c",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_length ON Track(length)",
+          "sql_sha256": "702e4e640bca98fa6944c546c1d1547376e7f9f27a350a9d9bfff2f40ed674a0"
+        },
+        {
+          "entry_ghidra_va": "0x293bcf8",
+          "sql_ghidra_va": "0x1db8280",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_rating ON Track(rating)",
+          "sql_sha256": "aed7d13667d1022e4ed447d78a776f1423d663869ca6b5ce98a8ed0ffa6c83da"
+        },
+        {
+          "entry_ghidra_va": "0x293bd04",
+          "sql_ghidra_va": "0x1db82b4",
+          "length": 44,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_year ON Track(year)",
+          "sql_sha256": "1df707fb77aa4d41a9df45a153a6aff239cf6a366ccf1a16bffbd8eb6719c7d0"
+        },
+        {
+          "entry_ghidra_va": "0x293bd10",
+          "sql_ghidra_va": "0x1db82e4",
+          "length": 54,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_dateAdded ON Track(dateAdded)",
+          "sql_sha256": "2003f13604860adb142cb96afb613b33b8e908303da2a440fb58d5652a9a4f76"
+        },
+        {
+          "entry_ghidra_va": "0x293bd1c",
+          "sql_ghidra_va": "0x1db831c",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_genre ON Track(genre)",
+          "sql_sha256": "e94602091717b76cba9912b0755bd84293d1e6dbf7b230249088594604b18d0d"
+        },
+        {
+          "entry_ghidra_va": "0x293bd28",
+          "sql_ghidra_va": "0x1db834c",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_artist ON Track(artist)",
+          "sql_sha256": "41ce7f32c5dab59d8e8dd34e9365e58ef218cf5ca8e71dfa7e882b8a8b011399"
+        },
+        {
+          "entry_ghidra_va": "0x293bd34",
+          "sql_ghidra_va": "0x1db8380",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_album ON Track(album)",
+          "sql_sha256": "0c29887ec3d183619d3c5d410821adcc1971b1b6a6d5da76694275270012fa0f"
+        },
+        {
+          "entry_ghidra_va": "0x293bd40",
+          "sql_ghidra_va": "0x1db83b0",
+          "length": 42,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_key ON Track(key)",
+          "sql_sha256": "dace240839b31339269a1a74c966fb69e209e1cdac827b6c8313a90b2e1ce6eb"
+        },
+        {
+          "entry_ghidra_va": "0x293bd4c",
+          "sql_ghidra_va": "0x1db83dc",
+          "length": 77,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_bpmAnalyzed ON Track(CAST(bpmAnalyzed + 0.5 AS int))",
+          "sql_sha256": "4083985d17cc037c687ee0ff85160932f295664c49dcad3dd3dc3f32ab0cd087"
+        },
+        {
+          "entry_ghidra_va": "0x293bd58",
+          "sql_ghidra_va": "0x1db842c",
+          "length": 229,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_check_id \nAFTER INSERT ON Track \n\tWHEN NEW.id <= (SELECT seq FROM sqlite_sequence WHERE name = 'Track') \nBEGIN \n\tSELECT RAISE(ABORT, 'Recycling deleted track id''s are not allowed'); \nEND",
+          "sql_sha256": "3850812f83d7f6e36c6c35d897bf8d80480c4c6a7961a3ad6a92371d5436c274"
+        },
+        {
+          "entry_ghidra_va": "0x293bd64",
+          "sql_ghidra_va": "0x1db8514",
+          "length": 173,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_check_Id \nBEFORE UPDATE ON Track \n\tWHEN NEW.id <> OLD.id \nBEGIN \n\tSELECT RAISE(ABORT, 'Changing track id''s are not allowed'); \nEND",
+          "sql_sha256": "73b2c23713816cb429d876de0b8d7ffd0d400e56eec71a83b22e14fe8bd514f0"
+        },
+        {
+          "entry_ghidra_va": "0x293bd70",
+          "sql_ghidra_va": "0x1db85c4",
+          "length": 300,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_fix_origin \nAFTER INSERT ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND",
+          "sql_sha256": "6ffe9b76fb4742fe9b42ca2e81af4596fe17dafc8f9c14682da2bf6823532c7f"
+        },
+        {
+          "entry_ghidra_va": "0x293bd7c",
+          "sql_ghidra_va": "0x1db86f4",
+          "length": 300,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_fix_origin \nAFTER UPDATE ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND",
+          "sql_sha256": "8c55bcf7aa002a3727c14a0fe33749c5993454a94bddf8a8be2882f194471a2e"
+        },
+        {
+          "entry_ghidra_va": "0x293bd88",
+          "sql_ghidra_va": "0x1db8824",
+          "length": 393,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_only_Track_timestamp \n\tAFTER UPDATE OF\tlength, bpm, year, filename, bitrate, bpmAnalyzed, albumArtId, \n\ttitle, artist, album, genre, comment, label, composer, remixer, key, rating, albumArt, \n\tfileType, isAnalyzed, isBeatgridLocked, explicitLyrics \n\tON Track \n\tFOR EACH ROW \nBEGIN \n\tUPDATE Track SET lastEditTime = strftime('%s') WHERE ROWID=NEW.ROWID; \nEND",
+          "sql_sha256": "b842095439e5fd468b5c80cedc4958544304e46a64de86c3b6a6c6b2526996d4"
+        },
+        {
+          "entry_ghidra_va": "0x293bd94",
+          "sql_ghidra_va": "0x1db89b0",
+          "length": 157,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_insert_performance_data \nAFTER INSERT ON Track \nBEGIN \n\tINSERT INTO PerformanceData(trackId) VALUES(NEW.id); \nEND \n",
+          "sql_sha256": "c850e10e24050c37987a5d0f4b74e1b081066a0a26ed89cd0ce247b198a4c472"
+        },
+        {
+          "entry_ghidra_va": "0x293bda0",
+          "sql_ghidra_va": "0x1db8a50",
+          "length": 299,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "PerformanceData",
+          "sql": "CREATE TABLE PerformanceData ( \n\ttrackId INTEGER PRIMARY KEY, \n\ttrackData BLOB, \n\toverviewWaveFormData BLOB, \n\tbeatData BLOB, \n\tquickCues BLOB, \n\tloops BLOB, \n\tthirdPartySourceId INTEGER, \n\tactiveOnLoadLoops INTEGER, \n\tFOREIGN KEY(trackId) REFERENCES Track(id) ON DELETE CASCADE ON UPDATE CASCADE \n)",
+          "sql_sha256": "f05319e4b8f4560d81d41169180ceca290d4c78a34b162ac70418c4143d03142"
+        },
+        {
+          "entry_ghidra_va": "0x293bdac",
+          "sql_ghidra_va": "0x1db8b7c",
+          "length": 301,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_PerformanceData_after_update_Track_timestamp \n\tAFTER UPDATE OF trackData, isAnalyzed, overviewWaveFormData, beatData, quickCues, loops, activeOnLoadLoops \n\tON PerformanceData \n\tFOR EACH ROW \nBEGIN \n\tUPDATE Track \n\tSET lastEditTime = strftime('%s') \n\tWHERE id = NEW.trackId; \nEND",
+          "sql_sha256": "46b127506fa4745476a5a3e0e82cb9fe47c9af947a4ae4b3f9a749d7152d8887"
+        },
+        {
+          "entry_ghidra_va": "0x293bdb8",
+          "sql_ghidra_va": "0x1db8cac",
+          "length": 354,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Playlist",
+          "sql": "CREATE TABLE Playlist ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\ttitle TEXT, \n\tparentListId INTEGER, \n\tisPersisted BOOLEAN, \n\tnextListId INTEGER, \n\tlastEditTime DATETIME, \n\tisExplicitlyExported BOOLEAN, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_PARENT UNIQUE (title, parentListId), \n\tCONSTRAINT C_NEXT_LIST_ID_UNIQUE_FOR_PARENT UNIQUE (parentListId, nextListId) \n)",
+          "sql_sha256": "d6b2089e9e2c34c0debe3d6850b69afaffca9d6de4e261de751e02e198ed96bc"
+        },
+        {
+          "entry_ghidra_va": "0x293bdc4",
+          "sql_ghidra_va": "0x1db8e10",
+          "length": 224,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_before_insert_List \nBEFORE INSERT ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = -(1 + nextListId) \n\tWHERE nextListId = NEW.nextListId \n\tAND parentListId = NEW.parentListId; \nEND",
+          "sql_sha256": "1c46d837c3b31fc58d29ef7156930873b75c8d117a241b849ba90d118bdd1757"
+        },
+        {
+          "entry_ghidra_va": "0x293bdd0",
+          "sql_ghidra_va": "0x1db8ef4",
+          "length": 218,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_List \nAFTER INSERT ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = NEW.id \n\tWHERE nextListId = -(1 + NEW.nextListId) \n\tAND parentListId = NEW.parentListId; \nEND",
+          "sql_sha256": "1a475f093eb5d88ee20407cfc30d3fd70f3586879c24418edc4bfb282971c099"
+        },
+        {
+          "entry_ghidra_va": "0x293bddc",
+          "sql_ghidra_va": "0x1db8fd0",
+          "length": 227,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_delete_List \nAFTER DELETE ON Playlist \nFOR EACH ROW BEGIN \n\tUPDATE Playlist SET \n\t\tnextListId = OLD.nextListId \n\tWHERE nextListId = OLD.id; \n\tDELETE FROM Playlist \n\tWHERE parentListId = OLD.id; \nEND",
+          "sql_sha256": "71176df6949f8c7832a991961753a7a64ee22fa2d59d28c12dfcd168e57e4821"
+        },
+        {
+          "entry_ghidra_va": "0x293bde8",
+          "sql_ghidra_va": "0x1db90b4",
+          "length": 331,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_isPersistParent \nAFTER UPDATE ON Playlist \n\tWHEN (old.isPersisted = 0 \n\tAND new.isPersisted = 1) \n\tOR (old.parentListId != new.parentListId \n\tAND new.isPersisted = 1) \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 1 \n\tWHERE id IN (SELECT parentListId FROM PlaylistAllParent WHERE id=new.id); \nEND",
+          "sql_sha256": "f3a446ce2fd25955ff716e1f8e3e803573da6631029c714e1dd50b1b7bd23f9a"
+        },
+        {
+          "entry_ghidra_va": "0x293bdf4",
+          "sql_ghidra_va": "0x1db9200",
+          "length": 259,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_isPersistChild \nAFTER UPDATE ON Playlist \n\tWHEN old.isPersisted = 1 \n\tAND new.isPersisted = 0 \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 0 \n\tWHERE id IN (SELECT childListId FROM PlaylistAllChildren WHERE id=new.id); \nEND",
+          "sql_sha256": "b70b9acf6049b43c95a65976117a1ea3d831750a08afe29d4a2ec167edbd6acb"
+        },
+        {
+          "entry_ghidra_va": "0x293be00",
+          "sql_ghidra_va": "0x1db9304",
+          "length": 227,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_isPersist \nAFTER INSERT ON Playlist \n\tWHEN new.isPersisted = 1 \nBEGIN \n\tUPDATE Playlist SET \n\t\tisPersisted = 1 \n\tWHERE id IN (SELECT parentListId FROM PlaylistAllParent WHERE id=new.id); \nEND",
+          "sql_sha256": "e708e5807054811e7ec083bf188e479b66fcc9cf0b3cbe1a75b6d14e34a418c3"
+        },
+        {
+          "entry_ghidra_va": "0x293be0c",
+          "sql_ghidra_va": "0x1db93e8",
+          "length": 288,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE VIEW PlaylistAllParent AS \nWITH FindAllParent AS ( \n\tSELECT id, parentListId FROM Playlist \n\tUNION ALL \n\tSELECT recursiveCTE.id, Plist.parentListId FROM Playlist Plist \n\tINNER JOIN FindAllParent recursiveCTE \n\tON recursiveCTE.parentListId = Plist.id \n) \nSELECT * FROM FindAllParent",
+          "sql_sha256": "87680aaefc25885a2c6f9cc5a766e341fdb39b686ecf840824568b49930627cc"
+        },
+        {
+          "entry_ghidra_va": "0x293be18",
+          "sql_ghidra_va": "0x1db950c",
+          "length": 310,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE VIEW PlaylistAllChildren AS \nWITH FindAllChild AS ( \nSELECT id, id as childListId FROM Playlist \nUNION ALL \nSELECT recursiveCTE.id, Plist.id FROM Playlist Plist \nINNER JOIN FindAllChild recursiveCTE \nON recursiveCTE.childListId = Plist.parentListId \n) \nSELECT * FROM FindAllChild WHERE id <> childListId",
+          "sql_sha256": "ba5b46ebe6cc153c28363c20cc54d2bc55fb1ec55cd617b461b61345d55b470a"
+        },
+        {
+          "entry_ghidra_va": "0x293be24",
+          "sql_ghidra_va": "0x1db9644",
+          "length": 992,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE VIEW PlaylistPath AS \nWITH RECURSIVE Heirarchy AS \n( \n\tSELECT id AS child, parentListId AS parent, title AS name, 1 AS depth FROM Playlist \n\tUNION ALL \n\tSELECT child, parentListId AS parent, title AS name, h.depth + 1 AS depth FROM Playlist c \n\tJOIN Heirarchy h ON h.parent = c.id \n\tORDER BY depth DESC \n), \nOrderedList AS \n( \n\tSELECT id , nextListId, 1 AS position \n\tFROM Playlist \n\tWHERE nextListId = 0 \n\tUNION ALL \n\tSELECT c.id , c.nextListId , l.position + 1 \n\tFROM Playlist c \n\tINNER JOIN OrderedList l \n\tON c.nextListId = l.id \n), \nNameConcat AS \n( \n\tSELECT \n\t\tchild AS id, \n\t\tGROUP_CONCAT(name ,';') || ';' AS path \n\tFROM \n\t( \n\t\tSELECT child, name \n\t\tFROM Heirarchy \n\t\tORDER BY depth DESC \n\t) \n\tGROUP BY child \n) \nSELECT \n\tid, \n\tpath, \n\tROW_NUMBER() OVER \n\t( \n\t\tORDER BY \n\t\t(SELECT COUNT(*) FROM (SELECT * FROM Heirarchy WHERE child = id) ) DESC, \n\t\t(SELECT position FROM OrderedList ol WHERE ol.id = c.id) ASC \n\t) AS position \nFROM Playlist c \nLEFT JOIN NameConcat g USING (id)",
+          "sql_sha256": "962abde8b613a9e07f183dd5523228ba0daaaa18a3609ca69cacfb152e977a80"
+        },
+        {
+          "entry_ghidra_va": "0x293be30",
+          "sql_ghidra_va": "0x1db9a28",
+          "length": 345,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": "Historylist",
+          "sql": "CREATE TABLE Historylist ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tsessionId TEXT, \n\ttitle TEXT, \n\tstartTime DATETIME, \n\ttimezone TEXT, \n\toriginDriveName TEXT, \n\toriginDatabaseUuid TEXT, \n\toriginListId INTEGER, \n\tisDeleted BOOLEAN, \n\teditTime DATETIME, \n\tCONSTRAINT C_UNIQUE_ORIGIN_UUID_AND_LIST_ID UNIQUE (originDatabaseUuid, originListId) \n)",
+          "sql_sha256": "54faa721a51ee494416b0c052bb533cc9c0e11f054881b12b8014a9c9fdaa900"
+        },
+        {
+          "entry_ghidra_va": "0x293be3c",
+          "sql_ghidra_va": "0x1db9b84",
+          "length": 254,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Historylist \nAFTER UPDATE ON Historylist \n\tWHEN COALESCE(NEW.title != OLD.title, OLD.title IS NULL AND NEW.title IS NOT NULL) \nBEGIN \n\tUPDATE Historylist SET \n\t\teditTime = strftime('%s','now') \n\tWHERE id = NEW.id; \nEND",
+          "sql_sha256": "e52569c803ebbc7cf609e4cb9575d12ce87f5c4f18f70f465893f23f93b000c2"
+        },
+        {
+          "entry_ghidra_va": "0x293be48",
+          "sql_ghidra_va": "0x1db9c84",
+          "length": 327,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "PlaylistEntity",
+          "sql": "CREATE TABLE PlaylistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tlistId INTEGER, \n\ttrackId INTEGER, \n\tdatabaseUuid TEXT, \n\tnextEntityId INTEGER, \n\tmembershipReference INTEGER, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_LIST UNIQUE (listId, databaseUuid, trackId), \n\tFOREIGN KEY (listId) REFERENCES Playlist (id) ON DELETE CASCADE \n)",
+          "sql_sha256": "9e93a51be6aec8be6040abc6a38810c4ccc12309ddde0ac1c78736d3638b3f7b"
+        },
+        {
+          "entry_ghidra_va": "0x293be54",
+          "sql_ghidra_va": "0x1db9dcc",
+          "length": 93,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_PlaylistEntity_nextEntityId_listId ON PlaylistEntity(nextEntityId, listId)",
+          "sql_sha256": "dd02de440437f678f064ab9b86a607bf8c0e556c62935435fe632479f3f36105"
+        },
+        {
+          "entry_ghidra_va": "0x293be60",
+          "sql_ghidra_va": "0x1db9e2c",
+          "length": 238,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_before_delete_PlaylistEntity \nBEFORE DELETE ON PlaylistEntity \nWHEN OLD.trackId > 0 \nBEGIN \n\tUPDATE PlaylistEntity SET \n\t\tnextEntityId = OLD.nextEntityId \n\tWHERE nextEntityId = OLD.id \n\tAND listId = OLD.listId; \nEND",
+          "sql_sha256": "a52de759882f7b2e11d7b9444817be84647ed22d030e6747a99eff2a1ad9648b"
+        },
+        {
+          "entry_ghidra_va": "0x293be6c",
+          "sql_ghidra_va": "0x1db9f1c",
+          "length": 268,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": "HistorylistEntity",
+          "sql": "CREATE TABLE HistorylistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tlistId INTEGER, \n\ttrackId INTEGER, \n\tstartTime DATETIME, \n\tFOREIGN KEY (listId) REFERENCES Historylist (id) ON DELETE CASCADE, \n\tFOREIGN KEY (trackId) REFERENCES Track (id) ON DELETE CASCADE \n)",
+          "sql_sha256": "0e863bdd23b532f01d1d821b1c433db0d0cdb0bb99d017e047a24eb232b7ba89"
+        },
+        {
+          "entry_ghidra_va": "0x293be78",
+          "sql_ghidra_va": "0x1dba02c",
+          "length": 73,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": null,
+          "sql": "CREATE INDEX index_HistorylistEntity_listId ON HistorylistEntity (listId)",
+          "sql_sha256": "f1d79b01151a108b2de1549720fcfb97678968c3babe51265333124519ab4c16"
+        },
+        {
+          "entry_ghidra_va": "0x293be84",
+          "sql_ghidra_va": "0x1dba078",
+          "length": 75,
+          "numeric_mask": 256,
+          "numeric_mask_hex": "0x100",
+          "table_name": null,
+          "sql": "CREATE INDEX index_HistorylistEntity_trackId ON HistorylistEntity (trackId)",
+          "sql_sha256": "803bfd91e40655cad2383adb3474b93ebf062bb4ffddaf1916e129d61ae39965"
+        },
+        {
+          "entry_ghidra_va": "0x293be90",
+          "sql_ghidra_va": "0x1dba0c4",
+          "length": 181,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": "PreparelistEntity",
+          "sql": "CREATE TABLE PreparelistEntity ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\ttrackId INTEGER, \n\ttrackNumber INTEGER, \n\tFOREIGN KEY (trackId) REFERENCES Track (id) ON DELETE CASCADE \n)",
+          "sql_sha256": "da926ac7cbfae731d4e1051b491f8830dfb30f8b5baa6281f9d0a2c0025f801b"
+        },
+        {
+          "entry_ghidra_va": "0x293be9c",
+          "sql_ghidra_va": "0x1dba17c",
+          "length": 75,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE INDEX index_PreparelistEntity_trackId ON PreparelistEntity (trackId)",
+          "sql_sha256": "48a14874f3887acb6734d3ede0acf53bb433b6c742188bc082201e2f5f3e7c12"
+        },
+        {
+          "entry_ghidra_va": "0x293bea8",
+          "sql_ghidra_va": "0x1dba1c8",
+          "length": 368,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": "Smartlist",
+          "sql": "CREATE TABLE Smartlist ( \n\tlistUuid TEXT NOT NULL PRIMARY KEY, \n\ttitle TEXT, \n\tparentPlaylistPath TEXT, \n\tnextPlaylistPath TEXT, \n\tnextListUuid TEXT, \n\trules TEXT, \n\tlastEditTime DATETIME, \n\tCONSTRAINT C_NAME_UNIQUE_FOR_PARENT UNIQUE (title, parentPlaylistPath), \n\tCONSTRAINT C_NEXT_LIST_UNIQUE_FOR_PARENT UNIQUE (parentPlaylistPath, nextPlaylistPath, nextListUuid) \n)",
+          "sql_sha256": "bf0cb4bb020e22dabd54ee67ebcd4f79340a66cceb1cda2317caa1bcbbf23e3d"
+        },
+        {
+          "entry_ghidra_va": "0x293beb4",
+          "sql_ghidra_va": "0x1db78f8",
+          "length": 254,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Information",
+          "sql": "CREATE TABLE Information ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tuuid TEXT, \n\tschemaVersionMajor INTEGER, \n\tschemaVersionMinor INTEGER, \n\tschemaVersionPatch INTEGER, \n\tcurrentPlayedIndiciator INTEGER, \n\tlastRekordBoxLibraryImportReadCounter INTEGER\n)",
+          "sql_sha256": "31cea6cb5bc7990550a7a16da5e3a720a6fd97ea8eda8f46a62c6950f8be5a06"
+        },
+        {
+          "entry_ghidra_va": "0x293bec0",
+          "sql_ghidra_va": "0x1db79f8",
+          "length": 95,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "AlbumArt",
+          "sql": "CREATE TABLE AlbumArt ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\thash TEXT, \n\talbumArt BLOB \n)",
+          "sql_sha256": "f127715e837877720f7032eae40f9faae6ed4c72917108378c596b13391df182"
+        },
+        {
+          "entry_ghidra_va": "0x293becc",
+          "sql_ghidra_va": "0x1db7a58",
+          "length": 51,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_AlbumArt_hash ON AlbumArt (hash)",
+          "sql_sha256": "c5e7bd488ab3b95bb163779205a95f72868cf4e91c8022b0babd7fe1d662ff33"
+        },
+        {
+          "entry_ghidra_va": "0x293bed8",
+          "sql_ghidra_va": "0x1db7a8c",
+          "length": 154,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": "Pack",
+          "sql": "CREATE TABLE Pack ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tpackId TEXT, \n\tchangeLogDatabaseUuid TEXT, \n\tchangeLogId INTEGER, \n\tlastPackTime DATETIME \n)",
+          "sql_sha256": "7a22907f4d9920c7661f820b75eb51c2dd04c3e1ca5ac51443dce79511452ec3"
+        },
+        {
+          "entry_ghidra_va": "0x293bee4",
+          "sql_ghidra_va": "0x1db7b28",
+          "length": 201,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Pack_timestamp \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.lastPackTime IS NULL \nBEGIN \n\tUPDATE Pack SET lastPackTime = strftime('%s') WHERE ROWID = NEW.ROWID; \nEND",
+          "sql_sha256": "9f0e85b8833c573616b0e02a03a74cb503db0e0902178e1351b041f945289084"
+        },
+        {
+          "entry_ghidra_va": "0x293bef0",
+          "sql_ghidra_va": "0x1db7bf4",
+          "length": 184,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Pack_changeLogId \nAFTER INSERT ON Pack \nFOR EACH ROW WHEN NEW.changeLogId = 0 \nBEGIN \n\tUPDATE Pack SET changeLogId = 1 WHERE ROWID = NEW.ROWID; \nEND",
+          "sql_sha256": "4e577b28cc1c25947fd0ddd15271e946964f29e706348fd9a029017c68ba9fb3"
+        },
+        {
+          "entry_ghidra_va": "0x293befc",
+          "sql_ghidra_va": "0x1db7cb0",
+          "length": 62,
+          "numeric_mask": 1,
+          "numeric_mask_hex": "0x1",
+          "table_name": null,
+          "sql": "CREATE VIEW ChangeLog (id, trackId) AS SELECT 0, 0 WHERE FALSE",
+          "sql_sha256": "34d7be9e67802f757b0e53eed51d1e7e93fc690bbe8231ae9dd13465c9e1f03e"
+        },
+        {
+          "entry_ghidra_va": "0x293bf08",
+          "sql_ghidra_va": "0x1dba33c",
+          "length": 1132,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "Track",
+          "sql": "CREATE TABLE Track ( \n\tid INTEGER PRIMARY KEY AUTOINCREMENT, \n\tplayOrder INTEGER, \n\tlength INTEGER, \n\tbpm INTEGER, \n\tyear INTEGER, \n\tpath TEXT, \n\tfilename TEXT, \n\tbitrate INTEGER, \n\tbpmAnalyzed REAL, \n\talbumArtId INTEGER, \n\tfileBytes INTEGER, \n\ttitle TEXT, \n\tartist TEXT, \n\talbum TEXT, \n\tgenre TEXT, \n\tcomment TEXT, \n\tlabel TEXT, \n\tcomposer TEXT, \n\tremixer TEXT, \n\tkey INTEGER, \n\trating INTEGER, \n\talbumArt TEXT, \n\ttimeLastPlayed DATETIME, \n\tisPlayed BOOLEAN, \n\tfileType TEXT, \n\tisAnalyzed BOOLEAN, \n\tdateCreated DATETIME, \n\tdateAdded DATETIME, \n\tisAvailable BOOLEAN, \n\tisMetadataOfPackedTrackChanged BOOLEAN, \n\tisPerfomanceDataOfPackedTrackChanged BOOLEAN, \n\tplayedIndicator INTEGER, \n\tisMetadataImported BOOLEAN, \n\tpdbImportKey INTEGER, \n\tstreamingSource TEXT, \n\turi TEXT, \n\tisBeatGridLocked BOOLEAN, \n\toriginDatabaseUuid TEXT, \n\toriginTrackId INTEGER, \n\tstreamingFlags INTEGER, \n\texplicitLyrics BOOLEAN, \n\tlastEditTime DATETIME, \n\tCONSTRAINT C_originDatabaseUuid_originTrackId UNIQUE (originDatabaseUuid, originTrackId), \n\tCONSTRAINT C_path UNIQUE (path), \n\tFOREIGN KEY (albumArtId) REFERENCES AlbumArt (id) ON DELETE RESTRICT \n)",
+          "sql_sha256": "8bcdbcec78772d33d8f28ef1c417f2e015e9c73f163464cab9f8acd987565855"
+        },
+        {
+          "entry_ghidra_va": "0x293bf14",
+          "sql_ghidra_va": "0x1db817c",
+          "length": 53,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_filename ON Track (filename)",
+          "sql_sha256": "a7311a67af19cc844b80e25e9cf14bae130b1d544d8ab510286f97ffd583b177"
+        },
+        {
+          "entry_ghidra_va": "0x293bf20",
+          "sql_ghidra_va": "0x1db81b4",
+          "length": 57,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_albumArtId ON Track (albumArtId)",
+          "sql_sha256": "f6bab9ed51e7433817daa8a13cc45f2b0176d5033079079effc11f202fcbf4a4"
+        },
+        {
+          "entry_ghidra_va": "0x293bf2c",
+          "sql_ghidra_va": "0x1db81f0",
+          "length": 43,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_uri ON Track (uri)",
+          "sql_sha256": "870f220cb9ea6442ef721cb82e0afce85acfd8e6a8cd485dd6ebda4030e8cfff"
+        },
+        {
+          "entry_ghidra_va": "0x293bf38",
+          "sql_ghidra_va": "0x1db821c",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_title ON Track(title)",
+          "sql_sha256": "7e19ed5dd87a326869b9329bdcc7949fa831bb437e6411381231ca1387a6502a"
+        },
+        {
+          "entry_ghidra_va": "0x293bf44",
+          "sql_ghidra_va": "0x1db824c",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_length ON Track(length)",
+          "sql_sha256": "702e4e640bca98fa6944c546c1d1547376e7f9f27a350a9d9bfff2f40ed674a0"
+        },
+        {
+          "entry_ghidra_va": "0x293bf50",
+          "sql_ghidra_va": "0x1db8280",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_rating ON Track(rating)",
+          "sql_sha256": "aed7d13667d1022e4ed447d78a776f1423d663869ca6b5ce98a8ed0ffa6c83da"
+        },
+        {
+          "entry_ghidra_va": "0x293bf5c",
+          "sql_ghidra_va": "0x1db82b4",
+          "length": 44,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_year ON Track(year)",
+          "sql_sha256": "1df707fb77aa4d41a9df45a153a6aff239cf6a366ccf1a16bffbd8eb6719c7d0"
+        },
+        {
+          "entry_ghidra_va": "0x293bf68",
+          "sql_ghidra_va": "0x1db82e4",
+          "length": 54,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_dateAdded ON Track(dateAdded)",
+          "sql_sha256": "2003f13604860adb142cb96afb613b33b8e908303da2a440fb58d5652a9a4f76"
+        },
+        {
+          "entry_ghidra_va": "0x293bf74",
+          "sql_ghidra_va": "0x1db831c",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_genre ON Track(genre)",
+          "sql_sha256": "e94602091717b76cba9912b0755bd84293d1e6dbf7b230249088594604b18d0d"
+        },
+        {
+          "entry_ghidra_va": "0x293bf80",
+          "sql_ghidra_va": "0x1db834c",
+          "length": 48,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_artist ON Track(artist)",
+          "sql_sha256": "41ce7f32c5dab59d8e8dd34e9365e58ef218cf5ca8e71dfa7e882b8a8b011399"
+        },
+        {
+          "entry_ghidra_va": "0x293bf8c",
+          "sql_ghidra_va": "0x1db8380",
+          "length": 46,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_album ON Track(album)",
+          "sql_sha256": "0c29887ec3d183619d3c5d410821adcc1971b1b6a6d5da76694275270012fa0f"
+        },
+        {
+          "entry_ghidra_va": "0x293bf98",
+          "sql_ghidra_va": "0x1db83b0",
+          "length": 42,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_key ON Track(key)",
+          "sql_sha256": "dace240839b31339269a1a74c966fb69e209e1cdac827b6c8313a90b2e1ce6eb"
+        },
+        {
+          "entry_ghidra_va": "0x293bfa4",
+          "sql_ghidra_va": "0x1db83dc",
+          "length": 77,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE INDEX index_Track_bpmAnalyzed ON Track(CAST(bpmAnalyzed + 0.5 AS int))",
+          "sql_sha256": "4083985d17cc037c687ee0ff85160932f295664c49dcad3dd3dc3f32ab0cd087"
+        },
+        {
+          "entry_ghidra_va": "0x293bfb0",
+          "sql_ghidra_va": "0x1db842c",
+          "length": 229,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_check_id \nAFTER INSERT ON Track \n\tWHEN NEW.id <= (SELECT seq FROM sqlite_sequence WHERE name = 'Track') \nBEGIN \n\tSELECT RAISE(ABORT, 'Recycling deleted track id''s are not allowed'); \nEND",
+          "sql_sha256": "3850812f83d7f6e36c6c35d897bf8d80480c4c6a7961a3ad6a92371d5436c274"
+        },
+        {
+          "entry_ghidra_va": "0x293bfbc",
+          "sql_ghidra_va": "0x1db8514",
+          "length": 173,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_check_Id \nBEFORE UPDATE ON Track \n\tWHEN NEW.id <> OLD.id \nBEGIN \n\tSELECT RAISE(ABORT, 'Changing track id''s are not allowed'); \nEND",
+          "sql_sha256": "73b2c23713816cb429d876de0b8d7ffd0d400e56eec71a83b22e14fe8bd514f0"
+        },
+        {
+          "entry_ghidra_va": "0x293bfc8",
+          "sql_ghidra_va": "0x1db85c4",
+          "length": 300,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_fix_origin \nAFTER INSERT ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND",
+          "sql_sha256": "6ffe9b76fb4742fe9b42ca2e81af4596fe17dafc8f9c14682da2bf6823532c7f"
+        },
+        {
+          "entry_ghidra_va": "0x293bfd4",
+          "sql_ghidra_va": "0x1db86f4",
+          "length": 300,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_fix_origin \nAFTER UPDATE ON Track \n\tWHEN IFNULL(NEW.originTrackId, 0) = 0 \n\tOR IFNULL(NEW.originDatabaseUuid, '') = '' \nBEGIN \n\tUPDATE Track SET \n\t\toriginTrackId = NEW.id, \n\t\toriginDatabaseUuid = (SELECT uuid FROM Information) \n\tWHERE track.id = NEW.id; \nEND",
+          "sql_sha256": "8c55bcf7aa002a3727c14a0fe33749c5993454a94bddf8a8be2882f194471a2e"
+        },
+        {
+          "entry_ghidra_va": "0x293bfe0",
+          "sql_ghidra_va": "0x1dba7ac",
+          "length": 470,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_update_Track_timestamp \n\tAFTER UPDATE OF\tlength, bpm, year, filename, bitrate, bpmAnalyzed, albumArtId, \n\ttitle, artist, album, genre, comment, label, composer, remixer, key, rating, albumArt, \n\tfileType, isAnalyzed, isBeatgridLocked, trackData, overviewWaveformData, beatData, quickCues, \n\tloops, explicitLyrics, activeOnLoadLoops \n\tON Track \n\tFOR EACH ROW \nBEGIN \n\tUPDATE Track SET lastEditTime = strftime('%s') WHERE ROWID=NEW.ROWID; \nEND",
+          "sql_sha256": "2441d99870f2931c88ae32c43b1a45e22f140d24b6ce58bf793f2b4fa3406eb5"
+        },
+        {
+          "entry_ghidra_va": "0x293bfec",
+          "sql_ghidra_va": "0x1db89b0",
+          "length": 157,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": null,
+          "sql": "CREATE TRIGGER trigger_after_insert_Track_insert_performance_data \nAFTER INSERT ON Track \nBEGIN \n\tINSERT INTO PerformanceData(trackId) VALUES(NEW.id); \nEND \n",
+          "sql_sha256": "c850e10e24050c37987a5d0f4b74e1b081066a0a26ed89cd0ce247b198a4c472"
+        },
+        {
+          "entry_ghidra_va": "0x293bff8",
+          "sql_ghidra_va": "0x1db8a50",
+          "length": 299,
+          "numeric_mask": 511,
+          "numeric_mask_hex": "0x1ff",
+          "table_name": "PerformanceData",
+          "sql": "CREATE TABLE PerformanceData ( \n\ttrackId INTEGER PRIMARY KEY, \n\ttrackData BLOB, \n\toverviewWaveFormData BLOB, \n\tbeatData BLOB, \n\tquickCues BLOB, \n\tloops BLOB, \n\tthirdPartySourceId INTEGER, \n\tactiveOnLoadLoops INTEGER, \n\tFOREIGN KEY(trackId) REFERENCES Track(id) ON DELETE CASCADE ON UPDATE CASCADE \n)",
+          "sql_sha256": "f05319e4b8f4560d81d41169180ceca290d4c78a34b162ac70418c4143d03142"
+        }
+      ],
+      "window_end_ghidra_va": "0x293c004",
+      "complete": false,
+      "array_boundaries_verified": false,
+      "mask_semantics_verified": false,
+      "stop_reason": "capture boundary or first undecoded tuple, not proof of array end"
+    }
+  ]
+}

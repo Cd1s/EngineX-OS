@@ -1,0 +1,2427 @@
+{
+  "source": "/root/build/sc5000-lab/rea-results",
+  "count": 268,
+  "unique_evidence_ids": 231,
+  "source_index_sha256": "0b2594eba0753e017e9effd27ecdf48ebf8ab4312192bac704903d87d224c395",
+  "projection": "All successful normalized results, parameters, authority and limitations; typed failure summaries; raw_result and diagnostic details omitted",
+  "raw_evidence_policy": "Raw JSON envelopes stay in lab; original file SHA-256 and REA Evidence IDs retained",
+  "records": [
+    {
+      "line": 1,
+      "source_file": "0004-open_binary.evidence.json",
+      "raw_file_sha256": "ad737d94b98651eebfb0eb37030ac65800c44f55b2b508c2b93fa7065862562a",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 2,
+      "source_file": "0007-open_binary.evidence.json",
+      "raw_file_sha256": "2879b9c17e74164611da58626e62f9e57f4f05b5c88b750eb10814b4aaff018c",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 3,
+      "source_file": "0008-list_procedures.evidence.json",
+      "raw_file_sha256": "d5495840ab965d20a283febfe3bf93cf2474d28250e8776411ecf0001e6b3543",
+      "evidence_id": "ev_09db187dc45f44ed7aef295bf953b48f8440f979dd4844b754f2e0a2d896d728",
+      "operation": "list_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 4,
+      "source_file": "0009-binary_overview.evidence.json",
+      "raw_file_sha256": "e88b03a953c29323c0a609a4fa26e28c9d12cbc10858e4e679661fa06cd2e1a3",
+      "evidence_id": "ev_7b7c993bcc832f9e198d20efe1da4d2e09368a7d3cc6f7e15c0b16ec04d661df",
+      "operation": "binary_overview",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 5,
+      "source_file": "0010-search_strings.evidence.json",
+      "raw_file_sha256": "7adafa2376a1f6343887fd187bc90a5d8a294b6987783f068e39264529370f98",
+      "evidence_id": "ev_3705a64110bac5dcda1076981fb6b072f503f45482f16c18be98530817e5f072",
+      "operation": "search_strings",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 6,
+      "source_file": "0011-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "f0626fcb0e09a7f24477700bf716fde0498f0540bc3ec8e24ef4339633474998",
+      "evidence_id": "ev_7ff1bc47c92d1d000e2029898437a59aba8f0ca27db02ac55d607a9368c5bb4d",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 7,
+      "source_file": "0012-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "504ea6323016b3da599f6bd39bc317a175a9825ae74ff9eac67894d1822175d9",
+      "evidence_id": "ev_292167a098345f66e34d31471bcaf68b514bcdb11f8bd4b4f66222a2ccf37013",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 8,
+      "source_file": "0013-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "844761ff4d8873f20183c876fd1507f0d5f514479a7b9f16220c9a9b7e89373b",
+      "evidence_id": "ev_4b6193600d690e803fb9d7c4b673126a53b7388fb2a9cf3651c4bc5b88300caf",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 9,
+      "source_file": "0014-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "c6662de1cb323f3703b1a271d8228acb4e7a5a72dccff92145866846312119f7",
+      "evidence_id": "ev_e0f7724de0f43932d33d9a329e8a943d88969bdd1c0648fa013667d9969c3f57",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 10,
+      "source_file": "0015-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "4d0bca7082eb3ebc22bebd2de5ba8f35dc5bd958f8e1e984f3c87a9b2bc62130",
+      "evidence_id": "ev_5aff326c606647b9f4d8cfa57691922435fc260ab0c2137c4883f5138ce43777",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 11,
+      "source_file": "0016-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "d83ff5a1fd06f4612e3f67b7ba08316b43cc23ad7fbb282a1b9fcf4b8fbf3447",
+      "evidence_id": "ev_d0f02bee182be18434e9fdc4ef80e5e6a3e8ea19013f1de784b215c2b70077db",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 12,
+      "source_file": "0017-xrefs.evidence.json",
+      "raw_file_sha256": "2549250224f7cc681e046e06a2d1164b9a32342688e805324b9a4f577573d834",
+      "evidence_id": "ev_8a01957b4368e43f9c246f3e7514539ab60abb249725fd1c91fca7cb4f4aef3e",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 13,
+      "source_file": "0018-xrefs.evidence.json",
+      "raw_file_sha256": "e2fe9450d146297c1271d18e8aab1f27c510ba226c8161f6e8242d99ea344544",
+      "evidence_id": "ev_0c78d803de18e924696300519456f434cca053736664b07d2887c5a192678154",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 14,
+      "source_file": "0019-xrefs.evidence.json",
+      "raw_file_sha256": "6fe7b78d66c31b6d895cc33f8cd1e74666a3935b88cf16bca9feabbc5726ae25",
+      "evidence_id": "ev_8c13fe3a010f32991e3d80a3afbf2ad0fb646ddf1b5376677c82f67801ae9269",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 15,
+      "source_file": "0020-xrefs.evidence.json",
+      "raw_file_sha256": "39e5567bcac03f46e28b9a0e2aa659d4cb3d23d9a6d34f89d5e994133a559e08",
+      "evidence_id": "ev_9c65d6bf6d53aa5b7e019759d99a8baac8202dde2ff7e258a05302771c63012a",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 16,
+      "source_file": "0021-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "5fbeb9899d57a05b8872d9612adb0a0715eb3348584afdff307356bf3681a13d",
+      "evidence_id": "ev_7f025973cd468f87b586dba80480af0d12288f16bf947356ff157f9854f90d93",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 17,
+      "source_file": "0022-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "dd2e9b68a43f928ef29af29895c9ac030870b47bea911ca0639d26ee5e23170e",
+      "evidence_id": "ev_1d869b27109611ebd26af0c8e0af676d06718c3bfe0d03df7c94f123a6f76d2f",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 18,
+      "source_file": "0023-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "38cf5943a1f71b9de46f6c06b09f423bc62dadfa4225701f180bdac5b9c90ae5",
+      "evidence_id": "ev_b01f4c674569ea75e486a7d1fe735301152bfc324df361d1ad1e4e25e5615c71",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 19,
+      "source_file": "0024-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "f451279db67e40449abce1160a2a7cf633954577c96af086c9abfa1c28dfbbcc",
+      "evidence_id": "ev_b36c4330f078a1361c6407cc84fb7a59d48289da1f8b32a26568bfdffe32b37a",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 20,
+      "source_file": "0025-procedure_callees.evidence.json",
+      "raw_file_sha256": "5ff69c47a94e094f79a94fbbe658f8198d871aa7736e5b7107a068798aa21989",
+      "evidence_id": "ev_2ada4732d87415063d1bf00fd842c81a760b9379610fb99f30bac3d31feea2b5",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 21,
+      "source_file": "0026-procedure_callees.evidence.json",
+      "raw_file_sha256": "c91e2da0fcf1e9645f0016688f214357cb7f5417f1f3134ec126a4565fb17c03",
+      "evidence_id": "ev_da947e3c6b0e9ce55ce1f44caaac8fc37f4edb95be6292117b41c0000e08b8a2",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 22,
+      "source_file": "0027-export_evidence_bundle.evidence.json",
+      "raw_file_sha256": "21bf6b39f97c54f4e9a3393c771c1ee90536ce893723c678b1a5a3f10e8286f9",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 23,
+      "source_file": "0028-close_binary.evidence.json",
+      "raw_file_sha256": "5a40ac4c7b0114046fd927448b13a8a4d49f3956d45dd43d576f1c1365331f8c",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 24,
+      "source_file": "0029-open_binary.evidence.json",
+      "raw_file_sha256": "0deaaee58d7a8a24ac40c1e943ba7070ff2ff1bd880e11ef4606143c53fc181f",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 25,
+      "source_file": "0030-list_procedures.evidence.json",
+      "raw_file_sha256": "e8eb5d3532d3b7cb335df2e771185aa88453811c8d1f07375ae6525ef05040a7",
+      "evidence_id": "ev_4fd1a8af03a71eb2413195ea957147535d0d1a622c6a52eb64258ca091849ba7",
+      "operation": "list_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 26,
+      "source_file": "0031-search_procedures.evidence.json",
+      "raw_file_sha256": "93ba427919e787340e2bfc4478983391e678fb01afd5243da2485c1ec0fba035",
+      "evidence_id": "ev_ee1572ca5149d489041596c1f8ce594543230d3410884b06ac3bd99711c9e179",
+      "operation": "search_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 27,
+      "source_file": "0032-search_strings.evidence.json",
+      "raw_file_sha256": "ada16ded4455262db0c0b0bb02393258a2e55176818fd041643acfb9293ee346",
+      "evidence_id": "ev_7e3b37cb93edec51ad3ab95062b4e3ed5068aa9ae298f2a7cc0888d2a4484966",
+      "operation": "search_strings",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 28,
+      "source_file": "0033-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "b1342fc61519e93581f4d0dfb57001aa7a6c710c04945065e243d1c1690489e3",
+      "evidence_id": "ev_c0ec451c1ec85843d2709b9737f737ce32e3a182c263bf30093b02c12adfa6ac",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 29,
+      "source_file": "0034-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "b4cbe4c8269da8186838a9837ddf6303788b2c1417573a831626f2a681e2be8b",
+      "evidence_id": "ev_eda3a45f23ffd2ef408ce49fd8230988eeb0b22746eec499da457df833a17b2f",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 30,
+      "source_file": "0035-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "e4e30341b6e20137fe7ae452b92672f90d23b3b9bb41d0148724a981f6da92d1",
+      "evidence_id": "ev_e0fb0467addbffa0ced3cf4a83190ce3268b5557f9e763b4bcf3869d725f8a82",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 31,
+      "source_file": "0036-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "136edaf9e778cc9f5154998335b949eea641d174bea560df0af1d19aea15b641",
+      "evidence_id": "ev_f52aea54665825223dc6219d4046a8a7a4928a5686407d7813ab252933f9fc6b",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 32,
+      "source_file": "0037-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "d21dd4a31d75acf4c2b854609c0d99106e40b404c5e2597539ed9bcbf2c7eed6",
+      "evidence_id": "ev_da617493800f6c2bcd8b5b115839ea15492260b9699a662b2a417b53162f049a",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 33,
+      "source_file": "0038-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "d653b430a9cbd5e2cfee311da0cbd5318be16c17919a755233514838a1c1a75e",
+      "evidence_id": "ev_2d106f29bf8cc4327d722addab5ef13f7e683c77d768652c108e7da3fc8bf1ca",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 34,
+      "source_file": "0039-procedure_callees.evidence.json",
+      "raw_file_sha256": "a8a2d9a25e428db4caccd918e34a25308e943a19549f5245f74e881ad77ef1c3",
+      "evidence_id": "ev_811167fa9bc94be46bb9dae6b69256d13fc05c36ff6bd466067b6f40b659c61e",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 35,
+      "source_file": "0040-procedure_callees.evidence.json",
+      "raw_file_sha256": "617f9602a30426f7a8b611ad021dd7e02d479f615a38017801d35e7d7c7846b6",
+      "evidence_id": "ev_1beb72bdad2dd69bb9d7ee0928b37142b0a4b11e2aec0010b5b2230a7a3be2e6",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 36,
+      "source_file": "0041-list_names.evidence.json",
+      "raw_file_sha256": "81414606b0b8e2b1e7ed429398211dd9faf1b886fd7d35c91b701cc5cb7d6dc3",
+      "evidence_id": "ev_25d34d00496def6cd7a194e0d84cca992303e236f0dfedb78b0a8b7a16d6a395",
+      "operation": "list_names",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 37,
+      "source_file": "0042-search_procedures.evidence.json",
+      "raw_file_sha256": "776956d09d7a013256fc8f431e5ee584ac75ee6549d3af76abd561f8ec9375f2",
+      "evidence_id": "ev_605b885f81446498740f4d91b86f5fbdd4d75bae0b632bc06a7ec2453ead5edc",
+      "operation": "search_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 38,
+      "source_file": "0043-read_bytes.evidence.json",
+      "raw_file_sha256": "d6d0a75a98d0b9fe3f42760df1911d3227374e121593a3a536cafed55f3d538c",
+      "evidence_id": "ev_f2f6e235430165ded497504988b8e64bcfea496833f2b32a1704eef6110981df",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 39,
+      "source_file": "0044-read_bytes.evidence.json",
+      "raw_file_sha256": "bcf3b93c26ea6eaf5e25825770e3c67e747745be9f1b4066f0a8ed29691d1299",
+      "evidence_id": "ev_8d605cc27b1321b76c9f009a846b4193e07b33437af067dc458a309349ce81af",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 40,
+      "source_file": "0045-read_bytes.evidence.json",
+      "raw_file_sha256": "05664ac2d310d15cb0f4f1ee776aa9646b5e02c80b9b21c397c08a626564b3a2",
+      "evidence_id": "ev_6db646cde8629cfc5f98b369f7666e66b627f42b02f045f757d179ebf1d04b20",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 41,
+      "source_file": "0046-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "ee189d84671080b49b34bab1668fda25228d0fc70277ff0eaa3b90ee1e27b57d",
+      "evidence_id": "ev_334f79ed77bd429e884fd2a36ef7f79202a5c7b38b0cb8888372cc1f6286d2c0",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 42,
+      "source_file": "0047-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "e02ed1ddf6d2b0800c6a818f3998dab8c124878de655997cd9a6c633d1d9cbea",
+      "evidence_id": "ev_6707758229b74a1beb4d86c3069f06de475633c569540afc9e4f4306916bd4c0",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 43,
+      "source_file": "0048-procedure_callees.evidence.json",
+      "raw_file_sha256": "8387b0c86c2af4d2a432224b026c5a44c82bb41ba0df270d3d85b174b0a947e2",
+      "evidence_id": "ev_b79b517ede62e7010da7ba14366ba4d75ad1edd99dc8e74e333ed3a6214a8ad1",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 44,
+      "source_file": "0049-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "6fe55648ab4af132429b3f43947876ec38655efb7e3b74fcdfdc0aa9a3eb634f",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 45,
+      "source_file": "0050-procedure_callees.evidence.json",
+      "raw_file_sha256": "445b05eafb59cc7634472b8b68a7dede700da97a4c89e93774654894e9431256",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 46,
+      "source_file": "0051-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "bb5db5a0180f809ca409cd511c37df7aad759809b7a58ca69c6ef7649fadcc7d",
+      "evidence_id": "ev_5812fff6b3f0f8b95fbf6508f8eef0927fe75bb62b287f2985c2dc280ebce12c",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 47,
+      "source_file": "0052-procedure_callees.evidence.json",
+      "raw_file_sha256": "4774215319856f9e796402850826228063bacb03b223dee1651a9d20e60c63bb",
+      "evidence_id": "ev_26b69cfdd867934b24d99376062785927482ca9f4340bf34c639fbdd0cf216ba",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 48,
+      "source_file": "0053-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "d096f1de47adadb12a09c73b6d539262ca57492f00503a716db707476e389b50",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 49,
+      "source_file": "0054-procedure_callees.evidence.json",
+      "raw_file_sha256": "bdf8b28ff56af7251cef2d8c31c43db7d0f385fc1809d593fcf3a4d39debd368",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 50,
+      "source_file": "0055-export_evidence_bundle.evidence.json",
+      "raw_file_sha256": "cc7a3910beb7459a8ae82d365136eb5f0b5ba8b1027bf8d024708ed40952be5a",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 51,
+      "source_file": "0056-close_binary.evidence.json",
+      "raw_file_sha256": "6bd70096fd55ed52ebb2f074ed4938af0bfa72e8aa3e0a99ed15c6e121c7adc8",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 52,
+      "source_file": "0059-open_binary.evidence.json",
+      "raw_file_sha256": "0deaaee58d7a8a24ac40c1e943ba7070ff2ff1bd880e11ef4606143c53fc181f",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 53,
+      "source_file": "0060-list_procedures.evidence.json",
+      "raw_file_sha256": "65665e453b860e10fe7dd77415f61b827bc5b76b0bd22e43d4cd6ff0ce6bf7ab",
+      "evidence_id": "ev_1e577a897656581e252a9658f1383250f6a9ea2db32df8e8e917e617b522975b",
+      "operation": "list_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 54,
+      "source_file": "0061-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "c833ab6116264802e00b1a4ce2182b87d65eebf4f31072026f471d3cd5219037",
+      "evidence_id": "ev_344f158f25eea5516d1b0cdb941de3821d6265250fcbf52cdeab9afe65ab5a54",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 55,
+      "source_file": "0062-procedure_callees.evidence.json",
+      "raw_file_sha256": "780836cc95f398e5a3f2f0428fc9c24bb96c8ddee0c4de454be561ed2779e2ae",
+      "evidence_id": "ev_0df791e8624c38b350ce5a84a8ae1335f8a766b8cb3b8a869bd43d8e1466acb1",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 56,
+      "source_file": "0063-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "12b3d6392df45a84d8e4f7fd8648608bbdfed1542ca80b6d7a3f5f1a19afb5c9",
+      "evidence_id": "ev_beba86c3c80167aa4c7e26854e72c8fbf757be519f880ea62641fef9fdaea805",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 57,
+      "source_file": "0064-procedure_callees.evidence.json",
+      "raw_file_sha256": "b09c3ec3b41c44b31eb6872ffdbd802549ba450137d907b9d28ef87ab046f2da",
+      "evidence_id": "ev_e63681aa9dfec22288dfcae0e9777cf0df8f7c65aedec657a97cf0e0eeee1ae2",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 58,
+      "source_file": "0065-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "f9ad059243fcc3b88cf43054d974f48f54794067ff53980f8e6e5b75c4f2db81",
+      "evidence_id": "ev_69d4af049af8bad6f1422ceb956aa7fbe17dd8dbb9136d01067d2e78ad7c906d",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 59,
+      "source_file": "0066-procedure_callees.evidence.json",
+      "raw_file_sha256": "0b53bfe5e0088f0df3b3aa387828c886f71c0a1ff10fdb88b227bff7e9710d61",
+      "evidence_id": "ev_605fb5e4ea1051bc9da2eea9d5321b2cca742942abdc3e7700d3e0f9118f0697",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 60,
+      "source_file": "0067-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "c1e58738b0a95d20f17992c079db6880c7e69b96b0148e9aab9011a328045977",
+      "evidence_id": "ev_56e8c2478e56fa3d2b9c52c73e068964ac0bb1d4f71d580ff9796b9953e60efc",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 61,
+      "source_file": "0068-procedure_callees.evidence.json",
+      "raw_file_sha256": "301d841ee63ddc913260da09646b08a73b83250c53ac3402278cc0dfe0448aba",
+      "evidence_id": "ev_975499571eb4b15d67a41c544a14422fab62d2e68f673869eab574eaea34c635",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 62,
+      "source_file": "0069-export_evidence_bundle.evidence.json",
+      "raw_file_sha256": "e7c2d9c542fbdacac5dd8c524406086c8396d22dc82ce11619460dd09849280c",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 63,
+      "source_file": "0070-close_binary.evidence.json",
+      "raw_file_sha256": "db8197073433633ebe16d954136960c2128d490c5001c4ae6449034ee8f53daf",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 64,
+      "source_file": "0073-open_binary.evidence.json",
+      "raw_file_sha256": "d715310d8d88389dda21a15ffeaa3f7f56c960a05a48995a8a1363059eeef23c",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 65,
+      "source_file": "0074-list_procedures.evidence.json",
+      "raw_file_sha256": "02a65af82a50c5bbdc383fc5705eddf75f867be0ba498477e14f4a7d2ec26a22",
+      "evidence_id": "ev_aa2b08c0d7e1b07d7e2fb7cc66ab7f2a96ecf0cab899e501aed719d8af8bd01d",
+      "operation": "list_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 66,
+      "source_file": "0075-search_procedures.evidence.json",
+      "raw_file_sha256": "2aceb164376e475f97ca7b01e4339fb1478a9d3b5530a2757fff6c68e4434d50",
+      "evidence_id": "ev_0c296e1fcc7273df58dc02d4c7b5efb0a7d6432084f163ed304c46c3290678b0",
+      "operation": "search_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 67,
+      "source_file": "0076-search_strings.evidence.json",
+      "raw_file_sha256": "0ff861a24cf8608e8d29e528db60ffa14f5800085132f10ed00e0c2dc480e9e1",
+      "evidence_id": "ev_c65cc767d40a4f5c992a4398487b7c27cd343371c947b2f2a0d5ca48db24d927",
+      "operation": "search_strings",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 68,
+      "source_file": "0077-binary_overview.evidence.json",
+      "raw_file_sha256": "4e039559cf2edb54382fbabc4da19de52c27c1998480826c1de295de63dd1114",
+      "evidence_id": "ev_d20bb03715cf3eb2abbe39d5772fb220a74a1d1a42390c164c08ef760a034ea8",
+      "operation": "binary_overview",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 69,
+      "source_file": "0078-search_strings.evidence.json",
+      "raw_file_sha256": "09738c4cf6a84b1bfc7419d0c14b527daad792ae85440ca6c567648765f77e5a",
+      "evidence_id": "ev_99d1c888b5022d518e7c08cc6ecf64320e5159ce358254f5e47c4f01e35bed3a",
+      "operation": "search_strings",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 70,
+      "source_file": "0079-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "765c56c158d99e346e783ce0edcabeab2843197ad8809dbab8f5c3cd61a9cda7",
+      "evidence_id": "ev_6bfaf493848f7eeac848576990ed68f0981d94eb589d1e125347bfdf020d788a",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 71,
+      "source_file": "0080-xrefs.evidence.json",
+      "raw_file_sha256": "09398302bd5f5c528f7ae1cae9fde511bd7b66907f355e5ead4c8626fa888218",
+      "evidence_id": "ev_2e4e44dcc7575ede7dd4f08254a9da31308010e34fc4fa8cc12d7bf4e6fa02fd",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 72,
+      "source_file": "0081-xrefs.evidence.json",
+      "raw_file_sha256": "d4a03af7d39ee835ca2f5861b263d572407b893319a8633eec6e90ed0990d03e",
+      "evidence_id": "ev_d1c2f034417853ebf33b83455d13bfddba7c34e58472681b20fd8fd9ccbac2e4",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 73,
+      "source_file": "0082-xrefs.evidence.json",
+      "raw_file_sha256": "8817c452220e265fce4c05472c38b8cf69aa2e48fcf69a2d4885d79b6c30519a",
+      "evidence_id": "ev_21635784bef197d01ce215c8cf30be36150770eefebda60d9c0b2fa8c63fdcaf",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 74,
+      "source_file": "0083-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "f7c635de9710fa7d134e538f6a96ddc7f79996d4f084662190af2a00396031eb",
+      "evidence_id": "ev_1994dddb93bdffd2cb4ff400d5be5ddf3141c7da36d38df844e171c19ead910b",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 75,
+      "source_file": "0084-procedure_callees.evidence.json",
+      "raw_file_sha256": "3cfc10aa12e988b0cc2fd913614651b492ad99407d5a23e017cf283914768930",
+      "evidence_id": "ev_72e6534b6995c33bfdd8bb6a3e7c26ee6882e7c3d82291310bb471888ace0f64",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 76,
+      "source_file": "0085-export_evidence_bundle.evidence.json",
+      "raw_file_sha256": "91762a90854567e3c21b98475c1b81414cd5a031325a58023211d650808e800d",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 77,
+      "source_file": "0086-close_binary.evidence.json",
+      "raw_file_sha256": "84ed7b2db4cc36d3e3057bbdc837a53ceb1ae2a04584892511fec08d7d4d37bb",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 78,
+      "source_file": "0087-open_binary.evidence.json",
+      "raw_file_sha256": "b878500b91812ebc276a2a4db97f9cb862775e8c7a183b49e50c7f9ef59c88ff",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 79,
+      "source_file": "0088-list_procedures.evidence.json",
+      "raw_file_sha256": "5ca1260f495575e9a39987fb68ac94479fa2fb9afd5e539eb3cf18d6727a79e6",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 80,
+      "source_file": "Engine-layout.cli.json",
+      "raw_file_sha256": "4966d7e6e55a5eb1c7ccbd489aad1400ae955df127c8b4824e7bf07ddb68ae78",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 81,
+      "source_file": "MidiDeviceScanner-amidi-parser.cli.json",
+      "raw_file_sha256": "c7d5d3f3a3ddf7b33b9a3362265c9ced496040c1efa354a496bad11024280a2f",
+      "evidence_id": "ev_d86dee359e803bcc05640c7fab3c6edb417bc9ea9a317822d1ce6fcba88915b6",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 82,
+      "source_file": "engine-focused/0003-open_binary.evidence.json",
+      "raw_file_sha256": "b878500b91812ebc276a2a4db97f9cb862775e8c7a183b49e50c7f9ef59c88ff",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 83,
+      "source_file": "engine-focused/0004-search_strings.evidence.json",
+      "raw_file_sha256": "de7a094da8e7460265a58cde0b6a8fd590663dfc7d063bf7dec80842dbc643d9",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 84,
+      "source_file": "engine-targeted/0003-open_binary.evidence.json",
+      "raw_file_sha256": "b878500b91812ebc276a2a4db97f9cb862775e8c7a183b49e50c7f9ef59c88ff",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 85,
+      "source_file": "engine-targeted/0004-search_strings.evidence.json",
+      "raw_file_sha256": "dc25c1c485c8a8188259234f9de25ebfdcc7dc42dbd4511c57b5cc6e0492ccf7",
+      "evidence_id": "ev_55258caff49332b24437bd4bb295912f09ca35a4697b10a89b6372003acd07d5",
+      "operation": "search_strings",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 86,
+      "source_file": "engine-targeted/0005-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "ef8886db78ca3ce2f9fff9aa43d0518eba9d586275f5621a84591e9ba5092cbb",
+      "evidence_id": "ev_be412ee96e579352a8ed79d7308badf2c85054aef623b8f54715d1ec4391bbd8",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 87,
+      "source_file": "engine-targeted/0006-procedure_callees.evidence.json",
+      "raw_file_sha256": "c81dd78830ff2e047e97d7776abe1ab3fad32ac618bf601715eceaf9dc3a5c5e",
+      "evidence_id": "ev_4b4400e5c1dff82728e37e35f9c1bf00b4ad3eee5872f149d2482787c67ac41d",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 88,
+      "source_file": "engine-targeted/0007-procedure_callers.evidence.json",
+      "raw_file_sha256": "1dd7120310b7a40c0b999aaea3521533ae94fcde525fbe4b7a34a3d104151830",
+      "evidence_id": "ev_f964b3760a94f2b9526b7005beea88e5411c5abccf46633a9b96716be6a59b6a",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 89,
+      "source_file": "engine-targeted/0008-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "a066c7b67657e2d4f532f4bf0825ab48a4b7a3bb306f695239b97db58ae75137",
+      "evidence_id": "ev_02ae4d48cedd580ed8f162fc554eed2729b3491d990ec09f3abe452afa3f03a7",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 90,
+      "source_file": "engine-targeted/0009-procedure_callees.evidence.json",
+      "raw_file_sha256": "42739d345ce603f226e722a7b6a93d08ee3e22a3c6f256a74dfbc7f7cf62cd2d",
+      "evidence_id": "ev_4894b06938e035e0703f0bc838e2bc2361fdfef71c9ae5c96329e0e37dc937e5",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 91,
+      "source_file": "engine-targeted/0010-procedure_callers.evidence.json",
+      "raw_file_sha256": "5eefebb874aae880910949eea1f35a6c8f742d9fee1c44ef42d09fb7d84d2682",
+      "evidence_id": "ev_52f76cf79d01fe9be1c0e6f3fb0fc651e59424f0177e6776d460ecad38bd087c",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 92,
+      "source_file": "engine-targeted/0011-binary_overview.evidence.json",
+      "raw_file_sha256": "580c6ce4df4d58d7ba7becddbab49904d2a92ef5030f44c2dca6f6b6e9db0815",
+      "evidence_id": "ev_804e4062f6047237f63757d311fef2b95a7b9ae2a85d39b06579289601305b4d",
+      "operation": "binary_overview",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 93,
+      "source_file": "engine-targeted/0012-search_procedures.evidence.json",
+      "raw_file_sha256": "d4543da8c636dcee29b0930eae4972a3ed90d29c767b8c6064a2347e5830b593",
+      "evidence_id": "ev_4bf946947d9b6066fe7fe5fd34206c5bd330fb725b4d691f606ad8d317905088",
+      "operation": "search_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 94,
+      "source_file": "engine-targeted/0013-search_strings.evidence.json",
+      "raw_file_sha256": "00e1931122f2aec7e8afc626d90c1885a2db5b91fb964b57f878ea294ff8096f",
+      "evidence_id": "ev_827924dde2189f8c51ef217e9a3dec3bc2cdd072808753040b2f541e0b05467e",
+      "operation": "search_strings",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 95,
+      "source_file": "engine-targeted/0014-xrefs.evidence.json",
+      "raw_file_sha256": "ec76571532fd22eb3cf6c362521004b889c7caeccd8ad0f29154537a6aa84313",
+      "evidence_id": "ev_72c611ce1a3dbb00d6016b3c0d7954877abecdaed4bfdd47df9a1183c0ceaebe",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 96,
+      "source_file": "engine-targeted/0015-xrefs.evidence.json",
+      "raw_file_sha256": "5f076197d899e90dee9c2fd2093df0292f95aeac4381f44f7bd7630e756cb44c",
+      "evidence_id": "ev_0a0c1e76899bf3da7dd67b9b5051e5c57bf6bf0cc29f052cf8e5ddd00a307ce2",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 97,
+      "source_file": "engine-targeted/0016-xrefs.evidence.json",
+      "raw_file_sha256": "f802559ff3aff1ad3ad5ab111fad5160ec18bf92ef9f34e56c3f90b687bd185a",
+      "evidence_id": "ev_0459da859232d18d43c4388ae330e80f55d0e332b0141d076658e55346739ee3",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 98,
+      "source_file": "engine-targeted/0017-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "420658e5227bea027b1a7bfeda3bb0dee257787d456330c228264c9b02347390",
+      "evidence_id": "ev_2372269603449093afc1f72410f9129e5b8d404669bda8219c503d7ed3376276",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 99,
+      "source_file": "engine-targeted/0018-xrefs.evidence.json",
+      "raw_file_sha256": "b7e8ebc789901cc7c2c947020283b1ee9dc0cbfcdbd538d461aff11d7d7e1086",
+      "evidence_id": "ev_cd69e22b6a1b2c6c9c1588a6765851b348ebe8d472fecb92dd2dd9a13f54e696",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 100,
+      "source_file": "engine-targeted/0019-xrefs.evidence.json",
+      "raw_file_sha256": "9f025bd247642731e120f2115a1f0b46f909e0513e0b1161c0a10d89f7111a96",
+      "evidence_id": "ev_0593c4692b663587eaca30d82625b2fa2c4b9810bbc6bd44ea129c3dffe4cbf7",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 101,
+      "source_file": "engine-targeted/0020-xrefs.evidence.json",
+      "raw_file_sha256": "01cd1b310cb9df9afb836f587f3370f475d9f4375a2f4c876676efd2900bd31b",
+      "evidence_id": "ev_f8611100c5715f148df78df1c1561f44bedbc0e9de7f088d74f5e80ef96cf9e5",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 102,
+      "source_file": "engine-targeted/0021-read_bytes.evidence.json",
+      "raw_file_sha256": "29087148eb7a30cfc69ba6aa0ce02e8e2ad2faf795afc0de9f83091b74bf032f",
+      "evidence_id": "ev_f17789e7f0a007ec3caae6548cadf7245cd5aebeb7c2239f57edded7f7ff2704",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 103,
+      "source_file": "engine-targeted/0022-read_bytes.evidence.json",
+      "raw_file_sha256": "56f3c867bc81c525a6f4a396e005b7954b5c4f5f26593528b200888b243988d4",
+      "evidence_id": "ev_7fcafa6c2053987f7719e7a2979335f6387801e699fad6e3fbc3c39a95233d6d",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 104,
+      "source_file": "engine-targeted/0023-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "9794d733dfaf1005bb7d6dfb34286746c6ee90c9eb1967a14f0ff0485b2817b0",
+      "evidence_id": "ev_16457d35b6e7c4775684de4ea6cac4a7fe8528ad9199eba79fbdfb49e7952ffe",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 105,
+      "source_file": "engine-targeted/0024-procedure_callees.evidence.json",
+      "raw_file_sha256": "1df0b16e2fe126cc185c9b3cae1939628cff34d0cec2c29c29ed714b6b047674",
+      "evidence_id": "ev_80434328ddd76d6ed715749945a35ae651d892bbbcab1c79d8f8c401f583e226",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 106,
+      "source_file": "engine-targeted/0025-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "c0bbc88bd48689d68fcc83a3c13a7e35ade0037929c78559d1bd95fc781c660c",
+      "evidence_id": "ev_c7aca8856c5026b3c030f3ea5961d64b83accd5319c9487433a3ba356621cbe1",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 107,
+      "source_file": "engine-targeted/0026-procedure_callees.evidence.json",
+      "raw_file_sha256": "ac27156ed993dd227b6b1ca206784c1344121e7a1b128cbdc130940682073322",
+      "evidence_id": "ev_ced7ee304033d0a83412c8cbb278b703e6ffcce3639ab353dc10d0a9526ac4ef",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 108,
+      "source_file": "engine-targeted/0027-xrefs.evidence.json",
+      "raw_file_sha256": "387024021f10d31e64145b53844733e730185829c96e3736ca6d4e72d9762063",
+      "evidence_id": "ev_9f6a2a77ff48263f56127ec50ff4cdf025bd0236811cbfba1cd3b8928ce55c4b",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 109,
+      "source_file": "engine-targeted/0028-xrefs.evidence.json",
+      "raw_file_sha256": "7d2032037be836deb1f85550819de5a97941d4c8a9a6a132bc9bae81cbc1ba78",
+      "evidence_id": "ev_489d9d23336622196be8e5b32de33726526a2529fed50876e9e4df480c4e76b1",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 110,
+      "source_file": "engine-targeted/0029-xrefs.evidence.json",
+      "raw_file_sha256": "9c86193a4ec574592c3e74a8fc5e147d02fd3bffcc71a66aba09bd81b1ee555b",
+      "evidence_id": "ev_069589f52c7fe1423149f3ed4f97b4fc210cabd0774cc34d0493094c2d4c6ba6",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 111,
+      "source_file": "engine-targeted/0030-xrefs.evidence.json",
+      "raw_file_sha256": "f77f2e3445998f90792382ec4022ea754b569dacb7d02265fdf9efb177ebebee",
+      "evidence_id": "ev_64b0a9453babc779d846f4afbd5e4defa53131c9b77e0f99de21493e63b35b6f",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 112,
+      "source_file": "engine-targeted/0031-read_bytes.evidence.json",
+      "raw_file_sha256": "7547a0518000accba70dda7bdb8bcdbc97b66f1696619ea72510984f5564a405",
+      "evidence_id": "ev_77c0eaeff959574e37fe4cacf1f814a453605aa7cab12c21f9925078f89cd12e",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 113,
+      "source_file": "engine-targeted/0032-search_strings.evidence.json",
+      "raw_file_sha256": "828ac28548d97059b5ba8fc42d3e017ab56482bb642d65e33be882f59e1235b4",
+      "evidence_id": "ev_432bed4f1727c5de5d8452d201a5e59990ce773e2f500fe409fcda388fbafdc7",
+      "operation": "search_strings",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 114,
+      "source_file": "engine-targeted/0033-read_bytes.evidence.json",
+      "raw_file_sha256": "f169fb18ea355b12c3cacc9978afb3662c9bb83ed527d560bfe5ea8dd07265f6",
+      "evidence_id": "ev_4b6c95f9885db668f032c16a5f42dea097ad02b9323e54d7f206e9107290afa9",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 115,
+      "source_file": "engine-targeted/0034-search_strings.evidence.json",
+      "raw_file_sha256": "d94c837e2cb3b0e9846a45dae49cfe298b6d86506102ad3bd9e72bf1fb0ab4bf",
+      "evidence_id": "ev_f4cadd69f1c568d3549d24298c12b43b72341c7e3698c215d17540b2103e5124",
+      "operation": "search_strings",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 116,
+      "source_file": "engine-targeted/0035-procedure_info.evidence.json",
+      "raw_file_sha256": "22a3c52487843db39a4d716999414c8b16908d7eeef4c9224c3f54562e18ae8f",
+      "evidence_id": "ev_2392ade3a3af7bbbd8131c1e7f80d8069ef5c5d22dbdd06c3a41045372967b0e",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 117,
+      "source_file": "engine-targeted/0036-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "2294a15a97b9b074175e50214482246c5558c81270dc654f62f3868137754fa6",
+      "evidence_id": "ev_c8a95d27881a76e16e492f19f6def632510f917b44ab90bddb9e3348d34fcfea",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 118,
+      "source_file": "engine-targeted/0037-procedure_callees.evidence.json",
+      "raw_file_sha256": "3ed064045c27732005eff8bc29c433dd71bbccdb843c92fb65826e602f058543",
+      "evidence_id": "ev_1228d7d6e204e1be35766d117b8f29392178b28ba766d06e207fe73a92a0466d",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 119,
+      "source_file": "engine-targeted/0038-procedure_callers.evidence.json",
+      "raw_file_sha256": "2fedf399d363a4e8d93543f85d61bcf5958d46f386d92f21b438b5fd1f91a19a",
+      "evidence_id": "ev_ae67697a44d95032ad154c73975f8d75de3dc8a3932a5c569abe0acbd5fcd6af",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 120,
+      "source_file": "engine-targeted/0039-procedure_info.evidence.json",
+      "raw_file_sha256": "2c95da8556896748245f58692540989b4f6d443629a7aa0b7655fe70cae2338c",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 121,
+      "source_file": "engine-targeted/0040-procedure_info.evidence.json",
+      "raw_file_sha256": "318b719a1c28108acabd0ab9efccbcd8237868b7d68d406be25531694361a4d1",
+      "evidence_id": "ev_91cd98d908e75b01a6be09f8b208a26f4c188d266a1ed1770b3a74caeb8ea9a0",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 122,
+      "source_file": "engine-targeted/0041-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "7db3e828ba1512c93cdaec5f5a16f558a814917b1c193d446476cdf176577cc7",
+      "evidence_id": "ev_31d6d4f4c4887889c630462e7b957ac2f077a63d7564ab964b10af317fe13fa6",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 123,
+      "source_file": "engine-targeted/0042-procedure_callees.evidence.json",
+      "raw_file_sha256": "ae70697c9aa4598e76c167d16ebd2f9ce42eafac82f1538ec6a54a4e830b5995",
+      "evidence_id": "ev_bfe298fa8a4a7f452e946b3d7fad9a77f9173532117be30271e61895999c5186",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 124,
+      "source_file": "engine-targeted/0043-procedure_callers.evidence.json",
+      "raw_file_sha256": "7831c095e0fed8b7f24d5c5ad71900609c18cc01fcb6e41d221fb6123be7b397",
+      "evidence_id": "ev_bd5c5540641120003bd27fbe3d342c3f989585f139709a7871bd47ae4c6d6fa1",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 125,
+      "source_file": "engine-targeted/0044-procedure_info.evidence.json",
+      "raw_file_sha256": "d59b574a5125ff6c0b9cee4ee74a48e9e66bf90a38117b9a16371e833e99008a",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 126,
+      "source_file": "engine-targeted/0045-search_bytes.evidence.json",
+      "raw_file_sha256": "0142e3a5c05a4a56ef1b942128b23903a97770ab6b169f8bd53d9a2fbad59400",
+      "evidence_id": "ev_b024b9744ea99d4fb3bc9c82af0e554aef8465f46c1fe47eec0b03e3747f710c",
+      "operation": "search_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 127,
+      "source_file": "engine-targeted/0046-search_bytes.evidence.json",
+      "raw_file_sha256": "d0445f02e99bbedcf0d6c6e131ed0387ad74b9936eb90f0fa4d16b8cf94e6aee",
+      "evidence_id": "ev_5c48da7d65351888fe60fe5f6144dc709a9486de55e5ea517c31ffb9905b617b",
+      "operation": "search_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 128,
+      "source_file": "engine-targeted/0047-search_bytes.evidence.json",
+      "raw_file_sha256": "df36f5c9e06996942111ee764e14fff7cc7a1783ccf498b157f07de351367c82",
+      "evidence_id": "ev_66dc8c131ee3dfd9d511e286a588d9581ff203191a77984a3687ad76dd7623d4",
+      "operation": "search_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 129,
+      "source_file": "engine-targeted/0048-read_bytes.evidence.json",
+      "raw_file_sha256": "de0c65670c707829c6ce2b2a1c492aa79df74b3fcf138b7b0509cd8856bb3925",
+      "evidence_id": "ev_be56938e0bacde85b2c3d19ffb4a1d4bca6504b9e04752366565c4a3e531e478",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 130,
+      "source_file": "engine-targeted/0049-read_bytes.evidence.json",
+      "raw_file_sha256": "6485645b2ca97ed106622cff94a4c2430d445af85e560f4543474b0396942fa7",
+      "evidence_id": "ev_76b303d5c2cffbcb0a9c8b017b277525ed606a86f7710adc9cadcaf88ea783d7",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 131,
+      "source_file": "engine-targeted/0050-read_bytes.evidence.json",
+      "raw_file_sha256": "8a8c844f048a7d438ae287c80d23c020d6ab3fe39468f5428e592431b20467fc",
+      "evidence_id": "ev_d25960c2d67677703ee4d3df3e1075065fa96ee641f5d4cac978240a18262c52",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 132,
+      "source_file": "engine-targeted/0051-read_bytes.evidence.json",
+      "raw_file_sha256": "5a3ca22eb368d8333b4a26f7527e130ee3d3e2898774dc2f5aafd22264d8c595",
+      "evidence_id": "ev_33eeec353b44ab192524983c933aab39c5ca2a0f66030c8d0e7703d57f449371",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 133,
+      "source_file": "engine-targeted/0052-procedure_info.evidence.json",
+      "raw_file_sha256": "8d683c5ed0bef2add32fb55554a25d8a35e60fb4cf303024749135d59d5c0531",
+      "evidence_id": "ev_6129a4757bfa31e3541750c5285c145b59a176b017d3b0045708942051b31dd5",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 134,
+      "source_file": "engine-targeted/0053-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "9dbc85bc86baf535755dceb8e98d3e579bfc24e52398058edcab748b1c44a028",
+      "evidence_id": "ev_b4b8bcb4d3863d850ab6022f1285394fcf4c4ddb28352ffac3105005db4b901e",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 135,
+      "source_file": "engine-targeted/0054-procedure_callees.evidence.json",
+      "raw_file_sha256": "77cd567b7c32e65fdc8be0f759fa8864859f21861546a76d5302f4c186e85038",
+      "evidence_id": "ev_cbaaa8fa4ad8ca58d41c7d006ed19c041c9ddebdd0f6316d9f5e30f64c6c068e",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 136,
+      "source_file": "engine-targeted/0055-procedure_info.evidence.json",
+      "raw_file_sha256": "67395235541209776fcfa8a8846266d46502788bcb211c2be33c491808c7a309",
+      "evidence_id": "ev_aaa00ff75078c01e1356eb9b18b2cbd4264e1c651ab231606d470b7bceccdd45",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 137,
+      "source_file": "engine-targeted/0056-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "05dce6f0f2baafe9d03abaf897c44728e70319bfd0730b81950f83928bdba29e",
+      "evidence_id": "ev_1f5c3ae2abf2c4101e882b96c727e7132987a7091fe89b8a8c60c3c14294bd7d",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 138,
+      "source_file": "engine-targeted/0057-procedure_callees.evidence.json",
+      "raw_file_sha256": "c7fbc89da62f2072a1bdac66fe8c961bc6d7b2996905d93e6fae6328f0d0322d",
+      "evidence_id": "ev_e2caae7a624ce34bf9e0a23679d75e46c2889ed8079ecf59b03ae33c1fcbbbb1",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 139,
+      "source_file": "engine-targeted/0058-procedure_info.evidence.json",
+      "raw_file_sha256": "1cc36459e4e680753e7f29051726aa42f677a22a1d469aa725957cd8d2448b19",
+      "evidence_id": "ev_397825f2078c6ec66e13e23c63a62b4b9a5071bae7319cfe6c04340fb0838adb",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 140,
+      "source_file": "engine-targeted/0059-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "64c5d11d9538f054c7734ac335f27586462f9a478606d6c2455727349c2ca74c",
+      "evidence_id": "ev_33f051a0f82e0e6817b6d76d967ba0b1bcf1996b361520ede5bc9fdd8b250547",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 141,
+      "source_file": "engine-targeted/0060-procedure_callees.evidence.json",
+      "raw_file_sha256": "d714bbca537fd3a99aba5de61fc1e83c8a7ccc8b14d372f142f2af72656996b8",
+      "evidence_id": "ev_cb698c9491942fe5f6baef126d20928537c2285b522a47b79b21cf01112ac0ad",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 142,
+      "source_file": "engine-targeted/0061-procedure_info.evidence.json",
+      "raw_file_sha256": "7dba13f1547d972954cbd58d2eb2de4a9b8055cd5b33821fa750131070839e24",
+      "evidence_id": "ev_8d94e939e96c017eef76e28b05960baa898609a6bf0b5916a12c20527e84411b",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 143,
+      "source_file": "engine-targeted/0062-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "5d2cb4d51368287ef59abb3f6b1495032477446f5cbc33485513044a39abf3bb",
+      "evidence_id": "ev_a5ef1a395ee23c31a09c55a69bc084dea3bed368697e3fb655c679be198b4bc7",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 144,
+      "source_file": "engine-targeted/0063-procedure_callees.evidence.json",
+      "raw_file_sha256": "b3329f1928547888eb1c171389c95849da5a1de2d7f8ed17a77b2dd2e98fbeed",
+      "evidence_id": "ev_96d4010b0e4bce31c8787a49ea857601072b7766fe406041f314a3cd7eb92dd8",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 145,
+      "source_file": "engine-targeted/0064-procedure_info.evidence.json",
+      "raw_file_sha256": "063a9277a516958ae8dfd95595df3617dd1be98bab5a7e25b572e860a0b24042",
+      "evidence_id": "ev_98bcaf72f25bc1d00b1f3f57e9f56768edde513be9f0afbcd90bdabd903920ee",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 146,
+      "source_file": "engine-targeted/0065-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "77fd5198711982e5dc465783c29cce16c5d3f4e103c17e14400f5dc2030e313e",
+      "evidence_id": "ev_cf0f808f9297c4c255600f3506c0e510928c816eae564bf04c9c5d63a67cb6f5",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 147,
+      "source_file": "engine-targeted/0066-procedure_callees.evidence.json",
+      "raw_file_sha256": "5e096d38c9ed56451a4bcef842b96bc4a10737930fb6aeeaebbc136b2bdda489",
+      "evidence_id": "ev_e6f091953250c04bf72276a2d9d6d8a9376f3f6412e2114f071b34ad50396dc9",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 148,
+      "source_file": "engine-targeted/0067-xrefs.evidence.json",
+      "raw_file_sha256": "761cf514ee51d92203ff2f68ea06bdedde265655a8c97d19313febacd1249422",
+      "evidence_id": "ev_7007bdc72127c9bf6a4f3c8a1ea8f29bd272ffb601d35516d7fe0b691bbb0feb",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 149,
+      "source_file": "engine-targeted/0068-xrefs.evidence.json",
+      "raw_file_sha256": "5c6143e28db21f33c8421053017c8654c3416c7701b2cc9fc165f690994ec9b6",
+      "evidence_id": "ev_b2465cc658321636acde2ab85fad82a0e1dcd09d3dc3651d2b7c0af716aa20c2",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 150,
+      "source_file": "engine-targeted/0069-xrefs.evidence.json",
+      "raw_file_sha256": "586450910df33ebdb5ba407a5f18454b00583a97e7754f0e58f5742273042673",
+      "evidence_id": "ev_9feb5b49e828a19e5528c664a6a7b7f850cfddf3625eb34c124f00c8899eb374",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 151,
+      "source_file": "engine-targeted/0070-xrefs.evidence.json",
+      "raw_file_sha256": "098c5402dc06744ab5bfe76db62ef9ed16d6f6e41175c339e249ccbf0bb81e94",
+      "evidence_id": "ev_b60851f6cb6660516360c2277770e818686c81b8a5511c04f056ff2fde4953c5",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 152,
+      "source_file": "engine-targeted/0071-procedure_callers.evidence.json",
+      "raw_file_sha256": "67e7dceb4e1a907c912e6c9ca9a480cc0cabba3dfa22a20209f5dd9d8c1a4ada",
+      "evidence_id": "ev_2e20b226c69860a4cbeef58723e95a593da4760f69665559cec2e7c70ae3b04c",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 153,
+      "source_file": "engine-targeted/0072-procedure_info.evidence.json",
+      "raw_file_sha256": "c2ba421b1ede7db72f99ab2c0fe049c4b76f647431786078907e232a407476d7",
+      "evidence_id": "ev_4618f07d69dbded2ff7b6ef8d03edb4da1192dc31b1329472cd08769c6cd1322",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 154,
+      "source_file": "engine-targeted/0073-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "151af88d0213e743d1de8d3f7f3d01c8efaa0cac9ff2b96576aceddb49085c65",
+      "evidence_id": "ev_86fc46d3485adcfc66eeb42ac3ee33396e074b810c7810cf3567ecbd190bd215",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 155,
+      "source_file": "engine-targeted/0074-procedure_info.evidence.json",
+      "raw_file_sha256": "27b7564f0b5643b4963704474f9b0c5a482adc8031152bdf7ce8a890206bdc44",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 156,
+      "source_file": "engine-targeted/0075-procedure_info.evidence.json",
+      "raw_file_sha256": "67d7512489093fd5f60853f1e19905131bbafbc4ae13e2ab24beeac39373ec9f",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 157,
+      "source_file": "engine-targeted/0076-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "0213bed84dda4e75c3edff0a7c831cfeb32454f969c5aa3e647079832b50285f",
+      "evidence_id": "ev_8fb948156880f38bffbb104afce8f884a952c0cc71365c3bbe16891c8ddda17d",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 158,
+      "source_file": "engine-targeted/0077-procedure_callees.evidence.json",
+      "raw_file_sha256": "a48634c1120b813fcebdf68224f7a146f117389c47f38b47ab339d6a957654bd",
+      "evidence_id": "ev_17b6cf5e12e16f5276750d12f2fa82edc3b19d1dc25b4d804598e14c9f0b24d7",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 159,
+      "source_file": "engine-targeted/0078-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "efdcf8beb485ba422b8d88227fb2ce2680663e711b53a25d992c401e9310aa8f",
+      "evidence_id": "ev_56fa6d93a67dc731de47c533bcb8e2852b615898f6b38945743b704423ad336a",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 160,
+      "source_file": "engine-targeted/0079-procedure_callees.evidence.json",
+      "raw_file_sha256": "bb3fe1e9f2e6e991fdda4e8115807127ff715fb6c54b71f263a86cb8237b0329",
+      "evidence_id": "ev_0d3098d29aae8ddbfd37846c4204e729e676c8f94a7bac7f06cffb77ed804eee",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 161,
+      "source_file": "engine-targeted/0080-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "ec22a05b2c0e38e697410ee514654bf90b1fa723f8b380ded7442b0ea33834cf",
+      "evidence_id": "ev_69092e2a0f3b4fb93bf3ae2c795fd7f39da6f8d8216f597bddc8d0b302b9b525",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 162,
+      "source_file": "engine-targeted/0081-procedure_callees.evidence.json",
+      "raw_file_sha256": "cfc8c649aed7af5869f55ed864f2e4a18dc541baa50c4a172f1e3f4c20693107",
+      "evidence_id": "ev_21a3f14938f00b0b63439fce6e7adb8db0a2aa2458ae41d9c4a3d534b2036469",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 163,
+      "source_file": "engine-targeted/0082-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "f14ce46da1ac751eb114d77875893965b77d698335c038a28a718880c7082aec",
+      "evidence_id": "ev_d9972ce67d3ad08e8f8f55d49b4360a2fc8f2be5a53daba6c27e4cfa683b5796",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 164,
+      "source_file": "engine-targeted/0083-procedure_callees.evidence.json",
+      "raw_file_sha256": "ad482cb7acc775b495b26e05c9f26bb88f2855a90b1ab01750e12896ece38121",
+      "evidence_id": "ev_b6e5f0ad70f12f36c04683c6411920b627648581ea0d9a42b299a14ce9885e0e",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 165,
+      "source_file": "engine-targeted/0084-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "5a4062a06e07a493232fe5d44b190d60a53c9ae0233cbdee9b1fa24fdc6a4f0e",
+      "evidence_id": "ev_7b91c4c3269ee0860a6a4ebe6ff9c5c2200d5e0249830bb8c7675ecebcc84366",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 166,
+      "source_file": "engine-targeted/0085-procedure_callees.evidence.json",
+      "raw_file_sha256": "8d0f6c4dc9dfc366af72fadac6b1c92ee741db755e769322bb96954173fe9dea",
+      "evidence_id": "ev_aa269d5a98943289b01954fd81641861b74fb486eb5397cf57e5214049430cb6",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 167,
+      "source_file": "engine-targeted/0086-export_evidence_bundle.evidence.json",
+      "raw_file_sha256": "fa12c8bcd020b09f719519321f52e995ac729c89597e91fe843d3efc11e68d68",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 168,
+      "source_file": "engine-targeted/0087-close_binary.evidence.json",
+      "raw_file_sha256": "2e4be58fa47154d2d8ea3a6a1e2dc10d8d347b0626ce076b45b5b438eaab101d",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 169,
+      "source_file": "libaz01-signature-wrapper.cli.json",
+      "raw_file_sha256": "3d705f0c49149f95f2255038f054a33d9475739104a5c36f87fed76fe21e9bda",
+      "evidence_id": "ev_fbd313a9e32c3c654f9c01aa838f885f4cd82d854dc82ab772ecb1318fe50988",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 170,
+      "source_file": "offline/0003-open_binary.evidence.json",
+      "raw_file_sha256": "663e94bc70620b5e62760734fcecac69c48675aea10cb085459b4291d743318d",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 171,
+      "source_file": "offline/0004-list_procedures.evidence.json",
+      "raw_file_sha256": "73631e8cfe7090912498a4c1150a67f58cfbbaf6a71495c93e9fe5c6ac9f44c8",
+      "evidence_id": "ev_fe24e2b1fcf423bb6cd95f3c82d797d899af2238155fa8750db26a9729a0129e",
+      "operation": "list_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 172,
+      "source_file": "offline/0005-search_procedures.evidence.json",
+      "raw_file_sha256": "fa2c8a15c2915c985aed0441290686b9a6d5f5f287aeb6ec3eb9f07c26e5b62d",
+      "evidence_id": "ev_5598a33e4e4ae3d2b0a934d170a686aac576efd377b0876b6b8a09702297d4cd",
+      "operation": "search_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 173,
+      "source_file": "offline/0006-search_strings.evidence.json",
+      "raw_file_sha256": "144c4f609027ea9b1900393ad4a2ceecb150d0c43f029d92493aa00e3c9f776f",
+      "evidence_id": "ev_4337c56f9c02b1388049965c388324256db681b7c5760d0b5d49902a1ca3eb7f",
+      "operation": "search_strings",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 174,
+      "source_file": "offline/0007-xrefs.evidence.json",
+      "raw_file_sha256": "c6618060b46ebb72d74f268ebefff4838a5bdae8621af0fd26b9683edee5f61b",
+      "evidence_id": "ev_e418554605e1966ec8461a5064e9a4069374fd484d73c721627f2d89ec802c20",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 175,
+      "source_file": "offline/0008-xrefs.evidence.json",
+      "raw_file_sha256": "2fa40048ff8bb19ca766bc559525654a41b850f01037ffaeb6332c1212c2fe6d",
+      "evidence_id": "ev_4a533c416d120ff07017dd9218063c30d638236e52169b085b1b6336c488e2e7",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 176,
+      "source_file": "offline/0009-xrefs.evidence.json",
+      "raw_file_sha256": "c1b3a07bd7df4db24104a2f0161da4dcae68a35d4179bbfbe7ffd744bc802e04",
+      "evidence_id": "ev_8f29fc12d70ad233b74084a39a018efd5771884935dbfa02d6bcabacaed5c71e",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 177,
+      "source_file": "offline/0010-xrefs.evidence.json",
+      "raw_file_sha256": "08afa6b74ac872112a7a8580237099df49a25dd642cdf1895e705014be9e1b17",
+      "evidence_id": "ev_b89d9b30fa9a9010795fcba60a782538ca8675b34feaf0b7754dee619874f95e",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 178,
+      "source_file": "offline/0011-xrefs.evidence.json",
+      "raw_file_sha256": "490aa9bee40a2da699cc34c6080ba43a10f630db9d4272438d23ef41f6d50322",
+      "evidence_id": "ev_a2dc472e951f024ece7724fa648099a758e6719daf10f06b8cd17b84c44a9d03",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 179,
+      "source_file": "offline/0012-xrefs.evidence.json",
+      "raw_file_sha256": "ff013677e828872eaa8dbdef038895951edd7884a24b49786d7b19e34086acf8",
+      "evidence_id": "ev_27a78313ad7bdf0bed260ddf170f5233b0a1dd7746f13d9cf77f10729dd6c3e1",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 180,
+      "source_file": "offline/0013-xrefs.evidence.json",
+      "raw_file_sha256": "894b836553eca939c55cbba655054a133a1694ef5630a0118dc5c877107f8b88",
+      "evidence_id": "ev_58cf505d7ec0f44f190f0d44b3dd78e206abb0845fe2930e9e3f8c9792945ec5",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 181,
+      "source_file": "offline/0014-xrefs.evidence.json",
+      "raw_file_sha256": "02d7087f1d4a7dac3ca4482050a747db37d00d4242d07394061c5a7c1ebf2ca4",
+      "evidence_id": "ev_aa0289ce0ece8a217dcc099dbf84b6c7801338629d0b2f5d8799df868ad8e33d",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 182,
+      "source_file": "offline/0015-xrefs.evidence.json",
+      "raw_file_sha256": "6e0a11efddd824e79c75d63021784677144c750a04b5d5e5cde5d56ba6ee5e30",
+      "evidence_id": "ev_37e8128ce2e9c0bc4d54ef0abd55f088a8e0608ad7debea4c776e7e5f0a2ddb7",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 183,
+      "source_file": "offline/0016-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "c9d027174f296154dbf0b2f4e0e55acf60690b61e16f875c255bb634aef76bb6",
+      "evidence_id": "ev_32df459a646053eb345a3aeabb2046f53dab94d289700201b42f837405f353e1",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 184,
+      "source_file": "offline/0017-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "86d8321dce9deda4db59ff888e64d88c89b040df1a44b9e79fcfe246dab48cfa",
+      "evidence_id": "ev_60041ec85f684c679f09032e86c83e52679c37eb8573624f21a32ae02116c3e9",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 185,
+      "source_file": "offline/0018-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "6b8c1b93f41e333858cfde4dc2ff4c7dfe6919d3a2943f52745b264c17ffe657",
+      "evidence_id": "ev_a33071134313a9ca13ccf656a467b3ff47f06d9f581efe2973fcd0ac23a9de46",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 186,
+      "source_file": "offline/0019-binary_overview.evidence.json",
+      "raw_file_sha256": "459d575b93237e616e1bd0a85962c4b177de25b8bea35bf39a8c8af86aa97ebc",
+      "evidence_id": "ev_0cdef60c0d1b36c1e145f1219cac338f376b456cec5e4d0122fdfb5787b0b219",
+      "operation": "binary_overview",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 187,
+      "source_file": "offline/0020-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "552cfaca438871479c47cab09b75c4fa8152ccad5e0a907582b0d084c2a0c47a",
+      "evidence_id": "ev_20c6905f296aed725d958dd2b62a9251c8fae9aabefcc2e15edf32d3df8f429f",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 188,
+      "source_file": "offline/0021-procedure_callees.evidence.json",
+      "raw_file_sha256": "10cd2ff5d17e97eeacab6c378e6fbaee92d1676c75b40f86f6cef64832c8a56b",
+      "evidence_id": "ev_48f7287a372c9a4ada825ca215c04f3c032b0ff0539e89409d922a64768239fe",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 189,
+      "source_file": "offline/0022-inspect_native_load_image.evidence.json",
+      "raw_file_sha256": "dd3e4791d80898d8503ea4282feca8a21cf5776e14d283160c9784c5dbe79542",
+      "evidence_id": "ev_fe9767b21c37db007286cdb1eade4d2e4218de4ebdd7049868b224439c7ff410",
+      "operation": "inspect_native_load_image",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 190,
+      "source_file": "offline/0023-list_names.evidence.json",
+      "raw_file_sha256": "9278b138a71956b34b9d86b2b4d63bbde1141eb3f33ac7571842cc0df3f9ebff",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 191,
+      "source_file": "offline/0023-list_names.retained.evidence.json",
+      "raw_file_sha256": "e96038bbbe701e9ee4bcdc4c755745c6e6dfc044cc6c106bc0d87d0490a3b155",
+      "evidence_id": "ev_7676ae7b4db8b7d707af127b69fdbf88cfdb35bb43f1e4b4230f3403c674c342",
+      "operation": "list_names",
+      "record_type": "normalized_projection",
+      "source_aliases": [
+        {
+          "source_file": "retained/ev_7676ae7b4db8b7d707af127b69fdbf88cfdb35bb43f1e4b4230f3403c674c342.json",
+          "raw_file_sha256": "e96038bbbe701e9ee4bcdc4c755745c6e6dfc044cc6c106bc0d87d0490a3b155"
+        }
+      ]
+    },
+    {
+      "line": 192,
+      "source_file": "offline/0024-export_evidence_bundle.evidence.json",
+      "raw_file_sha256": "9386b8a4b8cdcb5714a8a34861261990325a621d4d0f187b51d430118068dc54",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 193,
+      "source_file": "offline/0025-xrefs.evidence.json",
+      "raw_file_sha256": "336cefa10104c98141ff5b935914a66ea7a8d76dc17ad7ca7d00c2376b20008a",
+      "evidence_id": "ev_47c6789bc7619adf689ff75457350aad2fa1f77e0d889689f61f31a15b0a3639",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 194,
+      "source_file": "offline/0026-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "1ab30f53631be76e24a6e0a46d3628f0f8822e6ca53aab4f2d71913e9badf925",
+      "evidence_id": "ev_106a742189cf8f4a8f0173f4b57135d708b5a14f0df6c2938185aa95836c50ab",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 195,
+      "source_file": "offline/0027-xrefs.evidence.json",
+      "raw_file_sha256": "f505c41f58a2765535e0ae88e6b12bd63202cf2053ecf1480f7d2ab1dcbd6a1b",
+      "evidence_id": "ev_cae24a00d18f557afe741cb507ab96b4d63375c9d0a05ed6f4929576c4afb6f7",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 196,
+      "source_file": "offline/0028-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "a5257ae18c09abbea19254b4dadd1a209f5022a000f4422df4644b3c023170e5",
+      "evidence_id": "ev_216341558ea52158b26e74fc85e7c7f2b0841ff9047f24a05938d9fc8c4ad2c5",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 197,
+      "source_file": "offline/0029-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "4245376b16980d8f94cb023089d0006853638ec48382c0bfd22b596fd382fe09",
+      "evidence_id": "ev_bf308eccd8e4ef6b9d0241e5979b80ab2dbe245dfba3c77b068ac1b77992f479",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 198,
+      "source_file": "offline/0030-xrefs.evidence.json",
+      "raw_file_sha256": "89458353e02d90374b9f1138a90698efb09c162ddf09f7c9ef627b0c0ac7c84f",
+      "evidence_id": "ev_70d03754502224cb819f18bd530280e6acc1ba3a48744c54d816175372a62242",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 199,
+      "source_file": "offline/0031-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "01188aba3d8b4213c6f50b4242e90794d16830b5eeffd6f2c5016a6fd56ddbaf",
+      "evidence_id": "ev_77c6984eb4afe90744d5d9a6f93a12255839feb32ce520797bbbc2e616a787ab",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 200,
+      "source_file": "offline/0032-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "d54c6a2bfb7c53c286ded710280b79679963faa87cb1b2b0ef8335025a4ba387",
+      "evidence_id": "ev_dbef13e7066631d353f38d1ee5ba29d4190dbbbd5c070e5c530fddee20af28d2",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 201,
+      "source_file": "offline/0033-xrefs.evidence.json",
+      "raw_file_sha256": "11c5a76ece4708798e9b74b441992605d84f95217b21f2f7e203680c675bd439",
+      "evidence_id": "ev_0f84c17d92b8801692f373c1fd36168a58af3da9250e8e1a1b6a42bf1b71c434",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 202,
+      "source_file": "offline/0034-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "7bace3f595c3810a2bd893a0ece82858a7cb184cebc55faae6bdef01854842ed",
+      "evidence_id": "ev_85afa0daf7a3a5b7547d94c6a51f9b428d87495f22754ec2076198fb62a0f568",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 203,
+      "source_file": "offline/0035-xrefs.evidence.json",
+      "raw_file_sha256": "fc2d53324b847d886bb641e1c6a691eed21451f0f1a2ad127ca3e092fd774676",
+      "evidence_id": "ev_955c9568cc6c0fcb7f7acd9b040500c9fc5d0ba421e9199cb5e986bf4f0183a5",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 204,
+      "source_file": "offline/0036-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "c07a989ff05546a3b4deca701a21ff8e0f1e46b71dd6f47f4076c84c73bc0a9c",
+      "evidence_id": "ev_3fc49b17aa9cb78d5e1900c1969d7745149caa9573978a81d2bb8fe0964f254a",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 205,
+      "source_file": "offline/0037-xrefs.evidence.json",
+      "raw_file_sha256": "a0d0c51a67346785160d6d64590c5c749cb07789a4edb1a309282c249ea9777a",
+      "evidence_id": "ev_2f3a55c30715c8f2e460427425bc2bcf4f522ab85394749a880f30b72c2c44f7",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 206,
+      "source_file": "offline/0038-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "2b88f1ae8bf3de28c6b3c4ffe881f424f6e10162eddf2fccbc644ca804e31877",
+      "evidence_id": "ev_e52479ccf1f7433a65dbf174875b8726dcf62845bf80f10ab4084be1758fd426",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 207,
+      "source_file": "offline/0039-xrefs.evidence.json",
+      "raw_file_sha256": "4d552bb67d789173bf054f4625ce52b09b9e61dc3c022b0b0793df64be1514e7",
+      "evidence_id": "ev_6987e55239b10372d7d39bf569a5ef1c2a6e214107b667e6ed05154b5b1a96d8",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 208,
+      "source_file": "offline/0040-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "5ad9b04bdbbfe7dac7e88545af7a380f3f7b2c6106404c17172f84344517aa12",
+      "evidence_id": "ev_2d82a2b6156750ee440caf6292caca3d9742e4a1a0e83db5efa52dc482cde6d7",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 209,
+      "source_file": "offline/0041-xrefs.evidence.json",
+      "raw_file_sha256": "e708de9f02b560813384323512a50853aca32360365b4e92a6e4f88f84dbf6b3",
+      "evidence_id": "ev_7d8841a0dd58b4bc96d43e9686410f079fc3aa324ef6bc9f41beef7fd07a9b1c",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 210,
+      "source_file": "offline/0042-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "7aa5879e36402249a3b38373c9edd506efe59564d0668123f224b60ced04139c",
+      "evidence_id": "ev_2f834f57becc30ec279ae47bf52a2b65de2e88678e9d6cb231694d74201e1d95",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 211,
+      "source_file": "offline/0043-resolve_containing_procedure.evidence.json",
+      "raw_file_sha256": "a44361b378bf5b9bfad448474202f4fafc0942ef683cf83b37a9cdbbb4845cdf",
+      "evidence_id": "ev_a4825af573750103564ac994eb5916b8c1796284f7caa04f0f1df7b2655507b6",
+      "operation": "resolve_containing_procedure",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 212,
+      "source_file": "offline/0044-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "6e09b8309e4382874648e5365bfd9b161acbb4465549e00339800b2424126707",
+      "evidence_id": "ev_9d85f36a7321345ecf21ca28d61d7a316d0eb68e7d13b0766dc1c7bc73bdf147",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 213,
+      "source_file": "offline/0045-procedure_callees.evidence.json",
+      "raw_file_sha256": "5f656a9274b23eba34e74cf6d2e060f40df1e2877c7c88d0c79d63bdd9f33a08",
+      "evidence_id": "ev_b0720391e1f9f4302b9ecf4437551ebd2744b66d61abd67268e2b2f50c29a8c1",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 214,
+      "source_file": "offline/0046-procedure_callers.evidence.json",
+      "raw_file_sha256": "3a5331533f45134bd0b764d1e1305baad4a41eab2bc79484f0833d2d399bdcb3",
+      "evidence_id": "ev_b17eb7c186ddda9a1fae1b733f1464e8e850c2ff10093a9052b3d3433604469c",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 215,
+      "source_file": "offline/0047-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "3fea1e739c3e6bf528124838b3b97b03f4f03d411cb315eef77dd101360e8ed4",
+      "evidence_id": "ev_b42e4b02ca0199815e83e542a49e3e0ac6ea982b6c2bd18ae0fb1d5929efc09b",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 216,
+      "source_file": "offline/0048-procedure_callees.evidence.json",
+      "raw_file_sha256": "7b1e0bdfb01c6d06c68ff98b1a063c4e66f532838882c01c3b773091bf57f8e7",
+      "evidence_id": "ev_fab79ee13463dd3eba4d25318705d4471c9d6bd402f393b2c213dc753d222d7c",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 217,
+      "source_file": "offline/0049-procedure_callers.evidence.json",
+      "raw_file_sha256": "6e237264a7cde68dc4d302a3e122dadf2d1a9fd930f888f48a27d7c791bfc580",
+      "evidence_id": "ev_a4481837a2ab86e932e30f26b0b51546837c8572a0dd1be09b2c83c945319858",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 218,
+      "source_file": "offline/0050-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "ec76e689d11efa1fa407979ac6bb8cb789578efeab475eb0f53787526116c6b9",
+      "evidence_id": "ev_c47759a1f75eafffa2bafb4eef2d5b4b5c93887fe8aaa5632c3265c84346387a",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 219,
+      "source_file": "offline/0051-procedure_callees.evidence.json",
+      "raw_file_sha256": "1d3f5f4151ec5a90d6405807594005fbc9b253e1c67e3781d2b6ec82d9088bff",
+      "evidence_id": "ev_e463e88e3ef0720c8b593795f8b7e426a73f17a397fab349ad6e1ddb475c25f6",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 220,
+      "source_file": "offline/0052-procedure_callers.evidence.json",
+      "raw_file_sha256": "f22d2df9980a1fe26efa20eb42acc681be07a88749b74b8f81ae8ae5f0d59f91",
+      "evidence_id": "ev_9747794c4cc4724cc9b518de7d7746becf1dd9c768bf8fa5f41f3290483fb40d",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 221,
+      "source_file": "offline/0053-export_evidence_bundle.evidence.json",
+      "raw_file_sha256": "fabb63787d2a9bb1174bc689633ca84f94b02203fee749669dc6563e1c58b809",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 222,
+      "source_file": "offline/0054-close_binary.evidence.json",
+      "raw_file_sha256": "e018940c933041f7235e30bca63f043e7c91a3e1e3add562908649b614b2a57d",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 223,
+      "source_file": "offline/0057-open_binary.evidence.json",
+      "raw_file_sha256": "663e94bc70620b5e62760734fcecac69c48675aea10cb085459b4291d743318d",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 224,
+      "source_file": "offline/0058-list_procedures.evidence.json",
+      "raw_file_sha256": "799232955d1fda0fb7c4f2638c972029c35a6c094dd7182c452b5594f2423a69",
+      "evidence_id": "ev_0f7239cee526c157fe721c76efc3b4c7b61b50c5dab1a2b2bd50d4ada7075695",
+      "operation": "list_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 225,
+      "source_file": "offline/0059-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "25284bae722fe6a7e649bd9e3c13541bcb723faff4afbadb998ed43b7e713ae0",
+      "evidence_id": "ev_ecf58ba72bd3b92cd9bcc1cb0dd6cc50f250f3278fcc2fcc698bd00088b8fbf6",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 226,
+      "source_file": "offline/0060-procedure_callees.evidence.json",
+      "raw_file_sha256": "53b07936135f77ec910565a98ee2459b08e91e68d7483a0e409e8282a03a38d3",
+      "evidence_id": "ev_e8981335c15841b90e970ada66063fdf8d5b4d0a891a3811e21d81eaf2b2bb30",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 227,
+      "source_file": "offline/0061-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "f47de75023cf853e5f5693f946b53b73eb03c095289071feb62298e7fda59ba3",
+      "evidence_id": "ev_4623e880dac66b191af17beedd0472e6b6f0d818615ed26aa4667d7156b0176e",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 228,
+      "source_file": "offline/0062-procedure_callees.evidence.json",
+      "raw_file_sha256": "b035bddc9aae881251037d03fda68a5f6595ad064362d6ad334d70a53191a8f8",
+      "evidence_id": "ev_8a7d030ecb200c58a7dfe0f99c5d4e56095c8075abd41f0d170bca487081dcbd",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 229,
+      "source_file": "offline/0063-xrefs.evidence.json",
+      "raw_file_sha256": "93445b9b5c0a7ff3f3e816803559991670dd0eea2832e2c17ba1463ce06c045b",
+      "evidence_id": "ev_a53c38615b4ff5197273c973ad152e63b461dcdc56f11947b7eb3408d7aa7375",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 230,
+      "source_file": "offline/0064-xrefs.evidence.json",
+      "raw_file_sha256": "51317577df789b0b8a98a2290632ce968ef8a1ecfb0a09d8b639bdf727834559",
+      "evidence_id": "ev_bad9e70cb7957177b50feefcc01b918c5239166b1279c2d4e910cabe16192961",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 231,
+      "source_file": "offline/0065-xrefs.evidence.json",
+      "raw_file_sha256": "c0371aed09fd2e6bd48ff1b15e6f9737c231afb8632f2a9cb3f9c4e32b81b88f",
+      "evidence_id": "ev_8bf533876a351c9014f8ad51b9fb16aed90bd5c1a3aa91b0bb0beaf0387433ab",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 232,
+      "source_file": "offline/0066-xrefs.evidence.json",
+      "raw_file_sha256": "fa8fe8de43bcd1f5ab4efd5ad9b9fcfb049e8aeef7b2729d17b45aa1321b36aa",
+      "evidence_id": "ev_c4130a6e7f3f11de32daa1de90dc1ce4b187d56c44c90d6383c515d4cdbee057",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 233,
+      "source_file": "offline/0067-xrefs.evidence.json",
+      "raw_file_sha256": "77a616e8e7e1e8f9f46a7e9b350383a32fa08e01ddd4e4c4eba1c0c074fc6c93",
+      "evidence_id": "ev_9e98fc213a1c56497c3f00f3fa31744d045ee50c06911c32058325bf1076fc21",
+      "operation": "xrefs",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 234,
+      "source_file": "offline/0068-procedure_info.evidence.json",
+      "raw_file_sha256": "1f062082470f813e4e114d9990bf418060c71fe5ee493683375a163b4f8450de",
+      "evidence_id": "ev_c7e6f6543189b429a5b150abf45095139749318d00977370c15adde40f179e29",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 235,
+      "source_file": "offline/0069-procedure_callees.evidence.json",
+      "raw_file_sha256": "76fd1af1a096301bfb1479962651c7606502496abf951bb36108bab5ed1ebf93",
+      "evidence_id": "ev_bceff56c6ee4b910026da112ac3f90c4fe243b30436dd25d2082829b36536a5e",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 236,
+      "source_file": "offline/0070-procedure_info.evidence.json",
+      "raw_file_sha256": "ee6d260ae689ead2b3bd122b2e582fe1d6727860d9a5201c33ddbc37ff5a3843",
+      "evidence_id": "ev_d53794398e23b1e7180dff2c65ee0635c6bb85ce0e72b0daa683d1a111a3ce7c",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 237,
+      "source_file": "offline/0071-procedure_callees.evidence.json",
+      "raw_file_sha256": "fee0f9b47eb4617ab7ee44d30635783929ca175912a7b5ee29c78a78790db56b",
+      "evidence_id": "ev_04cee6b8eb6cb57e692540bd26b15662506b832e7eecfd58e452a3d4e981e23f",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 238,
+      "source_file": "offline/0072-procedure_info.evidence.json",
+      "raw_file_sha256": "96147cd9bfc7a317ebe0f7080dbcc67b964a8065af5212ab5f930429e7bddd16",
+      "evidence_id": "ev_1e44ac1196a210130e183f2d2b5866cf08086a8c6ca932ecd7a40385b5a6cab6",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 239,
+      "source_file": "offline/0073-procedure_callees.evidence.json",
+      "raw_file_sha256": "49d248d8f9598be256903c24671aeb62b96135e1a6a324b9e314ddc494801ce1",
+      "evidence_id": "ev_e0b1a734e1de709b63f8bd399821417d2b73f40a0d90fba02858eeaa7bd0684b",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 240,
+      "source_file": "offline/0074-procedure_info.evidence.json",
+      "raw_file_sha256": "8f436fd6f405ca655eb59caead0154125413684aab0bfc68f05c4aedcbcf6ba4",
+      "evidence_id": "ev_9dfb0788414bf8317d9a9c97f383ee0bef02235042349eb73bce5421c294b654",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 241,
+      "source_file": "offline/0075-procedure_callees.evidence.json",
+      "raw_file_sha256": "33a799b743b756395cdedce6da0af5f95cb7d2ac8c2ba4eb85bcc4936b104679",
+      "evidence_id": "ev_3cfbe29404737fd19fa7e83f65d493ffd0f57325f95e551236a6e242cdc56553",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 242,
+      "source_file": "offline/0076-search_procedures.evidence.json",
+      "raw_file_sha256": "dc703948f3c3f2e88dda2b2eaba679b0dd1625d3711eabe0dd5810bde5e286e9",
+      "evidence_id": "ev_f7b31bf2c27cfeab8a440c64dbe734d40eca5b82c6de9cb3deddd3c33fad7358",
+      "operation": "search_procedures",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 243,
+      "source_file": "offline/0077-procedure_callers.evidence.json",
+      "raw_file_sha256": "a3046642009e7ca51ed9cbae11c758b92e2cd07a4f0703d2e71895ae4f6c740c",
+      "evidence_id": "ev_0b2eb3eff8c010084b8f1568e9520a78abb4ab0c2c727662af060b0cbc90b347",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 244,
+      "source_file": "offline/0078-procedure_callers.evidence.json",
+      "raw_file_sha256": "dcc98400b5a8fd0fcc3c9f1f14d4c572ae8a185346d236dcd4ab6c4af694dbda",
+      "evidence_id": "ev_be39ea89428ecc9aa95d32a6744c64c46a2badff46af7ebaf37d00df4583ae29",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 245,
+      "source_file": "offline/0079-procedure_callers.evidence.json",
+      "raw_file_sha256": "f16669629cb72b37a548f084b45071531a20b02280006159a7666b7f4c947736",
+      "evidence_id": "ev_52992473aeecde2ded18383364c3520c0c7eaed6ba30d13300a19c6625f2778e",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 246,
+      "source_file": "offline/0080-procedure_callers.evidence.json",
+      "raw_file_sha256": "73d3fc2c8f4e9f652d7a92164f9cabe712acc9f381cdddf480a7bb1e5f6c6d1d",
+      "evidence_id": "ev_2fedcb0c9143584cd608c112292398abcfb3916ad0de0f58982cafedace2fbe2",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 247,
+      "source_file": "offline/0081-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "7830ea267fd93b2678eb3de3859cab4aa4b8bc4f420fe71e8350175ca6913e58",
+      "evidence_id": "ev_50b3a64afab470bfaf749c26076d44caebb2d29b4e5d2f68cc3a10905f7763a5",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 248,
+      "source_file": "offline/0082-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "ca1cf70238c14c497a08fb83648688101431213c12e6ab6cadc17fcbd34903f1",
+      "evidence_id": "ev_4cbb822ad37feeffb095c29a06ea00c599c8f4da03ce6af07cf9d6129071cc08",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 249,
+      "source_file": "offline/0083-procedure_pseudo_code.evidence.json",
+      "raw_file_sha256": "796af56cfa4292a1f7ccfb27435271b90ec059a1d6044e99fbee50a374dc45a7",
+      "evidence_id": "ev_d14972d6c97b2915edf8b8de00e6560526237870302859516cad91736177623e",
+      "operation": "procedure_pseudo_code",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 250,
+      "source_file": "offline/0084-procedure_info.evidence.json",
+      "raw_file_sha256": "89d2f947cf956d3dce541db76886ec607d563a97a525832bfe0bfe85a32cdd3c",
+      "evidence_id": "ev_5794519200ae9ea5b03055fbd5272f2709eb3119dd05bdd9c7a7cc4e051a51d7",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 251,
+      "source_file": "offline/0085-procedure_info.evidence.json",
+      "raw_file_sha256": "fc544cec5372654355ae8aa74f23dc0f529708db59d0c2e1fac28bf99c813104",
+      "evidence_id": "ev_eeb18ec1503c191ed183c35825ecf8261d87afe640051958daa765aab34ecd43",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 252,
+      "source_file": "offline/0086-procedure_info.evidence.json",
+      "raw_file_sha256": "a150c5a03280f8375d62b6f514c8438bd62f55934c13b8cd480880e542fe3da7",
+      "evidence_id": "ev_ed58310bc3722d7163969df74fb5be12ebddccf98a9a8b25bbf6678066eb4be8",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 253,
+      "source_file": "offline/0087-procedure_info.evidence.json",
+      "raw_file_sha256": "a477edd4fc4bd5bcb4d4e9303e4973ece2c6d4d256151b45310ad84c48000f64",
+      "evidence_id": "ev_0e882d5d47a897814941f9105e10cb52dab63af096d14a93de3abfd43e9da82d",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 254,
+      "source_file": "offline/0088-procedure_info.evidence.json",
+      "raw_file_sha256": "7a255abff8504ec43a1713b60961ea706ecf8c5bd00827eafc9a7b927cc15cf2",
+      "evidence_id": "ev_76831c2cb66fa86975db72d470de7d7c178624118acecd64947e515e1f0e1519",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 255,
+      "source_file": "offline/0089-procedure_info.evidence.json",
+      "raw_file_sha256": "d6bebdae8edc6607c5e6e2cf68773ff3be8f186e3be49fa1d7a9091b4fdcc82e",
+      "evidence_id": "ev_f227796ad0965779bb00729f7ca5028fde1b811f699ea4387f65c443a6c8fb79",
+      "operation": "procedure_info",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 256,
+      "source_file": "offline/0090-procedure_callers.evidence.json",
+      "raw_file_sha256": "76d84ede0b8a6d3fbf7030ea7404e63754e70c49a545edf1f446961eff301eed",
+      "evidence_id": "ev_cfce2fd385dbc0866b3a2b7cf09c13c974274c43a5e3cf10e1978ff3c0f200e4",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 257,
+      "source_file": "offline/0091-procedure_callees.evidence.json",
+      "raw_file_sha256": "7c2ba9796a4bb84b16404faf691073db2894b262ec6bac95380916e264465956",
+      "evidence_id": "ev_302b25074bcc3cc108ce84f7fbb32f1b1996814a5fed9c556544b85be474591e",
+      "operation": "procedure_callees",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 258,
+      "source_file": "offline/0092-procedure_callers.evidence.json",
+      "raw_file_sha256": "0078a63456355c0d4c415a7eadd9894a17e142a5f66d1feb22a0f7ca84ad62b0",
+      "evidence_id": "ev_c01adf6d02c3223ca34b5a14b78968826dd29a704e37c57e696b1d7c4479e8f7",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 259,
+      "source_file": "offline/0093-procedure_callers.evidence.json",
+      "raw_file_sha256": "c45dadbdd212e8f85ea6fd36172bd62f4c1466fb2fcd552a088c8d8b07ca0eef",
+      "evidence_id": "ev_9c08a0eefb4bd929449368b0005b27f12ec3d1c1cd846adb035383d4b50601d0",
+      "operation": "procedure_callers",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 260,
+      "source_file": "offline/0094-read_bytes.evidence.json",
+      "raw_file_sha256": "599178ca1314a38cc8aca8f3a6146ffd7b5e29b79c3385c65390f4c0574a5795",
+      "evidence_id": "ev_59e9172d8e726e8aa3e3bd2a43238828c2773a7d7a16121100e836aaa88f381f",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 261,
+      "source_file": "offline/0095-read_bytes.evidence.json",
+      "raw_file_sha256": "98a24001b8d2ff65d04571bb03d8dbfc847d5586e418569f7d18dae356ab9398",
+      "evidence_id": "ev_4b0b8e0912ee98993d97b62982df63dd4491a757b4d45b64749b0ae7414f7beb",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 262,
+      "source_file": "offline/0096-read_bytes.evidence.json",
+      "raw_file_sha256": "13f222faa5596338fbe11cbd569d66d0f47c44944df08754d9ed451c12710c43",
+      "evidence_id": "ev_4c0f6eef519de7f5111a4a8545c96f7ebc042f3f9b56e2a76fa6338d9b27a651",
+      "operation": "read_bytes",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 263,
+      "source_file": "offline/0097-export_evidence_bundle.evidence.json",
+      "raw_file_sha256": "a06c8cd98d1caab0769922c93d2bca86337d84ac7fd594c43ff0b86ec260ba5b",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 264,
+      "source_file": "offline/0098-close_binary.evidence.json",
+      "raw_file_sha256": "5159c000ca74ed66ac1720037f042b123fe075018b437faf2767962b412b9632",
+      "evidence_id": null,
+      "operation": null,
+      "record_type": "diagnostic",
+      "source_aliases": []
+    },
+    {
+      "line": 265,
+      "source_file": "retained/ev_0fe271eb13253516791c0176b1ffc1d3a8f20117a5ad5e1c366e02bf91aef967.json",
+      "raw_file_sha256": "b117663f5923f5315b62b7b3f3254e73006b26ad6150154b417d5b1c7981e085",
+      "evidence_id": "ev_0fe271eb13253516791c0176b1ffc1d3a8f20117a5ad5e1c366e02bf91aef967",
+      "operation": "read_binary_inventory_summary",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 266,
+      "source_file": "retained/ev_12be02a07a33ed4d1164f5627424fa8a32665e6c021dee050ace5255a32fbf68.json",
+      "raw_file_sha256": "e368b3dc5c459849093aef0b3f16157f5ce0fd54cc6568cf36a81121fff5b74a",
+      "evidence_id": "ev_12be02a07a33ed4d1164f5627424fa8a32665e6c021dee050ace5255a32fbf68",
+      "operation": "read_binary_inventory_summary",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 267,
+      "source_file": "retained/ev_a35965ba3835aefe9723502d4d59800455bf09a058753ce860329e1a9a3ba91d.json",
+      "raw_file_sha256": "c81dc1f0ef3d3b8267b0cebcba70af9f904ebf3d732f8ce6ed1f644704c8c155",
+      "evidence_id": "ev_a35965ba3835aefe9723502d4d59800455bf09a058753ce860329e1a9a3ba91d",
+      "operation": "read_binary_inventory_summary",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    },
+    {
+      "line": 268,
+      "source_file": "retained/ev_bdce96b8aa19f1171a65330d8bb2b5296421c3917f33cbf8e9f6a1dc07404f10.json",
+      "raw_file_sha256": "7f6121041372381bdb303190108193d4cd089829b9c460df0cb80b6146d00292",
+      "evidence_id": "ev_bdce96b8aa19f1171a65330d8bb2b5296421c3917f33cbf8e9f6a1dc07404f10",
+      "operation": "read_binary_inventory_summary",
+      "record_type": "normalized_projection",
+      "source_aliases": []
+    }
+  ]
+}

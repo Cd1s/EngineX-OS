@@ -1,0 +1,50 @@
+{
+  "magic": "AZ01",
+  "wire_version": 1,
+  "build": "SNAPSHOT-20260724110618",
+  "compatible": [
+    "inmusic,jp07",
+    "inmusic,jp08",
+    "inmusic,jp11"
+  ],
+  "usb_devices": [
+    367316998,
+    367317002,
+    367317004
+  ],
+  "description": "Planck AZ01 Player upgrade Image",
+  "table_offset": 160,
+  "file_size": 182331488,
+  "sha256": "52e8526bbfd273e5185b5d8c2a9cbe32436c3acd1c77dcfde97e40a34c5b24d7",
+  "partitions": [
+    {
+      "name": "splash",
+      "compression": "none",
+      "entry": 160,
+      "offset": 240,
+      "size": 4096000,
+      "digest_at": 220,
+      "sha1": "cb30d080e8661feb7d745ec55d27af4b09a8f06d"
+    },
+    {
+      "name": "recoverysplash",
+      "compression": "none",
+      "entry": 4096240,
+      "offset": 4096328,
+      "size": 4096000,
+      "digest_at": 4096308,
+      "sha1": "67fb8d4b8afbe213b669fb1414f4a96a29e0f80d"
+    },
+    {
+      "name": "rootfs",
+      "compression": "xz",
+      "entry": 8192328,
+      "offset": 8192404,
+      "size": 174139068,
+      "digest_at": 8192384,
+      "sha1": "c1456f89548b0b86fc65b369c14cf859147c8743"
+    }
+  ],
+  "eof_offset": 182331472,
+  "verified": true
+}

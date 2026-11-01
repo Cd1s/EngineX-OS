@@ -1,0 +1,1367 @@
+{
+  "database": "/root/build/sc5000-lab/5.0.4/tree/usr/Engine/Content/DemoDevice/Engine Library/Database2/m.db",
+  "database_sha256": "3a54126c9d62f1f59c98548ed9f672fa61463a73b1be849fe451449865405593",
+  "scope": "shipped demo samples, observed layouts only",
+  "records": [
+    {
+      "trackId": 1,
+      "trackData": {
+        "blob_length": 27,
+        "raw_length": 44,
+        "blob_sha256": "10cf9d6c9016612c67907a1a1b6f29fc1cbea48b6577b42e1e931eba451abaea",
+        "sample_rate": 44100.0,
+        "sample_length": 17379264,
+        "offset16_u32_candidate_analyzed_key": 1,
+        "unknown_doubles": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "consumed": 44,
+        "unknown_tail_hex": ""
+      },
+      "overviewWaveFormData": {
+        "blob_length": 2692,
+        "raw_length": 3099,
+        "blob_sha256": "80aad7fa3177ab9999332f282ce90b4a0176a2040d0505954b5f379b5cd68f82",
+        "header_u64": [
+          1024,
+          1024
+        ],
+        "offset16_double": 16971.85546875,
+        "data_length": 3075,
+        "triple_count": 1025,
+        "first_eight_triples": [
+          44,
+          48,
+          32,
+          46,
+          45,
+          19,
+          41,
+          38,
+          12,
+          25,
+          29,
+          17,
+          39,
+          26,
+          11,
+          51,
+          36,
+          11,
+          48,
+          36,
+          10,
+          44,
+          36,
+          11
+        ],
+        "consumed": 3099,
+        "unknown_tail_hex": ""
+      },
+      "beatData": {
+        "blob_length": 71,
+        "raw_length": 138,
+        "blob_sha256": "c20aff4c4794e9330f751fe95ded22e2a170d61e1fb78356742ebc2e2b1cfff5",
+        "sample_rate": 44100.0,
+        "sample_length": 17379264.0,
+        "is_set": 1,
+        "default_grid": [
+          {
+            "sample_position": -79328.07706193099,
+            "beat_index": -4,
+            "beats_until_next": 838,
+            "unknown_u32": 2953727608
+          },
+          {
+            "sample_position": 17380104.99380421,
+            "beat_index": 834,
+            "beats_until_next": 0,
+            "unknown_u32": 2973755000
+          }
+        ],
+        "adjusted_grid": [
+          {
+            "sample_position": -79328.07706193099,
+            "beat_index": -4,
+            "beats_until_next": 838,
+            "unknown_u32": 2953727608
+          },
+          {
+            "sample_position": 17380104.99380421,
+            "beat_index": 834,
+            "beats_until_next": 0,
+            "unknown_u32": 2973755000
+          }
+        ],
+        "consumed": 129,
+        "unknown_tail_hex": "000000000000000000"
+      },
+      "quickCues": {
+        "blob_length": 110,
+        "raw_length": 152,
+        "blob_sha256": "764f6b3128ea600d3f25f6ff2d37d5c92c23583bbb331ba16f46e3c02e70a452",
+        "cues": [
+          {
+            "label": {
+              "text": "Intro",
+              "bytes_hex": "496e74726f"
+            },
+            "sample_position": 4010.4929199218604,
+            "argb": "fff4d345"
+          },
+          {
+            "label": {
+              "text": "Drop",
+              "bytes_hex": "44726f70"
+            },
+            "sample_position": 6671097.107093151,
+            "argb": "ffef8130"
+          },
+          {
+            "label": {
+              "text": "Breakdown",
+              "bytes_hex": "427265616b646f776e"
+            },
+            "sample_position": 9337931.752762442,
+            "argb": "ff9253c4"
+          },
+          {
+            "label": {
+              "text": "Outro",
+              "bytes_hex": "4f7574726f"
+            },
+            "sample_position": 16005018.36693567,
+            "argb": "ffce3232"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          }
+        ],
+        "main_cue_position": 4010.4929199218604,
+        "main_cue_overridden": 0,
+        "default_cue_position": 4010.5056152343604,
+        "consumed": 152,
+        "unknown_tail_hex": ""
+      },
+      "loops": {
+        "blob_length": 212,
+        "raw_length": 212,
+        "blob_sha256": "7e061a96c7d7d7bf8c0007f6b6cac035510b1361e0c9856d3b76b2dc88edea1a",
+        "loops": [
+          {
+            "label": {
+              "text": "Intro Loop",
+              "bytes_hex": "496e74726f204c6f6f70"
+            },
+            "start_sample": 670719.1543372447,
+            "end_sample": 1337427.8157545675,
+            "start_set": 1,
+            "end_set": 1,
+            "argb": "fff4d345"
+          },
+          {
+            "label": {
+              "text": "Outro Loop",
+              "bytes_hex": "4f7574726f204c6f6f70"
+            },
+            "start_sample": 16671727.028352993,
+            "end_sample": 17005081.35906165,
+            "start_set": 1,
+            "end_set": 1,
+            "argb": "ffef8130"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          }
+        ],
+        "padding_hex": "00000000000000",
+        "consumed": 212,
+        "unknown_tail_hex": ""
+      },
+      "thirdPartySourceId": null,
+      "activeOnLoadLoops": null
+    },
+    {
+      "trackId": 2,
+      "trackData": {
+        "blob_length": 44,
+        "raw_length": 44,
+        "blob_sha256": "995b004a1e94b9a129243d8923c34e2147f674e85e664856fc5db25d1d7612d3",
+        "sample_rate": 44100.0,
+        "sample_length": 17866688,
+        "offset16_u32_candidate_analyzed_key": 5,
+        "unknown_doubles": [
+          0.6855232119560242,
+          0.38459399342536926,
+          0.29237979650497437
+        ],
+        "consumed": 44,
+        "unknown_tail_hex": ""
+      },
+      "overviewWaveFormData": {
+        "blob_length": 2692,
+        "raw_length": 3099,
+        "blob_sha256": "35dd492ff5c9a136ee0377c60256c7a2fbe8d22a0eab4f994a0509afdf93ff37",
+        "header_u64": [
+          1024,
+          1024
+        ],
+        "offset16_double": 17447.63671875,
+        "data_length": 3075,
+        "triple_count": 1025,
+        "first_eight_triples": [
+          143,
+          32,
+          4,
+          132,
+          40,
+          12,
+          125,
+          34,
+          3,
+          110,
+          35,
+          11,
+          94,
+          24,
+          3,
+          125,
+          26,
+          2,
+          139,
+          42,
+          12,
+          133,
+          31,
+          3
+        ],
+        "consumed": 3099,
+        "unknown_tail_hex": ""
+      },
+      "beatData": {
+        "blob_length": 55,
+        "raw_length": 130,
+        "blob_sha256": "a3cfbfd3678ca9a15bb3d5f85e01ca0ac1be895c033dca848ce71a4155014721",
+        "sample_rate": 44100.0,
+        "sample_length": 17866688.0,
+        "is_set": 1,
+        "default_grid": [
+          {
+            "sample_position": -84672.0,
+            "beat_index": -4,
+            "beats_until_next": 849,
+            "unknown_u32": 0
+          },
+          {
+            "sample_position": 17886960.0,
+            "beat_index": 845,
+            "beats_until_next": 0,
+            "unknown_u32": 32767
+          }
+        ],
+        "adjusted_grid": [
+          {
+            "sample_position": -84672.0,
+            "beat_index": -4,
+            "beats_until_next": 849,
+            "unknown_u32": 0
+          },
+          {
+            "sample_position": 17886960.0,
+            "beat_index": 845,
+            "beats_until_next": 0,
+            "unknown_u32": 32767
+          }
+        ],
+        "consumed": 129,
+        "unknown_tail_hex": "00"
+      },
+      "quickCues": {
+        "blob_length": 84,
+        "raw_length": 152,
+        "blob_sha256": "ab1ea252adfa6b8b0759bee1cbe01b4a53c2d964466b3e5a3e477699ac43be7b",
+        "cues": [
+          {
+            "label": {
+              "text": "Intro",
+              "bytes_hex": "496e74726f"
+            },
+            "sample_position": 0.0,
+            "argb": "fff4d345"
+          },
+          {
+            "label": {
+              "text": "Drop",
+              "bytes_hex": "44726f70"
+            },
+            "sample_position": 8128512.0,
+            "argb": "ffef8130"
+          },
+          {
+            "label": {
+              "text": "Breakdown",
+              "bytes_hex": "427265616b646f776e"
+            },
+            "sample_position": 10838016.0,
+            "argb": "ff9253c4"
+          },
+          {
+            "label": {
+              "text": "Outro",
+              "bytes_hex": "4f7574726f"
+            },
+            "sample_position": 14224896.0,
+            "argb": "ffce3232"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          }
+        ],
+        "main_cue_position": 0.0,
+        "main_cue_overridden": 0,
+        "default_cue_position": 0.0,
+        "consumed": 152,
+        "unknown_tail_hex": ""
+      },
+      "loops": {
+        "blob_length": 212,
+        "raw_length": 212,
+        "blob_sha256": "2b1330628a4bc6e932879bdec9b68c837251956b8683f823c1df52ed9c096554",
+        "loops": [
+          {
+            "label": {
+              "text": "Intro Loop",
+              "bytes_hex": "496e74726f204c6f6f70"
+            },
+            "start_sample": 677376.0,
+            "end_sample": 1354752.0,
+            "start_set": 1,
+            "end_set": 1,
+            "argb": "fff4d345"
+          },
+          {
+            "label": {
+              "text": "Outro Loop",
+              "bytes_hex": "4f7574726f204c6f6f70"
+            },
+            "start_sample": 16257024.0,
+            "end_sample": 16934400.0,
+            "start_set": 1,
+            "end_set": 1,
+            "argb": "ffef8130"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          }
+        ],
+        "padding_hex": "00000000000000",
+        "consumed": 212,
+        "unknown_tail_hex": ""
+      },
+      "thirdPartySourceId": null,
+      "activeOnLoadLoops": null
+    },
+    {
+      "trackId": 5,
+      "trackData": {
+        "blob_length": 44,
+        "raw_length": 44,
+        "blob_sha256": "130f9e199f9af83ed0cce3f70f58afa864237ab2dece13c3e6218de77e1bde84",
+        "sample_rate": 44100.0,
+        "sample_length": 20205504,
+        "offset16_u32_candidate_analyzed_key": 19,
+        "unknown_doubles": [
+          0.5239492654800415,
+          0.2812095284461975,
+          0.3152896463871002
+        ],
+        "consumed": 44,
+        "unknown_tail_hex": ""
+      },
+      "overviewWaveFormData": {
+        "blob_length": 2561,
+        "raw_length": 3099,
+        "blob_sha256": "d1d3db913c689191d499c9d78ef77cd36f1fb60ecbfd049b43091b7b3b1f0061",
+        "header_u64": [
+          1024,
+          1024
+        ],
+        "offset16_double": 19731.796875,
+        "data_length": 3075,
+        "triple_count": 1025,
+        "first_eight_triples": [
+          114,
+          38,
+          15,
+          105,
+          40,
+          21,
+          109,
+          34,
+          15,
+          105,
+          42,
+          22,
+          107,
+          34,
+          14,
+          104,
+          39,
+          19,
+          105,
+          34,
+          11,
+          100,
+          42,
+          16
+        ],
+        "consumed": 3099,
+        "unknown_tail_hex": ""
+      },
+      "beatData": {
+        "blob_length": 93,
+        "raw_length": 138,
+        "blob_sha256": "d049289f25dcc5dfbe0781dcb06d3e35ab23f57675b120bc18ab7376ea4864ed",
+        "sample_rate": 44100.0,
+        "sample_length": 20205504.0,
+        "is_set": 1,
+        "default_grid": [
+          {
+            "sample_position": -72926.54296875,
+            "beat_index": -4,
+            "beats_until_next": 966,
+            "unknown_u32": 2964190856
+          },
+          {
+            "sample_position": 20213073.45703125,
+            "beat_index": 962,
+            "beats_until_next": 0,
+            "unknown_u32": 2973755000
+          }
+        ],
+        "adjusted_grid": [
+          {
+            "sample_position": -83709.21341266514,
+            "beat_index": -4,
+            "beats_until_next": 967,
+            "unknown_u32": 2964190856
+          },
+          {
+            "sample_position": 20223290.786587343,
+            "beat_index": 963,
+            "beats_until_next": 0,
+            "unknown_u32": 2973755000
+          }
+        ],
+        "consumed": 129,
+        "unknown_tail_hex": "000000000000000000"
+      },
+      "quickCues": {
+        "blob_length": 109,
+        "raw_length": 152,
+        "blob_sha256": "8964618046d25216c03c6f2bce9b1f2296c86fa3fc42a3d89b6bec9f11587a9e",
+        "cues": [
+          {
+            "label": {
+              "text": "Intro",
+              "bytes_hex": "496e74726f"
+            },
+            "sample_position": 505.6474713423813,
+            "argb": "fff4d345"
+          },
+          {
+            "label": {
+              "text": "Drop",
+              "bytes_hex": "44726f70"
+            },
+            "sample_position": 8064505.64747135,
+            "argb": "ffef8130"
+          },
+          {
+            "label": {
+              "text": "Breakdown",
+              "bytes_hex": "427265616b646f776e"
+            },
+            "sample_position": 9408505.64747135,
+            "argb": "ff9253c4"
+          },
+          {
+            "label": {
+              "text": "Outro",
+              "bytes_hex": "4f7574726f"
+            },
+            "sample_position": 18816505.647471357,
+            "argb": "ffce3232"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          }
+        ],
+        "main_cue_position": 290.78658733489283,
+        "main_cue_overridden": 0,
+        "default_cue_position": 290.78658733489283,
+        "consumed": 152,
+        "unknown_tail_hex": ""
+      },
+      "loops": {
+        "blob_length": 212,
+        "raw_length": 212,
+        "blob_sha256": "0286526f2b3bf690413b35241a897579848cbc60aa538f4ae4f84d33d171e5fb",
+        "loops": [
+          {
+            "label": {
+              "text": "Intro Loop",
+              "bytes_hex": "496e74726f204c6f6f70"
+            },
+            "start_sample": 672505.647471343,
+            "end_sample": 1344505.6474713434,
+            "start_set": 1,
+            "end_set": 1,
+            "argb": "fff4d345"
+          },
+          {
+            "label": {
+              "text": "Outro Loop",
+              "bytes_hex": "4f7574726f204c6f6f70"
+            },
+            "start_sample": 19488505.64747136,
+            "end_sample": 20160505.64747136,
+            "start_set": 1,
+            "end_set": 1,
+            "argb": "ffef8130"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          }
+        ],
+        "padding_hex": "00000000000000",
+        "consumed": 212,
+        "unknown_tail_hex": ""
+      },
+      "thirdPartySourceId": null,
+      "activeOnLoadLoops": null
+    },
+    {
+      "trackId": 6,
+      "trackData": {
+        "blob_length": 27,
+        "raw_length": 44,
+        "blob_sha256": "03898ca29486619596b2d6a241897aa6e5739c7b22b4a4a3203aedd0c35d64ba",
+        "sample_rate": 44100.0,
+        "sample_length": 11440064,
+        "offset16_u32_candidate_analyzed_key": 15,
+        "unknown_doubles": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "consumed": 44,
+        "unknown_tail_hex": ""
+      },
+      "overviewWaveFormData": {
+        "blob_length": 2726,
+        "raw_length": 3099,
+        "blob_sha256": "1647514232744c88805a01825d3b7afe9d02a0a5146e7f3a36417f31da80d5a3",
+        "header_u64": [
+          1024,
+          1024
+        ],
+        "offset16_double": 11171.8359375,
+        "data_length": 3075,
+        "triple_count": 1025,
+        "first_eight_triples": [
+          48,
+          54,
+          22,
+          5,
+          12,
+          23,
+          51,
+          56,
+          21,
+          5,
+          15,
+          20,
+          53,
+          49,
+          10,
+          11,
+          24,
+          17,
+          42,
+          37,
+          18,
+          21,
+          36,
+          12
+        ],
+        "consumed": 3099,
+        "unknown_tail_hex": ""
+      },
+      "beatData": {
+        "blob_length": 70,
+        "raw_length": 138,
+        "blob_sha256": "67669b51fc601dc4184f3c8d1de6e25f79df9808fb3c2f80f05370dc33734f79",
+        "sample_rate": 44100.0,
+        "sample_length": 11440064.0,
+        "is_set": 1,
+        "default_grid": [
+          {
+            "sample_position": -83534.83870967742,
+            "beat_index": -4,
+            "beats_until_next": 541,
+            "unknown_u32": 32644
+          },
+          {
+            "sample_position": 11460707.096774194,
+            "beat_index": 537,
+            "beats_until_next": 0,
+            "unknown_u32": 32767
+          }
+        ],
+        "adjusted_grid": [
+          {
+            "sample_position": -83534.83870967742,
+            "beat_index": -4,
+            "beats_until_next": 541,
+            "unknown_u32": 32644
+          },
+          {
+            "sample_position": 11460707.096774194,
+            "beat_index": 537,
+            "beats_until_next": 0,
+            "unknown_u32": 32767
+          }
+        ],
+        "consumed": 129,
+        "unknown_tail_hex": "000000000000000000"
+      },
+      "quickCues": {
+        "blob_length": 98,
+        "raw_length": 152,
+        "blob_sha256": "032fbd6e32e9ee62a0f6a88aa1446c7f8ec8c2ace3a28eb0b194b57bc8eecf58",
+        "cues": [
+          {
+            "label": {
+              "text": "Intro",
+              "bytes_hex": "496e74726f"
+            },
+            "sample_position": 1820.0,
+            "argb": "fff4d345"
+          },
+          {
+            "label": {
+              "text": "Drop",
+              "bytes_hex": "44726f70"
+            },
+            "sample_position": 2903884.5161290322,
+            "argb": "ffef8130"
+          },
+          {
+            "label": {
+              "text": "Breakdown",
+              "bytes_hex": "427265616b646f776e"
+            },
+            "sample_position": 4952400.645161291,
+            "argb": "ff9253c4"
+          },
+          {
+            "label": {
+              "text": "Outro",
+              "bytes_hex": "4f7574726f"
+            },
+            "sample_position": 10585820.0,
+            "argb": "ffce3232"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          }
+        ],
+        "main_cue_position": 1820.0,
+        "main_cue_overridden": 0,
+        "default_cue_position": 1820.0,
+        "consumed": 152,
+        "unknown_tail_hex": ""
+      },
+      "loops": {
+        "blob_length": 212,
+        "raw_length": 212,
+        "blob_sha256": "16eaa52793904ac09040c8afe17dde4cd14d7acaec6e3f47e44412f7b952c86d",
+        "loops": [
+          {
+            "label": {
+              "text": "Intro Loop",
+              "bytes_hex": "496e74726f204c6f6f70"
+            },
+            "start_sample": 1820.0,
+            "end_sample": 343239.3548387097,
+            "start_set": 1,
+            "end_set": 1,
+            "argb": "fff4d345"
+          },
+          {
+            "label": {
+              "text": "Outro Loop",
+              "bytes_hex": "4f7574726f204c6f6f70"
+            },
+            "start_sample": 10585820.0,
+            "end_sample": 10927239.35483871,
+            "start_set": 1,
+            "end_set": 1,
+            "argb": "ffef8130"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          }
+        ],
+        "padding_hex": "00000000000000",
+        "consumed": 212,
+        "unknown_tail_hex": ""
+      },
+      "thirdPartySourceId": null,
+      "activeOnLoadLoops": null
+    },
+    {
+      "trackId": 7,
+      "trackData": {
+        "blob_length": 27,
+        "raw_length": 44,
+        "blob_sha256": "90e4f4d6fbe9374a00a0dd6f84aeef00e9510edf18e68a5d28135aef93f83568",
+        "sample_rate": 44100.0,
+        "sample_length": 16310208,
+        "offset16_u32_candidate_analyzed_key": 1,
+        "unknown_doubles": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "consumed": 44,
+        "unknown_tail_hex": ""
+      },
+      "overviewWaveFormData": {
+        "blob_length": 2773,
+        "raw_length": 3099,
+        "blob_sha256": "0e52559883c116103faf5edeb707add4d1724172e4a36cd797db9205346568f1",
+        "header_u64": [
+          1024,
+          1024
+        ],
+        "offset16_double": 15927.59765625,
+        "data_length": 3075,
+        "triple_count": 1025,
+        "first_eight_triples": [
+          13,
+          49,
+          27,
+          12,
+          59,
+          20,
+          10,
+          38,
+          22,
+          5,
+          27,
+          19,
+          8,
+          48,
+          32,
+          7,
+          25,
+          12,
+          7,
+          46,
+          32,
+          7,
+          36,
+          20
+        ],
+        "consumed": 3099,
+        "unknown_tail_hex": ""
+      },
+      "beatData": {
+        "blob_length": 64,
+        "raw_length": 138,
+        "blob_sha256": "ab0646ca63f217b4282a5a61aec7e255993b62beb2fc35e5a91e14bcdde268ad",
+        "sample_rate": 44100.0,
+        "sample_length": 16310208.0,
+        "is_set": 1,
+        "default_grid": [
+          {
+            "sample_position": -84672.0,
+            "beat_index": -4,
+            "beats_until_next": 775,
+            "unknown_u32": 2958744976
+          },
+          {
+            "sample_position": 16320528.0,
+            "beat_index": 771,
+            "beats_until_next": 0,
+            "unknown_u32": 2973755000
+          }
+        ],
+        "adjusted_grid": [
+          {
+            "sample_position": -84672.0,
+            "beat_index": -4,
+            "beats_until_next": 775,
+            "unknown_u32": 2958744976
+          },
+          {
+            "sample_position": 16320528.0,
+            "beat_index": 771,
+            "beats_until_next": 0,
+            "unknown_u32": 2973755000
+          }
+        ],
+        "consumed": 129,
+        "unknown_tail_hex": "000000000000000000"
+      },
+      "quickCues": {
+        "blob_length": 101,
+        "raw_length": 152,
+        "blob_sha256": "033a69d3ac95c3a9c1aa05d707cafc23a3d484fabf62febca282c131c0f17480",
+        "cues": [
+          {
+            "label": {
+              "text": "Intro",
+              "bytes_hex": "496e74726f"
+            },
+            "sample_position": 399.4629070085939,
+            "argb": "fff4d345"
+          },
+          {
+            "label": {
+              "text": "Breakdown",
+              "bytes_hex": "427265616b646f776e"
+            },
+            "sample_position": 7959567.462907013,
+            "argb": "ffef8130"
+          },
+          {
+            "label": {
+              "text": "Drop",
+              "bytes_hex": "44726f70"
+            },
+            "sample_position": 10161039.462907014,
+            "argb": "ff9253c4"
+          },
+          {
+            "label": {
+              "text": "Outro",
+              "bytes_hex": "4f7574726f"
+            },
+            "sample_position": 15410703.462907016,
+            "argb": "ffce3232"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "sample_position": -1.0,
+            "argb": "00000000"
+          }
+        ],
+        "main_cue_position": 0.0,
+        "main_cue_overridden": 0,
+        "default_cue_position": 0.0,
+        "consumed": 152,
+        "unknown_tail_hex": ""
+      },
+      "loops": {
+        "blob_length": 212,
+        "raw_length": 212,
+        "blob_sha256": "30d3cea7d9761cf8d057e95ca854138ec3de323b407b4268ca4d6a5797cc8301",
+        "loops": [
+          {
+            "label": {
+              "text": "Intro Loop",
+              "bytes_hex": "496e74726f204c6f6f70"
+            },
+            "start_sample": 339087.46290700877,
+            "end_sample": 677775.462907009,
+            "start_set": 1,
+            "end_set": 1,
+            "argb": "fff4d345"
+          },
+          {
+            "label": {
+              "text": "Outro Loop",
+              "bytes_hex": "4f7574726f204c6f6f70"
+            },
+            "start_sample": 15410703.462907016,
+            "end_sample": 15749391.462907016,
+            "start_set": 1,
+            "end_set": 1,
+            "argb": "ffef8130"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          },
+          {
+            "label": {
+              "text": "",
+              "bytes_hex": ""
+            },
+            "start_sample": -1.0,
+            "end_sample": -1.0,
+            "start_set": 0,
+            "end_set": 0,
+            "argb": "00000000"
+          }
+        ],
+        "padding_hex": "00000000000000",
+        "consumed": 212,
+        "unknown_tail_hex": ""
+      },
+      "thirdPartySourceId": null,
+      "activeOnLoadLoops": null
+    }
+  ]
+}

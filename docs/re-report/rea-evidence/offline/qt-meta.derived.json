@@ -1,0 +1,283 @@
+{
+  "derivation": "Qt6 revision12 QMetaObject data decoded from REA read_bytes; analyst-derived, not independent REA operation",
+  "source_evidence_ids": [
+    "ev_59e9172d8e726e8aa3e3bd2a43238828c2773a7d7a16121100e836aaa88f381f",
+    "ev_4b0b8e0912ee98993d97b62982df63dd4491a757b4d45b64749b0ae7414f7beb",
+    "ev_4c0f6eef519de7f5111a4a8545c96f7ebc042f3f9b56e2a76fa6338d9b27a651"
+  ],
+  "static_metaobject_ghidra_va": "0x14c518",
+  "class_name": "BeatDetectionRunner",
+  "method_count": 16,
+  "signal_count": 12,
+  "methods": [
+    {
+      "local_method_id": 0,
+      "name": "finished",
+      "argument_count": 0,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        1,
+        0,
+        110,
+        2,
+        6,
+        1
+      ]
+    },
+    {
+      "local_method_id": 1,
+      "name": "detectionStarted",
+      "argument_count": 0,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        3,
+        0,
+        111,
+        2,
+        6,
+        2
+      ]
+    },
+    {
+      "local_method_id": 2,
+      "name": "detectionFinished",
+      "argument_count": 1,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        4,
+        1,
+        112,
+        2,
+        6,
+        3
+      ]
+    },
+    {
+      "local_method_id": 3,
+      "name": "detectionPaused",
+      "argument_count": 0,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        6,
+        0,
+        115,
+        2,
+        6,
+        5
+      ]
+    },
+    {
+      "local_method_id": 4,
+      "name": "detectionResumed",
+      "argument_count": 0,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        7,
+        0,
+        116,
+        2,
+        6,
+        6
+      ]
+    },
+    {
+      "local_method_id": 5,
+      "name": "detectionStopped",
+      "argument_count": 0,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        8,
+        0,
+        117,
+        2,
+        6,
+        7
+      ]
+    },
+    {
+      "local_method_id": 6,
+      "name": "detectionProgress",
+      "argument_count": 1,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        9,
+        1,
+        118,
+        2,
+        6,
+        8
+      ]
+    },
+    {
+      "local_method_id": 7,
+      "name": "detectionError",
+      "argument_count": 0,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        11,
+        0,
+        121,
+        2,
+        6,
+        10
+      ]
+    },
+    {
+      "local_method_id": 8,
+      "name": "trackDataChunkProcessed",
+      "argument_count": 1,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        12,
+        1,
+        122,
+        2,
+        6,
+        11
+      ]
+    },
+    {
+      "local_method_id": 9,
+      "name": "beatDataChunkProcessed",
+      "argument_count": 1,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        14,
+        1,
+        125,
+        2,
+        6,
+        13
+      ]
+    },
+    {
+      "local_method_id": 10,
+      "name": "overviewWaveChunkProcessed",
+      "argument_count": 1,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        16,
+        1,
+        128,
+        2,
+        6,
+        15
+      ]
+    },
+    {
+      "local_method_id": 11,
+      "name": "overviewWaveChunkProcessedRGB",
+      "argument_count": 1,
+      "flags": 6,
+      "kind": "signal",
+      "raw_words": [
+        18,
+        1,
+        131,
+        2,
+        6,
+        17
+      ]
+    },
+    {
+      "local_method_id": 12,
+      "name": "stopBeatDetection",
+      "argument_count": 0,
+      "flags": 10,
+      "kind": "slot",
+      "raw_words": [
+        19,
+        0,
+        134,
+        2,
+        10,
+        19
+      ]
+    },
+    {
+      "local_method_id": 13,
+      "name": "pauseBeatDetection",
+      "argument_count": 0,
+      "flags": 10,
+      "kind": "slot",
+      "raw_words": [
+        20,
+        0,
+        135,
+        2,
+        10,
+        20
+      ]
+    },
+    {
+      "local_method_id": 14,
+      "name": "resumeBeatDetection",
+      "argument_count": 0,
+      "flags": 10,
+      "kind": "slot",
+      "raw_words": [
+        21,
+        0,
+        136,
+        2,
+        10,
+        21
+      ]
+    },
+    {
+      "local_method_id": 15,
+      "name": "process",
+      "argument_count": 3,
+      "flags": 10,
+      "kind": "slot",
+      "raw_words": [
+        22,
+        3,
+        137,
+        2,
+        10,
+        22
+      ]
+    }
+  ],
+  "strings": [
+    "BeatDetectionRunner",
+    "finished",
+    "",
+    "detectionStarted",
+    "detectionFinished",
+    "bpm",
+    "detectionPaused",
+    "detectionResumed",
+    "detectionStopped",
+    "detectionProgress",
+    "progress",
+    "detectionError",
+    "trackDataChunkProcessed",
+    "trackDataChunk",
+    "beatDataChunkProcessed",
+    "beatDataChunk",
+    "overviewWaveChunkProcessed",
+    "overviewWaveChunk",
+    "overviewWaveChunkProcessedRGB",
+    "stopBeatDetection",
+    "pauseBeatDetection",
+    "resumeBeatDetection",
+    "process",
+    "path",
+    "AnalysisPreferences",
+    "analysisPreferences",
+    "overviewSize"
+  ]
+}
