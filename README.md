@@ -11,6 +11,7 @@ Denon DJ SC5000 Prime (`JP07` / Rockchip RK3288 / Engine OS 5.0.4) 深度定制�
    - **Rekordbox 局域网直连 (`rb-link-bridge`)**：支持 Pro DJ Link / 曲库直连。
    - **`⚡ Smart Next` 智能推荐列表**：基于当前播放曲目的 BPM（≤ 4）与 Camelot 调性动态生成推荐接歌歌单。
 4. **`cmd/stream-sync/`**：
+	- 使用与验证边界见 [Stream Sync 部署说明](docs/stream-sync.md)；支持纯 Go ARMv7 静态构建、访客账号、触控 Web 控制台和 Engine 5.0.4 数据库事务入库。
    - **机内流媒体歌单 + Deemix 下载 + 实时分析引擎**：支持 Deezer、Spotify（ISRC 精确匹配）、网易云音乐（扫码登录 + 标题/艺人/时长对齐）浏览歌单，调用本地 Deemix 接口下载并在机内 `CPU3`（`SCHED_IDLE` + `ionice` 核心硬隔离）实时生成 RGB 波形与 Beatgrid 入库，后台边下边放零卡顿。
 5. **`rootfs-overlay/`**：
    - **macOS 文件系统支持 (`fs-compat`)**：Linux 6.6.119-rt 的 `hfsplus.ko`（含 Journaled 强制读写修复）与 `linux-apfs-rw` (`apfs.ko`) 内核模块 + SD 卡 `overlayfs` 写保护。
