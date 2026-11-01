@@ -1,0 +1,88 @@
+#!/bin/bash
+# Best effort and repeatable: unavailable/read-only knobs never block playback.
+set -u
+SYS=${SC5000_SYS_ROOT:-/sys}
+PROC=${SC5000_PROC_ROOT:-/proc}
+AUDIO_IRQ=${SC5000_AUDIO_IRQ_PATTERN:-snd|alsa|i2s|spdif|audio}
+AUDIO_THREAD=${SC5000_AUDIO_THREAD_PATTERN:-audio|alsa|jack}
+export LC_ALL=C
+log() { printf 'sc5000-perf: %s\n' "$*" >&2; }
+write_knob() {
+    local path=$1 value=$2
+    [[ -e $path ]] || return 0
+    if [[ -w $path ]] && { printf '%s\n' "$value" > "$path"; } 2>/dev/null; then return 0; fi
+    [[ ${3:-} == quiet ]] || log "unavailable: $path"
+    return 0
+}
+lock_frequency() {
+    local dir=$1 governor=$2 max_name=$3 min_name=$4 max
+    [[ -d $dir ]] || return 0
+    if [[ -f $dir/$max_name ]]; then
+        max=$(cat "$dir/$max_name" 2>/dev/null) || max=
+        if [[ $max =~ ^[0-9]+$ ]]; then
+            [[ $governor != scaling_governor ]] || write_knob "$dir/scaling_max_freq" "$max"
+            write_knob "$dir/$min_name" "$max"
+        fi
+    fi
+    write_knob "$dir/$governor" performance
+    return 0
+}
+for cpu in 0 1 2 3; do
+    lock_frequency "$SYS/devices/system/cpu/cpu$cpu/cpufreq" scaling_governor cpuinfo_max_freq scaling_min_freq
+done
+for gpu in "$SYS"/class/devfreq/*ffa30000* "$SYS"/devices/platform/ffa30000.gpu/devfreq/*; do
+    lock_frequency "$gpu" governor max_freq min_freq
+done
+
+write_knob "$PROC/sys/vm/swappiness" 10
+write_knob "$PROC/sys/vm/dirty_background_ratio" 5
+write_knob "$PROC/sys/vm/dirty_ratio" 15
+write_knob "$PROC/sys/fs/file-max" 1048576
+for scheduler in "$SYS"/block/*/queue/scheduler; do
+    [[ -r $scheduler ]] || continue
+    available=$(cat "$scheduler")
+    if [[ " $available " =~ [\ \[]mq-deadline[\ \]] ]]; then
+        write_knob "$scheduler" mq-deadline
+    elif [[ " $available " =~ [\ \[]none[\ \]] ]]; then
+        write_knob "$scheduler" none
+    fi
+done
+
+# Route movable non-audio interrupts away from CPU0. Per-CPU/managed IRQs may
+# reject writes, which is expected. PREEMPT_RT IRQ threads are pinned below too.
+if [[ -r $PROC/interrupts ]]; then
+    while IFS= read -r line; do
+        [[ $line =~ ^[[:space:]]*([0-9]+): ]] || continue
+        irq=${BASH_REMATCH[1]}
+        mask=e
+        [[ ${line,,} =~ $AUDIO_IRQ ]] && mask=1
+        write_knob "$PROC/irq/$irq/smp_affinity" "$mask" quiet
+    done < "$PROC/interrupts"
+fi
+
+pin() {
+    taskset -pc "$1" "$2" >/dev/null 2>&1 || log "thread exited or affinity unavailable: $2"
+}
+for process in "$PROC"/[0-9]*; do
+    [[ -d $process ]] || continue
+    exe=$(readlink "$process/exe" 2>/dev/null) || exe=
+    comm=$(cat "$process/comm" 2>/dev/null) || comm=
+    if [[ $comm == irq/* && ${comm,,} =~ $AUDIO_IRQ ]]; then
+        pin 0 "${process##*/}"
+    fi
+    [[ $exe == /usr/Engine/* ]] || continue
+    for thread in "$process"/task/[0-9]*; do
+        [[ -r $thread/stat && -r $thread/comm ]] || continue
+        stat=$(cat "$thread/stat") || continue
+        thread_name=$(cat "$thread/comm") || continue
+        # stat field 41 is policy. Strip '(comm)' first, as comm may have spaces.
+        read -r -a fields <<< "${stat##*) }"
+        policy=${fields[38]:-0}
+        if [[ ${thread_name,,} =~ $AUDIO_THREAD && ( $policy == 1 || $policy == 2 ) ]]; then
+            pin 0 "${thread##*/}"
+        else
+            pin 1-2 "${thread##*/}"
+        fi
+    done
+done
+exit 0

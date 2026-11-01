@@ -1,0 +1,6 @@
+# systemd EnvironmentFile syntax, not shell. No external disk is formatted.
+# Optional override when multiple removable MMC slots exist:
+# SC5000_FRONT_SD_DEVICE=mmcblk1
+SC5000_INTERNAL_CACHE=/var/cache/sc5000
+# Executable adapter for the stock Engine mount notification protocol:
+SC5000_STORAGE_NOTIFY=/usr/local/libexec/sc5000-storage-notify
