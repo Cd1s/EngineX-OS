@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+APPLET="$1"
+shift
+ARCHIVE="/usr/share/sc5000-custom/sc5000-suite.xz"
+TARGET_DIR="/data/sc5000-custom/bin"
+if ! mkdir -p "$TARGET_DIR" 2>/dev/null || [ ! -w "$TARGET_DIR" ]; then
+    TARGET_DIR="/tmp/sc5000-custom-bin"
+    mkdir -p "$TARGET_DIR"
+fi
+BIN="$TARGET_DIR/sc5000-suite"
+if [ ! -x "$BIN" ] || [ "$ARCHIVE" -nt "$BIN" ]; then
+    TMP="$BIN.$$.tmp"
+    xz -dc "$ARCHIVE" > "$TMP"
+    chmod 0755 "$TMP"
+    mv -f "$TMP" "$BIN"
+fi
+exec "$BIN" "$APPLET" "$@"
