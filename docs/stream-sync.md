@@ -121,15 +121,18 @@ MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k
 
 ## BPM 与调性
 
-歌单和搜索结果带 BPM 和 Camelot 调性，显示在标题后（如 `Song [148 8A]`），因为 Engine 的
-客户端不读速度字段。结果存在 `state/bpm-cache.json`。
+歌单和搜索结果带 BPM 和 Camelot 调性。Engine 的客户端不读速度字段，所以网关把它们写在标题后
+（如 `Song [148 BPM 8A]`），曲目列表的 QML 再把它们移到原生的 BPM 和 Key 列。Engine 自己分析出
+值后，这两列改显示实测值。结果存在 `state/bpm-cache.json`。
 
 列表上的外部 BPM 只是预览，不写入 Beatgrid，也不进曲库。曲目载入转盘时标题不带它，由 Engine
 自己分析。碟机分析出结果后，实测值覆盖 `bpm-cache.json` 里的预览值，之后外部来源不能再改。
 
-顺序：自己分析出的结果 → ReccoBeats 批量查 ISRC / Spotify ID（列表最多等 3 秒）→ 后台逐首
-查（Deezer 曲目详情、ReccoBeats 搜索、GetSongBPM、SoundCloud）。后台查到的结果下次打开
-列表时显示。标题和主艺人必须一致才算命中。ReccoBeats 返回 429 时暂停 5 分钟。
+顺序：自己分析出的结果 → ReccoBeats 批量查 ISRC / Spotify ID → 逐首查（Deezer 曲目详情、
+ReccoBeats 搜索、GetSongBPM、SoundCloud）。打开歌单时最多等 4 秒，这段时间内同步查前 25 首
+未命中的曲目；其余在后台查，下次打开列表时显示。搜索结果不等逐首查询，因为每次按键都会搜索。
+ReccoBeats 搜索只按歌名匹配，主艺人必须一致；优先同版本，没有时接受同一首歌的其他版本。
+ReccoBeats 返回 429 时暂停 5 分钟。
 
 GetSongBPM 和 SoundCloud 的密钥可选，存在 `state/bpm-config.json`，在控制台或
 `GET/POST /api/bpm`（碟机本机 `/v1/sc5000/bpm`）修改。

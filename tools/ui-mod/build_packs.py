@@ -53,6 +53,12 @@ SERVICES_MAIN = """
 	readonly property var scDict: (@DICT@)
 	function scT(s) { return scDict[s] || s }
 	function scIcon(id) { return id === "tidal" ? "qrc:/UIKit.1/UIKit/Icons/SourceTIDALColored.png" : "file:///data/sc5000-custom/ui/icons/" + id + ".png" }
+	// The gateway appends " [128 BPM 8A]" to a list title; see withBPM. A value Engine
+	// analysed itself always wins, so these only fill empty columns.
+	function scPreview(song) {
+		return /\\s\\[(\\d+) BPM(?: ([0-9]{1,2}[AB]))?\\]$/.exec(song || "") || ["", "", ""]
+	}
+	function scPlainTitle(song) { return (song || "").replace(/\\s\\[\\d+ BPM(?: [0-9]{1,2}[AB])?\\]$/, "") }
 	// Engine's messages name its one streaming client; say which service is showing.
 	function scBrand(s) {
 		const service = scServices.find(v => v.id === scScope)
@@ -494,6 +500,9 @@ def edits(dev: bool):
                 "		providerName: root.scBrand(Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName)\n",
             ),
         ],
+        v + "BrowseView/Components/Components/Bpm.qml": [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.song)[1]')],
+        v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: row.modelData.key || root.scPreview(row.modelData.song)[2] || ""')],
+        v + "BrowseView/Components/Components/Song.qml": [('title: row.modelData.song || ""', 'title: root.scPlainTitle(row.modelData.song)')],
         v + "BrowseView/Components/RetryingHint.qml": [
             (
                 '		text: "WAITING FOR " + providerName.toUpperCase()\n',

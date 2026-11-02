@@ -416,7 +416,7 @@ func TestTidalScopeGoesToTidalsOwnServers(t *testing.T) {
 func TestListRowsShowTempoAndKey(t *testing.T) {
 	g := newTidalGateway(New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
 	v := g.trackJSON(1, providers.Track{Title: "Song", BPM: 147.6, Key: "8A", Provider: "netease"})
-	if v["title"] != "Song [148 8A]" || v["bpm"] != 148 {
+	if v["title"] != "Song [148 BPM 8A]" || v["bpm"] != 148 {
 		t.Fatal(v)
 	}
 	if v := g.trackJSON(1, providers.Track{Title: "Song"}); v["title"] != "Song" {
