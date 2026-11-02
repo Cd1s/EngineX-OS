@@ -3,7 +3,7 @@
 这是独立、可选的触控控制台，不改原厂 Deck、按键、Cue 或默认歌单。
 Go 服务完成歌单浏览、跨平台匹配、本地下载请求、WAV/FLAC/MP3 解码、
 BPM / Beatgrid / Camelot 调性 / RGB 波形分析及 SD 卡 SQLite 事务入库。
-不包含任何 DRM 解密代码，也不实现 Deemix 本身。
+stream-sync 本身不解密音频，下载交给碟机上的 `sc5000-deemixd`（`internal/deezer`，见提交 c24a140）。
 
 ## 构建与测试
 
@@ -97,7 +97,7 @@ Spotify 不接受普通 `http://sc5000.lan` 作为远程 OAuth redirect。
    `exhigh` → `standard`），试听片段一律不算。其他平台的曲目先按标题、版本、共同艺人和
    ≤5 秒时长匹配网易云曲目。访客只用自己的登录，不碰主人的 cookie。
 
-本仓库不实现音频解密。解密只发生在外部下载器里。
+stream-sync 不做音频解密，解密只发生在 `sc5000-deemixd` 里。
 
 网易云文件存为 `netease-<id>.flac`，经 `Inspect` 校验后才可用，重启后直接复用。没有 SD
 库时落在内部存储，总量上限 3 GiB，超出后淘汰最旧的下载（只动 `<id>.*` 和 `netease-<id>.*`）。
