@@ -236,7 +236,7 @@ func runStreamSync(args []string) error {
 	if *socket != "" {
 		dl.HTTP = deemixclient.UnixHTTP(*socket)
 	}
-	bpm := &providers.BPMStore{Path: filepath.Join(*state, "bpm-cache.json"), ConfigPath: filepath.Join(*state, "bpm-config.json")}
+	bpm := &providers.BPMStore{Path: filepath.Join(*state, "bpm-cache.json"), ConfigPath: filepath.Join(*state, "bpm-config.json"), PreviewBPM: webui.PreviewAnalyzer(guard)}
 	jobs := webui.NewJobs(webui.Pipeline{Guard: guard, Catalog: &providers.Deezer{}, Deemix: dl, Library: importer})
 	defer jobs.Close()
 	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay, BPM: bpm}, jobs)

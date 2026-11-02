@@ -135,6 +135,7 @@ type dzTrack struct {
 	Duration int64   `json:"duration"`
 	ISRC     string  `json:"isrc"`
 	BPM      float64 `json:"bpm"`
+	Preview  string  `json:"preview"`
 	Artist   struct {
 		Name string `json:"name"`
 	} `json:"artist"`
@@ -154,7 +155,7 @@ func (t dzTrack) track() Track {
 			seen[a.Name] = true
 		}
 	}
-	return Track{ID: strconv.FormatInt(t.ID, 10), Title: t.Title, Artist: strings.Join(artists, ", "), Artists: artists, Album: t.Album.Title, ISRC: t.ISRC, DurationMS: t.Duration * 1000, Provider: "deezer", BPM: t.BPM}
+	return Track{ID: strconv.FormatInt(t.ID, 10), Title: t.Title, Artist: strings.Join(artists, ", "), Artists: artists, Album: t.Album.Title, ISRC: t.ISRC, DurationMS: t.Duration * 1000, Provider: "deezer", BPM: t.BPM, Preview: t.Preview}
 }
 func (d *Deezer) base() string {
 	if d.BaseURL != "" {

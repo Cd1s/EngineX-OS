@@ -130,11 +130,14 @@ MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k
 
 顺序：自己分析出的结果 → ReccoBeats 批量查 ISRC / Spotify ID → 逐首查：Deezer 曲目详情 →
 用已登录的 Spotify 按“主艺人 歌名”搜出 ID 和 ISRC 再查 ReccoBeats → Deezer 搜索（自带 BPM 或
-ISRC）→ ReccoBeats 搜索 → GetSongBPM → SoundCloud。拉丁字母的艺人名必须一致；中文艺人名在
+ISRC）→ ReccoBeats 搜索 → GetSongBPM → SoundCloud → 分析 Deezer 公开的 30 秒预览 MP3。拉丁字母的艺人名必须一致；中文艺人名在
 别处常写法不同（张震岳 / A-Yue Chang），这时只比歌名，所以可能偶尔命中同名的歌。打开歌单时最多等 4 秒，这段时间内同步查前 25 首
 未命中的曲目；其余在后台查，下次打开列表时显示。搜索结果不等逐首查询，因为每次按键都会搜索。
 ReccoBeats 搜索只按歌名匹配，主艺人必须一致；优先同版本，没有时接受同一首歌的其他版本。
 ReccoBeats 返回 429 时暂停 5 分钟。
+
+预览分析用于各目录都没收录的新歌，只在后台逐首进行，占用 stream-sync 的 CPU3，不影响列表加载。
+片段下载到临时文件，分析后立即删除。它只有 30 秒，结果是估算值，整首分析后会被覆盖。
 
 GetSongBPM 和 SoundCloud 的密钥可选，存在 `state/bpm-config.json`，可在碟机控制台、
 `GET/POST /api/bpm`（碟机本机 `/v1/sc5000/bpm`）或 `https://denon.cheek.day` 的“BPM 增强”
