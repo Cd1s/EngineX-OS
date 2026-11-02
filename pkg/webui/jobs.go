@@ -62,6 +62,7 @@ type Jobs struct {
 
 	// netease returns the NetEase login a session may fetch audio with, or nil.
 	netease func(session string, guest bool) *providers.Netease
+	bpm     *providers.BPMStore
 }
 type fetched struct {
 	matched providers.Track
@@ -360,6 +361,10 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 	}
 	if matched.DurationMS > 0 && math.Abs(res.Duration*1000-float64(matched.DurationMS)) > maxDurationGapMS {
 		return errors.New("download duration differs from matched recording by more than 15 seconds")
+	}
+	// What the deck measured replaces the preview shown in lists.
+	if j.bpm != nil {
+		j.bpm.Put(v.Track, providers.BPMInfo{BPM: res.BPM, Key: res.Key.Camelot, Measured: true})
 	}
 	if err = t.Tick(); err != nil {
 		return err

@@ -66,7 +66,7 @@ func TestUISettingsRejectBadValues(t *testing.T) {
 	dir := t.TempDir()
 	srv := httptest.NewServer(New(Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}, nil))
 	defer srv.Close()
-	for _, q := range []string{"lang=../../etc", "waveform=x", "scope=tidal", "sources=netease,evil"} {
+	for _, q := range []string{"lang=../../etc", "waveform=x", "scope=evil", "sources=netease,evil"} {
 		if code, _ := uiPost(t, srv.URL, q); code != 400 {
 			t.Errorf("%s: %d", q, code)
 		}
