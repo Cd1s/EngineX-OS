@@ -24,6 +24,7 @@ import (
 const (
 	DefaultReccoURL      = "https://api.reccobeats.com"
 	defaultSoundCloudURL = "https://api.soundcloud.com"
+	defaultSoundCloudV2  = "https://api-v2.soundcloud.com"
 	defaultGetSongURL    = "https://api.getsong.co"
 
 	reccoBatch       = 40
@@ -56,6 +57,9 @@ type BPMStore struct {
 	SoundCloudURL    string
 	GetSongURL       string
 	DeezerURL        string
+	SoundCloudV2URL  string
+	// Spotify returns the owner's login, if any, for finding a track's IDs.
+	Spotify func() *Spotify
 
 	mu       sync.Mutex
 	loaded   bool
@@ -63,6 +67,8 @@ type BPMStore struct {
 	tried    map[string]bool // lookups that found nothing, until the next restart
 	queue    chan Track
 	waitTill time.Time
+	// Spotify's own rate limit, separate from ReccoBeats'.
+	spotifyWaitTill time.Time
 }
 
 func bpmKey(t Track) string { return t.Provider + ":" + t.ID }
@@ -307,7 +313,8 @@ func (b *BPMStore) batch(ctx context.Context, tracks []Track) {
 	}
 }
 
-// lookup tries the per-track sources, cheapest first.
+// lookup tries the per-track sources. Most catalogs only know a track by its ISRC
+// or Spotify ID, which a NetEase track lacks, so the first steps find those by name.
 func (b *BPMStore) lookup(ctx context.Context, t Track) BPMInfo {
 	if t.Provider == "deezer" {
 		d := &Deezer{BaseURL: b.DeezerURL, HTTP: b.HTTP}
@@ -315,19 +322,132 @@ func (b *BPMStore) lookup(ctx context.Context, t Track) BPMInfo {
 			return BPMInfo{BPM: full.BPM}
 		}
 	}
-	if info := b.reccoSearch(ctx, t); info.BPM > 0 {
-		return info
+	steps := []func() BPMInfo{
+		func() BPMInfo { return b.viaSpotify(ctx, t) },
+		func() BPMInfo { return b.viaDeezer(ctx, t) },
+		func() BPMInfo { return b.reccoSearch(ctx, t) },
 	}
 	cfg := b.Config()
 	if cfg.GetSongBPMKey != "" {
-		if info := b.getSong(ctx, t, cfg.GetSongBPMKey); info.BPM > 0 {
+		steps = append(steps, func() BPMInfo { return b.getSong(ctx, t, cfg.GetSongBPMKey) })
+	}
+	if cfg.SoundCloudClientID != "" || cfg.SoundCloudToken != "" {
+		steps = append(steps, func() BPMInfo { return b.soundCloud(ctx, t, cfg) })
+	}
+	for _, step := range steps {
+		if info := step(); info.BPM > 0 {
 			return info
 		}
 	}
-	if cfg.SoundCloudClientID != "" || cfg.SoundCloudToken != "" {
-		return b.soundCloud(ctx, t, cfg)
+	return BPMInfo{}
+}
+
+// bpmQuery is what a catalog with real search is asked for.
+func bpmQuery(t Track) string { return primaryArtist(t) + " " + bpmMainTitle(t.Title) }
+
+func isLatin(s string) bool {
+	for _, r := range s {
+		if r > unicode.MaxLatin1 {
+			return false
+		}
+	}
+	return true
+}
+
+// bestMatch picks the catalog's version of a track. A name written in Chinese is
+// often spelled differently elsewhere (张震岳, A-Yue Chang), and the search already
+// included it, so for those the title decides. Latin names must match.
+func bestMatch(t Track, found []Track) (Track, bool) {
+	for _, match := range []func(Track, string, []string) bool{sameSong, sameMainTitle} {
+		for _, c := range found {
+			if match(t, c.Title, c.Artists) {
+				return c, true
+			}
+		}
+	}
+	if !isLatin(primaryArtist(t)) {
+		for _, c := range found {
+			if bpmWords(bpmMainTitle(c.Title)) == bpmWords(bpmMainTitle(t.Title)) && bpmWords(c.Title) != "" {
+				return c, true
+			}
+		}
+	}
+	return Track{}, false
+}
+
+// features asks ReccoBeats about specific IDs and returns the first with a tempo.
+func (b *BPMStore) features(ctx context.Context, ids ...string) BPMInfo {
+	var known []string
+	for _, id := range ids {
+		if id != "" {
+			known = append(known, id)
+		}
+	}
+	if len(known) == 0 || b.rateLimited() {
+		return BPMInfo{}
+	}
+	var r struct {
+		Content []reccoFeatures `json:"content"`
+	}
+	if b.get(ctx, b.reccoURL()+"/v1/audio-features?"+url.Values{"ids": {strings.Join(known, ",")}}.Encode(), nil, &r) != nil {
+		return BPMInfo{}
+	}
+	for _, v := range r.Content {
+		if v.Tempo > 0 {
+			return v.info()
+		}
 	}
 	return BPMInfo{}
+}
+
+func (b *BPMStore) viaSpotify(ctx context.Context, t Track) BPMInfo {
+	if b.Spotify == nil || t.Provider == "spotify" {
+		return BPMInfo{}
+	}
+	b.mu.Lock()
+	waiting := time.Now().Before(b.spotifyWaitTill)
+	b.mu.Unlock()
+	s := b.Spotify()
+	if s == nil || waiting {
+		return BPMInfo{}
+	}
+	found, err := s.Search(ctx, bpmQuery(t))
+	if err != nil {
+		if strings.Contains(err.Error(), "HTTP 429") {
+			b.mu.Lock()
+			b.spotifyWaitTill = time.Now().Add(bpmRateLimitWait)
+			b.mu.Unlock()
+		}
+		return BPMInfo{}
+	}
+	c, ok := bestMatch(t, found)
+	if !ok {
+		return BPMInfo{}
+	}
+	return b.features(ctx, c.ID, c.ISRC)
+}
+
+func (b *BPMStore) viaDeezer(ctx context.Context, t Track) BPMInfo {
+	if t.Provider == "deezer" {
+		return BPMInfo{}
+	}
+	d := &Deezer{BaseURL: b.DeezerURL, HTTP: b.HTTP}
+	found, err := d.Search(ctx, bpmQuery(t))
+	if err != nil {
+		return BPMInfo{}
+	}
+	c, ok := bestMatch(t, found)
+	if !ok {
+		return BPMInfo{}
+	}
+	full, err := d.ByID(ctx, c.ID)
+	if err != nil {
+		return BPMInfo{}
+	}
+	if info := b.features(ctx, full.ISRC); info.BPM > 0 {
+		return info // ReccoBeats also knows the key
+	}
+	return BPMInfo{BPM: full.BPM}
 }
 
 var (
@@ -450,32 +570,65 @@ func (b *BPMStore) getSong(ctx context.Context, t Track, key string) BPMInfo {
 	return BPMInfo{}
 }
 
+// soundCloudTitle drops the "Artist - " many uploads start their title with.
+func soundCloudTitle(s string) string {
+	if i := strings.LastIndex(s, " - "); i >= 0 {
+		return s[i+3:]
+	}
+	return s
+}
+
+type soundCloudTrack struct {
+	Title string  `json:"title"`
+	BPM   float64 `json:"bpm"`
+	Key   string  `json:"key_signature"`
+	User  struct {
+		Username string `json:"username"`
+	} `json:"user"`
+	Publisher struct {
+		ISRC   string `json:"isrc"`
+		Artist string `json:"artist"`
+	} `json:"publisher_metadata"`
+}
+
+// soundCloud reads tempo, or an ISRC for ReccoBeats, from the owner's own credentials.
 func (b *BPMStore) soundCloud(ctx context.Context, t Track, cfg BPMConfig) BPMInfo {
-	base := b.SoundCloudURL
-	if base == "" {
-		base = defaultSoundCloudURL
-	}
-	q := url.Values{"q": {primaryArtist(t) + " " + t.Title}, "limit": {"10"}}
-	var h http.Header
-	if cfg.SoundCloudToken != "" {
-		h = http.Header{"Authorization": {"OAuth " + cfg.SoundCloudToken}}
-	} else {
+	var tracks []soundCloudTrack
+	q := url.Values{"q": {bpmQuery(t)}}
+	if cfg.SoundCloudClientID != "" {
+		base := b.SoundCloudV2URL
+		if base == "" {
+			base = defaultSoundCloudV2
+		}
+		q.Set("limit", "5")
 		q.Set("client_id", cfg.SoundCloudClientID)
+		var r struct {
+			Collection []soundCloudTrack `json:"collection"`
+		}
+		if b.get(ctx, strings.TrimRight(base, "/")+"/search/tracks?"+q.Encode(), nil, &r) == nil {
+			tracks = r.Collection
+		}
+		q.Del("client_id")
 	}
-	var r []struct {
-		Title string  `json:"title"`
-		BPM   float64 `json:"bpm"`
-		Key   string  `json:"key_signature"`
-		User  struct {
-			Username string `json:"username"`
-		} `json:"user"`
+	if len(tracks) == 0 && cfg.SoundCloudToken != "" {
+		base := b.SoundCloudURL
+		if base == "" {
+			base = defaultSoundCloudURL
+		}
+		q.Set("limit", "10")
+		if b.get(ctx, strings.TrimRight(base, "/")+"/tracks?"+q.Encode(), http.Header{"Authorization": {"OAuth " + cfg.SoundCloudToken}}, &tracks) != nil {
+			return BPMInfo{}
+		}
 	}
-	if b.get(ctx, strings.TrimRight(base, "/")+"/tracks?"+q.Encode(), h, &r) != nil {
-		return BPMInfo{}
-	}
-	for _, v := range r {
-		if v.BPM > 0 && sameSong(t, v.Title, []string{v.User.Username}) {
+	for _, v := range tracks {
+		if !sameMainTitle(t, soundCloudTitle(v.Title), []string{v.User.Username, v.Publisher.Artist}) {
+			continue
+		}
+		if v.BPM > 0 {
 			return BPMInfo{BPM: v.BPM, Key: camelotFromName(v.Key)}
+		}
+		if info := b.features(ctx, v.Publisher.ISRC); info.BPM > 0 {
+			return info
 		}
 	}
 	return BPMInfo{}
@@ -484,6 +637,8 @@ func (b *BPMStore) soundCloud(ctx context.Context, t Track, cfg BPMConfig) BPMIn
 // Config reads the optional service keys.
 func (b *BPMStore) Config() BPMConfig {
 	var v BPMConfig
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if data, err := os.ReadFile(b.ConfigPath); err == nil {
 		json.Unmarshal(data, &v)
 	}

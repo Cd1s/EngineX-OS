@@ -128,14 +128,18 @@ MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k
 列表上的外部 BPM 只是预览，不写入 Beatgrid，也不进曲库。曲目载入转盘时标题不带它，由 Engine
 自己分析。碟机分析出结果后，实测值覆盖 `bpm-cache.json` 里的预览值，之后外部来源不能再改。
 
-顺序：自己分析出的结果 → ReccoBeats 批量查 ISRC / Spotify ID → 逐首查（Deezer 曲目详情、
-ReccoBeats 搜索、GetSongBPM、SoundCloud）。打开歌单时最多等 4 秒，这段时间内同步查前 25 首
+顺序：自己分析出的结果 → ReccoBeats 批量查 ISRC / Spotify ID → 逐首查：Deezer 曲目详情 →
+用已登录的 Spotify 按“主艺人 歌名”搜出 ID 和 ISRC 再查 ReccoBeats → Deezer 搜索（自带 BPM 或
+ISRC）→ ReccoBeats 搜索 → GetSongBPM → SoundCloud。拉丁字母的艺人名必须一致；中文艺人名在
+别处常写法不同（张震岳 / A-Yue Chang），这时只比歌名，所以可能偶尔命中同名的歌。打开歌单时最多等 4 秒，这段时间内同步查前 25 首
 未命中的曲目；其余在后台查，下次打开列表时显示。搜索结果不等逐首查询，因为每次按键都会搜索。
 ReccoBeats 搜索只按歌名匹配，主艺人必须一致；优先同版本，没有时接受同一首歌的其他版本。
 ReccoBeats 返回 429 时暂停 5 分钟。
 
-GetSongBPM 和 SoundCloud 的密钥可选，存在 `state/bpm-config.json`，在控制台或
-`GET/POST /api/bpm`（碟机本机 `/v1/sc5000/bpm`）修改。
+GetSongBPM 和 SoundCloud 的密钥可选，存在 `state/bpm-config.json`，可在碟机控制台、
+`GET/POST /api/bpm`（碟机本机 `/v1/sc5000/bpm`）或 `https://denon.cheek.day` 的“BPM 增强”
+修改。碟机启动时和之后每小时从 `GET /api/config?secrets=1` 拉取一次，云端没有的密钥不覆盖本机。
+SoundCloud 用填入的 Client ID 调 v2 搜索，或用 OAuth Token 调 v1。
 
 ## 云端扫码登录
 

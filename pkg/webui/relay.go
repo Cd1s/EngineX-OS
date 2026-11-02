@@ -111,3 +111,54 @@ func (s *Server) relayCollect(session *Session, v relaySession) error {
 	}
 	return errRelayIncomplete
 }
+
+// bpmSyncInterval paces the pull of BPM service keys saved on the relay's console.
+const bpmSyncInterval = time.Hour
+
+// SyncRelaySettings keeps the BPM service keys in step with the relay until ctx ends.
+func (s *Server) SyncRelaySettings(ctx context.Context) {
+	for {
+		if err := s.pullBPMConfig(ctx); err != nil {
+			log.Printf("stream-sync: BPM settings not synced: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(bpmSyncInterval):
+		}
+	}
+}
+
+// pullBPMConfig copies keys set on the relay. A key the relay does not have is left
+// alone, so one entered on this deck's own console survives.
+func (s *Server) pullBPMConfig(ctx context.Context) error {
+	if s.cfg.BPM == nil {
+		return nil
+	}
+	if base, password := s.relaySettings(); base == "" || password == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, relayTimeout)
+	defer cancel()
+	var r struct {
+		Config providers.BPMConfig `json:"config"`
+	}
+	if err := s.relayCall(ctx, "GET", "/api/config?secrets=1", nil, &r); err != nil {
+		return err
+	}
+	v := s.cfg.BPM.Config()
+	next := v
+	if r.Config.SoundCloudClientID != "" {
+		next.SoundCloudClientID = r.Config.SoundCloudClientID
+	}
+	if r.Config.SoundCloudToken != "" {
+		next.SoundCloudToken = r.Config.SoundCloudToken
+	}
+	if r.Config.GetSongBPMKey != "" {
+		next.GetSongBPMKey = r.Config.GetSongBPMKey
+	}
+	if next == v {
+		return nil
+	}
+	return s.cfg.BPM.SaveConfig(next)
+}

@@ -105,6 +105,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/bpm", s.bpmConfigPost)
 	s.mux.HandleFunc("GET /api/relay", s.relayConfigGet)
 	s.mux.HandleFunc("POST /api/relay", s.relayConfigPost)
+	if cfg.BPM != nil {
+		cfg.BPM.Spotify = s.ownerSpotify
+	}
 	s.tidal = newTidalGateway(s)
 	if jobs != nil {
 		jobs.mu.Lock()

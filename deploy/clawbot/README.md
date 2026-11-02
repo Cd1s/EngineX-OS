@@ -29,7 +29,7 @@ sh install.sh ./sc5000-relay-amd64 ./sc5000-deemix-relay.service
 | `GET /oauth/spotify/callback` | OAuth callback |
 | `/api/audio`, `/api/download-stream`, `/api/download`, `/api/queue` | All methods return 410; no audio cache or queue |
 | `GET/POST /api/config` | Password or console cookie required |
-| `GET /api/config?secrets=1` | Explicit opt-in includes `config.deezerArl`, with `Cache-Control: no-store` |
+| `GET /api/config?secrets=1` | Explicit opt-in includes `config.deezerArl` and the BPM service keys, with `Cache-Control: no-store` |
 | `GET /`, `POST /login`, `POST /logout` | Credential management console |
 
 Password authentication supports `X-Deemix-Password`, `Authorization: Bearer`,

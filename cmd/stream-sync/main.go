@@ -118,6 +118,7 @@ func run() error {
 	server := &http.Server{Addr: *listen, Handler: ui, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go ui.SyncRelaySettings(ctx)
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()
 	select {

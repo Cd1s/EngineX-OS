@@ -262,3 +262,23 @@ func TestReviewFixes(t *testing.T) {
 		t.Fatalf("expected 429 after flood, got %d", code)
 	}
 }
+
+func TestBPMKeysOnlyLeaveWithSecrets(t *testing.T) {
+	s := newTestServer(t)
+	h := s.routes()
+	hdr := map[string]string{"X-Deemix-Password": defaultPassword, "Content-Type": "application/json"}
+	if w := do(h, "POST", "/api/config", `{"soundcloudClientId":"cid-value","getSongBpmKey":"gsb-value"}`, hdr); w.Code != 200 {
+		t.Fatalf("save: %d %s", w.Code, w.Body)
+	}
+	plain := do(h, "GET", "/api/config", "", hdr).Body.String()
+	if strings.Contains(plain, "cid-value") || strings.Contains(plain, "gsb-value") || !strings.Contains(plain, `"getSongBpmKeySet":true`) {
+		t.Fatalf("plain view: %s", plain)
+	}
+	secret := do(h, "GET", "/api/config?secrets=1", "", hdr).Body.String()
+	if !strings.Contains(secret, "cid-value") || !strings.Contains(secret, "gsb-value") {
+		t.Fatalf("secrets view: %s", secret)
+	}
+	if w := do(h, "GET", "/api/config?secrets=1", "", map[string]string{"X-Deemix-Password": "wrong"}); w.Code == 200 {
+		t.Fatal("secrets served without the password")
+	}
+}

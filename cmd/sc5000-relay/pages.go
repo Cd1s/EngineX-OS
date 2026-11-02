@@ -143,6 +143,14 @@ document.getElementById('clip').onclick=async function(){
 <input id="cid" placeholder="32 位十六进制" autocomplete="off" spellcheck="false">
 <button class="btn green small" onclick="save({spotifyClientId:val('cid')})">保存</button></div>
 
+<div class="card"><h2>BPM 增强（可选）</h2><p class="hint" id="bpmstate">…</p>
+<input id="scid" placeholder="SoundCloud Client ID（留空不改）" autocomplete="off" spellcheck="false" style="margin-bottom:8px">
+<input id="sctok" type="password" placeholder="SoundCloud OAuth Token（留空不改）" autocomplete="off" style="margin-bottom:8px">
+<input id="gsb" type="password" placeholder="GetSongBPM API Key（留空不改）" autocomplete="off">
+<button class="btn green small" onclick="save({soundcloudClientId:val('scid'),soundcloudToken:val('sctok'),getSongBpmKey:val('gsb')}).then(()=>{el('scid').value='';el('sctok').value='';el('gsb').value=''})">保存</button>
+<button class="btn ghost small" onclick="if(confirm('确定清除这些密钥？'))save({clearBpm:'1'})">清除</button>
+<p class="hint"><a href="https://getsongbpm.com" target="_blank" rel="noreferrer">BPM data by GetSongBPM</a></p></div>
+
 <div class="card"><h2>修改访问密码</h2>
 <input id="cur" type="password" placeholder="当前密码" autocomplete="current-password" style="margin-bottom:8px">
 <input id="np" type="password" placeholder="新密码（至少 8 位）" autocomplete="new-password">
@@ -158,6 +166,7 @@ function render(c){
  el('pwstate').innerHTML=c.passwordIsDefault?'<span class="badge warn">仍为默认初始密码，建议修改</span>':'<span class="badge good">已自定义</span>'+(c.passwordChangedAt?' '+esc(new Date(c.passwordChangedAt).toLocaleString()):'');
  el('redir').textContent=c.spotifyRedirect;
  el('arlstate').innerHTML=c.deezerArlSet?'已保存：<code>'+esc(c.deezerArlMasked)+'</code>'+(c.deezerArlUser?' · 用户 '+esc(c.deezerArlUser):''):'<span class="badge warn">未设置 ARL</span>（请先保存 ARL，供 SC5000 同步登录）';
+ el('bpmstate').textContent='SoundCloud Client ID：'+(c.soundcloudClientIdSet?'已设置':'未设置')+' · Token：'+(c.soundcloudTokenSet?'已设置':'未设置')+' · GetSongBPM：'+(c.getSongBpmKeySet?'已设置':'未设置');
  el('uid').value=c.deezerUserId||'';el('cid').value=c.spotifyClientId||'';}
 async function api(path,opt){const r=await fetch(path,Object.assign({credentials:'same-origin',headers:{'Content-Type':'application/json'}},opt||{}));
  if(r.status==401){location.reload();throw new Error('unauthorized')}return r.json()}
