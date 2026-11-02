@@ -26,9 +26,7 @@ const (
 	defaultGetSongURL = "https://api.getsong.co"
 
 	reccoBatch       = 40
-	bpmListWait      = 4 * time.Second
-	bpmListLookups   = 25
-	bpmListWorkers   = 6
+	bpmListWait      = 500 * time.Millisecond
 	bpmRateLimitWait = 5 * time.Minute
 	bpmQueueLimit    = 2000
 )
@@ -122,52 +120,10 @@ func (b *BPMStore) Apply(tracks []Track) {
 	}
 }
 
-// Enrich fills an opened list in place. It waits briefly for the batch lookup and
-// for the first tracks without an ISRC or Spotify ID, such as NetEase's, so the
-// rows on screen show a tempo at once. The rest fill in behind the scenes, and a
-// later listing shows them.
+// Enrich fills a list in place from the cache and one quick batch lookup. Lists must
+// open at once, so everything else is looked up behind the scenes and shows the next
+// time the list opens.
 func (b *BPMStore) Enrich(ctx context.Context, tracks []Track) {
-	if b == nil {
-		return
-	}
-	b.Apply(tracks)
-	ctx, cancel := context.WithTimeout(ctx, bpmListWait)
-	defer cancel()
-	b.batch(ctx, tracks)
-	b.Apply(tracks)
-	var first []Track
-	for _, t := range tracks {
-		if t.BPM == 0 && t.Provider != "soundcloud" && len(first) < bpmListLookups && b.claim(t) {
-			first = append(first, t)
-		}
-	}
-	work := make(chan Track)
-	var wg sync.WaitGroup
-	for range min(bpmListWorkers, len(first)) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for t := range work {
-				b.attempt(ctx, t)
-			}
-		}()
-	}
-	for _, t := range first {
-		work <- t
-	}
-	close(work)
-	wg.Wait()
-	b.Apply(tracks)
-	for _, t := range tracks {
-		if t.BPM == 0 {
-			b.enqueue(t)
-		}
-	}
-}
-
-// EnrichPreview is Enrich for search results. They change with every keystroke, so
-// nothing waits on per-track lookups.
-func (b *BPMStore) EnrichPreview(ctx context.Context, tracks []Track) {
 	if b == nil {
 		return
 	}
