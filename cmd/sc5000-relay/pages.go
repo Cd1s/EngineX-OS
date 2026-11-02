@@ -60,6 +60,22 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 {{define "donePage"}}{{template "head" .}}<div class="wrap"><div class="big">✅</div>
 <h1 class="center">已完成连接！</h1><p class="sub center">碟机屏幕上的二维码将自动关闭并加载歌单。<br>现在可以关闭此页面。</p></div></body></html>{{end}}
 
+{{define "soundcloudPage"}}{{template "head" .}}<div class="wrap">
+<h1>连接 SoundCloud</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
+{{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的设置。</div>{{end}}
+{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+<form method="post" class="card">
+<label for="user">主页链接或用户名（可选）</label>
+<input id="user" name="user" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://soundcloud.com/你的主页">
+<p class="hint">用来浏览喜欢的曲目和歌单。不填也可以搜索。</p>
+<label for="clientId">Client ID</label>
+<input id="clientId" name="clientId" autocomplete="off" autocapitalize="off" spellcheck="false">
+<label for="token">OAuth Token（可选）</label>
+<input id="token" name="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
+<p class="hint">至少填写其一。填 OAuth Token 还可以看私密内容。碟机只播放账号本身可以完整播放的内容。</p>
+<button class="btn purple" type="submit">完成连接</button>
+</form></div></body></html>{{end}}
+
 {{define "deezerPage"}}{{template "head" .}}<div class="wrap">
 <h1>连接 Deezer</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
 {{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的设置。</div>{{end}}

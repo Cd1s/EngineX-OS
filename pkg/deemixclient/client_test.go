@@ -370,3 +370,54 @@ func TestDownloadAsksForTheChosenQuality(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+func TestSavePartsJoinsSegmentsAndRetries(t *testing.T) {
+	frames := mp3Frames(14, 4)
+	half := len(frames) / 2
+	fails := 1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/a":
+			w.Write(frames[:half])
+		case "/b":
+			if fails > 0 {
+				fails--
+				w.Header().Set("Content-Length", "99999")
+				w.Write(frames[half : half+10])
+				return
+			}
+			w.Write(frames[half:])
+		case "/init":
+			w.Write([]byte("\x00\x00\x00\x18ftypiso5rest"))
+		default:
+			http.Error(w, "gone", 404)
+		}
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	c := &Client{DownloadDir: dir, MaxCache: 1 << 30, AllowLossy: true}
+	dl, err := c.SaveParts(context.Background(), "soundcloud-1", "mp3", []string{srv.URL + "/a", srv.URL + "/b"})
+	if err != nil || filepath.Base(dl.Path) != "soundcloud-1.mp3" {
+		t.Fatalf("%+v %v", dl, err)
+	}
+	if got, _ := os.ReadFile(dl.Path); !bytes.Equal(got, frames) {
+		t.Fatalf("joined %d bytes, want %d", len(got), len(frames))
+	}
+	if cached := c.Cached("soundcloud-1"); cached == nil {
+		t.Fatal("not cached")
+	}
+	mp4, err := c.SaveParts(context.Background(), "soundcloud-2", "mp4", []string{srv.URL + "/init"})
+	if err != nil || filepath.Base(mp4.Path) != "soundcloud-2.mp4" || c.Cached("soundcloud-2") == nil {
+		t.Fatalf("%+v %v", mp4, err)
+	}
+	if _, err := c.SaveParts(context.Background(), "soundcloud-3", "mp3", []string{srv.URL + "/missing"}); err == nil {
+		t.Fatal("missing segment accepted")
+	}
+	if _, err := c.SaveParts(context.Background(), "soundcloud-4", "mp3", []string{srv.URL + "/init"}); err == nil {
+		t.Fatal("wrong format accepted")
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 2 {
+		t.Fatalf("leftovers %v", entries)
+	}
+}
