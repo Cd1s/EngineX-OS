@@ -778,3 +778,53 @@ func TestSpotifyLikedSongs(t *testing.T) {
 		t.Fatalf("%+v %v", tracks, err)
 	}
 }
+
+func TestSoundCloudAccountLoginRenewsAndReachesPrivateLists(t *testing.T) {
+	var refreshes int
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			r.ParseForm()
+			if id, secret, ok := r.BasicAuth(); !ok || id != "cid" || secret != "shh" || r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "r1" {
+				t.Errorf("token request %v", r.Form)
+			}
+			refreshes++
+			io.WriteString(w, `{"access_token":"u2","refresh_token":"r2","expires_in":3600}`)
+			return
+		}
+		paths = append(paths, r.URL.Path)
+		if r.Header.Get("Authorization") != "OAuth u2" {
+			t.Errorf("wrong token on %s: %s", r.URL, r.Header.Get("Authorization"))
+		}
+		io.WriteString(w, `{"collection":[]}`)
+	}))
+	defer srv.Close()
+	path := t.TempDir() + "/token.json"
+	auth := &SoundCloudAuth{TokenURL: srv.URL + "/token", Path: path}
+	if err := auth.SetUser("u1", "r1", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	s := &SoundCloud{BaseURL: srv.URL, ClientID: "cid", Secret: "shh", Auth: auth, UserID: 8}
+	if _, err := s.Playlists(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Tracks(context.Background(), "likes"); err != nil {
+		t.Fatal(err)
+	}
+	if refreshes != 1 || !strings.HasPrefix(paths[0], "/me/") {
+		t.Fatalf("%d refreshes, paths %v", refreshes, paths)
+	}
+	// The rotated refresh token survives a restart.
+	again := &SoundCloudAuth{Path: path}
+	if !again.HasUser() {
+		t.Fatal("login lost on restart")
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), "r2") || strings.Contains(string(b), "shh") {
+		t.Fatalf("%s", b)
+	}
+	// An app token request must not wipe the login.
+	if err := auth.SetUser("", "", time.Time{}); err != nil || auth.HasUser() {
+		t.Fatal(err)
+	}
+}

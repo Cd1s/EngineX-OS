@@ -593,3 +593,38 @@ func TestSoundCloudAppCredentialsSearchButAreNotALogin(t *testing.T) {
 		t.Fatal("a bound profile is a login")
 	}
 }
+
+func TestRelayDeliversASoundCloudAccountLogin(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"status":"done","soundcloud":{"userId":8,"username":"me","userToken":"u1","refreshToken":"r1","expiry":"2099-01-01T00:00:00Z"}}`)
+	}))
+	defer relay.Close()
+	state := t.TempDir()
+	bpm := &providers.BPMStore{Path: filepath.Join(state, "bpm.json"), ConfigPath: filepath.Join(state, "bpm-config.json")}
+	bpm.SaveConfig(providers.BPMConfig{SoundCloudClientID: "cid", SoundCloudSecret: "shh"})
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, RelayURL: relay.URL, BPM: bpm}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	r, err := http.Post(srv.URL+"/v1/sc5000/login?provider=soundcloud", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	status, err := http.Get(srv.URL + "/v1/sc5000/login?provider=soundcloud")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(status.Body)
+	status.Body.Close()
+	if !strings.Contains(string(body), `"status":"done"`) {
+		t.Fatalf("%s", body)
+	}
+	p := ui.ownerSoundCloud()
+	if p == nil || p.UserID != 8 || !ready(p) || !p.Auth.HasUser() {
+		t.Fatalf("%+v", p)
+	}
+	owner, _ := os.ReadFile(filepath.Join(state, "soundcloud-owner.json"))
+	if strings.Contains(string(owner), "u1") {
+		t.Fatal("token copied into the owner file")
+	}
+}

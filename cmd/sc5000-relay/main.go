@@ -87,6 +87,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /m/{provider}", s.handleMobileGet)
 	mux.HandleFunc("POST /m/{provider}", s.handleMobilePost)
 	mux.HandleFunc("GET /oauth/spotify/callback", s.handleSpotifyCallback)
+	mux.HandleFunc("GET /oauth/soundcloud/callback", s.handleSoundCloudCallback)
 	// All legacy audio endpoints are permanently disabled, regardless of method.
 	for _, p := range []string{"/api/audio", "/api/download-stream", "/api/download", "/api/queue"} {
 		mux.HandleFunc(p, audioGone)
