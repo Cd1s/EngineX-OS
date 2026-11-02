@@ -6,29 +6,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
-
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
 )
 
 const (
-	// A service may take this long to produce a track before it starts sending.
+	// An audio host may take this long to start sending.
 	mediaFirstByte = 90 * time.Second
 	maxMediaBytes  = 2 << 30
 )
 
-var (
-	unsafeName = regexp.MustCompile(`[^A-Za-z0-9_-]`)
-	// Only files named by Save are ever evicted.
-	savedPrefixes = []string{"netease-", "remote-"}
-)
+// Only files named by Save are ever evicted.
+const savedPrefix = "netease-"
 
 func (c *Client) media() *http.Client {
 	if c.Media != nil {
@@ -63,29 +55,11 @@ func (c *Client) Cached(name string) *Download {
 // Save stores the audio at address as name.flac or name.mp3, after checking what
 // actually arrived. Addresses can carry access tokens, so errors never quote them.
 func (c *Client) Save(ctx context.Context, name, address string) (*Download, error) {
-	return c.save(ctx, name, address, "")
-}
-
-func (c *Client) save(ctx context.Context, name, address, password string) (*Download, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
 	if err != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") {
 		return nil, errors.New("audio: invalid address")
 	}
-	media := c.media()
-	if password != "" {
-		req.Header.Set("X-Deemix-Password", password)
-		req.Header.Set("Authorization", "Bearer "+password)
-		// Go keeps custom headers across redirects, so stay on the backend's host.
-		pinned := *media
-		pinned.CheckRedirect = func(next *http.Request, via []*http.Request) error {
-			if next.URL.Host != via[0].URL.Host || len(via) >= 5 {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		}
-		media = &pinned
-	}
-	resp, err := media.Do(req)
+	resp, err := c.media().Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -133,27 +107,6 @@ func (c *Client) save(ctx context.Context, name, address, password string) (*Dow
 	return dl, nil
 }
 
-// ErrNoRemote means no remote backend is configured.
-var ErrNoRemote = errors.New("audio: no remote backend configured")
-
-// FetchRemote asks the remote backend for a track by its metadata. The backend
-// streams the audio back; the format is taken from the bytes, not from any header.
-func (c *Client) FetchRemote(ctx context.Context, t providers.Track) (*Download, error) {
-	if c.Remote == nil {
-		return nil, ErrNoRemote
-	}
-	base, password := c.Remote()
-	if base == "" {
-		return nil, ErrNoRemote
-	}
-	name := "remote-" + unsafeName.ReplaceAllString(t.Provider+"-"+t.ID, "_")
-	if dl := c.Cached(name); dl != nil {
-		return dl, nil
-	}
-	q := url.Values{"provider": {t.Provider}, "id": {t.ID}, "isrc": {t.ISRC}, "title": {t.Title}, "artist": {t.Artist}, "duration": {strconv.FormatInt(t.DurationMS/1000, 10)}}
-	return c.save(ctx, name, strings.TrimRight(base, "/")+"/api/audio?"+q.Encode(), password)
-}
-
 // trim removes the oldest saved files beyond MaxCache, never the one just saved.
 func (c *Client) trim(keep string) {
 	if c.MaxCache <= 0 {
@@ -177,10 +130,8 @@ func (c *Client) trim(keep string) {
 		}
 		total += info.Size()
 		path := filepath.Join(c.DownloadDir, e.Name())
-		for _, prefix := range savedPrefixes {
-			if strings.HasPrefix(e.Name(), prefix) && path != keep {
-				files = append(files, file{path, info.Size(), info.ModTime()})
-			}
+		if strings.HasPrefix(e.Name(), savedPrefix) && path != keep {
+			files = append(files, file{path, info.Size(), info.ModTime()})
 		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })

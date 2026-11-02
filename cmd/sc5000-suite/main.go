@@ -174,7 +174,6 @@ func runStreamSync(args []string) error {
 	pid := fs.Int("deemix-pid", 0, "also isolate all existing threads of this Deemix PID")
 	lossy := fs.Bool("allow-320k", true, "accept verified MP3 when FLAC is unavailable")
 	relay := fs.String("relay-url", webui.DefaultRelayURL, "cloud login relay; empty keeps logins on the LAN")
-	remote := fs.String("remote-deemix-url", webui.DefaultRelayURL, "default remote Deemix backend; deemix-config.json overrides it")
 	token := fs.String("access-token", "", "console access code (default random per launch)")
 	state := fs.String("state-dir", webui.DefaultStateDir(home), "private owner cookie state")
 	spotifyToken := fs.String("spotify-token", filepath.Join(webui.DefaultStateDir(home), "spotify-token.json"), "owner OAuth token file; guests never use it")
@@ -239,7 +238,7 @@ func runStreamSync(args []string) error {
 	}
 	jobs := webui.NewJobs(webui.Pipeline{Guard: guard, Catalog: &providers.Deezer{}, Deemix: dl, Library: importer})
 	defer jobs.Close()
-	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay, RemoteDeemixURL: *remote}, jobs)
+	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay}, jobs)
 	fmt.Fprintf(os.Stderr, "Stream Sync: %s\n控制台访问码: %s\n", *public, ui.AccessToken())
 	server := &http.Server{Addr: *listen, Handler: ui, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

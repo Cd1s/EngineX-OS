@@ -27,10 +27,11 @@ while running crashed PID 1 once.
   they are not literals.
 - The three services share Engine's one TIDAL client, so one is active at a time.
   Tracks already loaded on a deck keep working after a switch.
-- Audio for streaming tracks needs a Deemix REST bridge at 127.0.0.1:6595. None
-  is installed on the deck, so browsing works and loading such a track fails.
-- Spotify needs the owner's own registered Client ID. Deezer links a public
-  profile, not an account login.
+- Audio for streaming tracks comes from a Deemix REST bridge on the deck at
+  127.0.0.1:6595, then the deck's NetEase login. See `docs/stream-sync.md`.
+- My Collection, Featured, Genres, Moods and TIDAL Rising are hidden. Encoder
+  navigation can still land on those rows; the gateway answers them with empty
+  listings.
 - Encoder navigation of the Source screen reaches only stock rows. The three
   service rows are touch-only.
 

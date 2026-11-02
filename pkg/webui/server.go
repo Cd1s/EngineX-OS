@@ -47,11 +47,9 @@ type Config struct {
 	HTTP                                                                  *http.Client
 	// UIDir holds the deck UI settings; empty means the on-device default.
 	UIDir string
-	// RelayURL is the cloud login and audio service. Empty keeps phone logins on
-	// the LAN, where the phone must reach this deck directly.
+	// RelayURL is the cloud login service; it passes credentials and never audio.
+	// Empty keeps phone logins on the LAN, where the phone must reach this deck.
 	RelayURL string
-	// RemoteDeemixURL is the audio backend unless deemix-config.json names another.
-	RemoteDeemixURL string
 	// RestartEngine replaces "systemctl restart engine.service" in tests.
 	RestartEngine func() error
 	// Factory is useful for embedded integrations and deterministic tests.
@@ -99,15 +97,12 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/jobs", s.submit)
 	s.mux.HandleFunc("GET /api/jobs", s.listJobs)
 	s.mux.HandleFunc("GET /api/jobs/{id}/waveform", s.waveform)
-	s.mux.HandleFunc("GET /api/deemix", s.deemixGet)
-	s.mux.HandleFunc("POST /api/deemix", s.deemixPost)
+	s.mux.HandleFunc("GET /api/relay", s.relayConfigGet)
+	s.mux.HandleFunc("POST /api/relay", s.relayConfigPost)
 	s.tidal = newTidalGateway(s)
 	if jobs != nil {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor
-		if jobs.p.Deemix != nil {
-			jobs.p.Deemix.Remote = s.deemixRemote
-		}
 		jobs.mu.Unlock()
 	}
 	return s
