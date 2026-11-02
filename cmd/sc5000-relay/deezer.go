@@ -273,3 +273,42 @@ func abs(x int) int {
 	}
 	return x
 }
+
+// arlUser validates a browser cookie with deezer.getUserData. It deliberately
+// does not require public playlists: account login must work for private users.
+func (d *deezerClient) arlUser(ctx context.Context, arl string) (string, string, error) {
+	if !validARL(arl) {
+		return "", "", errors.New("invalid ARL")
+	}
+	q := url.Values{"method": {"deezer.getUserData"}, "input": {"3"}, "api_version": {"1.0"}, "api_token": {"null"}}
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://www.deezer.com/ajax/gw-light.php?"+q.Encode(), nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.AddCookie(&http.Cookie{Name: "arl", Value: arl})
+	resp, err := d.hc.Do(req)
+	if err != nil {
+		return "", "", errors.New("Deezer identity unavailable")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", errors.New("Deezer identity rejected")
+	}
+	var result struct {
+		Results struct {
+			User struct {
+				ID   json.Number `json:"USER_ID"`
+				Name string      `json:"BLOG_NAME"`
+			} `json:"USER"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&result); err != nil {
+		return "", "", errors.New("invalid Deezer identity")
+	}
+	id, err := result.Results.User.ID.Int64()
+	if err != nil || id <= 0 {
+		return "", "", errors.New("Deezer account is not logged in")
+	}
+	return strconv.FormatInt(id, 10), result.Results.User.Name, nil
+}
