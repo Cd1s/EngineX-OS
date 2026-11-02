@@ -187,7 +187,13 @@ type analysisFile struct {
 	rel         string
 	size, mtime int64
 }
+
+// performanceEncoding is part of each track's fingerprint: raising it re-encodes
+// imported tracks' PerformanceData on their next import. 2 fixes beat spacing.
+const performanceEncoding = 2
+
 type fingerprint struct {
+	Encoding     int
 	Record       string
 	ResolvedPath string
 	Size, MTime  int64
@@ -581,16 +587,27 @@ func writePlaylists(ctx context.Context, tx *sql.Tx, l *rekordbox.Library, opts 
 	var insert func(uint32, int64) error
 	insert = func(sourceParent uint32, parent int64) error {
 		for _, p := range byParent[sourceParent] {
-			title, e := uniqueTitle(ctx, tx, p.Name, parent)
-			if e != nil {
-				return e
-			}
-			r, e := tx.ExecContext(ctx, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES(?,?,1,0,1)`, title, parent)
-			if e != nil {
-				return e
-			}
-			id, e := r.LastInsertId()
-			if e != nil {
+			// Engine can rebuild imported playlists under new ids, which orphans
+			// BridgePlaylist. Take such a list back rather than adding a duplicate.
+			var id int64
+			e := tx.QueryRowContext(ctx, `SELECT id FROM Playlist WHERE title=? AND parentListId=? AND isExplicitlyExported=1 AND id NOT IN (SELECT listId FROM BridgePlaylist)`, p.Name, parent).Scan(&id)
+			if e == nil {
+				if _, e = tx.ExecContext(ctx, `DELETE FROM PlaylistEntity WHERE listId=?`, id); e != nil {
+					return e
+				}
+			} else if errors.Is(e, sql.ErrNoRows) {
+				title, e := uniqueTitle(ctx, tx, p.Name, parent)
+				if e != nil {
+					return e
+				}
+				r, e := tx.ExecContext(ctx, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES(?,?,1,0,1)`, title, parent)
+				if e != nil {
+					return e
+				}
+				if id, e = r.LastInsertId(); e != nil {
+					return e
+				}
+			} else {
 				return e
 			}
 			if _, e = tx.ExecContext(ctx, `INSERT INTO BridgePlaylist(sourceId,listId) VALUES(?,?)`, p.ID, id); e != nil {

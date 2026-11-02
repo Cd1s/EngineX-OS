@@ -82,6 +82,38 @@ func label(b *bytes.Buffer, s string) { // Engine uses an 8-bit UTF-8 byte lengt
 // memory cues stay in BridgeAnalysis, with the first used as main cue. Engine's
 // native quickCues has exactly eight slots; appending memory cues would produce
 // an unsupported blob. BridgeAnalysis also retains labels beyond 255 UTF-8 bytes.
+// beatPositions returns each beat's sample offset. PQTZ times are whole
+// milliseconds, so using them directly gives a 130 BPM track spacings of 461 and
+// 462 ms, and Engine's per-beat BPM then jumps between 130.15 and 129.87. Beats in
+// a constant-BPM run are instead placed at one exact step from the run's first
+// beat. The step is 60/BPM unless the 0.01-precision BPM would leave the last beat
+// over 1 ms from its exported time; a long run then uses the step between its end
+// times, because at 130 BPM that rounding alone can reach 18 ms over 1000 beats.
+func beatPositions(beats []rekordbox.Beat, sampleRate float64) []float64 {
+	positions := make([]float64, len(beats))
+	for start := 0; start < len(beats); {
+		end := start + 1
+		for end < len(beats) && beats[start].BPM > 0 && math.Abs(beats[end].BPM-beats[start].BPM) < 0.005 {
+			end++
+		}
+		first := float64(beats[start].TimeMS)
+		stepMS := 0.0
+		if beats[start].BPM > 0 && end-start > 1 {
+			stepMS = 60000 / beats[start].BPM
+			span := float64(end - start - 1)
+			last := float64(beats[end-1].TimeMS)
+			if math.Abs(first+span*stepMS-last) > 1 {
+				stepMS = (last - first) / span
+			}
+		}
+		for i := start; i < end; i++ {
+			positions[i] = (first + float64(i-start)*stepMS) * sampleRate / 1000
+		}
+		start = end
+	}
+	return positions
+}
+
 func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, error) {
 	if a == nil {
 		a = &rekordbox.Analysis{}
@@ -128,6 +160,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 		return p, e
 	}
 	if len(a.Beats) > 0 {
+		positions := beatPositions(a.Beats, float64(sr))
 		var b bytes.Buffer
 		put(&b, big, float64(sr))
 		put(&b, big, samples)
@@ -140,7 +173,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 					return p, fmt.Errorf("non-increasing beatgrid")
 				}
 				previous = beat.TimeMS
-				put(&b, little, float64(beat.TimeMS)*float64(sr)/1000)
+				put(&b, little, positions[i])
 				put(&b, little, int64(i)+int64(a.Beats[0].Number)-1)
 				next := uint32(1)
 				if i == len(a.Beats)-1 {
