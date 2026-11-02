@@ -12,14 +12,26 @@ that state machine, so this tree never mounts, checks or writes block devices.
 `udev` starts `sc5000-storage@<dev>.service` after blkid probing; the worker
 waits for edisksd's mountpoint and then:
 
-- **read-only mounts** (all HFS+): do nothing. Engine imports a rekordbox
-  export itself when `IntegrateRekordBoxLibrary` is enabled, and the patched
-  Engine (`0x58af34`) no longer auto-ejects read-only volumes.
-- **writable mounts** with `PIONEER/` or macOS `.PIONEER/` (any case)
-  containing `rekordbox/export.pdb` or `exportLibrary.db`: run
-  `rb-bridge --mount-path <mountpoint>` and then
-  `engine-guardian --heal-mount <mountpoint>` on CPU3, bounded by
-  `SC5000_BRIDGE_TIMEOUT`/`SC5000_GUARDIAN_TIMEOUT` when `timeout(1)` exists.
+logs the result. It does not write databases.
+
+`edisksd` runs with `/etc/sc5000/libedisksd-hook.so` preloaded (source and
+`build.sh` in `tools/edisksd-hook`). edisksd answers Engine's Mount call only
+after `mnt_context_mount()` returns, so the hook finishes within that call:
+
+1. read-only HFS+ with `PIONEER/` or `.PIONEER/` gets a writable overlay on
+   `<mount>/Engine Library`, with its upper layer in
+   `/data/sc5000-custom/hfs-lib/<volume>`;
+2. `rb-bridge --mount-path <mount>` converts the export;
+3. `engine-guardian --heal-mount <mount> --data-only` repairs table data.
+
+The steps share a 20 s budget. An unfinished import is killed and rolled back,
+so a library too large to convert in that time stays unconverted.
+
+Nothing may write these databases once Engine has attached. Concurrent writers
+produced `SQLITE_CORRUPT` and index damage on real media, and Engine then deleted
+`m.db`. So `rb-bridge` no longer runs `--watch`, `engine-guardian.service` is not
+enabled, and hook repairs do not alter Engine's views or triggers, which Engine
+compares on attach.
 
 HFS+ must stay read-only. On the 6.6.119 RT kernel `hfsplus.ko` hits
 `kernel BUG at mm/highmem.c:553` (`hfsplus_mkdir`) on the first write; with
@@ -27,8 +39,9 @@ HFS+ must stay read-only. On the 6.6.119 RT kernel `hfsplus.ko` hits
 catalog node on real media. Therefore `/etc/edisksd/main.conf` has no
 `[hfsplus] force` option, and dirty HFS+ volumes are never "cleaned" by
 editing the volume header. OverlayFS also refuses HFS+ as a lower layer
-(case-insensitive dentry ops), so there is no writable HFS+ view; convert a
-Mac stick to exFAT if Engine must write its library onto it.
+(case-insensitive dentry ops), so the overlay's lower layer is empty: it hides
+any Engine Library already on the stick, and library changes live on the
+player, not on the stick.
 
 The scripts are POSIX `sh`: the stock rootfs has BusyBox ash, no bash and no
 `xz` (BusyBox `xzcat` unpacks `sc5000-suite.xz`).

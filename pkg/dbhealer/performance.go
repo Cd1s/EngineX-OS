@@ -209,8 +209,16 @@ func overviewReason(blob []byte) string {
 }
 
 func healPerformance(tx *sql.Tx, r *Report) error {
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS GuardianReanalysis(trackId INTEGER NOT NULL,field TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(trackId,field))`); err != nil {
+	// A data-only pass has already created a TEMP queue. An unqualified IF NOT
+	// EXISTS checks only main, and would add the table Engine objects to.
+	var tempQueue int
+	if err := tx.QueryRow("SELECT count(*) FROM sqlite_temp_master WHERE name='GuardianReanalysis'").Scan(&tempQueue); err != nil {
 		return err
+	}
+	if tempQueue == 0 {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS GuardianReanalysis(trackId INTEGER NOT NULL,field TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(trackId,field))`); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec("DELETE FROM GuardianReanalysis WHERE trackId NOT IN (SELECT trackId FROM PerformanceData)"); err != nil {
 		return err

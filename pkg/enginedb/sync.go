@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,12 +28,19 @@ import (
 //go:embed schema.sql
 var schema string
 
+// stateFile holds bridge bookkeeping beside m.db. Engine compares m.db with its
+// own schema on attach and drops every table it does not recognise, and then
+// resets again on each attach if they return, so nothing of ours may live there.
+const stateFile = ".rb-bridge-state.db"
+
 const bridgeSchema = `
-CREATE TABLE BridgeState(path TEXT PRIMARY KEY, trackId INTEGER NOT NULL REFERENCES Track(id) ON DELETE CASCADE, fingerprint TEXT NOT NULL);
-CREATE TABLE BridgeAnalysis(trackId INTEGER PRIMARY KEY REFERENCES Track(id) ON DELETE CASCADE, sourceJSON BLOB NOT NULL, audioJSON BLOB NOT NULL);
-CREATE TABLE BridgePlaylist(sourceId INTEGER PRIMARY KEY, listId INTEGER NOT NULL UNIQUE REFERENCES Playlist(id) ON DELETE CASCADE);
-CREATE TABLE BridgeLibrary(key TEXT PRIMARY KEY, value BLOB);
+CREATE TABLE bridge.BridgeState(path TEXT PRIMARY KEY, trackId INTEGER NOT NULL, fingerprint TEXT NOT NULL);
+CREATE TABLE bridge.BridgeAnalysis(trackId INTEGER PRIMARY KEY, sourceJSON BLOB NOT NULL, audioJSON BLOB NOT NULL);
+CREATE TABLE bridge.BridgePlaylist(sourceId INTEGER PRIMARY KEY, listId INTEGER NOT NULL UNIQUE);
+CREATE TABLE bridge.BridgeLibrary(key TEXT PRIMARY KEY, value BLOB);
 `
+
+var bridgeTables = []string{"BridgeState", "BridgeAnalysis", "BridgePlaylist", "BridgeLibrary"}
 
 type Options struct {
 	SmartMatch   bool
@@ -62,11 +70,21 @@ func safeFile(p string) error {
 	return nil
 }
 
+// playedIndicator returns the positive random 63-bit value Engine stores in
+// Information.currentPlayedIndiciator.
+func playedIndicator() int64 {
+	id := uuid.New()
+	return int64(binary.BigEndian.Uint64(id[:8])>>1) | 1
+}
+
 // open keeps schema initialization in the same transaction as the import.
 func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
-	for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
-		if e := safeFile(p + suffix); e != nil {
-			return nil, nil, e
+	state := filepath.Join(filepath.Dir(p), stateFile)
+	for _, file := range []string{p, state} {
+		for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
+			if e := safeFile(file + suffix); e != nil {
+				return nil, nil, e
+			}
 		}
 	}
 	u := url.URL{Scheme: "file", Path: p}
@@ -85,6 +103,11 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 			db.Close()
 		}
 	}()
+	// SetMaxOpenConns(1) keeps this attachment on the connection the import uses.
+	// One transaction spans both files, so they commit atomically.
+	if _, e = db.ExecContext(ctx, `ATTACH DATABASE ? AS bridge`, state); e != nil {
+		return nil, nil, e
+	}
 	tx, e = db.BeginTx(ctx, nil)
 	if e != nil {
 		return nil, nil, e
@@ -97,7 +120,7 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 		if _, e = tx.ExecContext(ctx, schema); e != nil {
 			return nil, nil, fmt.Errorf("engine schema: %w", e)
 		}
-		_, e = tx.ExecContext(ctx, `INSERT INTO Information(uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch,currentPlayedIndiciator,lastRekordBoxLibraryImportReadCounter) VALUES(?,3,0,2,0,0)`, uuid.NewString())
+		_, e = tx.ExecContext(ctx, `INSERT INTO Information(uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch,currentPlayedIndiciator,lastRekordBoxLibraryImportReadCounter) VALUES(?,3,0,2,?,0)`, uuid.NewString(), playedIndicator())
 	} else {
 		var major, minor, patch, n int
 		e = tx.QueryRowContext(ctx, `SELECT schemaVersionMajor,schemaVersionMinor,schemaVersionPatch FROM Information`).Scan(&major, &minor, &patch)
@@ -111,15 +134,41 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 	if e != nil {
 		return nil, nil, e
 	}
+	// Earlier bridge builds left this NULL; Engine initialises it to a random value.
+	if _, e = tx.ExecContext(ctx, `UPDATE Information SET currentPlayedIndiciator=? WHERE currentPlayedIndiciator IS NULL OR currentPlayedIndiciator=0`, playedIndicator()); e != nil {
+		return nil, nil, e
+	}
 	var n int
-	if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE name='BridgeState'`).Scan(&n); e != nil {
+	if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM bridge.sqlite_master WHERE name='BridgeState'`).Scan(&n); e != nil {
 		return nil, nil, e
 	}
 	if n == 0 {
 		if _, e = tx.ExecContext(ctx, bridgeSchema); e != nil {
 			return nil, nil, e
 		}
-		if _, e = tx.ExecContext(ctx, `INSERT INTO BridgeLibrary(key,value) VALUES('version','1')`); e != nil {
+	}
+	// Libraries from earlier builds kept this state in m.db, not yet dropped by Engine.
+	for _, table := range bridgeTables {
+		if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM main.sqlite_master WHERE type='table' AND name=?`, table).Scan(&n); e != nil {
+			return nil, nil, e
+		}
+		if n == 0 {
+			continue
+		}
+		if _, e = tx.ExecContext(ctx, fmt.Sprintf(`INSERT OR REPLACE INTO bridge.%[1]s SELECT * FROM main.%[1]s; DROP TABLE main.%[1]s`, table)); e != nil {
+			return nil, nil, e
+		}
+	}
+	if _, e = tx.ExecContext(ctx, `INSERT OR IGNORE INTO BridgeLibrary(key,value) VALUES('version','1')`); e != nil {
+		return nil, nil, e
+	}
+	// The state file has no foreign keys into m.db: forget what Engine has deleted.
+	for _, prune := range []string{
+		`DELETE FROM BridgeState WHERE trackId NOT IN (SELECT id FROM main.Track)`,
+		`DELETE FROM BridgeAnalysis WHERE trackId NOT IN (SELECT id FROM main.Track)`,
+		`DELETE FROM BridgePlaylist WHERE listId NOT IN (SELECT id FROM main.Playlist)`,
+	} {
+		if _, e = tx.ExecContext(ctx, prune); e != nil {
 			return nil, nil, e
 		}
 	}
