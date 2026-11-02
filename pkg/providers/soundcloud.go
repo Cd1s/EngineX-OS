@@ -48,18 +48,18 @@ type soundCloudToken struct {
 	Access   string    `json:"access_token"`
 	Refresh  string    `json:"refresh_token,omitempty"`
 	Expiry   time.Time `json:"expiry"`
+
+	// The owner's account login, separate from the app's token.
+	UserAccess  string    `json:"user_access_token,omitempty"`
+	UserRefresh string    `json:"user_refresh_token,omitempty"`
+	UserExpiry  time.Time `json:"user_expiry,omitzero"`
 }
 
 // Token returns a valid access token for the app.
 func (a *SoundCloudAuth) Token(ctx context.Context, id, secret string) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !a.loaded {
-		a.loaded = true
-		if b, err := os.ReadFile(a.Path); err == nil {
-			json.Unmarshal(b, &a.saved)
-		}
-	}
+	a.load()
 	if a.saved.ClientID == id && a.saved.Access != "" && time.Now().Add(soundCloudTokenMargin).Before(a.saved.Expiry) {
 		return a.saved.Access, nil
 	}
@@ -68,34 +68,104 @@ func (a *SoundCloudAuth) Token(ctx context.Context, id, secret string) (string, 
 		form.Set("grant_type", "refresh_token")
 		form.Set("refresh_token", a.saved.Refresh)
 	}
-	address := a.TokenURL
-	if address == "" {
-		address = soundCloudTokenPath
-	}
-	var r struct {
-		Access  string `json:"access_token"`
-		Refresh string `json:"refresh_token"`
-		Expires int64  `json:"expires_in"`
-	}
-	// This endpoint rejects credentials in the form with invalid_client.
-	basic := base64.StdEncoding.EncodeToString([]byte(id + ":" + secret))
-	h := http.Header{"Content-Type": {"application/x-www-form-urlencoded"}, "Accept": {"application/json"}, "Authorization": {"Basic " + basic}}
-	err := JSON(ctx, a.HTTP, "POST", address, strings.NewReader(form.Encode()), h, &r)
+	var r soundCloudTokenResponse
+	err := a.post(ctx, form, id, secret, &r)
 	if err != nil && form.Get("grant_type") == "refresh_token" {
 		form.Set("grant_type", "client_credentials")
 		form.Del("refresh_token")
-		err = JSON(ctx, a.HTTP, "POST", address, strings.NewReader(form.Encode()), h, &r)
+		err = a.post(ctx, form, id, secret, &r)
 	}
 	if err != nil {
 		return "", err
 	}
-	if r.Access == "" {
-		return "", errors.New("soundcloud: token response missing access token")
+	a.saved.ClientID, a.saved.Access, a.saved.Refresh, a.saved.Expiry = id, r.Access, r.Refresh, r.expiry()
+	if err := SaveJSON(a.Path, a.saved); err != nil {
+		return "", err
 	}
+	return r.Access, nil
+}
+
+func (a *SoundCloudAuth) load() {
+	if a.loaded {
+		return
+	}
+	a.loaded = true
+	if b, err := os.ReadFile(a.Path); err == nil {
+		json.Unmarshal(b, &a.saved)
+	}
+}
+
+type soundCloudTokenResponse struct {
+	Access  string `json:"access_token"`
+	Refresh string `json:"refresh_token"`
+	Expires int64  `json:"expires_in"`
+}
+
+func (r soundCloudTokenResponse) expiry() time.Time {
 	if r.Expires <= 0 {
 		r.Expires = 3600
 	}
-	a.saved = soundCloudToken{id, r.Access, r.Refresh, time.Now().Add(time.Duration(r.Expires) * time.Second)}
+	return time.Now().Add(time.Duration(r.Expires) * time.Second)
+}
+
+// post sends a token request. This endpoint rejects the app's credentials in the form.
+func (a *SoundCloudAuth) post(ctx context.Context, form url.Values, id, secret string, out *soundCloudTokenResponse) error {
+	address := a.TokenURL
+	if address == "" {
+		address = soundCloudTokenPath
+	}
+	basic := base64.StdEncoding.EncodeToString([]byte(id + ":" + secret))
+	h := http.Header{"Content-Type": {"application/x-www-form-urlencoded"}, "Accept": {"application/json"}, "Authorization": {"Basic " + basic}}
+	if err := JSON(ctx, a.HTTP, "POST", address, strings.NewReader(form.Encode()), h, out); err != nil {
+		return err
+	}
+	if out.Access == "" {
+		return errors.New("soundcloud: token response missing access token")
+	}
+	return nil
+}
+
+// SetUser stores the owner's account login. Empty values clear it.
+func (a *SoundCloudAuth) SetUser(access, refresh string, expiry time.Time) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.load()
+	a.saved.UserAccess, a.saved.UserRefresh, a.saved.UserExpiry = access, refresh, expiry
+	return SaveJSON(a.Path, a.saved)
+}
+
+// HasUser reports whether the owner logged in with an account.
+func (a *SoundCloudAuth) HasUser() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.load()
+	return a.saved.UserAccess != ""
+}
+
+// UserToken returns the owner's token, renewing it when it is about to expire. The
+// lock also keeps two callers from spending the same rotating refresh token.
+func (a *SoundCloudAuth) UserToken(ctx context.Context, id, secret string) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.load()
+	if time.Now().Add(soundCloudTokenMargin).Before(a.saved.UserExpiry) {
+		return a.saved.UserAccess, nil
+	}
+	if a.saved.UserRefresh == "" {
+		return "", errors.New("soundcloud: login expired")
+	}
+	var r soundCloudTokenResponse
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {a.saved.UserRefresh}}
+	if err := a.post(ctx, form, id, secret, &r); err != nil {
+		return "", err
+	}
+	a.saved.UserAccess, a.saved.UserExpiry = r.Access, r.expiry()
+	if r.Refresh != "" {
+		a.saved.UserRefresh = r.Refresh
+	}
 	if err := SaveJSON(a.Path, a.saved); err != nil {
 		return "", err
 	}
@@ -160,7 +230,12 @@ func (s *SoundCloud) headers(ctx context.Context) (http.Header, error) {
 			return nil, errors.New("soundcloud: not connected")
 		}
 		var err error
-		if token, err = s.Auth.Token(ctx, s.ClientID, s.Secret); err != nil {
+		if s.Auth.HasUser() {
+			token, err = s.Auth.UserToken(ctx, s.ClientID, s.Secret)
+		} else {
+			token, err = s.Auth.Token(ctx, s.ClientID, s.Secret)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -183,7 +258,7 @@ func (s *SoundCloud) list(path string, q url.Values) string {
 
 // Identify fills in the account behind a user's token. An app token has no user.
 func (s *SoundCloud) Identify(ctx context.Context) error {
-	if s.UserID != 0 || s.Token == "" {
+	if s.UserID != 0 || (s.Token == "" && !s.Auth.HasUser()) {
 		return nil
 	}
 	var me struct {
@@ -309,7 +384,7 @@ func (s *SoundCloud) playlistPages(ctx context.Context, address, prefix string, 
 // library is where the account's own lists live. A user's token also reaches private
 // ones through /me; otherwise it is the public profile.
 func (s *SoundCloud) library() (string, error) {
-	if s.Token != "" {
+	if s.Token != "" || s.Auth.HasUser() {
 		return "/me", nil
 	}
 	if s.UserID != 0 {
