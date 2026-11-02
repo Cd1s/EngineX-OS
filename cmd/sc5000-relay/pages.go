@@ -58,7 +58,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 {{define "errorPage"}}{{template "head" .}}<div class="wrap"><div class="big">⚠️</div><h1 class="center">{{.Title}}</h1><p class="sub center">{{.Message}}</p></div></body></html>{{end}}
 
 {{define "donePage"}}{{template "head" .}}<div class="wrap"><div class="big">✅</div>
-<h1 class="center">已完成连接！</h1><p class="sub center">碟机屏幕上的二维码将自动关闭并加载歌单。<br>现在可以关闭此页面。</p></div></body></html>{{end}}
+<h1 class="center">已完成连接！</h1><p class="sub center">{{if eq .Provider "deezer"}}碟机已自动登录 Deezer 与 Deemix。<br>{{end}}碟机屏幕上的二维码将自动关闭并加载歌单。<br>现在可以关闭此页面。</p></div></body></html>{{end}}
 
 {{define "soundcloudPage"}}{{template "head" .}}<div class="wrap">
 <h1>连接 SoundCloud</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
@@ -90,7 +90,80 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 <h1>连接 Deezer</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
 {{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的设置。</div>{{end}}
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+<div class="card">
+<h2>方式一：在线登录 Deezer 账号（自动获取 ARL）</h2>
+<p class="hint">在下方云端浏览器中登录 Deezer。登录成功后会自动连接碟机，并销毁登录窗口。五分钟无操作会关闭窗口。</p>
+<button id="dz-start" class="btn purple" type="button">启动云端登录窗口</button>
+<p id="dz-status" class="hint" role="status" aria-live="polite"></p>
+<div id="dz-window" hidden>
+<img id="dz-frame" width="390" height="680" draggable="false" alt="Deezer 云端登录画面，点击选择输入框" style="display:block;width:100%;max-width:390px;height:auto;margin:12px auto;touch-action:none;user-select:none">
+<p class="hint">点击画面选择输入框；在画面上滑动，或用下方按钮滚动。</p>
+<button class="btn ghost small" type="button" data-dz-wheel="-420">向上滚动</button>
+<button class="btn ghost small" type="button" data-dz-wheel="420">向下滚动</button>
+<label for="dz-text">输入文字（邮箱/密码/验证码）</label>
+<input id="dz-text" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="先点击画面中的目标输入框">
+<button id="dz-fill" class="btn ghost" type="button">填入当前焦点框</button>
+<button class="btn ghost small" type="button" data-dz-key="Enter">按回车 (Enter)</button>
+<button class="btn ghost small" type="button" data-dz-key="Tab">按 Tab</button>
+<button class="btn ghost small" type="button" data-dz-key="Backspace">退格</button>
+<button id="dz-stop" class="btn ghost" type="button">关闭并清除登录窗口</button>
+</div></div>
+<script>
+(()=>{
+ const token={{.Token}}, base='/m/deezer', query='?t='+encodeURIComponent(token);
+ const start=document.getElementById('dz-start'), win=document.getElementById('dz-window'), img=document.getElementById('dz-frame'), status=document.getElementById('dz-status'), input=document.getElementById('dz-text');
+ let active=false, timer, blobURL, chain=Promise.resolve();
+ function queue(fn){const p=chain.then(fn);chain=p.catch(()=>{});return p;}
+ function clearImage(){if(blobURL){URL.revokeObjectURL(blobURL);blobURL=null;}img.removeAttribute('src');}
+ function stopped(message){active=false;clearTimeout(timer);win.hidden=true;start.disabled=false;input.value='';clearImage();status.textContent=message;}
+ function done(){stopped('已完成连接！碟机已自动登录 Deezer 与 Deemix');location.replace(base+query);}
+ async function response(r){const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'登录窗口暂不可用');if(j.status==='done'){done();return false;}return true;}
+ async function frame(){
+  if(!active)return;
+  const r=await fetch(base+'/frame'+query+'&poll=1',{cache:'no-store',signal:AbortSignal.timeout(30000)});
+  if(!(r.headers.get('Content-Type')||'').startsWith('image/jpeg')){await response(r);return;}
+  if(!r.ok)throw new Error('无法获取登录画面');
+  const blob=await r.blob();if(!active)return;
+  const next=URL.createObjectURL(blob), old=blobURL;blobURL=next;img.src=next;if(old)URL.revokeObjectURL(old);
+  status.textContent='请在画面中登录 Deezer，登录后将自动完成连接。';
+ }
+ function schedule(){clearTimeout(timer);if(active)timer=setTimeout(()=>queue(async()=>{try{await frame();schedule();}catch(e){stopped(e.message);}}),1000);}
+ function act(action){
+  clearTimeout(timer);
+  return queue(async()=>{
+   if(!active&&action.type!=='start')return;
+   try{
+    const r=await fetch(base+'/act'+query,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(action),signal:AbortSignal.timeout(30000)});
+    if(!await response(r))return;
+    if(action.type==='stop'){stopped('登录窗口已关闭，浏览器数据已清除。');return;}
+    active=true;win.hidden=false;start.disabled=true;
+    await frame();schedule();
+   }catch(e){stopped(e.message);}
+  });
+ }
+ start.onclick=()=>{start.disabled=true;status.textContent='正在启动隔离登录窗口…';act({type:'start'});};
+ document.getElementById('dz-stop').onclick=()=>act({type:'stop'});
+ document.getElementById('dz-fill').onclick=()=>{const text=input.value;input.value='';if(text)act({type:'text',text});};
+ document.querySelectorAll('[data-dz-key]').forEach(b=>b.onclick=()=>act({type:'key',key:b.dataset.dzKey}));
+ document.querySelectorAll('[data-dz-wheel]').forEach(b=>b.onclick=()=>act({type:'wheel',dy:Number(b.dataset.dzWheel)}));
+ let pointer;
+ img.onpointerdown=e=>{if(!active)return;e.preventDefault();pointer={x:e.clientX,y:e.clientY,id:e.pointerId};img.setPointerCapture(e.pointerId);};
+ img.onpointercancel=()=>{pointer=null;};
+ img.onpointerup=e=>{
+  if(!pointer||pointer.id!==e.pointerId)return;e.preventDefault();const p=pointer;pointer=null;
+  const dy=p.y-e.clientY;
+  if(Math.abs(dy)>15){act({type:'wheel',dy:Math.max(-1500,Math.min(1500,dy*2))});return;}
+  const r=img.getBoundingClientRect(),x=(e.clientX-r.left)*390/r.width,y=(e.clientY-r.top)*680/r.height;
+  if(x>=0&&x<390&&y>=0&&y<680)act({type:'click',x,y});
+ };
+ img.addEventListener('wheel',e=>{e.preventDefault();if(e.deltaY)act({type:'wheel',dy:Math.max(-1500,Math.min(1500,e.deltaY))});},{passive:false});
+ // Pausing polling while hidden does not refresh the server idle deadline.
+ document.addEventListener('visibilitychange',()=>{if(document.hidden)clearTimeout(timer);else schedule();});
+ window.addEventListener('pagehide',()=>{clearTimeout(timer);input.value='';clearImage();if(active)fetch(base+'/act'+query,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'stop'}),keepalive:true}).catch(()=>{});});
+})();
+</script>
 <form method="post" class="card">
+<h2>方式二：直接粘贴分享链接 / 用户 ID / ARL</h2>
 <label for="user">Deezer 链接或用户 ID</label>
 <input id="user" name="user" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://link.deezer.com/s/… 或 6850245583">
 <p class="hint">支持 Deezer App「分享个人资料」的 link.deezer.com 短链、deezer.com/profile/…、deezer.com/playlist/… 或纯数字 ID。{{if .UserID}}当前服务端 User ID：<code>{{.UserID}}</code>{{end}}</p>

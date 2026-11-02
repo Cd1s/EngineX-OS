@@ -159,7 +159,7 @@ func TestSessionFlowBothPrefixes(t *testing.T) {
 	if pr := poll(""); pr.Status != "waiting" || pr.Provider != "spotify" {
 		t.Fatalf("poll: %+v", pr)
 	}
-	w = do(h, "GET", "/m/spotify?t="+tok, "", nil)
+	w = do(h, "GET", "/m/spotify?manual=1&t="+tok, "", nil)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "client_id="+defaultSpotifyClientID) ||
 		!strings.Contains(w.Body.String(), "127.0.0.1%3a8080") && !strings.Contains(w.Body.String(), "127.0.0.1%3A8080") {
 		t.Fatalf("spotify page: %d", w.Code)
@@ -168,7 +168,7 @@ func TestSessionFlowBothPrefixes(t *testing.T) {
 		t.Fatalf("after scan: %+v", pr)
 	}
 	// Stateless fallback: unregistered token opened by phone.
-	if w := do(h, "GET", "/sc5000/m/spotify?t=testtoken1234567890", "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), defaultSpotifyClientID) {
+	if w := do(h, "GET", "/sc5000/m/spotify?manual=1&t=testtoken1234567890", "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), defaultSpotifyClientID) {
 		t.Fatalf("fallback page: %d", w.Code)
 	}
 	if w := do(h, "GET", "/m/deezer?t=short", "", nil); w.Code != 400 {
