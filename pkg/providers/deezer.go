@@ -2,10 +2,12 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -13,8 +15,117 @@ import (
 type Deezer struct {
 	BaseURL string
 	UserID  string
-	HTTP    *http.Client
+	// ARL is the owner's Deezer login cookie, kept with the linked profile.
+	ARL string
+	// GatewayURL overrides https://www.deezer.com in tests.
+	GatewayURL string
+	HTTP       *http.Client
 }
+
+var (
+	deezerUserRefs = []*regexp.Regexp{
+		regexp.MustCompile(`/profile/(\d{1,20})`),
+		regexp.MustCompile(`\buser-(\d{1,20})`),
+		regexp.MustCompile(`[?&]host=(\d{1,20})`),
+	}
+	deezerPlaylistRef = regexp.MustCompile(`/playlist/(\d{1,20})`)
+	deezerUserID      = regexp.MustCompile(`^\d{1,20}$`)
+	deezerARL         = regexp.MustCompile(`^[0-9A-Za-z]{32,512}$`)
+)
+
+// Short links only ever lead here; nothing else is fetched on a phone's say-so.
+var deezerLinkHosts = map[string]bool{"link.deezer.com": true, "deezer.page.link": true, "dzr.page.link": true, "www.deezer.com": true, "deezer.com": true}
+
+// IsDeezerUserID reports whether s has the form of a Deezer user ID.
+func IsDeezerUserID(s string) bool { return deezerUserID.MatchString(s) }
+
+func (d *Deezer) deezerRef(ctx context.Context, s string) string {
+	if decoded, err := url.QueryUnescape(s); err == nil {
+		s = decoded
+	}
+	for _, re := range deezerUserRefs {
+		if m := re.FindStringSubmatch(s); m != nil {
+			return m[1]
+		}
+	}
+	if m := deezerPlaylistRef.FindStringSubmatch(s); m != nil {
+		var p struct {
+			Creator struct {
+				ID int64 `json:"id"`
+			} `json:"creator"`
+		}
+		if d.get(ctx, "/playlist/"+m[1], nil, &p) == nil && p.Creator.ID != 0 {
+			return strconv.FormatInt(p.Creator.ID, 10)
+		}
+	}
+	return ""
+}
+
+// ResolveUser finds the user ID in an ID, a profile or playlist link, or a
+// short link, whose redirects are followed only within Deezer's own hosts.
+func (d *Deezer) ResolveUser(ctx context.Context, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if deezerUserID.MatchString(raw) {
+		return raw, nil
+	}
+	if id := d.deezerRef(ctx, raw); id != "" {
+		return id, nil
+	}
+	c := *client(d.HTTP)
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	next, err := url.Parse(raw)
+	for hop := 0; err == nil && hop < 6; hop++ {
+		if next.Scheme != "https" || !deezerLinkHosts[next.Hostname()] {
+			break
+		}
+		req, e := http.NewRequestWithContext(ctx, "GET", next.String(), nil)
+		if e != nil {
+			break
+		}
+		resp, e := c.Do(req)
+		if e != nil {
+			return "", errors.New("deezer: could not open the link")
+		}
+		resp.Body.Close()
+		location, e := resp.Location()
+		if e != nil {
+			break
+		}
+		if id := d.deezerRef(ctx, location.String()); id != "" {
+			return id, nil
+		}
+		next = location
+	}
+	return "", errors.New("deezer: no user ID in that link")
+}
+
+// IdentifyARL asks Deezer whose login cookie this is, and never echoes it.
+func (d *Deezer) IdentifyARL(ctx context.Context, arl string) (string, error) {
+	if !deezerARL.MatchString(arl) {
+		return "", errors.New("deezer: malformed arl")
+	}
+	base := d.GatewayURL
+	if base == "" {
+		base = "https://www.deezer.com"
+	}
+	q := url.Values{"method": {"deezer.getUserData"}, "input": {"3"}, "api_version": {"1.0"}, "api_token": {"null"}}
+	var r struct {
+		Results struct {
+			User struct {
+				ID json.Number `json:"USER_ID"`
+			} `json:"USER"`
+		} `json:"results"`
+	}
+	if err := JSON(ctx, d.HTTP, "POST", endpoint(base, "/ajax/gw-light.php", q), strings.NewReader("{}"), http.Header{"Cookie": {"arl=" + arl}, "Content-Type": {"application/json"}}, &r); err != nil {
+		return "", err
+	}
+	id := r.Results.User.ID.String()
+	if !deezerUserID.MatchString(id) || strings.Trim(id, "0") == "" {
+		return "", errors.New("deezer: arl is not logged in")
+	}
+	return id, nil
+}
+
 type dzTrack struct {
 	Contributors []struct {
 		Name string `json:"name"`
