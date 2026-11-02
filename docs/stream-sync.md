@@ -171,6 +171,9 @@ SoundCloud 用填入的 Client ID 调 v2 搜索，或用 OAuth Token 调 v1。
 
 ## 云端扫码登录
 
+扫码后，Spotify（回调已确认可用时）和 SoundCloud 直接跳到官方授权页，同意后自动回来完成。加 `&manual=1` 打开备用表单，
+SoundCloud 的公开主页绑定也在那里。Deezer 没有开放给新应用的 OAuth，仍是表单；网易云一直是它自己 App 的扫码。
+
 Spotify 和 Deezer 的二维码指向 `--relay-url`（默认 `https://denon.cheek.day`），手机不用连局域网：
 
 - 碟机 `POST /api/relay/session`，body 为 `{"token","provider","spotifyClientId"}`，3 秒超时。失败只记日志。

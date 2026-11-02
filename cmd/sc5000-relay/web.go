@@ -74,14 +74,29 @@ func (s *server) handleMobileGet(w http.ResponseWriter, r *http.Request) {
 			s.sessions.update(token, func(x *session) { x.SpotifyClientID = id })
 			sess.SpotifyClientID = id
 		}
+		// Go straight to the service's own login when its redirect is known to work.
+		// Without that, this page explains the pasting fallback. So does ?manual=1.
+		if straightToLogin(r, sess) && s.spotify.useHTTPS(r.Context(), sess.SpotifyClientID) {
+			http.Redirect(w, r, s.spotify.authorizeURL(sess.SpotifyClientID, s.spotify.httpsRedirect, token, sess.Verifier), http.StatusFound)
+			return
+		}
 		s.renderSpotify(w, r, sess, "")
 		return
 	}
 	if provider == "soundcloud" {
-		renderPage(w, 200, "soundcloudPage", s.soundCloudPageData(sess, token, ""))
+		d := s.soundCloudPageData(sess, token, "")
+		if straightToLogin(r, sess) && d.AuthLoopback != "" {
+			http.Redirect(w, r, d.AuthLoopback, http.StatusFound)
+			return
+		}
+		renderPage(w, 200, "soundcloudPage", d)
 		return
 	}
 	renderPage(w, 200, "deezerPage", pageData{Title: "连接 Deezer", Token: token, Done: sess.Status == "done", UserID: cfg.DeezerUserID})
+}
+
+func straightToLogin(r *http.Request, sess session) bool {
+	return r.URL.Query().Get("manual") != "1" && sess.Status != "done"
 }
 
 func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
