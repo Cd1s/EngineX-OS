@@ -152,6 +152,8 @@ func runRBBridge(args []string) error {
 const (
 	defaultDownloads  = "/media/sc5000-sd-cache/Music/Stream"
 	fallbackDownloads = "/data/sc5000-custom/Stream"
+	// Internal storage is shared with Engine; the SD card has room to spare.
+	maxInternalCache = 3 << 30
 )
 
 func runStreamSync(args []string) error {
@@ -170,7 +172,9 @@ func runStreamSync(args []string) error {
 	mode := fs.String("deemix-mode", "queue", "queue REST bridge or directory (/api/download + exact ID filenames)")
 	socket := fs.String("deemix-socket", "", "optional local Unix HTTP socket")
 	pid := fs.Int("deemix-pid", 0, "also isolate all existing threads of this Deemix PID")
-	lossy := fs.Bool("allow-320k", false, "explicitly permit verified MP3 320k fallback")
+	lossy := fs.Bool("allow-320k", true, "accept verified MP3 when FLAC is unavailable")
+	relay := fs.String("relay-url", webui.DefaultRelayURL, "cloud login relay; empty keeps logins on the LAN")
+	remote := fs.String("remote-deemix-url", webui.DefaultRelayURL, "default remote Deemix backend; deemix-config.json overrides it")
 	token := fs.String("access-token", "", "console access code (default random per launch)")
 	state := fs.String("state-dir", webui.DefaultStateDir(home), "private owner cookie state")
 	spotifyToken := fs.String("spotify-token", filepath.Join(webui.DefaultStateDir(home), "spotify-token.json"), "owner OAuth token file; guests never use it")
@@ -215,10 +219,12 @@ func runStreamSync(args []string) error {
 	// The TIDAL gateway and console must run without a front SD card; only
 	// importing into an Engine library needs one.
 	var importer webui.Importer
+	var internalCache int64
 	if library, err := analyzer.OpenLibrary(*dbPath); err != nil {
 		log.Printf("stream-sync: library import disabled: %v", err)
 		if *downloads == defaultDownloads {
 			*downloads = fallbackDownloads
+			internalCache = maxInternalCache
 		}
 	} else {
 		defer library.Close()
@@ -227,13 +233,13 @@ func runStreamSync(args []string) error {
 	if err = os.MkdirAll(*downloads, 0755); err != nil {
 		return err
 	}
-	dl := &deemixclient.Client{Mode: *mode, BaseURL: *base, QueuePath: *queue, DownloadDir: *downloads, AllowLossy: *lossy}
+	dl := &deemixclient.Client{Mode: *mode, BaseURL: *base, QueuePath: *queue, DownloadDir: *downloads, AllowLossy: *lossy, MaxCache: internalCache}
 	if *socket != "" {
 		dl.HTTP = deemixclient.UnixHTTP(*socket)
 	}
 	jobs := webui.NewJobs(webui.Pipeline{Guard: guard, Catalog: &providers.Deezer{}, Deemix: dl, Library: importer})
 	defer jobs.Close()
-	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state}, jobs)
+	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay, RemoteDeemixURL: *remote}, jobs)
 	fmt.Fprintf(os.Stderr, "Stream Sync: %s\n控制台访问码: %s\n", *public, ui.AccessToken())
 	server := &http.Server{Addr: *listen, Handler: ui, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

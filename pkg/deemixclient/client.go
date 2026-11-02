@@ -29,6 +29,13 @@ type Client struct {
 	PollInterval time.Duration
 	// AllowLossy must be explicitly enabled to accept MP3 from a FLAC request.
 	AllowLossy bool
+	// Remote names the password-protected backend that streams audio back when
+	// nothing else has a track. It is read per request so settings apply at once.
+	Remote func() (url, password string)
+	// Media fetches audio files; the default has no overall deadline.
+	Media *http.Client
+	// MaxCache bounds the files this client saved itself; 0 means no limit.
+	MaxCache int64
 }
 type QueueStatus struct {
 	ID       string  `json:"id"`

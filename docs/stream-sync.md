@@ -3,7 +3,7 @@
 这是独立、可选的触控控制台，不改原厂 Deck、按键、Cue 或默认歌单。
 Go 服务完成歌单浏览、跨平台匹配、本地下载请求、WAV/FLAC/MP3 解码、
 BPM / Beatgrid / Camelot 调性 / RGB 波形分析及 SD 卡 SQLite 事务入库。
-不包含任何 DRM 解密代码，不分发服务凭据，也不实现 Deemix 本身。
+不包含任何 DRM 解密代码，也不实现 Deemix 本身。
 
 ## 构建与测试
 
@@ -82,7 +82,52 @@ Spotify 不接受普通 `http://sc5000.lan` 作为远程 OAuth redirect。
 
 读取公开用户歌单（在控制台填公开 user ID）或直接打开公开 playlist ID。
 公开目录接口不需要 cookie。搜索支持 ISRC endpoint 和艺人/标题查询。
-本实现不承诺读取 Deezer 私人歌单，不管理下载器的 ARL/账号凭据。
+本实现不承诺读取 Deezer 私人歌单，也不把 ARL 交给下载器。
+
+## 音频来源（按顺序尝试）
+
+1. **网易云直连**：用碟机上已登录的网易云账号取官方音频地址（`lossless` → `exhigh` →
+   `standard`），试听片段一律不算。Spotify、Deezer 曲目先按标题、版本、共同艺人和
+   ≤5 秒时长匹配网易云曲目。访客只用自己的登录，不碰主人的 cookie。
+2. **本地 Deemix 桥**：下文的 `queue` / `directory` 协议，默认 `127.0.0.1:6595`。
+3. **远程 Deemix 后端**：`GET <deemixUrl>/api/audio?provider=&id=&isrc=&title=&artist=&duration=`，
+   带 `X-Deemix-Password` 和 `Authorization: Bearer` 两个头，响应体就是音频。格式以
+   实际字节为准；跨域重定向不跟随，避免把密码带到别的主机。
+
+本仓库不实现音频解密。解密只发生在外部下载器里（本地桥或远程后端）。
+
+文件存到下载目录（`netease-<id>.flac`、`remote-<provider>-<id>.mp3`），经 `Inspect`
+校验后才可用，重启后直接复用。没有 SD 库时落在内部存储，总量上限 3 GiB，超出后淘汰最旧的。
+
+MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k=false` 可关闭。
+
+### 配置
+
+- `state/deemix-config.json`：`deemixUrl`、`relayUrl`（默认都是 `https://denon.cheek.day`）和
+  `deemixPassword`。密码没有默认值，也不进仓库，只存在这个 0600 文件里。
+- 控制台首页、`/m/deezer`、`GET/POST /api/deemix`（碟机本机为 `/v1/sc5000/deemix`）和
+  `POST /api/ui?deemixUrl=&deemixPassword=` 都可修改，保存后立即生效。
+  密码只能写入，读取时只返回 `deemixPasswordSet`。地址必须是 https，或内网 IP 的 http。
+- 中继和 Deemix 后端同一主机时，中继请求也带这两个密码头；中继请求不跟随重定向。
+
+### 不自动写入插着的库
+
+`--database` 不存在时**不会**扫描 `/media/*`。Engine 一直开着插入介质上的
+`m.db`/`hm.db`，运行中从外部写入曾导致库损坏后被 Engine 删除（见提交 b63795b）。
+没有配置库时曲目照常播放，只是不入库。
+
+## 云端扫码登录
+
+Spotify 和 Deezer 的二维码指向 `--relay-url`（默认 `https://denon.cheek.day`），手机不用连局域网：
+
+- 碟机 `POST /api/relay/session`，body 为 `{"token","provider","spotifyClientId"}`，3 秒超时。失败只记日志。
+- 二维码内容是 `<relay>/m/<provider>?t=<token>`。
+- 碟机轮询 `GET /api/relay/session?t=<token>`，返回 `status`（`scanned` / `done`），
+  `done` 时带 `spotifyToken` 或 `deezer: {userId, arl}`，碟机存入 state 目录。
+
+`--relay-url=` 留空时回退到局域网页面 `http://<碟机>:8080/m/<provider>?t=<token>`，
+页面接受短链、资料页、用户 ID、`arl` Cookie 和 Deemix 密码。`arl` 只用来向 Deezer 确认账号，
+随资料一起存为 `deezer-owner.json`（0600），碟机不用它下载。
 
 ## 本地 Deemix 适配协议
 
@@ -132,7 +177,7 @@ Spotify 优先用 ISRC，兼顾版本标记和已知时长；相互矛盾的 ISR
 搜索，但仍保留录音版本约束；Club/Radio/Extended/Remix 等版本必须相同。
 无法区分多个候选时拒绝下载。Deezer 原生曲目直接使用其目录 ID。
 
-无损请求默认拒绝 MP3。明确加 `--allow-320k` 才接受回退；每一个 MP3
+无损不可用时默认接受 MP3 回退，`--allow-320k=false` 可关闭；每一个 MP3
 音频帧都必须为 MPEG1 Layer III 320k，低码率/VBR 不会伪装成 `[320k]`。
 检查实际文件头，不相信扩展名或 API 音质字段。Comment 标注
 `[FLAC] <位深>/<采样率>` 或 `[320k] MP3 ...; FLAC unavailable`。

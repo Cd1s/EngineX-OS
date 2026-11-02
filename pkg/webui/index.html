@@ -5,6 +5,7 @@
 :root{color-scheme:dark;font:18px system-ui,sans-serif;background:#0b0e13;color:#e7edf5}*{box-sizing:border-box}body{margin:0;padding:18px;max-width:1100px;margin:auto}header{display:flex;justify-content:space-between;align-items:center}h1{font-size:25px;margin:8px 0;color:#5ce4d5}h2{font-size:20px}button,select,input{font:inherit;min-height:52px;border-radius:9px;border:1px solid #374151;padding:10px;background:#1b2330;color:inherit}button{cursor:pointer}button:hover{border-color:#5ce4d5}button:disabled{opacity:.5}input[type=checkbox]{min-height:28px;width:28px;vertical-align:middle}nav,.bar{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}.card{background:#131a24;border-radius:12px;padding:14px;margin:12px 0}.rows{display:grid;gap:8px;max-height:45vh;overflow:auto}.row{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:10px;background:#1b2330;border-radius:8px}.row span{flex:1;overflow-wrap:anywhere}small{display:block;color:#a4b1c5;font-size:14px}progress{width:100%;height:14px;accent-color:#5ce4d5}.badge{color:#5ce4d5}#notice{color:#f6cc71;min-height:24px}#qr{width:220px;max-width:70vw;background:white}a{color:#5ce4d5}#login{display:none}#guard{font-size:13px;max-width:65%;color:#9caec4}canvas{width:100%;height:70px}label{align-self:center}@media(max-width:600px){body{padding:10px}.row{flex-wrap:wrap}.row button{width:100%}header{align-items:start}#guard{max-width:55%;font-size:11px}}
 </style>
 <header><h1>STREAM SYNC</h1><span id="guard">后台工作队列</span></header>
+<details><summary>Deemix 后端</summary><p id="deemixState"></p><input id="deemixUrl" placeholder="https://denon.cheek.day" autocomplete="off"><input id="deemixPassword" type="password" placeholder="新密码（留空不改）" autocomplete="off"><button onclick="action(saveDeemix)">保存</button></details>
 <details><summary>手机扫码打开控制台</summary><img src="/api/console-qr" width="220" alt="局域网控制台二维码"><small>同一局域网连接，使用终端显示的控制台访问码登录。</small></details>
 <div class="card"><div class="bar"><label><input type="checkbox" id="guest"> 访客临时加歌</label><input id="user" placeholder="Deezer 公开用户 ID" aria-label="Deezer 用户 ID"></div>
 <nav><button data-provider="netease">网易云 · 扫码</button><button data-provider="spotify">Spotify · 扫码</button><button data-provider="deezer">Deezer</button></nav>
@@ -18,6 +19,8 @@
 <script>
 'use strict';
 const $=id=>document.getElementById(id);let current='',loginSession='',lastWave='',sessions=[],qrTimer=null,qrChecking=false;
+async function showDeemix(){const v=await api('deemix');$('deemixUrl').value=v.deemixUrl;$('deemixState').textContent=v.deemixPasswordSet?'密码已设置':'未设置密码'}
+async function saveDeemix(){const b={deemixUrl:$('deemixUrl').value.trim()};const p=$('deemixPassword').value;if(p)b.deemixPassword=p;await api('deemix',{method:'POST',body:JSON.stringify(b)});$('deemixPassword').value='';await showDeemix()}
 function notice(t){$('notice').textContent=t||''}
 async function api(path,opts={}){const r=await fetch('/api/'+path,{...opts,headers:{'Content-Type':'application/json'}});const v=await r.json();if(!r.ok)throw Error(v.error||r.status);return v}
 const post=(p,v={})=>api(p,{method:'POST',body:JSON.stringify(v)});
@@ -75,5 +78,5 @@ async function jobs(){
 
 function showUI(v){$('uiState').textContent='当前：'+v.language+' · '+v.waveform+(v.safeMode?' · 安全模式（已回到原厂界面，选择语言可重试）':'')}
 for(const b of document.querySelectorAll('[data-ui]'))b.onclick=()=>action(async()=>{const q=b.dataset.ui;if(q.includes('restart')&&!confirm('重启 Engine？播放会中断。'))return;showUI(await post('ui?'+q))});
-action(async()=>{showUI(await api('ui'));await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(e=>notice(e.message))},2000);
+action(async()=>{showUI(await api('ui'));await showDeemix();await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(e=>notice(e.message))},2000);
 </script></html>

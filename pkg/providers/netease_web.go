@@ -169,8 +169,10 @@ func (n *Netease) web(ctx context.Context, path string, q url.Values) (map[strin
 			items[i] = `{"id":` + id + `}`
 		}
 		fields["ids"], fields["c"] = "["+strings.Join(ids, ",")+"]", "["+strings.Join(items, ",")+"]"
+	case "/song/url/v1":
+		api, fields["ids"], fields["level"], fields["encodeType"] = "/song/enhance/player/url/v1", "["+q.Get("id")+"]", q.Get("level"), "flac"
 	case "/cloudsearch":
-		api, fields["s"], fields["type"], fields["limit"], fields["offset"] = "/cloudsearch/get/web", q.Get("keywords"), q.Get("type"), q.Get("limit"), "0"
+		api, fields["s"], fields["type"], fields["limit"], fields["offset"] = "/cloudsearch/pc", q.Get("keywords"), q.Get("type"), q.Get("limit"), "0"
 	default:
 		return nil, errors.New("netease: unsupported request")
 	}

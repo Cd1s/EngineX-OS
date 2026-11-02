@@ -25,6 +25,8 @@ import (
 const (
 	defaultDownloads  = "/media/sc5000-sd-cache/Music/Stream"
 	fallbackDownloads = "/data/sc5000-custom/Stream"
+	// Internal storage is shared with Engine; the SD card has room to spare.
+	maxInternalCache = 3 << 30
 )
 
 func run() error {
@@ -42,7 +44,9 @@ func run() error {
 	mode := flag.String("deemix-mode", "queue", "queue REST bridge or directory (/api/download + exact ID filenames)")
 	socket := flag.String("deemix-socket", "", "optional local Unix HTTP socket")
 	pid := flag.Int("deemix-pid", 0, "also isolate all existing threads of this Deemix PID")
-	lossy := flag.Bool("allow-320k", false, "explicitly permit verified MP3 320k fallback")
+	lossy := flag.Bool("allow-320k", true, "accept verified MP3 when FLAC is unavailable")
+	relay := flag.String("relay-url", webui.DefaultRelayURL, "cloud login relay; empty keeps logins on the LAN")
+	remote := flag.String("remote-deemix-url", webui.DefaultRelayURL, "default remote Deemix backend; deemix-config.json overrides it")
 	token := flag.String("access-token", "", "console access code (default random per launch)")
 	state := flag.String("state-dir", webui.DefaultStateDir(home), "private owner cookie state")
 	spotifyToken := flag.String("spotify-token", filepath.Join(webui.DefaultStateDir(home), "spotify-token.json"), "owner OAuth token file; guests never use it")
@@ -87,10 +91,12 @@ func run() error {
 	// The TIDAL gateway and console must run without a front SD card; only
 	// importing into an Engine library needs one.
 	var importer webui.Importer
+	var internalCache int64
 	if library, err := analyzer.OpenLibrary(*dbPath); err != nil {
 		log.Printf("stream-sync: library import disabled: %v", err)
 		if *downloads == defaultDownloads {
 			*downloads = fallbackDownloads
+			internalCache = maxInternalCache
 		}
 	} else {
 		defer library.Close()
@@ -99,13 +105,13 @@ func run() error {
 	if err = os.MkdirAll(*downloads, 0755); err != nil {
 		return err
 	}
-	dl := &deemixclient.Client{Mode: *mode, BaseURL: *base, QueuePath: *queue, DownloadDir: *downloads, AllowLossy: *lossy}
+	dl := &deemixclient.Client{Mode: *mode, BaseURL: *base, QueuePath: *queue, DownloadDir: *downloads, AllowLossy: *lossy, MaxCache: internalCache}
 	if *socket != "" {
 		dl.HTTP = deemixclient.UnixHTTP(*socket)
 	}
 	jobs := webui.NewJobs(webui.Pipeline{Guard: guard, Catalog: &providers.Deezer{}, Deemix: dl, Library: importer})
 	defer jobs.Close()
-	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state}, jobs)
+	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay, RemoteDeemixURL: *remote}, jobs)
 	// This is the one intentional local credential output: the operator needs
 	// it to pair the touch/phone console. No provider credentials are logged.
 	fmt.Fprintf(os.Stderr, "Stream Sync: %s\n控制台访问码: %s\n", *public, ui.AccessToken())
