@@ -63,8 +63,9 @@ SQLite 测试使用本工作树捕获的完整原厂 SQL，包含触发器和链
 Token。凭据存在 `state/bpm-config.json` 和 `state/soundcloud-owner.json`，token 缓存在 `state/soundcloud-token.json`，
 都不进仓库，也可在 `https://relay.example.com` 的“BPM 增强”里填写后同步到碟机。应用凭据只能搜索和播放公开内容，不算登录，
 碟机仍会弹二维码。在 `https://relay.example.com/m/soundcloud` 或局域网 `/m/soundcloud` 填主页链接、分享链接或用户名后，
-才有点赞、自己的歌单和收藏的歌单（`【收藏】` 前缀）。私密内容要在同一页面用“登录账号”走 OAuth PKCE：授权后粘贴
-`http://127.0.0.1:8765/callback?code=...`，云端换取 token 并交给碟机，token 存在 `soundcloud-token.json` 里自动续期。
+才有点赞、自己的歌单和收藏的歌单（`【收藏】` 前缀）。私密内容要在同一页面用“登录账号”走 OAuth PKCE：SoundCloud 应用的 redirect 必须注册为
+`https://relay.example.com/oauth/soundcloud/callback`，否则授权页是空白的。云端换取 token 并交给碟机，token 存在
+`soundcloud-token.json` 里自动续期。
 
 只用 API 标记 `access=playable` 的曲目：优先 `http_mp3_128_url`，其次 HLS MP3，再次 HLS AAC（存为 `.mp4`）。试听地址一律不用，
 也不做解密。文件存为 `soundcloud-<id>.mp3`。超过 15 分钟或 50 MB 的文件不做后台分析。代码不提取 SoundCloud 网页里的 client_id。
@@ -139,6 +140,11 @@ MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k
 `m.db`/`hm.db`，运行中从外部写入曾导致库损坏后被 Engine 删除（见提交 b63795b）。
 没有配置库时曲目照常播放，只是不入库。
 
+## 封面
+
+曲目列表的缩略图由网关 `GET /v1/sc5000/art?song=&artist=` 提供，取各平台的小尺寸图，内存里留最近 300 张。下载的文件里
+也内嵌封面（FLAC 的 PICTURE 块、MP3 的 APIC 帧），AAC 不内嵌。TIDAL 自己的列表不经过这里。
+
 ## BPM 与调性
 
 歌单和搜索结果带 BPM 和 Camelot 调性。Engine 的客户端不读速度字段，所以网关把它们写在
@@ -151,7 +157,7 @@ copyright 字段后（如 `网易云音乐 [148 BPM 8A]`），曲目列表的 QM
 顺序：自己分析出的结果 → ReccoBeats 批量查 ISRC / Spotify ID → 逐首查：Deezer 曲目详情 →
 用已登录的 Spotify 按“主艺人 歌名”搜出 ID 和 ISRC 再查 ReccoBeats → Deezer 搜索（自带 BPM 或
 ISRC）→ ReccoBeats 搜索 → GetSongBPM → SoundCloud → 分析 Deezer 公开的 30 秒预览 MP3。拉丁字母的艺人名必须一致；中文艺人名在
-别处常写法不同（张震岳 / A-Yue Chang），这时只比歌名，所以可能偶尔命中同名的歌。列表只等缓存和一次批量查询（最多 0.5 秒），逐首查询都在后台，下次打开列表时显示。
+别处常写法不同（张震岳 / A-Yue Chang），这时只比歌名，所以可能偶尔命中同名的歌。列表只等缓存和一次批量查询（最多 0.4 秒），逐首查询都在后台，下次打开列表时显示。
 ReccoBeats 搜索只按歌名匹配，主艺人必须一致；优先同版本，没有时接受同一首歌的其他版本。
 ReccoBeats 返回 429 时暂停 5 分钟。
 

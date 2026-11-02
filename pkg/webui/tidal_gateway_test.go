@@ -438,3 +438,43 @@ func TestLoadedTrackShowsNoCatalogTempo(t *testing.T) {
 		t.Fatalf("%+v", v)
 	}
 }
+
+func TestThumbnailsPickEachServicesSmallSize(t *testing.T) {
+	for _, c := range []struct {
+		in   providers.Track
+		want string
+	}{
+		{providers.Track{CoverURL: "https://p1.music.126.net/a.jpg?param=500y500"}, "https://p1.music.126.net/a.jpg?param=120y120"},
+		{providers.Track{CoverURL: "https://cdn-images.dzcdn.net/images/cover/x/500x500-000000-80-0-0.jpg"}, "https://cdn-images.dzcdn.net/images/cover/x/120x120-000000-80-0-0.jpg"},
+		{providers.Track{CoverURL: "https://i1.sndcdn.com/artworks-a-t500x500.jpg"}, "https://i1.sndcdn.com/artworks-a-t120x120.jpg"},
+		{providers.Track{CoverURL: "https://i.scdn.co/image/big", ThumbURL: "https://i.scdn.co/image/small"}, "https://i.scdn.co/image/small"},
+	} {
+		if got := thumbURL(c.in); got != c.want {
+			t.Fatalf("%s: %s", c.in.CoverURL, got)
+		}
+	}
+}
+
+func TestArtServesAKnownRowOnly(t *testing.T) {
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/v1/sc5000/art?song=Unknown&artist=Nobody")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatal(resp.StatusCode)
+	}
+	// Only https artwork is ever fetched.
+	ui.tidal.addTrack(trackRef{track: providers.Track{ID: "1", Title: "S", Artist: "A", Provider: "deezer", CoverURL: "http://169.254.169.254/x"}})
+	resp, err = http.Get(srv.URL + "/v1/sc5000/art?song=S&artist=A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatal(resp.StatusCode)
+	}
+}

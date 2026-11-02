@@ -1,8 +1,9 @@
 package main
 
-// SoundCloud account login for the phone page. Like Spotify's, it can finish by a
-// pasted loopback address, because the registered app redirects to 127.0.0.1.
-// The tokens only pass through here on their way to the deck.
+// SoundCloud account login for the phone page. The app must have this service's
+// callback registered as its redirect; SoundCloud shows a blank page otherwise. Pasting
+// the address still works for an app registered with another redirect. The tokens only
+// pass through here on their way to the deck.
 
 import (
 	"context"
@@ -136,7 +137,7 @@ func (s *server) finishSoundCloud(ctx context.Context, sess session, token, code
 func (s *server) soundCloudPageData(sess session, token, message string) pageData {
 	d := pageData{Title: "连接 SoundCloud", Token: token, Done: sess.Status == "done", Error: message}
 	if id := s.cfg.get().SoundCloudClientID; id != "" {
-		d.AuthLoopback = soundCloudAuthorize(id, soundCloudLoopback, token, sess.Verifier)
+		d.AuthLoopback = soundCloudAuthorize(id, s.public+"/oauth/soundcloud/callback", token, sess.Verifier)
 	}
 	return d
 }

@@ -575,6 +575,14 @@ def edits(dev: bool):
                 "		providerName: root.scBrand(Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName)\n",
             ),
         ],
+        # Engine asks TIDAL's image server for a row's artwork; the other services' come
+        # from the gateway. The row's provider label marks a streaming row.
+        v + "BrowseView/Components/Components/AlbumArt.qml": [(
+            'source: row.modelData.albumArt ? row.modelData.albumArt : ""',
+            'source: row.streamingProviderName && root.scScope !== "tidal" && row.modelData.song'
+            ' ? "http://127.0.0.1:8080/v1/sc5000/art?song=" + encodeURIComponent(root.scPlainTitle(row.modelData.song)) + "&artist=" + encodeURIComponent(row.modelData.artist || "")'
+            ' : (row.modelData.albumArt ? row.modelData.albumArt : "")',
+        )],
         v + "BrowseView/Components/Components/Bpm.qml": [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
         v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: row.modelData.key || root.scPreview(row.modelData.providerName)[2] || ""')],
         v + "BrowseView/Components/Components/Song.qml": [('title: row.modelData.song || ""', 'title: root.scPlainTitle(row.modelData.song)')],
