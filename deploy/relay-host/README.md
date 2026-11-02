@@ -25,7 +25,7 @@ sh install.sh ./sc5000-relay-amd64 ./sc5000-deemix-relay.service
 |---|---|
 | `GET /healthz` | Health check |
 | `POST/GET /api/relay/session` | QR session credential transfer |
-| `GET/POST /m/{spotify,deezer}?t=` | Phone login |
+| `GET/POST /m/{spotify,deezer,soundcloud}?t=` | Phone login. Spotify and SoundCloud redirect straight to their own login page; `&manual=1` shows the fallback form |
 | `GET /oauth/spotify/callback` | OAuth callback |
 | `GET /oauth/soundcloud/callback` | OAuth callback. Register this URL as the SoundCloud app's redirect, or its authorize page stays blank |
 | `/api/audio`, `/api/download-stream`, `/api/download`, `/api/queue` | All methods return 410; no audio cache or queue |

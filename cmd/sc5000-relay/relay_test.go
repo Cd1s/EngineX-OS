@@ -288,7 +288,7 @@ func TestSoundCloudPageNeedsACredentialAndPassesItOn(t *testing.T) {
 	h := s.routes()
 	tok := "soundcloudtoken00001"
 	if w := do(h, "GET", "/m/soundcloud?t="+tok, "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), "连接 SoundCloud") {
-		t.Fatalf("%d %s", w.Code, w.Body)
+		t.Fatalf("without an app there is nothing to redirect to: %d %s", w.Code, w.Body)
 	}
 	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
 	if w := do(h, "POST", "/m/soundcloud?t="+tok, "user=cave", form); w.Code == 200 {
@@ -328,7 +328,11 @@ func TestSoundCloudAccountLoginByPastedAddress(t *testing.T) {
 	s.cfg.update(func(c *config) { c.SoundCloudClientID, c.SoundCloudSecret = "cid", "shh" })
 	h := s.routes()
 	tok := "soundcloudlogin00001"
-	page := do(h, "GET", "/m/soundcloud?t="+tok, "", nil).Body.String()
+	direct := do(h, "GET", "/m/soundcloud?t="+tok, "", nil)
+	if direct.Code != http.StatusFound || !strings.HasPrefix(direct.Header().Get("Location"), soundCloudAuthorizeURL+"?") || !strings.Contains(direct.Header().Get("Location"), "oauth%2Fsoundcloud%2Fcallback") {
+		t.Fatalf("%d %s", direct.Code, direct.Header().Get("Location"))
+	}
+	page := do(h, "GET", "/m/soundcloud?manual=1&t="+tok, "", nil).Body.String()
 	if !strings.Contains(page, "code_challenge_method=S256") || !strings.Contains(page, "client_id=cid") || strings.Contains(page, "shh") || !strings.Contains(page, "oauth%2Fsoundcloud%2Fcallback") {
 		t.Fatal(page)
 	}
@@ -343,6 +347,9 @@ func TestSoundCloudAccountLoginByPastedAddress(t *testing.T) {
 	}
 	if verifier == "" || redirect != soundCloudLoopback {
 		t.Fatalf("verifier %q redirect %q", verifier, redirect)
+	}
+	if w := do(h, "GET", "/m/soundcloud?t="+tok, "", nil); w.Code != 200 {
+		t.Fatalf("a finished QR code should say so, not log in again: %d", w.Code)
 	}
 	poll := do(h, "GET", "/api/relay/session?t="+tok, "", nil).Body.String()
 	if !strings.Contains(poll, `"userToken":"u1"`) || !strings.Contains(poll, `"refreshToken":"r1"`) || !strings.Contains(poll, `"userId":8`) {
