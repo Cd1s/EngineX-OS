@@ -42,6 +42,43 @@ SERVICES_MAIN = """
 	property string scLang: "en"
 	property string scWave: "denon"
 	property string scQuality: "flac"
+	property string scJog: "static"
+	property bool scPlayheadRestored: false
+	// Engine resets this preference on every start, so settings.conf keeps it.
+	function scKeepPlayhead(saved) {
+		const p = Planck.getProperty("/Client/Preferences/PlayheadPosition")
+		if (!p || !p.translator) return
+		if (!scPlayheadRestored) {
+			scPlayheadRestored = true
+			if (saved > 0) p.translator.value = saved
+		} else if (Math.abs(p.translator.value - saved) > 0.001) {
+			scCall("playhead=" + p.translator.value)
+		}
+	}
+	// Jog light modes write only the decks' live colours. The profile's colours stay
+	// as chosen and are not written ten times a second to flash.
+	property real scJogHue: 0
+	property var scJogSaved: null
+	function scDeckColor(deck) { return Planck.getProperty("/Engine/Deck" + deck + "/Color").translator }
+	Timer {
+		interval: root.scJog === "fast" ? 60 : 100
+		repeat: true
+		running: root.scJog === "rainbow" || root.scJog === "fast"
+		onRunningChanged: {
+			if (running) {
+				root.scJogSaved = [String(root.scDeckColor(1).color), String(root.scDeckColor(2).color)]
+			} else if (root.scJogSaved) {
+				root.scDeckColor(1).color = root.scJogSaved[0]
+				root.scDeckColor(2).color = root.scJogSaved[1]
+				root.scJogSaved = null
+			}
+		}
+		onTriggered: {
+			root.scJogHue = (root.scJogHue + (root.scJog === "fast" ? 0.05 : 0.01)) % 1
+			root.scDeckColor(1).color = Qt.hsva(root.scJogHue, 1, 1, 1)
+			root.scDeckColor(2).color = Qt.hsva((root.scJogHue + 0.35) % 1, 1, 1, 1)
+		}
+	}
 	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud"]
 	property var scLoggedIn: []
 	property string scScope: ""
@@ -85,6 +122,8 @@ SERVICES_MAIN = """
 		scLang = v.language
 		scWave = v.waveform
 		scQuality = v.quality || "flac"
+		scJog = v.jog || "static"
+		scKeepPlayhead(v.playhead || 0)
 		scSources = v.sources
 		scLoggedIn = v.loggedIn
 		scScope = v.scope
@@ -398,6 +437,16 @@ QUALITY_ENTRY = """
 		},
 """
 
+JOG_ENTRY = """
+		EntryBase.ListEntry {
+			text: "Jog Light Mode"
+			readonly property var ids: ["static", "rainbow", "fast"]
+			values: ["Static", "Psy Rainbow", "Psy Fast"]
+			currentValue: values[Math.max(0, ids.indexOf(root.scJog))]
+			onSelected: function(index) { root.scCall("jog=" + ids[index]) }
+		},
+"""
+
 LANGUAGE_ENTRY = """
 		EntryBase.ListEntry {
 			text: "Language"
@@ -420,19 +469,26 @@ LANGUAGE_ENTRY = """
 		WaveformStyle { },
 """
 
-BAND_COLORS = {"Low": "#1a5cff", "Mid": "#ff9416", "High": "#ffffff"}  # Pioneer 3-Band
+# rekordbox's 3-Band palette: played, fading and past shades of each band.
+BAND_COLORS = {"Low": "#0055ff", "Mid": "#ff8800", "High": "#ffffff"}
+BAND_FADE = {"Low": "#0044dd", "Mid": "#e07000", "High": "#f0f4ff"}
+BAND_PAST = {"Low": "#003399", "Mid": "#994d00", "High": "#999999"}
+# rekordbox's saturated RGB primaries, in place of Engine's muted ones.
+RGB_COLORS = {"Low": "#ff1428", "Mid": "#00e632", "High": "#0078ff"}
+RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}
 
 
-def three_band(style_name, band):
-    return f'(root.scWave === "3band" ? "{BAND_COLORS[band]}" : Style.{style_name})'
+def three_band(style_name, band, colors=BAND_COLORS):
+    return f'(root.scWave === "3band" ? "{colors[band]}" : Style.{style_name})'
 
 
 def edits(dev: bool):
     v = ROOT + "Views/"
     prefs = v + "ControlCenter/Tabs/Preferences/"
-    wave = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}FadeColor", f"rgbMode ? Style.waveformRGB{b}Color : {three_band(f'waveform{b}FadeColor', b)}") for b in BAND_COLORS]
+    wave = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}FadeColor", f'rgbMode ? "{RGB_COLORS[b]}" : ' + three_band(f"waveform{b}FadeColor", b, BAND_FADE)) for b in BAND_COLORS]
     wave += [(f"color{b}Color: Style.waveform{b}Color", f"color{b}Color: {three_band(f'waveform{b}Color', b)}") for b in BAND_COLORS]
-    overview = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}Color", f"rgbMode ? Style.waveformRGB{b}Color : {three_band(f'waveform{b}Color', b)}") for b in BAND_COLORS]
+    overview = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}Color", f'rgbMode ? "{RGB_COLORS[b]}" : ' + three_band(f"waveform{b}Color", b)) for b in BAND_COLORS]
+    overview += [(f"elapsed{b}Color: Style.waveform{b}PastColor", f'elapsed{b}Color: rgbMode ? "{RGB_PAST[b]}" : ' + three_band(f"waveform{b}PastColor", b, BAND_PAST)) for b in BAND_COLORS]
     main = DEV_HARNESS if dev else ""
     return {
         # The flag is still cleared, which is what pressing "Ok" would do.
@@ -456,7 +512,7 @@ def edits(dev: bool):
         ],
         prefs + "TabContents/DeviceTabContent.qml": [
             ('import "../Entries"\n', 'import "../Entries"\nimport "../Entries/Base" as EntryBase\nimport Planck 1.0\n'),
-            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + QUALITY_ENTRY + "		PlayerNumber { },\n"),
+            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + QUALITY_ENTRY + JOG_ENTRY + "		PlayerNumber { },\n"),
         ],
         prefs + "Entries/StreamingServices.qml": [
             ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && provider.name !== "TIDAL" && provider.name !== "SoundCloud"\n'),

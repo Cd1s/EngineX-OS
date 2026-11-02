@@ -45,7 +45,7 @@ type Config struct {
 	SpotifyRedirectURL                                                    string
 	SpotifyClientID, SpotifyTokenPath, SpotifyBaseURL, SpotifyAccountsURL string
 	NeteaseURL, StateDir, DeezerURL, DeezerGatewayURL                     string
-	SoundCloudURL                                                         string
+	SoundCloudURL, SoundCloudTokenURL                                     string
 	HTTP                                                                  *http.Client
 	// UIDir holds the deck UI settings; empty means the on-device default.
 	UIDir string
@@ -74,6 +74,8 @@ type Server struct {
 	// Owner logins ended in the console; the deck must not restore them.
 	ownerDeleted map[string]bool
 	logins       map[string]*loginFlow
+
+	soundCloudAuth *providers.SoundCloudAuth
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
@@ -107,7 +109,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/bpm", s.bpmConfigPost)
 	s.mux.HandleFunc("GET /api/relay", s.relayConfigGet)
 	s.mux.HandleFunc("POST /api/relay", s.relayConfigPost)
+	s.soundCloudAuth = &providers.SoundCloudAuth{TokenURL: cfg.SoundCloudTokenURL, Path: filepath.Join(cfg.StateDir, "soundcloud-token.json"), HTTP: cfg.HTTP}
 	if cfg.BPM != nil {
+		cfg.BPM.SoundCloudAuth = s.soundCloudAuth
 		cfg.BPM.Spotify = s.ownerSpotify
 	}
 	s.tidal = newTidalGateway(s)
@@ -245,7 +249,7 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 		return &providers.Deezer{BaseURL: s.cfg.DeezerURL, GatewayURL: s.cfg.DeezerGatewayURL, UserID: user, ARL: arl, HTTP: s.cfg.HTTP}, nil
 	case "soundcloud":
 		if guest {
-			return &providers.SoundCloud{BaseURL: s.cfg.SoundCloudURL, HTTP: s.cfg.HTTP}, nil
+			return &providers.SoundCloud{BaseURL: s.cfg.SoundCloudURL, HTTP: s.cfg.HTTP, Auth: s.soundCloudAuth}, nil
 		}
 		return s.ownerSoundCloudProvider(), nil
 	case "netease":

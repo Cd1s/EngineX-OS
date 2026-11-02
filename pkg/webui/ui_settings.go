@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -21,6 +22,7 @@ var (
 	uiWaveforms = []string{"denon", "rgb", "3band"}
 	uiServices  = []string{"tidal", "netease", "spotify", "deezer", "soundcloud"}
 	uiQualities = []string{qualityFLAC, quality320k}
+	uiJogModes  = []string{"static", "rainbow", "fast"}
 	// TIDAL logs in through Engine's own flow against TIDAL's servers.
 	loginServices = []string{"netease", "spotify", "deezer", "soundcloud"}
 )
@@ -32,6 +34,8 @@ const (
 
 type uiSettings struct {
 	Quality  string   `json:"quality"`
+	Jog      string   `json:"jog"`
+	Playhead float64  `json:"playhead"`
 	Language string   `json:"language"`
 	Waveform string   `json:"waveform"`
 	Sources  []string `json:"sources"`
@@ -52,7 +56,7 @@ func (s *Server) uiDir() string {
 
 // loadUI must be called with uiMu held. Bad or missing values get defaults.
 func (s *Server) loadUI() uiSettings {
-	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC}
+	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static"}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
 		key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
@@ -75,6 +79,14 @@ func (s *Server) loadUI() uiSettings {
 		case "quality":
 			if slices.Contains(uiQualities, val) {
 				v.Quality = val
+			}
+		case "jog":
+			if slices.Contains(uiJogModes, val) {
+				v.Jog = val
+			}
+		case "playhead":
+			if f, err := strconv.ParseFloat(val, 64); err == nil && validPlayhead(f) {
+				v.Playhead = f
 			}
 		case "sources":
 			if list, err := parseUISources(val); err == nil {
@@ -107,7 +119,7 @@ func (s *Server) saveUI(v uiSettings) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\n"
+	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\njog=" + v.Jog + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
 	tmp, err := os.CreateTemp(dir, ".settings-*")
 	if err != nil {
 		return err
@@ -177,7 +189,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) {
+	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -193,6 +205,18 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("quality") {
 		v.Quality = q.Get("quality")
+	}
+	if q.Has("jog") {
+		v.Jog = q.Get("jog")
+	}
+	if q.Has("playhead") {
+		f, err := strconv.ParseFloat(q.Get("playhead"), 64)
+		if err != nil || !validPlayhead(f) {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.Playhead = f
 	}
 	if q.Has("sources") {
 		list, err := parseUISources(q.Get("sources"))
@@ -227,6 +251,9 @@ func (s *Server) quality() string {
 	defer s.uiMu.Unlock()
 	return s.loadUI().Quality
 }
+
+// validPlayhead takes Engine's normalised slider value.
+func validPlayhead(f float64) bool { return f >= 0 && f <= 1 }
 
 func ptrTo(v string) *string { return &v }
 

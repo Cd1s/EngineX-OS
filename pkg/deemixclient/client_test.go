@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mewkiz/flac"
+	"github.com/mewkiz/flac/meta"
+
 	"github.com/Cd1s/sc5000-custom-os/internal/testaudio"
 	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
 )
@@ -418,6 +421,93 @@ func TestSavePartsJoinsSegmentsAndRetries(t *testing.T) {
 	}
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 2 {
+		t.Fatalf("leftovers %v", entries)
+	}
+}
+
+func TestEmbedCoverInFLACAndMP3(t *testing.T) {
+	jpeg := append([]byte{0xff, 0xd8, 0xff}, bytes.Repeat([]byte("art"), 100)...)
+	var fetches int
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches++
+		if r.URL.Path == "/not-image" {
+			w.Write([]byte("<html>"))
+			return
+		}
+		w.Write(jpeg)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	c := &Client{DownloadDir: dir, AllowLossy: true, Media: srv.Client()}
+	ctx := context.Background()
+
+	flacPath := writeFLAC(t, dir)
+	before, _ := Inspect(flacPath)
+	if err := c.EmbedCover(ctx, flacPath, srv.URL+"/a.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Inspect(flacPath); err != nil || got != before {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if has, _ := hasPicture(flacPath); !has {
+		t.Fatal("no picture in FLAC")
+	}
+	stream, err := flac.ParseFile(flacPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, b := range stream.Blocks {
+		if pic, ok := b.Body.(*meta.Picture); ok {
+			found = pic.Type == 3 && pic.MIME == "image/jpeg" && bytes.Equal(pic.Data, jpeg)
+		}
+	}
+	if _, err := stream.ParseNext(); err != nil || !found {
+		t.Fatalf("audio %v, picture %v", err, found)
+	}
+	stream.Close()
+
+	mp3Path := filepath.Join(dir, "a.mp3")
+	frames := mp3Frames(14, 3)
+	os.WriteFile(mp3Path, frames, 0o644)
+	if err := c.EmbedCover(ctx, mp3Path, srv.URL+"/a.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(mp3Path)
+	if !bytes.HasSuffix(got, frames) || !bytes.HasPrefix(got, []byte("ID3\x03")) || !bytes.Contains(got, []byte("APIC")) || !bytes.Contains(got, jpeg) {
+		t.Fatal("bad MP3 tag")
+	}
+	if q, err := Inspect(mp3Path); err != nil || q.Label != "[320k]" {
+		t.Fatalf("%+v %v", q, err)
+	}
+	// A second pass downloads nothing and changes nothing.
+	n := fetches
+	if err := c.EmbedCover(ctx, mp3Path, srv.URL+"/a.jpg"); err != nil || fetches != n {
+		t.Fatal(err, fetches)
+	}
+
+	// Frames already in a padded tag stay, and the picture lands before the padding ends.
+	tagged := filepath.Join(dir, "b.mp3")
+	old := append([]byte("TIT2\x00\x00\x00\x03\x00\x00\x00Hi"), make([]byte, 40)...)
+	head := append([]byte("ID3\x03\x00\x00"), synchsafe(len(old))...)
+	os.WriteFile(tagged, append(append(head, old...), frames...), 0o644)
+	if err := c.EmbedCover(ctx, tagged, srv.URL+"/a.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = os.ReadFile(tagged)
+	if !bytes.Contains(got, []byte("TIT2")) || !bytes.Contains(got, []byte("APIC")) || !bytes.HasSuffix(got, frames) {
+		t.Fatal("old tag lost")
+	}
+
+	plain := filepath.Join(dir, "c.mp3")
+	os.WriteFile(plain, frames, 0o644)
+	if err := c.EmbedCover(ctx, plain, srv.URL+"/not-image"); err == nil {
+		t.Fatal("non-image embedded")
+	}
+	if err := c.EmbedCover(ctx, plain, "http://insecure.example/a.jpg"); err == nil {
+		t.Fatal("plain HTTP accepted")
+	}
+	if entries, _ := filepath.Glob(filepath.Join(dir, ".part-*")); len(entries) != 0 {
 		t.Fatalf("leftovers %v", entries)
 	}
 }

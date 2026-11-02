@@ -36,6 +36,7 @@ type relaySession struct {
 	SoundCloud *struct {
 		User     string `json:"user"`
 		ClientID string `json:"clientId"`
+		Secret   string `json:"clientSecret"`
 		Token    string `json:"token"`
 	} `json:"soundcloud"`
 }
@@ -110,7 +111,7 @@ func (s *Server) relayCollect(session *Session, v relaySession) error {
 		// The relay never holds a working client, so the deck checks what it sent.
 		ctx, cancel := context.WithTimeout(context.Background(), 2*relayTimeout)
 		defer cancel()
-		return s.linkSoundCloud(ctx, session, v.SoundCloud.User, v.SoundCloud.ClientID, v.SoundCloud.Token)
+		return s.linkSoundCloud(ctx, session, v.SoundCloud.User, v.SoundCloud.ClientID, v.SoundCloud.Secret, v.SoundCloud.Token)
 	case *providers.Spotify:
 		if v.SpotifyToken == nil {
 			return errRelayIncomplete
@@ -163,6 +164,9 @@ func (s *Server) pullBPMConfig(ctx context.Context) error {
 	next := v
 	if r.Config.SoundCloudClientID != "" {
 		next.SoundCloudClientID = r.Config.SoundCloudClientID
+	}
+	if r.Config.SoundCloudSecret != "" {
+		next.SoundCloudSecret = r.Config.SoundCloudSecret
 	}
 	if r.Config.SoundCloudToken != "" {
 		next.SoundCloudToken = r.Config.SoundCloudToken

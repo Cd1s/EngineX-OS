@@ -1,44 +1,121 @@
 package providers
 
-// SoundCloud through its API with the owner's own Client ID or OAuth token. Only
-// streams the account may already play are fetched: previews and encrypted streams
-// are refused, so tracks reserved for SoundCloud Go+ stay out of reach.
+// SoundCloud through its official API with the owner's registered app: the Client ID
+// and secret are exchanged for an access token, or a user's own token is used. Only
+// what the API marks fully playable is fetched. Previews are refused, and nothing is
+// decrypted.
 
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 const (
-	defaultSoundCloudAPI = "https://api-v2.soundcloud.com"
-	soundCloudLikesID    = "likes"
-	soundCloudListLimit  = 2000
+	defaultSoundCloudAPI  = "https://api.soundcloud.com"
+	soundCloudTokenPath   = "https://secure.soundcloud.com/oauth/token"
+	soundCloudLikesID     = "likes"
+	soundCloudListLimit   = 2000
+	soundCloudTokenMargin = time.Minute
 )
 
-// ErrNoFullStream means the track only offers a preview or an encrypted stream.
-var ErrNoFullStream = errors.New("soundcloud: no full-length unencrypted stream for this track")
+// ErrNoFullStream means the API only offers a preview of the track.
+var ErrNoFullStream = errors.New("soundcloud: no full-length stream for this track")
+
+// SoundCloudAuth exchanges an app's credentials for an access token. SoundCloud
+// limits how often that may happen, so the token is shared and kept in a file.
+type SoundCloudAuth struct {
+	TokenURL string
+	Path     string
+	HTTP     *http.Client
+
+	mu     sync.Mutex
+	loaded bool
+	saved  soundCloudToken
+}
+
+type soundCloudToken struct {
+	ClientID string    `json:"client_id"`
+	Access   string    `json:"access_token"`
+	Refresh  string    `json:"refresh_token,omitempty"`
+	Expiry   time.Time `json:"expiry"`
+}
+
+// Token returns a valid access token for the app.
+func (a *SoundCloudAuth) Token(ctx context.Context, id, secret string) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.loaded {
+		a.loaded = true
+		if b, err := os.ReadFile(a.Path); err == nil {
+			json.Unmarshal(b, &a.saved)
+		}
+	}
+	if a.saved.ClientID == id && a.saved.Access != "" && time.Now().Add(soundCloudTokenMargin).Before(a.saved.Expiry) {
+		return a.saved.Access, nil
+	}
+	form := url.Values{"grant_type": {"client_credentials"}}
+	if a.saved.ClientID == id && a.saved.Refresh != "" {
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", a.saved.Refresh)
+	}
+	address := a.TokenURL
+	if address == "" {
+		address = soundCloudTokenPath
+	}
+	var r struct {
+		Access  string `json:"access_token"`
+		Refresh string `json:"refresh_token"`
+		Expires int64  `json:"expires_in"`
+	}
+	// This endpoint rejects credentials in the form with invalid_client.
+	basic := base64.StdEncoding.EncodeToString([]byte(id + ":" + secret))
+	h := http.Header{"Content-Type": {"application/x-www-form-urlencoded"}, "Accept": {"application/json"}, "Authorization": {"Basic " + basic}}
+	err := JSON(ctx, a.HTTP, "POST", address, strings.NewReader(form.Encode()), h, &r)
+	if err != nil && form.Get("grant_type") == "refresh_token" {
+		form.Set("grant_type", "client_credentials")
+		form.Del("refresh_token")
+		err = JSON(ctx, a.HTTP, "POST", address, strings.NewReader(form.Encode()), h, &r)
+	}
+	if err != nil {
+		return "", err
+	}
+	if r.Access == "" {
+		return "", errors.New("soundcloud: token response missing access token")
+	}
+	if r.Expires <= 0 {
+		r.Expires = 3600
+	}
+	a.saved = soundCloudToken{id, r.Access, r.Refresh, time.Now().Add(time.Duration(r.Expires) * time.Second)}
+	if err := SaveJSON(a.Path, a.saved); err != nil {
+		return "", err
+	}
+	return r.Access, nil
+}
 
 type SoundCloud struct {
 	BaseURL  string
 	HTTP     *http.Client
 	ClientID string
-	Token    string
+	Secret   string
+	Token    string // a user's own token, which also reaches private content
+	Auth     *SoundCloudAuth
 	UserID   int64
 	Username string
 }
 
-type scTranscoding struct {
-	URL     string `json:"url"`
-	Snipped bool   `json:"snipped"`
-	Format  struct {
-		Protocol string `json:"protocol"`
-		MimeType string `json:"mime_type"`
-	} `json:"format"`
+// Usable reports whether there is anything to reach the API with.
+func (s *SoundCloud) Usable() bool {
+	return s.Token != "" || (s.ClientID != "" && s.Secret != "")
 }
 
 type scTrack struct {
@@ -46,27 +123,26 @@ type scTrack struct {
 	Title    string  `json:"title"`
 	Duration int64   `json:"duration"`
 	BPM      float64 `json:"bpm"`
-	Policy   string  `json:"policy"`
-	Auth     string  `json:"track_authorization"`
+	Key      string  `json:"key_signature"`
+	ISRC     string  `json:"isrc"`
+	Access   string  `json:"access"`
+	Artwork  string  `json:"artwork_url"`
 	User     struct {
 		Username string `json:"username"`
+		Avatar   string `json:"avatar_url"`
 	} `json:"user"`
-	Publisher struct {
-		ISRC   string `json:"isrc"`
-		Artist string `json:"artist"`
-		Album  string `json:"album_title"`
-	} `json:"publisher_metadata"`
-	Media struct {
-		Transcodings []scTranscoding `json:"transcodings"`
-	} `json:"media"`
+}
+
+func (t scTrack) cover() string {
+	art := t.Artwork
+	if art == "" {
+		art = t.User.Avatar
+	}
+	return strings.Replace(art, "-large.", "-t500x500.", 1)
 }
 
 func (t scTrack) track() Track {
-	artist := t.Publisher.Artist
-	if artist == "" {
-		artist = t.User.Username
-	}
-	return Track{ID: strconv.FormatInt(t.ID, 10), Title: t.Title, Artist: artist, Artists: []string{artist}, Album: t.Publisher.Album, ISRC: t.Publisher.ISRC, DurationMS: t.Duration, Provider: "soundcloud", BPM: t.BPM}
+	return Track{ID: strconv.FormatInt(t.ID, 10), Title: t.Title, Artist: t.User.Username, Artists: []string{t.User.Username}, ISRC: t.ISRC, DurationMS: t.Duration, Provider: "soundcloud", BPM: t.BPM, Key: camelotFromName(t.Key), CoverURL: t.cover()}
 }
 
 func (s *SoundCloud) base() string {
@@ -76,30 +152,36 @@ func (s *SoundCloud) base() string {
 	return defaultSoundCloudAPI
 }
 
-func (s *SoundCloud) headers() http.Header {
-	h := http.Header{"Accept": {"application/json"}}
-	if s.Token != "" {
-		h.Set("Authorization", "OAuth "+s.Token)
+func (s *SoundCloud) headers(ctx context.Context) (http.Header, error) {
+	h := http.Header{"Accept": {"application/json; charset=utf-8"}}
+	token := s.Token
+	if token == "" {
+		if s.Auth == nil || s.ClientID == "" || s.Secret == "" {
+			return nil, errors.New("soundcloud: not connected")
+		}
+		var err error
+		if token, err = s.Auth.Token(ctx, s.ClientID, s.Secret); err != nil {
+			return nil, err
+		}
 	}
-	return h
+	h.Set("Authorization", "OAuth "+token)
+	return h, nil
 }
 
-func (s *SoundCloud) get(ctx context.Context, address string, q url.Values, out any) error {
-	if q == nil {
-		q = url.Values{}
+func (s *SoundCloud) get(ctx context.Context, address string, out any) error {
+	h, err := s.headers(ctx)
+	if err != nil {
+		return err
 	}
-	if s.ClientID != "" {
-		q.Set("client_id", s.ClientID)
-	}
-	if strings.Contains(address, "?") {
-		address += "&" + q.Encode()
-	} else {
-		address += "?" + q.Encode()
-	}
-	return JSON(ctx, s.HTTP, "GET", address, nil, s.headers(), out)
+	return JSON(ctx, s.HTTP, "GET", address, nil, h, out)
 }
 
-// Identify fills in the account from the token, if there is no profile yet.
+func (s *SoundCloud) list(path string, q url.Values) string {
+	q.Set("linked_partitioning", "true")
+	return s.base() + path + "?" + q.Encode()
+}
+
+// Identify fills in the account behind a user's token. An app token has no user.
 func (s *SoundCloud) Identify(ctx context.Context) error {
 	if s.UserID != 0 || s.Token == "" {
 		return nil
@@ -108,24 +190,38 @@ func (s *SoundCloud) Identify(ctx context.Context) error {
 		ID       int64  `json:"id"`
 		Username string `json:"username"`
 	}
-	if err := s.get(ctx, s.base()+"/me", nil, &me); err != nil {
+	if err := s.get(ctx, s.base()+"/me", &me); err != nil {
 		return err
 	}
 	s.UserID, s.Username = me.ID, me.Username
 	return nil
 }
 
-// ResolveUser finds a profile from its link or username.
+// ResolveUser finds a profile from a link, a share link or a username. An app token
+// is enough, since profiles are public.
 func (s *SoundCloud) ResolveUser(ctx context.Context, raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return errors.New("soundcloud: profile required")
 	}
+	name := ""
 	if !strings.Contains(raw, "://") {
-		raw = "https://soundcloud.com/" + strings.TrimPrefix(raw, "@")
+		name = strings.TrimPrefix(raw, "@")
+		raw = "https://soundcloud.com/" + url.PathEscape(name)
 	}
 	u, err := url.Parse(raw)
-	if err != nil || (u.Hostname() != "soundcloud.com" && u.Hostname() != "www.soundcloud.com" && u.Hostname() != "m.soundcloud.com") {
+	if err != nil {
+		return errors.New("soundcloud: not a SoundCloud profile link")
+	}
+	if u.Hostname() == "on.soundcloud.com" {
+		if raw, err = s.expandShareLink(ctx, raw); err != nil {
+			return err
+		}
+		if u, err = url.Parse(raw); err != nil {
+			return errors.New("soundcloud: not a SoundCloud profile link")
+		}
+	}
+	if h := u.Hostname(); h != "soundcloud.com" && h != "www.soundcloud.com" && h != "m.soundcloud.com" {
 		return errors.New("soundcloud: not a SoundCloud profile link")
 	}
 	var v struct {
@@ -133,52 +229,124 @@ func (s *SoundCloud) ResolveUser(ctx context.Context, raw string) error {
 		ID       int64  `json:"id"`
 		Username string `json:"username"`
 	}
-	if err := s.get(ctx, s.base()+"/resolve", url.Values{"url": {raw}}, &v); err != nil {
+	err = s.get(ctx, s.base()+"/resolve?"+url.Values{"url": {raw}}.Encode(), &v)
+	if err == nil && v.Kind == "user" && v.ID != 0 {
+		s.UserID, s.Username = v.ID, v.Username
+		return nil
+	}
+	// A display name is not a profile address, so look it up by name.
+	if name != "" {
+		var found struct {
+			Collection []struct {
+				ID       int64  `json:"id"`
+				Username string `json:"username"`
+			} `json:"collection"`
+		}
+		if s.get(ctx, s.list("/users", url.Values{"q": {name}, "limit": {"1"}}), &found) == nil && len(found.Collection) > 0 {
+			s.UserID, s.Username = found.Collection[0].ID, found.Collection[0].Username
+			return nil
+		}
+	}
+	if err != nil {
 		return err
 	}
-	if v.Kind != "user" || v.ID == 0 {
-		return errors.New("soundcloud: that link is not a profile")
-	}
-	s.UserID, s.Username = v.ID, v.Username
-	return nil
+	return errors.New("soundcloud: that link is not a profile")
 }
 
-// sameHost keeps paging on the API, so a response cannot redirect the credentials.
+func (s *SoundCloud) expandShareLink(ctx context.Context, raw string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", raw, nil)
+	if err != nil {
+		return "", errors.New("soundcloud: invalid share link")
+	}
+	c := *client(s.HTTP)
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", errors.New("soundcloud: could not open the share link")
+	}
+	defer resp.Body.Close()
+	location, err := resp.Location()
+	if err != nil {
+		return "", errors.New("soundcloud: invalid share link")
+	}
+	location.RawQuery = ""
+	return location.String(), nil
+}
+
+// nextPage keeps paging on the API, so a response cannot redirect the credentials.
 func (s *SoundCloud) nextPage(next string) string {
 	u, err := url.Parse(next)
 	base, baseErr := url.Parse(s.base())
 	if next == "" || err != nil || baseErr != nil || u.Host != base.Host || u.Scheme != base.Scheme {
 		return ""
 	}
-	q := u.Query()
-	q.Del("client_id")
-	u.RawQuery = q.Encode()
 	return u.String()
 }
 
-func (s *SoundCloud) Playlists(ctx context.Context) ([]Playlist, error) {
-	if err := s.Identify(ctx); err != nil {
-		return nil, err
-	}
-	if s.UserID == 0 {
-		return nil, nil // search still works with only a Client ID
-	}
-	out := []Playlist{{ID: soundCloudLikesID, Title: "Likes"}}
-	address := s.base() + "/users/" + strconv.FormatInt(s.UserID, 10) + "/playlists?limit=100&linked_partitioning=1"
+type scPlaylist struct {
+	ID         int64  `json:"id"`
+	Title      string `json:"title"`
+	TrackCount int    `json:"track_count"`
+}
+
+func (s *SoundCloud) playlistPages(ctx context.Context, address, prefix string, out []Playlist) []Playlist {
 	for address != "" && len(out) < soundCloudListLimit {
 		var r struct {
-			Collection []struct {
-				ID         int64  `json:"id"`
-				Title      string `json:"title"`
-				TrackCount int    `json:"track_count"`
-			} `json:"collection"`
-			Next string `json:"next_href"`
+			Collection []scPlaylist `json:"collection"`
+			Next       string       `json:"next_href"`
 		}
-		if err := s.get(ctx, address, nil, &r); err != nil {
-			return out, nil // the profile's likes are still worth showing
+		if s.get(ctx, address, &r) != nil {
+			return out // what was already read is still worth showing
 		}
 		for _, p := range r.Collection {
-			out = append(out, Playlist{strconv.FormatInt(p.ID, 10), p.Title, p.TrackCount})
+			out = append(out, Playlist{strconv.FormatInt(p.ID, 10), prefix + p.Title, p.TrackCount})
+		}
+		address = s.nextPage(r.Next)
+	}
+	return out
+}
+
+// library is where the account's own lists live. A user's token also reaches private
+// ones through /me; otherwise it is the public profile.
+func (s *SoundCloud) library() (string, error) {
+	if s.Token != "" {
+		return "/me", nil
+	}
+	if s.UserID != 0 {
+		return "/users/" + strconv.FormatInt(s.UserID, 10), nil
+	}
+	return "", errors.New("soundcloud: profile required")
+}
+
+// Playlists lists Likes, the account's own playlists, then the ones it liked.
+func (s *SoundCloud) Playlists(ctx context.Context) ([]Playlist, error) {
+	root, err := s.library()
+	if err != nil {
+		return nil, nil // search still works with only the app's credentials
+	}
+	q := func() url.Values { return url.Values{"limit": {"100"}, "show_tracks": {"false"}} }
+	out := []Playlist{{ID: soundCloudLikesID, Title: "Liked Tracks & Sets（我点赞的音乐）"}}
+	out = s.playlistPages(ctx, s.list(root+"/playlists", q()), "", out)
+	return s.playlistPages(ctx, s.list(root+"/likes/playlists", q()), "【收藏】", out), nil
+}
+
+func (s *SoundCloud) trackPages(ctx context.Context, address string) ([]Track, error) {
+	var out []Track
+	for address != "" && len(out) < soundCloudListLimit {
+		var r struct {
+			Collection []scTrack `json:"collection"`
+			Next       string    `json:"next_href"`
+		}
+		if err := s.get(ctx, address, &r); err != nil {
+			if len(out) > 0 {
+				return out, nil
+			}
+			return nil, err
+		}
+		for _, t := range r.Collection {
+			if t.ID != 0 && t.Access != "blocked" {
+				out = append(out, t.track())
+			}
 		}
 		address = s.nextPage(r.Next)
 	}
@@ -186,103 +354,30 @@ func (s *SoundCloud) Playlists(ctx context.Context) ([]Playlist, error) {
 }
 
 func (s *SoundCloud) Tracks(ctx context.Context, id string) ([]Track, error) {
+	q := url.Values{"limit": {"100"}, "access": {"playable"}}
 	if id == soundCloudLikesID {
-		return s.likes(ctx)
+		root, err := s.library()
+		if err != nil {
+			return nil, err
+		}
+		q.Set("limit", "200")
+		return s.trackPages(ctx, s.list(root+"/likes/tracks", q))
 	}
 	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
 		return nil, errors.New("soundcloud: invalid playlist ID")
 	}
-	var p struct {
-		Tracks []scTrack `json:"tracks"`
-	}
-	if err := s.get(ctx, s.base()+"/playlists/"+id, nil, &p); err != nil {
-		return nil, err
-	}
-	// Only the first few tracks come complete; the rest need their own lookup.
-	var missing []string
-	for _, t := range p.Tracks {
-		if t.Title == "" {
-			missing = append(missing, strconv.FormatInt(t.ID, 10))
-		}
-	}
-	full := map[int64]scTrack{}
-	for start := 0; start < len(missing); start += 50 {
-		var batch []scTrack
-		q := url.Values{"ids": {strings.Join(missing[start:min(start+50, len(missing))], ",")}}
-		if err := s.get(ctx, s.base()+"/tracks", q, &batch); err != nil {
-			return nil, err
-		}
-		for _, t := range batch {
-			full[t.ID] = t
-		}
-	}
-	out := make([]Track, 0, len(p.Tracks))
-	for _, t := range p.Tracks {
-		if t.Title == "" {
-			t = full[t.ID]
-		}
-		if t.ID != 0 {
-			out = append(out, t.track())
-		}
-	}
-	return out, nil
-}
-
-func (s *SoundCloud) likes(ctx context.Context) ([]Track, error) {
-	if err := s.Identify(ctx); err != nil {
-		return nil, err
-	}
-	if s.UserID == 0 {
-		return nil, errors.New("soundcloud: profile required")
-	}
-	var out []Track
-	address := s.base() + "/users/" + strconv.FormatInt(s.UserID, 10) + "/track_likes?limit=100&linked_partitioning=1"
-	for address != "" && len(out) < soundCloudListLimit {
-		var r struct {
-			Collection []struct {
-				Track scTrack `json:"track"`
-			} `json:"collection"`
-			Next string `json:"next_href"`
-		}
-		if err := s.get(ctx, address, nil, &r); err != nil {
-			if len(out) > 0 {
-				return out, nil
-			}
-			return nil, err
-		}
-		for _, c := range r.Collection {
-			if c.Track.ID != 0 {
-				out = append(out, c.Track.track())
-			}
-		}
-		address = s.nextPage(r.Next)
-	}
-	return out, nil
+	return s.trackPages(ctx, s.list("/playlists/"+id+"/tracks", q))
 }
 
 func (s *SoundCloud) Search(ctx context.Context, query string) ([]Track, error) {
-	var r struct {
-		Collection []scTrack `json:"collection"`
-	}
-	if err := s.get(ctx, s.base()+"/search/tracks", url.Values{"q": {query}, "limit": {"30"}}, &r); err != nil {
-		return nil, err
-	}
-	out := make([]Track, 0, len(r.Collection))
-	for _, t := range r.Collection {
-		out = append(out, t.track())
-	}
-	return out, nil
+	return s.trackPages(ctx, s.list("/tracks", url.Values{"q": {query}, "limit": {"30"}, "access": {"playable"}}))
 }
 
 func (s *SoundCloud) SearchPlaylists(ctx context.Context, query string) ([]Playlist, error) {
 	var r struct {
-		Collection []struct {
-			ID         int64  `json:"id"`
-			Title      string `json:"title"`
-			TrackCount int    `json:"track_count"`
-		} `json:"collection"`
+		Collection []scPlaylist `json:"collection"`
 	}
-	if err := s.get(ctx, s.base()+"/search/playlists", url.Values{"q": {query}, "limit": {"20"}}, &r); err != nil {
+	if err := s.get(ctx, s.list("/playlists", url.Values{"q": {query}, "limit": {"20"}, "show_tracks": {"false"}}), &r); err != nil {
 		return nil, err
 	}
 	out := make([]Playlist, 0, len(r.Collection))
@@ -298,67 +393,78 @@ type SoundCloudMedia struct {
 	URLs []string
 }
 
-func usableTranscoding(t scTrack) (scTranscoding, string, bool) {
-	var best scTranscoding
-	bestRank, bestExt := 0, ""
-	for _, c := range t.Media.Transcodings {
-		if c.Snipped || c.URL == "" {
-			continue
-		}
-		mime := strings.ToLower(c.Format.MimeType)
-		rank, ext := 0, ""
-		switch {
-		case c.Format.Protocol == "progressive" && strings.HasPrefix(mime, "audio/mpeg"):
-			rank, ext = 3, "mp3"
-		case c.Format.Protocol == "hls" && strings.HasPrefix(mime, "audio/mpeg"):
-			rank, ext = 2, "mp3"
-		case c.Format.Protocol == "hls" && strings.HasPrefix(mime, "audio/mp4"):
-			rank, ext = 1, "mp4"
-		}
-		if rank > bestRank {
-			best, bestRank, bestExt = c, rank, ext
-		}
-	}
-	return best, bestExt, bestRank > 0
-}
-
-// Media finds where to download a track's whole audio from.
+// Media finds where to download a track's whole audio from. The preview address is
+// never used, however it is offered.
 func (s *SoundCloud) Media(ctx context.Context, id string) (SoundCloudMedia, error) {
 	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
 		return SoundCloudMedia{}, errors.New("soundcloud: invalid track ID")
 	}
 	var t scTrack
-	if err := s.get(ctx, s.base()+"/tracks/"+id, nil, &t); err != nil {
+	if err := s.get(ctx, s.base()+"/tracks/"+id, &t); err != nil {
 		return SoundCloudMedia{}, err
 	}
-	if t.Policy == "SNIP" || t.Policy == "BLOCK" {
+	if t.Access != "" && t.Access != "playable" {
 		return SoundCloudMedia{}, ErrNoFullStream
 	}
-	c, ext, ok := usableTranscoding(t)
-	if !ok {
-		return SoundCloudMedia{}, ErrNoFullStream
+	var streams struct {
+		HTTPMP3 string `json:"http_mp3_128_url"`
+		HLSMP3  string `json:"hls_mp3_128_url"`
+		HLSAAC  string `json:"hls_aac_160_url"`
 	}
-	var stream struct {
-		URL string `json:"url"`
-	}
-	q := url.Values{}
-	if t.Auth != "" {
-		q.Set("track_authorization", t.Auth)
-	}
-	if err := s.get(ctx, c.URL, q, &stream); err != nil {
+	if err := s.get(ctx, s.base()+"/tracks/"+id+"/streams", &streams); err != nil {
 		return SoundCloudMedia{}, err
 	}
-	if stream.URL == "" {
+	if streams.HTTPMP3 != "" {
+		// That address answers with a signed redirect, which needs no credentials.
+		location, err := s.signedAddress(ctx, streams.HTTPMP3)
+		if err != nil {
+			return SoundCloudMedia{}, err
+		}
+		return SoundCloudMedia{Ext: "mp3", URLs: []string{location}}, nil
+	}
+	ext, playlist := "mp3", streams.HLSMP3
+	if playlist == "" {
+		ext, playlist = "mp4", streams.HLSAAC
+	}
+	if playlist == "" {
 		return SoundCloudMedia{}, ErrNoFullStream
 	}
-	if c.Format.Protocol == "progressive" {
-		return SoundCloudMedia{Ext: ext, URLs: []string{stream.URL}}, nil
+	location, err := s.signedAddress(ctx, playlist)
+	if err != nil {
+		return SoundCloudMedia{}, err
 	}
-	urls, err := s.segments(ctx, stream.URL)
+	urls, err := s.segments(ctx, location)
 	if err != nil {
 		return SoundCloudMedia{}, err
 	}
 	return SoundCloudMedia{Ext: ext, URLs: urls}, nil
+}
+
+// signedAddress follows the API's redirect by hand, keeping credentials off the CDN.
+func (s *SoundCloud) signedAddress(ctx context.Context, address string) (string, error) {
+	h, err := s.headers(ctx)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
+	if err != nil {
+		return "", errors.New("soundcloud: invalid stream address")
+	}
+	req.Header = h
+	c := *client(s.HTTP)
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", errors.New("soundcloud: stream transfer failed")
+	}
+	defer resp.Body.Close()
+	if location, err := resp.Location(); err == nil {
+		return location.String(), nil
+	}
+	if resp.StatusCode == http.StatusOK {
+		return address, nil
+	}
+	return "", errors.New("soundcloud: stream refused: HTTP " + strconv.Itoa(resp.StatusCode))
 }
 
 // segments reads an HLS playlist. An encrypted one is refused, not decrypted.

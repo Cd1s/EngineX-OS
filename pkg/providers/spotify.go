@@ -38,8 +38,18 @@ type spTrack struct {
 	Type     string
 	Duration int64 `json:"duration_ms"`
 	Artists  []struct{ Name string }
-	Album    struct{ Name string }
+	Album    struct {
+		Name   string
+		Images []struct{ URL string }
+	}
 	External struct{ ISRC string } `json:"external_ids"`
+}
+
+func (t spTrack) cover() string {
+	if len(t.Album.Images) == 0 {
+		return ""
+	}
+	return t.Album.Images[0].URL // Spotify lists the largest first
 }
 
 func (t spTrack) track() Track {
@@ -47,7 +57,7 @@ func (t spTrack) track() Track {
 	for _, v := range t.Artists {
 		a = append(a, v.Name)
 	}
-	return Track{ID: t.ID, Title: t.Name, Artist: strings.Join(a, ", "), Artists: a, Album: t.Album.Name, ISRC: t.External.ISRC, DurationMS: t.Duration, Provider: "spotify"}
+	return Track{ID: t.ID, Title: t.Name, Artist: strings.Join(a, ", "), Artists: a, Album: t.Album.Name, ISRC: t.External.ISRC, CoverURL: t.cover(), DurationMS: t.Duration, Provider: "spotify"}
 }
 func RandomID() string {
 	var b [32]byte
@@ -154,7 +164,7 @@ func (s *Spotify) authorization(ctx context.Context) (http.Header, error) {
 func (s *Spotify) BeginPKCE(state, redirect string) (authURL, verifier string) {
 	verifier = RandomID()
 	hash := sha256.Sum256([]byte(verifier))
-	authURL = endpoint(s.accounts(), "/authorize", url.Values{"client_id": {s.ClientID}, "response_type": {"code"}, "redirect_uri": {redirect}, "scope": {"playlist-read-private playlist-read-collaborative"}, "state": {state}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}})
+	authURL = endpoint(s.accounts(), "/authorize", url.Values{"client_id": {s.ClientID}, "response_type": {"code"}, "redirect_uri": {redirect}, "scope": {"user-library-read playlist-read-private playlist-read-collaborative"}, "state": {state}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}})
 	return
 }
 func (s *Spotify) CompletePKCE(ctx context.Context, code, verifier, redirect string) error {
@@ -169,8 +179,19 @@ func (s *Spotify) get(ctx context.Context, path string, out any) error {
 	}
 	return JSON(ctx, s.HTTP, "GET", s.base()+path, nil, h, out)
 }
+
+// SpotifyLikedID names the owner's Liked Songs, which Spotify keeps outside playlists.
+const SpotifyLikedID = "liked"
+
 func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 	var all []Playlist
+	// An older login may lack the library scope; its playlists still work.
+	var liked struct {
+		Total int `json:"total"`
+	}
+	if s.get(ctx, "/me/tracks?limit=1&offset=0", &liked) == nil {
+		all = append(all, Playlist{SpotifyLikedID, "已點讚的歌曲 (Liked Songs)", liked.Total})
+	}
 	for offset := 0; offset < 100000; offset += 50 {
 		var r struct {
 			Items []struct {
@@ -197,7 +218,39 @@ func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 	}
 	return nil, errors.New("spotify: pagination limit")
 }
+func (s *Spotify) likedTracks(ctx context.Context) ([]Track, error) {
+	var all []Track
+	for offset := 0; offset < 100000; offset += 50 {
+		var r struct {
+			Items []struct {
+				Track *spTrack `json:"track"`
+				Item  *spTrack `json:"item"`
+			}
+			Next *string
+		}
+		if err := s.get(ctx, "/me/tracks?limit=50&offset="+strconv.Itoa(offset), &r); err != nil {
+			return nil, err
+		}
+		for _, item := range r.Items {
+			t := item.Item
+			if t == nil {
+				t = item.Track
+			}
+			if t != nil && t.ID != "" {
+				all = append(all, t.track())
+			}
+		}
+		if r.Next == nil || *r.Next == "" {
+			return all, nil
+		}
+	}
+	return nil, errors.New("spotify: pagination limit")
+}
+
 func (s *Spotify) Tracks(ctx context.Context, id string) ([]Track, error) {
+	if id == SpotifyLikedID {
+		return s.likedTracks(ctx)
+	}
 	var all []Track
 	endpointName := "/items"
 	for offset := 0; offset < 100000; offset += 100 {
