@@ -73,9 +73,11 @@ address=/logstash.inmusicbrands.com/0.0.0.0
 address=/telemetry.inmusicbrands.com/0.0.0.0
 address=/posthog.com/0.0.0.0
 CONF
+# Stock online check: Engine shows the Wi-Fi "!" until connman reaches ONLINE.
 cat > "$base/etc/connman/main.conf" <<'CONF'
 [General]
-EnableOnlineCheck = false
+OnlineCheckIPv4URL = http://ipv4.connman.inmusicbrands.com/
+EnableOnlineCheck = true
 PreferredTechnologies=wifi,ethernet
 CONF
 mkdir -p "$base/etc/systemd/system/connman.service.d" "$base/etc/edisksd"
@@ -83,12 +85,10 @@ cat > "$base/etc/systemd/system/connman.service.d/disable_dhcp_retries.conf" <<'
 [Service]
 Environment="CONNMAN_DISCOVER_RETRIES=5"
 CONF
-# edisksd otherwise refuses dirty (unplugged-without-eject) Mac/Windows disks.
+# Dirty NTFS still mounts. HFS+ must stay read-only: hfsplus.ko on the 6.6 RT
+# kernel oopses (mm/highmem.c:553) on the first write and corrupts the catalog.
 cat > "$base/etc/edisksd/main.conf" <<'CONF'
 [ntfs3]
-DefaultMountOptions=force
-
-[hfsplus]
 DefaultMountOptions=force
 CONF
 fi # offline/staging patches

@@ -24,8 +24,9 @@ case $tool in
         fi ;;
     findmnt)
         if [[ $* == *' -S '* ]]; then
-            dev=$3
-            awk -F '|' -v dev="$dev" '$1==dev {print $3; found=1} END {exit !found}' "$MOCK_ROOT/mounts"
+            dev=$3 col=3
+            [[ $* != *OPTIONS* ]] || col=4
+            awk -F '|' -v dev="$dev" -v col="$col" '$1==dev {print $col; found=1} END {exit !found}' "$MOCK_ROOT/mounts"
         else
             path=$5
             if [[ $path == "$SC5000_MEDIA_ROOT/sc5000-sd-cache" ]]; then
@@ -99,7 +100,7 @@ ok() { count=$((count + 1)); printf 'ok %02d - %s\n' "$count" "$*"; }
 has() { grep -Fq -- "$1" "$2" || fail "missing $1 in $2"; }
 lacks() { if grep -Fq -- "$1" "$2"; then fail "unexpected $1 in $2"; fi; }
 expect_fail() { if "$@" > "$MOCK_ROOT/output" 2>&1; then fail "unexpected success: $*"; fi; }
-run_storage() { bash "$STORAGE" "$@" > "$MOCK_ROOT/output" 2>&1; }
+run_storage() { sh "$STORAGE" "$@" > "$MOCK_ROOT/output" 2>&1; }
 fixture() {
     export MOCK_ROOT=$TMP/case-$count
     mkdir -p "$MOCK_ROOT"/{types,uuid,sys/class/block,proc,media,internal,outside}
@@ -130,246 +131,51 @@ sd_device() {
 
 fixture
 device sda1 hfsplus
+printf '/dev/sda1|hfsplus|%s/vivi|ro,nosuid\n' "$SC5000_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
+mkdir -p "$SC5000_MEDIA_ROOT/vivi/.PIONEER/rekordbox"; touch "$SC5000_MEDIA_ROOT/vivi/.PIONEER/rekordbox/export.pdb"
 ACTION=add DEVNAME=/dev/sda1 run_storage
-has 'fsck.hfsplus <-f> </dev/sda1>' "$MOCK_ROOT/log"
-has '<force,rw,uid=1000,gid=1000,umask=0000,nodev,nosuid>' "$MOCK_ROOT/log"
-fsck_line=$(grep -n '^fsck.hfsplus ' "$MOCK_ROOT/log" | cut -d: -f1)
-mount_line=$(grep -n '^mount ' "$MOCK_ROOT/log" | cut -d: -f1)
-[[ $fsck_line -lt $mount_line ]] || fail 'HFS check must precede mount'
-[[ -d $SC5000_MEDIA_ROOT/sc5000-sda1/Engine\ Library ]] || fail 'missing Engine Library'
-ok 'udev HFS+ detection, fsck before forced RW, library creation'
-
-fixture
-device sda1 hfsplus
-run_storage add /dev/sda1
-run_storage change /dev/sda1
-[[ $(grep -c '^fsck.hfsplus ' "$MOCK_ROOT/log") == 1 ]] || fail 'duplicate event repeated fsck'
-ok 'repeated udev events do not recheck a mounted HFS+ volume'
-
-fixture
-device sda1 hfsplus
-for rc in 1 2 3 4 8 47 127; do
-    MOCK_FSCK_RC=$rc expect_fail bash "$STORAGE" add /dev/sda1
-done
 lacks 'mount ' "$MOCK_ROOT/log"
-ok 'uncorrected HFS+ errors and missing checker block RW'
+lacks 'fsck.hfsplus' "$MOCK_ROOT/log"
+lacks 'rb-bridge ' "$MOCK_ROOT/log"
+has 'read-only' "$MOCK_ROOT/output"
+ok 'read-only HFS+ from edisksd is never remounted, checked or written'
 
-fixture
-device sda1 hfsplus
-printf '/dev/sda1|hfsplus|/elsewhere|ro\n' > "$MOCK_ROOT/mounts"
-expect_fail bash "$STORAGE" add /dev/sda1
-lacks 'fsck.hfsplus ' "$MOCK_ROOT/log"
-ok 'already mounted volume is never checked or claimed'
-
-fixture
-sd_device
-run_storage add /dev/mmcblk1p1
-for dir in 'Engine Library' Downloads apfs-overlays; do
-    [[ -d $SC5000_MEDIA_ROOT/sc5000-sd-cache/$dir ]] || fail "missing $dir"
-done
-device mmcblk0p1 ext4
-mkdir -p "$SC5000_SYS_ROOT/class/block/mmcblk0/device"
-printf 'MMC\n' > "$SC5000_SYS_ROOT/class/block/mmcblk0/device/type"
-run_storage add /dev/mmcblk0p1
-lacks '</dev/mmcblk0p1>' "$MOCK_ROOT/log"
-ok 'front SD cache structure; internal eMMC is excluded'
-
-fixture
-sd_device
-run_storage add /dev/mmcblk1p1
-device sdb1 apfs
-MOCK_PDB=1 run_storage add /dev/sdb1
-has 'mount <-t> <apfs> <-o> <ro,nodev,nosuid> </dev/sdb1>' "$MOCK_ROOT/log"
-has "upperdir=$SC5000_MEDIA_ROOT/sc5000-sd-cache/apfs-overlays/AABB-1234/upper" "$MOCK_ROOT/log"
-has "workdir=$SC5000_MEDIA_ROOT/sc5000-sd-cache/apfs-overlays/AABB-1234/work" "$MOCK_ROOT/log"
-has 'modprobe <apfs>' "$MOCK_ROOT/log"
-has 'rb-bridge <--mount-path>' "$MOCK_ROOT/log"
-bridge_line=$(grep -n '^rb-bridge ' "$MOCK_ROOT/log" | cut -d: -f1)
-notify_line=$(grep -n '^notify ' "$MOCK_ROOT/log" | tail -n1 | cut -d: -f1)
-[[ $bridge_line -lt $notify_line ]] || fail 'bridge must precede Engine notification'
-has "<$SC5000_MEDIA_ROOT/sc5000-sdb1/Engine Library>" "$MOCK_ROOT/log"
-touch "$SC5000_MEDIA_ROOT/sc5000-sd-cache/apfs-overlays/AABB-1234/upper/cues.db"
-before=$(grep -c '^mount ' "$MOCK_ROOT/log")
-run_storage add /dev/sdb1
-[[ $(grep -c '^mount ' "$MOCK_ROOT/log") == "$before" ]] || fail 'duplicate mount'
-expect_fail bash "$STORAGE" remove /dev/mmcblk1p1
-device sdc1 apfs
-expect_fail bash "$STORAGE" add /dev/sdc1
-MOCK_BUSY_TARGET=$SC5000_MEDIA_ROOT/sc5000-sdb1 expect_fail bash "$STORAGE" remove /dev/sdb1
-[[ -f $SC5000_RUN_ROOT/sdb1.state ]] || fail 'busy mount lost state'
-has 'overlay' "$MOCK_ROOT/mounts"
-has "$SC5000_MEDIA_ROOT/sc5000-sdb1/Engine Library" "$MOCK_ROOT/mounts"
-MOCK_BUSY_TARGET=$SC5000_MEDIA_ROOT/sc5000-sdb1/Engine\ Library expect_fail bash "$STORAGE" remove /dev/sdb1
-[[ -f $SC5000_RUN_ROOT/sdb1.state ]] || fail 'busy library lost state'
-run_storage remove /dev/sdb1
-run_storage add /dev/sdb1
-[[ -f $SC5000_MEDIA_ROOT/sc5000-sd-cache/apfs-overlays/AABB-1234/upper/cues.db ]] || fail 'cache not persistent'
-run_storage remove /dev/sdb1
-run_storage remove /dev/mmcblk1p1
-[[ ! -s $MOCK_ROOT/mounts ]] || fail 'unmount leaked mounts'
-ok 'APFS RO + SD overlay, bridge ordering, duplicate/busy safety and persistence'
-
-fixture
-device sda1 apfs
-run_storage add /dev/sda1
-has "upperdir=$SC5000_INTERNAL_CACHE/apfs-overlays/AABB-1234/upper" "$MOCK_ROOT/log"
-lacks 'fsck.hfsplus ' "$MOCK_ROOT/log"
-ok 'APFS without SD uses internal cache and never invokes HFS tools'
-
-fixture
-device sda1 apfs
-MOCK_APFS_LIBRARY=1 run_storage add /dev/sda1
-has "lowerdir=$SC5000_RUN_ROOT/lower/sda1/Engine Library,upperdir=" "$MOCK_ROOT/log"
-umount -- "$SC5000_MEDIA_ROOT/sc5000-sda1/Engine Library"
-run_storage add /dev/sda1
-has "$SC5000_MEDIA_ROOT/sc5000-sda1/Engine Library" "$MOCK_ROOT/mounts"
-: > "$MOCK_ROOT/log"
-run_storage remove /dev/sda1
-expected=$(printf 'umount <--> <%s>\numount <--> <%s>\numount <--> <%s>' \
-    "$SC5000_MEDIA_ROOT/sc5000-sda1/Engine Library" "$SC5000_MEDIA_ROOT/sc5000-sda1" "$SC5000_RUN_ROOT/lower/sda1")
-[[ $(grep '^umount ' "$MOCK_ROOT/log") == "$expected" ]] || fail 'APFS unmount order'
-ok 'existing APFS library is the dedicated lower; missing overlay recovers; ordered unmount'
-
-fixture
-sd_device vfat
-printf 'vfat\n' > "$MOCK_ROOT/sd-type"
-run_storage add /dev/mmcblk1p1
-device sda1 apfs
-run_storage add /dev/sda1
-has "upperdir=$SC5000_INTERNAL_CACHE/apfs-overlays/AABB-1234/upper" "$MOCK_ROOT/log"
-ok 'FAT SD remains usable for downloads; APFS upper falls back to Unix filesystem'
-
-fixture
-device sda1 apfs
-run_storage add /dev/sda1
-touch "$SC5000_INTERNAL_CACHE/apfs-overlays/AABB-1234/upper/cues.db"
-run_storage remove /dev/sda1
-sd_device
-run_storage add /dev/mmcblk1p1
-run_storage add /dev/sda1
-[[ $(sed -n '3p' "$SC5000_RUN_ROOT/sda1.state") == "$SC5000_INTERNAL_CACHE/apfs-overlays/AABB-1234" ]] || fail 'new SD hid existing internal cues'
-ok 'later SD insertion retains an existing internal overlay library'
-
-fixture
-device sda1 apfs
-printf 'vfat\n' > "$MOCK_ROOT/internal-type"
-expect_fail bash "$STORAGE" add /dev/sda1
-lacks 'mount ' "$MOCK_ROOT/log"
-ok 'APFS fails closed without a compatible writable upper filesystem'
-
-fixture
-device sda1 apfs
-MOCK_MOUNT_FAIL=overlay expect_fail bash "$STORAGE" add /dev/sda1
-[[ ! -s $MOCK_ROOT/mounts && ! -f $SC5000_RUN_ROOT/sda1.state ]] || fail 'failed overlay leaked lower mount/state'
-MOCK_MOD_FAIL=apfs expect_fail bash "$STORAGE" add /dev/sda1
-[[ ! -s $MOCK_ROOT/mounts ]] || fail 'failed module load leaked mount'
-MOCK_MOUNT_FAIL_TARGET=$SC5000_MEDIA_ROOT/sc5000-sda1/Engine\ Library expect_fail bash "$STORAGE" add /dev/sda1
-[[ ! -s $MOCK_ROOT/mounts && ! -f $SC5000_RUN_ROOT/sda1.state ]] || fail 'failed library overlay leaked root/lower mounts'
-ok 'overlay failure rolls back RO lower; module failure exposes no mount'
-
-fixture
-device sda1 apfs '../bad'
-expect_fail bash "$STORAGE" add /dev/sda1
-lacks 'mount ' "$MOCK_ROOT/log"
-printf 'AABB-1234\n' > "$MOCK_ROOT/uuid/sda1"
-mkdir -p "$SC5000_INTERNAL_CACHE/apfs-overlays"
-ln -s "$MOCK_ROOT/outside" "$SC5000_INTERNAL_CACHE/apfs-overlays/AABB-1234"
-expect_fail bash "$STORAGE" add /dev/sda1
-[[ ! -d $MOCK_ROOT/outside/upper ]] || fail 'cache symlink followed'
-ok 'UUID traversal and removable-cache symlinks rejected'
-
-fixture
-device sda1 hfsplus
-MOCK_LIB_SYMLINK=1 expect_fail bash "$STORAGE" add /dev/sda1
-[[ ! -s $MOCK_ROOT/mounts ]] || fail 'unsafe library mount leaked'
-ok 'library symlink fails safely and unmounts'
-
-fixture
-device sda1 hfsplus
-MOCK_PDB=1 MOCK_BRIDGE_RC=1 run_storage add /dev/sda1
-has 'notify <--mount-path>' "$MOCK_ROOT/log"
-[[ -f $SC5000_RUN_ROOT/sda1.state ]] || fail 'bridge failure removed readable files'
-ok 'bridge failure preserves original files and still notifies Engine'
-
-fixture
-device sda1 hfsplus
-MOCK_PDB=1 MOCK_BRIDGE_SLEEP=2 SC5000_BRIDGE_TIMEOUT=0.05s run_storage add /dev/sda1
-has 'timed out' "$MOCK_ROOT/output"
-has 'notify <--mount-path>' "$MOCK_ROOT/log"
-ok 'hung bridge is bounded and does not block original-file notification'
-
-fixture
-mkdir -p "$SC5000_SYS_ROOT/class/block/"{mmcblk0boot0,mmcblk0boot1,mmcblk0rpmb}
-run_storage --discover
-lacks 'blkid ' "$MOCK_ROOT/log"
-ok 'coldplug ignores internal eMMC boot and RPMB auxiliary nodes'
-
-fixture
-sd_device
-device sda1 apfs
-bash "$STORAGE" --discover > "$MOCK_ROOT/output" 2>&1
-has "upperdir=$SC5000_MEDIA_ROOT/sc5000-sd-cache/apfs-overlays/AABB-1234/upper" "$MOCK_ROOT/log"
-ok 'coldplug discovery mounts SD before APFS'
-
-fixture
-device sda1 crypto_LUKS
-run_storage add /dev/sda1
-lacks 'mount ' "$MOCK_ROOT/log"
-expect_fail bash "$STORAGE" add /dev/../etc/passwd
-expect_fail bash "$STORAGE" add /dev/sdz1
-ok 'unsupported, malformed and disappeared devices are handled safely'
-
-fixture
-for type in vfat exfat ntfs; do
-    device sda1 "$type"
-    run_storage add /dev/sda1
-    has 'uid=1000,gid=1000,umask=0000' "$MOCK_ROOT/log"
-    run_storage remove /dev/sda1
-done
-has 'mount <-t> <ntfs3>' "$MOCK_ROOT/log"
-ok 'FAT/exFAT are writable; NTFS explicitly selects the NTFS3 kernel driver'
-
-fixture
-sd_device apfs
-run_storage add /dev/mmcblk1p1
-has "<$SC5000_MEDIA_ROOT/sc5000-mmcblk1p1/Engine Library>" "$MOCK_ROOT/log"
-has "upperdir=$SC5000_INTERNAL_CACHE/apfs-overlays/SD-1234/upper" "$MOCK_ROOT/log"
-ok 'APFS SD is protected as an external volume rather than a writable cache'
-
-for export_name in EXPORT.PDB exportLibrary.db exportOneLibrary.db; do
+for dir in PIONEER .PIONEER pIoNeEr; do
     fixture
     device sda1 exfat
-    MOCK_PDB=1 MOCK_ENGINE_DB=1 MOCK_EXPORT_DIR=pIoNeEr/ReKoRdBoX MOCK_EXPORT_NAME=$export_name run_storage add /dev/sda1
-    has 'rb-bridge <--mount-path>' "$MOCK_ROOT/log"
+    printf '/dev/sda1|exfat|%s/STICK|rw,nosuid\n' "$SC5000_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
+    mkdir -p "$SC5000_MEDIA_ROOT/STICK/$dir/rekordbox"; touch "$SC5000_MEDIA_ROOT/STICK/$dir/rekordbox/export.pdb"
+    MOCK_ENGINE_DB=1 run_storage add /dev/sda1
+    has "rb-bridge <--mount-path> <$SC5000_MEDIA_ROOT/STICK>" "$MOCK_ROOT/log"
     has 'engine-guardian <--heal-mount>' "$MOCK_ROOT/log"
-    has "taskset <-c> <3> <$TMP/bin/engine-guardian>" "$MOCK_ROOT/log"
-    bridge_line=$(grep -n '^rb-bridge ' "$MOCK_ROOT/log" | cut -d: -f1)
-    heal_line=$(grep -n '^engine-guardian ' "$MOCK_ROOT/log" | cut -d: -f1)
-    notify_line=$(grep -n '^notify ' "$MOCK_ROOT/log" | cut -d: -f1)
-    ((bridge_line < heal_line && heal_line < notify_line)) || fail 'bridge/healer/notify ordering'
-    ok "$export_name converted and healed before notification"
+    lacks 'mount ' "$MOCK_ROOT/log"
+    ok "writable $dir export converted on the edisksd mountpoint"
 done
-fixture
-device sda1 exfat
-MOCK_PDB=1 MOCK_ENGINE_DB=1 MOCK_GUARDIAN_SLEEP=2 SC5000_GUARDIAN_TIMEOUT=0.05s run_storage add /dev/sda1
-has 'notify <--mount-path>' "$MOCK_ROOT/log"
-ok 'guardian timeout never blocks notification'
 
 fixture
-export SC5000_MEDIA_ROOT="$MOCK_ROOT/media[1]"
-device sda1 exfat
-MOCK_PDB=1 run_storage add /dev/sda1
-has 'rb-bridge <--mount-path>' "$MOCK_ROOT/log"
-ok 'export detection treats media root glob characters as literal path bytes'
-
-fixture
-export SC5000_MEDIA_ROOT="$MOCK_ROOT/pioneer/rekordbox/export-root"
-device sda1 exfat
-MOCK_FAKE_EXPORT=1 run_storage add /dev/sda1
+device sda1 vfat
+SC5000_MOUNT_WAIT=0 run_storage add /dev/sda1
+has 'not mounted by edisksd' "$MOCK_ROOT/output"
 lacks 'rb-bridge ' "$MOCK_ROOT/log"
-ok 'parent directory names cannot make unrelated files look like a Rekordbox export'
+ok 'device not mounted by edisksd is left alone'
 
+fixture
+device sda1 vfat
+printf '/dev/sda1|vfat|%s/X|rw\n' "$SC5000_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
+mkdir -p "$SC5000_MEDIA_ROOT/X/PIONEER/rekordbox"; touch "$SC5000_MEDIA_ROOT/X/PIONEER/rekordbox/export.pdb"
+MOCK_BRIDGE_RC=1 run_storage add /dev/sda1
+has 'rb-bridge failed' "$MOCK_ROOT/output"
+ok 'bridge failure is nonfatal'
 
+fixture
+mkdir -p "$SC5000_SYS_ROOT/class/block/mmcblk0p7" "$SC5000_SYS_ROOT/class/block/mmcblk0/device"
+printf 'MMC\n' > "$SC5000_SYS_ROOT/class/block/mmcblk0/device/type"
+run_storage add /dev/mmcblk0p7
+lacks 'findmnt' "$MOCK_ROOT/log"
+expect_fail sh "$STORAGE" add /dev/../etc/passwd
+expect_fail sh "$STORAGE" add /dev/sdz1x
+run_storage --discover
+ok 'internal eMMC, malformed devices and coldplug discovery are handled safely'
 
 fixture
 mkdir -p "$SC5000_PROC_ROOT/sys/"{vm,fs}
@@ -416,7 +222,7 @@ for entry in '201 144-ffa3000' '202 145-ff54000' '203 99-eth0' '204 99-other' '2
     mkdir -p "$SC5000_PROC_ROOT/$pid"
     printf 'irq/%s\n' "$name" > "$SC5000_PROC_ROOT/$pid/comm"
 done
-bash "$PERF" > "$MOCK_ROOT/output" 2>&1
+sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 for cpu in 0 1 2 3; do
     has performance "$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_governor"
     has 1800000 "$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_max_freq"
@@ -449,19 +255,19 @@ has 2 "$SC5000_PROC_ROOT/irq/144/smp_affinity"
 has 4 "$SC5000_PROC_ROOT/irq/145/smp_affinity"
 lacks 'taskset <-pc> <3>' "$MOCK_ROOT/log"
 find "$SC5000_SYS_ROOT" "$SC5000_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/before"
-bash "$PERF" > "$MOCK_ROOT/output" 2>&1
+sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 find "$SC5000_SYS_ROOT" "$SC5000_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/after"
 cmp -s "$MOCK_ROOT/before" "$MOCK_ROOT/after" || fail 'performance tuning is not idempotent'
 ok 'CPU/GPU, sysctl, schedulers, IRQs and RT-vs-GUI affinity are idempotent'
 
-MOCK_TASKSET_FAIL=1 bash "$PERF" > "$MOCK_ROOT/output" 2>&1
+MOCK_TASKSET_FAIL=1 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 rm "$gpu/governor"
 ln -s /dev/full "$gpu/governor"
-bash "$PERF" > "$MOCK_ROOT/output" 2>&1
+sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 ok 'thread exit/affinity failure and disappearing sysfs knobs are nonfatal'
 
 fixture
-bash "$PERF" > "$MOCK_ROOT/output" 2>&1
+sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 ok 'missing cpufreq, GPU, IRQ and process facilities are nonfatal'
 
 for service in sc5000-storage@.service rb-bridge.service.d/50-sc5000-background.conf \
@@ -473,8 +279,15 @@ for service in sc5000-storage@.service rb-bridge.service.d/50-sc5000-background.
     has 'IOWeight=10' "$file"
 done
 has 'IMPORT{builtin}="blkid"' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-sc5000-storage.rules"
+lacks 'UDISKS_IGNORE' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-sc5000-storage.rules"
 lacks ', RUN+=' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-sc5000-storage.rules"
 ok 'background service isolation and systemd udev handoff are installed'
+
+for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/sc5000-suite-exec"; do
+    [[ $(head -n 1 "$script") == '#!/bin/sh' ]] || fail "$script must use /bin/sh (no bash on Engine OS)"
+    if command -v busybox >/dev/null; then busybox sh -n "$script" || fail "busybox sh syntax: $script"; else sh -n "$script"; fi
+done
+ok 'device scripts run under /bin/sh'
 
 fixture
 expect_fail env TARGET_CONFIG= TARGET_SYMVERS= bash "$ROOT/kernel-modules/build_modules.sh" modules
@@ -490,15 +303,17 @@ lacks 'address=/inmusicbrands.com/' "$debloat_root/etc/dnsmasq.d/sc5000-telemetr
 has '0.0.0.0 telemetry.inmusicbrands.com' "$debloat_root/etc/hosts"
 has 'address=/logstash.inmusicbrands.com/0.0.0.0' "$debloat_root/etc/dnsmasq.d/sc5000-telemetry.conf"
 [[ $(grep -c 'logstash.inmusicbrands.com' "$debloat_root/etc/hosts") == 1 ]] || fail 'hosts entries duplicated'
-has 'EnableOnlineCheck = false' "$debloat_root/etc/connman/main.conf"
+has 'EnableOnlineCheck = true' "$debloat_root/etc/connman/main.conf"
+has 'OnlineCheckIPv4URL = http://ipv4.connman.inmusicbrands.com/' "$debloat_root/etc/connman/main.conf"
 has 'PreferredTechnologies=wifi,ethernet' "$debloat_root/etc/connman/main.conf"
 has 'CONNMAN_DISCOVER_RETRIES=5' "$debloat_root/etc/systemd/system/connman.service.d/disable_dhcp_retries.conf"
-[[ $(grep -c '^DefaultMountOptions=force$' "$debloat_root/etc/edisksd/main.conf") == 2 ]] || fail 'edisksd force options'
-has '[hfsplus]' "$debloat_root/etc/edisksd/main.conf"
-for module in hfsplus btbcm hci_uart; do
-    grep -qx "$module" "$ROOT/rootfs-overlay/etc/modules-load.d/sc5000-filesystems.conf" || fail "module $module not loaded"
+has '[ntfs3]' "$debloat_root/etc/edisksd/main.conf"
+lacks '[hfsplus]' "$debloat_root/etc/edisksd/main.conf"
+for module in btbcm hci_uart; do
+    if grep -qx "$module" "$ROOT/rootfs-overlay/etc/modules-load.d/sc5000-filesystems.conf"; then fail "$module must not be force-loaded"; fi
 done
-ok 'connman online check reachable, edisksd forced HFS+/NTFS mounts, Bluetooth modules'
+has 'feature_disable=0x82004' "$ROOT/rootfs-overlay/usr/lib/modprobe.d/brcmfmac.conf"
+ok 'stock connman online check, read-only HFS+, rootfs brcmfmac options'
 
 python3 -m unittest discover -s "$ROOT/sim/qengine" -p test_smoke.py >/dev/null
 printf 'PASS: %d tests (mocked storage and hardware; no privileged operations)\n' "$count"

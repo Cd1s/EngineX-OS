@@ -1,5 +1,6 @@
-#!/bin/bash
+#!/bin/sh
 # Best effort and repeatable: unavailable/read-only knobs never block playback.
+# POSIX sh: the stock Engine OS rootfs has BusyBox ash and no bash.
 set -u
 SYS=${SC5000_SYS_ROOT:-/sys}
 PROC=${SC5000_PROC_ROOT:-/proc}
@@ -9,22 +10,23 @@ IO_IRQ=${SC5000_IO_IRQ_PATTERN:-ehci_hcd|ff540000|eth0}
 AUDIO_THREAD=${SC5000_AUDIO_THREAD_PATTERN:-audio|alsa|jack}
 export LC_ALL=C
 log() { printf 'sc5000-perf: %s\n' "$*" >&2; }
+# Case-insensitive extended-regex match of $1 against pattern $2.
+matches() { printf '%s\n' "$1" | grep -Eiq -- "$2"; }
 write_knob() {
-    local path=$1 value=$2
-    [[ -e $path ]] || return 0
-    if [[ -w $path ]] && { printf '%s\n' "$value" > "$path"; } 2>/dev/null; then return 0; fi
-    [[ ${3:-} == quiet ]] || log "unavailable: $path"
+    [ -e "$1" ] || return 0
+    if [ -w "$1" ] && { printf '%s\n' "$2" > "$1"; } 2>/dev/null; then return 0; fi
+    [ "${3:-}" = quiet ] || log "unavailable: $1"
     return 0
 }
 lock_frequency() {
-    local dir=$1 governor=$2 max_name=$3 min_name=$4 max
-    [[ -d $dir ]] || return 0
-    if [[ -f $dir/$max_name ]]; then
+    dir=$1 governor=$2 max_name=$3 min_name=$4
+    [ -d "$dir" ] || return 0
+    if [ -f "$dir/$max_name" ]; then
         max=$(cat "$dir/$max_name" 2>/dev/null) || max=
-        if [[ $max =~ ^[0-9]+$ ]]; then
-            [[ $governor != scaling_governor ]] || write_knob "$dir/scaling_max_freq" "$max"
-            write_knob "$dir/$min_name" "$max"
-        fi
+        case $max in ''|*[!0-9]*) ;; *)
+            [ "$governor" != scaling_governor ] || write_knob "$dir/scaling_max_freq" "$max"
+            write_knob "$dir/$min_name" "$max" ;;
+        esac
     fi
     write_knob "$dir/$governor" performance
     return 0
@@ -41,28 +43,31 @@ write_knob "$PROC/sys/vm/dirty_background_ratio" 5
 write_knob "$PROC/sys/vm/dirty_ratio" 15
 write_knob "$PROC/sys/fs/file-max" 1048576
 for scheduler in "$SYS"/block/*/queue/scheduler; do
-    [[ -r $scheduler ]] || continue
-    available=$(cat "$scheduler")
-    if [[ " $available " =~ [\ \[]mq-deadline[\ \]] ]]; then
-        write_knob "$scheduler" mq-deadline
-    elif [[ " $available " =~ [\ \[]none[\ \]] ]]; then
-        write_knob "$scheduler" none
-    fi
+    [ -r "$scheduler" ] || continue
+    available=" $(cat "$scheduler") "
+    case $available in
+        *[\ \[]mq-deadline[\ \]]*) write_knob "$scheduler" mq-deadline ;;
+        *[\ \[]none[\ \]]*) write_knob "$scheduler" none ;;
+    esac
 done
 
+classify() {
+    if matches "$1" "$AUDIO_IRQ"; then echo 0
+    elif matches "$1" "$GPU_IRQ"; then echo 1
+    elif matches "$1" "$IO_IRQ"; then echo 2
+    else echo 1-2
+    fi
+}
 # Route movable non-audio interrupts away from CPU0. Per-CPU/managed IRQs may
 # reject writes, which is expected. PREEMPT_RT IRQ threads are pinned below too.
-declare -A irq_cpus=()
-if [[ -r $PROC/interrupts ]]; then
+irq_map=
+if [ -r "$PROC/interrupts" ]; then
     while IFS= read -r line; do
-        [[ $line =~ ^[[:space:]]*([0-9]+): ]] || continue
-        irq=${BASH_REMATCH[1]}
-        mask=6; cpu=1-2
-        if [[ ${line,,} =~ $AUDIO_IRQ ]]; then mask=1; cpu=0
-        elif [[ ${line,,} =~ $GPU_IRQ ]]; then mask=2; cpu=1
-        elif [[ ${line,,} =~ $IO_IRQ ]]; then mask=4; cpu=2
-        fi
-        irq_cpus[$irq]=$cpu
+        irq=$(printf '%s\n' "$line" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\):.*/\1/p')
+        [ -n "$irq" ] || continue
+        cpu=$(classify "$line")
+        case $cpu in 0) mask=1 ;; 1) mask=2 ;; 2) mask=4 ;; *) mask=6 ;; esac
+        irq_map="$irq_map $irq=$cpu"
         write_knob "$PROC/irq/$irq/smp_affinity" "$mask" quiet
     done < "$PROC/interrupts"
 fi
@@ -71,35 +76,34 @@ pin() {
     taskset -pc "$1" "$2" >/dev/null 2>&1 || log "thread exited or affinity unavailable: $2"
 }
 for process in "$PROC"/[0-9]*; do
-    [[ -d $process ]] || continue
+    [ -d "$process" ] || continue
+    pid=${process##*/}
     exe=$(readlink "$process/exe" 2>/dev/null) || exe=
     comm=$(cat "$process/comm" 2>/dev/null) || comm=
-    if [[ $comm == irq/* ]]; then
+    case $comm in irq/*)
         # comm is limited to 15 bytes: irq/148-ffb20000 loses its last digit.
         # Use the IRQ number to recover the classification from interrupts.
         cpu=
-        if [[ $comm =~ ^irq/([0-9]+)- ]]; then cpu=${irq_cpus[${BASH_REMATCH[1]}]:-}; fi
-        if [[ -z $cpu ]]; then
-            if [[ ${comm,,} =~ $AUDIO_IRQ ]]; then cpu=0
-            elif [[ ${comm,,} =~ $GPU_IRQ ]]; then cpu=1
-            elif [[ ${comm,,} =~ $IO_IRQ ]]; then cpu=2
-            else cpu=1-2
-            fi
+        irq=$(printf '%s\n' "$comm" | sed -n 's|^irq/\([0-9][0-9]*\)-.*|\1|p')
+        if [ -n "$irq" ]; then
+            for entry in $irq_map; do
+                [ "${entry%%=*}" = "$irq" ] && cpu=${entry#*=}
+            done
         fi
-        pin "$cpu" "${process##*/}"
-        if [[ $cpu == 0 ]]; then
-            chrt -f -p 99 "${process##*/}" >/dev/null 2>&1 || log "IRQ priority unavailable: ${process##*/}"
-        fi
-    fi
-    [[ $exe == /usr/Engine/* ]] || continue
+        [ -n "$cpu" ] || cpu=$(classify "$comm")
+        pin "$cpu" "$pid"
+        if [ "$cpu" = 0 ]; then
+            chrt -f -p 99 "$pid" >/dev/null 2>&1 || log "IRQ priority unavailable: $pid"
+        fi ;;
+    esac
+    case $exe in /usr/Engine/*) ;; *) continue ;; esac
     for thread in "$process"/task/[0-9]*; do
-        [[ -r $thread/stat && -r $thread/comm ]] || continue
+        [ -r "$thread/stat" ] && [ -r "$thread/comm" ] || continue
         stat=$(cat "$thread/stat") || continue
         thread_name=$(cat "$thread/comm") || continue
         # stat field 41 is policy. Strip '(comm)' first, as comm may have spaces.
-        read -r -a fields <<< "${stat##*) }"
-        policy=${fields[38]:-0}
-        if [[ ${thread_name,,} =~ $AUDIO_THREAD && ( $policy == 1 || $policy == 2 ) ]]; then
+        policy=$(printf '%s\n' "${stat##*) }" | awk '{print $39}')
+        if matches "$thread_name" "$AUDIO_THREAD" && { [ "$policy" = 1 ] || [ "$policy" = 2 ]; }; then
             pin 0 "${thread##*/}"
         else
             pin 1-2 "${thread##*/}"

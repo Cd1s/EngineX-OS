@@ -8,12 +8,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Cd1s/sc5000-custom-os/pkg/compat"
 	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
 	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
 )
+
+// ST_RDONLY from statvfs(3); syscall has no portable name for it.
+const unix_ST_RDONLY = 0x1
 
 func ReadLibrary(ctx context.Context, mount string) (*rekordbox.Library, error) {
 	r, e := compat.NewResolver(mount)
@@ -45,6 +49,12 @@ func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb
 	if errors.Is(e, os.ErrNotExist) {
 		return enginedb.Result{Bypassed: true}, nil
 	}
+	// Read-only volumes (HFS+ on Engine OS 5.0.4: rw writes crash hfsplus.ko)
+	// cannot hold an Engine Library; Engine's own rekordbox import reads them.
+	var st syscall.Statfs_t
+	if e == nil && syscall.Statfs(mount, &st) == nil && st.Flags&unix_ST_RDONLY != 0 {
+		return enginedb.Result{Bypassed: true}, nil
+	}
 	if e != nil {
 		return enginedb.Result{}, e
 	}
@@ -59,7 +69,7 @@ func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb
 }
 
 // Candidates examines at most three directory levels (Linux mount conventions),
-// stopping at PIONEER. It never recursively scans music or follows symlinks.
+// stopping at PIONEER (.PIONEER on macOS exports). It never recursively scans music or follows symlinks.
 func Candidates(root string) ([]string, error) {
 	resolved, e := filepath.EvalSymlinks(root)
 	if e != nil {
@@ -82,7 +92,7 @@ func Candidates(root string) ([]string, error) {
 		}
 		engineOnly := false
 		for _, ent := range entries {
-			if ent.IsDir() && strings.EqualFold(ent.Name(), "PIONEER") {
+			if ent.IsDir() && (strings.EqualFold(ent.Name(), "PIONEER") || strings.EqualFold(ent.Name(), ".PIONEER")) {
 				out = append(out, dir)
 				return nil
 			}
