@@ -61,3 +61,44 @@ func TestPDBMultiplePagesAndRowGroups(t *testing.T) {
 		t.Fatal(l.Keys)
 	}
 }
+
+// A partial last row group only reserves its flags and used offsets, so a live row
+// can sit where a full group would have been. Seen on a real export: 100 rows, 4 of
+// them in the last group, with the final row in the 24 bytes a full group would take.
+func TestPDBLiveRowInsideWhatAFullGroupWouldReserve(t *testing.T) {
+	const ps = 512
+	b := make([]byte, 2*ps)
+	le := binary.LittleEndian
+	le.PutUint32(b[4:], ps)
+	le.PutUint32(b[8:], 1)
+	le.PutUint32(b[28:], 5)
+	le.PutUint32(b[36:], 1)
+	le.PutUint32(b[40:], 1)
+	p := b[ps:]
+	le.PutUint32(p[4:], 1)
+	le.PutUint32(p[8:], 5)
+	le.PutUint16(p[24:], 20)
+	p[27] = 0x24
+	off := 40
+	for j := 0; j < 20; j++ {
+		id := uint32(j + 1)
+		if j == 19 {
+			off = ps - 70 // past 512-72, the end of the heap if the group were full
+		}
+		le.PutUint32(p[off:], id)
+		le.PutUint32(p[off+4:], id)
+		name := EncodeDeviceSQLString(fmt.Sprintf("%dA", id))
+		copy(p[off+8:], name)
+		base := ps - (j/16)*36
+		le.PutUint16(p[base-6-2*(j%16):], uint16(off-40))
+		le.PutUint16(p[base-4:], le.Uint16(p[base-4:])|1<<uint(j%16))
+		off += 8 + len(name)
+	}
+	l, e := ParsePDB(bytes.NewReader(b), int64(len(b)))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(l.Keys) != 20 || l.Keys[20] != "20A" {
+		t.Fatalf("%v", l.Keys)
+	}
+}

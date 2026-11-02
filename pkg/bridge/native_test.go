@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/Cd1s/sc5000-custom-os/internal/testfixture"
 	"github.com/Cd1s/sc5000-custom-os/pkg/bridge"
+	"github.com/Cd1s/sc5000-custom-os/pkg/compat"
 	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
 	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
 )
@@ -132,5 +134,91 @@ func TestPlaylistNameConflictGetsSuffix(t *testing.T) {
 	}
 	if n := scalar[int](t, db, `SELECT count(*) FROM Playlist WHERE title LIKE '% (rekordbox)'`); n == 0 {
 		t.Fatal("conflicting playlist not renamed")
+	}
+}
+
+func TestConvertSurvivesDuplicateRecordsAndMissingFiles(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	base, e := bridge.ReadLibrary(context.Background(), root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(base.Tracks) == 0 {
+		t.Fatal("empty fixture")
+	}
+	resolver, e := compat.NewResolver(root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	duplicate, gone := base.Tracks[0], base.Tracks[0]
+	duplicate.ID, gone.ID = 99, 98
+	gone.Path = "/Contents/not-on-this-stick.flac"
+	l := &rekordbox.Library{Tracks: append(slices.Clone(base.Tracks), duplicate, gone), Playlists: []rekordbox.Playlist{{ID: 1, Name: "Mix", Tracks: []uint32{98, 99, base.Tracks[0].ID}}}}
+	bridge.Reconcile(resolver, l)
+	if len(l.Tracks) != len(base.Tracks) {
+		t.Fatalf("%d tracks", len(l.Tracks))
+	}
+	if got := l.Playlists[0].Tracks; len(got) != 2 || got[0] != base.Tracks[0].ID || got[1] != base.Tracks[0].ID {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestMountImportSkipsAnUnchangedExport(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	first, e := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	if e != nil || first.Bypassed || first.Added == 0 {
+		t.Fatalf("%+v %v", first, e)
+	}
+	again, e := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	if e != nil || !again.Bypassed {
+		t.Fatalf("not skipped: %+v %v", again, e)
+	}
+	forced, e := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, true)
+	if e != nil || forced.Bypassed {
+		t.Fatalf("--full skipped: %+v %v", forced, e)
+	}
+	// A database that has gone missing is rebuilt despite the stamp.
+	if e = os.Remove(filepath.Join(root, "Engine Library/Database2/m.db")); e != nil {
+		t.Fatal(e)
+	}
+	rebuilt, e := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	if e != nil || rebuilt.Bypassed {
+		t.Fatalf("%+v %v", rebuilt, e)
+	}
+}
+
+func TestFastImportReadsOnlyTheExport(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	l, e := bridge.ReadLibrary(context.Background(), root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	// Every other file on the volume is gone, and the import must not notice.
+	for _, p := range []string{"Contents", "MUSIC", "PIONEER/USBANLZ"} {
+		os.RemoveAll(filepath.Join(root, p))
+	}
+	dir := t.TempDir()
+	r, e := enginedb.Sync(context.Background(), root, l, enginedb.Options{Fast: true, DatabaseDir: dir})
+	if e != nil || r.Added != len(l.Tracks) {
+		t.Fatalf("%+v %v", r, e)
+	}
+	db, e := sql.Open("sqlite", filepath.Join(dir, "m.db"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	var tracks, analysed int
+	db.QueryRow(`SELECT count(*) FROM Track`).Scan(&tracks)
+	db.QueryRow(`SELECT count(*) FROM PerformanceData WHERE quickCues IS NOT NULL OR beatData IS NOT NULL`).Scan(&analysed)
+	if tracks != len(l.Tracks) || analysed != 0 {
+		t.Fatalf("%d tracks, %d with performance data", tracks, analysed)
+	}
+	// A later fast pass leaves imported tracks alone.
+	r, e = enginedb.Sync(context.Background(), root, l, enginedb.Options{Fast: true, DatabaseDir: dir})
+	if e != nil || r.Unchanged != len(l.Tracks) || r.Added != 0 {
+		t.Fatalf("%+v %v", r, e)
 	}
 }

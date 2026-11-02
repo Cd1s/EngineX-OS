@@ -106,6 +106,10 @@ stream-sync 不做音频解密，解密只发生在 `sc5000-deemixd` 里。
 选 320k 时本机 Deemix 请求 `bitrate:3, MP3_320`，网易云从 `exhigh` 开始。已经下载过的曲目直接
 复用现有文件，不因切换音质重新下载。
 
+Engine 的流媒体客户端按编码决定保存文件的扩展名，原本只认识 FLAC 和 AAC。`engine_ui_hook.c`（离线镜像用
+`unlock_jp07_features.py`）把它唯一的 `aac` 字符串改成 `mp3`，MP3 就以 `.mp3` 保存并由原生解码器读取。
+TIDAL 自身的 AAC 标记为 `mp4a.40.x`，不受影响；代价是编码写作字面 `aac`/`AAC` 的音频会被当成 MP3。
+
 MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k=false` 可关闭。
 
 ### 配置
@@ -125,12 +129,12 @@ MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k
 
 ## BPM 与调性
 
-歌单和搜索结果带 BPM 和 Camelot 调性。Engine 的客户端不读速度字段，所以网关把它们写在标题后
-（如 `Song [148 BPM 8A]`），曲目列表的 QML 再把它们移到原生的 BPM 和 Key 列。Engine 自己分析出
+歌单和搜索结果带 BPM 和 Camelot 调性。Engine 的客户端不读速度字段，所以网关把它们写在
+copyright 字段后（如 `网易云音乐 [148 BPM 8A]`），曲目列表的 QML 再把它们放进原生的 BPM 和 Key 列。标题保持干净，
+因为 Engine 载入曲目时会把列表标题带到转盘上。Engine 自己分析出
 值后，这两列改显示实测值。结果存在 `state/bpm-cache.json`。
 
-列表上的外部 BPM 只是预览，不写入 Beatgrid，也不进曲库。曲目载入转盘时标题不带它，由 Engine
-自己分析。碟机分析出结果后，实测值覆盖 `bpm-cache.json` 里的预览值，之后外部来源不能再改。
+列表上的外部 BPM 只是预览，不写入 Beatgrid，也不进曲库。曲目载入转盘后由 Engine 自己分析。碟机分析出结果后，实测值覆盖 `bpm-cache.json` 里的预览值，之后外部来源不能再改。
 
 顺序：自己分析出的结果 → ReccoBeats 批量查 ISRC / Spotify ID → 逐首查：Deezer 曲目详情 →
 用已登录的 Spotify 按“主艺人 歌名”搜出 ID 和 ISRC 再查 ReccoBeats → Deezer 搜索（自带 BPM 或
