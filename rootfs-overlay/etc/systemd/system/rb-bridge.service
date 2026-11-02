@@ -8,7 +8,7 @@ Slice=sc5000-background.slice
 CPUAffinity=3
 Nice=19
 IOSchedulingClass=idle
-ExecStart=/usr/local/bin/rb-bridge --watch --prolink
+ExecStart=/usr/local/bin/rb-bridge --prolink
 Restart=on-failure
 RestartSec=3
 

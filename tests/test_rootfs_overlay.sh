@@ -140,17 +140,16 @@ lacks 'rb-bridge ' "$MOCK_ROOT/log"
 has 'read-only' "$MOCK_ROOT/output"
 ok 'read-only HFS+ from edisksd is never remounted, checked or written'
 
-for dir in PIONEER .PIONEER pIoNeEr; do
-    fixture
-    device sda1 exfat
-    printf '/dev/sda1|exfat|%s/STICK|rw,nosuid\n' "$SC5000_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
-    mkdir -p "$SC5000_MEDIA_ROOT/STICK/$dir/rekordbox"; touch "$SC5000_MEDIA_ROOT/STICK/$dir/rekordbox/export.pdb"
-    MOCK_ENGINE_DB=1 run_storage add /dev/sda1
-    has "rb-bridge <--mount-path> <$SC5000_MEDIA_ROOT/STICK>" "$MOCK_ROOT/log"
-    has 'engine-guardian <--heal-mount>' "$MOCK_ROOT/log"
-    lacks 'mount ' "$MOCK_ROOT/log"
-    ok "writable $dir export converted on the edisksd mountpoint"
-done
+fixture
+device sda1 exfat
+printf '/dev/sda1|exfat|%s/STICK|rw,nosuid\n' "$SC5000_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
+mkdir -p "$SC5000_MEDIA_ROOT/STICK/PIONEER/rekordbox"; touch "$SC5000_MEDIA_ROOT/STICK/PIONEER/rekordbox/export.pdb"
+MOCK_ENGINE_DB=1 run_storage add /dev/sda1
+lacks 'rb-bridge ' "$MOCK_ROOT/log"
+lacks 'engine-guardian ' "$MOCK_ROOT/log"
+lacks 'mount ' "$MOCK_ROOT/log"
+has 'ready: /dev/sda1' "$MOCK_ROOT/output"
+ok 'writable export is left to edisksd-hook; the worker never writes databases'
 
 fixture
 device sda1 vfat
@@ -158,14 +157,6 @@ SC5000_MOUNT_WAIT=0 run_storage add /dev/sda1
 has 'not mounted by edisksd' "$MOCK_ROOT/output"
 lacks 'rb-bridge ' "$MOCK_ROOT/log"
 ok 'device not mounted by edisksd is left alone'
-
-fixture
-device sda1 vfat
-printf '/dev/sda1|vfat|%s/X|rw\n' "$SC5000_MEDIA_ROOT" > "$MOCK_ROOT/mounts"
-mkdir -p "$SC5000_MEDIA_ROOT/X/PIONEER/rekordbox"; touch "$SC5000_MEDIA_ROOT/X/PIONEER/rekordbox/export.pdb"
-MOCK_BRIDGE_RC=1 run_storage add /dev/sda1
-has 'rb-bridge failed' "$MOCK_ROOT/output"
-ok 'bridge failure is nonfatal'
 
 fixture
 mkdir -p "$SC5000_SYS_ROOT/class/block/mmcblk0p7" "$SC5000_SYS_ROOT/class/block/mmcblk0/device"

@@ -33,8 +33,12 @@ func inspect(mount string) result {
 	return out
 }
 
-func heal(mount string, n int) result {
-	r, err := dbhealer.HealMount(mount, n)
+func heal(mount string, n int, dataOnly bool) result {
+	healMount := dbhealer.HealMount
+	if dataOnly {
+		healMount = dbhealer.HealMountDataOnly
+	}
+	r, err := healMount(mount, n)
 	out := result{Report: r}
 	if err != nil {
 		out.Error = err.Error()
@@ -92,6 +96,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	root := fs.String("mount-root", "/media", "mount discovery root (watch/status)")
 	interval := fs.Duration("interval", 10*time.Second, "watch polling interval")
 	quiet := fs.Duration("quiet-for", 5*time.Second, "minimum quiet time before healing")
+	dataOnly := fs.Bool("data-only", false, "repair table data but leave Engine's views, triggers and indexes untouched")
 	sessions := fs.Int("max-sessions", dbhealer.DefaultMaxSessions, "maximum history sessions; 0 uses 50")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -115,7 +120,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 			if *status {
 				r = inspect(m)
 			} else {
-				r = heal(m, *sessions)
+				r = heal(m, *sessions, *dataOnly)
 			}
 			if r.Error != "" {
 				code = 1
@@ -154,7 +159,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 			if s.done == sig || time.Since(s.since) < *quiet {
 				continue
 			}
-			r := heal(m, *sessions)
+			r := heal(m, *sessions, *dataOnly)
 			if err = enc.Encode(r); err != nil {
 				fmt.Fprintln(errOut, err)
 				return 1
