@@ -46,7 +46,7 @@ SERVICES_MAIN = """
 	property string scScope: ""
 	readonly property var scServices: [
 		{ id: "tidal", name: "TIDAL" },
-		{ id: "netease", name: "网易云音乐" },
+		{ id: "netease", name: scT("NetEase Cloud Music") },
 		{ id: "spotify", name: "Spotify" },
 		{ id: "deezer", name: "Deezer" }
 	]
@@ -69,6 +69,7 @@ SERVICES_MAIN = """
 		x.send()
 	}
 	function scApply(v) {
+		scEnsureTidal()
 		scLang = v.language
 		scWave = v.waveform
 		scSources = v.sources
@@ -84,11 +85,11 @@ SERVICES_MAIN = """
 		scCall("sources=" + list.join(","))
 	}
 	// Every service is backed by Engine's TIDAL provider; the gateway follows the scope.
-	function scOpen(id, tidalRow) {
+	function scOpen(id) {
+		scEnsureTidal()
 		scCall("scope=" + id, function() {
-			const c = Planck.librarianController
-			c.streamingPlaylistsController.invalidateUI()
-			if (tidalRow) c.browserSourceControllerPtr().select(tidalRow.modelIndex)
+			Planck.librarianController.streamingPlaylistsController.invalidateUI()
+			scSelectPending = !scSelectTidal()
 			scEnterTries = 8
 			scEnterTimer.start()
 			if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) scLoginBegin(id)
@@ -137,6 +138,30 @@ SERVICES_MAIN = """
 	}
 	// The playlists are one level down; open them so a source never looks empty.
 	property int scEnterTries: 0
+	property bool scSelectPending: false
+	// The row may not exist yet right after the provider is re-enabled, and a
+	// delegate can be recycled, so find it in the model rather than the view.
+	function scSelectTidal() {
+		const sources = Planck.librarianController.browserSourceControllerPtr()
+		const model = sources.model()
+		for (let i = 0; i < model.rowCount(); i++) {
+			const index = model.index(i, 0)
+			if (model.data(index, scSourceNameRole) === "TIDAL") {
+				sources.select(index)
+				return true
+			}
+		}
+		return false
+	}
+	readonly property int scSourceNameRole: 257
+	// Every service depends on Engine's TIDAL provider. A saved profile can turn it
+	// off, which would leave all four service rows doing nothing.
+	function scEnsureTidal() {
+		for (let i = 0; i < scProviders.count; i++) {
+			const watcher = scProviders.objectAt(i)
+			if (watcher) watcher.ensure()
+		}
+	}
 	function scFindMyPlaylists(item) {
 		if (item.objectName === "Browser_Collection_StackView_ViewDelegate" && item.visible && item.modelData && item.modelData.display === "My Playlists")
 			return item
@@ -150,6 +175,7 @@ SERVICES_MAIN = """
 		id: scEnterTimer
 		interval: 300; repeat: true
 		onTriggered: {
+			if (scSelectPending) scSelectPending = !scSelectTidal()
 			const row = scFindMyPlaylists(uiContainer)
 			if (row) row.clicked(null)
 			if (row || --scEnterTries <= 0) stop()
@@ -160,9 +186,15 @@ SERVICES_MAIN = """
 		onTriggered: scCall("")
 	}
 	Instantiator {
+		id: scProviders
 		model: Planck.librarianController.streamingInterfaceController.providerModel
 		delegate: QtObject {
-			Component.onCompleted: if (provider.name === "TIDAL" && !provider.integrated) provider.integrated = true
+			function ensure() { if (provider.name === "TIDAL" && !provider.integrated) provider.integrated = true }
+			readonly property Connections watcher: Connections {
+				target: provider
+				function onIntegratedChanged() { ensure() }
+			}
+			Component.onCompleted: ensure()
 		}
 	}
 """
@@ -250,7 +282,7 @@ SOURCE_FOOTER = """
 			MouseArea {
 				width: connectedSource.width
 				height: 108
-				onClicked: root.scOpen(modelData.id, connectedSource.scTidalRow)
+				onClicked: root.scOpen(modelData.id)
 				Rectangle {
 					anchors.fill: parent
 					radius: 16
@@ -404,7 +436,7 @@ def edits(dev: bool):
             ("		PlayerNumber { },\n", LANGUAGE_ENTRY + "		PlayerNumber { },\n"),
         ],
         prefs + "Entries/StreamingServices.qml": [
-            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && (provider.name !== "TIDAL" || root.scScope === "tidal")\n'),
+            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && provider.name !== "TIDAL"\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),
             ('	label: "Streaming"\n', '	label: "Streaming"\n' + STREAM_SWITCHES),
         ],
@@ -460,6 +492,12 @@ def edits(dev: bool):
             (
                 "		providerName: Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName\n",
                 "		providerName: root.scBrand(Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName)\n",
+            ),
+        ],
+        v + "BrowseView/Components/RetryingHint.qml": [
+            (
+                '		text: "WAITING FOR " + providerName.toUpperCase()\n',
+                '		text: root.scT("WAITING FOR") + " " + root.scBrand(providerName).toUpperCase()\n',
             ),
         ],
         v + "Common/Sidebar/Sidebar.qml": [

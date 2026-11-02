@@ -123,8 +123,8 @@ func TestSpotifyTokenRefreshAndPKCE(t *testing.T) {
 			} else {
 				ioJSON(w, `{"items":[{"id":"p2","name":"Second"}],"next":null}`)
 			}
-		case "/playlists/p1/tracks":
-			ioJSON(w, `{"items":[{"track":null},{"is_local":true,"track":{"id":"local"}},{"track":{"id":"s1","name":"Song","type":"track","duration_ms":180001,"artists":[{"name":"Artist"}],"album":{"name":"Album"},"external_ids":{"isrc":"US1234567890"}}}],"next":null}`)
+		case "/playlists/p1/tracks", "/playlists/p1/items":
+			ioJSON(w, `{"items":[{"track":null},{"is_local":true,"track":{"id":"local"}},{"item":{"id":"s1","name":"Song","type":"track","duration_ms":180001,"artists":[{"name":"Artist"}],"album":{"name":"Album"},"external_ids":{"isrc":"US1234567890"}}}]}`)
 		default:
 			t.Errorf("unexpected %s", r.URL.Path)
 			w.WriteHeader(404)
