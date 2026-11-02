@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,9 @@ import (
 	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
 	"github.com/Cd1s/sc5000-custom-os/pkg/resourceguard"
 )
+
+// Stores' editions of one recording differ by their fades.
+const maxDurationGapMS = 15000
 
 type Importer interface {
 	Import(context.Context, analyzer.Import) (int64, error)
@@ -55,6 +59,9 @@ type Jobs struct {
 	// Playlists each streamed track was queued for, so a guest playing a
 	// track the owner already downloaded still gets it in the guest playlist.
 	queued map[string]bool
+
+	// netease returns the NetEase login a session may fetch audio with, or nil.
+	netease func(session string, guest bool) *providers.Netease
 }
 type fetched struct {
 	matched providers.Track
@@ -140,11 +147,7 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	}()
 	ctx, cancel := context.WithTimeout(j.ctx, j.timeout())
 	defer cancel()
-	matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
-	if err != nil {
-		return "", err
-	}
-	dl, err := j.p.Deemix.Download(ctx, matched, nil)
+	matched, dl, err := j.acquire(ctx, session, t, guest, nil)
 	if err != nil {
 		return "", err
 	}
@@ -154,6 +157,72 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	j.mu.Unlock()
 	j.queueImport(session, t, guest, f)
 	return dl.Path, nil
+}
+
+// acquire tries each audio source in turn: the session's NetEase login, the local
+// download service, then the remote Deemix backend.
+func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (providers.Track, *deemixclient.Download, error) {
+	var failures []error
+	j.mu.Lock()
+	lookup := j.netease
+	j.mu.Unlock()
+	if lookup != nil {
+		if n := lookup(session, guest); n != nil {
+			matched, dl, err := j.fromNetease(ctx, n, t)
+			if err == nil {
+				return matched, dl, nil
+			}
+			failures = append(failures, err)
+		}
+	}
+	matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
+	if err == nil {
+		var dl *deemixclient.Download
+		if dl, err = j.p.Deemix.Download(ctx, matched, progress); err == nil {
+			return matched, dl, nil
+		}
+	}
+	failures = append(failures, err)
+	dl, err := j.p.Deemix.FetchRemote(ctx, t)
+	if err == nil {
+		return t, dl, nil
+	}
+	if !errors.Is(err, deemixclient.ErrNoRemote) {
+		failures = append(failures, err)
+	}
+	return providers.Track{}, nil, errors.Join(failures...)
+}
+
+// A NetEase upload of another service's track may differ by fades of a few seconds.
+const neteaseMatchToleranceMS = 5000
+
+func (j *Jobs) fromNetease(ctx context.Context, n *providers.Netease, t providers.Track) (providers.Track, *deemixclient.Download, error) {
+	if t.Provider != "netease" {
+		primary := t.Artist
+		if len(t.Artists) > 0 {
+			primary = t.Artists[0]
+		}
+		found, err := n.Search(ctx, strings.TrimSpace(strings.Split(primary, ",")[0]+" "+deemixclient.SearchTitle(t.Title)))
+		if err != nil {
+			return providers.Track{}, nil, err
+		}
+		if t, err = deemixclient.MatchNearby(t, found, neteaseMatchToleranceMS); err != nil {
+			return providers.Track{}, nil, err
+		}
+	}
+	name := "netease-" + t.ID
+	if dl := j.p.Deemix.Cached(name); dl != nil {
+		return t, dl, nil
+	}
+	address, err := n.AudioURL(ctx, t.ID)
+	if err != nil {
+		return providers.Track{}, nil, err
+	}
+	dl, err := j.p.Deemix.Save(ctx, name, address)
+	if err != nil {
+		return providers.Track{}, nil, err
+	}
+	return t, dl, nil
 }
 
 // queueImport analyses and imports a streamed file once per target playlist.
@@ -269,12 +338,8 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 	matched, dl := v.matched, v.dl
 	if dl == nil {
 		var err error
-		j.update(v.ID, func(v *Job) { v.State = "matching"; v.Progress = .02 })
-		if matched, err = deemixclient.Resolve(ctx, j.p.Catalog, v.Track); err != nil {
-			return err
-		}
 		j.update(v.ID, func(v *Job) { v.State = "downloading"; v.Progress = .05 })
-		dl, err = j.p.Deemix.Download(ctx, matched, func(q deemixclient.QueueStatus) {
+		matched, dl, err = j.acquire(ctx, v.SessionID, v.Track, v.Playlist == providers.GuestPlaylist, func(q deemixclient.QueueStatus) {
 			j.update(v.ID, func(v *Job) { v.Progress = .05 + .55*max(0, min(1, q.Progress)) })
 		})
 		if err != nil {
@@ -296,8 +361,8 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 	if audio.Format != dl.Quality.Format || audio.SampleRate != dl.Quality.SampleRate || (dl.Quality.Lossless && audio.BitsPerSample != dl.Quality.Bits) {
 		return errors.New("download format changed after quality inspection")
 	}
-	if matched.DurationMS > 0 && math.Abs(res.Duration*1000-float64(matched.DurationMS)) > 2000 {
-		return errors.New("download duration differs from matched recording by more than 2 seconds")
+	if matched.DurationMS > 0 && math.Abs(res.Duration*1000-float64(matched.DurationMS)) > maxDurationGapMS {
+		return errors.New("download duration differs from matched recording by more than 15 seconds")
 	}
 	if err = t.Tick(); err != nil {
 		return err

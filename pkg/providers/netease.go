@@ -35,9 +35,22 @@ type neSong struct {
 	DT   int64
 	AR   []struct{ Name string }
 	AL   struct{ Name string }
+	// Older search responses use these names instead of dt, ar and al.
+	Duration int64 `json:"duration"`
+	Artists  []struct{ Name string }
+	Album    struct{ Name string }
 }
 
 func (s neSong) track() Track {
+	if s.DT == 0 {
+		s.DT = s.Duration
+	}
+	if len(s.AR) == 0 {
+		s.AR = s.Artists
+	}
+	if s.AL.Name == "" {
+		s.AL = s.Album
+	}
 	artists := []string{}
 	for _, a := range s.AR {
 		artists = append(artists, a.Name)
@@ -205,6 +218,35 @@ func (n *Netease) Search(ctx context.Context, query string) ([]Track, error) {
 	}
 	return out, nil
 }
+
+// ErrNoFullAudio means the account only gets a preview of this track, or nothing.
+var ErrNoFullAudio = errors.New("netease: no full-length audio for this account")
+
+// AudioURL returns the address NetEase gives this account for a track at the best
+// quality on offer. Previews never count: a DJ must not load 30 seconds of a song.
+func (n *Netease) AudioURL(ctx context.Context, id string) (string, error) {
+	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
+		return "", errors.New("netease: invalid track ID")
+	}
+	for _, level := range []string{"lossless", "exhigh", "standard"} {
+		var r struct {
+			Data []struct {
+				URL   string          `json:"url"`
+				Trial json.RawMessage `json:"freeTrialInfo"`
+			} `json:"data"`
+		}
+		if err := n.get(ctx, "/song/url/v1", url.Values{"id": {id}, "level": {level}}, &r); err != nil {
+			return "", err
+		}
+		for _, v := range r.Data {
+			if v.URL != "" && (len(v.Trial) == 0 || string(v.Trial) == "null") {
+				return v.URL, nil
+			}
+		}
+	}
+	return "", ErrNoFullAudio
+}
+
 func (n *Netease) SearchPlaylists(ctx context.Context, query string) ([]Playlist, error) {
 	var r struct {
 		Result struct {

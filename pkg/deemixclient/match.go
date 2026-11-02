@@ -1,5 +1,6 @@
-// Package deemixclient adapts an existing local download service. It contains
-// no media decryption, DRM code, or service credentials.
+// Package deemixclient obtains audio files: from an existing local download
+// service, or from plain HTTP addresses handed to it. It contains no media
+// decryption, DRM code, or service credentials.
 package deemixclient
 
 import (
@@ -127,6 +128,54 @@ func Match(source providers.Track, candidates []providers.Track) (providers.Trac
 		return fallback[0], nil
 	}
 	return providers.Track{}, ErrNoMatch
+}
+
+// "Original Mix" is how many stores name the only version of a track.
+var originalMix = regexp.MustCompile(`\boriginal( mix)?\b`)
+
+// SearchTitle is the title with "Original Mix" removed, for cross-catalog lookups.
+func SearchTitle(title string) string {
+	return strings.Join(strings.Fields(originalMix.ReplaceAllString(CleanTitle(title), " ")), " ")
+}
+
+func artistSet(t providers.Track) map[string]bool {
+	set := map[string]bool{}
+	for _, a := range strings.Split(artistIdentity(t), "|") {
+		if a != "" {
+			set[a] = true
+		}
+	}
+	return set
+}
+
+// MatchNearby finds the same recording in a catalog that shares no IDs with the
+// source: same title and version, a shared artist, and a duration within
+// tolerance. Catalogs hold duplicate uploads, so the closest duration wins.
+func MatchNearby(source providers.Track, candidates []providers.Track, toleranceMS int64) (providers.Track, error) {
+	title := SearchTitle(source.Title)
+	want := artistSet(source)
+	var best providers.Track
+	bestGap := int64(-1)
+	for _, c := range candidates {
+		gap := source.DurationMS - c.DurationMS
+		if gap < 0 {
+			gap = -gap
+		}
+		if c.ID == "" || title == "" || source.DurationMS <= 0 || c.DurationMS <= 0 || gap > toleranceMS || SearchTitle(c.Title) != title || version(SearchTitle(c.Title)) != version(title) {
+			continue
+		}
+		shared := false
+		for a := range artistSet(c) {
+			shared = shared || want[a]
+		}
+		if shared && (bestGap < 0 || gap < bestGap || (gap == bestGap && c.ID < best.ID)) {
+			best, bestGap = c, gap
+		}
+	}
+	if bestGap < 0 {
+		return providers.Track{}, ErrNoMatch
+	}
+	return best, nil
 }
 
 type Catalog interface {
