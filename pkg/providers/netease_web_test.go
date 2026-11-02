@@ -10,8 +10,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestNeteaseDirectQRLogin(t *testing.T) {
@@ -257,8 +260,11 @@ func TestBPMPerTrackLookupNeedsTheSameSong(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/track/search":
-			io.WriteString(w, `{"content":[{"id":"wrong","trackTitle":"Song Cover","artists":[{"name":"Artist"}]},{"id":"right","trackTitle":"Song (Original Mix)","artists":[{"name":"Artist"}]}]}`)
-		case "/v1/track/right/audio-features":
+			if got := r.URL.Query().Get("searchText"); got != "Song" {
+				t.Errorf("searchText %q", got)
+			}
+			io.WriteString(w, `{"content":[{"id":"wrong","trackTitle":"Song Cover","artists":[{"name":"Artist"}]},{"id":"version","trackTitle":"Song, club mix","artists":[{"name":"Artist"}]},{"id":"right","trackTitle":"Song (Original Mix)","artists":[{"name":"Artist"}]}]}`)
+		case "/v1/track/right/audio-features", "/v1/track/version/audio-features":
 			io.WriteString(w, `{"tempo":128,"key":0,"mode":1}`)
 		default:
 			t.Errorf("unexpected %s", r.URL)
@@ -270,6 +276,10 @@ func TestBPMPerTrackLookupNeedsTheSameSong(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 	if got := b.reccoSearch(context.Background(), Track{Title: "Song", Artist: "Other"}); got.BPM != 0 {
+		t.Fatalf("%+v", got)
+	}
+	// With no exact title, another version of the same song is close enough.
+	if got := b.reccoSearch(context.Background(), Track{Title: "Song [Radio Edit]", Artist: "Artist"}); got.BPM != 128 {
 		t.Fatalf("%+v", got)
 	}
 }
@@ -367,5 +377,71 @@ func TestNeteasePlaylistsSurviveSavedListFailure(t *testing.T) {
 	lists, err := (&Netease{WebURL: srv.URL, Cookie: "c", UserID: 1}).Playlists(context.Background())
 	if err != nil || len(lists) != 1 {
 		t.Fatalf("%+v %v", lists, err)
+	}
+}
+
+func TestEnrichWaitsForTracksWithoutAnID(t *testing.T) {
+	var searches atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/track/search":
+			searches.Add(1)
+			io.WriteString(w, `{"content":[{"id":"x","trackTitle":"`+r.URL.Query().Get("searchText")+`","artists":[{"name":"Artist"}]}]}`)
+		default:
+			io.WriteString(w, `{"tempo":128,"key":0,"mode":1}`)
+		}
+	}))
+	defer srv.Close()
+	b := &BPMStore{Path: t.TempDir() + "/bpm.json", ReccoURL: srv.URL}
+	tracks := make([]Track, 30)
+	for i := range tracks {
+		tracks[i] = Track{ID: strconv.Itoa(i), Provider: "netease", Title: "S" + strconv.Itoa(i), Artist: "Artist"}
+	}
+	b.Enrich(context.Background(), tracks)
+	for i := range bpmListLookups {
+		if tracks[i].BPM != 128 {
+			t.Fatalf("track %d not filled: %+v", i, tracks[i])
+		}
+	}
+}
+
+func TestSearchPreviewDoesNotWaitForPerTrackLookups(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		io.WriteString(w, `{"content":[]}`)
+	}))
+	defer srv.Close()
+	defer close(release)
+	b := &BPMStore{Path: t.TempDir() + "/bpm.json", ReccoURL: srv.URL}
+	done := make(chan struct{})
+	go func() {
+		b.EnrichPreview(context.Background(), []Track{{ID: "1", Provider: "netease", Title: "S", Artist: "A"}})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("search waited for a lookup")
+	}
+}
+
+func TestCutShortLookupStaysEligible(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"content":[]}`)
+	}))
+	defer srv.Close()
+	b := &BPMStore{Path: t.TempDir() + "/bpm.json", ReccoURL: srv.URL}
+	track := Track{ID: "1", Provider: "netease", Title: "S", Artist: "A"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	b.claim(track)
+	b.attempt(ctx, track)
+	if !b.claim(track) {
+		t.Fatal("cut-short lookup was recorded as a miss")
+	}
+	b.attempt(context.Background(), track)
+	if b.claim(track) {
+		t.Fatal("a real miss was forgotten")
 	}
 }
