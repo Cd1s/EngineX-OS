@@ -41,6 +41,7 @@ SERVICES_MAIN = """
 	// SC5000 UI mod: settings owned by stream-sync (see pkg/webui/ui_settings.go).
 	property string scLang: "en"
 	property string scWave: "denon"
+	property string scQuality: "flac"
 	property var scSources: ["tidal", "netease", "spotify", "deezer"]
 	property var scLoggedIn: []
 	property string scScope: ""
@@ -78,6 +79,7 @@ SERVICES_MAIN = """
 		scEnsureTidal()
 		scLang = v.language
 		scWave = v.waveform
+		scQuality = v.quality || "flac"
 		scSources = v.sources
 		scLoggedIn = v.loggedIn
 		scScope = v.scope
@@ -381,6 +383,16 @@ ListEntry {
 }
 """
 
+QUALITY_ENTRY = """
+		EntryBase.ListEntry {
+			text: "Streaming Quality"
+			readonly property var ids: ["flac", "320k"]
+			values: ["FLAC", "320kbps"]
+			currentValue: values[Math.max(0, ids.indexOf(root.scQuality))]
+			onSelected: function(index) { root.scCall("quality=" + ids[index]) }
+		},
+"""
+
 LANGUAGE_ENTRY = """
 		EntryBase.ListEntry {
 			text: "Language"
@@ -439,7 +451,7 @@ def edits(dev: bool):
         ],
         prefs + "TabContents/DeviceTabContent.qml": [
             ('import "../Entries"\n', 'import "../Entries"\nimport "../Entries/Base" as EntryBase\nimport Planck 1.0\n'),
-            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + "		PlayerNumber { },\n"),
+            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + QUALITY_ENTRY + "		PlayerNumber { },\n"),
         ],
         prefs + "Entries/StreamingServices.qml": [
             ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && provider.name !== "TIDAL"\n'),

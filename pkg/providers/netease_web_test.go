@@ -95,11 +95,11 @@ func TestNeteaseAudioSkipsPreviews(t *testing.T) {
 	}))
 	defer srv.Close()
 	n := &Netease{WebURL: srv.URL, Cookie: "MUSIC_U=x", UserID: 1}
-	got, err := n.AudioURL(context.Background(), "7")
+	got, err := n.AudioURL(context.Background(), "7", true)
 	if err != nil || got != "https://cdn/full" || len(levels) != 3 {
 		t.Fatalf("%q %v %d", got, err, len(levels))
 	}
-	if _, err := n.AudioURL(context.Background(), "1,2"); err == nil {
+	if _, err := n.AudioURL(context.Background(), "1,2", true); err == nil {
 		t.Fatal("bad ID accepted")
 	}
 }
@@ -110,7 +110,7 @@ func TestNeteaseAudioReportsPreviewOnlyTracks(t *testing.T) {
 	}))
 	defer srv.Close()
 	n := &Netease{WebURL: srv.URL, Cookie: "MUSIC_U=x", UserID: 1}
-	if _, err := n.AudioURL(context.Background(), "7"); !errors.Is(err, ErrNoFullAudio) {
+	if _, err := n.AudioURL(context.Background(), "7", true); !errors.Is(err, ErrNoFullAudio) {
 		t.Fatal(err)
 	}
 }
@@ -577,5 +577,18 @@ func TestPreviewIsTheLastResortAndOnlyFromDeezer(t *testing.T) {
 	}
 	if address := b.previewFor(context.Background(), Track{ID: "x", Provider: "spotify", ISRC: "EVIL", Title: "X", Artist: "Y"}); address != "" {
 		t.Fatalf("foreign clip host accepted: %s", address)
+	}
+}
+
+func TestNeteaseSkipsLosslessWhenMP3IsWanted(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": []any{map[string]any{"url": "https://cdn/song"}}})
+	}))
+	defer srv.Close()
+	n := &Netease{WebURL: srv.URL, Cookie: "c", UserID: 1}
+	if _, err := n.AudioURL(context.Background(), "7", false); err != nil || calls != 1 {
+		t.Fatal(err, calls)
 	}
 }

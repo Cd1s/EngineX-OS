@@ -113,6 +113,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor
 		jobs.bpm = cfg.BPM
+		if jobs.p.Deemix != nil {
+			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }
+		}
 		jobs.mu.Unlock()
 	}
 	return s

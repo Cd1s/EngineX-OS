@@ -93,6 +93,8 @@ DefaultMountOptions=force
 CONF
 fi # offline/staging patches
 if [ "$runtime" = 1 ]; then
+    # The kernel boots with rfkill.default_state=0, which blocks both radios.
+    if command -v rfkill >/dev/null 2>&1; then rfkill unblock bluetooth wifi || :; fi
     if command -v az01-ethernet-speed >/dev/null 2>&1; then
         az01-ethernet-speed 1000 || az01-ethernet-speed 100 || :
     fi
