@@ -47,11 +47,20 @@ func snapshot(t *testing.T, root string) map[string][32]byte {
 }
 func dbOpen(t *testing.T, root string) *sql.DB {
 	t.Helper()
-	db, e := sql.Open("sqlite", filepath.Join(root, "Engine Library/Database2/m.db"))
+	dir := filepath.Join(root, "Engine Library/Database2")
+	db, e := sql.Open("sqlite", filepath.Join(dir, "m.db"))
 	if e != nil {
 		t.Fatal(e)
 	}
 	t.Cleanup(func() { db.Close() })
+	// One connection keeps the attached bridge state visible to every query.
+	db.SetMaxOpenConns(1)
+	state := filepath.Join(dir, ".rb-bridge-state.db")
+	if _, e = os.Stat(state); e == nil {
+		if _, e = db.Exec(`ATTACH DATABASE ? AS bridge`, state); e != nil {
+			t.Fatal(e)
+		}
+	}
 	return db
 }
 func scalar[T any](t *testing.T, db *sql.DB, q string, args ...any) T {

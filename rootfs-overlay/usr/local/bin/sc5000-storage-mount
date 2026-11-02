@@ -1,28 +1,17 @@
 #!/bin/sh
 # edisksd companion. Engine OS mounts removable media through edisksd and
 # Engine follows edisksd over D-Bus; mounting here as well races that state
-# machine. This worker never mounts, checks or writes block devices. It waits
-# for edisksd's mountpoint and converts a writable Rekordbox export.
+# machine. This worker never mounts, checks or writes block devices or their
+# databases. It waits for edisksd's mountpoint and reports it.
 # HFS+ stays read-only: rw writes oops hfsplus.ko on the 6.6 RT kernel.
 # POSIX sh: the stock rootfs has BusyBox ash and no bash.
 set -eu
 umask 022
 SYS=${SC5000_SYS_ROOT:-/sys}
 RUN=${SC5000_RUN_ROOT:-/run/sc5000-storage}
-BRIDGE=${SC5000_RB_BRIDGE:-/usr/local/bin/rb-bridge}
-GUARDIAN=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
 WAIT=${SC5000_MOUNT_WAIT:-30}
 log() { printf 'sc5000-storage: %s\n' "$*" >&2; }
 die() { log "$*"; exit 1; }
-# BusyBox has no timeout(1) on stock images; fall back to running unbounded.
-bounded() {
-    limit=$1; shift
-    if command -v timeout >/dev/null 2>&1; then
-        timeout -s TERM -k 2 "$limit" "$@"
-    else
-        "$@"
-    fi
-}
 mkdir -p "$RUN"
 [ ! -L "$RUN" ] || die "symlinked run directory: $RUN"
 exec 9>"$RUN/lock"
@@ -62,36 +51,10 @@ while :; do
 done
 options=$(findmnt -rn -S "$dev" -o OPTIONS 2>/dev/null | head -n 1) || options=
 case ,$options, in *,ro,*)
-    log "read-only: $dev at $target; Engine imports its rekordbox export natively"
+    log "read-only: $dev at $target"
     exit 0 ;;
 esac
 
-# FAT/exFAT/HFS+ lookups are case-insensitive in Engine and rekordbox; macOS
-# rekordbox writes the hidden ".PIONEER".
-lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
-has_export() {
-    for dir in "$target"/* "$target"/.[!.]*; do
-        [ -d "$dir" ] && [ ! -L "$dir" ] || continue
-        case $(lower "${dir##*/}") in pioneer|.pioneer) ;; *) continue ;; esac
-        for sub in "$dir"/*; do
-            [ "$(lower "${sub##*/}")" = rekordbox ] || continue
-            for f in "$sub"/*; do
-                case $(lower "${f##*/}") in export.pdb|exportlibrary.db|exportonelibrary.db) [ -f "$f" ] && return 0 ;; esac
-            done
-        done
-    done
-    return 1
-}
-if has_export; then
-    if [ -x "$BRIDGE" ]; then
-        bounded "${SC5000_BRIDGE_TIMEOUT:-120}" taskset -c 3 "$BRIDGE" --mount-path "$target" ||
-            log 'rb-bridge failed/timed out; original files remain available'
-    else
-        log 'rb-bridge unavailable'
-    fi
-fi
-if [ -f "$target/Engine Library/Database2/m.db" ] && [ -x "$GUARDIAN" ]; then
-    bounded "${SC5000_GUARDIAN_TIMEOUT:-30}" taskset -c 3 "$GUARDIAN" --heal-mount "$target" ||
-        log 'engine-guardian failed/timed out'
-fi
+# Conversion and repair run from edisksd-hook, before Engine learns of the mount:
+# Engine and an external writer on the same open database corrupt it.
 log "ready: $dev at $target"

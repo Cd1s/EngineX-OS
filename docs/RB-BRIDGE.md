@@ -54,6 +54,7 @@ bin/rb-bridge --prolink --bind 0.0.0.0
 - trackData 为 44 字节；overviewWaveFormData 为 3099 字节；beatData 使用报告的
   混合字节序。trackData / overview / beatData / quickCues 有 4 字节 BE 长度 + zlib；
   loops 不压缩。只有同时具备拍线和波形时设置 isAnalyzed。
+- `Bridge*` 表都在 `Database2/.rb-bridge-state.db`，不在 `m.db`：Engine attach 时会比对 schema，并删除它不认识的表。
 - BridgeState 记录实际路径、文件 size / mtime、PDB 原行与解析元数据哈希、分析文件
   和封面的 size / mtime。未变曲目不读取 ANLZ 内容或音频头，不更新 PerformanceData。
   分析文件单独发生变化也会更新其曲目。保留时间戳且等长的外部修改不属于此检测模型。

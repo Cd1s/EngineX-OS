@@ -143,11 +143,13 @@ func TestOverlayUnitsAndRuntimePolicy(t *testing.T) {
 			t.Fatal(text)
 		}
 	}
-	for _, name := range []string{"sc5000-debloat", "engine-guardian"} {
-		target, err := os.Readlink(filepath.Join(root, "etc/systemd/system/multi-user.target.wants", name+".service"))
-		if err != nil || target != "../"+name+".service" {
-			t.Fatalf("%s %q %v", name, target, err)
-		}
+	target, err := os.Readlink(filepath.Join(root, "etc/systemd/system/multi-user.target.wants/sc5000-debloat.service"))
+	if err != nil || target != "../sc5000-debloat.service" {
+		t.Fatalf("sc5000-debloat %q %v", target, err)
+	}
+	// Writing a database Engine has open corrupts it; repairs run from edisksd-hook.
+	if _, err := os.Lstat(filepath.Join(root, "etc/systemd/system/multi-user.target.wants/engine-guardian.service")); !os.IsNotExist(err) {
+		t.Fatalf("engine-guardian must not run alongside Engine: %v", err)
 	}
 	if out, err := exec.Command("bash", "-n", filepath.Join(root, "usr/local/bin/sc5000-debloat")).CombinedOutput(); err != nil {
 		t.Fatalf("%s %v", out, err)

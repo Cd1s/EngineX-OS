@@ -124,10 +124,36 @@ CREATE TRIGGER fail_import BEFORE INSERT ON PlaylistEntity BEGIN SELECT RAISE(AB
 	if n := scalar[int](t, db, `SELECT count(*) FROM Track WHERE pdbImportKey IS NOT NULL AND id IN (SELECT trackId FROM PerformanceData WHERE thirdPartySourceId=1)`); n == 0 {
 		t.Fatal("fixture lost its tracks")
 	}
-	if n := scalar[int](t, db, `SELECT count(*) FROM sqlite_master WHERE name LIKE 'Bridge%'`); n != 0 {
+	if n := scalar[int](t, db, `SELECT count(*) FROM bridge.sqlite_master WHERE name LIKE 'Bridge%'`); n != 0 {
 		t.Fatal("schema committed despite rollback")
 	}
 	if !reflect.DeepEqual(before, snapshot(t, filepath.Join(root, "Engine Library/Database2"))) {
 		t.Fatal("failed native import changed database bytes")
+	}
+}
+
+// Engine drops unknown tables from m.db on attach, then resets again on every
+// attach if they return, so m.db must stay free of them across repeat imports.
+func TestEngineSchemaResetKeepsBridgeState(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	convert(t, root, enginedb.Options{})
+	db := dbOpen(t, root)
+	if n := scalar[int](t, db, `SELECT count(*) FROM main.sqlite_master WHERE name LIKE 'Bridge%'`); n != 0 {
+		t.Fatal("bridge tables in m.db")
+	}
+	if v := scalar[int](t, db, `PRAGMA main.user_version`); v != 4194305 {
+		t.Fatal("user_version", v)
+	}
+	if v := scalar[int64](t, db, `SELECT currentPlayedIndiciator FROM main.Information`); v <= 0 {
+		t.Fatal("played indicator", v)
+	}
+	playlists := scalar[int](t, db, `SELECT count(*) FROM main.Playlist`)
+	result := convert(t, root, enginedb.Options{})
+	if result.PlaylistsChanged || result.Added != 0 || result.Updated != 0 {
+		t.Fatalf("repeat import rewrote the library: %+v", result)
+	}
+	if n := scalar[int](t, db, `SELECT count(*) FROM main.Playlist`); n != playlists {
+		t.Fatalf("playlists grew from %d to %d", playlists, n)
 	}
 }

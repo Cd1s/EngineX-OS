@@ -269,6 +269,7 @@ func runGuardian(ctx context.Context, args []string, out, errOut io.Writer) int 
 	root := fs.String("mount-root", "/media", "mount discovery root (watch/status)")
 	interval := fs.Duration("interval", 10*time.Second, "watch polling interval")
 	quiet := fs.Duration("quiet-for", 5*time.Second, "minimum quiet time before healing")
+	dataOnly := fs.Bool("data-only", false, "repair table data but leave Engine's views, triggers and indexes untouched")
 	sessions := fs.Int("max-sessions", dbhealer.DefaultMaxSessions, "maximum history sessions; 0 uses 50")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -308,7 +309,11 @@ func runGuardian(ctx context.Context, args []string, out, errOut io.Writer) int 
 		return res
 	}
 	heal := func(m string, n int) guardianResult {
-		r, err := dbhealer.HealMount(m, n)
+		healMount := dbhealer.HealMount
+		if *dataOnly {
+			healMount = dbhealer.HealMountDataOnly
+		}
+		r, err := healMount(m, n)
 		res := guardianResult{Report: r}
 		if err != nil {
 			res.Error = err.Error()
