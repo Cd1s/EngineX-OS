@@ -92,6 +92,11 @@ func (s *server) handleMobileGet(w http.ResponseWriter, r *http.Request) {
 		renderPage(w, 200, "soundcloudPage", d)
 		return
 	}
+	if sess.Status == "done" {
+		s.browser.closeToken(token)
+		renderPage(w, 200, "donePage", pageData{Title: "已完成连接", Provider: "deezer"})
+		return
+	}
 	renderPage(w, 200, "deezerPage", pageData{Title: "连接 Deezer", Token: token, Done: sess.Status == "done", UserID: cfg.DeezerUserID})
 }
 
@@ -158,6 +163,7 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 		info, err := s.connectDeezer(ctx, firstOf(v, "user", "link", "url", "userId", "id"), firstOf(v, "arl"), sess.Trusted)
 		if err == nil {
 			s.sessions.update(token, func(x *session) { x.Deezer, x.Status = info, "done" })
+			s.browser.closeToken(token)
 		}
 		s.mobileResult(w, r, provider, token, 200, err)
 		return

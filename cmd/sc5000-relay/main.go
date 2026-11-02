@@ -27,6 +27,7 @@ type server struct {
 	sessions    *sessionStore
 	spotify     *spotifyAuth
 	deezer      *deezerClient
+	browser     *deezerBrowser
 }
 
 func main() {
@@ -51,6 +52,7 @@ func main() {
 		newSessions: newLimiter(time.Minute, 30),
 		sessions:    newSessionStore(filepath.Join(*stateDir, "sessions.json")),
 		deezer:      newDeezerClient(),
+		browser:     newDeezerBrowser("http://127.0.0.1:9222"),
 	}
 	s.spotify = newSpotifyAuth(filepath.Join(*stateDir, "spotify-https-ok.json"), s.public+"/oauth/spotify/callback")
 
@@ -67,12 +69,14 @@ func main() {
 		<-ch
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		s.browser.close()
 		_ = srv.Shutdown(ctx)
 	}()
 	log.Printf("sc5000-relay listening on %s (public %s)", *listen, s.public)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+	s.browser.close()
 	s.sessions.save()
 }
 
@@ -84,6 +88,8 @@ func (s *server) routes() http.Handler {
 	// Deck <-> phone QR login, protected by the high-entropy session token.
 	mux.HandleFunc("POST /api/relay/session", s.handleSessionCreate)
 	mux.HandleFunc("GET /api/relay/session", s.handleSessionPoll)
+	mux.HandleFunc("GET /m/deezer/frame", s.handleDeezerBrowserFrame)
+	mux.HandleFunc("POST /m/deezer/act", s.handleDeezerBrowserAct)
 	mux.HandleFunc("GET /m/{provider}", s.handleMobileGet)
 	mux.HandleFunc("POST /m/{provider}", s.handleMobilePost)
 	mux.HandleFunc("GET /oauth/spotify/callback", s.handleSpotifyCallback)
