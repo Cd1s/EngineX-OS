@@ -47,31 +47,51 @@ static int is_engine(void) {
     return strcmp(exe, "/usr/Engine/Engine") == 0;
 }
 
-// Engine's TIDAL client names a downloaded file after its codec and knows FLAC and
-// AAC, so an MP3 from the gateway would be saved with no extension and fail to load.
-// Its one "aac" string is both what it compares the codec with and the extension it
-// then uses, so turning it into "mp3" teaches it MP3 in four bytes. TIDAL's own AAC
-// is labelled mp4a.40.x and keeps working. Same edit as unlock_jp07_features.py, for
-// a deck whose read-only root still has the older binary. Bytes are checked first,
-// so another Engine build is left alone.
-#define MP3_CODEC_OFFSET 0x1DB8E90u
+// Edits to Engine in memory, the same as unlock_jp07_features.py makes offline, for
+// a deck whose read-only root has the older binary. Each is only made if the bytes
+// are as expected, so another Engine build is left alone.
+struct engine_edit {
+    uint32_t offset;
+    const char *expected, *replacement;
+    uint32_t size;
+};
+
+static const struct engine_edit engine_edits[] = {
+    // TIDAL's client names a downloaded file after its codec and knows FLAC and AAC,
+    // so an MP3 from the gateway would be saved with no extension and fail to load.
+    // Its one "aac" string is both what it compares the codec with and the extension
+    // it then uses. TIDAL's own AAC is labelled mp4a.40.x and keeps working.
+    {0x1DB8E90u, "aac", "mp3", 4},
+    // JP07's device config never sets hasBluetooth at +588, so Planck.bluetooth stays
+    // null and the UI has no Bluetooth entry. add r2, r4, #592 -> strb r3, [r4, #588].
+    {0xF65A50u, "\x25\x2e\x84\xe2", "\x4c\x32\xc4\xe5", 4},
+    // That took the r2 this used: strh r3, [r2] -> strh r3, [r0, #-76]. r0 was just
+    // set to r4 + 668, so this still writes +592. strh's immediate cannot reach it from r4.
+    {0xF65A58u, "\xb0\x30\xc2\xe1", "\xbc\x34\x40\xe1", 4},
+};
+
 static int engine_base(struct dl_phdr_info *info, size_t size, void *out) {
     (void)size;
     *(uintptr_t *)out = info->dlpi_addr;
     return 1; // the first object is the program itself
 }
-__attribute__((constructor)) static void teach_mp3(void) {
+
+__attribute__((constructor)) static void edit_engine(void) {
     if (!is_engine()) return;
     uintptr_t base = 0;
     dl_iterate_phdr(engine_base, &base);
     if (!base) return;
-    char *at = (char *)(base + MP3_CODEC_OFFSET);
-    if (memcmp(at - 8, "flac\0\0\0\0aac\0mp4a.40.2", 21)) return;
     long page = sysconf(_SC_PAGESIZE);
-    char *start = (char *)((uintptr_t)at & ~(uintptr_t)(page - 1));
-    if (mprotect(start, (size_t)page, PROT_READ | PROT_WRITE)) return;
-    memcpy(at, "mp3", 4);
-    mprotect(start, (size_t)page, PROT_READ | PROT_EXEC);
+    for (size_t i = 0; i < sizeof engine_edits / sizeof *engine_edits; i++) {
+        const struct engine_edit *e = &engine_edits[i];
+        char *at = (char *)(base + e->offset);
+        if (memcmp(at, e->expected, e->size)) continue;
+        char *start = (char *)((uintptr_t)at & ~(uintptr_t)(page - 1));
+        if (mprotect(start, (size_t)page, PROT_READ | PROT_WRITE)) continue;
+        memcpy(at, e->replacement, e->size);
+        mprotect(start, (size_t)page, PROT_READ | PROT_EXEC);
+        __builtin___clear_cache(at, at + e->size);
+    }
 }
 
 // Unknown or unsafe values fall back to the English pack.
