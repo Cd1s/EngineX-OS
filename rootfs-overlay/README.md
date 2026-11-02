@@ -62,21 +62,19 @@ on controller and device support. Affinity also works without weight support.
 These settings do not reserve CPU0 against every stock daemon or unmovable
 kernel interrupt, and do not replace a verified RT kernel/boot policy.
 
-`sc5000-perf-tune` sets CPU0-3 governors to `performance`, raises their minimum
-to `cpuinfo_max_freq`, and selects GPU performance/maximum minimum frequency
-at `ffa30000.gpu` devfreq. Kernel thermal protections still apply. It writes
-sysctl values (swappiness 10, dirty background 5, dirty ratio 15, file-max
-1048576), and selects `mq-deadline`, otherwise `none`, when advertised.
-Movable non-audio IRQs use mask `e` (CPUs 1-3); managed IRQ rejection is
-nonfatal. `/etc/default/sc5000-perf` controls IRQ/audio-thread name patterns.
-Confirm actual firmware thread names; only existing FIFO/RR audio threads
-are pinned to CPU0. Scheduling policy/priority is never escalated.
+`sc5000-perf-tune` sets CPU0-3 to `ondemand` with `cpuinfo_min_freq` as the
+minimum, and the `ffa30000.gpu` devfreq to `simple_ondemand` at its lowest
+frequency, so the deck clocks down when idle. It writes sysctl values (swappiness
+10, dirty background 5, dirty ratio 15, file-max 1048576), and selects
+`mq-deadline`, otherwise `none`, when advertised. Movable IRQs and their
+PREEMPT_RT threads are placed by name; `/etc/default/sc5000-perf` holds the
+patterns. Engine's threads keep the scheduler's placement.
 
-The service runs at boot and a timer reapplies it after two seconds, then
-15 seconds after each run, covering newly created Engine threads. Missing,
+The service runs at boot and after each Engine start, because Engine's setup
+script sets the GPU back to `performance`. Missing,
 read-only or disappearing knobs and exited threads are nonfatal. The service
 conflicts with irqbalance to prevent it from undoing the IRQ policy. Enable
-symlinks for discovery, tuning and its timer are included in this tree.
+symlinks for discovery and tuning are included in this tree.
 
 ## Dependencies and validation
 

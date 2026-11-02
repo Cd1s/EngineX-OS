@@ -1,5 +1,5 @@
 [Unit]
-Description=SC5000 RK3288 clocks, audio IRQ and Engine thread affinity
+Description=SC5000 RK3288 dynamic clocks and IRQ affinity
 After=local-fs.target
 Conflicts=irqbalance.service
 

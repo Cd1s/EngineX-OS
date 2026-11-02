@@ -1,0 +1,21 @@
+#!/bin/sh
+# After three Engine starts that do not survive 90 seconds, the UI hook stops
+# applying packs (safe-mode) and the deck comes back with the stock UI.
+UI=${SC5000_UI_DIR:-/data/sc5000-custom/ui}
+case ${1:-} in
+pre)
+    n=$(cat "$UI/boot-count" 2>/dev/null)
+    case $n in ''|*[!0-9]*) n=0 ;; esac
+    n=$((n + 1))
+    mkdir -p "$UI"
+    echo "$n" > "$UI/boot-count"
+    [ "$n" -lt 3 ] || : > "$UI/safe-mode"
+    ;;
+post)
+    # Engine's setup script has just set the GPU to performance. This also covers
+    # boot, when a start request would merge with an already running tune job.
+    /usr/local/bin/sc5000-perf-tune >/dev/null 2>&1
+    ( sleep "${SC5000_UI_HEALTHY_AFTER:-90}"; rm -f "$UI/boot-count" ) </dev/null >/dev/null 2>&1 &
+    ;;
+esac
+exit 0

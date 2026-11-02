@@ -215,21 +215,18 @@ for entry in '201 144-ffa3000' '202 145-ff54000' '203 99-eth0' '204 99-other' '2
 done
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 for cpu in 0 1 2 3; do
-    has performance "$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_governor"
-    has 1800000 "$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_max_freq"
+    has ondemand "$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_governor"
 done
-has performance "$gpu/governor"
-has 600000000 "$gpu/min_freq"
+has simple_ondemand "$gpu/governor"
 has 10 "$SC5000_PROC_ROOT/sys/vm/swappiness"
 has 5 "$SC5000_PROC_ROOT/sys/vm/dirty_background_ratio"
 has 1048576 "$SC5000_PROC_ROOT/sys/fs/file-max"
 has mq-deadline "$SC5000_SYS_ROOT/block/sda/queue/scheduler"
 has none "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
+lacks 'taskset <-pc> <0> <101>' "$MOCK_ROOT/log"
+lacks 'taskset <-pc> <1-2> <100>' "$MOCK_ROOT/log"
 has 1 "$SC5000_PROC_ROOT/irq/42/smp_affinity"
 has 6 "$SC5000_PROC_ROOT/irq/43/smp_affinity"
-has 'taskset <-pc> <0> <101>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <1-2> <100>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <1-2> <102>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <0> <200>' "$MOCK_ROOT/log"
 has 'chrt <-f> <-p> <99> <200>' "$MOCK_ROOT/log"
 has 2 "$SC5000_PROC_ROOT/irq/44/smp_affinity"
