@@ -95,3 +95,23 @@ func TestFLACHeaderRejectsImplausibleRateAndDuration(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveMacHiddenPioneer(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".PIONEER/USBANLZ/P001"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	r, err := compat.NewResolver(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for in, want := range map[string]string{"PIONEER": ".PIONEER", "/PIONEER/USBANLZ/P001": ".PIONEER/USBANLZ/P001"} {
+		got, err := r.Resolve(in)
+		if err != nil || got != want {
+			t.Fatalf("Resolve(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if _, err = r.Resolve("MUSIC/PIONEER"); err == nil {
+		t.Fatal("only the volume root maps PIONEER to .PIONEER")
+	}
+}

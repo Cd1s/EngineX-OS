@@ -14,7 +14,7 @@ import (
 	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
 )
 
-func TestNativeTrackConflictIsNotAdopted(t *testing.T) {
+func TestNativeTrackConflictIsReferencedNotAdopted(t *testing.T) {
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	convert(t, root, enginedb.Options{})
@@ -29,8 +29,8 @@ func TestNativeTrackConflictIsNotAdopted(t *testing.T) {
 		t.Fatal(e)
 	}
 	l.Tracks = append(l.Tracks, rekordbox.Track{ID: 99, Title: "must not replace native", Path: "/MUSIC/native.wav"})
-	if _, e = enginedb.Sync(context.Background(), root, l, enginedb.Options{}); e == nil {
-		t.Fatal("adopted native path without ownership")
+	if _, e = enginedb.Sync(context.Background(), root, l, enginedb.Options{}); e != nil {
+		t.Fatal("native path conflict must be skipped, not fatal:", e)
 	}
 	if got := scalar[string](t, db, `SELECT title FROM Track WHERE id=?`, id); got != "Native title" {
 		t.Fatal(got)
@@ -111,5 +111,26 @@ func TestOneLibraryWALIsNeverTouched(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, snapshot(t, root)) {
 		t.Fatal("read-only source WAL/SHM was modified")
+	}
+}
+
+func TestPlaylistNameConflictGetsSuffix(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	convert(t, root, enginedb.Options{})
+	db := dbOpen(t, root)
+	l, e := bridge.ReadLibrary(context.Background(), root)
+	if e != nil || len(l.Playlists) == 0 {
+		t.Fatal(e)
+	}
+	if _, e = db.Exec(`DELETE FROM BridgePlaylist`); e != nil {
+		t.Fatal(e)
+	}
+	// The previously imported rows are now native playlists with the same names.
+	if _, e = enginedb.Sync(context.Background(), root, l, enginedb.Options{}); e != nil {
+		t.Fatal("playlist name conflict must not abort the import:", e)
+	}
+	if n := scalar[int](t, db, `SELECT count(*) FROM Playlist WHERE title LIKE '% (rekordbox)'`); n == 0 {
+		t.Fatal("conflicting playlist not renamed")
 	}
 }

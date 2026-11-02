@@ -79,6 +79,11 @@ func (r *Resolver) Resolve(s string) (string, error) {
 			r.dirs[cur] = idx
 		}
 		matches := idx[canonical(component)]
+		// macOS rekordbox writes the export as the hidden ".PIONEER", while
+		// export.pdb keeps volume paths like "/PIONEER/USBANLZ/...".
+		if len(matches) == 0 && cur == "" && canonical(component) == "pioneer" {
+			matches = idx[".pioneer"]
+		}
 		for _, name := range matches {
 			if name == component {
 				matches = []string{name}
