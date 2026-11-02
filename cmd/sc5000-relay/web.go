@@ -77,6 +77,10 @@ func (s *server) handleMobileGet(w http.ResponseWriter, r *http.Request) {
 		s.renderSpotify(w, r, sess, "")
 		return
 	}
+	if provider == "soundcloud" {
+		renderPage(w, 200, "soundcloudPage", pageData{Title: "连接 SoundCloud", Token: token, Done: sess.Status == "done"})
+		return
+	}
 	renderPage(w, 200, "deezerPage", pageData{Title: "连接 Deezer", Token: token, Done: sess.Status == "done", UserID: cfg.DeezerUserID})
 }
 
@@ -98,6 +102,32 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	if provider == "soundcloud" {
+		info := &soundCloudInfo{User: strings.TrimSpace(firstOf(v, "user", "url")), ClientID: strings.TrimSpace(firstOf(v, "clientId")), Token: strings.TrimSpace(firstOf(v, "token"))}
+		var err error
+		if info.ClientID == "" && info.Token == "" {
+			c := s.cfg.get()
+			info.ClientID, info.Token = c.SoundCloudClientID, c.SoundCloudToken
+			if !sess.Trusted || (info.ClientID == "" && info.Token == "") {
+				err = errors.New("至少填写 Client ID 或 OAuth Token 之一")
+			}
+		}
+		if err == nil {
+			s.sessions.update(token, func(x *session) { x.SoundCloud, x.Status = info, "done" })
+			if sess.Trusted {
+				s.cfg.update(func(c *config) {
+					if info.ClientID != "" {
+						c.SoundCloudClientID = info.ClientID
+					}
+					if info.Token != "" {
+						c.SoundCloudToken = info.Token
+					}
+				})
+			}
+		}
+		s.mobileResult(w, r, provider, token, 200, err)
+		return
+	}
 	if provider == "deezer" {
 		info, err := s.connectDeezer(ctx, firstOf(v, "user", "link", "url", "userId", "id"), firstOf(v, "arl"), sess.Trusted)
 		if err == nil {
@@ -171,6 +201,10 @@ func (s *server) mobileResult(w http.ResponseWriter, r *http.Request, provider, 
 		}
 		sess, _ := s.sessions.get(token)
 		writeJSON(w, 200, map[string]any{"ok": true, "status": sess.Status, "deezer": sess.Deezer, "spotify": sess.SpotifyToken != nil})
+		return
+	}
+	if err != nil && provider == "soundcloud" {
+		renderPage(w, code, "soundcloudPage", pageData{Title: "连接 SoundCloud", Token: token, Error: err.Error()})
 		return
 	}
 	if err != nil {

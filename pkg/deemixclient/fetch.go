@@ -20,7 +20,7 @@ const (
 )
 
 // Only downloads this pipeline named are ever evicted: Save's and Deemix's <id>.
-var evictable = regexp.MustCompile(`^(netease-)?\d+\.(flac|mp3)$`)
+var evictable = regexp.MustCompile(`^(netease-|soundcloud-)?\d+\.(flac|mp3|mp4)$`)
 
 func (c *Client) media() *http.Client {
 	if c.Media != nil {
@@ -49,7 +49,115 @@ func (c *Client) Cached(name string) *Download {
 			return dl
 		}
 	}
+	path := filepath.Join(c.DownloadDir, name+".mp4")
+	if isMP4(path) {
+		return &Download{Path: path, Quality: Quality{Label: "[AAC]", Format: "mp4"}}
+	}
 	return nil
+}
+
+func isMP4(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var head [8]byte
+	_, err = io.ReadFull(f, head[:])
+	return err == nil && string(head[4:]) == "ftyp"
+}
+
+// SaveParts joins the segments of one stream into name.ext, keeping what is checked
+// to be whole audio. Long DJ sets come this way, so a segment gets a few attempts.
+func (c *Client) SaveParts(ctx context.Context, name, ext string, urls []string) (*Download, error) {
+	if ext != "mp3" && ext != "mp4" {
+		return nil, errors.New("audio: unsupported format")
+	}
+	if err := os.MkdirAll(c.DownloadDir, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.CreateTemp(c.DownloadDir, ".part-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	for _, address := range urls {
+		if err = c.appendPart(ctx, f, address); err != nil {
+			return nil, err
+		}
+	}
+	if err = f.Close(); err != nil {
+		return nil, err
+	}
+	var dl *Download
+	if ext == "mp4" {
+		if !isMP4(f.Name()) {
+			return nil, errors.New("audio: not an MP4 file")
+		}
+		dl = &Download{Quality: Quality{Label: "[AAC]", Format: "mp4"}}
+	} else {
+		q, err := Inspect(f.Name())
+		if err != nil {
+			return nil, err
+		}
+		if q.Format != "mp3" {
+			return nil, errors.New("audio: not an MP3 file")
+		}
+		dl = &Download{Quality: q}
+	}
+	dl.Path = filepath.Join(c.DownloadDir, name+"."+ext)
+	if err = os.Chmod(f.Name(), 0o644); err != nil {
+		return nil, err
+	}
+	if err = os.Rename(f.Name(), dl.Path); err != nil {
+		return nil, err
+	}
+	c.Trim(dl.Path)
+	return dl, nil
+}
+
+// appendPart rewinds to where it started, so a failed attempt leaves no partial bytes.
+func (c *Client) appendPart(ctx context.Context, f *os.File, address string) error {
+	start, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return err
+		}
+		if err := f.Truncate(start); err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
+		if err != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") {
+			return errors.New("audio: invalid address")
+		}
+		resp, err := c.media().Do(req)
+		if err != nil {
+			last = errors.New("audio: transfer failed")
+			continue
+		}
+		var n int64
+		if resp.StatusCode == http.StatusOK {
+			n, err = io.Copy(f, io.LimitReader(resp.Body, maxMediaBytes))
+		}
+		resp.Body.Close()
+		switch {
+		case resp.StatusCode != http.StatusOK:
+			last = fmt.Errorf("audio: HTTP %d", resp.StatusCode)
+		case err != nil || (resp.ContentLength >= 0 && n != resp.ContentLength):
+			last = errors.New("audio: transfer interrupted")
+		default:
+			return nil
+		}
+	}
+	return last
 }
 
 // Save stores the audio at address as name.flac or name.mp3, after checking what

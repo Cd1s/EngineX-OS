@@ -33,6 +33,11 @@ type relaySession struct {
 		UserID string `json:"userId"`
 		ARL    string `json:"arl"`
 	} `json:"deezer"`
+	SoundCloud *struct {
+		User     string `json:"user"`
+		ClientID string `json:"clientId"`
+		Token    string `json:"token"`
+	} `json:"soundcloud"`
 }
 
 // relayCall makes one JSON request. Redirects are refused so that the password,
@@ -98,6 +103,14 @@ func (s *Server) relayStatus(ctx context.Context, session *Session, token, statu
 
 func (s *Server) relayCollect(session *Session, v relaySession) error {
 	switch p := session.p.(type) {
+	case *providers.SoundCloud:
+		if v.SoundCloud == nil {
+			return errRelayIncomplete
+		}
+		// The relay never holds a working client, so the deck checks what it sent.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*relayTimeout)
+		defer cancel()
+		return s.linkSoundCloud(ctx, session, v.SoundCloud.User, v.SoundCloud.ClientID, v.SoundCloud.Token)
 	case *providers.Spotify:
 		if v.SpotifyToken == nil {
 			return errRelayIncomplete

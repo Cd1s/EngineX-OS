@@ -15,6 +15,19 @@ import (
 	"github.com/Cd1s/sc5000-custom-os/pkg/resourceguard"
 )
 
+const (
+	maxAnalysedMS    = 15 * 60 * 1000
+	maxAnalysedBytes = 50 << 20
+)
+
+func tooLongToAnalyse(t providers.Track, path string) bool {
+	if t.DurationMS > maxAnalysedMS || strings.HasSuffix(path, ".mp4") {
+		return true
+	}
+	st, err := os.Stat(path)
+	return err == nil && st.Size() > maxAnalysedBytes && strings.HasSuffix(path, ".mp3")
+}
+
 // Stores' editions of one recording differ by their fades.
 const maxDurationGapMS = 15000
 
@@ -61,8 +74,9 @@ type Jobs struct {
 	queued map[string]bool
 
 	// netease returns the NetEase login a session may fetch audio with, or nil.
-	netease func(session string, guest bool) *providers.Netease
-	bpm     *providers.BPMStore
+	netease    func(session string, guest bool) *providers.Netease
+	soundcloud func() *providers.SoundCloud
+	bpm        *providers.BPMStore
 }
 type fetched struct {
 	matched providers.Track
@@ -163,6 +177,10 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 // acquire tries the deck's own Deemix service first, which costs no NetEase
 // download quota, then the session's NetEase login. All audio lands on the deck.
 func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (providers.Track, *deemixclient.Download, error) {
+	if t.Provider == "soundcloud" {
+		dl, err := j.fromSoundCloud(ctx, t)
+		return t, dl, err
+	}
 	if t.Provider == "netease" {
 		if dl := j.p.Deemix.Cached("netease-" + t.ID); dl != nil {
 			return t, dl, nil
@@ -190,6 +208,28 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 		}
 	}
 	return providers.Track{}, nil, errors.Join(failures...)
+}
+
+func (j *Jobs) fromSoundCloud(ctx context.Context, t providers.Track) (*deemixclient.Download, error) {
+	name := "soundcloud-" + t.ID
+	if dl := j.p.Deemix.Cached(name); dl != nil {
+		return dl, nil
+	}
+	j.mu.Lock()
+	lookup := j.soundcloud
+	j.mu.Unlock()
+	var s *providers.SoundCloud
+	if lookup != nil {
+		s = lookup()
+	}
+	if s == nil {
+		return nil, errors.New("soundcloud: not connected")
+	}
+	media, err := s.Media(ctx, t.ID)
+	if err != nil {
+		return nil, err
+	}
+	return j.p.Deemix.SaveParts(ctx, name, media.Ext, media.URLs)
 }
 
 // A NetEase upload of another service's track may differ by fades of a few seconds.
@@ -227,6 +267,10 @@ func (j *Jobs) fromNetease(ctx context.Context, n *providers.Netease, t provider
 // queueImport analyses and imports a streamed file once per target playlist.
 // A full queue only skips library import; the file is still playable.
 func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetched) {
+	// A DJ set is played, not analysed: decoding hours of audio would exhaust memory.
+	if tooLongToAnalyse(t, f.dl.Path) {
+		return
+	}
 	key := providers.OwnerPlaylist + "\x00" + trackKey(t)
 	if guest {
 		key = providers.GuestPlaylist + "\x00" + trackKey(t)
@@ -347,6 +391,10 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 		j.mu.Lock()
 		j.files[trackKey(v.Track)] = fetched{matched, dl}
 		j.mu.Unlock()
+	}
+	if tooLongToAnalyse(v.Track, dl.Path) {
+		j.update(v.ID, func(v *Job) { v.State = "done"; v.Quality = dl.Quality.Label; v.Progress = 1 })
+		return nil
 	}
 	j.update(v.ID, func(v *Job) { v.State = "analyzing"; v.Quality = dl.Quality.Label; v.Progress = .65 })
 	before, err := os.Stat(dl.Path)
