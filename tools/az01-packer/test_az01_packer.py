@@ -177,6 +177,10 @@ class FilesystemTests(unittest.TestCase):
                       self.fs.read('/usr/lib/systemd/system/sc5000-custom-prepare.service'))
         self.assertIn('sc5000-custom.target', self.fs.entries(
             '/usr/lib/systemd/system/multi-user.target.wants'))
+        self.assertIn('sc5000-custom-etc-reset.service', self.fs.entries(
+            '/usr/lib/systemd/system/etc.mount.wants'))
+        self.assertIn(b'Before=etc.mount',
+                      self.fs.read('/usr/lib/systemd/system/sc5000-custom-etc-reset.service'))
         az.check_fs(self.disk)
 
     def test_prepare_atomic_failure_retry_identity_and_symlink_guard(self):
@@ -211,6 +215,31 @@ class FilesystemTests(unittest.TestCase):
         refused = subprocess.run(['sh', '-s'], input=script, capture_output=True)
         self.assertNotEqual(refused.returncode, 0)
         self.assertEqual(sentinel.read_text(), 'keep')
+
+    def test_etc_reset_drops_stale_434_overlay_once(self):
+        data = self.root/'data'
+        upper = data/'system/etc/overlay'
+        for name in ('hosts', 'resolv.conf', 'connman/main.conf', 'dnsmasq.d/x.conf',
+                     'edisksd/main.conf', 'keep.conf'):
+            (upper/name).parent.mkdir(parents=True, exist_ok=True)
+            (upper/name).write_text('4.3.4')
+        script = az.ETC_RESET.replace(b'/data', str(data).encode())
+        passed = subprocess.run(['sh', '-s'], input=script, capture_output=True)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertEqual(sorted(p.name for p in upper.iterdir()), ['keep.conf'])
+        (upper/'hosts').write_text('user edit after upgrade')
+        passed = subprocess.run(['sh', '-s'], input=script, capture_output=True)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertEqual((upper/'hosts').read_text(), 'user edit after upgrade')
+        (data/'sc5000-custom/etc-overlay-epoch').unlink()
+        sentinel = self.root/'sentinel'
+        sentinel.mkdir()
+        (sentinel/'hosts').write_text('keep')
+        (data/'system/etc/overlay').rename(self.root/'old-upper')
+        (data/'system/etc/overlay').symlink_to(sentinel)
+        refused = subprocess.run(['sh', '-s'], input=script, capture_output=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual((sentinel/'hosts').read_text(), 'keep')
 
     def test_reject_symlink_parent_existing_symlink_and_hardlink(self):
         self.fs.cmd('symlink /alias /usr/Engine/Firmware', True)

@@ -187,6 +187,28 @@ SQLite 提交不等于 Engine 已刷新其内存中的歌单视图，本程序�
 波形已验收”**。部署验收需核对 CPU0-2 的 Engine/ALSA/Qt 分配、CPU3
 下载进程树、双 Deck 音频、触摸帧时间、RGB 显示/拍线、Key 和重新挂盘。
 
+## 碟机原生 TIDAL 界面
+
+`tools/az01-packer/unlock_jp07_features.py` 把 Engine 内置 TidalAPI 的
+`https://api.tidal.com/v1/` 与 `https://auth.tidal.com/v1/` 改写为
+`http://127.0.0.1:8080/v1/` 与 `http://127.0.0.1:8080/au//`。Stream Sync
+在同一端口应答（`pkg/webui/tidal_gateway.go`，双斜杠自动折叠）：
+
+- 设备码/令牌登录直接成功，订阅为 `PREMIUM_PLUS` / `LOSSLESS`；
+- 歌单 = 已登录的 `[网易云]`、`[Spotify]`、`[Deezer]` 歌单 + Deezer 精选；
+  尚未登录网易云/Spotify 时首项提示访问 `sc5000.lan:8080` 扫码；
+  重启后自动恢复已保存的 owner 登录；
+- 搜索并发查询 Deezer / 网易云 / Spotify 的曲目与歌单；
+- 每首曲目分配进程内稳定的正整数 trackId，播放信息返回
+  `application/vnd.tidal.bts` 清单，指向 `/v1/stream/<id>.flac`；
+- 首次播放时经 Deemix 下载（同一曲目并发请求共用一次下载），直接以
+  `http.ServeFile`（支持 Range）返回，同时排队 CPU3 分析并导入
+  `[Stream / 临时下载]`（访客会话为 `[Guest / 临时加歌]`）。
+
+网关没有控制台访问码，因此只接受回环地址请求；`/api/` 仍需访问码。
+Engine 解析 TIDAL JSON 的字段集合未在实机抓包验证，以上为按公开
+TidalAPI 格式的实现，需在 SC5000 上验收浏览、搜索与播放。
+
 ## 本次验证记录
 
 在 IN 工作树完成 `go test ./... -v`、`go test -race ./...`、`go vet ./...`

@@ -55,9 +55,12 @@ RuntimeMaxUse=16M
 CONF
 # /etc/hosts matches exact names. The optional dnsmasq config also blocks
 # subdomains on images using dnsmasq. Streaming CDN domains remain available.
+# Never block the inmusicbrands.com apex: connman's online check resolves
+# ipv4.connman.inmusicbrands.com and Wi-Fi spins forever when it fails.
 hosts=$base/etc/hosts
 touch "$hosts"
-for domain in inmusicbrands.com logstash.inmusicbrands.com telemetry.inmusicbrands.com posthog.com app.posthog.com us.i.posthog.com eu.i.posthog.com us.posthog.com eu.posthog.com; do
+sed -i '/^0\.0\.0\.0 inmusicbrands\.com$/d' "$hosts"
+for domain in logstash.inmusicbrands.com telemetry.inmusicbrands.com posthog.com app.posthog.com us.i.posthog.com eu.i.posthog.com us.posthog.com eu.posthog.com; do
     if ! grep -Fqx "0.0.0.0 $domain" "$hosts"; then
         printf '0.0.0.0 %s\n' "$domain" >> "$hosts"
     fi
@@ -66,8 +69,27 @@ done
 # change the device's DHCP owner or resolver configuration without evidence.
 mkdir -p "$base/etc/dnsmasq.d"
 cat > "$base/etc/dnsmasq.d/sc5000-telemetry.conf" <<'CONF'
-address=/inmusicbrands.com/0.0.0.0
+address=/logstash.inmusicbrands.com/0.0.0.0
+address=/telemetry.inmusicbrands.com/0.0.0.0
 address=/posthog.com/0.0.0.0
+CONF
+cat > "$base/etc/connman/main.conf" <<'CONF'
+[General]
+EnableOnlineCheck = false
+PreferredTechnologies=wifi,ethernet
+CONF
+mkdir -p "$base/etc/systemd/system/connman.service.d" "$base/etc/edisksd"
+cat > "$base/etc/systemd/system/connman.service.d/disable_dhcp_retries.conf" <<'CONF'
+[Service]
+Environment="CONNMAN_DISCOVER_RETRIES=5"
+CONF
+# edisksd otherwise refuses dirty (unplugged-without-eject) Mac/Windows disks.
+cat > "$base/etc/edisksd/main.conf" <<'CONF'
+[ntfs3]
+DefaultMountOptions=force
+
+[hfsplus]
+DefaultMountOptions=force
 CONF
 fi # offline/staging patches
 if [ "$runtime" = 1 ]; then

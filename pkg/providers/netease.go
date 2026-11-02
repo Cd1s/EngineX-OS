@@ -28,6 +28,21 @@ type QRLogin struct {
 	Code int    `json:"code"`
 }
 
+type neSong struct {
+	ID   int64
+	Name string
+	DT   int64
+	AR   []struct{ Name string }
+	AL   struct{ Name string }
+}
+
+func (s neSong) track() Track {
+	artists := []string{}
+	for _, a := range s.AR {
+		artists = append(artists, a.Name)
+	}
+	return Track{ID: strconv.FormatInt(s.ID, 10), Title: s.Name, Artist: strings.Join(artists, ", "), Artists: artists, Album: s.AL.Name, DurationMS: s.DT, Provider: "netease"}
+}
 func remarshal(a, b any) error {
 	data, err := json.Marshal(a)
 	if err != nil {
@@ -162,25 +177,43 @@ func (n *Netease) Tracks(ctx context.Context, id string) ([]Track, error) {
 		for _, v := range p.Playlist.TrackIDs[start:min(start+200, len(p.Playlist.TrackIDs))] {
 			ids = append(ids, strconv.FormatInt(v.ID, 10))
 		}
-		var r struct {
-			Songs []struct {
-				ID   int64
-				Name string
-				DT   int64
-				AR   []struct{ Name string }
-				AL   struct{ Name string }
-			}
-		}
+		var r struct{ Songs []neSong }
 		if err := n.get(ctx, "/song/detail", url.Values{"ids": {strings.Join(ids, ",")}}, &r); err != nil {
 			return nil, err
 		}
 		for _, s := range r.Songs {
-			artists := []string{}
-			for _, a := range s.AR {
-				artists = append(artists, a.Name)
-			}
-			all = append(all, Track{ID: strconv.FormatInt(s.ID, 10), Title: s.Name, Artist: strings.Join(artists, ", "), Artists: artists, Album: s.AL.Name, DurationMS: s.DT, Provider: "netease"})
+			all = append(all, s.track())
 		}
 	}
 	return all, nil
+}
+func (n *Netease) Search(ctx context.Context, query string) ([]Track, error) {
+	var r struct{ Result struct{ Songs []neSong } }
+	if err := n.get(ctx, "/cloudsearch", url.Values{"keywords": {query}, "type": {"1"}, "limit": {"30"}}, &r); err != nil {
+		return nil, err
+	}
+	out := make([]Track, 0, len(r.Result.Songs))
+	for _, s := range r.Result.Songs {
+		out = append(out, s.track())
+	}
+	return out, nil
+}
+func (n *Netease) SearchPlaylists(ctx context.Context, query string) ([]Playlist, error) {
+	var r struct {
+		Result struct {
+			Playlists []struct {
+				ID         int64
+				Name       string
+				TrackCount int
+			}
+		}
+	}
+	if err := n.get(ctx, "/cloudsearch", url.Values{"keywords": {query}, "type": {"1000"}, "limit": {"25"}}, &r); err != nil {
+		return nil, err
+	}
+	out := make([]Playlist, 0, len(r.Result.Playlists))
+	for _, p := range r.Result.Playlists {
+		out = append(out, Playlist{strconv.FormatInt(p.ID, 10), p.Name, p.TrackCount})
+	}
+	return out, nil
 }
