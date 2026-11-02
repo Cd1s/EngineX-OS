@@ -250,6 +250,10 @@ func (s *server) configView() map[string]any {
 		"spotifyClientId":   c.SpotifyClientID,
 		"passwordIsDefault": c.PasswordIsDefault,
 		"spotifyRedirect":   s.spotify.httpsRedirect,
+
+		"soundcloudClientIdSet": c.SoundCloudClientID != "",
+		"soundcloudTokenSet":    c.SoundCloudToken != "",
+		"getSongBpmKeySet":      c.GetSongBPMKey != "",
 	}
 	if c.DeezerARL != "" {
 		v["deezerArlMasked"] = maskSecret(c.DeezerARL)
@@ -265,7 +269,11 @@ func (s *server) configView() map[string]any {
 func (s *server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	view := s.configView()
 	if r.URL.Query().Get("secrets") == "1" {
-		view["deezerArl"] = s.cfg.get().DeezerARL
+		c := s.cfg.get()
+		view["deezerArl"] = c.DeezerARL
+		view["soundcloudClientId"] = c.SoundCloudClientID
+		view["soundcloudToken"] = c.SoundCloudToken
+		view["getSongBpmKey"] = c.GetSongBPMKey
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "config": view})
 }
@@ -321,6 +329,31 @@ func (s *server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		msgs = append(msgs, "Spotify Client ID 已保存")
+	}
+	if v.Get("clearBpm") == "1" {
+		if err := s.cfg.update(func(c *config) { c.SoundCloudClientID, c.SoundCloudToken, c.GetSongBPMKey = "", "", "" }); err != nil {
+			fail(500, err.Error())
+			return
+		}
+		msgs = append(msgs, "已清除 BPM 服务密钥")
+	}
+	cid, token, key := strings.TrimSpace(v.Get("soundcloudClientId")), strings.TrimSpace(v.Get("soundcloudToken")), strings.TrimSpace(v.Get("getSongBpmKey"))
+	if cid+token+key != "" {
+		if err := s.cfg.update(func(c *config) {
+			if cid != "" {
+				c.SoundCloudClientID = cid
+			}
+			if token != "" {
+				c.SoundCloudToken = token
+			}
+			if key != "" {
+				c.GetSongBPMKey = key
+			}
+		}); err != nil {
+			fail(500, err.Error())
+			return
+		}
+		msgs = append(msgs, "BPM 服务密钥已保存，SC5000 会在一小时内同步（重启 stream-sync 立即同步）")
 	}
 	if np := v.Get("newPassword"); np != "" {
 		if !s.cfg.checkPassword(v.Get("currentPassword")) {

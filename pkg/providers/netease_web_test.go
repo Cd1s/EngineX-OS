@@ -310,6 +310,31 @@ func TestGetSongAndSoundCloudReadTheirKeys(t *testing.T) {
 	}
 }
 
+func TestSoundCloudV2UsesTheClientIDAndISRC(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/search/tracks":
+			if r.URL.Query().Get("client_id") != "cid" {
+				t.Error("missing client ID")
+			}
+			io.WriteString(w, `{"collection":[{"title":"Artist - Song","user":{"username":"Some Label"},"publisher_metadata":{"artist":"Artist","isrc":"US1"}}]}`)
+		case "/v1/audio-features":
+			if r.URL.Query().Get("ids") != "US1" {
+				t.Errorf("ids %s", r.URL.RawQuery)
+			}
+			io.WriteString(w, `{"content":[{"tempo":130,"key":0,"mode":1}]}`)
+		default:
+			t.Errorf("unexpected %s", r.URL)
+		}
+	}))
+	defer srv.Close()
+	b := &BPMStore{SoundCloudV2URL: srv.URL, ReccoURL: srv.URL}
+	got := b.soundCloud(context.Background(), Track{Title: "Song", Artist: "Artist"}, BPMConfig{SoundCloudClientID: "cid"})
+	if got.BPM != 130 || got.Key != "8B" {
+		t.Fatalf("%+v", got)
+	}
+}
+
 func TestMeasuredTempoCannotBeOverwrittenByACatalog(t *testing.T) {
 	b := &BPMStore{Path: t.TempDir() + "/bpm.json"}
 	track := Track{ID: "1", Provider: "netease"}
@@ -443,5 +468,56 @@ func TestCutShortLookupStaysEligible(t *testing.T) {
 	b.attempt(context.Background(), track)
 	if b.claim(track) {
 		t.Fatal("a real miss was forgotten")
+	}
+}
+
+func TestBPMFindsNeteaseTracksThroughOtherCatalogs(t *testing.T) {
+	var featureIDs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/search":
+			switch r.URL.Query().Get("type") {
+			case "track": // Spotify
+				q := r.URL.Query().Get("q")
+				if strings.Contains(q, "Nowhere") {
+					io.WriteString(w, `{"tracks":{"items":[]}}`)
+					return
+				}
+				io.WriteString(w, `{"tracks":{"items":[{"id":"wrong","name":"Other Song","type":"track","artists":[{"name":"X"}]},{"id":"sp9","name":"走到底","type":"track","artists":[{"name":"A-Yue Chang"}],"external_ids":{"isrc":"TW1"}}]}}`)
+			default: // Deezer
+				io.WriteString(w, `{"data":[{"id":5,"title":"Deep Cut","duration":200,"artist":{"name":"Nowhere Man"}}]}`)
+			}
+		case "/track/5":
+			io.WriteString(w, `{"id":5,"title":"Deep Cut","duration":200,"bpm":121,"isrc":"","artist":{"name":"Nowhere Man"}}`)
+		case "/v1/audio-features":
+			featureIDs = append(featureIDs, r.URL.Query().Get("ids"))
+			io.WriteString(w, `{"content":[{"tempo":95,"key":0,"mode":1}]}`)
+		default:
+			t.Errorf("unexpected %s", r.URL)
+		}
+	}))
+	defer srv.Close()
+	sp := &Spotify{BaseURL: srv.URL, Token: Token{AccessToken: "a"}}
+	b := &BPMStore{ReccoURL: srv.URL, DeezerURL: srv.URL, Spotify: func() *Spotify { return sp }}
+
+	// A Chinese name is spelled differently on Spotify, so the title decides.
+	got := b.lookup(context.Background(), Track{ID: "1", Provider: "netease", Title: "走到底", Artist: "张震岳"})
+	if got.BPM != 95 || len(featureIDs) != 1 || featureIDs[0] != "sp9,TW1" {
+		t.Fatalf("%+v %q", got, featureIDs)
+	}
+	// Spotify has nothing, so Deezer's own tempo answers.
+	got = b.lookup(context.Background(), Track{ID: "2", Provider: "netease", Title: "Deep Cut", Artist: "Nowhere Man"})
+	if got.BPM != 121 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestBestMatchKeepsLatinArtistsStrict(t *testing.T) {
+	found := []Track{{ID: "x", Title: "Song", Artists: []string{"Somebody Else"}}}
+	if _, ok := bestMatch(Track{Title: "Song", Artist: "Artist"}, found); ok {
+		t.Fatal("same title by another Latin-named artist accepted")
+	}
+	if c, ok := bestMatch(Track{Title: "Song", Artist: "歌手"}, found); !ok || c.ID != "x" {
+		t.Fatal("Chinese artist name should fall back to the title")
 	}
 }
