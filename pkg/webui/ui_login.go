@@ -133,7 +133,7 @@ func (s *Server) ownerSession(provider string) (*Session, error) {
 
 func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 	provider := r.URL.Query().Get("provider")
-	if !slices.Contains(uiServices, provider) {
+	if !slices.Contains(loginServices, provider) {
 		fail(w, 400, errors.New("unsupported provider"))
 		return
 	}

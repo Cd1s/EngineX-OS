@@ -195,3 +195,123 @@ func TestDeezerARLIdentifiesAccountWithoutEchoing(t *testing.T) {
 		t.Fatal("logged-out arl accepted")
 	}
 }
+
+func TestCamelot(t *testing.T) {
+	for _, c := range []struct {
+		pitch, mode int
+		want        string
+	}{{9, 0, "8A"}, {0, 1, "8B"}, {1, 1, "3B"}, {7, 1, "9B"}, {11, 0, "10A"}, {12, 0, ""}} {
+		if got := Camelot(c.pitch, c.mode); got != c.want {
+			t.Fatalf("%+v: %s", c, got)
+		}
+	}
+	for name, want := range map[string]string{"Am": "8A", "C": "8B", "C#": "3B", "Bb minor": "3A", "x": ""} {
+		if got := camelotFromName(name); got != want {
+			t.Fatalf("%s: %s", name, got)
+		}
+	}
+}
+
+func TestBPMBatchFillsTracksAndCaches(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/v1/audio-features" || r.URL.Query().Get("ids") != "US1,sp1" {
+			t.Errorf("unexpected %s", r.URL)
+		}
+		io.WriteString(w, `{"content":[{"href":"https://open.spotify.com/track/xx","isrc":"US1","tempo":135.128,"key":7,"mode":1},{"href":"https://open.spotify.com/track/sp1","isrc":"ZZ","tempo":90,"key":9,"mode":0}]}`)
+	}))
+	defer srv.Close()
+	path := t.TempDir() + "/bpm.json"
+	b := &BPMStore{Path: path, ReccoURL: srv.URL}
+	tracks := []Track{{ID: "1", Provider: "deezer", ISRC: "US-1"}, {ID: "sp1", Provider: "spotify"}}
+	b.batch(context.Background(), tracks)
+	b.Apply(tracks)
+	if tracks[0].BPM != 135.1 || tracks[0].Key != "9B" || tracks[1].BPM != 90 || tracks[1].Key != "8A" {
+		t.Fatalf("%+v", tracks)
+	}
+	again := &BPMStore{Path: path, ReccoURL: srv.URL}
+	fresh := []Track{{ID: "1", Provider: "deezer"}}
+	again.Enrich(context.Background(), fresh)
+	if fresh[0].BPM != 135.1 || calls != 1 {
+		t.Fatalf("%+v %d", fresh, calls)
+	}
+}
+
+func TestBPMRateLimitPausesLookups(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "slow down", 429)
+	}))
+	defer srv.Close()
+	b := &BPMStore{Path: t.TempDir() + "/bpm.json", ReccoURL: srv.URL}
+	b.batch(context.Background(), []Track{{ID: "1", Provider: "deezer", ISRC: "US1"}})
+	b.batch(context.Background(), []Track{{ID: "2", Provider: "deezer", ISRC: "US2"}})
+	if calls != 1 {
+		t.Fatal(calls)
+	}
+}
+
+func TestBPMPerTrackLookupNeedsTheSameSong(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/track/search":
+			io.WriteString(w, `{"content":[{"id":"wrong","trackTitle":"Song Cover","artists":[{"name":"Artist"}]},{"id":"right","trackTitle":"Song (Original Mix)","artists":[{"name":"Artist"}]}]}`)
+		case "/v1/track/right/audio-features":
+			io.WriteString(w, `{"tempo":128,"key":0,"mode":1}`)
+		default:
+			t.Errorf("unexpected %s", r.URL)
+		}
+	}))
+	defer srv.Close()
+	b := &BPMStore{ReccoURL: srv.URL}
+	if got := b.reccoSearch(context.Background(), Track{Title: "Song", Artist: "Artist"}); got.BPM != 128 || got.Key != "8B" {
+		t.Fatalf("%+v", got)
+	}
+	if got := b.reccoSearch(context.Background(), Track{Title: "Song", Artist: "Other"}); got.BPM != 0 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestGetSongAndSoundCloudReadTheirKeys(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/search/":
+			if r.Header.Get("X-API-KEY") != "gsb" {
+				t.Error("missing key")
+			}
+			io.WriteString(w, `{"search":[{"title":"Song","tempo":"120","artist":{"name":"Artist"}}]}`)
+		case "/tracks":
+			if r.Header.Get("Authorization") != "OAuth tok" {
+				t.Error("missing token")
+			}
+			io.WriteString(w, `[{"title":"Song","bpm":126,"key_signature":"Am","user":{"username":"Artist"}}]`)
+		}
+	}))
+	defer srv.Close()
+	b := &BPMStore{GetSongURL: srv.URL, SoundCloudURL: srv.URL}
+	track := Track{Title: "Song", Artist: "Artist"}
+	if got := b.getSong(context.Background(), track, "gsb"); got.BPM != 120 {
+		t.Fatalf("%+v", got)
+	}
+	if got := b.soundCloud(context.Background(), track, BPMConfig{SoundCloudToken: "tok"}); got.BPM != 126 || got.Key != "8A" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestMeasuredTempoCannotBeOverwrittenByACatalog(t *testing.T) {
+	b := &BPMStore{Path: t.TempDir() + "/bpm.json"}
+	track := Track{ID: "1", Provider: "netease"}
+	read := func() BPMInfo {
+		list := []Track{track}
+		b.Apply(list)
+		return BPMInfo{BPM: list[0].BPM, Key: list[0].Key}
+	}
+	b.Put(track, BPMInfo{BPM: 140, Key: "1A"})
+	b.Put(track, BPMInfo{BPM: 141.2, Key: "2A", Measured: true})
+	b.Put(track, BPMInfo{BPM: 99, Key: "3A"})
+	if got := read(); got.BPM != 141.2 || got.Key != "2A" {
+		t.Fatalf("%+v", got)
+	}
+}

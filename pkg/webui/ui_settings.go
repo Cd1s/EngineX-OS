@@ -19,7 +19,9 @@ const defaultUIDir = "/data/sc5000-custom/ui"
 var (
 	uiLanguages = []string{"en", "zh-Hans", "zh-Hant"}
 	uiWaveforms = []string{"denon", "rgb", "3band"}
-	uiServices  = []string{"netease", "spotify", "deezer"}
+	uiServices  = []string{"tidal", "netease", "spotify", "deezer"}
+	// TIDAL logs in through Engine's own flow against TIDAL's servers.
+	loginServices = []string{"netease", "spotify", "deezer"}
 )
 
 type uiSettings struct {

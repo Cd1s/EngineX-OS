@@ -26,6 +26,8 @@ type Track struct {
 	ISRC       string   `json:"isrc,omitempty"`
 	DurationMS int64    `json:"durationMs"`
 	Provider   string   `json:"provider"`
+	BPM        float64  `json:"bpm,omitempty"`
+	Key        string   `json:"key,omitempty"` // Camelot, e.g. 8A
 }
 type Playlist struct {
 	ID    string `json:"id"`

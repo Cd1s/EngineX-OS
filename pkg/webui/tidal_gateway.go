@@ -12,8 +12,11 @@ import (
 	"errors"
 	"hash/crc32"
 	"log"
+	"math"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"path"
 	"sort"
 	"strconv"
@@ -106,6 +109,8 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/sc5000/login/qr", s.loginQR)
 	g.mux.HandleFunc("GET /v1/sc5000/ui", s.uiStatus)
 	g.mux.HandleFunc("POST /v1/sc5000/ui", s.uiUpdate)
+	g.mux.HandleFunc("GET /v1/sc5000/bpm", s.bpmConfigGet)
+	g.mux.HandleFunc("POST /v1/sc5000/bpm", s.bpmConfigPost)
 	g.mux.HandleFunc("GET /v1/sc5000/relay", s.relayConfigGet)
 	g.mux.HandleFunc("POST /v1/sc5000/relay", s.relayConfigPost)
 	g.mux.HandleFunc("GET /v1/ping", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
@@ -139,6 +144,58 @@ func (g *tidalGateway) emptyPage(w http.ResponseWriter, r *http.Request) {
 	respond(w, page(r, 100, []any{}))
 }
 
+// proxyToTidal passes a request on untouched when the deck is showing TIDAL itself,
+// so Engine talks to TIDAL's own servers with its own login and playback.
+func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clean string) {
+	target := g.s.cfg.TidalAPIURL
+	if target == "" {
+		target = "https://api.tidal.com"
+	}
+	upstream := clean
+	if rest, ok := strings.CutPrefix(clean, "/au"); ok {
+		target = g.s.cfg.TidalAuthURL
+		if target == "" {
+			target = "https://auth.tidal.com"
+		}
+		upstream = "/v1" + rest
+	}
+	if strings.HasSuffix(r.URL.Path, "/") {
+		upstream += "/"
+	}
+	base, err := url.Parse(target)
+	if err != nil {
+		fail(w, 500, errors.New("invalid upstream"))
+		return
+	}
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(out *httputil.ProxyRequest) {
+			out.SetURL(base)
+			out.Out.URL.Path, out.Out.URL.RawPath = upstream, ""
+			out.Out.Host = base.Host
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("stream-sync: TIDAL unreachable: %v", err)
+			fail(w, 502, errors.New("could not reach TIDAL"))
+		},
+	}
+	http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	proxy.ServeHTTP(w, r)
+}
+
+// withBPM shows tempo and key on each list row. Engine's TIDAL client reads no
+// tempo field, so the title is the only place the deck can display them. This is
+// display text only and reaches neither the beat grid nor the library.
+func withBPM(t providers.Track) string {
+	if t.BPM <= 0 {
+		return t.Title
+	}
+	label := strconv.Itoa(int(math.Round(t.BPM)))
+	if t.Key != "" {
+		label += " " + t.Key
+	}
+	return t.Title + " [" + label + "]"
+}
+
 // tidalNumericID hashes a name to an ID Engine can read: it parses them as signed
 // 32-bit integers.
 func tidalNumericID(name string) uint32 { return crc32.ChecksumIEEE([]byte(name)) & 0x7fffffff }
@@ -150,12 +207,16 @@ func isTidal(p string) bool { return strings.HasPrefix(p, "/v1/") || strings.Has
 func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
-		fail(w, 403, errors.New("TIDAL gateway is local to the deck"))
+		fail(w, 403, errors.New("the streaming gateway is local to the deck"))
 		return
 	}
 	clean := path.Clean(r.URL.Path)
 	if !isTidal(clean + "/") {
 		http.NotFound(w, r)
+		return
+	}
+	if g.s.scope() == "tidal" && !strings.HasPrefix(clean, "/v1/sc5000/") && !strings.HasPrefix(clean, "/v1/stream/") {
+		g.proxyToTidal(w, r, clean)
 		return
 	}
 	u := *r.URL
@@ -389,7 +450,7 @@ func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
 	if len(artists) > 0 {
 		artist = artists[0]
 	}
-	return map[string]any{"id": id, "title": t.Title, "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": true, "streamReady": true, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": providerLabels[t.Provider], "url": "http://sc5000.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": tidalNumericID(t.Album), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
+	return map[string]any{"id": id, "title": withBPM(t), "bpm": int(math.Round(t.BPM)), "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": true, "streamReady": true, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": providerLabels[t.Provider], "url": "http://sc5000.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": tidalNumericID(t.Album), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
 }
 
 // trackItems wraps each track as {"item":…,"type":"track"} (playlist items and
@@ -436,6 +497,7 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("playlist too large"))
 		return
 	}
+	g.s.cfg.BPM.Enrich(r.Context(), tracks)
 	respond(w, page(r, 500, g.trackItems(ref.session, guest, tracks)))
 }
 
@@ -449,6 +511,7 @@ func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 		}
 		if lists, err := v.p.Playlists(r.Context()); err == nil && len(lists) > 0 {
 			if tracks, err := v.p.Tracks(r.Context(), lists[0].ID); err == nil && len(tracks) <= maxPlaylistTracks {
+				g.s.cfg.BPM.Enrich(r.Context(), tracks)
 				items = g.trackItems(v.ID, false, tracks)
 			}
 		}
@@ -499,6 +562,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	})
 	trackItems, listItems := []any{}, []any{}
 	for i, v := range sources {
+		g.s.cfg.BPM.Enrich(r.Context(), tracks[i])
 		for _, t := range tracks[i] {
 			trackItems = append(trackItems, g.trackJSON(g.addTrack(trackRef{t, v.session, v.guest}), t))
 		}
@@ -527,13 +591,16 @@ func (g *tidalGateway) lookup(w http.ResponseWriter, raw string) (int64, trackRe
 }
 func (g *tidalGateway) trackInfo(w http.ResponseWriter, r *http.Request) {
 	if id, ref, ok := g.lookup(w, r.PathValue("id")); ok {
-		respond(w, g.trackJSON(id, ref.track))
+		// Lists preview a catalog tempo. A track on a deck is Engine's to analyse.
+		t := ref.track
+		t.BPM, t.Key = 0, ""
+		respond(w, g.trackJSON(id, t))
 	}
 }
 
 // streamTarget reports MP3 only when an explicitly allowed lossy download is
 // already on disk; otherwise Deemix is asked for FLAC.
-func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (url, codec string) {
+func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (address, codec string) {
 	codec = "flac"
 	if g.s.jobs != nil && strings.HasSuffix(strings.ToLower(g.s.jobs.File(ref.track)), ".mp3") {
 		codec = "mp3"
@@ -567,18 +634,18 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	if !g.knownCodec(w, r, ref) {
 		return
 	}
-	url, codec := g.streamTarget(r, id, ref)
+	address, codec := g.streamTarget(r, id, ref)
 	mime := "audio/flac"
 	if codec == "mp3" {
 		mime = "audio/mpeg"
 	}
-	manifest, _ := json.Marshal(map[string]any{"mimeType": mime, "codecs": codec, "encryptionType": "NONE", "urls": []string{url}})
+	manifest, _ := json.Marshal(map[string]any{"mimeType": mime, "codecs": codec, "encryptionType": "NONE", "urls": []string{address}})
 	respond(w, map[string]any{"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "LOSSLESS", "manifestMimeType": "application/vnd.tidal.bts", "manifestHash": "", "manifest": base64.StdEncoding.EncodeToString(manifest), "albumReplayGain": 0, "albumPeakAmplitude": 1, "trackReplayGain": 0, "trackPeakAmplitude": 1})
 }
 func (g *tidalGateway) streamURL(w http.ResponseWriter, r *http.Request) {
 	if id, ref, ok := g.lookup(w, r.PathValue("id")); ok && g.knownCodec(w, r, ref) {
-		url, codec := g.streamTarget(r, id, ref)
-		respond(w, map[string]any{"url": url, "codec": codec, "soundQuality": "LOSSLESS", "trackId": id})
+		address, codec := g.streamTarget(r, id, ref)
+		respond(w, map[string]any{"url": address, "codec": codec, "soundQuality": "LOSSLESS", "trackId": id})
 	}
 }
 

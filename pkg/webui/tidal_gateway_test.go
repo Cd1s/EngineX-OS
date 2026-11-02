@@ -363,3 +363,78 @@ func TestSearchAnswersLaterPagesWithoutAskingProviders(t *testing.T) {
 		t.Fatalf("%d %+v", calls.Load()-before, later)
 	}
 }
+
+func TestTidalScopeGoesToTidalsOwnServers(t *testing.T) {
+	var got []string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, "api "+r.URL.RequestURI()+" "+r.Header.Get("Authorization"))
+		io.WriteString(w, `{"from":"api"}`)
+	}))
+	defer api.Close()
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		got = append(got, "auth "+r.URL.RequestURI()+" "+string(body))
+		io.WriteString(w, `{"from":"auth"}`)
+	}))
+	defer auth.Close()
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir(), TidalAPIURL: api.URL, TidalAuthURL: auth.URL}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	if r, err := http.Post(srv.URL+"/v1/sc5000/ui?scope=tidal", "", nil); err != nil || r.StatusCode != 200 {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest("GET", srv.URL+"/v1//users/1/playlists/?countryCode=US", nil)
+	req.Header.Set("Authorization", "Bearer real")
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	r, err = http.Post(srv.URL+"/au//oauth2/token", "application/x-www-form-urlencoded", strings.NewReader("grant=x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if len(got) != 2 || got[0] != "api /v1/users/1/playlists/?countryCode=US Bearer real" || got[1] != "auth /v1/oauth2/token grant=x" {
+		t.Fatalf("%q", got)
+	}
+	// The deck's own settings stay local, and other services stop going upstream.
+	var settings struct{ Scope string }
+	tidalGet(t, srv.URL, "/v1/sc5000/ui", 200, &settings)
+	if settings.Scope != "tidal" || len(got) != 2 {
+		t.Fatalf("%+v %q", settings, got)
+	}
+	if r, err := http.Post(srv.URL+"/v1/sc5000/ui?scope=netease", "", nil); err != nil || r.StatusCode != 200 {
+		t.Fatal(err)
+	}
+	tidalGet(t, srv.URL, "/v1/genres", 200, nil)
+	if len(got) != 2 {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestListRowsShowTempoAndKey(t *testing.T) {
+	g := newTidalGateway(New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
+	v := g.trackJSON(1, providers.Track{Title: "Song", BPM: 147.6, Key: "8A", Provider: "netease"})
+	if v["title"] != "Song [148 8A]" || v["bpm"] != 148 {
+		t.Fatal(v)
+	}
+	if v := g.trackJSON(1, providers.Track{Title: "Song"}); v["title"] != "Song" {
+		t.Fatal(v)
+	}
+}
+
+func TestLoadedTrackShowsNoCatalogTempo(t *testing.T) {
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	id := ui.tidal.addTrack(trackRef{track: providers.Track{ID: "1", Title: "Song", BPM: 148, Key: "8A", Provider: "deezer"}})
+	var v struct {
+		Title string `json:"title"`
+		BPM   int    `json:"bpm"`
+	}
+	tidalGet(t, srv.URL, "/v1/tracks/"+strconv.FormatInt(id, 10), 200, &v)
+	if v.Title != "Song" || v.BPM != 0 {
+		t.Fatalf("%+v", v)
+	}
+}
