@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/Cd1s/sc5000-custom-os/pkg/compat"
 	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
@@ -53,6 +56,31 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 		prepared = append(prepared, preparedTrack{t, rel, digest(fp), st, files, art})
 	}
 	return prepared, nil
+}
+
+// exportFileInfo stands in for a stat in fast mode, from what the export recorded.
+type exportFileInfo struct {
+	os.FileInfo
+	size int64
+}
+
+func (f exportFileInfo) Size() int64        { return f.size }
+func (f exportFileInfo) ModTime() time.Time { return time.Time{} }
+
+// prepareFast trusts the export's paths without looking at the disk. A path that
+// tries to leave the volume is dropped.
+func prepareFast(l *rekordbox.Library) []preparedTrack {
+	prepared := make([]preparedTrack, 0, len(l.Tracks))
+	paths := map[string]bool{}
+	for _, t := range l.Tracks {
+		rel := strings.TrimLeft(path.Clean("/"+t.Path), "/")
+		if rel == "" || t.Path == "" || strings.HasPrefix(rel, "PIONEER/") || paths[rel] {
+			continue
+		}
+		paths[rel] = true
+		prepared = append(prepared, preparedTrack{track: t, rel: rel, hash: "fast:" + t.RecordHash, info: exportFileInfo{size: t.FileSize}})
+	}
+	return prepared
 }
 
 // Stage every moved owned row first, so even two source tracks swapping paths

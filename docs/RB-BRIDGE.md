@@ -118,3 +118,13 @@ file bin/rb-bridge-armv7
 - [Deep Symmetry DeviceSQL / ANLZ definitions](https://github.com/Deep-Symmetry/crate-digger/tree/main/src/main/kaitai)
 - [Engine Library path reference](https://github.com/mixxxdj/mixxx/wiki/Engine-Library-Format)
 - [libdjinterop key enum / OneLibrary schema](https://github.com/xsco/libdjinterop)
+
+## 挂载时的速度
+
+`rb-bridge --mount-path` 在 `export.pdb` 的大小和修改时间没变、`m.db` 仍在时立即跳过（`Database2/.rb-bridge-stamp`）。
+
+大曲库（超过 500 首）第一次导入时走快速模式：只读 `export.pdb`，在 tmpfs 上建 `m.db` 再拷回。没有热点、循环、波形和
+封面，Engine 载入曲目时自己分析。完整导入用 `rb-bridge --mount-path <盘> --full`，在 FAT32 U 盘上 6000 首约 8 分钟。
+
+`export.pdb` 变了而曲库已存在时走增量同步，要逐个检查文件，6000 首约 24 秒。这超过挂载钩子 20 秒的预算，所以会被
+中止并回滚，旧库保持不变，需要手动运行 `rb-bridge --mount-path <盘>`。

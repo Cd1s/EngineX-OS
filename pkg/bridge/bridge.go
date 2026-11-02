@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,7 +103,212 @@ func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb
 	if e != nil {
 		return enginedb.Result{}, e
 	}
+	Reconcile(r, l)
 	return enginedb.Sync(ctx, mount, l, opts)
+}
+
+// Reconcile fits a real export to what a library can hold, so that one odd entry
+// cannot lose thousands of tracks. rekordbox can list one file under two records,
+// and files get deleted from a stick after export. The first record of a file
+// stands for it in playlists; a track whose file is gone is left out.
+func Reconcile(r *compat.Resolver, l *rekordbox.Library) {
+	byPath := map[string]uint32{}
+	replaced := map[uint32]uint32{} // 0 means left out
+	kept := l.Tracks[:0:0]
+	var merged, missing int
+	for _, t := range l.Tracks {
+		rel, err := r.Resolve(t.Path)
+		if err == nil {
+			_, err = os.Stat(r.FullPath(rel))
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			replaced[t.ID] = 0
+			missing++
+			continue
+		}
+		if err != nil {
+			kept = append(kept, t) // Sync reports anything else
+			continue
+		}
+		if first, ok := byPath[rel]; ok {
+			replaced[t.ID] = first
+			merged++
+			continue
+		}
+		byPath[rel] = t.ID
+		kept = append(kept, t)
+	}
+	if len(replaced) == 0 {
+		return
+	}
+	l.Tracks = kept
+	replacePlaylistTracks(l, replaced)
+	log.Printf("rb-bridge: %d duplicate records merged, %d tracks without a file left out", merged, missing)
+}
+
+const (
+	stampName = ".rb-bridge-stamp"
+	stateName = ".rb-bridge-state.db"
+	// Past this, a first import cannot finish while the mount waits: reading every
+	// file took 8 minutes for 6000 tracks on a USB stick.
+	fastImportTracks = 500
+)
+
+// ConvertAtMount is Convert for when a volume is mounted, while Engine is waiting
+// for it. An export unchanged since the last import is skipped at once. A large
+// library's first import takes only what the export holds, built on tmpfs and
+// copied over in one go. full forces a complete import, with cues and waveforms.
+func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
+	r, err := compat.NewResolver(mount)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	rel, err := r.Resolve("PIONEER/rekordbox/export.pdb")
+	if err != nil {
+		return Convert(ctx, mount, opts)
+	}
+	st, err := os.Stat(r.FullPath(rel))
+	if err != nil {
+		return Convert(ctx, mount, opts)
+	}
+	stamp := fmt.Sprintf("%d %d", st.Size(), st.ModTime().UnixNano())
+	dir := filepath.Join(mount, "Engine Library", "Database2")
+	if !full && !opts.SmartMatch && importedStamp(dir) == stamp {
+		return enginedb.Result{Bypassed: true}, nil
+	}
+	var result enginedb.Result
+	if !full && !opts.SmartMatch && !hasState(dir) {
+		l, err := ReadLibrary(ctx, mount)
+		if err != nil {
+			return result, err
+		}
+		if len(l.Tracks) > fastImportTracks {
+			result, err = fastImport(ctx, mount, dir, l, opts)
+			if err == nil {
+				writeStamp(dir, stamp)
+			}
+			return result, err
+		}
+	}
+	result, err = Convert(ctx, mount, opts)
+	if err == nil && !result.Bypassed {
+		writeStamp(dir, stamp)
+	}
+	return result, err
+}
+
+func importedStamp(dir string) string {
+	if st, err := os.Stat(filepath.Join(dir, "m.db")); err != nil || st.Size() == 0 {
+		return ""
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, stampName))
+	return strings.TrimSpace(string(b))
+}
+
+func hasState(dir string) bool {
+	st, err := os.Stat(filepath.Join(dir, stateName))
+	return err == nil && st.Size() > 0
+}
+
+func writeStamp(dir, stamp string) {
+	if err := os.WriteFile(filepath.Join(dir, stampName), []byte(stamp+"\n"), 0o644); err != nil {
+		log.Printf("rb-bridge: could not record the import: %v", err)
+	}
+}
+
+func fastImport(ctx context.Context, mount, dir string, l *rekordbox.Library, opts enginedb.Options) (enginedb.Result, error) {
+	work, err := os.MkdirTemp("", "rb-bridge-*")
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	defer os.RemoveAll(work)
+	// Tracks Engine already holds on this volume stay in the library.
+	if err = copyIfPresent(filepath.Join(dir, "m.db"), filepath.Join(work, "m.db")); err != nil {
+		return enginedb.Result{}, err
+	}
+	opts.Fast, opts.DatabaseDir = true, work
+	mergeByPath(l)
+	result, err := enginedb.Sync(ctx, mount, l, opts)
+	if err != nil {
+		return result, err
+	}
+	if err = os.MkdirAll(dir, 0o755); err != nil {
+		return result, err
+	}
+	// The state first: a state without its database only makes the next run repeat.
+	for _, name := range []string{stateName, "m.db"} {
+		if err = copyReplace(filepath.Join(work, name), filepath.Join(dir, name)); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+// mergeByPath is Reconcile without touching the disk.
+func mergeByPath(l *rekordbox.Library) {
+	byPath := map[string]uint32{}
+	replaced := map[uint32]uint32{}
+	kept := l.Tracks[:0:0]
+	for _, t := range l.Tracks {
+		if first, ok := byPath[strings.ToLower(t.Path)]; ok {
+			replaced[t.ID] = first
+			continue
+		}
+		byPath[strings.ToLower(t.Path)] = t.ID
+		kept = append(kept, t)
+	}
+	l.Tracks = kept
+	replacePlaylistTracks(l, replaced)
+}
+
+func replacePlaylistTracks(l *rekordbox.Library, replaced map[uint32]uint32) {
+	if len(replaced) == 0 {
+		return
+	}
+	for i := range l.Playlists {
+		var tracks []uint32
+		for _, id := range l.Playlists[i].Tracks {
+			first, changed := replaced[id]
+			if !changed {
+				tracks = append(tracks, id)
+			} else if first != 0 {
+				tracks = append(tracks, first)
+			}
+		}
+		l.Playlists[i].Tracks = tracks
+	}
+}
+
+func copyIfPresent(src, dst string) error {
+	if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return copyReplace(src, dst)
+}
+
+// copyReplace writes beside the target and renames, so a pulled stick never holds
+// half a database.
+func copyReplace(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.CreateTemp(filepath.Dir(dst), ".copy-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(out.Name())
+	if _, err = io.Copy(out, in); err == nil {
+		err = out.Sync()
+	}
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(out.Name(), dst)
 }
 
 // Candidates examines at most three directory levels (Linux mount conventions),

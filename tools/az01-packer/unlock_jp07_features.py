@@ -48,6 +48,10 @@ PATCHES = [
     (0x336758, bytes(b + 7 for b in b"https://auth.tidal.com/v"),
      bytes(b + 7 for b in STREAM_SYNC_URL + b"/au"), "TidalAPI auth URL -> stream-sync /au//"),
     (0x33652C, struct.pack("<I", 0xE3033638), struct.pack("<I", 0xE3033636), "TidalAPI auth URL suffix 1/ -> //"),
+    # 14. TidalAPI::handleManifest and playLegacy name a download after its codec and know
+    #     FLAC and AAC. The "aac" string is both the codec they compare with and the extension
+    #     they then use, so "mp3" here saves an MP3 as .mp3. TIDAL's AAC is labelled mp4a.40.x.
+    (0x1DB8E90, b"aac\x00", b"mp3\x00", "TidalAPI knows mp3"),
     # 15. DevicesController::handleReadOnlyDeviceEjected (0x58aef0): ldrb r3, [r0, #560] -> mov r3, #0
     #     at 0x58af34, so a read-only (e.g. HFS+) volume is never queued for EjectDriveJob.
     (0x58AF34, struct.pack("<I", 0xE5D03230), struct.pack("<I", 0xE3A03000), "read-only volume not auto-ejected"),

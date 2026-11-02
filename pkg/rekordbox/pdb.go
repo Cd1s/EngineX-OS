@@ -52,8 +52,13 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 			}
 			if p[27]&0x40 == 0 {
 				count := int(le.Uint32(p[24:]) & 0x1fff)
-				groups := (count + 15) / 16
-				heapEnd := ps - groups*36
+				// A full row group takes 36 bytes. The last one, if partial, only
+				// has its flags and the offsets it uses.
+				indexBytes := (count / 16) * 36
+				if rem := count % 16; rem != 0 {
+					indexBytes += 4 + 2*rem
+				}
+				heapEnd := ps - indexBytes
 				if heapEnd < 40 {
 					return nil, fmt.Errorf("pdb: row index overlaps header")
 				}
