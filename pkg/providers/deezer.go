@@ -116,6 +116,40 @@ func (d *Deezer) Search(ctx context.Context, query string) ([]Track, error) {
 	}
 	return out, nil
 }
+func (d *Deezer) ChartPlaylists(ctx context.Context) ([]Playlist, error) {
+	var r struct {
+		Data []struct {
+			ID    int64  `json:"id"`
+			Title string `json:"title"`
+			Count int    `json:"nb_tracks"`
+		}
+	}
+	if err := d.get(ctx, "/chart/0/playlists", url.Values{"limit": {"10"}}, &r); err != nil {
+		return nil, err
+	}
+	out := make([]Playlist, 0, len(r.Data))
+	for _, v := range r.Data {
+		out = append(out, Playlist{strconv.FormatInt(v.ID, 10), v.Title, v.Count})
+	}
+	return out, nil
+}
+func (d *Deezer) SearchPlaylists(ctx context.Context, query string) ([]Playlist, error) {
+	var r struct {
+		Data []struct {
+			ID    int64  `json:"id"`
+			Title string `json:"title"`
+			Count int    `json:"nb_tracks"`
+		}
+	}
+	if err := d.get(ctx, "/search/playlist", url.Values{"q": {query}, "limit": {"25"}}, &r); err != nil {
+		return nil, err
+	}
+	out := make([]Playlist, 0, len(r.Data))
+	for _, v := range r.Data {
+		out = append(out, Playlist{strconv.FormatInt(v.ID, 10), v.Title, v.Count})
+	}
+	return out, nil
+}
 func (d *Deezer) ByISRC(ctx context.Context, isrc string) (Track, error) {
 	var t dzTrack
 	err := d.get(ctx, "/track/isrc:"+url.PathEscape(isrc), nil, &t)

@@ -434,6 +434,32 @@ fi
 /usr/bin/ssh-keygen -y -P '' -f /data/sc5000-custom/ssh_host_ed25519_key >/dev/null
 '''
 
+# Engine 4.3.4 left copies of these in the /etc overlay upper layer; they
+# shadow the 5.0.4 lower /etc (telemetry hosts blocking connman's online check,
+# stale connman/edisksd settings). Removing upper entries while /etc is mounted
+# is not seen until reboot, so this runs once per epoch before etc.mount.
+ETC_RESET = b'''#!/bin/sh
+set -eu
+epoch=engine-5.0.4
+upper=/data/system/etc/overlay
+marker=/data/sc5000-custom/etc-overlay-epoch
+for path in /data/system /data/system/etc "$upper" /data/sc5000-custom "$marker"; do
+    [ ! -L "$path" ] || { echo "Refusing /etc overlay symlink: $path" >&2; exit 1; }
+done
+if [ -f "$marker" ] && [ "$(cat "$marker")" = "$epoch" ]; then
+    exit 0
+fi
+if [ -d "$upper" ]; then
+    for name in hosts resolv.conf connman dnsmasq.d edisksd; do
+        rm -rf -- "$upper/$name"
+    done
+fi
+mkdir -p /data/sc5000-custom
+chmod 700 /data/sc5000-custom
+printf '%s\n' "$epoch" > "$marker.tmp"
+mv "$marker.tmp" "$marker"
+'''
+
 SSHD_CONFIG = b'''Port 22
 HostKey /data/sc5000-custom/ssh_host_ed25519_key
 AuthorizedKeysFile /data/sc5000-custom/authorized_keys
@@ -466,6 +492,15 @@ Before=sc5000-custom-sshd.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/libexec/sc5000-custom-prepare
+''',
+    'sc5000-custom-etc-reset.service': '''[Unit]
+Description=Drop stale Engine 4.3.4 /etc overlay entries
+DefaultDependencies=no
+RequiresMountsFor=/data
+Before=etc.mount
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/sc5000-custom-etc-reset
 ''',
     'sc5000-custom-sshd.service': '''[Unit]
 Description=SC5000 public key SSH
@@ -539,6 +574,7 @@ def inject(fs, key, services=(), overlay=None):
     fs.write('/usr/share/sc5000-custom/authorized_keys', key, 0o600)
     fs.write('/usr/share/sc5000-custom/sshd_config', SSHD_CONFIG)
     fs.write('/usr/libexec/sc5000-custom-prepare', PREPARE, 0o755)
+    fs.write('/usr/libexec/sc5000-custom-etc-reset', ETC_RESET, 0o755)
     # A locked root account is rejected even for public-key auth with UsePAM=no.
     # A fresh random unreachable password hash unlocks the account; SSH password
     # and interactive authentication remain explicitly disabled.
@@ -557,6 +593,8 @@ def inject(fs, key, services=(), overlay=None):
         fs.write('/usr/lib/systemd/system/'+name, content.encode())
     fs.link('/usr/lib/systemd/system/multi-user.target.wants/sc5000-custom.target',
             '/usr/lib/systemd/system/sc5000-custom.target')
+    fs.link('/usr/lib/systemd/system/etc.mount.wants/sc5000-custom-etc-reset.service',
+            '/usr/lib/systemd/system/sc5000-custom-etc-reset.service')
     for name, data in service_data.items():
         fs.write('/usr/lib/systemd/system/'+name, data)
         fs.write('/usr/lib/systemd/system/'+name+'.d/sc5000-ordering.conf',
