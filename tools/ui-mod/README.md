@@ -25,7 +25,9 @@ while running crashed PID 1 once.
 - Translation covers text literal in QML (`i18n.tsv`). Text from Engine's C++
   stays English. Track, artist and playlist names are never translated because
   they are not literals.
-- The three services share Engine's one TIDAL client, so one is active at a time.
+- TIDAL, NetEase, Spotify and Deezer share Engine's one TIDAL client, so one is
+  active at a time. TIDAL itself is passed straight to TIDAL's servers. Switching
+  to it after using another service may ask for a new TIDAL login.
   Tracks already loaded on a deck keep working after a switch.
 - Audio for streaming tracks comes from a Deemix REST bridge on the deck at
   127.0.0.1:6595, then the deck's NetEase login. See `docs/stream-sync.md`.

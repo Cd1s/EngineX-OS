@@ -41,17 +41,23 @@ SERVICES_MAIN = """
 	// SC5000 UI mod: settings owned by stream-sync (see pkg/webui/ui_settings.go).
 	property string scLang: "en"
 	property string scWave: "denon"
-	property var scSources: ["netease", "spotify", "deezer"]
+	property var scSources: ["tidal", "netease", "spotify", "deezer"]
 	property var scLoggedIn: []
 	property string scScope: ""
 	readonly property var scServices: [
+		{ id: "tidal", name: "TIDAL" },
 		{ id: "netease", name: "网易云音乐" },
 		{ id: "spotify", name: "Spotify" },
 		{ id: "deezer", name: "Deezer" }
 	]
 	readonly property var scDict: (@DICT@)
 	function scT(s) { return scDict[s] || s }
-	function scIcon(id) { return "file:///data/sc5000-custom/ui/icons/" + id + ".png" }
+	function scIcon(id) { return id === "tidal" ? "qrc:/UIKit.1/UIKit/Icons/SourceTIDALColored.png" : "file:///data/sc5000-custom/ui/icons/" + id + ".png" }
+	// Engine's messages name its one streaming client; say which service is showing.
+	function scBrand(s) {
+		const service = scServices.find(v => v.id === scScope)
+		return s && service && scScope !== "tidal" ? String(s).replace(/TIDAL/g, service.name) : s
+	}
 	function scCall(query, done) {
 		const x = new XMLHttpRequest()
 		x.open(query ? "POST" : "GET", "http://127.0.0.1:8080/v1/sc5000/ui" + (query ? "?" + query : ""))
@@ -85,7 +91,7 @@ SERVICES_MAIN = """
 			if (tidalRow) c.browserSourceControllerPtr().select(tidalRow.modelIndex)
 			scEnterTries = 8
 			scEnterTimer.start()
-			if (scLoggedIn.indexOf(id) < 0) scLoginBegin(id)
+			if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) scLoginBegin(id)
 		})
 	}
 	property string scLogin: ""
@@ -269,6 +275,7 @@ SOURCE_FOOTER = """
 				MouseArea {
 					anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
 					width: 140
+					visible: modelData.id !== "tidal"
 					onClicked: root.scLoginBegin(modelData.id)
 					Text {
 						anchors.centerIn: parent
@@ -397,7 +404,7 @@ def edits(dev: bool):
             ("		PlayerNumber { },\n", LANGUAGE_ENTRY + "		PlayerNumber { },\n"),
         ],
         prefs + "Entries/StreamingServices.qml": [
-            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && provider.name !== "TIDAL"\n'),
+            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && (provider.name !== "TIDAL" || root.scScope === "tidal")\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),
             ('	label: "Streaming"\n', '	label: "Streaming"\n' + STREAM_SWITCHES),
         ],
@@ -409,6 +416,10 @@ def edits(dev: bool):
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewHeader.qml": [("text: breadcrumbViewHeader.title\n", 'text: ["My Playlists", "My Collection"].indexOf(breadcrumbViewHeader.title) >= 0 ? root.scT(breadcrumbViewHeader.title) : breadcrumbViewHeader.title\n')],
         v + "BrowserSource/SourceScreen.qml": [("						AvailableSource {\n", AVAILABLE_TILES + "						AvailableSource {\n")],
+        v + "Streaming/StreamingDialog.qml": [
+            ("		function onShowGenericError(errorMessage, title) {\n", "		function onShowGenericError(errorMessage, title) {\n			title = root.scBrand(title)\n			errorMessage = root.scBrand(errorMessage)\n"),
+            ("		function onShowGenericMessage(message, title) {\n", "		function onShowGenericMessage(message, title) {\n			title = root.scBrand(title)\n			message = root.scBrand(message)\n"),
+        ],
         v + "Common/Sidebar/Sidebar.qml": [
             ("source: browserSource.sourceIconUrl\n", 'source: browserSource.sourceIconUrl.indexOf("TIDAL") >= 0 && root.scScope ? root.scIcon(root.scScope) : browserSource.sourceIconUrl\n'),
             ("useOriginal: browserSource.useOriginalIcon\n", 'useOriginal: browserSource.useOriginalIcon || browserSource.sourceIconUrl.indexOf("TIDAL") >= 0\n'),
@@ -416,7 +427,7 @@ def edits(dev: bool):
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml": [
             ('				objectName: "Browser_Collection_StackView_ViewDelegate"\n',
              '				objectName: "Browser_Collection_StackView_ViewDelegate"\n'
-             '				readonly property bool scHidden: breadcrumbView.isStreamingContent && contentView.StackView.index === 0 && !!modelData && ["My Collection", "Featured", "Genres", "Moods", "TIDAL Rising"].indexOf(modelData.display) >= 0\n'
+             '				readonly property bool scHidden: breadcrumbView.isStreamingContent && root.scScope !== "tidal" && contentView.StackView.index === 0 && !!modelData && ["My Collection", "Featured", "Genres", "Moods", "TIDAL Rising"].indexOf(modelData.display) >= 0\n'
              # The view assigns visible itself and would undo a binding. These rows
              # end the list, so what stays is blank space below My Playlists.
              '				opacity: scHidden ? 0 : 1\n'),
