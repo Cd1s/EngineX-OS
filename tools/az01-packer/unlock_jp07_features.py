@@ -29,6 +29,11 @@ PATCHES = [
     (0xF6592C, struct.pack("<I", 0xE3A02C01), struct.pack("<I", 0xE3002101), "JP07 hasStems 0 -> 1"),
     # 7. hasBluetooth (this + 588): strb r1(0) -> strb r3(1) at 0xf62bb4, as JP13 does at 0xf67154
     (0xF62BB4, struct.pack("<I", 0xE5C4124C), struct.pack("<I", 0xE5C4324C), "hasBluetooth 0 -> 1"),
+    # 7b. The patch above is on another model's path. JP07's config is at 0xf65a3c, with r3 = 0x101:
+    #     add r2, r4, #592 -> strb r3, [r4, #588], and since that took r2,
+    #     strh r3, [r2] -> strh r3, [r0, #-76] (r0 = r4 + 668, so still +592).
+    (0xF65A50, struct.pack("<I", 0xE2842E25), struct.pack("<I", 0xE5C4324C), "JP07 hasBluetooth 0 -> 1"),
+    (0xF65A58, struct.pack("<I", 0xE1C230B0), struct.pack("<I", 0xE14034BC), "JP07 hasBluetooth keep +592"),
     # 8. hasBluetoothSendToAssignment (this + 590): strb r1(0), [r4, #587] -> strb r3(1), [r4, #590]
     #    at 0xf65a48 so Bluetooth audio can be routed to Layer A / Layer B (JP13 0xf67158).
     (0xF65A48, struct.pack("<I", 0xE5C4124B), struct.pack("<I", 0xE5C4324E), "hasBluetoothSendToAssignment 0 -> 1"),
