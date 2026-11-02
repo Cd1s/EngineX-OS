@@ -404,3 +404,32 @@ func TestGuestNeverUsesTheOwnersNeteaseLogin(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestRelayBPMKeysSyncToTheDeck(t *testing.T) {
+	var auth string
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("X-Deemix-Password")
+		if r.URL.RequestURI() != "/api/config?secrets=1" {
+			t.Errorf("unexpected %s", r.URL)
+		}
+		io.WriteString(w, `{"ok":true,"config":{"soundcloudClientId":"from-relay","getSongBpmKey":""}}`)
+	}))
+	defer relay.Close()
+	state := t.TempDir()
+	bpm := &providers.BPMStore{Path: filepath.Join(state, "bpm.json"), ConfigPath: filepath.Join(state, "bpm-config.json")}
+	bpm.SaveConfig(providers.BPMConfig{GetSongBPMKey: "local", SoundCloudClientID: "old"})
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, RelayURL: relay.URL, BPM: bpm}, nil)
+
+	// Nothing is sent or asked without the relay's password.
+	if err := ui.pullBPMConfig(context.Background()); err != nil || auth != "" {
+		t.Fatalf("%v %q", err, auth)
+	}
+	ui.updateRelayConfig(nil, ptr("pw"))
+	if err := ui.pullBPMConfig(context.Background()); err != nil || auth != "pw" {
+		t.Fatalf("%v %q", err, auth)
+	}
+	got := bpm.Config()
+	if got.SoundCloudClientID != "from-relay" || got.GetSongBPMKey != "local" {
+		t.Fatalf("%+v", got)
+	}
+}
