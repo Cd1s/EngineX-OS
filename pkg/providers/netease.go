@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -88,7 +89,7 @@ func (n *Netease) get(ctx context.Context, path string, q url.Values, out any) e
 		return err
 	}
 	if code, ok := r["code"].(float64); ok && code != 200 && code != 800 && code != 801 && code != 802 && code != 803 {
-		return errors.New("netease: API rejected request")
+		return fmt.Errorf("netease: API rejected request (code %v)", code)
 	}
 	return remarshal(r, out)
 }
@@ -160,6 +161,28 @@ func (n *Netease) Playlists(ctx context.Context) ([]Playlist, error) {
 		return nil, errors.New("netease: login required")
 	}
 	var all []Playlist
+	// Saved albums and radios appear after the playlists. If they cannot be read,
+	// the playlists are still worth showing.
+	var albums []Album
+	var radios []Playlist
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		albums, _ = n.FavoriteAlbums(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		radios, _ = n.favoriteRadios(ctx)
+	}()
+	defer wg.Wait()
+	withSaved := func() []Playlist {
+		wg.Wait()
+		for _, a := range albums {
+			all = append(all, Playlist{albumPrefix + strconv.FormatInt(a.ID, 10), "【专辑】" + a.Name, a.Size})
+		}
+		return append(all, radios...)
+	}
 	for offset := 0; offset < 100000; offset += 100 {
 		var r struct {
 			Playlist []struct {
@@ -176,12 +199,139 @@ func (n *Netease) Playlists(ctx context.Context) ([]Playlist, error) {
 			all = append(all, Playlist{strconv.FormatInt(p.ID, 10), p.Name, p.TrackCount})
 		}
 		if !r.More {
-			return all, nil
+			return withSaved(), nil
 		}
 	}
 	return nil, errors.New("netease: pagination limit")
 }
+
+// Album is an album the account has saved.
+type Album struct {
+	ID      int64
+	Name    string
+	Size    int
+	Artists []struct{ Name string }
+}
+
+const (
+	albumPrefix      = "album:"
+	radioPrefix      = "dj:"
+	maxRadioPrograms = 500
+)
+
+// FavoriteAlbums lists the albums the account has saved.
+func (n *Netease) FavoriteAlbums(ctx context.Context) ([]Album, error) {
+	var all []Album
+	for offset := 0; offset < 10000; offset += 100 {
+		var r struct {
+			Data    []Album
+			HasMore bool
+		}
+		if err := n.get(ctx, "/album/sublist", url.Values{"limit": {"100"}, "offset": {strconv.Itoa(offset)}}, &r); err != nil {
+			return nil, err
+		}
+		all = append(all, r.Data...)
+		if !r.HasMore {
+			break
+		}
+	}
+	return all, nil
+}
+
+func (n *Netease) favoriteRadios(ctx context.Context) ([]Playlist, error) {
+	var all []Playlist
+	for offset := 0; offset < 10000; offset += 100 {
+		var r struct {
+			DJRadios []struct {
+				ID           int64
+				Name         string
+				ProgramCount int
+			}
+			HasMore bool
+		}
+		if err := n.get(ctx, "/dj/sublist", url.Values{"limit": {"100"}, "offset": {strconv.Itoa(offset)}}, &r); err != nil {
+			return nil, err
+		}
+		for _, v := range r.DJRadios {
+			all = append(all, Playlist{radioPrefix + strconv.FormatInt(v.ID, 10), "【电台】" + v.Name, v.ProgramCount})
+		}
+		if !r.HasMore {
+			break
+		}
+	}
+	return all, nil
+}
+
+func (n *Netease) albumTracks(ctx context.Context, id string) ([]Track, error) {
+	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
+		return nil, errors.New("netease: invalid album ID")
+	}
+	var r struct{ Songs []neSong }
+	if err := n.get(ctx, "/album", url.Values{"id": {id}}, &r); err != nil {
+		return nil, err
+	}
+	out := make([]Track, 0, len(r.Songs))
+	for _, s := range r.Songs {
+		out = append(out, s.track())
+	}
+	return out, nil
+}
+
+// radioTracks lists a radio's programs. Each plays through its main song, so a
+// program is an ordinary track named after the program and its host.
+func (n *Netease) radioTracks(ctx context.Context, id string) ([]Track, error) {
+	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
+		return nil, errors.New("netease: invalid radio ID")
+	}
+	var all []Track
+	// Some radios have thousands of programs, and paging through them all trips
+	// NetEase's rate limit (code 406). The newest ones are what anyone browses.
+	for offset := 0; offset < maxRadioPrograms; offset += 100 {
+		var r struct {
+			Programs []struct {
+				Name     string
+				Duration int64
+				DJ       struct{ Nickname string }
+				MainSong neSong
+			}
+			More bool
+		}
+		if err := n.get(ctx, "/dj/program", url.Values{"id": {id}, "limit": {"100"}, "offset": {strconv.Itoa(offset)}}, &r); err != nil {
+			if len(all) > 0 {
+				return all, nil
+			}
+			return nil, err
+		}
+		for _, p := range r.Programs {
+			if p.MainSong.ID == 0 {
+				continue
+			}
+			t := p.MainSong.track()
+			if p.Name != "" {
+				t.Title = p.Name
+			}
+			if t.DurationMS == 0 {
+				t.DurationMS = p.Duration
+			}
+			if p.DJ.Nickname != "" {
+				t.Artist, t.Artists = p.DJ.Nickname, []string{p.DJ.Nickname}
+			}
+			all = append(all, t)
+		}
+		if !r.More {
+			break
+		}
+	}
+	return all, nil
+}
+
 func (n *Netease) Tracks(ctx context.Context, id string) ([]Track, error) {
+	if album, ok := strings.CutPrefix(id, albumPrefix); ok {
+		return n.albumTracks(ctx, album)
+	}
+	if radio, ok := strings.CutPrefix(id, radioPrefix); ok {
+		return n.radioTracks(ctx, radio)
+	}
 	// playlist/detail trackIds is complete even when tracks is truncated.
 	var p struct {
 		Playlist struct {

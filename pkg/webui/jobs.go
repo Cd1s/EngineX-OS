@@ -172,6 +172,7 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 	if err == nil {
 		var dl *deemixclient.Download
 		if dl, err = j.p.Deemix.Download(ctx, matched, progress); err == nil {
+			j.p.Deemix.Trim(dl.Path)
 			return matched, dl, nil
 		}
 	}
