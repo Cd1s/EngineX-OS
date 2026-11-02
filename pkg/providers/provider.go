@@ -30,6 +30,8 @@ type Track struct {
 	Key        string   `json:"key,omitempty"` // Camelot, e.g. 8A
 	// CoverURL is the album artwork, embedded in the downloaded file for the deck.
 	CoverURL string `json:"coverUrl,omitempty"`
+	// ThumbURL is a smaller version for list rows, where the service offers one.
+	ThumbURL string `json:"-"`
 	// Preview is Deezer's public 30-second MP3, used only to estimate tempo.
 	Preview string `json:"-"`
 }

@@ -817,3 +817,32 @@ func TestSoundCloudAccountLoginRenewsAndReachesPrivateLists(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSpotifyLookupsArePacedAndPauseOnRateLimit(t *testing.T) {
+	var calls []time.Time
+	limited := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, time.Now())
+		if limited {
+			http.Error(w, "slow", 429)
+			return
+		}
+		io.WriteString(w, `{"tracks":{"items":[]}}`)
+	}))
+	defer srv.Close()
+	sp := &Spotify{BaseURL: srv.URL, Token: Token{AccessToken: "a"}}
+	b := &BPMStore{Spotify: func() *Spotify { return sp }}
+	track := Track{Title: "S", Artist: "A"}
+	b.spotifySearch(context.Background(), track)
+	b.spotifySearch(context.Background(), track)
+	if len(calls) != 2 || calls[1].Sub(calls[0]) < spotifyLookupGap-100*time.Millisecond {
+		t.Fatalf("%v", calls)
+	}
+	limited = true
+	b.spotifySearch(context.Background(), track)
+	n := len(calls)
+	b.spotifySearch(context.Background(), track)
+	if len(calls) != n {
+		t.Fatal("kept calling Spotify after a 429")
+	}
+}

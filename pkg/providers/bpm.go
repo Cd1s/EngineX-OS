@@ -26,7 +26,8 @@ const (
 	defaultGetSongURL = "https://api.getsong.co"
 
 	reccoBatch       = 40
-	bpmListWait      = 500 * time.Millisecond
+	bpmListWait      = 400 * time.Millisecond
+	spotifyLookupGap = 2 * time.Second
 	bpmRateLimitWait = 5 * time.Minute
 	bpmQueueLimit    = 2000
 )
@@ -73,6 +74,7 @@ type BPMStore struct {
 	waitTill time.Time
 	// Spotify's own rate limit, separate from ReccoBeats'.
 	spotifyWaitTill time.Time
+	spotifyNext     time.Time
 }
 
 func bpmKey(t Track) string { return t.Provider + ":" + t.ID }
@@ -220,13 +222,9 @@ func (b *BPMStore) previewFor(ctx context.Context, t Track) string {
 		}
 	}
 	// Deezer's search misses obscure names that its ISRC lookup still knows.
-	if found.Preview == "" && b.Spotify != nil && t.ISRC == "" && t.Provider != "spotify" {
-		if s := b.Spotify(); s != nil {
-			if results, err := s.Search(ctx, bpmQuery(t)); err == nil {
-				if c, ok := bestMatch(t, results); ok && c.ISRC != "" {
-					found, _ = d.ByISRC(ctx, c.ISRC)
-				}
-			}
+	if found.Preview == "" && t.ISRC == "" && t.Provider != "spotify" {
+		if c, ok := bestMatch(t, b.spotifySearch(ctx, t)); ok && c.ISRC != "" {
+			found, _ = d.ByISRC(ctx, c.ISRC)
 		}
 	}
 	u, err := url.Parse(found.Preview)
@@ -439,16 +437,31 @@ func (b *BPMStore) features(ctx context.Context, ids ...string) BPMInfo {
 	return BPMInfo{}
 }
 
-func (b *BPMStore) viaSpotify(ctx context.Context, t Track) BPMInfo {
-	if b.Spotify == nil || t.Provider == "spotify" {
-		return BPMInfo{}
+// spotifySearch is paced, because a list of unknown tracks would otherwise use up the
+// login's rate limit, and then the owner's own Spotify lists stop opening too.
+func (b *BPMStore) spotifySearch(ctx context.Context, t Track) []Track {
+	if b.Spotify == nil {
+		return nil
+	}
+	s := b.Spotify()
+	if s == nil {
+		return nil
 	}
 	b.mu.Lock()
-	waiting := time.Now().Before(b.spotifyWaitTill)
+	now := time.Now()
+	if now.Before(b.spotifyWaitTill) {
+		b.mu.Unlock()
+		return nil
+	}
+	wait := b.spotifyNext.Sub(now)
+	b.spotifyNext = now.Add(max(wait, 0) + spotifyLookupGap)
 	b.mu.Unlock()
-	s := b.Spotify()
-	if s == nil || waiting {
-		return BPMInfo{}
+	if wait > 0 {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return nil
+		}
 	}
 	found, err := s.Search(ctx, bpmQuery(t))
 	if err != nil {
@@ -457,8 +470,16 @@ func (b *BPMStore) viaSpotify(ctx context.Context, t Track) BPMInfo {
 			b.spotifyWaitTill = time.Now().Add(bpmRateLimitWait)
 			b.mu.Unlock()
 		}
+		return nil
+	}
+	return found
+}
+
+func (b *BPMStore) viaSpotify(ctx context.Context, t Track) BPMInfo {
+	if b.Spotify == nil || t.Provider == "spotify" {
 		return BPMInfo{}
 	}
+	found := b.spotifySearch(ctx, t)
 	c, ok := bestMatch(t, found)
 	if !ok {
 		return BPMInfo{}

@@ -27,6 +27,7 @@ sh install.sh ./sc5000-relay-amd64 ./sc5000-deemix-relay.service
 | `POST/GET /api/relay/session` | QR session credential transfer |
 | `GET/POST /m/{spotify,deezer}?t=` | Phone login |
 | `GET /oauth/spotify/callback` | OAuth callback |
+| `GET /oauth/soundcloud/callback` | OAuth callback. Register this URL as the SoundCloud app's redirect, or its authorize page stays blank |
 | `/api/audio`, `/api/download-stream`, `/api/download`, `/api/queue` | All methods return 410; no audio cache or queue |
 | `GET/POST /api/config` | Password or console cookie required |
 | `GET /api/config?secrets=1` | Explicit opt-in includes `config.deezerArl` and the BPM service keys, with `Cache-Control: no-store` |

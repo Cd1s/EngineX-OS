@@ -329,7 +329,7 @@ func TestSoundCloudAccountLoginByPastedAddress(t *testing.T) {
 	h := s.routes()
 	tok := "soundcloudlogin00001"
 	page := do(h, "GET", "/m/soundcloud?t="+tok, "", nil).Body.String()
-	if !strings.Contains(page, "code_challenge_method=S256") || !strings.Contains(page, "client_id=cid") || strings.Contains(page, "shh") {
+	if !strings.Contains(page, "code_challenge_method=S256") || !strings.Contains(page, "client_id=cid") || strings.Contains(page, "shh") || !strings.Contains(page, "oauth%2Fsoundcloud%2Fcallback") {
 		t.Fatal(page)
 	}
 	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}

@@ -52,12 +52,19 @@ func (t spTrack) cover() string {
 	return t.Album.Images[0].URL // Spotify lists the largest first
 }
 
+func (t spTrack) thumb() string {
+	if len(t.Album.Images) == 0 {
+		return ""
+	}
+	return t.Album.Images[len(t.Album.Images)-1].URL
+}
+
 func (t spTrack) track() Track {
 	a := []string{}
 	for _, v := range t.Artists {
 		a = append(a, v.Name)
 	}
-	return Track{ID: t.ID, Title: t.Name, Artist: strings.Join(a, ", "), Artists: a, Album: t.Album.Name, ISRC: t.External.ISRC, CoverURL: t.cover(), DurationMS: t.Duration, Provider: "spotify"}
+	return Track{ID: t.ID, Title: t.Name, Artist: strings.Join(a, ", "), Artists: a, Album: t.Album.Name, ISRC: t.External.ISRC, CoverURL: t.cover(), ThumbURL: t.thumb(), DurationMS: t.Duration, Provider: "spotify"}
 }
 func RandomID() string {
 	var b [32]byte
