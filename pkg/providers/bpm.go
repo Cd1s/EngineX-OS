@@ -27,7 +27,9 @@ const (
 	defaultGetSongURL    = "https://api.getsong.co"
 
 	reccoBatch       = 40
-	bpmListWait      = 3 * time.Second
+	bpmListWait      = 4 * time.Second
+	bpmListLookups   = 25
+	bpmListWorkers   = 6
 	bpmRateLimitWait = 5 * time.Minute
 	bpmQueueLimit    = 2000
 )
@@ -108,9 +110,52 @@ func (b *BPMStore) Apply(tracks []Track) {
 	}
 }
 
-// Enrich fills tracks in place, waiting briefly for a batch lookup and leaving the
-// rest to the background worker. A later listing shows what that finds.
+// Enrich fills an opened list in place. It waits briefly for the batch lookup and
+// for the first tracks without an ISRC or Spotify ID, such as NetEase's, so the
+// rows on screen show a tempo at once. The rest fill in behind the scenes, and a
+// later listing shows them.
 func (b *BPMStore) Enrich(ctx context.Context, tracks []Track) {
+	if b == nil {
+		return
+	}
+	b.Apply(tracks)
+	ctx, cancel := context.WithTimeout(ctx, bpmListWait)
+	defer cancel()
+	b.batch(ctx, tracks)
+	b.Apply(tracks)
+	var first []Track
+	for _, t := range tracks {
+		if t.BPM == 0 && len(first) < bpmListLookups && b.claim(t) {
+			first = append(first, t)
+		}
+	}
+	work := make(chan Track)
+	var wg sync.WaitGroup
+	for range min(bpmListWorkers, len(first)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range work {
+				b.attempt(ctx, t)
+			}
+		}()
+	}
+	for _, t := range first {
+		work <- t
+	}
+	close(work)
+	wg.Wait()
+	b.Apply(tracks)
+	for _, t := range tracks {
+		if t.BPM == 0 {
+			b.enqueue(t)
+		}
+	}
+}
+
+// EnrichPreview is Enrich for search results. They change with every keystroke, so
+// nothing waits on per-track lookups.
+func (b *BPMStore) EnrichPreview(ctx context.Context, tracks []Track) {
 	if b == nil {
 		return
 	}
@@ -126,13 +171,39 @@ func (b *BPMStore) Enrich(ctx context.Context, tracks []Track) {
 	}
 }
 
-func (b *BPMStore) enqueue(t Track) {
+// claim reserves a track's lookup, reporting false if it was already tried.
+func (b *BPMStore) claim(t Track) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.load()
 	if b.tried[bpmKey(t)] {
-		return
+		return false
 	}
 	b.tried[bpmKey(t)] = true
+	return true
+}
+
+// attempt looks a claimed track up. A lookup cut short says nothing about the
+// track, so it stays eligible for the next listing.
+func (b *BPMStore) attempt(ctx context.Context, t Track) {
+	info := b.lookup(ctx, t)
+	if info.BPM > 0 {
+		b.Put(t, info)
+		return
+	}
+	if ctx.Err() != nil || b.rateLimited() {
+		b.mu.Lock()
+		delete(b.tried, bpmKey(t))
+		b.mu.Unlock()
+	}
+}
+
+func (b *BPMStore) enqueue(t Track) {
+	if !b.claim(t) {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.queue == nil {
 		b.queue = make(chan Track, bpmQueueLimit)
 		go b.worker(b.queue)
@@ -147,9 +218,7 @@ func (b *BPMStore) enqueue(t Track) {
 func (b *BPMStore) worker(queue chan Track) {
 	for t := range queue {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if info := b.lookup(ctx, t); info.BPM > 0 {
-			b.Put(t, info)
-		}
+		b.attempt(ctx, t)
 		cancel()
 	}
 }
@@ -261,7 +330,11 @@ func (b *BPMStore) lookup(ctx context.Context, t Track) BPMInfo {
 	return BPMInfo{}
 }
 
-var bpmEdition = regexp.MustCompile(`(?i)\(original( mix)?\)|\boriginal mix\b|\[original( mix)?\]`)
+var (
+	bpmEdition = regexp.MustCompile(`(?i)\(original( mix)?\)|\boriginal mix\b|\[original( mix)?\]`)
+	// Everything after the song's own name: "(Club Mix)", "[Live]", ", av mix", " - Edit".
+	bpmSuffix = regexp.MustCompile(`\s*[(\[].*$|\s*,.*$|\s+-\s+.*$`)
+)
 
 func bpmWords(s string) string {
 	var out strings.Builder
@@ -273,6 +346,14 @@ func bpmWords(s string) string {
 	return out.String()
 }
 
+// bpmMainTitle is the song's name without any version.
+func bpmMainTitle(s string) string {
+	if main := strings.TrimSpace(bpmSuffix.ReplaceAllString(s, "")); main != "" {
+		return main
+	}
+	return strings.TrimSpace(s)
+}
+
 func primaryArtist(t Track) string {
 	if len(t.Artists) > 0 {
 		return t.Artists[0]
@@ -280,50 +361,65 @@ func primaryArtist(t Track) string {
 	return strings.TrimSpace(strings.Split(t.Artist, ",")[0])
 }
 
-// sameSong accepts a result only for the exact title by the same main artist.
-func sameSong(t Track, title string, artists []string) bool {
-	if bpmWords(title) != bpmWords(t.Title) || bpmWords(t.Title) == "" {
-		return false
-	}
+func sameArtist(t Track, artists []string) bool {
 	want := bpmWords(primaryArtist(t))
 	for _, a := range artists {
-		if bpmWords(a) == want {
+		if want != "" && bpmWords(a) == want {
 			return true
 		}
 	}
 	return false
 }
 
+// sameSong accepts a result only for the exact title by the same main artist.
+func sameSong(t Track, title string, artists []string) bool {
+	return bpmWords(title) == bpmWords(t.Title) && bpmWords(t.Title) != "" && sameArtist(t, artists)
+}
+
+// sameMainTitle is sameSong that ignores versions, for catalogs that name them
+// differently. A list's tempo is only a preview, so a close version will do.
+func sameMainTitle(t Track, title string, artists []string) bool {
+	return bpmWords(bpmMainTitle(title)) == bpmWords(bpmMainTitle(t.Title)) && bpmWords(bpmMainTitle(t.Title)) != "" && sameArtist(t, artists)
+}
+
+// reccoSearch looks a song up by name: searchText matches track titles only, so
+// adding the artist or a version finds nothing. The artist is checked afterwards.
 func (b *BPMStore) reccoSearch(ctx context.Context, t Track) BPMInfo {
 	if b.rateLimited() {
 		return BPMInfo{}
 	}
-	var r struct {
-		Content []struct {
-			ID      string `json:"id"`
-			Title   string `json:"trackTitle"`
-			Artists []struct {
-				Name string `json:"name"`
-			} `json:"artists"`
-		} `json:"content"`
+	type result struct {
+		ID      string `json:"id"`
+		Title   string `json:"trackTitle"`
+		Artists []struct {
+			Name string `json:"name"`
+		} `json:"artists"`
 	}
-	q := url.Values{"searchText": {primaryArtist(t) + " " + t.Title}}
+	var r struct {
+		Content []result `json:"content"`
+	}
+	q := url.Values{"searchText": {bpmMainTitle(t.Title)}}
 	if b.get(ctx, b.reccoURL()+"/v1/track/search?"+q.Encode(), nil, &r) != nil {
 		return BPMInfo{}
 	}
-	for _, c := range r.Content {
-		names := make([]string, len(c.Artists))
+	names := func(c result) []string {
+		out := make([]string, len(c.Artists))
 		for i, a := range c.Artists {
-			names[i] = a.Name
+			out[i] = a.Name
 		}
-		if !sameSong(t, c.Title, names) {
-			continue
+		return out
+	}
+	// The exact version first, then any version of the song.
+	for _, match := range []func(Track, string, []string) bool{sameSong, sameMainTitle} {
+		for _, c := range r.Content {
+			if !match(t, c.Title, names(c)) {
+				continue
+			}
+			var f reccoFeatures
+			if b.get(ctx, b.reccoURL()+"/v1/track/"+url.PathEscape(c.ID)+"/audio-features", nil, &f) == nil && f.Tempo > 0 {
+				return f.info()
+			}
 		}
-		var f reccoFeatures
-		if b.get(ctx, b.reccoURL()+"/v1/track/"+url.PathEscape(c.ID)+"/audio-features", nil, &f) == nil {
-			return f.info()
-		}
-		return BPMInfo{}
 	}
 	return BPMInfo{}
 }

@@ -185,14 +185,15 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 	proxy.ServeHTTP(w, r)
 }
 
-// withBPM shows tempo and key on each list row. Engine's TIDAL client reads no
-// tempo field, so the title is the only place the deck can display them. This is
-// display text only and reaches neither the beat grid nor the library.
+// withBPM carries tempo and key to each list row. Engine's TIDAL client reads no
+// tempo field, so they travel in the title, and the track list QML moves them to its
+// BPM and Key columns. "BPM" keeps a real title like "Song [2020]" from matching.
+// This is display text only and reaches neither the beat grid nor the library.
 func withBPM(t providers.Track) string {
 	if t.BPM <= 0 {
 		return t.Title
 	}
-	label := strconv.Itoa(int(math.Round(t.BPM)))
+	label := strconv.Itoa(int(math.Round(t.BPM))) + " BPM"
 	if t.Key != "" {
 		label += " " + t.Key
 	}
@@ -625,7 +626,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	})
 	trackItems, listItems := []any{}, []any{}
 	for i, v := range sources {
-		g.s.cfg.BPM.Enrich(r.Context(), tracks[i])
+		g.s.cfg.BPM.EnrichPreview(r.Context(), tracks[i])
 		for _, t := range tracks[i] {
 			trackItems = append(trackItems, g.trackJSON(g.addTrack(trackRef{t, v.session, v.guest}), t))
 		}
