@@ -57,6 +57,16 @@ SQLite 测试使用本工作树捕获的完整原厂 SQL，包含触发器和链
 主人新下载进入 `[Stream / 临时下载]`，不改变原歌单。凭据失效时可随时
 点击“重新扫码登录”，不必删除主人凭据文件。
 
+### SoundCloud
+
+用你自己的 Client ID 或 OAuth Token 访问 API（`state/soundcloud-owner.json`，也读 `bpm-config.json`）。填了主页才有
+Likes 和歌单，只有 Client ID 时可以搜索。`https://relay.example.com/m/soundcloud` 或局域网 `/m/soundcloud` 扫码绑定，
+凭据由碟机校验。
+
+只下载账号可以完整播放的流：优先 progressive MP3，其次 HLS MP3，再次 HLS AAC（存为 `.mp4`）。试听片段
+（`snipped` / `policy=SNIP`）和加密流一律拒绝，不做解密，所以 Go+ 专属曲目放不了。文件存为 `soundcloud-<id>.mp3`。
+超过 15 分钟或 50 MB 的文件不做后台分析。代码不提取 SoundCloud 网页里的 client_id。
+
 ### 网易云
 
 收藏的专辑和电台排在歌单后面，标题前缀 `【专辑】`、`【电台】`，曲目 ID 为 `album:<id>`、

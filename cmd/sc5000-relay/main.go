@@ -148,7 +148,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func validProvider(p string) bool { return p == "spotify" || p == "deezer" }
+func validProvider(p string) bool { return p == "spotify" || p == "deezer" || p == "soundcloud" }
 
 func (s *server) mobileURL(provider, token string) string {
 	return s.public + "/m/" + provider + "?t=" + token

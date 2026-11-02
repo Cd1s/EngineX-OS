@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,7 @@ type Config struct {
 	SpotifyRedirectURL                                                    string
 	SpotifyClientID, SpotifyTokenPath, SpotifyBaseURL, SpotifyAccountsURL string
 	NeteaseURL, StateDir, DeezerURL, DeezerGatewayURL                     string
+	SoundCloudURL                                                         string
 	HTTP                                                                  *http.Client
 	// UIDir holds the deck UI settings; empty means the on-device default.
 	UIDir string
@@ -112,6 +114,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	if jobs != nil {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor
+		jobs.soundcloud = s.ownerSoundCloud
 		jobs.bpm = cfg.BPM
 		if jobs.p.Deemix != nil {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }
@@ -240,6 +243,11 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 			user, arl = owner.UserID, owner.ARL
 		}
 		return &providers.Deezer{BaseURL: s.cfg.DeezerURL, GatewayURL: s.cfg.DeezerGatewayURL, UserID: user, ARL: arl, HTTP: s.cfg.HTTP}, nil
+	case "soundcloud":
+		if guest {
+			return &providers.SoundCloud{BaseURL: s.cfg.SoundCloudURL, HTTP: s.cfg.HTTP}, nil
+		}
+		return s.ownerSoundCloudProvider(), nil
 	case "netease":
 		n := &providers.Netease{BaseURL: s.cfg.NeteaseURL, HTTP: s.cfg.HTTP}
 		if !guest {
@@ -312,7 +320,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	if !input(w, r, &v) {
 		return
 	}
-	if v.Provider != "spotify" && v.Provider != "netease" && v.Provider != "deezer" {
+	if !slices.Contains(loginServices, v.Provider) {
 		fail(w, 400, errors.New("unsupported provider"))
 		return
 	}

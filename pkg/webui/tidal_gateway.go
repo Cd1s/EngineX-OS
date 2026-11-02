@@ -38,8 +38,8 @@ func hintTitle(scope string) string { return "请登录：sc5000.lan:8080" }
 
 var (
 	tidalNS        = uuid.MustParse("6f1c5a52-3c55-4c2e-9d0b-5c5000000000")
-	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer"}
-	providerOrder  = map[string]int{"netease": 0, "spotify": 1, "deezer": 2}
+	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud"}
+	providerOrder  = map[string]int{"netease": 0, "spotify": 1, "deezer": 2, "soundcloud": 3}
 )
 
 type trackRef struct {
@@ -251,7 +251,7 @@ func (g *tidalGateway) sources() []*Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prune()
-	for _, name := range []string{"netease", "spotify", "deezer"} {
+	for _, name := range loginServices {
 		owned := false
 		for _, v := range s.sessions {
 			owned = owned || (!v.Guest && v.Provider == name)
@@ -290,6 +290,8 @@ func ready(p providers.Provider) bool {
 		return v.UserID != 0 && v.Cookie != ""
 	case *providers.Deezer:
 		return v.UserID != ""
+	case *providers.SoundCloud:
+		return v.ClientID != "" || v.Token != ""
 	}
 	return false
 }
@@ -668,14 +670,21 @@ func (g *tidalGateway) trackInfo(w http.ResponseWriter, r *http.Request) {
 // already on disk; otherwise Deemix is asked for FLAC.
 func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (address, codec string) {
 	codec = "flac"
-	if g.s.jobs != nil && strings.HasSuffix(strings.ToLower(g.s.jobs.File(ref.track)), ".mp3") {
-		codec = "mp3"
+	ext := "flac"
+	if g.s.jobs != nil {
+		switch strings.ToLower(path.Ext(g.s.jobs.File(ref.track))) {
+		case ".mp3":
+			codec, ext = "mp3", "mp3"
+		case ".mp4":
+			// Engine saves this codec as .mp4, which its AAC reader opens.
+			codec, ext = "mp4a.40.2", "mp4"
+		}
 	}
 	host := r.Host
 	if host == "" {
 		host = "127.0.0.1:8080"
 	}
-	return "http://" + host + "/v1/stream/" + strconv.FormatInt(id, 10) + "." + codec, codec
+	return "http://" + host + "/v1/stream/" + strconv.FormatInt(id, 10) + "." + ext, codec
 }
 
 // knownCodec downloads first when MP3 fallback is allowed, because the codec
@@ -704,6 +713,8 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	mime := "audio/flac"
 	if codec == "mp3" {
 		mime = "audio/mpeg"
+	} else if ext := path.Ext(address); ext == ".mp4" {
+		mime = "audio/mp4"
 	}
 	manifest, _ := json.Marshal(map[string]any{"mimeType": mime, "codecs": codec, "encryptionType": "NONE", "urls": []string{address}})
 	respond(w, map[string]any{"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "LOSSLESS", "manifestMimeType": "application/vnd.tidal.bts", "manifestHash": "", "manifest": base64.StdEncoding.EncodeToString(manifest), "albumReplayGain": 0, "albumPeakAmplitude": 1, "trackReplayGain": 0, "trackPeakAmplitude": 1})
@@ -719,7 +730,7 @@ func (g *tidalGateway) streamURL(w http.ResponseWriter, r *http.Request) {
 // the CPU3 analysis/import job is queued by Jobs.Fetch and runs afterwards.
 func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	file := r.PathValue("file")
-	raw := strings.TrimSuffix(strings.TrimSuffix(file, ".flac"), ".mp3")
+	raw := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(file, ".flac"), ".mp3"), ".mp4")
 	if raw == file {
 		http.NotFound(w, r)
 		return
@@ -740,7 +751,9 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "audio/flac")
-	if strings.HasSuffix(strings.ToLower(p), ".mp3") {
+	if strings.HasSuffix(strings.ToLower(p), ".mp4") {
+		w.Header().Set("Content-Type", "audio/mp4")
+	} else if strings.HasSuffix(strings.ToLower(p), ".mp3") {
 		w.Header().Set("Content-Type", "audio/mpeg")
 	}
 	http.ServeFile(w, r, p)

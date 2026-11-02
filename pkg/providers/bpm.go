@@ -137,7 +137,7 @@ func (b *BPMStore) Enrich(ctx context.Context, tracks []Track) {
 	b.Apply(tracks)
 	var first []Track
 	for _, t := range tracks {
-		if t.BPM == 0 && len(first) < bpmListLookups && b.claim(t) {
+		if t.BPM == 0 && t.Provider != "soundcloud" && len(first) < bpmListLookups && b.claim(t) {
 			first = append(first, t)
 		}
 	}
@@ -288,7 +288,7 @@ func (b *BPMStore) previewFor(ctx context.Context, t Track) string {
 }
 
 func (b *BPMStore) enqueue(t Track) {
-	if !b.claim(t) {
+	if t.Provider == "soundcloud" || !b.claim(t) {
 		return
 	}
 	b.mu.Lock()

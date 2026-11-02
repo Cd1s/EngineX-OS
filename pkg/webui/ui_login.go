@@ -6,6 +6,7 @@ package webui
 // Either is guarded by a one-time token shown only on the deck's screen.
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -68,6 +69,83 @@ func (s *Server) savedDeezerOwner() deezerOwner {
 		json.Unmarshal(b, &v)
 	}
 	return v
+}
+
+// soundCloudOwner is the linked profile and the credentials that reach it.
+type soundCloudOwner struct {
+	UserID                    int64
+	Username, ClientID, Token string
+}
+
+func (s *Server) soundCloudOwnerPath() string {
+	return filepath.Join(s.cfg.StateDir, "soundcloud-owner.json")
+}
+
+// ownerSoundCloudProvider combines the linked profile with any credentials that
+// were entered for BPM lookups.
+func (s *Server) ownerSoundCloudProvider() *providers.SoundCloud {
+	var owner soundCloudOwner
+	if b, err := os.ReadFile(s.soundCloudOwnerPath()); err == nil {
+		json.Unmarshal(b, &owner)
+	}
+	if s.cfg.BPM != nil {
+		keys := s.cfg.BPM.Config()
+		if owner.ClientID == "" {
+			owner.ClientID = keys.SoundCloudClientID
+		}
+		if owner.Token == "" {
+			owner.Token = keys.SoundCloudToken
+		}
+	}
+	return &providers.SoundCloud{BaseURL: s.cfg.SoundCloudURL, HTTP: s.cfg.HTTP, ClientID: owner.ClientID, Token: owner.Token, UserID: owner.UserID, Username: owner.Username}
+}
+
+// ownerSoundCloud returns the owner's SoundCloud access, if there is any.
+func (s *Server) ownerSoundCloud() *providers.SoundCloud {
+	if p := s.ownerSoundCloudProvider(); ready(p) {
+		return p
+	}
+	return nil
+}
+
+// linkSoundCloud checks and saves what the phone page or the relay collected.
+func (s *Server) linkSoundCloud(ctx context.Context, session *Session, user, clientID, token string) error {
+	current := s.ownerSoundCloudProvider()
+	check := &providers.SoundCloud{BaseURL: s.cfg.SoundCloudURL, HTTP: s.cfg.HTTP, ClientID: current.ClientID, Token: current.Token, UserID: current.UserID, Username: current.Username}
+	if clientID != "" {
+		check.ClientID = clientID
+	}
+	if token != "" {
+		check.Token, check.UserID, check.Username = token, 0, ""
+	}
+	if !ready(check) {
+		return errors.New("soundcloud: a Client ID or OAuth token is required")
+	}
+	if user != "" {
+		if err := check.ResolveUser(ctx, user); err != nil {
+			return err
+		}
+	} else if err := check.Identify(ctx); err != nil {
+		return err
+	} else if _, err := check.Search(ctx, "test"); err != nil && check.UserID == 0 {
+		return err
+	}
+	if err := providers.SaveJSON(s.soundCloudOwnerPath(), soundCloudOwner{check.UserID, check.Username, check.ClientID, check.Token}); err != nil {
+		return err
+	}
+	if s.cfg.BPM != nil {
+		keys := s.cfg.BPM.Config()
+		keys.SoundCloudClientID, keys.SoundCloudToken = check.ClientID, check.Token
+		if err := s.cfg.BPM.SaveConfig(keys); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := session.p.(*providers.SoundCloud); ok {
+		p.ClientID, p.Token, p.UserID, p.Username = check.ClientID, check.Token, check.UserID, check.Username
+	}
+	return nil
 }
 
 // ownerSpotify returns the owner's Spotify login, if there is one.
@@ -286,6 +364,8 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 	switch flow.Provider {
 	case "deezer":
 		phonePage(w, `<h2>连接 Deezer</h2><p>填写资料页或分享链接后，可在碟机上浏览你的公开歌单；也可以填写 arl Cookie，碟机会用它确认账号。云端登录服务的地址和密码也可以在这里改，只想改这两项时其余留空。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="分享链接、资料页地址或用户 ID"><input name="arl" placeholder="arl Cookie（可选）" autocomplete="off"><input name="relayUrl" value="`+html.EscapeString(s.relayStatusView().RelayURL)+`" placeholder="云端登录服务地址" autocomplete="off"><input name="deemixPassword" type="password" placeholder="云端服务新密码（留空不改）" autocomplete="off"><button>连接</button></form>`)
+	case "soundcloud":
+		phonePage(w, `<h2>连接 SoundCloud</h2><p>主页用来浏览喜欢的曲目和歌单。至少填写 Client ID 或 OAuth Token 之一；填 OAuth Token 还可以看私密内容。只播放账号本身可以完整播放的内容。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="主页链接或用户名（可选）" autocomplete="off"><input name="clientId" placeholder="Client ID" autocomplete="off"><input name="token" type="password" placeholder="OAuth Token（可选）" autocomplete="off"><button>连接</button></form>`)
 	case "spotify":
 		session := s.sessionOf(flow)
 		sp, ok := session.p.(*providers.Spotify)
@@ -384,6 +464,12 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 		}
 		if err = s.saveDeezerOwner(p, deezerOwner{user, arl}); err != nil {
 			fail(w, 500, errors.New("could not save the Deezer login"))
+			return
+		}
+		s.finishPhoneLogin(w, flow)
+	case *providers.SoundCloud:
+		if err := s.linkSoundCloud(r.Context(), session, strings.TrimSpace(r.Form.Get("user")), strings.TrimSpace(r.Form.Get("clientId")), strings.TrimSpace(r.Form.Get("token"))); err != nil {
+			phonePage(w, "<h2>无法连接 SoundCloud</h2><p>请检查主页和凭据。</p>"+retry)
 			return
 		}
 		s.finishPhoneLogin(w, flow)
