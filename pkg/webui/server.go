@@ -43,10 +43,15 @@ type Config struct {
 	PublicURL                                                             string
 	SpotifyRedirectURL                                                    string
 	SpotifyClientID, SpotifyTokenPath, SpotifyBaseURL, SpotifyAccountsURL string
-	NeteaseURL, StateDir, DeezerURL                                       string
+	NeteaseURL, StateDir, DeezerURL, DeezerGatewayURL                     string
 	HTTP                                                                  *http.Client
 	// UIDir holds the deck UI settings; empty means the on-device default.
 	UIDir string
+	// RelayURL is the cloud login and audio service. Empty keeps phone logins on
+	// the LAN, where the phone must reach this deck directly.
+	RelayURL string
+	// RemoteDeemixURL is the audio backend unless deemix-config.json names another.
+	RemoteDeemixURL string
 	// RestartEngine replaces "systemctl restart engine.service" in tests.
 	RestartEngine func() error
 	// Factory is useful for embedded integrations and deterministic tests.
@@ -94,7 +99,17 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/jobs", s.submit)
 	s.mux.HandleFunc("GET /api/jobs", s.listJobs)
 	s.mux.HandleFunc("GET /api/jobs/{id}/waveform", s.waveform)
+	s.mux.HandleFunc("GET /api/deemix", s.deemixGet)
+	s.mux.HandleFunc("POST /api/deemix", s.deemixPost)
 	s.tidal = newTidalGateway(s)
+	if jobs != nil {
+		jobs.mu.Lock()
+		jobs.netease = s.neteaseFor
+		if jobs.p.Deemix != nil {
+			jobs.p.Deemix.Remote = s.deemixRemote
+		}
+		jobs.mu.Unlock()
+	}
 	return s
 }
 
@@ -137,7 +152,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != "GET" && r.Method != "HEAD" {
-		if origin := r.Header.Get("Origin"); origin != "" {
+		// Phone pages carry a one-time token instead of a cookie, and iOS web
+		// views send "Origin: null". The console cookie is SameSite=Strict, so a
+		// null origin cannot ride on it either.
+		if origin := r.Header.Get("Origin"); origin != "" && origin != "null" && !strings.HasPrefix(r.URL.Path, "/m/") {
 			u, e := url.Parse(origin)
 			if e != nil || u.Host != r.Host {
 				fail(w, 403, errors.New("same-origin request required"))
@@ -208,10 +226,12 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 	}
 	switch name {
 	case "deezer":
+		arl := ""
 		if user == "" && !guest {
-			user = s.savedDeezerUser()
+			owner := s.savedDeezerOwner()
+			user, arl = owner.UserID, owner.ARL
 		}
-		return &providers.Deezer{BaseURL: s.cfg.DeezerURL, UserID: user, HTTP: s.cfg.HTTP}, nil
+		return &providers.Deezer{BaseURL: s.cfg.DeezerURL, GatewayURL: s.cfg.DeezerGatewayURL, UserID: user, ARL: arl, HTTP: s.cfg.HTTP}, nil
 	case "netease":
 		n := &providers.Netease{BaseURL: s.cfg.NeteaseURL, HTTP: s.cfg.HTTP}
 		if !guest {

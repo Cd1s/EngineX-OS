@@ -1,5 +1,6 @@
-// Package providers reads playlist metadata through public HTTP APIs. It never
-// downloads audio or decrypts media. Each instance belongs to one account.
+// Package providers reads playlist metadata through public HTTP APIs and asks a
+// service for the audio address the account is entitled to. It never decrypts
+// media. Each instance belongs to one account.
 package providers
 
 import (

@@ -1,8 +1,9 @@
 package webui
 
 // Login from the deck's own screen. The deck shows a QR code: NetEase's goes to
-// its app directly; Spotify and Deezer have no such flow, so theirs opens a small
-// page on this deck, guarded by a one-time token shown only on the deck's screen.
+// its app directly; Spotify and Deezer have no such flow, so theirs opens the
+// cloud relay's page (see relay.go), or without a relay a small page on this deck.
+// Either is guarded by a one-time token shown only on the deck's screen.
 
 import (
 	"crypto/subtle"
@@ -14,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -33,36 +33,67 @@ type loginFlow struct {
 	Status   string `json:"status"` // waiting, scanned, done, expired
 	token    string
 	key      string // NetEase unikey
-	target   string // what the QR code encodes
+	Target   string `json:"target"` // what the QR code encodes
 	session  string
+	viaRelay bool
 	expires  time.Time
 }
 
-var deezerUser = regexp.MustCompile(`(?:^|/profile/)(\d{1,20})(?:[/?#]|$)`)
+// DefaultSpotifyClientID is this deck's registered public PKCE client.
+const DefaultSpotifyClientID = "1c7c775b12b642b38e0884afcfd6169c"
+
+// deezerOwner is the linked profile and, if given, the login cookie.
+type deezerOwner struct{ UserID, ARL string }
 
 func (s *Server) deezerOwnerPath() string { return filepath.Join(s.cfg.StateDir, "deezer-owner.json") }
 func (s *Server) spotifyClientPath() string {
 	return filepath.Join(s.cfg.StateDir, "spotify-client-id")
 }
 
-// spotifyClientID prefers the configured ID, then the one saved from the phone page.
+// spotifyClientID prefers the configured ID, then a saved one, then the default.
 func (s *Server) spotifyClientID() string {
 	if s.cfg.SpotifyClientID != "" {
 		return s.cfg.SpotifyClientID
 	}
 	b, _ := os.ReadFile(s.spotifyClientPath())
-	return strings.TrimSpace(string(b))
+	if id := strings.TrimSpace(string(b)); id != "" {
+		return id
+	}
+	return DefaultSpotifyClientID
 }
 
-// savedDeezerUser is the public profile the owner linked on the phone page.
-func (s *Server) savedDeezerUser() string {
-	b, err := os.ReadFile(s.deezerOwnerPath())
-	if err != nil {
-		return ""
+func (s *Server) savedDeezerOwner() deezerOwner {
+	var v deezerOwner
+	if b, err := os.ReadFile(s.deezerOwnerPath()); err == nil {
+		json.Unmarshal(b, &v)
 	}
-	var v struct{ UserID string }
-	json.Unmarshal(b, &v)
-	return v.UserID
+	return v
+}
+
+// neteaseFor picks the login a session may fetch audio with. The owner's cookie
+// serves the owner's sessions; a guest only ever uses a login of their own.
+func (s *Server) neteaseFor(session string, guest bool) *providers.Netease {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var p providers.Provider
+	if guest {
+		if v := s.sessions[session]; v != nil {
+			p = v.p
+		}
+	} else {
+		for _, v := range s.sessions {
+			if !v.Guest && v.Provider == "netease" {
+				p = v.p
+			}
+		}
+		if p == nil && !s.ownerDeleted["netease"] {
+			p, _ = s.makeProvider("netease", false, "")
+		}
+	}
+	if n, ok := p.(*providers.Netease); ok && ready(n) {
+		return n
+	}
+	return nil
 }
 
 func lanHost() string {
@@ -118,9 +149,15 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 			fail(w, 502, err)
 			return
 		}
-		flow.key, flow.target = q.Key, q.URL
+		flow.key, flow.Target = q.Key, q.URL
+	} else if base, _ := s.relaySettings(); base != "" {
+		// The relay opens a session by itself when a phone arrives first, so a
+		// failed registration here does not stop the QR code from working.
+		flow.viaRelay = true
+		s.relayRegister(r.Context(), flow)
+		flow.Target = s.relayPage(flow)
 	} else {
-		flow.target = "http://" + lanHost() + ":8080/m/" + provider + "?t=" + flow.token
+		flow.Target = "http://" + lanHost() + ":8080/m/" + provider + "?t=" + flow.token
 	}
 	s.mu.Lock()
 	s.logins[provider] = flow
@@ -143,7 +180,7 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	session := s.sessions[flow.session]
-	status, key := flow.Status, flow.key
+	status, key, token, viaRelay := flow.Status, flow.key, flow.token, flow.viaRelay
 	expired := time.Now().After(flow.expires)
 	s.mu.Unlock()
 	switch {
@@ -159,6 +196,8 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 		if status == "" {
 			status = "waiting"
 		}
+	case viaRelay && status != "done" && status != "linked":
+		status = s.relayStatus(r.Context(), session, token, status)
 	case ready(session.p):
 		// A phone page finished. A deck already logged in reaches this too, which
 		// is why the deck only offers the QR code after asking for a new login.
@@ -170,6 +209,7 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 	flow.Status = status
 	if status == "done" && session != nil {
 		session.Ready = true
+		flow.token = ""
 	}
 	s.mu.Unlock()
 	respond(w, flow)
@@ -181,7 +221,7 @@ func (s *Server) loginQR(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, errors.New("no login in progress"))
 		return
 	}
-	png, err := qrcode.Encode(flow.target, qrcode.Medium, 640)
+	png, err := qrcode.Encode(flow.Target, qrcode.Medium, 640)
 	if err != nil {
 		fail(w, 500, err)
 		return
@@ -216,12 +256,8 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 	action := "/m/" + flow.Provider + "?t=" + url.QueryEscape(flow.token)
 	switch flow.Provider {
 	case "deezer":
-		phonePage(w, `<h2>连接 Deezer</h2><p>Deezer 已不再向新应用开放登录授权，这里连接的是公开资料页：填写后可在碟机上浏览你的公开歌单。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="https://www.deezer.com/profile/数字 或用户 ID" required><button>连接</button></form>`)
+		phonePage(w, `<h2>连接 Deezer</h2><p>填写资料页或分享链接后，可在碟机上浏览你的公开歌单；也可以填写 arl Cookie，碟机会用它确认账号。Deemix 密码用于从你自己的 Deemix 后端取音频，只想改密码时其余留空。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="分享链接、资料页地址或用户 ID"><input name="arl" placeholder="arl Cookie（可选）" autocomplete="off"><input name="deemixUrl" value="`+html.EscapeString(s.deemixStatus().URL)+`" placeholder="Deemix 后端地址" autocomplete="off"><input name="deemixPassword" type="password" placeholder="Deemix 新密码（留空不改）" autocomplete="off"><button>连接</button></form>`)
 	case "spotify":
-		if s.spotifyClientID() == "" {
-			phonePage(w, `<h2>连接 Spotify</h2><p>Spotify 要求每个设备使用自己注册的应用。请到 developer.spotify.com 创建应用，Redirect URI 填写 <code>`+spotifyLoopbackRedirect+`</code>，再把 Client ID 填到这里。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="client" placeholder="Client ID" required autocomplete="off"><button>下一步</button></form>`)
-			return
-		}
 		session := s.sessionOf(flow)
 		sp, ok := session.p.(*providers.Spotify)
 		if !ok {
@@ -245,6 +281,16 @@ func (s *Server) sessionOf(flow *loginFlow) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sessions[flow.session]
+}
+
+func (s *Server) saveDeezerOwner(p *providers.Deezer, owner deezerOwner) error {
+	if err := providers.SaveJSON(s.deezerOwnerPath(), owner); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	p.UserID, p.ARL = owner.UserID, owner.ARL
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Server) finishPhoneLogin(w http.ResponseWriter, flow *loginFlow) {
@@ -272,33 +318,47 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 	retry := `<p><a class="b" href="/m/` + flow.Provider + `?t=` + url.QueryEscape(flow.token) + `">重试</a></p>`
 	switch p := session.p.(type) {
 	case *providers.Deezer:
-		m := deezerUser.FindStringSubmatch(strings.TrimSpace(r.Form.Get("user")))
-		if m == nil {
+		address, password := strings.TrimSpace(r.Form.Get("deemixUrl")), r.Form.Get("deemixPassword")
+		if address != "" && !validDeemixURL(address) {
+			phonePage(w, "<h2>Deemix 地址必须是 https，或内网 IP 的 http</h2>"+retry)
+			return
+		}
+		if err := s.updateDeemixConfig(optional(address), optional(password)); err != nil {
+			fail(w, 500, errors.New("could not save the Deemix settings"))
+			return
+		}
+		if strings.TrimSpace(r.Form.Get("user")+r.Form.Get("arl")) == "" {
+			s.finishPhoneLogin(w, flow)
+			return
+		}
+		check := &providers.Deezer{BaseURL: s.cfg.DeezerURL, GatewayURL: s.cfg.DeezerGatewayURL, HTTP: s.cfg.HTTP}
+		arl := strings.TrimSpace(r.Form.Get("arl"))
+		var user string
+		var err error
+		if arl != "" {
+			if user, err = check.IdentifyARL(r.Context(), arl); err != nil {
+				phonePage(w, "<h2>这个 arl 无效或已过期</h2>"+retry)
+				return
+			}
+		} else if user, err = check.ResolveUser(r.Context(), r.Form.Get("user")); err != nil {
 			phonePage(w, "<h2>没有识别出用户 ID</h2>"+retry)
 			return
 		}
-		check := &providers.Deezer{BaseURL: s.cfg.DeezerURL, UserID: m[1], HTTP: s.cfg.HTTP}
-		if _, err := check.Playlists(r.Context()); err != nil {
+		check.UserID = user
+		if _, err = check.Playlists(r.Context()); err != nil {
 			phonePage(w, "<h2>无法读取这个资料页的公开歌单</h2>"+retry)
 			return
 		}
-		if err := providers.SaveJSON(s.deezerOwnerPath(), struct{ UserID string }{m[1]}); err != nil {
-			fail(w, 500, err)
+		// Linking the same profile again by its link keeps the saved login.
+		if old := s.savedDeezerOwner(); arl == "" && old.UserID == user {
+			arl = old.ARL
+		}
+		if err = s.saveDeezerOwner(p, deezerOwner{user, arl}); err != nil {
+			fail(w, 500, errors.New("could not save the Deezer login"))
 			return
 		}
-		s.mu.Lock()
-		p.UserID = m[1]
-		s.mu.Unlock()
 		s.finishPhoneLogin(w, flow)
 	case *providers.Spotify:
-		if client := strings.TrimSpace(r.Form.Get("client")); client != "" {
-			if err := os.WriteFile(s.spotifyClientPath(), []byte(client+"\n"), 0o600); err != nil {
-				fail(w, 500, err)
-				return
-			}
-			http.Redirect(w, r, "/m/spotify?t="+url.QueryEscape(flow.token), http.StatusSeeOther)
-			return
-		}
 		u, err := url.Parse(strings.TrimSpace(r.Form.Get("callback")))
 		if err != nil {
 			phonePage(w, "<h2>地址不正确</h2>"+retry)

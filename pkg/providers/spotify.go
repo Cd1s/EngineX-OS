@@ -85,9 +85,31 @@ func (s *Spotify) LoadToken() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Token = t
-	if s.ClientID == "" {
+	// Only the client that minted a token can refresh it.
+	if t.ClientID != "" {
 		s.ClientID = t.ClientID
 	}
+	return nil
+}
+
+// SetToken installs and saves a token obtained elsewhere, such as the cloud relay.
+func (s *Spotify) SetToken(t Token) error {
+	if t.AccessToken == "" {
+		return errors.New("spotify: token missing access token")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t.Expiry.IsZero() && t.ExpiresIn > 0 {
+		t.Expiry = time.Now().Add(time.Duration(t.ExpiresIn) * time.Second)
+	}
+	if t.ClientID != "" {
+		s.ClientID = t.ClientID
+	}
+	t.ClientID = s.ClientID
+	if err := SaveJSON(s.TokenPath, t); err != nil {
+		return err
+	}
+	s.Token = t
 	return nil
 }
 func (s *Spotify) tokenRequest(ctx context.Context, v url.Values) error {
