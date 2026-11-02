@@ -26,9 +26,15 @@ import (
 
 const hintPlaylist = "00000000-0000-5000-8000-000000005000"
 
+// The deck shows NetEase, Spotify and Deezer as separate sources. They share
+// Engine's single TIDAL client, so the source the user last opened (the UI
+// "scope") decides what this gateway answers. Loaded tracks keep working after
+// a switch because track IDs are global.
+func hintTitle(scope string) string { return "请登录：sc5000.lan:8080" }
+
 var (
 	tidalNS        = uuid.MustParse("6f1c5a52-3c55-4c2e-9d0b-5c5000000000")
-	providerLabels = map[string]string{"netease": "网易云", "spotify": "Spotify", "deezer": "Deezer"}
+	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer"}
 	providerOrder  = map[string]int{"netease": 0, "spotify": 1, "deezer": 2}
 )
 
@@ -94,6 +100,8 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g := &tidalGateway{s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
+	g.mux.HandleFunc("GET /v1/sc5000/ui", s.uiStatus)
+	g.mux.HandleFunc("POST /v1/sc5000/ui", s.uiUpdate)
 	g.mux.HandleFunc("GET /v1/ping", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
 	g.mux.HandleFunc("GET /v1/sessions", g.session)
 	g.mux.HandleFunc("GET /v1/users/{id}/subscription", g.subscription)
@@ -266,7 +274,7 @@ func playlistJSON(id, title, description string, count int) map[string]any {
 }
 func (g *tidalGateway) refJSON(id string, ref playlistRef) map[string]any {
 	label := providerLabels[ref.provider]
-	return playlistJSON(id, "["+label+"] "+ref.list.Title, label+" 歌单，经 SC5000 Stream Sync 下载播放", ref.list.Count)
+	return playlistJSON(id, ref.list.Title, label+" 歌单，经 SC5000 Stream Sync 下载播放", ref.list.Count)
 }
 func page(r *http.Request, def int, items []any) map[string]any {
 	q := r.URL.Query()
@@ -280,11 +288,14 @@ func page(r *http.Request, def int, items []any) map[string]any {
 	return map[string]any{"limit": limit, "offset": offset, "totalNumberOfItems": len(items), "items": items[offset:end]}
 }
 func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
-	sessions := g.sources()
+	scope := g.s.scope()
+	sessions := []*Session{}
+	for _, v := range g.sources() {
+		if v.Provider == scope {
+			sessions = append(sessions, v)
+		}
+	}
 	lists := each(r.Context(), sessions, func(ctx context.Context, v *Session) ([]providers.Playlist, error) { return v.p.Playlists(ctx) })
-	defaults := each(r.Context(), []*providers.Deezer{g.catalog}, func(ctx context.Context, d *providers.Deezer) ([]providers.Playlist, error) {
-		return d.ChartPlaylists(ctx)
-	})
 	favorites := strings.HasSuffix(r.URL.Path, "/favorites/playlists")
 	items := []any{}
 	add := func(v map[string]any) {
@@ -298,27 +309,30 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, v)
 	}
-	loggedIn := false
 	for i, v := range sessions {
-		loggedIn = loggedIn || v.Provider == "netease" || v.Provider == "spotify"
 		for _, p := range lists[i] {
 			ref := playlistRef{v.ID, v.Provider, p}
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}
-	if !loggedIn {
-		add(playlistJSON(hintPlaylist, "请访问 sc5000.lan:8080 扫码登录网易云/Spotify", "手机打开 http://sc5000.lan:8080 登录后，歌单会出现在这里", 0))
-	}
-	for _, p := range defaults[0] {
-		ref := playlistRef{"", "deezer", p}
-		add(g.refJSON(g.addPlaylist(ref), ref))
+	// Deezer's public charts need no login; the others explain how to log in.
+	if scope == "deezer" {
+		defaults := each(r.Context(), []*providers.Deezer{g.catalog}, func(ctx context.Context, d *providers.Deezer) ([]providers.Playlist, error) {
+			return d.ChartPlaylists(ctx)
+		})
+		for _, p := range defaults[0] {
+			ref := playlistRef{"", "deezer", p}
+			add(g.refJSON(g.addPlaylist(ref), ref))
+		}
+	} else if len(sessions) == 0 {
+		add(playlistJSON(hintPlaylist, hintTitle(scope), "手机打开 http://sc5000.lan:8080 登录后，歌单会出现在这里", 0))
 	}
 	respond(w, page(r, 100, items))
 }
 func (g *tidalGateway) playlist(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("uuid")
 	if id == hintPlaylist {
-		respond(w, playlistJSON(hintPlaylist, "请访问 sc5000.lan:8080 扫码登录网易云/Spotify", "", 0))
+		respond(w, playlistJSON(hintPlaylist, hintTitle(g.s.scope()), "", 0))
 		return
 	}
 	ref, ok := g.list(id)
@@ -347,6 +361,7 @@ func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
 	}
 	return map[string]any{"id": id, "title": t.Title, "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": true, "streamReady": true, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": providerLabels[t.Provider], "url": "http://sc5000.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": crc32.ChecksumIEEE([]byte(t.Album)), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
 }
+
 // trackItems wraps each track as {"item":…,"type":"track"} (playlist items and
 // favourites) and repeats its fields flat, as plain /tracks listings return them.
 func (g *tidalGateway) trackItems(session string, guest bool, tracks []providers.Track) []any {
@@ -399,7 +414,7 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 	items := []any{}
 	for _, v := range g.sources() {
-		if v.Provider != "netease" || v.Guest {
+		if v.Provider != "netease" || v.Guest || g.s.scope() != "netease" {
 			continue
 		}
 		if lists, err := v.p.Playlists(r.Context()); err == nil && len(lists) > 0 {
@@ -422,10 +437,20 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 		guest             bool
 		p                 any
 	}
-	sources := []source{{"", "deezer", false, g.catalog}}
+	scope := g.s.scope()
+	sources := []source{}
+	if scope == "deezer" {
+		sources = append(sources, source{"", "deezer", false, g.catalog})
+	}
 	for _, v := range g.sources() {
-		if v.Provider != "deezer" {
+		if v.Provider == scope && v.Provider != "deezer" {
 			sources = append(sources, source{v.ID, v.Provider, v.Guest, v.p})
+		}
+	}
+	// NetEase search works without an account, so it is usable before login.
+	if scope == "netease" && len(sources) == 0 {
+		if p, err := g.s.makeProvider("netease", true, ""); err == nil {
+			sources = append(sources, source{"", "netease", true, p})
 		}
 	}
 	tracks := each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Track, error) {
@@ -435,7 +460,8 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 		return nil, nil
 	})
 	lists := each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Playlist, error) {
-		if p, ok := v.p.(playlistSearcher); ok {
+		// A logged-out NetEase search has no session to read the playlist with later.
+		if p, ok := v.p.(playlistSearcher); ok && (v.session != "" || v.provider == "deezer") {
 			return p.SearchPlaylists(ctx, query)
 		}
 		return nil, nil
@@ -487,6 +513,7 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ur
 	}
 	return "http://" + host + "/v1/stream/" + strconv.FormatInt(id, 10) + "." + codec, codec
 }
+
 // knownCodec downloads first when MP3 fallback is allowed, because the codec
 // is only known afterwards; otherwise Deemix delivers FLAC or fails.
 func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref trackRef) bool {

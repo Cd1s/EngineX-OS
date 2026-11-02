@@ -1,0 +1,238 @@
+# English	简体中文	繁體中文 — exact UI strings; tracks, artists and playlists never pass through here.
+24 Hour Clock	24 小时制	24 小時制
+About / Update	关于 / 更新	關於 / 更新
+Account	账号	帳號
+Added	添加日期	新增日期
+Album	专辑	專輯
+Are you sure you want to log out of your Engine DJ Profile?	确定要退出 Engine DJ 账号吗？	確定要登出 Engine DJ 帳號嗎？
+Assign Input to	输入分配到	輸入分配到
+Attenuation	衰减	衰減
+Auto Connect	自动连接	自動連線
+Bass	低音	低音
+Battery Charging	电池充电中	電池充電中
+Battery Power	电池供电	電池供電
+Battery level is low	电池电量低	電池電量低
+Beat Grid Edit	节拍网格编辑	節拍網格編輯
+Bluetooth	蓝牙	藍牙
+Bluetooth Device Volume	蓝牙设备音量	藍牙裝置音量
+BPM Filter Tolerance	BPM 筛选容差	BPM 篩選容差
+BPM Range	BPM 范围	BPM 範圍
+CANCEL	取消	取消
+CLEAR	清除	清除
+CLOSE	关闭	關閉
+Calibrate	校准	校準
+Calibrate Crossfader	校准交叉推子	校準交叉推桿
+Calibrating platter touch sensitivity	正在校准转盘触摸灵敏度	正在校準轉盤觸控靈敏度
+Cancel	取消	取消
+Change Storage Device	更换存储设备	更換儲存裝置
+Clear Database	清空数据库	清空資料庫
+Clear Prepare list?	清空准备列表？	清空準備清單？
+Clear Waveform/Cue/Loop data	清除波形/Cue/Loop 数据	清除波形/Cue/Loop 資料
+Close	关闭	關閉
+Cloud	云端	雲端
+Collection	曲库	曲庫
+Comment	备注	備註
+Computer Mode	电脑模式	電腦模式
+Confirm	确认	確認
+Connect New Sources	连接新来源	連接新來源
+Connection	连接	連線
+Continue	继续	繼續
+Cue Solo Mode	Cue 独听模式	Cue 獨聽模式
+Current	当前	目前
+Database is up to date.	数据库已是最新。	資料庫已是最新。
+Database not found.	未找到数据库。	找不到資料庫。
+Date	日期	日期
+Day Mode	日间模式	日間模式
+Decks	碟机	碟機
+Decrease BPM	降低 BPM	降低 BPM
+Default Beat Jump Size	默认节拍跳跃长度	預設節拍跳躍長度
+Default Loop Size	默认 Loop 长度	預設 Loop 長度
+Default Scratch Mode	默认搓碟模式	預設刷碟模式
+Default Speed Range	默认变速范围	預設變速範圍
+Device	设备	裝置
+Device Storage	设备存储	裝置儲存
+Devices	设备	裝置
+Display Album Art	显示专辑封面	顯示專輯封面
+Done	完成	完成
+DONE	完成	完成
+Double BPM	BPM 翻倍	BPM 加倍
+Download in progress	正在下载	正在下載
+Download Interrupted	下载已中断	下載已中斷
+Eject	弹出	退出
+Eject anyway	仍然弹出	仍然退出
+Eject track	卸载曲目	卸載曲目
+Enabled	已启用	已啟用
+Encoder Behavior	旋钮行为	旋鈕行為
+Engine Lighting	Engine 灯光	Engine 燈光
+Factory Reset	恢复出厂设置	恢復原廠設定
+Failed to load track	曲目加载失败	曲目載入失敗
+Features	功能	功能
+Fetching more content..	正在加载更多内容…	正在載入更多內容…
+Fetching more tracks...	正在加载更多曲目…	正在載入更多曲目…
+Fetching...	正在加载…	正在載入…
+File Type	文件类型	檔案類型
+File unavailable.	文件不可用。	檔案無法使用。
+Files	文件	檔案
+Filters	筛选	篩選
+Firmware Update Mode	固件更新模式	韌體更新模式
+Folder	文件夹	資料夾
+Force	强制	強制
+General Settings	常规设置	一般設定
+Genre	流派	曲風
+Half BPM	BPM 减半	BPM 減半
+Headphone Gain	耳机增益	耳機增益
+Hide Played	隐藏已播放	隱藏已播放
+Hide Title/Artist	隐藏歌名/歌手	隱藏歌名/歌手
+History	历史记录	歷史紀錄
+Ignore	忽略	忽略
+Import	导入	匯入
+Increase BPM	提高 BPM	提高 BPM
+Info	信息	資訊
+Join	加入	加入
+Key	调性	調性
+Key Adjust	调性调整	調性調整
+Key Filter	调性筛选	調性篩選
+Key Notation	调性记法	調性記法
+Key Sync Mode	调性同步模式	調性同步模式
+LOG IN	登录	登入
+LOG OUT	退出登录	登出
+Label	厂牌	廠牌
+Large	大	大
+Legal	法律信息	法律資訊
+Lighting	灯光	燈光
+Lock Playing Deck	锁定播放中的碟机	鎖定播放中的碟機
+Log In	登录	登入
+Logged Out	已退出登录	已登出
+Login Failed	登录失败	登入失敗
+Lost Connection	连接已断开	連線已中斷
+Maintain Play State on Load	加载时保持播放状态	載入時保持播放狀態
+Match to Deck	匹配到碟机	比對到碟機
+Mid	中音	中音
+Mixer	混音台	混音器
+Motorized Platter Start	电动转盘启动	電動轉盤啟動
+Name	名称	名稱
+Needle Lock	唱针锁定	唱針鎖定
+Network	网络	網路
+New features available	有新功能可用	有新功能可用
+No Files Found	未找到文件	找不到檔案
+No History Lists Found	未找到历史列表	找不到歷史清單
+No Playlists Found	未找到歌单	找不到歌單
+No Search Results	无搜索结果	沒有搜尋結果
+No Tracks Found	未找到曲目	找不到曲目
+No connection	无连接	沒有連線
+No network connection was detected.	未检测到网络连接。	未偵測到網路連線。
+Not Enough Disk Space	磁盘空间不足	磁碟空間不足
+Nudge Sensitivity	微调灵敏度	微調靈敏度
+Ok	确定	確定
+On Air Mode	On Air 模式	On Air 模式
+Open	打开	開啟
+Other	其他	其他
+Output Equalizer	输出均衡器	輸出等化器
+Pad Lock	Pad 锁定	Pad 鎖定
+Pairing Failed	配对失败	配對失敗
+Password	密码	密碼
+Paused	已暂停	已暫停
+Paused Hot Cue Behavior	暂停时 Hot Cue 行为	暫停時 Hot Cue 行為
+Paused Saved Loop Behavior	暂停时 Saved Loop 行为	暫停時 Saved Loop 行為
+Performance Pads	演奏 Pad	演奏 Pad
+Pitch Bend Behavior	弯音行为	彎音行為
+Pitch Control Type	音高控制类型	音高控制類型
+Pitch Range	音高范围	音高範圍
+Platter Touch Sensitivity	转盘触摸灵敏度	轉盤觸控靈敏度
+Player #	碟机编号 #	碟機編號 #
+Playhead Position	播放头位置	播放頭位置
+Playlists	歌单	歌單
+Please check your internet connection.	请检查网络连接。	請檢查網路連線。
+Please wait...	请稍候…	請稍候…
+Preview Volume	预览音量	預覽音量
+Quantize	量化	量化
+RESET	重置	重設
+Read-only	只读	唯讀
+Reboot	重启	重新開機
+Record	录音	錄音
+Recording	录音	錄音
+Recording Gain	录音增益	錄音增益
+Reload	重新加载	重新載入
+Remind Later	稍后提醒	稍後提醒
+Reset	重置	重設
+Reset Played Tracks	重置已播放曲目	重設已播放曲目
+Reset to Defaults	恢复默认	恢復預設
+Restart	重启	重新啟動
+RGB Waveform Creation	生成 RGB 波形	產生 RGB 波形
+RGB Waveforms and Track Overviews will be built when loading to deck.	RGB 波形和曲目概览会在加载到碟机时生成。	RGB 波形和曲目概覽會在載入碟機時產生。
+SELECT	选择	選擇
+Sampler Output	采样器输出	取樣器輸出
+Sampler Volume	采样器音量	取樣器音量
+Saved Loop Behavior	Saved Loop 行为	Saved Loop 行為
+Screen Saver Time	屏保时间	螢幕保護時間
+Search	搜索	搜尋
+Search All	搜索全部	搜尋全部
+Security	安全	安全性
+Select	选择	選擇
+Select Wi-Fi network	选择 Wi-Fi 网络	選擇 Wi-Fi 網路
+Select storage device	选择存储设备	選擇儲存裝置
+Select your Time Zone	选择时区	選擇時區
+Services	服务	服務
+Set Time Zone Manually	手动设置时区	手動設定時區
+Smart Scratch	智能搓碟	智慧刷碟
+Source	来源	來源
+Standard	标准	標準
+Start	开始	開始
+Statistics	统计	統計
+Status	状态	狀態
+Streaming	流媒体	串流
+Sync	同步	同步
+Sync Button Action	Sync 按钮动作	Sync 按鈕動作
+Sync Indicator	同步指示	同步指示
+Sync Mode	同步模式	同步模式
+Sync Time	同步时间	同步時間
+System Date	系统日期	系統日期
+Time Format	时间格式	時間格式
+Time Zone	时区	時區
+Time/Date	时间/日期	時間/日期
+Touch deck to load playlist	触摸碟机以加载歌单	觸控碟機以載入歌單
+Track Download Failed	曲目下载失败	曲目下載失敗
+Track End Warning	曲目结束提醒	曲目結束提醒
+Track Not Available	曲目不可用	曲目無法使用
+Track Preview	曲目预览	曲目預覽
+Track Speed	曲目速度	曲目速度
+Track Start Position	曲目起始位置	曲目起始位置
+Track Title	曲目标题	曲目標題
+Tracks	曲目	曲目
+Treble	高音	高音
+Turntable Mode	唱盘模式	唱盤模式
+Update	更新	更新
+Update FW	更新固件	更新韌體
+Update Firmware	更新固件	更新韌體
+Update Now	立即更新	立即更新
+Username	用户名	使用者名稱
+VU Meter Mode	VU 表模式	VU 表模式
+Waveform Orientation	波形方向	波形方向
+Waveform Style	波形样式	波形樣式
+Waveforms	波形	波形
+Wi-Fi Login Error	Wi-Fi 登录错误	Wi-Fi 登入錯誤
+You're running the latest version	已是最新版本	已是最新版本
+Language	语言	語言
+My Playlists	我的歌单	我的歌單
+My Collection	我的收藏	我的收藏
+On	开	開
+Off	关	關
+Yes	是	是
+No	否	否
+Light	浅色	淺色
+Dark	深色	深色
+Control Center	控制中心	控制中心
+Layout	布局	版面
+Profile	配置	設定檔
+Settings	设置	設定
+Display	显示	顯示
+Library	曲库	曲庫
+Playback	播放	播放
+Safety	安全	安全
+Performance	演奏	演奏
+Cues/Loops	Cue / Loop	Cue / Loop
+Cues & Loops	Cue / Loop	Cue / Loop
+Deck Colors	碟机颜色	碟機顏色
+Theme	主题	主題
+Advanced	高级	進階
+Fx	效果	效果
