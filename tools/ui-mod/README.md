@@ -31,7 +31,8 @@ while running crashed PID 1 once.
   Tracks already loaded on a deck keep working after a switch.
 - Audio for streaming tracks comes from a Deemix REST bridge on the deck at
   127.0.0.1:6595, then the deck's NetEase login. See `docs/stream-sync.md`.
-- My Collection, Featured, Genres, Moods and TIDAL Rising are hidden. Encoder
+- Featured, Genres, Moods and TIDAL Rising are hidden, and My Collection too except
+  on NetEase, where it opens saved albums. TIDAL itself shows them all. Encoder
   navigation can still land on those rows; the gateway answers them with empty
   listings.
 - Encoder navigation of the Source screen reaches only stock rows. The three

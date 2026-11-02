@@ -169,6 +169,14 @@ func (n *Netease) web(ctx context.Context, path string, q url.Values) (map[strin
 			items[i] = `{"id":` + id + `}`
 		}
 		fields["ids"], fields["c"] = "["+strings.Join(ids, ",")+"]", "["+strings.Join(items, ",")+"]"
+	case "/album/sublist":
+		api, fields["limit"], fields["offset"], fields["total"] = "/album/sublist", q.Get("limit"), q.Get("offset"), "true"
+	case "/album":
+		api = "/v1/album/" + q.Get("id")
+	case "/dj/sublist":
+		api, fields["limit"], fields["offset"], fields["total"] = "/djradio/get/subed", q.Get("limit"), q.Get("offset"), "true"
+	case "/dj/program":
+		api, fields["radioId"], fields["limit"], fields["offset"], fields["asc"] = "/dj/program/byradio", q.Get("id"), q.Get("limit"), q.Get("offset"), "false"
 	case "/song/url/v1":
 		api, fields["ids"], fields["level"], fields["encodeType"] = "/song/enhance/player/url/v1", "["+q.Get("id")+"]", q.Get("level"), "flac"
 	case "/cloudsearch":

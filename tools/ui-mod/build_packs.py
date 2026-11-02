@@ -427,7 +427,7 @@ def edits(dev: bool):
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml": [
             ('				objectName: "Browser_Collection_StackView_ViewDelegate"\n',
              '				objectName: "Browser_Collection_StackView_ViewDelegate"\n'
-             '				readonly property bool scHidden: breadcrumbView.isStreamingContent && root.scScope !== "tidal" && contentView.StackView.index === 0 && !!modelData && ["My Collection", "Featured", "Genres", "Moods", "TIDAL Rising"].indexOf(modelData.display) >= 0\n'
+             '				readonly property bool scHidden: breadcrumbView.isStreamingContent && root.scScope !== "tidal" && contentView.StackView.index === 0 && !!modelData && (root.scScope === "netease" ? ["Featured", "Genres", "Moods", "TIDAL Rising"] : ["My Collection", "Featured", "Genres", "Moods", "TIDAL Rising"]).indexOf(modelData.display) >= 0\n'
              # The view assigns visible itself and would undo a binding. These rows
              # end the list, so what stays is blank space below My Playlists.
              '				opacity: scHidden ? 0 : 1\n'),

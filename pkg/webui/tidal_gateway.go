@@ -119,6 +119,9 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/users/{id}/playlists", g.playlists)
 	g.mux.HandleFunc("GET /v1/users/{id}/favorites/playlists", g.playlists)
 	g.mux.HandleFunc("GET /v1/users/{id}/favorites/tracks", g.favoriteTracks)
+	g.mux.HandleFunc("GET /v1/users/{id}/favorites/albums", g.favoriteAlbums)
+	g.mux.HandleFunc("GET /v1/albums/{id}/tracks", g.albumTracks)
+	g.mux.HandleFunc("GET /v1/albums/{id}/items", g.albumTracks)
 	g.mux.HandleFunc("GET /v1/playlists/{uuid}", g.playlist)
 	g.mux.HandleFunc("GET /v1/playlists/{uuid}/tracks", g.playlistTracks)
 	g.mux.HandleFunc("GET /v1/playlists/{uuid}/items", g.playlistTracks)
@@ -519,6 +522,66 @@ func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 	}
 	respond(w, page(r, 500, items))
 }
+
+// ownerNetease is the owner's NetEase session while the deck is showing NetEase.
+func (g *tidalGateway) ownerNetease() (*Session, *providers.Netease) {
+	if g.s.scope() != "netease" {
+		return nil, nil
+	}
+	for _, v := range g.sources() {
+		if n, ok := v.p.(*providers.Netease); ok && !v.Guest {
+			return v, n
+		}
+	}
+	return nil, nil
+}
+
+func (g *tidalGateway) favoriteAlbums(w http.ResponseWriter, r *http.Request) {
+	items := []any{}
+	if _, n := g.ownerNetease(); n != nil {
+		albums, err := n.FavoriteAlbums(r.Context())
+		if err != nil {
+			log.Printf("stream-sync: gateway source failed: %v", err)
+		}
+		for _, a := range albums {
+			names := []any{}
+			for i, artist := range a.Artists {
+				kind := "FEATURED"
+				if i == 0 {
+					kind = "MAIN"
+				}
+				names = append(names, map[string]any{"id": tidalNumericID(artist.Name), "name": artist.Name, "type": kind, "picture": nil})
+			}
+			var main any
+			if len(names) > 0 {
+				main = names[0]
+			}
+			v := map[string]any{"id": a.ID, "title": a.Name, "numberOfTracks": a.Size, "numberOfVideos": 0, "numberOfVolumes": 1, "duration": 0, "releaseDate": "2000-01-01", "streamStartDate": "2000-01-01T00:00:00.000+0000", "cover": nil, "streamReady": true, "allowStreaming": true, "premiumStreamingOnly": false, "copyright": providerLabels["netease"], "explicit": false, "popularity": 0, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "type": "ALBUM", "url": "http://sc5000.lan:8080", "artist": main, "artists": names}
+			flat := map[string]any{"item": v, "created": tidalTime(time.Now())}
+			for k, f := range v {
+				flat[k] = f
+			}
+			items = append(items, flat)
+		}
+	}
+	respond(w, page(r, 100, items))
+}
+
+func (g *tidalGateway) albumTracks(w http.ResponseWriter, r *http.Request) {
+	session, n := g.ownerNetease()
+	if n == nil {
+		respond(w, page(r, 100, []any{}))
+		return
+	}
+	tracks, err := n.Tracks(r.Context(), "album:"+r.PathValue("id"))
+	if err != nil {
+		fail(w, 502, err)
+		return
+	}
+	g.s.cfg.BPM.Enrich(r.Context(), tracks)
+	respond(w, page(r, 500, g.trackItems(session.ID, false, tracks)))
+}
+
 func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
 	if query == "" || len(query) > 200 {

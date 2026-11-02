@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -19,8 +19,8 @@ const (
 	maxMediaBytes  = 2 << 30
 )
 
-// Only files named by Save are ever evicted.
-const savedPrefix = "netease-"
+// Only downloads this pipeline named are ever evicted: Save's and Deemix's <id>.
+var evictable = regexp.MustCompile(`^(netease-)?\d+\.(flac|mp3)$`)
 
 func (c *Client) media() *http.Client {
 	if c.Media != nil {
@@ -103,12 +103,12 @@ func (c *Client) Save(ctx context.Context, name, address string) (*Download, err
 		return nil, err
 	}
 	dl.Path = final
-	c.trim(final)
+	c.Trim(final)
 	return dl, nil
 }
 
-// trim removes the oldest saved files beyond MaxCache, never the one just saved.
-func (c *Client) trim(keep string) {
+// Trim removes the oldest downloads beyond MaxCache, never the one just saved.
+func (c *Client) Trim(keep string) {
 	if c.MaxCache <= 0 {
 		return
 	}
@@ -130,7 +130,7 @@ func (c *Client) trim(keep string) {
 		}
 		total += info.Size()
 		path := filepath.Join(c.DownloadDir, e.Name())
-		if strings.HasPrefix(e.Name(), savedPrefix) && path != keep {
+		if evictable.MatchString(e.Name()) && path != keep {
 			files = append(files, file{path, info.Size(), info.ModTime()})
 		}
 	}
