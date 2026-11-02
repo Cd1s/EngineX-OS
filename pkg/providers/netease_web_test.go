@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -208,7 +209,7 @@ func TestCamelot(t *testing.T) {
 			t.Fatalf("%+v: %s", c, got)
 		}
 	}
-	for name, want := range map[string]string{"Am": "8A", "C": "8B", "C#": "3B", "Bb minor": "3A", "x": ""} {
+	for name, want := range map[string]string{"Am": "8A", "C": "8B", "C#": "3B", "Bb minor": "3A", "F:min": "4A", "C:maj": "8B", "x": ""} {
 		if got := camelotFromName(name); got != want {
 			t.Fatalf("%s: %s", name, got)
 		}
@@ -296,7 +297,7 @@ func TestGetSongAndSoundCloudReadTheirKeys(t *testing.T) {
 			if r.Header.Get("Authorization") != "OAuth tok" {
 				t.Error("missing token")
 			}
-			io.WriteString(w, `[{"title":"Song","bpm":126,"key_signature":"Am","user":{"username":"Artist"}}]`)
+			io.WriteString(w, `{"collection":[{"id":1,"title":"Artist - Song","bpm":126,"key_signature":"Am","user":{"username":"Artist"}}]}`)
 		}
 	}))
 	defer srv.Close()
@@ -310,28 +311,277 @@ func TestGetSongAndSoundCloudReadTheirKeys(t *testing.T) {
 	}
 }
 
-func TestSoundCloudV2UsesTheClientIDAndISRC(t *testing.T) {
+func TestBPMFindsNeteaseTracksThroughOtherCatalogs(t *testing.T) {
+	var featureIDs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/search/tracks":
-			if r.URL.Query().Get("client_id") != "cid" {
-				t.Error("missing client ID")
+		case "/search":
+			switch r.URL.Query().Get("type") {
+			case "track": // Spotify
+				q := r.URL.Query().Get("q")
+				if strings.Contains(q, "Nowhere") {
+					io.WriteString(w, `{"tracks":{"items":[]}}`)
+					return
+				}
+				io.WriteString(w, `{"tracks":{"items":[{"id":"wrong","name":"Other Song","type":"track","artists":[{"name":"X"}]},{"id":"sp9","name":"走到底","type":"track","artists":[{"name":"A-Yue Chang"}],"external_ids":{"isrc":"TW1"}}]}}`)
+			default: // Deezer
+				io.WriteString(w, `{"data":[{"id":5,"title":"Deep Cut","duration":200,"artist":{"name":"Nowhere Man"}}]}`)
 			}
-			io.WriteString(w, `{"collection":[{"title":"Artist - Song","user":{"username":"Some Label"},"publisher_metadata":{"artist":"Artist","isrc":"US1"}}]}`)
+		case "/track/5":
+			io.WriteString(w, `{"id":5,"title":"Deep Cut","duration":200,"bpm":121,"isrc":"","artist":{"name":"Nowhere Man"}}`)
 		case "/v1/audio-features":
-			if r.URL.Query().Get("ids") != "US1" {
-				t.Errorf("ids %s", r.URL.RawQuery)
-			}
-			io.WriteString(w, `{"content":[{"tempo":130,"key":0,"mode":1}]}`)
+			featureIDs = append(featureIDs, r.URL.Query().Get("ids"))
+			io.WriteString(w, `{"content":[{"tempo":95,"key":0,"mode":1}]}`)
 		default:
 			t.Errorf("unexpected %s", r.URL)
 		}
 	}))
 	defer srv.Close()
-	b := &BPMStore{SoundCloudV2URL: srv.URL, ReccoURL: srv.URL}
-	got := b.soundCloud(context.Background(), Track{Title: "Song", Artist: "Artist"}, BPMConfig{SoundCloudClientID: "cid"})
-	if got.BPM != 130 || got.Key != "8B" {
+	sp := &Spotify{BaseURL: srv.URL, Token: Token{AccessToken: "a"}}
+	b := &BPMStore{ReccoURL: srv.URL, DeezerURL: srv.URL, Spotify: func() *Spotify { return sp }}
+
+	// A Chinese name is spelled differently on Spotify, so the title decides.
+	got := b.lookup(context.Background(), Track{ID: "1", Provider: "netease", Title: "走到底", Artist: "张震岳"})
+	if got.BPM != 95 || len(featureIDs) != 1 || featureIDs[0] != "sp9,TW1" {
+		t.Fatalf("%+v %q", got, featureIDs)
+	}
+	// Spotify has nothing, so Deezer's own tempo answers.
+	got = b.lookup(context.Background(), Track{ID: "2", Provider: "netease", Title: "Deep Cut", Artist: "Nowhere Man"})
+	if got.BPM != 121 {
 		t.Fatalf("%+v", got)
+	}
+}
+
+func TestBestMatchKeepsLatinArtistsStrict(t *testing.T) {
+	found := []Track{{ID: "x", Title: "Song", Artists: []string{"Somebody Else"}}}
+	if _, ok := bestMatch(Track{Title: "Song", Artist: "Artist"}, found); ok {
+		t.Fatal("same title by another Latin-named artist accepted")
+	}
+	if c, ok := bestMatch(Track{Title: "Song", Artist: "歌手"}, found); !ok || c.ID != "x" {
+		t.Fatal("Chinese artist name should fall back to the title")
+	}
+}
+
+func TestPreviewIsTheLastResortAndOnlyFromDeezer(t *testing.T) {
+	var clips []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/track/isrc:GX38U2629409":
+			io.WriteString(w, `{"id":1,"title":"Transmissions","duration":300,"preview":"https://cdnt-preview.dzcdn.net/clip.mp3","artist":{"name":"Modpsy"}}`)
+		case "/track/isrc:EVIL":
+			io.WriteString(w, `{"id":2,"title":"X","duration":300,"preview":"https://evil.example/clip.mp3","artist":{"name":"Y"}}`)
+		default:
+			io.WriteString(w, `{"content":[],"data":[]}`)
+		}
+	}))
+	defer srv.Close()
+	b := &BPMStore{Path: t.TempDir() + "/bpm.json", ReccoURL: srv.URL, DeezerURL: srv.URL}
+	done := make(chan struct{}, 2)
+	b.PreviewBPM = func(ctx context.Context, address string) BPMInfo {
+		clips = append(clips, address)
+		done <- struct{}{}
+		return BPMInfo{BPM: 133.4, Key: "4A"}
+	}
+	track := Track{ID: "sp", Provider: "spotify", ISRC: "GX38U2629409", Title: "Transmissions", Artist: "Modpsy"}
+	if !b.claim(track) {
+		t.Fatal("claim")
+	}
+	b.attempt(context.Background(), track)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("preview never analysed")
+	}
+	if len(clips) != 1 || clips[0] != "https://cdnt-preview.dzcdn.net/clip.mp3" {
+		t.Fatal(clips)
+	}
+	var got []Track
+	for range 100 {
+		got = []Track{track}
+		b.Apply(got)
+		if got[0].BPM != 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got[0].BPM != 133.4 || got[0].Key != "4A" {
+		t.Fatalf("%+v", got[0])
+	}
+	// An estimate cannot replace what the deck measured from the whole file.
+	b.Put(track, BPMInfo{BPM: 130, Measured: true})
+	b.Put(track, BPMInfo{BPM: 133.4})
+	got = []Track{track}
+	b.Apply(got)
+	if got[0].BPM != 130 {
+		t.Fatalf("%+v", got[0])
+	}
+	if address := b.previewFor(context.Background(), Track{ID: "x", Provider: "spotify", ISRC: "EVIL", Title: "X", Artist: "Y"}); address != "" {
+		t.Fatalf("foreign clip host accepted: %s", address)
+	}
+}
+
+func TestNeteaseSkipsLosslessWhenMP3IsWanted(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": []any{map[string]any{"url": "https://cdn/song"}}})
+	}))
+	defer srv.Close()
+	n := &Netease{WebURL: srv.URL, Cookie: "c", UserID: 1}
+	if _, err := n.AudioURL(context.Background(), "7", false); err != nil || calls != 1 {
+		t.Fatal(err, calls)
+	}
+}
+
+func soundCloudServer(t *testing.T, streams string) *httptest.Server {
+	t.Helper()
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token", "/list.m3u8":
+		default:
+			if r.Header.Get("Authorization") != "OAuth app-token" {
+				t.Errorf("no credentials on %s", r.URL)
+			}
+		}
+		switch r.URL.Path {
+		case "/token":
+			r.ParseForm()
+			if id, secret, ok := r.BasicAuth(); !ok || id != "cid" || secret != "shh" || r.Form.Get("grant_type") != "client_credentials" || r.Form.Get("client_secret") != "" {
+				t.Errorf("token request %v", r.Form)
+			}
+			io.WriteString(w, `{"access_token":"app-token","expires_in":3600}`)
+		case "/resolve":
+			io.WriteString(w, `{"kind":"user","id":7,"username":"cave"}`)
+		case "/users":
+			io.WriteString(w, `{"collection":[{"id":7,"username":"cave"}]}`)
+		case "/users/7/playlists":
+			if r.URL.Query().Get("offset") == "" {
+				io.WriteString(w, `{"collection":[{"id":1,"title":"Sets","track_count":2}],"next_href":"`+srv.URL+`/users/7/playlists?offset=1"}`)
+			} else {
+				io.WriteString(w, `{"collection":[{"id":2,"title":"More","track_count":1}],"next_href":"https://evil.example/next"}`)
+			}
+		case "/users/7/likes/playlists":
+			io.WriteString(w, `{"collection":[{"id":3,"title":"Liked set","track_count":4}]}`)
+		case "/users/7/likes/tracks":
+			io.WriteString(w, `{"collection":[{"id":11,"title":"Liked","duration":7200000,"user":{"username":"DJ"}}]}`)
+		case "/playlists/1/tracks":
+			io.WriteString(w, `{"collection":[{"id":21,"title":"Full","duration":1000,"bpm":128,"key_signature":"Am","isrc":"US1","user":{"username":"A"}},{"id":22,"access":"blocked"}]}`)
+		case "/tracks":
+			io.WriteString(w, `{"collection":[{"id":31,"title":"Found set","duration":5400000,"user":{"username":"C"}}]}`)
+		case "/playlists":
+			io.WriteString(w, `{"collection":[{"id":41,"title":"Found list","track_count":3}]}`)
+		case "/tracks/99":
+			io.WriteString(w, `{"id":99,"access":"playable"}`)
+		case "/tracks/98":
+			io.WriteString(w, `{"id":98,"access":"preview"}`)
+		case "/tracks/99/streams":
+			io.WriteString(w, strings.ReplaceAll(streams, "BASE", srv.URL))
+		case "/stream/mp3":
+			http.Redirect(w, r, "https://cdn.example/audio.mp3?sig=1", http.StatusFound)
+		case "/stream/hls":
+			http.Redirect(w, r, srv.URL+"/list.m3u8", http.StatusFound)
+		case "/list.m3u8":
+			if r.Header.Get("Authorization") != "" {
+				t.Error("credentials sent to the CDN")
+			}
+			io.WriteString(w, "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:10,\nseg0.ts\n#EXTINF:10,\n"+srv.URL+"/seg1.ts\n#EXT-X-ENDLIST\n")
+		default:
+			t.Errorf("unexpected %s", r.URL)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func testSoundCloud(t *testing.T, srv *httptest.Server) *SoundCloud {
+	return &SoundCloud{BaseURL: srv.URL, ClientID: "cid", Secret: "shh", Auth: &SoundCloudAuth{TokenURL: srv.URL + "/token", Path: t.TempDir() + "/token.json"}}
+}
+
+func TestSoundCloudBrowsesAProfile(t *testing.T) {
+	srv := soundCloudServer(t, "")
+	s := testSoundCloud(t, srv)
+	if err := s.ResolveUser(context.Background(), "https://soundcloud.com/cave"); err != nil || s.UserID != 7 {
+		t.Fatal(err, s.UserID)
+	}
+	if err := s.ResolveUser(context.Background(), "https://evil.example/cave"); err == nil {
+		t.Fatal("foreign profile link accepted")
+	}
+	byName := testSoundCloud(t, srv)
+	if err := byName.ResolveUser(context.Background(), "cave"); err != nil || byName.UserID != 7 {
+		t.Fatal(err, byName.UserID)
+	}
+	lists, err := s.Playlists(context.Background())
+	if err != nil || len(lists) != 4 || lists[0].ID != "likes" || lists[1].Title != "Sets" || lists[2].Title != "More" || lists[3].Title != "【收藏】Liked set" {
+		t.Fatalf("%+v %v", lists, err)
+	}
+	likes, err := s.Tracks(context.Background(), "likes")
+	if err != nil || len(likes) != 1 || likes[0].DurationMS != 7200000 || likes[0].Provider != "soundcloud" {
+		t.Fatalf("%+v %v", likes, err)
+	}
+	tracks, err := s.Tracks(context.Background(), "1")
+	if err != nil || len(tracks) != 1 || tracks[0].BPM != 128 || tracks[0].Key != "8A" || tracks[0].ISRC != "US1" {
+		t.Fatalf("%+v %v", tracks, err)
+	}
+	found, err := s.Search(context.Background(), "set")
+	if err != nil || found[0].Title != "Found set" {
+		t.Fatalf("%+v %v", found, err)
+	}
+	list, err := s.SearchPlaylists(context.Background(), "set")
+	if err != nil || list[0].Count != 3 {
+		t.Fatalf("%+v %v", list, err)
+	}
+}
+
+func TestSoundCloudTokenIsReusedAcrossRestarts(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		io.WriteString(w, `{"access_token":"a","expires_in":3600}`)
+	}))
+	defer srv.Close()
+	path := t.TempDir() + "/token.json"
+	for range 2 {
+		a := &SoundCloudAuth{TokenURL: srv.URL, Path: path}
+		if got, err := a.Token(context.Background(), "cid", "shh"); err != nil || got != "a" {
+			t.Fatal(got, err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("%d token requests", calls)
+	}
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "shh") {
+		t.Fatal("secret written to the token file")
+	}
+}
+
+func TestSoundCloudMediaPrefersMP3AndJoinsHLS(t *testing.T) {
+	both := soundCloudServer(t, `{"http_mp3_128_url":"BASE/stream/mp3","hls_aac_160_url":"BASE/stream/hls","preview_mp3_128_url":"BASE/preview"}`)
+	m, err := testSoundCloud(t, both).Media(context.Background(), "99")
+	if err != nil || m.Ext != "mp3" || len(m.URLs) != 1 || m.URLs[0] != "https://cdn.example/audio.mp3?sig=1" {
+		t.Fatalf("%+v %v", m, err)
+	}
+	hls := soundCloudServer(t, `{"hls_aac_160_url":"BASE/stream/hls"}`)
+	m, err = testSoundCloud(t, hls).Media(context.Background(), "99")
+	if err != nil || m.Ext != "mp4" || len(m.URLs) != 3 || !strings.HasSuffix(m.URLs[0], "/init.mp4") || !strings.HasSuffix(m.URLs[2], "/seg1.ts") {
+		t.Fatalf("%+v %v", m, err)
+	}
+}
+
+func TestSoundCloudRefusesPreviews(t *testing.T) {
+	onlyPreview := soundCloudServer(t, `{"preview_mp3_128_url":"BASE/preview"}`)
+	if _, err := testSoundCloud(t, onlyPreview).Media(context.Background(), "99"); !errors.Is(err, ErrNoFullStream) {
+		t.Fatal(err)
+	}
+	if _, err := testSoundCloud(t, onlyPreview).Media(context.Background(), "98"); !errors.Is(err, ErrNoFullStream) {
+		t.Fatal(err)
+	}
+	keyed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k\"\nseg.ts\n")
+	}))
+	defer keyed.Close()
+	if _, err := (&SoundCloud{}).segments(context.Background(), keyed.URL); !errors.Is(err, ErrNoFullStream) {
+		t.Fatal(err)
 	}
 }
 
@@ -471,242 +721,60 @@ func TestCutShortLookupStaysEligible(t *testing.T) {
 	}
 }
 
-func TestBPMFindsNeteaseTracksThroughOtherCatalogs(t *testing.T) {
-	var featureIDs []string
+func TestSoundCloudTokenReachesPrivateLists(t *testing.T) {
+	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/search":
-			switch r.URL.Query().Get("type") {
-			case "track": // Spotify
-				q := r.URL.Query().Get("q")
-				if strings.Contains(q, "Nowhere") {
-					io.WriteString(w, `{"tracks":{"items":[]}}`)
-					return
-				}
-				io.WriteString(w, `{"tracks":{"items":[{"id":"wrong","name":"Other Song","type":"track","artists":[{"name":"X"}]},{"id":"sp9","name":"走到底","type":"track","artists":[{"name":"A-Yue Chang"}],"external_ids":{"isrc":"TW1"}}]}}`)
-			default: // Deezer
-				io.WriteString(w, `{"data":[{"id":5,"title":"Deep Cut","duration":200,"artist":{"name":"Nowhere Man"}}]}`)
-			}
-		case "/track/5":
-			io.WriteString(w, `{"id":5,"title":"Deep Cut","duration":200,"bpm":121,"isrc":"","artist":{"name":"Nowhere Man"}}`)
-		case "/v1/audio-features":
-			featureIDs = append(featureIDs, r.URL.Query().Get("ids"))
-			io.WriteString(w, `{"content":[{"tempo":95,"key":0,"mode":1}]}`)
-		default:
-			t.Errorf("unexpected %s", r.URL)
-		}
-	}))
-	defer srv.Close()
-	sp := &Spotify{BaseURL: srv.URL, Token: Token{AccessToken: "a"}}
-	b := &BPMStore{ReccoURL: srv.URL, DeezerURL: srv.URL, Spotify: func() *Spotify { return sp }}
-
-	// A Chinese name is spelled differently on Spotify, so the title decides.
-	got := b.lookup(context.Background(), Track{ID: "1", Provider: "netease", Title: "走到底", Artist: "张震岳"})
-	if got.BPM != 95 || len(featureIDs) != 1 || featureIDs[0] != "sp9,TW1" {
-		t.Fatalf("%+v %q", got, featureIDs)
-	}
-	// Spotify has nothing, so Deezer's own tempo answers.
-	got = b.lookup(context.Background(), Track{ID: "2", Provider: "netease", Title: "Deep Cut", Artist: "Nowhere Man"})
-	if got.BPM != 121 {
-		t.Fatalf("%+v", got)
-	}
-}
-
-func TestBestMatchKeepsLatinArtistsStrict(t *testing.T) {
-	found := []Track{{ID: "x", Title: "Song", Artists: []string{"Somebody Else"}}}
-	if _, ok := bestMatch(Track{Title: "Song", Artist: "Artist"}, found); ok {
-		t.Fatal("same title by another Latin-named artist accepted")
-	}
-	if c, ok := bestMatch(Track{Title: "Song", Artist: "歌手"}, found); !ok || c.ID != "x" {
-		t.Fatal("Chinese artist name should fall back to the title")
-	}
-}
-
-func TestPreviewIsTheLastResortAndOnlyFromDeezer(t *testing.T) {
-	var clips []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/track/isrc:GX38U2629409":
-			io.WriteString(w, `{"id":1,"title":"Transmissions","duration":300,"preview":"https://cdnt-preview.dzcdn.net/clip.mp3","artist":{"name":"Modpsy"}}`)
-		case "/track/isrc:EVIL":
-			io.WriteString(w, `{"id":2,"title":"X","duration":300,"preview":"https://evil.example/clip.mp3","artist":{"name":"Y"}}`)
-		default:
-			io.WriteString(w, `{"content":[],"data":[]}`)
-		}
-	}))
-	defer srv.Close()
-	b := &BPMStore{Path: t.TempDir() + "/bpm.json", ReccoURL: srv.URL, DeezerURL: srv.URL}
-	done := make(chan struct{}, 2)
-	b.PreviewBPM = func(ctx context.Context, address string) BPMInfo {
-		clips = append(clips, address)
-		done <- struct{}{}
-		return BPMInfo{BPM: 133.4, Key: "4A"}
-	}
-	track := Track{ID: "sp", Provider: "spotify", ISRC: "GX38U2629409", Title: "Transmissions", Artist: "Modpsy"}
-	if !b.claim(track) {
-		t.Fatal("claim")
-	}
-	b.attempt(context.Background(), track)
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("preview never analysed")
-	}
-	if len(clips) != 1 || clips[0] != "https://cdnt-preview.dzcdn.net/clip.mp3" {
-		t.Fatal(clips)
-	}
-	var got []Track
-	for range 100 {
-		got = []Track{track}
-		b.Apply(got)
-		if got[0].BPM != 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got[0].BPM != 133.4 || got[0].Key != "4A" {
-		t.Fatalf("%+v", got[0])
-	}
-	// An estimate cannot replace what the deck measured from the whole file.
-	b.Put(track, BPMInfo{BPM: 130, Measured: true})
-	b.Put(track, BPMInfo{BPM: 133.4})
-	got = []Track{track}
-	b.Apply(got)
-	if got[0].BPM != 130 {
-		t.Fatalf("%+v", got[0])
-	}
-	if address := b.previewFor(context.Background(), Track{ID: "x", Provider: "spotify", ISRC: "EVIL", Title: "X", Artist: "Y"}); address != "" {
-		t.Fatalf("foreign clip host accepted: %s", address)
-	}
-}
-
-func TestNeteaseSkipsLosslessWhenMP3IsWanted(t *testing.T) {
-	calls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": []any{map[string]any{"url": "https://cdn/song"}}})
-	}))
-	defer srv.Close()
-	n := &Netease{WebURL: srv.URL, Cookie: "c", UserID: 1}
-	if _, err := n.AudioURL(context.Background(), "7", false); err != nil || calls != 1 {
-		t.Fatal(err, calls)
-	}
-}
-
-func soundCloudServer(t *testing.T, transcodings string) *httptest.Server {
-	t.Helper()
-	var srv *httptest.Server
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/seg0.ts" && r.URL.Path != "/list.m3u8" && r.Header.Get("Authorization") == "" && r.URL.Query().Get("client_id") == "" {
-			t.Errorf("no credentials on %s", r.URL)
+		paths = append(paths, r.URL.Path)
+		if r.Header.Get("Authorization") != "OAuth mine" {
+			t.Errorf("token missing on %s", r.URL)
 		}
 		switch r.URL.Path {
-		case "/resolve":
-			io.WriteString(w, `{"kind":"user","id":7,"username":"cave"}`)
 		case "/me":
 			io.WriteString(w, `{"id":8,"username":"me"}`)
-		case "/users/7/playlists":
-			if r.URL.Query().Get("offset") == "" {
-				io.WriteString(w, `{"collection":[{"id":1,"title":"Sets","track_count":2}],"next_href":"`+srv.URL+`/users/7/playlists?offset=1&client_id=leak"}`)
-			} else {
-				io.WriteString(w, `{"collection":[{"id":2,"title":"More","track_count":1}],"next_href":"https://evil.example/next"}`)
+		default:
+			io.WriteString(w, `{"collection":[]}`)
+		}
+	}))
+	defer srv.Close()
+	s := &SoundCloud{BaseURL: srv.URL, Token: "mine"}
+	if err := s.Identify(context.Background()); err != nil || s.UserID != 8 {
+		t.Fatal(err, s.UserID)
+	}
+	if _, err := s.Playlists(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Tracks(context.Background(), "likes"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/me", "/me/playlists", "/me/likes/playlists", "/me/likes/tracks"}
+	if strings.Join(paths, ",") != strings.Join(want, ",") {
+		t.Fatalf("%v", paths)
+	}
+}
+
+func TestSpotifyLikedSongs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/me/tracks":
+			if r.URL.Query().Get("limit") == "1" {
+				io.WriteString(w, `{"total":2,"items":[]}`)
+				return
 			}
-		case "/users/7/track_likes":
-			io.WriteString(w, `{"collection":[{"track":{"id":11,"title":"Liked","duration":7200000,"user":{"username":"DJ"}}}]}`)
-		case "/playlists/1":
-			io.WriteString(w, `{"tracks":[{"id":21,"title":"Full","duration":1000,"user":{"username":"A"},"publisher_metadata":{"artist":"Real","isrc":"US1"}},{"id":22}]}`)
-		case "/tracks":
-			if r.URL.Query().Get("ids") != "22" {
-				t.Errorf("ids %s", r.URL.RawQuery)
-			}
-			io.WriteString(w, `[{"id":22,"title":"Second","duration":2000,"user":{"username":"B"}}]`)
-		case "/search/tracks":
-			io.WriteString(w, `{"collection":[{"id":31,"title":"Found set","duration":5400000,"user":{"username":"C"}}]}`)
-		case "/search/playlists":
-			io.WriteString(w, `{"collection":[{"id":41,"title":"Found list","track_count":3}]}`)
-		case "/tracks/99":
-			io.WriteString(w, `{"id":99,"track_authorization":"auth","media":{"transcodings":[`+strings.ReplaceAll(transcodings, "BASE", srv.URL)+`]}}`)
-		case "/media/hls", "/media/prog":
-			if r.URL.Query().Get("track_authorization") != "auth" {
-				t.Error("track authorization missing")
-			}
-			io.WriteString(w, `{"url":"`+srv.URL+map[string]string{"/media/hls": "/list.m3u8", "/media/prog": "/audio.mp3"}[r.URL.Path]+`"}`)
-		case "/list.m3u8":
-			io.WriteString(w, "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:10,\nseg0.ts\n#EXTINF:10,\n"+srv.URL+"/seg1.ts\n#EXT-X-ENDLIST\n")
+			io.WriteString(w, `{"items":[{"track":{"id":"a","name":"One","type":"track"}},{"item":{"id":"b","name":"Two","type":"track"}}],"next":null}`)
+		case "/me/playlists":
+			io.WriteString(w, `{"items":[{"id":"p","name":"Mine"}],"next":null}`)
 		default:
 			t.Errorf("unexpected %s", r.URL)
 		}
 	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func TestSoundCloudBrowsesAProfile(t *testing.T) {
-	srv := soundCloudServer(t, "")
-	s := &SoundCloud{BaseURL: srv.URL, ClientID: "cid"}
-	if err := s.ResolveUser(context.Background(), "https://soundcloud.com/cave"); err != nil || s.UserID != 7 {
-		t.Fatal(err, s.UserID)
-	}
-	if err := s.ResolveUser(context.Background(), "https://evil.example/cave"); err == nil {
-		t.Fatal("foreign profile link accepted")
-	}
+	defer srv.Close()
+	s := &Spotify{BaseURL: srv.URL, Token: Token{AccessToken: "a"}}
 	lists, err := s.Playlists(context.Background())
-	if err != nil || len(lists) != 3 || lists[0].ID != "likes" || lists[1].Title != "Sets" || lists[2].Title != "More" {
+	if err != nil || len(lists) != 2 || lists[0].ID != "liked" || lists[0].Count != 2 || lists[1].ID != "p" {
 		t.Fatalf("%+v %v", lists, err)
 	}
-	likes, err := s.Tracks(context.Background(), "likes")
-	if err != nil || len(likes) != 1 || likes[0].DurationMS != 7200000 || likes[0].Provider != "soundcloud" {
-		t.Fatalf("%+v %v", likes, err)
-	}
-	tracks, err := s.Tracks(context.Background(), "1")
-	if err != nil || len(tracks) != 2 || tracks[0].Artist != "Real" || tracks[0].ISRC != "US1" || tracks[1].Title != "Second" {
+	tracks, err := s.Tracks(context.Background(), "liked")
+	if err != nil || len(tracks) != 2 || tracks[1].ID != "b" {
 		t.Fatalf("%+v %v", tracks, err)
-	}
-	found, err := s.Search(context.Background(), "set")
-	if err != nil || found[0].Title != "Found set" {
-		t.Fatalf("%+v %v", found, err)
-	}
-	list, err := s.SearchPlaylists(context.Background(), "set")
-	if err != nil || list[0].Count != 3 {
-		t.Fatalf("%+v %v", list, err)
-	}
-	tokenOnly := &SoundCloud{BaseURL: srv.URL, Token: "tok"}
-	if err := tokenOnly.Identify(context.Background()); err != nil || tokenOnly.UserID != 8 {
-		t.Fatal(err, tokenOnly.UserID)
-	}
-}
-
-func TestSoundCloudMediaPrefersProgressiveMP3AndJoinsHLS(t *testing.T) {
-	prog := `{"url":"BASE/media/prog","format":{"protocol":"progressive","mime_type":"audio/mpeg"}}`
-	hlsAAC := `{"url":"BASE/media/hls","format":{"protocol":"hls","mime_type":"audio/mp4; codecs=\"mp4a.40.2\""}}`
-	both := soundCloudServer(t, hlsAAC+","+prog)
-	m, err := (&SoundCloud{BaseURL: both.URL, ClientID: "cid"}).Media(context.Background(), "99")
-	if err != nil || m.Ext != "mp3" || len(m.URLs) != 1 || !strings.HasSuffix(m.URLs[0], "/audio.mp3") {
-		t.Fatalf("%+v %v", m, err)
-	}
-	hls := soundCloudServer(t, hlsAAC)
-	m, err = (&SoundCloud{BaseURL: hls.URL, ClientID: "cid"}).Media(context.Background(), "99")
-	if err != nil || m.Ext != "mp4" || len(m.URLs) != 3 || !strings.HasSuffix(m.URLs[0], "/init.mp4") || !strings.HasSuffix(m.URLs[1], "/seg0.ts") || !strings.HasSuffix(m.URLs[2], "/seg1.ts") {
-		t.Fatalf("%+v %v", m, err)
-	}
-}
-
-func TestSoundCloudRefusesPreviewsAndEncryptedStreams(t *testing.T) {
-	for _, list := range []string{
-		`{"url":"BASE/media/prog","snipped":true,"format":{"protocol":"progressive","mime_type":"audio/mpeg"}}`,
-		`{"url":"BASE/media/hls","format":{"protocol":"ctr-encrypted-hls","mime_type":"audio/mp4"}}`,
-		`{"url":"BASE/media/hls","format":{"protocol":"hls","mime_type":"audio/ogg; codecs=\"opus\""}}`,
-	} {
-		srv := soundCloudServer(t, list)
-		if _, err := (&SoundCloud{BaseURL: srv.URL, ClientID: "c"}).Media(context.Background(), "99"); !errors.Is(err, ErrNoFullStream) {
-			t.Fatalf("%s: %v", list, err)
-		}
-	}
-	keyed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k\"\nseg.ts\n")
-	}))
-	defer keyed.Close()
-	if _, err := (&SoundCloud{}).segments(context.Background(), keyed.URL); !errors.Is(err, ErrNoFullStream) {
-		t.Fatal(err)
 	}
 }

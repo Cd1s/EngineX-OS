@@ -291,7 +291,9 @@ func ready(p providers.Provider) bool {
 	case *providers.Deezer:
 		return v.UserID != ""
 	case *providers.SoundCloud:
-		return v.ClientID != "" || v.Token != ""
+		// An app's token can search but knows no account, so that is not a login:
+		// the deck must still offer the QR code that binds a profile.
+		return v.Usable() && (v.UserID != 0 || v.Token != "")
 	}
 	return false
 }
@@ -488,7 +490,14 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 	}
 	var p providers.Provider = g.catalog
 	guest := false
-	if ref.session != "" {
+	if ref.session == "" && ref.provider == "soundcloud" {
+		sc := g.s.ownerSoundCloud()
+		if sc == nil {
+			fail(w, 404, errors.New("soundcloud: not connected"))
+			return
+		}
+		p = sc
+	} else if ref.session != "" {
 		v := g.sessionByID(ref.session)
 		if v == nil {
 			fail(w, 404, errors.New("login expired; sign in again at sc5000.lan:8080"))
@@ -513,15 +522,25 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 // always returns as the first playlist of /user/playlist.
 func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 	items := []any{}
+	scope := g.s.scope()
 	for _, v := range g.sources() {
-		if v.Provider != "netease" || v.Guest || g.s.scope() != "netease" {
+		if v.Guest || v.Provider != scope {
 			continue
 		}
-		if lists, err := v.p.Playlists(r.Context()); err == nil && len(lists) > 0 {
-			if tracks, err := v.p.Tracks(r.Context(), lists[0].ID); err == nil && len(tracks) <= maxPlaylistTracks {
-				g.s.cfg.BPM.Enrich(r.Context(), tracks)
-				items = g.trackItems(v.ID, false, tracks)
+		var tracks []providers.Track
+		var err error
+		switch scope {
+		case "netease":
+			var lists []providers.Playlist
+			if lists, err = v.p.Playlists(r.Context()); err == nil && len(lists) > 0 {
+				tracks, err = v.p.Tracks(r.Context(), lists[0].ID)
 			}
+		case "spotify":
+			tracks, err = v.p.Tracks(r.Context(), providers.SpotifyLikedID)
+		}
+		if err == nil && len(tracks) <= maxPlaylistTracks {
+			g.s.cfg.BPM.Enrich(r.Context(), tracks)
+			items = g.trackItems(v.ID, false, tracks)
 		}
 		break
 	}
@@ -614,6 +633,11 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	for _, v := range g.sources() {
 		if v.Provider == scope && v.Provider != "deezer" {
 			sources = append(sources, source{v.ID, v.Provider, v.Guest, v.p})
+		}
+	}
+	if scope == "soundcloud" && len(sources) == 0 {
+		if p := g.s.ownerSoundCloud(); p != nil {
+			sources = append(sources, source{"", "soundcloud", false, p})
 		}
 	}
 	tracks := each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Track, error) {

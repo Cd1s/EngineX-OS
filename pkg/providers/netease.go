@@ -35,11 +35,16 @@ type neSong struct {
 	Name string
 	DT   int64
 	AR   []struct{ Name string }
-	AL   struct{ Name string }
+	AL   neAlbum
 	// Older search responses use these names instead of dt, ar and al.
 	Duration int64 `json:"duration"`
 	Artists  []struct{ Name string }
-	Album    struct{ Name string }
+	Album    neAlbum
+}
+
+type neAlbum struct {
+	Name   string
+	PicURL string `json:"picUrl"`
 }
 
 func (s neSong) track() Track {
@@ -56,8 +61,15 @@ func (s neSong) track() Track {
 	for _, a := range s.AR {
 		artists = append(artists, a.Name)
 	}
-	return Track{ID: strconv.FormatInt(s.ID, 10), Title: s.Name, Artist: strings.Join(artists, ", "), Artists: artists, Album: s.AL.Name, DurationMS: s.DT, Provider: "netease"}
+	return Track{ID: strconv.FormatInt(s.ID, 10), Title: s.Name, Artist: strings.Join(artists, ", "), Artists: artists, Album: s.AL.Name, DurationMS: s.DT, Provider: "netease", CoverURL: neteaseCover(s.AL.PicURL)}
 }
+func neteaseCover(pic string) string {
+	if pic == "" {
+		return ""
+	}
+	return pic + "?param=500y500"
+}
+
 func remarshal(a, b any) error {
 	data, err := json.Marshal(a)
 	if err != nil {

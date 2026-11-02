@@ -37,6 +37,7 @@ type deezerInfo struct {
 type soundCloudInfo struct {
 	User     string `json:"user,omitempty"`
 	ClientID string `json:"clientId,omitempty"`
+	Secret   string `json:"clientSecret,omitempty"`
 	Token    string `json:"token,omitempty"`
 }
 

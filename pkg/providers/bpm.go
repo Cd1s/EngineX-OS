@@ -22,10 +22,8 @@ import (
 )
 
 const (
-	DefaultReccoURL      = "https://api.reccobeats.com"
-	defaultSoundCloudURL = "https://api.soundcloud.com"
-	defaultSoundCloudV2  = "https://api-v2.soundcloud.com"
-	defaultGetSongURL    = "https://api.getsong.co"
+	DefaultReccoURL   = "https://api.reccobeats.com"
+	defaultGetSongURL = "https://api.getsong.co"
 
 	reccoBatch       = 40
 	bpmListWait      = 4 * time.Second
@@ -46,6 +44,7 @@ type BPMInfo struct {
 // BPMConfig holds the optional keys of services that need one.
 type BPMConfig struct {
 	SoundCloudClientID string `json:"soundcloudClientId,omitempty"`
+	SoundCloudSecret   string `json:"soundcloudClientSecret,omitempty"`
 	SoundCloudToken    string `json:"soundcloudToken,omitempty"`
 	GetSongBPMKey      string `json:"getSongBpmKey,omitempty"`
 }
@@ -57,7 +56,8 @@ type BPMStore struct {
 	SoundCloudURL    string
 	GetSongURL       string
 	DeezerURL        string
-	SoundCloudV2URL  string
+	// SoundCloudAuth is the token store shared with the SoundCloud source.
+	SoundCloudAuth *SoundCloudAuth
 	// Spotify returns the owner's login, if any, for finding a track's IDs.
 	Spotify func() *Spotify
 	// PreviewBPM estimates tempo and key from a preview clip, for tracks too new
@@ -414,7 +414,7 @@ func (b *BPMStore) lookup(ctx context.Context, t Track) BPMInfo {
 	if cfg.GetSongBPMKey != "" {
 		steps = append(steps, func() BPMInfo { return b.getSong(ctx, t, cfg.GetSongBPMKey) })
 	}
-	if cfg.SoundCloudClientID != "" || cfg.SoundCloudToken != "" {
+	if cfg.SoundCloudToken != "" || (cfg.SoundCloudClientID != "" && cfg.SoundCloudSecret != "") {
 		steps = append(steps, func() BPMInfo { return b.soundCloud(ctx, t, cfg) })
 	}
 	for _, step := range steps {
@@ -661,56 +661,21 @@ func soundCloudTitle(s string) string {
 	return s
 }
 
-type soundCloudTrack struct {
-	Title string  `json:"title"`
-	BPM   float64 `json:"bpm"`
-	Key   string  `json:"key_signature"`
-	User  struct {
-		Username string `json:"username"`
-	} `json:"user"`
-	Publisher struct {
-		ISRC   string `json:"isrc"`
-		Artist string `json:"artist"`
-	} `json:"publisher_metadata"`
-}
-
-// soundCloud reads tempo, or an ISRC for ReccoBeats, from the owner's own credentials.
+// soundCloud reads tempo, or an ISRC for ReccoBeats, through the official API.
 func (b *BPMStore) soundCloud(ctx context.Context, t Track, cfg BPMConfig) BPMInfo {
-	var tracks []soundCloudTrack
-	q := url.Values{"q": {bpmQuery(t)}}
-	if cfg.SoundCloudClientID != "" {
-		base := b.SoundCloudV2URL
-		if base == "" {
-			base = defaultSoundCloudV2
-		}
-		q.Set("limit", "5")
-		q.Set("client_id", cfg.SoundCloudClientID)
-		var r struct {
-			Collection []soundCloudTrack `json:"collection"`
-		}
-		if b.get(ctx, strings.TrimRight(base, "/")+"/search/tracks?"+q.Encode(), nil, &r) == nil {
-			tracks = r.Collection
-		}
-		q.Del("client_id")
+	s := &SoundCloud{BaseURL: b.SoundCloudURL, HTTP: b.HTTP, ClientID: cfg.SoundCloudClientID, Secret: cfg.SoundCloudSecret, Token: cfg.SoundCloudToken, Auth: b.SoundCloudAuth}
+	found, err := s.Search(ctx, bpmQuery(t))
+	if err != nil {
+		return BPMInfo{}
 	}
-	if len(tracks) == 0 && cfg.SoundCloudToken != "" {
-		base := b.SoundCloudURL
-		if base == "" {
-			base = defaultSoundCloudURL
-		}
-		q.Set("limit", "10")
-		if b.get(ctx, strings.TrimRight(base, "/")+"/tracks?"+q.Encode(), http.Header{"Authorization": {"OAuth " + cfg.SoundCloudToken}}, &tracks) != nil {
-			return BPMInfo{}
-		}
-	}
-	for _, v := range tracks {
-		if !sameMainTitle(t, soundCloudTitle(v.Title), []string{v.User.Username, v.Publisher.Artist}) {
+	for _, v := range found {
+		if !sameMainTitle(t, soundCloudTitle(v.Title), v.Artists) {
 			continue
 		}
 		if v.BPM > 0 {
-			return BPMInfo{BPM: v.BPM, Key: camelotFromName(v.Key)}
+			return BPMInfo{BPM: v.BPM, Key: v.Key}
 		}
-		if info := b.features(ctx, v.Publisher.ISRC); info.BPM > 0 {
+		if info := b.features(ctx, v.ISRC); info.BPM > 0 {
 			return info
 		}
 	}
@@ -753,9 +718,9 @@ func Camelot(pitch, mode int) string {
 	return fmt.Sprintf("%dA", camelotMinor[pitch])
 }
 
-// camelotFromName reads names such as "Am", "C#" and "Bb minor".
+// camelotFromName reads names such as "Am", "C#", "Bb minor" and SoundCloud's "F:min".
 func camelotFromName(name string) string {
-	m := regexp.MustCompile(`^([A-Ga-g])([#b]?)\s*(m|min|minor|maj|major)?$`).FindStringSubmatch(strings.TrimSpace(name))
+	m := regexp.MustCompile(`^([A-Ga-g])([#b]?)[\s:]*(m|min|minor|maj|major)?$`).FindStringSubmatch(strings.TrimSpace(name))
 	if m == nil {
 		return ""
 	}
