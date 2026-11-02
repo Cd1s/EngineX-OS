@@ -302,3 +302,50 @@ func TestSoundCloudPageNeedsACredentialAndPassesItOn(t *testing.T) {
 		t.Fatal(poll)
 	}
 }
+
+func TestSoundCloudAccountLoginByPastedAddress(t *testing.T) {
+	var verifier, redirect string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			r.ParseForm()
+			id, secret, ok := r.BasicAuth()
+			if !ok || id != "cid" || secret != "shh" || r.Form.Get("grant_type") != "authorization_code" || r.Form.Get("code") != "abc" {
+				t.Errorf("token request %v", r.Form)
+			}
+			verifier, redirect = r.Form.Get("code_verifier"), r.Form.Get("redirect_uri")
+			w.Write([]byte(`{"access_token":"u1","refresh_token":"r1","expires_in":3600}`))
+		case "/me":
+			if r.Header.Get("Authorization") != "OAuth u1" {
+				t.Error("no token on /me")
+			}
+			w.Write([]byte(`{"id":8,"username":"me"}`))
+		}
+	}))
+	defer api.Close()
+	soundCloudTokenURL, soundCloudAPIURL = api.URL+"/token", api.URL
+	s := newTestServer(t)
+	s.cfg.update(func(c *config) { c.SoundCloudClientID, c.SoundCloudSecret = "cid", "shh" })
+	h := s.routes()
+	tok := "soundcloudlogin00001"
+	page := do(h, "GET", "/m/soundcloud?t="+tok, "", nil).Body.String()
+	if !strings.Contains(page, "code_challenge_method=S256") || !strings.Contains(page, "client_id=cid") || strings.Contains(page, "shh") {
+		t.Fatal(page)
+	}
+	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	foreign := url.QueryEscape("http://127.0.0.1:8765/callback?code=abc&state=someoneelse00000001")
+	if w := do(h, "POST", "/m/soundcloud?t="+tok, "callback="+foreign, form); w.Code == 200 {
+		t.Fatal("address from another login accepted")
+	}
+	pasted := url.QueryEscape("http://127.0.0.1:8765/callback?code=abc&state=" + tok)
+	if w := do(h, "POST", "/m/soundcloud?t="+tok, "callback="+pasted, form); w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if verifier == "" || redirect != soundCloudLoopback {
+		t.Fatalf("verifier %q redirect %q", verifier, redirect)
+	}
+	poll := do(h, "GET", "/api/relay/session?t="+tok, "", nil).Body.String()
+	if !strings.Contains(poll, `"userToken":"u1"`) || !strings.Contains(poll, `"refreshToken":"r1"`) || !strings.Contains(poll, `"userId":8`) {
+		t.Fatal(poll)
+	}
+}

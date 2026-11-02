@@ -111,9 +111,33 @@ func (s *Server) ownerSoundCloud() *providers.SoundCloud {
 	return nil
 }
 
-// linkSoundCloud checks and saves what the phone page or the relay collected.
+// linkSoundCloudAccount saves an account login the relay completed. The tokens live
+// with the app's in soundcloud-token.json, where they get renewed.
+func (s *Server) linkSoundCloudAccount(session *Session, userID int64, username, token, refresh string, expiry time.Time) error {
+	if userID == 0 || token == "" {
+		return errRelayIncomplete
+	}
+	if err := s.soundCloudAuth.SetUser(token, refresh, expiry); err != nil {
+		return err
+	}
+	current := s.ownerSoundCloudProvider()
+	if err := providers.SaveJSON(s.soundCloudOwnerPath(), soundCloudOwner{userID, username, current.ClientID, current.Secret, ""}); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := session.p.(*providers.SoundCloud); ok {
+		p.ClientID, p.Secret, p.Token, p.UserID, p.Username = current.ClientID, current.Secret, "", userID, username
+	}
+	return nil
+}
+
+// linkSoundCloud checks and saves what the phone page or the relay collected. Binding
+// a public profile or a pasted token replaces any account login.
 func (s *Server) linkSoundCloud(ctx context.Context, session *Session, user, clientID, secret, token string) error {
 	check := s.ownerSoundCloudProvider()
+	check.Auth = &providers.SoundCloudAuth{TokenURL: s.cfg.SoundCloudTokenURL, Path: filepath.Join(s.cfg.StateDir, "soundcloud-token-check.json"), HTTP: s.cfg.HTTP}
+	defer os.Remove(check.Auth.Path)
 	if clientID != "" {
 		check.ClientID = clientID
 	}
@@ -138,6 +162,9 @@ func (s *Server) linkSoundCloud(ctx context.Context, session *Session, user, cli
 		}
 	}
 	if err := providers.SaveJSON(s.soundCloudOwnerPath(), soundCloudOwner{check.UserID, check.Username, check.ClientID, check.Secret, check.Token}); err != nil {
+		return err
+	}
+	if err := s.soundCloudAuth.SetUser("", "", time.Time{}); err != nil {
 		return err
 	}
 	if s.cfg.BPM != nil {

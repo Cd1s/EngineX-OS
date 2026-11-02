@@ -64,7 +64,15 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 <h1>连接 SoundCloud</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
 {{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的设置。</div>{{end}}
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
-<form method="post" class="card">
+{{if .AuthLoopback}}<div class="card"><h2>方式一：登录账号（可读私密歌单和私人收藏）</h2>
+<a class="btn green" href="{{.AuthLoopback}}" target="_blank" rel="noreferrer">1. 打开 SoundCloud 账号登录授权</a>
+<p class="hint">同意后手机会显示“无法打开页面”，这是正常的。复制地址栏里以 127.0.0.1 开头的完整地址，回到这里。</p>
+<form method="post" id="scLogin">
+<input id="callback" name="callback" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="http://127.0.0.1:8765/callback?code=...">
+<button class="btn ghost" type="button" onclick="navigator.clipboard.readText().then(function(t){document.getElementById('callback').value=t.trim();document.getElementById('scLogin').submit()}).catch(function(){document.getElementById('callback').focus()})">2. 一键读取剪贴板并完成登录</button>
+<button class="btn green" type="submit">或粘贴后点这里完成登录</button>
+</form></div>{{end}}
+<form method="post" class="card"><h2>方式二：只填公开主页（免登录）</h2>
 <label for="user">主页链接、分享链接或用户名</label>
 <input id="user" name="user" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://soundcloud.com/你的主页">
 <p class="hint">例如 https://soundcloud.com/你的主页。填好就能看到点赞的曲目和歌单。</p>
@@ -74,7 +82,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 <input id="clientSecret" name="clientSecret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
 <label for="token">OAuth Token（可选）</label>
 <input id="token" name="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
-<p class="hint">想看私密歌单才需要填 OAuth Token。碟机只播放 API 标记为可完整播放的内容。</p>
+<p class="hint">碟机只播放 API 标记为可完整播放的内容。</p>
 <button class="btn purple" type="submit">完成连接</button>
 </form></div></body></html>{{end}}
 

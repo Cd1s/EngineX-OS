@@ -78,7 +78,7 @@ func (s *server) handleMobileGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if provider == "soundcloud" {
-		renderPage(w, 200, "soundcloudPage", pageData{Title: "连接 SoundCloud", Token: token, Done: sess.Status == "done"})
+		renderPage(w, 200, "soundcloudPage", s.soundCloudPageData(sess, token, ""))
 		return
 	}
 	renderPage(w, 200, "deezerPage", pageData{Title: "连接 Deezer", Token: token, Done: sess.Status == "done", UserID: cfg.DeezerUserID})
@@ -102,6 +102,14 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	if provider == "soundcloud" && firstOf(v, "callback") != "" {
+		code, redirect, err := soundCloudCode(firstOf(v, "callback"), token)
+		if err == nil {
+			err = s.finishSoundCloud(ctx, sess, token, code, redirect)
+		}
+		s.mobileResult(w, r, provider, token, 200, err)
+		return
+	}
 	if provider == "soundcloud" {
 		info := &soundCloudInfo{User: strings.TrimSpace(firstOf(v, "user", "url")), ClientID: strings.TrimSpace(firstOf(v, "clientId")), Secret: strings.TrimSpace(firstOf(v, "clientSecret")), Token: strings.TrimSpace(firstOf(v, "token"))}
 		var err error
@@ -207,7 +215,8 @@ func (s *server) mobileResult(w http.ResponseWriter, r *http.Request, provider, 
 		return
 	}
 	if err != nil && provider == "soundcloud" {
-		renderPage(w, code, "soundcloudPage", pageData{Title: "连接 SoundCloud", Token: token, Error: err.Error()})
+		sess, _ := s.sessions.get(token)
+		renderPage(w, code, "soundcloudPage", s.soundCloudPageData(sess, token, err.Error()))
 		return
 	}
 	if err != nil {

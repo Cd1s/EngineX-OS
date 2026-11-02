@@ -39,6 +39,13 @@ type soundCloudInfo struct {
 	ClientID string `json:"clientId,omitempty"`
 	Secret   string `json:"clientSecret,omitempty"`
 	Token    string `json:"token,omitempty"`
+
+	// Set by an account login, which also reaches private lists.
+	UserID       int64     `json:"userId,omitempty"`
+	Username     string    `json:"username,omitempty"`
+	UserToken    string    `json:"userToken,omitempty"`
+	RefreshToken string    `json:"refreshToken,omitempty"`
+	Expiry       time.Time `json:"expiry,omitzero"`
 }
 
 type session struct {
@@ -197,7 +204,7 @@ func (st *sessionStore) open(token, provider, clientID string) (session, bool) {
 	if s.Status == "waiting" {
 		s.Status = "scanned"
 	}
-	if provider == "spotify" && s.Verifier == "" {
+	if (provider == "spotify" || provider == "soundcloud") && s.Verifier == "" {
 		s.Verifier = randomVerifier()
 	}
 	st.saveLocked()

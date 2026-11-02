@@ -220,7 +220,7 @@ func parsePastedCode(in string) (code, redirect string, err error) {
 			return "", "", errors.New("无法解析粘贴的地址")
 		}
 		if e := q.Get("error"); e != "" {
-			return "", "", fmt.Errorf("Spotify 返回错误：%s", e)
+			return "", "", fmt.Errorf("授权返回错误：%s", e)
 		}
 		code = q.Get("code")
 		redirect = spotifyLoopbackURI
