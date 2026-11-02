@@ -286,6 +286,20 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			}
 		}
 		existing := id != 0
+		if !existing {
+			// Engine (or its desktop app) already owns a track at this path:
+			// reference it from imported playlists, but never adopt or rewrite it.
+			var native int64
+			e := tx.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, enginePath).Scan(&native)
+			if e == nil {
+				mapping[t.ID] = native
+				result.Unchanged++
+				continue
+			}
+			if !errors.Is(e, sql.ErrNoRows) {
+				return result, e
+			}
+		}
 		mapping[t.ID] = id
 		if previous == hash {
 			if t.BPM == 0 {
@@ -366,7 +380,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			// A pre-existing native track at the same path is never adopted/overwritten.
 			r, e := tx.ExecContext(ctx, `INSERT INTO Track(length,bpm,year,path,filename,bitrate,bpmAnalyzed,albumArtId,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,fileType,isAnalyzed,isAvailable,isMetadataImported,pdbImportKey,dateCreated,dateAdded) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s'),strftime('%s'))`, args...)
 			if e != nil {
-				return result, fmt.Errorf("insert track %d (native path conflicts are refused): %w", t.ID, e)
+				return result, fmt.Errorf("insert track %d: %w", t.ID, e)
 			}
 			id, e = r.LastInsertId()
 			if e != nil {
@@ -448,6 +462,26 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 	return result, err
 }
 
+// uniqueTitle keeps Engine's UNIQUE(title,parentListId): a native playlist or
+// a repeated rekordbox name under one folder gets a " (rekordbox N)" suffix.
+func uniqueTitle(ctx context.Context, tx *sql.Tx, name string, parent int64) (string, error) {
+	title := name
+	for n := 1; ; n++ {
+		var exists int
+		if e := tx.QueryRowContext(ctx, `SELECT count(*) FROM Playlist WHERE title=? AND parentListId=?`, title, parent).Scan(&exists); e != nil {
+			return "", e
+		}
+		if exists == 0 {
+			return title, nil
+		}
+		if n == 1 {
+			title = name + " (rekordbox)"
+		} else {
+			title = fmt.Sprintf("%s (rekordbox %d)", name, n)
+		}
+	}
+}
+
 func writePlaylists(ctx context.Context, tx *sql.Tx, l *rekordbox.Library, opts Options, mapping map[uint32]int64, databaseUUID string, recommendations []uint32) error {
 	// Refuse to cascade-delete an Engine-created child of an imported folder.
 	var n int
@@ -498,7 +532,11 @@ func writePlaylists(ctx context.Context, tx *sql.Tx, l *rekordbox.Library, opts 
 	var insert func(uint32, int64) error
 	insert = func(sourceParent uint32, parent int64) error {
 		for _, p := range byParent[sourceParent] {
-			r, e := tx.ExecContext(ctx, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES(?,?,1,0,1)`, p.Name, parent)
+			title, e := uniqueTitle(ctx, tx, p.Name, parent)
+			if e != nil {
+				return e
+			}
+			r, e := tx.ExecContext(ctx, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES(?,?,1,0,1)`, title, parent)
 			if e != nil {
 				return e
 			}

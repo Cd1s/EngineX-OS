@@ -88,8 +88,13 @@ func TestDebloatScriptCompleteOfflineAndIdempotent(t *testing.T) {
 	if strings.Contains(hosts, "0.0.0.0 inmusicbrands.com\n") || strings.Contains(read(t, root, "etc/dnsmasq.d/sc5000-telemetry.conf"), "/inmusicbrands.com/") {
 		t.Fatal("connman online check domain blocked")
 	}
-	if !strings.Contains(read(t, root, "etc/connman/main.conf"), "EnableOnlineCheck = false") {
-		t.Fatal("connman online check enabled")
+	// Engine shows a Wi-Fi "!" unless connman's stock online check reaches ONLINE.
+	if conf := read(t, root, "etc/connman/main.conf"); !strings.Contains(conf, "EnableOnlineCheck = true") || !strings.Contains(conf, "OnlineCheckIPv4URL = http://ipv4.connman.inmusicbrands.com/") {
+		t.Fatal("connman online check disabled")
+	}
+	// hfsplus.ko oopses on write; HFS+ must never be force-mounted read-write.
+	if strings.Contains(read(t, root, "etc/edisksd/main.conf"), "[hfsplus]") {
+		t.Fatal("HFS+ force mount retained")
 	}
 	if strings.Contains(read(t, root, "usr/Engine/Scripts/encrypt-fs.sh"), "az01-update --erase-data") {
 		t.Fatal("dangerous recovery retained")

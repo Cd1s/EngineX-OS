@@ -43,6 +43,7 @@ class UnlockJP07Test(unittest.TestCase):
         self.assertEqual(word(0x1897E70), 0xE3A06004)
         self.assertEqual(word(0x1897DCC), 0x03A04001)
         self.assertEqual(word(0x1678644), 0xE320F000)
+        self.assertEqual(word(0x58AF34), 0xE3A03000)
         self.assertEqual(decode(out, 0x336740, 24, 1) + bytes([out[0x33649C] - 1]),
                          b"http://127.0.0.1:8080/v1/")
         self.assertEqual(decode(out, 0x336758, 24, 7) + decode(out, 0x33652C, 2, 7),

@@ -148,6 +148,12 @@ func runRBBridge(args []string) error {
 	return first
 }
 
+// Downloads go to the front SD when present, otherwise to internal storage.
+const (
+	defaultDownloads  = "/media/sc5000-sd-cache/Music/Stream"
+	fallbackDownloads = "/data/sc5000-custom/Stream"
+)
+
 func runStreamSync(args []string) error {
 	fs := flag.NewFlagSet("stream-sync", flag.ContinueOnError)
 	cfg := resourceguard.DefaultConfig()
@@ -158,7 +164,7 @@ func runStreamSync(args []string) error {
 	listen := fs.String("listen", ":8080", "touch/LAN HTTP listener")
 	public := fs.String("public-url", "http://sc5000.lan:8080", "public console URL")
 	dbPath := fs.String("database", analyzer.DefaultDatabase, "existing Engine 5.0.4 m.db (back up before use)")
-	downloads := fs.String("downloads", "/media/sc5000-sd-cache/Music/Stream", "Deemix output root on the same SD volume")
+	downloads := fs.String("downloads", defaultDownloads, "Deemix output root on the same SD volume")
 	base := fs.String("deemix-url", "http://127.0.0.1:6595", "local REST bridge URL")
 	queue := fs.String("deemix-queue", "/api/queue", "REST bridge queue path")
 	mode := fs.String("deemix-mode", "queue", "queue REST bridge or directory (/api/download + exact ID filenames)")
@@ -206,11 +212,18 @@ func runStreamSync(args []string) error {
 			log.Printf("Deemix guard: %s", r.String())
 		}
 	}
-	library, err := analyzer.OpenLibrary(*dbPath)
-	if err != nil {
-		return err
+	// The TIDAL gateway and console must run without a front SD card; only
+	// importing into an Engine library needs one.
+	var importer webui.Importer
+	if library, err := analyzer.OpenLibrary(*dbPath); err != nil {
+		log.Printf("stream-sync: library import disabled: %v", err)
+		if *downloads == defaultDownloads {
+			*downloads = fallbackDownloads
+		}
+	} else {
+		defer library.Close()
+		importer = library
 	}
-	defer library.Close()
 	if err = os.MkdirAll(*downloads, 0755); err != nil {
 		return err
 	}
@@ -218,7 +231,7 @@ func runStreamSync(args []string) error {
 	if *socket != "" {
 		dl.HTTP = deemixclient.UnixHTTP(*socket)
 	}
-	jobs := webui.NewJobs(webui.Pipeline{Guard: guard, Catalog: &providers.Deezer{}, Deemix: dl, Library: library})
+	jobs := webui.NewJobs(webui.Pipeline{Guard: guard, Catalog: &providers.Deezer{}, Deemix: dl, Library: importer})
 	defer jobs.Close()
 	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state}, jobs)
 	fmt.Fprintf(os.Stderr, "Stream Sync: %s\n控制台访问码: %s\n", *public, ui.AccessToken())
