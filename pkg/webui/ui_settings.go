@@ -30,7 +30,7 @@ type uiSettings struct {
 	SafeMode bool     `json:"safeMode"`
 	LoggedIn []string `json:"loggedIn"`
 
-	DeemixURL         string `json:"deemixUrl"`
+	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
 }
 
@@ -132,8 +132,8 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 			v.LoggedIn = append(v.LoggedIn, session.Provider)
 		}
 	}
-	deemix := s.deemixStatus()
-	v.DeemixURL, v.DeemixPasswordSet = deemix.URL, deemix.PasswordSet
+	relay := s.relayStatusView()
+	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
 	respond(w, v)
 }
 
@@ -142,20 +142,20 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 // safe mode: the user has asked for the UI to be tried again.
 func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if q.Has("deemixUrl") && !validDeemixURL(q.Get("deemixUrl")) {
-		fail(w, 400, errors.New("Deemix address must be https, or http on a private network"))
+	if q.Has("relayUrl") && !validRelayURL(q.Get("relayUrl")) {
+		fail(w, 400, errInvalidRelayURL)
 		return
 	}
-	if q.Has("deemixUrl") || q.Has("deemixPassword") {
-		var address, password *string
-		if q.Has("deemixUrl") {
-			address = ptrTo(q.Get("deemixUrl"))
+	if q.Has("relayUrl") || q.Has("deemixPassword") {
+		var relay, password *string
+		if q.Has("relayUrl") {
+			relay = ptrTo(q.Get("relayUrl"))
 		}
 		if q.Has("deemixPassword") {
 			password = ptrTo(q.Get("deemixPassword"))
 		}
-		if err := s.updateDeemixConfig(address, password); err != nil {
-			fail(w, 500, errors.New("could not save the Deemix settings"))
+		if err := s.updateRelayConfig(relay, password); err != nil {
+			fail(w, 500, errors.New("could not save the relay settings"))
 			return
 		}
 	}

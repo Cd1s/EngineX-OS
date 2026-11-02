@@ -46,7 +46,6 @@ func run() error {
 	pid := flag.Int("deemix-pid", 0, "also isolate all existing threads of this Deemix PID")
 	lossy := flag.Bool("allow-320k", true, "accept verified MP3 when FLAC is unavailable")
 	relay := flag.String("relay-url", webui.DefaultRelayURL, "cloud login relay; empty keeps logins on the LAN")
-	remote := flag.String("remote-deemix-url", webui.DefaultRelayURL, "default remote Deemix backend; deemix-config.json overrides it")
 	token := flag.String("access-token", "", "console access code (default random per launch)")
 	state := flag.String("state-dir", webui.DefaultStateDir(home), "private owner cookie state")
 	spotifyToken := flag.String("spotify-token", filepath.Join(webui.DefaultStateDir(home), "spotify-token.json"), "owner OAuth token file; guests never use it")
@@ -111,7 +110,7 @@ func run() error {
 	}
 	jobs := webui.NewJobs(webui.Pipeline{Guard: guard, Catalog: &providers.Deezer{}, Deemix: dl, Library: importer})
 	defer jobs.Close()
-	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay, RemoteDeemixURL: *remote}, jobs)
+	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay}, jobs)
 	// This is the one intentional local credential output: the operator needs
 	// it to pair the touch/phone console. No provider credentials are logged.
 	fmt.Fprintf(os.Stderr, "Stream Sync: %s\n控制台访问码: %s\n", *public, ui.AccessToken())

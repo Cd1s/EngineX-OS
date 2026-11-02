@@ -256,7 +256,7 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 	action := "/m/" + flow.Provider + "?t=" + url.QueryEscape(flow.token)
 	switch flow.Provider {
 	case "deezer":
-		phonePage(w, `<h2>连接 Deezer</h2><p>填写资料页或分享链接后，可在碟机上浏览你的公开歌单；也可以填写 arl Cookie，碟机会用它确认账号。Deemix 密码用于从你自己的 Deemix 后端取音频，只想改密码时其余留空。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="分享链接、资料页地址或用户 ID"><input name="arl" placeholder="arl Cookie（可选）" autocomplete="off"><input name="deemixUrl" value="`+html.EscapeString(s.deemixStatus().URL)+`" placeholder="Deemix 后端地址" autocomplete="off"><input name="deemixPassword" type="password" placeholder="Deemix 新密码（留空不改）" autocomplete="off"><button>连接</button></form>`)
+		phonePage(w, `<h2>连接 Deezer</h2><p>填写资料页或分享链接后，可在碟机上浏览你的公开歌单；也可以填写 arl Cookie，碟机会用它确认账号。云端登录服务的地址和密码也可以在这里改，只想改这两项时其余留空。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="分享链接、资料页地址或用户 ID"><input name="arl" placeholder="arl Cookie（可选）" autocomplete="off"><input name="relayUrl" value="`+html.EscapeString(s.relayStatusView().RelayURL)+`" placeholder="云端登录服务地址" autocomplete="off"><input name="deemixPassword" type="password" placeholder="云端服务新密码（留空不改）" autocomplete="off"><button>连接</button></form>`)
 	case "spotify":
 		session := s.sessionOf(flow)
 		sp, ok := session.p.(*providers.Spotify)
@@ -318,13 +318,13 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 	retry := `<p><a class="b" href="/m/` + flow.Provider + `?t=` + url.QueryEscape(flow.token) + `">重试</a></p>`
 	switch p := session.p.(type) {
 	case *providers.Deezer:
-		address, password := strings.TrimSpace(r.Form.Get("deemixUrl")), r.Form.Get("deemixPassword")
-		if address != "" && !validDeemixURL(address) {
-			phonePage(w, "<h2>Deemix 地址必须是 https，或内网 IP 的 http</h2>"+retry)
+		relay, password := strings.TrimSpace(r.Form.Get("relayUrl")), r.Form.Get("deemixPassword")
+		if relay != "" && !validRelayURL(relay) {
+			phonePage(w, "<h2>地址必须是 https，或内网 IP 的 http</h2>"+retry)
 			return
 		}
-		if err := s.updateDeemixConfig(optional(address), optional(password)); err != nil {
-			fail(w, 500, errors.New("could not save the Deemix settings"))
+		if err := s.updateRelayConfig(optional(relay), optional(password)); err != nil {
+			fail(w, 500, errors.New("could not save the relay settings"))
 			return
 		}
 		if strings.TrimSpace(r.Form.Get("user")+r.Form.Get("arl")) == "" {
