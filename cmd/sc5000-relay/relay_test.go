@@ -294,7 +294,7 @@ func TestSoundCloudPageNeedsACredentialAndPassesItOn(t *testing.T) {
 	if w := do(h, "POST", "/m/soundcloud?t="+tok, "user=cave", form); w.Code == 200 {
 		t.Fatalf("accepted without a credential: %s", w.Body)
 	}
-	if w := do(h, "POST", "/m/soundcloud?t="+tok, "user=cave&clientId=cid", form); w.Code != 200 {
+	if w := do(h, "POST", "/m/soundcloud?t="+tok, "user=cave&clientId=cid&clientSecret=shh", form); w.Code != 200 {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	poll := do(h, "GET", "/api/relay/session?t="+tok, "", nil).Body.String()

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -17,18 +18,25 @@ const (
 	// An audio host may take this long to start sending.
 	mediaFirstByte = 90 * time.Second
 	maxMediaBytes  = 2 << 30
+	maxPartBytes   = 64 << 20
+	partsAtOnce    = 8
 )
 
 // Only downloads this pipeline named are ever evicted: Save's and Deemix's <id>.
 var evictable = regexp.MustCompile(`^(netease-|soundcloud-)?\d+\.(flac|mp3|mp4)$`)
 
+var defaultMedia = func() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = mediaFirstByte
+	t.MaxIdleConnsPerHost = partsAtOnce
+	return &http.Client{Transport: t}
+}()
+
 func (c *Client) media() *http.Client {
 	if c.Media != nil {
 		return c.Media
 	}
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.ResponseHeaderTimeout = mediaFirstByte
-	return &http.Client{Transport: t}
+	return defaultMedia
 }
 
 func (c *Client) accept(path string) (*Download, error) {
@@ -82,10 +90,8 @@ func (c *Client) SaveParts(ctx context.Context, name, ext string, urls []string)
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
-	for _, address := range urls {
-		if err = c.appendPart(ctx, f, address); err != nil {
-			return nil, err
-		}
+	if err = c.fetchParts(ctx, f, urls); err != nil {
+		return nil, err
 	}
 	if err = f.Close(); err != nil {
 		return nil, err
@@ -117,47 +123,69 @@ func (c *Client) SaveParts(ctx context.Context, name, ext string, urls []string)
 	return dl, nil
 }
 
-// appendPart rewinds to where it started, so a failed attempt leaves no partial bytes.
-func (c *Client) appendPart(ctx context.Context, f *os.File, address string) error {
-	start, err := f.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return err
+// fetchParts downloads segments a batch at a time and writes them in order. One at a
+// time, a two-hour set takes far longer than Engine should wait.
+func (c *Client) fetchParts(ctx context.Context, f *os.File, urls []string) error {
+	for start := 0; start < len(urls); start += partsAtOnce {
+		batch := urls[start:min(start+partsAtOnce, len(urls))]
+		parts := make([][]byte, len(batch))
+		errs := make([]error, len(batch))
+		var wg sync.WaitGroup
+		for i, address := range batch {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				parts[i], errs[i] = c.fetchPart(ctx, address)
+			}()
+		}
+		wg.Wait()
+		for i, part := range parts {
+			if errs[i] != nil {
+				return errs[i]
+			}
+			if _, err := f.Write(part); err != nil {
+				return err
+			}
+		}
 	}
+	return nil
+}
+
+func (c *Client) fetchPart(ctx context.Context, address string) ([]byte, error) {
 	var last error
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if _, err := f.Seek(start, io.SeekStart); err != nil {
-			return err
-		}
-		if err := f.Truncate(start); err != nil {
-			return err
+			return nil, err
 		}
 		req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
 		if err != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") {
-			return errors.New("audio: invalid address")
+			return nil, errors.New("audio: invalid address")
 		}
 		resp, err := c.media().Do(req)
 		if err != nil {
 			last = errors.New("audio: transfer failed")
 			continue
 		}
-		var n int64
-		if resp.StatusCode == http.StatusOK {
-			n, err = io.Copy(f, io.LimitReader(resp.Body, maxMediaBytes))
-		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxPartBytes))
 		resp.Body.Close()
 		switch {
 		case resp.StatusCode != http.StatusOK:
 			last = fmt.Errorf("audio: HTTP %d", resp.StatusCode)
-		case err != nil || (resp.ContentLength >= 0 && n != resp.ContentLength):
+		case err != nil || (resp.ContentLength >= 0 && int64(len(data)) != resp.ContentLength):
 			last = errors.New("audio: transfer interrupted")
 		default:
-			return nil
+			return data, nil
 		}
 	}
-	return last
+	return nil, last
+}
+
+// RemoveStaleParts clears unfinished downloads left by a previous run.
+func (c *Client) RemoveStaleParts() {
+	parts, _ := filepath.Glob(filepath.Join(c.DownloadDir, ".part-*"))
+	for _, p := range parts {
+		os.Remove(p)
+	}
 }
 
 // Save stores the audio at address as name.flac or name.mp3, after checking what

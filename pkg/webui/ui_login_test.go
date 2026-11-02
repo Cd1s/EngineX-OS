@@ -492,11 +492,16 @@ func TestLongTracksSkipAnalysis(t *testing.T) {
 
 func TestRelayCollectsSoundCloudAndDeckChecksIt(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("client_id") != "cid" {
-			t.Errorf("client id missing: %s", r.URL)
-		}
 		switch r.URL.Path {
+		case "/token":
+			if id, secret, ok := r.BasicAuth(); !ok || id != "cid" || secret != "shh" {
+				t.Error("token request without the app's credentials")
+			}
+			io.WriteString(w, `{"access_token":"app","expires_in":3600}`)
 		case "/resolve":
+			if r.Header.Get("Authorization") != "OAuth app" {
+				t.Errorf("no token on %s", r.URL)
+			}
 			io.WriteString(w, `{"kind":"user","id":7,"username":"cave"}`)
 		default:
 			io.WriteString(w, `{"collection":[]}`)
@@ -504,12 +509,12 @@ func TestRelayCollectsSoundCloudAndDeckChecksIt(t *testing.T) {
 	}))
 	defer api.Close()
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"status":"done","soundcloud":{"user":"cave","clientId":"cid","token":""}}`)
+		io.WriteString(w, `{"status":"done","soundcloud":{"user":"cave","clientId":"cid","clientSecret":"shh"}}`)
 	}))
 	defer relay.Close()
 	state := t.TempDir()
 	bpm := &providers.BPMStore{Path: filepath.Join(state, "bpm.json"), ConfigPath: filepath.Join(state, "bpm-config.json")}
-	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, RelayURL: relay.URL, SoundCloudURL: api.URL, BPM: bpm}, nil)
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, RelayURL: relay.URL, SoundCloudURL: api.URL, SoundCloudTokenURL: api.URL + "/token", BPM: bpm}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	r, err := http.Post(srv.URL+"/v1/sc5000/login?provider=soundcloud", "", nil)
@@ -538,5 +543,53 @@ func TestRelayCollectsSoundCloudAndDeckChecksIt(t *testing.T) {
 	info, err := os.Stat(filepath.Join(state, "soundcloud-owner.json"))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatal(info, err)
+	}
+}
+
+func TestStrayEthernetDefaultOnlyWhenWiFiHasARoute(t *testing.T) {
+	wifi := "default via 192.168.1.6 dev wlan0 \n"
+	if got, ok := strayEthernetDefault("0.0.0.0 dev eth0 scope link \n" + wifi + "169.254.0.0/16 dev eth0 scope link src 169.254.1.2\n"); !ok || got != "0.0.0.0" {
+		t.Fatal(got, ok)
+	}
+	if got, ok := strayEthernetDefault("default dev eth0 scope link \n" + wifi); !ok || got != "default" {
+		t.Fatal(got, ok)
+	}
+	if _, ok := strayEthernetDefault(wifi + "169.254.0.0/16 dev eth0 scope link\n"); ok {
+		t.Fatal("removed nothing stray")
+	}
+	if _, ok := strayEthernetDefault("0.0.0.0 dev eth0 scope link \n"); ok {
+		t.Fatal("would cut the only route")
+	}
+	if _, ok := strayEthernetDefault("default via 10.0.0.1 dev eth0 \n" + wifi); ok {
+		t.Fatal("touched a real Ethernet gateway")
+	}
+}
+
+func TestProviderTracksCarryCovers(t *testing.T) {
+	deezer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"data":[{"id":1,"title":"S","artist":{"name":"A"},"album":{"title":"L","cover_big":"https://cdn/big.jpg"}}]}`)
+	}))
+	defer deezer.Close()
+	found, err := (&providers.Deezer{BaseURL: deezer.URL}).Search(context.Background(), "q")
+	if err != nil || found[0].CoverURL != "https://cdn/big.jpg" {
+		t.Fatalf("%+v %v", found, err)
+	}
+}
+
+func TestSoundCloudAppCredentialsSearchButAreNotALogin(t *testing.T) {
+	state := t.TempDir()
+	bpm := &providers.BPMStore{Path: filepath.Join(state, "bpm.json"), ConfigPath: filepath.Join(state, "bpm-config.json")}
+	bpm.SaveConfig(providers.BPMConfig{SoundCloudClientID: "cid", SoundCloudSecret: "shh"})
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, BPM: bpm}, nil)
+	p := ui.ownerSoundCloud()
+	if p == nil {
+		t.Fatal("search and download need the app's credentials to count")
+	}
+	if ready(p) {
+		t.Fatal("an app token must still offer the login QR code")
+	}
+	p.UserID = 7
+	if !ready(p) {
+		t.Fatal("a bound profile is a login")
 	}
 }

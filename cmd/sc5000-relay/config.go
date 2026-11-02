@@ -40,6 +40,7 @@ type config struct {
 	SpotifyClientID   string    `json:"spotifyClientId"`
 
 	SoundCloudClientID string `json:"soundcloudClientId,omitempty"`
+	SoundCloudSecret   string `json:"soundcloudClientSecret,omitempty"`
 	SoundCloudToken    string `json:"soundcloudToken,omitempty"`
 	GetSongBPMKey      string `json:"getSongBpmKey,omitempty"`
 }

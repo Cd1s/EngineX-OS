@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"errors"
+	"log"
 	"math"
 	"os"
 	"strings"
@@ -166,6 +167,7 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	if err != nil {
 		return "", err
 	}
+	j.addCover(ctx, t, dl)
 	f := fetched{matched, dl}
 	j.mu.Lock()
 	j.files[key] = f
@@ -208,6 +210,17 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 		}
 	}
 	return providers.Track{}, nil, errors.Join(failures...)
+}
+
+// addCover embeds the artwork, which Engine reads from the file for its screens. A
+// missing cover is not worth failing a track over.
+func (j *Jobs) addCover(ctx context.Context, t providers.Track, dl *deemixclient.Download) {
+	if t.CoverURL == "" {
+		return
+	}
+	if err := j.p.Deemix.EmbedCover(ctx, dl.Path, t.CoverURL); err != nil {
+		log.Printf("stream-sync: no cover for track %s: %v", t.ID, err)
+	}
 }
 
 func (j *Jobs) fromSoundCloud(ctx context.Context, t providers.Track) (*deemixclient.Download, error) {
@@ -388,6 +401,7 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 		if err != nil {
 			return err
 		}
+		j.addCover(ctx, v.Track, dl)
 		j.mu.Lock()
 		j.files[trackKey(v.Track)] = fetched{matched, dl}
 		j.mu.Unlock()

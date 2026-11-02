@@ -65,14 +65,16 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 {{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的设置。</div>{{end}}
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 <form method="post" class="card">
-<label for="user">主页链接或用户名（可选）</label>
+<label for="user">主页链接、分享链接或用户名</label>
 <input id="user" name="user" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://soundcloud.com/你的主页">
-<p class="hint">用来浏览喜欢的曲目和歌单。不填也可以搜索。</p>
-<label for="clientId">Client ID</label>
+<p class="hint">例如 https://soundcloud.com/你的主页。填好就能看到点赞的曲目和歌单。</p>
+<label for="clientId">Client ID（已在后台配置时可留空）</label>
 <input id="clientId" name="clientId" autocomplete="off" autocapitalize="off" spellcheck="false">
+<label for="clientSecret">Client Secret（已在后台配置时可留空）</label>
+<input id="clientSecret" name="clientSecret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
 <label for="token">OAuth Token（可选）</label>
 <input id="token" name="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
-<p class="hint">至少填写其一。填 OAuth Token 还可以看私密内容。碟机只播放账号本身可以完整播放的内容。</p>
+<p class="hint">想看私密歌单才需要填 OAuth Token。碟机只播放 API 标记为可完整播放的内容。</p>
 <button class="btn purple" type="submit">完成连接</button>
 </form></div></body></html>{{end}}
 
@@ -161,9 +163,10 @@ document.getElementById('clip').onclick=async function(){
 
 <div class="card"><h2>BPM 增强（可选）</h2><p class="hint" id="bpmstate">…</p>
 <input id="scid" placeholder="SoundCloud Client ID（留空不改）" autocomplete="off" spellcheck="false" style="margin-bottom:8px">
+<input id="scsec" type="password" placeholder="SoundCloud Client Secret（留空不改）" autocomplete="off" style="margin-bottom:8px">
 <input id="sctok" type="password" placeholder="SoundCloud OAuth Token（留空不改）" autocomplete="off" style="margin-bottom:8px">
 <input id="gsb" type="password" placeholder="GetSongBPM API Key（留空不改）" autocomplete="off">
-<button class="btn green small" onclick="save({soundcloudClientId:val('scid'),soundcloudToken:val('sctok'),getSongBpmKey:val('gsb')}).then(()=>{el('scid').value='';el('sctok').value='';el('gsb').value=''})">保存</button>
+<button class="btn green small" onclick="save({soundcloudClientId:val('scid'),soundcloudClientSecret:val('scsec'),soundcloudToken:val('sctok'),getSongBpmKey:val('gsb')}).then(()=>{el('scid').value='';el('scsec').value='';el('sctok').value='';el('gsb').value=''})">保存</button>
 <button class="btn ghost small" onclick="if(confirm('确定清除这些密钥？'))save({clearBpm:'1'})">清除</button>
 <p class="hint"><a href="https://getsongbpm.com" target="_blank" rel="noreferrer">BPM data by GetSongBPM</a></p></div>
 
@@ -182,7 +185,7 @@ function render(c){
  el('pwstate').innerHTML=c.passwordIsDefault?'<span class="badge warn">仍为默认初始密码，建议修改</span>':'<span class="badge good">已自定义</span>'+(c.passwordChangedAt?' '+esc(new Date(c.passwordChangedAt).toLocaleString()):'');
  el('redir').textContent=c.spotifyRedirect;
  el('arlstate').innerHTML=c.deezerArlSet?'已保存：<code>'+esc(c.deezerArlMasked)+'</code>'+(c.deezerArlUser?' · 用户 '+esc(c.deezerArlUser):''):'<span class="badge warn">未设置 ARL</span>（请先保存 ARL，供 SC5000 同步登录）';
- el('bpmstate').textContent='SoundCloud Client ID：'+(c.soundcloudClientIdSet?'已设置':'未设置')+' · Token：'+(c.soundcloudTokenSet?'已设置':'未设置')+' · GetSongBPM：'+(c.getSongBpmKeySet?'已设置':'未设置');
+ el('bpmstate').textContent='SoundCloud Client ID：'+(c.soundcloudClientIdSet?'已设置':'未设置')+' · Secret：'+(c.soundcloudSecretSet?'已设置':'未设置')+' · Token：'+(c.soundcloudTokenSet?'已设置':'未设置')+' · GetSongBPM：'+(c.getSongBpmKeySet?'已设置':'未设置');
  el('uid').value=c.deezerUserId||'';el('cid').value=c.spotifyClientId||'';}
 async function api(path,opt){const r=await fetch(path,Object.assign({credentials:'same-origin',headers:{'Content-Type':'application/json'}},opt||{}));
  if(r.status==401){location.reload();throw new Error('unauthorized')}return r.json()}

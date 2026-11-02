@@ -103,14 +103,14 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if provider == "soundcloud" {
-		info := &soundCloudInfo{User: strings.TrimSpace(firstOf(v, "user", "url")), ClientID: strings.TrimSpace(firstOf(v, "clientId")), Token: strings.TrimSpace(firstOf(v, "token"))}
+		info := &soundCloudInfo{User: strings.TrimSpace(firstOf(v, "user", "url")), ClientID: strings.TrimSpace(firstOf(v, "clientId")), Secret: strings.TrimSpace(firstOf(v, "clientSecret")), Token: strings.TrimSpace(firstOf(v, "token"))}
 		var err error
-		if info.ClientID == "" && info.Token == "" {
-			c := s.cfg.get()
-			info.ClientID, info.Token = c.SoundCloudClientID, c.SoundCloudToken
-			if !sess.Trusted || (info.ClientID == "" && info.Token == "") {
-				err = errors.New("至少填写 Client ID 或 OAuth Token 之一")
-			}
+		// The deck pulls the app's credentials from this service by itself, so only
+		// what the phone entered travels with the session.
+		c := s.cfg.get()
+		hasApp := c.SoundCloudClientID != "" && c.SoundCloudSecret != ""
+		if info.Token == "" && (info.ClientID == "" || info.Secret == "") && !(sess.Trusted && hasApp) {
+			err = errors.New("请填写 Client ID 和 Client Secret，或者 OAuth Token")
 		}
 		if err == nil {
 			s.sessions.update(token, func(x *session) { x.SoundCloud, x.Status = info, "done" })
@@ -118,6 +118,9 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 				s.cfg.update(func(c *config) {
 					if info.ClientID != "" {
 						c.SoundCloudClientID = info.ClientID
+					}
+					if info.Secret != "" {
+						c.SoundCloudSecret = info.Secret
 					}
 					if info.Token != "" {
 						c.SoundCloudToken = info.Token
@@ -286,6 +289,7 @@ func (s *server) configView() map[string]any {
 		"spotifyRedirect":   s.spotify.httpsRedirect,
 
 		"soundcloudClientIdSet": c.SoundCloudClientID != "",
+		"soundcloudSecretSet":   c.SoundCloudSecret != "",
 		"soundcloudTokenSet":    c.SoundCloudToken != "",
 		"getSongBpmKeySet":      c.GetSongBPMKey != "",
 	}
@@ -306,6 +310,7 @@ func (s *server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		c := s.cfg.get()
 		view["deezerArl"] = c.DeezerARL
 		view["soundcloudClientId"] = c.SoundCloudClientID
+		view["soundcloudClientSecret"] = c.SoundCloudSecret
 		view["soundcloudToken"] = c.SoundCloudToken
 		view["getSongBpmKey"] = c.GetSongBPMKey
 	}
@@ -365,17 +370,22 @@ func (s *server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 		msgs = append(msgs, "Spotify Client ID 已保存")
 	}
 	if v.Get("clearBpm") == "1" {
-		if err := s.cfg.update(func(c *config) { c.SoundCloudClientID, c.SoundCloudToken, c.GetSongBPMKey = "", "", "" }); err != nil {
+		if err := s.cfg.update(func(c *config) {
+			c.SoundCloudClientID, c.SoundCloudSecret, c.SoundCloudToken, c.GetSongBPMKey = "", "", "", ""
+		}); err != nil {
 			fail(500, err.Error())
 			return
 		}
 		msgs = append(msgs, "已清除 BPM 服务密钥")
 	}
-	cid, token, key := strings.TrimSpace(v.Get("soundcloudClientId")), strings.TrimSpace(v.Get("soundcloudToken")), strings.TrimSpace(v.Get("getSongBpmKey"))
-	if cid+token+key != "" {
+	cid, secret, token, key := strings.TrimSpace(v.Get("soundcloudClientId")), strings.TrimSpace(v.Get("soundcloudClientSecret")), strings.TrimSpace(v.Get("soundcloudToken")), strings.TrimSpace(v.Get("getSongBpmKey"))
+	if cid+secret+token+key != "" {
 		if err := s.cfg.update(func(c *config) {
 			if cid != "" {
 				c.SoundCloudClientID = cid
+			}
+			if secret != "" {
+				c.SoundCloudSecret = secret
 			}
 			if token != "" {
 				c.SoundCloudToken = token
