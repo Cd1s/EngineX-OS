@@ -50,6 +50,10 @@ type Config struct {
 	// RelayURL is the cloud login service; it passes credentials and never audio.
 	// Empty keeps phone logins on the LAN, where the phone must reach this deck.
 	RelayURL string
+	// TidalAPIURL and TidalAuthURL override TIDAL's servers in tests.
+	TidalAPIURL, TidalAuthURL string
+	// BPM looks up tempo and key for browsed tracks; nil turns that off.
+	BPM *providers.BPMStore
 	// RestartEngine replaces "systemctl restart engine.service" in tests.
 	RestartEngine func() error
 	// Factory is useful for embedded integrations and deterministic tests.
@@ -97,12 +101,15 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/jobs", s.submit)
 	s.mux.HandleFunc("GET /api/jobs", s.listJobs)
 	s.mux.HandleFunc("GET /api/jobs/{id}/waveform", s.waveform)
+	s.mux.HandleFunc("GET /api/bpm", s.bpmConfigGet)
+	s.mux.HandleFunc("POST /api/bpm", s.bpmConfigPost)
 	s.mux.HandleFunc("GET /api/relay", s.relayConfigGet)
 	s.mux.HandleFunc("POST /api/relay", s.relayConfigPost)
 	s.tidal = newTidalGateway(s)
 	if jobs != nil {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor
+		jobs.bpm = cfg.BPM
 		jobs.mu.Unlock()
 	}
 	return s

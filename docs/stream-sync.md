@@ -116,6 +116,21 @@ MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k
 `m.db`/`hm.db`，运行中从外部写入曾导致库损坏后被 Engine 删除（见提交 b63795b）。
 没有配置库时曲目照常播放，只是不入库。
 
+## BPM 与调性
+
+歌单和搜索结果带 BPM 和 Camelot 调性，显示在标题后（如 `Song [148 8A]`），因为 Engine 的
+客户端不读速度字段。结果存在 `state/bpm-cache.json`。
+
+列表上的外部 BPM 只是预览，不写入 Beatgrid，也不进曲库。曲目载入转盘时标题不带它，由 Engine
+自己分析。碟机分析出结果后，实测值覆盖 `bpm-cache.json` 里的预览值，之后外部来源不能再改。
+
+顺序：自己分析出的结果 → ReccoBeats 批量查 ISRC / Spotify ID（列表最多等 3 秒）→ 后台逐首
+查（Deezer 曲目详情、ReccoBeats 搜索、GetSongBPM、SoundCloud）。后台查到的结果下次打开
+列表时显示。标题和主艺人必须一致才算命中。ReccoBeats 返回 429 时暂停 5 分钟。
+
+GetSongBPM 和 SoundCloud 的密钥可选，存在 `state/bpm-config.json`，在控制台或
+`GET/POST /api/bpm`（碟机本机 `/v1/sc5000/bpm`）修改。
+
 ## 云端扫码登录
 
 Spotify 和 Deezer 的二维码指向 `--relay-url`（默认 `https://relay.example.com`），手机不用连局域网：
