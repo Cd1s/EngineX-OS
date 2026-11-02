@@ -1,18 +1,39 @@
 #!/bin/sh
+# Stock Engine OS has no xz(1); BusyBox provides xzcat. A .gz archive is also
+# accepted. Concurrent service starts unpack once under a lock.
 set -eu
 APPLET="$1"
 shift
-ARCHIVE="/usr/share/sc5000-custom/sc5000-suite.xz"
-TARGET_DIR="/data/sc5000-custom/bin"
+SHARE=${SC5000_SUITE_SHARE:-/usr/share/sc5000-custom}
+TARGET_DIR=${SC5000_SUITE_DIR:-/data/sc5000-custom/bin}
 if ! mkdir -p "$TARGET_DIR" 2>/dev/null || [ ! -w "$TARGET_DIR" ]; then
     TARGET_DIR="/tmp/sc5000-custom-bin"
     mkdir -p "$TARGET_DIR"
 fi
 BIN="$TARGET_DIR/sc5000-suite"
-if [ ! -x "$BIN" ] || [ "$ARCHIVE" -nt "$BIN" ]; then
-    TMP="$BIN.$$.tmp"
-    xz -dc "$ARCHIVE" > "$TMP"
-    chmod 0755 "$TMP"
-    mv -f "$TMP" "$BIN"
+ARCHIVE="$SHARE/sc5000-suite.xz"
+[ -f "$ARCHIVE" ] || ARCHIVE="$SHARE/sc5000-suite.gz"
+decompress() {
+    case $1 in
+        *.gz) gzip -dc "$1" ;;
+        *) if command -v xz >/dev/null 2>&1; then xz -dc "$1"; else busybox xzcat "$1"; fi ;;
+    esac
+}
+stale() { [ ! -x "$BIN" ] || [ "$ARCHIVE" -nt "$BIN" ]; }
+if stale; then
+    exec 9>"$TARGET_DIR/.unpack.lock"
+    flock 9
+    if stale; then
+        TMP="$BIN.$$.tmp"
+        trap 'rm -f "$TMP"' EXIT
+        decompress "$ARCHIVE" > "$TMP"
+        chmod 0755 "$TMP"
+        mv -f "$TMP" "$BIN"
+        trap - EXIT
+    fi
+    # Earlier releases leaked one empty temporary per failed start.
+    rm -f "$TARGET_DIR"/sc5000-suite.*.tmp
+    # The service must not keep holding the unpack lock.
+    exec 9>&-
 fi
 exec "$BIN" "$APPLET" "$@"

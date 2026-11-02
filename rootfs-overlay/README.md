@@ -6,100 +6,32 @@ packaging workflow. It does not change the build host. Kernel artifacts and
 
 ## Storage lifecycle
 
-`udev` probes filesystems using its blkid builtin, then activates
-`sc5000-storage@<kernel-device>.service`. Mounts run in the host namespace,
-outside udev's private namespace. Device removal stops the worker through
-`BindsTo=dev-<device>.device`; `ExecStop` unmounts the public view before its
-APFS lower. Busy mounts are preserved; no lazy or forced unmount is used.
-Coldplug discovery processes MMC devices before USB devices. A global flock
-serializes discovery, hotplug, conversion and ejection.
+Engine OS mounts removable media through `edisksd`, and Engine follows edisksd
+over D-Bus (`/io/github/inmusicdev/edisksd/dev/<dev>`). A second mounter races
+that state machine, so this tree never mounts, checks or writes block devices.
+`udev` starts `sc5000-storage@<dev>.service` after blkid probing; the worker
+waits for edisksd's mountpoint and then:
 
-The front cache candidate must be `mmcblk*` with sysfs `device/type=SD`.
-Soldered eMMC (`MMC`) is excluded, including its partitions. Set
-`SC5000_FRONT_SD_DEVICE=mmcblkN` in `/etc/default/sc5000-storage` if more than
-one removable MMC slot exists. The first writable, supported SD filesystem
-is mounted at `/media/sc5000-sd-cache`, with:
+- **read-only mounts** (all HFS+): do nothing. Engine imports a rekordbox
+  export itself when `IntegrateRekordBoxLibrary` is enabled, and the patched
+  Engine (`0x58af34`) no longer auto-ejects read-only volumes.
+- **writable mounts** with `PIONEER/` or macOS `.PIONEER/` (any case)
+  containing `rekordbox/export.pdb` or `exportLibrary.db`: run
+  `rb-bridge --mount-path <mountpoint>` and then
+  `engine-guardian --heal-mount <mountpoint>` on CPU3, bounded by
+  `SC5000_BRIDGE_TIMEOUT`/`SC5000_GUARDIAN_TIMEOUT` when `timeout(1)` exists.
 
-```text
-Engine Library/
-Downloads/
-apfs-overlays/<filesystem-UUID>/{upper,work,view-upper,view-work}/
-```
+HFS+ must stay read-only. On the 6.6.119 RT kernel `hfsplus.ko` hits
+`kernel BUG at mm/highmem.c:553` (`hfsplus_mkdir`) on the first write; with
+`panic_on_oops=1` the player reboots, and the interrupted write corrupted a
+catalog node on real media. Therefore `/etc/edisksd/main.conf` has no
+`[hfsplus] force` option, and dirty HFS+ volumes are never "cleaned" by
+editing the volume header. OverlayFS also refuses HFS+ as a lower layer
+(case-insensitive dentry ops), so there is no writable HFS+ view; convert a
+Mac stick to exFAT if Engine must write its library onto it.
 
-No disk is formatted. Use ext4 or f2fs on the permanent SD for an OverlayFS
-upper. FAT/exFAT/NTFS/HFS+ SD cards still supply a library/download area, but
-APFS uppers use internal storage because those filesystems lack the required
-upperdir semantics. APFS-formatted SD is handled as an external APFS volume,
-using internal cache, rather than becoming the writable cache repository.
-
-HFS+ mounting loads `hfsplus`, runs `fsck.hfsplus -f <device>` with closed
-stdin, and permits `force,rw,uid=1000,gid=1000,umask=0000` only after status
-**0**. This pinned hfsprogs returns nonzero for usage/dirty/check failures;
-all are rejected. The device must be unmounted first. Force-RW does not add
-macOS journal replay to Linux: cleanly eject Mac media and validate HFS+
-repair behavior with disposable media before production use.
-
-APFS mounting loads `apfs` and `overlay`, then:
-
-1. Mounts the external filesystem **read-only** at
-   `/run/sc5000-storage/lower/<device>`, with `nodev,nosuid`.
-2. Creates library `upper`/`work` and root-view `view-upper`/`view-work` pairs
-   together under the SD UUID directory, or under
-   `/var/cache/sc5000/apfs-overlays/<UUID>` if SD is absent/incompatible.
-   ext4/f2fs/xfs or a compatible writable internal overlay filesystem is needed.
-3. Mounts a whole-volume OverlayFS view at `/media/sc5000-<device>` using
-   `view-upper`/`view-work`, then mounts a dedicated library OverlayFS at
-   `<public-path>/Engine Library` using `upper`/`work`. The library lower is
-   the APFS `Engine Library` directory, or an empty runtime directory when
-   the original disk lacks one. Directory creation happens in the root
-   view's upper, never on the original disk. Music and `PIONEER` remain
-   readable through the public view.
-4. Calls `/usr/local/bin/rb-bridge --mount-path <public-path>` when
-   `PIONEER/rekordbox/export.pdb` exists, then invokes the notification hook.
-
-The root view keeps track paths stable for bridge/database clients; writes
-outside `Engine Library` stay in `view-upper`, while database/cue/history
-writes use the dedicated library `upper`. Ejection unmounts library, root
-view, then APFS lower. If a track keeps the root view busy after library
-unmount succeeds, the worker restores the library overlay before reporting
-busy, preserving access to saved cues.
-An existing internal UUID cache remains in use when a new SD is inserted,
-so adding an empty SD cannot hide previously saved cues. There is no live
-migration. Eject APFS volumes before SD. Clone UUIDs cannot use the same
-upper/work pair concurrently. No upper/work cache is deleted on eject.
-Malformed UUIDs and symlinks in cache/library paths are rejected.
-
-`rb-bridge` inherits CPU3 and the worker's background resource weights.
-`SC5000_BRIDGE_TIMEOUT` defaults to `10s`, with a two-second kill grace period.
-Bridge failure/timeout preserves access to original music and still invokes
-notification. This suite controls call ordering; actual conversion speed
-depends on the separately supplied bridge implementation and library size.
-FAT/exFAT use kernel mounts; NTFS explicitly uses the kernel `ntfs3` driver.
-
-## Required Engine integration before firmware release
-
-The current repository contains no stock Engine automounter protocol or
-confirmed Engine service name. Therefore:
-
-- Install a firmware-specific executable at
-  `/usr/local/libexec/sc5000-storage-notify`, accepting `--mount-path <path>`.
-  It must publish the completed mount to Engine. It is called after the
-  bridge. The generic worker deliberately does not invent a DBus signal or
-  process restart. Without this adapter, the volume mounts but Engine
-  notification is not implemented.
-- Disable/route the stock automounter for devices claimed by this worker.
-  `UDISKS_IGNORE=1` handles UDisks only; it cannot suppress a proprietary
-  Engine watcher. Engine must consume completed worker notifications rather
-  than discover the mount before conversion finishes. The worker refuses an
-  already mounted source, preventing fsck against a live filesystem.
-- In the **verified stock Engine service**, set
-  `Slice=sc5000-engine.slice`. This provides CPUs 0-2 for the process's audio
-  and GUI threads. Do not set process-wide `CPUAffinity=1 2`, which would
-  interfere with audio on CPU0. If the stock service has an existing cpuset,
-  ensure it permits CPUs 0-2.
-
-These adapters must be validated against the unpacked firmware/QEngine;
-their completion cannot be inferred from shell mocks.
+The scripts are POSIX `sh`: the stock rootfs has BusyBox ash, no bash and no
+`xz` (BusyBox `xzcat` unpacks `sc5000-suite.xz`).
 
 ## CPU and I/O policy
 
@@ -135,9 +67,8 @@ symlinks for discovery, tuning and its timer are included in this tree.
 
 ## Dependencies and validation
 
-Runtime: Bash, systemd/udev with blkid APFS probing, util-linux mount/umount,
-blkid/findmnt/flock/mountpoint/taskset, kmod, coreutils timeout/chown/chmod,
-`fsck.hfsplus`, and matching filesystem modules. Stock kernel exFAT/NTFS3 and
+Runtime: BusyBox sh, systemd/udev, util-linux findmnt/flock/taskset and
+edisksd from the stock image. Stock kernel exFAT/NTFS3 and
 SD filesystem support must also be present. The internal cache must have
 enough persistent free space and OverlayFS-compatible xattrs/d_type.
 

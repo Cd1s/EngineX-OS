@@ -1,9 +1,8 @@
-# blkid is built into systemd-udevd; no long-running RUN+= mount commands.
+# edisksd owns mounting. This only starts the post-mount bridge worker; it never
+# runs long commands from udev and never mounts on its own.
 SUBSYSTEM!="block", GOTO="sc5000_storage_end"
 ACTION!="add|change", GOTO="sc5000_storage_end"
-KERNEL!="sd*|mmcblk*", GOTO="sc5000_storage_end"
+KERNEL!="sd*[0-9]|mmcblk[0-9]p[0-9]*", GOTO="sc5000_storage_end"
 IMPORT{builtin}="blkid"
-# SD only, never the soldered eMMC (device/type == MMC).
-KERNEL=="mmcblk*", ATTRS{type}=="SD", ENV{ID_FS_TYPE}=="ext4|f2fs|vfat|exfat|ntfs|hfsplus|apfs", ENV{UDISKS_IGNORE}="1", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sc5000-storage@%k.service"
-KERNEL=="sd*", ENV{ID_FS_TYPE}=="apfs|hfsplus|vfat|exfat|ntfs|ext4|f2fs", ENV{UDISKS_IGNORE}="1", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sc5000-storage@%k.service"
+ENV{ID_FS_TYPE}=="hfsplus|vfat|exfat|ntfs|ext4|f2fs", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sc5000-storage@%k.service"
 LABEL="sc5000_storage_end"
