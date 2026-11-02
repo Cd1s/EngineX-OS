@@ -45,6 +45,10 @@ type Config struct {
 	SpotifyClientID, SpotifyTokenPath, SpotifyBaseURL, SpotifyAccountsURL string
 	NeteaseURL, StateDir, DeezerURL                                       string
 	HTTP                                                                  *http.Client
+	// UIDir holds the deck UI settings; empty means the on-device default.
+	UIDir string
+	// RestartEngine replaces "systemctl restart engine.service" in tests.
+	RestartEngine func() error
 	// Factory is useful for embedded integrations and deterministic tests.
 	Factory func(provider string, guest bool, userID string) (providers.Provider, error)
 }
@@ -56,6 +60,7 @@ type Server struct {
 	pending  map[string]pending
 	mux      *http.ServeMux
 	tidal    *tidalGateway
+	uiMu     sync.Mutex
 
 	// Owner logins ended in the console; the deck must not restore them.
 	ownerDeleted map[string]bool
@@ -70,6 +75,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /login", s.login)
 	s.mux.HandleFunc("GET /oauth/spotify/callback", s.callback)
 	s.mux.HandleFunc("GET /api/sessions", s.listSessions)
+	s.mux.HandleFunc("GET /api/ui", s.uiStatus)
+	s.mux.HandleFunc("POST /api/ui", s.uiUpdate)
 	s.mux.HandleFunc("GET /api/console-qr", s.consoleQR)
 	s.mux.HandleFunc("POST /api/sessions", s.createSession)
 	s.mux.HandleFunc("DELETE /api/sessions/{id}", s.deleteSession)

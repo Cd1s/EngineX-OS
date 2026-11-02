@@ -1,0 +1,32 @@
+# Engine UI mod
+
+`engine_ui_hook.c` is preloaded into `/usr/Engine/Engine` and swaps files in
+Engine's embedded Qt resources for those in
+`/data/sc5000-custom/ui/packs/<language>/`. Rootfs and the Engine binary stay
+untouched. `build_packs.py` builds the packs from the QML extracted from Engine
+5.0.4: language, waveform palette, separate NetEase/Spotify/Deezer sources and
+removal of the improper-eject prompt.
+
+    python3 build_packs.py --qrc <extracted qrc> --out out/ui-packs
+    # unpack out/ui-packs.tar.gz into /data/sc5000-custom/ui on the deck
+
+`--dev` adds an eval/screenshot harness; it also needs
+`QML_XHR_ALLOW_FILE_READ=1` and must never ship.
+
+## Limits
+
+- Translation covers text literal in QML (`i18n.tsv`). Text from Engine's C++
+  stays English. Track, artist and playlist names are never translated because
+  they are not literals.
+- The three services share Engine's one TIDAL client, so one is active at a time.
+  Tracks already loaded on a deck keep working after a switch.
+- Encoder navigation of the Source screen reaches only stock rows. The three
+  service rows are touch-only.
+
+## Recovery
+
+- Three Engine starts that do not survive 90 s create
+  `/data/sc5000-custom/ui/safe-mode` and the stock UI returns.
+- To remove the mod: delete
+  `/etc/systemd/system/engine.service.d/60-ui-hook.conf`, run
+  `systemctl daemon-reload` and restart `engine.service`.

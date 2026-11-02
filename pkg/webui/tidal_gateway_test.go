@@ -69,7 +69,7 @@ func tidalGet(t *testing.T, base, path string, status int, out any) []byte {
 }
 
 func TestTidalGatewayLoginAndHint(t *testing.T) {
-	ui := New(Config{AccessToken: "test-console-code", DeezerURL: fakeDeezer(t).URL, StateDir: t.TempDir()}, nil)
+	ui := New(Config{AccessToken: "test-console-code", DeezerURL: fakeDeezer(t).URL, StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	for _, path := range []string{"/au/oauth2/device_authorization", "/au//oauth2/token"} {
@@ -94,16 +94,30 @@ func TestTidalGatewayLoginAndHint(t *testing.T) {
 	if sub["highestSoundQuality"] != "LOSSLESS" || sub["status"] != "ACTIVE" {
 		t.Fatal(sub)
 	}
-	var lists tidalList
-	tidalGet(t, srv.URL, "/v1/users/1/playlists?countryCode=US", 200, &lists)
-	var titles []string
-	for _, raw := range lists.Items {
-		var p tidalPlaylist
-		json.Unmarshal(raw, &p)
-		titles = append(titles, p.Title)
+	titles := func() []string {
+		var lists tidalList
+		tidalGet(t, srv.URL, "/v1/users/1/playlists?countryCode=US", 200, &lists)
+		out := []string{}
+		for _, raw := range lists.Items {
+			var p tidalPlaylist
+			json.Unmarshal(raw, &p)
+			out = append(out, p.Title)
+		}
+		return out
 	}
-	if len(titles) != 2 || !strings.Contains(titles[0], "sc5000.lan:8080") || titles[1] != "[Deezer] Top" {
-		t.Fatalf("titles=%q", titles)
+	// Each service answers alone: public Deezer charts, or a login hint.
+	if got := titles(); len(got) != 1 || got[0] != "Top" {
+		t.Fatalf("deezer titles=%q", got)
+	}
+	for _, scope := range []string{"netease", "spotify"} {
+		resp, err := http.Post(srv.URL+"/v1/sc5000/ui?scope="+scope, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got := titles(); len(got) != 1 || !strings.Contains(got[0], "sc5000.lan:8080") {
+			t.Fatalf("%s titles=%q", scope, got)
+		}
 	}
 	// The gateway carries no console login, so it must stay local to the deck.
 	w := httptest.NewRecorder()
@@ -147,7 +161,11 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 	defer queue.Close()
 	jobs := NewJobs(Pipeline{Guard: resourceguard.New(resourceguard.Config{Disabled: true}), Catalog: fixtureCatalog{}, Deemix: &deemixclient.Client{BaseURL: queue.URL, DownloadDir: root, PollInterval: time.Millisecond}, Library: lib})
 	defer jobs.Close()
-	ui := New(Config{AccessToken: "test-console-code", DeezerURL: fakeDeezer(t).URL, Factory: func(string, bool, string) (providers.Provider, error) { return fixtureProvider{}, nil }}, jobs)
+	uiDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("scope=netease\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ui := New(Config{AccessToken: "test-console-code", DeezerURL: fakeDeezer(t).URL, UIDir: uiDir, Factory: func(string, bool, string) (providers.Provider, error) { return fixtureProvider{}, nil }}, jobs)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	var s Session
@@ -168,7 +186,7 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 		if p.Item.UUID != p.UUID || strings.Contains(p.Title, "sc5000.lan") {
 			t.Fatalf("favorite item %s", raw)
 		}
-		if p.Title == "[网易云] Friend" {
+		if p.Title == "Friend" {
 			friend = p.tidalPlaylist
 		}
 	}
@@ -278,6 +296,12 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 		Tracks    tidalList `json:"tracks"`
 		Playlists tidalList `json:"playlists"`
 		Albums    tidalList `json:"albums"`
+	}
+	// Search follows the active service; the catalog answers for Deezer.
+	if resp, err := http.Post(srv.URL+"/v1/sc5000/ui?scope=deezer", "", nil); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
 	}
 	tidalGet(t, srv.URL, "/v1/search?query=Found&types=TRACKS,PLAYLISTS", 200, &found)
 	if found.Tracks.TotalNumberOfItems != 1 || found.Playlists.TotalNumberOfItems != 1 || found.Albums.Items == nil {
