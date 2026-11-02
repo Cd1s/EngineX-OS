@@ -12,7 +12,7 @@
 <nav><button data-provider="netease">网易云 · 扫码</button><button data-provider="spotify">Spotify · 扫码</button><button data-provider="deezer">Deezer</button></nav>
 <div class="bar"><select id="sessions" aria-label="账号"></select><button id="browse">浏览歌单</button><button id="relogin">重新扫码登录</button><button id="logout">结束账号会话</button></div>
 <small>访客凭据仅保存在内存，8 小时后失效；下载进入 [Guest / 临时加歌]。原有 Hot Cue 保留。</small></div>
-<div class="card"><h2>碟机显示</h2><div class="bar"><span>语言（需重启 Engine，播放会中断）</span><button data-ui="lang=en&restart=1">English</button><button data-ui="lang=zh-Hans&restart=1">简体中文</button><button data-ui="lang=zh-Hant&restart=1">繁體中文</button></div><div class="bar"><span>波形（立即生效）</span><button data-ui="waveform=denon">Denon 原厂</button><button data-ui="waveform=rgb">RGB</button><button data-ui="waveform=3band">3-Band</button></div><small id="uiState"></small></div>
+<div class="card"><h2>碟机显示</h2><div class="bar"><span>流媒体音质（立即生效）</span><button data-ui="quality=flac">FLAC</button><button data-ui="quality=320k">320kbps</button></div><div class="bar"><span>语言（需重启 Engine，播放会中断）</span><button data-ui="lang=en&restart=1">English</button><button data-ui="lang=zh-Hans&restart=1">简体中文</button><button data-ui="lang=zh-Hant&restart=1">繁體中文</button></div><div class="bar"><span>波形（立即生效）</span><button data-ui="waveform=denon">Denon 原厂</button><button data-ui="waveform=rgb">RGB</button><button data-ui="waveform=3band">3-Band</button></div><small id="uiState"></small></div>
 <div id="notice" role="status"></div>
 <div id="login" class="card"><img id="qr" alt="登录二维码"><p><a id="auth" target="_blank" rel="noreferrer">在此手机打开登录</a></p><button id="check">检查网易云扫码状态</button><small id="loginStatus"></small></div>
 <div class="card"><h2 id="heading">歌单</h2><div class="bar"><input id="playlistID" placeholder="Deezer 公开歌单 ID" aria-label="公开歌单 ID"><button id="open">打开歌单 ID</button></div><div id="rows" class="rows"></div></div>
@@ -79,7 +79,7 @@ async function jobs(){
  if(g)$('guard').textContent='CPU '+(g.cpus||[]).join(',')+' · nice '+g.nice+(g.degraded?.length?' · 降级：'+g.degraded.join('; '):' · 后台低优先级');
 }
 
-function showUI(v){$('uiState').textContent='当前：'+v.language+' · '+v.waveform+(v.safeMode?' · 安全模式（已回到原厂界面，选择语言可重试）':'')}
+function showUI(v){$('uiState').textContent='当前：'+v.language+' · '+v.waveform+' · '+v.quality+(v.safeMode?' · 安全模式（已回到原厂界面，选择语言可重试）':'')}
 for(const b of document.querySelectorAll('[data-ui]'))b.onclick=()=>action(async()=>{const q=b.dataset.ui;if(q.includes('restart')&&!confirm('重启 Engine？播放会中断。'))return;showUI(await post('ui?'+q))});
 action(async()=>{showUI(await api('ui'));await showRelay();await showBpm();await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(e=>notice(e.message))},2000);
 </script></html>

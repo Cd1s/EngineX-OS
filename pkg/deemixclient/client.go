@@ -31,6 +31,9 @@ type Client struct {
 	AllowLossy bool
 	// Media fetches audio files; the default has no overall deadline.
 	Media *http.Client
+	// PreferMP3 asks for 320k MP3 instead of FLAC; nil means FLAC. It is read per
+	// download so that the deck's setting applies at once.
+	PreferMP3 func() bool
 	// MaxCache bounds the files this client saved itself; 0 means no limit.
 	MaxCache int64
 }
@@ -45,6 +48,22 @@ type Download struct {
 	Path    string
 	Quality Quality
 }
+
+func (c *Client) wantsMP3() bool { return c.PreferMP3 != nil && c.PreferMP3() }
+
+// lossyAllowed also holds when MP3 is what was asked for.
+func (c *Client) lossyAllowed() bool { return c.AllowLossy || c.wantsMP3() }
+
+// request names the wanted quality in the download service's terms.
+func (c *Client) request() (bitrate int, quality string) {
+	if c.wantsMP3() {
+		return 3, "MP3_320"
+	}
+	return 9, "FLAC"
+}
+
+// Lossless reports whether the next download should try for FLAC first.
+func (c *Client) Lossless() bool { return !c.wantsMP3() }
 
 func UnixHTTP(socket string) *http.Client {
 	return &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -115,7 +134,8 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 	if c.Mode != "" && c.Mode != "queue" {
 		return nil, errors.New("deemix: unsupported adapter mode")
 	}
-	data, _ := json.Marshal(map[string]any{"url": "https://www.deezer.com/track/" + url.PathEscape(t.ID), "bitrate": 9, "quality": "FLAC", "allowLossy": c.AllowLossy})
+	bitrate, name := c.request()
+	data, _ := json.Marshal(map[string]any{"url": "https://www.deezer.com/track/" + url.PathEscape(t.ID), "bitrate": bitrate, "quality": name, "allowLossy": c.lossyAllowed()})
 	var q QueueStatus
 	if err := providers.JSON(ctx, c.HTTP, "POST", c.base()+c.queue(), strings.NewReader(string(data)), http.Header{"Content-Type": {"application/json"}}, &q); err != nil {
 		return nil, err
@@ -147,7 +167,7 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 			if err != nil {
 				return nil, err
 			}
-			if !quality.Lossless && !c.AllowLossy {
+			if !quality.Lossless && !c.lossyAllowed() {
 				return nil, errors.New("deemix: MP3 fallback needs explicit --allow-320k")
 			}
 			return &Download{Path: p, Quality: quality}, nil
@@ -170,7 +190,8 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 // final names only after download completion. Never select an unrelated newest
 // file: exact catalog ID, containment, stability and actual headers are required.
 func (c *Client) downloadDirectory(ctx context.Context, t providers.Track, progress func(QueueStatus)) (*Download, error) {
-	payload, _ := json.Marshal(map[string]any{"url": "https://www.deezer.com/track/" + t.ID, "bitrate": 9, "allowLossy": c.AllowLossy})
+	bitrate, _ := c.request()
+	payload, _ := json.Marshal(map[string]any{"url": "https://www.deezer.com/track/" + t.ID, "bitrate": bitrate, "allowLossy": c.lossyAllowed()})
 	req, err := http.NewRequestWithContext(ctx, "POST", c.base()+"/api/download", strings.NewReader(string(payload)))
 	if err != nil {
 		return nil, err
@@ -245,7 +266,7 @@ func (c *Client) downloadDirectory(ctx context.Context, t providers.Track, progr
 			if e != nil {
 				return nil, e
 			}
-			if !q.Lossless && !c.AllowLossy {
+			if !q.Lossless && !c.lossyAllowed() {
 				return nil, errors.New("deemix: MP3 fallback needs explicit --allow-320k")
 			}
 			if progress != nil {

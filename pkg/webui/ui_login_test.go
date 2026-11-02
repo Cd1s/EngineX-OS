@@ -465,3 +465,18 @@ func TestPreviewAnalyzerMeasuresAClipAndKeepsNothing(t *testing.T) {
 		t.Fatalf("left behind %v", entries)
 	}
 }
+
+func TestUnblockRadiosLeavesOtherSwitchesAlone(t *testing.T) {
+	root := t.TempDir()
+	for name, kind := range map[string]string{"rfkill0": "bluetooth", "rfkill1": "wlan", "rfkill2": "nfc"} {
+		os.MkdirAll(filepath.Join(root, name), 0o755)
+		os.WriteFile(filepath.Join(root, name, "type"), []byte(kind+"\n"), 0o644)
+		os.WriteFile(filepath.Join(root, name, "soft"), []byte("1"), 0o644)
+	}
+	UnblockRadios(root)
+	for name, want := range map[string]string{"rfkill0": "0", "rfkill1": "0", "rfkill2": "1"} {
+		if got, _ := os.ReadFile(filepath.Join(root, name, "soft")); string(got) != want {
+			t.Fatalf("%s: %s", name, got)
+		}
+	}
+}

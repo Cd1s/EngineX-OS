@@ -36,7 +36,7 @@ func (c *Client) accept(path string) (*Download, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !q.Lossless && !c.AllowLossy {
+	if !q.Lossless && !c.lossyAllowed() {
 		return nil, errors.New("deemix: MP3 fallback needs explicit --allow-320k")
 	}
 	return &Download{Path: path, Quality: q}, nil

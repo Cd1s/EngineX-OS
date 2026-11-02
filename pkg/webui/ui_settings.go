@@ -20,11 +20,18 @@ var (
 	uiLanguages = []string{"en", "zh-Hans", "zh-Hant"}
 	uiWaveforms = []string{"denon", "rgb", "3band"}
 	uiServices  = []string{"tidal", "netease", "spotify", "deezer"}
+	uiQualities = []string{qualityFLAC, quality320k}
 	// TIDAL logs in through Engine's own flow against TIDAL's servers.
 	loginServices = []string{"netease", "spotify", "deezer"}
 )
 
+const (
+	qualityFLAC = "flac"
+	quality320k = "320k"
+)
+
 type uiSettings struct {
+	Quality  string   `json:"quality"`
 	Language string   `json:"language"`
 	Waveform string   `json:"waveform"`
 	Sources  []string `json:"sources"`
@@ -45,7 +52,7 @@ func (s *Server) uiDir() string {
 
 // loadUI must be called with uiMu held. Bad or missing values get defaults.
 func (s *Server) loadUI() uiSettings {
-	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer"}
+	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
 		key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
@@ -64,6 +71,10 @@ func (s *Server) loadUI() uiSettings {
 		case "scope":
 			if slices.Contains(uiServices, val) {
 				v.Scope = val
+			}
+		case "quality":
+			if slices.Contains(uiQualities, val) {
+				v.Quality = val
 			}
 		case "sources":
 			if list, err := parseUISources(val); err == nil {
@@ -96,7 +107,7 @@ func (s *Server) saveUI(v uiSettings) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nscope=" + v.Scope + "\n"
+	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\n"
 	tmp, err := os.CreateTemp(dir, ".settings-*")
 	if err != nil {
 		return err
@@ -166,7 +177,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) {
+	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -179,6 +190,9 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("scope") {
 		v.Scope = q.Get("scope")
+	}
+	if q.Has("quality") {
+		v.Quality = q.Get("quality")
 	}
 	if q.Has("sources") {
 		list, err := parseUISources(q.Get("sources"))
@@ -205,6 +219,13 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.uiStatus(w, r)
+}
+
+// quality is the download quality the owner chose. It applies from the next download.
+func (s *Server) quality() string {
+	s.uiMu.Lock()
+	defer s.uiMu.Unlock()
+	return s.loadUI().Quality
 }
 
 func ptrTo(v string) *string { return &v }

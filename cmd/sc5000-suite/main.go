@@ -197,6 +197,7 @@ func runStreamSync(args []string) error {
 	if cfg.CPU < 0 || cfg.ThrottleWork < 0 || cfg.ThrottleSleep < 0 || *pid < 0 {
 		return fmt.Errorf("invalid resource guard configuration")
 	}
+	webui.UnblockRadios("/sys/class/rfkill")
 	runtime.GOMAXPROCS(1)
 	guard := resourceguard.New(cfg)
 	reports, err := guard.ApplyToProcess(0)
