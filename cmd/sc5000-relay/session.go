@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"regexp"
@@ -269,4 +270,24 @@ func writeFileAtomic(path string, b []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// completeDeezer commits the account only while its QR is live. The config
+// callback runs under the same lock, so expiry/provider changes/trust upgrades
+// cannot race global config synchronization or publish a partial success.
+func (st *sessionStore) completeDeezer(token, userID, arl string, syncConfig func(bool) error) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	s := st.m[token]
+	if s == nil || s.expired(time.Now()) || s.Provider != "deezer" || s.Status == "done" {
+		return errors.New("Deezer 会话已过期或已完成，请重新扫码")
+	}
+	if err := syncConfig(s.Trusted); err != nil {
+		return err
+	}
+	s.Deezer, s.Status = &deezerInfo{UserID: userID, ARL: arl}, "done"
+	st.saveLocked()
+	// Successful login credentials must survive an immediate service restart.
+	st.flushLocked()
+	return nil
 }

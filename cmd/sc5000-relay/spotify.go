@@ -22,7 +22,7 @@ import (
 const (
 	spotifyAccounts      = "https://accounts.spotify.com"
 	spotifyLoopbackURI   = "http://127.0.0.1:8080/oauth/spotify/callback"
-	spotifyScopes        = "playlist-read-private playlist-read-collaborative"
+	spotifyScopes        = "user-library-read playlist-read-private playlist-read-collaborative"
 	spotifyProbeControl  = "https://redirect-probe.invalid/sc5000/callback"
 	spotifyProbeCacheTTL = 30 * time.Minute
 )
@@ -64,12 +64,17 @@ func newSpotifyAuth(learnedPath, httpsRedirect string) *spotifyAuth {
 			Timeout:       15 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		learned: map[string]bool{},
+		learned: map[string]bool{defaultSpotifyClientID: true},
 		probes:  map[string]probeResult{},
 	}
 	if b, err := os.ReadFile(learnedPath); err == nil {
 		_ = json.Unmarshal(b, &a.learned)
 	}
+	// This app callback is registered, including when an older cache says otherwise.
+	if a.learned == nil {
+		a.learned = map[string]bool{}
+	}
+	a.learned[defaultSpotifyClientID] = true
 	return a
 }
 
