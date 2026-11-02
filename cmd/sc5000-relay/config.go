@@ -38,6 +38,10 @@ type config struct {
 	DeezerARLChecked  time.Time `json:"deezerArlChecked,omitzero"`
 	DeezerUserID      string    `json:"deezerUserId"`
 	SpotifyClientID   string    `json:"spotifyClientId"`
+
+	SoundCloudClientID string `json:"soundcloudClientId,omitempty"`
+	SoundCloudToken    string `json:"soundcloudToken,omitempty"`
+	GetSongBPMKey      string `json:"getSongBpmKey,omitempty"`
 }
 
 // configStore persists config.json (0600) and verifies the access password.

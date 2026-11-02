@@ -70,6 +70,35 @@ func (s *Server) savedDeezerOwner() deezerOwner {
 	return v
 }
 
+// ownerSpotify returns the owner's Spotify login, if there is one.
+func (s *Server) ownerSpotify() *providers.Spotify {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ownerDeleted["spotify"] {
+		return nil
+	}
+	var p providers.Provider
+	for _, v := range s.sessions {
+		if !v.Guest && v.Provider == "spotify" {
+			p = v.p
+		}
+	}
+	if p == nil {
+		// Kept so that lookups share one token and its refreshes.
+		made, err := s.makeProvider("spotify", false, "")
+		if err != nil || !ready(made) {
+			return nil
+		}
+		id := providers.RandomID()
+		s.sessions[id] = &Session{ID: id, Provider: "spotify", Ready: true, p: made, tracks: map[string]providers.Track{}, expires: time.Now().Add(8 * time.Hour)}
+		p = made
+	}
+	if sp, ok := p.(*providers.Spotify); ok && ready(sp) {
+		return sp
+	}
+	return nil
+}
+
 // neteaseFor picks the login a session may fetch audio with. The owner's cookie
 // serves the owner's sessions; a guest only ever uses a login of their own.
 func (s *Server) neteaseFor(session string, guest bool) *providers.Netease {
