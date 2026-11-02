@@ -103,7 +103,11 @@ func transaction(db *sql.DB, f func(*sql.Tx) error) error {
 
 // Heal runs all m.db mutations atomically. Integrity errors are reported; a
 // corrupt library is never replaced with an empty one.
-func Heal(db *sql.DB) (Report, error) {
+func Heal(db *sql.DB) (Report, error) { return heal(db, false) }
+
+// heal with dataOnly leaves Engine's views, triggers and indexes byte-identical:
+// Engine compares its schema on attach, then drops and recreates anything altered.
+func heal(db *sql.DB, dataOnly bool) (Report, error) {
 	r := Report{CheckedAt: time.Now().UTC()}
 	var check string
 	if err := db.QueryRow("PRAGMA quick_check").Scan(&check); err != nil {
@@ -119,7 +123,13 @@ func Heal(db *sql.DB) (Report, error) {
 	if major != 3 || minor != 0 || patch != 2 {
 		return r, fmt.Errorf("unsupported library schema %d.%d.%d (supported 3.0.2)", major, minor, patch)
 	}
-	if err := Tune(db, false); err != nil {
+	if dataOnly {
+		// PRAGMA optimize could add sqlite_stat1, and the queue must stay out of
+		// the file: Engine drops unknown tables on attach.
+		if _, err := db.Exec("CREATE TEMP TABLE IF NOT EXISTS GuardianReanalysis(trackId INTEGER NOT NULL,field TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(trackId,field))"); err != nil {
+			return r, err
+		}
+	} else if err := Tune(db, false); err != nil {
 		return r, err
 	}
 	err := transaction(db, func(tx *sql.Tx) error {
@@ -129,8 +139,10 @@ func Heal(db *sql.DB) (Report, error) {
 			return fmt.Errorf("unsupported library schema: %w", err)
 		}
 		var err error
-		if err = fixSchema(tx); err != nil {
-			return err
+		if !dataOnly {
+			if err = fixSchema(tx); err != nil {
+				return err
+			}
 		}
 		if r.PlaylistEntities, err = healChains(tx, false); err != nil {
 			return err
@@ -138,8 +150,10 @@ func Heal(db *sql.DB) (Report, error) {
 		if r.Playlists, err = healChains(tx, true); err != nil {
 			return err
 		}
-		if err = materialize(tx); err != nil {
-			return err
+		if !dataOnly {
+			if err = materialize(tx); err != nil {
+				return err
+			}
 		}
 		if err = healPerformance(tx, &r); err != nil {
 			return err
@@ -171,6 +185,16 @@ func writable(path string) (bool, error) {
 
 // HealMount only opens Engine's two known database names; it never scans music.
 func HealMount(mount string, maxSessions int) (Report, error) {
+	return healMount(mount, maxSessions, false)
+}
+
+// HealMountDataOnly is HealMount without schema edits, for libraries Engine will
+// attach next.
+func HealMountDataOnly(mount string, maxSessions int) (Report, error) {
+	return healMount(mount, maxSessions, true)
+}
+
+func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
 	r := Report{Mount: mount, CheckedAt: time.Now().UTC()}
 	if maxSessions < 0 {
 		return r, fmt.Errorf("maxSessions must not be negative")
@@ -190,7 +214,7 @@ func HealMount(mount string, maxSessions int) (Report, error) {
 		r.Warnings = append(r.Warnings, "read-only media: inspected without repairs or journal writes")
 		return r, err
 	}
-	r, err = Heal(db)
+	r, err = heal(db, dataOnly)
 	closeErr := db.Close()
 	r.Mount = mount
 	if err != nil {
@@ -213,7 +237,7 @@ func HealMount(mount string, maxSessions int) (Report, error) {
 		if e != nil {
 			return r, e
 		}
-		hr, e := Heal(hdb)
+		hr, e := heal(hdb, dataOnly)
 		ce := hdb.Close()
 		if e != nil {
 			r.Healthy = false
@@ -236,6 +260,10 @@ func HealMount(mount string, maxSessions int) (Report, error) {
 			return r, fmt.Errorf("history: %w", err)
 		}
 		r.HistoryPruned = true
+		if dataOnly {
+			r.ReanalysisPending += hr.ReanalysisPending
+			return r, nil
+		}
 		hdb, e = Open(history, false)
 		if e != nil {
 			return r, e

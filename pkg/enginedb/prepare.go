@@ -106,6 +106,7 @@ func stageOwnedMoves(ctx context.Context, tx *sql.Tx, prepared []preparedTrack) 
 		for _, query := range []string{
 			`DELETE FROM PlaylistEntity WHERE trackId=? AND (databaseUuid IS NULL OR databaseUuid='' OR databaseUuid=(SELECT uuid FROM Information))`,
 			`DELETE FROM BridgeState WHERE trackId=?`,
+			`DELETE FROM BridgeAnalysis WHERE trackId=?`,
 			`DELETE FROM Track WHERE id=?`,
 		} {
 			if _, e = tx.ExecContext(ctx, query, id); e != nil {

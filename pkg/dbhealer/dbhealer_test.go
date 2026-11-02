@@ -622,3 +622,38 @@ func TestPlaylistPathCacheMatchesVendorAcrossTrees(t *testing.T) {
 		})
 	}
 }
+
+// A data-only pass must leave sqlite_master untouched, and Engine's m.db with it.
+func TestHealDataOnlyLeavesSchemaUntouched(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	schema, err := os.ReadFile("testdata/engine-5.0.4.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ddl := strings.Replace(string(schema), "CREATE TABLE sqlite_sequence(name,seq);", "", 1)
+	if _, err = db.Exec(ddl); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO Information(uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch) VALUES('t',3,0,2)`); err != nil {
+		t.Fatal(err)
+	}
+	dump := func() string {
+		var s string
+		if err := db.QueryRow(`SELECT group_concat(type||name||COALESCE(sql,''),char(10)) FROM (SELECT * FROM main.sqlite_master ORDER BY type,name)`).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	before := dump()
+	if _, err = heal(db, true); err != nil {
+		t.Fatal(err)
+	}
+	if after := dump(); after != before {
+		t.Fatalf("schema changed:\n%s", after)
+	}
+}

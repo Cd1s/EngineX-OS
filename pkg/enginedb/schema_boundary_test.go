@@ -30,6 +30,10 @@ func TestBridgeSchemaHealerAndDeletionInterop(t *testing.T) {
 		t.Fatal(e)
 	}
 	exec(`UPDATE PerformanceData SET trackData=?,overviewWaveFormData=? WHERE trackId=1`, p.TrackData, p.Overview)
+	// The chain-repairing delete trigger is the healer's, not Engine's stock DDL.
+	if _, e = dbhealer.Heal(db); e != nil {
+		t.Fatal(e)
+	}
 	// Deleting an external membership (trackId=0) must repair its predecessor.
 	exec(`INSERT INTO Playlist(id,title,parentListId,nextListId) VALUES(1,'Test',0,0)`)
 	exec(`INSERT INTO PlaylistEntity(id,listId,trackId,nextEntityId) VALUES(1,1,1,2),(2,1,0,3),(3,1,1,0)`)
