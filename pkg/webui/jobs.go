@@ -213,7 +213,7 @@ func (j *Jobs) fromNetease(ctx context.Context, n *providers.Netease, t provider
 	if dl := j.p.Deemix.Cached(name); dl != nil {
 		return t, dl, nil
 	}
-	address, err := n.AudioURL(ctx, t.ID)
+	address, err := n.AudioURL(ctx, t.ID, j.p.Deemix.Lossless())
 	if err != nil {
 		return providers.Track{}, nil, err
 	}

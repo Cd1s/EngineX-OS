@@ -346,3 +346,27 @@ func TestMatchNearbyAcrossCatalogs(t *testing.T) {
 		}
 	}
 }
+
+func TestDownloadAsksForTheChosenQuality(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "1.mp3"), mp3Frames(14, 3), 0o644)
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&got)
+		json.NewEncoder(w).Encode(QueueStatus{ID: "j", State: "done", Progress: 1, Path: "1.mp3"})
+	}))
+	defer srv.Close()
+	track := providers.Track{ID: "1", Provider: "deezer"}
+	mp3 := true
+	c := &Client{BaseURL: srv.URL, DownloadDir: dir, PreferMP3: func() bool { return mp3 }}
+	dl, err := c.Download(context.Background(), track, nil)
+	if err != nil || dl.Quality.Label != "[320k]" || got["bitrate"] != float64(3) || got["quality"] != "MP3_320" || got["allowLossy"] != true {
+		t.Fatalf("%+v %v %v", dl, err, got)
+	}
+	// The setting applies to the very next download.
+	mp3 = false
+	c.Download(context.Background(), track, nil)
+	if got["bitrate"] != float64(9) || got["quality"] != "FLAC" || got["allowLossy"] != false {
+		t.Fatalf("%v", got)
+	}
+}
