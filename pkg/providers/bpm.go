@@ -60,12 +60,18 @@ type BPMStore struct {
 	SoundCloudV2URL  string
 	// Spotify returns the owner's login, if any, for finding a track's IDs.
 	Spotify func() *Spotify
+	// PreviewBPM estimates tempo and key from a preview clip, for tracks too new
+	// for any catalog. It is the last resort and never replaces a measured value.
+	PreviewBPM func(ctx context.Context, previewURL string) BPMInfo
+	// PreviewAllowed overrides the accepted clip hosts in tests.
+	PreviewAllowed func(*url.URL) bool
 
 	mu       sync.Mutex
 	loaded   bool
 	known    map[string]BPMInfo
 	tried    map[string]bool // lookups that found nothing, until the next restart
 	queue    chan Track
+	previews chan Track
 	waitTill time.Time
 	// Spotify's own rate limit, separate from ReccoBeats'.
 	spotifyWaitTill time.Time
@@ -201,7 +207,84 @@ func (b *BPMStore) attempt(ctx context.Context, t Track) {
 		b.mu.Lock()
 		delete(b.tried, bpmKey(t))
 		b.mu.Unlock()
+		return
 	}
+	b.enqueuePreview(t)
+}
+
+// enqueuePreview hands a track no catalog knows to the preview worker. There is one
+// worker because stream-sync runs on a single background CPU, so more would only
+// take turns, and it never holds up a list.
+func (b *BPMStore) enqueuePreview(t Track) {
+	if b.PreviewBPM == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.previews == nil {
+		b.previews = make(chan Track, bpmQueueLimit)
+		go b.previewWorker(b.previews)
+	}
+	select {
+	case b.previews <- t:
+	default:
+		delete(b.tried, bpmKey(t)) // full: try again on a later listing
+	}
+}
+
+func (b *BPMStore) previewWorker(previews chan Track) {
+	for t := range previews {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		if address := b.previewFor(ctx, t); address != "" {
+			b.Put(t, b.PreviewBPM(ctx, address))
+		}
+		cancel()
+	}
+}
+
+func isDeezerPreview(u *url.URL) bool {
+	host := u.Hostname()
+	return u.Scheme == "https" && (host == "dzcdn.net" || strings.HasSuffix(host, ".dzcdn.net"))
+}
+
+// previewFor finds the track's Deezer preview clip: by ID, ISRC or name, and last by
+// the ISRC that the owner's Spotify knows for it.
+func (b *BPMStore) previewFor(ctx context.Context, t Track) string {
+	d := &Deezer{BaseURL: b.DeezerURL, HTTP: b.HTTP}
+	var found Track
+	if t.Provider == "deezer" {
+		found, _ = d.ByID(ctx, t.ID)
+	}
+	if found.Preview == "" && t.ISRC != "" {
+		found, _ = d.ByISRC(ctx, strings.ReplaceAll(t.ISRC, "-", ""))
+	}
+	if found.Preview == "" {
+		if results, err := d.Search(ctx, bpmQuery(t)); err == nil {
+			found, _ = bestMatch(t, results)
+		}
+	}
+	// Deezer's search misses obscure names that its ISRC lookup still knows.
+	if found.Preview == "" && b.Spotify != nil && t.ISRC == "" && t.Provider != "spotify" {
+		if s := b.Spotify(); s != nil {
+			if results, err := s.Search(ctx, bpmQuery(t)); err == nil {
+				if c, ok := bestMatch(t, results); ok && c.ISRC != "" {
+					found, _ = d.ByISRC(ctx, c.ISRC)
+				}
+			}
+		}
+	}
+	u, err := url.Parse(found.Preview)
+	if found.Preview == "" || err != nil {
+		return ""
+	}
+	allowed := b.PreviewAllowed
+	if allowed == nil {
+		allowed = isDeezerPreview
+	}
+	if !allowed(u) {
+		return ""
+	}
+	return found.Preview
 }
 
 func (b *BPMStore) enqueue(t Track) {
