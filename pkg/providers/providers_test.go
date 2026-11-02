@@ -123,6 +123,12 @@ func TestSpotifyTokenRefreshAndPKCE(t *testing.T) {
 			} else {
 				ioJSON(w, `{"items":[{"id":"p2","name":"Second"}],"next":null}`)
 			}
+		case "/me/tracks":
+			if r.URL.Query().Get("limit") == "1" {
+				ioJSON(w, `{"total":2,"items":[]}`)
+			} else {
+				ioJSON(w, `{"items":[{"track":{"id":"l1","name":"One","type":"track"}},{"item":{"id":"l2","name":"Two","type":"track"}}],"next":null}`)
+			}
 		case "/playlists/p1/tracks", "/playlists/p1/items":
 			ioJSON(w, `{"items":[{"track":null},{"is_local":true,"track":{"id":"local"}},{"item":{"id":"s1","name":"Song","type":"track","duration_ms":180001,"artists":[{"name":"Artist"}],"album":{"name":"Album"},"external_ids":{"isrc":"US1234567890"}}}]}`)
 		default:
@@ -138,7 +144,7 @@ func TestSpotifyTokenRefreshAndPKCE(t *testing.T) {
 		t.Fatal(err)
 	}
 	lists, err := sp.Playlists(context.Background())
-	if err != nil || len(lists) != 2 || refresh != 1 || playlistPages != 2 {
+	if err != nil || len(lists) != 3 || lists[0].ID != "liked" || refresh != 1 || playlistPages != 2 {
 		t.Fatalf("pagination/refresh %v %v", lists, err)
 	}
 	tracks, err := sp.Tracks(context.Background(), "p1")

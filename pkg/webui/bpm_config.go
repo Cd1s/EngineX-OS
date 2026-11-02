@@ -14,7 +14,7 @@ func (s *Server) bpmConfigGet(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.BPM != nil {
 		v = s.cfg.BPM.Config()
 	}
-	respond(w, map[string]bool{"soundcloudSet": v.SoundCloudClientID != "" || v.SoundCloudToken != "", "getSongBpmSet": v.GetSongBPMKey != ""})
+	respond(w, map[string]bool{"soundcloudSet": v.SoundCloudToken != "" || (v.SoundCloudClientID != "" && v.SoundCloudSecret != ""), "getSongBpmSet": v.GetSongBPMKey != ""})
 }
 
 func (s *Server) bpmConfigPost(w http.ResponseWriter, r *http.Request) {
@@ -29,6 +29,9 @@ func (s *Server) bpmConfigPost(w http.ResponseWriter, r *http.Request) {
 	v := s.cfg.BPM.Config()
 	if in.SoundCloudClientID != "" {
 		v.SoundCloudClientID = in.SoundCloudClientID
+	}
+	if in.SoundCloudSecret != "" {
+		v.SoundCloudSecret = in.SoundCloudSecret
 	}
 	if in.SoundCloudToken != "" {
 		v.SoundCloudToken = in.SoundCloudToken

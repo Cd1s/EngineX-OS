@@ -120,6 +120,8 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go ui.SyncRelaySettings(ctx)
+	go webui.GuardRoutes(ctx)
+	dl.RemoveStaleParts()
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()
 	select {

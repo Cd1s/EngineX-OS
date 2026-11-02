@@ -120,3 +120,22 @@ func TestQualitySettingAppliesWithoutARestart(t *testing.T) {
 		t.Fatalf("bad quality accepted: %d", code)
 	}
 }
+
+func TestPlayheadAndJogModePersist(t *testing.T) {
+	dir := t.TempDir()
+	ui := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	if code, v := uiPost(t, srv.URL, "playhead=0.42&jog=rainbow"); code != 200 || v.Playhead != 0.42 || v.Jog != "rainbow" {
+		t.Fatalf("%d %+v", code, v)
+	}
+	again := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil)
+	if got := again.loadUI(); got.Playhead != 0.42 || got.Jog != "rainbow" {
+		t.Fatalf("%+v", got)
+	}
+	for _, q := range []string{"playhead=2", "playhead=x", "jog=strobe"} {
+		if code, _ := uiPost(t, srv.URL, q); code != 400 {
+			t.Fatalf("%s: %d", q, code)
+		}
+	}
+}

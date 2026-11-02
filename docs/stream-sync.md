@@ -59,13 +59,14 @@ SQLite 测试使用本工作树捕获的完整原厂 SQL，包含触发器和链
 
 ### SoundCloud
 
-用你自己的 Client ID 或 OAuth Token 访问 API（`state/soundcloud-owner.json`，也读 `bpm-config.json`）。填了主页才有
-Likes 和歌单，只有 Client ID 时可以搜索。`https://relay.example.com/m/soundcloud` 或局域网 `/m/soundcloud` 扫码绑定，
-凭据由碟机校验。
+用官方 API（`api.soundcloud.com`）。已注册应用的 Client ID 和 Secret 自动换取 access token，也可以直接用用户的 OAuth
+Token。凭据存在 `state/bpm-config.json` 和 `state/soundcloud-owner.json`，token 缓存在 `state/soundcloud-token.json`，
+都不进仓库，也可在 `https://relay.example.com` 的“BPM 增强”里填写后同步到碟机。应用凭据只能搜索和播放公开内容，不算登录，
+碟机仍会弹二维码。在 `https://relay.example.com/m/soundcloud` 或局域网 `/m/soundcloud` 填主页链接、分享链接或用户名后，
+才有点赞、自己的歌单和收藏的歌单（`【收藏】` 前缀）。私密内容需要用户的 OAuth Token。
 
-只下载账号可以完整播放的流：优先 progressive MP3，其次 HLS MP3，再次 HLS AAC（存为 `.mp4`）。试听片段
-（`snipped` / `policy=SNIP`）和加密流一律拒绝，不做解密，所以 Go+ 专属曲目放不了。文件存为 `soundcloud-<id>.mp3`。
-超过 15 分钟或 50 MB 的文件不做后台分析。代码不提取 SoundCloud 网页里的 client_id。
+只用 API 标记 `access=playable` 的曲目：优先 `http_mp3_128_url`，其次 HLS MP3，再次 HLS AAC（存为 `.mp4`）。试听地址一律不用，
+也不做解密。文件存为 `soundcloud-<id>.mp3`。超过 15 分钟或 50 MB 的文件不做后台分析。代码不提取 SoundCloud 网页里的 client_id。
 
 ### 网易云
 
