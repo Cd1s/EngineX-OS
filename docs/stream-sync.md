@@ -191,7 +191,9 @@ SQLite 提交不等于 Engine 已刷新其内存中的歌单视图，本程序�
 
 Source 和 Settings → Services → Streaming 显示网易云音乐、Spotify、Deezer 三项（`tools/ui-mod`）。
 它们共用 Engine 唯一的 TIDAL 客户端，点哪项，网关的 `scope` 就切到哪项，只返回该服务的歌单和搜索结果；
-未登录网易云/Spotify 时显示登录提示歌单，Deezer 公开榜单和网易云搜索无需登录。
+未登录时点击来源会在屏幕上弹出二维码：网易云用其 App 直接扫码（官方 unikey 流程，不再需要 NeteaseCloudMusicApi）；
+Spotify 和 Deezer 没有同类流程，二维码打开本机的一次性手机页（`/m/<provider>`）。Spotify 需要自行注册应用的 Client ID，
+Deezer 连接的是公开资料页。Deezer 公开榜单无需登录；网易云搜索需要登录。
 
 ## 碟机原生 TIDAL 界面
 
