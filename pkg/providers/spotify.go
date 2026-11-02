@@ -186,12 +186,16 @@ const SpotifyLikedID = "liked"
 func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 	var all []Playlist
 	// An older login may lack the library scope; its playlists still work.
-	var liked struct {
-		Total int `json:"total"`
-	}
-	if s.get(ctx, "/me/tracks?limit=1&offset=0", &liked) == nil {
-		all = append(all, Playlist{SpotifyLikedID, "已點讚的歌曲 (Liked Songs)", liked.Total})
-	}
+	liked := make(chan Playlist, 1)
+	go func() {
+		var r struct {
+			Total int `json:"total"`
+		}
+		if s.get(ctx, "/me/tracks?limit=1&offset=0", &r) == nil {
+			liked <- Playlist{SpotifyLikedID, "已點讚的歌曲 (Liked Songs)", r.Total}
+		}
+		close(liked)
+	}()
 	for offset := 0; offset < 100000; offset += 50 {
 		var r struct {
 			Items []struct {
@@ -213,6 +217,9 @@ func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 			all = append(all, Playlist{p.ID, p.Name, total})
 		}
 		if r.Next == nil || *r.Next == "" {
+			if p, ok := <-liked; ok {
+				all = append([]Playlist{p}, all...)
+			}
 			return all, nil
 		}
 	}

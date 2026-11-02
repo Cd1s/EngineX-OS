@@ -654,7 +654,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	})
 	trackItems, listItems := []any{}, []any{}
 	for i, v := range sources {
-		g.s.cfg.BPM.EnrichPreview(r.Context(), tracks[i])
+		g.s.cfg.BPM.Enrich(r.Context(), tracks[i])
 		for _, t := range tracks[i] {
 			trackItems = append(trackItems, g.trackJSON(g.addTrack(trackRef{t, v.session, v.guest}), t))
 		}

@@ -11,9 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -655,50 +653,41 @@ func TestNeteasePlaylistsSurviveSavedListFailure(t *testing.T) {
 	}
 }
 
-func TestEnrichWaitsForTracksWithoutAnID(t *testing.T) {
-	var searches atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/track/search":
-			searches.Add(1)
-			io.WriteString(w, `{"content":[{"id":"x","trackTitle":"`+r.URL.Query().Get("searchText")+`","artists":[{"name":"Artist"}]}]}`)
-		default:
-			io.WriteString(w, `{"tempo":128,"key":0,"mode":1}`)
-		}
-	}))
-	defer srv.Close()
-	b := &BPMStore{Path: t.TempDir() + "/bpm.json", ReccoURL: srv.URL}
-	tracks := make([]Track, 30)
-	for i := range tracks {
-		tracks[i] = Track{ID: strconv.Itoa(i), Provider: "netease", Title: "S" + strconv.Itoa(i), Artist: "Artist"}
-	}
-	b.Enrich(context.Background(), tracks)
-	for i := range bpmListLookups {
-		if tracks[i].BPM != 128 {
-			t.Fatalf("track %d not filled: %+v", i, tracks[i])
-		}
-	}
-}
-
-func TestSearchPreviewDoesNotWaitForPerTrackLookups(t *testing.T) {
+func TestEnrichNeverWaitsForPerTrackLookups(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-release
-		io.WriteString(w, `{"content":[]}`)
+		if r.URL.Path == "/v1/track/search" {
+			<-release
+			io.WriteString(w, `{"content":[{"id":"x","trackTitle":"S","artists":[{"name":"A"}]}]}`)
+			return
+		}
+		io.WriteString(w, `{"tempo":128,"key":0,"mode":1,"data":[]}`)
 	}))
 	defer srv.Close()
 	defer close(release)
-	b := &BPMStore{Path: t.TempDir() + "/bpm.json", ReccoURL: srv.URL}
+	b := &BPMStore{Path: t.TempDir() + "/bpm.json", ReccoURL: srv.URL, DeezerURL: srv.URL}
+	track := Track{ID: "1", Provider: "netease", Title: "S", Artist: "A"}
 	done := make(chan struct{})
 	go func() {
-		b.EnrichPreview(context.Background(), []Track{{ID: "1", Provider: "netease", Title: "S", Artist: "A"}})
+		b.Enrich(context.Background(), []Track{track})
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("search waited for a lookup")
+		t.Fatal("a list waited for a lookup")
 	}
+	// The worker finishes it in the background for the next listing.
+	release <- struct{}{}
+	for range 300 {
+		list := []Track{track}
+		b.Apply(list)
+		if list[0].BPM == 128 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("background lookup never finished")
 }
 
 func TestCutShortLookupStaysEligible(t *testing.T) {
