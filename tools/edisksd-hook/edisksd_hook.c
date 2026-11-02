@@ -151,9 +151,11 @@ static void after_mount(const char *target) {
 		char *const bridge[] = {"/usr/local/bin/rb-bridge", "--mount-path", (char *)target, NULL};
 		run(bridge, deadline);
 	}
+	// A rekordbox volume's library comes from rb-bridge, and scanning its thousands
+	// of tracks here would hold up every mount for 15 seconds or more.
 	char db[PATH_MAX];
 	snprintf(db, sizeof db, "%s/Engine Library/Database2/m.db", target);
-	if (!access(db, F_OK)) {
+	if (!pioneer && !access(db, F_OK)) {
 		char *const guardian[] = {"/usr/local/bin/engine-guardian", "--heal-mount", (char *)target, "--data-only", NULL};
 		run(guardian, deadline);
 	}

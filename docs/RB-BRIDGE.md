@@ -126,5 +126,8 @@ file bin/rb-bridge-armv7
 大曲库（超过 500 首）第一次导入时走快速模式：只读 `export.pdb`，在 tmpfs 上建 `m.db` 再拷回。没有热点、循环、波形和
 封面，Engine 载入曲目时自己分析。完整导入用 `rb-bridge --mount-path <盘> --full`，在 FAT32 U 盘上 6000 首约 8 分钟。
 
+带 rekordbox 导出的盘挂载时不再运行 `engine-guardian --heal-mount`（6000 首约 15 秒），只有纯 Engine 盘才运行。
+这类盘因此失去挂载时的自动修复；数据库出问题时，手动运行 `engine-guardian --heal-mount <盘> --data-only`。
+
 `export.pdb` 变了而曲库已存在时走增量同步，要逐个检查文件，6000 首约 24 秒。这超过挂载钩子 20 秒的预算，所以会被
 中止并回滚，旧库保持不变，需要手动运行 `rb-bridge --mount-path <盘>`。
