@@ -7,7 +7,6 @@ PROC=${SC5000_PROC_ROOT:-/proc}
 AUDIO_IRQ=${SC5000_AUDIO_IRQ_PATTERN:-ffb20000|snd|alsa|i2s|spdif|audio}
 GPU_IRQ=${SC5000_GPU_IRQ_PATTERN:-ffa30000}
 IO_IRQ=${SC5000_IO_IRQ_PATTERN:-ehci_hcd|ff540000|eth0}
-AUDIO_THREAD=${SC5000_AUDIO_THREAD_PATTERN:-audio|alsa|jack}
 export LC_ALL=C
 log() { printf 'sc5000-perf: %s\n' "$*" >&2; }
 # Case-insensitive extended-regex match of $1 against pattern $2.
@@ -18,24 +17,30 @@ write_knob() {
     [ "${3:-}" = quiet ] || log "unavailable: $1"
     return 0
 }
-lock_frequency() {
-    dir=$1 governor=$2 max_name=$3 min_name=$4
+# Dynamic clocks keep the deck cool when idle. Locking everything at maximum
+# ran it above 90 C while doing nothing. Engine's own setup script sets the GPU
+# to performance at each start, so engine.service runs this script afterwards.
+dynamic_frequency() {
+    dir=$1 governor_file=$2 governor=$3 min_source=$4 min_file=$5
     [ -d "$dir" ] || return 0
-    if [ -f "$dir/$max_name" ]; then
-        max=$(cat "$dir/$max_name" 2>/dev/null) || max=
-        case $max in ''|*[!0-9]*) ;; *)
-            [ "$governor" != scaling_governor ] || write_knob "$dir/scaling_max_freq" "$max"
-            write_knob "$dir/$min_name" "$max" ;;
-        esac
+    write_knob "$dir/$governor_file" "$governor"
+    if [ -f "$dir/$min_source" ]; then
+        # The lowest entry; a devfreq list is ascending and a cpufreq value is single.
+        min=$(awk '{print $1; exit}' "$dir/$min_source" 2>/dev/null) || min=
+        case $min in ''|*[!0-9]*) ;; *) write_knob "$dir/$min_file" "$min" ;; esac
     fi
-    write_knob "$dir/$governor" performance
     return 0
 }
 for cpu in 0 1 2 3; do
-    lock_frequency "$SYS/devices/system/cpu/cpu$cpu/cpufreq" scaling_governor cpuinfo_max_freq scaling_min_freq
+    dynamic_frequency "$SYS/devices/system/cpu/cpu$cpu/cpufreq" scaling_governor ondemand cpuinfo_min_freq scaling_min_freq
 done
+# All four cores share one clock, so Engine's idle UI thread alone would hold a
+# lower threshold at 1.4 GHz. stream-sync is niced and must not raise the clock.
+write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/up_threshold" 90 quiet
+write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/sampling_down_factor" 1 quiet
+write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/ignore_nice_load" 1 quiet
 for gpu in "$SYS"/class/devfreq/*ffa30000* "$SYS"/devices/platform/ffa30000.gpu/devfreq/*; do
-    lock_frequency "$gpu" governor max_freq min_freq
+    dynamic_frequency "$gpu" governor simple_ondemand available_frequencies min_freq
 done
 
 write_knob "$PROC/sys/vm/swappiness" 10
@@ -72,42 +77,25 @@ if [ -r "$PROC/interrupts" ]; then
     done < "$PROC/interrupts"
 fi
 
-pin() {
-    taskset -pc "$1" "$2" >/dev/null 2>&1 || log "thread exited or affinity unavailable: $2"
-}
+# PREEMPT_RT IRQ threads follow their IRQ. This runs once per Engine start;
+# Engine's own threads keep the scheduler's placement.
 for process in "$PROC"/[0-9]*; do
-    [ -d "$process" ] || continue
+    comm=$(cat "$process/comm" 2>/dev/null) || continue
+    case $comm in irq/*) ;; *) continue ;; esac
     pid=${process##*/}
-    exe=$(readlink "$process/exe" 2>/dev/null) || exe=
-    comm=$(cat "$process/comm" 2>/dev/null) || comm=
-    case $comm in irq/*)
-        # comm is limited to 15 bytes: irq/148-ffb20000 loses its last digit.
-        # Use the IRQ number to recover the classification from interrupts.
-        cpu=
-        irq=$(printf '%s\n' "$comm" | sed -n 's|^irq/\([0-9][0-9]*\)-.*|\1|p')
-        if [ -n "$irq" ]; then
-            for entry in $irq_map; do
-                [ "${entry%%=*}" = "$irq" ] && cpu=${entry#*=}
-            done
-        fi
-        [ -n "$cpu" ] || cpu=$(classify "$comm")
-        pin "$cpu" "$pid"
-        if [ "$cpu" = 0 ]; then
-            chrt -f -p 99 "$pid" >/dev/null 2>&1 || log "IRQ priority unavailable: $pid"
-        fi ;;
-    esac
-    case $exe in /usr/Engine/*) ;; *) continue ;; esac
-    for thread in "$process"/task/[0-9]*; do
-        [ -r "$thread/stat" ] && [ -r "$thread/comm" ] || continue
-        stat=$(cat "$thread/stat") || continue
-        thread_name=$(cat "$thread/comm") || continue
-        # stat field 41 is policy. Strip '(comm)' first, as comm may have spaces.
-        policy=$(printf '%s\n' "${stat##*) }" | awk '{print $39}')
-        if matches "$thread_name" "$AUDIO_THREAD" && { [ "$policy" = 1 ] || [ "$policy" = 2 ]; }; then
-            pin 0 "${thread##*/}"
-        else
-            pin 1-2 "${thread##*/}"
-        fi
-    done
+    # comm is limited to 15 bytes: irq/148-ffb20000 loses its last digit.
+    # Use the IRQ number to recover the classification from interrupts.
+    cpu=
+    irq=$(printf '%s\n' "$comm" | sed -n 's|^irq/\([0-9][0-9]*\)-.*|\1|p')
+    if [ -n "$irq" ]; then
+        for entry in $irq_map; do
+            [ "${entry%%=*}" = "$irq" ] && cpu=${entry#*=}
+        done
+    fi
+    [ -n "$cpu" ] || cpu=$(classify "$comm")
+    taskset -pc "$cpu" "$pid" >/dev/null 2>&1 || log "thread exited or affinity unavailable: $pid"
+    if [ "$cpu" = 0 ]; then
+        chrt -f -p 99 "$pid" >/dev/null 2>&1 || log "IRQ priority unavailable: $pid"
+    fi
 done
 exit 0

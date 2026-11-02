@@ -187,6 +187,12 @@ SQLite 提交不等于 Engine 已刷新其内存中的歌单视图，本程序�
 波形已验收”**。部署验收需核对 CPU0-2 的 Engine/ALSA/Qt 分配、CPU3
 下载进程树、双 Deck 音频、触摸帧时间、RGB 显示/拍线、Key 和重新挂盘。
 
+## 碟机上的三个独立来源
+
+Source 和 Settings → Services → Streaming 显示网易云音乐、Spotify、Deezer 三项（`tools/ui-mod`）。
+它们共用 Engine 唯一的 TIDAL 客户端，点哪项，网关的 `scope` 就切到哪项，只返回该服务的歌单和搜索结果；
+未登录网易云/Spotify 时显示登录提示歌单，Deezer 公开榜单和网易云搜索无需登录。
+
 ## 碟机原生 TIDAL 界面
 
 `tools/az01-packer/unlock_jp07_features.py` 把 Engine 内置 TidalAPI 的
