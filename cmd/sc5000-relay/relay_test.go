@@ -1,0 +1,264 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func newTestServer(t *testing.T) *server {
+	t.Helper()
+	dir := t.TempDir()
+	cfg, err := loadConfig(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{
+		public:      "https://relay.example.com",
+		cfg:         cfg,
+		fails:       newLimiter(failWindow, failMax),
+		newSessions: newLimiter(time.Minute, 30),
+		sessions:    newSessionStore(filepath.Join(dir, "sessions.json")),
+		deezer:      newDeezerClient(),
+	}
+	s.spotify = newSpotifyAuth(filepath.Join(dir, "learned.json"), s.public+"/oauth/spotify/callback")
+	s.spotify.probes[defaultSpotifyClientID] = probeResult{at: time.Now()} // no network probe
+	return s
+}
+
+func do(h http.Handler, method, target string, body string, hdr map[string]string) *httptest.ResponseRecorder {
+	var r *http.Request
+	if body != "" {
+		r = httptest.NewRequest(method, target, strings.NewReader(body))
+	} else {
+		r = httptest.NewRequest(method, target, nil)
+	}
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func TestCredentialOnlyEndpoints(t *testing.T) {
+	h := newTestServer(t).routes()
+	for _, prefix := range []string{"", "/sc5000"} {
+		for _, p := range []string{"/api/audio", "/api/download", "/api/download-stream", "/api/queue", "/api/download/job"} {
+			for _, method := range []string{"GET", "POST", "PUT"} {
+				w := do(h, method, prefix+p, "", nil)
+				if w.Code != 410 || !strings.Contains(w.Body.String(), audioGoneMessage) {
+					t.Errorf("%s %s: %d %s", method, prefix+p, w.Code, w.Body)
+				}
+			}
+		}
+	}
+}
+
+func TestConfigSecrets(t *testing.T) {
+	s := newTestServer(t)
+	arl := strings.Repeat("a", 192)
+	if err := s.cfg.update(func(c *config) { c.DeezerARL = arl }); err != nil {
+		t.Fatal(err)
+	}
+	h := s.routes()
+	for _, hdr := range []map[string]string{nil, {"X-Deemix-Password": "wrong"}} {
+		w := do(h, "GET", "/api/config?secrets=1", "", hdr)
+		if w.Code != 401 || strings.Contains(w.Body.String(), arl) {
+			t.Fatal("unprotected secrets")
+		}
+	}
+	for _, hdr := range []map[string]string{{"X-Deemix-Password": defaultPassword}, {"Authorization": "Bearer " + defaultPassword}} {
+		for _, query := range []string{"", "?secrets=0", "?secrets=1"} {
+			w := do(h, "GET", "/api/config"+query, "", hdr)
+			var v struct{ Config map[string]any }
+			if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+				t.Fatal(err)
+			}
+			got, exists := v.Config["deezerArl"]
+			if w.Code != 200 || exists != (query == "?secrets=1") || (exists && got != arl) {
+				t.Fatal("wrong secret opt-in response")
+			}
+			if w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal("secrets must not be cached")
+			}
+		}
+	}
+}
+
+func TestLoginCookieAndPasswordChange(t *testing.T) {
+	s := newTestServer(t)
+	h := s.routes()
+	if w := do(h, "GET", "/", "", nil); !strings.Contains(w.Body.String(), `name="password"`) {
+		t.Fatal("login page expected")
+	}
+	w := do(h, "POST", "/login", "password="+defaultPassword, map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+	if w.Code != 303 {
+		t.Fatalf("login: %d", w.Code)
+	}
+	cookie := w.Result().Cookies()[0]
+	hdr := map[string]string{"Cookie": cookie.Name + "=" + cookie.Value}
+	if w := do(h, "GET", "/api/config", "", hdr); w.Code != 200 || !strings.Contains(w.Body.String(), `"passwordIsDefault":true`) {
+		t.Fatalf("cookie auth: %d %s", w.Code, w.Body)
+	}
+	if w := do(h, "GET", "/sc5000/", "", hdr); !strings.Contains(w.Body.String(), "SC5000 Deemix 控制台") {
+		t.Fatal("panel expected under /sc5000/")
+	}
+	hdr["Content-Type"] = "application/json"
+	if w := do(h, "POST", "/api/config", `{"currentPassword":"nope","newPassword":"another-pass-1"}`, hdr); w.Code != 403 {
+		t.Fatalf("wrong current password: %d", w.Code)
+	}
+	if w := do(h, "POST", "/api/config", `{"currentPassword":"`+defaultPassword+`","newPassword":"another-pass-1"}`, hdr); w.Code != 200 {
+		t.Fatalf("change password: %d %s", w.Code, w.Body)
+	}
+	delete(hdr, "Content-Type")
+	if w := do(h, "GET", "/api/config", "", hdr); w.Code != 401 {
+		t.Fatalf("old cookie must be invalid after password change: %d", w.Code)
+	}
+	if w := do(h, "GET", "/api/config", "", map[string]string{"X-Deemix-Password": defaultPassword}); w.Code != 401 {
+		t.Fatal("old password still accepted")
+	}
+	if w := do(h, "GET", "/api/config", "", map[string]string{"X-Deemix-Password": "another-pass-1"}); w.Code != 200 {
+		t.Fatal("new password rejected")
+	}
+}
+
+func TestFailLimiter(t *testing.T) {
+	h := newTestServer(t).routes()
+	for i := 0; i < failMax; i++ {
+		do(h, "GET", "/api/config", "", map[string]string{"X-Deemix-Password": "bad"})
+	}
+	if w := do(h, "GET", "/api/config", "", map[string]string{"X-Deemix-Password": defaultPassword}); w.Code != 429 {
+		t.Fatalf("expected 429, got %d", w.Code)
+	}
+}
+
+func TestSessionFlowBothPrefixes(t *testing.T) {
+	s := newTestServer(t)
+	h := s.routes()
+	tok := "abcdefghijklmnop1234"
+	w := do(h, "POST", "/sc5000/api/relay/session", `{"token":"`+tok+`","provider":"spotify","spotifyClientId":""}`, nil)
+	var cr struct {
+		OK  bool
+		URL string
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &cr)
+	if !cr.OK || cr.URL != "https://relay.example.com/m/spotify?t="+tok {
+		t.Fatalf("create: %s", w.Body)
+	}
+	poll := func(p string) pollResponse {
+		var pr pollResponse
+		_ = json.Unmarshal(do(h, "GET", p+"/api/relay/session?t="+tok, "", nil).Body.Bytes(), &pr)
+		return pr
+	}
+	if pr := poll(""); pr.Status != "waiting" || pr.Provider != "spotify" {
+		t.Fatalf("poll: %+v", pr)
+	}
+	w = do(h, "GET", "/m/spotify?t="+tok, "", nil)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "client_id="+defaultSpotifyClientID) ||
+		!strings.Contains(w.Body.String(), "127.0.0.1%3a8080") && !strings.Contains(w.Body.String(), "127.0.0.1%3A8080") {
+		t.Fatalf("spotify page: %d", w.Code)
+	}
+	if pr := poll("/sc5000"); pr.Status != "scanned" {
+		t.Fatalf("after scan: %+v", pr)
+	}
+	// Stateless fallback: unregistered token opened by phone.
+	if w := do(h, "GET", "/sc5000/m/spotify?t=testtoken1234567890", "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), defaultSpotifyClientID) {
+		t.Fatalf("fallback page: %d", w.Code)
+	}
+	if w := do(h, "GET", "/m/deezer?t=short", "", nil); w.Code != 400 {
+		t.Fatalf("short token: %d", w.Code)
+	}
+	// Done sessions survive repeated polls.
+	s.sessions.update(tok, func(x *session) { x.Status = "done"; x.SpotifyToken = &spotifyToken{AccessToken: "a"} })
+	for i := 0; i < 2; i++ {
+		if pr := poll(""); pr.Status != "done" || pr.SpotifyToken == nil {
+			t.Fatalf("poll %d: %+v", i, pr)
+		}
+	}
+	s.sessions.update(tok, func(x *session) { x.Expires = time.Now().Add(-time.Second) })
+	if pr := poll(""); pr.Status != "expired" || pr.SpotifyToken != nil {
+		t.Fatalf("expired: %+v", pr)
+	}
+}
+
+func TestParsePastedCode(t *testing.T) {
+	cases := []struct{ in, code, redirect string }{
+		{"http://127.0.0.1:8080/oauth/spotify/callback?code=AQB123&state=x", "AQB123", spotifyLoopbackURI},
+		{"  AQBxyz  ", "AQBxyz", spotifyLoopbackURI},
+		{"打开了 http://127.0.0.1:8080/oauth/spotify/callback?code=AQC9&state=t 页面", "AQC9", spotifyLoopbackURI},
+		{"https://relay.example.com/oauth/spotify/callback?code=Z&state=t", "Z", "https://relay.example.com/oauth/spotify/callback"},
+	}
+	for _, c := range cases {
+		code, red, err := parsePastedCode(c.in)
+		if err != nil || code != c.code || red != c.redirect {
+			t.Errorf("%q: %q %q %v", c.in, code, red, err)
+		}
+	}
+	if _, _, err := parsePastedCode("http://127.0.0.1:8080/oauth/spotify/callback?error=access_denied"); err == nil {
+		t.Error("error param must fail")
+	}
+}
+
+func TestProfileExtraction(t *testing.T) {
+	hop := "https://link.deezer.com/?awf=https%3A%2F%2Fwww.deezer.com%2Fprofile%2F6850245583%3Fhost%3D6850245583&dest=x"
+	found := ""
+	for _, v := range decodedForms(hop) {
+		if m := profileRe[0].FindStringSubmatch(v); m != nil {
+			found = m[1]
+		}
+	}
+	if found != "6850245583" {
+		t.Fatalf("got %q", found)
+	}
+	if !isDeezerHost("link.deezer.com") || isDeezerHost("deezer.com.evil.org") || isDeezerHost("evildeezer.com") {
+		t.Fatal("host check")
+	}
+}
+
+func TestDeezerPostNeedsInput(t *testing.T) {
+	h := newTestServer(t).routes()
+	w := do(h, "POST", "/m/deezer?t=abcdefghijklmnop1234", url.Values{"user": {""}}.Encode(), map[string]string{"Content-Type": "application/x-www-form-urlencoded", "Origin": "null"})
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "请填写") {
+		t.Fatalf("%d", w.Code)
+	}
+}
+
+func TestReviewFixes(t *testing.T) {
+	s := newTestServer(t)
+	h := s.routes()
+	// Only password-bearing deck calls make a session trusted (global sync).
+	do(h, "POST", "/api/relay/session", `{"token":"trustedtoken00000001","provider":"deezer"}`, map[string]string{"X-Deemix-Password": defaultPassword})
+	if x, _ := s.sessions.open("trustedtoken00000001", "deezer", ""); !x.Trusted {
+		t.Fatal("registered with password must be trusted")
+	}
+	do(h, "POST", "/api/relay/session", `{"token":"anontoken00000000001","provider":"deezer"}`, nil)
+	if x, _ := s.sessions.open("anontoken00000000001", "deezer", ""); x.Trusted {
+		t.Fatal("anonymous session must not be trusted")
+	}
+	if x, _ := s.sessions.open("phoneonly00000000001", "deezer", ""); x.Trusted {
+		t.Fatal("phone-created session must not be trusted")
+	}
+	// Expired QR codes stay dead.
+	s.sessions.update("anontoken00000000001", func(x *session) { x.Expires = time.Now().Add(-time.Second) })
+	if w := do(h, "GET", "/m/deezer?t=anontoken00000000001", "", nil); w.Code != 400 {
+		t.Fatalf("expired token revived: %d", w.Code)
+	}
+	// The console ignores ?key= (no limiter bypass).
+	if w := do(h, "GET", "/?key="+defaultPassword, "", nil); strings.Contains(w.Body.String(), "控制台") {
+		t.Fatal("panel must require the cookie")
+	}
+	// Anonymous session creation is rate limited per client.
+	code := 0
+	for i := 0; i < 40; i++ {
+		code = do(h, "GET", "/api/relay/session?t=floodtoken"+strings.Repeat("0", 6)+string(rune('a'+i%26))+string(rune('a'+i/26)), "", nil).Code
+	}
+	if code != 429 {
+		t.Fatalf("expected 429 after flood, got %d", code)
+	}
+}
