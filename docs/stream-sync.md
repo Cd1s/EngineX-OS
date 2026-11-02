@@ -86,29 +86,29 @@ Spotify 不接受普通 `http://sc5000.lan` 作为远程 OAuth redirect。
 
 ## 音频来源（按顺序尝试）
 
-1. **网易云直连**：用碟机上已登录的网易云账号取官方音频地址（`lossless` → `exhigh` →
-   `standard`），试听片段一律不算。Spotify、Deezer 曲目先按标题、版本、共同艺人和
+音频全部下载到碟机本机，云端服务只传登录凭证，不经手音频。
+
+1. **碟机本机 Deemix**（默认 `127.0.0.1:6595`）：下文的 `queue` / `directory` 协议。网易云、
+   Spotify、Deezer 曲目都先走这里，不占网易云的月度下载额度。
+2. **网易云直连**：第一步失败时，用碟机已登录的网易云账号取官方音频地址（`lossless` →
+   `exhigh` → `standard`），试听片段一律不算。其他平台的曲目先按标题、版本、共同艺人和
    ≤5 秒时长匹配网易云曲目。访客只用自己的登录，不碰主人的 cookie。
-2. **本地 Deemix 桥**：下文的 `queue` / `directory` 协议，默认 `127.0.0.1:6595`。
-3. **远程 Deemix 后端**：`GET <deemixUrl>/api/audio?provider=&id=&isrc=&title=&artist=&duration=`，
-   带 `X-Deemix-Password` 和 `Authorization: Bearer` 两个头，响应体就是音频。格式以
-   实际字节为准；跨域重定向不跟随，避免把密码带到别的主机。
 
-本仓库不实现音频解密。解密只发生在外部下载器里（本地桥或远程后端）。
+本仓库不实现音频解密。解密只发生在外部下载器里。
 
-文件存到下载目录（`netease-<id>.flac`、`remote-<provider>-<id>.mp3`），经 `Inspect`
-校验后才可用，重启后直接复用。没有 SD 库时落在内部存储，总量上限 3 GiB，超出后淘汰最旧的。
+网易云文件存为 `netease-<id>.flac`，经 `Inspect` 校验后才可用，重启后直接复用。没有 SD
+库时落在内部存储，总量上限 3 GiB，超出后淘汰最旧的。
 
 MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k=false` 可关闭。
 
 ### 配置
 
-- `state/deemix-config.json`：`deemixUrl`、`relayUrl`（默认都是 `https://relay.example.com`）和
-  `deemixPassword`。密码没有默认值，也不进仓库，只存在这个 0600 文件里。
-- 控制台首页、`/m/deezer`、`GET/POST /api/deemix`（碟机本机为 `/v1/sc5000/deemix`）和
-  `POST /api/ui?deemixUrl=&deemixPassword=` 都可修改，保存后立即生效。
+- `state/deemix-config.json`：`relayUrl`（默认 `https://relay.example.com`）和 `deemixPassword`。
+  密码没有默认值，也不进仓库，只存在这个 0600 文件里。
+- 控制台首页、`/m/deezer`、`GET/POST /api/relay`（碟机本机为 `/v1/sc5000/relay`）和
+  `POST /api/ui?relayUrl=&deemixPassword=` 都可修改，保存后立即生效。
   密码只能写入，读取时只返回 `deemixPasswordSet`。地址必须是 https，或内网 IP 的 http。
-- 中继和 Deemix 后端同一主机时，中继请求也带这两个密码头；中继请求不跟随重定向。
+- 中继请求带 `X-Deemix-Password` 和 `Authorization: Bearer`，不跟随重定向。
 
 ### 不自动写入插着的库
 
@@ -126,8 +126,8 @@ Spotify 和 Deezer 的二维码指向 `--relay-url`（默认 `https://relay.exam
   `done` 时带 `spotifyToken` 或 `deezer: {userId, arl}`，碟机存入 state 目录。
 
 `--relay-url=` 留空时回退到局域网页面 `http://<碟机>:8080/m/<provider>?t=<token>`，
-页面接受短链、资料页、用户 ID、`arl` Cookie 和 Deemix 密码。`arl` 只用来向 Deezer 确认账号，
-随资料一起存为 `deezer-owner.json`（0600），碟机不用它下载。
+页面接受短链、资料页、用户 ID、`arl` Cookie、中继地址和密码。`arl` 向 Deezer 确认账号后，
+随资料一起存为 `deezer-owner.json`（0600）；stream-sync 自身不用它下载，供本机 Deemix 读取。
 
 ## 本地 Deemix 适配协议
 

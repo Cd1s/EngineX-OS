@@ -219,24 +219,36 @@ func TestRelayLoginCollectsBothServices(t *testing.T) {
 	}
 }
 
-func TestRelayPasswordOnlyGoesToTheDeemixHost(t *testing.T) {
-	var got []string
+func TestRelayRequestsCarryThePassword(t *testing.T) {
+	var got string
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = append(got, r.Header.Get("X-Deemix-Password"))
+		got = r.Header.Get("X-Deemix-Password") + "|" + r.Header.Get("Authorization")
 		io.WriteString(w, `{}`)
 	}))
 	defer relay.Close()
-	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir(), RelayURL: relay.URL, RemoteDeemixURL: relay.URL}, nil)
-	if err := ui.updateDeemixConfig(nil, ptr("pw")); err != nil {
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir(), RelayURL: relay.URL}, nil)
+	if err := ui.updateRelayConfig(nil, ptr("pw")); err != nil {
 		t.Fatal(err)
 	}
 	ui.relayRegister(context.Background(), &loginFlow{Provider: "deezer", token: "t"})
-	if err := ui.updateDeemixConfig(ptr("https://other.example"), nil); err != nil {
-		t.Fatal(err)
-	}
-	ui.relayRegister(context.Background(), &loginFlow{Provider: "deezer", token: "t"})
-	if len(got) != 2 || got[0] != "pw" || got[1] != "" {
+	if got != "pw|Bearer pw" {
 		t.Fatalf("%q", got)
+	}
+}
+
+func TestRelayRefusesToFollowRedirects(t *testing.T) {
+	var leaked bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked = true }))
+	defer other.Close()
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL, http.StatusFound)
+	}))
+	defer relay.Close()
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir(), RelayURL: relay.URL}, nil)
+	ui.updateRelayConfig(nil, ptr("pw"))
+	ui.relayRegister(context.Background(), &loginFlow{Provider: "deezer", token: "t"})
+	if leaked {
+		t.Fatal("password followed a redirect")
 	}
 }
 
@@ -256,12 +268,12 @@ func TestRelayOutageStillShowsItsQRCode(t *testing.T) {
 	}
 }
 
-func TestDeemixPasswordIsNeverReadBack(t *testing.T) {
+func TestRelayPasswordIsNeverReadBack(t *testing.T) {
 	state := t.TempDir()
-	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: state, RemoteDeemixURL: "https://default.example"}, nil)
+	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: state, RelayURL: "https://default.example"}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	r, err := http.Post(srv.URL+"/v1/sc5000/deemix", "application/json", strings.NewReader(`{"deemixPassword":"hunter2"}`))
+	r, err := http.Post(srv.URL+"/v1/sc5000/relay", "application/json", strings.NewReader(`{"deemixPassword":"hunter2"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,8 +282,8 @@ func TestDeemixPasswordIsNeverReadBack(t *testing.T) {
 	if strings.Contains(string(body), "hunter2") || !strings.Contains(string(body), `"deemixPasswordSet":true`) || !strings.Contains(string(body), "default.example") {
 		t.Fatalf("status %s", body)
 	}
-	if address, password := ui.deemixRemote(); address != "https://default.example" || password != "hunter2" {
-		t.Fatal(address, password)
+	if relay, password := ui.relaySettings(); relay != "https://default.example" || password != "hunter2" {
+		t.Fatal(relay, password)
 	}
 	info, err := os.Stat(filepath.Join(state, "deemix-config.json"))
 	if err != nil || info.Mode().Perm() != 0o600 {
@@ -286,10 +298,10 @@ func TestDeemixPasswordIsNeverReadBack(t *testing.T) {
 	if strings.Contains(string(body), "changed") {
 		t.Fatalf("status %s", body)
 	}
-	if _, password := ui.deemixRemote(); password != "changed" {
+	if _, password := ui.relaySettings(); password != "changed" {
 		t.Fatal(password)
 	}
-	r, err = http.Post(srv.URL+"/v1/sc5000/deemix", "application/json", strings.NewReader(`{"deemixUrl":"http://public.example"}`))
+	r, err = http.Post(srv.URL+"/v1/sc5000/relay", "application/json", strings.NewReader(`{"relayUrl":"http://public.example"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,62 +327,67 @@ func netEaseServer(t *testing.T, audioURL func() string) *httptest.Server {
 	return srv
 }
 
-func TestFetchTriesNeteaseThenBackendForEveryService(t *testing.T) {
+func TestFetchPrefersLocalDeemixThenFallsBackToNetease(t *testing.T) {
 	var flac bytes.Buffer
 	if err := testaudio.FLAC(&flac, testaudio.Song(2)); err != nil {
 		t.Fatal(err)
 	}
-	var backendHits atomic.Int32
+	var neteaseCalls, bridgeCalls atomic.Int32
 	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Cookie") != "" {
 			t.Error("login cookie sent to the audio host")
 		}
-		if r.URL.Path == "/api/audio" {
-			backendHits.Add(1)
-			if r.Header.Get("X-Deemix-Password") != "pw" {
-				http.Error(w, "denied", 401)
-				return
-			}
-		}
 		w.Write(flac.Bytes())
 	}))
 	defer cdn.Close()
-	netease := netEaseServer(t, func() string { return cdn.URL + "/song.flac" })
-	bridgeDown := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "down", 503) }))
-	defer bridgeDown.Close()
-	catalog := &providers.Deezer{BaseURL: fakeDeezer(t).URL}
+	netease := netEaseServer(t, func() string { neteaseCalls.Add(1); return cdn.URL + "/song.flac" })
 	dir := t.TempDir()
-	jobs := NewJobs(Pipeline{Guard: resourceguard.New(resourceguard.Config{Disabled: true}), Catalog: catalog, Deemix: &deemixclient.Client{BaseURL: bridgeDown.URL, DownloadDir: dir, AllowLossy: true}})
+	bridgeUp := atomic.Bool{}
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bridgeCalls.Add(1)
+		if !bridgeUp.Load() {
+			http.Error(w, "no match", 500)
+			return
+		}
+		os.WriteFile(filepath.Join(dir, "9.flac"), flac.Bytes(), 0o644)
+		json.NewEncoder(w).Encode(deemixclient.QueueStatus{ID: "j", State: "done", Progress: 1, Path: "9.flac"})
+	}))
+	defer bridge.Close()
+	catalog := &providers.Deezer{BaseURL: fakeDeezer(t).URL}
+	jobs := NewJobs(Pipeline{Guard: resourceguard.New(resourceguard.Config{Disabled: true}), Catalog: catalog, Deemix: &deemixclient.Client{BaseURL: bridge.URL, DownloadDir: dir, AllowLossy: true}})
 	defer jobs.Close()
-	state := t.TempDir()
-	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, RemoteDeemixURL: cdn.URL, Factory: func(string, bool, string) (providers.Provider, error) {
+	New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) {
 		return &providers.Netease{WebURL: netease.URL, Cookie: "MUSIC_U=secret", UserID: 1}, nil
 	}}, jobs)
-	if err := ui.updateDeemixConfig(nil, ptr("pw")); err != nil {
-		t.Fatal(err)
-	}
 	ctx := context.Background()
 
-	// A NetEase track comes straight from the login, by its own ID.
-	own := providers.Track{ID: "77", Provider: "netease", Title: "x", Artist: "y"}
+	// With Deemix working, NetEase's download quota is never touched.
+	bridgeUp.Store(true)
+	deezer := providers.Track{ID: "9", Provider: "deezer", Title: "Rare", Artist: "Nobody", DurationMS: 200000}
+	if p, err := jobs.Fetch(ctx, "s", deezer, false); err != nil || filepath.Base(p) != "9.flac" {
+		t.Fatalf("%q %v", p, err)
+	}
+	if neteaseCalls.Load() != 0 {
+		t.Fatal("NetEase used while Deemix works")
+	}
+
+	// A NetEase-only track falls back to the login, by its own ID.
+	bridgeUp.Store(false)
+	own := providers.Track{ID: "77", Provider: "netease", Title: "Song", Artist: "Artist", DurationMS: 200000}
 	if p, err := jobs.Fetch(ctx, "s", own, false); err != nil || filepath.Base(p) != "netease-77.flac" {
 		t.Fatalf("%q %v", p, err)
 	}
-	// Another service's track is matched by name and duration to a NetEase one.
+	// Another service's track falls back by name and duration.
 	other := providers.Track{ID: "abc", Provider: "spotify", Title: "Song", Artist: "Artist", DurationMS: 200000}
 	if p, err := jobs.Fetch(ctx, "s", other, false); err != nil || filepath.Base(p) != "netease-5.flac" {
 		t.Fatalf("%q %v", p, err)
 	}
-	if backendHits.Load() != 0 {
-		t.Fatal("backend asked for tracks NetEase has")
-	}
-	// A track NetEase does not have falls through to the backend.
-	rare := providers.Track{ID: "9", Provider: "deezer", Title: "Rare", Artist: "Nobody", DurationMS: 200000}
-	if p, err := jobs.Fetch(ctx, "s", rare, false); err != nil || filepath.Base(p) != "remote-deezer-9.flac" {
+	// A saved NetEase file is reused without asking anyone.
+	jobs2 := NewJobs(Pipeline{Guard: resourceguard.New(resourceguard.Config{Disabled: true}), Catalog: catalog, Deemix: &deemixclient.Client{BaseURL: bridge.URL, DownloadDir: dir, AllowLossy: true}})
+	defer jobs2.Close()
+	calls := bridgeCalls.Load()
+	if p, err := jobs2.Fetch(ctx, "s", own, false); err != nil || filepath.Base(p) != "netease-77.flac" || bridgeCalls.Load() != calls {
 		t.Fatalf("%q %v", p, err)
-	}
-	if backendHits.Load() != 1 {
-		t.Fatalf("backend hits %d", backendHits.Load())
 	}
 }
 

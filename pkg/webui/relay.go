@@ -19,7 +19,7 @@ import (
 	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
 )
 
-// DefaultRelayURL is the operator's own service, which also hosts the Deemix backend.
+// DefaultRelayURL is the operator's own login service.
 const DefaultRelayURL = "https://relay.example.com"
 
 const relayTimeout = 3 * time.Second

@@ -304,51 +304,6 @@ func TestSaveKeepsOnlyRealAudio(t *testing.T) {
 	}
 }
 
-func TestFetchRemoteSendsPasswordAndStaysOnBackend(t *testing.T) {
-	audio := mp3Frames(14, 3)
-	var foreign bool
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		foreign = r.Header.Get("X-Deemix-Password") != "" || r.Header.Get("Authorization") != ""
-		w.Write(audio)
-	}))
-	defer other.Close()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Deemix-Password") != "pw" || r.Header.Get("Authorization") != "Bearer pw" {
-			http.Error(w, "denied", 401)
-			return
-		}
-		q := r.URL.Query()
-		if r.URL.Path != "/api/audio" || q.Get("provider") != "deezer" || q.Get("id") != "9" || q.Get("isrc") != "I" || q.Get("title") != "T" || q.Get("artist") != "A" || q.Get("duration") != "200" {
-			t.Errorf("bad request %s", r.URL)
-		}
-		w.Header().Set("X-Audio-Format", "flac") // the bytes decide, not this
-		w.Write(audio)
-	}))
-	defer srv.Close()
-	track := providers.Track{ID: "9", Provider: "deezer", ISRC: "I", Title: "T", Artist: "A", DurationMS: 200000}
-	c := &Client{DownloadDir: t.TempDir(), AllowLossy: true, Remote: func() (string, string) { return srv.URL + "/", "pw" }}
-	dl, err := c.FetchRemote(context.Background(), track)
-	if err != nil || filepath.Base(dl.Path) != "remote-deezer-9.mp3" {
-		t.Fatalf("%+v %v", dl, err)
-	}
-	wrong := &Client{DownloadDir: t.TempDir(), AllowLossy: true, Remote: func() (string, string) { return srv.URL, "nope" }}
-	if _, err := wrong.FetchRemote(context.Background(), track); err == nil || !strings.Contains(err.Error(), "401") {
-		t.Fatal(err)
-	}
-	none := &Client{DownloadDir: t.TempDir()}
-	if _, err := none.FetchRemote(context.Background(), track); !errors.Is(err, ErrNoRemote) {
-		t.Fatal(err)
-	}
-	moved := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, other.URL+"/stolen", http.StatusFound)
-	}))
-	defer moved.Close()
-	redirected := &Client{DownloadDir: t.TempDir(), AllowLossy: true, Remote: func() (string, string) { return moved.URL, "pw" }}
-	if _, err := redirected.FetchRemote(context.Background(), track); err == nil || foreign {
-		t.Fatalf("password followed a redirect: %v %v", err, foreign)
-	}
-}
-
 func TestTrimEvictsOldestSavedFilesOnly(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string, age time.Duration) string {
@@ -360,7 +315,7 @@ func TestTrimEvictsOldestSavedFilesOnly(t *testing.T) {
 	}
 	oldest := write("netease-1.flac", 3*time.Hour)
 	foreign := write("user-file.flac", 4*time.Hour)
-	middle := write("remote-deezer-2.mp3", 2*time.Hour)
+	middle := write("netease-2.mp3", 2*time.Hour)
 	keep := write("netease-3.flac", time.Hour)
 	(&Client{DownloadDir: dir, MaxCache: 300}).trim(keep)
 	if _, err := os.Stat(oldest); err == nil {
