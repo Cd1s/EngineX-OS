@@ -176,7 +176,8 @@ func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 			Items []struct {
 				ID     string
 				Name   string
-				Tracks struct{ Total int }
+				Tracks struct{ Total int } `json:"tracks"`
+				Items  struct{ Total int } `json:"items"`
 			}
 			Next *string
 		}
@@ -184,7 +185,11 @@ func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 			return nil, err
 		}
 		for _, p := range r.Items {
-			all = append(all, Playlist{p.ID, p.Name, p.Tracks.Total})
+			total := p.Items.Total
+			if total == 0 {
+				total = p.Tracks.Total
+			}
+			all = append(all, Playlist{p.ID, p.Name, total})
 		}
 		if r.Next == nil || *r.Next == "" {
 			return all, nil
@@ -194,19 +199,29 @@ func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 }
 func (s *Spotify) Tracks(ctx context.Context, id string) ([]Track, error) {
 	var all []Track
+	endpointName := "/items"
 	for offset := 0; offset < 100000; offset += 100 {
 		var r struct {
 			Items []struct {
 				IsLocal bool     `json:"is_local"`
 				Track   *spTrack `json:"track"`
+				Item    *spTrack `json:"item"`
 			}
 			Next *string
 		}
-		if err := s.get(ctx, "/playlists/"+url.PathEscape(id)+"/tracks?limit=100&offset="+strconv.Itoa(offset), &r); err != nil {
+		err := s.get(ctx, "/playlists/"+url.PathEscape(id)+endpointName+"?limit=100&offset="+strconv.Itoa(offset), &r)
+		if err != nil && offset == 0 && endpointName == "/items" {
+			endpointName = "/tracks"
+			err = s.get(ctx, "/playlists/"+url.PathEscape(id)+endpointName+"?limit=100&offset="+strconv.Itoa(offset), &r)
+		}
+		if err != nil {
 			return nil, err
 		}
 		for _, item := range r.Items {
-			t := item.Track
+			t := item.Item
+			if t == nil {
+				t = item.Track
+			}
 			if t == nil || item.IsLocal || t.ID == "" || (t.Type != "" && t.Type != "track") {
 				continue
 			}
@@ -220,7 +235,7 @@ func (s *Spotify) Tracks(ctx context.Context, id string) ([]Track, error) {
 }
 func (s *Spotify) Search(ctx context.Context, query string) ([]Track, error) {
 	var r struct{ Tracks struct{ Items []*spTrack } }
-	if err := s.get(ctx, "/search?"+url.Values{"q": {query}, "type": {"track"}, "limit": {"20"}}.Encode(), &r); err != nil {
+	if err := s.get(ctx, "/search?"+url.Values{"q": {query}, "type": {"track"}, "limit": {"10"}}.Encode(), &r); err != nil {
 		return nil, err
 	}
 	out := make([]Track, 0, len(r.Tracks.Items))
@@ -238,17 +253,22 @@ func (s *Spotify) SearchPlaylists(ctx context.Context, query string) ([]Playlist
 			Items []*struct {
 				ID     string
 				Name   string
-				Tracks struct{ Total int }
+				Tracks struct{ Total int } `json:"tracks"`
+				Items  struct{ Total int } `json:"items"`
 			}
 		}
 	}
-	if err := s.get(ctx, "/search?"+url.Values{"q": {query}, "type": {"playlist"}, "limit": {"20"}}.Encode(), &r); err != nil {
+	if err := s.get(ctx, "/search?"+url.Values{"q": {query}, "type": {"playlist"}, "limit": {"10"}}.Encode(), &r); err != nil {
 		return nil, err
 	}
 	out := make([]Playlist, 0, len(r.Playlists.Items))
 	for _, p := range r.Playlists.Items {
 		if p != nil && p.ID != "" {
-			out = append(out, Playlist{p.ID, p.Name, p.Tracks.Total})
+			total := p.Items.Total
+			if total == 0 {
+				total = p.Tracks.Total
+			}
+			out = append(out, Playlist{p.ID, p.Name, total})
 		}
 	}
 	return out, nil
