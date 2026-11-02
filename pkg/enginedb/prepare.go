@@ -46,7 +46,7 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 		if e != nil {
 			return nil, fmt.Errorf("track %d: %w", t.ID, e)
 		}
-		fp := fingerprint{Record: t.RecordHash + ":" + rekordbox.RecordHash(t), ResolvedPath: rel, Size: st.Size(), MTime: st.ModTime().UnixNano(), Artwork: art}
+		fp := fingerprint{Encoding: performanceEncoding, Record: t.RecordHash + ":" + rekordbox.RecordHash(t), ResolvedPath: rel, Size: st.Size(), MTime: st.ModTime().UnixNano(), Artwork: art}
 		for _, f := range files {
 			fp.Analysis = append(fp.Analysis, analysisFileExport{f.rel, f.size, f.mtime})
 		}
