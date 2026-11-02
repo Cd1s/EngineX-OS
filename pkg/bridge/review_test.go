@@ -157,3 +157,34 @@ func TestEngineSchemaResetKeepsBridgeState(t *testing.T) {
 		t.Fatalf("playlists grew from %d to %d", playlists, n)
 	}
 }
+
+// Engine may recreate imported playlists under new ids. The next import must
+// refill them instead of adding "(rekordbox)" copies.
+func TestRebuiltPlaylistIsAdoptedNotDuplicated(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	convert(t, root, enginedb.Options{})
+	db := dbOpen(t, root)
+	before := scalar[int](t, db, `SELECT count(*) FROM main.Playlist`)
+	entities := scalar[int](t, db, `SELECT count(*) FROM main.PlaylistEntity`)
+	if _, e := db.Exec(`DELETE FROM main.PlaylistEntity;
+CREATE TEMP TABLE saved AS SELECT title,parentListId FROM main.Playlist WHERE parentListId=0;
+DELETE FROM main.Playlist WHERE parentListId<>0;
+DELETE FROM main.Playlist;
+INSERT INTO main.Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) SELECT title,parentListId,1,0,1 FROM saved;
+DROP TABLE saved;`); e != nil {
+		t.Fatal(e)
+	}
+	if !convert(t, root, enginedb.Options{}).PlaylistsChanged {
+		t.Fatal("orphaned playlists were not rebuilt")
+	}
+	if n := scalar[int](t, db, `SELECT count(*) FROM main.Playlist WHERE title LIKE '%(rekordbox%'`); n != 0 {
+		t.Fatalf("%d duplicate playlists", n)
+	}
+	if n := scalar[int](t, db, `SELECT count(*) FROM main.Playlist`); n != before {
+		t.Fatalf("playlists %d, want %d", n, before)
+	}
+	if n := scalar[int](t, db, `SELECT count(*) FROM main.PlaylistEntity`); n != entities {
+		t.Fatalf("entities %d, want %d", n, entities)
+	}
+}
