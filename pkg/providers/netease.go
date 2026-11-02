@@ -373,12 +373,17 @@ func (n *Netease) Search(ctx context.Context, query string) ([]Track, error) {
 var ErrNoFullAudio = errors.New("netease: no full-length audio for this account")
 
 // AudioURL returns the address NetEase gives this account for a track at the best
-// quality on offer. Previews never count: a DJ must not load 30 seconds of a song.
-func (n *Netease) AudioURL(ctx context.Context, id string) (string, error) {
+// quality on offer, starting at 320k MP3 unless lossless is wanted. Previews never
+// count: a DJ must not load 30 seconds of a song.
+func (n *Netease) AudioURL(ctx context.Context, id string, lossless bool) (string, error) {
 	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
 		return "", errors.New("netease: invalid track ID")
 	}
-	for _, level := range []string{"lossless", "exhigh", "standard"} {
+	levels := []string{"exhigh", "standard"}
+	if lossless {
+		levels = append([]string{"lossless"}, levels...)
+	}
+	for _, level := range levels {
 		var r struct {
 			Data []struct {
 				URL   string          `json:"url"`

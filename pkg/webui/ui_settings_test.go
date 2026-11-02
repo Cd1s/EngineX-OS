@@ -7,7 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/Cd1s/sc5000-custom-os/pkg/deemixclient"
 )
 
 func uiPost(t *testing.T, base, query string) (int, uiSettings) {
@@ -89,5 +92,31 @@ func TestUISettingsConsoleNeedsLoginAndRemoteGatewayIsRefused(t *testing.T) {
 	ui.ServeHTTP(w, httptest.NewRequest("POST", "/api/ui?lang=en&restart=1", nil))
 	if w.Code != 401 {
 		t.Fatalf("console without login: %d", w.Code)
+	}
+}
+
+func TestQualitySettingAppliesWithoutARestart(t *testing.T) {
+	restarted := false
+	jobs := NewJobs(Pipeline{Deemix: &deemixclient.Client{DownloadDir: t.TempDir()}})
+	defer jobs.Close()
+	dir := t.TempDir()
+	ui := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir(), RestartEngine: func() error { restarted = true; return nil }}, jobs)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	if !jobs.p.Deemix.Lossless() {
+		t.Fatal("FLAC should be the default")
+	}
+	if code, v := uiPost(t, srv.URL, "quality=320k"); code != 200 || v.Quality != "320k" {
+		t.Fatalf("%d %+v", code, v)
+	}
+	if jobs.p.Deemix.Lossless() || restarted {
+		t.Fatalf("not applied at once, restarted=%v", restarted)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if !strings.Contains(string(data), "quality=320k") {
+		t.Fatalf("%s", data)
+	}
+	if code, _ := uiPost(t, srv.URL, "quality=128k"); code != 400 {
+		t.Fatalf("bad quality accepted: %d", code)
 	}
 }
