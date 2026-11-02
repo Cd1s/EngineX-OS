@@ -42,18 +42,23 @@ SERVICES_MAIN = """
 	property string scLang: "en"
 	property string scWave: "denon"
 	property string scQuality: "flac"
-	property var scSources: ["tidal", "netease", "spotify", "deezer"]
+	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud"]
 	property var scLoggedIn: []
 	property string scScope: ""
 	readonly property var scServices: [
 		{ id: "tidal", name: "TIDAL" },
 		{ id: "netease", name: scT("NetEase Cloud Music") },
 		{ id: "spotify", name: "Spotify" },
-		{ id: "deezer", name: "Deezer" }
+		{ id: "deezer", name: "Deezer" },
+		{ id: "soundcloud", name: "SoundCloud" }
 	]
 	readonly property var scDict: (@DICT@)
 	function scT(s) { return scDict[s] || s }
-	function scIcon(id) { return id === "tidal" ? "qrc:/UIKit.1/UIKit/Icons/SourceTIDALColored.png" : "file:///data/sc5000-custom/ui/icons/" + id + ".png" }
+	function scIcon(id) {
+		if (id === "tidal") return "qrc:/UIKit.1/UIKit/Icons/SourceTIDALColored.png"
+		if (id === "soundcloud") return "qrc:/UIKit.1/UIKit/Icons/SourceSoundCloudColored.png"
+		return "file:///data/sc5000-custom/ui/icons/" + id + ".png"
+	}
 	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM. A value
 	// Engine analysed itself always wins, so these only fill empty columns.
 	function scPreview(label) {
@@ -257,7 +262,7 @@ LOGIN_DIALOG = """
 						if (root.scLoginStatus === "error") return root.scT("Can't start login. Check the network.")
 						if (root.scLoginStatus === "scanned") return root.scT("Confirm on your phone")
 						if (root.scLogin === "netease") return root.scT("Scan with the NetEase Cloud Music app")
-						return root.scT("Scan with your phone camera. Phone and deck must be on the same network.")
+						return root.scT("Scan with your phone camera.")
 					}
 				}
 				Rectangle {
@@ -454,19 +459,21 @@ def edits(dev: bool):
             ("		PlayerNumber { },\n", LANGUAGE_ENTRY + QUALITY_ENTRY + "		PlayerNumber { },\n"),
         ],
         prefs + "Entries/StreamingServices.qml": [
-            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && provider.name !== "TIDAL"\n'),
+            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && provider.name !== "TIDAL" && provider.name !== "SoundCloud"\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),
             ('	label: "Streaming"\n', '	label: "Streaming"\n' + STREAM_SWITCHES),
         ],
         v + "BrowserSource/ConnectedSource.qml": [
             ("	currentIndex: -1\n", "	currentIndex: -1\n" + SOURCE_FOOTER),
-            ("		height: 108\n		leftPadding", '		height: model.name === "TIDAL" ? 0 : 108\n		visible: model.name !== "TIDAL"\n		Component.onCompleted: if (model.name === "TIDAL") connectedSource.scTidalRow = this\n		leftPadding'),
+            ("		height: 108\n		leftPadding", '		height: model.name === "TIDAL" || model.name === "SoundCloud" ? 0 : 108\n		visible: model.name !== "TIDAL" && model.name !== "SoundCloud"\n		Component.onCompleted: if (model.name === "TIDAL") connectedSource.scTidalRow = this\n		leftPadding'),
         ],
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewHeader.qml": [("text: breadcrumbViewHeader.title\n", 'text: ["My Playlists", "My Collection"].indexOf(breadcrumbViewHeader.title) >= 0 ? root.scT(breadcrumbViewHeader.title) : breadcrumbViewHeader.title\n')],
         v + "BrowserSource/SourceScreen.qml": [("						AvailableSource {\n", AVAILABLE_TILES + "						AvailableSource {\n")],
         v + "Streaming/StreamingDialog.qml": [
+            # This limit is for TIDAL's own qualities; DJ sets here run for hours.
+            ("		function onShowTrackTooLong() {\n", "		function onShowTrackTooLong() {\n			return\n"),
             ("		function onShowGenericError(errorMessage, title) {\n", "		function onShowGenericError(errorMessage, title) {\n			title = root.scBrand(title)\n			errorMessage = root.scBrand(errorMessage)\n"),
             ("		function onShowGenericMessage(message, title) {\n", "		function onShowGenericMessage(message, title) {\n			title = root.scBrand(title)\n			message = root.scBrand(message)\n"),
             ("`${provider.displayName}: ${message}`", "root.scBrand(`${provider.displayName}: ${message}`)"),

@@ -282,3 +282,23 @@ func TestBPMKeysOnlyLeaveWithSecrets(t *testing.T) {
 		t.Fatal("secrets served without the password")
 	}
 }
+
+func TestSoundCloudPageNeedsACredentialAndPassesItOn(t *testing.T) {
+	s := newTestServer(t)
+	h := s.routes()
+	tok := "soundcloudtoken00001"
+	if w := do(h, "GET", "/m/soundcloud?t="+tok, "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), "连接 SoundCloud") {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	if w := do(h, "POST", "/m/soundcloud?t="+tok, "user=cave", form); w.Code == 200 {
+		t.Fatalf("accepted without a credential: %s", w.Body)
+	}
+	if w := do(h, "POST", "/m/soundcloud?t="+tok, "user=cave&clientId=cid", form); w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	poll := do(h, "GET", "/api/relay/session?t="+tok, "", nil).Body.String()
+	if !strings.Contains(poll, `"status":"done"`) || !strings.Contains(poll, `"clientId":"cid"`) || !strings.Contains(poll, `"user":"cave"`) {
+		t.Fatal(poll)
+	}
+}

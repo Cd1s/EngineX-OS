@@ -480,3 +480,63 @@ func TestUnblockRadiosLeavesOtherSwitchesAlone(t *testing.T) {
 		}
 	}
 }
+
+func TestLongTracksSkipAnalysis(t *testing.T) {
+	if !tooLongToAnalyse(providers.Track{DurationMS: 2 * 60 * 60 * 1000}, "/x/a.mp3") {
+		t.Fatal("two-hour set would be analysed")
+	}
+	if tooLongToAnalyse(providers.Track{DurationMS: 5 * 60 * 1000}, "/missing/a.flac") {
+		t.Fatal("ordinary track skipped")
+	}
+}
+
+func TestRelayCollectsSoundCloudAndDeckChecksIt(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("client_id") != "cid" {
+			t.Errorf("client id missing: %s", r.URL)
+		}
+		switch r.URL.Path {
+		case "/resolve":
+			io.WriteString(w, `{"kind":"user","id":7,"username":"cave"}`)
+		default:
+			io.WriteString(w, `{"collection":[]}`)
+		}
+	}))
+	defer api.Close()
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"status":"done","soundcloud":{"user":"cave","clientId":"cid","token":""}}`)
+	}))
+	defer relay.Close()
+	state := t.TempDir()
+	bpm := &providers.BPMStore{Path: filepath.Join(state, "bpm.json"), ConfigPath: filepath.Join(state, "bpm-config.json")}
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, RelayURL: relay.URL, SoundCloudURL: api.URL, BPM: bpm}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	r, err := http.Post(srv.URL+"/v1/sc5000/login?provider=soundcloud", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if !strings.HasPrefix(ui.logins["soundcloud"].Target, relay.URL+"/m/soundcloud?t=") {
+		t.Fatalf("%+v", ui.logins["soundcloud"])
+	}
+	status, err := http.Get(srv.URL + "/v1/sc5000/login?provider=soundcloud")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(status.Body)
+	status.Body.Close()
+	if !strings.Contains(string(body), `"status":"done"`) {
+		t.Fatalf("%s", body)
+	}
+	if p := ui.ownerSoundCloud(); p == nil || p.UserID != 7 || p.ClientID != "cid" {
+		t.Fatalf("%+v", p)
+	}
+	if got := bpm.Config().SoundCloudClientID; got != "cid" {
+		t.Fatal(got)
+	}
+	info, err := os.Stat(filepath.Join(state, "soundcloud-owner.json"))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal(info, err)
+	}
+}
