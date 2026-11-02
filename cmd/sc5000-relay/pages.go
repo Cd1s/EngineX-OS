@@ -1,0 +1,169 @@
+package main
+
+import (
+	"html/template"
+	"log"
+	"net/http"
+)
+
+type pageData struct {
+	Title, Message, Error   string
+	Token, Provider, UserID string
+	Done                    bool
+	// Spotify
+	ClientID, HTTPSRedirect, AuthHTTPS, AuthLoopback string
+	Auto                                             bool
+	// panel
+	Backend string
+}
+
+func renderPage(w http.ResponseWriter, code int, name string, d pageData) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.WriteHeader(code)
+	if err := pages.ExecuteTemplate(w, name, d); err != nil {
+		log.Printf("template %s: %v", name, err)
+	}
+}
+
+var pages = template.Must(template.New("").Parse(`
+{{define "head"}}<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark"><title>{{.Title}}</title>
+<style>
+:root{--bg:#0d0f14;--card:#171a22;--line:#262a35;--fg:#e8eaf0;--mute:#8b91a1;--acc:#1ed760;--dz:#a238ff;--err:#ff5d6c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK SC",sans-serif;padding:max(20px,env(safe-area-inset-top)) 16px 40px}
+.wrap{max-width:520px;margin:0 auto}.wide{max-width:860px}
+h1{font-size:22px;margin:8px 0 4px}h2{font-size:17px;margin:0 0 10px}.sub{color:var(--mute);font-size:14px;margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin:14px 0}
+label{display:block;font-weight:600;margin:4px 0 6px}.hint{color:var(--mute);font-size:13px;margin:6px 0 0}
+input,textarea{width:100%;background:#0f1218;border:1px solid var(--line);border-radius:12px;color:var(--fg);padding:13px 14px;font-size:16px;font-family:inherit}
+textarea{min-height:84px;resize:vertical;word-break:break-all}input:focus,textarea:focus{outline:none;border-color:#4b5263}
+.btn{display:block;width:100%;text-align:center;border:0;border-radius:999px;padding:15px 18px;font-size:17px;font-weight:700;cursor:pointer;text-decoration:none;margin-top:14px}
+.green{background:var(--acc);color:#04130a}.purple{background:var(--dz);color:#fff}.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+.small{display:inline-block;width:auto;padding:9px 14px;font-size:14px;margin:8px 8px 0 0}
+.err{background:#2a1418;border:1px solid #5a2630;color:#ffc2c8;border-radius:12px;padding:12px 14px;margin:12px 0}
+.ok{background:#10251a;border:1px solid #1f5a37;color:#b9f5cf;border-radius:12px;padding:12px 14px;margin:12px 0}
+.big{font-size:64px;text-align:center;margin:30px 0 0}.center{text-align:center}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;word-break:break-all}
+.copy{background:#0f1218;border:1px dashed var(--line);border-radius:10px;padding:10px;margin-top:8px;user-select:all}
+details summary{cursor:pointer;color:var(--mute)}.or{color:var(--mute);text-align:center;margin:10px 0;font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertical-align:top}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:14px}.kv b{color:var(--mute);font-weight:500}
+.badge{display:inline-block;border-radius:999px;padding:1px 8px;font-size:12px;background:#262a35}.warn{background:#4a3410;color:#ffd58a}.good{background:#103a22;color:#9ff0bf}
+</style></head><body>{{end}}
+
+{{define "errorPage"}}{{template "head" .}}<div class="wrap"><div class="big">⚠️</div><h1 class="center">{{.Title}}</h1><p class="sub center">{{.Message}}</p></div></body></html>{{end}}
+
+{{define "donePage"}}{{template "head" .}}<div class="wrap"><div class="big">✅</div>
+<h1 class="center">已完成连接！</h1><p class="sub center">碟机屏幕上的二维码将自动关闭并加载歌单。<br>现在可以关闭此页面。</p></div></body></html>{{end}}
+
+{{define "deezerPage"}}{{template "head" .}}<div class="wrap">
+<h1>连接 Deezer</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
+{{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的设置。</div>{{end}}
+{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+<form method="post" class="card">
+<label for="user">Deezer 链接或用户 ID</label>
+<input id="user" name="user" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://link.deezer.com/s/… 或 6850245583">
+<p class="hint">支持 Deezer App「分享个人资料」的 link.deezer.com 短链、deezer.com/profile/…、deezer.com/playlist/… 或纯数字 ID。{{if .UserID}}当前服务端 User ID：<code>{{.UserID}}</code>{{end}}</p>
+<div class="or">— 可以任填其一，也可以同时填写 —</div>
+<label for="arl">Deezer ARL Cookie（可选）</label>
+<textarea id="arl" name="arl" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="192 位十六进制 arl"></textarea>
+<p class="hint">填入后自动登录 Deezer 歌单，并同时登录 Deemix 无损下载。在电脑浏览器登录 deezer.com 后，从开发者工具 → Cookie 里复制 <code>arl</code>。</p>
+<button class="btn purple" type="submit">完成连接</button>
+</form></div></body></html>{{end}}
+
+{{define "spotifyPage"}}{{template "head" .}}<div class="wrap">
+<h1>连接 Spotify</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
+{{if .Done}}<div class="ok">此二维码已完成连接，碟机会自动加载歌单。</div>{{end}}
+{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+{{if .Auto}}
+<div class="card"><a class="btn green" href="{{.AuthHTTPS}}">打开 Spotify 授权</a>
+<p class="hint">登录并同意后会自动跳回这里完成连接。</p></div>
+<details class="card"><summary>跳转失败？改用粘贴方式</summary>
+<a class="btn ghost" href="{{.AuthLoopback}}">打开 Spotify 登录授权（127.0.0.1 回调）</a>
+{{template "pasteForm" .}}</details>
+{{else}}
+<div class="card"><a class="btn green" href="{{.AuthLoopback}}">1. 打开 Spotify 登录授权</a>
+<p class="hint">同意授权后，浏览器会跳到一个打不开的 <code>http://127.0.0.1:8080/…</code> 页面——这是正常的，复制地址栏里的完整链接即可。</p></div>
+<div class="card"><label>2. 粘贴授权后地址栏的 127.0.0.1 链接（或 code）</label>{{template "pasteForm" .}}</div>
+<div class="card"><h2>想要扫码后全自动跳转？</h2>
+<p class="hint">在 developer.spotify.com 为该 App 添加 Redirect URI：</p>
+<div class="copy mono">{{.HTTPSRedirect}}</div>
+<p class="hint">添加后点下面按钮试一次，成功后以后扫码都会全自动完成：</p>
+<a class="btn ghost" href="{{.AuthHTTPS}}">已添加，试试全自动跳转</a></div>
+{{end}}
+<details class="card"><summary>更换 Client ID（可选）</summary>
+<form method="get"><input type="hidden" name="t" value="{{.Token}}">
+<p class="hint">当前 Client ID：<code>{{.ClientID}}</code></p>
+<input name="client_id" placeholder="32 位 Client ID" autocomplete="off" autocapitalize="off" spellcheck="false" pattern="[0-9a-fA-F]{32}">
+<button class="btn ghost" type="submit">使用此 Client ID</button></form></details>
+</div></body></html>{{end}}
+
+{{define "pasteForm"}}<form method="post" id="pf">
+<textarea name="code" id="code" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="http://127.0.0.1:8080/oauth/spotify/callback?code=…"></textarea>
+<button class="btn green" type="button" id="clip">一键读取剪贴板并完成登录</button>
+<button class="btn ghost" type="submit">提交</button></form>
+<script>
+document.getElementById('clip').onclick=async function(){
+ try{const t=await navigator.clipboard.readText();if(!t){alert('剪贴板是空的');return}
+ document.getElementById('code').value=t.trim();document.getElementById('pf').submit()}
+ catch(e){alert('无法读取剪贴板，请长按输入框手动粘贴后点「提交」')}};
+</script>{{end}}
+
+{{define "loginPage"}}{{template "head" .}}<div class="wrap">
+<h1>SC5000 Deemix</h1><p class="sub">扫码登录与凭证中继 · 请输入访问密码</p>
+{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+<form method="post" action="login" class="card"><label for="pw">访问密码</label>
+<input id="pw" type="password" name="password" autocomplete="current-password" autofocus>
+<button class="btn purple" type="submit">登录</button></form></div></body></html>{{end}}
+
+{{define "panelPage"}}{{template "head" .}}<div class="wrap wide">
+<div style="display:flex;justify-content:space-between;align-items:center"><h1>SC5000 Deemix 控制台</h1>
+<form method="post" action="logout"><button class="btn ghost small" type="submit">退出</button></form></div>
+<div id="msg"></div>
+<div class="card"><h2>SC5000 后端</h2><div class="kv">
+<b>后端地址</b><span class="mono" id="backend">{{.Backend}}</span>
+<b>访问密码</b><span id="pwstate">…</span>
+<b>Spotify 回调</b><span class="mono" id="redir"></span></div>
+<p class="hint">此网页用于登录和传递凭证。音频由 SC5000 本机直接下载并保存。</p></div>
+
+<div class="card"><h2>Deezer ARL Cookie</h2><p class="hint" id="arlstate">…</p>
+<textarea id="arl" placeholder="粘贴新的 arl（保存时自动校验并提取 User ID）" autocomplete="off" spellcheck="false"></textarea>
+<button class="btn purple small" onclick="save({deezerArl:val('arl')})">校验并保存 ARL</button>
+<button class="btn ghost small" onclick="if(confirm('确定清除服务端保存的 ARL？'))save({clearArl:'1'})">清除 ARL</button></div>
+
+<div class="card"><h2>Deezer User ID</h2>
+<input id="uid" placeholder="数字 ID 或 Deezer 个人资料/歌单/短链" autocomplete="off" spellcheck="false">
+<button class="btn purple small" onclick="save({deezerUserId:val('uid')})">保存</button></div>
+
+<div class="card"><h2>Spotify Client ID</h2>
+<input id="cid" placeholder="32 位十六进制" autocomplete="off" spellcheck="false">
+<button class="btn green small" onclick="save({spotifyClientId:val('cid')})">保存</button></div>
+
+<div class="card"><h2>修改访问密码</h2>
+<input id="cur" type="password" placeholder="当前密码" autocomplete="current-password" style="margin-bottom:8px">
+<input id="np" type="password" placeholder="新密码（至少 8 位）" autocomplete="new-password">
+<button class="btn ghost small" onclick="save({currentPassword:val('cur'),newPassword:val('np')}).then(()=>{el('cur').value='';el('np').value=''})">修改密码</button></div>
+
+
+</div>
+<script>
+const el=id=>document.getElementById(id),val=id=>el(id).value.trim();
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function show(ok,lines){el('msg').innerHTML=lines.length?'<div class="'+(ok?'ok':'err')+'">'+lines.map(esc).join('<br>')+'</div>':''}
+function render(c){
+ el('pwstate').innerHTML=c.passwordIsDefault?'<span class="badge warn">仍为默认初始密码，建议修改</span>':'<span class="badge good">已自定义</span>'+(c.passwordChangedAt?' '+esc(new Date(c.passwordChangedAt).toLocaleString()):'');
+ el('redir').textContent=c.spotifyRedirect;
+ el('arlstate').innerHTML=c.deezerArlSet?'已保存：<code>'+esc(c.deezerArlMasked)+'</code>'+(c.deezerArlUser?' · 用户 '+esc(c.deezerArlUser):''):'<span class="badge warn">未设置 ARL</span>（请先保存 ARL，供 SC5000 同步登录）';
+ el('uid').value=c.deezerUserId||'';el('cid').value=c.spotifyClientId||'';}
+async function api(path,opt){const r=await fetch(path,Object.assign({credentials:'same-origin',headers:{'Content-Type':'application/json'}},opt||{}));
+ if(r.status==401){location.reload();throw new Error('unauthorized')}return r.json()}
+async function load(){const j=await api('api/config');render(j.config)}
+async function save(body){const j=await api('api/config',{method:'POST',body:JSON.stringify(body)});
+ if(j.config)render(j.config);show(j.ok,j.ok?(j.messages||[]):[j.error]);if(j.ok)el('arl').value=''}
+load();
+</script></body></html>{{end}}
+`))
