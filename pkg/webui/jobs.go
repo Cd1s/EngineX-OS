@@ -27,6 +27,10 @@ type Job struct {
 	Quality   string          `json:"quality,omitempty"`
 	Error     string          `json:"error,omitempty"`
 	TrackID   int64           `json:"trackId,omitempty"`
+
+	// Set when the TIDAL gateway already downloaded the file for playback.
+	matched providers.Track
+	dl      *deemixclient.Download
 }
 type Pipeline struct {
 	Guard   *resourceguard.Guard
@@ -45,6 +49,16 @@ type Jobs struct {
 	items   map[string]Job
 	order   []string
 	results map[string]*analyzer.Result
+	files   map[string]fetched
+	fetches map[string]chan struct{}
+
+	// Playlists each streamed track was queued for, so a guest playing a
+	// track the owner already downloaded still gets it in the guest playlist.
+	queued map[string]bool
+}
+type fetched struct {
+	matched providers.Track
+	dl      *deemixclient.Download
 }
 
 func NewJobs(p Pipeline) *Jobs {
@@ -52,12 +66,122 @@ func NewJobs(p Pipeline) *Jobs {
 		p.Guard = resourceguard.New(resourceguard.DefaultConfig())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	j := &Jobs{p: p, ctx: ctx, cancel: cancel, queue: make(chan string, 16), done: make(chan struct{}), items: make(map[string]Job), results: make(map[string]*analyzer.Result)}
+	j := &Jobs{p: p, ctx: ctx, cancel: cancel, queue: make(chan string, 16), done: make(chan struct{}), items: make(map[string]Job), results: make(map[string]*analyzer.Result), files: make(map[string]fetched), fetches: make(map[string]chan struct{}), queued: make(map[string]bool)}
 	go j.worker()
 	return j
 }
 func (j *Jobs) Close() { j.cancel(); <-j.done }
+func (j *Jobs) timeout() time.Duration {
+	if j.p.Timeout > 0 {
+		return j.p.Timeout
+	}
+	return 30 * time.Minute
+}
+func trackKey(t providers.Track) string { return t.Provider + ":" + t.ID }
+
+// File returns a finished download of t that is still on disk.
+func (j *Jobs) File(t providers.Track) string {
+	j.mu.Lock()
+	path := ""
+	if f, ok := j.files[trackKey(t)]; ok {
+		path = f.dl.Path
+	}
+	j.mu.Unlock()
+	if st, err := os.Stat(path); path == "" || err != nil || !st.Mode().IsRegular() {
+		return ""
+	}
+	return path
+}
+
+// Fetch downloads t for immediate playback and queues CPU3 analysis and import
+// of the same file. Playback never waits for analysis. Concurrent requests for
+// one track share a download; it continues if the waiting caller gives up.
+func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, guest bool) (string, error) {
+	if j.p.Catalog == nil || j.p.Deemix == nil {
+		return "", errors.New("pipeline is not configured")
+	}
+	key := trackKey(t)
+	for {
+		// Check the cache and claim the download under one lock so a fetch
+		// finishing in between cannot trigger a second download.
+		j.mu.Lock()
+		f, done := j.files[key]
+		busy, ok := j.fetches[key]
+		if !ok && !done {
+			j.fetches[key] = make(chan struct{})
+		}
+		j.mu.Unlock()
+		if done {
+			if st, err := os.Stat(f.dl.Path); err == nil && st.Mode().IsRegular() {
+				j.queueImport(session, t, guest, f)
+				return f.dl.Path, nil
+			}
+			j.mu.Lock()
+			if j.files[key].dl == f.dl {
+				delete(j.files, key)
+			}
+			j.mu.Unlock()
+			continue
+		}
+		if !ok {
+			break
+		}
+		select {
+		case <-busy:
+		case <-wait.Done():
+			return "", wait.Err()
+		}
+	}
+	defer func() {
+		j.mu.Lock()
+		close(j.fetches[key])
+		delete(j.fetches, key)
+		j.mu.Unlock()
+	}()
+	ctx, cancel := context.WithTimeout(j.ctx, j.timeout())
+	defer cancel()
+	matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
+	if err != nil {
+		return "", err
+	}
+	dl, err := j.p.Deemix.Download(ctx, matched, nil)
+	if err != nil {
+		return "", err
+	}
+	f := fetched{matched, dl}
+	j.mu.Lock()
+	j.files[key] = f
+	j.mu.Unlock()
+	j.queueImport(session, t, guest, f)
+	return dl.Path, nil
+}
+
+// queueImport analyses and imports a streamed file once per target playlist.
+// A full queue only skips library import; the file is still playable.
+func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetched) {
+	key := providers.OwnerPlaylist + "\x00" + trackKey(t)
+	if guest {
+		key = providers.GuestPlaylist + "\x00" + trackKey(t)
+	}
+	j.mu.Lock()
+	seen := j.queued[key]
+	j.queued[key] = true
+	j.mu.Unlock()
+	if !seen {
+		if _, err := j.submit(session, t, guest, f.matched, f.dl); err != nil {
+			j.mu.Lock()
+			delete(j.queued, key)
+			j.mu.Unlock()
+		}
+	}
+}
+
+// Lossy reports whether Deemix may deliver MP3 instead of FLAC.
+func (j *Jobs) Lossy() bool { return j.p.Deemix != nil && j.p.Deemix.AllowLossy }
 func (j *Jobs) Submit(session string, t providers.Track, guest bool) (Job, error) {
+	return j.submit(session, t, guest, providers.Track{}, nil)
+}
+func (j *Jobs) submit(session string, t providers.Track, guest bool, matched providers.Track, dl *deemixclient.Download) (Job, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.ctx.Err() != nil {
@@ -83,7 +207,7 @@ func (j *Jobs) Submit(session string, t providers.Track, guest bool) (Job, error
 	if guest {
 		playlist = providers.GuestPlaylist
 	}
-	job := Job{ID: providers.RandomID(), SessionID: session, Track: t, Playlist: playlist, State: "queued"}
+	job := Job{ID: providers.RandomID(), SessionID: session, Track: t, Playlist: playlist, State: "queued", matched: matched, dl: dl}
 	j.items[job.ID] = job
 	j.order = append(j.order, job.ID)
 	select {
@@ -126,11 +250,7 @@ func (j *Jobs) worker() {
 			j.mu.Lock()
 			v := j.items[id]
 			j.mu.Unlock()
-			timeout := j.p.Timeout
-			if timeout <= 0 {
-				timeout = 30 * time.Minute
-			}
-			ctx, cancel := context.WithTimeout(j.ctx, timeout)
+			ctx, cancel := context.WithTimeout(j.ctx, j.timeout())
 			err := j.p.Guard.Run(ctx, func(t *resourceguard.Throttle) error { return j.run(ctx, v, t) })
 			cancel()
 			if err != nil {
@@ -146,17 +266,23 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 	if err := t.Tick(); err != nil {
 		return err
 	}
-	j.update(v.ID, func(v *Job) { v.State = "matching"; v.Progress = .02 })
-	matched, err := deemixclient.Resolve(ctx, j.p.Catalog, v.Track)
-	if err != nil {
-		return err
-	}
-	j.update(v.ID, func(v *Job) { v.State = "downloading"; v.Progress = .05 })
-	dl, err := j.p.Deemix.Download(ctx, matched, func(q deemixclient.QueueStatus) {
-		j.update(v.ID, func(v *Job) { v.Progress = .05 + .55*max(0, min(1, q.Progress)) })
-	})
-	if err != nil {
-		return err
+	matched, dl := v.matched, v.dl
+	if dl == nil {
+		var err error
+		j.update(v.ID, func(v *Job) { v.State = "matching"; v.Progress = .02 })
+		if matched, err = deemixclient.Resolve(ctx, j.p.Catalog, v.Track); err != nil {
+			return err
+		}
+		j.update(v.ID, func(v *Job) { v.State = "downloading"; v.Progress = .05 })
+		dl, err = j.p.Deemix.Download(ctx, matched, func(q deemixclient.QueueStatus) {
+			j.update(v.ID, func(v *Job) { v.Progress = .05 + .55*max(0, min(1, q.Progress)) })
+		})
+		if err != nil {
+			return err
+		}
+		j.mu.Lock()
+		j.files[trackKey(v.Track)] = fetched{matched, dl}
+		j.mu.Unlock()
 	}
 	j.update(v.ID, func(v *Job) { v.State = "analyzing"; v.Quality = dl.Quality.Label; v.Progress = .65 })
 	before, err := os.Stat(dl.Path)

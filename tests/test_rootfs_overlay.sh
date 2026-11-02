@@ -480,5 +480,25 @@ fixture
 expect_fail env TARGET_CONFIG= TARGET_SYMVERS= bash "$ROOT/kernel-modules/build_modules.sh" modules
 has 'TARGET_CONFIG' "$MOCK_ROOT/output"
 ok 'module build refuses missing target ABI inputs before building'
+debloat_root=$TMP/debloat-root
+mkdir -p "$debloat_root/etc"
+printf '127.0.0.1 localhost\n0.0.0.0 inmusicbrands.com\n' > "$debloat_root/etc/hosts"
+sh "$ROOT/rootfs-overlay/usr/local/bin/sc5000-debloat" --root "$debloat_root"
+sh "$ROOT/rootfs-overlay/usr/local/bin/sc5000-debloat" --root "$debloat_root"
+lacks '0.0.0.0 inmusicbrands.com' "$debloat_root/etc/hosts"
+lacks 'address=/inmusicbrands.com/' "$debloat_root/etc/dnsmasq.d/sc5000-telemetry.conf"
+has '0.0.0.0 telemetry.inmusicbrands.com' "$debloat_root/etc/hosts"
+has 'address=/logstash.inmusicbrands.com/0.0.0.0' "$debloat_root/etc/dnsmasq.d/sc5000-telemetry.conf"
+[[ $(grep -c 'logstash.inmusicbrands.com' "$debloat_root/etc/hosts") == 1 ]] || fail 'hosts entries duplicated'
+has 'EnableOnlineCheck = false' "$debloat_root/etc/connman/main.conf"
+has 'PreferredTechnologies=wifi,ethernet' "$debloat_root/etc/connman/main.conf"
+has 'CONNMAN_DISCOVER_RETRIES=5' "$debloat_root/etc/systemd/system/connman.service.d/disable_dhcp_retries.conf"
+[[ $(grep -c '^DefaultMountOptions=force$' "$debloat_root/etc/edisksd/main.conf") == 2 ]] || fail 'edisksd force options'
+has '[hfsplus]' "$debloat_root/etc/edisksd/main.conf"
+for module in hfsplus btbcm hci_uart; do
+    grep -qx "$module" "$ROOT/rootfs-overlay/etc/modules-load.d/sc5000-filesystems.conf" || fail "module $module not loaded"
+done
+ok 'connman online check reachable, edisksd forced HFS+/NTFS mounts, Bluetooth modules'
+
 python3 -m unittest discover -s "$ROOT/sim/qengine" -p test_smoke.py >/dev/null
 printf 'PASS: %d tests (mocked storage and hardware; no privileged operations)\n' "$count"
