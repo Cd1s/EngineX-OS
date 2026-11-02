@@ -521,3 +521,61 @@ func TestBestMatchKeepsLatinArtistsStrict(t *testing.T) {
 		t.Fatal("Chinese artist name should fall back to the title")
 	}
 }
+
+func TestPreviewIsTheLastResortAndOnlyFromDeezer(t *testing.T) {
+	var clips []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/track/isrc:GX38U2629409":
+			io.WriteString(w, `{"id":1,"title":"Transmissions","duration":300,"preview":"https://cdnt-preview.dzcdn.net/clip.mp3","artist":{"name":"Modpsy"}}`)
+		case "/track/isrc:EVIL":
+			io.WriteString(w, `{"id":2,"title":"X","duration":300,"preview":"https://evil.example/clip.mp3","artist":{"name":"Y"}}`)
+		default:
+			io.WriteString(w, `{"content":[],"data":[]}`)
+		}
+	}))
+	defer srv.Close()
+	b := &BPMStore{Path: t.TempDir() + "/bpm.json", ReccoURL: srv.URL, DeezerURL: srv.URL}
+	done := make(chan struct{}, 2)
+	b.PreviewBPM = func(ctx context.Context, address string) BPMInfo {
+		clips = append(clips, address)
+		done <- struct{}{}
+		return BPMInfo{BPM: 133.4, Key: "4A"}
+	}
+	track := Track{ID: "sp", Provider: "spotify", ISRC: "GX38U2629409", Title: "Transmissions", Artist: "Modpsy"}
+	if !b.claim(track) {
+		t.Fatal("claim")
+	}
+	b.attempt(context.Background(), track)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("preview never analysed")
+	}
+	if len(clips) != 1 || clips[0] != "https://cdnt-preview.dzcdn.net/clip.mp3" {
+		t.Fatal(clips)
+	}
+	var got []Track
+	for range 100 {
+		got = []Track{track}
+		b.Apply(got)
+		if got[0].BPM != 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got[0].BPM != 133.4 || got[0].Key != "4A" {
+		t.Fatalf("%+v", got[0])
+	}
+	// An estimate cannot replace what the deck measured from the whole file.
+	b.Put(track, BPMInfo{BPM: 130, Measured: true})
+	b.Put(track, BPMInfo{BPM: 133.4})
+	got = []Track{track}
+	b.Apply(got)
+	if got[0].BPM != 130 {
+		t.Fatalf("%+v", got[0])
+	}
+	if address := b.previewFor(context.Background(), Track{ID: "x", Provider: "spotify", ISRC: "EVIL", Title: "X", Artist: "Y"}); address != "" {
+		t.Fatalf("foreign clip host accepted: %s", address)
+	}
+}

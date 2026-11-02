@@ -433,3 +433,35 @@ func TestRelayBPMKeysSyncToTheDeck(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestPreviewAnalyzerMeasuresAClipAndKeepsNothing(t *testing.T) {
+	var clip bytes.Buffer
+	if err := testaudio.FLAC(&clip, testaudio.Song(30)); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/short" {
+			var short bytes.Buffer
+			testaudio.FLAC(&short, testaudio.Song(2))
+			w.Write(short.Bytes())
+			return
+		}
+		w.Write(clip.Bytes())
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	analyze := PreviewAnalyzer(resourceguard.New(resourceguard.Config{Disabled: true}))
+	if got := analyze(context.Background(), srv.URL+"/clip"); got.BPM <= 0 || got.Measured {
+		t.Fatalf("%+v", got)
+	}
+	if got := analyze(context.Background(), srv.URL+"/short"); got.BPM != 0 {
+		t.Fatalf("short clip: %+v", got)
+	}
+	if got := analyze(context.Background(), srv.URL+"/missing\x7f"); got.BPM != 0 {
+		t.Fatalf("%+v", got)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("left behind %v", entries)
+	}
+}
