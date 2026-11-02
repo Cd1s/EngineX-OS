@@ -13,6 +13,13 @@ removal of the improper-eject prompt.
 `--dev` adds an eval/screenshot harness; it also needs
 `QML_XHR_ALLOW_FILE_READ=1` and must never ship.
 
+`icons/` holds the service marks, rendered from Simple Icons (CC0).
+
+Units in the rootfs `/etc`: systemd reads them before the `/etc` overlay mounts,
+so a drop-in only in the overlay's upper layer is ignored at boot. On a live
+deck, change that layer offline or in an image; bind-mounting `/` and editing it
+while running crashed PID 1 once.
+
 ## Limits
 
 - Translation covers text literal in QML (`i18n.tsv`). Text from Engine's C++
@@ -20,6 +27,10 @@ removal of the improper-eject prompt.
   they are not literals.
 - The three services share Engine's one TIDAL client, so one is active at a time.
   Tracks already loaded on a deck keep working after a switch.
+- Audio for streaming tracks needs a Deemix REST bridge at 127.0.0.1:6595. None
+  is installed on the deck, so browsing works and loading such a track fails.
+- Spotify needs the owner's own registered Client ID. Deezer links a public
+  profile, not an account login.
 - Encoder navigation of the Source screen reaches only stock rows. The three
   service rows are touch-only.
 
