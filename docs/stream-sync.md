@@ -59,6 +59,9 @@ SQLite 测试使用本工作树捕获的完整原厂 SQL，包含触发器和链
 
 ### 网易云
 
+收藏的专辑和电台排在歌单后面，标题前缀 `【专辑】`、`【电台】`，曲目 ID 为 `album:<id>`、
+`dj:<id>`。电台节目按其 `mainSong` 下载播放。`My Collection -> Albums` 也列出收藏的专辑。
+
 需在机内另外运行 NeteaseCloudMusicApi 兼容服务，默认 `127.0.0.1:3000`，
 可用 `--netease-url` 更改。使用 `/login/qr/key`、`/login/qr/create`、
 `/login/qr/check`、`/login/status`、`/user/playlist`、`/playlist/detail`
@@ -97,7 +100,7 @@ Spotify 不接受普通 `http://sc5000.lan` 作为远程 OAuth redirect。
 本仓库不实现音频解密。解密只发生在外部下载器里。
 
 网易云文件存为 `netease-<id>.flac`，经 `Inspect` 校验后才可用，重启后直接复用。没有 SD
-库时落在内部存储，总量上限 3 GiB，超出后淘汰最旧的。
+库时落在内部存储，总量上限 3 GiB，超出后淘汰最旧的下载（只动 `<id>.*` 和 `netease-<id>.*`）。
 
 MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k=false` 可关闭。
 

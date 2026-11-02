@@ -315,3 +315,57 @@ func TestMeasuredTempoCannotBeOverwrittenByACatalog(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestNeteaseSavedAlbumsAndRadios(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/weapi/user/playlist":
+			json.NewEncoder(w).Encode(map[string]any{"code": 200, "playlist": []any{map[string]any{"id": 1, "name": "Mine", "trackCount": 2}}})
+		case "/weapi/album/sublist":
+			json.NewEncoder(w).Encode(map[string]any{"code": 200, "data": []any{map[string]any{"id": 5, "name": "LP", "size": 9, "artists": []any{map[string]any{"name": "A"}}}}})
+		case "/weapi/djradio/get/subed":
+			json.NewEncoder(w).Encode(map[string]any{"code": 200, "djRadios": []any{map[string]any{"id": 6, "name": "Show", "programCount": 3}}})
+		case "/weapi/v1/album/5":
+			json.NewEncoder(w).Encode(map[string]any{"code": 200, "songs": []any{map[string]any{"id": 50, "name": "S", "dt": 1000, "ar": []any{map[string]any{"name": "A"}}}}})
+		case "/weapi/dj/program/byradio":
+			json.NewEncoder(w).Encode(map[string]any{"code": 200, "programs": []any{
+				map[string]any{"name": "Episode", "duration": 2000, "dj": map[string]any{"nickname": "Host"}, "mainSong": map[string]any{"id": 60, "name": "x", "duration": 3000, "artists": []any{map[string]any{"name": "B"}}, "album": map[string]any{"name": "Show"}}},
+				map[string]any{"name": "Empty", "mainSong": map[string]any{"id": 0}},
+			}})
+		default:
+			t.Errorf("unexpected %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	n := &Netease{WebURL: srv.URL, Cookie: "MUSIC_U=x", UserID: 1}
+	lists, err := n.Playlists(context.Background())
+	if err != nil || len(lists) != 3 || lists[0].Title != "Mine" || lists[1] != (Playlist{"album:5", "【专辑】LP", 9}) || lists[2] != (Playlist{"dj:6", "【电台】Show", 3}) {
+		t.Fatalf("%+v %v", lists, err)
+	}
+	album, err := n.Tracks(context.Background(), "album:5")
+	if err != nil || len(album) != 1 || album[0].ID != "50" || album[0].Provider != "netease" {
+		t.Fatalf("%+v %v", album, err)
+	}
+	radio, err := n.Tracks(context.Background(), "dj:6")
+	if err != nil || len(radio) != 1 || radio[0].ID != "60" || radio[0].Title != "Episode" || radio[0].Artist != "Host" || radio[0].DurationMS != 3000 || radio[0].Album != "Show" {
+		t.Fatalf("%+v %v", radio, err)
+	}
+	if _, err := n.Tracks(context.Background(), "album:1/../2"); err == nil {
+		t.Fatal("bad album ID accepted")
+	}
+}
+
+func TestNeteasePlaylistsSurviveSavedListFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/weapi/user/playlist" {
+			json.NewEncoder(w).Encode(map[string]any{"code": 200, "playlist": []any{map[string]any{"id": 1, "name": "Mine"}}})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"code": 301})
+	}))
+	defer srv.Close()
+	lists, err := (&Netease{WebURL: srv.URL, Cookie: "c", UserID: 1}).Playlists(context.Background())
+	if err != nil || len(lists) != 1 {
+		t.Fatalf("%+v %v", lists, err)
+	}
+}

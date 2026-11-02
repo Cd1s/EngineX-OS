@@ -315,9 +315,9 @@ func TestTrimEvictsOldestSavedFilesOnly(t *testing.T) {
 	}
 	oldest := write("netease-1.flac", 3*time.Hour)
 	foreign := write("user-file.flac", 4*time.Hour)
-	middle := write("netease-2.mp3", 2*time.Hour)
+	middle := write("2.mp3", 2*time.Hour)
 	keep := write("netease-3.flac", time.Hour)
-	(&Client{DownloadDir: dir, MaxCache: 300}).trim(keep)
+	(&Client{DownloadDir: dir, MaxCache: 300}).Trim(keep)
 	if _, err := os.Stat(oldest); err == nil {
 		t.Fatal("oldest kept")
 	}
