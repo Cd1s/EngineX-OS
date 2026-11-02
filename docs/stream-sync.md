@@ -63,7 +63,8 @@ SQLite 测试使用本工作树捕获的完整原厂 SQL，包含触发器和链
 Token。凭据存在 `state/bpm-config.json` 和 `state/soundcloud-owner.json`，token 缓存在 `state/soundcloud-token.json`，
 都不进仓库，也可在 `https://relay.example.com` 的“BPM 增强”里填写后同步到碟机。应用凭据只能搜索和播放公开内容，不算登录，
 碟机仍会弹二维码。在 `https://relay.example.com/m/soundcloud` 或局域网 `/m/soundcloud` 填主页链接、分享链接或用户名后，
-才有点赞、自己的歌单和收藏的歌单（`【收藏】` 前缀）。私密内容需要用户的 OAuth Token。
+才有点赞、自己的歌单和收藏的歌单（`【收藏】` 前缀）。私密内容要在同一页面用“登录账号”走 OAuth PKCE：授权后粘贴
+`http://127.0.0.1:8765/callback?code=...`，云端换取 token 并交给碟机，token 存在 `soundcloud-token.json` 里自动续期。
 
 只用 API 标记 `access=playable` 的曲目：优先 `http_mp3_128_url`，其次 HLS MP3，再次 HLS AAC（存为 `.mp4`）。试听地址一律不用，
 也不做解密。文件存为 `soundcloud-<id>.mp3`。超过 15 分钟或 50 MB 的文件不做后台分析。代码不提取 SoundCloud 网页里的 client_id。
