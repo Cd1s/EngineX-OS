@@ -67,7 +67,8 @@ func neteaseCover(pic string) string {
 	if pic == "" {
 		return ""
 	}
-	return pic + "?param=500y500"
+	// The API hands out plain http addresses, which its image hosts also serve over TLS.
+	return strings.Replace(pic, "http://", "https://", 1) + "?param=500y500"
 }
 
 func remarshal(a, b any) error {

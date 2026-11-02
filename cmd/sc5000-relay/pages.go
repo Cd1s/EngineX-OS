@@ -65,12 +65,12 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 {{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的设置。</div>{{end}}
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 {{if .AuthLoopback}}<div class="card"><h2>方式一：登录账号（可读私密歌单和私人收藏）</h2>
-<a class="btn green" href="{{.AuthLoopback}}" target="_blank" rel="noreferrer">1. 打开 SoundCloud 账号登录授权</a>
-<p class="hint">同意后手机会显示“无法打开页面”，这是正常的。复制地址栏里以 127.0.0.1 开头的完整地址，回到这里。</p>
+<a class="btn green" href="{{.AuthLoopback}}">打开 SoundCloud 账号登录授权</a>
+<p class="hint">同意后会自动回到这里完成连接。如果跳到打不开的 127.0.0.1 页面，复制地址栏的完整地址粘贴到下面。</p>
 <form method="post" id="scLogin">
 <input id="callback" name="callback" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="http://127.0.0.1:8765/callback?code=...">
-<button class="btn ghost" type="button" onclick="navigator.clipboard.readText().then(function(t){document.getElementById('callback').value=t.trim();document.getElementById('scLogin').submit()}).catch(function(){document.getElementById('callback').focus()})">2. 一键读取剪贴板并完成登录</button>
-<button class="btn green" type="submit">或粘贴后点这里完成登录</button>
+<button class="btn ghost" type="button" onclick="navigator.clipboard.readText().then(function(t){document.getElementById('callback').value=t.trim();document.getElementById('scLogin').submit()}).catch(function(){document.getElementById('callback').focus()})">一键读取剪贴板并完成登录</button>
+<button class="btn ghost" type="submit">粘贴后点这里完成登录</button>
 </form></div>{{end}}
 <form method="post" class="card"><h2>方式二：只填公开主页（免登录）</h2>
 <label for="user">主页链接、分享链接或用户名</label>

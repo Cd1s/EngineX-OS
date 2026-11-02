@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"hash/crc32"
+	"io"
 	"log"
 	"math"
 	"net"
@@ -68,6 +69,12 @@ type tidalGateway struct {
 	lists   map[string]playlistRef
 	next    int64
 
+	// Artwork for list rows, by what the row knows: title and artist.
+	artURLs  map[string]string
+	artMu    sync.Mutex
+	artCache map[string][]byte
+	artAge   []string
+
 	// Last-use sequence numbers for evicting the least recently used refs.
 	seq       int64
 	trackSeen map[int64]int64
@@ -101,7 +108,7 @@ func evict[K comparable](seen map[K]int64, limit int, drop func(K)) {
 }
 
 func newTidalGateway(s *Server) *tidalGateway {
-	g := &tidalGateway{s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
+	g := &tidalGateway{artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
 	g.mux.HandleFunc("POST /v1/sc5000/login", s.loginStart)
@@ -111,6 +118,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("POST /v1/sc5000/ui", s.uiUpdate)
 	g.mux.HandleFunc("GET /v1/sc5000/bpm", s.bpmConfigGet)
 	g.mux.HandleFunc("POST /v1/sc5000/bpm", s.bpmConfigPost)
+	g.mux.HandleFunc("GET /v1/sc5000/art", g.art)
 	g.mux.HandleFunc("GET /v1/sc5000/relay", s.relayConfigGet)
 	g.mux.HandleFunc("POST /v1/sc5000/relay", s.relayConfigPost)
 	g.mux.HandleFunc("GET /v1/ping", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
@@ -359,6 +367,13 @@ func (g *tidalGateway) addTrack(ref trackRef) int64 {
 		g.ids[key] = id
 	}
 	g.tracks[id] = ref
+	if address := thumbURL(ref.track); address != "" {
+		if len(g.artURLs) > maxTracks {
+			g.artURLs = map[string]string{}
+		}
+		g.artURLs[artKey(ref.track.Title, ref.track.Artist)] = address
+		g.artURLs[artKey(ref.track.Title, "")] = address
+	}
 	g.seq++
 	g.trackSeen[id] = g.seq
 	evict(g.trackSeen, maxTracks, func(id int64) {
@@ -368,6 +383,71 @@ func (g *tidalGateway) addTrack(ref trackRef) int64 {
 	})
 	return id
 }
+func artKey(title, artist string) string { return title + "\x00" + artist }
+
+// thumbURL asks each service for its small size, so a list stays quick and light.
+func thumbURL(t providers.Track) string {
+	if t.ThumbURL != "" {
+		return t.ThumbURL
+	}
+	address := strings.Replace(t.CoverURL, "?param=500y500", "?param=120y120", 1)
+	address = strings.Replace(address, "/500x500-", "/120x120-", 1)
+	return strings.Replace(address, "-t500x500.", "-t120x120.", 1)
+}
+
+const (
+	maxArtEntries = 300
+	maxArtBytes   = 2 << 20
+)
+
+// art serves a list row's thumbnail, keeping the most recently fetched in memory.
+func (g *tidalGateway) art(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	g.mu.Lock()
+	address := g.artURLs[artKey(q.Get("song"), q.Get("artist"))]
+	if address == "" {
+		address = g.artURLs[artKey(q.Get("song"), "")]
+	}
+	g.mu.Unlock()
+	if !strings.HasPrefix(address, "https://") {
+		http.NotFound(w, r)
+		return
+	}
+	g.artMu.Lock()
+	data := g.artCache[address]
+	g.artMu.Unlock()
+	if data == nil {
+		req, err := http.NewRequestWithContext(r.Context(), "GET", address, nil)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer resp.Body.Close()
+		data, err = io.ReadAll(io.LimitReader(resp.Body, maxArtBytes+1))
+		if err != nil || resp.StatusCode != http.StatusOK || len(data) > maxArtBytes {
+			http.NotFound(w, r)
+			return
+		}
+		g.artMu.Lock()
+		if len(g.artAge) >= maxArtEntries {
+			delete(g.artCache, g.artAge[0])
+			g.artAge = g.artAge[1:]
+		}
+		if _, ok := g.artCache[address]; !ok {
+			g.artCache[address] = data
+			g.artAge = append(g.artAge, address)
+		}
+		g.artMu.Unlock()
+	}
+	w.Header().Set("Content-Type", http.DetectContentType(data))
+	w.Write(data)
+}
+
 func tidalTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000-0700") }
 func playlistJSON(id, title, description string, count int) map[string]any {
 	now := tidalTime(time.Now())
