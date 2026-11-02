@@ -51,6 +51,8 @@ func TestNeteaseQRAndCompletePlaylist(t *testing.T) {
 				t.Error("incomplete tracks not expanded")
 			}
 			response = map[string]any{"code": 200, "songs": []any{map[string]any{"id": 99, "name": "Title", "dt": 200000, "ar": []any{map[string]string{"name": "Artist"}}, "al": map[string]string{"name": "Album"}}}}
+		case "/album/sublist", "/dj/sublist":
+			response = map[string]any{"code": 200}
 		default:
 			t.Errorf("unexpected endpoint %s", r.URL.Path)
 		}
