@@ -1,0 +1,29 @@
+[Unit]
+Description=SC5000 Deemix relay (credential relay only; downloads run on SC5000)
+Documentation=https://denon.cheek.day/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/sc5000-relay -listen 0.0.0.0:6595 -public https://denon.cheek.day -state /var/lib/sc5000-relay
+DynamicUser=yes
+StateDirectory=sc5000-relay
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+Nice=10
+CPUQuota=300%
+MemoryMax=1536M
+
+[Install]
+WantedBy=multi-user.target
