@@ -51,6 +51,11 @@ PATCHES = [
     # 15. DevicesController::handleReadOnlyDeviceEjected (0x58aef0): ldrb r3, [r0, #560] -> mov r3, #0
     #     at 0x58af34, so a read-only (e.g. HFS+) volume is never queued for EjectDriveJob.
     (0x58AF34, struct.pack("<I", 0xE5D03230), struct.pack("<I", 0xE3A03000), "read-only volume not auto-ejected"),
+    # 16. DeviceManager::isReadOnly (0x16727e4): return false (0) at 0x167295c and 0x16728c0 so
+    #     DevicesController (0x599cb0) schedules Preparing/Migration on read-only HFS+ mounts
+    #     whose "Engine Library" subdirectory is backed by a writable overlay.
+    (0x167295C, struct.pack("<I", 0xE5D4001C), struct.pack("<I", 0xE3A00000), "DeviceManager::isReadOnly cache -> false"),
+    (0x16728C0, struct.pack("<I", 0xE2240001), struct.pack("<I", 0xE3A00000), "DeviceManager::isReadOnly QFileInfo -> false"),
 ]
 
 
