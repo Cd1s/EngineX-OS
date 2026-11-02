@@ -85,6 +85,12 @@ func TestDebloatScriptCompleteOfflineAndIdempotent(t *testing.T) {
 			t.Fatal(hosts)
 		}
 	}
+	if strings.Contains(hosts, "0.0.0.0 inmusicbrands.com\n") || strings.Contains(read(t, root, "etc/dnsmasq.d/sc5000-telemetry.conf"), "/inmusicbrands.com/") {
+		t.Fatal("connman online check domain blocked")
+	}
+	if !strings.Contains(read(t, root, "etc/connman/main.conf"), "EnableOnlineCheck = false") {
+		t.Fatal("connman online check enabled")
+	}
 	if strings.Contains(read(t, root, "usr/Engine/Scripts/encrypt-fs.sh"), "az01-update --erase-data") {
 		t.Fatal("dangerous recovery retained")
 	}

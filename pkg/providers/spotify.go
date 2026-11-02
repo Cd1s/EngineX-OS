@@ -32,6 +32,23 @@ type Spotify struct {
 	Token                                     Token
 }
 
+type spTrack struct {
+	ID       string
+	Name     string
+	Type     string
+	Duration int64 `json:"duration_ms"`
+	Artists  []struct{ Name string }
+	Album    struct{ Name string }
+	External struct{ ISRC string } `json:"external_ids"`
+}
+
+func (t spTrack) track() Track {
+	a := []string{}
+	for _, v := range t.Artists {
+		a = append(a, v.Name)
+	}
+	return Track{ID: t.ID, Title: t.Name, Artist: strings.Join(a, ", "), Artists: a, Album: t.Album.Name, ISRC: t.External.ISRC, DurationMS: t.Duration, Provider: "spotify"}
+}
 func RandomID() string {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -158,16 +175,8 @@ func (s *Spotify) Tracks(ctx context.Context, id string) ([]Track, error) {
 	for offset := 0; offset < 100000; offset += 100 {
 		var r struct {
 			Items []struct {
-				IsLocal bool `json:"is_local"`
-				Track   *struct {
-					ID       string
-					Name     string
-					Type     string
-					Duration int64 `json:"duration_ms"`
-					Artists  []struct{ Name string }
-					Album    struct{ Name string }
-					External struct{ ISRC string } `json:"external_ids"`
-				}
+				IsLocal bool     `json:"is_local"`
+				Track   *spTrack `json:"track"`
 			}
 			Next *string
 		}
@@ -179,15 +188,46 @@ func (s *Spotify) Tracks(ctx context.Context, id string) ([]Track, error) {
 			if t == nil || item.IsLocal || t.ID == "" || (t.Type != "" && t.Type != "track") {
 				continue
 			}
-			a := []string{}
-			for _, v := range t.Artists {
-				a = append(a, v.Name)
-			}
-			all = append(all, Track{ID: t.ID, Title: t.Name, Artist: strings.Join(a, ", "), Artists: a, Album: t.Album.Name, ISRC: t.External.ISRC, DurationMS: t.Duration, Provider: "spotify"})
+			all = append(all, t.track())
 		}
 		if r.Next == nil || *r.Next == "" {
 			return all, nil
 		}
 	}
 	return nil, errors.New("spotify: pagination limit")
+}
+func (s *Spotify) Search(ctx context.Context, query string) ([]Track, error) {
+	var r struct{ Tracks struct{ Items []*spTrack } }
+	if err := s.get(ctx, "/search?"+url.Values{"q": {query}, "type": {"track"}, "limit": {"20"}}.Encode(), &r); err != nil {
+		return nil, err
+	}
+	out := make([]Track, 0, len(r.Tracks.Items))
+	for _, t := range r.Tracks.Items {
+		if t != nil && t.ID != "" {
+			out = append(out, t.track())
+		}
+	}
+	return out, nil
+}
+func (s *Spotify) SearchPlaylists(ctx context.Context, query string) ([]Playlist, error) {
+	// Spotify returns null entries for playlists that became unavailable.
+	var r struct {
+		Playlists struct {
+			Items []*struct {
+				ID     string
+				Name   string
+				Tracks struct{ Total int }
+			}
+		}
+	}
+	if err := s.get(ctx, "/search?"+url.Values{"q": {query}, "type": {"playlist"}, "limit": {"20"}}.Encode(), &r); err != nil {
+		return nil, err
+	}
+	out := make([]Playlist, 0, len(r.Playlists.Items))
+	for _, p := range r.Playlists.Items {
+		if p != nil && p.ID != "" {
+			out = append(out, Playlist{p.ID, p.Name, p.Tracks.Total})
+		}
+	}
+	return out, nil
 }

@@ -55,13 +55,17 @@ type Server struct {
 	sessions map[string]*Session
 	pending  map[string]pending
 	mux      *http.ServeMux
+	tidal    *tidalGateway
+
+	// Owner logins ended in the console; the deck must not restore them.
+	ownerDeleted map[string]bool
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
 	if cfg.AccessToken == "" {
 		cfg.AccessToken = providers.RandomID()
 	}
-	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}}
 	s.mux.HandleFunc("GET /", s.index)
 	s.mux.HandleFunc("POST /login", s.login)
 	s.mux.HandleFunc("GET /oauth/spotify/callback", s.callback)
@@ -77,6 +81,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/jobs", s.submit)
 	s.mux.HandleFunc("GET /api/jobs", s.listJobs)
 	s.mux.HandleFunc("GET /api/jobs/{id}/waveform", s.waveform)
+	s.tidal = newTidalGateway(s)
 	return s
 }
 func (s *Server) AccessToken() string { return s.cfg.AccessToken }
@@ -106,6 +111,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Frame-Options", "DENY")
+	if isTidal(r.URL.Path) {
+		s.tidal.ServeHTTP(w, r)
+		return
+	}
 	if r.Method != "GET" && r.Method != "HEAD" {
 		if origin := r.Header.Get("Origin"); origin != "" {
 			u, e := url.Parse(origin)
@@ -265,6 +274,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	// One owner per service prevents concurrent credential replacement; guests
 	// are independent and cannot reuse the owner's cookie/token file.
 	if !v.Guest {
+		delete(s.ownerDeleted, v.Provider)
 		for _, old := range s.sessions {
 			if !old.Guest && old.Provider == v.Provider {
 				respond(w, old)
@@ -291,6 +301,9 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id := r.PathValue("id")
+	if v := s.sessions[id]; v != nil && !v.Guest {
+		s.ownerDeleted[v.Provider] = true
+	}
 	delete(s.sessions, id)
 	for state, v := range s.pending {
 		if v.session == id {
