@@ -40,6 +40,40 @@ func ReadLibrary(ctx context.Context, mount string) (*rekordbox.Library, error) 
 	return nil, os.ErrNotExist
 }
 
+// ensureWritableEngineLibrary mounts an ext4-backed overlay onto "<mount>/Engine Library"
+// when the underlying volume (such as macOS HFS+) is mounted read-only.
+func ensureWritableEngineLibrary(mount string) bool {
+	libDir := filepath.Join(mount, "Engine Library")
+	var libSt syscall.Statfs_t
+	if syscall.Statfs(libDir, &libSt) == nil && libSt.Flags&unix_ST_RDONLY == 0 {
+		return true
+	}
+	info, err := os.Lstat(libDir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	if st, err := os.Stat("/data/sc5000-custom"); err != nil || !st.IsDir() {
+		return false
+	}
+	base := filepath.Base(filepath.Clean(mount))
+	if base == "" || base == "." || base == "/" {
+		return false
+	}
+	lower := "/run/sc5000-empty"
+	upper := filepath.Join("/data/sc5000-custom/hfs-lib", base, "upper")
+	work := filepath.Join("/data/sc5000-custom/hfs-lib", base, "work")
+	for _, d := range []string{lower, upper, work} {
+		if os.MkdirAll(d, 0755) != nil {
+			return false
+		}
+	}
+	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lower, upper, work)
+	if syscall.Mount("overlay", libDir, "overlay", 0, opts) != nil {
+		return false
+	}
+	return syscall.Statfs(libDir, &libSt) == nil && libSt.Flags&unix_ST_RDONLY == 0
+}
+
 func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb.Result, error) {
 	r, e := compat.NewResolver(mount)
 	if e != nil {
@@ -50,10 +84,12 @@ func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb
 		return enginedb.Result{Bypassed: true}, nil
 	}
 	// Read-only volumes (HFS+ on Engine OS 5.0.4: rw writes crash hfsplus.ko)
-	// cannot hold an Engine Library; Engine's own rekordbox import reads them.
+	// cannot hold an Engine Library unless Engine Library itself is a writable mount.
 	var st syscall.Statfs_t
 	if e == nil && syscall.Statfs(mount, &st) == nil && st.Flags&unix_ST_RDONLY != 0 {
-		return enginedb.Result{Bypassed: true}, nil
+		if !ensureWritableEngineLibrary(mount) {
+			return enginedb.Result{Bypassed: true}, nil
+		}
 	}
 	if e != nil {
 		return enginedb.Result{}, e
