@@ -85,7 +85,49 @@ SERVICES_MAIN = """
 			if (tidalRow) c.browserSourceControllerPtr().select(tidalRow.modelIndex)
 			scEnterTries = 8
 			scEnterTimer.start()
+			if (scLoggedIn.indexOf(id) < 0) scLoginBegin(id)
 		})
+	}
+	property string scLogin: ""
+	property string scLoginStatus: ""
+	property int scLoginSerial: 0
+	function scLoginRequest(method, id, done) {
+		const x = new XMLHttpRequest()
+		x.open(method, "http://127.0.0.1:8080/v1/sc5000/login?provider=" + id)
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4 || scLogin !== id) return
+			if (x.status === 200) done(JSON.parse(x.responseText).status)
+			else scLoginStatus = "error"
+		}
+		x.send()
+	}
+	function scLoginBegin(id) {
+		scLogin = id
+		scLoginStatus = "starting"
+		scLoginRequest("POST", id, function(status) {
+			scLoginSerial++
+			scLoginStatus = status
+		})
+	}
+	function scLoginDone() {
+		scLogin = ""
+		scCall("", function() {
+			Planck.librarianController.streamingPlaylistsController.invalidateUI()
+			scEnterTries = 8
+			scEnterTimer.start()
+		})
+	}
+	Timer {
+		interval: 2000; repeat: true
+		running: scLogin !== "" && scLoginStatus !== "starting" && scLoginStatus !== "error"
+		onTriggered: {
+			const id = scLogin
+			scLoginRequest("GET", id, function(status) {
+				if (status === "done") scLoginDone()
+				else if (status === "expired") scLoginBegin(id)
+				else scLoginStatus = status
+			})
+		}
 	}
 	// The playlists are one level down; open them so a source never looks empty.
 	property int scEnterTries: 0
@@ -119,6 +161,80 @@ SERVICES_MAIN = """
 	}
 """
 
+LOGIN_DIALOG = """
+		Rectangle {
+			anchors.fill: parent
+			z: 1000000
+			visible: root.scLogin !== ""
+			color: "#e0000000"
+			readonly property var service: root.scServices.find(s => s.id === root.scLogin)
+			MouseArea { anchors.fill: parent }
+			Rectangle {
+				anchors.centerIn: parent
+				width: 1040; height: 660
+				radius: 24
+				color: Style.surface02Color
+				Rectangle {
+					x: 40; y: 60
+					width: 540; height: 540
+					radius: 16
+					color: "white"
+					Image {
+						anchors.centerIn: parent
+						width: 508; height: 508
+						smooth: false
+						cache: false
+						visible: root.scLoginSerial > 0 && root.scLoginStatus !== "error"
+						source: root.scLogin && root.scLoginSerial > 0 ? "http://127.0.0.1:8080/v1/sc5000/login/qr?provider=" + root.scLogin + "&n=" + root.scLoginSerial : ""
+					}
+				}
+				Image {
+					x: 620; y: 70
+					width: 88; height: 88
+					mipmap: true
+					source: root.scLogin ? root.scIcon(root.scLogin) : ""
+				}
+				Text {
+					x: 620; y: 180
+					width: 380
+					text: parent.parent.service ? parent.parent.service.name : ""
+					color: Style.font02Color
+					font: Style.fontH0
+				}
+				Text {
+					x: 620; y: 240
+					width: 380
+					wrapMode: Text.WordWrap
+					color: Style.font02Color
+					font: Style.fontH1
+					text: {
+						if (root.scLoginStatus === "error") return root.scT("Can't start login. Check the network.")
+						if (root.scLoginStatus === "scanned") return root.scT("Confirm on your phone")
+						if (root.scLogin === "netease") return root.scT("Scan with the NetEase Cloud Music app")
+						return root.scT("Scan with your phone camera. Phone and deck must be on the same network.")
+					}
+				}
+				Rectangle {
+					x: 620; y: 520
+					width: 380; height: 80
+					radius: 16
+					color: closeArea.pressed ? Style.focus02Color : Style.surface03Color
+					Text {
+						anchors.centerIn: parent
+						text: root.scT("Not now")
+						color: Style.font02Color
+						font: Style.fontH1
+					}
+					MouseArea {
+						id: closeArea
+						anchors.fill: parent
+						onClicked: root.scLogin = ""
+					}
+				}
+			}
+		}
+"""
+
 SOURCE_FOOTER = """
 	property var scTidalRow: null
 	footer: Column {
@@ -140,6 +256,7 @@ SOURCE_FOOTER = """
 					x: connectedSource.delegateLeftPadding + 8
 					anchors.verticalCenter: parent.verticalCenter
 					width: 48; height: 48
+					mipmap: true
 					source: root.scIcon(modelData.id)
 				}
 				Text {
@@ -148,6 +265,17 @@ SOURCE_FOOTER = """
 					text: modelData.name
 					color: Style.font02Color
 					font: Style.fontH1
+				}
+				MouseArea {
+					anchors { right: parent.right; top: parent.top; bottom: parent.bottom }
+					width: 140
+					onClicked: root.scLoginBegin(modelData.id)
+					Text {
+						anchors.centerIn: parent
+						text: root.scT(root.scLoggedIn.indexOf(modelData.id) >= 0 ? "Switch account" : "Scan to log in")
+						color: Style.font02Color
+						font: Style.fontH3
+					}
 				}
 			}
 		}
@@ -165,7 +293,7 @@ AVAILABLE_TILES = """
 									width: 180; height: 180
 									onClicked: root.scSetSource(modelData.id, true)
 									Rectangle { anchors.fill: parent; radius: 24; color: parent.pressed ? Style.focus02Color : Style.surface03Color }
-									Image { anchors.horizontalCenter: parent.horizontalCenter; y: 36; width: 48; height: 48; source: root.scIcon(modelData.id) }
+									Image { anchors.horizontalCenter: parent.horizontalCenter; y: 36; width: 48; height: 48; mipmap: true; source: root.scIcon(modelData.id) }
 									Text { anchors.horizontalCenter: parent.horizontalCenter; y: 110; text: modelData.name; color: Style.font02Color; font: Style.fontH1 }
 								}
 							}
@@ -248,7 +376,10 @@ def edits(dev: bool):
         # The flag is still cleared, which is what pressing "Ok" would do.
         ROOT + "Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml": [(
             "      let messageObject = {", "      Planck.librarianController.deviceEjectedImproperly = false\n      return\n      let messageObject = {")],
-        ROOT + "EmbeddedMain.qml": [("	Connections {\n		target: MainWindow\n", SERVICES_MAIN + main + "\n	Connections {\n		target: MainWindow\n")],
+        ROOT + "EmbeddedMain.qml": [
+            ("	Connections {\n		target: MainWindow\n", SERVICES_MAIN + main + "\n	Connections {\n		target: MainWindow\n"),
+            ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG),
+        ],
         v + "Common/Waveform/Waveform.qml": wave,
         v + "Common/WaveformOverview/WaveformOverview.qml": overview,
         v + "Common/WaveformOverview/WaveformOverviewLibrary.qml": overview,
@@ -331,16 +462,8 @@ def translate(text, table, skip):
     return "\n".join(out)
 
 
-def make_icons(out: Path):
-    from PIL import Image, ImageDraw, ImageFont
-    out.mkdir(parents=True)
-    cjk = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
-    for name, color, glyph in (("netease", "#d81e06", "网"), ("spotify", "#1db954", "S"), ("deezer", "#a238ff", "D")):
-        img = Image.new("RGBA", (96, 96))
-        d = ImageDraw.Draw(img)
-        d.rounded_rectangle((0, 0, 95, 95), 22, fill=color)
-        d.text((48, 46), glyph, font=ImageFont.truetype(cjk, 60), fill="white", anchor="mm")
-        img.save(out / f"{name}.png")
+def copy_icons(out: Path):
+    shutil.copytree(HERE / "icons", out)
 
 
 def main():
@@ -379,7 +502,7 @@ def main():
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
         print(lang, len(files), "files")
-    make_icons(a.out / "icons")
+    copy_icons(a.out / "icons")
     with tarfile.open(a.out.with_suffix(".tar.gz"), "w:gz") as t:
         for lang in ("en", "zh-Hans", "zh-Hant"):
             t.add(a.out / lang, arcname=f"packs/{lang}")

@@ -64,17 +64,23 @@ type Server struct {
 
 	// Owner logins ended in the console; the deck must not restore them.
 	ownerDeleted map[string]bool
+	logins       map[string]*loginFlow
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
 	if cfg.AccessToken == "" {
 		cfg.AccessToken = providers.RandomID()
 	}
-	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}}
+	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}, logins: map[string]*loginFlow{}}
+	if cfg.StateDir != "" {
+		os.MkdirAll(cfg.StateDir, 0o700)
+	}
 	s.mux.HandleFunc("GET /", s.index)
 	s.mux.HandleFunc("POST /login", s.login)
 	s.mux.HandleFunc("GET /oauth/spotify/callback", s.callback)
 	s.mux.HandleFunc("GET /api/sessions", s.listSessions)
+	s.mux.HandleFunc("GET /m/{provider}", s.phoneGet)
+	s.mux.HandleFunc("POST /m/{provider}", s.phonePost)
 	s.mux.HandleFunc("GET /api/ui", s.uiStatus)
 	s.mux.HandleFunc("POST /api/ui", s.uiUpdate)
 	s.mux.HandleFunc("GET /api/console-qr", s.consoleQR)
@@ -90,6 +96,14 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /api/jobs/{id}/waveform", s.waveform)
 	s.tidal = newTidalGateway(s)
 	return s
+}
+
+// DefaultStateDir keeps logins on the deck's writable partition; its home is read-only.
+func DefaultStateDir(home string) string {
+	if _, err := os.Stat("/data/sc5000-custom"); err == nil {
+		return "/data/sc5000-custom/state"
+	}
+	return filepath.Join(home, ".config/stream-sync")
 }
 func (s *Server) AccessToken() string { return s.cfg.AccessToken }
 
@@ -194,6 +208,9 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 	}
 	switch name {
 	case "deezer":
+		if user == "" && !guest {
+			user = s.savedDeezerUser()
+		}
 		return &providers.Deezer{BaseURL: s.cfg.DeezerURL, UserID: user, HTTP: s.cfg.HTTP}, nil
 	case "netease":
 		n := &providers.Netease{BaseURL: s.cfg.NeteaseURL, HTTP: s.cfg.HTTP}
@@ -212,7 +229,7 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 		}
 		return n, nil
 	case "spotify":
-		p := &providers.Spotify{ClientID: s.cfg.SpotifyClientID, HTTP: s.cfg.HTTP, BaseURL: s.cfg.SpotifyBaseURL, AccountsURL: s.cfg.SpotifyAccountsURL}
+		p := &providers.Spotify{ClientID: s.spotifyClientID(), HTTP: s.cfg.HTTP, BaseURL: s.cfg.SpotifyBaseURL, AccountsURL: s.cfg.SpotifyAccountsURL}
 		if !guest {
 			p.TokenPath = s.cfg.SpotifyTokenPath
 			if p.TokenPath != "" {

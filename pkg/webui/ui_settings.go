@@ -125,7 +125,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Unlock()
 	v.LoggedIn = []string{}
 	for _, session := range s.tidal.sources() {
-		if !session.Guest && !slices.Contains(v.LoggedIn, session.Provider) {
+		if !session.Guest && ready(session.p) && !slices.Contains(v.LoggedIn, session.Provider) {
 			v.LoggedIn = append(v.LoggedIn, session.Provider)
 		}
 	}

@@ -12,10 +12,11 @@ import (
 	"time"
 )
 
-// Netease speaks the HTTP API provided by a locally installed
-// NeteaseCloudMusicApi-compatible service. No proprietary encryption is included.
+// Netease speaks to music.163.com directly, or to a NeteaseCloudMusicApi-compatible
+// service when BaseURL is set.
 type Netease struct {
 	BaseURL    string
+	WebURL     string // overrides https://music.163.com in tests
 	HTTP       *http.Client
 	CookiePath string
 	mu         sync.Mutex
@@ -64,7 +65,13 @@ func (n *Netease) get(ctx context.Context, path string, q url.Values, out any) e
 	}
 	h := http.Header{"Content-Type": {"application/x-www-form-urlencoded"}}
 	var r map[string]any
-	if err := JSON(ctx, n.HTTP, "POST", endpoint(n.BaseURL, path, nil), strings.NewReader(q.Encode()), h, &r); err != nil {
+	var err error
+	if n.BaseURL == "" {
+		r, err = n.web(ctx, path, q)
+	} else {
+		err = JSON(ctx, n.HTTP, "POST", endpoint(n.BaseURL, path, nil), strings.NewReader(q.Encode()), h, &r)
+	}
+	if err != nil {
 		return err
 	}
 	if code, ok := r["code"].(float64); ok && code != 200 && code != 800 && code != 801 && code != 802 && code != 803 {

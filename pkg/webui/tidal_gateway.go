@@ -100,6 +100,9 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g := &tidalGateway{s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
+	g.mux.HandleFunc("POST /v1/sc5000/login", s.loginStart)
+	g.mux.HandleFunc("GET /v1/sc5000/login", s.loginStatus)
+	g.mux.HandleFunc("GET /v1/sc5000/login/qr", s.loginQR)
 	g.mux.HandleFunc("GET /v1/sc5000/ui", s.uiStatus)
 	g.mux.HandleFunc("POST /v1/sc5000/ui", s.uiUpdate)
 	g.mux.HandleFunc("GET /v1/ping", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
@@ -159,7 +162,7 @@ func (g *tidalGateway) sources() []*Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prune()
-	for _, name := range []string{"netease", "spotify"} {
+	for _, name := range []string{"netease", "spotify", "deezer"} {
 		owned := false
 		for _, v := range s.sessions {
 			owned = owned || (!v.Guest && v.Provider == name)
@@ -196,6 +199,8 @@ func ready(p providers.Provider) bool {
 		return v.Token.AccessToken != ""
 	case *providers.Netease:
 		return v.UserID != 0 && v.Cookie != ""
+	case *providers.Deezer:
+		return v.UserID != ""
 	}
 	return false
 }
@@ -447,12 +452,6 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 			sources = append(sources, source{v.ID, v.Provider, v.Guest, v.p})
 		}
 	}
-	// NetEase search works without an account, so it is usable before login.
-	if scope == "netease" && len(sources) == 0 {
-		if p, err := g.s.makeProvider("netease", true, ""); err == nil {
-			sources = append(sources, source{"", "netease", true, p})
-		}
-	}
 	tracks := each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Track, error) {
 		if p, ok := v.p.(trackSearcher); ok {
 			return p.Search(ctx, query)
@@ -460,8 +459,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 		return nil, nil
 	})
 	lists := each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Playlist, error) {
-		// A logged-out NetEase search has no session to read the playlist with later.
-		if p, ok := v.p.(playlistSearcher); ok && (v.session != "" || v.provider == "deezer") {
+		if p, ok := v.p.(playlistSearcher); ok {
 			return p.SearchPlaylists(ctx, query)
 		}
 		return nil, nil
