@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"hash/crc32"
+	"log"
 	"net"
 	"net/http"
 	"path"
@@ -105,8 +106,8 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/sc5000/login/qr", s.loginQR)
 	g.mux.HandleFunc("GET /v1/sc5000/ui", s.uiStatus)
 	g.mux.HandleFunc("POST /v1/sc5000/ui", s.uiUpdate)
-	g.mux.HandleFunc("GET /v1/sc5000/deemix", s.deemixGet)
-	g.mux.HandleFunc("POST /v1/sc5000/deemix", s.deemixPost)
+	g.mux.HandleFunc("GET /v1/sc5000/relay", s.relayConfigGet)
+	g.mux.HandleFunc("POST /v1/sc5000/relay", s.relayConfigPost)
 	g.mux.HandleFunc("GET /v1/ping", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
 	g.mux.HandleFunc("GET /v1/sessions", g.session)
 	g.mux.HandleFunc("GET /v1/users/{id}/subscription", g.subscription)
@@ -121,8 +122,27 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/tracks/{id}/playbackinfopostpaywall", g.playbackInfo)
 	g.mux.HandleFunc("GET /v1/tracks/{id}/streamurl", g.streamURL)
 	g.mux.HandleFunc("GET /v1/stream/{file}", g.stream)
+	// Engine reads a category list as a JSON array and fails on anything else.
+	for _, category := range []string{"featured", "genres", "moods", "rising"} {
+		g.mux.HandleFunc("GET /v1/"+category, func(w http.ResponseWriter, r *http.Request) { respond(w, []any{}) })
+	}
+	g.mux.HandleFunc("/v1/", g.emptyPage)
 	return g
 }
+
+// emptyPage answers what this gateway has no content for (albums, artists,
+// category items). Engine reports any body it cannot parse as "Failed to parse
+// server response", which interrupts the browser, so every other /v1 path is a
+// valid empty listing.
+func (g *tidalGateway) emptyPage(w http.ResponseWriter, r *http.Request) {
+	log.Printf("stream-sync: gateway has no content for %s %s", r.Method, r.URL.Path)
+	respond(w, page(r, 100, []any{}))
+}
+
+// tidalNumericID hashes a name to an ID Engine can read: it parses them as signed
+// 32-bit integers.
+func tidalNumericID(name string) uint32 { return crc32.ChecksumIEEE([]byte(name)) & 0x7fffffff }
+
 func isTidal(p string) bool { return strings.HasPrefix(p, "/v1/") || strings.HasPrefix(p, "/au/") }
 
 // ServeHTTP folds the "/au//" and "/v1//" joins produced by the patched base
@@ -224,9 +244,12 @@ func each[T, R any](ctx context.Context, in []T, fn func(context.Context, T) ([]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if r, err := fn(ctx, v); err == nil {
-				out[i] = r
+			r, err := fn(ctx, v)
+			if err != nil {
+				log.Printf("stream-sync: gateway source failed: %v", err)
+				return
 			}
+			out[i] = r
 		}()
 	}
 	wg.Wait()
@@ -360,13 +383,13 @@ func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
 		if i == 0 {
 			kind = "MAIN"
 		}
-		artists = append(artists, map[string]any{"id": crc32.ChecksumIEEE([]byte(name)), "name": name, "type": kind, "picture": nil})
+		artists = append(artists, map[string]any{"id": tidalNumericID(name), "name": name, "type": kind, "picture": nil})
 	}
 	var artist any
 	if len(artists) > 0 {
 		artist = artists[0]
 	}
-	return map[string]any{"id": id, "title": t.Title, "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": true, "streamReady": true, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": providerLabels[t.Provider], "url": "http://sc5000.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": crc32.ChecksumIEEE([]byte(t.Album)), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
+	return map[string]any{"id": id, "title": t.Title, "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": true, "streamReady": true, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": providerLabels[t.Provider], "url": "http://sc5000.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": tidalNumericID(t.Album), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
 }
 
 // trackItems wraps each track as {"item":…,"type":"track"} (playlist items and
@@ -437,6 +460,14 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
 	if query == "" || len(query) > 200 {
 		fail(w, 400, errors.New("query required"))
+		return
+	}
+	// Providers return one page, but Engine asks for six per keystroke. Answering
+	// the rest locally keeps fast typing from tripping NetEase's rate limit, which
+	// would empty the results of the query that counts.
+	if offset, _ := strconv.Atoi(r.URL.Query().Get("offset")); offset > 0 {
+		none := page(r, 50, []any{})
+		respond(w, map[string]any{"tracks": none, "playlists": none, "albums": none, "artists": none})
 		return
 	}
 	type source struct {

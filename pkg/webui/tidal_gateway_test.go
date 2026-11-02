@@ -311,3 +311,55 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 	tidalGet(t, srv.URL, "/v1/tracks/999999", 404, nil)
 	tidalGet(t, srv.URL, "/v1/stream/"+id+".exe", 404, nil)
 }
+
+func TestEveryCatalogPathAnswersValidJSON(t *testing.T) {
+	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	for _, path := range []string{"/v1/featured", "/v1/genres/", "/v1/moods", "/v1/rising"} {
+		data := tidalGet(t, srv.URL, path, 200, nil)
+		if strings.TrimSpace(string(data)) != "[]" {
+			t.Fatalf("%s: %s", path, data)
+		}
+	}
+	for _, path := range []string{"/v1/users/1/favorites/artists/", "/v1/users/1/favorites/albums", "/v1/genres/pop/playlists", "/v1/featured/new/tracks", "/v1/rising/new/albums", "/v1/artists/9/toptracks", "/v1/albums/9/tracks", "/v1/albums/9/items", "/v1/never/heard/of/this"} {
+		var page tidalList
+		tidalGet(t, srv.URL, path, 200, &page)
+		if page.TotalNumberOfItems != 0 || page.Items == nil {
+			t.Fatalf("%s: %+v", path, page)
+		}
+	}
+}
+
+func TestArtistAndAlbumIDsFitASigned32BitInteger(t *testing.T) {
+	g := newTidalGateway(New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
+	v := g.trackJSON(1, providers.Track{Title: "t", Artist: "Tromo", Album: "Robotek", Provider: "netease"})
+	artist := v["artist"].(map[string]any)["id"].(uint32)
+	album := v["album"].(map[string]any)["id"].(uint32)
+	if artist > 1<<31-1 || artist == 0 || album > 1<<31-1 || album == 0 {
+		t.Fatal(artist, album)
+	}
+}
+
+func TestSearchAnswersLaterPagesWithoutAskingProviders(t *testing.T) {
+	var calls atomic.Int32
+	deezer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		io.WriteString(w, `{"data":[{"id":9,"title":"Found","duration":200,"artist":{"name":"Artist"}}]}`)
+	}))
+	defer deezer.Close()
+	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir(), DeezerURL: deezer.URL}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	var first struct{ Tracks tidalList }
+	tidalGet(t, srv.URL, "/v1/search/?query=x&limit=100&offset=0&types=TRACKS", 200, &first)
+	if first.Tracks.TotalNumberOfItems != 1 {
+		t.Fatalf("%+v", first)
+	}
+	before := calls.Load()
+	var later struct{ Tracks tidalList }
+	tidalGet(t, srv.URL, "/v1/search/?query=x&limit=100&offset=100&types=TRACKS", 200, &later)
+	if calls.Load() != before || later.Tracks.Items == nil || len(later.Tracks.Items) != 0 {
+		t.Fatalf("%d %+v", calls.Load()-before, later)
+	}
+}

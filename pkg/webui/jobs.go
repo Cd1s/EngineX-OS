@@ -159,10 +159,22 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	return dl.Path, nil
 }
 
-// acquire tries each audio source in turn: the session's NetEase login, the local
-// download service, then the remote Deemix backend.
+// acquire tries the deck's own Deemix service first, which costs no NetEase
+// download quota, then the session's NetEase login. All audio lands on the deck.
 func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (providers.Track, *deemixclient.Download, error) {
-	var failures []error
+	if t.Provider == "netease" {
+		if dl := j.p.Deemix.Cached("netease-" + t.ID); dl != nil {
+			return t, dl, nil
+		}
+	}
+	matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
+	if err == nil {
+		var dl *deemixclient.Download
+		if dl, err = j.p.Deemix.Download(ctx, matched, progress); err == nil {
+			return matched, dl, nil
+		}
+	}
+	failures := []error{err}
 	j.mu.Lock()
 	lookup := j.netease
 	j.mu.Unlock()
@@ -174,21 +186,6 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 			}
 			failures = append(failures, err)
 		}
-	}
-	matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
-	if err == nil {
-		var dl *deemixclient.Download
-		if dl, err = j.p.Deemix.Download(ctx, matched, progress); err == nil {
-			return matched, dl, nil
-		}
-	}
-	failures = append(failures, err)
-	dl, err := j.p.Deemix.FetchRemote(ctx, t)
-	if err == nil {
-		return t, dl, nil
-	}
-	if !errors.Is(err, deemixclient.ErrNoRemote) {
-		failures = append(failures, err)
 	}
 	return providers.Track{}, nil, errors.Join(failures...)
 }
