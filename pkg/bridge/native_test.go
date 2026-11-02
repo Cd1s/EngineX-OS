@@ -123,7 +123,7 @@ func TestPlaylistNameConflictGetsSuffix(t *testing.T) {
 	if e != nil || len(l.Playlists) == 0 {
 		t.Fatal(e)
 	}
-	if _, e = db.Exec(`DELETE FROM BridgePlaylist`); e != nil {
+	if _, e = db.Exec(`DELETE FROM BridgePlaylist; UPDATE main.Playlist SET isExplicitlyExported=0`); e != nil {
 		t.Fatal(e)
 	}
 	// The previously imported rows are now native playlists with the same names.
