@@ -45,6 +45,13 @@ var bridgeTables = []string{"BridgeState", "BridgeAnalysis", "BridgePlaylist", "
 type Options struct {
 	SmartMatch   bool
 	CurrentTrack uint32
+	// Fast imports only what the export itself holds, opening no audio, analysis
+	// or artwork file. Tracks already imported are left as they are. Engine
+	// analyses a track without performance data when it is loaded.
+	Fast bool
+	// DatabaseDir builds the database elsewhere, such as on tmpfs, instead of in
+	// the mount's Engine Library.
+	DatabaseDir string
 }
 type Result struct {
 	Added, Updated, Unchanged int
@@ -280,13 +287,17 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			return result, fmt.Errorf("Smart Match reference track %d not found", opts.CurrentTrack)
 		}
 	}
-	prepared, err := prepareTracks(ctx, res, l)
-	if err != nil {
+	var prepared []preparedTrack
+	if opts.Fast {
+		prepared = prepareFast(l)
+	} else if prepared, err = prepareTracks(ctx, res, l); err != nil {
 		return result, err
 	}
-	dir, err := compat.SafeOutputDir(mount, "Engine Library/Database2")
-	if err != nil {
-		return result, err
+	dir := opts.DatabaseDir
+	if dir == "" {
+		if dir, err = compat.SafeOutputDir(mount, "Engine Library/Database2"); err != nil {
+			return result, err
+		}
 	}
 	lockPath := filepath.Join(dir, ".rb-bridge.lock")
 	if err = safeFile(lockPath); err != nil {
@@ -356,6 +367,10 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			}
 		}
 		mapping[t.ID] = id
+		if opts.Fast && existing {
+			result.Unchanged++
+			continue
+		}
 		if previous == hash {
 			if t.BPM == 0 {
 				effectiveTracks[i].BPM = storedBPM
@@ -372,9 +387,11 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			}
 			a.Merge(aa)
 		}
-		audio, e := compat.AudioHeader(full)
-		if e != nil {
-			return result, fmt.Errorf("track %d audio header: %w", t.ID, e)
+		var audio compat.AudioInfo
+		if !opts.Fast {
+			if audio, e = compat.AudioHeader(full); e != nil {
+				return result, fmt.Errorf("track %d audio header: %w", t.ID, e)
+			}
 		}
 		if audio.SampleRate > 0 {
 			t.SampleRate = audio.SampleRate
@@ -391,9 +408,12 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			t.BPM = a.Beats[0].BPM
 		}
 		effectiveTracks[i] = t
-		perf, e := EncodePerformance(t, a)
-		if e != nil {
-			return result, fmt.Errorf("track %d performance: %w", t.ID, e)
+		// Compressing an empty performance is half of a fast import's time.
+		var perf Performance
+		if !opts.Fast {
+			if perf, e = EncodePerformance(t, a); e != nil {
+				return result, fmt.Errorf("track %d performance: %w", t.ID, e)
+			}
 		}
 		var artID any
 		if art != nil {
@@ -452,16 +472,21 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		}
 		mapping[t.ID] = id
 		// Track's factory trigger already inserted PerformanceData(trackId).
-		if _, e = tx.ExecContext(ctx, `UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?,thirdPartySourceId=1,activeOnLoadLoops=? WHERE trackId=?`, perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, id); e != nil {
-			return result, e
+		// Fast mode leaves it empty, which is what makes Engine analyse on load.
+		if !opts.Fast {
+			if _, e = tx.ExecContext(ctx, `UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?,thirdPartySourceId=1,activeOnLoadLoops=? WHERE trackId=?`, perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, id); e != nil {
+				return result, e
+			}
 		}
-		sourceJSON, _ := json.Marshal(struct {
-			Track    rekordbox.Track
-			Analysis *rekordbox.Analysis
-		}{original, a})
-		audioJSON, _ := json.Marshal(audio)
-		if _, e = tx.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, sourceJSON, audioJSON); e != nil {
-			return result, e
+		if !opts.Fast {
+			sourceJSON, _ := json.Marshal(struct {
+				Track    rekordbox.Track
+				Analysis *rekordbox.Analysis
+			}{original, a})
+			audioJSON, _ := json.Marshal(audio)
+			if _, e = tx.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, sourceJSON, audioJSON); e != nil {
+				return result, e
+			}
 		}
 		if existing {
 			_, e = tx.ExecContext(ctx, `UPDATE BridgeState SET path=?,fingerprint=? WHERE trackId=?`, enginePath, hash, id)

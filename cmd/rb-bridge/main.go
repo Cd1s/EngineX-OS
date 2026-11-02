@@ -31,6 +31,7 @@ func run() error {
 	roots := flag.String("watch-roots", "/media,/run/media,/mnt", "comma-separated mount parent directories")
 	link := flag.Bool("prolink", false, "listen for Rekordbox / Pro DJ Link announcements and player status")
 	bind := flag.String("bind", "0.0.0.0", "IPv4 address for Pro DJ Link listeners")
+	full := flag.Bool("full", false, "with --mount-path: read every file for cues and waveforms, even if unchanged")
 	smart := flag.Uint("smart-match", 0, "optional recommendation playlist relative to this Rekordbox track ID")
 	poll := flag.Duration("poll-interval", 2*time.Second, "mount polling interval")
 	flag.Parse()
@@ -71,7 +72,7 @@ func run() error {
 	enc := json.NewEncoder(os.Stdout)
 	emit := func(v any) { mu.Lock(); defer mu.Unlock(); _ = enc.Encode(v) }
 	if *mount != "" && !*watch {
-		r, e := bridge.Convert(ctx, *mount, opts)
+		r, e := bridge.ConvertAtMount(ctx, *mount, opts, *full)
 		if e != nil {
 			return e
 		}

@@ -185,19 +185,21 @@ func (g *tidalGateway) proxyToTidal(w http.ResponseWriter, r *http.Request, clea
 	proxy.ServeHTTP(w, r)
 }
 
-// withBPM carries tempo and key to each list row. Engine's TIDAL client reads no
-// tempo field, so they travel in the title, and the track list QML moves them to its
-// BPM and Key columns. "BPM" keeps a real title like "Song [2020]" from matching.
-// This is display text only and reaches neither the beat grid nor the library.
-func withBPM(t providers.Track) string {
+// labelWithBPM carries tempo and key to each list row. Engine's TIDAL client reads
+// no tempo field, and it copies a list row's title to the deck when a track loads,
+// so they travel in the copyright field, which it only keeps for the list. The track
+// list QML moves them to its BPM and Key columns. Display text only: this reaches
+// neither the beat grid nor the library.
+func labelWithBPM(t providers.Track) string {
+	label := providerLabels[t.Provider]
 	if t.BPM <= 0 {
-		return t.Title
+		return label
 	}
-	label := strconv.Itoa(int(math.Round(t.BPM))) + " BPM"
+	tempo := strconv.Itoa(int(math.Round(t.BPM))) + " BPM"
 	if t.Key != "" {
-		label += " " + t.Key
+		tempo += " " + t.Key
 	}
-	return t.Title + " [" + label + "]"
+	return label + " [" + tempo + "]"
 }
 
 // tidalNumericID hashes a name to an ID Engine can read: it parses them as signed
@@ -454,7 +456,7 @@ func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
 	if len(artists) > 0 {
 		artist = artists[0]
 	}
-	return map[string]any{"id": id, "title": withBPM(t), "bpm": int(math.Round(t.BPM)), "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": true, "streamReady": true, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": providerLabels[t.Provider], "url": "http://sc5000.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": tidalNumericID(t.Album), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
+	return map[string]any{"id": id, "title": t.Title, "bpm": int(math.Round(t.BPM)), "duration": t.DurationMS / 1000, "replayGain": 0, "peak": 1, "allowStreaming": true, "streamReady": true, "premiumStreamingOnly": false, "trackNumber": 1, "volumeNumber": 1, "version": nil, "popularity": 0, "copyright": labelWithBPM(t), "url": "http://sc5000.lan:8080", "isrc": t.ISRC, "editable": false, "explicit": false, "audioQuality": "LOSSLESS", "audioModes": []string{"STEREO"}, "artist": artist, "artists": artists, "album": map[string]any{"id": tidalNumericID(t.Album), "title": t.Album, "cover": nil, "vibrantColor": nil, "videoCover": nil}, "mixes": map[string]any{}}
 }
 
 // trackItems wraps each track as {"item":…,"type":"track"} (playlist items and

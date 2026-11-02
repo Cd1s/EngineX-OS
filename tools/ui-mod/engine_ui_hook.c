@@ -9,10 +9,12 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <link.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -43,6 +45,33 @@ static int is_engine(void) {
         return 0;
     exe[n] = 0;
     return strcmp(exe, "/usr/Engine/Engine") == 0;
+}
+
+// Engine's TIDAL client names a downloaded file after its codec and knows FLAC and
+// AAC, so an MP3 from the gateway would be saved with no extension and fail to load.
+// Its one "aac" string is both what it compares the codec with and the extension it
+// then uses, so turning it into "mp3" teaches it MP3 in four bytes. TIDAL's own AAC
+// is labelled mp4a.40.x and keeps working. Same edit as unlock_jp07_features.py, for
+// a deck whose read-only root still has the older binary. Bytes are checked first,
+// so another Engine build is left alone.
+#define MP3_CODEC_OFFSET 0x1DB8E90u
+static int engine_base(struct dl_phdr_info *info, size_t size, void *out) {
+    (void)size;
+    *(uintptr_t *)out = info->dlpi_addr;
+    return 1; // the first object is the program itself
+}
+__attribute__((constructor)) static void teach_mp3(void) {
+    if (!is_engine()) return;
+    uintptr_t base = 0;
+    dl_iterate_phdr(engine_base, &base);
+    if (!base) return;
+    char *at = (char *)(base + MP3_CODEC_OFFSET);
+    if (memcmp(at - 8, "flac\0\0\0\0aac\0mp4a.40.2", 21)) return;
+    long page = sysconf(_SC_PAGESIZE);
+    char *start = (char *)((uintptr_t)at & ~(uintptr_t)(page - 1));
+    if (mprotect(start, (size_t)page, PROT_READ | PROT_WRITE)) return;
+    memcpy(at, "mp3", 4);
+    mprotect(start, (size_t)page, PROT_READ | PROT_EXEC);
 }
 
 // Unknown or unsafe values fall back to the English pack.
