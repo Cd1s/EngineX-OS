@@ -28,6 +28,8 @@ type Track struct {
 	Provider   string   `json:"provider"`
 	BPM        float64  `json:"bpm,omitempty"`
 	Key        string   `json:"key,omitempty"` // Camelot, e.g. 8A
+	// Preview is Deezer's public 30-second MP3, used only to estimate tempo.
+	Preview string `json:"-"`
 }
 type Playlist struct {
 	ID    string `json:"id"`
