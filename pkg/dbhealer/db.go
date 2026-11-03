@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
 
@@ -137,6 +138,19 @@ func heal(db *sql.DB, dataOnly bool) (Report, error) {
 		var schema string
 		if err := tx.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name='PerformanceData'").Scan(&schema); err != nil {
 			return fmt.Errorf("unsupported library schema: %w", err)
+		}
+		// GL-010: Engine rejects libraries where Information.id != 1 or uuid is empty.
+		var infoCount int
+		if err := tx.QueryRow("SELECT count(*) FROM Information").Scan(&infoCount); err != nil {
+			return err
+		}
+		if infoCount == 1 {
+			if _, err := tx.Exec("UPDATE Information SET id=1 WHERE id<>1"); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec("UPDATE Information SET uuid=? WHERE uuid IS NULL OR trim(uuid)=''", uuid.NewString()); err != nil {
+			return err
 		}
 		var err error
 		if !dataOnly {

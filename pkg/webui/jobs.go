@@ -19,6 +19,7 @@ import (
 const (
 	maxAnalysedMS    = 15 * 60 * 1000
 	maxAnalysedBytes = 50 << 20
+	maxJobFiles      = 500
 )
 
 func tooLongToAnalyse(t providers.Track, path string) bool {
@@ -171,11 +172,23 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	}
 	j.addCover(ctx, t, dl)
 	f := fetched{matched, dl}
-	j.mu.Lock()
-	j.files[key] = f
-	j.mu.Unlock()
+	j.putFile(key, f)
 	j.queueImport(session, t, guest, f)
 	return dl.Path, nil
+}
+
+func (j *Jobs) putFile(key string, f fetched) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if _, ok := j.files[key]; !ok && len(j.files) >= maxJobFiles {
+		for k := range j.files {
+			if j.fetches[k] == nil {
+				delete(j.files, k)
+				break
+			}
+		}
+	}
+	j.files[key] = f
 }
 
 // acquire tries the deck's own Deemix service first, which costs no NetEase
@@ -333,6 +346,12 @@ func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetc
 	}
 	j.mu.Lock()
 	seen := j.queued[key]
+	if !seen && len(j.queued) >= maxJobFiles {
+		for k := range j.queued {
+			delete(j.queued, k)
+			break
+		}
+	}
 	j.queued[key] = true
 	j.mu.Unlock()
 	if !seen {
@@ -445,9 +464,7 @@ func (j *Jobs) run(ctx context.Context, v Job, t *resourceguard.Throttle) error 
 			return err
 		}
 		j.addCover(ctx, v.Track, dl)
-		j.mu.Lock()
-		j.files[trackKey(v.Track)] = fetched{matched, dl}
-		j.mu.Unlock()
+		j.putFile(trackKey(v.Track), fetched{matched, dl})
 	}
 	if tooLongToAnalyse(v.Track, dl.Path) {
 		j.update(v.ID, func(v *Job) { v.State = "done"; v.Quality = dl.Quality.Label; v.Progress = 1 })

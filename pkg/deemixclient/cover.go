@@ -7,7 +7,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	_ "image/png"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +21,57 @@ import (
 )
 
 const maxCoverBytes = 2 << 20
+
+// capCover shrinks high-resolution cover art to <= 512x512 JPEG before embedding
+// so Engine's QQuickPixmapReader never stalls audio on track load (N006).
+func capCover(data []byte, mime string) ([]byte, string, error) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		// Minimal valid headers in unit tests have no full image frame; preserve small ones.
+		if len(data) <= 256<<10 {
+			return data, mime, nil
+		}
+		return nil, "", errors.New("cover: corrupt image")
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > 16<<20 {
+		return nil, "", errors.New("cover: image dimensions exceed safe limit")
+	}
+	if cfg.Width <= 512 && cfg.Height <= 512 && len(data) <= 256<<10 {
+		return data, mime, nil
+	}
+	src, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, "", errors.New("cover: decode failed")
+	}
+	b := src.Bounds()
+	scale := math.Min(1, 512/float64(max(b.Dx(), b.Dy())))
+	w, h := max(1, int(math.Round(float64(b.Dx())*scale))), max(1, int(math.Round(float64(b.Dy())*scale)))
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			sx, sy := (float64(x)+0.5)/scale-0.5, (float64(y)+0.5)/scale-0.5
+			sx, sy = math.Max(0, sx), math.Max(0, sy)
+			x0, y0 := int(sx), int(sy)
+			dx, dy := sx-float64(x0), sy-float64(y0)
+			var ch [3]float64
+			for j := 0; j < 2; j++ {
+				for i := 0; i < 2; i++ {
+					weight := []float64{1 - dx, dx}[i] * []float64{1 - dy, dy}[j]
+					r, g, bb, a := src.At(b.Min.X+min(x0+i, b.Dx()-1), b.Min.Y+min(y0+j, b.Dy()-1)).RGBA()
+					ch[0] += float64(r+65535-a) * weight
+					ch[1] += float64(g+65535-a) * weight
+					ch[2] += float64(bb+65535-a) * weight
+				}
+			}
+			dst.SetRGBA(x, y, color.RGBA{uint8(math.Round(ch[0] / 257)), uint8(math.Round(ch[1] / 257)), uint8(math.Round(ch[2] / 257)), 255})
+		}
+	}
+	var out bytes.Buffer
+	if err := jpeg.Encode(&out, dst, &jpeg.Options{Quality: 80}); err != nil {
+		return nil, "", err
+	}
+	return out.Bytes(), "image/jpeg", nil
+}
 
 // EmbedCover fetches artwork and writes it into a downloaded FLAC or MP3, unless the
 // file already has a picture. The file is replaced in one step.
@@ -81,9 +137,9 @@ func (c *Client) fetchCover(ctx context.Context, address string) ([]byte, string
 	}
 	switch {
 	case bytes.HasPrefix(data, []byte{0xff, 0xd8, 0xff}):
-		return data, "image/jpeg", nil
+		return capCover(data, "image/jpeg")
 	case bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
-		return data, "image/png", nil
+		return capCover(data, "image/png")
 	}
 	return nil, "", errors.New("cover: not a JPEG or PNG")
 }

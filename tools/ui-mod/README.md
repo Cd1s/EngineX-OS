@@ -62,32 +62,110 @@ while running crashed PID 1 once.
 
 ## Remote Stems runtime adapter
 
-The hook includes the four matched-byte edits from
-`Engine.remote-stems-candidate.patch.json` for Engine SHA-256
+All backend offsets below are ELF virtual addresses in the ARMv7 Engine 5.0.4
+build with GNU build ID `af073865a3318d807a8303f716152eac923a4c6f`. This executable contains the
+player-model branches; these are not independently validated hardware builds. The official SHA-256 is
+`e1eb0e2b858880016daa3ad14538426204f8e698d855a274aebc924a5f9a5caa`;
+the previously unlocked image is
 `342b611bd71fd09d9fda8013f19dccfba47ee4f0f772a959058bdd19d74d5413`.
-All four must match before any Stems edit is enabled. Memory protection covers
-all touched pages, including spans larger than a page, and returns to RX before
-Engine starts. A protection failure aborts startup rather than running a partial
-Stems trampoline set. The Engine file remains unchanged.
+Constructor boundaries and model-name PC references were recovered from ARM
+code and `.ARM.exidx`: JP07 `0xf6586c`, JP08 `0xf663f8`, JP11 `0xf665e0`, JP13
+`0xf6709c`, JP14 `0xf67dcc`, JP20 `0xf67fc8`; PRIME 4 has a separate constructor
+at `0xf64124`. The JP20 constructor names **SC LIVE 2**, not PRIME 4. No model
+constructor is modified by the new Bluetooth/HFS+/processor settings.
 
-The playback edit at `0x8429b0` uses an ARM trampoline at the feature-evaluation
-join point. It only changes the original `StemsPreRenderedPlayback` object
-(`base + 0x29bc83c`), binding its result pointer to the native true byte
-(`base + 0x258e185`). It restores r0/r1, replays the two displaced frame-relative
-loads, and resumes before the original comparison at `0x8429b8`. Other features
-keep their computed values. The separate `0x6d3e00` edit preserves the existing
-ShowStemsList eligibility result across the extra device feature gate, allowing
-the native type-5 Stems row. Both patches require matching original instructions.
+An unknown build ID is left untouched. Each edit then accepts original bytes,
+already patched bytes, or the explicitly supported old processor branch.
+Unknown bytes are skipped; the processor and gateway groups are each checked
+as a unit. A memory-protection failure aborts startup. Code mappings return to
+RX and their instruction caches are flushed; the Engine file is never changed.
 
-The trampoline has its own RX mapping. Device configuration remains unchanged;
-changing JP07's strings to `Unlocked` is rejected by this Engine's configuration
-validation and is not part of this implementation. These offsets and object
-addresses apply only to the Engine build identified above.
+| Site | Behavior |
+| --- | --- |
+| `0x842644` | Bind only the native StemsPreRenderedPlayback object (`0x29bc83c`) to the native true byte (`0x258e185`), then use the normal enabled-feature registration at `0x8429b0`. Other features replay the displaced load/comparison and resume at `0x84264c`. |
+| `0x6d3e00` | Preserve ShowStemsList eligibility across the extra device gate. |
+| `0x85ef9c`, `0x85e5f8` | Keep the remote processor path and handshake adapter. |
+| `0xf6303c` | After model initialization, set config bytes `+0xdb`, `+0x24c`, `+0x24e`, `+0x276` to 1 (Stems integration, Bluetooth, Bluetooth assignment, remote processor) and `+0x289` to 0 (disableHfsPlus). Replay the two original literal loads and resume at `0xf63044`. |
+| `0x1897e70`, `0x1897dcc`, `0x1678644` | Filesystem admission and native hfsplus selection. |
+| `0x58af34`, `0x167295c`, `0x16728c0` | Keep the existing read-only library-overlay admission behavior. |
+| `0x336740`, `0x336758`, `0x33652c`, `0x1db8e90` | Local Tidal gateway URLs and MP3 extension. |
 
-Check the binding and other-feature isolation on IN with:
+The old `0x8429b0` Stems patch was sufficient for JP07 but missed the early exit
+for configurations set to False. The new single interception runs before that
+split. It changes no configuration strings or secure-configuration flag.
+`0x85f000` is no longer needed: the shared getConfig hook includes its processor
+capability write. The pre-existing JP07 `0xf659b8` capability patch remains.
+Bluetooth admission does not add missing Bluetooth hardware or drivers, and
+filesystem admission does not make a physically read-only volume writable.
 
-    arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -o out/test-stems-feature tools/ui-mod/test_stems_feature.c -ldl -lpthread
-    qemu-arm -L /usr/arm-linux-gnueabihf out/test-stems-feature
+## SQLite, telemetry and worker guards
+
+Engine embeds SQLite 3.45.3, source ID
+`2024-04-15 13:34:05 8653b758870e6ef0c98d46b3ace27849054af85da891eb121e9aaa537f1e8355`,
+matching the [official release](https://www.sqlite.org/releaselog/3_45_3.html).
+The internal `sqlite3_api_routines` table at ELF VA `0x29980a4` (file offset
+`0x29970a4`) and the ARM code establish these entries:
+
+| Function | ELF VA | API table slot |
+| --- | --- | --- |
+| sqlite3_open | `0x1cba858` | 70 |
+| sqlite3_open_v2 | `0x1cba874` | 135 |
+| sqlite3_exec | `0x1c91f74` | 55 |
+| openDatabase (shared internal implementation) | `0x1cba04c` | — |
+
+Both public open entries use eight-byte, checked ARM redirects. Their copied
+prologues contain no PC-relative instructions. The original functions still
+receive their filename/output pointer/flags/VFS arguments. Telemetry filenames
+containing `posthog.db` or `events.db` become `:memory:`. Successful ordinary
+opens receive `synchronous=NORMAL`, `temp_store=MEMORY`, `cache_size=-8000` through
+the internal exec function. Failed opens preserve their original result and do
+not run PRAGMA. `:memory:` connections do not run the tuning SQL. `open16` is not
+intercepted.
+
+`open`, `open64`, `openat`, and `openat64` additionally map analytics sidecars
+and CrashReportDB files into a private `/tmp/sc5000-engine-volatile-<uid>/`
+tree, preserving absolute path identity and handling relative dirfds. `/tmp`
+must be tmpfs for this fallback to avoid storage writes. This is an open fallback,
+not an overlay for mkdir/stat/rename/unlink or other processes.
+
+Crashpad exec/spawn requests fail with the normal ENOENT result; they never
+claim success or invent a child PID. Other exec/spawn calls pass through.
+The listed analysis/cloud/Sentry/freeze workers receive SCHED_IDLE, nice 19,
+idle I/O, and the last online CPU outside CPU0. Pixmap/FileInfo workers receive
+nice 10 and CPUs 1 through the last online CPU. The mask is built from the online
+CPU count rather than Engine's inherited CPU1-only startup affinity. Both pthread
+naming and Qt's prctl/__prctl_time64 naming apply these guards; later
+pthread_setschedparam calls cannot reset idle workers to SCHED_OTHER. Naming
+another pthread targets that thread, never blindly applies nice/ioprio to its
+caller. Subsequent affinity requests retain these guards. CPU0-only systems
+cannot satisfy the CPU guard.
+AudioOut/AudioRenderer names are excluded. Freeze/Sentry threads are deprioritized,
+not terminated; independent OfflineAnalyzer processes are outside is_engine().
+
+NORMAL still permits journal writes/fsync. The 8000 KiB cache is per connection,
+not a total RAM bound, and later application PRAGMAs can override it. Telemetry
+`:memory:` databases are connection-local. Unit tests do not prove zero Engine
+retries, zero flash writes by all processes, or fixes for CF003/N001/N002/N006.
+
+## Verification and deployment status
+
+Build only on IN in `/root/build/sc5000-hook-universal-20261104`. The ARM tests
+link the official SQLite 3.45.3 amalgamation, kept only in that remote directory:
+
+    arm-linux-gnueabihf-gcc -O2 -DSQLITE_THREADSAFE=1 -c deps/sqlite3.c -o deps/sqlite3.o
+    arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -Ideps -o out/test_stems_feature tools/ui-mod/test_stems_feature.c deps/sqlite3.o -ldl -lpthread -lm
+    qemu-arm -L /usr/arm-linux-gnueabihf out/test_stems_feature /root/build/sc5000-lab/5.0.4/tree/usr/Engine/Engine /root/build/sc5000-lab/out/Engine.unlocked17
+
+The tests execute installed ARM SQLite redirects and original-function
+trampolines, read back all three real PRAGMAs, open/query a real database, check
+read-only/error/memory cases, exercise the Stems/config paths, classify every
+edit on both binary images, and check actual worker scheduling/affinity/nice/I/O
+and caller isolation. Six synthetic config patterns exercise the common layout;
+they are not six hardware acceptance tests. Ghidra's full import timed out;
+entry identification above uses the API table, source ID and objdump evidence.
+
+This universal backend build is prepared for coordinated deployment. Its new
+hooks have not been loaded on the deck and this task does not restart Engine.
 
 The client additionally requires the separately provisioned private
 `/etc/sc5000-stems/token` and the LAN backend. Installing the client and seeing

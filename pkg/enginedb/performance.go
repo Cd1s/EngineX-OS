@@ -319,7 +319,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 // Explicit PCP2 RGB (including opaque black) takes precedence over the palette.
 func cueColor(c rekordbox.Cue) [4]byte {
 	if c.Color != [4]byte{} {
-		return c.Color
+		return [4]byte{255, c.Color[1], c.Color[2], c.Color[3]}
 	}
 	palette := [9][4]byte{{}, {255, 255, 0, 127}, {255, 255, 0, 0}, {255, 255, 127, 0}, {255, 255, 255, 0}, {255, 0, 255, 0}, {255, 0, 255, 255}, {255, 0, 0, 255}, {255, 127, 0, 255}}
 	if c.ColorID > 0 && int(c.ColorID) < len(palette) {
