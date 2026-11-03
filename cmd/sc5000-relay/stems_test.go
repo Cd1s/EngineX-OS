@@ -243,7 +243,7 @@ func TestStemsRelayWorkerFailurePropagates(t *testing.T) {
 // A deck that disappears mid-session must free the renderer, even when the
 // worker would otherwise run on regardless of its input.
 func TestStemsRelayDisconnectKillsWorker(t *testing.T) {
-	f := newStemsFixture(t, []string{"/bin/sh", "-c", "printf ready; exec sleep 60"})
+	f := newStemsFixture(t, []string{"/bin/sh", "-c", "printf 'session=1\\n\\n'; exec sleep 60"})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	in, send := io.Pipe()
@@ -255,8 +255,8 @@ func TestStemsRelayDisconnectKillsWorker(t *testing.T) {
 		receive.CloseWithError(err)
 		done <- err
 	}()
-	greeting := make([]byte, 5)
-	if _, err := io.ReadFull(out, greeting); err != nil || string(greeting) != "ready" {
+	greeting := make([]byte, 11)
+	if _, err := io.ReadFull(out, greeting); err != nil || string(greeting) != "session=1\n\n" {
 		t.Fatalf("greeting %q %v", greeting, err)
 	}
 	cancel()
