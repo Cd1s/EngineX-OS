@@ -10,8 +10,8 @@ from collections import deque
 import os
 import sys
 
-os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
-os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '4')
+os.environ.setdefault('OMP_NUM_THREADS', '4')
 import numpy as np
 from scipy.fft import rfft, irfft
 from scipy.ndimage import median_filter
@@ -73,6 +73,7 @@ class Separator:
         self.skip = n-h
         self.received = self.returned = 0
         self.finished = False
+        self.workers = int(os.environ.get('STEMS_WORKERS', '4'))
         f = np.fft.rfftfreq(n, 1/sample_rate)
         self.low = (1 / (1 + (f/220)**6)).astype(np.float32)
         self.vocal_band = ((1/(1+(180/np.maximum(f, 1))**6)) *
@@ -83,7 +84,7 @@ class Separator:
         pieces = []
         n, h = self.size, self.hop
         while self.pending.shape[1] >= n:
-            z = rfft(self.pending[:, :n]*self.window, workers=1)
+            z = rfft(self.pending[:, :n]*self.window, workers=self.workers)
             mag = np.mean(abs(z), axis=0)
             self.history.append(mag)
             harmonic = np.median(np.stack(self.history), axis=0)
@@ -103,7 +104,7 @@ class Separator:
             melody_mask = 1-p_mask-bass_mask-vocal_mask
             # Canonical worker order; native output mapping is documented in PROTOCOL.md.
             masks = np.stack((vocal_mask, bass_mask, p_mask, melody_mask))
-            waves = irfft(masks[:, None, :]*z[None, :, :], n=n, workers=1)
+            waves = irfft(masks[:, None, :]*z[None, :, :], n=n, workers=self.workers)
             self.ola += waves*self.window
             self.norm += self.window**2
             out = self.ola[:, :, :h] / np.maximum(self.norm[:h], 1e-12)
