@@ -487,6 +487,10 @@ RGB_COLORS = {"Low": "#ff1428", "Mid": "#00e632", "High": "#0078ff"}
 RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}
 
 
+# Vertical stretch of the deck overview waveform (1.0 = stock height).
+OVERVIEW_Y_SCALE = 1.3
+
+
 def three_band(style_name, band, colors=BAND_COLORS):
     return f'(root.scWave === "3band" ? "{colors[band]}" : Style.{style_name})'
 
@@ -498,8 +502,19 @@ def edits(dev: bool):
     wave += [(f"color{b}Color: Style.waveform{b}Color", f"color{b}Color: {three_band(f'waveform{b}Color', b)}") for b in BAND_COLORS]
     overview = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}Color", f'rgbMode ? "{RGB_COLORS[b]}" : ' + three_band(f"waveform{b}Color", b)) for b in BAND_COLORS]
     overview += [(f"elapsed{b}Color: Style.waveform{b}PastColor", f'elapsed{b}Color: rgbMode ? "{RGB_PAST[b]}" : ' + three_band(f"waveform{b}PastColor", b, BAND_PAST)) for b in BAND_COLORS]
+    # Deck overview: drop the 7 px gap under the waveform so it uses the full bar,
+    # and stretch the amplitude. Engine's own analysis and imported rekordbox
+    # tracks both peak near 127 and look flat in the strip. The default style
+    # (Praline) grows up from the bottom edge, so scale from there; only y changes,
+    # so needle drop and markers keep their x. The container clips what the
+    # stretch pushes past the top. transform must sit outside the anchors group.
     deck_overview = list(overview) + [
-        ("				bottomMargin: 7\n", "				bottomMargin: 0\n				transform: Scale { yScale: 1.25; origin.y: overview.height }\n"),
+        ("				bottomMargin: 7\n", "				bottomMargin: 0\n"),
+        ("		objectName: \"Deck_WaveformOverview_ViewContainer\"\n",
+         "		objectName: \"Deck_WaveformOverview_ViewContainer\"\n		clip: true\n"),
+        ("			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n",
+         f"			transform: Scale {{ origin.y: overview.height; yScale: {OVERVIEW_Y_SCALE} }}\n"
+         "			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n"),
     ]
     main = DEV_HARNESS if dev else ""
     return {
@@ -513,13 +528,12 @@ def edits(dev: bool):
         v + "Common/Waveform/Waveform.qml": wave,
         v + "Common/WaveformOverview/WaveformOverview.qml": deck_overview,
         v + "Common/WaveformOverview/WaveformOverviewLibrary.qml": overview,
+        # Bindings, not aliases. WaveformOverviewRotatable aliases these two
+        # properties and must stay untouched: "property alias x: 0" is not a valid
+        # alias, and that one error makes the whole JP07 main view unavailable.
         v + "Common/WaveformOverview/WaveformOverviewWithNeedleLock.qml": [
             ("invisibleActiveAreaWidthAtBeginning: isInGridEditor ? 0 : isRightDeck ? 15 : 25", "invisibleActiveAreaWidthAtBeginning: 0"),
             ("invisibleActiveAreaWidthAtEnd: isInGridEditor ? 0 : isRightDeck ? 25 : 15", "invisibleActiveAreaWidthAtEnd: 0"),
-        ],
-        v + "Common/WaveformOverview/WaveformOverviewRotatable.qml": [
-            ("invisibleActiveAreaWidthAtBeginning: verticalWaveformOverview.invisibleActiveAreaWidthAtBeginning", "invisibleActiveAreaWidthAtBeginning: 0"),
-            ("invisibleActiveAreaWidthAtEnd: verticalWaveformOverview.invisibleActiveAreaWidthAtEnd", "invisibleActiveAreaWidthAtEnd: 0"),
         ],
         prefs + "Entries/WaveformStyle.qml": WAVEFORM_ENTRY,
         prefs + "Entries/Base/ListEntry.qml": [
