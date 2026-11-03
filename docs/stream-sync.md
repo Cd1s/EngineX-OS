@@ -109,8 +109,8 @@ Spotify 不接受普通 `http://sc5000.lan` 作为远程 OAuth redirect。
    `/data/sc5000-custom/bin/sc5000-deemixd`，空值关闭）；该端口已有进程在听时不另起一个。
    不再用单独的 systemd 单元：碟机的 systemd 在可写 `/etc` overlay 挂载之前读单元，
    只在 overlay 里启用的单元开机不会启动，重启后 6595 没人听，点播报
-   `TidalAPI::play The response didn't contain the required keys`。网易云、
-   Spotify、Deezer 曲目都先走这里，不占网易云的月度下载额度。
+   `TidalAPI::play The response didn't contain the required keys`。Spotify、Deezer
+   曲目都先走这里；网易云曲目默认跳过这一步，见下面的「网易云下载方式」。
 2. **网易云直连**：第一步失败时，用碟机已登录的网易云账号取官方音频地址（`lossless` →
    `exhigh` → `standard`），试听片段一律不算。其他平台的曲目先按标题、版本、共同艺人和
    ≤5 秒时长匹配网易云曲目。访客只用自己的登录，不碰主人的 cookie。
@@ -119,6 +119,14 @@ stream-sync 不做音频解密，解密只发生在 `sc5000-deemixd` 里。
 
 网易云文件存为 `netease-<id>.flac`，经 `Inspect` 校验后才可用，重启后直接复用。没有 SD
 库时落在内部存储，总量上限 3 GiB，超出后淘汰最旧的下载（只动 `<id>.*` 和 `netease-<id>.*`）。
+
+网易云下载方式（`設定 -> 裝置 -> 網易雲下載方式`，接口 `neteaseMode=official|deemix`，存为
+`settings.conf` 的 `netease_mode=`）：
+
+- `official`（默认，`官方直下`）：网易云曲目直接用碟机上登录的网易云账号下载，完全不经过
+  Deemix，没有 Deezer 账号也能用。没登录网易云时报错提示先登录。
+- `deemix`（`Deemix優先`）：先按标题、艺人匹配 Deezer 交给本机 Deemix，不占网易云月度下载
+  额度；匹配或下载失败再回到网易云。
 
 音质在碟机 `設定 -> 裝置` 或控制台切换（`quality=flac` / `320k`），无需重启，下一次下载生效。
 选 320k 时本机 Deemix 请求 `bitrate:3, MP3_320`，网易云从 `exhigh` 开始。已经下载过的曲目直接

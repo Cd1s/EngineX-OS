@@ -42,6 +42,7 @@ SERVICES_MAIN = """
 	property string scLang: "en"
 	property string scWave: "denon"
 	property string scQuality: "flac"
+	property string scNeteaseMode: "official"
 	property string scJog: "static"
 	property bool scPlayheadRestored: false
 	// Engine resets this preference on every start, so settings.conf keeps it.
@@ -122,6 +123,7 @@ SERVICES_MAIN = """
 		scLang = v.language
 		scWave = v.waveform
 		scQuality = v.quality || "flac"
+		scNeteaseMode = v.neteaseMode || "official"
 		scJog = v.jog || "static"
 		scKeepPlayhead(v.playhead || 0)
 		scSources = v.sources
@@ -434,6 +436,13 @@ QUALITY_ENTRY = """
 			values: ["FLAC", "320kbps"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scQuality))]
 			onSelected: function(index) { root.scCall("quality=" + ids[index]) }
+		},
+		EntryBase.ListEntry {
+			text: "NetEase Download"
+			readonly property var ids: ["official", "deemix"]
+			values: ["Official", "Deemix First"]
+			currentValue: values[Math.max(0, ids.indexOf(root.scNeteaseMode))]
+			onSelected: function(index) { root.scCall("neteaseMode=" + ids[index]) }
 		},
 """
 

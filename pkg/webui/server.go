@@ -118,6 +118,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	if jobs != nil {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor
+		jobs.neteaseDirect = s.neteaseDirect
 		jobs.soundcloud = s.ownerSoundCloud
 		jobs.bpm = cfg.BPM
 		if jobs.p.Deemix != nil {
