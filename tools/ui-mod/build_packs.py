@@ -498,6 +498,9 @@ def edits(dev: bool):
     wave += [(f"color{b}Color: Style.waveform{b}Color", f"color{b}Color: {three_band(f'waveform{b}Color', b)}") for b in BAND_COLORS]
     overview = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}Color", f'rgbMode ? "{RGB_COLORS[b]}" : ' + three_band(f"waveform{b}Color", b)) for b in BAND_COLORS]
     overview += [(f"elapsed{b}Color: Style.waveform{b}PastColor", f'elapsed{b}Color: rgbMode ? "{RGB_PAST[b]}" : ' + three_band(f"waveform{b}PastColor", b, BAND_PAST)) for b in BAND_COLORS]
+    deck_overview = list(overview) + [
+        ("				bottomMargin: 7\n", "				bottomMargin: 0\n				transform: Scale { yScale: 1.25; origin.y: overview.height }\n"),
+    ]
     main = DEV_HARNESS if dev else ""
     return {
         # The flag is still cleared, which is what pressing "Ok" would do.
@@ -508,8 +511,16 @@ def edits(dev: bool):
             ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG),
         ],
         v + "Common/Waveform/Waveform.qml": wave,
-        v + "Common/WaveformOverview/WaveformOverview.qml": overview,
+        v + "Common/WaveformOverview/WaveformOverview.qml": deck_overview,
         v + "Common/WaveformOverview/WaveformOverviewLibrary.qml": overview,
+        v + "Common/WaveformOverview/WaveformOverviewWithNeedleLock.qml": [
+            ("invisibleActiveAreaWidthAtBeginning: isInGridEditor ? 0 : isRightDeck ? 15 : 25", "invisibleActiveAreaWidthAtBeginning: 0"),
+            ("invisibleActiveAreaWidthAtEnd: isInGridEditor ? 0 : isRightDeck ? 25 : 15", "invisibleActiveAreaWidthAtEnd: 0"),
+        ],
+        v + "Common/WaveformOverview/WaveformOverviewRotatable.qml": [
+            ("invisibleActiveAreaWidthAtBeginning: verticalWaveformOverview.invisibleActiveAreaWidthAtBeginning", "invisibleActiveAreaWidthAtBeginning: 0"),
+            ("invisibleActiveAreaWidthAtEnd: verticalWaveformOverview.invisibleActiveAreaWidthAtEnd", "invisibleActiveAreaWidthAtEnd: 0"),
+        ],
         prefs + "Entries/WaveformStyle.qml": WAVEFORM_ENTRY,
         prefs + "Entries/Base/ListEntry.qml": [
             ("function isSelected(text) {", "function isSelected(value) {"),
