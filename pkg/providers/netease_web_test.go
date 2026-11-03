@@ -774,7 +774,8 @@ func TestSoundCloudAccountLoginRenewsAndReachesPrivateLists(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/token" {
 			r.ParseForm()
-			if id, secret, ok := r.BasicAuth(); !ok || id != "cid" || secret != "shh" || r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "r1" {
+			// SoundCloud answers 400 to a refresh with a Basic header; the app's keys go in the form.
+			if _, _, basic := r.BasicAuth(); basic || r.Form.Get("client_id") != "cid" || r.Form.Get("client_secret") != "shh" || r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "r1" {
 				t.Errorf("token request %v", r.Form)
 			}
 			refreshes++
