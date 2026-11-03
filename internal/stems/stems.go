@@ -28,6 +28,8 @@ const Protocol = "engine-5.0.4"
 // big-endian length + Engine bytes, and a closing 'E' + length + "ok" or
 // "failed" once the worker has exited. Unlike the X-Stems-Status trailer,
 // the closing frame is ordinary body data, so edge proxies pass it on.
+// Value 2 also asks for packed replies (pack.go); a renderer that packs
+// answers 2, one that only frames answers 1. The relay forwards the value.
 const FramingHeader = "X-Stems-Framing"
 
 const maxFrame = 1 << 20
@@ -58,14 +60,15 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 	sess := &Session{}
 	pipe := newPipeline(out)
 	start := time.Now()
-	req, e := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(endpoint, "/")+"/v1/engine", io.NopCloser(engineReader{tap{in, sess.FeedIn}, pipe}))
+	up := &engineReader{r: tap{in, sess.FeedIn}, p: pipe, buf: make([]byte, 64<<10)}
+	req, e := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(endpoint, "/")+"/v1/engine", io.NopCloser(up))
 	if e != nil {
 		return e
 	}
 	req.Header.Set("Authorization", "Bearer "+secret)
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Stems-Protocol", Protocol)
-	req.Header.Set(FramingHeader, "1")
+	req.Header.Set(FramingHeader, "2")
 	req.Close = true
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	tr := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -89,7 +92,9 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 	if resp.Header.Get("X-Stems-Protocol") != Protocol {
 		return errors.New("backend protocol mismatch")
 	}
-	if resp.Header.Get(FramingHeader) != "1" {
+	sess.Packed = resp.Header.Get(FramingHeader) == "2"
+	pipe.decide(sess.Packed)
+	if f := resp.Header.Get(FramingHeader); f != "1" && f != "2" {
 		// Older renderer or relay: only the trailer says whether it finished.
 		_, e = io.Copy(pipe, resp.Body)
 		if e == nil && resp.Trailer.Get("X-Stems-Status") != "ok" {
@@ -289,9 +294,10 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Stems-Protocol", Protocol)
 	w.Header().Set("Connection", "close")
 	w.Header().Set("Trailer", "X-Stems-Status")
-	framed := r.Header.Get(FramingHeader) == "1"
+	framing := r.Header.Get(FramingHeader)
+	framed := framing == "1" || framing == "2"
 	if framed {
-		w.Header().Set(FramingHeader, "1")
+		w.Header().Set(FramingHeader, framing)
 	}
 	if e = cmd.Start(); e != nil {
 		stdin.Close()
@@ -304,7 +310,11 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	done := make(chan error, 1)
 	body := &idleBody{r: r.Body, c: http.NewResponseController(w)}
 	go func() {
-		_, err := io.Copy(stdin, body)
+		var dst io.Writer = stdin
+		if framing == "2" {
+			dst = newUnpackWriter(stdin)
+		}
+		_, err := io.Copy(dst, body)
 		stdin.Close()
 		if err != nil {
 			cancel()
@@ -314,6 +324,9 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var dst io.Writer = &flushWriter{w: w}
 	if framed {
 		dst = frameWriter{dst}
+	}
+	if framing == "2" {
+		dst = newPackWriter(dst)
 	}
 	_, copyErr := io.Copy(dst, stdout)
 	if copyErr != nil {
