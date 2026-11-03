@@ -48,7 +48,9 @@ while running crashed PID 1 once.
 - Jog light modes only set `/Engine/Deck<N>/Color` in memory. Measured
   2026-11-03: 30 s of Psy Fast or Psy BPM Sync wrote no more to eMMC than Static
   and changed no settings, profile or database file. BPM sync follows the playing
-  deck's tempo (an eighth note per step), not its beat phase.
+  deck's tempo (one beat per step, four beats per colour-wheel turn), not its beat
+  phase. This changes the earlier half-beat timing; the new pack needs deployment
+  before a deck running the previous version changes behaviour.
 - Selecting a drive that carries an Engine profile no longer asks "Load drive
   profile to device?"; the prompt's "No" is taken and the deck keeps its settings.
 
