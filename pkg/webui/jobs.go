@@ -75,9 +75,11 @@ type Jobs struct {
 	queued map[string]bool
 
 	// netease returns the NetEase login a session may fetch audio with, or nil.
-	netease    func(session string, guest bool) *providers.Netease
-	soundcloud func() *providers.SoundCloud
-	bpm        *providers.BPMStore
+	netease func(session string, guest bool) *providers.Netease
+	// neteaseDirect reports whether NetEase tracks skip Deemix; nil tries Deemix first.
+	neteaseDirect func() bool
+	soundcloud    func() *providers.SoundCloud
+	bpm           *providers.BPMStore
 }
 type fetched struct {
 	matched providers.Track
@@ -177,39 +179,49 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 }
 
 // acquire tries the deck's own Deemix service first, which costs no NetEase
-// download quota, then the session's NetEase login. All audio lands on the deck.
+// download quota, then the session's NetEase login. A NetEase track goes
+// straight to NetEase unless the owner chose Deemix first. All audio lands on
+// the deck.
 func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (providers.Track, *deemixclient.Download, error) {
 	if t.Provider == "soundcloud" {
 		dl, err := j.fromSoundCloud(ctx, t)
 		return t, dl, err
 	}
+	j.mu.Lock()
+	lookup, direct := j.netease, j.neteaseDirect
+	j.mu.Unlock()
+	var failures []error
 	if t.Provider == "netease" {
 		if dl := j.p.Deemix.Cached("netease-" + t.ID); dl != nil {
 			return t, dl, nil
 		}
 	}
-	matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
-	if err == nil {
-		var dl *deemixclient.Download
-		if dl, err = j.p.Deemix.Download(ctx, matched, progress); err == nil {
-			j.p.Deemix.Trim(dl.Path)
-			return matched, dl, nil
-		}
-	}
-	failures := []error{err}
-	j.mu.Lock()
-	lookup := j.netease
-	j.mu.Unlock()
-	if lookup != nil {
-		if n := lookup(session, guest); n != nil {
-			matched, dl, err := j.fromNetease(ctx, n, t)
-			if err == nil {
+	if t.Provider != "netease" || direct == nil || !direct() {
+		matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
+		if err == nil {
+			var dl *deemixclient.Download
+			if dl, err = j.p.Deemix.Download(ctx, matched, progress); err == nil {
+				j.p.Deemix.Trim(dl.Path)
 				return matched, dl, nil
 			}
-			failures = append(failures, err)
 		}
+		failures = append(failures, err)
 	}
-	return providers.Track{}, nil, errors.Join(failures...)
+	var n *providers.Netease
+	if lookup != nil {
+		n = lookup(session, guest)
+	}
+	if n == nil {
+		if len(failures) == 0 {
+			return providers.Track{}, nil, errors.New("netease: log in to NetEase Cloud Music on the deck first")
+		}
+		return providers.Track{}, nil, errors.Join(failures...)
+	}
+	matched, dl, err := j.fromNetease(ctx, n, t)
+	if err == nil {
+		return matched, dl, nil
+	}
+	return providers.Track{}, nil, errors.Join(append(failures, err)...)
 }
 
 // addCover embeds the artwork, which Engine reads from the file for its screens. A

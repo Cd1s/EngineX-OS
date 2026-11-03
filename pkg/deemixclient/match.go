@@ -206,8 +206,13 @@ func Resolve(ctx context.Context, c Catalog, source providers.Track) (providers.
 	} else {
 		primary = strings.TrimSpace(strings.Split(primary, ",")[0])
 	}
-	query := fmt.Sprintf("artist:%q track:%q", primary, CleanTitle(source.Title))
-	tracks, err := c.Search(ctx, query)
+	tracks, err := c.Search(ctx, fmt.Sprintf("artist:%q track:%q", primary, CleanTitle(source.Title)))
+	if err == nil && len(tracks) == 0 {
+		// Deezer's field search can come back empty for tracks its plain search
+		// finds (2026-11: even "Daft Punk" "One More Time"). Match below still
+		// requires the same title, version, artist and duration.
+		tracks, err = c.Search(ctx, primary+" "+CleanTitle(source.Title))
+	}
 	if err != nil {
 		return providers.Track{}, err
 	}

@@ -391,6 +391,58 @@ func TestFetchPrefersLocalDeemixThenFallsBackToNetease(t *testing.T) {
 	}
 }
 
+func TestNeteaseModeChoosesTheDownloadSource(t *testing.T) {
+	var flac bytes.Buffer
+	if err := testaudio.FLAC(&flac, testaudio.Song(2)); err != nil {
+		t.Fatal(err)
+	}
+	var neteaseCalls, bridgeCalls atomic.Int32
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(flac.Bytes()) }))
+	defer cdn.Close()
+	netease := netEaseServer(t, func() string { neteaseCalls.Add(1); return cdn.URL + "/song.flac" })
+	dir := t.TempDir()
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bridgeCalls.Add(1)
+		os.WriteFile(filepath.Join(dir, "9.flac"), flac.Bytes(), 0o644)
+		json.NewEncoder(w).Encode(deemixclient.QueueStatus{ID: "j", State: "done", Progress: 1, Path: "9.flac"})
+	}))
+	defer bridge.Close()
+	catalog := &providers.Deezer{BaseURL: fakeDeezer(t).URL}
+	loggedIn := true
+	setup := func(mode string) *Jobs {
+		uiDir := t.TempDir()
+		if mode != "" {
+			os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("netease_mode="+mode+"\n"), 0o644)
+		}
+		jobs := NewJobs(Pipeline{Guard: resourceguard.New(resourceguard.Config{Disabled: true}), Catalog: catalog, Deemix: &deemixclient.Client{BaseURL: bridge.URL, DownloadDir: dir, AllowLossy: true}})
+		t.Cleanup(jobs.Close)
+		New(Config{AccessToken: "c", UIDir: uiDir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) {
+			if !loggedIn {
+				return &providers.Netease{WebURL: netease.URL}, nil
+			}
+			return &providers.Netease{WebURL: netease.URL, Cookie: "MUSIC_U=secret", UserID: 1}, nil
+		}}, jobs)
+		return jobs
+	}
+	ctx := context.Background()
+	track := providers.Track{ID: "31", Provider: "netease", Title: "Found", Artist: "Artist", DurationMS: 200000}
+
+	// Default: straight from NetEase, Deemix never asked.
+	if p, err := setup("").Fetch(ctx, "s", track, false); err != nil || filepath.Base(p) != "netease-31.flac" || bridgeCalls.Load() != 0 || neteaseCalls.Load() != 1 {
+		t.Fatalf("%q %v bridge=%d netease=%d", p, err, bridgeCalls.Load(), neteaseCalls.Load())
+	}
+	os.Remove(filepath.Join(dir, "netease-31.flac"))
+	// Deemix first spares the NetEase quota.
+	if p, err := setup("deemix").Fetch(ctx, "s", track, false); err != nil || filepath.Base(p) != "9.flac" || bridgeCalls.Load() != 1 || neteaseCalls.Load() != 1 {
+		t.Fatalf("%q %v bridge=%d netease=%d", p, err, bridgeCalls.Load(), neteaseCalls.Load())
+	}
+	// Official mode without a NetEase login says what is missing.
+	loggedIn = false
+	if _, err := setup("official").Fetch(ctx, "s", providers.Track{ID: "32", Provider: "netease", Title: "Found", Artist: "Artist"}, false); err == nil || !strings.Contains(err.Error(), "log in to NetEase") || bridgeCalls.Load() != 1 {
+		t.Fatalf("%v bridge=%d", err, bridgeCalls.Load())
+	}
+}
+
 func TestGuestNeverUsesTheOwnersNeteaseLogin(t *testing.T) {
 	state := t.TempDir()
 	os.WriteFile(filepath.Join(state, "netease-owner.json"), []byte(`{"Cookie":"MUSIC_U=owner","UserID":1}`), 0o600)
