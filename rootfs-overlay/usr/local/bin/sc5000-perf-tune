@@ -17,30 +17,28 @@ write_knob() {
     [ "${3:-}" = quiet ] || log "unavailable: $1"
     return 0
 }
-# Dynamic clocks keep the deck cool when idle. Locking everything at maximum
-# ran it above 90 C while doing nothing. Engine's own setup script sets the GPU
-# to performance at each start, so engine.service runs this script afterwards.
-dynamic_frequency() {
-    dir=$1 governor_file=$2 governor=$3 min_source=$4 min_file=$5
-    [ -d "$dir" ] || return 0
-    write_knob "$dir/$governor_file" "$governor"
-    if [ -f "$dir/$min_source" ]; then
-        # The lowest entry; a devfreq list is ascending and a cpufreq value is single.
-        min=$(awk '{print $1; exit}' "$dir/$min_source" 2>/dev/null) || min=
-        case $min in ''|*[!0-9]*) ;; *) write_knob "$dir/$min_file" "$min" ;; esac
-    fi
-    return 0
-}
+# Audio first. CPU clocks stay dynamic but never drop below 1.2 GHz: at 408 MHz
+# the audio thread missed periods (ALSA xruns). Locking 1.6 GHz ran the deck
+# above 90 C; 1.2 GHz measured about 72 C.
 for cpu in 0 1 2 3; do
-    dynamic_frequency "$SYS/devices/system/cpu/cpu$cpu/cpufreq" scaling_governor ondemand cpuinfo_min_freq scaling_min_freq
+    dir=$SYS/devices/system/cpu/cpu$cpu/cpufreq
+    [ -d "$dir" ] || continue
+    write_knob "$dir/scaling_governor" ondemand
+    write_knob "$dir/scaling_min_freq" 1200000
 done
-# All four cores share one clock, so Engine's idle UI thread alone would hold a
-# lower threshold at 1.4 GHz. stream-sync is niced and must not raise the clock.
-write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/up_threshold" 90 quiet
-write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/sampling_down_factor" 1 quiet
+# Ramp up early and hold the raised clock for 10 samples. stream-sync is niced
+# and must not raise the clock.
+write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/up_threshold" 50 quiet
+write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/sampling_down_factor" 10 quiet
 write_knob "$SYS/devices/system/cpu/cpufreq/ondemand/ignore_nice_load" 1 quiet
+# The GPU idles at its lowest clock and leaves heat headroom to the CPU; the UI
+# may drop frames, audio may not. Engine's setup script sets it to performance at
+# each start, so engine.service runs this script afterwards.
 for gpu in "$SYS"/class/devfreq/*ffa30000* "$SYS"/devices/platform/ffa30000.gpu/devfreq/*; do
-    dynamic_frequency "$gpu" governor simple_ondemand available_frequencies min_freq
+    [ -d "$gpu" ] || continue
+    write_knob "$gpu/governor" simple_ondemand
+    min=$(awk '{print $1; exit}' "$gpu/available_frequencies" 2>/dev/null) || min=
+    case $min in ''|*[!0-9]*) ;; *) write_knob "$gpu/min_freq" "$min" ;; esac
 done
 
 write_knob "$PROC/sys/vm/swappiness" 10
@@ -51,6 +49,8 @@ for scheduler in "$SYS"/block/*/queue/scheduler; do
     [ -r "$scheduler" ] || continue
     available=" $(cat "$scheduler") "
     case $available in
+        # Engine's SchedulerManager sets BFQ with strict guarantees; keep it.
+        *\[bfq\]*) ;;
         *[\ \[]mq-deadline[\ \]]*) write_knob "$scheduler" mq-deadline ;;
         *[\ \[]none[\ \]]*) write_knob "$scheduler" none ;;
     esac
