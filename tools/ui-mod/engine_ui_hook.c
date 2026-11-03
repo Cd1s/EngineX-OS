@@ -10,6 +10,8 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <link.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -263,3 +265,46 @@ int _Z21qRegisterResourceDataiPKhS0_S0_(int version, const uchar *tree, const uc
     fprintf(stderr, "engine-ui-hook: %s: %d files\n", w.pack, w.replaced);
     return real(version, copy, names, data);
 }
+
+// Engine's RenderStemsJob sets thread affinity to CPU cores that exist on 6/8-core models
+// (e.g. CPU 4/5), but on the 4-core SC5000 (cores 0..3) pthread_setaffinity_np fails with
+// EINVAL, causing Engine to call QMessageLogger::fatal("Failed setting CPU Affinity") and abort.
+int pthread_setaffinity_np(pthread_t thread, size_t cpusetsize, const cpu_set_t *cpuset) {
+    static int (*real_fn)(pthread_t, size_t, const cpu_set_t *);
+    if (!real_fn)
+        real_fn = (int (*)(pthread_t, size_t, const cpu_set_t *))dlsym(RTLD_NEXT, "pthread_setaffinity_np");
+    if (!real_fn)
+        return 0;
+    int res = real_fn(thread, cpusetsize, cpuset);
+    if (res != 0) {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        if (n <= 0) n = 4;
+        cpu_set_t fallback;
+        CPU_ZERO(&fallback);
+        for (long i = 0; i < n; i++)
+            CPU_SET((int)i, &fallback);
+        res = real_fn(thread, sizeof fallback, &fallback);
+        if (res != 0)
+            return 0; // Prevent fatal abort
+    }
+    return 0;
+}
+
+int pthread_getaffinity_np(pthread_t thread, size_t cpusetsize, cpu_set_t *cpuset) {
+    static int (*real_fn)(pthread_t, size_t, cpu_set_t *);
+    if (!real_fn)
+        real_fn = (int (*)(pthread_t, size_t, cpu_set_t *))dlsym(RTLD_NEXT, "pthread_getaffinity_np");
+    if (!real_fn)
+        return 0;
+    int res = real_fn(thread, cpusetsize, cpuset);
+    if (res != 0) {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        if (n <= 0) n = 4;
+        CPU_ZERO(cpuset);
+        for (long i = 0; i < n; i++)
+            CPU_SET((int)i, cpuset);
+        return 0;
+    }
+    return 0;
+}
+
