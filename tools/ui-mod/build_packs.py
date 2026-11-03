@@ -165,15 +165,6 @@ SERVICES_MAIN = """
 		if (!/(^|\\/)Contents\\//.test(path)) return 1
 		return rgb ? @RGB_SCALE@ : @BANDS_SCALE@
 	}
-	Timer {
-		id: scStemsSort
-		interval: 400
-		onTriggered: {
-			const c = Planck.librarianController.currentCollectionController
-			if (c) c.sortColumn("stems", Qt.DescendingOrder, false)
-		}
-	}
-	function scSortByStems() { scStemsSort.restart() }
 	function scSetSource(id, on) {
 		const list = scSources.filter(s => s !== id)
 		if (on) list.push(id)
@@ -280,14 +271,74 @@ SERVICES_MAIN = """
 		interval: 3000; running: true; repeat: true; triggeredOnStart: true
 		onTriggered: scCall("")
 	}
-	// Stems are rendered on the deck (the hook enables embedded rendering), but
-	// Engine gates the Stems list on pre-rendered playback, which this unit lacks.
-	// Keep the list in the library sidebar so tracks can be dropped on it.
+	// Keep Engine's own Stems list in the library sidebar (the hook enables it on JP07)
+	// and its Performance Pads bar on screen.
 	Timer {
 		interval: 2000; running: true
 		onTriggered: {
-			const p = Planck.getProperty("/Client/Preferences/Profile/Application/ShowStemsList")
-			if (p && p.translator && !p.translator.state) p.translator.state = true
+			for (const path of ["/Client/Preferences/Profile/Application/ShowStemsList", "/GUI/PadsViewEnabled"]) {
+				const p = Planck.getProperty(path)
+				if (p && p.translator && !p.translator.state) p.translator.state = true
+			}
+		}
+	}
+	// A stemmed track opens its deck's pads in STEMS mode. Pads/View only steps
+	// through modes; stop at STEMS, or back where it started if STEMS is not offered.
+	// Engine renders Stems only for library tracks and silently skips streamed rows.
+	// A streamed row dropped on the Stems list is imported by Engine itself from the
+	// file stream-sync downloaded, onto a deck that is not playing, then queued.
+	function scStemStream(uid) {
+		const lib = Planck.librarianController.collectionController
+		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
+		if (!m) return false
+		const deck = [2, 1].find(d => !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
+		if (!deck) return true // both decks playing: never interrupt playback
+		const x = new XMLHttpRequest()
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/stems/source?id=" + m[1])
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4 || x.status !== 200) return
+			const url = "file://" + encodeURI(JSON.parse(x.responseText).path)
+			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = url
+			scStemImport.url = url
+			scStemImport.tries = 20
+			scStemImport.restart()
+		}
+		x.send()
+		return true
+	}
+	// Imports land in the deck's internal library, whose universal ids are plain
+	// track ids. shortcut: scans ids 1-500; widen if that library ever grows past it.
+	Timer {
+		id: scStemImport
+		property string url: ""
+		property int tries: 0
+		interval: 500; repeat: true
+		onTriggered: {
+			const ids = Array.from({ length: 500 }, (_, i) => i + 1)
+			const lines = (Planck.librarianController.collectionController.getTrackUrisFromUniversalIds(ids) || "").split("\\n")
+			const hit = lines.find(l => l.startsWith(url + "?"))
+			const id = hit && /[?&]trackId=(\\d+)/.exec(hit)
+			if (id) Planck.librarianController.stemsQueueManager.startRenderTracks(id[1])
+			if (id || --tries <= 0) stop()
+		}
+	}
+	function scPadsToStems(deck) {
+		const p = Planck.getProperty("/Engine/Deck%1/Pads/View".arg(deck))
+		const t = p && p.translator
+		if (!t) return
+		const start = t.string
+		for (let i = 0; i < 16 && t.string !== "STEMS"; i++) {
+			t.incValue(0, 1, 0, true)
+			if (t.string === start) return
+		}
+	}
+	Instantiator {
+		model: [1, 2]
+		delegate: QtObject {
+			readonly property QObjProperty pStemmed: Planck.getProperty("/Engine/Deck%1/Track/Stemmed".arg(modelData))
+			readonly property bool stemmed: !!pStemmed && !!pStemmed.translator && pStemmed.translator.state
+			onStemmedChanged: if (stemmed) root.scPadsToStems(modelData)
+			Component.onCompleted: if (stemmed) root.scPadsToStems(modelData)
 		}
 	}
 	Instantiator {
@@ -507,70 +558,6 @@ JOG_ENTRY = """
 		},
 """
 
-STEMS_HEADER_ENTRY = """
-	// SC5000 mod: Engine lists Stems in the sidebar only on players with pre-rendered
-	// Stems playback, which this unit lacks, so its C++ model never adds the row. This
-	// entry stands in for it on the playlist sidebar's top bar: drop tracks or a
-	// playlist on it to render stems (Engine's own Stems list calls), tap it to list
-	// the whole collection with stemmed tracks first.
-	Rectangle {
-		id: scStems
-		// The playlist sidebar is the view showing the selected drive's craylist model.
-		readonly property var craylists: Planck.librarianController.devicesController.selectedDeviceCraylistModel
-		readonly property bool active: !!craylists && !!breadcrumbViewHeader.breadcrumbView && breadcrumbViewHeader.breadcrumbView.model === craylists && !breadcrumbViewHeader.backButtonVisible && Config.device.hasStemsProEmbeddedRendering
-		visible: active
-		z: 6
-		anchors { right: parent.right; rightMargin: 14; verticalCenter: parent.verticalCenter }
-		width: 170; height: 54; radius: 27
-		color: scStemsDrop.containsDrag ? Qt.darker(Style.systemBlue01Color, 1.2) : scStemsTap.pressed ? Style.focus02Color : Style.surface03Color
-		border { width: 2; color: scStemsDrop.containsDrag ? Style.icon02Color : Style.systemBlue01Color }
-		Row {
-			anchors.centerIn: parent
-			spacing: 8
-			Icons.ColoredImage {
-				anchors.verticalCenter: parent.verticalCenter
-				width: 30; height: 30
-				source: "qrc:/UIKit.1/UIKit/Icons/Stems30x30.png"
-				color: Style.font02Color
-			}
-			Text {
-				anchors.verticalCenter: parent.verticalCenter
-				text: root.scT("Stems")
-				color: Style.font02Color
-				font: Style.fontH2
-			}
-		}
-		MouseArea {
-			id: scStemsTap
-			anchors.fill: parent
-			enabled: scStems.active
-			onClicked: {
-				const list = breadcrumbViewHeader.stackView.currentItem
-				if (list) list.currentRowIndex = -1
-				root.scSortByStems()
-			}
-		}
-		AIRTouchDropZone {
-			id: scStemsDrop
-			anchors.fill: parent
-			enabled: scStems.active
-			dropKeys: [TouchDragTracksToStemsList, TouchDragListToStemsList]
-			onDrop: {
-				const queue = Planck.librarianController.stemsQueueManager
-				if (!queue) return
-				if (info.matchingKeys.indexOf(TouchDragListToStemsList) > -1) {
-					const lists = Planck.librarianController.craylistController
-					queue.startRenderTracksFromListPath(lists.getListPath(info.payload), lists.getSourceDevice(info.payload))
-				} else if (info.matchingKeys.indexOf(TouchDragTracksToStemsList) > -1) {
-					const ids = []
-					for (const key in info.payload) ids.push(info.payload[key].uniqueID)
-					if (ids.length) queue.startRenderTracks(ids.join(";"))
-				}
-			}
-		}
-	}
-"""
-
 LANGUAGE_ENTRY = """
 		EntryBase.ListEntry {
 			text: "Language"
@@ -646,6 +633,9 @@ def edits(dev: bool):
             ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG),
         ],
         v + "Common/Waveform/Waveform.qml": wave,
+        v + "BrowseView/Components/Craylist.qml": [(
+            "				var trackInfo = info.payload[key]\n				tracks.push(trackInfo.uniqueID)\n			}\n			Planck.librarianController.stemsQueueManager.startRenderTracks(",
+            "				var trackInfo = info.payload[key]\n				if (!root.scStemStream(trackInfo.uniqueID)) tracks.push(trackInfo.uniqueID)\n			}\n			if (tracks.length) Planck.librarianController.stemsQueueManager.startRenderTracks(")],
         v + "Common/WaveformOverview/WaveformOverview.qml": deck_overview,
         v + "Common/WaveformOverview/WaveformOverviewLibrary.qml": overview,
         # Bindings, not aliases. WaveformOverviewRotatable aliases these two
@@ -686,7 +676,6 @@ def edits(dev: bool):
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewHeader.qml": [
             ("text: breadcrumbViewHeader.title\n", 'text: ["My Playlists", "My Collection"].indexOf(breadcrumbViewHeader.title) >= 0 ? root.scT(breadcrumbViewHeader.title) : breadcrumbViewHeader.title\n'),
-            ("	Rectangle {\n		id: background\n", STEMS_HEADER_ENTRY + "\n	Rectangle {\n		id: background\n"),
         ],
         v + "BrowserSource/SourceScreen.qml": [("						AvailableSource {\n", AVAILABLE_TILES + "						AvailableSource {\n")],
         v + "Streaming/StreamingDialog.qml": [
