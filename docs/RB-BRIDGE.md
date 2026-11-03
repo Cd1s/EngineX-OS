@@ -10,8 +10,6 @@ qCompress 格式。不会打开 `PIONEER/` 或音频文件进行写入，不安�
 go build -o bin/rb-bridge ./cmd/rb-bridge
 bin/rb-bridge --mount-path /media/usb
 bin/rb-bridge --mount-path /media/usb --smart-match 123
-bin/rb-bridge --watch --watch-roots /media,/run/media,/mnt
-bin/rb-bridge --watch --mount-path /media/usb
 bin/rb-bridge --prolink --bind 0.0.0.0
 ```
 
@@ -21,8 +19,11 @@ bin/rb-bridge --prolink --bind 0.0.0.0
 
 单次转换输出 JSON（Added / Updated / Unchanged / PlaylistsChanged / Bypassed），
 错误输出到 stderr，退出码为 1。SIGINT / SIGTERM 取消守护进程。
-监听器默认每两秒检查挂载目录，深度最多三级，遇到 PIONEER 即停止下探。
-每次挂载只成功导入一次，失败十秒后重试；不在已导入的播放介质上持续重写数据库。
+`--mount-path` 先只看 `export.pdb` 的大小和修改时间：与 `Database2/.rb-bridge-stamp` 记录的
+上次导入一致且 `m.db` 非空时直接旁路（实机 5966 首的 U 盘约 30 ms），不读导出库、不碰音频文件。
+`--watch` 已停用，只打印一行就退出：它在 Engine 打开数据库时反复写入（`SQLITE_BUSY`，
+真机上还出现过损坏）。导入由 edisksd 挂载 hook 在 Engine 接管前完成。碟机只读 `/etc`
+里的旧单元仍带 `--watch --prolink`，所以这个参数保留为立即退出，而不是报错重启。
 不负责挂载文件系统；APFS/HFS+ 驱动、只读盘 overlay 均在本工具范围外。
 
 ## 数据与兼容性
