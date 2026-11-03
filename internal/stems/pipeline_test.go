@@ -2,18 +2,58 @@ package stems
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
+	"math"
+	"math/rand"
 	"testing"
 )
 
-// The renderer lags three blocks behind and drains after done; Engine must get
-// one immediate reply per block, never more than maxBlock frames, and every
-// frame in order.
+func f32s(v []float32) []byte {
+	b := make([]byte, 0, len(v)*4)
+	for _, f := range v {
+		b = binary.LittleEndian.AppendUint32(b, math.Float32bits(f))
+	}
+	return b
+}
+
+// engineReplies parses what Engine received after the greeting into one
+// float32 stream per return channel, checking each reply's size.
+func engineReplies(t *testing.T, got []byte, planes, maxBlock int) (streams [][]float32, replies, last int) {
+	t.Helper()
+	streams = make([][]float32, planes)
+	var n int
+	var payload []byte
+	s := stream{data: func(b []byte) {
+		payload = append(payload, b...)
+		if len(payload) == n*planes*4 {
+			for i := range streams {
+				for k := 0; k < n; k++ {
+					streams[i] = append(streams[i], math.Float32frombits(binary.LittleEndian.Uint32(payload[(i*n+k)*4:])))
+				}
+			}
+		}
+	}}
+	if err := s.feed(got, func(f map[string]string) (int64, error) {
+		v, err := count(f, "returnFrames", int64(maxBlock))
+		n, payload, replies, last = int(v), payload[:0], replies+1, int(v)
+		return v * int64(planes) * 4, err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return streams, replies, last
+}
+
+// The renderer lags three blocks behind with uneven reply sizes and drains
+// after done; Engine must get one immediate reply per block, never more than
+// maxBlock frames, and every return channel's frames in order.
 func TestPipelineAnswersEngineWithoutWaiting(t *testing.T) {
 	var out bytes.Buffer
 	p := newPipeline(&out)
+	p.unpacked()
 	feed := func(s string) {
-		if err := p.fromEngine([]byte(s)); err != nil {
+		if _, err := p.fromEngine([]byte(s)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -22,20 +62,26 @@ func TestPipelineAnswersEngineWithoutWaiting(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	const block, frame = 4, 1 * 4 * 4 // mono: 4 stems × float32
-	var sent []byte
-	reply := func(n int) string { // renderer reply with numbered frames
-		b := make([]byte, n*frame)
-		for i := range b {
-			b[i] = byte(len(sent) + i)
+	const block, planes = 4, 4 // mono: four stems
+	want := make([][]float32, planes)
+	next := float32(0)
+	reply := func(n int) string { // a planar reply of numbered samples
+		var v []float32
+		for i := 0; i < planes; i++ {
+			for k := 0; k < n; k++ {
+				next++
+				v = append(v, next)
+				want[i] = append(want[i], next)
+			}
 		}
-		sent = append(sent, b...)
-		return fmt.Sprintf("returnFrames=%d\n\n", n) + string(b)
+		return fmt.Sprintf("returnFrames=%d\n\n", n) + string(f32s(v))
 	}
 	render("session=FFFFFFFFFFFFFFFF\n\n")
 	feed("numChannels=1\nsampleRate=44100\nmaxBlockSize=4\n\n")
 	render("preparing=ready\n\npreparing=ready\nnumReturnChannels=4\n\n")
 	greeting := out.Len()
+	sizes := []int{3, 1, 4, 2, 4, 4, 3, 3} // 24 frames over 6 blocks plus drain
+	r := 0
 	for i := 0; i < 6; i++ {
 		before := out.Len()
 		feed("action=block\nnumSamples=4\n\n")
@@ -47,28 +93,97 @@ func TestPipelineAnswersEngineWithoutWaiting(t *testing.T) {
 			t.Fatalf("block %d got no immediate reply", i)
 		}
 		if i >= 3 {
-			render(reply(block)) // reply to block i-3
+			render(reply(sizes[r])) // reply to block i-3
+			r++
 		}
 	}
 	feed("action=done\n\n")
-	render(reply(block) + reply(block) + reply(block)) // blocks 3-5
-	render(reply(0))                                   // the drain's closing zero
+	for ; r < len(sizes); r++ {
+		render(reply(sizes[r]))
+	}
+	render("returnFrames=0\n\n")
 	if err := p.Complete(); err != nil {
 		t.Fatal(err)
 	}
-	// Parse what Engine got: every reply within maxBlock, frames in order.
-	var got []byte
-	s := stream{data: func(b []byte) { got = append(got, b...) }}
-	replies, last := 0, -1
-	if err := s.feed(out.Bytes()[greeting:], func(f map[string]string) (int64, error) {
-		n, err := count(f, "returnFrames", block)
-		replies, last = replies+1, int(n)
-		return n * frame, err
-	}); err != nil {
+	got, replies, last := engineReplies(t, out.Bytes()[greeting:], planes, block)
+	for i := range want {
+		if fmt.Sprint(got[i]) != fmt.Sprint(want[i]) {
+			t.Fatalf("plane %d: Engine got %v, want %v", i, got[i], want[i])
+		}
+	}
+	if last != 0 || replies < 7 {
+		t.Fatalf("%d replies, last %d", replies, last)
+	}
+}
+
+// Packed replies: three stems cross as int16 and the deck rebuilds melody
+// from its input, so Engine still gets four float32 stems that sum to it.
+func TestPipelinePackedRebuildsMelody(t *testing.T) {
+	var out bytes.Buffer
+	p := newPipeline(&out)
+	render := newPackWriter(p) // the renderer's side of the wire
+	feed := func(b []byte) {
+		if _, err := p.fromEngine(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const ch, block = 2, 1024
+	share := [4]float32{0.3, 0.2, 0.1, 0.4}
+	rng := rand.New(rand.NewSource(1))
+	var input [][]float32 // per block, planar
+	render.Write([]byte("session=FFFFFFFFFFFFFFFF\n\n"))
+	feed([]byte(fmt.Sprintf("numChannels=%d\nsampleRate=44100\nmaxBlockSize=%d\n\n", ch, block)))
+	render.Write([]byte("preparing=ready\nnumReturnChannels=8\n\n"))
+	greeting := out.Len()
+	// The renderer's reply to a block: each stem a share of that block's input.
+	answer := func(x []float32, n int) {
+		var v []float32
+		for s := 0; s < 4; s++ {
+			for c := 0; c < ch; c++ {
+				for k := 0; k < n; k++ {
+					v = append(v, x[c*n+k]*share[s])
+				}
+			}
+		}
+		if _, err := render.Write([]byte(fmt.Sprintf("returnFrames=%d\n\n", n) + string(f32s(v)))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		x := make([]float32, ch*block)
+		for k := range x {
+			x[k] = float32(rng.NormFloat64() * 0.5)
+		}
+		input = append(input, x)
+		feed(append([]byte(fmt.Sprintf("action=block\nnumSamples=%d\n\n", block)), f32s(x)...))
+		if i >= 2 {
+			answer(input[i-2], block)
+		}
+	}
+	feed([]byte("action=done\n\n"))
+	answer(input[3], block)
+	answer(input[4], block)
+	render.Write([]byte("returnFrames=0\n\n"))
+	if err := p.Complete(); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, sent) || last != 0 || replies < 7 {
-		t.Fatalf("Engine got %d of %d bytes in %d replies, last %d", len(got), len(sent), replies, last)
+	got, _, last := engineReplies(t, out.Bytes()[greeting:], 4*ch, block)
+	if last != 0 {
+		t.Fatal("no closing zero")
+	}
+	for c := 0; c < ch; c++ {
+		for i, x := range input {
+			for k := 0; k < block; k++ {
+				at := i*block + k
+				sum := got[c][at] + got[ch+c][at] + got[2*ch+c][at] + got[3*ch+c][at]
+				if d := math.Abs(float64(sum - x[c*block+k])); d > 1e-6 {
+					t.Fatalf("stems sum off by %g", d)
+				}
+				if d := math.Abs(float64(got[c][at] - x[c*block+k]*share[0])); d > 1.0/packScale {
+					t.Fatalf("vocals off by %g", d)
+				}
+			}
+		}
 	}
 }
 
@@ -76,6 +191,7 @@ func TestPipelineAnswersEngineWithoutWaiting(t *testing.T) {
 func TestPipelineWaitsForTheFinalZero(t *testing.T) {
 	var out bytes.Buffer
 	p := newPipeline(&out)
+	p.unpacked()
 	p.Write([]byte("session=x\n\n"))
 	p.fromEngine([]byte("numChannels=1\nsampleRate=44100\nmaxBlockSize=4\n\n"))
 	p.Write([]byte("numReturnChannels=4\n\n"))
@@ -87,5 +203,42 @@ func TestPipelineWaitsForTheFinalZero(t *testing.T) {
 	p.Write([]byte("returnFrames=0\n\n"))
 	if err := p.Complete(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Packed uploads: Engine's float32 blocks go up as int16 and the renderer's
+// unpackWriter restores them, within one quantization step.
+func TestPackedUploadRoundTrip(t *testing.T) {
+	p := newPipeline(io.Discard)
+	var worker bytes.Buffer
+	u := newUnpackWriter(&worker)
+	send := func(b []byte) int {
+		up, err := p.fromEngine(b)
+		if err == nil {
+			_, err = u.Write(up)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(up)
+	}
+	init := "numChannels=2\nsampleRate=44100\nmaxBlockSize=1024\n\n"
+	send([]byte(init))
+	x := make([]float32, 2*1000)
+	for k := range x {
+		x[k] = float32(math.Sin(float64(k)) * 0.9)
+	}
+	head := "action=block\nnumSamples=1000\n\n"
+	if n := send(append([]byte(head), f32s(x)...)); n != len(head)+len(x)*2 {
+		t.Fatalf("uploaded %d bytes, want %d", n, len(head)+len(x)*2)
+	}
+	got := worker.Bytes()[len(init)+len(head):]
+	if len(got) != len(x)*4 {
+		t.Fatalf("worker got %d bytes", len(got))
+	}
+	for k, want := range x {
+		if d := math.Abs(float64(math.Float32frombits(binary.LittleEndian.Uint32(got[k*4:])) - want)); d > 0.5/packScale+1e-9 {
+			t.Fatalf("sample %d off by %g", k, d)
+		}
 	}
 }

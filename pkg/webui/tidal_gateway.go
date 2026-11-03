@@ -120,6 +120,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("POST /v1/sc5000/bpm", s.bpmConfigPost)
 	g.mux.HandleFunc("GET /v1/sc5000/art", g.art)
 	g.mux.HandleFunc("GET /v1/sc5000/stems/source", g.stemsSource)
+	g.mux.HandleFunc("GET /v1/sc5000/stems/local", g.stemsLocal)
 	g.mux.HandleFunc("GET /v1/sc5000/relay", s.relayConfigGet)
 	g.mux.HandleFunc("POST /v1/sc5000/relay", s.relayConfigPost)
 	g.mux.HandleFunc("GET /v1/ping", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
@@ -397,8 +398,8 @@ func thumbURL(t providers.Track) string {
 }
 
 const (
-	maxArtEntries = 300
-	maxArtBytes   = 2 << 20
+	maxArtEntries = 128
+	maxArtBytes   = 512 << 10
 )
 
 // art serves a list row's thumbnail, keeping the most recently fetched in memory.
@@ -491,6 +492,9 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, v)
 	}
+	if n := len(g.s.stemmed(scope)); n > 0 {
+		add(playlistJSON(stemsListID(scope), "Stems", "", n))
+	}
 	for i, v := range sessions {
 		for _, p := range lists[i] {
 			ref := playlistRef{v.ID, v.Provider, p}
@@ -515,6 +519,10 @@ func (g *tidalGateway) playlist(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("uuid")
 	if id == hintPlaylist {
 		respond(w, playlistJSON(hintPlaylist, hintTitle(g.s.scope()), "", 0))
+		return
+	}
+	if scope := g.s.scope(); id == stemsListID(scope) {
+		respond(w, playlistJSON(id, "Stems", "", len(g.s.stemmed(scope))))
 		return
 	}
 	ref, ok := g.list(id)
@@ -562,6 +570,10 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("uuid")
 	if id == hintPlaylist {
 		respond(w, page(r, 500, []any{}))
+		return
+	}
+	if scope := g.s.scope(); id == stemsListID(scope) {
+		g.stemsListTracks(w, r, scope)
 		return
 	}
 	ref, ok := g.list(id)
@@ -618,6 +630,8 @@ func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 			}
 		case "spotify":
 			tracks, err = v.p.Tracks(r.Context(), providers.SpotifyLikedID)
+		case "soundcloud":
+			tracks, err = v.p.Tracks(r.Context(), "likes")
 		}
 		if err == nil && len(tracks) <= maxPlaylistTracks {
 			g.s.cfg.BPM.Enrich(r.Context(), tracks)
@@ -847,6 +861,11 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 	p, err := g.s.jobs.Fetch(r.Context(), ref.session, ref.track, ref.guest)
 	if err != nil {
 		fail(w, 502, err)
+		return
+	}
+	// The row joins the Stems list of the service it was stemmed from.
+	if err = g.s.addStemmed(g.s.scope(), stemmedTrack{ref.track, ref.session, ref.guest, p}); err != nil {
+		fail(w, 500, err)
 		return
 	}
 	respond(w, map[string]any{"path": p})

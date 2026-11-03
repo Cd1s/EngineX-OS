@@ -61,7 +61,7 @@ SERVICES_MAIN = """
 	property real scJogHue: 0
 	property var scJogSaved: null
 	function scDeckList() { return (root.decks && root.decks.length ? root.decks : [1, 2]).map(d => parseInt(d)) }
-	function scDeckColor(deck) { return Planck.getProperty("/Engine/Deck" + deck + "/Color").translator }
+	function scDeckColor(deck) { const p = Planck.getProperty("/Engine/Deck" + deck + "/Color"); return p ? p.translator : null }
 	// BPM sync: the tempo of the deck that is playing, the active one first; 0 when
 	// nothing plays. Rounded so the pitch fader does not restart the timer constantly.
 	function scPlayingBPM() {
@@ -92,9 +92,9 @@ SERVICES_MAIN = """
 		onRunningChanged: {
 			const decks = root.scDeckList()
 			if (running) {
-				root.scJogSaved = decks.map(d => String(root.scDeckColor(d).color))
+				root.scJogSaved = decks.map(d => { const c = root.scDeckColor(d); return c ? String(c.color) : "" })
 			} else if (root.scJogSaved) {
-				decks.forEach((d, i) => { if (root.scJogSaved[i]) root.scDeckColor(d).color = root.scJogSaved[i] })
+				decks.forEach((d, i) => { const c = root.scDeckColor(d); if (c && root.scJogSaved[i]) c.color = root.scJogSaved[i] })
 				root.scJogSaved = null
 			}
 		}
@@ -102,7 +102,8 @@ SERVICES_MAIN = """
 			const step = root.scJog === "fast" ? 0.05 : root.scJog === "bpm" && root.scJogBPM > 0 ? 0.25 : 0.01
 			root.scJogHue = (root.scJogHue + step) % 1
 			root.scDeckList().forEach((d, i) => {
-				root.scDeckColor(d).color = Qt.hsva((root.scJogHue + i * 0.35) % 1, 1, 1, 1)
+				const c = root.scDeckColor(d)
+				if (c) c.color = Qt.hsva((root.scJogHue + i * 0.35) % 1, 1, 1, 1)
 			})
 		}
 	}
@@ -342,7 +343,25 @@ SERVICES_MAIN = """
 			readonly property bool stemmed: !!pStemmed && !!pStemmed.translator && pStemmed.translator.state
 			onStemmedChanged: if (stemmed) root.scPadsToStems(deckIdx)
 			Component.onCompleted: if (stemmed) root.scPadsToStems(deckIdx)
+			readonly property QObjProperty pUri: Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(deckIdx))
+			readonly property string uri: pUri && pUri.translator ? pUri.translator.string : ""
+			onUriChanged: root.scSwapStemmed(deckIdx, uri)
 		}
+	}
+	// A streamed row with a stemmed local copy (the services' own Stems lists)
+	// is swapped for that copy as it loads, so the deck has its Stems. Engine's
+	// own import finds the track it already imported; a playing deck is left alone.
+	function scSwapStemmed(deck, uri) {
+		const m = /^streaming:\\/\\/TIDAL\\/Track\\/(\\d+)$/.exec(uri)
+		if (!m) return
+		const x = new XMLHttpRequest()
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/stems/local?id=" + m[1])
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4 || x.status !== 200) return
+			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return
+			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = "file://" + encodeURI(JSON.parse(x.responseText).path)
+		}
+		x.send()
 	}
 	Instantiator {
 		id: scProviders
