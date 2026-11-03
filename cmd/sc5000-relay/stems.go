@@ -25,6 +25,9 @@ const (
 	stemsProtocol      = "engine-5.0.4"
 	stemsStatusTrailer = "X-Stems-Status"
 	stemsTokenFile     = "/etc/sc5000-stems/token"
+	// stemsFramingHeader matches internal/stems.FramingHeader: the deck asks
+	// sc5000-stemsd for an in-body closing frame, so it need not see the trailer.
+	stemsFramingHeader = "X-Stems-Framing"
 	// stemsCredential is the LoadCredential= name in the systemd drop-in.
 	stemsCredential = "stems-token"
 	stemsIdleRead   = 120 * time.Second
@@ -197,6 +200,9 @@ func (p *stemsProxy) engine(w http.ResponseWriter, r *http.Request) {
 	out, _ := http.NewRequestWithContext(ctx, "POST", p.url("/v1/engine"), body)
 	out.Header.Set("Content-Type", "application/octet-stream")
 	out.Header.Set("X-Stems-Protocol", stemsProtocol)
+	if v := r.Header.Get(stemsFramingHeader); v != "" {
+		out.Header.Set(stemsFramingHeader, v)
+	}
 	if token != "" {
 		out.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -232,6 +238,9 @@ func (p *stemsProxy) engine(w http.ResponseWriter, r *http.Request) {
 	// Tell any buffering edge proxy (nginx) to pass bytes straight through.
 	h.Set("X-Accel-Buffering", "no")
 	h.Set("Trailer", stemsStatusTrailer)
+	if v := resp.Header.Get(stemsFramingHeader); v != "" {
+		h.Set(stemsFramingHeader, v)
+	}
 	w.WriteHeader(200)
 	_ = rc.Flush()
 

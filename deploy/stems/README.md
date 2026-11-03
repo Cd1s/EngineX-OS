@@ -51,6 +51,21 @@ remote-build -- '. /etc/profile.d/buildtools.sh; GOOS=linux GOARCH=arm GOARM=7 C
 `render.py in.wav outdir --client <stems-processor>` runs a real WAV through
 any client and writes vocals/bass/drums/melody WAVs.
 
+## Session end
+
+The client sends `X-Stems-Framing: 1`; `sc5000-stemsd` then wraps its reply in
+`'D'` + uint32 length frames and closes with `'E'` + `ok|failed` only after the
+worker exited cleanly. The relay passes the header through. The client exits 0
+only on `E ok` with a session `internal/stems.Session` finds complete (done,
+every frame returned, `returnFrames=0` last), so it no longer waits for an
+HTTP trailer the deck's edge proxy never delivered (2026-11-03: a 120 s idle
+timeout and exit 1 after every render). Old clients or backends fall back to
+the trailer. A greeting-only run (`</dev/null`) still exits 0.
+
+`stems-probe [-seconds N] [-block N] <client>` plays Engine against a client:
+lockstep blocks, `done`, stdin left open, and reports per-block wait and how
+long the child took to exit. See `docs/STEMS-REMOTE-ACCEPTANCE-20261103.md`.
+
 ## Deploy
 
 1. Back up the deployed relay binary, unit, `/opt/sc5000-stems`, the stemsd

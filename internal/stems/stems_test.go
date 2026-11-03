@@ -26,47 +26,8 @@ func TestWorker(t *testing.T) {
 	os.Stdout.Write(bytes.ToUpper(p))
 	os.Exit(0)
 }
-func TestFullDuplexAndSlotRelease(t *testing.T) {
-	b := &Backend{Secret: secret, Worker: []string{os.Args[0], "-test.run=TestWorker", "--", "bridge-worker"}, Slot: make(chan struct{}, 1)}
-	s := httptest.NewServer(b)
-	defer s.Close()
-	for i := 0; i < 2; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-		in, send := io.Pipe()
-		out, receive := io.Pipe()
-		done := make(chan error, 1)
-		go func() { e := Proxy(ctx, s.URL, secret, in, receive); receive.CloseWithError(e); done <- e }()
-		greeting := make([]byte, len("session=FFFFFFFFFFFFFFFF\n\n"))
-		if _, e := io.ReadFull(out, greeting); e != nil {
-			cancel()
-			t.Fatal(e)
-		}
-		if string(greeting) != "session=FFFFFFFFFFFFFFFF\n\n" {
-			t.Fatal(string(greeting))
-		}
-		// Do not close input: EOF on worker stdout must still release the render slot.
-		send.Write([]byte("abcd"))
-		tail, e := io.ReadAll(out)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if string(tail) != "ABCD" {
-			t.Fatal(string(tail))
-		}
-		if e = <-done; e != nil {
-			t.Fatal(e)
-		}
-		send.Close()
-		cancel()
-		until := time.Now().Add(time.Second)
-		for len(b.Slot) != 0 && time.Now().Before(until) {
-			time.Sleep(time.Millisecond)
-		}
-		if len(b.Slot) != 0 {
-			t.Fatal("render slot leaked after worker completion")
-		}
-	}
-}
+
+// Full duplex, slot release and framing: see TestFramedSessionEndsWithUploadOpen.
 func TestAuthenticationAndBusy(t *testing.T) {
 	b := &Backend{Secret: secret, Slot: make(chan struct{}, 1)}
 	s := httptest.NewServer(b)
