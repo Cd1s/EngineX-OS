@@ -119,6 +119,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/sc5000/bpm", s.bpmConfigGet)
 	g.mux.HandleFunc("POST /v1/sc5000/bpm", s.bpmConfigPost)
 	g.mux.HandleFunc("GET /v1/sc5000/art", g.art)
+	g.mux.HandleFunc("GET /v1/sc5000/stems/source", g.stemsSource)
 	g.mux.HandleFunc("GET /v1/sc5000/relay", s.relayConfigGet)
 	g.mux.HandleFunc("POST /v1/sc5000/relay", s.relayConfigPost)
 	g.mux.HandleFunc("GET /v1/ping", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("OK")) })
@@ -828,6 +829,27 @@ func (g *tidalGateway) streamURL(w http.ResponseWriter, r *http.Request) {
 		address, codec := g.streamTarget(r, id, ref)
 		respond(w, map[string]any{"url": address, "codec": codec, "soundQuality": "LOSSLESS", "trackId": id})
 	}
+}
+
+// stemsSource returns the local file of a streamed row, downloading it if needed,
+// so the deck can stem it as a local track. Only a Stems request calls this;
+// playback keeps using stream.
+func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
+	_, ref, ok := g.lookup(w, r.URL.Query().Get("id"))
+	if !ok {
+		return
+	}
+	if g.s.jobs == nil {
+		fail(w, 503, errors.New("worker unavailable"))
+		return
+	}
+	http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	p, err := g.s.jobs.Fetch(r.Context(), ref.session, ref.track, ref.guest)
+	if err != nil {
+		fail(w, 502, err)
+		return
+	}
+	respond(w, map[string]any{"path": p})
 }
 
 // stream serves a finished download (with Range support) or downloads it now;

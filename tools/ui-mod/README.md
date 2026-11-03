@@ -37,11 +37,9 @@ while running crashed PID 1 once.
   listings.
 - Encoder navigation of the Source screen reaches only stock rows. The three
   service rows are touch-only.
-- Engine adds its Stems list row only on players with pre-rendered Stems playback
-  (`Planck.hasStemsPreRenderedPlayback()` is false here), so its C++ craylist model
-  never has it. The pack puts a "Stems" entry on the playlist sidebar's top bar
-  instead: drop tracks or a playlist on it to render stems (the stock Stems list
-  calls), tap it to sort the collection by Stems. It is not a real list.
+- Stems use Engine's own sidebar Stems list, which the hook enables on JP07.
+  The pack keeps Engine's Performance Pads bar on and switches a deck's pads
+  to STEMS when a stemmed track loads.
 - The deck overview is stretched only for tracks whose path has a `Contents/`
   folder (a rekordbox USB export). Streams, Stream downloads and Engine Library
   music keep stock height.
@@ -72,15 +70,24 @@ all touched pages, including spans larger than a page, and returns to RX before
 Engine starts. A protection failure aborts startup rather than running a partial
 Stems trampoline set. The Engine file remains unchanged.
 
-On the current deck the hook is installed at
-`/data/sc5000-custom/lib/libengine_ui_hook.so`, with the existing
-`/etc/sc5000/libengine-ui-hook.so` preload path linked to it. The static ARMv7
-client lives at `/data/sc5000-custom/bin/stems-processor` (0755).
-`stems-runtime-prepare` is installed at `/etc/sc5000/stems-runtime-prepare` and
-called by the existing `engine-ui-guard pre` entry. It overlays the read-only
-`/usr/local/bin` directory, preserving vendor commands, and adds the client
-symlink. Upper/work directories live under
-`/data/sc5000-custom/stems-bin-overlay`.
+The playback edit at `0x8429b0` uses an ARM trampoline at the feature-evaluation
+join point. It only changes the original `StemsPreRenderedPlayback` object
+(`base + 0x29bc83c`), binding its result pointer to the native true byte
+(`base + 0x258e185`). It restores r0/r1, replays the two displaced frame-relative
+loads, and resumes before the original comparison at `0x8429b8`. Other features
+keep their computed values. The separate `0x6d3e00` edit preserves the existing
+ShowStemsList eligibility result across the extra device feature gate, allowing
+the native type-5 Stems row. Both patches require matching original instructions.
+
+The trampoline has its own RX mapping. Device configuration remains unchanged;
+changing JP07's strings to `Unlocked` is rejected by this Engine's configuration
+validation and is not part of this implementation. These offsets and object
+addresses apply only to the Engine build identified above.
+
+Check the binding and other-feature isolation on IN with:
+
+    arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -o out/test-stems-feature tools/ui-mod/test_stems_feature.c -ldl -lpthread
+    qemu-arm -L /usr/arm-linux-gnueabihf out/test-stems-feature
 
 The client additionally requires the separately provisioned private
 `/etc/sc5000-stems/token` and the LAN backend. Installing the client and seeing

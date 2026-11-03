@@ -63,11 +63,12 @@ on controller and device support. Affinity also works without weight support.
 These settings do not reserve CPU0 against every stock daemon or unmovable
 kernel interrupt, and do not replace a verified RT kernel/boot policy.
 
-`sc5000-perf-tune` sets CPU0-3 to `ondemand` with `cpuinfo_min_freq` as the
-minimum, and the `ffa30000.gpu` devfreq to `simple_ondemand` at its lowest
-frequency, so the deck clocks down when idle. It writes sysctl values (swappiness
-10, dirty background 5, dirty ratio 15, file-max 1048576), and selects
-`mq-deadline`, otherwise `none`, when advertised. Movable IRQs and their
+`sc5000-perf-tune` sets CPU0-3 to `ondemand` with a 1.2 GHz minimum (lower
+clocks caused ALSA xruns), `up_threshold` 50 and `sampling_down_factor` 10, and the `ffa30000.gpu` devfreq
+to `simple_ondemand` at its lowest frequency (audio over UI frame rate). It writes sysctl
+values (swappiness 10, dirty background 5, dirty ratio 15, file-max 1048576),
+and selects `mq-deadline`, otherwise `none`, when advertised, except on devices
+where Engine already chose `bfq`. Movable IRQs and their
 PREEMPT_RT threads are placed by name; `/etc/default/sc5000-perf` holds the
 patterns. Engine's threads keep the scheduler's placement.
 
