@@ -183,12 +183,16 @@ for cpu in 0 1 2 3; do
 done
 gpu=$SC5000_SYS_ROOT/class/devfreq/ffa30000.gpu
 mkdir -p "$gpu"
-printf 'simple_ondemand\n' > "$gpu/governor"
+printf 'performance\n' > "$gpu/governor"
+printf '100000000 600000000\n' > "$gpu/available_frequencies"
 printf '600000000\n' > "$gpu/max_freq"
-printf '100000000\n' > "$gpu/min_freq"
+printf '600000000\n' > "$gpu/min_freq"
 for dev in sda mmcblk1; do mkdir -p "$SC5000_SYS_ROOT/block/$dev/queue"; done
 printf '[none] mq-deadline kyber\n' > "$SC5000_SYS_ROOT/block/sda/queue/scheduler"
 printf '[none]\n' > "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
+mkdir -p "$SC5000_SYS_ROOT/block/mmcblk0/queue" "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand"
+printf 'none mq-deadline kyber [bfq]\n' > "$SC5000_SYS_ROOT/block/mmcblk0/queue/scheduler"
+for knob in up_threshold sampling_down_factor ignore_nice_load; do printf '0\n' > "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/$knob"; done
 printf ' CPU0 CPU1 CPU2 CPU3\n 42: 1 0 0 0 GIC i2s-audio\n 43: 0 1 0 0 GIC ehci\n' > "$SC5000_PROC_ROOT/interrupts"
 printf ' 44: 0 1 0 0 GIC ffa30000.gpu\n 45: 0 1 0 0 GIC ehci_hcd\n 46: 0 1 0 0 GIC ffb20000\n' >> "$SC5000_PROC_ROOT/interrupts"
 printf ' 144: 0 1 0 0 GIC ffa30000.gpu\n 145: 0 1 0 0 GIC ff540000\n 146: 0 1 0 0 GIC ffb20000\n' >> "$SC5000_PROC_ROOT/interrupts"
@@ -216,8 +220,13 @@ done
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 for cpu in 0 1 2 3; do
     has ondemand "$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_governor"
+    has 1200000 "$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_min_freq"
 done
 has simple_ondemand "$gpu/governor"
+has 100000000 "$gpu/min_freq"
+has 50 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/up_threshold"
+has 10 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/sampling_down_factor"
+has '[bfq]' "$SC5000_SYS_ROOT/block/mmcblk0/queue/scheduler"
 has 10 "$SC5000_PROC_ROOT/sys/vm/swappiness"
 has 5 "$SC5000_PROC_ROOT/sys/vm/dirty_background_ratio"
 has 1048576 "$SC5000_PROC_ROOT/sys/fs/file-max"

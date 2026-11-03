@@ -58,6 +58,34 @@ struct engine_edit {
     uint32_t size;
 };
 
+static uint32_t stems_feature_jump[2];
+
+static void prepare_stems_feature(uintptr_t base, size_t page) {
+    // Keep only StemsPreRenderedPlayback bound to the native true byte after evaluation.
+    uint32_t code[] = {
+        0xe92d0003, // push {r0, r1}
+        0xe59f001c, // ldr r0, [pc, #28] (Stems feature object)
+        0xe1570000, // cmp r7, r0
+        0x059f0018, // ldreq r0, [pc, #24] (native true byte)
+        0x05870004, // streq r0, [r7, #4]
+        0xe8bd0003, // pop {r0, r1}
+        0xe51b2328, // ldr r2, [fp, #-808] (displaced instruction)
+        0xe51b3324, // ldr r3, [fp, #-804] (displaced instruction)
+        0xe59ff008, // ldr pc, [pc, #8] (resume before the original cmp)
+        0xe320f000,
+        (uint32_t)(base + 0x29bc83c),
+        (uint32_t)(base + 0x258e185),
+        (uint32_t)(base + 0x8429b8),
+    };
+    void *stub = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (stub == MAP_FAILED) _exit(127);
+    memcpy(stub, code, sizeof code);
+    if (mprotect(stub, page, PROT_READ | PROT_EXEC)) _exit(127);
+    __builtin___clear_cache(stub, (char *)stub + sizeof code);
+    stems_feature_jump[0] = 0xe51ff004; // ldr pc, [pc, #-4]
+    stems_feature_jump[1] = (uint32_t)(uintptr_t)stub;
+}
+
 static const struct engine_edit engine_edits[] = {
     // Stems remote processor: exact Engine build from the verified patch manifest.
     {0x85ef9cu, "\xbc\x26\x9f\xe5\xbc\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x94\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
@@ -79,8 +107,11 @@ static const struct engine_edit engine_edits[] = {
     // That took the r2 this used: strh r3, [r2] -> strh r3, [r0, #-76]. r0 was just
     // set to r4 + 668, so this still writes +592. strh's immediate cannot reach it from r4.
     {0xF65A58u, "\xb0\x30\xc2\xe1", "\xbc\x34\x40\xe1", 4},
-    // JP07 zeroes out stemsPreRenderedPlayback at +36 (+0x24) in 0xf659b8. NOP it so it stays 1.
+    // Retain the pre-existing +0x24 capability patch.
     {0xF659B8u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4},
+    {0x8429B0u, "\x28\x23\x1b\xe5\x24\x33\x1b\xe5", (const char *)stems_feature_jump, 8},
+    // Preserve ShowStemsList eligibility in r8 across the extra device feature gate.
+    {0x6D3E00u, "\x07\x00\x00\x0a", "\x07\x00\x00\xea", 4},
 };
 
 static int engine_base(struct dl_phdr_info *info, size_t size, void *out) {
@@ -97,6 +128,8 @@ __attribute__((constructor)) static void edit_engine(void) {
     long page_size = sysconf(_SC_PAGESIZE);
     if (page_size <= 0) return;
     uintptr_t page = (uintptr_t)page_size;
+    if (!memcmp((const void *)(base + 0x8429b0), "\x28\x23\x1b\xe5\x24\x33\x1b\xe5", 8))
+        prepare_stems_feature(base, page);
     // These four edits branch into each other; enable them only as a complete set.
     int stems_ready = 1;
     for (size_t i = 0; i < 4; i++) {

@@ -239,6 +239,11 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 	if body := tidalGet(t, srv.URL, "/v1/stream/"+id+".flac", 200, nil); !bytes.Equal(body, audio) {
 		t.Fatal("stream body differs from download")
 	}
+	var src struct{ Path string }
+	if tidalGet(t, srv.URL, "/v1/sc5000/stems/source?id="+id, 200, &src); src.Path != file {
+		t.Fatalf("stems source %q, want %q", src.Path, file)
+	}
+	tidalGet(t, srv.URL, "/v1/sc5000/stems/source?id=999999", 404, nil)
 	r, _ := http.NewRequest("GET", stream, nil)
 	r.Header.Set("Range", "bytes=0-3")
 	resp, err := http.DefaultClient.Do(r)
