@@ -1,4 +1,5 @@
-// Command sc5000-relay relays Spotify/Deezer QR login credentials to SC5000.
+// Command sc5000-relay relays Spotify/Deezer QR login credentials to SC5000
+// and is the single public entry point for remote Stems rendering.
 package main
 
 import (
@@ -28,12 +29,15 @@ type server struct {
 	spotify     *spotifyAuth
 	deezer      *deezerClient
 	browser     *deezerBrowser
+	stems       *stemsProxy
 }
 
 func main() {
 	listen := flag.String("listen", "0.0.0.0:6595", "listen address")
 	public := flag.String("public", "https://denon.cheek.day", "public base URL")
 	stateDir := flag.String("state", "/var/lib/sc5000-relay", "state directory (config.json, sessions)")
+	stemsTarget := flag.String("stems-target", "http://127.0.0.1:6596", "local sc5000-stemsd base URL (/v1/engine is appended)")
+	stemsToken := flag.String("stems-token-file", defaultStemsTokenFile(), "sc5000-stemsd internal token; missing file sends none")
 	flag.Parse()
 
 	for _, d := range []string{*stateDir} {
@@ -45,6 +49,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	target, err := parseStemsTarget(*stemsTarget)
+	if err != nil {
+		log.Fatal(err)
+	}
 	s := &server{
 		public:      strings.TrimRight(*public, "/"),
 		cfg:         cfg,
@@ -53,6 +61,7 @@ func main() {
 		sessions:    newSessionStore(filepath.Join(*stateDir, "sessions.json")),
 		deezer:      newDeezerClient(),
 		browser:     newDeezerBrowser("http://127.0.0.1:9222"),
+		stems:       newStemsProxy(target, *stemsToken),
 	}
 	s.spotify = newSpotifyAuth(filepath.Join(*stateDir, "spotify-https-ok.json"), s.public+"/oauth/spotify/callback")
 
@@ -99,6 +108,9 @@ func (s *server) routes() http.Handler {
 		mux.HandleFunc(p, audioGone)
 		mux.HandleFunc(p+"/", audioGone)
 	}
+	// Remote Stems: console password in, local daemon token out.
+	mux.HandleFunc("POST /v1/engine", s.requireStemsAuth(func(w http.ResponseWriter, r *http.Request) { s.stems.engine(w, r) }))
+	mux.HandleFunc("GET /healthz/stems", s.requireStemsAuth(func(w http.ResponseWriter, r *http.Request) { s.stems.health(w, r) }))
 	mux.HandleFunc("GET /api/config", s.requireAuth(s.handleConfigGet))
 	mux.HandleFunc("POST /api/config", s.requireAuth(s.handleConfigPost))
 	// Web console.
