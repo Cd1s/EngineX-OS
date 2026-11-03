@@ -22,7 +22,7 @@ var (
 	uiWaveforms    = []string{"denon", "rgb", "3band"}
 	uiServices     = []string{"tidal", "netease", "spotify", "deezer", "soundcloud"}
 	uiQualities    = []string{qualityFLAC, quality320k}
-	uiJogModes     = []string{"static", "rainbow", "fast"}
+	uiJogModes     = []string{"static", "rainbow", "fast", "bpm"}
 	uiNeteaseModes = []string{neteaseOfficial, neteaseDeemix}
 	// TIDAL logs in through Engine's own flow against TIDAL's servers.
 	loginServices = []string{"netease", "spotify", "deezer", "soundcloud"}

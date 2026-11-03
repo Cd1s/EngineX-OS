@@ -157,6 +157,9 @@ func TestPlayheadAndJogModePersist(t *testing.T) {
 	if got := again.loadUI(); got.Playhead != 0.42 || got.Jog != "rainbow" {
 		t.Fatalf("%+v", got)
 	}
+	if code, v := uiPost(t, srv.URL, "jog=bpm"); code != 200 || v.Jog != "bpm" {
+		t.Fatalf("%d %+v", code, v)
+	}
 	for _, q := range []string{"playhead=2", "playhead=x", "jog=strobe"} {
 		if code, _ := uiPost(t, srv.URL, q); code != 400 {
 			t.Fatalf("%s: %d", q, code)

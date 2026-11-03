@@ -555,12 +555,12 @@ func TestSoundCloudTokenIsReusedAcrossRestarts(t *testing.T) {
 
 func TestSoundCloudMediaPrefersMP3AndJoinsHLS(t *testing.T) {
 	both := soundCloudServer(t, `{"http_mp3_128_url":"BASE/stream/mp3","hls_aac_160_url":"BASE/stream/hls","preview_mp3_128_url":"BASE/preview"}`)
-	m, err := testSoundCloud(t, both).Media(context.Background(), "99")
+	m, err := testSoundCloud(t, both).Media(context.Background(), "99", false)
 	if err != nil || m.Ext != "mp3" || len(m.URLs) != 1 || m.URLs[0] != "https://cdn.example/audio.mp3?sig=1" {
 		t.Fatalf("%+v %v", m, err)
 	}
 	hls := soundCloudServer(t, `{"hls_aac_160_url":"BASE/stream/hls"}`)
-	m, err = testSoundCloud(t, hls).Media(context.Background(), "99")
+	m, err = testSoundCloud(t, hls).Media(context.Background(), "99", false)
 	if err != nil || m.Ext != "mp4" || len(m.URLs) != 3 || !strings.HasSuffix(m.URLs[0], "/init.mp4") || !strings.HasSuffix(m.URLs[2], "/seg1.ts") {
 		t.Fatalf("%+v %v", m, err)
 	}
@@ -568,10 +568,10 @@ func TestSoundCloudMediaPrefersMP3AndJoinsHLS(t *testing.T) {
 
 func TestSoundCloudRefusesPreviews(t *testing.T) {
 	onlyPreview := soundCloudServer(t, `{"preview_mp3_128_url":"BASE/preview"}`)
-	if _, err := testSoundCloud(t, onlyPreview).Media(context.Background(), "99"); !errors.Is(err, ErrNoFullStream) {
+	if _, err := testSoundCloud(t, onlyPreview).Media(context.Background(), "99", false); !errors.Is(err, ErrNoFullStream) {
 		t.Fatal(err)
 	}
-	if _, err := testSoundCloud(t, onlyPreview).Media(context.Background(), "98"); !errors.Is(err, ErrNoFullStream) {
+	if _, err := testSoundCloud(t, onlyPreview).Media(context.Background(), "98", false); !errors.Is(err, ErrNoFullStream) {
 		t.Fatal(err)
 	}
 	keyed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -845,5 +845,45 @@ func TestSpotifyLookupsArePacedAndPauseOnRateLimit(t *testing.T) {
 	b.spotifySearch(context.Background(), track)
 	if len(calls) != n {
 		t.Fatal("kept calling Spotify after a 429")
+	}
+}
+
+func TestSoundCloudLosslessTakesTheOriginalOnlyWhenAsked(t *testing.T) {
+	var srv *httptest.Server
+	downloads := 0
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			io.WriteString(w, `{"access_token":"app-token","expires_in":3600}`)
+		case "/tracks/97":
+			// The reply's address is ignored; the login only goes to the API.
+			io.WriteString(w, `{"id":97,"access":"playable","downloadable":true,"download_url":"https://evil.example/steal"}`)
+		case "/tracks/96":
+			io.WriteString(w, `{"id":96,"access":"playable","downloadable":false}`)
+		case "/tracks/97/download":
+			downloads++
+			if r.Header.Get("Authorization") != "OAuth app-token" {
+				t.Error("no credentials on the download")
+			}
+			http.Redirect(w, r, "https://cdn.example/original.wav?sig=1", http.StatusFound)
+		case "/tracks/97/streams", "/tracks/96/streams":
+			io.WriteString(w, `{"http_mp3_128_url":"`+srv.URL+`/stream/mp3"}`)
+		case "/stream/mp3":
+			http.Redirect(w, r, "https://cdn.example/audio.mp3?sig=1", http.StatusFound)
+		default:
+			t.Errorf("unexpected %s", r.URL)
+		}
+	}))
+	defer srv.Close()
+	s := testSoundCloud(t, srv)
+	m, err := s.Media(context.Background(), "97", true)
+	if err != nil || m.Original != "https://cdn.example/original.wav?sig=1" || m.Ext != "mp3" || len(m.URLs) != 1 {
+		t.Fatalf("%+v %v", m, err)
+	}
+	if m, err = s.Media(context.Background(), "97", false); err != nil || m.Original != "" || downloads != 1 {
+		t.Fatalf("320kbps asked for the original: %+v %v", m, err)
+	}
+	if m, err = s.Media(context.Background(), "96", true); err != nil || m.Original != "" || len(m.URLs) != 1 {
+		t.Fatalf("%+v %v", m, err)
 	}
 }

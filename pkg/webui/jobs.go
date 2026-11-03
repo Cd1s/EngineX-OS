@@ -235,10 +235,15 @@ func (j *Jobs) addCover(ctx context.Context, t providers.Track, dl *deemixclient
 	}
 }
 
+// fromSoundCloud follows the deck's Streaming Quality. 320kbps takes the stream
+// (SoundCloud's own MP3/AAC, the smallest file) straight away. Lossless first
+// tries the uploader's original, then falls back to that stream.
 func (j *Jobs) fromSoundCloud(ctx context.Context, t providers.Track) (*deemixclient.Download, error) {
 	name := "soundcloud-" + t.ID
-	if dl := j.p.Deemix.Cached(name); dl != nil {
-		return dl, nil
+	lossless := j.p.Deemix.Lossless()
+	cached := j.p.Deemix.Cached(name)
+	if cached != nil && (cached.Quality.Lossless || !lossless) {
+		return cached, nil
 	}
 	j.mu.Lock()
 	lookup := j.soundcloud
@@ -248,11 +253,37 @@ func (j *Jobs) fromSoundCloud(ctx context.Context, t providers.Track) (*deemixcl
 		s = lookup()
 	}
 	if s == nil {
+		if cached != nil {
+			return cached, nil
+		}
 		return nil, errors.New("soundcloud: not connected")
 	}
-	media, err := s.Media(ctx, t.ID)
+	media, err := s.Media(ctx, t.ID, lossless)
 	if err != nil {
+		if cached != nil {
+			return cached, nil
+		}
 		return nil, err
+	}
+	if media.Original != "" {
+		dl, err := j.p.Deemix.SaveSplit(ctx, name, media.Original)
+		if err == nil {
+			return dl, nil
+		}
+		log.Printf("stream-sync: SoundCloud original of track %s unusable, using the stream: %v", t.ID, err)
+		if cached != nil {
+			return cached, nil
+		}
+		if len(media.URLs) == 0 {
+			return nil, err
+		}
+	}
+	if cached != nil {
+		// Lossless was asked for, but there is no original: the stream on disk is it.
+		return cached, nil
+	}
+	if media.Ext == "mp3" && len(media.URLs) == 1 {
+		return j.p.Deemix.SaveSplit(ctx, name, media.URLs[0])
 	}
 	return j.p.Deemix.SaveParts(ctx, name, media.Ext, media.URLs)
 }
