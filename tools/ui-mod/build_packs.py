@@ -67,9 +67,12 @@ SERVICES_MAIN = """
 		const decks = (root.activeDecks || []).map(d => parseInt(d)).concat([1, 2])
 		for (const d of decks) {
 			const play = Planck.getProperty("/Engine/Deck" + d + "/PlayState")
-			const bpm = Planck.getProperty("/Engine/Deck" + d + "/CurrentBPM")
-			if (play && play.translator && play.translator.state && bpm && bpm.translator && bpm.translator.unnormalized > 40)
-				return Math.round(bpm.translator.unnormalized * 10) / 10
+			let bpm = Planck.getProperty("/Engine/Deck" + d + "/Track/CurrentBPM")
+			if (!bpm || !bpm.translator) bpm = Planck.getProperty("/Engine/Deck" + d + "/CurrentBPM")
+			const isPlaying = play && play.translator && play.translator.state
+			const bpmVal = bpm && bpm.translator ? (bpm.translator.unnormalized || bpm.translator.value || 0) : 0
+			if (isPlaying && bpmVal > 40)
+				return Math.round(bpmVal * 10) / 10
 		}
 		return 0
 	}
@@ -81,8 +84,8 @@ SERVICES_MAIN = """
 		onRunningChanged: root.scJogBPM = running ? root.scPlayingBPM() : 0
 	}
 	Timer {
-		// bpm: a step every half beat (an eighth note), a full turn of the colour wheel per bar.
-		interval: root.scJog === "fast" ? 60 : root.scJog === "bpm" && root.scJogBPM > 0 ? Math.round(60000 / root.scJogBPM / 2) : 100
+		// bpm: one colour step per beat, a full turn of the colour wheel every four beats.
+		interval: root.scJog === "fast" ? 60 : root.scJog === "bpm" && root.scJogBPM > 0 ? Math.round(60000 / root.scJogBPM) : 100
 		repeat: true
 		running: root.scJog === "rainbow" || root.scJog === "fast" || root.scJog === "bpm"
 		onRunningChanged: {
@@ -95,7 +98,7 @@ SERVICES_MAIN = """
 			}
 		}
 		onTriggered: {
-			const step = root.scJog === "fast" ? 0.05 : root.scJog === "bpm" && root.scJogBPM > 0 ? 0.125 : 0.01
+			const step = root.scJog === "fast" ? 0.05 : root.scJog === "bpm" && root.scJogBPM > 0 ? 0.25 : 0.01
 			root.scJogHue = (root.scJogHue + step) % 1
 			root.scDeckColor(1).color = Qt.hsva(root.scJogHue, 1, 1, 1)
 			root.scDeckColor(2).color = Qt.hsva((root.scJogHue + 0.35) % 1, 1, 1, 1)
