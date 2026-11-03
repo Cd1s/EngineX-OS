@@ -56,8 +56,9 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	sess := &Session{}
+	pipe := newPipeline(out)
 	start := time.Now()
-	req, e := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(endpoint, "/")+"/v1/engine", io.NopCloser(tap{in, sess.FeedIn}))
+	req, e := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(endpoint, "/")+"/v1/engine", io.NopCloser(engineReader{tap{in, sess.FeedIn}, pipe}))
 	if e != nil {
 		return e
 	}
@@ -90,13 +91,16 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 	}
 	if resp.Header.Get(FramingHeader) != "1" {
 		// Older renderer or relay: only the trailer says whether it finished.
-		_, e = io.Copy(out, resp.Body)
+		_, e = io.Copy(pipe, resp.Body)
 		if e == nil && resp.Trailer.Get("X-Stems-Status") != "ok" {
 			return errors.New("remote renderer did not finish successfully")
 		}
+		return cmp.Or(e, pipe.Complete())
+	}
+	if e = readFrames(resp.Body, pipe, sess); e != nil {
 		return e
 	}
-	if e = readFrames(resp.Body, out, sess); e != nil {
+	if e = pipe.Complete(); e != nil {
 		return e
 	}
 	// Engine's journal keeps child stderr: frames, blocks and wall time show where a slow render spends it.
