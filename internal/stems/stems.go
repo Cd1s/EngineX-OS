@@ -3,8 +3,11 @@
 package stems
 
 import (
+	"bufio"
+	"cmp"
 	"context"
 	"crypto/subtle"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +23,14 @@ import (
 
 // Protocol is the Engine child-process dialect carried in X-Stems-Protocol.
 const Protocol = "engine-5.0.4"
+
+// FramingHeader asks the renderer to wrap its reply in frames: 'D' + uint32
+// big-endian length + Engine bytes, and a closing 'E' + length + "ok" or
+// "failed" once the worker has exited. Unlike the X-Stems-Status trailer,
+// the closing frame is ordinary body data, so edge proxies pass it on.
+const FramingHeader = "X-Stems-Framing"
+
+const maxFrame = 1 << 20
 
 // Secret reads the renderer's internal bearer token (at least 24 characters).
 func Secret(path string) (string, error) {
@@ -44,13 +55,16 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	req, e := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(endpoint, "/")+"/v1/engine", io.NopCloser(in))
+	sess := &Session{}
+	start := time.Now()
+	req, e := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(endpoint, "/")+"/v1/engine", io.NopCloser(tap{in, sess.FeedIn}))
 	if e != nil {
 		return e
 	}
 	req.Header.Set("Authorization", "Bearer "+secret)
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Stems-Protocol", Protocol)
+	req.Header.Set(FramingHeader, "1")
 	req.Close = true
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	tr := &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -74,11 +88,97 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 	if resp.Header.Get("X-Stems-Protocol") != Protocol {
 		return errors.New("backend protocol mismatch")
 	}
-	_, e = io.Copy(out, resp.Body)
-	if e == nil && resp.Trailer.Get("X-Stems-Status") != "ok" {
-		return errors.New("remote renderer did not finish successfully")
+	if resp.Header.Get(FramingHeader) != "1" {
+		// Older renderer or relay: only the trailer says whether it finished.
+		_, e = io.Copy(out, resp.Body)
+		if e == nil && resp.Trailer.Get("X-Stems-Status") != "ok" {
+			return errors.New("remote renderer did not finish successfully")
+		}
+		return e
 	}
+	if e = readFrames(resp.Body, out, sess); e != nil {
+		return e
+	}
+	// Engine's journal keeps child stderr: frames, blocks and wall time show where a slow render spends it.
+	fmt.Fprintf(os.Stderr, "remote stems: ok %s, %.1fs\n", sess, time.Since(start).Seconds())
+	return nil
+}
+
+// readFrames unwraps a framed reply into out. It returns as soon as the
+// renderer's closing frame confirms a session that is complete on the wire,
+// without waiting for the HTTP response to end.
+func readFrames(body io.Reader, out io.Writer, sess *Session) error {
+	br := bufio.NewReaderSize(body, 64<<10)
+	var head [5]byte
+	var buf []byte
+	for {
+		if _, e := io.ReadFull(br, head[:]); e != nil {
+			return fmt.Errorf("renderer stream ended early: %w", e)
+		}
+		n := binary.BigEndian.Uint32(head[1:])
+		if n > maxFrame {
+			return errors.New("renderer frame too large")
+		}
+		if cap(buf) < int(n) {
+			buf = make([]byte, n)
+		}
+		buf = buf[:n]
+		if _, e := io.ReadFull(br, buf); e != nil {
+			return fmt.Errorf("renderer stream ended early: %w", e)
+		}
+		switch head[0] {
+		case 'D':
+			sess.FeedOut(buf)
+			if e := sess.Err(); e != nil {
+				return e
+			}
+			if w, e := out.Write(buf); e != nil || w != len(buf) {
+				return cmp.Or(e, io.ErrShortWrite)
+			}
+		case 'E':
+			if string(buf) != "ok" {
+				return fmt.Errorf("remote renderer %s", buf)
+			}
+			return sess.Complete()
+		default:
+			return errors.New("renderer sent an unknown frame")
+		}
+	}
+}
+
+type tap struct {
+	r io.Reader
+	f func([]byte)
+}
+
+func (t tap) Read(p []byte) (int, error) {
+	n, e := t.r.Read(p)
+	if n > 0 {
+		t.f(p[:n])
+	}
+	return n, e
+}
+
+type frameWriter struct{ w io.Writer }
+
+func (f frameWriter) frame(kind byte, p []byte) error {
+	b := make([]byte, 5+len(p))
+	b[0] = kind
+	binary.BigEndian.PutUint32(b[1:], uint32(len(p)))
+	copy(b[5:], p)
+	_, e := f.w.Write(b)
 	return e
+}
+
+func (f frameWriter) Write(p []byte) (int, error) {
+	for done := 0; done < len(p); {
+		n := min(len(p)-done, maxFrame)
+		if e := f.frame('D', p[done:done+n]); e != nil {
+			return done, e
+		}
+		done += n
+	}
+	return len(p), nil
 }
 
 // Enforce inactivity bounds even while an HTTP upload body remains open.
@@ -185,6 +285,10 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Stems-Protocol", Protocol)
 	w.Header().Set("Connection", "close")
 	w.Header().Set("Trailer", "X-Stems-Status")
+	framed := r.Header.Get(FramingHeader) == "1"
+	if framed {
+		w.Header().Set(FramingHeader, "1")
+	}
 	if e = cmd.Start(); e != nil {
 		stdin.Close()
 		http.Error(w, "worker unavailable", 500)
@@ -203,17 +307,24 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		done <- err
 	}()
-	_, copyErr := io.Copy(&flushWriter{w: w}, stdout)
+	var dst io.Writer = &flushWriter{w: w}
+	if framed {
+		dst = frameWriter{dst}
+	}
+	_, copyErr := io.Copy(dst, stdout)
 	if copyErr != nil {
 		cancel()
 	}
 	e = cmd.Wait()
 	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
+	status := "failed"
 	if e == nil && copyErr == nil {
-		w.Header().Set("X-Stems-Status", "ok")
-	} else {
-		w.Header().Set("X-Stems-Status", "failed")
+		status = "ok"
 	}
+	if framed {
+		frameWriter{&flushWriter{w: w}}.frame('E', []byte(status))
+	}
+	w.Header().Set("X-Stems-Status", status)
 	cancel()
 	body.stop()
 	r.Body.Close()

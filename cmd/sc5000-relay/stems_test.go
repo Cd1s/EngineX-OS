@@ -77,10 +77,17 @@ func waitSlotFree(t *testing.T, b *stems.Backend) {
 	}
 }
 
+// shellProtocolWorker speaks worker.py's dialect for a session with no audio.
+var shellProtocolWorker = []string{"/bin/sh", "-c", `printf 'session=FFFFFFFFFFFFFFFF\n\n'
+while read l && [ -n "$l" ]; do :; done
+printf 'preparing=ready\n\npreparing=ready\nnumReturnChannels=8\n\n'
+while read l && [ -n "$l" ]; do :; done
+printf 'returnFrames=0\n\n'`}
+
 // The deck's real client must get the greeting while its upload is still open,
-// then the worker's answer and the ok trailer, through both URL prefixes.
+// then the closing frame, through both URL prefixes, without the upload ending.
 func TestStemsRelayFullDuplex(t *testing.T) {
-	f := newStemsFixture(t, echoWorker())
+	f := newStemsFixture(t, shellProtocolWorker)
 	for i, base := range []string{f.relay.URL, f.relay.URL + "/sc5000/"} {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		in, send := io.Pipe()
@@ -99,10 +106,10 @@ func TestStemsRelayFullDuplex(t *testing.T) {
 		if string(greeting) != testGreeting {
 			t.Fatalf("%d: greeting %q", i, greeting)
 		}
-		// Upload stays open: the worker exiting must still end the session.
-		send.Write([]byte("abcd"))
+		// Upload stays open after done: the closing frame must still end the session.
+		send.Write([]byte("numChannels=2\nsampleRate=44100\nmaxBlockSize=1024\n\naction=done\n\n"))
 		tail, err := io.ReadAll(out)
-		if err != nil || string(tail) != "ABCD" {
+		if want := "preparing=ready\n\npreparing=ready\nnumReturnChannels=8\n\nreturnFrames=0\n\n"; err != nil || string(tail) != want {
 			t.Fatalf("%d: tail %q %v", i, tail, err)
 		}
 		if err := <-done; err != nil {
