@@ -235,6 +235,37 @@ func TestCollaborationFallbackFetchesContributors(t *testing.T) {
 	}
 }
 
+// fieldlessCatalog answers plain searches only, as Deezer did in November 2026.
+type fieldlessCatalog struct{ queries *[]string }
+
+func (fieldlessCatalog) ByISRC(context.Context, string) (providers.Track, error) {
+	return providers.Track{}, ErrNoMatch
+}
+func (c fieldlessCatalog) Search(_ context.Context, q string) ([]providers.Track, error) {
+	*c.queries = append(*c.queries, q)
+	if strings.Contains(q, "artist:") {
+		return nil, nil
+	}
+	return []providers.Track{
+		{ID: "7", Title: "Knights Gallop", Artist: "Hitam", DurationMS: 261000, Provider: "deezer"},
+		{ID: "8", Title: "Knights Gallop", Artist: "Medieval Horizons", DurationMS: 123000, Provider: "deezer"},
+	}, nil
+}
+
+func TestResolveRetriesAPlainSearchWhenTheFieldSearchIsEmpty(t *testing.T) {
+	var queries []string
+	source := providers.Track{ID: "1", Title: "Knights Gallop", Artist: "Hitam", DurationMS: 261400, Provider: "netease"}
+	got, err := Resolve(context.Background(), fieldlessCatalog{&queries}, source)
+	if err != nil || got.ID != "7" || len(queries) != 2 || queries[1] != "Hitam knights gallop" && queries[1] != "Hitam Knights Gallop" {
+		t.Fatalf("%+v %v %q", got, err, queries)
+	}
+	// The plain search is no excuse to take another artist's or length's track.
+	source.Artist, queries = "Somebody", nil
+	if _, err := Resolve(context.Background(), fieldlessCatalog{&queries}, source); err == nil {
+		t.Fatal("matched the wrong artist")
+	}
+}
+
 func mp3Frames(kbpsIndex byte, frames int) []byte {
 	var b bytes.Buffer
 	for i := 0; i < frames; i++ {

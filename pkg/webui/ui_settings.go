@@ -18,11 +18,12 @@ import (
 const defaultUIDir = "/data/sc5000-custom/ui"
 
 var (
-	uiLanguages = []string{"en", "zh-Hans", "zh-Hant"}
-	uiWaveforms = []string{"denon", "rgb", "3band"}
-	uiServices  = []string{"tidal", "netease", "spotify", "deezer", "soundcloud"}
-	uiQualities = []string{qualityFLAC, quality320k}
-	uiJogModes  = []string{"static", "rainbow", "fast"}
+	uiLanguages    = []string{"en", "zh-Hans", "zh-Hant"}
+	uiWaveforms    = []string{"denon", "rgb", "3band"}
+	uiServices     = []string{"tidal", "netease", "spotify", "deezer", "soundcloud"}
+	uiQualities    = []string{qualityFLAC, quality320k}
+	uiJogModes     = []string{"static", "rainbow", "fast"}
+	uiNeteaseModes = []string{neteaseOfficial, neteaseDeemix}
 	// TIDAL logs in through Engine's own flow against TIDAL's servers.
 	loginServices = []string{"netease", "spotify", "deezer", "soundcloud"}
 )
@@ -30,18 +31,25 @@ var (
 const (
 	qualityFLAC = "flac"
 	quality320k = "320k"
+
+	// NetEase tracks download from NetEase itself, which works with nothing but a
+	// NetEase login. Deemix mode tries the deck's Deemix first to spare the
+	// account's monthly download quota, and falls back to NetEase.
+	neteaseOfficial = "official"
+	neteaseDeemix   = "deemix"
 )
 
 type uiSettings struct {
-	Quality  string   `json:"quality"`
-	Jog      string   `json:"jog"`
-	Playhead float64  `json:"playhead"`
-	Language string   `json:"language"`
-	Waveform string   `json:"waveform"`
-	Sources  []string `json:"sources"`
-	Scope    string   `json:"scope"`
-	SafeMode bool     `json:"safeMode"`
-	LoggedIn []string `json:"loggedIn"`
+	Quality     string   `json:"quality"`
+	Jog         string   `json:"jog"`
+	NeteaseMode string   `json:"neteaseMode"`
+	Playhead    float64  `json:"playhead"`
+	Language    string   `json:"language"`
+	Waveform    string   `json:"waveform"`
+	Sources     []string `json:"sources"`
+	Scope       string   `json:"scope"`
+	SafeMode    bool     `json:"safeMode"`
+	LoggedIn    []string `json:"loggedIn"`
 
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
@@ -56,7 +64,7 @@ func (s *Server) uiDir() string {
 
 // loadUI must be called with uiMu held. Bad or missing values get defaults.
 func (s *Server) loadUI() uiSettings {
-	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static"}
+	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
 		key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
@@ -83,6 +91,10 @@ func (s *Server) loadUI() uiSettings {
 		case "jog":
 			if slices.Contains(uiJogModes, val) {
 				v.Jog = val
+			}
+		case "netease_mode":
+			if slices.Contains(uiNeteaseModes, val) {
+				v.NeteaseMode = val
 			}
 		case "playhead":
 			if f, err := strconv.ParseFloat(val, 64); err == nil && validPlayhead(f) {
@@ -119,7 +131,7 @@ func (s *Server) saveUI(v uiSettings) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\njog=" + v.Jog + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
+	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\njog=" + v.Jog + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
 	tmp, err := os.CreateTemp(dir, ".settings-*")
 	if err != nil {
 		return err
@@ -189,7 +201,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) {
+	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -208,6 +220,9 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("jog") {
 		v.Jog = q.Get("jog")
+	}
+	if q.Has("neteaseMode") {
+		v.NeteaseMode = q.Get("neteaseMode")
 	}
 	if q.Has("playhead") {
 		f, err := strconv.ParseFloat(q.Get("playhead"), 64)
@@ -250,6 +265,13 @@ func (s *Server) quality() string {
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
 	return s.loadUI().Quality
+}
+
+// neteaseDirect reports whether NetEase tracks skip Deemix.
+func (s *Server) neteaseDirect() bool {
+	s.uiMu.Lock()
+	defer s.uiMu.Unlock()
+	return s.loadUI().NeteaseMode == neteaseOfficial
 }
 
 // validPlayhead takes Engine's normalised slider value.

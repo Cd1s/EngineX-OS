@@ -69,7 +69,7 @@ func TestUISettingsRejectBadValues(t *testing.T) {
 	dir := t.TempDir()
 	srv := httptest.NewServer(New(Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}, nil))
 	defer srv.Close()
-	for _, q := range []string{"lang=../../etc", "waveform=x", "scope=evil", "sources=netease,evil"} {
+	for _, q := range []string{"lang=../../etc", "waveform=x", "scope=evil", "sources=netease,evil", "neteaseMode=quota"} {
 		if code, _ := uiPost(t, srv.URL, q); code != 400 {
 			t.Errorf("%s: %d", q, code)
 		}
@@ -118,6 +118,30 @@ func TestQualitySettingAppliesWithoutARestart(t *testing.T) {
 	}
 	if code, _ := uiPost(t, srv.URL, "quality=128k"); code != 400 {
 		t.Fatalf("bad quality accepted: %d", code)
+	}
+}
+
+func TestNeteaseModeDefaultsToOfficialAndPersists(t *testing.T) {
+	jobs := NewJobs(Pipeline{Deemix: &deemixclient.Client{DownloadDir: t.TempDir()}})
+	defer jobs.Close()
+	dir := t.TempDir()
+	srv := httptest.NewServer(New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, jobs))
+	defer srv.Close()
+	// Without a Deezer account, NetEase tracks must work out of the box.
+	if _, v := uiPost(t, srv.URL, ""); v.NeteaseMode != "official" || !jobs.neteaseDirect() {
+		t.Fatalf("%+v", v)
+	}
+	if code, v := uiPost(t, srv.URL, "neteaseMode=deemix"); code != 200 || v.NeteaseMode != "deemix" || jobs.neteaseDirect() {
+		t.Fatalf("%d %+v", code, v)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if !slices.Contains(splitLines(data), "netease_mode=deemix") {
+		t.Fatalf("%s", data)
+	}
+	// An unknown value in the file falls back to the default.
+	os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("netease_mode=other\n"), 0o644)
+	if _, v := uiPost(t, srv.URL, ""); v.NeteaseMode != "official" {
+		t.Fatalf("%+v", v)
 	}
 }
 
