@@ -108,14 +108,22 @@ func (r soundCloudTokenResponse) expiry() time.Time {
 	return time.Now().Add(time.Duration(r.Expires) * time.Second)
 }
 
-// post sends a token request. This endpoint rejects the app's credentials in the form.
+// post sends a token request. The app's credentials go in a Basic header for
+// client_credentials; a refresh_token grant answers 400 to that header and wants
+// them in the form instead.
 func (a *SoundCloudAuth) post(ctx context.Context, form url.Values, id, secret string, out *soundCloudTokenResponse) error {
 	address := a.TokenURL
 	if address == "" {
 		address = soundCloudTokenPath
 	}
-	basic := base64.StdEncoding.EncodeToString([]byte(id + ":" + secret))
-	h := http.Header{"Content-Type": {"application/x-www-form-urlencoded"}, "Accept": {"application/json"}, "Authorization": {"Basic " + basic}}
+	h := http.Header{"Content-Type": {"application/x-www-form-urlencoded"}, "Accept": {"application/json; charset=utf-8"}}
+	if form.Get("grant_type") == "refresh_token" {
+		form = cloneValues(form)
+		form.Set("client_id", id)
+		form.Set("client_secret", secret)
+	} else {
+		h.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(id+":"+secret)))
+	}
 	if err := JSON(ctx, a.HTTP, "POST", address, strings.NewReader(form.Encode()), h, out); err != nil {
 		return err
 	}
@@ -123,6 +131,14 @@ func (a *SoundCloudAuth) post(ctx context.Context, form url.Values, id, secret s
 		return errors.New("soundcloud: token response missing access token")
 	}
 	return nil
+}
+
+func cloneValues(v url.Values) url.Values {
+	out := make(url.Values, len(v))
+	for k, vals := range v {
+		out[k] = append([]string(nil), vals...)
+	}
+	return out
 }
 
 // SetUser stores the owner's account login. Empty values clear it.
@@ -203,6 +219,19 @@ type scTrack struct {
 	} `json:"user"`
 }
 
+// UnmarshalJSON also accepts a like, which wraps the track as {"track": {...}}.
+func (t *scTrack) UnmarshalJSON(b []byte) error {
+	type plain scTrack
+	var like struct {
+		Track *plain `json:"track"`
+	}
+	if json.Unmarshal(b, &like) == nil && like.Track != nil && like.Track.ID != 0 {
+		*t = scTrack(*like.Track)
+		return nil
+	}
+	return json.Unmarshal(b, (*plain)(t))
+}
+
 func (t scTrack) cover() string {
 	art := t.Artwork
 	if art == "" {
@@ -222,22 +251,25 @@ func (s *SoundCloud) base() string {
 	return defaultSoundCloudAPI
 }
 
+// headers authorises a request. An account login comes first because only it
+// renews itself; a pasted token is used as is; the app's own token is the fallback.
 func (s *SoundCloud) headers(ctx context.Context) (http.Header, error) {
 	h := http.Header{"Accept": {"application/json; charset=utf-8"}}
-	token := s.Token
-	if token == "" {
-		if s.Auth == nil || s.ClientID == "" || s.Secret == "" {
-			return nil, errors.New("soundcloud: not connected")
-		}
-		var err error
-		if s.Auth.HasUser() {
-			token, err = s.Auth.UserToken(ctx, s.ClientID, s.Secret)
-		} else {
-			token, err = s.Auth.Token(ctx, s.ClientID, s.Secret)
-		}
-		if err != nil {
-			return nil, err
-		}
+	appKeys := s.Auth != nil && s.ClientID != "" && s.Secret != ""
+	var token string
+	var err error
+	switch {
+	case appKeys && s.Auth.HasUser():
+		token, err = s.Auth.UserToken(ctx, s.ClientID, s.Secret)
+	case s.Token != "":
+		token = s.Token
+	case appKeys:
+		token, err = s.Auth.Token(ctx, s.ClientID, s.Secret)
+	default:
+		return nil, errors.New("soundcloud: not connected")
+	}
+	if err != nil {
+		return nil, err
 	}
 	h.Set("Authorization", "OAuth "+token)
 	return h, nil
@@ -362,6 +394,19 @@ type scPlaylist struct {
 	ID         int64  `json:"id"`
 	Title      string `json:"title"`
 	TrackCount int    `json:"track_count"`
+}
+
+// UnmarshalJSON also accepts a like, which wraps the playlist as {"playlist": {...}}.
+func (p *scPlaylist) UnmarshalJSON(b []byte) error {
+	type plain scPlaylist
+	var like struct {
+		Playlist *plain `json:"playlist"`
+	}
+	if json.Unmarshal(b, &like) == nil && like.Playlist != nil && like.Playlist.ID != 0 {
+		*p = scPlaylist(*like.Playlist)
+		return nil
+	}
+	return json.Unmarshal(b, (*plain)(p))
 }
 
 func (s *SoundCloud) playlistPages(ctx context.Context, address, prefix string, out []Playlist) []Playlist {

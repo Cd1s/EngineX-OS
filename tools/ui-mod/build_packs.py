@@ -239,6 +239,16 @@ SERVICES_MAIN = """
 		interval: 3000; running: true; repeat: true; triggeredOnStart: true
 		onTriggered: scCall("")
 	}
+	// Stems are rendered on the deck (the hook enables embedded rendering), but
+	// Engine gates the Stems list on pre-rendered playback, which this unit lacks.
+	// Keep the list in the library sidebar so tracks can be dropped on it.
+	Timer {
+		interval: 2000; running: true
+		onTriggered: {
+			const p = Planck.getProperty("/Client/Preferences/Profile/Application/ShowStemsList")
+			if (p && p.translator && !p.translator.state) p.translator.state = true
+		}
+	}
 	Instantiator {
 		id: scProviders
 		model: Planck.librarianController.streamingInterfaceController.providerModel
@@ -487,8 +497,11 @@ RGB_COLORS = {"Low": "#ff1428", "Mid": "#00e632", "High": "#0078ff"}
 RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}
 
 
-# Vertical stretch of the deck overview waveform (1.0 = stock height).
-OVERVIEW_Y_SCALE = 1.9
+# Vertical stretch of the deck overview waveform (1.0 = stock height). RGB draws
+# each column at full amplitude and fills the strip quickly; Denon and 3-Band
+# stack the bands as separate, lower layers and need more.
+OVERVIEW_Y_SCALE_RGB = 1.3
+OVERVIEW_Y_SCALE_BANDS = 2.2
 
 
 def three_band(style_name, band, colors=BAND_COLORS):
@@ -513,7 +526,7 @@ def edits(dev: bool):
         ("		objectName: \"Deck_WaveformOverview_ViewContainer\"\n",
          "		objectName: \"Deck_WaveformOverview_ViewContainer\"\n		clip: true\n"),
         ("			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n",
-         f"			transform: Scale {{ origin.y: overview.height; yScale: {OVERVIEW_Y_SCALE} }}\n"
+         f"			transform: Scale {{ origin.y: overview.height; yScale: overview.rgbMode ? {OVERVIEW_Y_SCALE_RGB} : {OVERVIEW_Y_SCALE_BANDS} }}\n"
          "			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n"),
     ]
     main = DEV_HARNESS if dev else ""
@@ -536,6 +549,11 @@ def edits(dev: bool):
             ("invisibleActiveAreaWidthAtEnd: isInGridEditor ? 0 : isRightDeck ? 25 : 15", "invisibleActiveAreaWidthAtEnd: 0"),
         ],
         prefs + "Entries/WaveformStyle.qml": WAVEFORM_ENTRY,
+        # Same gate as above: show the Stems List switch and the per-track stems icon.
+        prefs + "Entries/StemsList.qml": [("active: Planck.hasStemsPreRenderedPlayback()", "active: true")],
+        v + "BrowseView/Components/Components/StemsIcon.qml": [(
+            "visible: (Planck.hasStemsPreRenderedPlayback() || (!!row.modelData.isDemoTrack && Config.device.hasDemoContentPreRenderedStems) ) && row.modelData.stems !== 0",
+            "visible: row.modelData.stems !== 0")],
         prefs + "Entries/Base/ListEntry.qml": [
             ("function isSelected(text) {", "function isSelected(value) {"),
             ("return entry.currentValue === text\n", "return entry.currentValue === value\n"),
