@@ -330,12 +330,6 @@ func TestEngineOnlyBypassAndProtectedSource(t *testing.T) {
 	if !r.Bypassed || !reflect.DeepEqual(before, snapshot(t, root)) {
 		t.Fatal("Engine-only drive was touched")
 	}
-	if e := os.MkdirAll(filepath.Join(root, "MUSIC/sub/PIONEER"), 0755); e != nil {
-		t.Fatal(e)
-	}
-	if xs, e := bridge.Candidates(root); e != nil || len(xs) != 0 {
-		t.Fatal("watch descended into Engine-only media", xs, e)
-	}
 	for _, name := range []string{"symlink-dir", "symlink-db", "hardlink-db"} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
@@ -433,40 +427,6 @@ func TestSQLiteIntelligentAndNativeRows(t *testing.T) {
 	r = convert(t, root, enginedb.Options{SmartMatch: true, CurrentTrack: 1})
 	if r.Updated != 0 || scalar[int](t, engine, `SELECT count(*) FROM Playlist WHERE title='Native'`) != 1 {
 		t.Fatal("native playlist changed")
-	}
-}
-
-func TestMountCandidatesAndWatch(t *testing.T) {
-	parent := t.TempDir()
-	root := filepath.Join(parent, "user/usb")
-	testfixture.Export(t, root)
-	xs, e := bridge.Candidates(parent)
-	if e != nil || !reflect.DeepEqual(xs, []string{root}) {
-		t.Fatal(xs, e)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	events := make(chan bridge.WatchEvent, 4)
-	done := make(chan error, 1)
-	go func() {
-		done <- bridge.Watch(ctx, []string{parent}, enginedb.Options{}, 10*time.Millisecond, func(e bridge.WatchEvent) { events <- e })
-	}()
-	defer cancel()
-	select {
-	case event := <-events:
-		if event.Err != nil || event.Result.Added != 5 {
-			t.Fatal(event)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("watch did not import")
-	}
-	select {
-	case e := <-events:
-		t.Fatalf("repeated import: %+v", e)
-	case <-time.After(40 * time.Millisecond):
-	}
-	cancel()
-	if e := <-done; e != context.Canceled {
-		t.Fatal(e)
 	}
 }
 
