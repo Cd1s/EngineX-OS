@@ -30,6 +30,7 @@ const (
 	spotifyLookupGap = 2 * time.Second
 	bpmRateLimitWait = 5 * time.Minute
 	bpmQueueLimit    = 2000
+	maxBPMEntries    = 20000
 )
 
 type BPMInfo struct {
@@ -104,6 +105,22 @@ func (b *BPMStore) Put(t Track, info BPMInfo) error {
 	if b.known[bpmKey(t)].Measured && !info.Measured {
 		return nil
 	}
+	if _, exists := b.known[bpmKey(t)]; !exists && len(b.known) >= maxBPMEntries {
+		evicted := false
+		for k, v := range b.known {
+			if !v.Measured {
+				delete(b.known, k)
+				evicted = true
+				break
+			}
+		}
+		if !evicted {
+			for k := range b.known {
+				delete(b.known, k)
+				break
+			}
+		}
+	}
 	b.known[bpmKey(t)] = info
 	return b.saveLocked()
 }
@@ -148,6 +165,12 @@ func (b *BPMStore) claim(t Track) bool {
 	b.load()
 	if b.tried[bpmKey(t)] {
 		return false
+	}
+	if len(b.tried) >= maxBPMEntries {
+		for k := range b.tried {
+			delete(b.tried, k)
+			break
+		}
 	}
 	b.tried[bpmKey(t)] = true
 	return true

@@ -127,7 +127,7 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 		if _, e = tx.ExecContext(ctx, schema); e != nil {
 			return nil, nil, fmt.Errorf("engine schema: %w", e)
 		}
-		_, e = tx.ExecContext(ctx, `INSERT INTO Information(uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch,currentPlayedIndiciator,lastRekordBoxLibraryImportReadCounter) VALUES(?,3,0,2,?,0)`, uuid.NewString(), playedIndicator())
+		_, e = tx.ExecContext(ctx, `INSERT INTO Information(id,uuid,schemaVersionMajor,schemaVersionMinor,schemaVersionPatch,currentPlayedIndiciator,lastRekordBoxLibraryImportReadCounter) VALUES(1,?,3,0,2,?,0)`, uuid.NewString(), playedIndicator())
 	} else {
 		var major, minor, patch, n int
 		e = tx.QueryRowContext(ctx, `SELECT schemaVersionMajor,schemaVersionMinor,schemaVersionPatch FROM Information`).Scan(&major, &minor, &patch)
@@ -139,6 +139,13 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 		}
 	}
 	if e != nil {
+		return nil, nil, e
+	}
+	// GL-010: Engine treats a library as corrupted if Information.id != 1 or uuid is empty.
+	if _, e = tx.ExecContext(ctx, `UPDATE Information SET id=1 WHERE id<>1`); e != nil {
+		return nil, nil, e
+	}
+	if _, e = tx.ExecContext(ctx, `UPDATE Information SET uuid=? WHERE uuid IS NULL OR trim(uuid)=''`, uuid.NewString()); e != nil {
 		return nil, nil, e
 	}
 	// Earlier bridge builds left this NULL; Engine initialises it to a random value.
@@ -367,7 +374,24 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			}
 		}
 		mapping[t.ID] = id
+		// CF049: Rekordbox's analyzer can clamp misparsed AIFF files to 500.00 BPM
+		// (or >499.5 BPM). Clear the bogus clamp before both Fast and Full paths.
+		if t.BPM >= 499.5 {
+			t.BPM = 0
+		}
 		if opts.Fast && existing {
+			if previous != hash && strings.HasPrefix(previous, "fast:") {
+				effectiveTracks[i] = t
+				args := []any{int(t.Duration + 0.5), int(t.BPM + 0.5), t.Year, enginePath, path.Base(rel), t.Bitrate, t.BPM, st.Size(), t.Title, t.Artist, t.Album, t.Genre, t.Comment, t.Label, t.Composer, t.Remixer, EngineKey(t.Key), t.Rating, strings.TrimPrefix(strings.ToLower(path.Ext(rel)), "."), int64(t.ID), id}
+				if _, e := tx.ExecContext(ctx, `UPDATE Track SET length=?,bpm=?,year=?,path=?,filename=?,bitrate=?,bpmAnalyzed=?,fileBytes=?,title=?,artist=?,album=?,genre=?,comment=?,label=?,composer=?,remixer=?,key=?,rating=?,fileType=?,pdbImportKey=? WHERE id=?`, args...); e != nil {
+					return result, e
+				}
+				if _, e := tx.ExecContext(ctx, `UPDATE BridgeState SET path=?,fingerprint=? WHERE trackId=?`, enginePath, hash, id); e != nil {
+					return result, e
+				}
+				result.Updated++
+				continue
+			}
 			result.Unchanged++
 			continue
 		}
@@ -403,6 +427,9 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			if audio.Bitrate > 0 {
 				t.Bitrate = audio.Bitrate
 			}
+		}
+		if len(a.Beats) > 0 && a.Beats[0].BPM >= 499.5 {
+			a.Beats = nil
 		}
 		if t.BPM == 0 && len(a.Beats) > 0 {
 			t.BPM = a.Beats[0].BPM
