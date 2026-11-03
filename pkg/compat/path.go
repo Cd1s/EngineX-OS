@@ -84,6 +84,16 @@ func (r *Resolver) Resolve(s string) (string, error) {
 		if len(matches) == 0 && cur == "" && canonical(component) == "pioneer" {
 			matches = idx[".pioneer"]
 		}
+		// FAT32/Windows strips trailing spaces and periods from folder names (1.x H019).
+		if len(matches) == 0 {
+			if trimmed := strings.TrimRight(canonical(component), " ."); trimmed != "" {
+				for k, names := range idx {
+					if strings.TrimRight(k, " .") == trimmed {
+						matches = append(matches, names...)
+					}
+				}
+			}
+		}
 		for _, name := range matches {
 			if name == component {
 				matches = []string{name}

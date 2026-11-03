@@ -115,3 +115,45 @@ func TestResolveMacHiddenPioneer(t *testing.T) {
 		t.Fatal("only the volume root maps PIONEER to .PIONEER")
 	}
 }
+
+func TestAIFFHeaderAndFAT32TrailingSpaceDotResolution(t *testing.T) {
+	root := t.TempDir()
+	// Build a valid 48kHz, 2-channel, 24-bit, 96000-frame AIFF container (CF049).
+	aiff := make([]byte, 12+26+16+96000*6)
+	copy(aiff[0:4], "FORM")
+	binary.BigEndian.PutUint32(aiff[4:8], uint32(len(aiff)-8))
+	copy(aiff[8:12], "AIFF")
+	copy(aiff[12:16], "COMM")
+	binary.BigEndian.PutUint32(aiff[16:20], 18)
+	binary.BigEndian.PutUint16(aiff[20:22], 2)     // channels
+	binary.BigEndian.PutUint32(aiff[22:26], 96000) // frames
+	binary.BigEndian.PutUint16(aiff[26:28], 24)    // bit depth
+	// 48000.0 in 80-bit IEEE 754 extended float: exp = 16383 + 15 = 0x400E, mant = 0xBB80000000000000
+	binary.BigEndian.PutUint16(aiff[28:30], 0x400e)
+	binary.BigEndian.PutUint64(aiff[30:38], 0xbb80000000000000)
+	copy(aiff[38:42], "SSND")
+	binary.BigEndian.PutUint32(aiff[42:46], uint32(8+96000*6))
+
+	testfixture.Write(t, root, "Club Set/track.aiff", aiff)
+	info, err := compat.AudioHeader(filepath.Join(root, "Club Set/track.aiff"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Format != "aiff" || info.SampleRate != 48000 || info.Channels != 2 || info.BitDepth != 24 || info.Samples != 96000 || info.Duration != 2 {
+		t.Fatalf("unexpected AIFF info: %+v", info)
+	}
+	testfixture.Write(t, root, "bad.aiff", aiff[:40])
+	if _, err := compat.AudioHeader(filepath.Join(root, "bad.aiff")); err == nil {
+		t.Fatal("accepted truncated AIFF")
+	}
+	// H019: Directory exported with trailing space/period resolved against stripped FAT32 folder.
+	r, err := compat.NewResolver(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Resolve("/Club Set. /track.aiff")
+	if err != nil || got != "Club Set/track.aiff" {
+		t.Fatalf("Resolve trailing dot/space = %q, %v", got, err)
+	}
+}
+

@@ -93,6 +93,23 @@ func TestExactContainerSamplesAndLegacyCueColor(t *testing.T) {
 	if !bytes.Equal(q[8+9:8+13], []byte{0, 0, 0, 0}) {
 		t.Fatal("empty A was painted")
 	}
+	// GL-013 (Seabass #56): Explicit RGB cue/loop color with Alpha=0 is forced opaque (Alpha=255).
+	pOpaque, e := enginedb.EncodePerformance(rekordbox.Track{SampleRate: 48000, Duration: 2}, &rekordbox.Analysis{
+		Cues: []rekordbox.Cue{{HotCue: 1, TimeMS: 100, EndMS: 500, Loop: true, Color: [4]byte{0, 10, 20, 30}}},
+	})
+	if e != nil {
+		t.Fatal(e)
+	}
+	qOpaque, e := enginedb.QUncompress(pOpaque.QuickCues, 1000)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !bytes.Equal(qOpaque[8+9:8+13], []byte{255, 10, 20, 30}) {
+		t.Fatalf("expected opaque Alpha=255 on hot cue, got %v", qOpaque[8+9:8+13])
+	}
+	if !bytes.Equal(pOpaque.Loops[8+1+18:8+1+22], []byte{255, 10, 20, 30}) {
+		t.Fatalf("expected opaque Alpha=255 on loop, got %v", pOpaque.Loops[8+1+18:8+1+22])
+	}
 }
 
 func TestWaveformIndexAndShortAnalysisBoundaries(t *testing.T) {

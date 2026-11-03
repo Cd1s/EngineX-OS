@@ -133,3 +133,43 @@ func TestWAVContainer32Valid24(t *testing.T) {
 		t.Fatalf("valid bits confused with container width: %d", got)
 	}
 }
+
+func TestCF049Bogus500BPMAndGL010InformationGuard(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	l, err := bridge.ReadLibrary(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Tracks[0].BPM = 500.0
+	if _, err := enginedb.Sync(context.Background(), root, l, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	db := dbOpen(t, root)
+	// Track 1 has valid 120 BPM PQTZ beats in the fixture, so 500 BPM header clamp falls back to beat BPM (120).
+	if got := scalar[int](t, db, `SELECT bpm FROM Track WHERE pdbImportKey=1`); got != 120 {
+		t.Fatalf("expected 500 BPM clamp to recover 120 BPM from beats, got %d", got)
+	}
+	// Track 2 has no ANLZ beats; 500 BPM clamp resets to 0 so Engine analyses on load instead of locking at 500 BPM.
+	l.Tracks[1].BPM = 500.0
+	if _, err := enginedb.Sync(context.Background(), root, l, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar[int](t, db, `SELECT bpm FROM Track WHERE pdbImportKey=2`); got != 0 {
+		t.Fatalf("expected unanalysed 500 BPM track to reset to 0, got %d", got)
+	}
+	// GL-010: Damage Information.id and uuid, verify Sync and dbhealer both restore id=1 and non-empty uuid.
+	if _, err := db.Exec(`UPDATE Information SET id=7, uuid=''`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enginedb.Sync(context.Background(), root, l, enginedb.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if id := scalar[int](t, db, `SELECT id FROM Information`); id != 1 {
+		t.Fatalf("Information.id = %d, want 1", id)
+	}
+	if u := scalar[string](t, db, `SELECT uuid FROM Information`); u == "" {
+		t.Fatal("Information.uuid remained empty")
+	}
+}
+
