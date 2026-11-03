@@ -61,10 +61,30 @@ SERVICES_MAIN = """
 	property real scJogHue: 0
 	property var scJogSaved: null
 	function scDeckColor(deck) { return Planck.getProperty("/Engine/Deck" + deck + "/Color").translator }
+	// BPM sync: the tempo of the deck that is playing, the active one first; 0 when
+	// nothing plays. Rounded so the pitch fader does not restart the timer constantly.
+	function scPlayingBPM() {
+		const decks = (root.activeDecks || []).map(d => parseInt(d)).concat([1, 2])
+		for (const d of decks) {
+			const play = Planck.getProperty("/Engine/Deck" + d + "/PlayState")
+			const bpm = Planck.getProperty("/Engine/Deck" + d + "/CurrentBPM")
+			if (play && play.translator && play.translator.state && bpm && bpm.translator && bpm.translator.unnormalized > 40)
+				return Math.round(bpm.translator.unnormalized * 10) / 10
+		}
+		return 0
+	}
+	property real scJogBPM: 0
 	Timer {
-		interval: root.scJog === "fast" ? 60 : 100
+		interval: 500; repeat: true
+		running: root.scJog === "bpm"
+		onTriggered: root.scJogBPM = root.scPlayingBPM()
+		onRunningChanged: root.scJogBPM = running ? root.scPlayingBPM() : 0
+	}
+	Timer {
+		// bpm: a step every half beat (an eighth note), a full turn of the colour wheel per bar.
+		interval: root.scJog === "fast" ? 60 : root.scJog === "bpm" && root.scJogBPM > 0 ? Math.round(60000 / root.scJogBPM / 2) : 100
 		repeat: true
-		running: root.scJog === "rainbow" || root.scJog === "fast"
+		running: root.scJog === "rainbow" || root.scJog === "fast" || root.scJog === "bpm"
 		onRunningChanged: {
 			if (running) {
 				root.scJogSaved = [String(root.scDeckColor(1).color), String(root.scDeckColor(2).color)]
@@ -75,7 +95,8 @@ SERVICES_MAIN = """
 			}
 		}
 		onTriggered: {
-			root.scJogHue = (root.scJogHue + (root.scJog === "fast" ? 0.05 : 0.01)) % 1
+			const step = root.scJog === "fast" ? 0.05 : root.scJog === "bpm" && root.scJogBPM > 0 ? 0.125 : 0.01
+			root.scJogHue = (root.scJogHue + step) % 1
 			root.scDeckColor(1).color = Qt.hsva(root.scJogHue, 1, 1, 1)
 			root.scDeckColor(2).color = Qt.hsva((root.scJogHue + 0.35) % 1, 1, 1, 1)
 		}
@@ -133,6 +154,23 @@ SERVICES_MAIN = """
 		if (p.translator && (p.translator.index == 1) !== (v.waveform === "rgb"))
 			p.translator.index = v.waveform === "rgb" ? 1 : 0
 	}
+	// Only a rekordbox USB export's quick-imported overview is low and needs the
+	// stretch. Its audio sits under the export's Contents folder; streams, Stream
+	// downloads and Engine Library music never do, so they keep stock height.
+	function scOverviewScale(track, rgb) {
+		const path = track && track.path ? String(track.path) : ""
+		if (!/(^|\\/)Contents\\//.test(path)) return 1
+		return rgb ? @RGB_SCALE@ : @BANDS_SCALE@
+	}
+	Timer {
+		id: scStemsSort
+		interval: 400
+		onTriggered: {
+			const c = Planck.librarianController.currentCollectionController
+			if (c) c.sortColumn("stems", Qt.DescendingOrder, false)
+		}
+	}
+	function scSortByStems() { scStemsSort.restart() }
 	function scSetSource(id, on) {
 		const list = scSources.filter(s => s !== id)
 		if (on) list.push(id)
@@ -443,7 +481,7 @@ QUALITY_ENTRY = """
 		EntryBase.ListEntry {
 			text: "Streaming Quality"
 			readonly property var ids: ["flac", "320k"]
-			values: ["FLAC", "320kbps"]
+			values: ["Lossless", "320kbps"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scQuality))]
 			onSelected: function(index) { root.scCall("quality=" + ids[index]) }
 		},
@@ -459,11 +497,75 @@ QUALITY_ENTRY = """
 JOG_ENTRY = """
 		EntryBase.ListEntry {
 			text: "Jog Light Mode"
-			readonly property var ids: ["static", "rainbow", "fast"]
-			values: ["Static", "Psy Rainbow", "Psy Fast"]
+			readonly property var ids: ["static", "rainbow", "fast", "bpm"]
+			values: ["Static", "Psy Rainbow", "Psy Fast", "Psy BPM Sync"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scJog))]
 			onSelected: function(index) { root.scCall("jog=" + ids[index]) }
 		},
+"""
+
+STEMS_HEADER_ENTRY = """
+	// SC5000 mod: Engine lists Stems in the sidebar only on players with pre-rendered
+	// Stems playback, which this unit lacks, so its C++ model never adds the row. This
+	// entry stands in for it on the playlist sidebar's top bar: drop tracks or a
+	// playlist on it to render stems (Engine's own Stems list calls), tap it to list
+	// the whole collection with stemmed tracks first.
+	Rectangle {
+		id: scStems
+		// The playlist sidebar is the view showing the selected drive's craylist model.
+		readonly property var craylists: Planck.librarianController.devicesController.selectedDeviceCraylistModel
+		readonly property bool active: !!craylists && !!breadcrumbViewHeader.breadcrumbView && breadcrumbViewHeader.breadcrumbView.model === craylists && !breadcrumbViewHeader.backButtonVisible && Config.device.hasStemsProEmbeddedRendering
+		visible: active
+		z: 6
+		anchors { right: parent.right; rightMargin: 14; verticalCenter: parent.verticalCenter }
+		width: 170; height: 54; radius: 27
+		color: scStemsDrop.containsDrag ? Qt.darker(Style.systemBlue01Color, 1.2) : scStemsTap.pressed ? Style.focus02Color : Style.surface03Color
+		border { width: 2; color: scStemsDrop.containsDrag ? Style.icon02Color : Style.systemBlue01Color }
+		Row {
+			anchors.centerIn: parent
+			spacing: 8
+			Icons.ColoredImage {
+				anchors.verticalCenter: parent.verticalCenter
+				width: 30; height: 30
+				source: "qrc:/UIKit.1/UIKit/Icons/Stems30x30.png"
+				color: Style.font02Color
+			}
+			Text {
+				anchors.verticalCenter: parent.verticalCenter
+				text: root.scT("Stems")
+				color: Style.font02Color
+				font: Style.fontH2
+			}
+		}
+		MouseArea {
+			id: scStemsTap
+			anchors.fill: parent
+			enabled: scStems.active
+			onClicked: {
+				const list = breadcrumbViewHeader.stackView.currentItem
+				if (list) list.currentRowIndex = -1
+				root.scSortByStems()
+			}
+		}
+		AIRTouchDropZone {
+			id: scStemsDrop
+			anchors.fill: parent
+			enabled: scStems.active
+			dropKeys: [TouchDragTracksToStemsList, TouchDragListToStemsList]
+			onDrop: {
+				const queue = Planck.librarianController.stemsQueueManager
+				if (!queue) return
+				if (info.matchingKeys.indexOf(TouchDragListToStemsList) > -1) {
+					const lists = Planck.librarianController.craylistController
+					queue.startRenderTracksFromListPath(lists.getListPath(info.payload), lists.getSourceDevice(info.payload))
+				} else if (info.matchingKeys.indexOf(TouchDragTracksToStemsList) > -1) {
+					const ids = []
+					for (const key in info.payload) ids.push(info.payload[key].uniqueID)
+					if (ids.length) queue.startRenderTracks(ids.join(";"))
+				}
+			}
+		}
+	}
 """
 
 LANGUAGE_ENTRY = """
@@ -497,7 +599,8 @@ RGB_COLORS = {"Low": "#ff1428", "Mid": "#00e632", "High": "#0078ff"}
 RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}
 
 
-# Vertical stretch of the deck overview waveform (1.0 = stock height). RGB draws
+# Vertical stretch of the deck overview waveform for tracks on a rekordbox USB
+# export (1.0 = stock height; every other track keeps 1.0). RGB draws
 # each column at full amplitude and fills the strip quickly; Denon and 3-Band
 # stack the bands as separate, lower layers and need more.
 OVERVIEW_Y_SCALE_RGB = 1.3
@@ -516,8 +619,8 @@ def edits(dev: bool):
     overview = [(f"rgbMode ? Style.waveformRGB{b}Color : Style.waveform{b}Color", f'rgbMode ? "{RGB_COLORS[b]}" : ' + three_band(f"waveform{b}Color", b)) for b in BAND_COLORS]
     overview += [(f"elapsed{b}Color: Style.waveform{b}PastColor", f'elapsed{b}Color: rgbMode ? "{RGB_PAST[b]}" : ' + three_band(f"waveform{b}PastColor", b, BAND_PAST)) for b in BAND_COLORS]
     # Deck overview: drop the 7 px gap under the waveform so it uses the full bar,
-    # and stretch the amplitude. Engine's own analysis and imported rekordbox
-    # tracks both peak near 127 and look flat in the strip. The default style
+    # and stretch the amplitude of tracks quick-imported from a rekordbox USB, whose
+    # converted overview looks flat in the strip (scOverviewScale). The default style
     # (Praline) grows up from the bottom edge, so scale from there; only y changes,
     # so needle drop and markers keep their x. The container clips what the
     # stretch pushes past the top. transform must sit outside the anchors group.
@@ -526,16 +629,17 @@ def edits(dev: bool):
         ("		objectName: \"Deck_WaveformOverview_ViewContainer\"\n",
          "		objectName: \"Deck_WaveformOverview_ViewContainer\"\n		clip: true\n"),
         ("			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n",
-         f"			transform: Scale {{ origin.y: overview.height; yScale: overview.rgbMode ? {OVERVIEW_Y_SCALE_RGB} : {OVERVIEW_Y_SCALE_BANDS} }}\n"
+         "			transform: Scale { origin.y: overview.height; yScale: root.scOverviewScale(overview.trackData, overview.rgbMode) }\n"
          "			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n"),
     ]
     main = DEV_HARNESS if dev else ""
+    services = SERVICES_MAIN.replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS))
     return {
         # The flag is still cleared, which is what pressing "Ok" would do.
         ROOT + "Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml": [(
             "      let messageObject = {", "      Planck.librarianController.deviceEjectedImproperly = false\n      return\n      let messageObject = {")],
         ROOT + "EmbeddedMain.qml": [
-            ("	Connections {\n		target: MainWindow\n", SERVICES_MAIN + main + "\n	Connections {\n		target: MainWindow\n"),
+            ("	Connections {\n		target: MainWindow\n", services + main + "\n	Connections {\n		target: MainWindow\n"),
             ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG),
         ],
         v + "Common/Waveform/Waveform.qml": wave,
@@ -577,7 +681,10 @@ def edits(dev: bool):
         ],
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],
-        v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewHeader.qml": [("text: breadcrumbViewHeader.title\n", 'text: ["My Playlists", "My Collection"].indexOf(breadcrumbViewHeader.title) >= 0 ? root.scT(breadcrumbViewHeader.title) : breadcrumbViewHeader.title\n')],
+        v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewHeader.qml": [
+            ("text: breadcrumbViewHeader.title\n", 'text: ["My Playlists", "My Collection"].indexOf(breadcrumbViewHeader.title) >= 0 ? root.scT(breadcrumbViewHeader.title) : breadcrumbViewHeader.title\n'),
+            ("	Rectangle {\n		id: background\n", STEMS_HEADER_ENTRY + "\n	Rectangle {\n		id: background\n"),
+        ],
         v + "BrowserSource/SourceScreen.qml": [("						AvailableSource {\n", AVAILABLE_TILES + "						AvailableSource {\n")],
         v + "Streaming/StreamingDialog.qml": [
             # This limit is for TIDAL's own qualities; DJ sets here run for hours.
@@ -638,6 +745,14 @@ def edits(dev: bool):
         v + "BrowseView/Components/Components/Bpm.qml": [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
         v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: row.modelData.key || root.scPreview(row.modelData.providerName)[2] || ""')],
         v + "BrowseView/Components/Components/Song.qml": [('title: row.modelData.song || ""', 'title: root.scPlainTitle(row.modelData.song)')],
+        # Selecting a drive that carries an Engine profile asked "Load drive profile to
+        # device?" on every insert. Answer "No" unasked: the deck keeps its own settings.
+        prefs + "Entries/LoadPreferencesDialog.qml": [(
+            "		if(show && !pQuitting) {\n			let messageObject = {\n",
+            "		if(show && !pQuitting) {\n"
+            "			Qt.callLater(() => { pShow.translator.state = false; pFinshedLoadingProfile.translator.state = true })\n"
+            "			return\n"
+            "			let messageObject = {\n")],
         # rb-bridge converts rekordbox media at mount. Engine's own slow import of a
         # large library corrupted m.db, so always take the prompt's "Ignore" branch.
         ROOT + "Items/MessageBoxes/RekordBoxImportDialog.qml": [(

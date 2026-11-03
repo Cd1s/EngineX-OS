@@ -37,6 +37,20 @@ while running crashed PID 1 once.
   listings.
 - Encoder navigation of the Source screen reaches only stock rows. The three
   service rows are touch-only.
+- Engine adds its Stems list row only on players with pre-rendered Stems playback
+  (`Planck.hasStemsPreRenderedPlayback()` is false here), so its C++ craylist model
+  never has it. The pack puts a "Stems" entry on the playlist sidebar's top bar
+  instead: drop tracks or a playlist on it to render stems (the stock Stems list
+  calls), tap it to sort the collection by Stems. It is not a real list.
+- The deck overview is stretched only for tracks whose path has a `Contents/`
+  folder (a rekordbox USB export). Streams, Stream downloads and Engine Library
+  music keep stock height.
+- Jog light modes only set `/Engine/Deck<N>/Color` in memory. Measured
+  2026-11-03: 30 s of Psy Fast or Psy BPM Sync wrote no more to eMMC than Static
+  and changed no settings, profile or database file. BPM sync follows the playing
+  deck's tempo (an eighth note per step), not its beat phase.
+- Selecting a drive that carries an Engine profile no longer asks "Load drive
+  profile to device?"; the prompt's "No" is taken and the deck keeps its settings.
 
 ## Recovery
 

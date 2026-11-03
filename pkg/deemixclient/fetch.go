@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"sync"
 	"time"
 )
 
@@ -19,7 +18,8 @@ const (
 	mediaFirstByte = 90 * time.Second
 	maxMediaBytes  = 2 << 30
 	maxPartBytes   = 64 << 20
-	partsAtOnce    = 8
+	// The deck's link fills at about 16 requests; 8 in lockstep got half of it.
+	partsAtOnce = 16
 )
 
 // Only downloads this pipeline named are ever evicted: Save's and Deemix's <id>.
@@ -90,7 +90,7 @@ func (c *Client) SaveParts(ctx context.Context, name, ext string, urls []string)
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
-	if err = c.fetchParts(ctx, f, urls); err != nil {
+	if err = c.fetchParts(ctx, f, wholeParts(urls)); err != nil {
 		return nil, err
 	}
 	if err = f.Close(); err != nil {
@@ -123,43 +123,80 @@ func (c *Client) SaveParts(ctx context.Context, name, ext string, urls []string)
 	return dl, nil
 }
 
-// fetchParts downloads segments a batch at a time and writes them in order. One at a
-// time, a two-hour set takes far longer than Engine should wait.
-func (c *Client) fetchParts(ctx context.Context, f *os.File, urls []string) error {
-	for start := 0; start < len(urls); start += partsAtOnce {
-		batch := urls[start:min(start+partsAtOnce, len(urls))]
-		parts := make([][]byte, len(batch))
-		errs := make([]error, len(batch))
-		var wg sync.WaitGroup
-		for i, address := range batch {
-			wg.Add(1)
+// part is one request of a download: a whole address, or bytes from..to of it.
+type part struct {
+	url      string
+	from, to int64 // to is inclusive; from < 0 asks for the whole response
+}
+
+func wholeParts(urls []string) []part {
+	parts := make([]part, len(urls))
+	for i, u := range urls {
+		parts[i] = part{u, -1, -1}
+	}
+	return parts
+}
+
+// fetchParts keeps partsAtOnce requests going and writes the answers in order. A
+// slow part holds back only its own slot, never a whole batch, and no more than
+// partsAtOnce answers wait in memory.
+func (c *Client) fetchParts(ctx context.Context, f io.Writer, parts []part) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type answer struct {
+		data []byte
+		err  error
+	}
+	answers := make([]chan answer, len(parts))
+	for i := range answers {
+		answers[i] = make(chan answer, 1)
+	}
+	slots := make(chan struct{}, partsAtOnce)
+	go func() {
+		for i, p := range parts {
+			select {
+			case slots <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 			go func() {
-				defer wg.Done()
-				parts[i], errs[i] = c.fetchPart(ctx, address)
+				data, err := c.fetchPart(ctx, p)
+				answers[i] <- answer{data, err}
 			}()
 		}
-		wg.Wait()
-		for i, part := range parts {
-			if errs[i] != nil {
-				return errs[i]
-			}
-			if _, err := f.Write(part); err != nil {
-				return err
-			}
+	}()
+	for i := range parts {
+		var a answer
+		select {
+		case a = <-answers[i]:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
+		if a.err != nil {
+			return a.err
+		}
+		if _, err := f.Write(a.data); err != nil {
+			return err
+		}
+		<-slots
 	}
 	return nil
 }
 
-func (c *Client) fetchPart(ctx context.Context, address string) ([]byte, error) {
+func (c *Client) fetchPart(ctx context.Context, p part) ([]byte, error) {
 	var last error
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", p.url, nil)
 		if err != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") {
 			return nil, errors.New("audio: invalid address")
+		}
+		want := http.StatusOK
+		if p.from >= 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", p.from, p.to))
+			want = http.StatusPartialContent
 		}
 		resp, err := c.media().Do(req)
 		if err != nil {
@@ -169,15 +206,118 @@ func (c *Client) fetchPart(ctx context.Context, address string) ([]byte, error) 
 		data, err := io.ReadAll(io.LimitReader(resp.Body, maxPartBytes))
 		resp.Body.Close()
 		switch {
-		case resp.StatusCode != http.StatusOK:
+		case resp.StatusCode != want:
 			last = fmt.Errorf("audio: HTTP %d", resp.StatusCode)
 		case err != nil || (resp.ContentLength >= 0 && int64(len(data)) != resp.ContentLength):
+			last = errors.New("audio: transfer interrupted")
+		case p.from >= 0 && int64(len(data)) != p.to-p.from+1:
 			last = errors.New("audio: transfer interrupted")
 		default:
 			return data, nil
 		}
 	}
 	return nil, last
+}
+
+// splitBytes is the size of one ranged request; partsAtOnce of them fit in memory.
+const splitBytes = 2 << 20
+
+// fetchSplit downloads one file as parallel byte ranges. A host that ignores
+// Range just sends it whole, which is kept as it comes.
+func (c *Client) fetchSplit(ctx context.Context, f io.Writer, address string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
+	if err != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") {
+		return errors.New("audio: invalid address")
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", splitBytes-1))
+	resp, err := c.media().Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errors.New("audio: transfer failed")
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		n, err := io.Copy(f, io.LimitReader(resp.Body, maxMediaBytes+1))
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return errors.New("audio: transfer interrupted")
+		}
+		if n > maxMediaBytes || (resp.ContentLength >= 0 && n != resp.ContentLength) {
+			return errors.New("audio: incomplete or oversized transfer")
+		}
+		return nil
+	case http.StatusPartialContent:
+	default:
+		return fmt.Errorf("audio: HTTP %d", resp.StatusCode)
+	}
+	var from, to, total int64
+	if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/%d", &from, &to, &total); err != nil || from != 0 || to < 0 || to >= total || total > maxMediaBytes {
+		return errors.New("audio: unexpected byte range")
+	}
+	first, err := io.ReadAll(io.LimitReader(resp.Body, splitBytes+1))
+	if err != nil || int64(len(first)) != to+1 {
+		return errors.New("audio: transfer interrupted")
+	}
+	if _, err := f.Write(first); err != nil {
+		return err
+	}
+	var parts []part
+	for at := to + 1; at < total; at += splitBytes {
+		parts = append(parts, part{address, at, min(at+splitBytes, total) - 1})
+	}
+	return c.fetchParts(ctx, f, parts)
+}
+
+// SaveSplit stores the file at address as name.flac or name.mp3, fetched as
+// parallel byte ranges. WAV and AIFF are re-encoded to FLAC with the same samples.
+// The caller decides whether MP3 is acceptable; this keeps whichever arrived.
+func (c *Client) SaveSplit(ctx context.Context, name, address string) (*Download, error) {
+	if err := os.MkdirAll(c.DownloadDir, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.CreateTemp(c.DownloadDir, ".part-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if err = c.fetchSplit(ctx, f, address); err != nil {
+		return nil, err
+	}
+	if err = f.Close(); err != nil {
+		return nil, err
+	}
+	path := f.Name()
+	if converted, err := pcmToFLAC(path); err == nil {
+		defer os.Remove(converted)
+		path = converted
+	} else if !errors.Is(err, errNotPCM) {
+		return nil, err
+	}
+	q, err := Inspect(path)
+	if err != nil {
+		return nil, err
+	}
+	final := filepath.Join(c.DownloadDir, name+"."+q.Format)
+	if err = os.Chmod(path, 0o644); err != nil {
+		return nil, err
+	}
+	if err = os.Rename(path, final); err != nil {
+		return nil, err
+	}
+	// Only one of name's formats is kept, so Cached finds the one just saved.
+	for _, ext := range []string{".flac", ".mp3", ".mp4"} {
+		if other := filepath.Join(c.DownloadDir, name+ext); other != final {
+			os.Remove(other)
+		}
+	}
+	c.Trim(final)
+	return &Download{Path: final, Quality: q}, nil
 }
 
 // RemoveStaleParts clears unfinished downloads left by a previous run.

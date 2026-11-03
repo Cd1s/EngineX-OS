@@ -213,7 +213,10 @@ type scTrack struct {
 	ISRC     string  `json:"isrc"`
 	Access   string  `json:"access"`
 	Artwork  string  `json:"artwork_url"`
-	User     struct {
+	// Set when the uploader lets listeners download their original file.
+	Downloadable bool   `json:"downloadable"`
+	DownloadURL  string `json:"download_url"`
+	User         struct {
 		Username string `json:"username"`
 		Avatar   string `json:"avatar_url"`
 	} `json:"user"`
@@ -511,11 +514,15 @@ func (s *SoundCloud) SearchPlaylists(ctx context.Context, query string) ([]Playl
 type SoundCloudMedia struct {
 	Ext  string // mp3, or mp4 for AAC
 	URLs []string
+	// Original is the uploader's own file (often WAV or FLAC), offered only when
+	// lossless was asked for and the uploader allows downloads.
+	Original string
 }
 
 // Media finds where to download a track's whole audio from. The preview address is
-// never used, however it is offered.
-func (s *SoundCloud) Media(ctx context.Context, id string) (SoundCloudMedia, error) {
+// never used, however it is offered. Lossless also looks for the original upload,
+// which is far larger: a stream of an hour-long set is 60 MB, the WAV 600 MB.
+func (s *SoundCloud) Media(ctx context.Context, id string, lossless bool) (SoundCloudMedia, error) {
 	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
 		return SoundCloudMedia{}, errors.New("soundcloud: invalid track ID")
 	}
@@ -526,38 +533,62 @@ func (s *SoundCloud) Media(ctx context.Context, id string) (SoundCloudMedia, err
 	if t.Access != "" && t.Access != "playable" {
 		return SoundCloudMedia{}, ErrNoFullStream
 	}
+	var m SoundCloudMedia
+	if lossless && t.Downloadable && t.DownloadURL != "" {
+		// The address is built here, not taken from the reply, so the login is only
+		// ever sent to the API. A refused download (a limit, a changed setting)
+		// still leaves the stream.
+		address := s.base() + "/tracks/" + id + "/download"
+		if location, err := s.signedAddress(ctx, address); err == nil && location != address {
+			m.Original = location
+		}
+	}
 	var streams struct {
 		HTTPMP3 string `json:"http_mp3_128_url"`
 		HLSMP3  string `json:"hls_mp3_128_url"`
 		HLSAAC  string `json:"hls_aac_160_url"`
 	}
 	if err := s.get(ctx, s.base()+"/tracks/"+id+"/streams", &streams); err != nil {
+		if m.Original != "" {
+			return m, nil
+		}
 		return SoundCloudMedia{}, err
 	}
 	if streams.HTTPMP3 != "" {
 		// That address answers with a signed redirect, which needs no credentials.
 		location, err := s.signedAddress(ctx, streams.HTTPMP3)
-		if err != nil {
-			return SoundCloudMedia{}, err
+		if err == nil {
+			m.Ext, m.URLs = "mp3", []string{location}
+			return m, nil
 		}
-		return SoundCloudMedia{Ext: "mp3", URLs: []string{location}}, nil
+		if m.Original != "" {
+			return m, nil
+		}
+		return SoundCloudMedia{}, err
 	}
 	ext, playlist := "mp3", streams.HLSMP3
 	if playlist == "" {
 		ext, playlist = "mp4", streams.HLSAAC
 	}
 	if playlist == "" {
+		if m.Original != "" {
+			return m, nil
+		}
 		return SoundCloudMedia{}, ErrNoFullStream
 	}
 	location, err := s.signedAddress(ctx, playlist)
+	var urls []string
+	if err == nil {
+		urls, err = s.segments(ctx, location)
+	}
 	if err != nil {
+		if m.Original != "" {
+			return m, nil
+		}
 		return SoundCloudMedia{}, err
 	}
-	urls, err := s.segments(ctx, location)
-	if err != nil {
-		return SoundCloudMedia{}, err
-	}
-	return SoundCloudMedia{Ext: ext, URLs: urls}, nil
+	m.Ext, m.URLs = ext, urls
+	return m, nil
 }
 
 // signedAddress follows the API's redirect by hand, keeping credentials off the CDN.

@@ -70,6 +70,16 @@ Token。凭据存在 `state/bpm-config.json` 和 `state/soundcloud-owner.json`�
 只用 API 标记 `access=playable` 的曲目：优先 `http_mp3_128_url`，其次 HLS MP3，再次 HLS AAC（存为 `.mp4`）。试听地址一律不用，
 也不做解密。文件存为 `soundcloud-<id>.mp3`。超过 15 分钟或 50 MB 的文件不做后台分析。代码不提取 SoundCloud 网页里的 client_id。
 
+碟机设置「串流音質」决定 SoundCloud 走哪条路（2026-11-03）：
+
+- `320kbps`：直接取上面的串流（SoundCloud 自己只提供 128k MP3 / 160k AAC），不请求原档。
+- `無損 (Lossless)`：曲目 `downloadable=true` 时先用 `/tracks/<id>/download` 取上传者的原档（地址由 API 基址拼出，登录凭证只发给 API）。
+  FLAC、MP3 原样保存；WAV、AIFF（8/16/24 bit PCM）在碟机上无损转成 FLAC（同样的采样，体积更小）；浮点、32 bit 或其他格式
+  不可用，退回串流。不允许下载的曲目（大部分 DJ Set）两种设置结果相同。
+
+切片和单文件都用 16 路滑动窗口并行下载（单文件按 2 MB 字节区间拆分）。实测同一首 1 小时 50 分、106 MB 的 Set：
+旧的「8 个一批」60.3 秒，现在 43.7–45.8 秒；32 路没有更快，碟机网络上限约 2.3 MB/s。
+
 ### 网易云
 
 收藏的专辑和电台排在歌单后面，标题前缀 `【专辑】`、`【电台】`，曲目 ID 为 `album:<id>`、
