@@ -79,6 +79,8 @@ static const struct engine_edit engine_edits[] = {
     // That took the r2 this used: strh r3, [r2] -> strh r3, [r0, #-76]. r0 was just
     // set to r4 + 668, so this still writes +592. strh's immediate cannot reach it from r4.
     {0xF65A58u, "\xb0\x30\xc2\xe1", "\xbc\x34\x40\xe1", 4},
+    // JP07 zeroes out stemsPreRenderedPlayback at +36 (+0x24) in 0xf659b8. NOP it so it stays 1.
+    {0xF659B8u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4},
 };
 
 static int engine_base(struct dl_phdr_info *info, size_t size, void *out) {
