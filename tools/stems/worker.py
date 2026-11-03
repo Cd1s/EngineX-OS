@@ -6,19 +6,64 @@ approximates vocals; HPSS estimates drums, a low-band mask estimates bass, and
 the remainder is melody. Masks sum to one; the stems sum back to the input.
 """
 import argparse
-from collections import deque
+import io
 import os
+import select
 import sys
 
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '4')
 os.environ.setdefault('OMP_NUM_THREADS', '4')
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 from scipy.fft import rfft, irfft
 from scipy.ndimage import median_filter
 
 MAX_HEADER = 8192
 MAX_BLOCK = 65536
 MAX_RATE = 192000
+BATCH = 64  # blocks separated together when they are already waiting
+HISTORY = 17
+
+
+class Input:
+    """Buffered input that can tell whether more bytes are already waiting."""
+
+    def __init__(self, stream):
+        self.stream, self.buf, self.pos = stream, bytearray(), 0
+        try:
+            self.fd = stream.fileno()
+        except (AttributeError, OSError, io.UnsupportedOperation):
+            self.fd = None
+
+    def _fill(self):
+        if self.pos:
+            del self.buf[:self.pos]
+            self.pos = 0
+        chunk = os.read(self.fd, 1 << 20) if self.fd is not None else self.stream.read(1 << 20)
+        self.buf += chunk
+        return bool(chunk)
+
+    def waiting(self):
+        if self.pos < len(self.buf) or self.fd is None:
+            return True
+        return bool(select.select([self.fd], [], [], 0)[0])
+
+    def readline(self, limit):
+        while True:
+            end = self.buf.find(b'\n', self.pos, self.pos + limit)
+            if end >= 0 or len(self.buf) - self.pos >= limit or not self._fill():
+                break
+        n = end + 1 - self.pos if end >= 0 else min(len(self.buf) - self.pos, limit)
+        line = bytes(self.buf[self.pos:self.pos + n])
+        self.pos += n
+        return line
+
+    def read(self, count):
+        if self.pos == len(self.buf):
+            self._fill()
+        chunk = bytes(self.buf[self.pos:self.pos + count])
+        self.pos += len(chunk)
+        return chunk
 
 
 def header_read(stream):
@@ -69,7 +114,7 @@ class Separator:
         self.pending = np.zeros((channels, n-h), np.float32)
         self.ola = np.zeros((4, channels, n), np.float32)
         self.norm = np.zeros(n, np.float32)
-        self.history = deque(maxlen=17)
+        self.history = np.empty((0, n//2+1), np.float32)
         self.skip = n-h
         self.received = self.returned = 0
         self.finished = False
@@ -79,46 +124,72 @@ class Separator:
         self.vocal_band = ((1/(1+(180/np.maximum(f, 1))**6)) *
                            (1/(1+(f/5000)**6))).astype(np.float32)
 
+    def _harmonic(self, mag):
+        """Median over each frame's last HISTORY magnitudes, as one streaming deque would."""
+        hist = np.concatenate((self.history, mag))
+        start = len(self.history)
+        out = np.empty_like(mag)
+        early = max(0, min(len(mag), HISTORY - 1 - start))
+        for i in range(early):  # only the first frames of a session
+            out[i] = np.median(hist[max(0, start+i+1-HISTORY):start+i+1], axis=0)
+        if early < len(mag):
+            # One 1-D median over every bin's history laid end to end: scipy's 1-D
+            # path is far faster than np.median over windows or an n-D filter.
+            # origin ends each window at its own frame; the outputs kept never
+            # reach into the neighbouring bin.
+            seg = np.ascontiguousarray(hist[start+early+1-HISTORY:].T)
+            flat = median_filter(seg.ravel(), size=HISTORY, origin=HISTORY//2, mode='nearest')
+            out[early:] = flat.reshape(seg.shape)[:, HISTORY-1:].T
+        self.history = hist[-HISTORY:]
+        return out
+
     def _process(self, x):
         self.pending = np.concatenate((self.pending, x), axis=1)
-        pieces = []
         n, h = self.size, self.hop
-        while self.pending.shape[1] >= n:
-            z = rfft(self.pending[:, :n]*self.window, workers=self.workers)
-            mag = np.mean(abs(z), axis=0)
-            self.history.append(mag)
-            harmonic = np.median(np.stack(self.history), axis=0)
-            percussive = median_filter(mag, size=31, mode='nearest')
-            p_mask = percussive**2 / (harmonic**2 + percussive**2 + 1e-20)
-            h_mask = 1-p_mask
-            bass_mask = h_mask*self.low
-            if self.channels == 2:
-                # Mid/side coherence favors centered material; this also leaks
-                # centered instruments and cannot identify a singer semantically.
-                mid = abs((z[0]+z[1])*0.5)
-                side = abs((z[0]-z[1])*0.5)
-                center = np.clip((mid-side)/(mid+side+1e-10), 0, 1)
-            else:
-                center = np.ones_like(mag)
-            vocal_mask = h_mask*(1-self.low)*self.vocal_band*center*0.8
-            melody_mask = 1-p_mask-bass_mask-vocal_mask
-            # Canonical worker order; native output mapping is documented in PROTOCOL.md.
-            masks = np.stack((vocal_mask, bass_mask, p_mask, melody_mask))
-            waves = irfft(masks[:, None, :]*z[None, :, :], n=n, workers=self.workers)
-            self.ola += waves*self.window
+        count = (self.pending.shape[1] - n) // h + 1 if self.pending.shape[1] >= n else 0
+        if not count:
+            return np.empty((4, self.channels, 0), np.float32)
+        # Every complete window at once: (channels, frames, n).
+        frames = sliding_window_view(self.pending, n, axis=1)[:, :count*h:h]
+        z = rfft(frames*self.window, workers=self.workers)
+        mag = np.mean(abs(z), axis=0)
+        harmonic = self._harmonic(mag)
+        # Each frame's median across frequency, as one 1-D pass: 15 edge copies on
+        # both sides of every row are exactly mode='nearest' for a 31-bin window.
+        padded = np.pad(mag, ((0, 0), (15, 15)), mode='edge')
+        percussive = median_filter(padded.ravel(), size=31, mode='nearest').reshape(padded.shape)[:, 15:-15]
+        p_mask = percussive**2 / (harmonic**2 + percussive**2 + 1e-20)
+        h_mask = 1-p_mask
+        bass_mask = h_mask*self.low
+        if self.channels == 2:
+            # Mid/side coherence favors centered material; this also leaks
+            # centered instruments and cannot identify a singer semantically.
+            mid = abs((z[0]+z[1])*0.5)
+            side = abs((z[0]-z[1])*0.5)
+            center = np.clip((mid-side)/(mid+side+1e-10), 0, 1)
+        else:
+            center = np.ones_like(mag)
+        vocal_mask = h_mask*(1-self.low)*self.vocal_band*center*0.8
+        melody_mask = 1-p_mask-bass_mask-vocal_mask
+        # Canonical worker order; native output mapping is documented in PROTOCOL.md.
+        masks = np.stack((vocal_mask, bass_mask, p_mask, melody_mask))
+        waves = irfft(masks[:, None]*z[None], n=n, workers=self.workers)*self.window
+        pieces = []
+        for i in range(count):
+            self.ola += waves[:, :, i]
             self.norm += self.window**2
             out = self.ola[:, :, :h] / np.maximum(self.norm[:h], 1e-12)
             self.ola[:, :, :-h] = self.ola[:, :, h:]
             self.ola[:, :, -h:] = 0
             self.norm[:-h] = self.norm[h:]
             self.norm[-h:] = 0
-            self.pending = self.pending[:, h:]
             if self.skip:
                 take = min(self.skip, h)
                 out = out[:, :, take:]
                 self.skip -= take
             if out.shape[-1]:
                 pieces.append(out.copy())
+        self.pending = self.pending[:, count*h:]
         if not pieces:
             return np.empty((4, self.channels, 0), np.float32)
         return np.concatenate(pieces, axis=2).astype(np.float32)
@@ -164,37 +235,52 @@ def serve(src, dst):
     queued = np.empty((4, channels, 0), np.float32)
     header_write(dst, preparing='ready')
     header_write(dst, preparing='ready', numReturnChannels=channels*4)
-    while True:
-        fields = header_read(src)
-        if fields is None:
-            return
-        action = fields.get(b'action')
-        if action == b'done':
-            tail = np.concatenate((queued, separator.drain()), axis=2)
-            for start in range(0, tail.shape[-1], max_block):
-                chunk = tail[:, :, start:start+max_block]
-                header_write(dst, returnFrames=chunk.shape[-1])
-                dst.write(chunk.astype('<f4', copy=False).tobytes(order='C'))
-                dst.flush()
-            header_write(dst, returnFrames=0)
-            return
-        if action != b'block':
-            raise ValueError('unsupported action')
-        count = int(fields[b'numSamples'])
-        if not 0 <= count <= max_block:
-            raise ValueError('invalid PCM frame count')
-        if count:
-            raw = read_exact(src, count*channels*4)
-            x = np.frombuffer(raw, dtype='<f4').reshape(channels, count)
-            stems = separator.feed(x)
-        else:
-            stems = np.empty((4, channels, 0), np.float32)
-        queued = np.concatenate((queued, stems), axis=2)
-        reply = queued[:, :, :max_block]
-        queued = queued[:, :, max_block:]
-        header_write(dst, returnFrames=reply.shape[-1])
-        dst.write(reply.astype('<f4', copy=False).tobytes(order='C'))
+
+    def reply(frames):
+        nonlocal queued
+        chunk = queued[:, :, :frames]
+        queued = queued[:, :, frames:]
+        header_write(dst, returnFrames=chunk.shape[-1])
+        dst.write(chunk.astype('<f4', copy=False).tobytes(order='C'))
         dst.flush()
+
+    fields = header_read(src)
+    while fields is not None:
+        # Blocks already waiting (a pipelining client sends ahead) are separated
+        # together; each still gets its own reply. A client that waits for every
+        # reply leaves nothing waiting, so it is served block by block.
+        blocks, pcm = 0, []
+        while True:
+            action = fields.get(b'action')
+            if action == b'done':
+                break
+            if action != b'block':
+                raise ValueError('unsupported action')
+            count = int(fields[b'numSamples'])
+            if not 0 <= count <= max_block:
+                raise ValueError('invalid PCM frame count')
+            if count:
+                raw = read_exact(src, count*channels*4)
+                pcm.append(np.frombuffer(raw, dtype='<f4').reshape(channels, count))
+            blocks += 1
+            if blocks >= BATCH or not src.waiting():
+                fields = {}
+                break
+            fields = header_read(src)
+            if fields is None:
+                break
+        if pcm:
+            queued = np.concatenate((queued, separator.feed(np.concatenate(pcm, axis=1))), axis=2)
+        for _ in range(blocks):
+            reply(max_block)
+        if fields is not None and fields.get(b'action') == b'done':
+            queued = np.concatenate((queued, separator.drain()), axis=2)
+            while queued.shape[-1]:
+                reply(max_block)
+            reply(0)
+            return
+        if fields is not None:
+            fields = header_read(src)
 
 
 def main():
@@ -204,7 +290,7 @@ def main():
     parser.add_argument('-pv')
     parser.parse_args()
     try:
-        serve(sys.stdin.buffer, sys.stdout.buffer)
+        serve(Input(sys.stdin.buffer), sys.stdout.buffer)
     except (ValueError, KeyError, BrokenPipeError, OSError) as exc:
         print('stems worker:', str(exc), file=sys.stderr)
         return 1

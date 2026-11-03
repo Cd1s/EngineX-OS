@@ -24,7 +24,10 @@ type stream struct {
 	line   []byte
 	fields map[string]string
 	used   int
-	skip   int64 // payload bytes still to pass
+	skip   int64        // payload bytes still to pass
+	raw    []byte       // the current header as sent, kept only when keep
+	keep   bool         // keep raw
+	data   func([]byte) // receives payload bytes, if set
 }
 
 // feed passes p through the parser; header calls back with each complete
@@ -37,6 +40,9 @@ func (s *stream) feed(p []byte, header func(map[string]string) (int64, error)) e
 				n = s.skip
 			}
 			s.skip -= n
+			if s.data != nil {
+				s.data(p[:n])
+			}
 			p = p[n:]
 			continue
 		}
@@ -51,6 +57,9 @@ func (s *stream) feed(p []byte, header func(map[string]string) (int64, error)) e
 			return errors.New("stems protocol: header too large")
 		}
 		s.line = append(s.line, chunk...)
+		if s.keep {
+			s.raw = append(s.raw, chunk...)
+		}
 		if i < 0 {
 			continue
 		}
@@ -71,7 +80,7 @@ func (s *stream) feed(p []byte, header func(map[string]string) (int64, error)) e
 		if err != nil {
 			return err
 		}
-		s.fields, s.used, s.skip = nil, 0, n
+		s.fields, s.used, s.skip, s.raw = nil, 0, n, s.raw[:0]
 	}
 	return nil
 }
@@ -91,6 +100,8 @@ type Session struct {
 	Blocks, Replies          int
 	done                     bool
 	lastReply                int64
+	// Packed replies carry three stems as int16 (see pack.go).
+	Packed bool
 }
 
 func count(fields map[string]string, key string, max int64) (int64, error) {
@@ -170,6 +181,9 @@ func (s *Session) FeedOut(p []byte) {
 		s.FramesOut += n
 		s.Replies++
 		s.lastReply = n
+		if s.Packed {
+			return n * int64(s.ReturnChannels) * 3 / 4 * 2, nil
+		}
 		return n * int64(s.ReturnChannels) * 4, nil
 	})
 }

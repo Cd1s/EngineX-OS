@@ -146,12 +146,13 @@ func TestFramedSessionEndsWithUploadOpen(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("edge never saw the end of the reply: the test proves nothing")
 	}
-	want := "session=FFFFFFFFFFFFFFFF\n\npreparing=ready\n\npreparing=ready\nnumReturnChannels=8\n\n"
-	for i := 0; i < 3; i++ {
-		want += "returnFrames=256\n\n" + strings.Repeat("\x01", 256*8*4)
+	greeting := "session=FFFFFFFFFFFFFFFF\n\npreparing=ready\n\npreparing=ready\nnumReturnChannels=8\n\n"
+	if !strings.HasPrefix(string(got), greeting) || !strings.HasSuffix(string(got), "returnFrames=0\n\n") {
+		t.Fatalf("Engine got %q...", got[:min(len(got), 120)])
 	}
-	if want += "returnFrames=0\n\n"; string(got) != want {
-		t.Fatalf("Engine got %d bytes, want %d", len(got), len(want))
+	// Packed on the wire; Engine still gets all eight float32 channels.
+	if streams, _, last := engineReplies(t, got[len(greeting):], 8, 256); len(streams[7]) != 3*256 || last != 0 {
+		t.Fatalf("Engine got %d frames per channel, want %d", len(streams[7]), 3*256)
 	}
 	closeUpload()
 	until := time.Now().Add(3 * time.Second)

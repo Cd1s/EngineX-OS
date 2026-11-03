@@ -165,7 +165,7 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("scope=netease\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ui := New(Config{AccessToken: "test-console-code", DeezerURL: fakeDeezer(t).URL, UIDir: uiDir, Factory: func(string, bool, string) (providers.Provider, error) { return fixtureProvider{}, nil }}, jobs)
+	ui := New(Config{AccessToken: "test-console-code", DeezerURL: fakeDeezer(t).URL, UIDir: uiDir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return fixtureProvider{}, nil }}, jobs)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	var s Session
@@ -244,6 +244,24 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 		t.Fatalf("stems source %q, want %q", src.Path, file)
 	}
 	tidalGet(t, srv.URL, "/v1/sc5000/stems/source?id=999999", 404, nil)
+	// The stemmed row heads netease's own Stems list and no other service's.
+	var stemLists tidalList
+	tidalGet(t, srv.URL, "/v1/users/1/favorites/playlists", 200, &stemLists)
+	var first tidalPlaylist
+	if len(stemLists.Items) == 0 || json.Unmarshal(stemLists.Items[0], &first) != nil || first.UUID != stemsListID("netease") || first.Title != "Stems" || first.NumberOfTracks != 1 {
+		t.Fatalf("first playlist %s", stemLists.Items[0])
+	}
+	var stemTracks tidalList
+	tidalGet(t, srv.URL, "/v1/playlists/"+first.UUID+"/tracks", 200, &stemTracks)
+	if len(stemTracks.Items) != 1 || json.Unmarshal(stemTracks.Items[0], &entry) != nil || entry.Item.ID <= 0 {
+		t.Fatalf("stems tracks %+v", stemTracks)
+	}
+	if len(ui.stemmed("deezer")) != 0 || len(ui.stemmed("spotify")) != 0 {
+		t.Fatal("stems list leaked into another service")
+	}
+	if tidalGet(t, srv.URL, "/v1/sc5000/stems/local?id="+id, 200, &src); src.Path != file {
+		t.Fatalf("stems local %q", src.Path)
+	}
 	r, _ := http.NewRequest("GET", stream, nil)
 	r.Header.Set("Range", "bytes=0-3")
 	resp, err := http.DefaultClient.Do(r)

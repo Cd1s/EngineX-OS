@@ -70,6 +70,7 @@ type Server struct {
 	mux      *http.ServeMux
 	tidal    *tidalGateway
 	uiMu     sync.Mutex
+	stemsMu  sync.Mutex // streaming-stems.json
 
 	// Owner logins ended in the console; the deck must not restore them.
 	ownerDeleted map[string]bool
