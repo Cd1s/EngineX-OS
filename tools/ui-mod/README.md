@@ -45,3 +45,36 @@ while running crashed PID 1 once.
 - To remove the mod: delete
   `/etc/systemd/system/engine.service.d/60-ui-hook.conf`, run
   `systemctl daemon-reload` and restart `engine.service`.
+
+## Remote Stems runtime adapter
+
+The hook includes the four matched-byte edits from
+`Engine.remote-stems-candidate.patch.json` for Engine SHA-256
+`342b611bd71fd09d9fda8013f19dccfba47ee4f0f772a959058bdd19d74d5413`.
+All four must match before any Stems edit is enabled. Memory protection covers
+all touched pages, including spans larger than a page, and returns to RX before
+Engine starts. A protection failure aborts startup rather than running a partial
+Stems trampoline set. The Engine file remains unchanged.
+
+On the current deck the hook is installed at
+`/data/sc5000-custom/lib/libengine_ui_hook.so`, with the existing
+`/etc/sc5000/libengine-ui-hook.so` preload path linked to it. The static ARMv7
+client lives at `/data/sc5000-custom/bin/stems-processor` (0755).
+`stems-runtime-prepare` is installed at `/etc/sc5000/stems-runtime-prepare` and
+called by the existing `engine-ui-guard pre` entry. It overlays the read-only
+`/usr/local/bin` directory, preserving vendor commands, and adds the client
+symlink. Upper/work directories live under
+`/data/sc5000-custom/stems-bin-overlay`.
+
+The client additionally requires the separately provisioned private
+`/etc/sc5000-stems/token` and the LAN backend. Installing the client and seeing
+Engine load the hook does not establish that a track can be separated. Full
+acceptance requires a real short track, successful `.stems` output, and playback
+of each stem. Do not use Engine's "Remove Stems Support" button: the stock
+removal path targets the processor path returned by this adapter.
+
+Before deployment, back up the existing hook, `engine-ui-guard`, and Engine
+service drop-ins to agent-backup. To roll back, stop Engine, restore those exact
+files, unmount `/usr/local/bin` after stopping processes using the overlay,
+remove the newly installed helper, and restart Engine. Keep user audio,
+databases, and credentials intact.
