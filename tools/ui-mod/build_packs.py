@@ -488,7 +488,7 @@ RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}
 
 
 # Vertical stretch of the deck overview waveform (1.0 = stock height).
-OVERVIEW_Y_SCALE = 1.3
+OVERVIEW_Y_SCALE = 1.9
 
 
 def three_band(style_name, band, colors=BAND_COLORS):
