@@ -57,6 +57,15 @@ struct engine_edit {
 };
 
 static const struct engine_edit engine_edits[] = {
+    // Stems remote processor: exact Engine build from the verified patch manifest.
+    {0x85ef9cu, "\xbc\x26\x9f\xe5\xbc\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x94\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
+        "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x04\xd5\xe3\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63},
+    {0x85f000u, "\x08\x30\x93\xe5\x33\xff\x2f\xe1\x5c\x16\x9f\xe5\x05\x20\xa0\xe1\x08\x00\xa0\xe1",
+        "\x01\x30\xa0\xe3\x76\x32\xc0\xe5\x00\x20\x9f\xe5\x0b\x10\x1c\xea\x6c\x69\xa3\x01", 20},
+    {0x85e5f8u, "\x90\xc7\x9f\xe5",
+        "\x1e\xff\x2f\xe1", 4},
+    {0xf6303cu, "\xe0\x20\x9f\xe5",
+        "\xef\xef\xe3\xea", 4},
     // TIDAL's client names a downloaded file after its codec and knows FLAC and AAC,
     // so an MP3 from the gateway would be saved with no extension and fail to load.
     // Its one "aac" string is both what it compares the codec with and the extension
@@ -81,16 +90,43 @@ __attribute__((constructor)) static void edit_engine(void) {
     uintptr_t base = 0;
     dl_iterate_phdr(engine_base, &base);
     if (!base) return;
-    long page = sysconf(_SC_PAGESIZE);
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) return;
+    uintptr_t page = (uintptr_t)page_size;
+    // These four edits branch into each other; enable them only as a complete set.
+    int stems_ready = 1;
+    for (size_t i = 0; i < 4; i++) {
+        const struct engine_edit *e = &engine_edits[i];
+        if (memcmp((const void *)(base + e->offset), e->expected, e->size))
+            stems_ready = 0;
+    }
     for (size_t i = 0; i < sizeof engine_edits / sizeof *engine_edits; i++) {
         const struct engine_edit *e = &engine_edits[i];
+        if (i < 4 && !stems_ready) continue;
         char *at = (char *)(base + e->offset);
         if (memcmp(at, e->expected, e->size)) continue;
-        char *start = (char *)((uintptr_t)at & ~(uintptr_t)(page - 1));
-        if (mprotect(start, (size_t)page, PROT_READ | PROT_WRITE)) continue;
+        uintptr_t first = (uintptr_t)at - (uintptr_t)at % page;
+        if (e->size > UINTPTR_MAX - (uintptr_t)at) continue;
+        uintptr_t end = (uintptr_t)at + e->size;
+        uintptr_t tail = end % page;
+        if (tail && page - tail > UINTPTR_MAX - end) continue;
+        if (tail) end += page - tail;
+        char *start = (char *)first;
+        size_t span = (size_t)(end - first);
+        if (mprotect(start, span, PROT_READ | PROT_WRITE)) {
+            // A partial Stems trampoline set must never reach Engine startup.
+            if (i < 4) _exit(127);
+            continue;
+        }
         memcpy(at, e->replacement, e->size);
-        mprotect(start, (size_t)page, PROT_READ | PROT_EXEC);
+        if (mprotect(start, span, PROT_READ | PROT_EXEC)) {
+            // Do not execute Engine code with an incomplete protection transition.
+            static const char error[] = "engine-ui-hook: restoring RX protection failed\n";
+            write(STDERR_FILENO, error, sizeof error - 1);
+            _exit(127);
+        }
         __builtin___clear_cache(at, at + e->size);
+        fprintf(stderr, "engine-ui-hook: applied 0x%x (%u bytes)\n", e->offset, e->size);
     }
 }
 
