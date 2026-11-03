@@ -162,21 +162,29 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	if err != nil {
 		return enginedb.Result{}, err
 	}
-	rel, err := r.Resolve("PIONEER/rekordbox/export.pdb")
-	if err != nil {
+	var rel string
+	for _, p := range []string{"PIONEER/rekordbox/export.pdb", "PIONEER/rekordbox/exportLibrary.db", "PIONEER/rekordbox/exportOneLibrary.db"} {
+		if resolved, e := r.Resolve(p); e == nil {
+			rel = resolved
+			break
+		}
+	}
+	if rel == "" {
 		return Convert(ctx, mount, opts)
 	}
 	st, err := os.Stat(r.FullPath(rel))
 	if err != nil {
 		return Convert(ctx, mount, opts)
 	}
-	stamp := fmt.Sprintf("%d %d", st.Size(), st.ModTime().UnixNano())
+	stamp := fmt.Sprintf("%s %d %d", rel, st.Size(), st.ModTime().UnixNano())
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	if !full && !opts.SmartMatch && importedStamp(dir) == stamp {
 		return enginedb.Result{Bypassed: true}, nil
 	}
 	var result enginedb.Result
-	if !full && !opts.SmartMatch && !hasState(dir) {
+	// GL-011: Always use fast tmpfs delta import at mount when a library exceeds
+	// fastImportTracks, even if .rb-bridge-state.db already exists from an earlier mount.
+	if !full && !opts.SmartMatch {
 		l, err := ReadLibrary(ctx, mount)
 		if err != nil {
 			return result, err
@@ -204,11 +212,6 @@ func importedStamp(dir string) string {
 	return strings.TrimSpace(string(b))
 }
 
-func hasState(dir string) bool {
-	st, err := os.Stat(filepath.Join(dir, stateName))
-	return err == nil && st.Size() > 0
-}
-
 func writeStamp(dir, stamp string) {
 	if err := os.WriteFile(filepath.Join(dir, stampName), []byte(stamp+"\n"), 0o644); err != nil {
 		log.Printf("rb-bridge: could not record the import: %v", err)
@@ -221,9 +224,11 @@ func fastImport(ctx context.Context, mount, dir string, l *rekordbox.Library, op
 		return enginedb.Result{}, err
 	}
 	defer os.RemoveAll(work)
-	// Tracks Engine already holds on this volume stay in the library.
-	if err = copyIfPresent(filepath.Join(dir, "m.db"), filepath.Join(work, "m.db")); err != nil {
-		return enginedb.Result{}, err
+	// Tracks and bridge state already held on this volume stay in the library for incremental sync.
+	for _, name := range []string{"m.db", stateName} {
+		if err = copyIfPresent(filepath.Join(dir, name), filepath.Join(work, name)); err != nil {
+			return enginedb.Result{}, err
+		}
 	}
 	opts.Fast, opts.DatabaseDir = true, work
 	mergeByPath(l)

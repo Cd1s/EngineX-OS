@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/Cd1s/sc5000-custom-os/internal/testfixture"
@@ -222,3 +223,46 @@ func TestFastImportReadsOnlyTheExport(t *testing.T) {
 		t.Fatalf("%+v %v", r, e)
 	}
 }
+
+func TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "PIONEER/rekordbox")
+	if e := os.MkdirAll(dir, 0755); e != nil {
+		t.Fatal(e)
+	}
+	exportDB := filepath.Join(dir, "exportLibrary.db")
+	db, e := sql.Open("sqlite", exportDB)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	if _, e = db.Exec(`CREATE TABLE content(id INTEGER PRIMARY KEY,title TEXT,file_path TEXT,bpm INTEGER,key_name TEXT);CREATE TABLE playlist(id INTEGER PRIMARY KEY,parent_id INTEGER,name TEXT,attribute INTEGER,seq INTEGER,smart_list TEXT);CREATE TABLE playlist_content(playlist_id INTEGER,content_id INTEGER,track_no INTEGER);INSERT INTO playlist VALUES(1,0,'Main Set',0,1,'');`); e != nil {
+		t.Fatal(e)
+	}
+	for i := 1; i <= 505; i++ {
+		if _, e = db.Exec(`INSERT INTO content VALUES(?,?,?,12800,'8A')`, i, "Track", filepath.ToSlash(filepath.Join("/Contents/track", string(rune('a'+i%26)), "s"+strconv.Itoa(i)+".flac"))); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e = db.Exec(`INSERT INTO playlist_content VALUES(1,1,1),(1,505,2)`); e != nil {
+		t.Fatal(e)
+	}
+	r1, e := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	if e != nil || r1.Added != 505 || !r1.PlaylistsChanged {
+		t.Fatalf("first mount: %+v %v", r1, e)
+	}
+	// Simulate user exporting 3 new tracks and a new playlist in Rekordbox (GL-011).
+	for i := 506; i <= 508; i++ {
+		if _, e = db.Exec(`INSERT INTO content VALUES(?,?,?,13000,'9A')`, i, "New Track", filepath.ToSlash(filepath.Join("/Contents/new", "s"+strconv.Itoa(i)+".flac"))); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e = db.Exec(`INSERT INTO playlist VALUES(2,0,'Added Set',0,2,'');INSERT INTO playlist_content VALUES(2,506,1),(2,507,2),(2,508,3);`); e != nil {
+		t.Fatal(e)
+	}
+	r2, e := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	if e != nil || r2.Added != 3 || r2.Unchanged != 505 || !r2.PlaylistsChanged {
+		t.Fatalf("second mount incremental delta: %+v %v", r2, e)
+	}
+}
+

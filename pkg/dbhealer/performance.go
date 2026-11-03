@@ -182,6 +182,11 @@ func alignLoops(blob []byte, g beatGrid) ([]byte, int, error) {
 		if startSet > 1 || endSet > 1 {
 			return nil, 0, fmt.Errorf("unknown loop flags")
 		}
+		// GL-013: Ensure any active loop color is opaque (Alpha=255) so pads are never invisible.
+		if (startSet == 1 || endSet == 1) && out[offset+18] == 0 && (out[offset+19] != 0 || out[offset+20] != 0 || out[offset+21] != 0) {
+			out[offset+18] = 255
+			changes++
+		}
 		if startSet == 1 && endSet == 1 && finite(start) && finite(end) && start >= 0 && end > start && end <= g.length {
 			startBeat := math.Round(g.beatAt(start))
 			beats := math.Round((g.beatAt(end)-g.beatAt(start))*128) / 128
@@ -202,6 +207,39 @@ func alignLoops(blob []byte, g beatGrid) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("unknown loops tail")
 	}
 	return out, changes, nil
+}
+
+// healQuickCues repairs transparent (Alpha=0) RGB colors on active Hot Cue slots (GL-013)
+// while leaving unrecognized or already-opaque quickCues blobs byte-identical.
+func healQuickCues(blob []byte) ([]byte, bool) {
+	raw, err := DecodeQCompress(blob)
+	if err != nil || len(raw) < 8+8*13+17 || binary.BigEndian.Uint64(raw[:8]) != 8 {
+		return blob, false
+	}
+	out := append([]byte(nil), raw...)
+	offset := 8
+	changed := false
+	for i := 0; i < 8; i++ {
+		if offset >= len(out)-17 {
+			return blob, false
+		}
+		labelLen := int(out[offset])
+		offset++
+		if len(out)-17-offset < labelLen+12 {
+			return blob, false
+		}
+		offset += labelLen
+		pos := beFloat(out[offset : offset+8])
+		if finite(pos) && pos >= 0 && out[offset+8] == 0 && (out[offset+9] != 0 || out[offset+10] != 0 || out[offset+11] != 0) {
+			out[offset+8] = 255
+			changed = true
+		}
+		offset += 12
+	}
+	if offset+17 != len(out) || !changed {
+		return blob, false
+	}
+	return EncodeQCompress(out), true
 }
 
 func overviewReason(blob []byte) string {
@@ -227,18 +265,18 @@ func healPerformance(tx *sql.Tx, r *Report) error {
 	// cursor before issuing writes on the same SQLite connection.
 	var last int64 = math.MinInt64
 	for {
-		rows, err := tx.Query("SELECT trackId,substr(trackData,1,33554433),substr(overviewWaveFormData,1,33554433),substr(beatData,1,33554433),substr(loops,1,33554433) FROM PerformanceData WHERE trackId>? ORDER BY trackId LIMIT 1", last)
+		rows, err := tx.Query("SELECT trackId,substr(trackData,1,33554433),substr(overviewWaveFormData,1,33554433),substr(beatData,1,33554433),substr(quickCues,1,33554433),substr(loops,1,33554433) FROM PerformanceData WHERE trackId>? ORDER BY trackId LIMIT 1", last)
 		if err != nil {
 			return err
 		}
 		type perf struct {
-			id                           int64
-			track, overview, beat, loops []byte
+			id                                 int64
+			track, overview, beat, cues, loops []byte
 		}
 		var page []perf
 		for rows.Next() {
 			var p perf
-			if err = rows.Scan(&p.id, &p.track, &p.overview, &p.beat, &p.loops); err != nil {
+			if err = rows.Scan(&p.id, &p.track, &p.overview, &p.beat, &p.cues, &p.loops); err != nil {
 				rows.Close()
 				return err
 			}
@@ -308,6 +346,11 @@ func healPerformance(tx *sql.Tx, r *Report) error {
 				// A new valid waveform written by Engine completes the request;
 				// our own unchanged placeholder remains queued.
 				if _, err = tx.Exec("DELETE FROM GuardianReanalysis WHERE trackId=? AND field='overviewWaveFormData' AND reason<>?", p.id, overviewReason(p.overview)); err != nil {
+					return err
+				}
+			}
+			if cues, ok := healQuickCues(p.cues); ok {
+				if _, err = tx.Exec("UPDATE PerformanceData SET quickCues=? WHERE trackId=?", cues, p.id); err != nil {
 					return err
 				}
 			}
