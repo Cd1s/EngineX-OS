@@ -12,7 +12,7 @@ import (
 	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
 )
 
-func TestUppercasePDBAndSymlinkWatchRoot(t *testing.T) {
+func TestUppercasePDB(t *testing.T) {
 	root := t.TempDir()
 	testfixture.Export(t, root)
 	old := filepath.Join(root, "PIONEER/rekordbox")
@@ -25,14 +25,6 @@ func TestUppercasePDBAndSymlinkWatchRoot(t *testing.T) {
 	}
 	if r := convert(t, root, enginedb.Options{}); r.Added != 5 {
 		t.Fatal(r)
-	}
-	link := filepath.Join(t.TempDir(), "media")
-	if e := os.Symlink(root, link); e != nil {
-		t.Fatal(e)
-	}
-	xs, e := bridge.Candidates(link)
-	if e != nil || !reflect.DeepEqual(xs, []string{root}) {
-		t.Fatal(xs, e)
 	}
 }
 

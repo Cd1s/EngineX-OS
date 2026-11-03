@@ -15,19 +15,18 @@ bash -n rootfs-overlay/usr/local/bin/sc5000-debloat
 engine-guardian --heal-mount /media/USB
 engine-guardian --heal-mount /media/USB --max-sessions 50
 engine-guardian --status --heal-mount /media/USB
-engine-guardian --watch --mount-root /media --interval 10s --quiet-for 5s
+engine-guardian --status --mount-root /media
 ```
 
-One-shot commands emit a JSON array and return nonzero for a failed library.
-Watch mode emits one JSON object per attempt. `--status` always opens databases
-read-only and does not repair anything. `--watch --heal-mount DIR` watches a
-specific volume. Discovery checks at most two levels under `--mount-root`, never
-walks audio directories, and retries failures. SIGINT/SIGTERM stops polling.
-Changes to m.db, hm.db and their WAL/journal sidecars reset the quiet period;
-unchanged libraries are not healed again. Quiet time reduces contention but is
-not a guarantee that Engine has stopped writing: SQLite transactions and a 3s
-busy timeout arbitrate concurrent access. For an initial large-library repair,
-run the one-shot command while Engine is stopped.
+Commands emit a JSON array and return nonzero for a failed library.
+`--status` always opens databases read-only and does not repair anything.
+Without `--heal-mount`, `--status` discovers libraries at most two levels under
+`--mount-root` and never walks audio directories.
+
+`--watch` is retired and exits at once. Healing a library while Engine has it
+open races Engine's own writes; the edisksd mount hook repairs each volume
+before Engine attaches. The unit in the player's read-only base `/etc` still
+runs `--watch`, so the flag stays accepted.
 
 ## Repair behavior
 
