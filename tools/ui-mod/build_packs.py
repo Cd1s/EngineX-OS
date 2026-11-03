@@ -60,11 +60,12 @@ SERVICES_MAIN = """
 	// as chosen and are not written ten times a second to flash.
 	property real scJogHue: 0
 	property var scJogSaved: null
+	function scDeckList() { return (root.decks && root.decks.length ? root.decks : [1, 2]).map(d => parseInt(d)) }
 	function scDeckColor(deck) { return Planck.getProperty("/Engine/Deck" + deck + "/Color").translator }
 	// BPM sync: the tempo of the deck that is playing, the active one first; 0 when
 	// nothing plays. Rounded so the pitch fader does not restart the timer constantly.
 	function scPlayingBPM() {
-		const decks = (root.activeDecks || []).map(d => parseInt(d)).concat([1, 2])
+		const decks = (root.activeDecks || []).map(d => parseInt(d)).concat(root.scDeckList())
 		for (const d of decks) {
 			const play = Planck.getProperty("/Engine/Deck" + d + "/PlayState")
 			let bpm = Planck.getProperty("/Engine/Deck" + d + "/Track/CurrentBPM")
@@ -89,19 +90,20 @@ SERVICES_MAIN = """
 		repeat: true
 		running: root.scJog === "rainbow" || root.scJog === "fast" || root.scJog === "bpm"
 		onRunningChanged: {
+			const decks = root.scDeckList()
 			if (running) {
-				root.scJogSaved = [String(root.scDeckColor(1).color), String(root.scDeckColor(2).color)]
+				root.scJogSaved = decks.map(d => String(root.scDeckColor(d).color))
 			} else if (root.scJogSaved) {
-				root.scDeckColor(1).color = root.scJogSaved[0]
-				root.scDeckColor(2).color = root.scJogSaved[1]
+				decks.forEach((d, i) => { if (root.scJogSaved[i]) root.scDeckColor(d).color = root.scJogSaved[i] })
 				root.scJogSaved = null
 			}
 		}
 		onTriggered: {
 			const step = root.scJog === "fast" ? 0.05 : root.scJog === "bpm" && root.scJogBPM > 0 ? 0.25 : 0.01
 			root.scJogHue = (root.scJogHue + step) % 1
-			root.scDeckColor(1).color = Qt.hsva(root.scJogHue, 1, 1, 1)
-			root.scDeckColor(2).color = Qt.hsva((root.scJogHue + 0.35) % 1, 1, 1, 1)
+			root.scDeckList().forEach((d, i) => {
+				root.scDeckColor(d).color = Qt.hsva((root.scJogHue + i * 0.35) % 1, 1, 1, 1)
+			})
 		}
 	}
 	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud"]
@@ -291,8 +293,8 @@ SERVICES_MAIN = """
 		const lib = Planck.librarianController.collectionController
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
 		if (!m) return false
-		const deck = [2, 1].find(d => !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
-		if (!deck) return true // both decks playing: never interrupt playback
+		const deck = root.scDeckList().slice().reverse().find(d => !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
+		if (!deck) return true // all decks playing: never interrupt playback
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/stems/source?id=" + m[1])
 		x.onreadystatechange = function() {
@@ -333,12 +335,13 @@ SERVICES_MAIN = """
 		}
 	}
 	Instantiator {
-		model: [1, 2]
+		model: root.decks && root.decks.length ? root.decks : [1, 2]
 		delegate: QtObject {
-			readonly property QObjProperty pStemmed: Planck.getProperty("/Engine/Deck%1/Track/Stemmed".arg(modelData))
+			readonly property int deckIdx: parseInt(modelData)
+			readonly property QObjProperty pStemmed: Planck.getProperty("/Engine/Deck%1/Track/Stemmed".arg(deckIdx))
 			readonly property bool stemmed: !!pStemmed && !!pStemmed.translator && pStemmed.translator.state
-			onStemmedChanged: if (stemmed) root.scPadsToStems(modelData)
-			Component.onCompleted: if (stemmed) root.scPadsToStems(modelData)
+			onStemmedChanged: if (stemmed) root.scPadsToStems(deckIdx)
+			Component.onCompleted: if (stemmed) root.scPadsToStems(deckIdx)
 		}
 	}
 	Instantiator {
@@ -633,6 +636,17 @@ def edits(dev: bool):
             ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG),
         ],
         v + "Common/Waveform/Waveform.qml": wave,
+        # Engine offers streamed rows only Prepare; add Stems (see scStemStream).
+        v + "BrowseView/Components/Components/SwipeLeftItem.qml": [
+            ("	readonly property list<string> actionLabels: leftActions.map( action => action.display.label )\n",
+             "	readonly property bool scStem: String(row.modelData && row.modelData.uri || \"\").startsWith(\"streaming://TIDAL/Track/\")\n"
+             "	readonly property list<string> actionLabels: leftActions.map( action => action.display.label ).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
+            ("leftActions.map( action => action.display.commitMessage )", "leftActions.map( action => action.display.commitMessage ).concat(scStem ? [root.scT(\"Stems\")] : [])"),
+            ("leftActions.map( action => action.display.color )", "leftActions.map( action => action.display.color ).concat(scStem ? [Style.systemBlue01Color] : [])"),
+            ("				  leftActions[actionIndex].trigger(row.index)\n",
+             "				  if (actionIndex < leftActions.length) leftActions[actionIndex].trigger(row.index)\n"
+             "				  else root.scStemStream(row.modelData.trackId)\n"),
+        ],
         v + "BrowseView/Components/Craylist.qml": [(
             "				var trackInfo = info.payload[key]\n				tracks.push(trackInfo.uniqueID)\n			}\n			Planck.librarianController.stemsQueueManager.startRenderTracks(",
             "				var trackInfo = info.payload[key]\n				if (!root.scStemStream(trackInfo.uniqueID)) tracks.push(trackInfo.uniqueID)\n			}\n			if (tracks.length) Planck.librarianController.stemsQueueManager.startRenderTracks(")],

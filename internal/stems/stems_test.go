@@ -102,7 +102,7 @@ func TestDisconnectReleasesSlot(t *testing.T) {
 
 // Unlike an EOF-sensitive worker, sleep cannot exit just because stdin closes.
 func TestDisconnectKillsWorkerIgnoringStdin(t *testing.T) {
-	b := &Backend{Secret: secret, Worker: []string{"/bin/sh", "-c", "printf ready; exec sleep 60"}, Slot: make(chan struct{}, 1)}
+	b := &Backend{Secret: secret, Worker: []string{"/bin/sh", "-c", "printf 'session=1\\n\\n'; exec sleep 60"}, Slot: make(chan struct{}, 1)}
 	s := httptest.NewServer(b)
 	defer s.Close()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -112,11 +112,11 @@ func TestDisconnectKillsWorkerIgnoringStdin(t *testing.T) {
 	out, receive := io.Pipe()
 	done := make(chan error, 1)
 	go func() { e := Proxy(ctx, s.URL, secret, in, receive); receive.CloseWithError(e); done <- e }()
-	greeting := make([]byte, 5)
+	greeting := make([]byte, 11)
 	if _, e := io.ReadFull(out, greeting); e != nil {
 		t.Fatal(e)
 	}
-	if string(greeting) != "ready" {
+	if string(greeting) != "session=1\n\n" {
 		t.Fatal(string(greeting))
 	}
 	cancel()
