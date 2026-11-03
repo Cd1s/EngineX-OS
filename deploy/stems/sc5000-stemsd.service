@@ -1,0 +1,34 @@
+[Unit]
+Description=SC5000 remote Stems renderer (spectral HPSS approximation; public entry is sc5000-relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+LoadCredential=token:/etc/sc5000-stems/token
+ExecStart=/opt/sc5000-stems/sc5000-stemsd -listen 127.0.0.1:6596 -token-file %d/token -worker /opt/sc5000-stems/worker.py
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+KillMode=control-group
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0077
+Nice=10
+CPUQuota=600%
+MemoryMax=1G
+TasksMax=32
+Environment=GOMAXPROCS=2 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1
+
+[Install]
+WantedBy=multi-user.target
