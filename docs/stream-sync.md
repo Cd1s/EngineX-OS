@@ -104,7 +104,12 @@ Spotify 不接受普通 `http://sc5000.lan` 作为远程 OAuth redirect。
 
 音频全部下载到碟机本机，云端服务只传登录凭证，不经手音频。
 
-1. **碟机本机 Deemix**（默认 `127.0.0.1:6595`）：下文的 `queue` / `directory` 协议。网易云、
+1. **碟机本机 Deemix**（默认 `127.0.0.1:6595`）：下文的 `queue` / `directory` 协议。
+   `sc5000-deemixd` 由 stream-sync 启动并在退出后重启（`--deemixd`，默认
+   `/data/sc5000-custom/bin/sc5000-deemixd`，空值关闭）；该端口已有进程在听时不另起一个。
+   不再用单独的 systemd 单元：碟机的 systemd 在可写 `/etc` overlay 挂载之前读单元，
+   只在 overlay 里启用的单元开机不会启动，重启后 6595 没人听，点播报
+   `TidalAPI::play The response didn't contain the required keys`。网易云、
    Spotify、Deezer 曲目都先走这里，不占网易云的月度下载额度。
 2. **网易云直连**：第一步失败时，用碟机已登录的网易云账号取官方音频地址（`lossless` →
    `exhigh` → `standard`），试听片段一律不算。其他平台的曲目先按标题、版本、共同艺人和
