@@ -51,7 +51,10 @@ build SC6000 SC6000 Denon-SC6000-Prime-JP13 SC6000M Denon-SC6000M-Prime-JP14 &
 p2=$!
 build PRIME4 PRIME4 Denon-PRIME-4-JC11 PRIME2 Denon-PRIME-2-JC16 MIXSTREAMPRO Numark-Mixstream-Pro-NH08 &
 p3=$!
-wait "$p1" "$p2" "$p3"
+# One wait per job: "wait a b c" only reports c, so set -e would miss a failed group.
+wait "$p1"
+wait "$p2"
+wait "$p3"
 
 # 3. Verify every image as a container again and record checksums.
 cd "$OUT"

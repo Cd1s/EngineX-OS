@@ -30,11 +30,11 @@ const (
 var githubRepoRE = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 
 type updateStatus struct {
-	Repo            string  `json:"repo"`
-	Current         string  `json:"currentVersion"`
-	Latest          string  `json:"latestVersion,omitempty"`
-	URL             string  `json:"releaseUrl,omitempty"`
-	UpdateAvailable bool    `json:"updateAvailable"`
+	Repo            string `json:"repo"`
+	Current         string `json:"currentVersion"`
+	Latest          string `json:"latestVersion,omitempty"`
+	URL             string `json:"releaseUrl,omitempty"`
+	UpdateAvailable bool   `json:"updateAvailable"`
 	// DownloadURL is this model's upgrade image in the release, for Engine's
 	// own online updater (Settings → Update).
 	DownloadURL string  `json:"downloadUrl,omitempty"`
@@ -125,8 +125,11 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 			s.setUpdateProgress(0.10, "", false)
 			time.Sleep(150 * time.Millisecond)
 			if exec.Command("pkill", "-TERM", "-x", "Engine").Run() == nil {
+				s.setUpdateProgress(1.0, "", true)
 				return
 			}
+			_ = os.Remove("/tmp/engine-quit-reason")
+			_ = os.Remove("/tmp/update-file-url")
 		}
 	}
 	if !hasMatchingStagedImage(stagedUpdateFile, downloadURL) {
@@ -222,15 +225,22 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 	s.setUpdateProgress(1.0, "", false)
 }
 
-func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
+func (s *Server) installedVersion() string {
 	path := s.cfg.VersionFile
 	if path == "" {
 		path = versionFile
 	}
 	current := currentVersion(path)
-	if current == "dev" && s.cfg.VersionFile == "" {
-		current = currentVersion(imageVersionFile) // the flashed image's release (#13)
+	if s.cfg.VersionFile == "" {
+		if imgVer := currentVersion(imageVersionFile); current == "dev" || newerVersion(imgVer, current) {
+			current = imgVer // the flashed image's release (#13)
+		}
 	}
+	return current
+}
+
+func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
+	current := s.installedVersion()
 	v := updateStatus{Repo: repo, Current: current, checked: time.Now()}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

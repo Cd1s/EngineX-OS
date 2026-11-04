@@ -39,6 +39,7 @@ def patch(text: str, old: str, new: str, path: str) -> str:
 
 SERVICES_MAIN = """
 	// SC5000 UI mod: settings owned by stream-sync (see pkg/webui/ui_settings.go).
+	property string scVersion: ""
 	property string scLang: "en"
 	property string scWave: "denon"
 	property string scQuality: "flac"
@@ -107,6 +108,7 @@ SERVICES_MAIN = """
 				return
 			}
 			const v = JSON.parse(x.responseText)
+			if (v.currentVersion && v.currentVersion !== "dev") scVersion = v.currentVersion
 			scUpdating = !!v.updating
 			scUpdateText = v.error ? scT(v.error) : v.updating ? scT("Updating…") + " " + Math.round((v.progress || 0.05) * 100) + "%" : v.updateAvailable ? scT("New release available:") + " " + v.latestVersion : scT("Up to date") + " (" + v.currentVersion + ")"
 			if (v.updateAvailable && v.downloadUrl) {
@@ -226,6 +228,7 @@ SERVICES_MAIN = """
 	}
 	function scApply(v) {
 		scEnsureTidal()
+		if (v.version) scVersion = v.version
 		scLang = v.language
 		scWave = v.waveform
 		scQuality = v.quality || "flac"
@@ -752,7 +755,7 @@ def edits(dev: bool):
             ("	onUpdateAvailableChanged: {\n", "	onUpdateAvailableChanged: {\n		return\n")],
         prefs + "Entries/Version.qml": [(
             "	text: `Engine OS ${versionString} <font color=\\\"${grey}\\\">(${gitHashString})</font>`",
-            "	text: `EngineX OS ${versionString} Custom`")],
+            "	text: `EngineX OS ${root.scVersion || versionString} Custom`")],
         prefs + "Entries/Update.qml": [
             ("    model: PlanckGUI.views.updaterController.releaseVersionsModel\n", "    model: root.scUpdateModel\n"),
             ("        text: `Engine OS ${model.displayVersion} is available`\n",
