@@ -201,31 +201,28 @@ Every known defect from Engine OS 1.x to 5.0.4, Engine DJ Desktop (229) and thir
 
 <a id="benchmarks"></a>
 
-## ⚡ Live Hardware Benchmarks & Resource Footprint (Before vs. `EngineX OS 5.0.4.1`)
+## ⚡ What's Unlocked, Refactored Architecture & Live Resource Footprint
 
-Measured directly on a live **Denon DJ SC5000 Prime (RK3288 quad-core Cortex-A17 / 2 GB RAM / 96 kHz `SCHED_RR 49` real-time audio)**:
+### 🔓 Unlocked Features & On-Deck Experience
+- **4-Part Stems Unlocked Across All Models (Vocals / Melody / Bass / Drums)**: Enables the native sidebar `Stems` list, swipe-left track separation, and Performance Pads 4-stem mute/unmute on SC5000 / SC5000M / SC6000 / PRIME GO / PRIME 2 / PRIME 4, backed by automatic 3-tier compute fallback (cloud GPU, home PC worker, or on-deck `CPU3`).
+- **5 Native Streaming Services + Phone QR Login**: Browse and search **NetEase Cloud Music, Spotify, Deezer, SoundCloud, and TIDAL** directly inside the deck's native library UI, with lossless FLAC / 320k switching, Deemix fallback, and automatic catalog BPM & key injection.
+- **Zero-Conversion Rekordbox USB Plug & Play**: Mounts FAT32 / exFAT / HFS+ / NTFS / APFS drives, bridges Rekordbox exports on the fly, auto-heals corrupted SQLite databases, and normalizes overview waveform heights.
+- **Full Localization, RGB / 3-Band Waveforms & Native Graphical OTA**: English / Simplified Chinese / Traditional Chinese UI packs, Rekordbox-palette 3-Band & RGB waveforms, BPM-synced jog wheel lighting, and one-click OTA firmware updates via the stock full-screen graphical updater (`Settings → About / Update`).
+- **19 Closed-Source C++ DSP De-Click Hooks & Real-Time Hardening**: Per-chain 128-frame cosine crossfade across 32 independent FX slots eliminates dual-deck effect switching clicks/pops while redirecting telemetry databases to `:memory:`.
 
-| Metric | Before Refactoring | Refactored (`EngineX OS 5.0.4.1` Live) | Improvement / Impact |
+### 📊 Before vs. After Refactoring — Live SC5000 Benchmarks
+
+| Metric | Before Refactoring | Refactored (`EngineX OS 5.0.4.1` Live) | On-Deck Impact |
 | :--- | :--- | :--- | :--- |
 | **Available System RAM (out of `2018 MB`)** | `~680 – 780 MB` (unbounded artwork cache & stream buffers) | **`1,042 MB` available** (`975 MB` used idle; stable at `835–843 MB` across 12 dual-deck stress rounds) | **~260 MB more free RAM**, zero memory leaks over long DJ sets |
 | **`Engine` Main Process RSS (`EMain`)** | `~780 MB` idle, `920+ MB` under dual-deck load (`.qmlc` mmap bloat + telemetry DB writes) | **`624 MB` idle** (`639,576 KB`), `~838 MB` under 25 ops/s dual-deck stress | **~150 MB lower `Engine` RSS** |
 | **Custom Daemons Total RAM (`stream-sync` + `deemixd`)** | 5 separate daemons + helpers: **`~85 – 120 MB`** | `stream-sync` **`17.6 MB`** + `deemixd` **`11.6 MB`** = **`29.2 MB` total** | **70%+ reduction in background daemon RAM** |
-| **Background CPU Steal on Audio Cores (`CPU0–2`)** | `5% – 25%` spikes during downloads / track parsing | **`0.0%` on `CPU0–2`**: all custom services pinned to **`CPU3` + `SCHED_IDLE`** (`0.3%` total on `CPU3`) | **Audio cores (`CPU0–2`) 100% dedicated to 96 kHz audio & UI** |
+| **Background CPU Steal on Audio Cores (`CPU0–2`)** | `5% – 25%` spikes during downloads / track parsing | **`0.0%` on `CPU0–2`**: all custom services pinned to **`CPU3` + `SCHED_IDLE`** (`0.3%` total on `CPU3`) | **Audio cores (`CPU0–2`) 100% dedicated to 96 kHz audio & 60 fps UI** |
 | **Rootfs Flash Footprint (5-in-1 Suite)** | 5 standalone binaries: **`~38 MB`** (overflows the `459 MB` `/` partition) | 5-in-1 `sc5000-suite.xz` **`4.0 MB`** + `ui-packs.tar.xz` **`125.5 KB`** | **89% smaller rootfs footprint** |
 | **96 kHz Real-Time Audio Stack (`SCHED_RR 49`)** | `16,440 B` (`16.4 KB`) stack frame per `hook_fx_common_chain` call | **`1,060 B` (`1.0 KB`)** (snapshots only the 128-frame ramp prefix; **`0.05%`** of audio period) | **93.5% smaller real-time audio stack**, up to 16× less `memcpy` |
-| **Closed-Source C++ DSP Hook (`libengine-ui-hook.so`)** | `75.2 KB`, single shared ramp state (dual-deck FX switches stole each other's ramp) | **`65.5 KB`**, **32 per-`common` slots + lock-free `busy` guard** (`effect+0x68` isolation) | **13% smaller `.so`, zero dual-deck FX click/pop crosstalk** |
+| **Closed-Source C++ DSP Hook (`libengine-ui-hook.so`)** | `75.2 KB`, single shared ramp state (dual-deck FX switches stole each other's ramp) | **`65.5 KB`**, **32 per-`common` slots + lock-free protection** | **13% smaller `.so`, zero dual-deck FX click/pop crosstalk** |
 | **4-Stem Separation Speed (239.7s Real Track)** | Per-chunk slice reallocations in pipeline | Remote server: **`1.18×` real-time** (`203.6s`); on-deck `CPU3`: **`1.43×` real-time** (`168.2s`) | **Separates 4 stems faster than real-time playback** |
 | **Local Gateway Latency (`/v1/ping`, 8-way concurrent)** | `~25 – 60 ms` | **`11.42 ms` average** (`2.23 ms` min, 160 requests 100% `200 OK`) | **Instantaneous touchscreen browsing & source switching** |
-
-### 🧬 Why a Hybrid "Pure C11 Real-Time Audio Core + Go 5-in-1 Control Plane" Architecture? (C11 vs. Rust vs. Go)
-
-On the RK3288 (32-bit ARMv7-A / 2 GB RAM), the **96 kHz `SCHED_RR 49` real-time audio callback (`CPU0–2`)** and the **network/database control plane (`CPU3`)** have fundamentally different requirements:
-
-| Language / Layer | Binary Size | Resident RAM (RSS) | `SCHED_RR 49` Real-Time Audio Determinism | Role in EngineX OS |
-| :--- | :--- | :--- | :--- | :--- |
-| **Pure C11 + ARMv7 Inline Trampolines** (`libengine-ui-hook.so` / `libedisksd-hook.so`) | **`65.5 KB`** | **`0 KB` heap** (`~34 KB` static BSS for 32 slots, `1,060 B` stack) | ⭐⭐⭐⭐⭐ **Best (`0` runtime, `0` GC, lock-free try-only slots, `0.05%` period overhead)** | ✅ **Used for `CPU0–2` real-time DSP & binary hooks**: injected directly into `/usr/Engine/Engine` via `LD_PRELOAD` across 19 closed-source ARM32 instruction boundaries |
-| **Rust (`no_std` / `cdylib`)** | `~180 KB – 1.2 MB` | `0 – 2 MB` | ⭐⭐⭐⭐☆ (No GC in `no_std`, but requires heavy `unsafe asm!` across closed-source C++ ABIs) | ⚖️ Matches C11 in pure compute, but C11 produces a smaller `.so` (`65.5 KB`) with zero ABI/unwind friction when patching 19 closed-source ARM32 C++ prologues |
-| **Go 1.27 Static Multi-Call (`sc5000-suite`)** | **`4.0 MB` (xz)** (all 5 tools combined) | **`11.6 – 17.6 MB` / daemon** (`29.2 MB` total for both active services) | ❌ **Never used in audio threads** (GC STW pauses & goroutine scheduling would risk XRUNs) | ✅ **Used for `CPU3` (`SCHED_IDLE`) control plane & streaming gateway**: ideal for 5-provider HTTP/2 multiplexing, QR auth, SQLite healing, and Stems I/O, with **0.0% impact on `CPU0–2`** |
 
 <a id="quick-start"></a>
 
