@@ -858,7 +858,10 @@ def edits(dev: bool):
              "        onClicked: root.scConfirmUpdate(model.displayVersion)\n"),
             ('        text: "You\'re running the latest version"\n        visible: control.count < 1\n',
              "        text: root.scUpdateText\n        visible: true\n"),
-            ("            PlanckGUI.views.updaterController.checkForUpdates()\n", "            root.scCheckUpdate()\n"),
+            # Keep Denon's call: it also rescans USB/SD for <PREFIX>-*-Update.img, otherwise
+            # only a replug finds a stick that was in before boot (Firmware Update Mode dialog).
+            ("            PlanckGUI.views.updaterController.checkForUpdates()\n",
+             "            PlanckGUI.views.updaterController.checkForUpdates()\n            root.scCheckUpdate()\n"),
         ],
         # RA002: stepping the clock while a deck plays disturbs the audio output.
         prefs + "Entries/Time.qml": [(
