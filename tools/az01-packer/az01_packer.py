@@ -576,7 +576,7 @@ Description=Prepare persistent SC5000 access
 RequiresMountsFor=/data
 Requires=etc.mount var.mount
 After=etc.mount var.mount
-Before=sc5000-custom-sshd.service
+Before=sc5000-custom-sshd.service engine.service stream-sync.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
