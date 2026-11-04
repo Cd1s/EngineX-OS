@@ -164,19 +164,25 @@ typedef void (*dsp_event_fn)(void *, const void *);
 typedef void (*dsp_process_fn)(void *, float *const *, float *const *, uint32_t);
 enum {
     DSP_TURN_OFF, DSP_TURN_ON, DSP_SWITCH, DSP_CHANGE, DSP_ENABLE,
-    DSP_MIX, DSP_PARAMETER, DSP_NUDGE, DSP_TEMPO, DSP_AUTOGATE, DSP_COMMON, DSP_HOOK_COUNT
+    DSP_MIX, DSP_PARAMETER, DSP_NUDGE, DSP_TEMPO, DSP_JUMP, DSP_RAMP_TIME, DSP_MOTOR_RAMP_TIME,
+    DSP_SAMPLER_IMMEDIATE, DSP_SAMPLER_STOP, DSP_SAMPLER_PLAY,
+    DSP_AUTOGATE, DSP_COMMON, DSP_DUB_ECHO, DSP_WASH, DSP_HOOK_COUNT
 };
 static void *dsp_originals[DSP_HOOK_COUNT];
 
-static void dsp_transition(unsigned slot, uint32_t kind, void *handler, const void *event) {
+static void *dsp_bound_owner(void *handler) {
     // ARM MemberFunctionHandler owns a bound object and a two-word member pointer.
-    // r0 at this entry is the handler, not ChannelDJFx itself. Keep it intact for
+    // r0 at this entry is the handler, not the bound object. Keep it intact for
     // the original dispatcher, including its virtual-function/this-adjustment path.
     uint32_t owner;
     int32_t adjustment;
     memcpy(&owner, (char *)handler + 0x0c, sizeof owner);
     memcpy(&adjustment, (char *)handler + 0x14, sizeof adjustment);
-    sc_dsp_fx_mark_transition((void *)((uintptr_t)owner + (adjustment >> 1)), kind);
+    return (void *)((uintptr_t)owner + (adjustment >> 1));
+}
+
+static void dsp_transition(unsigned slot, uint32_t kind, void *handler, const void *event) {
+    sc_dsp_fx_mark_transition(dsp_bound_owner(handler), kind);
     ((dsp_event_fn)dsp_originals[slot])(handler, event);
 }
 
@@ -198,6 +204,7 @@ static void dsp_finite_event(unsigned slot, size_t offset, int is_double,
         double value;
         memcpy(&value, (const char *)event + offset, sizeof value);
         if (!sc_dsp_finite_f64(value) || (slot == DSP_TEMPO && value <= 0.0)) return;
+        if ((slot == DSP_RAMP_TIME || slot == DSP_MOTOR_RAMP_TIME) && value < 0.0) return;
     } else {
         float value;
         memcpy(&value, (const char *)event + offset, sizeof value);
@@ -210,6 +217,34 @@ static void hook_fx_mix(void *h, const void *e) { dsp_finite_event(DSP_MIX, 0x0c
 static void hook_fx_parameter(void *h, const void *e) { dsp_finite_event(DSP_PARAMETER, 0x20, 0, h, e); }
 static void hook_playback_nudge(void *h, const void *e) { dsp_finite_event(DSP_NUDGE, 0x08, 1, h, e); }
 static void hook_playback_tempo(void *h, const void *e) { dsp_finite_event(DSP_TEMPO, 0x08, 1, h, e); }
+static void hook_time_stretch_jump(void *h, const void *e) { dsp_finite_event(DSP_JUMP, 0x08, 1, h, e); }
+static void hook_ramp_time(void *h, const void *e) { dsp_finite_event(DSP_RAMP_TIME, 0x08, 1, h, e); }
+static void hook_motor_ramp_time(void *h, const void *e) { dsp_finite_event(DSP_MOTOR_RAMP_TIME, 0x08, 1, h, e); }
+
+static void dsp_sampler_event(unsigned slot, uint32_t kind, void *handler, const void *event) {
+    sc_dsp_sampler_mark_event(dsp_bound_owner(handler), kind);
+    ((dsp_event_fn)dsp_originals[slot])(handler, event);
+}
+
+static void hook_sampler_immediate(void *h, const void *e) {
+    dsp_sampler_event(DSP_SAMPLER_IMMEDIATE, SC_DSP_SAMPLER_STOP_IMMEDIATELY, h, e);
+}
+static void hook_sampler_stop(void *h, const void *e) {
+    dsp_sampler_event(DSP_SAMPLER_STOP, SC_DSP_SAMPLER_STOP, h, e);
+}
+static void hook_sampler_play(void *h, const void *e) {
+    dsp_sampler_event(DSP_SAMPLER_PLAY, SC_DSP_SAMPLER_PLAY, h, e);
+}
+
+static void hook_dub_echo(void *self, float *const *in, float *const *out, uint32_t frames) {
+    ((dsp_process_fn)dsp_originals[DSP_DUB_ECHO])(self, in, out, frames);
+    sc_dsp_sweep_fx_post_process(self, in, frames);
+}
+
+static void hook_wash(void *self, float *const *in, float *const *out, uint32_t frames) {
+    ((dsp_process_fn)dsp_originals[DSP_WASH])(self, in, out, frames);
+    sc_dsp_sweep_fx_post_process(self, in, frames);
+}
 
 static void hook_autogate_process(void *self, float *const *input, float *const *output, uint32_t frames) {
     sc_dsp_autogate_pre_process(self, frames);
@@ -262,6 +297,7 @@ static void hook_fx_common_chain(void *common, float *const *input, float *const
 static const uint32_t dsp_event_prefix[] = {0xe1c021d0, 0xe590c00c, 0xe52db004};
 static const uint32_t dsp_autogate_prefix[] = {0xe3530000, 0xe1a02001, 0x0a000035};
 static const uint32_t dsp_common_prefix[] = {0xe16d42f4, 0xe1cd60f8};
+static const uint32_t dsp_sweep_prefix[] = {0xe52db004, 0xe1a02001, 0xe28db000};
 struct dsp_hook_site {
     uint32_t offset;
     void *hook;
@@ -271,11 +307,16 @@ static const struct dsp_hook_site dsp_hooks[DSP_HOOK_COUNT] = {
     {0xd91894, hook_fx_switch}, {0xd918c0, hook_fx_change}, {0xd918ec, hook_fx_enable},
     {0xd91810, hook_fx_mix}, {0xd91868, hook_fx_parameter},
     {0x14fff54, hook_playback_nudge}, {0x153312c, hook_playback_tempo},
-    {0xe3a598, hook_autogate_process}, {0x15fa188, hook_fx_common_chain}
+    {0x1532fa0, hook_time_stretch_jump}, {0x1500950, hook_ramp_time},
+    {0xd0b5bc, hook_motor_ramp_time}, {0xc5b2e0, hook_sampler_immediate},
+    {0xc5b30c, hook_sampler_stop}, {0xc5b338, hook_sampler_play},
+    {0xe3a598, hook_autogate_process}, {0x15fa188, hook_fx_common_chain},
+    {0xe3d0a8, hook_dub_echo}, {0xe3d908, hook_wash}
 };
 
 static const void *dsp_expected(unsigned slot, size_t *size) {
     *size = slot == DSP_COMMON ? sizeof dsp_common_prefix : sizeof dsp_event_prefix;
+    if (slot == DSP_DUB_ECHO || slot == DSP_WASH) return dsp_sweep_prefix;
     return slot == DSP_COMMON ? dsp_common_prefix :
         (slot == DSP_AUTOGATE ? dsp_autogate_prefix : dsp_event_prefix);
 }

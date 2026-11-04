@@ -8,14 +8,47 @@ int hook_test_engine;
 #include <math.h>
 #include <float.h>
 
-static unsigned dsp_calls, dsp_seen_generation;
+static unsigned dsp_calls, dsp_seen_generation, dsp_seen_sampler_generation;
 static void *dsp_wanted_owner;
 static const void *dsp_wanted_event;
 
 static void mock_dsp_event(void *owner, const void *event) {
     assert(owner == dsp_wanted_owner && event == dsp_wanted_event);
-    dsp_calls++;
-    dsp_seen_generation = sc_dsp_state()->generation;
+    __atomic_add_fetch(&dsp_calls, 1u, __ATOMIC_RELAXED);
+    __atomic_store_n(&dsp_seen_generation,
+        __atomic_load_n(&sc_dsp_state()->generation, __ATOMIC_ACQUIRE), __ATOMIC_RELAXED);
+    __atomic_store_n(&dsp_seen_sampler_generation,
+        __atomic_load_n(&sc_dsp_state()->sampler_generation, __ATOMIC_ACQUIRE), __ATOMIC_RELAXED);
+}
+
+struct sampler_thread_args { char *image; void *handler; const void *event; };
+static void *sampler_thread(void *arg) {
+    const struct sampler_thread_args *a = arg;
+    for (unsigned i = 0; i < 1500; i++) {
+        unsigned slot = DSP_SAMPLER_IMMEDIATE + i % 3;
+        ((dsp_event_fn)(a->image + dsp_hooks[slot].offset))(a->handler, a->event);
+    }
+    return NULL;
+}
+
+static const float sweep_samples[] = {
+    NAN, INFINITY, -INFINITY, FLT_MAX, -FLT_MAX, 9.0f, -9.0f,
+    8.0f, -8.0f, 0.25f, -0.5f, 0.0f, -0.0f
+};
+static const float sweep_expected[] = {
+    0.0f, 0.0f, 0.0f, 8.0f, -8.0f, 8.0f, -8.0f,
+    8.0f, -8.0f, 0.25f, -0.5f, 0.0f, -0.0f
+};
+static unsigned sweep_calls;
+static uintptr_t sweep_owner_adjustment;
+static uint32_t sweep_wanted_frames;
+static void mock_sweep_process(void *self, float *const *in, float *const *out, uint32_t frames) {
+    assert((uintptr_t)self == (uintptr_t)dsp_wanted_owner + sweep_owner_adjustment);
+    assert(in == out && frames == sweep_wanted_frames);
+    sweep_calls++;
+    for (unsigned ch = 0; ch < 2; ch++)
+        for (uint32_t i = 0; i < frames; i++)
+            in[ch][i] = sweep_samples[(i + ch) % (sizeof sweep_samples / sizeof *sweep_samples)];
 }
 
 static unsigned gate_zero_calls, gate_nonzero_calls;
@@ -61,6 +94,14 @@ static void test_dsp_hooks(void) {
     const uint32_t common[] = {0xe16d42f4, 0xe1cd60f8, 0xe1cd40d0, 0xe1cd60d8,
                               0xe28dd024, 0xe51ff004, (uint32_t)(uintptr_t)mock_common_process};
     memcpy(image + dsp_hooks[DSP_COMMON].offset, common, sizeof common);
+    // Actual SweepFx prefix and native owner adjustment, then restore fp before
+    // entering a C mock. r2 must become the original input pointer, not output.
+    for (unsigned i = DSP_DUB_ECHO; i <= DSP_WASH; i++) {
+        const uint32_t sweep[] = {0xe52db004, 0xe1a02001, 0xe28db000,
+            i == DSP_DUB_ECHO ? 0xe2800060 : 0xe2800070,
+            0xe28bd000, 0xe49db004, 0xe51ff004, (uint32_t)(uintptr_t)mock_sweep_process};
+        memcpy(image + dsp_hooks[i].offset, sweep, sizeof sweep);
+    }
     // Every checked byte, including byte 12 of a dispatcher, gates the WHOLE group.
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         size_t size;
@@ -107,7 +148,7 @@ static void test_dsp_hooks(void) {
     handler[3] = (uintptr_t)owner; handler[5] = 0;
 
     const double values[] = {NAN, INFINITY, -INFINITY, 0.0, -0.0, -0.5, 0.5};
-    for (unsigned i = DSP_MIX; i <= DSP_TEMPO; i++) {
+    for (unsigned i = DSP_MIX; i <= DSP_MOTOR_RAMP_TIME; i++) {
         dsp_event_fn call = (void *)(image + dsp_hooks[i].offset);
         size_t offset = i == DSP_MIX ? 0x0c : (i == DSP_PARAMETER ? 0x20 : 0x08);
         for (size_t j = 0; j < sizeof values / sizeof *values; j++) {
@@ -117,13 +158,80 @@ static void test_dsp_hooks(void) {
             unsigned before = dsp_calls;
             call(handler, event);
             int accepted = sc_dsp_finite_f64(value) && (i != DSP_TEMPO || value > 0.0);
+            if ((i == DSP_RAMP_TIME || i == DSP_MOTOR_RAMP_TIME) && value < 0.0) accepted = 0;
             assert(dsp_calls == before + (unsigned)accepted);
         }
         unsigned before = dsp_calls;
         call(handler, NULL);
         assert(dsp_calls == before);
     }
-    puts("ARM DSP install: all 11 prefix guards, repeat install, event ABI/virtual/adjusted this, finite controls: PASS");
+    assert(DSP_HOOK_COUNT == 19);
+    puts("ARM DSP install: all 19 prefix guards, repeat install, event ABI/virtual/adjusted this, finite controls: PASS");
+
+    unsigned fx_generation = sc_dsp_state()->generation;
+    int32_t fx_remaining = sc_dsp_state()->ramp_remaining;
+    // Count before calling the original, without inspecting payloads or arming FX.
+    dsp_wanted_event = NULL;
+    for (unsigned i = DSP_SAMPLER_IMMEDIATE; i <= DSP_SAMPLER_PLAY; i++) {
+        unsigned before = dsp_calls, gen = sc_dsp_state()->sampler_generation;
+        ((dsp_event_fn)(image + dsp_hooks[i].offset))(handler, NULL);
+        assert(dsp_calls == before + 1 && dsp_seen_sampler_generation == gen + 1);
+    }
+    dsp_wanted_event = event;
+    uint32_t sampler_before = sc_dsp_state()->sampler_generation;
+    sc_dsp_sampler_mark_event(owner, 0); sc_dsp_sampler_mark_event(owner, 4);
+    assert(sc_dsp_state()->sampler_generation == sampler_before);
+    struct sampler_thread_args args = {image, handler, event};
+    pthread_t sampler_workers[4];
+    unsigned calls_before = dsp_calls;
+    for (unsigned i = 0; i < 4; i++) assert(!pthread_create(&sampler_workers[i], NULL, sampler_thread, &args));
+    for (unsigned i = 0; i < 4; i++) assert(!pthread_join(sampler_workers[i], NULL));
+    assert(sc_dsp_state()->sampler_generation == sampler_before + 6000 && dsp_calls == calls_before + 6000);
+    __atomic_store_n(&sc_dsp_state()->sampler_generation, UINT32_MAX, __ATOMIC_RELEASE);
+    ((dsp_event_fn)(image + dsp_hooks[DSP_SAMPLER_PLAY].offset))(handler, event);
+    assert(sc_dsp_state()->sampler_generation == 0 && dsp_seen_sampler_generation == 0);
+    assert(sc_dsp_state()->generation == fx_generation && sc_dsp_state()->ramp_remaining == fx_remaining);
+    puts("ARM Sampler: all three dispatchers, mark-before-forward, null payload, four producers, wrap and FX isolation: PASS");
+
+    for (unsigned slot = DSP_DUB_ECHO; slot <= DSP_WASH; slot++) {
+        float in_l[32], in_r[32], untouched_l[32], untouched_r[32];
+        float *in_pair[2] = {in_l, in_r}, *untouched[2] = {untouched_l, untouched_r};
+        dsp_process_fn call = (void *)(image + dsp_hooks[slot].offset);
+        sweep_owner_adjustment = slot == DSP_DUB_ECHO ? 0x60 : 0x70;
+        for (unsigned alias = 0; alias < 2; alias++) {
+            for (unsigned i = 0; i < 32; i++) {
+                in_l[i] = in_r[i] = 17.0f;
+                untouched_l[i] = untouched_r[i] = 23.0f;
+            }
+            sweep_wanted_frames = 27;
+            call(owner, in_pair, alias ? in_pair : untouched, sweep_wanted_frames);
+            for (unsigned ch = 0; ch < 2; ch++) for (unsigned i = 0; i < 27; i++) {
+                float expected = sweep_expected[(i + ch) % (sizeof sweep_expected / sizeof *sweep_expected)];
+                assert(!memcmp(&in_pair[ch][i], &expected, sizeof expected));
+            }
+            for (unsigned i = 0; i < 32; i++) assert(untouched_l[i] == 23.0f && untouched_r[i] == 23.0f);
+            assert(in_l[27] == 17.0f && in_r[31] == 17.0f);
+            sweep_wanted_frames = 0;
+            call(owner, in_pair, untouched, 0);
+            assert(in_l[27] == 17.0f);
+        }
+    }
+    assert(sweep_calls == 8);
+    float single_sample = NAN, *partial_buffers[2] = {&single_sample, NULL};
+    sc_dsp_sweep_fx_post_process(NULL, NULL, 1);
+    sc_dsp_sweep_fx_post_process(NULL, partial_buffers, 0);
+    assert(!sc_dsp_finite_f32(single_sample));
+    sc_dsp_sweep_fx_post_process(NULL, partial_buffers, 1);
+    assert(single_sample == 0.0f);
+    // Include signaling NaNs and subnormals, beyond the usual math.h constants.
+    const uint32_t raw_bits[] = {0x7f800001, 0xff800001, 0x7fc00123, 0x80000000, 0x00000001};
+    const uint32_t wanted_bits[] = {0, 0, 0, 0x80000000, 0x00000001};
+    float bit_samples[5]; memcpy(bit_samples, raw_bits, sizeof raw_bits);
+    float *bit_buffers[2] = {bit_samples, NULL};
+    sc_dsp_sweep_fx_post_process(NULL, bit_buffers, 5);
+    assert(!memcmp(bit_samples, wanted_bits, sizeof wanted_bits));
+    assert(sc_dsp_state()->generation == fx_generation && sc_dsp_state()->ramp_remaining == fx_remaining);
+    puts("ARM DubEcho/Wash: prologue/this adjustment, input/output ABI, NaN/Inf/extreme clamp, zeros and bounds: PASS");
 
     unsigned char gate[0x200] = {0};
     const float phase = 0.75f;

@@ -164,7 +164,7 @@
 | 📀 | **Rekordbox 隨身碟掛載** | 首次掛載約 8 分鐘，重新掃描 15–24 秒，增量更新 21 首新歌匯入 0 首（`GL-011`） | 首次掛載 **< 2 秒**（> 500 首，在 `tmpfs` 上產生），未變更 **0.03 秒**，增量 **< 1 秒** | **重新掛載快約 800 倍** |
 | 💾 | **SQLite 卡頓與快閃記憶體遙測** | `synchronous=FULL`，暫存表寫入磁碟；`posthog.db` / `events.db` 持續寫入 | `synchronous=NORMAL`、記憶體暫存表、8 MB 快取；遙測資料庫以 `:memory:` 開啟 | 30 秒壓力測試 eMMC 寫入 **0 B** |
 | 🔊 | **96 kHz 音訊** | 閒置時降到 126–408 MHz；中斷與分析執行緒擠占音訊核心 | CPU0 獨佔 ALSA（FIFO 99）、1.2 GHz 下限、`MONOTONIC_RAW` 時間戳防 NTP 跳變（`RA002`） | **0 XRUN** |
-| 🎚 | **FX 與控制 DSP 守護** | 切換 / 開關 FX 爆音（`H145` `H163` `H164`），AutoGate 混入舊相位（`LA-020` `H153`），NaN / Inf 控制值進入 DSP（`H154`、Nudge `CF011`） | `dsp_smooth.h` 經 `libengine-ui-hook.so` 的 11 個跳板接入：128 幀防爆音斜坡、每次切換重設 AutoGate 相位、清除 FX 混合尾鏈中的 NaN/Inf、Nudge 與 `PlaybackTempoChange` 有限值守衛 | ✅ **已實機部署**，ALSA `RUNNING`、0 XRUN |
+| 🎚 | **FX 與控制 DSP 守護** | 切換 / 開關 FX 爆音（`H145` `H163` `H164`），AutoGate 混入舊相位（`LA-020` `H153`），NaN / Inf 控制值進入 DSP（`H154`、Nudge `CF011`） | `dsp_smooth.h` 經 `libengine-ui-hook.so` 的 19 個跳板全部實機生效：128 幀防爆音斜坡、每次切換重設 AutoGate 相位、清除 FX 混合尾鏈與 `DubEcho`/`Wash` 中的 NaN/Inf、Nudge / `PlaybackTempoChange` / `Jump` / `ChangeRampTime` / `RampdownTimeChange` 有限值守衛、Sampler 聲部代際追蹤 | ✅ **已實機部署**，ALSA `RUNNING`、0 XRUN |
 | ☁️ | **SoundCloud 1 小時 50 分 DJ Set** | 60.3 秒（8 路基準） | 16 路分段下載 **43.7 秒** | 跑滿網路卡（約 2.3 MB/s） |
 | 🖼 | **封面佔用記憶體** | 每張 3000 × 3000 封面約 36 MB | **≤ 1 MB**（≤ 512 × 512 JPEG） | **減少 97% 以上** |
 
@@ -193,9 +193,11 @@ Engine OS 1.x 到 5.0.4、Engine DJ 電腦版（229 條）以及第三方工具�
 
 | | 狀態 | 數量 | 例子 |
 | :-: | :-- | :-: | :-- |
-| ✅ | 在 5.0.4 上已根治或已防禦 | ~102 | 斷音（`CF001` `N001`–`N003` `RA002`）、損毀與慢速掛載（`CF003`–`CF006` `GL-011`）、PRIME 4 SATA 休眠（`CF017`）。本版新增並已實機部署：QML `CF008` `CF009` `CF010` `H143` `CF013` `H166` `RA001` `RA008`；DSP 守護 `H145` `H163` `H164` `H153` `H154` `LA-020` |
-| 🟢 | 5.0.4 底層已修正或已由架構繞過 | ~527 | 包括全部 229 條電腦版缺陷：播放機不再需要 Engine DJ 電腦版。Key Lock 淡化（`H130` `LA-018`）：逆向確認原廠 `ElastiqueFader` 已逐幀步進，維持原樣 |
-| ❌ | 位於閉源 DSP 或馬達 MCU 韌體內 | ~16 | Sync 狀態機（`RA004` `LA-033`）、M 系列轉盤 MCU（`CF014` `LC030`） |
+| ✅ | 在 5.0.4 上已根治或已防禦 | ~111 | 斷音（`CF001` `N001`–`N003` `RA002`）、損毀與慢速掛載（`CF003`–`CF006` `GL-011`）、PRIME 4 SATA 休眠（`CF017`）。本版新增並已實機部署：QML `CF008` `CF009` `CF010` `H143` `CF013` `H166` `RA001` `RA008`；19 個閉源 C++ DSP / 控制守護跳板全覆蓋（`H145` `H163` `H164` `H153` `H154` `LA-020` `H172` `N004` `H149` `R012` `LA-033` `LA-036` `RA004` `RA006` `CF024` `RA012` `LC003` `RA010` `RA013`） |
+| 🟢 | 5.0.4 底層已修正或已由架構繞過 | ~527 | 包括全部 229 條電腦版缺陷：播放機不再需要 Engine DJ 電腦版。Key Lock 淡化（`H130` `LA-018`）原廠已逐幀步進；`CF007` Pitch 中位軟接管與 `H043` AAC 編碼延遲（`elst`）5.0.4 已內建（皆經逆向核實） |
+| 🔧 | 獨立周邊 MCU 物理層（主機側已加 C Hook 守衛） | 4 | PRIME GO 面板 ADC（`CF011` `RA003`）、M 系列馬達控制板 MCU（`CF014` `LC030`）；主機側 Nudge / Motor 事件已由 `libengine-ui-hook.so` 守護 |
+
+<sub>合計 642 條。閉源 C++ DSP 沒有未施加 Hook 守衛的條目；4 項 🔧 位於 RK3288 主控之外的獨立單晶片韌體。</sub>
 
 <a id="quick-start"></a>
 
@@ -230,6 +232,7 @@ Engine OS 1.x 到 5.0.4、Engine DJ 電腦版（229 條）以及第三方工具�
 | `getaddrinfo` | 存取 `autoupdate.airmusictech.com` | 封鎖；保留 `api.github.com` 與裝置驗證 | GitHub 更新檢查 |
 | `ChannelDJFx` TurnOn / TurnOff / Switch / Change / Enable / Mix / Parameter（`0xd917b8`–`0xd918ec`）、`Effects::AutoGate::process` `0xe3a598`、FX 混合尾鏈 `0x15fa188` | FX 切換 / 開關時直接跳到新訊號；AutoGate 保留舊相位；NaN/Inf 原樣輸出 | `dsp_smooth.h`：切換時武裝 128 幀乾→濕斜坡、捨棄含 NaN/Inf 的 Mix / Parameter 事件、每次切換清零一次 AutoGate 相位、替換 NaN/Inf 輸出 | `H145` `H163` `H164` `LA-020` `H153` `H154` |
 | `PlaybackModifier::Nudge` `0x14fff54`、`TimeStretchingModifier::PlaybackTempoChange` `0x153312c` | 控制值原樣使用 | 捨棄非有限值（速度還要求為正） | `H154`、`CF011` 輸入側 |
+| `Effects::SweepFx::DubEcho::process` `0xe3d0a8`、`SweepFx::Wash::process` `0xe3d908`；`TimeStretchingModifier::Jump` `0x1532fa0`；`RampDownModifier::ChangeRampTime` `0x1500950`；`MotorizedPlatterScratchControl::RampdownTimeChange` `0xd0b5bc`；`SamplerControl` StopImmediately / Stop / Play `0xc5b2e0` `0xc5b30c` `0xc5b338` | 輸出與控制值原樣使用；取樣器聲部不追蹤 | Echo / Wash 輸出 NaN/Inf 淨化並鉗位至 `[-8.0, 8.0]`；Jump 有限值；斜坡時間非負有限值；取樣器聲部代際追蹤 | `H172` `H149` `R012` `LA-033` `LA-036` `CF014` `LC030` `N004` |
 
 </details>
 
