@@ -115,6 +115,20 @@ func hasMatchingStagedImage(path, downloadURL string) bool {
 }
 
 func (s *Server) applyOnlineUpdate(downloadURL string) {
+	uiDir := s.uiDir()
+	_ = os.Remove(filepath.Join(uiDir, "safe-mode"))
+	_ = os.Remove(filepath.Join(uiDir, "boot-count"))
+	// Trigger stock Denon full-screen graphical updater (/usr/bin/planck-remote-screen --update)
+	// via /usr/Engine/Scripts/engine's native UpdateFromUrl quit handler.
+	if err := os.WriteFile("/tmp/update-file-url", []byte(downloadURL+"\n"), 0o644); err == nil {
+		if err := os.WriteFile("/tmp/engine-quit-reason", []byte("UpdateFromUrl\n"), 0o644); err == nil {
+			s.setUpdateProgress(0.10, "", false)
+			time.Sleep(150 * time.Millisecond)
+			if exec.Command("pkill", "-TERM", "-x", "Engine").Run() == nil {
+				return
+			}
+		}
+	}
 	if !hasMatchingStagedImage(stagedUpdateFile, downloadURL) {
 		part := stagedUpdateFile + ".part"
 		_ = os.Remove(part)
@@ -194,7 +208,6 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		_ = os.WriteFile(stagedUpdateFile+".url", []byte(downloadURL+"\n"), 0o644)
 	}
 	s.setUpdateProgress(0.97, "", false)
-	uiDir := s.uiDir()
 	_ = os.Remove(filepath.Join(uiDir, "safe-mode"))
 	_ = os.Remove(filepath.Join(uiDir, "boot-count"))
 	cmd := exec.Command("/usr/sbin/az01-update", "--file", stagedUpdateFile)

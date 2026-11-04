@@ -56,6 +56,28 @@ SERVICES_MAIN = """
 		running: root.scUpdating
 		onTriggered: root.scFetchUpdate(false)
 	}
+	function scConfirmUpdate(ver) {
+		if (scUpdating) return
+		try {
+			let msg = {
+				id: "FirmwareUpdateAvailable",
+				type: Prompt.Info,
+				title: scT("Update Now"),
+				options: [
+					{text: scT("Remind Later"), role: Prompt.RejectRole},
+					{text: scT("Update"), role: Prompt.AcceptRole}
+				]
+			}
+			let p = PlanckGUI.views.prompts.post(msg)
+			p.message = scT("New release available:") + " EngineX OS " + (ver || "")
+			p.finished.connect(function(role) {
+				if (role === Prompt.AcceptRole)
+					root.scApplyUpdate()
+			})
+		} catch (e) {
+			root.scApplyUpdate()
+		}
+	}
 	function scApplyUpdate() {
 		if (scUpdating) return
 		scUpdating = true
@@ -736,7 +758,7 @@ def edits(dev: bool):
             ("        text: `Engine OS ${model.displayVersion} is available`\n",
              "        text: root.scT(\"New release available:\") + \" EngineX OS \" + model.displayVersion\n"),
             ("        onClicked: PlanckGUI.views.updaterController.updateOnlineForUrl(model.displayVersion, model.imageUrl)\n",
-             "        onClicked: root.scApplyUpdate()\n"),
+             "        onClicked: root.scConfirmUpdate(model.displayVersion)\n"),
             ('        text: "You\'re running the latest version"\n        visible: control.count < 1\n',
              "        text: root.scUpdateText\n        visible: true\n"),
             ("            PlanckGUI.views.updaterController.checkForUpdates()\n", "            root.scCheckUpdate()\n"),
