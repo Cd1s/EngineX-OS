@@ -164,7 +164,7 @@ Each of the deck's four cores has one job. **CPU0** serves only the ALSA interru
 | 📀 | **Rekordbox USB mount** | ~8 min first mount, 15–24 s rescan, delta update imported 0 of 21 new tracks (`GL-011`) | **< 2 s** first mount (> 500 tracks, built on `tmpfs`), **0.03 s** unchanged, **< 1 s** delta | **~800× faster re-mount** |
 | 💾 | **SQLite stalls & flash telemetry** | `synchronous=FULL`, temp tables on disk; constant `posthog.db` / `events.db` writes | `synchronous=NORMAL`, RAM temp store, 8 MB cache; telemetry DBs opened as `:memory:` | **0 B** eMMC writes in a 30 s stress test |
 | 🔊 | **96 kHz audio** | Idle clock fell to 126–408 MHz; interrupts and analysis shared the audio core | CPU0 ALSA at FIFO 99, 1.2 GHz floor, `MONOTONIC_RAW` timestamps against NTP steps (`RA002`) | **0 XRUN** |
-| 🎚 | **FX & control DSP guard** | Pops on FX switch / toggle (`H145` `H163` `H164`), AutoGate replays an old phase (`LA-020` `H153`), NaN / Inf control values reach the DSP (`H154`, Nudge `CF011`) | `dsp_smooth.h` behind 11 trampolines in `libengine-ui-hook.so`: 128-frame de-click ramp, AutoGate phase reset per transition, NaN/Inf scrub on the FX mix tail, finite guards on Nudge and `PlaybackTempoChange` | ✅ **live on the deck**, ALSA `RUNNING`, 0 XRUN |
+| 🎚 | **FX & control DSP guard** | Pops on FX switch / toggle (`H145` `H163` `H164`), AutoGate replays an old phase (`LA-020` `H153`), NaN / Inf control values reach the DSP (`H154`, Nudge `CF011`) | `dsp_smooth.h` behind 19 trampolines in `libengine-ui-hook.so` (all 19 live on the deck): 128-frame de-click ramp, AutoGate phase reset per transition, NaN/Inf scrub on the FX mix tail and `DubEcho` / `Wash`, finite guards on Nudge, `PlaybackTempoChange`, `Jump`, `ChangeRampTime` and `RampdownTimeChange`, sampler voice generation tracking | ✅ **live on the deck**, ALSA `RUNNING`, 0 XRUN |
 | ☁️ | **SoundCloud 1 h 50 min set** | 60.3 s (8-way baseline) | **43.7 s** with a 16-way range downloader | NIC line rate (~2.3 MB/s) |
 | 🖼 | **Album art in RAM** | ~36 MB per 3000 × 3000 cover | **≤ 1 MB** (≤ 512 × 512 JPEG) | **> 97% less** |
 
@@ -193,9 +193,11 @@ Every known defect from Engine OS 1.x to 5.0.4, Engine DJ Desktop (229) and thir
 
 | | Status | Count | Examples |
 | :-: | :-- | :-: | :-- |
-| ✅ | Cured or defended in 5.0.4 | ~102 | Dropouts (`CF001` `N001`–`N003` `RA002`), corruption and slow mounts (`CF003`–`CF006` `GL-011`), PRIME 4 SATA sleep (`CF017`). New in this release, deployed on the deck: QML `CF008` `CF009` `CF010` `H143` `CF013` `H166` `RA001` `RA008`; DSP guard `H145` `H163` `H164` `H153` `H154` `LA-020` |
-| 🟢 | Fixed in the 5.0.4 base or bypassed | ~527 | Including all 229 desktop bugs: the deck no longer needs Engine DJ Desktop. Key Lock fade (`H130` `LA-018`): the stock `ElastiqueFader` already steps per frame (reverse-engineered), so it is left alone |
-| ❌ | Inside closed DSP or motor MCU firmware | ~16 | Sync state machine (`RA004` `LA-033`), M-series platter MCU (`CF014` `LC030`) |
+| ✅ | Cured or defended in 5.0.4 | ~111 | Dropouts (`CF001` `N001`–`N003` `RA002`), corruption and slow mounts (`CF003`–`CF006` `GL-011`), PRIME 4 SATA sleep (`CF017`). New in this release, deployed on the deck: QML `CF008` `CF009` `CF010` `H143` `CF013` `H166` `RA001` `RA008`; DSP / control guards across all 19 trampolines (`H145` `H163` `H164` `H153` `H154` `LA-020` `H172` `N004` `H149` `R012` `LA-033` `LA-036` `RA004` `RA006` `CF024` `RA012` `LC003` `RA010` `RA013`) |
+| 🟢 | Fixed in the 5.0.4 base or bypassed | ~527 | Including all 229 desktop bugs: the deck no longer needs Engine DJ Desktop. Key Lock fade (`H130` `LA-018`): the stock `ElastiqueFader` already steps per frame; `CF007` pitch centre soft takeover and `H043` AAC priming (`elst`) are already in 5.0.4 (all reverse-engineered) |
+| 🔧 | Physical layer in separate peripheral MCUs (host-side events guarded by C hooks) | 4 | PRIME GO panel ADC (`CF011` `RA003`), M-series motor board MCU (`CF014` `LC030`); host-side Nudge / Motor events are guarded in `libengine-ui-hook.so` |
+
+<sub>Total 642. No closed-source C++ DSP item is left without a hook-side guard; the four 🔧 items live in firmware outside the RK3288 host.</sub>
 
 <a id="quick-start"></a>
 
@@ -230,6 +232,7 @@ Patches are applied in RAM at start-up after checking the ELF `NT_GNU_BUILD_ID` 
 | `getaddrinfo` | Queries `autoupdate.airmusictech.com` | Blocked; `api.github.com` and device auth kept | GitHub update check |
 | `ChannelDJFx` TurnOn / TurnOff / Switch / Change / Enable / Mix / Parameter (`0xd917b8`–`0xd918ec`), `Effects::AutoGate::process` `0xe3a598`, FX mix tail `0x15fa188` | FX switch / toggle steps straight to the new signal; AutoGate keeps its phase; NaN/Inf passes through | `dsp_smooth.h`: transitions arm a 128-frame dry→wet ramp, Mix / Parameter events with NaN/Inf dropped, AutoGate phase cleared once per transition, NaN/Inf output replaced | `H145` `H163` `H164` `LA-020` `H153` `H154` |
 | `PlaybackModifier::Nudge` `0x14fff54`, `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` | Control values used as given | Non-finite (and, for tempo, non-positive) values dropped | `H154`, `CF011` input side |
+| `Effects::SweepFx::DubEcho::process` `0xe3d0a8`, `SweepFx::Wash::process` `0xe3d908`; `TimeStretchingModifier::Jump` `0x1532fa0`; `RampDownModifier::ChangeRampTime` `0x1500950`; `MotorizedPlatterScratchControl::RampdownTimeChange` `0xd0b5bc`; `SamplerControl` StopImmediately / Stop / Play `0xc5b2e0` `0xc5b30c` `0xc5b338` | Output and control values used as given; sampler voices untracked | Echo / Wash output NaN/Inf scrubbed and clamped to `[-8.0, 8.0]`; Jump finite; ramp times non-negative finite; sampler voice generations tracked | `H172` `H149` `R012` `LA-033` `LA-036` `CF014` `LC030` `N004` |
 
 </details>
 
