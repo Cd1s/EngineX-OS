@@ -47,6 +47,7 @@ type Config struct {
 	NeteaseURL, StateDir, DeezerURL, DeezerGatewayURL                     string
 	SoundCloudURL, SoundCloudTokenURL                                     string
 	HTTP                                                                  *http.Client
+	GitHubURL, VersionFile                                                string // tests; defaults are api.github.com and versionFile
 	// UIDir holds the deck UI settings; empty means the on-device default.
 	UIDir string
 	// RelayURL is the cloud login service; it passes credentials and never audio.
@@ -72,6 +73,9 @@ type Server struct {
 	uiMu     sync.Mutex
 	stemsMu  sync.Mutex // streaming-stems.json
 
+	updateMu    sync.Mutex
+	updateCache updateStatus
+
 	// Owner logins ended in the console; the deck must not restore them.
 	ownerDeleted map[string]bool
 	logins       map[string]*loginFlow
@@ -94,6 +98,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /m/{provider}", s.phoneGet)
 	s.mux.HandleFunc("POST /m/{provider}", s.phonePost)
 	s.mux.HandleFunc("GET /api/ui", s.uiStatus)
+	s.mux.HandleFunc("GET /api/update", s.update)
 	s.mux.HandleFunc("POST /api/ui", s.uiUpdate)
 	s.mux.HandleFunc("GET /api/console-qr", s.consoleQR)
 	s.mux.HandleFunc("POST /api/sessions", s.createSession)

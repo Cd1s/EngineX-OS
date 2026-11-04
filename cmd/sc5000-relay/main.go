@@ -34,7 +34,7 @@ type server struct {
 
 func main() {
 	listen := flag.String("listen", "0.0.0.0:6595", "listen address")
-	public := flag.String("public", "https://denon.cheek.day", "public base URL")
+	public := flag.String("public", "https://relay.example.com", "public base URL of your self-hosted sc5000-relay")
 	stateDir := flag.String("state", "/var/lib/sc5000-relay", "state directory (config.json, sessions)")
 	stemsTarget := flag.String("stems-target", "http://127.0.0.1:6596", "local sc5000-stemsd base URL (/v1/engine is appended)")
 	stemsToken := flag.String("stems-token-file", defaultStemsTokenFile(), "sc5000-stemsd internal token; missing file sends none")

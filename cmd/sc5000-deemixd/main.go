@@ -30,7 +30,7 @@ const (
 	defaultStateDir    = "/data/sc5000-custom/state"
 	defaultDownloadDir = "/data/sc5000-custom/Stream"
 	sdDownloadDir      = "/media/sc5000-sd-cache/Music/Stream"
-	defaultRelay       = "https://denon.cheek.day"
+	defaultRelay       = ""
 	defaultPassword    = "change-me-in-config"
 	maxJobs            = 200
 	maxPending         = 20
@@ -376,15 +376,24 @@ func (d *daemon) credentials(ctx context.Context) (string, error) {
 		return "", err
 	}
 	relay, password := defaultRelay, defaultPassword
-	for key, dst := range map[string]*string{"deemixUrl": &relay, "deemixPassword": &password} {
+	for _, key := range []string{"deemixUrl", "relayUrl"} {
 		if raw, ok := cfg[key]; ok {
 			var s string
 			if json.Unmarshal(raw, &s) != nil {
 				return "", fmt.Errorf("invalid %s in deemix-config.json", key)
 			}
 			if s != "" {
-				*dst = s
+				relay = s
 			}
+		}
+	}
+	if raw, ok := cfg["deemixPassword"]; ok {
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return "", errors.New("invalid deemixPassword in deemix-config.json")
+		}
+		if s != "" {
+			password = s
 		}
 	}
 	u, err := url.Parse(relay)

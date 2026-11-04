@@ -45,6 +45,10 @@ write_knob "$PROC/sys/vm/swappiness" 10
 write_knob "$PROC/sys/vm/dirty_background_ratio" 5
 write_knob "$PROC/sys/vm/dirty_ratio" 15
 write_knob "$PROC/sys/fs/file-max" 1048576
+# LC003: a 1 MiB read-ahead keeps far seeks in long MP3 sets fed.
+for ra in "$SYS"/block/sd*/queue/read_ahead_kb "$SYS"/block/mmcblk*/queue/read_ahead_kb; do
+    write_knob "$ra" 1024 quiet
+done
 for scheduler in "$SYS"/block/*/queue/scheduler; do
     [ -r "$scheduler" ] || continue
     available=" $(cat "$scheduler") "

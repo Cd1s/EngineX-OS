@@ -323,6 +323,105 @@ static void test_threads(void) {
     puts("pthread/prctl/time64 naming, Qt policy override, online CPUs and caller isolation: PASS");
 }
 
+struct mock_sw_params { int type; unsigned long start, stop, silence_threshold, silence_size; };
+static int mock_get_rc, mock_set_rc, mock_apply_rc, mock_seen_type;
+static char alsa_order[16];
+static unsigned alsa_count;
+static void *mock_pcm;
+
+static int mock_tstamp_get(const void *params, int *type) {
+    alsa_order[alsa_count++] = 'g';
+    if (!mock_get_rc) *type = ((const struct mock_sw_params *)params)->type;
+    return mock_get_rc;
+}
+
+static int mock_tstamp_set(void *pcm, void *params, int type) {
+    assert(pcm == mock_pcm);
+    alsa_order[alsa_count++] = 's';
+    mock_seen_type = type;
+    if (!mock_set_rc) ((struct mock_sw_params *)params)->type = type;
+    return mock_set_rc;
+}
+
+static int mock_sw_apply(void *pcm, void *params) {
+    assert(pcm == mock_pcm && params);
+    alsa_order[alsa_count++] = 'a';
+    return mock_apply_rc;
+}
+
+static void test_alsa(void) {
+    void *old_sw = alsa_sw_cache, *old_set = alsa_tstamp_set_cache, *old_get = alsa_tstamp_get_cache;
+    alsa_sw_cache = mock_sw_apply;
+    alsa_tstamp_set_cache = mock_tstamp_set;
+    alsa_tstamp_get_cache = mock_tstamp_get;
+    char pcm; mock_pcm = &pcm;
+    hook_test_engine = 1;
+    for (int type = 0; type <= 2; type++) {
+        struct mock_sw_params params, wanted;
+        memset(&params, 0x5a, sizeof params);
+        params.type = type; params.silence_threshold = 0;
+        memcpy(&wanted, &params, sizeof wanted);
+        wanted.type = type == 0 ? 2 : type;
+        alsa_count = 0; memset(alsa_order, 0, sizeof alsa_order);
+        assert(snd_pcm_sw_params(&pcm, &params) == 0);
+        assert(!strcmp(alsa_order, type == 0 ? "gsa" : "ga"));
+        assert(!memcmp(&params, &wanted, sizeof params));
+    }
+    struct mock_sw_params params = {.type = 0, .silence_threshold = 0};
+    alsa_count = 0; mock_set_rc = -EINVAL;
+    assert(snd_pcm_sw_params(&pcm, &params) == -EINVAL && alsa_count == 2 && params.type == 0);
+    mock_set_rc = 0; mock_get_rc = -EINVAL; mock_apply_rc = -EBUSY; alsa_count = 0;
+    assert(snd_pcm_sw_params(&pcm, &params) == -EBUSY && alsa_count == 2 && params.type == 0);
+    mock_get_rc = 0; mock_apply_rc = 0;
+    for (int type = -1; type <= 3; type++) {
+        alsa_count = 0;
+        assert(!snd_pcm_sw_params_set_tstamp_type(&pcm, &params, type));
+        assert(mock_seen_type == (type == 0 ? 2 : type));
+    }
+    hook_test_engine = 0; params.type = 0; alsa_count = 0;
+    assert(!snd_pcm_sw_params(&pcm, &params) && alsa_count == 1 && params.type == 0);
+    alsa_count = 0;
+    assert(!snd_pcm_sw_params_set_tstamp_type(&pcm, &params, 0) && mock_seen_type == 0);
+    alsa_sw_cache = old_sw; alsa_tstamp_set_cache = old_set; alsa_tstamp_get_cache = old_get;
+    puts("ALSA setup: realtime -> RAW, preserve explicit clocks/silence, call order and errors: PASS");
+}
+
+static int dns_calls;
+static const char *dns_node, *dns_service;
+static const struct addrinfo *dns_hints;
+
+static int mock_dns(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **result) {
+    assert(node == dns_node && service == dns_service && hints == dns_hints);
+    dns_calls++;
+    *result = NULL;
+    return EAI_AGAIN;
+}
+
+static void test_update_dns(void) {
+    void *old = getaddrinfo_cache; getaddrinfo_cache = mock_dns;
+    hook_test_engine = 1;
+    const char *blocked[] = {"autoupdate.airmusictech.com", "AUTOUPDATE.AIRMUSICTECH.COM", "autoupdate.airmusictech.com."};
+    struct addrinfo hints = {.ai_family = AF_UNSPEC}, *result;
+    for (size_t i = 0; i < sizeof blocked / sizeof *blocked; i++) {
+        result = &hints;
+        assert(getaddrinfo(blocked[i], "443", &hints, &result) == EAI_NONAME && !result);
+    }
+    assert(!dns_calls);
+    const char *allowed[] = {"device.inmusicbrands.com", "auth.profile.inmusicbrands.com",
+        "ipv4.connman.inmusicbrands.com", "api.github.com", "notautoupdate.airmusictech.com",
+        "autoupdate.airmusictech.com.example", NULL};
+    dns_service = "443"; dns_hints = &hints;
+    for (size_t i = 0; i < sizeof allowed / sizeof *allowed; i++) {
+        dns_node = allowed[i];
+        assert(getaddrinfo(dns_node, dns_service, dns_hints, &result) == EAI_AGAIN);
+    }
+    hook_test_engine = 0; dns_node = blocked[0];
+    assert(getaddrinfo(dns_node, dns_service, dns_hints, &result) == EAI_AGAIN);
+    assert(dns_calls == (int)(sizeof allowed / sizeof *allowed) + 1);
+    getaddrinfo_cache = old;
+    puts("Update DNS: exact official updater host blocked; auth/GitHub/connman/other processes preserved: PASS");
+}
+
 static void test_patch_files(const char *filename) {
     FILE *f = fopen(filename, "rb"); assert(f);
     assert(!fseek(f, 0, SEEK_END)); long size = ftell(f); assert(size > 0);
@@ -360,6 +459,8 @@ int main(int argc, char **argv) {
     test_sqlite();
     test_files();
     test_threads();
+    test_alsa();
+    test_update_dns();
     for (int i = 1; i < argc; i++) test_patch_files(argv[i]);
     return 0;
 }

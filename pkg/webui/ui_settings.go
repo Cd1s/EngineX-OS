@@ -48,6 +48,7 @@ type uiSettings struct {
 	Waveform    string   `json:"waveform"`
 	Sources     []string `json:"sources"`
 	Scope       string   `json:"scope"`
+	GitHubRepo  string   `json:"githubRepo"`
 	SafeMode    bool     `json:"safeMode"`
 	LoggedIn    []string `json:"loggedIn"`
 
@@ -64,7 +65,7 @@ func (s *Server) uiDir() string {
 
 // loadUI must be called with uiMu held. Bad or missing values get defaults.
 func (s *Server) loadUI() uiSettings {
-	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial}
+	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
 		key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
@@ -79,6 +80,10 @@ func (s *Server) loadUI() uiSettings {
 		case "waveform":
 			if slices.Contains(uiWaveforms, val) {
 				v.Waveform = val
+			}
+		case "github_repo":
+			if githubRepoRE.MatchString(val) {
+				v.GitHubRepo = val
 			}
 		case "scope":
 			if slices.Contains(uiServices, val) {
@@ -132,6 +137,9 @@ func (s *Server) saveUI(v uiSettings) error {
 		return err
 	}
 	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\njog=" + v.Jog + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
+	if v.GitHubRepo != defaultGitHubRepo {
+		text += "github_repo=" + v.GitHubRepo + "\n"
+	}
 	tmp, err := os.CreateTemp(dir, ".settings-*")
 	if err != nil {
 		return err

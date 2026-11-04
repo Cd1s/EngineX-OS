@@ -448,7 +448,7 @@ func TestSpotifyRegisteredDefaultHTTPSAndScopes(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			a := newSpotifyAuth(path, "https://denon.cheek.day/oauth/spotify/callback")
+			a := newSpotifyAuth(path, "https://relay.example.com/oauth/spotify/callback")
 			a.hc = &http.Client{Transport: browserRoundTripper(func(*http.Request) (*http.Response, error) {
 				t.Error("known callback performed probe")
 				return nil, fmt.Errorf("no network")
