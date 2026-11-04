@@ -346,6 +346,26 @@ sleep 1.5
 sh "$GUARD" post; sleep 1.5
 [[ ! -e $SC5000_UI_DIR/boot-count ]] || fail 'a start that survives the window must clear boot-count'
 unset SC5000_UI_HEALTHY_AFTER
+# Quit reasons the stock script exits 0 after: the guard must restart Engine unless
+# the system is already rebooting (FactoryReset when az01-update --erase-data worked).
+mkdir -p "$TMP/guard-bin"
+cat > "$TMP/guard-bin/systemctl" <<'MOCK'
+#!/bin/sh
+echo "$*" >> "$GUARD_LOG"
+[ "$1" != is-system-running ] || echo "$GUARD_STATE"
+MOCK
+chmod +x "$TMP/guard-bin/systemctl"
+export SC5000_QUIT_REASON_FILE=$TMP/quit-reason GUARD_LOG=$TMP/guard-log
+for case in 'FactoryReset running 1' 'FactoryReset degraded 1' 'FactoryReset stopping 0' 'AnalyticsChange stopping 1' 'Poweroff running 0' ' running 0'; do
+    set -- $case; [[ $# == 3 ]] || set -- '' "$@"
+    [[ -z $1 ]] && rm -f "$SC5000_QUIT_REASON_FILE" || echo "$1" > "$SC5000_QUIT_REASON_FILE"
+    : > "$GUARD_LOG"
+    GUARD_STATE=$2 SERVICE_RESULT=success PATH=$TMP/guard-bin:$PATH sh "$GUARD" stop
+    started=$(grep -c '^start --no-block engine.service$' "$GUARD_LOG" || :)
+    [[ $started == "$3" ]] || fail "guard stop reason='$1' state=$2 started=$started want $3"
+    if [[ $3 == 1 && -e $SC5000_QUIT_REASON_FILE ]]; then fail "guard must consume quit reason $1"; fi
+done
+unset SC5000_QUIT_REASON_FILE GUARD_LOG
 has 'ExecStopPost=-/etc/sc5000/engine-ui-guard stop' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf"
 has 'ExecStopPost=-/etc/sc5000/engine-ui-guard stop' "$debloat_root/etc/systemd/system/engine.service.d/override.conf"
 for conf in "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf" "$debloat_root/etc/systemd/system/engine.service.d/override.conf"; do
@@ -354,7 +374,7 @@ for conf in "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.c
 done
 has 'SC5000_UI_HEALTHY_AFTER:-15' "$GUARD"
 unset SC5000_UI_DIR
-ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode'
+ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode, failed FactoryReset restarts Engine'
 
 python3 -m unittest discover -s "$ROOT/sim/qengine" -p test_smoke.py >/dev/null
 printf 'PASS: %d tests (mocked storage and hardware; no privileged operations)\n' "$count"
