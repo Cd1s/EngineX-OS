@@ -1,4 +1,4 @@
-# sc5000-relay on clawbot-104 (`https://denon.cheek.day`)
+# sc5000-relay self-hosted deployment (`https://relay.example.com`)
 
 The web service handles Spotify/Deezer QR login and credential transfer. It
 never downloads or stores music. SC5000 downloads directly from Deezer using

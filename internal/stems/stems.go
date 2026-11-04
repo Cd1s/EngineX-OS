@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +34,10 @@ const Protocol = "engine-5.0.4"
 const FramingHeader = "X-Stems-Framing"
 
 const maxFrame = 1 << 20
+
+// ErrUnreachable: Proxy could not connect and read nothing from Engine, so
+// the caller may still serve the session another way.
+var ErrUnreachable = errors.New("stems backend unreachable")
 
 // Secret reads the renderer's internal bearer token (at least 24 characters).
 func Secret(path string) (string, error) {
@@ -83,6 +88,10 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 	resp, e := tr.RoundTrip(req)
 	startup.Stop()
 	if e != nil {
+		// A failed dial never started the upload, so Engine's stdin is untouched.
+		if op := (*net.OpError)(nil); errors.As(e, &op) && op.Op == "dial" {
+			return fmt.Errorf("%w: %v", ErrUnreachable, e)
+		}
 		return fmt.Errorf("backend connection: %w", e)
 	}
 	defer resp.Body.Close()
@@ -227,11 +236,14 @@ func (b *idleBody) stop() {
 	b.c.SetReadDeadline(time.Now())
 }
 
+// Backend serves /v1/engine. An empty Secret serves LAN callers without a
+// credential (a home renderer found by discovery); others are refused.
 type Backend struct {
 	Secret string
 	Worker []string
 	Slot   chan struct{}
 	Log    io.Writer
+	Name   string // separator reported by /healthz: hpss (default) or htdemucs
 }
 type flushWriter struct {
 	w http.ResponseWriter
@@ -246,14 +258,25 @@ func (f *flushWriter) Write(p []byte) (int, error) {
 	return n, e
 }
 func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	want := "Bearer " + b.Secret
-	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(want)) != 1 {
+	if b.Secret == "" {
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if !lanIP(net.ParseIP(host)) {
+			http.Error(w, "LAN only", http.StatusForbidden)
+			return
+		}
+	} else if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.Secret)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if r.Method == "GET" && r.URL.Path == "/healthz" {
+		name, separator := cmp.Or(b.Name, "hpss"), "spectral-hpss-approximation"
+		if name != "hpss" {
+			separator = name
+		}
+		device, _ := os.Hostname()
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"ok":true,"protocol":"engine-5.0.4","separator":"spectral-hpss-approximation"}`)
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "protocol": Protocol, "separator": separator,
+			"backend": name, "device": device, "sessions": cap(b.Slot), "busy": len(b.Slot) >= cap(b.Slot)})
 		return
 	}
 	if r.Method != "POST" || r.URL.Path != "/v1/engine" {

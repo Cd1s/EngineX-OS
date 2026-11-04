@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/Cd1s/sc5000-custom-os/internal/stems"
 	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
 )
 
@@ -23,6 +24,8 @@ type relayConfig struct {
 type relayConfigStatus struct {
 	RelayURL    string `json:"relayUrl"`
 	PasswordSet bool   `json:"deemixPasswordSet"`
+	// LANStems is the home Stems renderer stems-processor last checked.
+	LANStems *stems.LANState `json:"lanStems,omitempty"`
 }
 
 func (s *Server) relayConfigPath() string {
@@ -49,7 +52,14 @@ func (s *Server) relaySettings() (relay, password string) {
 
 func (s *Server) relayStatusView() relayConfigStatus {
 	relay, password := s.relaySettings()
-	return relayConfigStatus{relay, password != ""}
+	v := relayConfigStatus{RelayURL: relay, PasswordSet: password != ""}
+	if b, err := os.ReadFile(filepath.Join(s.cfg.StateDir, stems.LANStateName)); err == nil {
+		v.LANStems = new(stems.LANState)
+		if json.Unmarshal(b, v.LANStems) != nil {
+			v.LANStems = nil
+		}
+	}
+	return v
 }
 
 // validRelayURL refuses to send the password in the clear across the internet.

@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Engine 5.0.4 child protocol + bounded, causal spectral approximation.
 
-This is NOT a neural/semantic vocal separator. A center-panned harmonic mask
-approximates vocals; HPSS estimates drums, a low-band mask estimates bass, and
-the remainder is melody. Masks sum to one; the stems sum back to the input.
+The default backend (hpss) is NOT a neural/semantic vocal separator. A
+center-panned harmonic mask approximates vocals; HPSS estimates drums, a
+low-band mask estimates bass, and the remainder is melody. Masks sum to one;
+the stems sum back to the input.
+
+--backend demucs (or auto, when torch + demucs are installed) runs the
+htdemucs neural model instead on CUDA, Apple mps or CPU, in overlapping
+chunks; melody is the remainder there too, so the wire protocol is unchanged.
 """
+import importlib.util
 import argparse
 import io
 import os
@@ -217,7 +223,116 @@ class Separator:
         return out
 
 
-def serve(src, dst):
+CHUNK, OVERLAP = 10.0, 1.0  # seconds: htdemucs window and crossfade
+
+
+def demucs_available():
+    return all(importlib.util.find_spec(m) for m in ('torch', 'demucs', 'julius'))
+
+
+def resolve_backend(name):
+    """auto|hpss|demucs|htdemucs -> hpss or htdemucs."""
+    if name == 'hpss' or (name == 'auto' and not demucs_available()):
+        return 'hpss'
+    if not demucs_available():
+        raise ValueError('the demucs backend needs: pip install demucs')
+    return 'htdemucs'
+
+
+_model = None
+
+
+def load_demucs():
+    """Returns separate(x (channels, n) float32, rate) -> (4, channels, n)."""
+    global _model
+    os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
+    import torch
+    from demucs.apply import apply_model
+    from demucs.pretrained import get_model
+    from julius import resample_frac
+    device = ('cuda' if torch.cuda.is_available() else
+              'mps' if torch.backends.mps.is_available() else 'cpu')
+    if _model is None:
+        _model = get_model('htdemucs').to(device).eval()
+    model = _model
+    order = [model.sources.index(s) for s in ('vocals', 'bass', 'drums')]
+
+    def separate(x, rate):
+        channels, n = x.shape
+        mix = torch.from_numpy(np.ascontiguousarray(x))
+        if channels == 1:
+            mix = mix.repeat(2, 1)
+        rate = int(round(rate))
+        if rate != model.samplerate:
+            mix = resample_frac(mix, rate, model.samplerate)
+        with torch.no_grad():
+            y = apply_model(model, mix[None], device=device, split=True, overlap=0.25, progress=False)[0][order]
+        if rate != model.samplerate:
+            y = resample_frac(y, model.samplerate, rate)
+        y = y.cpu().numpy().astype(np.float32)[..., :n]
+        y = np.pad(y, ((0, 0), (0, 0), (0, n - y.shape[-1])))
+        if channels == 1:
+            y = y.mean(axis=1, keepdims=True)
+        # Canonical order; melody is the remainder so the stems sum to the input.
+        return np.concatenate((y, (x - y.sum(axis=0))[None]))
+    return separate
+
+
+class DemucsSeparator:
+    """Chunked neural separation: windows of CHUNK seconds overlap by OVERLAP
+    seconds and are crossfaded linearly. Output frame k is always input frame
+    k's stems (latency is one window), as the deck's melody rebuild needs."""
+
+    def __init__(self, channels, sample_rate, separate=None, chunk=CHUNK, overlap=OVERLAP):
+        self.channels, self.rate = channels, sample_rate
+        self.size = max(2, int(chunk*sample_rate))
+        self.overlap = min(int(overlap*sample_rate), self.size//2)
+        self.separate = separate or load_demucs()
+        self.fade = ((np.arange(self.overlap)+0.5)/max(self.overlap, 1)).astype(np.float32)
+        self.pending = np.zeros((channels, 0), np.float32)
+        self.tail = None
+        self.received = self.returned = 0
+        self.finished = False
+
+    def _run(self, x):
+        y = self.separate(x, self.rate)
+        if self.tail is not None:
+            o = self.overlap
+            y[:, :, :o] = self.tail*(1-self.fade) + y[:, :, :o]*self.fade
+        return y
+
+    def feed(self, x):
+        if self.finished:
+            raise ValueError('PCM after drain')
+        if not np.isfinite(x).all():
+            raise ValueError('non-finite PCM')
+        self.received += x.shape[1]
+        self.pending = np.concatenate((self.pending, x), axis=1)
+        hop, pieces = self.size - self.overlap, []
+        while self.pending.shape[1] >= self.size:
+            y = self._run(self.pending[:, :self.size])
+            pieces.append(y[:, :, :hop])
+            self.tail = y[:, :, hop:]
+            self.pending = self.pending[:, hop:]
+        out = np.concatenate(pieces, axis=2) if pieces else np.empty((4, self.channels, 0), np.float32)
+        self.returned += out.shape[-1]
+        return out
+
+    def drain(self):
+        if self.finished:
+            return np.empty((4, self.channels, 0), np.float32)
+        self.finished = True
+        left = self.pending.shape[1]
+        out = np.empty((4, self.channels, 0), np.float32)
+        if left:
+            out = self._run(np.pad(self.pending, ((0, 0), (0, self.size-left))))[:, :, :left]
+        self.returned += left
+        if self.returned != self.received:
+            raise ValueError('drain frame accounting mismatch')
+        return out
+
+
+def serve(src, dst, backend='hpss'):
     # The original parent treats initReply/ack/feedback/reply as log labels;
     # they are not required keys on the wire.
     header_write(dst, session='FFFFFFFFFFFFFFFF')
@@ -231,7 +346,10 @@ def serve(src, dst):
         raise ValueError('unsupported channel count or sample rate')
     if not 1 <= max_block <= MAX_BLOCK:
         raise ValueError('unsupported block size')
-    separator = Separator(channels, sample_rate)
+    if backend == 'htdemucs':
+        separator = DemucsSeparator(channels, sample_rate)
+    else:
+        separator = Separator(channels, sample_rate)
     queued = np.empty((4, channels, 0), np.float32)
     header_write(dst, preparing='ready')
     header_write(dst, preparing='ready', numReturnChannels=channels*4)
@@ -288,9 +406,16 @@ def main():
     parser.add_argument('-s', action='store_true')
     parser.add_argument('-hv')
     parser.add_argument('-pv')
-    parser.parse_args()
+    parser.add_argument('--backend', default=os.environ.get('ENGINEX_STEMS_BACKEND', 'hpss'),
+                        choices=('auto', 'hpss', 'demucs', 'htdemucs'))
+    parser.add_argument('--print-backend', action='store_true', help='print hpss or htdemucs and exit')
+    args = parser.parse_args()
     try:
-        serve(Input(sys.stdin.buffer), sys.stdout.buffer)
+        backend = resolve_backend(args.backend)
+        if args.print_backend:
+            print(backend)
+            return 0
+        serve(Input(sys.stdin.buffer), sys.stdout.buffer, backend)
     except (ValueError, KeyError, BrokenPipeError, OSError) as exc:
         print('stems worker:', str(exc), file=sys.stderr)
         return 1
