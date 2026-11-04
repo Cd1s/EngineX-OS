@@ -64,9 +64,14 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 
 ## 5.0.4.1 在线更新收尾（同日追加，Opus 5.5）
 
-- 设置页「更新」按钮先弹原厂 `FirmwareUpdateAvailable` 同款确认框（写法与 qrc 里 `FirmwareUpdateAvailableMessageBox.qml` 一致），确认后由 stream-sync 写 `/tmp/update-file-url` 和 `/tmp/engine-quit-reason=UpdateFromUrl`，再 `pkill -TERM -x Engine`。原厂 `/usr/Engine/Scripts/engine` 随后启动 `/usr/bin/planck-remote-screen --update <URL>`：libaz01-prog 用 curl 下载（跟随 GitHub 302）到 `/data/az01-update.img`，校验后 `reboot update`。
-- `pkill` 成功后把 `updating` 清掉，刷写失败、Engine 被拉起时可以重试；`pkill` 失败时删除两个 `/tmp` 文件，避免 Engine 之后崩溃时意外进入刷写。
-- 关于页版本号改用 stream-sync 报的已安装版本（`/data` 与镜像 `/etc` 中较新的那个），不再出现上方显示 5.0.4、下方显示 5.0.4.1 的情况。
-- `build-release.sh` 对三组构建逐个 `wait`（`wait a b c` 只返回最后一个的状态，前两组失败会被漏掉）。
-- 发行版本固定为 5.0.4.1：重打包的 8 个镜像覆盖上传到 Release `v5.0.4.1`。sha256：SC5000/SC5000M/PRIME GO `bfadb8db…42d4`，SC6000/SC6000M `3dc96b04…6861`，PRIME 4/PRIME 2/Mixstream Pro `3cfcaee6…0f54`。
-- 回滚点：Release 的旧资产已被覆盖；回滚方式是在 IN 上 checkout `adc1fa1` 重新执行 `build-release.sh` 并重新上传。
+- 设置页「更新」按钮先弹原厂 `FirmwareUpdateAvailable` 同款确认框（写法与 qrc 里 `FirmwareUpdateAvailableMessageBox.qml` 一致），确认后由 stream-sync 写 `/tmp/update-file-url` 和 `/tmp/engine-quit-reason=UpdateFromUrl`，再给 Engine 发 SIGTERM。原厂 `/usr/Engine/Scripts/engine` 随后启动 `/usr/bin/planck-remote-screen --update <URL>`：libaz01-prog 用 curl 下载（跟随 GitHub 302）到 `/data/az01-update.img`，校验后 `reboot update`。
+- **Engine 的进程名是 `EMain`**，原来的 `pkill -x Engine` 匹配不到，会退回自下载 + `az01-update --file`。改为 `pkill -f '^/usr/Engine/Engine( |$)'`。`pkill` 成功后清掉 `updating`（刷写失败、Engine 被拉起时可以重试）；失败时删除两个 `/tmp` 文件，避免 Engine 之后崩溃时意外进入刷写。
+- 关于页版本号改用 stream-sync 报的已安装版本（`/data` 与镜像 `/etc` 中较新的那个）。
+- 版本号固定为 5.0.4.1 后，重打包的镜像版本号不变：`sc5000-custom-prepare` 改为同时比较 UI 包归档的 sha256（`.pack-id`），`sc5000-suite-exec` 改为比较 `sc5000-suite.xz` 的 sha256（`sc5000-suite.id`），不再靠 mtime。同一镜像下手工部署的包和二进制仍然保留。
+- `engine.service` 加 `QML_DISABLE_DISK_CACHE=1`：#25 让 HOME 可写后 Qt 开始在 `/tmp/sc5000-engine-home/.cache/.../qmlcache` 缓存 `.qmlc`（实机 918 个）。UI hook 替换 qrc 内容但保留时间戳，缓存一直有效，切换语言或换包后重启 Engine 仍用旧编译结果，直到整机重启。关掉缓存即恢复 #25 之前的行为。
+- `build-release.sh` 对三组构建逐个 `wait`（`wait a b c` 只返回最后一个的状态）。
+- 实机 SC5000 端到端两轮：临时把两个 `version.txt` 设为 5.0.4（`/etc` 那份用 bind mount，不写 overlay 上层）→ `?apply=1` → 日志 `Engine quit with reason: UpdateFromUrl` → planck 下载约 15 s → `verifying image... / preparing upgrade environment...` → 重启刷写约 1 分钟 → 两个版本号 5.0.4.1、`engine.service` active、`NRestarts=0`、`/ui` 的 `version` 与 `/update` 的 `currentVersion` 都是 5.0.4.1、`updateAvailable:false`。关于页截图显示 `EngineX OS 5.0.4.1 Custom` 与 `已是最新 (5.0.4.1)`；确认框点「更新」的路径也在实机走过。
+- 原厂 5.0.4 没有 `/usr/share/planck/update-firmware-from-web-background-270.data`（4.3.4 有），planck 刷机界面没有背景图，不影响刷写。
+- 实机 `/etc` overlay 上层有一份手工放的 `sc5000/libengine-ui-hook.so`（与仓库相同），会遮住新镜像的 hook，已移除（备份在 agent-backup）。
+- Release `v5.0.4.1` 的 8 个镜像已覆盖上传。sha256：SC5000/SC5000M/PRIME GO `b0f43a46…aaca`，SC6000/SC6000M `d7f88604…0011`，PRIME 4/PRIME 2/Mixstream Pro `489fdb5b…26d4`。
+- 回滚点：Release 旧资产已被覆盖；回滚方式是在 IN 上 checkout `adc1fa1` 重新执行 `build-release.sh` 并重新上传。
