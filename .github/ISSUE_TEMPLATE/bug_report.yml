@@ -1,0 +1,70 @@
+name: Bug report / 问题反馈
+description: Something on the deck does not work as expected. / 碟机上有功能不正常。
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please do not post passwords, Deezer ARL, tokens or private keys in logs.
+        感谢反馈。日志里请不要贴密码、Deezer ARL、Token 或私钥。
+  - type: dropdown
+    id: model
+    attributes:
+      label: Hardware model / 机型
+      options:
+        - SC5000 (JP07)
+        - SC5000M (JP08)
+        - SC6000 (JP13)
+        - SC6000M (JP14)
+        - PRIME 4 (JC11)
+        - PRIME 2 (JC16)
+        - PRIME GO (JP11)
+        - Mixstream Pro (NH08)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: EngineX OS version / 系统版本
+      description: Settings → About, e.g. 5.0.4.1 / 设置 → 关于，例如 5.0.4.1
+      placeholder: 5.0.4.1
+    validations:
+      required: true
+  - type: dropdown
+    id: audio
+    attributes:
+      label: Does it affect live audio? / 是否影响实时音频？
+      description: Dropouts, clicks, xruns, stopped playback. / 断音、爆音、xrun、播放中断。
+      options:
+        - "No / 否"
+        - "Yes, audio dropouts or clicks / 是，断音或爆音"
+        - "Yes, playback stops or the deck restarts / 是，播放停止或碟机重启"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      description: What you did, what you expected, what happened instead. / 做了什么、期望什么、实际发生了什么。
+      placeholder: |
+        1. Load a track from a Rekordbox USB on Deck 1
+        2. ...
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots / 日志与截图
+      description: |
+        Photos of the screen help. If you have SSH access: `journalctl -b -u engine.service --no-pager | tail -n 200`.
+        屏幕照片很有帮助。能 SSH 的话请附 `journalctl -b -u engine.service --no-pager | tail -n 200`。
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else / 其它信息
+      description: Media (USB / SD, Rekordbox or Engine library), streaming service, mixer, network. / 介质（U 盘 / SD、Rekordbox 或 Engine 曲库）、流媒体平台、混音台、网络。

@@ -37,3 +37,7 @@ __pycache__/
 *.arl
 .env
 .DS_Store
+
+# Local agent settings (machine-specific paths); .claude/rules is tracked
+.claude/settings*.json
+.codex/
