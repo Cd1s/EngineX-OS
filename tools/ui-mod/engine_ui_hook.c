@@ -166,7 +166,7 @@ enum {
     DSP_TURN_OFF, DSP_TURN_ON, DSP_SWITCH, DSP_CHANGE, DSP_ENABLE,
     DSP_MIX, DSP_PARAMETER, DSP_NUDGE, DSP_TEMPO, DSP_JUMP, DSP_RAMP_TIME, DSP_MOTOR_RAMP_TIME,
     DSP_SAMPLER_IMMEDIATE, DSP_SAMPLER_STOP, DSP_SAMPLER_PLAY,
-    DSP_AUTOGATE, DSP_COMMON, DSP_DUB_ECHO, DSP_WASH, DSP_HOOK_COUNT
+    DSP_AUTOGATE, DSP_COMMON, DSP_DUB_ECHO, DSP_WASH, DSP_CHANNEL, DSP_HOOK_COUNT
 };
 static void *dsp_originals[DSP_HOOK_COUNT];
 
@@ -246,57 +246,50 @@ static void hook_wash(void *self, float *const *in, float *const *out, uint32_t 
     sc_dsp_sweep_fx_post_process(self, in, frames);
 }
 
+static __thread struct sc_dsp_fx_slot *dsp_current_channel __attribute__((tls_model("initial-exec")));
+
 static void hook_autogate_process(void *self, float *const *input, float *const *output, uint32_t frames) {
-    sc_dsp_autogate_pre_process(self, frames);
+    sc_dsp_autogate_for_slot(dsp_current_channel, self, frames);
     ((dsp_process_fn)dsp_originals[DSP_AUTOGATE])(self, input, output, frames);
 }
 
-static int dsp_buffers_overlap(const float *a, const float *b, uint32_t frames) {
-    if (!a || !b) return 0;
-    uintptr_t x = (uintptr_t)a, y = (uintptr_t)b;
-    return (uint64_t)(x > y ? x - y : y - x) < (uint64_t)frames * sizeof(float);
+static void hook_fx_common_chain(void *self, float *const *input, float *const *output, uint32_t frames) {
+    ((dsp_process_fn)dsp_originals[DSP_COMMON])(self, input, output, frames);
+    sc_dsp_fx_common_post_process(self, input, output, frames);
 }
 
-static void hook_fx_common_chain(void *common, float *const *input, float *const *output, uint32_t frames) {
-    enum { MAX_SNAPSHOT_FRAMES = 2048 };
-    float dry_l[MAX_SNAPSHOT_FRAMES], dry_r[MAX_SNAPSHOT_FRAMES];
-    float *dry_pair[2] = {dry_l, dry_r};
-    int saved_dry = 0;
-    int aliases = input && output && frames &&
-        (input == output || dsp_buffers_overlap(input[0], output[0], frames) ||
-         dsp_buffers_overlap(input[0], output[1], frames) ||
-         dsp_buffers_overlap(input[1], output[0], frames) ||
-         dsp_buffers_overlap(input[1], output[1], frames));
-    if (__atomic_load_n(&sc_dsp_state()->ramp_remaining, __ATOMIC_ACQUIRE) > 0 &&
-        aliases && input[0] && input[1] && frames <= MAX_SNAPSHOT_FRAMES) {
-        memcpy(dry_l, input[0], (size_t)frames * sizeof(float));
-        memcpy(dry_r, input[1], (size_t)frames * sizeof(float));
-        saved_dry = 1;
-    }
-    ((dsp_process_fn)dsp_originals[DSP_COMMON])(common, input, output, frames);
-    // This is the input to the common tail; upstream FX may already have changed
-    // it. An unsaved alias (large block or concurrent re-arm) has no dry source.
-    float *const *dry = saved_dry ? dry_pair : (aliases ? NULL : input);
-    uint32_t generation = __atomic_load_n(&sc_dsp_state()->generation, __ATOMIC_ACQUIRE);
-    sc_dsp_fx_common_post_process(common, dry, output, frames);
-    // The header CAS compares only the count. A new 128-frame event can have
-    // the same count as the old one; never let that ABA discard the new ramp.
-    if (__atomic_load_n(&sc_dsp_state()->generation, __ATOMIC_ACQUIRE) != generation)
-        __atomic_store_n(&sc_dsp_state()->ramp_remaining, SC_DSP_RAMP_FRAMES, __ATOMIC_RELEASE);
-    // The helper sanitizes BEFORE interpolation. Opposite finite extremes can
-    // still overflow (wet - dry), so check the at-most-128 frames it may remix.
-    if (output) for (unsigned ch = 0; ch < 2; ch++) {
-        if (!output[ch]) continue;
-        for (uint32_t i = 0; i < frames && i < SC_DSP_RAMP_FRAMES; i++) {
-            if (!sc_dsp_finite_f32(output[ch][i]))
-                output[ch][i] = dry && dry[ch] && sc_dsp_finite_f32(dry[ch][i]) ? dry[ch][i] : 0.0f;
-        }
-    }
+/* Initial-exec TLS is allocated by the loader before audio threads exist. */
+static void *dsp_channel_original __attribute__((used));
+static __attribute__((used,noinline)) struct sc_dsp_fx_slot *dsp_channel_before(void *owner) {
+    struct sc_dsp_fx_slot *previous = dsp_current_channel;
+    dsp_current_channel = sc_dsp_fx_begin(owner);
+    return previous;
+}
+static __attribute__((used,noinline)) void dsp_channel_after(void *owner, float *const *out,
+                                                            uint32_t frames, struct sc_dsp_fx_slot *previous) {
+    (void)owner;
+    sc_dsp_fx_end(dsp_current_channel, out, frames);
+    dsp_current_channel = previous;
+}
+
+/* Native 0xdaec60 reads input from r2, output/frames from stack+0/+4.
+ * r1/r3 and d0-d7 are opaque: preserve every bit across the pre-call helper.
+ * Original stack arguments are copied at the call boundary; callee-saved
+ * registers, caller lr and nested channel TLS are restored on return. */
+__attribute__((naked)) static void hook_channel_process(void) {
+    __asm__("push {r0-r3, r4-r8, lr}\n"
+            "vpush {d0-d7}\nldr r0, [sp, #64]\nbl dsp_channel_before\nmov r8, r0\nvpop {d0-d7}\n"
+            "sub sp, sp, #8\nldr r0, [sp, #48]\nstr r0, [sp]\n"
+            "ldr r0, [sp, #52]\nstr r0, [sp, #4]\nadd ip, sp, #8\nldmia ip, {r0-r3}\n"
+            "ldr ip, 1f\n2: add ip, pc, ip\nldr ip, [ip]\nblx ip\nadd sp, sp, #8\n"
+            "vpush {d0-d7}\npush {r0-r3}\nldr r0, [sp, #80]\nldr r1, [sp, #120]\nldr r2, [sp, #124]\n"
+            "mov r3, r8\nbl dsp_channel_after\npop {r0-r3}\nvpop {d0-d7}\nadd sp, sp, #16\npop {r4-r8, pc}\n.align 2\n1: .word dsp_channel_original - (2b + 8)\n");
 }
 
 static const uint32_t dsp_event_prefix[] = {0xe1c021d0, 0xe590c00c, 0xe52db004};
 static const uint32_t dsp_autogate_prefix[] = {0xe3530000, 0xe1a02001, 0x0a000035};
 static const uint32_t dsp_common_prefix[] = {0xe16d42f4, 0xe1cd60f8};
+static const uint32_t dsp_channel_prefix[] = {0xe16d42f0, 0xe1a05000, 0xe5900288};
 static const uint32_t dsp_sweep_prefix[] = {0xe52db004, 0xe1a02001, 0xe28db000};
 struct dsp_hook_site {
     uint32_t offset;
@@ -311,11 +304,12 @@ static const struct dsp_hook_site dsp_hooks[DSP_HOOK_COUNT] = {
     {0xd0b5bc, hook_motor_ramp_time}, {0xc5b2e0, hook_sampler_immediate},
     {0xc5b30c, hook_sampler_stop}, {0xc5b338, hook_sampler_play},
     {0xe3a598, hook_autogate_process}, {0x15fa188, hook_fx_common_chain},
-    {0xe3d0a8, hook_dub_echo}, {0xe3d908, hook_wash}
+    {0xe3d0a8, hook_dub_echo}, {0xe3d908, hook_wash}, {0xdaec60, hook_channel_process}
 };
 
 static const void *dsp_expected(unsigned slot, size_t *size) {
     *size = slot == DSP_COMMON ? sizeof dsp_common_prefix : sizeof dsp_event_prefix;
+    if (slot == DSP_CHANNEL) return dsp_channel_prefix;
     if (slot == DSP_DUB_ECHO || slot == DSP_WASH) return dsp_sweep_prefix;
     return slot == DSP_COMMON ? dsp_common_prefix :
         (slot == DSP_AUTOGATE ? dsp_autogate_prefix : dsp_event_prefix);
@@ -357,11 +351,12 @@ static int install_dsp_hooks(uintptr_t base, size_t page) {
             dsp_originals[i] = rx_code(code, sizeof code, page);
         }
     }
+    dsp_channel_original = dsp_originals[DSP_CHANNEL];
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)dsp_hooks[i].hook, 0xe320f000};
         patch_bytes(base + dsp_hooks[i].offset, jump, i == DSP_AUTOGATE ? 12 : 8, page);
     }
-    fprintf(stderr, "engine-ui-hook: %u DSP guards/transitions installed (shared FX state)\n", DSP_HOOK_COUNT);
+    fprintf(stderr, "engine-ui-hook: %u DSP guards/transitions installed (per-channel FX state)\n", DSP_HOOK_COUNT);
     return 1;
 }
 
@@ -777,8 +772,16 @@ int pthread_setschedparam(pthread_t thread, int policy, const struct sched_param
     return real(thread, policy, param);
 }
 
-static int analytics_db(const char *name) {
-    return name && (strstr(name, "posthog.db") || strstr(name, "events.db"));
+static int is_telemetry_sqlite_filename(const char *filename) {
+    if (!filename) return 0;
+    int uri = !strncmp(filename, "file:", 5);
+    const char *start = filename + (uri ? 5 : 0), *end = start + strlen(start);
+    if (uri) { const char *query = strchr(start, '?'); if (query) end = query; }
+    const char *base = start;
+    for (const char *p = start; p < end; p++) if (*p == '/') base = p + 1;
+    size_t size = (size_t)(end - base);
+    return (size == 10 && !memcmp(base, "posthog.db", 10)) ||
+           (size == 9 && !memcmp(base, "events.db", 9));
 }
 
 typedef int (*sqlite_open_v2_fn)(const char *, void **, int, const char *);
@@ -795,14 +798,14 @@ static void tune_database(int rc, const char *filename, void **db) {
 }
 
 static int __attribute__((used)) tuned_sqlite_open_v2(const char *filename, void **db, int flags, const char *vfs) {
-    const char *target = analytics_db(filename) ? ":memory:" : filename;
+    const char *target = is_telemetry_sqlite_filename(filename) ? ":memory:" : filename;
     int rc = sqlite_open_v2_original(target, db, flags, vfs);
     tune_database(rc, target, db);
     return rc;
 }
 
 static int __attribute__((used)) tuned_sqlite_open(const char *filename, void **db) {
-    const char *target = analytics_db(filename) ? ":memory:" : filename;
+    const char *target = is_telemetry_sqlite_filename(filename) ? ":memory:" : filename;
     int rc = sqlite_open_original(target, db);
     tune_database(rc, target, db);
     return rc;

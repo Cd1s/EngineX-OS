@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/stems"
+	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
 
 const (

@@ -1,4 +1,5 @@
-// sc5000-suite combines rb-bridge, stream-sync, and engine-guardian into a
+// sc5000-suite combines rb-bridge, stream-sync, engine-guardian, stems-processor
+// and sc5000-deemixd into a
 // single multi-call ARMv7 static binary so it fits inside the fixed-geometry
 // 5.0.4 rootfs.ext2 partition with zero partition resizing.
 package main
@@ -11,7 +12,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/cli"
+	"github.com/Cd1s/EngineX-OS/internal/cli"
+	"github.com/Cd1s/EngineX-OS/internal/deemixd"
+	"github.com/Cd1s/EngineX-OS/internal/stemsproc"
 )
 
 func main() {
@@ -34,8 +37,15 @@ func main() {
 		}
 	case "engine-guardian":
 		os.Exit(cli.Guardian(args, os.Stdout, os.Stderr))
+	case "stems-processor":
+		os.Exit(stemsproc.Main(args))
+	case "sc5000-deemixd":
+		if err = deemixd.Main(args); err != nil && !errors.Is(err, flag.ErrHelp) {
+			log.Print(err)
+			os.Exit(1)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "usage: sc5000-suite {rb-bridge|stream-sync|engine-guardian} [args...]\n")
+		fmt.Fprintf(os.Stderr, "usage: sc5000-suite {rb-bridge|stream-sync|engine-guardian|stems-processor|sc5000-deemixd} [args...]\n")
 		os.Exit(2)
 	}
 }

@@ -282,7 +282,7 @@ lacks 'UDISKS_IGNORE' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-sc5000-storage.r
 lacks ', RUN+=' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-sc5000-storage.rules"
 ok 'background service isolation and systemd udev handoff are installed'
 
-for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/sc5000-suite-exec"; do
+for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/sc5000-suite-exec" "$ROOT/rootfs-overlay/etc/sc5000/engine-ui-guard"; do
     [[ $(head -n 1 "$script") == '#!/bin/sh' ]] || fail "$script must use /bin/sh (no bash on Engine OS)"
     if command -v busybox >/dev/null; then busybox sh -n "$script" || fail "busybox sh syntax: $script"; else sh -n "$script"; fi
 done
@@ -313,6 +313,32 @@ for module in btbcm hci_uart; do
 done
 has 'feature_disable=0x82004' "$ROOT/rootfs-overlay/usr/lib/modprobe.d/brcmfmac.conf"
 ok 'stock connman online check, read-only HFS+, rootfs brcmfmac options'
+
+GUARD=$ROOT/rootfs-overlay/etc/sc5000/engine-ui-guard
+export SC5000_UI_DIR=$TMP/ui-guard
+for _ in 1 2 3; do SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre; done
+[[ ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'clean restarts must not reach safe-mode'
+for result in signal core-dump exit-code; do SERVICE_RESULT=$result sh "$GUARD" stop; sh "$GUARD" pre; done
+[[ -e $SC5000_UI_DIR/safe-mode ]] || fail 'three crashed starts must enter safe-mode'
+# #7: a crashed start's timer must not reset the streak of the starts after it.
+rm -f "$SC5000_UI_DIR"/*
+export SC5000_UI_HEALTHY_AFTER=1
+sh "$GUARD" pre; sh "$GUARD" post
+SERVICE_RESULT=signal sh "$GUARD" stop; sh "$GUARD" pre
+sleep 1.5
+[[ $(cat "$SC5000_UI_DIR/boot-count") == 2 ]] || fail 'stale timer reset the crash streak'
+sh "$GUARD" post; sleep 1.5
+[[ ! -e $SC5000_UI_DIR/boot-count ]] || fail 'a start that survives the window must clear boot-count'
+unset SC5000_UI_HEALTHY_AFTER
+has 'ExecStopPost=-/etc/sc5000/engine-ui-guard stop' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf"
+has 'ExecStopPost=-/etc/sc5000/engine-ui-guard stop' "$debloat_root/etc/systemd/system/engine.service.d/override.conf"
+for conf in "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf" "$debloat_root/etc/systemd/system/engine.service.d/override.conf"; do
+    has 'Environment=HOME=/tmp/sc5000-engine-home' "$conf"
+    has "command -v connmanctl >/dev/null || exit 0" "$conf"
+done
+has 'SC5000_UI_HEALTHY_AFTER:-15' "$GUARD"
+unset SC5000_UI_DIR
+ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode'
 
 python3 -m unittest discover -s "$ROOT/sim/qengine" -p test_smoke.py >/dev/null
 printf 'PASS: %d tests (mocked storage and hardware; no privileged operations)\n' "$count"

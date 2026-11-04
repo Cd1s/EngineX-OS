@@ -54,8 +54,10 @@ while running crashed PID 1 once.
 
 ## Recovery
 
-- Three Engine starts that do not survive 90 s create
-  `/data/sc5000-custom/ui/safe-mode` and the stock UI returns.
+- Three Engine starts in a row that crash within 15 s create
+  `/data/sc5000-custom/ui/safe-mode` and the stock UI returns. A deliberate
+  stop or restart (language switch, deploy) resets the count
+  (`engine-ui-guard stop`, run from `override.conf`).
 - To remove the mod: delete
   `/etc/systemd/system/engine.service.d/60-ui-hook.conf`, run
   `systemctl daemon-reload` and restart `engine.service`.

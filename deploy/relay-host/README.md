@@ -1,4 +1,8 @@
-# sc5000-relay self-hosted deployment (`https://relay.example.com`)
+# sc5000-relay self-hosted deployment
+
+`https://relay.example.com` below is a placeholder: set `-public` in the unit to
+this relay's real public URL before the first install. `install.sh` refuses the
+placeholder on a fresh host and keeps an installed unit's `-public` on upgrade.
 
 The web service handles Spotify/Deezer QR login and credential transfer. It
 never downloads or stores music. SC5000 downloads directly from Deezer using
@@ -41,10 +45,16 @@ sh install.sh ./sc5000-relay-amd64 ./sc5000-deemix-relay.service
 | `GET /`, `POST /login`, `POST /logout` | Credential management console |
 
 Password authentication supports `X-Deemix-Password`, `Authorization: Bearer`,
-legacy `?key=` / `?password=`, or the console cookie. Change the initial
-password in the web console and update the deck's `deemix-config.json` to match.
-Ten failed attempts per client in five minutes cause HTTP 429 (shared with the
-Stems routes).
+or the console cookie; the password is no longer accepted in the URL query.
+On first start the relay writes a random password to
+`/var/lib/sc5000-relay/initial-password` (0600) and logs only that path. Change
+it in the web console and update the deck's `deemix-config.json` to match. A
+config still using the old fixed default may log in but gets 403 for
+`?secrets=1` and Stems until the password is changed.
+Ten failed attempts per client (IPv6: per /64) in five minutes cause HTTP 429
+(shared with the Stems routes). `X-Forwarded-For` is trusted from private,
+loopback and tailnet peers; pass `-trusted-proxies <edge proxy IP>` to trust
+only the edge proxy.
 
 ## Stems flags
 

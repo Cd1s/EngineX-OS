@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/deezer"
+	"github.com/Cd1s/EngineX-OS/internal/deezer"
 )
 
 const (

@@ -191,19 +191,6 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errInvalidRelayURL)
 		return
 	}
-	if q.Has("relayUrl") || q.Has("deemixPassword") {
-		var relay, password *string
-		if q.Has("relayUrl") {
-			relay = ptrTo(q.Get("relayUrl"))
-		}
-		if q.Has("deemixPassword") {
-			password = ptrTo(q.Get("deemixPassword"))
-		}
-		if err := s.updateRelayConfig(relay, password); err != nil {
-			fail(w, 500, errors.New("could not save the relay settings"))
-			return
-		}
-	}
 	s.uiMu.Lock()
 	v := s.loadUI()
 	bad := func(field, val string, allowed []string) bool {
@@ -249,6 +236,21 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.Sources = list
+	}
+	// Relay settings are written only once every field is known to be valid (#9).
+	if q.Has("relayUrl") || q.Has("deemixPassword") {
+		var relay, password *string
+		if q.Has("relayUrl") {
+			relay = ptrTo(q.Get("relayUrl"))
+		}
+		if q.Has("deemixPassword") {
+			password = ptrTo(q.Get("deemixPassword"))
+		}
+		if err := s.updateRelayConfigLocked(relay, password); err != nil {
+			s.uiMu.Unlock()
+			fail(w, 500, errors.New("could not save the relay settings"))
+			return
+		}
 	}
 	err := s.saveUI(v)
 	s.uiMu.Unlock()

@@ -1,4 +1,4 @@
-package main
+package deemixd
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/deezer"
+	"github.com/Cd1s/EngineX-OS/internal/deezer"
 )
 
 func testDaemon(t *testing.T) *daemon {

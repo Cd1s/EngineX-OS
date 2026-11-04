@@ -1,0 +1,17 @@
+[Unit]
+Description=SC5000 Deezer Download Queue (127.0.0.1:6595)
+After=local-fs.target network.target data.mount
+
+[Service]
+Type=simple
+Slice=sc5000-background.slice
+CPUAffinity=3
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/local/bin/sc5000-deemixd -state-dir /data/sc5000-custom/state
+# No -download-dir: the daemon prefers the SD cache when it is mounted, else /data/sc5000-custom/Stream.
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

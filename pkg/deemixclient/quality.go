@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/Cd1s/sc5000-custom-os/internal/audioheader"
+	"github.com/Cd1s/EngineX-OS/internal/audioheader"
 	"io"
 	"os"
 )

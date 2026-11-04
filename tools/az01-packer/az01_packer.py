@@ -78,13 +78,39 @@ class Reader:
             raise SafetyError('non-ASCII container string') from exc
 
 
+# Device-tree compatible strings of the 5.0.4 AZ01 wire-v1 images and the products
+# they name (#32). A container keeps its own list: a package is only ever built
+# from the official image of the same model group, never retargeted.
+MODELS = {
+    'inmusic,jp07': ('JP07', 'SC5000'),
+    'inmusic,jp08': ('JP08', 'SC5000M'),
+    'inmusic,jp11': ('JP11', 'PRIME GO'),
+    'inmusic,jp13': ('JP13', 'SC6000'),
+    'inmusic,jp14': ('JP14', 'SC6000M'),
+    'inmusic,jc11': ('JC11', 'PRIME 4'),
+    'inmusic,jc16': ('JC16', 'PRIME 2'),
+    'inmusic,nh08': ('NH08', 'MIXSTREAM PRO'),
+}
+# Official 5.0.4 images come in three AZ01 groups, byte-identical within a group
+# and all carrying the same Engine build (af073865...): SC5000/SC5000M/PRIME GO,
+# SC6000/SC6000M, PRIME 4/PRIME 2/MIXSTREAM PRO. SC LIVE 2 is AZ0x (signed).
+
+
+def models_of(compatible):
+    return [dict(code=MODELS[c][0], name=MODELS[c][1]) for c in compatible if c in MODELS]
+
+
 class Image:
     EOF = b'EOF\0' + struct.pack('<IQ', 16, 0)
 
     def __init__(self, data):
         self.data = data
         r = Reader(data)
-        require(r.take(4) == b'AZ01', 'not AZ01 (FIT/4.x is read-only research only)')
+        magic = r.take(4)
+        # SC LIVE 2 ships AZ0x, a signed container (key record "denon-1"). A
+        # modified image would fail the deck's signature check (#32).
+        require(magic != b'AZ0x', 'AZ0x (SC LIVE 2) is a signed container; this tool cannot sign a modified image')
+        require(magic == b'AZ01', 'not AZ01 (FIT/4.x is read-only research only)')
         self.version, self.table = r.u32(), r.u32()
         require(self.version == 1, 'unsupported AZ01 wire version; refuse signed/unknown layout')
         self.build = r.string()
@@ -96,7 +122,8 @@ class Image:
         self.usb_devices = [r.u32() for _ in range(count)]
         self.description = r.string()
         require(r.pos == self.table, 'unrecognized header extensions')
-        require('inmusic,jp07' in self.compatible, 'not a JP07-compatible image')
+        self.models = models_of(self.compatible)
+        require(self.models, 'no supported model in compatible list: ' + ', '.join(self.compatible))
         self.parts = []
         for i, name in enumerate(('splash', 'recoverysplash', 'rootfs')):
             entry = r.pos
@@ -120,6 +147,12 @@ class Image:
                                    offset=offset, size=size, digest_at=digest_at,
                                    sha1=digest.hex()))
         self.end = r.pos
+        # SC6000 and PRIME 4 images pad the last record with zeros to 8 bytes
+        # before EOF; SC5000 images happen to end aligned (#32).
+        pad = (-r.pos) % 8
+        if pad and data[r.pos:r.pos+pad] == bytes(pad) and data[r.pos+pad:r.pos+pad+4] == b'EOF\0':
+            r.take(pad)
+        self.aligned = r.pos % 8 == 0
         require(r.take(16) == self.EOF and r.pos == len(data),
                 'unexpected EOF/trailer/signature')
 
@@ -129,7 +162,7 @@ class Image:
 
     def info(self):
         return dict(magic='AZ01', wire_version=self.version, build=self.build,
-                    compatible=self.compatible, usb_devices=self.usb_devices,
+                    compatible=self.compatible, models=self.models, usb_devices=self.usb_devices,
                     description=self.description,
                     table_offset=self.table, file_size=len(self.data),
                     sha256=hashlib.sha256(self.data).hexdigest(),
@@ -141,6 +174,8 @@ class Image:
         struct.pack_into('<Q', result, p['entry']+8, len(payload))
         result[p['digest_at']:p['digest_at']+20] = hashlib.sha1(payload).digest()
         result.extend(payload)
+        if self.aligned:
+            result.extend(bytes((-len(result)) % 8))
         result.extend(self.EOF)
         Image(bytes(result))
         return bytes(result)
@@ -432,15 +467,50 @@ if [ ! -e /data/sc5000-custom/ssh_host_ed25519_key ]; then
 fi
 [ -f /data/sc5000-custom/ssh_host_ed25519_key ]
 /usr/bin/ssh-keygen -y -P '' -f /data/sc5000-custom/ssh_host_ed25519_key >/dev/null
+
+# A firmware update rewrites / but never /data: install the image's UI packs
+# once per release, before Engine starts (engine.service orders after this unit).
+install_ui() {
+    archive=${SC5000_UI_ARCHIVE:-/usr/share/sc5000-custom/ui-packs.tar.xz}
+    ui=${SC5000_UI_DIR:-/data/sc5000-custom/ui}
+    [ -f "$archive" ] || return 0
+    version=$(cat /etc/sc5000/version.txt 2>/dev/null || echo unknown)
+    if [ -d "$ui/packs" ] && [ "$(cat "$ui/.pack-version" 2>/dev/null)" = "$version" ]; then
+        return 0
+    fi
+    for path in "$ui" "$ui/packs" "$ui/icons"; do
+        [ ! -L "$path" ] || { echo "Refusing UI symlink: $path" >&2; return 1; }
+    done
+    umask 022
+    mkdir -p "$ui"
+    stage=$(mktemp -d "$ui/.install.XXXXXX")
+    if ! xzcat "$archive" | tar -C "$stage" -xf - || [ ! -d "$stage/packs" ]; then
+        rm -rf "$stage"
+        return 1
+    fi
+    for name in packs icons; do
+        [ -d "$stage/$name" ] || continue
+        rm -rf "$ui/$name.replaced"
+        [ ! -e "$ui/$name" ] || mv "$ui/$name" "$ui/$name.replaced"
+        mv "$stage/$name" "$ui/$name"
+        rm -rf "$ui/$name.replaced"
+    done
+    rm -rf "$stage"
+    # New packs deserve a fresh try, even after the old ones hit safe mode.
+    rm -f "$ui/safe-mode" "$ui/boot-count" "$ui/boot-token"
+    printf '%s\n' "$version" > "$ui/.pack-version"
+    printf '%s\n' "$version" > "${SC5000_VERSION_FILE:-/data/sc5000-custom/version.txt}"
+}
+install_ui || echo "sc5000-custom-prepare: UI packs not installed" >&2
 '''
 
 # Engine 4.3.4 left copies of these in the /etc overlay upper layer; they
 # shadow the 5.0.4 lower /etc (telemetry hosts blocking connman's online check,
 # stale connman/edisksd settings). Removing upper entries while /etc is mounted
 # is not seen until reboot, so this runs once per epoch before etc.mount.
-ETC_RESET = b'''#!/bin/sh
+ETC_RESET_TEMPLATE = '''#!/bin/sh
 set -eu
-epoch=engine-5.0.4
+epoch=@EPOCH@
 upper=/data/system/etc/overlay
 marker=/data/sc5000-custom/etc-overlay-epoch
 for path in /data/system /data/system/etc "$upper" /data/sc5000-custom "$marker"; do
@@ -450,7 +520,7 @@ if [ -f "$marker" ] && [ "$(cat "$marker")" = "$epoch" ]; then
     exit 0
 fi
 if [ -d "$upper" ]; then
-    for name in hosts resolv.conf connman dnsmasq.d edisksd; do
+    for name in hosts resolv.conf connman dnsmasq.d edisksd@MANAGED@; do
         rm -rf -- "$upper/$name"
     done
 fi
@@ -459,6 +529,21 @@ chmod 700 /data/sc5000-custom
 printf '%s\n' "$epoch" > "$marker.tmp"
 mv "$marker.tmp" "$marker"
 '''
+
+
+def etc_reset(epoch='engine-5.0.4', managed=()):
+    """The reset script for one build. A new epoch (version + /etc content of the
+    overlay) also drops upper-layer copies of every /etc file the image ships, so
+    a live-deployed guard, hook or drop-in cannot shadow the new image (#33)."""
+    require(re.fullmatch(r'[A-Za-z0-9._-]{1,64}', epoch), 'invalid epoch')
+    for name in managed:
+        require(re.fullmatch(r'[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*', name) and '..' not in name.split('/'),
+                'unsafe /etc path for reset: ' + name)
+    return (ETC_RESET_TEMPLATE.replace('@EPOCH@', epoch)
+            .replace('@MANAGED@', ''.join(' ' + n for n in sorted(managed))).encode())
+
+
+ETC_RESET = etc_reset()
 
 SSHD_CONFIG = b'''Port 22
 HostKey /data/sc5000-custom/ssh_host_ed25519_key
@@ -537,7 +622,46 @@ def public_key(data):
     return (lines[0]+'\n').encode()
 
 
-def inject(fs, key, services=(), overlay=None):
+# Files sc5000-debloat --root rewrites in a staged root (#33). Copied out of the
+# image, patched by the overlay's own script and written back, so the offline
+# image and the runtime script share one definition.
+DEBLOAT_INPUTS = ('/usr/Engine/Scripts/engine', '/usr/Engine/Scripts/setup-prerequisites.sh',
+                  '/usr/Engine/Scripts/setup-usb-gadget.sh', '/usr/Engine/Scripts/encrypt-fs.sh',
+                  '/etc/hosts')
+
+
+def offline_debloat(fs, script):
+    with tempfile.TemporaryDirectory(prefix='az01-debloat-', dir=fs.path.parent) as tmp:
+        root = Path(tmp)
+        (root/'usr/Engine/Scripts').mkdir(parents=True)
+        (root/'etc').mkdir()
+        before = {}
+        for path in DEBLOAT_INPUTS:
+            try:
+                data = fs.read(path)
+            except SafetyError:
+                continue
+            (root/path[1:]).write_bytes(data)
+            before[path] = data
+        script_path = root.parent/'sc5000-debloat'
+        script_path.write_bytes(script)
+        p = subprocess.run(['sh', str(script_path), '--root', str(root)], capture_output=True, text=True)
+        require(p.returncode == 0, 'sc5000-debloat --root failed: ' + (p.stdout + p.stderr)[-800:])
+        for source in sorted(root.rglob('*')):
+            dest = '/' + source.relative_to(root).as_posix()
+            if source.is_symlink():
+                fs.link(dest, os.readlink(source))
+            elif source.is_file():
+                data = source.read_bytes()
+                if before.get(dest) != data:
+                    mode = 0o755 if dest.startswith('/usr/Engine/Scripts/') else 0o644
+                    fs.write(dest, data, mode)
+
+
+VERSION_RE = re.compile(r'\d+(\.\d+){1,3}')
+
+
+def inject(fs, key, services=(), overlay=None, version=None):
     additions, links, planned = {}, {}, {}
     if overlay:
         root = Path(overlay)
@@ -567,14 +691,29 @@ def inject(fs, key, services=(), overlay=None):
         require(b'[Service]' in data and b'ExecStart=' in data and b'\x00' not in data,
                 'invalid custom service')
         service_data[source.name] = data
+    if version is not None:
+        require(VERSION_RE.fullmatch(version), 'invalid --set-version (e.g. 5.0.4.1)')
+        # The deck's update check reads it; the release tag compares against it.
+        additions['/etc/sc5000/version.txt'] = ((version + '\n').encode(), 0o644)
+    etc = sorted(p for p in additions if p.startswith('/etc/'))
+    digest = hashlib.sha256()
+    for path in etc:
+        digest.update(path.encode() + b'\0' + additions[path][0] + b'\0')
+    epoch = '%s-%s' % (version or 'engine-5.0.4', digest.hexdigest()[:12]) if etc else 'engine-5.0.4'
     for path, (data, mode) in additions.items():
         fs.write(path, data, mode)
     for path, target in links.items():
         fs.link(path, target, planned)
+    if '/usr/local/bin/sc5000-debloat' in additions:
+        offline_debloat(fs, additions['/usr/local/bin/sc5000-debloat'][0])
     fs.write('/usr/share/sc5000-custom/authorized_keys', key, 0o600)
     fs.write('/usr/share/sc5000-custom/sshd_config', SSHD_CONFIG)
     fs.write('/usr/libexec/sc5000-custom-prepare', PREPARE, 0o755)
-    fs.write('/usr/libexec/sc5000-custom-etc-reset', ETC_RESET, 0o755)
+    # sc5000/stems-runtime-prepare: the live Stems deployment of 2026-11-03 put it
+    # in the /etc upper layer; its /usr/local/bin overlay would shadow the image's
+    # stems-processor wrapper.
+    managed = [p[len('/etc/'):] for p in etc] + (['sc5000/stems-runtime-prepare'] if etc else [])
+    fs.write('/usr/libexec/sc5000-custom-etc-reset', etc_reset(epoch, managed), 0o755)
     # A locked root account is rejected even for public-key auth with UsePAM=no.
     # A fresh random unreachable password hash unlocks the account; SSH password
     # and interactive authentication remain explicitly disabled.
@@ -639,6 +778,7 @@ def main(argv=None):
             s.add_argument('--ssh-public-key', required=True, type=Path)
             s.add_argument('--overlay', type=Path)
             s.add_argument('--service', action='append', default=[], type=Path)
+            s.add_argument('--set-version', help='EngineX release written to /etc/sc5000/version.txt, e.g. 5.0.4.1')
         elif name == 'repack':
             s.add_argument('--rootfs', required=True, type=Path)
             s.add_argument('--output', required=True, help='new external AZ01 image')
@@ -671,7 +811,7 @@ def main(argv=None):
                     key = public_key(args.ssh_public_key.read_text())
                     candidate = Path(temp)/'patched.ext2'
                     shutil.copyfile(stock, candidate)
-                    inject(ExtFS(candidate), key, args.service, args.overlay)
+                    inject(ExtFS(candidate), key, args.service, args.overlay, args.set_version)
                 else:
                     require(args.rootfs.is_file() and not args.rootfs.is_symlink(),
                             'candidate must be a regular file')

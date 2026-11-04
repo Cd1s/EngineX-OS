@@ -7,9 +7,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testfixture"
-	"github.com/Cd1s/sc5000-custom-os/pkg/bridge"
-	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 func TestUppercasePDB(t *testing.T) {
@@ -56,11 +56,23 @@ func TestSmartMatchUsesCachedAnalysisBPM(t *testing.T) {
 }
 
 func TestMoveAndSwapPathsRetainEngineIDs(t *testing.T) {
-	for _, swap := range []bool{false, true} {
-		t.Run(map[bool]string{false: "move", true: "swap"}[swap], func(t *testing.T) {
+	// #4: the fast (mount-time) import must finish staged moves too, after a
+	// full import and after a fast one.
+	for _, c := range []struct {
+		name        string
+		swap        bool
+		first, then enginedb.Options
+	}{
+		{"move", false, enginedb.Options{}, enginedb.Options{}},
+		{"swap", true, enginedb.Options{}, enginedb.Options{}},
+		{"full-to-fast move", false, enginedb.Options{}, enginedb.Options{Fast: true}},
+		{"fast-to-fast swap", true, enginedb.Options{Fast: true}, enginedb.Options{Fast: true}},
+	} {
+		swap := c.swap
+		t.Run(c.name, func(t *testing.T) {
 			root := t.TempDir()
 			testfixture.Export(t, root)
-			convert(t, root, enginedb.Options{})
+			convert(t, root, c.first)
 			db := dbOpen(t, root)
 			l, e := bridge.ReadLibrary(context.Background(), root)
 			if e != nil {
@@ -77,7 +89,7 @@ func TestMoveAndSwapPathsRetainEngineIDs(t *testing.T) {
 				}
 				l.Tracks[2].Path = "/MUSIC/renamed.wav"
 			}
-			r, e := enginedb.Sync(context.Background(), root, l, enginedb.Options{})
+			r, e := enginedb.Sync(context.Background(), root, l, c.then)
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -90,7 +102,7 @@ func TestMoveAndSwapPathsRetainEngineIDs(t *testing.T) {
 			if n := scalar[int](t, db, `SELECT count(*) FROM Track WHERE path LIKE '.rb-bridge-pending-%'`); n != 0 {
 				t.Fatal("temporary path committed")
 			}
-			r, e = enginedb.Sync(context.Background(), root, l, enginedb.Options{})
+			r, e = enginedb.Sync(context.Background(), root, l, c.then)
 			if e != nil || r.Unchanged != 5 || r.PlaylistsChanged {
 				t.Fatal("move not stable", r, e)
 			}
@@ -178,5 +190,59 @@ DROP TABLE saved;`); e != nil {
 	}
 	if n := scalar[int](t, db, `SELECT count(*) FROM main.PlaylistEntity`); n != entities {
 		t.Fatalf("entities %d, want %d", n, entities)
+	}
+}
+
+// #5: an interrupted publish is completed by the next run, so m.db and the
+// bridge state never come from different imports; stale sidecars are dropped.
+func TestInterruptedFastPublishIsCompleted(t *testing.T) {
+	dir := t.TempDir()
+	stage := filepath.Join(dir, ".rb-bridge-publish")
+	os.Mkdir(stage, 0o755)
+	os.WriteFile(filepath.Join(stage, "m.db"), []byte("new db"), 0o644)
+	os.WriteFile(filepath.Join(dir, ".rb-bridge-state.db"), []byte("new state"), 0o644) // already moved
+	os.WriteFile(filepath.Join(dir, "m.db"), []byte("old db"), 0o644)
+	os.WriteFile(filepath.Join(dir, "m.db-wal"), []byte("old wal"), 0o644)
+	os.WriteFile(filepath.Join(stage, "READY"), nil, 0o644)
+	if err := bridge.FinishPublishForTest(dir); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "m.db")); string(b) != "new db" {
+		t.Fatalf("m.db = %q", b)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "m.db-wal")); !os.IsNotExist(err) {
+		t.Fatal("old WAL kept beside the new database")
+	}
+	if _, err := os.Stat(stage); !os.IsNotExist(err) {
+		t.Fatal("stage left behind")
+	}
+	// A stage that never became ready is discarded, not published.
+	os.Mkdir(stage, 0o755)
+	os.WriteFile(filepath.Join(stage, "m.db"), []byte("half"), 0o644)
+	if err := bridge.FinishPublishForTest(dir); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "m.db")); string(b) != "new db" {
+		t.Fatalf("unready stage published: %q", b)
+	}
+}
+
+// #6: the fast import stores the spelling on the volume, not the export's.
+func TestFastImportResolvesTheVolumeSpelling(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	if err := os.Rename(filepath.Join(root, "MUSIC/three.wav"), filepath.Join(root, "MUSIC/Three.WAV")); err != nil {
+		t.Fatal(err)
+	}
+	l, e := bridge.ReadLibrary(context.Background(), root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = enginedb.Sync(context.Background(), root, l, enginedb.Options{Fast: true}); e != nil {
+		t.Fatal(e)
+	}
+	db := dbOpen(t, root)
+	if p := scalar[string](t, db, `SELECT path FROM Track WHERE pdbImportKey=3`); p != "../MUSIC/Three.WAV" {
+		t.Fatalf("stored %q", p)
 	}
 }

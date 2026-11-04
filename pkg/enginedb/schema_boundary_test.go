@@ -6,8 +6,8 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/dbhealer"
-	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
+	"github.com/Cd1s/EngineX-OS/pkg/dbhealer"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 func TestBridgeSchemaHealerAndDeletionInterop(t *testing.T) {

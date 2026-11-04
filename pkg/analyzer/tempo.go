@@ -116,7 +116,8 @@ func detectTempo(x []float32, sr int, minBPM, maxBPM float64, tick func(int) err
 			return 0, 0, ErrTooShort
 		}
 	}
-	bpm = snapBPM(bpm)
+	// The comb search may drift past the window edges; the result stays inside (#35).
+	bpm = snapBPM(math.Max(minBPM, math.Min(maxBPM, bpm)))
 	period := 60 / bpm
 	// 包络帧 i 对应窗口 [i*hop, i*hop+N)，谱通量峰值对应起音在窗口中部附近，
 	// 补偿半个窗口长度。
@@ -198,6 +199,14 @@ func foldBPM(bpm, lo, hi float64) float64 {
 	}
 	for bpm > hi {
 		bpm /= 2
+	}
+	// A window narrower than an octave has no octave of some tempos inside it:
+	// take the nearer edge instead of returning a value below lo (#35).
+	if bpm < lo {
+		if 2*bpm-hi < lo-bpm {
+			return hi
+		}
+		return lo
 	}
 	return bpm
 }

@@ -439,8 +439,14 @@ func TestCompleteDeezerConfigFailureAndExpiry(t *testing.T) {
 	}
 }
 
-func TestSpotifyRegisteredDefaultHTTPSAndScopes(t *testing.T) {
-	for _, cache := range []string{"", `null`, `{"` + defaultSpotifyClientID + `":false}`, `{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":true}`} {
+func TestSpotifyLearnedCallbackIsPerPublicURL(t *testing.T) {
+	const callback = "https://relay.example.com/oauth/spotify/callback"
+	for cache, want := range map[string]bool{
+		"": false, `null`: false,
+		`{"` + defaultSpotifyClientID + `":true}`:                                              false, // old cache, no callback
+		`{"` + defaultSpotifyClientID + ` https://other.example/oauth/spotify/callback":true}`: false,
+		`{"` + defaultSpotifyClientID + ` ` + callback + `":true}`:                             true,
+	} {
 		t.Run(cache, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "learned.json")
 			if cache != "" {
@@ -448,13 +454,18 @@ func TestSpotifyRegisteredDefaultHTTPSAndScopes(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			a := newSpotifyAuth(path, "https://relay.example.com/oauth/spotify/callback")
+			a := newSpotifyAuth(path, callback)
+			probed := false
 			a.hc = &http.Client{Transport: browserRoundTripper(func(*http.Request) (*http.Response, error) {
-				t.Error("known callback performed probe")
+				probed = true
 				return nil, fmt.Errorf("no network")
 			})}
-			if !a.useHTTPS(context.Background(), defaultSpotifyClientID) {
-				t.Fatal("registered callback not enabled")
+			// An unlearned callback is probed; an inconclusive probe keeps the paste flow.
+			if got := a.useHTTPS(context.Background(), defaultSpotifyClientID); got != want || probed == want {
+				t.Fatalf("https=%v probed=%v", got, probed)
+			}
+			if !want {
+				return
 			}
 			s := newTestServer(t)
 			s.spotify = a

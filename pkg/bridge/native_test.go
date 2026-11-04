@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testfixture"
-	"github.com/Cd1s/sc5000-custom-os/pkg/bridge"
-	"github.com/Cd1s/sc5000-custom-os/pkg/compat"
-	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
-	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 func TestNativeTrackConflictIsReferencedNotAdopted(t *testing.T) {
@@ -265,4 +265,3 @@ func TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011(t *testing.T) 
 		t.Fatalf("second mount incremental delta: %+v %v", r2, e)
 	}
 }
-

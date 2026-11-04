@@ -5,6 +5,7 @@ package resourceguard
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"runtime"
 	"testing"
 	"time"
@@ -136,5 +137,20 @@ func TestThrottleSleepsAndCancels(t *testing.T) {
 	var nilT *Throttle
 	if nilT.Tick() != nil {
 		t.Fatal("nil throttle must be no-op")
+	}
+}
+
+func TestApplyToProcessHonoursStrictCPU(t *testing.T) {
+	// A child process, so the test binary's own affinity stays untouched.
+	child := exec.Command("sleep", "5")
+	if err := child.Start(); err != nil {
+		t.Skip(err)
+	}
+	defer child.Process.Kill()
+	cfg := DefaultConfig()
+	cfg.CPU = 1000
+	cfg.StrictCPU = true
+	if _, err := New(cfg).ApplyToProcess(child.Process.Pid); err == nil {
+		t.Fatal("StrictCPU accepted a thread off the dedicated CPU")
 	}
 }

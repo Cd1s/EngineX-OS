@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 var ErrNoMatch = errors.New("deemix: no unambiguous recording within 2 seconds")

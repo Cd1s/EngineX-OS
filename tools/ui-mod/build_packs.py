@@ -44,11 +44,14 @@ SERVICES_MAIN = """
 	property string scQuality: "flac"
 	property string scNeteaseMode: "official"
 	property string scJog: "static"
-	property string scUpdateRepo: "Cd1s/sc5000-custom-os"
+	property string scUpdateRepo: "Cd1s/EngineX-OS"
 	property string scUpdateText: ""
+	// Offers this model's release image to Engine's own online updater.
+	property ListModel scUpdateModel: ListModel {}
 	// EngineX checks its own GitHub repository, not Denon's firmware server.
 	function scCheckUpdate() {
 		scUpdateText = scT("Checking GitHub…")
+		scUpdateModel.clear()
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/update")
 		x.onreadystatechange = function() {
@@ -59,6 +62,8 @@ SERVICES_MAIN = """
 			}
 			const v = JSON.parse(x.responseText)
 			scUpdateText = v.error ? scT(v.error) : v.updateAvailable ? scT("New release available:") + " " + v.latestVersion : scT("Up to date") + " (" + v.currentVersion + ")"
+			if (v.updateAvailable && v.downloadUrl)
+				scUpdateModel.append({ displayVersion: v.latestVersion, imageUrl: v.downloadUrl, buttonLabel: scT("Update"), isEnabled: true, downloadProgress: 0 })
 		}
 		x.send()
 	}
@@ -691,9 +696,11 @@ def edits(dev: bool):
             ("	onUpdateAvailableChanged: {\n", "	onUpdateAvailableChanged: {\n		return\n")],
         prefs + "Entries/Version.qml": [(
             "	text: `Engine OS ${versionString} <font color=\\\"${grey}\\\">(${gitHashString})</font>`",
-            "	text: `EngineX OS ${versionString} <font color=\\\"${grey}\\\">(GitHub: ${root.scUpdateRepo})</font>`")],
+            "	text: `EngineX OS ${versionString} Custom`")],
         prefs + "Entries/Update.qml": [
-            ("    model: PlanckGUI.views.updaterController.releaseVersionsModel\n", "    model: []\n"),
+            ("    model: PlanckGUI.views.updaterController.releaseVersionsModel\n", "    model: root.scUpdateModel\n"),
+            ("        text: `Engine OS ${model.displayVersion} is available`\n",
+             "        text: root.scT(\"New release available:\") + \" EngineX OS \" + model.displayVersion\n"),
             ('        text: "You\'re running the latest version"\n        visible: control.count < 1\n',
              "        text: root.scUpdateText\n        visible: true\n"),
             ("            PlanckGUI.views.updaterController.checkForUpdates()\n", "            root.scCheckUpdate()\n"),
