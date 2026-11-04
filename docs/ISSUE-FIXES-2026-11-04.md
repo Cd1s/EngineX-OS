@@ -61,3 +61,12 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - 「检查更新」按设备的 compatible 匹配 Release 里本机型的升级包，交给 Engine 自带的在线升级（`updateOnlineForUrl`）。
 - 新增根目录 `LICENSE`（MIT）。
 - `tools/az01-packer/build-release.sh` 在 IN 上生成 `/root/build/sc5000-lab/release-5.0.4.1/` 下的 8 个镜像。每个都经过 `info` 校验，校验和见 `SHA256SUMS.txt`；三组的 sha256 各自相同。没有刷入碟机。
+
+## 5.0.4.1 在线更新收尾（同日追加，Opus 5.5）
+
+- 设置页「更新」按钮先弹原厂 `FirmwareUpdateAvailable` 同款确认框（写法与 qrc 里 `FirmwareUpdateAvailableMessageBox.qml` 一致），确认后由 stream-sync 写 `/tmp/update-file-url` 和 `/tmp/engine-quit-reason=UpdateFromUrl`，再 `pkill -TERM -x Engine`。原厂 `/usr/Engine/Scripts/engine` 随后启动 `/usr/bin/planck-remote-screen --update <URL>`：libaz01-prog 用 curl 下载（跟随 GitHub 302）到 `/data/az01-update.img`，校验后 `reboot update`。
+- `pkill` 成功后把 `updating` 清掉，刷写失败、Engine 被拉起时可以重试；`pkill` 失败时删除两个 `/tmp` 文件，避免 Engine 之后崩溃时意外进入刷写。
+- 关于页版本号改用 stream-sync 报的已安装版本（`/data` 与镜像 `/etc` 中较新的那个），不再出现上方显示 5.0.4、下方显示 5.0.4.1 的情况。
+- `build-release.sh` 对三组构建逐个 `wait`（`wait a b c` 只返回最后一个的状态，前两组失败会被漏掉）。
+- 发行版本固定为 5.0.4.1：重打包的 8 个镜像覆盖上传到 Release `v5.0.4.1`。sha256：SC5000/SC5000M/PRIME GO `bfadb8db…42d4`，SC6000/SC6000M `3dc96b04…6861`，PRIME 4/PRIME 2/Mixstream Pro `3cfcaee6…0f54`。
+- 回滚点：Release 的旧资产已被覆盖；回滚方式是在 IN 上 checkout `adc1fa1` 重新执行 `build-release.sh` 并重新上传。
