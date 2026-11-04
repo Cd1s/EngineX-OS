@@ -282,6 +282,43 @@ class FilesystemTests(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertEqual(sentinel.read_text(), 'keep')
 
+    def test_public_image_ships_no_key_and_retires_the_old_release_key(self):
+        # #46: public images seed no key, sshd needs a non-empty authorized_keys,
+        # and the key public images up to 5.0.4.1 seeded is dropped from /data.
+        az.inject(self.fs, None)
+        self.assertNotIn('authorized_keys', self.fs.entries('/usr/share/sc5000-custom'))
+        self.assertIn(b'ConditionFileNotEmpty=/data/sc5000-custom/authorized_keys',
+                      self.fs.read('/usr/lib/systemd/system/sc5000-custom-sshd.service'))
+        seed, data = self.root/'seed', self.root/'data'
+        seed.mkdir()
+        script = az.PREPARE.replace(b'/data', str(data).encode()).replace(
+            b'/usr/share/sc5000-custom', str(seed).encode())
+        run = lambda: subprocess.run(['sh', '-s'], input=script, capture_output=True)
+        state = data/'sc5000-custom'
+        p = run()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertFalse((state/'authorized_keys').exists())
+        self.assertTrue((state/'ssh_host_ed25519_key').exists())
+        own = self.key.with_suffix('.pub').read_bytes()
+        old = b'ssh-ed25519 ' + az.RETIRED_RELEASE_KEY + b' release\n'
+        (state/'authorized_keys').write_bytes(old + own)
+        p = run()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual((state/'authorized_keys').read_bytes(), own)
+        self.assertEqual((state/'authorized_keys').stat().st_mode & 0o777, 0o600)
+        (state/'authorized_keys').write_bytes(old)
+        p = run()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual((state/'authorized_keys').read_bytes(), b'')
+        # The maintainer's deck opts out; a private image seeding the same key keeps it.
+        for keep in (state/'keep-release-key', seed/'authorized_keys'):
+            keep.write_bytes(old)
+            (state/'authorized_keys').write_bytes(old + own)
+            p = run()
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual((state/'authorized_keys').read_bytes(), old + own)
+            keep.unlink()
+
     def test_etc_reset_drops_stale_434_overlay_once(self):
         data = self.root/'data'
         upper = data/'system/etc/overlay'

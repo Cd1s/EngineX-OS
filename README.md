@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/assets/hero-banner.svg" alt="EngineX OS 5.0.4.1" width="100%">
+<img src="./docs/assets/hero-banner.svg" alt="EngineX OS 5.0.4.2" width="100%">
 
 <br>
 
@@ -16,7 +16,7 @@
 
 <br>
 
-**EngineX OS 5.0.4.1** is an enhanced firmware upgrade for Denon DJ and Numark standalone players:
+**EngineX OS 5.0.4.2** is an enhanced firmware upgrade for Denon DJ and Numark standalone players:
 `SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro`.
 
 Everything works right inside the stock Denon interface — flash it from a USB stick and unlock the features below.
@@ -119,7 +119,7 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 
 The entire system has been refactored and slimmed down so all extra features take minimal space and leave more free memory than stock firmware:
 
-| Metric | Stock / Before Refactoring | `EngineX OS 5.0.4.1` (Measured on SC5000) | What It Means for DJs |
+| Metric | Stock / Before Refactoring | `EngineX OS 5.0.4.2` (Measured on SC5000) | What It Means for DJs |
 | :--- | :--- | :--- | :--- |
 | **Firmware Image Size (`*-Update.img`)** | Official stock: `173.88 MB`<br>Earlier custom build: `~210 MB` | **`176.70 MB`** (all custom features combined take only **`4.1 MB`**) | **Only `2.8 MB` larger than stock firmware** |
 | **Internal Storage Used After Clean Flash** | `~243 MB` left behind by older builds | **`17.2 MB` for core app + 3-language UI** (`45.6 MB` including extra drive format drivers) | Frees up **nearly `200 MB`** of internal flash space |
@@ -136,14 +136,14 @@ The entire system has been refactored and slimmed down so all extra features tak
 
 ### Option 1: USB Stick Install (First-Time Setup)
 1. Click the link for your exact player model below to download the `.img` file directly (or visit [**Releases**](https://github.com/Cd1s/EngineX-OS/releases/latest)):
-   - **Denon DJ SC5000 Prime**: [`SC5000-5.0.4.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.0.4.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
-   - **Denon DJ SC5000M Prime**: [`SC5000M-5.0.4.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.0.4.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
-   - **Denon DJ SC6000 Prime**: [`SC6000-5.0.4.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.0.4.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
-   - **Denon DJ SC6000M Prime**: [`SC6000M-5.0.4.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.0.4.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
-   - **Denon DJ PRIME 4**: [`PRIME4-5.0.4.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.0.4.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
-   - **Denon DJ PRIME 2**: [`PRIME2-5.0.4.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.0.4.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
-   - **Denon DJ PRIME GO**: [`PRIMEGO-5.0.4.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.0.4.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
-   - **Numark Mixstream Pro**: [`MIXSTREAMPRO-5.0.4.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.0.4.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
+   - **Denon DJ SC5000 Prime**: [`SC5000-5.0.4.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.0.4.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
+   - **Denon DJ SC5000M Prime**: [`SC5000M-5.0.4.2-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.0.4.2-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
+   - **Denon DJ SC6000 Prime**: [`SC6000-5.0.4.2-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.0.4.2-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
+   - **Denon DJ SC6000M Prime**: [`SC6000M-5.0.4.2-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.0.4.2-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
+   - **Denon DJ PRIME 4**: [`PRIME4-5.0.4.2-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.0.4.2-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
+   - **Denon DJ PRIME 2**: [`PRIME2-5.0.4.2-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.0.4.2-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
+   - **Denon DJ PRIME GO**: [`PRIMEGO-5.0.4.2-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.0.4.2-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
+   - **Numark Mixstream Pro**: [`MIXSTREAMPRO-5.0.4.2-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.0.4.2-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
 2. Copy the `.img` file to the **root folder of a FAT32 or exFAT USB drive**.
 3. Plug the USB drive into your deck, open **Settings → About / Update → Reboot into Firmware Update Mode**, and let the player install and reboot.
 
@@ -160,6 +160,22 @@ tools/stems/run-home-worker.sh
 # Windows (PowerShell)
 powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs
 ```
+
+---
+
+## Security: Playing on Public Networks
+
+EngineX OS is built to be safe on a club, bar or festival Wi-Fi shared with strangers.
+
+- **No default SSH password.** Password login is switched off completely, and the public firmware ships with **no SSH key at all**, so SSH stays closed until you add your own key. Decks that ran an earlier public image have the key those images carried removed automatically when they update to 5.0.4.2.
+- **Nobody on the same Wi-Fi can control your deck.** Everything the deck uses internally (playing, waveform and language settings, online update, streaming logins, Stems) only answers the deck itself (`127.0.0.1`). Someone else on the network cannot switch your tracks, change settings or restart the player.
+- **The phone web console needs your deck's own access code.** The page at `http://<deck-ip>:8080` asks for a random code generated on your deck. Streaming QR logins use one-time links that expire.
+
+For advanced users:
+
+- To use SSH, put your public key in `/data/sc5000-custom/authorized_keys` (for example with a private build of the image), then reboot. Key login only, no passwords.
+- The console access code is stored in `/data/sc5000-custom/state/access-token`. Delete that file and restart the deck to get a new one.
+- If you play on a network you do not trust, you do not need Wi-Fi for USB, SD or Bluetooth playback: leave the deck offline.
 
 ---
 
