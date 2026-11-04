@@ -29,6 +29,10 @@ stop)
     # systemd sets SERVICE_RESULT=success for a requested stop/restart; a crash
     # (exit-code, signal, core-dump, timeout) keeps counting towards safe-mode.
     [ "${SERVICE_RESULT:-}" != success ] || rm -f "$UI/boot-count" "$UI/boot-token"
+    if [ "$(cat /tmp/engine-quit-reason 2>/dev/null)" = "AnalyticsChange" ]; then
+        rm -f /tmp/engine-quit-reason
+        systemctl start --no-block engine.service >/dev/null 2>&1 || true
+    fi
     ;;
 esac
 exit 0
