@@ -197,17 +197,22 @@ If **EngineX OS** makes your decks more fun to play on or saves you prep time be
 <td width="33%" align="center" valign="top">
 <img src="./docs/assets/sponsor-binance-pay.jpg" height="260" alt="Binance Pay QR Code"><br>
 <b>Binance Pay</b><br>
-<sub>Scan with Binance App · <code>User-504fa</code></sub>
+<sub>Scan QR or send to Binance ID: <code>565380652</code> (0 fee)</sub>
 </td>
 <td width="33%" align="center" valign="top">
 <img src="./docs/assets/sponsor-evm-usdt.jpg" height="260" alt="USDT EVM QR Code"><br>
-<b>USDT / USDC (BSC / EVM Universal)</b><br>
-<sub>Supports <code>BSC (BEP-20)</code> · <code>ERC-20</code> · <code>Arbitrum</code></sub>
+<b>USDT / USDC (All Binance EVM Chains)</b><br>
+<sub>BSC · ERC20 · Arbitrum · Optimism · Polygon · Base · opBNB</sub>
 </td>
 </tr>
 </table>
 
-> **USDT / USDC Wallet Address (BSC / EVM Universal — click copy on the right):**
+> **Binance ID (UID — 0 fee via Binance Pay, click copy on the right):**
+> ```text
+> 565380652
+> ```
+>
+> **USDT / USDC Wallet Address (Supports all Binance EVM networks: `BSC (BEP-20)` · `Ethereum (ERC-20)` · `Arbitrum One` · `Optimism` · `Polygon` · `Base` · `opBNB` · `Avalanche C-Chain` · `zkSync Era` · `Scroll` · `Linea`):**
 > ```text
 > 0x35e0c53dd887b37cd5db0064291f7c5a7442bc91
 > ```
