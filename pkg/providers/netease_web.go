@@ -101,11 +101,7 @@ func (n *Netease) weapi(ctx context.Context, path string, fields map[string]stri
 	req.Header.Set("Referer", "https://music.163.com/")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 	req.Header.Set("Cookie", strings.TrimRight("os=pc; appver=8.9.75; "+cookie, "; "))
-	client := n.HTTP
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
+	resp, err := client(n.HTTP).Do(req) // never http.DefaultClient: it has no timeout
 	if err != nil {
 		return nil, nil, err
 	}

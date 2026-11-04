@@ -439,7 +439,7 @@ func (g *tidalGateway) art(w http.ResponseWriter, r *http.Request) {
 		g.artMu.Lock()
 		if len(g.artAge) >= maxArtEntries {
 			delete(g.artCache, g.artAge[0])
-			g.artAge = g.artAge[1:]
+			g.artAge = append(g.artAge[:0], g.artAge[1:]...) // keep the backing array bounded
 		}
 		if _, ok := g.artCache[address]; !ok {
 			g.artCache[address] = data
