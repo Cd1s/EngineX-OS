@@ -1,14 +1,12 @@
 package prolink_test
 
 import (
-	"context"
 	"encoding/binary"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
-	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 func TestDiscoveryStatusAndExpiry(t *testing.T) {
@@ -43,25 +41,6 @@ func TestDiscoveryStatusAndExpiry(t *testing.T) {
 		if _, e = prolink.ParsePacket(bad, 50002, ip); e == nil {
 			t.Fatal("accepted bad packet")
 		}
-	}
-}
-
-type source struct{}
-
-func (source) Library(context.Context, prolink.Device) (*rekordbox.Library, error) {
-	return &rekordbox.Library{Tracks: []rekordbox.Track{{ID: 1, Path: "Music/a.wav"}}}, nil
-}
-
-type sink struct{ called bool }
-
-func (s *sink) Import(_ context.Context, _ prolink.Device, l *rekordbox.Library) error {
-	s.called = len(l.Tracks) == 1
-	return nil
-}
-func TestLibrarySyncInterface(t *testing.T) {
-	s := &sink{}
-	if e := prolink.Sync(context.Background(), prolink.Device{}, source{}, s); e != nil || !s.called {
-		t.Fatal(e, s)
 	}
 }
 

@@ -1,5 +1,4 @@
-// Package prolink provides passive Pro DJ Link discovery/status and a read-only
-// library-source interface. It does not impersonate a CDJ or write to Rekordbox.
+// Package prolink provides passive Pro DJ Link discovery/status. It does not impersonate a CDJ or write to Rekordbox.
 package prolink
 
 import (
@@ -11,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 const magic = "Qspt1WmJOL"
@@ -178,25 +175,4 @@ func (d *Discovery) Listen(ctx context.Context, address net.IP, notify func(Devi
 	}
 	wg.Wait()
 	return err
-}
-
-// LibrarySource separates LAN transport/authentication from export parsing.
-// A mounted read-only Rekordbox share can supply the same PDB/SQLite library;
-// proprietary dbserver/NFS negotiation is intentionally not fabricated here.
-type LibrarySource interface {
-	Library(context.Context, Device) (*rekordbox.Library, error)
-}
-type LibrarySink interface {
-	Import(context.Context, Device, *rekordbox.Library) error
-}
-
-func Sync(ctx context.Context, device Device, source LibrarySource, sink LibrarySink) error {
-	l, e := source.Library(ctx, device)
-	if e != nil {
-		return e
-	}
-	if e = l.Validate(); e != nil {
-		return e
-	}
-	return sink.Import(ctx, device, l)
 }

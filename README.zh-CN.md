@@ -218,9 +218,9 @@ Engine OS 1.x 到 5.0.4、Engine DJ 电脑版（229 条）以及第三方工具�
 | **`Engine` 主进程内存 (`EMain` RSS)** | 待机 `~780 MB`，双轨压测升至 `920+ MB`（含 `.qmlc` 缓存映射与遥测库写放大） | **待机 `624 MB`**（`639,576 KB`），双轨高频压测稳定 `~838 MB` | **主进程内存直降 ~150 MB** |
 | **定制后台服务总内存 (`stream-sync` + `deemixd`)** | 5 个独立进程常驻，合计 **`~85 – 120 MB`** | `stream-sync` **`17.6 MB`** + `deemixd` **`11.6 MB`**，合计 **仅 `29.2 MB`** | **后台常驻内存减少 70%+** |
 | **音频核 (`CPU0–2`) 后台抢占率** | 后台下载 / 解析偶发抢占 `CPU0–2`（`5% – 25%`） | **`CPU0–2` 后台占用 `0.0%`**：定制服务 100% 绑死 **`CPU3` + `SCHED_IDLE`**（合计仅占 `CPU3` 的 `0.3%`） | **前 3 颗核心 100% 留给 96 kHz 实时音频与 60 fps 触控** |
-| **Rootfs 闪存占用（5 合 1 套件）** | 5 个独立二进制约 **`~38 MB`**（撑满 `459 MB` 根分区） | 5 合 1 `sc5000-suite.xz` 仅 **`4.0 MB`** + `ui-packs.tar.xz` **`125.5 KB`** | **Rootfs 空间占用减少 89%** |
+| **Rootfs 闪存占用（5 合 1 套件）** | 5 个独立二进制约 **`~38 MB`**（撑满 `459 MB` 根分区） | 5 合 1 `sc5000-suite.xz` 仅 **`4.0 MB`** + `ui-packs.tar.xz` **`123.9 KB`** | **Rootfs 空间占用减少 89%** |
 | **96 kHz 实时音频线程栈消耗 (`SCHED_RR 49`)** | `hook_fx_common_chain` 每次回调栈分配 `16,440 B`（`16.4 KB`） | **`1,060 B`（`1.0 KB`）**，仅快照前 128 帧干声；Hook 总开销仅占音频周期的 **`0.05%`** | **实时音频栈消耗减少 93.5%**，`memcpy` 减少最高 16 倍 |
-| **闭源 C++ DSP Hook (`libengine-ui-hook.so`)** | `75.2 KB`，全局单槽位（双轨同时开 FX 会互相吞掉去爆音渐变） | **`65.5 KB`**，**32 槽位独立平滑 + 非阻塞保护** | **体积减小 13%，双轨同时切效果器零咔嗒声** |
+| **闭源 C++ DSP Hook (`libengine-ui-hook.so`)** | `75.2 KB`，全局单槽位（双轨同时开 FX 会互相吞掉去爆音渐变） | **`21.5 KB`**，**32 槽位独立平滑 + 非阻塞保护** | **体积减小 71%（4 KiB 段对齐），双轨同时切效果器零咔嗒声** |
 | **Stems 四轨分离速度（239.7s 真曲实测）** | 管道每块重复分配临时切片 | 远端服务器 **`1.18×` 实时速度**（`203.6s`），本机 `CPU3` **`1.43×` 实时速度**（`168.2s`） | **比曲目本身播放时长更快完成四轨分离** |
 | **本地流媒体网关响应 (`/v1/ping` 8 并发)** | `~25 – 60 ms` | **平均 `11.42 ms`**（最快 `2.23 ms`，160 次并发 100% `200 OK`） | **触控屏切源与歌单浏览无感秒开** |
 
@@ -330,11 +330,9 @@ gcc -std=c11 -O2 -Wall -Wextra -Werror tools/ui-mod/test_dsp_smooth.c -o /tmp/te
 
 # 碟机用静态 ARMv7 程序
 GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/sc5000-suite ./cmd/sc5000-suite
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/stems-processor ./cmd/stems-processor
 
 # LD_PRELOAD 钩子
-arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -shared -fPIC -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
-  -o out/libengine-ui-hook.so tools/ui-mod/engine_ui_hook.c -ldl
+sh tools/ui-mod/build.sh
 sh tools/edisksd-hook/build.sh
 
 # 由原厂 5.0.4 QML 生成三语界面包（en / zh-Hans / zh-Hant）

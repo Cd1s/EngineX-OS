@@ -26,7 +26,7 @@ const (
 	fallbackDownloads = "/data/sc5000-custom/Stream"
 	// Internal storage is shared with Engine; the SD card has room to spare.
 	maxInternalCache = 3 << 30
-	defaultDeemixd   = "/data/sc5000-custom/bin/sc5000-deemixd"
+	defaultDeemixd   = "/usr/local/bin/sc5000-deemixd"
 )
 
 // StreamSync runs the on-device playlist/download/analyze console.

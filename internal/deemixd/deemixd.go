@@ -1,5 +1,5 @@
 // Package deemixd is sc5000-deemixd: it downloads directly from Deezer on the
-// SC5000 for a queue on 127.0.0.1:6595. cmd/sc5000-deemixd and sc5000-suite run Main.
+// SC5000 for a queue on 127.0.0.1:6595. sc5000-suite runs Main.
 package deemixd
 
 import (

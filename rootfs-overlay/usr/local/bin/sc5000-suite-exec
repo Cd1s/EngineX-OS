@@ -35,8 +35,10 @@ if stale; then
         trap - EXIT
         printf '%s\n' "$ID" > "$BIN.id"
     fi
-    # Earlier releases leaked one empty temporary per failed start.
-    rm -f "$TARGET_DIR"/sc5000-suite.*.tmp
+    # Earlier releases leaked one empty temporary per failed start and left
+    # standalone binaries and hand-made backups that this suite replaces (#44).
+    rm -f "$TARGET_DIR"/sc5000-suite.*.tmp "$TARGET_DIR"/*.pre-* "$TARGET_DIR"/*.prev \
+        "$TARGET_DIR"/*.o55prev "$TARGET_DIR/sc5000-deemixd" "$TARGET_DIR/stems-processor"
     # The service must not keep holding the unpack lock.
     exec 9>&-
 fi
