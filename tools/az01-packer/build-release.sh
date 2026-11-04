@@ -23,8 +23,10 @@ STAGE=$WORK/overlay
 cp -a rootfs-overlay "$STAGE"
 rm -f "$STAGE/README.md"
 mkdir -p "$STAGE/usr/share/sc5000-custom" "$STAGE/usr/sbin"
-xz --check=crc32 -6 -c "$WORK/sc5000-suite" > "$STAGE/usr/share/sc5000-custom/sc5000-suite.xz"
-gzip -dc "$WORK/packs.tar.gz" | xz --check=crc32 -6 -c > "$STAGE/usr/share/sc5000-custom/ui-packs.tar.xz"
+# BusyBox xzcat on the deck rejects BCJ filters; lc/lp/pb suit 32-bit ARM code.
+# The 8 MiB dictionary keeps the deck's decoder memory as it was with -6.
+xz --check=crc32 --lzma2=preset=9e,dict=8MiB,lc=0,lp=2,pb=2 -c "$WORK/sc5000-suite" > "$STAGE/usr/share/sc5000-custom/sc5000-suite.xz"
+gzip -dc "$WORK/packs.tar.gz" | xz --check=crc32 --lzma2=preset=9e,dict=8MiB -c > "$STAGE/usr/share/sc5000-custom/ui-packs.tar.xz"
 install -m 0755 "$FSCK" "$STAGE/usr/sbin/fsck.hfsplus"
 chmod 0644 "$STAGE/usr/share/sc5000-custom/"*
 

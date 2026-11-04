@@ -218,9 +218,9 @@ Every known defect from Engine OS 1.x to 5.0.4, Engine DJ Desktop (229) and thir
 | **`Engine` Main Process RSS (`EMain`)** | `~780 MB` idle, `920+ MB` under dual-deck load (`.qmlc` mmap bloat + telemetry DB writes) | **`624 MB` idle** (`639,576 KB`), `~838 MB` under 25 ops/s dual-deck stress | **~150 MB lower `Engine` RSS** |
 | **Custom Daemons Total RAM (`stream-sync` + `deemixd`)** | 5 separate daemons + helpers: **`~85 – 120 MB`** | `stream-sync` **`17.6 MB`** + `deemixd` **`11.6 MB`** = **`29.2 MB` total** | **70%+ reduction in background daemon RAM** |
 | **Background CPU Steal on Audio Cores (`CPU0–2`)** | `5% – 25%` spikes during downloads / track parsing | **`0.0%` on `CPU0–2`**: all custom services pinned to **`CPU3` + `SCHED_IDLE`** (`0.3%` total on `CPU3`) | **Audio cores (`CPU0–2`) 100% dedicated to 96 kHz audio & 60 fps UI** |
-| **Rootfs Flash Footprint (5-in-1 Suite)** | 5 standalone binaries: **`~38 MB`** (overflows the `459 MB` `/` partition) | 5-in-1 `sc5000-suite.xz` **`4.0 MB`** + `ui-packs.tar.xz` **`125.5 KB`** | **89% smaller rootfs footprint** |
+| **Rootfs Flash Footprint (5-in-1 Suite)** | 5 standalone binaries: **`~38 MB`** (overflows the `459 MB` `/` partition) | 5-in-1 `sc5000-suite.xz` **`4.0 MB`** + `ui-packs.tar.xz` **`123.9 KB`** | **89% smaller rootfs footprint** |
 | **96 kHz Real-Time Audio Stack (`SCHED_RR 49`)** | `16,440 B` (`16.4 KB`) stack frame per `hook_fx_common_chain` call | **`1,060 B` (`1.0 KB`)** (snapshots only the 128-frame ramp prefix; **`0.05%`** of audio period) | **93.5% smaller real-time audio stack**, up to 16× less `memcpy` |
-| **Closed-Source C++ DSP Hook (`libengine-ui-hook.so`)** | `75.2 KB`, single shared ramp state (dual-deck FX switches stole each other's ramp) | **`65.5 KB`**, **32 per-`common` slots + lock-free protection** | **13% smaller `.so`, zero dual-deck FX click/pop crosstalk** |
+| **Closed-Source C++ DSP Hook (`libengine-ui-hook.so`)** | `75.2 KB`, single shared ramp state (dual-deck FX switches stole each other's ramp) | **`21.5 KB`**, **32 per-`common` slots + lock-free protection** | **71% smaller `.so` (4 KiB segment alignment), zero dual-deck FX click/pop crosstalk** |
 | **4-Stem Separation Speed (239.7s Real Track)** | Per-chunk slice reallocations in pipeline | Remote server: **`1.18×` real-time** (`203.6s`); on-deck `CPU3`: **`1.43×` real-time** (`168.2s`) | **Separates 4 stems faster than real-time playback** |
 | **Local Gateway Latency (`/v1/ping`, 8-way concurrent)** | `~25 – 60 ms` | **`11.42 ms` average** (`2.23 ms` min, 160 requests 100% `200 OK`) | **Instantaneous touchscreen browsing & source switching** |
 
@@ -330,11 +330,9 @@ gcc -std=c11 -O2 -Wall -Wextra -Werror tools/ui-mod/test_dsp_smooth.c -o /tmp/te
 
 # Static ARMv7 deck binaries
 GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/sc5000-suite ./cmd/sc5000-suite
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/stems-processor ./cmd/stems-processor
 
 # LD_PRELOAD hooks
-arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -shared -fPIC -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
-  -o out/libengine-ui-hook.so tools/ui-mod/engine_ui_hook.c -ldl
+sh tools/ui-mod/build.sh
 sh tools/edisksd-hook/build.sh
 
 # UI packs (en / zh-Hans / zh-Hant) from the stock 5.0.4 QML

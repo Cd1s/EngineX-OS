@@ -218,9 +218,9 @@ Engine OS 1.x 到 5.0.4、Engine DJ 電腦版（229 條）以及第三方工具�
 | **`Engine` 主行程記憶體 (`EMain` RSS)** | 待機 `~780 MB`，雙軌壓測升至 `920+ MB`（含 `.qmlc` 快取映射與遙測庫寫入放大） | **待機 `624 MB`**（`639,576 KB`），雙軌高頻壓測穩定 `~838 MB` | **主行程記憶體直降 ~150 MB** |
 | **客製背景服務總記憶體 (`stream-sync` + `deemixd`)** | 5 個獨立行程常駐，合計 **`~85 – 120 MB`** | `stream-sync` **`17.6 MB`** + `deemixd` **`11.6 MB`**，合計 **僅 `29.2 MB`** | **背景常駐記憶體減少 70%+** |
 | **音訊核心 (`CPU0–2`) 背景搶佔率** | 背景下載 / 解析偶發搶佔 `CPU0–2`（`5% – 25%`） | **`CPU0–2` 背景佔用 `0.0%`**：客製服務 100% 綁死 **`CPU3` + `SCHED_IDLE`**（合計僅佔 `CPU3` 的 `0.3%`） | **前 3 顆核心 100% 留給 96 kHz 即時音訊與 60 fps 觸控** |
-| **Rootfs 快閃記憶體佔用（5 合 1 套件）** | 5 個獨立二進位檔約 **`~38 MB`**（撐滿 `459 MB` 根分割區） | 5 合 1 `sc5000-suite.xz` 僅 **`4.0 MB`** + `ui-packs.tar.xz` **`125.5 KB`** | **Rootfs 空間佔用減少 89%** |
+| **Rootfs 快閃記憶體佔用（5 合 1 套件）** | 5 個獨立二進位檔約 **`~38 MB`**（撐滿 `459 MB` 根分割區） | 5 合 1 `sc5000-suite.xz` 僅 **`4.0 MB`** + `ui-packs.tar.xz` **`123.9 KB`** | **Rootfs 空間佔用減少 89%** |
 | **96 kHz 即時音訊執行緒堆疊消耗 (`SCHED_RR 49`)** | `hook_fx_common_chain` 每次回呼堆疊配置 `16,440 B`（`16.4 KB`） | **`1,060 B`（`1.0 KB`）**，僅快照前 128 幀乾聲；Hook 總開銷僅佔音訊週期的 **`0.05%`** | **即時音訊堆疊減少 93.5%**，`memcpy` 減少最高 16 倍 |
-| **閉源 C++ DSP Hook (`libengine-ui-hook.so`)** | `75.2 KB`，全域單槽位（雙軌同時開 FX 會互相吞掉去爆音漸變） | **`65.5 KB`**，**32 槽位獨立平滑 + 非阻塞保護** | **體積減小 13%，雙軌同時切效果器零咔嗒聲** |
+| **閉源 C++ DSP Hook (`libengine-ui-hook.so`)** | `75.2 KB`，全域單槽位（雙軌同時開 FX 會互相吞掉去爆音漸變） | **`21.5 KB`**，**32 槽位獨立平滑 + 非阻塞保護** | **體積減小 71%（4 KiB 段對齊），雙軌同時切效果器零咔嗒聲** |
 | **Stems 四軌分離速度（239.7s 真曲實測）** | 管線每塊重複配置暫存切片 | 遠端伺服器 **`1.18×` 即時速度**（`203.6s`），本機 `CPU3` **`1.43×` 即時速度**（`168.2s`） | **比曲目本身播放時長更快完成四軌分離** |
 | **本機串流閘道回應 (`/v1/ping` 8 並發)** | `~25 – 60 ms` | **平均 `11.42 ms`**（最快 `2.23 ms`，160 次並發 100% `200 OK`） | **觸控螢幕切源與歌單瀏覽無感秒開** |
 
@@ -330,11 +330,9 @@ gcc -std=c11 -O2 -Wall -Wextra -Werror tools/ui-mod/test_dsp_smooth.c -o /tmp/te
 
 # 播放機用靜態 ARMv7 程式
 GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/sc5000-suite ./cmd/sc5000-suite
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/stems-processor ./cmd/stems-processor
 
 # LD_PRELOAD 掛鉤
-arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -shared -fPIC -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
-  -o out/libengine-ui-hook.so tools/ui-mod/engine_ui_hook.c -ldl
+sh tools/ui-mod/build.sh
 sh tools/edisksd-hook/build.sh
 
 # 由原廠 5.0.4 QML 產生三語介面包（en / zh-Hans / zh-Hant）

@@ -77,57 +77,6 @@ func (d *deezerClient) getJSON(ctx context.Context, u string, out any) error {
 	return json.Unmarshal(b, out)
 }
 
-type dzTrack struct {
-	ID       int64  `json:"id"`
-	Title    string `json:"title"`
-	Duration int    `json:"duration"`
-	ISRC     string `json:"isrc"`
-	Readable bool   `json:"readable"`
-	Artist   struct {
-		Name string `json:"name"`
-	} `json:"artist"`
-}
-
-func (d *deezerClient) trackByID(ctx context.Context, id string) (*dzTrack, error) {
-	var t dzTrack
-	if err := d.getJSON(ctx, deezerAPI+"/track/"+url.PathEscape(id), &t); err != nil {
-		return nil, err
-	}
-	return &t, nil
-}
-
-func (d *deezerClient) trackByISRC(ctx context.Context, isrc string) (*dzTrack, error) {
-	return d.trackByID(ctx, "isrc:"+isrc)
-}
-
-func (d *deezerClient) searchTrack(ctx context.Context, artist, title string, duration int) (*dzTrack, error) {
-	q := fmt.Sprintf(`track:"%s"`, title)
-	if artist != "" {
-		q = fmt.Sprintf(`artist:"%s" %s`, artist, q)
-	}
-	var r struct {
-		Data []dzTrack `json:"data"`
-	}
-	if err := d.getJSON(ctx, deezerAPI+"/search/track?limit=10&q="+url.QueryEscape(q), &r); err != nil {
-		return nil, err
-	}
-	var best *dzTrack
-	for i := range r.Data {
-		t := &r.Data[i]
-		if duration > 0 && abs(t.Duration-duration) > 30 {
-			continue
-		}
-		if best == nil || (duration > 0 && abs(t.Duration-duration) < abs(best.Duration-duration)) {
-			best = t
-		}
-	}
-	if best == nil {
-		return nil, errors.New("deezer search: no match")
-	}
-	return best, nil
-}
-
-// userPlaylistsOK checks the public playlist API answers for userID.
 func (d *deezerClient) userPlaylistsOK(ctx context.Context, userID string) error {
 	var r struct {
 		Data []json.RawMessage `json:"data"`
@@ -265,13 +214,6 @@ func (d *deezerClient) followRedirects(ctx context.Context, start string) ([]str
 
 func (d *deezerClient) login(ctx context.Context, arl string) (*deezer.Session, error) {
 	return deezer.Login(ctx, arl)
-}
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
 }
 
 // arlUser validates a browser cookie with deezer.getUserData. It deliberately

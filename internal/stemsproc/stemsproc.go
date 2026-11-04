@@ -1,11 +1,10 @@
-// Command stems-processor stands in for Engine 5.0.4's native Stems child
+// Package stemsproc is stems-processor. It stands in for Engine 5.0.4's native Stems child
 // process on SC5000. It forwards the child's stdin/stdout byte stream to a
 // remote renderer, by default through the cloud relay the deck already uses
 // for logins (see internal/stems.ResolveClient for the override variables).
 // With no relay set up, or one it cannot reach, it looks for sc5000-stemsd
 // on a computer in the same LAN (stems.FindLAN); failing that the deck
-// splits stems itself (stems.LocalRender). cmd/stems-processor and
-// sc5000-suite both run Main.
+// splits stems itself (stems.LocalRender). sc5000-suite runs Main.
 package stemsproc
 
 import (

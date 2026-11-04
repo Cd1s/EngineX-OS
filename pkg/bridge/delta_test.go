@@ -12,7 +12,6 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
-	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
 
 func TestOneLibraryVendorColumnsAndMountedSync(t *testing.T) {
@@ -32,15 +31,14 @@ func TestOneLibraryVendorColumnsAndMountedSync(t *testing.T) {
 		t.Fatal(e)
 	}
 	before := snapshot(t, filepath.Join(root, "PIONEER"))
-	source := bridge.MountedSource{MountPath: root}
-	l, e := source.Library(context.Background(), prolink.Device{Name: "rekordbox"})
+	l, e := bridge.ReadLibrary(context.Background(), root)
 	if e != nil {
 		t.Fatal(e)
 	}
 	if len(l.Tracks) != 1 || l.Tracks[0].Artist != "Vendor artist" || l.Tracks[0].Composer != "Vendor artist" || l.Tracks[0].BPM != 120 || l.Tracks[0].SampleRate != 48000 || l.Tracks[0].AnalysisPath == "" || l.Tracks[0].Key != "Am" {
 		t.Fatalf("actual OneLibrary columns not handled: %+v", l)
 	}
-	if e = prolink.Sync(context.Background(), prolink.Device{}, source, bridge.EngineSink{MountPath: root}); e != nil {
+	if _, e = enginedb.Sync(context.Background(), root, l, enginedb.Options{}); e != nil {
 		t.Fatal(e)
 	}
 	engine := dbOpen(t, root)
