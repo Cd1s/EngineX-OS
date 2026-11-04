@@ -186,10 +186,30 @@ sh tools/edisksd-hook/build.sh
 
 如果 **EngineX OS** 讓你的播放機更好用、在演出或練歌時幫到了你，歡迎請作者喝杯咖啡或給專案點個 **Star ⭐** 支持後續維護！
 
-<div align="center">
-<img src="./docs/assets/sponsor-wechat.jpg" width="260" alt="微信讚賞碼"><br>
-<sub><b>微信掃碼讚賞（Cheek's 讚賞碼）</b></sub>
-</div>
+<table>
+<tr>
+<td width="33%" align="center" valign="top">
+<img src="./docs/assets/sponsor-wechat.jpg" width="240" alt="微信讚賞碼"><br>
+<b>微信讚賞碼</b><br>
+<sub>微信掃一掃直接讚賞</sub>
+</td>
+<td width="33%" align="center" valign="top">
+<img src="./docs/assets/sponsor-binance-pay.jpg" width="240" alt="Binance Pay 幣安收款碼"><br>
+<b>幣安掃碼支付 (Binance Pay)</b><br>
+<sub>幣安 App 掃碼 · <code>User-504fa</code>（0 手續費）</sub>
+</td>
+<td width="33%" align="center" valign="top">
+<img src="./docs/assets/sponsor-evm-usdt.jpg" width="240" alt="USDT EVM 收款碼"><br>
+<b>USDT / USDC（BSC / EVM 全鏈通用）</b><br>
+<sub>支援 <code>BSC (BEP-20)</code> · <code>ERC-20</code> · <code>Arbitrum</code> · <code>Polygon</code></sub>
+</td>
+</tr>
+</table>
+
+> **💳 USDT / USDC 鏈上收款位址（BSC / EVM 通用，點擊右側一鍵複製）：**
+> ```text
+> 0x35e0c53dd887b37cd5db0064291f7c5a7442bc91
+> ```
 
 ---
 
