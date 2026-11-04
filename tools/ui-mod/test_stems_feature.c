@@ -9,6 +9,13 @@ int hook_test_engine;
 #include <float.h>
 
 static unsigned dsp_calls, dsp_seen_generation, dsp_seen_sampler_generation;
+
+// Frames left in the ramp of one common tail; -1 if it has no slot yet.
+static int32_t chain_ramp(const void *common) {
+    for (unsigned i = 0; i < SC_DSP_CHAIN_SLOTS; i++)
+        if (sc_dsp_state()->chain[i].self == common) return sc_dsp_state()->chain[i].ramp_remaining;
+    return -1;
+}
 static void *dsp_wanted_owner;
 static const void *dsp_wanted_event;
 
@@ -137,7 +144,7 @@ static void test_dsp_hooks(void) {
         unsigned before = dsp_calls, gen = sc_dsp_state()->generation;
         ((dsp_event_fn)(image + dsp_hooks[i].offset))(handler, event);
         assert(dsp_calls == before + 1 && dsp_seen_generation == gen + 1);
-        assert(sc_dsp_state()->ramp_remaining == SC_DSP_RAMP_FRAMES);
+        assert(chain_ramp(owner) == -1); // a transition only bumps the generation
     }
     // Preserve the dispatcher's virtual target resolution and signed this adjustment.
     uint32_t vtable[] = {(uintptr_t)mock_dsp_event};
@@ -169,7 +176,6 @@ static void test_dsp_hooks(void) {
     puts("ARM DSP install: all 19 prefix guards, repeat install, event ABI/virtual/adjusted this, finite controls: PASS");
 
     unsigned fx_generation = sc_dsp_state()->generation;
-    int32_t fx_remaining = sc_dsp_state()->ramp_remaining;
     // Count before calling the original, without inspecting payloads or arming FX.
     dsp_wanted_event = NULL;
     for (unsigned i = DSP_SAMPLER_IMMEDIATE; i <= DSP_SAMPLER_PLAY; i++) {
@@ -190,7 +196,7 @@ static void test_dsp_hooks(void) {
     __atomic_store_n(&sc_dsp_state()->sampler_generation, UINT32_MAX, __ATOMIC_RELEASE);
     ((dsp_event_fn)(image + dsp_hooks[DSP_SAMPLER_PLAY].offset))(handler, event);
     assert(sc_dsp_state()->sampler_generation == 0 && dsp_seen_sampler_generation == 0);
-    assert(sc_dsp_state()->generation == fx_generation && sc_dsp_state()->ramp_remaining == fx_remaining);
+    assert(sc_dsp_state()->generation == fx_generation);
     puts("ARM Sampler: all three dispatchers, mark-before-forward, null payload, four producers, wrap and FX isolation: PASS");
 
     for (unsigned slot = DSP_DUB_ECHO; slot <= DSP_WASH; slot++) {
@@ -230,7 +236,7 @@ static void test_dsp_hooks(void) {
     float *bit_buffers[2] = {bit_samples, NULL};
     sc_dsp_sweep_fx_post_process(NULL, bit_buffers, 5);
     assert(!memcmp(bit_samples, wanted_bits, sizeof wanted_bits));
-    assert(sc_dsp_state()->generation == fx_generation && sc_dsp_state()->ramp_remaining == fx_remaining);
+    assert(sc_dsp_state()->generation == fx_generation);
     puts("ARM DubEcho/Wash: prologue/this adjustment, input/output ABI, NaN/Inf/extreme clamp, zeros and bounds: PASS");
 
     unsigned char gate[0x200] = {0};
@@ -266,7 +272,7 @@ static void test_dsp_hooks(void) {
         for (unsigned ch = 0; ch < 2; ch++)
             for (unsigned i = 0; i < 160; i++)
                 assert(dest[ch][i] == (i < 128 ? (float)i / 128.0f : 1.0f));
-        assert(sc_dsp_state()->ramp_remaining == 0);
+        assert(chain_ramp(owner) == 0);
     }
     // Partially overlapping buffers need a snapshot too, including the right channel.
     memset(left, 0, sizeof left); memset(right, 0, sizeof right);
@@ -274,14 +280,23 @@ static void test_dsp_hooks(void) {
     sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_CHANGE);
     process(owner, in, out, 128);
     assert(out[0][0] == 0.0f && out[1][127] == 127.0f / 128.0f);
-    // An in-place block beyond the bounded snapshot size is sanitized only.
-    sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_CHANGE);
-    process(owner, in, in, N);
-    assert(left[0] == 1.0f && sc_dsp_state()->ramp_remaining == 128);
+    // A block far beyond the snapshot size still ramps: only its first 128 dry frames
+    // are copied, so the stack stays at 1 KB for any block size.
+    for (unsigned size = N - 1; size <= N; size++) {
+        memset(left, 0, sizeof left); memset(right, 0, sizeof right);
+        sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_CHANGE);
+        process(owner, in, in, size);
+        assert(left[0] == 0.0f && left[127] == 127.0f / 128.0f && left[128] == 1.0f && left[size - 1] == 1.0f);
+        assert(right[0] == 0.0f && right[size - 1] == 1.0f && chain_ramp(owner) == 0);
+    }
+    // A second common has its own ramp: the first one's finished ramp does not
+    // swallow it, and it ramps when first seen.
+    unsigned char other[8];
     memset(left, 0, sizeof left); memset(right, 0, sizeof right);
-    process(owner, in, in, 2048);
-    assert(left[0] == 0.0f && left[127] == 127.0f / 128.0f && left[128] == 1.0f);
-    assert(!sc_dsp_state()->ramp_remaining);
+    dsp_wanted_owner = other;
+    process(other, in, in, 64);
+    dsp_wanted_owner = owner;
+    assert(chain_ramp(other) == 64 && left[63] == 63.0f / 128.0f && chain_ramp(owner) == 0);
     // A short block resumes the same ramp in the next call.
     memset(left, 0, sizeof left); memset(right, 0, sizeof right);
     out[0] = out_l; out[1] = out_r;
@@ -291,7 +306,7 @@ static void test_dsp_hooks(void) {
     process(owner, in, out, 64);
     assert(out_l[0] == 0.5f && out_r[63] == 127.0f / 128.0f);
     process(owner, in, out, 0);
-    assert(!sc_dsp_state()->ramp_remaining);
+    assert(chain_ramp(owner) == 0);
     common_bad_output = 1;
     for (unsigned i = 0; i < 160; i++) { left[i] = 0.25f; right[i] = 0.5f; }
     process(owner, in, out, 160);
@@ -316,7 +331,9 @@ static void test_dsp_hooks(void) {
     }
     memset(sc_dsp_state(), 0, sizeof *sc_dsp_state());
     assert(!munmap(image, image_size));
-    puts("ARM FX common tail: ABI/prologue replay, in/out/overlap snapshots, 128-frame ramp, 2048 bound, finite output: PASS");
+    for (unsigned i = 0; i < SC_DSP_CHAIN_SLOTS; i++)
+        assert(sc_dsp_state()->chain[i].busy == 0); // every enter was paired with an exit
+    puts("ARM FX common tail: ABI/prologue replay, in/out/overlap snapshots, 128-frame ramp, per-common slots, any block size, finite output: PASS");
 }
 
 __attribute__((naked)) static void invoke_stub(void *feature __attribute__((unused)),
