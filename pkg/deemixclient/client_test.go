@@ -383,10 +383,10 @@ func TestMatchNearbyAcrossCatalogs(t *testing.T) {
 
 func TestDownloadAsksForTheChosenQuality(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "1.mp3"), mp3Frames(14, 3), 0o644)
 	var got map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
+		os.WriteFile(filepath.Join(dir, "1.mp3"), mp3Frames(14, 3), 0o644)
 		json.NewEncoder(w).Encode(QueueStatus{ID: "j", State: "done", Progress: 1, Path: "1.mp3"})
 	}))
 	defer srv.Close()
@@ -397,7 +397,8 @@ func TestDownloadAsksForTheChosenQuality(t *testing.T) {
 	if err != nil || dl.Quality.Label != "[320k]" || got["bitrate"] != float64(3) || got["quality"] != "MP3_320" || got["allowLossy"] != true {
 		t.Fatalf("%+v %v %v", dl, err, got)
 	}
-	// The setting applies to the very next download.
+	// The setting applies to the very next download: FLAC without lossy
+	// fallback cannot use the cached MP3.
 	mp3 = false
 	c.Download(context.Background(), track, nil)
 	if got["bitrate"] != float64(9) || got["quality"] != "FLAC" || got["allowLossy"] != false {
@@ -564,5 +565,32 @@ func TestHasPictureReadsFrameIDs(t *testing.T) {
 		if got, err := hasPicture(path); err != nil || got != c.want {
 			t.Errorf("%s: %v %v", name, got, err)
 		}
+	}
+}
+
+func TestDownloadReusesTheFileOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	os.Rename(writeFLAC(t, dir), filepath.Join(dir, "123.flac"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("downloaded again") }))
+	defer srv.Close()
+	dl, err := (&Client{BaseURL: srv.URL, DownloadDir: dir}).Download(context.Background(), providers.Track{ID: "123", Provider: "deezer"}, nil)
+	if err != nil || filepath.Base(dl.Path) != "123.flac" || dl.Quality.Label != "[FLAC]" {
+		t.Fatalf("%+v %v", dl, err)
+	}
+}
+
+func TestTrimFreesSpaceBelowMinFree(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"1.flac", "2.flac"} {
+		os.WriteFile(filepath.Join(dir, name), make([]byte, 100), 0o600)
+	}
+	keep := filepath.Join(dir, "2.flac")
+	// Far under MaxCache, but no volume has this much free.
+	(&Client{DownloadDir: dir, MaxCache: 1 << 40, MinFree: 1 << 62}).Trim(keep)
+	if _, err := os.Stat(filepath.Join(dir, "1.flac")); err == nil {
+		t.Fatal("kept a download while space ran short")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatal(err)
 	}
 }

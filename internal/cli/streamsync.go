@@ -26,7 +26,9 @@ const (
 	fallbackDownloads = "/data/sc5000-custom/Stream"
 	// Internal storage is shared with Engine; the SD card has room to spare.
 	maxInternalCache = 3 << 30
-	defaultDeemixd   = "/usr/local/bin/sc5000-deemixd"
+	// Engine needs room on /data for its databases and its own temp copies.
+	internalMinFree = 1 << 30
+	defaultDeemixd  = "/usr/local/bin/sc5000-deemixd"
 )
 
 // StreamSync runs the on-device playlist/download/analyze console.
@@ -120,7 +122,7 @@ func StreamSync(args []string) error {
 	if *deemixd != "" && *socket == "" && sameDeemixd(*base) {
 		go superviseDeemixd(ctx, deemixdAddr, *deemixd, "-state-dir", *state, "-download-dir", *downloads)
 	}
-	dl := &deemixclient.Client{Mode: *mode, BaseURL: *base, QueuePath: *queue, DownloadDir: *downloads, AllowLossy: *lossy, MaxCache: internalCache}
+	dl := &deemixclient.Client{Mode: *mode, BaseURL: *base, QueuePath: *queue, DownloadDir: *downloads, AllowLossy: *lossy, MaxCache: internalCache, MinFree: internalMinFree}
 	if *socket != "" {
 		dl.HTTP = deemixclient.UnixHTTP(*socket)
 	}
@@ -149,6 +151,8 @@ func StreamSync(args []string) error {
 	go ui.SyncRelaySettings(ctx)
 	go webui.GuardRoutes(ctx)
 	dl.RemoveStaleParts()
+	dl.Trim("")
+	go watchEngineTemp(ctx)
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()
 	select {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"syscall"
 	"time"
 )
 
@@ -383,10 +384,18 @@ func (c *Client) Save(ctx context.Context, name, address string) (*Download, err
 	return dl, nil
 }
 
-// Trim removes the oldest downloads beyond MaxCache, never the one just saved.
+// Trim removes the least recently used downloads while they exceed MaxCache or
+// the volume has less than MinFree left, never the one just saved.
 func (c *Client) Trim(keep string) {
 	if c.MaxCache <= 0 {
 		return
+	}
+	short := func() bool { return false }
+	if c.MinFree > 0 {
+		short = func() bool {
+			var st syscall.Statfs_t
+			return syscall.Statfs(c.DownloadDir, &st) == nil && int64(st.Bavail)*int64(st.Bsize) < c.MinFree
+		}
 	}
 	entries, err := os.ReadDir(c.DownloadDir)
 	if err != nil {
@@ -412,7 +421,7 @@ func (c *Client) Trim(keep string) {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
 	for _, f := range files {
-		if total <= c.MaxCache {
+		if total <= c.MaxCache && !short() {
 			return
 		}
 		if os.Remove(f.path) == nil {
