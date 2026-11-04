@@ -19,7 +19,10 @@ decompress() {
         *) if command -v xz >/dev/null 2>&1; then xz -dc "$1"; else busybox xzcat "$1"; fi ;;
     esac
 }
-stale() { [ ! -x "$BIN" ] || [ "$ARCHIVE" -nt "$BIN" ]; }
+# Keyed on the archive's content, not mtime: rebuilt releases keep their version,
+# and a binary deployed by hand stays until the next image brings a new archive.
+ID=$(sha256sum < "$ARCHIVE" | cut -d' ' -f1)
+stale() { [ ! -x "$BIN" ] || [ "$(cat "$BIN.id" 2>/dev/null)" != "$ID" ]; }
 if stale; then
     exec 9>"$TARGET_DIR/.unpack.lock"
     flock 9
@@ -30,6 +33,7 @@ if stale; then
         chmod 0755 "$TMP"
         mv -f "$TMP" "$BIN"
         trap - EXIT
+        printf '%s\n' "$ID" > "$BIN.id"
     fi
     # Earlier releases leaked one empty temporary per failed start.
     rm -f "$TARGET_DIR"/sc5000-suite.*.tmp

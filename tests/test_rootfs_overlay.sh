@@ -288,6 +288,19 @@ for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/sc5000-suit
 done
 ok 'device scripts run under /bin/sh'
 
+suite_share=$TMP/suite-share suite_dir=$TMP/suite-bin
+mkdir -p "$suite_share"
+printf '#!/bin/sh\necho image-1 "$@"\n' | gzip -c > "$suite_share/sc5000-suite.gz"
+run_suite() { SC5000_SUITE_SHARE=$suite_share SC5000_SUITE_DIR=$suite_dir sh "$ROOT/rootfs-overlay/usr/local/bin/sc5000-suite-exec" x; }
+[[ $(run_suite) == 'image-1 x' ]] || fail 'suite archive is unpacked on first start'
+printf '#!/bin/sh\necho hand "$@"\n' > "$suite_dir/sc5000-suite"
+touch -t 200001010000 "$suite_dir/sc5000-suite"
+[[ $(run_suite) == 'hand x' ]] || fail 'a hand-deployed suite survives restarts of the same image'
+printf '#!/bin/sh\necho image-2 "$@"\n' | gzip -c > "$suite_share/sc5000-suite.gz"
+touch -t 200001010000 "$suite_share/sc5000-suite.gz"
+[[ $(run_suite) == 'image-2 x' ]] || fail 'a new image archive replaces the suite even with an older mtime'
+ok 'suite binary follows the image archive content, not mtime'
+
 fixture
 expect_fail env TARGET_CONFIG= TARGET_SYMVERS= bash "$ROOT/kernel-modules/build_modules.sh" modules
 has 'TARGET_CONFIG' "$MOCK_ROOT/output"
