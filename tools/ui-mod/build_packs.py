@@ -366,6 +366,8 @@ SERVICES_MAIN = """
 				const p = Planck.getProperty(path)
 				if (p && p.translator && !p.translator.state) p.translator.state = true
 			}
+			const a = Planck.getProperty("/Client/AnalyticsEnabled")
+			if (a && a.translator && a.translator.state) a.translator.state = false
 		}
 	}
 	// A stemmed track opens its deck's pads in STEMS mode. Pads/View only steps
@@ -756,6 +758,9 @@ def edits(dev: bool):
         prefs + "Entries/Version.qml": [(
             "	text: `Engine OS ${versionString} <font color=\\\"${grey}\\\">(${gitHashString})</font>`",
             "	text: `EngineX OS ${root.scVersion || versionString} <font color=\\\"${grey}\\\">(github.com/${root.scUpdateRepo})</font>`")],
+        prefs + "Entries/Analytics.qml": [(
+            "\t\tchecked = pAnalyticsEnabled.translator.state\n\t\tPlanck.quit(QuitReasons.AnalyticsChange, false)",
+            "\t\tpAnalyticsEnabled.translator.state = !pAnalyticsEnabled.translator.state")],
         prefs + "Entries/Update.qml": [
             ("    model: PlanckGUI.views.updaterController.releaseVersionsModel\n", "    model: root.scUpdateModel\n"),
             ("        text: `Engine OS ${model.displayVersion} is available`\n",
