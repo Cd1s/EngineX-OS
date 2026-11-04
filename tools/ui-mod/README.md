@@ -168,6 +168,33 @@ The current ALSA/update candidate is prepared for coordinated deployment. Its
 new hooks have not been loaded on the deck by this task; this task does not
 restart Engine.
 
+## DSP guard (`dsp_smooth.h`)
+
+`dsp_smooth.h` is header-only C11 for the audio callback: no allocation, no
+locks, shared state only through `__atomic` builtins. Include it from this one
+translation unit; a second one would get its own, unconnected state.
+`test_dsp_smooth.c` covers it:
+
+    gcc -std=c11 -O2 -Wall -Wextra -Werror tools/ui-mod/test_dsp_smooth.c -o /tmp/test_dsp_smooth && /tmp/test_dsp_smooth
+
+The hook places 11 trampolines into Engine's closed DSP and controller code:
+
+| Entry | Guard | Issues |
+|---|---|---|
+| `ChannelDJFx` TurnOff `0xd917b8`, TurnOn `0xd917e4`, EffectSwitch `0xd91894`, EffectChange `0xd918c0`, EnabledChanged `0xd918ec` | `sc_dsp_fx_mark_transition`: bump the generation, arm a 128-frame ramp | H145 H163 H164 |
+| `ChannelDJFx` Mix `0xd91810`, Parameter `0xd91868` | Events carrying NaN/Inf are dropped, not rewritten to 0 | H154 |
+| `Effects::AutoGate::process` `0xe3a598` | `sc_dsp_autogate_pre_process`: phase at `+0x1e8` cleared once per transition | LA-020 H153 |
+| FX common mix tail `0x15fa188` | `sc_dsp_fx_common_post_process`: NaN/Inf output replaced by dry or silence, dry→wet ramp while armed | H154 H145 H163 H164 |
+| `PlaybackModifier::Nudge` `0x14fff54` | Non-finite values dropped | CF011 (input side) |
+| `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` | Only positive finite tempo values pass | H154 |
+
+`ElastiqueFader` (`0x1534398`) is not hooked: `r1` is the channel count and the
+stock code already steps per frame (`step = 1/(rate × 0.001)`), so
+`sc_dsp_fader_smooth_block` stays unused. Verified on SC5000 on 2026-11-04 with
+hook SHA-256 `f92f233c…3f27e42`: all 11 trampolines installed, ALSA
+`card2/pcm0p/sub0` `RUNNING`, no XRUN, `NRestarts=0`. That shows the hooks load
+and keep audio running; it does not show each pop is gone by ear.
+
 ## ALSA clock and official updater boundary
 
 The official image contradicts the original RA002 assumption: `0x165bcd0`
@@ -207,10 +234,10 @@ not counted as fixed. StopTime maps to `/Client/Preferences/RampDownTime` and
 `Config.audio.rampDownTime`; forcing it to zero could abruptly cut audio.
 KeyLock (`/Engine/DeckN/Track/KeyLock`) and InstantDouble
 (`/Engine/DeckN/InstantDouble/Sync`) expose controls, not a verified DSP repair
-interface. FX tails/gates/reverse reverb/loop-phase transitions need state-aware
-DSP changes; pitch/motor MCU defects are outside Engine's library boundary.
-No clamp, buffer clearing, virtual-call replacement or DSP machine-code edit is
-added for those groups. Resource guards do not prove those defects resolved.
+interface. FX switch/toggle, AutoGate phase and non-finite control values are
+now guarded (see DSP guard above). Reverse reverb, FX tails, loop-phase and Sync
+transitions are still untouched; pitch/motor MCU defects are outside Engine's
+library boundary. Resource guards do not prove those defects resolved.
 
 The client additionally requires the separately provisioned private
 `/etc/sc5000-stems/token` and the LAN backend. Installing the client and seeing

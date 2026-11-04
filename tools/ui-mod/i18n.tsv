@@ -267,3 +267,17 @@ GitHub unreachable	无法连接 GitHub	無法連線 GitHub
 New release available:	有新版本：	有新版本：
 Up to date	已是最新	已是最新
 no release found (no releases yet, or the repository is private)	未找到发布版本（仓库还没有发布，或是私有仓库）	未找到發佈版本（倉庫尚無發佈，或為私有倉庫）
+# Preferences: Device and About / Update pages
+Send Anonymous Usage Statistics	发送匿名使用统计	傳送匿名使用統計
+Debug Information	调试信息	除錯資訊
+Save to Source	保存到来源	儲存到來源
+Other Available Updates	其他可用更新	其他可用更新
+No updates available	没有可用更新	沒有可用更新
+Screen Brightness	屏幕亮度	螢幕亮度
+Screen (Plugged In)	屏幕（接通电源）	螢幕（接上電源）
+Screen (Battery)	屏幕（电池）	螢幕（電池）
+Checking...	正在检查…	正在檢查…
+Options	选项	選項
+This will wipe all user settings and passwords from this device and restore it to its factory default configuration. The device will reboot during this process.	这将清除本设备上的所有用户设置和密码，并恢复出厂默认配置。设备会在此过程中重启。	這將清除本裝置上的所有使用者設定與密碼，並恢復原廠預設設定。裝置會在此過程中重新啟動。
+Version: ${version}	版本：${version}	版本：${version}
+Prepare	准备	準備

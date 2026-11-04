@@ -77,7 +77,8 @@ func ResolveClient(getenv func(string) string) (Client, error) {
 	if override != "" {
 		password = override
 	}
-	if password == "" {
+	if password == "" || relay == "" {
+		// No relay: stems-processor looks for a home renderer, then renders locally.
 		return Client{Source: "standalone"}, nil
 	}
 	if !validEndpoint(relay) {

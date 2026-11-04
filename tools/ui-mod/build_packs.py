@@ -665,7 +665,7 @@ def edits(dev: bool):
     ]
     main = DEV_HARNESS if dev else ""
     services = SERVICES_MAIN.replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS))
-    return {
+    out = {
         # The flag is still cleared, which is what pressing "Ok" would do.
         ROOT + "Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml": [(
             "      let messageObject = {", "      Planck.librarianController.deviceEjectedImproperly = false\n      return\n      let messageObject = {")],
@@ -832,6 +832,8 @@ def edits(dev: bool):
         v + "Common/Sidebar/Sidebar.qml": [
             ("source: browserSource.sourceIconUrl\n", 'source: browserSource.sourceIconUrl.indexOf("TIDAL") >= 0 && root.scScope ? root.scIcon(root.scScope) : browserSource.sourceIconUrl\n'),
             ("useOriginal: browserSource.useOriginalIcon\n", 'useOriginal: browserSource.useOriginalIcon || browserSource.sourceIconUrl.indexOf("TIDAL") >= 0\n'),
+            # "History" is also compared in Historylist.qml, so translate() leaves it alone everywhere.
+            ('						"History"\n', '						root.scT("History")\n'),
         ],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml": [
             ('				objectName: "Browser_Collection_StackView_ViewDelegate"\n',
@@ -844,12 +846,138 @@ def edits(dev: bool):
             ("						return modelData.display\n					}\n					return \"\"", "						return breadcrumbView.isStreamingContent && contentView.StackView.index === 0 ? root.scT(modelData.display) : modelData.display\n					}\n					return \"\""),
         ],
     }
+    for rel, fixes in legacy_qml_fixes().items():
+        assert not isinstance(out.get(rel), str), rel  # a whole-file replacement already owns it
+        out.setdefault(rel, []).extend(fixes)
+    return out
+
+
+def legacy_qml_fixes():
+    """Fixes for stock Engine 5.0.4 QML defects, applied before translation (so
+    the LOG IN / LOG OUT labels below are translated too). Every anchor must
+    match exactly once; patch() stops the build otherwise."""
+    v = ROOT + "Views/"
+    # Focus comes back on the next event-loop turn, and never while a dialog or
+    # a text field (on-screen keyboard) holds it.
+    restore_guard = (
+        "if(!visible || !isCurrentFocusArea || activeFocus || root.dialogOpen || root.messageBoxOpen) return\n"
+        "				const item = MainWindow.activeFocusItem\n"
+        "				if(item && item.inputMethodHints !== undefined) return\n"
+    )
+    return {
+        # CF008: Back/Forward on the Source screen fired an action nothing handles
+        # there; /GUI/CloseDialogs is what SourceScreen.qml listens to. Arrow keys
+        # and Enter/Escape drive it like the encoder.
+        ROOT + "StateNodes/States/SourceScreenState.qml": [(
+            '		back: "/Qml/CloseCurrentDialog"\n		forward: "/Qml/CloseCurrentDialog"\n',
+            '		back: "/GUI/CloseDialogs"\n		forward: "/GUI/CloseDialogs"\n',
+        )],
+        v + "BrowserSource/SourceScreen.qml": [(
+            "	readonly property alias expandTransitionRunning: expandTransition.running\n",
+            "	readonly property alias expandTransitionRunning: expandTransition.running\n"
+            "	Keys.enabled: sourceScreen.visible && !root.messageBoxOpen\n"
+            "	Keys.onUpPressed: controller.navigation().decrementIndex()\n"
+            "	Keys.onDownPressed: controller.navigation().incrementIndex()\n"
+            "	Keys.onReturnPressed: controller.navigation().enter()\n"
+            "	Keys.onEnterPressed: controller.navigation().enter()\n"
+            "	Keys.onEscapePressed: controller.close()\n",
+        )],
+        # CF009 / CF010 / H143: after a view switch or Instant Double the track list
+        # and breadcrumb stack grabbed focus mid-transition and the encoder lost it.
+        v + "BrowseView/Components/TrackList.qml": [
+            ("			onIsCurrentFocusAreaChanged: {\n				if(visible && !activeFocus && isCurrentFocusArea) {\n					forceActiveFocus()\n				}\n",
+             "			function scRestoreFocusNow() {\n				" + restore_guard + "				forceActiveFocus()\n			}\n\n"
+             "			onIsCurrentFocusAreaChanged: {\n				if(visible && !activeFocus && isCurrentFocusArea) {\n					Qt.callLater(scRestoreFocusNow)\n				}\n"),
+            ("					if(visible && isCurrentFocusArea && !activeFocus) {\n						forceActiveFocus()\n					}\n",
+             "					if(visible && isCurrentFocusArea && !activeFocus) {\n						Qt.callLater(scRestoreFocusNow)\n					}\n"),
+        ],
+        v + "BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml": [(
+            "						contentView.currentRowIndex = index\n					}\n					breadcrumbView.push()\n				}\n",
+            "						contentView.currentRowIndex = index\n					}\n					breadcrumbView.push()\n"
+            "					Qt.callLater(function() {\n"
+            "						if(!breadcrumbView.visible || !breadcrumbView.isCurrentFocusArea || root.dialogOpen || root.messageBoxOpen) return\n"
+            "						const item = MainWindow.activeFocusItem\n"
+            "						if(item && item.inputMethodHints !== undefined) return\n"
+            "						breadcrumbView.forceActiveFocus()\n"
+            "					})\n"
+            "				}\n",
+        )],
+        # CF013: after logging out of a cloud drive the Account button still said
+        # LOG OUT and could not log back in. Only an explicit loggedIn === false
+        # switches it: if the provider type has no such property the stock
+        # logout keeps working.
+        v + "Streaming/CloudUtilityDialog.qml": [(
+            '			buttonText: "LOG OUT"\n'
+            "			showSpinner: pLogoutSpinner.translator.state\n"
+            "			onClicked: {\n"
+            "				pLogoutSpinner.translator.state = true\n"
+            "				Planck.librarianController.streamingInterfaceController.displayLogout(provider)\n"
+            "			}\n",
+            # The comparison sits on its own line: translate() skips lines holding "==".
+            "			readonly property bool scLoggedOut: !!provider && provider.loggedIn === false\n"
+            '			buttonText: scLoggedOut ? "LOG IN" : "LOG OUT"\n'
+            "			showSpinner: !scLoggedOut && !!(pLogoutSpinner && pLogoutSpinner.translator && pLogoutSpinner.translator.state)\n"
+            "			onClicked: {\n"
+            "				const service = provider\n"
+            "				if(!service) return\n"
+            "				const controller = Planck.librarianController.streamingInterfaceController\n"
+            "				if(scLoggedOut) {\n"
+            "					dialog.close()\n"
+            "					controller.showAddAccountDialog(service)\n"
+            "				} else {\n"
+            "					pLogoutSpinner.translator.state = true\n"
+            "					controller.displayLogout(service)\n"
+            "				}\n"
+            "			}\n",
+        )],
+        # H166: closing a login left the provider half-paired; only cancel the
+        # pairing that belongs to the provider still selected.
+        v + "Streaming/StreamingLoginDialog.qml": [(
+            "	onCrossClicked: {\n		controller.restorePreviouslySelectedSource()\n	}\n",
+            "	onCrossClicked: {\n"
+            "		if(provider && !provider.loggedIn && controller.selectedProvider === provider) {\n"
+            "			controller.cancelPairing()\n"
+            "		}\n"
+            "		controller.restorePreviouslySelectedSource()\n"
+            "	}\n",
+        )],
+        v + "Streaming/StreamingPairingDialog.qml": [(
+            "		if(!visible && service.provider && !service.provider.loggedIn) {\n",
+            "		if(!visible && service.provider && !service.provider.loggedIn && controller.selectedProvider === service.provider) {\n",
+        )],
+        # RA001: leaving the Load Playlist menu left the deck picker open.
+        v + "SelectPlaylistDeckMenu/SelectPlaylistDeckMenuLayoutBase.qml": [(
+            '	pShow: Planck.getProperty("/GUI/ShowSelectPlaylistDeckMenu")\n',
+            '	pShow: Planck.getProperty("/GUI/ShowSelectPlaylistDeckMenu")\n'
+            "	onShownChanged: {\n"
+            "		const selection = PlanckGUI.views.playlistDeck ? PlanckGUI.views.playlistDeck.selectDeck : null\n"
+            "		if(!shown && selection && selection.isOpen) selection.close()\n"
+            "	}\n",
+        )],
+        # RA008: Hide Title/Artist also holds on the main view's title and artist.
+        ROOT + "Items/Utils/TrackDisplayText.qml": [
+            ("	property bool forceFilename: false\n",
+             "	property bool forceFilename: false\n"
+             "	property bool respectHideTitleArtist: false\n"
+             '	readonly property QObjProperty pHideTitleArtist: Planck.getProperty("/Client/Preferences/HideTitleArtist")\n'
+             "	readonly property bool hideTitleArtist: !!(respectHideTitleArtist && pHideTitleArtist && pHideTitleArtist.translator && pHideTitleArtist.translator.state)\n"),
+            ("	readonly property string display: shouldShowFilename && canShowFilename ? filename : title\n",
+             '	readonly property string display: hideTitleArtist ? "" : (shouldShowFilename && canShowFilename ? filename : title)\n'),
+        ],
+        v + "MainView/ArtistSong.qml": [
+            ("				providerName: artistSong.trackSource\n",
+             "				providerName: artistSong.trackSource\n				respectHideTitleArtist: true\n"),
+            ("			visible: !artistSong.onlyFileName && text.length > 0\n",
+             "			visible: !artistSong.onlyFileName && !displayText.hideTitleArtist && text.length > 0\n"),
+        ],
+    }
 
 
 # Only these properties hold display text. Ids such as StateMap names never match.
-TEXT_LINE = re.compile(r'^(\s*(?:[\w.]*\.)?(?:text|label|title|message|headline|info|display|description|missingContentHint)\s*:)(.*)$')
+TEXT_LINE = re.compile(r'^(\s*(?:[\w.]*\.)?(?:text|label|title|message|headline|info|display|description|missingContentHint|buttonText|value)\s*:)(.*)$')
 BARE_LITERAL = re.compile(r'^(\s*)"([^"\\]+)"(\s*)$')
-LITERAL = re.compile(r'"([^"\\\n]+)"')
+# Template literals match whole, ${...} included (`Version: ${version}`).
+LITERAL = re.compile(r'"([^"\\\n]+)"|`([^`\\\n]+)`')
 
 
 def load_dict():
@@ -871,7 +999,8 @@ def compared_strings(qrc: Path):
 
 def translate(text, table, skip):
     def literal(m):
-        return f'"{table[m.group(1)]}"' if m.group(1) in table and m.group(1) not in skip else m.group(0)
+        s, q = (m.group(1), '"') if m.group(1) is not None else (m.group(2), "`")
+        return f"{q}{table[s]}{q}" if s in table and s not in skip else m.group(0)
     out = []
     for line in text.split("\n"):
         m = TEXT_LINE.match(line)
