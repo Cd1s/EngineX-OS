@@ -1,10 +1,10 @@
 /* Real-time safe smoothing and state guards for Engine's FX / Key Lock paths.
  *
- * Header-only C11. Nothing here allocates, waits for a lock or makes a system call: the
+ * Header-only C11. Nothing here allocates, locks or makes a system call: the
  * hooks that include it run inside the 96 kHz audio callback (SCHED_RR 49).
- * Owner/event publication uses atomics. Audio history has a nonblocking
- * try-acquire guard; contention skips stateful processing. UI marks never
- * touch audio history. Include it from a single translation unit (the hook);
+ * Shared state is one static block per translation unit, touched only through
+ * __atomic builtins, so the UI thread can arm a transition while the audio
+ * thread consumes it. Include it from a single translation unit (the hook);
  * a second one would get its own, unconnected state.
  */
 #ifndef SC5000_DSP_SMOOTH_H
@@ -35,23 +35,15 @@ enum {
     SC_DSP_SAMPLER_PLAY = 3
 };
 
-#define SC_DSP_OWNER_SLOTS 8
-#define SC_DSP_COMMON_SLOTS 16
-
-#define SC_DSP_FX_SLOTS 64
-struct sc_dsp_fx_slot {
-    uintptr_t owner;              /* published once; never evict a live owner */
-    uint32_t event;               /* generation in bits 3..31, kind in bits 0..2 */
-    uint32_t rendering;           /* try-acquire only; audio never waits */
-    uint32_t seen_event, remaining;
-    unsigned history;
-    float previous[2], origin[2];
-    struct { void *self; uint32_t generation; } gate[SC_DSP_AUTOGATE_SLOTS];
-};
 struct sc_dsp_state {
-    uint32_t sampler_generation;
-    uint32_t slot_misses;
-    struct sc_dsp_fx_slot fx[SC_DSP_FX_SLOTS];
+    uint32_t generation;          /* bumped by every FX transition */
+    uint32_t sampler_generation;  /* observation only; independent of FX ramps */
+    int32_t ramp_remaining;       /* frames left in the de-click ramp */
+    uint32_t next_evict;          /* round-robin victim when the table is full */
+    struct {
+        void *self;               /* AutoGate instance, NULL when free */
+        uint32_t generation;      /* generation it last synced to */
+    } autogate[SC_DSP_AUTOGATE_SLOTS];
 };
 
 static inline struct sc_dsp_state *sc_dsp_state(void)
@@ -125,104 +117,86 @@ static inline double sc_dsp_read_f64(const void *base, size_t byte_offset)
     return sc_dsp_finite_f64(v) ? v : 0.0;
 }
 
-/* Open addressing with immutable keys. Exhaustion falls back to stateless
- * sanitation, never to another channel's state. Channel objects live for the
- * Engine session; no phase/history pointer is read by the control thread. */
-static inline struct sc_dsp_fx_slot *sc_dsp_fx_lookup(const void *owner, int create)
+/* 2. FX transitions. Any thread may mark one; the audio thread consumes it. */
+static inline void sc_dsp_fx_mark_transition(const void *fx_owner, uint32_t kind)
 {
-    if (!owner) return NULL;
     struct sc_dsp_state *s = sc_dsp_state();
-    uintptr_t key = (uintptr_t)owner;
-    unsigned first = (unsigned)((key >> 4) ^ (key >> 12)) % SC_DSP_FX_SLOTS;
-    for (unsigned n = 0; n < SC_DSP_FX_SLOTS; n++) {
-        struct sc_dsp_fx_slot *f = &s->fx[(first + n) % SC_DSP_FX_SLOTS];
-        uintptr_t found = __atomic_load_n(&f->owner, __ATOMIC_ACQUIRE);
-        if (found == key) return f;
-        if (!found && create && __atomic_compare_exchange_n(&f->owner, &found, key, 0,
-                                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return f;
-        if (found == key) return f;
-    }
-    if (create) __atomic_add_fetch(&s->slot_misses, 1u, __ATOMIC_RELAXED);
-    return NULL;
-}
-
-static inline void sc_dsp_fx_mark_transition(const void *owner, uint32_t kind)
-{
-    if (kind < SC_DSP_FX_TRANSITION_TURN_ON || kind > SC_DSP_FX_TRANSITION_ENABLE) return;
-    struct sc_dsp_fx_slot *f = sc_dsp_fx_lookup(owner, 1);
-    if (!f) return;
-    uint32_t old = __atomic_load_n(&f->event, __ATOMIC_RELAXED), next;
-    do { next = ((old & ~7u) + 8u) | kind; }
-    while (!__atomic_compare_exchange_n(&f->event, &old, next, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
-}
-
-static inline struct sc_dsp_fx_slot *sc_dsp_fx_begin(const void *owner)
-{
-    struct sc_dsp_fx_slot *f = sc_dsp_fx_lookup(owner, 1);
-    uint32_t idle = 0;
-    return f && __atomic_compare_exchange_n(&f->rendering, &idle, 1u, 0,
-                                            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED) ? f : NULL;
-}
-
-/* Called only while this channel's render guard is held. Unknown ownership
- * deliberately leaves vendor phase alone; there is no global generation. */
-static inline void sc_dsp_autogate_for_slot(struct sc_dsp_fx_slot *f, void *self, uint32_t frames)
-{
-    if (!f || !self || !frames) return;
-    uint32_t generation = __atomic_load_n(&f->event, __ATOMIC_ACQUIRE) & ~7u;
-    for (unsigned i = 0; i < SC_DSP_AUTOGATE_SLOTS; i++) {
-        if (f->gate[i].self && f->gate[i].self != self) continue;
-        if (!f->gate[i].self || f->gate[i].generation != generation) {
-            if (generation) {
-                const float zero = 0.0f;
-                memcpy((char *)self + SC_DSP_AUTOGATE_PHASE_OFFSET, &zero, sizeof zero);
-            }
-            f->gate[i].self = self;
-            f->gate[i].generation = generation;
-        }
+    (void)fx_owner; /* one global ramp: the common mix tail does not know its owner */
+    if (kind < SC_DSP_FX_TRANSITION_TURN_ON || kind > SC_DSP_FX_TRANSITION_ENABLE)
         return;
-    }
-    /* Full per-owner gate table: preserve phase rather than evict another gate. */
+    __atomic_add_fetch(&s->generation, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s->ramp_remaining, (int32_t)SC_DSP_RAMP_FRAMES, __ATOMIC_RELEASE);
 }
 
-/* The common tail remains a stateless guard. Stateful smoothing belongs at
- * the final ChannelDJFx output, including its native bypass/TurnOff path. */
-static inline void sc_dsp_fx_common_post_process(void *common, float *const *input,
-                                                 float *const *output, uint32_t frames)
+/* Clears AutoGate's phase (float at +0x1e8) once after every FX transition,
+ * so a switched or re-opened gate does not resume an old phase (LA-020). An
+ * instance seen for the first time only records the generation: there is no
+ * transition it could have missed. With more than 8 live instances the oldest
+ * slot is reused; the evicted one is treated as new when it returns. */
+static inline void sc_dsp_autogate_pre_process(void *autogate_self, uint32_t frames)
 {
-    (void)common;
-    if (!output) return;
-    for (unsigned ch = 0; ch < 2; ch++) {
-        if (!output[ch]) continue;
-        for (uint32_t i = 0; i < frames; i++)
-            if (!sc_dsp_finite_f32(output[ch][i]))
-                output[ch][i] = input && input[ch] && sc_dsp_finite_f32(input[ch][i]) ? input[ch][i] : 0.0f;
+    struct sc_dsp_state *s = sc_dsp_state();
+    uint32_t gen = __atomic_load_n(&s->generation, __ATOMIC_ACQUIRE);
+    int free_slot = -1;
+    (void)frames;
+    if (!autogate_self)
+        return;
+    for (int i = 0; i < SC_DSP_AUTOGATE_SLOTS; i++) {
+        void *self = __atomic_load_n(&s->autogate[i].self, __ATOMIC_ACQUIRE);
+        if (self == autogate_self) {
+            if (__atomic_load_n(&s->autogate[i].generation, __ATOMIC_RELAXED) != gen) {
+                const float zero = 0.0f;
+                memcpy((char *)autogate_self + SC_DSP_AUTOGATE_PHASE_OFFSET, &zero, sizeof zero);
+                __atomic_store_n(&s->autogate[i].generation, gen, __ATOMIC_RELAXED);
+            }
+            return;
+        }
+        if (!self && free_slot < 0)
+            free_slot = i;
     }
+    if (free_slot < 0)
+        free_slot = (int)(__atomic_fetch_add(&s->next_evict, 1u, __ATOMIC_RELAXED) % SC_DSP_AUTOGATE_SLOTS);
+    __atomic_store_n(&s->autogate[free_slot].generation, gen, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->autogate[free_slot].self, autogate_self, __ATOMIC_RELEASE);
 }
 
-static inline void sc_dsp_fx_end(struct sc_dsp_fx_slot *f, float *const *output, uint32_t frames)
+/* Runs on the stereo FX mix tail just before it returns: replaces NaN/Inf
+ * output samples with the (finite) dry input or silence, then, while a
+ * transition ramp is armed, fades each frame from dry to processed so an
+ * FX switch never steps. In-place processing (input[0] == output[0]) has no
+ * separate dry signal and is only sanitized. */
+static inline void sc_dsp_fx_common_post_process(void *common_self,
+                                                 float *const *input,
+                                                 float *const *output,
+                                                 uint32_t frames)
 {
-    sc_dsp_fx_common_post_process(NULL, NULL, output, frames);
-    if (!f) return;
-    if (frames && output && output[0] && output[1]) {
-        uint32_t event = __atomic_load_n(&f->event, __ATOMIC_ACQUIRE);
-        if (event != f->seen_event) {
-            for (unsigned ch = 0; ch < 2; ch++)
-                f->origin[ch] = f->history & (1u << ch) ? f->previous[ch] : 0.0f;
-            f->remaining = SC_DSP_RAMP_FRAMES;
-            f->seen_event = event;
+    struct sc_dsp_state *s = sc_dsp_state();
+    (void)common_self;
+    if (!output || !frames)
+        return;
+    for (int ch = 0; ch < 2; ch++) {
+        float *out = output[ch];
+        const float *in = input ? input[ch] : NULL;
+        if (!out)
+            continue;
+        for (uint32_t i = 0; i < frames; i++) {
+            if (!sc_dsp_finite_f32(out[i]))
+                out[i] = in && sc_dsp_finite_f32(in[i]) ? in[i] : 0.0f;
         }
-        for (uint32_t i = 0; i < frames && f->remaining; i++, f->remaining--) {
-            const double w = (double)(SC_DSP_RAMP_FRAMES - f->remaining) / SC_DSP_RAMP_FRAMES;
-            for (unsigned ch = 0; ch < 2; ch++)
-                output[ch][i] = (float)((1.0 - w) * (double)f->origin[ch] + w * (double)output[ch][i]);
-        }
-        for (unsigned ch = 0; ch < 2; ch++) f->previous[ch] = output[ch][frames - 1];
-        f->history = 3;
     }
-    /* UI only changes event. A new mark during this block remains pending for
-     * the next block; no CAS on a re-armed counter can swallow it. */
-    __atomic_store_n(&f->rendering, 0u, __ATOMIC_RELEASE);
+    int32_t remaining = __atomic_load_n(&s->ramp_remaining, __ATOMIC_ACQUIRE);
+    if (remaining <= 0 || !input || !input[0] || !input[1] || !output[0] || !output[1] || input[0] == output[0])
+        return;
+    int32_t left = remaining;
+    for (uint32_t i = 0; i < frames && left > 0; i++, left--) {
+        const float w = (float)(SC_DSP_RAMP_FRAMES - left) / (float)SC_DSP_RAMP_FRAMES;
+        for (int ch = 0; ch < 2; ch++) {
+            const float dry = sc_dsp_finite_f32(input[ch][i]) ? input[ch][i] : 0.0f;
+            output[ch][i] = dry + (output[ch][i] - dry) * w;
+        }
+    }
+    /* A transition marked meanwhile re-armed the ramp: keep that, not our count. */
+    __atomic_compare_exchange_n(&s->ramp_remaining, &remaining, left, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
 }
 
 /* Standalone crossfade helper; not installed as an Engine Fader hook. The
