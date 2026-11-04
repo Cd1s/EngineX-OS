@@ -155,8 +155,8 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
    - 自动裁剪膨胀的历史库 `hm.db`（默认保留最近 50 场会话）。
 
 ### 2. 流媒体无损下载与远程 Stems 分轨组件
-- **`cmd/sc5000-deemixd` (`internal/deezer`)**：本地 `127.0.0.1:6595` 守护进程，支持 Deezer Blowfish CBC 条带解密、无损 FLAC / 320k MP3 下载、WAV/AIFF 转 FLAC、多段并发分片拉取与 `<=512x512` 封面内嵌 (`pkg/deemixclient/cover.go`)。
-- **`cmd/stems-processor` + `cmd/sc5000-stemsd` + `cmd/sc5000-relay` + `tools/stems/worker.py` (`internal/stems`)**：
+- **`sc5000-suite sc5000-deemixd` (`internal/deemixd`, `internal/deezer`)**：本地 `127.0.0.1:6595` 守护进程，支持 Deezer Blowfish CBC 条带解密、无损 FLAC / 320k MP3 下载、WAV/AIFF 转 FLAC、多段并发分片拉取与 `<=512x512` 封面内嵌 (`pkg/deemixclient/cover.go`)。
+- **`sc5000-suite stems-processor` (`internal/stemsproc`) + `cmd/sc5000-stemsd` + `cmd/sc5000-relay` + `tools/stems/worker.py` (`internal/stems`)**：
   - 碟机端 `stems-processor` 伪装为原厂分轨器，采用本地流水线即时应答 Engine `action=block`，并通过 `X-Stems-Framing: 2` 将输入块转为 `int16` 流式上传；
   - 远端 `sc5000-stemsd` 驱动 `worker.py`（基于 2048 点 STFT 与一维拼接中值滤波的 4 轨分离器：Vocals / Melody / Bass / Drums），将前三轨以 `int16` 帧流式回传，碟机端用原始 `float32` 减去前三轨无损还原第 4 轨。
   - **GitHub Issue #1：零配置局域网家用电脑算力卸载**：
@@ -269,7 +269,7 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 1. **不含任何私钥或账号凭据**：
    - 全仓已通过检查：所有的 Deezer ARL、网易云 Cookie、Spotify Token、SoundCloud Secret、Relay 密码均只存在于碟机运行时的 `/data/sc5000-custom/state/` 目录下（不在 Git 仓库中）。
 2. **自建后端地址完全解耦（零硬编码个人域名）**：
-   - `pkg/webui/relay.go` (`DefaultRelayURL = ""`)、`internal/stems/client.go` (`DefaultRelayURL = ""`)、`cmd/sc5000-deemixd/main.go` (`defaultRelay = ""`) 与 `cmd/sc5000-relay/main.go` (`--public https://relay.example.com`) 已彻底移除任何个人域名；
+   - `pkg/webui/relay.go` (`DefaultRelayURL = ""`)、`internal/stems/client.go` (`DefaultRelayURL = ""`)、`internal/deemixd/deemixd.go` (`defaultRelay = ""`) 与 `cmd/sc5000-relay/main.go` (`--public https://relay.example.com`) 已彻底移除任何个人域名；
    - 未配置云端 Relay 时，碟机扫码登录默认走本机局域网（`http://sc5000.lan:8080`），外部用户可在碟机网页控制台（`http://sc5000.lan:8080` $\rightarrow$「云端登录服务」）或环境变量 `SC5000_STEMS_URL` / `--relay-url` 中自由填入自己部署的 `sc5000-relay` / `sc5000-stemsd` 后端地址。
 3. **不分发受版权保护的原厂二进制**：
    - 仓库中只包含我们自研的 Go 源码（`cmd/`、`pkg/`、`internal/`）、C Hook 源码（`tools/ui-mod/engine_ui_hook.c`、`tools/edisksd-hook/edisksd_hook.c`）、Python 打包/补丁脚本（`tools/az01-packer/`、`tools/ui-mod/build_packs.py`、`tools/stems/worker.py`）与系统配置层（`rootfs-overlay/`），不包含天龙原厂 `/usr/Engine/Engine` 二进制或原厂 QML 源码包。

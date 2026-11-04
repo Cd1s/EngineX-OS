@@ -7,10 +7,10 @@ qCompress 格式。不会打开 `PIONEER/` 或音频文件进行写入，不安�
 ## 使用
 
 ```sh
-go build -o bin/rb-bridge ./cmd/rb-bridge
-bin/rb-bridge --mount-path /media/usb
-bin/rb-bridge --mount-path /media/usb --smart-match 123
-bin/rb-bridge --prolink --bind 0.0.0.0
+go build -o bin/sc5000-suite ./cmd/sc5000-suite
+bin/sc5000-suite rb-bridge --mount-path /media/usb
+bin/sc5000-suite rb-bridge --mount-path /media/usb --smart-match 123
+bin/sc5000-suite rb-bridge --prolink --bind 0.0.0.0
 ```
 
 `--smart-match` 参数是参考曲目的 **Rekordbox ID**；默认关闭。推荐列表在根歌单树
@@ -101,8 +101,8 @@ SQLiteAdapter 可替换版本相关的解析逻辑，无法识别/加密的库�
 
 ```sh
 go test ./... -v
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o bin/rb-bridge-armv7 ./cmd/rb-bridge
-file bin/rb-bridge-armv7
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/sc5000-suite ./cmd/sc5000-suite
+file bin/sc5000-suite
 ```
 
 端到端 fixture 独立构造 DeviceSQL 数据/非数据页、DAT / EXT / 2EX、NFD 日文/韩文/

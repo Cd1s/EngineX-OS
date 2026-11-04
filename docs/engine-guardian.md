@@ -9,7 +9,7 @@ binary layouts come from section 7 of `re-report/ENGINE-5.0.4-ANALYSIS.md`.
 
 ```sh
 go test ./... -v
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o bin/engine-guardian-armv7 ./cmd/engine-guardian
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/sc5000-suite ./cmd/sc5000-suite
 bash -n rootfs-overlay/usr/local/bin/sc5000-debloat
 
 engine-guardian --heal-mount /media/USB

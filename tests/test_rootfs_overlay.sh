@@ -298,7 +298,10 @@ touch -t 200001010000 "$suite_dir/sc5000-suite"
 [[ $(run_suite) == 'hand x' ]] || fail 'a hand-deployed suite survives restarts of the same image'
 printf '#!/bin/sh\necho image-2 "$@"\n' | gzip -c > "$suite_share/sc5000-suite.gz"
 touch -t 200001010000 "$suite_share/sc5000-suite.gz"
+touch "$suite_dir/sc5000-deemixd" "$suite_dir/stems-processor" "$suite_dir/sc5000-suite.prev" "$suite_dir/sc5000-suite.pre-x" "$suite_dir/drmgrab"
 [[ $(run_suite) == 'image-2 x' ]] || fail 'a new image archive replaces the suite even with an older mtime'
+[[ ! -e $suite_dir/sc5000-deemixd && ! -e $suite_dir/stems-processor && ! -e $suite_dir/sc5000-suite.prev && ! -e $suite_dir/sc5000-suite.pre-x && -e $suite_dir/drmgrab ]] ||
+    fail 'a new image removes the replaced standalone binaries and backups only'
 ok 'suite binary follows the image archive content, not mtime'
 
 fixture

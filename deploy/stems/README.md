@@ -19,7 +19,7 @@ default) and an optional HTDemucs 4-stem neural GPU/CPU separator
 | Path | Role |
 |---|---|
 | `internal/stems` | Wire protocol: client `Proxy`, renderer `Backend`, LAN mDNS/UDP discovery (`FindLAN`), on-deck `RenderLocal` |
-| `cmd/stems-processor` | Static ARMv7 deck client, installed as `/data/sc5000-custom/bin/stems-processor` |
+| `internal/stemsproc` | Deck client, run as `sc5000-suite stems-processor` (`/usr/local/bin/stems-processor`) |
 | `cmd/sc5000-stemsd` | Renderer HTTP service with multi-session support and LAN mDNS/UDP responder |
 | `cmd/sc5000-relay` | Public entry point (`POST /v1/engine`, `GET /healthz/stems`) |
 | `tools/stems` | `worker.py`, `run-home-worker.sh`, `run-home-worker.ps1`, `render.py`, `test_worker.py` |
@@ -48,7 +48,7 @@ Addresses must be `https`, or `http` to a loopback, private or tailnet address.
 ```sh
 remote-build -- '. /etc/profile.d/buildtools.sh; go test -race ./internal/stems ./cmd/sc5000-relay && (cd tools/stems && python3 -m unittest test_worker)'
 remote-build -- '. /etc/profile.d/buildtools.sh; CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/sc5000-stemsd ./cmd/sc5000-stemsd'
-remote-build -- '. /etc/profile.d/buildtools.sh; GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/stems-processor-armv7 ./cmd/stems-processor'
+remote-build -- '. /etc/profile.d/buildtools.sh; GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/sc5000-suite ./cmd/sc5000-suite'
 ```
 
 `render.py in.wav outdir --client <stems-processor>` runs a real WAV through

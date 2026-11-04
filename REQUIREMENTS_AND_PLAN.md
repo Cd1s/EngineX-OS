@@ -1,6 +1,6 @@
 # Denon SC5000 Prime (Engine OS 5.0.4) 深度定制系统 (`sc5000-custom-os`) 需求与架构方案
 
-> 状态：**原始需求蓝图；2026-11-03 已接管，当前进度与实施顺序见 [接续方案](docs/CONTINUATION-PLAN.md)**。
+> 状态：**原始需求蓝图；当前进度见 [变更记录](docs/ISSUE-FIXES-2026-11-04.md)**。
 > 本文中的秒读、完整 Cue/波形兼容和功能描述是目标，不代表均已通过实机验收。
 > 目标设备：Denon DJ SC5000 Prime (`sc5000.lan` / `192.168.1.108`，硬件代号 `JP07`，Rockchip RK3288 ARMv7)
 > 基础底包：Engine OS 5.0.4 官方固件（`AZ01` 容器 / Yocto Scarthgap / Linux 6.6.119-rt / Qt 6.7.2）

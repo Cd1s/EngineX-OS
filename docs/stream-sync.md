@@ -10,8 +10,8 @@ stream-sync 本身不解密音频，下载交给碟机上的 `sc5000-deemixd`（
 ```sh
 go test ./... -v
 go test -race ./...
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o bin/stream-sync-armv7 ./cmd/stream-sync
-file bin/stream-sync-armv7
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/sc5000-suite ./cmd/sc5000-suite
+file bin/sc5000-suite
 ```
 
 所有依赖均支持纯 Go，包括 `modernc.org/sqlite`、`mewkiz/flac`、`go-mp3`
