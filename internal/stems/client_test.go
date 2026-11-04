@@ -40,12 +40,11 @@ func TestResolveClientFromRelayConfig(t *testing.T) {
 func TestResolveClientDefaultsAndLegacyKey(t *testing.T) {
 	dir := t.TempDir()
 	cfg := writeFile(t, dir, "a.json", `{"deemixPassword":"pw"}`)
-	c, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_CONFIG": cfg}))
-	if err != nil || c.Endpoint != DefaultRelayURL {
-		t.Fatalf("default relay: %+v %v", c, err)
+	if _, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_CONFIG": cfg})); err == nil {
+		t.Fatal("missing self-hosted relayUrl/deemixUrl was accepted")
 	}
 	cfg = writeFile(t, dir, "b.json", `{"deemixUrl":"http://192.168.1.5:6595","deemixPassword":"pw"}`)
-	c, err = ResolveClient(envOf(map[string]string{"SC5000_STEMS_CONFIG": cfg}))
+	c, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_CONFIG": cfg}))
 	if err != nil || c.Endpoint != "http://192.168.1.5:6595" {
 		t.Fatalf("legacy deemixUrl: %+v %v", c, err)
 	}
@@ -54,9 +53,8 @@ func TestResolveClientDefaultsAndLegacyKey(t *testing.T) {
 func TestResolveClientRejects(t *testing.T) {
 	dir := t.TempDir()
 	for name, c := range map[string]struct{ body, want string }{
-		"no password": {`{"relayUrl":"https://relay.example"}`, "no relay password"},
-		"plain http":  {`{"relayUrl":"http://relay.example","deemixPassword":"pw"}`, "https"},
-		"bad json":    {`{`, "invalid JSON"},
+		"plain http": {`{"relayUrl":"http://relay.example","deemixPassword":"pw"}`, "https"},
+		"bad json":   {`{`, "invalid JSON"},
 	} {
 		cfg := writeFile(t, dir, strings.ReplaceAll(name, " ", "-")+".json", c.body)
 		_, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_CONFIG": cfg}))
@@ -67,8 +65,16 @@ func TestResolveClientRejects(t *testing.T) {
 			t.Errorf("%s: error leaks the password: %v", name, err)
 		}
 	}
-	if _, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_CONFIG": filepath.Join(dir, "missing.json")})); err == nil {
-		t.Error("missing config accepted")
+}
+
+// Without a renderer set up the deck renders on its own.
+func TestResolveClientStandalone(t *testing.T) {
+	dir := t.TempDir()
+	for _, cfg := range []string{filepath.Join(dir, "missing.json"), writeFile(t, dir, "no-password.json", `{"relayUrl":"https://relay.example"}`)} {
+		c, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_CONFIG": cfg}))
+		if err != nil || c.Endpoint != "" || c.Source != "standalone" {
+			t.Errorf("%s: %+v %v", cfg, c, err)
+		}
 	}
 }
 

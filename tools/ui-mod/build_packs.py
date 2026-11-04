@@ -44,6 +44,24 @@ SERVICES_MAIN = """
 	property string scQuality: "flac"
 	property string scNeteaseMode: "official"
 	property string scJog: "static"
+	property string scUpdateRepo: "Cd1s/sc5000-custom-os"
+	property string scUpdateText: ""
+	// EngineX checks its own GitHub repository, not Denon's firmware server.
+	function scCheckUpdate() {
+		scUpdateText = scT("Checking GitHub…")
+		const x = new XMLHttpRequest()
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/update")
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4) return
+			if (x.status !== 200) {
+				scUpdateText = scT("GitHub unreachable")
+				return
+			}
+			const v = JSON.parse(x.responseText)
+			scUpdateText = v.error ? scT(v.error) : v.updateAvailable ? scT("New release available:") + " " + v.latestVersion : scT("Up to date") + " (" + v.currentVersion + ")"
+		}
+		x.send()
+	}
 	property bool scPlayheadRestored: false
 	// Engine resets this preference on every start, so settings.conf keeps it.
 	function scKeepPlayhead(saved) {
@@ -151,6 +169,7 @@ SERVICES_MAIN = """
 		scWave = v.waveform
 		scQuality = v.quality || "flac"
 		scNeteaseMode = v.neteaseMode || "official"
+		scUpdateRepo = v.githubRepo || scUpdateRepo
 		scJog = v.jog || "static"
 		scKeepPlayhead(v.playhead || 0)
 		scSources = v.sources
@@ -666,6 +685,23 @@ def edits(dev: bool):
              "				  if (actionIndex < leftActions.length) leftActions[actionIndex].trigger(row.index)\n"
              "				  else root.scStemStream(row.modelData.trackId)\n"),
         ],
+        # EngineX: Denon firmware would replace the whole mod, so its prompt never
+        # shows; the Update page checks the GitHub repository instead.
+        ROOT + "Items/MessageBoxes/FirmwareUpdateAvailableMessageBox.qml": [
+            ("	onUpdateAvailableChanged: {\n", "	onUpdateAvailableChanged: {\n		return\n")],
+        prefs + "Entries/Version.qml": [(
+            "	text: `Engine OS ${versionString} <font color=\\\"${grey}\\\">(${gitHashString})</font>`",
+            "	text: `EngineX OS ${versionString} <font color=\\\"${grey}\\\">(GitHub: ${root.scUpdateRepo})</font>`")],
+        prefs + "Entries/Update.qml": [
+            ("    model: PlanckGUI.views.updaterController.releaseVersionsModel\n", "    model: []\n"),
+            ('        text: "You\'re running the latest version"\n        visible: control.count < 1\n',
+             "        text: root.scUpdateText\n        visible: true\n"),
+            ("            PlanckGUI.views.updaterController.checkForUpdates()\n", "            root.scCheckUpdate()\n"),
+        ],
+        # RA002: stepping the clock while a deck plays disturbs the audio output.
+        prefs + "Entries/Time.qml": [(
+            '		text: "Sync Time"\n',
+            '		text: "Sync Time"\n		enabled: !root.scDeckList().some(d => { const p = Planck.getProperty("/Engine/Deck" + d + "/PlayState"); return !!(p && p.translator && p.translator.state) })\n')],
         v + "BrowseView/Components/Craylist.qml": [(
             "				var trackInfo = info.payload[key]\n				tracks.push(trackInfo.uniqueID)\n			}\n			Planck.librarianController.stemsQueueManager.startRenderTracks(",
             "				var trackInfo = info.payload[key]\n				if (!root.scStemStream(trackInfo.uniqueID)) tracks.push(trackInfo.uniqueID)\n			}\n			if (tracks.length) Planck.librarianController.stemsQueueManager.startRenderTracks(")],

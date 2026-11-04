@@ -19,8 +19,9 @@ import (
 	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
 )
 
-// DefaultRelayURL is the operator's own login service.
-const DefaultRelayURL = "https://relay.example.com"
+// DefaultRelayURL is empty by default so open-source builds keep logins on the
+// local LAN until the operator configures a self-hosted sc5000-relay URL.
+const DefaultRelayURL = ""
 
 const relayTimeout = 3 * time.Second
 
