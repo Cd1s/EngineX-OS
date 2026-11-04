@@ -755,7 +755,7 @@ def edits(dev: bool):
             ("	onUpdateAvailableChanged: {\n", "	onUpdateAvailableChanged: {\n		return\n")],
         prefs + "Entries/Version.qml": [(
             "	text: `Engine OS ${versionString} <font color=\\\"${grey}\\\">(${gitHashString})</font>`",
-            "	text: `EngineX OS ${root.scVersion || versionString}`")],
+            "	text: `EngineX OS ${root.scVersion || versionString} <font color=\\\"${grey}\\\">(github.com/${root.scUpdateRepo})</font>`")],
         prefs + "Entries/Update.qml": [
             ("    model: PlanckGUI.views.updaterController.releaseVersionsModel\n", "    model: root.scUpdateModel\n"),
             ("        text: `Engine OS ${model.displayVersion} is available`\n",
