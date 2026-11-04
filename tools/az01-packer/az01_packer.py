@@ -453,13 +453,22 @@ mkdir -p /data/sc5000-custom
 chmod 700 /data/sc5000-custom
 work=$(mktemp -d /data/sc5000-custom/.prepare.XXXXXX)
 trap 'rm -rf "$work"' 0
-if [ ! -e /data/sc5000-custom/authorized_keys ]; then
+# Public images seed no key: SSH stays off until the owner adds one (#46).
+if [ ! -e /data/sc5000-custom/authorized_keys ] && [ -s /usr/share/sc5000-custom/authorized_keys ]; then
     cp /usr/share/sc5000-custom/authorized_keys "$work/authorized_keys"
     chmod 600 "$work/authorized_keys"
     mv "$work/authorized_keys" /data/sc5000-custom/authorized_keys
 fi
-[ -f /data/sc5000-custom/authorized_keys ]
-chmod 600 /data/sc5000-custom/authorized_keys
+# Public images up to 5.0.4.1 seeded every deck with the maintainer's key.
+retired=@RETIRED@
+if [ -f /data/sc5000-custom/authorized_keys ] && [ ! -e /data/sc5000-custom/keep-release-key ] &&
+    grep -qF "$retired" /data/sc5000-custom/authorized_keys &&
+    ! grep -qsF "$retired" /usr/share/sc5000-custom/authorized_keys; then
+    grep -vF "$retired" /data/sc5000-custom/authorized_keys > "$work/authorized_keys" || :
+    chmod 600 "$work/authorized_keys"
+    mv "$work/authorized_keys" /data/sc5000-custom/authorized_keys
+fi
+[ ! -f /data/sc5000-custom/authorized_keys ] || chmod 600 /data/sc5000-custom/authorized_keys
 if [ ! -e /data/sc5000-custom/ssh_host_ed25519_key ]; then
     /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$work/ssh_host_ed25519_key"
     mv "$work/ssh_host_ed25519_key" /data/sc5000-custom/ssh_host_ed25519_key
@@ -507,6 +516,9 @@ install_ui() {
 }
 install_ui || echo "sc5000-custom-prepare: UI packs not installed" >&2
 '''
+# Public half of the key public images up to 5.0.4.1 shipped (#46). Not a secret.
+RETIRED_RELEASE_KEY = b'AAAAC3NzaC1lZDI1NTE5AAAAIC6p0NjBPb0vPCGB3XloshlMtXoYgVc6ig+JQAYnVUSz'
+PREPARE = PREPARE.replace(b'@RETIRED@', RETIRED_RELEASE_KEY)
 
 # Engine 4.3.4 left copies of these in the /etc overlay upper layer; they
 # shadow the 5.0.4 lower /etc (telemetry hosts blocking connman's online check,
@@ -596,6 +608,8 @@ Description=SC5000 public key SSH
 Requires=sc5000-custom-prepare.service
 After=sc5000-custom-prepare.service network.target
 Conflicts=sshd.service sshd.socket
+# No key, no SSH: public images ship none (#46).
+ConditionFileNotEmpty=/data/sc5000-custom/authorized_keys
 [Service]
 Type=simple
 ExecStartPre=/usr/bin/mkdir -p /run/sshd
@@ -665,7 +679,7 @@ def offline_debloat(fs, script):
 VERSION_RE = re.compile(r'\d+(\.\d+){1,3}')
 
 
-def inject(fs, key, services=(), overlay=None, version=None):
+def inject(fs, key=None, services=(), overlay=None, version=None):
     additions, links, planned = {}, {}, {}
     if overlay:
         root = Path(overlay)
@@ -710,7 +724,8 @@ def inject(fs, key, services=(), overlay=None, version=None):
         fs.link(path, target, planned)
     if '/usr/local/bin/sc5000-debloat' in additions:
         offline_debloat(fs, additions['/usr/local/bin/sc5000-debloat'][0])
-    fs.write('/usr/share/sc5000-custom/authorized_keys', key, 0o600)
+    if key:  # private builds only; public releases ship no key (#46)
+        fs.write('/usr/share/sc5000-custom/authorized_keys', key, 0o600)
     fs.write('/usr/share/sc5000-custom/sshd_config', SSHD_CONFIG)
     fs.write('/usr/libexec/sc5000-custom-prepare', PREPARE, 0o755)
     # sc5000/stems-runtime-prepare: the live Stems deployment of 2026-11-03 put it
@@ -779,7 +794,7 @@ def main(argv=None):
             s.add_argument('--output', required=True, help='new external directory')
         elif name == 'patch-rootfs':
             s.add_argument('--output', required=True, help='new external ext2 image')
-            s.add_argument('--ssh-public-key', required=True, type=Path)
+            s.add_argument('--ssh-public-key', type=Path, help='seed key for a private build; public releases omit it')
             s.add_argument('--overlay', type=Path)
             s.add_argument('--service', action='append', default=[], type=Path)
             s.add_argument('--set-version', help='EngineX release written to /etc/sc5000/version.txt, e.g. 5.0.4.1')
@@ -812,7 +827,7 @@ def main(argv=None):
                 original_fs = ExtFS(stock)
                 before = original_fs.snapshot()
                 if args.command == 'patch-rootfs':
-                    key = public_key(args.ssh_public_key.read_text())
+                    key = public_key(args.ssh_public_key.read_text()) if args.ssh_public_key else None
                     candidate = Path(temp)/'patched.ext2'
                     shutil.copyfile(stock, candidate)
                     inject(ExtFS(candidate), key, args.service, args.overlay, args.set_version)

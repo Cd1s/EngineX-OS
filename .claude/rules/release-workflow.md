@@ -52,8 +52,10 @@ python3 -m unittest discover -s tools/stems
 
 ```sh
 remote-build --name sc5000-release-<短说明> --clean -- \
-  'sh tools/az01-packer/build-release.sh <VERSION> <官方固件目录> <公钥> <fsck.hfsplus> <新输出目录>'
+  'sh tools/az01-packer/build-release.sh <VERSION> <官方固件目录> none <fsck.hfsplus> <新输出目录>'
 ```
+
+第 3 个参数在公开发布时**必须是 `none`**：公开镜像不能内置任何人的 SSH 公钥（#46）。只有维护者自用的私有镜像才传公钥文件，且私有镜像不能上传到 Release。
 
 输出目录必须不存在、且不在任何 git 工作区里。产出 8 个 `*-Update.img` 和 `SHA256SUMS.txt`。
 

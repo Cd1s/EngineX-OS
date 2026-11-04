@@ -45,7 +45,7 @@ Maintainers follow the checklist in [`.claude/rules/release-workflow.md`](./.cla
 2. **Three READMEs** (`README.md`, `README.zh-CN.md`, `README.zh-TW.md`): the hero image `alt`, the version in the intro and the performance table, and all 8 download links in "How to Install & Update":
    `https://github.com/Cd1s/EngineX-OS/releases/latest/download/<PREFIX>-<VERSION>-EngineX-OS-<Model>-Update.img`
 3. **Hero banners** `docs/assets/hero-banner*.svg`: only if they show a version (they do not today).
-4. **Build** all 8 images and `SHA256SUMS.txt` with `tools/az01-packer/build-release.sh <VERSION> ...` from a clean checkout, then spot-check one image per group.
+4. **Build** all 8 images and `SHA256SUMS.txt` with `tools/az01-packer/build-release.sh <VERSION> <fw> none ...` from a clean checkout, then spot-check one image per group. Public images never carry an SSH key (`none`).
 5. **Tag and Release** `v<VERSION>`: upload the 8 images and `SHA256SUMS.txt`, and put the SHA-256 table of all 8 models in the release notes.
 
 | Image group | Models (prefix, board) |
