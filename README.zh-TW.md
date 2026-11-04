@@ -97,13 +97,19 @@
 <sub>直接切換語言、波形樣式、串流音質與轉盤燈效</sub>
 </td>
 </tr>
-</table>
-
-<div align="center">
-<img src="./docs/assets/screenshots/zh-TW/06-preferences-enginex-github-update.png" width="70%" alt="播放機線上檢查更新"><br>
+<tr>
+<td width="50%" align="center" valign="top">
+<img src="./docs/assets/screenshots/zh-TW/06-preferences-enginex-github-update.png" width="100%" alt="播放機線上檢查更新"><br>
 <b>設定 → 關於 / 更新：播放機螢幕一鍵線上升級</b><br>
 <sub>偵測到新版本時直接點擊螢幕上的「更新」，自動拉起原廠刷機進度條完成升級</sub>
-</div>
+</td>
+<td width="50%" align="center" valign="top">
+<img src="./docs/assets/screenshots/zh-TW/07-bluetooth-audio.png" width="100%" alt="原生藍牙音訊"><br>
+<b>原生藍牙音訊輸入與播放控制</b><br>
+<sub>手機藍牙串流到播放機，螢幕顯示曲目資訊，可直接播放/暫停與切歌</sub>
+</td>
+</tr>
+</table>
 
 ---
 

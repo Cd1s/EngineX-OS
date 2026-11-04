@@ -97,13 +97,19 @@
 <sub>直接切换语言、波形样式、流媒体音质与转盘灯效</sub>
 </td>
 </tr>
-</table>
-
-<div align="center">
-<img src="./docs/assets/screenshots/zh-CN/06-preferences-enginex-github-update.png" width="70%" alt="碟机在线检查更新"><br>
+<tr>
+<td width="50%" align="center" valign="top">
+<img src="./docs/assets/screenshots/zh-CN/06-preferences-enginex-github-update.png" width="100%" alt="碟机在线检查更新"><br>
 <b>设置 → 关于 / 更新：碟机屏幕一键在线升级</b><br>
 <sub>检测到新版本时直接点击屏幕上的「更新」，自动拉起原厂刷机进度条完成升级</sub>
-</div>
+</td>
+<td width="50%" align="center" valign="top">
+<img src="./docs/assets/screenshots/zh-CN/07-bluetooth-audio.png" width="100%" alt="原生蓝牙音频"><br>
+<b>原生蓝牙音频输入与播放控制</b><br>
+<sub>手机蓝牙推流到碟机，屏幕显示曲目信息，可直接播放/暂停与切歌</sub>
+</td>
+</tr>
+</table>
 
 ---
 
