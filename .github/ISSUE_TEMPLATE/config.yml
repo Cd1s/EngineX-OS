@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Downloads and release notes / 下载与更新说明
+    url: https://github.com/Cd1s/EngineX-OS/releases
+    about: Every model's upgrade image with SHA-256 checksums. / 各机型升级包与 SHA-256 校验值。
+  - name: Install and update guide / 安装与升级说明
+    url: https://github.com/Cd1s/EngineX-OS#how-to-install--update
+    about: USB install and one-click on-deck update. / U 盘刷机与碟机一键升级。
