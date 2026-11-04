@@ -1,13 +1,18 @@
 #!/bin/sh
-# After three Engine starts that do not survive 90 seconds, the UI hook stops
-# applying packs (safe-mode) and the deck comes back with the stock UI.
+# After three Engine starts that neither survive 15 seconds nor stop cleanly,
+# the UI hook stops applying packs (safe-mode) and the deck comes back with the
+# stock UI. Deliberate stops and restarts (language switch, deploy) reset it.
 UI=${SC5000_UI_DIR:-/data/sc5000-custom/ui}
 case ${1:-} in
 pre)
+    if [ -x /etc/sc5000/stems-runtime-prepare ]; then
+        /etc/sc5000/stems-runtime-prepare || exit 1
+    fi
     n=$(cat "$UI/boot-count" 2>/dev/null)
     case $n in ''|*[!0-9]*) n=0 ;; esac
     n=$((n + 1))
     mkdir -p "$UI"
+    rm -f "$UI/boot-token"
     echo "$n" > "$UI/boot-count"
     [ "$n" -lt 3 ] || : > "$UI/safe-mode"
     ;;
@@ -15,7 +20,18 @@ post)
     # Engine's setup script has just set the GPU to performance. This also covers
     # boot, when a start request would merge with an already running tune job.
     /usr/local/bin/sc5000-perf-tune >/dev/null 2>&1
-    ( sleep "${SC5000_UI_HEALTHY_AFTER:-90}"; rm -f "$UI/boot-count" ) </dev/null >/dev/null 2>&1 &
+    # Only the timer of the latest start may clear the count, so a timer that
+    # outlived its start cannot reset a later crash streak (#7).
+    token=$$-$(cat "$UI/boot-count" 2>/dev/null)
+    echo "$token" > "$UI/boot-token"
+    ( sleep "${SC5000_UI_HEALTHY_AFTER:-15}"
+      [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$token" ] && rm -f "$UI/boot-count" "$UI/boot-token"
+    ) </dev/null >/dev/null 2>&1 &
+    ;;
+stop)
+    # systemd sets SERVICE_RESULT=success for a requested stop/restart; a crash
+    # (exit-code, signal, core-dump, timeout) keeps counting towards safe-mode.
+    [ "${SERVICE_RESULT:-}" != success ] || rm -f "$UI/boot-count" "$UI/boot-token"
     ;;
 esac
 exit 0

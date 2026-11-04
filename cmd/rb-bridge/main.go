@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/cli"
+	"github.com/Cd1s/EngineX-OS/internal/cli"
 )
 
 func main() {

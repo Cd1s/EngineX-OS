@@ -12,7 +12,9 @@ from pathlib import Path
 import struct
 import tempfile
 
-from az01_packer import ExtFS, SafetyError, inflate, new_output, require
+from az01_packer import MODELS, ExtFS, SafetyError, inflate, new_output, require
+
+KNOWN_COMPATIBLE = {c.encode() for c in MODELS}
 
 
 def inspect(data):
@@ -78,7 +80,8 @@ def inspect(data):
             break
         else:
             require(token == 4, 'unknown FDT token')
-    require(prop('', 'compatible') == b'inmusic,jp07\0', 'not official JP07 FIT layout')
+    compatible = prop('', 'compatible').split(b'\0')
+    require(any(c in KNOWN_COMPATIBLE for c in compatible), 'not an official supported-model FIT layout')
     parts = []
     for path, props in nodes.items():
         if 'data' not in props:

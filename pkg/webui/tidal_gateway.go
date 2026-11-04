@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"github.com/google/uuid"
 )
 

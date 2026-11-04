@@ -15,10 +15,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testaudio"
-	"github.com/Cd1s/sc5000-custom-os/pkg/deemixclient"
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
-	"github.com/Cd1s/sc5000-custom-os/pkg/resourceguard"
+	"github.com/Cd1s/EngineX-OS/internal/testaudio"
+	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
 )
 
 func deezerProfiles(t *testing.T) *httptest.Server {
@@ -62,7 +62,8 @@ func TestPhoneLoginNeedsTokenAndLinksDeezer(t *testing.T) {
 		t.Fatalf("wrong token: %d", bad.StatusCode)
 	}
 	token := flow.token
-	ok, err := http.PostForm(srv.URL+"/m/deezer?t="+token, url.Values{"user": {"https://www.deezer.com/profile/123?x=1"}})
+	// #8: holding the QR token must not re-point the relay.
+	ok, err := http.PostForm(srv.URL+"/m/deezer?t="+token, url.Values{"user": {"https://www.deezer.com/profile/123?x=1"}, "relayUrl": {"https://evil.example"}, "deemixPassword": {"x"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +71,9 @@ func TestPhoneLoginNeedsTokenAndLinksDeezer(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(state, "deezer-owner.json"))
 	if err != nil || !strings.Contains(string(data), "123") {
 		t.Fatalf("not saved: %s %v", data, err)
+	}
+	if relay, password := ui.relaySettings(); relay != "" || password != "" {
+		t.Fatalf("phone page changed the relay: %q %q", relay, password)
 	}
 	// The token works once, and the deck learns that the login finished.
 	again, err := http.PostForm(srv.URL+"/m/deezer?t="+token, url.Values{"user": {"456"}})
@@ -300,6 +304,24 @@ func TestRelayPasswordIsNeverReadBack(t *testing.T) {
 	}
 	if _, password := ui.relaySettings(); password != "changed" {
 		t.Fatal(password)
+	}
+	// #9: a rejected request leaves the relay alone.
+	r, err = http.Post(srv.URL+"/v1/sc5000/ui?lang=xx&relayUrl=https://other.example", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if relay, password := ui.relaySettings(); r.StatusCode != 400 || relay != "https://default.example" || password != "changed" {
+		t.Fatalf("%d %q %q", r.StatusCode, relay, password)
+	}
+	// #8: the password stays with its host; the same host keeps it.
+	ui.updateRelayConfig(ptr("https://DEFAULT.example/"), nil)
+	if _, password := ui.relaySettings(); password != "changed" {
+		t.Fatal("same host lost the password")
+	}
+	ui.updateRelayConfig(ptr("https://other.example"), nil)
+	if _, password := ui.relaySettings(); password != "" {
+		t.Fatal("password followed the relay to another host")
 	}
 	r, err = http.Post(srv.URL+"/v1/sc5000/relay", "application/json", strings.NewReader(`{"relayUrl":"http://public.example"}`))
 	if err != nil {

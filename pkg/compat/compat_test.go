@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testfixture"
-	"github.com/Cd1s/sc5000-custom-os/pkg/compat"
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -156,4 +156,3 @@ func TestAIFFHeaderAndFAT32TrailingSpaceDotResolution(t *testing.T) {
 		t.Fatalf("Resolve trailing dot/space = %q, %v", got, err)
 	}
 }
-

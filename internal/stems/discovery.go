@@ -105,6 +105,9 @@ func broadcastTargets() []*net.UDPAddr {
 			if !ok || n.IP.To4() == nil {
 				continue
 			}
+			if len(n.Mask) < 4 {
+				continue // point-to-point / unnumbered interfaces have no broadcast mask (#40)
+			}
 			ip, mask, b := n.IP.To4(), n.Mask[len(n.Mask)-4:], make(net.IP, 4)
 			for k := range b {
 				b[k] = ip[k] | ^mask[k]
@@ -184,7 +187,8 @@ func lanHealth(ctx context.Context, endpoint string, timeout time.Duration) (LAN
 	if err != nil {
 		return LANState{}, false
 	}
-	resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil}}).Do(req)
+	// One-shot probe: no keep-alive, so no idle socket outlives it (#42).
+	resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}).Do(req)
 	if err != nil {
 		return LANState{}, false
 	}

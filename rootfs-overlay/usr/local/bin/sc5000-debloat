@@ -42,10 +42,22 @@ if [ -d "$scripts" ]; then
 fi
 mkdir -p "$base/etc/systemd/system/engine.service.d" "$base/etc/systemd/journald.conf.d" "$base/etc/connman"
 cat > "$base/etc/systemd/system/engine.service.d/override.conf" <<'CONF'
+[Unit]
+# The image's UI packs and version.txt are installed by this unit (az01_packer PREPARE).
+Wants=sc5000-custom-prepare.service
+After=sc5000-custom-prepare.service
+
 [Service]
 LimitCORE=0
 ExecStopPost=
-ExecStopPost=-/usr/Engine/Scripts/cleanup-JP07.sh
+# The vendor script only calls connmanctl, which 5.0.4 does not ship (#33).
+ExecStopPost=-/bin/sh -c 'command -v connmanctl >/dev/null || exit 0; exec /usr/Engine/Scripts/cleanup-JP07.sh'
+# Here, not in 60-ui-hook.conf: the empty ExecStopPost= above would drop it.
+ExecStopPost=-/etc/sc5000/engine-ui-guard stop
+# Engine runs without HOME: Mesa falls back to /root/.cache and Qt to //.config,
+# both on the read-only root (#25). RAM-backed, capped so the cache stays small.
+Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M
+ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home
 ExecStartPre=/usr/local/bin/sc5000-debloat --apply-runtime
 CONF
 cat > "$base/etc/systemd/journald.conf.d/sc5000.conf" <<'CONF'

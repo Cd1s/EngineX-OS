@@ -8,16 +8,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 // EngineX checks its own GitHub repository for releases; the UI pack hides
 // Engine's Denon firmware check, whose updates would replace the whole mod.
 
 const (
-	defaultGitHubRepo = "Cd1s/sc5000-custom-os"
+	defaultGitHubRepo = "Cd1s/EngineX-OS"
 	versionFile       = "/data/sc5000-custom/version.txt"
-	updateCacheFor    = 10 * time.Minute
+	// imageVersionFile is written by az01_packer.py patch-rootfs --set-version.
+	imageVersionFile = "/etc/sc5000/version.txt"
+	updateCacheFor   = 10 * time.Minute
 )
 
 var githubRepoRE = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
@@ -28,8 +30,11 @@ type updateStatus struct {
 	Latest          string `json:"latestVersion,omitempty"`
 	URL             string `json:"releaseUrl,omitempty"`
 	UpdateAvailable bool   `json:"updateAvailable"`
-	Error           string `json:"error,omitempty"`
-	checked         time.Time
+	// DownloadURL is this model's upgrade image in the release, for Engine's
+	// own online updater (Settings → Update).
+	DownloadURL string `json:"downloadUrl,omitempty"`
+	Error       string `json:"error,omitempty"`
+	checked     time.Time
 }
 
 func currentVersion(path string) string {
@@ -47,7 +52,8 @@ func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
 	if v := s.updateCache; v.Repo != repo || time.Since(v.checked) > updateCacheFor {
-		s.updateCache = s.checkRelease(r.Context(), repo)
+		// Detached: a deck page closing mid-check must not cache "unreachable" (#13).
+		s.updateCache = s.checkRelease(context.WithoutCancel(r.Context()), repo)
 	}
 	respond(w, s.updateCache)
 }
@@ -57,7 +63,11 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 	if path == "" {
 		path = versionFile
 	}
-	v := updateStatus{Repo: repo, Current: currentVersion(path), checked: time.Now()}
+	current := currentVersion(path)
+	if current == "dev" && s.cfg.VersionFile == "" {
+		current = currentVersion(imageVersionFile) // the flashed image's release (#13)
+	}
+	v := updateStatus{Repo: repo, Current: current, checked: time.Now()}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	base := s.cfg.GitHubURL
@@ -65,8 +75,12 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 		base = "https://api.github.com"
 	}
 	var rel struct {
-		Tag string `json:"tag_name"`
-		URL string `json:"html_url"`
+		Tag    string `json:"tag_name"`
+		URL    string `json:"html_url"`
+		Assets []struct {
+			Name string `json:"name"`
+			URL  string `json:"browser_download_url"`
+		} `json:"assets"`
 	}
 	h := http.Header{"Accept": {"application/vnd.github+json"}, "User-Agent": {"EngineX-OS"}}
 	if err := providers.JSON(ctx, s.cfg.HTTP, "GET", base+"/repos/"+repo+"/releases/latest", nil, h, &rel); err != nil {
@@ -79,6 +93,64 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 		return v
 	}
 	v.Latest, v.URL = rel.Tag, rel.URL
-	v.UpdateAvailable = rel.Tag != "" && rel.Tag != v.Current
+	v.UpdateAvailable = newerVersion(rel.Tag, v.Current)
+	if prefix := imagePrefix(deviceCompatible()); prefix != "" {
+		for _, a := range rel.Assets {
+			// Engine's own scan expects <PREFIX>-<version>-...Update.img.
+			if strings.HasPrefix(a.Name, prefix+"-") && strings.HasSuffix(a.Name, "-Update.img") && strings.HasPrefix(a.URL, "https://") {
+				v.DownloadURL = a.URL
+				break
+			}
+		}
+	}
 	return v
+}
+
+// deviceCompatiblePath lists the board's device-tree compatible strings.
+var deviceCompatiblePath = "/sys/firmware/devicetree/base/compatible"
+
+func deviceCompatible() []string {
+	b, err := os.ReadFile(deviceCompatiblePath)
+	if err != nil {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
+}
+
+// imagePrefixes name each model's upgrade image as Denon does (SC5000-…-Update.img).
+var imagePrefixes = map[string]string{
+	"inmusic,jp07": "SC5000", "inmusic,jp08": "SC5000M", "inmusic,jp11": "PRIMEGO",
+	"inmusic,jp13": "SC6000", "inmusic,jp14": "SC6000M",
+	"inmusic,jc11": "PRIME4", "inmusic,jc16": "PRIME2", "inmusic,nh08": "MIXSTREAMPRO",
+}
+
+func imagePrefix(compatible []string) string {
+	for _, c := range compatible {
+		if p := imagePrefixes[c]; p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+var versionNumberRE = regexp.MustCompile(`\d+`)
+
+// newerVersion compares the numbers in two tags in order, so v5.0.4-custom.10 is
+// newer than v5.0.4-custom.9 and an older tag is never offered. A current
+// version without numbers ("dev", no version.txt) is unknown: never claim an update.
+func newerVersion(latest, current string) bool {
+	l, c := versionNumberRE.FindAllString(latest, -1), versionNumberRE.FindAllString(current, -1)
+	if len(l) == 0 || len(c) == 0 {
+		return false
+	}
+	for i := 0; i < len(l) && i < len(c); i++ {
+		a, b := strings.TrimLeft(l[i], "0"), strings.TrimLeft(c[i], "0")
+		if len(a) != len(b) {
+			return len(a) > len(b)
+		}
+		if a != b {
+			return a > b
+		}
+	}
+	return len(l) > len(c)
 }

@@ -1,4 +1,4 @@
-package main
+package stemsproc
 
 import (
 	"bytes"
@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/stems"
+	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
 
 // The LAN renderer's worker is this test binary answering with LocalRender.
@@ -98,6 +98,39 @@ func TestFallsBackToLocalRender(t *testing.T) {
 	}
 	if !asked {
 		t.Fatal("LAN not tried after the relay was unreachable")
+	}
+	checkSession(t, in, out.Bytes())
+}
+
+// gated releases its input only once opened, like Engine waiting for the greeting.
+type gated struct {
+	open chan struct{}
+	r    io.Reader
+}
+
+func (g gated) Read(p []byte) (int, error) {
+	<-g.open
+	return g.r.Read(p)
+}
+
+// #41: a busy relay (503) before Engine sent anything falls back, and bytes a
+// given-up upload read later still reach the next renderer in order.
+func TestBusyRelayFallsBackWithoutSplittingTheStream(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer relay.Close()
+	in := engineInput(3)
+	g := gated{open: make(chan struct{}), r: strings.NewReader(in)}
+	var out bytes.Buffer
+	find := func(context.Context) (string, bool) { return "", false }
+	local := func(r io.Reader, w io.Writer) error {
+		close(g.open)
+		return stems.LocalRender(r, w)
+	}
+	client := stems.Client{Endpoint: relay.URL, Secret: "pw", Source: "test relay"}
+	if err := run(context.Background(), client, find, local, g, &out); err != nil {
+		t.Fatal(err)
 	}
 	checkSession(t, in, out.Bytes())
 }

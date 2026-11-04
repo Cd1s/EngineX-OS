@@ -43,6 +43,22 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(changed.payload('splash'), b'S')
         self.assertEqual(changed.info()['compatible'], ['inmusic,jp07'])
 
+    def test_models_and_aligned_trailer(self):
+        im = az.Image(fixture())
+        self.assertEqual(im.info()['models'], [{'code': 'JP07', 'name': 'SC5000'}])
+        # SC6000 / PRIME 4 pad the last record to 8 bytes before EOF (#32).
+        padded = fixture(payload=b'rootfs0')
+        body = padded[:-16]
+        pad = (-len(body)) % 8
+        if pad:
+            im = az.Image(body + bytes(pad) + az.Image.EOF)
+            self.assertTrue(im.aligned)
+            self.assertEqual(len(im.replace_rootfs(b'odd')) % 8, 0)
+        with self.assertRaises(az.SafetyError):
+            az.Image(fixture().replace(b'inmusic,jp07', b'inmusic,xx99'))
+        with self.assertRaises(az.SafetyError):
+            az.Image(b'AZ0x' + fixture()[4:])
+
     def test_truncation_every_boundary(self):
         data = fixture()
         for n in range(len(data)):
@@ -182,6 +198,43 @@ class FilesystemTests(unittest.TestCase):
         self.assertIn(b'Before=etc.mount',
                       self.fs.read('/usr/lib/systemd/system/sc5000-custom-etc-reset.service'))
         az.check_fs(self.disk)
+
+    def test_prepare_installs_ui_packs_once_per_version(self):
+        import io, lzma, tarfile
+        seed = self.root/'seed-ui'
+        seed.mkdir()
+        (seed/'authorized_keys').write_bytes(self.key.with_suffix('.pub').read_bytes())
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as t:
+            for name, data in (('packs/en/Main.qml', b'new'), ('icons/deezer.png', b'png')):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                t.addfile(info, io.BytesIO(data))
+        (seed/'ui-packs.tar.xz').write_bytes(lzma.compress(buf.getvalue(), check=lzma.CHECK_CRC32))
+        version = self.root/'version.txt'
+        version.write_text('5.0.4.1\n')
+        data = self.root/'data-ui'
+        ui = data/'sc5000-custom/ui'
+        (ui/'packs/en').mkdir(parents=True)
+        (ui/'packs/en/Main.qml').write_text('old')
+        (ui/'packs.dev').mkdir()
+        (ui/'safe-mode').write_text('')
+        (ui/'boot-count').write_text('3')
+        script = az.PREPARE.replace(b'/data', str(data).encode()).replace(
+            b'/usr/share/sc5000-custom', str(seed).encode()).replace(
+            b'/etc/sc5000/version.txt', str(version).encode())
+        passed = subprocess.run(['sh', '-s'], input=script, capture_output=True)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertEqual((ui/'packs/en/Main.qml').read_text(), 'new')
+        self.assertTrue((ui/'icons/deezer.png').exists() and (ui/'packs.dev').is_dir())
+        self.assertFalse((ui/'safe-mode').exists() or (ui/'boot-count').exists())
+        self.assertEqual((ui/'.pack-version').read_text(), '5.0.4.1\n')
+        self.assertEqual((data/'sc5000-custom/version.txt').read_text(), '5.0.4.1\n')
+        self.assertEqual(list(ui.glob('.install.*')) + list(ui.glob('*.replaced')), [])
+        # Same version again: a hand-deployed pack is left alone.
+        (ui/'packs/en/Main.qml').write_text('dev')
+        subprocess.run(['sh', '-s'], input=script, check=True, capture_output=True)
+        self.assertEqual((ui/'packs/en/Main.qml').read_text(), 'dev')
 
     def test_prepare_atomic_failure_retry_identity_and_symlink_guard(self):
         # Relocate every guest state/seed path into this lab fixture. Only host
@@ -394,6 +447,26 @@ class FilesystemTests(unittest.TestCase):
         # Re-injection must replace existing wants links without corrupting ext2.
         az.inject(self.fs, b'key', overlay=overlay)
         self.assertEqual(self.fs.snapshot(), before)
+        az.check_fs(self.disk)
+
+    def test_set_version_writes_version_and_new_reset_epoch(self):
+        overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
+        az.inject(self.fs, b'key', overlay=overlay, version='5.0.4.1')
+        self.assertEqual(self.fs.read('/etc/sc5000/version.txt'), b'5.0.4.1\n')
+        reset = self.fs.read('/usr/libexec/sc5000-custom-etc-reset')
+        self.assertRegex(reset, rb'epoch=5\.0\.4\.1-[0-9a-f]{12}\n')
+        # Upper-layer copies of image-managed /etc files are dropped on upgrade (#33).
+        self.assertIn(b' sc5000/engine-ui-guard', reset)
+        self.assertIn(b' systemd/system/engine.service.d/override.conf', reset)
+        with self.assertRaises(az.SafetyError):
+            az.inject(self.fs, b'key', overlay=overlay, version='5.0.4.1; rm -rf /')
+
+    def test_overlay_debloat_runs_offline(self):
+        overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
+        self.fs.write('/usr/Engine/Scripts/engine', b'#!/bin/sh\n/usr/bin/az01-ethernet-speed 100\n', 0o755)
+        az.inject(self.fs, b'key', overlay=overlay)
+        self.assertIn(b'az01-ethernet-speed 1000', self.fs.read('/usr/Engine/Scripts/engine'))
+        self.assertIn(b'0.0.0.0 telemetry.inmusicbrands.com', self.fs.read('/etc/hosts'))
         az.check_fs(self.disk)
 
     def test_guardian_and_template_services(self):

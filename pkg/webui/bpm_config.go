@@ -4,7 +4,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 // The optional BPM service keys can be replaced but are never read back out.

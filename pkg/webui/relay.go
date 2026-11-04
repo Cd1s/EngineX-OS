@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 // DefaultRelayURL is empty by default so open-source builds keep logins on the
@@ -139,16 +139,27 @@ func (s *Server) relayCollect(session *Session, v relaySession) error {
 // bpmSyncInterval paces the pull of BPM service keys saved on the relay's console.
 const bpmSyncInterval = time.Hour
 
+// bpmSyncRetries back off a failed pull; at boot the network is often not up yet (#14).
+var bpmSyncRetries = []time.Duration{10 * time.Second, 30 * time.Second, 2 * time.Minute}
+
 // SyncRelaySettings keeps the BPM service keys in step with the relay until ctx ends.
 func (s *Server) SyncRelaySettings(ctx context.Context) {
+	failures := 0
 	for {
+		wait := bpmSyncInterval
 		if err := s.pullBPMConfig(ctx); err != nil {
 			log.Printf("stream-sync: BPM settings not synced: %v", err)
+			if failures < len(bpmSyncRetries) {
+				wait = bpmSyncRetries[failures]
+			}
+			failures++
+		} else {
+			failures = 0
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(bpmSyncInterval):
+		case <-time.After(wait):
 		}
 	}
 }

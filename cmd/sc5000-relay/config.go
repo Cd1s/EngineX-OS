@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,10 +23,12 @@ import (
 )
 
 const (
-	defaultPassword     = "change-me-in-config"
-	defaultDeezerUserID = "6850245583"
-	authCookie          = "deemix_auth"
-	authCookieTTL       = 30 * 24 * time.Hour
+	// legacyDefaultPassword was the fixed initial password of older releases;
+	// configs still using it are flagged and kept away from secrets (#10).
+	legacyDefaultPassword = "change-me-in-config"
+	defaultDeezerUserID   = "6850245583"
+	authCookie            = "deemix_auth"
+	authCookieTTL         = 30 * 24 * time.Hour
 )
 
 type config struct {
@@ -76,9 +79,17 @@ func loadConfig(path string) (*configStore, error) {
 	}
 	changed := false
 	if cs.c.PasswordHash == "" {
-		h, _ := bcrypt.GenerateFromPassword([]byte(defaultPassword), bcrypt.DefaultCost)
-		cs.c.PasswordHash, cs.c.PasswordIsDefault = string(h), true
+		// A random first password, readable only by the service account; it is
+		// never logged, so the journal does not hold a working credential.
+		pw := randomHex(12)
+		initial := filepath.Join(filepath.Dir(path), "initial-password")
+		if err := writeFileAtomic(initial, []byte(pw+"\n"), 0o600); err != nil {
+			return nil, err
+		}
+		h, _ := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+		cs.c.PasswordHash = string(h)
 		changed = true
+		log.Printf("config: initial console password written to %s; change it in the console", initial)
 	}
 	if cs.c.CookieSecret == "" {
 		cs.c.CookieSecret = randomHex(32)
@@ -157,7 +168,7 @@ func (cs *configStore) setPassword(pw string) error {
 	}
 	err = cs.update(func(c *config) {
 		c.PasswordHash = string(h)
-		c.PasswordIsDefault = pw == defaultPassword
+		c.PasswordIsDefault = pw == legacyDefaultPassword
 		c.PasswordChangedAt = time.Now().UTC()
 	})
 	if err == nil {
@@ -214,10 +225,8 @@ func passwordFromRequest(r *http.Request) string {
 	if v := r.Header.Get("Authorization"); len(v) > 7 && strings.EqualFold(v[:7], "bearer ") {
 		return strings.TrimSpace(v[7:])
 	}
-	if v := r.URL.Query().Get("key"); v != "" {
-		return v
-	}
-	return r.URL.Query().Get("password")
+	// Not from the URL query: proxies and access logs keep URLs (#10).
+	return ""
 }
 
 // failLimiter counts events per client in a sliding window: password
@@ -238,17 +247,44 @@ func newLimiter(window time.Duration, max int) *failLimiter {
 	return &failLimiter{m: map[string][]time.Time{}, window: window, max: max}
 }
 
+const maxLimiterKeys = 10000
+
+// limitKey counts an IPv6 client by its /64: one host usually owns the whole
+// prefix, so per-address keys would be free to rotate (#11).
+func limitKey(key string) string {
+	if ip := net.ParseIP(key); ip != nil && ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	}
+	return key
+}
+
 func (l *failLimiter) blocked(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(l.prune(key)) >= l.max
+	return len(l.prune(limitKey(key))) >= l.max
 }
 
 func (l *failLimiter) fail(key string) {
+	key = limitKey(key)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.m) > 10000 {
-		l.m = map[string][]time.Time{}
+	if _, ok := l.m[key]; !ok && len(l.m) >= maxLimiterKeys {
+		// Full: forget expired keys, then the quietest key that is not blocked.
+		// Never wipe the table, which would release blocked clients too (#11).
+		oldest, at, oldestBlocked := "", time.Now(), true
+		for k := range l.m {
+			ts := l.prune(k)
+			if len(ts) == 0 {
+				continue
+			}
+			blocked := len(ts) >= l.max
+			if (oldestBlocked && !blocked) || (blocked == oldestBlocked && ts[len(ts)-1].Before(at)) {
+				oldest, at, oldestBlocked = k, ts[len(ts)-1], blocked
+			}
+		}
+		if len(l.m) >= maxLimiterKeys {
+			delete(l.m, oldest)
+		}
 	}
 	l.m[key] = append(l.prune(key), time.Now())
 }
@@ -266,15 +302,15 @@ func (l *failLimiter) prune(key string) []time.Time {
 	return ts
 }
 
-// clientIP trusts X-Forwarded-For only from private/tailnet peers (the
-// mini-router edge proxy); the right-most entry is the one it appended.
+// clientIP trusts X-Forwarded-For only from trustedProxies (the edge proxy);
+// the right-most entry is the one it appended.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
 	ip := net.ParseIP(host)
-	if ip != nil && (ip.IsPrivate() || ip.IsLoopback() || cgnat.Contains(ip)) {
+	if ip != nil && trustedProxy(ip) {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
 			return strings.TrimSpace(parts[len(parts)-1])
@@ -287,6 +323,46 @@ func clientIP(r *http.Request) string {
 }
 
 var _, cgnat, _ = net.ParseCIDR("100.64.0.0/10")
+
+// trustedProxies is set by -trusted-proxies; nil keeps the old default of every
+// private, loopback and tailnet peer. Set it to the edge proxy's address so
+// other LAN hosts cannot choose their own limiter key (#11).
+var trustedProxies []*net.IPNet
+
+func trustedProxy(ip net.IP) bool {
+	if trustedProxies == nil {
+		return ip.IsPrivate() || ip.IsLoopback() || cgnat.Contains(ip)
+	}
+	for _, n := range trustedProxies {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseTrustedProxies(list string) ([]*net.IPNet, error) {
+	if strings.TrimSpace(list) == "" {
+		return nil, nil
+	}
+	nets := []*net.IPNet{}
+	for _, item := range strings.Split(list, ",") {
+		item = strings.TrimSpace(item)
+		if !strings.Contains(item, "/") {
+			if ip := net.ParseIP(item); ip != nil && ip.To4() != nil {
+				item += "/32"
+			} else {
+				item += "/128"
+			}
+		}
+		_, n, err := net.ParseCIDR(item)
+		if err != nil {
+			return nil, fmt.Errorf("-trusted-proxies: %v", err)
+		}
+		nets = append(nets, n)
+	}
+	return nets, nil
+}
 
 // trustedCaller reports whether an optional password on a public endpoint
 // (deck session calls) is valid; wrong guesses count against the limiter.

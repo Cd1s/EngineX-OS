@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/deemixclient"
+	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 )
 
 func uiPost(t *testing.T, base, query string) (int, uiSettings) {
@@ -38,8 +38,15 @@ func TestUISettingsPersistAndRestart(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "safe-mode"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Two earlier quick restarts: this deliberate one must not become the third.
+	if err := os.WriteFile(filepath.Join(dir, "boot-count"), []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if code, v := uiPost(t, srv.URL, "lang=zh-Hant&restart=1"); code != 200 || v.Language != "zh-Hant" || v.SafeMode || restarts != 1 {
 		t.Fatalf("%d %+v restarts=%d", code, v, restarts)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "boot-count")); !os.IsNotExist(err) {
+		t.Fatalf("boot-count survived the restart: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
 	if err != nil || !slices.Contains(splitLines(data), "lang=zh-Hant") {
@@ -164,5 +171,20 @@ func TestPlayheadAndJogModePersist(t *testing.T) {
 		if code, _ := uiPost(t, srv.URL, q); code != 400 {
 			t.Fatalf("%s: %d", q, code)
 		}
+	}
+}
+
+func TestAccessTokenSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	first, created, err := LoadAccessToken(dir)
+	if err != nil || !created || first == "" {
+		t.Fatal(first, created, err)
+	}
+	again, created, err := LoadAccessToken(dir)
+	if err != nil || created || again != first {
+		t.Fatal(again, created, err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, "access-token")); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal(info, err)
 	}
 }

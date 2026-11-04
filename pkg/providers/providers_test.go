@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -192,5 +193,29 @@ func TestDeezerPublicPlaylistAndErrors(t *testing.T) {
 	}
 	if _, e := d.ByISRC(context.Background(), "bad"); e == nil || strings.Contains(e.Error(), "private token") {
 		t.Fatal("API error leaked body")
+	}
+}
+
+func TestSpotifyTracksFallBackOnlyWhenItemsIsGone(t *testing.T) {
+	for _, c := range []struct {
+		status   int
+		wantHits int
+		wantErr  bool
+	}{{429, 1, true}, {500, 1, true}, {404, 2, false}} {
+		hits := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits++
+			if r.URL.Path == "/playlists/p1/items" {
+				w.WriteHeader(c.status)
+				return
+			}
+			ioJSON(w, `{"items":[]}`)
+		}))
+		sp := &Spotify{BaseURL: srv.URL, Token: Token{AccessToken: "a", Expiry: time.Now().Add(time.Hour)}}
+		_, err := sp.Tracks(context.Background(), "p1")
+		srv.Close()
+		if hits != c.wantHits || (err != nil) != c.wantErr || (c.wantErr && !strings.Contains(err.Error(), strconv.Itoa(c.status))) {
+			t.Errorf("status %d: hits=%d err=%v", c.status, hits, err)
+		}
 	}
 }

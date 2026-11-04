@@ -9,7 +9,7 @@ import (
 	"math"
 	"os"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/audioheader"
+	"github.com/Cd1s/EngineX-OS/internal/audioheader"
 	"github.com/hajimehoshi/go-mp3"
 	"github.com/mewkiz/flac"
 )
@@ -156,7 +156,7 @@ func DecodeWAV(r io.Reader) (*Audio, error) {
 }
 
 func decodeWAVData(r io.Reader, format, channels, sampleRate, bits int) (*Audio, error) {
-	if channels <= 0 || channels > 8 || sampleRate < 8000 || sampleRate > 192000 {
+	if channels <= 0 || channels > 8 || sampleRate < 8000 || sampleRate > 384000 {
 		return nil, errors.New("analyzer: wav: invalid fmt")
 	}
 	var conv func([]byte) float64
@@ -232,7 +232,7 @@ func DecodeFLAC(r io.Reader) (*Audio, error) {
 	if info.BitsPerSample < 8 || info.BitsPerSample > 32 || info.NChannels < 1 || info.NChannels > 8 {
 		return nil, errors.New("analyzer: flac: invalid sample format")
 	}
-	if info.NSamples > MaxDecodedSamples || info.SampleRate < 8000 || info.SampleRate > 192000 {
+	if info.NSamples > MaxDecodedSamples || info.SampleRate < 8000 || info.SampleRate > 384000 {
 		return nil, errors.New("analyzer: FLAC exceeds sample/rate limit")
 	}
 	a := &Audio{
@@ -296,7 +296,7 @@ func DecodeMP3(r io.Reader) (*Audio, error) {
 		return nil, fmt.Errorf("analyzer: mp3: %w", err)
 	}
 	sampleRate := dec.SampleRate()
-	if sampleRate < 8000 || sampleRate > 192000 {
+	if sampleRate < 8000 || sampleRate > 384000 {
 		return nil, errors.New("analyzer: mp3: invalid sample rate")
 	}
 	a := &Audio{SampleRate: sampleRate, Channels: 2, BitsPerSample: 16, Format: "mp3"}

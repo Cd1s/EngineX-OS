@@ -101,7 +101,7 @@
       <circle cx="34" cy="130" r="11" class="a"/><text x="34" y="135" text-anchor="middle" font-size="12" font-weight="700" class="bg">3</text>
       <text x="54" y="135" class="t">CPU3 本机分轨 <tspan class="m">— 因果 IIR 分频，无需服务器</tspan></text>
     </g>
-    <text x="22" y="160" font-size="11.5" class="faint">只有前一个渲染端完全连不上时才换下一个：同一会话绝不拆分。</text>
+    <text x="22" y="160" font-size="11" class="faint">前一级完全连不上才换下一级；同一会话绝不拆分。</text>
   </g>
 
   <!-- home PC -->
@@ -142,5 +142,6 @@
     <text x="712" y="200" class="g">发现广播</text>
   </g>
 
-  <text x="716" y="626" font-size="11.5" class="faint">上下行均为 int16；碟机还原 旋律 = 原音 − 人声 − 低音 − 鼓组</text>
+  <text x="1176" y="618" font-size="11.5" text-anchor="end" class="faint">上下行均为 int16</text>
+  <text x="1176" y="636" font-size="11.5" text-anchor="end" class="faint">碟机还原 旋律 = 原音 − 人声 − 低音 − 鼓组</text>
 </svg>

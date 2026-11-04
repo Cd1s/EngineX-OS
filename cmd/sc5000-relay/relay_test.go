@@ -5,17 +5,25 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// defaultPassword is the console password the test servers are set up with.
+const defaultPassword = "test-relay-password"
 
 func newTestServer(t *testing.T) *server {
 	t.Helper()
 	dir := t.TempDir()
 	cfg, err := loadConfig(filepath.Join(dir, "config.json"))
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.setPassword(defaultPassword); err != nil {
 		t.Fatal(err)
 	}
 	s := &server{
@@ -103,7 +111,7 @@ func TestLoginCookieAndPasswordChange(t *testing.T) {
 	}
 	cookie := w.Result().Cookies()[0]
 	hdr := map[string]string{"Cookie": cookie.Name + "=" + cookie.Value}
-	if w := do(h, "GET", "/api/config", "", hdr); w.Code != 200 || !strings.Contains(w.Body.String(), `"passwordIsDefault":true`) {
+	if w := do(h, "GET", "/api/config", "", hdr); w.Code != 200 || !strings.Contains(w.Body.String(), `"passwordIsDefault":false`) {
 		t.Fatalf("cookie auth: %d %s", w.Code, w.Body)
 	}
 	if w := do(h, "GET", "/sc5000/", "", hdr); !strings.Contains(w.Body.String(), "SC5000 Deemix 控制台") {
@@ -354,5 +362,88 @@ func TestSoundCloudAccountLoginByPastedAddress(t *testing.T) {
 	poll := do(h, "GET", "/api/relay/session?t="+tok, "", nil).Body.String()
 	if !strings.Contains(poll, `"userToken":"u1"`) || !strings.Contains(poll, `"refreshToken":"r1"`) || !strings.Contains(poll, `"userId":8`) {
 		t.Fatal(poll)
+	}
+}
+
+func TestNoFixedDefaultPassword(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := loadConfig(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "initial-password"))
+	if info, _ := os.Stat(filepath.Join(dir, "initial-password")); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal(err)
+	}
+	if cfg.checkPassword(legacyDefaultPassword) || !cfg.checkPassword(strings.TrimSpace(string(b))) || cfg.get().PasswordIsDefault {
+		t.Fatal("first start must use the random initial password")
+	}
+	// A legacy config still on the old default may log in but not read secrets or use Stems.
+	s := newTestServer(t)
+	if err := s.cfg.setPassword(legacyDefaultPassword); err != nil {
+		t.Fatal(err)
+	}
+	h := s.routes()
+	hdr := map[string]string{"X-Deemix-Password": legacyDefaultPassword}
+	if w := do(h, "GET", "/api/config", "", hdr); w.Code != 200 {
+		t.Fatalf("legacy login: %d", w.Code)
+	}
+	if w := do(h, "GET", "/api/config?secrets=1", "", hdr); w.Code != 403 {
+		t.Fatalf("legacy secrets: %d", w.Code)
+	}
+	if w := do(h, "GET", "/api/config", "", nil); w.Code != 401 {
+		t.Fatal("no password")
+	}
+	if w := do(h, "GET", "/api/config?key="+legacyDefaultPassword, "", nil); w.Code != 401 {
+		t.Fatalf("password from the query string accepted: %d", w.Code)
+	}
+}
+
+func TestLimiterKeysIPv6ByPrefixAndNeverWipes(t *testing.T) {
+	l := newLimiter(time.Minute, 2)
+	l.fail("2001:db8:1:2::1")
+	l.fail("2001:db8:1:2::ffff")
+	if !l.blocked("2001:db8:1:2:abcd::9") {
+		t.Fatal("same /64 must share one key")
+	}
+	for i := 0; i < maxLimiterKeys+5; i++ {
+		l.fail("10." + strconv.Itoa(i/65536) + "." + strconv.Itoa(i/256%256) + "." + strconv.Itoa(i%256))
+	}
+	if len(l.m) > maxLimiterKeys {
+		t.Fatalf("%d keys", len(l.m))
+	}
+	l.fail("2001:db8:1:2::1")
+	if !l.blocked("2001:db8:1:2::1") {
+		t.Fatal("a flood released a blocked client")
+	}
+}
+
+func TestAnonymousPollDoesNotCreateSessions(t *testing.T) {
+	s := newTestServer(t)
+	if pr := s.sessions.poll("unknowntoken00000001", "", false); pr.Status != "expired" || s.sessions.exists("unknowntoken00000001") {
+		t.Fatalf("%+v", pr)
+	}
+	if pr := s.sessions.poll("unknowntoken00000002", "", true); pr.Status != "waiting" {
+		t.Fatalf("deck poll after restart: %+v", pr)
+	}
+}
+
+func TestSecondCompletionIsIdempotent(t *testing.T) {
+	s := newTestServer(t)
+	s.sessions.register("completetoken0000001", "soundcloud", "", true)
+	synced := 0
+	sync := func(bool) error { synced++; return nil }
+	if err := s.sessions.complete("completetoken0000001", "soundcloud", sync, func(x *session) { x.SoundCloud = &soundCloudInfo{User: "a"} }); err != nil {
+		t.Fatal(err)
+	}
+	err := s.sessions.complete("completetoken0000001", "soundcloud", sync, func(x *session) { x.SoundCloud = &soundCloudInfo{User: "b"} })
+	if doneOK(err) != nil || synced != 1 {
+		t.Fatalf("%v synced=%d", err, synced)
+	}
+	if x, _ := s.sessions.get("completetoken0000001"); x.SoundCloud.User != "a" {
+		t.Fatal("a done login was replaced")
+	}
+	if err := s.sessions.complete("completetoken0000001", "deezer", sync, func(*session) {}); err != errSessionGone {
+		t.Fatalf("wrong provider: %v", err)
 	}
 }

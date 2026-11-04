@@ -3,9 +3,9 @@ package bridge
 import (
 	"context"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
-	"github.com/Cd1s/sc5000-custom-os/pkg/prolink"
-	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 // MountedSource reads a locally mounted, read-only LAN export. The caller owns

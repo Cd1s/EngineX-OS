@@ -19,8 +19,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/compat"
-	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
@@ -296,7 +296,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 	}
 	var prepared []preparedTrack
 	if opts.Fast {
-		prepared = prepareFast(l)
+		prepared = prepareFast(res, l)
 	} else if prepared, err = prepareTracks(ctx, res, l); err != nil {
 		return result, err
 	}
@@ -380,7 +380,9 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			t.BPM = 0
 		}
 		if opts.Fast && existing {
-			if previous != hash && strings.HasPrefix(previous, "fast:") {
+			// An empty fingerprint is a row stageOwnedMoves just parked on a
+			// temporary path; it must get its final path and metadata (#4).
+			if previous != hash && (previous == "" || strings.HasPrefix(previous, "fast:")) {
 				effectiveTracks[i] = t
 				args := []any{int(t.Duration + 0.5), int(t.BPM + 0.5), t.Year, enginePath, path.Base(rel), t.Bitrate, t.BPM, st.Size(), t.Title, t.Artist, t.Album, t.Genre, t.Comment, t.Label, t.Composer, t.Remixer, EngineKey(t.Key), t.Rating, strings.TrimPrefix(strings.ToLower(path.Ext(rel)), "."), int64(t.ID), id}
 				if _, e := tx.ExecContext(ctx, `UPDATE Track SET length=?,bpm=?,year=?,path=?,filename=?,bitrate=?,bpmAnalyzed=?,fileBytes=?,title=?,artist=?,album=?,genre=?,comment=?,label=?,composer=?,remixer=?,key=?,rating=?,fileType=?,pdbImportKey=? WHERE id=?`, args...); e != nil {
@@ -564,6 +566,14 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		if _, err = tx.ExecContext(ctx, `INSERT INTO BridgeLibrary(key,value) VALUES('source',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, metadata); err != nil {
 			return result, err
 		}
+	}
+	// A staged move that no branch completed would commit an unloadable path (#4).
+	var pending int
+	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM Track WHERE path LIKE '.rb-bridge-pending-%'`).Scan(&pending); err != nil {
+		return result, err
+	}
+	if pending > 0 {
+		return result, fmt.Errorf("%d tracks left on a temporary path; import rolled back", pending)
 	}
 	err = tx.Commit()
 	return result, err

@@ -64,18 +64,23 @@ func newSpotifyAuth(learnedPath, httpsRedirect string) *spotifyAuth {
 			Timeout:       15 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		learned: map[string]bool{defaultSpotifyClientID: true},
+		learned: map[string]bool{},
 		probes:  map[string]probeResult{},
 	}
 	if b, err := os.ReadFile(learnedPath); err == nil {
 		_ = json.Unmarshal(b, &a.learned)
 	}
-	// This app callback is registered, including when an older cache says otherwise.
 	if a.learned == nil {
 		a.learned = map[string]bool{}
 	}
-	a.learned[defaultSpotifyClientID] = true
 	return a
+}
+
+// learnedKey ties a learned callback to this relay's -public URL: a client that
+// once worked elsewhere, or the built-in client, is probed again here (#29).
+// Older caches keyed by client ID alone are ignored.
+func (a *spotifyAuth) learnedKey(clientID string) string {
+	return clientID + " " + a.httpsRedirect
 }
 
 func (a *spotifyAuth) authorizeURL(clientID, redirect, state, verifier string) string {
@@ -114,7 +119,7 @@ func (a *spotifyAuth) rejects(ctx context.Context, clientID, redirect string) (b
 // the primary flow for clientID.
 func (a *spotifyAuth) useHTTPS(ctx context.Context, clientID string) bool {
 	a.mu.Lock()
-	if a.learned[clientID] {
+	if a.learned[a.learnedKey(clientID)] {
 		a.mu.Unlock()
 		return true
 	}
@@ -143,10 +148,10 @@ func (a *spotifyAuth) useHTTPS(ctx context.Context, clientID string) bool {
 func (a *spotifyAuth) learnHTTPS(clientID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.learned[clientID] {
+	if a.learned[a.learnedKey(clientID)] {
 		return
 	}
-	a.learned[clientID] = true
+	a.learned[a.learnedKey(clientID)] = true
 	b, _ := json.Marshal(a.learned)
 	if err := writeFileAtomic(a.learnedPath, b, 0o600); err != nil {
 		log.Printf("spotify: save learned redirects: %v", err)

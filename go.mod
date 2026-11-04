@@ -1,4 +1,4 @@
-module github.com/Cd1s/sc5000-custom-os
+module github.com/Cd1s/EngineX-OS
 
 go 1.26.0
 

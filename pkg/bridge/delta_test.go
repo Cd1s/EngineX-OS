@@ -9,10 +9,10 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testfixture"
-	"github.com/Cd1s/sc5000-custom-os/pkg/bridge"
-	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
-	"github.com/Cd1s/sc5000-custom-os/pkg/prolink"
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
 
 func TestOneLibraryVendorColumnsAndMountedSync(t *testing.T) {
@@ -172,4 +172,3 @@ func TestCF049Bogus500BPMAndGL010InformationGuard(t *testing.T) {
 		t.Fatal("Information.uuid remained empty")
 	}
 }
-

@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testfixture"
-	"github.com/Cd1s/sc5000-custom-os/pkg/bridge"
-	"github.com/Cd1s/sc5000-custom-os/pkg/dbhealer"
-	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/dbhealer"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 func TestDeletedSourceReleasesPathAndMembership(t *testing.T) {

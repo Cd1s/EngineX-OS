@@ -73,6 +73,16 @@ class WorkerTests(unittest.TestCase):
             with self.assertRaises(ValueError):serve(io.BytesIO(header),io.BytesIO())
         with self.assertRaises(ValueError):header_read(io.BytesIO(b'x=' + b'1'*8192+b'\n\n'))
         with self.assertRaises(ValueError):header_read(io.BytesIO(b'x=1\nx=2\n\n'))
+        # #38: an incomplete init header is a clear error, not KeyError.
+        with self.assertRaises(ValueError):serve(io.BytesIO(b'numChannels=2\n\n'),io.BytesIO())
+
+    def test_blank_lines_before_init_are_skipped(self):
+        x=np.random.default_rng(3).normal(0,.05,(2,1024)).astype('f4')
+        req=(b'\n\r\nnumChannels=2\nsampleRate=44100\nmaxBlockSize=1024\n\n'
+             b'action=block\nnumSamples=1024\n\n'+x.tobytes(order='C')+b'action=done\n\n')
+        out=io.BytesIO()
+        serve(Input(io.BytesIO(req)),out)
+        self.assertTrue(out.getvalue().startswith(b'session='))
 
     def test_demucs_chunks_stay_aligned(self):
         # A fake model with a fixed split: crossfading equal estimates must

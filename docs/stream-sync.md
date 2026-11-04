@@ -38,7 +38,7 @@ SQLite 测试使用本工作树捕获的完整原厂 SQL，包含触发器和链
 
 `--listen :8080`、`--public-url http://sc5000.lan:8080` 为默认值。
 域名解析由现有 LAN DNS/mDNS 提供，本程序不修改 DNS。
-启动终端显示随机控制台访问码；设备和手机在首页输入同一个码即可操作。
+控制台访问码首次启动时随机生成并保存在 `<state-dir>/access-token`（0600），重启不变；只有首次生成时打印到日志，之后日志只提示文件位置。设备和手机在首页输入同一个码即可操作。
 也可显式设置 `--access-token`，应通过受限启动环境管理，避免共享 shell 历史。
 控制台 Cookie 为 HttpOnly / SameSite=Strict，HTTPS 下为 Secure；跨 Origin 写请求被拒绝。
 纯 HTTP LAN 访问没有传输加密，仅用于可信网络；需要时在已有反代上终止 HTTPS。
@@ -150,8 +150,8 @@ MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k
 
 ### 配置
 
-- `state/deemix-config.json`：`relayUrl`（默认 `https://relay.example.com`）和 `deemixPassword`。
-  密码没有默认值，也不进仓库，只存在这个 0600 文件里。
+- `state/deemix-config.json`：`relayUrl`（默认为空：`--relay-url` 不传时登录只走局域网）和 `deemixPassword`。
+  碟机这边的密码不进仓库，只存在这个 0600 文件里；它必须和中继控制台的密码一致（中继首次启动的随机密码见 `deploy/relay-host/README.md`）。
 - 控制台首页、`/m/deezer`、`GET/POST /api/relay`（碟机本机为 `/v1/sc5000/relay`）和
   `POST /api/ui?relayUrl=&deemixPassword=` 都可修改，保存后立即生效。
   密码只能写入，读取时只返回 `deemixPasswordSet`。地址必须是 https，或内网 IP 的 http。

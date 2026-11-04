@@ -101,7 +101,7 @@
       <circle cx="34" cy="130" r="11" class="a"/><text x="34" y="135" text-anchor="middle" font-size="12" font-weight="700" class="bg">3</text>
       <text x="54" y="135" class="t">LocalRender on CPU3 <tspan class="m">— causal IIR split, no server needed</tspan></text>
     </g>
-    <text x="22" y="160" font-size="11.5" class="faint">Falls through only when the previous renderer cannot be dialled: one session never splits.</text>
+    <text x="22" y="160" font-size="11" class="faint">Next tier only if the previous one cannot be reached; a session never splits.</text>
   </g>
 
   <!-- home PC -->
@@ -142,5 +142,6 @@
     <text x="712" y="200" class="g">beacon</text>
   </g>
 
-  <text x="716" y="626" font-size="11.5" class="faint">int16 on the wire both ways; the deck rebuilds melody = input − vocals − bass − drums</text>
+  <text x="1176" y="618" font-size="11.5" text-anchor="end" class="faint">int16 on the wire both ways</text>
+  <text x="1176" y="636" font-size="11.5" text-anchor="end" class="faint">the deck rebuilds melody = input − vocals − bass − drums</text>
 </svg>

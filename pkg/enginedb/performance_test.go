@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
-	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 func TestQCompressAndAbsentCues(t *testing.T) {

@@ -36,7 +36,12 @@ func applyProcess(cfg Config, pid int) ([]Report, error) {
 		if err != nil {
 			continue
 		}
-		reps = append(reps, applyTID(cfg, tid))
+		rep := applyTID(cfg, tid)
+		// A thread that exited meanwhile fails every call with ESRCH; it is gone, not degraded (#36).
+		if _, err := os.Stat(fmt.Sprintf("/proc/%d/task/%d", pid, tid)); err != nil {
+			continue
+		}
+		reps = append(reps, rep)
 	}
 	return reps, nil
 }

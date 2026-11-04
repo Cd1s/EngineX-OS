@@ -126,12 +126,18 @@ func (s *server) finishSoundCloud(ctx context.Context, sess session, token, code
 	if c.SoundCloudClientID == "" || c.SoundCloudSecret == "" {
 		return errors.New("后台还没有配置 SoundCloud 应用")
 	}
+	if s.sessions.isDone(token) {
+		return nil
+	}
 	info, err := soundCloudLogin(ctx, c.SoundCloudClientID, c.SoundCloudSecret, code, sess.Verifier, redirect)
 	if err != nil {
+		// A parallel callback spent the one-time code and finished the login (#12).
+		if s.sessions.isDone(token) {
+			return nil
+		}
 		return err
 	}
-	s.sessions.update(token, func(x *session) { x.SoundCloud, x.Status = info, "done" })
-	return nil
+	return doneOK(s.sessions.complete(token, "soundcloud", nil, func(x *session) { x.SoundCloud = info }))
 }
 
 func (s *server) soundCloudPageData(sess session, token, message string) pageData {

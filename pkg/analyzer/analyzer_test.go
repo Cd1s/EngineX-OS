@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testaudio"
-	"github.com/Cd1s/sc5000-custom-os/pkg/resourceguard"
+	"github.com/Cd1s/EngineX-OS/internal/testaudio"
+	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
 )
 
 func TestSyntheticWAVFLACAnalysis(t *testing.T) {

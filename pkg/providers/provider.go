@@ -68,7 +68,12 @@ func JSON(ctx context.Context, c *http.Client, method, endpoint string, body io.
 	}
 	resp, err := client(c).Do(req)
 	if err != nil {
-		return errors.New("provider: HTTP transport failed")
+		// url.Error would print the URL, whose query may hold an API key; keep only the cause.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return fmt.Errorf("provider: HTTP transport failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

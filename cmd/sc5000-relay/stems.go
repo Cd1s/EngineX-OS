@@ -128,6 +128,10 @@ func (s *server) requireStemsAuth(h http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, 401, map[string]any{"ok": false, "error": "unauthorized: invalid relay password"})
 			return
 		}
+		if s.cfg.get().PasswordIsDefault {
+			writeJSON(w, 403, map[string]any{"ok": false, "error": "change the default console password before using Stems"})
+			return
+		}
 		if s.stems == nil {
 			writeJSON(w, 503, map[string]any{"ok": false, "error": "stems backend not configured"})
 			return

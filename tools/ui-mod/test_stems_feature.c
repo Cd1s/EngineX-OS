@@ -12,11 +12,50 @@ static unsigned dsp_calls, dsp_seen_generation, dsp_seen_sampler_generation;
 static void *dsp_wanted_owner;
 static const void *dsp_wanted_event;
 
+static unsigned fx_generation(const void *owner) {
+    struct sc_dsp_fx_slot *f=sc_dsp_fx_lookup(owner,0);
+    return f?(__atomic_load_n(&f->event,__ATOMIC_ACQUIRE)>>3):0;
+}
+typedef void (*test_channel_fn)(void *,uintptr_t,float *const *,uintptr_t,float *const *,uint32_t,
+                              double,double,double,double,double,double,double,double);
+static test_channel_fn nested_channel;
+struct channel_case { float value; void *gate; struct channel_case *child; unsigned char native_padding[0x290]; };
+static dsp_process_fn channel_gate;
+static void mock_channel_process(void *self,uintptr_t a1,float *const *in,uintptr_t a3,
+                                 float *const *out,uint32_t frames,
+                                 double p0,double p1,double p2,double p3,double p4,double p5,double p6,double p7) {
+    assert(a1==0x11223344&&a3==0x55667788);
+    assert(p0==10.5&&p1==11.5&&p2==12.5&&p3==13.5&&p4==14.5&&p5==15.5&&p6==16.5&&p7==17.5);
+    assert(dsp_current_channel&&dsp_current_channel->owner==(uintptr_t)self);
+    struct channel_case *c=self;
+    if(c->child) {
+        nested_channel(c->child,a1,in,a3,out,frames,p0,p1,p2,p3,p4,p5,p6,p7);
+        assert(dsp_current_channel&&dsp_current_channel->owner==(uintptr_t)self);
+    }
+    if(c->gate&&frames)channel_gate(c->gate,in,out,frames);
+    for(unsigned ch=0;ch<2;ch++)for(uint32_t i=0;i<frames;i++)out[ch][i]=c->value;
+}
+static void call_channel(test_channel_fn fn,void *owner,float *const *in,float *const *out,uint32_t frames) {
+    fn(owner,0x11223344,in,0x55667788,out,frames,10.5,11.5,12.5,13.5,14.5,15.5,16.5,17.5);
+    assert(!dsp_current_channel);
+}
+
+struct channel_worker_args { test_channel_fn fn; struct channel_case *owner; };
+static void *channel_worker(void *arg) {
+    struct channel_worker_args *a=arg;
+    float l[16]={0},r[16]={0},*p[2]={l,r};
+    for(unsigned i=0;i<1000;i++) {
+        call_channel(a->fn,a->owner,p,p,16);
+        assert(l[15]==a->owner->value&&r[15]==a->owner->value);
+    }
+    return NULL;
+}
+
 static void mock_dsp_event(void *owner, const void *event) {
     assert(owner == dsp_wanted_owner && event == dsp_wanted_event);
     __atomic_add_fetch(&dsp_calls, 1u, __ATOMIC_RELAXED);
     __atomic_store_n(&dsp_seen_generation,
-        __atomic_load_n(&sc_dsp_state()->generation, __ATOMIC_ACQUIRE), __ATOMIC_RELAXED);
+        fx_generation(owner), __ATOMIC_RELAXED);
     __atomic_store_n(&dsp_seen_sampler_generation,
         __atomic_load_n(&sc_dsp_state()->sampler_generation, __ATOMIC_ACQUIRE), __ATOMIC_RELAXED);
 }
@@ -102,6 +141,9 @@ static void test_dsp_hooks(void) {
             0xe28bd000, 0xe49db004, 0xe51ff004, (uint32_t)(uintptr_t)mock_sweep_process};
         memcpy(image + dsp_hooks[i].offset, sweep, sizeof sweep);
     }
+    const uint32_t channel_code[] = {0xe16d42f0,0xe1a05000,0xe5900288,0xe1a00005,0xe1cd40d0,0xe28dd020,
+                                     0xe51ff004,(uint32_t)(uintptr_t)mock_channel_process};
+    memcpy(image+dsp_hooks[DSP_CHANNEL].offset,channel_code,sizeof channel_code);
     // Every checked byte, including byte 12 of a dispatcher, gates the WHOLE group.
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         size_t size;
@@ -134,10 +176,10 @@ static void test_dsp_hooks(void) {
     dsp_wanted_owner = owner;
     dsp_wanted_event = event;
     for (unsigned i = 0; i < DSP_MIX; i++) {
-        unsigned before = dsp_calls, gen = sc_dsp_state()->generation;
+        unsigned before = dsp_calls, gen = fx_generation(dsp_wanted_owner);
         ((dsp_event_fn)(image + dsp_hooks[i].offset))(handler, event);
         assert(dsp_calls == before + 1 && dsp_seen_generation == gen + 1);
-        assert(sc_dsp_state()->ramp_remaining == SC_DSP_RAMP_FRAMES);
+        assert(sc_dsp_fx_lookup(dsp_wanted_owner,1)->remaining == 0); // UI never edits audio progress
     }
     // Preserve the dispatcher's virtual target resolution and signed this adjustment.
     uint32_t vtable[] = {(uintptr_t)mock_dsp_event};
@@ -165,11 +207,11 @@ static void test_dsp_hooks(void) {
         call(handler, NULL);
         assert(dsp_calls == before);
     }
-    assert(DSP_HOOK_COUNT == 19);
-    puts("ARM DSP install: all 19 prefix guards, repeat install, event ABI/virtual/adjusted this, finite controls: PASS");
+    assert(DSP_HOOK_COUNT == 20);
+    puts("ARM DSP install: all 20 prefix guards, repeat install, event ABI/virtual/adjusted this, finite controls: PASS");
 
-    unsigned fx_generation = sc_dsp_state()->generation;
-    int32_t fx_remaining = sc_dsp_state()->ramp_remaining;
+    unsigned fx_generation_before = fx_generation(dsp_wanted_owner);
+    uint32_t fx_remaining = sc_dsp_fx_lookup(dsp_wanted_owner,1)->remaining;
     // Count before calling the original, without inspecting payloads or arming FX.
     dsp_wanted_event = NULL;
     for (unsigned i = DSP_SAMPLER_IMMEDIATE; i <= DSP_SAMPLER_PLAY; i++) {
@@ -190,7 +232,7 @@ static void test_dsp_hooks(void) {
     __atomic_store_n(&sc_dsp_state()->sampler_generation, UINT32_MAX, __ATOMIC_RELEASE);
     ((dsp_event_fn)(image + dsp_hooks[DSP_SAMPLER_PLAY].offset))(handler, event);
     assert(sc_dsp_state()->sampler_generation == 0 && dsp_seen_sampler_generation == 0);
-    assert(sc_dsp_state()->generation == fx_generation && sc_dsp_state()->ramp_remaining == fx_remaining);
+    assert(fx_generation(dsp_wanted_owner) == fx_generation_before && sc_dsp_fx_lookup(dsp_wanted_owner,1)->remaining == fx_remaining);
     puts("ARM Sampler: all three dispatchers, mark-before-forward, null payload, four producers, wrap and FX isolation: PASS");
 
     for (unsigned slot = DSP_DUB_ECHO; slot <= DSP_WASH; slot++) {
@@ -230,93 +272,50 @@ static void test_dsp_hooks(void) {
     float *bit_buffers[2] = {bit_samples, NULL};
     sc_dsp_sweep_fx_post_process(NULL, bit_buffers, 5);
     assert(!memcmp(bit_samples, wanted_bits, sizeof wanted_bits));
-    assert(sc_dsp_state()->generation == fx_generation && sc_dsp_state()->ramp_remaining == fx_remaining);
+    assert(fx_generation(dsp_wanted_owner) == fx_generation_before && sc_dsp_fx_lookup(dsp_wanted_owner,1)->remaining == fx_remaining);
     puts("ARM DubEcho/Wash: prologue/this adjustment, input/output ABI, NaN/Inf/extreme clamp, zeros and bounds: PASS");
 
-    unsigned char gate[0x200] = {0};
-    const float phase = 0.75f;
-    memcpy(gate + SC_DSP_AUTOGATE_PHASE_OFFSET, &phase, sizeof phase);
-    float *empty[2] = {NULL, NULL};
-    dsp_process_fn gate_call = (void *)(image + dsp_hooks[DSP_AUTOGATE].offset);
-    gate_call(gate, empty, NULL, 1);
-    assert(gate_seen_phase == phase);
-    sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_SWITCH);
-    gate_call(gate, empty, NULL, 1);
-    assert(gate_seen_phase == 0.0f);
-    memcpy(gate + SC_DSP_AUTOGATE_PHASE_OFFSET, &phase, sizeof phase);
-    gate_call(gate, empty, NULL, 1);
-    assert(gate_seen_phase == phase); // only clear once per generation
-    gate_call(gate, empty, NULL, 0);
-    assert(gate_nonzero_calls == 3 && gate_zero_calls == 1);
-    puts("ARM AutoGate: phase reset before original, one clear per generation, relocated zero/nonzero branches: PASS");
+    unsigned char gate[512]={0},other_gate[512]={0};
+    float phase=.75f;memcpy(gate+0x1e8,&phase,4);memcpy(other_gate+0x1e8,&phase,4);
+    struct channel_case ca={.value=1,.gate=gate},cb={.value=2,.gate=other_gate};
+    float left[256]={0},right[256]={0},*in[2]={left,right};
+    float ol[256],oright[256],*out[2]={ol,oright};
+    test_channel_fn channel=(void *)(image+dsp_hooks[DSP_CHANNEL].offset);
+    channel_gate=(void *)(image+dsp_hooks[DSP_AUTOGATE].offset);
+    call_channel(channel,&ca,in,out,256);assert(ol[0]==1&&gate_seen_phase==.75f);
+    call_channel(channel,&cb,in,out,256);assert(ol[0]==2&&gate_seen_phase==.75f);
+    sc_dsp_fx_mark_transition(&ca,SC_DSP_FX_TRANSITION_TURN_OFF);ca.value=0;
+    call_channel(channel,&cb,in,out,256);assert(ol[0]==2&&gate_seen_phase==.75f);
+    call_channel(channel,&ca,in,out,64);assert(ol[0]==1&&oright[63]==65.0f/128&&gate_seen_phase==0);
+    call_channel(channel,&ca,in,out,192);assert(ol[0]==.5f&&ol[63]==1.0f/128&&ol[64]==0);
+    call_channel(channel,&ca,in,out,0);
+    channel_gate(gate,in,NULL,0);assert(gate_zero_calls==1);
+    assert(gate_nonzero_calls==5);
+    ca.gate=cb.gate=NULL;ca.value=1;ca.child=&cb;nested_channel=channel;
+    call_channel(channel,&ca,in,out,256);assert(ol[255]==1);ca.child=NULL;
+    struct channel_worker_args audio_args[2]={{channel,&ca},{channel,&cb}};
+    pthread_t audio_threads[2];
+    for(unsigned i=0;i<2;i++)assert(!pthread_create(&audio_threads[i],NULL,channel_worker,&audio_args[i]));
+    for(unsigned i=0;i<2;i++)assert(!pthread_join(audio_threads[i],NULL));
+    puts("ARM ChannelDJFx: 6 general/stack arguments, d0-d7, nested TLS restoration, per-owner OFF ramp/AutoGate isolation: PASS");
 
-    enum { N = 2049 };
-    static float left[N], right[N], out_l[N], out_r[N];
-    float *in[2] = {left, right}, *out[2] = {out_l, out_r};
-    dsp_process_fn process = (void *)(image + dsp_hooks[DSP_COMMON].offset);
-    dsp_wanted_owner = owner;
-    // Separate, identical pointer arrays, L alias, R-only alias and crossed alias.
-    for (unsigned mode = 0; mode < 5; mode++) {
-        memset(left, 0, sizeof left); memset(right, 0, sizeof right);
-        out[0] = mode == 2 ? left : (mode == 4 ? right : out_l);
-        out[1] = mode == 3 ? right : (mode == 4 ? left : out_r);
-        sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_TURN_ON);
-        float **dest = mode == 1 ? in : out;
-        process(owner, in, dest, 160);
-        for (unsigned ch = 0; ch < 2; ch++)
-            for (unsigned i = 0; i < 160; i++)
-                assert(dest[ch][i] == (i < 128 ? (float)i / 128.0f : 1.0f));
-        assert(sc_dsp_state()->ramp_remaining == 0);
-    }
-    // Partially overlapping buffers need a snapshot too, including the right channel.
-    memset(left, 0, sizeof left); memset(right, 0, sizeof right);
-    out[0] = left + 1; out[1] = right + 1;
-    sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_CHANGE);
-    process(owner, in, out, 128);
-    assert(out[0][0] == 0.0f && out[1][127] == 127.0f / 128.0f);
-    // An in-place block beyond the bounded snapshot size is sanitized only.
-    sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_CHANGE);
-    process(owner, in, in, N);
-    assert(left[0] == 1.0f && sc_dsp_state()->ramp_remaining == 128);
-    memset(left, 0, sizeof left); memset(right, 0, sizeof right);
-    process(owner, in, in, 2048);
-    assert(left[0] == 0.0f && left[127] == 127.0f / 128.0f && left[128] == 1.0f);
-    assert(!sc_dsp_state()->ramp_remaining);
-    // A short block resumes the same ramp in the next call.
-    memset(left, 0, sizeof left); memset(right, 0, sizeof right);
-    out[0] = out_l; out[1] = out_r;
-    sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_CHANGE);
-    process(owner, in, out, 64);
-    assert(out_l[0] == 0.0f && out_r[63] == 63.0f / 128.0f);
-    process(owner, in, out, 64);
-    assert(out_l[0] == 0.5f && out_r[63] == 127.0f / 128.0f);
-    process(owner, in, out, 0);
-    assert(!sc_dsp_state()->ramp_remaining);
-    common_bad_output = 1;
-    for (unsigned i = 0; i < 160; i++) { left[i] = 0.25f; right[i] = 0.5f; }
-    process(owner, in, out, 160);
-    assert(out_l[0] == 0.25f && out_r[1] == 0.5f);
-    left[0] = NAN; right[1] = INFINITY;
-    process(owner, in, out, 160);
-    assert(out_l[0] == 0.0f && out_r[1] == 0.0f);
-    process(owner, in, in, 160);
-    assert(left[0] == 0.0f && right[1] == 0.0f);
-    common_bad_output = 0;
-    // NaN/Inf sanitation must also cover overflow CREATED by the ramp itself.
-    // Opposite finite extremes overflow the helper's (wet - dry) intermediate.
-    common_bad_output = 2;
-    for (unsigned i = 0; i < 160; i++) left[i] = right[i] = -FLT_MAX;
-    sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_TURN_ON);
-    process(owner, in, out, 160);
-    for (unsigned i = 0; i < 160; i++)
-        assert(sc_dsp_finite_f32(out_l[i]) && sc_dsp_finite_f32(out_r[i]));
-    common_bad_output = 0;
+    dsp_wanted_owner=owner;
+    dsp_process_fn process=(void *)(image+dsp_hooks[DSP_COMMON].offset);
+    common_bad_output=0;process(owner,in,out,160);assert(ol[0]==1&&oright[159]==1);
+    sc_dsp_fx_mark_transition(owner,SC_DSP_FX_TRANSITION_SWITCH);
+    process(owner,in,in,160);assert(left[0]==1); // common cannot consume channel progress
+    common_bad_output=1;
+    for(unsigned i=0;i<160;i++){left[i]=.25f;right[i]=.5f;}
+    process(owner,in,out,160);assert(ol[0]==.25f&&oright[1]==.5f);
+    process(owner,in,in,160);assert(left[0]==0&&right[1]==0);
+    common_bad_output=0;
+    puts("ARM common tail: original prologue/ABI, stateless finite guard, alias sanitation without stealing transitions: PASS");
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         assert(!munmap(dsp_originals[i], page)); dsp_originals[i] = NULL;
     }
     memset(sc_dsp_state(), 0, sizeof *sc_dsp_state());
     assert(!munmap(image, image_size));
-    puts("ARM FX common tail: ABI/prologue replay, in/out/overlap snapshots, 128-frame ramp, 2048 bound, finite output: PASS");
+
 }
 
 __attribute__((naked)) static void invoke_stub(void *feature __attribute__((unused)),
@@ -415,6 +414,17 @@ static int pragma(sqlite3 *db, const char *sql) {
     return value;
 }
 
+static void test_telemetry_names(void) {
+    const char *yes[]={"events.db","posthog.db","/data/analytics/events.db",
+        "file:/data/analytics/posthog.db?mode=rwc","file:events.db?cache=shared"};
+    const char *no[]={NULL,"","/media/USB/events.db-collection/Engine Library/Database2/m.db",
+        "/media/posthog.db/archive/m.db","/tmp/myevents.db","/tmp/events.db-wal","/tmp/posthog.db.bak",
+        "file:/data/events.db/Database2/m.db?mode=rw","/tmp/events.db?literal-filename","file:/tmp/m.db?x=events.db"};
+    for(size_t i=0;i<sizeof yes/sizeof *yes;i++)assert(is_telemetry_sqlite_filename(yes[i]));
+    for(size_t i=0;i<sizeof no/sizeof *no;i++)assert(!is_telemetry_sqlite_filename(no[i]));
+    puts("Telemetry SQLite exact basename, URI query and normal-library ancestor boundaries: PASS");
+}
+
 static void test_sqlite(void) {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
     char *image = mmap(NULL, 0x2a00000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -479,6 +489,17 @@ static void test_sqlite(void) {
     if (db) sqlite3_close(db);
     tune_database(SQLITE_OK, path, NULL);
     assert(exec_count == 3);
+    char ordinary_dir[128],ordinary_db[160];
+    snprintf(ordinary_dir,sizeof ordinary_dir,"/tmp/events.db-collection-%ld",(long)getpid());
+    assert(!mkdir(ordinary_dir,0700));
+    snprintf(ordinary_db,sizeof ordinary_db,"%s/m.db",ordinary_dir);
+    assert(v2_fn(ordinary_db,&db,SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE,NULL)==SQLITE_OK);
+    assert(!strcmp(sqlite3_db_filename(db,"main"),ordinary_db));
+    assert(sqlite3_exec(db,"CREATE TABLE kept(v); INSERT INTO kept VALUES(73)",NULL,NULL,NULL)==SQLITE_OK);
+    assert(sqlite3_close(db)==SQLITE_OK);
+    assert(sqlite3_open(ordinary_db,(sqlite3 **)&db)==SQLITE_OK);
+    assert(pragma(db,"SELECT v FROM kept")==73&&sqlite3_close(db)==SQLITE_OK);
+    unlink(ordinary_db);rmdir(ordinary_dir);
     munmap(image, 0x2a00000);
     puts("Installed ARM SQLite hooks, real PRAGMA readback, memory telemetry, errors/readonly: PASS");
 }
@@ -776,6 +797,7 @@ int main(int argc, char **argv) {
     test_dsp_hooks();
     test_stems();
     test_config();
+    test_telemetry_names();
     test_sqlite();
     test_files();
     test_threads();
