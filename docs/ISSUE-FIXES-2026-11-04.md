@@ -121,3 +121,40 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **验证（全部在 IN，不碰实机）**：`unshare -m` + `qemu-arm` 挂载新 SC5000 镜像 rootfs 与空白 `/data`，按 systemd 顺序跑 `sc5000-custom-etc-reset` → `systemd-tmpfiles`（overlayfs-setup）→ `/etc`、`/var` overlay → `sc5000-custom-prepare`（1.1 s，生成 host key、UI 包、`version.txt` 5.0.4.1）→ `engine-ui-guard pre` → `sc5000-debloat --apply-runtime`，全部 rc=0，`systemd-analyze verify` 无排序环；`encrypt-fs.sh` 里的自动擦除仍被禁用。debian systemd 容器复刻原厂 `engine.service`（`Type=forking`、`Restart=on-failure`）：旧 guard + 擦除失败 → `inactive dead`；新 guard → Engine 重新启动且 `active running`；擦除改为 `systemctl reboot` → guard 只查询状态，不干预。`tests/test_rootfs_overlay.sh` 13 项（新增 guard 六种 reason/状态组合）、az01-packer 单测（新增 prepare 排序断言）通过。
 - **Release**：8 个镜像由 `f33dc2d` 在 IN 干净目录 `sc5000-release-factoryreset` 构建，覆盖上传到 `v5.0.4.1`，Release Notes 的 SHA-256 表已更新：SC5000/SC5000M/PRIME GO `6dcd4200…f0d5`，SC6000/SC6000M `b1e8e7f0…5102`，PRIME 4/PRIME 2/Mixstream Pro `43aabac7…ccc7`。解包三组镜像核对：prepare 单元含新 `Before=`，guard 含 FactoryReset 分支，`version.txt` 5.0.4.1。
 - **实机**：只替换 `/etc/sc5000/engine-ui-guard`（`f3a802d9…` → `f1749119…`），用临时目录与 systemctl 桩 dry-run 了 stop 分支；Engine 未重启，`NRestarts=0`。**没有在实机触发 Factory Reset。** 备份 `20261104T154117Z-…-f3a802d91832-sc5000-engine-ui-guard-pre-factoryreset`。回滚：取回备份覆盖 guard（不需重启）；Release 回滚为在 IN 上 checkout `cbc94d9` 重跑 `build-release.sh` 并重新上传。
+
+## 5.0.4.2：控制中心波形切换（#45）与安全加固（#46）（同日追加，Opus 5.5）
+
+- **#45 波形切换**：控制中心「日间模式」后新增一个原厂尺寸格子（256×104），照 CDJ-3000 的 `WAVEFORM COLOR` 做：
+  - 标题「波形样式」下面是三段拼接按钮 DENON / RGB / 3BAND，各带色带（纯绿、彩虹渐变、白/金/蓝），选中段填青色 `#00c3e3`。
+  - 一点即切，不弹 RGB 提示（设置页里的入口仍会弹）。
+  - 碟机上的 3-Band 改用 CDJ-3000 配色：低 `#4a78ff`、中 `#f0b400`、高白。
+  - 设计按用户反馈改了四轮（大卡片 → 横条 → 预览格子 → CDJ 分段），前三版都被用户否决。
+  - 实机验证了三语截图、点击切换，以及网关与 Engine `WaveformStyle` 的同步。
+- **蓝牙截图**：用真实连接拍摄，没有改 QML。
+  - 碟机已配对的 iPhone 正在推流「SOTU FM 014 w/ CHEEK」。把它在 BlueZ 里的别名临时改为 `Cheek Sotu FM`，蓝牙输入分配到 Layer A，三语各截一张 `07-bluetooth-audio.png`。README 截图网格成为 4×2。
+  - 截图后别名已改回 `iPhone`（备份 `20261104T155326Z-…-f00d5a4d020d-sc5000-bt-iphone-info`）。
+- **#46 安全**：
+  - SSH：公开镜像不内置任何 SSH 公钥（`build-release.sh … none`）。`sc5000-custom-sshd` 加了 `ConditionFileNotEmpty=/data/sc5000-custom/authorized_keys`，没有公钥就不启动。密码登录仍关闭。
+  - 旧公钥：≤5.0.4.1 的公开镜像都把维护者公钥写进了每台碟机的 `/data/sc5000-custom/authorized_keys`。5.0.4.2 的 prepare 会删掉这把公钥，只有存在 `/data/sc5000-custom/keep-release-key`，或镜像本身内置了同一把钥匙时才保留。维护者的 SC5000 已放置该标记。
+  - 局域网隔离：`/v1/*`（含全部 `/v1/sc5000/*` 与 TIDAL 网关）原本就只接受回环地址，`/api/*` 原本就要访问码。这次新增回归测试，覆盖 issue 点名的请求以及 `//`、`/./` 路径写法。
+  - 从 Mac 实测：`/v1/ping`、`/v1/sc5000/update`、`/v1/sc5000/ui` 均返回 403，`/api/ui` 返回 401。
+  - 三语 README 新增「安全说明」章节。
+- **验证（IN 干净目录）**：
+  - 测试：gofmt 0 个未格式化文件、vet 通过；Go 全量测试（含 race 检测）19 个包、`tests/test_rootfs_overlay.sh` 13 项、az01-packer 36 项、tools/stems 全部通过；UI 包构建成功。
+  - 解包三组镜像核对：`version.txt` 是 5.0.4.2；`/usr/share/sc5000-custom` 下没有 `authorized_keys`；sshd 带启动条件；prepare 有退役公钥逻辑；UI 包含新格子，且没有 dev eval 通道。
+- **Release `v5.0.4.2`**（Latest，tag `bd42f30`，资产由 `bd42f30` 构建）：
+  - SC5000 / SC5000M / PRIME GO：`9825d1c6…a7b9`
+  - SC6000 / SC6000M：`591c355a…5b1a`
+  - PRIME 4 / PRIME 2 / Mixstream Pro：`18970bd1…5714`
+  - README 下载链接实测返回 200。
+- **实机**：
+  - 碟机端在线更新（`/v1/sc5000/update?apply=1`）从 5.0.4.1 升到 5.0.4.2，约 1 分 20 秒后回来。
+  - 两个 `version.txt` 都是 5.0.4.2；engine / prepare / sshd / stream-sync 均为 active、`NRestarts=0`。
+  - 5 把公钥保留，语言与波形设置保留，`updateAvailable:false`，没有 QML 加载错误。
+  - 部署 dev 包前的正式 UI 包备份：`20261104T154858Z-…-4c17fac11261-ui-before.tar.gz`。
+- **回滚点**：
+  - Release `v5.0.4.1` 没有删除（tag `a305c2b`）；碟机回滚方式是用 U 盘刷 5.0.4.1 镜像。
+  - 注意：5.0.4.1 镜像会重新写入旧公钥种子（仅在 `/data/sc5000-custom/authorized_keys` 不存在时）。
+- **遗留**：
+  - Engine 重启后蓝牙开关会变回关闭，蓝牙输入分配也回到 None（原厂行为，没有处理）。
+  - dev eval 通道在 Engine 重启后会重放最后一条脚本，切语言的命令曾因此执行了两次。只影响调试，正式包里没有这个通道。
