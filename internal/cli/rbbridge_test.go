@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testfixture"
-	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 func TestRBBridgeValidation(t *testing.T) {

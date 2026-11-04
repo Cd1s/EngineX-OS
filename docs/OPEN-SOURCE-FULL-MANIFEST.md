@@ -1,4 +1,4 @@
-# Denon Engine OS 5.0.4 深度定制系统 (`sc5000-custom-os`) 与官方原版完整差异及 642 条历史 Bug 全量核查总表
+# Denon Engine OS 5.0.4 深度定制系统 (`EngineX OS` · `Cd1s/EngineX-OS`) 与官方原版完整差异及 642 条历史 Bug 全量核查总表
 
 > **基线固件版本**：Denon DJ Engine OS `5.0.4`（官方 `/usr/Engine/Engine` SHA-256: `e1eb0e2b858880016daa3ad14538426204f8e698d855a274aebc924a5f9a5caa`，ELF BuildID: `af073865a3318d807a8303f716152eac923a4c6f`）
 > **支持硬件架构**：Rockchip RK3288 (ARMv7 `armhf`, Linux `6.6.119-rt` `PREEMPT_RT`, Qt `6.7.2`)
@@ -19,7 +19,7 @@
 
 本项目采用 **「保留 100% 原厂 QML 界面直觉 + 外科手术式重构 Linux & C++ 底层后端」** 路线：
 
-| 维度 | 官方原版 Engine OS 5.0.4 | 本定制系统 (`sc5000-custom-os`) |
+| 维度 | 官方原版 Engine OS 5.0.4 | 本定制系统 (`EngineX OS` · `Cd1s/EngineX-OS`) |
 |---|---|---|
 | **UI 与打碟手感** | 原厂 QtQuick/QML 界面 | **100% 保留原厂打碟布局与按键逻辑**；无自定义阻断弹窗；新增简/繁/英三语切换、Rekordbox 风格饱和 RGB / 3-Band 波形配色、转盘灯效（含 1 拍 1 色 BPM 同步） |
 | **Stems 四轨分轨控制** | 仅开放给特定机型，SC5000 (`JP07`) 被软件阉割锁死 | **全机型原生解锁**：左侧歌单树第 0 行显示原厂 `Stems` 列表；加载已分轨曲目自动展开屏幕底部原厂 `[ Vocal ] [ Melody ] [ Bass ] [ Drums ]` 触控消音栏，并支持双击硬件 `HOT CUE` 进入打击垫 4 轨控制 |

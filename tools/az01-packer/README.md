@@ -2,7 +2,28 @@
 
 Python 3 标准库实现容器解析；文件系统操作需要 `debugfs`、`e2fsck`（e2fsprogs），公钥检查需要 `ssh-keygen`，生成不可知随机密码哈希需要 `openssl`。不挂载文件系统、不运行固件程序、不刷机、不访问块设备。所有二进制输出必须在 git 工作树外，输出已存在时拒绝覆盖。
 
-已实测的输入是 SC5000 5.0.4，SHA-256 为 `52e8526bbfd273e5185b5d8c2a9cbe32436c3acd1c77dcfde97e40a34c5b24d7`。实现只接受已核实的 **AZ01 wire version 1**、JP07 兼容性及 `splash → recoverysplash → rootfs → EOF` 布局；更新器内部将此类称为 v2。4.3.4 是 FIT/FDT，未知 wire version、签名格式及其他分区布局全部拒绝，不能用此工具重打包。
+已实测的输入是 SC5000 5.0.4，SHA-256 为 `52e8526bbfd273e5185b5d8c2a9cbe32436c3acd1c77dcfde97e40a34c5b24d7`。实现只接受已核实的 **AZ01 wire version 1** 及 `splash → recoverysplash → rootfs → EOF` 布局（最后一条记录可按 8 字节补零后接 EOF）；更新器内部将此类称为 v2。4.3.4 是 FIT/FDT，未知 wire version、签名格式及其他分区布局全部拒绝，不能用此工具重打包。
+
+官方 5.0.4 底包分三组，组内逐字节相同，Engine 都是同一构建（BuildID `af073865…`，ARMv7），`info` 的 `models` 字段列出型号：
+
+| 底包 | compatible | 型号 | 建议发布文件名 |
+|---|---|---|---|
+| `SC5000` / `SC5000M` / `PRIMEGO-5.0.4-Update.img` | `jp07` `jp08` `jp11` | SC5000、SC5000M、PRIME GO | `EngineX-OS-5.0.4.1-SC5000-SC5000M-PRIMEGO-Update.img` |
+| `SC6000` / `SC6000M-5.0.4-Update.img` | `jp13` `jp14` | SC6000、SC6000M | `EngineX-OS-5.0.4.1-SC6000-SC6000M-Update.img` |
+| `PRIME4` / `PRIME2` / `MIXSTREAMPRO-5.0.4-Update.img` | `jc11` `jc16` `nh08` | PRIME 4、PRIME 2、MIXSTREAM PRO | `EngineX-OS-5.0.4.1-PRIME4-PRIME2-MIXSTREAMPRO-Update.img` |
+
+每个包只能从同组的官方底包生成，compatible 列表原样保留，工具不提供改写目标型号的功能：把一组的 rootfs 刷到另一组硬件上可能变砖。SC LIVE 2（`SCLIVE2-5.0.4-Update.img`）是带签名的 AZ0x 容器，改过的镜像过不了设备验签，工具明确拒绝。
+
+整套发布镜像用 `build-release.sh` 生成（在编译机上、仓库根目录执行）：它把五个工具编成一个 ARMv7 静态 `sc5000-suite.xz`（rb-bridge、stream-sync、engine-guardian、stems-processor、sc5000-deemixd），把 UI 包打成 `ui-packs.tar.xz`，与 `rootfs-overlay` 和 `fsck.hfsplus` 组成 overlay。每组底包只打一次，然后按 `<型号前缀>-<版本>-EngineX-OS-<品牌型号>-Update.img` 复制成各型号的文件名（Engine 在 U 盘上按 `<前缀>-<数字和点>-…Update.img` 找包）。最后逐个 `info` 校验，并生成 `SHA256SUMS.txt`。
+
+```bash
+sh tools/az01-packer/build-release.sh 5.0.4.1 /root/build/sc5000-lab/fw \
+  /path/to/one_key.pub /path/to/fsck.hfsplus /root/build/sc5000-lab/release-5.0.4.1
+```
+
+镜像首次启动（以及每次换版本）时，`sc5000-custom-prepare` 会把 `ui-packs.tar.xz` 解到 `/data/sc5000-custom/ui/{packs,icons}`，清除 safe-mode 和启动计数，并写入 `.pack-version` 和 `/data/sc5000-custom/version.txt`。`engine.service` 排在它之后启动。版本号没变时不会覆盖手工部署的 UI 包。
+
+`patch-rootfs --set-version 5.0.4.1` 写入 `/etc/sc5000/version.txt`（碟机「检查更新」读取它，与 Release tag 比较）。`/etc` 刷新 epoch 由版本号和 overlay 中 `/etc` 文件内容的哈希组成：升级后首次启动会删除 `/data/system/etc/overlay` 上层里这些文件的旧副本（如现场部署过的 guard、hook、drop-in），避免旧文件遮住新镜像。overlay 带有 `usr/local/bin/sc5000-debloat` 时，打包会对镜像离线执行它（`--root`），网口千兆、IRQ 亲和、禁用自动擦除和遥测屏蔽在出厂镜像里就生效。
 
 辅助研究入口：`inspect_fit.py <4.3.4.img> [--extract-rootfs <外部新文件>]` 仅解析、校验和提取旧 FIT；`probe_performance.py <Database2/m.db>` 用只读 SQLite URI 解析随包 Demo 的 PerformanceData，输出字段/未知尾部与 blob 哈希，不修改数据库。
 

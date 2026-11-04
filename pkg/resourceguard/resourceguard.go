@@ -117,8 +117,19 @@ func (g *Guard) Run(ctx context.Context, fn func(t *Throttle) error) error {
 
 // ApplyToProcess 把护栏应用到 pid 的所有线程（例如本地 Deemix 进程）。
 // pid 为 0 表示当前进程。
+// With StrictCPU, a live thread that could not be bound to the dedicated CPU
+// is an error, as in Run (#36).
 func (g *Guard) ApplyToProcess(pid int) ([]Report, error) {
-	return applyProcess(g.cfg, pid)
+	reps, err := applyProcess(g.cfg, pid)
+	if err != nil || !g.cfg.StrictCPU || g.cfg.Disabled {
+		return reps, err
+	}
+	for _, rep := range reps {
+		if len(rep.CPUs) != 1 || rep.CPUs[0] != g.cfg.CPU {
+			return reps, fmt.Errorf("resourceguard: dedicated CPU%d unavailable for thread %d: %s", g.cfg.CPU, rep.TID, rep.String())
+		}
+	}
+	return reps, nil
 }
 
 // Throttle 是协作式节流器：工作循环里频繁调用 Tick，

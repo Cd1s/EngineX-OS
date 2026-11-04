@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/dbhealer"
+	"github.com/Cd1s/EngineX-OS/pkg/dbhealer"
 )
 
 type guardianResult struct {

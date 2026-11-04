@@ -10,7 +10,7 @@ import (
 	"math"
 	"unicode/utf8"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 var big = binary.BigEndian

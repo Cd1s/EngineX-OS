@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 func TestBeatPositionsHoldConstantBPM(t *testing.T) {

@@ -101,7 +101,7 @@
       <circle cx="34" cy="130" r="11" class="a"/><text x="34" y="135" text-anchor="middle" font-size="12" font-weight="700" class="bg">3</text>
       <text x="54" y="135" class="t">CPU3 本機分軌 <tspan class="m">— 因果 IIR 分頻，無需伺服器</tspan></text>
     </g>
-    <text x="22" y="160" font-size="11.5" class="faint">只有前一個算繪端完全連不上時才換下一個：同一工作階段絕不拆分。</text>
+    <text x="22" y="160" font-size="11" class="faint">前一級完全連不上才換下一級；同一工作階段絕不拆分。</text>
   </g>
 
   <!-- home PC -->
@@ -142,5 +142,6 @@
     <text x="712" y="200" class="g">探索廣播</text>
   </g>
 
-  <text x="716" y="626" font-size="11.5" class="faint">上下行皆為 int16；播放機還原 旋律 = 原音 − 人聲 − 低音 − 鼓組</text>
+  <text x="1176" y="618" font-size="11.5" text-anchor="end" class="faint">上下行皆為 int16</text>
+  <text x="1176" y="636" font-size="11.5" text-anchor="end" class="faint">播放機還原 旋律 = 原音 − 人聲 − 低音 − 鼓組</text>
 </svg>

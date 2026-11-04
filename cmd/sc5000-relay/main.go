@@ -34,11 +34,20 @@ type server struct {
 
 func main() {
 	listen := flag.String("listen", "0.0.0.0:6595", "listen address")
-	public := flag.String("public", "https://relay.example.com", "public base URL of your self-hosted sc5000-relay")
+	public := flag.String("public", "", "public base URL of your self-hosted sc5000-relay (required; OAuth callbacks use it)")
 	stateDir := flag.String("state", "/var/lib/sc5000-relay", "state directory (config.json, sessions)")
 	stemsTarget := flag.String("stems-target", "http://127.0.0.1:6596", "local sc5000-stemsd base URL (/v1/engine is appended)")
 	stemsToken := flag.String("stems-token-file", defaultStemsTokenFile(), "sc5000-stemsd internal token; missing file sends none")
+	proxies := flag.String("trusted-proxies", "", "comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted; empty trusts all private, loopback and tailnet peers")
 	flag.Parse()
+	if *public == "" || strings.Contains(*public, "relay.example.com") {
+		log.Fatal("-public must be this relay's real public URL (relay.example.com is a placeholder)")
+	}
+	tp, err := parseTrustedProxies(*proxies)
+	if err != nil {
+		log.Fatal(err)
+	}
+	trustedProxies = tp
 
 	for _, d := range []string{*stateDir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {

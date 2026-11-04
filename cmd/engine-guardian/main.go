@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/cli"
+	"github.com/Cd1s/EngineX-OS/internal/cli"
 )
 
 func main() { os.Exit(cli.Guardian(os.Args[1:], os.Stdout, os.Stderr)) }

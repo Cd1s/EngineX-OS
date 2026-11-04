@@ -98,3 +98,19 @@ func TestCombSearchRejectsInvalidRangeBeforeIteration(t *testing.T) {
 		}
 	}
 }
+
+func TestFoldBPMStaysInsideANarrowWindow(t *testing.T) {
+	for _, c := range []struct{ bpm, lo, hi, want float64 }{
+		{87.9, 88, 175, 88},    // no octave of 87.9 lies in [88, 175]; 88 is nearer
+		{87.593, 88, 175, 175}, // 175.186 is nearer to 175 than 87.593 to 88
+		{90, 100, 150, 100},    // 90 is nearer to 100 than 180 is to 150
+		{140, 100, 150, 140},
+		{70, 100, 150, 140},
+		{148, 100, 150, 148},
+		{280, 100, 150, 140},
+	} {
+		if got := foldBPM(c.bpm, c.lo, c.hi); math.Abs(got-c.want) > 1e-9 {
+			t.Errorf("foldBPM(%v, %v, %v) = %v, want %v", c.bpm, c.lo, c.hi, got, c.want)
+		}
+	}
+}

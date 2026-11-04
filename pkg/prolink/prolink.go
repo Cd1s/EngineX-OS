@@ -3,6 +3,7 @@
 package prolink
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -11,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 const magic = "Qspt1WmJOL"
@@ -35,7 +36,11 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 	}
 	d.PacketType = b[10]
 	d.Address = remote.String()
-	d.Name = strings.TrimRight(string(b[12:32]), "\x00 ")
+	name := b[12:32]
+	if i := bytes.IndexByte(name, 0); i >= 0 {
+		name = name[:i] // C string: bytes after the NUL are buffer garbage (#36)
+	}
+	d.Name = strings.TrimRight(string(name), " ")
 	d.LastSeen = time.Now()
 	switch {
 	case port == 50000 && b[10] == 0x06:
@@ -57,6 +62,8 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 	return d, nil
 }
 
+const maxDevices = 64
+
 type Discovery struct {
 	mu      sync.RWMutex
 	devices map[string]Device
@@ -69,8 +76,17 @@ func (d *Discovery) Observe(device Device) Device {
 	if d.devices == nil {
 		d.devices = map[string]Device{}
 	}
-	d.prune(time.Now())
+	now := time.Now()
+	d.prune(now)
+	if device.LastSeen.IsZero() {
+		device.LastSeen = now
+	}
 	key := fmt.Sprintf("%s/%d", device.Address, device.Number)
+	// Spoofed UDP must not grow the table without bound; a real network has a
+	// handful of players and mixers (#36).
+	if _, ok := d.devices[key]; !ok && len(d.devices) >= maxDevices {
+		return device
+	}
 	if old, ok := d.devices[key]; ok && device.PacketType == 6 {
 		device.TrackID = old.TrackID
 		device.SourcePlayer = old.SourcePlayer

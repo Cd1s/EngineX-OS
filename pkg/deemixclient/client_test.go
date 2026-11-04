@@ -17,8 +17,8 @@ import (
 	"github.com/mewkiz/flac"
 	"github.com/mewkiz/flac/meta"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testaudio"
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/internal/testaudio"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 func TestMatchingRecordingIdentity(t *testing.T) {
@@ -540,5 +540,29 @@ func TestEmbedCoverInFLACAndMP3(t *testing.T) {
 	}
 	if entries, _ := filepath.Glob(filepath.Join(dir, ".part-*")); len(entries) != 0 {
 		t.Fatalf("leftovers %v", entries)
+	}
+}
+
+func TestHasPictureReadsFrameIDs(t *testing.T) {
+	frame := func(id, body string) []byte {
+		return append(binary.BigEndian.AppendUint32([]byte(id), uint32(len(body))), append([]byte{0, 0}, body...)...)
+	}
+	tag := func(frames ...[]byte) []byte {
+		body := bytes.Join(frames, nil)
+		return append([]byte{'I', 'D', '3', 3, 0, 0, byte(len(body) >> 21 & 0x7f), byte(len(body) >> 14 & 0x7f), byte(len(body) >> 7 & 0x7f), byte(len(body) & 0x7f)}, body...)
+	}
+	dir := t.TempDir()
+	for name, c := range map[string]struct {
+		data []byte
+		want bool
+	}{
+		"comment mentions APIC": {tag(frame("COMM", "\x00engAPIC frame?")), false},
+		"real picture":          {tag(frame("TIT2", "\x00x"), frame("APIC", "\x00image/jpeg\x00\x03\x00jpg")), true},
+	} {
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".mp3")
+		os.WriteFile(path, append(c.data, 0xff, 0xfb, 0x90, 0x00), 0o644)
+		if got, err := hasPicture(path); err != nil || got != c.want {
+			t.Errorf("%s: %v %v", name, got, err)
+		}
 	}
 }

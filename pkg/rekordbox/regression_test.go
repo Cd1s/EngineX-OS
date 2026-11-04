@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 )
 
 func TestAlbumFarOffset(t *testing.T) {

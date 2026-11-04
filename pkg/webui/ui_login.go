@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -397,7 +397,7 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 	action := "/m/" + flow.Provider + "?t=" + url.QueryEscape(flow.token)
 	switch flow.Provider {
 	case "deezer":
-		phonePage(w, `<h2>连接 Deezer</h2><p>填写资料页或分享链接后，可在碟机上浏览你的公开歌单；也可以填写 arl Cookie，碟机会用它确认账号。云端登录服务的地址和密码也可以在这里改，只想改这两项时其余留空。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="分享链接、资料页地址或用户 ID"><input name="arl" placeholder="arl Cookie（可选）" autocomplete="off"><input name="relayUrl" value="`+html.EscapeString(s.relayStatusView().RelayURL)+`" placeholder="云端登录服务地址" autocomplete="off"><input name="deemixPassword" type="password" placeholder="云端服务新密码（留空不改）" autocomplete="off"><button>连接</button></form>`)
+		phonePage(w, `<h2>连接 Deezer</h2><p>填写资料页或分享链接后，可在碟机上浏览你的公开歌单；也可以填写 arl Cookie，碟机会用它确认账号。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="分享链接、资料页地址或用户 ID"><input name="arl" placeholder="arl Cookie（可选）" autocomplete="off"><button>连接</button></form>`)
 	case "soundcloud":
 		phonePage(w, `<h2>连接 SoundCloud</h2><p>填主页链接、分享链接或用户名，就能看到点赞的曲目和歌单。想看私密内容才需要 OAuth Token。只播放 API 标记为可完整播放的内容。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="主页链接、分享链接或用户名" autocomplete="off"><input name="clientId" placeholder="Client ID（已配好可留空）" autocomplete="off"><input name="clientSecret" type="password" placeholder="Client Secret（已配好可留空）" autocomplete="off"><input name="token" type="password" placeholder="OAuth Token（可选）" autocomplete="off"><button>连接</button></form>`)
 	case "spotify":
@@ -461,17 +461,10 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 	retry := `<p><a class="b" href="/m/` + flow.Provider + `?t=` + url.QueryEscape(flow.token) + `">重试</a></p>`
 	switch p := session.p.(type) {
 	case *providers.Deezer:
-		relay, password := strings.TrimSpace(r.Form.Get("relayUrl")), r.Form.Get("deemixPassword")
-		if relay != "" && !validRelayURL(relay) {
-			phonePage(w, "<h2>地址必须是 https，或内网 IP 的 http</h2>"+retry)
-			return
-		}
-		if err := s.updateRelayConfig(optional(relay), optional(password)); err != nil {
-			fail(w, 500, errors.New("could not save the relay settings"))
-			return
-		}
+		// The relay URL and password are not settable here: holding the QR
+		// token is not owning the deck (#8). The console and deck UI set them.
 		if strings.TrimSpace(r.Form.Get("user")+r.Form.Get("arl")) == "" {
-			s.finishPhoneLogin(w, flow)
+			phonePage(w, "<h2>请填写资料页链接或 arl</h2>"+retry)
 			return
 		}
 		check := &providers.Deezer{BaseURL: s.cfg.DeezerURL, GatewayURL: s.cfg.DeezerGatewayURL, HTTP: s.cfg.HTTP}

@@ -102,14 +102,15 @@ func (st *sessionStore) flushLocked() {
 	if !st.dirty {
 		return
 	}
-	st.dirty = false
 	b, err := json.Marshal(st.m)
 	if err != nil {
 		return
 	}
 	if err := writeFileAtomic(st.path, b, 0o600); err != nil {
-		log.Printf("sessions: save: %v", err)
+		log.Printf("sessions: save: %v", err) // stays dirty: the janitor retries
+		return
 	}
+	st.dirty = false
 }
 
 func (st *sessionStore) save() {
@@ -157,11 +158,12 @@ func (st *sessionStore) poll(token, clientID string, trusted bool) pollResponse 
 	defer st.mu.Unlock()
 	s := st.m[token]
 	if s == nil {
-		if !validToken(token) || len(st.m) >= maxSessions {
+		// Only the deck (with the password) may recreate a session it registered
+		// before a restart we have no record of; anonymous polls must not fill
+		// the store (#11).
+		if !trusted || !validToken(token) || len(st.m) >= maxSessions {
 			return pollResponse{Status: "expired"}
 		}
-		// Deck registered before a restart we have no record of, or never
-		// reached us: keep its QR usable.
 		s = newSession(token, "", clientID)
 		st.m[token] = s
 		st.saveLocked()
@@ -210,6 +212,11 @@ func (st *sessionStore) open(token, provider, clientID string) (session, bool) {
 	}
 	st.saveLocked()
 	return *s, true
+}
+
+func (st *sessionStore) isDone(token string) bool {
+	s, ok := st.get(token)
+	return ok && s.Status == "done"
 }
 
 func (st *sessionStore) get(token string) (session, bool) {
@@ -272,22 +279,53 @@ func writeFileAtomic(path string, b []byte, mode os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
-// completeDeezer commits the account only while its QR is live. The config
-// callback runs under the same lock, so expiry/provider changes/trust upgrades
-// cannot race global config synchronization or publish a partial success.
-func (st *sessionStore) completeDeezer(token, userID, arl string, syncConfig func(bool) error) error {
+var (
+	errSessionGone = errors.New("会话已过期，请在碟机上重新生成二维码")
+	// errSessionDone: another request (double tap, browser prefetch) already
+	// finished this login. Callers show success and change nothing (#12).
+	errSessionDone = errors.New("这次登录已经完成")
+)
+
+// complete commits a login result only while its QR is live, for its provider,
+// and once. The config sync runs under the same lock, so expiry, provider
+// changes or trust upgrades cannot race the server-wide config, and a failed
+// sync publishes nothing. syncConfig may be nil.
+func (st *sessionStore) complete(token, provider string, syncConfig func(trusted bool) error, apply func(*session)) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	s := st.m[token]
-	if s == nil || s.expired(time.Now()) || s.Provider != "deezer" || s.Status == "done" {
-		return errors.New("Deezer 会话已过期或已完成，请重新扫码")
+	if s == nil || s.expired(time.Now()) || s.Provider != provider {
+		return errSessionGone
 	}
-	if err := syncConfig(s.Trusted); err != nil {
-		return err
+	if s.Status == "done" {
+		return errSessionDone
 	}
-	s.Deezer, s.Status = &deezerInfo{UserID: userID, ARL: arl}, "done"
+	if syncConfig != nil {
+		if err := syncConfig(s.Trusted); err != nil {
+			return err
+		}
+	}
+	apply(s)
+	s.Status = "done"
 	st.saveLocked()
 	// Successful login credentials must survive an immediate service restart.
 	st.flushLocked()
 	return nil
+}
+
+// completeDeezer is complete for the Deezer browser login.
+func (st *sessionStore) completeDeezer(token, userID, arl string, syncConfig func(bool) error) error {
+	err := st.complete(token, "deezer", syncConfig, func(s *session) { s.Deezer = &deezerInfo{UserID: userID, ARL: arl} })
+	if err == errSessionGone || err == errSessionDone {
+		return errors.New("Deezer 会话已过期或已完成，请重新扫码")
+	}
+	return err
+}
+
+// doneOK turns "someone else already finished this login" into success.
+func doneOK(err error) error {
+	if err == errSessionDone {
+		return nil
+	}
+	return err
 }

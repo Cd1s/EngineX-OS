@@ -56,7 +56,7 @@ curl -fsS http://127.0.0.1:6595/healthz
 
 `20261102T174854Z-clawbot-104-before-deezer-browser-deploy-state-a36a51a27752-sc5000-relay.tar.gz`
 
-Spotify 默认 Client ID `1c7c775b12b642b38e0884afcfd6169c` 已注册 `https://relay.example.com/oauth/spotify/callback`，因此默认使用自动 HTTPS 回调；授权范围为 `user-library-read playlist-read-private playlist-read-collaborative`。
+Spotify 默认 Client ID `1c7c775b12b642b38e0884afcfd6169c` 只在其注册过的回调上可用（`relay.example.com` 是文档占位符）。中继按当前 `-public` 生成 `<public>/oauth/spotify/callback`，首次使用会探测 Spotify 是否接受这个回调：接受就走自动 HTTPS 回调，并按“Client ID + 回调地址”记住；不接受或探测无结论就退回粘贴 127.0.0.1 地址的流程。授权范围为 `user-library-read playlist-read-private playlist-read-collaborative`。
 
 ## 本次部署验收
 

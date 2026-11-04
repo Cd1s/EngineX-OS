@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"github.com/skip2/go-qrcode"
 )
 
@@ -143,6 +143,25 @@ func DefaultStateDir(home string) string {
 	return filepath.Join(home, ".config/stream-sync")
 }
 func (s *Server) AccessToken() string { return s.cfg.AccessToken }
+
+// LoadAccessToken keeps the console access code in <dir>/access-token (0600), so a
+// restart does not log every browser out (#14). created reports a new code.
+func LoadAccessToken(dir string) (token string, created bool, err error) {
+	path := filepath.Join(dir, "access-token")
+	if b, err := os.ReadFile(path); err == nil {
+		if t := strings.TrimSpace(string(b)); t != "" {
+			return t, false, nil
+		}
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", false, err
+	}
+	token = providers.RandomID()
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		return "", false, err
+	}
+	return token, true, nil
+}
 
 func (s *Server) consoleQR(w http.ResponseWriter, r *http.Request) {
 	target := s.cfg.PublicURL

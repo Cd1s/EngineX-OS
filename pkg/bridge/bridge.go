@@ -5,16 +5,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/compat"
-	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
-	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 // ST_RDONLY from statvfs(3); syscall has no portable name for it.
@@ -219,6 +220,18 @@ func writeStamp(dir, stamp string) {
 }
 
 func fastImport(ctx context.Context, mount, dir string, l *rekordbox.Library, opts enginedb.Options) (enginedb.Result, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return enginedb.Result{}, err
+	}
+	unlock, err := lockVolume(dir)
+	if err != nil {
+		return enginedb.Result{}, err
+	}
+	defer unlock()
+	// An earlier run may have died between the two renames.
+	if err = finishPublish(dir, stateName, "m.db"); err != nil {
+		return enginedb.Result{}, err
+	}
 	work, err := os.MkdirTemp("", "rb-bridge-*")
 	if err != nil {
 		return enginedb.Result{}, err
@@ -226,7 +239,7 @@ func fastImport(ctx context.Context, mount, dir string, l *rekordbox.Library, op
 	defer os.RemoveAll(work)
 	// Tracks and bridge state already held on this volume stay in the library for incremental sync.
 	for _, name := range []string{"m.db", stateName} {
-		if err = copyIfPresent(filepath.Join(dir, name), filepath.Join(work, name)); err != nil {
+		if err = snapshot(filepath.Join(dir, name), filepath.Join(work, name)); err != nil {
 			return enginedb.Result{}, err
 		}
 	}
@@ -236,16 +249,7 @@ func fastImport(ctx context.Context, mount, dir string, l *rekordbox.Library, op
 	if err != nil {
 		return result, err
 	}
-	if err = os.MkdirAll(dir, 0o755); err != nil {
-		return result, err
-	}
-	// The state first: a state without its database only makes the next run repeat.
-	for _, name := range []string{stateName, "m.db"} {
-		if err = copyReplace(filepath.Join(work, name), filepath.Join(dir, name)); err != nil {
-			return result, err
-		}
-	}
-	return result, nil
+	return result, publish(work, dir, stateName, "m.db")
 }
 
 // mergeByPath is Reconcile without touching the disk.
@@ -254,11 +258,13 @@ func mergeByPath(l *rekordbox.Library) {
 	replaced := map[uint32]uint32{}
 	kept := l.Tracks[:0:0]
 	for _, t := range l.Tracks {
-		if first, ok := byPath[strings.ToLower(t.Path)]; ok {
+		// Same equivalence as compat's resolver: case folding and NFC (#6).
+		key := norm.NFC.String(cases.Fold().String(norm.NFC.String(t.Path)))
+		if first, ok := byPath[key]; ok {
 			replaced[t.ID] = first
 			continue
 		}
-		byPath[strings.ToLower(t.Path)] = t.ID
+		byPath[key] = t.ID
 		kept = append(kept, t)
 	}
 	l.Tracks = kept
@@ -281,36 +287,4 @@ func replacePlaylistTracks(l *rekordbox.Library, replaced map[uint32]uint32) {
 		}
 		l.Playlists[i].Tracks = tracks
 	}
-}
-
-func copyIfPresent(src, dst string) error {
-	if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return copyReplace(src, dst)
-}
-
-// copyReplace writes beside the target and renames, so a pulled stick never holds
-// half a database.
-func copyReplace(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.CreateTemp(filepath.Dir(dst), ".copy-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(out.Name())
-	if _, err = io.Copy(out, in); err == nil {
-		err = out.Sync()
-	}
-	if closeErr := out.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(out.Name(), dst)
 }

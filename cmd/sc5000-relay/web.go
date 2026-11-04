@@ -141,9 +141,11 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 			err = errors.New("请填写 Client ID 和 Client Secret，或者 OAuth Token")
 		}
 		if err == nil {
-			s.sessions.update(token, func(x *session) { x.SoundCloud, x.Status = info, "done" })
-			if sess.Trusted {
-				s.cfg.update(func(c *config) {
+			err = doneOK(s.sessions.complete(token, "soundcloud", func(trusted bool) error {
+				if !trusted {
+					return nil
+				}
+				return s.cfg.update(func(c *config) {
 					if info.ClientID != "" {
 						c.SoundCloudClientID = info.ClientID
 					}
@@ -154,15 +156,28 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 						c.SoundCloudToken = info.Token
 					}
 				})
-			}
+			}, func(x *session) { x.SoundCloud = info }))
 		}
 		s.mobileResult(w, r, provider, token, 200, err)
 		return
 	}
 	if provider == "deezer" {
-		info, err := s.connectDeezer(ctx, firstOf(v, "user", "link", "url", "userId", "id"), firstOf(v, "arl"), sess.Trusted)
+		info, arlName, err := s.connectDeezer(ctx, firstOf(v, "user", "link", "url", "userId", "id"), firstOf(v, "arl"))
 		if err == nil {
-			s.sessions.update(token, func(x *session) { x.Deezer, x.Status = info, "done" })
+			// The 30 s lookup ran without the lock; the session is re-checked here.
+			err = doneOK(s.sessions.complete(token, "deezer", func(trusted bool) error {
+				if !trusted {
+					return nil
+				}
+				return s.cfg.update(func(c *config) {
+					c.DeezerUserID = info.UserID
+					if info.ARL != "" {
+						c.DeezerARL, c.DeezerARLUserName, c.DeezerARLChecked = info.ARL, arlName, time.Now().UTC()
+					}
+				})
+			}, func(x *session) { x.Deezer = info }))
+		}
+		if err == nil {
 			s.browser.closeToken(token)
 		}
 		s.mobileResult(w, r, provider, token, 200, err)
@@ -179,47 +194,37 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 	s.mobileResult(w, r, provider, token, 200, err)
 }
 
-// connectDeezer resolves the pasted link/ID and/or validates the ARL. For
-// sessions the deck opened with the password (sync), the result is also
-// mirrored into the server config used by /api/audio; anyone can mint a
-// token, so untrusted sessions only carry the result back to their deck.
-func (s *server) connectDeezer(ctx context.Context, user, arl string, sync bool) (*deezerInfo, error) {
+// connectDeezer resolves the pasted link/ID and/or validates the ARL. The caller
+// mirrors the result into the server config only for sessions the deck opened
+// with the password; anyone can mint a token, so untrusted sessions only carry
+// the result back to their deck.
+func (s *server) connectDeezer(ctx context.Context, user, arl string) (*deezerInfo, string, error) {
 	if user == "" && arl == "" {
-		return nil, errors.New("请填写 Deezer 链接 / 用户 ID，或 ARL Cookie")
+		return nil, "", errors.New("请填写 Deezer 链接 / 用户 ID，或 ARL Cookie")
 	}
 	info := &deezerInfo{}
 	var arlUser, arlName string
 	if arl != "" {
 		ses, err := s.deezer.login(ctx, arl)
 		if err != nil {
-			return nil, fmt.Errorf("%v（如只想用链接连接，请清空 ARL 输入框）", err)
+			return nil, "", fmt.Errorf("%v（如只想用链接连接，请清空 ARL 输入框）", err)
 		}
 		info.ARL, arlUser, arlName = arl, ses.UserID, ses.UserName
 	}
 	if user != "" {
 		id, err := s.deezer.resolveUser(ctx, user)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		info.UserID = id
 	} else {
 		info.UserID = arlUser
 	}
 	if err := s.deezer.userPlaylistsOK(ctx, info.UserID); err != nil {
-		return nil, fmt.Errorf("Deezer 用户 %s 的歌单无法访问：%v", info.UserID, err)
+		return nil, "", fmt.Errorf("Deezer 用户 %s 的歌单无法访问：%v", info.UserID, err)
 	}
-	if sync {
-		if err := s.cfg.update(func(c *config) {
-			c.DeezerUserID = info.UserID
-			if info.ARL != "" {
-				c.DeezerARL, c.DeezerARLUserName, c.DeezerARLChecked = info.ARL, arlName, time.Now().UTC()
-			}
-		}); err != nil {
-			return nil, err
-		}
-	}
-	log.Printf("deezer: connected user %s (arl: %v, synced to config: %v)", info.UserID, info.ARL != "", sync)
-	return info, nil
+	log.Printf("deezer: connected user %s (arl: %v)", info.UserID, info.ARL != "")
+	return info, arlName, nil
 }
 
 func (s *server) mobileResult(w http.ResponseWriter, r *http.Request, provider, token string, code int, err error) {
@@ -271,18 +276,22 @@ func (s *server) finishSpotify(ctx context.Context, sess session, code, redirect
 	if sess.Verifier == "" {
 		return errors.New("会话缺少 PKCE 信息，请重新打开扫码页面")
 	}
+	if s.sessions.isDone(sess.Token) {
+		return nil
+	}
 	tok, err := s.spotify.exchange(ctx, sess.SpotifyClientID, code, sess.Verifier, redirect)
 	if err != nil {
+		// A parallel callback spent the one-time code and finished the login.
+		if s.sessions.isDone(sess.Token) {
+			return nil
+		}
 		log.Printf("spotify: exchange failed: %v", err)
 		return fmt.Errorf("Spotify 换取令牌失败：%v", err)
 	}
 	if redirect == s.spotify.httpsRedirect {
 		s.spotify.learnHTTPS(sess.SpotifyClientID)
 	}
-	if !s.sessions.update(sess.Token, func(x *session) { x.SpotifyToken, x.Status = tok, "done" }) {
-		return errors.New("会话已过期，请在碟机上重新生成二维码")
-	}
-	return nil
+	return doneOK(s.sessions.complete(sess.Token, "spotify", nil, func(x *session) { x.SpotifyToken = tok }))
 }
 
 func (s *server) handleSpotifyCallback(w http.ResponseWriter, r *http.Request) {
@@ -338,6 +347,10 @@ func (s *server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	view := s.configView()
 	if r.URL.Query().Get("secrets") == "1" {
 		c := s.cfg.get()
+		if c.PasswordIsDefault {
+			writeJSON(w, 403, map[string]any{"ok": false, "error": "change the default console password before reading secrets", "config": view})
+			return
+		}
 		view["deezerArl"] = c.DeezerARL
 		view["soundcloudClientId"] = c.SoundCloudClientID
 		view["soundcloudClientSecret"] = c.SoundCloudSecret

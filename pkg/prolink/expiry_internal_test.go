@@ -17,3 +17,18 @@ func TestObservePrunesStorage(t *testing.T) {
 		t.Fatal("Devices retained expired storage")
 	}
 }
+
+func TestObserveBoundsTheTableAndStampsLastSeen(t *testing.T) {
+	d := NewDiscovery()
+	for i := 0; i < maxDevices+10; i++ {
+		d.Observe(Device{Address: "10.0.0.1", Number: byte(i)})
+	}
+	if len(d.devices) != maxDevices {
+		t.Fatalf("%d devices", len(d.devices))
+	}
+	for _, v := range d.devices {
+		if v.LastSeen.IsZero() {
+			t.Fatal("zero LastSeen stored")
+		}
+	}
+}
