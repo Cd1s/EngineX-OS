@@ -2,6 +2,7 @@
 // process on SC5000. It forwards the child's stdin/stdout byte stream to a
 // remote renderer, by default through the cloud relay the deck already uses
 // for logins (see internal/stems.ResolveClient for the override variables).
+// A deck with no renderer set up splits stems itself (stems.LocalRender).
 package main
 
 import (
@@ -12,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/Cd1s/sc5000-custom-os/internal/stems"
+	"github.com/Cd1s/sc5000-custom-os/pkg/resourceguard"
 )
 
 func main() {
@@ -20,6 +22,17 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stems backend:", err)
 		os.Exit(1)
+	}
+	if client.Endpoint == "" {
+		// No renderer set up: split on the deck, never at the audio's expense.
+		if _, err = resourceguard.New(resourceguard.DefaultConfig()).ApplyToProcess(0); err != nil {
+			fmt.Fprintln(os.Stderr, "local stems: resource guard:", err)
+		}
+		if err = stems.LocalRender(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "local stems:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

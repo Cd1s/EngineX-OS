@@ -164,8 +164,53 @@ and caller isolation. Six synthetic config patterns exercise the common layout;
 they are not six hardware acceptance tests. Ghidra's full import timed out;
 entry identification above uses the API table, source ID and objdump evidence.
 
-This universal backend build is prepared for coordinated deployment. Its new
-hooks have not been loaded on the deck and this task does not restart Engine.
+The current ALSA/update candidate is prepared for coordinated deployment. Its
+new hooks have not been loaded on the deck by this task; this task does not
+restart Engine.
+
+## ALSA clock and official updater boundary
+
+The official image contradicts the original RA002 assumption: `0x165bcd0`
+loads type **2 (MONOTONIC_RAW)** and `0x165bcd8` calls the ALSA timestamp setter.
+The second setup at `0x167cdf8` does not explicitly choose a type. Engine's timer
+helpers at `0x167bad4` and `0x167bc1c` use clockid **4 (CLOCK_MONOTONIC_RAW)**.
+This supports preserving RAW; it is not an end-to-end proof of the Sync Time bug.
+
+The two ALSA interposers only upgrade GETTIMEOFDAY/type 0 to RAW/type 2 inside
+Engine. Existing MONOTONIC/type 1 and RAW/type 2 pass through unchanged. Before
+sw_params is committed, its type is queried through the real ALSA getter. An
+unavailable/failed query preserves the original apply behavior; a failed required
+type change returns the real error without committing the configuration. Other
+processes retain normal ALSA behavior. No timestamp mode, sample rate, PCM data,
+DSP operator, start/stop threshold or silence parameter is changed.
+
+Both native paths explicitly set silence_threshold=0 (`0x165bcc0`, `0x167cde4`).
+No silence-size/boundary override is added: filling a ring buffer differently
+without establishing its ownership/drain semantics could truncate valid audio.
+The ALSA docs describe [silence filling](https://www.alsa-project.org/alsa-doc/alsa-lib/pcm_2pcm_8c.html)
+and the kernel distinguishes [the clock domains](https://cdn.kernel.org/doc/html/latest/sound/designs/timestamping.html).
+The unit test checks type preservation, call ordering, failure handling and
+unchanged sentinel buffer parameters; it cannot establish zero pops or XRUNs.
+
+UpdateServerUrl defaults to `https://autoupdate.airmusictech.com/PrimeUpdates.xml`
+(the string reference at `0x386f6c` precedes the property assignment at `0x386f94`).
+The Engine-only getaddrinfo guard rejects that exact hostname, case-insensitively
+and allowing a final DNS dot. It does not block the inmusicbrands.com apex,
+connman, GitHub, or `device.inmusicbrands.com`: the latter also appears in OAuth
+refresh (`0xf089b0`) and software-unlock (`0x1a84b94`) code. GitHub OTA UI and its
+server remain separate work; vendor XML requests are not redirected to GitHub
+JSON. Proxy-side DNS, numeric/cached endpoints and other processes are outside
+this resolver boundary.
+
+The historical closed-core/MCU checklist was checked for a library boundary,
+not counted as fixed. StopTime maps to `/Client/Preferences/RampDownTime` and
+`Config.audio.rampDownTime`; forcing it to zero could abruptly cut audio.
+KeyLock (`/Engine/DeckN/Track/KeyLock`) and InstantDouble
+(`/Engine/DeckN/InstantDouble/Sync`) expose controls, not a verified DSP repair
+interface. FX tails/gates/reverse reverb/loop-phase transitions need state-aware
+DSP changes; pitch/motor MCU defects are outside Engine's library boundary.
+No clamp, buffer clearing, virtual-call replacement or DSP machine-code edit is
+added for those groups. Resource guards do not prove those defects resolved.
 
 The client additionally requires the separately provisioned private
 `/etc/sc5000-stems/token` and the LAN backend. Installing the client and seeing

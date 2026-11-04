@@ -68,7 +68,7 @@ clocks caused ALSA xruns), `up_threshold` 50 and `sampling_down_factor` 10, and 
 to `simple_ondemand` at its lowest frequency (audio over UI frame rate). It writes sysctl
 values (swappiness 10, dirty background 5, dirty ratio 15, file-max 1048576),
 and selects `mq-deadline`, otherwise `none`, when advertised, except on devices
-where Engine already chose `bfq`. Movable IRQs and their
+where Engine already chose `bfq`. USB and SD devices read ahead 1 MiB (LC003). Movable IRQs and their
 PREEMPT_RT threads are placed by name; `/etc/default/sc5000-perf` holds the
 patterns. Engine's threads keep the scheduler's placement.
 

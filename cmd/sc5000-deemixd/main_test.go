@@ -159,9 +159,7 @@ func TestCredentialSyncAndPreservation(t *testing.T) {
 func TestDefaultRelayConfig(t *testing.T) {
 	d := testDaemon(t)
 	d.hc = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if r.URL.String() != defaultRelay+"/api/config?secrets=1" || r.Header.Get("X-Deemix-Password") != defaultPassword {
-			t.Error("defaults incorrect")
-		}
+		t.Error("unconfigured relay must not make network requests")
 		return &http.Response{StatusCode: 200, Body: http.NoBody, Header: make(http.Header)}, nil
 	})}
 	if _, err := d.credentials(context.Background()); err == nil {

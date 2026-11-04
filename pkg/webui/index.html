@@ -6,7 +6,7 @@
 </style>
 <header><h1>STREAM SYNC</h1><span id="guard">后台工作队列</span></header>
 <details><summary>BPM 数据来源（可选）</summary><p id="bpmState"></p><input id="scClient" placeholder="SoundCloud Client ID（留空不改）" autocomplete="off"><input id="scSecret" type="password" placeholder="SoundCloud Client Secret（留空不改）" autocomplete="off"><input id="scToken" type="password" placeholder="SoundCloud Token（留空不改）" autocomplete="off"><input id="gsbKey" type="password" placeholder="GetSongBPM Key（留空不改）" autocomplete="off"><button onclick="action(saveBpm)">保存</button><p><small><a href="https://getsongbpm.com" target="_blank" rel="noreferrer">BPM data by GetSongBPM</a></small></p></details>
-<details><summary>云端登录服务</summary><p id="relayState"></p><input id="relayUrl" placeholder="https://relay.example.com" autocomplete="off"><input id="relayPassword" type="password" placeholder="新密码（留空不改）" autocomplete="off"><button onclick="action(saveRelay)">保存</button></details>
+<details><summary>云端登录服务</summary><p id="relayState"></p><input id="relayUrl" placeholder="https://relay.example.com（自建 sc5000-relay 地址）" autocomplete="off"><input id="relayPassword" type="password" placeholder="新密码（留空不改）" autocomplete="off"><button onclick="action(saveRelay)">保存</button></details>
 <details><summary>手机扫码打开控制台</summary><img src="/api/console-qr" width="220" alt="局域网控制台二维码"><small>同一局域网连接，使用终端显示的控制台访问码登录。</small></details>
 <div class="card"><div class="bar"><label><input type="checkbox" id="guest"> 访客临时加歌</label><input id="user" placeholder="Deezer 公开用户 ID" aria-label="Deezer 用户 ID"></div>
 <nav><button data-provider="netease">网易云 · 扫码</button><button data-provider="spotify">Spotify · 扫码</button><button data-provider="deezer">Deezer</button></nav>

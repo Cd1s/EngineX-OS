@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <link.h>
+#include <netdb.h>
 #include <pthread.h>
 #include <sched.h>
 #include <spawn.h>
@@ -21,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
@@ -87,6 +89,53 @@ static int is_engine(void) {
     __atomic_store_n(&cached, value, __ATOMIC_RELAXED);
     return value;
 #endif
+}
+
+static void *alsa_sw_cache, *alsa_tstamp_set_cache, *alsa_tstamp_get_cache;
+
+int snd_pcm_sw_params_set_tstamp_type(void *pcm, void *params, int type) {
+    int (*real)(void *, void *, int) = next_symbol(&alsa_tstamp_set_cache, "snd_pcm_sw_params_set_tstamp_type");
+    if (!real) return -ENOSYS;
+    // Engine already requests RAW in ALSADevice; never change an explicit monotonic clock.
+    if (is_engine() && type == 0) type = 2; // GETTIMEOFDAY -> MONOTONIC_RAW
+    return real(pcm, params, type);
+}
+
+int snd_pcm_sw_params(void *pcm, void *params) {
+    int (*real)(void *, void *) = next_symbol(&alsa_sw_cache, "snd_pcm_sw_params");
+    if (!real) return -ENOSYS;
+    if (is_engine()) {
+        int (*get)(const void *, int *) = next_symbol(&alsa_tstamp_get_cache, "snd_pcm_sw_params_get_tstamp_type");
+        int type;
+        if (get && !get(params, &type) && type == 0) {
+            int rc = snd_pcm_sw_params_set_tstamp_type(pcm, params, 2);
+            if (rc < 0) return rc;
+        }
+    }
+    return real(pcm, params);
+}
+
+static int official_update_host(const char *node) {
+    static const char host[] = "autoupdate.airmusictech.com";
+    if (!node) return 0;
+    size_t size = strlen(node);
+    if (size && node[size - 1] == '.') size--;
+    return size == sizeof host - 1 && !strncasecmp(node, host, size);
+}
+
+static void *getaddrinfo_cache;
+
+int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **result) {
+    // device.inmusicbrands.com also serves OAuth/unlock; only deny the firmware-update host.
+    if (is_engine() && official_update_host(node)) {
+        if (result) *result = NULL;
+        return EAI_NONAME;
+    }
+    int (*real)(const char *, const char *, const struct addrinfo *, struct addrinfo **) =
+        next_symbol(&getaddrinfo_cache, "getaddrinfo");
+    if (real) return real(node, service, hints, result);
+    errno = ENOSYS;
+    return EAI_SYSTEM;
 }
 
 // Edits to Engine in memory, the same as unlock_jp07_features.py makes offline, for
