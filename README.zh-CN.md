@@ -10,7 +10,7 @@
 
 <br>
 
-**[解锁功能](#features)** · **[刷机包下载](https://github.com/Cd1s/EngineX-OS/releases/latest)** · **[实机画面](#gallery)** · **[重构与占用对比](#benchmarks)** · **[如何安装与升级](#install)**
+**[解锁功能](#features)** · **[刷机包下载](https://github.com/Cd1s/EngineX-OS/releases/latest)** · **[实机画面](#gallery)** · **[重构与占用对比](#benchmarks)** · **[如何安装与升级](#install)** · **[赞赏支持](#sponsor)**
 
 </div>
 
@@ -177,6 +177,33 @@ sh tools/edisksd-hook/build.sh
 ```
 
 </details>
+
+---
+
+<a id="sponsor"></a>
+
+## ☕ 赞赏与支持
+
+如果 **EngineX OS** 让你的碟机更好用、在演出或练歌时帮到了你，欢迎请作者喝杯咖啡或给项目点个 **Star ⭐** 支持后续维护！
+
+<div align="center">
+<img src="./docs/assets/sponsor-wechat.jpg" width="260" alt="微信赞赏码"><br>
+<sub><b>微信扫码赞赏（Cheek's 赞赏码）</b></sub>
+</div>
+
+---
+
+## 📈 Star 增长趋势
+
+<div align="center">
+<a href="https://star-history.com/#Cd1s/EngineX-OS&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Cd1s/EngineX-OS&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Cd1s/EngineX-OS&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Cd1s/EngineX-OS&type=Date" width="100%" />
+  </picture>
+</a>
+</div>
 
 ---
 
