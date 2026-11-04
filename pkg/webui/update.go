@@ -107,10 +107,18 @@ func (s *Server) setUpdateProgress(p float64, errMsg string, done bool) {
 	}
 }
 
+func hasMatchingStagedImage(path, downloadURL string) bool {
+	if b, err := os.ReadFile(path + ".url"); err != nil || strings.TrimSpace(string(b)) != downloadURL {
+		return false
+	}
+	return hasValidAZ01Image(path)
+}
+
 func (s *Server) applyOnlineUpdate(downloadURL string) {
-	if !hasValidAZ01Image(stagedUpdateFile) {
+	if !hasMatchingStagedImage(stagedUpdateFile, downloadURL) {
 		part := stagedUpdateFile + ".part"
 		_ = os.Remove(part)
+		_ = os.Remove(stagedUpdateFile + ".url")
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 		req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 		if err != nil {
@@ -183,6 +191,7 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 			s.setUpdateProgress(0, "downloaded image failed AZ01 check", true)
 			return
 		}
+		_ = os.WriteFile(stagedUpdateFile+".url", []byte(downloadURL+"\n"), 0o644)
 	}
 	s.setUpdateProgress(0.97, "", false)
 	uiDir := s.uiDir()
