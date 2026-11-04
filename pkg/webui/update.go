@@ -1,9 +1,13 @@
 package webui
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -19,21 +23,24 @@ const (
 	versionFile       = "/data/sc5000-custom/version.txt"
 	// imageVersionFile is written by az01_packer.py patch-rootfs --set-version.
 	imageVersionFile = "/etc/sc5000/version.txt"
+	stagedUpdateFile = "/data/az01-update.img"
 	updateCacheFor   = 10 * time.Minute
 )
 
 var githubRepoRE = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 
 type updateStatus struct {
-	Repo            string `json:"repo"`
-	Current         string `json:"currentVersion"`
-	Latest          string `json:"latestVersion,omitempty"`
-	URL             string `json:"releaseUrl,omitempty"`
-	UpdateAvailable bool   `json:"updateAvailable"`
+	Repo            string  `json:"repo"`
+	Current         string  `json:"currentVersion"`
+	Latest          string  `json:"latestVersion,omitempty"`
+	URL             string  `json:"releaseUrl,omitempty"`
+	UpdateAvailable bool    `json:"updateAvailable"`
 	// DownloadURL is this model's upgrade image in the release, for Engine's
 	// own online updater (Settings → Update).
-	DownloadURL string `json:"downloadUrl,omitempty"`
-	Error       string `json:"error,omitempty"`
+	DownloadURL string  `json:"downloadUrl,omitempty"`
+	Updating    bool    `json:"updating,omitempty"`
+	Progress    float64 `json:"progress,omitempty"`
+	Error       string  `json:"error,omitempty"`
 	checked     time.Time
 }
 
@@ -51,11 +58,146 @@ func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Unlock()
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
-	if v := s.updateCache; v.Repo != repo || time.Since(v.checked) > updateCacheFor {
-		// Detached: a deck page closing mid-check must not cache "unreachable" (#13).
-		s.updateCache = s.checkRelease(context.WithoutCancel(r.Context()), repo)
+	if !s.updateCache.Updating {
+		if v := s.updateCache; v.Repo != repo || time.Since(v.checked) > updateCacheFor {
+			// Detached: a deck page closing mid-check must not cache "unreachable" (#13).
+			s.updateCache = s.checkRelease(context.WithoutCancel(r.Context()), repo)
+		}
+		if strings.HasPrefix(r.URL.Path, "/v1/sc5000/update") && r.URL.Query().Get("apply") == "1" &&
+			s.updateCache.UpdateAvailable && s.updateCache.DownloadURL != "" {
+			s.updateCache.Updating = true
+			s.updateCache.Progress = 0.05
+			s.updateCache.Error = ""
+			go s.applyOnlineUpdate(s.updateCache.DownloadURL)
+		}
 	}
 	respond(w, s.updateCache)
+}
+
+func hasValidAZ01Image(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() < 50*1024*1024 {
+		return false
+	}
+	var head [4]byte
+	if _, err := io.ReadFull(f, head[:]); err != nil || string(head[:]) != "AZ01" {
+		return false
+	}
+	var tail [16]byte
+	if _, err := f.ReadAt(tail[:], st.Size()-16); err != nil {
+		return false
+	}
+	return bytes.Equal(tail[:4], []byte("EOF\x00"))
+}
+
+func (s *Server) setUpdateProgress(p float64, errMsg string, done bool) {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
+	s.updateCache.Progress = p
+	if errMsg != "" {
+		s.updateCache.Error = errMsg
+	}
+	if done {
+		s.updateCache.Updating = false
+	}
+}
+
+func (s *Server) applyOnlineUpdate(downloadURL string) {
+	if !hasValidAZ01Image(stagedUpdateFile) {
+		part := stagedUpdateFile + ".part"
+		_ = os.Remove(part)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
+		if err != nil {
+			cancel()
+			s.setUpdateProgress(0, "update download failed", true)
+			return
+		}
+		req.Header.Set("User-Agent", "EngineX-OS")
+		hc := s.cfg.HTTP
+		if hc == nil {
+			hc = &http.Client{Timeout: 20 * time.Minute}
+		}
+		resp, err := hc.Do(req)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			cancel()
+			s.setUpdateProgress(0, "update download failed", true)
+			return
+		}
+		out, err := os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		if err != nil {
+			resp.Body.Close()
+			cancel()
+			s.setUpdateProgress(0, "cannot write /data/az01-update.img", true)
+			return
+		}
+		total := resp.ContentLength
+		var written int64
+		buf := make([]byte, 256*1024)
+		for {
+			n, rerr := resp.Body.Read(buf)
+			if n > 0 {
+				if _, werr := out.Write(buf[:n]); werr != nil {
+					out.Close()
+					resp.Body.Close()
+					cancel()
+					_ = os.Remove(part)
+					s.setUpdateProgress(0, "disk write failed", true)
+					return
+				}
+				written += int64(n)
+				if total > 0 {
+					p := 0.05 + 0.88*(float64(written)/float64(total))
+					if p > 0.93 {
+						p = 0.93
+					}
+					s.setUpdateProgress(p, "", false)
+				}
+			}
+			if rerr == io.EOF {
+				break
+			}
+			if rerr != nil {
+				out.Close()
+				resp.Body.Close()
+				cancel()
+				_ = os.Remove(part)
+				s.setUpdateProgress(0, "download interrupted", true)
+				return
+			}
+		}
+		_ = out.Sync()
+		out.Close()
+		resp.Body.Close()
+		cancel()
+		if !hasValidAZ01Image(part) || os.Rename(part, stagedUpdateFile) != nil {
+			_ = os.Remove(part)
+			s.setUpdateProgress(0, "downloaded image failed AZ01 check", true)
+			return
+		}
+	}
+	s.setUpdateProgress(0.97, "", false)
+	uiDir := s.uiDir()
+	_ = os.Remove(filepath.Join(uiDir, "safe-mode"))
+	_ = os.Remove(filepath.Join(uiDir, "boot-count"))
+	cmd := exec.Command("/usr/sbin/az01-update", "--file", stagedUpdateFile)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		s.setUpdateProgress(0, "az01-update: "+msg, true)
+		return
+	}
+	s.setUpdateProgress(1.0, "", false)
 }
 
 func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
