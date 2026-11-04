@@ -10,7 +10,7 @@
 
 <br>
 
-**[Unlocked Features](#features)** · **[Download Firmware](https://github.com/Cd1s/EngineX-OS/releases/latest)** · **[Screenshots](#gallery)** · **[Before vs. After](#benchmarks)** · **[How to Install](#install)**
+**[Unlocked Features](#features)** · **[Download Firmware](https://github.com/Cd1s/EngineX-OS/releases/latest)** · **[Screenshots](#gallery)** · **[Before vs. After](#benchmarks)** · **[How to Install](#install)** · **[Sponsor](#sponsor)**
 
 </div>
 
@@ -177,6 +177,33 @@ sh tools/edisksd-hook/build.sh
 ```
 
 </details>
+
+---
+
+<a id="sponsor"></a>
+
+## ☕ Sponsor & Support
+
+If **EngineX OS** makes your decks more fun to play on or saves you prep time before a gig, consider buying the author a coffee or leaving a **Star ⭐** on the repo!
+
+<div align="center">
+<img src="./docs/assets/sponsor-wechat.jpg" width="260" alt="WeChat Appreciation QR Code"><br>
+<sub><b>WeChat Appreciation Code (Cheek's 讚賞碼)</b></sub>
+</div>
+
+---
+
+## 📈 Star History
+
+<div align="center">
+<a href="https://star-history.com/#Cd1s/EngineX-OS&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Cd1s/EngineX-OS&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Cd1s/EngineX-OS&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Cd1s/EngineX-OS&type=Date" width="100%" />
+  </picture>
+</a>
+</div>
 
 ---
 
