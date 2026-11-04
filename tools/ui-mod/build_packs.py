@@ -689,91 +689,97 @@ LANGUAGE_ENTRY = """
 		WaveformStyle { },
 """
 
-# Control Center: one tile like the stock ones, as on the CDJ-3000 shortcut
-# screen (#45). It previews the current palette on a fixed EDM-shaped track;
-# a tap moves to the next palette at once, without the RGB prompt.
+# Control Center: the CDJ-3000 "WAVEFORM COLOR" control, in a stock-size tile
+# (#45): a title over three joined segments, each with a colour swatch and a
+# name; the selected one is filled cyan. A tap switches at once, no RGB prompt.
 WAVE_TILE = """
 		Rectangle {
 			id: scWaveTile
 			objectName: "ControlCenter_WaveformStyle"
 			readonly property var ids: ["denon", "rgb", "3band"]
-			readonly property var names: ["Denon", "RGB", "3-Band"]
 			readonly property string current: ids.indexOf(root.scWave) >= 0 ? root.scWave : "denon"
 			width: 256
 			height: 104
 			radius: 16
-			color: scWaveTap.pressed ? Style.surface02Color : Style.surface03Color
-			onCurrentChanged: scWavePreview.requestPaint()
-			Canvas {
-				id: scWavePreview
-				anchors.horizontalCenter: parent.horizontalCenter
-				y: 14
-				width: 200
-				height: 44
-				onPaint: {
-					const ctx = getContext("2d")
-					ctx.reset()
-					const n = Math.floor(width / 2), mid = height / 2
-					let seed = 20261104
-					const rnd = () => (seed = seed * 16807 % 2147483647) / 2147483647
-					ctx.fillStyle = "#3a3a3a"
-					ctx.fillRect(0, mid - 0.5, width, 1)
-					for (let i = 0; i < n; i++) {
-						const t = i / n, kick = i % 4 === 0
-						let low, mids, high
-						if (t < 0.14) {          // intro: kicks and hats
-							low = kick ? 0.55 : 0.3; mids = 0.15; high = 0.25
-						} else if (t < 0.34) {   // build: synths and hats rise
-							const r = (t - 0.14) / 0.2
-							low = 0.2 + 0.15 * r; mids = 0.3 + 0.4 * r; high = 0.3 + 0.45 * r
-						} else if (t < 0.6) {    // drop
-							low = kick ? 1 : 0.45; mids = 0.6; high = i % 2 ? 0.6 : 0.3
-						} else if (t < 0.7) {    // breakdown: pads
-							low = 0.12; mids = 0.45; high = 0.2
-						} else {                 // second drop
-							low = kick ? 1 : 0.5; mids = 0.7; high = i % 2 ? 0.7 : 0.35
+			color: Style.surface03Color
+			Text {
+				x: 14
+				y: 8
+				text: "Waveform Style"
+				font: Style.fontH4
+				color: Style.font01Color
+			}
+			Row {
+				x: 12
+				y: 36
+				Repeater {
+					model: ["DENON", "RGB", "3BAND"]
+					Rectangle {
+						id: seg
+						readonly property string waveId: scWaveTile.ids[index]
+						readonly property bool selected: scWaveTile.current === waveId
+						objectName: "ControlCenter_WaveformStyle_" + waveId
+						width: (scWaveTile.width - 24) / 3
+						height: 56
+						color: selected ? "#00c3e3" : segTap.pressed ? "#6a6a6a" : "#4a4a4a"
+						border {
+							width: 1
+							color: "#a8a8a8"
 						}
-						low *= 0.75 + 0.25 * rnd(); mids *= 0.6 + 0.4 * rnd(); high *= 0.5 + 0.5 * rnd()
-						let bars
-						if (scWaveTile.current === "rgb") {
-							// Like rekordbox / CDJ RGB: the three bands add up to one colour per
-							// column (kick red-orange, mids yellow-green, hats cyan-blue).
-							// Taking out most of the shared (white) part keeps the hues saturated.
-							const ch = [low, mids * 0.85, high * 1.1], grey = 0.6 * Math.min(...ch)
-							const sat = ch.map(x => x - grey), top = Math.max(...sat)
-							const colour = Qt.rgba(sat[0] / top, sat[1] / top, sat[2] / top, 1)
-							bars = [[Math.max(low, mids, high), colour]]
-						} else {
-							const c = scWaveTile.current === "3band" ? ["@LOW@", "@MID@", "@HIGH@"] : ["#006837", "#00e676", "#ccffe2"]
-							bars = [[Math.max(low, mids), c[0]], [mids * 0.75, c[1]], [Math.min(high, mids) * 0.45, c[2]]]
+						Rectangle {
+							id: swatch
+							anchors.horizontalCenter: parent.horizontalCenter
+							y: 10
+							width: 50
+							height: 12
+							color: "#00c853"
+							border {
+								width: 1
+								color: "#202020"
+							}
+							gradient: seg.waveId === "rgb" ? rainbow : null
+							Gradient {
+								id: rainbow
+								orientation: Gradient.Horizontal
+								GradientStop { position: 0.0; color: "#ff2020" }
+								GradientStop { position: 0.2; color: "#ffd000" }
+								GradientStop { position: 0.4; color: "#20e040" }
+								GradientStop { position: 0.6; color: "#00d8ff" }
+								GradientStop { position: 0.8; color: "#3050ff" }
+								GradientStop { position: 1.0; color: "#e040ff" }
+							}
+							Row {
+								visible: seg.waveId === "3band"
+								x: 1
+								y: 1
+								Rectangle { width: 14; height: 10; color: "@HIGH@" }
+								Rectangle { width: 14; height: 10; color: "@MID@" }
+								Rectangle { width: 20; height: 10; color: "@LOW@" }
+							}
 						}
-						for (const b of bars) {
-							ctx.fillStyle = b[1]
-							ctx.fillRect(i * 2, mid - b[0] * mid, 1.5, 2 * b[0] * mid)
+						Text {
+							anchors.horizontalCenter: parent.horizontalCenter
+							y: 28
+							text: modelData
+							font: Style.fontH5
+							color: "#ffffff"
+						}
+						MouseArea {
+							id: segTap
+							anchors.fill: parent
+							onClicked: if (!seg.selected) root.scCall("waveform=" + seg.waveId)
 						}
 					}
 				}
 			}
-			Text {
-				anchors.horizontalCenter: parent.horizontalCenter
-				y: 66
-				text: "Waveform Style" + " · " + scWaveTile.names[scWaveTile.ids.indexOf(scWaveTile.current)]
-				font: Style.fontH3
-				color: Style.font02Color
-			}
-			MouseArea {
-				id: scWaveTap
-				anchors.fill: parent
-				onClicked: root.scCall("waveform=" + scWaveTile.ids[(scWaveTile.ids.indexOf(scWaveTile.current) + 1) % 3])
-			}
 		}
 """
 
-# CDJ / rekordbox 3-Band palette (blue lows, amber mids, white highs): played,
+# CDJ-3000 3-Band palette (blue lows, gold mids, white highs): played,
 # fading and past shades of each band.
-BAND_COLORS = {"Low": "#0055ff", "Mid": "#ffa000", "High": "#ffffff"}
-BAND_FADE = {"Low": "#0044dd", "Mid": "#e08c00", "High": "#f0f4ff"}
-BAND_PAST = {"Low": "#003399", "Mid": "#996000", "High": "#999999"}
+BAND_COLORS = {"Low": "#4a78ff", "Mid": "#f0b400", "High": "#ffffff"}
+BAND_FADE = {"Low": "#3a62dd", "Mid": "#d89e00", "High": "#f0f4ff"}
+BAND_PAST = {"Low": "#24408f", "Mid": "#906c00", "High": "#999999"}
 # rekordbox's saturated RGB primaries, in place of Engine's muted ones.
 RGB_COLORS = {"Low": "#ff1428", "Mid": "#00e632", "High": "#0078ff"}
 RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}
