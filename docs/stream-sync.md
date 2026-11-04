@@ -127,8 +127,20 @@ Spotify 不接受普通 `http://sc5000.lan` 作为远程 OAuth redirect。
 
 stream-sync 不做音频解密，解密只发生在 `sc5000-deemixd` 里。
 
-网易云文件存为 `netease-<id>.flac`，经 `Inspect` 校验后才可用，重启后直接复用。没有 SD
-库时落在内部存储，总量上限 3 GiB，超出后淘汰最旧的下载（只动 `<id>.*` 和 `netease-<id>.*`）。
+网易云文件存为 `netease-<id>.flac`，经 `Inspect` 校验后才可用，重启后直接复用。Deezer
+通道（含 Spotify/TIDAL 匹配和网易云 deemix 模式）的 `<Deezer id>.flac/.mp3` 也一样：
+`Download` 先查盘上已校验的文件，命中就不再下载。下载目录里的 `.sources.json` 记着
+`平台:曲目 id → 文件名`，重启后 `File`/`Fetch` 直接命中，连 Deezer 匹配搜索都不做。
+
+没有 SD 库时落在内部存储 `/data/sc5000-custom/Stream`（`/media/sc5000-sd-cache` 自 8856176
+起不再挂载；前置 SD 由 edisksd 按卷标挂在 `/media/SD`，Engine 开着它的库，不往上写）。
+总量上限 3 GiB，`/data` 剩余不足 1 GiB 时也继续淘汰，按最近使用时间（命中会刷新 mtime）
+先删最久未用的（只动 `<id>.*`、`netease-<id>.*`、`soundcloud-<id>.*`）。
+
+Engine 每次加载流媒体曲目（以及 U 盘曲目、`.stems`）都会在 `/data/inMusicTempFiles`
+写一份 `<随机hex>_<名字>` 副本且从不删除。stream-sync 启动时和之后每 5 分钟清理：任何进程
+打开着的文件不动；上一次 Engine 运行留下的（mtime 早于当前 Engine 启动时间，或 Engine
+没在运行）全部删掉；本次运行的副本超过 1 GiB 或 `/data` 剩余不足 1 GiB 时从最旧的删起。
 
 网易云下载方式（`設定 -> 裝置 -> 網易雲下載方式`，接口 `neteaseMode=official|deemix`，存为
 `settings.conf` 的 `netease_mode=`）：

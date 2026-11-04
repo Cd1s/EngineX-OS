@@ -36,6 +36,8 @@ type Client struct {
 	PreferMP3 func() bool
 	// MaxCache bounds the files this client saved itself; 0 means no limit.
 	MaxCache int64
+	// MinFree also evicts while the volume has less free space (needs MaxCache).
+	MinFree int64
 }
 type QueueStatus struct {
 	ID       string  `json:"id"`
@@ -127,6 +129,12 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 	}
 	if id, e := strconv.ParseUint(t.ID, 10, 64); e != nil || id == 0 {
 		return nil, errors.New("deemix: invalid numeric track ID")
+	}
+	// Any verified <id>.flac/.mp3 already on disk is the track: a restart or a
+	// second request must not download it again. A FLAC wish does not refetch a
+	// cached MP3, which is usually there because Deezer had no FLAC.
+	if dl := c.Cached(t.ID); dl != nil {
+		return dl, nil
 	}
 	if c.Mode == "directory" {
 		return c.downloadDirectory(ctx, t, progress)
