@@ -2,10 +2,12 @@ package webui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +72,9 @@ type Jobs struct {
 	results map[string]*analyzer.Result
 	files   map[string]fetched
 	fetches map[string]chan struct{}
+	// sources maps trackKey to the file name it was saved as, kept on disk so a
+	// restart finds a Spotify/TIDAL track's Deezer file without asking Deezer.
+	sources map[string]string
 
 	// Playlists each streamed track was queued for, so a guest playing a
 	// track the owner already downloaded still gets it in the guest playlist.
@@ -105,18 +110,73 @@ func (j *Jobs) timeout() time.Duration {
 }
 func trackKey(t providers.Track) string { return t.Provider + ":" + t.ID }
 
-// File returns a finished download of t that is still on disk.
+// File returns a finished download of t that is still on disk, including one
+// saved before a restart.
 func (j *Jobs) File(t providers.Track) string {
+	key := trackKey(t)
 	j.mu.Lock()
 	path := ""
-	if f, ok := j.files[trackKey(t)]; ok {
+	if f, ok := j.files[key]; ok {
 		path = f.dl.Path
+	} else if name := j.loadSources()[key]; name != "" && j.p.Deemix != nil {
+		j.mu.Unlock()
+		dl := j.p.Deemix.Cached(strings.TrimSuffix(name, filepath.Ext(name)))
+		if dl == nil {
+			return ""
+		}
+		// Recently used: Trim evicts by modification time.
+		now := time.Now()
+		os.Chtimes(dl.Path, now, now)
+		j.putFile(key, fetched{t, dl})
+		return dl.Path
 	}
 	j.mu.Unlock()
 	if st, err := os.Stat(path); path == "" || err != nil || !st.Mode().IsRegular() {
 		return ""
 	}
 	return path
+}
+
+const sourcesFile = ".sources.json"
+
+// loadSources reads the saved index once; j.mu must be held.
+func (j *Jobs) loadSources() map[string]string {
+	if j.sources == nil {
+		j.sources = map[string]string{}
+		if j.p.Deemix != nil {
+			if b, err := os.ReadFile(filepath.Join(j.p.Deemix.DownloadDir, sourcesFile)); err == nil {
+				json.Unmarshal(b, &j.sources)
+			}
+		}
+	}
+	return j.sources
+}
+
+// saveSource records key's file and drops entries whose file was evicted; j.mu
+// must be held. A lost index only costs one catalog lookup per track.
+func (j *Jobs) saveSource(key, path string) {
+	dir := j.p.Deemix.DownloadDir
+	sources := j.loadSources()
+	if sources[key] == filepath.Base(path) {
+		return
+	}
+	// Only files directly in the download directory (paths may be symlink-resolved).
+	if a, err := os.Stat(path); err != nil {
+		return
+	} else if b, err := os.Stat(filepath.Join(dir, filepath.Base(path))); err != nil || !os.SameFile(a, b) {
+		return
+	}
+	sources[key] = filepath.Base(path)
+	for k, name := range sources {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			delete(sources, k)
+		}
+	}
+	b, _ := json.Marshal(sources)
+	tmp := filepath.Join(dir, sourcesFile+".tmp")
+	if os.WriteFile(tmp, b, 0o644) == nil {
+		os.Rename(tmp, filepath.Join(dir, sourcesFile))
+	}
 }
 
 // Fetch downloads t for immediate playback and queues CPU3 analysis and import
@@ -127,6 +187,7 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 		return "", errors.New("pipeline is not configured")
 	}
 	key := trackKey(t)
+	j.File(t) // loads a download saved before a restart
 	for {
 		// Check the cache and claim the download under one lock so a fetch
 		// finishing in between cannot trigger a second download.
@@ -189,6 +250,9 @@ func (j *Jobs) putFile(key string, f fetched) {
 		}
 	}
 	j.files[key] = f
+	if j.p.Deemix != nil {
+		j.saveSource(key, f.dl.Path)
+	}
 }
 
 // acquire tries the deck's own Deemix service first, which costs no NetEase

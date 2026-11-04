@@ -702,3 +702,56 @@ func TestRelayDeliversASoundCloudAccountLogin(t *testing.T) {
 		t.Fatal("token copied into the owner file")
 	}
 }
+
+// A restarted stream-sync finds another service's track by the file it was
+// saved as: no catalog search, no download.
+func TestRestartReusesADownloadWithoutAskingAnyone(t *testing.T) {
+	var flac bytes.Buffer
+	if err := testaudio.FLAC(&flac, testaudio.Song(2)); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	var bridgeCalls, catalogCalls atomic.Int32
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bridgeCalls.Add(1)
+		os.WriteFile(filepath.Join(dir, "9.flac"), flac.Bytes(), 0o644)
+		json.NewEncoder(w).Encode(deemixclient.QueueStatus{ID: "j", State: "done", Progress: 1, Path: "9.flac"})
+	}))
+	defer bridge.Close()
+	catalog := countingCatalog{&providers.Deezer{BaseURL: fakeDeezer(t).URL}, &catalogCalls}
+	start := func() *Jobs {
+		j := NewJobs(Pipeline{Guard: resourceguard.New(resourceguard.Config{Disabled: true}), Catalog: catalog, Deemix: &deemixclient.Client{BaseURL: bridge.URL, DownloadDir: dir, AllowLossy: true}})
+		t.Cleanup(j.Close)
+		return j
+	}
+	ctx := context.Background()
+	track := providers.Track{ID: "sp1", Provider: "spotify", Title: "Found", Artist: "Artist", DurationMS: 200000}
+	if p, err := start().Fetch(ctx, "s", track, false); err != nil || filepath.Base(p) != "9.flac" || bridgeCalls.Load() != 1 {
+		t.Fatalf("%q %v bridge=%d", p, err, bridgeCalls.Load())
+	}
+	searched := catalogCalls.Load()
+	again := start()
+	if p := again.File(track); filepath.Base(p) != "9.flac" {
+		t.Fatalf("File after restart: %q", p)
+	}
+	if p, err := again.Fetch(ctx, "s", track, false); err != nil || filepath.Base(p) != "9.flac" {
+		t.Fatalf("%q %v", p, err)
+	}
+	if bridgeCalls.Load() != 1 || catalogCalls.Load() != searched {
+		t.Fatalf("restart asked again: bridge=%d catalog=%d->%d", bridgeCalls.Load(), searched, catalogCalls.Load())
+	}
+	// The same Deezer recording, played directly, is not downloaded again either.
+	if p, err := start().Fetch(ctx, "s", providers.Track{ID: "9", Provider: "deezer", Title: "Found", Artist: "Artist", DurationMS: 200000}, false); err != nil || filepath.Base(p) != "9.flac" || bridgeCalls.Load() != 1 {
+		t.Fatalf("%q %v bridge=%d", p, err, bridgeCalls.Load())
+	}
+}
+
+type countingCatalog struct {
+	deemixclient.Catalog
+	calls *atomic.Int32
+}
+
+func (c countingCatalog) Search(ctx context.Context, q string) ([]providers.Track, error) {
+	c.calls.Add(1)
+	return c.Catalog.Search(ctx, q)
+}

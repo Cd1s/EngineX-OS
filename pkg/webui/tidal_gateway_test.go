@@ -270,7 +270,8 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 	}
 	part, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 206 || string(part) != "fLaC" || enqueued.Load() != 1 {
+	// 42.flac was already on disk, so nothing is downloaded.
+	if resp.StatusCode != 206 || string(part) != "fLaC" || enqueued.Load() != 0 {
 		t.Fatalf("range %d %q enqueued=%d", resp.StatusCode, part, enqueued.Load())
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -284,7 +285,7 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if enqueued.Load() != 1 {
+	if enqueued.Load() != 0 {
 		t.Fatalf("background import downloaded again: %d", enqueued.Load())
 	}
 	var playlist string
@@ -311,7 +312,7 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 			t.Fatalf("guest import %+v", list)
 		}
 	}
-	if enqueued.Load() != 1 {
+	if enqueued.Load() != 0 {
 		t.Fatalf("guest play downloaded again: %d", enqueued.Load())
 	}
 
