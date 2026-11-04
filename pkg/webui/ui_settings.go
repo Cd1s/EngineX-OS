@@ -40,6 +40,7 @@ const (
 )
 
 type uiSettings struct {
+	Version     string   `json:"version,omitempty"`
 	Quality     string   `json:"quality"`
 	Jog         string   `json:"jog"`
 	NeteaseMode string   `json:"neteaseMode"`
@@ -171,6 +172,9 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
 	s.uiMu.Unlock()
+	if ver := s.installedVersion(); ver != "" && ver != "dev" {
+		v.Version = ver
+	}
 	v.LoggedIn = []string{}
 	for _, session := range s.tidal.sources() {
 		if !session.Guest && ready(session.p) && !slices.Contains(v.LoggedIn, session.Provider) {
