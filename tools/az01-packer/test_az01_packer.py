@@ -189,8 +189,10 @@ class FilesystemTests(unittest.TestCase):
         self.assertIn(b'AuthorizedKeysFile /data/sc5000-custom/',
                       self.fs.read('/usr/share/sc5000-custom/sshd_config'))
         self.assertIn(b'root:$6$', self.fs.read('/etc/shadow'))
-        self.assertIn(b'After=etc.mount var.mount',
-                      self.fs.read('/usr/lib/systemd/system/sc5000-custom-prepare.service'))
+        prepare = self.fs.read('/usr/lib/systemd/system/sc5000-custom-prepare.service')
+        self.assertIn(b'After=etc.mount var.mount', prepare)
+        # After a factory reset /data is blank: the UI packs must exist before Engine starts.
+        self.assertIn(b'Before=sc5000-custom-sshd.service engine.service stream-sync.service', prepare)
         self.assertIn('sc5000-custom.target', self.fs.entries(
             '/usr/lib/systemd/system/multi-user.target.wants'))
         self.assertIn('sc5000-custom-etc-reset.service', self.fs.entries(
