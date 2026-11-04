@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"strconv"
 	"sync"
 )
@@ -59,8 +60,8 @@ func newPipeline(out io.Writer) *pipeline {
 			for c, n := 0, len(p.in)/len(p.input); c < len(p.input); c++ {
 				p.input[c] = append(p.input[c], p.in[c*n:(c+1)*n]...)
 			}
-			at := len(p.upOut)
-			p.upOut = append(p.upOut, make([]byte, len(p.in)/2)...)
+			at, n := len(p.upOut), len(p.in)/2
+			p.upOut = slices.Grow(p.upOut, n)[:at+n]
 			packSamples(p.upOut[at:], p.in)
 		}
 	}
@@ -96,6 +97,7 @@ func (p *pipeline) queue() {
 	ch := p.nplanes / 4
 	n := len(p.cur) / (3 * ch * 2) // frames
 	for i := 0; i < 3*ch; i++ {
+		p.planes[i] = slices.Grow(p.planes[i], n*4)
 		for k := 0; k < n; k++ {
 			p.planes[i] = binary.LittleEndian.AppendUint32(p.planes[i], math.Float32bits(unpackSample(p.cur[(i*n+k)*2:])))
 		}
@@ -103,6 +105,7 @@ func (p *pipeline) queue() {
 	f32 := func(b []byte, k int) float32 { return math.Float32frombits(binary.LittleEndian.Uint32(b[k*4:])) }
 	for c := 0; c < ch; c++ {
 		x, base := p.input[c], len(p.planes[c])/4-n
+		p.planes[3*ch+c] = slices.Grow(p.planes[3*ch+c], n*4)
 		for k := 0; k < n; k++ {
 			m := f32(x, k) - f32(p.planes[c], base+k) - f32(p.planes[ch+c], base+k) - f32(p.planes[2*ch+c], base+k)
 			p.planes[3*ch+c] = binary.LittleEndian.AppendUint32(p.planes[3*ch+c], math.Float32bits(m))
