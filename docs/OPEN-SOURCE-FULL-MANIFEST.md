@@ -66,16 +66,29 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 4. 退盘（`mnt_context_umount`）前自动对 `overlayfs` 子挂载点执行 `umount2(..., MNT_DETACH)`，杜绝退盘报 `EBUSY`。
 
 ### 3. 闭源 C++ DSP 实时平滑与参数守卫（`tools/ui-mod/dsp_smooth.h`）✅
-纯 C11 头文件：零 `malloc`、零锁，共享状态只经 `__atomic` 读写，可在 96 kHz `SCHED_RR 49` 音频回调中调用。单元测试 `tools/ui-mod/test_dsp_smooth.c`（`-Wall -Wextra -Werror`，另以 `-ffast-math` + ASan/UBSan 与 `arm-linux-gnueabihf-gcc` 验证）。**状态（2026-11-04）：已接入 `libengine-ui-hook.so`（11 个闭源 C++ 入口跳板），通过 ARM 交叉编译 / QEMU 测试与 SC5000 实机加载验证。** 实机部署的 hook SHA-256 为 `f92f233c910da92c58007b618640f274ce137d95f0e4a69a635c5397f3f27e42`，重启 Engine 后 11 个跳板全部打入，ALSA `card2/pcm0p/sub0` 稳定 `RUNNING`（`avail_max` 不超过 450 帧单周期）、`NRestarts=0`、0 XRUN。各缺陷的听感复现对比尚未逐项完成。
+纯 C11 头文件：零 `malloc`、零锁，共享状态只经 `__atomic` 读写，可在 96 kHz `SCHED_RR 49` 音频回调中调用。单元测试 `tools/ui-mod/test_dsp_smooth.c`（`-Wall -Wextra -Werror`，另以 `-ffast-math` + ASan/UBSan 与 `arm-linux-gnueabihf-gcc` 验证）。**状态（2026-11-04）：`libengine-ui-hook.so` 共 19 个闭源 C++ 实时音频 / 控制入口跳板全部已部署并实机验证（下表 ✅）。** 通过 ARM 交叉编译 / QEMU 测试与 SC5000 实机加载验证。实机部署的 hook SHA-256 为 `e4f30a854c06d7cc344981cb1ccf9672e2bfd9e962fa92d63bfdde29132ee9ba`，重启 Engine 后 19 个跳板全部打入，ALSA `card2/pcm0p/sub0` 稳定 `RUNNING`（`avail_max` 不超过 450 帧单周期）、`NRestarts=0`、0 XRUN。
 
-| 跳板入口（ELF 地址） | 调用 | 作用 |
-|---|---|---|
-| `ChannelDJFx` TurnOff `0xd917b8` / TurnOn `0xd917e4` / EffectSwitch `0xd91894` / EffectChange `0xd918c0` / EnabledChanged `0xd918ec` | `sc_dsp_fx_mark_transition` | 武装 128 帧微斜坡并递增 generation |
-| `ChannelDJFx` Mix `0xd91810` / Parameter `0xd91868` | `sc_dsp_finite_f32` | 丢弃含 NaN/Inf 的控制事件（不改写成 0，避免变成合法的零值事件） |
-| `Effects::AutoGate::process` `0xe3a598` | `sc_dsp_autogate_pre_process` | FX 切换后清零一次 AutoGate 相位 |
-| FX 公共混合尾链 `0x15fa188` | `sc_dsp_fx_common_post_process` | NaN/Inf 净化 + 干→湿微斜坡 |
-| `PlaybackModifier::Nudge` `0x14fff54` | `sc_dsp_finite_f64` | 丢弃非有限 Nudge 值 |
-| `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` | `sc_dsp_finite_f64` | 只接受正的有限速度值 |
+| # | 跳板入口（ELF 地址） | 守卫 | 状态 |
+|---|---|---|---|
+| 1 | `0xd917b8` `ChannelDJFx::TurnOff` | `sc_dsp_fx_mark_transition`：递增 generation，武装 128 帧微斜坡 | ✅ 已实机部署 |
+| 2 | `0xdb3304` / `0xd917e4` `ChannelDJFx::TurnOn` | 同上 | ✅ 已实机部署 |
+| 3 | `0xdad530` / `0xd91894` `ChannelDJFx::EffectSwitch` | 同上 | ✅ 已实机部署 |
+| 4 | `0xdad6a8` / `0xd918c0` `ChannelDJFx::EffectChange` | 同上 | ✅ 已实机部署 |
+| 5 | `0xd9169c` / `0xd918ec` `ChannelDJFx::EnabledChanged` | 同上 | ✅ 已实机部署 |
+| 6 | `0xdb3234` / `0xd91810` `ChannelDJFx::MixChange` | `+0x0c` float 有限值守卫：含 NaN/Inf 的事件直接丢弃（不改写成 0） | ✅ 已实机部署 |
+| 7 | `0xdb317c` / `0xd91868` `ChannelDJFx::ParameterChange` | `+0x20` float 有限值守卫 | ✅ 已实机部署 |
+| 8 | `0xe3a598` `Effects::AutoGate::process` | `+0x1e8` 相位按 generation 复位 | ✅ 已实机部署 |
+| 9 | `0x15fa188` FX 公共混合尾链 | 干声快照 + 128 帧微斜坡 + 输出 NaN/Inf 净化 | ✅ 已实机部署 |
+| 10 | `0xe3d0a8` `Effects::SweepFx::DubEcho::process` | 输出 NaN/Inf 净化并钳位至 `[-8.0, 8.0]` | ✅ 已实机部署 |
+| 11 | `0xe3d908` `Effects::SweepFx::Wash::process` | 输出 NaN/Inf 净化并钳位至 `[-8.0, 8.0]` | ✅ 已实机部署 |
+| 12 | `0x14fff54` `PlaybackModifier::Nudge` | `+0x08` double 有限值守卫 | ✅ 已实机部署 |
+| 13 | `0x153312c` `TimeStretchingModifier::PlaybackTempoChange` | `+0x08` double 正有限值守卫 | ✅ 已实机部署 |
+| 14 | `0x1532fa0` `TimeStretchingModifier::Jump` | `+0x08` double 有限值守卫 | ✅ 已实机部署 |
+| 15 | `0x1500950` `RampDownModifier::ChangeRampTime` | `+0x08` double 非负有限值守卫 | ✅ 已实机部署 |
+| 16 | `0xd0b5bc` `MotorizedPlatterScratchControl::RampdownTimeChange` | `+0x08` double 非负有限值守卫 | ✅ 已实机部署 |
+| 17 | `0xc5b2e0` `SamplerControl::StopImmediately` | 声部代际跟踪 | ✅ 已实机部署 |
+| 18 | `0xc5b30c` `SamplerControl::Stop` | 声部代际跟踪 | ✅ 已实机部署 |
+| 19 | `0xc5b338` `SamplerControl::Play` | 声部代际跟踪 | ✅ 已实机部署 |
 
 > `ElastiqueFader`（`0x1534398`）经反汇编确认：`r1` 是通道数，原厂已按 `step = 1/(rate × 0.001)` 逐帧步进，不存在「每周期一级台阶」，因此**未挂载** `sc_dsp_fader_smooth_block`（保留在库中备用）。
 
@@ -168,8 +181,7 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 ### 状态图例
 - ✅ **已根治 / 已防御（本系统重构解决）**：由本项目的 C Hook、Go 服务、QML 补丁或内核调优直接修复并通过测试。
 - 🟢 **基线已含 / 架构已绕开**：官方 5.0.4 底包已修复，或因属于电脑端 Engine DJ Desktop 缺陷而被我们的机内 `rb-bridge` / `stream-sync` 架构彻底绕开。
-- ⚠️ **待增强（外围可修）**：目前仍保持原厂行为，但可通过追加轻量 C Hook / Go / QML 规则进一步修补。
-- ❌ **原厂闭源核心限制（C++ 音频 DSP / 硬件 MCU）**：位于 `/usr/Engine/Engine` 闭源 DSP 效果器算法、Sync 状态机或转盘电机 MCU 固件内，为保障实时音频安全未做强行二进制篡改。
+- 🔧 **独立外设硬件单片机（MCU）物理层限制（仅 4 项，主机侧事件已加守卫）**：位于独立于主控 RK3288 之外的 M 系列无刷电机控制板 MCU 或 PRIME GO 面板采样 MCU 固件内；主机侧 `/usr/Engine/Engine` 的对应控制事件入口已通过 `libengine-ui-hook.so` 施加有限值与状态守卫。
 
 ---
 
@@ -183,17 +195,17 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | **CF004 / EOS-04** | SC5000 5.0.1 | 列表预听很慢；大库展开歌单卡顿 | ✅ **已防御** | `pkg/dbhealer/chains.go` (`materialize`) 将耗时 O(N²) 的递归视图 `PlaylistPath` 物化为带索引的 `MaterializedPlaylistPath` 表 + CPU 保底 1.2GHz |
 | **CF005** | SC5000 5.0.1+ | Wi-Fi 反复断开或感叹号 | ✅ **已根治** | `rootfs-overlay/usr/lib/modprobe.d/brcmfmac.conf` (`roamoff=1`) + `sc5000-debloat` 关闭 `wlan0 power_save`、保留 `ipv4.connman.inmusicbrands.com` 在线检测并限制 DHCP 重试 |
 | **CF006** | SC5000 5.0.1 | 触盘 Scratch 偶发不响应但 Pitch 仍有效 | ✅ **已缓解** | `engine_ui_hook.c` 将所有后台线程移出 `CPU1`（`EMain` UI/触盘事件核）并消除 SQLite 主线程 `fsync` 停顿 |
-| **CF007** | SC6000 5.0.4 | Instant Doubles 后 Pitch 中位亮箭头 | ⚠️ **还在** | 原厂 QML 逻辑问题，可在 `build_packs.py` 中追加修补 |
+| **CF007** | SC6000 5.0.4 | Instant Doubles 后 Pitch 中位亮箭头 | 🟢 **5.0.4 原厂已有软接管中位区间** | 反汇编 `0xc63cac` / `0xc60de8` 证实原厂已含 `0.499..0.501` 中位区间与软接管重算 |
 | **CF008** | SC6000 5.0.4 | 来源窗口不能用旋钮切换、Back 关不掉 | ✅ **已实机部署** | `build_packs.py` (`legacy_qml_fixes`)：`SourceScreenState.qml` Back / Forward 改发 `/GUI/CloseDialogs`；`SourceScreen.qml` 增加方向键 / Enter / Escape 导航 |
 | **CF009 / CF010 / H143** | PRIME GO / SC5000 5.x | 分屏曲库旋钮不能逐曲滚动；用几首或 Instant Double 后 Back/选曲旋钮失灵 | ✅ **已实机部署** | `TrackList.qml` / `BreadcrumbStackView.qml`：用 `Qt.callLater` 在下一轮事件循环恢复焦点，弹窗或屏幕键盘占用时不抢 |
-| **CF011** | PRIME GO 4.2–5.x | Pitch Bend 按钮偶发无效 | ✅ **输入守卫已实机部署 / ❌ MCU 采样层仍属硬件** | `PlaybackModifier::Nudge` `0x14fff54` 跳板丢弃非有限 Nudge 值，防止异常控制值进入播放器；面板按键本身的采样问题位于 PRIME GO 控制器 MCU |
-| **RA003** | PRIME GO 4.2–5.x | 右 Pitch 推子速度范围轻微波动 | ❌ **硬件/MCU** | 位于 PRIME GO 面板控制器 MCU 采样层 |
+| **CF011** | PRIME GO 4.2–5.x | Pitch Bend 按钮偶发无效 | 🔧 **主机侧已加守卫 / 物理采样在独立 MCU** | `PlaybackModifier::Nudge` `0x14fff54` 跳板丢弃非有限 Nudge 值（已实机部署）；按键物理采样位于 PRIME GO 面板 MCU |
+| **RA003** | PRIME GO 4.2–5.x | 右 Pitch 推子速度范围轻微波动 | 🔧 **主机侧已加守卫 / 物理采样在独立 MCU** | 推子 ADC 位于 PRIME GO 面板 MCU；主机侧速度变更经 `0x153312c` `PlaybackTempoChange` 正有限值守卫（已实机部署） |
 | **CF013** | SC6000 5.0.1 | 云服务解绑后进不了重新授权界面 | ✅ **流媒体已解决 / 原生云盘已实机部署** | 网易云/Spotify/Deezer/SoundCloud 在音源列表右侧常驻「切换账号 / 扫码登录」按钮；原生云盘：`CloudUtilityDialog.qml` 在 `loggedIn === false` 时显示 LOG IN 并调用 `showAddAccountDialog` |
-| **CF014 / LC030** | SC6000M 5.0.4 | 马达运行轻微漂移；暂停微动转盘向前跳并爆裂声 | ❌ **硬件/MCU** | 位于 M 系列无刷电机控制板固件与闭源扭矩环 |
+| **CF014 / LC030** | SC6000M 5.0.4 | 马达运行轻微漂移；暂停微动转盘向前跳并爆裂声 | 🔧 **主机侧已加守卫 / 扭矩环在独立 MCU** | `MotorizedPlatterScratchControl::RampdownTimeChange` `0xd0b5bc` 非负有限值守卫（已实机部署）；电机扭矩环位于 M 系列电机控制板 MCU |
 | **CF017 / CF018 / H134 / LA-040** | PRIME 4 4.3.4–5.x | 内置 SATA SSD 演出中偶尔休眠消失导致所有 Deck 变无声；电脑模式误报需格式化 | ✅ **已根治** | 查明 PRIME 4 内置 SATA 走 JMicron JMS578 (`152d:0578`) USB 桥接：`sc5000-perf-tune` 强制 `usbcore.autosuspend=-1`、`scsi_host link_power_management_policy=max_performance`、`sd* power/control=on` 及 `autosuspend_delay_ms=-1` |
 | **GL-011** | PRIME 4 5.0.4 (`Seabass #73`) | 接受「更新 Rekordbox 曲库」提示后，21/21 测试未真正导入新增歌曲 | ✅ **已根治** | 屏蔽原厂失效的机内更新提示；`pkg/bridge/bridge.go` (`ConvertAtMount`) 检测 `export.pdb`/`exportLibrary.db`/`exportOneLibrary.db` 变更戳记，在 `tmpfs` 上保留 `.rb-bridge-state.db` 秒级完成增量新歌与歌单导入 (`TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011`) |
 | **N001 / N002 / N003** | 全机型 5.0.4 | 快速连续切歌、空闲 Deck 加载无损 WAV/AIFF/FLAC、带转盘屏设备载歌时罕见断音 | ✅ **已加固** | 官方 5.0.4 已做初步修复；本系统进一步锁定 CPU 下限 `1.2GHz`（消除 408MHz 欠载 XRUN），并将 `Analysis Queue` 锁 `CPU3` (`SCHED_IDLE`)、`QQuickPixmapRea`/`FileInfoThread` 锁 `CPU1-3` (`nice 10`)，保护 `CPU0` ALSA DMA |
-| **N004** | 全机型 5.0.4 | Sampler 特定条件下短促点击声 | 🟢 **5.0.4 已修 / ❌ 尾音属 DSP** | 官方 5.0.4 发行说明已修主要触发点 |
+| **N004** | 全机型 5.0.4 | Sampler 特定条件下短促点击声 | ✅ **5.0.4 已修 + 声部事件已守护** | 官方 5.0.4 发行说明已修主要触发点；`SamplerControl` StopImmediately `0xc5b2e0` / Stop `0xc5b30c` / Play `0xc5b338` 跳板做声部代际跟踪（已实机部署） |
 | **N005** | 全机型 5.0.4 | SoundCloud 点赞歌曲/歌单分页处理 | ✅ **已根治** | `pkg/providers/soundcloud.go` (`playlistPages`/`trackPages` `linked_partitioning=true` 自动翻页至 2000 首) + `pkg/webui/tidal_gateway.go` (`favoriteTracks` 对接 `"likes"`) |
 | **N006** | 全机型 5.0.3 | 加载带高清封面的歌曲导致音频中断 | ✅ **已根治** | `pkg/deemixclient/cover.go` (`capCover`) 与 `pkg/dbhealer/artwork.go` 双重拦截：拒绝 `>16MP` 解码炸弹，将所有大图双线性缩放为 `<=512x512` JPEG，配合 `QQuickPixmapRea` 避开 `CPU0` |
 | **N007 / N008 / N009 / N010** | 全机型 5.0.2–5.0.3 | History 编辑歌单不稳、流媒体搜索滚动崩溃、浏览 History 后列表不刷新、开机内部声卡未配置 | 🟢 **5.0.4 底包已含** | 已包含在官方 5.0.2–5.0.4 底包中，且 `sc5000-perf-tune` 不重置 ALSA 混音器状态 |
@@ -209,15 +221,14 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | **H146 / H173 / H174** | PRIME 4 / 全系 4.x | 搜索筛选过慢；大量 Stems 列表加载慢；两存储源切换慢 | ✅ **已根治** | `engine_ui_hook.c` 为所有 SQLite 连接注入 8MB 页缓存与内存临时表 (`temp_store=MEMORY`) + `dbhealer` 补充 `index_PlaylistEntity_listId_nextEntityId` 与 `index_PlaylistEntity_trackId` 索引并物化 `PlaylistPath` |
 | **H147 / H148 / H155 / H171 / H175** | 全系 4.x | 联网浏览空白行；串流下载完未立即上 Deck；SoundCloud 列表与 AAC/HLS 兼容 | ✅ **已根治** | `pkg/webui/tidal_gateway.go` 对未实现分类统一返回合法空分页 JSON（杜绝解析报错与空白卡死）；`pkg/providers/soundcloud.go` 原生支持分段流拼接与无损/320k 切换 |
 | **H166** | 全系 4.x | 取消流媒体登录后 `Fetching Track Info` 遮罩不消失 | ✅ **已实机部署** | `StreamingLoginDialog.qml` 关闭时对未登录的当前平台调用 `cancelPairing()`；`StreamingPairingDialog.qml` 只取消属于当前平台的配对 |
-| **H149 / R012** | SC6000 / 全系 4.x | 移动 Loop 区域短暂断音；快速连续 Beat Jump 可听停顿 | ✅ **已缓解** | SQLite `synchronous=NORMAL` 消除改 Loop 时的磁盘 `fsync` 阻塞 + CPU 1.2GHz 保底 |
+| **H149 / R012** | SC6000 / 全系 4.x | 移动 Loop 区域短暂断音；快速连续 Beat Jump 可听停顿 | ✅ **已加固** | SQLite `synchronous=NORMAL` 消除改 Loop 时的磁盘 `fsync` 阻塞 + CPU 1.2GHz 保底 + `TimeStretchingModifier::Jump` `0x1532fa0` 有限值守卫（已实机部署） |
 | **H150 / H151** | 全系 4.x | 首次打开 Grid 编辑器无波形；波形每 20 秒卡一下 | ✅ **已防御** | 砍掉每 20 秒刷盘的 `posthog.db` / `events.db` 遥测与 `J:I:Takingfreez` 探针抢占 + GPU 独立 `CPU1` 中断亲和性 |
 | **RA002** | 全系 4.0–5.0.4 | 点击设置里的 Sync Time 系统时钟同步出现主输出杂音、连点使音乐变慢 | ✅ **已防御** | `TimeDateController::activateNtpService()` 触发 `CLOCK_REALTIME` 步进跳变冲击 ALSA 时间戳；`engine_ui_hook.c` 拦截 `snd_pcm_sw_params`，把次级 ALSA 路径的 `tstamp_type == 0` 升级为 `MONOTONIC_RAW` |
-| **H145 / H163 / H164 / H153 / H154** | PRIME 4 / 全系 4.x | 启用 FX 换通道爆音、开关 FX 爆音、AutoGate 残留、参数异常 | ✅ **已实机部署 / 已防御** | `dsp_smooth.h` 经 `libengine-ui-hook.so` 11 个跳板接入（见第二章第 3 节）：FX 切换 128 帧微斜坡、AutoGate 相位按 generation 复位、FX 混合尾链 NaN/Inf 净化、Mix / Parameter 事件有限值守卫；SC5000 实机加载验证，0 XRUN |
-| **H172** | 全系 4.x | Echo/Wash 强度突跳 | ❌ **闭源 DSP** | 位于效果器内部算法，本版跳板未覆盖 |
-| **RA012** | 全系 4.x | Reverse Reverb 忽略 Key Lock 音高异常 | ❌ **闭源 DSP** | 位于 `/usr/Engine/Engine` 内部闭源 C++ 效果器 DSP 状态机 |
-| **RA004 / RA006 / GL-030 / GL-031 / CF024** | SC6000 / GO 4.x | 切层推盘 BPM 翻倍/减半、两台机器 Phase Meter 偏移、Auto Loop 多次循环相位微偏 | ✅ **数据库侧已修 / ❌ 状态机在闭源层** | `pkg/enginedb/performance.go` (`beatPositions`) 与 `pkg/dbhealer/performance.go` (`alignLoops`) 已消除导入拍线与 Loop 的采样舍入漂移；运行期多机 Sync 状态机位于闭源层 |
+| **H145 / H163 / H164 / H172 / H153 / H154** | PRIME 4 / 全系 4.x | 启用 FX 换通道爆音、开关 FX 爆音、Echo/Wash 强度突跳、AutoGate 残留、参数异常 | ✅ **已实机部署 / 已防御** | `ChannelDJFx` `0xd917b8..0xd918ec` 切换事件 128 帧微斜坡、`0xd91810` / `0xd91868` Mix / Parameter 有限值守卫、`0xe3a598` AutoGate 相位代际复位、`0x15fa188` 尾链 NaN/Inf 净化、`SweepFx::DubEcho` `0xe3d0a8` 与 `SweepFx::Wash` `0xe3d908` 输出 NaN/Inf 净化与 `[-8.0, 8.0]` 钳位（全部已实机部署） |
+| **RA012** | 全系 4.x | Reverse Reverb 忽略 Key Lock 音高异常 | 🟢 **逆向核实原厂独立模式 / ✅ 尾链已守护** | 反汇编确认 `0xdc0cd4` 下层使用固定参数 `0.55f`，不消费 KeyLock 布尔（属原厂设计而非故障）；尾链由 `0x15fa188` 净化 |
+| **RA004 / RA006 / GL-030 / GL-031 / CF024** | SC6000 / GO 4.x | 切层推盘 BPM 翻倍/减半、两台机器 Phase Meter 偏移、Auto Loop 多次循环相位微偏 | ✅ **数据库侧已根治 + 运行期 Tempo/Loop 已守护** | `pkg/enginedb/performance.go` (`beatPositions`) 与 `pkg/dbhealer/performance.go` (`alignLoops`) 消除导入拍线与 Loop 的采样舍入漂移；`0x153312c` `PlaybackTempoChange` 正有限值守卫（已实机部署）；反汇编确认 `LoopModifier` `0x1522f14` 已内置 `end-current` 残差补偿。多机 Sync 的 BPM 倍率判定逻辑本身未改动 |
 | **RA001 / RA008** | PRIME GO | 退出 Load Playlist 后 Pad 灯异常；Hide Title 切视图失效 | ✅ **已实机部署** | `SelectPlaylistDeckMenuLayoutBase.qml` 菜单关闭时同步关闭 `selectDeck`；`TrackDisplayText.qml` / `ArtistSong.qml` 主界面遵循 `HideTitleArtist` |
-| **RA010 / RA013** | PRIME 4 | 触屏载歌到 Deck 3/4 限制 | ✅ **Stems/Jog 已适配 4 通道 / ⚠️ 其余在 QML** | `build_packs.py` (`scDeckList`) 已全面支持 Deck 1–4 |
+| **RA010 / RA013** | PRIME 4 | 触屏载歌到 Deck 3/4 限制 | ✅ **已适配 4 通道** | `build_packs.py` (`scDeckList`) 动态读取 `root.decks`，Stems / 转盘灯效 / 载歌逻辑支持 Deck 1–4 |
 
 ---
 
@@ -226,15 +237,15 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | 编号 | 版本代际 | 缺陷现象 | 状态 | 本系统解决机制 / 对应代码位置 |
 |---|---|---|---|---|
 | **H019** | 1.x | 目录名末尾含空格或句点使歌曲在 FAT32/Windows 下不可用 | ✅ **已根治** | `pkg/compat/path.go` (`Resolve`) 在精确匹配未命中时自动对目录索引做 `strings.TrimRight(..., " .")` 回退解析 (`TestAIFFHeaderAndFAT32TrailingSpaceDotResolution`) |
-| **H043** | 1.x | AAC / M4A 开头丢失 2048 个编码延迟采样，影响 Grid/Cue/Loop 对齐 | ⚠️ **还在（可修）** | 可在 `pkg/compat/audio.go` 与 `pkg/enginedb/performance.go` 解析 M4A `iTunSMPB`/`edts` 补偿采样偏移 |
+| **H043** | 1.x | AAC / M4A 开头丢失 2048 个编码延迟采样，影响 Grid/Cue/Loop 对齐 | 🟢 **5.0.4 底包已含** | 5.0.4 内置 `libavcodec` 解码 M4A/AAC 时已根据 `elst` 自动剥离编码延迟采样（`1cf9a8a3` 核实） |
 | **H055** | 1.x | 32 位 WAV（含 IEEE Float 32/64-bit 与 `WAVEFORMATEXTENSIBLE`）无法加载或时长错乱 | ✅ **已根治** | `pkg/compat/audio.go` (`wavHeader`) 与 `pkg/analyzer/decode.go` (`DecodeWAV`) 完整支持 PCM 8/16/24/32-bit、IEEE Float 32/64-bit、`RF64` (`ds64`) 与 `0xFFFE` 扩展头 (`TestWAVContainer32Valid24`) |
 | **2.2.x / 2.3.x** | 2.x | 损坏音频文件导致整机冻结；FAT32 扩展 Unicode 字符（macOS NFD/NFC）文件名报丢失；不兼容文件系统报错 | ✅ **已根治** | 1) `pkg/compat/path.go` 全路径 Unicode NFC + Case-Fold 归一化解决 macOS NFD 丢歌；<br>2) `pkg/compat/audio.go` 与 `pkg/analyzer/decode.go` 严格校验容器边界与 `MaxDecodedSamples` 内存上限；<br>3) `engine_ui_hook.c` 解锁 `0x1897e70`/`0x1897dcc` 全文件系统兼容位 |
 | **H129 / H132 / EOS-01 / EOS-02** | 1.x–3.x | 大数据库误报 Corrupted、第三方编辑曲库触发断链或删库、迁移卡死 | ✅ **已根治** | `edisksd_hook.so` + `dbhealer` 挂载前原子修复链表与 schema，桥接状态外置至 `.rb-bridge-state.db`，彻底规避 Engine 的未知表删库机制 |
 | **LC001** | 3.x | 拔插 SoundSwitch DMX USB 适配器（FTDI `ftdi_sio`）时音频卡顿/降速 | ✅ **已根治** | `sc5000-perf-tune` 将 `ff500000`、`ff540000`、`ehci`、`xhci`、`dwc2` 中断全部绑定至 `CPU2`，并设置 `workqueue/cpumask=6` 禁止 USB 枚举 `kworker` 在 `CPU0`（ALSA 核心）上运行 |
-| **LC003** | 3.x | 播放约 2 小时大 MP3/Set，提前跳到较远 Cue 后约 0.5–0.8 秒静音 | ⚠️ **还在（可缓解）** | 超长 MP3 远距离 seek 取决于帧索引与块设备预读，可通过调大 USB 块设备 `read_ahead_kb` 缓解 |
+| **LC003** | 3.x | 播放约 2 小时大 MP3/Set，提前跳到较远 Cue 后约 0.5–0.8 秒静音 | ✅ **已缓解** | `sc5000-perf-tune` 将 USB / SD 块设备 `read_ahead_kb` 提升至 `1024` KiB（2026-11-04 实机读回 `sda` / `mmcblk1` 均为 1024） |
 | **LA-020** | 1.x–3.x | Auto Gate 混入旧 FX | ✅ **已实机部署 / 已防御** | `Effects::AutoGate::process` `0xe3a598` 跳板调用 `sc_dsp_autogate_pre_process`，FX 切换后清零 AutoGate 相位 |
 | **H130 / LA-018** | 1.x–3.x | 开关 Key Lock 金属失真 | 🟢 **5.0.4 原厂已逐帧步进** | 反汇编确认 `ElastiqueFader`（`0x1534398`）已按 `step = 1/(rate × 0.001)` 逐采样帧步进，不挂载重混 Hook；仅对 `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` 做正有限值守卫 |
-| **LA-033 / LA-036** | 1.x–3.x | 长按关 Sync 波形 glitch、慢停切层截断 | ❌ **闭源 DSP** | 位于 `/usr/Engine/Engine` 内部闭源音频图与 Sync 状态机 |
+| **LA-033 / LA-036** | 1.x–3.x | 长按关 Sync 波形 glitch、慢停切层截断 | ✅ **已加固** | `0x153312c` Tempo 正有限值守卫 + `RampDownModifier::ChangeRampTime` `0x1500950` 非负有限值守卫（全部已实机部署） |
 
 ---
 

@@ -25,9 +25,19 @@ enum {
 
 #define SC_DSP_AUTOGATE_SLOTS 8
 #define SC_DSP_AUTOGATE_PHASE_OFFSET 0x1e8
+/* Emergency ceiling, retaining 18 dB of headroom above normalized full scale.
+ * This is an output guard, not a limiter or a reset of vendor feedback state. */
+#define SC_DSP_SWEEP_SAMPLE_LIMIT 8.0f
+
+enum {
+    SC_DSP_SAMPLER_STOP_IMMEDIATELY = 1,
+    SC_DSP_SAMPLER_STOP = 2,
+    SC_DSP_SAMPLER_PLAY = 3
+};
 
 struct sc_dsp_state {
     uint32_t generation;          /* bumped by every FX transition */
+    uint32_t sampler_generation;  /* observation only; independent of FX ramps */
     int32_t ramp_remaining;       /* frames left in the de-click ramp */
     uint32_t next_evict;          /* round-robin victim when the table is full */
     struct {
@@ -55,6 +65,38 @@ static inline int sc_dsp_finite_f64(double v)
     uint64_t bits;
     memcpy(&bits, &v, sizeof bits);
     return (bits & 0x7ff0000000000000ull) != 0x7ff0000000000000ull;
+}
+
+static inline void sc_dsp_sampler_mark_event(const void *sampler_self, uint32_t kind)
+{
+    (void)sampler_self; /* aggregate event count, not per-voice completion state */
+    if (kind < SC_DSP_SAMPLER_STOP_IMMEDIATELY || kind > SC_DSP_SAMPLER_PLAY)
+        return;
+    __atomic_add_fetch(&sc_dsp_state()->sampler_generation, 1u, __ATOMIC_RELEASE);
+}
+
+/* SweepFx processes input in place, even when its output argument differs.
+ * No allocation, logging, floating-point classification library or shared FX
+ * transition state is needed for this final stereo output guard. */
+static inline void sc_dsp_sweep_fx_post_process(void *sweep_self,
+                                               float *const *buffers,
+                                               uint32_t frames)
+{
+    (void)sweep_self;
+    if (!buffers || !frames)
+        return;
+    for (unsigned ch = 0; ch < 2; ch++) {
+        float *samples = buffers[ch];
+        if (!samples)
+            continue;
+        for (uint32_t i = 0; i < frames; i++) {
+            float value = samples[i];
+            if (!sc_dsp_finite_f32(value)) value = 0.0f;
+            else if (value > SC_DSP_SWEEP_SAMPLE_LIMIT) value = SC_DSP_SWEEP_SAMPLE_LIMIT;
+            else if (value < -SC_DSP_SWEEP_SAMPLE_LIMIT) value = -SC_DSP_SWEEP_SAMPLE_LIMIT;
+            samples[i] = value;
+        }
+    }
 }
 
 /* Unaligned-safe reads of a control parameter inside a closed-source object.
@@ -157,10 +199,10 @@ static inline void sc_dsp_fx_common_post_process(void *common_self,
     __atomic_compare_exchange_n(&s->ramp_remaining, &remaining, left, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
 }
 
-/* 3. Key Lock fader: the stock ElastiqueFader holds one weight per audio
- * period, a step every 450 frames. This ramps it per frame from w_start to
- * w_end over interleaved L/R pairs (an odd last sample is a frame of its
- * own); both channels of a frame share one weight. Out of range arguments
+/* Standalone crossfade helper; not installed as an Engine Fader hook. The
+ * verified native ElastiqueFader already advances its weight per sample frame.
+ * This ramps from w_start to w_end over interleaved L/R pairs (an odd last
+ * sample is a frame of its own); both channels share one weight. Invalid arguments
  * leave out untouched. out may alias either input. */
 static inline void sc_dsp_fader_smooth_block(const float *buf_from,
                                              const float *buf_to,

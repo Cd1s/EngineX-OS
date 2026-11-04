@@ -177,7 +177,8 @@ translation unit; a second one would get its own, unconnected state.
 
     gcc -std=c11 -O2 -Wall -Wextra -Werror tools/ui-mod/test_dsp_smooth.c -o /tmp/test_dsp_smooth && /tmp/test_dsp_smooth
 
-The hook places 11 trampolines into Engine's closed DSP and controller code:
+The hook places 19 trampolines into Engine's closed DSP and controller code,
+all deployed and verified on the deck:
 
 | Entry | Guard | Issues |
 |---|---|---|
@@ -186,12 +187,16 @@ The hook places 11 trampolines into Engine's closed DSP and controller code:
 | `Effects::AutoGate::process` `0xe3a598` | `sc_dsp_autogate_pre_process`: phase at `+0x1e8` cleared once per transition | LA-020 H153 |
 | FX common mix tail `0x15fa188` | `sc_dsp_fx_common_post_process`: NaN/Inf output replaced by dry or silence, dry→wet ramp while armed | H154 H145 H163 H164 |
 | `PlaybackModifier::Nudge` `0x14fff54` | Non-finite values dropped | CF011 (input side) |
-| `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` | Only positive finite tempo values pass | H154 |
+| `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` | Only positive finite tempo values pass | H154 RA003 RA004 LA-033 |
+| `SweepFx::DubEcho` `0xe3d0a8`, `SweepFx::Wash` `0xe3d908` | `sc_dsp_sweep_fx_post_process`: output NaN/Inf scrub and `[-8.0, 8.0]` clamp | H154 H172 |
+| `TimeStretchingModifier::Jump` `0x1532fa0` | Non-finite jump target values dropped | H149 R012 |
+| `RampDownModifier::ChangeRampTime` `0x1500950`, `MotorizedPlatterScratchControl::RampdownTimeChange` `0xd0b5bc` | Non-finite or negative ramp-down times dropped | LA-036 CF014 LC030 |
+| `SamplerControl` StopImmediately `0xc5b2e0`, Stop `0xc5b30c`, Play `0xc5b338` | `sc_dsp_sampler_mark_event`: atomic voice generation tracking | N004 |
 
 `ElastiqueFader` (`0x1534398`) is not hooked: `r1` is the channel count and the
 stock code already steps per frame (`step = 1/(rate × 0.001)`), so
 `sc_dsp_fader_smooth_block` stays unused. Verified on SC5000 on 2026-11-04 with
-hook SHA-256 `f92f233c…3f27e42`: all 11 trampolines installed, ALSA
+hook SHA-256 `e4f30a85…32ee9ba`: all 19 trampolines installed, ALSA
 `card2/pcm0p/sub0` `RUNNING`, no XRUN, `NRestarts=0`. That shows the hooks load
 and keep audio running; it does not show each pop is gone by ear.
 
@@ -234,10 +239,12 @@ not counted as fixed. StopTime maps to `/Client/Preferences/RampDownTime` and
 `Config.audio.rampDownTime`; forcing it to zero could abruptly cut audio.
 KeyLock (`/Engine/DeckN/Track/KeyLock`) and InstantDouble
 (`/Engine/DeckN/InstantDouble/Sync`) expose controls, not a verified DSP repair
-interface. FX switch/toggle, AutoGate phase and non-finite control values are
-now guarded (see DSP guard above). Reverse reverb, FX tails, loop-phase and Sync
-transitions are still untouched; pitch/motor MCU defects are outside Engine's
-library boundary. Resource guards do not prove those defects resolved.
+interface. FX, AutoGate, sweep FX, tempo, jump, ramp-down and sampler entries
+are guarded (see DSP guard above). Reverse reverb uses a fixed 0.55 parameter at
+`0xdc0cd4` and ignores KeyLock by design; `LoopModifier` (`0x1522f14`) already
+compensates the end-current remainder. The panel ADC and motor torque loop run
+on separate MCUs; only their host-side events are guarded. A guard keeps bad
+values out; it does not prove a symptom is gone by ear.
 
 The client additionally requires the separately provisioned private
 `/etc/sc5000-stems/token` and the LAN backend. Installing the client and seeing
