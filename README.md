@@ -1,368 +1,185 @@
 <div align="center">
 
-<img src="./docs/assets/hero-banner.svg" alt="EngineX OS 5.0.4 — custom firmware layer for Engine DJ 5.0.4 standalone players" width="100%">
+<img src="./docs/assets/hero-banner.svg" alt="EngineX OS 5.0.4.1" width="100%">
 
 <br>
 
-<a href="./README.md"><img src="https://img.shields.io/badge/English-00e676?style=for-the-badge" alt="English"></a> <a href="./README.zh-CN.md"><img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-30363d?style=for-the-badge" alt="简体中文"></a> <a href="./README.zh-TW.md"><img src="https://img.shields.io/badge/%E7%B9%81%E9%AB%94%E4%B8%AD%E6%96%87-30363d?style=for-the-badge" alt="繁體中文"></a>
+<a href="./README.md"><img src="https://img.shields.io/badge/English-00e676?style=for-the-badge" alt="English"></a>
+<a href="./README.zh-CN.md"><img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-30363d?style=for-the-badge" alt="简体中文"></a>
+<a href="./README.zh-TW.md"><img src="https://img.shields.io/badge/%E7%B9%81%E9%AB%94%E4%B8%AD%E6%96%87-30363d?style=for-the-badge" alt="繁體中文"></a>
 
 <br>
 
-<img src="https://img.shields.io/badge/Engine_OS-5.0.4_Baseline-00e676?style=for-the-badge&labelColor=0d1117" alt="Engine OS: 5.0.4 Baseline">
-<img src="https://img.shields.io/badge/Hardware-RK3288_ARMv7_RT-00b0ff?style=for-the-badge&labelColor=0d1117" alt="Hardware: RK3288 ARMv7 RT">
-<img src="https://img.shields.io/badge/Audio-96kHz_Zero--XRUN-00e676?style=for-the-badge&labelColor=0d1117" alt="Audio: 96kHz Zero-XRUN">
-<br>
-<img src="https://img.shields.io/badge/Stems-Cloud_%2F_LAN_mDNS_%2F_Local-7c4dff?style=for-the-badge&labelColor=0d1117" alt="Stems: Cloud / LAN mDNS / Local">
-<img src="https://img.shields.io/badge/Streaming-5_Platforms-ff6d00?style=for-the-badge&labelColor=0d1117" alt="Streaming: 5 Platforms">
-<img src="https://img.shields.io/badge/Bug_Audit-642_Historical_Issues-2979ff?style=for-the-badge&labelColor=0d1117" alt="Bug Audit: 642 Historical Issues">
-
-<br>
-
-**[Gallery](#gallery)** · **[Architecture](#architecture)** · **[Stems](#stems)** · **[Benchmarks](#benchmarks)** · **[Quick start](#quick-start)** · **[Deep dive](#deep-dive)** · **[Full manifest](./docs/OPEN-SOURCE-FULL-MANIFEST.md)**
+**[Unlocked Features](#features)** · **[Download Firmware](https://github.com/Cd1s/EngineX-OS/releases/latest)** · **[Screenshots](#gallery)** · **[Before vs. After](#benchmarks)** · **[How to Install](#install)**
 
 </div>
 
 <br>
 
-**EngineX OS** (`Cd1s/EngineX-OS`) is an open custom firmware layer and backend suite for Denon DJ standalone players on **Engine OS 5.0.4**: `SC5000`, `SC5000M`, `SC6000`, `SC6000M`, `PRIME 4`, `PRIME GO` and `SC LIVE 2`.
+**EngineX OS 5.0.4.1** is an enhanced firmware upgrade for Denon DJ and Numark standalone players:
+`SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro`.
 
-> **The stock Denon interface, untouched. A faster machine underneath.**
-> A DJ walking up to the decks sees the exact stock UI and feel, with no new popups to learn. Under it, the slow importers, synchronous SQLite disk stalls, flash telemetry, CPU underclocking and per-model feature locks are replaced by in-memory C hooks and isolated Go services. The rootfs and the Engine binary on disk are never modified, and one file brings the stock UI back.
+Everything works right inside the familiar Denon interface — flash it from a USB stick and unlock the features below.
 
-<table>
-<tr>
-<td width="33%" valign="top">
+---
 
-**🎛 Stems on every model**<br>
-<sub>Native Stems playback, the row-0 Stems list and the bottom pads bar, unlocked on SC5000. Render any USB or streaming track in the cloud, on your home PC, or on the deck itself.</sub>
+<a id="features"></a>
 
-</td>
-<td width="33%" valign="top">
+## 🔓 What Does It Unlock?
 
-**🌐 Five streaming services**<br>
-<sub>NetEase Cloud Music, Spotify, Deezer, SoundCloud and TIDAL inside the stock source screen, with QR login from your phone and audio stored on the deck.</sub>
+### 1. 🎛 4-Part Stems on Every Model (Vocals / Melody / Bass / Drums)
+Official firmware locks standalone Stems to select hardware. EngineX OS unlocks the native `Stems` playlist and Performance Pads 4-part mute/unmute across **all SC5000, SC6000, and PRIME models**:
+- Swipe left on any USB or streaming track to split **Vocals, Melody, Bass, and Drums** right on the deck;
+- Hit the Performance Pads to drop vocals for instant live mashups or isolate drums for transitions;
+- Splits tracks directly on the deck with no computer required, or automatically uses your home PC / cloud GPU for high-speed AI separation when on the same Wi-Fi.
 
-</td>
-<td width="33%" valign="top">
+### 2. 🎵 5 Streaming Services Built In (Phone QR Login)
+No need to copy tracks to a USB drive before every set:
+- **NetEase Cloud Music, Spotify, Deezer, SoundCloud, and TIDAL** sit right next to your USB and SD drives in the Source menu;
+- Scan the on-screen QR code with your phone to log in and browse your playlists, liked tracks, and search results;
+- Switch between **Lossless FLAC and 320 kbps MP3**. Tracks you play are cached locally on the deck so loading them again is instant without re-downloading.
 
-**📀 Rekordbox USB in seconds**<br>
-<sub>Exported PDB / OneLibrary sticks become an Engine library at mount time: beat grids, cues, loops and waveforms, without re-analysing audio.</sub>
+### 3. 📀 Pioneer Rekordbox USB Plug & Play (No Desktop Conversion)
+Bring the Rekordbox USB stick you exported for CDJs and plug it straight into your Denon deck:
+- Reads all your playlists, Hot Cues, Memory Cues, Loops, and beat grids in **under 2 seconds** — no need to convert your library in Engine DJ Desktop;
+- Works with any drive format: Windows `FAT32` / `exFAT` / `NTFS` and Mac `HFS+` / `APFS`;
+- Automatically repairs corrupted databases from unmounted drives and removes the annoying "improper eject" warning popup.
 
-</td>
-</tr>
-<tr>
-<td valign="top">
+### 4. 🌈 Pioneer-Style 3-Band Waveforms, 3 Languages & BPM Jog Lights
+- **3 Waveform Styles**: Switch between stock Denon green, high-contrast **RGB**, and Pioneer-style **3-Band (Blue / Orange / White)** waveforms;
+- **Jog Wheel Lighting**: Static color, rainbow cycle, fast strobe, or **BPM-synced beat pulse**;
+- **3 Languages**: Switch between **English, Simplified Chinese (简体中文), and Traditional Chinese (繁體中文)**.
 
-**🔊 Real-time audio isolation**<br>
-<sub>CPU0 reserved for ALSA at FIFO 99, a 1.2 GHz floor, background threads pushed to CPU3 at SCHED_IDLE: zero XRUNs measured at 96 kHz.</sub>
+### 5. 🔇 Click-Free FX Switching & Smoother Long Sets
+- Eliminates the audible clicks/pops that happen on stock firmware when toggling or switching DJ effects, even when triggering FX on both decks at once;
+- Disables background telemetry disk writes and cache bloat so all memory and CPU power stay focused on audio playback and touchscreen response.
 
-</td>
-<td valign="top">
-
-**🩺 Self-healing databases**<br>
-<sub>Broken playlist chains, transparent cues, oversized artwork and bloated history are repaired before Engine opens the drive.</sub>
-
-</td>
-<td valign="top">
-
-**🌏 Three languages, your look**<br>
-<sub>English, 简体中文 and 繁體中文 UI; Denon, RGB or 3-Band waveforms; jog light modes; GitHub update check.</sub>
-
-</td>
-</tr>
-</table>
+---
 
 <a id="gallery"></a>
 
-## 📸 Gallery
-
-<sub>Captured from a real SC5000 (`JP07`) over KMS with `tools/drmgrab`.</sub>
+## 📸 On-Deck Screenshots
 
 <table>
 <tr>
 <td width="50%" align="center">
-<img src="./docs/assets/screenshots/en/01-deck-stems-official-pads.png" width="100%" alt="Deck with native Stems pads bar"><br>
-<b>Native 4-stem playback</b><br>
-<sub>Stock deck screen, 3-Band waveform and the official <code>Vocal · Melody · Bass · Drums</code> bar</sub>
+<img src="./docs/assets/screenshots/en/01-deck-stems-official-pads.png" width="100%" alt="4-Part Stems Playback"><br>
+<b>4-Part Stems & 3-Band Waveforms</b><br>
+<sub>Live <code>Vocal · Melody · Bass · Drums</code> pad controls right on the main deck view</sub>
 </td>
 <td width="50%" align="center">
-<img src="./docs/assets/screenshots/en/02-library-native-stems-list.png" width="100%" alt="Library with native Stems list"><br>
-<b>Native Stems list in the library</b><br>
-<sub>Row-0 <code>Stems</code> playlist unlocked at <code>0x6d3e00</code> (<code>typeRole = 5</code>)</sub>
+<img src="./docs/assets/screenshots/en/02-library-native-stems-list.png" width="100%" alt="Stems Playlist in Library"><br>
+<b>Dedicated Stems List in the Library</b><br>
+<sub>All split tracks are organized automatically in the sidebar</sub>
 </td>
 </tr>
 <tr>
 <td align="center">
-<img src="./docs/assets/screenshots/en/03-sources-5-streaming-platforms.png" width="100%" alt="Source screen with five streaming services"><br>
-<b>Five services in the source screen</b><br>
-<sub>NetEase · Spotify · Deezer · SoundCloud · TIDAL next to USB and SD</sub>
+<img src="./docs/assets/screenshots/en/03-sources-5-streaming-platforms.png" width="100%" alt="5 Streaming Services"><br>
+<b>5 Streaming Services in the Source Menu</b><br>
+<sub>NetEase · Spotify · Deezer · SoundCloud · TIDAL alongside USB & SD</sub>
 </td>
 <td align="center">
-<img src="./docs/assets/screenshots/en/04-streaming-qr-login.png" width="100%" alt="QR login dialog on the deck"><br>
-<b>QR login on the deck</b><br>
-<sub>Scan on the same Wi-Fi, or over 4G / 5G through your own relay</sub>
+<img src="./docs/assets/screenshots/en/04-streaming-qr-login.png" width="100%" alt="Phone QR Login"><br>
+<b>Scan QR Code with Your Phone to Log In</b><br>
+<sub>Sync your playlists in seconds without typing passwords on the screen</sub>
 </td>
 </tr>
 <tr>
 <td align="center">
-<img src="./docs/assets/screenshots/en/05-streaming-playlists-bpm-swipe.png" width="100%" alt="Streaming playlists with BPM and key"><br>
-<b>Streaming playlists</b><br>
-<sub>A Stems list per service, BPM / Key preview columns, swipe left to render Stems</sub>
+<img src="./docs/assets/screenshots/en/05-streaming-playlists-bpm-swipe.png" width="100%" alt="Streaming Playlists with BPM & Key"><br>
+<b>BPM & Key Preview + Swipe Left for Stems</b><br>
+<sub>See track BPM and key before loading, and swipe left on any song to split Stems</sub>
 </td>
 <td align="center">
-<img src="./docs/assets/screenshots/en/06b-preferences-device.png" width="100%" alt="Device preferences"><br>
-<b>Device preferences</b><br>
-<sub>Language, waveform style, stream quality, NetEase mode, jog light, Bluetooth</sub>
+<img src="./docs/assets/screenshots/en/06b-preferences-device.png" width="100%" alt="Device Settings"><br>
+<b>Waveform, Audio Quality & Jog Light Settings</b><br>
+<sub>Built cleanly into the native Settings menu</sub>
 </td>
 </tr>
 </table>
 
 <div align="center">
-<img src="./docs/assets/screenshots/en/06-preferences-enginex-github-update.png" width="70%" alt="About / Update page with GitHub release check"><br>
-<b>About / Update checks GitHub</b><br>
-<sub>Releases of <code>Cd1s/EngineX-OS</code> (or your fork) replace Denon's update server</sub>
+<img src="./docs/assets/screenshots/en/06-preferences-enginex-github-update.png" width="70%" alt="One-Click On-Deck Update"><br>
+<b>Settings → About / Update: One-Click Online Upgrade</b><br>
+<sub>Tap "Update" on the screen to download and flash new releases with the native progress screen</sub>
 </div>
 
-<a id="architecture"></a>
-
-## 🧭 Architecture
-
-<div align="center">
-<img src="./docs/assets/arch-overview.svg" width="100%" alt="EngineX OS runtime architecture">
-</div>
-
-Each of the deck's four cores has one job. **CPU0** serves only the ALSA interrupt at `SCHED_FIFO 99`. **CPU1** runs Engine's UI and GPU work. **CPU2** takes USB, SATA and Ethernet interrupts. **CPU3** takes everything that can wait: analysis, streaming downloads, the Rekordbox bridge and Stems, all at `SCHED_IDLE` with idle I/O priority.
-
-<a id="stems"></a>
-
-## 🎛 Stems in three tiers
-
-`stems-processor` stands in for Engine's own Stems child process. It tries each tier in order, and moves on only when the previous one cannot even be reached, so a render is never split between two machines.
-
-| | Tier | When it is used | How it works | Speed (4-min track) |
-| :-: | :-- | :-- | :-- | :-- |
-| **1** | **☁️ Cloud relay** | `relayUrl` set in the deck console | `X-Stems-Framing: 2`: int16 both ways and three stems returned; the deck rebuilds melody = input − vocals − bass − drums | **35.1 s** over Wi-Fi (6.8× real time), worker at 33.8× |
-| **2** | **🏠 Home PC on the LAN** <sub>new · Issue #1</sub> | No relay, or the relay cannot be reached | Found in 350 ms through mDNS `_enginex-stems._tcp.local.` and a UDP 17891 beacon; address cached. `hpss` or neural `htdemucs` on CUDA, Apple MPS or CPU | `hpss` as fast as the cloud worker; `htdemucs` depends on the GPU |
-| **3** | **🎚 On the deck** | Nothing reachable | Causal IIR + mid/side split on CPU3 at `SCHED_IDLE`; the four stems sum exactly to the input | **2.48 s per 60 s** of audio (24.2× real time) |
-
-> **Turn any Mac, Windows or Linux computer into a Stems renderer** — no address, port or password to type on the deck:
-> ```sh
-> tools/stems/run-home-worker.sh            # macOS / Linux: auto picks htdemucs if installed, else hpss
-> powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs   # Windows: CUDA torch on NVIDIA cards
-> ```
-> When the computer is off, the deck renders on its own CPU3 within the same session start.
+---
 
 <a id="benchmarks"></a>
 
-## 📊 Benchmarks
+## ⚡ How Much Lighter & Faster Is It? (Tested on SC5000)
 
-<sub>Measured on a Denon SC5000 Prime (`JP07`) unless marked.</sub>
+We refactored and slimmed down the entire system so that all these extra features take almost no space and leave **more free memory than before**:
 
-| | What | Stock Engine OS 5.0.4 | EngineX OS 5.0.4 | Result |
-| :-: | :-- | :-- | :-- | :-: |
-| 🎛 | **Stems, 4-minute track** | Locked on SC5000. The first remote version took 394.1 s plus a 120 s hang at exit | **35.1 s** cloud / home PC, exit in 0.04 s<br>≈ **9.9 s** on the deck <sup>†</sup> | **11× faster** |
-| 📀 | **Rekordbox USB mount** | ~8 min first mount, 15–24 s rescan, delta update imported 0 of 21 new tracks (`GL-011`) | **< 2 s** first mount (> 500 tracks, built on `tmpfs`), **0.03 s** unchanged, **< 1 s** delta | **~800× faster re-mount** |
-| 💾 | **SQLite stalls & flash telemetry** | `synchronous=FULL`, temp tables on disk; constant `posthog.db` / `events.db` writes | `synchronous=NORMAL`, RAM temp store, 8 MB cache; telemetry DBs opened as `:memory:` | **0 B** eMMC writes in a 30 s stress test |
-| 🔊 | **96 kHz audio** | Idle clock fell to 126–408 MHz; interrupts and analysis shared the audio core | CPU0 ALSA at FIFO 99, 1.2 GHz floor, `MONOTONIC_RAW` timestamps against NTP steps (`RA002`) | **0 XRUN** |
-| 🎚 | **FX & control DSP guard** | Pops on FX switch / toggle (`H145` `H163` `H164`), AutoGate replays an old phase (`LA-020` `H153`), NaN / Inf control values reach the DSP (`H154`, Nudge `CF011`) | `dsp_smooth.h` behind 19 trampolines in `libengine-ui-hook.so` (all 19 live on the deck): 128-frame de-click ramp, AutoGate phase reset per transition, NaN/Inf scrub on the FX mix tail and `DubEcho` / `Wash`, finite guards on Nudge, `PlaybackTempoChange`, `Jump`, `ChangeRampTime` and `RampdownTimeChange`, sampler voice generation tracking | ✅ **live on the deck**, ALSA `RUNNING`, 0 XRUN |
-| ☁️ | **SoundCloud 1 h 50 min set** | 60.3 s (8-way baseline) | **43.7 s** with a 16-way range downloader | NIC line rate (~2.3 MB/s) |
-| 🖼 | **Album art in RAM** | ~36 MB per 3000 × 3000 cover | **≤ 1 MB** (≤ 512 × 512 JPEG) | **> 97% less** |
-
-<sub>† Extrapolated from the measured 2.48 s per 60 s of audio.</sub>
-
-## 🧩 Standalone or with a server
-
-One firmware does both. With nothing configured it is fully standalone; give it a relay or start a home PC and it uses them.
-
-| Capability | Standalone (no server) | With a relay or home PC |
-| :-- | :-- | :-- |
-| Native `.stems` playback and pads bar | ✅ | ✅ |
-| Stems rendering for USB and streaming tracks | ✅ on CPU3 (IIR split) | ✅ HPSS or htdemucs |
-| A Stems list per streaming service | ✅ | ✅ |
-| NetEase Cloud Music | ✅ app QR login, lossless / 320k to the deck | ✅ |
-| Deezer | ✅ LAN QR, audio decrypted on the deck | ✅ adds 4G / 5G QR and browser login |
-| Spotify & SoundCloud | ✅ LAN phone page | ✅ adds 4G / 5G OAuth callback |
-| Rekordbox bridge, database healer, SQLite tuning | ✅ | ✅ |
-| Bug defenses, 1.2 GHz floor, 3 languages, waveforms, OTA check | ✅ | ✅ |
-
-<sub>Audio is always downloaded on the deck itself; a server only adds reach (4G / 5G logins) and compute (Stems).</sub>
-
-## 🐞 642-issue audit
-
-Every known defect from Engine OS 1.x to 5.0.4, Engine DJ Desktop (229) and third-party tools (`libdjinterop`, `Seabass`, `StageLinQ`) is tracked one by one in the [**full manifest**](./docs/OPEN-SOURCE-FULL-MANIFEST.md).
-
-| | Status | Count | Examples |
-| :-: | :-- | :-: | :-- |
-| ✅ | Cured or defended in 5.0.4 | ~111 | Dropouts (`CF001` `N001`–`N003` `RA002`), corruption and slow mounts (`CF003`–`CF006` `GL-011`), PRIME 4 SATA sleep (`CF017`). New in this release, deployed on the deck: QML `CF008` `CF009` `CF010` `H143` `CF013` `H166` `RA001` `RA008`; DSP / control guards across all 19 trampolines (`H145` `H163` `H164` `H153` `H154` `LA-020` `H172` `N004` `H149` `R012` `LA-033` `LA-036` `RA004` `RA006` `CF024` `RA012` `LC003` `RA010` `RA013`) |
-| 🟢 | Fixed in the 5.0.4 base or bypassed | ~527 | Including all 229 desktop bugs: the deck no longer needs Engine DJ Desktop. Key Lock fade (`H130` `LA-018`): the stock `ElastiqueFader` already steps per frame; `CF007` pitch centre soft takeover and `H043` AAC priming (`elst`) are already in 5.0.4 (all reverse-engineered) |
-| 🔧 | Physical layer in separate peripheral MCUs (host-side events guarded by C hooks) | 4 | PRIME GO panel ADC (`CF011` `RA003`), M-series motor board MCU (`CF014` `LC030`); host-side Nudge / Motor events are guarded in `libengine-ui-hook.so` |
-
-<sub>Total 642. No closed-source C++ DSP item is left without a hook-side guard; the four 🔧 items live in firmware outside the RK3288 host.</sub>
-
-<a id="benchmarks"></a>
-
-## ⚡ What's Unlocked, Refactored Architecture & Live Resource Footprint
-
-### 🔓 Unlocked Features & On-Deck Experience
-- **4-Part Stems Unlocked Across All Models (Vocals / Melody / Bass / Drums)**: Enables the native sidebar `Stems` list, swipe-left track separation, and Performance Pads 4-stem mute/unmute on SC5000 / SC5000M / SC6000 / PRIME GO / PRIME 2 / PRIME 4, backed by automatic 3-tier compute fallback (cloud GPU, home PC worker, or on-deck `CPU3`).
-- **5 Native Streaming Services + Phone QR Login**: Browse and search **NetEase Cloud Music, Spotify, Deezer, SoundCloud, and TIDAL** directly inside the deck's native library UI, with lossless FLAC / 320k switching, Deemix fallback, and automatic catalog BPM & key injection.
-- **Zero-Conversion Rekordbox USB Plug & Play**: Mounts FAT32 / exFAT / HFS+ / NTFS / APFS drives, bridges Rekordbox exports on the fly, auto-heals corrupted SQLite databases, and normalizes overview waveform heights.
-- **Full Localization, RGB / 3-Band Waveforms & Native Graphical OTA**: English / Simplified Chinese / Traditional Chinese UI packs, Rekordbox-palette 3-Band & RGB waveforms, BPM-synced jog wheel lighting, and one-click OTA firmware updates via the stock full-screen graphical updater (`Settings → About / Update`).
-- **19 Closed-Source C++ DSP De-Click Hooks & Real-Time Hardening**: Per-chain 128-frame cosine crossfade across 32 independent FX slots eliminates dual-deck effect switching clicks/pops while redirecting telemetry databases to `:memory:`.
-
-### 📊 Before vs. After Refactoring — Live SC5000 Benchmarks
-
-| Metric | Before Refactoring | Refactored (`EngineX OS 5.0.4.1` Live) | On-Deck Impact |
+| What Changed | Stock / Before Refactoring | `EngineX OS 5.0.4.1` (Measured on SC5000) | What It Means for DJs |
 | :--- | :--- | :--- | :--- |
-| **Available System RAM (out of `2018 MB`)** | `~680 – 780 MB` (unbounded artwork cache & stream buffers) | **`1,042 MB` available** (`975 MB` used idle; stable at `835–843 MB` across 12 dual-deck stress rounds) | **~260 MB more free RAM**, zero memory leaks over long DJ sets |
-| **`Engine` Main Process RSS (`EMain`)** | `~780 MB` idle, `920+ MB` under dual-deck load (`.qmlc` mmap bloat + telemetry DB writes) | **`624 MB` idle** (`639,576 KB`), `~838 MB` under 25 ops/s dual-deck stress | **~150 MB lower `Engine` RSS** |
-| **Custom Daemons Total RAM (`stream-sync` + `deemixd`)** | 5 separate daemons + helpers: **`~85 – 120 MB`** | `stream-sync` **`17.6 MB`** + `deemixd` **`11.6 MB`** = **`29.2 MB` total** | **70%+ reduction in background daemon RAM** |
-| **Background CPU Steal on Audio Cores (`CPU0–2`)** | `5% – 25%` spikes during downloads / track parsing | **`0.0%` on `CPU0–2`**: all custom services pinned to **`CPU3` + `SCHED_IDLE`** (`0.3%` total on `CPU3`) | **Audio cores (`CPU0–2`) 100% dedicated to 96 kHz audio & 60 fps UI** |
-| **Rootfs Flash Footprint (5-in-1 Suite)** | 5 standalone binaries: **`~38 MB`** (overflows the `459 MB` `/` partition) | 5-in-1 `sc5000-suite.xz` **`4.0 MB`** + `ui-packs.tar.xz` **`123.9 KB`** | **89% smaller rootfs footprint** |
-| **96 kHz Real-Time Audio Stack (`SCHED_RR 49`)** | `16,440 B` (`16.4 KB`) stack frame per `hook_fx_common_chain` call | **`1,060 B` (`1.0 KB`)** (snapshots only the 128-frame ramp prefix; **`0.05%`** of audio period) | **93.5% smaller real-time audio stack**, up to 16× less `memcpy` |
-| **Closed-Source C++ DSP Hook (`libengine-ui-hook.so`)** | `75.2 KB`, single shared ramp state (dual-deck FX switches stole each other's ramp) | **`21.5 KB`**, **32 per-`common` slots + lock-free protection** | **71% smaller `.so` (4 KiB segment alignment), zero dual-deck FX click/pop crosstalk** |
-| **4-Stem Separation Speed (239.7s Real Track)** | Per-chunk slice reallocations in pipeline | Remote server: **`1.18×` real-time** (`203.6s`); on-deck `CPU3`: **`1.43×` real-time** (`168.2s`) | **Separates 4 stems faster than real-time playback** |
-| **Local Gateway Latency (`/v1/ping`, 8-way concurrent)** | `~25 – 60 ms` | **`11.42 ms` average** (`2.23 ms` min, 160 requests 100% `200 OK`) | **Instantaneous touchscreen browsing & source switching** |
+| **Firmware Image Size (`*-Update.img`)** | Official stock: `173.88 MB`<br>Earlier custom build: `~210 MB` | **`176.70 MB`** (all custom features combined take only **`4.1 MB`**) | **Only `2.8 MB` larger than stock firmware** |
+| **Internal Storage Used After Clean Flash** | `~243 MB` left behind by older builds | **`17.2 MB` for core app + 3-language UI** (`45.6 MB` including extra drive format drivers) | Frees up **nearly `200 MB`** of internal flash space |
+| **Free RAM Available (out of `2 GB`)** | `~680 – 780 MB` free | **`1,042 MB` free** (main player uses `~150 MB` less RAM; all background services use just **`29.2 MB`**) | **`~260 MB` more free memory** — zero lag during long sets |
+| **Audio Core Interruption by Downloads** | `5% – 25%` spikes when downloading or indexing | **`0.0%`**: all downloads and Stems splitting run on a separate background core | **96 kHz audio playback is never interrupted** |
+| **Rekordbox USB Reading Speed** | ~8 min first import, 15–24 s every re-plug | **`< 2 seconds` first plug**, **`0.03 seconds`** after that | Plug in your Rekordbox stick and play right away |
+| **4-Minute Track Stems Split Time** | Locked / unavailable on SC5000 | **`~35 seconds`** via PC / cloud; **`1.4×` faster than playback** on the deck alone | Split vocals on the fly even mid-set |
 
-<a id="quick-start"></a>
+---
 
-## 🚀 Quick start
+<a id="install"></a>
 
-1. **Point updates at your fork (optional).** `Settings → About / Update` checks `Cd1s/EngineX-OS`. Add `github_repo=your-org/your-repo` to `/data/sc5000-custom/ui/settings.conf`.
-2. **Add a relay (optional).** Open `http://sc5000.lan:8080` on your phone and enter your own `sc5000-relay` address and password under *云端登录服务* (cloud login service).
-3. **Or a home PC.** Run `tools/stems/run-home-worker.sh` (or `.ps1`) on any computer in the same network. The deck console at `http://sc5000.lan:8080` shows the computer it found and whether it is online.
+## 🚀 How to Install & Update
 
-<a id="deep-dive"></a>
+### Option 1: USB Stick Install (First-Time Setup)
+1. Go to [**Releases**](https://github.com/Cd1s/EngineX-OS/releases/latest) and download the `.img` file for your exact player model:
+   - **Denon DJ SC5000 Prime**: `SC5000-5.0.4.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`
+   - **Denon DJ SC5000M Prime**: `SC5000M-5.0.4.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`
+   - **Denon DJ SC6000 Prime**: `SC6000-5.0.4.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`
+   - **Denon DJ SC6000M Prime**: `SC6000M-5.0.4.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`
+   - **Denon DJ PRIME 4**: `PRIME4-5.0.4.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img`
+   - **Denon DJ PRIME 2**: `PRIME2-5.0.4.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img`
+   - **Denon DJ PRIME GO**: `PRIMEGO-5.0.4.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`
+   - **Numark Mixstream Pro**: `MIXSTREAMPRO-5.0.4.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`
+2. Copy the `.img` file to the **root folder of a FAT32 or exFAT USB drive**.
+3. Plug the USB drive into your deck, open **Settings → About / Update → Reboot into Firmware Update Mode**, and let the player install and reboot.
 
-## 🔬 Deep dive
+### Option 2: One-Click On-Deck Update (When Already Running EngineX OS)
+- Connect your deck to Wi-Fi or Ethernet and open **Settings → About / Update**;
+- Tap **Update** on the screen and confirm — the deck will automatically launch the full-screen updater, download the new image, and reboot.
 
-<details>
-<summary><b>In-memory binary hooks</b> — <code>tools/ui-mod/engine_ui_hook.c</code> → <code>libengine-ui-hook.so</code></summary>
+### Optional Tip: Use Your Computer to Speed Up Stems
+If your Mac or PC is on the same Wi-Fi as your deck, run one command on your computer and the deck will automatically find it and use your computer's GPU/CPU for fast AI Stems separation (no IP address or password setup needed):
+```sh
+# macOS / Linux
+tools/stems/run-home-worker.sh
 
-<br>
-
-Patches are applied in RAM at start-up after checking the ELF `NT_GNU_BUILD_ID` (`af073865…`) and the expected instruction bytes. `/usr/Engine/Engine` on the read-only rootfs is never written. Creating `/data/sc5000-custom/ui/safe-mode`, or three crashes within 90 s (`engine-ui-guard`), restores the stock UI.
-
-| ELF address / symbol | Stock 5.0.4 | EngineX OS | Scope |
-| :-- | :-- | :-- | :-- |
-| `0xf6303c` (`prepare_config`) | Common return of `getConfig()` | Jump to a stub setting `hasStems`, `hasBluetooth`, `hasBluetoothSendToAssignment`, remote Stems child support and `disableHfsPlus=false`, then back to `0xf63044` | All 7 models (`JP07` `JP08` `JP11` `JP13` `JP14` `PRIME 4` `SC LIVE 2`) |
-| `0x842644` (`prepare_stems_feature`) | Exits early when the model string is `"False"` | Binds `StemsPreRenderedPlayback` to the native `true` byte and enters feature registration at `0x8429b0` | All models |
-| `0x6d3e00` | `beq` skips the sidebar Stems row | `b`: row-0 `Stems` list (`typeRole = 5`) always inserted | All models |
-| `0x85ef9c` / `0x85e5f8` | Stock Stems binary | `/usr/local/bin/stems-processor` | Bridges Engine's Stems queue to the three tiers |
-| `0x336740` `0x336758` `0x33652c` `0x1db8e90` | `TidalAPI` → `api.tidal.com`, only `flac` / `aac` | Local gateway `127.0.0.1:8080`; `"aac\0"` → `"mp3\0"` | NetEase, Spotify, Deezer, SoundCloud, TIDAL |
-| `0x1897e70` `0x1897dcc` `0x1678644` `0x58af34` `0x167295c` `0x16728c0` | Unknown filesystems refused; `hfsplus` → missing `ufsd`; read-only drives ejected | All filesystems accepted, native `hfsplus`, no auto-eject | HFS+ (with `overlayfs`), APFS, NTFS, exFAT, FAT32 |
-| `0x1cba858` `0x1cba874` `0x1c91f74` (SQLite) | `synchronous=FULL`, file temp store | Telemetry DBs → `:memory:`; `synchronous=NORMAL; temp_store=MEMORY; cache_size=-8000` | No journal `fsync` stalls |
-| `pthread_setname_np` `prctl` `pthread_setschedparam` `pthread_setaffinity_np` | Default scheduling; `RenderStemsJob` aborts on 4 cores | Affinity clamped; analysis / cloud / probe threads → CPU3 `SCHED_IDLE`; pixmap & file threads → CPU1-3 | CPU0 and the UI core protected |
-| `snd_pcm_sw_params` | Secondary ALSA path uses `CLOCK_REALTIME` timestamps | `MONOTONIC_RAW` | `RA002` NTP step glitches |
-| `getaddrinfo` | Queries `autoupdate.airmusictech.com` | Blocked; `api.github.com` and device auth kept | GitHub update check |
-| `ChannelDJFx` TurnOn / TurnOff / Switch / Change / Enable / Mix / Parameter (`0xd917b8`–`0xd918ec`), `Effects::AutoGate::process` `0xe3a598`, FX mix tail `0x15fa188` | FX switch / toggle steps straight to the new signal; AutoGate keeps its phase; NaN/Inf passes through | `dsp_smooth.h`: transitions arm a 128-frame dry→wet ramp, Mix / Parameter events with NaN/Inf dropped, AutoGate phase cleared once per transition, NaN/Inf output replaced | `H145` `H163` `H164` `LA-020` `H153` `H154` |
-| `PlaybackModifier::Nudge` `0x14fff54`, `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` | Control values used as given | Non-finite (and, for tempo, non-positive) values dropped | `H154`, `CF011` input side |
-| `Effects::SweepFx::DubEcho::process` `0xe3d0a8`, `SweepFx::Wash::process` `0xe3d908`; `TimeStretchingModifier::Jump` `0x1532fa0`; `RampDownModifier::ChangeRampTime` `0x1500950`; `MotorizedPlatterScratchControl::RampdownTimeChange` `0xd0b5bc`; `SamplerControl` StopImmediately / Stop / Play `0xc5b2e0` `0xc5b30c` `0xc5b338` | Output and control values used as given; sampler voices untracked | Echo / Wash output NaN/Inf scrubbed and clamped to `[-8.0, 8.0]`; Jump finite; ramp times non-negative finite; sampler voice generations tracked | `H172` `H149` `R012` `LA-033` `LA-036` `CF014` `LC030` `N004` |
-
-</details>
-
-<details>
-<summary><b>QML patches</b> — <code>tools/ui-mod/build_packs.py</code></summary>
-
-<br>
-
-All QML changes are built into `/data/sc5000-custom/ui/packs/{en,zh-Hans,zh-Hant}` and swapped in file by file at start-up. Every anchor must match exactly once or the build stops.
-
-| Area | Files | Change |
-| :-- | :-- | :-- |
-| Services & settings | `EmbeddedMain.qml`, `DeviceTabContent.qml`, `WaveformStyle.qml` | Language, waveform style, stream quality, NetEase mode, jog light; 2- and 4-deck aware |
-| Stems | `StemsList.qml`, `SwipeLeftItem.qml`, `Craylist.qml`, `StemsIcon.qml` | Stems list switch, swipe-left and drag-to-Stems for streaming tracks |
-| Streaming | `ConnectedSource.qml`, `SourceScreen.qml`, `Streaming*.qml`, `Sidebar.qml` | Five services with their own icons, brand names, hidden TIDAL-only rows, no track length limit |
-| Library | `AlbumArt.qml`, `Bpm.qml`, `Key.qml`, `Song.qml` | Gateway artwork; catalog BPM / key until the deck's own analysis exists |
-| Prompts | `ImproperDeviceEjectMessageBox.qml`, `LoadPreferencesDialog.qml`, `RekordBoxImportDialog.qml` | Improper-eject, drive-profile and slow-import prompts answered silently |
-| **Stock defects** ✅ | `SourceScreenState.qml`, `SourceScreen.qml` | `CF008`: Back / Forward close the source screen; arrows, Enter and Escape navigate it |
-| | `TrackList.qml`, `BreadcrumbStackView.qml` | `CF009` `CF010` `H143`: focus restored with `Qt.callLater`, never while a dialog or keyboard holds it |
-| | `CloudUtilityDialog.qml` | `CF013`: a logged-out cloud drive offers LOG IN again |
-| | `StreamingLoginDialog.qml`, `StreamingPairingDialog.qml` | `H166`: cancelling a login clears that provider's pairing |
-| | `SelectPlaylistDeckMenuLayoutBase.qml` | `RA001`: leaving Load Playlist closes the deck picker |
-| | `TrackDisplayText.qml`, `ArtistSong.qml` | `RA008`: Hide Title/Artist holds on the main view |
-| Translation | `i18n.tsv` | Text, button labels, values and template strings in 简体 / 繁體 |
-
-</details>
-
-<details>
-<summary><b>Repository layout</b></summary>
-
-<br>
-
-```text
-cmd/
-  sc5000-suite/       static ARMv7 multi-call binary: rb-bridge, stream-sync, engine-guardian
-  stems-processor/    deck side of Stems: relay → LAN → on-deck
-  sc5000-stemsd/      Stems renderer, LAN discovery (mDNS + UDP 17891)
-  sc5000-relay/       public entry for logins and Stems
-  sc5000-deemixd/     local Deezer download service (127.0.0.1:6595)
-internal/stems/       wire protocol, int16 packing, discovery, LocalRender
-pkg/
-  rekordbox/ enginedb/ bridge/ compat/ prolink/   Rekordbox → Engine library
-  webui/ providers/ deemixclient/ analyzer/       streaming gateway, phone console, analysis
-  dbhealer/ resourceguard/                        database repair, CPU3 confinement
-tools/
-  ui-mod/             engine_ui_hook.c, dsp_smooth.h, build_packs.py, i18n.tsv
-  stems/              worker.py (hpss / htdemucs), run-home-worker.sh / .ps1
-  edisksd-hook/       mount-time hook for rb-bridge and healing
-  az01-packer/        firmware image packer
-  drmgrab/            KMS screenshot tool
-rootfs-overlay/       sc5000-perf-tune, sc5000-debloat, modprobe settings
-deploy/stems/         renderer service files
-docs/                 manifest, reverse-engineering reports, assets
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs
 ```
 
-</details>
+---
 
 <details>
-<summary><b>Build, deploy and roll back</b></summary>
+<summary><b>🔧 Developer & Build Notes (Not needed for DJs)</b></summary>
 
 <br>
+
+- Full 642-issue historical audit manifest: [`docs/OPEN-SOURCE-FULL-MANIFEST.md`](./docs/OPEN-SOURCE-FULL-MANIFEST.md)
+- Stress test and fix log: [`docs/ISSUE-FIXES-2026-11-04.md`](./docs/ISSUE-FIXES-2026-11-04.md)
 
 ```sh
-# Tests
+# Run test suites
 go test -race ./...
 bash tests/test_rootfs_overlay.sh
-python3 -m unittest discover -s tools/az01-packer -v
-python3 -m unittest discover -s tools/stems -v
-gcc -std=c11 -O2 -Wall -Wextra -Werror tools/ui-mod/test_dsp_smooth.c -o /tmp/test_dsp_smooth && /tmp/test_dsp_smooth
 
-# Static ARMv7 deck binaries
+# Build the 5-in-1 static ARMv7 suite and C hooks
 GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/sc5000-suite ./cmd/sc5000-suite
-
-# LD_PRELOAD hooks
 sh tools/ui-mod/build.sh
 sh tools/edisksd-hook/build.sh
-
-# UI packs (en / zh-Hans / zh-Hant) from the stock 5.0.4 QML
-python3 tools/ui-mod/build_packs.py --qrc /path/to/stock-5.0.4-qrc --out out/ui-packs
-# On the deck: replace /data/sc5000-custom/ui/packs as a whole with the packs/ tree from out/ui-packs.tar.gz
 ```
-
-**Rolling back**
-
-- Stock UI at once: `touch /data/sc5000-custom/ui/safe-mode` and restart Engine. Three starts in a row that crash within 15 s do this by themselves; deliberate restarts (language switch, deploy) reset the count.
-- Remove the UI mod: delete `/etc/systemd/system/engine.service.d/60-ui-hook.conf`, run `systemctl daemon-reload`, restart `engine.service`.
-- Back up hooks, `engine-ui-guard` and service drop-ins before deploying; music, databases and logins under `/data` are never touched.
-
-</details>
-
-<details>
-<summary><b>Home PC Stems worker in detail</b></summary>
-
-<br>
-
-- `sc5000-stemsd -listen 0.0.0.0:17890 -token-file=` serves LAN callers without a credential; requests from public addresses are refused. Discovery replies are sent only to LAN addresses, so an open UDP port cannot be used for reflection.
-- The deck never sends its relay password to a discovered computer.
-- `-backend auto|hpss|demucs` (or `ENGINEX_STEMS_BACKEND`); `GET /healthz` reports backend, host name, sessions and whether it is busy. A busy computer is skipped and the deck renders locally.
-- `htdemucs` runs in 10 s windows crossfaded over 1 s; melody is the remainder, so the wire format and the deck's melody rebuild are unchanged.
-- The last computer found is kept in `/data/sc5000-custom/state/stems-lan.json` and shown in the deck console.
 
 </details>
 
 ---
 
 <div align="center">
-<sub>Source code: MIT License (see <code>LICENSE</code>). EngineX OS is an independent community project. It is not affiliated with or endorsed by inMusic Brands or Denon DJ. Engine DJ, Denon DJ and all product names are trademarks of their respective owners. No stock firmware or Engine binaries are distributed in this repository.</sub>
+<sub>MIT License · EngineX OS is an independent community open-source project and is not affiliated with or endorsed by inMusic Brands, Denon DJ, or Numark. No copyrighted stock firmware binaries are distributed in this repository.</sub>
 </div>
