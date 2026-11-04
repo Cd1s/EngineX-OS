@@ -1,0 +1,39 @@
+name: Feature request / 功能建议
+description: Suggest something that would make DJing on the deck better. / 建议一个让打碟更顺手的功能。
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: models
+    attributes:
+      label: Target models / 目标机型
+      multiple: true
+      options:
+        - All models / 全部机型
+        - SC5000 (JP07)
+        - SC5000M (JP08)
+        - SC6000 (JP13)
+        - SC6000M (JP14)
+        - PRIME 4 (JC11)
+        - PRIME 2 (JC16)
+        - PRIME GO (JP11)
+        - Mixstream Pro (NH08)
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem in your set / 打碟时遇到的痛点
+      description: When does it get in your way? Gig, practice, library prep... / 在什么场景下碍事？演出、练习、整理曲库……
+    validations:
+      required: true
+  - type: textarea
+    id: wish
+    attributes:
+      label: What you would like to happen / 期望的体验
+      description: Describe it from the deck's screen and controls. / 从碟机屏幕和按键的角度描述。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you use today / 现在的替代做法
