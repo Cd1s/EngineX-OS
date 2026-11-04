@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // defaultPassword is the console password the test servers are set up with.
@@ -445,5 +447,26 @@ func TestSecondCompletionIsIdempotent(t *testing.T) {
 	}
 	if err := s.sessions.complete("completetoken0000001", "deezer", sync, func(*session) {}); err != errSessionGone {
 		t.Fatalf("wrong provider: %v", err)
+	}
+}
+
+func TestStaleDefaultPasswordFlagIsCleared(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	for _, c := range []struct {
+		pw   string
+		want bool
+	}{{"someone-changed-it", false}, {legacyDefaultPassword, true}} {
+		h, _ := bcrypt.GenerateFromPassword([]byte(c.pw), bcrypt.MinCost)
+		b, _ := json.Marshal(map[string]any{"passwordHash": string(h), "passwordIsDefault": true})
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.get().PasswordIsDefault; got != c.want {
+			t.Fatalf("password %q: PasswordIsDefault = %v, want %v", c.pw, got, c.want)
+		}
 	}
 }

@@ -91,6 +91,12 @@ func loadConfig(path string) (*configStore, error) {
 		changed = true
 		log.Printf("config: initial console password written to %s; change it in the console", initial)
 	}
+	// The flag is only advisory state on disk; a stale true blocked Stems with 403
+	// although the hash no longer matched the legacy default. Trust the hash.
+	if cs.c.PasswordIsDefault && bcrypt.CompareHashAndPassword([]byte(cs.c.PasswordHash), []byte(legacyDefaultPassword)) != nil {
+		cs.c.PasswordIsDefault = false
+		changed = true
+	}
 	if cs.c.CookieSecret == "" {
 		cs.c.CookieSecret = randomHex(32)
 		changed = true
