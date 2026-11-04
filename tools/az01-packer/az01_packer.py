@@ -475,7 +475,10 @@ install_ui() {
     ui=${SC5000_UI_DIR:-/data/sc5000-custom/ui}
     [ -f "$archive" ] || return 0
     version=$(cat /etc/sc5000/version.txt 2>/dev/null || echo unknown)
-    if [ -d "$ui/packs" ] && [ "$(cat "$ui/.pack-version" 2>/dev/null)" = "$version" ]; then
+    # Releases keep their version (5.0.4.1) across rebuilds: also key on the archive.
+    id=$(sha256sum < "$archive" | cut -d' ' -f1)
+    if [ -d "$ui/packs" ] && [ "$(cat "$ui/.pack-version" 2>/dev/null)" = "$version" ] &&
+        [ "$(cat "$ui/.pack-id" 2>/dev/null)" = "$id" ]; then
         return 0
     fi
     for path in "$ui" "$ui/packs" "$ui/icons"; do
@@ -499,6 +502,7 @@ install_ui() {
     # New packs deserve a fresh try, even after the old ones hit safe mode.
     rm -f "$ui/safe-mode" "$ui/boot-count" "$ui/boot-token"
     printf '%s\n' "$version" > "$ui/.pack-version"
+    printf '%s\n' "$id" > "$ui/.pack-id"
     printf '%s\n' "$version" > "${SC5000_VERSION_FILE:-/data/sc5000-custom/version.txt}"
 }
 install_ui || echo "sc5000-custom-prepare: UI packs not installed" >&2

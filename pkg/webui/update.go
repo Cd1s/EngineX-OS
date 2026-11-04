@@ -124,7 +124,8 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		if err := os.WriteFile("/tmp/engine-quit-reason", []byte("UpdateFromUrl\n"), 0o644); err == nil {
 			s.setUpdateProgress(0.10, "", false)
 			time.Sleep(150 * time.Millisecond)
-			if exec.Command("pkill", "-TERM", "-x", "Engine").Run() == nil {
+			// Engine renames itself "EMain", so match the command line, not the name.
+			if exec.Command("pkill", "-TERM", "-f", "^/usr/Engine/Engine( |$)").Run() == nil {
 				s.setUpdateProgress(1.0, "", true)
 				return
 			}

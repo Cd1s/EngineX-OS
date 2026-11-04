@@ -21,7 +21,7 @@ sh tools/az01-packer/build-release.sh 5.0.4.1 /root/build/sc5000-lab/fw \
   /path/to/one_key.pub /path/to/fsck.hfsplus /root/build/sc5000-lab/release-5.0.4.1
 ```
 
-镜像首次启动（以及每次换版本）时，`sc5000-custom-prepare` 会把 `ui-packs.tar.xz` 解到 `/data/sc5000-custom/ui/{packs,icons}`，清除 safe-mode 和启动计数，并写入 `.pack-version` 和 `/data/sc5000-custom/version.txt`。`engine.service` 排在它之后启动。版本号没变时不会覆盖手工部署的 UI 包。
+镜像首次启动（以及每次换版本）时，`sc5000-custom-prepare` 会把 `ui-packs.tar.xz` 解到 `/data/sc5000-custom/ui/{packs,icons}`，清除 safe-mode 和启动计数，并写入 `.pack-version` 和 `/data/sc5000-custom/version.txt`。`engine.service` 排在它之后启动。版本号和 UI 包归档（`.pack-id` 记录其 sha256）都没变时不会覆盖手工部署的 UI 包；同版本号重打包的镜像会重新安装。
 
 `patch-rootfs --set-version 5.0.4.1` 写入 `/etc/sc5000/version.txt`（碟机「检查更新」读取它，与 Release tag 比较）。`/etc` 刷新 epoch 由版本号和 overlay 中 `/etc` 文件内容的哈希组成：升级后首次启动会删除 `/data/system/etc/overlay` 上层里这些文件的旧副本（如现场部署过的 guard、hook、drop-in），避免旧文件遮住新镜像。overlay 带有 `usr/local/bin/sc5000-debloat` 时，打包会对镜像离线执行它（`--root`），网口千兆、IRQ 亲和、禁用自动擦除和遥测屏蔽在出厂镜像里就生效。
 

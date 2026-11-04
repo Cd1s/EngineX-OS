@@ -235,6 +235,17 @@ class FilesystemTests(unittest.TestCase):
         (ui/'packs/en/Main.qml').write_text('dev')
         subprocess.run(['sh', '-s'], input=script, check=True, capture_output=True)
         self.assertEqual((ui/'packs/en/Main.qml').read_text(), 'dev')
+        # A rebuilt release with the same version but new packs is installed.
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as t:
+            info = tarfile.TarInfo('packs/en/Main.qml')
+            info.size = 7
+            t.addfile(info, io.BytesIO(b'rebuilt'))
+        (seed/'ui-packs.tar.xz').write_bytes(lzma.compress(buf.getvalue(), check=lzma.CHECK_CRC32))
+        (data/'sc5000-custom/version.txt').write_text('5.0.4\n')
+        subprocess.run(['sh', '-s'], input=script, check=True, capture_output=True)
+        self.assertEqual((ui/'packs/en/Main.qml').read_text(), 'rebuilt')
+        self.assertEqual((data/'sc5000-custom/version.txt').read_text(), '5.0.4.1\n')
 
     def test_prepare_atomic_failure_retry_identity_and_symlink_guard(self):
         # Relocate every guest state/seed path into this lab fixture. Only host
