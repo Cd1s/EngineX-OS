@@ -5,9 +5,6 @@
 UI=${SC5000_UI_DIR:-/data/sc5000-custom/ui}
 case ${1:-} in
 pre)
-    if [ -x /etc/sc5000/stems-runtime-prepare ]; then
-        /etc/sc5000/stems-runtime-prepare || exit 1
-    fi
     n=$(cat "$UI/boot-count" 2>/dev/null)
     case $n in ''|*[!0-9]*) n=0 ;; esac
     n=$((n + 1))

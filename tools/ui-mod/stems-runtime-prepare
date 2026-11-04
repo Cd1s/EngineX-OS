@@ -1,9 +1,0 @@
-#!/bin/sh
-# Preserve the read-only vendor bin directory; add only the persistent client link.
-set -eu
-state=/data/sc5000-custom/stems-bin-overlay
-mkdir -p "$state/upper" "$state/work"
-if ! awk '$2 == "/usr/local/bin" && $3 == "overlay" { found=1 } END { exit !found }' /proc/mounts; then
-    mount -t overlay overlay -o "lowerdir=/usr/local/bin,upperdir=$state/upper,workdir=$state/work" /usr/local/bin
-fi
-ln -sfn /data/sc5000-custom/bin/stems-processor /usr/local/bin/stems-processor
