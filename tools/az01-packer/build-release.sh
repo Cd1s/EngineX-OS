@@ -7,12 +7,13 @@
 set -eu
 VERSION=${1:?version, e.g. 5.0.4.1}
 FW=${2:?directory with the official <PREFIX>-5.0.4-Update.img files}
-KEY=${3:?one SSH public key}
+KEY=${3:?one SSH public key for a private build, or "none" for public releases (#46)}
 FSCK=${4:?static ARMv7 fsck.hfsplus}
 OUT=${5:?new output directory outside any git worktree}
 case $VERSION in *[!0-9.]*|'') echo "version must be digits and dots" >&2; exit 2 ;; esac
 [ ! -e "$OUT" ] || { echo "$OUT exists; refusing to overwrite" >&2; exit 2; }
 ROOT=$(pwd)
+KEYARG=$KEY; [ "$KEY" != none ] || KEYARG=
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -35,7 +36,7 @@ mkdir -p "$OUT"
 build() { # <official image prefix> <model prefix> <release name>...
     base=$1; shift
     python3 tools/az01-packer/az01_packer.py patch-rootfs "$FW/$base-5.0.4-Update.img" \
-        --ssh-public-key "$KEY" --overlay "$STAGE" --set-version "$VERSION" --output "$WORK/$base.ext2" >/dev/null
+        ${KEYARG:+--ssh-public-key "$KEYARG"} --overlay "$STAGE" --set-version "$VERSION" --output "$WORK/$base.ext2" >/dev/null
     python3 tools/az01-packer/az01_packer.py repack "$FW/$base-5.0.4-Update.img" \
         --rootfs "$WORK/$base.ext2" --output "$WORK/$base.img" >/dev/null
     rm -f "$WORK/$base.ext2"
