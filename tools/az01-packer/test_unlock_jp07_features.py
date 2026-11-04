@@ -6,7 +6,9 @@ import unlock_jp07_features as u
 
 def stock():
     # Synthetic image: only the patched sites and anchor strings hold stock bytes.
-    buf = bytearray(u.UNLOCKED_STR_OFF + 16)
+    size = max([u.UNLOCKED_STR_OFF + 16, u.FALSE_STR_OFF + 16] +
+               [offset + len(expected) for offset, expected, _, _ in u.PATCHES])
+    buf = bytearray(size)
     buf[u.UNLOCKED_STR_OFF:u.UNLOCKED_STR_OFF + 9] = b"Unlocked\x00"
     buf[u.FALSE_STR_OFF:u.FALSE_STR_OFF + 6] = b"False\x00"
     for offset, expected, _, _ in u.PATCHES:

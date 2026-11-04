@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 420" width="1280" height="420" role="img" aria-labelledby="title desc">
+  <title id="title">EngineX OS 5.0.4</title>
+  <desc id="desc">Engine DJ 5.0.4 獨立播放器客製系統：96 kHz 零 XRUN 即時音訊、Stems 分軌 33.8 倍即時速度、5 大串流平台、Rekordbox 直連橋接 2 秒內掛載。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0e13"/>
+      <stop offset="1" stop-color="#121a24"/>
+    </linearGradient>
+    <radialGradient id="glowG" cx="0.12" cy="0.1" r="0.55">
+      <stop offset="0" stop-color="#00e676" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#00e676" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0.85" cy="0.35" r="0.45">
+      <stop offset="0" stop-color="#00b0ff" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#00b0ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="x" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#00e676"/>
+      <stop offset="1" stop-color="#00b0ff"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#151e29"/>
+      <stop offset="1" stop-color="#0e141c"/>
+    </linearGradient>
+    <radialGradient id="platter" cx="0.5" cy="0.45" r="0.6">
+      <stop offset="0" stop-color="#1d2733"/>
+      <stop offset="1" stop-color="#0b1016"/>
+    </radialGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity="0.035"/>
+    </pattern>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="frame"><rect width="1280" height="420" rx="22"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect width="1280" height="420" fill="url(#bg)"/>
+    <rect width="1280" height="420" fill="url(#grid)"/>
+    <rect width="1280" height="420" fill="url(#glowG)"/>
+    <rect width="1280" height="420" fill="url(#glowB)"/>
+    <rect x="0.5" y="0.5" width="1279" height="419" rx="22" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  </g>
+
+  <!-- wordmark -->
+  <g font-family="-apple-system, 'Segoe UI', 'PingFang TC','Microsoft JhengHei','Noto Sans CJK TC','Source Han Sans TC', Helvetica, Arial, sans-serif">
+    <rect x="48" y="44" width="292" height="28" rx="14" fill="#00e676" fill-opacity="0.1" stroke="#00e676" stroke-opacity="0.45"/>
+    <circle cx="66" cy="58" r="4" fill="#00e676" filter="url(#glow)"/>
+    <text x="80" y="63" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'PingFang TC','Microsoft JhengHei','Noto Sans CJK TC','Source Han Sans TC', monospace" font-size="13" letter-spacing="1.5" fill="#9ff5c6">ENGINE OS 5.0.4 · 客製版</text>
+    <text x="46" y="150" font-size="78" font-weight="800" letter-spacing="-2" fill="#f2f6fa">Engine<tspan fill="url(#x)" filter="url(#glow)">X</tspan><tspan fill="#f2f6fa" font-weight="300"> OS</tspan></text>
+    <text x="50" y="192" font-size="21" fill="#a9b6c4">為 Engine DJ 5.0.4 獨立播放器打造的客製韌體層</text>
+    <text x="50" y="224" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'PingFang TC','Microsoft JhengHei','Noto Sans CJK TC','Source Han Sans TC', monospace" font-size="14" letter-spacing="1" fill="#6f7d8c">SC5000 · SC6000 · PRIME 4 · 以及更多 Engine 5.0.4 硬體</text>
+  </g>
+
+  <!-- jog wheel motif: stems as four arcs -->
+  <g transform="translate(1088 140)">
+    <circle r="122" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="2"/>
+    <circle r="108" fill="url(#platter)" stroke="#2a3644" stroke-width="2"/>
+    <g fill="none" stroke-width="7" stroke-linecap="round" transform="rotate(-90)">
+      <circle r="96" stroke="#00e676" stroke-dasharray="120 483" filter="url(#glow)"/>
+      <circle r="96" stroke="#00b0ff" stroke-dasharray="110 493" stroke-dashoffset="-151" filter="url(#glow)"/>
+      <circle r="96" stroke="#ffb300" stroke-opacity="0.85" stroke-dasharray="100 503" stroke-dashoffset="-302"/>
+      <circle r="96" stroke="#e040fb" stroke-opacity="0.8" stroke-dasharray="90 513" stroke-dashoffset="-453"/>
+    </g>
+    <circle r="78" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="1"/>
+    <circle r="62" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="1"/>
+    <circle r="36" fill="#0b1016" stroke="#00e676" stroke-opacity="0.5" stroke-width="1.5"/>
+    <text y="6" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'PingFang TC','Microsoft JhengHei','Noto Sans CJK TC','Source Han Sans TC', monospace" font-size="15" font-weight="700" fill="#e9f0f6">STEMS</text>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'PingFang TC','Microsoft JhengHei','Noto Sans CJK TC','Source Han Sans TC', monospace" font-size="10.5" letter-spacing="1" fill="#7f8d9c">
+      <text x="60" y="-104">人聲</text>
+      <text x="112" y="62">低音</text>
+      <text x="-38" y="134">鼓組</text>
+      <text x="-170" y="-40">旋律</text>
+    </g>
+  </g>
+
+  <!-- metric cards -->
+  <g font-family="-apple-system, 'Segoe UI', 'PingFang TC','Microsoft JhengHei','Noto Sans CJK TC','Source Han Sans TC', Helvetica, Arial, sans-serif">
+    <g transform="translate(48 286)">
+      <rect width="282" height="96" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
+      <rect x="18" y="0" width="56" height="3" rx="1.5" fill="#00e676"/>
+      <text x="20" y="50" font-size="34" font-weight="800" fill="#00e676">96 kHz</text>
+      <text x="20" y="77" font-size="14.5" fill="#a9b6c4">零 XRUN 即時音訊</text>
+    </g>
+    <g transform="translate(346 286)">
+      <rect width="282" height="96" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
+      <rect x="18" y="0" width="56" height="3" rx="1.5" fill="#00b0ff"/>
+      <text x="20" y="50" font-size="34" font-weight="800" fill="#00b0ff">33.8×</text>
+      <text x="20" y="77" font-size="14.5" fill="#a9b6c4">Stems 分軌，遠超即時速度</text>
+    </g>
+    <g transform="translate(644 286)">
+      <rect width="282" height="96" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
+      <rect x="18" y="0" width="56" height="3" rx="1.5" fill="#00e676"/>
+      <text x="20" y="50" font-size="34" font-weight="800" fill="#00e676">5 <tspan font-size="18" font-weight="600" fill="#e9f0f6">大平台</tspan></text>
+      <text x="20" y="77" font-size="11.8" fill="#a9b6c4">網易雲 · Spotify · Deezer · SoundCloud · TIDAL</text>
+    </g>
+    <g transform="translate(942 286)">
+      <rect width="290" height="96" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
+      <rect x="18" y="0" width="56" height="3" rx="1.5" fill="#00b0ff"/>
+      <text x="20" y="50" font-size="34" font-weight="800" fill="#00b0ff">&lt; 2 s</text>
+      <text x="20" y="77" font-size="14.5" fill="#a9b6c4">Rekordbox 直連橋接掛載</text>
+    </g>
+  </g>
+</svg>

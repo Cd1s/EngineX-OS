@@ -9,27 +9,30 @@ Engine ─stdin/stdout─ stems-processor ══HTTPS══ sc5000-relay /v1/eng
           (deck)          console password          (public)      internal token        (loopback)
 ```
 
-The separator in [`tools/stems/worker.py`](../../tools/stems/worker.py) is a
-causal spectral HPSS / centre-harmonic approximation, not a neural model. The
-four stems sum back to the input.
+The separator in [`tools/stems/worker.py`](../../tools/stems/worker.py) supports
+both a fast causal spectral HPSS / centre-harmonic separator (`--backend hpss`,
+default) and an optional HTDemucs 4-stem neural GPU/CPU separator
+(`--backend demucs|auto`). In both modes the four stems sum back to the input.
 
 ## Code
 
 | Path | Role |
 |---|---|
-| `internal/stems` | Wire protocol: client `Proxy`, renderer `Backend`, client settings `ResolveClient` |
+| `internal/stems` | Wire protocol: client `Proxy`, renderer `Backend`, LAN mDNS/UDP discovery (`FindLAN`), on-deck `RenderLocal` |
 | `cmd/stems-processor` | Static ARMv7 deck client, installed as `/data/sc5000-custom/bin/stems-processor` |
-| `cmd/sc5000-stemsd` | Renderer HTTP service; one session at a time |
+| `cmd/sc5000-stemsd` | Renderer HTTP service with multi-session support and LAN mDNS/UDP responder |
 | `cmd/sc5000-relay` | Public entry point (`POST /v1/engine`, `GET /healthz/stems`) |
-| `tools/stems` | `worker.py`, `render.py` (WAV → four WAVs through any client), `test_worker.py` |
+| `tools/stems` | `worker.py`, `run-home-worker.sh`, `run-home-worker.ps1`, `render.py`, `test_worker.py` |
 
 ## Deck client settings
 
 With no environment variables the client reads stream-sync's
-`/data/sc5000-custom/state/deemix-config.json` — the same relay address
-(`relayUrl`, default `https://relay.example.com`) and password (`deemixPassword`)
-the deck console already manages — and posts to `<relayUrl>/v1/engine`. No key
-file, LAN address or extra port is needed on the deck.
+`/data/sc5000-custom/state/deemix-config.json` — the optional relay address
+(`relayUrl`, e.g. `https://relay.example.com`) and password (`deemixPassword`)
+the deck console manages — and posts to `<relayUrl>/v1/engine`. If no cloud
+`relayUrl` is configured, `stems-processor` automatically discovers a home PC
+running `sc5000-stemsd` on the LAN via mDNS (`_enginex-stems._tcp.local.`) /
+UDP broadcast (`17891`), or falls back to on-deck `RenderLocal` (`CPU3`).
 
 | Variable | Effect |
 |---|---|

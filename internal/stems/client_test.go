@@ -40,8 +40,8 @@ func TestResolveClientFromRelayConfig(t *testing.T) {
 func TestResolveClientDefaultsAndLegacyKey(t *testing.T) {
 	dir := t.TempDir()
 	cfg := writeFile(t, dir, "a.json", `{"deemixPassword":"pw"}`)
-	if _, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_CONFIG": cfg})); err == nil {
-		t.Fatal("missing self-hosted relayUrl/deemixUrl was accepted")
+	if c, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_CONFIG": cfg})); err != nil || c.Endpoint != "" {
+		t.Fatalf("a password without relayUrl must mean standalone: %+v %v", c, err)
 	}
 	cfg = writeFile(t, dir, "b.json", `{"deemixUrl":"http://192.168.1.5:6595","deemixPassword":"pw"}`)
 	c, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_CONFIG": cfg}))

@@ -1,100 +1,342 @@
-# EngineX OS — 天龙 Denon DJ Engine OS 5.0.4 全机型通用深度定制系统与高性能后端套件
+<div align="center">
 
-<p align="center">
-  <a href="./README.md">English</a> · <b>简体中文</b> · <a href="./README.zh-TW.md">繁體中文</a> · <a href="./docs/OPEN-SOURCE-FULL-MANIFEST.md">完整开源技术白皮书与 642 条 Bug 核查总表</a>
-</p>
+<img src="./docs/assets/hero-banner-zh-CN.svg" alt="EngineX OS 5.0.4 — 为 Engine DJ 5.0.4 独立播放器打造的定制固件层" width="100%">
 
-<p align="center">
-  <img src="https://img.shields.io/badge/基线固件-Engine_OS_5.0.4-0078ff?style=flat-square" alt="Base Firmware" />
-  <img src="https://img.shields.io/badge/实时内核-Linux_6.6.119--rt_(PREEMPT__RT)-00e632?style=flat-square" alt="Kernel" />
-  <img src="https://img.shields.io/badge/支持机型-SC5000_%7C_SC6000_%7C_PRIME_4_%7C_PRIME_GO_%7C_SC_LIVE_2-ff8800?style=flat-square" alt="Models" />
-  <img src="https://img.shields.io/badge/双版本架构-本地无服务器版_(Standalone)_%26_服务器加速版-5ce4d5?style=flat-square" alt="Editions" />
-</p>
+<br>
 
-**EngineX OS** (`sc5000-custom-os`) 是面向天龙 Denon DJ **Engine OS 5.0.4** 全系独立碟机与一体机（`SC5000`、`SC5000M`、`PRIME GO`、`SC6000`、`SC6000M`、`PRIME 4`、`SC LIVE 2`）打造的开源定制系统与底层后端重构套件。
+<a href="./README.md"><img src="https://img.shields.io/badge/English-30363d?style=for-the-badge" alt="English"></a> <a href="./README.zh-CN.md"><img src="https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-00e676?style=for-the-badge" alt="简体中文"></a> <a href="./README.zh-TW.md"><img src="https://img.shields.io/badge/%E7%B9%81%E9%AB%94%E4%B8%AD%E6%96%87-30363d?style=for-the-badge" alt="繁體中文"></a>
 
-核心设计宪法：
-> **100% 保留原厂 QML 打碟界面直觉（零学习成本、零阻断弹窗）+ 外科手术式替换 Linux & C++ 低效后端。**
-> 任何习惯 CDJ 或 Denon 的 DJ 走上台看到的都是原汁原味的原厂界面；而在底层，拖慢机器的原厂慢速导库器、FAT32/exFAT 同步 `fsync` 磁盘锁、高频闪存遥测写入、408MHz 降频断音与机型功能阉割，已被高性能 C `LD_PRELOAD` 内存钩子与 CPU 硬隔离的 Go 守护进程彻底重构。
+<br>
+
+<img src="https://img.shields.io/badge/Engine_OS-5.0.4_%E5%9F%BA%E7%BA%BF-00e676?style=for-the-badge&labelColor=0d1117" alt="Engine OS: 5.0.4 基线">
+<img src="https://img.shields.io/badge/%E7%A1%AC%E4%BB%B6-RK3288_ARMv7_%E5%AE%9E%E6%97%B6%E5%86%85%E6%A0%B8-00b0ff?style=for-the-badge&labelColor=0d1117" alt="硬件: RK3288 ARMv7 实时内核">
+<img src="https://img.shields.io/badge/%E9%9F%B3%E9%A2%91-96kHz_%E9%9B%B6_XRUN-00e676?style=for-the-badge&labelColor=0d1117" alt="音频: 96kHz 零 XRUN">
+<br>
+<img src="https://img.shields.io/badge/Stems-%E4%BA%91%E7%AB%AF_%2F_%E5%B1%80%E5%9F%9F%E7%BD%91_mDNS_%2F_%E6%9C%AC%E6%9C%BA-7c4dff?style=for-the-badge&labelColor=0d1117" alt="Stems: 云端 / 局域网 mDNS / 本机">
+<img src="https://img.shields.io/badge/%E6%B5%81%E5%AA%92%E4%BD%93-5_%E5%A4%A7%E5%B9%B3%E5%8F%B0-ff6d00?style=for-the-badge&labelColor=0d1117" alt="流媒体: 5 大平台">
+<img src="https://img.shields.io/badge/Bug_%E6%A0%B8%E6%9F%A5-642_%E6%9D%A1%E5%8E%86%E5%8F%B2%E9%97%AE%E9%A2%98-2979ff?style=for-the-badge&labelColor=0d1117" alt="Bug 核查: 642 条历史问题">
+
+<br>
+
+**[实机截图](#gallery)** · **[系统架构](#architecture)** · **[Stems 分轨](#stems)** · **[性能对比](#benchmarks)** · **[快速上手](#quick-start)** · **[技术深潜](#deep-dive)** · **[完整技术清单](./docs/OPEN-SOURCE-FULL-MANIFEST.md)**
+
+</div>
+
+<br>
+
+**EngineX OS**（`sc5000-custom-os`）是面向天龙 Denon DJ **Engine OS 5.0.4** 独立播放器的开源定制固件层与后端套件，支持 `SC5000`、`SC5000M`、`SC6000`、`SC6000M`、`PRIME 4`、`PRIME GO` 与 `SC LIVE 2`。
+
+> **界面原汁原味，底层脱胎换骨。**
+> DJ 走上台看到的就是原厂界面和原厂手感，没有新弹窗要学。底层那些拖慢机器的慢速导库、SQLite 同步写盘卡顿、闪存遥测、CPU 降频和机型功能锁，已被内存中的 C 钩子和相互隔离的 Go 服务替换。rootfs 与磁盘上的 Engine 二进制从不改动，一个文件就能回到原厂界面。
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+**🎛 全机型 Stems 分轨**<br>
+<sub>在 SC5000 上解锁原生 Stems 播放、第 0 行 Stems 歌单与底部分轨栏。U 盘和流媒体曲目都能分轨：云端、家里电脑或碟机本机任选。</sub>
+
+</td>
+<td width="33%" valign="top">
+
+**🌐 五大流媒体平台**<br>
+<sub>网易云音乐、Spotify、Deezer、SoundCloud 与 TIDAL 进入原厂音源页，手机扫码登录，音频直接存进碟机。</sub>
+
+</td>
+<td width="33%" valign="top">
+
+**📀 Rekordbox U 盘秒读**<br>
+<sub>插入导出好的 PDB / OneLibrary U 盘，挂载时即转换为 Engine 曲库：拍线、Cue、Loop、波形全部保留，无需重新分析音频。</sub>
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**🔊 实时音频隔离**<br>
+<sub>CPU0 独占 ALSA 中断（FIFO 99），频率下限 1.2 GHz，后台线程全部压到 CPU3（SCHED_IDLE）：96 kHz 下实测零 XRUN。</sub>
+
+</td>
+<td valign="top">
+
+**🩺 数据库自愈**<br>
+<sub>Engine 打开 U 盘之前，先修好断裂的歌单链表、透明 Cue、超大封面和膨胀的历史库。</sub>
+
+</td>
+<td valign="top">
+
+**🌏 三语界面，随心配色**<br>
+<sub>English、简体中文、繁體中文界面；Denon、RGB、3-Band 波形；转盘灯效；GitHub 更新检查。</sub>
+
+</td>
+</tr>
+</table>
+
+<a id="gallery"></a>
+
+## 📸 实机截图
+
+<sub>在 SC5000（`JP07`）实机上通过 KMS 用 `tools/drmgrab` 截取。</sub>
+
+<table>
+<tr>
+<td width="50%" align="center">
+<img src="./docs/assets/screenshots/zh-CN/01-deck-stems-official-pads.png" width="100%" alt="碟机原生 Stems 分轨栏"><br>
+<b>原生 4 轨 Stems 播放</b><br>
+<sub>原厂碟机界面、3-Band 波形与官方 <code>Vocal · Melody · Bass · Drums</code> 分轨栏</sub>
+</td>
+<td width="50%" align="center">
+<img src="./docs/assets/screenshots/zh-CN/02-library-native-stems-list.png" width="100%" alt="曲库原生 Stems 歌单"><br>
+<b>曲库里的原生 Stems 歌单</b><br>
+<sub>在 <code>0x6d3e00</code> 解锁的第 0 行 <code>Stems</code> 歌单（<code>typeRole = 5</code>）</sub>
+</td>
+</tr>
+<tr>
+<td align="center">
+<img src="./docs/assets/screenshots/zh-CN/03-sources-5-streaming-platforms.png" width="100%" alt="音源页的五大流媒体"><br>
+<b>音源页集成五大平台</b><br>
+<sub>网易云 · Spotify · Deezer · SoundCloud · TIDAL 与 U 盘、SD 卡并列</sub>
+</td>
+<td align="center">
+<img src="./docs/assets/screenshots/zh-CN/04-streaming-qr-login.png" width="100%" alt="碟机扫码登录"><br>
+<b>碟机屏幕扫码登录</b><br>
+<sub>同一 Wi-Fi 下直接扫码，或通过自建中继在 4G / 5G 下扫码</sub>
+</td>
+</tr>
+<tr>
+<td align="center">
+<img src="./docs/assets/screenshots/zh-CN/05-streaming-playlists-bpm-swipe.png" width="100%" alt="流媒体歌单与 BPM 调性"><br>
+<b>流媒体歌单</b><br>
+<sub>每个平台独立的 Stems 歌单、BPM / 调性预览列、左滑一键分轨</sub>
+</td>
+<td align="center">
+<img src="./docs/assets/screenshots/zh-CN/06b-preferences-device.png" width="100%" alt="设备设置"><br>
+<b>设备设置</b><br>
+<sub>语言、波形样式、串流音质、网易云下载方式、转盘灯效、蓝牙</sub>
+</td>
+</tr>
+</table>
+
+<div align="center">
+<img src="./docs/assets/screenshots/zh-CN/06-preferences-enginex-github-update.png" width="70%" alt="关于 / 更新页的 GitHub 版本检查"><br>
+<b>关于 / 更新：检查 GitHub 发布</b><br>
+<sub>用 <code>Cd1s/sc5000-custom-os</code>（或你的 fork）的 Releases 取代天龙官方更新服务器</sub>
+</div>
+
+<a id="architecture"></a>
+
+## 🧭 系统架构
+
+<div align="center">
+<img src="./docs/assets/arch-zh-CN.svg" width="100%" alt="EngineX OS 运行架构">
+</div>
+
+碟机的四个核心各司其职。**CPU0** 只服务 ALSA 音频中断（`SCHED_FIFO 99`）。**CPU1** 运行 Engine 界面与 GPU 渲染。**CPU2** 承接 USB、SATA 与以太网中断。**CPU3** 负责一切可以等待的工作：曲目分析、流媒体下载、Rekordbox 桥接与 Stems 分轨，全部以 `SCHED_IDLE` 和空闲 I/O 优先级运行。
+
+<a id="stems"></a>
+
+## 🎛 三级 Stems 算力
+
+`stems-processor` 替代 Engine 原厂的 Stems 子进程，按顺序尝试三级算力。只有前一级完全连不上时才换下一级，所以同一次分轨绝不会被拆到两台机器上。
+
+| | 级别 | 何时使用 | 工作方式 | 速度（4 分钟曲目） |
+| :-: | :-- | :-- | :-- | :-- |
+| **1** | **☁️ 云端中继** | 在碟机控制台设置了 `relayUrl` | `X-Stems-Framing: 2`：上下行均为 int16，只回传三轨；碟机用 原音 − 人声 − 低音 − 鼓组 还原旋律 | Wi-Fi 下 **35.1 秒**（6.8 倍实时），分轨核心 33.8 倍 |
+| **2** | **🏠 局域网家用电脑** <sub>新功能 · Issue #1</sub> | 没有中继，或中继连不上 | 通过 mDNS `_enginex-stems._tcp.local.` 与 UDP 17891 广播在 350 毫秒内发现并缓存地址；`hpss` 或神经网络 `htdemucs`（CUDA、Apple MPS 或 CPU） | `hpss` 与云端一样快；`htdemucs` 取决于显卡 |
+| **3** | **🎚 碟机本机** | 什么都连不上 | 在 CPU3（`SCHED_IDLE`）上做因果 IIR + 中/侧声道分离；四轨相加严格等于原音 | **每 60 秒音频 2.48 秒**（24.2 倍实时） |
+
+> **把任意一台 Mac、Windows 或 Linux 电脑变成 Stems 算力机**，碟机上不用填地址、端口或密码：
+> ```sh
+> tools/stems/run-home-worker.sh            # macOS / Linux：装了 demucs 就用 htdemucs，否则用 hpss
+> powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs   # Windows：N 卡自动装 CUDA 版 torch
+> ```
+> 电脑关机时，碟机在下一次分轨开始时自动改用自己的 CPU3。
+
+<a id="benchmarks"></a>
+
+## 📊 性能对比
+
+<sub>除特别标注外，均在天龙 SC5000 Prime（`JP07`）实机上测得。</sub>
+
+| | 项目 | 原厂 Engine OS 5.0.4 | EngineX OS 5.0.4 | 结果 |
+| :-: | :-- | :-- | :-- | :-: |
+| 🎛 | **Stems，4 分钟曲目** | SC5000 上被锁死。初版远程方案耗时 394.1 秒，结束时还卡 120 秒 | 云端 / 家用电脑 **35.1 秒**，0.04 秒退出<br>碟机本机约 **9.9 秒** <sup>†</sup> | **快 11 倍** |
+| 📀 | **Rekordbox U 盘挂载** | 首次挂载约 8 分钟，重扫 15–24 秒，增量更新 21 首新歌导入 0 首（`GL-011`） | 首次挂载 **< 2 秒**（> 500 首，在 `tmpfs` 上生成），未变化 **0.03 秒**，增量 **< 1 秒** | **重新挂载快约 800 倍** |
+| 💾 | **SQLite 卡顿与闪存遥测** | `synchronous=FULL`，临时表落盘；`posthog.db` / `events.db` 持续写入 | `synchronous=NORMAL`、内存临时表、8 MB 缓存；遥测库以 `:memory:` 打开 | 30 秒压力测试 eMMC 写入 **0 B** |
+| 🔊 | **96 kHz 音频** | 空闲时降到 126–408 MHz；中断与分析线程挤占音频核心 | CPU0 独占 ALSA（FIFO 99）、1.2 GHz 下限、`MONOTONIC_RAW` 时间戳防 NTP 跳变（`RA002`） | **0 XRUN** |
+| 🎚 | **FX 与控制 DSP 守护** | 切换 / 开关 FX 爆音（`H145` `H163` `H164`），AutoGate 混入旧相位（`LA-020` `H153`），NaN / Inf 控制值进入 DSP（`H154`、Nudge `CF011`） | `dsp_smooth.h` 经 `libengine-ui-hook.so` 的 11 个跳板接入：128 帧防爆音斜坡、每次切换复位 AutoGate 相位、清除 FX 混合尾链中的 NaN/Inf、Nudge 与 `PlaybackTempoChange` 有限值守卫 | ✅ **已实机部署**，ALSA `RUNNING`、0 XRUN |
+| ☁️ | **SoundCloud 1 小时 50 分 DJ Set** | 60.3 秒（8 路基线） | 16 路分段下载 **43.7 秒** | 跑满网卡（约 2.3 MB/s） |
+| 🖼 | **封面占用内存** | 每张 3000 × 3000 封面约 36 MB | **≤ 1 MB**（≤ 512 × 512 JPEG） | **减少 97% 以上** |
+
+<sub>† 由实测的每 60 秒音频 2.48 秒推算。</sub>
+
+## 🧩 单机版还是加服务器
+
+同一套固件两种用法。什么都不配置就是完整的单机版；配上中继或打开家里电脑就自动用上。
+
+| 能力 | 单机版（无服务器） | 加中继或家用电脑 |
+| :-- | :-- | :-- |
+| 原生 `.stems` 播放与分轨栏 | ✅ | ✅ |
+| U 盘与流媒体曲目分轨 | ✅ CPU3 本机（IIR 分频） | ✅ HPSS 或 htdemucs |
+| 每个流媒体平台独立的 Stems 歌单 | ✅ | ✅ |
+| 网易云音乐 | ✅ App 扫码，无损 / 320k 直接下载到碟机 | ✅ |
+| Deezer | ✅ 局域网扫码，音频在碟机本机解密 | ✅ 增加 4G / 5G 扫码与浏览器登录 |
+| Spotify 与 SoundCloud | ✅ 局域网手机页面 | ✅ 增加 4G / 5G OAuth 回调 |
+| Rekordbox 桥接、数据库自愈、SQLite 调优 | ✅ | ✅ |
+| Bug 防御、1.2 GHz 下限、三语界面、波形、OTA 检查 | ✅ | ✅ |
+
+<sub>音频始终下载在碟机本机；服务器只是增加可达性（4G / 5G 登录）和算力（Stems）。</sub>
+
+## 🐞 642 条问题核查
+
+Engine OS 1.x 到 5.0.4、Engine DJ 电脑版（229 条）以及第三方工具（`libdjinterop`、`Seabass`、`StageLinQ`）的全部已知缺陷，都在 [**完整技术清单**](./docs/OPEN-SOURCE-FULL-MANIFEST.md) 里逐条记录。
+
+| | 状态 | 数量 | 例子 |
+| :-: | :-- | :-: | :-- |
+| ✅ | 在 5.0.4 上已根治或已防御 | ~102 | 断音（`CF001` `N001`–`N003` `RA002`）、损坏与慢挂载（`CF003`–`CF006` `GL-011`）、PRIME 4 SATA 休眠（`CF017`）。本版新增并已实机部署：QML `CF008` `CF009` `CF010` `H143` `CF013` `H166` `RA001` `RA008`；DSP 守护 `H145` `H163` `H164` `H153` `H154` `LA-020` |
+| 🟢 | 5.0.4 底包已修复或已被架构绕开 | ~527 | 包括全部 229 条电脑版缺陷：碟机不再需要 Engine DJ 电脑版。Key Lock 淡化（`H130` `LA-018`）：逆向确认原厂 `ElastiqueFader` 已逐帧步进，保持原样 |
+| ❌ | 位于闭源 DSP 或电机 MCU 固件内 | ~16 | Sync 状态机（`RA004` `LA-033`）、M 系列转盘 MCU（`CF014` `LC030`） |
+
+<a id="quick-start"></a>
+
+## 🚀 快速上手
+
+1. **把更新检查指向你的 fork（可选）。** `设置 → 关于 / 更新` 默认检查 `Cd1s/sc5000-custom-os`。在 `/data/sc5000-custom/ui/settings.conf` 中加入 `github_repo=your-org/your-repo`，或设置 `SC5000_GITHUB_REPO`。
+2. **配置中继（可选）。** 手机打开 `http://sc5000.lan:8080`，在「云端登录服务」里填入你自建的 `sc5000-relay` 地址和密码。
+3. **或者用家里电脑。** 在同一网络的任意电脑上运行 `tools/stems/run-home-worker.sh`（或 `.ps1`）。碟机控制台 `http://sc5000.lan:8080` 会显示找到的电脑以及是否在线。
+
+<a id="deep-dive"></a>
+
+## 🔬 技术深潜
+
+<details>
+<summary><b>内存二进制钩子</b> — <code>tools/ui-mod/engine_ui_hook.c</code> → <code>libengine-ui-hook.so</code></summary>
+
+<br>
+
+所有补丁在启动时先校验 ELF `NT_GNU_BUILD_ID`（`af073865…`）与预期指令字节，再在内存中应用。只读 rootfs 上的 `/usr/Engine/Engine` 从不写入。创建 `/data/sc5000-custom/ui/safe-mode`，或 90 秒内连续崩溃三次（`engine-ui-guard`），即恢复原厂界面。
+
+| ELF 地址 / 符号 | 原厂 5.0.4 | EngineX OS | 范围 |
+| :-- | :-- | :-- | :-- |
+| `0xf6303c`（`prepare_config`） | `getConfig()` 公共返回路径 | 跳到桩代码，置 `hasStems`、`hasBluetooth`、`hasBluetoothSendToAssignment`、远程 Stems 子进程支持与 `disableHfsPlus=false`，再跳回 `0xf63044` | 全部 7 个机型（`JP07` `JP08` `JP11` `JP13` `JP14` `PRIME 4` `SC LIVE 2`） |
+| `0x842644`（`prepare_stems_feature`） | 机型字符串为 `"False"` 时提前退出 | 把 `StemsPreRenderedPlayback` 绑到原厂 `true` 字节，进入 `0x8429b0` 的特性登记 | 全机型 |
+| `0x6d3e00` | `beq` 跳过侧栏 Stems 行 | 改为 `b`：始终插入第 0 行 `Stems` 歌单（`typeRole = 5`） | 全机型 |
+| `0x85ef9c` / `0x85e5f8` | 原厂分轨二进制 | `/usr/local/bin/stems-processor` | 把 Engine 的分轨队列接到三级算力 |
+| `0x336740` `0x336758` `0x33652c` `0x1db8e90` | `TidalAPI` → `api.tidal.com`，只认 `flac` / `aac` | 本地网关 `127.0.0.1:8080`；`"aac\0"` → `"mp3\0"` | 网易云、Spotify、Deezer、SoundCloud、TIDAL |
+| `0x1897e70` `0x1897dcc` `0x1678644` `0x58af34` `0x167295c` `0x16728c0` | 拒绝未知文件系统；`hfsplus` 被改写为不存在的 `ufsd`；只读盘被弹出 | 接受所有文件系统、保留原生 `hfsplus`、不自动弹出 | HFS+（配合 `overlayfs`）、APFS、NTFS、exFAT、FAT32 |
+| `0x1cba858` `0x1cba874` `0x1c91f74`（SQLite） | `synchronous=FULL`，临时表落盘 | 遥测库 → `:memory:`；`synchronous=NORMAL; temp_store=MEMORY; cache_size=-8000` | 消除日志 `fsync` 卡顿 |
+| `pthread_setname_np` `prctl` `pthread_setschedparam` `pthread_setaffinity_np` | 默认调度；`RenderStemsJob` 在 4 核上绑核失败崩溃 | 修正亲和性掩码；分析 / 云服务 / 探针线程 → CPU3 `SCHED_IDLE`；图片与文件线程 → CPU1-3 | 保护 CPU0 与界面核心 |
+| `snd_pcm_sw_params` | 次级 ALSA 路径用 `CLOCK_REALTIME` 时间戳 | 改为 `MONOTONIC_RAW` | `RA002` NTP 跳变杂音 |
+| `getaddrinfo` | 访问 `autoupdate.airmusictech.com` | 屏蔽；保留 `api.github.com` 与设备认证 | GitHub 更新检查 |
+| `ChannelDJFx` TurnOn / TurnOff / Switch / Change / Enable / Mix / Parameter（`0xd917b8`–`0xd918ec`）、`Effects::AutoGate::process` `0xe3a598`、FX 混合尾链 `0x15fa188` | FX 切换 / 开关时直接跳到新信号；AutoGate 保留旧相位；NaN/Inf 原样输出 | `dsp_smooth.h`：切换时武装 128 帧干→湿斜坡、丢弃含 NaN/Inf 的 Mix / Parameter 事件、每次切换清零一次 AutoGate 相位、替换 NaN/Inf 输出 | `H145` `H163` `H164` `LA-020` `H153` `H154` |
+| `PlaybackModifier::Nudge` `0x14fff54`、`TimeStretchingModifier::PlaybackTempoChange` `0x153312c` | 控制值原样使用 | 丢弃非有限值（速度还要求为正） | `H154`、`CF011` 输入侧 |
+
+</details>
+
+<details>
+<summary><b>QML 补丁</b> — <code>tools/ui-mod/build_packs.py</code></summary>
+
+<br>
+
+所有 QML 改动编译进 `/data/sc5000-custom/ui/packs/{en,zh-Hans,zh-Hant}`，启动时按文件替换。每个锚点必须恰好匹配一次，否则构建中止。
+
+| 范围 | 文件 | 改动 |
+| :-- | :-- | :-- |
+| 服务与设置 | `EmbeddedMain.qml`、`DeviceTabContent.qml`、`WaveformStyle.qml` | 语言、波形样式、串流音质、网易云下载方式、转盘灯效；兼容 2 通道与 4 通道 |
+| Stems | `StemsList.qml`、`SwipeLeftItem.qml`、`Craylist.qml`、`StemsIcon.qml` | Stems 歌单开关、流媒体曲目左滑分轨与拖入 Stems 歌单 |
+| 流媒体 | `ConnectedSource.qml`、`SourceScreen.qml`、`Streaming*.qml`、`Sidebar.qml` | 五个平台各自的入口与图标、品牌名、隐藏 TIDAL 专属分类、取消曲目时长限制 |
+| 曲库 | `AlbumArt.qml`、`Bpm.qml`、`Key.qml`、`Song.qml` | 网关封面；本机分析完成前显示曲库 BPM / 调性 |
+| 弹窗 | `ImproperDeviceEjectMessageBox.qml`、`LoadPreferencesDialog.qml`、`RekordBoxImportDialog.qml` | 未安全弹出、U 盘配置文件、慢速导库三个弹窗自动应答 |
+| **原厂缺陷** ✅ | `SourceScreenState.qml`、`SourceScreen.qml` | `CF008`：Back / Forward 关闭来源窗口；方向键、Enter、Escape 可操作 |
+| | `TrackList.qml`、`BreadcrumbStackView.qml` | `CF009` `CF010` `H143`：用 `Qt.callLater` 恢复焦点，有弹窗或键盘时不抢焦点 |
+| | `CloudUtilityDialog.qml` | `CF013`：云盘退出登录后可重新登录 |
+| | `StreamingLoginDialog.qml`、`StreamingPairingDialog.qml` | `H166`：取消登录时清理该平台的配对状态 |
+| | `SelectPlaylistDeckMenuLayoutBase.qml` | `RA001`：退出 Load Playlist 时同步关闭选碟机菜单 |
+| | `TrackDisplayText.qml`、`ArtistSong.qml` | `RA008`：隐藏曲名 / 艺人在主界面同样生效 |
+| 翻译 | `i18n.tsv` | 文字、按钮、数值与模板字符串的简体 / 繁体翻译 |
+
+</details>
+
+<details>
+<summary><b>仓库结构</b></summary>
+
+<br>
+
+```text
+cmd/
+  sc5000-suite/       静态 ARMv7 多合一程序：rb-bridge、stream-sync、engine-guardian
+  stems-processor/    碟机端 Stems：中继 → 局域网 → 本机
+  sc5000-stemsd/      Stems 渲染服务，局域网发现（mDNS + UDP 17891）
+  sc5000-relay/       登录与 Stems 的公网入口
+  sc5000-deemixd/     本地 Deezer 下载服务（127.0.0.1:6595）
+internal/stems/       传输协议、int16 打包、局域网发现、LocalRender
+pkg/
+  rekordbox/ enginedb/ bridge/ compat/ prolink/   Rekordbox → Engine 曲库
+  webui/ providers/ deemixclient/ analyzer/       流媒体网关、手机控制台、音频分析
+  dbhealer/ resourceguard/                        数据库修复、CPU3 资源隔离
+tools/
+  ui-mod/             engine_ui_hook.c、dsp_smooth.h、build_packs.py、i18n.tsv
+  stems/              worker.py（hpss / htdemucs）、run-home-worker.sh / .ps1
+  edisksd-hook/       挂载时调用 rb-bridge 与自愈的钩子
+  az01-packer/        固件镜像打包工具
+  drmgrab/            KMS 截图工具
+rootfs-overlay/       sc5000-perf-tune、sc5000-debloat、内核模块参数
+deploy/stems/         渲染服务部署文件
+docs/                 技术清单、逆向报告、图片资源
+```
+
+</details>
+
+<details>
+<summary><b>构建、部署与回退</b></summary>
+
+<br>
+
+```sh
+# 测试
+go test -race ./...
+bash tests/test_rootfs_overlay.sh
+python3 -m unittest discover -s tools/az01-packer -v
+python3 -m unittest discover -s tools/stems -v
+gcc -std=c11 -O2 -Wall -Wextra -Werror tools/ui-mod/test_dsp_smooth.c -o /tmp/test_dsp_smooth && /tmp/test_dsp_smooth
+
+# 碟机用静态 ARMv7 程序
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/sc5000-suite ./cmd/sc5000-suite
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o out/stems-processor ./cmd/stems-processor
+
+# LD_PRELOAD 钩子
+arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -shared -fPIC -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
+  -o out/libengine-ui-hook.so tools/ui-mod/engine_ui_hook.c -ldl
+sh tools/edisksd-hook/build.sh
+
+# 由原厂 5.0.4 QML 生成三语界面包（en / zh-Hans / zh-Hant）
+python3 tools/ui-mod/build_packs.py --qrc /path/to/stock-5.0.4-qrc --out out/ui-packs
+# 在碟机上：用 out/ui-packs.tar.gz 里的 packs/ 整体替换 /data/sc5000-custom/ui/packs
+```
+
+**回退**
+
+- 立即回到原厂界面：`touch /data/sc5000-custom/ui/safe-mode` 后重启 Engine。90 秒内连续三次启动失败也会自动这样做。
+- 卸载界面改动：删除 `/etc/systemd/system/engine.service.d/60-ui-hook.conf`，执行 `systemctl daemon-reload`，重启 `engine.service`。
+- 部署前先备份钩子、`engine-ui-guard` 与服务 drop-in；`/data` 下的音乐、数据库和登录信息不会被改动。
+
+</details>
+
+<details>
+<summary><b>家用电脑 Stems 算力机详解</b></summary>
+
+<br>
+
+- `sc5000-stemsd -listen 0.0.0.0:17890 -token-file=` 只为局域网内的调用者免密服务，来自公网地址的请求一律拒绝。发现应答只发往局域网地址，开放的 UDP 端口无法被用来做反射放大。
+- 碟机绝不会把中继密码发给自动发现的电脑。
+- `-backend auto|hpss|demucs`（或 `ENGINEX_STEMS_BACKEND`）；`GET /healthz` 返回后端、主机名、并发数与是否繁忙。电脑繁忙时碟机跳过它，改为本机分轨。
+- `htdemucs` 以 10 秒为一段、相邻段交叉淡化 1 秒；旋律仍是余量，所以传输格式与碟机的旋律还原都不变。
+- 最近一次找到的电脑记录在 `/data/sc5000-custom/state/stems-lan.json`，并显示在碟机控制台中。
+
+</details>
 
 ---
 
-## 一、实机真实功能截图（SC5000 `JP07` 硬件 KMS `drmgrab` 实拍）
-
-| 原厂 4 轨 Stems 播放与底部原厂消音栏 | 曲库侧边栏第 0 行原生 `Stems` 歌单 (`0x6d3e00`) |
-| :---: | :---: |
-| ![Deck Stems Pads Bar](./docs/assets/screenshots/01-deck-stems-official-pads.png) | ![Library Native Stems List](./docs/assets/screenshots/02-library-native-stems-list.png) |
-| *100% 原厂 UI 布局：先锋 3-Band 波形、Rekordbox 总览波形自适应拉伸与屏幕底部原厂 `[ Vocal ] [ Melody ] [ Bass ] [ Drums ]` 分轨控制栏* | *解锁侧边栏第 0 行原厂 `Stems` 列表 (`typeRole = 5`) 与曲目双轨图标* |
-
-| 原厂音源页集成 5 大流媒体平台 | 碟机屏幕扫码登录弹窗 |
-| :---: | :---: |
-| ![5 Streaming Platforms](./docs/assets/screenshots/03-sources-5-streaming-platforms.png) | ![QR Code Login Modal](./docs/assets/screenshots/04-streaming-qr-login.png) |
-| *同屏支持 USB 3、SD 卡与网易云音乐、Spotify、Deezer、SoundCloud、TIDAL* | *支持本地无服务器局域网扫码 (`http://<碟机IP>:8080`) 与自建云端中继扫码* |
-
-| 流媒体独立 `Stems` 列表、`[BPM / Key]` 预览与左滑 `Stems` | `EngineX OS` 设备偏好设置页（语言、波形、音质、灯效、蓝牙） |
-| :---: | :---: |
-| ![Streaming Playlists & Swipe Stems](./docs/assets/screenshots/05-streaming-playlists-bpm-swipe.png) | ![EngineX OS Device Preferences](./docs/assets/screenshots/06b-preferences-device.png) |
-| *四大流媒体各自拥有独立的第 0 行 `Stems` 列表（互不串列表、不混入 U 盘）、自带速度/调性预览列与左滑蓝色 `Stems` 按钮* | *支持简/繁/英三语切换、Denon/RGB/3-Band 波形、无损/320k 音质、转盘灯效与蓝牙音频开关* |
-
-| `EngineX OS 5.0.4` GitHub 仓库固件更新检测（`关于 / 更新`） |
-| :---: |
-| ![EngineX OS GitHub Update](./docs/assets/screenshots/06-preferences-enginex-github-update.png) |
-| *屏蔽原厂 `autoupdate.airmusictech.com` 升级弹窗，直接检测你的 GitHub 仓库（`Cd1s/sc5000-custom-os`）* |
-
----
-
-## 二、双版本 / 双模式架构：**本地版（无服务器 Standalone）** vs **服务器版（Server Edition）**
-
-针对大量没有云服务器（VPS）的用户，**EngineX OS** 将**「本地无服务器版（Standalone）」与「服务器加速版（Server-Assisted）」融合在同一套自适应固件中**：不配任何服务器时自动以 **100% 纯本机模式**运行；在控制台填入自建服务器或家里电脑局域网地址后，自动升级为**服务器加速模式**。
-
-### 本地版（无服务器） vs 服务器版 功能完整对比表
-
-| 功能模块 | **本地版（无服务器 Standalone Edition）** | **服务器版（自建 VPS 或家里电脑 Server Edition）** | 两者差异说明 |
-| :--- | :--- | :--- | :--- |
-| **U 盘/SD 卡现成 `.stems` 播放与底部 4 轨控制栏** | ✅ **100% 完整支持** | ✅ **100% 完整支持** | 完全一致（`0x842644` + `0x6d3e00` C Hook）。 |
-| **U 盘与流媒体曲目实时 Stems 分轨计算** | ✅ **支持纯本机分轨 (`internal/stems/local.go`)**<br>未配置服务器时，`stems-processor` 自动锁在碟机 `CPU3` (`SCHED_IDLE` + `nice 19`) 运行纯 Go 因果 IIR 频带 + Mid/Side 四轨分离器（**实测 60 秒音频在碟机上仅需 `2.48 秒` = `24.2×` 实时**，四轨相加 100% 还原原曲，不抢音频核！）。 | ✅ **支持远端高精度分轨 (`worker.py`)**<br>通过 `X-Stems-Framing: 2`（双向 `int16` + 3 轨残差还原）流式交由远端 `sc5000-stemsd` 执行 2048 点 STFT + 二维谐波/打击乐中值滤波（**Wi-Fi 实测 `6.8×` 实时，算力峰值 `33.8×` 实时**）。 | **算法精度 vs 零外部硬件**：本地版用轻量级实时 IIR + 中侧频带分离实现零服务器机内分轨；服务器/家里电脑版运行高算力 2D STFT 谐波/打击乐中值分离。 |
-| **四大流媒体各自独立的第 0 行 `Stems` 歌单** | ✅ **100% 完整支持** | ✅ **100% 完整支持** | 完全一致（保存在本机 `state/streaming-stems.json`）。 |
-| **网易云音乐（扫码登录 + 无损 FLAC / 320k 下载）** | ✅ **100% 完整支持（完全不需要服务器）**<br>手机网易云 App 直接扫碟机屏幕二维码（支持 4G/5G），曲目由碟机直接向网易云官方下载无损 FLAC / 320k MP3。 | ✅ **100% 完整支持** | 完全一致。 |
-| **Deezer（公开歌单 + ARL 登录 + 本机无损下载）** | ✅ **100% 支持（局域网扫码 + 本机 `sc5000-deemixd`）**<br>公开榜单免登录即用；手机连同一 Wi-Fi 扫碟机二维码 (`http://<碟机IP>:8080/m/deezer`) 填入主页链接或 `arl` Cookie，音频由碟机本机 `sc5000-deemixd` (`127.0.0.1:6595`) 直接下载解密无损 FLAC。 | ✅ **100% 支持（跨网 4G/5G 扫码 + 云端浏览器账密登录）**<br>额外支持手机在 4G/5G 下跨网扫码，并提供云端无头浏览器直接输入 Deezer 邮箱密码自动提取 ARL。 | **两个版本的音频下载和解密 100% 都在碟机本机完成**；服务器版仅多出跨网扫码与云端浏览器填账密辅助。 |
-| **Spotify & SoundCloud** | ✅ **100% 支持（局域网扫码绑定）**<br>手机连同一 Wi-Fi 扫碟机二维码打开本机绑定页即可完成授权；音频全部在碟机本机下载。 | ✅ **100% 支持（4G/5G 自动 HTTPS OAuth 回调）**<br>手机无需连同一 Wi-Fi，扫码同意后自动通过 HTTPS 回调完成绑定。 | 本地版通过同一 Wi-Fi 局域网页面绑定；服务器版支持 4G/5G 自动 HTTPS 回调。 |
-| **先锋 Rekordbox 零扫描秒读 (`rb-bridge`)** | ✅ **100% 完整支持** | ✅ **100% 完整支持** | 完全一致（纯机内挂载钩子）。 |
-| **数据库自愈 (`dbhealer`) 与 SQLite 内存加速** | ✅ **100% 完整支持** | ✅ **100% 完整支持** | 完全一致。 |
-| **642 条 Bug 防御、1.2GHz 保底、三语/RGB/3-Band 与 GitHub 更新检测** | ✅ **100% 完整支持** | ✅ **100% 完整支持** | 完全一致。 |
-
-> **💡 家里有电脑（Mac / Windows / Linux），没有云服务器，能用家里电脑算 Stems 吗？**
-> **完全可以！** 只要家里电脑和碟机在同一个路由器/Wi-Fi 下，在电脑上运行本仓库的 `sc5000-stemsd`（或 `sc5000-relay`），然后在碟机网页控制台 `http://sc5000.lan:8080` 把地址填成 `http://<电脑局域网IP>:6595`（或设环境变量 `SC5000_STEMS_URL=http://<电脑局域网IP>:6596`），碟机就会直接调家里电脑的 CPU/GPU 算 Stems！我们还建立了 [**Issue #1**](https://github.com/Cd1s/sc5000-custom-os/issues/1) 追踪零配置局域网 mDNS 自动发现与 GPU Demucs 模型支持。
-
----
-
-## 三、修改前 vs 修改后：实机性能对比基准表
-
-所有性能数据均来自 **Denon SC5000 Prime (`JP07`)** 实机测量：
-
-| # | 性能指标 | 修改前（官方原版 Engine OS 5.0.4 / 初版基线） | 修改后（EngineX OS 5.0.4 实机实测） | 性能提升幅度 |
-| :-: | :--- | :--- | :--- | :--- |
-| **1** | **Stems 分轨耗时与实时倍率**<br>*(4 分钟 / 240 秒曲目)* | • **原厂**：SC5000 (`JP07`) 被软件阉割锁死，零实时分轨算力。<br>• **初版未优化**：耗时 `394.1 秒`（**0.61× 实时**），且结束后必卡死 `120 秒` `i/o timeout`。 | • **服务器版（`X-Stems-Framing: 2` 双向 `int16` + 批量中值滤波）**：整曲仅需 **`35.1 秒`（6.8× 实时**，服务端计算峰值 **33.8× 实时**，收尾 **0.04 秒**）。<br>• **本地版（碟机 `CPU3` `SCHED_IDLE` 本机分离）**：60 秒音频仅需 **`2.48 秒`（24.2× 实时）**。 | **提速 11.1 倍 – 39 倍**<br>+ **彻底消灭 120 秒收尾假死** |
-| **2** | **Rekordbox 大曲库首次挂载与二次增量同步**<br>*(~6,000 首曲目 U 盘)* | • **首次插入**：机内逐首重扫音频算波形耗时 **~8 分钟**，极易写坏 `m.db`。<br>• **二次插入（无改动）**：每次扫描耗时 **~15–24 秒**。<br>• **二次插入（新增歌曲 `GL-011`）**：超过 `edisksd` 20 秒挂载预算被强杀回滚，**21/21 测试新增歌曲导入失败**。 | • **首次插入 (`>500` 首大库)**：**`< 2 秒`**（在 `tmpfs` 内存盘直接转换导出库，不读音频文件，100% 不碰 `PIONEER/` 原目录）。<br>• **二次插入（无改动）**：凭 `.rb-bridge-stamp` **`30 毫秒 (0.03s)`** 瞬间放行。<br>• **二次插入（新增歌曲/歌单）**：在 `tmpfs` 上 **`< 1 秒`** 完成增量同步（**成功率 100%**）。 | **二次挂载提速 ~800 倍 (`24s` $\rightarrow$ `0.03s`)**<br>+ **大库增量同步 100% 成功** |
-| **3** | **SoundCloud 106 MB 长 Set 下载耗时**<br>*(1 小时 50 分钟 DJ Set)* | • **原厂**：仅在线串流，不支持本地缓存，慢网易断音。<br>• **8 路分批基线**：耗时 `60.3 秒`。 | **16 路滑动窗口 Range 并行分片下载**（2 MB 切片，锁定在 `CPU3` `SCHED_IDLE`）：耗时缩短至 **`43.7 – 45.8 秒`**（跑满 SC5000 硬件网卡极限 `~2.3 MB/s`）。 | **提速 27.5% (`60.3s` $\rightarrow$ `43.7s`)**<br>跑满硬件物理带宽极限 |
-| **4** | **SQLite 事务耗时与内部 eMMC 闪存遥测写入量** | • **SQLite**：默认 `synchronous=FULL` + 磁盘临时表，每次打 Cue / 写历史在 FAT32/exFAT 上反复建删 `-journal` 并同步 `fsync` 阻塞主线程。<br>• **遥测**：每次按键写 `/data/.../posthog.db` 与 `events.db` + 4 个 `J:I:Takingfreez` 线程每 20 秒刷盘。 | • **SQLite Hook (`0x1cba858`/`0x1cba874`)**：自动注入 `PRAGMA synchronous=NORMAL; temp_store=MEMORY; cache_size=-8000;`（8 MB RAM 页缓存 + 内存临时表）。<br>• **遥测清零**：`posthog.db`/`events.db` 重定向至 `":memory:"`，`crashpad_handler` 直接短路 (`ENOENT`)。<br>• **实测闪存写入**：30 秒高频切歌下 eMMC 遥测写入增量为 **`0 字节`**。 | **闪存遥测写入降低 100% (`0 B`)**<br>+ **磁盘 `fsync` 阻塞降低 >95%** |
-| **5** | **ALSA 实时音频 XRUN 断音率**<br>*(96kHz / 450 帧 / 4.68ms 周期)* | • 空闲时 CPU 降频至 `126 MHz – 408 MHz`，切歌或解码大图瞬间升频不及引发 ALSA XRUN 爆音。<br>• GPU、USB 与网卡中断全挤在 `CPU1`；后台分析与封面解码抢占 `CPU0`。 | • **CPU 保底锁频 `1.2 GHz`**（`ondemand`, `up_threshold=50`, `sampling_down_factor=10`，稳定 `~72°C`）；GPU 设 `simple_ondemand` 低频让出热设计功耗。<br>• **四核硬隔离**：`CPU0` 独占 ALSA `ffb20000` 中断 (`FIFO 99`, `workqueue/cpumask=6`)；`CPU1` 独占 GPU/UI；`CPU2` 独占 USB/SATA/网卡中断；`CPU3` 隔离运行 `Analysis Queue`/`Freeze Checker`/`J:I:Takingfreez`/`Dropbox*` (`SCHED_IDLE` + `IOPRIO_CLASS_IDLE`)。 | **ALSA XRUN 断音率降至 0%**<br>边下歌分析边快速切歌零爆音 |
-| **6** | **高清封面内存占用与长时间运行稳定性 (`CF003` / `N006`)** | • 原厂无尺寸上限，3000×3000 封面解压为 raw RGBA 占用 **`~36 MB/张`**，冲垮内存带宽并在双层打碟 45–120 分钟后导致搜歌失灵与转盘屏卡顿。 | • `capCover` 与 `dbhealer` 拒绝 `>16MP` 解码炸弹，将大图双线性缩放为 **`<= 512×512` JPEG (`<= 256 KB`)**，单图解压内存降至 **`<= 1 MB`**。<br>• 缩略图缓存设 `128` 张硬上限，所有后台 Map 采用单条安全淘汰；`QQuickPixmapReader` 限制在 `CPU1-3` (`nice 10`)。 | **单图内存开销降低 >97% (`36 MB` $\rightarrow$ `<= 1 MB`)**<br>数小时演出内存零膨胀 |
-
----
-
-## 四、与官方原版系统的完整改动与 642 条历史 Bug 状态总览
-
-1. **二进制层 C Hook (`tools/ui-mod/engine_ui_hook.c` & `tools/edisksd-hook/edisksd_hook.c`)**：
-   - `0xf6303c` (`getConfig` 公共出口)：单点解锁全系 7 款机型（`JP07`/`JP08`/`JP11`/`JP13`/`JP14`/`JC11` PRIME 4/`JP20` SC LIVE 2）的 Stems、蓝牙音频、HFS+ 与远程分轨能力；
-   - `0x842644` & `0x6d3e00`：在 `"False"` 分支前激活 `StemsPreRenderedPlayback` 并解锁侧边栏第 0 行原生 `Stems` 列表；
-   - `0x1cba858` / `0x1cba874` / `0x1c91f74`：接管静态编译的 SQLite 3.45.3，注入 RAM PRAGMA 并将遥测库转为 `:memory:`；
-   - `snd_pcm_sw_params`：将未显式设置时钟类型的 ALSA 流（`GETTIMEOFDAY == 0`）升级为 `SND_PCM_TSTAMP_TYPE_MONOTONIC_RAW (2)`（防御 `RA002` 对时杂音，保留原厂静音与缓冲参数）；
-   - `getaddrinfo`：精准阻断原厂自动更新域名 `autoupdate.airmusictech.com`，保留账号授权与 GitHub API。
-2. **QML 界面层补丁 (`tools/ui-mod/build_packs.py`)**：
-   - 将 `Settings -> About / Update` 替换为 **GitHub 仓库更新检测（`EngineX OS 5.0.4 (GitHub: Cd1s/sc5000-custom-os)`）**，屏蔽原厂升级弹窗；
-   - 在任意 Deck 播放时自动禁用 `Sync Time` 按钮（双重防御 `RA002`）；
-   - 解锁 PRIME 4 Deck 3/4 触屏载歌限制（`LoadToDeckFilter.qml` `RA013`）；
-   - 动态读取 `root.decks` 适配 2 通道与 4 通道机型，提供简/繁/英三语、RGB/3-Band 波形、流媒体左滑 `Stems` 与底部原厂 Pads 栏自动切换。
-3. **642 条历史缺陷（1.x–5.0.4）核查结论**（逐条明细见 [**`docs/OPEN-SOURCE-FULL-MANIFEST.md`**](./docs/OPEN-SOURCE-FULL-MANIFEST.md)）：
-   - **✅ ~88 条 5.0.4 活跃痛点已直接根治/防御**（涵盖音频断音、数据库损坏、大库增量同步、AIFF 500BPM、FAT32 尾空格/点、透明 Cue、高清封面、SATA 休眠、DMX 插拔、45 分钟退化、对时杂音、大 MP3 预读等）；
-   - **🟢 ~525 条 1.x–5.0.3 历史项与 229 条电脑端桌面软件 Bug 已包含或被机内桥接架构彻底绕开**；
-   - **❌ ~29 条原厂闭源 C++ 音频 DSP 效果器算子与电机 MCU 内部限制如实披露**（如 FX 换通道尾音、Key Lock 切换瞬间伪影、M 系列马达盘 MCU 漂移——为严守「绝不炸音」红线，未对闭源浮点 DSP 状态机做强行篡改）。
+<div align="center">
+<sub>EngineX OS 是独立的社区项目，与 inMusic Brands 或 Denon DJ 无任何关联，也未获其认可。Engine DJ、Denon DJ 及所有产品名称均为其各自所有者的商标。本仓库不分发任何原厂固件或 Engine 二进制文件。</sub>
+</div>

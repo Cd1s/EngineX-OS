@@ -22,7 +22,7 @@
 const $=id=>document.getElementById(id);let current='',loginSession='',lastWave='',sessions=[],qrTimer=null,qrChecking=false;
 async function showBpm(){const v=await api('bpm');$('bpmState').textContent='SoundCloud：'+(v.soundcloudSet?'已设置':'未设置')+' · GetSongBPM：'+(v.getSongBpmSet?'已设置':'未设置')}
 async function saveBpm(){const b={};if($('scClient').value)b.soundcloudClientId=$('scClient').value.trim();if($('scSecret').value)b.soundcloudClientSecret=$('scSecret').value.trim();if($('scToken').value)b.soundcloudToken=$('scToken').value.trim();if($('gsbKey').value)b.getSongBpmKey=$('gsbKey').value.trim();await api('bpm',{method:'POST',body:JSON.stringify(b)});$('scClient').value=$('scSecret').value=$('scToken').value=$('gsbKey').value='';await showBpm()}
-async function showRelay(){const v=await api('relay');$('relayUrl').value=v.relayUrl;$('relayState').textContent=v.deemixPasswordSet?'密码已设置':'未设置密码'}
+async function showRelay(){const v=await api('relay');$('relayUrl').value=v.relayUrl;$('relayState').textContent=(v.deemixPasswordSet?'密码已设置':'未设置密码')+(v.lanStems?(v.lanStems.online?' · 家里电脑 Stems：'+v.lanStems.hostname+'（'+v.lanStems.backend+'）已连上':' · 家里电脑 Stems：'+(v.lanStems.hostname||'未发现')+' 离线，碟机本机分轨'):'')}
 async function saveRelay(){const b={relayUrl:$('relayUrl').value.trim()};const p=$('relayPassword').value;if(p)b.deemixPassword=p;await api('relay',{method:'POST',body:JSON.stringify(b)});$('relayPassword').value='';await showRelay()}
 function notice(t){$('notice').textContent=t||''}
 async function api(path,opts={}){const r=await fetch('/api/'+path,{...opts,headers:{'Content-Type':'application/json'}});const v=await r.json();if(!r.ok)throw Error(v.error||r.status);return v}

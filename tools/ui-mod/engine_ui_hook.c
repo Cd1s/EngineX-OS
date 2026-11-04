@@ -29,6 +29,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include "dsp_smooth.h"
 
 #define UI_ROOT "/data/sc5000-custom/ui"
 #define FLAG_COMPRESSED 0x01
@@ -157,6 +158,170 @@ static void *rx_code(const void *code, size_t size, size_t page) {
     if (mprotect(stub, page, PROT_READ | PROT_EXEC)) _exit(127);
     __builtin___clear_cache(stub, (char *)stub + size);
     return stub;
+}
+
+typedef void (*dsp_event_fn)(void *, const void *);
+typedef void (*dsp_process_fn)(void *, float *const *, float *const *, uint32_t);
+enum {
+    DSP_TURN_OFF, DSP_TURN_ON, DSP_SWITCH, DSP_CHANGE, DSP_ENABLE,
+    DSP_MIX, DSP_PARAMETER, DSP_NUDGE, DSP_TEMPO, DSP_AUTOGATE, DSP_COMMON, DSP_HOOK_COUNT
+};
+static void *dsp_originals[DSP_HOOK_COUNT];
+
+static void dsp_transition(unsigned slot, uint32_t kind, void *handler, const void *event) {
+    // ARM MemberFunctionHandler owns a bound object and a two-word member pointer.
+    // r0 at this entry is the handler, not ChannelDJFx itself. Keep it intact for
+    // the original dispatcher, including its virtual-function/this-adjustment path.
+    uint32_t owner;
+    int32_t adjustment;
+    memcpy(&owner, (char *)handler + 0x0c, sizeof owner);
+    memcpy(&adjustment, (char *)handler + 0x14, sizeof adjustment);
+    sc_dsp_fx_mark_transition((void *)((uintptr_t)owner + (adjustment >> 1)), kind);
+    ((dsp_event_fn)dsp_originals[slot])(handler, event);
+}
+
+#define DSP_TRANSITION(name, slot, kind) \
+    static void name(void *handler, const void *event) { dsp_transition(slot, kind, handler, event); }
+DSP_TRANSITION(hook_fx_turn_off, DSP_TURN_OFF, SC_DSP_FX_TRANSITION_TURN_OFF)
+DSP_TRANSITION(hook_fx_turn_on, DSP_TURN_ON, SC_DSP_FX_TRANSITION_TURN_ON)
+DSP_TRANSITION(hook_fx_switch, DSP_SWITCH, SC_DSP_FX_TRANSITION_SWITCH)
+DSP_TRANSITION(hook_fx_change, DSP_CHANGE, SC_DSP_FX_TRANSITION_CHANGE)
+DSP_TRANSITION(hook_fx_enable, DSP_ENABLE, SC_DSP_FX_TRANSITION_ENABLE)
+#undef DSP_TRANSITION
+
+static void dsp_finite_event(unsigned slot, size_t offset, int is_double,
+                             void *handler, const void *event) {
+    if (!event) return;
+    // Do not use the sanitizing sc_dsp_read_* helpers: NaN must be rejected,
+    // rather than turned into a valid zero-valued control event.
+    if (is_double) {
+        double value;
+        memcpy(&value, (const char *)event + offset, sizeof value);
+        if (!sc_dsp_finite_f64(value) || (slot == DSP_TEMPO && value <= 0.0)) return;
+    } else {
+        float value;
+        memcpy(&value, (const char *)event + offset, sizeof value);
+        if (!sc_dsp_finite_f32(value)) return;
+    }
+    ((dsp_event_fn)dsp_originals[slot])(handler, event);
+}
+
+static void hook_fx_mix(void *h, const void *e) { dsp_finite_event(DSP_MIX, 0x0c, 0, h, e); }
+static void hook_fx_parameter(void *h, const void *e) { dsp_finite_event(DSP_PARAMETER, 0x20, 0, h, e); }
+static void hook_playback_nudge(void *h, const void *e) { dsp_finite_event(DSP_NUDGE, 0x08, 1, h, e); }
+static void hook_playback_tempo(void *h, const void *e) { dsp_finite_event(DSP_TEMPO, 0x08, 1, h, e); }
+
+static void hook_autogate_process(void *self, float *const *input, float *const *output, uint32_t frames) {
+    sc_dsp_autogate_pre_process(self, frames);
+    ((dsp_process_fn)dsp_originals[DSP_AUTOGATE])(self, input, output, frames);
+}
+
+static int dsp_buffers_overlap(const float *a, const float *b, uint32_t frames) {
+    if (!a || !b) return 0;
+    uintptr_t x = (uintptr_t)a, y = (uintptr_t)b;
+    return (uint64_t)(x > y ? x - y : y - x) < (uint64_t)frames * sizeof(float);
+}
+
+static void hook_fx_common_chain(void *common, float *const *input, float *const *output, uint32_t frames) {
+    enum { MAX_SNAPSHOT_FRAMES = 2048 };
+    float dry_l[MAX_SNAPSHOT_FRAMES], dry_r[MAX_SNAPSHOT_FRAMES];
+    float *dry_pair[2] = {dry_l, dry_r};
+    int saved_dry = 0;
+    int aliases = input && output && frames &&
+        (input == output || dsp_buffers_overlap(input[0], output[0], frames) ||
+         dsp_buffers_overlap(input[0], output[1], frames) ||
+         dsp_buffers_overlap(input[1], output[0], frames) ||
+         dsp_buffers_overlap(input[1], output[1], frames));
+    if (__atomic_load_n(&sc_dsp_state()->ramp_remaining, __ATOMIC_ACQUIRE) > 0 &&
+        aliases && input[0] && input[1] && frames <= MAX_SNAPSHOT_FRAMES) {
+        memcpy(dry_l, input[0], (size_t)frames * sizeof(float));
+        memcpy(dry_r, input[1], (size_t)frames * sizeof(float));
+        saved_dry = 1;
+    }
+    ((dsp_process_fn)dsp_originals[DSP_COMMON])(common, input, output, frames);
+    // This is the input to the common tail; upstream FX may already have changed
+    // it. An unsaved alias (large block or concurrent re-arm) has no dry source.
+    float *const *dry = saved_dry ? dry_pair : (aliases ? NULL : input);
+    uint32_t generation = __atomic_load_n(&sc_dsp_state()->generation, __ATOMIC_ACQUIRE);
+    sc_dsp_fx_common_post_process(common, dry, output, frames);
+    // The header CAS compares only the count. A new 128-frame event can have
+    // the same count as the old one; never let that ABA discard the new ramp.
+    if (__atomic_load_n(&sc_dsp_state()->generation, __ATOMIC_ACQUIRE) != generation)
+        __atomic_store_n(&sc_dsp_state()->ramp_remaining, SC_DSP_RAMP_FRAMES, __ATOMIC_RELEASE);
+    // The helper sanitizes BEFORE interpolation. Opposite finite extremes can
+    // still overflow (wet - dry), so check the at-most-128 frames it may remix.
+    if (output) for (unsigned ch = 0; ch < 2; ch++) {
+        if (!output[ch]) continue;
+        for (uint32_t i = 0; i < frames && i < SC_DSP_RAMP_FRAMES; i++) {
+            if (!sc_dsp_finite_f32(output[ch][i]))
+                output[ch][i] = dry && dry[ch] && sc_dsp_finite_f32(dry[ch][i]) ? dry[ch][i] : 0.0f;
+        }
+    }
+}
+
+static const uint32_t dsp_event_prefix[] = {0xe1c021d0, 0xe590c00c, 0xe52db004};
+static const uint32_t dsp_autogate_prefix[] = {0xe3530000, 0xe1a02001, 0x0a000035};
+static const uint32_t dsp_common_prefix[] = {0xe16d42f4, 0xe1cd60f8};
+struct dsp_hook_site {
+    uint32_t offset;
+    void *hook;
+};
+static const struct dsp_hook_site dsp_hooks[DSP_HOOK_COUNT] = {
+    {0xd917b8, hook_fx_turn_off}, {0xd917e4, hook_fx_turn_on},
+    {0xd91894, hook_fx_switch}, {0xd918c0, hook_fx_change}, {0xd918ec, hook_fx_enable},
+    {0xd91810, hook_fx_mix}, {0xd91868, hook_fx_parameter},
+    {0x14fff54, hook_playback_nudge}, {0x153312c, hook_playback_tempo},
+    {0xe3a598, hook_autogate_process}, {0x15fa188, hook_fx_common_chain}
+};
+
+static const void *dsp_expected(unsigned slot, size_t *size) {
+    *size = slot == DSP_COMMON ? sizeof dsp_common_prefix : sizeof dsp_event_prefix;
+    return slot == DSP_COMMON ? dsp_common_prefix :
+        (slot == DSP_AUTOGATE ? dsp_autogate_prefix : dsp_event_prefix);
+}
+
+static void patch_bytes(uintptr_t entry, const void *bytes, size_t size, size_t page) {
+    uintptr_t start = entry - entry % page;
+    size_t span = ((entry + size + page - 1) / page * page) - start;
+    // Constructor only, before Engine threads start. Never continue with a
+    // partially installed group or an executable page left writable.
+    if (mprotect((void *)start, span, PROT_READ | PROT_WRITE)) _exit(127);
+    memcpy((void *)entry, bytes, size);
+    if (mprotect((void *)start, span, PROT_READ | PROT_EXEC)) _exit(127);
+    __builtin___clear_cache((char *)entry, (char *)entry + size);
+}
+
+static int install_dsp_hooks(uintptr_t base, size_t page) {
+    // edit_engine has already verified the main ELF BuildID. Treat these hooks
+    // as one group: if ANY original prefix differs, leave ALL DSP sites alone.
+    if (!base || !page) return 0;
+    for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
+        size_t size;
+        const void *expected = dsp_expected(i, &size);
+        if (memcmp((const void *)(base + dsp_hooks[i].offset), expected, size)) return 0;
+    }
+    for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
+        uintptr_t entry = base + dsp_hooks[i].offset;
+        if (i == DSP_AUTOGATE) {
+            // cmp r3,#0; mov r2,r1; BEQ -> absolute conditional load.
+            // Both loads preserve NZCV; +12 is nonzero, +0xe4 is zero frames.
+            const uint32_t code[] = {0xe3530000, 0xe1a02001, 0x059ff004, 0xe51ff004,
+                                    (uint32_t)(entry + 12), (uint32_t)(entry + 0xe4)};
+            dsp_originals[i] = rx_code(code, sizeof code, page);
+        } else {
+            uint32_t code[4];
+            memcpy(code, (const void *)entry, 8); // no PC-relative instructions
+            code[2] = 0xe51ff004;
+            code[3] = (uint32_t)(entry + 8);
+            dsp_originals[i] = rx_code(code, sizeof code, page);
+        }
+    }
+    for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
+        uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)dsp_hooks[i].hook, 0xe320f000};
+        patch_bytes(base + dsp_hooks[i].offset, jump, i == DSP_AUTOGATE ? 12 : 8, page);
+    }
+    fprintf(stderr, "engine-ui-hook: %u DSP guards/transitions installed (shared FX state)\n", DSP_HOOK_COUNT);
+    return 1;
 }
 
 static void prepare_config(uintptr_t base, size_t page) {
@@ -324,6 +489,7 @@ __attribute__((constructor)) static void edit_engine(void) {
         fprintf(stderr, "engine-ui-hook: applied 0x%x (%u bytes)\n", e->offset, e->size);
     }
     install_sqlite_hooks(base, page);
+    install_dsp_hooks(base, page);
 }
 
 // Unknown or unsafe values fall back to the English pack.

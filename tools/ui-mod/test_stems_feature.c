@@ -5,6 +5,211 @@ int hook_test_engine;
 #include <assert.h>
 #include <sqlite3.h>
 #include <sys/wait.h>
+#include <math.h>
+#include <float.h>
+
+static unsigned dsp_calls, dsp_seen_generation;
+static void *dsp_wanted_owner;
+static const void *dsp_wanted_event;
+
+static void mock_dsp_event(void *owner, const void *event) {
+    assert(owner == dsp_wanted_owner && event == dsp_wanted_event);
+    dsp_calls++;
+    dsp_seen_generation = sc_dsp_state()->generation;
+}
+
+static unsigned gate_zero_calls, gate_nonzero_calls;
+static float gate_seen_phase;
+static void mock_gate_nonzero(void *self, float *const *in, float *const *out, uint32_t frames) {
+    assert(frames > 0 && in == out); // displaced mov r2,r1 must still execute
+    memcpy(&gate_seen_phase, (char *)self + SC_DSP_AUTOGATE_PHASE_OFFSET, sizeof gate_seen_phase);
+    gate_nonzero_calls++;
+}
+static void mock_gate_zero(void *self, float *const *in, float *const *out, uint32_t frames) {
+    (void)self;
+    assert(frames == 0 && in == out);
+    gate_zero_calls++;
+}
+
+static int common_bad_output;
+static void mock_common_process(void *self, float *const *in, float *const *out, uint32_t frames) {
+    assert(self == dsp_wanted_owner && in && out);
+    for (int ch = 0; ch < 2; ch++)
+        for (uint32_t i = 0; i < frames; i++)
+            out[ch][i] = common_bad_output == 2 ? FLT_MAX :
+                (common_bad_output ? (i & 1 ? INFINITY : NAN) : 1.0f);
+}
+
+// Execute the actual ARM entry patches and displaced prologues, followed by
+// small ABI-correct native tails into mocks. No vendor DSP needs to be emulated.
+static void test_dsp_hooks(void) {
+    size_t page = (size_t)sysconf(_SC_PAGESIZE), image_size = 0x1600000;
+    char *image = mmap(NULL, image_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(image != MAP_FAILED);
+    const uint32_t dispatcher[] = {
+        0xe1c021d0, 0xe590c00c, 0xe52db004, 0xe28db000, 0xe3130001, 0xe08c00c3,
+        0x179c30c3, 0x17932002, 0xe28bd000, 0xe49db004, 0xe12fff12
+    };
+    for (unsigned i = 0; i < DSP_AUTOGATE; i++)
+        memcpy(image + dsp_hooks[i].offset, dispatcher, sizeof dispatcher);
+    memcpy(image + dsp_hooks[DSP_AUTOGATE].offset, dsp_autogate_prefix, sizeof dsp_autogate_prefix);
+    uint32_t jump_nonzero[] = {0xe51ff004, (uint32_t)(uintptr_t)mock_gate_nonzero};
+    uint32_t jump_zero[] = {0xe51ff004, (uint32_t)(uintptr_t)mock_gate_zero};
+    memcpy(image + dsp_hooks[DSP_AUTOGATE].offset + 12, jump_nonzero, sizeof jump_nonzero);
+    memcpy(image + dsp_hooks[DSP_AUTOGATE].offset + 0xe4, jump_zero, sizeof jump_zero);
+    // Undo the real common-chain strd prologue before tail-calling a C mock.
+    const uint32_t common[] = {0xe16d42f4, 0xe1cd60f8, 0xe1cd40d0, 0xe1cd60d8,
+                              0xe28dd024, 0xe51ff004, (uint32_t)(uintptr_t)mock_common_process};
+    memcpy(image + dsp_hooks[DSP_COMMON].offset, common, sizeof common);
+    // Every checked byte, including byte 12 of a dispatcher, gates the WHOLE group.
+    for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
+        size_t size;
+        dsp_expected(i, &size);
+        image[dsp_hooks[i].offset + size - 1] ^= 1;
+        assert(!install_dsp_hooks((uintptr_t)image, page));
+        image[dsp_hooks[i].offset + size - 1] ^= 1;
+        for (unsigned j = 0; j < DSP_HOOK_COUNT; j++) {
+            const void *expected = dsp_expected(j, &size);
+            assert(!memcmp(image + dsp_hooks[j].offset, expected, size));
+            assert(!dsp_originals[j]);
+        }
+    }
+    assert(!mprotect(image, image_size, PROT_READ | PROT_EXEC));
+    __builtin___clear_cache(image, image + image_size);
+    assert(install_dsp_hooks((uintptr_t)image, page));
+    assert(!install_dsp_hooks((uintptr_t)image, page)); // repeat install leaves original stubs intact
+    for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
+        uint32_t *at = (void *)(image + dsp_hooks[i].offset);
+        assert(at[0] == 0xe51ff004 && at[1] == (uint32_t)(uintptr_t)dsp_hooks[i].hook);
+        if (i == DSP_AUTOGATE) assert(at[2] == 0xe320f000);
+    }
+    memset(sc_dsp_state(), 0, sizeof *sc_dsp_state());
+    uint32_t owner[8] = {0}, handler[6] = {0};
+    unsigned char raw_event[0x40] = {0};
+    // Deliberately unaligned payload; guards must use memcpy rather than casts.
+    void *event = raw_event + 1;
+    handler[3] = (uintptr_t)owner;
+    handler[4] = (uintptr_t)mock_dsp_event;
+    dsp_wanted_owner = owner;
+    dsp_wanted_event = event;
+    for (unsigned i = 0; i < DSP_MIX; i++) {
+        unsigned before = dsp_calls, gen = sc_dsp_state()->generation;
+        ((dsp_event_fn)(image + dsp_hooks[i].offset))(handler, event);
+        assert(dsp_calls == before + 1 && dsp_seen_generation == gen + 1);
+        assert(sc_dsp_state()->ramp_remaining == SC_DSP_RAMP_FRAMES);
+    }
+    // Preserve the dispatcher's virtual target resolution and signed this adjustment.
+    uint32_t vtable[] = {(uintptr_t)mock_dsp_event};
+    owner[0] = (uintptr_t)vtable; handler[4] = 0; handler[5] = 1;
+    ((dsp_event_fn)(image + dsp_hooks[DSP_SWITCH].offset))(handler, event);
+    handler[3] = (uintptr_t)(owner + 1); handler[4] = (uintptr_t)mock_dsp_event; handler[5] = (uint32_t)-8;
+    ((dsp_event_fn)(image + dsp_hooks[DSP_SWITCH].offset))(handler, event);
+    handler[3] = (uintptr_t)owner; handler[5] = 0;
+
+    const double values[] = {NAN, INFINITY, -INFINITY, 0.0, -0.0, -0.5, 0.5};
+    for (unsigned i = DSP_MIX; i <= DSP_TEMPO; i++) {
+        dsp_event_fn call = (void *)(image + dsp_hooks[i].offset);
+        size_t offset = i == DSP_MIX ? 0x0c : (i == DSP_PARAMETER ? 0x20 : 0x08);
+        for (size_t j = 0; j < sizeof values / sizeof *values; j++) {
+            double value = values[j]; float f = (float)value;
+            if (i < DSP_NUDGE) memcpy((char *)event + offset, &f, sizeof f);
+            else memcpy((char *)event + offset, &value, sizeof value);
+            unsigned before = dsp_calls;
+            call(handler, event);
+            int accepted = sc_dsp_finite_f64(value) && (i != DSP_TEMPO || value > 0.0);
+            assert(dsp_calls == before + (unsigned)accepted);
+        }
+        unsigned before = dsp_calls;
+        call(handler, NULL);
+        assert(dsp_calls == before);
+    }
+    puts("ARM DSP install: all 11 prefix guards, repeat install, event ABI/virtual/adjusted this, finite controls: PASS");
+
+    unsigned char gate[0x200] = {0};
+    const float phase = 0.75f;
+    memcpy(gate + SC_DSP_AUTOGATE_PHASE_OFFSET, &phase, sizeof phase);
+    float *empty[2] = {NULL, NULL};
+    dsp_process_fn gate_call = (void *)(image + dsp_hooks[DSP_AUTOGATE].offset);
+    gate_call(gate, empty, NULL, 1);
+    assert(gate_seen_phase == phase);
+    sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_SWITCH);
+    gate_call(gate, empty, NULL, 1);
+    assert(gate_seen_phase == 0.0f);
+    memcpy(gate + SC_DSP_AUTOGATE_PHASE_OFFSET, &phase, sizeof phase);
+    gate_call(gate, empty, NULL, 1);
+    assert(gate_seen_phase == phase); // only clear once per generation
+    gate_call(gate, empty, NULL, 0);
+    assert(gate_nonzero_calls == 3 && gate_zero_calls == 1);
+    puts("ARM AutoGate: phase reset before original, one clear per generation, relocated zero/nonzero branches: PASS");
+
+    enum { N = 2049 };
+    static float left[N], right[N], out_l[N], out_r[N];
+    float *in[2] = {left, right}, *out[2] = {out_l, out_r};
+    dsp_process_fn process = (void *)(image + dsp_hooks[DSP_COMMON].offset);
+    dsp_wanted_owner = owner;
+    // Separate, identical pointer arrays, L alias, R-only alias and crossed alias.
+    for (unsigned mode = 0; mode < 5; mode++) {
+        memset(left, 0, sizeof left); memset(right, 0, sizeof right);
+        out[0] = mode == 2 ? left : (mode == 4 ? right : out_l);
+        out[1] = mode == 3 ? right : (mode == 4 ? left : out_r);
+        sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_TURN_ON);
+        float **dest = mode == 1 ? in : out;
+        process(owner, in, dest, 160);
+        for (unsigned ch = 0; ch < 2; ch++)
+            for (unsigned i = 0; i < 160; i++)
+                assert(dest[ch][i] == (i < 128 ? (float)i / 128.0f : 1.0f));
+        assert(sc_dsp_state()->ramp_remaining == 0);
+    }
+    // Partially overlapping buffers need a snapshot too, including the right channel.
+    memset(left, 0, sizeof left); memset(right, 0, sizeof right);
+    out[0] = left + 1; out[1] = right + 1;
+    sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_CHANGE);
+    process(owner, in, out, 128);
+    assert(out[0][0] == 0.0f && out[1][127] == 127.0f / 128.0f);
+    // An in-place block beyond the bounded snapshot size is sanitized only.
+    sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_CHANGE);
+    process(owner, in, in, N);
+    assert(left[0] == 1.0f && sc_dsp_state()->ramp_remaining == 128);
+    memset(left, 0, sizeof left); memset(right, 0, sizeof right);
+    process(owner, in, in, 2048);
+    assert(left[0] == 0.0f && left[127] == 127.0f / 128.0f && left[128] == 1.0f);
+    assert(!sc_dsp_state()->ramp_remaining);
+    // A short block resumes the same ramp in the next call.
+    memset(left, 0, sizeof left); memset(right, 0, sizeof right);
+    out[0] = out_l; out[1] = out_r;
+    sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_CHANGE);
+    process(owner, in, out, 64);
+    assert(out_l[0] == 0.0f && out_r[63] == 63.0f / 128.0f);
+    process(owner, in, out, 64);
+    assert(out_l[0] == 0.5f && out_r[63] == 127.0f / 128.0f);
+    process(owner, in, out, 0);
+    assert(!sc_dsp_state()->ramp_remaining);
+    common_bad_output = 1;
+    for (unsigned i = 0; i < 160; i++) { left[i] = 0.25f; right[i] = 0.5f; }
+    process(owner, in, out, 160);
+    assert(out_l[0] == 0.25f && out_r[1] == 0.5f);
+    left[0] = NAN; right[1] = INFINITY;
+    process(owner, in, out, 160);
+    assert(out_l[0] == 0.0f && out_r[1] == 0.0f);
+    process(owner, in, in, 160);
+    assert(left[0] == 0.0f && right[1] == 0.0f);
+    common_bad_output = 0;
+    // NaN/Inf sanitation must also cover overflow CREATED by the ramp itself.
+    // Opposite finite extremes overflow the helper's (wet - dry) intermediate.
+    common_bad_output = 2;
+    for (unsigned i = 0; i < 160; i++) left[i] = right[i] = -FLT_MAX;
+    sc_dsp_fx_mark_transition(owner, SC_DSP_FX_TRANSITION_TURN_ON);
+    process(owner, in, out, 160);
+    for (unsigned i = 0; i < 160; i++)
+        assert(sc_dsp_finite_f32(out_l[i]) && sc_dsp_finite_f32(out_r[i]));
+    common_bad_output = 0;
+    for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
+        assert(!munmap(dsp_originals[i], page)); dsp_originals[i] = NULL;
+    }
+    memset(sc_dsp_state(), 0, sizeof *sc_dsp_state());
+    assert(!munmap(image, image_size));
+    puts("ARM FX common tail: ABI/prologue replay, in/out/overlap snapshots, 128-frame ramp, 2048 bound, finite output: PASS");
+}
 
 __attribute__((naked)) static void invoke_stub(void *feature __attribute__((unused)),
     void *frame __attribute__((unused)), void *stub __attribute__((unused)),
@@ -449,11 +654,18 @@ static void test_patch_files(const char *filename) {
         image[e->offset] ^= 0xff;
         assert(edit_state((uintptr_t)image, e) == 0);
     }
+    for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
+        size_t bytes;
+        const void *expected = dsp_expected(i, &bytes);
+        assert(dsp_hooks[i].offset + bytes <= (size_t)size);
+        assert(!memcmp(image + dsp_hooks[i].offset, expected, bytes));
+    }
     free(image);
     printf("Stock/patched/mismatched edit classification: %s PASS\n", filename);
 }
 
 int main(int argc, char **argv) {
+    test_dsp_hooks();
     test_stems();
     test_config();
     test_sqlite();

@@ -65,6 +65,28 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 3. 若为原生 Engine U 盘（含 `Engine Library/Database2/m.db`），同步调用 `/usr/local/bin/engine-guardian --heal-mount <mount> --data-only` 完成链表与数据自愈；
 4. 退盘（`mnt_context_umount`）前自动对 `overlayfs` 子挂载点执行 `umount2(..., MNT_DETACH)`，杜绝退盘报 `EBUSY`。
 
+### 3. 闭源 C++ DSP 实时平滑与参数守卫（`tools/ui-mod/dsp_smooth.h`）✅
+纯 C11 头文件：零 `malloc`、零锁，共享状态只经 `__atomic` 读写，可在 96 kHz `SCHED_RR 49` 音频回调中调用。单元测试 `tools/ui-mod/test_dsp_smooth.c`（`-Wall -Wextra -Werror`，另以 `-ffast-math` + ASan/UBSan 与 `arm-linux-gnueabihf-gcc` 验证）。**状态（2026-11-04）：已接入 `libengine-ui-hook.so`（11 个闭源 C++ 入口跳板），通过 ARM 交叉编译 / QEMU 测试与 SC5000 实机加载验证。** 实机部署的 hook SHA-256 为 `f92f233c910da92c58007b618640f274ce137d95f0e4a69a635c5397f3f27e42`，重启 Engine 后 11 个跳板全部打入，ALSA `card2/pcm0p/sub0` 稳定 `RUNNING`（`avail_max` 不超过 450 帧单周期）、`NRestarts=0`、0 XRUN。各缺陷的听感复现对比尚未逐项完成。
+
+| 跳板入口（ELF 地址） | 调用 | 作用 |
+|---|---|---|
+| `ChannelDJFx` TurnOff `0xd917b8` / TurnOn `0xd917e4` / EffectSwitch `0xd91894` / EffectChange `0xd918c0` / EnabledChanged `0xd918ec` | `sc_dsp_fx_mark_transition` | 武装 128 帧微斜坡并递增 generation |
+| `ChannelDJFx` Mix `0xd91810` / Parameter `0xd91868` | `sc_dsp_finite_f32` | 丢弃含 NaN/Inf 的控制事件（不改写成 0，避免变成合法的零值事件） |
+| `Effects::AutoGate::process` `0xe3a598` | `sc_dsp_autogate_pre_process` | FX 切换后清零一次 AutoGate 相位 |
+| FX 公共混合尾链 `0x15fa188` | `sc_dsp_fx_common_post_process` | NaN/Inf 净化 + 干→湿微斜坡 |
+| `PlaybackModifier::Nudge` `0x14fff54` | `sc_dsp_finite_f64` | 丢弃非有限 Nudge 值 |
+| `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` | `sc_dsp_finite_f64` | 只接受正的有限速度值 |
+
+> `ElastiqueFader`（`0x1534398`）经反汇编确认：`r1` 是通道数，原厂已按 `step = 1/(rate × 0.001)` 逐帧步进，不存在「每周期一级台阶」，因此**未挂载** `sc_dsp_fader_smooth_block`（保留在库中备用）。
+
+| API | 作用 | 对应缺陷 |
+|---|---|---|
+| `sc_dsp_finite_f32/f64`、`sc_dsp_read_f32/f64` | 按位判断有限值（`-ffast-math` 下不被优化掉）；非对齐安全读取控制参数，NaN/Inf 读作 0 | `H154` |
+| `sc_dsp_fx_mark_transition` | FX TurnOn / TurnOff / Switch / Change / Enable 时递增原子 generation，并武装 128 帧（约 1.33 ms @ 96 kHz）微斜坡 | `H145` `H163` `H164` |
+| `sc_dsp_autogate_pre_process` | 8 槽实例表记录每个 AutoGate 已同步的 generation；发生过切换则把 `+0x1e8` 相位清零一次 | `LA-020` `H153` |
+| `sc_dsp_fx_common_post_process` | 双声道 FX 混合尾链：输出 NaN/Inf 换成有限干声或静音；斜坡期间逐帧从干声过渡到处理后信号；原地处理只做净化 | `H154` `H145` `H163` `H164` |
+| `sc_dsp_fader_smooth_block` | 交错立体声块内逐帧线性插值淡化权重，左右声道同权（**未挂载**：原厂 Fader 已逐帧步进） | — |
+
 ---
 
 ## 三、原厂 QML 前端补丁完整清单 (`tools/ui-mod/build_packs.py`)
@@ -86,6 +108,15 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | `Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml` | 自动清除 `deviceEjectedImproperly` 标志并静默关闭「设备未安全弹出」阻断弹窗 |
 | `Views/ControlCenter/Tabs/Preferences/Entries/LoadPreferencesDialog.qml` | 插入带 `user.profile` 的他人 U 盘时自动选 `No`，保留碟机自身偏好设置，不弹窗打断演出 |
 | `Items/MessageBoxes/RekordBoxImportDialog.qml` | 自动接管 `onRequestChanged`（允许 NFS 并触发设备自动选择后直接返回），彻底屏蔽原厂缓慢且易损毁数据库的机内 Rekordbox 导入弹窗 |
+| `StateNodes/States/SourceScreenState.qml` & `Views/BrowserSource/SourceScreen.qml` ✅ | **`CF008`**：Back / Forward 由无人处理的 `/Qml/CloseCurrentDialog` 改为来源窗口实际监听的 `/GUI/CloseDialogs`；来源窗口支持方向键、Enter 与 Escape |
+| `Views/BrowseView/Components/TrackList.qml` & `BreadcrumbView/BreadcrumbStackView.qml` ✅ | **`CF009` / `CF010` / `H143`**：切视图或 Instant Double 后用 `Qt.callLater` 在下一轮事件循环恢复列表与面包屑栈焦点；有弹窗或文本输入（屏幕键盘）占用焦点时不抢 |
+| `Views/Streaming/CloudUtilityDialog.qml` ✅ | **`CF013`**：原生云盘登出后「Account」按钮显示 LOG IN 并调用 `showAddAccountDialog` 重新授权。仅当 `loggedIn === false` 时切换；若该 provider 类型没有 `loggedIn` 属性，保持原厂登出行为 |
+| `Views/Streaming/StreamingLoginDialog.qml` & `StreamingPairingDialog.qml` ✅ | **`H166`**：关闭登录窗口时，若该平台未登录且仍为当前选中平台，先 `cancelPairing()` 再恢复之前的音源；配对窗口只取消属于当前平台的配对 |
+| `Views/SelectPlaylistDeckMenu/SelectPlaylistDeckMenuLayoutBase.qml` ✅ | **`RA001`**：Load Playlist 菜单关闭（`onShownChanged`）时同步关闭 `selectDeck` 选碟机状态 |
+| `Items/Utils/TrackDisplayText.qml` & `Views/MainView/ArtistSong.qml` ✅ | **`RA008`**：主界面曲名 / 艺人遵循 `/Client/Preferences/HideTitleArtist`，切换视图后保持隐藏 |
+| 全部 QML（`translate()` + `i18n.tsv`） | 翻译范围扩展到 `buttonText` 与 `value` 属性及反引号模板字符串（如 `` `Version: ${version}` `` → `版本：${version}`）；补齐设置 / 关于页遗漏词条（Options、Legal、Factory Reset、Send Anonymous Usage Statistics 等） |
+
+> ✅ 标记的 6 组原厂缺陷修复已在原厂 5.0.4 QML 上逐个核对锚点与引用的属性 / C++ 方法（`OverlayCore.shown`、`root.dialogOpen`、`root.messageBoxOpen`、`showAddAccountDialog`、`cancelPairing` 等），并于 2026-11-04 在 SC5000 实机部署：英 / 简 / 繁三套正式界面包轮流加载，Engine 日志无任何 QML `unavailable` / `Invalid` / 引用错误，修补文件零报错。各缺陷的交互复现测试尚未逐项完成。
 
 ---
 
@@ -115,6 +146,13 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 - **`cmd/stems-processor` + `cmd/sc5000-stemsd` + `cmd/sc5000-relay` + `tools/stems/worker.py` (`internal/stems`)**：
   - 碟机端 `stems-processor` 伪装为原厂分轨器，采用本地流水线即时应答 Engine `action=block`，并通过 `X-Stems-Framing: 2` 将输入块转为 `int16` 流式上传；
   - 远端 `sc5000-stemsd` 驱动 `worker.py`（基于 2048 点 STFT 与一维拼接中值滤波的 4 轨分离器：Vocals / Melody / Bass / Drums），将前三轨以 `int16` 帧流式回传，碟机端用原始 `float32` 减去前三轨无损还原第 4 轨。
+  - **GitHub Issue #1：零配置局域网家用电脑算力卸载**：
+    - 三级回退：已配置云端中继 → 局域网家用电脑 → 碟机 `CPU3` 本机 `LocalRender`。只有前一级连接都建立不起来（尚未读取 Engine 任何数据）时才换下一级，同一会话绝不拆到两台机器；
+    - 发现：`internal/stems/discovery.go` + `mdns.go`（纯标准库）。碟机同时发送 UDP 17891 广播探针 `ENGINEX_STEMS_DISCOVER_V1` 与 mDNS `_enginex-stems._tcp.local.` PTR 查询，350 ms 内取最先应答者；`sc5000-stemsd` 应答 JSON 信标与 PTR / SRV / TXT / A 记录（`dns-sd -B`、`avahi-browse` 也能看到）。服务端只应答局域网来源，避免被用作反射放大；
+    - 缓存与状态：找到的电脑写入 `/data/sc5000-custom/state/stems-lan.json`，下次先快速 `GET /healthz` 探活；网页控制台 `GET /api/relay` 的 `lanStems` 字段显示电脑名称、后端与是否在线；
+    - 安全：家用电脑以 `-token-file=` 免密运行，只接受局域网来源；碟机绝不把中继密码发给自动发现的电脑；忙碌的电脑被跳过；
+    - 后端：`worker.py --backend auto|hpss|demucs`（或 `ENGINEX_STEMS_BACKEND`）。`htdemucs` 使用 CUDA / Apple MPS / CPU，按 10 秒分段、1 秒线性交叉淡化，旋律仍取余量，传输协议不变；`auto` 未安装 demucs 时回退 `hpss`；`sc5000-stemsd` 启动时探测一次后端，旧版 `worker.py` 不支持探测时记录警告并按 `hpss` 运行；
+    - 一键启动：`tools/stems/run-home-worker.sh`（macOS / Linux）与 `run-home-worker.ps1`（Windows，NVIDIA 显卡自动安装 CUDA 版 torch）。
 
 ### 3. Linux 系统服务与调优脚本 (`rootfs-overlay/`)
 - `usr/local/bin/sc5000-perf-tune`：每次 Engine 启动后执行，设置 CPU `1.2GHz` 下限、GPU `simple_ondemand`、内核 `vm`/`fs` 参数、保留 `bfq` 调度器、关闭 USB/SATA 休眠 (`autosuspend=-1`, `link_power_management_policy=max_performance`)、将 `workqueue/cpumask` 设为 `6`（避开 `CPU0`）、并将 `ffb20000` (ALSA) 锁 `CPU0` (`FIFO 99`)、`ffa30000` (GPU) 锁 `CPU1`、`ehci`/`xhci`/`dwc2`/`ff500000`/`ff540000`/`dwmmc`/`sata`/`eth0` 锁 `CPU2`。
@@ -130,8 +168,8 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 ### 状态图例
 - ✅ **已根治 / 已防御（本系统重构解决）**：由本项目的 C Hook、Go 服务、QML 补丁或内核调优直接修复并通过测试。
 - 🟢 **基线已含 / 架构已绕开**：官方 5.0.4 底包已修复，或因属于电脑端 Engine DJ Desktop 缺陷而被我们的机内 `rb-bridge` / `stream-sync` 架构彻底绕开。
-- ⚠️ **待增强（外围可修，共 8 项）**：目前仍保持原厂行为，但可通过追加轻量 C Hook / Go / QML 规则进一步修补。
-- ❌ **原厂闭源核心限制（C++ 音频 DSP / 硬件 MCU，共 24 项）**：位于 `/usr/Engine/Engine` 闭源 DSP 效果器算法、Sync 状态机或转盘电机 MCU 固件内，为保障实时音频安全未做强行二进制篡改。
+- ⚠️ **待增强（外围可修）**：目前仍保持原厂行为，但可通过追加轻量 C Hook / Go / QML 规则进一步修补。
+- ❌ **原厂闭源核心限制（C++ 音频 DSP / 硬件 MCU）**：位于 `/usr/Engine/Engine` 闭源 DSP 效果器算法、Sync 状态机或转盘电机 MCU 固件内，为保障实时音频安全未做强行二进制篡改。
 
 ---
 
@@ -145,10 +183,12 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | **CF004 / EOS-04** | SC5000 5.0.1 | 列表预听很慢；大库展开歌单卡顿 | ✅ **已防御** | `pkg/dbhealer/chains.go` (`materialize`) 将耗时 O(N²) 的递归视图 `PlaylistPath` 物化为带索引的 `MaterializedPlaylistPath` 表 + CPU 保底 1.2GHz |
 | **CF005** | SC5000 5.0.1+ | Wi-Fi 反复断开或感叹号 | ✅ **已根治** | `rootfs-overlay/usr/lib/modprobe.d/brcmfmac.conf` (`roamoff=1`) + `sc5000-debloat` 关闭 `wlan0 power_save`、保留 `ipv4.connman.inmusicbrands.com` 在线检测并限制 DHCP 重试 |
 | **CF006** | SC5000 5.0.1 | 触盘 Scratch 偶发不响应但 Pitch 仍有效 | ✅ **已缓解** | `engine_ui_hook.c` 将所有后台线程移出 `CPU1`（`EMain` UI/触盘事件核）并消除 SQLite 主线程 `fsync` 停顿 |
-| **CF007 / CF008** | SC6000 5.0.4 | Instant Doubles 后 Pitch 中位亮箭头；来源窗口不能用旋钮切换 | ⚠️ **还在** | 原厂 QML 逻辑问题，可在 `build_packs.py` 中追加修补 |
-| **CF009 / CF010 / H143** | PRIME GO / SC5000 5.x | 分屏曲库旋钮不能逐曲滚动；用几首或 Instant Double 后 Back/选曲旋钮失灵 | ⚠️ **还在** | 原厂 QML `StackView` 切换偶发丢焦点，可在 `build_packs.py` 追加 `forceActiveFocus()` 修复 |
-| **CF011 / RA003** | PRIME GO 4.2–5.x | Pitch Bend 按钮偶发无效；右 Pitch 推子速度范围轻微波动 | ❌ **硬件/MCU** | 位于 PRIME GO 面板控制器 MCU 采样层 |
-| **CF013** | SC6000 5.0.1 | 云服务解绑后进不了重新授权界面 | ✅ **流媒体已解决 / ⚠️ 原生云盘还在** | 我们的网易云/Spotify/Deezer/SoundCloud 在音源列表右侧常驻「切换账号 / 扫码登录」按钮，随时可重绑；原生 Dropbox 可在 `CloudDialog.qml` 修补 |
+| **CF007** | SC6000 5.0.4 | Instant Doubles 后 Pitch 中位亮箭头 | ⚠️ **还在** | 原厂 QML 逻辑问题，可在 `build_packs.py` 中追加修补 |
+| **CF008** | SC6000 5.0.4 | 来源窗口不能用旋钮切换、Back 关不掉 | ✅ **已实机部署** | `build_packs.py` (`legacy_qml_fixes`)：`SourceScreenState.qml` Back / Forward 改发 `/GUI/CloseDialogs`；`SourceScreen.qml` 增加方向键 / Enter / Escape 导航 |
+| **CF009 / CF010 / H143** | PRIME GO / SC5000 5.x | 分屏曲库旋钮不能逐曲滚动；用几首或 Instant Double 后 Back/选曲旋钮失灵 | ✅ **已实机部署** | `TrackList.qml` / `BreadcrumbStackView.qml`：用 `Qt.callLater` 在下一轮事件循环恢复焦点，弹窗或屏幕键盘占用时不抢 |
+| **CF011** | PRIME GO 4.2–5.x | Pitch Bend 按钮偶发无效 | ✅ **输入守卫已实机部署 / ❌ MCU 采样层仍属硬件** | `PlaybackModifier::Nudge` `0x14fff54` 跳板丢弃非有限 Nudge 值，防止异常控制值进入播放器；面板按键本身的采样问题位于 PRIME GO 控制器 MCU |
+| **RA003** | PRIME GO 4.2–5.x | 右 Pitch 推子速度范围轻微波动 | ❌ **硬件/MCU** | 位于 PRIME GO 面板控制器 MCU 采样层 |
+| **CF013** | SC6000 5.0.1 | 云服务解绑后进不了重新授权界面 | ✅ **流媒体已解决 / 原生云盘已实机部署** | 网易云/Spotify/Deezer/SoundCloud 在音源列表右侧常驻「切换账号 / 扫码登录」按钮；原生云盘：`CloudUtilityDialog.qml` 在 `loggedIn === false` 时显示 LOG IN 并调用 `showAddAccountDialog` |
 | **CF014 / LC030** | SC6000M 5.0.4 | 马达运行轻微漂移；暂停微动转盘向前跳并爆裂声 | ❌ **硬件/MCU** | 位于 M 系列无刷电机控制板固件与闭源扭矩环 |
 | **CF017 / CF018 / H134 / LA-040** | PRIME 4 4.3.4–5.x | 内置 SATA SSD 演出中偶尔休眠消失导致所有 Deck 变无声；电脑模式误报需格式化 | ✅ **已根治** | 查明 PRIME 4 内置 SATA 走 JMicron JMS578 (`152d:0578`) USB 桥接：`sc5000-perf-tune` 强制 `usbcore.autosuspend=-1`、`scsi_host link_power_management_policy=max_performance`、`sd* power/control=on` 及 `autosuspend_delay_ms=-1` |
 | **GL-011** | PRIME 4 5.0.4 (`Seabass #73`) | 接受「更新 Rekordbox 曲库」提示后，21/21 测试未真正导入新增歌曲 | ✅ **已根治** | 屏蔽原厂失效的机内更新提示；`pkg/bridge/bridge.go` (`ConvertAtMount`) 检测 `export.pdb`/`exportLibrary.db`/`exportOneLibrary.db` 变更戳记，在 `tmpfs` 上保留 `.rb-bridge-state.db` 秒级完成增量新歌与歌单导入 (`TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011`) |
@@ -168,13 +208,16 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | **CF049** | SC6000 4.3.4+ | 特定 AIFF 经机器导入 Rekordbox 后直接变 500 BPM 且不能播放 | ✅ **已根治** | `pkg/compat/audio.go` 新增 `aiffHeader` 与 `extended80` 精确解析 `FORM....AIFF/AIFC` 头；`pkg/enginedb/sync.go` 在 Fast/Full 双路径自动清除 `>=499.5` BPM 的畸形钳位网格 (`TestCF049Bogus500BPMAndGL010InformationGuard`) |
 | **H146 / H173 / H174** | PRIME 4 / 全系 4.x | 搜索筛选过慢；大量 Stems 列表加载慢；两存储源切换慢 | ✅ **已根治** | `engine_ui_hook.c` 为所有 SQLite 连接注入 8MB 页缓存与内存临时表 (`temp_store=MEMORY`) + `dbhealer` 补充 `index_PlaylistEntity_listId_nextEntityId` 与 `index_PlaylistEntity_trackId` 索引并物化 `PlaylistPath` |
 | **H147 / H148 / H155 / H171 / H175** | 全系 4.x | 联网浏览空白行；串流下载完未立即上 Deck；SoundCloud 列表与 AAC/HLS 兼容 | ✅ **已根治** | `pkg/webui/tidal_gateway.go` 对未实现分类统一返回合法空分页 JSON（杜绝解析报错与空白卡死）；`pkg/providers/soundcloud.go` 原生支持分段流拼接与无损/320k 切换 |
-| **H166** | 全系 4.x | 取消流媒体登录后 `Fetching Track Info` 遮罩不消失 | ⚠️ **还在** | 可在 `build_packs.py` 的 `StreamingLoginDialog.qml` 取消回调中补调 `cancelDownload()` |
+| **H166** | 全系 4.x | 取消流媒体登录后 `Fetching Track Info` 遮罩不消失 | ✅ **已实机部署** | `StreamingLoginDialog.qml` 关闭时对未登录的当前平台调用 `cancelPairing()`；`StreamingPairingDialog.qml` 只取消属于当前平台的配对 |
 | **H149 / R012** | SC6000 / 全系 4.x | 移动 Loop 区域短暂断音；快速连续 Beat Jump 可听停顿 | ✅ **已缓解** | SQLite `synchronous=NORMAL` 消除改 Loop 时的磁盘 `fsync` 阻塞 + CPU 1.2GHz 保底 |
 | **H150 / H151** | 全系 4.x | 首次打开 Grid 编辑器无波形；波形每 20 秒卡一下 | ✅ **已防御** | 砍掉每 20 秒刷盘的 `posthog.db` / `events.db` 遥测与 `J:I:Takingfreez` 探针抢占 + GPU 独立 `CPU1` 中断亲和性 |
-| **RA002** | 全系 4.0–5.0.4 | 点击设置里的 Sync Time 系统时钟同步出现主输出杂音、连点使音乐变慢 | ⚠️ **还在（可修）** | 原因已查明：`TimeDateController::activateNtpService()` 触发 `CLOCK_REALTIME` 步进跳变冲击 ALSA 时间戳与 PLL；可通过 Hook `snd_pcm_sw_params` 强制 `SND_PCM_TSTAMP_TYPE_MONOTONIC` 根除 |
-| **H145 / H163 / H164 / H172 / H153 / H154 / RA012** | PRIME 4 / 全系 4.x | 启用 FX 换通道爆音、开关 FX 爆音、Reverse Reverb 忽略 Key Lock 音高异常、Echo/Wash 强度突跳 | ❌ **闭源 DSP** | 位于 `/usr/Engine/Engine` 内部闭源 C++ 效果器 DSP 状态机 |
+| **RA002** | 全系 4.0–5.0.4 | 点击设置里的 Sync Time 系统时钟同步出现主输出杂音、连点使音乐变慢 | ✅ **已防御** | `TimeDateController::activateNtpService()` 触发 `CLOCK_REALTIME` 步进跳变冲击 ALSA 时间戳；`engine_ui_hook.c` 拦截 `snd_pcm_sw_params`，把次级 ALSA 路径的 `tstamp_type == 0` 升级为 `MONOTONIC_RAW` |
+| **H145 / H163 / H164 / H153 / H154** | PRIME 4 / 全系 4.x | 启用 FX 换通道爆音、开关 FX 爆音、AutoGate 残留、参数异常 | ✅ **已实机部署 / 已防御** | `dsp_smooth.h` 经 `libengine-ui-hook.so` 11 个跳板接入（见第二章第 3 节）：FX 切换 128 帧微斜坡、AutoGate 相位按 generation 复位、FX 混合尾链 NaN/Inf 净化、Mix / Parameter 事件有限值守卫；SC5000 实机加载验证，0 XRUN |
+| **H172** | 全系 4.x | Echo/Wash 强度突跳 | ❌ **闭源 DSP** | 位于效果器内部算法，本版跳板未覆盖 |
+| **RA012** | 全系 4.x | Reverse Reverb 忽略 Key Lock 音高异常 | ❌ **闭源 DSP** | 位于 `/usr/Engine/Engine` 内部闭源 C++ 效果器 DSP 状态机 |
 | **RA004 / RA006 / GL-030 / GL-031 / CF024** | SC6000 / GO 4.x | 切层推盘 BPM 翻倍/减半、两台机器 Phase Meter 偏移、Auto Loop 多次循环相位微偏 | ✅ **数据库侧已修 / ❌ 状态机在闭源层** | `pkg/enginedb/performance.go` (`beatPositions`) 与 `pkg/dbhealer/performance.go` (`alignLoops`) 已消除导入拍线与 Loop 的采样舍入漂移；运行期多机 Sync 状态机位于闭源层 |
-| **RA001 / RA008 / RA010 / RA013** | PRIME GO / PRIME 4 | GO 退出 Load Playlist 后 Pad 灯异常、Hide Title 切视图失效；PRIME 4 触屏载歌到 Deck 3/4 限制 | ✅ **Stems/Jog 已适配 4 通道 / ⚠️ 其余在 QML** | `build_packs.py` (`scDeckList`) 已全面支持 Deck 1–4 |
+| **RA001 / RA008** | PRIME GO | 退出 Load Playlist 后 Pad 灯异常；Hide Title 切视图失效 | ✅ **已实机部署** | `SelectPlaylistDeckMenuLayoutBase.qml` 菜单关闭时同步关闭 `selectDeck`；`TrackDisplayText.qml` / `ArtistSong.qml` 主界面遵循 `HideTitleArtist` |
+| **RA010 / RA013** | PRIME 4 | 触屏载歌到 Deck 3/4 限制 | ✅ **Stems/Jog 已适配 4 通道 / ⚠️ 其余在 QML** | `build_packs.py` (`scDeckList`) 已全面支持 Deck 1–4 |
 
 ---
 
@@ -189,7 +232,9 @@ Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会�
 | **H129 / H132 / EOS-01 / EOS-02** | 1.x–3.x | 大数据库误报 Corrupted、第三方编辑曲库触发断链或删库、迁移卡死 | ✅ **已根治** | `edisksd_hook.so` + `dbhealer` 挂载前原子修复链表与 schema，桥接状态外置至 `.rb-bridge-state.db`，彻底规避 Engine 的未知表删库机制 |
 | **LC001** | 3.x | 拔插 SoundSwitch DMX USB 适配器（FTDI `ftdi_sio`）时音频卡顿/降速 | ✅ **已根治** | `sc5000-perf-tune` 将 `ff500000`、`ff540000`、`ehci`、`xhci`、`dwc2` 中断全部绑定至 `CPU2`，并设置 `workqueue/cpumask=6` 禁止 USB 枚举 `kworker` 在 `CPU0`（ALSA 核心）上运行 |
 | **LC003** | 3.x | 播放约 2 小时大 MP3/Set，提前跳到较远 Cue 后约 0.5–0.8 秒静音 | ⚠️ **还在（可缓解）** | 超长 MP3 远距离 seek 取决于帧索引与块设备预读，可通过调大 USB 块设备 `read_ahead_kb` 缓解 |
-| **H130 / LA-018 / LA-020 / LA-033 / LA-036** | 1.x–3.x | 开关 Key Lock 金属失真、长按关 Sync 波形 glitch、Auto Gate 混入旧 FX、慢停切层截断 | ❌ **闭源 DSP** | 位于 `/usr/Engine/Engine` 内部闭源音频图与 Elastique 库 |
+| **LA-020** | 1.x–3.x | Auto Gate 混入旧 FX | ✅ **已实机部署 / 已防御** | `Effects::AutoGate::process` `0xe3a598` 跳板调用 `sc_dsp_autogate_pre_process`，FX 切换后清零 AutoGate 相位 |
+| **H130 / LA-018** | 1.x–3.x | 开关 Key Lock 金属失真 | 🟢 **5.0.4 原厂已逐帧步进** | 反汇编确认 `ElastiqueFader`（`0x1534398`）已按 `step = 1/(rate × 0.001)` 逐采样帧步进，不挂载重混 Hook；仅对 `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` 做正有限值守卫 |
+| **LA-033 / LA-036** | 1.x–3.x | 长按关 Sync 波形 glitch、慢停切层截断 | ❌ **闭源 DSP** | 位于 `/usr/Engine/Engine` 内部闭源音频图与 Sync 状态机 |
 
 ---
 
