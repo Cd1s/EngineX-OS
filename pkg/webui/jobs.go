@@ -336,8 +336,10 @@ func (j *Jobs) fromNetease(ctx context.Context, n *providers.Netease, t provider
 // queueImport analyses and imports a streamed file once per target playlist.
 // A full queue only skips library import; the file is still playable.
 func (j *Jobs) queueImport(session string, t providers.Track, guest bool, f fetched) {
+	// No library (no front SD Engine Library): nothing to import into, so do not
+	// queue a job that can only end in "pipeline is not configured".
 	// A DJ set is played, not analysed: decoding hours of audio would exhaust memory.
-	if tooLongToAnalyse(t, f.dl.Path) {
+	if j.p.Library == nil || tooLongToAnalyse(t, f.dl.Path) {
 		return
 	}
 	key := providers.OwnerPlaylist + "\x00" + trackKey(t)
