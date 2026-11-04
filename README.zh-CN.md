@@ -145,7 +145,7 @@
    - **Denon DJ PRIME GO**：[`PRIMEGO-5.0.4.2-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.0.4.2-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
    - **Numark Mixstream Pro**：[`MIXSTREAMPRO-5.0.4.2-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.0.4.2-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
 2. 将下载好的 `.img` 文件放入 **FAT32 或 exFAT 格式 U 盘的根目录**。
-3. 将 U 盘插入碟机，进入 **设置 (Settings) → 关于 / 更新 (About / Update) → 重启进入固件更新模式**，机器会自动完成刷入并重启。
+3. 将 U 盘插入碟机（原厂 Engine OS 4.3.x 与 5.0.x 都可以直接刷），进入 **设置 (Settings) → 关于 / 更新 (About / Update) → 固件更新模式 (Firmware Update Mode)**，看到 `Found 5.0.4.2 on USB/SD` 时选 **USB/SD**，机器会自动完成刷入并重启。如果只弹出 *Reboot into firmware update mode?*，说明碟机没找到文件：核对机型，文件名保持原样放在根目录，再拔插一次 U 盘。
 
 ### 方式二：碟机屏幕一键在线升级（已安装本系统后）
 - 连接 Wi-Fi 或网线后，打开碟机 **设置 → 关于 / 更新**；
