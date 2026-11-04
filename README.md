@@ -186,10 +186,30 @@ sh tools/edisksd-hook/build.sh
 
 If **EngineX OS** makes your decks more fun to play on or saves you prep time before a gig, consider buying the author a coffee or leaving a **Star ⭐** on the repo!
 
-<div align="center">
-<img src="./docs/assets/sponsor-wechat.jpg" width="260" alt="WeChat Appreciation QR Code"><br>
-<sub><b>WeChat Appreciation Code (Cheek's 讚賞碼)</b></sub>
-</div>
+<table>
+<tr>
+<td width="33%" align="center" valign="top">
+<img src="./docs/assets/sponsor-wechat.jpg" width="240" alt="WeChat Appreciation QR Code"><br>
+<b>WeChat Pay</b><br>
+<sub>Scan with WeChat (Cheek's 讚賞碼)</sub>
+</td>
+<td width="33%" align="center" valign="top">
+<img src="./docs/assets/sponsor-binance-pay.jpg" width="240" alt="Binance Pay QR Code"><br>
+<b>Binance Pay</b><br>
+<sub>Scan with Binance App · <code>User-504fa</code></sub>
+</td>
+<td width="33%" align="center" valign="top">
+<img src="./docs/assets/sponsor-evm-usdt.jpg" width="240" alt="USDT EVM QR Code"><br>
+<b>USDT / USDC (BSC / EVM Universal)</b><br>
+<sub>Supports <code>BSC (BEP-20)</code> · <code>ERC-20</code> · <code>Arbitrum</code> · <code>Polygon</code></sub>
+</td>
+</tr>
+</table>
+
+> **💳 USDT / USDC Wallet Address (BSC / EVM Universal — click copy on the right):**
+> ```text
+> 0x35e0c53dd887b37cd5db0064291f7c5a7442bc91
+> ```
 
 ---
 
