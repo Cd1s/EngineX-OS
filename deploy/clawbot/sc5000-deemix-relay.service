@@ -1,11 +1,11 @@
 [Unit]
 Description=SC5000 Deemix relay (credential relay only; downloads run on SC5000)
-Documentation=https://denon.cheek.day/
+Documentation=https://relay.example.com/
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/sc5000-relay -listen 0.0.0.0:6595 -public https://denon.cheek.day -state /var/lib/sc5000-relay
+ExecStart=/usr/local/bin/sc5000-relay -listen 0.0.0.0:6595 -public https://relay.example.com -state /var/lib/sc5000-relay
 DynamicUser=yes
 StateDirectory=sc5000-relay
 StateDirectoryMode=0700
