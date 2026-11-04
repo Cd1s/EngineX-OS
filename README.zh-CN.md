@@ -196,18 +196,23 @@ sh tools/edisksd-hook/build.sh
 </td>
 <td width="33%" align="center" valign="top">
 <img src="./docs/assets/sponsor-binance-pay.jpg" height="260" alt="Binance Pay 币安收款码"><br>
-<b>币安扫码支付 (Binance Pay)</b><br>
-<sub>币安 App 扫码 · <code>User-504fa</code></sub>
+<b>币安支付 (Binance Pay)</b><br>
+<sub>币安扫码或转币安 ID：<code>565380652</code>（0 手续费）</sub>
 </td>
 <td width="33%" align="center" valign="top">
 <img src="./docs/assets/sponsor-evm-usdt.jpg" height="260" alt="USDT EVM 收款码"><br>
-<b>USDT / USDC（BSC / EVM 通用）</b><br>
-<sub>支持 <code>BSC (BEP-20)</code> · <code>ERC-20</code> · <code>Arbitrum</code></sub>
+<b>USDT / USDC（币安 EVM 全链通用）</b><br>
+<sub>支持 BSC · ERC20 · Arbitrum · Optimism · Polygon · Base · opBNB</sub>
 </td>
 </tr>
 </table>
 
-> **USDT / USDC 链上收款地址（BSC / EVM 全链通用，点击右侧一键复制）：**
+> **币安 ID (Binance UID，币安内转账 0 手续费，点击右侧一键复制)：**
+> ```text
+> 565380652
+> ```
+>
+> **USDT / USDC 链上收款地址（支持币安所有 EVM 网络：`BSC (BEP-20)` · `Ethereum (ERC-20)` · `Arbitrum One` · `Optimism` · `Polygon` · `Base` · `opBNB` · `Avalanche C-Chain` · `zkSync Era` · `Scroll` · `Linea`）：**
 > ```text
 > 0x35e0c53dd887b37cd5db0064291f7c5a7442bc91
 > ```
