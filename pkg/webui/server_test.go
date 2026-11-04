@@ -222,3 +222,59 @@ func TestExpiredOwnerCanExplicitlyRestartLogin(t *testing.T) {
 		t.Fatal("missing UI reauthentication action")
 	}
 }
+
+// #46: on a club's Wi-Fi, nobody else on the LAN may restart, update or reconfigure
+// the deck. Deck-internal routes answer only loopback; console APIs need the code.
+func TestLANCannotDriveTheDeck(t *testing.T) {
+	uiDir := t.TempDir()
+	ui := New(Config{AccessToken: "test-console-code", UIDir: uiDir, StateDir: t.TempDir()}, nil)
+	for _, c := range []struct {
+		method, target string
+		want           int
+	}{
+		{"POST", "/v1/sc5000/ui?restart=1", 403},
+		{"POST", "/v1/sc5000/ui?waveform=rgb&lang=en", 403},
+		{"GET", "/v1/sc5000/update?apply=1", 403},
+		{"POST", "/v1/sc5000/login?provider=spotify", 403},
+		{"POST", "/v1/sc5000/relay", 403},
+		{"GET", "/v1/sc5000/stems/source", 403},
+		{"GET", "/v1/tracks/1", 403},
+		{"GET", "/v1/users/1/playlists", 403},
+		{"GET", "/v1/search?query=x", 403},
+		{"GET", "/v1/stream/1", 403},
+		{"GET", "/v1/ping", 403},
+		{"POST", "/v1//sc5000/ui?restart=1", 403},
+		{"POST", "/api/ui", 401},
+		{"GET", "/api/update?apply=1", 401},
+	} {
+		for _, addr := range []string{"192.168.1.23:50000", "[fe80::1]:50000"} {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(c.method, c.target, strings.NewReader(`{"waveform":"rgb"}`))
+			r.RemoteAddr = addr
+			ui.ServeHTTP(w, r)
+			if w.Code != c.want {
+				t.Errorf("%s %s from %s: %d, want %d", c.method, c.target, addr, w.Code, c.want)
+			}
+		}
+	}
+	// "/./v1/..." is not a gateway path: the console mux only redirects it.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/./v1/sc5000/ui?restart=1", nil)
+	r.RemoteAddr = "192.168.1.23:50000"
+	ui.ServeHTTP(w, r)
+	if w.Code < 300 || w.Code >= 500 {
+		t.Errorf("dot path from LAN: %d", w.Code)
+	}
+	if _, err := os.Stat(filepath.Join(uiDir, "settings.conf")); !os.IsNotExist(err) {
+		t.Fatalf("a LAN request changed the deck settings: %v", err)
+	}
+	for _, addr := range []string{"127.0.0.1:41000", "[::1]:41000"} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/v1/ping", nil)
+		r.RemoteAddr = addr
+		ui.ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Errorf("loopback ping from %s: %d", addr, w.Code)
+		}
+	}
+}
