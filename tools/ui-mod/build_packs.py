@@ -251,6 +251,18 @@ SERVICES_MAIN = """
 		if (!/(^|\\/)Contents\\//.test(path)) return 1
 		return rgb ? @RGB_SCALE@ : @BANDS_SCALE@
 	}
+	// Settings and the Control Center selector both switch the palette here.
+	function scSetWave(id) {
+		if (id === "rgb" && scWave !== "rgb") {
+			PlanckGUI.views.prompts.post({
+				type: Prompt.Default,
+				title: "RGB Waveform Creation",
+				message: "RGB Waveforms and Track Overviews will be built when loading to deck.",
+				options: Prompt.Ok
+			})
+		}
+		scCall("waveform=" + id)
+	}
 	function scSetSource(id, on) {
 		const list = scSources.filter(s => s !== id)
 		if (on) list.push(id)
@@ -624,17 +636,7 @@ ListEntry {
 	readonly property var ids: ["denon", "rgb", "3band"]
 	values: ["Denon", "RGB", "3-Band"]
 	currentValue: values[Math.max(0, ids.indexOf(root.scWave))]
-	onSelected: function(index) {
-		if (index === 1 && root.scWave !== "rgb") {
-			PlanckGUI.views.prompts.post({
-				type: Prompt.Default,
-				title: "RGB Waveform Creation",
-				message: "RGB Waveforms and Track Overviews will be built when loading to deck.",
-				options: Prompt.Ok
-			})
-		}
-		root.scCall("waveform=" + ids[index])
-	}
+	onSelected: function(index) { root.scSetWave(ids[index]) }
 }
 """
 
@@ -687,10 +689,91 @@ LANGUAGE_ENTRY = """
 		WaveformStyle { },
 """
 
-# rekordbox's 3-Band palette: played, fading and past shades of each band.
-BAND_COLORS = {"Low": "#0055ff", "Mid": "#ff8800", "High": "#ffffff"}
-BAND_FADE = {"Low": "#0044dd", "Mid": "#e07000", "High": "#f0f4ff"}
-BAND_PAST = {"Low": "#003399", "Mid": "#994d00", "High": "#999999"}
+# Control Center: one tile like the stock ones, as on the CDJ-3000 shortcut
+# screen (#45). It previews the current palette on a fixed EDM-shaped track;
+# a tap moves to the next palette at once, without the RGB prompt.
+WAVE_TILE = """
+		Rectangle {
+			id: scWaveTile
+			objectName: "ControlCenter_WaveformStyle"
+			readonly property var ids: ["denon", "rgb", "3band"]
+			readonly property var names: ["Denon", "RGB", "3-Band"]
+			readonly property string current: ids.indexOf(root.scWave) >= 0 ? root.scWave : "denon"
+			width: 256
+			height: 104
+			radius: 16
+			color: scWaveTap.pressed ? Style.surface02Color : Style.surface03Color
+			onCurrentChanged: scWavePreview.requestPaint()
+			Canvas {
+				id: scWavePreview
+				anchors.horizontalCenter: parent.horizontalCenter
+				y: 14
+				width: 200
+				height: 44
+				onPaint: {
+					const ctx = getContext("2d")
+					ctx.reset()
+					const n = Math.floor(width / 2), mid = height / 2
+					let seed = 20261104
+					const rnd = () => (seed = seed * 16807 % 2147483647) / 2147483647
+					ctx.fillStyle = "#3a3a3a"
+					ctx.fillRect(0, mid - 0.5, width, 1)
+					for (let i = 0; i < n; i++) {
+						const t = i / n, kick = i % 4 === 0
+						let low, mids, high
+						if (t < 0.14) {          // intro: kicks and hats
+							low = kick ? 0.55 : 0.3; mids = 0.15; high = 0.25
+						} else if (t < 0.34) {   // build: synths and hats rise
+							const r = (t - 0.14) / 0.2
+							low = 0.2 + 0.15 * r; mids = 0.3 + 0.4 * r; high = 0.3 + 0.45 * r
+						} else if (t < 0.6) {    // drop
+							low = kick ? 1 : 0.45; mids = 0.6; high = i % 2 ? 0.6 : 0.3
+						} else if (t < 0.7) {    // breakdown: pads
+							low = 0.12; mids = 0.45; high = 0.2
+						} else {                 // second drop
+							low = kick ? 1 : 0.5; mids = 0.7; high = i % 2 ? 0.7 : 0.35
+						}
+						low *= 0.75 + 0.25 * rnd(); mids *= 0.6 + 0.4 * rnd(); high *= 0.5 + 0.5 * rnd()
+						let bars
+						if (scWaveTile.current === "rgb") {
+							// Like rekordbox / CDJ RGB: the three bands add up to one colour per
+							// column (kick red-orange, mids yellow-green, hats cyan-blue).
+							// Taking out most of the shared (white) part keeps the hues saturated.
+							const ch = [low, mids * 0.85, high * 1.1], grey = 0.6 * Math.min(...ch)
+							const sat = ch.map(x => x - grey), top = Math.max(...sat)
+							const colour = Qt.rgba(sat[0] / top, sat[1] / top, sat[2] / top, 1)
+							bars = [[Math.max(low, mids, high), colour]]
+						} else {
+							const c = scWaveTile.current === "3band" ? ["@LOW@", "@MID@", "@HIGH@"] : ["#006837", "#00e676", "#ccffe2"]
+							bars = [[Math.max(low, mids), c[0]], [mids * 0.75, c[1]], [Math.min(high, mids) * 0.45, c[2]]]
+						}
+						for (const b of bars) {
+							ctx.fillStyle = b[1]
+							ctx.fillRect(i * 2, mid - b[0] * mid, 1.5, 2 * b[0] * mid)
+						}
+					}
+				}
+			}
+			Text {
+				anchors.horizontalCenter: parent.horizontalCenter
+				y: 66
+				text: "Waveform Style" + " · " + scWaveTile.names[scWaveTile.ids.indexOf(scWaveTile.current)]
+				font: Style.fontH3
+				color: Style.font02Color
+			}
+			MouseArea {
+				id: scWaveTap
+				anchors.fill: parent
+				onClicked: root.scCall("waveform=" + scWaveTile.ids[(scWaveTile.ids.indexOf(scWaveTile.current) + 1) % 3])
+			}
+		}
+"""
+
+# CDJ / rekordbox 3-Band palette (blue lows, amber mids, white highs): played,
+# fading and past shades of each band.
+BAND_COLORS = {"Low": "#0055ff", "Mid": "#ffa000", "High": "#ffffff"}
+BAND_FADE = {"Low": "#0044dd", "Mid": "#e08c00", "High": "#f0f4ff"}
+BAND_PAST = {"Low": "#003399", "Mid": "#996000", "High": "#999999"}
 # rekordbox's saturated RGB primaries, in place of Engine's muted ones.
 RGB_COLORS = {"Low": "#ff1428", "Mid": "#00e632", "High": "#0078ff"}
 RGB_PAST = {"Low": "#7f0a14", "Mid": "#007319", "High": "#003c80"}
@@ -813,6 +896,10 @@ def edits(dev: bool):
         v + "BrowserSource/ConnectedSource.qml": [
             ("	currentIndex: -1\n", "	currentIndex: -1\n" + SOURCE_FOOTER),
             ("		height: 108\n		leftPadding", '		height: model.name === "TIDAL" || model.name === "SoundCloud" ? 0 : 108\n		visible: model.name !== "TIDAL" && model.name !== "SoundCloud"\n		Component.onCompleted: if (model.name === "TIDAL") connectedSource.scTidalRow = this\n		leftPadding'),
+        ],
+        v + "ControlCenter/Tabs/ControlCenterTab.qml": [
+            ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),
+            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"])),
         ],
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],

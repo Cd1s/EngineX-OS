@@ -97,13 +97,19 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 <sub>Switch language, waveform style, audio quality, and jog lights</sub>
 </td>
 </tr>
-</table>
-
-<div align="center">
-<img src="./docs/assets/screenshots/en/06-preferences-enginex-github-update.png" width="70%" alt="One-Click On-Deck Update"><br>
+<tr>
+<td width="50%" align="center" valign="top">
+<img src="./docs/assets/screenshots/en/06-preferences-enginex-github-update.png" width="100%" alt="One-Click On-Deck Update"><br>
 <b>Settings → About / Update: One-Click Online Upgrade</b><br>
 <sub>Tap "Update" on the screen to download and flash new releases with the native progress screen</sub>
-</div>
+</td>
+<td width="50%" align="center" valign="top">
+<img src="./docs/assets/screenshots/en/07-bluetooth-audio.png" width="100%" alt="Native Bluetooth Audio"><br>
+<b>Native Bluetooth Audio Input & Playback Controls</b><br>
+<sub>Stream from your phone with track info, play/pause and skip on the deck</sub>
+</td>
+</tr>
+</table>
 
 ---
 
