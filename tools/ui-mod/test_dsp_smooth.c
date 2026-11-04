@@ -1,7 +1,11 @@
-/* gcc -std=c11 -O2 -Wall -Wextra -Werror tools/ui-mod/test_dsp_smooth.c -o /tmp/test_dsp_smooth && /tmp/test_dsp_smooth */
+/* gcc -std=c11 -O2 -Wall -Wextra -Werror -pthread tools/ui-mod/test_dsp_smooth.c -lm -o /tmp/test_dsp_smooth && /tmp/test_dsp_smooth
+ * Also run once with -fsanitize=address,undefined and once with -fsanitize=thread. */
+#define _GNU_SOURCE
+#include <pthread.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "dsp_smooth.h"
 
@@ -75,14 +79,45 @@ static void test_autogate(void)
     sc_dsp_autogate_pre_process(NULL, 1);
 }
 
+/* One ChannelDJFx-style effect: enter its slot (as the hook does per block). */
+static struct sc_dsp_chain *enter(void *common)
+{
+    struct sc_dsp_chain *c = sc_dsp_chain_enter(common);
+    CHECK(c != NULL);
+    return c;
+}
+
+/* enter -> post -> exit, as the hook does for one block. */
+static void post_on(void *common, float *const *in, float *const *out, uint32_t frames, uint32_t valid)
+{
+    struct sc_dsp_chain *c = enter(common);
+    sc_dsp_fx_common_post_process(c, in, out, frames, valid);
+    sc_dsp_chain_exit(c);
+}
+
+static int32_t ramp_of(void *common)
+{
+    struct sc_dsp_chain *c = enter(common);
+    int32_t r = c ? c->ramp_remaining : -1;
+    sc_dsp_chain_exit(c);
+    return r;
+}
+
 static void test_post_process(void)
 {
     enum { N = 300 };
     static float in_l[N], in_r[N], out_l[N], out_r[N];
+    static char fx[8];
     float *in[2] = {in_l, in_r}, *out[2] = {out_l, out_r};
 
-    /* Drain any ramp armed by earlier tests. */
-    sc_dsp_fx_common_post_process(NULL, in, out, N);
+    /* A common seen for the first time ramps (it is usually the effect just
+     * turned on); spend that ramp, then it passes through. */
+    struct sc_dsp_chain *c = enter(&fx[0]);
+    CHECK(c && c->ramp_remaining == SC_DSP_RAMP_FRAMES);
+    sc_dsp_fx_common_post_process(c, in, out, N, N);
+    sc_dsp_chain_exit(c);
+    CHECK(enter(&fx[0]) == c && c->ramp_remaining == 0);
+    sc_dsp_chain_exit(c);
 
     /* Not armed: NaN/Inf are cleaned, everything else stays. */
     for (int i = 0; i < N; i++) {
@@ -93,7 +128,7 @@ static void test_post_process(void)
     out_r[4] = INFINITY;
     in_r[4] = NAN;   /* no finite dry sample: silence */
     out_l[5] = -INFINITY;
-    sc_dsp_fx_common_post_process(NULL, in, out, N);
+    sc_dsp_fx_common_post_process(c, in, out, N, N);
     CHECK(out_l[3] == 0.25f && out_r[4] == 0.0f && out_l[5] == 0.25f && out_l[6] == 1.0f && out_r[0] == 1.0f);
 
     /* Armed: a step from dry 0 to wet 1 becomes a 128-frame ramp, across two calls. */
@@ -102,9 +137,9 @@ static void test_post_process(void)
         out_l[i] = out_r[i] = 1.0f;
     }
     sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_ON);
-    sc_dsp_fx_common_post_process(NULL, in, out, 100);
+    post_on(&fx[0], in, out, 100, 100);
     float *in2[2] = {in_l + 100, in_r + 100}, *out2[2] = {out_l + 100, out_r + 100};
-    sc_dsp_fx_common_post_process(NULL, in2, out2, N - 100);
+    post_on(&fx[0], in2, out2, N - 100, N - 100);
     CHECK(out_l[0] == 0.0f && out_r[0] == 0.0f);
     float max_step = out_l[0];
     for (int i = 1; i < N; i++) {
@@ -121,17 +156,294 @@ static void test_post_process(void)
     /* The ramp is spent: the next block passes through. */
     for (int i = 0; i < N; i++)
         out_l[i] = out_r[i] = 1.0f;
-    sc_dsp_fx_common_post_process(NULL, in, out, N);
+    post_on(&fx[0], in, out, N, N);
     CHECK(out_l[0] == 1.0f);
 
     /* In-place processing has no dry copy: only sanitized, ramp left armed. */
     sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_OFF);
-    sc_dsp_fx_common_post_process(NULL, out, out, N);
-    CHECK(out_l[0] == 1.0f);
-    sc_dsp_fx_common_post_process(NULL, in, out, N);
+    c = enter(&fx[0]);
+    sc_dsp_fx_common_post_process(c, out, out, N, N);
+    CHECK(out_l[0] == 1.0f && c->ramp_remaining == SC_DSP_RAMP_FRAMES);
+    sc_dsp_chain_exit(c);
+    post_on(&fx[0], in, out, N, N);
     CHECK(out_l[0] == 0.0f);
 
-    sc_dsp_fx_common_post_process(NULL, NULL, NULL, N); /* no crash */
+    /* Not a transition kind: nothing re-arms. */
+    sc_dsp_fx_mark_transition(NULL, 99);
+    CHECK(ramp_of(&fx[0]) == 0);
+
+    /* No chain, no buffers: no crash, and a NULL chain never ramps. */
+    CHECK(sc_dsp_chain_enter(NULL) == NULL);
+    sc_dsp_fx_common_post_process(NULL, NULL, NULL, N, N);
+    for (int i = 0; i < N; i++)
+        out_l[i] = out_r[i] = 1.0f;
+    sc_dsp_fx_common_post_process(NULL, in, out, N, N);
+    CHECK(out_l[0] == 1.0f);
+
+    /* The hook snapshots only the first 128 dry frames of a large aliased block:
+     * the ramp covers them, a NaN inside them takes the dry sample, one beyond
+     * them falls back to silence, and nothing reads past dry_valid_frames. */
+    enum { BIG = 4096 };
+    static float big_out_l[BIG], big_out_r[BIG];
+    float dry_l[SC_DSP_RAMP_FRAMES], dry_r[SC_DSP_RAMP_FRAMES];
+    float *dry_pair[2] = {dry_l, dry_r}, *big_out[2] = {big_out_l, big_out_r};
+    for (int i = 0; i < SC_DSP_RAMP_FRAMES; i++)
+        dry_l[i] = dry_r[i] = 0.5f;
+    for (int i = 0; i < BIG; i++)
+        big_out_l[i] = big_out_r[i] = 1.0f;
+    big_out_l[SC_DSP_RAMP_FRAMES + 72] = NAN;
+    big_out_r[SC_DSP_RAMP_FRAMES + 1] = INFINITY;
+    big_out_l[7] = NAN;
+    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_SWITCH);
+    c = enter(&fx[1]);
+    sc_dsp_fx_common_post_process(c, dry_pair, big_out, BIG, SC_DSP_RAMP_FRAMES);
+    sc_dsp_chain_exit(c);
+    CHECK(big_out_l[0] == 0.5f);                                  /* ramp starts at dry */
+    CHECK(sc_dsp_finite_f32(big_out_l[7]));
+    CHECK(fabsf(big_out_l[SC_DSP_RAMP_FRAMES - 1] - (0.5f + 0.5f * (SC_DSP_RAMP_FRAMES - 1) / SC_DSP_RAMP_FRAMES)) < 1e-6f);
+    CHECK(big_out_l[SC_DSP_RAMP_FRAMES] == 1.0f && big_out_l[BIG - 1] == 1.0f);
+    CHECK(big_out_l[SC_DSP_RAMP_FRAMES + 72] == 0.0f && big_out_r[SC_DSP_RAMP_FRAMES + 1] == 0.0f);
+    CHECK(c->ramp_remaining == 0);
+
+    /* NaN in the snapshot itself reads as silence for the ramp. */
+    dry_l[2] = NAN;
+    for (int i = 0; i < SC_DSP_RAMP_FRAMES; i++)
+        big_out_l[i] = big_out_r[i] = 1.0f;
+    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_ON);
+    post_on(&fx[1], dry_pair, big_out, SC_DSP_RAMP_FRAMES, SC_DSP_RAMP_FRAMES);
+    CHECK(sc_dsp_finite_f32(big_out_l[2]) && big_out_l[2] > 0.0f && big_out_l[2] < 1.0f);
+
+    /* dry_valid_frames 0 with a ramp armed: nothing is read, the ramp stays armed. */
+    dry_l[2] = 0.5f;
+    for (int i = 0; i < N; i++) {
+        in_l[i] = in_r[i] = 0.0f;
+        out_l[i] = out_r[i] = 1.0f;
+    }
+    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_ON);
+    c = enter(&fx[1]);
+    sc_dsp_fx_common_post_process(c, in, out, N, 0);
+    CHECK(out_l[0] == 1.0f && c->ramp_remaining == SC_DSP_RAMP_FRAMES);
+    /* dry_valid_frames beyond frames is clamped. */
+    sc_dsp_fx_common_post_process(c, in, out, N, N * 4);
+    sc_dsp_chain_exit(c);
+    CHECK(out_l[0] == 0.0f && out_l[SC_DSP_RAMP_FRAMES] == 1.0f);
+
+    /* Re-armed mid-ramp: the new transition restarts from dry, not where the old one stopped. */
+    for (int i = 0; i < N; i++)
+        out_l[i] = out_r[i] = 1.0f;
+    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_ON);
+    post_on(&fx[1], in, out, 64, 64);
+    CHECK(out_l[63] > 0.4f && out_l[63] < 0.6f);
+    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_TURN_OFF);
+    for (int i = 0; i < N; i++)
+        out_l[i] = out_r[i] = 1.0f;
+    post_on(&fx[1], in, out, 64, 64);
+    CHECK(out_l[0] == 0.0f);
+}
+
+/* Two commons on different threads: each ramps its own 128 frames, neither
+ * swallows the other's count. */
+static void test_two_chains(void)
+{
+    static char a_id, b_id;
+    static float in_l[256], in_r[256], a_l[256], a_r[256], b_l[256], b_r[256];
+    float *in[2] = {in_l, in_r}, *a[2] = {a_l, a_r}, *b[2] = {b_l, b_r};
+    for (int i = 0; i < 256; i++) {
+        in_l[i] = in_r[i] = 0.0f;
+        a_l[i] = a_r[i] = b_l[i] = b_r[i] = 1.0f;
+    }
+    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_SWITCH);
+    struct sc_dsp_chain *ca = enter(&a_id);
+    struct sc_dsp_chain *cb = enter(&b_id);
+    CHECK(ca != cb);
+    sc_dsp_fx_common_post_process(ca, in, a, 50, 50);          /* A: frames 0..49 */
+    sc_dsp_chain_exit(ca);
+    sc_dsp_fx_common_post_process(cb, in, b, 128, 128);        /* B: all 128 in one block */
+    sc_dsp_chain_exit(cb);
+    CHECK(b_l[0] == 0.0f && fabsf(b_l[127] - 127.0f / 128.0f) < 1e-6f && cb->ramp_remaining == 0);
+    float *in2[2] = {in_l + 50, in_r + 50}, *a2[2] = {a_l + 50, a_r + 50};
+    post_on(&a_id, in2, a2, 206, 206);  /* A continues at frame 50 */
+    CHECK(fabsf(a_l[50] - 50.0f / 128.0f) < 1e-6f);             /* B's ramp did not use up A's */
+    CHECK(fabsf(a_l[127] - 127.0f / 128.0f) < 1e-6f && a_l[128] == 1.0f && ca->ramp_remaining == 0);
+    CHECK(enter(&b_id) == cb && cb->ramp_remaining == 0);       /* A finishing did not re-arm B */
+    sc_dsp_chain_exit(cb);
+}
+
+static void reset_chains(void)
+{
+    memset(sc_dsp_state()->chain, 0, sizeof sc_dsp_state()->chain);
+}
+
+/* Enter and leave: the slot a common holds, or NULL. */
+static struct sc_dsp_chain *slot_of(void *common)
+{
+    struct sc_dsp_chain *c = sc_dsp_chain_enter(common);
+    sc_dsp_chain_exit(c);
+    return c;
+}
+
+/* More live commons than slots: no eviction, no out-of-bounds write; the extra
+ * one gets no chain and its block is only sanitized. */
+static void test_chain_full(void)
+{
+    static char many[SC_DSP_CHAIN_SLOTS + 1];
+    static float in_l[8], in_r[8], out_l[8], out_r[8];
+    float *in[2] = {in_l, in_r}, *out[2] = {out_l, out_r};
+    struct sc_dsp_chain *first = NULL;
+    int taken = 0;
+    reset_chains();                                               /* only this test's commons */
+    for (size_t i = 0; i < sizeof many; i++) {
+        struct sc_dsp_chain *c = slot_of(&many[i]);
+        if (!i)
+            first = c;
+        taken += c != NULL;
+    }
+    CHECK(taken == SC_DSP_CHAIN_SLOTS);                           /* the extra one got none */
+    CHECK(slot_of(&many[0]) == first);                            /* a known common keeps its slot */
+    static char late;
+    CHECK(slot_of(&late) == NULL);                                /* full: no slot, no eviction */
+    /* A slot synced after the caller sampled gen is ahead, not stale (no unsigned wrap). */
+    struct sc_dsp_chain *ahead = slot_of(&many[1]);
+    uint32_t keep = sc_dsp_state()->generation;
+    if (ahead)
+        ahead->generation = keep + 1u;
+    CHECK(slot_of(&late) == NULL);
+    if (ahead)
+        ahead->generation = keep;
+    /* Fewer events than the threshold reclaim nothing; reaching it frees stale slots. */
+    for (int i = 0; i < SC_DSP_CHAIN_STALE_GENERATIONS - 1; i++)
+        sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_SWITCH);
+    CHECK(slot_of(&many[0]) == first);
+    CHECK(slot_of(&late) == NULL);
+    sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_SWITCH);
+    CHECK(slot_of(&many[0]) == first);
+    struct sc_dsp_chain *reclaimed = sc_dsp_chain_enter(&late);
+    CHECK(reclaimed && reclaimed != first && reclaimed->ramp_remaining == SC_DSP_RAMP_FRAMES);
+    CHECK(reclaimed && reclaimed->self == &late);
+    sc_dsp_chain_exit(reclaimed);
+    CHECK(slot_of(&many[0]) == first);                            /* the live one kept its slot */
+    for (int i = 0; i < 8; i++) {
+        in_l[i] = in_r[i] = 0.25f;
+        out_l[i] = 1.0f;
+        out_r[i] = i == 2 ? NAN : 1.0f;
+    }
+    sc_dsp_fx_common_post_process(NULL, in, out, 8, 8);
+    CHECK(out_l[0] == 1.0f && out_r[2] == 0.25f);                 /* sanitized, not ramped */
+}
+
+/* A slot a call still holds is never taken over, however many FX events pass,
+ * and the same common overlapping itself gets no chain (only sanitized). */
+static void test_chain_busy(void)
+{
+    static char many[2 * SC_DSP_CHAIN_SLOTS];
+    static float in_l[8], in_r[8], out_l[8], out_r[8];
+    float *in[2] = {in_l, in_r}, *out[2] = {out_l, out_r};
+    reset_chains();
+    for (int i = 0; i < SC_DSP_CHAIN_SLOTS; i++)
+        CHECK(slot_of(&many[i]) != NULL);
+    struct sc_dsp_chain *held = sc_dsp_chain_enter(&many[0]);     /* in flight, not exited */
+    CHECK(held && held->busy == 1);
+    for (int i = 0; i < 3 * SC_DSP_CHAIN_STALE_GENERATIONS; i++)
+        sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_SWITCH);
+    /* Every other slot is now stale and gets reused; the held one must not be. */
+    int refused = 0;
+    for (int i = SC_DSP_CHAIN_SLOTS; i < 2 * SC_DSP_CHAIN_SLOTS; i++) {
+        struct sc_dsp_chain *c = sc_dsp_chain_enter(&many[i]);
+        CHECK(c != held);
+        refused += c == NULL;
+        sc_dsp_chain_exit(c);
+    }
+    CHECK(refused == 1 && held->self == &many[0] && held->busy == 1);
+    /* Same common again while in flight: no chain, sanitize only. */
+    CHECK(sc_dsp_chain_enter(&many[0]) == NULL);
+    CHECK(held->busy == 1);                                       /* the failed try did not release it */
+    for (int i = 0; i < 8; i++) {
+        in_l[i] = in_r[i] = 0.25f;
+        out_l[i] = 1.0f;
+        out_r[i] = i == 3 ? INFINITY : 1.0f;
+    }
+    sc_dsp_fx_common_post_process(NULL, in, out, 8, 8);
+    CHECK(out_l[0] == 1.0f && out_r[3] == 0.25f);
+    sc_dsp_chain_exit(held);
+    CHECK(held->busy == 0);
+    /* Once released it is stale and free to reuse. */
+    static char fresh;
+    struct sc_dsp_chain *c = sc_dsp_chain_enter(&fresh);
+    CHECK(c == held && c->self == &fresh && c->ramp_remaining == SC_DSP_RAMP_FRAMES);
+    sc_dsp_chain_exit(c);
+    sc_dsp_chain_exit(NULL);                                      /* NULL-safe */
+}
+
+/* Real threads: several "render" threads run enter/post/exit over a shared set
+ * of commons (so some overlap on the same one) while another keeps firing FX
+ * events. Under -fsanitize=thread this reports any unsynchronised slot access;
+ * `inside` is deliberately plain, so a second owner of one slot would race. */
+enum { THREADS = 4, COMMONS = 40, ITERS = 20000, BLOCK = 192 };
+static char thread_commons[COMMONS];
+static int inside[SC_DSP_CHAIN_SLOTS];
+static volatile int stop_events;
+
+static void *render_thread(void *arg)
+{
+    uintptr_t bad = 0;
+    unsigned seed = (unsigned)(uintptr_t)arg * 2654435761u + 1;
+    float in_l[BLOCK], in_r[BLOCK], out_l[BLOCK], out_r[BLOCK];
+    float *in[2] = {in_l, in_r}, *out[2] = {out_l, out_r};
+    for (int it = 0; it < ITERS; it++) {
+        seed = seed * 1103515245u + 12345u;
+        void *common = &thread_commons[(seed >> 16) % COMMONS];
+        for (int i = 0; i < BLOCK; i++) {
+            in_l[i] = in_r[i] = 0.0f;
+            out_l[i] = out_r[i] = i == 5 ? NAN : 1.0f;
+        }
+        struct sc_dsp_chain *c = sc_dsp_chain_enter(common);
+        if (c) {
+            int idx = (int)(c - sc_dsp_state()->chain);
+            if (++inside[idx] != 1) bad++;
+            if (c->self != common || c->ramp_remaining < 0 || c->ramp_remaining > SC_DSP_RAMP_FRAMES) bad++;
+        }
+        sc_dsp_fx_common_post_process(c, in, out, BLOCK, BLOCK);
+        if (c)
+            inside[(int)(c - sc_dsp_state()->chain)]--;
+        sc_dsp_chain_exit(c);
+        for (int i = 0; i < BLOCK; i++)
+            if (!sc_dsp_finite_f32(out_l[i]) || !sc_dsp_finite_f32(out_r[i]) ||
+                out_l[i] < 0.0f || out_l[i] > 1.0f) {
+                bad++;
+                break;
+            }
+    }
+    return (void *)bad;
+}
+
+static void *event_thread(void *arg)
+{
+    (void)arg;
+    while (!__atomic_load_n(&stop_events, __ATOMIC_ACQUIRE)) {
+        sc_dsp_fx_mark_transition(NULL, SC_DSP_FX_TRANSITION_CHANGE);
+        sched_yield();
+    }
+    return NULL;
+}
+
+static void test_chain_threads(void)
+{
+    pthread_t render[THREADS], events;
+    reset_chains();
+    memset(inside, 0, sizeof inside);
+    __atomic_store_n(&stop_events, 0, __ATOMIC_RELEASE);
+    CHECK(pthread_create(&events, NULL, event_thread, NULL) == 0);
+    for (uintptr_t t = 0; t < THREADS; t++)
+        CHECK(pthread_create(&render[t], NULL, render_thread, (void *)(t + 1)) == 0);
+    for (int t = 0; t < THREADS; t++) {
+        void *bad = NULL;
+        pthread_join(render[t], &bad);
+        CHECK(bad == NULL);
+    }
+    __atomic_store_n(&stop_events, 1, __ATOMIC_RELEASE);
+    pthread_join(events, NULL);
+    for (int i = 0; i < SC_DSP_CHAIN_SLOTS; i++)
+        CHECK(sc_dsp_state()->chain[i].busy == 0);                /* every try was paired with an exit */
 }
 
 static void test_fader(void)
@@ -186,6 +498,10 @@ int main(void)
     test_finite();
     test_autogate();
     test_post_process();
+    test_two_chains();
+    test_chain_full();
+    test_chain_busy();
+    test_chain_threads();
     test_fader();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);

@@ -258,40 +258,44 @@ static int dsp_buffers_overlap(const float *a, const float *b, uint32_t frames) 
 }
 
 static void hook_fx_common_chain(void *common, float *const *input, float *const *output, uint32_t frames) {
-    enum { MAX_SNAPSHOT_FRAMES = 2048 };
-    float dry_l[MAX_SNAPSHOT_FRAMES], dry_r[MAX_SNAPSHOT_FRAMES];
+    // This runs on several RR49 render threads, one common per effect. Each has
+    // its own ramp slot, owned (try-acquire only, never waiting) from enter to
+    // exit; no lock, no allocation, no logging. chain == NULL (table full, or the
+    // same common already in flight): the block is only sanitized.
+    // The ramp is SC_DSP_RAMP_FRAMES long, so only that many dry frames are ever
+    // read back: at most 1 KB of audio-thread stack at any block size.
+    float dry_l[SC_DSP_RAMP_FRAMES], dry_r[SC_DSP_RAMP_FRAMES];
     float *dry_pair[2] = {dry_l, dry_r};
-    int saved_dry = 0;
+    struct sc_dsp_chain *chain = sc_dsp_chain_enter(common);
+    int32_t ramp = chain ? __atomic_load_n(&chain->ramp_remaining, __ATOMIC_RELAXED) : 0;
+    uint32_t snap = ramp <= 0 ? 0 : ((uint32_t)ramp < frames ? (uint32_t)ramp : frames);
     int aliases = input && output && frames &&
         (input == output || dsp_buffers_overlap(input[0], output[0], frames) ||
          dsp_buffers_overlap(input[0], output[1], frames) ||
          dsp_buffers_overlap(input[1], output[0], frames) ||
          dsp_buffers_overlap(input[1], output[1], frames));
-    if (__atomic_load_n(&sc_dsp_state()->ramp_remaining, __ATOMIC_ACQUIRE) > 0 &&
-        aliases && input[0] && input[1] && frames <= MAX_SNAPSHOT_FRAMES) {
-        memcpy(dry_l, input[0], (size_t)frames * sizeof(float));
-        memcpy(dry_r, input[1], (size_t)frames * sizeof(float));
+    int saved_dry = 0;
+    if (snap && aliases && input[0] && input[1]) {
+        memcpy(dry_l, input[0], (size_t)snap * sizeof(float));
+        memcpy(dry_r, input[1], (size_t)snap * sizeof(float));
         saved_dry = 1;
     }
     ((dsp_process_fn)dsp_originals[DSP_COMMON])(common, input, output, frames);
     // This is the input to the common tail; upstream FX may already have changed
-    // it. An unsaved alias (large block or concurrent re-arm) has no dry source.
+    // it. An aliased block with nothing saved has no dry source.
     float *const *dry = saved_dry ? dry_pair : (aliases ? NULL : input);
-    uint32_t generation = __atomic_load_n(&sc_dsp_state()->generation, __ATOMIC_ACQUIRE);
-    sc_dsp_fx_common_post_process(common, dry, output, frames);
-    // The header CAS compares only the count. A new 128-frame event can have
-    // the same count as the old one; never let that ABA discard the new ramp.
-    if (__atomic_load_n(&sc_dsp_state()->generation, __ATOMIC_ACQUIRE) != generation)
-        __atomic_store_n(&sc_dsp_state()->ramp_remaining, SC_DSP_RAMP_FRAMES, __ATOMIC_RELEASE);
+    uint32_t dry_valid_frames = saved_dry ? snap : (aliases ? 0 : frames);
+    sc_dsp_fx_common_post_process(chain, dry, output, frames, dry_valid_frames);
     // The helper sanitizes BEFORE interpolation. Opposite finite extremes can
     // still overflow (wet - dry), so check the at-most-128 frames it may remix.
     if (output) for (unsigned ch = 0; ch < 2; ch++) {
         if (!output[ch]) continue;
         for (uint32_t i = 0; i < frames && i < SC_DSP_RAMP_FRAMES; i++) {
             if (!sc_dsp_finite_f32(output[ch][i]))
-                output[ch][i] = dry && dry[ch] && sc_dsp_finite_f32(dry[ch][i]) ? dry[ch][i] : 0.0f;
+                output[ch][i] = dry && dry[ch] && i < dry_valid_frames && sc_dsp_finite_f32(dry[ch][i]) ? dry[ch][i] : 0.0f;
         }
     }
+    sc_dsp_chain_exit(chain); // NULL-safe; the slot is ours from enter to here
 }
 
 static const uint32_t dsp_event_prefix[] = {0xe1c021d0, 0xe590c00c, 0xe52db004};
