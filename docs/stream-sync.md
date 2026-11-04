@@ -61,10 +61,10 @@ SQLite 测试使用本工作树捕获的完整原厂 SQL，包含触发器和链
 
 用官方 API（`api.soundcloud.com`）。已注册应用的 Client ID 和 Secret 自动换取 access token，也可以直接用用户的 OAuth
 Token。凭据存在 `state/bpm-config.json` 和 `state/soundcloud-owner.json`，token 缓存在 `state/soundcloud-token.json`，
-都不进仓库，也可在 `https://denon.cheek.day` 的“BPM 增强”里填写后同步到碟机。应用凭据只能搜索和播放公开内容，不算登录，
-碟机仍会弹二维码。在 `https://denon.cheek.day/m/soundcloud` 或局域网 `/m/soundcloud` 填主页链接、分享链接或用户名后，
+都不进仓库，也可在 `https://relay.example.com` 的“BPM 增强”里填写后同步到碟机。应用凭据只能搜索和播放公开内容，不算登录，
+碟机仍会弹二维码。在 `https://relay.example.com/m/soundcloud` 或局域网 `/m/soundcloud` 填主页链接、分享链接或用户名后，
 才有点赞、自己的歌单和收藏的歌单（`【收藏】` 前缀）。私密内容要在同一页面用“登录账号”走 OAuth PKCE：SoundCloud 应用的 redirect 必须注册为
-`https://denon.cheek.day/oauth/soundcloud/callback`，否则授权页是空白的。云端换取 token 并交给碟机，token 存在
+`https://relay.example.com/oauth/soundcloud/callback`，否则授权页是空白的。云端换取 token 并交给碟机，token 存在
 `soundcloud-token.json` 里自动续期。
 
 只用 API 标记 `access=playable` 的曲目：优先 `http_mp3_128_url`，其次 HLS MP3，再次 HLS AAC（存为 `.mp4`）。试听地址一律不用，
@@ -150,7 +150,7 @@ MP3 回退默认开启，标签写实际码率（如 `[128k]`），`--allow-320k
 
 ### 配置
 
-- `state/deemix-config.json`：`relayUrl`（默认 `https://denon.cheek.day`）和 `deemixPassword`。
+- `state/deemix-config.json`：`relayUrl`（默认 `https://relay.example.com`）和 `deemixPassword`。
   密码没有默认值，也不进仓库，只存在这个 0600 文件里。
 - 控制台首页、`/m/deezer`、`GET/POST /api/relay`（碟机本机为 `/v1/sc5000/relay`）和
   `POST /api/ui?relayUrl=&deemixPassword=` 都可修改，保存后立即生效。
@@ -188,7 +188,7 @@ ReccoBeats 返回 429 时暂停 5 分钟。
 片段下载到临时文件，分析后立即删除。它只有 30 秒，结果是估算值，整首分析后会被覆盖。
 
 GetSongBPM 和 SoundCloud 的密钥可选，存在 `state/bpm-config.json`，可在碟机控制台、
-`GET/POST /api/bpm`（碟机本机 `/v1/sc5000/bpm`）或 `https://denon.cheek.day` 的“BPM 增强”
+`GET/POST /api/bpm`（碟机本机 `/v1/sc5000/bpm`）或 `https://relay.example.com` 的“BPM 增强”
 修改。碟机启动时和之后每小时从 `GET /api/config?secrets=1` 拉取一次，云端没有的密钥不覆盖本机。
 SoundCloud 用填入的 Client ID 调 v2 搜索，或用 OAuth Token 调 v1。
 
@@ -197,7 +197,7 @@ SoundCloud 用填入的 Client ID 调 v2 搜索，或用 OAuth Token 调 v1。
 扫码后，Spotify（回调已确认可用时）和 SoundCloud 直接跳到官方授权页，同意后自动回来完成。加 `&manual=1` 打开备用表单，
 SoundCloud 的公开主页绑定也在那里。Deezer 没有开放给新应用的 OAuth，仍是表单；网易云一直是它自己 App 的扫码。
 
-Spotify 和 Deezer 的二维码指向 `--relay-url`（默认 `https://denon.cheek.day`），手机不用连局域网：
+Spotify 和 Deezer 的二维码指向 `--relay-url`（默认 `https://relay.example.com`），手机不用连局域网：
 
 - 碟机 `POST /api/relay/session`，body 为 `{"token","provider","spotifyClientId"}`，3 秒超时。失败只记日志。
 - 二维码内容是 `<relay>/m/<provider>?t=<token>`。

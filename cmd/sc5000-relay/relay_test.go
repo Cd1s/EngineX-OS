@@ -19,7 +19,7 @@ func newTestServer(t *testing.T) *server {
 		t.Fatal(err)
 	}
 	s := &server{
-		public:      "https://denon.cheek.day",
+		public:      "https://relay.example.com",
 		cfg:         cfg,
 		fails:       newLimiter(failWindow, failMax),
 		newSessions: newLimiter(time.Minute, 30),
@@ -148,7 +148,7 @@ func TestSessionFlowBothPrefixes(t *testing.T) {
 		URL string
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &cr)
-	if !cr.OK || cr.URL != "https://denon.cheek.day/m/spotify?t="+tok {
+	if !cr.OK || cr.URL != "https://relay.example.com/m/spotify?t="+tok {
 		t.Fatalf("create: %s", w.Body)
 	}
 	poll := func(p string) pollResponse {
@@ -192,7 +192,7 @@ func TestParsePastedCode(t *testing.T) {
 		{"http://127.0.0.1:8080/oauth/spotify/callback?code=AQB123&state=x", "AQB123", spotifyLoopbackURI},
 		{"  AQBxyz  ", "AQBxyz", spotifyLoopbackURI},
 		{"打开了 http://127.0.0.1:8080/oauth/spotify/callback?code=AQC9&state=t 页面", "AQC9", spotifyLoopbackURI},
-		{"https://denon.cheek.day/oauth/spotify/callback?code=Z&state=t", "Z", "https://denon.cheek.day/oauth/spotify/callback"},
+		{"https://relay.example.com/oauth/spotify/callback?code=Z&state=t", "Z", "https://relay.example.com/oauth/spotify/callback"},
 	}
 	for _, c := range cases {
 		code, red, err := parsePastedCode(c.in)

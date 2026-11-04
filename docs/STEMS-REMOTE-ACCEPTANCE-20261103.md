@@ -25,7 +25,7 @@
 | 段 | 设计 | 实际部署 / 实测 |
 |---|---|---|
 | 在线曲下载 | 用户期望在 clawbot 下载 | **未实现**。relay 从第一次提交 c24a140（11-02）起对 `/api/audio` 等一律返回 410；在线曲由碟机本机的 `sc5000-deemixd` 下载。git 里从来没有远端缓存方案 |
-| 分轨输入 | — | Engine 在碟机上解码，float32 PCM 实时逐块上传：deck → `denon.cheek.day`（碟机上解析为 192.168.1.6:443，即路由器边缘）→ clawbot relay :6595 → stemsd :6596 → `worker.py` |
+| 分轨输入 | — | Engine 在碟机上解码，float32 PCM 实时逐块上传：deck → `relay.example.com`（碟机上解析为 192.168.1.6:443，即路由器边缘）→ clawbot relay :6595 → stemsd :6596 → `worker.py` |
 | 分离器 | — | numpy/scipy 频谱 HPSS / 声像近似，**不是神经网络模型**（clawbot 上没有 torch/demucs）。四轨相加等于原曲 |
 | 打包 | — | Engine 在碟机上自行编码并加密，写入 U 盘 `Engine Library/Stems/<trackId> <uuid>.stems` |
 | 缓存 | — | **无**。同一首重新渲染会全量重新上传、重新计算 |
@@ -110,7 +110,7 @@ systemctl restart sc5000-stemsd sc5000-deemix-relay
 | B1 | 速度：拿到 Engine 的实际 maxBlockSize 和逐块往返后再决定是否做客户端流水线（见 6.2） | 待 A1/A2 数据 |
 | B2 | 缓存与在线曲远端预取（见 6.1） | 设计中 |
 
-### 5.1 A1 实测（碟机 → denon.cheek.day → 192.168.1.6 → relay → stemsd，2026-11-03 15:07–15:10 UTC）
+### 5.1 A1 实测（碟机 → relay.example.com → 192.168.1.6 → relay → stemsd，2026-11-03 15:07–15:10 UTC）
 
 各跑一次，均为 20 s 合成立体声 44.1 kHz，`-block 1024`，lockstep，done 后 stdin 保持打开，外层限时 180 s。开始前确认碟机没有 `stems-processor` 进程、clawbot 没有 worker 进程。
 

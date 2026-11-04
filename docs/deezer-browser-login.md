@@ -56,7 +56,7 @@ curl -fsS http://127.0.0.1:6595/healthz
 
 `20261102T174854Z-clawbot-104-before-deezer-browser-deploy-state-a36a51a27752-sc5000-relay.tar.gz`
 
-Spotify 默认 Client ID `1c7c775b12b642b38e0884afcfd6169c` 已注册 `https://denon.cheek.day/oauth/spotify/callback`，因此默认使用自动 HTTPS 回调；授权范围为 `user-library-read playlist-read-private playlist-read-collaborative`。
+Spotify 默认 Client ID `1c7c775b12b642b38e0884afcfd6169c` 已注册 `https://relay.example.com/oauth/spotify/callback`，因此默认使用自动 HTTPS 回调；授权范围为 `user-library-read playlist-read-private playlist-read-collaborative`。
 
 ## 本次部署验收
 

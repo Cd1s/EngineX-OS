@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	// DefaultRelayURL mirrors webui.DefaultRelayURL: the address stream-sync
-	// uses when deemix-config.json does not name one.
-	DefaultRelayURL = "https://denon.cheek.day"
+	// DefaultRelayURL is empty: operators configure their own self-hosted relay
+	// in deemix-config.json (via http://sc5000.lan:8080) or SC5000_STEMS_URL.
+	DefaultRelayURL = ""
 	// DefaultRelayConfig is stream-sync's relay settings file on the deck.
 	DefaultRelayConfig = "/data/sc5000-custom/state/deemix-config.json"
 	// DefaultTokenFile holds the renderer's internal token for direct mode.
@@ -25,7 +25,8 @@ const (
 )
 
 // Client is a resolved backend: the base URL Proxy posts /v1/engine to and
-// the bearer credential it presents.
+// the bearer credential it presents. An empty Endpoint means no renderer is
+// set up (a standalone deck): stems-processor then renders locally.
 type Client struct {
 	Endpoint string
 	Secret   string
@@ -67,6 +68,9 @@ func ResolveClient(getenv func(string) string) (Client, error) {
 		path = DefaultRelayConfig
 	}
 	relay, password, err := readRelayConfig(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Client{Source: "standalone"}, nil
+	}
 	if err != nil {
 		return Client{}, err
 	}
@@ -74,7 +78,7 @@ func ResolveClient(getenv func(string) string) (Client, error) {
 		password = override
 	}
 	if password == "" {
-		return Client{}, fmt.Errorf("%s: no relay password (deemixPassword) set; set it in the deck console or SC5000_STEMS_TOKEN", path)
+		return Client{Source: "standalone"}, nil
 	}
 	if !validEndpoint(relay) {
 		return Client{}, fmt.Errorf("%s: relay address must be https, or http on a private network", path)
