@@ -158,3 +158,20 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **遗留**：
   - Engine 重启后蓝牙开关会变回关闭，蓝牙输入分配也回到 None（原厂行为，没有处理）。
   - dev eval 通道在 Engine 重启后会重放最后一条脚本，切语言的命令曾因此执行了两次。只影响调试，正式包里没有这个通道。
+
+## 5.0.4.2：4.3.x 升级链路核验、开机前已插 U 盘重扫修复与第二台 SC5000 线刷（2026-11-05 追加，Opus 5.5）
+
+- **4.3.x 升级核验**：
+  - Ghidra 反编译 4.3.4 `Engine` 的 `UsbUpdateChecker::findImage`（`0x5fdd60`）、`UsbUpdateChecker::setImage`（`0x5fd4f0`）、`UpdaterController::setLatestLocalVersion`（`0x34ee40`）与 `SemVer`（`0x11c9268`）確認：`setLatestLocalVersion` 不走三段式 SemVer 校验，8 个机型的 `*-5.0.4.2-*-Update.img` 在 4.3.x 与 5.0.x 下均唯一匹配并提取出 `5.0.4.2`。
+  - 在 IN 的 `unshare -m -n` + `qemu-arm` 沙箱中用 4.3.4 rootfs 的 `/usr/sbin/az01-update`（`libaz01-prog.so.0.89`）实测官方 `5.0.4` 镜像、我们的 `5.0.4.2` 镜像与篡改 1 字节的对照镜像：前两者均通过 `verifying image...`（`open_img=0, verify_img=0`），篡改镜像报 `file corrupt`。
+- **修复 `Update.qml` 未触发本地 U 盘重扫**：
+  - `tools/ui-mod/build_packs.py` 此前将 `Update.qml` 的 `PlanckGUI.views.updaterController.checkForUpdates()` 替换为 `root.scCheckUpdate()`，导致已刷 EngineX OS 的机器在开机前就插着固件 U 盘时，打开设置页不会触发 `UsbUpdateChecker::check()` 重扫。现保留原厂 `checkForUpdates()` 并紧接调用 `root.scCheckUpdate()`。
+  - 三语 `README*.md` 安装步骤补充说明：原厂 4.3.x 与 5.0.x 均可直接刷入；进入 `Firmware Update Mode` 后看到 `Found 5.0.4.2 on USB/SD` 选 `USB/SD` 即可。
+- **第二台 SC5000（`A11712213906381` / `192.168.1.187`）实机从 4.3.x 线刷**：
+  - 刷前状态备份：`20261104T195438Z-cheekmacbookair-…-d85319d30658-sc5000-deck2-A11712213906381-pre-flash.txt`。
+  - 通过 `fastboot oem inmusic-unlock-magic-7de5fbc22b8c524e` + `-S 0 flash splash / recoverysplash / rootfs` 刷入 `5.0.4.2`（64.6 s），一次启动成功；`engine`、`stream-sync`、`sc5000-deemixd`、`sc5000-custom-sshd` 全部 `active`，`/data` 原有配置保留，已放置 `/data/sc5000-custom/keep-release-key`。
+- **Release `v5.0.4.2` 重发**（`--clobber`）：
+  - SC5000 / SC5000M / PRIME GO：`77ac2d8ca2f9d4a7bc8f1e61396e58e1704ce8ffd85b0c5095d7323fdb443eca`
+  - SC6000 / SC6000M：`7cd635c56d27f960811a27da4360063833c9fd35715dc53720eba813b46565e5`
+  - PRIME 4 / PRIME 2 / Mixstream Pro：`00b8dc0ae90548486a10a2977b180b2d308663e20944f66aafb12d9446a19711`
+
