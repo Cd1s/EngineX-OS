@@ -46,24 +46,58 @@ SERVICES_MAIN = """
 	property string scJog: "static"
 	property string scUpdateRepo: "Cd1s/EngineX-OS"
 	property string scUpdateText: ""
-	// Offers this model's release image to Engine's own online updater.
+	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
+	property bool scUpdating: false
+	Timer {
+		id: scUpdatePollTimer
+		interval: 500
+		repeat: true
+		running: root.scUpdating
+		onTriggered: root.scFetchUpdate(false)
+	}
+	function scApplyUpdate() {
+		if (scUpdating) return
+		scUpdating = true
+		scUpdateText = scT("Updating…")
+		if (scUpdateModel.count > 0) {
+			scUpdateModel.setProperty(0, "isEnabled", false)
+			scUpdateModel.setProperty(0, "buttonLabel", scT("Updating…"))
+			scUpdateModel.setProperty(0, "downloadProgress", 0.05)
+		}
+		scFetchUpdate(true)
+	}
 	// EngineX checks its own GitHub repository, not Denon's firmware server.
 	function scCheckUpdate() {
+		if (scUpdating) return
 		scUpdateText = scT("Checking GitHub…")
 		scUpdateModel.clear()
+		scFetchUpdate(false)
+	}
+	function scFetchUpdate(apply) {
 		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/update")
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/update" + (apply ? "?apply=1" : ""))
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4) return
 			if (x.status !== 200) {
+				scUpdating = false
 				scUpdateText = scT("GitHub unreachable")
 				return
 			}
 			const v = JSON.parse(x.responseText)
-			scUpdateText = v.error ? scT(v.error) : v.updateAvailable ? scT("New release available:") + " " + v.latestVersion : scT("Up to date") + " (" + v.currentVersion + ")"
-			if (v.updateAvailable && v.downloadUrl)
-				scUpdateModel.append({ displayVersion: v.latestVersion, imageUrl: v.downloadUrl, buttonLabel: scT("Update"), isEnabled: true, downloadProgress: 0 })
+			scUpdating = !!v.updating
+			scUpdateText = v.error ? scT(v.error) : v.updating ? scT("Updating…") + " " + Math.round((v.progress || 0.05) * 100) + "%" : v.updateAvailable ? scT("New release available:") + " " + v.latestVersion : scT("Up to date") + " (" + v.currentVersion + ")"
+			if (v.updateAvailable && v.downloadUrl) {
+				const lbl = v.updating ? Math.round((v.progress || 0.05) * 100) + "%" : scT("Update")
+				const prog = v.updating ? (v.progress || 0.05) : 0
+				if (scUpdateModel.count < 1)
+					scUpdateModel.append({ displayVersion: v.latestVersion, imageUrl: v.downloadUrl, buttonLabel: lbl, isEnabled: !v.updating, downloadProgress: prog })
+				else {
+					scUpdateModel.setProperty(0, "buttonLabel", lbl)
+					scUpdateModel.setProperty(0, "isEnabled", !v.updating)
+					scUpdateModel.setProperty(0, "downloadProgress", prog)
+				}
+			}
 		}
 		x.send()
 	}
@@ -701,6 +735,8 @@ def edits(dev: bool):
             ("    model: PlanckGUI.views.updaterController.releaseVersionsModel\n", "    model: root.scUpdateModel\n"),
             ("        text: `Engine OS ${model.displayVersion} is available`\n",
              "        text: root.scT(\"New release available:\") + \" EngineX OS \" + model.displayVersion\n"),
+            ("        onClicked: PlanckGUI.views.updaterController.updateOnlineForUrl(model.displayVersion, model.imageUrl)\n",
+             "        onClicked: root.scApplyUpdate()\n"),
             ('        text: "You\'re running the latest version"\n        visible: control.count < 1\n',
              "        text: root.scUpdateText\n        visible: true\n"),
             ("            PlanckGUI.views.updaterController.checkForUpdates()\n", "            root.scCheckUpdate()\n"),
