@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/compat"
-	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 	"github.com/google/uuid"
 )
 
@@ -67,14 +67,23 @@ type exportFileInfo struct {
 func (f exportFileInfo) Size() int64        { return f.size }
 func (f exportFileInfo) ModTime() time.Time { return time.Time{} }
 
-// prepareFast trusts the export's paths without looking at the disk. A path that
-// tries to leave the volume is dropped.
-func prepareFast(l *rekordbox.Library) []preparedTrack {
+// prepareFast trusts the export's metadata without reading audio, but stores the
+// spelling the volume actually uses: case and NFC/NFD differences are resolved
+// from directory entries, as in a full import (#6). A path that cannot be
+// resolved (missing file) keeps the export spelling; one that tries to leave
+// the volume is dropped.
+func prepareFast(res *compat.Resolver, l *rekordbox.Library) []preparedTrack {
 	prepared := make([]preparedTrack, 0, len(l.Tracks))
 	paths := map[string]bool{}
 	for _, t := range l.Tracks {
 		rel := strings.TrimLeft(path.Clean("/"+t.Path), "/")
-		if rel == "" || t.Path == "" || strings.HasPrefix(rel, "PIONEER/") || paths[rel] {
+		if rel == "" || t.Path == "" || strings.HasPrefix(rel, "PIONEER/") {
+			continue
+		}
+		if resolved, e := res.Resolve(t.Path); e == nil {
+			rel = resolved
+		}
+		if paths[rel] {
 			continue
 		}
 		paths[rel] = true

@@ -17,9 +17,9 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/bridge"
-	"github.com/Cd1s/sc5000-custom-os/pkg/enginedb"
-	"github.com/Cd1s/sc5000-custom-os/pkg/prolink"
+	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
 
 // RBBridge converts one mounted export, or listens for Pro DJ Link.

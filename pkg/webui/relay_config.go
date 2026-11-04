@@ -11,9 +11,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/stems"
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/internal/stems"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 type relayConfig struct {
@@ -79,8 +80,18 @@ func validRelayURL(raw string) bool {
 func (s *Server) updateRelayConfig(relay, password *string) error {
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
+	return s.updateRelayConfigLocked(relay, password)
+}
+
+// updateRelayConfigLocked needs s.uiMu. Moving the relay to another host drops
+// the saved password unless a new one comes with it: it was never meant for
+// that host (#8).
+func (s *Server) updateRelayConfigLocked(relay, password *string) error {
 	v := s.loadRelayConfig()
 	if relay != nil {
+		if relayHost(*relay) != relayHost(v.RelayURL) {
+			v.Password = ""
+		}
 		v.RelayURL = *relay
 	}
 	if password != nil {
@@ -89,12 +100,12 @@ func (s *Server) updateRelayConfig(relay, password *string) error {
 	return providers.SaveJSON(s.relayConfigPath(), v)
 }
 
-// optional turns an empty form field into "leave this setting alone".
-func optional(v string) *string {
-	if v == "" {
-		return nil
+func relayHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
 	}
-	return &v
+	return strings.ToLower(u.Scheme + "://" + u.Host)
 }
 
 func (s *Server) relayConfigGet(w http.ResponseWriter, r *http.Request) {

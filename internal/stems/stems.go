@@ -39,6 +39,10 @@ const maxFrame = 1 << 20
 // the caller may still serve the session another way.
 var ErrUnreachable = errors.New("stems backend unreachable")
 
+// ErrUnavailable: the backend answered 502/503/504 before any reply reached
+// Engine. Whether Engine's stdin was touched is for the caller to tell.
+var ErrUnavailable = errors.New("stems backend unavailable")
+
 // Secret reads the renderer's internal bearer token (at least 24 characters).
 func Secret(path string) (string, error) {
 	b, e := os.ReadFile(path)
@@ -96,6 +100,11 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		switch resp.StatusCode {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			// Busy renderer or relay without one: nothing reached Engine yet (#41).
+			return fmt.Errorf("%w: backend status %d", ErrUnavailable, resp.StatusCode)
+		}
 		return fmt.Errorf("backend status %d", resp.StatusCode)
 	}
 	if resp.Header.Get("X-Stems-Protocol") != Protocol {

@@ -1,22 +1,16 @@
-// LD_PRELOAD shim for /usr/libexec/edisksd. edisksd answers Engine's D-Bus Mount
-// call only after mnt_context_mount() returns, so anything done here is complete
-// before Engine can open the volume. util-linux 2.39 mounts through
-// fsopen/move_mount, so mount(2) itself is not a usable interposition point.
-//
-// After a successful mount below /media:
-//   1. read-only HFS+ with a rekordbox export gets its writable Engine Library
-//      overlay (hfsplus.ko cannot take writes, and refuses to be a lower layer);
-//   2. rb-bridge converts the export;
-//   3. engine-guardian repairs table data only.
-// Engine is not attached yet, so these are the only moments an external process
-// may write its databases. Failures are logged and never fail the mount.
+// Writable HFS library presentation without using HFS as an overlayfs lower.
+// All mount changes occur before Engine attaches. Only recorded mount IDs may
+// be removed; a failed eject restores the preallocated private view tree.
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,166 +18,458 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/sysmacros.h>
 #include <sys/vfs.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
+#ifndef LIB_ROOT
+#define LIB_ROOT "/data/sc5000-custom/hfs-libraries"
+#endif
+#ifndef RUN_ROOT
+#define RUN_ROOT "/run/sc5000-hfs-views"
+#endif
+#ifndef MEDIA_ROOT
+#define MEDIA_ROOT "/media"
+#endif
 #define HFSPLUS_MAGIC 0x482b
-#define HOOK_BUDGET_MS 20000
-#define LIB_ROOT "/data/sc5000-custom/hfs-lib"
-#define EMPTY_LOWER "/run/sc5000-empty"
-
+#define HOOK_BUDGET_MS INT64_C(20000)
+#define MAX_VIEW_ENTRIES 4096
+#define VIEW_MAGIC UINT64_C(0x5343484653563031)
 struct libmnt_context;
 extern const char *mnt_context_get_target(struct libmnt_context *);
+extern const char *mnt_context_get_source(struct libmnt_context *);
 extern int mnt_context_get_status(struct libmnt_context *);
+extern int mnt_context_set_syscall_status(struct libmnt_context *, int);
+static pthread_mutex_t view_lock = PTHREAD_MUTEX_INITIALIZER;
+struct view_child { char name[NAME_MAX + 1]; uint64_t mount_id; };
+struct owned_view {
+    uint64_t magic, base_id, public_id;
+    unsigned count;
+    char target[PATH_MAX], anchor[PATH_MAX], identity[80];
+    struct view_child child[MAX_VIEW_ENTRIES];
+};
 
 static void note(const char *what, const char *path, int err) {
-	fprintf(stderr, "edisksd-hook: %s %s%s%s\n", what, path, err ? ": " : "", err ? strerror(err) : "");
+    fprintf(stderr,"edisksd-hook: %s %s%s%s\n",what,path,err?": ":"",err?strerror(err):"");
 }
-
-// volume returns the name in /media/<name>, or NULL for anything else.
+static int path_join(char *out, size_t size, const char *a, const char *b) {
+    if (snprintf(out,size,"%s/%s",a,b) >= (int)size) { errno=ENAMETOOLONG; return -1; }
+    return 0;
+}
 static const char *volume(const char *target) {
-	if (!target || strncmp(target, "/media/", 7) != 0) return NULL;
-	const char *name = target + 7;
-	if (!*name || strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, "..")) return NULL;
-	return name;
+    size_t n=strlen(MEDIA_ROOT);
+    if (!target || strncmp(target,MEDIA_ROOT,n) || target[n]!='/') return NULL;
+    const char *name=target+n+1;
+    if (!*name || strchr(name,'/') || !strcmp(name,".") || !strcmp(name,"..")) return NULL;
+    return name;
+}
+static int64_t timespec_ms(const struct timespec *t) {
+    return (int64_t)t->tv_sec * INT64_C(1000) + t->tv_nsec/1000000;
+}
+static int64_t deadline_from(int64_t now) {
+    return now>INT64_MAX-HOOK_BUDGET_MS?INT64_MAX:now+HOOK_BUDGET_MS;
+}
+static int64_t now_ms(void) {
+    struct timespec t;
+    if (clock_gettime(CLOCK_MONOTONIC,&t)) return INT64_MAX;
+    return timespec_ms(&t);
+}
+static int budget(int64_t deadline) {
+    if (now_ms() >= deadline) { errno=ETIMEDOUT; return -1; }
+    return 0;
 }
 
-static long now_ms(void) {
-	struct timespec t;
-	clock_gettime(CLOCK_MONOTONIC, &t);
-	return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+// Check EVERY component. A missing final component is allowed only when the
+// caller is about to create it in an already checked, trusted parent.
+static int safe_path(const char *path, int missing_final) {
+    if (!path || path[0]!='/') { errno=EINVAL; return -1; }
+    char copy[PATH_MAX];
+    if (snprintf(copy,sizeof copy,"%s",path)>=(int)sizeof copy) {errno=ENAMETOOLONG;return -1;}
+    for (char *p=copy+1;;p++) if (!*p || *p=='/') {
+        char saved=*p; *p=0;
+        const char *part=strrchr(copy,'/'); part=part?part+1:copy;
+        if (!*part || !strcmp(part,".") || !strcmp(part,"..")) {errno=EINVAL;return -1;}
+        struct stat st;
+        if (lstat(copy,&st)) { if (!saved && missing_final && errno==ENOENT) return 0; return -1; }
+        if (S_ISLNK(st.st_mode)) {errno=ELOOP;return -1;}
+        if (saved && !S_ISDIR(st.st_mode)) {errno=ENOTDIR;return -1;}
+        *p=saved; if (!saved) return 0;
+    }
 }
-
 static int make_dirs(const char *path) {
-	char p[PATH_MAX];
-	if (snprintf(p, sizeof p, "%s", path) >= (int)sizeof p) return ENAMETOOLONG;
-	for (char *s = p + 1; *s; s++) {
-		if (*s != '/') continue;
-		*s = 0;
-		if (mkdir(p, 0755) && errno != EEXIST) return errno;
-		*s = '/';
-	}
-	if (mkdir(p, 0755) && errno != EEXIST) return errno;
-	return 0;
+    char copy[PATH_MAX];
+    if (snprintf(copy,sizeof copy,"%s",path)>=(int)sizeof copy) {errno=ENAMETOOLONG;return -1;}
+    for (char *p=copy+1;;p++) if (!*p || *p=='/') {
+        char saved=*p; *p=0;
+        if (safe_path(copy,1)) return -1;
+        if (mkdir(copy,0700) && errno!=EEXIST) return -1;
+        struct stat st;
+        if (lstat(copy,&st) || !S_ISDIR(st.st_mode)) {errno=ENOTDIR;return -1;}
+        *p=saved; if (!saved) return 0;
+    }
+}
+static uint64_t mount_id(const char *path) {
+    struct statx st;
+    if (safe_path(path,0) || statx(AT_FDCWD,path,AT_SYMLINK_NOFOLLOW|AT_NO_AUTOMOUNT,STATX_MNT_ID,&st) ||
+        !(st.stx_mask&STATX_MNT_ID)) return 0;
+    return st.stx_mnt_id;
+}
+static int secure_runtime(void) {
+    struct stat st;
+    if (make_dirs(RUN_ROOT) || lstat(RUN_ROOT,&st) || st.st_uid!=geteuid() || (st.st_mode&077)) {
+        errno=EACCES;return -1;
+    }
+    return 0;
+}
+static uint64_t hash_bytes(uint64_t h,const void *data,size_t n) {
+    const unsigned char *p=data;
+    while(n--) {h^=*p++;h*=UINT64_C(1099511628211);} return h;
+}
+static int volume_identity(const char *source,char out[80]) {
+    char device[PATH_MAX]; struct stat st;
+    if (!source || !realpath(source,device) || strncmp(device,"/dev/",5) ||
+        stat(device,&st) || !S_ISBLK(st.st_mode)) {errno=ENODEV;return -1;}
+    // libmount already depends on libblkid on the supported image. Resolve the
+    // optional API dynamically so the shim has no new loader dependency.
+    char *(*get_tag)(void *,const char *,const char *)=dlsym(RTLD_DEFAULT,"blkid_get_tag_value");
+    char *uuid=get_tag?get_tag(NULL,"UUID",device):NULL;
+    uint64_t h=UINT64_C(14695981039346656037);
+    if (uuid && *uuid) {
+        h=hash_bytes(h,uuid,strlen(uuid)); free(uuid);
+        snprintf(out,80,"uuid-%016llx",(unsigned long long)h);return 0;
+    }
+    free(uuid);
+    int fd=open(device,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    if(fd<0)return -1;
+    unsigned char header[8192]; ssize_t n=pread(fd,header,sizeof header,0);int saved=errno;close(fd);errno=saved;
+    if(n<1024){if(n>=0)errno=EIO;return -1;}
+    h=hash_bytes(h,header,(size_t)n);
+    snprintf(out,80,"signature-%016llx",(unsigned long long)h);return 0;
 }
 
-// has_export accepts PIONEER and macOS .PIONEER in any case, matching rb-bridge.
+// Keep the I/O buffer out of recursive directory-walk frames.
+static __attribute__((noinline)) int copy_file_data(int in,int out,int64_t deadline) {
+    char buf[8192];ssize_t n;
+    while((n=read(in,buf,sizeof buf))!=0) {
+        if(n<0){if(errno==EINTR)continue;return -1;}
+        if(budget(deadline))return -1;
+        for(ssize_t pos=0;pos<n;) {
+            ssize_t wrote=write(out,buf+pos,(size_t)(n-pos));
+            if(wrote<0&&errno==EINTR)continue;
+            if(wrote<=0){if(!wrote)errno=EIO;return -1;}pos+=wrote;
+        }
+    }
+    return fsync(out);
+}
+
+// No links, special files or traversal are accepted in seeded Engine metadata.
+// O_NOFOLLOW/openat pins each source directory and each copied file.
+static int copy_tree(int src,int dst,int64_t deadline,unsigned depth) {
+    if(depth>64){errno=ELOOP;return -1;}
+    int copyfd=openat(src,".",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(copyfd<0)return -1;
+    DIR *dir=fdopendir(copyfd);if(!dir){close(copyfd);return -1;}
+    int rc=0;struct dirent *e;
+    for(;;) {
+        errno=0;e=readdir(dir);if(!e){if(errno)rc=-1;break;}
+        if(!strcmp(e->d_name,".") || !strcmp(e->d_name,".."))continue;
+        if(budget(deadline)){rc=-1;break;}
+        struct stat st;
+        if(fstatat(src,e->d_name,&st,AT_SYMLINK_NOFOLLOW)){rc=-1;break;}
+        if(S_ISLNK(st.st_mode) || (!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))){errno=ELOOP;rc=-1;break;}
+        int in=openat(src,e->d_name,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|(S_ISDIR(st.st_mode)?O_DIRECTORY:0));
+        if(in<0){rc=-1;break;}
+        if(S_ISDIR(st.st_mode)) {
+            int out=-1;
+            if(dst>=0) {
+                if(mkdirat(dst,e->d_name,0700)){close(in);rc=-1;break;}
+                out=openat(dst,e->d_name,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+                if(out<0){close(in);rc=-1;break;}
+            }
+            rc=copy_tree(in,out,deadline,depth+1);if(out>=0)close(out);
+        } else if(dst>=0) {
+            int out=openat(dst,e->d_name,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);
+            if(out<0){close(in);rc=-1;break;}
+            rc=copy_file_data(in,out,deadline);
+            close(out);
+        }
+        close(in);if(rc)break;
+    }
+    if(!rc&&dst>=0&&fsync(dst))rc=-1;
+    int saved=errno;closedir(dir);errno=saved;return rc;
+}
+static void remove_tree(int parent,const char *name) {
+    int fd=openat(parent,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(fd<0){unlinkat(parent,name,0);return;}
+    DIR *d=fdopendir(fd);if(!d){close(fd);return;}
+    struct dirent *e;
+    while((e=readdir(d)))if(strcmp(e->d_name,".")&&strcmp(e->d_name,"..")) {
+        struct stat st;
+        if(!fstatat(fd,e->d_name,&st,AT_SYMLINK_NOFOLLOW)&&S_ISDIR(st.st_mode))remove_tree(fd,e->d_name);
+        else unlinkat(fd,e->d_name,0);
+    }
+    closedir(d);unlinkat(parent,name,AT_REMOVEDIR);
+}
+static int seed_library(const char *target,const char *identity,char library[PATH_MAX],int64_t deadline) {
+    char native[PATH_MAX],root[PATH_MAX],stage[PATH_MAX];struct stat st;
+    if(path_join(native,sizeof native,target,"Engine Library")||safe_path(native,1)||
+       make_dirs(LIB_ROOT))return -1;
+    struct stat cache_stat;
+    if(lstat(LIB_ROOT,&cache_stat)||cache_stat.st_uid!=geteuid()||(cache_stat.st_mode&077)){errno=EACCES;return -1;}
+    if(path_join(root,sizeof root,LIB_ROOT,identity)||make_dirs(root))return -1;
+    uint64_t signature=0;int src=-1;
+    if(!lstat(native,&st)) {
+        if(!S_ISDIR(st.st_mode)){errno=ENOTDIR;return -1;}
+        src=open(native,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(src<0)return -1;
+        if(copy_tree(src,-1,deadline,0)){close(src);return -1;} // validate reused native trees too
+        // A changed PC-authored database gets a separate seed rather than
+        // overwriting an older sidecar containing deck-authored cues.
+        const char *files[]={"Database2/m.db","Database2/m.db-wal"};
+        for(unsigned i=0;i<2;i++) {
+            char db[PATH_MAX];
+            if(path_join(db,sizeof db,native,files[i])||safe_path(db,1)){if(errno==ENOENT)continue;close(src);return -1;}
+            if(lstat(db,&st)){if(errno==ENOENT)continue;close(src);return -1;}
+            // Content, not struct padding or coarse HFS timestamps, identifies
+            // PC-side changes. A copied file with preserved mtime must refresh.
+            int64_t size=(int64_t)st.st_size;
+            signature=hash_bytes(signature,&i,sizeof i);
+            signature=hash_bytes(signature,&size,sizeof size);
+            int fd=open(db,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(fd<0){close(src);return -1;}
+            char buf[8192];ssize_t n;
+            for(;;) {
+                if(budget(deadline)){close(fd);close(src);return -1;}
+                n=read(fd,buf,sizeof buf);
+                if(n<0&&errno==EINTR)continue;
+                if(n<=0)break;
+                signature=hash_bytes(signature,buf,(size_t)n);
+            }
+            int saved=errno;close(fd);errno=saved;
+            if(n<0){close(src);return -1;}
+        }
+    } else if(errno!=ENOENT)return -1;
+    char name[80];snprintf(name,sizeof name,"library-%016llx",(unsigned long long)signature);
+    if(path_join(library,PATH_MAX,root,name)){if(src>=0)close(src);return -1;}
+    if(!lstat(library,&st)) {
+        if(src>=0)close(src);
+        if(safe_path(library,0)||!S_ISDIR(st.st_mode)){errno=ELOOP;return -1;}
+        int fd=open(library,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return -1;
+        int rc=copy_tree(fd,-1,deadline,0);close(fd);return rc;
+    }
+    if(errno!=ENOENT){if(src>=0)close(src);return -1;}
+    if(snprintf(stage,sizeof stage,"%s/.seed-XXXXXX",root)>=(int)sizeof stage){if(src>=0)close(src);errno=ENAMETOOLONG;return -1;}
+    if(!mkdtemp(stage)){if(src>=0)close(src);return -1;}
+    int dst=open(stage,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC),rc=dst<0?-1:0;
+    if(!rc&&src>=0)rc=copy_tree(src,dst,deadline,0);
+    if(!rc&&fsync(dst))rc=-1;
+    if(dst>=0)close(dst);
+    if(src>=0)close(src);
+    if(!rc)rc=rename(stage,library);
+    if(!rc){int parent=open(root,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(parent<0)rc=-1;else{rc=fsync(parent);close(parent);}}
+    if(rc){int saved=errno;int parent=open(root,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(parent>=0){remove_tree(parent,strrchr(stage,'/')+1);close(parent);}errno=saved;}
+    return rc;
+}
+static int bind_checked(const char *source,const char *target,unsigned long flags) {
+    if(safe_path(source,0)||safe_path(target,0))return -1;
+    return mount(source,target,NULL,flags,NULL);
+}
+static int save_record(struct owned_view *v) {
+    char path[PATH_MAX],temp[PATH_MAX];
+    if(path_join(path,sizeof path,v->anchor,"record")||path_join(temp,sizeof temp,v->anchor,"record.new"))return -1;
+    if(unlink(temp)&&errno!=ENOENT)return -1;
+    int fd=open(temp,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)return -1;
+    size_t bytes=offsetof(struct owned_view,child)+(size_t)v->count*sizeof v->child[0],done=0;
+    int rc=0;
+    while(done<bytes){ssize_t n=write(fd,(char *)v+done,bytes-done);if(n<0&&errno==EINTR)continue;if(n<=0){rc=-1;break;}done+=(size_t)n;}
+    if(!rc)rc=fsync(fd);
+    int saved=errno;close(fd);errno=saved;
+    if(!rc)rc=rename(temp,path);
+    if(!rc){int parent=open(v->anchor,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(parent<0)rc=-1;else{rc=fsync(parent);close(parent);}}
+    if(rc){saved=errno;unlink(temp);errno=saved;}
+    return rc;
+}
+static void cleanup_view(struct owned_view *v) {
+    // The anchor is our own private mount tree, never a media-controlled path.
+    if(safe_path(v->anchor,0))return;
+    if(umount2(v->anchor,MNT_DETACH|UMOUNT_NOFOLLOW)&&errno!=EINVAL&&errno!=ENOENT)return;
+    char path[PATH_MAX];if(!path_join(path,sizeof path,v->anchor,"record"))unlink(path);
+    if(!path_join(path,sizeof path,v->anchor,"record.new"))unlink(path);
+    const char *names[]={"backing","view","rescue"};
+    for(unsigned i=0;i<3;i++)if(!path_join(path,sizeof path,v->anchor,names[i]))rmdir(path);
+    rmdir(v->anchor);
+}
+static int add_child(struct owned_view *v,const char *name,const char *source,int isdir) {
+    if(v->count==MAX_VIEW_ENTRIES){errno=E2BIG;return -1;}
+    char root[PATH_MAX],dest[PATH_MAX];
+    if(path_join(root,sizeof root,v->anchor,"view")||path_join(dest,sizeof dest,root,name))return -1;
+    if(isdir){if(mkdir(dest,0700))return -1;}
+    else {int fd=open(dest,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)return -1;close(fd);}
+    if(bind_checked(source,dest,MS_BIND|MS_REC))return -1;
+    snprintf(v->child[v->count++].name,NAME_MAX+1,"%s",name);return 0;
+}
+static int update_public_ids(struct owned_view *v) {
+    v->public_id=mount_id(v->target);if(!v->public_id)return -1;
+    for(unsigned i=0;i<v->count;i++) {
+        char p[PATH_MAX];if(path_join(p,sizeof p,v->target,v->child[i].name))return -1;
+        v->child[i].mount_id=mount_id(p);if(!v->child[i].mount_id)return -1;
+    }
+    return save_record(v);
+}
+static struct owned_view *find_view(const char *,const char *);
+static int prepare_view(const char *target,const char *identity,int64_t deadline) {
+    if(secure_runtime()||safe_path(target,0))return -1;
+    struct owned_view *active=find_view(NULL,identity);
+    if(active){free(active);errno=EBUSY;return -1;}
+    char library[PATH_MAX];if(seed_library(target,identity,library,deadline))return -1;
+    struct owned_view *v=calloc(1,sizeof *v);if(!v)return -1;
+    v->magic=VIEW_MAGIC;snprintf(v->target,sizeof v->target,"%s",target);snprintf(v->identity,sizeof v->identity,"%s",identity);
+    v->base_id=mount_id(target);
+    if(!v->base_id||snprintf(v->anchor,sizeof v->anchor,"%s/view-XXXXXX",RUN_ROOT)>=(int)sizeof v->anchor||!mkdtemp(v->anchor)){free(v);return -1;}
+    int rc=-1;char backing[PATH_MAX],view[PATH_MAX],rescue[PATH_MAX];
+    if(bind_checked(v->anchor,v->anchor,MS_BIND)||mount(NULL,v->anchor,NULL,MS_PRIVATE|MS_REC,NULL))goto done;
+    if(path_join(backing,sizeof backing,v->anchor,"backing")||path_join(view,sizeof view,v->anchor,"view")||path_join(rescue,sizeof rescue,v->anchor,"rescue")||
+       mkdir(backing,0700)||mkdir(view,0700)||mkdir(rescue,0700))goto done;
+    if(bind_checked(target,backing,MS_BIND|MS_REC)||mount(NULL,backing,NULL,MS_PRIVATE|MS_REC,NULL)||
+       mount("sc5000-hfs-view",view,"tmpfs",MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=16m"))goto done;
+    DIR *d=opendir(backing);if(!d)goto done;
+    struct dirent *e;int scan_error=0;
+    for(;;) {
+        errno=0;e=readdir(d);if(!e){if(errno)scan_error=1;break;}
+        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,"..")||!strcmp(e->d_name,"Engine Library"))continue;
+        char source[PATH_MAX];struct stat st;
+        if(budget(deadline)||path_join(source,sizeof source,backing,e->d_name)||lstat(source,&st)||S_ISLNK(st.st_mode)||
+           (!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))||add_child(v,e->d_name,source,S_ISDIR(st.st_mode))){if(!errno)errno=ELOOP;scan_error=1;break;}
+    }
+    closedir(d);if(scan_error||add_child(v,"Engine Library",library,1))goto done;
+    // Make the synthetic root read-only, while the separate library bind stays rw.
+    if(mount(NULL,view,"tmpfs",MS_REMOUNT|MS_RDONLY|MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=16m")||
+       budget(deadline)||bind_checked(view,target,MS_BIND|MS_REC))goto done;
+    if(update_public_ids(v)) {
+        int saved=errno;umount2(target,MNT_DETACH|UMOUNT_NOFOLLOW);errno=saved;goto done;
+    }
+    note("writable HFS library ready on",target,0);rc=0;
+ done: {int saved=errno;if(rc)cleanup_view(v);free(v);errno=saved;}return rc;
+}
+static struct owned_view *find_view(const char *target,const char *identity) {
+    if(secure_runtime()||(target&&safe_path(target,0)))return NULL;
+    DIR *d=opendir(RUN_ROOT);if(!d)return NULL;struct dirent *e;struct owned_view *found=NULL;
+    while((e=readdir(d))) {
+        if(strncmp(e->d_name,"view-",5))continue;
+        char anchor[PATH_MAX],path[PATH_MAX];
+        if(path_join(anchor,sizeof anchor,RUN_ROOT,e->d_name)||safe_path(anchor,0)||path_join(path,sizeof path,anchor,"record")||safe_path(path,0))continue;
+        int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)continue;struct stat st;
+        if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_uid!=geteuid()||(st.st_mode&077)){close(fd);continue;}
+        struct owned_view *v=calloc(1,sizeof *v);if(!v){close(fd);break;}
+        ssize_t bytes=0;
+        if(st.st_size>=(off_t)offsetof(struct owned_view,child)&&st.st_size<=(off_t)sizeof *v) {
+            while(bytes<st.st_size){ssize_t n=read(fd,(char *)v+bytes,(size_t)(st.st_size-bytes));if(n<0&&errno==EINTR)continue;if(n<=0){bytes=-1;break;}bytes+=n;}
+        }
+        close(fd);
+        if(bytes>=(ssize_t)offsetof(struct owned_view,child)&&v->magic==VIEW_MAGIC&&v->count<=MAX_VIEW_ENTRIES&&
+           bytes==(ssize_t)(offsetof(struct owned_view,child)+(size_t)v->count*sizeof v->child[0])&&
+           memchr(v->target,0,sizeof v->target)&&memchr(v->anchor,0,sizeof v->anchor)&&memchr(v->identity,0,sizeof v->identity)&&
+           (!target||!strcmp(v->target,target))&&(!identity||!strcmp(v->identity,identity))&&
+           !strcmp(v->anchor,anchor)&&mount_id(v->target)==v->public_id) {found=v;break;}
+        free(v);
+    }
+    closedir(d);return found;
+}
+
+static struct owned_view *load_view(const char *target) { return find_view(target,NULL); }
+
 static int has_export(const char *target) {
-	DIR *d = opendir(target);
-	if (!d) return 0;
-	int found = 0;
-	for (struct dirent *e; !found && (e = readdir(d));)
-		found = !strcasecmp(e->d_name, "PIONEER") || !strcasecmp(e->d_name, ".PIONEER");
-	closedir(d);
-	return found;
+    if(safe_path(target,0))return 0;
+    DIR *d=opendir(target);if(!d)return 0;int found=0;struct dirent *e;
+    while(!found&&(e=readdir(d)))if(!strcasecmp(e->d_name,"PIONEER")||!strcasecmp(e->d_name,".PIONEER")) {
+        struct stat st;found=!fstatat(dirfd(d),e->d_name,&st,AT_SYMLINK_NOFOLLOW)&&S_ISDIR(st.st_mode);
+    }
+    closedir(d);return found;
+}
+static int run(char *const argv[],int64_t deadline) {
+    if(budget(deadline))return -1;
+    pid_t pid=fork();if(pid<0)return -1;
+    if(!pid){setpgid(0,0);unsetenv("LD_PRELOAD");setenv("PATH","/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",1);execv(argv[0],argv);_exit(127);}
+    setpgid(pid,pid);
+    for(;;){int status;pid_t r=waitpid(pid,&status,WNOHANG);
+        if(r==pid){if(WIFEXITED(status)&&!WEXITSTATUS(status))return 0;errno=EIO;return -1;}
+        if(r<0&&errno!=EINTR)return -1;
+        if(budget(deadline)){kill(-pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}errno=ETIMEDOUT;return -1;}usleep(20000);
+    }
+}
+static void after_mount(struct libmnt_context *ctx) {
+    const char *target=mnt_context_get_target(ctx);
+    if(!volume(target)||safe_path(target,0))return;
+    int64_t deadline=deadline_from(now_ms());
+    int pioneer=has_export(target);char lib[PATH_MAX];
+    if(path_join(lib,sizeof lib,target,"Engine Library")||safe_path(lib,1)) {note("unsafe library path rejected on",target,errno);return;}
+    struct stat existing;
+    if(!lstat(lib,&existing)) {
+        int fd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+        if(fd<0)return;
+        int unsafe=copy_tree(fd,-1,deadline,0);close(fd);
+        if(unsafe){note("unsafe library contents rejected on",target,errno);return;}
+    }
+    struct statfs f;struct statvfs v;
+    if(!statfs(target,&f)&&f.f_type==HFSPLUS_MAGIC&&!statvfs(target,&v)&&(v.f_flag&ST_RDONLY)) {
+        char identity[80];
+        if(volume_identity(mnt_context_get_source(ctx),identity)||prepare_view(target,identity,deadline)){note("HFS view unavailable on",target,errno);return;}
+    }
+    if(pioneer){char *const a[]={"/usr/local/bin/rb-bridge","--mount-path",(char *)target,NULL};if(run(a,deadline))note("bridge failed on",target,errno);}
+    char db[PATH_MAX];
+    if(!pioneer&&!path_join(db,sizeof db,lib,"Database2/m.db")&&!safe_path(db,0)) {
+        char *const a[]={"/usr/local/bin/engine-guardian","--heal-mount",(char *)target,"--data-only",NULL};if(run(a,deadline))note("guardian failed on",target,errno);
+    }
+}
+int mnt_context_mount(struct libmnt_context *ctx) {
+    int (*real)(struct libmnt_context *)=dlsym(RTLD_NEXT,"mnt_context_mount");if(!real){errno=ENOSYS;return -ENOSYS;}
+    int rc=real(ctx);if(!rc&&mnt_context_get_status(ctx)==1){int saved=errno;pthread_mutex_lock(&view_lock);after_mount(ctx);pthread_mutex_unlock(&view_lock);errno=saved;}return rc;
 }
 
-static void mount_overlay(const char *target, const char *name) {
-	char lib[PATH_MAX], upper[PATH_MAX], work[PATH_MAX], opts[3 * PATH_MAX];
-	snprintf(lib, sizeof lib, "%s/Engine Library", target);
-	snprintf(upper, sizeof upper, LIB_ROOT "/%s/upper", name);
-	snprintf(work, sizeof work, LIB_ROOT "/%s/work", name);
-	struct statvfs v;
-	if (statvfs(lib, &v)) {
-		note("no Engine Library directory on read-only volume", target, errno);
-		return;
-	}
-	if (!(v.f_flag & ST_RDONLY)) return;
-	int e = make_dirs(EMPTY_LOWER);
-	if (!e) e = make_dirs(upper);
-	if (!e) e = make_dirs(work);
-	if (e) {
-		note("cannot prepare overlay for", target, e);
-		return;
-	}
-	snprintf(opts, sizeof opts, "lowerdir=" EMPTY_LOWER ",upperdir=%s,workdir=%s", upper, work);
-	if (mount("overlay", lib, "overlay", 0, opts)) note("overlay failed on", lib, errno);
-	else note("overlay ready on", lib, 0);
+// A rescue tree is cloned BEFORE changing the public view. Normal child
+// unmounts detect open files; rollback moves the already allocated mounts back.
+static int unmount_view(struct libmnt_context *ctx,struct owned_view *v,int (*real)(struct libmnt_context *)) {
+    char view[PATH_MAX],rescue[PATH_MAX],pub[PATH_MAX],src[PATH_MAX];
+    if(path_join(view,sizeof view,v->anchor,"view")||path_join(rescue,sizeof rescue,v->anchor,"rescue")||
+       safe_path(v->target,0)||mount_id(v->target)!=v->public_id)return -EINVAL;
+    for(unsigned i=0;i<v->count;i++) {
+        if(!memchr(v->child[i].name,0,sizeof v->child[i].name)||strchr(v->child[i].name,'/')||
+           path_join(pub,sizeof pub,v->target,v->child[i].name)||mount_id(pub)!=v->child[i].mount_id)return -EINVAL;
+    }
+    if(bind_checked(view,rescue,MS_BIND|MS_REC))return -errno;
+    if(mount(NULL,rescue,NULL,MS_PRIVATE|MS_REC,NULL)){int saved=errno;umount2(rescue,MNT_DETACH|UMOUNT_NOFOLLOW);errno=saved;return -saved;}
+    unsigned removed=0;int rc=-1,saved=0;
+    for(;removed<v->count;removed++) {
+        if(path_join(pub,sizeof pub,v->target,v->child[removed].name)||umount2(pub,UMOUNT_NOFOLLOW)) {saved=errno;goto restore_children;}
+    }
+    if(umount2(v->target,UMOUNT_NOFOLLOW)){saved=errno;goto restore_children;}
+    if(mount_id(v->target)!=v->base_id) {saved=EBUSY;goto restore_root;}
+    rc=real(ctx);saved=errno;
+    if(!rc) {cleanup_view(v);return 0;}
+ restore_root:
+    if(bind_checked(rescue,v->target,MS_MOVE))note("FATAL: restoring HFS view failed on",v->target,errno);
+    else if(update_public_ids(v))note("record update failed on",v->target,errno);
+    goto failed;
+ restore_children:
+    for(unsigned i=0;i<removed;i++) {
+        if(path_join(src,sizeof src,rescue,v->child[i].name)||path_join(pub,sizeof pub,v->target,v->child[i].name)||
+           bind_checked(src,pub,MS_MOVE))note("FATAL: restoring HFS child failed on",v->target,errno);
+    }
+    if(update_public_ids(v))note("record update failed on",v->target,errno);
+    umount2(rescue,MNT_DETACH|UMOUNT_NOFOLLOW); // only our private spare tree
+ failed:
+    mnt_context_set_syscall_status(ctx,-(saved?saved:EBUSY));errno=saved?saved:EBUSY;return rc?rc:-EBUSY;
+}
+static int unmount_dispatch(struct libmnt_context *ctx,int (*real)(struct libmnt_context *)) {
+    const char *target=mnt_context_get_target(ctx);
+    if(!volume(target))return real(ctx);
+    char lib[PATH_MAX];
+    if(safe_path(target,0)||path_join(lib,sizeof lib,target,"Engine Library")||safe_path(lib,1))return -errno;
+    pthread_mutex_lock(&view_lock);struct owned_view *v=load_view(target);
+    int rc=v?unmount_view(ctx,v,real):real(ctx);int saved=errno;free(v);pthread_mutex_unlock(&view_lock);errno=saved;return rc;
 }
 
-// run executes argv under a shared deadline. An unfinished import is killed:
-// its transaction rolls back, whereas leaving it running would write beneath
-// an Engine that is about to attach.
-static void run(char *const argv[], long deadline) {
-	pid_t pid = fork();
-	if (pid < 0) {
-		note("fork failed for", argv[0], errno);
-		return;
-	}
-	if (pid == 0) {
-		setpgid(0, 0);
-		unsetenv("LD_PRELOAD");
-		setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
-		execv(argv[0], argv);
-		_exit(127);
-	}
-	setpgid(pid, pid);
-	for (;;) {
-		int status;
-		pid_t r = waitpid(pid, &status, WNOHANG);
-		if (r == pid) {
-			if (!WIFEXITED(status) || WEXITSTATUS(status)) note("step failed:", argv[0], 0);
-			return;
-		}
-		if (r < 0 && errno != EINTR) return;
-		if (now_ms() >= deadline) {
-			note("deadline exceeded, killing", argv[0], 0);
-			kill(-pid, SIGKILL);
-			waitpid(pid, &status, 0);
-			return;
-		}
-		usleep(20000);
-	}
-}
-
-static void after_mount(const char *target) {
-	const char *name = volume(target);
-	if (!name) return;
-	long deadline = now_ms() + HOOK_BUDGET_MS;
-	int pioneer = has_export(target);
-	struct statfs f;
-	struct statvfs v;
-	if (pioneer && !statfs(target, &f) && f.f_type == HFSPLUS_MAGIC && !statvfs(target, &v) && (v.f_flag & ST_RDONLY))
-		mount_overlay(target, name);
-	if (pioneer) {
-		char *const bridge[] = {"/usr/local/bin/rb-bridge", "--mount-path", (char *)target, NULL};
-		run(bridge, deadline);
-	}
-	// A rekordbox volume's library comes from rb-bridge, and scanning its thousands
-	// of tracks here would hold up every mount for 15 seconds or more.
-	char db[PATH_MAX];
-	snprintf(db, sizeof db, "%s/Engine Library/Database2/m.db", target);
-	if (!pioneer && !access(db, F_OK)) {
-		char *const guardian[] = {"/usr/local/bin/engine-guardian", "--heal-mount", (char *)target, "--data-only", NULL};
-		run(guardian, deadline);
-	}
-}
-
-int mnt_context_mount(struct libmnt_context *cxt) {
-	static int (*real)(struct libmnt_context *);
-	if (!real) real = dlsym(RTLD_NEXT, "mnt_context_mount");
-	int rc = real(cxt);
-	if (rc == 0 && mnt_context_get_status(cxt) == 1) {
-		int saved = errno;
-		after_mount(mnt_context_get_target(cxt));
-		errno = saved;
-	}
-	return rc;
-}
-
-// The overlay is a submount, and would otherwise make every eject fail EBUSY.
-int mnt_context_umount(struct libmnt_context *cxt) {
-	static int (*real)(struct libmnt_context *);
-	if (!real) real = dlsym(RTLD_NEXT, "mnt_context_umount");
-	const char *target = mnt_context_get_target(cxt);
-	if (volume(target)) {
-		char lib[PATH_MAX];
-		snprintf(lib, sizeof lib, "%s/Engine Library", target);
-		struct statfs f;
-		if (!statfs(lib, &f) && f.f_type == 0x794c7630 /* OVERLAYFS_SUPER_MAGIC */ && umount2(lib, MNT_DETACH))
-			note("overlay detach failed on", lib, errno);
-	}
-	return real(cxt);
+int mnt_context_umount(struct libmnt_context *ctx) {
+    int (*real)(struct libmnt_context *)=dlsym(RTLD_NEXT,"mnt_context_umount");
+    if(!real){errno=ENOSYS;return -ENOSYS;}
+    return unmount_dispatch(ctx,real);
 }

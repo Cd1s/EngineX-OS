@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testfixture"
+	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 )
 
 func TestDeviceSQLStrings(t *testing.T) {

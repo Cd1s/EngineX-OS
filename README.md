@@ -24,7 +24,7 @@
 
 <br>
 
-**EngineX OS** (`sc5000-custom-os`) is an open custom firmware layer and backend suite for Denon DJ standalone players on **Engine OS 5.0.4**: `SC5000`, `SC5000M`, `SC6000`, `SC6000M`, `PRIME 4`, `PRIME GO` and `SC LIVE 2`.
+**EngineX OS** (`Cd1s/EngineX-OS`) is an open custom firmware layer and backend suite for Denon DJ standalone players on **Engine OS 5.0.4**: `SC5000`, `SC5000M`, `SC6000`, `SC6000M`, `PRIME 4`, `PRIME GO` and `SC LIVE 2`.
 
 > **The stock Denon interface, untouched. A faster machine underneath.**
 > A DJ walking up to the decks sees the exact stock UI and feel, with no new popups to learn. Under it, the slow importers, synchronous SQLite disk stalls, flash telemetry, CPU underclocking and per-model feature locks are replaced by in-memory C hooks and isolated Go services. The rootfs and the Engine binary on disk are never modified, and one file brings the stock UI back.
@@ -120,7 +120,7 @@
 <div align="center">
 <img src="./docs/assets/screenshots/en/06-preferences-enginex-github-update.png" width="70%" alt="About / Update page with GitHub release check"><br>
 <b>About / Update checks GitHub</b><br>
-<sub>Releases of <code>Cd1s/sc5000-custom-os</code> (or your fork) replace Denon's update server</sub>
+<sub>Releases of <code>Cd1s/EngineX-OS</code> (or your fork) replace Denon's update server</sub>
 </div>
 
 <a id="architecture"></a>
@@ -203,7 +203,7 @@ Every known defect from Engine OS 1.x to 5.0.4, Engine DJ Desktop (229) and thir
 
 ## 🚀 Quick start
 
-1. **Point updates at your fork (optional).** `Settings → About / Update` checks `Cd1s/sc5000-custom-os`. Add `github_repo=your-org/your-repo` to `/data/sc5000-custom/ui/settings.conf`, or set `SC5000_GITHUB_REPO`.
+1. **Point updates at your fork (optional).** `Settings → About / Update` checks `Cd1s/EngineX-OS`. Add `github_repo=your-org/your-repo` to `/data/sc5000-custom/ui/settings.conf`.
 2. **Add a relay (optional).** Open `http://sc5000.lan:8080` on your phone and enter your own `sc5000-relay` address and password under *云端登录服务* (cloud login service).
 3. **Or a home PC.** Run `tools/stems/run-home-worker.sh` (or `.ps1`) on any computer in the same network. The deck console at `http://sc5000.lan:8080` shows the computer it found and whether it is online.
 
@@ -319,7 +319,7 @@ python3 tools/ui-mod/build_packs.py --qrc /path/to/stock-5.0.4-qrc --out out/ui-
 
 **Rolling back**
 
-- Stock UI at once: `touch /data/sc5000-custom/ui/safe-mode` and restart Engine. Three short-lived starts within 90 s do this by themselves.
+- Stock UI at once: `touch /data/sc5000-custom/ui/safe-mode` and restart Engine. Three starts in a row that crash within 15 s do this by themselves; deliberate restarts (language switch, deploy) reset the count.
 - Remove the UI mod: delete `/etc/systemd/system/engine.service.d/60-ui-hook.conf`, run `systemctl daemon-reload`, restart `engine.service`.
 - Back up hooks, `engine-ui-guard` and service drop-ins before deploying; music, databases and logins under `/data` are never touched.
 
@@ -341,5 +341,5 @@ python3 tools/ui-mod/build_packs.py --qrc /path/to/stock-5.0.4-qrc --out out/ui-
 ---
 
 <div align="center">
-<sub>EngineX OS is an independent community project. It is not affiliated with or endorsed by inMusic Brands or Denon DJ. Engine DJ, Denon DJ and all product names are trademarks of their respective owners. No stock firmware or Engine binaries are distributed in this repository.</sub>
+<sub>Source code: MIT License (see <code>LICENSE</code>). EngineX OS is an independent community project. It is not affiliated with or endorsed by inMusic Brands or Denon DJ. Engine DJ, Denon DJ and all product names are trademarks of their respective owners. No stock firmware or Engine binaries are distributed in this repository.</sub>
 </div>

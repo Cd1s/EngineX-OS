@@ -213,7 +213,7 @@ func hasPicture(path string) (bool, error) {
 		if err != nil {
 			return true, nil
 		}
-		return bytes.Contains(tag.frames, []byte("APIC")), nil
+		return id3HasFrame(tag, "APIC"), nil
 	}
 	return false, nil
 }
@@ -284,6 +284,28 @@ func readID3(r io.Reader) (id3Tag, []byte, error) {
 		return id3Tag{}, nil, err
 	}
 	return id3Tag{h[3], frames}, h[:], nil
+}
+
+// id3HasFrame walks the frame headers, so "APIC" inside a comment or lyrics
+// does not count as a picture (#16). A frame running past the tag ends the walk.
+func id3HasFrame(tag id3Tag, id string) bool {
+	f := tag.frames
+	for len(f) >= 10 && f[0] != 0 {
+		var size int
+		if tag.version == 4 {
+			size = int(f[4]&0x7f)<<21 | int(f[5]&0x7f)<<14 | int(f[6]&0x7f)<<7 | int(f[7]&0x7f)
+		} else {
+			size = int(binary.BigEndian.Uint32(f[4:8]))
+		}
+		if string(f[:4]) == id {
+			return true
+		}
+		if size < 0 || size > len(f)-10 {
+			return false
+		}
+		f = f[10+size:]
+	}
+	return false
 }
 
 func synchsafe(n int) []byte {

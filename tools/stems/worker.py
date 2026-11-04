@@ -337,8 +337,13 @@ def serve(src, dst, backend='hpss'):
     # they are not required keys on the wire.
     header_write(dst, session='FFFFFFFFFFFFFFFF')
     init = header_read(src)
+    while init == {}:  # stray blank lines before the init header (#38)
+        init = header_read(src)
     if init is None:
         return
+    missing = [k.decode() for k in (b'numChannels', b'sampleRate', b'maxBlockSize') if k not in init]
+    if missing:
+        raise ValueError('init header lacks ' + ', '.join(missing))
     channels = int(init[b'numChannels'])
     sample_rate = float(init[b'sampleRate'])
     max_block = int(init[b'maxBlockSize'])

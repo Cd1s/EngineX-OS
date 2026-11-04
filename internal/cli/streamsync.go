@@ -13,11 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/analyzer"
-	"github.com/Cd1s/sc5000-custom-os/pkg/deemixclient"
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
-	"github.com/Cd1s/sc5000-custom-os/pkg/resourceguard"
-	"github.com/Cd1s/sc5000-custom-os/pkg/webui"
+	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
+	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
+	"github.com/Cd1s/EngineX-OS/pkg/webui"
 )
 
 // Downloads go to the front SD when present, otherwise to internal storage.
@@ -49,9 +49,9 @@ func StreamSync(args []string) error {
 	deemixd := fs.String("deemixd", defaultDeemixd, "start and keep this sc5000-deemixd running for "+deemixdURL+"; empty leaves it to others")
 	lossy := fs.Bool("allow-320k", true, "accept verified MP3 when FLAC is unavailable")
 	relay := fs.String("relay-url", webui.DefaultRelayURL, "cloud login relay; empty keeps logins on the LAN")
-	token := fs.String("access-token", "", "console access code (default random per launch)")
+	token := fs.String("access-token", "", "console access code (default: kept in <state-dir>/access-token)")
 	state := fs.String("state-dir", webui.DefaultStateDir(home), "private owner cookie state")
-	spotifyToken := fs.String("spotify-token", filepath.Join(webui.DefaultStateDir(home), "spotify-token.json"), "owner OAuth token file; guests never use it")
+	spotifyToken := fs.String("spotify-token", "", "owner OAuth token file; guests never use it (default <state-dir>/spotify-token.json)")
 	clientID := fs.String("spotify-client-id", "", "registered Spotify public PKCE client ID")
 	redirect := fs.String("spotify-redirect-url", "", "exact registered HTTPS callback URL (or device loopback for local browser)")
 	netease := fs.String("netease-url", "", "optional NeteaseCloudMusicApi-compatible service; empty talks to music.163.com")
@@ -62,6 +62,9 @@ func StreamSync(args []string) error {
 	fs.BoolVar(&cfg.StrictCPU, "strict-cpu", false, "refuse work when the requested isolated CPU is unavailable")
 	if err = fs.Parse(args); err != nil {
 		return err
+	}
+	if *spotifyToken == "" {
+		*spotifyToken = filepath.Join(*state, "spotify-token.json") // follows --state-dir (#31)
 	}
 	if *mode != "queue" && *mode != "directory" {
 		return fmt.Errorf("invalid --deemix-mode")
@@ -124,10 +127,24 @@ func StreamSync(args []string) error {
 	bpm := &providers.BPMStore{Path: filepath.Join(*state, "bpm-cache.json"), ConfigPath: filepath.Join(*state, "bpm-config.json"), PreviewBPM: webui.PreviewAnalyzer(guard)}
 	jobs := webui.NewJobs(webui.Pipeline{Guard: guard, Catalog: &providers.Deezer{}, Deemix: dl, Library: importer})
 	defer jobs.Close()
+	newToken, explicitToken := false, *token != ""
+	if !explicitToken {
+		if *token, newToken, err = webui.LoadAccessToken(*state); err != nil {
+			return err
+		}
+	}
 	ui := webui.New(webui.Config{AccessToken: *token, PublicURL: *public, SpotifyClientID: *clientID, SpotifyRedirectURL: *redirect, SpotifyTokenPath: *spotifyToken, NeteaseURL: *netease, StateDir: *state, RelayURL: *relay, BPM: bpm}, jobs)
 	// This is the one intentional local credential output: the operator needs
 	// it to pair the touch/phone console. No provider credentials are logged.
-	fmt.Fprintf(os.Stderr, "Stream Sync: %s\n控制台访问码: %s\n", *public, ui.AccessToken())
+	// Printed once, when created; afterwards only where to find it.
+	switch {
+	case newToken:
+		fmt.Fprintf(os.Stderr, "Stream Sync: %s\n控制台访问码: %s\n", *public, ui.AccessToken())
+	case explicitToken:
+		fmt.Fprintf(os.Stderr, "Stream Sync: %s\n控制台访问码: 由 --access-token 指定\n", *public)
+	default:
+		fmt.Fprintf(os.Stderr, "Stream Sync: %s\n控制台访问码: 见 %s\n", *public, filepath.Join(*state, "access-token"))
+	}
 	server := &http.Server{Addr: *listen, Handler: ui, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	go ui.SyncRelaySettings(ctx)
 	go webui.GuardRoutes(ctx)

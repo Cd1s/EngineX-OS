@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/deemixclient"
-	"github.com/Cd1s/sc5000-custom-os/pkg/providers"
+	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 func testMP3(frames int) []byte {

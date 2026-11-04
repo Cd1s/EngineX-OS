@@ -76,31 +76,35 @@
     </g>
   </g>
 
-  <!-- metric cards -->
+  <!-- metric cards: one <text> per line, no side-by-side x guesses -->
   <g font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-    <g transform="translate(48 286)">
-      <rect width="282" height="96" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
+    <g transform="translate(48 280)">
+      <rect width="284" height="112" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
       <rect x="18" y="0" width="56" height="3" rx="1.5" fill="#00e676"/>
-      <text x="20" y="50" font-size="34" font-weight="800" fill="#00e676">96 kHz</text>
-      <text x="20" y="77" font-size="14.5" fill="#a9b6c4">Zero-XRUN real-time audio</text>
+      <text x="20" y="48" font-size="32" font-weight="800" fill="#00e676">96 kHz</text>
+      <text x="20" y="76" font-size="13.5" fill="#a9b6c4">Zero-XRUN real-time audio</text>
+      <text x="20" y="96" font-size="12" fill="#6f7d8c">CPU0 reserved for ALSA</text>
     </g>
-    <g transform="translate(346 286)">
-      <rect width="282" height="96" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
+    <g transform="translate(348 280)">
+      <rect width="284" height="112" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
       <rect x="18" y="0" width="56" height="3" rx="1.5" fill="#00b0ff"/>
-      <text x="20" y="50" font-size="34" font-weight="800" fill="#00b0ff">33.8×</text>
-      <text x="20" y="77" font-size="14.5" fill="#a9b6c4">Stems worker, faster than real time</text>
+      <text x="20" y="48" font-size="32" font-weight="800" fill="#00b0ff">33.8×</text>
+      <text x="20" y="76" font-size="13.5" fill="#a9b6c4">Stems, faster than real time</text>
+      <text x="20" y="96" font-size="12" fill="#6f7d8c">4-min track in 35 s</text>
     </g>
-    <g transform="translate(644 286)">
-      <rect width="282" height="96" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
+    <g transform="translate(648 280)">
+      <rect width="284" height="112" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
       <rect x="18" y="0" width="56" height="3" rx="1.5" fill="#00e676"/>
-      <text x="20" y="50" font-size="34" font-weight="800" fill="#00e676">5 <tspan font-size="18" font-weight="600" fill="#e9f0f6">platforms</tspan></text>
-      <text x="20" y="77" font-size="11.8" fill="#a9b6c4">NetEase · Spotify · Deezer · SoundCloud · TIDAL</text>
+      <text x="20" y="48" font-size="32" font-weight="800" fill="#00e676">5 <tspan font-size="18" font-weight="600" fill="#e9f0f6">platforms</tspan></text>
+      <text x="20" y="76" font-size="13.5" fill="#a9b6c4">NetEase · Spotify · Deezer</text>
+      <text x="20" y="96" font-size="12" fill="#6f7d8c">SoundCloud · TIDAL</text>
     </g>
-    <g transform="translate(942 286)">
-      <rect width="290" height="96" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
+    <g transform="translate(948 280)">
+      <rect width="284" height="112" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
       <rect x="18" y="0" width="56" height="3" rx="1.5" fill="#00b0ff"/>
-      <text x="20" y="50" font-size="34" font-weight="800" fill="#00b0ff">&lt; 2 s</text>
-      <text x="20" y="77" font-size="14.5" fill="#a9b6c4">Rekordbox direct bridge mount</text>
+      <text x="20" y="48" font-size="32" font-weight="800" fill="#00b0ff">&lt; 2 s</text>
+      <text x="20" y="76" font-size="13.5" fill="#a9b6c4">Rekordbox direct bridge</text>
+      <text x="20" y="96" font-size="12" fill="#6f7d8c">first mount, no re-analysis</text>
     </g>
   </g>
 </svg>

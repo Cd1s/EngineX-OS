@@ -24,7 +24,7 @@
 
 <br>
 
-**EngineX OS**（`sc5000-custom-os`）是為天龍 Denon DJ **Engine OS 5.0.4** 獨立播放機打造的開源客製韌體層與後端套件，支援 `SC5000`、`SC5000M`、`SC6000`、`SC6000M`、`PRIME 4`、`PRIME GO` 與 `SC LIVE 2`。
+**EngineX OS**（`Cd1s/EngineX-OS`）是為天龍 Denon DJ **Engine OS 5.0.4** 獨立播放機打造的開源客製韌體層與後端套件，支援 `SC5000`、`SC5000M`、`SC6000`、`SC6000M`、`PRIME 4`、`PRIME GO` 與 `SC LIVE 2`。
 
 > **介面原汁原味，底層脫胎換骨。**
 > DJ 走上台看到的就是原廠介面與原廠手感，沒有新的彈窗要學。底層那些拖慢機器的慢速匯入、SQLite 同步寫入卡頓、快閃記憶體遙測、CPU 降頻與機型功能鎖，已由記憶體中的 C 掛鉤與彼此隔離的 Go 服務取代。rootfs 與磁碟上的 Engine 二進位檔從不改動，一個檔案就能回到原廠介面。
@@ -120,7 +120,7 @@
 <div align="center">
 <img src="./docs/assets/screenshots/zh-TW/06-preferences-enginex-github-update.png" width="70%" alt="關於 / 更新頁的 GitHub 版本檢查"><br>
 <b>關於 / 更新：檢查 GitHub 發佈</b><br>
-<sub>以 <code>Cd1s/sc5000-custom-os</code>（或你的 fork）的 Releases 取代天龍官方更新伺服器</sub>
+<sub>以 <code>Cd1s/EngineX-OS</code>（或你的 fork）的 Releases 取代天龍官方更新伺服器</sub>
 </div>
 
 <a id="architecture"></a>
@@ -203,7 +203,7 @@ Engine OS 1.x 到 5.0.4、Engine DJ 電腦版（229 條）以及第三方工具�
 
 ## 🚀 快速上手
 
-1. **把更新檢查指向你的 fork（選用）。** `設定 → 關於 / 更新` 預設檢查 `Cd1s/sc5000-custom-os`。在 `/data/sc5000-custom/ui/settings.conf` 加入 `github_repo=your-org/your-repo`，或設定 `SC5000_GITHUB_REPO`。
+1. **把更新檢查指向你的 fork（選用）。** `設定 → 關於 / 更新` 預設檢查 `Cd1s/EngineX-OS`。在 `/data/sc5000-custom/ui/settings.conf` 加入 `github_repo=your-org/your-repo`。
 2. **設定中繼（選用）。** 手機開啟 `http://sc5000.lan:8080`，在「云端登录服务」中填入你自架的 `sc5000-relay` 位址與密碼。
 3. **或者用家用電腦。** 在同一網路的任何電腦上執行 `tools/stems/run-home-worker.sh`（或 `.ps1`）。播放機控制台 `http://sc5000.lan:8080` 會顯示找到的電腦以及是否在線。
 
@@ -319,7 +319,7 @@ python3 tools/ui-mod/build_packs.py --qrc /path/to/stock-5.0.4-qrc --out out/ui-
 
 **還原**
 
-- 立即回到原廠介面：`touch /data/sc5000-custom/ui/safe-mode` 後重新啟動 Engine。90 秒內連續三次啟動失敗也會自動這樣做。
+- 立即回到原廠介面：`touch /data/sc5000-custom/ui/safe-mode` 後重新啟動 Engine。連續三次啟動在 15 秒內崩潰也會自動這樣做；正常重新啟動（切換語言、部署）會清零計數。
 - 移除介面改動：刪除 `/etc/systemd/system/engine.service.d/60-ui-hook.conf`，執行 `systemctl daemon-reload`，重新啟動 `engine.service`。
 - 部署前先備份掛鉤、`engine-ui-guard` 與服務 drop-in；`/data` 下的音樂、資料庫與登入資訊不會被改動。
 
@@ -341,5 +341,5 @@ python3 tools/ui-mod/build_packs.py --qrc /path/to/stock-5.0.4-qrc --out out/ui-
 ---
 
 <div align="center">
-<sub>EngineX OS 是獨立的社群專案，與 inMusic Brands 或 Denon DJ 並無任何關聯，也未獲其認可。Engine DJ、Denon DJ 及所有產品名稱皆為其各自所有者的商標。本儲存庫不散佈任何原廠韌體或 Engine 二進位檔。</sub>
+<sub>原始碼以 MIT 授權條款發布（見 <code>LICENSE</code>）。EngineX OS 是獨立的社群專案，與 inMusic Brands 或 Denon DJ 並無任何關聯，也未獲其認可。Engine DJ、Denon DJ 及所有產品名稱皆為其各自所有者的商標。本儲存庫不散佈任何原廠韌體或 Engine 二進位檔。</sub>
 </div>

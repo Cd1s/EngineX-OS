@@ -187,6 +187,11 @@ func (s *Spotify) get(ctx context.Context, path string, out any) error {
 	return JSON(ctx, s.HTTP, "GET", s.base()+path, nil, h, out)
 }
 
+func endpointMissing(err error) bool {
+	msg := err.Error()
+	return msg == "provider: HTTP 404" || msg == "provider: HTTP 405"
+}
+
 // SpotifyLikedID names the owner's Liked Songs, which Spotify keeps outside playlists.
 const SpotifyLikedID = "liked"
 
@@ -277,7 +282,8 @@ func (s *Spotify) Tracks(ctx context.Context, id string) ([]Track, error) {
 			Next *string
 		}
 		err := s.get(ctx, "/playlists/"+url.PathEscape(id)+endpointName+"?limit=100&offset="+strconv.Itoa(offset), &r)
-		if err != nil && offset == 0 && endpointName == "/items" {
+		// Only an endpoint that is gone falls back; a 429 or 5xx is returned as is (#15).
+		if err != nil && offset == 0 && endpointName == "/items" && endpointMissing(err) {
 			endpointName = "/tracks"
 			err = s.get(ctx, "/playlists/"+url.PathEscape(id)+endpointName+"?limit=100&offset="+strconv.Itoa(offset), &r)
 		}

@@ -122,10 +122,11 @@ func (l *Library) Import(ctx context.Context, in Import) (int64, error) {
 	if format == "" {
 		format = strings.TrimPrefix(strings.ToLower(filepath.Ext(p)), ".")
 	}
+	kbps := int(math.Round(float64(st.Size()) * 8 / r.Duration / 1000)) // Engine stores kbit/s (#34)
 	err = tx.QueryRowContext(ctx, "SELECT id FROM Track WHERE path=?", enginePath).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		result, e := tx.ExecContext(ctx, `INSERT INTO Track(path,filename,title,artist,album,comment,length,bpm,bpmAnalyzed,key,fileBytes,bitrate,fileType,isAnalyzed,isAvailable,isMetadataImported,isBeatGridLocked,dateCreated,dateAdded,lastEditTime)
- VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,1,0,strftime('%s'),strftime('%s'),strftime('%s'))`, enginePath, filepath.Base(p), in.Title, in.Artist, in.Album, in.Comment, int(math.Round(r.Duration)), int(math.Round(r.BPM)), r.BPM, r.Key.EngineID, st.Size(), int(float64(st.Size())*8/r.Duration), format)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,1,0,strftime('%s'),strftime('%s'),strftime('%s'))`, enginePath, filepath.Base(p), in.Title, in.Artist, in.Album, in.Comment, int(math.Round(r.Duration)), int(math.Round(r.BPM)), r.BPM, r.Key.EngineID, st.Size(), kbps, format)
 		if e != nil {
 			return 0, e
 		}
@@ -136,16 +137,23 @@ func (l *Library) Import(ctx context.Context, in Import) (int64, error) {
 			return 0, err
 		}
 		if alreadyAnalyzed {
-			_, err = tx.ExecContext(ctx, "UPDATE Track SET comment=?,isAvailable=1 WHERE id=?", in.Comment, id)
+			// Keep the analysis and the owner's tags, but describe the file now on disk (#34).
+			_, err = tx.ExecContext(ctx, "UPDATE Track SET comment=?,fileBytes=?,bitrate=?,fileType=?,length=?,isAvailable=1 WHERE id=?", in.Comment, st.Size(), kbps, format, int(math.Round(r.Duration)), id)
 		} else {
-			_, err = tx.ExecContext(ctx, `UPDATE Track SET title=?,artist=?,album=?,filename=?,fileBytes=?,bitrate=?,fileType=?,comment=?,bpm=CASE WHEN isBeatGridLocked AND bpm>0 THEN bpm ELSE ? END,bpmAnalyzed=CASE WHEN isBeatGridLocked AND bpmAnalyzed>0 THEN bpmAnalyzed ELSE ? END,key=?,length=?,isAnalyzed=1,isAvailable=1 WHERE id=?`, in.Title, in.Artist, in.Album, filepath.Base(p), st.Size(), int(float64(st.Size())*8/r.Duration), format, in.Comment, int(math.Round(r.BPM)), r.BPM, r.Key.EngineID, int(math.Round(r.Duration)), id)
+			_, err = tx.ExecContext(ctx, `UPDATE Track SET title=?,artist=?,album=?,filename=?,fileBytes=?,bitrate=?,fileType=?,comment=?,bpm=CASE WHEN isBeatGridLocked AND bpm>0 THEN bpm ELSE ? END,bpmAnalyzed=CASE WHEN isBeatGridLocked AND bpmAnalyzed>0 THEN bpmAnalyzed ELSE ? END,key=?,length=?,isAnalyzed=1,isAvailable=1 WHERE id=?`, in.Title, in.Artist, in.Album, filepath.Base(p), st.Size(), kbps, format, in.Comment, int(math.Round(r.BPM)), r.BPM, r.Key.EngineID, int(math.Round(r.Duration)), id)
 		}
 	}
 	if err != nil {
 		return 0, err
 	}
 	// Preserve an existing analysis; a locked grid may coexist with missing waveform data.
-	if !alreadyAnalyzed {
+	if alreadyAnalyzed {
+		// ...but fill in waveforms an analysed track lacks (#34).
+		_, err = tx.ExecContext(ctx, `UPDATE PerformanceData SET trackData=coalesce(trackData,?),overviewWaveFormData=coalesce(overviewWaveFormData,?) WHERE trackId=? AND (trackData IS NULL OR overviewWaveFormData IS NULL)`, track, overview, id)
+		if err != nil {
+			return 0, err
+		}
+	} else {
 		// The original trigger creates PerformanceData on Track insertion.
 		_, err = tx.ExecContext(ctx, `INSERT INTO PerformanceData(trackId,trackData,overviewWaveFormData,beatData) VALUES(?,?,?,?) ON CONFLICT(trackId) DO UPDATE SET trackData=excluded.trackData,overviewWaveFormData=excluded.overviewWaveFormData,beatData=CASE WHEN ? AND PerformanceData.beatData IS NOT NULL THEN PerformanceData.beatData ELSE excluded.beatData END`, id, track, overview, beats, beatGridLocked)
 		if err != nil {
@@ -179,8 +187,9 @@ func (l *Library) Import(ctx context.Context, in Import) (int64, error) {
 		if e != nil {
 			return 0, e
 		}
-		// A list is a singly linked chain ending at nextEntityId=0.
-		if _, err = tx.ExecContext(ctx, "UPDATE PlaylistEntity SET nextEntityId=? WHERE listId=? AND nextEntityId=0 AND id<>?", entityID, listID, entityID); err != nil {
+		// A list is a singly linked chain ending at nextEntityId=0 (or NULL in some
+		// databases). Link exactly one tail, the newest, even in a damaged list (#34).
+		if _, err = tx.ExecContext(ctx, "UPDATE PlaylistEntity SET nextEntityId=? WHERE id=(SELECT max(id) FROM PlaylistEntity WHERE listId=? AND coalesce(nextEntityId,0)=0 AND id<>?)", entityID, listID, entityID); err != nil {
 			return 0, err
 		}
 	}

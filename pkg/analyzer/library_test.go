@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Cd1s/sc5000-custom-os/internal/testaudio"
-	"github.com/Cd1s/sc5000-custom-os/internal/testlibrary"
+	"github.com/Cd1s/EngineX-OS/internal/testaudio"
+	"github.com/Cd1s/EngineX-OS/internal/testlibrary"
 )
 
 func uncompress(t *testing.T, b []byte) []byte {
@@ -66,6 +66,12 @@ func TestEngine504AtomicImport(t *testing.T) {
 	if storedPath != "../first.wav" || filepath.Clean(filepath.Join(root, "Engine Library", filepath.FromSlash(storedPath))) != file {
 		t.Fatal("track path is not relative to Engine Library", storedPath)
 	}
+	// #34: Engine stores kbit/s; the 16-bit mono test WAV is about Rate*16/1000.
+	var bitrate int
+	db.QueryRow("SELECT bitrate FROM Track WHERE id=?", id).Scan(&bitrate)
+	if want := int(testaudio.Rate * 16 / 1000); bitrate < want*9/10 || bitrate > want*11/10 {
+		t.Fatalf("bitrate %d, want about %d kbit/s", bitrate, want)
+	}
 	var track, overview, beats, cues []byte
 	if err = db.QueryRow("SELECT trackData,overviewWaveFormData,beatData,quickCues FROM PerformanceData WHERE trackId=?", id).Scan(&track, &overview, &beats, &cues); err != nil {
 		t.Fatal(err)
@@ -114,6 +120,10 @@ func TestEngine504AtomicImport(t *testing.T) {
 	if !bytes.Equal(kept, beats) {
 		t.Fatal("locked beatgrid overwritten")
 	}
+	// #34: some databases end a list with NULL instead of 0.
+	if _, err = db.Exec("UPDATE PlaylistEntity SET nextEntityId=NULL"); err != nil {
+		t.Fatal(err)
+	}
 	file2 := filepath.Join(root, "second.wav")
 	os.WriteFile(file2, testaudio.WAV(song), 0600)
 	input.Path = file2
@@ -123,7 +133,7 @@ func TestEngine504AtomicImport(t *testing.T) {
 		t.Fatal(err)
 	}
 	var tail, head int
-	db.QueryRow("SELECT count(*) FROM PlaylistEntity WHERE nextEntityId=0").Scan(&tail)
+	db.QueryRow("SELECT count(*) FROM PlaylistEntity WHERE coalesce(nextEntityId,0)=0").Scan(&tail)
 	db.QueryRow("SELECT count(*) FROM PlaylistEntity p WHERE NOT EXISTS(SELECT 1 FROM PlaylistEntity q WHERE q.nextEntityId=p.id)").Scan(&head)
 	if tail != 1 || head != 1 {
 		t.Fatalf("broken membership chain head=%d tail=%d", head, tail)

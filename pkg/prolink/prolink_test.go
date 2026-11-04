@@ -7,15 +7,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cd1s/sc5000-custom-os/pkg/prolink"
-	"github.com/Cd1s/sc5000-custom-os/pkg/rekordbox"
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 func TestDiscoveryStatusAndExpiry(t *testing.T) {
 	b := make([]byte, 54)
 	copy(b, "Qspt1WmJOL")
 	b[10] = 6
-	copy(b[12:], "rekordbox")
+	copy(b[12:], "rekordbox\x00garbage") // bytes after the NUL are not part of the name
 	b[0x24] = 17
 	ip := net.IPv4(192, 168, 1, 2)
 	d, e := prolink.ParsePacket(b, 50000, ip)
