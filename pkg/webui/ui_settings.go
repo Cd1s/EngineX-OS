@@ -75,6 +75,11 @@ type uiSettings struct {
 
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
+
+	// Status only, never saved: the export runs (ON waits for a Rekordbox USB), and
+	// the board is a standalone player without channel faders (#52).
+	ProlinkExportActive bool `json:"prolinkExportActive"`
+	Player              bool `json:"player"`
 }
 
 func (s *Server) uiDir() string {
@@ -203,7 +208,12 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if s.prolinkExport != nil && (v.ProlinkExport != s.loadUI().ProlinkExport || len(exportRequested) > 0 && exportRequested[0]) {
 		was = s.prolinkExport.Status().Enabled
 		if err = s.prolinkExport.SetEnabled(v.ProlinkExport); err != nil {
-			return err
+			if !v.ProlinkExport {
+				return err
+			}
+			// ON stays ON without a Rekordbox USB; retryExport starts it once one is mounted.
+			log.Printf("stream-sync: Pro DJ Link export waits: %v", err)
+			err = nil
 		}
 		defer func() {
 			if err != nil && was != v.ProlinkExport {
@@ -289,6 +299,8 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	relay := s.relayStatusView()
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
+	v.ProlinkExportActive = s.prolinkExport != nil && s.prolinkExport.Status().Enabled
+	v.Player = playerBoards[imagePrefix(deviceCompatible())]
 	respond(w, v)
 }
 

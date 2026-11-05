@@ -82,6 +82,8 @@ type Server struct {
 	uiMu          sync.Mutex
 	stemsMu       sync.Mutex // streaming-stems.json
 	prolinkExport *prolink.Exporter
+	closed        chan struct{}
+	closeOnce     sync.Once
 
 	updateMu    sync.Mutex
 	updateCache updateStatus
@@ -128,6 +130,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 		}
 	}
 	s.prolinkExport = prolink.NewExporter(exportCfg)
+	s.closed = make(chan struct{})
+	go s.retryExport(10 * time.Second)
 	if s.loadUI().ProlinkExport {
 		// A missing drive or occupied port must not prevent the normal console
 		// from starting. The export status reports whether it actually started.
@@ -190,8 +194,32 @@ func New(cfg Config, jobs *Jobs) *Server {
 	return s
 }
 
+// retryExport starts a saved-ON export once a Rekordbox USB is mounted (#63).
+func (s *Server) retryExport(every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.closed:
+			return
+		case <-t.C:
+			s.tryExport()
+		}
+	}
+}
+
+func (s *Server) tryExport() {
+	s.uiMu.Lock()
+	on := s.loadUI().ProlinkExport
+	s.uiMu.Unlock()
+	if on && !s.prolinkExport.Status().Enabled && s.prolinkExport.SetEnabled(true) == nil {
+		log.Printf("stream-sync: Pro DJ Link export started")
+	}
+}
+
 // Close releases optional network exports, including active dbserver clients.
 func (s *Server) Close() {
+	s.closeOnce.Do(func() { close(s.closed) })
 	if s.prolinkExport != nil {
 		s.prolinkExport.Close()
 	}
