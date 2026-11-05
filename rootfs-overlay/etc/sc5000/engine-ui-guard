@@ -26,6 +26,20 @@ pre)
         fi
         mv "$accounts.tmp" "$accounts"
     fi
+    # #49: with the 4-deck layout unlocked (four_deck_waveform=1) Engine stops being a
+    # player and names the hardware's deck group "Left"; the players' preset assignment
+    # files use the unnamed group, so PLAY, CUE and the wheel would drive no deck. Bind a
+    # copy that names it only when Engine is not a player (unchanged on a player).
+    assign=${SC5000_ASSIGNMENT_DIR:-/usr/Engine/AssignmentFiles/PresetAssignmentFiles}
+    patched=${SC5000_ASSIGNMENT_PATCHED:-/run/sc5000-assignments}
+    for f in "$assign"/JP07/JP07_Controller_Assignments.qml "$assign"/JP08/JP08_Controller_Assignments.qml \
+        "$assign"/JP13/JP13_Controller_Assignments.qml "$assign"/JP14/JP14_Controller_Assignments.qml; do
+        [ -f "$f" ] && ! mountpoint -q "$f" || continue
+        mkdir -p "$patched"
+        p=$patched/${f##*/}
+        sed '/^    DeckAssignmentConfig {$/{n;s/^        id: deckConfig$/&\n        name: Config.device.isPlayer ? "" : "Left"/}' "$f" > "$p"
+        if grep -q 'name: Config.device.isPlayer' "$p"; then mount --bind "$p" "$f"; else rm -f "$p"; fi
+    done
     ;;
 post)
     # Engine's setup script has just set the GPU to performance. This also covers
