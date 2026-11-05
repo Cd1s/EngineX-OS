@@ -18,8 +18,9 @@ import (
 )
 
 var (
-	broadcasters  sync.Map // map[*Server]*broadcast.Broadcaster
-	broadcasterMu sync.Mutex
+	broadcasters              sync.Map // map[*Server]*broadcast.Broadcaster
+	broadcasterMu             sync.Mutex
+	broadcastRoutesRegistered sync.Map // map[*Server]bool
 )
 
 // broadcaster returns the lazily initialized Broadcaster for this server.
@@ -227,6 +228,9 @@ func (s *Server) SetBroadcastEnabled(on bool) error {
 
 // RegisterBroadcastRoutes registers broadcast routes on the server's mux.
 func (s *Server) RegisterBroadcastRoutes() {
+	if _, loaded := broadcastRoutesRegistered.LoadOrStore(s, true); loaded {
+		return
+	}
 	s.mux.HandleFunc("GET /api/broadcast", s.broadcastGet)
 	s.mux.HandleFunc("POST /api/broadcast", s.broadcastPost)
 	s.mux.HandleFunc("POST /api/broadcast/metadata", s.broadcastMetadataPost)

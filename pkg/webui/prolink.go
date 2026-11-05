@@ -184,11 +184,17 @@ type prolinkResponse struct {
 	Decks     map[string]prolink.Device `json:"decks"`
 }
 
+func (s *Server) prolinkWaveformEnabled() bool {
+	s.uiMu.Lock()
+	defer s.uiMu.Unlock()
+	return s.loadUI().ProlinkWaveform
+}
+
 func (s *Server) prolinkGet(w http.ResponseWriter, r *http.Request) {
 	devices := s.mergedDevices()
 	snap := prolink.BuildSnapshot(devices)
 	resp := prolinkResponse{
-		Enabled:   true,
+		Enabled:   s.prolinkWaveformEnabled(),
 		UpdatedAt: snap.UpdatedAt,
 		Devices:   snap.Devices,
 		Decks:     snap.Decks,

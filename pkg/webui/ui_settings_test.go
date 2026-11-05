@@ -209,3 +209,67 @@ func TestUpgradedSettingsShowNewServicesOnce(t *testing.T) {
 		t.Fatalf("a service turned off came back: %v", got)
 	}
 }
+
+func TestUIFourDeckAndProlinkWaveformSettings(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+
+	// Defaults
+	if _, v := uiPost(t, srv.URL, ""); v.FourDeckWaveform != false || v.ProlinkWaveform != true {
+		t.Fatalf("defaults wrong: %+v", v)
+	}
+
+	// Update fourDeckWaveform=1 and prolinkWaveform=0
+	if code, v := uiPost(t, srv.URL, "fourDeckWaveform=1&prolinkWaveform=0"); code != 200 || !v.FourDeckWaveform || v.ProlinkWaveform {
+		t.Fatalf("update failed: code=%d, v=%+v", code, v)
+	}
+
+	// Verify persistence in settings.conf
+	data, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := splitLines(data)
+	if !slices.Contains(lines, "four_deck_waveform=1") || !slices.Contains(lines, "prolink_waveform=0") {
+		t.Fatalf("settings.conf missing lines: %s", string(data))
+	}
+
+	// Re-reading in new server instance
+	srv2 := httptest.NewServer(New(cfg, nil))
+	defer srv2.Close()
+	if _, v := uiPost(t, srv2.URL, ""); !v.FourDeckWaveform || v.ProlinkWaveform {
+		t.Fatalf("did not reload from file: %+v", v)
+	}
+
+	// Rejects invalid boolean values
+	for _, bad := range []string{"fourDeckWaveform=yes", "fourDeckWaveform=2", "prolinkWaveform=invalid"} {
+		if code, _ := uiPost(t, srv.URL, bad); code != 400 {
+			t.Errorf("expected 400 for %s, got %d", bad, code)
+		}
+	}
+}
+
+func TestUIBroadcastSetting(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+
+	if _, v := uiPost(t, srv.URL, ""); v.BroadcastEnabled != false {
+		t.Fatalf("broadcast default wrong: %+v", v)
+	}
+
+	if code, v := uiPost(t, srv.URL, "broadcast=1"); code != 200 || !v.BroadcastEnabled {
+		t.Fatalf("broadcast enable failed: code=%d, v=%+v", code, v)
+	}
+
+	if code, v := uiPost(t, srv.URL, "broadcast=false"); code != 200 || v.BroadcastEnabled {
+		t.Fatalf("broadcast disable failed: code=%d, v=%+v", code, v)
+	}
+
+	if code, _ := uiPost(t, srv.URL, "broadcast=notabool"); code != 400 {
+		t.Fatalf("expected 400 for invalid broadcast value")
+	}
+}

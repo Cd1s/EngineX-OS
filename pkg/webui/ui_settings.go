@@ -40,18 +40,21 @@ const (
 )
 
 type uiSettings struct {
-	Version     string   `json:"version,omitempty"`
-	Quality     string   `json:"quality"`
-	Jog         string   `json:"jog"`
-	NeteaseMode string   `json:"neteaseMode"`
-	Playhead    float64  `json:"playhead"`
-	Language    string   `json:"language"`
-	Waveform    string   `json:"waveform"`
-	Sources     []string `json:"sources"`
-	Scope       string   `json:"scope"`
-	GitHubRepo  string   `json:"githubRepo"`
-	SafeMode    bool     `json:"safeMode"`
-	LoggedIn    []string `json:"loggedIn"`
+	Version          string   `json:"version,omitempty"`
+	Quality          string   `json:"quality"`
+	Jog              string   `json:"jog"`
+	NeteaseMode      string   `json:"neteaseMode"`
+	Playhead         float64  `json:"playhead"`
+	Language         string   `json:"language"`
+	Waveform         string   `json:"waveform"`
+	Sources          []string `json:"sources"`
+	Scope            string   `json:"scope"`
+	GitHubRepo       string   `json:"githubRepo"`
+	SafeMode         bool     `json:"safeMode"`
+	LoggedIn         []string `json:"loggedIn"`
+	FourDeckWaveform bool     `json:"fourDeckWaveform"`
+	ProlinkWaveform  bool     `json:"prolinkWaveform"`
+	BroadcastEnabled bool     `json:"broadcastEnabled"`
 
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
@@ -72,7 +75,7 @@ var uiServicesBeforeKnown = []string{"tidal", "netease", "spotify", "deezer", "s
 // loadUI must be called with uiMu held. Bad or missing values get defaults.
 func (s *Server) loadUI() uiSettings {
 	known, saved := uiServicesBeforeKnown, false
-	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo}
+	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, ProlinkWaveform: true}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
 		key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
@@ -118,6 +121,18 @@ func (s *Server) loadUI() uiSettings {
 			}
 		case "known":
 			known = strings.Split(val, ",")
+		case "four_deck_waveform":
+			if val == "1" || strings.EqualFold(val, "true") {
+				v.FourDeckWaveform = true
+			} else if val == "0" || strings.EqualFold(val, "false") {
+				v.FourDeckWaveform = false
+			}
+		case "prolink_waveform":
+			if val == "0" || strings.EqualFold(val, "false") {
+				v.ProlinkWaveform = false
+			} else if val == "1" || strings.EqualFold(val, "true") {
+				v.ProlinkWaveform = true
+			}
 		}
 	}
 	if saved { // services added since the file was written start enabled; ones turned off stay off
@@ -154,6 +169,12 @@ func (s *Server) saveUI(v uiSettings) error {
 		return err
 	}
 	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\njog=" + v.Jog + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
+	if v.FourDeckWaveform {
+		text += "four_deck_waveform=1\n"
+	}
+	if !v.ProlinkWaveform {
+		text += "prolink_waveform=0\n"
+	}
 	if v.GitHubRepo != defaultGitHubRepo {
 		text += "github_repo=" + v.GitHubRepo + "\n"
 	}
@@ -188,6 +209,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
 	s.uiMu.Unlock()
+	v.BroadcastEnabled = s.BroadcastEnabled()
 	if ver := s.installedVersion(); ver != "" && ver != "dev" {
 		v.Version = ver
 	}
@@ -200,6 +222,17 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	relay := s.relayStatusView()
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
 	respond(w, v)
+}
+
+func parseBoolParam(val string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "1", "true":
+		return true, true
+	case "0", "false":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 // uiUpdate changes the settings named in the query string. A language only
@@ -220,6 +253,38 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
+	}
+	if q.Has("fourDeckWaveform") {
+		b, ok := parseBoolParam(q.Get("fourDeckWaveform"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.FourDeckWaveform = b
+	}
+	if q.Has("prolinkWaveform") {
+		b, ok := parseBoolParam(q.Get("prolinkWaveform"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.ProlinkWaveform = b
+	}
+	var (
+		hasBroadcast bool
+		bcastOn      bool
+	)
+	if q.Has("broadcast") {
+		b, ok := parseBoolParam(q.Get("broadcast"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		hasBroadcast = true
+		bcastOn = b
 	}
 	if q.Has("lang") {
 		v.Language = q.Get("lang")
@@ -277,6 +342,12 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fail(w, 500, err)
 		return
+	}
+	if hasBroadcast {
+		if err := s.SetBroadcastEnabled(bcastOn); err != nil {
+			fail(w, 400, err)
+			return
+		}
 	}
 	if q.Get("restart") == "1" {
 		os.Remove(filepath.Join(s.uiDir(), "safe-mode"))

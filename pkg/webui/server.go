@@ -118,6 +118,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/bpm", s.bpmConfigPost)
 	s.mux.HandleFunc("GET /api/relay", s.relayConfigGet)
 	s.mux.HandleFunc("POST /api/relay", s.relayConfigPost)
+	s.RegisterBroadcastRoutes()
+	s.mux.HandleFunc("GET /api/prolink", s.prolinkGet)
+	s.mux.HandleFunc("POST /api/prolink", s.prolinkPost)
 	s.soundCloudAuth = &providers.SoundCloudAuth{TokenURL: cfg.SoundCloudTokenURL, Path: filepath.Join(cfg.StateDir, "soundcloud-token.json"), HTTP: cfg.HTTP}
 	if cfg.BPM != nil {
 		cfg.BPM.SoundCloudAuth = s.soundCloudAuth
