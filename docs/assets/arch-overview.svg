@@ -46,7 +46,7 @@
 
   <!-- deck -->
   <rect x="24" y="92" width="676" height="544" rx="16" class="deck"/>
-  <text x="44" y="122" font-size="12" font-weight="700" letter-spacing="1.5" class="faint">DECK · ENGINE OS 5.0.4 · 4 × ARM CORES</text>
+  <text x="44" y="122" font-size="12" font-weight="700" letter-spacing="1.5" class="faint">DECK · ENGINE OS 5.3.0 · 4 × ARM CORES</text>
 
   <!-- CPU0 -->
   <g transform="translate(44 138)">

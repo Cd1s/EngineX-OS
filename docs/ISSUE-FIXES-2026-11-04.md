@@ -175,3 +175,27 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
   - SC6000 / SC6000M：`7cd635c56d27f960811a27da4360063833c9fd35715dc53720eba813b46565e5`
   - PRIME 4 / PRIME 2 / Mixstream Pro：`00b8dc0ae90548486a10a2977b180b2d308663e20944f66aafb12d9446a19711`
 
+## 5.3.0.1 与 5.0.4.2：官方 Engine OS 5.3.0 适配、双版本 Hook 自动选表与 Source 界面 TIDAL 残留/双图标修复（2026-11-05 追加，Opus 5.5 + GPT-6.1-sol）
+
+- **修复 Source 界面关闭 TIDAL 后仍显示及双图标 Bug（`tools/ui-mod/build_packs.py`）**：
+  - **根因**：① `AVAILABLE_TILES` 用 `root.scServices.filter(s => root.scSources.indexOf(s.id) < 0)` 将 `Settings → Services → Streaming` 中已关闭的服务全部渲染到了 `Connect New Sources`；② `scProviders` 在后台保持原厂 `TIDAL`（5.3.0 中改名为 `"Tidal"`）的 `provider.integrated = true` 供自定义流媒体借道，但 `AvailableSource.qml`（`availableSourceModel()`）未过滤 `"TIDAL"` / `"Tidal"` / `"SoundCloud"`，导致关闭 TIDAL 后下方出现两个 TIDAL 图标。
+  - **修法**：移除 `AVAILABLE_TILES` 及其在 `SourceScreen.qml` 中的注入（与原厂一致：设置中关闭的服务从 Source 界面隐藏）；将 `AvailableSource.qml` 改为 `Grid { columns: columnCount }` + `Repeater` 并过滤 `"TIDAL"`、`"Tidal"`、`"SoundCloud"`（避免 `GridView` 对隐藏项留空白坑位），同时在 `AvailableSourceDelegate.qml`、`StreamingServices.qml`、`ConnectedSource.qml`、`scSelectTidal`、`scProviders`、`scBrand` 同步兼容 5.3.0 的 `"Tidal"` 命名。
+- **适配官方 Engine OS 5.3.0 底层并升级为 5.3.0.1（镜像从 177 MB 精简至 152 MB）**：
+  - **底层变化**：Linux 内核 6.6.119 → 6.18.57，SQLite 3.45.3 → 3.53.1，libaz01-prog 1.3 → 1.8.1，移除内置 Demo 曲目与冗余解码库，公开镜像体积降至 **152 MB**。
+  - **QRC 自动提取（`tools/ui-mod/qrc_dump.c`、`tools/ui-mod/extract_qrc.py`、`tools/az01-packer/build-release.sh`）**：构建时若未传外部 QRC 目录，直接从底包 `Engine` 二进制自动导出 QML 资源树；`build_packs.py` 适配 5.3.0 的 `Skins/Embedded/` 目录、`planckQuickView` 及新版流媒体对话框。
+  - **双版本 `engine_builds[]` 自动识别与安全回退（`tools/ui-mod/engine_ui_hook.c`、`test_stems_feature.c`）**：按 ELF `NT_GNU_BUILD_ID` 自动匹配 `5.0.4`（`af073865…`）与 `5.3.0`（`be537e90…`）两套 verified 站点表（19 个 DSP Hook、Stems processor、getConfig 跳板、Stems feature、ShowStemsList、文件系统与只读卷、SQLite 内存库与 pragma、TidalAPI 网关）；若遇到未知新版本或前缀字节不匹配则安全跳过，绝不强行写内存或崩溃。
+- **验证（编译机 IN）**：
+  - `gofmt`、`go vet`、`go test -race ./...`、`tests/test_rootfs_overlay.sh`（13 项）、`az01-packer`（44 项）、`tools/stems`（9 项）、`test_dsp_smooth`（常规 + ASan/UBSan + TSan）、`test_stems_feature`（5.0.4 与 5.3.0 双版本 ARM 单测 + 原厂 ELF 静态校验）、`test_edisksd_hook`（含 `unshare -m` mounts）全部通过。
+  - 5.0.4 与 5.3.0 在 `unshare` + `qemu-arm` 沙箱实跑验证 Source 界面：只开 Spotify + NetEase 时，上方显示 NetEase/Spotify，下方 `Connect New Sources` 显示原厂可用项，0 个 TIDAL、无空白格。
+  - 两套共 16 个镜像抽样 6 组 `az01_packer.py unpack` 均 `verified: true`，无内置 SSH 公钥（`none`）。
+- **Release `v5.0.4.2`（`--clobber` 重发）**：
+  - SC5000 / SC5000M / PRIME GO：`a0a0427d4ed9786b1ad8c37d8ff9991727b79c959aae76f2396eca29516e2b33`
+  - SC6000 / SC6000M：`d3fbb92d3dda095a1d0fee87bbd8d53c2b5c732f22374725e02f98deab7ee166`
+  - PRIME 4 / PRIME 2 / Mixstream Pro：`39a089f5cbdb5b0a6e40e60cf324e15ca4536eb2db934e3aa8fbf3e6e445adf5`
+- **Release `v5.3.0.1`（Latest）**：
+  - SC5000 / SC5000M / PRIME GO：`fc86f83167752b7585224cd1848a6f5327fe99006fd88bdd694e63df2a79d752`
+  - SC6000 / SC6000M：`b644223ec79e4359b0810b8cfb4976c3524df8eb929136c8bab2a6653fa1873d`
+  - PRIME 4 / PRIME 2 / Mixstream Pro：`5cf5a34f65c92c6c7b5e6c0599c359634905144702f3f59cfbb37ec8e51d5896`
+- **回滚点**：5.0.4.2 上一版构建提交为 `3b3b0a5`；5.3.0.1 可随时刷回 `v5.0.4.2` 镜像。
+
+
