@@ -121,12 +121,12 @@ func TestShadowDeckFromCDJ(t *testing.T) {
 	defer func() { fourDeckRolePath = "/run/sc5000-assignments/role" }()
 	os.WriteFile(fourDeckRolePath, []byte("24\n"), 0o644)
 	uiPost(t, srv.URL, "fourDeckWaveform=1")
-	dev := `{"address":"127.0.0.1","name":"CDJ-3000","number":3,"playing":true,"play_position_ms":5000,"pitch":-1.5,"master":true}`
+	dev := `{"address":"127.0.0.1","name":"CDJ-3000","number":3,"playing":true,"play_position_ms":5000,"pitch":-1.5,"master":true,"sync":true}`
 	if resp, err := http.Post(srv.URL+"/v1/sc5000/prolink", "application/json", strings.NewReader(dev)); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("post device: %v %v", resp, err)
 	}
 	_, decks := shadowGetJSON(t, srv.URL+"/v1/sc5000/shadow")
-	if len(decks) != 1 || decks[0].Deck != 3 || !decks[0].Playing || decks[0].Pitch != -1.5 || decks[0].PositionMS < 5000 || decks[0].Path != "" || !decks[0].Master {
+	if len(decks) != 1 || decks[0].Deck != 3 || !decks[0].Playing || decks[0].Pitch != -1.5 || decks[0].PositionMS < 5000 || decks[0].Path != "" || !decks[0].Master || !decks[0].Sync {
 		t.Fatalf("shadow: %+v", decks)
 	}
 	// A CDJ-3000's absolute position (0x0b) wins over the beat-based one.
