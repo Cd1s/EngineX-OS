@@ -81,6 +81,7 @@ type playlistRef struct {
 	session  string // empty for the built-in Deezer catalog
 	provider string
 	list     providers.Playlist
+	guest    bool
 }
 type trackSearcher interface {
 	Search(context.Context, string) ([]providers.Track, error)
@@ -123,15 +124,31 @@ type savedRef struct {
 	File    string          `json:"file,omitempty"`
 	Drive   string          `json:"drive,omitempty"`
 }
+type savedList struct {
+	ID       string             `json:"id"`
+	Session  string             `json:"session,omitempty"`
+	Provider string             `json:"provider"`
+	List     providers.Playlist `json:"list"`
+	Guest    bool               `json:"guest,omitempty"`
+}
 type savedTracks struct {
-	Next   int64      `json:"next"`
-	Tracks []savedRef `json:"tracks"` // least recently used first
+	Next   int64       `json:"next"`
+	Tracks []savedRef  `json:"tracks"` // least recently used first
+	Lists  []savedList `json:"lists"`  // least recently used first
 }
 
 const trackSaveDelay = 3 * time.Second
 
+// owner names a ref's login for its stable ID. An owner session gets a new
+// random ID at every start, so it is named by its service; a guest by its session.
+func owner(session string, guest bool) string {
+	if session != "" && !guest {
+		return "owner"
+	}
+	return session
+}
 func refKey(ref trackRef) string {
-	return ref.session + "\x00" + ref.track.Provider + "\x00" + ref.track.ID
+	return owner(ref.session, ref.guest) + "\x00" + ref.track.Provider + "\x00" + ref.track.ID
 }
 
 func (g *tidalGateway) tracksPath() string {
@@ -157,6 +174,19 @@ func (g *tidalGateway) loadTracks() {
 		g.next = max(g.next, r.ID)
 	}
 	g.next = max(g.next, v.Next)
+	for _, l := range v.Lists {
+		g.lists[l.ID] = playlistRef{l.Session, l.Provider, l.List, l.Guest}
+		g.seq++
+		g.listSeen[l.ID] = g.seq
+	}
+}
+
+// scheduleSave must be called with g.mu held.
+func (g *tidalGateway) scheduleSave() {
+	if !g.saving && g.tracksPath() != "" {
+		g.saving = true
+		time.AfterFunc(trackSaveDelay, g.saveTracks)
+	}
 }
 
 // saveTracks writes the track IDs. Run by a timer after changes, and by Close.
@@ -174,6 +204,10 @@ func (g *tidalGateway) saveTracks() {
 		v.Tracks = append(v.Tracks, savedRef{id, ref.track, ref.session, ref.guest, ref.file, ref.drive})
 	}
 	sort.Slice(v.Tracks, func(a, b int) bool { return g.trackSeen[v.Tracks[a].ID] < g.trackSeen[v.Tracks[b].ID] })
+	for id, ref := range g.lists {
+		v.Lists = append(v.Lists, savedList{id, ref.session, ref.provider, ref.list, ref.guest})
+	}
+	sort.Slice(v.Lists, func(a, b int) bool { return g.listSeen[v.Lists[a].ID] < g.listSeen[v.Lists[b].ID] })
 	g.mu.Unlock()
 	if _, err := os.Stat(filepath.Dir(path)); err != nil {
 		return // the state dir is gone (a test that ended)
@@ -452,9 +486,10 @@ func each[T, R any](ctx context.Context, in []T, fn func(context.Context, T) ([]
 	return out
 }
 func (g *tidalGateway) addPlaylist(ref playlistRef) string {
-	id := uuid.NewSHA1(tidalNS, []byte(ref.session+"\x00"+ref.provider+"\x00"+ref.list.ID)).String()
+	id := uuid.NewSHA1(tidalNS, []byte(owner(ref.session, ref.guest)+"\x00"+ref.provider+"\x00"+ref.list.ID)).String()
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.scheduleSave()
 	g.lists[id] = ref
 	g.seq++
 	g.listSeen[id] = g.seq
@@ -483,10 +518,7 @@ func (g *tidalGateway) addTrack(ref trackRef) int64 {
 		id = g.next
 		g.ids[key] = id
 	}
-	if !g.saving && g.tracksPath() != "" {
-		g.saving = true
-		time.AfterFunc(trackSaveDelay, g.saveTracks)
-	}
+	g.scheduleSave()
 	g.tracks[id] = ref
 	if address := thumbURL(ref.track); address != "" {
 		if len(g.artURLs) > maxTracks {
@@ -629,7 +661,7 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 			add(playlistJSON(hintPlaylist, sourceFailedTitle(v.Provider, err), err.Error(), 0))
 		}
 		for _, p := range lists[i] {
-			ref := playlistRef{v.ID, v.Provider, p}
+			ref := playlistRef{v.ID, v.Provider, p, v.Guest}
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}
@@ -639,7 +671,7 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 			return d.ChartPlaylists(ctx)
 		})
 		for _, p := range defaults[0] {
-			ref := playlistRef{"", "deezer", p}
+			ref := playlistRef{"", "deezer", p, false}
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}
@@ -736,7 +768,7 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var p providers.Provider = g.catalog
-	guest := false
+	guest, session := false, ref.session
 	if ref.session == "" && ref.provider == "soundcloud" {
 		sc := g.s.ownerSoundCloud()
 		if sc == nil {
@@ -746,11 +778,18 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		p = sc
 	} else if ref.session != "" {
 		v := g.sessionByID(ref.session)
+		if v == nil && !ref.guest { // the owner's login after a restart (#73)
+			for _, o := range g.sources() {
+				if !o.Guest && o.Provider == ref.provider {
+					v = o
+				}
+			}
+		}
 		if v == nil {
 			fail(w, 404, errors.New("login expired; sign in again at sc5000.lan:8080"))
 			return
 		}
-		p, guest = v.p, v.Guest
+		p, guest, session = v.p, v.Guest, v.ID
 	}
 	tracks, err := p.Tracks(r.Context(), ref.list.ID)
 	if err != nil {
@@ -762,7 +801,7 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.s.cfg.BPM.Enrich(r.Context(), tracks)
-	respond(w, page(r, 500, g.trackItems(ref.session, guest, tracks)))
+	respond(w, page(r, 500, g.trackItems(session, guest, tracks)))
 }
 
 // favoriteTracks maps to the owner's NetEase "liked songs", which NetEase
@@ -908,7 +947,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 			trackItems = append(trackItems, g.trackJSON(g.addTrack(trackRef{track: t, session: v.session, guest: v.guest}), t))
 		}
 		for _, p := range lists[i] {
-			ref := playlistRef{v.session, v.provider, p}
+			ref := playlistRef{v.session, v.provider, p, v.guest}
 			listItems = append(listItems, g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}

@@ -242,7 +242,7 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 	drives := g.s.drives()
 	for _, lists := range each(ctx, drives, drivePlaylists) {
 		for _, p := range lists {
-			ref := playlistRef{"", localProvider, p}
+			ref := playlistRef{"", localProvider, p, false}
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}
@@ -256,7 +256,7 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 	for i, v := range others {
 		for _, p := range lists[i] {
 			p.Title = "[" + providerLabels[v.Provider] + "] " + p.Title
-			ref := playlistRef{v.ID, v.Provider, p}
+			ref := playlistRef{v.ID, v.Provider, p, v.Guest}
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}
