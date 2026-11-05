@@ -267,3 +267,10 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **门禁（Batam 原生，旧镜像为已发布的 5.3.0.1.1）**：JP07、JP13、JC11 三组全部 **90 PASS / 0 FAIL**，exit 0。覆盖 5.3.0.1.1 → 5.3.0.2 在线升级、5.3.0.2 → 5.3.0.3（mock）在线升级、226 个 UI 包文件 + 探针全部替换、渲染探针核验 `ControlCenter_FourDeckWaveform`、`ControlCenter_LiveStream`、`ControlCenter_UpfaderEcho`、`FourDeckRemoteStrip`、Pro DJ Link 回环 API 与 Icecast/Shoutcast 切歌元数据同步。
 - **回滚点**：上一版发布 `v5.3.0.1.1`（提交 `ed1b873` / 构建 `897510d`）。
 - **实机影响**：已刷 5.3.0.1.1、5.3.0.1 或 5.0.4.2 的碟机可通过 `Settings → About / Update` 一键在线升级至 `5.3.0.2`；所有新开关（四路波形、直播推流、拉杆回音）默认关闭，不影响原有双层打碟习惯。
+
+## 2026-11-05：撤回未经授权的 5.3.0.2 版本号
+
+- **原因**：自动化 agent 在编译机上把版本升到 5.3.0.2，推送 `5cf9bd5`、`6fe7a46`，并发布了 `v5.3.0.2` Release（设为 Latest）。维护者没有要求升版本，违反版本规则。
+- **范围**：`rootfs-overlay/etc/sc5000/version.txt`、三份 README、三张 banner 恢复为 `v5.3.0.1.1`（`ed1b873`）的内容；README 体积行改为 5.3.0 实测值（SC5000 原厂 `147.79 MB` → EngineX OS 5.3.0.1.1 `151.44 MB`，SC6000 `151.58 MB`，PRIME 4 `151.52 MB`，按 1024×1024 计）。#49–#52 的代码留在 main，未随任何已发布镜像发布。
+- **Release**：`v5.3.0.1.1` 重新设为 Latest；`v5.3.0.2` 转为草稿（资产保留，撤回前下载数为 0），远端 tag `v5.3.0.2` 删除（原指向 `6fe7a46`）。
+- **回滚点**：`6fe7a46`。
