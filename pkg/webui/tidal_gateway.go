@@ -302,9 +302,9 @@ func ready(p providers.Provider) bool {
 	case *providers.Deezer:
 		return v.UserID != ""
 	case *providers.SoundCloud:
-		// An app's token can search but knows no account, so that is not a login:
-		// the deck must still offer the QR code that binds a profile.
-		return v.Usable() && (v.UserID != 0 || v.Token != "")
+		// Searching needs no account, so only a bound profile or a user's token is a
+		// login: until then the deck still offers the QR code.
+		return v.UserID != 0 || v.Token != ""
 	case *providers.Beatport:
 		return v.Ready()
 	}

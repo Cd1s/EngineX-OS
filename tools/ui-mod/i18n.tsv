@@ -240,7 +240,7 @@ Fx	效果	效果
 Can't start login. Check the network.	无法开始登录，请检查网络。	無法開始登入，請檢查網路。
 Confirm on your phone	请在手机上确认	請在手機上確認
 Scan with the NetEase Cloud Music app	请用网易云音乐 App 扫码	請用網易雲音樂 App 掃碼
-Scan with your phone camera. Phone and deck must be on the same network.	请用手机相机扫码完成授权（支持 5G/Wi-Fi 免局域网）。	請用手機相機掃碼完成授權（支援 5G/Wi-Fi 免區域網路）。
+Scan with your phone camera. Phone and deck must be on the same network.	请用手机相机扫码。手机和碟机要连同一个 Wi-Fi。	請用手機相機掃碼。手機和碟機要連同一個 Wi-Fi。
 Not now	暂不登录	暫不登入
 Switch account	切换账号	切換帳號
 Scan to log in	扫码登录	掃碼登入
@@ -283,3 +283,5 @@ Options	选项	選項
 This will wipe all user settings and passwords from this device and restore it to its factory default configuration. The device will reboot during this process.	这将清除本设备上的所有用户设置和密码，并恢复出厂默认配置。设备会在此过程中重启。	這將清除本裝置上的所有使用者設定與密碼，並恢復原廠預設設定。裝置會在此過程中重新啟動。
 Version: ${version}	版本：${version}	版本：${version}
 Prepare	准备	準備
+The QR code expired.	二维码已过期。	QR Code 已過期。
+Tap for a new QR code	点这里换一个新二维码	點這裡換一個新 QR Code

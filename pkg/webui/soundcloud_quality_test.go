@@ -54,7 +54,7 @@ func TestSoundCloudFollowsStreamingQuality(t *testing.T) {
 	d := &deemixclient.Client{DownloadDir: dir, AllowLossy: true, PreferMP3: func() bool { return mp3 }}
 	j := NewJobs(Pipeline{Deemix: d})
 	defer j.Close()
-	sc := &providers.SoundCloud{BaseURL: srv.URL, Token: "t"}
+	sc := &providers.SoundCloud{BaseURL: srv.URL, ClientID: "cid", Secret: "shh", Token: "t"}
 	j.soundcloud = func() *providers.SoundCloud { return sc }
 	track := providers.Track{ID: "5", Provider: "soundcloud"}
 

@@ -298,6 +298,7 @@ SERVICES_MAIN = """
 	// Every service is backed by Engine's TIDAL provider; the gateway follows the scope.
 	function scOpen(id) {
 		scAskedAt = Date.now()
+		scScope = id // before Engine's TIDAL client can raise a prompt; scApply confirms it
 		scEnsureTidal()
 		scCall("scope=" + id, function() {
 			Planck.librarianController.streamingPlaylistsController.invalidateUI()
@@ -313,6 +314,10 @@ SERVICES_MAIN = """
 	// and then asked to log in to TIDAL again and again (#48). Close those as the
 	// cross would.
 	property double scAskedAt: 0
+	// The local gateway logs Engine's TIDAL client in at once for every other service,
+	// so its login, pairing and "Connecting to" boxes would only flash up with the
+	// TIDAL name. They stay closed unless TIDAL itself is open.
+	function scQuiet() { return scScope !== "" && scScope !== "tidal" }
 	function scUnasked(provider) {
 		if (Date.now() - scAskedAt < 120000) return false
 		const c = Planck.librarianController.streamingInterfaceController
@@ -322,13 +327,14 @@ SERVICES_MAIN = """
 	}
 	property string scLogin: ""
 	property string scLoginStatus: ""
+	property bool scLoginLocal: false
 	property int scLoginSerial: 0
 	function scLoginRequest(method, id, done) {
 		const x = new XMLHttpRequest()
 		x.open(method, "http://127.0.0.1:8080/v1/sc5000/login?provider=" + id)
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || scLogin !== id) return
-			if (x.status === 200) done(JSON.parse(x.responseText).status)
+			if (x.status === 200) done(JSON.parse(x.responseText))
 			else scLoginStatus = "error"
 		}
 		x.send()
@@ -336,9 +342,10 @@ SERVICES_MAIN = """
 	function scLoginBegin(id) {
 		scLogin = id
 		scLoginStatus = "starting"
-		scLoginRequest("POST", id, function(status) {
+		scLoginRequest("POST", id, function(v) {
 			scLoginSerial++
-			scLoginStatus = status
+			scLoginStatus = v.status
+			scLoginLocal = /:8080\\/m\\//.test(v.target || "")
 		})
 	}
 	function scLoginDone() {
@@ -351,13 +358,14 @@ SERVICES_MAIN = """
 	}
 	Timer {
 		interval: 2000; repeat: true
-		running: scLogin !== "" && scLoginStatus !== "starting" && scLoginStatus !== "error"
+		// An expired code waits for a tap: renewing it here redrew the code every
+		// two seconds whenever NetEase kept calling fresh ones expired.
+		running: scLogin !== "" && ["starting", "error", "expired"].indexOf(scLoginStatus) < 0
 		onTriggered: {
 			const id = scLogin
-			scLoginRequest("GET", id, function(status) {
-				if (status === "done") scLoginDone()
-				else if (status === "expired") scLoginBegin(id)
-				else scLoginStatus = status
+			scLoginRequest("GET", id, function(v) {
+				if (v.status === "done") scLoginDone()
+				else scLoginStatus = v.status
 			})
 		}
 	}
@@ -533,13 +541,30 @@ LOGIN_DIALOG = """
 					width: 540; height: 540
 					radius: 16
 					color: "white"
+					readonly property bool renew: root.scLoginStatus === "expired" || root.scLoginStatus === "error"
 					Image {
 						anchors.centerIn: parent
 						width: 508; height: 508
 						smooth: false
 						cache: false
-						visible: root.scLoginSerial > 0 && root.scLoginStatus !== "error"
+						opacity: parent.renew ? 0.08 : 1
+						visible: root.scLoginSerial > 0
 						source: root.scLogin && root.scLoginSerial > 0 ? "http://127.0.0.1:8080/v1/sc5000/login/qr?provider=" + root.scLogin + "&n=" + root.scLoginSerial : ""
+					}
+					Text {
+						anchors.centerIn: parent
+						width: 460
+						visible: parent.renew
+						horizontalAlignment: Text.AlignHCenter
+						wrapMode: Text.WordWrap
+						text: root.scT("Tap for a new QR code")
+						color: "black"
+						font: Style.fontH0
+					}
+					MouseArea {
+						anchors.fill: parent
+						enabled: parent.renew
+						onClicked: root.scLoginBegin(root.scLogin)
 					}
 				}
 				Image {
@@ -563,9 +588,10 @@ LOGIN_DIALOG = """
 					font: Style.fontH1
 					text: {
 						if (root.scLoginStatus === "error") return root.scT("Can't start login. Check the network.")
+						if (root.scLoginStatus === "expired") return root.scT("The QR code expired.")
 						if (root.scLoginStatus === "scanned") return root.scT("Confirm on your phone")
 						if (root.scLogin === "netease") return root.scT("Scan with the NetEase Cloud Music app")
-						return root.scT("Scan with your phone camera.")
+						return root.scT(root.scLoginLocal ? "Scan with your phone camera. Phone and deck must be on the same network." : "Scan with your phone camera.")
 					}
 				}
 				Rectangle {
@@ -1095,7 +1121,7 @@ def edits(dev: bool):
                 '						text: service.provider ? `Connecting to ${service.provider.displayName}` : ""\n',
                 '						text: service.provider ? root.scT("Connecting to") + " " + root.scBrand(service.provider.displayName) : ""\n',
             ),
-            ("function onShowAcceptDenyDialog(provider) {\n", "function onShowAcceptDenyDialog(provider) {\n				if (root.scUnasked(provider)) return\n"),
+            ("function onShowAcceptDenyDialog(provider) {\n", "function onShowAcceptDenyDialog(provider) {\n				if (root.scQuiet() || root.scUnasked(provider)) return\n"),
         ],
         v + "Streaming/StreamingUtilityDialog.qml": [(
             '            color: Style.icon01Color\n'
@@ -1116,7 +1142,7 @@ def edits(dev: bool):
                 '					text: `Log in to ${loginDialog.provider ? loginDialog.provider.displayName: ""} to access your tracks and playlists`\n',
                 '					text: root.scBrand(`Log in to ${loginDialog.provider ? loginDialog.provider.displayName: ""} to access your tracks and playlists`)\n',
             ),
-            ("function onShowLoginDialog(provider) {\n", "function onShowLoginDialog(provider) {\n			if (root.scUnasked(provider)) return\n"),
+            ("function onShowLoginDialog(provider) {\n", "function onShowLoginDialog(provider) {\n			if (root.scQuiet() || root.scUnasked(provider)) return\n"),
         ],
         v + "BrowseView/Components/TrackList.qml": [
             (
@@ -1307,7 +1333,7 @@ def legacy_qml_fixes():
         v + "Streaming/StreamingPairingDialog.qml": [(
             "		if(!visible && service.provider && !service.provider.loggedIn) {\n",
             "		if(!visible && service.provider && !service.provider.loggedIn && controller.selectedProvider === service.provider) {\n",
-        )],
+        ), ("function onShowPairingDialog(provider) {\n", "function onShowPairingDialog(provider) {\n				if (root.scQuiet()) return\n")],
         # RA001: leaving the Load Playlist menu left the deck picker open.
         v + "SelectPlaylistDeckMenu/SelectPlaylistDeckMenuLayoutBase.qml": [(
             '	pShow: Planck.getProperty("/GUI/ShowSelectPlaylistDeckMenu")\n',
