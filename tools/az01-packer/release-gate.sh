@@ -3,7 +3,8 @@
 #   bash tools/az01-packer/release-gate.sh <previous release .img> <new .img> <new version> [work dir]
 # e.g. SC5000-5.0.4.2-...-JP07-Update.img SC5000-5.3.0.1-...-JP07-Update.img 5.3.0.1
 #
-# On the real unpacked rootfs.ext2 of both images (unshare -m -n -p + qemu-arm chroot):
+# On the real unpacked rootfs.ext2 of both images (unshare -m -n -p + chroot; armhf runs
+# natively on an ARM host with 32-bit EL0, elsewhere through qemu-arm binfmt):
 #  1. static audit of the new rootfs: unit dependencies, Exec* commands, tool
 #     paths, shared libraries of every shipped ELF (rootfs_audit.py, ld.so --list);
 #  2. the previous release boots (prepare, stream-sync, Engine), finds the new
@@ -74,7 +75,7 @@ rc=$(sed -n 's/^rc=//p' /tmp/gate-az01.log | tail -1); exit "${rc:-1}"
 SH
     # qemu-user shows an emulated process as "<qemu> <path> <argv0> <args>" in
     # /proc/PID/cmdline, so the suite's "pkill -f ^/usr/Engine/Engine" would miss
-    # Engine. This pkill, first in the deck's PATH, drops that prefix.
+    # Engine. This pkill, first in the deck's PATH, drops that prefix (none when native).
     mkdir -p "$R/usr/local/sbin"
     mount -t tmpfs tmpfs "$R/usr/local/sbin"
     cat > "$R/usr/local/sbin/pkill" <<SH
@@ -84,7 +85,7 @@ rc=1
 for c in /proc/[0-9]*/cmdline; do
     pid=\${c#/proc/}; pid=\${pid%/cmdline}
     cmd=\$(tr '\\0' ' ' < "\$c" 2>/dev/null) || continue
-    case \$cmd in "$QEMU_INTERP "*) cmd=\${cmd#* }; cmd=\${cmd#* } ;; esac
+    [ -z "$QEMU_INTERP" ] || case \$cmd in "$QEMU_INTERP "*) cmd=\${cmd#* }; cmd=\${cmd#* } ;; esac
     [ "\$pid" = \$\$ ] || ! printf '%s\\n' "\${cmd% }" | grep -Eq -- "\$3" || { kill "\$1" "\$pid" && rc=0; }
 done
 exit \$rc
@@ -126,6 +127,12 @@ SH
     # Engine aborts without the deck's serial IRQ ("No IRQ matching 'ttyS0'").
     printf '           CPU0\n 41:        100     GICv2  32 Level     ttyS0\n' > "$R/run/gate/interrupts"
     mount --bind "$R/run/gate/interrupts" "$R/proc/interrupts"
+    # Engine then pins that IRQ to CPU 0. Without this it wrote the build host's own
+    # IRQ 41, and aborts where the host has no such IRQ (native ARM hosts).
+    mount -t tmpfs tmpfs "$R/proc/irq"
+    mkdir "$R/proc/irq/41"
+    printf 'f\n' > "$R/proc/irq/41/smp_affinity"
+    printf '0-3\n' > "$R/proc/irq/41/smp_affinity_list"
 
     mkdir -p "$R/run/dbus"
     chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile >> "$W/$name-boot.log" 2>&1 || chroot "$R" /usr/bin/dbus-daemon --system --fork
@@ -317,7 +324,14 @@ esac
 
 [ $# -ge 3 ] || { sed -n '2,4p' "$SELF" >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "run as root on the build host" >&2; exit 2; }
-grep -qs '^flags:.*F' /proc/sys/fs/binfmt_misc/qemu-arm || { echo "needs qemu-arm binfmt with the F flag" >&2; exit 2; }
+# A registered qemu-arm handler wins over native execution, so only its absence means native.
+QEMU_INTERP=
+if grep -qs '^enabled' /proc/sys/fs/binfmt_misc/qemu-arm; then
+    grep -qs '^flags:.*F' /proc/sys/fs/binfmt_misc/qemu-arm || { echo "qemu-arm binfmt needs the F flag" >&2; exit 2; }
+    QEMU_INTERP=$(sed -n 's/^interpreter //p' /proc/sys/fs/binfmt_misc/qemu-arm)
+else
+    case $(uname -m) in aarch64|arm*) ;; *) echo "needs an ARM host or qemu-arm binfmt with the F flag" >&2; exit 2 ;; esac
+fi
 for t in python3 openssl curl unshare chroot ip readelf realpath systemd-analyze; do command -v $t >/dev/null || { echo "missing $t" >&2; exit 2; }; done
 OLD_IMG=$(realpath "$1"); NEW_IMG=$(realpath "$2"); NEWV=$3
 W=$(realpath -m "${4:-$(mktemp -d /var/tmp/sc5000-gate.XXXXXX)}")
@@ -329,7 +343,6 @@ PREFIX=${BASH_REMATCH[1]} MODEL=${BASH_REMATCH[2]} PRODUCT=${BASH_REMATCH[3]}
 OLDV=${BASH_REMATCH[1]}
 NEXTV=${NEWV%.*}.$(( ${NEWV##*.} + 1 ))
 COMPAT=inmusic,$(echo "$PRODUCT" | tr 'A-Z' 'a-z')
-QEMU_INTERP=$(sed -n 's/^interpreter //p' /proc/sys/fs/binfmt_misc/qemu-arm)
 export W REPO OLDV NEWV NEXTV PREFIX PRODUCT COMPAT QEMU_INTERP NEW_IMG
 export LANG_PACK=${GATE_LANG:-zh-Hans} ENGINE_START=${GATE_ENGINE_START:-300} ENGINE_SECONDS=${GATE_ENGINE_SECONDS:-90}
 export UPDATE_TIMEOUT=${GATE_UPDATE_TIMEOUT:-900} EXPECT_APPLIED=${GATE_EXPECT_APPLIED:-16} EXPECT_DSP=${GATE_EXPECT_DSP:-19}
