@@ -30,7 +30,9 @@ git grep -n "<OLD>" -- README.md README.zh-CN.md README.zh-TW.md rootfs-overlay 
 
 `tests/`、`test_az01_packer.py` 里的版本号是测试数据，不要改。镜像里的 `/etc/sc5000/version.txt` 由 `build-release.sh` 的 `--set-version` 写入，第 1 步改的仓库文件用于实机热部署和保持一致。
 
-## 2. 测试（只在编译机上跑，本机不编译）
+## 2. 测试（只在编译机 `Oracle-Batam-arm` 上跑，本机不编译）
+
+本项目的编译、单测、门禁和打包主机是 **`Oracle-Batam-arm`**（ssm 别名；Oracle 印尼巴淡，aarch64，支持 32 位 EL0，碟机的 armhf 程序原生运行）。2026-11-05 起不再用 IN。`remote-build` 默认仍连 IN，所以每次都写 `REMOTE_BUILD_HOST=Oracle-Batam-arm remote-build ...`。机器上的固定材料在 `/root/build/sc5000-lab/`：`fw/`（5.0.4 官方底包）、`fw-5.3.0/`、`5.0.4/qrc`、`5.3.0/qrc`、`5.0.4|5.3.0/tree/usr/Engine/Engine`、`deps-sqlite/`（armhf `sqlite3.o`）、`sbin/fsck.hfsplus`、`release-5.0.4.2/`（已发布的旧镜像，供门禁用）。Go 1.27.1 在 `/etc/profile.d/buildtools.sh`。
 
 ```sh
 gofmt -l . && go vet ./... && go test -race ./...
@@ -39,11 +41,11 @@ python3 -m unittest discover -s tools/az01-packer
 python3 -m unittest discover -s tools/stems
 # C 单测：编译命令写在各文件头部
 #   tools/ui-mod/test_dsp_smooth.c（另跑 ASan/UBSan 与 TSan 各一次）
-#   tools/ui-mod/test_stems_feature.c（armhf + qemu-arm）
+#   tools/ui-mod/test_stems_feature.c（arm-linux-gnueabihf-gcc 编译，Batam 上原生运行；参数给两个底包的 Engine）
 #   tools/edisksd-hook/test_edisksd_hook.c（--mounts 只在 unshare -m 里跑）
 ```
 
-涉及 Factory Reset、`az01-update --erase-data`、空白 `/data` 首次启动的改动，只在编译机的 `unshare -m` + `qemu-arm` 沙箱里用解包出的 rootfs 测，**绝不在实机触发**。
+涉及 Factory Reset、`az01-update --erase-data`、空白 `/data` 首次启动的改动，只在 `Oracle-Batam-arm` 的 `unshare -m` + chroot 沙箱里用解包出的 rootfs 测，**绝不在实机触发**。
 
 ## 3. 提交与构建
 
@@ -51,9 +53,11 @@ python3 -m unittest discover -s tools/stems
 2. 用干净目录构建（`remote-build` 同步不会删除远端已删除的文件，旧目录会带上残留）：
 
 ```sh
-remote-build --name sc5000-release-<短说明> --clean -- \
-  'sh tools/az01-packer/build-release.sh <VERSION> <官方固件目录> none <fsck.hfsplus> <新输出目录>'
+REMOTE_BUILD_HOST=Oracle-Batam-arm remote-build --name sc5000-release-<短说明> --clean -- \
+  '. /etc/profile.d/buildtools.sh; sh tools/az01-packer/build-release.sh <VERSION> /root/build/sc5000-lab/fw-5.3.0 none /root/build/sc5000-lab/sbin/fsck.hfsplus <新输出目录>'
 ```
+
+`build-release.sh` 抽 qrc 时用 `qemu-arm -L <rootfs>` 跑 Engine 的静态初始化，Batam 装了不带 binfmt 的 `qemu-user`（`--no-install-recommends`）。不要装 `qemu-user-binfmt`：注册了 `qemu-arm` 的 binfmt 会盖过原生执行，门禁会退回软模拟。
 
 第 3 个参数在公开发布时**必须是 `none`**：公开镜像不能内置任何人的 SSH 公钥（#46）。只有维护者自用的私有镜像才传公钥文件，且私有镜像不能上传到 Release。
 
@@ -81,7 +85,7 @@ remote-build --name sc5000-release-<短说明> --clean -- \
 - **适配新官方底包时，以及每次发版（含同版本重发）**，都在第 4 步之后跑门禁。三个镜像组各跑一次，旧镜像用同一机型的**上一个已发布版本**：
 
 ```sh
-# 编译机上以 root 运行，在 remote-build 同步过来的仓库根目录
+# Oracle-Batam-arm 上以 root 运行，在 remote-build 同步过来的仓库根目录
 bash tools/az01-packer/release-gate.sh \
   <上一版目录>/SC5000-<OLD>-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img \
   <新输出目录>/SC5000-<VERSION>-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img <VERSION> /var/tmp/sc5000-gate-<短说明>
@@ -90,7 +94,7 @@ bash tools/az01-packer/release-gate.sh \
 
 退出码为 0、`results.txt` 里没有 `FAIL`，才能进第 5 步。
 
-运行位置：ARM 门禁和沙箱**优先放在 Oracle 印尼 ARM 机（ssm 别名 `oracle-id-arm`，简称 ID）上原生跑**。IN 是 x86，`qemu-arm` 软模拟下 Engine 每次启动要 60–90 秒，整树遍历一次 QML 节点要 20–35 秒。注意：`release-gate.sh` 目前会检查 `qemu-arm` binfmt，pkill shim 也按 qemu 的 cmdline 前缀处理，第一次在 ID 上跑之前要先适配这两处并验证一遍（截至 2026-11-05 还没在 ID 上跑过）。ID 上没有官方固件和构建产物时，构建仍在 IN 上做，再把镜像传过去。门禁全部在 `unshare -m -n -p` + `qemu-arm` chroot 里运行，挂载的是两个镜像解包出的**真实 `rootfs.ext2`**，宿主的 `/proc`、`/sys` 不会被写到：
+运行位置：门禁在 `Oracle-Batam-arm` 上原生跑（armhf 直接执行，不经 `qemu-arm`）。旧的 x86 编译机 IN 上 Engine 每次启动要 60–90 秒，Batam 上约 2 秒。`release-gate.sh` 在没有注册 `qemu-arm` binfmt 且 `uname -m` 是 `aarch64`/`arm*` 时原生执行；在 x86 上仍要求带 F 标志的 `qemu-arm` binfmt。门禁全部在 `unshare -m -n -p` + chroot 里运行，挂载的是两个镜像解包出的**真实 `rootfs.ext2`**，宿主的 `/proc`、`/sys` 不会被写到：
 
 | 阶段 | 检查 |
 | --- | --- |
@@ -101,12 +105,12 @@ bash tools/az01-packer/release-gate.sh \
 
 - 预期值随底包变：`GATE_EXPECT_APPLIED`（默认 16）、`GATE_EXPECT_DSP`（默认 19）、`GATE_LANG`（默认 `zh-Hans`）。只有底包或 hook 站点表变了才改，并写进变更记录。
 - 沙箱里不真正执行、而是由记录 shim 代替的命令：`kexec`、`systemctl`、`reboot`、`encrypt-fs.sh`（对 `/data` 做 fscrypt，失败时会触发 Factory Reset）、`az01-update --erase-data`。`planck-remote-screen` 在沙箱里没有显示，它的 shim 改调 `az01-update --net`，两者用的是同一个 libaz01-prog 下载与校验代码。沙箱里没有 eMMC，`Applying` 之后会报 `unsupported operation`，这是预期结果，记为 INFO。真实刷写和重启仍需按第 8 步在实机上抽查。
-- 另外两处是沙箱本身的限制，不是 bug：qemu-user 下 `/proc/PID/cmdline` 前面多出解释器路径，所以门禁在 `/usr/local/sbin` 放了一个去掉这个前缀的 `pkill`；没有 udev 时 edisksd 会自行退出，所以门禁只验证 hook 能在 `LD_BIND_NOW=1` 下预加载，挂载流程由 `test_edisksd_hook.c --mounts` 覆盖。
+- 另外两处是沙箱本身的限制，不是 bug：qemu-user 下 `/proc/PID/cmdline` 前面多出解释器路径，所以门禁在 `/usr/local/sbin` 放了一个去掉这个前缀的 `pkill`（原生运行时没有前缀，shim 原样匹配）；Engine 会把伪造的 ttyS0（IRQ 41）绑到 CPU 0，门禁用 tmpfs 盖住沙箱里的 `/proc/irq`，否则会改到宿主的 IRQ，宿主没有这个 IRQ 时 Engine 直接 abort；没有 udev 时 edisksd 会自行退出，所以门禁只验证 hook 能在 `LD_BIND_NOW=1` 下预加载，挂载流程由 `test_edisksd_hook.c --mounts` 覆盖。
 - 证据在工作目录：`results.txt`、`audit.txt`、`old-*.log` / `new-*.log`、`*-shim.log`。摘要写进 `docs/ISSUE-FIXES-*.md`。
 
 ## 5. Tag 与 GitHub Release
 
-在编译机上直接上传（那边 `gh` 已登录，不用把 1.5 GB 拉回本机）：
+在 `Oracle-Batam-arm` 上直接上传（那边 `gh` 已登录 `Cd1s`，不用把 1.5 GB 拉回本机）：
 
 ```sh
 # 新版本
