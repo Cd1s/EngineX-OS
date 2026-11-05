@@ -23,19 +23,34 @@ Item {
         f(o)
         for (const c of kids(o)) walk(c, seen, f)
     }
+    function isSection(o) { return typeof o.label === "string" && "labelVisible" in o }
+    function entries(section, f) { // the switch rows of a preferences Section
+        walk(section, new Set(), function (c) {
+            if (c !== section && "accessory" in c && "checked" in c && typeof c.text === "string" && c.text) f(c)
+        })
+    }
+    function streamingSection() { // stock or pack: both list SoundCloud
+        let found = null
+        walk(probe.Window.window.contentItem, new Set(), function (o) {
+            if (!found && isSection(o)) entries(o, function (c) { if (c.text === "SoundCloud") found = o })
+        })
+        return found
+    }
     function report() {
         walk(probe.Window.window.contentItem, new Set(), function (o) {
             if (o.objectName === "Version")
                 console.warn("SCPROBE version|" + String(o.text).replace(/<[^>]*>/g, "") + "|")
             if (o.objectName === "ControlCenter_WaveformStyle")
                 console.warn("SCPROBE tile|" + o.objectName + "|")
-            if (typeof o.label === "string" && "labelVisible" in o) // a preferences Section
-                walk(o, new Set(), function (c) {
-                    if (c !== o && "accessory" in c && "checked" in c && typeof c.text === "string" && c.text)
-                        console.warn("SCPROBE entry|" + o.label + "|" + c.text + "|" + (c.visible ? 1 : 0) + "|")
-                })
+            if (isSection(o))
+                entries(o, function (c) { console.warn("SCPROBE entry|" + o.label + "|" + c.text + "|" + (c.visible ? 1 : 0) + "|") })
         })
     }
+
+    // A whole-tree walk takes 20-35 s under qemu: find the section once, then only poll it.
+    property var section: null
+    property var tabNames: []
+    property int tabTry: 0
 
     Timer {
         property int step: 0
@@ -45,9 +60,24 @@ Item {
         onTriggered: {
             try {
                 step++
-                if (step === 1) PlanckGUI.views.controlCenter.openTab(ControlCenterTabNameSettings)
-                if (step === 2) PlanckGUI.views.controlCenter.selectSubTab("Services")
-                if (step < 4) return
+                if (!probe.section) {
+                    PlanckGUI.views.controlCenter.openTab(ControlCenterTabNameSettings)
+                    probe.section = streamingSection()
+                    if (!probe.section && step <= 20) return
+                    let view = probe.section
+                    while (view && typeof view.selectTab !== "function") view = view.parent
+                    const names = []
+                    for (let i = 0; view && i < view.tabs.count; i++) names.push(view.tabs.get(i).display)
+                    probe.tabNames = names
+                }
+                // The packs translate the sub-tab names selectSubTab() matches on: try each.
+                if (probe.section && !probe.section.visible && probe.tabTry < probe.tabNames.length * 2) {
+                    const name = probe.tabNames[probe.tabTry++ % probe.tabNames.length]
+                    console.warn("SCPROBE nav|" + name + "|")
+                    PlanckGUI.views.controlCenter.selectSubTab(name)
+                    return
+                }
+                if (!(probe.section && probe.section.visible)) console.warn("SCPROBE error|Settings -> Services never showed|")
                 report()
             } catch (e) {
                 console.warn("SCPROBE error|" + e + "|")

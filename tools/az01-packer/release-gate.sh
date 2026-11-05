@@ -184,7 +184,7 @@ SH
         check "new: UI hook replaced all $want pack files + the gate probe (got ${files:-0})" test "${files:-0}" -eq $((want + 1)) -a "$want" -gt 0
         # What Engine rendered, not what the hook counted: a stale .qmlc showed the stock UI
         # while the hook still logged every file.
-        check "new: render probe reported (Settings -> Services, About)" wait_for 120 grep -aq 'SCPROBE done|' "$log"
+        check "new: render probe reported (Settings -> Services, About)" wait_for "$ENGINE_START" grep -aq 'SCPROBE done|' "$log"
         check "new: render probe ran without errors" bash -c "! grep -aq 'SCPROBE error|' '$log'"
         label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2) || :
         check "new: Settings -> Services -> Streaming shows the pack's Deezer row" test -n "$label"
