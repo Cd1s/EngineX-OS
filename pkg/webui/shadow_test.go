@@ -147,3 +147,35 @@ func TestShadowDeckFromCDJ(t *testing.T) {
 		t.Fatalf("cue: %+v", decks)
 	}
 }
+
+func TestCDJDecks(t *testing.T) {
+	now := time.Now()
+	dev := func(n byte) prolink.Device { return prolink.Device{Number: n, Name: "CDJ-3000", LastSeen: now} }
+	for _, c := range []struct {
+		cdjs []byte
+		free []int
+		want map[int]byte
+	}{
+		{[]byte{3}, []int{2, 4}, map[int]byte{2: 3}},          // a lone CDJ 3 next to a 1+3 player: Deck 2
+		{[]byte{2}, []int{2, 4}, map[int]byte{2: 2}},          // its own number
+		{[]byte{4}, []int{2, 4}, map[int]byte{4: 4}},          // its own number, even if Deck 2 is free
+		{[]byte{1, 3}, []int{2, 4}, map[int]byte{2: 1, 4: 3}}, // both moved, in player order
+		{[]byte{3}, []int{1, 3}, map[int]byte{3: 3}},          // a 2+4 player: Deck 3
+		{[]byte{1, 2, 3}, []int{4}, map[int]byte{4: 1}},       // more CDJs than shadow decks
+	} {
+		var devices []prolink.Device
+		for _, n := range c.cdjs {
+			devices = append(devices, dev(n))
+		}
+		devices = append(devices, prolink.Device{Number: 4, Name: "EngineX Export Beta", LastSeen: now}, prolink.Device{Number: 1, Name: "CDJ-2000", LastSeen: now.Add(-time.Minute)})
+		got := cdjDecks(devices, c.free, now)
+		if len(got) != len(c.want) {
+			t.Fatalf("%v on %v: %v", c.cdjs, c.free, got)
+		}
+		for deck, n := range c.want {
+			if got[deck].Number != n {
+				t.Fatalf("%v on %v: deck %d has %d, want %d", c.cdjs, c.free, deck, got[deck].Number, n)
+			}
+		}
+	}
+}

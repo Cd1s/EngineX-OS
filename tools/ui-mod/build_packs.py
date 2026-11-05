@@ -121,7 +121,7 @@ SERVICES_MAIN = """
 	// drive the decks it does not play from GET /v1/sc5000/shadow (a CDJ or the
 	// other player); the hook keeps them silent. Units measured on a JP07:
 	// TrackPosition/TrackLength are track samples, Speed is the fader (0.5 = 0 %,
-	// 0..1 = the SpeedRange), Play toggles. A seek flushes Engine's decoder and
+	// 0..1 = the SpeedRange), Play is a button (false -> true toggles). A seek flushes Engine's decoder and
 	// waveform (visible stutter), so while playing small drift is closed with the
 	// fader (P control, 4 s to catch up, at most +-4 %) and only > 800 ms seeks,
 	// at most every 3 s.
@@ -164,26 +164,30 @@ SERVICES_MAIN = """
 			return
 		}
 		if (now < at.act || !g("/Track/SongLoaded").state) return
+		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!!g("/PlayState").state !== e.playing) {
-			Planck.getProperty("/Engine/Deck" + d + "/Play").translator.state = true // a toggle
-			at.act = now + 700
+			// Play is a button: only false -> true presses it (toggles play/pause);
+			// writing true while it is already true does nothing.
+			const play = g("/Play")
+			play.state = false
+			play.state = true
+			at.act = now + 700 // CUE: the seek waits until Engine reports the deck stopped
 			return
 		}
-		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
-		let bend = 0
-		if (sr > 0 && len > 0) {
-			const drift = e.positionMs - g("/Track/TrackPosition").unnormalized / sr * 1000 // > 0: behind
-			if (Math.abs(drift) > (e.playing ? 800 : 30) && now >= at.seek) {
-				g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, e.positionMs / (len / sr * 1000)))
-				at.seek = now + (e.playing ? 3000 : 300)
-				at.act = now + 400
-				return
-			}
-			if (e.playing && Math.abs(drift) > 20) bend = Math.max(-4, Math.min(4, drift / 40))
-		}
+		const drift = sr > 0 && len > 0 ? e.positionMs - g("/Track/TrackPosition").unnormalized / sr * 1000 : 0 // > 0: behind
+		const bend = e.playing && Math.abs(drift) > 20 ? Math.max(-4, Math.min(4, drift / 40)) : 0
 		const range = parseFloat(g("/SpeedRange").string) || 8
 		const speed = Math.max(0, Math.min(1, 0.5 + (e.pitch + bend) / (2 * range)))
 		if (Math.abs(g("/Speed").value - speed) > 0.001) g("/Speed").value = speed
+		// Paused: seek once per CDJ position. The landing point is off by a decoder
+		// frame (or a beat with Quantize), and seeking again every tick replayed it.
+		if (e.playing) at.target = null
+		if (Math.abs(drift) > (e.playing ? 800 : 30) && now >= at.seek && (e.playing || at.target === null || at.target === undefined || Math.abs(e.positionMs - at.target) > 50)) {
+			g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, e.positionMs / (len / sr * 1000)))
+			at.seek = now + (e.playing ? 3000 : 300)
+			at.target = e.positionMs
+			at.act = now + 400
+		}
 	}
 	function scRestartCall(query) {
 		const prompt = PlanckGUI.views.prompts.post({

@@ -67,7 +67,7 @@ type shadowState struct {
 	peerDecks map[int]peerDeck
 	files     map[string]string // track key -> local copy
 	busy      map[string]bool
-	wanted    map[string]bool
+	used      map[string]time.Time // when a shadow deck last wanted a copy
 	polled    time.Time
 	running   bool
 	peerPort  int // tests only; 0 is 8080
@@ -77,7 +77,7 @@ type shadowState struct {
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, files: map[string]string{}, busy: map[string]bool{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
+	return &shadowState{precise: map[byte]precisePos{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, files: map[string]string{}, busy: map[string]bool{}, used: map[string]time.Time{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
 }
 
 func (s *Server) shadowDir() string { return filepath.Join(filepath.Dir(s.uiDir()), "shadow") }
@@ -227,56 +227,83 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 	sh := s.shadow
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	wanted := map[string]bool{}
+	wanted := sh.used
 	var out []deckState
+	var free []int // shadow decks the other EngineX player does not fill
 	for deck := 1; deck <= 4; deck++ {
 		if strings.Contains(role, strconv.Itoa(deck)) {
 			continue
 		}
-		if p, ok := sh.peerDecks[deck]; ok && now.Sub(p.at) < 2*time.Second {
-			d := p.deckState
-			if d.Playing {
-				d.PositionMS += float64(now.Sub(p.at).Milliseconds()) * (1 + d.Pitch/100)
-			}
-			if d.Key != "" {
-				key := "peer:" + p.ip + ":" + d.Key
-				wanted[key] = true
-				d.Path = sh.files[key]
-				if d.Path == "" {
-					s.shadowFetchPeer(key, p)
-				}
-			}
-			d.Key, d.Ext = "", ""
-			out = append(out, d)
+		p, ok := sh.peerDecks[deck]
+		if !ok || now.Sub(p.at) >= 2*time.Second {
+			free = append(free, deck)
 			continue
 		}
-		for _, dev := range devices {
-			if int(dev.Number) != deck || strings.HasPrefix(dev.Name, "EngineX") || now.Sub(dev.LastSeen) > 5*time.Second {
-				continue
+		d := p.deckState
+		if d.Playing {
+			d.PositionMS += float64(now.Sub(p.at).Milliseconds()) * (1 + d.Pitch/100)
+		}
+		if d.Key != "" {
+			key := "peer:" + p.ip + ":" + d.Key
+			wanted[key] = now
+			d.Path = sh.files[key]
+			if d.Path == "" {
+				s.shadowFetchPeer(key, p)
 			}
-			d := deckState{Deck: deck, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch}
-			at := dev.LastSeen
-			if p, ok := sh.precise[dev.Number]; ok && now.Sub(p.at) < time.Second {
-				d.PositionMS, at = p.ms, p.at
-			}
-			if d.Playing {
-				d.PositionMS += float64(now.Sub(at).Milliseconds()) * (1 + d.Pitch/100)
-			}
-			if dev.TrackID != 0 {
-				if host := s.sourceHost(devices, dev.SourcePlayer); host != nil {
-					key := fmt.Sprintf("cdj:%s:%d:%d", host, dev.SourceSlot, dev.TrackID)
-					wanted[key] = true
-					d.Path = sh.files[key]
-					if d.Path == "" {
-						s.shadowFetchCDJ(key, host, dev.SourceSlot, dev.TrackID)
-					}
+		}
+		d.Key, d.Ext = "", ""
+		out = append(out, d)
+	}
+	for deck, dev := range cdjDecks(devices, free, now) {
+		d := deckState{Deck: deck, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch}
+		at := dev.LastSeen
+		if p, ok := sh.precise[dev.Number]; ok && now.Sub(p.at) < time.Second {
+			d.PositionMS, at = p.ms, p.at
+		}
+		if d.Playing {
+			d.PositionMS += float64(now.Sub(at).Milliseconds()) * (1 + d.Pitch/100)
+		}
+		if dev.TrackID != 0 {
+			if host := s.sourceHost(devices, dev.SourcePlayer); host != nil {
+				key := fmt.Sprintf("cdj:%s:%d:%d", host, dev.SourceSlot, dev.TrackID)
+				wanted[key] = now
+				d.Path = sh.files[key]
+				if d.Path == "" {
+					s.shadowFetchCDJ(key, host, dev.SourceSlot, dev.TrackID)
 				}
 			}
-			out = append(out, d)
-			break
+		}
+		out = append(out, d)
+	}
+	slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
+	return out
+}
+
+// cdjDecks puts the CDJs on the free shadow decks: on their own player number
+// when it is free, the rest on what is left, Deck 2 first. A lone CDJ next to
+// a 1+3 player then shows beside Deck 1 also in the 2-waveform layout.
+func cdjDecks(devices []prolink.Device, free []int, now time.Time) map[int]prolink.Device {
+	var cdjs []prolink.Device
+	for _, dev := range devices {
+		if dev.Number >= 1 && dev.Number <= 6 && !strings.HasPrefix(dev.Name, "EngineX") && now.Sub(dev.LastSeen) <= 5*time.Second {
+			cdjs = append(cdjs, dev)
 		}
 	}
-	sh.wanted = wanted
+	slices.SortFunc(cdjs, func(a, b prolink.Device) int { return int(a.Number) - int(b.Number) })
+	out := map[int]prolink.Device{}
+	var rest []prolink.Device
+	for _, dev := range cdjs {
+		if deck := int(dev.Number); slices.Contains(free, deck) {
+			out[deck] = dev
+		} else {
+			rest = append(rest, dev)
+		}
+	}
+	for _, deck := range []int{2, 4, 1, 3} {
+		if _, taken := out[deck]; len(rest) > 0 && !taken && slices.Contains(free, deck) {
+			out[deck], rest = rest[0], rest[1:]
+		}
+	}
 	return out
 }
 
@@ -363,10 +390,13 @@ func (s *Server) shadowFetch(key string, fetch func(context.Context) (string, er
 			return
 		}
 		sh.files[key] = path
-		for k, f := range sh.files { // keep only the copies the shadow decks still play
-			if !sh.wanted[k] && k != key {
+		// Keep copies a shadow deck wanted in the last 2 minutes: deleting the
+		// previous track at once failed Engine's load when the CDJ switched fast.
+		for k, f := range sh.files {
+			if k != key && time.Since(sh.used[k]) > 2*time.Minute {
 				os.Remove(f)
 				delete(sh.files, k)
+				delete(sh.used, k)
 			}
 		}
 	}()
