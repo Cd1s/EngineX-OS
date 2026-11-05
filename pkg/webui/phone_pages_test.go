@@ -69,7 +69,7 @@ func TestEveryPhoneTextHasThreeLanguages(t *testing.T) {
 // Phone pages are English unless the deck's language or the switch says otherwise,
 // and every page renders in every language.
 func TestPhonePagesDefaultToEnglishAndSwitchLanguage(t *testing.T) {
-	for _, provider := range []string{"deezer", "soundcloud", "beatport", "spotify"} {
+	for _, provider := range []string{"deezer", "soundcloud", "beatport", "spotify", "applemusic"} {
 		_, srv, target := standalone(t, Config{}, provider)
 		if target.Query().Get("lang") != "en" {
 			t.Fatalf("%s QR code %s", provider, target)

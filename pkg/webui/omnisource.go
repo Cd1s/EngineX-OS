@@ -40,10 +40,7 @@ func (s *Server) omniSource() bool {
 
 // drives lists the mounted volumes that carry an Engine Library.
 func (s *Server) drives() []drive {
-	root := s.cfg.MediaRoot
-	if root == "" {
-		root = defaultMediaRoot
-	}
+	root := s.mediaRoot()
 	entries, _ := os.ReadDir(root)
 	var out []drive
 	for _, e := range entries {
@@ -54,6 +51,13 @@ func (s *Server) drives() []drive {
 		}
 	}
 	return out
+}
+
+func (s *Server) mediaRoot() string {
+	if s.cfg.MediaRoot != "" {
+		return s.cfg.MediaRoot
+	}
+	return defaultMediaRoot
 }
 
 func openDrive(d drive) (*sql.DB, error) {

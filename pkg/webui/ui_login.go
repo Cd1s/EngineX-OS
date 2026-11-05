@@ -327,7 +327,8 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		flow.key, flow.Target = q.Key, q.URL
-	} else if base, _ := s.relaySettings(); base != "" {
+	} else if base, _ := s.relaySettings(); base != "" && provider != "applemusic" {
+		// The relay has no Apple Music page; that login stays on the deck's own page.
 		// The relay opens a session by itself when a phone arrives first, so a
 		// failed registration here does not stop the QR code from working.
 		flow.viaRelay = true
@@ -443,6 +444,14 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 		phonePage(w, r, soundCloudPhonePage(lang, action))
 	case "beatport":
 		phonePage(w, r, beatportPhonePage(lang, action))
+	case "applemusic":
+		dev := ""
+		if v := s.sessionOf(flow); v != nil {
+			if am, ok := v.p.(*providers.AppleMusic); ok {
+				dev = am.Owner().DevToken
+			}
+		}
+		phonePage(w, r, appleMusicPhonePage(lang, action, dev))
 	case "spotify":
 		session := s.sessionOf(flow)
 		sp, ok := session.p.(*providers.Spotify)
@@ -577,6 +586,32 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 	case *providers.Beatport:
 		if err := s.linkBeatport(r.Context(), p, strings.TrimSpace(r.Form.Get("user")), r.Form.Get("password"), strings.TrimSpace(r.Form.Get("token"))); err != nil {
 			refuse("bpFailed", tr(lang, "bpFailedHint"))
+			return
+		}
+		s.finishPhoneLogin(w, r, flow)
+	case *providers.AppleMusic:
+		o := p.Owner()
+		if links := r.Form.Get("links"); strings.TrimSpace(links) != "" {
+			o.Links = nil
+			for _, l := range providers.ParseAppleMusicLinks(links) {
+				o.Links = append(o.Links, l.URL())
+				if o.Storefront == "" {
+					o.Storefront = l.Storefront // the store the links come from
+				}
+			}
+			if len(o.Links) == 0 {
+				refuse("amFailed", tr(lang, "amFailedHint"))
+				return
+			}
+		}
+		for field, dst := range map[string]*string{"userToken": &o.UserToken, "devToken": &o.DevToken, "storefront": &o.Storefront} {
+			if v := strings.TrimSpace(r.Form.Get(field)); v != "" {
+				*dst = v // an empty field keeps what was saved
+			}
+		}
+		if err := p.SetOwner(r.Context(), o); err != nil {
+			log.Printf("stream-sync: Apple Music link failed: %v", err)
+			refuse("amFailed", tr(lang, "amFailedHint"))
 			return
 		}
 		s.finishPhoneLogin(w, r, flow)

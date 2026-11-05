@@ -33,12 +33,13 @@ Official firmware locks standalone Stems to select hardware. EngineX OS unlocks 
 - Hit the Performance Pads to mute vocals for live mashups or isolate drums for transitions;
 - Splits tracks directly on the deck with no computer required, or automatically uses your home PC / cloud GPU for high-speed AI separation when on the same Wi-Fi.
 
-### 2. 6 Streaming Services Built In (Phone QR Login)
+### 2. 7 Streaming Services Built In (Phone QR Login)
 No need to copy tracks to a USB drive before every set:
-- **NetEase Cloud Music, Spotify, Deezer, SoundCloud, TIDAL, and Beatport** sit right next to your USB and SD drives in the Source menu;
+- **NetEase Cloud Music, Spotify, Deezer, SoundCloud, TIDAL, Beatport, and Apple Music** sit right next to your USB and SD drives in the Source menu;
 - Scan the on-screen QR code with your phone to log in and browse your playlists, liked tracks, and search results;
 - Switch between **Lossless FLAC and 320 kbps MP3**. Tracks you play are cached locally on the deck so loading them again is instant without re-downloading.
 - **Beatport** uses your own account and plan: Professional downloads FLAC or 256k AAC, Advanced downloads 128k AAC, and Essential streams 128k AAC. Beatport tracks split into Stems like any other track.
+- **Apple Music**: paste any playlist or album link on your phone, no account needed; add your `media-user-token` to browse your own library too. Apple Music audio is protected, so each track plays from Deezer (lossless FLAC) or NetEase, matched by ISRC or by title and artist.
 
 ### 3. Pioneer Rekordbox USB Plug & Play (No Desktop Conversion)
 Bring the Rekordbox USB stick you exported for CDJs and plug it straight into your Denon deck:
@@ -62,6 +63,8 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 
 
 ### 7. New in 5.3.0.2
+- **Apple Music** joins the streaming services (7 in total), logged in with the deck QR code like the others;
+- **Wi-Fi Music Drop**: drag MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS files from a computer onto the deck's web console (`http://<deck IP>:8080`) and they are saved to the internal drive, SD card or USB of your choice under `Wi-Fi Drop/<playlist>/`. FLAC / MP3 on the library drive are analysed and added to that playlist; existing files are never overwritten and 256 MiB always stays free;
 - **OmniSource**: the playlists and tracks on your USB / SD drives appear right inside the streaming browser, next to your streaming playlists, and one search finds both. Drive tracks play straight from the drive at full quality (`Settings → OmniSource`, off by default);
 - **Pioneer CDJ / Pro DJ Link (Beta)**: show the waveform and beat grid of a CDJ-3000 / CDJ-2000NXS2 feeding a Line-In channel, and read a CDJ's rekordbox USB library over LAN / Wi-Fi (`Pro DJ Link Library`). Exporting the deck's own media to CDJs is experimental. All off by default;
 - **Cleaner sound**: `Master Soft Limiter` keeps the master output under -0.1 dBFS with a smooth curve and zero latency, untouched below -1.5 dBFS; the Flanger no longer dips the volume (level matched to the dry track, up to +6 dB); `Upfader Echo Out` leaves an echo tail when you pull a fader down; `Auto-Gain (0 dB Normalize)` brings quiet tracks up toward 0 dBFS (at most +9 dB, slow and smooth, never lifts silence below -42 dBFS) and always ends in the soft limiter, so it cannot clip (off by default). 21 real-time DSP hooks in total, with no added latency;
