@@ -227,3 +227,4 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **提交说明清理**：v5.3.0.1 范围内的 3 个提交改写后去掉了 `Co-Authored-By: … <noreply@anthropic.com>`（该邮箱在 GitHub 上绑定了一个无关账号，导致它出现在 Release 贡献者里），代码树不变：`045c0f2`→`563ad8c`，`008b153`→`87fb264`，`4303937`→`7e013c9`。本地留有备份分支 `backup/pre-coauthor-rewrite-20261105`。v5.0.4.2 及更早的提交没有改写。
 - **回滚点**：上一次构建基于 `87fb264`（改写前为 `008b153`）。碟机可以刷回 `v5.0.4.2`。
 - **实机影响**：已出现原厂界面的碟机，升级到这一版后第一次启动会重编被替换的 QML，界面恢复为定制版；`/data` 里的数据不会被删除。
+- **实机 OTA（2026-11-05）**：Release 重建后，用碟机自己的在线更新（两个 `version.txt` 临时降为 5.3.0，`/etc` 那份用 bind mount）从 GitHub 下载 JP07 镜像并刷写。重启后两个 `version.txt` 都是 5.3.0.1，`/etc` 上没有 bind mount，镜像自带的 hook 为 `2938bda2…`，Engine、stream-sync、sshd 都在运行，hook 日志为 `packs/en: 48 files`，来源页截图显示网易云 / Spotify / Deezer / SoundCloud / Beatport。

@@ -88,7 +88,9 @@ bash tools/az01-packer/release-gate.sh \
 # SC6000 组用 SC6000 JP13，PRIME 4 组用 PRIME4 JC11；工作目录每次用新的
 ```
 
-退出码为 0、`results.txt` 里没有 `FAIL`，才能进第 5 步。门禁全部在 `unshare -m -n -p` + `qemu-arm` chroot 里运行，挂载的是两个镜像解包出的**真实 `rootfs.ext2`**，宿主的 `/proc`、`/sys` 不会被写到：
+退出码为 0、`results.txt` 里没有 `FAIL`，才能进第 5 步。
+
+运行位置：ARM 门禁和沙箱**优先放在 Oracle 印尼 ARM 机（ssm 别名 `oracle-id-arm`，简称 ID）上原生跑**。IN 是 x86，`qemu-arm` 软模拟下 Engine 每次启动要 60–90 秒，整树遍历一次 QML 节点要 20–35 秒。注意：`release-gate.sh` 目前会检查 `qemu-arm` binfmt，pkill shim 也按 qemu 的 cmdline 前缀处理，第一次在 ID 上跑之前要先适配这两处并验证一遍（截至 2026-11-05 还没在 ID 上跑过）。ID 上没有官方固件和构建产物时，构建仍在 IN 上做，再把镜像传过去。门禁全部在 `unshare -m -n -p` + `qemu-arm` chroot 里运行，挂载的是两个镜像解包出的**真实 `rootfs.ext2`**，宿主的 `/proc`、`/sys` 不会被写到：
 
 | 阶段 | 检查 |
 | --- | --- |
