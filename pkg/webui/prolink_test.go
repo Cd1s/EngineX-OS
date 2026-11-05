@@ -265,3 +265,19 @@ func TestProlinkShareToggle(t *testing.T) {
 		t.Fatalf("bad value: %d", code)
 	}
 }
+
+// A CDJ back at pitch 0 or cued to 0 ms is followed: zero is a value, not "unknown".
+func TestMergeDeviceKeepsZeroPitchAndCue(t *testing.T) {
+	d := prolink.Device{PacketType: 0x0a, Pitch: 20.83, PlayPositionMS: 5000}
+	d = mergeDevice(d, prolink.Device{PacketType: 0x0a, Pitch: 0})
+	if d.Pitch != 0 {
+		t.Fatalf("status pitch 0 ignored: %v", d.Pitch)
+	}
+	d.Pitch = 3
+	if d = mergeDevice(d, prolink.Device{PacketType: 6}); d.Pitch != 3 {
+		t.Fatalf("keepalive cleared the pitch: %v", d.Pitch)
+	}
+	if d = mergeDevice(d, prolink.Device{PacketType: 0x0b, PrecisePosition: true}); d.PlayPositionMS != 0 || d.Pitch != 0 {
+		t.Fatalf("cue to 0 ms ignored: %+v", d)
+	}
+}

@@ -59,7 +59,9 @@ func mergeDevice(old, updated prolink.Device) prolink.Device {
 	if updated.BPM != 0 {
 		res.BPM = updated.BPM
 	}
-	if updated.Pitch != 0 {
+	// 0 is a real pitch (fader centred, TEMPO RESET, synced to the same BPM) in every
+	// packet that carries one; only keepalives and unknown packets have none.
+	if t := updated.PacketType; updated.Pitch != 0 || t == 0x0a || t == 0x28 || t == 0x0b {
 		res.Pitch = updated.Pitch
 	}
 	if updated.EffectiveBPM != 0 {
@@ -71,7 +73,7 @@ func mergeDevice(old, updated prolink.Device) prolink.Device {
 	if updated.BeatInBar != 0 {
 		res.BeatInBar = updated.BeatInBar
 	}
-	if updated.PlayPositionMS != 0 {
+	if updated.PlayPositionMS != 0 || updated.PacketType == 0x0b && updated.PrecisePosition { // CUE at 0 ms
 		res.PlayPositionMS = updated.PlayPositionMS
 	}
 	if updated.PacketType != 0x0b { // absolute position packets carry no play/master/sync flags
