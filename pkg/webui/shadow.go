@@ -43,8 +43,9 @@ type deckState struct {
 	PositionMS float64 `json:"positionMs"`
 	Pitch      float64 `json:"pitch"` // percent
 	Master     bool    `json:"master,omitempty"`
-	BPM        float64 `json:"bpm,omitempty"` // the track's
-	Dbg        string  `json:"dbg,omitempty"` // shortcut: Engine's raw master state, until verified on hardware
+	BPM        float64 `json:"bpm,omitempty"`  // the track's
+	Beat       float64 `json:"beat,omitempty"` // Engine's BeatNumber: beats into the bar, 0..4
+	Dbg        string  `json:"dbg,omitempty"`  // shortcut: Engine's raw master state, until verified on hardware
 }
 
 type peerDeck struct {
@@ -154,10 +155,10 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	}
 	// Pro DJ Link players see these decks in our status: playing, tempo and
 	// master. Taking master asks a CDJ that still holds it to hand it over.
-	var ex prolink.ExportDeck
+	ex := prolink.ExportDeck{At: time.Now()}
 	for _, d := range own {
 		if d.Master || (d.Playing && !ex.Playing && !ex.Master) {
-			ex.BPM, ex.Pitch = d.BPM, d.Pitch
+			ex.BPM, ex.Pitch, ex.Beat = d.BPM, d.Pitch, d.Beat
 		}
 		ex.Playing = ex.Playing || d.Playing
 		ex.Master = ex.Master || d.Master

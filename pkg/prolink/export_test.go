@@ -834,3 +834,33 @@ func TestExportDeckMasterAndHandoff(t *testing.T) {
 		t.Fatalf("handoff to %d", h)
 	}
 }
+
+// #49: as master, the beat phase comes from Engine's BeatNumber (0..4).
+func TestExportDeckBeat(t *testing.T) {
+	at := time.Now()
+	d := ExportDeck{Master: true, Playing: true, BPM: 120, Beat: 2.75, At: at} // 500 ms a beat
+	if beat, frac, ok := d.beatAt(at.Add(250 * time.Millisecond)); !ok || beat != 3 || math.Abs(frac-0.25) > 1e-6 {
+		t.Fatalf("beat %d %v %v", beat, frac, ok)
+	}
+	if beat, frac, ok := d.beatAt(at.Add(750 * time.Millisecond)); !ok || beat != 0 || math.Abs(frac-0.25) > 1e-6 {
+		t.Fatalf("wrap: beat %d %v %v", beat, frac, ok)
+	}
+	if _, _, ok := (ExportDeck{Playing: true, BPM: 120, At: at}).beatAt(at); ok {
+		t.Fatal("not master, yet beats")
+	}
+	r := &exportRun{player: 4}
+	b := r.beatPacket(ExportDeck{BPM: 120, Pitch: 0}, 1, 0) // beat 2 of the bar just hit
+	if len(b) != 0x60 || b[10] != 0x28 || b[0x21] != 4 || b[0x5f] != 4 || b[0x5c] != 2 || binary.BigEndian.Uint16(b[0x5a:]) != 12000 || b[0x3c] != 0xff {
+		t.Fatalf("% x", b)
+	}
+	for i, want := range []uint32{500, 1000, 1500, 2000, 3500, 4000} {
+		if got := binary.BigEndian.Uint32(b[0x24+4*i:]); got != want {
+			t.Fatalf("timing %d: %d, want %d", i, got, want)
+		}
+	}
+	r.deck = d
+	r.deck.At = time.Now()
+	if st := r.statusPacket(); st[0xa6] != 3 {
+		t.Fatalf("status beat in bar %d", st[0xa6])
+	}
+}
