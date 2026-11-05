@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -31,6 +32,9 @@ type ExportConfig struct {
 	// Observe receives valid status packets captured on the shared status port.
 	Observe    func(Device)
 	MediaCache *MediaCache // optional incoming status enrichment; allocated only while ON
+	// BeatAddr also feeds Observe with CDJ-3000 absolute position packets (0x0b,
+	// every 30 ms) for #49 shadow decks; default 0.0.0.0:50001, shared with rb-bridge.
+	BeatAddr string
 	// Peers lists Pro DJ Link devices seen on the LAN; the export binds to the
 	// interface that reaches them (see exportIdentity).
 	Peers func() []net.IP
@@ -116,6 +120,7 @@ type exportRun struct {
 	nfs               *NFSServer
 	db                *DBServer
 	discovery, status *net.UDPConn
+	beat              *net.UDPConn // nil without Observe or when the port is taken
 	ip                net.IP
 	mac               net.HardwareAddr
 	announce          *net.UDPAddr
@@ -399,6 +404,13 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 		r.updates = make(chan Device, 16)
 		r.wg.Add(1)
 		go r.observeLoop()
+		if r.beat, err = listenLinkUDP(address(cfg.BeatAddr, "50001"), true); err != nil {
+			log.Printf("prolink: no absolute positions on the beat port: %v", err)
+			r.beat, err = nil, nil
+		} else {
+			r.wg.Add(1)
+			go r.receiveBeats()
+		}
 	}
 	r.wg.Add(3)
 	go r.receivePeers()
@@ -415,6 +427,9 @@ func (r *exportRun) close() {
 	}
 	r.discovery.Close()
 	r.status.Close()
+	if r.beat != nil {
+		r.beat.Close()
+	}
 	r.mu.Lock()
 	r.player = 0
 	r.mu.Unlock()
@@ -515,6 +530,24 @@ func (r *exportRun) receiveMedia() {
 			r.sendLocked(r.status, r.mediaPacket(), addr)
 		}
 		r.mu.Unlock()
+	}
+}
+
+// receiveBeats passes CDJ-3000 absolute position packets to Observe.
+func (r *exportRun) receiveBeats() {
+	defer r.wg.Done()
+	b := make([]byte, 512)
+	for {
+		n, addr, err := r.beat.ReadFromUDP(b)
+		if err != nil {
+			return
+		}
+		if d, err := ParsePacket(b[:n], 50001, addr.IP); err == nil && d.PacketType == 0x0b && d.Number >= 1 && d.Number <= 6 && r.network.Contains(addr.IP) {
+			select {
+			case r.updates <- d:
+			default:
+			}
+		}
 	}
 }
 

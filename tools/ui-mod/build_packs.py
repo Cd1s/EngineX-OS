@@ -121,10 +121,13 @@ SERVICES_MAIN = """
 	// drive the decks it does not play from GET /v1/sc5000/shadow (a CDJ or the
 	// other player); the hook keeps them silent. Units measured on a JP07:
 	// TrackPosition/TrackLength are track samples, Speed is the fader (0.5 = 0 %,
-	// 0..1 = the SpeedRange), Play toggles.
+	// 0..1 = the SpeedRange), Play toggles. A seek flushes Engine's decoder and
+	// waveform (visible stutter), so while playing small drift is closed with the
+	// fader (P control, 4 s to catch up, at most +-4 %) and only > 800 ms seeks,
+	// at most every 3 s.
 	property var scShadowAt: ({})
 	Timer {
-		interval: 250; repeat: true
+		interval: 400; repeat: true
 		running: root.scFourDeckRole !== ""
 		onTriggered: root.scShadowTick()
 	}
@@ -154,29 +157,33 @@ SERVICES_MAIN = """
 		if (scFourDeckRole.indexOf(String(d)) >= 0 || !e.path) return
 		const g = p => Planck.getProperty("/Engine/Deck" + d + p).translator
 		const now = Date.now()
-		const at = scShadowAt[d] || {path: "", act: 0}
+		const at = scShadowAt[d] || {path: "", act: 0, seek: 0}
 		if (at.path !== e.path) {
 			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck" + d).translator.url = "file://" + encodeURI(e.path)
-			scShadowAt[d] = {path: e.path, act: now + 1500}
+			scShadowAt[d] = {path: e.path, act: now + 1500, seek: 0}
 			return
 		}
 		if (now < at.act || !g("/Track/SongLoaded").state) return
-		const range = parseFloat(g("/SpeedRange").string) || 8
-		const speed = Math.max(0, Math.min(1, 0.5 + e.pitch / (2 * range)))
-		if (Math.abs(g("/Speed").value - speed) > 0.002) g("/Speed").value = speed
 		if (!!g("/PlayState").state !== e.playing) {
 			Planck.getProperty("/Engine/Deck" + d + "/Play").translator.state = true // a toggle
 			at.act = now + 700
 			return
 		}
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
+		let bend = 0
 		if (sr > 0 && len > 0) {
-			const here = g("/Track/TrackPosition").unnormalized / sr * 1000
-			if (Math.abs(here - e.positionMs) > (e.playing ? 150 : 30)) {
+			const drift = e.positionMs - g("/Track/TrackPosition").unnormalized / sr * 1000 // > 0: behind
+			if (Math.abs(drift) > (e.playing ? 800 : 30) && now >= at.seek) {
 				g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, e.positionMs / (len / sr * 1000)))
-				at.act = now + 500
+				at.seek = now + (e.playing ? 3000 : 300)
+				at.act = now + 400
+				return
 			}
+			if (e.playing && Math.abs(drift) > 20) bend = Math.max(-4, Math.min(4, drift / 40))
 		}
+		const range = parseFloat(g("/SpeedRange").string) || 8
+		const speed = Math.max(0, Math.min(1, 0.5 + (e.pitch + bend) / (2 * range)))
+		if (Math.abs(g("/Speed").value - speed) > 0.001) g("/Speed").value = speed
 	}
 	function scRestartCall(query) {
 		const prompt = PlanckGUI.views.prompts.post({

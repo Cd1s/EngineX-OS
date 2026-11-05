@@ -118,6 +118,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 			if d.Number < 1 || d.Number > 6 {
 				return
 			}
+			s.shadow.observe(d)
 			prolinkMu.Lock()
 			defer prolinkMu.Unlock()
 			for key, old := range postedDevices[s] {
