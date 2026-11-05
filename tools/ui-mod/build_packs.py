@@ -761,33 +761,43 @@ LOGIN_DIALOG = """
 """
 
 FOUR_DECK_STRIP = """
+		// #49: PRIME 4 style lanes for decks 3/4, docked at the bottom of the main
+		// waveform (above the pads) so the title / artist / BPM header stays clear.
+		// Only decks that have a track (Pro DJ Link or Engine) get a lane.
 		Rectangle {
 			id: scFourDeckRemoteStrip
 			objectName: "FourDeckRemoteStrip"
 			z: 900
-			height: 76
+			height: scDeckLanes.height + 6
 			anchors {
-				top: parent.top
-				topMargin: 80
+				bottom: parent.bottom
+				bottomMargin: 66
 				left: parent.left
-				leftMargin: 20
+				leftMargin: 24
 				right: parent.right
-				rightMargin: 20
+				rightMargin: 24
 			}
-			visible: root.scFourDeckWave && !root.dialogOpen && !root.messageBoxOpen
-			color: "#e610141d"
-			radius: 12
-			border {
-				width: 1
-				color: "#2e384d"
+			// Not scDeckLanes.height: a hidden parent hides its lanes, which keeps the height at 0.
+			visible: root.scFourDeckWave && (scDeckLoaded(3) || scDeckLoaded(4)) && !root.dialogOpen && !root.messageBoxOpen
+			color: "#000000"
+
+			Rectangle {
+				anchors { top: parent.top; left: parent.left; right: parent.right }
+				height: 1
+				color: "#3a3a3a"
 			}
 
+			function scDeckLoaded(d) {
+				if (root.scProlinkDeck(d)) return true
+				const p = Planck.getProperty("/Engine/Deck" + d + "/Track/SongLoaded")
+				return !!(p && p.translator && p.translator.state)
+			}
 			function scDeckSong(d) {
 				const pl = root.scProlinkDeck(d)
 				if (pl && pl.title) return pl.title
 				const p = Planck.getProperty("/Engine/Deck" + d + "/Track/SongName")
 				if (p && p.translator && p.translator.string) return root.scPlainTitle(p.translator.string)
-				return "DECK " + d
+				return ""
 			}
 			function scDeckArtist(d) {
 				const pl = root.scProlinkDeck(d)
@@ -818,172 +828,125 @@ FOUR_DECK_STRIP = """
 				return !!(p && p.translator && p.translator.state)
 			}
 
-			Row {
-				anchors.fill: parent
-				anchors.margins: 6
-				spacing: 12
+			Column {
+				id: scDeckLanes
+				anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+				spacing: 4
 
 				Repeater {
 					model: [3, 4]
-					Rectangle {
+					Item {
 						readonly property int deckNum: modelData
-						readonly property bool isD3: deckNum === 3
-						width: (parent.width - 12) / 2
-						height: parent.height
-						color: "#18202c"
-						radius: 8
-						border {
-							width: 1
-							color: isD3 ? "#1e3a5f" : "#3b234a"
-						}
+						readonly property color deckColor: deckNum === 3 ? "#00c853" : "#ab47bc"
+						width: scDeckLanes.width
+						height: 34
+						visible: scFourDeckRemoteStrip.scDeckLoaded(deckNum)
 
-						// Top line: Badge, Title & Artist, BPM
-						Item {
-							id: headerRow
-							anchors {
-								top: parent.top
-								topMargin: 4
-								left: parent.left
-								leftMargin: 8
-								right: parent.right
-								rightMargin: 8
-							}
-							height: 22
-
-							Rectangle {
-								id: dBadge
-								width: 54
-								height: 18
-								radius: 4
-								color: isD3 ? "#00c853" : "#ab47bc"
-								anchors.verticalCenter: parent.verticalCenter
-								Text {
-									anchors.centerIn: parent
-									text: "DECK " + deckNum
-									font.bold: true
-									font.pixelSize: 11
-									color: isD3 ? "#000000" : "#ffffff"
-								}
-							}
-
+						// Deck number column, like the native deck label left of the waveform
+						Rectangle {
+							id: dBadge
+							width: 24
+							height: parent.height
+							color: parent.deckColor
 							Text {
-								id: dTitle
-								anchors {
-									left: dBadge.right
-									leftMargin: 8
-									right: dBpm.left
-									rightMargin: 8
-									verticalCenter: parent.verticalCenter
-								}
-								text: scFourDeckRemoteStrip.scDeckSong(deckNum) + (scFourDeckRemoteStrip.scDeckArtist(deckNum) ? " - " + scFourDeckRemoteStrip.scDeckArtist(deckNum) : "")
-								color: "#ffffff"
-								font.pixelSize: 13
+								anchors.centerIn: parent
+								text: deckNum
 								font.bold: true
-								elide: Text.ElideRight
-							}
-
-							Text {
-								id: dBpm
-								anchors {
-									right: parent.right
-									verticalCenter: parent.verticalCenter
-								}
-								text: scFourDeckRemoteStrip.scDeckBpm(deckNum) + " BPM"
-								color: "#00c3e3"
-								font.pixelSize: 13
-								font.bold: true
+								font.pixelSize: 16
+								color: "#000000"
 							}
 						}
 
-						// Bottom line: 4-Beat Phase indicators + Mini Waveform Strip
-						Item {
-							anchors {
-								top: headerRow.bottom
-								topMargin: 4
-								left: parent.left
-								leftMargin: 8
-								right: parent.right
-								rightMargin: 8
-								bottom: parent.bottom
-								bottomMargin: 4
-							}
-
-							// 4-beat phase bars
-							Row {
-								id: phaseBars
-								anchors {
-									left: parent.left
-									verticalCenter: parent.verticalCenter
+						// Beat phase, one tick per beat of the bar
+						Row {
+							id: phaseBars
+							anchors { left: dBadge.right; leftMargin: 6; verticalCenter: parent.verticalCenter }
+							spacing: 2
+							Repeater {
+								model: 4
+								Rectangle {
+									readonly property bool activeBeat: (index + 1) === scFourDeckRemoteStrip.scDeckBeat(deckNum)
+									width: 5
+									height: 26
+									radius: 1
+									color: activeBeat ? (scFourDeckRemoteStrip.scDeckPlaying(deckNum) ? deckColor : "#ffffff") : "#2a2a2a"
 								}
-								height: 26
-								spacing: 3
+							}
+						}
 
-								Repeater {
-									model: 4
+						// Scrolling 3-band waveform, playhead in the middle
+						Row {
+							id: laneWave
+							anchors { left: phaseBars.right; leftMargin: 6; right: parent.right; top: parent.top; bottom: parent.bottom }
+							spacing: 1
+
+							readonly property int bars: 96
+							readonly property real stepW: (width - (bars - 1)) / bars
+							readonly property var pDev: root.scProlinkDeck(deckNum)
+							readonly property var pWf: pDev && pDev.waveform ? pDev.waveform : []
+							readonly property bool isPlaying: scFourDeckRemoteStrip.scDeckPlaying(deckNum)
+							readonly property real pPosMs: root.scProlinkPosMs(deckNum)
+							readonly property real pDurMs: (pDev && pDev.duration_ms) ? pDev.duration_ms : 180000
+							readonly property int pCenter: pWf.length > 0 ? Math.floor((pPosMs / Math.max(1, pDurMs)) * pWf.length) : 0
+
+							Repeater {
+								model: laneWave.bars
+								Item {
+									width: Math.max(1, laneWave.stepW)
+									height: laneWave.height
+
+									readonly property var sample: laneWave.pWf.length > 0 ? laneWave.pWf[Math.max(0, Math.min(laneWave.pWf.length - 1, laneWave.pCenter + index - laneWave.bars / 2))] : null
+									readonly property real hFactor: sample ? Math.max(0.1, (sample[0] + sample[1] + sample[2]) / (3.0 * 255.0)) : (laneWave.isPlaying ? (0.2 + 0.5 * Math.abs(Math.sin((index + Math.floor(root.scProlinkNowMs / 80)) * 0.4))) : 0.1)
+
+									// Mirrored around the centre line, low band outermost like the main waveform
 									Rectangle {
-										readonly property bool activeBeat: (index + 1) === scFourDeckRemoteStrip.scDeckBeat(deckNum)
-										width: 8
-										height: 26
-										radius: 2
-										color: activeBeat ? (scFourDeckRemoteStrip.scDeckPlaying(deckNum) ? (isD3 ? "#00c853" : "#ab47bc") : "#ffffff") : "#2a3649"
+										anchors.centerIn: parent
+										width: parent.width
+										height: Math.max(1, Math.round(parent.height * hFactor))
+										color: root.scWave === "3band" ? "#4a78ff" : root.scWave === "rgb" ? "#ff1428" : "#00c853"
+									}
+									Rectangle {
+										anchors.centerIn: parent
+										width: parent.width
+										height: Math.max(1, Math.round(parent.height * hFactor * 0.6))
+										color: root.scWave === "3band" ? "#f0b400" : root.scWave === "rgb" ? "#00e632" : "#00e676"
+									}
+									Rectangle {
+										anchors.centerIn: parent
+										width: parent.width
+										height: Math.max(1, Math.round(parent.height * hFactor * 0.25))
+										color: root.scWave === "3band" ? "#ffffff" : root.scWave === "rgb" ? "#0078ff" : "#69f0ae"
 									}
 								}
 							}
+						}
 
-							// Mini waveform strip (32 bars)
-							Row {
-								anchors {
-									left: phaseBars.right
-									leftMargin: 8
-									right: parent.right
-									verticalCenter: parent.verticalCenter
-								}
-								height: 26
-								spacing: 1
+						Rectangle {
+							anchors { horizontalCenter: laneWave.horizontalCenter; top: parent.top; bottom: parent.bottom }
+							width: 2
+							color: "#ffffff"
+						}
 
-								readonly property real stepW: (width - 31) / 32.0
-								readonly property var pDev: root.scProlinkDeck(deckNum)
-								readonly property var pWf: pDev && pDev.waveform ? pDev.waveform : []
-								readonly property bool isPlaying: scFourDeckRemoteStrip.scDeckPlaying(deckNum)
-								readonly property real pPosMs: root.scProlinkPosMs(deckNum)
-								readonly property real pDurMs: (pDev && pDev.duration_ms) ? pDev.duration_ms : 180000
-								readonly property int pCenter: pWf && pWf.length > 0 ? Math.floor((pPosMs / Math.max(1, pDurMs)) * pWf.length) : 0
-
-								Repeater {
-									model: 32
-									Item {
-										width: Math.max(2, parent.stepW)
-										height: 26
-
-										readonly property int sIdx: parent.pWf && parent.pWf.length > 0 ? Math.max(0, Math.min(parent.pWf.length - 1, parent.pCenter + (index - 16) * 2)) : 0
-										readonly property var sample: (parent.pWf && parent.pWf.length > 0) ? parent.pWf[sIdx] : null
-										readonly property real animPhase: (index + Math.floor(root.scProlinkNowMs / 80)) % 16
-										readonly property real hFactor: sample ? Math.max(0.15, (sample[0] + sample[1] + sample[2]) / (3.0 * 255.0)) : (parent.isPlaying ? (0.2 + 0.6 * Math.abs(Math.sin((index + animPhase) * 0.4))) : 0.2)
-
-										Column {
-											anchors.centerIn: parent
-											width: parent.width
-											spacing: 1
-
-											Rectangle {
-												width: parent.width
-												height: Math.max(1, Math.round(8 * hFactor))
-												color: root.scWave === "3band" ? "#ffffff" : root.scWave === "rgb" ? "#0078ff" : "#69f0ae"
-											}
-											Rectangle {
-												width: parent.width
-												height: Math.max(1, Math.round(9 * hFactor))
-												color: root.scWave === "3band" ? "#f0b400" : root.scWave === "rgb" ? "#00e632" : "#00e676"
-											}
-											Rectangle {
-												width: parent.width
-												height: Math.max(1, Math.round(9 * hFactor))
-												color: root.scWave === "3band" ? "#4a78ff" : root.scWave === "rgb" ? "#ff1428" : "#00c853"
-											}
-										}
-									}
-								}
-							}
+						// Title and BPM over the waveform's left/right ends
+						Text {
+							anchors { left: laneWave.left; leftMargin: 4; top: parent.top; topMargin: 1; right: dBpm.left; rightMargin: 12 }
+							text: scFourDeckRemoteStrip.scDeckSong(deckNum) + (scFourDeckRemoteStrip.scDeckArtist(deckNum) ? " - " + scFourDeckRemoteStrip.scDeckArtist(deckNum) : "")
+							color: "#ffffff"
+							style: Text.Outline
+							styleColor: "#000000"
+							font.pixelSize: 13
+							font.bold: true
+							elide: Text.ElideRight
+						}
+						Text {
+							id: dBpm
+							anchors { right: parent.right; rightMargin: 4; top: parent.top; topMargin: 1 }
+							text: scFourDeckRemoteStrip.scDeckBpm(deckNum)
+							color: "#00c3e3"
+							style: Text.Outline
+							styleColor: "#000000"
+							font.pixelSize: 13
+							font.bold: true
 						}
 					}
 				}
