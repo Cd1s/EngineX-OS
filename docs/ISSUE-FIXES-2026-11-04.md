@@ -250,3 +250,20 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **门禁（编译机原生，旧镜像为已发布的 5.3.0.1）**：JP07、JP13、JC11 三组都是 83 PASS / 0 FAIL，exit 0，每组约 230 秒。覆盖 5.3.0.1 → 5.3.0.1.1 在线升级、5.3.0.1.1 → 5.3.0.1.2（mock）在线升级、224 个包文件 + 探针全部替换、渲染探针（About 显示 `EngineX OS 5.3.0.1.1`，原厂 Tidal 隐藏）、Beatport 手机登录页等。第一次跑 JC11 时报 `truncated container`：编译机 lab 里的旧镜像 `release-5.3.0.1/PRIME4-…-JC11` 只有 21 MB，是不完整的拷贝。已从 v5.3.0.1 Release 重新下载并核对 sha（`a02907a2…`）后替换，坏的那份改名为 `*.truncated-20261105` 留存，重跑后通过。
 - **回滚点**：上一次发布 v5.3.0.1（tag 不动，资产由 `1488ddd` 构建）；碟机可以刷回 5.3.0.1 或 5.0.4.2。
 - **实机影响**：5.3.0.1 与 5.0.4.2 的碟机在线更新会提示 5.3.0.1.1。`/data` 中的登录信息、歌单和缓存不受影响。
+
+## 5.3.0.2：#49 四路波形开关、#50 Icecast/Shoutcast 直播推流、#51 Pro DJ Link Line-In 波形与 #52 拉杆切歌回音（2026-11-05 追加，Gemini 4 Argon + 3.8 Flash + GPT-6.1 Terra）
+
+- **范围**：
+  - **#47（升级后仍显示原厂 5.3.0 界面）**：已在 `5.3.0.1.1`（`d363fca` / `ed1b873`）通过 `RequiresMountsFor=/data /etc /var` 与 qrc 内容时间戳失效旧 `.qmlc` 缓存彻底解决，已核验并关闭 Issue。
+  - **#49（独立播放机可选第 3 / 4 轨波形显示，`pkg/webui/ui_settings.go`、`tools/ui-mod/build_packs.py`）**：在 `Settings → Device`、控制中心（`ControlCenter_FourDeckWaveform`）与 Web 控制台新增 `4-Deck Waveform` 开关（默认 `Off`）。开启后在主界面顶部渲染 `FourDeckRemoteStrip`，从 Engine Link `/RemoteState/%1/RemoteProperties/Engine/Deck%2/...`（及本地 Deck 3/4 与 Pro DJ Link）同步曲目名、实时 BPM、四拍相位条与三频段/RGB 滚动微缩波形。
+  - **#50（内置 Shoutcast / Icecast 实时音频直播推流，`pkg/broadcast/`、`pkg/webui/broadcast.go`）**：在 `stream-sync` 内新增纯 Go 实现的 Icecast v2（HTTP `SOURCE`）与 Shoutcast v1/v2（ICY）直播推流器，全程绑定后台副核 `CPU3` 并经 `resourceguard` 节流，支持 `http://` 与 `https://`（TLS 1.2+），非阻塞打开音频输入管道，密码在状态与错误回显中全程脱敏（`PasswordSet` / `sanitizeError`）。碟机端 `EmbeddedMain.qml` 监听播放中轨道的 `/Engine/Deck%1/Track/ArtistName` 与 `SongName`，切歌时自动向 `/v1/sc5000/broadcast/metadata` 推送 `Artist - Title` 并同步至流媒体服务器。
+  - **#51（先锋 CDJ-3000 / Pro DJ Link 波形与拍线同步至 PRIME 4 Line-In 通道，`pkg/prolink/`、`internal/cli/rbbridge.go`、`pkg/webui/prolink.go`、`tools/ui-mod/build_packs.py`）**：扩展 `pkg/prolink` 解析 UDP 50000（发现）、50001（实时拍点/Pitch/BPM）与 50002（播放状态/Playhead/On-Air/Master/Sync），并在锁外解析与缓存 `.DAT`/`.EXT`/`.2EX` ANLZ 波形（`PWV7` 3-Band、`PWV5` RGB、`PWV3`）与 `PQTZ` 拍线；`rb-bridge --prolink` 在 `CPU3` 维护 `/tmp/sc5000-prolink.json` 快照，经本地回环 API `/v1/sc5000/prolink` 提供给 QML `WaveformLineInHint.qml` / `LineInHint.qml`，在 Line-In 开启（或 Deck 3/4 空载收到 CDJ 信号）时渲染同步滚动波形、拍线、曲目信息与 BPM，绝不遮挡有本地曲目的活跃轨道。
+  - **#52（Upfader Echo Out 拉杆切歌自动回音，`pkg/webui/ui_settings.go`、`tools/ui-mod/build_packs.py`）**：在 `Settings → Mixer`、`Settings → Device`、控制中心（`ControlCenter_UpfaderEcho`）与 Web 控制台新增 `Upfader Echo Out` 开关（默认 `Off`）。开启后监听各通道 `/Engine/Mixer/Channel%1/Volume/Level`，当推子在 `<300 ms` 内从 `>=0.8` 快速拉到底（`<=0.02`）时自动触发该通道 Echo 效果尾音并按当前 BPM 在 4 拍后自动释放，全程走 GUI 线程 `StateMap` 事件队列，96 kHz `SCHED_RR 49` 实时音频线程零阻塞。
+- **测试（编译机原生）**：`gofmt`、`go vet`、`go test -race ./...`（含新增 `pkg/broadcast`、`pkg/prolink`、`pkg/webui` 单测）、`tests/test_rootfs_overlay.sh`（13 项）、`az01-packer`（49 项）、`tools/stems`（9 项）、`test_dsp_smooth`（常规 / ASan+UBSan / TSan）、`test_stems_feature`（5.0.4 与 5.3.0 原生 ARM）、`test_edisksd_hook`（含 `unshare -m --mounts`）全部通过。
+- **正式构建（提交 `5cf9bd5`，编译机 `/root/build/sc5000-lab/release-5.3.0.2`，公钥参数 `none`）**：
+  - SC5000 / SC5000M / PRIME GO：`2cbdf608618ae637dff98b20468ecd52e91c0f35dd7797c91df1eacad7dc26f5`
+  - SC6000 / SC6000M：`2370a68e1b8df75e7842c3b8b62051bd464d7c46fc6c12c5e3a02556c8cc33aa`
+  - PRIME 4 / PRIME 2 / Mixstream Pro：`ec2883433969bfdc9b47ce84fbfe4646c8a0cdb5ecd9f0ada45d72b14f609467`
+- **门禁（编译机原生，旧镜像为已发布的 5.3.0.1.1）**：JP07、JP13、JC11 三组全部 **90 PASS / 0 FAIL**，exit 0。覆盖 5.3.0.1.1 → 5.3.0.2 在线升级、5.3.0.2 → 5.3.0.3（mock）在线升级、226 个 UI 包文件 + 探针全部替换、渲染探针核验 `ControlCenter_FourDeckWaveform`、`ControlCenter_LiveStream`、`ControlCenter_UpfaderEcho`、`FourDeckRemoteStrip`、Pro DJ Link 回环 API 与 Icecast/Shoutcast 切歌元数据同步。
+- **回滚点**：上一版发布 `v5.3.0.1.1`（提交 `ed1b873` / 构建 `897510d`）。
+- **实机影响**：已刷 5.3.0.1.1、5.3.0.1 或 5.0.4.2 的碟机可通过 `Settings → About / Update` 一键在线升级至 `5.3.0.2`；所有新开关（四路波形、直播推流、拉杆回音）默认关闭，不影响原有双层打碟习惯。
