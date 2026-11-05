@@ -14,8 +14,10 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
@@ -36,6 +38,12 @@ func RBBridge(args []string, stdout io.Writer) error {
 	bind := fs.String("bind", "0.0.0.0", "IPv4 address for Pro DJ Link listeners")
 	full := fs.Bool("full", false, "with --mount-path: read every file for cues and waveforms, even if unchanged")
 	smart := fs.Uint("smart-match", 0, "optional recommendation playlist relative to this Rekordbox track ID")
+	defaultStateFile := "/tmp/sc5000-prolink.json"
+	if env := os.Getenv("SC5000_PROLINK_STATE"); env != "" {
+		defaultStateFile = env
+	}
+	stateFile := fs.String("state-file", defaultStateFile, "path to write Pro DJ Link snapshot state JSON")
+	anlzRoot := fs.String("anlz-root", "/media", "root directory to scan for Rekordbox ANLZ analysis files")
 	watch := fs.Bool("watch", false, "retired; exits at once")
 	fs.String("watch-roots", "", "retired")
 	fs.Duration("poll-interval", 0, "retired")
@@ -78,7 +86,51 @@ func RBBridge(args []string, stdout io.Writer) error {
 	if !*link {
 		return nil
 	}
-	err := prolink.NewDiscovery().Listen(ctx, ip, func(d prolink.Device) { emit(d) })
+
+	discovery := prolink.NewDiscovery()
+	if *anlzRoot != "" {
+		discovery.SetANLZRoot(*anlzRoot)
+	}
+
+	var stateMu sync.Mutex
+	writeState := func(path string, snap prolink.Snapshot) {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return
+		}
+		tmp, err := os.CreateTemp(dir, ".prolink-*.tmp")
+		if err != nil {
+			return
+		}
+		defer os.Remove(tmp.Name())
+		data, err := json.MarshalIndent(snap, "", "  ")
+		if err != nil {
+			tmp.Close()
+			return
+		}
+		if _, err := tmp.Write(data); err != nil {
+			tmp.Close()
+			return
+		}
+		if err := tmp.Sync(); err != nil {
+			tmp.Close()
+			return
+		}
+		if err := tmp.Close(); err != nil {
+			return
+		}
+		_ = os.Chmod(tmp.Name(), 0644)
+		_ = os.Rename(tmp.Name(), path)
+	}
+
+	err := discovery.Listen(ctx, ip, func(d prolink.Device) {
+		emit(d)
+		if *stateFile != "" {
+			writeState(*stateFile, prolink.BuildSnapshot(discovery.Devices(time.Now())))
+		}
+	})
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
