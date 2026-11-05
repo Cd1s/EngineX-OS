@@ -11,8 +11,10 @@
 #     /v1/sc5000/update?apply=1 -> Engine quits with UpdateFromUrl -> the stock
 #     engine script -> az01-update downloads and verifies the new image;
 #  3. the new rootfs boots on the same /data: etc-reset, prepare, debloat,
-#     perf-tune, sshd -t, stream-sync, deemixd, rb-bridge, guardian, storage,
-#     edisksd + hook, Engine + UI hook (patch/DSP/QML counts), streaming
+#     perf-tune, sshd -t, a stock Engine run that leaves a stale QML cache, then
+#     stream-sync, deemixd, rb-bridge, guardian, storage, edisksd + hook, Engine +
+#     UI hook (patch/DSP/QML counts, and gate-ui-probe.qml reading the rendered
+#     Settings -> Services -> Streaming rows, About and Control Center), streaming
 #     gateway, Stems handshake, Rekordbox conversion, fsck.hfsplus, and the
 #     next online update again.
 # Exit 0 only when every check passed. Evidence: <work dir>/results.txt and logs.
@@ -142,10 +144,33 @@ SH
     fi
     # engine.service: ExecStartPre (guard), runengine's environment, the stock engine script.
     mkdir -p -m 0700 "$R/tmp/sc5000-engine-home"
+    local ui=$W/data/sc5000-custom/ui want=0
+    local engine_env=(HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1
+        LD_PRELOAD=/etc/sc5000/libengine-ui-hook.so QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib)
+    if [ "$name" = new ]; then
+        # The 5.3.0.1 deck kept the stock UI (2026-11-05): Engine 5.3.0 once ran without the
+        # pack, and its forced QML disk cache in /data outlived every later boot with it.
+        # Seed that cache with one stock run (safe-mode), then boot as a deck would.
+        : > "$ui/safe-mode"
+        in_root "${engine_env[@]}" /usr/Engine/Engine -d0 > "$W/new-stock-engine.log" 2>&1 &
+        local stock=$! qmlc
+        qmlc=$(printf '%s' :/Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/StreamingServices.qml | sha1sum | cut -c1-40).qmlc
+        check "new: a stock Engine run cached StreamingServices.qml in /data (stale-cache seed)" \
+            wait_for "$ENGINE_START" bash -c "find '$W/data' -name '$qmlc' | grep -q ."
+        sleep 20  # let it finish writing the rest of the cache
+        in_root /usr/local/sbin/pkill -TERM -f '^/usr/Engine/Engine( |$)' || :
+        (sleep 60; in_root /usr/local/sbin/pkill -KILL -f '^/usr/Engine/Engine( |$)') & local reaper=$!
+        wait "$stock" 2>/dev/null || :
+        kill "$reaper" 2>/dev/null || :
+        note "new: stale QML cache seeded: $(find "$W/data" -name '*.qmlc' | wc -l) .qmlc files"
+        rm -f "$ui/safe-mode" "$ui/boot-count" "$ui/boot-token" "$R/tmp/engine_runguard.lock"
+        # The probe stands in for a stock file Engine always creates; it is not in the image.
+        want=$(find "$ui/packs/$LANG_PACK" -type f | wc -l)
+        mkdir -p "$ui/packs/$LANG_PACK/Skins/Common/Items"
+        cp "$REPO/tools/az01-packer/gate-ui-probe.qml" "$ui/packs/$LANG_PACK/Skins/Common/Items/QmlWarnings.qml"
+    fi
     in_root /etc/sc5000/engine-ui-guard pre >> "$W/$name-boot.log" 2>&1 || :
-    in_root HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1 \
-        LD_PRELOAD=/etc/sc5000/libengine-ui-hook.so QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 \
-        LD_LIBRARY_PATH=/usr/qt/lib /usr/Engine/Scripts/engine "$PRODUCT" > "$W/$name-engine.log" 2>&1 & pid[engine]=$!
+    in_root "${engine_env[@]}" /usr/Engine/Scripts/engine "$PRODUCT" > "$W/$name-engine.log" 2>&1 & pid[engine]=$!
     check "$name: stream-sync listens on :8080" wait_for 120 curl -sf -o /dev/null http://127.0.0.1:8080/v1/sc5000/ui
     check "$name: UI hook loaded the $LANG_PACK pack" wait_for "$ENGINE_START" grep -aq "packs/$LANG_PACK: [0-9]* files" "$W/$name-engine.log"
     in_root /etc/sc5000/engine-ui-guard post >> "$W/$name-boot.log" 2>&1 || :
@@ -154,10 +179,21 @@ SH
     # press Update once it is up, so the gate waits the same way before ?apply=1.
     sleep "$ENGINE_SECONDS"
     if [ "$name" = new ]; then
-        local log=$W/new-engine.log files want
+        local log=$W/new-engine.log files label
         files=$(sed -n "s|.*packs/$LANG_PACK: \([0-9]*\) files.*|\1|p" "$log" | awk '{s += $1} END {print s + 0}')
-        want=$(find "$W/data/sc5000-custom/ui/packs/$LANG_PACK" -type f | wc -l)
-        check "new: UI hook replaced all $want QML files (got ${files:-0})" test "${files:-0}" -eq "$want" -a "$want" -gt 0
+        check "new: UI hook replaced all $want pack files + the gate probe (got ${files:-0})" test "${files:-0}" -eq $((want + 1)) -a "$want" -gt 0
+        # What Engine rendered, not what the hook counted: a stale .qmlc showed the stock UI
+        # while the hook still logged every file.
+        check "new: render probe reported (Settings -> Services, About)" wait_for 120 grep -aq 'SCPROBE done|' "$log"
+        check "new: render probe ran without errors" bash -c "! grep -aq 'SCPROBE error|' '$log'"
+        label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2)
+        check "new: Settings -> Services -> Streaming shows the pack's Deezer row" test -n "$label"
+        check "new: Streaming shows SoundCloud once (stock row hidden)" test "$(grep -acF "SCPROBE entry|$label|SoundCloud|1|" "$log")" -eq 1
+        check "new: Streaming shows Beatport once (stock row hidden)" test "$(grep -acF "SCPROBE entry|$label|Beatport|1|" "$log")" -eq 1
+        check "new: Streaming hides stock Tidal" bash -c "! grep -aqF 'SCPROBE entry|$label|Tidal|1|' '$log'"
+        check "new: About shows EngineX OS $NEWV" grep -aqF "SCPROBE version|EngineX OS $NEWV " "$log"
+        check "new: Control Center has the waveform tile" grep -aqF 'SCPROBE tile|ControlCenter_WaveformStyle|' "$log"
+        note "new: render probe: $(grep -ao 'SCPROBE [a-z]*|.*|' "$log" | grep -v 'SCPROBE done' | tr '\n' ' ')"
         check "new: Engine build matched (Engine $BASE)" grep -aq "engine-ui-hook: Engine $BASE" "$log"
         check "new: $EXPECT_APPLIED Engine patches applied (TidalAPI gateway, Stems, getConfig...)" \
             test "$(grep -ac 'engine-ui-hook: applied 0x' "$log")" -eq "$EXPECT_APPLIED"
