@@ -34,16 +34,18 @@ var dropTypes = map[string]bool{".mp3": true, ".flac": true, ".wav": true, ".aif
 
 type dropDrive struct {
 	Name  string `json:"name"`
-	Kind  string `json:"kind"` // hd (internal SATA), sd, usb, or drive when unknown
+	Kind  string `json:"kind"` // internal (eMMC), hd (internal SATA), sd, usb, or drive when unknown
 	Free  int64  `json:"free"`
 	Total int64  `json:"total"`
 	Path  string `json:"path"`
 }
 
-// driveKind tells the deck's drives apart by their block device: SD cards are
-// mmcblk, and a SCSI disk is USB when its sysfs path runs through a USB host.
+// driveKind tells the deck's drives apart by their block device: mmcblk0 is
+// the deck's own eMMC (az01-internal), other mmcblk are SD slots, and a SCSI disk is USB when its sysfs path runs through a USB host.
 func driveKind(dev, sysPath string) string {
 	switch {
+	case strings.HasPrefix(dev, "/dev/mmcblk0"):
+		return "internal"
 	case strings.HasPrefix(dev, "/dev/mmcblk"):
 		return "sd"
 	case strings.HasPrefix(dev, "/dev/sd") && strings.Contains(sysPath, "/usb"):
