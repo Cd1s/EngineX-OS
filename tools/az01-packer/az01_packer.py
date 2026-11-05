@@ -676,7 +676,8 @@ def offline_debloat(fs, script):
                     fs.write(dest, data, mode)
 
 
-VERSION_RE = re.compile(r'\d+(\.\d+){1,3}')
+# A hotfix of a release adds a fifth number: 5.3.0.1.1 follows 5.3.0.1.
+VERSION_RE = re.compile(r'\d+(\.\d+){1,4}')
 
 
 def inject(fs, key=None, services=(), overlay=None, version=None):

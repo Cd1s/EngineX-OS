@@ -355,7 +355,7 @@ for side in old new; do
     python3 -I "$REPO/tools/az01-packer/az01_packer.py" unpack "$img" --output "$W/$side-img" > "$W/$side-unpack.json"
     check "$side image unpacks and verifies" json "$W/$side-unpack.json" "j.get('verified') is True"
 done
-export BASE=${NEWV%.*}  # the official Engine the image is built on, as the UI hook names it
+export BASE=$(cut -d. -f1-3 <<< "$NEWV")  # the official Engine the image is built on, as the UI hook names it (5.3.0 for 5.3.0.1.1)
 # Tools the suite runs directly (exec.Command); a base without them breaks that feature.
 SUITE_CMDS=$(cd "$REPO" && grep -rhoE 'exec\.Command(Context)?\((ctx, )?"[^"]+"' --include='*.go' --exclude='*_test.go' cmd internal pkg | sed -E 's/.*"([^"]+)"$/\1/' | sort -u | tr '\n' ' ')
 export SUITE_CMDS
