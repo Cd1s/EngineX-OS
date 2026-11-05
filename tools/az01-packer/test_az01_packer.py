@@ -511,6 +511,8 @@ class FilesystemTests(unittest.TestCase):
         self.assertIn(b' systemd/system/engine.service.d/override.conf', reset)
         with self.assertRaises(az.SafetyError):
             az.inject(self.fs, b'key', overlay=overlay, version='5.0.4.1; rm -rf /')
+        self.assertTrue(az.VERSION_RE.fullmatch('5.3.0.1.1'))
+        self.assertIsNone(az.VERSION_RE.fullmatch('5.3.0.1.1.1'))
 
     def test_overlay_debloat_runs_offline(self):
         overlay = Path(__file__).resolve().parents[2]/'rootfs-overlay'
