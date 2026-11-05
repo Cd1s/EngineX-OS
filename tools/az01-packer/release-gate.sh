@@ -200,6 +200,7 @@ SH
         check "new: Streaming hides stock Tidal" bash -c "! grep -aqF 'SCPROBE entry|$label|Tidal|1|' '$log'"
         check "new: About shows EngineX OS $NEWV" grep -aqF "SCPROBE version|EngineX OS $NEWV " "$log"
         check "new: Control Center has the waveform tile" grep -aqF 'SCPROBE tile|ControlCenter_WaveformStyle|' "$log"
+        check "new: Control Center has the upfader echo tile" grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|' "$log"
         note "new: render probe: $(grep -ao 'SCPROBE [a-z]*|.*|' "$log" | grep -v 'SCPROBE done' | tr '\n' ' ')"
         check "new: Engine build matched (Engine $BASE)" grep -aq "engine-ui-hook: Engine $BASE" "$log"
         check "new: $EXPECT_APPLIED Engine patches applied (TidalAPI gateway, Stems, getConfig...)" \
@@ -212,6 +213,8 @@ SH
         check "new: edisksd starts with the hook preloaded (LD_BIND_NOW)" bash -c "grep -aq 'Loaded configuration' '$W/new-edisksd.log' && ! grep -aiE 'symbol lookup error|undefined symbol|cannot open shared object|cannot be preloaded' '$W/new-edisksd.log'"
         curl -sf http://127.0.0.1:8080/v1/sc5000/ui > "$W/new-ui.json" || :
         check "new: GET /v1/sc5000/ui reports $NEWV" json "$W/new-ui.json" "j.get('version') == '$NEWV'"
+        curl -sf -X POST "http://127.0.0.1:8080/v1/sc5000/ui?upfaderEcho=1" > "$W/new-ui-echo.json" || :
+        check "new: POST /v1/sc5000/ui?upfaderEcho=1 returns upfaderEcho: true" json "$W/new-ui-echo.json" "j.get('upfaderEcho') is True"
         curl -sf -X POST http://127.0.0.1:8080/au/oauth2/token > "$W/new-token.json" || :
         check "new: POST /au/oauth2/token (TIDAL gateway)" json "$W/new-token.json" "j.get('access_token')"
         check "new: Beatport is one of the deck's sources" json "$W/new-ui.json" "'beatport' in j.get('sources', [])"

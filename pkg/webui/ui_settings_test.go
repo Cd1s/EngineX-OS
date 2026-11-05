@@ -273,3 +273,49 @@ func TestUIBroadcastSetting(t *testing.T) {
 		t.Fatalf("expected 400 for invalid broadcast value")
 	}
 }
+
+func TestUIUpfaderEchoSetting(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+
+	// Default
+	if _, v := uiPost(t, srv.URL, ""); v.UpfaderEcho != false {
+		t.Fatalf("default UpfaderEcho should be false, got %+v", v)
+	}
+
+	// Update upfaderEcho=1
+	if code, v := uiPost(t, srv.URL, "upfaderEcho=1"); code != 200 || !v.UpfaderEcho {
+		t.Fatalf("update upfaderEcho=1 failed: code=%d, v=%+v", code, v)
+	}
+
+	// Verify persistence in settings.conf
+	data, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(splitLines(data), "upfader_echo=1") {
+		t.Fatalf("settings.conf missing upfader_echo=1: %s", string(data))
+	}
+
+	// Update upfaderEcho=0
+	if code, v := uiPost(t, srv.URL, "upfaderEcho=0"); code != 200 || v.UpfaderEcho {
+		t.Fatalf("update upfaderEcho=0 failed: code=%d, v=%+v", code, v)
+	}
+
+	data, err = os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(splitLines(data), "upfader_echo=1") {
+		t.Fatalf("settings.conf should not contain upfader_echo=1 after disabling: %s", string(data))
+	}
+
+	// Reject invalid values
+	for _, bad := range []string{"upfaderEcho=bad", "upfaderEcho=2", "upfaderEcho=yes"} {
+		if code, _ := uiPost(t, srv.URL, bad); code != 400 {
+			t.Errorf("expected 400 for %s, got %d", bad, code)
+		}
+	}
+}

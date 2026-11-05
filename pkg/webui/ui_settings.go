@@ -55,6 +55,7 @@ type uiSettings struct {
 	FourDeckWaveform bool     `json:"fourDeckWaveform"`
 	ProlinkWaveform  bool     `json:"prolinkWaveform"`
 	BroadcastEnabled bool     `json:"broadcastEnabled"`
+	UpfaderEcho      bool     `json:"upfaderEcho"`
 
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
@@ -133,6 +134,12 @@ func (s *Server) loadUI() uiSettings {
 			} else if val == "1" || strings.EqualFold(val, "true") {
 				v.ProlinkWaveform = true
 			}
+		case "upfader_echo":
+			if val == "1" || strings.EqualFold(val, "true") {
+				v.UpfaderEcho = true
+			} else if val == "0" || strings.EqualFold(val, "false") {
+				v.UpfaderEcho = false
+			}
 		}
 	}
 	if saved { // services added since the file was written start enabled; ones turned off stay off
@@ -174,6 +181,9 @@ func (s *Server) saveUI(v uiSettings) error {
 	}
 	if !v.ProlinkWaveform {
 		text += "prolink_waveform=0\n"
+	}
+	if v.UpfaderEcho {
+		text += "upfader_echo=1\n"
 	}
 	if v.GitHubRepo != defaultGitHubRepo {
 		text += "github_repo=" + v.GitHubRepo + "\n"
@@ -271,6 +281,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.ProlinkWaveform = b
+	}
+	if q.Has("upfaderEcho") {
+		b, ok := parseBoolParam(q.Get("upfaderEcho"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.UpfaderEcho = b
 	}
 	var (
 		hasBroadcast bool
