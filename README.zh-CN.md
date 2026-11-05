@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/assets/hero-banner-zh-CN.svg" alt="EngineX OS 5.3.0.1" width="100%">
+<img src="./docs/assets/hero-banner-zh-CN.svg" alt="EngineX OS 5.3.0.1.1" width="100%">
 
 <br>
 
@@ -16,7 +16,7 @@
 
 <br>
 
-**EngineX OS 5.3.0.1** 是面向天龙 Denon DJ 与 Numark 独立打碟机的增强固件，支持：
+**EngineX OS 5.3.0.1.1** 是面向天龙 Denon DJ 与 Numark 独立打碟机的增强固件，支持：
 `SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro`。
 
 操作界面与原厂保持一致，直接通过 U 盘刷入即可解锁以下功能。
@@ -125,7 +125,7 @@
 
 系统经过全面重构与瘦身，所有新增功能仅占极小空间，比原厂固件留出更多可用内存：
 
-| 对比项 | 官方原厂 / 重构前 | 重构后（`EngineX OS 5.3.0.1` 实测） | 实际打碟提升 |
+| 对比项 | 官方原厂 / 重构前 | 重构后（`EngineX OS 5.3.0.1.1` 实测） | 实际打碟提升 |
 | :--- | :--- | :--- | :--- |
 | **刷机包体积 (`*-Update.img`)** | 官方原厂 `173.88 MB`<br>重构前改版 `~210 MB` | **`176.70 MB`**（整套扩展功能仅占 **`4.1 MB`**） | **仅比官方原厂大 `2.8 MB`** |
 | **纯刷机开机硬盘占用 (`/data`)** | 重构前残留约 `243 MB` | **核心程序 + 三语界面仅占 `17.2 MB`**（含扩展文件系统库共 `45.6 MB`） | 内置闪存多腾出 **近 `200 MB`** 空间 |
@@ -144,16 +144,16 @@
 
 ### 方式一：U 盘刷机（首次安装）
 1. 点击下方对应你机器型号的链接，直接下载升级包（或前往 [**Releases 页面**](https://github.com/Cd1s/EngineX-OS/releases/latest)）：
-   - **Denon DJ SC5000 Prime**：[`SC5000-5.3.0.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
-   - **Denon DJ SC5000M Prime**：[`SC5000M-5.3.0.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
-   - **Denon DJ SC6000 Prime**：[`SC6000-5.3.0.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
-   - **Denon DJ SC6000M Prime**：[`SC6000M-5.3.0.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
-   - **Denon DJ PRIME 4**：[`PRIME4-5.3.0.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
-   - **Denon DJ PRIME 2**：[`PRIME2-5.3.0.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
-   - **Denon DJ PRIME GO**：[`PRIMEGO-5.3.0.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
-   - **Numark Mixstream Pro**：[`MIXSTREAMPRO-5.3.0.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
+   - **Denon DJ SC5000 Prime**：[`SC5000-5.3.0.1.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.1.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
+   - **Denon DJ SC5000M Prime**：[`SC5000M-5.3.0.1.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.1.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
+   - **Denon DJ SC6000 Prime**：[`SC6000-5.3.0.1.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.1.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
+   - **Denon DJ SC6000M Prime**：[`SC6000M-5.3.0.1.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.1.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
+   - **Denon DJ PRIME 4**：[`PRIME4-5.3.0.1.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.1.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
+   - **Denon DJ PRIME 2**：[`PRIME2-5.3.0.1.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.1.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
+   - **Denon DJ PRIME GO**：[`PRIMEGO-5.3.0.1.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.1.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
+   - **Numark Mixstream Pro**：[`MIXSTREAMPRO-5.3.0.1.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.1.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
 2. 将下载好的 `.img` 文件放入 **FAT32 或 exFAT 格式 U 盘的根目录**。
-3. 将 U 盘插入碟机（原厂 Engine OS 4.3.x 与 5.0.x 都可以直接刷），进入 **设置 (Settings) → 关于 / 更新 (About / Update) → 固件更新模式 (Firmware Update Mode)**，看到 `Found 5.3.0.1 on USB/SD` 时选 **USB/SD**，机器会自动完成刷入并重启。如果只弹出 *Reboot into firmware update mode?*，说明碟机没找到文件：核对机型，文件名保持原样放在根目录，再拔插一次 U 盘。
+3. 将 U 盘插入碟机（原厂 Engine OS 4.3.x 与 5.0.x 都可以直接刷），进入 **设置 (Settings) → 关于 / 更新 (About / Update) → 固件更新模式 (Firmware Update Mode)**，看到 `Found 5.3.0.1.1 on USB/SD` 时选 **USB/SD**，机器会自动完成刷入并重启。如果只弹出 *Reboot into firmware update mode?*，说明碟机没找到文件：核对机型，文件名保持原样放在根目录，再拔插一次 U 盘。
 
 ### 方式二：碟机屏幕一键在线升级（已安装本系统后）
 - 连接 Wi-Fi 或网线后，打开碟机 **设置 → 关于 / 更新**；
@@ -169,13 +169,32 @@ tools/stems/run-home-worker.sh
 powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs
 ```
 
+### 流媒体登录：只有碟机也能用
+不需要电脑，也不需要服务器。碟机和手机连同一个 Wi-Fi，在音源菜单里点开平台，用手机扫屏幕上的二维码即可。手机上的登录页默认英文，右上角可切换简体中文或繁體中文，每个页面都有分步教程。
+
+| 平台 | 怎么登录 |
+| --- | --- |
+| 网易云音乐 | 用网易云音乐 App 扫碟机屏幕上的二维码并确认。二维码过期后点一下就会换新的。 |
+| Spotify | 第 1 步：点「打开 Spotify 登录」并同意。第 2 步：随后会打开一个以 `127.0.0.1` 开头、无法访问的页面，复制它的地址，点「粘贴并连接」。 |
+| Deezer | 粘贴你的 **ARL**（页面教程演示怎样在电脑上从 deezer.com 复制）。同一次登录也为 Spotify、网易云和 Deezer 曲目打开 Deemix 无损 FLAC 下载。只填资料页链接则只显示公开歌单、不能下载。 |
+| SoundCloud | 填用户名或主页链接即可，不用密码、不用 Artist Pro、也不用申请 API。私密歌单在「高级」里粘贴 soundcloud.com 的 `oauth_token`。 |
+| Beatport | 填 Beatport 邮箱和密码，碟机只保存登录令牌。 |
+
+### 选配：自建登录中继
+中继让用移动数据的手机也能完成登录，并提供 Deezer 网页内登录。在任意有公网 HTTPS 地址的服务器上运行，然后在碟机网页控制台（`http://<碟机 IP>:8080`）填入它的地址和密码：
+```sh
+go build -o sc5000-relay ./cmd/sc5000-relay
+./sc5000-relay -public https://relay.example.com -listen 0.0.0.0:6595
+# 首次控制台密码写在 /var/lib/sc5000-relay/initial-password
+```
+
 ---
 
 ## 安全说明：演出现场公共网络防护
 
 EngineX OS 按照「和陌生人共用酒吧、Club、音乐节 Wi-Fi」的场景做了安全设计。
 
-- **没有任何默认 SSH 密码。** 密码登录已彻底关闭，公开固件也**不内置任何 SSH 公钥**，你自己没放公钥之前 SSH 根本不开放。用过旧版公开固件的碟机，升级到 5.3.0.1 时会自动清除旧固件带的那把公钥。
+- **没有任何默认 SSH 密码。** 密码登录已彻底关闭，公开固件也**不内置任何 SSH 公钥**，你自己没放公钥之前 SSH 根本不开放。用过旧版公开固件的碟机，升级到 5.3.0.1.1 时会自动清除旧固件带的那把公钥。
 - **同一个 Wi-Fi 下的人控制不了你的碟机。** 碟机内部用的所有接口（播放控制、切波形、切语言、在线升级、流媒体登录、Stems）只接受碟机自己（`127.0.0.1`）调用，别人就算和你连同一个网络，也没法远程切你的歌、改设置或重启机器。
 - **手机网页控制台必须输入你这台碟机独有的访问码。** 打开 `http://<碟机IP>:8080` 时要输入碟机随机生成的访问码；流媒体扫码登录用的是会过期的一次性链接。
 
