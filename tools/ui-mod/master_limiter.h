@@ -65,4 +65,55 @@ static inline void sc_lim_planar(struct sc_lim *s, float *l, float *r, unsigned 
     s->env = env;
 }
 
+/* #64 Auto-Gain: brings quiet material up toward a -0.4 dBFS peak before the
+ * limiter above, which always runs after it. A stereo-linked peak follower
+ * (instant rise, ~3 s fall) sets the target; the gain only ever boosts (at
+ * most +9 dB), falls within ~50 ms when the music gets louder, rises over
+ * ~2 s, and moves linearly sample by sample inside a block (no zipper noise).
+ * A block whose peak is under -42 dBFS freezes everything, so silence, intros
+ * and noise floors are never pulled up. shortcut: time constants assume 96 kHz. */
+#define SC_GAIN_TARGET 0.95f  /* -0.4 dBFS */
+#define SC_GAIN_MAX 2.82f     /* +9 dB */
+#define SC_GAIN_GATE 0.008f   /* -42 dBFS */
+#define SC_GAIN_FALL 288000.0f /* level follower release, frames (~3 s) */
+#define SC_GAIN_DOWN 4800.0f   /* gain decrease time constant, frames (~50 ms) */
+#define SC_GAIN_UP 192000.0f   /* gain increase time constant, frames (~2 s) */
+
+struct sc_gain {
+    float level, gain; /* 0 means not started: unity gain */
+};
+
+static inline void sc_gain_planar(struct sc_gain *s, float *l, float *r, unsigned frames)
+{
+    if (!s || !l || !frames)
+        return;
+    float peak = 0.0f;
+    for (unsigned i = 0; i < frames; i++) {
+        float a = l[i] < 0.0f ? -l[i] : l[i], b = r ? (r[i] < 0.0f ? -r[i] : r[i]) : 0.0f;
+        if (a <= 3.0e38f && a > peak) peak = a; /* NaN/Inf never drive the level */
+        if (b <= 3.0e38f && b > peak) peak = b;
+    }
+    float g0 = s->gain > 0.0f ? s->gain : 1.0f, g1 = g0;
+    if (peak >= SC_GAIN_GATE) {
+        float n = (float)frames, fall = n / SC_GAIN_FALL;
+        if (fall > 1.0f) fall = 1.0f;
+        s->level = peak > s->level ? peak : s->level + (peak - s->level) * fall;
+        float target = SC_GAIN_TARGET / s->level;
+        if (target > SC_GAIN_MAX) target = SC_GAIN_MAX;
+        if (target < 1.0f) target = 1.0f;
+        float k = n / (target < g0 ? SC_GAIN_DOWN : SC_GAIN_UP);
+        g1 = g0 + (target - g0) * (k > 1.0f ? 1.0f : k);
+        if (g1 - target < 1e-4f && target - g1 < 1e-4f) g1 = target; /* float steps stall one ulp short of unity */
+    }
+    s->gain = g1;
+    if (g0 == 1.0f && g1 == 1.0f)
+        return; /* unity: leave the block untouched */
+    for (unsigned i = 0; i < frames; i++) {
+        float g = g0 + (g1 - g0) * (float)(i + 1) / (float)frames;
+        l[i] *= g;
+        if (r)
+            r[i] *= g;
+    }
+}
+
 #endif

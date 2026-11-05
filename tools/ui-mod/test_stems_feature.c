@@ -312,7 +312,12 @@ static void test_dsp_hooks(void) {
         for (int ch = 0; ch < 4; ch++)
             for (int i = 0; i < 64; i++) assert(fabsf(buf[ch][i]) <= SC_LIM_CEIL && fabsf(buf[ch][i]) > 0.9f);
         __atomic_store_n(&lim_enabled, 0, __ATOMIC_RELAXED);
-        assert(master_calls == 2);
+        __atomic_store_n(&gain_enabled, 1, __ATOMIC_RELAXED); // #64 alone still ends in the limiter
+        assert(call((void *)0x11, (void *)0x22, 2, in, 4, out, 64) == 0x5a);
+        for (int ch = 0; ch < 4; ch++)
+            for (int i = 0; i < 64; i++) assert(fabsf(buf[ch][i]) <= SC_LIM_CEIL && fabsf(buf[ch][i]) > 0.9f);
+        __atomic_store_n(&gain_enabled, 0, __ATOMIC_RELAXED);
+        assert(master_calls == 3);
         puts("ARM airDeviceCallback (#58): displaced per-build prologue, 7-argument ABI, both stereo pairs limited to -0.1 dBFS only when on: PASS");
     }
 

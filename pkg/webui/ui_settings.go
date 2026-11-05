@@ -51,6 +51,9 @@ type uiSettings struct {
 	// MasterLimiter turns on the soft clipper / peak limiter engine_ui_hook.c
 	// applies to Engine's audio output (#58). Off by default.
 	MasterLimiter bool `json:"masterLimiter"`
+	// AutoGain raises quiet material toward 0 dBFS (at most +9 dB) ahead of the
+	// limiter, which then always runs (#64). Off by default.
+	AutoGain bool `json:"autoGain"`
 	// OmniSource adds every mounted drive's playlists and tracks, and the other
 	// services' playlists, to the streaming browser (#62). Off by default.
 	OmniSource bool `json:"omniSource"`
@@ -137,6 +140,8 @@ func (s *Server) loadUI() uiSettings {
 			v.AutoAnalyze = val == "1"
 		case "master_limiter":
 			v.MasterLimiter = val == "1"
+		case "auto_gain":
+			v.AutoGain = val == "1"
 		case "omni_source":
 			v.OmniSource = val == "1"
 		case "prolink_share":
@@ -225,6 +230,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.MasterLimiter {
 		text += "master_limiter=1\n"
+	}
+	if v.AutoGain {
+		text += "auto_gain=1\n"
 	}
 	if v.OmniSource {
 		text += "omni_source=1\n"
@@ -399,6 +407,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.MasterLimiter = on == "1"
+	}
+	if q.Has("autoGain") {
+		on := q.Get("autoGain")
+		if on != "0" && on != "1" {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.AutoGain = on == "1"
 	}
 	if q.Has("omniSource") {
 		on := q.Get("omniSource")
