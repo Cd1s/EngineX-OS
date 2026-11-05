@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -45,6 +46,8 @@ func RBBridge(args []string, stdout io.Writer) error {
 	}
 	stateFile := fs.String("state-file", defaultStateFile, "path to write Pro DJ Link snapshot state JSON")
 	anlzRoot := fs.String("anlz-root", "/media", "root directory to scan for Rekordbox ANLZ analysis files")
+	mediaCache := fs.String("media-cache", "/tmp/sc5000-prolink-media", "where tracks read from Pioneer players over the network are kept (#59)")
+	uiSettings := fs.String("ui-settings", "/data/sc5000-custom/ui/settings.conf", "deck settings; prolink_share=1 enables reading players' media")
 	watch := fs.Bool("watch", false, "retired; exits at once")
 	fs.String("watch-roots", "", "retired")
 	fs.Duration("poll-interval", 0, "retired")
@@ -92,6 +95,9 @@ func RBBridge(args []string, stdout io.Writer) error {
 	if *anlzRoot != "" {
 		discovery.SetANLZRoot(*anlzRoot)
 	}
+	if *mediaCache != "" {
+		discovery.SetMediaCache(&prolink.MediaCache{Dir: *mediaCache, Enabled: func() bool { return settingOn(*uiSettings, "prolink_share") }})
+	}
 
 	var stateMu sync.Mutex
 	writeState := func(path string, snap prolink.Snapshot) {
@@ -127,8 +133,12 @@ func RBBridge(args []string, stdout io.Writer) error {
 	}
 
 	_, _ = resourceguard.New(resourceguard.DefaultConfig()).ApplyToProcess(0)
+	st := &stager{mounts: localExports, last: map[string]time.Time{}}
 	err := discovery.Listen(ctx, ip, func(d prolink.Device) {
 		emit(d)
+		if d.PacketType == 6 && d.Number >= 1 && d.Number <= 6 && settingOn(*uiSettings, "prolink_share") {
+			st.observe(ctx, d)
+		}
 		if *stateFile != "" {
 			writeState(*stateFile, prolink.BuildSnapshot(discovery.Devices(time.Now())))
 		}
@@ -137,4 +147,15 @@ func RBBridge(args []string, stdout io.Writer) error {
 		return nil
 	}
 	return err
+}
+
+// settingOn reports whether key=1 is in a key=value settings file.
+func settingOn(path, key string) bool {
+	b, _ := os.ReadFile(path)
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == key+"=1" {
+			return true
+		}
+	}
+	return false
 }

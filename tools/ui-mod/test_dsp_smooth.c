@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "dsp_smooth.h"
+#include "master_limiter.h"
 
 static int failures;
 #define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #cond); failures++; } } while (0)
@@ -493,6 +494,159 @@ static void test_fader(void)
     CHECK(keep[0] == 7 && keep[3] == 7);
 }
 
+/* #54: one Flanger-like block, dry level measured before, dipped in place. */
+static void flanger_block(void *self, float *l, float *r, uint32_t n, float dip, uint32_t *t)
+{
+    float *buf[2] = {l, r};
+    for (uint32_t i = 0; i < n; i++, (*t)++)
+        l[i] = r[i] = 0.25f * sinf((float)*t * 0.01f);
+    float dry = sc_dsp_block_energy(buf, n);
+    for (uint32_t i = 0; i < n; i++) { l[i] *= dip; r[i] *= dip; }
+    sc_dsp_makeup_apply(self, buf, n, dry);
+}
+
+static void test_flanger_makeup(void)
+{
+    enum { B = 128 };
+    static float l[B], r[B];
+    float *buf[2] = {l, r};
+    static char fx[4];
+    uint32_t t = 0;
+    memset(sc_dsp_state(), 0, sizeof *sc_dsp_state());
+    /* A 0.6x dip converges back to the dry level within a few hundred ms. */
+    for (int i = 0; i < 2000; i++) flanger_block(&fx[0], l, r, B, 0.6f, &t);
+    float in = 0.0f, out = 0.0f;
+    for (int i = 0; i < 100; i++) {
+        uint32_t t0 = t;
+        flanger_block(&fx[0], l, r, B, 0.6f, &t);
+        out += sc_dsp_block_energy(buf, B);
+        t = t0;
+        for (uint32_t k = 0; k < B; k++, t++) l[k] = r[k] = 0.25f * sinf((float)t * 0.01f);
+        in += sc_dsp_block_energy(buf, B);
+    }
+    CHECK(fabsf(sqrtf(out / in) - 1.0f) < 0.02f);
+    /* No dip, or a louder block: bit-exact passthrough, never attenuated. */
+    for (float dip = 1.0f; dip <= 1.5f; dip += 0.5f) {
+        flanger_block(&fx[1], l, r, B, dip, &t);
+        float want = 0.25f * sinf((float)(t - 1) * 0.01f) * dip;
+        CHECK(l[B - 1] == want && r[B - 1] == want);
+    }
+    /* A deep dip is capped at +6 dB; silence and non-finite input change nothing. */
+    for (int i = 0; i < 2000; i++) flanger_block(&fx[2], l, r, B, 0.1f, &t);
+    CHECK(sc_dsp_state()->makeup[2].gain <= SC_DSP_MAKEUP_MAX && sc_dsp_state()->makeup[2].gain > 1.9f);
+    memset(l, 0, sizeof l); memset(r, 0, sizeof r);
+    sc_dsp_makeup_apply(&fx[3], buf, B, 0.0f);
+    sc_dsp_makeup_apply(&fx[3], buf, B, NAN);
+    sc_dsp_makeup_apply(NULL, buf, B, 1.0f);
+    sc_dsp_makeup_apply(&fx[3], NULL, B, 1.0f);
+    CHECK(l[0] == 0.0f && r[B - 1] == 0.0f);
+    /* The gain moves linearly within a block: no step at a block boundary. */
+    flanger_block(&fx[0], l, r, B, 0.6f, &t);
+    CHECK(sc_dsp_state()->makeup[0].gain > 1.6f && sc_dsp_state()->makeup[0].gain < 1.72f);
+    /* More instances than slots: the table recycles, nothing breaks. */
+    static char many[SC_DSP_MAKEUP_SLOTS * 2];
+    for (unsigned i = 0; i < sizeof many; i++) flanger_block(&many[i], l, r, B, 0.5f, &t);
+    for (uint32_t k = 0; k < B; k++) CHECK(sc_dsp_finite_f32(l[k]) && fabsf(l[k]) <= 0.5f);
+}
+
+static void *flanger_thread(void *arg)
+{
+    float l[64], r[64];
+    uint32_t t = 0;
+    for (int i = 0; i < 20000; i++) flanger_block(arg, l, r, 64, 0.7f, &t);
+    return NULL;
+}
+
+static void test_flanger_threads(void)
+{
+    /* Each render thread its own instance, plus two sharing one (busy slot skipped). */
+    static char fx[3];
+    pthread_t th[4];
+    void *who[4] = {&fx[0], &fx[1], &fx[2], &fx[2]};
+    memset(sc_dsp_state(), 0, sizeof *sc_dsp_state());
+    for (int i = 0; i < 4; i++) CHECK(!pthread_create(&th[i], NULL, flanger_thread, who[i]));
+    for (int i = 0; i < 4; i++) CHECK(!pthread_join(th[i], NULL));
+    for (int i = 0; i < SC_DSP_MAKEUP_SLOTS; i++) {
+        const struct sc_dsp_makeup *m = &sc_dsp_state()->makeup[i];
+        CHECK(!m->busy && (!m->self || (m->gain >= 1.0f && m->gain <= SC_DSP_MAKEUP_MAX)));
+    }
+}
+
+/* #58 master soft clipper / peak limiter. */
+static void test_master_limiter(void)
+{
+    /* Curve: bit-exact up to the knee, C1 at the knee, monotonic, flat into the ceiling. */
+    for (float x = 0.0f; x <= SC_LIM_KNEE; x += 0.001f)
+        CHECK(sc_lim_clip(x) == x && sc_lim_clip(-x) == -x);
+    const float h = 1e-4f;
+    CHECK(fabsf((sc_lim_clip(SC_LIM_KNEE + h) - SC_LIM_KNEE) / h - 1.0f) < 0.01f);
+    CHECK((sc_lim_clip(SC_LIM_SAT) - sc_lim_clip(SC_LIM_SAT - h)) / h < 0.01f);
+    float prev = 0.0f, max_slope = 0.0f, max_bend = 0.0f, prev_slope = 1.0f;
+    for (int i = 1; i <= 20000; i++) {
+        float x = 2.0f * (float)i / 20000.0f, y = sc_lim_clip(x), slope = (y - prev) / (2.0f / 20000.0f);
+        CHECK(y >= prev - 1e-6f && y <= SC_LIM_CEIL); /* 1 ulp of rounding on the flat top */
+        if (slope > max_slope) max_slope = slope;
+        if (fabsf(slope - prev_slope) > max_bend) max_bend = fabsf(slope - prev_slope);
+        prev = y, prev_slope = slope;
+    }
+    CHECK(max_slope < 1.01f);
+    CHECK(max_bend < 0.01f); /* no slope jump anywhere: a hard clip jumps by 1 */
+    CHECK(sc_lim_clip(NAN) == 0.0f && sc_lim_clip(INFINITY) == 0.0f && sc_lim_clip(-INFINITY) == 0.0f);
+
+    /* +6 dB overdriven sine: peaks stay at or below -0.1 dBFS and finite, and the
+     * harsh high harmonics (7th..21st) are far below a hard clip at the same
+     * ceiling. 9600 frames hold exactly 100 periods of 1 kHz at 96 kHz. */
+    enum { N = 9600 };
+    static float l[N], r[N], hard[N];
+    struct sc_lim s = {0};
+    float peak = 0.0f;
+    for (int i = 0; i < N; i++) {
+        float x = 2.0f * sinf(2.0f * 3.14159265f * 1000.0f * (float)i / 96000.0f);
+        l[i] = x, r[i] = 0.5f * x;
+        hard[i] = x > SC_LIM_CEIL ? SC_LIM_CEIL : x < -SC_LIM_CEIL ? -SC_LIM_CEIL : x;
+    }
+    sc_lim_planar(&s, l, r, N);
+    for (int i = 0; i < N; i++) {
+        CHECK(isfinite(l[i]) && isfinite(r[i]));
+        if (fabsf(l[i]) > peak) peak = fabsf(l[i]);
+        CHECK(fabsf(r[i]) <= SC_LIM_KNEE); /* linked: the quieter side is only turned down */
+    }
+    CHECK(peak <= SC_LIM_CEIL && peak > 0.95f);
+    double soft_hi = 0.0, hard_hi = 0.0;
+    for (int k = 7; k <= 21; k += 2) {
+        double sr = 0, si = 0, hr = 0, hi = 0;
+        for (int i = 0; i < N; i++) {
+            double w = 2.0 * 3.14159265358979 * 100.0 * k * i / N;
+            sr += l[i] * cos(w), si += l[i] * sin(w);
+            hr += hard[i] * cos(w), hi += hard[i] * sin(w);
+        }
+        soft_hi += sr * sr + si * si, hard_hi += hr * hr + hi * hi;
+    }
+    CHECK(soft_hi < 0.25 * hard_hi); /* measured 9.9 dB less high-order energy; require 6 */
+
+    /* After the overdrive stops, the envelope releases back to unity. */
+    for (int i = 0; i < N; i++) l[i] = r[i] = 0.5f;
+    sc_lim_planar(&s, l, r, N);
+    CHECK(s.env == 0.0f && l[N - 1] == 0.5f && r[N - 1] == 0.5f);
+
+    /* Below the knee nothing is touched, bit for bit; a lone channel works too. */
+    float quiet[256], copy[256];
+    for (int i = 0; i < 256; i++) quiet[i] = copy[i] = 0.84f * sinf((float)i * 0.37f);
+    struct sc_lim d = {0};
+    sc_lim_planar(&d, quiet, NULL, 256);
+    CHECK(!memcmp(quiet, copy, sizeof quiet));
+    sc_lim_planar(NULL, quiet, NULL, 256);
+    sc_lim_planar(&d, NULL, quiet, 256);
+    CHECK(!memcmp(quiet, copy, sizeof quiet));
+
+    /* NaN/Inf become silence and do not poison the envelope. */
+    float bl[3] = {NAN, INFINITY, 0.5f}, br[3] = {-INFINITY, 0.25f, NAN};
+    struct sc_lim e = {0};
+    sc_lim_planar(&e, bl, br, 3);
+    CHECK(bl[0] == 0.0f && bl[1] == 0.0f && bl[2] == 0.5f && br[0] == 0.0f && br[1] == 0.25f && br[2] == 0.0f);
+    CHECK(e.env == 0.0f);
+}
+
 int main(void)
 {
     test_finite();
@@ -503,6 +657,9 @@ int main(void)
     test_chain_busy();
     test_chain_threads();
     test_fader();
+    test_flanger_makeup();
+    test_flanger_threads();
+    test_master_limiter();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return EXIT_FAILURE;

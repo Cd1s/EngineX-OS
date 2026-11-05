@@ -234,3 +234,34 @@ func TestProlinkStateFileMerging(t *testing.T) {
 		t.Errorf("pre-existing metadata lost in merge: %+v", d)
 	}
 }
+
+// #59: the media share toggle is routed on the gateway and shared with the UI settings.
+func TestProlinkShareToggle(t *testing.T) {
+	t.Setenv("SC5000_PROLINK_STATE", filepath.Join(t.TempDir(), "none.json"))
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	get := func(method, query string) (int, prolinkResponse) {
+		req, _ := http.NewRequest(method, srv.URL+"/v1/sc5000/prolink"+query, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var v prolinkResponse
+		json.NewDecoder(resp.Body).Decode(&v)
+		return resp.StatusCode, v
+	}
+	if code, v := get("GET", ""); code != 200 || v.Share {
+		t.Fatalf("%d %+v", code, v)
+	}
+	if code, v := get("POST", "?share=1"); code != 200 || !v.Share {
+		t.Fatalf("%d %+v", code, v)
+	}
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || !v.ProlinkShare {
+		t.Fatalf("%d %+v", code, v)
+	}
+	if code, _ := get("POST", "?share=yes"); code != 400 {
+		t.Fatalf("bad value: %d", code)
+	}
+}

@@ -32,7 +32,7 @@ func TestDiscoveryStatusAndExpiry(t *testing.T) {
 	status := make([]byte, 0xd4)
 	copy(status, "Qspt1WmJOL")
 	status[10] = 0xa
-	copy(status[12:], "CDJ-3000")
+	copy(status[11:], "CDJ-3000")
 	status[0x21] = 1
 	status[0x28] = 17
 	status[0x29] = 3
@@ -82,7 +82,7 @@ func TestParseBeatPacket(t *testing.T) {
 	pkt := make([]byte, 0x64)
 	copy(pkt, "Qspt1WmJOL")
 	pkt[10] = 0x28
-	copy(pkt[12:], "CDJ-3000")
+	copy(pkt[11:], "CDJ-3000")
 	pkt[0x21] = 2 // player number
 
 	// Raw pitch: 0x108000 -> (0x108000 - 0x100000) / 0x100000 * 100 = 3.125%
@@ -131,24 +131,24 @@ func TestParsePlayerStatus(t *testing.T) {
 	pkt := make([]byte, 0xd0)
 	copy(pkt, "Qspt1WmJOL")
 	pkt[10] = 0x0a
-	copy(pkt[12:], "CDJ-3000")
+	copy(pkt[11:], "CDJ-3000")
 	pkt[0x21] = 1 // player number
 	pkt[0x28] = 1 // source player
 	pkt[0x29] = 2 // source slot
 	binary.BigEndian.PutUint32(pkt[0x2c:], 101)
 
-	// Flags at 0x7b: playing (bit 6: 0x40), master (bit 5: 0x20), sync (bit 4: 0x10), on_air (bit 3: 0x08)
-	pkt[0x7b] = 0x40 | 0x20 | 0x10 | 0x08
+	// Flags at 0x89: playing (bit 6: 0x40), master (bit 5: 0x20), sync (bit 4: 0x10), on_air (bit 3: 0x08)
+	pkt[0x89] = 0x40 | 0x20 | 0x10 | 0x08
 
-	// Pitch at 0x8d: 0x100000 -> 0%
-	binary.BigEndian.PutUint32(pkt[0x8d:], 0x100000)
+	// Pitch at 0x8c: 0x100000 -> 0%
+	binary.BigEndian.PutUint32(pkt[0x8c:], 0x100000)
 	// BPM at 0x92: 12000 -> 120.0
 	binary.BigEndian.PutUint16(pkt[0x92:], 12000)
 	// Beat at 0xa0: 17
 	binary.BigEndian.PutUint32(pkt[0xa0:], 17)
 	// Beat in bar at 0xa6: 2
 	pkt[0xa6] = 2
-	// Play position at 0xb4: 8000 ms
+	// Unrelated bytes at 0xb4 must not override beat-derived position
 	binary.BigEndian.PutUint32(pkt[0xb4:], 8000)
 
 	d, err := prolink.ParsePacket(pkt, 50002, ip)
@@ -165,7 +165,7 @@ func TestParsePlayerStatus(t *testing.T) {
 		t.Errorf("position mismatch: beat=%d, beatInBar=%d, pos=%d", d.Beat, d.BeatInBar, d.PlayPositionMS)
 	}
 
-	// Test fallback PlayPositionMS calculation when 0xb4 is 0
+	// Clearing unrelated bytes preserves the beat-derived position
 	binary.BigEndian.PutUint32(pkt[0xb4:], 0)
 	d2, err := prolink.ParsePacket(pkt, 50002, ip)
 	if err != nil {

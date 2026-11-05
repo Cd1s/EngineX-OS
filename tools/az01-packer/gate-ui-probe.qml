@@ -5,6 +5,7 @@
 // Lines are short "SCPROBE kind|field|...|" records: Engine splits long log lines.
 import QtQuick 2.12
 import QtQuick.Window 2.2
+import Planck 1.0
 
 Item {
     id: probe
@@ -37,7 +38,9 @@ Item {
         return found
     }
     function report() {
+        let main = null // EmbeddedMain's root, which carries the pack's settings
         walk(probe.Window.window.contentItem, new Set(), function (o) {
+            if (!main && "scAutoAnalyze" in o) main = o
             if (o.objectName === "Version")
                 console.warn("SCPROBE version|" + String(o.text).replace(/<[^>]*>/g, "") + "|")
             if (o.objectName === "ControlCenter_WaveformStyle" || o.objectName === "ControlCenter_FourDeckWaveform" || o.objectName === "ControlCenter_LiveStream" || o.objectName === "ControlCenter_UpfaderEcho" || o.objectName === "FourDeckRemoteStrip")
@@ -45,6 +48,9 @@ Item {
             if (isSection(o))
                 entries(o, function (c) { console.warn("SCPROBE entry|" + o.label + "|" + c.text + "|" + (c.visible ? 1 : 0) + "|") })
         })
+        // #55: the pack's toggle, and the Engine preference it drives.
+        const aa = Planck.getProperty("/Client/Preferences/AutoAnalysis")
+        console.warn("SCPROBE analyze|" + (main ? typeof main.scAutoAnalyze : "none") + "|" + (aa && aa.translator ? 1 : 0) + "|")
     }
 
     // A whole-tree walk takes 20-35 s under qemu: find the section once, then only poll it.

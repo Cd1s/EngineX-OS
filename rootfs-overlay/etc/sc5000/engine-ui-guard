@@ -12,6 +12,20 @@ pre)
     rm -f "$UI/boot-token"
     echo "$n" > "$UI/boot-count"
     [ "$n" -lt 3 ] || : > "$UI/safe-mode"
+    # Engine 5.3.0 sends a TIDAL client with no saved account to the Engine DJ
+    # Profile login (#56), and every EngineX service runs on that client. With the
+    # account entry (no token in it) Engine logs in to the local gateway at start.
+    # Real TIDAL (scope=tidal) keeps the stock login.
+    accounts=${SC5000_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
+    if ! grep -qx 'scope=tidal' "$UI/settings.conf" 2>/dev/null && ! grep -q '"TIDAL"' "$accounts" 2>/dev/null; then
+        export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\"}"'
+        if grep -q '"' "$accounts" 2>/dev/null; then
+            awk '!d && (i = index($0, "{")) { $0 = substr($0, 1, i) "\n    " ENVIRON["T"] "," substr($0, i + 1); d = 1 } 1' "$accounts" > "$accounts.tmp"
+        else
+            printf '{\n    %s\n}\n' "$T" > "$accounts.tmp"
+        fi
+        mv "$accounts.tmp" "$accounts"
+    fi
     ;;
 post)
     # Engine's setup script has just set the GPU to performance. This also covers

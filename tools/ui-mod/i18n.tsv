@@ -243,7 +243,8 @@ Advanced	高级	進階
 Fx	效果	效果
 Can't start login. Check the network.	无法开始登录，请检查网络。	無法開始登入，請檢查網路。
 Confirm on your phone	请在手机上确认	請在手機上確認
-Scan with the NetEase Cloud Music app	请用网易云音乐 App 扫码	請用網易雲音樂 App 掃碼
+Scan in the NetEase Cloud Music app, not with the camera or WeChat	用网易云音乐 App 的「扫一扫」扫码，不要用相机或微信	用網易雲音樂 App 的「掃一掃」掃碼，不要用相機或微信
+Only one phone? Take a photo of this code, then in the app tap Scan and pick the photo from Album.	只有一部手机？先用相机拍下这个二维码，再在 App 的「扫一扫」里点「相册」选这张照片。	只有一部手機？先用相機拍下這個 QR 碼，再在 App 的「掃一掃」裡點「相簿」選這張照片。
 Scan with your phone camera. Phone and deck must be on the same network.	请用手机相机扫码。手机和碟机要连同一个 Wi-Fi。	請用手機相機掃碼。手機和碟機要連同一個 Wi-Fi。
 Not now	暂不登录	暫不登入
 Switch account	切换账号	切換帳號
@@ -260,7 +261,11 @@ Scan with your phone camera.	用手机相机扫码	用手機相機掃碼
 Low	低	低
 High	高	高
 Max	最高	最高
+Auto-Analyze Drives	自动分析插入的设备	自動分析插入的裝置
 Jog Light Mode	转盘灯效	轉盤燈效
+OmniSource (Drives in Streaming)	OmniSource（在流媒体中显示 U 盘/SD）	OmniSource（在串流中顯示 USB/SD）
+Master Soft Limiter	主输出软限幅	主輸出軟限幅
+Pro DJ Link Library	Pro DJ Link 曲库	Pro DJ Link 曲庫
 Static	固定颜色	固定顏色
 Psy Rainbow	迷幻流光	迷幻流光
 Psy Fast	迷幻频闪	迷幻頻閃

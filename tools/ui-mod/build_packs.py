@@ -70,6 +70,26 @@ SERVICES_MAIN = """
 	property string scQuality: "flac"
 	property string scNeteaseMode: "official"
 	property string scJog: "static"
+	property bool scMasterLimiter: false // #58, applied by engine_ui_hook.c
+	// #55: once a drive is in, Engine's own analysis queue takes every unanalysed
+	// track (rb-bridge's quick imports included). Its OfflineAnalyzer processes and
+	// queue threads run at idle priority (engine_ui_hook.c), so playback keeps priority.
+	property bool scAutoAnalyze: false
+	property bool scOmniSource: false // #62, served by the streaming gateway
+	readonly property var scDrives: Planck.librarianController.devicesController.deviceModelCountObserver
+	readonly property int scDriveCount: scDrives ? scDrives.count : 0
+	onScDriveCountChanged: scAutoAnalyzeTimer.restart()
+	onScAutoAnalyzeChanged: scAutoAnalyzeTimer.restart()
+	Timer {
+		id: scAutoAnalyzeTimer
+		interval: 15000 // after rb-bridge and Engine have attached the drive's library
+		onTriggered: {
+			const p = Planck.getProperty("/Client/Librarian/Analyzer/AnalyzeUnanalyzed")
+			if (root.scAutoAnalyze && root.scDriveCount > 0 && p && p.translator) p.translator.state = true
+		}
+	}
+	property bool scProlinkShare: false // #59, read by rb-bridge
+	property bool scProlinkExport: false // #63, experimental export to CDJs
 	property string scUpdateRepo: "Cd1s/EngineX-OS"
 	property string scUpdateText: ""
 	property bool scFourDeckWave: false
@@ -270,6 +290,11 @@ SERVICES_MAIN = """
 		scNeteaseMode = v.neteaseMode || "official"
 		scUpdateRepo = v.githubRepo || scUpdateRepo
 		scJog = v.jog || "static"
+		scMasterLimiter = !!v.masterLimiter
+		scAutoAnalyze = !!v.autoAnalyze
+		scOmniSource = !!v.omniSource
+		scProlinkShare = !!v.prolinkShare
+		scProlinkExport = !!v.prolinkExport
 		scKeepPlayhead(v.playhead || 0)
 		scSources = v.sources
 		scLoggedIn = v.loggedIn
@@ -707,7 +732,7 @@ LOGIN_DIALOG = """
 						if (root.scLoginStatus === "error") return root.scT("Can't start login. Check the network.")
 						if (root.scLoginStatus === "expired") return root.scT("The QR code expired.")
 						if (root.scLoginStatus === "scanned") return root.scT("Confirm on your phone")
-						if (root.scLogin === "netease") return root.scT("Scan with the NetEase Cloud Music app")
+						if (root.scLogin === "netease") return root.scT("Scan in the NetEase Cloud Music app, not with the camera or WeChat") + "\n\n" + root.scT("Only one phone? Take a photo of this code, then in the app tap Scan and pick the photo from Album.")
 						return root.scT(root.scLoginLocal ? "Scan with your phone camera. Phone and deck must be on the same network." : "Scan with your phone camera.")
 					}
 				}
@@ -1095,6 +1120,36 @@ JOG_ENTRY = """
 			values: ["Static", "Psy Rainbow", "Psy Fast", "Psy BPM Sync"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scJog))]
 			onSelected: function(index) { root.scCall("jog=" + ids[index]) }
+		},
+		EntryBase.ListEntry {
+			text: "Auto-Analyze Drives"
+			values: ["Off", "On"]
+			currentValue: values[root.scAutoAnalyze ? 1 : 0]
+			onSelected: function(index) { root.scCall("autoAnalyze=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "Master Soft Limiter"
+			values: ["Off", "On"]
+			currentValue: values[root.scMasterLimiter ? 1 : 0]
+			onSelected: function(index) { root.scCall("masterLimiter=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "OmniSource (Drives in Streaming)"
+			values: ["Off", "On"]
+			currentValue: values[root.scOmniSource ? 1 : 0]
+			onSelected: function(index) { root.scCall("omniSource=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "Pro DJ Link Library"
+			values: ["Off", "On"]
+			currentValue: values[root.scProlinkShare ? 1 : 0]
+			onSelected: function(index) { root.scCall("prolinkShare=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "Pro DJ Link Export to CDJ (Beta)"
+			values: ["Off", "On"]
+			currentValue: values[root.scProlinkExport ? 1 : 0]
+			onSelected: function(index) { root.scCall("prolinkExport=" + index) }
 		},
 """
 

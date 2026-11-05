@@ -177,6 +177,10 @@ SH
         cp "$REPO/tools/az01-packer/gate-ui-probe.qml" "$ui/packs/$LANG_PACK/Skins/Common/Items/QmlWarnings.qml"
     fi
     in_root /etc/sc5000/engine-ui-guard pre >> "$W/$name-boot.log" 2>&1 || :
+    # #56: without a TIDAL account Engine 5.3.0 opens the Engine DJ Profile login
+    # (device.enginedj.com) instead of logging in to the local gateway.
+    [ "$name" = old ] || check "new: engine-ui-guard pre left Engine a TIDAL account on a fresh /data (#56)" \
+        python3 -I -c 'import json,sys; a=json.load(open(sys.argv[1])); sys.exit(json.loads(a["TIDAL"])["providerType"] != "TIDAL")' "$W/data/StreamingAccounts.json"
     in_root "${engine_env[@]}" /usr/Engine/Scripts/engine "$PRODUCT" > "$W/$name-engine.log" 2>&1 & pid[engine]=$!
     check "$name: stream-sync listens on :8080" wait_for 120 curl -sf -o /dev/null http://127.0.0.1:8080/v1/sc5000/ui
     check "$name: UI hook loaded the $LANG_PACK pack" wait_for "$ENGINE_START" grep -aq "packs/$LANG_PACK: [0-9]* files" "$W/$name-engine.log"
@@ -204,6 +208,7 @@ SH
         check "new: Control Center has the Live Stream tile (#50)" grep -aqF 'SCPROBE tile|ControlCenter_LiveStream|' "$log"
         check "new: Control Center has the upfader echo tile (#52)" grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|' "$log"
         check "new: 4-Deck remote waveform strip is loaded (#49)" grep -aqF 'SCPROBE tile|FourDeckRemoteStrip|' "$log"
+        check "new: auto-analyze toggle and Engine's AnalyzeUnanalyzed action exist (#55)" grep -aqF 'SCPROBE analyze|boolean|1|' "$log"
         note "new: render probe: $(grep -ao 'SCPROBE [a-z]*|.*|' "$log" | grep -v 'SCPROBE done' | tr '\n' ' ')"
         check "new: Engine build matched (Engine $BASE)" grep -aq "engine-ui-hook: Engine $BASE" "$log"
         check "new: $EXPECT_APPLIED Engine patches applied (TidalAPI gateway, Stems, getConfig...)" \
@@ -213,6 +218,8 @@ SH
         check "new: no QML load errors" bash -c "! grep -aE 'is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component' '$log'"
         check "new: no Engine crash" bash -c "! grep -aE 'Crash with|Unknown exit code' '$log'"
         for v in "${!pid[@]}"; do check "new: $v still running after ${ENGINE_SECONDS}s" kill -0 "${pid[$v]}"; done
+        # Field 41 of /proc/PID/stat is the policy; 5 is SCHED_IDLE.
+        check "new: OfflineAnalyzer runs at idle priority (#55)" bash -c "chroot '$R' /bin/sh -c 'cat /proc/[0-9]*/stat 2>/dev/null' | awk '\$2 == \"(OfflineAnalyzer)\" { n++; if (\$41 != 5) bad = 1 } END { exit !(n && !bad) }'"
         check "new: edisksd starts with the hook preloaded (LD_BIND_NOW)" bash -c "grep -aq 'Loaded configuration' '$W/new-edisksd.log' && ! grep -aiE 'symbol lookup error|undefined symbol|cannot open shared object|cannot be preloaded' '$W/new-edisksd.log'"
         curl -sf http://127.0.0.1:8080/v1/sc5000/ui > "$W/new-ui.json" || :
         check "new: GET /v1/sc5000/ui reports $NEWV" json "$W/new-ui.json" "j.get('version') == '$NEWV'"
@@ -355,7 +362,7 @@ NEXTV=${NEWV%.*}.$(( ${NEWV##*.} + 1 ))
 COMPAT=inmusic,$(echo "$PRODUCT" | tr 'A-Z' 'a-z')
 export W REPO OLDV NEWV NEXTV PREFIX PRODUCT COMPAT QEMU_INTERP NEW_IMG
 export LANG_PACK=${GATE_LANG:-zh-Hans} ENGINE_START=${GATE_ENGINE_START:-300} ENGINE_SECONDS=${GATE_ENGINE_SECONDS:-90}
-export UPDATE_TIMEOUT=${GATE_UPDATE_TIMEOUT:-900} EXPECT_APPLIED=${GATE_EXPECT_APPLIED:-16} EXPECT_DSP=${GATE_EXPECT_DSP:-19}
+export UPDATE_TIMEOUT=${GATE_UPDATE_TIMEOUT:-900} EXPECT_APPLIED=${GATE_EXPECT_APPLIED:-16} EXPECT_DSP=${GATE_EXPECT_DSP:-21}
 mkdir -p "$W/bin" "$W/tls" "$W/mock/assets"
 : > "$W/results.txt"
 echo "gate: $OLD_NAME -> $NEW_NAME (next $NEXTV), work $W"

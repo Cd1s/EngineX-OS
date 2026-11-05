@@ -274,3 +274,37 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **范围**：`rootfs-overlay/etc/sc5000/version.txt`、三份 README、三张 banner 恢复为 `v5.3.0.1.1`（`ed1b873`）的内容；README 体积行改为 5.3.0 实测值（SC5000 原厂 `147.79 MB` → EngineX OS 5.3.0.1.1 `151.44 MB`，SC6000 `151.58 MB`，PRIME 4 `151.52 MB`，按 1024×1024 计）。#49–#52 的代码留在 main，未随任何已发布镜像发布。
 - **Release**：`v5.3.0.1.1` 重新设为 Latest；`v5.3.0.2` 转为草稿（资产保留，撤回前下载数为 0），远端 tag `v5.3.0.2` 删除（原指向 `6fe7a46`）。
 - **回滚点**：`6fe7a46`。
+
+## #53 / #54 / #55：PRIME 4 读不到 rekordbox 6.8.5 U 盘、Flanger 掉音量、插入设备后台自动分析（2026-11-05 追加，Opus 5.5，未发版）
+
+- **来源**：Reddit 用户反馈（PRIME 4 读不到 rekordbox 6.8.5 导出 U 盘里的歌曲和歌单；Flanger 让音量下沉；希望插入 U 盘或 SD 卡后在后台自动分析）。
+- **#53 根因（`pkg/enginedb/sync.go`、`pkg/enginedb/prepare.go`、`pkg/bridge/bridge.go`）**：表结构排除。Engine 5.3.0 与 5.0.4 的建表 SQL 相同，Engine 5.3.0 自己建的 m.db 是 schema 3.0.2、`user_version` 4194305，与 rb-bridge 写的一致。PDB 解析也排除。rekordcrate 的 3886 首 / 104 个歌单真实 rekordbox 6 导出，以及 pyrekordbox 的导出，都完整解析，57 个真实 ANLZ 文件全部可读。真正的原因是：不超过 500 首的库走完整导入，只要有一首歌的音频头、ANLZ 或封面读不出来，就会让整次导入失败。Sync 此时已经在 U 盘上建好了一个 0 字节的 `Engine Library/Database2/m.db`。UI 包又一直替用户在 Engine 原生的 rekordbox 导入提示上选「Ignore」，结果 U 盘上既没有歌曲也没有歌单。用真实导出模拟插盘时复现：`track 6 audio header: invalid WAV/FLAC/AIFF magic`，留下 0 字节 m.db。
+- **#53 修复**：读不出文件的那一首只用导出里的元数据导入（`Result.Degraded`），PerformanceData 留空，Engine 载入时自己分析。它的指纹照常写入，文件没变就不再重复读取。新 U 盘的首次导入改为在临时目录建库，整次成功后才发布到 U 盘（与大库快速导入共用 `stagedImport`）；失败时清掉自己建的空目录，以及旧版本留下的 0 字节 m.db 和状态库。
+- **#54（`tools/ui-mod/dsp_smooth.h`、`engine_ui_hook.c`）**：逆向结果：`Effects::Flanger::process`（5.0.4 `0xe3a118`，5.3.0 `0xf1ab24`）由 Flanger、FlangerPositive、FlangerNegative 三个 vtable 共用，整个二进制里只有这 3 处引用。它原地写 `0.7·dry + k·delayed`（带反馈），然后尾调用 FX common tail（effect+0x68）。新增第 20 个 DSP 挂点：先测处理前这一块的能量，处理后把 RMS 拉回 dry 的水平。增益只升不降，最多 +6 dB，时间常数约 100 ms，块内线性过渡，用一次 Newton 迭代求平方根（hook 不链接 libm），输出钳在 ±8。每个实例一个槽位，只做 try-acquire，不加锁、不分配内存。安装前逐字节核对前缀（`strd r4,[sp,#-36]!; cmp r3,#0`），与其余 19 个挂点同组，任一不符就全部不装。门禁 `GATE_EXPECT_DSP` 默认值由 19 改为 20。TouchFlanger 的 process 是另一个函数，这次没有处理。
+- **#55（`pkg/webui/ui_settings.go`、`tools/ui-mod/build_packs.py`、`engine_ui_hook.c`、门禁探针）**：调用 Engine 自己的分析队列，不由我们写 m.db（以前 Engine 打开 m.db 时并发写导致过删库）。设置页新增「Auto-Analyze Drives」开关（`settings.conf` 的 `auto_analyze=1`，默认关闭）。打开后，设备数（`deviceModelCountObserver.count`）每次变化 15 秒，UI 包设置 `/Client/Librarian/Analyzer/AnalyzeUnanalyzed`。Engine 发现分析进程连上后，会把 OfflineAnalyzer 提到 nice -5、SCHED_OTHER。hook 现在让 OfflineAnalyzer 一启动就进入 SCHED_IDLE、nice 19、空闲 IO，并避开 CPU0；Engine 对它调用的 `setpriority` / `sched_setscheduler` 也改写成空闲值。门禁新增两项检查：探针读到开关和 Engine 偏好属性；OfflineAnalyzer 的调度策略是 SCHED_IDLE。
+- **验证（Oracle-Batam-arm）**：Go race 全部包、gofmt、vet、`tests/test_rootfs_overlay.sh`、az01-packer、tools/stems、`test_dsp_smooth`（普通 / ASan+UBSan / TSan，新增 Flanger 补偿与 4 线程并发）、`test_stems_feature`（armhf 原生，`-Werror`，5.0.4 与 5.3.0 两个 Engine；20 个前缀守卫、Flanger 的 strd/cmp 前序与原地 ABI、OfflineAnalyzer 优先级）。另在 5.3.0.1.1 JC11 门禁 rootfs 的副本上，用 `unshare -m -p -n` 和 chroot 原生启动真实 Engine 5.3.0，hook 为本次构建。日志显示 `20 DSP guards/transitions installed`，没有崩溃。往内置曲库塞一首未分析的 120 BPM WAV，设置 `AnalyzeUnanalyzed` 后，Engine 跑完 "Collecting unanalyzed tracks" → "Saving performance data"，m.db 里 `isAnalyzed=1`、`bpmAnalyzed=120.0`，性能数据 blob 齐全。两个 OfflineAnalyzer 都是 `policy=5 nice=19 io=idle`、CPU 2-3（沙箱必须打开 loopback，否则分析进程的 IPC 连不上）。
+- **没做的**：没有跑完整的 release-gate（需要先出镜像）；实机没有验证；没有真实 6.8.5 用户的 U 盘，根因是用真实 rekordbox 6 导出加坏文件复现的；Flanger 补偿只做了 RMS 匹配，没有修复反相 Flanger 的低频频谱抵消，也没有在实机上听感对比。
+- **回滚点**：`ed1b873`。
+
+## #62：OmniSource，在流媒体浏览器里统一浏览、搜索 U 盘/SD 和各个服务（2026-11-05 追加，Opus 5.5，未发版）
+
+- **做法（`pkg/webui/omnisource.go`、`tidal_gateway.go`、`ui_settings.go`、`build_packs.py`）**：打开设置 `omni_source=1`（`/v1/sc5000/ui?omniSource=1`，UI 包设置页的「OmniSource」开关，默认关闭）后，TIDAL 网关有三处变化：
+  - 歌单列表追加每个已挂载设备 `Engine Library` 里有曲目的歌单，标题为 `[USB: <设备名>] <歌单名>`，曲目按 Engine 的 `nextEntityId` 链排序；同时追加其他已登录服务的歌单，标题为 `[Spotify] …`。
+  - 搜索时，各设备的匹配曲目（标题、艺人、专辑，每个设备最多 50 条，LIKE 通配符按字面匹配）排在流媒体结果前面。
+  - 设备曲目和流媒体曲目共用全局 track ID，加载时 `playbackinfopostpaywall` 把 `/v1/stream/<id>.<flac|mp3|mp4>` 指向设备上的文件，用 `http.ServeFile` 直接读取，支持 Range，不经 Deemix 下载；Stems 的 source 也直接返回设备文件。
+- **不会损坏数据库**：设备的 m.db 以 `mode=ro` 加 `query_only` 打开，只做查询；测试确认 m.db 前后 sha256 相同，也没有生成 `-journal`、`-wal`、`-shm`。
+- **安全**：网关原本就只接受 loopback 请求。m.db 来自外部介质，属于不可信内容：列表时拒绝指向卷外的路径；播放时对卷根和文件都做 `EvalSymlinks`，再确认文件仍在卷内，指向卷外的符号链接返回 404。只认歌单项里本设备 `Information.uuid` 的条目。
+- **没做的**：WAV/AIFF 不显示，因为 Engine 的 TIDAL 播放器只认 flac、mp3、aac 三种 codec，以流的方式播放 WAV/AIFF 还没在碟机上验证过（代码里有 `shortcut:` 注释）；Control Center 磁贴和手机 WebUI 页面没有加开关；搜索不跨其他流媒体服务（避免触发网易云限流）。
+- **验证（Oracle-Batam-arm）**：`pkg/webui/omnisource_test.go` 的 4 个测试，覆盖统一歌单（含次要服务）、Engine 歌单顺序、跨源搜索、LIKE 转义、只读不改库、Range 直读、codec 清单、符号链接逃逸、Stems 源、开关的持久化与非法值；外加全部 Go race 测试、Python 测试和两个底包的 UI 包构建。实机没有测试。
+- **回滚点**：`ed1b873`。
+
+## 2026-11-05：#49–#63 集成到 main（Opus 5.5，版本号保持 5.3.0.1.1，未发版）
+
+- **范围**：`origin/main`（`836cbb0`，#49–#52）、本机工作树（#53–#58、#60–#62）和 `feat-issue-58-59` 工作树（#59、#63）合并为一次提交。`tools/cdj3000-sim` 没有并入，它在单独的 OpenCDJ-3000 仓库里。
+- **合并时修正**：
+  - `pkg/prolink/prolink.go`：保留 QA 改成的锁外解析，并在其中加入 #59 的 `MediaCache.resolve`：在锁内取对方地址，锁外通过 NFS 读取。
+  - `POST /v1/sc5000/prolink` 两边都注册过，导致 `ServeMux` panic；现在只保留一条，`?share=` / `?export=` 走开关逻辑，JSON 请求体仍按设备上报处理。
+  - `pkg/webui/index.html`：#58 写坏的 `showUI` 表达式（`v.quality++'…'(…)`）已修好，4-Deck、Pro DJ Link、软限幅、CDJ 曲库/导出的按钮都保留。
+  - `ui_settings.go`、`build_packs.py`、`i18n.tsv`：两边新增的设置项全部保留。
+- **验证（Oracle-Batam-arm，`--clean` 目录）**：gofmt、vet、全部 Go 包的 race 测试（21 个包）、`test_rootfs_overlay.sh`（13 项）、az01-packer（55 项）、tools/stems（9 项）、`test_dsp_smooth`（普通、ASan+UBSan、TSan）、`test_stems_feature`（armhf 原生，`-Werror`，5.0.4 与 5.3.0 两个 Engine 上都是 21 个前缀守卫）、5.3.0 与 5.0.4 两个底包的 UI 包构建，全部通过。hook 在 Batam 上重新编译（`1053d543…`）。没有出镜像，也没有跑 release-gate。
+- **回滚点**：`836cbb0`。

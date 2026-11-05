@@ -105,7 +105,12 @@ func TestArtworkRejectsDirectoryAndOversizedFile(t *testing.T) {
 				t.Fatal(err)
 			}
 			l.Tracks[0].ArtworkPath = "/bad-art"
-			if _, err = enginedb.Sync(context.Background(), root, l, enginedb.Options{}); err == nil {
+			// #53: the track still lands, without the artwork or its cues.
+			r, err := enginedb.Sync(context.Background(), root, l, enginedb.Options{})
+			if err != nil || r.Degraded != 1 {
+				t.Fatalf("%+v %v", r, err)
+			}
+			if n := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM AlbumArt`); n != 0 {
 				t.Fatal("accepted unsafe artwork")
 			}
 		})
@@ -130,11 +135,12 @@ func TestDeletedSourceCleanupRollsBackOnBadAnalysis(t *testing.T) {
 			}
 		}
 	}
-	if err = os.WriteFile(filepath.Join(root, "PIONEER/USBANLZ/P001/ANLZ0000.DAT"), []byte("corrupt"), 0600); err != nil {
+	// A corrupt analysis no longer fails the import (#53); a failing insert still must.
+	if _, err = db.Exec(`CREATE TRIGGER fail BEFORE INSERT ON Track WHEN NEW.pdbImportKey=100 BEGIN SELECT RAISE(ABORT,'fail'); END`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = enginedb.Sync(context.Background(), root, l, enginedb.Options{}); err == nil {
-		t.Fatal("accepted corrupt analysis")
+		t.Fatal("failed insert accepted")
 	}
 	if n := scalar[int](t, db, `SELECT count(*) FROM Track WHERE pdbImportKey=?`, removed); n != 1 {
 		t.Fatal("deletion escaped rolled-back transaction")
