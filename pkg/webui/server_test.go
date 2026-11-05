@@ -90,7 +90,7 @@ func TestGuestDownloadAnalyzeImportEndToEnd(t *testing.T) {
 	guard := resourceguard.New(resourceguard.Config{Disabled: true})
 	jobs := NewJobs(Pipeline{Guard: guard, Catalog: fixtureCatalog{}, Deemix: &deemixclient.Client{BaseURL: queue.URL, DownloadDir: root, PollInterval: time.Millisecond}, Library: lib})
 	defer jobs.Close()
-	ui := New(Config{AccessToken: "test-console-code", Factory: func(string, bool, string) (providers.Provider, error) { return fixtureProvider{}, nil }}, jobs)
+	ui := New(Config{AccessToken: "test-console-code", SpotifyClientID: testSpotifyClientID, Factory: func(string, bool, string) (providers.Provider, error) { return fixtureProvider{}, nil }}, jobs)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	c := srv.Client()

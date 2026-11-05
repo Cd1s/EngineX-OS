@@ -69,7 +69,7 @@ func tidalGet(t *testing.T, base, path string, status int, out any) []byte {
 }
 
 func TestTidalGatewayLoginAndHint(t *testing.T) {
-	ui := New(Config{AccessToken: "test-console-code", DeezerURL: fakeDeezer(t).URL, StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
+	ui := New(Config{AccessToken: "test-console-code", SpotifyClientID: testSpotifyClientID, DeezerURL: fakeDeezer(t).URL, StateDir: t.TempDir(), UIDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	for _, path := range []string{"/au/oauth2/device_authorization", "/au//oauth2/token"} {
@@ -165,7 +165,7 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("scope=netease\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ui := New(Config{AccessToken: "test-console-code", DeezerURL: fakeDeezer(t).URL, UIDir: uiDir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return fixtureProvider{}, nil }}, jobs)
+	ui := New(Config{AccessToken: "test-console-code", SpotifyClientID: testSpotifyClientID, DeezerURL: fakeDeezer(t).URL, UIDir: uiDir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return fixtureProvider{}, nil }}, jobs)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	var s Session
@@ -516,7 +516,7 @@ func TestTidalGatewaySaysWhyPlaylistsFailed(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("scope=spotify\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ui := New(Config{AccessToken: "test-console-code", DeezerURL: fakeDeezer(t).URL, UIDir: uiDir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return refusedProvider{}, nil }}, nil)
+	ui := New(Config{AccessToken: "test-console-code", SpotifyClientID: testSpotifyClientID, DeezerURL: fakeDeezer(t).URL, UIDir: uiDir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return refusedProvider{}, nil }}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	var s Session

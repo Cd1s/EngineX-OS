@@ -181,6 +181,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /api/bpm", s.bpmConfigGet)
 	s.mux.HandleFunc("POST /api/bpm", s.bpmConfigPost)
 	s.mux.HandleFunc("GET /api/relay", s.relayConfigGet)
+	s.mux.HandleFunc("GET /api/spotify", s.spotifyClientGet)
+	s.mux.HandleFunc("POST /api/spotify", s.spotifyClientPost)
 	s.mux.HandleFunc("POST /api/relay", s.relayConfigPost)
 	s.RegisterBroadcastRoutes()
 	s.mux.HandleFunc("GET /api/prolink", s.prolinkGet)
@@ -433,6 +435,11 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 				if err := p.LoadToken(); err != nil && !os.IsNotExist(err) {
 					return nil, err
 				}
+				// A token minted by another app (the old built-in ID) is not used:
+				// each owner logs in again with their own Client ID.
+				if id := s.spotifyClientID(); p.ClientID != id {
+					p.Token, p.ClientID = providers.Token{}, id
+				}
 			}
 		}
 		return p, nil
@@ -483,6 +490,10 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if !slices.Contains(loginServices, v.Provider) {
 		fail(w, 400, errors.New("unsupported provider"))
+		return
+	}
+	if v.Provider == "spotify" && s.spotifyClientID() == "" {
+		fail(w, 400, errSpotifyClientID)
 		return
 	}
 	s.mu.Lock()

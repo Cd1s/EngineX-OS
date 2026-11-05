@@ -19,6 +19,9 @@ import (
 // defaultPassword is the console password the test servers are set up with.
 const defaultPassword = "test-relay-password"
 
+// testSpotifyClientID stands in for an operator's own Spotify app; there is no built-in one.
+const testSpotifyClientID = "0123456789abcdef0123456789abcdef"
+
 func newTestServer(t *testing.T) *server {
 	t.Helper()
 	dir := t.TempDir()
@@ -27,6 +30,9 @@ func newTestServer(t *testing.T) *server {
 		t.Fatal(err)
 	}
 	if err := cfg.setPassword(defaultPassword); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.update(func(c *config) { c.SpotifyClientID = testSpotifyClientID }); err != nil {
 		t.Fatal(err)
 	}
 	s := &server{
@@ -38,7 +44,7 @@ func newTestServer(t *testing.T) *server {
 		deezer:      newDeezerClient(),
 	}
 	s.spotify = newSpotifyAuth(filepath.Join(dir, "learned.json"), s.public+"/oauth/spotify/callback")
-	s.spotify.probes[defaultSpotifyClientID] = probeResult{at: time.Now()} // no network probe
+	s.spotify.probes[testSpotifyClientID] = probeResult{at: time.Now()} // no network probe
 	return s
 }
 
@@ -171,7 +177,7 @@ func TestSessionFlowBothPrefixes(t *testing.T) {
 		t.Fatalf("poll: %+v", pr)
 	}
 	w = do(h, "GET", "/m/spotify?manual=1&t="+tok, "", nil)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "client_id="+defaultSpotifyClientID) ||
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "client_id="+testSpotifyClientID) ||
 		!strings.Contains(w.Body.String(), "127.0.0.1%3a8080") && !strings.Contains(w.Body.String(), "127.0.0.1%3A8080") {
 		t.Fatalf("spotify page: %d", w.Code)
 	}
@@ -179,7 +185,7 @@ func TestSessionFlowBothPrefixes(t *testing.T) {
 		t.Fatalf("after scan: %+v", pr)
 	}
 	// Stateless fallback: unregistered token opened by phone.
-	if w := do(h, "GET", "/sc5000/m/spotify?manual=1&t=testtoken1234567890", "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), defaultSpotifyClientID) {
+	if w := do(h, "GET", "/sc5000/m/spotify?manual=1&t=testtoken1234567890", "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), testSpotifyClientID) {
 		t.Fatalf("fallback page: %d", w.Code)
 	}
 	if w := do(h, "GET", "/m/deezer?t=short", "", nil); w.Code != 400 {

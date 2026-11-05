@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -45,8 +46,15 @@ type loginFlow struct {
 	spotifyState string
 }
 
-// DefaultSpotifyClientID is this deck's registered public PKCE client.
-const DefaultSpotifyClientID = "<redacted-spotify-client-id>"
+// DefaultSpotifyClientID is empty: every owner registers their own Spotify app
+// (developer.spotify.com/dashboard), because Spotify limits each app's users and
+// requests. The console saves it (spotifyClientPath).
+const DefaultSpotifyClientID = ""
+
+// errSpotifyClientID is the answer to a Spotify login before an ID is set.
+var errSpotifyClientID = errors.New("Please set your own Spotify Client ID in the console first / 请先在网页控制台填入你自己的 Spotify Client ID")
+
+var spotifyClientIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // deezerOwner is the linked profile and, if given, the login cookie.
 type deezerOwner struct{ UserID, ARL string }
@@ -56,7 +64,7 @@ func (s *Server) spotifyClientPath() string {
 	return filepath.Join(s.cfg.StateDir, "spotify-client-id")
 }
 
-// spotifyClientID prefers the configured ID, then a saved one, then the default.
+// spotifyClientID prefers the configured ID, then the saved one ("" when neither).
 func (s *Server) spotifyClientID() string {
 	if s.cfg.SpotifyClientID != "" {
 		return s.cfg.SpotifyClientID
@@ -314,6 +322,10 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("unsupported provider"))
 		return
 	}
+	if provider == "spotify" && s.spotifyClientID() == "" {
+		fail(w, 400, errSpotifyClientID)
+		return
+	}
 	session, err := s.ownerSession(provider)
 	if err != nil {
 		fail(w, 500, err)
@@ -453,6 +465,10 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 		}
 		phonePage(w, r, appleMusicPhonePage(lang, action, dev))
 	case "spotify":
+		if s.spotifyClientID() == "" {
+			fail(w, 400, errSpotifyClientID)
+			return
+		}
 		session := s.sessionOf(flow)
 		sp, ok := session.p.(*providers.Spotify)
 		if !ok {
@@ -641,4 +657,39 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// spotifyClientGet tells the console whether the owner's Spotify app is set,
+// and the redirect URI that app must allow.
+func (s *Server) spotifyClientGet(w http.ResponseWriter, r *http.Request) {
+	id := s.spotifyClientID()
+	masked := ""
+	if len(id) > 8 {
+		masked = id[:4] + "…" + id[len(id)-4:]
+	}
+	respond(w, map[string]any{"set": id != "", "clientId": masked, "redirectUri": spotifyLoopbackRedirect, "fixed": s.cfg.SpotifyClientID != ""})
+}
+
+// spotifyClientPost saves the owner's own Spotify Client ID (32 hex digits).
+func (s *Server) spotifyClientPost(w http.ResponseWriter, r *http.Request) {
+	var v struct {
+		ClientID string `json:"clientId"`
+	}
+	if !input(w, r, &v) {
+		return
+	}
+	id := strings.ToLower(strings.TrimSpace(v.ClientID))
+	if !spotifyClientIDRe.MatchString(id) {
+		fail(w, 400, errors.New("a Spotify Client ID is 32 hex characters / Spotify Client ID 应为 32 位十六进制"))
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.spotifyClientPath()), 0o700); err != nil {
+		fail(w, 500, err)
+		return
+	}
+	if err := os.WriteFile(s.spotifyClientPath(), []byte(id+"\n"), 0o600); err != nil {
+		fail(w, 500, err)
+		return
+	}
+	s.spotifyClientGet(w, r)
 }

@@ -70,7 +70,7 @@ func TestEveryPhoneTextHasThreeLanguages(t *testing.T) {
 // and every page renders in every language.
 func TestPhonePagesDefaultToEnglishAndSwitchLanguage(t *testing.T) {
 	for _, provider := range []string{"deezer", "soundcloud", "beatport", "spotify", "applemusic"} {
-		_, srv, target := standalone(t, Config{}, provider)
+		_, srv, target := standalone(t, Config{SpotifyClientID: testSpotifyClientID}, provider)
 		if target.Query().Get("lang") != "en" {
 			t.Fatalf("%s QR code %s", provider, target)
 		}
@@ -109,7 +109,7 @@ func TestSpotifyPasteWithoutSchemeOrState(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"access_token": "AT", "refresh_token": "RT", "token_type": "Bearer", "expires_in": 3600})
 	}))
 	defer accounts.Close()
-	_, srv, target := standalone(t, Config{SpotifyAccountsURL: accounts.URL}, "spotify")
+	_, srv, target := standalone(t, Config{SpotifyAccountsURL: accounts.URL, SpotifyClientID: testSpotifyClientID}, "spotify")
 	page := srv.URL + target.Path + "?" + target.RawQuery
 	getPage(t, page)
 	if code, state := spotifyPaste("Copied 127.0.0.1:8080/oauth/spotify/callback?code=CODE&state=S#x now"); code != "CODE" || state != "S" {
