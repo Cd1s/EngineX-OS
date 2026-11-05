@@ -468,6 +468,21 @@ static int install_dsp_hooks(uintptr_t base, size_t page) {
     return 1;
 }
 
+// #49: four_deck_waveform=1 in settings.conf (the console's 4-Deck switch) unlocks Engine's own 4-deck layout
+// (Layout -> Decks / Waveforms). Engine offers it only to a non-player with 4
+// decks (5.3.0 0x1c44110); 4 decks alone crash a player's layout controller.
+static int four_deck_layout(void) {
+    int v = 0;
+    FILE *f = fopen(UI_ROOT "/settings.conf", "r");
+    if (f) {
+        char line[64];
+        while (fgets(line, sizeof line, f))
+            if (!strncmp(line, "four_deck_waveform=", 19)) v = atoi(line + 19);
+        fclose(f);
+    }
+    return v;
+}
+
 static void prepare_config(uintptr_t base, size_t page) {
     // getConfig's common return path runs after every model's constructor.
     uint32_t code[] = {
@@ -478,6 +493,10 @@ static void prepare_config(uintptr_t base, size_t page) {
         0xe5c02276, // remote Stems processor support
         0xe3a02000, // mov r2, #0
         0xe5c02289, // disableHfsPlus
+        0xe320f000, // #49: mov r2, #4 (numberOfDecks) when enabled
+        0xe320f000, // #49: str r2, [r0, #0x90]
+        0xe320f000, // #49: mov r2, #0
+        0xe320f000, // #49: strb r2, [r0, #0x239] (isPlayer)
         0xe59f2004, // replay the two displaced literal loads
         0xe59f3004,
         0xe59ff004,
@@ -487,6 +506,13 @@ static void prepare_config(uintptr_t base, size_t page) {
     };
     const unsigned at[] = {1, 2, 3, 4, 6};
     for (unsigned i = 0; i < 5; i++) code[at[i]] = (code[at[i]] & ~0xfffu) | build->config_field[i];
+    if (!strcmp(build->name, "5.3.0") && four_deck_layout() > 0) {
+        code[7] = 0xe3a02004;
+        code[8] = 0xe5802090;
+        code[9] = 0xe3a02000;
+        code[10] = 0xe5c02239;
+        fprintf(stderr, "engine-ui-hook: 4-deck layout unlocked (#49)\n");
+    }
     config_jump[0] = 0xe51ff004;
     config_jump[1] = (uint32_t)(uintptr_t)rx_code(code, sizeof code, page);
 }
