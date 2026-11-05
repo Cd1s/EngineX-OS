@@ -25,7 +25,9 @@ import (
 )
 
 const (
-	loginLifetime           = 10 * time.Minute
+	// Long enough for Spotify's email code and new-device page: at 10 minutes the
+	// deck put up a new QR code meanwhile, and the pasted callback was refused (#48).
+	loginLifetime           = 30 * time.Minute
 	spotifyLoopbackRedirect = "http://127.0.0.1:8080/oauth/spotify/callback"
 )
 

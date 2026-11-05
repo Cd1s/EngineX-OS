@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
@@ -52,11 +53,17 @@ type Options struct {
 	// DatabaseDir builds the database elsewhere, such as on tmpfs, instead of in
 	// the mount's Engine Library.
 	DatabaseDir string
+	// Deadline stops reading audio and analysis files once it has passed. The
+	// tracks left are imported as Fast imports them and counted in Deferred, so
+	// the playlists still land while the mount waits (#48).
+	Deadline time.Time `json:"-"`
 }
 type Result struct {
 	Added, Updated, Unchanged int
-	PlaylistsChanged          bool
-	Bypassed                  bool
+	// Deferred tracks were imported without cues and waveforms: Deadline passed.
+	Deferred         int `json:",omitempty"`
+	PlaylistsChanged bool
+	Bypassed         bool
 }
 
 // safeFile refuses redirection into PIONEER through symlinks or hard links.
@@ -358,6 +365,12 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 				return result, e
 			}
 		}
+		fast := opts.Fast
+		if !fast && previous != hash && !opts.Deadline.IsZero() && time.Now().After(opts.Deadline) {
+			// A "fast:" fingerprint makes the next full import read this track.
+			fast, files, art, hash = true, nil, nil, "fast:"+t.RecordHash
+			result.Deferred++
+		}
 		existing := id != 0
 		if !existing {
 			// Engine (or its desktop app) already owns a track at this path:
@@ -379,7 +392,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		if t.BPM >= 499.5 {
 			t.BPM = 0
 		}
-		if opts.Fast && existing {
+		if fast && existing {
 			// An empty fingerprint is a row stageOwnedMoves just parked on a
 			// temporary path; it must get its final path and metadata (#4).
 			if previous != hash && (previous == "" || strings.HasPrefix(previous, "fast:")) {
@@ -414,7 +427,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			a.Merge(aa)
 		}
 		var audio compat.AudioInfo
-		if !opts.Fast {
+		if !fast {
 			if audio, e = compat.AudioHeader(full); e != nil {
 				return result, fmt.Errorf("track %d audio header: %w", t.ID, e)
 			}
@@ -439,7 +452,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		effectiveTracks[i] = t
 		// Compressing an empty performance is half of a fast import's time.
 		var perf Performance
-		if !opts.Fast {
+		if !fast {
 			if perf, e = EncodePerformance(t, a); e != nil {
 				return result, fmt.Errorf("track %d performance: %w", t.ID, e)
 			}
@@ -502,12 +515,12 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		mapping[t.ID] = id
 		// Track's factory trigger already inserted PerformanceData(trackId).
 		// Fast mode leaves it empty, which is what makes Engine analyse on load.
-		if !opts.Fast {
+		if !fast {
 			if _, e = tx.ExecContext(ctx, `UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?,thirdPartySourceId=1,activeOnLoadLoops=? WHERE trackId=?`, perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, id); e != nil {
 				return result, e
 			}
 		}
-		if !opts.Fast {
+		if !fast {
 			sourceJSON, _ := json.Marshal(struct {
 				Track    rekordbox.Track
 				Analysis *rekordbox.Analysis
