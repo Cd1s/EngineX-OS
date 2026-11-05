@@ -164,11 +164,19 @@ func TestCDJDecks(t *testing.T) {
 		{[]byte{1, 2, 3}, []int{4}, map[int]byte{4: 1}},       // more CDJs than shadow decks
 	} {
 		var devices []prolink.Device
-		for _, n := range c.cdjs {
-			devices = append(devices, dev(n))
+		for i, n := range c.cdjs {
+			d := dev(n)
+			d.Address = "10.0.0." + strconv.Itoa(i+1)
+			devices = append(devices, d)
 		}
 		devices = append(devices, prolink.Device{Number: 4, Name: "EngineX Export Beta", LastSeen: now}, prolink.Device{Number: 1, Name: "CDJ-2000", LastSeen: now.Add(-time.Minute)})
 		got := cdjDecks(devices, c.free, now)
+		// The same CDJ with its old number, seen earlier, is not another CDJ.
+		if len(c.cdjs) == 1 {
+			old := dev(c.cdjs[0]%4 + 1)
+			old.Address, old.LastSeen = "10.0.0.1", now.Add(-time.Second)
+			got = cdjDecks(append(devices, old), c.free, now)
+		}
 		if len(got) != len(c.want) {
 			t.Fatalf("%v on %v: %v", c.cdjs, c.free, got)
 		}

@@ -166,6 +166,17 @@ SERVICES_MAIN = """
 			const decks = JSON.parse(x.responseText).decks || []
 			root.scShadowCdjMaster = decks.some(e => e.master)
 			for (const e of decks) root.scShadowApply(e)
+			// A shadow deck whose CDJ or player went away stops (and gives up master).
+			for (const d in root.scShadowAt) {
+				const p = Planck.getProperty("/Engine/Deck" + d + "/PlayState").translator
+				const at = root.scShadowAt[d]
+				if (!decks.some(e => e.deck === parseInt(d)) && p && p.state && scFourDeckRole.indexOf(d) < 0 && Date.now() >= at.act) {
+					const play = Planck.getProperty("/Engine/Deck" + d + "/Play").translator
+					play.state = false
+					play.state = true
+					at.act = Date.now() + 700
+				}
+			}
 		}
 		x.send()
 	}
@@ -182,14 +193,10 @@ SERVICES_MAIN = """
 		}
 		if (now < at.act || !g("/Track/SongLoaded").state) return
 		// The CDJ took master: so does its shadow deck, and Engine drops it on ours
-		// (one master). Only on the change, so pressing MASTER here wins it back.
-		if (e.master && !at.master) {
-			const m = g("/RequestMaster")
-			if (m) {
-				m.state = false
-				m.state = true
-			}
-		}
+		// (one master). Only after the change (for 5 s), so pressing MASTER here
+		// afterwards wins it back.
+		if (e.master && !at.master) at.wantMaster = now + 5000
+		if (!e.master) at.wantMaster = 0
 		at.master = !!e.master
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!!g("/PlayState").state !== e.playing) {
@@ -201,6 +208,17 @@ SERVICES_MAIN = """
 			at.act = now + 700 // CUE: the seek waits until Engine reports the deck stopped
 			return
 		}
+		// Engine ignores RequestMaster on a stopped deck: press it once this one
+		// plays, again until it is master.
+		if (at.wantMaster && now < at.wantMaster && !g("/DeckIsMaster").state && g("/PlayState").state && now >= (at.pressed || 0)) {
+			const m = g("/RequestMaster")
+			if (m) {
+				m.state = false
+				m.state = true
+			}
+			at.pressed = now + 800
+		}
+		if (g("/DeckIsMaster").state) at.wantMaster = 0
 		const drift = sr > 0 && len > 0 ? e.positionMs - g("/Track/TrackPosition").unnormalized / sr * 1000 : 0 // > 0: behind
 		const bend = e.playing && Math.abs(drift) > 20 ? Math.max(-4, Math.min(4, drift / 40)) : 0
 		const range = parseFloat(g("/SpeedRange").string) || 8
@@ -1629,11 +1647,16 @@ def edits(dev: bool):
             ("        active: songLoading || lockLine\n", "        active: songLoading || lockLine || root.scDeckLocked(deckIndex)\n")]
         # #49: a networked player's MASTER LED shows the unit's network master, so in
         # the 4-deck layout it stayed lit while a shadow deck (a CDJ) held master.
-        # There it shows the deck's own master; every other device keeps stock.
+        # There (JP boards with isPlayer off: SC5000/SC6000 in 4-deck, and PRIME GO)
+        # it shows the deck's own master; every other device keeps stock.
         out["ControlSurfaceModules/ControlSurfaceModules/Sync.qml"] = [(
             "            readonly property string isMasterPath: Config.network.hasSyncing\n",
             "            readonly property string isMasterPath: Config.network.hasSyncing &&\n"
-            "                    !(!Config.device.isPlayer && [\"SC5000\", \"SC5000M\", \"SC6000\", \"SC6000M\"].indexOf(Config.device.name) >= 0)\n",
+            "                    !(Config.device.isJP && !Config.device.isPlayer)\n",
+        ), (
+            # Stock dims a non-master LED (1), which reads as lit; here it is off.
+            "                        } else {\n                            1\n                        }\n",
+            "                        } else {\n                            Config.device.isJP && !Config.device.isPlayer ? 0 : 1\n                        }\n",
         )]
         # #49: a swipe loads the role's own decks (1+3: left 1, right 3), not the stock
         # left/right layer deck. Only "Deck N" actions; Prepare List etc. stay stock.

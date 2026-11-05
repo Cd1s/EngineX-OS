@@ -311,11 +311,21 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 // when it is free, the rest on what is left, Deck 2 first. A lone CDJ next to
 // a 1+3 player then shows beside Deck 1 also in the 2-waveform layout.
 func cdjDecks(devices []prolink.Device, free []int, now time.Time) map[int]prolink.Device {
-	var cdjs []prolink.Device
+	// One player per address: a CDJ that changed its number still has its
+	// old entry for a few seconds, which became a second (master) CDJ.
+	latest := map[string]prolink.Device{}
 	for _, dev := range devices {
-		if dev.Number >= 1 && dev.Number <= 6 && !strings.HasPrefix(dev.Name, "EngineX") && now.Sub(dev.LastSeen) <= 5*time.Second {
-			cdjs = append(cdjs, dev)
+		key := dev.Address
+		if key == "" {
+			key = strconv.Itoa(int(dev.Number))
 		}
+		if old, seen := latest[key]; dev.Number >= 1 && dev.Number <= 6 && !strings.HasPrefix(dev.Name, "EngineX") && now.Sub(dev.LastSeen) <= 5*time.Second && (!seen || dev.LastSeen.After(old.LastSeen)) {
+			latest[key] = dev
+		}
+	}
+	var cdjs []prolink.Device
+	for _, dev := range latest {
+		cdjs = append(cdjs, dev)
 	}
 	slices.SortFunc(cdjs, func(a, b prolink.Device) int { return int(a.Number) - int(b.Number) })
 	out := map[int]prolink.Device{}
