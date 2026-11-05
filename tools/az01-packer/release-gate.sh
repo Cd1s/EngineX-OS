@@ -192,7 +192,9 @@ SH
     if [ "$name" = new ]; then
         local log=$W/new-engine.log files label
         files=$(sed -n "s|.*packs/$LANG_PACK: \([0-9]*\) files.*|\1|p" "$log" | awk '{s += $1} END {print s + 0}')
-        check "new: UI hook replaced all $want pack files + the gate probe (got ${files:-0})" test "${files:-0}" -eq $((want + 1)) -a "$want" -gt 0
+        # At least, not exactly: Engine 5.3.0 registers ControlSurfaceModules (Sync.qml) twice
+        # at run time and the hook replaces it in both, one line each. What rendered is checked below.
+        check "new: UI hook replaced all $want pack files + the gate probe (got ${files:-0})" test "${files:-0}" -ge $((want + 1)) -a "$want" -gt 0
         # What Engine rendered, not what the hook counted: a stale .qmlc showed the stock UI
         # while the hook still logged every file.
         check "new: render probe reported (Settings -> Services, About)" wait_for "$ENGINE_START" grep -aq 'SCPROBE done|' "$log"
