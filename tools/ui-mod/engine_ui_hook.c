@@ -146,7 +146,31 @@ struct engine_edit {
     uint32_t offset;
     const char *expected, *replacement;
     uint32_t size;
+    int group; // all sites of a group are applied together or not at all
 };
+enum { EDIT_ONE, EDIT_STEMS, EDIT_GATEWAY };
+
+// Everything that differs between Engine builds. The hook only patches a build
+// listed here (exact GNU BuildID), and every site is checked byte for byte first.
+struct engine_build {
+    const char *name;
+    uchar id[20];
+    uint32_t dsp[19];
+    const struct engine_edit *edits;
+    unsigned edit_count;
+    // getConfig's common return path: site, its two literal-pool words, and the
+    // config fields set there (Stems integration, Bluetooth, Bluetooth send to
+    // assignment, onboard Stems rendering, disableHfsPlus).
+    uint32_t config_site, config_r2, config_r3;
+    uint16_t config_field[5];
+    // Stems feature registration: site, feature object, native true byte, enabled path.
+    uint32_t feature_site, feature_object, feature_true, feature_enabled;
+    // sqlite3_api_routines and the functions it lists ([55] exec, [70] open,
+    // [135] open_v2). opendb != 0: open and open_v2 only tail-call it, hook it once.
+    uint32_t sqlite_api, sqlite_exec, sqlite_open, sqlite_open_v2, sqlite_opendb;
+    const char *sqlite_prefix[3]; // exec, open (or opendb), open_v2
+};
+static const struct engine_build *build;
 
 static uint32_t stems_feature_jump[2];
 static uint32_t config_jump[2];
@@ -306,7 +330,7 @@ struct dsp_hook_site {
     uint32_t offset;
     void *hook;
 };
-static const struct dsp_hook_site dsp_hooks[DSP_HOOK_COUNT] = {
+static struct dsp_hook_site dsp_hooks[DSP_HOOK_COUNT] = { // offsets: 5.0.4, replaced by select_build
     {0xd917b8, hook_fx_turn_off}, {0xd917e4, hook_fx_turn_on},
     {0xd91894, hook_fx_switch}, {0xd918c0, hook_fx_change}, {0xd918ec, hook_fx_enable},
     {0xd91810, hook_fx_mix}, {0xd91868, hook_fx_parameter},
@@ -382,10 +406,12 @@ static void prepare_config(uintptr_t base, size_t page) {
         0xe59f2004, // replay the two displaced literal loads
         0xe59f3004,
         0xe59ff004,
-        *(const uint32_t *)(base + 0xf63124),
-        *(const uint32_t *)(base + 0xf63120),
-        (uint32_t)(base + 0xf63044),
+        *(const uint32_t *)(base + build->config_r2),
+        *(const uint32_t *)(base + build->config_r3),
+        (uint32_t)(base + build->config_site + 8),
     };
+    const unsigned at[] = {1, 2, 3, 4, 6};
+    for (unsigned i = 0; i < 5; i++) code[at[i]] = (code[at[i]] & ~0xfffu) | build->config_field[i];
     config_jump[0] = 0xe51ff004;
     config_jump[1] = (uint32_t)(uintptr_t)rx_code(code, sizeof code, page);
 }
@@ -401,55 +427,108 @@ static void prepare_stems_feature(uintptr_t base, size_t page) {
         0xe51b3340, // ldr r3, [fp, #-832] (displaced instruction)
         0xe3540000, // cmp r4, #0 (displaced flags)
         0xe59ff008, // ldr pc, [pc, #8] (original store/branch)
-        (uint32_t)(base + 0x29bc83c),
-        (uint32_t)(base + 0x258e185),
-        (uint32_t)(base + 0x8429b0),
-        (uint32_t)(base + 0x84264c),
+        (uint32_t)(base + build->feature_object),
+        (uint32_t)(base + build->feature_true),
+        (uint32_t)(base + build->feature_enabled),
+        (uint32_t)(base + build->feature_site + 8),
     };
     stems_feature_jump[0] = 0xe51ff004; // ldr pc, [pc, #-4]
     stems_feature_jump[1] = (uint32_t)(uintptr_t)rx_code(code, sizeof code, page);
 }
 
-static const struct engine_edit engine_edits[] = {
+static const struct engine_edit edits_504[] = {
     // Stems remote processor: exact Engine build from the verified patch manifest.
     {0x85ef9cu, "\xbc\x26\x9f\xe5\xbc\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x94\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
-        "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x04\xd5\xe3\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63},
+        "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x04\xd5\xe3\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
     {0x85e5f8u, "\x90\xc7\x9f\xe5",
-        "\x1e\xff\x2f\xe1", 4},
-    {0xf6303cu, "\xe0\x20\x9f\xe5\xd8\x30\x9f\xe5", (const char *)config_jump, 8},
+        "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
+    {0xf6303cu, "\xe0\x20\x9f\xe5\xd8\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
     // TIDAL's client names a downloaded file after its codec and knows FLAC and AAC,
     // so an MP3 from the gateway would be saved with no extension and fail to load.
     // Its one "aac" string is both what it compares the codec with and the extension
     // it then uses. TIDAL's own AAC is labelled mp4a.40.x and keeps working.
-    {0x1DB8E90u, "aac", "mp3", 4},
+    {0x1DB8E90u, "aac", "mp3", 4, EDIT_ONE},
     // Retain the pre-existing +0x24 capability patch.
-    {0xF659B8u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4},
-    {0x842644u, "\x40\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8},
+    {0xF659B8u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
+    {0x842644u, "\x40\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8, EDIT_ONE},
     // Preserve ShowStemsList eligibility in r8 across the extra device feature gate.
-    {0x6D3E00u, "\x07\x00\x00\x0a", "\x07\x00\x00\xea", 4},
+    {0x6D3E00u, "\x07\x00\x00\x0a", "\x07\x00\x00\xea", 4, EDIT_ONE},
     // unknown filesystem -> supported
-    {0x1897e70u, "\x00\x60\xa0\xe3", "\x04\x60\xa0\xe3", 4},
+    {0x1897e70u, "\x00\x60\xa0\xe3", "\x04\x60\xa0\xe3", 4, EDIT_ONE},
     // isSupportedFilesystem always true
-    {0x1897dccu, "\x00\x40\xa0\x03", "\x01\x40\xa0\x03", 4},
+    {0x1897dccu, "\x00\x40\xa0\x03", "\x01\x40\xa0\x03", 4, EDIT_ONE},
     // hfsplus not rewritten to ufsd
-    {0x1678644u, "\xd1\x01\x00\x1a", "\x00\xf0\x20\xe3", 4},
+    {0x1678644u, "\xd1\x01\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
     // TidalAPI base URL -> stream-sync /v1/
-    {0x336740u, "\x69\x75\x75\x71\x74\x3b\x30\x30\x62\x71\x6a\x2f\x75\x6a\x65\x62\x6d\x2f\x64\x70\x6e\x30\x77\x32", "\x69\x75\x75\x71\x3b\x30\x30\x32\x33\x38\x2f\x31\x2f\x31\x2f\x32\x3b\x39\x31\x39\x31\x30\x77\x32", 24},
+    {0x336740u, "\x69\x75\x75\x71\x74\x3b\x30\x30\x62\x71\x6a\x2f\x75\x6a\x65\x62\x6d\x2f\x64\x70\x6e\x30\x77\x32", "\x69\x75\x75\x71\x3b\x30\x30\x32\x33\x38\x2f\x31\x2f\x31\x2f\x32\x3b\x39\x31\x39\x31\x30\x77\x32", 24, EDIT_GATEWAY},
     // TidalAPI auth URL -> stream-sync /au//
-    {0x336758u, "\x6f\x7b\x7b\x77\x7a\x41\x36\x36\x68\x7c\x7b\x6f\x35\x7b\x70\x6b\x68\x73\x35\x6a\x76\x74\x36\x7d", "\x6f\x7b\x7b\x77\x41\x36\x36\x38\x39\x3e\x35\x37\x35\x37\x35\x38\x41\x3f\x37\x3f\x37\x36\x68\x7c", 24},
+    {0x336758u, "\x6f\x7b\x7b\x77\x7a\x41\x36\x36\x68\x7c\x7b\x6f\x35\x7b\x70\x6b\x68\x73\x35\x6a\x76\x74\x36\x7d", "\x6f\x7b\x7b\x77\x41\x36\x36\x38\x39\x3e\x35\x37\x35\x37\x35\x38\x41\x3f\x37\x3f\x37\x36\x68\x7c", 24, EDIT_GATEWAY},
     // TidalAPI auth URL suffix 1/ -> //
-    {0x33652cu, "\x38\x36\x03\xe3", "\x36\x36\x03\xe3", 4},
+    {0x33652cu, "\x38\x36\x03\xe3", "\x36\x36\x03\xe3", 4, EDIT_GATEWAY},
     // read-only volume not auto-ejected
-    {0x58af34u, "\x30\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4},
+    {0x58af34u, "\x30\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4, EDIT_ONE},
     // DeviceManager::isReadOnly cache -> false
-    {0x167295cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4},
+    {0x167295cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
     // DeviceManager::isReadOnly QFileInfo -> false
-    {0x16728c0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4},
+    {0x16728c0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
 };
+
+// 5.3.0 (BuildID be537e90...): sites found by RTTI/vtable slots (DSP), the QML
+// property map (config fields), sqlite3_api_routines, and masked-context matches,
+// each checked against the 5.0.4 disassembly.
+static const struct engine_edit edits_530[] = {
+    {0x8bf744u, "\xbc\x26\x9f\xe5\xbc\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x94\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
+        // As 5.0.4, with the BL re-encoded for QString::fromUtf8(QByteArrayView)@plt at 0x15f768.
+        "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x03\x80\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
+    {0x8be39cu, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
+    {0x1537148u, "\xe4\x20\x9f\xe5\xdc\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
+    {0x1efc6bcu, "aac", "mp3", 4, EDIT_ONE},
+    // Config.audio.hasLimiter (root +0x24), as the 5.0.4 +0x24 patch.
+    {0x153DDB0u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
+    {0x8a1eacu, "\x40\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8, EDIT_ONE},
+    // ShowStemsList gate (eligibility is in r7 here, r8 in 5.0.4).
+    {0x7398FCu, "\x07\x00\x00\x0a", "\x07\x00\x00\xea", 4, EDIT_ONE},
+    {0x1a28ea8u, "\x00\x60\xa0\xe3", "\x04\x60\xa0\xe3", 4, EDIT_ONE},
+    {0x1a28e04u, "\x00\x40\xa0\x03", "\x01\x40\xa0\x03", 4, EDIT_ONE},
+    {0x167c6f8u, "\xfa\x01\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
+    // TidalAPI base URL -> stream-sync /v1/ (5.3.0 XORs byte i with 0x24 + i)
+    {0x3155d0u, "\x4c\x51\x52\x57\x5b\x13\x05\x04\x4d\x5d\x47\x01\x44\x58\x56\x52\x58\x1b\x55\x58\x55\x16\x4c\x0a", "\x4c\x51\x52\x57\x12\x06\x05\x1a\x1e\x1a\x00\x1f\x1e\x01\x1c\x02\x0e\x0d\x06\x0f\x08\x16\x4c\x0a", 24, EDIT_GATEWAY},
+    // TidalAPI auth URL -> stream-sync /au// (5.3.0 XORs byte i with 0x57 + i)
+    {0x3155e8u, "\x3f\x2c\x2d\x2a\x28\x66\x72\x71\x3e\x15\x15\x0a\x4d\x10\x0c\x02\x06\x04\x47\x09\x04\x01\x42\x18", "\x3f\x2c\x2d\x2a\x61\x73\x72\x6f\x6d\x57\x4f\x52\x4d\x54\x4b\x57\x5d\x50\x59\x52\x5b\x43\x0c\x1b", 24, EDIT_GATEWAY},
+    // TidalAPI auth URL suffix 1/ -> //
+    {0x3153acu, "\x5e\x3f\x05\xe3", "\x40\x3f\x05\xe3", 4, EDIT_GATEWAY},
+    // The config field moved from 560 to 568.
+    {0x5e28ccu, "\x38\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4, EDIT_ONE},
+    {0x167e32cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    {0x167e290u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+};
+
+static const struct engine_build engine_builds[] = {
+    {"5.0.4", "\xaf\x07\x38\x65\xa3\x31\x8d\x80\x7a\x83\x03\xf7\x16\x15\x2e\xac\x92\x3a\x4c\x6f",
+     {0xd917b8, 0xd917e4, 0xd91894, 0xd918c0, 0xd918ec, 0xd91810, 0xd91868, 0x14fff54, 0x153312c,
+      0x1532fa0, 0x1500950, 0xd0b5bc, 0xc5b2e0, 0xc5b30c, 0xc5b338, 0xe3a598, 0x15fa188, 0xe3d0a8, 0xe3d908},
+     edits_504, sizeof edits_504 / sizeof *edits_504,
+     0xf6303c, 0xf63124, 0xf63120, {0xdb, 0x24c, 0x24e, 0x276, 0x289},
+     0x842644, 0x29bc83c, 0x258e185, 0x8429b0,
+     0x29980a4, 0x1c91f74, 0x1cba858, 0x1cba874, 0,
+     {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}},
+    {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
+     {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
+      0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4},
+     edits_530, sizeof edits_530 / sizeof *edits_530,
+     0x1537148, 0x1537234, 0x1537230, {0xe3, 0x254, 0x256, 0x2a6, 0x2b9},
+     0x8a1eac, 0x2c8e808, 0x21b8b98, 0x8a2218,
+     0x2b9bee8, 0x1d7289c, 0x1d47324, 0x1d7e2bc, 0x1d46a6c,
+     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}},
+};
+
+static void select_build(const struct engine_build *b) {
+    build = b;
+    for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) dsp_hooks[i].offset = b->dsp[i];
+}
 
 static int engine_base(struct dl_phdr_info *info, size_t size, void *out) {
     (void)size;
-    static const uchar id[] = "\xaf\x07\x38\x65\xa3\x31\x8d\x80\x7a\x83\x03\xf7\x16\x15\x2e\xac\x92\x3a\x4c\x6f";
     for (size_t i = 0; i < info->dlpi_phnum; i++) {
         const ElfW(Phdr) *p = &info->dlpi_phdr[i];
         if (p->p_type != PT_NOTE) continue;
@@ -460,9 +539,12 @@ static int engine_base(struct dl_phdr_info *info, size_t size, void *out) {
             size_t desc = ((size_t)n->n_descsz + 3) & ~(size_t)3;
             at += sizeof *n;
             if (names > (size_t)(end - at) || desc > (size_t)(end - at) - names) break;
-            if (n->n_type == NT_GNU_BUILD_ID && n->n_namesz == 4 && n->n_descsz == 20 &&
-                !memcmp(at, "GNU", 4) && !memcmp(at + names, id, 20))
-                *(uintptr_t *)out = info->dlpi_addr;
+            if (n->n_type == NT_GNU_BUILD_ID && n->n_namesz == 4 && n->n_descsz == 20 && !memcmp(at, "GNU", 4))
+                for (size_t b = 0; b < sizeof engine_builds / sizeof *engine_builds; b++)
+                    if (!memcmp(at + names, engine_builds[b].id, 20)) {
+                        select_build(&engine_builds[b]);
+                        *(uintptr_t *)out = info->dlpi_addr;
+                    }
             at += names + desc;
         }
     }
@@ -474,15 +556,11 @@ static int edit_state(uintptr_t base, const struct engine_edit *e) {
     if (!memcmp(at, e->replacement, e->size)) return 2;
     if (!memcmp(at, e->expected, e->size)) return 1;
     // Upgrade the previous processor-only getConfig branch without mixing code paths.
-    if (e->offset == 0xf6303c && !memcmp(at, "\xef\xef\xe3\xea\xd8\x30\x9f\xe5", 8)) return 1;
+    if (build == &engine_builds[0] && e->offset == 0xf6303c && !memcmp(at, "\xef\xef\xe3\xea\xd8\x30\x9f\xe5", 8)) return 1;
     return 0;
 }
 
 static void install_sqlite_hooks(uintptr_t base, size_t page);
-
-static int gateway_site(uint32_t offset) {
-    return offset == 0x336740 || offset == 0x336758 || offset == 0x33652c;
-}
 
 __attribute__((constructor)) static void edit_engine(void) {
     if (!is_engine()) return;
@@ -493,22 +571,19 @@ __attribute__((constructor)) static void edit_engine(void) {
     long page_size = sysconf(_SC_PAGESIZE);
     if (page_size <= 0) return;
     uintptr_t page = (uintptr_t)page_size;
+    fprintf(stderr, "engine-ui-hook: Engine %s\n", build->name);
     prepare_config(base, page);
-    if (!memcmp((const void *)(base + 0x842644), "\x40\x33\x1b\xe5\x00\x00\x54\xe3", 8))
+    if (build->feature_true && !memcmp((const void *)(base + build->feature_site), "\x40\x33\x1b\xe5\x00\x00\x54\xe3", 8))
         prepare_stems_feature(base, page);
-    // The processor edits form one unit; accept both stock and already patched sites.
-    int stems_ready = 1;
-    for (size_t i = 0; i < 3; i++) {
-        const struct engine_edit *e = &engine_edits[i];
-        if (!edit_state(base, e)) stems_ready = 0;
-    }
-    int gateway_ready = 1;
-    for (size_t i = 0; i < sizeof engine_edits / sizeof *engine_edits; i++)
-        if (gateway_site(engine_edits[i].offset) && !edit_state(base, &engine_edits[i])) gateway_ready = 0;
-    for (size_t i = 0; i < sizeof engine_edits / sizeof *engine_edits; i++) {
-        const struct engine_edit *e = &engine_edits[i];
-        if (i < 3 && !stems_ready) continue;
-        if (gateway_site(e->offset) && !gateway_ready) continue;
+    // A group is applied only if every site of it is stock or already patched.
+    int ready[3] = {1, 1, 1};
+    for (unsigned i = 0; i < build->edit_count; i++)
+        if (!edit_state(base, &build->edits[i])) ready[build->edits[i].group] = 0;
+    for (unsigned i = 0; i < build->edit_count; i++) {
+        const struct engine_edit *e = &build->edits[i];
+        if (e->group != EDIT_ONE && !ready[e->group]) continue;
+        // An unprepared trampoline is all zero: never write it.
+        if (e->replacement == (const char *)stems_feature_jump && !stems_feature_jump[1]) continue;
         char *at = (char *)(base + e->offset);
         if (edit_state(base, e) != 1) continue;
         uintptr_t first = (uintptr_t)at - (uintptr_t)at % page;
@@ -820,6 +895,14 @@ static int __attribute__((used)) tuned_sqlite_open(const char *filename, void **
     return rc;
 }
 
+// Target of an unconditional ARM B at "at", or 0.
+static uintptr_t arm_branch_target(uintptr_t at) {
+    uint32_t insn = *(const uint32_t *)at;
+    if ((insn & 0xff000000u) != 0xea000000u) return 0;
+    int32_t offset = (int32_t)(insn << 8) >> 6;
+    return at + 8 + (uintptr_t)offset;
+}
+
 static void *function_trampoline(uintptr_t entry, size_t page) {
     uint32_t code[4];
     memcpy(code, (const void *)entry, 8);
@@ -839,17 +922,29 @@ static void redirect_function(uintptr_t entry, const void *handler, size_t page)
 }
 
 static void install_sqlite_hooks(uintptr_t base, size_t page) {
-    // Identified through sqlite3_api_routines slots 70/135/55 and ARM disassembly.
-    if (memcmp((const void *)(base + 0x1cba858), "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", 8) ||
-        memcmp((const void *)(base + 0x1cba874), "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2", 8) ||
-        memcmp((const void *)(base + 0x1c91f74), "\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", 8)) return;
-    const uint32_t *api = (const void *)(base + 0x29980a4);
-    if (api[70] != base + 0x1cba858 || api[135] != base + 0x1cba874 || api[55] != base + 0x1c91f74) return;
-    sqlite_exec_original = (sqlite_exec_fn)(base + 0x1c91f74);
-    sqlite_open_original = (sqlite_open_fn)function_trampoline(base + 0x1cba858, page);
-    sqlite_open_v2_original = (sqlite_open_v2_fn)function_trampoline(base + 0x1cba874, page);
-    redirect_function(base + 0x1cba858, tuned_sqlite_open, page);
-    redirect_function(base + 0x1cba874, tuned_sqlite_open_v2, page);
+    // Identified through sqlite3_api_routines slots 55/70/135 and ARM disassembly.
+    const struct engine_build *b = build;
+    const uint32_t *api = (const void *)(base + b->sqlite_api);
+    if (api[55] != base + b->sqlite_exec || api[70] != base + b->sqlite_open || api[135] != base + b->sqlite_open_v2) return;
+    if (memcmp((const void *)(base + b->sqlite_exec), b->sqlite_prefix[0], 8)) return;
+    sqlite_exec_original = (sqlite_exec_fn)(base + b->sqlite_exec);
+    if (b->sqlite_opendb) {
+        // open = "mov r3,#0; mov r2,#6; b opendb", open_v2 = "b opendb": opendb has
+        // open_v2's signature and is the only way in, so hooking it covers both.
+        const uint32_t *open = (const void *)(base + b->sqlite_open), *v2 = (const void *)(base + b->sqlite_open_v2);
+        if (open[0] != 0xe3a03000 || open[1] != 0xe3a02006 || arm_branch_target((uintptr_t)&open[2]) != base + b->sqlite_opendb ||
+            arm_branch_target((uintptr_t)v2) != base + b->sqlite_opendb ||
+            memcmp((const void *)(base + b->sqlite_opendb), b->sqlite_prefix[1], 8)) return;
+        sqlite_open_v2_original = (sqlite_open_v2_fn)function_trampoline(base + b->sqlite_opendb, page);
+        redirect_function(base + b->sqlite_opendb, tuned_sqlite_open_v2, page);
+    } else {
+        if (memcmp((const void *)(base + b->sqlite_open), b->sqlite_prefix[1], 8) ||
+            memcmp((const void *)(base + b->sqlite_open_v2), b->sqlite_prefix[2], 8)) return;
+        sqlite_open_original = (sqlite_open_fn)function_trampoline(base + b->sqlite_open, page);
+        sqlite_open_v2_original = (sqlite_open_v2_fn)function_trampoline(base + b->sqlite_open_v2, page);
+        redirect_function(base + b->sqlite_open, tuned_sqlite_open, page);
+        redirect_function(base + b->sqlite_open_v2, tuned_sqlite_open_v2, page);
+    }
     fprintf(stderr, "engine-ui-hook: SQLite open/open_v2 hooks installed\n");
 }
 

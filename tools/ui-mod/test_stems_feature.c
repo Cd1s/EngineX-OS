@@ -83,7 +83,7 @@ static void mock_common_process(void *self, float *const *in, float *const *out,
 // Execute the actual ARM entry patches and displaced prologues, followed by
 // small ABI-correct native tails into mocks. No vendor DSP needs to be emulated.
 static void test_dsp_hooks(void) {
-    size_t page = (size_t)sysconf(_SC_PAGESIZE), image_size = 0x1600000;
+    size_t page = (size_t)sysconf(_SC_PAGESIZE), image_size = 0x1800000;
     char *image = mmap(NULL, image_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(image != MAP_FAILED);
     const uint32_t dispatcher[] = {
@@ -347,21 +347,24 @@ __attribute__((naked)) static void invoke_stub(void *feature __attribute__((unus
 
 static void test_stems(void) {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
-    char *image = mmap(NULL, 0x2a00000, PROT_READ | PROT_WRITE,
+    char *image = mmap(NULL, 0x2d00000, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(image != MAP_FAILED);
     uint32_t enabled[] = {0xe51b2328, 0xe51b3324, 0xe12fff1e};
     uint32_t ordinary[] = {0x05873004, 0xe12fff1e}; // streq r3,[r7,#4]; bx lr
-    memcpy(image + 0x8429b0, enabled, sizeof enabled);
-    memcpy(image + 0x84264c, ordinary, sizeof ordinary);
-    char *code_page = image + 0x84264c / page * page;
+    memcpy(image + build->feature_enabled, enabled, sizeof enabled);
+    memcpy(image + (build->feature_site + 8), ordinary, sizeof ordinary);
+    char *code_page = image + (build->feature_site + 8) / page * page;
     assert(mprotect(code_page, page, PROT_READ | PROT_EXEC) == 0);
     __builtin___clear_cache(code_page, code_page + page);
-    image[0x258e185] = 1;
+    code_page = image + build->feature_enabled / page * page;
+    assert(mprotect(code_page, page, PROT_READ | PROT_EXEC) == 0);
+    __builtin___clear_cache(code_page, code_page + page);
+    image[build->feature_true] = 1;
     prepare_stems_feature((uintptr_t)image, page);
-    uint32_t *feature = (void *)(image + 0x29bc83c);
+    uint32_t *feature = (void *)(image + build->feature_object);
     uint32_t *other = feature + 8;
-    uint32_t false_ptr = (uint32_t)(uintptr_t)(image + 0x258e186);
+    uint32_t false_ptr = (uint32_t)(uintptr_t)(image + (build->feature_true + 1));
     feature[1] = other[1] = false_ptr;
     uint32_t frame[0x100] = {0}, out[4];
     char *fp = (char *)frame + 0x350;
@@ -370,14 +373,14 @@ static void test_stems(void) {
     *(uint32_t *)(fp - 832) = false_ptr;
     void *stub = (void *)(uintptr_t)stems_feature_jump[1];
     invoke_stub(feature, fp, stub, out);
-    assert(feature[1] == (uint32_t)(uintptr_t)(image + 0x258e185));
+    assert(feature[1] == (uint32_t)(uintptr_t)(image + build->feature_true));
     assert(*(char *)(uintptr_t)feature[1] == 1);
     assert(out[0] == 17 && out[1] == 23 && out[2] == 1234 && out[3] == 5678);
     invoke_stub(other, fp, stub, out);
     assert(other[1] == false_ptr);
     assert(out[0] == 17 && out[1] == 23 && out[2] == 29 && out[3] == false_ptr);
     puts("ARM Stems binding, other-feature isolation and register replay: PASS");
-    munmap(image, 0x2a00000);
+    munmap(image, 0x2d00000);
 }
 
 __attribute__((naked)) static void invoke_config(void *config __attribute__((unused)),
@@ -387,27 +390,27 @@ __attribute__((naked)) static void invoke_config(void *config __attribute__((unu
 
 static void test_config(void) {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
-    char *image = mmap(NULL, 0x1000000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    char *image = mmap(NULL, 0x1600000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(image != MAP_FAILED);
     uint32_t resume = 0xe12fff1e;
-    memcpy(image + 0xf63044, &resume, 4);
-    *(uint32_t *)(image + 0xf63124) = 123;
-    *(uint32_t *)(image + 0xf63120) = 456;
-    assert(!mprotect(image + 0xf63000, page, PROT_READ | PROT_EXEC));
-    __builtin___clear_cache(image + 0xf63000, image + 0xf64000);
+    memcpy(image + (build->config_site + 8), &resume, 4);
+    *(uint32_t *)(image + build->config_r2) = 123;
+    *(uint32_t *)(image + build->config_r3) = 456;
+    assert(!mprotect(image + build->config_site / page * page, page, PROT_READ | PROT_EXEC));
+    __builtin___clear_cache(image + build->config_site / page * page, image + (build->config_site / page + 1) * page);
     prepare_config((uintptr_t)image, page);
-    const unsigned fields[] = {0xdb, 0x24c, 0x24e, 0x276, 0x289};
+    const uint16_t *fields = build->config_field;
     for (int model = 0; model < 6; model++) {
         uchar config[0x500], expected[0x500];
         memset(config, 0xa0 + model, sizeof config);
         memcpy(expected, config, sizeof expected);
-        for (size_t i = 0; i < sizeof fields / sizeof *fields; i++) expected[fields[i]] = i == 4 ? 0 : 1;
+        for (size_t i = 0; i < 5; i++) expected[fields[i]] = i == 4 ? 0 : 1;
         uint32_t out[3];
         invoke_config(config, (void *)(uintptr_t)config_jump[1], out);
         assert(!memcmp(config, expected, sizeof config));
         assert(out[0] == (uintptr_t)config && out[1] == 123 && out[2] == 456);
     }
-    munmap(image, 0x1000000);
+    munmap(image, 0x1600000);
     puts("Common config hook, six input layouts, literal/register replay: PASS");
 }
 
@@ -434,33 +437,47 @@ static int pragma(sqlite3 *db, const char *sql) {
 
 static void test_sqlite(void) {
     size_t page = (size_t)sysconf(_SC_PAGESIZE);
-    char *image = mmap(NULL, 0x2a00000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    char *image = mmap(NULL, 0x2d00000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(image != MAP_FAILED);
-    // Vendor entry prologues, followed by ABI-correct tails into real SQLite 3.45.3.
+    // Replay each build's actual prologues before tail-calling real SQLite.
     uint32_t open_code[] = {0xe52db004, 0xe3a03000, 0xe28db000, 0xe28bd000, 0xe49db004};
     uint32_t v2_code[] = {0xe52db004, 0xe28db000, 0xe28bd000, 0xe49db004};
     uint32_t exec_code[] = {0xe16d42f4, 0xe1a05002, 0xe1cd40d0, 0xe28dd024};
-    emit_tail(image + 0x1cba858, open_code, 5, sqlite3_open);
-    emit_tail(image + 0x1cba874, v2_code, 4, sqlite3_open_v2);
-    emit_tail(image + 0x1c91f74, exec_code, 4, real_sqlite_exec);
-    uint32_t *api = (void *)(image + 0x29980a4);
-    api[70] = (uintptr_t)image + 0x1cba858;
-    api[135] = (uintptr_t)image + 0x1cba874;
-    api[55] = (uintptr_t)image + 0x1c91f74;
-    image[0x1c91f74] ^= 1;
+    if (build->sqlite_opendb) {
+        uint32_t shared_code[] = {0xe16d42f4, 0xe58de020, 0xe59de020, 0xe1cd40d0, 0xe28dd024};
+        uint32_t exec_shared[] = {0xe16d42f4, 0xe1cd60f8, 0xe1cd60d8, 0xe1cd40d0, 0xe28dd024};
+        emit_tail(image + build->sqlite_opendb, shared_code, 5, sqlite3_open_v2);
+        emit_tail(image + build->sqlite_exec, exec_shared, 5, real_sqlite_exec);
+        uint32_t open_shared[] = {0xe3a03000, 0xe3a02006,
+            0xea000000u | (((build->sqlite_opendb - build->sqlite_open - 16) >> 2) & 0xffffffu)};
+        uint32_t v2_shared = 0xea000000u | (((build->sqlite_opendb - build->sqlite_open_v2 - 8) >> 2) & 0xffffffu);
+        memcpy(image + build->sqlite_open, open_shared, sizeof open_shared);
+        memcpy(image + build->sqlite_open_v2, &v2_shared, sizeof v2_shared);
+    } else {
+        emit_tail(image + build->sqlite_open, open_code, 5, sqlite3_open);
+        emit_tail(image + build->sqlite_open_v2, v2_code, 4, sqlite3_open_v2);
+        emit_tail(image + build->sqlite_exec, exec_code, 4, real_sqlite_exec);
+    }
+    uint32_t entry = build->sqlite_opendb ? build->sqlite_opendb : build->sqlite_open;
+    uint32_t original = *(uint32_t *)(image + entry);
+    uint32_t *api = (void *)(image + build->sqlite_api);
+    api[70] = (uintptr_t)image + build->sqlite_open;
+    api[135] = (uintptr_t)image + build->sqlite_open_v2;
+    api[55] = (uintptr_t)image + build->sqlite_exec;
+    image[build->sqlite_exec] ^= 1;
     install_sqlite_hooks((uintptr_t)image, page);
-    assert(*(uint32_t *)(image + 0x1cba858) == open_code[0]);
-    image[0x1c91f74] ^= 1;
-    assert(!mprotect(image + 0x1cba000, page, PROT_READ | PROT_EXEC));
-    assert(!mprotect(image + 0x1c91000, page, PROT_READ | PROT_EXEC));
-    __builtin___clear_cache(image, image + 0x2a00000);
+    assert(*(uint32_t *)(image + entry) == original);
+    image[build->sqlite_exec] ^= 1;
+    assert(!mprotect(image, 0x2d00000, PROT_READ | PROT_EXEC));
+    __builtin___clear_cache(image, image + 0x2d00000);
+    assert(!mprotect(image + build->sqlite_api / page * page, page, PROT_READ | PROT_WRITE));
     api[55] = 0;
     install_sqlite_hooks((uintptr_t)image, page);
-    assert(*(uint32_t *)(image + 0x1cba858) == open_code[0]);
-    api[55] = (uintptr_t)image + 0x1c91f74;
+    assert(*(uint32_t *)(image + entry) == original);
+    api[55] = (uintptr_t)image + build->sqlite_exec;
     install_sqlite_hooks((uintptr_t)image, page);
-    sqlite_open_fn open_fn = (void *)(image + 0x1cba858);
-    sqlite_open_v2_fn v2_fn = (void *)(image + 0x1cba874);
+    sqlite_open_fn open_fn = (void *)(image + build->sqlite_open);
+    sqlite_open_v2_fn v2_fn = (void *)(image + build->sqlite_open_v2);
     void *db = NULL;
     char path[128];
     snprintf(path, sizeof path, "/tmp/sc5000-hook-test-%ld.db", (long)getpid());
@@ -496,7 +513,7 @@ static void test_sqlite(void) {
     if (db) sqlite3_close(db);
     tune_database(SQLITE_OK, path, NULL);
     assert(exec_count == 3);
-    munmap(image, 0x2a00000);
+    munmap(image, 0x2d00000);
     puts("Installed ARM SQLite hooks, real PRAGMA readback, memory telemetry, errors/readonly: PASS");
 }
 
@@ -763,14 +780,14 @@ static void test_patch_files(const char *filename) {
     uintptr_t found = 0;
     engine_base(&info, sizeof info, &found);
     assert(found == (uintptr_t)image);
-    char id[] = "\xaf\x07\x38\x65\xa3\x31\x8d\x80\x7a\x83\x03\xf7\x16\x15\x2e\xac\x92\x3a\x4c\x6f";
+    const uchar *id = build->id;
     char *at = memmem(image, (size_t)size, id, 20); assert(at);
     *at ^= 1; found = 0;
     engine_base(&info, sizeof info, &found);
     assert(found == 0);
     *at ^= 1;
-    for (size_t i = 0; i < sizeof engine_edits / sizeof *engine_edits; i++) {
-        const struct engine_edit *e = &engine_edits[i];
+    for (size_t i = 0; i < build->edit_count; i++) {
+        const struct engine_edit *e = &build->edits[i];
         assert(e->offset + e->size <= (size_t)size);
         int state = edit_state((uintptr_t)image, e);
         assert(state == 1 || state == 2);
@@ -785,15 +802,51 @@ static void test_patch_files(const char *filename) {
         assert(dsp_hooks[i].offset + bytes <= (size_t)size);
         assert(!memcmp(image + dsp_hooks[i].offset, expected, bytes));
     }
+    const uint32_t *api = NULL;
+    // The data LOAD segment's file offset differs from its runtime address.
+    for (unsigned i = 0; i < info.dlpi_phnum; i++) {
+        const ElfW(Phdr) *p = &info.dlpi_phdr[i];
+        if (p->p_type != PT_LOAD || build->sqlite_api < p->p_vaddr ||
+            build->sqlite_api + 136 * sizeof *api > p->p_vaddr + p->p_filesz) continue;
+        size_t offset = p->p_offset + build->sqlite_api - p->p_vaddr;
+        assert(offset + 136 * sizeof *api <= (size_t)size);
+        api = (const void *)(image + offset);
+    }
+    assert(api);
+    assert(api[55] == build->sqlite_exec && api[70] == build->sqlite_open && api[135] == build->sqlite_open_v2);
+    assert(!memcmp(image + build->sqlite_exec, build->sqlite_prefix[0], 8));
+    if (build->sqlite_opendb) {
+        const uint32_t *open = (const void *)(image + build->sqlite_open);
+        assert(open[0] == 0xe3a03000 && open[1] == 0xe3a02006);
+        assert(arm_branch_target((uintptr_t)&open[2]) == (uintptr_t)image + build->sqlite_opendb);
+        assert(arm_branch_target((uintptr_t)image + build->sqlite_open_v2) == (uintptr_t)image + build->sqlite_opendb);
+        assert(!memcmp(image + build->sqlite_opendb, build->sqlite_prefix[1], 8));
+    } else {
+        assert(!memcmp(image + build->sqlite_open, build->sqlite_prefix[1], 8));
+        assert(!memcmp(image + build->sqlite_open_v2, build->sqlite_prefix[2], 8));
+    }
     free(image);
     printf("Stock/patched/mismatched edit classification: %s PASS\n", filename);
 }
 
 int main(int argc, char **argv) {
-    test_dsp_hooks();
-    test_stems();
-    test_config();
-    test_sqlite();
+    for (size_t b = 0; b < sizeof engine_builds / sizeof *engine_builds; b++) {
+        // Hooks and counters are process-global; each build starts pristine.
+        fflush(NULL);
+        pid_t child = fork(); assert(child >= 0);
+        if (!child) {
+            select_build(&engine_builds[b]);
+            printf("Engine %s\n", build->name);
+            test_dsp_hooks();
+            test_stems();
+            test_config();
+            test_sqlite();
+            exit(0);
+        }
+        int status;
+        assert(waitpid(child, &status, 0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
     test_files();
     test_threads();
     test_alsa();

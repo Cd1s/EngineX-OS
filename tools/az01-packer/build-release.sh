@@ -1,12 +1,12 @@
 #!/bin/sh
-# Builds every model's EngineX OS upgrade image from the official 5.0.4 images.
+# Builds every model's EngineX OS upgrade image from one set of official images.
 # Run from the repository root on the build host (never on the deck):
 #   sh tools/az01-packer/build-release.sh <version> <fw-dir> <public-key> <fsck.hfsplus> <out-dir>
 # Each official AZ01 group is patched once and copied under each model's name:
 # Engine finds an image on USB by <PREFIX>-<digits and dots>-...Update.img.
 set -eu
 VERSION=${1:?version, e.g. 5.0.4.1}
-FW=${2:?directory with the official <PREFIX>-5.0.4-Update.img files}
+FW=${2:?directory with the official <PREFIX>-<base>-Update.img files, one base version}
 KEY=${3:?one SSH public key for a private build, or "none" for public releases (#46)}
 FSCK=${4:?static ARMv7 fsck.hfsplus}
 OUT=${5:?new output directory outside any git worktree}
@@ -16,10 +16,19 @@ ROOT=$(pwd)
 KEYARG=$KEY; [ "$KEY" != none ] || KEYARG=
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+# The official base, e.g. 5.3.0: every image in $FW must carry the same one.
+BASE=$(cd "$FW" && ls *-Update.img | sed -n 's/^SC5000-\([0-9.]*\)-Update\.img$/\1/p')
+[ -n "$BASE" ] && [ "$(echo "$BASE" | wc -l)" = 1 ] || { echo "need exactly one SC5000-<base>-Update.img in $FW" >&2; exit 2; }
 
 # 1. One static ARMv7 binary for all five tools, and the UI packs.
 GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$WORK/sc5000-suite" ./cmd/sc5000-suite
-python3 tools/ui-mod/build_packs.py --qrc "${QRC:-/root/build/sc5000-lab/5.0.4/qrc}" --out "$WORK/packs" >/dev/null
+# QML comes straight from the base image's Engine, so a new base needs no hand-made qrc tree.
+if [ -z "${QRC:-}" ]; then
+    arm-linux-gnueabihf-gcc -O2 -shared -fPIC -o "$WORK/qrc_dump.so" tools/ui-mod/qrc_dump.c -ldl
+    python3 -I tools/ui-mod/extract_qrc.py --image "$FW/SC5000-$BASE-Update.img" --preload "$WORK/qrc_dump.so" --out "$WORK/qrc" >/dev/null
+    QRC=$WORK/qrc
+fi
+python3 tools/ui-mod/build_packs.py --qrc "$QRC" --out "$WORK/packs" >/dev/null
 STAGE=$WORK/overlay
 cp -a rootfs-overlay "$STAGE"
 rm -f "$STAGE/README.md"
@@ -35,13 +44,13 @@ chmod 0644 "$STAGE/usr/share/sc5000-custom/"*
 mkdir -p "$OUT"
 build() { # <official image prefix> <model prefix> <release name>...
     base=$1; shift
-    python3 tools/az01-packer/az01_packer.py patch-rootfs "$FW/$base-5.0.4-Update.img" \
+    python3 tools/az01-packer/az01_packer.py patch-rootfs "$FW/$base-$BASE-Update.img" \
         ${KEYARG:+--ssh-public-key "$KEYARG"} --overlay "$STAGE" --set-version "$VERSION" --output "$WORK/$base.ext2" >/dev/null
-    python3 tools/az01-packer/az01_packer.py repack "$FW/$base-5.0.4-Update.img" \
+    python3 tools/az01-packer/az01_packer.py repack "$FW/$base-$BASE-Update.img" \
         --rootfs "$WORK/$base.ext2" --output "$WORK/$base.img" >/dev/null
     rm -f "$WORK/$base.ext2"
     while [ "$#" -ge 2 ]; do
-        cmp -s "$FW/$base-5.0.4-Update.img" "$FW/$1-5.0.4-Update.img" ||
+        cmp -s "$FW/$base-$BASE-Update.img" "$FW/$1-$BASE-Update.img" ||
             { echo "$1 is not the same official image as $base" >&2; exit 1; }
         cp "$WORK/$base.img" "$OUT/$1-$VERSION-EngineX-OS-$2-Update.img"
         shift 2

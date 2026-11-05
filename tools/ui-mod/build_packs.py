@@ -8,7 +8,10 @@ import tarfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# The deck skin: Skins/EmbeddedCommon up to 5.0.4, Skins/Embedded from 5.3.0 (set in main).
 ROOT = "Skins/EmbeddedCommon/"
+# Translated, and scanned for compared literals: the trees the 5.0.4 packs always covered.
+TRANSLATED = ("Skins/EmbeddedCommon/", "Skins/Embedded/", "Skins/JP22SideScreen/", "UIKit.1/", "Skins/UIKit/")
 DEV_HARNESS = """
 	Timer {
 		interval: 500; running: true; repeat: true
@@ -31,10 +34,32 @@ DEV_HARNESS = """
 """
 
 
+def anchor_pattern(old: str) -> str:
+    """old as a regex that ignores layout only: 5.3.0 ran qmlformat over every file
+    (tabs -> spaces, `if(` -> `if (`, wrapped lines). Tokens and their order must
+    still match, and words that were apart stay apart."""
+    out, prev, gap = [], "", False
+    for tok in re.findall(r"\s+|\w+|[^\w\s]", old):
+        if tok.isspace():
+            gap = True
+            continue
+        if out:
+            out.append(r"\s+" if gap and (prev[-1:].isalnum() or prev[-1:] == "_") and (tok[0].isalnum() or tok[0] == "_") else r"\s*")
+        out.append(re.escape(tok))
+        prev, gap = tok, False
+    head = r"(?m:^)[ \t]*" if old[:1] in " \t" else ""
+    tail = r"[ \t]*\n" if old.endswith("\n") else ""
+    return head + "".join(out) + tail
+
+
 def patch(text: str, old: str, new: str, path: str) -> str:
-    if text.count(old) != 1:
-        raise SystemExit(f"{path}: expected exactly one match for {old!r}, got {text.count(old)}")
-    return text.replace(old, new)
+    if text.count(old) == 1:
+        return text.replace(old, new)
+    found = list(re.finditer(anchor_pattern(old), text))
+    if text.count(old) or len(found) != 1:
+        raise SystemExit(f"{path}: expected exactly one match for {old!r}, got {max(text.count(old), len(found))}")
+    m = found[0]
+    return text[:m.start()] + new + text[m.end():]
 
 
 SERVICES_MAIN = """
@@ -214,7 +239,7 @@ SERVICES_MAIN = """
 	// Engine's messages name its one streaming client; say which service is showing.
 	function scBrand(s) {
 		const service = scServices.find(v => v.id === scScope)
-		return s && service && scScope !== "tidal" ? String(s).replace(/TIDAL/g, service.name) : s
+		return s && service && scScope !== "tidal" ? String(s).replace(/TIDAL/gi, service.name) : s
 	}
 	function scCall(query, done) {
 		const x = new XMLHttpRequest()
@@ -330,7 +355,7 @@ SERVICES_MAIN = """
 		const model = sources.model()
 		for (let i = 0; i < model.rowCount(); i++) {
 			const index = model.index(i, 0)
-			if (model.data(index, scSourceNameRole) === "TIDAL") {
+			if (["TIDAL", "Tidal"].indexOf(model.data(index, scSourceNameRole)) >= 0) {
 				sources.select(index)
 				return true
 			}
@@ -464,7 +489,7 @@ SERVICES_MAIN = """
 		id: scProviders
 		model: Planck.librarianController.streamingInterfaceController.providerModel
 		delegate: QtObject {
-			function ensure() { if (provider.name === "TIDAL" && !provider.integrated) provider.integrated = true }
+			function ensure() { if (["TIDAL", "Tidal"].indexOf(provider.name) >= 0 && !provider.integrated) provider.integrated = true }
 			readonly property Connections watcher: Connections {
 				target: provider
 				function onIntegratedChanged() { ensure() }
@@ -596,22 +621,38 @@ SOURCE_FOOTER = """
 	}
 """
 
-AVAILABLE_TILES = """
-						Flow {
-							Layout.fillWidth: true
-							spacing: availableSource.cellPadding
-							visible: children.length > 1
-							Repeater {
-								model: root.scServices.filter(s => root.scSources.indexOf(s.id) < 0)
-								MouseArea {
-									width: 180; height: 180
-									onClicked: root.scSetSource(modelData.id, true)
-									Rectangle { anchors.fill: parent; radius: 24; color: parent.pressed ? Style.focus02Color : Style.surface03Color }
-									Image { anchors.horizontalCenter: parent.horizontalCenter; y: 36; width: 48; height: 48; mipmap: true; source: root.scIcon(modelData.id) }
-									Text { anchors.horizontalCenter: parent.horizontalCenter; y: 110; text: modelData.name; color: Style.font02Color; font: Style.fontH1 }
-								}
-							}
-						}
+# Connect New Sources, minus stock TIDAL (kept integrated for the custom services; 5.3.0
+# names it "Tidal") and SoundCloud. A GridView keeps a blank cell for a hidden delegate; Grid skips it.
+# The GridView properties SourceScreen.qml sets stay declared.
+AVAILABLE_SOURCE = """import QtQuick
+import Planck
+
+Grid {
+	id: availableSource
+	objectName: "AvailableSource"
+
+	property int columnCount: 5
+	property int cellPadding: 16
+	readonly property real cellWidth: width / columnCount
+	readonly property real cellHeight: cellWidth
+	readonly property real contentHeight: implicitHeight
+	property bool interactive: false
+	property int currentIndex: -1
+	readonly property Item currentItem: currentIndex >= 0 && currentIndex < scRepeater.count ? scRepeater.itemAt(currentIndex) : null
+
+	columns: columnCount
+	Repeater {
+		id: scRepeater
+		model: Planck.librarianController.browserSourceControllerPtr().availableSourceModel()
+		delegate: AvailableSourceDelegate {
+			visible: ["TIDAL", "Tidal", "SoundCloud"].indexOf(model.name) < 0
+			width: availableSource.cellWidth
+			height: availableSource.cellHeight
+			cellContentWidth: availableSource.cellWidth - availableSource.cellPadding * 2
+			cellCcontentHeight: availableSource.cellHeight - availableSource.cellPadding * 2
+		}
+	}
+}
 """
 
 STREAM_SWITCHES = """
@@ -797,6 +838,16 @@ def three_band(style_name, band, colors=BAND_COLORS):
     return f'(root.scWave === "3band" ? "{colors[band]}" : Style.{style_name})'
 
 
+def v53():
+    """5.3.0 renamed the skin root, ran qmlformat and moved or rewrote a few views."""
+    return ROOT == "Skins/Embedded/"
+
+
+def window():
+    # The QML name of Engine's window: MainWindow up to 5.0.4, planckQuickView in 5.3.0.
+    return "planckQuickView" if v53() else "MainWindow"
+
+
 def edits(dev: bool):
     v = ROOT + "Views/"
     prefs = v + "ControlCenter/Tabs/Preferences/"
@@ -825,7 +876,7 @@ def edits(dev: bool):
         ROOT + "Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml": [(
             "      let messageObject = {", "      Planck.librarianController.deviceEjectedImproperly = false\n      return\n      let messageObject = {")],
         ROOT + "EmbeddedMain.qml": [
-            ("	Connections {\n		target: MainWindow\n", services + main + "\n	Connections {\n		target: MainWindow\n"),
+            (f"	Connections {{\n		target: {window()}\n", services + main + f"\n	Connections {{\n		target: {window()}\n"),
             ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG),
         ],
         v + "Common/Waveform/Waveform.qml": wave,
@@ -893,18 +944,19 @@ def edits(dev: bool):
             ("down: pressed || isSelected(text)", "down: pressed || isSelected(modelData)"),
             ("if(isSelected(text) && entry.defaultIndex", "if(isSelected(modelData) && entry.defaultIndex"),
         ],
-        prefs + "TabContents/DeviceTabContent.qml": [
-            ('import "../Entries"\n', 'import "../Entries"\nimport "../Entries/Base" as EntryBase\nimport Planck 1.0\n'),
+        # 5.3.0 moved it up from TabContents/, so its imports lost the "../".
+        prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
+            (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
             ("		PlayerNumber { },\n", LANGUAGE_ENTRY + QUALITY_ENTRY + JOG_ENTRY + "		PlayerNumber { },\n"),
         ],
         prefs + "Entries/StreamingServices.qml": [
-            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && provider.name !== "TIDAL" && provider.name !== "SoundCloud"\n'),
+            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud"].indexOf(provider.name) < 0\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),
             ('	label: "Streaming"\n', '	label: "Streaming"\n' + STREAM_SWITCHES),
         ],
         v + "BrowserSource/ConnectedSource.qml": [
             ("	currentIndex: -1\n", "	currentIndex: -1\n" + SOURCE_FOOTER),
-            ("		height: 108\n		leftPadding", '		height: model.name === "TIDAL" || model.name === "SoundCloud" ? 0 : 108\n		visible: model.name !== "TIDAL" && model.name !== "SoundCloud"\n		Component.onCompleted: if (model.name === "TIDAL") connectedSource.scTidalRow = this\n		leftPadding'),
+            ("		height: 108\n		leftPadding", '		height: ["TIDAL", "Tidal", "SoundCloud"].indexOf(model.name) >= 0 ? 0 : 108\n		visible: ["TIDAL", "Tidal", "SoundCloud"].indexOf(model.name) < 0\n		Component.onCompleted: if (model.name === "TIDAL" || model.name === "Tidal") connectedSource.scTidalRow = this\n		leftPadding'),
         ],
         v + "ControlCenter/Tabs/ControlCenterTab.qml": [
             ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),
@@ -915,7 +967,12 @@ def edits(dev: bool):
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewHeader.qml": [
             ("text: breadcrumbViewHeader.title\n", 'text: ["My Playlists", "My Collection"].indexOf(breadcrumbViewHeader.title) >= 0 ? root.scT(breadcrumbViewHeader.title) : breadcrumbViewHeader.title\n'),
         ],
-        v + "BrowserSource/SourceScreen.qml": [("						AvailableSource {\n", AVAILABLE_TILES + "						AvailableSource {\n")],
+        # Services switched off in Settings > Streaming stay hidden here, as stock ones do.
+        v + "BrowserSource/AvailableSource.qml": AVAILABLE_SOURCE,
+        v + "BrowserSource/AvailableSourceDelegate.qml": [
+            ("GridView.view.model.index(model.index, 0)", "Planck.librarianController.browserSourceControllerPtr().availableSourceModel().index(model.index, 0)"),
+            ("GridView.isCurrentItem || cellContent.pressed", "availableSource.currentIndex === model.index || cellContent.pressed"),
+        ],
         v + "Streaming/StreamingDialog.qml": [
             # This limit is for TIDAL's own qualities; DJ sets here run for hours.
             ("		function onShowTrackTooLong() {\n", "		function onShowTrackTooLong() {\n			return\n"),
@@ -940,7 +997,15 @@ def edits(dev: bool):
                 '						text: service.provider ? root.scT("Connecting to") + " " + root.scBrand(service.provider.displayName) : ""\n',
             ),
         ],
-        v + "Streaming/StreamingUtilityDialog.qml": [
+        v + "Streaming/StreamingUtilityDialog.qml": [(
+            '            color: Style.icon01Color\n'
+            '            source: dialog.provider ? "qrc:/streaming/%1/Logo_Horizontal.png".arg(dialog.provider.providerType) : ""\n',
+            '            Layout.preferredWidth: root.scScope && root.scScope !== "tidal" ? 96 : -1\n'
+            '            Layout.preferredHeight: root.scScope && root.scScope !== "tidal" ? 96 : -1\n'
+            '            useOriginal: !!(root.scScope && root.scScope !== "tidal")\n'
+            '            color: Style.icon01Color\n'
+            '            source: dialog.provider ? (root.scScope && root.scScope !== "tidal" ? root.scIcon(root.scScope) : "qrc:/streaming/%1/Logo_Horizontal.png".arg(dialog.provider.providerType)) : ""\n',
+        )] if v53() else [
             (
                 '			width: 400\n			height: (src.height / src.width) * width\n			color: Style.icon01Color\n			source: dialog.provider ? "qrc:/streaming/%1/Logo.png".arg(dialog.provider.providerType) : ""\n',
                 '			width: root.scScope && root.scScope !== "tidal" ? 96 : 400\n			height: root.scScope && root.scScope !== "tidal" ? 96 : (src.height / src.width) * width\n			useOriginal: !!(root.scScope && root.scScope !== "tidal")\n			color: Style.icon01Color\n			source: dialog.provider ? (root.scScope && root.scScope !== "tidal" ? root.scIcon(root.scScope) : "qrc:/streaming/%1/Logo.png".arg(dialog.provider.providerType)) : ""\n',
@@ -972,7 +1037,7 @@ def edits(dev: bool):
             ' ? "http://127.0.0.1:8080/v1/sc5000/art?song=" + encodeURIComponent(root.scPlainTitle(row.modelData.song)) + "&artist=" + encodeURIComponent(row.modelData.artist || "")'
             ' : (row.modelData.albumArt ? row.modelData.albumArt : "")',
         )],
-        v + "BrowseView/Components/Components/Bpm.qml": [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
+        v + "BrowseView/Components/Components/" + ("BrowseViewBpm.qml" if v53() else "Bpm.qml"): [('text: row.modelData.bpm || ""', 'text: row.modelData.bpm || root.scPreview(row.modelData.providerName)[1]')],
         v + "BrowseView/Components/Components/Key.qml": [('text: row.modelData.key || ""', 'text: row.modelData.key || root.scPreview(row.modelData.providerName)[2] || ""')],
         v + "BrowseView/Components/Components/Song.qml": [('title: row.modelData.song || ""', 'title: root.scPlainTitle(row.modelData.song)')],
         # Selecting a drive that carries an Engine profile asked "Load drive profile to
@@ -998,7 +1063,8 @@ def edits(dev: bool):
                 '		text: root.scT("WAITING FOR") + " " + root.scBrand(providerName).toUpperCase()\n',
             ),
         ],
-        v + "Common/Sidebar/Sidebar.qml": [
+        # 5.3.0 keeps the old sidebar as LegacySidebar for the legacy browse view.
+        v + "Common/Sidebar/" + ("LegacySidebar.qml" if v53() else "Sidebar.qml"): [
             ("source: browserSource.sourceIconUrl\n", 'source: browserSource.sourceIconUrl.indexOf("TIDAL") >= 0 && root.scScope ? root.scIcon(root.scScope) : browserSource.sourceIconUrl\n'),
             ("useOriginal: browserSource.useOriginalIcon\n", 'useOriginal: browserSource.useOriginalIcon || browserSource.sourceIconUrl.indexOf("TIDAL") >= 0\n'),
             # "History" is also compared in Historylist.qml, so translate() leaves it alone everywhere.
@@ -1030,7 +1096,7 @@ def legacy_qml_fixes():
     # a text field (on-screen keyboard) holds it.
     restore_guard = (
         "if(!visible || !isCurrentFocusArea || activeFocus || root.dialogOpen || root.messageBoxOpen) return\n"
-        "				const item = MainWindow.activeFocusItem\n"
+        f"				const item = {window()}.activeFocusItem\n"
         "				if(item && item.inputMethodHints !== undefined) return\n"
     )
     return {
@@ -1065,7 +1131,7 @@ def legacy_qml_fixes():
             "						contentView.currentRowIndex = index\n					}\n					breadcrumbView.push()\n"
             "					Qt.callLater(function() {\n"
             "						if(!breadcrumbView.visible || !breadcrumbView.isCurrentFocusArea || root.dialogOpen || root.messageBoxOpen) return\n"
-            "						const item = MainWindow.activeFocusItem\n"
+            f"						const item = {window()}.activeFocusItem\n"
             "						if(item && item.inputMethodHints !== undefined) return\n"
             "						breadcrumbView.forceActiveFocus()\n"
             "					})\n"
@@ -1076,6 +1142,33 @@ def legacy_qml_fixes():
         # switches it: if the provider type has no such property the stock
         # logout keeps working.
         v + "Streaming/CloudUtilityDialog.qml": [(
+            '            label: "Account"\n'
+            '            buttons: ["Log Out"]\n'
+            "            onClicked: label => {\n"
+            '                Planck.getProperty("/Client/Librarian/Streaming/LogoutSpinner").translator.state = true\n'
+            "                Planck.librarianController.streamingInterfaceController.displayLogout(dialog.provider)\n"
+            "            }\n"
+            "            attachment: Elements.BusyIndicator {\n"
+            '                running: Planck.getProperty("/Client/Librarian/Streaming/LogoutSpinner").translator.state\n',
+            "            id: scAccount\n"
+            "            readonly property bool scLoggedOut: !!dialog.provider && dialog.provider.loggedIn === false\n"
+            '            label: "Account"\n'
+            '            buttons: [scLoggedOut ? "Log In" : "Log Out"]\n'
+            "            onClicked: label => {\n"
+            "                const service = dialog.provider\n"
+            "                if (!service) return\n"
+            "                const controller = Planck.librarianController.streamingInterfaceController\n"
+            "                if (scLoggedOut) {\n"
+            "                    dialog.close()\n"
+            "                    controller.showAddAccountDialog(service)\n"
+            "                } else {\n"
+            '                    Planck.getProperty("/Client/Librarian/Streaming/LogoutSpinner").translator.state = true\n'
+            "                    controller.displayLogout(service)\n"
+            "                }\n"
+            "            }\n"
+            "            attachment: Elements.BusyIndicator {\n"
+            '                running: !scAccount.scLoggedOut && Planck.getProperty("/Client/Librarian/Streaming/LogoutSpinner").translator.state\n',
+        )] if v53() else [(
             '			buttonText: "LOG OUT"\n'
             "			showSpinner: pLogoutSpinner.translator.state\n"
             "			onClicked: {\n"
@@ -1158,10 +1251,17 @@ def load_dict():
     return rows
 
 
+def translated_qml(qrc: Path):
+    for f in sorted(qrc.rglob("*.qml")):
+        rel = f.relative_to(qrc).as_posix()
+        if rel.startswith(TRANSLATED) and "/Demo/" not in rel:
+            yield f, rel
+
+
 def compared_strings(qrc: Path):
     """Literals used in comparisons drive logic, so they must stay in English."""
     found = set()
-    for f in qrc.rglob("*.qml"):
+    for f, _ in translated_qml(qrc):
         found |= set(re.findall(r'[=!]==?\s*"([^"\n]+)"', f.read_text(encoding="utf-8", errors="replace")))
     return found
 
@@ -1193,6 +1293,10 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--dev", action="store_true", help="add the eval harness (never ship this)")
     a = ap.parse_args()
+    global ROOT
+    ROOT = next((r for r in ("Skins/EmbeddedCommon/", "Skins/Embedded/") if (a.qrc / r / "EmbeddedMain.qml").is_file()), None)
+    if not ROOT:
+        raise SystemExit(f"{a.qrc}: no Skins/EmbeddedCommon or Skins/Embedded EmbeddedMain.qml")
     shutil.rmtree(a.out, ignore_errors=True)
     base = {}
     for rel, change in edits(a.dev).items():
@@ -1209,10 +1313,7 @@ def main():
         table = {en: t[lang] for en, t in rows.items()} if lang != "en" else {}
         files = dict(base)
         if table:
-            for f in a.qrc.rglob("*.qml"):
-                rel = f.relative_to(a.qrc).as_posix()
-                if "/Demo/" in rel:
-                    continue
+            for f, rel in translated_qml(a.qrc):
                 source = files.get(rel) or f.read_text(encoding="utf-8", errors="strict")
                 changed = translate(source, table, skip)
                 if changed != source:
