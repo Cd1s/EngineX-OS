@@ -1,6 +1,7 @@
 package prolink
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -144,4 +145,54 @@ func (r mediaReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		return 0, err
 	}
 	return r.ReaderAt.ReadAt(p, off)
+}
+
+// FetchTrack copies the audio of track id from a player's media slot into dir
+// and returns the local file (#49: a shadow deck plays what a CDJ plays). A
+// copy already in dir is reused.
+// shortcut: the copy is keyed by host, slot and track id, so a different stick
+// in the same slot with the same id reuses a stale copy until dir is cleared.
+func FetchTrack(ctx context.Context, c *NFSClient, slot byte, id uint32, dir string) (string, error) {
+	export, err := SlotExport(slot)
+	if err != nil {
+		return "", err
+	}
+	pdb, _, err := c.Fetch(ctx, export, "/"+pdbPath, maxPDB)
+	if err != nil {
+		return "", err
+	}
+	lib, err := rekordbox.ParsePDB(bytes.NewReader(pdb), int64(len(pdb)))
+	if err != nil {
+		return "", err
+	}
+	rel := ""
+	for _, t := range lib.Tracks {
+		if t.ID == id {
+			rel, _ = SafeRel(t.Path)
+			break
+		}
+	}
+	if rel == "" {
+		return "", fmt.Errorf("prolink: track %d is not in the player's export", id)
+	}
+	local := filepath.Join(dir, fmt.Sprintf("%s-%d-%d%s", c.IP, slot, id, strings.ToLower(filepath.Ext(rel))))
+	if _, err := os.Stat(local); err == nil {
+		return local, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(dir, ".fetch-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(f.Name())
+	_, err = c.FetchTo(ctx, export, "/"+filepath.ToSlash(rel), f, maxAudio)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return "", err
+	}
+	return local, os.Rename(f.Name(), local)
 }

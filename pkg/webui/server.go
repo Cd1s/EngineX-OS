@@ -96,6 +96,7 @@ type Server struct {
 	soundCloudAuth *providers.SoundCloudAuth
 	// beatport is the owner's account, shared because each refresh rotates its token.
 	beatport *providers.Beatport
+	shadow   *shadowState // #49 shadow decks
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
@@ -103,6 +104,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 		cfg.AccessToken = providers.RandomID()
 	}
 	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}, logins: map[string]*loginFlow{}}
+	s.shadow = newShadowState()
 	exportCfg := cfg.ProlinkExport
 	if exportCfg.MediaCache == nil {
 		cacheRoot := cfg.StateDir
@@ -183,6 +185,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /api/prolink", s.prolinkGet)
 	s.mux.HandleFunc("POST /api/prolink", s.prolinkPost)
 	s.mux.HandleFunc("GET /api/drives", s.dropDrivesGet)
+	s.mux.HandleFunc("GET /peer/decks", s.peerDecksGet)
+	s.mux.HandleFunc("GET /peer/decks/{n}/audio", s.peerAudioGet)
 	s.mux.HandleFunc("POST /api/drop", s.drop)
 	s.soundCloudAuth = &providers.SoundCloudAuth{TokenURL: cfg.SoundCloudTokenURL, Path: filepath.Join(cfg.StateDir, "soundcloud-token.json"), HTTP: cfg.HTTP}
 	if cfg.BPM != nil {

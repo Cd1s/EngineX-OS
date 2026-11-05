@@ -195,3 +195,25 @@ func TestNFSServerConfinement(t *testing.T) {
 		t.Fatal("outside file changed")
 	}
 }
+
+func TestFetchTrackCopiesOneTrack(t *testing.T) {
+	usb := t.TempDir()
+	testfixture.Export(t, usb)
+	player := newFakePlayer(t, usb)
+	c := &prolink.NFSClient{IP: net.IPv4(127, 0, 0, 1), Portmap: player.port()}
+	dir := t.TempDir()
+	got, err := prolink.FetchTrack(t.Context(), c, 3, 2, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := os.ReadFile(filepath.Join(usb, "MUSIC/two.flac"))
+	if b, err := os.ReadFile(got); err != nil || string(b) != string(want) || filepath.Ext(got) != ".flac" {
+		t.Fatalf("%s: %v", got, err)
+	}
+	if again, err := prolink.FetchTrack(t.Context(), c, 3, 2, dir); err != nil || again != got {
+		t.Fatalf("reuse: %s %v", again, err)
+	}
+	if _, err := prolink.FetchTrack(t.Context(), c, 3, 999, dir); err == nil {
+		t.Fatal("unknown track fetched")
+	}
+}
