@@ -328,7 +328,7 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
   - 自动增益最后保持关闭（默认值）。实际听感还要维护者在实机上试听确认。
 - **回滚点**：`684142f`（5.3.0.2 README 提交）。实机可以用上面的备份恢复。
 
-## 2026-11-06：#70 / #71 / #73、双 SC5000 + CDJ-3000 联调修复，5.3.0.2 候选构建（Opus 5.5，未推送、未发版）
+## 2026-11-06：#70 / #71 / #73、双 SC5000 + CDJ-3000 联调修复，5.3.0.2 候选构建（Opus 5.5，已发布 v5.3.0.2）
 
 - **#70 Spotify**：去掉内置 Client ID（`bd6188a` 后改写为 `280a2ca`），每位碟机主人在网页控制台填自己的应用；没填时登录、手机页和中继都给出明确提示。`release-5.3.0.2` 分支历史已用 filter-branch 抹掉旧 ID 和私有主机名、序列号（162 个提交 0 命中）。
 - **#73 「Track not found」**：根因不是 token 过期。实机日志显示 Engine 在 18:58 拿到歌单，stream-sync 18:59 重启（热部署），19:48 加载 ID 342–344 得到 404。网关的数字 ID 只在内存里，重启后从 1 重新编号。修复：ID、计数器和歌单写入 `state/gateway-tracks.json`（变化后 3 s、关闭时），启动时读回；owner 的 key 不再用随机会话 ID（`9e8f09e`、`f021655`）。deemixd 每次下载都重新用 ARL 登录，网关 token 24 h 且任何刷新都成功，各服务都会在 401 时续期，这几处无需改动。
@@ -341,5 +341,8 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **测试（编译机，`--clean`）**：发版规则第 2 步全部通过（gofmt、vet、21 个 Go 包 race、overlay、az01-packer、stems、`test_dsp_smooth` 三种编译、`test_stems_feature` 两个底包、`test_edisksd_hook` 含 `--mounts`、`test_sclive4_bootstrap.sh`）。
 - **候选构建** `release-5.3.0.2-rc1`（`none`，未上传）：SC5000 组 `cfa266a8…`、SC6000 组 `b407accd…`、PRIME 4 组 `061355e3…`；三组解包 `verified: true`、版本 5.3.0.2；`/root/.ssh/authorized_keys` 只有原厂的 `cert-authority`（与官方 5.3.0 镜像逐字节相同）。
 - **门禁**（`release-gate.sh`，旧镜像为 5.3.0.1.1）：第一次三组各 91 PASS / 1 FAIL，失败项都是 UI 包计数 230 ≠ 229（见上面 `ac3448b`）；修正后重跑，JP07、JP13、JC11 三组均为 **92 PASS / 0 FAIL**（`/var/tmp/sc5000-gate-5302rc1b-*`）。
-- **未完成，需要维护者决定**：`origin/main` 的 `e32a76e`（Engine m.db / 流媒体曲目导出给 CDJ，约 1500 行）不在本分支，和本分支的 `export.go` 有 5 处冲突（最大 130 行）。直接把本分支强推到 main 会丢掉它，所以没有推送、没有建 tag 和 Release、没有关闭 issue。
-- **回滚点**：5.3.0.1.1 的构建提交 `897510d`；改写前的分支在 `backup/pre-private-scrub-20261106`。
+- **#63 合入（`1d4bb2a`）**：main 上的 `e32a76e`（把只有 Engine 库的盘导出给 CDJ）合入本分支，并做了三处改动：不改写盘上真实的 rekordbox 导出（原版会用我们自己的 PDB 写入器把它重写一遍）；先过导出根目录检查再生成；rb-bridge 不把生成的导出再导回 Engine。另一套没有调用方的碟机状态 API 没有合入。实机两台的导出盘都带真实 rekordbox 导出，部署后 `export.pdb` 哈希不变、没有生成标记。
+- **CDJ 速度回到 0 不跟随（`ae8f32b`）**：合并播放器数据包时把 pitch 0 当成「没有」，CDJ 从跟随 145 BPM 回到 120 BPM 后，两台的影子轨一直停在 +20.83%。状态、拍点、绝对位置包里的 0 现在都照收。实机：CDJ 作为 Master 调到 +5% 再回 0、暂停、播放，两台影子轨都跟上，Master 只有一个。
+- **发布**：`release-5.3.0.2` 推到 `origin/main`（`--force-with-lease`，旧 main `e32a76e` 的完整历史另存了 bundle），从 `ae8f32b` 用 `--clean`、`none` 构建 `release-5.3.0.2-final`：SC5000 组 `97a2c61539029753b1aea991b3ac1c3edc03cee6b8eb28cd7811c8c352a287bb`、SC6000 组 `01c7769ed2954679d3caef3247568f4207bd8549d423ddf70b8ba6c9c7078e39`、PRIME 4 组 `56ae8088845b63acb68ae60c324669402f00ba7f220f7d8e45a9cd6862e6c7e7`。三组解包 `verified: true`、版本 5.3.0.2；门禁三组 92 PASS / 0 FAIL；Release `v5.3.0.2` 设为 Latest，9 个资产的 digest 与 `SHA256SUMS.txt` 一致，README 24 条下载链接全部 200。
+- **回滚点**：上一版 Release `v5.3.0.1.1`（构建提交 `897510d`）；改写前的 main 在备份 bundle 里。
+- **实机影响**：两台 JP07 仍是 5.3.0.1.1 镜像加 5.3.0.2 热部署（bind mount，重启后失效）；正式的 5.3.0.2 要用在线更新或 U 盘刷入。
