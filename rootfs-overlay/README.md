@@ -30,8 +30,9 @@ so a library too large to convert in that time stays unconverted.
 Nothing may write these databases once Engine has attached. Concurrent writers
 produced `SQLITE_CORRUPT` and index damage on real media, and Engine then deleted
 `m.db`. So `rb-bridge --watch` and `engine-guardian --watch` exit at once (the
-player's base `/etc` still enables both from older images), `rb-bridge.service`
-and `engine-guardian.service` are not enabled, and hook repairs do not alter
+player's base `/etc` still enables both from older images),
+`engine-guardian.service` is not enabled, `rb-bridge.service` runs only
+`--prolink` (receives Pro DJ Link, writes no database), and hook repairs do not alter
 Engine's views or triggers, which Engine compares on attach.
 
 HFS+ must stay read-only. On the 6.6.119 RT kernel `hfsplus.ko` hits
