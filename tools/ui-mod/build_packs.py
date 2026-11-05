@@ -213,7 +213,7 @@ SERVICES_MAIN = """
 			})
 		}
 	}
-	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud"]
+	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport"]
 	property var scLoggedIn: []
 	property string scScope: ""
 	readonly property var scServices: [
@@ -221,13 +221,15 @@ SERVICES_MAIN = """
 		{ id: "netease", name: scT("NetEase Cloud Music") },
 		{ id: "spotify", name: "Spotify" },
 		{ id: "deezer", name: "Deezer" },
-		{ id: "soundcloud", name: "SoundCloud" }
+		{ id: "soundcloud", name: "SoundCloud" },
+		{ id: "beatport", name: "Beatport" }
 	]
 	readonly property var scDict: (@DICT@)
 	function scT(s) { return scDict[s] || s }
 	function scIcon(id) {
-		if (id === "tidal") return "qrc:/UIKit.1/UIKit/Icons/SourceTIDALColored.png"
-		if (id === "soundcloud") return "qrc:/UIKit.1/UIKit/Icons/SourceSoundCloudColored.png"
+		if (id === "tidal") return "qrc:/@ICONS@/SourceTIDALColored.png"
+		if (id === "soundcloud") return "qrc:/@ICONS@/SourceSoundCloudColored.png"
+		if (id === "beatport") return "qrc:/@ICONS@/SourceBeatport%20LINKColored.png"
 		return "file:///data/sc5000-custom/ui/icons/" + id + ".png"
 	}
 	// The gateway appends " [128 BPM 8A]" to a row's label; see labelWithBPM. A value
@@ -622,7 +624,7 @@ SOURCE_FOOTER = """
 """
 
 # Connect New Sources, minus stock TIDAL (kept integrated for the custom services; 5.3.0
-# names it "Tidal") and SoundCloud. A GridView keeps a blank cell for a hidden delegate; Grid skips it.
+# names it "Tidal"), SoundCloud and Beatport LINK, which stream-sync replaces. A GridView keeps a blank cell for a hidden delegate; Grid skips it.
 # The GridView properties SourceScreen.qml sets stay declared.
 AVAILABLE_SOURCE = """import QtQuick
 import Planck
@@ -645,7 +647,7 @@ Grid {
 		id: scRepeater
 		model: Planck.librarianController.browserSourceControllerPtr().availableSourceModel()
 		delegate: AvailableSourceDelegate {
-			visible: ["TIDAL", "Tidal", "SoundCloud"].indexOf(model.name) < 0
+			visible: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(model.name) < 0
 			width: availableSource.cellWidth
 			height: availableSource.cellHeight
 			cellContentWidth: availableSource.cellWidth - availableSource.cellPadding * 2
@@ -816,6 +818,83 @@ WAVE_TILE = """
 		}
 """
 
+# Smart Sync (5.3.0 only): a synced deck with a track widens its Pitch Range to
+# the smallest step that reaches the master tempo. It never narrows the range.
+# An empty deck still reports OriginalBPM 120, hence SongLoaded.
+SMART_SYNC_MAIN = """
+	Instantiator {
+		model: root.decks && root.decks.length ? root.decks : [1, 2]
+		delegate: QtObject {
+			readonly property int deckIdx: parseInt(modelData)
+			readonly property QObjProperty pSync: Planck.getProperty("/Engine/Deck%1/SyncMode".arg(deckIdx))
+			readonly property QObjProperty pLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deckIdx))
+			readonly property QObjProperty pOrigBpm: Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(deckIdx))
+			readonly property QObjProperty pMasterBpm: Planck.getProperty("/Engine/Master/MasterTempo")
+			readonly property real syncNeed: {
+				const s = pSync && pSync.translator, l = pLoaded && pLoaded.translator, o = pOrigBpm && pOrigBpm.translator, m = pMasterBpm && pMasterBpm.translator
+				if (!s || !l || !o || !m || s.string === "Off" || !l.state || !(o.unnormalized > 0)) return 0
+				return Math.abs(m.unnormalized - o.unnormalized) / o.unnormalized * 100
+			}
+			onSyncNeedChanged: root.scWidenRange(deckIdx, syncNeed)
+		}
+	}
+	function scWidenRange(deck, need) {
+		const t = Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(deck)).translator
+		if (!t || need <= parseFloat(t.string)) return
+		const i = t.entries.findIndex(e => parseFloat(e) >= need)
+		t.index = i < 0 ? t.entries.length - 1 : i
+	}
+"""
+
+# Control Center (5.3.0 only): Engine's own Sync Mode preference (Bar / Beat /
+# Tempo) as a tile in the WAVE_TILE style, next to SMART_SYNC_MAIN.
+SYNC_TILE = """
+		Rectangle {
+			id: scSyncTile
+			objectName: "ControlCenter_SmartSync"
+			readonly property var translator: Planck.getProperty("/Client/Preferences/Profile/Application/SyncMode").translator
+			width: 256
+			height: 104
+			radius: 16
+			color: Style.surface03Color
+			Text {
+				x: 14
+				y: 8
+				text: root.scT("Smart Sync")
+				font: Style.fontH4
+				color: Style.font01Color
+			}
+			Row {
+				x: 12
+				y: 36
+				Repeater {
+					model: scSyncTile.translator.entries
+					Rectangle {
+						objectName: "ControlCenter_SmartSync_" + modelData
+						width: (scSyncTile.width - 24) / 3
+						height: 56
+						color: scSyncTile.translator.index === index ? "#00c3e3" : syncTap.pressed ? "#6a6a6a" : "#4a4a4a"
+						border {
+							width: 1
+							color: "#a8a8a8"
+						}
+						Text {
+							anchors.centerIn: parent
+							text: modelData.toUpperCase()
+							font: Style.fontH5
+							color: "#ffffff"
+						}
+						MouseArea {
+							id: syncTap
+							anchors.fill: parent
+							onClicked: scSyncTile.translator.index = index
+						}
+					}
+				}
+			}
+		}
+"""
+
 # CDJ-3000 3-Band palette (blue lows, gold mids, white highs): played,
 # fading and past shades of each band.
 BAND_COLORS = {"Low": "#4a78ff", "Mid": "#f0b400", "High": "#ffffff"}
@@ -870,7 +949,7 @@ def edits(dev: bool):
          "			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n"),
     ]
     main = DEV_HARNESS if dev else ""
-    services = SERVICES_MAIN.replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS))
+    services = SERVICES_MAIN.replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons").replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS)) + (SMART_SYNC_MAIN if v53() else "")
     out = {
         # The flag is still cleared, which is what pressing "Ok" would do.
         ROOT + "Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml": [(
@@ -950,17 +1029,17 @@ def edits(dev: bool):
             ("		PlayerNumber { },\n", LANGUAGE_ENTRY + QUALITY_ENTRY + JOG_ENTRY + "		PlayerNumber { },\n"),
         ],
         prefs + "Entries/StreamingServices.qml": [
-            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud"].indexOf(provider.name) < 0\n'),
+            ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(provider.name) < 0\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),
             ('	label: "Streaming"\n', '	label: "Streaming"\n' + STREAM_SWITCHES),
         ],
         v + "BrowserSource/ConnectedSource.qml": [
             ("	currentIndex: -1\n", "	currentIndex: -1\n" + SOURCE_FOOTER),
-            ("		height: 108\n		leftPadding", '		height: ["TIDAL", "Tidal", "SoundCloud"].indexOf(model.name) >= 0 ? 0 : 108\n		visible: ["TIDAL", "Tidal", "SoundCloud"].indexOf(model.name) < 0\n		Component.onCompleted: if (model.name === "TIDAL" || model.name === "Tidal") connectedSource.scTidalRow = this\n		leftPadding'),
+            ("		height: 108\n		leftPadding", '		height: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(model.name) >= 0 ? 0 : 108\n		visible: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(model.name) < 0\n		Component.onCompleted: if (model.name === "TIDAL" || model.name === "Tidal") connectedSource.scTidalRow = this\n		leftPadding'),
         ],
         v + "ControlCenter/Tabs/ControlCenterTab.qml": [
             ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),
-            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"])),
+            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + (SYNC_TILE if v53() else "")),
         ],
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],
@@ -1307,6 +1386,11 @@ def main():
         for old, new in change:
             text = patch(text, old, new, rel)
         base[rel] = text
+    # A qrc path this base does not ship renders as a blank icon (5.3.0 has no UIKit.1/).
+    for rel, text in base.items():
+        for ref in re.findall(r'"qrc:/([^"$%{}+]+\.(?:png|svg|jpg|qml))"', text.replace("%20", " ")):
+            if not (a.qrc / ref).is_file():
+                raise SystemExit(f"{rel}: qrc:/{ref} is not in {a.qrc}")
     rows = load_dict()
     skip = compared_strings(a.qrc)
     for lang in ("en", "zh-Hans", "zh-Hant"):

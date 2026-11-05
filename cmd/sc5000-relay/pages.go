@@ -86,6 +86,21 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 <button class="btn purple" type="submit">完成连接</button>
 </form></div></body></html>{{end}}
 
+{{define "beatportPage"}}{{template "head" .}}<div class="wrap">
+<h1>连接 Beatport</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
+{{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的登录。</div>{{end}}
+{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+<form class="card" method="post" action="/m/beatport?t={{.Token}}">
+<label for="bp-user">Beatport 账号</label>
+<input id="bp-user" name="user" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="邮箱或用户名">
+<label for="bp-pass" style="margin-top:12px">密码</label>
+<input id="bp-pass" name="password" type="password" autocomplete="current-password">
+<p class="hint">中继只用密码换取登录令牌，碟机只保存令牌。Essential 播放 128k 流，Advanced 下载 128k AAC，Professional 下载 FLAC 或 256k AAC。</p>
+<details style="margin-top:12px"><summary>或者粘贴 Token</summary>
+<textarea name="token" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder='{"access_token":"…","refresh_token":"…"} 或 Access Token'></textarea></details>
+<button class="btn green">连接</button>
+</form></div></body></html>{{end}}
+
 {{define "deezerPage"}}{{template "head" .}}<div class="wrap">
 <h1>连接 Deezer</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
 {{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的设置。</div>{{end}}

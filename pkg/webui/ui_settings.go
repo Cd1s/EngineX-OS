@@ -20,12 +20,12 @@ const defaultUIDir = "/data/sc5000-custom/ui"
 var (
 	uiLanguages    = []string{"en", "zh-Hans", "zh-Hant"}
 	uiWaveforms    = []string{"denon", "rgb", "3band"}
-	uiServices     = []string{"tidal", "netease", "spotify", "deezer", "soundcloud"}
+	uiServices     = []string{"tidal", "netease", "spotify", "deezer", "soundcloud", "beatport"}
 	uiQualities    = []string{qualityFLAC, quality320k}
 	uiJogModes     = []string{"static", "rainbow", "fast", "bpm"}
 	uiNeteaseModes = []string{neteaseOfficial, neteaseDeemix}
 	// TIDAL logs in through Engine's own flow against TIDAL's servers.
-	loginServices = []string{"netease", "spotify", "deezer", "soundcloud"}
+	loginServices = []string{"netease", "spotify", "deezer", "soundcloud", "beatport"}
 )
 
 const (
@@ -64,8 +64,14 @@ func (s *Server) uiDir() string {
 	return defaultUIDir
 }
 
+// uiServicesBeforeKnown are the services a settings file without "known=" (up to
+// 5.3.0.1) was written against. 5.0.4.2 saved all five by default, so without this
+// a service added later (Beatport) stayed hidden on every upgraded deck.
+var uiServicesBeforeKnown = []string{"tidal", "netease", "spotify", "deezer", "soundcloud"}
+
 // loadUI must be called with uiMu held. Bad or missing values get defaults.
 func (s *Server) loadUI() uiSettings {
+	known, saved := uiServicesBeforeKnown, false
 	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
@@ -108,9 +114,19 @@ func (s *Server) loadUI() uiSettings {
 			}
 		case "sources":
 			if list, err := parseUISources(val); err == nil {
-				v.Sources = list
+				v.Sources, saved = list, true
+			}
+		case "known":
+			known = strings.Split(val, ",")
+		}
+	}
+	if saved { // services added since the file was written start enabled; ones turned off stay off
+		for _, name := range uiServices {
+			if !slices.Contains(known, name) && !slices.Contains(v.Sources, name) {
+				v.Sources = append(v.Sources, name)
 			}
 		}
+		v.Sources, _ = parseUISources(strings.Join(v.Sources, ",")) // fixed order
 	}
 	_, err := os.Stat(filepath.Join(s.uiDir(), "safe-mode"))
 	v.SafeMode = err == nil
@@ -137,7 +153,7 @@ func (s *Server) saveUI(v uiSettings) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\njog=" + v.Jog + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
+	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\njog=" + v.Jog + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
 	if v.GitHubRepo != defaultGitHubRepo {
 		text += "github_repo=" + v.GitHubRepo + "\n"
 	}

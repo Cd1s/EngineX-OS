@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 const (
@@ -58,7 +60,9 @@ type session struct {
 	SpotifyToken    *spotifyToken   `json:"spotifyToken,omitempty"`
 	Deezer          *deezerInfo     `json:"deezer,omitempty"`
 	SoundCloud      *soundCloudInfo `json:"soundcloud,omitempty"`
-	Expires         time.Time       `json:"expires"`
+	// Beatport is the token the relay got by logging in; the password is not kept.
+	Beatport *providers.BeatportToken `json:"beatport,omitempty"`
+	Expires  time.Time                `json:"expires"`
 	// Trusted: the deck registered or polled it with the access password, so
 	// results from the phone may also update the server-wide config.
 	Trusted bool `json:"trusted,omitempty"`
@@ -67,11 +71,12 @@ type session struct {
 func (s *session) expired(now time.Time) bool { return now.After(s.Expires) }
 
 type pollResponse struct {
-	Status       string          `json:"status"`
-	Provider     string          `json:"provider,omitempty"`
-	SpotifyToken *spotifyToken   `json:"spotifyToken,omitempty"`
-	Deezer       *deezerInfo     `json:"deezer,omitempty"`
-	SoundCloud   *soundCloudInfo `json:"soundcloud,omitempty"`
+	Status       string                   `json:"status"`
+	Provider     string                   `json:"provider,omitempty"`
+	SpotifyToken *spotifyToken            `json:"spotifyToken,omitempty"`
+	Deezer       *deezerInfo              `json:"deezer,omitempty"`
+	SoundCloud   *soundCloudInfo          `json:"soundcloud,omitempty"`
+	Beatport     *providers.BeatportToken `json:"beatport,omitempty"`
 }
 
 // sessionStore keeps sessions in memory and mirrors them to disk so a
@@ -175,7 +180,7 @@ func (st *sessionStore) poll(token, clientID string, trusted bool) pollResponse 
 		s.Trusted = true
 		st.saveLocked()
 	}
-	return pollResponse{Status: s.Status, Provider: s.Provider, SpotifyToken: s.SpotifyToken, Deezer: s.Deezer, SoundCloud: s.SoundCloud}
+	return pollResponse{Status: s.Status, Provider: s.Provider, SpotifyToken: s.SpotifyToken, Deezer: s.Deezer, SoundCloud: s.SoundCloud, Beatport: s.Beatport}
 }
 
 // open returns a copy of the session for a phone page, creating it on demand
@@ -257,9 +262,9 @@ func (st *sessionStore) janitor() {
 			if now.After(s.Expires.Add(tombstoneTTL)) {
 				delete(st.m, k)
 				changed = true
-			} else if s.expired(now) && (s.SpotifyToken != nil || s.Deezer != nil || s.SoundCloud != nil || s.Verifier != "") {
+			} else if s.expired(now) && (s.SpotifyToken != nil || s.Deezer != nil || s.SoundCloud != nil || s.Beatport != nil || s.Verifier != "") {
 				// Expired sessions only answer "expired"; drop credentials early.
-				s.SpotifyToken, s.Deezer, s.SoundCloud, s.Verifier = nil, nil, nil, ""
+				s.SpotifyToken, s.Deezer, s.SoundCloud, s.Beatport, s.Verifier = nil, nil, nil, nil, ""
 				changed = true
 			}
 		}

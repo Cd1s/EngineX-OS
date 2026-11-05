@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 func wantsJSON(r *http.Request) bool {
@@ -92,6 +94,10 @@ func (s *server) handleMobileGet(w http.ResponseWriter, r *http.Request) {
 		renderPage(w, 200, "soundcloudPage", d)
 		return
 	}
+	if provider == "beatport" {
+		renderPage(w, 200, "beatportPage", pageData{Title: "连接 Beatport", Token: token, Done: sess.Status == "done"})
+		return
+	}
 	if sess.Status == "done" {
 		s.browser.closeToken(token)
 		renderPage(w, 200, "donePage", pageData{Title: "已完成连接", Provider: "deezer"})
@@ -161,6 +167,14 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 		s.mobileResult(w, r, provider, token, 200, err)
 		return
 	}
+	if provider == "beatport" {
+		tok, err := s.connectBeatport(ctx, strings.TrimSpace(firstOf(v, "user")), firstOf(v, "password"), strings.TrimSpace(firstOf(v, "token")))
+		if err == nil {
+			err = doneOK(s.sessions.complete(token, "beatport", nil, func(x *session) { x.Beatport = &tok }))
+		}
+		s.mobileResult(w, r, provider, token, 200, err)
+		return
+	}
 	if provider == "deezer" {
 		info, arlName, err := s.connectDeezer(ctx, firstOf(v, "user", "link", "url", "userId", "id"), firstOf(v, "arl"))
 		if err == nil {
@@ -192,6 +206,31 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mobileResult(w, r, provider, token, 200, err)
+}
+
+// connectBeatport logs in (or takes a pasted token) and checks the login reads the
+// account. Only the token travels on to the deck.
+func (s *server) connectBeatport(ctx context.Context, user, password, token string) (providers.BeatportToken, error) {
+	b := &providers.Beatport{BaseURL: s.beatportURL}
+	var err error
+	if token != "" {
+		var t providers.BeatportToken
+		if t, err = providers.ParseBeatportToken(token); err == nil {
+			err = b.SetToken(t)
+		}
+	} else if user == "" || password == "" {
+		return providers.BeatportToken{}, errors.New("请填写 Beatport 账号和密码，或者粘贴 Token")
+	} else {
+		err = b.Login(ctx, user, password)
+	}
+	if err == nil {
+		_, err = b.Playlists(ctx)
+	}
+	if err != nil {
+		log.Printf("beatport: login failed: %v", err)
+		return providers.BeatportToken{}, errors.New("Beatport 登录失败，请检查账号密码或 Token")
+	}
+	return b.Token(), nil
 }
 
 // connectDeezer resolves the pasted link/ID and/or validates the ARL. The caller
@@ -238,6 +277,10 @@ func (s *server) mobileResult(w http.ResponseWriter, r *http.Request, provider, 
 		}
 		sess, _ := s.sessions.get(token)
 		writeJSON(w, 200, map[string]any{"ok": true, "status": sess.Status, "deezer": sess.Deezer, "spotify": sess.SpotifyToken != nil})
+		return
+	}
+	if err != nil && provider == "beatport" {
+		renderPage(w, code, "beatportPage", pageData{Title: "连接 Beatport", Token: token, Error: err.Error()})
 		return
 	}
 	if err != nil && provider == "soundcloud" {

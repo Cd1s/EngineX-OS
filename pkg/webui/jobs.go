@@ -85,6 +85,7 @@ type Jobs struct {
 	// neteaseDirect reports whether NetEase tracks skip Deemix; nil tries Deemix first.
 	neteaseDirect func() bool
 	soundcloud    func() *providers.SoundCloud
+	beatport      func() *providers.Beatport
 	bpm           *providers.BPMStore
 }
 type fetched struct {
@@ -268,6 +269,14 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 	lookup, direct := j.netease, j.neteaseDirect
 	j.mu.Unlock()
 	var failures []error
+	if t.Provider == "beatport" {
+		dl, err := j.fromBeatport(ctx, t)
+		if err == nil {
+			return t, dl, nil
+		}
+		// Deemix and NetEase below match the track by ISRC, or artist and title.
+		failures = append(failures, err)
+	}
 	if t.Provider == "netease" {
 		if dl := j.p.Deemix.Cached("netease-" + t.ID); dl != nil {
 			return t, dl, nil
@@ -363,6 +372,77 @@ func (j *Jobs) fromSoundCloud(ctx context.Context, t providers.Track) (*deemixcl
 		return j.p.Deemix.SaveSplit(ctx, name, media.URLs[0])
 	}
 	return j.p.Deemix.SaveParts(ctx, name, media.Ext, media.URLs)
+}
+
+// fromBeatport takes the best file the subscription allows: FLAC on Professional
+// when the deck asks for lossless, else AAC. Essential has no file, only a stream.
+func (j *Jobs) fromBeatport(ctx context.Context, t providers.Track) (*deemixclient.Download, error) {
+	name := "beatport-" + t.ID
+	lossless := j.p.Deemix.Lossless()
+	cached := j.p.Deemix.Cached(name)
+	if cached != nil && (cached.Quality.Lossless || !lossless) {
+		return cached, nil
+	}
+	j.mu.Lock()
+	lookup := j.beatport
+	j.mu.Unlock()
+	var b *providers.Beatport
+	if lookup != nil {
+		b = lookup()
+	}
+	if b == nil {
+		if cached != nil {
+			return cached, nil
+		}
+		return nil, errors.New("beatport: not connected")
+	}
+	location, ext, err := b.Download(ctx, t.ID, lossless)
+	// AAC again would be no better than the file already on disk.
+	if err == nil && (cached == nil || ext == "flac") {
+		var dl *deemixclient.Download
+		if ext == "flac" {
+			dl, err = j.p.Deemix.SaveSplit(ctx, name, location)
+		} else {
+			dl, err = j.p.Deemix.SaveParts(ctx, name, "mp4", []string{location})
+		}
+		if err == nil {
+			return dl, nil
+		}
+		log.Printf("stream-sync: Beatport file of track %s unusable: %v", t.ID, err)
+	}
+	if cached != nil {
+		return cached, nil
+	}
+	return j.saveBeatportStream(ctx, b, name, t.ID)
+}
+
+// saveBeatportStream stores the track's stream as name.mp4.
+func (j *Jobs) saveBeatportStream(ctx context.Context, b *providers.Beatport, name, id string) (*deemixclient.Download, error) {
+	dir := j.p.Deemix.DownloadDir
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.CreateTemp(dir, ".part-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	final := filepath.Join(dir, name+".mp4")
+	if err = b.SaveStream(ctx, id, f); err == nil {
+		err = f.Close()
+	}
+	if err == nil {
+		err = os.Chmod(f.Name(), 0o644)
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), final)
+	}
+	if err != nil {
+		return nil, err
+	}
+	j.p.Deemix.Trim(final)
+	return &deemixclient.Download{Path: final, Quality: deemixclient.Quality{Label: "[AAC]", Format: "mp4"}}, nil
 }
 
 // A NetEase upload of another service's track may differ by fades of a few seconds.
