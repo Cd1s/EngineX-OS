@@ -207,8 +207,8 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **发版门禁（`tools/az01-packer/release-gate.sh`、`rootfs_audit.py`、`test_rootfs_audit.py`、`internal/testfixture/gate_test.go`；规则见 `.claude/rules/release-workflow.md` 4b 与 `CONTRIBUTING.md`）**：从上一版在线升级到新版，再在新版上开机做全功能验收，全部基于真实 `rootfs.ext2` 的 `unshare` + `qemu-arm` 沙箱。用 `rootfs_audit.py` 审计一遍当前已发布的 v5.3.0.1 镜像，正好报出这次的 2 个 FAIL（`Requires=etc.mount` / `var.mount`）。
 - **门禁顺带发现、已改进门禁的沙箱问题**：qemu-user 下 cmdline 多出解释器前缀，`pkill` 匹配不到 Engine；Engine 缺 `ttyS0` 中断会 abort；Engine 启动过程中会删除残留的 `/tmp/update-file-url`，所以门禁要等 Engine 起稳后再 `?apply=1`；`encrypt-fs.sh` 失败会走 `az01-update --erase-data`，门禁已用 shim 拦下。
 - **验证（编译机 IN）**：`gofmt`、静态检查、Go race 测试（20 个包）、`tests/test_rootfs_overlay.sh`（13 项）、`az01-packer`（49 项，含新增 5 项审计单测）、`tools/stems`（9 项）全部通过。门禁三个镜像组各跑一次，均从同机型的 5.0.4.2 起步：SC5000 JP07、SC6000 JP13、PRIME 4 JC11 全部 **74 PASS / 0 FAIL**。覆盖：5.0.4.2 在线升级（下载、校验、进入 Applying）；翻转一个字节的镜像在 Verifying 阶段被拒；新版开机后版本号、223 个 QML 全部替换、16 处 Engine 补丁、19 个 DSP guard、SQLite hook；TIDAL token 网关、Beatport 登录流程与手机页；stems-probe 握手与分轨；rb-bridge 转换 Rekordbox 导出；`sshd -t`；下一次在线升级到 5.3.0.2（mock）。沙箱没有 eMMC，Applying 之后报 `unsupported operation`，属于预期。
-- **实验室构建（基于 `045c0f2` 加未提交改动，未发布）**：SC5000 组 `eedde27a6c108156b685c9752bbb854d048a174e1a38c60139b33a58bd5a6af4`、SC6000 组 `e867261e9fe2c8c8d9a0edc249c9af8ca91b34cb2f2d838b9e577d5d303a9abe`、PRIME 4 组 `e53b75d86f02677d2313060f1c96bcd8b436138d756a4be582a386a82991fc7f`。正式重发前须先提交并推送，再用干净目录重新构建、重跑门禁。
+- **正式发布构建（基于 `008b153`，Release `v5.3.0.1` 刷新发布）**：SC5000 组 `460db079f6bb719176534832a10dfdac0e48199fe1dc732039db07c257379d41`、SC6000 组 `d35be991ce71afde1b3e5a478426eb0cd302807222dad0b44f5d1063485e54ae`、PRIME 4 组 `f859c39d6649b0f172a16dcc41dd4f49442ca68e9810a866d5a0bb7400976e6a`。
 - **回滚点**：`045c0f2`；碟机可随时刷回 `v5.0.4.2`。
-- **实机影响**：已发布的 v5.3.0.1（SC5000 组 `fc86f831…`）仍带 `Requires=` 问题，5.0.4.2 碟机在线升级后会退回原厂 UI 并丢失 SSH，需要尽快按第 0 步「同版本修复重发」（`--clobber`）。
+- **实机影响**：已修复 `Requires=` 依赖问题，5.0.4.2 在线升级至 5.3.0.1 能正常保留定制 UI 与 SSH 访问，Beatport 自动出现在来源列表中。
 
 
