@@ -177,6 +177,84 @@ func TestParsePlayerStatus(t *testing.T) {
 	}
 }
 
+func TestParseAbsolutePositionPacket(t *testing.T) {
+	ip := net.IPv4(192, 168, 1, 12)
+
+	// Truncated packet (< 0x3c)
+	bad := make([]byte, 0x30)
+	copy(bad, "Qspt1WmJOL")
+	bad[10] = 0x0b
+	if _, err := prolink.ParsePacket(bad, 50001, ip); err == nil {
+		t.Fatal("expected error for truncated 0x0b absolute position packet")
+	}
+
+	// Valid 60-byte 0x0b packet
+	pkt := make([]byte, 0x3c)
+	copy(pkt, "Qspt1WmJOL")
+	pkt[10] = 0x0b
+	copy(pkt[11:], "CDJ-3000")
+	pkt[0x1f] = 0x01
+	pkt[0x20] = 0x00
+	pkt[0x21] = 2 // Player number
+	binary.BigEndian.PutUint16(pkt[0x22:], 0x0018)
+	binary.BigEndian.PutUint32(pkt[0x24:], 215)   // 215 seconds track length
+	binary.BigEndian.PutUint32(pkt[0x28:], 45123) // 45123 ms playhead
+	binary.BigEndian.PutUint32(pkt[0x2c:], 312)   // +3.12% pitch
+	binary.BigEndian.PutUint32(pkt[0x38:], 1237)  // 123.7 effective BPM
+
+	d, err := prolink.ParsePacket(pkt, 50001, ip)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d.Name != "CDJ-3000" {
+		t.Errorf("got name %q, want CDJ-3000", d.Name)
+	}
+	if d.Number != 2 {
+		t.Errorf("got number %d, want 2", d.Number)
+	}
+	if d.DurationMS != 215000 {
+		t.Errorf("got duration %d, want 215000", d.DurationMS)
+	}
+	if d.PlayPositionMS != 45123 || !d.PrecisePosition {
+		t.Errorf("got position %d, precise=%v, want 45123, true", d.PlayPositionMS, d.PrecisePosition)
+	}
+	if math.Abs(d.Pitch-3.12) > 0.001 {
+		t.Errorf("got pitch %f, want 3.12", d.Pitch)
+	}
+	if math.Abs(d.EffectiveBPM-123.7) > 0.001 {
+		t.Errorf("got effective BPM %f, want 123.7", d.EffectiveBPM)
+	}
+
+	// Test negative pitch: -5.00% (-500)
+	negPitch := int32(-500)
+	binary.BigEndian.PutUint32(pkt[0x2c:], uint32(negPitch))
+	dNeg, err := prolink.ParsePacket(pkt, 50001, ip)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if math.Abs(dNeg.Pitch-(-5.0)) > 0.001 {
+		t.Errorf("got pitch %f, want -5.0", dNeg.Pitch)
+	}
+
+	// Test invalid / no track loaded (0xffffffff)
+	binary.BigEndian.PutUint32(pkt[0x24:], 0xffffffff)
+	binary.BigEndian.PutUint32(pkt[0x28:], 0xffffffff)
+	binary.BigEndian.PutUint32(pkt[0x38:], 0xffffffff)
+	dEmpty, err := prolink.ParsePacket(pkt, 50001, ip)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dEmpty.DurationMS != 0 {
+		t.Errorf("expected 0 duration for 0xffffffff, got %d", dEmpty.DurationMS)
+	}
+	if dEmpty.PlayPositionMS != 0 || dEmpty.PrecisePosition {
+		t.Errorf("expected empty play position, got %d, precise=%v", dEmpty.PlayPositionMS, dEmpty.PrecisePosition)
+	}
+	if dEmpty.EffectiveBPM != 0 {
+		t.Errorf("expected 0 effective BPM for 0xffffffff, got %f", dEmpty.EffectiveBPM)
+	}
+}
+
 func TestExtractANLZ(t *testing.T) {
 	// 1. Nil analysis
 	wf, beats, dur := prolink.ExtractANLZ(nil)
@@ -353,6 +431,125 @@ func TestDiscoveryObserveWithResolver(t *testing.T) {
 	obs4 := d.Observe(annPkt)
 	if obs4.TrackID != 77 || obs4.Title != "Test Title" || obs4.BPM != 126.0 {
 		t.Errorf("announcement observe lost fields: %+v", obs4)
+	}
+}
+
+func TestDiscoveryObserveAbsolutePositionInterleaved(t *testing.T) {
+	d := prolink.NewDiscovery()
+	d.SetResolver(func(dev prolink.Device) (*rekordbox.Analysis, string, string) {
+		return &rekordbox.Analysis{
+			Beats: []rekordbox.Beat{
+				{Number: 1, BPM: 120.0, TimeMS: 0},
+				{Number: 17, BPM: 120.0, TimeMS: 8000},
+			},
+			Waveforms: []rekordbox.Waveform{
+				{Tag: "PWV7", EntryBytes: 3, Data: []byte{10, 20, 30}},
+			},
+		}, "Track Title", "Track Artist"
+	})
+
+	ip := net.IPv4(192, 168, 1, 30)
+
+	// 1. Initial 0x0a status packet
+	statusPkt := make([]byte, 0xd0)
+	copy(statusPkt, "Qspt1WmJOL")
+	statusPkt[10] = 0x0a
+	copy(statusPkt[11:], "CDJ-3000")
+	statusPkt[0x21] = 2                              // Player 2
+	statusPkt[0x28] = 2                              // Source player
+	statusPkt[0x29] = 1                              // Source slot
+	binary.BigEndian.PutUint32(statusPkt[0x2c:], 55) // Track ID
+	statusPkt[0x89] = 0x40 | 0x20 | 0x10 | 0x08      // Playing, Master, Sync, OnAir
+	binary.BigEndian.PutUint32(statusPkt[0x8c:], 0x100000)
+	binary.BigEndian.PutUint16(statusPkt[0x92:], 12000) // 120.0 BPM
+	binary.BigEndian.PutUint32(statusPkt[0xa0:], 17)    // Beat 17
+	statusPkt[0xa6] = 2                                 // Beat in bar
+
+	devStatus, err := prolink.ParsePacket(statusPkt, 50002, ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs1 := d.Observe(devStatus)
+	if obs1.Title != "Track Title" || obs1.Artist != "Track Artist" || len(obs1.Waveform) == 0 {
+		t.Fatalf("expected metadata resolved: %+v", obs1)
+	}
+	if !obs1.Playing || !obs1.Master || !obs1.Sync || !obs1.OnAir {
+		t.Fatalf("expected flags set: %+v", obs1)
+	}
+	// Initial position from 0x0a: beat 17 at 120 BPM = 8000ms
+	if obs1.PlayPositionMS != 8000 {
+		t.Fatalf("expected initial 8000ms, got %d", obs1.PlayPositionMS)
+	}
+
+	// 2. 0x0b Absolute Position packet arrives (e.g. 25ms past beat 17 -> 8025ms)
+	posPkt := make([]byte, 0x3c)
+	copy(posPkt, "Qspt1WmJOL")
+	posPkt[10] = 0x0b
+	copy(posPkt[11:], "CDJ-3000")
+	posPkt[0x1f] = 0x01
+	posPkt[0x21] = 2 // Player 2
+	binary.BigEndian.PutUint16(posPkt[0x22:], 0x0018)
+	binary.BigEndian.PutUint32(posPkt[0x24:], 180)  // 180s duration
+	binary.BigEndian.PutUint32(posPkt[0x28:], 8025) // 8025ms playhead
+	binary.BigEndian.PutUint32(posPkt[0x2c:], 312)  // +3.12% pitch
+	binary.BigEndian.PutUint32(posPkt[0x38:], 1237) // 123.7 effective BPM
+
+	devPos, err := prolink.ParsePacket(posPkt, 50001, ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs2 := d.Observe(devPos)
+	if obs2.PlayPositionMS != 8025 || !obs2.PrecisePosition {
+		t.Fatalf("got position %d, precise=%v, want 8025, true", obs2.PlayPositionMS, obs2.PrecisePosition)
+	}
+	// Verify metadata and flags were preserved across 0x0b
+	if obs2.TrackID != 55 || obs2.Title != "Track Title" || len(obs2.Waveform) == 0 {
+		t.Fatalf("0x0b lost track metadata: %+v", obs2)
+	}
+	if !obs2.Playing || !obs2.Master || !obs2.Sync || !obs2.OnAir {
+		t.Fatalf("0x0b lost status flags: %+v", obs2)
+	}
+	if obs2.DurationMS != 180000 {
+		t.Fatalf("got duration %d, want 180000", obs2.DurationMS)
+	}
+
+	// 3. Subsequent 0x0a status packet must NOT roll back PlayPositionMS to coarse beat (8000ms)
+	obs3 := d.Observe(devStatus)
+	if obs3.PlayPositionMS != 8025 {
+		t.Fatalf("0x0a status packet regressed precise position: got %d, want 8025", obs3.PlayPositionMS)
+	}
+	if !obs3.PrecisePosition {
+		t.Fatal("0x0a status packet lost PrecisePosition flag")
+	}
+
+	// 4. Subsequent 0x28 beat packet must also preserve precise position
+	beatPkt := make([]byte, 0x60)
+	copy(beatPkt, "Qspt1WmJOL")
+	beatPkt[10] = 0x28
+	copy(beatPkt[11:], "CDJ-3000")
+	beatPkt[0x21] = 2
+	binary.BigEndian.PutUint32(beatPkt[0x54:], 0x100000)
+	binary.BigEndian.PutUint16(beatPkt[0x5a:], 12000)
+	beatPkt[0x5c] = 3
+
+	devBeat, err := prolink.ParsePacket(beatPkt, 50001, ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs4 := d.Observe(devBeat)
+	if obs4.PlayPositionMS != 8025 {
+		t.Fatalf("0x28 beat packet regressed precise position: got %d, want 8025", obs4.PlayPositionMS)
+	}
+	if !obs4.PrecisePosition {
+		t.Fatal("0x28 beat packet lost PrecisePosition flag")
+	}
+
+	// 5. Subsequent 0x0b packet updates to new millisecond position
+	binary.BigEndian.PutUint32(posPkt[0x28:], 8055)
+	devPos2, _ := prolink.ParsePacket(posPkt, 50001, ip)
+	obs5 := d.Observe(devPos2)
+	if obs5.PlayPositionMS != 8055 {
+		t.Fatalf("got position %d, want 8055", obs5.PlayPositionMS)
 	}
 }
 
