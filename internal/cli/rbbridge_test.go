@@ -82,3 +82,12 @@ func TestRBBridgeUnchangedExportSkipsTheVolume(t *testing.T) {
 		t.Fatal("unchanged export rewrote m.db")
 	}
 }
+
+func TestRBBridgeProlinkFlags(t *testing.T) {
+	t.Setenv("SC5000_PROLINK_STATE", "/tmp/custom-state.json")
+	var out bytes.Buffer
+	err := RBBridge([]string{"--prolink", "--state-file=/custom.json", "--anlz-root=/custom-anlz", "--bind=invalid"}, &out)
+	if err == nil || !strings.Contains(err.Error(), "bind must be IPv4") {
+		t.Fatalf("expected bind error, got %v", err)
+	}
+}
