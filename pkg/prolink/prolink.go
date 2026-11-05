@@ -1,4 +1,5 @@
-// Package prolink provides passive Pro DJ Link discovery/status. It does not impersonate a CDJ or write to Rekordbox.
+// Package prolink provides passive Pro DJ Link discovery/status and read-only
+// access to players' media (nfs.go). It does not impersonate a CDJ or write to Rekordbox.
 package prolink
 
 import (
@@ -61,7 +62,11 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 	if remote != nil {
 		d.Address = remote.String()
 	}
-	name := b[12:32]
+	nameOffset := 11
+	if port == 50000 {
+		nameOffset = 12
+	}
+	name := b[nameOffset : nameOffset+20]
 	if i := bytes.IndexByte(name, 0); i >= 0 {
 		name = name[:i] // C string: bytes after the NUL are buffer garbage (#36)
 	}
@@ -79,9 +84,7 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 		}
 		d.Number = b[0x21]
 		rawPitch := binary.BigEndian.Uint32(b[0x54:0x58])
-		if rawPitch != 0 {
-			d.Pitch = (float64(rawPitch) - float64(0x100000)) / float64(0x100000) * 100
-		}
+		d.Pitch = (float64(rawPitch) - float64(0x100000)) / float64(0x100000) * 100
 		rawBPM := binary.BigEndian.Uint16(b[0x5a:0x5c])
 		if rawBPM > 0 && rawBPM != 0xffff {
 			d.BPM = float64(rawBPM) / 100.0
@@ -99,14 +102,12 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 		d.SourcePlayer = b[0x28]
 		d.SourceSlot = b[0x29]
 		d.TrackID = binary.BigEndian.Uint32(b[0x2c:])
-		d.Playing = (b[0x7b]&0x40 != 0) || b[0x27] == 1 || b[0x7b] == 3 || b[0x7b] == 4 || b[0x7b] == 6
-		d.Master = b[0x7b]&0x20 != 0
-		d.Sync = b[0x7b]&0x10 != 0
-		d.OnAir = b[0x7b]&0x08 != 0
-		rawPitch := binary.BigEndian.Uint32(b[0x8d:0x91])
-		if rawPitch != 0 {
-			d.Pitch = (float64(rawPitch) - float64(0x100000)) / float64(0x100000) * 100
-		}
+		d.Playing = b[0x89]&0x40 != 0 || len(b) < 0xd4 && (b[0x7b] == 3 || b[0x7b] == 4 || b[0x7b] == 9)
+		d.Master = b[0x89]&0x20 != 0
+		d.Sync = b[0x89]&0x10 != 0
+		d.OnAir = b[0x89]&0x08 != 0
+		rawPitch := binary.BigEndian.Uint32(b[0x8c:0x90])
+		d.Pitch = (float64(rawPitch) - float64(0x100000)) / float64(0x100000) * 100
 		rawBPM := binary.BigEndian.Uint16(b[0x92:0x94])
 		if rawBPM > 0 && rawBPM != 0xffff {
 			d.BPM = float64(rawBPM) / 100.0
@@ -119,9 +120,8 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 		if b[0xa6] >= 1 && b[0xa6] <= 4 {
 			d.BeatInBar = b[0xa6]
 		}
-		if binary.BigEndian.Uint32(b[0xb4:0xb8]) > 0 {
-			d.PlayPositionMS = binary.BigEndian.Uint32(b[0xb4:0xb8])
-		} else if d.Beat > 0 && d.BPM > 0 {
+		// 0xb4 is not a timestamp (0xb7 is CDJ-3000 media presence).
+		if d.Beat > 0 && d.BPM > 0 {
 			d.PlayPositionMS = uint32(float64(d.Beat-1) * 60000.0 / d.BPM)
 		}
 	default:
@@ -277,6 +277,24 @@ type Discovery struct {
 	resolver   func(Device) (*rekordbox.Analysis, string, string)
 	trackCache map[string]cachedTrack
 	trackKeys  []string
+	media      *MediaCache
+}
+
+// SetMediaCache reads tracks from the hosting player over the network first (#59).
+func (d *Discovery) SetMediaCache(m *MediaCache) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.media = m
+}
+
+// hostIP runs with the mutex held: the address of player number n.
+func (d *Discovery) hostIP(n byte) net.IP {
+	for _, dev := range d.devices {
+		if dev.Number == n && dev.Address != "" {
+			return net.ParseIP(dev.Address)
+		}
+	}
+	return nil
 }
 
 func NewDiscovery() *Discovery {
@@ -433,6 +451,11 @@ func (d *Discovery) Observe(device Device) Device {
 		return device
 	}
 	if old, ok := d.devices[key]; ok {
+		if device.PacketType == 0x28 {
+			// Beat packets carry tempo/bar phase, not status flags or track position.
+			device.Master, device.Sync, device.OnAir = old.Master, old.Sync, old.OnAir
+			device.Beat, device.PlayPositionMS = old.Beat, old.PlayPositionMS
+		}
 		if device.PacketType == 6 || device.PacketType == 0x28 {
 			if device.TrackID == 0 {
 				device.TrackID = old.TrackID
@@ -498,6 +521,8 @@ func (d *Discovery) Observe(device Device) Device {
 		resolver     func(Device) (*rekordbox.Analysis, string, string)
 		anlzRoot     string
 		cacheKey     string
+		media        *MediaCache
+		host         net.IP
 	)
 	if device.TrackID != 0 && (len(device.Waveform) == 0 || len(device.Beats) == 0 || device.Title == "") {
 		cacheKey = fmt.Sprintf("%d:%d:%d", device.SourcePlayer, device.SourceSlot, device.TrackID)
@@ -517,10 +542,16 @@ func (d *Discovery) Observe(device Device) Device {
 			if device.Artist == "" {
 				device.Artist = cached.artist
 			}
-		} else if d.resolver != nil || d.anlzRoot != "" {
+		} else if d.resolver != nil || d.anlzRoot != "" || d.media != nil {
 			needsResolve = true
 			resolver = d.resolver
 			anlzRoot = d.anlzRoot
+			// Remote media (#59): look the host up now, fetch over NFS with the lock released.
+			if media = d.media; media != nil {
+				if host = d.hostIP(device.SourcePlayer); host == nil && device.SourcePlayer == device.Number {
+					host = net.ParseIP(device.Address)
+				}
+			}
 		}
 	}
 
@@ -531,8 +562,13 @@ func (d *Discovery) Observe(device Device) Device {
 		var title, artist string
 		if resolver != nil {
 			anlz, title, artist = resolver(device)
-		} else if anlzRoot != "" {
-			anlz, title, artist = defaultResolveWithRoot(anlzRoot, device)
+		} else {
+			if media != nil {
+				anlz, title, artist = media.resolve(device, host)
+			}
+			if anlz == nil && title == "" && anlzRoot != "" {
+				anlz, title, artist = defaultResolveWithRoot(anlzRoot, device)
+			}
 		}
 		var wf [][3]byte
 		var bts []BeatGridPoint
@@ -614,8 +650,12 @@ func (d *Discovery) prune(now time.Time) {
 // address, with bounded reads and context cancellation. No network writes occur.
 func (d *Discovery) Listen(ctx context.Context, address net.IP, notify func(Device)) error {
 	var conns []*net.UDPConn
+	host := ""
+	if address != nil {
+		host = address.String()
+	}
 	for _, port := range []int{50000, 50001, 50002} {
-		c, e := net.ListenUDP("udp4", &net.UDPAddr{IP: address, Port: port})
+		c, e := listenLinkUDP(net.JoinHostPort(host, strconv.Itoa(port)), false)
 		if e != nil {
 			if port == 50001 {
 				continue

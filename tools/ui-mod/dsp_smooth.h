@@ -30,6 +30,11 @@ enum {
 /* Emergency ceiling, retaining 18 dB of headroom above normalized full scale.
  * This is an output guard, not a limiter or a reset of vendor feedback state. */
 #define SC_DSP_SWEEP_SAMPLE_LIMIT 8.0f
+/* Flanger makeup gain (#54): at most +6 dB, never below unity, following the
+ * level over ~100 ms (9600 frames at the deck's 96 kHz). */
+#define SC_DSP_MAKEUP_SLOTS 8
+#define SC_DSP_MAKEUP_MAX 2.0f
+#define SC_DSP_MAKEUP_TAU_FRAMES 9600.0f
 
 enum {
     SC_DSP_SAMPLER_STOP_IMMEDIATELY = 1,
@@ -58,6 +63,12 @@ struct sc_dsp_state {
         uint32_t generation;      /* generation it last synced to */
     } autogate[SC_DSP_AUTOGATE_SLOTS];
     struct sc_dsp_chain chain[SC_DSP_CHAIN_SLOTS];
+    uint32_t makeup_evict;        /* round-robin victim when the makeup table is full */
+    struct sc_dsp_makeup {
+        void *self;               /* Flanger instance, NULL when free */
+        uint32_t busy;            /* try-acquired by the block that uses the slot */
+        float dry, wet, gain;     /* smoothed block energies and the gain applied last */
+    } makeup[SC_DSP_MAKEUP_SLOTS];
 };
 
 static inline struct sc_dsp_state *sc_dsp_state(void)
@@ -290,6 +301,85 @@ static inline void sc_dsp_fx_common_post_process(struct sc_dsp_chain *chain,
         }
     }
     __atomic_store_n(&chain->ramp_remaining, left, __ATOMIC_RELAXED);
+}
+
+/* Mean square of a stereo block; non-finite samples count as silence. */
+static inline float sc_dsp_block_energy(float *const *buf, uint32_t frames)
+{
+    if (!buf || !buf[0] || !buf[1] || !frames)
+        return 0.0f;
+    float sum = 0.0f;
+    for (int ch = 0; ch < 2; ch++)
+        for (uint32_t i = 0; i < frames; i++)
+            if (sc_dsp_finite_f32(buf[ch][i]))
+                sum += buf[ch][i] * buf[ch][i];
+    return sum / (float)(2u * frames);
+}
+
+/* Engine's Flanger mixes 0.7 x dry with its delay line in place, so engaging it
+ * drops the level by 3 dB and more in the comb notches (#54). This brings the
+ * processed block's smoothed RMS back up to the dry input's: dry_energy is
+ * sc_dsp_block_energy() of the block before the vendor process, buf the block
+ * after it. The gain moves linearly across each block (no zipper noise), is
+ * found by one Newton step a block (no libm in the hook), stays in
+ * [1, SC_DSP_MAKEUP_MAX] and the result keeps the SweepFx output ceiling.
+ * Per-instance state lives in a small table; a busy or unclaimable slot leaves
+ * the block untouched. shortcut: the time constant assumes 96 kHz. */
+static inline void sc_dsp_makeup_apply(void *self, float *const *buf, uint32_t frames, float dry_energy)
+{
+    struct sc_dsp_state *s = sc_dsp_state();
+    struct sc_dsp_makeup *m = NULL;
+    if (!self || !buf || !buf[0] || !buf[1] || !frames || !sc_dsp_finite_f32(dry_energy))
+        return;
+    for (int i = 0; i < SC_DSP_MAKEUP_SLOTS && !m; i++)
+        if (__atomic_load_n(&s->makeup[i].self, __ATOMIC_ACQUIRE) == self)
+            m = &s->makeup[i];
+    if (m) {
+        if (__atomic_exchange_n(&m->busy, 1u, __ATOMIC_ACQUIRE))
+            return;
+        if (__atomic_load_n(&m->self, __ATOMIC_ACQUIRE) != self) /* evicted meanwhile */
+            goto out;
+    } else {
+        for (int i = 0; i < SC_DSP_MAKEUP_SLOTS && !m; i++)
+            if (!__atomic_load_n(&s->makeup[i].self, __ATOMIC_ACQUIRE))
+                m = &s->makeup[i];
+        if (!m)
+            m = &s->makeup[__atomic_fetch_add(&s->makeup_evict, 1u, __ATOMIC_RELAXED) % SC_DSP_MAKEUP_SLOTS];
+        if (__atomic_exchange_n(&m->busy, 1u, __ATOMIC_ACQUIRE))
+            return;
+        m->dry = m->wet = 0.0f;
+        m->gain = 1.0f;
+        __atomic_store_n(&m->self, self, __ATOMIC_RELEASE); /* publish last */
+    }
+    {
+        float a = (float)frames / SC_DSP_MAKEUP_TAU_FRAMES;
+        if (a > 1.0f) a = 1.0f;
+        m->dry += a * (dry_energy - m->dry);
+        m->wet += a * (sc_dsp_block_energy(buf, frames) - m->wet);
+        float g0 = m->gain, target = g0;
+        if (m->wet > 1e-10f && m->dry > 1e-10f) {
+            float ratio = m->dry / m->wet; /* target gain squared */
+            if (ratio > SC_DSP_MAKEUP_MAX * SC_DSP_MAKEUP_MAX) ratio = SC_DSP_MAKEUP_MAX * SC_DSP_MAKEUP_MAX;
+            if (ratio < 1.0f) ratio = 1.0f;
+            target = 0.5f * (g0 + ratio / g0);
+        }
+        float g1 = g0 + a * (target - g0);
+        if (!sc_dsp_finite_f32(g1) || g1 < 1.0f) g1 = 1.0f;
+        if (g1 > SC_DSP_MAKEUP_MAX) g1 = SC_DSP_MAKEUP_MAX;
+        for (uint32_t i = 0; i < frames; i++) {
+            const float g = g0 + (g1 - g0) * (float)(i + 1) / (float)frames;
+            for (int ch = 0; ch < 2; ch++) {
+                float v = buf[ch][i] * g;
+                if (!sc_dsp_finite_f32(v)) v = 0.0f;
+                else if (v > SC_DSP_SWEEP_SAMPLE_LIMIT) v = SC_DSP_SWEEP_SAMPLE_LIMIT;
+                else if (v < -SC_DSP_SWEEP_SAMPLE_LIMIT) v = -SC_DSP_SWEEP_SAMPLE_LIMIT;
+                buf[ch][i] = v;
+            }
+        }
+        m->gain = g1;
+    }
+out:
+    __atomic_store_n(&m->busy, 0u, __ATOMIC_RELEASE);
 }
 
 /* Standalone crossfade helper; not installed as an Engine Fader hook. The

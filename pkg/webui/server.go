@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"github.com/skip2/go-qrcode"
 )
@@ -58,21 +60,27 @@ type Config struct {
 	TidalAPIURL, TidalAuthURL string
 	// BPM looks up tempo and key for browsed tracks; nil turns that off.
 	BPM *providers.BPMStore
+	// MediaRoot is where drives mount for OmniSource (#62); empty means /media.
+	MediaRoot string
 	// RestartEngine replaces "systemctl restart engine.service" in tests.
 	RestartEngine func() error
+	// ProlinkExport selects the optional read-only CDJ export; zero uses the
+	// mounted USB and standard ports. It stays inert until explicitly enabled.
+	ProlinkExport prolink.ExportConfig
 	// Factory is useful for embedded integrations and deterministic tests.
 	Factory func(provider string, guest bool, userID string) (providers.Provider, error)
 }
 type Server struct {
-	cfg      Config
-	jobs     *Jobs
-	mu       sync.Mutex
-	sessions map[string]*Session
-	pending  map[string]pending
-	mux      *http.ServeMux
-	tidal    *tidalGateway
-	uiMu     sync.Mutex
-	stemsMu  sync.Mutex // streaming-stems.json
+	cfg           Config
+	jobs          *Jobs
+	mu            sync.Mutex
+	sessions      map[string]*Session
+	pending       map[string]pending
+	mux           *http.ServeMux
+	tidal         *tidalGateway
+	uiMu          sync.Mutex
+	stemsMu       sync.Mutex // streaming-stems.json
+	prolinkExport *prolink.Exporter
 
 	updateMu    sync.Mutex
 	updateCache updateStatus
@@ -91,6 +99,41 @@ func New(cfg Config, jobs *Jobs) *Server {
 		cfg.AccessToken = providers.RandomID()
 	}
 	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}, logins: map[string]*loginFlow{}}
+	exportCfg := cfg.ProlinkExport
+	if exportCfg.MediaCache == nil {
+		cacheRoot := cfg.StateDir
+		if cacheRoot == "" {
+			cacheRoot = s.uiDir()
+		}
+		exportCfg.MediaCache = &prolink.MediaCache{Dir: filepath.Join(cacheRoot, "prolink-media"), Enabled: func() bool { return s.loadUI().ProlinkShare }}
+	}
+	if exportCfg.Observe == nil {
+		exportCfg.Observe = func(d prolink.Device) {
+			if d.Number < 1 || d.Number > 6 {
+				return
+			}
+			prolinkMu.Lock()
+			defer prolinkMu.Unlock()
+			for key, old := range postedDevices[s] {
+				if time.Since(old.LastSeen) > 10*time.Second {
+					delete(postedDevices[s], key)
+				}
+			}
+			if postedDevices[s] == nil {
+				postedDevices[s] = make(map[string]prolink.Device)
+			}
+			key := deviceKey(d)
+			postedDevices[s][key] = mergeDevice(postedDevices[s][key], d)
+		}
+	}
+	s.prolinkExport = prolink.NewExporter(exportCfg)
+	if s.loadUI().ProlinkExport {
+		// A missing drive or occupied port must not prevent the normal console
+		// from starting. The export status reports whether it actually started.
+		if err := s.prolinkExport.SetEnabled(true); err != nil {
+			log.Printf("stream-sync: experimental Pro DJ Link export not started: %v", err)
+		}
+	}
 	if cfg.StateDir != "" {
 		os.MkdirAll(cfg.StateDir, 0o700)
 	}
@@ -141,6 +184,16 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.mu.Unlock()
 	}
 	return s
+}
+
+// Close releases optional network exports, including active dbserver clients.
+func (s *Server) Close() {
+	if s.prolinkExport != nil {
+		s.prolinkExport.Close()
+	}
+	prolinkMu.Lock()
+	delete(postedDevices, s)
+	prolinkMu.Unlock()
 }
 
 // DefaultStateDir keeps logins on the deck's writable partition; its home is read-only.

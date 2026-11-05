@@ -324,6 +324,9 @@ has 'PreferredTechnologies=wifi,ethernet' "$debloat_root/etc/connman/main.conf"
 has 'CONNMAN_DISCOVER_RETRIES=5' "$debloat_root/etc/systemd/system/connman.service.d/disable_dhcp_retries.conf"
 has '[ntfs3]' "$debloat_root/etc/edisksd/main.conf"
 lacks '[hfsplus]' "$debloat_root/etc/edisksd/main.conf"
+# #60: Bluetooth stays on for every board (JC11, JC16, JP07, JP13); nothing masks it.
+grep -Eq '^ +if command -v rfkill .*; then rfkill unblock bluetooth' "$ROOT/rootfs-overlay/usr/local/bin/sc5000-debloat" || fail 'debloat no longer unblocks Bluetooth'
+if grep -rEil 'bluetooth' "$debloat_root/etc/systemd" | grep -q .; then fail 'debloat touches a Bluetooth unit'; fi
 for module in btbcm hci_uart; do
     if grep -qx "$module" "$ROOT/rootfs-overlay/etc/modules-load.d/sc5000-filesystems.conf"; then fail "$module must not be force-loaded"; fi
 done
@@ -331,7 +334,18 @@ has 'feature_disable=0x82004' "$ROOT/rootfs-overlay/usr/lib/modprobe.d/brcmfmac.
 ok 'stock connman online check, read-only HFS+, rootfs brcmfmac options'
 
 GUARD=$ROOT/rootfs-overlay/etc/sc5000/engine-ui-guard
-export SC5000_UI_DIR=$TMP/ui-guard
+export SC5000_UI_DIR=$TMP/ui-guard SC5000_STREAMING_ACCOUNTS=$TMP/StreamingAccounts.json
+# #56: every start leaves Engine a TIDAL account entry (valid JSON, other accounts
+# kept) unless TIDAL itself is the selected service.
+tidal_entry() { python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); assert json.loads(a["TIDAL"])["providerType"] == "TIDAL"; print(len(a))' "$SC5000_STREAMING_ACCOUNTS"; }
+sh "$GUARD" pre; [[ $(tidal_entry) == 1 ]] || fail 'guard must create the TIDAL account entry'
+printf '{\n    "SoundCloud": "{\\"provider\\":\\"SoundCloud\\"}"\n}\n' > "$SC5000_STREAMING_ACCOUNTS"
+sh "$GUARD" pre; [[ $(tidal_entry) == 2 ]] || fail 'guard must add TIDAL beside other accounts'
+cp "$SC5000_STREAMING_ACCOUNTS" "$TMP/accounts.before"; sh "$GUARD" pre
+cmp -s "$TMP/accounts.before" "$SC5000_STREAMING_ACCOUNTS" || fail 'guard must leave an existing TIDAL entry alone'
+rm "$SC5000_STREAMING_ACCOUNTS"; mkdir -p "$SC5000_UI_DIR"; echo scope=tidal > "$SC5000_UI_DIR/settings.conf"
+sh "$GUARD" pre; [[ ! -e $SC5000_STREAMING_ACCOUNTS ]] || fail 'guard must not touch accounts while TIDAL is selected'
+rm -rf "$SC5000_UI_DIR"
 for _ in 1 2 3; do SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre; done
 [[ ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'clean restarts must not reach safe-mode'
 for result in signal core-dump exit-code; do SERVICE_RESULT=$result sh "$GUARD" stop; sh "$GUARD" pre; done

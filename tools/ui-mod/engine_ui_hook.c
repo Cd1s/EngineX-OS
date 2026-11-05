@@ -30,6 +30,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include "dsp_smooth.h"
+#include "master_limiter.h"
 
 #define UI_ROOT "/data/sc5000-custom/ui"
 #define FLAG_COMPRESSED 0x01
@@ -116,6 +117,41 @@ int snd_pcm_sw_params(void *pcm, void *params) {
     return real(pcm, params);
 }
 
+// #58: the toggle is master_limiter=1 in settings.conf, polled once a second
+// off the audio thread; the limiter itself runs in hook_master_output.
+static int lim_enabled;
+
+static void *lim_poll(void *arg) {
+    (void)arg;
+    for (;;) {
+        int on = 0;
+        FILE *f = fopen(UI_ROOT "/settings.conf", "r");
+        if (f) {
+            char line[64];
+            while (fgets(line, sizeof line, f))
+                if (!strncmp(line, "master_limiter=1", 16)) on = 1;
+            fclose(f);
+        }
+        __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
+        sleep(1);
+    }
+    return NULL;
+}
+
+static void lim_start_poll(void) {
+    pthread_attr_t attr;
+    struct sched_param param = {.sched_priority = 0};
+    pthread_t thread;
+    if (pthread_attr_init(&attr)) return;
+    // Never inherit a real-time policy from whichever thread starts it.
+    pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
+    pthread_attr_setschedpolicy(&attr, SCHED_OTHER);
+    pthread_attr_setschedparam(&attr, &param);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&thread, &attr, lim_poll, NULL);
+    pthread_attr_destroy(&attr);
+}
+
 static int official_update_host(const char *node) {
     static const char host[] = "autoupdate.airmusictech.com";
     if (!node) return 0;
@@ -155,7 +191,7 @@ enum { EDIT_ONE, EDIT_STEMS, EDIT_GATEWAY };
 struct engine_build {
     const char *name;
     uchar id[20];
-    uint32_t dsp[19];
+    uint32_t dsp[21];
     const struct engine_edit *edits;
     unsigned edit_count;
     // getConfig's common return path: site, its two literal-pool words, and the
@@ -190,7 +226,7 @@ enum {
     DSP_TURN_OFF, DSP_TURN_ON, DSP_SWITCH, DSP_CHANGE, DSP_ENABLE,
     DSP_MIX, DSP_PARAMETER, DSP_NUDGE, DSP_TEMPO, DSP_JUMP, DSP_RAMP_TIME, DSP_MOTOR_RAMP_TIME,
     DSP_SAMPLER_IMMEDIATE, DSP_SAMPLER_STOP, DSP_SAMPLER_PLAY,
-    DSP_AUTOGATE, DSP_COMMON, DSP_DUB_ECHO, DSP_WASH, DSP_HOOK_COUNT
+    DSP_AUTOGATE, DSP_COMMON, DSP_DUB_ECHO, DSP_WASH, DSP_FLANGER, DSP_MASTER, DSP_HOOK_COUNT
 };
 static void *dsp_originals[DSP_HOOK_COUNT];
 
@@ -275,6 +311,31 @@ static void hook_autogate_process(void *self, float *const *input, float *const 
     ((dsp_process_fn)dsp_originals[DSP_AUTOGATE])(self, input, output, frames);
 }
 
+// Effects::Flanger::process, shared by Flanger, FlangerPositive and
+// FlangerNegative (their vtables are its only references). It works in place
+// on `input` and tail-calls the common chain with (input, input), so `input`
+// holds the final block on return (#54).
+static void hook_flanger(void *self, float *const *input, float *const *output, uint32_t frames) {
+    float dry = sc_dsp_block_energy(input, frames);
+    ((dsp_process_fn)dsp_originals[DSP_FLANGER])(self, input, output, frames);
+    sc_dsp_makeup_apply(self, input, frames, dry);
+}
+
+// airHost's device callback (5.0.4 0x1462a6c, 5.3.0 0xc77934): it zeroes and
+// then fills Engine's planar float outputs, before the resampler and the S32_LE
+// conversion clip them, so this is the true master bus (#58). Every stereo pair
+// gets its own linked limiter. The callback runs on the one audio thread.
+typedef uint32_t (*audio_callback_fn)(void *, void *, int, const float *const *, int, float *const *, int);
+static struct sc_lim master_lim[8];
+static uint32_t hook_master_output(void *host, void *context, int in_channels, const float *const *in,
+                                   int out_channels, float *const *out, int frames) {
+    uint32_t rc = ((audio_callback_fn)dsp_originals[DSP_MASTER])(host, context, in_channels, in, out_channels, out, frames);
+    if (__atomic_load_n(&lim_enabled, __ATOMIC_RELAXED) && out && frames > 0)
+        for (int ch = 0; ch < out_channels && ch < 16; ch += 2)
+            sc_lim_planar(&master_lim[ch / 2], out[ch], ch + 1 < out_channels ? out[ch + 1] : NULL, (unsigned)frames);
+    return rc;
+}
+
 static int dsp_buffers_overlap(const float *a, const float *b, uint32_t frames) {
     if (!a || !b) return 0;
     uintptr_t x = (uintptr_t)a, y = (uintptr_t)b;
@@ -326,6 +387,9 @@ static const uint32_t dsp_event_prefix[] = {0xe1c021d0, 0xe590c00c, 0xe52db004};
 static const uint32_t dsp_autogate_prefix[] = {0xe3530000, 0xe1a02001, 0x0a000035};
 static const uint32_t dsp_common_prefix[] = {0xe16d42f4, 0xe1cd60f8};
 static const uint32_t dsp_sweep_prefix[] = {0xe52db004, 0xe1a02001, 0xe28db000};
+static const uint32_t dsp_flanger_prefix[] = {0xe16d42f4, 0xe3530000}; // strd r4,[sp,#-36]!; cmp r3,#0
+// strd r4,[sp,#-36]! then mov r5,r2 (5.0.4) or strd r10,[sp,#24] (5.3.0)
+static const uint32_t dsp_master_prefix[2][2] = {{0xe16d42f4, 0xe1a05002}, {0xe16d42f4, 0xe1cda1f8}};
 struct dsp_hook_site {
     uint32_t offset;
     void *hook;
@@ -339,12 +403,15 @@ static struct dsp_hook_site dsp_hooks[DSP_HOOK_COUNT] = { // offsets: 5.0.4, rep
     {0xd0b5bc, hook_motor_ramp_time}, {0xc5b2e0, hook_sampler_immediate},
     {0xc5b30c, hook_sampler_stop}, {0xc5b338, hook_sampler_play},
     {0xe3a598, hook_autogate_process}, {0x15fa188, hook_fx_common_chain},
-    {0xe3d0a8, hook_dub_echo}, {0xe3d908, hook_wash}
+    {0xe3d0a8, hook_dub_echo}, {0xe3d908, hook_wash}, {0xe3a118, hook_flanger},
+    {0x1462a6c, hook_master_output}
 };
 
 static const void *dsp_expected(unsigned slot, size_t *size) {
     *size = slot == DSP_COMMON ? sizeof dsp_common_prefix : sizeof dsp_event_prefix;
     if (slot == DSP_DUB_ECHO || slot == DSP_WASH) return dsp_sweep_prefix;
+    if (slot == DSP_FLANGER) { *size = sizeof dsp_flanger_prefix; return dsp_flanger_prefix; }
+    if (slot == DSP_MASTER) { *size = sizeof dsp_master_prefix[0]; return dsp_master_prefix[dsp_hooks[slot].offset != 0x1462a6c]; }
     return slot == DSP_COMMON ? dsp_common_prefix :
         (slot == DSP_AUTOGATE ? dsp_autogate_prefix : dsp_event_prefix);
 }
@@ -506,7 +573,7 @@ static const struct engine_edit edits_530[] = {
 static const struct engine_build engine_builds[] = {
     {"5.0.4", "\xaf\x07\x38\x65\xa3\x31\x8d\x80\x7a\x83\x03\xf7\x16\x15\x2e\xac\x92\x3a\x4c\x6f",
      {0xd917b8, 0xd917e4, 0xd91894, 0xd918c0, 0xd918ec, 0xd91810, 0xd91868, 0x14fff54, 0x153312c,
-      0x1532fa0, 0x1500950, 0xd0b5bc, 0xc5b2e0, 0xc5b30c, 0xc5b338, 0xe3a598, 0x15fa188, 0xe3d0a8, 0xe3d908},
+      0x1532fa0, 0x1500950, 0xd0b5bc, 0xc5b2e0, 0xc5b30c, 0xc5b338, 0xe3a598, 0x15fa188, 0xe3d0a8, 0xe3d908, 0xe3a118, 0x1462a6c},
      edits_504, sizeof edits_504 / sizeof *edits_504,
      0xf6303c, 0xf63124, 0xf63120, {0xdb, 0x24c, 0x24e, 0x276, 0x289},
      0x842644, 0x29bc83c, 0x258e185, 0x8429b0,
@@ -514,7 +581,7 @@ static const struct engine_build engine_builds[] = {
      {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
      {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
-      0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4},
+      0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
      edits_530, sizeof edits_530 / sizeof *edits_530,
      0x1537148, 0x1537234, 0x1537230, {0xe3, 0x254, 0x256, 0x2a6, 0x2b9},
      0x8a1eac, 0x2c8e808, 0x21b8b98, 0x8a2218,
@@ -609,7 +676,7 @@ __attribute__((constructor)) static void edit_engine(void) {
         fprintf(stderr, "engine-ui-hook: applied 0x%x (%u bytes)\n", e->offset, e->size);
     }
     install_sqlite_hooks(base, page);
-    install_dsp_hooks(base, page);
+    if (install_dsp_hooks(base, page)) lim_start_poll();
 }
 
 // Unknown or unsafe values fall back to the English pack.
@@ -826,6 +893,56 @@ static void guard_named_thread(pthread_t thread, const char *name) {
         if (tasks) closedir(tasks);
     }
     errno = saved_errno;
+}
+
+// #55: Engine analyses in OfflineAnalyzer child processes, which inherit this
+// preload. Analysing a whole drive in the background must never compete with
+// playback: idle CPU class, nice 19 and idle I/O, off CPU 0; threads inherit all.
+__attribute__((constructor)) static void lower_offline_analyzer(void) {
+    char exe[64];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0) return;
+    exe[n] = 0;
+    const char *name = strrchr(exe, '/');
+    if (strcmp(name ? name + 1 : exe, "OfflineAnalyzer")) return;
+    struct sched_param param = {.sched_priority = 0};
+    sched_setscheduler(0, SCHED_IDLE, &param);
+    lower_io_nice(0, 19, 1);
+    cpu_set_t cpus;
+    if (!sched_getaffinity(0, sizeof cpus, &cpus) && CPU_ISSET(0, &cpus) && CPU_COUNT(&cpus) > 1) {
+        CPU_CLR(0, &cpus);
+        sched_setaffinity(0, sizeof cpus, &cpus);
+    }
+}
+
+// Engine itself raises its analyzers to nice -5 / SCHED_OTHER once they connect
+// (seen on 5.3.0): keep them idle (#55).
+static int offline_analyzer(pid_t pid) {
+    char path[48], comm[32] = "";
+    if (pid <= 0) return 0;
+    snprintf(path, sizeof path, "/proc/%d/comm", (int)pid);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int match = fgets(comm, sizeof comm, f) && !strncmp(comm, "OfflineAnalyzer", 15);
+    fclose(f);
+    return match;
+}
+
+int setpriority(__priority_which_t which, id_t who, int prio) {
+    static void *cache;
+    int (*real)(__priority_which_t, id_t, int) = next_symbol(&cache, "setpriority");
+    if (!real) { errno = ENOSYS; return -1; }
+    if (which == PRIO_PROCESS && is_engine() && offline_analyzer((pid_t)who)) prio = 19;
+    return real(which, who, prio);
+}
+
+int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param) {
+    static void *cache;
+    int (*real)(pid_t, int, const struct sched_param *) = next_symbol(&cache, "sched_setscheduler");
+    if (!real) { errno = ENOSYS; return -1; }
+    static const struct sched_param idle = {.sched_priority = 0};
+    if (is_engine() && offline_analyzer(pid)) policy = SCHED_IDLE, param = &idle;
+    return real(pid, policy, param);
 }
 
 int pthread_setname_np(pthread_t thread, const char *name) {

@@ -40,11 +40,24 @@ const (
 )
 
 type uiSettings struct {
-	Version          string   `json:"version,omitempty"`
-	Quality          string   `json:"quality"`
-	Jog              string   `json:"jog"`
-	NeteaseMode      string   `json:"neteaseMode"`
-	Playhead         float64  `json:"playhead"`
+	Version     string  `json:"version,omitempty"`
+	Quality     string  `json:"quality"`
+	Jog         string  `json:"jog"`
+	NeteaseMode string  `json:"neteaseMode"`
+	Playhead    float64 `json:"playhead"`
+	// AutoAnalyze has the UI pack start Engine's own analysis of every
+	// unanalysed track whenever a drive is inserted (#55). Off by default.
+	AutoAnalyze bool `json:"autoAnalyze"`
+	// MasterLimiter turns on the soft clipper / peak limiter engine_ui_hook.c
+	// applies to Engine's audio output (#58). Off by default.
+	MasterLimiter bool `json:"masterLimiter"`
+	// OmniSource adds every mounted drive's playlists and tracks, and the other
+	// services' playlists, to the streaming browser (#62). Off by default.
+	OmniSource bool `json:"omniSource"`
+	// ProlinkShare lets rb-bridge read the Rekordbox library of Pioneer
+	// players on the LAN (#59). Off by default.
+	ProlinkShare     bool     `json:"prolinkShare"`
+	ProlinkExport    bool     `json:"prolinkExport"` // experimental Denon -> CDJ export; default OFF
 	Language         string   `json:"language"`
 	Waveform         string   `json:"waveform"`
 	Sources          []string `json:"sources"`
@@ -120,6 +133,16 @@ func (s *Server) loadUI() uiSettings {
 			if list, err := parseUISources(val); err == nil {
 				v.Sources, saved = list, true
 			}
+		case "auto_analyze":
+			v.AutoAnalyze = val == "1"
+		case "master_limiter":
+			v.MasterLimiter = val == "1"
+		case "omni_source":
+			v.OmniSource = val == "1"
+		case "prolink_share":
+			v.ProlinkShare = val == "1"
+		case "prolink_export":
+			v.ProlinkExport = val == "1"
 		case "known":
 			known = strings.Split(val, ",")
 		case "four_deck_waveform":
@@ -170,7 +193,19 @@ func parseUISources(val string) ([]string, error) {
 	return list, nil
 }
 
-func (s *Server) saveUI(v uiSettings) error {
+func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
+	was := false
+	if s.prolinkExport != nil && (v.ProlinkExport != s.loadUI().ProlinkExport || len(exportRequested) > 0 && exportRequested[0]) {
+		was = s.prolinkExport.Status().Enabled
+		if err = s.prolinkExport.SetEnabled(v.ProlinkExport); err != nil {
+			return err
+		}
+		defer func() {
+			if err != nil && was != v.ProlinkExport {
+				_ = s.prolinkExport.SetEnabled(was)
+			}
+		}()
+	}
 	dir := s.uiDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -184,6 +219,21 @@ func (s *Server) saveUI(v uiSettings) error {
 	}
 	if v.UpfaderEcho {
 		text += "upfader_echo=1\n"
+	}
+	if v.AutoAnalyze {
+		text += "auto_analyze=1\n"
+	}
+	if v.MasterLimiter {
+		text += "master_limiter=1\n"
+	}
+	if v.OmniSource {
+		text += "omni_source=1\n"
+	}
+	if v.ProlinkShare {
+		text += "prolink_share=1\n"
+	}
+	if v.ProlinkExport {
+		text += "prolink_export=1\n"
 	}
 	if v.GitHubRepo != defaultGitHubRepo {
 		text += "github_repo=" + v.GitHubRepo + "\n"
@@ -332,6 +382,51 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		v.Playhead = f
 	}
+	if q.Has("autoAnalyze") {
+		on := q.Get("autoAnalyze")
+		if on != "0" && on != "1" {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.AutoAnalyze = on == "1"
+	}
+	if q.Has("masterLimiter") {
+		on := q.Get("masterLimiter")
+		if on != "0" && on != "1" {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.MasterLimiter = on == "1"
+	}
+	if q.Has("omniSource") {
+		on := q.Get("omniSource")
+		if on != "0" && on != "1" {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.OmniSource = on == "1"
+	}
+	if q.Has("prolinkShare") {
+		on := q.Get("prolinkShare")
+		if on != "0" && on != "1" {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.ProlinkShare = on == "1"
+	}
+	if q.Has("prolinkExport") {
+		on := q.Get("prolinkExport")
+		if on != "0" && on != "1" {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.ProlinkExport = on == "1"
+	}
 	if q.Has("sources") {
 		list, err := parseUISources(q.Get("sources"))
 		if err != nil {
@@ -356,7 +451,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	err := s.saveUI(v)
+	err := s.saveUI(v, q.Has("prolinkExport"))
 	s.uiMu.Unlock()
 	if err != nil {
 		fail(w, 500, err)

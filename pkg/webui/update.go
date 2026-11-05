@@ -297,6 +297,8 @@ var imagePrefixes = map[string]string{
 	"inmusic,jp07": "SC5000", "inmusic,jp08": "SC5000M", "inmusic,jp11": "PRIMEGO",
 	"inmusic,jp13": "SC6000", "inmusic,jp14": "SC6000M",
 	"inmusic,jc11": "PRIME4", "inmusic,jc16": "PRIME2", "inmusic,nh08": "MIXSTREAMPRO",
+	// SC LIVE 4 ships no .img yet, only the /data bundle (#61): it is never offered.
+	"inmusic,jp21": "SCLIVE4",
 }
 
 func imagePrefix(compatible []string) string {

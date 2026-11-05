@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -178,10 +179,13 @@ func (s *Server) writeProlinkSnapshot(snap prolink.Snapshot) error {
 }
 
 type prolinkResponse struct {
-	Enabled   bool                      `json:"enabled"`
-	UpdatedAt time.Time                 `json:"updatedAt"`
-	Devices   []prolink.Device          `json:"devices"`
-	Decks     map[string]prolink.Device `json:"decks"`
+	Enabled     bool                      `json:"enabled"`
+	Share       bool                      `json:"share"`  // reads players' media over the LAN (#59)
+	Export      bool                      `json:"export"` // experimental export to CDJs (#63)
+	ExportState prolink.ExportStatus      `json:"exportState"`
+	UpdatedAt   time.Time                 `json:"updatedAt"`
+	Devices     []prolink.Device          `json:"devices"`
+	Decks       map[string]prolink.Device `json:"decks"`
 }
 
 func (s *Server) prolinkWaveformEnabled() bool {
@@ -193,11 +197,19 @@ func (s *Server) prolinkWaveformEnabled() bool {
 func (s *Server) prolinkGet(w http.ResponseWriter, r *http.Request) {
 	devices := s.mergedDevices()
 	snap := prolink.BuildSnapshot(devices)
+	s.uiMu.Lock()
+	settings := s.loadUI()
+	s.uiMu.Unlock()
 	resp := prolinkResponse{
-		Enabled:   s.prolinkWaveformEnabled(),
+		Enabled:   settings.ProlinkWaveform,
+		Share:     settings.ProlinkShare,
+		Export:    settings.ProlinkExport,
 		UpdatedAt: snap.UpdatedAt,
 		Devices:   snap.Devices,
 		Decks:     snap.Decks,
+	}
+	if s.prolinkExport != nil {
+		resp.ExportState = s.prolinkExport.Status()
 	}
 	if resp.Devices == nil {
 		resp.Devices = []prolink.Device{}
@@ -210,6 +222,11 @@ func (s *Server) prolinkGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prolinkPost(w http.ResponseWriter, r *http.Request) {
+	// ?share= / ?export= switch #59 / #63; a JSON body posts devices (#51).
+	if q := r.URL.Query(); q.Has("share") || q.Has("export") {
+		s.prolinkToggle(w, r)
+		return
+	}
 	var body []byte
 	if r.Body != nil {
 		body, _ = io.ReadAll(io.LimitReader(r.Body, 2<<20))
@@ -253,5 +270,36 @@ func (s *Server) prolinkPost(w http.ResponseWriter, r *http.Request) {
 	snap := prolink.BuildSnapshot(devices)
 	_ = s.writeProlinkSnapshot(snap)
 
+	s.prolinkGet(w, r)
+}
+
+// prolinkToggle is POST /v1/sc5000/prolink?share=0|1, the same setting as
+// /v1/sc5000/ui?prolinkShare=.
+func (s *Server) prolinkToggle(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if !q.Has("share") && !q.Has("export") {
+		fail(w, 400, errors.New("invalid setting"))
+		return
+	}
+	for _, key := range []string{"share", "export"} {
+		if q.Has(key) && q.Get(key) != "0" && q.Get(key) != "1" {
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+	}
+	s.uiMu.Lock()
+	v := s.loadUI()
+	if q.Has("share") {
+		v.ProlinkShare = q.Get("share") == "1"
+	}
+	if q.Has("export") {
+		v.ProlinkExport = q.Get("export") == "1"
+	}
+	err := s.saveUI(v, q.Has("export"))
+	s.uiMu.Unlock()
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
 	s.prolinkGet(w, r)
 }

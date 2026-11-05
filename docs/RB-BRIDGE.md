@@ -89,10 +89,35 @@ Engine 原生 quickCues 只支持 8 槽（A–H），空槽位置为 -1。这些
 
 `--prolink` 被动监听 UDP 50000 的 announcements 与 50002 的 player status，输出
 设备名、地址、播放源设备/槽位和 track ID；不发送包、不抢占播放器编号。
-`pkg/prolink.LibrarySource / LibrarySink / Sync` 是库同步接口，`bridge.MountedSource`
-和 `bridge.EngineSink` 可对已经挂载的局域网导出运行同一导入流程。
-**未实现原生 dbserver TCP 12523 查询、NFS 取曲、加密 OneLibrary 解密或自动远程挂载。**
-这些是后续独立传输适配器的工作，发现 Rekordbox 不代表已经读取其电脑收藏库。
+`prolinkShare`（`settings.conf` 的 `prolink_share=1`）允许从 CDJ 的 NFSv2 导出读取曲库。
+发现 Rekordbox 不代表已经读取其电脑收藏库；加密 OneLibrary 解密仍不支持。
+
+### 反向导出到 CDJ（#63，2026-11-05）
+
+`stream-sync` 的 **Pro DJ Link Export to CDJ (Beta)** 开关默认关闭。关闭时导出组件
+没有监听 socket、公告、goroutine 或定时器；原有被动发现继续独立工作。开启前先挂载
+含 `PIONEER/rekordbox/export.pdb` 的 U 盘；多个盘选择 `/media` 下排序后的第一个。
+设置可用 `POST /v1/sc5000/ui?prolinkExport=1` 或
+`POST /v1/sc5000/prolink?export=1` 修改，也可在启动前写入 `prolink_export=1`。
+改为 `0` 会同步关闭全部导出连接。`GET /v1/sc5000/prolink` 的 `export` 是保存的意愿，
+`exportState` 报告实际监听地址和编号；启动失败不会阻止普通控制台启动。
+
+开启后提供只读 UDP portmapper/MOUNTv1/NFSv2（`/C/`），TCP 12523 的端口查询、
+dbserver 握手、Root/Track/Playlist 菜单、分页和曲目文件路径；ANLZ 路径从 NFS 上的
+export.pdb 获取。先监听 2.5 秒，
+再选择未占用的编号 4→3→2→1；同号外部公告会立即让号，四个编号全占用时停止公告。
+USB 媒体详情在 UDP 50002 广播并响应查询，并向已发现的 peer 单播空闲状态。被动发现与导出共享广播端口，目录访问
+固定在打开的 USB root 内，拒绝写入、越界及符号链接。移除或改变 export.pdb 后停止
+公告和旧媒体读取；更换盘后需关闭再开启，以重新读取曲库。
+
+协议依据：[Deep Symmetry dbserver](https://djl-analysis.deepsymmetry.org/djl-analysis/track_metadata.html)、
+[菜单](https://djl-analysis.deepsymmetry.org/djl-analysis/menus.html)、
+[媒体详情](https://djl-analysis.deepsymmetry.org/djl-analysis/media.html)。
+这仍是实验功能：环回测试覆盖真实 TCP/UDP、编号冲突及音频/ANLZ 的 NFS 读取，
+不能替代真实 CDJ 的浏览、加载和播放验收。逐字节抓包证据与机型限制见
+[协议核对记录](PROLINK-EXPORT-WIRE.md)。未实现其他 dbserver 菜单、波形/封面二进制
+查询、排序选项或 Pioneer 的完整编号协商。
+没有本地 Rekordbox export 的空盘或纯 Engine 盘，也能导入 `.prolink-cache/` 的暂存 CDJ 曲库，并保留 Native 曲目。
 SQLiteAdapter 可替换版本相关的解析逻辑，无法识别/加密的库明确报错，不改写源库。
 只读 SQLite 使用 immutable，防止 `mode=ro` 仍创建/修改 SHM；有非空 WAL/journal
 的活动库必须先取得正常 checkpoint 的导出快照，工具不会操作源 journal。

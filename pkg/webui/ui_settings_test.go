@@ -174,6 +174,53 @@ func TestPlayheadAndJogModePersist(t *testing.T) {
 	}
 }
 
+// #55: the auto-analyze toggle is off until switched on, and persists.
+func TestAutoAnalyzeTogglePersists(t *testing.T) {
+	dir := t.TempDir()
+	ui := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	if ui.loadUI().AutoAnalyze {
+		t.Fatal("auto-analyze must default to off")
+	}
+	if code, v := uiPost(t, srv.URL, "autoAnalyze=1"); code != 200 || !v.AutoAnalyze {
+		t.Fatalf("%d %+v", code, v)
+	}
+	if !New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil).loadUI().AutoAnalyze {
+		t.Fatal("not persisted")
+	}
+	if code, v := uiPost(t, srv.URL, "autoAnalyze=0"); code != 200 || v.AutoAnalyze {
+		t.Fatalf("%d %+v", code, v)
+	}
+	if code, _ := uiPost(t, srv.URL, "autoAnalyze=yes"); code != 400 {
+		t.Fatal(code)
+	}
+}
+
+// #58: the limiter toggle defaults off, persists as the key engine_ui_hook.c
+// polls, and only takes 0 or 1.
+func TestMasterLimiterToggle(t *testing.T) {
+	dir := t.TempDir()
+	ui := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	if v := ui.loadUI(); v.MasterLimiter {
+		t.Fatalf("defaults: %+v", v)
+	}
+	if code, v := uiPost(t, srv.URL, "masterLimiter=1"); code != 200 || !v.MasterLimiter {
+		t.Fatalf("%d %+v", code, v)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(b), "\nmaster_limiter=1\n") {
+		t.Fatalf("settings.conf: %q", b)
+	}
+	if code, v := uiPost(t, srv.URL, "masterLimiter=0"); code != 200 || v.MasterLimiter {
+		t.Fatalf("%d %+v", code, v)
+	}
+	if code, _ := uiPost(t, srv.URL, "masterLimiter=on"); code != 400 {
+		t.Fatalf("bad value: %d", code)
+	}
+}
+
 func TestAccessTokenSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	first, created, err := LoadAccessToken(dir)
@@ -317,5 +364,25 @@ func TestUIUpfaderEchoSetting(t *testing.T) {
 		if code, _ := uiPost(t, srv.URL, bad); code != 400 {
 			t.Errorf("expected 400 for %s, got %d", bad, code)
 		}
+	}
+}
+
+// #59: the toggle defaults off, persists as the key rb-bridge reads, and only takes 0 or 1.
+func TestProlinkShareSetting(t *testing.T) {
+	dir := t.TempDir()
+	ui := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	if v := ui.loadUI(); v.ProlinkShare {
+		t.Fatalf("defaults: %+v", v)
+	}
+	if code, v := uiPost(t, srv.URL, "prolinkShare=1"); code != 200 || !v.ProlinkShare {
+		t.Fatalf("%d %+v", code, v)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(b), "\nprolink_share=1\n") {
+		t.Fatalf("settings.conf: %q", b)
+	}
+	if code, _ := uiPost(t, srv.URL, "prolinkShare=2"); code != 400 {
+		t.Fatalf("bad value: %d", code)
 	}
 }

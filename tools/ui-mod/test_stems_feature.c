@@ -71,6 +71,26 @@ static void mock_gate_zero(void *self, float *const *in, float *const *out, uint
     gate_zero_calls++;
 }
 
+// Flanger::process stand-in (#54): in place, dips the level like the vendor's 0.7 x dry mix.
+static unsigned flanger_calls;
+static float flanger_dip;
+static void mock_flanger_process(void *self, float *const *in, float *const *out, uint32_t frames) {
+    assert(self && in && out && frames);
+    flanger_calls++;
+    for (int ch = 0; ch < 2; ch++)
+        for (uint32_t i = 0; i < frames; i++) in[ch][i] *= flanger_dip;
+}
+
+static unsigned master_calls;
+static uint32_t mock_master_output(void *host, void *context, int in_channels, const float *const *in,
+                                   int out_channels, float *const *out, int frames) {
+    assert(host == (void *)0x11 && context == (void *)0x22 && in_channels == 2 && in && out_channels == 4 && frames == 64);
+    master_calls++;
+    for (int ch = 0; ch < out_channels; ch++)
+        for (int i = 0; i < frames; i++) out[ch][i] = i & 1 ? -2.0f : 2.0f;
+    return 0x5a;
+}
+
 static int common_bad_output;
 static void mock_common_process(void *self, float *const *in, float *const *out, uint32_t frames) {
     assert(self == dsp_wanted_owner && in && out);
@@ -109,6 +129,19 @@ static void test_dsp_hooks(void) {
             0xe28bd000, 0xe49db004, 0xe51ff004, (uint32_t)(uintptr_t)mock_sweep_process};
         memcpy(image + dsp_hooks[i].offset, sweep, sizeof sweep);
     }
+    // Actual Flanger prefix (strd sets up a frame, cmp feeds a later beq); undo
+    // the strd before entering the C mock.
+    const uint32_t flanger[] = {0xe16d42f4, 0xe3530000, 0xe1cd40d0, 0xe28dd024,
+                               0xe51ff004, (uint32_t)(uintptr_t)mock_flanger_process};
+    memcpy(image + dsp_hooks[DSP_FLANGER].offset, flanger, sizeof flanger);
+    // Actual airDeviceCallback prefix of this build (strd; ...), undone before the
+    // 7-argument C mock so its three stack arguments are where the caller put them.
+    // 5.3.0's second word is strd r10,[sp,#24], a harmless store into the same frame.
+    size_t master_size;
+    const uint32_t *master_prefix = dsp_expected(DSP_MASTER, &master_size);
+    const uint32_t master[] = {master_prefix[0], master_prefix[1], 0xe1cd40d0, 0xe28dd024,
+                              0xe51ff004, (uint32_t)(uintptr_t)mock_master_output};
+    memcpy(image + dsp_hooks[DSP_MASTER].offset, master, sizeof master);
     // Every checked byte, including byte 12 of a dispatcher, gates the WHOLE group.
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         size_t size;
@@ -172,8 +205,8 @@ static void test_dsp_hooks(void) {
         call(handler, NULL);
         assert(dsp_calls == before);
     }
-    assert(DSP_HOOK_COUNT == 19);
-    puts("ARM DSP install: all 19 prefix guards, repeat install, event ABI/virtual/adjusted this, finite controls: PASS");
+    assert(DSP_HOOK_COUNT == 21);
+    puts("ARM DSP install: all 21 prefix guards, repeat install, event ABI/virtual/adjusted this, finite controls: PASS");
 
     unsigned fx_generation = sc_dsp_state()->generation;
     // Count before calling the original, without inspecting payloads or arming FX.
@@ -238,6 +271,50 @@ static void test_dsp_hooks(void) {
     assert(!memcmp(bit_samples, wanted_bits, sizeof wanted_bits));
     assert(sc_dsp_state()->generation == fx_generation);
     puts("ARM DubEcho/Wash: prologue/this adjustment, input/output ABI, NaN/Inf/extreme clamp, zeros and bounds: PASS");
+
+    {
+        float fl_l[128], fl_r[128], scratch_l[128], scratch_r[128];
+        float *fl[2] = {fl_l, fl_r}, *scratch[2] = {scratch_l, scratch_r};
+        unsigned char flanger_self[0x220] = {0};
+        dsp_process_fn call = (void *)(image + dsp_hooks[DSP_FLANGER].offset);
+        flanger_dip = 0.7f;
+        for (unsigned block = 0; block < 3000; block++) {
+            for (unsigned i = 0; i < 128; i++) fl_l[i] = fl_r[i] = 0.5f * sinf((float)(block * 128 + i) * 0.02f);
+            call(flanger_self, fl, scratch, 128);
+        }
+        float wet = 0.0f, dry = 0.0f;
+        for (unsigned i = 0; i < 128; i++) {
+            float x = 0.5f * sinf((float)(2999 * 128 + i) * 0.02f);
+            dry += x * x; wet += fl_l[i] * fl_l[i];
+        }
+        assert(fabsf(sqrtf(wet / dry) - 1.0f) < 0.03f);
+        // A level the flanger did not lower passes bit-exact on a fresh instance.
+        unsigned char plain_self[0x220] = {0};
+        flanger_dip = 1.0f;
+        for (unsigned i = 0; i < 128; i++) fl_l[i] = fl_r[i] = 0.125f;
+        call(plain_self, fl, scratch, 128);
+        for (unsigned i = 0; i < 128; i++) assert(fl_l[i] == 0.125f && fl_r[i] == 0.125f);
+        assert(flanger_calls == 3001);
+        puts("ARM Flanger (#54): displaced strd/cmp prologue, in-place ABI, makeup restores the dry level, unity when no dip: PASS");
+    }
+
+    {
+        typedef uint32_t (*master_fn)(void *, void *, int, const float *const *, int, float *const *, int);
+        master_fn call = (master_fn)(image + dsp_hooks[DSP_MASTER].offset);
+        static float buf[4][64], in0[64];
+        const float *in[2] = {in0, in0};
+        float *out[4] = {buf[0], buf[1], buf[2], buf[3]};
+        __atomic_store_n(&lim_enabled, 0, __ATOMIC_RELAXED);
+        assert(call((void *)0x11, (void *)0x22, 2, in, 4, out, 64) == 0x5a);
+        assert(buf[0][0] == 2.0f && buf[3][1] == -2.0f); // off: untouched
+        __atomic_store_n(&lim_enabled, 1, __ATOMIC_RELAXED);
+        assert(call((void *)0x11, (void *)0x22, 2, in, 4, out, 64) == 0x5a);
+        for (int ch = 0; ch < 4; ch++)
+            for (int i = 0; i < 64; i++) assert(fabsf(buf[ch][i]) <= SC_LIM_CEIL && fabsf(buf[ch][i]) > 0.9f);
+        __atomic_store_n(&lim_enabled, 0, __ATOMIC_RELAXED);
+        assert(master_calls == 2);
+        puts("ARM airDeviceCallback (#58): displaced per-build prologue, 7-argument ABI, both stereo pairs limited to -0.1 dBFS only when on: PASS");
+    }
 
     unsigned char gate[0x200] = {0};
     const float phase = 0.75f;
@@ -854,6 +931,32 @@ static void test_patch_files(const char *filename) {
     printf("Stock/patched/mismatched edit classification: %s PASS\n", filename);
 }
 
+// #55: Engine's own setpriority/sched_setscheduler on an analyzer keep it idle.
+static void test_offline_analyzer(void) {
+    int ready[2];
+    assert(!pipe(ready));
+    pid_t child = fork(); assert(child >= 0);
+    if (!child) {
+        prctl(PR_SET_NAME, "OfflineAnalyzer");
+        char c = 1; assert(write(ready[1], &c, 1) == 1);
+        pause();
+        _exit(0);
+    }
+    char c; assert(read(ready[0], &c, 1) == 1);
+    hook_test_engine = 1;
+    struct sched_param other = {.sched_priority = 0};
+    assert(!setpriority(PRIO_PROCESS, (id_t)child, 5) && getpriority(PRIO_PROCESS, (id_t)child) == 19);
+    assert(!sched_setscheduler(child, SCHED_OTHER, &other) && sched_getscheduler(child) == SCHED_IDLE);
+    // Anything else, and anything outside Engine, is left alone.
+    assert(!setpriority(PRIO_PROCESS, 0, 3) && getpriority(PRIO_PROCESS, 0) == 3);
+    hook_test_engine = 0;
+    assert(!sched_setscheduler(child, SCHED_OTHER, &other) && sched_getscheduler(child) == SCHED_OTHER);
+    kill(child, SIGKILL);
+    assert(waitpid(child, NULL, 0) == child);
+    setpriority(PRIO_PROCESS, 0, 0); // only effective as root; harmless otherwise
+    puts("OfflineAnalyzer (#55): Engine's priority/policy changes on an analyzer stay idle, others untouched: PASS");
+}
+
 int main(int argc, char **argv) {
     for (size_t b = 0; b < sizeof engine_builds / sizeof *engine_builds; b++) {
         // Hooks and counters are process-global; each build starts pristine.
@@ -877,6 +980,7 @@ int main(int argc, char **argv) {
     test_alsa();
     test_update_dns();
     test_resources();
+    test_offline_analyzer();
     for (int i = 1; i < argc; i++) test_patch_files(argv[i]);
     return 0;
 }

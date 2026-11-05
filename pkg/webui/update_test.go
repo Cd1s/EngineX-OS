@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,19 @@ func TestNewerVersion(t *testing.T) {
 	} {
 		if got := newerVersion(c.latest, c.current); got != c.want {
 			t.Errorf("newerVersion(%q, %q) = %v", c.latest, c.current, got)
+		}
+	}
+}
+
+func TestImagePrefix(t *testing.T) {
+	for in, want := range map[string]string{
+		"inmusic,jp07\x00rockchip,rk3288": "SC5000",
+		"inmusic,jc16":                    "PRIME2",
+		"inmusic,jp21":                    "SCLIVE4",
+		"rockchip,rk3288":                 "",
+	} {
+		if got := imagePrefix(strings.Split(in, "\x00")); got != want {
+			t.Errorf("imagePrefix(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

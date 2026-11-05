@@ -369,16 +369,19 @@ func TestFailedUpdateRollsBack(t *testing.T) {
 	convert(t, root, enginedb.Options{})
 	db := dbOpen(t, root)
 	before := scalar[string](t, db, `SELECT group_concat(title,'|') FROM Track`)
-	// Change the first track, then break the last audio header so the entire
+	// Change the first track, then fail the last track's write so the entire
 	// transaction (including prior successful track writes) must roll back.
 	l, e := bridge.ReadLibrary(context.Background(), root)
 	if e != nil {
 		t.Fatal(e)
 	}
 	l.Tracks[0].Title = "must roll back"
-	testfixture.Write(t, root, "MUSIC/five.wav", []byte("RIFFbroken"))
+	l.Tracks[len(l.Tracks)-1].Title = "fail"
+	if _, e = db.Exec(`CREATE TRIGGER fail BEFORE UPDATE ON Track WHEN NEW.title='fail' BEGIN SELECT RAISE(ABORT,'fail'); END`); e != nil {
+		t.Fatal(e)
+	}
 	if _, e = enginedb.Sync(context.Background(), root, l, enginedb.Options{}); e == nil {
-		t.Fatal("bad audio accepted")
+		t.Fatal("failed write accepted")
 	}
 	if got := scalar[string](t, db, `SELECT group_concat(title,'|') FROM Track`); got != before {
 		t.Fatalf("partial commit: %s", got)

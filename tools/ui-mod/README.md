@@ -191,6 +191,7 @@ all deployed and verified on the deck:
 | `PlaybackModifier::Nudge` `0x14fff54` | Non-finite values dropped | CF011 (input side) |
 | `TimeStretchingModifier::PlaybackTempoChange` `0x153312c` | Only positive finite tempo values pass | H154 RA003 RA004 LA-033 |
 | `SweepFx::DubEcho` `0xe3d0a8`, `SweepFx::Wash` `0xe3d908` | `sc_dsp_sweep_fx_post_process`: output NaN/Inf scrub and `[-8.0, 8.0]` clamp | H154 H172 |
+| `Effects::Flanger::process` `0xe3a118` (5.3.0 `0xf1ab24`; shared by Flanger, FlangerPositive, FlangerNegative) | `sc_dsp_makeup_apply`: the stock code mixes 0.7 x dry in place, so the block's RMS is brought back to the dry input's over ~100 ms, unity to +6 dB, ramped per block | #54 |
 | `TimeStretchingModifier::Jump` `0x1532fa0` | Non-finite jump target values dropped | H149 R012 |
 | `RampDownModifier::ChangeRampTime` `0x1500950`, `MotorizedPlatterScratchControl::RampdownTimeChange` `0xd0b5bc` | Non-finite or negative ramp-down times dropped | LA-036 CF014 LC030 |
 | `SamplerControl` StopImmediately `0xc5b2e0`, Stop `0xc5b30c`, Play `0xc5b338` | `sc_dsp_sampler_mark_event`: atomic voice generation tracking | N004 |
@@ -201,6 +202,22 @@ stock code already steps per frame (`step = 1/(rate × 0.001)`), so
 hook SHA-256 `e4f30a85…32ee9ba`: all 19 trampolines installed, ALSA
 `card2/pcm0p/sub0` `RUNNING`, no XRUN, `NRestarts=0`. That shows the hooks load
 and keep audio running; it does not show each pop is gone by ear.
+
+## Master soft limiter (`master_limiter.h`, #58)
+
+Off by default; Settings → "Master Soft Limiter" or `POST /v1/sc5000/ui?masterLimiter=1`
+writes `master_limiter=1` to `settings.conf`, which the hook polls once a second
+from a SCHED_OTHER thread. It is the 21st DSP site: airHost's device callback
+(5.0.4 `0x1462a6c`, 5.3.0 `0xc77934`, 7 arguments, the last three on the stack),
+which zeroes and fills Engine's planar float outputs before the resampler and
+the `S32_LE` conversion clip them. After the original returns, each stereo pair
+of outputs gets a linked limiter. Samples up to -1.5 dBFS are bit-exact; above
+that a rational tanh curve bends peaks into a -0.1 dBFS ceiling, and an
+instant-attack peak envelope (~100 ms release, no lookahead) lowers the gain
+when the input is hotter than the curve's range. The two builds' prologues
+differ in the second word and are checked per build with the rest of the group.
+Tests: `test_master_limiter()` in `test_dsp_smooth.c`, and the ARM mock in
+`test_stems_feature.c`.
 
 ## ALSA clock and official updater boundary
 

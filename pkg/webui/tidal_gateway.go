@@ -39,7 +39,7 @@ func hintTitle(scope string) string { return "请登录：sc5000.lan:8080" }
 
 var (
 	tidalNS        = uuid.MustParse("6f1c5a52-3c55-4c2e-9d0b-5c5000000000")
-	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport"}
+	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport", localProvider: "USB/SD"}
 	providerOrder  = map[string]int{"netease": 0, "spotify": 1, "deezer": 2, "soundcloud": 3, "beatport": 4}
 )
 
@@ -47,6 +47,8 @@ type trackRef struct {
 	track   providers.Track
 	session string // empty for the built-in Deezer catalog
 	guest   bool
+	// file is a drive track's audio on its drive (OmniSource, #62), drive the volume.
+	file, drive string
 }
 type playlistRef struct {
 	session  string // empty for the built-in Deezer catalog
@@ -518,7 +520,11 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 			ref := playlistRef{"", "deezer", p}
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
-	} else if len(sessions) == 0 {
+	}
+	if g.s.omniSource() {
+		g.omniPlaylists(r.Context(), scope, add)
+	}
+	if scope != "deezer" && len(sessions) == 0 {
 		add(playlistJSON(hintPlaylist, hintTitle(scope), "手机打开 http://sc5000.lan:8080 登录后，歌单会出现在这里", 0))
 	}
 	respond(w, page(r, 100, items))
@@ -563,9 +569,16 @@ func (g *tidalGateway) trackJSON(id int64, t providers.Track) map[string]any {
 // trackItems wraps each track as {"item":…,"type":"track"} (playlist items and
 // favourites) and repeats its fields flat, as plain /tracks listings return them.
 func (g *tidalGateway) trackItems(session string, guest bool, tracks []providers.Track) []any {
-	items := make([]any, 0, len(tracks))
+	refs := make([]trackRef, 0, len(tracks))
 	for _, t := range tracks {
-		v := g.trackJSON(g.addTrack(trackRef{t, session, guest}), t)
+		refs = append(refs, trackRef{track: t, session: session, guest: guest})
+	}
+	return g.refItems(refs)
+}
+func (g *tidalGateway) refItems(refs []trackRef) []any {
+	items := make([]any, 0, len(refs))
+	for _, ref := range refs {
+		v := g.trackJSON(g.addTrack(ref), ref.track)
 		flat := map[string]any{"item": v, "type": "track"}
 		for k, f := range v {
 			flat[k] = f
@@ -587,6 +600,15 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 	ref, ok := g.list(id)
 	if !ok {
 		fail(w, 404, errors.New("playlist not found"))
+		return
+	}
+	if ref.provider == localProvider {
+		refs, err := g.s.driveListTracks(r.Context(), ref.list.ID)
+		if err != nil {
+			fail(w, 404, err)
+			return
+		}
+		respond(w, page(r, 500, g.refItems(refs)))
 		return
 	}
 	var p providers.Provider = g.catalog
@@ -759,12 +781,15 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	for i, v := range sources {
 		g.s.cfg.BPM.Enrich(r.Context(), tracks[i])
 		for _, t := range tracks[i] {
-			trackItems = append(trackItems, g.trackJSON(g.addTrack(trackRef{t, v.session, v.guest}), t))
+			trackItems = append(trackItems, g.trackJSON(g.addTrack(trackRef{track: t, session: v.session, guest: v.guest}), t))
 		}
 		for _, p := range lists[i] {
 			ref := playlistRef{v.session, v.provider, p}
 			listItems = append(listItems, g.refJSON(g.addPlaylist(ref), ref))
 		}
+	}
+	if g.s.omniSource() { // the DJ's own drives first
+		trackItems = append(g.omniSearch(r.Context(), query), trackItems...)
 	}
 	empty := map[string]any{"limit": 10, "offset": 0, "totalNumberOfItems": 0, "items": []any{}}
 	respond(w, map[string]any{"tracks": page(r, 50, trackItems), "playlists": page(r, 50, listItems), "albums": empty, "artists": empty})
@@ -798,7 +823,14 @@ func (g *tidalGateway) trackInfo(w http.ResponseWriter, r *http.Request) {
 func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (address, codec string) {
 	codec = "flac"
 	ext := "flac"
-	if g.s.jobs != nil {
+	if ref.file != "" {
+		codec = localCodecs[strings.ToLower(path.Ext(ref.file))]
+		if codec == "mp3" {
+			ext = "mp3"
+		} else if codec != "flac" {
+			ext = "mp4"
+		}
+	} else if g.s.jobs != nil {
 		switch strings.ToLower(path.Ext(g.s.jobs.File(ref.track))) {
 		case ".mp3":
 			codec, ext = "mp3", "mp3"
@@ -818,7 +850,7 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 // is only known afterwards; otherwise Deemix delivers FLAC or fails.
 func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref trackRef) bool {
 	j := g.s.jobs
-	if j == nil || !j.Lossy() || j.File(ref.track) != "" {
+	if ref.file != "" || j == nil || !j.Lossy() || j.File(ref.track) != "" {
 		return true
 	}
 	http.NewResponseController(w).SetWriteDeadline(time.Time{})
@@ -861,6 +893,14 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if ref.file != "" { // a drive track is already local
+		if p, err := localFile(ref); err != nil {
+			fail(w, 404, err)
+		} else {
+			respond(w, map[string]any{"path": p})
+		}
+		return
+	}
 	if g.s.jobs == nil {
 		fail(w, 503, errors.New("worker unavailable"))
 		return
@@ -890,6 +930,20 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	}
 	_, ref, ok := g.lookup(w, raw)
 	if !ok {
+		return
+	}
+	if ref.file != "" { // OmniSource: straight from the drive, with Range
+		p, err := localFile(ref)
+		if err != nil {
+			fail(w, 404, err)
+			return
+		}
+		mime := map[string]string{"flac": "audio/flac", "mp3": "audio/mpeg"}[localCodecs[strings.ToLower(path.Ext(p))]]
+		if mime == "" {
+			mime = "audio/mp4"
+		}
+		w.Header().Set("Content-Type", mime)
+		http.ServeFile(w, r, p)
 		return
 	}
 	if g.s.jobs == nil {
