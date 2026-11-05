@@ -98,6 +98,33 @@ SERVICES_MAIN = """
 	// player into a non-player inside Engine (#49).
 	property bool scPlayer: false
 	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 }
+	// Swipe left loads the role's first deck, swipe right its second (0: stock).
+	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
+	property bool scFourDeckOn: false // the saved switch; Engine applies it on restart
+	property string scFourDeckRoleSetting: "auto"
+	// The 4-deck layout shows four waveform lanes; Engine keeps "2" otherwise. Once per
+	// Engine start (retried until the performance view exists), so a manual "2" sticks.
+	property bool scFourWaveSet: false
+	Timer {
+		interval: 2000; repeat: true
+		running: root.scFourDeckRole !== "" && !root.scFourWaveSet
+		onTriggered: {
+			const c = PlanckGUI.views.performanceViewController
+			const w = c && c.waveformController ? c.waveformController.waveformCountSetting : null
+			const i = w ? w.settingNames.indexOf("4 Waveforms") : -1
+			if (i < 0) return
+			if (w.currentName !== "4 Waveforms") w.setCurrentIndex(i)
+			root.scFourWaveSet = true
+		}
+	}
+	function scRestartCall(query) {
+		const prompt = PlanckGUI.views.prompts.post({
+			type: Prompt.Warning,
+			message: "需要重启 Engine，播放会中断。\nRestart Engine to apply? Playback will stop.",
+			options: Prompt.Cancel | Prompt.Ok
+		})
+		prompt.finished.connect(function(r) { if (r === Prompt.AcceptRole) scCall(query + "&restart=1") })
+	}
 	property string scUpdateRepo: "Cd1s/EngineX-OS"
 	property string scUpdateText: ""
 	property bool scBroadcastOn: false
@@ -302,6 +329,8 @@ SERVICES_MAIN = """
 		scProlinkExport = !!v.prolinkExport
 		scPlayer = !!v.player
 		scFourDeckRole = v.player && v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
+		scFourDeckOn = !!v.fourDeckWaveform
+		scFourDeckRoleSetting = v.fourDeckRole || "auto"
 		scKeepPlayhead(v.playhead || 0)
 		scSources = v.sources
 		scLoggedIn = v.loggedIn
@@ -899,6 +928,21 @@ JOG_ENTRY = """
 
 EXTRA_DEVICE_ENTRIES = """
 		EntryBase.ListEntry {
+			text: "4-Deck Waveform"
+			visible: root.scPlayer // #49
+			values: ["Off", "On"]
+			currentValue: root.scFourDeckOn ? "On" : "Off"
+			onSelected: function(index) { if ((index === 1) !== root.scFourDeckOn) root.scRestartCall("fourDeckWaveform=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "4-Deck Role"
+			visible: root.scPlayer && root.scFourDeckOn
+			readonly property var ids: ["auto", "13", "24", "12", "1", "2"]
+			values: ["Auto", "1+3", "2+4", "1+2", "1", "2"]
+			currentValue: values[Math.max(0, ids.indexOf(root.scFourDeckRoleSetting))]
+			onSelected: function(index) { if (ids[index] !== root.scFourDeckRoleSetting) root.scRestartCall("fourDeckRole=" + ids[index]) }
+		},
+		EntryBase.ListEntry {
 			text: "Live Stream"
 			readonly property var ids: ["0", "1"]
 			values: ["Off", "On"]
@@ -1484,6 +1528,26 @@ def edits(dev: bool):
         # refuses decks that belong to the other player in the 4-deck layout.
         out[ROOT + "PropertyFilter/LoadToDeckFilter.qml"] = [
             ("        active: songLoading || lockLine\n", "        active: songLoading || lockLine || root.scDeckLocked(deckIndex)\n")]
+        # #49: a swipe loads the role's own decks (1+3: left 1, right 3), not the stock
+        # left/right layer deck. Only "Deck N" actions; Prepare List etc. stay stock.
+        for side, right in (("left", "false"), ("right", "true")):
+            a = side + "Actions"
+            out[ROOT + f"Views/BrowseView/Components/Components/Swipe{side.title()}Item.qml"] = [
+                (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
+                 f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
+                 "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
+                 f"    readonly property list<string> actionLabels: {a}.map(action => scLabel(action.display.label))\n"),
+                (f"    readonly property list<string> actionCommitMessages: {a}.map(action => action.display.commitMessage)\n",
+                 f"    readonly property list<string> actionCommitMessages: {a}.map(action => scLabel(action.display.commitMessage))\n"),
+                (f"        {a}[actionIndex].trigger(row.index)\n",
+                 f"        if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
+                 "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"
+                 "            Planck.getProperty(\"/Client/Librarian/LoadToDeck%1\".arg(scDeck)).translator.state = true\n"
+                 f"        }} else {a}[actionIndex].trigger(row.index)\n"),
+                # The stock block message is about the stock deck (the other player's);
+                # Engine's load arbitrator still checks the role's deck on load.
+                ("    textSwipeInvalid: ((readyToCommit", "    textSwipeInvalid: scDeck > 0 ? \"\" : ((readyToCommit"),
+            ]
     for rel, fixes in legacy_qml_fixes().items():
         assert not isinstance(out.get(rel), str), rel  # a whole-file replacement already owns it
         out.setdefault(rel, []).extend(fixes)
