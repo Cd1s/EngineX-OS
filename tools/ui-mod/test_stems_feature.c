@@ -500,6 +500,32 @@ static void test_config(void) {
         assert(!memcmp(config, expected, sizeof config));
         assert(out[0] == (uintptr_t)config && out[1] == 123 && out[2] == 456);
     }
+    // #49: four_deck_waveform=1 turns a 5.3.0 player into a 4-deck non-player and
+    // leaves an all-in-one (already not a player) alone.
+    if (!strcmp(build->name, "5.3.0")) {
+        char path[] = "/tmp/four-deck-XXXXXX";
+        int fd = mkstemp(path);
+        const char flag[] = "lang=en\nfour_deck_waveform=1\n";
+        assert(fd >= 0 && write(fd, flag, sizeof flag - 1) == (ssize_t)(sizeof flag - 1));
+        close(fd);
+        four_deck_settings = path;
+        prepare_config((uintptr_t)image, page);
+        for (int player = 0; player < 2; player++) {
+            uchar config[0x500];
+            memset(config, 0, sizeof config);
+            config[0x239] = (uchar)player;
+            *(uint32_t *)(config + 0x90) = 2;
+            uint32_t out[3];
+            invoke_config(config, (void *)(uintptr_t)config_jump[1], out);
+            assert(config[0x239] == 0 && *(uint32_t *)(config + 0x90) == (player ? 4u : 2u));
+            assert(config[fields[0]] == 1 && config[fields[4]] == 0);
+            assert(out[0] == (uintptr_t)config && out[1] == 123 && out[2] == 456);
+        }
+        unlink(path);
+        four_deck_settings = UI_ROOT "/settings.conf";
+        prepare_config((uintptr_t)image, page);
+        puts("4-deck layout unlock: players only: PASS");
+    }
     munmap(image, 0x1600000);
     puts("Common config hook, six input layouts, literal/register replay: PASS");
 }
