@@ -502,3 +502,37 @@ func TestArtServesAKnownRowOnly(t *testing.T) {
 		t.Fatal(resp.StatusCode)
 	}
 }
+
+// #70: a logged-in source whose playlists fail (Spotify 403 for an account the
+// app may not serve) says why in the menu instead of leaving it empty.
+type refusedProvider struct{ fixtureProvider }
+
+func (refusedProvider) Playlists(context.Context) ([]providers.Playlist, error) {
+	return nil, providers.StatusError(403)
+}
+
+func TestTidalGatewaySaysWhyPlaylistsFailed(t *testing.T) {
+	uiDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(uiDir, "settings.conf"), []byte("scope=spotify\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ui := New(Config{AccessToken: "test-console-code", DeezerURL: fakeDeezer(t).URL, UIDir: uiDir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return refusedProvider{}, nil }}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	var s Session
+	json.Unmarshal(request(t, srv.Client(), srv.URL, "POST", "/api/sessions", map[string]any{"provider": "spotify"}, 200), &s)
+	ui.mu.Lock()
+	ui.sessions[s.ID].Ready = true
+	ui.mu.Unlock()
+	var lists tidalList
+	tidalGet(t, srv.URL, "/v1/users/1/playlists", 200, &lists)
+	var titles []string
+	for _, raw := range lists.Items {
+		var p tidalPlaylist
+		json.Unmarshal(raw, &p)
+		titles = append(titles, p.Title)
+	}
+	if len(titles) != 1 || !strings.Contains(titles[0], "Spotify") || !strings.Contains(titles[0], "403") {
+		t.Fatalf("menu: %q", titles)
+	}
+}
