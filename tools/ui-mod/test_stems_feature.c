@@ -769,6 +769,31 @@ static void test_update_dns(void) {
     puts("Update DNS: exact official updater host blocked; auth/GitHub/connman/other processes preserved: PASS");
 }
 
+// A pack file replaces its qrc node: data, flags and a content timestamp (the QML disk cache key).
+static void test_resources(void) {
+    char dir[] = "/tmp/hook-qrc-XXXXXX", path[64];
+    assert(mkdtemp(dir));
+    snprintf(path, sizeof path, "%s/a.qml", dir);
+    FILE *f = fopen(path, "w"); assert(f && fputs("Item {}", f) >= 0 && !fclose(f));
+    static const uchar names[] = {0, 5, 0, 0, 0, 0, 0, 'a', 0, '.', 0, 'q', 0, 'm', 0, 'l'};
+    static const uchar data[] = {0, 0, 0, 4, 's', 't', 'o', 'k'};
+    uchar tree[44] = {0}; // rcc v3: node 0 = root dir (1 child, node 1), node 1 = zlib "a.qml" stamped 1
+    tree[5] = FLAG_DIRECTORY; tree[9] = 1; tree[13] = 1;
+    tree[27] = FLAG_COMPRESSED; tree[43] = 1;
+    struct walk w = {.tree = tree, .names = names, .data = data, .node_size = 22};
+    snprintf(w.pack, sizeof w.pack, "%s", dir);
+    apply(&w, 0, "", 0);
+    const uchar *e = tree + 22, *blob = data + be32(e + 10); // the offset wraps on 32-bit, as in Qt
+    assert(w.replaced == 1 && !(be16(e + 4) & (FLAG_COMPRESSED | FLAG_ZSTD)));
+    assert(be32(blob) == 7 && !memcmp(blob + 4, "Item {}", 7));
+    uint64_t stamp = (uint64_t)be32(e + 14) << 32 | be32(e + 18);
+    assert(stamp == content_stamp((const uchar *)"Item {}", 7) && stamp != 1);
+    assert(stamp >= 1577836800000ULL && stamp < 4102444800000ULL);
+    assert(content_stamp((const uchar *)"Item { }", 8) != stamp); // new text, new stamp
+    unlink(path); rmdir(dir);
+    puts("qrc: pack file replaces data, drops compression, stamps content for the QML cache: PASS");
+}
+
 static void test_patch_files(const char *filename) {
     FILE *f = fopen(filename, "rb"); assert(f);
     assert(!fseek(f, 0, SEEK_END)); long size = ftell(f); assert(size > 0);
@@ -851,6 +876,7 @@ int main(int argc, char **argv) {
     test_threads();
     test_alsa();
     test_update_dns();
+    test_resources();
     for (int i = 1; i < argc; i++) test_patch_files(argv[i]);
     return 0;
 }

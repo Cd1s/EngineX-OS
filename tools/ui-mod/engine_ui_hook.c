@@ -670,6 +670,16 @@ static int node_name(const struct walk *w, uint32_t offset, char *out, size_t si
     return 1;
 }
 
+// Engine 5.3.0 forces Qt's QML disk cache (QML_FORCE_DISK_CACHE beats QML_DISABLE_DISK_CACHE)
+// into /data, and Qt reuses a .qmlc while the source timestamp is unchanged: a cache compiled
+// from stock QML, an older pack or the other language would win over the pack forever.
+// A timestamp from the content makes Qt recompile exactly when the text changes.
+static uint64_t content_stamp(const uchar *p, size_t n) {
+    uint64_t h = 0xcbf29ce484222325ULL; // FNV-1a
+    while (n--) h = (h ^ *p++) * 0x100000001b3ULL;
+    return 1577836800000ULL + h % 2524608000000ULL; // ms in 2020..2100, a valid QDateTime
+}
+
 static uint32_t max_node(const struct walk *w, uint32_t node) {
     const uchar *e = w->tree + node * w->node_size;
     uint32_t top = node;
@@ -714,6 +724,11 @@ static void apply(struct walk *w, uint32_t node, const char *prefix, int depth) 
     put32(e + 10, (uint32_t)((uintptr_t)blob - (uintptr_t)w->data));
     e[4] = (uchar)((flags & ~(FLAG_COMPRESSED | FLAG_ZSTD)) >> 8);
     e[5] = (uchar)(flags & ~(FLAG_COMPRESSED | FLAG_ZSTD));
+    if (w->node_size >= 22) { // rcc v2+: be64 last-modified ms at +14
+        uint64_t stamp = content_stamp(blob + 4, be32(blob));
+        put32(e + 14, (uint32_t)(stamp >> 32));
+        put32(e + 18, (uint32_t)stamp);
+    }
     w->replaced++;
 }
 

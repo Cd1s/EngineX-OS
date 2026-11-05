@@ -75,6 +75,8 @@ remote-build --name sc5000-release-<短说明> --clean -- \
 
 教训（5.3.0.1）：官方 5.3.0 删掉了 `etc.mount` / `var.mount`，`sc5000-custom-prepare.service` 上的 `Requires=` 因此失败。从 5.0.4.2 在线升级后，UI 包、版本号和 SSH 全部失效，而单测和镜像抽查都没发现。碟机多在俱乐部现场用，这类问题不能留给用户自己去踩。
 
+教训（5.3.0.1 重发）：Engine 5.3.0 强制打开 Qt 的 QML 磁盘缓存（`QML_FORCE_DISK_CACHE` 盖过我们的 `QML_DISABLE_DISK_CACHE`），缓存放在 `/data/AppDataUser/AIR Music Technology/Engine/.cache/qml`，只按源文件时间戳判断是否过期。实机曾经在没有 UI 包的情况下跑过一次 Engine，留下了原厂缓存；之后 hook 日志照样显示「48 files」，界面却一直是原厂的。门禁以前只数 hook 日志，没看渲染结果，所以没发现。现在 hook 按内容给替换的 qrc 文件打时间戳，门禁先种下原厂旧缓存，再读实际渲染出的节点。
+
 - 自定义 unit **不得对官方单元用硬依赖**（`Requires=` / `BindsTo=` / `Requisite=`），因为新底包可能删掉它。挂载用 `RequiresMountsFor=<路径>`（只对底包真有的挂载单元生效），其余用 `Wants=` + `After=`。`rootfs_audit.py` 把违反的写法记为 FAIL。
 - **适配新官方底包时，以及每次发版（含同版本重发）**，都在第 4 步之后跑门禁。三个镜像组各跑一次，旧镜像用同一机型的**上一个已发布版本**：
 
@@ -92,8 +94,8 @@ bash tools/az01-packer/release-gate.sh \
 | --- | --- |
 | 静态审计 | 新 rootfs 里所有自定义 unit 的 `Requires/BindsTo/Wants/After/Slice` 目标、`Exec*` 与 `EnvironmentFile`、脚本解释器和脚本里的绝对路径工具、suite 直接调用的工具（`exec.Command`）是否真实存在；`command -v` 可选工具缺失记为 WARN（例如 `iw` 缺失时，关闭 Wi-Fi 省电的分支从不执行）；宿主 systemd 再用 `systemd-analyze verify --root` 把所有自定义 unit 和带 drop-in 的官方 unit 解析一遍（5.3.0.1 第一次构建时它报出了 `Unit var.mount not found`），输出必须为空；overlay 里每个动态 ELF 跑 `ld.so --list`；engine 脚本不再强制 100 Mbps；所有 Engine 脚本过 `sh -n` |
 | 上一版在线升级 | 旧 rootfs + 空 `/data`：etc-reset → prepare → stream-sync + Engine（带 UI hook）；本地 TLS GitHub mock 发布新版；`/v1/sc5000/update` 发现新版 → `?apply=1` → Engine 以 `UpdateFromUrl` 退出 → 官方 engine 脚本 → `az01-update --net` 下载并校验新镜像，并进入 Applying；作为对照，翻转一个字节的镜像必须在 Verifying 阶段被拒绝 |
-| 新版开机 | 同一个 `/data` 换成新 rootfs：etc-reset → prepare（检查版本号、UI 包、SSH host key 保留）→ `sc5000-debloat --apply-runtime` → `sc5000-perf-tune` → `sshd -t` → stream-sync / deemixd / rb-bridge / engine-guardian / storage-discover / edisksd + hook → Engine + UI hook |
-| 新版功能 | QML 替换数等于 UI 包文件数，Engine 补丁 16 处（TidalAPI 网关、Stems 等），19 个 DSP guard，SQLite hook 已装，无 QML 加载错误、无崩溃，各守护进程存活；`/v1/sc5000/ui`、`POST /au/oauth2/token`、deemixd `/healthz` 正常；stems-probe 与 `stems-processor` 完成握手和分轨；rb-bridge 转换 Rekordbox 导出；fsck.hfsplus 可执行；下一次在线升级（mock 发布 `<VERSION>` 末位 +1）同样走通 |
+| 新版开机 | 同一个 `/data` 换成新 rootfs：etc-reset → prepare（检查版本号、UI 包、SSH host key 保留）→ `sc5000-debloat --apply-runtime` → `sc5000-perf-tune` → `sshd -t` → safe-mode 下先跑一次原厂 Engine，在 `/data` 留下原厂 QML 缓存（复现 5.3.0.1 实机故障）→ stream-sync / deemixd / rb-bridge / engine-guardian / storage-discover / edisksd + hook → Engine + UI hook |
+| 新版功能 | QML 替换数等于 UI 包文件数 + 1（门禁探针）；探针 `tools/az01-packer/gate-ui-probe.qml`（只在沙箱里替换原厂 `QmlWarnings.qml`，不进镜像）读取 Engine 实际渲染的节点：Settings → Services → Streaming 显示包里的 Deezer、SoundCloud 和 Beatport 各一行、原厂 Tidal 隐藏，About 显示 `EngineX OS <VERSION>`，控制中心有波形磁贴；Engine 补丁 16 处（TidalAPI 网关、Stems 等），19 个 DSP guard，SQLite hook 已装，无 QML 加载错误、无崩溃，各守护进程存活；`/v1/sc5000/ui`、`POST /au/oauth2/token`、deemixd `/healthz` 正常；stems-probe 与 `stems-processor` 完成握手和分轨；rb-bridge 转换 Rekordbox 导出；fsck.hfsplus 可执行；下一次在线升级（mock 发布 `<VERSION>` 末位 +1）同样走通 |
 
 - 预期值随底包变：`GATE_EXPECT_APPLIED`（默认 16）、`GATE_EXPECT_DSP`（默认 19）、`GATE_LANG`（默认 `zh-Hans`）。只有底包或 hook 站点表变了才改，并写进变更记录。
 - 沙箱里不真正执行、而是由记录 shim 代替的命令：`kexec`、`systemctl`、`reboot`、`encrypt-fs.sh`（对 `/data` 做 fscrypt，失败时会触发 Factory Reset）、`az01-update --erase-data`。`planck-remote-screen` 在沙箱里没有显示，它的 shim 改调 `az01-update --net`，两者用的是同一个 libaz01-prog 下载与校验代码。沙箱里没有 eMMC，`Applying` 之后会报 `unsupported operation`，这是预期结果，记为 INFO。真实刷写和重启仍需按第 8 步在实机上抽查。
