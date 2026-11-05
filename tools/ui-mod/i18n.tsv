@@ -1,5 +1,6 @@
 # English	简体中文	繁體中文 — exact UI strings; tracks, artists and playlists never pass through here.
 24 Hour Clock	24 小时制	24 小時制
+4-Deck Waveform	四路波形显示	四路波形顯示
 About / Update	关于 / 更新	關於 / 更新
 Account	账号	帳號
 Added	添加日期	新增日期
@@ -100,6 +101,7 @@ Label	厂牌	廠牌
 Large	大	大
 Legal	法律信息	法律資訊
 Lighting	灯光	燈光
+Live Stream	直播推流	直播推流
 Lock Playing Deck	锁定播放中的碟机	鎖定播放中的碟機
 Log In	登录	登入
 Logged Out	已退出登录	已登出
@@ -145,6 +147,7 @@ Playlists	歌单	歌單
 Please check your internet connection.	请检查网络连接。	請檢查網路連線。
 Please wait...	请稍候…	請稍候…
 Preview Volume	预览音量	預覽音量
+Pro DJ Link Waveform	Pro DJ Link 波形	Pro DJ Link 波形
 Quantize	量化	量化
 RESET	重置	重設
 Read-only	只读	唯讀
