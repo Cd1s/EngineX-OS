@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -129,6 +130,17 @@ func New(cfg Config, jobs *Jobs) *Server {
 			postedDevices[s][key] = mergeDevice(postedDevices[s][key], d)
 		}
 	}
+	if exportCfg.Peers == nil {
+		exportCfg.Peers = func() []net.IP {
+			var ips []net.IP
+			for _, d := range prolink.BuildSnapshot(s.mergedDevices()).Devices {
+				if ip := net.ParseIP(d.Address); ip != nil {
+					ips = append(ips, ip)
+				}
+			}
+			return ips
+		}
+	}
 	s.prolinkExport = prolink.NewExporter(exportCfg)
 	s.closed = make(chan struct{})
 	go s.retryExport(10 * time.Second)
@@ -212,7 +224,14 @@ func (s *Server) tryExport() {
 	s.uiMu.Lock()
 	on := s.loadUI().ProlinkExport
 	s.uiMu.Unlock()
-	if on && !s.prolinkExport.Status().Enabled && s.prolinkExport.SetEnabled(true) == nil {
+	if !on {
+		return
+	}
+	if s.prolinkExport.Status().Enabled {
+		if err := s.prolinkExport.Rebind(); err != nil {
+			log.Printf("stream-sync: Pro DJ Link export rebind: %v", err)
+		}
+	} else if s.prolinkExport.SetEnabled(true) == nil {
 		log.Printf("stream-sync: Pro DJ Link export started")
 	}
 }

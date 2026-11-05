@@ -742,3 +742,47 @@ func TestExportMediaQueriesAndOffDuringSlowIncomingNFS(t *testing.T) {
 		t.Fatal("OFF did not cancel incoming NFS promptly", err)
 	}
 }
+
+// The export follows the players: a peer in an interface's subnet picks that
+// interface; our own address and unreachable peers fall back to the first one.
+func TestExportIdentityFollowsPeers(t *testing.T) {
+	type cand struct {
+		ip  net.IP
+		net *net.IPNet
+	}
+	var cands []cand
+	ifaces, _ := net.Interfaces()
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || len(iface.HardwareAddr) != 6 {
+			continue
+		}
+		addrs, _ := iface.Addrs()
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() {
+				cands = append(cands, cand{n.IP.To4(), n})
+			}
+		}
+	}
+	if len(cands) == 0 {
+		t.Skip("no usable IPv4 interface")
+	}
+	first, _, _, _, err := exportIdentity(ExportConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cands {
+		peer := append(net.IP(nil), c.ip...)
+		peer[3] ^= 1 // a neighbour on the same subnet
+		if !c.net.Contains(peer) {
+			continue
+		}
+		got, _, _, _, err := exportIdentity(ExportConfig{Peers: func() []net.IP { return []net.IP{c.ip, peer} }})
+		if err != nil || !c.net.Contains(got) {
+			t.Fatalf("peer %v: picked %v, want an address in %v", peer, got, c.net)
+		}
+	}
+	got, _, _, _, _ := exportIdentity(ExportConfig{Peers: func() []net.IP { return []net.IP{net.IPv4(203, 0, 113, 9)} }})
+	if !got.Equal(first) {
+		t.Fatalf("unreachable peer: picked %v, want the first interface %v", got, first)
+	}
+}
