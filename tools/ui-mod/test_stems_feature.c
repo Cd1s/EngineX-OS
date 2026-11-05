@@ -82,10 +82,12 @@ static void mock_flanger_process(void *self, float *const *in, float *const *out
 }
 
 static unsigned master_calls;
+static int master_seen_channels;
 static uint32_t mock_master_output(void *host, void *context, int in_channels, const float *const *in,
                                    int out_channels, float *const *out, int frames) {
-    assert(host == (void *)0x11 && context == (void *)0x22 && in_channels == 2 && in && out_channels == 4 && frames == 64);
+    assert(host == (void *)0x11 && context == (void *)0x22 && in_channels == 2 && in && (out_channels == 4 || out_channels == 8) && frames == 64);
     master_calls++;
+    master_seen_channels = out_channels;
     for (int ch = 0; ch < out_channels; ch++)
         for (int i = 0; i < frames; i++) out[ch][i] = i & 1 ? -2.0f : 2.0f;
     return 0x5a;
@@ -319,6 +321,14 @@ static void test_dsp_hooks(void) {
         __atomic_store_n(&gain_enabled, 0, __ATOMIC_RELAXED);
         assert(master_calls == 3);
         puts("ARM airDeviceCallback (#58): displaced per-build prologue, 7-argument ABI, both stereo pairs limited to -0.1 dBFS only when on: PASS");
+        // #49: in the 4-deck layout Engine gets 8 outputs, the card's 4 first.
+        four_deck_pad_on = 1;
+        memset(buf, 0, sizeof buf);
+        assert(call((void *)0x11, (void *)0x22, 2, in, 4, out, 64) == 0x5a);
+        assert(master_seen_channels == 8 && buf[0][0] == 2.0f && buf[3][1] == -2.0f && four_deck_pad[3][1] == -2.0f);
+        four_deck_pad_on = 0;
+        assert(call((void *)0x11, (void *)0x22, 2, in, 4, out, 64) == 0x5a && master_seen_channels == 4);
+        puts("ARM airDeviceCallback (#49): decks 3/4 render into scratch outputs only in the 4-deck layout: PASS");
     }
 
     unsigned char gate[0x200] = {0};
@@ -521,6 +531,21 @@ static void test_config(void) {
             assert(config[fields[0]] == 1 && config[fields[4]] == 0);
             assert(out[0] == (uintptr_t)config && out[1] == 123 && out[2] == 456);
         }
+        // Only a player's 4-channel device gets the scratch outputs for decks 3/4.
+        char code_path[] = "/tmp/product-code-XXXXXX";
+        int cfd = mkstemp(code_path);
+        assert(cfd >= 0);
+        close(cfd);
+        product_code_path = code_path;
+        const char *boards[][2] = {{"JP07", "1"}, {"JP14", "1"}, {"JC11", "0"}, {"JP21", "0"}};
+        for (size_t i = 0; i < 4; i++) {
+            FILE *f = fopen(code_path, "w");
+            assert(f && fputs(boards[i][0], f) >= 0 && !fclose(f));
+            prepare_config((uintptr_t)image, page);
+            assert(four_deck_pad_on == (boards[i][1][0] == '1'));
+        }
+        unlink(code_path);
+        four_deck_pad_on = 0;
         unlink(path);
         four_deck_settings = UI_ROOT "/settings.conf";
         prepare_config((uintptr_t)image, page);

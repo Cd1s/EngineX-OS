@@ -330,9 +330,24 @@ static void hook_flanger(void *self, float *const *input, float *const *output, 
 typedef uint32_t (*audio_callback_fn)(void *, void *, int, const float *const *, int, float *const *, int);
 static struct sc_lim master_lim[8];
 static struct sc_gain master_gain[8];
+// #49: in the 4-deck layout a player's 4-channel device (two stereo pairs) leaves
+// decks 3 and 4 without output buffers, and Engine skips rendering them ("Mixer
+// skipped ... unassigned output buffer"): their playheads stand still. They render
+// into scratch buffers instead; their sound is dropped, the card keeps two decks.
+#define FOUR_DECK_PAD_FRAMES 8192
+static float four_deck_pad[4][FOUR_DECK_PAD_FRAMES];
+static int four_deck_pad_on;
 static uint32_t hook_master_output(void *host, void *context, int in_channels, const float *const *in,
                                    int out_channels, float *const *out, int frames) {
-    uint32_t rc = ((audio_callback_fn)dsp_originals[DSP_MASTER])(host, context, in_channels, in, out_channels, out, frames);
+    audio_callback_fn orig = (audio_callback_fn)dsp_originals[DSP_MASTER];
+    uint32_t rc;
+    if (four_deck_pad_on && out_channels == 4 && out && frames > 0 && frames <= FOUR_DECK_PAD_FRAMES) {
+        float *padded[8] = {out[0], out[1], out[2], out[3],
+                            four_deck_pad[0], four_deck_pad[1], four_deck_pad[2], four_deck_pad[3]};
+        rc = orig(host, context, in_channels, in, 8, padded, frames);
+    } else {
+        rc = orig(host, context, in_channels, in, out_channels, out, frames);
+    }
     int gain = __atomic_load_n(&gain_enabled, __ATOMIC_RELAXED);
     // Auto-Gain (#64) always runs into the limiter, so a boost never clips.
     if ((gain || __atomic_load_n(&lim_enabled, __ATOMIC_RELAXED)) && out && frames > 0)
@@ -474,6 +489,18 @@ static int install_dsp_hooks(uintptr_t base, size_t page) {
 // The sound card keeps its 2 deck outputs (PlanckClient caps decks at 12, not at
 // outputs), and engine-ui-guard names the hardware's deck group for this layout.
 static const char *four_deck_settings = UI_ROOT "/settings.conf";
+static const char *product_code_path = "/sys/firmware/devicetree/base/inmusic,product-code";
+
+// The standalone players (SC5000, SC5000M, SC6000, SC6000M).
+static int player_board(void) {
+    char code[8] = "";
+    FILE *f = fopen(product_code_path, "r");
+    if (f) {
+        if (!fgets(code, sizeof code, f)) code[0] = 0;
+        fclose(f);
+    }
+    return !strncmp(code, "JP07", 4) || !strncmp(code, "JP08", 4) || !strncmp(code, "JP13", 4) || !strncmp(code, "JP14", 4);
+}
 static int four_deck_layout(void) {
     int v = 0;
     FILE *f = fopen(four_deck_settings, "r");
@@ -514,6 +541,7 @@ static void prepare_config(uintptr_t base, size_t page) {
     if (!strcmp(build->name, "5.3.0") && four_deck_layout() > 0) {
         const uint32_t unlock[] = {0xe5d02239, 0xe3520000, 0x13a02004, 0x15802090, 0x13a02000, 0x15c02239};
         memcpy(code + 7, unlock, sizeof unlock);
+        four_deck_pad_on = player_board();
         fprintf(stderr, "engine-ui-hook: 4-deck layout unlocked (#49)\n");
     }
     config_jump[0] = 0xe51ff004;
