@@ -70,7 +70,9 @@
 - **更乾淨的聲音**：`主輸出軟限幅` 以平滑曲線把主輸出壓在 -0.1 dBFS 以下，零延遲，-1.5 dBFS 以下的訊號原樣不動；Flanger 不再讓音量下沉（自動補償到原曲電平，最多 +6 dB）；`推桿切歌自動回音` 在拉下推桿時留下回音尾巴；`自動增益（0 dB 正規化）` 把音量偏小的歌平滑地提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下的靜音不提升），之後一定經過軟限幅，不會爆音（預設關閉）。共 21 個即時 DSP 掛點，不增加任何延遲；
 - **SC5000 / SC6000 原生四軌版面**：在獨立播放機上解鎖 Engine 內建的四軌介面，音效卡仍只用 2 路。每台播放機負責自己角色的兩軌（`自動`、`1+3`、`2+4`、`1+2`、`1`、`2`，在 `設定 → 裝置 → 四軌角色` 或網頁控制台切換），其餘各軌是不出聲的**影子軌道**，跟隨另一台 EngineX 碟機或 CDJ 的曲目、播放 / CUE、位置、速度、Master 與同步；
 - 向 Shoutcast / Icecast 伺服器 **直播推流**；
-- **曲庫**：`自動分析插入的裝置` 在背景分析新插入的隨身碟 / SD 卡上所有未分析的曲目，使用最低優先權，不影響播放；rekordbox 匯出的隨身碟（包含 6.8.5）即使有個別檔案損壞也能正常匯入，那幾首在載入時再分析；選取其他串流服務時，不再跳出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示。
+- **曲庫**：`自動分析插入的裝置` 在背景分析新插入的隨身碟 / SD 卡上所有未分析的曲目，使用最低優先權，不影響播放；rekordbox 匯出的隨身碟（包含 6.8.5）即使有個別檔案損壞也能正常匯入，那幾首在載入時再分析；選取其他串流服務時，不再跳出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示；
+- **Spotify 改用你自己的應用**：Spotify 限制每個應用的使用者數和請求量，所以不再內建共用的應用。到 `developer.spotify.com/dashboard` 免費建立一個應用，把網頁控制台裡顯示的 Redirect URI 加進去，再把它的 Client ID 填回控制台（`#70`）；
+- **串流與影子軌道更穩**：在播放機上開著的串流歌單，背景服務重啟後照樣能載入，不再出現「Track not found」（`#73`）；影子軌道顯示真實歌名，沒有標籤的檔案也一樣，另一台從串流瀏覽器載入的歌也能跟隨；載入歌曲時打擊墊保持在 HOT CUE（`#71`）。
 
 > **先鋒連線說明**：與先鋒 CDJ-3000 的連線互通（曲庫分享、3-Band 波形、60fps 播放頭與 Master / Beat Sync 對拍）是以維護者自研的 **OpenCDJ-3000**（Virtual CDJ-3000 硬體協定模擬器）與實機 Denon SC5000 聯調驗證。手邊暫時沒有先鋒 CDJ-3000 實體真機，接先鋒真機的表現還需要大家實測，非常歡迎提交 Issue 或 PR 回報！
 
@@ -82,6 +84,13 @@
 ## 實機畫面
 
 <table>
+<tr>
+<td colspan="2" align="center" valign="top">
+<img src="./docs/assets/screenshots/4deck-sc5000-cdj3000.png" width="49%" alt="原生 4 軌視圖與影子軌道"> <img src="./docs/assets/screenshots/opencdj-3000.png" width="49%" alt="OpenCDJ-3000 虛擬 CDJ-3000"><br>
+<b>原生 4 軌視圖：兩台 SC5000 + 一台 CDJ-3000 同一區域網路連動</b><br>
+<sub>右邊的 SC5000 負責第 2、4 軌；第 3 軌是開著 BEAT SYNC 的 CDJ-3000（OpenCDJ-3000 模擬器），波形和速度經 Pro DJ Link 即時跟隨</sub>
+</td>
+</tr>
 <tr>
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/zh-TW/01-deck-stems-official-pads.png" width="100%" alt="原生 4 軌 Stems 分軌"><br>

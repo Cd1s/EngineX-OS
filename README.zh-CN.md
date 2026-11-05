@@ -70,7 +70,9 @@
 - **更干净的声音**：`主输出软限幅` 用平滑曲线把主输出压在 -0.1 dBFS 以下，零延迟，-1.5 dBFS 以下的信号原样不动；Flanger 不再让音量下沉（自动补偿到原曲电平，最多 +6 dB）；`拉杆切歌自动回音` 在拉下推子时留下回音尾巴；`自动增益（0 dB 归一化）` 把音量偏小的歌平滑地提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下的静音不提升），之后总会经过软限幅，不会爆音（默认关闭）。共 21 个实时 DSP 挂点，不增加任何延迟；
 - **SC5000 / SC6000 原生四轨布局**：在独立播放机上解锁 Engine 自带的四轨界面，声卡仍只用 2 路。每台播放机负责自己角色的两轨（`自动`、`1+3`、`2+4`、`1+2`、`1`、`2`，在 `设置 → 设备 → 四轨角色` 或网页控制台切换），其余各轨是不出声的**影子轨道**，跟随另一台 EngineX 碟机或 CDJ 的曲目、播放 / CUE、位置、速度、Master 和同步；
 - 向 Shoutcast / Icecast 服务器 **直播推流**；
-- **曲库**：`自动分析插入的设备` 在后台分析新插入的 U 盘 / SD 卡上所有未分析的曲目，使用最低优先级，不影响播放；rekordbox 导出的 U 盘（包括 6.8.5）即使有个别文件损坏也能正常导入，那几首在加载时再分析；选中其他流媒体服务时，不再弹出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示。
+- **曲库**：`自动分析插入的设备` 在后台分析新插入的 U 盘 / SD 卡上所有未分析的曲目，使用最低优先级，不影响播放；rekordbox 导出的 U 盘（包括 6.8.5）即使有个别文件损坏也能正常导入，那几首在加载时再分析；选中其他流媒体服务时，不再弹出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示；
+- **Spotify 改用你自己的应用**：Spotify 限制每个应用的用户数和请求量，所以不再内置共用的应用。到 `developer.spotify.com/dashboard` 免费创建一个应用，把网页控制台里显示的 Redirect URI 加进去，再把它的 Client ID 填回控制台（`#70`）；
+- **流媒体与影子轨道更稳**：在碟机上开着的流媒体歌单，后台服务重启后照样能加载，不再报「Track not found」（`#73`）；影子轨道显示真实歌名，没有标签的文件也一样，另一台从流媒体浏览器加载的歌也能跟随；加载歌曲时打击垫保持在 HOT CUE（`#71`）。
 
 > **先锋联机说明**：与先锋 CDJ-3000 的联机互通（曲库共享、3-Band 波形、60fps 播放头与 Master / Beat Sync 对拍）是用维护者自研的 **OpenCDJ-3000**（Virtual CDJ-3000 硬件协议模拟器）与实机 Denon SC5000 联调验证的。手头暂时没有先锋 CDJ-3000 实体真机，接先锋真机的表现还需要大家实测，非常欢迎提交 Issue 或 PR 反馈！
 
@@ -82,6 +84,13 @@
 ## 实机画面
 
 <table>
+<tr>
+<td colspan="2" align="center" valign="top">
+<img src="./docs/assets/screenshots/4deck-sc5000-cdj3000.png" width="49%" alt="原生 4 轨视图与影子轨道"> <img src="./docs/assets/screenshots/opencdj-3000.png" width="49%" alt="OpenCDJ-3000 虚拟 CDJ-3000"><br>
+<b>原生 4 轨视图：两台 SC5000 + 一台 CDJ-3000 同一局域网联动</b><br>
+<sub>右边的 SC5000 负责第 2、4 轨；第 3 轨是开着 BEAT SYNC 的 CDJ-3000（OpenCDJ-3000 模拟器），波形和速度经 Pro DJ Link 实时跟随</sub>
+</td>
+</tr>
 <tr>
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/zh-CN/01-deck-stems-official-pads.png" width="100%" alt="原生 4 轨 Stems 分轨"><br>
