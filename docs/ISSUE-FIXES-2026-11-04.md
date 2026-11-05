@@ -327,3 +327,18 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
   - NetEase / Spotify 保持登录，登录文件哈希没有变化。
   - 自动增益最后保持关闭（默认值）。实际听感还要维护者在实机上试听确认。
 - **回滚点**：`684142f`（5.3.0.2 README 提交）。实机可以用上面的备份恢复。
+
+## 2026-11-06：#70 / #71 / #73、双 SC5000 + CDJ-3000 联调修复，5.3.0.2 候选构建（Opus 5.5，未推送、未发版）
+
+- **#70 Spotify**：去掉内置 Client ID（`bd6188a` 后改写为 `280a2ca`），每位碟机主人在网页控制台填自己的应用；没填时登录、手机页和中继都给出明确提示。`release-5.3.0.2` 分支历史已用 filter-branch 抹掉旧 ID 和私有主机名、序列号（162 个提交 0 命中）。
+- **#73 「Track not found」**：根因不是 token 过期。实机日志显示 Engine 在 18:58 拿到歌单，stream-sync 18:59 重启（热部署），19:48 加载 ID 342–344 得到 404。网关的数字 ID 只在内存里，重启后从 1 重新编号。修复：ID、计数器和歌单写入 `state/gateway-tracks.json`（变化后 3 s、关闭时），启动时读回；owner 的 key 不再用随机会话 ID（`9e8f09e`、`f021655`）。deemixd 每次下载都重新用 ARL 登录，网关 token 24 h 且任何刷新都成功，各服务都会在 401 时续期，这几处无需改动。
+- **双 SC5000 + 虚拟 CDJ-3000 联调中发现并修复**：
+  - CDJ 曲目元数据缓存按主机区分（`54941b8`）：两台导出端短暂撞号时，另一台会把对方 SD 卡上的歌名一直挂在 CDJ 的 track 1 上。
+  - 影子轨道副本保留原文件名（`ac1798f`）：没有标签的 WAV 以前显示成 `IP-槽位-ID.wav`；从流媒体浏览器（含 OmniSource）加载的歌也能镜像到另一台。
+  - 门禁 UI 包计数改为下限（`ac3448b`）：Engine 5.3.0 运行时把 ControlSurfaceModules（`Sync.qml`）注册两次，hook 两处都替换，日志多一行；全路径核对 228 个包文件都在各自的注册里。
+  - OpenCDJ-3000（另一个仓库，本地未提交）：`-deck` 支持多台碟机（逗号分隔），只认第一台为 Denon 编号，修掉 2↔4 来回跳。
+- **实机（两台 JP07，有线 LAN）**：第二台从 5.0.4.2 用官方 5.3.0.1.1 镜像本地刷入（`az01-update --file`，sha256 与 Release 一致，SSH 与 host key 保留），再热部署 5.3.0.2（hook `ca2025c0`、guard、UI 包 `b5736349`、suite `4ee12c34`）。角色：左 `1`、右 `2+4`，CDJ 为 player 3；Pro DJ Link 编号互不冲突（左 4、右 2、CDJ 3）。CDJ 开 BEAT SYNC 时实时跟随右机 Master（128.7 / 145 BPM），影子轨 3 的波形、位置、歌名正确。部署前均用 agent-backup 备份。
+- **测试（Oracle-Batam-arm，`--clean`）**：发版规则第 2 步全部通过（gofmt、vet、21 个 Go 包 race、overlay、az01-packer、stems、`test_dsp_smooth` 三种编译、`test_stems_feature` 两个底包、`test_edisksd_hook` 含 `--mounts`、`test_sclive4_bootstrap.sh`）。
+- **候选构建** `release-5.3.0.2-rc1`（`none`，未上传）：SC5000 组 `cfa266a8…`、SC6000 组 `b407accd…`、PRIME 4 组 `061355e3…`；三组解包 `verified: true`、版本 5.3.0.2；`/root/.ssh/authorized_keys` 只有原厂的 `cert-authority`（与官方 5.3.0 镜像逐字节相同）。
+- **未完成，需要维护者决定**：`origin/main` 的 `e32a76e`（Engine m.db / 流媒体曲目导出给 CDJ，约 1500 行）不在本分支，和本分支的 `export.go` 有 5 处冲突（最大 130 行）。直接把本分支强推到 main 会丢掉它，所以没有推送、没有建 tag 和 Release、没有关闭 issue。
+- **回滚点**：5.3.0.1.1 的构建提交 `897510d`；改写前的分支在 `backup/pre-private-scrub-20261106`。
