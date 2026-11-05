@@ -17,6 +17,7 @@
 <div id="notice" role="status"></div>
 <div id="login" class="card"><img id="qr" alt="登录二维码"><p><a id="auth" target="_blank" rel="noreferrer">在此手机打开登录</a></p><button id="check">检查网易云扫码状态</button><small id="loginStatus"></small></div>
 <div class="card"><h2 id="heading">歌单</h2><div class="bar"><input id="playlistID" placeholder="Deezer 公开歌单 ID" aria-label="公开歌单 ID"><button id="open">打开歌单 ID</button></div><div id="rows" class="rows"></div></div>
+<div class="card"><h2>Wi-Fi 传歌（内置硬盘 / SD / U 盘）</h2><div class="bar"><select id="dropDrive" aria-label="目标盘"></select><input id="dropPlaylist" placeholder="Wi-Fi Drop" aria-label="文件夹 / 歌单名"></div><label id="dropZone" for="dropFiles" tabindex="0" style="display:block;padding:28px;border:2px dashed #374151;border-radius:9px;text-align:center">把 MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS 拖到这里，或点此选择文件<input id="dropFiles" type="file" multiple accept=".mp3,.flac,.wav,.aiff,.aif,.m4a,.aac,.ogg,.opus,audio/*" style="display:none"></label><small id="dropState" role="status">存到 &lt;盘&gt;/Wi-Fi Drop/&lt;歌单&gt;/。SD 卡上的 FLAC/MP3 会自动分析并加入同名歌单，其余在 Engine 的文件浏览里出现、加载时分析。</small></div>
 <div class="card"><h2>下载与分析</h2><div id="jobs"></div><canvas id="wave" width="1024" height="70" aria-label="RGB 波形"></canvas></div>
 <script>
 'use strict';
@@ -85,5 +86,13 @@ async function jobs(){
 
 function showUI(v){$('uiState').textContent='当前：'+v.language+' · '+v.waveform+' · '+v.quality+' · 4-Deck: '+(v.fourDeckWaveform?'开':'关')+' · ProLink: '+(v.prolinkWaveform?'开':'关')+' · 软限幅: '+(v.masterLimiter?'开':'关')+' · 自动增益: '+(v.autoGain?'开':'关')+' · Pro DJ Link 曲库: '+(v.prolinkShare?'开':'关')+' · CDJ Export Beta: '+(v.prolinkExport?'开':'关')+(v.safeMode?' · 安全模式（已回到原厂界面，选择语言可重试）':'')}
 for(const b of document.querySelectorAll('[data-ui]'))b.onclick=()=>action(async()=>{const q=b.dataset.ui;if(q.includes('restart')&&!confirm('重启 Engine？播放会中断。'))return;showUI(await post('ui?'+q))});
-action(async()=>{showUI(await api('ui'));await showRelay();await showBpm();await showBroadcast();await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(e=>notice(e.message))},2000);
+async function showDrives(){const ds=await api('drives'),sel=$('dropDrive');sel.replaceChildren();const kinds={hd:'内置硬盘',sd:'SD 卡',usb:'U 盘',drive:'存储'};for(const d of ds){const o=document.createElement('option');o.value=d.name;o.textContent=(kinds[d.kind]||d.kind)+' · '+d.name+' · 剩余 '+(d.free/2**30).toFixed(1)+' GB';sel.append(o)}if(!ds.length){const o=document.createElement('option');o.textContent='没有可写的盘';o.disabled=true;sel.append(o)}}
+function dropOne(file){return new Promise((ok,bad)=>{const x=new XMLHttpRequest(),f=new FormData();f.append('file',file,file.name);x.open('POST','/api/drop?drive='+encodeURIComponent($('dropDrive').value)+'&playlist='+encodeURIComponent($('dropPlaylist').value.trim()));x.upload.onprogress=e=>{if(e.lengthComputable)$('dropState').textContent=file.name+' · '+Math.round(100*e.loaded/e.total)+'%'};x.onload=()=>{let v={};try{v=JSON.parse(x.responseText)}catch(e){}x.status===200?ok(v):bad(Error(v.error||x.status))};x.onerror=()=>bad(Error('网络中断'));x.send(f)})}
+async function dropFiles(files){if(!$('dropDrive').value)throw Error('先选择目标盘');let n=0,imp=0;for(const file of files){const v=await dropOne(file);n+=v.saved.length;imp+=v.imported}$('dropState').textContent='已保存 '+n+' 个文件'+(imp?'，'+imp+' 个正在分析入库（见下方）':'');await showDrives()}
+$('dropFiles').onchange=e=>action(()=>dropFiles([...e.target.files]));
+$('dropZone').onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();$('dropFiles').click()}};
+$('dropZone').ondragover=e=>{e.preventDefault();$('dropZone').style.borderColor='#5ce4d5'};
+$('dropZone').ondragleave=()=>{$('dropZone').style.borderColor='#374151'};
+$('dropZone').ondrop=e=>{e.preventDefault();$('dropZone').style.borderColor='#374151';action(()=>dropFiles([...e.dataTransfer.files]))};
+action(async()=>{showUI(await api('ui'));await showDrives();await showRelay();await showBpm();await showBroadcast();await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(e=>notice(e.message))},2000);
 </script></html>

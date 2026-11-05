@@ -59,6 +59,9 @@ func OpenLibrary(path string) (*Library, error) {
 }
 func (l *Library) Close() error { return l.db.Close() }
 
+// Root is the volume holding this Engine Library.
+func (l *Library) Root() string { return l.root }
+
 type Import struct {
 	Path, Title, Artist, Album, Comment, Playlist, Format string
 	Result                                                *Result

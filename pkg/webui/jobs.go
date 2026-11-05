@@ -515,6 +515,38 @@ func (j *Jobs) Submit(session string, t providers.Track, guest bool) (Job, error
 	return j.submit(session, t, guest, providers.Track{}, nil)
 }
 func (j *Jobs) submit(session string, t providers.Track, guest bool, matched providers.Track, dl *deemixclient.Download) (Job, error) {
+	playlist := providers.OwnerPlaylist
+	if guest {
+		playlist = providers.GuestPlaylist
+	}
+	return j.submitTo(session, t, playlist, matched, dl)
+}
+
+// SubmitFile analyses an audio file already on the library's volume and
+// imports it into playlist (#66). ok is false when there is no library, the
+// file is on another drive, or it is not FLAC/MP3.
+// shortcut: only FLAC/MP3 pass deemixclient.Inspect; WAV/AIFF/M4A are left to Engine's analysis on load.
+func (j *Jobs) SubmitFile(path, playlist string) (job Job, ok bool, err error) {
+	lib, has := j.p.Library.(interface{ Root() string })
+	if !has {
+		return Job{}, false, nil
+	}
+	if real, e := filepath.EvalSymlinks(path); e == nil {
+		path = real
+	}
+	if rel, e := filepath.Rel(lib.Root(), path); e != nil || !filepath.IsLocal(rel) {
+		return Job{}, false, nil
+	}
+	q, err := deemixclient.Inspect(path)
+	if err != nil {
+		return Job{}, false, nil
+	}
+	t := providers.Track{ID: "drop:" + path, Title: strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), Provider: localProvider}
+	job, err = j.submitTo("wifi-drop", t, playlist, providers.Track{}, &deemixclient.Download{Path: path, Quality: q})
+	return job, err == nil, err
+}
+
+func (j *Jobs) submitTo(session string, t providers.Track, playlist string, matched providers.Track, dl *deemixclient.Download) (Job, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.ctx.Err() != nil {
@@ -535,10 +567,6 @@ func (j *Jobs) submit(session string, t providers.Track, guest bool, matched pro
 		delete(j.items, old)
 		delete(j.results, old)
 		j.order = j.order[1:]
-	}
-	playlist := providers.OwnerPlaylist
-	if guest {
-		playlist = providers.GuestPlaylist
 	}
 	job := Job{ID: providers.RandomID(), SessionID: session, Track: t, Playlist: playlist, State: "queued", matched: matched, dl: dl}
 	j.items[job.ID] = job

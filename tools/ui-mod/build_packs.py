@@ -242,7 +242,7 @@ SERVICES_MAIN = """
 			})
 		}
 	}
-	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport"]
+	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
 	property var scLoggedIn: []
 	property string scScope: ""
 	readonly property var scServices: [
@@ -251,7 +251,8 @@ SERVICES_MAIN = """
 		{ id: "spotify", name: "Spotify" },
 		{ id: "deezer", name: "Deezer" },
 		{ id: "soundcloud", name: "SoundCloud" },
-		{ id: "beatport", name: "Beatport" }
+		{ id: "beatport", name: "Beatport" },
+		{ id: "applemusic", name: "Apple Music" }
 	]
 	readonly property var scDict: (@DICT@)
 	function scT(s) { return scDict[s] || s }

@@ -49,6 +49,7 @@ type Config struct {
 	NeteaseURL, StateDir, DeezerURL, DeezerGatewayURL                     string
 	SoundCloudURL, SoundCloudTokenURL                                     string
 	BeatportURL                                                           string // tests; empty is Beatport's API
+	AppleMusicURL, AppleMusicWebURL                                       string // tests; empty is Apple's API and web player
 	HTTP                                                                  *http.Client
 	GitHubURL, VersionFile                                                string // tests; defaults are api.github.com and versionFile
 	// UIDir holds the deck UI settings; empty means the on-device default.
@@ -164,6 +165,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.RegisterBroadcastRoutes()
 	s.mux.HandleFunc("GET /api/prolink", s.prolinkGet)
 	s.mux.HandleFunc("POST /api/prolink", s.prolinkPost)
+	s.mux.HandleFunc("GET /api/drives", s.dropDrivesGet)
+	s.mux.HandleFunc("POST /api/drop", s.drop)
 	s.soundCloudAuth = &providers.SoundCloudAuth{TokenURL: cfg.SoundCloudTokenURL, Path: filepath.Join(cfg.StateDir, "soundcloud-token.json"), HTTP: cfg.HTTP}
 	if cfg.BPM != nil {
 		cfg.BPM.SoundCloudAuth = s.soundCloudAuth
@@ -360,6 +363,15 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 			}
 		}
 		return n, nil
+	case "applemusic":
+		p := &providers.AppleMusic{BaseURL: s.cfg.AppleMusicURL, WebURL: s.cfg.AppleMusicWebURL, HTTP: s.cfg.HTTP}
+		if !guest {
+			p.OwnerPath = filepath.Join(s.cfg.StateDir, "applemusic-owner.json")
+			if err := p.Load(); err != nil && !os.IsNotExist(err) {
+				return nil, err
+			}
+		}
+		return p, nil
 	case "spotify":
 		p := &providers.Spotify{ClientID: s.spotifyClientID(), HTTP: s.cfg.HTTP, BaseURL: s.cfg.SpotifyBaseURL, AccountsURL: s.cfg.SpotifyAccountsURL}
 		if !guest {

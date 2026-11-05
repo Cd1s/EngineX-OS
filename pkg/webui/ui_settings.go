@@ -20,12 +20,12 @@ const defaultUIDir = "/data/sc5000-custom/ui"
 var (
 	uiLanguages    = []string{"en", "zh-Hans", "zh-Hant"}
 	uiWaveforms    = []string{"denon", "rgb", "3band"}
-	uiServices     = []string{"tidal", "netease", "spotify", "deezer", "soundcloud", "beatport"}
+	uiServices     = []string{"tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
 	uiQualities    = []string{qualityFLAC, quality320k}
 	uiJogModes     = []string{"static", "rainbow", "fast", "bpm"}
 	uiNeteaseModes = []string{neteaseOfficial, neteaseDeemix}
 	// TIDAL logs in through Engine's own flow against TIDAL's servers.
-	loginServices = []string{"netease", "spotify", "deezer", "soundcloud", "beatport"}
+	loginServices = []string{"netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
 )
 
 const (
