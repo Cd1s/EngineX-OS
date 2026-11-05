@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
 
 func TestNetPathFile(t *testing.T) {
@@ -112,7 +114,8 @@ func TestShadowDeckFromCDJ(t *testing.T) {
 	shadowBeaconOn = false
 	defer func() { shadowBeaconOn = true }()
 	dir := t.TempDir()
-	srv := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
+	s := New(Config{UIDir: dir, StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
 	defer srv.Close()
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = "/run/sc5000-assignments/role" }()
@@ -125,5 +128,10 @@ func TestShadowDeckFromCDJ(t *testing.T) {
 	_, decks := shadowGetJSON(t, srv.URL+"/v1/sc5000/shadow")
 	if len(decks) != 1 || decks[0].Deck != 3 || !decks[0].Playing || decks[0].Pitch != -1.5 || decks[0].PositionMS < 5000 || decks[0].Path != "" {
 		t.Fatalf("shadow: %+v", decks)
+	}
+	// A CDJ-3000's absolute position (0x0b) wins over the beat-based one.
+	s.shadow.observe(prolink.Device{Number: 3, PacketType: 0x0b, PrecisePosition: true, PlayPositionMS: 9000})
+	if _, decks = shadowGetJSON(t, srv.URL+"/v1/sc5000/shadow"); len(decks) != 1 || decks[0].PositionMS < 9000 || decks[0].PositionMS > 9500 {
+		t.Fatalf("precise: %+v", decks)
 	}
 }

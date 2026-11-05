@@ -50,8 +50,17 @@ type peerDeck struct {
 	at time.Time
 }
 
+// precisePos is a CDJ-3000's playhead from its absolute position packet (0x0b,
+// every 30 ms) and when it arrived; the status packet's playhead only moves on
+// beats, and following that made the shadow deck jump (#49).
+type precisePos struct {
+	ms float64
+	at time.Time
+}
+
 type shadowState struct {
 	mu        sync.Mutex
+	precise   map[byte]precisePos
 	own       []deckState
 	ownAt     time.Time
 	peers     map[string]time.Time // EngineX players heard on the beacon
@@ -68,7 +77,7 @@ type shadowState struct {
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, files: map[string]string{}, busy: map[string]bool{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
+	return &shadowState{precise: map[byte]precisePos{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, files: map[string]string{}, busy: map[string]bool{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
 }
 
 func (s *Server) shadowDir() string { return filepath.Join(filepath.Dir(s.uiDir()), "shadow") }
@@ -193,6 +202,15 @@ func (s *Server) peerAudioGet(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", st.ModTime(), f)
 }
 
+// observe keeps the absolute positions of Pro DJ Link players.
+func (sh *shadowState) observe(d prolink.Device) {
+	if d.PacketType == 0x0b && d.PrecisePosition {
+		sh.mu.Lock()
+		sh.precise[d.Number] = precisePos{float64(d.PlayPositionMS), time.Now()}
+		sh.mu.Unlock()
+	}
+}
+
 // shadowGet is what the QML applies to the decks this player does not play.
 func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	role := s.role()
@@ -237,8 +255,12 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 				continue
 			}
 			d := deckState{Deck: deck, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch}
+			at := dev.LastSeen
+			if p, ok := sh.precise[dev.Number]; ok && now.Sub(p.at) < time.Second {
+				d.PositionMS, at = p.ms, p.at
+			}
 			if d.Playing {
-				d.PositionMS += float64(now.Sub(dev.LastSeen).Milliseconds()) * (1 + d.Pitch/100)
+				d.PositionMS += float64(now.Sub(at).Milliseconds()) * (1 + d.Pitch/100)
 			}
 			if dev.TrackID != 0 {
 				if host := s.sourceHost(devices, dev.SourcePlayer); host != nil {
