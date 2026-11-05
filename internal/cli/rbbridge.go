@@ -92,6 +92,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	}
 
 	discovery := prolink.NewDiscovery()
+	discovery.SetIgnoreLocal(true) // never stage or cache the deck's own export
 	if *anlzRoot != "" {
 		discovery.SetANLZRoot(*anlzRoot)
 	}

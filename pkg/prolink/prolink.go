@@ -278,6 +278,44 @@ type Discovery struct {
 	trackCache map[string]cachedTrack
 	trackKeys  []string
 	media      *MediaCache
+	// ignoreLocal drops packets this machine sent itself (rb-bridge next to the
+	// deck's own export would otherwise copy the deck's stick onto itself).
+	ignoreLocal bool
+	local       localAddrs
+}
+
+// SetIgnoreLocal makes Listen ignore packets from this machine's own addresses.
+func (d *Discovery) SetIgnoreLocal(on bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.ignoreLocal = on
+}
+
+// localAddrs caches this machine's IPv4 addresses for ten seconds.
+type localAddrs struct {
+	mu   sync.Mutex
+	at   time.Time
+	list []net.IP
+}
+
+func (l *localAddrs) has(ip net.IP) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if time.Since(l.at) > 10*time.Second {
+		l.at, l.list = time.Now(), nil
+		addrs, _ := net.InterfaceAddrs()
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok {
+				l.list = append(l.list, n.IP)
+			}
+		}
+	}
+	for _, own := range l.list {
+		if own.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetMediaCache reads tracks from the hosting player over the network first (#59).
@@ -694,6 +732,12 @@ func (d *Discovery) Listen(ctx context.Context, address net.IP, notify func(Devi
 				}
 				device, e := ParsePacket(b[:n], c.LocalAddr().(*net.UDPAddr).Port, addr.IP)
 				if e != nil {
+					continue
+				}
+				d.mu.RLock()
+				ignore := d.ignoreLocal
+				d.mu.RUnlock()
+				if ignore && (d.local.has(addr.IP) || d.local.has(net.ParseIP(device.Address))) {
 					continue
 				}
 				device = d.Observe(device)

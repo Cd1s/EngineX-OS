@@ -3,9 +3,11 @@ package prolink
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
@@ -28,6 +30,30 @@ func SafeRel(p string) (string, bool) {
 // complete one. Files already in dst are kept (they are only ever written
 // whole). It stops once the copied bytes would pass max; tracks left without
 // audio are skipped by the import. Returns the number of files copied.
+// stageRate caps the copy: the destination is usually the stick a deck is
+// playing from, and a full-speed copy starved playback ("short read" stutter).
+var stageRate int64 = 2 << 20
+
+type throttled struct {
+	ctx   context.Context
+	w     io.Writer
+	start time.Time
+	n     int64
+}
+
+func (t *throttled) Write(p []byte) (int, error) {
+	n, err := t.w.Write(p)
+	t.n += int64(n)
+	if ahead := time.Duration(t.n*int64(time.Second)/stageRate) - time.Since(t.start); ahead > 0 && err == nil {
+		select {
+		case <-time.After(ahead):
+		case <-t.ctx.Done():
+			return n, t.ctx.Err()
+		}
+	}
+	return n, err
+}
+
 func Stage(ctx context.Context, c *NFSClient, export, dst string, max int64) (int, error) {
 	pdb, _, err := c.Fetch(ctx, export, "/"+pdbPath, maxPDB)
 	if err != nil {
@@ -51,6 +77,7 @@ func Stage(ctx context.Context, c *NFSClient, export, dst string, max int64) (in
 	}
 	copied, used := 0, int64(0)
 	full := errors.New("full")
+	tw := &throttled{ctx: ctx, start: time.Now()}
 	fetch := func(remote string, limit uint32) error {
 		rel, ok := SafeRel(remote)
 		if !ok {
@@ -75,7 +102,8 @@ func Stage(ctx context.Context, c *NFSClient, export, dst string, max int64) (in
 			return err
 		}
 		defer os.Remove(f.Name())
-		_, err = c.FetchTo(ctx, export, "/"+filepath.ToSlash(rel), f, limit)
+		tw.w = f
+		_, err = c.FetchTo(ctx, export, "/"+filepath.ToSlash(rel), tw, limit)
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
