@@ -170,7 +170,7 @@ func TestSpotifyPhoneLoginSurvivesASlowTwoFactorDetour(t *testing.T) {
 	}
 	body, _ := io.ReadAll(done.Body)
 	done.Body.Close()
-	if !strings.Contains(string(body), "已完成") {
+	if !strings.Contains(string(body), "Connected") {
 		t.Fatalf("pasted callback refused: %s", body)
 	}
 	if s := get("/v1/sc5000/login?provider=spotify"); !strings.Contains(s, `"status":"done"`) {

@@ -1,9 +1,10 @@
 package providers
 
 // SoundCloud through its official API with the owner's registered app: the Client ID
-// and secret are exchanged for an access token, or a user's own token is used. Only
-// what the API marks fully playable is fetched. Previews are refused, and nothing is
-// decrypted.
+// and secret are exchanged for an access token, or a user's own token is used.
+// Registering an app needs Artist Pro, so a deck without either reads public
+// profiles through the web API soundcloud.com itself uses (see web). Only what is
+// fully playable is fetched. Previews are refused, and nothing is decrypted.
 
 import (
 	"bufio"
@@ -11,9 +12,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +25,8 @@ import (
 
 const (
 	defaultSoundCloudAPI  = "https://api.soundcloud.com"
+	defaultSoundCloudWeb  = "https://api-v2.soundcloud.com"
+	defaultSoundCloudSite = "https://soundcloud.com"
 	soundCloudTokenPath   = "https://secure.soundcloud.com/oauth/token"
 	soundCloudLikesID     = "likes"
 	soundCloudListLimit   = 2000
@@ -197,11 +202,100 @@ type SoundCloud struct {
 	Auth     *SoundCloudAuth
 	UserID   int64
 	Username string
+	WebURL   string // overrides the web API in tests
+	SiteURL  string // overrides soundcloud.com in tests
 }
 
-// Usable reports whether there is anything to reach the API with.
-func (s *SoundCloud) Usable() bool {
-	return s.Token != "" || (s.ClientID != "" && s.Secret != "")
+// web reports whether the deck has no app of its own. Public profiles, likes and
+// playlists are then read as soundcloud.com reads them, with the client ID its own
+// pages carry; an oauth_token from a browser login adds the account's private ones.
+func (s *SoundCloud) web() bool {
+	return s.ClientID == "" || s.Secret == ""
+}
+
+var (
+	scWebMu      sync.Mutex
+	scWebIDs     = map[string]string{} // by site, shared by every instance
+	scScriptRe   = regexp.MustCompile(`<script[^>]+src="(https?://[^"]+\.js)"`)
+	scClientIDRe = regexp.MustCompile(`client_id\s*[:=]\s*"([A-Za-z0-9]{32})"`)
+)
+
+func (s *SoundCloud) site() string {
+	if s.SiteURL != "" {
+		return strings.TrimRight(s.SiteURL, "/")
+	}
+	return defaultSoundCloudSite
+}
+
+// webClientID finds the public client ID in soundcloud.com's scripts. SoundCloud
+// changes it now and then, so a refused one is looked up again.
+func (s *SoundCloud) webClientID(ctx context.Context, renew bool) (string, error) {
+	scWebMu.Lock()
+	defer scWebMu.Unlock()
+	if id := scWebIDs[s.site()]; id != "" && !renew {
+		return id, nil
+	}
+	page, err := s.text(ctx, s.site()+"/")
+	if err != nil {
+		return "", err
+	}
+	scripts := scScriptRe.FindAllStringSubmatch(page, -1)
+	// It sits in one of the last bundles.
+	for i := len(scripts) - 1; i >= 0 && i >= len(scripts)-8; i-- {
+		js, err := s.text(ctx, scripts[i][1])
+		if err != nil {
+			continue
+		}
+		if m := scClientIDRe.FindStringSubmatch(js); m != nil {
+			scWebIDs[s.site()] = m[1]
+			return m[1], nil
+		}
+	}
+	return "", errors.New("soundcloud: public client ID not found")
+}
+
+func (s *SoundCloud) text(ctx context.Context, address string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	resp, err := client(s.HTTP).Do(req)
+	if err != nil {
+		return "", errors.New("soundcloud: site unreachable")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", StatusError(resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	return string(b), err
+}
+
+// webGet adds the public client ID, which stays on the web API's host.
+func (s *SoundCloud) webGet(ctx context.Context, address string, out any) error {
+	u, err := url.Parse(address)
+	if base, _ := url.Parse(s.base()); err != nil || base == nil || u.Host != base.Host {
+		return errors.New("soundcloud: invalid address")
+	}
+	h := http.Header{"Accept": {"application/json; charset=utf-8"}}
+	if s.Token != "" {
+		h.Set("Authorization", "OAuth "+s.Token)
+	}
+	for renew := false; ; renew = true {
+		id, err := s.webClientID(ctx, renew)
+		if err != nil {
+			return err
+		}
+		q := u.Query()
+		q.Set("client_id", id)
+		u.RawQuery = q.Encode()
+		err = JSON(ctx, s.HTTP, "GET", u.String(), nil, h, out)
+		var status StatusError
+		if renew || !errors.As(err, &status) || (status != 401 && status != 403) {
+			return err
+		}
+	}
 }
 
 type scTrack struct {
@@ -212,6 +306,7 @@ type scTrack struct {
 	Key      string  `json:"key_signature"`
 	ISRC     string  `json:"isrc"`
 	Access   string  `json:"access"`
+	Policy   string  `json:"policy"` // web API: SNIP is a preview, BLOCK nothing
 	Artwork  string  `json:"artwork_url"`
 	// Set when the uploader lets listeners download their original file.
 	Downloadable bool   `json:"downloadable"`
@@ -248,6 +343,12 @@ func (t scTrack) track() Track {
 }
 
 func (s *SoundCloud) base() string {
+	if s.web() {
+		if s.WebURL != "" {
+			return strings.TrimRight(s.WebURL, "/")
+		}
+		return defaultSoundCloudWeb
+	}
 	if s.BaseURL != "" {
 		return strings.TrimRight(s.BaseURL, "/")
 	}
@@ -279,6 +380,9 @@ func (s *SoundCloud) headers(ctx context.Context) (http.Header, error) {
 }
 
 func (s *SoundCloud) get(ctx context.Context, address string, out any) error {
+	if s.web() {
+		return s.webGet(ctx, address, out)
+	}
 	h, err := s.headers(ctx)
 	if err != nil {
 		return err
@@ -352,7 +456,7 @@ func (s *SoundCloud) ResolveUser(ctx context.Context, raw string) error {
 				Username string `json:"username"`
 			} `json:"collection"`
 		}
-		if s.get(ctx, s.list("/users", url.Values{"q": {name}, "limit": {"1"}}), &found) == nil && len(found.Collection) > 0 {
+		if s.get(ctx, s.list(s.path("/users", "/search/users"), url.Values{"q": {name}, "limit": {"1"}}), &found) == nil && len(found.Collection) > 0 {
 			s.UserID, s.Username = found.Collection[0].ID, found.Collection[0].Username
 			return nil
 		}
@@ -381,6 +485,14 @@ func (s *SoundCloud) expandShareLink(ctx context.Context, raw string) (string, e
 	}
 	location.RawQuery = ""
 	return location.String(), nil
+}
+
+// path picks the official API's path or the web API's.
+func (s *SoundCloud) path(official, web string) string {
+	if s.web() {
+		return web
+	}
+	return official
 }
 
 // nextPage keeps paging on the API, so a response cannot redirect the credentials.
@@ -432,6 +544,9 @@ func (s *SoundCloud) playlistPages(ctx context.Context, address, prefix string, 
 // library is where the account's own lists live. A user's token also reaches private
 // ones through /me; otherwise it is the public profile.
 func (s *SoundCloud) library() (string, error) {
+	if s.web() && s.UserID != 0 {
+		return "/users/" + strconv.FormatInt(s.UserID, 10), nil
+	}
 	if s.Token != "" || s.Auth.HasUser() {
 		return "/me", nil
 	}
@@ -450,7 +565,7 @@ func (s *SoundCloud) Playlists(ctx context.Context) ([]Playlist, error) {
 	q := func() url.Values { return url.Values{"limit": {"100"}, "show_tracks": {"false"}} }
 	out := []Playlist{{ID: soundCloudLikesID, Title: "Liked Tracks & Sets（我点赞的音乐）"}}
 	out = s.playlistPages(ctx, s.list(root+"/playlists", q()), "", out)
-	return s.playlistPages(ctx, s.list(root+"/likes/playlists", q()), "【收藏】", out), nil
+	return s.playlistPages(ctx, s.list(root+s.path("/likes/playlists", "/playlist_likes"), q()), "【收藏】", out), nil
 }
 
 func (s *SoundCloud) trackPages(ctx context.Context, address string) ([]Track, error) {
@@ -467,7 +582,7 @@ func (s *SoundCloud) trackPages(ctx context.Context, address string) ([]Track, e
 			return nil, err
 		}
 		for _, t := range r.Collection {
-			if t.ID != 0 && t.Access != "blocked" {
+			if t.ID != 0 && t.Access != "blocked" && t.Policy != "BLOCK" && t.Policy != "SNIP" {
 				out = append(out, t.track())
 			}
 		}
@@ -484,23 +599,64 @@ func (s *SoundCloud) Tracks(ctx context.Context, id string) ([]Track, error) {
 			return nil, err
 		}
 		q.Set("limit", "200")
-		return s.trackPages(ctx, s.list(root+"/likes/tracks", q))
+		return s.trackPages(ctx, s.list(root+s.path("/likes/tracks", "/track_likes"), q))
 	}
 	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
 		return nil, errors.New("soundcloud: invalid playlist ID")
 	}
+	if s.web() {
+		return s.webPlaylistTracks(ctx, id)
+	}
 	return s.trackPages(ctx, s.list("/playlists/"+id+"/tracks", q))
 }
 
+// webPlaylistTracks reads a playlist from the web API, which fills in only its first
+// few tracks; the rest come by ID, 50 at a time.
+func (s *SoundCloud) webPlaylistTracks(ctx context.Context, id string) ([]Track, error) {
+	var list struct {
+		Tracks []scTrack `json:"tracks"`
+	}
+	if err := s.get(ctx, s.base()+"/playlists/"+id, &list); err != nil {
+		return nil, err
+	}
+	full := map[int64]scTrack{}
+	var missing []string
+	for _, t := range list.Tracks {
+		if t.Title != "" {
+			full[t.ID] = t
+		} else if t.ID != 0 {
+			missing = append(missing, strconv.FormatInt(t.ID, 10))
+		}
+	}
+	for len(missing) > 0 {
+		n := min(50, len(missing))
+		var got []scTrack
+		if err := s.get(ctx, s.base()+"/tracks?"+url.Values{"ids": {strings.Join(missing[:n], ",")}}.Encode(), &got); err != nil {
+			break // what was already read is still worth showing
+		}
+		for _, t := range got {
+			full[t.ID] = t
+		}
+		missing = missing[n:]
+	}
+	var out []Track
+	for _, ref := range list.Tracks {
+		if t, ok := full[ref.ID]; ok && t.Policy != "BLOCK" && t.Policy != "SNIP" && len(out) < soundCloudListLimit {
+			out = append(out, t.track())
+		}
+	}
+	return out, nil
+}
+
 func (s *SoundCloud) Search(ctx context.Context, query string) ([]Track, error) {
-	return s.trackPages(ctx, s.list("/tracks", url.Values{"q": {query}, "limit": {"30"}, "access": {"playable"}}))
+	return s.trackPages(ctx, s.list(s.path("/tracks", "/search/tracks"), url.Values{"q": {query}, "limit": {"30"}, "access": {"playable"}}))
 }
 
 func (s *SoundCloud) SearchPlaylists(ctx context.Context, query string) ([]Playlist, error) {
 	var r struct {
 		Collection []scPlaylist `json:"collection"`
 	}
-	if err := s.get(ctx, s.list("/playlists", url.Values{"q": {query}, "limit": {"20"}, "show_tracks": {"false"}}), &r); err != nil {
+	if err := s.get(ctx, s.list(s.path("/playlists", "/search/playlists"), url.Values{"q": {query}, "limit": {"20"}, "show_tracks": {"false"}}), &r); err != nil {
 		return nil, err
 	}
 	out := make([]Playlist, 0, len(r.Collection))
@@ -525,6 +681,9 @@ type SoundCloudMedia struct {
 func (s *SoundCloud) Media(ctx context.Context, id string, lossless bool) (SoundCloudMedia, error) {
 	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
 		return SoundCloudMedia{}, errors.New("soundcloud: invalid track ID")
+	}
+	if s.web() {
+		return s.webMedia(ctx, id)
 	}
 	var t scTrack
 	if err := s.get(ctx, s.base()+"/tracks/"+id, &t); err != nil {
@@ -589,6 +748,58 @@ func (s *SoundCloud) Media(ctx context.Context, id string, lossless bool) (Sound
 	}
 	m.Ext, m.URLs = ext, urls
 	return m, nil
+}
+
+// webMedia picks a full-length stream from the web API: plain MP3 where there still is
+// one, else the AAC HLS stream, else HLS MP3. Encrypted streams are refused.
+// shortcut: the uploader's original file is not offered here; it needs an app.
+func (s *SoundCloud) webMedia(ctx context.Context, id string) (SoundCloudMedia, error) {
+	var t struct {
+		Policy string `json:"policy"`
+		Auth   string `json:"track_authorization"`
+		Media  struct {
+			Transcodings []struct {
+				URL     string `json:"url"`
+				Snipped bool   `json:"snipped"`
+				Format  struct {
+					Protocol string `json:"protocol"`
+					MimeType string `json:"mime_type"`
+				} `json:"format"`
+			} `json:"transcodings"`
+		} `json:"media"`
+	}
+	if err := s.get(ctx, s.base()+"/tracks/"+id, &t); err != nil {
+		return SoundCloudMedia{}, err
+	}
+	if t.Policy == "SNIP" || t.Policy == "BLOCK" {
+		return SoundCloudMedia{}, ErrNoFullStream
+	}
+	for _, want := range []struct{ protocol, mime, ext string }{
+		{"progressive", "audio/mpeg", "mp3"}, {"hls", "audio/mp4", "mp4"}, {"hls", "audio/mpeg", "mp3"},
+	} {
+		for _, c := range t.Media.Transcodings {
+			if c.Snipped || c.Format.Protocol != want.protocol || !strings.HasPrefix(c.Format.MimeType, want.mime) {
+				continue
+			}
+			var stream struct {
+				URL string `json:"url"`
+			}
+			address := c.URL
+			if t.Auth != "" {
+				address += "?" + url.Values{"track_authorization": {t.Auth}}.Encode()
+			}
+			if s.get(ctx, address, &stream) != nil || stream.URL == "" {
+				continue
+			}
+			if want.protocol == "progressive" {
+				return SoundCloudMedia{Ext: want.ext, URLs: []string{stream.URL}}, nil
+			}
+			if urls, err := s.segments(ctx, stream.URL); err == nil {
+				return SoundCloudMedia{Ext: want.ext, URLs: urls}, nil
+			}
+		}
+	}
+	return SoundCloudMedia{}, ErrNoFullStream
 }
 
 // signedAddress follows the API's redirect by hand, keeping credentials off the CDN.

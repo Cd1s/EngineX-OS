@@ -99,7 +99,7 @@ func TestBeatportPhoneLoginBrowseAndPlay(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(body), "已完成") {
+	if !strings.Contains(string(body), "Connected") {
 		t.Fatalf("phone page: %s", body)
 	}
 	if !strings.Contains(string(tidalGet(t, srv.URL, "/v1/sc5000/login?provider=beatport", 200, nil)), `"status":"done"`) {

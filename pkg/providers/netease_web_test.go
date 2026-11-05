@@ -304,7 +304,7 @@ func TestGetSongAndSoundCloudReadTheirKeys(t *testing.T) {
 	if got := b.getSong(context.Background(), track, "gsb"); got.BPM != 120 {
 		t.Fatalf("%+v", got)
 	}
-	if got := b.soundCloud(context.Background(), track, BPMConfig{SoundCloudToken: "tok"}); got.BPM != 126 || got.Key != "8A" {
+	if got := b.soundCloud(context.Background(), track, BPMConfig{SoundCloudClientID: "cid", SoundCloudSecret: "shh", SoundCloudToken: "tok"}); got.BPM != 126 || got.Key != "8A" {
 		t.Fatalf("%+v", got)
 	}
 }
@@ -725,7 +725,7 @@ func TestSoundCloudTokenReachesPrivateLists(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	s := &SoundCloud{BaseURL: srv.URL, Token: "mine"}
+	s := &SoundCloud{BaseURL: srv.URL, ClientID: "cid", Secret: "shh", Token: "mine"}
 	if err := s.Identify(context.Background()); err != nil || s.UserID != 8 {
 		t.Fatal(err, s.UserID)
 	}
