@@ -171,10 +171,10 @@ func TestCDJDecks(t *testing.T) {
 		}
 		devices = append(devices, prolink.Device{Number: 4, Name: "EngineX Export Beta", LastSeen: now}, prolink.Device{Number: 1, Name: "CDJ-2000", LastSeen: now.Add(-time.Minute)})
 		got := cdjDecks(devices, c.free, now)
-		// The same CDJ with its old number, seen earlier, is not another CDJ.
+		// The same CDJ with its old number, silent for 2 s, is not another CDJ.
 		if len(c.cdjs) == 1 {
 			old := dev(c.cdjs[0]%4 + 1)
-			old.Address, old.LastSeen = "10.0.0.1", now.Add(-time.Second)
+			old.Address, old.LastSeen = "10.0.0.1", now.Add(-2*time.Second)
 			got = cdjDecks(append(devices, old), c.free, now)
 		}
 		if len(got) != len(c.want) {
@@ -185,5 +185,22 @@ func TestCDJDecks(t *testing.T) {
 				t.Fatalf("%v on %v: deck %d has %d, want %d", c.cdjs, c.free, deck, got[deck].Number, n)
 			}
 		}
+	}
+}
+
+// An XDJ-XZ / XDJ-AZ is several players on one address: all of them are kept.
+func TestCDJDecksAllInOne(t *testing.T) {
+	now := time.Now()
+	xz := func(n byte, ago time.Duration) prolink.Device {
+		return prolink.Device{Number: n, Name: "XDJ-XZ", Address: "10.0.0.9", LastSeen: now.Add(-ago)}
+	}
+	got := cdjDecks([]prolink.Device{xz(1, 0), xz(2, 150*time.Millisecond)}, []int{2, 4}, now)
+	if len(got) != 2 || got[2].Number != 2 || got[4].Number != 1 { // player 2 on its own deck, player 1 on the free one
+		t.Fatalf("both decks of one address: %v", got)
+	}
+	// Its deck 2 went quiet 3 s ago (gone, or renumbered): only deck 1 stays.
+	got = cdjDecks([]prolink.Device{xz(1, 0), xz(2, 3*time.Second)}, []int{2, 4}, now)
+	if len(got) != 1 || got[2].Number != 1 {
+		t.Fatalf("quiet number kept: %v", got)
 	}
 }

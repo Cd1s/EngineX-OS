@@ -172,8 +172,10 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	if s.prolinkExport != nil {
 		s.prolinkExport.SetDeck(ex)
 		if claimed {
+			asked := map[string]bool{} // an all-in-one is one address for several players
 			for _, dev := range s.mergedDevices() {
-				if ip := net.ParseIP(dev.Address); dev.Master && ip != nil && !strings.HasPrefix(dev.Name, "EngineX") && time.Since(dev.LastSeen) < 5*time.Second {
+				if ip := net.ParseIP(dev.Address); dev.Master && ip != nil && !asked[dev.Address] && !strings.HasPrefix(dev.Name, "EngineX") && time.Since(dev.LastSeen) < 5*time.Second {
+					asked[dev.Address] = true
 					s.prolinkExport.RequestMaster(ip)
 				}
 			}
@@ -312,21 +314,25 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 // when it is free, the rest on what is left, Deck 2 first. A lone CDJ next to
 // a 1+3 player then shows beside Deck 1 also in the 2-waveform layout.
 func cdjDecks(devices []prolink.Device, free []int, now time.Time) map[int]prolink.Device {
-	// One player per address: a CDJ that changed its number still has its
-	// old entry for a few seconds, which became a second (master) CDJ.
-	latest := map[string]prolink.Device{}
+	// A CDJ that changed its number keeps its old entry for a few seconds, which
+	// became a second (master) CDJ. An all-in-one (XDJ-XZ, XDJ-AZ) is several
+	// players on one address, all sending every 200 ms or so. So keep only the
+	// numbers an address sent from within 1.5 s of its newest packet.
+	var live []prolink.Device
+	newest := map[string]time.Time{}
 	for _, dev := range devices {
-		key := dev.Address
-		if key == "" {
-			key = strconv.Itoa(int(dev.Number))
-		}
-		if old, seen := latest[key]; dev.Number >= 1 && dev.Number <= 6 && !strings.HasPrefix(dev.Name, "EngineX") && now.Sub(dev.LastSeen) <= 5*time.Second && (!seen || dev.LastSeen.After(old.LastSeen)) {
-			latest[key] = dev
+		if dev.Number >= 1 && dev.Number <= 6 && !strings.HasPrefix(dev.Name, "EngineX") && now.Sub(dev.LastSeen) <= 5*time.Second {
+			live = append(live, dev)
+			if dev.LastSeen.After(newest[dev.Address]) {
+				newest[dev.Address] = dev.LastSeen
+			}
 		}
 	}
 	var cdjs []prolink.Device
-	for _, dev := range latest {
-		cdjs = append(cdjs, dev)
+	for _, dev := range live {
+		if newest[dev.Address].Sub(dev.LastSeen) <= 1500*time.Millisecond {
+			cdjs = append(cdjs, dev)
+		}
 	}
 	slices.SortFunc(cdjs, func(a, b prolink.Device) int { return int(a.Number) - int(b.Number) })
 	out := map[int]prolink.Device{}
