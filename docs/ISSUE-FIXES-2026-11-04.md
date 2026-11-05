@@ -212,3 +212,18 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **实机影响**：已修复 `Requires=` 依赖问题，5.0.4.2 在线升级至 5.3.0.1 能正常保留定制 UI 与 SSH 访问，Beatport 自动出现在来源列表中。
 
 
+
+## 5.3.0.1 重发：升级后仍显示原厂界面（Engine 强制 QML 缓存），门禁改为检查实际渲染（2026-11-05 追加，Opus 5.5）
+
+- **现象**：实机（SC5000 JP07）从 5.0.4.2 在线升级到修正版 5.3.0.1 后，Settings → SERVICES → STREAMING 仍是原厂的 Beatport / SoundCloud / Tidal；来源页和控制中心同样是原厂样子。Engine 日志里 hook 照常打印 `packs/en: 48 files`，16 处补丁、19 个 DSP guard 都在，没有 safe-mode。
+- **根因**：Engine 5.3.0（Qt 6.7.2）自己设置了 `QML_FORCE_DISK_CACHE` 和 `QML_DISK_CACHE_PATH`，前者会盖过我们设的 `QML_DISABLE_DISK_CACHE=1`，缓存写在 `/data/AppDataUser/AIR Music Technology/Engine/.cache/qml`。Qt 只按源文件时间戳判断 `.qmlc` 是否过期，而 hook 替换 qrc 内容时保留了原厂时间戳。这台碟机 03:01–03:02 第一次升到 5.3.0.1 时，prepare 因 `etc.mount` 失败没有装上 UI 包，Engine 用原厂 QML 写了 1029 个 `.qmlc`。之后每次启动都直接用缓存，不再读 hook 换进去的源码。实机的 `qt.qml.import` 跟踪可以印证：`StreamingServices.qml` 只导入了原厂的 `QtQuick` 和 `Base`，没有解析包里的 `Repeater`。`/proc/<EMain>/maps` 里也能看到这些 `.qmlc` 被 mmap。同一机制还会让切换语言、同一底包上的新 UI 包失效。沙箱 `/data` 每次都是空的，所以单测、hook 计数和以前的门禁都发现不了。
+- **修复（`tools/ui-mod/engine_ui_hook.c`，提交 `1488ddd`）**：替换 qrc 文件时，把节点的 last-modified（rcc v2+，偏移 +14 处的 be64 毫秒值）设为文件内容的 FNV-1a 哈希，映射到 2020–2100 年。文本一变 Qt 就会重编，旧缓存（原厂、旧包、另一种语言）自动失效，不删任何数据。新增 C 单测 `test_resources`。`engine.service` override 与 debloat 里关于缓存的注释同步更新。
+- **门禁（`tools/az01-packer/release-gate.sh`、`gate-ui-probe.qml`，提交 `1488ddd` / `f570e3f` / `331d7b4`）**：新版开机前先在 safe-mode 下跑一次原厂 Engine，在 `/data` 留下原厂 QML 缓存（复现实机场景）。然后把只在沙箱里用的探针放在原厂 `QmlWarnings.qml` 的位置上（镜像里没有），读取 Engine 实际渲染出的节点并断言：Streaming 显示包里的 Deezer 行，SoundCloud、Beatport 各只显示一行，原厂 Tidal 隐藏；About 显示 `EngineX OS <版本>`；控制中心有波形磁贴。各包把 Settings 子标签名翻译了，而 `selectSubTab()` 是按名字匹配的，所以探针会逐个尝试模型里的标签名。另外，qemu 下遍历一次整棵节点树要 20–35 秒，探针只找一次 Section，之后只轮询它。
+- **验证**：
+  - 实机（bind mount 临时挂上新 hook，保留旧缓存不动）：46 个文件因「different time stamp」被重编，来源页恢复为网易云 / Spotify / Deezer / SoundCloud / Beatport（截图核对）。
+  - 编译机 IN：gofmt、vet、Go race（20 个包）、`tests/test_rootfs_overlay.sh`（13 项）、az01-packer、tools/stems、`test_stems_feature`（5.0.4 与 5.3.0 两个版本，含新用例）全部通过；hook 重复编译 sha256 一致（`2938bda2…`）。
+  - 门禁对照：用新门禁跑**线上原 5.3.0.1**（JP07）得到 77 PASS / 6 FAIL，失败的正好是 6 项渲染检查，而「hook 替换了全部文件」那一项照样 PASS。新镜像在沙箱里（en 与 zh-Hans，均先种原厂缓存）由探针读到的是包里的 6 行，原厂行全部隐藏，About 版本行和波形磁贴都在。用新镜像跑的三组完整门禁里，第一版探针本身有问题（中文标签名、超时），已在 `f570e3f`、`331d7b4` 修正。
+- **正式发布构建（基于 `1488ddd`，IN `/root/build/release-5.3.0.1-qmlcache`，三组各抽一个解包 `verified: true`，镜像内 version 5.3.0.1、hook `2938bda2…`）**：SC5000 组 `b1df6156f97b3490a6dd197ee253da28d107a28cc64f613883d07fe7b52d81a9`，SC6000 组 `52e035e6c104a00147eff77cf1554cf67c9cf0dd29b067914df6045f7e40fd02`，PRIME 4 组 `a02907a2b8268406d6478c3fa03b129a1a78313c3cbebda76312884fd2ff882c`。
+- **提交说明清理**：v5.3.0.1 范围内的 3 个提交改写后去掉了 `Co-Authored-By: … <noreply@anthropic.com>`（该邮箱在 GitHub 上绑定了一个无关账号，导致它出现在 Release 贡献者里），代码树不变：`045c0f2`→`563ad8c`，`008b153`→`87fb264`，`4303937`→`7e013c9`。本地留有备份分支 `backup/pre-coauthor-rewrite-20261105`。v5.0.4.2 及更早的提交没有改写。
+- **回滚点**：上一次构建基于 `87fb264`（改写前为 `008b153`）。碟机可以刷回 `v5.0.4.2`。
+- **实机影响**：已出现原厂界面的碟机，升级到这一版后第一次启动会重编被替换的 QML，界面恢复为定制版；`/data` 里的数据不会被删除。
