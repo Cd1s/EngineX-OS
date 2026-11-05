@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"log"
@@ -36,6 +37,30 @@ const hintPlaylist = "00000000-0000-5000-8000-000000005000"
 // "scope") decides what this gateway answers. Loaded tracks keep working after
 // a switch because track IDs are global.
 func hintTitle(scope string) string { return "请登录：sc5000.lan:8080" }
+
+// sourceFailedTitle stands in for a logged-in source whose playlists failed,
+// so the menu says why instead of being empty. #70: Spotify answers 403 for an
+// account the app is not allowed to serve. Data, not UI text, so in both
+// languages.
+func sourceFailedTitle(provider string, err error) string {
+	label := providerLabels[provider]
+	if label == "" {
+		label = provider
+	}
+	var st providers.StatusError
+	if !errors.As(err, &st) {
+		return label + ": failed to load / 加载失败"
+	}
+	switch st {
+	case 401:
+		return label + ": log in again (401) / 请重新登录"
+	case 403:
+		return label + ": account not allowed (403) / 账号未获授权"
+	case 429:
+		return label + ": too many requests (429) / 请稍后再试"
+	}
+	return fmt.Sprintf("%s: failed to load (HTTP %d) / 加载失败", label, int(st))
+}
 
 var (
 	tidalNS        = uuid.MustParse("6f1c5a52-3c55-4c2e-9d0b-5c5000000000")
@@ -492,7 +517,17 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 			sessions = append(sessions, v)
 		}
 	}
-	lists := each(r.Context(), sessions, func(ctx context.Context, v *Session) ([]providers.Playlist, error) { return v.p.Playlists(ctx) })
+	var failedMu sync.Mutex
+	failed := map[*Session]error{}
+	lists := each(r.Context(), sessions, func(ctx context.Context, v *Session) ([]providers.Playlist, error) {
+		l, err := v.p.Playlists(ctx)
+		if err != nil {
+			failedMu.Lock()
+			failed[v] = err
+			failedMu.Unlock()
+		}
+		return l, err
+	})
 	favorites := strings.HasSuffix(r.URL.Path, "/favorites/playlists")
 	items := []any{}
 	add := func(v map[string]any) {
@@ -510,6 +545,9 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 		add(playlistJSON(stemsListID(scope), "Stems", "", n))
 	}
 	for i, v := range sessions {
+		if err := failed[v]; err != nil {
+			add(playlistJSON(hintPlaylist, sourceFailedTitle(v.Provider, err), err.Error(), 0))
+		}
 		for _, p := range lists[i] {
 			ref := playlistRef{v.ID, v.Provider, p}
 			add(g.refJSON(g.addPlaylist(ref), ref))
