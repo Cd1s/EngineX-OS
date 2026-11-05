@@ -340,5 +340,6 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **实机（两台 JP07，有线 LAN）**：第二台从 5.0.4.2 用官方 5.3.0.1.1 镜像本地刷入（`az01-update --file`，sha256 与 Release 一致，SSH 与 host key 保留），再热部署 5.3.0.2（hook `ca2025c0`、guard、UI 包 `b5736349`、suite `4ee12c34`）。角色：左 `1`、右 `2+4`，CDJ 为 player 3；Pro DJ Link 编号互不冲突（左 4、右 2、CDJ 3）。CDJ 开 BEAT SYNC 时实时跟随右机 Master（128.7 / 145 BPM），影子轨 3 的波形、位置、歌名正确。部署前均用 agent-backup 备份。
 - **测试（Oracle-Batam-arm，`--clean`）**：发版规则第 2 步全部通过（gofmt、vet、21 个 Go 包 race、overlay、az01-packer、stems、`test_dsp_smooth` 三种编译、`test_stems_feature` 两个底包、`test_edisksd_hook` 含 `--mounts`、`test_sclive4_bootstrap.sh`）。
 - **候选构建** `release-5.3.0.2-rc1`（`none`，未上传）：SC5000 组 `cfa266a8…`、SC6000 组 `b407accd…`、PRIME 4 组 `061355e3…`；三组解包 `verified: true`、版本 5.3.0.2；`/root/.ssh/authorized_keys` 只有原厂的 `cert-authority`（与官方 5.3.0 镜像逐字节相同）。
+- **门禁**（`release-gate.sh`，旧镜像为 5.3.0.1.1）：第一次三组各 91 PASS / 1 FAIL，失败项都是 UI 包计数 230 ≠ 229（见上面 `ac3448b`）；修正后重跑，JP07、JP13、JC11 三组均为 **92 PASS / 0 FAIL**（`/var/tmp/sc5000-gate-5302rc1b-*`）。
 - **未完成，需要维护者决定**：`origin/main` 的 `e32a76e`（Engine m.db / 流媒体曲目导出给 CDJ，约 1500 行）不在本分支，和本分支的 `export.go` 有 5 处冲突（最大 130 行）。直接把本分支强推到 main 会丢掉它，所以没有推送、没有建 tag 和 Release、没有关闭 issue。
 - **回滚点**：5.3.0.1.1 的构建提交 `897510d`；改写前的分支在 `backup/pre-private-scrub-20261106`。
