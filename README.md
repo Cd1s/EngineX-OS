@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/assets/hero-banner.svg" alt="EngineX OS 5.3.0.1.1" width="100%">
+<img src="./docs/assets/hero-banner.svg" alt="EngineX OS 5.3.0.2" width="100%">
 
 <br>
 
@@ -16,7 +16,7 @@
 
 <br>
 
-**EngineX OS 5.3.0.1.1** is an enhanced firmware upgrade for Denon DJ and Numark standalone players:
+**EngineX OS 5.3.0.2** is an enhanced firmware upgrade for Denon DJ and Numark standalone players:
 `SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro`.
 
 Everything works right inside the stock Denon interface — flash it from a USB stick and unlock the features below.
@@ -59,6 +59,14 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 - **Smart Sync**: pull down the Control Center and switch the Sync mode between **Bar / Beat / Tempo** with one tap. With Sync on, when the BPM gap between two tracks is wider than the current pitch range, the deck steps Pitch Range up until it fits (up to `±100%`);
 - **Gigabit Ethernet**: the wired port runs at **1 Gbps (1000 Mbps) full duplex** instead of the stock `100 Mbps` limit, with 8 MiB TCP buffers for large transfers;
 - **Wi-Fi**: the deck's built-in Wi-Fi module is limited by the board's 25 MHz SDR12 SDIO bus to about `9–10 MB/s` in practice. Use the Gigabit port to copy large libraries.
+
+
+### 7. New in 5.3.0.2
+- **OmniSource**: the playlists and tracks on your USB / SD drives appear right inside the streaming browser, next to your streaming playlists, and one search finds both. Drive tracks play straight from the drive at full quality (`Settings → OmniSource`, off by default);
+- **Pioneer CDJ / Pro DJ Link (Beta)**: show the waveform and beat grid of a CDJ-3000 / CDJ-2000NXS2 feeding a Line-In channel, and read a CDJ's rekordbox USB library over LAN / Wi-Fi (`Pro DJ Link Library`). Exporting the deck's own media to CDJs is experimental. All off by default;
+- **Cleaner sound**: `Master Soft Limiter` keeps the master output under -0.1 dBFS with a smooth curve and zero latency, untouched below -1.5 dBFS; the Flanger no longer dips the volume (level matched to the dry track, up to +6 dB); `Upfader Echo Out` leaves an echo tail when you pull a fader down. 21 real-time DSP hooks in total, with no added latency;
+- **4-Deck Waveform** strip and **Live Stream** to Shoutcast / Icecast servers;
+- **Library**: `Auto-Analyze Drives` analyses every unanalysed track on an inserted USB / SD in the background, at idle priority so playback is never affected; a rekordbox export (6.8.5 included) still imports when a few of its files are damaged, and those tracks are analysed when loaded; Engine 5.3.0's "Connect to your Engine DJ Profile to use Tidal" popup no longer appears while another service is selected.
 
 ---
 
@@ -125,7 +133,7 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 
 The entire system has been refactored and slimmed down so all extra features take minimal space and leave more free memory than stock firmware:
 
-| Metric | Stock / Before Refactoring | `EngineX OS 5.3.0.1.1` (Measured on SC5000) | What It Means for DJs |
+| Metric | Stock / Before Refactoring | `EngineX OS 5.3.0.2` (Measured on SC5000) | What It Means for DJs |
 | :--- | :--- | :--- | :--- |
 | **Firmware Image Size (`*-Update.img`)** | Official stock 5.3.0: `147.79 MB`<br>Earlier custom build: `~210 MB` | **`151.44 MB`** (SC6000 `151.58 MB`, PRIME 4 `151.52 MB`) | **Only `3.64 MB` larger than stock firmware** |
 | **Internal Storage Used After Clean Flash** | `~243 MB` left behind by older builds | **`17.2 MB` for core app + 3-language UI** (`45.6 MB` including extra drive format drivers) | Frees up **nearly `200 MB`** of internal flash space |
@@ -144,16 +152,16 @@ The entire system has been refactored and slimmed down so all extra features tak
 
 ### Option 1: USB Stick Install (First-Time Setup)
 1. Click the link for your exact player model below to download the `.img` file directly (or visit [**Releases**](https://github.com/Cd1s/EngineX-OS/releases/latest)):
-   - **Denon DJ SC5000 Prime**: [`SC5000-5.3.0.1.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.1.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
-   - **Denon DJ SC5000M Prime**: [`SC5000M-5.3.0.1.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.1.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
-   - **Denon DJ SC6000 Prime**: [`SC6000-5.3.0.1.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.1.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
-   - **Denon DJ SC6000M Prime**: [`SC6000M-5.3.0.1.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.1.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
-   - **Denon DJ PRIME 4**: [`PRIME4-5.3.0.1.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.1.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
-   - **Denon DJ PRIME 2**: [`PRIME2-5.3.0.1.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.1.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
-   - **Denon DJ PRIME GO**: [`PRIMEGO-5.3.0.1.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.1.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
-   - **Numark Mixstream Pro**: [`MIXSTREAMPRO-5.3.0.1.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.1.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
+   - **Denon DJ SC5000 Prime**: [`SC5000-5.3.0.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
+   - **Denon DJ SC5000M Prime**: [`SC5000M-5.3.0.2-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.2-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
+   - **Denon DJ SC6000 Prime**: [`SC6000-5.3.0.2-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.2-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
+   - **Denon DJ SC6000M Prime**: [`SC6000M-5.3.0.2-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.2-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
+   - **Denon DJ PRIME 4**: [`PRIME4-5.3.0.2-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.2-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
+   - **Denon DJ PRIME 2**: [`PRIME2-5.3.0.2-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.2-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
+   - **Denon DJ PRIME GO**: [`PRIMEGO-5.3.0.2-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.2-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
+   - **Numark Mixstream Pro**: [`MIXSTREAMPRO-5.3.0.2-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.2-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
 2. Copy the `.img` file to the **root folder of a FAT32 or exFAT USB drive**.
-3. Plug the USB drive into your deck (stock Engine OS 4.3.x and 5.0.x both work), open **Settings → About / Update → Firmware Update Mode**, choose **USB/SD** when the deck shows `Found 5.3.0.1.1 on USB/SD`, and let the player install and reboot. If it only asks *Reboot into firmware update mode?*, the deck did not see the file: check the model, keep the original file name in the root folder, then unplug and replug the drive.
+3. Plug the USB drive into your deck (stock Engine OS 4.3.x and 5.0.x both work), open **Settings → About / Update → Firmware Update Mode**, choose **USB/SD** when the deck shows `Found 5.3.0.2 on USB/SD`, and let the player install and reboot. If it only asks *Reboot into firmware update mode?*, the deck did not see the file: check the model, keep the original file name in the root folder, then unplug and replug the drive.
 
 ### Option 2: One-Click On-Deck Update (When Already Running EngineX OS)
 - Connect your deck to Wi-Fi or Ethernet and open **Settings → About / Update**;

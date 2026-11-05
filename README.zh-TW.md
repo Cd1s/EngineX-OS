@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/assets/hero-banner-zh-TW.svg" alt="EngineX OS 5.3.0.1.1" width="100%">
+<img src="./docs/assets/hero-banner-zh-TW.svg" alt="EngineX OS 5.3.0.2" width="100%">
 
 <br>
 
@@ -16,7 +16,7 @@
 
 <br>
 
-**EngineX OS 5.3.0.1.1** 是專為天龍 Denon DJ 與 Numark 獨立播放機打造的強化韌體，支援：
+**EngineX OS 5.3.0.2** 是專為天龍 Denon DJ 與 Numark 獨立播放機打造的強化韌體，支援：
 `SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro`。
 
 操作介面與原廠完全一致，直接透過隨身碟刷入即可解鎖以下功能。
@@ -59,6 +59,14 @@
 - **智慧同步（Smart Sync）**：下拉控制中心一鍵切換 **Bar / Beat / Tempo** 同步模式；開啟 Sync 後，兩首曲目 BPM 差距超出目前變速範圍時，自動把 Pitch Range 升檔到足夠為止（最高 `±100%`）；
 - **Gigabit 有線網路**：有線網路孔從原廠限制的 `100 Mbps` 解鎖至 **1 Gbps（1000 Mbps）全雙工滿速**，並配 8 MiB TCP 大視窗緩衝；
 - **Wi-Fi**：播放機內建 Wi-Fi 模組受限於主機板 SDIO 25 MHz SDR12 匯流排頻寬，實測極限約 `9～10 MB/s`，大容量曲庫傳輸建議使用 Gigabit 有線網路孔。
+
+
+### 7. 5.3.0.2 新功能
+- **OmniSource 統一瀏覽**：隨身碟 / SD 卡裡的歌單和曲目直接顯示在串流瀏覽器中，和串流歌單放在一起，一次搜尋兩邊都找得到；隨身碟曲目直接從碟上讀取播放，音質不打折（`設定 → OmniSource`，預設關閉）；
+- **先鋒 CDJ / Pro DJ Link（測試版）**：CDJ-3000 / CDJ-2000NXS2 接入 Line-In 通道時同步顯示它的波形與拍線；透過區域網路 / Wi-Fi 讀取 CDJ 上 rekordbox 隨身碟的曲庫（`Pro DJ Link 曲庫`）；把本機曲庫分享給 CDJ 為實驗功能。以上預設全部關閉；
+- **更乾淨的聲音**：`主輸出軟限幅` 以平滑曲線把主輸出壓在 -0.1 dBFS 以下，零延遲，-1.5 dBFS 以下的訊號原樣不動；Flanger 不再讓音量下沉（自動補償到原曲電平，最多 +6 dB）；`推桿切歌自動回音` 在拉下推桿時留下回音尾巴。共 21 個即時 DSP 掛點，不增加任何延遲；
+- **四路波形顯示**，以及向 Shoutcast / Icecast 伺服器 **直播推流**；
+- **曲庫**：`自動分析插入的裝置` 在背景分析新插入的隨身碟 / SD 卡上所有未分析的曲目，使用最低優先權，不影響播放；rekordbox 匯出的隨身碟（包含 6.8.5）即使有個別檔案損壞也能正常匯入，那幾首在載入時再分析；選取其他串流服務時，不再跳出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示。
 
 ---
 
@@ -125,7 +133,7 @@
 
 系統經過全面重構與瘦身，所有新增功能僅佔極小空間，比原廠韌體留出更多可用記憶體：
 
-| 對比項目 | 官方原廠 / 重構前 | 重構後（`EngineX OS 5.3.0.1.1` 實測） | 實際刷碟提升 |
+| 對比項目 | 官方原廠 / 重構前 | 重構後（`EngineX OS 5.3.0.2` 實測） | 實際刷碟提升 |
 | :--- | :--- | :--- | :--- |
 | **刷機包體積 (`*-Update.img`)** | 官方原廠 5.3.0 `147.79 MB`<br>重構前改版 `~210 MB` | **`151.44 MB`**（SC6000 `151.58 MB`，PRIME 4 `151.52 MB`） | **僅比官方原廠大 `3.64 MB`** |
 | **純刷機開機硬碟佔用 (`/data`)** | 重構前殘留約 `243 MB` | **核心程式 + 三語介面僅佔 `17.2 MB`**（含擴充檔案系統庫共 `45.6 MB`） | 內建快閃記憶體多騰出 **近 `200 MB`** 空間 |
@@ -144,16 +152,16 @@
 
 ### 方式一：隨身碟刷機（首次安裝）
 1. 點擊下方對應你機器型號的連結，直接下載升級包（或前往 [**Releases 頁面**](https://github.com/Cd1s/EngineX-OS/releases/latest)）：
-   - **Denon DJ SC5000 Prime**：[`SC5000-5.3.0.1.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.1.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
-   - **Denon DJ SC5000M Prime**：[`SC5000M-5.3.0.1.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.1.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
-   - **Denon DJ SC6000 Prime**：[`SC6000-5.3.0.1.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.1.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
-   - **Denon DJ SC6000M Prime**：[`SC6000M-5.3.0.1.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.1.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
-   - **Denon DJ PRIME 4**：[`PRIME4-5.3.0.1.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.1.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
-   - **Denon DJ PRIME 2**：[`PRIME2-5.3.0.1.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.1.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
-   - **Denon DJ PRIME GO**：[`PRIMEGO-5.3.0.1.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.1.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
-   - **Numark Mixstream Pro**：[`MIXSTREAMPRO-5.3.0.1.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.1.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
+   - **Denon DJ SC5000 Prime**：[`SC5000-5.3.0.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
+   - **Denon DJ SC5000M Prime**：[`SC5000M-5.3.0.2-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.2-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
+   - **Denon DJ SC6000 Prime**：[`SC6000-5.3.0.2-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.2-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
+   - **Denon DJ SC6000M Prime**：[`SC6000M-5.3.0.2-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.2-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
+   - **Denon DJ PRIME 4**：[`PRIME4-5.3.0.2-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.2-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
+   - **Denon DJ PRIME 2**：[`PRIME2-5.3.0.2-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.2-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
+   - **Denon DJ PRIME GO**：[`PRIMEGO-5.3.0.2-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.2-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
+   - **Numark Mixstream Pro**：[`MIXSTREAMPRO-5.3.0.2-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.2-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
 2. 將下載好的 `.img` 檔案放進 **FAT32 或 exFAT 格式隨身碟的根目錄**。
-3. 將隨身碟插入播放機（原廠 Engine OS 4.3.x 與 5.0.x 都可以直接刷），進入 **設定 (Settings) → 關於 / 更新 (About / Update) → 韌體更新模式 (Firmware Update Mode)**，看到 `Found 5.3.0.1.1 on USB/SD` 時選 **USB/SD**，機器會自動完成刷入並重啟。如果只跳出 *Reboot into firmware update mode?*，代表播放機沒找到檔案：核對機型，檔名保持原樣放在根目錄，再拔插一次隨身碟。
+3. 將隨身碟插入播放機（原廠 Engine OS 4.3.x 與 5.0.x 都可以直接刷），進入 **設定 (Settings) → 關於 / 更新 (About / Update) → 韌體更新模式 (Firmware Update Mode)**，看到 `Found 5.3.0.2 on USB/SD` 時選 **USB/SD**，機器會自動完成刷入並重啟。如果只跳出 *Reboot into firmware update mode?*，代表播放機沒找到檔案：核對機型，檔名保持原樣放在根目錄，再拔插一次隨身碟。
 
 ### 方式二：播放機螢幕一鍵線上升級（已安裝本系統後）
 - 連接 Wi-Fi 或網路線後，開啟播放機 **設定 → 關於 / 更新**；
@@ -194,7 +202,7 @@ go build -o sc5000-relay ./cmd/sc5000-relay
 
 EngineX OS 依照「和陌生人共用酒吧、Club、音樂節 Wi-Fi」的情境做了安全設計。
 
-- **沒有任何預設 SSH 密碼。** 密碼登入已徹底關閉，公開韌體也**不內建任何 SSH 公鑰**，你自己沒放公鑰之前 SSH 根本不開放。用過舊版公開韌體的播放機，升級到 5.3.0.1.1 時會自動清除舊韌體帶的那把公鑰。
+- **沒有任何預設 SSH 密碼。** 密碼登入已徹底關閉，公開韌體也**不內建任何 SSH 公鑰**，你自己沒放公鑰之前 SSH 根本不開放。用過舊版公開韌體的播放機，升級到 5.3.0.2 時會自動清除舊韌體帶的那把公鑰。
 - **同一個 Wi-Fi 下的人控制不了你的播放機。** 播放機內部使用的所有介面（播放控制、切換波形、切換語言、線上升級、串流登入、Stems）只接受播放機自己（`127.0.0.1`）呼叫，別人就算和你連同一個網路，也無法遠端切你的歌、改設定或重新啟動機器。
 - **手機網頁控制台必須輸入你這台播放機獨有的存取碼。** 開啟 `http://<播放機IP>:8080` 時要輸入播放機隨機產生的存取碼；串流掃碼登入使用的是會過期的一次性連結。
 
