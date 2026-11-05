@@ -677,8 +677,6 @@ SERVICES_MAIN = """
 			if (a && a.translator && a.translator.state) a.translator.state = false
 		}
 	}
-	// A stemmed track opens its deck's pads in STEMS mode. Pads/View only steps
-	// through modes; stop at STEMS, or back where it started if STEMS is not offered.
 	// Engine renders Stems only for library tracks and silently skips streamed rows.
 	// A streamed row dropped on the Stems list is imported by Engine itself from the
 	// file stream-sync downloaded, onto a deck that is not playing, then queued.
@@ -717,24 +715,12 @@ SERVICES_MAIN = """
 			if (id || --tries <= 0) stop()
 		}
 	}
-	function scPadsToStems(deck) {
-		const p = Planck.getProperty("/Engine/Deck%1/Pads/View".arg(deck))
-		const t = p && p.translator
-		if (!t) return
-		const start = t.string
-		for (let i = 0; i < 16 && t.string !== "STEMS"; i++) {
-			t.incValue(0, 1, 0, true)
-			if (t.string === start) return
-		}
-	}
 	Instantiator {
 		model: root.decks && root.decks.length ? root.decks : [1, 2]
 		delegate: QtObject {
 			readonly property int deckIdx: parseInt(modelData)
-			readonly property QObjProperty pStemmed: Planck.getProperty("/Engine/Deck%1/Track/Stemmed".arg(deckIdx))
-			readonly property bool stemmed: !!pStemmed && !!pStemmed.translator && pStemmed.translator.state
-			onStemmedChanged: if (stemmed) root.scPadsToStems(deckIdx)
-			Component.onCompleted: if (stemmed) root.scPadsToStems(deckIdx)
+			// Pads stay in Engine's own mode (HOT CUE) when a track loads (#71): they
+			// used to jump to STEMS for every stemmed track, which is every track.
 			readonly property QObjProperty pUri: Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(deckIdx))
 			readonly property string uri: pUri && pUri.translator ? pUri.translator.string : ""
 			onUriChanged: root.scSwapStemmed(deckIdx, uri)
