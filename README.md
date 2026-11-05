@@ -33,11 +33,12 @@ Official firmware locks standalone Stems to select hardware. EngineX OS unlocks 
 - Hit the Performance Pads to mute vocals for live mashups or isolate drums for transitions;
 - Splits tracks directly on the deck with no computer required, or automatically uses your home PC / cloud GPU for high-speed AI separation when on the same Wi-Fi.
 
-### 2. 5 Streaming Services Built In (Phone QR Login)
+### 2. 6 Streaming Services Built In (Phone QR Login)
 No need to copy tracks to a USB drive before every set:
-- **NetEase Cloud Music, Spotify, Deezer, SoundCloud, and TIDAL** sit right next to your USB and SD drives in the Source menu;
+- **NetEase Cloud Music, Spotify, Deezer, SoundCloud, TIDAL, and Beatport** sit right next to your USB and SD drives in the Source menu;
 - Scan the on-screen QR code with your phone to log in and browse your playlists, liked tracks, and search results;
 - Switch between **Lossless FLAC and 320 kbps MP3**. Tracks you play are cached locally on the deck so loading them again is instant without re-downloading.
+- **Beatport** uses your own account and plan: Professional downloads FLAC or 256k AAC, Advanced downloads 128k AAC, and Essential streams 128k AAC. Beatport tracks split into Stems like any other track.
 
 ### 3. Pioneer Rekordbox USB Plug & Play (No Desktop Conversion)
 Bring the Rekordbox USB stick you exported for CDJs and plug it straight into your Denon deck:
@@ -53,6 +54,11 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 ### 5. Click-Free FX Switching & Smoother Long Sets
 - Eliminates the audible clicks/pops that happen on stock firmware when toggling or switching DJ effects, even when triggering FX on both decks at once;
 - Defaults anonymous usage statistics to off and disables background telemetry disk writes so all memory and CPU power stay focused on audio playback and touchscreen response.
+
+### 6. Smart Sync & Gigabit Ethernet
+- **Smart Sync**: pull down the Control Center and switch the Sync mode between **Bar / Beat / Tempo** with one tap. With Sync on, when the BPM gap between two tracks is wider than the current pitch range, the deck steps Pitch Range up until it fits (up to `±100%`);
+- **Gigabit Ethernet**: the wired port runs at **1 Gbps (1000 Mbps) full duplex** instead of the stock `100 Mbps` limit, with 8 MiB TCP buffers for large transfers;
+- **Wi-Fi**: the deck's built-in Wi-Fi module is limited by the board's 25 MHz SDR12 SDIO bus to about `9–10 MB/s` in practice. Use the Gigabit port to copy large libraries.
 
 ---
 
@@ -127,6 +133,8 @@ The entire system has been refactored and slimmed down so all extra features tak
 | **Audio Core Interruption by Downloads** | `5% – 25%` spikes when downloading or indexing | **`0.0%`**: all downloads and Stems splitting run on a separate background core | **96 kHz audio playback is never interrupted** |
 | **Rekordbox USB Reading Speed** | ~8 min first import, 15–24 s every re-plug | **`< 2 seconds` first plug**, **`0.03 seconds`** after that | Plug in your Rekordbox stick and play right away |
 | **4-Minute Track Stems Split Time** | Locked / unavailable on SC5000 | **`~35 seconds`** via PC / cloud; **`1.4×` faster than playback** on the deck alone | Split vocals on the fly even mid-set |
+| **Sync Across Large BPM Gaps** | Sync cannot reach the other tempo once the gap is wider than the pitch range; widen Pitch Range by hand | **Smart Sync** steps Pitch Range up automatically (up to `±100%`); Bar / Beat / Tempo switch in the Control Center | Sync tracks far apart in tempo without opening settings |
+| **Network Speed** | Ethernet limited to `100 Mbps` | Ethernet **`1 Gbps` (1000 Mbps)** full duplex, 8 MiB TCP buffers; Wi-Fi about `9–10 MB/s` (25 MHz SDR12 SDIO bus) | Copy large libraries over the wired port |
 
 ---
 

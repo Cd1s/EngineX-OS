@@ -182,6 +182,36 @@ func (s *Server) linkSoundCloud(ctx context.Context, session *Session, user, cli
 	return nil
 }
 
+// ownerBeatport returns the owner's Beatport login, if there is one.
+func (s *Server) ownerBeatport() *providers.Beatport {
+	if s.beatport.Ready() {
+		return s.beatport
+	}
+	return nil
+}
+
+// linkBeatport checks a login before it replaces the one in p. Only the token is
+// kept, never the password.
+func (s *Server) linkBeatport(ctx context.Context, p *providers.Beatport, user, password, token string) error {
+	check := &providers.Beatport{BaseURL: s.cfg.BeatportURL, HTTP: s.cfg.HTTP}
+	var err error
+	if token != "" {
+		var t providers.BeatportToken
+		if t, err = providers.ParseBeatportToken(token); err == nil {
+			err = check.SetToken(t)
+		}
+	} else {
+		err = check.Login(ctx, user, password)
+	}
+	if err == nil {
+		_, err = check.Playlists(ctx)
+	}
+	if err != nil {
+		return err
+	}
+	return p.SetToken(check.Token())
+}
+
 // ownerSpotify returns the owner's Spotify login, if there is one.
 func (s *Server) ownerSpotify() *providers.Spotify {
 	s.mu.Lock()
@@ -400,6 +430,8 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 		phonePage(w, `<h2>连接 Deezer</h2><p>填写资料页或分享链接后，可在碟机上浏览你的公开歌单；也可以填写 arl Cookie，碟机会用它确认账号。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="分享链接、资料页地址或用户 ID"><input name="arl" placeholder="arl Cookie（可选）" autocomplete="off"><button>连接</button></form>`)
 	case "soundcloud":
 		phonePage(w, `<h2>连接 SoundCloud</h2><p>填主页链接、分享链接或用户名，就能看到点赞的曲目和歌单。想看私密内容才需要 OAuth Token。只播放 API 标记为可完整播放的内容。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="主页链接、分享链接或用户名" autocomplete="off"><input name="clientId" placeholder="Client ID（已配好可留空）" autocomplete="off"><input name="clientSecret" type="password" placeholder="Client Secret（已配好可留空）" autocomplete="off"><input name="token" type="password" placeholder="OAuth Token（可选）" autocomplete="off"><button>连接</button></form>`)
+	case "beatport":
+		phonePage(w, `<h2>连接 Beatport</h2><p>用 Beatport 账号登录。碟机只保存登录令牌，不保存密码。Essential 播放 128k 流，Advanced 下载 128k AAC，Professional 下载 FLAC 或 256k AAC。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="邮箱或用户名" autocomplete="username" autocapitalize="off"><input name="password" type="password" placeholder="密码" autocomplete="current-password"><input name="token" placeholder="或粘贴 Token JSON / Access Token" autocomplete="off" autocapitalize="off"><button>连接</button></form>`)
 	case "spotify":
 		session := s.sessionOf(flow)
 		sp, ok := session.p.(*providers.Spotify)
@@ -497,6 +529,12 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 	case *providers.SoundCloud:
 		if err := s.linkSoundCloud(r.Context(), session, strings.TrimSpace(r.Form.Get("user")), strings.TrimSpace(r.Form.Get("clientId")), strings.TrimSpace(r.Form.Get("clientSecret")), strings.TrimSpace(r.Form.Get("token"))); err != nil {
 			phonePage(w, "<h2>无法连接 SoundCloud</h2><p>请检查主页和凭据。</p>"+retry)
+			return
+		}
+		s.finishPhoneLogin(w, flow)
+	case *providers.Beatport:
+		if err := s.linkBeatport(r.Context(), p, strings.TrimSpace(r.Form.Get("user")), r.Form.Get("password"), strings.TrimSpace(r.Form.Get("token"))); err != nil {
+			phonePage(w, "<h2>无法登录 Beatport</h2><p>请检查账号密码或 Token。</p>"+retry)
 			return
 		}
 		s.finishPhoneLogin(w, flow)

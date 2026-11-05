@@ -188,3 +188,24 @@ func TestAccessTokenSurvivesRestart(t *testing.T) {
 		t.Fatal(info, err)
 	}
 }
+
+func TestUpgradedSettingsShowNewServicesOnce(t *testing.T) {
+	dir := t.TempDir()
+	// What 5.0.4.2 saves by default: no "known=" line, all five services of that time.
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("lang=zh-Hans\nsources=tidal,netease,spotify,deezer,soundcloud\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ui := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil)
+	if got := ui.loadUI().Sources; !slices.Equal(got, uiServices) {
+		t.Fatalf("upgraded deck hides a new service: %v", got)
+	}
+	// The owner turns Beatport off: the saved "known=" keeps it off.
+	v := ui.loadUI()
+	v.Sources = []string{"netease", "spotify"}
+	if err := ui.saveUI(v); err != nil {
+		t.Fatal(err)
+	}
+	if got := ui.loadUI().Sources; !slices.Equal(got, []string{"netease", "spotify"}) {
+		t.Fatalf("a service turned off came back: %v", got)
+	}
+}

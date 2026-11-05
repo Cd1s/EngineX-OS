@@ -46,6 +46,8 @@ type relaySession struct {
 		RefreshToken string    `json:"refreshToken"`
 		Expiry       time.Time `json:"expiry"`
 	} `json:"soundcloud"`
+	// The relay logs in to Beatport itself and passes on only the token.
+	Beatport *providers.BeatportToken `json:"beatport"`
 }
 
 // relayCall makes one JSON request. Redirects are refused so that the password,
@@ -122,6 +124,11 @@ func (s *Server) relayCollect(session *Session, v relaySession) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*relayTimeout)
 		defer cancel()
 		return s.linkSoundCloud(ctx, session, v.SoundCloud.User, v.SoundCloud.ClientID, v.SoundCloud.Secret, v.SoundCloud.Token)
+	case *providers.Beatport:
+		if v.Beatport == nil {
+			return errRelayIncomplete
+		}
+		return p.SetToken(*v.Beatport)
 	case *providers.Spotify:
 		if v.SpotifyToken == nil {
 			return errRelayIncomplete

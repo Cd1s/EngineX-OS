@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -468,5 +469,47 @@ func TestStaleDefaultPasswordFlagIsCleared(t *testing.T) {
 		if got := cfg.get().PasswordIsDefault; got != c.want {
 			t.Fatalf("password %q: PasswordIsDefault = %v, want %v", c.pw, got, c.want)
 		}
+	}
+}
+
+// The relay swaps the password for a token, and only the token reaches the deck.
+func TestBeatportPageLogsInAndPassesOnlyTheToken(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/auth/o/token/":
+			r.ParseForm()
+			if r.Form.Get("grant_type") != "password" || r.Form.Get("username") != "dj" || r.Form.Get("password") != "secret-pw" {
+				w.WriteHeader(400)
+				return
+			}
+			io.WriteString(w, `{"access_token":"bp-access","refresh_token":"bp-refresh","expires_in":36000}`)
+		case "/my/playlists/", "/catalog/charts/":
+			if r.Header.Get("Authorization") != "Bearer bp-access" {
+				w.WriteHeader(401)
+				return
+			}
+			io.WriteString(w, `{"results":[]}`)
+		default:
+			w.WriteHeader(404) // no website session: the password grant is the fallback
+		}
+	}))
+	defer api.Close()
+	s := newTestServer(t)
+	s.beatportURL = api.URL
+	h := s.routes()
+	tok := "beatporttoken000001"
+	if w := do(h, "GET", "/m/beatport?t="+tok, "", nil); w.Code != 200 || !strings.Contains(w.Body.String(), "连接 Beatport") {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	if w := do(h, "POST", "/m/beatport?t="+tok, "user=dj&password=wrong", form); w.Code == 200 || !strings.Contains(w.Body.String(), "Beatport 登录失败") {
+		t.Fatalf("wrong password accepted: %d %s", w.Code, w.Body)
+	}
+	if w := do(h, "POST", "/m/beatport?t="+tok, "user=dj&password=secret-pw", form); w.Code != 200 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	poll := do(h, "GET", "/api/relay/session?t="+tok, "", nil).Body.String()
+	if !strings.Contains(poll, `"status":"done"`) || !strings.Contains(poll, `"access_token":"bp-access"`) || strings.Contains(poll, "secret-pw") {
+		t.Fatal(poll)
 	}
 }
