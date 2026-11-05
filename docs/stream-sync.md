@@ -68,7 +68,12 @@ Token。凭据存在 `state/bpm-config.json` 和 `state/soundcloud-owner.json`�
 `soundcloud-token.json` 里自动续期。
 
 只用 API 标记 `access=playable` 的曲目：优先 `http_mp3_128_url`，其次 HLS MP3，再次 HLS AAC（存为 `.mp4`）。试听地址一律不用，
-也不做解密。文件存为 `soundcloud-<id>.mp3`。超过 15 分钟或 50 MB 的文件不做后台分析。代码不提取 SoundCloud 网页里的 client_id。
+也不做解密。文件存为 `soundcloud-<id>.mp3`。超过 15 分钟或 50 MB 的文件不做后台分析。
+
+没有自有应用（注册应用需要 Artist Pro）时，走 soundcloud.com 网页自己用的 `api-v2.soundcloud.com`：client_id 从
+soundcloud.com 首页引用的脚本里取（进程内缓存，401/403 时重取一次），只发往 api-v2。这时填用户名或主页链接即可读点赞和歌单；
+手机页「高级」里粘贴浏览器 Cookie 中的 `oauth_token` 可读私密内容。音频按顺序选：非试听的 progressive MP3 → HLS AAC（存 `.mp4`）→
+HLS MP3；`policy` 为 SNIP（Go+ 试听）或 BLOCK 的曲目不列出，加密流拒绝。这一模式下不提供上传者原始文件下载。
 
 碟机设置「串流音質」决定 SoundCloud 走哪条路（2026-11-03）：
 
