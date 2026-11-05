@@ -307,4 +307,5 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
   - `pkg/webui/index.html`：#58 写坏的 `showUI` 表达式（`v.quality++'…'(…)`）已修好，4-Deck、Pro DJ Link、软限幅、CDJ 曲库/导出的按钮都保留。
   - `ui_settings.go`、`build_packs.py`、`i18n.tsv`：两边新增的设置项全部保留。
 - **验证（Oracle-Batam-arm，`--clean` 目录）**：gofmt、vet、全部 Go 包的 race 测试（21 个包）、`test_rootfs_overlay.sh`（13 项）、az01-packer（55 项）、tools/stems（9 项）、`test_dsp_smooth`（普通、ASan+UBSan、TSan）、`test_stems_feature`（armhf 原生，`-Werror`，5.0.4 与 5.3.0 两个 Engine 上都是 21 个前缀守卫）、5.3.0 与 5.0.4 两个底包的 UI 包构建，全部通过。hook 在 Batam 上重新编译（`1053d543…`）。没有出镜像，也没有跑 release-gate。
+- **后续提交**：#59 后来补的修复没赶上集成提交（另一个 agent 当时还在 `feat-issue-58-59` 里改）：没有本地导出、只有 CDJ 暂存库的盘，现在也按暂存库的 stamp 判断，内容没变就直接跳过；同时带上了对应的单测。OpenCDJ-3000 的 `TestSimulatorEmptyDenonDriveStage` 就是因此发现的。
 - **回滚点**：`836cbb0`。

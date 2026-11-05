@@ -213,14 +213,19 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 			break
 		}
 	}
-	if rel == "" {
-		return Convert(ctx, mount, opts)
+	var stamp string
+	if rel != "" {
+		st, err := os.Stat(r.FullPath(rel))
+		if err != nil {
+			return Convert(ctx, mount, opts)
+		}
+		stamp = fmt.Sprintf("%s %d %d", rel, st.Size(), st.ModTime().UnixNano()) + stagedStamp(mount)
+	} else {
+		stamp = strings.TrimSpace(stagedStamp(mount))
+		if stamp == "" {
+			return Convert(ctx, mount, opts)
+		}
 	}
-	st, err := os.Stat(r.FullPath(rel))
-	if err != nil {
-		return Convert(ctx, mount, opts)
-	}
-	stamp := fmt.Sprintf("%s %d %d", rel, st.Size(), st.ModTime().UnixNano()) + stagedStamp(mount)
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	if !full && !opts.SmartMatch && importedStamp(dir) == stamp {
 		return enginedb.Result{Bypassed: true}, nil
@@ -229,10 +234,11 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	// GL-011: Always use fast tmpfs delta import at mount when a library exceeds
 	// fastImportTracks, even if .rb-bridge-state.db already exists from an earlier mount.
 	if !full && !opts.SmartMatch {
-		l, err := ReadLibrary(ctx, mount)
+		l, stagedOnly, err := readLibrary(ctx, mount)
 		if err != nil {
 			return result, err
 		}
+		opts.StagedOnly = stagedOnly
 		if len(l.Tracks) > fastImportTracks {
 			opts.Fast = true
 			result, err = stagedImport(ctx, mount, dir, l, opts)
