@@ -201,8 +201,8 @@ struct engine_build {
     // assignment, onboard Stems rendering, disableHfsPlus).
     uint32_t config_site, config_r2, config_r3;
     uint16_t config_field[5];
-    // Stems feature registration: site, feature object, native true byte, enabled path.
-    uint32_t feature_site, feature_object, feature_true, feature_enabled;
+    // Stems feature registration: site, feature object, native true byte, enabled path, displaced instruction.
+    uint32_t feature_site, feature_object, feature_true, feature_enabled, feature_displaced;
     // sqlite3_api_routines and the functions it lists ([55] exec, [70] open,
     // [135] open_v2). opendb != 0: open and open_v2 only tail-call it, hook it once.
     uint32_t sqlite_api, sqlite_exec, sqlite_open, sqlite_open_v2, sqlite_opendb;
@@ -499,7 +499,7 @@ static void prepare_stems_feature(uintptr_t base, size_t page) {
         0x059f3014, // ldreq r3, [pc, #20] (native true byte)
         0x05873004, // streq r3, [r7, #4]
         0x059ff010, // ldreq pc, [pc, #16] (native enabled-feature registration)
-        0xe51b3340, // ldr r3, [fp, #-832] (displaced instruction)
+        build->feature_displaced ? build->feature_displaced : 0xe51b3340, // displaced instruction
         0xe3540000, // cmp r4, #0 (displaced flags)
         0xe59ff008, // ldr pc, [pc, #8] (original store/branch)
         (uint32_t)(base + build->feature_object),
@@ -578,13 +578,33 @@ static const struct engine_edit edits_530[] = {
     {0x167e290u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
 };
 
+static const struct engine_edit edits_sclive[] = {
+    {0x8ba000u, "\xc0\x26\x9f\xe5\xc0\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x98\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
+        "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x47\x9c\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
+    {0x8bbaa4u, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
+    {0x159f4a8u, "\xe4\x20\x9f\xe5\xdc\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
+    {0x1f69520u, "aac", "mp3", 4, EDIT_ONE},
+    {0x15b6fb0u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
+    {0x89cd64u, "\x38\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8, EDIT_ONE},
+    {0x72c284u, "\x07\x00\x00\x0a", "\x07\x00\x00\xea", 4, EDIT_ONE},
+    {0x1a8dbc0u, "\x00\x60\xa0\xe3", "\x04\x60\xa0\xe3", 4, EDIT_ONE},
+    {0x1a8db1cu, "\x00\x40\xa0\x03", "\x01\x40\xa0\x03", 4, EDIT_ONE},
+    {0x16d2208u, "\xfa\x01\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
+    {0x31a880u, "\x4c\x51\x52\x57\x5b\x13\x05\x04\x4d\x5d\x47\x01\x44\x58\x56\x52\x58\x1b\x55\x58\x55\x16\x4c\x0a", "\x4c\x51\x52\x57\x12\x06\x05\x1a\x1e\x1a\x00\x1f\x1e\x01\x1c\x02\x0e\x0d\x06\x0f\x08\x16\x4c\x0a", 24, EDIT_GATEWAY},
+    {0x31a898u, "\x3f\x2c\x2d\x2a\x28\x66\x72\x71\x3e\x15\x15\x0a\x4d\x10\x0c\x02\x06\x04\x47\x09\x04\x01\x42\x18", "\x3f\x2c\x2d\x2a\x61\x73\x72\x6f\x6d\x57\x4f\x52\x4d\x54\x4b\x57\x5d\x50\x59\x52\x5b\x43\x0c\x1b", 24, EDIT_GATEWAY},
+    {0x31a65cu, "\x5e\x3f\x05\xe3", "\x40\x3f\x05\xe3", 4, EDIT_GATEWAY},
+    {0x5d5418u, "\x38\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4, EDIT_ONE},
+    {0x16d3e3cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    {0x16d3da0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+};
+
 static const struct engine_build engine_builds[] = {
     {"5.0.4", "\xaf\x07\x38\x65\xa3\x31\x8d\x80\x7a\x83\x03\xf7\x16\x15\x2e\xac\x92\x3a\x4c\x6f",
      {0xd917b8, 0xd917e4, 0xd91894, 0xd918c0, 0xd918ec, 0xd91810, 0xd91868, 0x14fff54, 0x153312c,
       0x1532fa0, 0x1500950, 0xd0b5bc, 0xc5b2e0, 0xc5b30c, 0xc5b338, 0xe3a598, 0x15fa188, 0xe3d0a8, 0xe3d908, 0xe3a118, 0x1462a6c},
      edits_504, sizeof edits_504 / sizeof *edits_504,
      0xf6303c, 0xf63124, 0xf63120, {0xdb, 0x24c, 0x24e, 0x276, 0x289},
-     0x842644, 0x29bc83c, 0x258e185, 0x8429b0,
+     0x842644, 0x29bc83c, 0x258e185, 0x8429b0, 0xe51b3340,
      0x29980a4, 0x1c91f74, 0x1cba858, 0x1cba874, 0,
      {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
@@ -592,8 +612,16 @@ static const struct engine_build engine_builds[] = {
       0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
      edits_530, sizeof edits_530 / sizeof *edits_530,
      0x1537148, 0x1537234, 0x1537230, {0xe3, 0x254, 0x256, 0x2a6, 0x2b9},
-     0x8a1eac, 0x2c8e808, 0x21b8b98, 0x8a2218,
+     0x8a1eac, 0x2c8e808, 0x21b8b98, 0x8a2218, 0xe51b3340,
      0x2b9bee8, 0x1d7289c, 0x1d47324, 0x1d7e2bc, 0x1d46a6c,
+     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}},
+    {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
+     {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
+      0x179af04, 0x175a1b8, 0xdeacec, 0xd31818, 0xd31844, 0xd31870, 0xf27698, 0x172e668, 0xf2a410, 0xf2b9b0, 0xf27218, 0xc7cb2c},
+     edits_sclive, sizeof edits_sclive / sizeof *edits_sclive,
+     0x159f4a8, 0x159f594, 0x159f590, {0xe3, 0x254, 0x256, 0x2a6, 0x2b9},
+     0x89cd64, 0x2c28744, 0x222cc8d, 0x89d0d0, 0xe51b3338,
+     0x2c1bea4, 0x1ddf11c, 0x1db3ba4, 0x1deab3c, 0x1db32ec,
      {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}},
 };
 
@@ -1171,10 +1199,38 @@ static int crashpad(const char *file) {
     return file && !strcmp(base ? base + 1 : file, "crashpad_handler");
 }
 
+static void *access_cache;
+static int raw_access(const char *path, int mode) {
+    int (*real)(const char *, int) = next_symbol(&access_cache, "access");
+    return real ? real(path, mode) : -1;
+}
+
+static const char *stems_processor_path(const char *path) {
+    if (path && !strcmp(path, "/usr/local/bin/stems-processor")) {
+        if (raw_access(path, X_OK) != 0) {
+            if (raw_access("/data/sc5000-custom/bundle/stems-processor", X_OK) == 0)
+                return "/data/sc5000-custom/bundle/stems-processor";
+            if (raw_access("/data/sc5000-custom/bundle/bin/stems-processor", X_OK) == 0)
+                return "/data/sc5000-custom/bundle/bin/stems-processor";
+        }
+    }
+    return path;
+}
+
+int access(const char *path, int mode) {
+    int (*real)(const char *, int) = next_symbol(&access_cache, "access");
+    if (!real) { errno = ENOSYS; return -1; }
+    if (is_engine()) path = stems_processor_path(path);
+    return real(path, mode);
+}
+
 int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions,
                 const posix_spawnattr_t *attr, char *const argv[], char *const envp[]) {
     static void *cache;
-    if (is_engine() && crashpad(path)) return ENOENT; // Never return success with a fabricated PID.
+    if (is_engine()) {
+        if (crashpad(path)) return ENOENT; // Never return success with a fabricated PID.
+        path = stems_processor_path(path);
+    }
     int (*real)(pid_t *, const char *, const posix_spawn_file_actions_t *,
                 const posix_spawnattr_t *, char *const [], char *const []) = next_symbol(&cache, "posix_spawn");
     return real ? real(pid, path, actions, attr, argv, envp) : ENOSYS;
@@ -1182,7 +1238,10 @@ int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *
 
 int execve(const char *path, char *const argv[], char *const envp[]) {
     static void *cache;
-    if (is_engine() && crashpad(path)) { errno = ENOENT; return -1; }
+    if (is_engine()) {
+        if (crashpad(path)) { errno = ENOENT; return -1; }
+        path = stems_processor_path(path);
+    }
     int (*real)(const char *, char *const [], char *const []) = next_symbol(&cache, "execve");
     if (real) return real(path, argv, envp);
     errno = ENOSYS; return -1;

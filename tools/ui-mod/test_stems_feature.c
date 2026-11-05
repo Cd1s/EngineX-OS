@@ -432,7 +432,15 @@ static void test_stems(void) {
     char *image = mmap(NULL, 0x2d00000, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     assert(image != MAP_FAILED);
-    uint32_t enabled[] = {0xe51b2328, 0xe51b3324, 0xe12fff1e};
+    int is_sclive = build->feature_displaced == 0xe51b3338;
+    int fp_displaced = is_sclive ? 824 : 832;
+    int fp_enabled1 = is_sclive ? 800 : 808;
+    int fp_enabled2 = is_sclive ? 796 : 804;
+    uint32_t enabled[] = {
+        is_sclive ? 0xe51b2320 : 0xe51b2328,
+        is_sclive ? 0xe51b331c : 0xe51b3324,
+        0xe12fff1e
+    };
     uint32_t ordinary[] = {0x05873004, 0xe12fff1e}; // streq r3,[r7,#4]; bx lr
     memcpy(image + build->feature_enabled, enabled, sizeof enabled);
     memcpy(image + (build->feature_site + 8), ordinary, sizeof ordinary);
@@ -450,9 +458,9 @@ static void test_stems(void) {
     feature[1] = other[1] = false_ptr;
     uint32_t frame[0x100] = {0}, out[4];
     char *fp = (char *)frame + 0x350;
-    *(uint32_t *)(fp - 808) = 1234;
-    *(uint32_t *)(fp - 804) = 5678;
-    *(uint32_t *)(fp - 832) = false_ptr;
+    *(uint32_t *)(fp - fp_enabled1) = 1234;
+    *(uint32_t *)(fp - fp_enabled2) = 5678;
+    *(uint32_t *)(fp - fp_displaced) = false_ptr;
     void *stub = (void *)(uintptr_t)stems_feature_jump[1];
     invoke_stub(feature, fp, stub, out);
     assert(feature[1] == (uint32_t)(uintptr_t)(image + build->feature_true));
@@ -962,6 +970,27 @@ static void test_offline_analyzer(void) {
     puts("OfflineAnalyzer (#55): Engine's priority/policy changes on an analyzer stay idle, others untouched: PASS");
 }
 
+static void test_stems_processor_fallback(void) {
+    hook_test_engine = 1;
+    if (access("/usr/local/bin/stems-processor", X_OK) != 0) {
+        assert(!strcmp(stems_processor_path("/usr/local/bin/stems-processor"), "/usr/local/bin/stems-processor"));
+        system("mkdir -p /data/sc5000-custom/bundle 2>/dev/null");
+        const char *bundle_file = "/data/sc5000-custom/bundle/stems-processor";
+        FILE *f = fopen(bundle_file, "w");
+        if (f) {
+            fputs("#!/bin/sh\nexit 0\n", f);
+            fclose(f);
+            chmod(bundle_file, 0755);
+            assert(!strcmp(stems_processor_path("/usr/local/bin/stems-processor"), bundle_file));
+            assert(access("/usr/local/bin/stems-processor", X_OK) == 0);
+            unlink(bundle_file);
+        }
+    }
+    assert(!strcmp(stems_processor_path("/bin/sh"), "/bin/sh"));
+    hook_test_engine = 0;
+    puts("stems-processor fallback: redirects to /data/sc5000-custom/bundle/stems-processor when absent: PASS");
+}
+
 int main(int argc, char **argv) {
     for (size_t b = 0; b < sizeof engine_builds / sizeof *engine_builds; b++) {
         // Hooks and counters are process-global; each build starts pristine.
@@ -986,6 +1015,7 @@ int main(int argc, char **argv) {
     test_update_dns();
     test_resources();
     test_offline_analyzer();
+    test_stems_processor_fallback();
     for (int i = 1; i < argc; i++) test_patch_files(argv[i]);
     return 0;
 }
