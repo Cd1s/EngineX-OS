@@ -496,6 +496,44 @@ func TestTrackIDsSurviveARestart(t *testing.T) {
 	}
 }
 
+// #73: after a restart the owner's login has a new session. A playlist Engine
+// still shows is served by it, with the same playlist and track IDs.
+func TestOwnerPlaylistSurvivesARestart(t *testing.T) {
+	cfg := Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}
+	login := func(ui *Server, id string) {
+		ui.mu.Lock()
+		ui.sessions[id] = &Session{ID: id, Provider: "netease", Ready: true, p: fixtureProvider{}, tracks: map[string]providers.Track{}, expires: time.Now().Add(time.Hour)}
+		ui.mu.Unlock()
+	}
+	list := providers.Playlist{ID: "p1", Title: "Friend", Count: 1}
+	before := New(cfg, nil)
+	login(before, "old")
+	id := before.tidal.addPlaylist(playlistRef{"old", "netease", list, false})
+	srv := httptest.NewServer(before)
+	var tracks tidalList
+	tidalGet(t, srv.URL, "/v1/playlists/"+id+"/tracks", 200, &tracks)
+	srv.Close()
+	before.Close()
+
+	after := New(cfg, nil)
+	defer after.Close()
+	login(after, "new")
+	srv = httptest.NewServer(after)
+	defer srv.Close()
+	var again tidalList
+	tidalGet(t, srv.URL, "/v1/playlists/"+id+"/tracks", 200, &again)
+	if len(tracks.Items) != 1 || len(again.Items) != 1 || !bytes.Equal(again.Items[0], tracks.Items[0]) {
+		t.Fatalf("before %s, after %s", tracks.Items, again.Items)
+	}
+	if relisted := after.tidal.addPlaylist(playlistRef{"new", "netease", list, false}); relisted != id {
+		t.Fatalf("playlist ID changed: %s, was %s", relisted, id)
+	}
+	// A guest's playlist stays the guest's own.
+	if guest := after.tidal.addPlaylist(playlistRef{"g", "netease", list, true}); guest == id {
+		t.Fatal("guest playlist shares the owner's ID")
+	}
+}
+
 func TestThumbnailsPickEachServicesSmallSize(t *testing.T) {
 	for _, c := range []struct {
 		in   providers.Track
