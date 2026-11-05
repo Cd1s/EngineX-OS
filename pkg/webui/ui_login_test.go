@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testaudio"
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
@@ -112,6 +113,68 @@ func TestSpotifyPhonePageUsesTheDefaultClient(t *testing.T) {
 	page.Body.Close()
 	if !strings.Contains(string(body), DefaultSpotifyClientID) {
 		t.Fatalf("page %s", body)
+	}
+}
+
+// #48: Spotify sends a new device through an email code and a "new device" page
+// before it redirects. Twenty-five minutes on, with the phone page reloaded, the
+// pasted 127.0.0.1 callback from the first page must still link the account.
+func TestSpotifyPhoneLoginSurvivesASlowTwoFactorDetour(t *testing.T) {
+	accounts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		if r.URL.Path != "/api/token" || r.Form.Get("code") != "CODE" || r.Form.Get("code_verifier") == "" {
+			w.WriteHeader(400)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"access_token": "AT", "refresh_token": "RT", "token_type": "Bearer", "expires_in": 3600})
+	}))
+	defer accounts.Close()
+	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir(), SpotifyAccountsURL: accounts.URL}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	get := func(path string) string {
+		t.Helper()
+		r, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		return string(b)
+	}
+	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	token := ui.logins["spotify"].token
+	state := regexp.MustCompile(`state=([A-Za-z0-9_-]+)`).FindStringSubmatch(get("/m/spotify?t=" + token))
+	if state == nil {
+		t.Fatal("no authorize link on the phone page")
+	}
+	ui.mu.Lock()
+	ui.logins["spotify"].expires = ui.logins["spotify"].expires.Add(-25 * time.Minute)
+	for k, v := range ui.pending {
+		v.expires = v.expires.Add(-25 * time.Minute)
+		ui.pending[k] = v
+	}
+	ui.mu.Unlock()
+	if s := get("/v1/sc5000/login?provider=spotify"); strings.Contains(s, "expired") {
+		t.Fatalf("the deck gave up on the QR code: %s", s)
+	}
+	get("/m/spotify?t=" + token) // the browser reloads the page on return
+	callback := "http://127.0.0.1:8080/oauth/spotify/callback?code=CODE&state=" + state[1]
+	done, err := http.PostForm(srv.URL+"/m/spotify?t="+token, url.Values{"callback": {callback}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(done.Body)
+	done.Body.Close()
+	if !strings.Contains(string(body), "已完成") {
+		t.Fatalf("pasted callback refused: %s", body)
+	}
+	if s := get("/v1/sc5000/login?provider=spotify"); !strings.Contains(s, `"status":"done"`) {
+		t.Fatalf("deck status %s", s)
 	}
 }
 

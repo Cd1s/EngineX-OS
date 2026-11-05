@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	sessionTTL   = 15 * time.Minute
+	sessionTTL   = 30 * time.Minute // as the deck's loginLifetime (#48)
 	tombstoneTTL = time.Hour
 	maxSessions  = 20000
 )

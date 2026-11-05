@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
@@ -108,6 +109,42 @@ func TestPlaylistAndSmartMatchDelta(t *testing.T) {
 	}
 	if scalar[int](t, engine, `SELECT count(*) FROM Playlist WHERE title='User child'`) != 1 {
 		t.Fatal("native child lost")
+	}
+}
+
+// #48: an export with more new tracks than one mount can read used to be killed
+// by the mount hook and rolled back, playlists included. Its playlists must land
+// at once; the tracks finish, cues and all, on the next mount.
+func TestMountPastItsReadBudgetStillImportsPlaylists(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	stamp := filepath.Join(root, "Engine Library", "Database2", ".rb-bridge-stamp")
+	r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{Deadline: time.Unix(1, 0)}, false)
+	if err != nil || r.Added != 5 || r.Deferred != 5 || !r.PlaylistsChanged {
+		t.Fatal(r, err)
+	}
+	engine := dbOpen(t, root)
+	if got := playlistTracks(t, engine, "同名", "Nested"); !reflect.DeepEqual(got, []int64{1, 2}) {
+		t.Fatalf("playlist after a deferred import: %v", got)
+	}
+	if n := scalar[int](t, engine, `SELECT count(*) FROM Track WHERE isAnalyzed=1`); n != 0 {
+		t.Fatalf("%d tracks analysed without reading their files", n)
+	}
+	if _, err := os.Stat(stamp); !os.IsNotExist(err) {
+		t.Fatal("a partial import marked the export as imported")
+	}
+	r, err = bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	if err != nil || r.Deferred != 0 || r.Updated != 5 {
+		t.Fatal(r, err)
+	}
+	if n := scalar[int](t, engine, `SELECT count(*) FROM Track WHERE isAnalyzed=1`); n == 0 {
+		t.Fatal("the next mount did not read the deferred tracks")
+	}
+	if got := playlistTracks(t, engine, "同名", "Nested"); !reflect.DeepEqual(got, []int64{1, 2}) {
+		t.Fatalf("playlist after the full import: %v", got)
+	}
+	if r, err = bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil || !r.Bypassed {
+		t.Fatal("complete import not recorded", r, err)
 	}
 }
 
