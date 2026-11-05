@@ -972,6 +972,33 @@ func (g *tidalGateway) lookup(w http.ResponseWriter, raw string) (int64, trackRe
 	}
 	return id, ref, true
 }
+
+// streamedFile is the local file of a row Engine loaded from the gateway
+// (streaming://TIDAL/Track/<id>): the drive file of an OmniSource row, or the
+// finished download. "" when there is none yet.
+func (g *tidalGateway) streamedFile(net string) string {
+	rest, ok := strings.CutPrefix(net, "streaming://")
+	if !ok {
+		return ""
+	}
+	id, err := strconv.ParseInt(path.Base(rest), 10, 64)
+	if err != nil {
+		return ""
+	}
+	g.mu.Lock()
+	ref, ok := g.tracks[id]
+	g.mu.Unlock()
+	switch {
+	case !ok:
+		return ""
+	case ref.file != "":
+		p, _ := localFile(ref)
+		return p
+	case g.s.jobs != nil:
+		return g.s.jobs.File(ref.track)
+	}
+	return ""
+}
 func (g *tidalGateway) trackInfo(w http.ResponseWriter, r *http.Request) {
 	if id, ref, ok := g.lookup(w, r.PathValue("id")); ok {
 		// Lists preview a catalog tempo. A track on a deck is Engine's to analyse.

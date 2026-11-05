@@ -175,14 +175,15 @@ func FetchTrack(ctx context.Context, c *NFSClient, slot byte, id uint32, dir str
 	if rel == "" {
 		return "", fmt.Errorf("prolink: track %d is not in the player's export", id)
 	}
-	local := filepath.Join(dir, fmt.Sprintf("%s-%d-%d%s", c.IP, slot, id, strings.ToLower(filepath.Ext(rel))))
+	// The copy keeps the file's name: Engine shows it as the title when the file has no tags (WAV).
+	local := filepath.Join(dir, fmt.Sprintf("%s-%d-%d", c.IP, slot, id), filepath.Base(rel))
 	if _, err := os.Stat(local); err == nil {
 		return local, nil
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
 		return "", err
 	}
-	f, err := os.CreateTemp(dir, ".fetch-*")
+	f, err := os.CreateTemp(filepath.Dir(local), ".fetch-*")
 	if err != nil {
 		return "", err
 	}

@@ -207,7 +207,7 @@ func TestFetchTrackCopiesOneTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 	want, _ := os.ReadFile(filepath.Join(usb, "MUSIC/two.flac"))
-	if b, err := os.ReadFile(got); err != nil || string(b) != string(want) || filepath.Ext(got) != ".flac" {
+	if b, err := os.ReadFile(got); err != nil || string(b) != string(want) || filepath.Base(got) != "two.flac" {
 		t.Fatalf("%s: %v", got, err)
 	}
 	if again, err := prolink.FetchTrack(t.Context(), c, 3, 2, dir); err != nil || again != got {
