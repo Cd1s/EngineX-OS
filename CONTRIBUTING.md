@@ -21,6 +21,7 @@ Thanks for helping. EngineX OS runs on decks that people play live on, so the ba
 - **All models**: the same image group serves several models (see the table below). Check every model of the group, or limit the change explicitly.
 - **Destructive operations**: Factory Reset, `az01-update --erase-data` and boots with a blank `/data` are tested in a sandbox or VM (`unshare -m` + `qemu-arm` with the unpacked rootfs), never on a real deck.
 - **Engine databases**: while Engine has a library open, no other process may write `m.db` / `hm.db`.
+- **Vendor units**: never put a hard `Requires=`, `BindsTo=` or `Requisite=` on a unit the vendor ships, because a new base may drop it (5.3.0 dropped `etc.mount`, and the 5.0.4.2 → 5.3.0.1 online update lost the UI packs and SSH). Use `RequiresMountsFor=` for mounts and `Wants=` + `After=` for everything else.
 
 ### Tests
 
@@ -46,7 +47,8 @@ Maintainers follow the checklist in [`.claude/rules/release-workflow.md`](./.cla
    `https://github.com/Cd1s/EngineX-OS/releases/latest/download/<PREFIX>-<VERSION>-EngineX-OS-<Model>-Update.img`
 3. **Hero banners** `docs/assets/hero-banner*.svg`: only if they show a version (they do not today).
 4. **Build** all 8 images and `SHA256SUMS.txt` with `tools/az01-packer/build-release.sh <VERSION> <fw> none ...` from a clean checkout, then spot-check one image per group. Public images never carry an SSH key (`none`).
-5. **Tag and Release** `v<VERSION>`: upload the 8 images and `SHA256SUMS.txt`, and put the SHA-256 table of all 8 models in the release notes.
+5. **Release gate** (mandatory, also for a new vendor base and for same-version re-releases): run `tools/az01-packer/release-gate.sh <previous release .img> <new .img> <VERSION> <new work dir>` as root on the build host, once per image group (JP07, JP13, JC11). It audits the new rootfs (unit dependencies, commands, tool paths, shared libraries), runs the previous release's online update to the new image, and then boots the new rootfs on the same `/data` and checks every core feature: services, UI hook counts, DSP guards, streaming gateway, Stems, Rekordbox, storage and the next online update. No release unless it exits 0.
+6. **Tag and Release** `v<VERSION>`: upload the 8 images and `SHA256SUMS.txt`, and put the SHA-256 table of all 8 models in the release notes.
 
 | Image group | Models (prefix, board) |
 | --- | --- |

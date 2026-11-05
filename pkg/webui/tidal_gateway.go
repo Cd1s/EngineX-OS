@@ -39,8 +39,8 @@ func hintTitle(scope string) string { return "请登录：sc5000.lan:8080" }
 
 var (
 	tidalNS        = uuid.MustParse("6f1c5a52-3c55-4c2e-9d0b-5c5000000000")
-	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud"}
-	providerOrder  = map[string]int{"netease": 0, "spotify": 1, "deezer": 2, "soundcloud": 3}
+	providerLabels = map[string]string{"netease": "网易云音乐", "spotify": "Spotify", "deezer": "Deezer", "soundcloud": "SoundCloud", "beatport": "Beatport"}
+	providerOrder  = map[string]int{"netease": 0, "spotify": 1, "deezer": 2, "soundcloud": 3, "beatport": 4}
 )
 
 type trackRef struct {
@@ -305,6 +305,8 @@ func ready(p providers.Provider) bool {
 		// An app's token can search but knows no account, so that is not a login:
 		// the deck must still offer the QR code that binds a profile.
 		return v.Usable() && (v.UserID != 0 || v.Token != "")
+	case *providers.Beatport:
+		return v.Ready()
 	}
 	return false
 }

@@ -24,7 +24,7 @@ const (
 )
 
 // Only downloads this pipeline named are ever evicted: Save's and Deemix's <id>.
-var evictable = regexp.MustCompile(`^(netease-|soundcloud-)?\d+\.(flac|mp3|mp4)$`)
+var evictable = regexp.MustCompile(`^(netease-|soundcloud-|beatport-)?\d+\.(flac|mp3|mp4)$`)
 
 var defaultMedia = func() *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()

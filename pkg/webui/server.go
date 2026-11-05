@@ -46,6 +46,7 @@ type Config struct {
 	SpotifyClientID, SpotifyTokenPath, SpotifyBaseURL, SpotifyAccountsURL string
 	NeteaseURL, StateDir, DeezerURL, DeezerGatewayURL                     string
 	SoundCloudURL, SoundCloudTokenURL                                     string
+	BeatportURL                                                           string // tests; empty is Beatport's API
 	HTTP                                                                  *http.Client
 	GitHubURL, VersionFile                                                string // tests; defaults are api.github.com and versionFile
 	// UIDir holds the deck UI settings; empty means the on-device default.
@@ -81,6 +82,8 @@ type Server struct {
 	logins       map[string]*loginFlow
 
 	soundCloudAuth *providers.SoundCloudAuth
+	// beatport is the owner's account, shared because each refresh rotates its token.
+	beatport *providers.Beatport
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
@@ -120,12 +123,14 @@ func New(cfg Config, jobs *Jobs) *Server {
 		cfg.BPM.SoundCloudAuth = s.soundCloudAuth
 		cfg.BPM.Spotify = s.ownerSpotify
 	}
+	s.beatport = &providers.Beatport{BaseURL: cfg.BeatportURL, HTTP: cfg.HTTP, Path: filepath.Join(cfg.StateDir, "beatport-owner.json")}
 	s.tidal = newTidalGateway(s)
 	if jobs != nil {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor
 		jobs.neteaseDirect = s.neteaseDirect
 		jobs.soundcloud = s.ownerSoundCloud
+		jobs.beatport = s.ownerBeatport
 		jobs.bpm = cfg.BPM
 		if jobs.p.Deemix != nil {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }
@@ -278,6 +283,11 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 			return &providers.SoundCloud{BaseURL: s.cfg.SoundCloudURL, HTTP: s.cfg.HTTP, Auth: s.soundCloudAuth}, nil
 		}
 		return s.ownerSoundCloudProvider(), nil
+	case "beatport":
+		if guest {
+			return &providers.Beatport{BaseURL: s.cfg.BeatportURL, HTTP: s.cfg.HTTP}, nil
+		}
+		return s.beatport, nil
 	case "netease":
 		n := &providers.Netease{BaseURL: s.cfg.NeteaseURL, HTTP: s.cfg.HTTP}
 		if !guest {
@@ -383,6 +393,9 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if np, ok := p.(*providers.Netease); ok {
 		session.Ready = np.UserID != 0 && np.Cookie != ""
+	}
+	if bp, ok := p.(*providers.Beatport); ok {
+		session.Ready = bp.Ready()
 	}
 	s.sessions[session.ID] = session
 	respond(w, session)
