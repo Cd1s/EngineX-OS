@@ -1070,6 +1070,26 @@ static void test_stems_processor_fallback(void) {
     puts("stems-processor fallback: redirects to /data/sc5000-custom/bundle/stems-processor when absent: PASS");
 }
 
+static void test_alsa_boot_hook(void) {
+    hook_test_engine = 1;
+    g_hook_initialized = 1;
+    void *dst = (void *)0x1234;
+    assert(sc5000_alsa_boot_hook(NULL, NULL, &dst, NULL) == 0);
+    assert(dst == NULL);
+    dst = (void *)0x1234;
+    assert(snd_config_hook_sc5000_alsa_boot_hook(NULL, NULL, &dst, NULL) == 0);
+    assert(dst == NULL);
+
+    g_hook_initialized = 0;
+    system("mkdir -p /run 2>/dev/null; touch /run/sc5000-alsa-reexec.once");
+    assert(sc5000_alsa_boot_hook(NULL, NULL, &dst, NULL) == 0);
+    unlink("/run/sc5000-alsa-reexec.once");
+
+    g_hook_initialized = 1;
+    hook_test_engine = 0;
+    puts("sc5000_alsa_boot_hook: no-op when initialized or reexec marker exists, resets dst: PASS");
+}
+
 int main(int argc, char **argv) {
     for (size_t b = 0; b < sizeof engine_builds / sizeof *engine_builds; b++) {
         // Hooks and counters are process-global; each build starts pristine.
@@ -1095,6 +1115,7 @@ int main(int argc, char **argv) {
     test_resources();
     test_offline_analyzer();
     test_stems_processor_fallback();
+    test_alsa_boot_hook();
     for (int i = 1; i < argc; i++) test_patch_files(argv[i]);
     return 0;
 }

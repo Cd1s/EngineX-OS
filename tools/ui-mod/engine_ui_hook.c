@@ -87,7 +87,9 @@ static int is_engine(void) {
     if (n <= 0)
         return 0;
     exe[n] = 0;
-    value = strcmp(exe, "/usr/Engine/Engine") == 0;
+    const char *base = strrchr(exe, '/');
+    base = base ? base + 1 : exe;
+    value = strcmp(base, "Engine") == 0;
     __atomic_store_n(&cached, value, __ATOMIC_RELAXED);
     return value;
 #endif
@@ -763,8 +765,19 @@ static int edit_state(uintptr_t base, const struct engine_edit *e) {
 
 static void install_sqlite_hooks(uintptr_t base, size_t page);
 
+int g_hook_initialized = 0;
+
 __attribute__((constructor)) static void edit_engine(void) {
+#ifdef ENGINE_UI_HOOK_TEST
+    g_hook_initialized = 1;
+#else
+    const char *preload = getenv("LD_PRELOAD");
+    if (preload && strstr(preload, "libengine-ui-hook.so")) {
+        g_hook_initialized = 1;
+    }
+#endif
     if (!is_engine()) return;
+    if (!g_hook_initialized) return;
     initialize_engine_cpus();
     uintptr_t base = 0;
     dl_iterate_phdr(engine_base, &base);
@@ -774,7 +787,8 @@ __attribute__((constructor)) static void edit_engine(void) {
     uintptr_t page = (uintptr_t)page_size;
     fprintf(stderr, "engine-ui-hook: Engine %s\n", build->name);
     prepare_config(base, page);
-    if (build->feature_true && !memcmp((const void *)(base + build->feature_site), "\x40\x33\x1b\xe5\x00\x00\x54\xe3", 8))
+    uint32_t expected_feature[2] = {build->feature_displaced ? build->feature_displaced : 0xe51b3340, 0xe3540000};
+    if (build->feature_true && !memcmp((const void *)(base + build->feature_site), expected_feature, 8))
         prepare_stems_feature(base, page);
     // A group is applied only if every site of it is stock or already patched.
     int ready[3] = {1, 1, 1};
@@ -1380,4 +1394,47 @@ int pthread_getaffinity_np(pthread_t thread, size_t cpusetsize, cpu_set_t *cpuse
     int res = real_fn(thread, cpusetsize, cpuset);
     return res;
 }
+
+// #61 / #67: One-shot ALSA boot loader for SC LIVE 4 (inmusic,jp21) and devices
+// with read-only root filesystems where LD_PRELOAD cannot be placed in rootfs.
+__attribute__((visibility("default")))
+int sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_data) {
+    (void)root;
+    (void)config;
+    (void)private_data;
+    if (dst) *dst = NULL;
+    if (g_hook_initialized) return 0;
+    if (!is_engine()) return 0;
+    if (access("/run/sc5000-alsa-reexec.once", F_OK) == 0) return 0;
+
+    int fd = open("/run/sc5000-alsa-reexec.once", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd >= 0) close(fd);
+
+    fprintf(stderr, "engine-ui-hook: ALSA one-shot boot hook triggered; activating EngineX OS\n");
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, 0);
+            dup2(devnull, 1);
+            dup2(devnull, 2);
+            if (devnull > 2) close(devnull);
+        }
+        char *const argv[] = {"/bin/sh", "/data/sc5000-custom/bundle/boot-activate.sh", NULL};
+        execv("/bin/sh", argv);
+        _exit(1);
+    }
+    return 0;
+}
+
+__attribute__((visibility("default")))
+int snd_config_hook_sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_data) {
+    return sc5000_alsa_boot_hook(root, config, dst, private_data);
+}
+
+__attribute__((used, visibility("default")))
+const char _sc5000_alsa_boot_hook_dlsym_config_hook_001[] = "ALSA_0.9";
+__attribute__((used, visibility("default")))
+const char _snd_config_hook_sc5000_alsa_boot_hook_dlsym_config_hook_001[] = "ALSA_0.9";
 

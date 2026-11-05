@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import io
+import os
 import subprocess
 import tarfile
 import tempfile
@@ -44,7 +45,10 @@ class DataBundleTest(unittest.TestCase):
     def extract(self, result):
         dest = self.tmp / 'x'
         with tarfile.open(result['bundle']) as t:
-            t.extractall(dest, filter='data')
+            if hasattr(tarfile, 'data_filter'):
+                t.extractall(dest, filter='data')
+            else:
+                t.extractall(dest)
         return dest / TOP
 
     def test_bundle_layout_and_manifest(self):
@@ -60,6 +64,11 @@ class DataBundleTest(unittest.TestCase):
         for applet in bdb.APPLETS:
             self.assertIn(f'sc5000-suite" {applet} ', (src / 'bin' / applet).read_text())
             self.assertTrue((src / 'bin' / applet).stat().st_mode & 0o100)
+        self.assertTrue((src / 'boot-activate.sh').exists())
+        self.assertTrue((src / 'boot-activate.sh').stat().st_mode & 0o100)
+        self.assertTrue((src / '99-sc5000-custom.conf').exists())
+        self.assertTrue((src / 'host-install-userdata.py').exists())
+        self.assertTrue((src / 'host-install-fastboot.sh').exists())
         listed = {}
         for line in (src / 'SHA256SUMS').read_text().splitlines():
             digest, name = line.split('  ')
@@ -81,30 +90,39 @@ class DataBundleTest(unittest.TestCase):
             with self.subTest(kw=kw), self.assertRaises(SystemExit):
                 self.build(**kw)
 
-    def sh(self, script, dest, check=True):
-        return subprocess.run(['sh', str(script)], env={'PATH': '/usr/bin:/bin', 'SC5000_CUSTOM': str(dest)},
+    def sh(self, script, dest, alsa_dest=None, check=True):
+        env = {'PATH': os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin:/sbin'), 'SC5000_CUSTOM': str(dest)}
+        if alsa_dest:
+            env['SC5000_ALSA_OVERLAY'] = str(alsa_dest)
+        return subprocess.run(['sh', str(script)], env=env,
                               capture_output=True, text=True, check=check)
 
     def test_install_then_uninstall_keeps_user_data(self):
         src = self.extract(self.build())
         dest = self.tmp / 'data/sc5000-custom'
+        alsa_dest = self.tmp / 'data/system/var/overlay/lib/alsa/conf.d'
         dest.mkdir(parents=True)
         (dest / 'authorized_keys').write_text('ssh-ed25519 AAAA test\n')
         (dest / 'ui').mkdir()
         (dest / 'ui/safe-mode').write_text('1')
-        self.sh(src / 'install.sh', dest)
+        self.sh(src / 'install.sh', dest, alsa_dest=alsa_dest)
         self.assertEqual((dest / 'bundle/bin/sc5000-suite').read_bytes(), b'\x7fELF suite')
         self.assertEqual((dest / 'ui/packs/a/Main.qml').read_bytes(), b'Item {}')
         self.assertTrue((dest / 'ui/icons/x.svg').exists())
         self.assertFalse((dest / 'ui/safe-mode').exists())
+        self.assertTrue((dest / 'bundle/boot-activate.sh').exists())
+        self.assertTrue((dest / 'bundle/boot-activate.sh').stat().st_mode & 0o100)
+        self.assertTrue((dest / 'bundle/99-sc5000-custom.conf').exists())
+        self.assertTrue((alsa_dest / '99-sc5000-custom.conf').exists())
         self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
         self.assertEqual(oct(dest.stat().st_mode & 0o777), '0o700')
         self.assertEqual([p.name for p in dest.glob('.bundle.*')], [])
-        self.sh(src / 'install.sh', dest)  # reinstall over itself
-        self.sh(dest / 'bundle/uninstall.sh', dest)
+        self.sh(src / 'install.sh', dest, alsa_dest=alsa_dest)  # reinstall over itself
+        self.sh(dest / 'bundle/uninstall.sh', dest, alsa_dest=alsa_dest)
         self.assertEqual(sorted(p.name for p in dest.iterdir()), ['authorized_keys', 'ui'])
         self.assertEqual(list((dest / 'ui').iterdir()), [])
-        self.assertNotEqual(self.sh(src / 'uninstall.sh', dest, check=False).returncode, 0)
+        self.assertFalse((alsa_dest / '99-sc5000-custom.conf').exists())
+        self.assertNotEqual(self.sh(src / 'uninstall.sh', dest, alsa_dest=alsa_dest, check=False).returncode, 0)
 
     def test_uninstall_keeps_packs_installed_by_someone_else(self):
         src = self.extract(self.build())
@@ -123,6 +141,40 @@ class DataBundleTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('SHA256SUMS mismatch', r.stderr)
         self.assertFalse(dest.exists())
+
+    def test_host_install_userdata(self):
+        if subprocess.run(['which', 'debugfs'], capture_output=True).returncode != 0:
+            self.skipTest('debugfs not installed on this host')
+        if subprocess.run(['which', 'mkfs.ext4'], capture_output=True).returncode != 0:
+            self.skipTest('mkfs.ext4 not installed on this host')
+        r = self.build()
+        img = self.tmp / 'userdata.img'
+        subprocess.run(['dd', 'if=/dev/zero', f'of={img}', 'bs=1M', 'count=32'], check=True, capture_output=True)
+        subprocess.run(['mkfs.ext4', '-F', str(img)], check=True, capture_output=True)
+
+        # Pre-seed an existing user file in userdata.img
+        subprocess.run(['debugfs', '-w', '-R', 'mkdir /Music', str(img)], check=True, capture_output=True)
+        subprocess.run(['debugfs', '-w', '-R', 'write /etc/hosts /Music/my_track.mp3', str(img)], check=True, capture_output=True)
+
+        hspec = importlib.util.spec_from_file_location('host_install_userdata', HERE / 'host-install-userdata.py')
+        hmod = importlib.util.module_from_spec(hspec)
+        hspec.loader.exec_module(hmod)
+
+        res = hmod.inject(img, r['bundle'])
+        self.assertEqual(res['status'], 'ok')
+
+        fsck = subprocess.run(['e2fsck', '-f', '-y', str(img)], capture_output=True, text=True)
+        self.assertIn(fsck.returncode, (0, 1, 2))
+
+        stat_out = subprocess.run(['debugfs', '-R', 'stat /Music/my_track.mp3', str(img)], capture_output=True, text=True).stdout
+        self.assertIn('regular', stat_out)
+
+        hook_out = subprocess.run(['debugfs', '-R', 'stat /system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf', str(img)], capture_output=True, text=True).stdout
+        self.assertIn('regular', hook_out)
+        self.assertIn('0644', hook_out)
+
+        suite_out = subprocess.run(['debugfs', '-R', 'stat /sc5000-custom/bundle/bin/sc5000-suite', str(img)], capture_output=True, text=True).stdout
+        self.assertIn('0755', suite_out)
 
 
 if __name__ == '__main__':
