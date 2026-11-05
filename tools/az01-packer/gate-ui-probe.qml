@@ -43,7 +43,7 @@ Item {
             if (!main && "scAutoAnalyze" in o) main = o
             if (o.objectName === "Version")
                 console.warn("SCPROBE version|" + String(o.text).replace(/<[^>]*>/g, "") + "|")
-            if (o.objectName === "ControlCenter_WaveformStyle" || o.objectName === "ControlCenter_FourDeckWaveform" || o.objectName === "ControlCenter_LiveStream" || o.objectName === "ControlCenter_UpfaderEcho" || o.objectName === "FourDeckRemoteStrip")
+            if (o.objectName === "ControlCenter_WaveformStyle" || o.objectName === "ControlCenter_LiveStream" || o.objectName === "ControlCenter_UpfaderEcho")
                 console.warn("SCPROBE tile|" + o.objectName + "|")
             if (isSection(o))
                 entries(o, function (c) { console.warn("SCPROBE entry|" + o.label + "|" + c.text + "|" + (c.visible ? 1 : 0) + "|") })

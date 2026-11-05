@@ -93,13 +93,8 @@ SERVICES_MAIN = """
 	property bool scProlinkExport: false // #63, experimental export to CDJs
 	property string scUpdateRepo: "Cd1s/EngineX-OS"
 	property string scUpdateText: ""
-	property bool scFourDeckWave: false
-	property bool scProlinkWave: true
 	property bool scBroadcastOn: false
 	property bool scUpfaderEcho: false
-	property var scProlinkDecks: ({})
-	property double scProlinkSyncMs: 0
-	property double scProlinkNowMs: 0
 	property string scLastBroadcastTrack: ""
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
@@ -302,49 +297,11 @@ SERVICES_MAIN = """
 		scSources = v.sources
 		scLoggedIn = v.loggedIn
 		scScope = v.scope
-		scFourDeckWave = !!v.fourDeckWaveform
-		scProlinkWave = v.prolinkWaveform !== undefined ? !!v.prolinkWaveform : true
 		scBroadcastOn = !!v.broadcastEnabled
 		scUpfaderEcho = !!v.upfaderEcho
 		const p = Planck.getProperty("/Client/Preferences/Profile/Application/WaveformStyle")
 		if (p.translator && (p.translator.index == 1) !== (v.waveform === "rgb"))
 			p.translator.index = v.waveform === "rgb" ? 1 : 0
-	}
-	function scProlinkDeck(deck) {
-		return scProlinkDecks && scProlinkDecks[String(deck)] ? scProlinkDecks[String(deck)] : null
-	}
-	function scHasProlinkDeck(deck) {
-		const d = scProlinkDeck(deck)
-		return !!(scProlinkWave && d && (d.track_id || d.bpm > 0 || (d.waveform && d.waveform.length > 0)))
-	}
-	function scProlinkPosMs(deck) {
-		const d = scProlinkDeck(deck)
-		if (!d) return 0
-		const base = d.play_position_ms || 0
-		if (!d.playing || !(scProlinkSyncMs > 0)) return base
-		return base + Math.max(0, Date.now() - scProlinkSyncMs)
-	}
-	function scFetchProlink() {
-		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/prolink")
-		x.onreadystatechange = function() {
-			if (x.readyState !== 4 || x.status !== 200) return
-			const v = JSON.parse(x.responseText)
-			scProlinkDecks = v.decks || {}
-			scProlinkSyncMs = Date.now()
-			scProlinkNowMs = scProlinkSyncMs
-		}
-		x.send()
-	}
-	Timer {
-		interval: 400; repeat: true
-		running: root.scProlinkWave || root.scFourDeckWave
-		onTriggered: root.scFetchProlink()
-	}
-	Timer {
-		interval: 50; repeat: true
-		running: (root.scProlinkWave || root.scFourDeckWave) && root.scProlinkSyncMs > 0
-		onTriggered: root.scProlinkNowMs = Date.now()
 	}
 	function scSyncBroadcastMeta() {
 		if (!scBroadcastOn) return
@@ -760,200 +717,6 @@ LOGIN_DIALOG = """
 		}
 """
 
-FOUR_DECK_STRIP = """
-		// #49: PRIME 4 style lanes for decks 3/4, docked at the bottom of the main
-		// waveform (above the pads) so the title / artist / BPM header stays clear.
-		// Only decks that have a track (Pro DJ Link or Engine) get a lane.
-		Rectangle {
-			id: scFourDeckRemoteStrip
-			objectName: "FourDeckRemoteStrip"
-			z: 900
-			height: scDeckLanes.height + 6
-			anchors {
-				bottom: parent.bottom
-				bottomMargin: 66
-				left: parent.left
-				leftMargin: 24
-				right: parent.right
-				rightMargin: 24
-			}
-			// Not scDeckLanes.height: a hidden parent hides its lanes, which keeps the height at 0.
-			visible: root.scFourDeckWave && (scDeckLoaded(3) || scDeckLoaded(4)) && !root.dialogOpen && !root.messageBoxOpen
-			color: "#000000"
-
-			Rectangle {
-				anchors { top: parent.top; left: parent.left; right: parent.right }
-				height: 1
-				color: "#3a3a3a"
-			}
-
-			function scDeckLoaded(d) {
-				if (root.scProlinkDeck(d)) return true
-				const p = Planck.getProperty("/Engine/Deck" + d + "/Track/SongLoaded")
-				return !!(p && p.translator && p.translator.state)
-			}
-			function scDeckSong(d) {
-				const pl = root.scProlinkDeck(d)
-				if (pl && pl.title) return pl.title
-				const p = Planck.getProperty("/Engine/Deck" + d + "/Track/SongName")
-				if (p && p.translator && p.translator.string) return root.scPlainTitle(p.translator.string)
-				return ""
-			}
-			function scDeckArtist(d) {
-				const pl = root.scProlinkDeck(d)
-				if (pl && pl.artist) return pl.artist
-				const p = Planck.getProperty("/Engine/Deck" + d + "/Track/ArtistName")
-				if (p && p.translator && p.translator.string) return p.translator.string
-				return ""
-			}
-			function scDeckBpm(d) {
-				const pl = root.scProlinkDeck(d)
-				if (pl && (pl.effective_bpm || pl.bpm)) return (pl.effective_bpm || pl.bpm).toFixed(1)
-				let p = Planck.getProperty("/Engine/Deck" + d + "/Track/CurrentBPM")
-				if (!p || !p.translator) p = Planck.getProperty("/Engine/Deck" + d + "/CurrentBPM")
-				const val = p && p.translator ? (p.translator.unnormalized || p.translator.value || 0) : 0
-				return val > 0 ? (Math.round(val * 10) / 10).toFixed(1) : "--.-"
-			}
-			function scDeckBeat(d) {
-				const pl = root.scProlinkDeck(d)
-				if (pl && pl.beat_in_bar >= 1 && pl.beat_in_bar <= 4) return pl.beat_in_bar
-				const p = Planck.getProperty("/Engine/Deck" + d + "/CurrentBeatInBar")
-				if (p && p.translator && p.translator.value) return p.translator.value
-				return 1
-			}
-			function scDeckPlaying(d) {
-				const pl = root.scProlinkDeck(d)
-				if (pl && pl.playing) return true
-				const p = Planck.getProperty("/Engine/Deck" + d + "/PlayState")
-				return !!(p && p.translator && p.translator.state)
-			}
-
-			Column {
-				id: scDeckLanes
-				anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
-				spacing: 4
-
-				Repeater {
-					model: [3, 4]
-					Item {
-						readonly property int deckNum: modelData
-						readonly property color deckColor: deckNum === 3 ? "#00c853" : "#ab47bc"
-						width: scDeckLanes.width
-						height: 34
-						visible: scFourDeckRemoteStrip.scDeckLoaded(deckNum)
-
-						// Deck number column, like the native deck label left of the waveform
-						Rectangle {
-							id: dBadge
-							width: 24
-							height: parent.height
-							color: parent.deckColor
-							Text {
-								anchors.centerIn: parent
-								text: deckNum
-								font.bold: true
-								font.pixelSize: 16
-								color: "#000000"
-							}
-						}
-
-						// Beat phase, one tick per beat of the bar
-						Row {
-							id: phaseBars
-							anchors { left: dBadge.right; leftMargin: 6; verticalCenter: parent.verticalCenter }
-							spacing: 2
-							Repeater {
-								model: 4
-								Rectangle {
-									readonly property bool activeBeat: (index + 1) === scFourDeckRemoteStrip.scDeckBeat(deckNum)
-									width: 5
-									height: 26
-									radius: 1
-									color: activeBeat ? (scFourDeckRemoteStrip.scDeckPlaying(deckNum) ? deckColor : "#ffffff") : "#2a2a2a"
-								}
-							}
-						}
-
-						// Scrolling 3-band waveform, playhead in the middle
-						Row {
-							id: laneWave
-							anchors { left: phaseBars.right; leftMargin: 6; right: parent.right; top: parent.top; bottom: parent.bottom }
-							spacing: 1
-
-							readonly property int bars: 96
-							readonly property real stepW: (width - (bars - 1)) / bars
-							readonly property var pDev: root.scProlinkDeck(deckNum)
-							readonly property var pWf: pDev && pDev.waveform ? pDev.waveform : []
-							readonly property bool isPlaying: scFourDeckRemoteStrip.scDeckPlaying(deckNum)
-							readonly property real pPosMs: root.scProlinkPosMs(deckNum)
-							readonly property real pDurMs: (pDev && pDev.duration_ms) ? pDev.duration_ms : 180000
-							readonly property int pCenter: pWf.length > 0 ? Math.floor((pPosMs / Math.max(1, pDurMs)) * pWf.length) : 0
-
-							Repeater {
-								model: laneWave.bars
-								Item {
-									width: Math.max(1, laneWave.stepW)
-									height: laneWave.height
-
-									readonly property var sample: laneWave.pWf.length > 0 ? laneWave.pWf[Math.max(0, Math.min(laneWave.pWf.length - 1, laneWave.pCenter + index - laneWave.bars / 2))] : null
-									readonly property real hFactor: sample ? Math.max(0.1, (sample[0] + sample[1] + sample[2]) / (3.0 * 255.0)) : (laneWave.isPlaying ? (0.2 + 0.5 * Math.abs(Math.sin((index + Math.floor(root.scProlinkNowMs / 80)) * 0.4))) : 0.1)
-
-									// Mirrored around the centre line, low band outermost like the main waveform
-									Rectangle {
-										anchors.centerIn: parent
-										width: parent.width
-										height: Math.max(1, Math.round(parent.height * hFactor))
-										color: root.scWave === "3band" ? "#4a78ff" : root.scWave === "rgb" ? "#ff1428" : "#00c853"
-									}
-									Rectangle {
-										anchors.centerIn: parent
-										width: parent.width
-										height: Math.max(1, Math.round(parent.height * hFactor * 0.6))
-										color: root.scWave === "3band" ? "#f0b400" : root.scWave === "rgb" ? "#00e632" : "#00e676"
-									}
-									Rectangle {
-										anchors.centerIn: parent
-										width: parent.width
-										height: Math.max(1, Math.round(parent.height * hFactor * 0.25))
-										color: root.scWave === "3band" ? "#ffffff" : root.scWave === "rgb" ? "#0078ff" : "#69f0ae"
-									}
-								}
-							}
-						}
-
-						Rectangle {
-							anchors { horizontalCenter: laneWave.horizontalCenter; top: parent.top; bottom: parent.bottom }
-							width: 2
-							color: "#ffffff"
-						}
-
-						// Title and BPM over the waveform's left/right ends
-						Text {
-							anchors { left: laneWave.left; leftMargin: 4; top: parent.top; topMargin: 1; right: dBpm.left; rightMargin: 12 }
-							text: scFourDeckRemoteStrip.scDeckSong(deckNum) + (scFourDeckRemoteStrip.scDeckArtist(deckNum) ? " - " + scFourDeckRemoteStrip.scDeckArtist(deckNum) : "")
-							color: "#ffffff"
-							style: Text.Outline
-							styleColor: "#000000"
-							font.pixelSize: 13
-							font.bold: true
-							elide: Text.ElideRight
-						}
-						Text {
-							id: dBpm
-							anchors { right: parent.right; rightMargin: 4; top: parent.top; topMargin: 1 }
-							text: scFourDeckRemoteStrip.scDeckBpm(deckNum)
-							color: "#00c3e3"
-							style: Text.Outline
-							styleColor: "#000000"
-							font.pixelSize: 13
-							font.bold: true
-						}
-					}
-				}
-			}
-		}
-"""
-
 SOURCE_FOOTER = """
 	property var scTidalRow: null
 	footer: Column {
@@ -1127,20 +890,6 @@ JOG_ENTRY = """
 
 EXTRA_DEVICE_ENTRIES = """
 		EntryBase.ListEntry {
-			text: "4-Deck Waveform"
-			readonly property var ids: ["0", "1"]
-			values: ["Off", "On"]
-			currentValue: values[root.scFourDeckWave ? 1 : 0]
-			onSelected: function(index) { root.scCall("fourDeckWaveform=" + ids[index]) }
-		},
-		EntryBase.ListEntry {
-			text: "Pro DJ Link Waveform"
-			readonly property var ids: ["0", "1"]
-			values: ["Off", "On"]
-			currentValue: values[root.scProlinkWave ? 1 : 0]
-			onSelected: function(index) { root.scCall("prolinkWaveform=" + ids[index]) }
-		},
-		EntryBase.ListEntry {
 			text: "Live Stream"
 			readonly property var ids: ["0", "1"]
 			values: ["Off", "On"]
@@ -1264,52 +1013,6 @@ WAVE_TILE = """
 		}
 """
 
-FOUR_DECK_TILE = """
-		Rectangle {
-			id: scFourDeckTile
-			objectName: "ControlCenter_FourDeckWaveform"
-			width: 256
-			height: 104
-			radius: 16
-			color: Style.surface03Color
-			Text {
-				x: 14
-				y: 8
-				text: "4-Deck Waveform"
-				font: Style.fontH4
-				color: Style.font01Color
-			}
-			Row {
-				x: 12
-				y: 36
-				Repeater {
-					model: ["OFF", "ON"]
-					Rectangle {
-						readonly property bool selected: (index === 1) === root.scFourDeckWave
-						width: (scFourDeckTile.width - 24) / 2
-						height: 56
-						color: selected ? "#00c3e3" : fourDeckTap.pressed ? "#6a6a6a" : "#4a4a4a"
-						border {
-							width: 1
-							color: "#a8a8a8"
-						}
-						Text {
-							anchors.centerIn: parent
-							text: root.scT(index === 0 ? "Off" : "On").toUpperCase()
-							font: Style.fontH5
-							color: "#ffffff"
-						}
-						MouseArea {
-							id: fourDeckTap
-							anchors.fill: parent
-							onClicked: root.scCall("fourDeckWaveform=" + index)
-						}
-					}
-				}
-			}
-		}
-"""
-
 BROADCAST_TILE = """
 		Rectangle {
 			id: scBroadcastTile
@@ -1400,208 +1103,6 @@ UPFADER_ECHO_TILE = """
 				}
 			}
 		}
-"""
-
-WAVEFORM_LINE_IN_HINT = """import QtQuick 2.9
-import airQuick 1.0
-import StateMap 1.0
-import EngineOS.UI.Style 1.0
-
-Rectangle {
-	id: lineInHintRoot
-	anchors.fill: parent
-	anchors.leftMargin: Config.device.isPlayer ? 36 : 24
-	color: Style.surface01Color
-
-	property int deckIndex
-	readonly property QObjProperty pLine: Planck.getProperty(`/Engine/Mixer/Channel${deckIndex}/Line`)
-	readonly property QObjProperty pSongLoaded: Planck.getProperty(`/Engine/Deck${deckIndex}/Track/SongLoaded`)
-	readonly property bool songLoaded: !!(pSongLoaded && pSongLoaded.translator && pSongLoaded.translator.state)
-	readonly property bool lineActive: !!(pLine && pLine.translator && pLine.translator.state)
-	visible: deckIndex >= 1 && (lineActive || (deckIndex >= 3 && !songLoaded && root.scHasProlinkDeck(deckIndex)))
-	opacity: visible ? 1 : 0.0
-
-	AIRMouseEventBlocker { enabled: lineInHintRoot.lineActive }
-
-	readonly property var d: root.scProlinkDeck(deckIndex)
-	readonly property bool hasProlink: root.scHasProlinkDeck(deckIndex)
-
-	Item {
-		id: prolinkContent
-		anchors.fill: parent
-		visible: lineInHintRoot.hasProlink
-
-		// Top metadata bar
-		Rectangle {
-			id: metaBar
-			anchors {
-				top: parent.top
-				left: parent.left
-				right: parent.right
-			}
-			height: 32
-			color: "#cc0c1017"
-
-			Row {
-				anchors {
-					left: parent.left
-					leftMargin: 8
-					verticalCenter: parent.verticalCenter
-				}
-				spacing: 8
-
-				Rectangle {
-					width: playerTag.implicitWidth + 12
-					height: 22
-					radius: 4
-					color: (lineInHintRoot.d && lineInHintRoot.d.on_air) ? "#ff3b30" : "#00c3e3"
-					anchors.verticalCenter: parent.verticalCenter
-					Text {
-						id: playerTag
-						anchors.centerIn: parent
-						text: (lineInHintRoot.d && lineInHintRoot.d.name) ? lineInHintRoot.d.name : "CDJ-3000"
-						font.bold: true
-						font.pixelSize: 12
-						color: "#000000"
-					}
-				}
-
-				Text {
-					anchors.verticalCenter: parent.verticalCenter
-					text: (lineInHintRoot.d && lineInHintRoot.d.title) ? lineInHintRoot.d.title : "Line-In Pro DJ Link"
-					color: "#ffffff"
-					font.pixelSize: 15
-					font.bold: true
-					elide: Text.ElideRight
-					width: Math.min(implicitWidth, lineInHintRoot.width - 240)
-				}
-
-				Text {
-					anchors.verticalCenter: parent.verticalCenter
-					text: (lineInHintRoot.d && lineInHintRoot.d.artist) ? lineInHintRoot.d.artist : ""
-					color: "#9caec4"
-					font.pixelSize: 14
-					elide: Text.ElideRight
-					width: Math.min(implicitWidth, 180)
-				}
-			}
-
-			Text {
-				anchors {
-					right: parent.right
-					rightMargin: 12
-					verticalCenter: parent.verticalCenter
-				}
-				text: ((lineInHintRoot.d && (lineInHintRoot.d.effective_bpm || lineInHintRoot.d.bpm)) ? (lineInHintRoot.d.effective_bpm || lineInHintRoot.d.bpm).toFixed(1) : "--.-") + " BPM"
-				color: "#00c3e3"
-				font.pixelSize: 15
-				font.bold: true
-			}
-		}
-
-		// Waveform area
-		Item {
-			id: waveArea
-			anchors {
-				top: metaBar.bottom
-				left: parent.left
-				right: parent.right
-				bottom: parent.bottom
-			}
-			clip: true
-
-			readonly property real posMs: root.scProlinkPosMs(lineInHintRoot.deckIndex)
-			readonly property real durMs: (lineInHintRoot.d && lineInHintRoot.d.duration_ms) ? lineInHintRoot.d.duration_ms : 180000
-			readonly property var wf: (lineInHintRoot.d && lineInHintRoot.d.waveform) ? lineInHintRoot.d.waveform : []
-			readonly property int wfLen: wf ? wf.length : 0
-			readonly property real centerIdx: wfLen > 0 ? (posMs / Math.max(1, durMs)) * wfLen : 0
-			readonly property real colW: width / 64.0
-			readonly property bool isPlaying: !!(lineInHintRoot.d && lineInHintRoot.d.playing)
-
-			Row {
-				anchors.fill: parent
-				Repeater {
-					model: 64
-					Item {
-						id: colItem
-						width: waveArea.colW
-						height: waveArea.height
-
-						readonly property int sIdx: Math.round(waveArea.centerIdx + (index - 32) * (waveArea.wfLen > 0 ? Math.max(1, waveArea.wfLen / 128) : 1))
-						readonly property var sample: (waveArea.wf && waveArea.wfLen > 0 && sIdx >= 0 && sIdx < waveArea.wfLen) ? waveArea.wf[sIdx] : null
-						readonly property real animPhase: (index + Math.floor(root.scProlinkNowMs / 80)) % 16
-						readonly property real hFactor: sample ? 1.0 : (waveArea.isPlaying ? (0.2 + 0.6 * Math.abs(Math.sin((index + animPhase) * 0.4))) : 0.15)
-						readonly property real lowVal: sample ? sample[0] : Math.round(180 * hFactor)
-						readonly property real midVal: sample ? sample[1] : Math.round(140 * hFactor)
-						readonly property real highVal: sample ? sample[2] : Math.round(100 * hFactor)
-
-						// Beatgrid tick mark at top
-						Rectangle {
-							anchors.top: parent.top
-							anchors.horizontalCenter: parent.horizontalCenter
-							width: 1
-							height: ((index - 32) % 16 === 0) ? 10 : (((index - 32) % 4 === 0) ? 6 : 0)
-							color: ((index - 32) % 16 === 0) ? "#ff3b30" : "#ffffff"
-							visible: ((index - 32) % 4 === 0)
-						}
-
-						// Waveform bar centered vertically
-						Column {
-							anchors.centerIn: parent
-							spacing: 1
-							width: Math.max(2, colItem.width - 1)
-
-							// High segment
-							Rectangle {
-								anchors.horizontalCenter: parent.horizontalCenter
-								width: parent.width
-								height: Math.max(1, Math.round((colItem.highVal / 255.0) * (colItem.height * 0.2)))
-								color: root.scWave === "3band" ? "#ffffff" : root.scWave === "rgb" ? "#0078ff" : "#69f0ae"
-							}
-							// Mid segment
-							Rectangle {
-								anchors.horizontalCenter: parent.horizontalCenter
-								width: parent.width
-								height: Math.max(2, Math.round((colItem.midVal / 255.0) * (colItem.height * 0.35)))
-								color: root.scWave === "3band" ? "#f0b400" : root.scWave === "rgb" ? "#00e632" : "#00e676"
-							}
-							// Low segment
-							Rectangle {
-								anchors.horizontalCenter: parent.horizontalCenter
-								width: parent.width
-								height: Math.max(2, Math.round((colItem.lowVal / 255.0) * (colItem.height * 0.4)))
-								color: root.scWave === "3band" ? "#4a78ff" : root.scWave === "rgb" ? "#ff1428" : "#00c853"
-							}
-						}
-
-						// Beatgrid tick mark at bottom
-						Rectangle {
-							anchors.bottom: parent.bottom
-							anchors.horizontalCenter: parent.horizontalCenter
-							width: 1
-							height: ((index - 32) % 16 === 0) ? 10 : (((index - 32) % 4 === 0) ? 6 : 0)
-							color: ((index - 32) % 16 === 0) ? "#ff3b30" : "#ffffff"
-							visible: ((index - 32) % 4 === 0)
-						}
-					}
-				}
-			}
-
-			// Crisp white center playhead bar
-			Rectangle {
-				id: playhead
-				anchors {
-					top: parent.top
-					bottom: parent.bottom
-					horizontalCenter: parent.horizontalCenter
-				}
-				width: 2
-				color: "#ffffff"
-				z: 10
-			}
-		}
-	}
-}
 """
 
 # Smart Sync (5.3.0 only): a synced deck with a track widens its Pitch Range to
@@ -1748,10 +1249,9 @@ def edits(dev: bool):
             "function onUnsupportedStorageDeviceDetected(name) {\n", "function onUnsupportedStorageDeviceDetected(name) {\n			return\n")],
         ROOT + "EmbeddedMain.qml": [
             (f"	Connections {{\n		target: {window()}\n", services + main + f"\n	Connections {{\n		target: {window()}\n"),
-            ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG + FOUR_DECK_STRIP),
+            ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG),
         ],
         v + "Common/Waveform/Waveform.qml": wave,
-        v + "Common/Waveform/" + ("WaveformLineInHint.qml" if v53() else "LineInHint.qml"): WAVEFORM_LINE_IN_HINT,
         # Engine offers streamed rows only Prepare; add Stems (see scStemStream).
         v + "BrowseView/Components/Components/SwipeLeftItem.qml": [
             ("	readonly property list<string> actionLabels: leftActions.map( action => action.display.label )\n",
@@ -1845,7 +1345,7 @@ def edits(dev: bool):
         ],
         v + "ControlCenter/Tabs/ControlCenterTab.qml": [
             ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),
-            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + FOUR_DECK_TILE + BROADCAST_TILE + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
+            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + BROADCAST_TILE + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
         ],
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],
