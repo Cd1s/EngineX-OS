@@ -39,6 +39,7 @@ type deckState struct {
 	Net        string  `json:"net,omitempty"`  // Engine's TrackNetworkPath, posted by the QML
 	Key        string  `json:"key,omitempty"`  // changes with the track
 	Ext        string  `json:"ext,omitempty"`
+	Name       string  `json:"name,omitempty"` // the file's name, which the copy keeps
 	Playing    bool    `json:"playing"`
 	PositionMS float64 `json:"positionMs"`
 	Pitch      float64 `json:"pitch"` // percent
@@ -144,10 +145,14 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		if d.Deck < 1 || d.Deck > 4 {
 			continue
 		}
-		d.Path = ""
-		if f := netPathFile(d.Net, s.shadow.dataRoot, s.shadow.mediaRoot); f != "" && slices.Contains(shadowAudioExt, strings.ToLower(filepath.Ext(f))) {
+		d.Path, d.Name = "", ""
+		f := netPathFile(d.Net, s.shadow.dataRoot, s.shadow.mediaRoot)
+		if f == "" && s.tidal != nil {
+			f = s.tidal.streamedFile(d.Net) // loaded from the streaming browser (OmniSource too)
+		}
+		if f != "" && slices.Contains(shadowAudioExt, strings.ToLower(filepath.Ext(f))) {
 			if st, err := os.Stat(f); err == nil && st.Mode().IsRegular() {
-				d.Path, d.Ext = f, strings.ToLower(filepath.Ext(f))
+				d.Path, d.Ext, d.Name = f, strings.ToLower(filepath.Ext(f)), filepath.Base(f)
 				d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("%s %d %d", f, st.Size(), st.ModTime().UnixNano())))
 			}
 		}
@@ -387,7 +392,12 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 	if slices.Contains(shadowAudioExt, p.Ext) {
 		ext = p.Ext
 	}
-	local := filepath.Join(s.shadowDir(), fmt.Sprintf("peer-%x%s", fnvSum(key), ext))
+	// The copy keeps the peer's file name (Engine shows it for a file without tags).
+	name := filepath.Base(p.Name)
+	if name == "." || name == ".." || strings.ToLower(filepath.Ext(name)) != ext {
+		name = "track" + ext
+	}
+	local := filepath.Join(s.shadowDir(), fmt.Sprintf("peer-%x", fnvSum(key)), name)
 	s.shadowFetch(key, func(ctx context.Context) (string, error) {
 		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 		resp, err := http.DefaultClient.Do(req)
@@ -440,6 +450,9 @@ func (s *Server) shadowFetch(key string, fetch func(context.Context) (string, er
 		for k, f := range sh.files {
 			if k != key && time.Since(sh.used[k]) > 2*time.Minute {
 				os.Remove(f)
+				if dir := filepath.Dir(f); dir != s.shadowDir() {
+					os.Remove(dir) // the copy's own directory
+				}
 				delete(sh.files, k)
 				delete(sh.used, k)
 			}

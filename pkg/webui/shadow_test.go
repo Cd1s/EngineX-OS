@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
+	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
 func TestNetPathFile(t *testing.T) {
@@ -97,7 +99,7 @@ func TestShadowDeckFromPeer(t *testing.T) {
 			t.Fatalf("shadow: %q %+v", role, decks)
 		}
 		if p := decks[0].Path; p != "" {
-			if got, _ := os.ReadFile(p); string(got) != "AUDIO" || !strings.HasPrefix(p, filepath.Join(dirB, "shadow")) || filepath.Ext(p) != ".mp3" {
+			if got, _ := os.ReadFile(p); string(got) != "AUDIO" || !strings.HasPrefix(p, filepath.Join(dirB, "shadow")) || filepath.Base(p) != "a.mp3" {
 				t.Fatalf("copy %s: %q", p, got)
 			}
 			break
@@ -202,5 +204,31 @@ func TestCDJDecksAllInOne(t *testing.T) {
 	got = cdjDecks([]prolink.Device{xz(1, 0), xz(2, 3*time.Second)}, []int{2, 4}, now)
 	if len(got) != 1 || got[2].Number != 1 {
 		t.Fatalf("quiet number kept: %v", got)
+	}
+}
+
+// A track loaded from the streaming browser (here an OmniSource drive row) is a
+// file the other player can copy, under its own name.
+func TestShadowDeckFromStreamedRow(t *testing.T) {
+	shadowBeaconOn = false
+	defer func() { shadowBeaconOn = true }()
+	drive := t.TempDir()
+	file := filepath.Join(drive, "Song.flac")
+	os.WriteFile(file, []byte("AUDIO"), 0o644)
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	id := s.tidal.addTrack(trackRef{track: providers.Track{ID: "1", Provider: localProvider}, file: file, drive: drive})
+	body := fmt.Sprintf(`[{"deck":1,"net":"streaming://TIDAL/Track/%d"},{"deck":3,"net":"streaming://TIDAL/Track/999999"}]`, id)
+	if resp, err := http.Post(srv.URL+"/v1/sc5000/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("post: %v %v", resp, err)
+	}
+	var peer struct{ Decks []deckState }
+	resp, _ := http.Get(srv.URL + "/peer/decks")
+	json.NewDecoder(resp.Body).Decode(&peer)
+	resp.Body.Close()
+	if len(peer.Decks) != 2 || peer.Decks[0].Key == "" || peer.Decks[0].Name != "Song.flac" || peer.Decks[0].Path != "" || peer.Decks[1].Key != "" {
+		t.Fatalf("peer decks: %+v", peer.Decks)
 	}
 }
