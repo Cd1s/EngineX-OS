@@ -332,19 +332,28 @@ static struct sc_lim master_lim[8];
 static struct sc_gain master_gain[8];
 // #49: in the 4-deck layout a player's 4-channel device (two stereo pairs) leaves
 // decks 3 and 4 without output buffers, and Engine skips rendering them ("Mixer
-// skipped ... unassigned output buffer"): their playheads stand still. They render
-// into scratch buffers instead; their sound is dropped, the card keeps two decks.
+// skipped ... unassigned output buffer"): their playheads stand still. All four
+// render into scratch pairs (deck n into pair n-1); the deck's role (four_deck_role)
+// picks which deck each of the card's pairs (RCA A, RCA B) plays. The other decks
+// show and advance but stay silent here: another player or a CDJ plays them.
 #define FOUR_DECK_PAD_FRAMES 8192
-static float four_deck_pad[4][FOUR_DECK_PAD_FRAMES];
+static float four_deck_pad[8][FOUR_DECK_PAD_FRAMES];
 static int four_deck_pad_on;
+static signed char four_deck_route[2] = {0, 1}; // deck (0-3) on RCA A and RCA B, -1 silent
 static uint32_t hook_master_output(void *host, void *context, int in_channels, const float *const *in,
                                    int out_channels, float *const *out, int frames) {
     audio_callback_fn orig = (audio_callback_fn)dsp_originals[DSP_MASTER];
     uint32_t rc;
     if (four_deck_pad_on && out_channels == 4 && out && frames > 0 && frames <= FOUR_DECK_PAD_FRAMES) {
-        float *padded[8] = {out[0], out[1], out[2], out[3],
-                            four_deck_pad[0], four_deck_pad[1], four_deck_pad[2], four_deck_pad[3]};
+        float *padded[8];
+        for (int ch = 0; ch < 8; ch++) padded[ch] = four_deck_pad[ch];
         rc = orig(host, context, in_channels, in, 8, padded, frames);
+        for (int ch = 0; ch < 4; ch++) {
+            if (!out[ch]) continue;
+            int deck = four_deck_route[ch / 2];
+            if (deck < 0) memset(out[ch], 0, (size_t)frames * sizeof(float));
+            else memcpy(out[ch], four_deck_pad[deck * 2 + ch % 2], (size_t)frames * sizeof(float));
+        }
     } else {
         rc = orig(host, context, in_channels, in, out_channels, out, frames);
     }
@@ -513,6 +522,37 @@ static int four_deck_layout(void) {
     return v;
 }
 
+// four_deck_role: the decks this player plays on RCA A / RCA B: 13, 24, 12, or a
+// single deck 1 / 2 with RCA B silent. auto (default) is what engine-ui-guard resolved
+// from the Engine player number before this start; it also maps the hardware.
+static const char *four_deck_resolved = "/run/sc5000-assignments/role";
+static void read_role(const char *path, const char *key, char *role, size_t size) {
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[64];
+    size_t n = strlen(key);
+    while (fgets(line, sizeof line, f))
+        if (!strncmp(line, key, n)) {
+            line[strcspn(line, "\r\n")] = 0;
+            snprintf(role, size, "%s", line + n);
+        }
+    fclose(f);
+}
+
+static void four_deck_role(void) {
+    char role[8] = "auto";
+    read_role(four_deck_settings, "four_deck_role=", role, sizeof role);
+    if (!strcmp(role, "auto")) {
+        snprintf(role, sizeof role, "13");
+        read_role(four_deck_resolved, "", role, sizeof role);
+    }
+    static const struct { const char *name; signed char a, b; } roles[] = {
+        {"12", 0, 1}, {"13", 0, 2}, {"24", 1, 3}, {"1", 0, -1}, {"2", 1, -1}};
+    four_deck_route[0] = 0, four_deck_route[1] = 2;
+    for (size_t i = 0; i < sizeof roles / sizeof *roles; i++)
+        if (!strcmp(role, roles[i].name)) four_deck_route[0] = roles[i].a, four_deck_route[1] = roles[i].b;
+}
+
 static void prepare_config(uintptr_t base, size_t page) {
     // getConfig's common return path runs after every model's constructor.
     uint32_t code[] = {
@@ -542,6 +582,7 @@ static void prepare_config(uintptr_t base, size_t page) {
         const uint32_t unlock[] = {0xe5d02239, 0xe3520000, 0x13a02004, 0x15802090, 0x13a02000, 0x15c02239};
         memcpy(code + 7, unlock, sizeof unlock);
         four_deck_pad_on = player_board();
+        four_deck_role();
         fprintf(stderr, "engine-ui-hook: 4-deck layout unlocked (#49)\n");
     }
     config_jump[0] = 0xe51ff004;

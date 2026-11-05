@@ -413,3 +413,33 @@ func TestProlinkShareSetting(t *testing.T) {
 		t.Fatalf("bad value: %d", code)
 	}
 }
+
+// #49: the 4-deck role is saved only when it is not the default, and checked.
+func TestFourDeckRole(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
+	defer srv.Close()
+	if code, v := uiPost(t, srv.URL, "waveform=rgb"); code != 200 || v.FourDeckRole != "auto" {
+		t.Fatalf("default role: %d %q", code, v.FourDeckRole)
+	}
+	if code, v := uiPost(t, srv.URL, "fourDeckRole=24"); code != 200 || v.FourDeckRole != "24" {
+		t.Fatalf("role 24: %d %q", code, v.FourDeckRole)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(b), "four_deck_role=24\n") {
+		t.Fatalf("not saved: %s", b)
+	}
+	if code, _ := uiPost(t, srv.URL, "fourDeckRole=3"); code != 400 {
+		t.Fatalf("bad role accepted: %d", code)
+	}
+	// The UI locks loading by the role the guard applied (auto resolved), with 4 decks on.
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = "/run/sc5000-assignments/role" }()
+	os.WriteFile(fourDeckRolePath, []byte("13\n"), 0o644)
+	if _, v := uiPost(t, srv.URL, "fourDeckWaveform=1"); v.FourDeckRoleActive != "13" {
+		t.Fatalf("active role: %q", v.FourDeckRoleActive)
+	}
+	os.WriteFile(fourDeckRolePath, []byte("auto\n"), 0o644)
+	if _, v := uiPost(t, srv.URL, "fourDeckWaveform=1"); v.FourDeckRoleActive != "" {
+		t.Fatalf("unresolved role exposed: %q", v.FourDeckRoleActive)
+	}
+}
