@@ -27,12 +27,70 @@ APPLETS = ('stream-sync', 'rb-bridge', 'sc5000-deemixd', 'stems-processor')
 
 WRAPPER = '#!/bin/sh\nexec "$(dirname "$0")/sc5000-suite" {} "$@"\n'
 
+BOOT_ACTIVATE = r'''#!/bin/sh
+# One-shot boot activator for SC LIVE 4 (inmusic,jp21) and read-only root decks (#61).
+set -eu
+
+dest="${SC5000_CUSTOM:-/data/sc5000-custom}"
+bundle_dir="$dest/bundle"
+bin_dir="$bundle_dir/bin"
+lib_hook="$bundle_dir/lib/libengine-ui-hook.so"
+
+mkdir -p /run/systemd/system/engine.service.d
+
+cat <<EOF > /run/systemd/system/engine.service.d/99-sc5000.conf
+[Service]
+Environment="LD_PRELOAD=$lib_hook"
+EOF
+
+if [ -f "$bundle_dir/version.txt" ]; then
+    mkdir -p /run/sc5000
+    if [ ! -f /etc/sc5000/version.txt ] || ! cmp -s "$bundle_dir/version.txt" /etc/sc5000/version.txt; then
+        cp "$bundle_dir/version.txt" /run/sc5000/version.txt
+        if [ -f /etc/sc5000/version.txt ]; then
+            mount --bind /run/sc5000/version.txt /etc/sc5000/version.txt 2>/dev/null || :
+        fi
+    fi
+fi
+
+for applet in stream-sync rb-bridge sc5000-deemixd; do
+    if [ -x "$bin_dir/$applet" ] && ! pgrep -f "$bin_dir/$applet" >/dev/null 2>&1; then
+        "$bin_dir/$applet" >/dev/null 2>&1 &
+    fi
+done
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || :
+    systemctl restart engine.service || :
+fi
+'''
+
+ALSA_CONF = r'''hook_func.sc5000_alsa_boot_hook {
+	lib "/data/sc5000-custom/bundle/lib/libengine-ui-hook.so"
+	func sc5000_alsa_boot_hook
+}
+
+@hooks [
+	{
+		func sc5000_alsa_boot_hook
+		errors false
+	}
+]
+'''
+
 INSTALL = r'''#!/bin/sh
 # Installs this bundle under /data/sc5000-custom. Checks SHA256SUMS first and
 # replaces each part in one rename, so a failed install leaves the old one.
 set -eu
 src=$(cd "$(dirname "$0")" && pwd)
 dest=${SC5000_CUSTOM:-/data/sc5000-custom}
+if [ -n "${SC5000_ALSA_OVERLAY:-}" ]; then
+    alsa_dest="$SC5000_ALSA_OVERLAY"
+elif [ "$dest" != "/data/sc5000-custom" ] && [ ! -d "/data" ]; then
+    alsa_dest="$(dirname "$dest")/system/var/overlay/lib/alsa/conf.d"
+else
+    alsa_dest="/data/system/var/overlay/lib/alsa/conf.d"
+fi
 cd "$src"
 sha256sum -c SHA256SUMS >/dev/null || { echo "bundle damaged: SHA256SUMS mismatch" >&2; exit 1; }
 for path in "$dest" "$dest/bundle" "$dest/ui" "$dest/ui/packs" "$dest/ui/icons"; do
@@ -44,7 +102,7 @@ umask 022
 stage=$(mktemp -d "$dest/.bundle.XXXXXX")
 trap 'rm -rf "$stage"' 0
 mkdir "$stage/bundle" "$stage/ui"
-cp -R bin lib SHA256SUMS version.txt uninstall.sh "$stage/bundle/"
+cp -R bin lib SHA256SUMS version.txt boot-activate.sh 99-sc5000-custom.conf uninstall.sh "$stage/bundle/"
 tar -C "$stage/ui" -xf ui-packs.tar
 [ -d "$stage/ui/packs" ] || { echo "ui-packs.tar has no packs/" >&2; exit 1; }
 rm -rf "$dest/bundle.replaced"
@@ -58,6 +116,8 @@ for name in packs icons; do
     mv "$stage/ui/$name" "$dest/ui/$name"
     rm -rf "$dest/ui/$name.replaced"
 done
+mkdir -p "$alsa_dest"
+cp 99-sc5000-custom.conf "$alsa_dest/99-sc5000-custom.conf"
 # Same markers as sc5000-custom-prepare: new packs get a fresh try after safe mode.
 rm -f "$dest/ui/safe-mode" "$dest/ui/boot-count" "$dest/ui/boot-token"
 cp version.txt "$dest/ui/.pack-version"
@@ -71,6 +131,13 @@ UNINSTALL = r'''#!/bin/sh
 # caches and downloads stay; UI packs stay if something else replaced them.
 set -eu
 dest=${SC5000_CUSTOM:-/data/sc5000-custom}
+if [ -n "${SC5000_ALSA_OVERLAY:-}" ]; then
+    alsa_dest="$SC5000_ALSA_OVERLAY"
+elif [ "$dest" != "/data/sc5000-custom" ] && [ ! -d "/data" ]; then
+    alsa_dest="$(dirname "$dest")/system/var/overlay/lib/alsa/conf.d"
+else
+    alsa_dest="/data/system/var/overlay/lib/alsa/conf.d"
+fi
 for path in "$dest" "$dest/bundle" "$dest/ui"; do
     [ ! -L "$path" ] || { echo "refusing symlink: $path" >&2; exit 1; }
 done
@@ -81,6 +148,8 @@ if [ "$(cat "$dest/ui/.pack-id" 2>/dev/null)" = "$ui_id" ]; then
     rm -rf "$dest/ui/packs" "$dest/ui/icons" "$dest/ui/.pack-version" "$dest/ui/.pack-id"
 fi
 [ "$(cat "$dest/version.txt" 2>/dev/null)" != "$version" ] || rm -f "$dest/version.txt"
+rm -f "$alsa_dest/99-sc5000-custom.conf"
+rmdir "$alsa_dest" 2>/dev/null || :
 rm -rf "$dest/bundle"
 echo "EngineX OS $version removed from $dest"
 '''
@@ -122,8 +191,13 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
         files[f'bin/{applet}'] = (WRAPPER.format(applet).encode(), 0o755)
     files['ui-packs.tar'] = (ui_packs_tar(ui_packs), 0o644)
     files['version.txt'] = (f'{version}\n'.encode(), 0o644)
+    files['boot-activate.sh'] = (BOOT_ACTIVATE.encode(), 0o755)
+    files['99-sc5000-custom.conf'] = (ALSA_CONF.encode(), 0o644)
     files['install.sh'] = (INSTALL.encode(), 0o755)
     files['uninstall.sh'] = (UNINSTALL.encode(), 0o755)
+    here = Path(__file__).parent
+    files['host-install-userdata.py'] = ((here / 'host-install-userdata.py').read_bytes(), 0o755)
+    files['host-install-fastboot.sh'] = ((here / 'host-install-fastboot.sh').read_bytes(), 0o755)
     sums = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, (data, _) in sorted(files.items()))
     files['SHA256SUMS'] = (sums.encode(), 0o644)
 
@@ -143,6 +217,10 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
             tar.addfile(info, io.BytesIO(data))
     digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
     (out / 'SHA256SUMS.txt').write_text(f'{digest}  {bundle.name}\n')
+    (out / 'host-install-userdata.py').write_bytes(files['host-install-userdata.py'][0])
+    (out / 'host-install-userdata.py').chmod(0o755)
+    (out / 'host-install-fastboot.sh').write_bytes(files['host-install-fastboot.sh'][0])
+    (out / 'host-install-fastboot.sh').chmod(0o755)
     return {'bundle': str(bundle), 'sha256': digest, 'files': len(files)}
 
 
