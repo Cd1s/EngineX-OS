@@ -75,6 +75,7 @@ SERVICES_MAIN = """
 	property bool scFourDeckWave: false
 	property bool scProlinkWave: true
 	property bool scBroadcastOn: false
+	property bool scUpfaderEcho: false
 	property var scProlinkDecks: ({})
 	property double scProlinkSyncMs: 0
 	property double scProlinkNowMs: 0
@@ -276,6 +277,7 @@ SERVICES_MAIN = """
 		scFourDeckWave = !!v.fourDeckWaveform
 		scProlinkWave = v.prolinkWaveform !== undefined ? !!v.prolinkWaveform : true
 		scBroadcastOn = !!v.broadcastEnabled
+		scUpfaderEcho = !!v.upfaderEcho
 		const p = Planck.getProperty("/Client/Preferences/Profile/Application/WaveformStyle")
 		if (p.translator && (p.translator.index == 1) !== (v.waveform === "rgb"))
 			p.translator.index = v.waveform === "rgb" ? 1 : 0
@@ -590,6 +592,50 @@ SERVICES_MAIN = """
 				function onIntegratedChanged() { ensure() }
 			}
 			Component.onCompleted: ensure()
+		}
+	}
+	function scTriggerUpfaderEcho(deckIdx) {
+		const ch = "/Engine/Mixer/Channel" + deckIdx
+		const pType = Planck.getProperty(ch + "/DJFx/Type")
+		if (pType && pType.translator) pType.translator.string = "Echo"
+		const pAssigned = Planck.getProperty(ch + "/DJFx/Assigned")
+		if (pAssigned && pAssigned.translator) pAssigned.translator.state = true
+		const pMix = Planck.getProperty(ch + "/DJFx/Mix")
+		if (pMix && pMix.translator) pMix.translator.unnormalized = 0.75
+		const pActive = Planck.getProperty(ch + "/DJFx/Active")
+		if (pActive && pActive.translator) pActive.translator.state = true
+	}
+	Instantiator {
+		model: [1, 2, 3, 4]
+		delegate: QtObject {
+			readonly property int deckIdx: parseInt(modelData)
+			readonly property QObjProperty pVol: Planck.getProperty("/Engine/Mixer/Channel%1/Volume/Level".arg(deckIdx))
+			readonly property real level: pVol && pVol.translator ? (pVol.translator.value !== undefined ? pVol.translator.value : pVol.translator.unnormalized) : 0
+			property double lastHighAt: 0
+			property bool echoArmed: false
+			readonly property Timer tailTimer: Timer {
+				interval: Math.max(800, Math.min(3000, Math.round(240000 / (root.scPlayingBPM() || 128))))
+				repeat: false
+				onTriggered: {
+					const pActive = Planck.getProperty("/Engine/Mixer/Channel%1/DJFx/Active".arg(deckIdx))
+					if (pActive && pActive.translator) pActive.translator.state = false
+				}
+			}
+			onLevelChanged: {
+				if (!root.scUpfaderEcho) return
+				const now = Date.now()
+				if (level >= 0.8) {
+					lastHighAt = now
+					echoArmed = true
+					if (tailTimer.running) tailTimer.stop()
+				} else if (echoArmed && level <= 0.02) {
+					echoArmed = false
+					if (now - lastHighAt <= 300) {
+						root.scTriggerUpfaderEcho(deckIdx)
+						tailTimer.restart()
+					}
+				}
+			}
 		}
 	}
 """
@@ -1074,6 +1120,13 @@ EXTRA_DEVICE_ENTRIES = """
 			currentValue: values[root.scBroadcastOn ? 1 : 0]
 			onSelected: function(index) { root.scCall("broadcast=" + ids[index]) }
 		},
+		EntryBase.ListEntry {
+			text: "Upfader Echo Out"
+			readonly property var ids: ["0", "1"]
+			values: ["Off", "On"]
+			currentValue: root.scUpfaderEcho ? "On" : "Off"
+			onSelected: function(index) { root.scCall("upfaderEcho=" + ids[index]) }
+		},
 """
 
 LANGUAGE_ENTRY = """
@@ -1276,6 +1329,52 @@ BROADCAST_TILE = """
 		}
 """
 
+UPFADER_ECHO_TILE = """
+		Rectangle {
+			id: scUpfaderEchoTile
+			objectName: "ControlCenter_UpfaderEcho"
+			width: 256
+			height: 104
+			radius: 16
+			color: Style.surface03Color
+			Text {
+				x: 14
+				y: 8
+				text: "Upfader Echo Out"
+				font: Style.fontH4
+				color: Style.font01Color
+			}
+			Row {
+				x: 12
+				y: 36
+				Repeater {
+					model: ["OFF", "ON"]
+					Rectangle {
+						readonly property bool selected: (index === 1) === root.scUpfaderEcho
+						width: (scUpfaderEchoTile.width - 24) / 2
+						height: 56
+						color: selected ? "#00c3e3" : upfaderEchoTap.pressed ? "#6a6a6a" : "#4a4a4a"
+						border {
+							width: 1
+							color: "#a8a8a8"
+						}
+						Text {
+							anchors.centerIn: parent
+							text: root.scT(index === 0 ? "Off" : "On").toUpperCase()
+							font: Style.fontH5
+							color: "#ffffff"
+						}
+						MouseArea {
+							id: upfaderEchoTap
+							anchors.fill: parent
+							onClicked: root.scCall("upfaderEcho=" + index)
+						}
+					}
+				}
+			}
+		}
+"""
+
 WAVEFORM_LINE_IN_HINT = """import QtQuick 2.9
 import airQuick 1.0
 import StateMap 1.0
@@ -1289,10 +1388,13 @@ Rectangle {
 
 	property int deckIndex
 	readonly property QObjProperty pLine: Planck.getProperty(`/Engine/Mixer/Channel${deckIndex}/Line`)
-	visible: deckIndex >= 1 && ((pLine && pLine.translator && pLine.translator.state) || root.scHasProlinkDeck(deckIndex))
+	readonly property QObjProperty pSongLoaded: Planck.getProperty(`/Engine/Deck${deckIndex}/Track/SongLoaded`)
+	readonly property bool songLoaded: !!(pSongLoaded && pSongLoaded.translator && pSongLoaded.translator.state)
+	readonly property bool lineActive: !!(pLine && pLine.translator && pLine.translator.state)
+	visible: deckIndex >= 1 && (lineActive || (deckIndex >= 3 && !songLoaded && root.scHasProlinkDeck(deckIndex)))
 	opacity: visible ? 1 : 0.0
 
-	AIRMouseEventBlocker { }
+	AIRMouseEventBlocker { enabled: lineInHintRoot.lineActive }
 
 	readonly property var d: root.scProlinkDeck(deckIndex)
 	readonly property bool hasProlink: root.scHasProlinkDeck(deckIndex)
@@ -1692,6 +1794,19 @@ def edits(dev: bool):
             (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
             ("		PlayerNumber { },\n", LANGUAGE_ENTRY + QUALITY_ENTRY + JOG_ENTRY + EXTRA_DEVICE_ENTRIES + "		PlayerNumber { },\n"),
         ],
+        prefs + ("" if v53() else "TabContents/") + "MixerTabContent.qml": [
+            (f'import "{"" if v53() else "../"}Entries"\n',
+             f'import "{"" if v53() else "../"}Entries"\nimport "{"Entries/Base" if v53() else "../Entries/Base"}" as EntryBase\nimport Planck 1.0\n'),
+            ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }",
+             """EntryBase.ListEntry {
+\t\t\t\ttext: "Upfader Echo Out"
+\t\t\t\treadonly property var ids: ["0", "1"]
+\t\t\t\tvalues: ["Off", "On"]
+\t\t\t\tcurrentValue: root.scUpfaderEcho ? "On" : "Off"
+\t\t\t\tonSelected: function(index) { root.scCall("upfaderEcho=" + ids[index]) }
+\t\t\t},
+\t\t\t""" + ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }")),
+        ],
         prefs + "Entries/StreamingServices.qml": [
             ("		visible: !isCloudService && !isEaasService\n", '		visible: !isCloudService && !isEaasService && ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(provider.name) < 0\n'),
             ('import "Base"\n', 'import QtQuick.Layouts 1.12\nimport "Base"\n'),
@@ -1703,7 +1818,7 @@ def edits(dev: bool):
         ],
         v + "ControlCenter/Tabs/ControlCenterTab.qml": [
             ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),
-            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + FOUR_DECK_TILE + BROADCAST_TILE + (SYNC_TILE if v53() else "")),
+            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + FOUR_DECK_TILE + BROADCAST_TILE + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
         ],
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],

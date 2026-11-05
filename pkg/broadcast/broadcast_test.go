@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -711,5 +712,35 @@ func TestInputPathPCM(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("timeout waiting for PCM frame with custom input path")
+	}
+}
+
+func TestUpdateMetadataLastErrorDoesNotLeakPassword(t *testing.T) {
+	b := New(newTestGuard())
+	defer b.Close()
+
+	secretPassword := "superSecretPassword123!@#"
+	// Unreachable port
+	b.cfg = Config{
+		Protocol:  "shoutcast",
+		ServerURL: "http://127.0.0.1:59999",
+		Password:  secretPassword,
+	}
+
+	err := b.UpdateMetadata("Artist", "Track")
+	if err == nil {
+		t.Fatal("expected error updating metadata against unreachable URL")
+	}
+
+	st := b.Status()
+	if strings.Contains(st.LastError, secretPassword) {
+		t.Fatalf("Status().LastError leaked plain password: %s", st.LastError)
+	}
+	escaped := url.QueryEscape(secretPassword)
+	if strings.Contains(st.LastError, escaped) {
+		t.Fatalf("Status().LastError leaked escaped password: %s", st.LastError)
+	}
+	if !strings.Contains(st.LastError, "***") {
+		t.Fatalf("expected '***' in sanitized LastError, got: %s", st.LastError)
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
+	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
 )
 
 // RBBridge converts one mounted export, or listens for Pro DJ Link.
@@ -125,6 +126,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 		_ = os.Rename(tmp.Name(), path)
 	}
 
+	_, _ = resourceguard.New(resourceguard.DefaultConfig()).ApplyToProcess(0)
 	err := discovery.Listen(ctx, ip, func(d prolink.Device) {
 		emit(d)
 		if *stateFile != "" {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
@@ -280,6 +282,19 @@ func parseServerTarget(raw string) (scheme, hostPort string, err error) {
 	return scheme, net.JoinHostPort(host, port), nil
 }
 
+// sanitizeError masks any plain or URL-escaped occurrence of password in error messages.
+func sanitizeError(err error, password string) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if password != "" {
+		msg = strings.ReplaceAll(msg, url.QueryEscape(password), "***")
+		msg = strings.ReplaceAll(msg, password, "***")
+	}
+	return msg
+}
+
 // workerLoop manages continuous streaming with reconnect on drop.
 func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle) {
 	for {
@@ -291,7 +306,7 @@ func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle)
 		if err != nil && ctx.Err() == nil {
 			b.mu.Lock()
 			b.streaming = false
-			b.lastError = err.Error()
+			b.lastError = sanitizeError(err, b.cfg.Password)
 			b.mu.Unlock()
 
 			select {
@@ -309,13 +324,22 @@ func (b *Broadcaster) streamOnce(ctx context.Context, t *resourceguard.Throttle)
 	cfg := b.cfg
 	b.mu.Unlock()
 
-	_, hostPort, err := parseServerTarget(cfg.ServerURL)
+	scheme, hostPort, err := parseServerTarget(cfg.ServerURL)
 	if err != nil {
 		return err
 	}
 
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", hostPort)
+	var conn net.Conn
+	if scheme == "https" {
+		host, _, _ := net.SplitHostPort(hostPort)
+		conn, err = tls.DialWithDialer(dialer, "tcp", hostPort, &tls.Config{
+			ServerName: host,
+			MinVersion: tls.VersionTLS12,
+		})
+	} else {
+		conn, err = dialer.DialContext(ctx, "tcp", hostPort)
+	}
 	if err != nil {
 		return err
 	}
@@ -370,7 +394,7 @@ func (b *Broadcaster) streamOnce(ctx context.Context, t *resourceguard.Throttle)
 
 	var inputF *os.File
 	if cfg.InputPath != "" {
-		if f, err := os.Open(cfg.InputPath); err == nil {
+		if f, err := os.OpenFile(cfg.InputPath, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
 			inputF = f
 			defer inputF.Close()
 		}
@@ -604,7 +628,7 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 	scheme, hostPort, err := parseServerTarget(cfg.ServerURL)
 	if err != nil {
 		b.mu.Lock()
-		b.lastError = err.Error()
+		b.lastError = sanitizeError(err, cfg.Password)
 		b.mu.Unlock()
 		return err
 	}
@@ -621,7 +645,7 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 	req, err := http.NewRequest("GET", metaURL, nil)
 	if err != nil {
 		b.mu.Lock()
-		b.lastError = err.Error()
+		b.lastError = sanitizeError(err, cfg.Password)
 		b.mu.Unlock()
 		return err
 	}
@@ -639,7 +663,7 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 	resp, err := client.Do(req)
 	if err != nil {
 		b.mu.Lock()
-		b.lastError = err.Error()
+		b.lastError = sanitizeError(err, cfg.Password)
 		b.mu.Unlock()
 		return err
 	}
@@ -649,7 +673,7 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		reqErr := fmt.Errorf("metadata update failed (status %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		b.mu.Lock()
-		b.lastError = reqErr.Error()
+		b.lastError = sanitizeError(reqErr, cfg.Password)
 		b.mu.Unlock()
 		return reqErr
 	}
