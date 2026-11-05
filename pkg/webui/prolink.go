@@ -74,10 +74,12 @@ func mergeDevice(old, updated prolink.Device) prolink.Device {
 	if updated.PlayPositionMS != 0 {
 		res.PlayPositionMS = updated.PlayPositionMS
 	}
-	res.Playing = updated.Playing
-	res.OnAir = updated.OnAir
-	res.Master = updated.Master
-	res.Sync = updated.Sync
+	if updated.PacketType != 0x0b { // absolute position packets carry no play/master/sync flags
+		res.Playing = updated.Playing
+		res.OnAir = updated.OnAir
+		res.Master = updated.Master
+		res.Sync = updated.Sync
+	}
 	if updated.Title != "" {
 		res.Title = updated.Title
 	}

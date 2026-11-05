@@ -134,4 +134,16 @@ func TestShadowDeckFromCDJ(t *testing.T) {
 	if _, decks = shadowGetJSON(t, srv.URL+"/v1/sc5000/shadow"); len(decks) != 1 || decks[0].PositionMS < 9000 || decks[0].PositionMS > 9500 {
 		t.Fatalf("precise: %+v", decks)
 	}
+	// CUE: the status packet says paused; the position packets that keep coming
+	// (no play flag) must not make it play again.
+	for _, d := range []string{
+		`{"address":"127.0.0.1","name":"CDJ-3000","number":3,"packet_type":10,"playing":false,"play_position_ms":52}`,
+		`{"address":"127.0.0.1","name":"CDJ-3000","number":3,"packet_type":11,"play_position_ms":52}`,
+	} {
+		http.Post(srv.URL+"/v1/sc5000/prolink", "application/json", strings.NewReader(d))
+	}
+	s.shadow.observe(prolink.Device{Number: 3, PacketType: 0x0b, PrecisePosition: true, PlayPositionMS: 52})
+	if _, decks = shadowGetJSON(t, srv.URL+"/v1/sc5000/shadow"); len(decks) != 1 || decks[0].Playing || decks[0].PositionMS != 52 {
+		t.Fatalf("cue: %+v", decks)
+	}
 }
