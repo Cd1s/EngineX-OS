@@ -170,6 +170,8 @@ The entire system has been refactored and slimmed down so all extra features tak
 2. Copy the `.img` file to the **root folder of a FAT32 or exFAT USB drive**.
 3. Plug the USB drive into your deck (stock Engine OS 4.3.x and 5.0.x both work), open **Settings → About / Update → Firmware Update Mode**, choose **USB/SD** when the deck shows `Found 5.3.0.2 on USB/SD`, and let the player install and reboot. If it only asks *Reboot into firmware update mode?*, the deck did not see the file: check the model, keep the original file name in the root folder, then unplug and replug the drive.
 
+> **Second-generation models (SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+)**: they share one signed firmware (AZ0x) that refuses a modified `.img`, so there is no `.img` for them. **Never flash a `PRIME4` / `PRIMEGO` image on a PRIME 4+ / PRIME GO+.** Support for them comes as a `/data` bundle that leaves the system partition untouched (#61, #68, #69); it is in testing and not released yet.
+
 ### Option 2: One-Click On-Deck Update (When Already Running EngineX OS)
 - Connect your deck to Wi-Fi or Ethernet and open **Settings → About / Update**;
 - Tap **Update** on the screen and confirm — the deck will automatically launch the full-screen updater, download the new image, and reboot.

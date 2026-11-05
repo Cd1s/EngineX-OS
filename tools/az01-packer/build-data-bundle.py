@@ -176,7 +176,13 @@ def ui_packs_tar(path):
     return out.getvalue()
 
 
+# The second-generation models on the one signed AZ0x firmware (#61, #68, #69).
+PREFIXES = ('SCLIVE4', 'SCLIVE2', 'PRIME4PLUS', 'PRIMEGOPLUS')
+
+
 def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
+    if prefix not in PREFIXES:
+        fail(f'prefix must be one of {PREFIXES}, got {prefix!r}')
     if not VERSION_RE.match(version):
         fail(f'version must be 3 to 5 dot-separated numbers, got {version!r}')
     if out.exists():
@@ -231,7 +237,7 @@ def main(argv=None):
     p.add_argument('--hook', required=True, type=Path, help='libengine-ui-hook.so')
     p.add_argument('--ui-packs', required=True, type=Path, help='build_packs.py packs.tar(.gz)')
     p.add_argument('--out', required=True, type=Path, help='new output directory')
-    p.add_argument('--prefix', default='SCLIVE4', help='model prefix in the file name')
+    p.add_argument('--prefix', default='SCLIVE4', choices=PREFIXES, help='model prefix in the file name')
     a = p.parse_args(argv)
     json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix), sys.stdout, indent=2)
     print()

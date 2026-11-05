@@ -81,12 +81,22 @@ class DataBundleTest(unittest.TestCase):
         a, b = self.build('a'), self.build('b')
         self.assertEqual(a['sha256'], b['sha256'])
 
+    def test_second_generation_prefixes(self):
+        # PRIME 4+ / PRIME GO+ / SC LIVE 2 run the same AZ0x firmware as SC LIVE 4 (#68).
+        for prefix in ('PRIME4PLUS', 'PRIMEGOPLUS', 'SCLIVE2'):
+            with self.subTest(prefix=prefix):
+                r = self.build(out=f'out-{prefix}', prefix=prefix)
+                self.assertTrue(os.path.basename(r['bundle']).startswith(f'{prefix}-5.3.0.1.1-EngineX-OS-Data-Bundle'))
+                with tarfile.open(r['bundle']) as t:
+                    self.assertTrue(all(n.startswith(f'{prefix}-5.3.0.1.1-EngineX-OS-Data-Bundle') for n in t.getnames()))
+
     def test_refuses_bad_input(self):
         (self.tmp / 'taken').mkdir()
         for kw in ({'version': '5.3'}, {'version': '5.3.0-x'}, {'out': 'taken'},
                    {'suite': self.tmp / 'packs.tar.gz'},
                    {'ui_packs': self.ui_tar({'icons/x.svg': b''}, 'nopacks.tar.gz')},
-                   {'ui_packs': self.ui_tar({'packs/x': b'', '../evil': b''}, 'evil.tar.gz')}):
+                   {'ui_packs': self.ui_tar({'packs/x': b'', '../evil': b''}, 'evil.tar.gz')},
+                   {'prefix': 'PRIME4'}, {'prefix': '../x'}):
             with self.subTest(kw=kw), self.assertRaises(SystemExit):
                 self.build(**kw)
 
