@@ -66,6 +66,73 @@ type Exporter struct {
 type ExportDeck struct {
 	Playing, Master bool
 	BPM, Pitch      float64 // the track's BPM; pitch in percent
+	// Beat is Engine's BeatNumber when read at At: beats into the bar, 0..4
+	// (the integer part is the beat, the fraction the phase). As master and
+	// playing, the export sends a beat packet (0x28) on every beat from it.
+	Beat float64
+	At   time.Time
+}
+
+// beatAt is where the master deck is in its bar at now: the beat (0..3) and
+// how far into it (0..1). ok is false when it is not a playing master.
+func (d ExportDeck) beatAt(now time.Time) (beat int, frac float64, ok bool) {
+	bpm := d.BPM * (1 + d.Pitch/100)
+	if !d.Master || !d.Playing || bpm <= 0 || d.At.IsZero() || d.Beat < 0 || now.Sub(d.At) > 2*time.Second {
+		return 0, 0, false
+	}
+	pos := d.Beat + now.Sub(d.At).Seconds()*bpm/60
+	whole := math.Floor(pos)
+	return int(whole) % 4, pos - whole, true
+}
+
+// beatPacket is a Pro DJ Link beat (0x28): beat in bar (1..4) just hit, the
+// time to the following beats and bars, pitch and BPM.
+func (r *exportRun) beatPacket(d ExportDeck, inBar int, frac float64) []byte {
+	b := linkPacket(0x28, 0x60, 11)
+	b[0x21], b[0x5f] = r.player, r.player
+	binary.BigEndian.PutUint16(b[0x22:], 0x3c)
+	ms := 60000 / (d.BPM * (1 + d.Pitch/100))
+	next := (1 - frac) * ms
+	for i, beats := range []float64{0, 1, float64(3 - inBar), 3, float64(7 - inBar), 7} { // next beat, 2nd beat, next bar, 4th beat, 2nd bar, 8th beat
+		binary.BigEndian.PutUint32(b[0x24+4*i:], uint32(math.Round(next+beats*ms)))
+	}
+	for i := 0x3c; i < 0x54; i++ {
+		b[i] = 0xff
+	}
+	binary.BigEndian.PutUint32(b[0x54:], uint32(math.Round(0x100000*(1+d.Pitch/100))))
+	binary.BigEndian.PutUint16(b[0x5a:], uint16(math.Round(d.BPM*100)))
+	b[0x5c] = byte(inBar + 1)
+	return b
+}
+
+// beatLoop sends a beat packet to the players each time the master deck
+// crosses a beat.
+func (r *exportRun) beatLoop() {
+	defer r.wg.Done()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	last := -1
+	for {
+		select {
+		case <-r.done:
+			return
+		case now := <-tick.C:
+			r.mu.Lock()
+			beat, frac, ok := r.deck.beatAt(now)
+			if !ok {
+				last = -1
+			} else if beat != last {
+				if last >= 0 && r.player != 0 { // not on the first sample: that is mid-beat
+					pkt := r.beatPacket(r.deck, beat, frac)
+					for _, ip := range r.peerIPsLocked() {
+						r.sendLocked(r.beatConn(), pkt, &net.UDPAddr{IP: ip, Port: 50001})
+					}
+				}
+				last = beat
+			}
+			r.mu.Unlock()
+		}
+	}
 }
 
 // SetDeck updates the status packets. Losing master ends a handoff we granted.
@@ -476,10 +543,11 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 			go r.receiveBeats()
 		}
 	}
-	r.wg.Add(3)
+	r.wg.Add(4)
 	go r.receivePeers()
 	go r.receiveMedia()
 	go r.announceLoop(probe)
+	go r.beatLoop()
 	return r, nil
 }
 func (r *exportRun) number() byte         { r.mu.Lock(); defer r.mu.Unlock(); return r.player }
@@ -794,12 +862,16 @@ func (r *exportRun) statusPacket() []byte {
 	if r.handoff != 0 {
 		b[0x9f] = r.handoff
 	}
+	if beat, _, ok := r.deck.beatAt(time.Now()); ok {
+		b[0xa6] = byte(beat + 1)
+	}
 	r.statusCounter++
 	binary.BigEndian.PutUint32(b[0xc8:], r.statusCounter)
 	return b
 }
-func (r *exportRun) sendStatus() {
-	r.mu.Lock()
+
+// peerIPsLocked lists the players seen in the last 10 s (at most 6). Caller holds r.mu.
+func (r *exportRun) peerIPsLocked() []net.IP {
 	peers := make([]net.IP, 0, len(r.peers))
 	seen := make(map[string]bool)
 	for _, p := range r.peers {
@@ -808,6 +880,12 @@ func (r *exportRun) sendStatus() {
 			seen[p.ip.String()] = true
 		}
 	}
+	return peers
+}
+
+func (r *exportRun) sendStatus() {
+	r.mu.Lock()
+	peers := r.peerIPsLocked()
 	r.mu.Unlock()
 	for _, ip := range peers {
 		r.mu.Lock()

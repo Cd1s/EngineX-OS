@@ -152,6 +152,7 @@ SERVICES_MAIN = """
 				playing: !!g(d, "/PlayState").state, positionMs: sr > 0 ? g(d, "/Track/TrackPosition").unnormalized / sr * 1000 : 0,
 				pitch: parseFloat(g(d, "/SpeedState").string) || 0, master: deckMaster[d - 1] || d === lead,
 				bpm: (Planck.getProperty("/Engine/Deck" + d + "/OriginalBPM").translator || {}).unnormalized || 0,
+				beat: (Planck.getProperty("/Engine/Deck" + d + "/BeatNumber").translator || {}).unnormalized || 0,
 				// shortcut: raw master state for diagnosis on /peer/decks; drop once verified on hardware.
 				dbg: deckMaster.map(m => m ? 1 : 0).join("") + "/" + (net ? 1 : 0)})
 		}
