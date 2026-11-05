@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
@@ -152,13 +153,22 @@ const (
 	// Past this, a first import cannot finish while the mount waits: reading every
 	// file took 8 minutes for 6000 tracks on a USB stick.
 	fastImportTracks = 500
+	// The edisksd hook kills rb-bridge 20 s after the mount, which rolled back the
+	// whole import, playlists included (#48). Stop reading files after this; the
+	// rest of the tracks finish on later mounts.
+	mountReadBudget = 8 * time.Second
 )
 
 // ConvertAtMount is Convert for when a volume is mounted, while Engine is waiting
 // for it. An export unchanged since the last import is skipped at once. A large
 // library's first import takes only what the export holds, built on tmpfs and
 // copied over in one go. full forces a complete import, with cues and waveforms.
+// Otherwise files are read for mountReadBudget at most, and the export counts as
+// imported only once no track was left without its cues.
 func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
+	if !full && opts.Deadline.IsZero() {
+		opts.Deadline = time.Now().Add(mountReadBudget)
+	}
 	r, err := compat.NewResolver(mount)
 	if err != nil {
 		return enginedb.Result{}, err
@@ -199,7 +209,9 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		}
 	}
 	result, err = Convert(ctx, mount, opts)
-	if err == nil && !result.Bypassed {
+	if err == nil && result.Deferred > 0 {
+		log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
+	} else if err == nil && !result.Bypassed {
 		writeStamp(dir, stamp)
 	}
 	return result, err
