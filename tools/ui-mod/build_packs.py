@@ -131,16 +131,29 @@ SERVICES_MAIN = """
 		running: root.scFourDeckRole !== ""
 		onTriggered: root.scShadowTick()
 	}
+	property bool scShadowCdjMaster: false // a CDJ on a shadow deck holds master
 	function scShadowTick() {
 		const g = (d, p) => Planck.getProperty("/Engine/Deck" + d + p).translator
+		// A networked player's MASTER LED is the unit's /Engine/Sync/Network/MasterStatus
+		// (ControlSurfaceModules/Sync.qml); DeckIsMaster is per deck. The unit's
+		// master is this player's unless a shadow deck (a CDJ) holds it.
+		const deckMaster = [1, 2, 3, 4].map(i => !!g(i, "/DeckIsMaster").state)
+		const pNet = Planck.getProperty("/Engine/Sync/Network/MasterStatus")
+		const net = !!(pNet && pNet.translator && pNet.translator.state)
+		const mine = scFourDeckRole.split("").map(c => parseInt(c))
+		const shadowLead = deckMaster.some((m, i) => m && mine.indexOf(i + 1) < 0)
+		let lead = 0
+		if (net && !shadowLead && !scShadowCdjMaster && !mine.some(d => deckMaster[d - 1]))
+			lead = mine.find(d => g(d, "/PlayState").state) || mine[0]
 		const own = []
-		for (const c of scFourDeckRole) {
-			const d = parseInt(c)
+		for (const d of mine) {
 			const sr = g(d, "/Track/SampleRate").value
 			own.push({deck: d, net: g(d, "/Track/SongLoaded").state ? g(d, "/Track/TrackNetworkPath").string : "",
 				playing: !!g(d, "/PlayState").state, positionMs: sr > 0 ? g(d, "/Track/TrackPosition").unnormalized / sr * 1000 : 0,
-				pitch: parseFloat(g(d, "/SpeedState").string) || 0, master: !!g(d, "/DeckIsMaster").state,
-				bpm: (Planck.getProperty("/Engine/Deck" + d + "/Track/OriginalBPM").translator || {}).unnormalized || 0})
+				pitch: parseFloat(g(d, "/SpeedState").string) || 0, master: deckMaster[d - 1] || d === lead,
+				bpm: (Planck.getProperty("/Engine/Deck" + d + "/OriginalBPM").translator || {}).unnormalized || 0,
+				// shortcut: raw master state for diagnosis on /peer/decks; drop once verified on hardware.
+				dbg: deckMaster.map(m => m ? 1 : 0).join("") + "/" + (net ? 1 : 0)})
 		}
 		const post = new XMLHttpRequest()
 		post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks")
@@ -149,7 +162,9 @@ SERVICES_MAIN = """
 		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow")
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || x.status !== 200) return
-			for (const e of JSON.parse(x.responseText).decks || []) root.scShadowApply(e)
+			const decks = JSON.parse(x.responseText).decks || []
+			root.scShadowCdjMaster = decks.some(e => e.master)
+			for (const e of decks) root.scShadowApply(e)
 		}
 		x.send()
 	}
@@ -1611,6 +1626,14 @@ def edits(dev: bool):
         # refuses decks that belong to the other player in the 4-deck layout.
         out[ROOT + "PropertyFilter/LoadToDeckFilter.qml"] = [
             ("        active: songLoading || lockLine\n", "        active: songLoading || lockLine || root.scDeckLocked(deckIndex)\n")]
+        # #49: a networked player's MASTER LED shows the unit's network master, so in
+        # the 4-deck layout it stayed lit while a shadow deck (a CDJ) held master.
+        # There it shows the deck's own master; every other device keeps stock.
+        out["ControlSurfaceModules/ControlSurfaceModules/Sync.qml"] = [(
+            "            readonly property string isMasterPath: Config.network.hasSyncing\n",
+            "            readonly property string isMasterPath: Config.network.hasSyncing &&\n"
+            "                    !(!Config.device.isPlayer && [\"SC5000\", \"SC5000M\", \"SC6000\", \"SC6000M\"].indexOf(Config.device.name) >= 0)\n",
+        )]
         # #49: a swipe loads the role's own decks (1+3: left 1, right 3), not the stock
         # left/right layer deck. Only "Deck N" actions; Prepare List etc. stay stock.
         for side, right in (("left", "false"), ("right", "true")):
