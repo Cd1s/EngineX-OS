@@ -132,6 +132,30 @@ SERVICES_MAIN = """
 		onTriggered: root.scShadowTick()
 	}
 	property bool scShadowCdjMaster: false // a CDJ on a shadow deck holds master
+	// Engine's buttons (RequestMaster, Sync, UnSync) act on false -> true and only
+	// see the value between event-loop turns: release, press, release, 120 ms
+	// apart. /Engine/DeckN/Play is not one of them: it is the play state itself
+	// (true plays, false pauses), so it is written, not pressed.
+	property var scPressQueue: []
+	function scPress(path) {
+		scPressQueue = scPressQueue.concat([{path: path, step: 0}])
+		scPressTimer.restart()
+	}
+	Timer {
+		id: scPressTimer
+		interval: 120
+		onTriggered: {
+			const next = []
+			for (const e of root.scPressQueue) {
+				const t = Planck.getProperty(e.path).translator
+				if (!t) continue
+				t.state = e.step === 1
+				if (e.step < 2) next.push({path: e.path, step: e.step + 1})
+			}
+			root.scPressQueue = next
+			if (next.length) restart()
+		}
+	}
 	function scShadowTick() {
 		const g = (d, p) => Planck.getProperty("/Engine/Deck" + d + p).translator
 		// A networked player's MASTER LED is the unit's /Engine/Sync/Network/MasterStatus
@@ -155,7 +179,8 @@ SERVICES_MAIN = """
 				beat: (Planck.getProperty("/Engine/Deck" + d + "/BeatNumber").translator || {}).unnormalized || 0,
 				// shortcut: raw master state for diagnosis on /peer/decks; drop once verified on hardware.
 				dbg: deckMaster.map(m => m ? 1 : 0).join("") + "/" + (net ? 1 : 0) + " " + [Config.device.isJP, Config.device.isPlayer, Config.device.name, Config.network.hasSyncing].join(",")
-					+ " sync" + [1, 2, 3, 4].map(i => g(i, "/SyncMode").string).join(",")})
+					+ " sync" + [1, 2, 3, 4].map(i => g(i, "/SyncMode").string).join(",")
+					+ " play" + [1, 2, 3, 4].map(i => g(i, "/PlayState").state ? 1 : 0).join("")})
 		}
 		const post = new XMLHttpRequest()
 		post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks")
@@ -171,11 +196,11 @@ SERVICES_MAIN = """
 			for (const d in root.scShadowAt) {
 				const p = Planck.getProperty("/Engine/Deck" + d + "/PlayState").translator
 				const at = root.scShadowAt[d]
-				if (!decks.some(e => e.deck === parseInt(d)) && p && p.state && scFourDeckRole.indexOf(d) < 0 && Date.now() >= at.act) {
-					const play = Planck.getProperty("/Engine/Deck" + d + "/Play").translator
-					play.state = false
-					play.state = true
-					at.act = Date.now() + 700
+				const now = Date.now()
+				if (!decks.some(e => e.deck === parseInt(d)) && p && p.state && scFourDeckRole.indexOf(d) < 0 && !(at.playWant === false && now < at.playUntil)) {
+					Planck.getProperty("/Engine/Deck" + d + "/Play").translator.state = false
+					at.playWant = false
+					at.playUntil = now + 3000
 				}
 			}
 		}
@@ -201,22 +226,21 @@ SERVICES_MAIN = """
 		at.master = !!e.master
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!!g("/PlayState").state !== e.playing) {
-			// Play is a button: only false -> true presses it (toggles play/pause);
-			// writing true while it is already true does nothing.
-			const play = g("/Play")
-			play.state = false
-			play.state = true
+			// Play is the play state: true plays, false pauses. (Writing false then
+			// true as a button press left it playing, so CUE never stopped the
+			// deck.) Give PlayState up to 3 s to follow, e.g. while it brakes.
+			if (at.playWant === e.playing && now < at.playUntil) return
+			g("/Play").state = e.playing
+			at.playWant = e.playing
+			at.playUntil = now + 3000
 			at.act = now + 700 // CUE: the seek waits until Engine reports the deck stopped
 			return
 		}
+		at.playWant = undefined
 		// Engine ignores RequestMaster on a stopped deck: press it once this one
 		// plays, again until it is master.
 		if (at.wantMaster && now < at.wantMaster && !g("/DeckIsMaster").state && g("/PlayState").state && now >= (at.pressed || 0)) {
-			const m = g("/RequestMaster")
-			if (m) {
-				m.state = false
-				m.state = true
-			}
+			scPress("/Engine/Deck" + d + "/RequestMaster")
 			at.pressed = now + 800
 		}
 		if (g("/DeckIsMaster").state) at.wantMaster = 0
@@ -225,11 +249,7 @@ SERVICES_MAIN = """
 		const pSync = g("/SyncMode")
 		const synced = !!pSync && pSync.string !== "" && pSync.string !== "Off"
 		if (!!e.sync !== synced && now >= (at.syncAt || 0)) {
-			const b = g(e.sync ? "/Sync" : "/UnSync")
-			if (b) {
-				b.state = false
-				b.state = true
-			}
+			scPress("/Engine/Deck" + d + (e.sync ? "/Sync" : "/UnSync"))
 			at.syncAt = now + 800
 		}
 		const drift = sr > 0 && len > 0 ? e.positionMs - g("/Track/TrackPosition").unnormalized / sr * 1000 : 0 // > 0: behind
