@@ -200,7 +200,10 @@ SH
         check "new: Streaming hides stock Tidal" bash -c "! grep -aqF 'SCPROBE entry|$label|Tidal|1|' '$log'"
         check "new: About shows EngineX OS $NEWV" grep -aqF "SCPROBE version|EngineX OS $NEWV " "$log"
         check "new: Control Center has the waveform tile" grep -aqF 'SCPROBE tile|ControlCenter_WaveformStyle|' "$log"
-        check "new: Control Center has the upfader echo tile" grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|' "$log"
+        check "new: Control Center has the 4-Deck Waveform tile (#49)" grep -aqF 'SCPROBE tile|ControlCenter_FourDeckWaveform|' "$log"
+        check "new: Control Center has the Live Stream tile (#50)" grep -aqF 'SCPROBE tile|ControlCenter_LiveStream|' "$log"
+        check "new: Control Center has the upfader echo tile (#52)" grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|' "$log"
+        check "new: 4-Deck remote waveform strip is loaded (#49)" grep -aqF 'SCPROBE tile|FourDeckRemoteStrip|' "$log"
         note "new: render probe: $(grep -ao 'SCPROBE [a-z]*|.*|' "$log" | grep -v 'SCPROBE done' | tr '\n' ' ')"
         check "new: Engine build matched (Engine $BASE)" grep -aq "engine-ui-hook: Engine $BASE" "$log"
         check "new: $EXPECT_APPLIED Engine patches applied (TidalAPI gateway, Stems, getConfig...)" \
@@ -226,6 +229,10 @@ SH
         check "new: UI pack carries the Beatport source" grep -rqs 'id: "beatport"' "$W/data/sc5000-custom/ui/packs/$LANG_PACK"
         curl -sf http://127.0.0.1:6595/healthz > "$W/new-deemixd.json" || :
         check "new: sc5000-deemixd /healthz" json "$W/new-deemixd.json" "j.get('ok') is True"
+        curl -sf -X POST -d '{"number":1,"name":"CDJ-3000","track_id":77,"bpm":128.0,"playing":true,"title":"Prolink Gate"}' http://127.0.0.1:8080/v1/sc5000/prolink > "$W/new-prolink.json" || :
+        check "new: Pro DJ Link loopback API syncs CDJ-3000 to Deck 3 (#51)" json "$W/new-prolink.json" "j.get('enabled') is True and j.get('decks', {}).get('3', {}).get('title') == 'Prolink Gate'"
+        curl -sf -X POST "http://127.0.0.1:8080/v1/sc5000/broadcast/metadata?artist=Denon&title=Prime" > "$W/new-broadcast.json" || :
+        check "new: Icecast/Shoutcast broadcast API updates live track metadata (#50)" json "$W/new-broadcast.json" "j.get('currentTrack') == 'Denon - Prime'"
         cp "$W/bin/stems-probe" "$R/tmp/stems-probe"
         check "new: Stems handshake and render (stems-probe -> stems-processor)" \
             timeout 600 chroot "$R" /usr/bin/env -i PATH=$PATH_DECK HOME=/tmp /tmp/stems-probe -seconds 3 /usr/local/bin/stems-processor
