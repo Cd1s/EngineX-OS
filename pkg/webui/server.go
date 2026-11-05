@@ -246,6 +246,9 @@ func (s *Server) tryExport() {
 // Close releases optional network exports, including active dbserver clients.
 func (s *Server) Close() {
 	s.closeOnce.Do(func() { close(s.closed) })
+	if s.tidal != nil {
+		s.tidal.saveTracks() // the IDs Engine still lists, for the next run (#73)
+	}
 	if s.prolinkExport != nil {
 		s.prolinkExport.Close()
 	}

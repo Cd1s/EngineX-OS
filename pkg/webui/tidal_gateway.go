@@ -19,7 +19,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -106,6 +108,79 @@ type tidalGateway struct {
 	seq       int64
 	trackSeen map[int64]int64
 	listSeen  map[string]int64
+
+	saving bool       // a save of the track IDs is scheduled
+	saveMu sync.Mutex // keeps saves in order
+}
+
+// savedRef is a trackRef on disk. Engine keeps a listing's IDs while stream-sync
+// restarts, so without them its next load is a 404, "Track not found" (#73).
+type savedRef struct {
+	ID      int64           `json:"id"`
+	Track   providers.Track `json:"track"`
+	Session string          `json:"session,omitempty"`
+	Guest   bool            `json:"guest,omitempty"`
+	File    string          `json:"file,omitempty"`
+	Drive   string          `json:"drive,omitempty"`
+}
+type savedTracks struct {
+	Next   int64      `json:"next"`
+	Tracks []savedRef `json:"tracks"` // least recently used first
+}
+
+const trackSaveDelay = 3 * time.Second
+
+func refKey(ref trackRef) string {
+	return ref.session + "\x00" + ref.track.Provider + "\x00" + ref.track.ID
+}
+
+func (g *tidalGateway) tracksPath() string {
+	if g.s.cfg.StateDir == "" {
+		return ""
+	}
+	return filepath.Join(g.s.cfg.StateDir, "gateway-tracks.json")
+}
+
+// loadTracks restores the IDs of the previous run, and its counter, so an old ID
+// never names a different track.
+func (g *tidalGateway) loadTracks() {
+	b, err := os.ReadFile(g.tracksPath())
+	var v savedTracks
+	if err != nil || json.Unmarshal(b, &v) != nil {
+		return
+	}
+	for _, r := range v.Tracks {
+		ref := trackRef{track: r.Track, session: r.Session, guest: r.Guest, file: r.File, drive: r.Drive}
+		g.tracks[r.ID], g.ids[refKey(ref)] = ref, r.ID
+		g.seq++
+		g.trackSeen[r.ID] = g.seq
+		g.next = max(g.next, r.ID)
+	}
+	g.next = max(g.next, v.Next)
+}
+
+// saveTracks writes the track IDs. Run by a timer after changes, and by Close.
+func (g *tidalGateway) saveTracks() {
+	path := g.tracksPath()
+	if path == "" {
+		return
+	}
+	g.saveMu.Lock()
+	defer g.saveMu.Unlock()
+	g.mu.Lock()
+	g.saving = false
+	v := savedTracks{Next: g.next, Tracks: make([]savedRef, 0, len(g.tracks))}
+	for id, ref := range g.tracks {
+		v.Tracks = append(v.Tracks, savedRef{id, ref.track, ref.session, ref.guest, ref.file, ref.drive})
+	}
+	sort.Slice(v.Tracks, func(a, b int) bool { return g.trackSeen[v.Tracks[a].ID] < g.trackSeen[v.Tracks[b].ID] })
+	g.mu.Unlock()
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		return // the state dir is gone (a test that ended)
+	}
+	if err := providers.SaveJSON(path, v); err != nil {
+		log.Printf("stream-sync: save gateway track IDs: %v", err)
+	}
 }
 
 // Browse state is bounded. When full, the least recently used tenth is
@@ -136,6 +211,7 @@ func evict[K comparable](seen map[K]int64, limit int, drop func(K)) {
 
 func newTidalGateway(s *Server) *tidalGateway {
 	g := &tidalGateway{artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
+	g.loadTracks()
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
 	g.mux.HandleFunc("POST /v1/sc5000/login", s.loginStart)
@@ -396,9 +472,9 @@ func (g *tidalGateway) list(id string) (playlistRef, bool) {
 	return ref, ok
 }
 
-// addTrack assigns stable positive IDs per source track for this process.
+// addTrack assigns stable positive IDs per source track, kept across restarts.
 func (g *tidalGateway) addTrack(ref trackRef) int64 {
-	key := ref.session + "\x00" + ref.track.Provider + "\x00" + ref.track.ID
+	key := refKey(ref)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	id := g.ids[key]
@@ -406,6 +482,10 @@ func (g *tidalGateway) addTrack(ref trackRef) int64 {
 		g.next++
 		id = g.next
 		g.ids[key] = id
+	}
+	if !g.saving && g.tracksPath() != "" {
+		g.saving = true
+		time.AfterFunc(trackSaveDelay, g.saveTracks)
 	}
 	g.tracks[id] = ref
 	if address := thumbURL(ref.track); address != "" {
@@ -419,7 +499,7 @@ func (g *tidalGateway) addTrack(ref trackRef) int64 {
 	g.trackSeen[id] = g.seq
 	evict(g.trackSeen, maxTracks, func(id int64) {
 		r := g.tracks[id]
-		delete(g.ids, r.session+"\x00"+r.track.Provider+"\x00"+r.track.ID)
+		delete(g.ids, refKey(r))
 		delete(g.tracks, id)
 	})
 	return id

@@ -463,6 +463,39 @@ func TestLoadedTrackShowsNoCatalogTempo(t *testing.T) {
 	}
 }
 
+// #73: Engine keeps a listing's IDs while stream-sync restarts. They still play
+// afterwards, and the new run never gives an old ID to a different track.
+func TestTrackIDsSurviveARestart(t *testing.T) {
+	cfg := Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}
+	song := providers.Track{ID: "1", Title: "Song", Artists: []string{"Artist"}, Provider: "deezer"}
+	before := New(cfg, nil)
+	id := before.tidal.addTrack(trackRef{track: song, session: "s"})
+	before.Close()
+
+	after := New(cfg, nil)
+	defer after.Close()
+	srv := httptest.NewServer(after)
+	defer srv.Close()
+	var v struct {
+		Title string `json:"title"`
+	}
+	tidalGet(t, srv.URL, "/v1/tracks/"+strconv.FormatInt(id, 10), 200, &v)
+	if v.Title != "Song" {
+		t.Fatalf("%+v", v)
+	}
+	if again := after.tidal.addTrack(trackRef{track: song, session: "s"}); again != id {
+		t.Fatalf("same track got ID %d, was %d", again, id)
+	}
+	if other := after.tidal.addTrack(trackRef{track: providers.Track{ID: "2", Provider: "deezer"}}); other <= id {
+		t.Fatalf("new track reused ID %d (old %d)", other, id)
+	}
+	// A save after a change, without Close, also reaches the next run.
+	after.tidal.saveTracks()
+	if n := len(New(cfg, nil).tidal.tracks); n != 2 {
+		t.Fatalf("%d tracks restored", n)
+	}
+}
+
 func TestThumbnailsPickEachServicesSmallSize(t *testing.T) {
 	for _, c := range []struct {
 		in   providers.Track
