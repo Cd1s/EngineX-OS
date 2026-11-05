@@ -31,6 +31,9 @@ type ExportConfig struct {
 	// Observe receives valid status packets captured on the shared status port.
 	Observe    func(Device)
 	MediaCache *MediaCache // optional incoming status enrichment; allocated only while ON
+	// Peers lists Pro DJ Link devices seen on the LAN; the export binds to the
+	// interface that reaches them (see exportIdentity).
+	Peers func() []net.IP
 }
 
 type ExportStatus struct {
@@ -73,6 +76,27 @@ func (e *Exporter) SetEnabled(on bool) error {
 	return nil
 }
 func (e *Exporter) Close() { _ = e.SetEnabled(false) }
+
+// Rebind restarts a running export when the players moved to another interface.
+func (e *Exporter) Rebind() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.run == nil {
+		return nil
+	}
+	ip, _, _, _, err := exportIdentity(e.cfg)
+	if err != nil || ip.Equal(e.run.ip) {
+		return nil
+	}
+	e.run.close()
+	e.run = nil
+	r, err := startExport(e.cfg)
+	if err != nil {
+		return err
+	}
+	e.run = r
+	return nil
+}
 func (e *Exporter) Status() ExportStatus {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -166,11 +190,21 @@ func listenLinkUDP(address string, broadcast bool) (*net.UDPConn, error) {
 	return p.(*net.UDPConn), nil
 }
 
+// exportIdentity picks the interface to export on: the one whose subnet holds a
+// Pro DJ Link device we have seen (cfg.Peers, our own addresses ignored), else
+// the first usable one. A deck on Wi-Fi with a bare link-local eth0 then follows
+// the players to Wi-Fi, and a booth cable keeps eth0.
 func exportIdentity(cfg ExportConfig) (net.IP, net.HardwareAddr, net.IP, *net.IPNet, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	explicit := cfg.IP != nil && !cfg.IP.IsUnspecified()
+	var peers []net.IP
+	if cfg.Peers != nil && !explicit {
+		peers = cfg.Peers()
+	}
+	var first func() (net.IP, net.HardwareAddr, net.IP, *net.IPNet, error)
 	for _, iface := range interfaces {
 		if iface.Flags&net.FlagUp == 0 {
 			continue
@@ -182,7 +216,7 @@ func exportIdentity(cfg ExportConfig) (net.IP, net.HardwareAddr, net.IP, *net.IP
 				continue
 			}
 			ip := n.IP.To4()
-			if cfg.IP != nil && !cfg.IP.IsUnspecified() {
+			if explicit {
 				if !ip.Equal(cfg.IP) {
 					// Explicit loopback identities can use isolated 127/8 test
 					// addresses without adding system interface aliases.
@@ -195,23 +229,39 @@ func exportIdentity(cfg ExportConfig) (net.IP, net.HardwareAddr, net.IP, *net.IP
 			} else if ip.IsLoopback() || len(iface.HardwareAddr) != 6 {
 				continue
 			}
-			mac := iface.HardwareAddr
-			if len(cfg.MAC) != 0 {
-				mac = cfg.MAC
+			identity := func() (net.IP, net.HardwareAddr, net.IP, *net.IPNet, error) {
+				mac := iface.HardwareAddr
+				if len(cfg.MAC) != 0 {
+					mac = cfg.MAC
+				}
+				if len(mac) != 6 {
+					return nil, nil, nil, nil, errors.New("prolink: export needs a six-byte interface MAC")
+				}
+				broadcast := append(net.IP(nil), ip...)
+				mask := n.Mask
+				if len(mask) == 16 {
+					mask = mask[12:]
+				}
+				for i := range broadcast {
+					broadcast[i] |= ^mask[i]
+				}
+				return append(net.IP(nil), ip...), append(net.HardwareAddr(nil), mac...), broadcast, &net.IPNet{IP: ip.Mask(mask), Mask: mask}, nil
 			}
-			if len(mac) != 6 {
-				return nil, nil, nil, nil, errors.New("prolink: export needs a six-byte interface MAC")
+			if len(peers) == 0 {
+				return identity()
 			}
-			broadcast := append(net.IP(nil), ip...)
-			mask := n.Mask
-			if len(mask) == 16 {
-				mask = mask[12:]
+			for _, p := range peers {
+				if p = p.To4(); p != nil && !p.Equal(ip) && n.Contains(p) {
+					return identity()
+				}
 			}
-			for i := range broadcast {
-				broadcast[i] |= ^mask[i]
+			if first == nil {
+				first = identity
 			}
-			return append(net.IP(nil), ip...), append(net.HardwareAddr(nil), mac...), broadcast, &net.IPNet{IP: ip.Mask(mask), Mask: mask}, nil
 		}
+	}
+	if first != nil {
+		return first()
 	}
 	return nil, nil, nil, nil, errors.New("prolink: no IPv4 interface for export")
 }
