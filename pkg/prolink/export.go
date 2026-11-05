@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -53,9 +54,69 @@ type ExportStatus struct {
 // Exporter is inert until SetEnabled(true): constructing it, asking its status,
 // or disabling it binds no sockets and starts no goroutines or timers.
 type Exporter struct {
-	mu  sync.Mutex
-	cfg ExportConfig
-	run *exportRun
+	mu   sync.Mutex
+	cfg  ExportConfig
+	run  *exportRun
+	deck ExportDeck
+}
+
+// ExportDeck is what the status packets say about the decks this player plays
+// (#49): playing, tempo, and whether one of them is tempo master. Without it
+// the export looks like an idle player.
+type ExportDeck struct {
+	Playing, Master bool
+	BPM, Pitch      float64 // the track's BPM; pitch in percent
+}
+
+// SetDeck updates the status packets. Losing master ends a handoff we granted.
+func (e *Exporter) SetDeck(d ExportDeck) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.deck = d
+	if e.run != nil {
+		e.run.mu.Lock()
+		e.run.deck = d
+		if !d.Master {
+			e.run.handoff = 0
+		}
+		e.run.mu.Unlock()
+	}
+}
+
+// RequestMaster asks the tempo master at ip to hand master over to this player
+// (Pro DJ Link master handoff request, type 0x26, to its beat port).
+func (e *Exporter) RequestMaster(ip net.IP) error {
+	e.mu.Lock()
+	r := e.run
+	e.mu.Unlock()
+	if r == nil {
+		return errors.New("prolink: export is off")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.player == 0 {
+		return errors.New("prolink: no player number yet")
+	}
+	r.sendLocked(r.beatConn(), r.handoffPacket(0x26, 0x28), &net.UDPAddr{IP: ip, Port: 50001})
+	return nil
+}
+
+// handoffPacket is a master handoff request (0x26) or response (0x27, yes).
+func (r *exportRun) handoffPacket(kind byte, length int) []byte {
+	b := linkPacket(kind, length, 11)
+	b[0x21], b[0x27] = r.player, r.player
+	binary.BigEndian.PutUint16(b[0x22:], 8) // as Beat Link sends both
+	if kind == 0x27 {
+		b[0x2b] = 1
+	}
+	return b
+}
+
+func (r *exportRun) beatConn() *net.UDPConn {
+	if r.beat != nil {
+		return r.beat
+	}
+	return r.status
 }
 
 func NewExporter(cfg ExportConfig) *Exporter { return &Exporter{cfg: cfg} }
@@ -76,6 +137,7 @@ func (e *Exporter) SetEnabled(on bool) error {
 	if err != nil {
 		return err
 	}
+	r.deck = e.deck
 	e.run = r
 	return nil
 }
@@ -121,6 +183,8 @@ type exportRun struct {
 	db                *DBServer
 	discovery, status *net.UDPConn
 	beat              *net.UDPConn // nil without Observe or when the port is taken
+	deck              ExportDeck
+	handoff           byte // the player we agreed to hand master to
 	ip                net.IP
 	mac               net.HardwareAddr
 	announce          *net.UDPAddr
@@ -544,6 +608,17 @@ func (r *exportRun) receiveBeats() {
 		if err != nil {
 			return
 		}
+		if n >= 0x28 && string(b[:10]) == magic && b[10] == 0x26 && r.network.Contains(addr.IP) {
+			// Another player asks for master: agree, and name it in our status
+			// until Engine moves master to its shadow deck (SetDeck).
+			r.mu.Lock()
+			if r.player != 0 {
+				r.sendLocked(r.beat, r.handoffPacket(0x27, 0x2c), &net.UDPAddr{IP: addr.IP, Port: 50001})
+				r.handoff = b[0x21]
+			}
+			r.mu.Unlock()
+			continue
+		}
 		if d, err := ParsePacket(b[:n], 50001, addr.IP); err == nil && d.PacketType == 0x0b && d.Number >= 1 && d.Number <= 6 && r.network.Contains(addr.IP) {
 			r.observe(d)
 		}
@@ -700,6 +775,25 @@ func (r *exportRun) statusPacket() []byte {
 	}
 	binary.BigEndian.PutUint16(b[0x92:], 0xffff)
 	binary.BigEndian.PutUint32(b[0xa0:], 0xffffffff)
+	if d := r.deck; d.Master || d.Playing {
+		if d.Playing {
+			b[0x89] |= 0x40
+		}
+		if d.Master {
+			b[0x89] |= 0x20
+		}
+		if d.BPM > 0 {
+			binary.BigEndian.PutUint16(b[0x90:], 0x8000)
+			binary.BigEndian.PutUint16(b[0x92:], uint16(math.Round(d.BPM*100)))
+		}
+		if f := 1 + d.Pitch/100; f > 0 {
+			binary.BigEndian.PutUint32(b[0x8c:], uint32(math.Round(0x100000*f)))
+			binary.BigEndian.PutUint32(b[0x98:], uint32(math.Round(0x100000*f)))
+		}
+	}
+	if r.handoff != 0 {
+		b[0x9f] = r.handoff
+	}
 	r.statusCounter++
 	binary.BigEndian.PutUint32(b[0xc8:], r.statusCounter)
 	return b

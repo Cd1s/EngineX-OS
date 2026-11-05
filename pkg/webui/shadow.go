@@ -42,6 +42,8 @@ type deckState struct {
 	Playing    bool    `json:"playing"`
 	PositionMS float64 `json:"positionMs"`
 	Pitch      float64 `json:"pitch"` // percent
+	Master     bool    `json:"master,omitempty"`
+	BPM        float64 `json:"bpm,omitempty"` // the track's
 }
 
 type peerDeck struct {
@@ -62,6 +64,7 @@ type shadowState struct {
 	mu        sync.Mutex
 	precise   map[byte]precisePos
 	own       []deckState
+	ownMaster bool
 	ownAt     time.Time
 	peers     map[string]time.Time // EngineX players heard on the beacon
 	peerDecks map[int]peerDeck
@@ -148,9 +151,31 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		d.Net = ""
 		own = append(own, d)
 	}
+	// Pro DJ Link players see these decks in our status: playing, tempo and
+	// master. Taking master asks a CDJ that still holds it to hand it over.
+	var ex prolink.ExportDeck
+	for _, d := range own {
+		if d.Master || (d.Playing && !ex.Playing && !ex.Master) {
+			ex.BPM, ex.Pitch = d.BPM, d.Pitch
+		}
+		ex.Playing = ex.Playing || d.Playing
+		ex.Master = ex.Master || d.Master
+	}
 	s.shadow.mu.Lock()
 	s.shadow.own, s.shadow.ownAt = own, time.Now()
+	claimed := ex.Master && !s.shadow.ownMaster
+	s.shadow.ownMaster = ex.Master
 	s.shadow.mu.Unlock()
+	if s.prolinkExport != nil {
+		s.prolinkExport.SetDeck(ex)
+		if claimed {
+			for _, dev := range s.mergedDevices() {
+				if ip := net.ParseIP(dev.Address); dev.Master && ip != nil && !strings.HasPrefix(dev.Name, "EngineX") && time.Since(dev.LastSeen) < 5*time.Second {
+					s.prolinkExport.RequestMaster(ip)
+				}
+			}
+		}
+	}
 	s.shadowWake()
 	respond(w, map[string]any{"ok": true})
 }
@@ -240,6 +265,7 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 			continue
 		}
 		d := p.deckState
+		d.Master = false // the two Engines share master natively (Engine Link)
 		if d.Playing {
 			d.PositionMS += float64(now.Sub(p.at).Milliseconds()) * (1 + d.Pitch/100)
 		}
@@ -255,7 +281,7 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 		out = append(out, d)
 	}
 	for deck, dev := range cdjDecks(devices, free, now) {
-		d := deckState{Deck: deck, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch}
+		d := deckState{Deck: deck, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, BPM: dev.BPM}
 		at := dev.LastSeen
 		if p, ok := sh.precise[dev.Number]; ok && now.Sub(p.at) < time.Second {
 			d.PositionMS, at = p.ms, p.at

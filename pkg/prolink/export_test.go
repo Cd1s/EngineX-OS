@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -784,5 +785,52 @@ func TestExportIdentityFollowsPeers(t *testing.T) {
 	got, _, _, _, _ := exportIdentity(ExportConfig{Peers: func() []net.IP { return []net.IP{net.IPv4(203, 0, 113, 9)} }})
 	if !got.Equal(first) {
 		t.Fatalf("unreachable peer: picked %v, want the first interface %v", got, first)
+	}
+}
+
+// #49: the status packets carry the decks this player plays, and master is
+// handed over the Pro DJ Link way (0x26 request, 0x27 answer on the beat port).
+func TestExportDeckMasterAndHandoff(t *testing.T) {
+	r := &exportRun{player: 3}
+	if b := r.statusPacket(); b[0x89] != 0x84 || binary.BigEndian.Uint16(b[0x92:]) != 0xffff || b[0x9f] != 0xff {
+		t.Fatalf("idle: % x", b[0x89:0xa0])
+	}
+	r.deck = ExportDeck{Playing: true, Master: true, BPM: 126, Pitch: 2}
+	r.handoff = 2
+	b := r.statusPacket()
+	if b[0x89] != 0x84|0x40|0x20 || binary.BigEndian.Uint16(b[0x92:]) != 12600 || binary.BigEndian.Uint32(b[0x8c:]) != uint32(math.Round(0x100000*1.02)) || b[0x9f] != 2 {
+		t.Fatalf("master: % x", b[0x89:0xa0])
+	}
+	if req := r.handoffPacket(0x26, 0x28); len(req) != 0x28 || req[10] != 0x26 || req[0x1f] != 1 || req[0x21] != 3 || binary.BigEndian.Uint16(req[0x22:]) != 8 || req[0x27] != 3 {
+		t.Fatalf("request: % x", req)
+	}
+
+	cdj, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 63, 0, 2), Port: 50001})
+	if err != nil {
+		t.Skip("beat port:", err)
+	}
+	defer cdj.Close()
+	r.beat, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 63, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, r.network, _ = net.ParseCIDR("127.0.0.0/8")
+	r.observe = func(Device) {}
+	r.wg.Add(1)
+	go r.receiveBeats()
+	defer func() { r.beat.Close(); r.wg.Wait() }()
+	ask := (&exportRun{player: 2}).handoffPacket(0x26, 0x28)
+	cdj.WriteToUDP(ask, r.beat.LocalAddr().(*net.UDPAddr))
+	cdj.SetReadDeadline(time.Now().Add(2 * time.Second))
+	got := make([]byte, 64)
+	n, _, err := cdj.ReadFromUDP(got)
+	if err != nil || n != 0x2c || got[10] != 0x27 || got[0x21] != 3 || got[0x2b] != 1 {
+		t.Fatalf("answer: %v % x", err, got[:n])
+	}
+	r.mu.Lock()
+	h := r.handoff
+	r.mu.Unlock()
+	if h != 2 {
+		t.Fatalf("handoff to %d", h)
 	}
 }
