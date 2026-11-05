@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/assets/hero-banner.svg" alt="EngineX OS 5.3.0.1" width="100%">
+<img src="./docs/assets/hero-banner.svg" alt="EngineX OS 5.3.0.1.1" width="100%">
 
 <br>
 
@@ -16,7 +16,7 @@
 
 <br>
 
-**EngineX OS 5.3.0.1** is an enhanced firmware upgrade for Denon DJ and Numark standalone players:
+**EngineX OS 5.3.0.1.1** is an enhanced firmware upgrade for Denon DJ and Numark standalone players:
 `SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro`.
 
 Everything works right inside the stock Denon interface — flash it from a USB stick and unlock the features below.
@@ -125,7 +125,7 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 
 The entire system has been refactored and slimmed down so all extra features take minimal space and leave more free memory than stock firmware:
 
-| Metric | Stock / Before Refactoring | `EngineX OS 5.3.0.1` (Measured on SC5000) | What It Means for DJs |
+| Metric | Stock / Before Refactoring | `EngineX OS 5.3.0.1.1` (Measured on SC5000) | What It Means for DJs |
 | :--- | :--- | :--- | :--- |
 | **Firmware Image Size (`*-Update.img`)** | Official stock: `173.88 MB`<br>Earlier custom build: `~210 MB` | **`176.70 MB`** (all custom features combined take only **`4.1 MB`**) | **Only `2.8 MB` larger than stock firmware** |
 | **Internal Storage Used After Clean Flash** | `~243 MB` left behind by older builds | **`17.2 MB` for core app + 3-language UI** (`45.6 MB` including extra drive format drivers) | Frees up **nearly `200 MB`** of internal flash space |
@@ -144,16 +144,16 @@ The entire system has been refactored and slimmed down so all extra features tak
 
 ### Option 1: USB Stick Install (First-Time Setup)
 1. Click the link for your exact player model below to download the `.img` file directly (or visit [**Releases**](https://github.com/Cd1s/EngineX-OS/releases/latest)):
-   - **Denon DJ SC5000 Prime**: [`SC5000-5.3.0.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
-   - **Denon DJ SC5000M Prime**: [`SC5000M-5.3.0.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
-   - **Denon DJ SC6000 Prime**: [`SC6000-5.3.0.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
-   - **Denon DJ SC6000M Prime**: [`SC6000M-5.3.0.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
-   - **Denon DJ PRIME 4**: [`PRIME4-5.3.0.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
-   - **Denon DJ PRIME 2**: [`PRIME2-5.3.0.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
-   - **Denon DJ PRIME GO**: [`PRIMEGO-5.3.0.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
-   - **Numark Mixstream Pro**: [`MIXSTREAMPRO-5.3.0.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
+   - **Denon DJ SC5000 Prime**: [`SC5000-5.3.0.1.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.1.1-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
+   - **Denon DJ SC5000M Prime**: [`SC5000M-5.3.0.1.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.1.1-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
+   - **Denon DJ SC6000 Prime**: [`SC6000-5.3.0.1.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.1.1-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
+   - **Denon DJ SC6000M Prime**: [`SC6000M-5.3.0.1.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.1.1-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
+   - **Denon DJ PRIME 4**: [`PRIME4-5.3.0.1.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.1.1-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
+   - **Denon DJ PRIME 2**: [`PRIME2-5.3.0.1.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.1.1-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
+   - **Denon DJ PRIME GO**: [`PRIMEGO-5.3.0.1.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.1.1-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
+   - **Numark Mixstream Pro**: [`MIXSTREAMPRO-5.3.0.1.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.1.1-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
 2. Copy the `.img` file to the **root folder of a FAT32 or exFAT USB drive**.
-3. Plug the USB drive into your deck (stock Engine OS 4.3.x and 5.0.x both work), open **Settings → About / Update → Firmware Update Mode**, choose **USB/SD** when the deck shows `Found 5.3.0.1 on USB/SD`, and let the player install and reboot. If it only asks *Reboot into firmware update mode?*, the deck did not see the file: check the model, keep the original file name in the root folder, then unplug and replug the drive.
+3. Plug the USB drive into your deck (stock Engine OS 4.3.x and 5.0.x both work), open **Settings → About / Update → Firmware Update Mode**, choose **USB/SD** when the deck shows `Found 5.3.0.1.1 on USB/SD`, and let the player install and reboot. If it only asks *Reboot into firmware update mode?*, the deck did not see the file: check the model, keep the original file name in the root folder, then unplug and replug the drive.
 
 ### Option 2: One-Click On-Deck Update (When Already Running EngineX OS)
 - Connect your deck to Wi-Fi or Ethernet and open **Settings → About / Update**;
@@ -167,6 +167,25 @@ tools/stems/run-home-worker.sh
 
 # Windows (PowerShell)
 powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs
+```
+
+### Streaming Login: the Deck Alone Is Enough
+No computer and no server are needed. Put the deck and your phone on the same Wi-Fi, open a service in the Source menu and scan the QR code on the screen. The login page on your phone is in English by default and switches to 简体中文 or 繁體中文 at the top right; every page has a step-by-step guide.
+
+| Service | What you do |
+| --- | --- |
+| NetEase Cloud Music | Scan the deck's QR code with the NetEase Cloud Music app and confirm. If the code expires, tap it for a new one. |
+| Spotify | Step 1: tap **Open Spotify login** and agree. Step 2: Spotify then opens a `127.0.0.1` page that cannot load; copy its address and tap **Paste & Connect**. |
+| Deezer | Paste your **ARL** (the guide shows how to copy it from deezer.com on a computer). The same login unlocks lossless FLAC downloads (Deemix) for Spotify, NetEase and Deezer tracks. A profile link alone shows public playlists without downloads. |
+| SoundCloud | Enter your username or profile URL. No password, Artist Pro or API app needed. For private playlists, paste the `oauth_token` from soundcloud.com under *Advanced*. |
+| Beatport | Enter your Beatport email and password. The deck keeps only the login token. |
+
+### Optional: Your Own Login Relay
+A relay lets a phone on mobile data finish logins and adds Deezer's in-browser login. Run it on any server with a public HTTPS address, then enter its address and password in the deck's web console (`http://<deck-ip>:8080`):
+```sh
+go build -o sc5000-relay ./cmd/sc5000-relay
+./sc5000-relay -public https://relay.example.com -listen 0.0.0.0:6595
+# the first console password is written to /var/lib/sc5000-relay/initial-password
 ```
 
 ---
