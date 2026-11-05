@@ -94,6 +94,9 @@ SERVICES_MAIN = """
 	// #49: the decks this player owns in the 4-deck layout ("13", "24", "12", "1", "2";
 	// empty: no 4-deck layout). Engine refuses loading the others (LoadToDeckFilter).
 	property string scFourDeckRole: ""
+	// The board (device tree), not Config.device.isPlayer: the 4-deck layout turns a
+	// player into a non-player inside Engine (#49).
+	property bool scPlayer: false
 	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 }
 	property string scUpdateRepo: "Cd1s/EngineX-OS"
 	property string scUpdateText: ""
@@ -297,6 +300,7 @@ SERVICES_MAIN = """
 		scOmniSource = !!v.omniSource
 		scProlinkShare = !!v.prolinkShare
 		scProlinkExport = !!v.prolinkExport
+		scPlayer = !!v.player
 		scFourDeckRole = v.player && v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
 		scKeepPlayhead(v.playhead || 0)
 		scSources = v.sources
@@ -903,7 +907,7 @@ EXTRA_DEVICE_ENTRIES = """
 		},
 		EntryBase.ListEntry {
 			text: "Upfader Echo Out"
-			visible: !Config.device.isPlayer // #52: players have no channel faders
+			visible: !root.scPlayer // #52: players have no channel faders
 			readonly property var ids: ["0", "1"]
 			values: ["Off", "On"]
 			currentValue: root.scUpfaderEcho ? "On" : "Off"
@@ -1069,7 +1073,7 @@ UPFADER_ECHO_TILE = """
 		Rectangle {
 			id: scUpfaderEchoTile
 			objectName: "ControlCenter_UpfaderEcho"
-			visible: !Config.device.isPlayer // #52: players have no channel faders
+			visible: !root.scPlayer // #52: players have no channel faders
 			width: 256
 			height: 104
 			radius: 16
