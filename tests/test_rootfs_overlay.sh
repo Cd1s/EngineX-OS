@@ -380,29 +380,56 @@ for case in 'FactoryReset running 1' 'FactoryReset degraded 1' 'FactoryReset sto
     if [[ $3 == 1 && -e $SC5000_QUIT_REASON_FILE ]]; then fail "guard must consume quit reason $1"; fi
 done
 unset SC5000_QUIT_REASON_FILE GUARD_LOG
-# #49: the guard binds a player's assignment file that names the 4-deck "Left"
-# group, once per boot, and leaves files it cannot patch alone.
-assign=$TMP/assign; mkdir -p "$assign/JP07" "$assign/JP13"
-printf '    DeckAssignmentConfig {\n        id: deckConfig\n        midiChannel: 1\n    }\n' > "$assign/JP07/JP07_Controller_Assignments.qml"
+# #49: in the 4-deck layout the guard binds, per start, a player's assignment file for
+# its role (bindings only: the assignment loader rejects handlers); off, the stock file.
+assign=$TMP/assign; mkdir -p "$assign/JP07" "$assign/JP13" "$TMP/ui-roles"
+printf 'import airAssignments 1.0\nMidiAssignment {\n    objectName: "SC5000 Controller Assignment"\n    Layer {\n        note: 11\n        midiChannel: globalConfig.midiChannel\n    }\n    DeckAssignmentConfig {\n        id: deckConfig\n        midiChannel: 1\n    }\n}\n' > "$assign/JP07/JP07_Controller_Assignments.qml"
 printf 'Item {}\n' > "$assign/JP13/JP13_Controller_Assignments.qml"
 cat > "$TMP/guard-bin/mount" <<'MOCK'
 #!/bin/sh
 echo "mount $*" >> "$GUARD_LOG"; echo "$3" >> "$GUARD_LOG.bound"
 MOCK
+cat > "$TMP/guard-bin/umount" <<'MOCK'
+#!/bin/sh
+echo "umount $*" >> "$GUARD_LOG"; grep -vxF "$1" "$GUARD_LOG.bound" > "$GUARD_LOG.tmp"; mv "$GUARD_LOG.tmp" "$GUARD_LOG.bound"
+MOCK
 cat > "$TMP/guard-bin/mountpoint" <<'MOCK'
 #!/bin/sh
 grep -qxF "$2" "$GUARD_LOG.bound" 2>/dev/null
 MOCK
-chmod +x "$TMP/guard-bin/mount" "$TMP/guard-bin/mountpoint"
-export GUARD_LOG=$TMP/guard-log SC5000_ASSIGNMENT_DIR=$assign SC5000_ASSIGNMENT_PATCHED=$TMP/assign-patched
+chmod +x "$TMP/guard-bin/mount" "$TMP/guard-bin/umount" "$TMP/guard-bin/mountpoint"
+printf '{\n  "Player": {\n    "string": "2",\n    "type": 4\n  }\n}\n' > "$TMP/planck-state.json"
+export GUARD_LOG=$TMP/guard-log SC5000_ASSIGNMENT_DIR=$assign SC5000_ASSIGNMENT_PATCHED=$TMP/assign-patched SC5000_PLANCK_STATE=$TMP/planck-state.json
+j=$TMP/assign-patched/JP07_Controller_Assignments.qml
+role_case() { # <four_deck_role or ""> <resolved role> <group in the name binding> <LAYER: stock|own|none>
+    printf 'four_deck_waveform=1\n%s\n' "${1:+four_deck_role=$1}" > "$TMP/ui-roles/settings.conf"
+    SC5000_UI_DIR=$TMP/ui-roles PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre
+    [[ $(cat "$TMP/assign-patched/role") == "$2" ]] || fail "role '$1' resolved to $(cat "$TMP/assign-patched/role"), want $2"
+    [[ $(grep -c '^mount --bind' "$GUARD_LOG") == 1 ]] || fail "role '$1': want exactly one bind"
+    grep -A2 '^        id: deckConfig$' "$j" | grep -q "name: Config.device.isPlayer ? \"\" : $3" || fail "role '$1': name binding"
+    case $4 in
+    stock) has '    Layer {' "$j"; lacks 'ValueNoteAssignment' "$j" ;;
+    own) lacks '    Layer {' "$j"; has 'path: "/GUI/Decks/DeckLeft/Layer"' "$j"; has 'note: 11' "$j"; has 'import Planck 1.0' "$j" ;;
+    none) lacks '    Layer {' "$j"; lacks 'ValueNoteAssignment' "$j" ;;
+    esac
+    if grep -q '^ *on[A-Z][A-Za-z]*:' "$j"; then fail "role '$1': handlers break the assignment loader"; fi
+    : > "$GUARD_LOG"
+}
 : > "$GUARD_LOG"; rm -f "$GUARD_LOG.bound"
-for _ in 1 2; do PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre; done
-[[ $(grep -c '^mount --bind' "$GUARD_LOG") == 1 ]] || fail 'guard must bind the JP07 assignment copy exactly once'
-has "mount --bind $TMP/assign-patched/JP07_Controller_Assignments.qml $assign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG"
-has 'name: Config.device.isPlayer ? "" : "Left"' "$TMP/assign-patched/JP07_Controller_Assignments.qml"
-[[ $(sed -n 3p "$TMP/assign-patched/JP07_Controller_Assignments.qml") == *'name: Config.device.isPlayer'* ]] || fail 'name must follow id: deckConfig'
+role_case 13 13 '"Left"' stock
+role_case 24 24 '"Right"' stock
+role_case 12 12 'Planck.getProperty' own
+role_case 1 1 '"Left"' none
+role_case 2 2 '"Right"' none
+role_case '' 24 '"Right"' stock # auto: player 2 is even
+printf '{\n  "Player": {\n    "string": "1",\n    "type": 4\n  }\n}\n' > "$TMP/planck-state.json"
+role_case auto 13 '"Left"' stock
 [[ ! -e $TMP/assign-patched/JP13_Controller_Assignments.qml ]] || fail 'an unpatchable file must not be bound'
-unset GUARD_LOG SC5000_ASSIGNMENT_DIR SC5000_ASSIGNMENT_PATCHED
+printf 'lang=en\n' > "$TMP/ui-roles/settings.conf"
+SC5000_UI_DIR=$TMP/ui-roles PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre
+has "umount $assign/JP07/JP07_Controller_Assignments.qml" "$GUARD_LOG"
+if grep -q '^mount --bind' "$GUARD_LOG"; then fail 'the 4-deck layout off must leave the stock assignment files'; fi
+unset GUARD_LOG SC5000_ASSIGNMENT_DIR SC5000_ASSIGNMENT_PATCHED SC5000_PLANCK_STATE
 has 'ExecStopPost=-/etc/sc5000/engine-ui-guard stop' "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf"
 has 'ExecStopPost=-/etc/sc5000/engine-ui-guard stop' "$debloat_root/etc/systemd/system/engine.service.d/override.conf"
 for conf in "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.conf" "$debloat_root/etc/systemd/system/engine.service.d/override.conf"; do

@@ -91,6 +91,10 @@ SERVICES_MAIN = """
 	}
 	property bool scProlinkShare: false // #59, read by rb-bridge
 	property bool scProlinkExport: false // #63, experimental export to CDJs
+	// #49: the decks this player owns in the 4-deck layout ("13", "24", "12", "1", "2";
+	// empty: no 4-deck layout). Engine refuses loading the others (LoadToDeckFilter).
+	property string scFourDeckRole: ""
+	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 }
 	property string scUpdateRepo: "Cd1s/EngineX-OS"
 	property string scUpdateText: ""
 	property bool scBroadcastOn: false
@@ -293,6 +297,7 @@ SERVICES_MAIN = """
 		scOmniSource = !!v.omniSource
 		scProlinkShare = !!v.prolinkShare
 		scProlinkExport = !!v.prolinkExport
+		scFourDeckRole = v.player && v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
 		scKeepPlayhead(v.playhead || 0)
 		scSources = v.sources
 		scLoggedIn = v.loggedIn
@@ -1470,6 +1475,11 @@ def edits(dev: bool):
             ("						return modelData.display\n					}\n					return \"\"", "						return breadcrumbView.isStreamingContent && contentView.StackView.index === 0 ? root.scT(modelData.display) : modelData.display\n					}\n					return \"\""),
         ],
     }
+    if v53():
+        # #49: Engine's own load filter (all load paths: menu, direct, browse knob) also
+        # refuses decks that belong to the other player in the 4-deck layout.
+        out[ROOT + "PropertyFilter/LoadToDeckFilter.qml"] = [
+            ("        active: songLoading || lockLine\n", "        active: songLoading || lockLine || root.scDeckLocked(deckIndex)\n")]
     for rel, fixes in legacy_qml_fixes().items():
         assert not isinstance(out.get(rel), str), rel  # a whole-file replacement already owns it
         out.setdefault(rel, []).extend(fixes)

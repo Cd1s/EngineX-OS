@@ -325,10 +325,17 @@ static void test_dsp_hooks(void) {
         four_deck_pad_on = 1;
         memset(buf, 0, sizeof buf);
         assert(call((void *)0x11, (void *)0x22, 2, in, 4, out, 64) == 0x5a);
-        assert(master_seen_channels == 8 && buf[0][0] == 2.0f && buf[3][1] == -2.0f && four_deck_pad[3][1] == -2.0f);
+        // Engine gets 8 scratch outputs; the role picks the deck on each of the card's pairs.
+        assert(master_seen_channels == 8 && buf[0][0] == 2.0f && buf[3][1] == -2.0f && four_deck_pad[7][1] == -2.0f);
+        four_deck_route[0] = 2, four_deck_route[1] = -1; // role 13 / 1 style: RCA B silent
+        memset(buf, 0, sizeof buf);
+        four_deck_pad[4][0] = 0; // deck 3, rewritten by the mock to 2.0
+        assert(call((void *)0x11, (void *)0x22, 2, in, 4, out, 64) == 0x5a);
+        assert(buf[0][0] == 2.0f && buf[2][0] == 0.0f && buf[3][1] == 0.0f);
+        four_deck_route[0] = 0, four_deck_route[1] = 1;
         four_deck_pad_on = 0;
         assert(call((void *)0x11, (void *)0x22, 2, in, 4, out, 64) == 0x5a && master_seen_channels == 4);
-        puts("ARM airDeviceCallback (#49): decks 3/4 render into scratch outputs only in the 4-deck layout: PASS");
+        puts("ARM airDeviceCallback (#49): all 4 decks render, the role routes them to the card's pairs, only in the 4-deck layout: PASS");
     }
 
     unsigned char gate[0x200] = {0};
@@ -546,6 +553,27 @@ static void test_config(void) {
         }
         unlink(code_path);
         four_deck_pad_on = 0;
+        // four_deck_role picks the decks on RCA A / RCA B; auto takes engine-ui-guard's
+        // answer (none here: 13), anything unknown is 13.
+        four_deck_resolved = "/nonexistent/role";
+        const struct { const char *role; signed char a, b; } roles[] = {
+            {"24", 1, 3}, {"13", 0, 2}, {"2", 1, -1}, {"1", 0, -1}, {"12", 0, 1}, {"auto", 0, 2}, {"9;rm", 0, 2}};
+        for (size_t i = 0; i < sizeof roles / sizeof *roles; i++) {
+            FILE *f = fopen(path, "w");
+            assert(f && fprintf(f, "four_deck_waveform=1\nfour_deck_role=%s\n", roles[i].role) > 0 && !fclose(f));
+            prepare_config((uintptr_t)image, page);
+            assert(four_deck_route[0] == roles[i].a && four_deck_route[1] == roles[i].b);
+        }
+        char resolved[] = "/tmp/four-deck-role-XXXXXX";
+        int rfd = mkstemp(resolved);
+        assert(rfd >= 0 && write(rfd, "24\n", 3) == 3);
+        close(rfd);
+        four_deck_resolved = resolved;
+        FILE *af = fopen(path, "w");
+        assert(af && fputs("four_deck_waveform=1\nfour_deck_role=auto\n", af) >= 0 && !fclose(af));
+        prepare_config((uintptr_t)image, page);
+        assert(four_deck_route[0] == 1 && four_deck_route[1] == 3); // auto followed the guard
+        unlink(resolved);
         unlink(path);
         four_deck_settings = UI_ROOT "/settings.conf";
         prepare_config((uintptr_t)image, page);

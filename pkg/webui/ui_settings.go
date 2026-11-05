@@ -69,6 +69,7 @@ type uiSettings struct {
 	SafeMode         bool     `json:"safeMode"`
 	LoggedIn         []string `json:"loggedIn"`
 	FourDeckWaveform bool     `json:"fourDeckWaveform"`
+	FourDeckRole     string   `json:"fourDeckRole"`
 	ProlinkWaveform  bool     `json:"prolinkWaveform"`
 	BroadcastEnabled bool     `json:"broadcastEnabled"`
 	UpfaderEcho      bool     `json:"upfaderEcho"`
@@ -80,7 +81,16 @@ type uiSettings struct {
 	// the board is a standalone player without channel faders (#52).
 	ProlinkExportActive bool `json:"prolinkExportActive"`
 	Player              bool `json:"player"`
+	// The role engine-ui-guard applied at Engine's last start (auto resolved).
+	FourDeckRoleActive string `json:"fourDeckRoleActive,omitempty"`
 }
+
+// uiFourDeckRoles are the decks a player plays in the 4-deck layout (#49), RCA A then B.
+// auto: 13 for an odd Engine player number, 24 for an even one (engine-ui-guard).
+var uiFourDeckRoles = []string{"auto", "13", "24", "12", "1", "2"}
+
+// fourDeckRolePath is where engine-ui-guard leaves the role it applied.
+var fourDeckRolePath = "/run/sc5000-assignments/role"
 
 func (s *Server) uiDir() string {
 	if s.cfg.UIDir != "" {
@@ -97,7 +107,7 @@ var uiServicesBeforeKnown = []string{"tidal", "netease", "spotify", "deezer", "s
 // loadUI must be called with uiMu held. Bad or missing values get defaults.
 func (s *Server) loadUI() uiSettings {
 	known, saved := uiServicesBeforeKnown, false
-	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, ProlinkWaveform: true}
+	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ProlinkWaveform: true}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
 		key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
@@ -155,6 +165,10 @@ func (s *Server) loadUI() uiSettings {
 			v.ProlinkExport = val == "1"
 		case "known":
 			known = strings.Split(val, ",")
+		case "four_deck_role":
+			if slices.Contains(uiFourDeckRoles, val) {
+				v.FourDeckRole = val
+			}
 		case "four_deck_waveform":
 			if val == "1" || strings.EqualFold(val, "true") {
 				v.FourDeckWaveform = true
@@ -229,6 +243,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.FourDeckWaveform {
 		text += "four_deck_waveform=1\n"
 	}
+	if v.FourDeckRole != "auto" {
+		text += "four_deck_role=" + v.FourDeckRole + "\n"
+	}
 	if !v.ProlinkWaveform {
 		text += "prolink_waveform=0\n"
 	}
@@ -301,6 +318,12 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
 	v.ProlinkExportActive = s.prolinkExport != nil && s.prolinkExport.Status().Enabled
 	v.Player = playerBoards[imagePrefix(deviceCompatible())]
+	if v.FourDeckWaveform {
+		b, _ := os.ReadFile(fourDeckRolePath)
+		if role := strings.TrimSpace(string(b)); slices.Contains(uiFourDeckRoles[1:], role) {
+			v.FourDeckRoleActive = role
+		}
+	}
 	respond(w, v)
 }
 
@@ -329,7 +352,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) {
+	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -389,6 +412,9 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("jog") {
 		v.Jog = q.Get("jog")
+	}
+	if q.Has("fourDeckRole") {
+		v.FourDeckRole = q.Get("fourDeckRole")
 	}
 	if q.Has("neteaseMode") {
 		v.NeteaseMode = q.Get("neteaseMode")
