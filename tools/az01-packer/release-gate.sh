@@ -186,7 +186,7 @@ SH
         # while the hook still logged every file.
         check "new: render probe reported (Settings -> Services, About)" wait_for 120 grep -aq 'SCPROBE done|' "$log"
         check "new: render probe ran without errors" bash -c "! grep -aq 'SCPROBE error|' '$log'"
-        label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2)
+        label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2) || :
         check "new: Settings -> Services -> Streaming shows the pack's Deezer row" test -n "$label"
         check "new: Streaming shows SoundCloud once (stock row hidden)" test "$(grep -acF "SCPROBE entry|$label|SoundCloud|1|" "$log")" -eq 1
         check "new: Streaming shows Beatport once (stock row hidden)" test "$(grep -acF "SCPROBE entry|$label|Beatport|1|" "$log")" -eq 1
