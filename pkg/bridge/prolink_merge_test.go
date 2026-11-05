@@ -113,6 +113,16 @@ func TestStagedProlinkWithoutLocalRekordboxExport(t *testing.T) {
 			if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, true); err != nil || r.Added != 0 {
 				t.Fatalf("repeat staged-only import: %+v %v", r, err)
 			}
+			if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || !r.Bypassed {
+				t.Fatalf("unchanged staged-only mount not bypassed: %+v %v", r, err)
+			}
+			later := time.Now().Add(time.Minute)
+			if err := os.Chtimes(filepath.Join(staged, "PIONEER", "rekordbox", "export.pdb"), later, later); err != nil {
+				t.Fatal(err)
+			}
+			if r, err = bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err != nil || r.Bypassed {
+				t.Fatalf("restaged staged-only mount bypassed: %+v %v", r, err)
+			}
 			if _, err = os.Stat(filepath.Join(root, "PIONEER/rekordbox/export.pdb")); !os.IsNotExist(err) {
 				t.Fatal("created a fake local Rekordbox export")
 			}
