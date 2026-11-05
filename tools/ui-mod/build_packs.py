@@ -139,7 +139,8 @@ SERVICES_MAIN = """
 			const sr = g(d, "/Track/SampleRate").value
 			own.push({deck: d, net: g(d, "/Track/SongLoaded").state ? g(d, "/Track/TrackNetworkPath").string : "",
 				playing: !!g(d, "/PlayState").state, positionMs: sr > 0 ? g(d, "/Track/TrackPosition").unnormalized / sr * 1000 : 0,
-				pitch: parseFloat(g(d, "/SpeedState").string) || 0})
+				pitch: parseFloat(g(d, "/SpeedState").string) || 0, master: !!g(d, "/DeckIsMaster").state,
+				bpm: (Planck.getProperty("/Engine/Deck" + d + "/Track/OriginalBPM").translator || {}).unnormalized || 0})
 		}
 		const post = new XMLHttpRequest()
 		post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks")
@@ -164,6 +165,16 @@ SERVICES_MAIN = """
 			return
 		}
 		if (now < at.act || !g("/Track/SongLoaded").state) return
+		// The CDJ took master: so does its shadow deck, and Engine drops it on ours
+		// (one master). Only on the change, so pressing MASTER here wins it back.
+		if (e.master && !at.master) {
+			const m = g("/RequestMaster")
+			if (m) {
+				m.state = false
+				m.state = true
+			}
+		}
+		at.master = !!e.master
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!!g("/PlayState").state !== e.playing) {
 			// Play is a button: only false -> true presses it (toggles play/pause);
