@@ -533,7 +533,9 @@ func (r *exportRun) receiveMedia() {
 	}
 }
 
-// receiveBeats passes CDJ-3000 absolute position packets to Observe.
+// receiveBeats passes CDJ-3000 absolute position packets straight to Observe:
+// at 30 ms they filled the status queue and status packets (play/pause) were
+// dropped, so a paused CDJ still looked like it was playing.
 func (r *exportRun) receiveBeats() {
 	defer r.wg.Done()
 	b := make([]byte, 512)
@@ -543,10 +545,7 @@ func (r *exportRun) receiveBeats() {
 			return
 		}
 		if d, err := ParsePacket(b[:n], 50001, addr.IP); err == nil && d.PacketType == 0x0b && d.Number >= 1 && d.Number <= 6 && r.network.Contains(addr.IP) {
-			select {
-			case r.updates <- d:
-			default:
-			}
+			r.observe(d)
 		}
 	}
 }
