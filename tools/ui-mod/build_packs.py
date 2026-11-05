@@ -898,6 +898,7 @@ EXTRA_DEVICE_ENTRIES = """
 		},
 		EntryBase.ListEntry {
 			text: "Upfader Echo Out"
+			visible: !Config.device.isPlayer // #52: players have no channel faders
 			readonly property var ids: ["0", "1"]
 			values: ["Off", "On"]
 			currentValue: root.scUpfaderEcho ? "On" : "Off"
@@ -1063,6 +1064,7 @@ UPFADER_ECHO_TILE = """
 		Rectangle {
 			id: scUpfaderEchoTile
 			objectName: "ControlCenter_UpfaderEcho"
+			visible: !Config.device.isPlayer // #52: players have no channel faders
 			width: 256
 			height: 104
 			radius: 16

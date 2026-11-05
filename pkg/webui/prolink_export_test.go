@@ -87,17 +87,19 @@ func TestProlinkExportSettingLifecycle(t *testing.T) {
 	}
 }
 
-func TestProlinkExportStartFailureDoesNotPersistOptIn(t *testing.T) {
+// ON without a Rekordbox USB stays ON and reports that the export waits (#63).
+func TestProlinkExportOnWithoutUSBStaysOnAndWaits(t *testing.T) {
 	dir := t.TempDir()
 	ui := New(Config{UIDir: dir, StateDir: t.TempDir(), ProlinkExport: prolink.ExportConfig{Root: filepath.Join(t.TempDir(), "missing")}}, nil)
 	defer ui.Close()
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	if code, _ := uiPost(t, srv.URL, "prolinkExport=1"); code != 500 {
-		t.Fatalf("startup failure: %d", code)
+	code, v := uiPost(t, srv.URL, "prolinkExport=1")
+	if code != 200 || !v.ProlinkExport || v.ProlinkExportActive {
+		t.Fatalf("ON without USB: %d %+v", code, v)
 	}
-	if ui.loadUI().ProlinkExport || ui.prolinkExport.Status().Enabled {
-		t.Fatal("failed start published/persisted ON")
+	if !ui.loadUI().ProlinkExport || ui.prolinkExport.Status().Enabled {
+		t.Fatal("ON was not kept, or the export started without a USB")
 	}
 }
 
@@ -116,10 +118,28 @@ func TestProlinkSavedOnWithoutUSBDoesNotBlockOtherSettings(t *testing.T) {
 	if ui.prolinkExport.Status().Enabled {
 		t.Fatal("missing USB started export")
 	}
-	if code, _ := uiPost(t, srv.URL, "prolinkExport=1"); code != 500 {
-		t.Fatal("explicit ON must retry and report missing USB")
+	if code, v := uiPost(t, srv.URL, "prolinkExport=1"); code != 200 || !v.ProlinkExport || v.ProlinkExportActive {
+		t.Fatal("explicit ON must stay ON and report that it waits for a USB")
 	}
 	if code, _ := uiPost(t, srv.URL, "prolinkExport=0"); code != 200 {
 		t.Fatal("OFF failed")
+	}
+}
+
+// A saved ON starts by itself once the Rekordbox USB appears (#63).
+func TestProlinkExportStartsWhenUSBArrives(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "usb")
+	cfg := Config{UIDir: t.TempDir(), StateDir: t.TempDir(), ProlinkExport: prolink.ExportConfig{Root: root, IP: net.IPv4(127, 64, 0, 2), MAC: net.HardwareAddr{2, 0, 0, 0, 0, 2}, DBAddr: "127.64.0.2:0", PortmapAddr: "127.64.0.2:0", DiscoveryAddr: "127.64.0.2:0", StatusAddr: "127.64.0.2:0", AnnounceAddr: "127.64.0.2:9", ProbeDuration: time.Millisecond}}
+	ui := New(cfg, nil)
+	defer ui.Close()
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	if code, v := uiPost(t, srv.URL, "prolinkExport=1"); code != 200 || v.ProlinkExportActive {
+		t.Fatalf("ON without USB: %d %+v", code, v)
+	}
+	testfixture.Export(t, root)
+	ui.tryExport()
+	if !ui.prolinkExport.Status().Enabled {
+		t.Fatal("export did not start once the USB was mounted")
 	}
 }

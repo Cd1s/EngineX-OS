@@ -301,6 +301,9 @@ var imagePrefixes = map[string]string{
 	"inmusic,jp21": "SCLIVE4",
 }
 
+// playerBoards are the standalone players: no channel faders, so no Upfader Echo (#52).
+var playerBoards = map[string]bool{"SC5000": true, "SC5000M": true, "SC6000": true, "SC6000M": true}
+
 func imagePrefix(compatible []string) string {
 	for _, c := range compatible {
 		if p := imagePrefixes[c]; p != "" {

@@ -129,7 +129,7 @@ tGain:['Auto-Gain 0 dB','自动增益 0 dB 归一化','自動增益 0 dB 歸一�
 tOmni:['OmniSource','OmniSource 全源同屏混排','OmniSource 全源同屏混排'],sOmni:['Show USB / SD drives next to streaming in one browser and search','在流媒体浏览和搜索里同时显示 U 盘 / SD 卡','在串流瀏覽和搜尋裡同時顯示隨身碟 / SD 卡'],
 tAnalyze:['Auto-analyze drives','插盘后台自动分析','插碟後台自動分析'],sAnalyze:['Analyze new tracks in the background when a drive is inserted','插入 U 盘或 SD 卡后在后台分析新歌','插入隨身碟或 SD 卡後在背景分析新歌'],
 tShare:['Pro DJ Link library','Pro DJ Link 曲库','Pro DJ Link 曲庫'],sShare:['Read the USB drives of CDJs on the network','读取局域网内 CDJ 的 U 盘','讀取區域網路內 CDJ 的隨身碟'],
-tExport:['Pro DJ Link export to CDJ','Pro DJ Link 共享本机 U 盘给 CDJ','Pro DJ Link 分享本機隨身碟給 CDJ'],sExport:['Let CDJs browse this deck’s USB drive. Not yet tested on a real CDJ','让 CDJ 浏览本机 U 盘；尚未在真 CDJ 上验证','讓 CDJ 瀏覽本機隨身碟；尚未在實機 CDJ 上驗證'],beta:['Beta','实验性','實驗性'],needRbUsb:['Plug in a USB drive with a rekordbox export first: this deck shares only rekordbox USB drives with CDJs.','请先插入带 rekordbox 导出的 U 盘：本机只能把 rekordbox U 盘共享给 CDJ。','請先插入帶 rekordbox 匯出的隨身碟：本機只能把 rekordbox 隨身碟分享給 CDJ。'],
+waitRbUsb:['On: starts by itself once a rekordbox USB is plugged in','已开启：插入 rekordbox U 盘后自动开始共享','已開啟：插入 rekordbox 隨身碟後自動開始分享'],tExport:['Pro DJ Link export to CDJ','Pro DJ Link 共享本机 U 盘给 CDJ','Pro DJ Link 分享本機隨身碟給 CDJ'],sExport:['Let CDJs browse this deck’s USB drive. Not yet tested on a real CDJ','让 CDJ 浏览本机 U 盘；尚未在真 CDJ 上验证','讓 CDJ 瀏覽本機隨身碟；尚未在實機 CDJ 上驗證'],beta:['Beta','实验性','實驗性'],needRbUsb:['Plug in a USB drive with a rekordbox export first: this deck shares only rekordbox USB drives with CDJs.','请先插入带 rekordbox 导出的 U 盘：本机只能把 rekordbox U 盘共享给 CDJ。','請先插入帶 rekordbox 匯出的隨身碟：本機只能把 rekordbox 隨身碟分享給 CDJ。'],
 jobsTitle:['Downloads & analysis','下载与分析','下載與分析'],waveAria:['RGB waveform of the newest track','最新曲目的 RGB 波形','最新曲目的 RGB 波形'],
 bcTitle:['Shoutcast / Icecast live stream','Shoutcast / Icecast 直播推流','Shoutcast / Icecast 直播推流'],bcUrl:['Server, e.g. http://icecast.example.com:8000','推流地址，如 http://icecast.example.com:8000','推流位址，如 http://icecast.example.com:8000'],bcPass:['Stream password (empty keeps it)','推流密码（留空不改）','推流密碼（留空不改）'],bcSave:['Save stream settings','保存推流设置','儲存推流設定'],bcStart:['Start streaming','开启推流','開始推流'],bcStop:['Stop streaming','停止推流','停止推流'],
 relayTitle:['Cloud login relay','云端登录服务','雲端登入服務'],relayUrl:['https://relay.example.com (your sc5000-relay)','https://relay.example.com（自建 sc5000-relay 地址）','https://relay.example.com（自建 sc5000-relay 位址）'],newPassword:['New password (empty keeps it)','新密码（留空不改）','新密碼（留空不改）'],save:['Save','保存','儲存'],
@@ -236,13 +236,16 @@ const toggleKeys=['upfaderEcho','masterLimiter','autoGain','omniSource','autoAna
 function showUI(v){lastUI=v;
  if(v.version){$('version').textContent='v'+v.version;$('version').hidden=false}
  for(const e of document.querySelectorAll('[data-toggle]'))e.checked=!!v[e.dataset.toggle];
+ const tg=k=>document.querySelector('[data-toggle="'+k+'"]');
+ tg('upfaderEcho').closest('.setting').hidden=!!v.player; // #52: players have no channel faders
+ why(tg('prolinkExport'),v.prolinkExport&&!v.prolinkExportActive?t('waitRbUsb'):'');
  const segs={quality:v.quality,lang:v.language,waveform:v.waveform};
  for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.classList.toggle('on',b.dataset.v===segs[g.dataset.seg]);
  const lname={en:'English','zh-Hans':'简体中文','zh-Hant':'繁體中文'}[v.language]||v.language;
  $('uiState').textContent=t('current')+': '+lname+' · '+v.waveform+' · '+v.quality+(v.safeMode?' · '+t('safeMode'):'')}
 // A refused switch says why under its own label, not only in the toast.
 function why(e,m){const txt=e.closest('.setting').querySelector('.txt');let w=txt.querySelector('.why');if(!m){if(w)w.remove();return}if(!w){w=document.createElement('span');w.className='sub why';txt.append(w)}w.textContent=/rekordbox usb export/i.test(m)?t('needRbUsb'):m}
-for(const e of document.querySelectorAll('[data-toggle]'))e.onchange=async()=>{e.disabled=true;try{showUI(await post('ui?'+e.dataset.toggle+'='+(e.checked?1:0)));why(e)}catch(err){e.checked=!e.checked;why(e,err.message)}finally{e.disabled=false}};
+for(const e of document.querySelectorAll('[data-toggle]'))e.onchange=async()=>{e.disabled=true;try{why(e);showUI(await post('ui?'+e.dataset.toggle+'='+(e.checked?1:0)))}catch(err){e.checked=!e.checked;why(e,err.message)}finally{e.disabled=false}};
 for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.onclick=()=>action(async()=>{let q=g.dataset.seg+'='+b.dataset.v;if(g.dataset.seg==='lang'){if(!confirm(t('restartAsk')))return;q+='&restart=1'}showUI(await post('ui?'+q))});
 const kinds={internal:'kInternal',hd:'kHd',sd:'kSd',usb:'kUsb',drive:'kDrive'},gb=n=>(n/2**30).toFixed(1);
 function renderDrives(){const sel=$('dropDrive'),keep=sel.value;sel.replaceChildren();for(const d of lastDrives){const o=document.createElement('option');o.value=d.name;o.textContent=t(kinds[d.kind]||'kDrive')+' · '+d.name+' · '+t('free',gb(d.free));sel.append(o)}if(!lastDrives.length){const o=document.createElement('option');o.textContent=t('noDrive');o.disabled=true;o.selected=true;sel.append(o)}if(lastDrives.some(d=>d.name===keep))sel.value=keep;showStore()}
