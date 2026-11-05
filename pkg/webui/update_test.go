@@ -77,10 +77,13 @@ func TestNewerVersion(t *testing.T) {
 
 func TestImagePrefix(t *testing.T) {
 	for in, want := range map[string]string{
-		"inmusic,jp07\x00rockchip,rk3288": "SC5000",
-		"inmusic,jc16":                    "PRIME2",
-		"inmusic,jp21":                    "SCLIVE4",
-		"rockchip,rk3288":                 "",
+		"inmusic,jp07\x00rockchip,rk3288":  "SC5000",
+		"inmusic,jc16":                     "PRIME2",
+		"inmusic,jp21":                     "SCLIVE4",
+		"inmusic,jp20":                     "SCLIVE2",
+		"inmusic,jc11s\x00rockchip,rk3288": "PRIME4PLUS",
+		"inmusic,jp11s":                    "PRIMEGOPLUS",
+		"rockchip,rk3288":                  "",
 	} {
 		if got := imagePrefix(strings.Split(in, "\x00")); got != want {
 			t.Errorf("imagePrefix(%q) = %q, want %q", in, got, want)
