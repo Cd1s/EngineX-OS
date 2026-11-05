@@ -639,3 +639,21 @@ func TestListenContextCancellationAndPort50001Busy(t *testing.T) {
 		t.Fatalf("unexpected listen error: %v", err)
 	}
 }
+
+// A player number that named another device for a while (two players claimed it)
+// must not keep that device's track metadata once the real player answers.
+func TestTrackMetadataIsPerHost(t *testing.T) {
+	d := prolink.NewDiscovery()
+	d.SetResolver(func(dev prolink.Device) (*rekordbox.Analysis, string, string) {
+		return nil, "Song on " + dev.Address, ""
+	})
+	status := func(addr string) prolink.Device {
+		return d.Observe(prolink.Device{Address: addr, Number: 3, PacketType: 10, TrackID: 1, SourcePlayer: 3, SourceSlot: 3})
+	}
+	if got := status("192.168.50.12").Title; got != "Song on 192.168.50.12" {
+		t.Fatalf("first: %q", got)
+	}
+	if got := status("192.168.50.249").Title; got != "Song on 192.168.50.249" {
+		t.Fatalf("other host kept stale metadata: %q", got)
+	}
+}

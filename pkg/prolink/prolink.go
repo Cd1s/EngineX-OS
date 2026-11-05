@@ -623,7 +623,14 @@ func (d *Discovery) Observe(device Device) Device {
 		host         net.IP
 	)
 	if device.TrackID != 0 && (len(device.Waveform) == 0 || len(device.Beats) == 0 || device.Title == "") {
-		cacheKey = fmt.Sprintf("%d:%d:%d", device.SourcePlayer, device.SourceSlot, device.TrackID)
+		// The media's host is in the key: a player number can name another device for
+		// a while (two players claiming it, a swapped player), and its track 1 is a
+		// different song. A player's own drive is on the player itself.
+		host = net.ParseIP(device.Address)
+		if device.SourcePlayer != device.Number {
+			host = d.hostIP(device.SourcePlayer)
+		}
+		cacheKey = fmt.Sprintf("%s:%d:%d:%d", host, device.SourcePlayer, device.SourceSlot, device.TrackID)
 		if cached, ok := d.trackCache[cacheKey]; ok {
 			if len(device.Waveform) == 0 {
 				device.Waveform = cached.waveform
@@ -645,11 +652,7 @@ func (d *Discovery) Observe(device Device) Device {
 			resolver = d.resolver
 			anlzRoot = d.anlzRoot
 			// Remote media (#59): look the host up now, fetch over NFS with the lock released.
-			if media = d.media; media != nil {
-				if host = d.hostIP(device.SourcePlayer); host == nil && device.SourcePlayer == device.Number {
-					host = net.ParseIP(device.Address)
-				}
-			}
+			media = d.media
 		}
 	}
 
