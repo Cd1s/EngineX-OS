@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -46,11 +47,24 @@ type Device struct {
 	OnAir                    bool            `json:"on_air,omitempty"`
 	Master                   bool            `json:"master,omitempty"`
 	Sync                     bool            `json:"sync,omitempty"`
+	BPMSync                  bool            `json:"bpm_sync,omitempty"`
+	MasterHandoff            byte            `json:"master_handoff,omitempty"`
+	PlayState1               byte            `json:"play_state_1,omitempty"`
+	BeatPhase                float64         `json:"beat_phase,omitempty"`
 	Title                    string          `json:"title,omitempty"`
 	Artist                   string          `json:"artist,omitempty"`
 	DurationMS               uint32          `json:"duration_ms,omitempty"`
 	Waveform                 [][3]byte       `json:"waveform,omitempty"`
 	Beats                    []BeatGridPoint `json:"beats,omitempty"`
+}
+
+type DeckSyncInfo struct {
+	MasterNumber  byte    `json:"master_number"`
+	BPMDelta      float64 `json:"bpm_delta"`
+	PhaseOffsetMS float64 `json:"phase_offset_ms"`
+	PhasePct      float64 `json:"phase_pct"`
+	BeatAligned   bool    `json:"beat_aligned"`
+	SameTrack     bool    `json:"same_track"`
 }
 
 // ParsePacket only accepts known packet shapes on their corresponding ports.
@@ -128,10 +142,12 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 		d.SourcePlayer = b[0x28]
 		d.SourceSlot = b[0x29]
 		d.TrackID = binary.BigEndian.Uint32(b[0x2c:])
+		d.PlayState1 = b[0x7b]
 		d.Playing = b[0x89]&0x40 != 0 || len(b) < 0xd4 && (b[0x7b] == 3 || b[0x7b] == 4 || b[0x7b] == 9)
 		d.Master = b[0x89]&0x20 != 0
 		d.Sync = b[0x89]&0x10 != 0
 		d.OnAir = b[0x89]&0x08 != 0
+		d.BPMSync = b[0x89]&0x02 != 0
 		rawPitch := binary.BigEndian.Uint32(b[0x8c:0x90])
 		d.Pitch = (float64(rawPitch) - float64(0x100000)) / float64(0x100000) * 100
 		rawBPM := binary.BigEndian.Uint16(b[0x92:0x94])
@@ -139,6 +155,7 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 			d.BPM = float64(rawBPM) / 100.0
 			d.EffectiveBPM = d.BPM * (1 + d.Pitch/100)
 		}
+		d.MasterHandoff = b[0x9f]
 		rawBeat := binary.BigEndian.Uint32(b[0xa0:0xa4])
 		if rawBeat > 0 && rawBeat != 0xffffffff {
 			d.Beat = rawBeat
@@ -149,6 +166,17 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 		// 0xb4 is not a timestamp (0xb7 is CDJ-3000 media presence).
 		if d.Beat > 0 && d.BPM > 0 {
 			d.PlayPositionMS = uint32(float64(d.Beat-1) * 60000.0 / d.BPM)
+		}
+		eff := d.EffectiveBPM
+		if eff <= 0 {
+			eff = d.BPM
+		}
+		if eff > 0 {
+			beatMS := 60000.0 / eff
+			d.BeatPhase = math.Mod(float64(d.PlayPositionMS), beatMS) / beatMS
+			if d.BeatPhase < 0 {
+				d.BeatPhase += 1.0
+			}
 		}
 	default:
 		return d, fmt.Errorf("prolink: unsupported packet type/port")
@@ -248,18 +276,71 @@ func ExtractANLZ(a *rekordbox.Analysis) (waveform [][3]byte, beats []BeatGridPoi
 }
 
 type Snapshot struct {
-	UpdatedAt time.Time         `json:"updatedAt"`
-	Devices   []Device          `json:"devices"`
-	Decks     map[string]Device `json:"decks"`
+	UpdatedAt    time.Time               `json:"updatedAt"`
+	Devices      []Device                `json:"devices"`
+	Decks        map[string]Device       `json:"decks"`
+	MasterDevice *Device                 `json:"master_device,omitempty"`
+	SyncStatus   map[string]DeckSyncInfo `json:"sync_status,omitempty"`
+}
+
+// ComputeDeckSync calculates cross-brand master/sync phase offset, BPM delta,
+// alignment flag and same-track identification.
+func ComputeDeckSync(d, master Device) DeckSyncInfo {
+	effBPM := master.EffectiveBPM
+	if effBPM <= 0 {
+		effBPM = master.BPM
+	}
+	if effBPM <= 0 {
+		return DeckSyncInfo{MasterNumber: master.Number}
+	}
+	masterBeatMS := 60000.0 / effBPM
+	bpmDelta := d.EffectiveBPM - master.EffectiveBPM
+
+	phaseOffsetMS := (d.BeatPhase - master.BeatPhase) * masterBeatMS
+	for phaseOffsetMS > masterBeatMS/2 {
+		phaseOffsetMS -= masterBeatMS
+	}
+	for phaseOffsetMS < -masterBeatMS/2 {
+		phaseOffsetMS += masterBeatMS
+	}
+	phasePct := (phaseOffsetMS / masterBeatMS) * 100.0
+
+	beatAligned := math.Abs(phaseOffsetMS) <= 15.0 && math.Abs(bpmDelta) <= 0.05
+	sameTrack := (d.TrackID != 0 && d.TrackID == master.TrackID && d.SourcePlayer == master.SourcePlayer && d.SourceSlot == master.SourceSlot) || (d.Title != "" && d.Title == master.Title)
+
+	return DeckSyncInfo{
+		MasterNumber:  master.Number,
+		BPMDelta:      bpmDelta,
+		PhaseOffsetMS: phaseOffsetMS,
+		PhasePct:      phasePct,
+		BeatAligned:   beatAligned,
+		SameTrack:     sameTrack,
+	}
 }
 
 // BuildSnapshot filters active devices and populates standard decks map.
 func BuildSnapshot(devices []Device) Snapshot {
 	now := time.Now()
 	active := make([]Device, 0, len(devices))
+	var masterDev *Device
 	for _, d := range devices {
 		if d.LastSeen.IsZero() || now.Sub(d.LastSeen) <= 10*time.Second {
+			eff := d.EffectiveBPM
+			if eff <= 0 {
+				eff = d.BPM
+			}
+			if eff > 0 {
+				beatMS := 60000.0 / eff
+				d.BeatPhase = math.Mod(float64(d.PlayPositionMS), beatMS) / beatMS
+				if d.BeatPhase < 0 {
+					d.BeatPhase += 1.0
+				}
+			}
 			active = append(active, d)
+			if d.Master && masterDev == nil {
+				dCopy := d
+				masterDev = &dCopy
+			}
 		}
 	}
 	decks := make(map[string]Device)
@@ -278,10 +359,21 @@ func BuildSnapshot(devices []Device) Snapshot {
 			decks["4"] = d2
 		}
 	}
+	var syncStatus map[string]DeckSyncInfo
+	if masterDev != nil {
+		syncStatus = make(map[string]DeckSyncInfo)
+		for _, d := range active {
+			if d.Number >= 1 && d.Number <= 4 {
+				syncStatus[strconv.Itoa(int(d.Number))] = ComputeDeckSync(d, *masterDev)
+			}
+		}
+	}
 	return Snapshot{
-		UpdatedAt: now,
-		Devices:   active,
-		Decks:     decks,
+		UpdatedAt:    now,
+		Devices:      active,
+		Decks:        decks,
+		MasterDevice: masterDev,
+		SyncStatus:   syncStatus,
 	}
 }
 

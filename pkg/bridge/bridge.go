@@ -14,6 +14,7 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -55,6 +56,9 @@ func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 		return nil, e
 	}
 	for _, p := range []string{"PIONEER/rekordbox/export.pdb", "PIONEER/rekordbox/exportLibrary.db", "PIONEER/rekordbox/exportOneLibrary.db"} {
+		if p == "PIONEER/rekordbox/export.pdb" && prolink.GeneratedExport(mount) {
+			continue // made from this drive's own Engine library for CDJs (#63): nothing to import
+		}
 		rel, e := r.Resolve(p)
 		if errors.Is(e, os.ErrNotExist) {
 			continue
@@ -208,6 +212,9 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	}
 	var rel string
 	for _, p := range []string{"PIONEER/rekordbox/export.pdb", "PIONEER/rekordbox/exportLibrary.db", "PIONEER/rekordbox/exportOneLibrary.db"} {
+		if p == "PIONEER/rekordbox/export.pdb" && prolink.GeneratedExport(mount) {
+			continue // made from this drive's own Engine library for CDJs (#63): nothing to import
+		}
 		if resolved, e := r.Resolve(p); e == nil {
 			rel = resolved
 			break

@@ -295,7 +295,10 @@ func MountedExports() []string {
 			continue
 		}
 		root := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\134`, `\`).Replace(fields[1])
-		if st, err := os.Stat(filepath.Join(root, "PIONEER", "rekordbox", "export.pdb")); err == nil && st.Mode().IsRegular() {
+		pdb, pdbErr := os.Stat(filepath.Join(root, "PIONEER", "rekordbox", "export.pdb"))
+		mdb, mdbErr := os.Stat(filepath.Join(root, "Engine Library", "Database2", "m.db"))
+		// A rekordbox export, or an Engine library the bridge exports for CDJs (#63).
+		if pdbErr == nil && pdb.Mode().IsRegular() || mdbErr == nil && mdb.Mode().IsRegular() {
 			roots = append(roots, root)
 		}
 	}
@@ -417,6 +420,10 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 	}
 	if st, err := os.Lstat(root); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("prolink: export root must be a real directory")
+	}
+	// An Engine-only drive gets an export.pdb for the CDJs; a real rekordbox export is left alone.
+	if err := SyncEngineToPioneerExport(root); err != nil {
+		return nil, err
 	}
 	nfs := &NFSServer{Root: root}
 	rel := ""
