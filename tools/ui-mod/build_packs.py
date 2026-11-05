@@ -297,6 +297,7 @@ SERVICES_MAIN = """
 	}
 	// Every service is backed by Engine's TIDAL provider; the gateway follows the scope.
 	function scOpen(id) {
+		scAskedAt = Date.now()
 		scEnsureTidal()
 		scCall("scope=" + id, function() {
 			Planck.librarianController.streamingPlaylistsController.invalidateUI()
@@ -305,6 +306,19 @@ SERVICES_MAIN = """
 			scEnterTimer.start()
 			if (id !== "tidal" && scLoggedIn.indexOf(id) < 0) scLoginBegin(id)
 		})
+	}
+	// Engine's own login and pairing prompts for that provider belong to a tap on a
+	// service in the source list. Engine also raises them by itself, for instance
+	// after a restart with TIDAL last shown or for a track from an old TIDAL login,
+	// and then asked to log in to TIDAL again and again (#48). Close those as the
+	// cross would.
+	property double scAskedAt: 0
+	function scUnasked(provider) {
+		if (Date.now() - scAskedAt < 120000) return false
+		const c = Planck.librarianController.streamingInterfaceController
+		if (provider && !provider.loggedIn && c.selectedProvider === provider) c.cancelPairing()
+		c.restorePreviouslySelectedSource()
+		return true
 	}
 	property string scLogin: ""
 	property string scLoginStatus: ""
@@ -954,6 +968,12 @@ def edits(dev: bool):
         # The flag is still cleared, which is what pressing "Ok" would do.
         ROOT + "Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml": [(
             "      let messageObject = {", "      Planck.librarianController.deviceEjectedImproperly = false\n      return\n      let messageObject = {")],
+        # The hook already admits every filesystem type (0x1897dcc / 0x1a28e04), yet an
+        # exFAT card still got "reformat the drive to exFAT or FAT32" (#48), likely for
+        # a partition with no filesystem (EFI, hidden) next to the one that mounted.
+        # Nothing here can repair a drive; one that does not mount stays off the list.
+        ROOT + "Items/MessageBoxes/UnsupportedStorageDeviceDetectedMessageBox.qml": [(
+            "function onUnsupportedStorageDeviceDetected(name) {\n", "function onUnsupportedStorageDeviceDetected(name) {\n			return\n")],
         ROOT + "EmbeddedMain.qml": [
             (f"	Connections {{\n		target: {window()}\n", services + main + f"\n	Connections {{\n		target: {window()}\n"),
             ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG),
@@ -1075,6 +1095,7 @@ def edits(dev: bool):
                 '						text: service.provider ? `Connecting to ${service.provider.displayName}` : ""\n',
                 '						text: service.provider ? root.scT("Connecting to") + " " + root.scBrand(service.provider.displayName) : ""\n',
             ),
+            ("function onShowAcceptDenyDialog(provider) {\n", "function onShowAcceptDenyDialog(provider) {\n				if (root.scUnasked(provider)) return\n"),
         ],
         v + "Streaming/StreamingUtilityDialog.qml": [(
             '            color: Style.icon01Color\n'
@@ -1095,6 +1116,7 @@ def edits(dev: bool):
                 '					text: `Log in to ${loginDialog.provider ? loginDialog.provider.displayName: ""} to access your tracks and playlists`\n',
                 '					text: root.scBrand(`Log in to ${loginDialog.provider ? loginDialog.provider.displayName: ""} to access your tracks and playlists`)\n',
             ),
+            ("function onShowLoginDialog(provider) {\n", "function onShowLoginDialog(provider) {\n			if (root.scUnasked(provider)) return\n"),
         ],
         v + "BrowseView/Components/TrackList.qml": [
             (
