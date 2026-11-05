@@ -117,6 +117,67 @@ SERVICES_MAIN = """
 			root.scFourWaveSet = true
 		}
 	}
+	// #49 shadow decks: post this player's decks for the other EngineX player and
+	// drive the decks it does not play from GET /v1/sc5000/shadow (a CDJ or the
+	// other player); the hook keeps them silent. Units measured on a JP07:
+	// TrackPosition/TrackLength are track samples, Speed is the fader (0.5 = 0 %,
+	// 0..1 = the SpeedRange), Play toggles.
+	property var scShadowAt: ({})
+	Timer {
+		interval: 250; repeat: true
+		running: root.scFourDeckRole !== ""
+		onTriggered: root.scShadowTick()
+	}
+	function scShadowTick() {
+		const g = (d, p) => Planck.getProperty("/Engine/Deck" + d + p).translator
+		const own = []
+		for (const c of scFourDeckRole) {
+			const d = parseInt(c)
+			const sr = g(d, "/Track/SampleRate").value
+			own.push({deck: d, net: g(d, "/Track/SongLoaded").state ? g(d, "/Track/TrackNetworkPath").string : "",
+				playing: !!g(d, "/PlayState").state, positionMs: sr > 0 ? g(d, "/Track/TrackPosition").unnormalized / sr * 1000 : 0,
+				pitch: parseFloat(g(d, "/SpeedState").string) || 0})
+		}
+		const post = new XMLHttpRequest()
+		post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks")
+		post.send(JSON.stringify(own))
+		const x = new XMLHttpRequest()
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow")
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4 || x.status !== 200) return
+			for (const e of JSON.parse(x.responseText).decks || []) root.scShadowApply(e)
+		}
+		x.send()
+	}
+	function scShadowApply(e) {
+		const d = e.deck
+		if (scFourDeckRole.indexOf(String(d)) >= 0 || !e.path) return
+		const g = p => Planck.getProperty("/Engine/Deck" + d + p).translator
+		const now = Date.now()
+		const at = scShadowAt[d] || {path: "", act: 0}
+		if (at.path !== e.path) {
+			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck" + d).translator.url = "file://" + encodeURI(e.path)
+			scShadowAt[d] = {path: e.path, act: now + 1500}
+			return
+		}
+		if (now < at.act || !g("/Track/SongLoaded").state) return
+		const range = parseFloat(g("/SpeedRange").string) || 8
+		const speed = Math.max(0, Math.min(1, 0.5 + e.pitch / (2 * range)))
+		if (Math.abs(g("/Speed").value - speed) > 0.002) g("/Speed").value = speed
+		if (!!g("/PlayState").state !== e.playing) {
+			Planck.getProperty("/Engine/Deck" + d + "/Play").translator.state = true // a toggle
+			at.act = now + 700
+			return
+		}
+		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
+		if (sr > 0 && len > 0) {
+			const here = g("/Track/TrackPosition").unnormalized / sr * 1000
+			if (Math.abs(here - e.positionMs) > (e.playing ? 150 : 30)) {
+				g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, e.positionMs / (len / sr * 1000)))
+				at.act = now + 500
+			}
+		}
+	}
 	function scRestartCall(query) {
 		const prompt = PlanckGUI.views.prompts.post({
 			type: Prompt.Warning,

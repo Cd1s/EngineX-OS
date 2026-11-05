@@ -318,12 +318,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
 	v.ProlinkExportActive = s.prolinkExport != nil && s.prolinkExport.Status().Enabled
 	v.Player = playerBoards[imagePrefix(deviceCompatible())]
-	if v.FourDeckWaveform {
-		b, _ := os.ReadFile(fourDeckRolePath)
-		if role := strings.TrimSpace(string(b)); slices.Contains(uiFourDeckRoles[1:], role) {
-			v.FourDeckRoleActive = role
-		}
-	}
+	v.FourDeckRoleActive = s.activeRole(v)
 	respond(w, v)
 }
 
