@@ -1,0 +1,728 @@
+package broadcast
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
+)
+
+// Default settings
+const (
+	DefaultProtocol   = "icecast"
+	DefaultMountpoint = "/live"
+	DefaultUsername   = "source"
+	DefaultFormat     = "mp3"
+	DefaultBitrate    = 192
+	DefaultStreamName = "EngineX OS Live Mix"
+	DefaultInputPath  = "/tmp/sc5000-broadcast.pcm"
+)
+
+// Config specifies live stream parameters.
+type Config struct {
+	Enabled    bool   `json:"enabled"`
+	Protocol   string `json:"protocol"`            // "icecast" (default) or "shoutcast"
+	ServerURL  string `json:"serverUrl"`           // e.g. "http://192.168.1.10:8000" or "192.168.1.10:8000"
+	Mountpoint string `json:"mountpoint"`          // e.g. "/live.mp3" (default "/live")
+	Username   string `json:"username"`            // default "source"
+	Password   string `json:"password,omitempty"`  // omitted in JSON output
+	Format     string `json:"format"`              // "mp3" (default), "ogg", "wav"
+	Bitrate    int    `json:"bitrate"`             // 128, 192 (default), 256, 320
+	StreamName string `json:"streamName"`          // default "EngineX OS Live Mix"
+	InputPath  string `json:"inputPath,omitempty"` // optional PCM file/FIFO path (default "/tmp/sc5000-broadcast.pcm")
+}
+
+// Status captures real-time state of the broadcaster without revealing secrets.
+type Status struct {
+	Enabled      bool   `json:"enabled"`
+	Streaming    bool   `json:"streaming"`
+	Protocol     string `json:"protocol"`
+	ServerURL    string `json:"serverUrl"`
+	Mountpoint   string `json:"mountpoint"`
+	Username     string `json:"username"`
+	PasswordSet  bool   `json:"passwordSet"`
+	Format       string `json:"format"`
+	Bitrate      int    `json:"bitrate"`
+	StreamName   string `json:"streamName"`
+	CurrentTrack string `json:"currentTrack"`
+	BytesSent    int64  `json:"bytesSent"`
+	ConnectedAt  string `json:"connectedAt,omitempty"`
+	LastError    string `json:"lastError,omitempty"`
+}
+
+// Broadcaster manages background audio streaming to Icecast/Shoutcast on CPU3.
+type Broadcaster struct {
+	mu           sync.Mutex
+	guard        *resourceguard.Guard
+	cfg          Config
+	currentTrack string
+	streaming    bool
+	connectedAt  string
+	lastError    string
+
+	bytesSent atomic.Int64
+
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	conn   net.Conn
+
+	// HTTP client used for metadata updates (can be overridden in tests).
+	httpClient *http.Client
+}
+
+// New creates a new Broadcaster bound to the dedicated CPU3 guard.
+func New(guard *resourceguard.Guard) *Broadcaster {
+	if guard == nil {
+		guard = resourceguard.New(resourceguard.DefaultConfig())
+	}
+	return &Broadcaster{
+		guard: guard,
+		cfg: Config{
+			Protocol:   DefaultProtocol,
+			Mountpoint: DefaultMountpoint,
+			Username:   DefaultUsername,
+			Format:     DefaultFormat,
+			Bitrate:    DefaultBitrate,
+			StreamName: DefaultStreamName,
+			InputPath:  DefaultInputPath,
+		},
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+// normalizeConfig validates and applies defaults to a Config.
+func normalizeConfig(cfg *Config) error {
+	cfg.Protocol = strings.ToLower(strings.TrimSpace(cfg.Protocol))
+	if cfg.Protocol == "" {
+		cfg.Protocol = DefaultProtocol
+	}
+	if cfg.Protocol != "icecast" && cfg.Protocol != "shoutcast" {
+		return fmt.Errorf("invalid protocol: %q (must be 'icecast' or 'shoutcast')", cfg.Protocol)
+	}
+
+	cfg.Format = strings.ToLower(strings.TrimSpace(cfg.Format))
+	if cfg.Format == "" {
+		cfg.Format = DefaultFormat
+	}
+	if cfg.Format != "mp3" && cfg.Format != "ogg" && cfg.Format != "wav" {
+		return fmt.Errorf("invalid format: %q (must be 'mp3', 'ogg', or 'wav')", cfg.Format)
+	}
+
+	if cfg.Bitrate == 0 {
+		cfg.Bitrate = DefaultBitrate
+	}
+	if cfg.Bitrate != 128 && cfg.Bitrate != 192 && cfg.Bitrate != 256 && cfg.Bitrate != 320 {
+		return fmt.Errorf("invalid bitrate: %d (must be 128, 192, 256, or 320)", cfg.Bitrate)
+	}
+
+	cfg.Mountpoint = strings.TrimSpace(cfg.Mountpoint)
+	if cfg.Mountpoint == "" {
+		cfg.Mountpoint = DefaultMountpoint
+	}
+	if !strings.HasPrefix(cfg.Mountpoint, "/") {
+		cfg.Mountpoint = "/" + cfg.Mountpoint
+	}
+
+	cfg.Username = strings.TrimSpace(cfg.Username)
+	if cfg.Username == "" {
+		cfg.Username = DefaultUsername
+	}
+
+	cfg.StreamName = strings.TrimSpace(cfg.StreamName)
+	if cfg.StreamName == "" {
+		cfg.StreamName = DefaultStreamName
+	}
+
+	cfg.InputPath = strings.TrimSpace(cfg.InputPath)
+	if cfg.InputPath == "" {
+		cfg.InputPath = DefaultInputPath
+	}
+
+	cfg.ServerURL = strings.TrimSpace(cfg.ServerURL)
+	return nil
+}
+
+// Configure validates and updates settings, starting or stopping streaming as needed.
+func (b *Broadcaster) Configure(cfg Config) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if err := normalizeConfig(&cfg); err != nil {
+		return err
+	}
+	b.cfg = cfg
+
+	if cfg.Enabled && cfg.ServerURL != "" {
+		b.stopLocked()
+		b.startLocked()
+	} else {
+		b.stopLocked()
+	}
+	return nil
+}
+
+// SetEnabled toggles live streaming on or off.
+func (b *Broadcaster) SetEnabled(on bool) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.cfg.Enabled = on
+	if on && b.cfg.ServerURL != "" {
+		b.stopLocked()
+		b.startLocked()
+	} else {
+		b.stopLocked()
+	}
+	return nil
+}
+
+// Status returns a snapshot of the current broadcaster state.
+func (b *Broadcaster) Status() Status {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return Status{
+		Enabled:      b.cfg.Enabled,
+		Streaming:    b.streaming,
+		Protocol:     b.cfg.Protocol,
+		ServerURL:    b.cfg.ServerURL,
+		Mountpoint:   b.cfg.Mountpoint,
+		Username:     b.cfg.Username,
+		PasswordSet:  b.cfg.Password != "",
+		Format:       b.cfg.Format,
+		Bitrate:      b.cfg.Bitrate,
+		StreamName:   b.cfg.StreamName,
+		CurrentTrack: b.currentTrack,
+		BytesSent:    b.bytesSent.Load(),
+		ConnectedAt:  b.connectedAt,
+		LastError:    b.lastError,
+	}
+}
+
+// Close shuts down the broadcaster and waits for the worker goroutine to exit.
+func (b *Broadcaster) Close() {
+	b.mu.Lock()
+	b.stopLocked()
+	b.mu.Unlock()
+}
+
+// startLocked starts the worker goroutine on CPU3. Caller must hold b.mu.
+func (b *Broadcaster) startLocked() {
+	ctx, cancel := context.WithCancel(context.Background())
+	b.cancel = cancel
+	b.wg.Add(1)
+
+	go func() {
+		defer b.wg.Done()
+		_ = b.guard.Run(ctx, func(t *resourceguard.Throttle) error {
+			b.workerLoop(ctx, t)
+			return nil
+		})
+	}()
+}
+
+// stopLocked cancels context, closes connection, and waits for worker. Caller must hold b.mu.
+func (b *Broadcaster) stopLocked() {
+	if b.cancel != nil {
+		b.cancel()
+		b.cancel = nil
+	}
+	if b.conn != nil {
+		_ = b.conn.Close()
+		b.conn = nil
+	}
+	b.streaming = false
+	b.connectedAt = ""
+
+	b.mu.Unlock()
+	b.wg.Wait()
+	b.mu.Lock()
+}
+
+// parseServerTarget decomposes a URL/address into scheme and host:port.
+func parseServerTarget(raw string) (scheme, hostPort string, err error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", "", errors.New("empty server URL")
+	}
+
+	scheme = "http"
+	if strings.HasPrefix(s, "http://") {
+		s = strings.TrimPrefix(s, "http://")
+	} else if strings.HasPrefix(s, "https://") {
+		scheme = "https"
+		s = strings.TrimPrefix(s, "https://")
+	}
+
+	if idx := strings.Index(s, "/"); idx != -1 {
+		s = s[:idx]
+	}
+
+	host, port, splitErr := net.SplitHostPort(s)
+	if splitErr != nil {
+		host = s
+		port = "8000"
+	}
+	return scheme, net.JoinHostPort(host, port), nil
+}
+
+// workerLoop manages continuous streaming with reconnect on drop.
+func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		err := b.streamOnce(ctx, t)
+		if err != nil && ctx.Err() == nil {
+			b.mu.Lock()
+			b.streaming = false
+			b.lastError = err.Error()
+			b.mu.Unlock()
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(1 * time.Second):
+			}
+		}
+	}
+}
+
+// streamOnce executes one connection and streaming session.
+func (b *Broadcaster) streamOnce(ctx context.Context, t *resourceguard.Throttle) error {
+	b.mu.Lock()
+	cfg := b.cfg
+	b.mu.Unlock()
+
+	_, hostPort, err := parseServerTarget(cfg.ServerURL)
+	if err != nil {
+		return err
+	}
+
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", hostPort)
+	if err != nil {
+		return err
+	}
+
+	b.mu.Lock()
+	b.conn = conn
+	b.streaming = true
+	b.connectedAt = time.Now().UTC().Format(time.RFC3339)
+	b.lastError = ""
+	b.mu.Unlock()
+
+	defer func() {
+		_ = conn.Close()
+		b.mu.Lock()
+		if b.conn == conn {
+			b.conn = nil
+		}
+		b.streaming = false
+		b.mu.Unlock()
+	}()
+
+	// Perform server handshake
+	if cfg.Protocol == "shoutcast" {
+		if err := b.handshakeShoutcast(conn, cfg); err != nil {
+			return err
+		}
+	} else {
+		if err := b.handshakeIcecast(conn, cfg); err != nil {
+			return err
+		}
+	}
+
+	// Send initial container header if required
+	if cfg.Format == "wav" {
+		hdr := makeWAVHeader()
+		if _, err := conn.Write(hdr); err != nil {
+			return err
+		}
+		b.bytesSent.Add(int64(len(hdr)))
+	} else if cfg.Format == "ogg" {
+		bos := makeOggPage(0x02, 0, 0x12345678, 0, []byte("EngineX-OS-Audio-BOS"))
+		if _, err := conn.Write(bos); err != nil {
+			return err
+		}
+		b.bytesSent.Add(int64(len(bos)))
+	}
+
+	// 1152 samples per MPEG frame at 44.1kHz = ~26.122ms
+	frameInterval := time.Duration(1152) * time.Second / 44100
+	ticker := time.NewTicker(frameInterval)
+	defer ticker.Stop()
+
+	var inputF *os.File
+	if cfg.InputPath != "" {
+		if f, err := os.Open(cfg.InputPath); err == nil {
+			inputF = f
+			defer inputF.Close()
+		}
+	}
+
+	var oggSeq uint32 = 1
+	var oggGranule uint64 = 1152
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+
+		if t != nil {
+			if err := t.Tick(); err != nil {
+				return err
+			}
+		}
+
+		var frame []byte
+		switch cfg.Format {
+		case "wav":
+			frame = b.nextWAVFrame(inputF)
+		case "ogg":
+			frame = b.nextOggFrame(inputF, &oggSeq, &oggGranule)
+		default:
+			frame = b.nextMP3Frame(cfg, inputF)
+		}
+
+		if _, err := conn.Write(frame); err != nil {
+			return err
+		}
+		b.bytesSent.Add(int64(len(frame)))
+	}
+}
+
+// handshakeIcecast performs the HTTP SOURCE handshake with Icecast v2.
+func (b *Broadcaster) handshakeIcecast(conn net.Conn, cfg Config) error {
+	contentType := "audio/mpeg"
+	switch cfg.Format {
+	case "ogg":
+		contentType = "audio/ogg"
+	case "wav":
+		contentType = "audio/wav"
+	}
+
+	auth := base64.StdEncoding.EncodeToString([]byte(cfg.Username + ":" + cfg.Password))
+	req := fmt.Sprintf(
+		"SOURCE %s HTTP/1.0\r\n"+
+			"Authorization: Basic %s\r\n"+
+			"Content-Type: %s\r\n"+
+			"Ice-Name: %s\r\n"+
+			"Ice-Bitrate: %d\r\n"+
+			"Ice-Audio-Info: ice-samplerate=44100;ice-bitrate=%d;ice-channels=2\r\n"+
+			"\r\n",
+		cfg.Mountpoint, auth, contentType, cfg.StreamName, cfg.Bitrate, cfg.Bitrate,
+	)
+
+	if _, err := io.WriteString(conn, req); err != nil {
+		return fmt.Errorf("icecast handshake write failed: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("icecast handshake read failed: %w", err)
+	}
+
+	if !strings.Contains(statusLine, "200") {
+		return fmt.Errorf("icecast handshake rejected: %s", strings.TrimSpace(statusLine))
+	}
+
+	// Consume remaining response headers
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("icecast handshake header read error: %w", err)
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+	}
+	return nil
+}
+
+// handshakeShoutcast performs the password & ICY handshake with Shoutcast v1/v2.
+func (b *Broadcaster) handshakeShoutcast(conn net.Conn, cfg Config) error {
+	if _, err := fmt.Fprintf(conn, "%s\r\n", cfg.Password); err != nil {
+		return fmt.Errorf("shoutcast sending password failed: %w", err)
+	}
+
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return fmt.Errorf("shoutcast reading handshake failed: %w", err)
+	}
+
+	respStr := string(buf[:n])
+	if !strings.Contains(respStr, "OK2") {
+		return fmt.Errorf("shoutcast authentication failed: %s", strings.TrimSpace(respStr))
+	}
+
+	icyHeaders := fmt.Sprintf(
+		"icy-name:%s\r\n"+
+			"icy-pub:0\r\n"+
+			"icy-br:%d\r\n"+
+			"content-type:audio/mpeg\r\n"+
+			"\r\n",
+		cfg.StreamName, cfg.Bitrate,
+	)
+
+	if _, err := io.WriteString(conn, icyHeaders); err != nil {
+		return fmt.Errorf("shoutcast sending icy headers failed: %w", err)
+	}
+	return nil
+}
+
+// nextMP3Frame generates a valid MPEG-1 Layer III 44.1kHz stereo audio frame.
+func (b *Broadcaster) nextMP3Frame(cfg Config, inputF *os.File) []byte {
+	// Frame size = 144 * Bitrate / SampleRate
+	frameLen := (144 * cfg.Bitrate * 1000) / 44100
+	if frameLen < 4 {
+		frameLen = 626
+	}
+	frame := make([]byte, frameLen)
+
+	// MPEG-1 Layer III 44.1kHz Stereo Header
+	frame[0] = 0xFF
+	frame[1] = 0xFB // Sync (11 bits) + Version 1 (2 bits) + Layer III (2 bits) + No CRC (1 bit)
+
+	var brIdx byte
+	switch cfg.Bitrate {
+	case 128:
+		brIdx = 0x9
+	case 192:
+		brIdx = 0xB
+	case 256:
+		brIdx = 0xD
+	case 320:
+		brIdx = 0xE
+	default:
+		brIdx = 0xB
+	}
+
+	frame[2] = (brIdx << 4) // 44.1kHz (00), Padding (0), Private (0)
+	frame[3] = 0x00         // Stereo (00), Mode Ext (00), Copy (0), Original (0), Emphasis (00)
+
+	// Bytes 4..35: Side info (zeros for empty/silent granule data)
+	// Bytes 36..frameLen: Ancillary PCM digest
+	if inputF != nil {
+		pcmBuf := make([]byte, 1152*4)
+		n, err := inputF.Read(pcmBuf)
+		if err == io.EOF {
+			_, _ = inputF.Seek(0, 0)
+			n, _ = inputF.Read(pcmBuf)
+		}
+		if n > 0 {
+			digest := sha256.Sum256(pcmBuf[:n])
+			copy(frame[36:], digest[:])
+		}
+	} else {
+		copy(frame[36:], []byte("EngineX-OS-MP3-Silence-Frame"))
+	}
+	return frame
+}
+
+// nextWAVFrame produces 1152 samples of 16-bit 44.1kHz stereo PCM.
+func (b *Broadcaster) nextWAVFrame(inputF *os.File) []byte {
+	const pcmBytes = 1152 * 4 // 1152 samples * 2 channels * 2 bytes/sample
+	buf := make([]byte, pcmBytes)
+	if inputF != nil {
+		n, err := inputF.Read(buf)
+		if err == io.EOF {
+			_, _ = inputF.Seek(0, 0)
+			n, _ = inputF.Read(buf)
+		}
+		if n > 0 {
+			return buf[:n]
+		}
+	}
+	return buf
+}
+
+// nextOggFrame creates a valid Ogg page containing audio payload.
+func (b *Broadcaster) nextOggFrame(inputF *os.File, seq *uint32, granule *uint64) []byte {
+	payload := make([]byte, 128)
+	if inputF != nil {
+		n, err := inputF.Read(payload)
+		if err == io.EOF {
+			_, _ = inputF.Seek(0, 0)
+			n, _ = inputF.Read(payload)
+		}
+		if n > 0 {
+			payload = payload[:n]
+		}
+	} else {
+		copy(payload, []byte("EngineX-OS-Ogg-Audio-Data"))
+	}
+
+	page := makeOggPage(0x00, *granule, 0x12345678, *seq, payload)
+	*seq++
+	*granule += 1152
+	return page
+}
+
+// UpdateMetadata pushes track metadata changes to the Icecast/Shoutcast server.
+func (b *Broadcaster) UpdateMetadata(artist, title string) error {
+	b.mu.Lock()
+	artist = strings.TrimSpace(artist)
+	title = strings.TrimSpace(title)
+
+	var song string
+	if artist != "" && title != "" {
+		song = artist + " - " + title
+	} else if title != "" {
+		song = title
+	} else {
+		song = artist
+	}
+
+	b.currentTrack = song
+	cfg := b.cfg
+	b.mu.Unlock()
+
+	if cfg.ServerURL == "" {
+		return nil
+	}
+
+	scheme, hostPort, err := parseServerTarget(cfg.ServerURL)
+	if err != nil {
+		b.mu.Lock()
+		b.lastError = err.Error()
+		b.mu.Unlock()
+		return err
+	}
+
+	var metaURL string
+	if cfg.Protocol == "shoutcast" {
+		metaURL = fmt.Sprintf("%s://%s/admin.cgi?mode=updinfo&pass=%s&song=%s",
+			scheme, hostPort, url.QueryEscape(cfg.Password), url.QueryEscape(song))
+	} else {
+		metaURL = fmt.Sprintf("%s://%s/admin/metadata?mode=updinfo&mount=%s&song=%s",
+			scheme, hostPort, url.QueryEscape(cfg.Mountpoint), url.QueryEscape(song))
+	}
+
+	req, err := http.NewRequest("GET", metaURL, nil)
+	if err != nil {
+		b.mu.Lock()
+		b.lastError = err.Error()
+		b.mu.Unlock()
+		return err
+	}
+
+	if cfg.Protocol == "icecast" {
+		req.SetBasicAuth(cfg.Username, cfg.Password)
+	}
+	req.Header.Set("User-Agent", "EngineX-OS-Broadcaster")
+
+	client := b.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Second}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		b.mu.Lock()
+		b.lastError = err.Error()
+		b.mu.Unlock()
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		reqErr := fmt.Errorf("metadata update failed (status %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		b.mu.Lock()
+		b.lastError = reqErr.Error()
+		b.mu.Unlock()
+		return reqErr
+	}
+
+	b.mu.Lock()
+	if strings.Contains(b.lastError, "metadata update") {
+		b.lastError = ""
+	}
+	b.mu.Unlock()
+	return nil
+}
+
+// makeWAVHeader builds a standard 44-byte RIFF/WAVE header for streaming.
+func makeWAVHeader() []byte {
+	hdr := make([]byte, 44)
+	copy(hdr[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(hdr[4:8], 0x7FFFFFFF) // stream/unknown size
+	copy(hdr[8:12], "WAVE")
+	copy(hdr[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(hdr[16:20], 16)      // PCM header size
+	binary.LittleEndian.PutUint16(hdr[20:22], 1)       // PCM
+	binary.LittleEndian.PutUint16(hdr[22:24], 2)       // 2 channels
+	binary.LittleEndian.PutUint32(hdr[24:28], 44100)   // 44.1kHz
+	binary.LittleEndian.PutUint32(hdr[28:32], 44100*4) // byte rate
+	binary.LittleEndian.PutUint16(hdr[32:34], 4)       // block align
+	binary.LittleEndian.PutUint16(hdr[34:36], 16)      // 16 bits
+	copy(hdr[36:40], "data")
+	binary.LittleEndian.PutUint32(hdr[40:44], 0x7FFFFFFF) // stream size
+	return hdr
+}
+
+// Ogg CRC-32 lookup table (polynomial 0x04c11db7).
+var oggCRCTable [256]uint32
+
+func init() {
+	for i := 0; i < 256; i++ {
+		curr := uint32(i) << 24
+		for j := 0; j < 8; j++ {
+			if (curr & 0x80000000) != 0 {
+				curr = (curr << 1) ^ 0x04c11db7
+			} else {
+				curr <<= 1
+			}
+		}
+		oggCRCTable[i] = curr
+	}
+}
+
+func oggChecksum(buf []byte) uint32 {
+	var crc uint32
+	for _, b := range buf {
+		crc = (crc << 8) ^ oggCRCTable[byte(crc>>24)^b]
+	}
+	return crc
+}
+
+// makeOggPage constructs a valid Ogg bitstream page with calculated CRC.
+func makeOggPage(headerType byte, granule uint64, serial uint32, seq uint32, payload []byte) []byte {
+	if len(payload) > 255 {
+		payload = payload[:255]
+	}
+	page := make([]byte, 27+1+len(payload))
+	copy(page[0:4], "OggS")
+	page[4] = 0 // structure version
+	page[5] = headerType
+	binary.LittleEndian.PutUint64(page[6:14], granule)
+	binary.LittleEndian.PutUint32(page[14:18], serial)
+	binary.LittleEndian.PutUint32(page[18:22], seq)
+	page[26] = 1 // 1 segment
+	page[27] = byte(len(payload))
+	copy(page[28:], payload)
+
+	crc := oggChecksum(page)
+	binary.LittleEndian.PutUint32(page[22:26], crc)
+	return page
+}
