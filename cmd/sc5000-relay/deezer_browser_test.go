@@ -443,9 +443,9 @@ func TestSpotifyLearnedCallbackIsPerPublicURL(t *testing.T) {
 	const callback = "https://relay.example.com/oauth/spotify/callback"
 	for cache, want := range map[string]bool{
 		"": false, `null`: false,
-		`{"` + defaultSpotifyClientID + `":true}`:                                              false, // old cache, no callback
-		`{"` + defaultSpotifyClientID + ` https://other.example/oauth/spotify/callback":true}`: false,
-		`{"` + defaultSpotifyClientID + ` ` + callback + `":true}`:                             true,
+		`{"` + testSpotifyClientID + `":true}`:                                              false, // old cache, no callback
+		`{"` + testSpotifyClientID + ` https://other.example/oauth/spotify/callback":true}`: false,
+		`{"` + testSpotifyClientID + ` ` + callback + `":true}`:                             true,
 	} {
 		t.Run(cache, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "learned.json")
@@ -461,7 +461,7 @@ func TestSpotifyLearnedCallbackIsPerPublicURL(t *testing.T) {
 				return nil, fmt.Errorf("no network")
 			})}
 			// An unlearned callback is probed; an inconclusive probe keeps the paste flow.
-			if got := a.useHTTPS(context.Background(), defaultSpotifyClientID); got != want || probed == want {
+			if got := a.useHTTPS(context.Background(), testSpotifyClientID); got != want || probed == want {
 				t.Fatalf("https=%v probed=%v", got, probed)
 			}
 			if !want {

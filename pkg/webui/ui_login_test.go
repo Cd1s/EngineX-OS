@@ -96,11 +96,34 @@ func TestPhoneLoginNeedsTokenAndLinksDeezer(t *testing.T) {
 	}
 }
 
-func TestSpotifyPhonePageUsesTheDefaultClient(t *testing.T) {
-	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+// testSpotifyClientID stands in for an owner's own Spotify app; there is no built-in one.
+const testSpotifyClientID = "0123456789abcdef0123456789abcdef"
+
+// #70: Spotify needs the owner's own Client ID, set in the console.
+func TestSpotifyLoginNeedsTheOwnersClientID(t *testing.T) {
+	ui := New(Config{AccessToken: "test-console-code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 400 || !strings.Contains(string(body), "Spotify Client ID") {
+		t.Fatalf("login without an ID: %d %s", resp.StatusCode, body)
+	}
+	request(t, srv.Client(), srv.URL, "POST", "/api/spotify", map[string]any{"clientId": "not-an-id"}, 400)
+	var got struct {
+		Set         bool
+		ClientID    string
+		RedirectURI string
+	}
+	json.Unmarshal(request(t, srv.Client(), srv.URL, "POST", "/api/spotify", map[string]any{"clientId": strings.ToUpper(testSpotifyClientID)}, 200), &got)
+	if !got.Set || strings.Contains(got.ClientID, testSpotifyClientID) || got.RedirectURI != spotifyLoopbackRedirect {
+		t.Fatalf("saved: %+v", got)
+	}
+	resp, err = http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,16 +132,30 @@ func TestSpotifyPhonePageUsesTheDefaultClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(page.Body)
+	body, _ = io.ReadAll(page.Body)
 	page.Body.Close()
-	if !strings.Contains(string(body), DefaultSpotifyClientID) {
+	if !strings.Contains(string(body), testSpotifyClientID) {
 		t.Fatalf("page %s", body)
 	}
 }
 
-// #48: Spotify sends a new device through an email code and a "new device" page
-// before it redirects. Twenty-five minutes on, with the phone page reloaded, the
-// pasted 127.0.0.1 callback from the first page must still link the account.
+// A token minted by another app (the old built-in ID) is not used.
+func TestSpotifyTokenFromAnotherAppIsDropped(t *testing.T) {
+	state := t.TempDir()
+	tokenPath := filepath.Join(state, "spotify-token.json")
+	os.WriteFile(tokenPath, []byte(`{"access_token":"AT","refresh_token":"RT","client_id":"ffffffffffffffffffffffffffffffff"}`), 0o600)
+	os.WriteFile(filepath.Join(state, "spotify-client-id"), []byte(testSpotifyClientID+"\n"), 0o600)
+	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: state, SpotifyTokenPath: tokenPath}, nil)
+	p, err := ui.makeProvider("spotify", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := p.(*providers.Spotify)
+	if sp.Token.AccessToken != "" || sp.ClientID != testSpotifyClientID {
+		t.Fatalf("kept: %q %q", sp.Token.AccessToken, sp.ClientID)
+	}
+}
+
 func TestSpotifyPhoneLoginSurvivesASlowTwoFactorDetour(t *testing.T) {
 	accounts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()
@@ -129,7 +166,7 @@ func TestSpotifyPhoneLoginSurvivesASlowTwoFactorDetour(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"access_token": "AT", "refresh_token": "RT", "token_type": "Bearer", "expires_in": 3600})
 	}))
 	defer accounts.Close()
-	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir(), SpotifyAccountsURL: accounts.URL}, nil)
+	ui := New(Config{AccessToken: "code", SpotifyClientID: testSpotifyClientID, UIDir: t.TempDir(), StateDir: t.TempDir(), SpotifyAccountsURL: accounts.URL}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	get := func(path string) string {
@@ -240,7 +277,7 @@ func TestRelayLoginCollectsBothServices(t *testing.T) {
 	defer relay.Close()
 	state := t.TempDir()
 	tokenPath := filepath.Join(state, "spotify-token.json")
-	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: state, SpotifyTokenPath: tokenPath, RelayURL: relay.URL}, nil)
+	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: state, SpotifyTokenPath: tokenPath, RelayURL: relay.URL, SpotifyClientID: testSpotifyClientID}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	poll := func(provider string) string {
@@ -273,7 +310,7 @@ func TestRelayLoginCollectsBothServices(t *testing.T) {
 			t.Fatalf("%s: %s", provider, got)
 		}
 	}
-	if len(registered) != 2 || registered[0]["spotifyClientId"] != DefaultSpotifyClientID {
+	if len(registered) != 2 || registered[0]["spotifyClientId"] != testSpotifyClientID {
 		t.Fatalf("registered %v", registered)
 	}
 	saved, err := os.ReadFile(tokenPath)
@@ -322,7 +359,7 @@ func TestRelayRefusesToFollowRedirects(t *testing.T) {
 func TestRelayOutageStillShowsItsQRCode(t *testing.T) {
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "down", 503) }))
 	defer relay.Close()
-	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir(), RelayURL: relay.URL}, nil)
+	ui := New(Config{AccessToken: "code", SpotifyClientID: testSpotifyClientID, UIDir: t.TempDir(), StateDir: t.TempDir(), RelayURL: relay.URL}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	r, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)

@@ -17,7 +17,9 @@ import (
 	"time"
 )
 
-const defaultSpotifyClientID = "<redacted-spotify-client-id>"
+// defaultSpotifyClientID is empty: the deck sends its owner's own Spotify Client ID,
+// and a relay operator may set one in the config. There is no built-in app.
+const defaultSpotifyClientID = ""
 
 type server struct {
 	public string // public base URL, no trailing slash

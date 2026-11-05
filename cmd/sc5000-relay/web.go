@@ -76,6 +76,10 @@ func (s *server) handleMobileGet(w http.ResponseWriter, r *http.Request) {
 			s.sessions.update(token, func(x *session) { x.SpotifyClientID = id })
 			sess.SpotifyClientID = id
 		}
+		if !validClientID(sess.SpotifyClientID) { // no built-in app: the deck sends its owner's
+			renderPage(w, 400, "errorPage", pageData{Title: "Spotify Client ID", Message: "Please set your own Spotify Client ID in the deck's web console first. / 请先在碟机网页控制台填入你自己的 Spotify Client ID。"})
+			return
+		}
 		// Go straight to the service's own login when its redirect is known to work.
 		// Without that, this page explains the pasting fallback. So does ?manual=1.
 		if straightToLogin(r, sess) && s.spotify.useHTTPS(r.Context(), sess.SpotifyClientID) {
