@@ -44,6 +44,7 @@ type deckState struct {
 	Pitch      float64 `json:"pitch"` // percent
 	Master     bool    `json:"master,omitempty"`
 	BPM        float64 `json:"bpm,omitempty"` // the track's
+	Dbg        string  `json:"dbg,omitempty"` // shortcut: Engine's raw master state, until verified on hardware
 }
 
 type peerDeck struct {
