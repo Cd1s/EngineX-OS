@@ -309,3 +309,21 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **验证（Oracle-Batam-arm，`--clean` 目录）**：gofmt、vet、全部 Go 包的 race 测试（21 个包）、`test_rootfs_overlay.sh`（13 项）、az01-packer（55 项）、tools/stems（9 项）、`test_dsp_smooth`（普通、ASan+UBSan、TSan）、`test_stems_feature`（armhf 原生，`-Werror`，5.0.4 与 5.3.0 两个 Engine 上都是 21 个前缀守卫）、5.3.0 与 5.0.4 两个底包的 UI 包构建，全部通过。hook 在 Batam 上重新编译（`1053d543…`）。没有出镜像，也没有跑 release-gate。
 - **后续提交**：#59 后来补的修复没赶上集成提交（另一个 agent 当时还在 `feat-issue-58-59` 里改）：没有本地导出、只有 CDJ 暂存库的盘，现在也按暂存库的 stamp 判断，内容没变就直接跳过；同时带上了对应的单测。OpenCDJ-3000 的 `TestSimulatorEmptyDenonDriveStage` 就是因此发现的。
 - **回滚点**：`836cbb0`。
+
+## 2026-11-05：#64 自动增益（0 dB 归一化），并入 5.3.0.2（未推送、未发版）
+
+- **范围**：`master_limiter.h` 新增 `sc_gain_planar`，挂在已有的第 21 个 DSP 挂点 `DSP_MASTER`（`airDeviceCallback`）上，跑在 #58 软限幅之前。开启自动增益时软限幅总会接着运行，所以提升后不会削波。设置项是 `settings.conf` 的 `auto_gain=1`（`POST /v1/sc5000/ui?autoGain=0|1`），由 `lim_poll` 每秒轮询；另有 QML 的 `Auto-Gain (0 dB Normalize)` 和 WebUI 开关，默认关闭。
+- **算法**：左右声道联动取每块峰值，电平跟随器瞬时上升、约 3 秒回落。目标峰值 0.95（-0.4 dBFS），只做提升，最多 2.82 倍（+9 dB）。增益下降约 50 ms、上升约 2 s，块内按样本线性插值。某块峰值低于 0.008（-42 dBFS）时冻结增益和电平。增益为 1 时整块原样不动。时间常数按 96 kHz 计算。
+- **测试（Oracle-Batam-arm，`--clean`）**：
+  - `test_dsp_smooth` 新增 `test_auto_gain`，普通、ASan+UBSan、TSan 三种编译各跑一次。覆盖：0.35 在 10 s 内被提到增益 > 2.6、峰值 > 0.85；随后 1.8 回到增益 1、输出 ≤ 0.988；低于门限不提升（无论是冷启动还是播放过音乐之后）；斜坡平滑；NaN/Inf 不影响电平；增益为 1 时逐位不变。
+  - `test_stems_feature`（`-Werror`，5.0.4 与 5.3.0 两个 Engine）：只开自动增益时输出也经过软限幅。
+  - `TestAutoGainToggle`。
+  - gofmt、vet、全部 Go 包的 race 测试、overlay、az01-packer、stems，以及两个底包的 UI 包，全部通过。
+- **实机热部署（JP07）**：
+  - 部署前用 agent-backup 备份了 suite、hook、UI 包和 `settings.conf`（sha256 `ceab1c667592…`）。
+  - 部署的产物：suite `8d3531d3…`、hook `114f5634…`、UI 包 `290051fc…`。
+  - Engine 启动时打了 16 处补丁，日志显示 `21 DSP guards/transitions installed`、`packs/en: 51 files`，只有原厂的 QML 警告。
+  - `/v1/sc5000/ui` 返回 200，版本 5.3.0.2；`autoGain=1/0` 能正确写入 `settings.conf` 并回读，`autoGain=2` 返回 400；开启期间 Engine 没有崩溃。
+  - NetEase / Spotify 保持登录，登录文件哈希没有变化。
+  - 自动增益最后保持关闭（默认值）。实际听感还要维护者在实机上试听确认。
+- **回滚点**：`684142f`（5.3.0.2 README 提交）。实机可以用上面的备份恢复。

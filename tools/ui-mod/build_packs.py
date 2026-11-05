@@ -71,6 +71,7 @@ SERVICES_MAIN = """
 	property string scNeteaseMode: "official"
 	property string scJog: "static"
 	property bool scMasterLimiter: false // #58, applied by engine_ui_hook.c
+	property bool scAutoGain: false // #64, applied by engine_ui_hook.c
 	// #55: once a drive is in, Engine's own analysis queue takes every unanalysed
 	// track (rb-bridge's quick imports included). Its OfflineAnalyzer processes and
 	// queue threads run at idle priority (engine_ui_hook.c), so playback keeps priority.
@@ -291,6 +292,7 @@ SERVICES_MAIN = """
 		scUpdateRepo = v.githubRepo || scUpdateRepo
 		scJog = v.jog || "static"
 		scMasterLimiter = !!v.masterLimiter
+		scAutoGain = !!v.autoGain
 		scAutoAnalyze = !!v.autoAnalyze
 		scOmniSource = !!v.omniSource
 		scProlinkShare = !!v.prolinkShare
@@ -1132,6 +1134,12 @@ JOG_ENTRY = """
 			values: ["Off", "On"]
 			currentValue: values[root.scMasterLimiter ? 1 : 0]
 			onSelected: function(index) { root.scCall("masterLimiter=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "Auto-Gain (0 dB Normalize)"
+			values: ["Off", "On"]
+			currentValue: values[root.scAutoGain ? 1 : 0]
+			onSelected: function(index) { root.scCall("autoGain=" + index) }
 		},
 		EntryBase.ListEntry {
 			text: "OmniSource (Drives in Streaming)"

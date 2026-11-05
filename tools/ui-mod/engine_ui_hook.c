@@ -119,20 +119,22 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 
 // #58: the toggle is master_limiter=1 in settings.conf, polled once a second
 // off the audio thread; the limiter itself runs in hook_master_output.
-static int lim_enabled;
+static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
 
 static void *lim_poll(void *arg) {
     (void)arg;
     for (;;) {
-        int on = 0;
+        int on = 0, gain = 0;
         FILE *f = fopen(UI_ROOT "/settings.conf", "r");
         if (f) {
             char line[64];
             while (fgets(line, sizeof line, f))
                 if (!strncmp(line, "master_limiter=1", 16)) on = 1;
+                else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
             fclose(f);
         }
         __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
+        __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
         sleep(1);
     }
     return NULL;
@@ -327,12 +329,18 @@ static void hook_flanger(void *self, float *const *input, float *const *output, 
 // gets its own linked limiter. The callback runs on the one audio thread.
 typedef uint32_t (*audio_callback_fn)(void *, void *, int, const float *const *, int, float *const *, int);
 static struct sc_lim master_lim[8];
+static struct sc_gain master_gain[8];
 static uint32_t hook_master_output(void *host, void *context, int in_channels, const float *const *in,
                                    int out_channels, float *const *out, int frames) {
     uint32_t rc = ((audio_callback_fn)dsp_originals[DSP_MASTER])(host, context, in_channels, in, out_channels, out, frames);
-    if (__atomic_load_n(&lim_enabled, __ATOMIC_RELAXED) && out && frames > 0)
-        for (int ch = 0; ch < out_channels && ch < 16; ch += 2)
-            sc_lim_planar(&master_lim[ch / 2], out[ch], ch + 1 < out_channels ? out[ch + 1] : NULL, (unsigned)frames);
+    int gain = __atomic_load_n(&gain_enabled, __ATOMIC_RELAXED);
+    // Auto-Gain (#64) always runs into the limiter, so a boost never clips.
+    if ((gain || __atomic_load_n(&lim_enabled, __ATOMIC_RELAXED)) && out && frames > 0)
+        for (int ch = 0; ch < out_channels && ch < 16; ch += 2) {
+            float *r = ch + 1 < out_channels ? out[ch + 1] : NULL;
+            if (gain) sc_gain_planar(&master_gain[ch / 2], out[ch], r, (unsigned)frames);
+            sc_lim_planar(&master_lim[ch / 2], out[ch], r, (unsigned)frames);
+        }
     return rc;
 }
 

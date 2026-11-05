@@ -647,6 +647,73 @@ static void test_master_limiter(void)
     CHECK(e.env == 0.0f);
 }
 
+/* #64 Auto-Gain into the #58 limiter, the way hook_master_output runs them. */
+static float gain_run(struct sc_gain *g, struct sc_lim *lim, float amp, int blocks, float *peak_out)
+{
+    enum { B = 512 };
+    float l[B], r[B], peak = 0.0f;
+    for (int b = 0; b < blocks; b++) {
+        for (int i = 0; i < B; i++)
+            l[i] = r[i] = amp * sinf(2.0f * 3.14159265f * 1000.0f * (float)(b * B + i) / 96000.0f);
+        sc_gain_planar(g, l, r, B);
+        sc_lim_planar(lim, l, r, B);
+        for (int i = 0; i < B; i++) {
+            CHECK(isfinite(l[i]) && fabsf(l[i]) <= SC_LIM_CEIL && fabsf(r[i]) <= SC_LIM_CEIL);
+            if (b >= blocks - 20 && fabsf(l[i]) > peak) peak = fabsf(l[i]);
+        }
+    }
+    *peak_out = peak;
+    return g->gain;
+}
+
+static void test_auto_gain(void)
+{
+    float peak;
+    /* 0.35 (-9 dBFS) is brought up near 0 dBFS within 10 s, never past the ceiling. */
+    struct sc_gain g = {0};
+    struct sc_lim lim = {0};
+    float gain = gain_run(&g, &lim, 0.35f, 1875, &peak);
+    CHECK(gain > 2.6f && gain <= SC_GAIN_MAX && peak > 0.85f);
+    /* Then a loud 1.8 passage: gain falls back to unity fast, the limiter holds the ceiling. */
+    gain = gain_run(&g, &lim, 1.8f, 200, &peak);
+    CHECK(gain == 1.0f && peak <= SC_LIM_CEIL);
+
+    /* Under the -42 dBFS gate nothing is boosted, from a fresh start or after music. */
+    struct sc_gain q = {0};
+    struct sc_lim ql = {0};
+    gain = gain_run(&q, &ql, 0.007f, 1875, &peak);
+    CHECK(q.gain == 1.0f && q.level == 0.0f && peak < 0.0071f);
+    struct sc_gain m = {0};
+    struct sc_lim ml = {0};
+    gain_run(&m, &ml, 0.5f, 1875, &peak);
+    float held = m.gain;
+    gain_run(&m, &ml, 0.002f, 1875, &peak);
+    CHECK(m.gain == held && peak < 0.002f * held + 1e-4f); /* frozen, not raised further */
+
+    /* Per-sample ramp: no step larger than the block's gain change. */
+    struct sc_gain z = {.level = 0.2f, .gain = 1.0f};
+    float l[512], r[512];
+    for (int i = 0; i < 512; i++) l[i] = r[i] = 0.2f;
+    sc_gain_planar(&z, l, r, 512);
+    CHECK(z.gain > 1.0f && l[511] == 0.2f * z.gain);
+    for (int i = 1; i < 512; i++) CHECK(l[i] >= l[i - 1] && l[i] - l[i - 1] < 1e-4f);
+
+    /* NaN/Inf do not drive the level; NULL is safe. */
+    float bl[3] = {NAN, INFINITY, 0.5f};
+    struct sc_gain n = {0};
+    sc_gain_planar(&n, bl, NULL, 3);
+    CHECK(isfinite(n.level) && n.level == 0.5f);
+    sc_gain_planar(NULL, bl, NULL, 3);
+    sc_gain_planar(&n, NULL, NULL, 3);
+
+    /* At unity (fresh, or gated) the block is left bit for bit; the hook's off path skips it entirely. */
+    float quiet[256], copy[256];
+    for (int i = 0; i < 256; i++) quiet[i] = copy[i] = 0.0079f * sinf((float)i * 0.37f);
+    struct sc_gain u = {0};
+    sc_gain_planar(&u, quiet, quiet, 256);
+    CHECK(!memcmp(quiet, copy, sizeof quiet));
+}
+
 int main(void)
 {
     test_finite();
@@ -660,6 +727,7 @@ int main(void)
     test_flanger_makeup();
     test_flanger_threads();
     test_master_limiter();
+    test_auto_gain();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return EXIT_FAILURE;

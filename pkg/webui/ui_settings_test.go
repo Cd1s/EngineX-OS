@@ -221,6 +221,33 @@ func TestMasterLimiterToggle(t *testing.T) {
 	}
 }
 
+// #64: Auto-Gain defaults off, persists as auto_gain=1 next to the limiter
+// key, is independent of it, and only takes 0 or 1.
+func TestAutoGainToggle(t *testing.T) {
+	dir := t.TempDir()
+	ui := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	if v := ui.loadUI(); v.AutoGain {
+		t.Fatalf("defaults: %+v", v)
+	}
+	if code, v := uiPost(t, srv.URL, "autoGain=1"); code != 200 || !v.AutoGain || v.MasterLimiter {
+		t.Fatalf("%d %+v", code, v)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(b), "\nauto_gain=1\n") || strings.Contains(string(b), "master_limiter=1") {
+		t.Fatalf("settings.conf: %q", b)
+	}
+	if v := ui.loadUI(); !v.AutoGain {
+		t.Fatalf("reload: %+v", v)
+	}
+	if code, v := uiPost(t, srv.URL, "autoGain=0"); code != 200 || v.AutoGain {
+		t.Fatalf("%d %+v", code, v)
+	}
+	if code, _ := uiPost(t, srv.URL, "autoGain=yes"); code != 400 {
+		t.Fatalf("bad value: %d", code)
+	}
+}
+
 func TestAccessTokenSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	first, created, err := LoadAccessToken(dir)
