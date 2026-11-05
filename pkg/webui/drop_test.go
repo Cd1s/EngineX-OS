@@ -128,7 +128,9 @@ func TestWiFiDropSavesSafely(t *testing.T) {
 
 func TestDriveKind(t *testing.T) {
 	for _, c := range []struct{ dev, sys, want string }{
+		{"/dev/mmcblk0p7", "/sys/devices/platform/mmc/mmcblk0/mmcblk0p7", "internal"}, // az01-internal eMMC
 		{"/dev/mmcblk1p1", "/sys/devices/platform/mmc/mmcblk1/mmcblk1p1", "sd"},
+		{"/dev/mmcblk2p1", "/sys/devices/platform/mmc/mmcblk2/mmcblk2p1", "sd"},
 		{"/dev/sda1", "/sys/devices/platform/usb/usb1/1-1/host0/block/sda/sda1", "usb"},
 		{"/dev/sdb1", "/sys/devices/platform/ahci/ata1/host1/block/sdb/sdb1", "hd"},
 		{"", "", "drive"},
