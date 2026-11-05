@@ -190,7 +190,8 @@ class FilesystemTests(unittest.TestCase):
                       self.fs.read('/usr/share/sc5000-custom/sshd_config'))
         self.assertIn(b'root:$6$', self.fs.read('/etc/shadow'))
         prepare = self.fs.read('/usr/lib/systemd/system/sc5000-custom-prepare.service')
-        self.assertIn(b'After=etc.mount var.mount', prepare)
+        self.assertIn(b'RequiresMountsFor=/data /etc /var\n', prepare)
+        self.assertNotIn(b'Requires=etc.mount', prepare)  # 5.3.0 has no etc.mount
         # After a factory reset /data is blank: the UI packs must exist before Engine starts.
         self.assertIn(b'Before=sc5000-custom-sshd.service engine.service stream-sync.service', prepare)
         self.assertIn('sc5000-custom.target', self.fs.entries(

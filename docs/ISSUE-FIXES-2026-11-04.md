@@ -198,4 +198,17 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
   - PRIME 4 / PRIME 2 / Mixstream Pro：`5cf5a34f65c92c6c7b5e6c0599c359634905144702f3f59cfbb37ec8e51d5896`
 - **回滚点**：5.0.4.2 上一版构建提交为 `3b3b0a5`；5.3.0.1 可随时刷回 `v5.0.4.2` 镜像。
 
+## 5.3.0.1：在线升级后退回原厂 UI 的修复、发版门禁、网络调优核实、Beatport 升级后默认隐藏（2026-11-05 追加，Opus 5.5）
+
+- **在线升级退回原厂 UI、SSH 不启动（`tools/az01-packer/az01_packer.py`）**：官方 5.3.0 删掉了 `etc.mount` / `var.mount`，`sc5000-custom-prepare.service` 的 `Requires=etc.mount var.mount` 因此失败，prepare 不执行：`/data` 里的 UI 包停留在 5.0.4.2 的 `Skins/EmbeddedCommon/`，Engine 命中 0 个文件，退回原厂界面；`sc5000-custom-sshd` 也随之失败。修法是改为 `RequiresMountsFor=/data /etc /var`：5.0.4 上仍硬依赖 `etc.mount` / `var.mount`，5.3.0 上不再引用。宿主 systemd 257 的 `systemd-analyze verify --root` 在旧镜像上报 `Unit var.mount not found`，在新镜像上输出为空。
+- **5.3.0 下 TIDAL / SoundCloud 图标空白（`tools/ui-mod/build_packs.py`）**：`scIcon()` 把路径写死为 `qrc:/UIKit.1/...`，而 5.3.0 的图标在 `Skins/UIKit/Icons/`。现改为与 Beatport 一样用 `@ICONS@`。构建时还会检查 UI 包里每个字面量 `qrc:/` 资源在该底包里确实存在，旧写法会直接构建失败。
+- **从 5.0.4.2 升级后 Beatport 默认隐藏（`pkg/webui/ui_settings.go`）**：5.0.4.2 默认会把 `sources=tidal,netease,spotify,deezer,soundcloud` 写进 `settings.conf`，新版读回后不包含 Beatport。现在 `settings.conf` 会记录 `known=`；没有这一行的旧文件按当时的 5 个服务处理，之后新增的服务首次默认开启，用户关掉的服务保持关闭（`TestUpgradedSettingsShowNewServicesOnce`）。
+- **网络（`rootfs-overlay/usr/local/bin/sc5000-perf-tune`）**：新增 8 MiB TCP 读写缓冲。有线 1 Gbps 原本就有：100 Mbps 的限制来自官方 `/usr/Engine/Scripts/engine` 每次启动时执行的 `az01-ethernet-speed 100`，debloat 离线补丁把它改成 1000，运行时再设一次。核实后**没有**加 `/etc/modprobe.d/sc5000-wifi.conf`：kmod 读取时它排在 `brcmfmac.conf` 之后，会把 `feature_disable=0x82004`（关闭 PNO、固件 supplicant、SAE）覆盖回原厂的 `0x80000`。另外 `txglomsz` 在这个内核的 `brcmfmac.ko` 里默认值已经是 32（从 `.data` 读出），且参数权限为 0，sysfs 写不进去。5.0.4 和 5.3.0 的 rootfs 都没有 `iw`，所以 `sc5000-debloat` 里关闭 Wi-Fi 省电的那一行从未生效（内核 `CONFIG_CFG80211_DEFAULT_PS=y`），README 因此不宣称「常开免休眠」。`docs/OPEN-SOURCE-FULL-MANIFEST.md` 中 CF005 写的 `roamoff=1` 和 power_save 与实际不符，留待修正。
+- **发版门禁（`tools/az01-packer/release-gate.sh`、`rootfs_audit.py`、`test_rootfs_audit.py`、`internal/testfixture/gate_test.go`；规则见 `.claude/rules/release-workflow.md` 4b 与 `CONTRIBUTING.md`）**：从上一版在线升级到新版，再在新版上开机做全功能验收，全部基于真实 `rootfs.ext2` 的 `unshare` + `qemu-arm` 沙箱。用 `rootfs_audit.py` 审计一遍当前已发布的 v5.3.0.1 镜像，正好报出这次的 2 个 FAIL（`Requires=etc.mount` / `var.mount`）。
+- **门禁顺带发现、已改进门禁的沙箱问题**：qemu-user 下 cmdline 多出解释器前缀，`pkill` 匹配不到 Engine；Engine 缺 `ttyS0` 中断会 abort；Engine 启动过程中会删除残留的 `/tmp/update-file-url`，所以门禁要等 Engine 起稳后再 `?apply=1`；`encrypt-fs.sh` 失败会走 `az01-update --erase-data`，门禁已用 shim 拦下。
+- **验证（编译机 IN）**：`gofmt`、静态检查、Go race 测试（20 个包）、`tests/test_rootfs_overlay.sh`（13 项）、`az01-packer`（49 项，含新增 5 项审计单测）、`tools/stems`（9 项）全部通过。门禁三个镜像组各跑一次，均从同机型的 5.0.4.2 起步：SC5000 JP07、SC6000 JP13、PRIME 4 JC11 全部 **74 PASS / 0 FAIL**。覆盖：5.0.4.2 在线升级（下载、校验、进入 Applying）；翻转一个字节的镜像在 Verifying 阶段被拒；新版开机后版本号、223 个 QML 全部替换、16 处 Engine 补丁、19 个 DSP guard、SQLite hook；TIDAL token 网关、Beatport 登录流程与手机页；stems-probe 握手与分轨；rb-bridge 转换 Rekordbox 导出；`sshd -t`；下一次在线升级到 5.3.0.2（mock）。沙箱没有 eMMC，Applying 之后报 `unsupported operation`，属于预期。
+- **实验室构建（基于 `045c0f2` 加未提交改动，未发布）**：SC5000 组 `eedde27a6c108156b685c9752bbb854d048a174e1a38c60139b33a58bd5a6af4`、SC6000 组 `e867261e9fe2c8c8d9a0edc249c9af8ca91b34cb2f2d838b9e577d5d303a9abe`、PRIME 4 组 `e53b75d86f02677d2313060f1c96bcd8b436138d756a4be582a386a82991fc7f`。正式重发前须先提交并推送，再用干净目录重新构建、重跑门禁。
+- **回滚点**：`045c0f2`；碟机可随时刷回 `v5.0.4.2`。
+- **实机影响**：已发布的 v5.3.0.1（SC5000 组 `fc86f831…`）仍带 `Requires=` 问题，5.0.4.2 碟机在线升级后会退回原厂 UI 并丢失 SSH，需要尽快按第 0 步「同版本修复重发」（`--clobber`）。
+
 

@@ -581,13 +581,13 @@ UNITS = {
 Description=SC5000 custom services
 Requires=sc5000-custom-prepare.service
 Wants=sc5000-custom-sshd.service
-After=etc.mount var.mount data.mount sc5000-custom-prepare.service
+After=etc.mount var.mount var-lib.mount data.mount sc5000-custom-prepare.service
 ''',
     'sc5000-custom-prepare.service': '''[Unit]
 Description=Prepare persistent SC5000 access
-RequiresMountsFor=/data
-Requires=etc.mount var.mount
-After=etc.mount var.mount
+# Only mounts the rootfs defines: 5.0.4 has etc.mount and var.mount, 5.3.0 has
+# neither, and Requires= on a missing unit failed this unit and SSH with it.
+RequiresMountsFor=/data /etc /var
 Before=sc5000-custom-sshd.service engine.service stream-sync.service
 [Service]
 Type=oneshot

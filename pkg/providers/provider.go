@@ -1,6 +1,7 @@
 // Package providers reads playlist metadata through public HTTP APIs and asks a
-// service for the audio address the account is entitled to. It never decrypts
-// media. Each instance belongs to one account.
+// service for the audio address the account is entitled to. The only media it
+// decrypts is Beatport's player stream for the account's own Essential
+// subscription (beatport_hls.go). Each instance belongs to one account.
 package providers
 
 import (
@@ -77,7 +78,7 @@ func JSON(ctx context.Context, c *http.Client, method, endpoint string, body io.
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("provider: HTTP %d", resp.StatusCode)
+		return StatusError(resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20+1))
 	if err != nil {
@@ -91,6 +92,12 @@ func JSON(ctx context.Context, c *http.Client, method, endpoint string, body io.
 	}
 	return nil
 }
+
+// StatusError is a refused request's HTTP status, so callers can tell 401 or 404 apart.
+type StatusError int
+
+func (e StatusError) Error() string { return fmt.Sprintf("provider: HTTP %d", int(e)) }
+
 func endpoint(base, path string, q url.Values) string {
 	s := strings.TrimRight(base, "/") + path
 	if len(q) > 0 {

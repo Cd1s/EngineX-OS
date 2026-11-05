@@ -30,6 +30,7 @@ type server struct {
 	deezer      *deezerClient
 	browser     *deezerBrowser
 	stems       *stemsProxy
+	beatportURL string // tests; empty is Beatport's API
 }
 
 func main() {
@@ -176,7 +177,9 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func validProvider(p string) bool { return p == "spotify" || p == "deezer" || p == "soundcloud" }
+func validProvider(p string) bool {
+	return p == "spotify" || p == "deezer" || p == "soundcloud" || p == "beatport"
+}
 
 func (s *server) mobileURL(provider, token string) string {
 	return s.public + "/m/" + provider + "?t=" + token
