@@ -154,7 +154,8 @@ SERVICES_MAIN = """
 				bpm: (Planck.getProperty("/Engine/Deck" + d + "/OriginalBPM").translator || {}).unnormalized || 0,
 				beat: (Planck.getProperty("/Engine/Deck" + d + "/BeatNumber").translator || {}).unnormalized || 0,
 				// shortcut: raw master state for diagnosis on /peer/decks; drop once verified on hardware.
-				dbg: deckMaster.map(m => m ? 1 : 0).join("") + "/" + (net ? 1 : 0)})
+				dbg: deckMaster.map(m => m ? 1 : 0).join("") + "/" + (net ? 1 : 0) + " " + [Config.device.isJP, Config.device.isPlayer, Config.device.name, Config.network.hasSyncing].join(",")
+					+ " sync" + [1, 2, 3, 4].map(i => g(i, "/SyncMode").string).join(",")})
 		}
 		const post = new XMLHttpRequest()
 		post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks")
@@ -219,15 +220,27 @@ SERVICES_MAIN = """
 			at.pressed = now + 800
 		}
 		if (g("/DeckIsMaster").state) at.wantMaster = 0
+		// The CDJ's BEAT SYNC is Engine's own Sync on the shadow deck: Engine then
+		// holds its tempo and phase to the master, so no fader and few seeks here.
+		const pSync = g("/SyncMode")
+		const synced = !!pSync && pSync.string !== "" && pSync.string !== "Off"
+		if (!!e.sync !== synced && now >= (at.syncAt || 0)) {
+			const b = g(e.sync ? "/Sync" : "/UnSync")
+			if (b) {
+				b.state = false
+				b.state = true
+			}
+			at.syncAt = now + 800
+		}
 		const drift = sr > 0 && len > 0 ? e.positionMs - g("/Track/TrackPosition").unnormalized / sr * 1000 : 0 // > 0: behind
 		const bend = e.playing && Math.abs(drift) > 20 ? Math.max(-4, Math.min(4, drift / 40)) : 0
 		const range = parseFloat(g("/SpeedRange").string) || 8
 		const speed = Math.max(0, Math.min(1, 0.5 + (e.pitch + bend) / (2 * range)))
-		if (Math.abs(g("/Speed").value - speed) > 0.001) g("/Speed").value = speed
+		if (!(e.sync && synced) && Math.abs(g("/Speed").value - speed) > 0.001) g("/Speed").value = speed
 		// Paused: seek once per CDJ position. The landing point is off by a decoder
 		// frame (or a beat with Quantize), and seeking again every tick replayed it.
 		if (e.playing) at.target = null
-		if (Math.abs(drift) > (e.playing ? 800 : 30) && now >= at.seek && (e.playing || at.target === null || at.target === undefined || Math.abs(e.positionMs - at.target) > 50)) {
+		if (Math.abs(drift) > (e.playing ? (e.sync && synced ? 2000 : 800) : 30) && now >= at.seek && (e.playing || at.target === null || at.target === undefined || Math.abs(e.positionMs - at.target) > 50)) {
 			g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, e.positionMs / (len / sr * 1000)))
 			at.seek = now + (e.playing ? 3000 : 300)
 			at.target = e.positionMs
@@ -1647,16 +1660,17 @@ def edits(dev: bool):
             ("        active: songLoading || lockLine\n", "        active: songLoading || lockLine || root.scDeckLocked(deckIndex)\n")]
         # #49: a networked player's MASTER LED shows the unit's network master, so in
         # the 4-deck layout it stayed lit while a shadow deck (a CDJ) held master.
-        # There (JP boards with isPlayer off: SC5000/SC6000 in 4-deck, and PRIME GO)
-        # it shows the deck's own master; every other device keeps stock.
+        # There (SC5000/SC6000 boards with isPlayer off, i.e. 4-deck; Config.device.name
+        # is the board, "JP07", and isJP is undefined) it shows the deck's own
+        # master; every other device keeps stock.
         out["ControlSurfaceModules/ControlSurfaceModules/Sync.qml"] = [(
             "            readonly property string isMasterPath: Config.network.hasSyncing\n",
             "            readonly property string isMasterPath: Config.network.hasSyncing &&\n"
-            "                    !(Config.device.isJP && !Config.device.isPlayer)\n",
+            "                    !(!Config.device.isPlayer && [\"JP07\", \"JP08\", \"JP13\", \"JP14\"].indexOf(Config.device.name) >= 0)\n",
         ), (
             # Stock dims a non-master LED (1), which reads as lit; here it is off.
             "                        } else {\n                            1\n                        }\n",
-            "                        } else {\n                            Config.device.isJP && !Config.device.isPlayer ? 0 : 1\n                        }\n",
+            "                        } else {\n                            !Config.device.isPlayer && [\"JP07\", \"JP08\", \"JP13\", \"JP14\"].indexOf(Config.device.name) >= 0 ? 0 : 1\n                        }\n",
         )]
         # #49: a swipe loads the role's own decks (1+3: left 1, right 3), not the stock
         # left/right layer deck. Only "Deck N" actions; Prepare List etc. stay stock.

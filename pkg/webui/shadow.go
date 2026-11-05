@@ -43,6 +43,7 @@ type deckState struct {
 	PositionMS float64 `json:"positionMs"`
 	Pitch      float64 `json:"pitch"` // percent
 	Master     bool    `json:"master,omitempty"`
+	Sync       bool    `json:"sync,omitempty"` // a CDJ's BEAT SYNC: the shadow deck syncs in Engine
 	BPM        float64 `json:"bpm,omitempty"`  // the track's
 	Beat       float64 `json:"beat,omitempty"` // Engine's BeatNumber: beats into the bar, 0..4
 	Dbg        string  `json:"dbg,omitempty"`  // shortcut: Engine's raw master state, until verified on hardware
@@ -283,7 +284,7 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 		out = append(out, d)
 	}
 	for deck, dev := range cdjDecks(devices, free, now) {
-		d := deckState{Deck: deck, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, BPM: dev.BPM}
+		d := deckState{Deck: deck, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM}
 		at := dev.LastSeen
 		if p, ok := sh.precise[dev.Number]; ok && now.Sub(p.at) < time.Second {
 			d.PositionMS, at = p.ms, p.at
