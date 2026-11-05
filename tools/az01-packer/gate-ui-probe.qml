@@ -40,7 +40,7 @@ Item {
         walk(probe.Window.window.contentItem, new Set(), function (o) {
             if (o.objectName === "Version")
                 console.warn("SCPROBE version|" + String(o.text).replace(/<[^>]*>/g, "") + "|")
-            if (o.objectName === "ControlCenter_WaveformStyle" || o.objectName === "ControlCenter_UpfaderEcho")
+            if (o.objectName === "ControlCenter_WaveformStyle" || o.objectName === "ControlCenter_FourDeckWaveform" || o.objectName === "ControlCenter_LiveStream" || o.objectName === "ControlCenter_UpfaderEcho" || o.objectName === "FourDeckRemoteStrip")
                 console.warn("SCPROBE tile|" + o.objectName + "|")
             if (isSection(o))
                 entries(o, function (c) { console.warn("SCPROBE entry|" + o.label + "|" + c.text + "|" + (c.visible ? 1 : 0) + "|") })
