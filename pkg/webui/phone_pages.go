@@ -149,7 +149,7 @@ func serviceName(provider string) string {
 }
 
 func phoneHeading(lang int, provider string) string {
-	return "<h2>" + strings.Replace(tr(lang, "open"), "%s", serviceName(provider), 1) + "</h2>"
+	return `<h2><img src="/icons/` + provider + `" width="32" height="32" alt="" style="vertical-align:middle;border-radius:8px;margin-right:10px">` + strings.Replace(tr(lang, "open"), "%s", serviceName(provider), 1) + "</h2>"
 }
 
 func deezerPhonePage(lang int, action string) string {

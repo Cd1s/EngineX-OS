@@ -1,98 +1,263 @@
 <!doctype html>
-<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Stream Sync · SC5000</title>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EngineX OS · Console</title>
 <style>
-:root{color-scheme:dark;font:18px system-ui,sans-serif;background:#0b0e13;color:#e7edf5}*{box-sizing:border-box}body{margin:0;padding:18px;max-width:1100px;margin:auto}header{display:flex;justify-content:space-between;align-items:center}h1{font-size:25px;margin:8px 0;color:#5ce4d5}h2{font-size:20px}button,select,input{font:inherit;min-height:52px;border-radius:9px;border:1px solid #374151;padding:10px;background:#1b2330;color:inherit}button{cursor:pointer}button:hover{border-color:#5ce4d5}button:disabled{opacity:.5}input[type=checkbox]{min-height:28px;width:28px;vertical-align:middle}nav,.bar{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}.card{background:#131a24;border-radius:12px;padding:14px;margin:12px 0}.rows{display:grid;gap:8px;max-height:45vh;overflow:auto}.row{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:10px;background:#1b2330;border-radius:8px}.row span{flex:1;overflow-wrap:anywhere}small{display:block;color:#a4b1c5;font-size:14px}progress{width:100%;height:14px;accent-color:#5ce4d5}.badge{color:#5ce4d5}#notice{color:#f6cc71;min-height:24px}#qr{width:220px;max-width:70vw;background:white}a{color:#5ce4d5}#login{display:none}#guard{font-size:13px;max-width:65%;color:#9caec4}canvas{width:100%;height:70px}label{align-self:center}@media(max-width:600px){body{padding:10px}.row{flex-wrap:wrap}.row button{width:100%}header{align-items:start}#guard{max-width:55%;font-size:11px}}
+:root{color-scheme:dark;--bg:#07090d;--card:rgba(22,27,36,.72);--line:rgba(255,255,255,.07);--text:#e8edf4;--dim:#8c97a8;--accent:#2ee6d6;--accent2:#34d399;--warn:#f6c453;--bad:#ff6b6b;--field:#121820;font:16px/1.45 -apple-system,"SF Pro Text","PingFang SC","PingFang TC","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--text)}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;min-height:100vh;background:radial-gradient(1200px 600px at 10% -10%,rgba(46,230,214,.10),transparent 60%),radial-gradient(900px 500px at 110% 10%,rgba(124,92,255,.10),transparent 60%),var(--bg)}
+.wrap{max-width:1180px;margin:auto;padding:16px 18px 80px}
+header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 18px;background:rgba(7,9,13,.78);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.04em;font-size:18px}.brand svg{flex:none}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:12.5px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--dim);white-space:nowrap}
+.pill.ver{color:var(--accent);border-color:rgba(46,230,214,.35)}.dot{width:8px;height:8px;border-radius:50%;background:var(--accent2);box-shadow:0 0 8px var(--accent2)}
+#guard{overflow:hidden;text-overflow:ellipsis;max-width:42vw}.spacer{flex:1}
+.langs{display:inline-flex;padding:3px;border-radius:999px;background:rgba(255,255,255,.05);border:1px solid var(--line)}
+.langs button{border:0;background:none;color:var(--dim);padding:6px 12px;border-radius:999px;font:inherit;font-size:13.5px;cursor:pointer;min-height:0}.langs button.on{background:var(--accent);color:#04201d;font-weight:700}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}.col{display:grid;gap:16px;min-width:0}.grid>*{min-width:0}.full{grid-column:1/-1}
+@media(max-width:880px){.grid{grid-template-columns:minmax(0,1fr)}#guard{max-width:60vw}}@media(max-width:560px){.wrap{padding:12px 10px 80px}.card{padding:14px}.setting{flex-wrap:wrap}.setting .seg{width:100%}.seg button{flex:1}.bar>input,.bar>select{min-width:0}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.card h2{display:flex;align-items:center;gap:10px;margin:0 0 14px;font-size:16px;letter-spacing:.02em}.card h2 .ic{display:grid;place-items:center;width:30px;height:30px;border-radius:9px;background:rgba(46,230,214,.12);color:var(--accent);font-size:16px}
+button,select,input{font:inherit;color:inherit}
+.btn{min-height:42px;padding:9px 14px;border-radius:11px;border:1px solid var(--line);background:rgba(255,255,255,.05);cursor:pointer;transition:.15s}.btn:hover{border-color:rgba(46,230,214,.5)}.btn:disabled{opacity:.5;cursor:default}
+.btn.primary{background:linear-gradient(135deg,#2ee6d6,#34d399);border:0;color:#04201d;font-weight:700}
+input,select{min-height:42px;padding:9px 12px;border-radius:11px;border:1px solid var(--line);background:var(--field);width:100%}input:focus,select:focus,.btn:focus-visible,.langs button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0}.bar>input,.bar>select{flex:1;min-width:160px}
+small,.sub{display:block;color:var(--dim);font-size:13px;line-height:1.4}
+.providers{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:8px}
+.prov{display:flex;align-items:center;gap:8px;min-height:44px;padding:8px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.04);cursor:pointer;text-align:left;transition:.15s}.prov:hover{transform:translateY(-1px);border-color:var(--c)}.prov img{width:24px;height:24px;border-radius:7px;flex:none}.prov.ok{border-color:var(--c)}.prov.off{opacity:.55;cursor:default;transform:none}
+.setting{display:flex;align-items:center;gap:14px;padding:12px 0;border-top:1px solid var(--line)}.setting:first-of-type{border-top:0}.setting .txt{flex:1;min-width:0}.setting b{display:block;font-weight:600;font-size:14.5px}
+.sw{position:relative;width:50px;height:28px;flex:none}.sw input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;min-height:0}.sw span{position:absolute;inset:0;border-radius:999px;background:#2a313d;transition:.2s;pointer-events:none}.sw span::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#cfd6e0;transition:.2s}
+.sw input:checked+span{background:linear-gradient(135deg,#14b8a6,#34d399);box-shadow:0 0 14px rgba(46,230,214,.55)}.sw input:checked+span::after{transform:translateX(22px);background:#fff}.sw input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}.sw input:disabled+span{opacity:.5}
+.seg{display:inline-flex;flex-wrap:wrap;padding:3px;border-radius:12px;background:var(--field);border:1px solid var(--line)}.seg button{border:0;background:none;color:var(--dim);min-height:34px;padding:6px 12px;border-radius:9px;cursor:pointer;font-size:14px}.seg button.on{background:rgba(46,230,214,.16);color:var(--accent);font-weight:700;box-shadow:inset 0 0 0 1px rgba(46,230,214,.4)}
+.tag{font-size:11px;padding:1px 6px;border-radius:6px;background:rgba(246,196,83,.15);color:var(--warn);margin-left:6px;vertical-align:middle;font-weight:600}
+.rows{display:grid;gap:8px;max-height:46vh;overflow:auto;margin-top:8px}.row{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:10px 12px;background:rgba(255,255,255,.035);border:1px solid var(--line);border-radius:12px}.row span{flex:1;overflow-wrap:anywhere}
+.store{height:8px;border-radius:99px;background:#1d2430;overflow:hidden;margin:4px 0 2px}.store i{display:block;height:100%;background:linear-gradient(90deg,#14b8a6,#34d399)}.store.full i{background:linear-gradient(90deg,#f59e0b,#ef4444)}
+#dropZone{display:grid;place-items:center;gap:6px;padding:26px 14px;border:2px dashed #2f3a4a;border-radius:16px;text-align:center;cursor:pointer;transition:.15s;background:rgba(255,255,255,.02)}#dropZone:hover,#dropZone.over{border-color:var(--accent);background:rgba(46,230,214,.06)}#dropZone .big{font-size:28px}
+progress{width:100%;height:8px;border-radius:99px;overflow:hidden;accent-color:var(--accent);appearance:none}progress::-webkit-progress-bar{background:#1d2430}progress::-webkit-progress-value{background:linear-gradient(90deg,#14b8a6,#34d399)}
+.job{padding:10px 12px;border:1px solid var(--line);border-radius:12px;margin:8px 0;background:rgba(255,255,255,.03)}
+canvas{width:100%;height:70px;border-radius:10px;background:#05070a;margin-top:8px}
+details.card{padding:0}details.card>summary{list-style:none;cursor:pointer;padding:16px 18px;display:flex;align-items:center;gap:10px;font-weight:600}details.card>summary::-webkit-details-marker{display:none}details.card>summary::after{content:"›";margin-left:auto;color:var(--dim);transition:.2s;font-size:20px}details.card[open]>summary::after{transform:rotate(90deg)}details.card>.in{padding:0 18px 18px}
+#notice{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);max-width:92vw;padding:10px 16px;border-radius:12px;background:rgba(40,30,8,.92);border:1px solid rgba(246,196,83,.4);color:var(--warn);font-size:14px;z-index:9}#notice:empty{display:none}
+#login{display:none;margin-top:12px;padding:14px;border-radius:14px;background:rgba(255,255,255,.03);border:1px solid var(--line)}#qr{width:200px;max-width:60vw;background:#fff;border-radius:10px;padding:6px}
+a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:pointer}
 </style>
-<header><h1>STREAM SYNC</h1><span id="guard">后台工作队列</span></header>
-<details><summary>BPM 数据来源（可选）</summary><p id="bpmState"></p><input id="scClient" placeholder="SoundCloud Client ID（留空不改）" autocomplete="off"><input id="scSecret" type="password" placeholder="SoundCloud Client Secret（留空不改）" autocomplete="off"><input id="scToken" type="password" placeholder="SoundCloud Token（留空不改）" autocomplete="off"><input id="gsbKey" type="password" placeholder="GetSongBPM Key（留空不改）" autocomplete="off"><button onclick="action(saveBpm)">保存</button><p><small><a href="https://getsongbpm.com" target="_blank" rel="noreferrer">BPM data by GetSongBPM</a></small></p></details>
-<details><summary>云端登录服务</summary><p id="relayState"></p><input id="relayUrl" placeholder="https://relay.example.com（自建 sc5000-relay 地址）" autocomplete="off"><input id="relayPassword" type="password" placeholder="新密码（留空不改）" autocomplete="off"><button onclick="action(saveRelay)">保存</button></details>
-<details><summary>Shoutcast / Icecast 直播推流</summary><p id="bcState"></p><div class="bar"><input id="bcUrl" placeholder="推流地址，如 http://icecast.example.com:8000" autocomplete="off" style="flex:2"><input id="bcMount" placeholder="/live" autocomplete="off" style="flex:1"></div><div class="bar"><select id="bcProto"><option value="icecast">Icecast</option><option value="shoutcast">Shoutcast</option></select><select id="bcFmt"><option value="mp3">MP3</option><option value="ogg">OGG / Opus</option><option value="wav">WAV (PCM)</option></select><select id="bcBr"><option value="192">192 kbps</option><option value="128">128 kbps</option><option value="256">256 kbps</option><option value="320">320 kbps</option></select><input id="bcPass" type="password" placeholder="推流密码（留空不改）" autocomplete="off"></div><div class="bar"><button onclick="action(saveBroadcast)">保存推流设置</button><button id="bcToggle" onclick="action(toggleBroadcast)">开启推流</button></div></details>
-<details><summary>手机扫码打开控制台</summary><img src="/api/console-qr" width="220" alt="局域网控制台二维码"><small>同一局域网连接，使用终端显示的控制台访问码登录。</small></details>
-<div class="card"><div class="bar"><label><input type="checkbox" id="guest"> 访客临时加歌</label><input id="user" placeholder="Deezer 公开用户 ID" aria-label="Deezer 用户 ID"></div>
-<nav><button data-provider="netease">网易云 · 扫码</button><button data-provider="spotify">Spotify · 扫码</button><button data-provider="deezer">Deezer</button></nav>
-<div class="bar"><select id="sessions" aria-label="账号"></select><button id="browse">浏览歌单</button><button id="relogin">重新扫码登录</button><button id="logout">结束账号会话</button></div>
-<small>访客凭据仅保存在内存，8 小时后失效；下载进入 [Guest / 临时加歌]。原有 Hot Cue 保留。</small></div>
-<div class="card"><h2>碟机显示</h2><div class="bar"><span>流媒体音质（立即生效）</span><button data-ui="quality=flac">FLAC</button><button data-ui="quality=320k">320kbps</button></div><div class="bar"><span>语言（需重启 Engine，播放会中断）</span><button data-ui="lang=en&restart=1">English</button><button data-ui="lang=zh-Hans&restart=1">简体中文</button><button data-ui="lang=zh-Hant&restart=1">繁體中文</button></div><div class="bar"><span>波形（立即生效）</span><button data-ui="waveform=denon">Denon 原厂</button><button data-ui="waveform=rgb">RGB</button><button data-ui="waveform=3band">3-Band</button></div><div class="bar"><span>4-Deck 波形</span><button data-ui="fourDeckWaveform=1">开启</button><button data-ui="fourDeckWaveform=0">关闭</button></div><div class="bar"><span>Pro DJ Link Line-In 波形</span><button data-ui="prolinkWaveform=1">开启</button><button data-ui="prolinkWaveform=0">关闭</button></div><div class="bar"><span>拉杆切歌自动回音</span><button data-ui="upfaderEcho=1">开启</button><button data-ui="upfaderEcho=0">关闭</button></div><div class="bar"><span>主输出软限幅（立即生效）</span><button data-ui="masterLimiter=1">开启</button><button data-ui="masterLimiter=0">关闭</button></div><div class="bar"><span>自动增益 0 dB 归一化（立即生效，含软限幅）</span><button data-ui="autoGain=1">开启</button><button data-ui="autoGain=0">关闭</button></div><div class="bar"><span>Pro DJ Link 曲库（读取局域网 CDJ 的 U 盘）</span><button data-ui="prolinkShare=0">关</button><button data-ui="prolinkShare=1">开</button></div><div class="bar"><span>Pro DJ Link Export to CDJ (Beta)</span><button data-ui="prolinkExport=0">关</button><button data-ui="prolinkExport=1">开</button></div><small id="uiState"></small></div>
+<header>
+ <div class="brand"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><circle cx="13" cy="13" r="11.5" fill="none" stroke="#2ee6d6" stroke-width="2"/><path d="M6 13h2l2-5 3 10 2-7 2 4h3" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>EngineX OS</div>
+ <span class="pill ver" id="version" hidden></span>
+ <span class="pill"><span class="dot"></span><span id="guard" data-i18n="queueIdle"></span></span>
+ <span class="spacer"></span>
+ <div class="langs" role="group" aria-label="Language"><button data-lang="en">EN</button><button data-lang="zh-Hans">简体中文</button><button data-lang="zh-Hant">繁體中文</button></div>
+</header>
+<div class="wrap">
+<div class="grid">
+<div class="col">
+ <section class="card">
+  <h2><span class="ic">♫</span><span data-i18n="streaming"></span></h2>
+  <div class="providers">
+   <button class="prov" data-provider="netease" style="--c:#e60026"><img src="/icons/netease" alt=""><span data-i18n="pNetease"></span></button>
+   <button class="prov" data-provider="spotify" style="--c:#1ed760"><img src="/icons/spotify" alt="">Spotify</button>
+   <button class="prov" data-provider="applemusic" style="--c:#fa2d48"><img src="/icons/applemusic" alt="">Apple Music</button>
+   <button class="prov" data-provider="soundcloud" style="--c:#ff5500"><img src="/icons/soundcloud" alt="">SoundCloud</button>
+   <button class="prov" data-provider="deezer" style="--c:#a238ff"><img src="/icons/deezer" alt="">Deezer</button>
+   <button class="prov" data-provider="beatport" style="--c:#01ff95"><img src="/icons/beatport" alt="">Beatport</button>
+   <button class="prov off" id="tidalInfo" style="--c:#ffffff" aria-disabled="true"><img src="/icons/tidal" alt="">TIDAL</button>
+  </div>
+  <div class="setting"><div class="txt"><b data-i18n="guest"></b><span class="sub" data-i18n="guestSub"></span></div><label class="sw"><input type="checkbox" id="guest"><span></span></label></div>
+  <div class="bar"><input id="user" data-i18n-ph="deezerUser" data-i18n-aria="deezerUser"></div>
+  <div class="bar"><select id="sessions" data-i18n-aria="account"></select></div>
+  <div class="bar"><button class="btn primary" id="browse" data-i18n="browse"></button><button class="btn" id="relogin" data-i18n="relogin"></button><button class="btn" id="logout" data-i18n="logout"></button></div>
+  <div id="login"><img id="qr" data-i18n-alt="loginQr"><p><a id="auth" target="_blank" rel="noreferrer" data-i18n="openOnPhone"></a></p><button class="btn" id="check" data-i18n="checkNetease"></button><small id="loginStatus"></small></div>
+ </section>
+ <section class="card">
+  <h2><span class="ic">≡</span><span id="heading" data-i18n="playlists"></span></h2>
+  <div class="bar"><input id="playlistID" data-i18n-ph="playlistId" data-i18n-aria="playlistId"><button class="btn" id="open" data-i18n="openId"></button></div>
+  <div id="rows" class="rows"></div>
+ </section>
+ <section class="card">
+  <h2><span class="ic">⇪</span><span data-i18n="drop"></span></h2>
+  <div class="bar"><select id="dropDrive" data-i18n-aria="dropDrive"></select></div>
+  <div class="store" id="dropStore"><i style="width:0"></i></div><small id="dropStoreText"></small>
+  <div class="bar"><input id="dropPlaylist" placeholder="Wi-Fi Drop" data-i18n-aria="dropFolder"></div>
+  <label id="dropZone" for="dropFiles" tabindex="0"><span class="big">⤓</span><span data-i18n="dropHere"></span><small>MP3 · FLAC · WAV · AIFF · M4A · AAC · OGG · OPUS</small><input id="dropFiles" type="file" multiple accept=".mp3,.flac,.wav,.aiff,.aif,.m4a,.aac,.ogg,.opus,audio/*" style="display:none"></label>
+  <progress id="dropProgress" max="1" value="0" hidden></progress>
+  <small id="dropState" role="status" data-i18n="dropHint"></small>
+ </section>
+</div>
+<div class="col">
+ <section class="card">
+  <h2><span class="ic">◐</span><span data-i18n="deck"></span></h2>
+  <div class="setting"><div class="txt"><b data-i18n="quality"></b><span class="sub" data-i18n="qualitySub"></span></div><div class="seg" data-seg="quality"><button data-v="flac">FLAC</button><button data-v="320k">320 kbps</button></div></div>
+  <div class="setting"><div class="txt"><b data-i18n="deckLang"></b><span class="sub" data-i18n="deckLangSub"></span></div><div class="seg" data-seg="lang"><button data-v="en">English</button><button data-v="zh-Hans">简体中文</button><button data-v="zh-Hant">繁體中文</button></div></div>
+  <div class="setting"><div class="txt"><b data-i18n="waveform"></b><span class="sub" data-i18n="waveformSub"></span></div><div class="seg" data-seg="waveform"><button data-v="denon" data-i18n="wDenon"></button><button data-v="rgb">RGB</button><button data-v="3band">3-Band</button></div></div>
+  <div class="setting"><div class="txt"><b data-i18n="tFourDeck"></b><span class="sub" data-i18n="sFourDeck"></span></div><label class="sw"><input type="checkbox" data-toggle="fourDeckWaveform"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tLineIn"></b><span class="sub" data-i18n="sLineIn"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkWaveform"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tEcho"></b><span class="sub" data-i18n="sEcho"></span></div><label class="sw"><input type="checkbox" data-toggle="upfaderEcho"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tLimiter"></b><span class="sub" data-i18n="sLimiter"></span></div><label class="sw"><input type="checkbox" data-toggle="masterLimiter"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tGain"></b><span class="sub" data-i18n="sGain"></span></div><label class="sw"><input type="checkbox" data-toggle="autoGain"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tOmni"></b><span class="sub" data-i18n="sOmni"></span></div><label class="sw"><input type="checkbox" data-toggle="omniSource"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tAnalyze"></b><span class="sub" data-i18n="sAnalyze"></span></div><label class="sw"><input type="checkbox" data-toggle="autoAnalyze"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tShare"></b><span class="sub" data-i18n="sShare"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkShare"><span></span></label></div>
+  <div class="setting"><div class="txt"><b><span data-i18n="tExport"></span><span class="tag" data-i18n="beta"></span></b><span class="sub" data-i18n="sExport"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkExport"><span></span></label></div>
+  <small id="uiState"></small>
+ </section>
+ <section class="card">
+  <h2><span class="ic">↧</span><span data-i18n="jobsTitle"></span></h2>
+  <div id="jobs"></div><canvas id="wave" width="1024" height="70" data-i18n-aria="waveAria" hidden></canvas>
+ </section>
+</div>
+<details class="card"><summary><span class="ic">📡</span><span data-i18n="bcTitle"></span></summary><div class="in"><small id="bcState"></small><div class="bar"><input id="bcUrl" data-i18n-ph="bcUrl" autocomplete="off" style="flex:2"><input id="bcMount" placeholder="/live" autocomplete="off"></div><div class="bar"><select id="bcProto"><option value="icecast">Icecast</option><option value="shoutcast">Shoutcast</option></select><select id="bcFmt"><option value="mp3">MP3</option><option value="ogg">OGG / Opus</option><option value="wav">WAV (PCM)</option></select><select id="bcBr"><option value="192">192 kbps</option><option value="128">128 kbps</option><option value="256">256 kbps</option><option value="320">320 kbps</option></select></div><div class="bar"><input id="bcPass" type="password" data-i18n-ph="bcPass" autocomplete="off"></div><div class="bar"><button class="btn" onclick="action(saveBroadcast)" data-i18n="bcSave"></button><button class="btn primary" id="bcToggle" onclick="action(toggleBroadcast)" data-i18n="bcStart"></button></div></div></details>
+<details class="card"><summary><span class="ic">☁</span><span data-i18n="relayTitle"></span></summary><div class="in"><small id="relayState"></small><div class="bar"><input id="relayUrl" data-i18n-ph="relayUrl" autocomplete="off"></div><div class="bar"><input id="relayPassword" type="password" data-i18n-ph="newPassword" autocomplete="off"></div><button class="btn" onclick="action(saveRelay)" data-i18n="save"></button></div></details>
+<details class="card"><summary><span class="ic">♩</span><span data-i18n="bpmTitle"></span></summary><div class="in"><small id="bpmState"></small><div class="bar"><input id="scClient" data-i18n-ph="scClient" autocomplete="off"></div><div class="bar"><input id="scSecret" type="password" data-i18n-ph="scSecret" autocomplete="off"></div><div class="bar"><input id="scToken" type="password" data-i18n-ph="scToken" autocomplete="off"></div><div class="bar"><input id="gsbKey" type="password" data-i18n-ph="gsbKey" autocomplete="off"></div><button class="btn" onclick="action(saveBpm)" data-i18n="save"></button><small><a href="https://getsongbpm.com" target="_blank" rel="noreferrer">BPM data by GetSongBPM</a></small></div></details>
+<details class="card"><summary><span class="ic">▣</span><span data-i18n="qrTitle"></span></summary><div class="in"><img src="/api/console-qr" width="200" data-i18n-alt="qrAlt" style="background:#fff;border-radius:10px;padding:6px"><small data-i18n="qrHint"></small></div></details>
+</div>
+</div>
 <div id="notice" role="status"></div>
-<div id="login" class="card"><img id="qr" alt="登录二维码"><p><a id="auth" target="_blank" rel="noreferrer">在此手机打开登录</a></p><button id="check">检查网易云扫码状态</button><small id="loginStatus"></small></div>
-<div class="card"><h2 id="heading">歌单</h2><div class="bar"><input id="playlistID" placeholder="Deezer 公开歌单 ID" aria-label="公开歌单 ID"><button id="open">打开歌单 ID</button></div><div id="rows" class="rows"></div></div>
-<div class="card"><h2>Wi-Fi 传歌（内置硬盘 / SD / U 盘）</h2><div class="bar"><select id="dropDrive" aria-label="目标盘"></select><input id="dropPlaylist" placeholder="Wi-Fi Drop" aria-label="文件夹 / 歌单名"></div><label id="dropZone" for="dropFiles" tabindex="0" style="display:block;padding:28px;border:2px dashed #374151;border-radius:9px;text-align:center">把 MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS 拖到这里，或点此选择文件<input id="dropFiles" type="file" multiple accept=".mp3,.flac,.wav,.aiff,.aif,.m4a,.aac,.ogg,.opus,audio/*" style="display:none"></label><small id="dropState" role="status">存到 &lt;盘&gt;/Wi-Fi Drop/&lt;歌单&gt;/。SD 卡上的 FLAC/MP3 会自动分析并加入同名歌单，其余在 Engine 的文件浏览里出现、加载时分析。</small></div>
-<div class="card"><h2>下载与分析</h2><div id="jobs"></div><canvas id="wave" width="1024" height="70" aria-label="RGB 波形"></canvas></div>
 <script>
 'use strict';
-const $=id=>document.getElementById(id);let current='',loginSession='',lastWave='',sessions=[],qrTimer=null,qrChecking=false;
-async function showBpm(){const v=await api('bpm');$('bpmState').textContent='SoundCloud：'+(v.soundcloudSet?'已设置':'未设置')+' · GetSongBPM：'+(v.getSongBpmSet?'已设置':'未设置')}
+const $=id=>document.getElementById(id);let current='',loginSession='',lastWave='',sessions=[],qrTimer=null,qrChecking=false,lastUI=null,lastDrives=[],redrawList=null,lastJobs=null;
+// Every visible string: [English, 简体中文, 繁體中文].
+const T={
+queueIdle:['Background queue','后台工作队列','背景工作佇列'],streaming:['Streaming & accounts','流媒体与账号','串流與帳號'],pNetease:['NetEase','网易云','網易雲'],
+guest:['Guest mode','访客临时加歌','訪客臨時加歌'],guestSub:['Guest logins stay in memory for 8 hours; downloads go to [Guest / 临时加歌]. Hot cues are kept.','访客凭据只保存在内存，8 小时后失效；下载进入 [Guest / 临时加歌]，原有 Hot Cue 保留。','訪客憑證只保存在記憶體，8 小時後失效；下載進入 [Guest / 临时加歌]，原有 Hot Cue 保留。'],
+deezerUser:['Deezer public user ID (optional)','Deezer 公开用户 ID（可选）','Deezer 公開使用者 ID（可選）'],account:['Account','账号','帳號'],browse:['Browse playlists','浏览歌单','瀏覽歌單'],relogin:['Log in again','重新登录','重新登入'],logout:['End session','结束账号会话','結束帳號工作階段'],
+loginQr:['Login QR code','登录二维码','登入 QR Code'],openOnPhone:['Open the login on this phone','在此手机打开登录','在此手機開啟登入'],checkNetease:['Check NetEase scan','检查网易云扫码状态','檢查網易雲掃碼狀態'],
+playlists:['Playlists','歌单','歌單'],playlistId:['Deezer public playlist ID','Deezer 公开歌单 ID','Deezer 公開歌單 ID'],openId:['Open ID','打开歌单 ID','開啟歌單 ID'],
+drop:['Wi-Fi Music Drop','Wi-Fi 传歌','Wi-Fi 傳歌'],dropDrive:['Target drive','目标盘','目標磁碟'],dropFolder:['Folder / playlist name','文件夹 / 歌单名','資料夾 / 歌單名稱'],dropHere:['Drop audio files here, or tap to choose','把音频文件拖到这里，或点此选择','把音訊檔拖到這裡，或點此選擇'],
+dropHint:['Saved to <drive>/Wi-Fi Drop/<playlist>/. FLAC and MP3 on the SD card are analysed and added to a playlist of the same name; other files appear in Engine’s file browser and are analysed when loaded.','存到 <盘>/Wi-Fi Drop/<歌单>/。SD 卡上的 FLAC/MP3 会自动分析并加入同名歌单，其余在 Engine 的文件浏览里出现、加载时分析。','存到 <磁碟>/Wi-Fi Drop/<歌單>/。SD 卡上的 FLAC/MP3 會自動分析並加入同名歌單，其餘在 Engine 的檔案瀏覽裡出現、載入時分析。'],
+deck:['Deck display & audio','碟机显示与音频','碟機顯示與音訊'],quality:['Streaming quality','流媒体音质','串流音質'],qualitySub:['Applies right away','立即生效','立即生效'],deckLang:['Deck language','碟机界面语言','碟機介面語言'],deckLangSub:['Restarts Engine: playback stops','需重启 Engine，播放会中断','需重新啟動 Engine，播放會中斷'],
+waveform:['Waveform style','波形样式','波形樣式'],waveformSub:['Applies right away','立即生效','立即生效'],wDenon:['Denon stock','Denon 原厂','Denon 原廠'],
+tFourDeck:['4-Deck waveform','4-Deck 波形','4-Deck 波形'],sFourDeck:['Show decks 3 and 4 as extra waveform strips','把第 3、4 层显示为额外的波形条','把第 3、4 層顯示為額外的波形條'],
+tLineIn:['Pro DJ Link Line-In waveform','Pro DJ Link Line-In 波形','Pro DJ Link Line-In 波形'],sLineIn:['Live waveform and beatgrid of a linked CDJ on Line-In channels','在 Line-In 通道显示联机 CDJ 的实时波形与节拍网格','在 Line-In 通道顯示連線 CDJ 的即時波形與節拍格線'],
+tEcho:['Upfader Echo Out','拉杆切歌自动回音','推桿切歌自動回音'],sEcho:['A one-beat echo tail when a fader is pulled down fast','快速拉下推子时自动留一拍回音尾巴','快速拉下推桿時自動留一拍回音尾巴'],
+tLimiter:['Master soft limiter','主输出软限幅','主輸出軟限幅'],sLimiter:['Stops clipping at the master output; applies right away','防止主输出削波，立即生效','防止主輸出削波，立即生效'],
+tGain:['Auto-Gain 0 dB','自动增益 0 dB 归一化','自動增益 0 dB 歸一化'],sGain:['Brings every track to 0 dB peak, with the soft limiter','把每首歌峰值拉到 0 dB，含软限幅','把每首歌峰值拉到 0 dB，含軟限幅'],
+tOmni:['OmniSource','OmniSource 全源同屏混排','OmniSource 全源同屏混排'],sOmni:['Show USB / SD drives next to streaming in one browser and search','在流媒体浏览和搜索里同时显示 U 盘 / SD 卡','在串流瀏覽和搜尋裡同時顯示隨身碟 / SD 卡'],
+tAnalyze:['Auto-analyze drives','插盘后台自动分析','插碟後台自動分析'],sAnalyze:['Analyze new tracks in the background when a drive is inserted','插入 U 盘或 SD 卡后在后台分析新歌','插入隨身碟或 SD 卡後在背景分析新歌'],
+tShare:['Pro DJ Link library','Pro DJ Link 曲库','Pro DJ Link 曲庫'],sShare:['Read the USB drives of CDJs on the network','读取局域网内 CDJ 的 U 盘','讀取區域網路內 CDJ 的隨身碟'],
+tExport:['Pro DJ Link export to CDJ','Pro DJ Link 共享本机 U 盘给 CDJ','Pro DJ Link 分享本機隨身碟給 CDJ'],sExport:['Let CDJs browse this deck’s USB drive. Not yet tested on a real CDJ','让 CDJ 浏览本机 U 盘；尚未在真 CDJ 上验证','讓 CDJ 瀏覽本機隨身碟；尚未在實機 CDJ 上驗證'],beta:['Beta','实验性','實驗性'],
+jobsTitle:['Downloads & analysis','下载与分析','下載與分析'],waveAria:['RGB waveform of the newest track','最新曲目的 RGB 波形','最新曲目的 RGB 波形'],
+bcTitle:['Shoutcast / Icecast live stream','Shoutcast / Icecast 直播推流','Shoutcast / Icecast 直播推流'],bcUrl:['Server, e.g. http://icecast.example.com:8000','推流地址，如 http://icecast.example.com:8000','推流位址，如 http://icecast.example.com:8000'],bcPass:['Stream password (empty keeps it)','推流密码（留空不改）','推流密碼（留空不改）'],bcSave:['Save stream settings','保存推流设置','儲存推流設定'],bcStart:['Start streaming','开启推流','開始推流'],bcStop:['Stop streaming','停止推流','停止推流'],
+relayTitle:['Cloud login relay','云端登录服务','雲端登入服務'],relayUrl:['https://relay.example.com (your sc5000-relay)','https://relay.example.com（自建 sc5000-relay 地址）','https://relay.example.com（自建 sc5000-relay 位址）'],newPassword:['New password (empty keeps it)','新密码（留空不改）','新密碼（留空不改）'],save:['Save','保存','儲存'],
+bpmTitle:['BPM data sources (optional)','BPM 数据来源（可选）','BPM 資料來源（可選）'],scClient:['SoundCloud Client ID (empty keeps it)','SoundCloud Client ID（留空不改）','SoundCloud Client ID（留空不改）'],scSecret:['SoundCloud Client Secret (empty keeps it)','SoundCloud Client Secret（留空不改）','SoundCloud Client Secret（留空不改）'],scToken:['SoundCloud token (empty keeps it)','SoundCloud Token（留空不改）','SoundCloud Token（留空不改）'],gsbKey:['GetSongBPM key (empty keeps it)','GetSongBPM Key（留空不改）','GetSongBPM Key（留空不改）'],
+qrTitle:['Open this console on a phone','手机扫码打开控制台','手機掃碼開啟控制台'],qrAlt:['QR code of this console','局域网控制台二维码','區域網路控制台 QR Code'],qrHint:['Same network only; log in with the console code shown on the deck.','需在同一局域网；用碟机显示的控制台访问码登录。','需在同一區域網路；用碟機顯示的控制台存取碼登入。'],
+set:['set','已设置','已設定'],unset:['not set','未设置','未設定'],pwSet:['Password set','密码已设置','密碼已設定'],pwUnset:['No password','未设置密码','未設定密碼'],
+lanOn:['Home PC Stems: {0} ({1}) online','家里电脑 Stems：{0}（{1}）已连上','家裡電腦 Stems：{0}（{1}）已連上'],lanOff:['Home PC Stems: {0} offline, splitting on the deck','家里电脑 Stems：{0} 离线，碟机本机分轨','家裡電腦 Stems：{0} 離線，碟機本機分軌'],notFound:['not found','未发现','未發現'],
+bcStatus:['Status','状态','狀態'],bcConnected:['connected','已连上','已連上'],bcStreaming:['streaming','推流中','推流中'],bcFailed:['connection failed','连接失败','連線失敗'],bcConnecting:['connecting…','连接中…','連線中…'],bcOff:['off','未开启','未開啟'],bcSent:['sent','已发','已送出'],
+owner:['owner','主人','主人'],noAccount:['No account yet: pick a service above','还没有账号：先点上面的服务','還沒有帳號：先點上面的服務'],guestShort:['guest','访客','訪客'],needLogin:['needs login','待登录','待登入'],chooseAccount:['Choose an account first','先选择账号','先選擇帳號'],
+scanPhone:['Scan with your phone. For Spotify, tap “Browse playlists” after logging in.','请用手机扫码；Spotify 登录后点“浏览歌单”。','請用手機掃碼；Spotify 登入後點「瀏覽歌單」。'],
+deckQr:['Log in to {0} on the deck: Settings → Services → Streaming → {0}, then scan the QR code on its screen.','请在碟机上登录 {0}：设置 → 服务 → 流媒体 → {0}，用手机扫屏幕上的二维码。','請在碟機上登入 {0}：設定 → 服務 → 串流 → {0}，用手機掃螢幕上的 QR Code。'],
+tidalHint:['TIDAL logs in on the deck with Engine’s own TIDAL login.','TIDAL 在碟机上用 Engine 自带的 TIDAL 登录。','TIDAL 在碟機上用 Engine 內建的 TIDAL 登入。'],
+qrExpired:['QR code expired, log in again','二维码已过期，请重新登录','QR Code 已過期，請重新登入'],qrWait:['Waiting for the scan','等待扫码','等待掃碼'],qrConfirm:['Confirm on your phone','等待手机确认','等待手機確認'],qrDone:['Logged in','登录成功','登入成功'],retry:['Please try again','请重试','請重試'],
+open:['Open','打开','開啟'],nTracks:['{0} tracks','{0} 首','{0} 首'],seconds:['{0} s','{0} 秒','{0} 秒'],trackDefault:['Tracks','曲目','曲目'],getTrack:['Download & analyze','下载并分析入库','下載並分析入庫'],queued:['Added to the background queue','已加入后台队列','已加入背景佇列'],
+jQueued:['queued','排队','排隊'],jMatching:['matching','匹配录音','比對錄音'],jDownloading:['downloading','下载','下載'],jAnalyzing:['analyzing BPM / key / RGB','分析 BPM / Key / RGB','分析 BPM / Key / RGB'],jImporting:['writing to the SD library','写入 SD 曲库','寫入 SD 曲庫'],jDone:['ready to load','可加载播放','可載入播放'],jError:['failed','失败','失敗'],
+degraded:['degraded','降级','降級'],lowPrio:['low-priority background','后台低优先级','背景低優先'],
+current:['Now','当前','目前'],on:['on','开','開'],off:['off','关','關'],safeMode:['Safe mode: the stock UI is back; choose a language to retry','安全模式：已回到原厂界面，选择语言可重试','安全模式：已回到原廠介面，選擇語言可重試'],restartAsk:['Restart Engine? Playback stops.','重启 Engine？播放会中断。','重新啟動 Engine？播放會中斷。'],
+kInternal:['Internal storage','内置存储','內建儲存'],kHd:['Internal drive','内置硬盘','內建硬碟'],kSd:['SD card','SD 卡','SD 卡'],kUsb:['USB drive','U 盘','隨身碟'],kDrive:['Drive','存储','儲存裝置'],free:['{0} GB free','剩余 {0} GB','剩餘 {0} GB'],ofTotal:['{0} GB free of {1} GB','{1} GB 中剩余 {0} GB','{1} GB 中剩餘 {0} GB'],noDrive:['No writable drive','没有可写的盘','沒有可寫入的磁碟'],
+chooseDrive:['Choose a target drive first','先选择目标盘','先選擇目標磁碟'],netDown:['Network interrupted','网络中断','網路中斷'],savedN:['Saved {0} files','已保存 {0} 个文件','已儲存 {0} 個檔案'],importingN:['; {0} being analyzed and imported (see Downloads)','，{0} 个正在分析入库（见“下载与分析”）','，{0} 個正在分析入庫（見「下載與分析」）']
+};
+const LANGS=['en','zh-Hans','zh-Hant'];
+// ?lang= (a shared link) wins, then the saved choice, then the browser; the deck's language once known.
+const urlLang=new URLSearchParams(location.search).get('lang');if(['en','zh-Hans','zh-Hant'].includes(urlLang))localStorage.setItem('enginex-console-lang',urlLang);
+let lang=localStorage.getItem('enginex-console-lang')||(/^zh-(tw|hk|mo|hant)/i.test(navigator.language)?'zh-Hant':/^zh/i.test(navigator.language)?'zh-Hans':'en');
+function t(k,...a){const v=T[k];if(!v)return k;return v[Math.max(0,LANGS.indexOf(lang))].replace(/\{(\d)\}/g,(_,i)=>a[i]??'')}
+function applyLang(){document.documentElement.lang=lang==='en'?'en':lang==='zh-Hans'?'zh-CN':'zh-TW';
+ for(const e of document.querySelectorAll('[data-i18n]'))e.textContent=t(e.dataset.i18n);
+ for(const e of document.querySelectorAll('[data-i18n-ph]'))e.placeholder=t(e.dataset.i18nPh);
+ for(const e of document.querySelectorAll('[data-i18n-aria]'))e.setAttribute('aria-label',t(e.dataset.i18nAria));
+ for(const e of document.querySelectorAll('[data-i18n-alt]'))e.alt=t(e.dataset.i18nAlt);
+ for(const b of document.querySelectorAll('[data-lang]'))b.classList.toggle('on',b.dataset.lang===lang)}
+function setLang(l,save){if(!LANGS.includes(l))return;lang=l;if(save)localStorage.setItem('enginex-console-lang',l);applyLang();if(lastUI)showUI(lastUI);renderSessions();renderDrives();if(redrawList)redrawList();if(lastJobs)renderJobs(lastJobs);action(async()=>{await showRelay();await showBpm();await showBroadcast()})}
+for(const b of document.querySelectorAll('[data-lang]'))b.onclick=()=>setLang(b.dataset.lang,true);
+async function showBpm(){const v=await api('bpm');$('bpmState').textContent='SoundCloud: '+(v.soundcloudSet?t('set'):t('unset'))+' · GetSongBPM: '+(v.getSongBpmSet?t('set'):t('unset'))}
 async function saveBpm(){const b={};if($('scClient').value)b.soundcloudClientId=$('scClient').value.trim();if($('scSecret').value)b.soundcloudClientSecret=$('scSecret').value.trim();if($('scToken').value)b.soundcloudToken=$('scToken').value.trim();if($('gsbKey').value)b.getSongBpmKey=$('gsbKey').value.trim();await api('bpm',{method:'POST',body:JSON.stringify(b)});$('scClient').value=$('scSecret').value=$('scToken').value=$('gsbKey').value='';await showBpm()}
-async function showRelay(){const v=await api('relay');$('relayUrl').value=v.relayUrl;$('relayState').textContent=(v.deemixPasswordSet?'密码已设置':'未设置密码')+(v.lanStems?(v.lanStems.online?' · 家里电脑 Stems：'+v.lanStems.hostname+'（'+v.lanStems.backend+'）已连上':' · 家里电脑 Stems：'+(v.lanStems.hostname||'未发现')+' 离线，碟机本机分轨'):'')}
+async function showRelay(){const v=await api('relay');$('relayUrl').value=v.relayUrl;$('relayState').textContent=(v.deemixPasswordSet?t('pwSet'):t('pwUnset'))+(v.lanStems?' · '+(v.lanStems.online?t('lanOn',v.lanStems.hostname,v.lanStems.backend):t('lanOff',v.lanStems.hostname||t('notFound'))):'')}
 async function saveRelay(){const b={relayUrl:$('relayUrl').value.trim()};const p=$('relayPassword').value;if(p)b.deemixPassword=p;await api('relay',{method:'POST',body:JSON.stringify(b)});$('relayPassword').value='';await showRelay()}
-async function showBroadcast(){const v=await api('broadcast');$('bcUrl').value=v.serverUrl||'';$('bcMount').value=v.mountpoint||'';if(v.protocol)$('bcProto').value=v.protocol;if(v.format)$('bcFmt').value=v.format;if(v.bitrate)$('bcBr').value=String(v.bitrate);$('bcState').textContent='状态：'+(v.enabled?(v.connected?'已连上 ('+(v.currentArtist||v.currentTitle?(v.currentArtist+' - '+v.currentTitle):'推流中')+')':v.lastError?'连接失败: '+v.lastError:'连接中…'):'未开启')+' · 已发：'+Math.round((v.bytesSent||0)/1024)+' KB';$('bcToggle').textContent=v.enabled?'停止推流':'开启推流'}
+async function showBroadcast(){const v=await api('broadcast');$('bcUrl').value=v.serverUrl||'';$('bcMount').value=v.mountpoint||'';if(v.protocol)$('bcProto').value=v.protocol;if(v.format)$('bcFmt').value=v.format;if(v.bitrate)$('bcBr').value=String(v.bitrate);$('bcState').textContent=t('bcStatus')+': '+(v.enabled?(v.connected?t('bcConnected')+' ('+(v.currentArtist||v.currentTitle?(v.currentArtist+' - '+v.currentTitle):t('bcStreaming'))+')':v.lastError?t('bcFailed')+': '+v.lastError:t('bcConnecting')):t('bcOff'))+' · '+t('bcSent')+' '+Math.round((v.bytesSent||0)/1024)+' KB';$('bcToggle').textContent=v.enabled?t('bcStop'):t('bcStart')}
 async function saveBroadcast(){const b={serverUrl:$('bcUrl').value.trim(),mountpoint:$('bcMount').value.trim(),protocol:$('bcProto').value,format:$('bcFmt').value,bitrate:parseInt($('bcBr').value,10)};const p=$('bcPass').value;if(p)b.password=p;await post('broadcast',b);$('bcPass').value='';await showBroadcast()}
 async function toggleBroadcast(){const v=await api('broadcast');await post('broadcast',{enabled:!v.enabled});await showBroadcast()}
-function notice(t){$('notice').textContent=t||''}
+let noticeTimer=null;function notice(m){$('notice').textContent=m||'';clearTimeout(noticeTimer);if(m)noticeTimer=setTimeout(()=>notice(''),6000)}
 async function api(path,opts={}){const r=await fetch('/api/'+path,{...opts,headers:{'Content-Type':'application/json'}});const v=await r.json();if(!r.ok)throw Error(v.error||r.status);return v}
 const post=(p,v={})=>api(p,{method:'POST',body:JSON.stringify(v)});
 async function action(fn){try{notice('');await fn()}catch(e){notice(e.message)}}
-async function refreshSessions(){sessions=await api('sessions');const selected=current;$('sessions').replaceChildren();for(const s of sessions){const o=document.createElement('option');o.value=s.id;o.textContent=s.provider+' · '+(s.guest?'访客':'主人')+(s.ready?' ✓':' · 待登录');$('sessions').append(o)}current=sessions.some(s=>s.id===selected)?selected:(sessions[0]?.id||'');$('sessions').value=current}
-$('sessions').onchange=()=>{current=$('sessions').value;$('rows').replaceChildren()};
+function renderSessions(){const selected=current;$('sessions').replaceChildren();for(const s of sessions){const o=document.createElement('option');o.value=s.id;o.textContent=s.provider+' · '+(s.guest?t('guestShort'):t('owner'))+(s.ready?' ✓':' · '+t('needLogin'));$('sessions').append(o)}if(!sessions.length){const o=document.createElement('option');o.textContent=t('noAccount');o.disabled=true;o.selected=true;$('sessions').append(o)}current=sessions.some(s=>s.id===selected)?selected:(sessions[0]?.id||'');if(current)$('sessions').value=current;for(const b of document.querySelectorAll('[data-provider]'))b.classList.toggle('ok',sessions.some(s=>s.provider===b.dataset.provider&&s.ready))}
+async function refreshSessions(){sessions=await api('sessions');renderSessions()}
+$('sessions').onchange=()=>{current=$('sessions').value;$('rows').replaceChildren();redrawList=null};
 async function beginLogin(id){
  const q=await post('sessions/'+id+'/login');loginSession=id;clearInterval(qrTimer);
  const session=sessions.find(s=>s.id===id);
  if(session?.provider==='netease')qrTimer=setInterval(()=>action(checkLogin),2500);
  $('login').style.display='block';$('qr').src='/api/sessions/'+id+'/qr';$('auth').href=q.url;
- $('check').hidden=session?.provider!=='netease';$('loginStatus').textContent='请用手机扫码；Spotify 登录后点“浏览歌单”';
+ $('check').hidden=session?.provider!=='netease';$('loginStatus').textContent=t('scanPhone');
 }
+const consoleLogin=['netease','spotify'],names={soundcloud:'SoundCloud',beatport:'Beatport',applemusic:'Apple Music'};
 for(const b of document.querySelectorAll('[data-provider]'))b.onclick=()=>action(async()=>{
  const s=await post('sessions',{provider:b.dataset.provider,guest:$('guest').checked,userId:$('user').value.trim()});
  current=s.id;await refreshSessions();
  if(s.provider==='deezer'||s.ready){await playlists();return}
+ // SoundCloud, Beatport and Apple Music log in from the deck's own QR code.
+ if(!consoleLogin.includes(s.provider)){notice(t('deckQr',names[s.provider]||s.provider));return}
  await beginLogin(s.id);
 });
-$('relogin').onclick=()=>action(()=>{if(!current)throw Error('先选择账号');return beginLogin(current)});
+$('tidalInfo').onclick=()=>notice(t('tidalHint'));
+$('relogin').onclick=()=>action(()=>{if(!current)throw Error(t('chooseAccount'));const s=sessions.find(v=>v.id===current);if(s&&!consoleLogin.includes(s.provider)&&s.provider!=='deezer'){notice(t('deckQr',names[s.provider]||s.provider));return}return beginLogin(current)});
 async function checkLogin(){
  if(qrChecking||!loginSession)return;qrChecking=true;
  try{
   const r=await post('sessions/'+loginSession+'/poll');
-  $('loginStatus').textContent=({800:'二维码已过期，请重新登录',801:'等待扫码',802:'等待手机确认',803:'登录成功'})[r.code]||'请重试';
+  $('loginStatus').textContent=({800:t('qrExpired'),801:t('qrWait'),802:t('qrConfirm'),803:t('qrDone')})[r.code]||t('retry');
   if(r.code===800||r.code===803)clearInterval(qrTimer);
   if(r.code===803){$('login').style.display='none';await refreshSessions();await playlists()}
  }catch(e){clearInterval(qrTimer);throw e}finally{qrChecking=false}
 }
 $('check').onclick=()=>action(checkLogin);
-function row(title,detail,label,fn){const d=document.createElement('div');d.className='row';const s=document.createElement('span');s.textContent=title;const small=document.createElement('small');small.textContent=detail;s.append(small);const b=document.createElement('button');b.textContent=label;b.onclick=()=>action(async()=>{b.disabled=true;try{await fn()}finally{b.disabled=false}});d.append(s,b);return d}
-async function playlists(){if(!current)throw Error('先选择账号');await refreshSessions();const all=await api('sessions/'+current+'/playlists');$('heading').textContent='歌单';$('rows').replaceChildren();for(const p of all)$('rows').append(row(p.title,p.count+' 首','打开',()=>tracks(p.id,p.title)));$('login').style.display='none'}
-async function tracks(id,title='曲目'){const account=current;const all=await api('sessions/'+account+'/tracks?playlist='+encodeURIComponent(id));$('heading').textContent=title;$('rows').replaceChildren();for(const t of all)$('rows').append(row(t.title,t.artist+' · '+Math.round(t.durationMs/1000)+' 秒','下载并分析入库',async()=>{await post('jobs',{sessionId:account,trackId:t.id});notice('已加入后台队列');await jobs()}))}
+function row(title,detail,label,fn){const d=document.createElement('div');d.className='row';const s=document.createElement('span');s.textContent=title;const small=document.createElement('small');small.textContent=detail;s.append(small);const b=document.createElement('button');b.className='btn';b.textContent=label;b.onclick=()=>action(async()=>{b.disabled=true;try{await fn()}finally{b.disabled=false}});d.append(s,b);return d}
+async function playlists(){if(!current)throw Error(t('chooseAccount'));await refreshSessions();const all=await api('sessions/'+current+'/playlists');redrawList=()=>{$('heading').textContent=t('playlists');$('rows').replaceChildren();for(const p of all)$('rows').append(row(p.title,t('nTracks',p.count),t('open'),()=>tracks(p.id,p.title)))};redrawList();$('login').style.display='none'}
+async function tracks(id,title){const account=current;const all=await api('sessions/'+account+'/tracks?playlist='+encodeURIComponent(id));redrawList=()=>{$('heading').textContent=title||t('trackDefault');$('rows').replaceChildren();for(const tr of all)$('rows').append(row(tr.title,tr.artist+' · '+t('seconds',Math.round(tr.durationMs/1000)),t('getTrack'),async()=>{await post('jobs',{sessionId:account,trackId:tr.id});notice(t('queued'));await jobs()}))};redrawList()}
 $('browse').onclick=()=>action(playlists);$('open').onclick=()=>action(()=>tracks($('playlistID').value.trim()));
-$('logout').onclick=()=>action(async()=>{await api('sessions/'+current,{method:'DELETE'});current='';clearInterval(qrTimer);await refreshSessions();$('rows').replaceChildren();$('login').style.display='none'});
-async function jobs(){
- const data=await api('jobs');$('jobs').replaceChildren();
- const states={queued:'排队',matching:'匹配录音',downloading:'下载',analyzing:'分析 BPM / Key / RGB',importing:'写入 SD 曲库',done:'可加载播放',error:'失败'};
+$('logout').onclick=()=>action(async()=>{await api('sessions/'+current,{method:'DELETE'});current='';clearInterval(qrTimer);await refreshSessions();$('rows').replaceChildren();redrawList=null;$('login').style.display='none'});
+function renderJobs(data){
+ $('jobs').replaceChildren();
+ const states={queued:'jQueued',matching:'jMatching',downloading:'jDownloading',analyzing:'jAnalyzing',importing:'jImporting',done:'jDone',error:'jError'};
  for(const j of data.jobs||[]){
-  const d=document.createElement('div');d.className='card';
-  const title=document.createElement('div');title.textContent=j.track.title+' · '+(states[j.state]||j.state)+' '+(j.quality||'');
+  const d=document.createElement('div');d.className='job';
+  const title=document.createElement('div');title.textContent=j.track.title+' · '+(states[j.state]?t(states[j.state]):j.state)+' '+(j.quality||'');
   const p=document.createElement('progress');p.max=1;p.value=j.progress;
   const detail=document.createElement('small');detail.textContent=j.error||j.playlist;
   d.append(title,p,detail);$('jobs').append(d);
  }
+ const g=data.resourceGuard;
+ if(g)$('guard').textContent='CPU '+(g.cpus||[]).join(',')+' · nice '+g.nice+(g.degraded?.length?' · '+t('degraded')+': '+g.degraded.join('; '):' · '+t('lowPrio'));
+}
+async function jobs(){
+ const data=await api('jobs');lastJobs=data;renderJobs(data);
  const newest=(data.jobs||[]).find(j=>j.state==='done');
  if(newest&&lastWave!==newest.id){
   const v=await api('jobs/'+newest.id+'/waveform');lastWave=newest.id;
-  const c=$('wave').getContext('2d');c.clearRect(0,0,1024,70);
+  $('wave').hidden=false;const c=$('wave').getContext('2d');c.clearRect(0,0,1024,70);
   v.overview.forEach((p,i)=>{c.fillStyle='rgb('+p.LowValue+','+p.MidValue+','+p.HighValue+')';const h=Math.max(p.LowValue,p.MidValue,p.HighValue)*70/255;c.fillRect(i,(70-h)/2,1,h)});
  }
- const g=data.resourceGuard;
- if(g)$('guard').textContent='CPU '+(g.cpus||[]).join(',')+' · nice '+g.nice+(g.degraded?.length?' · 降级：'+g.degraded.join('; '):' · 后台低优先级');
 }
-
-function showUI(v){$('uiState').textContent='当前：'+v.language+' · '+v.waveform+' · '+v.quality+' · 4-Deck: '+(v.fourDeckWaveform?'开':'关')+' · ProLink: '+(v.prolinkWaveform?'开':'关')+' · 软限幅: '+(v.masterLimiter?'开':'关')+' · 自动增益: '+(v.autoGain?'开':'关')+' · Pro DJ Link 曲库: '+(v.prolinkShare?'开':'关')+' · CDJ Export Beta: '+(v.prolinkExport?'开':'关')+(v.safeMode?' · 安全模式（已回到原厂界面，选择语言可重试）':'')}
-for(const b of document.querySelectorAll('[data-ui]'))b.onclick=()=>action(async()=>{const q=b.dataset.ui;if(q.includes('restart')&&!confirm('重启 Engine？播放会中断。'))return;showUI(await post('ui?'+q))});
-async function showDrives(){const ds=await api('drives'),sel=$('dropDrive');sel.replaceChildren();const kinds={internal:'内置存储',hd:'内置硬盘',sd:'SD 卡',usb:'U 盘',drive:'存储'};for(const d of ds){const o=document.createElement('option');o.value=d.name;o.textContent=(kinds[d.kind]||d.kind)+' · '+d.name+' · 剩余 '+(d.free/2**30).toFixed(1)+' GB';sel.append(o)}if(!ds.length){const o=document.createElement('option');o.textContent='没有可写的盘';o.disabled=true;sel.append(o)}}
-function dropOne(file){return new Promise((ok,bad)=>{const x=new XMLHttpRequest(),f=new FormData();f.append('file',file,file.name);x.open('POST','/api/drop?drive='+encodeURIComponent($('dropDrive').value)+'&playlist='+encodeURIComponent($('dropPlaylist').value.trim()));x.upload.onprogress=e=>{if(e.lengthComputable)$('dropState').textContent=file.name+' · '+Math.round(100*e.loaded/e.total)+'%'};x.onload=()=>{let v={};try{v=JSON.parse(x.responseText)}catch(e){}x.status===200?ok(v):bad(Error(v.error||x.status))};x.onerror=()=>bad(Error('网络中断'));x.send(f)})}
-async function dropFiles(files){if(!$('dropDrive').value)throw Error('先选择目标盘');let n=0,imp=0;for(const file of files){const v=await dropOne(file);n+=v.saved.length;imp+=v.imported}$('dropState').textContent='已保存 '+n+' 个文件'+(imp?'，'+imp+' 个正在分析入库（见下方）':'');await showDrives()}
+const toggleKeys=['fourDeckWaveform','prolinkWaveform','upfaderEcho','masterLimiter','autoGain','omniSource','autoAnalyze','prolinkShare','prolinkExport'];
+function showUI(v){lastUI=v;
+ if(v.version){$('version').textContent='v'+v.version;$('version').hidden=false}
+ for(const e of document.querySelectorAll('[data-toggle]'))e.checked=!!v[e.dataset.toggle];
+ const segs={quality:v.quality,lang:v.language,waveform:v.waveform};
+ for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.classList.toggle('on',b.dataset.v===segs[g.dataset.seg]);
+ const lname={en:'English','zh-Hans':'简体中文','zh-Hant':'繁體中文'}[v.language]||v.language;
+ $('uiState').textContent=t('current')+': '+lname+' · '+v.waveform+' · '+v.quality+(v.safeMode?' · '+t('safeMode'):'')}
+for(const e of document.querySelectorAll('[data-toggle]'))e.onchange=()=>action(async()=>{e.disabled=true;try{showUI(await post('ui?'+e.dataset.toggle+'='+(e.checked?1:0)))}catch(err){e.checked=!e.checked;throw err}finally{e.disabled=false}});
+for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.onclick=()=>action(async()=>{let q=g.dataset.seg+'='+b.dataset.v;if(g.dataset.seg==='lang'){if(!confirm(t('restartAsk')))return;q+='&restart=1'}showUI(await post('ui?'+q))});
+const kinds={internal:'kInternal',hd:'kHd',sd:'kSd',usb:'kUsb',drive:'kDrive'},gb=n=>(n/2**30).toFixed(1);
+function renderDrives(){const sel=$('dropDrive'),keep=sel.value;sel.replaceChildren();for(const d of lastDrives){const o=document.createElement('option');o.value=d.name;o.textContent=t(kinds[d.kind]||'kDrive')+' · '+d.name+' · '+t('free',gb(d.free));sel.append(o)}if(!lastDrives.length){const o=document.createElement('option');o.textContent=t('noDrive');o.disabled=true;o.selected=true;sel.append(o)}if(lastDrives.some(d=>d.name===keep))sel.value=keep;showStore()}
+function showStore(){const d=lastDrives.find(v=>v.name===$('dropDrive').value),bar=$('dropStore');if(!d||!d.total){bar.hidden=true;$('dropStoreText').textContent='';return}const used=1-d.free/d.total;bar.hidden=false;bar.classList.toggle('full',used>.9);bar.firstChild.style.width=Math.round(used*100)+'%';$('dropStoreText').textContent=t('ofTotal',gb(d.free),gb(d.total))}
+async function showDrives(){lastDrives=await api('drives');renderDrives()}
+$('dropDrive').onchange=showStore;
+function dropOne(file){return new Promise((ok,bad)=>{const x=new XMLHttpRequest(),f=new FormData();f.append('file',file,file.name);x.open('POST','/api/drop?drive='+encodeURIComponent($('dropDrive').value)+'&playlist='+encodeURIComponent($('dropPlaylist').value.trim()));x.upload.onprogress=e=>{if(e.lengthComputable){$('dropProgress').hidden=false;$('dropProgress').value=e.loaded/e.total;$('dropState').textContent=file.name+' · '+Math.round(100*e.loaded/e.total)+'%'}};x.onload=()=>{let v={};try{v=JSON.parse(x.responseText)}catch(e){}x.status===200?ok(v):bad(Error(v.error||x.status))};x.onerror=()=>bad(Error(t('netDown')));x.send(f)})}
+async function dropFiles(files){if(!$('dropDrive').value)throw Error(t('chooseDrive'));let n=0,imp=0;try{for(const file of files){const v=await dropOne(file);n+=v.saved.length;imp+=v.imported}}finally{$('dropProgress').hidden=true}$('dropState').textContent=t('savedN',n)+(imp?t('importingN',imp):'');await showDrives()}
 $('dropFiles').onchange=e=>action(()=>dropFiles([...e.target.files]));
 $('dropZone').onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();$('dropFiles').click()}};
-$('dropZone').ondragover=e=>{e.preventDefault();$('dropZone').style.borderColor='#5ce4d5'};
-$('dropZone').ondragleave=()=>{$('dropZone').style.borderColor='#374151'};
-$('dropZone').ondrop=e=>{e.preventDefault();$('dropZone').style.borderColor='#374151';action(()=>dropFiles([...e.dataTransfer.files]))};
-action(async()=>{showUI(await api('ui'));await showDrives();await showRelay();await showBpm();await showBroadcast();await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(e=>notice(e.message))},2000);
+$('dropZone').ondragover=e=>{e.preventDefault();$('dropZone').classList.add('over')};
+$('dropZone').ondragleave=()=>$('dropZone').classList.remove('over');
+$('dropZone').ondrop=e=>{e.preventDefault();$('dropZone').classList.remove('over');action(()=>dropFiles([...e.dataTransfer.files]))};
+applyLang();renderSessions();renderDrives();
+action(async()=>{const v=await api('ui');if(!localStorage.getItem('enginex-console-lang')&&LANGS.includes(v.language))setLang(v.language,false);showUI(v);await showDrives();await showRelay();await showBpm();await showBroadcast();await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(e=>notice(e.message))},2000);
 </script></html>

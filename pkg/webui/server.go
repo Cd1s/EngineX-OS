@@ -143,6 +143,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /oauth/spotify/callback", s.callback)
 	s.mux.HandleFunc("GET /api/sessions", s.listSessions)
 	s.mux.HandleFunc("GET /m/{provider}", s.phoneGet)
+	s.mux.HandleFunc("GET /icons/{id}", s.serviceIcon)
 	s.mux.HandleFunc("POST /m/{provider}", s.phonePost)
 	s.mux.HandleFunc("GET /api/ui", s.uiStatus)
 	s.mux.HandleFunc("GET /api/update", s.update)
