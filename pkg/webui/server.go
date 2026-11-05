@@ -280,7 +280,7 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 		return &providers.Deezer{BaseURL: s.cfg.DeezerURL, GatewayURL: s.cfg.DeezerGatewayURL, UserID: user, ARL: arl, HTTP: s.cfg.HTTP}, nil
 	case "soundcloud":
 		if guest {
-			return &providers.SoundCloud{BaseURL: s.cfg.SoundCloudURL, HTTP: s.cfg.HTTP, Auth: s.soundCloudAuth}, nil
+			return s.soundCloud(&providers.SoundCloud{Auth: s.soundCloudAuth}), nil
 		}
 		return s.ownerSoundCloudProvider(), nil
 	case "beatport":

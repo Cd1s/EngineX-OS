@@ -1,16 +1,16 @@
 package webui
 
 // Login from the deck's own screen. The deck shows a QR code: NetEase's goes to
-// its app directly; Spotify and Deezer have no such flow, so theirs opens the
-// cloud relay's page (see relay.go), or without a relay a small page on this deck.
-// Either is guarded by a one-time token shown only on the deck's screen.
+// its app directly; the others have no such flow, so theirs opens the cloud
+// relay's page (see relay.go), or without a relay a page on this deck
+// (phone_pages.go). Either is guarded by a one-time token shown only on the deck.
 
 import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"html"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -40,6 +40,9 @@ type loginFlow struct {
 	session  string
 	viaRelay bool
 	expires  time.Time
+	// spotifyState is the last authorization the phone page offered, for a pasted
+	// address that lost its state.
+	spotifyState string
 }
 
 // DefaultSpotifyClientID is this deck's registered public PKCE client.
@@ -102,15 +105,19 @@ func (s *Server) ownerSoundCloudProvider() *providers.SoundCloud {
 			owner.Token = keys.SoundCloudToken
 		}
 	}
-	return &providers.SoundCloud{BaseURL: s.cfg.SoundCloudURL, HTTP: s.cfg.HTTP, ClientID: owner.ClientID, Secret: owner.Secret, Token: owner.Token, Auth: s.soundCloudAuth, UserID: owner.UserID, Username: owner.Username}
+	return s.soundCloud(&providers.SoundCloud{ClientID: owner.ClientID, Secret: owner.Secret, Token: owner.Token, Auth: s.soundCloudAuth, UserID: owner.UserID, Username: owner.Username})
 }
 
-// ownerSoundCloud returns the owner's SoundCloud access, if there is any.
+// soundCloud points p at SoundCloud; tests serve all of it from one fake server.
+func (s *Server) soundCloud(p *providers.SoundCloud) *providers.SoundCloud {
+	p.BaseURL, p.WebURL, p.SiteURL, p.HTTP = s.cfg.SoundCloudURL, s.cfg.SoundCloudURL, s.cfg.SoundCloudURL, s.cfg.HTTP
+	return p
+}
+
+// ownerSoundCloud returns the owner's SoundCloud access. Without any credentials
+// it still reaches public profiles and search.
 func (s *Server) ownerSoundCloud() *providers.SoundCloud {
-	if p := s.ownerSoundCloudProvider(); p.Usable() {
-		return p
-	}
-	return nil
+	return s.ownerSoundCloudProvider()
 }
 
 // linkSoundCloudAccount saves an account login the relay completed. The tokens live
@@ -148,9 +155,6 @@ func (s *Server) linkSoundCloud(ctx context.Context, session *Session, user, cli
 	}
 	if token != "" {
 		check.Token, check.UserID, check.Username = token, 0, ""
-	}
-	if !check.Usable() {
-		return errors.New("soundcloud: credentials required")
 	}
 	if user != "" {
 		if err := check.ResolveUser(ctx, user); err != nil {
@@ -330,7 +334,10 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 		s.relayRegister(r.Context(), flow)
 		flow.Target = s.relayPage(flow)
 	} else {
-		flow.Target = "http://" + lanHost() + ":8080/m/" + provider + "?t=" + flow.token
+		s.uiMu.Lock()
+		lang := s.loadUI().Language
+		s.uiMu.Unlock()
+		flow.Target = "http://" + lanHost() + ":8080/m/" + provider + "?t=" + url.QueryEscape(flow.token) + "&lang=" + url.QueryEscape(lang)
 	}
 	s.mu.Lock()
 	s.logins[provider] = flow
@@ -362,12 +369,17 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 	case key != "":
 		code, err := session.p.(*providers.Netease).PollQR(r.Context(), key)
 		if err != nil {
+			log.Printf("stream-sync: NetEase QR check failed: %v", err)
 			fail(w, 502, err)
 			return
 		}
+		previous := status
 		status = map[int]string{800: "expired", 801: "waiting", 802: "scanned", 803: "done"}[code]
 		if status == "" {
 			status = "waiting"
+		}
+		if status != previous {
+			log.Printf("stream-sync: NetEase QR code %d (%s)", code, status)
 		}
 	case viaRelay && status != "done" && status != "linked":
 		status = s.relayStatus(r.Context(), session, token, status)
@@ -403,19 +415,16 @@ func (s *Server) loginQR(w http.ResponseWriter, r *http.Request) {
 	w.Write(png)
 }
 
-func phonePage(w http.ResponseWriter, body string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SC5000</title><style>body{background:#111;color:#eee;font:18px system-ui,sans-serif;padding:24px;max-width:560px;margin:auto}input,button,a.b{display:block;width:100%;box-sizing:border-box;font:inherit;padding:14px;margin:12px 0;border-radius:10px;border:1px solid #444;background:#1c1c1c;color:#eee;text-align:center;text-decoration:none}button,a.b{background:#2a6;border:0;color:#fff}small{color:#aaa}</style>` + body))
-}
-
 // phoneFlow checks the one-time token from the QR code.
 func (s *Server) phoneFlow(w http.ResponseWriter, r *http.Request) *loginFlow {
 	flow := s.loginFlow(r.PathValue("provider"))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if flow == nil || flow.token == "" || time.Now().After(flow.expires) || subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("t")), []byte(flow.token)) != 1 {
+		lang := phoneLang(r)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(403)
-		phonePage(w, "<h2>二维码已失效</h2><p>请在碟机屏幕上重新打开二维码。</p>")
+		phoneMessage(w, r, nil, tr(lang, "expired"), tr(lang, "expiredHint"))
 		return nil
 	}
 	return flow
@@ -426,14 +435,14 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 	if flow == nil {
 		return
 	}
-	action := "/m/" + flow.Provider + "?t=" + url.QueryEscape(flow.token)
+	lang, action := phoneLang(r), phoneAction(r, flow)
 	switch flow.Provider {
 	case "deezer":
-		phonePage(w, `<h2>连接 Deezer</h2><p>填写资料页或分享链接后，可在碟机上浏览你的公开歌单；也可以填写 arl Cookie，碟机会用它确认账号。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="分享链接、资料页地址或用户 ID"><input name="arl" placeholder="arl Cookie（可选）" autocomplete="off"><button>连接</button></form>`)
+		phonePage(w, r, deezerPhonePage(lang, action))
 	case "soundcloud":
-		phonePage(w, `<h2>连接 SoundCloud</h2><p>填主页链接、分享链接或用户名，就能看到点赞的曲目和歌单。想看私密内容才需要 OAuth Token。只播放 API 标记为可完整播放的内容。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="主页链接、分享链接或用户名" autocomplete="off"><input name="clientId" placeholder="Client ID（已配好可留空）" autocomplete="off"><input name="clientSecret" type="password" placeholder="Client Secret（已配好可留空）" autocomplete="off"><input name="token" type="password" placeholder="OAuth Token（可选）" autocomplete="off"><button>连接</button></form>`)
+		phonePage(w, r, soundCloudPhonePage(lang, action))
 	case "beatport":
-		phonePage(w, `<h2>连接 Beatport</h2><p>用 Beatport 账号登录。碟机只保存登录令牌，不保存密码。Essential 播放 128k 流，Advanced 下载 128k AAC，Professional 下载 FLAC 或 256k AAC。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="user" placeholder="邮箱或用户名" autocomplete="username" autocapitalize="off"><input name="password" type="password" placeholder="密码" autocomplete="current-password"><input name="token" placeholder="或粘贴 Token JSON / Access Token" autocomplete="off" autocapitalize="off"><button>连接</button></form>`)
+		phonePage(w, r, beatportPhonePage(lang, action))
 	case "spotify":
 		session := s.sessionOf(flow)
 		sp, ok := session.p.(*providers.Spotify)
@@ -447,8 +456,9 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.prune()
 		s.pending[state] = pending{session.ID, verifier, spotifyLoopbackRedirect, time.Now().Add(loginLifetime)}
+		flow.spotifyState = state
 		s.mu.Unlock()
-		phonePage(w, `<h2>连接 Spotify</h2><p>1. 打开授权页并同意。</p><a class="b" target="_blank" rel="noreferrer" href="`+html.EscapeString(auth)+`">打开 Spotify 授权</a><p>2. 同意后手机会显示“无法打开页面”，这是正常的。复制地址栏里以 127.0.0.1 开头的完整地址，粘贴到下面。</p><form method="post" action="`+html.EscapeString(action)+`"><input name="callback" placeholder="http://127.0.0.1:8080/oauth/spotify/callback?code=..." required autocomplete="off"><button>完成登录</button></form>`)
+		phonePage(w, r, spotifyPhonePage(lang, action, auth))
 	default:
 		http.NotFound(w, r)
 	}
@@ -470,11 +480,29 @@ func (s *Server) saveDeezerOwner(p *providers.Deezer, owner deezerOwner) error {
 	return nil
 }
 
-func (s *Server) finishPhoneLogin(w http.ResponseWriter, flow *loginFlow) {
+func (s *Server) finishPhoneLogin(w http.ResponseWriter, r *http.Request, flow *loginFlow) {
 	s.mu.Lock()
 	flow.Status, flow.token = "linked", ""
 	s.mu.Unlock()
-	phonePage(w, "<h2>已完成</h2><p>可以回到碟机了，屏幕上的二维码会自动关闭。</p>")
+	lang := phoneLang(r)
+	phoneMessage(w, r, nil, tr(lang, "done"), tr(lang, "doneHint"))
+}
+
+// spotifyPaste finds the code and state in what was pasted: the whole address,
+// one without "http://", or the address amid other copied text.
+func spotifyPaste(in string) (code, state string) {
+	for _, f := range strings.Fields(in) {
+		if _, query, ok := strings.Cut(f, "?"); ok || strings.HasPrefix(f, "code=") {
+			if !ok {
+				query = f
+			}
+			query, _, _ = strings.Cut(query, "#")
+			if q, err := url.ParseQuery(query); err == nil && q.Get("code") != "" {
+				return q.Get("code"), q.Get("state")
+			}
+		}
+	}
+	return "", ""
 }
 
 func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
@@ -492,13 +520,14 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("login session is gone"))
 		return
 	}
-	retry := `<p><a class="b" href="/m/` + flow.Provider + `?t=` + url.QueryEscape(flow.token) + `">重试</a></p>`
+	lang := phoneLang(r)
+	refuse := func(title, hint string) { phoneMessage(w, r, flow, tr(lang, title), hint) }
 	switch p := session.p.(type) {
 	case *providers.Deezer:
 		// The relay URL and password are not settable here: holding the QR
 		// token is not owning the deck (#8). The console and deck UI set them.
 		if strings.TrimSpace(r.Form.Get("user")+r.Form.Get("arl")) == "" {
-			phonePage(w, "<h2>请填写资料页链接或 arl</h2>"+retry)
+			refuse("badForm", "")
 			return
 		}
 		check := &providers.Deezer{BaseURL: s.cfg.DeezerURL, GatewayURL: s.cfg.DeezerGatewayURL, HTTP: s.cfg.HTTP}
@@ -506,18 +535,22 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 		var user string
 		var err error
 		if arl != "" {
+			// The ARL itself is the check: it also serves Deemix downloads, which
+			// need no public playlists.
 			if user, err = check.IdentifyARL(r.Context(), arl); err != nil {
-				phonePage(w, "<h2>这个 arl 无效或已过期</h2>"+retry)
+				refuse("deezerBadARL", "")
 				return
 			}
-		} else if user, err = check.ResolveUser(r.Context(), r.Form.Get("user")); err != nil {
-			phonePage(w, "<h2>没有识别出用户 ID</h2>"+retry)
-			return
-		}
-		check.UserID = user
-		if _, err = check.Playlists(r.Context()); err != nil {
-			phonePage(w, "<h2>无法读取这个资料页的公开歌单</h2>"+retry)
-			return
+		} else {
+			if user, err = check.ResolveUser(r.Context(), r.Form.Get("user")); err != nil {
+				refuse("deezerBadUser", "")
+				return
+			}
+			check.UserID = user
+			if _, err = check.Playlists(r.Context()); err != nil {
+				refuse("deezerNoLists", "")
+				return
+			}
 		}
 		// Linking the same profile again by its link keeps the saved login.
 		if old := s.savedDeezerOwner(); arl == "" && old.UserID == user {
@@ -527,38 +560,49 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 			fail(w, 500, errors.New("could not save the Deezer login"))
 			return
 		}
-		s.finishPhoneLogin(w, flow)
+		s.finishPhoneLogin(w, r, flow)
 	case *providers.SoundCloud:
-		if err := s.linkSoundCloud(r.Context(), session, strings.TrimSpace(r.Form.Get("user")), strings.TrimSpace(r.Form.Get("clientId")), strings.TrimSpace(r.Form.Get("clientSecret")), strings.TrimSpace(r.Form.Get("token"))); err != nil {
-			phonePage(w, "<h2>无法连接 SoundCloud</h2><p>请检查主页和凭据。</p>"+retry)
+		user, token := strings.TrimSpace(r.Form.Get("user")), strings.TrimSpace(r.Form.Get("token"))
+		clientID, secret := strings.TrimSpace(r.Form.Get("clientId")), strings.TrimSpace(r.Form.Get("clientSecret"))
+		if user+token+clientID == "" {
+			refuse("badForm", "")
 			return
 		}
-		s.finishPhoneLogin(w, flow)
+		if err := s.linkSoundCloud(r.Context(), session, user, clientID, secret, token); err != nil {
+			log.Printf("stream-sync: SoundCloud link failed: %v", err)
+			refuse("scFailed", tr(lang, "scFailedHint"))
+			return
+		}
+		s.finishPhoneLogin(w, r, flow)
 	case *providers.Beatport:
 		if err := s.linkBeatport(r.Context(), p, strings.TrimSpace(r.Form.Get("user")), r.Form.Get("password"), strings.TrimSpace(r.Form.Get("token"))); err != nil {
-			phonePage(w, "<h2>无法登录 Beatport</h2><p>请检查账号密码或 Token。</p>"+retry)
+			refuse("bpFailed", tr(lang, "bpFailedHint"))
 			return
 		}
-		s.finishPhoneLogin(w, flow)
+		s.finishPhoneLogin(w, r, flow)
 	case *providers.Spotify:
-		u, err := url.Parse(strings.TrimSpace(r.Form.Get("callback")))
-		if err != nil {
-			phonePage(w, "<h2>地址不正确</h2>"+retry)
+		code, state := spotifyPaste(r.Form.Get("callback"))
+		if code == "" {
+			refuse("spBadPaste", tr(lang, "spHelp"))
 			return
 		}
 		s.mu.Lock()
-		pend, ok := s.pending[u.Query().Get("state")]
-		delete(s.pending, u.Query().Get("state"))
+		if state == "" {
+			state = flow.spotifyState
+		}
+		pend, ok := s.pending[state]
+		delete(s.pending, state)
 		s.mu.Unlock()
-		if !ok || pend.session != session.ID || u.Query().Get("code") == "" {
-			phonePage(w, "<h2>地址不正确或已过期</h2>"+retry)
+		if !ok || pend.session != session.ID {
+			refuse("spOtherLogin", "")
 			return
 		}
-		if err := p.CompletePKCE(r.Context(), u.Query().Get("code"), pend.verifier, pend.redirect); err != nil {
-			phonePage(w, "<h2>Spotify 拒绝了这次登录</h2>"+retry)
+		if err := p.CompletePKCE(r.Context(), code, pend.verifier, pend.redirect); err != nil {
+			log.Printf("stream-sync: Spotify refused the login: %v", err)
+			refuse("spRefused", "")
 			return
 		}
-		s.finishPhoneLogin(w, flow)
+		s.finishPhoneLogin(w, r, flow)
 	default:
 		http.NotFound(w, r)
 	}
