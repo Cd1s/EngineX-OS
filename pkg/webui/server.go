@@ -191,6 +191,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /peer/decks", s.peerDecksGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/audio", s.peerAudioGet)
 	s.mux.HandleFunc("POST /api/drop", s.drop)
+	s.mux.HandleFunc("POST /api/relocate", s.relocate)
 	s.soundCloudAuth = &providers.SoundCloudAuth{TokenURL: cfg.SoundCloudTokenURL, Path: filepath.Join(cfg.StateDir, "soundcloud-token.json"), HTTP: cfg.HTTP}
 	if cfg.BPM != nil {
 		cfg.BPM.SoundCloudAuth = s.soundCloudAuth
@@ -357,6 +358,9 @@ func input(w http.ResponseWriter, r *http.Request, v any) bool {
 	}
 	return true
 }
+
+const consoleLoginPage = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Stream Sync</title><style>body{background:#111;color:#eee;font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px}main{max-width:460px;margin:12vh auto}h1{font-size:28px}label{display:block;font-weight:600}input,button{box-sizing:border-box;width:100%;padding:14px;margin-top:10px;border-radius:6px;font:inherit}input{background:#222;color:#fff;border:1px solid #555}button{background:#287e60;color:white;border:0;font-weight:600;cursor:pointer}p{color:#bbb}</style><main><h1>Stream Sync</h1><form method="post" action="/login"><label for="token" id="label">Console Access Code</label><input id="token" name="token" type="password" autocomplete="current-password" required><button id="submit">Sign in</button></form><p id="hint">The Console Access Code is shown on the deck screen under Settings → About.</p></main><script>const l=(navigator.language||'en').toLowerCase();const t=l.startsWith('zh')?(l.includes('hant')||/-(tw|hk|mo)/.test(l)?['控制台存取碼','登入','控制台存取碼顯示在碟機螢幕的「設定 → 關於」中。']:['控制台访问码','登录','控制台访问码显示在碟机屏幕的「设置 → 关于」中。']):null;if(t){document.documentElement.lang=l;document.getElementById('label').textContent=t[0];document.getElementById('submit').textContent=t[1];document.getElementById('hint').textContent=t[2]}</script></html>`
+
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -364,7 +368,7 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if !s.authorized(r) {
-		io.WriteString(w, `<!doctype html><meta name="viewport" content="width=device-width"><style>body{background:#111;color:#eee;font:24px sans-serif;padding:32px}input,button{font:inherit;padding:16px;max-width:90%}</style><h1>Stream Sync</h1><form method="post" action="/login"><label>控制台访问码 <input name="token" type="password" autocomplete="current-password" required></label><p><button>登录</button></form>`)
+		io.WriteString(w, consoleLoginPage)
 		return
 	}
 	b, _ := assets.ReadFile("index.html")

@@ -460,7 +460,10 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 		dev := ""
 		if v := s.sessionOf(flow); v != nil {
 			if am, ok := v.p.(*providers.AppleMusic); ok {
-				dev = am.Owner().DevToken
+				// the owner's token, else Apple's web player one; empty hides the button
+				ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+				dev, _ = am.DeveloperToken(ctx)
+				cancel()
 			}
 		}
 		phonePage(w, r, appleMusicPhonePage(lang, action, dev))

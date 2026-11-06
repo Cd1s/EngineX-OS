@@ -67,6 +67,9 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 ### 7. New in 5.3.0.2
 - **Zoom further out on the waveform (#77)**: the all-in-ones (PRIME 4, PRIME 2, PRIME GO, Mixstream Pro, SC LIVE) zoom out to 30 seconds like the SC5000 / SC6000, instead of Engine's 10 s, so more of the upcoming beat grid is on screen. Turn the Browse knob on the deck screen to zoom when `Settings → Device → Encoder Behavior` is `Waveform Zoom`;
 - **Turn Off from the screen (#78)**: `Settings → Device → Power → Turn Off` opens Engine's own "Turn Off" confirmation, so a deck in a booth can be shut down without reaching for the rear power button;
+- **Relocate Missing Tracks (#74)**: after files were moved or renamed on the same drive, the web console finds each missing track's new place (same name and size, then the name ignoring case, then a cleaned-up name). `Scan` only previews; `Relocate` backs up `m.db` first, then rewrites the paths. Reload the drive on the deck afterwards;
+- **Apple Music sign-in (#75)**: the phone page signs in with Apple Music (MusicKit JS). Where Apple does not allow that, it offers a bookmarklet that copies your token from music.apple.com;
+- **Console Access Code on the deck (#79)**: `Settings → About` shows the web console address and access code. A streaming QR code logs in only that service and never opens the console, so guests who scan the screen in a club get no control of your deck;
 - **Silent Cue and Master Limiter**: the Censor button can be set to `Silent Cue` (`Settings → Playback → Censor Button Behavior`), and PRIME GO / Mixstream Pro get Engine's own `Master Limiter` (`Settings → Mixer`, Off / 0–18 dB), next to the EngineX `Master Soft Clipper`;
 - **Apple Music** joins the streaming services (7 in total), logged in with the deck QR code like the others;
 - **Wi-Fi Music Drop**: drag MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS files from a computer onto the deck's web console (`http://<deck IP>:8080`) and they are saved to the internal drive, SD card or USB of your choice under `Wi-Fi Drop/<playlist>/`. FLAC / MP3 on the library drive are analysed and added to that playlist; existing files are never overwritten and 256 MiB always stays free;
@@ -79,7 +82,7 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 - **Spotify with your own app**: Spotify limits how many users and requests one app may have, so there is no shared built-in app any more. Create a free app at `developer.spotify.com/dashboard`, add the Redirect URI shown in the web console, and paste its Client ID there (`#70`);
 - **Steadier streaming and shadow decks**: a streaming playlist left open on the deck keeps loading after the background service restarts, instead of failing with "Track not found" (`#73`); shadow decks show the real track name, also for files without tags, and follow tracks the other player loaded from its streaming browser; the pads stay in HOT CUE when a track loads (`#71`).
 
-> **Pioneer interop status**: the link with the Pioneer CDJ-3000 (library sharing, 3-band waveforms, 60 fps playhead, Master / Beat Sync) was tested between a real Denon SC5000 and **OpenCDJ-3000**, the maintainer's Virtual CDJ-3000 protocol simulator. No real Pioneer CDJ-3000 has been on hand yet, so how real Pioneer players behave still needs testing. Issues and PRs reporting it are very welcome!
+> **Pioneer interop status**: the link with the Pioneer CDJ-3000 (library sharing, 3-band waveforms, 60 fps playhead, Master / Beat Sync) was tested between a real Denon SC5000 and [**OpenProLink**](https://github.com/Cd1s/OpenProLink), the maintainer's Pro DJ Link toolkit (a built-in Virtual CDJ-3000 simulator, plus `prolink-probe` to capture the protocol of Pioneer CDJ / XDJ players and DJM mixers). No real Pioneer CDJ-3000 has been on hand yet, so how real Pioneer players behave still needs testing. If you own a Pioneer CDJ-3000, CDJ-2000NXS2, XDJ-AZ / XZ or a DJM-A9 / DJM-V10 / DJM-900NXS2 mixer, real-hardware test reports and device / mixer protocol captures are very welcome at [Cd1s/OpenProLink](https://github.com/Cd1s/OpenProLink) or here, to improve cross-brand libraries, the mixer's Beat FX tempo sync, Quantize and On-Air linking!
 
 
 ---
@@ -91,9 +94,9 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 <table>
 <tr>
 <td colspan="2" align="center" valign="top">
-<img src="./docs/assets/screenshots/4deck-sc5000-cdj3000.png" width="49%" alt="Native 4-deck view with shadow decks"> <img src="./docs/assets/screenshots/opencdj-3000.png" width="49%" alt="OpenCDJ-3000 Virtual CDJ-3000"><br>
+<img src="./docs/assets/screenshots/4deck-sc5000-cdj3000.png" width="49%" alt="Native 4-deck view with shadow decks"> <img src="./docs/assets/screenshots/opencdj-3000.png" width="49%" alt="OpenProLink Virtual CDJ-3000"><br>
 <b>Native 4-Deck View: Two SC5000s + a CDJ-3000 on One LAN</b><br>
-<sub>Right SC5000 plays decks 2 and 4; deck 3 is a CDJ-3000 (OpenCDJ-3000 simulator) in BEAT SYNC, its waveform and tempo followed live over Pro DJ Link</sub>
+<sub>Right SC5000 plays decks 2 and 4; deck 3 is a CDJ-3000 (OpenProLink simulator) in BEAT SYNC, its waveform and tempo followed live over Pro DJ Link</sub>
 </td>
 </tr>
 <tr>
@@ -271,7 +274,7 @@ EngineX OS is built to be safe on a club, bar or festival Wi-Fi shared with stra
 
 - **No default SSH password.** Password login is switched off completely, and the public firmware ships with **no SSH key at all**, so SSH stays closed until you add your own key. Decks that ran an earlier public image have the key those images carried removed automatically when they update to 5.3.0.1.
 - **Nobody on the same Wi-Fi can control your deck.** Everything the deck uses internally (playing, waveform and language settings, online update, streaming logins, Stems) only answers the deck itself (`127.0.0.1`). Someone else on the network cannot switch your tracks, change settings or restart the player.
-- **The phone web console needs your deck's own access code.** The page at `http://<deck-ip>:8080` asks for a random code generated on your deck. Streaming QR logins use one-time links that expire.
+- **The phone web console needs your deck's own access code.** The page at `http://<deck-ip>:8080` asks for a random code generated on your deck. The address and code are shown on the deck under `Settings → About`. Streaming QR logins use one-time links that expire and never open the console.
 
 For advanced users:
 

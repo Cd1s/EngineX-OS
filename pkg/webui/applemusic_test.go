@@ -63,7 +63,7 @@ func TestAppleMusicPhoneLinkLoginAndBrowse(t *testing.T) {
 		t.Fatalf("QR code %+v", ui.logins["applemusic"])
 	}
 	page := srv.URL + target.Path + "?" + target.RawQuery
-	if p := getPage(t, page); !strings.Contains(p, "Apple Music") || !strings.Contains(p, `name="links"`) || strings.Contains(p, "musickit.js") {
+	if p := getPage(t, page); !strings.Contains(p, "Apple Music") || !strings.Contains(p, `name="links"`) || !strings.Contains(p, "musickit.js") { // the web player's token is enough for the button
 		t.Fatalf("phone page: %s", p)
 	}
 	// A link that is not Apple Music is refused and nothing is saved.
@@ -127,6 +127,18 @@ func TestAppleMusicPageOffersMusicKitWithOwnToken(t *testing.T) {
 	p := appleMusicPhonePage(0, "/m/applemusic?t=x", `ab</script><b>`)
 	if !strings.Contains(p, "musickit.js") || strings.Contains(p, "</script><b>") || !strings.Contains(p, `</script>`) {
 		t.Fatalf("page: %s", p)
+	}
+}
+
+// The sign-in button falls back to the bookmarklet when authorize() throws, and
+// stays hidden when no developer token could be found.
+func TestAppleMusicPageFallsBackToBookmarklet(t *testing.T) {
+	p := appleMusicPhonePage(1, "/m/applemusic?t=x", "tok")
+	if !strings.Contains(p, `id="amb" hidden`) || !strings.Contains(p, "javascript:void(") || !strings.Contains(p, `getElementById("amb").hidden=false`) || !strings.Contains(p, `build:"5.3.0.2"`) {
+		t.Fatalf("page: %s", p)
+	}
+	if strings.Contains(appleMusicPhonePage(0, "/m/applemusic?t=x", ""), "musickit.js") {
+		t.Fatal("button without a developer token")
 	}
 }
 

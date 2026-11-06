@@ -66,6 +66,53 @@ func TestEveryPhoneTextHasThreeLanguages(t *testing.T) {
 	}
 }
 
+// #79: scanning a streaming QR code (anyone in the room can) never hands out the
+// console: no session cookie and no access code on the phone page.
+func TestPhoneQRDoesNotGrantConsole(t *testing.T) {
+	_, srv, target := standalone(t, Config{}, "deezer")
+	resp, err := http.Get(srv.URL + target.Path + "?" + target.RawQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("phone page: %d", resp.StatusCode)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == "stream_sync" {
+			t.Fatal("phone page set the console cookie")
+		}
+	}
+	if strings.Contains(string(body), "<code>code</code>") || strings.Contains(string(body), `"code"`) {
+		t.Fatal("phone page shows the console code")
+	}
+}
+
+func TestConsoleStatusLoopbackOnly(t *testing.T) {
+	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	for _, tc := range []struct {
+		addr    string
+		status  int
+		hasCode bool
+	}{{"127.0.0.1:1234", 200, true}, {"192.0.2.1:1234", 403, false}} {
+		r := httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+		r.RemoteAddr = tc.addr
+		w := httptest.NewRecorder()
+		ui.ServeHTTP(w, r)
+		if w.Code != tc.status || strings.Contains(w.Body.String(), `"accessCode":"code"`) != tc.hasCode || (tc.hasCode && !strings.Contains(w.Body.String(), `"consoleUrl":"http://`)) {
+			t.Fatalf("status %d: %s", w.Code, w.Body.String())
+		}
+	}
+	r := httptest.NewRequest("GET", "/api/ui", nil)
+	r.Header.Set("Authorization", "Bearer code")
+	w := httptest.NewRecorder()
+	ui.ServeHTTP(w, r)
+	if strings.Contains(w.Body.String(), "accessCode") {
+		t.Fatal("console code leaked in /api/ui")
+	}
+}
+
 // Phone pages are English unless the deck's language or the switch says otherwise,
 // and every page renders in every language.
 func TestPhonePagesDefaultToEnglishAndSwitchLanguage(t *testing.T) {

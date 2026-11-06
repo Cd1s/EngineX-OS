@@ -83,6 +83,13 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <progress id="dropProgress" max="1" value="0" hidden></progress>
   <small id="dropState" role="status" data-i18n="dropHint"></small>
  </section>
+ <section class="card">
+  <h2><span class="ic">⌕</span><span data-i18n="relocate"></span></h2>
+  <small data-i18n="relocateHint"></small>
+  <div class="bar"><button class="btn" id="relScan" data-i18n="relScan"></button><button class="btn" id="relApply" data-i18n="relApply" disabled></button></div>
+  <small id="relState" role="status"></small>
+  <div id="relRows" class="rows"></div>
+ </section>
 </div>
 <div class="col">
  <section class="card">
@@ -125,6 +132,9 @@ loginQr:['Login QR code','登录二维码','登入 QR Code'],openOnPhone:['Open 
 playlists:['Playlists','歌单','歌單'],playlistId:['Deezer public playlist ID','Deezer 公开歌单 ID','Deezer 公開歌單 ID'],openId:['Open ID','打开歌单 ID','開啟歌單 ID'],
 drop:['Wi-Fi Music Drop','Wi-Fi 传歌','Wi-Fi 傳歌'],dropDrive:['Target drive','目标盘','目標磁碟'],dropFolder:['Folder / playlist name','文件夹 / 歌单名','資料夾 / 歌單名稱'],dropHere:['Drop audio files here, or tap to choose','把音频文件拖到这里，或点此选择','把音訊檔拖到這裡，或點此選擇'],
 dropHint:['Saved to <drive>/Wi-Fi Drop/<playlist>/. FLAC and MP3 on the SD card are analysed and added to a playlist of the same name; other files appear in Engine’s file browser and are analysed when loaded.','存到 <盘>/Wi-Fi Drop/<歌单>/。SD 卡上的 FLAC/MP3 会自动分析并加入同名歌单，其余在 Engine 的文件浏览里出现、加载时分析。','存到 <磁碟>/Wi-Fi Drop/<歌單>/。SD 卡上的 FLAC/MP3 會自動分析並加入同名歌單，其餘在 Engine 的檔案瀏覽裡出現、載入時分析。'],
+relocate:['Relocate Missing Tracks (#74)','丢失曲目自动重定位 (#74)','遺失曲目自動重新定位 (#74)'],relocateHint:['Finds tracks whose file moved on the same drive and points them at the new place. Scan only previews; Relocate backs up m.db first, then rewrites the paths. Reload the drive on the deck afterwards.','找出在同一张盘上被移动或改名的曲目，把路径指向新位置。「扫描」只预览；「一键修复路径」会先备份 m.db 再改写路径。完成后请在碟机上重新加载该盘。','找出在同一張磁碟上被移動或改名的曲目，把路徑指向新位置。「掃描」只預覽；「一鍵修復路徑」會先備份 m.db 再改寫路徑。完成後請在碟機上重新載入該磁碟。'],
+relScan:['Scan missing tracks','扫描丢失曲目','掃描遺失曲目'],relApply:['Relocate','一键修复路径','一鍵修復路徑'],relConfirm:['Rewrite the paths of {0} tracks? m.db is backed up first.','改写 {0} 首曲目的路径？会先备份 m.db。','改寫 {0} 首曲目的路徑？會先備份 m.db。'],
+relSummary:['{0}: {1} missing, {2} can be fixed, {3} not found','{0}：丢失 {1} 首，可修复 {2} 首，未找到 {3} 首','{0}：遺失 {1} 首，可修復 {2} 首，未找到 {3} 首'],relDone:['{0}: {1} paths fixed, backup {2}','{0}：已修复 {1} 首路径，备份 {2}','{0}：已修復 {1} 首路徑，備份 {2}'],relNothing:['No missing tracks','没有丢失的曲目','沒有遺失的曲目'],relTier:['Match {0} (1 = most certain)','匹配等级 {0}（1 最可靠）','比對等級 {0}（1 最可靠）'],
 deck:['Deck display & audio','碟机显示与音频','碟機顯示與音訊'],quality:['Streaming quality','流媒体音质','串流音質'],qualitySub:['Applies right away','立即生效','立即生效'],deckLang:['Deck language','碟机界面语言','碟機介面語言'],deckLangSub:['Restarts Engine: playback stops','需重启 Engine，播放会中断','需重新啟動 Engine，播放會中斷'],
 waveform:['Waveform style','波形样式','波形樣式'],waveformSub:['Applies right away','立即生效','立即生效'],wDenon:['Denon stock','Denon 原厂','Denon 原廠'],
 tFourDeck:['Native 4-deck layout','原厂 4 碟布局','原廠 4 碟佈局'],sFourDeck:['Adds Layout → 4 Decks. The hardware plays decks 1 and 3 (LAYER), decks 3 and 4 are silent. Restarts Engine','在 Layout 里加入 4 Decks。实体按键控制 1、3 号台（LAYER 切换），3、4 号台不出声。切换会重启 Engine','在 Layout 裡加入 4 Decks。實體按鍵控制 1、3 號台（LAYER 切換），3、4 號台不出聲。切換會重啟 Engine'],tRole:['4-deck role','4 碟分工','4 碟分工'],sRole:['Which decks this player plays: RCA A + RCA B. Auto: Player # 1/3 takes 1+3, Player # 2/4 takes 2+4. The others only show','本机负责哪几台（RCA A + RCA B）。自动：播放器编号 1/3 用 1+3，编号 2/4 用 2+4。其他台只显示不出声','本機負責哪幾台（RCA A + RCA B）。自動：播放器編號 1/3 用 1+3，編號 2/4 用 2+4。其他台只顯示不出聲'],rAuto:['Auto','自动','自動'],tEcho:['Upfader Echo Out','拉杆切歌自动回音','推桿切歌自動回音'],sEcho:['A one-beat echo tail when a fader is pulled down fast','快速拉下推子时自动留一拍回音尾巴','快速拉下推桿時自動留一拍回音尾巴'],
@@ -267,6 +277,10 @@ $('dropZone').onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();
 $('dropZone').ondragover=e=>{e.preventDefault();$('dropZone').classList.add('over')};
 $('dropZone').ondragleave=()=>$('dropZone').classList.remove('over');
 $('dropZone').ondrop=e=>{e.preventDefault();$('dropZone').classList.remove('over');action(()=>dropFiles([...e.dataTransfer.files]))};
+let relPlan=0;
+function relRender(v){const box=$('relRows');box.replaceChildren();relPlan=0;let any=false,lines=[];for(const d of v.drives){if(d.error){lines.push(d.name+': '+d.error);continue}if(!d.missing)continue;any=true;lines.push(v.dryRun?t('relSummary',d.name,d.missing,d.moves.length,d.unresolved):t('relDone',d.name,d.moves.length,d.backup||'-'));if(v.dryRun)relPlan+=d.moves.length;for(const m of d.moves.slice(0,200)){const r=document.createElement('div');r.className='row';r.title=t('relTier',m.tier);r.textContent=m.oldPath+' → '+m.newPath;box.append(r)}}$('relState').textContent=any||lines.length?lines.join(' · '):t('relNothing');$('relApply').disabled=!relPlan}
+$('relScan').onclick=()=>action(async()=>relRender(await post('relocate',{dryRun:true})));
+$('relApply').onclick=()=>action(async()=>{if(!confirm(t('relConfirm',relPlan)))return;relRender(await post('relocate',{dryRun:false}))});
 applyLang();renderSessions();renderDrives();
 action(async()=>{const v=await api('ui');if(!localStorage.getItem('enginex-console-lang')&&LANGS.includes(v.language))setLang(v.language,false);showUI(v);await showDrives();await showRelay();await showSpotify();await showBpm();await showBroadcast();await refreshSessions();await jobs()});setInterval(()=>{jobs().catch(e=>notice(e.message))},2000);
 </script></html>

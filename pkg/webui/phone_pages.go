@@ -84,6 +84,7 @@ var phoneText = map[string][3]string{
 	"amAdvanced":    {"Your own Apple developer token", "自己的 Apple 开发者令牌", "自己的 Apple 開發者權杖"},
 	"amDevHow":      {"Optional. Without one the deck uses the token of Apple's web player. With your own MusicKit token, this page also offers Sign in with Apple Music.", "可选。不填时碟机使用 Apple 网页播放器的令牌。填入自己的 MusicKit 令牌后，本页还会出现“用 Apple Music 登录”。", "可選。不填時碟機使用 Apple 網頁播放器的權杖。填入自己的 MusicKit 權杖後，本頁還會出現「用 Apple Music 登入」。"},
 	"amSignIn":      {"Sign in with Apple Music", "用 Apple Music 登录", "用 Apple Music 登入"},
+	"amFallback":    {"Apple did not allow sign-in here. On a computer or phone, open music.apple.com, sign in, then run this bookmarklet (it copies your token) and paste the token below:", "Apple 不允许在这里登录。请在 music.apple.com 登录后运行下面的书签脚本（会复制你的令牌），再把令牌粘贴到下方：", "Apple 不允許在這裡登入。請在 music.apple.com 登入後執行下面的書籤腳本（會複製你的權杖），再把權杖貼到下方："},
 	"amFailed":      {"Apple Music did not accept this", "Apple Music 没有接受", "Apple Music 沒有接受"},
 	"amFailedHint":  {"Check that each link opens in Apple Music and that the token was copied whole.", "请确认每个链接都能在 Apple Music 里打开，令牌也复制完整。", "請確認每個連結都能在 Apple Music 裡開啟，權杖也複製完整。"},
 	"spRefused":     {"Spotify refused this login. A code works only once: open Spotify login again.", "Spotify 拒绝了这次登录。code 只能用一次，请重新打开 Spotify 登录。", "Spotify 拒絕了這次登入。code 只能用一次，請重新開啟 Spotify 登入。"},
@@ -180,6 +181,9 @@ func beatportPhonePage(lang int, action string) string {
 		`<details><summary>` + tr(lang, "bpAdvanced") + `</summary><input name="token" placeholder="` + tr(lang, "bpTokenPh") + `" autocomplete="off" autocapitalize="off"></details></form>`
 }
 
+// amBookmarklet runs on music.apple.com and copies the signed-in media-user-token.
+const amBookmarklet = `javascript:void(function(){var t;try{t=MusicKit.getInstance().musicUserToken}catch(e){}if(!t){var m=document.cookie.match(/media-user-token=([^;]+)/);t=m&&m[1]}t?(navigator.clipboard&&navigator.clipboard.writeText(t),prompt("media-user-token",t)):alert("Sign in first")}())`
+
 // appleMusicPhonePage offers links (no account), the library token and, with
 // the owner's own developer token, MusicKit's sign-in, which fills the token in.
 func appleMusicPhonePage(lang int, action, devToken string) string {
@@ -192,9 +196,10 @@ func appleMusicPhonePage(lang int, action, devToken string) string {
 	if devToken != "" {
 		js, _ := json.Marshal(devToken) // escapes <, > and &, so it cannot end the script
 		signIn = `<button type="button" id="amk">` + tr(lang, "amSignIn") + `</button>` +
+			`<div id="amb" hidden><p>` + tr(lang, "amFallback") + `</p><input readonly value="` + html.EscapeString(amBookmarklet) + `" onfocus="this.select()"></div>` +
 			`<script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js" async></script><script>` +
-			`document.getElementById("amk").onclick=async()=>{try{const m=await MusicKit.configure({developerToken:` + string(js) + `,app:{name:"EngineX OS",build:"1"}});` +
-			`document.getElementById("amt").value=await m.authorize();document.getElementById("amf").submit()}catch(e){alert(e)}}</script>`
+			`document.getElementById("amk").onclick=async()=>{try{const m=await MusicKit.configure({developerToken:` + string(js) + `,app:{name:"EngineX OS",build:"5.3.0.2"}});` +
+			`document.getElementById("amt").value=await m.authorize();document.getElementById("amf").submit()}catch(e){document.getElementById("amb").hidden=false}}</script>`
 	}
 	return phoneHeading(lang, "applemusic") + `<p>` + tr(lang, "amIntro") + `</p>` +
 		`<form id="amf" method="post" action="` + a + `"><textarea name="links" rows="4" placeholder="https://music.apple.com/…/playlist/…" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>` +
