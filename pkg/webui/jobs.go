@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"os"
@@ -84,9 +85,12 @@ type Jobs struct {
 	netease func(session string, guest bool) *providers.Netease
 	// neteaseDirect reports whether NetEase tracks skip Deemix; nil tries Deemix first.
 	neteaseDirect func() bool
-	soundcloud    func() *providers.SoundCloud
-	beatport      func() *providers.Beatport
-	bpm           *providers.BPMStore
+	// deezerReady reports whether a Deezer ARL is saved; nil skips the hint.
+	deezerReady func() bool
+	soundcloud  func() *providers.SoundCloud
+	beatport    func() *providers.Beatport
+	spotify     func() *providers.Spotify
+	bpm         *providers.BPMStore
 }
 type fetched struct {
 	matched providers.Track
@@ -261,28 +265,52 @@ func (j *Jobs) putFile(key string, f fetched) {
 // straight to NetEase unless the owner chose Deemix first. All audio lands on
 // the deck.
 func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (providers.Track, *deemixclient.Download, error) {
-	if t.Provider == "soundcloud" {
+	// Each service plays from itself: no track is matched on another service
+	// without the user asking for it. Only NetEase has a Deemix mode (below).
+	switch t.Provider {
+	case "soundcloud":
 		dl, err := j.fromSoundCloud(ctx, t)
 		return t, dl, err
+	case "beatport":
+		dl, err := j.fromBeatport(ctx, t)
+		return t, dl, err
+	case "spotify":
+		dl, err := j.fromSpotify(ctx, session, t, guest)
+		return t, dl, err
+	case "deezer":
+		matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
+		if err != nil {
+			return providers.Track{}, nil, err
+		}
+		dl, err := j.p.Deemix.Download(ctx, matched, progress)
+		if err != nil {
+			j.mu.Lock()
+			ready := j.deezerReady
+			j.mu.Unlock()
+			if ready != nil && !ready() {
+				return providers.Track{}, nil, errors.New("deezer: please scan QR code on the deck and enter your Deezer ARL first")
+			}
+			return providers.Track{}, nil, err
+		}
+		j.p.Deemix.Trim(dl.Path)
+		return matched, dl, nil
+	case "netease":
+		return j.fromNeteaseMode(ctx, session, t, guest, progress)
 	}
+	return providers.Track{}, nil, fmt.Errorf("%s: no audio source for this service", t.Provider)
+}
+
+// fromNeteaseMode: official mode goes straight to NetEase; deemix mode tries a
+// Deezer match first and falls back to NetEase.
+func (j *Jobs) fromNeteaseMode(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (providers.Track, *deemixclient.Download, error) {
 	j.mu.Lock()
 	lookup, direct := j.netease, j.neteaseDirect
 	j.mu.Unlock()
 	var failures []error
-	if t.Provider == "beatport" {
-		dl, err := j.fromBeatport(ctx, t)
-		if err == nil {
-			return t, dl, nil
-		}
-		// Deemix and NetEase below match the track by ISRC, or artist and title.
-		failures = append(failures, err)
+	if dl := j.p.Deemix.Cached("netease-" + t.ID); dl != nil {
+		return t, dl, nil
 	}
-	if t.Provider == "netease" {
-		if dl := j.p.Deemix.Cached("netease-" + t.ID); dl != nil {
-			return t, dl, nil
-		}
-	}
-	if t.Provider != "netease" || direct == nil || !direct() {
+	if direct == nil || !direct() {
 		matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
 		if err == nil {
 			var dl *deemixclient.Download
@@ -308,6 +336,34 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 		return matched, dl, nil
 	}
 	return providers.Track{}, nil, errors.Join(append(failures, err)...)
+}
+
+// fromSpotify fetches track t via the owner's logged-in Spotify provider.
+func (j *Jobs) fromSpotify(ctx context.Context, session string, t providers.Track, guest bool) (*deemixclient.Download, error) {
+	if j.p.Deemix != nil {
+		if cached := j.p.Deemix.Cached("spotify-" + t.ID); cached != nil {
+			return cached, nil
+		}
+	}
+	j.mu.Lock()
+	lookup := j.spotify
+	j.mu.Unlock()
+	var sp *providers.Spotify
+	if lookup != nil {
+		sp = lookup()
+	}
+	if sp == nil {
+		return nil, errors.New("spotify: please log in via Spotify Connect or QR code on the deck first")
+	}
+	if j.p.Deemix == nil {
+		return nil, errors.New("deemix: pipeline download directory is not configured")
+	}
+	path, err := sp.DownloadAudio(ctx, t.ID, j.p.Deemix.DownloadDir)
+	if err != nil {
+		return nil, err
+	}
+	j.p.Deemix.Trim(path)
+	return &deemixclient.Download{Path: path, Quality: deemixclient.Quality{Format: "OGG_320"}}, nil
 }
 
 // addCover embeds the artwork, which Engine reads from the file for its screens. A

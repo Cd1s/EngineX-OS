@@ -41,14 +41,18 @@ const (
 type NFSServer struct {
 	Root      string
 	Available func() bool // optional media-generation guard
+	// StreamDirs are served as /EngineX_Stream: a name is looked up in each
+	// directory in turn, each pinned like Root.
+	StreamDirs []string
 
-	mu    sync.Mutex
-	gen   uint32
-	paths []string // handle index -> path relative to Root ("" is the root)
-	index map[string]uint32
-	conns []*net.UDPConn
-	fs    *os.Root // pins the mounted directory; path replacement cannot escape it
-	wg    sync.WaitGroup
+	mu      sync.Mutex
+	gen     uint32
+	paths   []string // handle index -> path relative to Root ("" is the root)
+	index   map[string]uint32
+	conns   []*net.UDPConn
+	fs      *os.Root // pins the mounted directory; path replacement cannot escape it
+	streams []*os.Root
+	wg      sync.WaitGroup
 }
 
 // Listen binds the portmapper on pmAddr (":111" on a deck) and MOUNT+NFS on
@@ -84,6 +88,12 @@ func (s *NFSServer) Listen(pmAddr string) error {
 	s.paths, s.index = []string{""}, map[string]uint32{"": 0}
 	s.conns = []*net.UDPConn{pm, svc}
 	s.fs = root
+	s.streams = nil
+	for _, d := range s.StreamDirs {
+		if r, err := os.OpenRoot(d); err == nil {
+			s.streams = append(s.streams, r)
+		}
+	}
 	s.mu.Unlock()
 	port := uint32(svc.LocalAddr().(*net.UDPAddr).Port)
 	for _, c := range s.conns {
@@ -122,6 +132,10 @@ func (s *NFSServer) Close() {
 		s.fs.Close()
 		s.fs = nil
 	}
+	for _, r := range s.streams {
+		r.Close()
+	}
+	s.streams = nil
 	s.mu.Unlock()
 }
 
@@ -353,7 +367,28 @@ func (s *NFSServer) stat(rel string) (os.FileInfo, uint32) {
 	return fi, nfsOK
 }
 
+// stream maps /EngineX_Stream/<rest> to the stream directory holding rest
+// (rest "" is the virtual directory itself: the first stream directory).
+func (s *NFSServer) stream(rel string) (*os.Root, string, bool) {
+	first, rest, _ := strings.Cut(rel, "/")
+	if first != StreamPrefix || len(s.streams) == 0 {
+		return nil, "", false
+	}
+	if rest == "" {
+		return s.streams[0], ".", true
+	}
+	for _, r := range s.streams {
+		if _, err := r.Lstat(rest); err == nil {
+			return r, rest, true
+		}
+	}
+	return s.streams[0], rest, true
+}
+
 func (s *NFSServer) lstat(rel string) (os.FileInfo, error) {
+	if r, sub, ok := s.stream(rel); ok {
+		return r.Lstat(sub)
+	}
 	if s.fs != nil {
 		if rel == "" {
 			rel = "."
@@ -363,6 +398,16 @@ func (s *NFSServer) lstat(rel string) (os.FileInfo, error) {
 	return os.Lstat(filepath.Join(s.Root, rel))
 }
 func (s *NFSServer) readDir(rel string) ([]os.DirEntry, error) {
+	if r, sub, ok := s.stream(rel); ok {
+		if sub == "." { // the virtual directory lists every stream directory
+			var all []os.DirEntry
+			for _, r := range s.streams {
+				all = append(all, rootDir(r, ".")...)
+			}
+			return all, nil
+		}
+		return rootDir(r, sub), nil
+	}
 	if s.fs == nil {
 		return os.ReadDir(filepath.Join(s.Root, rel))
 	}
@@ -380,7 +425,9 @@ func (s *NFSServer) readDir(rel string) ([]os.DirEntry, error) {
 func (s *NFSServer) read(rel string, off, count uint32) ([]byte, uint32) {
 	var f *os.File
 	var err error
-	if s.fs != nil {
+	if r, sub, ok := s.stream(rel); ok {
+		f, err = r.Open(sub)
+	} else if s.fs != nil {
 		f, err = s.fs.Open(rel)
 	} else {
 		f, err = os.Open(filepath.Join(s.Root, rel))
@@ -446,4 +493,14 @@ func (s *NFSServer) lookupFH(b []byte) (string, bool) {
 		return "", false
 	}
 	return s.paths[i], true
+}
+
+func rootDir(r *os.Root, rel string) []os.DirEntry {
+	f, err := r.Open(rel)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	entries, _ := f.ReadDir(-1)
+	return entries
 }

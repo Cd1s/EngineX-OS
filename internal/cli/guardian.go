@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/dbhealer"
 )
@@ -30,6 +31,7 @@ func Guardian(args []string, out, errOut io.Writer) int {
 	root := fs.String("mount-root", "/media", "mount discovery root when no --heal-mount is given")
 	dataOnly := fs.Bool("data-only", false, "repair table data but leave Engine's views, triggers and indexes untouched")
 	sessions := fs.Int("max-sessions", dbhealer.DefaultMaxSessions, "maximum history sessions; 0 uses 50")
+	reserve := fs.Bool("normalize-reserve", false, "only rebuild libraries whose page reserve byte is not 0 (breaks ATTACH in Engine 5.3.0); Engine must not be running")
 	watch := fs.Bool("watch", false, "retired; exits at once")
 	fs.Duration("interval", 0, "retired")
 	fs.Duration("quiet-for", 0, "retired")
@@ -54,6 +56,10 @@ func Guardian(args []string, out, errOut io.Writer) int {
 		var r dbhealer.Report
 		var err error
 		switch {
+		case *reserve:
+			r.Mount, r.CheckedAt = m, time.Now().UTC()
+			r.ReserveFixed, err = dbhealer.NormalizeDatabase2(filepath.Join(m, "Engine Library", "Database2"))
+			r.Healthy = err == nil
 		case *status:
 			r, err = dbhealer.InspectMount(m)
 		case *dataOnly:

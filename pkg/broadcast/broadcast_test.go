@@ -744,3 +744,93 @@ func TestUpdateMetadataLastErrorDoesNotLeakPassword(t *testing.T) {
 		t.Fatalf("expected '***' in sanitized LastError, got: %s", st.LastError)
 	}
 }
+
+func TestLocalOnlyWithoutServerURL(t *testing.T) {
+	pcmFile := filepath.Join(t.TempDir(), "live.pcm")
+	pcmData := make([]byte, 1152*4)
+	for i := range pcmData {
+		pcmData[i] = byte(i%250 + 1)
+	}
+	if err := os.WriteFile(pcmFile, pcmData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := New(newTestGuard())
+	defer b.Close()
+	if err := b.Configure(Config{InputPath: pcmFile}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+
+	ch, cancel := b.Subscribe()
+	defer cancel()
+	select {
+	case pcm := <-ch:
+		if len(pcm) == 0 || pcm[0] != 1 {
+			t.Fatalf("unexpected PCM chunk: %d bytes", len(pcm))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no PCM reached the local listener without a ServerURL")
+	}
+	st := b.Status()
+	if !st.Enabled || !st.Streaming || st.Listeners != 1 {
+		t.Errorf("unexpected status: %+v", st)
+	}
+
+	if err := b.SetEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+	for range ch { // closed on disable; must not hang
+	}
+	if st := b.Status(); st.Streaming || st.Listeners != 0 {
+		t.Errorf("expected stopped, got %+v", st)
+	}
+}
+
+func TestLocalListenersAndExternalPushTogether(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	got := make(chan struct{})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		r := bufio.NewReader(conn)
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil || strings.TrimSpace(line) == "" {
+				break
+			}
+		}
+		_, _ = io.WriteString(conn, "HTTP/1.0 200 OK\r\n\r\n")
+		buf := make([]byte, 1024)
+		if n, err := conn.Read(buf); err == nil && n >= 4 {
+			close(got)
+		}
+	}()
+
+	b := New(newTestGuard())
+	defer b.Close()
+	if err := b.Configure(Config{Enabled: true, ServerURL: "http://" + ln.Addr().String()}); err != nil {
+		t.Fatal(err)
+	}
+	ch, cancel := b.Subscribe()
+	defer cancel()
+	select {
+	case <-got:
+	case <-time.After(3 * time.Second):
+		t.Fatal("external server received nothing")
+	}
+	select {
+	case <-ch:
+	case <-time.After(3 * time.Second):
+		t.Fatal("local listener received nothing while pushing externally")
+	}
+}

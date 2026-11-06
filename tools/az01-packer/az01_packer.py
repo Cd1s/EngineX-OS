@@ -443,45 +443,66 @@ class ExtFS:
         self.cmd(f'symlink "{path}" "{target}"', True)
 
 
+MIGRATE = r'''# /data/sc5000-custom became /data/enginex (#103): one rename keeps every file, and a
+# symlink keeps the old path working for older scripts and for a rollback.
+old=/data/sc5000-custom
+new=/data/enginex
+if [ -d "$old" ] && [ ! -L "$old" ]; then
+    if [ ! -e "$new" ] && [ ! -L "$new" ]; then
+        mv "$old" "$new"
+    elif [ -d "$new" ] && [ ! -L "$new" ]; then
+        # Both are real: move over what enginex lacks, set the remainder aside.
+        for e in "$old"/* "$old"/.[!.]*; do
+            [ -e "$e" ] || [ -L "$e" ] || continue
+            [ -e "$new/${e##*/}" ] || [ -L "$new/${e##*/}" ] || mv "$e" "$new/"
+        done
+        rmdir "$old" 2>/dev/null || mv "$old" "$new/legacy-sc5000-custom.$$"
+    fi
+fi
+[ -e "$new" ] || [ -L "$new" ] || mkdir -p "$new"
+{ [ -d "$old" ] && [ ! -L "$old" ]; } || ln -sfn enginex "$old"'''
+
+
 PREPARE = b'''#!/bin/sh
 set -eu
 umask 077
-for path in /data/sc5000-custom /data/sc5000-custom/authorized_keys /data/sc5000-custom/ssh_host_ed25519_key /data/sc5000-custom/ssh_host_ed25519_key.pub; do
+@MIGRATE@
+for path in /data/enginex /data/enginex/authorized_keys /data/enginex/ssh_host_ed25519_key /data/enginex/ssh_host_ed25519_key.pub; do
     [ ! -L "$path" ] || { echo "Refusing persistent SSH symlink: $path" >&2; exit 1; }
 done
-mkdir -p /data/sc5000-custom
-chmod 700 /data/sc5000-custom
-work=$(mktemp -d /data/sc5000-custom/.prepare.XXXXXX)
+mkdir -p /data/enginex
+chmod 700 /data/enginex
+work=$(mktemp -d /data/enginex/.prepare.XXXXXX)
 trap 'rm -rf "$work"' 0
 # Public images seed no key: SSH stays off until the owner adds one (#46).
-if [ ! -e /data/sc5000-custom/authorized_keys ] && [ -s /usr/share/sc5000-custom/authorized_keys ]; then
+if [ ! -e /data/enginex/authorized_keys ] && [ -s /usr/share/sc5000-custom/authorized_keys ]; then
     cp /usr/share/sc5000-custom/authorized_keys "$work/authorized_keys"
     chmod 600 "$work/authorized_keys"
-    mv "$work/authorized_keys" /data/sc5000-custom/authorized_keys
+    mv "$work/authorized_keys" /data/enginex/authorized_keys
 fi
 # Public images up to 5.0.4.1 seeded every deck with the maintainer's key.
 retired=@RETIRED@
-if [ -f /data/sc5000-custom/authorized_keys ] && [ ! -e /data/sc5000-custom/keep-release-key ] &&
-    grep -qF "$retired" /data/sc5000-custom/authorized_keys &&
+if [ -f /data/enginex/authorized_keys ] && [ ! -e /data/enginex/keep-release-key ] &&
+    grep -qF "$retired" /data/enginex/authorized_keys &&
     ! grep -qsF "$retired" /usr/share/sc5000-custom/authorized_keys; then
-    grep -vF "$retired" /data/sc5000-custom/authorized_keys > "$work/authorized_keys" || :
+    grep -vF "$retired" /data/enginex/authorized_keys > "$work/authorized_keys" || :
     chmod 600 "$work/authorized_keys"
-    mv "$work/authorized_keys" /data/sc5000-custom/authorized_keys
+    mv "$work/authorized_keys" /data/enginex/authorized_keys
 fi
-[ ! -f /data/sc5000-custom/authorized_keys ] || chmod 600 /data/sc5000-custom/authorized_keys
-if [ ! -e /data/sc5000-custom/ssh_host_ed25519_key ]; then
+[ ! -f /data/enginex/authorized_keys ] || chmod 600 /data/enginex/authorized_keys
+if [ ! -e /data/enginex/ssh_host_ed25519_key ]; then
     /usr/bin/ssh-keygen -q -t ed25519 -N '' -f "$work/ssh_host_ed25519_key"
-    mv "$work/ssh_host_ed25519_key" /data/sc5000-custom/ssh_host_ed25519_key
-    mv "$work/ssh_host_ed25519_key.pub" /data/sc5000-custom/ssh_host_ed25519_key.pub
+    mv "$work/ssh_host_ed25519_key" /data/enginex/ssh_host_ed25519_key
+    mv "$work/ssh_host_ed25519_key.pub" /data/enginex/ssh_host_ed25519_key.pub
 fi
-[ -f /data/sc5000-custom/ssh_host_ed25519_key ]
-/usr/bin/ssh-keygen -y -P '' -f /data/sc5000-custom/ssh_host_ed25519_key >/dev/null
+[ -f /data/enginex/ssh_host_ed25519_key ]
+/usr/bin/ssh-keygen -y -P '' -f /data/enginex/ssh_host_ed25519_key >/dev/null
 
 # A firmware update rewrites / but never /data: install the image's UI packs
 # once per release, before Engine starts (engine.service orders after this unit).
 install_ui() {
     archive=${SC5000_UI_ARCHIVE:-/usr/share/sc5000-custom/ui-packs.tar.xz}
-    ui=${SC5000_UI_DIR:-/data/sc5000-custom/ui}
+    ui=${SC5000_UI_DIR:-/data/enginex/ui}
     [ -f "$archive" ] || return 0
     version=$(cat /etc/sc5000/version.txt 2>/dev/null || echo unknown)
     # Releases keep their version (5.0.4.1) across rebuilds: also key on the archive.
@@ -512,13 +533,14 @@ install_ui() {
     rm -f "$ui/safe-mode" "$ui/boot-count" "$ui/boot-token"
     printf '%s\n' "$version" > "$ui/.pack-version"
     printf '%s\n' "$id" > "$ui/.pack-id"
-    printf '%s\n' "$version" > "${SC5000_VERSION_FILE:-/data/sc5000-custom/version.txt}"
+    printf '%s\n' "$version" > "${SC5000_VERSION_FILE:-/data/enginex/version.txt}"
 }
+[ ! -d /etc/sc5000 ] || [ -e /etc/enginex ] || ln -s sc5000 /etc/enginex 2>/dev/null || :
 install_ui || echo "sc5000-custom-prepare: UI packs not installed" >&2
 '''
 # Public half of the key public images up to 5.0.4.1 shipped (#46). Not a secret.
 RETIRED_RELEASE_KEY = b'AAAAC3NzaC1lZDI1NTE5AAAAIC6p0NjBPb0vPCGB3XloshlMtXoYgVc6ig+JQAYnVUSz'
-PREPARE = PREPARE.replace(b'@RETIRED@', RETIRED_RELEASE_KEY)
+PREPARE = PREPARE.replace(b'@RETIRED@', RETIRED_RELEASE_KEY).replace(b'@MIGRATE@', MIGRATE.encode())
 
 # Engine 4.3.4 left copies of these in the /etc overlay upper layer; they
 # shadow the 5.0.4 lower /etc (telemetry hosts blocking connman's online check,
@@ -526,10 +548,11 @@ PREPARE = PREPARE.replace(b'@RETIRED@', RETIRED_RELEASE_KEY)
 # is not seen until reboot, so this runs once per epoch before etc.mount.
 ETC_RESET_TEMPLATE = '''#!/bin/sh
 set -eu
+@MIGRATE@
 epoch=@EPOCH@
 upper=/data/system/etc/overlay
-marker=/data/sc5000-custom/etc-overlay-epoch
-for path in /data/system /data/system/etc "$upper" /data/sc5000-custom "$marker"; do
+marker=/data/enginex/etc-overlay-epoch
+for path in /data/system /data/system/etc "$upper" /data/enginex "$marker"; do
     [ ! -L "$path" ] || { echo "Refusing /etc overlay symlink: $path" >&2; exit 1; }
 done
 if [ -f "$marker" ] && [ "$(cat "$marker")" = "$epoch" ]; then
@@ -540,8 +563,8 @@ if [ -d "$upper" ]; then
         rm -rf -- "$upper/$name"
     done
 fi
-mkdir -p /data/sc5000-custom
-chmod 700 /data/sc5000-custom
+mkdir -p /data/enginex
+chmod 700 /data/enginex
 printf '%s\n' "$epoch" > "$marker.tmp"
 mv "$marker.tmp" "$marker"
 '''
@@ -555,15 +578,15 @@ def etc_reset(epoch='engine-5.0.4', managed=()):
     for name in managed:
         require(re.fullmatch(r'[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*', name) and '..' not in name.split('/'),
                 'unsafe /etc path for reset: ' + name)
-    return (ETC_RESET_TEMPLATE.replace('@EPOCH@', epoch)
+    return (ETC_RESET_TEMPLATE.replace('@MIGRATE@', MIGRATE).replace('@EPOCH@', epoch)
             .replace('@MANAGED@', ''.join(' ' + n for n in sorted(managed))).encode())
 
 
 ETC_RESET = etc_reset()
 
 SSHD_CONFIG = b'''Port 22
-HostKey /data/sc5000-custom/ssh_host_ed25519_key
-AuthorizedKeysFile /data/sc5000-custom/authorized_keys
+HostKey /data/enginex/ssh_host_ed25519_key
+AuthorizedKeysFile /data/enginex/authorized_keys
 PermitRootLogin prohibit-password
 PasswordAuthentication no
 PermitEmptyPasswords no
@@ -609,7 +632,7 @@ Requires=sc5000-custom-prepare.service
 After=sc5000-custom-prepare.service network.target
 Conflicts=sshd.service sshd.socket
 # No key, no SSH: public images ship none (#46).
-ConditionFileNotEmpty=/data/sc5000-custom/authorized_keys
+ConditionFileNotEmpty=/data/enginex/authorized_keys
 [Service]
 Type=simple
 ExecStartPre=/usr/bin/mkdir -p /run/sshd

@@ -62,6 +62,10 @@ func (c *Client) Cached(name string) *Download {
 	if isMP4(path) {
 		return &Download{Path: path, Quality: Quality{Label: "[AAC]", Format: "mp4"}}
 	}
+	oggPath := filepath.Join(c.DownloadDir, name+".ogg")
+	if st, err := os.Stat(oggPath); err == nil && st.Mode().IsRegular() && st.Size() > 0 {
+		return &Download{Path: oggPath, Quality: Quality{Format: "OGG_320", Lossless: false}}
+	}
 	return nil
 }
 

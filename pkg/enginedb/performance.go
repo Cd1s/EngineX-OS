@@ -114,6 +114,49 @@ func beatPositions(beats []rekordbox.Beat, sampleRate float64) []float64 {
 	return positions
 }
 
+// Engine 5.3.0 trackData (68 bytes): sample rate, sample count, key, then the
+// low/mid/high waveform peaks (0..1) and the same three for stems. Engine reads
+// the peaks as floats and ignores an all-zero triple; its analyser sets them and
+// emits ITrackData::waveformPeakChanged. 5.0.4 rows end after the first triple.
+// Engine-analysed tracks on a real drive had median peaks 0.68/0.40/0.18, and a
+// peak of 0.0066/0.0035/0.0016 per unit of their own overview's band maximum.
+var (
+	defaultPeaks        = [3]float64{0.68, 0.40, 0.18}
+	peakPerOverviewByte = [3]float64{0.0066, 0.0035, 0.0016}
+)
+
+// TrackDataPeaks returns raw trackData in Engine 5.3.0's 68-byte form. A 5.0.4
+// row (44 bytes), or one whose peaks are zero (Engine ignores those), gets
+// peaks from the band maxima of its raw overview (>q q d, 3-byte entries, 3-byte max).
+func TrackDataPeaks(track, overview []byte) []byte {
+	if len(track) < 20 {
+		return track
+	}
+	out := make([]byte, 68)
+	copy(out, track)
+	if len(track) >= 44 && binary.BigEndian.Uint64(out[20:])|binary.BigEndian.Uint64(out[28:])|binary.BigEndian.Uint64(out[36:]) != 0 {
+		return out
+	}
+	peaks := defaultPeaks
+	if len(overview) >= 27 {
+		var top [3]byte
+		for i := 24; i+3 <= len(overview)-3; i += 3 {
+			for c := range top {
+				top[c] = max(top[c], overview[i+c])
+			}
+		}
+		for c := range peaks {
+			if top[c] > 0 {
+				peaks[c] = min(1, float64(top[c])*peakPerOverviewByte[c])
+			}
+		}
+	}
+	for c, v := range peaks {
+		binary.BigEndian.PutUint64(out[20+8*c:], math.Float64bits(v))
+	}
+	return out
+}
+
 func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, error) {
 	if a == nil {
 		a = &rekordbox.Analysis{}
@@ -143,22 +186,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 	}
 	samples := float64(sampleCount)
 	p := Performance{}
-	var track bytes.Buffer
-	put(&track, big, float64(sr))
-	put(&track, big, sampleCount)
-	key := uint32(0)
-	if k, ok := EngineKey(t.Key).(int); ok {
-		key = uint32(k)
-	}
-	put(&track, big, key)
-	for i := 0; i < 3; i++ {
-		put(&track, big, float64(0))
-	}
 	var e error
-	p.TrackData, e = QCompress(track.Bytes())
-	if e != nil {
-		return p, e
-	}
 	if len(a.Beats) > 0 {
 		positions := beatPositions(a.Beats, float64(sr))
 		var b bytes.Buffer
@@ -190,6 +218,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 		}
 	}
 	var wave *rekordbox.Waveform
+	var top [3]byte // the whole track's peak per band
 	priority := map[string]int{"PWAV": 1, "PWV2": 1, "PWV3": 2, "PWV4": 3, "PWV5": 4, "PWV7": 5}
 	for i := range a.Waveforms {
 		w := &a.Waveforms[i]
@@ -217,9 +246,8 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 			for j := lo; j < hi && j < n; j++ {
 				v := waveRGB(*wave, int(j))
 				for c := 0; c < 3; c++ {
-					if v[c] > peak[c] {
-						peak[c] = v[c]
-					}
+					peak[c] = max(peak[c], v[c])
+					top[c] = max(top[c], v[c])
 				}
 			}
 			b.Write(peak[:])
@@ -229,6 +257,28 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 		if e != nil {
 			return p, e
 		}
+	}
+	peaks := defaultPeaks
+	if wave != nil && wave.Tag == "PWV7" { // PWV7 bytes share Engine's overview scale
+		for c := range peaks {
+			if top[c] > 0 {
+				peaks[c] = min(1, float64(top[c])*peakPerOverviewByte[c])
+			}
+		}
+	}
+	var track bytes.Buffer
+	put(&track, big, float64(sr))
+	put(&track, big, sampleCount)
+	key := uint32(0)
+	if k, ok := EngineKey(t.Key).(int); ok {
+		key = uint32(k)
+	}
+	put(&track, big, key)
+	put(&track, big, peaks)
+	put(&track, big, [3]float64{}) // stem peaks: Engine keeps its own while these are zero
+	p.TrackData, e = QCompress(track.Bytes())
+	if e != nil {
+		return p, e
 	}
 	var hot [8]*rekordbox.Cue
 	var memory []rekordbox.Cue

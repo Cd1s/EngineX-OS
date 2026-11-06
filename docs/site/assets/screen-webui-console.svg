@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800" width="1280" height="800" font-family="-apple-system,'Helvetica Neue','PingFang SC','Microsoft YaHei',Arial,sans-serif">
+  <title>Web console :8080/ui / Web 控制台</title>
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d131b"/><stop offset="1" stop-color="#06090d"/></linearGradient></defs>
+  <rect width="1280" height="800" fill="url(#bg)"/>
+  <text x="40" y="52" fill="#e8f1f8" font-size="26" font-weight="700">Web 控制台 · http://&lt;deck-ip&gt;:8080/ui</text>
+  <text x="40" y="80" fill="#7f93a5" font-size="15">Phone or computer · wireless drag-and-drop · relocate · OTA · Stems · limiter</text>
+
+  <rect x="40" y="104" width="840" height="640" rx="14" fill="#111922" stroke="#2c3b4c" stroke-width="2"/>
+  <rect x="40" y="104" width="840" height="40" rx="14" fill="#18222d"/>
+  <rect x="140" y="114" width="640" height="22" rx="11" fill="#0b1117"/><text x="460" y="130" fill="#9db0c0" font-size="13" text-anchor="middle">192.168.1.xx:8080/ui</text>
+
+  <!-- Access code -->
+  <rect x="64" y="166" width="792" height="64" rx="10" fill="#16202b" stroke="#00e5ff" stroke-width="2"/>
+  <text x="88" y="205" fill="#e8f1f8" font-size="18">访问码 Access code</text>
+  <g font-size="26" font-weight="700" fill="#00e5ff" letter-spacing="8"><text x="620" y="208">• • • • • •</text></g>
+  <rect x="760" y="178" width="84" height="40" rx="8" fill="#00e5ff"/><text x="802" y="204" fill="#001418" font-size="15" font-weight="700" text-anchor="middle">解锁 Unlock</text>
+
+  <!-- Upload -->
+  <rect x="64" y="248" width="384" height="180" rx="10" fill="#0e151d" stroke="#39ff88" stroke-width="2" stroke-dasharray="8 6"/>
+  <text x="256" y="320" fill="#39ff88" font-size="34" text-anchor="middle">⇪</text>
+  <text x="256" y="358" fill="#e8f1f8" font-size="17" text-anchor="middle">Wi-Fi 无线拖拽传歌</text>
+  <text x="256" y="382" fill="#9db0c0" font-size="13" text-anchor="middle">Drop audio files — no USB stick needed</text>
+
+  <!-- Relocate -->
+  <rect x="472" y="248" width="384" height="180" rx="10" fill="#16202b" stroke="#243242"/>
+  <text x="496" y="282" fill="#e8f1f8" font-size="17" font-weight="700">曲库重定位 Relocate</text>
+  <text x="496" y="308" fill="#9db0c0" font-size="13">Missing tracks: 12 · 丢失曲目</text>
+  <rect x="496" y="340" width="336" height="44" rx="8" fill="#ff9f1c"/><text x="664" y="368" fill="#1b1000" font-size="16" font-weight="700" text-anchor="middle">一键重定位 Relocate all</text>
+
+  <!-- OTA -->
+  <rect x="64" y="446" width="384" height="130" rx="10" fill="#16202b" stroke="#243242"/>
+  <text x="88" y="480" fill="#e8f1f8" font-size="17" font-weight="700">在线升级 OTA Update</text>
+  <text x="88" y="504" fill="#9db0c0" font-size="13">New version available · 发现新版本</text>
+  <rect x="88" y="520" width="336" height="40" rx="8" fill="#b04dff"/><text x="256" y="546" fill="#14001f" font-size="15" font-weight="700" text-anchor="middle">一键升级 Update on deck</text>
+
+  <!-- Stems / DSP -->
+  <rect x="472" y="446" width="384" height="130" rx="10" fill="#16202b" stroke="#243242"/>
+  <text x="496" y="480" fill="#e8f1f8" font-size="17" font-weight="700">Stems</text>
+  <rect x="760" y="462" width="72" height="30" rx="15" fill="#39ff88"/><circle cx="814" cy="477" r="11" fill="#04150b"/>
+  <text x="496" y="530" fill="#e8f1f8" font-size="17" font-weight="700">DSP 限幅器 Limiter</text>
+  <rect x="496" y="546" width="336" height="8" rx="4" fill="#243242"/><rect x="496" y="546" width="250" height="8" rx="4" fill="#00e5ff"/><circle cx="746" cy="550" r="10" fill="#00e5ff"/>
+  <text x="832" y="530" fill="#9db0c0" font-size="13" text-anchor="end">-0.3 dB</text>
+
+  <text x="64" y="620" fill="#7f93a5" font-size="13">所有操作在局域网内完成，不经云端 · LAN only, nothing leaves your network</text>
+
+  <!-- Callouts -->
+  <g font-size="16" font-weight="700">
+    <g transform="translate(940,198)"><circle r="20" fill="#00e5ff"/><text y="6" text-anchor="middle" fill="#001418" font-size="20">①</text></g>
+    <path d="M920 198 H860" stroke="#00e5ff" stroke-width="2"/>
+    <text x="974" y="194" fill="#00e5ff">访问码 Access code</text><text x="974" y="216" fill="#9db0c0" font-size="14" font-weight="400">Shown on the deck: Settings › About</text>
+
+    <g transform="translate(940,330)"><circle r="20" fill="#39ff88"/><text y="6" text-anchor="middle" fill="#04150b" font-size="20">②</text></g>
+    <path d="M920 330 H868 L448 330" stroke="#39ff88" stroke-width="2" stroke-dasharray="2 5"/>
+    <text x="974" y="326" fill="#39ff88">无线拖拽传歌</text><text x="974" y="348" fill="#9db0c0" font-size="14" font-weight="400">Wireless drag-and-drop upload</text>
+
+    <g transform="translate(940,420)"><circle r="20" fill="#ff9f1c"/><text y="6" text-anchor="middle" fill="#1b1000" font-size="20">③</text></g>
+    <path d="M920 420 H864 L850 400" stroke="#ff9f1c" stroke-width="2" fill="none"/>
+    <text x="974" y="416" fill="#ff9f1c">曲库丢歌一键重定位</text><text x="974" y="438" fill="#9db0c0" font-size="14" font-weight="400">One-click fix for moved/missing tracks</text>
+
+    <g transform="translate(940,510)"><circle r="20" fill="#b04dff"/><text y="6" text-anchor="middle" fill="#14001f" font-size="20">④</text></g>
+    <path d="M920 510 H900 L452 520" stroke="#b04dff" stroke-width="2" stroke-dasharray="2 5"/>
+    <text x="974" y="506" fill="#b04dff">屏幕一键 OTA 升级</text><text x="974" y="528" fill="#9db0c0" font-size="14" font-weight="400">One-tap OTA, started from the screen</text>
+
+    <g transform="translate(940,600)"><circle r="20" fill="#ffffff"/><text y="6" text-anchor="middle" fill="#05080b" font-size="20">⑤</text></g>
+    <path d="M920 600 H868 L860 560" stroke="#ffffff" stroke-width="2" fill="none"/>
+    <text x="974" y="596" fill="#ffffff">Stems 开关与 DSP 限幅器</text><text x="974" y="618" fill="#9db0c0" font-size="14" font-weight="400">Stems switch and DSP limiter settings</text>
+  </g>
+</svg>

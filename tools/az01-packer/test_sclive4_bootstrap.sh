@@ -101,9 +101,12 @@ python3 "$REPO/tools/az01-packer/host-install-userdata.py" "$IMG" --bundle "$BUN
 e2fsck -f -y "$IMG" >/dev/null
 debugfs -R "stat /Music/user_track.flac" "$IMG" 2>&1 | grep -q "regular"
 debugfs -R "stat /${VARLIB#data/}/alsa/conf.d/99-sc5000-custom.conf" "$IMG" 2>&1 | grep -q "regular"
-debugfs -R "stat /sc5000-custom/bundle/lib/libengine-ui-hook.so" "$IMG" 2>&1 | grep -q "regular"
+debugfs -R "stat /enginex/bundle/lib/libengine-ui-hook.so" "$IMG" 2>&1 | grep -q "regular"
+debugfs -R "stat /enginex/bundle/boot-activate.sh" "$IMG" 2>&1 | grep -q "regular"
+test "$(debugfs -R "cat /enginex/version.txt" "$IMG" 2>/dev/null | tr -d '\r\n')" = "5.3.0.1.1"
+# #103: the old path stays reachable (the ALSA hook and older scripts use it)
+debugfs -R "stat /sc5000-custom" "$IMG" 2>&1 | grep -q "symlink"
 debugfs -R "stat /sc5000-custom/bundle/boot-activate.sh" "$IMG" 2>&1 | grep -q "regular"
-test "$(debugfs -R "cat /sc5000-custom/version.txt" "$IMG" 2>/dev/null | tr -d '\r\n')" = "5.3.0.1.1"
 echo "  Method A ext4 userdata injection: PASS"
 
 # 3. Stage 1: Cold Boot ALSA One-Shot Activation
@@ -147,7 +150,7 @@ for i in \$(seq 1 30); do
 done
 
 test -f '$TARGET/run/sc5000-alsa-reexec.once'
-grep -q 'LD_PRELOAD=/data/sc5000-custom/bundle/lib/libengine-ui-hook.so' \
+grep -q 'LD_PRELOAD=/data/enginex/bundle/lib/libengine-ui-hook.so' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 "
 echo "  Stage 1 ALSA boot activation: PASS"
@@ -208,15 +211,46 @@ tar -xzf '$BUNDLE' -C '$TARGET/tmp/installer'
 chroot '$TARGET' /bin/sh /tmp/installer/$PREFIX-5.3.0.1.1-EngineX-OS-Data-Bundle/install.sh >/dev/null
 
 test -f '$TARGET/$VARLIB/alsa/conf.d/99-sc5000-custom.conf'
-test -f '$TARGET/data/sc5000-custom/version.txt'
+test -f '$TARGET/data/enginex/version.txt'
+test -L '$TARGET/data/sc5000-custom'
 
-chroot '$TARGET' /bin/sh /data/sc5000-custom/bundle/uninstall.sh >/dev/null
+chroot '$TARGET' /bin/sh /data/enginex/bundle/uninstall.sh >/dev/null
 
 test ! -f '$TARGET/$VARLIB/alsa/conf.d/99-sc5000-custom.conf'
-test ! -d '$TARGET/data/sc5000-custom/bundle'
+test ! -d '$TARGET/data/enginex/bundle'
 test -f '$TARGET/data/Music/user_track.flac'
 "
 echo "  Method B on-device install & uninstall: PASS"
+
+# 5b. #103 upgrade: a deck still on the real /data/sc5000-custom keeps every file when install.sh runs
+echo "[5b] Testing upgrade from the legacy /data/sc5000-custom directory..."
+unshare -m -n -p -f bash -c "
+set -euo pipefail
+mount --bind '$ROOTFS' '$TARGET'
+mount -o remount,ro,bind '$TARGET'
+mount -o loop '$IMG' '$TARGET/data'
+mount --bind '$TARGET/$VARLIB' '$TARGET/var/lib'
+mount -t tmpfs tmpfs '$TARGET/run'
+mount -t tmpfs tmpfs '$TARGET/tmp'
+mount --bind /dev '$TARGET/dev'
+
+rm -f '$TARGET/data/sc5000-custom'
+rm -rf '$TARGET/data/enginex/bundle'
+mv '$TARGET/data/enginex' '$TARGET/data/sc5000-custom'
+mkdir -p '$TARGET/data/sc5000-custom/Stream'
+echo keep > '$TARGET/data/sc5000-custom/Stream/song.flac'
+echo ssh-key > '$TARGET/data/sc5000-custom/authorized_keys'
+mkdir -p '$TARGET/tmp/installer'
+tar -xzf '$BUNDLE' -C '$TARGET/tmp/installer'
+chroot '$TARGET' /bin/sh /tmp/installer/$PREFIX-5.3.0.1.1-EngineX-OS-Data-Bundle/install.sh >/dev/null
+
+test -L '$TARGET/data/sc5000-custom'
+test \"\$(readlink '$TARGET/data/sc5000-custom')\" = enginex
+test \"\$(cat '$TARGET/data/enginex/Stream/song.flac')\" = keep
+test \"\$(cat '$TARGET/data/sc5000-custom/authorized_keys')\" = ssh-key
+test -f '$TARGET/data/sc5000-custom/bundle/boot-activate.sh'
+"
+echo "  Legacy directory upgrade: PASS"
 
 echo ""
 echo "=== All $PREFIX verification checks PASSED ==="

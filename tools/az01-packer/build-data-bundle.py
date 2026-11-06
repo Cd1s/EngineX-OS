@@ -2,7 +2,7 @@
 """Pack the EngineX OS user-space suite into a /data bundle (#61).
 
 Devices whose root partition stays read-only (SC LIVE 4, inmusic,jp21) cannot
-take an EngineX OS .img; they install this tarball under /data/sc5000-custom:
+take an EngineX OS .img; they install this tarball under /data/enginex:
 
     tar -xzf SCLIVE4-<V>-EngineX-OS-Data-Bundle.tar.gz -C /tmp
     sh /tmp/SCLIVE4-<V>-EngineX-OS-Data-Bundle/install.sh
@@ -22,6 +22,12 @@ import sys
 import tarfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from az01_packer import MIGRATE  # one migration snippet for the image and the bundle
+
+# SC5000_CUSTOM is only set by tests: then dest is not the deck's /data, nothing to migrate.
+MIGRATE_IF_DEFAULT = 'if [ -z "${SC5000_CUSTOM:-}" ]; then\n' + MIGRATE + '\nfi'
+
 VERSION_RE = re.compile(r'^\d+(\.\d+){2,4}$')  # same range as az01_packer.py
 APPLETS = ('stream-sync', 'rb-bridge', 'sc5000-deemixd', 'stems-processor')
 
@@ -31,7 +37,8 @@ BOOT_ACTIVATE = r'''#!/bin/sh
 # One-shot boot activator for SC LIVE 4 (inmusic,jp21) and read-only root decks (#61).
 set -eu
 
-dest="${SC5000_CUSTOM:-/data/sc5000-custom}"
+@MIGRATE_IF_DEFAULT@
+dest="${SC5000_CUSTOM:-/data/enginex}"
 bundle_dir="$dest/bundle"
 bin_dir="$bundle_dir/bin"
 lib_hook="$bundle_dir/lib/libengine-ui-hook.so"
@@ -54,7 +61,7 @@ if [ -f "$bundle_dir/version.txt" ]; then
 fi
 
 for applet in stream-sync rb-bridge sc5000-deemixd; do
-    if [ -x "$bin_dir/$applet" ] && ! pgrep -f "$bin_dir/$applet" >/dev/null 2>&1; then
+    if [ -x "$bin_dir/$applet" ] && ! pgrep -f "bundle/bin/$applet" >/dev/null 2>&1; then
         "$bin_dir/$applet" >/dev/null 2>&1 &
     fi
 done
@@ -79,16 +86,17 @@ ALSA_CONF = r'''hook_func.sc5000_alsa_boot_hook {
 '''
 
 INSTALL = r'''#!/bin/sh
-# Installs this bundle under /data/sc5000-custom. Checks SHA256SUMS first and
+# Installs this bundle under /data/enginex (/data/sc5000-custom stays as a symlink). Checks SHA256SUMS first and
 # replaces each part in one rename, so a failed install leaves the old one.
 set -eu
 src=$(cd "$(dirname "$0")" && pwd)
-dest=${SC5000_CUSTOM:-/data/sc5000-custom}
+@MIGRATE_IF_DEFAULT@
+dest=${SC5000_CUSTOM:-/data/enginex}
 # Where /var/lib lives on /data differs by firmware: see alsa-dir.
 alsa_rel=$(cat "$src/alsa-dir")
 if [ -n "${SC5000_ALSA_OVERLAY:-}" ]; then
     alsa_dest="$SC5000_ALSA_OVERLAY"
-elif [ "$dest" != "/data/sc5000-custom" ] && [ ! -d "/data" ]; then
+elif [ "$dest" != "/data/enginex" ] && [ ! -d "/data" ]; then
     alsa_dest="$(dirname "$dest")/$alsa_rel"
 else
     alsa_dest="/data/$alsa_rel"
@@ -129,15 +137,16 @@ echo "EngineX OS $(cat version.txt) installed in $dest"
 '''
 
 UNINSTALL = r'''#!/bin/sh
-# Removes only what install.sh put in /data/sc5000-custom. SSH keys, settings,
+# Removes only what install.sh put in /data/enginex. SSH keys, settings,
 # caches and downloads stay; UI packs stay if something else replaced them.
 set -eu
-dest=${SC5000_CUSTOM:-/data/sc5000-custom}
+@MIGRATE_IF_DEFAULT@
+dest=${SC5000_CUSTOM:-/data/enginex}
 # Bundles before 5.3.0.2's AZ04 support had no alsa-dir; they all used the overlay path.
 alsa_rel=$(cat "$dest/bundle/alsa-dir" 2>/dev/null || echo system/var/overlay/lib/alsa/conf.d)
 if [ -n "${SC5000_ALSA_OVERLAY:-}" ]; then
     alsa_dest="$SC5000_ALSA_OVERLAY"
-elif [ "$dest" != "/data/sc5000-custom" ] && [ ! -d "/data" ]; then
+elif [ "$dest" != "/data/enginex" ] && [ ! -d "/data" ]; then
     alsa_dest="$(dirname "$dest")/$alsa_rel"
 else
     alsa_dest="/data/$alsa_rel"
@@ -230,7 +239,7 @@ Needs a root shell on the device. Copy this .tar.gz to the device, then:
     sh /tmp/{top}/install.sh
     reboot
 
-install.sh only writes /data/sc5000-custom and one ALSA file
+install.sh only writes /data/enginex (the old /data/sc5000-custom becomes a symlink to it) and one ALSA file
 (/data/{alsa}/99-sc5000-custom.conf). Music,
 settings and the Engine library are left alone.
 
@@ -247,7 +256,7 @@ Never flash an empty or someone else's userdata image.
 
 Uninstall
 ---------
-    sh /data/sc5000-custom/bundle/uninstall.sh && reboot
+    sh /data/enginex/bundle/uninstall.sh && reboot
 
 Removes only what install.sh added; Engine starts stock again.
 '''
@@ -274,11 +283,11 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
         files[f'bin/{applet}'] = (WRAPPER.format(applet).encode(), 0o755)
     files['ui-packs.tar'] = (ui_packs_tar(ui_packs), 0o644)
     files['version.txt'] = (f'{version}\n'.encode(), 0o644)
-    files['boot-activate.sh'] = (BOOT_ACTIVATE.encode(), 0o755)
+    files['boot-activate.sh'] = (BOOT_ACTIVATE.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)
     files['99-sc5000-custom.conf'] = (ALSA_CONF.encode(), 0o644)
     files['alsa-dir'] = (f'{alsa_dir(prefix)}\n'.encode(), 0o644)
-    files['install.sh'] = (INSTALL.encode(), 0o755)
-    files['uninstall.sh'] = (UNINSTALL.encode(), 0o755)
+    files['install.sh'] = (INSTALL.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)
+    files['uninstall.sh'] = (UNINSTALL.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)
     top = f'{prefix}-{version}-EngineX-OS-Data-Bundle'
     files['README-INSTALL.txt'] = (README_INSTALL.format(version=version, model=MODELS[prefix], top=top, alsa=alsa_dir(prefix),
                                                         note=AZ04_NOTE if prefix in AZ04 else '').encode(), 0o644)

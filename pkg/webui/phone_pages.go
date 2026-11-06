@@ -36,7 +36,7 @@ var phoneText = map[string][3]string{
 	"privacy":       {"Everything you enter stays on this deck.", "填写的内容只保存在这台碟机上。", "填寫的內容只儲存在這台碟機上。"},
 	"open":          {"Connect %s", "连接 %s", "連接 %s"},
 	"badForm":       {"Please fill in one of the fields", "请至少填写一项", "請至少填寫一項"},
-	"deezerFLAC":    {"Logging in with your Deezer ARL here also unlocks lossless FLAC track downloads (Deemix) for Spotify, NetEase and Deezer.", "在这里用 Deezer ARL 登录，Spotify、网易云和 Deezer 的曲目都能用 Deemix 下载无损 FLAC。", "在這裡用 Deezer ARL 登入，Spotify、網易雲和 Deezer 的曲目都能用 Deemix 下載無損 FLAC。"},
+	"deezerFLAC":    {"Enter your Deezer ARL to recognise your account and playlists automatically and enable lossless FLAC downloads.", "填入您的 Deezer ARL 即可自动识别账号歌单并启用 FLAC 无损下载。", "填入您的 Deezer ARL 即可自動識別帳號歌單並啟用 FLAC 無損下載。"},
 	"deezerARL":     {"Log in with your ARL (recommended)", "用 ARL 登录（推荐）", "用 ARL 登入（推薦）"},
 	"deezerARLPh":   {"Paste your ARL (192 characters)", "粘贴 ARL（192 个字符）", "貼上 ARL（192 個字元）"},
 	"deezerStep1":   {"On a computer, open deezer.com and log in.", "在电脑上打开 deezer.com 并登录。", "在電腦上開啟 deezer.com 並登入。"},

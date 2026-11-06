@@ -27,6 +27,8 @@ type Token struct {
 }
 type Spotify struct {
 	BaseURL, AccountsURL, ClientID, TokenPath string
+	StreamURL                                 string
+	AudioKey                                  []byte
 	HTTP                                      *http.Client
 	mu                                        sync.Mutex
 	Token                                     Token

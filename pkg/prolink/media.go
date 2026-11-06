@@ -153,30 +153,21 @@ func (r mediaReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // shortcut: the copy is keyed by host, slot and track id, so a different stick
 // in the same slot with the same id reuses a stale copy until dir is cleared.
 func FetchTrack(ctx context.Context, c *NFSClient, slot byte, id uint32, dir string) (string, error) {
-	export, err := SlotExport(slot)
+	export, t, err := fetchTrackRow(ctx, c, slot, id)
 	if err != nil {
 		return "", err
 	}
-	pdb, _, err := c.Fetch(ctx, export, "/"+pdbPath, maxPDB)
-	if err != nil {
-		return "", err
-	}
-	lib, err := rekordbox.ParsePDB(bytes.NewReader(pdb), int64(len(pdb)))
-	if err != nil {
-		return "", err
-	}
-	rel := ""
-	for _, t := range lib.Tracks {
-		if t.ID == id {
-			rel, _ = SafeRel(t.Path)
-			break
-		}
-	}
+	rel, _ := SafeRel(t.Path)
 	if rel == "" {
-		return "", fmt.Errorf("prolink: track %d is not in the player's export", id)
+		return "", fmt.Errorf("prolink: track %d has no usable path", id)
 	}
-	// The copy keeps the file's name: Engine shows it as the title when the file has no tags (WAV).
-	local := filepath.Join(dir, fmt.Sprintf("%s-%d-%d", c.IP, slot, id), filepath.Base(rel))
+	// The copy keeps the file's name: Engine shows it as the title when the file has no tags (WAV),
+	// and an export's Contents folder: the UI stretches that low overview by it (scOverviewScale).
+	sub := ""
+	if first, _, _ := strings.Cut(filepath.ToSlash(rel), "/"); first == "Contents" {
+		sub = "Contents"
+	}
+	local := filepath.Join(dir, fmt.Sprintf("%s-%d-%d", c.IP, slot, id), sub, filepath.Base(rel))
 	if _, err := os.Stat(local); err == nil {
 		return local, nil
 	}
@@ -196,4 +187,60 @@ func FetchTrack(ctx context.Context, c *NFSClient, slot byte, id uint32, dir str
 		return "", err
 	}
 	return local, os.Rename(f.Name(), local)
+}
+
+// fetchTrackRow reads track id's row from the export.pdb on a player's slot.
+func fetchTrackRow(ctx context.Context, c *NFSClient, slot byte, id uint32) (string, rekordbox.Track, error) {
+	export, err := SlotExport(slot)
+	if err != nil {
+		return "", rekordbox.Track{}, err
+	}
+	pdb, _, err := c.Fetch(ctx, export, "/"+pdbPath, maxPDB)
+	if err != nil {
+		return "", rekordbox.Track{}, err
+	}
+	lib, err := rekordbox.ParsePDB(bytes.NewReader(pdb), int64(len(pdb)))
+	if err != nil {
+		return "", rekordbox.Track{}, err
+	}
+	for _, t := range lib.Tracks {
+		if t.ID == id {
+			return export, t, nil
+		}
+	}
+	return "", rekordbox.Track{}, fmt.Errorf("prolink: track %d is not in the player's export", id)
+}
+
+// FetchAnalysis reads track id's row and its ANLZ files (.DAT, plus .EXT and
+// .2EX when present) from a player's slot, so a shadow deck gets the CDJ's
+// grid and waveform instead of analysing its copy (#49).
+func FetchAnalysis(ctx context.Context, c *NFSClient, slot byte, id uint32) (rekordbox.Track, *rekordbox.Analysis, error) {
+	export, t, err := fetchTrackRow(ctx, c, slot, id)
+	if err != nil {
+		return t, nil, err
+	}
+	// The path comes from the remote PDB: only files under PIONEER/USBANLZ.
+	rel := filepath.Clean(strings.TrimPrefix(t.AnalysisPath, "/"))
+	if !filepath.IsLocal(rel) || !strings.HasPrefix(rel, "PIONEER/USBANLZ/") {
+		return t, nil, fmt.Errorf("prolink: track %d has no ANLZ path", id)
+	}
+	base := strings.TrimSuffix(rel, filepath.Ext(rel))
+	var merged *rekordbox.Analysis
+	for _, ext := range []string{".DAT", ".EXT", ".2EX"} {
+		data, _, err := c.Fetch(ctx, export, "/"+base+ext, maxANLZ)
+		if err != nil {
+			continue // .EXT and .2EX are optional
+		}
+		if a, err := rekordbox.ParseAnalysis(data); err == nil {
+			if merged == nil {
+				merged = a
+			} else {
+				merged.Merge(a)
+			}
+		}
+	}
+	if merged == nil {
+		return t, nil, fmt.Errorf("prolink: no ANLZ for track %d", id)
+	}
+	return t, merged, nil
 }

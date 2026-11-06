@@ -42,7 +42,7 @@ const (
 	bundleMaxUnpack = 256 << 20 // all files together
 	compatCmd       = "cat /sys/firmware/devicetree/base/compatible"
 	// install.sh's own default; the variable is only set by tests.
-	customDirSh = `"${SC5000_CUSTOM:-/data/sc5000-custom}"`
+	customDirSh = `"${SC5000_CUSTOM:-/data/enginex}"`
 )
 
 // options are the flags plus the seams the tests point at real local things.
@@ -103,6 +103,28 @@ func (o *options) defaults() {
 }
 
 func (o *options) say(zh, en string) { fmt.Fprintf(o.Out, "%s\n  %s\n", zh, en) }
+
+// firstGenGuide is shown at start-up and when no deck is found: the first-generation decks
+// are invisible to this tool in normal operation (#104, "flasher doesn't see Prime Go").
+const firstGenGuide = `==================================================================
+ [一代机 / 1st-gen: SC5000 SC5000M SC6000 SC6000M PRIME GO PRIME 4 PRIME 2 Mixstream Pro]
+  本工具在碟机正常开机时看不到一代机 / this tool cannot see a 1st-gen deck while it runs normally.
+  方式 A（最简单，无需电脑）/ Option A (easiest, no computer):
+    把对应机型的 *-Update.img 拷到 FAT32/exFAT U 盘根目录，插上碟机，
+    点 Settings -> Update -> Reboot 即可刷入或恢复。
+    Copy the model's *-Update.img to the root of a FAT32/exFAT USB stick, plug it into the
+    deck, then tap Settings -> Update -> Reboot.
+  方式 B（USB 线）/ Option B (USB cable):
+    先在碟机上点 Settings -> Update -> Reboot to Computer Update Mode
+    （进入电脑更新模式，USB ID 15a2:007d），再接 USB-B 线运行本工具。
+    First tap Settings -> Update -> Reboot to Computer Update Mode on the deck
+    (USB ID 15a2:007d), then connect the USB-B cable and run this tool.
+ [二代机 / 2nd-gen: SC LIVE 2/4, Mixstream Pro+/Go, PRIME 4+, RANE PERFORMER, SYSTEM ONE]
+  碟机正常开机，并与电脑在同一 Wi-Fi / 局域网，本工具会自动发现并一键安装。
+  Keep the deck powered on and on the same Wi-Fi / LAN as this computer; it is found and installed automatically.
+==================================================================`
+
+func (o *options) guide() { fmt.Fprintln(o.Out, firstGenGuide) }
 
 // ---- boards -----------------------------------------------------------------
 
@@ -917,6 +939,7 @@ func modeBGen1(ctx context.Context, o *options, m model) error {
 
 func run(ctx context.Context, o *options) error {
 	o.defaults()
+	o.guide()
 	if len(fastbootDevices(ctx, o)) > 0 {
 		return modeB(ctx, o)
 	}
@@ -934,6 +957,7 @@ func run(ctx context.Context, o *options) error {
 		}
 	}
 	if n == 0 {
+		o.guide()
 		return errors.New("没有发现碟机：请开机并接入同一局域网，或把碟机进入 Firmware Update Mode 后用 USB 连接 / no deck found: power it on in this LAN, or boot it into Firmware Update Mode and connect USB")
 	}
 	return errors.Join(errs...)

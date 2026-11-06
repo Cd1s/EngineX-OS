@@ -9,6 +9,7 @@
 
 #include "dsp_smooth.h"
 #include "master_limiter.h"
+#include "echo_out.h"
 
 static int failures;
 #define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #cond); failures++; } } while (0)
@@ -714,6 +715,68 @@ static void test_auto_gain(void)
     CHECK(!memcmp(quiet, copy, sizeof quiet));
 }
 
+/* #104 Echo Out: music plays 1 s, goes silent, the last beat rings out for 2.2 s. */
+static struct sc_echo echo_state; /* 384 KB: not on the stack */
+
+static float echo_block(float amp, int silent, int enabled, float *rms)
+{
+    enum { B = 256 };
+    static unsigned n;
+    float l[B], r[B], sum = 0.0f;
+    for (int i = 0; i < B; i++, n++)
+        l[i] = r[i] = silent ? 0.0f : amp * sinf(2.0f * 3.14159265f * 440.0f * (float)n / 96000.0f);
+    sc_echo_planar(&echo_state, l, r, B, enabled);
+    for (int i = 0; i < B; i++) {
+        CHECK(isfinite(l[i]) && l[i] == r[i]);
+        sum += l[i] * l[i];
+    }
+    *rms = sqrtf(sum / B);
+    return l[B - 1];
+}
+
+static void test_echo_out(void)
+{
+    float rms;
+    memset(&echo_state, 0, sizeof echo_state);
+    /* Music, then silence: while music plays the signal is untouched. */
+    for (int b = 0; b < 400; b++) { echo_block(0.5f, 0, 1, &rms); CHECK(rms > 0.3f && rms < 0.4f); }
+    CHECK(echo_state.tail == 0);
+    /* The first silent block already carries the echo (zero latency), and it is as loud as the music. */
+    echo_block(0.5f, 1, 1, &rms);
+    CHECK(echo_state.tail > 0 && rms > 0.25f);
+    /* The tail decays to nothing within 2.2 s (211200 frames = 825 blocks) and then stays silent. */
+    float prev_peak = rms, early = 0.0f, late = 0.0f;
+    for (int b = 1; b < 900; b++) {
+        echo_block(0.5f, 1, 1, &rms);
+        if (b == 100) early = rms;
+        if (b == 700) late = rms;
+        if (b > 830) CHECK(rms == 0.0f);
+    }
+    CHECK(early > 0.0f && late < early && late < prev_peak * 0.2f && echo_state.tail == 0);
+    /* Silence again does not retrigger: the loud counter was reset. */
+    echo_block(0.5f, 1, 1, &rms);
+    CHECK(rms == 0.0f && echo_state.tail == 0);
+    /* A short blip (< 0.5 s of music) does not trigger an echo. */
+    for (int b = 0; b < 40; b++) echo_block(0.5f, 0, 1, &rms);
+    echo_block(0.5f, 1, 1, &rms);
+    CHECK(rms == 0.0f && echo_state.tail == 0);
+    /* Disabled: bit-exact pass-through and no trigger; disabling mid-tail stops it at once. */
+    for (int b = 0; b < 400; b++) echo_block(0.5f, 0, 0, &rms);
+    echo_block(0.5f, 1, 0, &rms);
+    CHECK(rms == 0.0f && echo_state.tail == 0);
+    for (int b = 0; b < 400; b++) echo_block(0.5f, 0, 1, &rms);
+    echo_block(0.5f, 1, 1, &rms);
+    CHECK(echo_state.tail > 0);
+    echo_block(0.5f, 1, 0, &rms);
+    CHECK(rms == 0.0f && echo_state.tail == 0);
+    /* NaN in, finite out; NULL arguments and a mono pair are safe. */
+    float nl[4] = {NAN, INFINITY, 0.1f, 0.1f};
+    sc_echo_planar(&echo_state, nl, NULL, 4, 1);
+    sc_echo_planar(NULL, nl, NULL, 4, 1);
+    sc_echo_planar(&echo_state, NULL, NULL, 4, 1);
+    for (unsigned i = 0; i < SC_ECHO_DELAY; i++) CHECK(isfinite(echo_state.l[i]) && isfinite(echo_state.r[i]));
+}
+
 int main(void)
 {
     test_finite();
@@ -728,6 +791,7 @@ int main(void)
     test_flanger_threads();
     test_master_limiter();
     test_auto_gain();
+    test_echo_out();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return EXIT_FAILURE;

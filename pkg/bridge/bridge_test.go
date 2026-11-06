@@ -203,7 +203,7 @@ func TestEndToEndPDBAnalysisNFDIncrementalSmartMatch(t *testing.T) {
 		return b
 	}
 	track := decode("trackData")
-	if len(track) != 44 || binary.BigEndian.Uint64(track[8:]) != 96000 {
+	if len(track) != 68 || binary.BigEndian.Uint64(track[8:]) != 96000 {
 		t.Fatalf("trackData length/samples: %x", track)
 	}
 	wave := decode("overviewWaveFormData")

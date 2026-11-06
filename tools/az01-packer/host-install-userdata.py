@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import io
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -26,7 +27,14 @@ def fail(msg):
     raise SystemExit(f'host-install-userdata: {msg}')
 
 
-def generate_debugfs_script(files_to_write, dirs_to_create):
+def image_kind(img, rel):
+    """'directory', 'symlink', 'regular' or None for /rel inside the image."""
+    out = subprocess.run(['debugfs', '-R', f'stat /{rel}', str(img)], capture_output=True, text=True).stdout
+    m = re.search(r'Type: (\w+)', out)
+    return m.group(1) if m else None
+
+
+def generate_debugfs_script(files_to_write, dirs_to_create, links=()):
     lines = []
     # Create directories in hierarchical order
     for d in sorted(dirs_to_create, key=lambda x: (len(x.parts), x)):
@@ -38,6 +46,8 @@ def generate_debugfs_script(files_to_write, dirs_to_create):
         lines.append(f'rm {target}')
         lines.append(f'write {src_path} {target}')
         lines.append(f'set_inode_field {target} mode 0{mode:o}')
+    for path, target in links:
+        lines.append(f'symlink {path} {target}')
     return '\n'.join(lines) + '\n'
 
 
@@ -59,6 +69,12 @@ def inject(img_path, bundle_tar, check=True):
         if not bundle_roots:
             fail(f'{bundle} does not contain an EngineX-OS-Data-Bundle directory')
         broot = bundle_roots[0]
+
+        # #103: runtime dir is enginex, with sc5000-custom -> enginex for older code. A deck
+        # that still has the real legacy dir keeps being written there: the first boot renames it.
+        legacy, new = image_kind(img, 'sc5000-custom'), image_kind(img, 'enginex')
+        root = 'sc5000-custom' if legacy == 'directory' and new is None else 'enginex'
+        links = [('/sc5000-custom', 'enginex')] if legacy is None and root == 'enginex' else []
 
         sums_file = broot / 'SHA256SUMS'
         if not sums_file.is_file():
@@ -88,11 +104,11 @@ def inject(img_path, bundle_tar, check=True):
         pack_id = hashlib.sha256(ui_packs_tar.read_bytes()).hexdigest()
 
         dirs = {
-            Path('sc5000-custom'),
-            Path('sc5000-custom/bundle'),
-            Path('sc5000-custom/bundle/bin'),
-            Path('sc5000-custom/bundle/lib'),
-            Path('sc5000-custom/ui'),
+            Path(root),
+            Path(root) / 'bundle',
+            Path(root) / 'bundle/bin',
+            Path(root) / 'bundle/lib',
+            Path(root) / 'ui',
         }
         # Bundles without alsa-dir predate AZ04 (#76) and all used the overlay path.
         alsa_file = broot / 'alsa-dir'
@@ -110,12 +126,12 @@ def inject(img_path, bundle_tar, check=True):
         if (broot / 'bin').is_dir():
             for p in (broot / 'bin').iterdir():
                 if p.is_file():
-                    files.append((p, Path('sc5000-custom/bundle/bin') / p.name, 0o100755))
+                    files.append((p, Path(root) / 'bundle/bin' / p.name, 0o100755))
 
         if (broot / 'lib').is_dir():
             for p in (broot / 'lib').iterdir():
                 if p.is_file():
-                    files.append((p, Path('sc5000-custom/bundle/lib') / p.name, 0o100755))
+                    files.append((p, Path(root) / 'bundle/lib' / p.name, 0o100755))
 
         for name, mode in [
             ('boot-activate.sh', 0o100755),
@@ -127,12 +143,12 @@ def inject(img_path, bundle_tar, check=True):
         ]:
             p = broot / name
             if p.is_file():
-                files.append((p, Path('sc5000-custom/bundle') / name, mode))
+                files.append((p, Path(root) / 'bundle' / name, mode))
 
         # 2. UI packs and icons
         for root_item in ui_stage.rglob('*'):
             rel = root_item.relative_to(ui_stage)
-            target_p = Path('sc5000-custom/ui') / rel
+            target_p = Path(root) / 'ui' / rel
             if root_item.is_dir():
                 dirs.add(target_p)
             elif root_item.is_file():
@@ -141,15 +157,15 @@ def inject(img_path, bundle_tar, check=True):
 
         pack_ver_f = tmp / '.pack-version'
         pack_ver_f.write_text(f'{version}\n')
-        files.append((pack_ver_f, Path('sc5000-custom/ui/.pack-version'), 0o100644))
+        files.append((pack_ver_f, Path(root) / 'ui/.pack-version', 0o100644))
 
         pack_id_f = tmp / '.pack-id'
         pack_id_f.write_text(f'{pack_id}\n')
-        files.append((pack_id_f, Path('sc5000-custom/ui/.pack-id'), 0o100644))
+        files.append((pack_id_f, Path(root) / 'ui/.pack-id', 0o100644))
 
         ver_top_f = tmp / 'ver_top.txt'
         ver_top_f.write_text(f'{version}\n')
-        files.append((ver_top_f, Path('sc5000-custom/version.txt'), 0o100644))
+        files.append((ver_top_f, Path(root) / 'version.txt', 0o100644))
 
         # 3. ALSA hook configuration
         alsa_conf_f = broot / '99-sc5000-custom.conf'
@@ -162,14 +178,14 @@ def inject(img_path, bundle_tar, check=True):
                 if str(parent) != '.':
                     all_dirs.add(parent)
 
-        script = generate_debugfs_script(files, all_dirs)
+        script = generate_debugfs_script(files, all_dirs, links)
         script_file = tmp / 'debugfs_script.txt'
         script_file.write_text(script)
 
         subprocess.run(['debugfs', '-w', '-f', str(script_file), str(img)],
                        capture_output=True, text=True)
         # debugfs exits 0 even when a write failed (full image, bad path): read back.
-        for rel in ('sc5000-custom/version.txt', 'sc5000-custom/bundle/bin/sc5000-suite'):
+        for rel in (f'{root}/version.txt', f'{root}/bundle/bin/sc5000-suite'):
             st = subprocess.run(['debugfs', '-R', f'stat /{rel}', str(img)], capture_output=True, text=True).stdout
             if 'Type: regular' not in st:
                 fail(f'/{rel} is not in {img} after writing (image full?)')

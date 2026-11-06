@@ -1,8 +1,11 @@
 package bridge_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha1"
 	"database/sql"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -163,6 +166,62 @@ func TestConvertSurvivesDuplicateRecordsAndMissingFiles(t *testing.T) {
 	if got := l.Playlists[0].Tracks; len(got) != 2 || got[0] != base.Tracks[0].ID || got[1] != base.Tracks[0].ID {
 		t.Fatalf("%v", got)
 	}
+}
+
+// Engine 5.3.0 serves covers to other decks only from a 20-byte BLOB hash and
+// Engine Library/Artwork/<base64url>.jpg; earlier builds wrote a TEXT hash.
+func TestArtworkIsServedToOtherDecks(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	art := []byte{0xff, 0xd8, 0xff, 0xd9}
+	testfixture.Write(t, root, "PIONEER/Artwork/a.jpg", art)
+	l, e := bridge.ReadLibrary(context.Background(), root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	l.Tracks[0].ArtworkPath = "/PIONEER/Artwork/a.jpg"
+	sum := sha1.Sum(art)
+	file := filepath.Join(root, "Engine Library/Artwork", base64.RawURLEncoding.EncodeToString(sum[:])+".jpg")
+	check := func(when string) {
+		t.Helper()
+		db := dbOpen(t, root)
+		if n := scalar[int](t, db, `SELECT count(*) FROM AlbumArt WHERE typeof(hash)='blob' AND length(hash)=20 AND hash=?`, sum[:]); n != 1 {
+			t.Fatal(when, "hash is not the 20-byte BLOB", n)
+		}
+		if got, e := os.ReadFile(file); e != nil || !bytes.Equal(got, art) {
+			t.Fatal(when, "artwork file", got, e)
+		}
+	}
+	if _, e = enginedb.Sync(context.Background(), root, l, enginedb.Options{}); e != nil {
+		t.Fatal(e)
+	}
+	check("fresh import")
+	// A library from an earlier build, and a stick that never had the file.
+	db := dbOpen(t, root)
+	if _, e = db.Exec(`UPDATE AlbumArt SET hash=lower(hex(hash))`); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.Remove(file); e != nil {
+		t.Fatal(e)
+	}
+	l.Tracks[0].Title = "Changed"
+	if _, e = enginedb.Sync(context.Background(), root, l, enginedb.Options{}); e != nil {
+		t.Fatal(e)
+	}
+	check("legacy TEXT hash after sync")
+	if n := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM AlbumArt`); n != 1 {
+		t.Fatal("legacy row duplicated", n)
+	}
+	// The same upgrade without an import, for a library whose export is unchanged.
+	db = dbOpen(t, root)
+	if _, e = db.Exec(`UPDATE AlbumArt SET hash=lower(hex(hash))`); e != nil {
+		t.Fatal(e)
+	}
+	os.Remove(file)
+	if n, e := enginedb.MigrateArtwork(context.Background(), root); e != nil || n != 1 {
+		t.Fatal(n, e)
+	}
+	check("MigrateArtwork")
 }
 
 func TestMountImportSkipsAnUnchangedExport(t *testing.T) {

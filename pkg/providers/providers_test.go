@@ -2,6 +2,9 @@ package providers
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -217,5 +220,101 @@ func TestSpotifyTracksFallBackOnlyWhenItemsIsGone(t *testing.T) {
 		if hits != c.wantHits || (err != nil) != c.wantErr || (c.wantErr && !strings.Contains(err.Error(), strconv.Itoa(c.status))) {
 			t.Errorf("status %d: hits=%d err=%v", c.status, hits, err)
 		}
+	}
+}
+
+func TestSpotifyDownloadAudio(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	// 1. Not logged in
+	var unauth Spotify
+	if _, err := unauth.DownloadAudio(ctx, "t1", tmpDir); err == nil {
+		t.Fatal("expected error when not logged in")
+	}
+
+	rawKey, _ := hex.DecodeString("0102030405060708090a0b0c0d0e0f10")
+	iv, _ := hex.DecodeString("72e067fbddcbcf77ebe8bc643f630d93")
+
+	// Payload with 167 bytes private header followed by OggS
+	privHeader := make([]byte, 167)
+	for i := range privHeader {
+		privHeader[i] = byte(i)
+	}
+	realPayload := append(privHeader, []byte("OggS-stream-content")...)
+
+	block, err := aes.NewCipher(rawKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipherPayload := make([]byte, len(realPayload))
+	cipher.NewCTR(block, iv).XORKeyStream(cipherPayload, realPayload)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer valid-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/audio/encrypted-header":
+			w.Header().Set("X-Spotify-Audio-Key", hex.EncodeToString(rawKey))
+			w.Write(cipherPayload)
+		case "/audio/encrypted-field":
+			w.Write(cipherPayload)
+		case "/audio/plain":
+			w.Write([]byte("OggS-plain-content"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	sp := &Spotify{
+		BaseURL: srv.URL,
+		Token:   Token{AccessToken: "valid-token"},
+	}
+
+	// 2. Encrypted with X-Spotify-Audio-Key header and 0xa7 stripping
+	path1, err := sp.DownloadAudio(ctx, "encrypted-header", tmpDir)
+	if err != nil {
+		t.Fatalf("DownloadAudio encrypted-header: %v", err)
+	}
+	if filepath.Base(path1) != "spotify-encrypted-header.ogg" {
+		t.Fatalf("wrong file name: %s", path1)
+	}
+	data1, err := os.ReadFile(path1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data1) != "OggS-stream-content" {
+		t.Fatalf("unexpected content: %q", string(data1))
+	}
+
+	// 3. Encrypted with sp.AudioKey
+	sp.AudioKey = rawKey
+	path2, err := sp.DownloadAudio(ctx, "encrypted-field", tmpDir)
+	if err != nil {
+		t.Fatalf("DownloadAudio encrypted-field: %v", err)
+	}
+	data2, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data2) != "OggS-stream-content" {
+		t.Fatalf("unexpected content: %q", string(data2))
+	}
+
+	// 4. Plain download
+	sp.AudioKey = nil
+	path3, err := sp.DownloadAudio(ctx, "plain", tmpDir)
+	if err != nil {
+		t.Fatalf("DownloadAudio plain: %v", err)
+	}
+	data3, err := os.ReadFile(path3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data3) != "OggS-plain-content" {
+		t.Fatalf("unexpected plain content: %q", string(data3))
 	}
 }

@@ -156,3 +156,58 @@ func TestWaveformIndexAndShortAnalysisBoundaries(t *testing.T) {
 		})
 	}
 }
+
+// #101: Engine 5.3.0 ignores all-zero waveform peaks, so imported tracks drew
+// lower than Engine-analysed ones.
+func TestTrackDataWaveformPeaks(t *testing.T) {
+	peaks := func(a *rekordbox.Analysis) []float64 {
+		t.Helper()
+		p, e := enginedb.EncodePerformance(rekordbox.Track{SampleRate: 44100, Duration: 10}, a)
+		if e != nil {
+			t.Fatal(e)
+		}
+		raw, e := enginedb.QUncompress(p.TrackData, 100)
+		if e != nil || len(raw) != 68 {
+			t.Fatalf("trackData %d bytes: %v", len(raw), e)
+		}
+		var v [6]float64
+		for i := range v {
+			v[i] = math.Float64frombits(binary.BigEndian.Uint64(raw[20+8*i:]))
+		}
+		if v[3] != 0 || v[4] != 0 || v[5] != 0 {
+			t.Fatal("stem peaks written", v)
+		}
+		return v[:3]
+	}
+	if got := peaks(nil); !reflect.DeepEqual(got, []float64{0.68, 0.40, 0.18}) {
+		t.Fatal("default peaks", got)
+	}
+	pwv7 := rekordbox.Waveform{Tag: "PWV7", EntryBytes: 3, Data: []byte{0, 0, 0, 102, 123, 255}}
+	got := peaks(&rekordbox.Analysis{Waveforms: []rekordbox.Waveform{pwv7}})
+	if math.Abs(got[0]-0.6732) > 1e-9 || math.Abs(got[1]-0.4305) > 1e-9 || math.Abs(got[2]-0.408) > 1e-9 {
+		t.Fatal("PWV7 peaks", got)
+	}
+	silent := rekordbox.Waveform{Tag: "PWV7", EntryBytes: 3, Data: []byte{0, 0, 0}}
+	if got := peaks(&rekordbox.Analysis{Waveforms: []rekordbox.Waveform{silent}}); got[0] != 0.68 {
+		t.Fatal("silent band must keep the default", got)
+	}
+}
+
+func TestTrackDataPeaksUpgrade(t *testing.T) {
+	old := bytes.Repeat([]byte{7}, 20)
+	old = append(old, bytes.Repeat([]byte{0}, 24)...) // 5.0.4: 44 bytes, zero peaks
+	overview := append(bytes.Repeat([]byte{0}, 24), 100, 50, 25, 10, 60, 5, 0, 0, 0)
+	got := enginedb.TrackDataPeaks(old, overview)
+	if len(got) != 68 || !bytes.Equal(got[:20], old[:20]) || !bytes.Equal(got[44:], bytes.Repeat([]byte{0}, 24)) {
+		t.Fatalf("upgrade %x", got)
+	}
+	for c, want := range []float64{100 * 0.0066, 60 * 0.0035, 25 * 0.0016} {
+		if v := math.Float64frombits(binary.BigEndian.Uint64(got[20+8*c:])); math.Abs(v-want) > 1e-12 {
+			t.Fatal("band", c, v, want)
+		}
+	}
+	// Engine's own peaks are kept as they are.
+	if again := enginedb.TrackDataPeaks(got, nil); !bytes.Equal(again, got) {
+		t.Fatal("rewrote existing peaks")
+	}
+}

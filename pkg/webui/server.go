@@ -183,6 +183,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /api/relay", s.relayConfigGet)
 	s.mux.HandleFunc("GET /api/spotify", s.spotifyClientGet)
 	s.mux.HandleFunc("POST /api/spotify", s.spotifyClientPost)
+	s.mux.HandleFunc("GET /spotify-connect", s.spotifyConnectGet)
+	s.mux.HandleFunc("POST /spotify-connect", s.spotifyConnectPost)
 	s.mux.HandleFunc("POST /api/relay", s.relayConfigPost)
 	s.RegisterBroadcastRoutes()
 	s.mux.HandleFunc("GET /api/prolink", s.prolinkGet)
@@ -190,6 +192,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /api/drives", s.dropDrivesGet)
 	s.mux.HandleFunc("GET /peer/decks", s.peerDecksGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/audio", s.peerAudioGet)
+	s.mux.HandleFunc("GET /peer/decks/{n}/perf", s.peerPerfGet)
 	s.mux.HandleFunc("POST /api/drop", s.drop)
 	s.mux.HandleFunc("POST /api/relocate", s.relocate)
 	s.soundCloudAuth = &providers.SoundCloudAuth{TokenURL: cfg.SoundCloudTokenURL, Path: filepath.Join(cfg.StateDir, "soundcloud-token.json"), HTTP: cfg.HTTP}
@@ -203,8 +206,10 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor
 		jobs.neteaseDirect = s.neteaseDirect
+		jobs.deezerReady = func() bool { return s.savedDeezerOwner().ARL != "" }
 		jobs.soundcloud = s.ownerSoundCloud
 		jobs.beatport = s.ownerBeatport
+		jobs.spotify = s.ownerSpotify
 		jobs.bpm = cfg.BPM
 		if jobs.p.Deemix != nil {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }
@@ -319,7 +324,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Phone pages carry a one-time token instead of a cookie, and iOS web
 		// views send "Origin: null". The console cookie is SameSite=Strict, so a
 		// null origin cannot ride on it either.
-		if origin := r.Header.Get("Origin"); origin != "" && origin != "null" && !strings.HasPrefix(r.URL.Path, "/m/") {
+		if origin := r.Header.Get("Origin"); origin != "" && origin != "null" && !strings.HasPrefix(r.URL.Path, "/m/") && r.URL.Path != "/spotify-connect" {
 			u, e := url.Parse(origin)
 			if e != nil || u.Host != r.Host {
 				fail(w, 403, errors.New("same-origin request required"))
@@ -438,6 +443,9 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 		p := &providers.Spotify{ClientID: s.spotifyClientID(), HTTP: s.cfg.HTTP, BaseURL: s.cfg.SpotifyBaseURL, AccountsURL: s.cfg.SpotifyAccountsURL}
 		if !guest {
 			p.TokenPath = s.cfg.SpotifyTokenPath
+			if p.TokenPath == "" && s.cfg.StateDir != "" {
+				p.TokenPath = filepath.Join(s.cfg.StateDir, "spotify-token.json")
+			}
 			if p.TokenPath != "" {
 				if err := p.LoadToken(); err != nil && !os.IsNotExist(err) {
 					return nil, err
@@ -497,10 +505,6 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if !slices.Contains(loginServices, v.Provider) {
 		fail(w, 400, errors.New("unsupported provider"))
-		return
-	}
-	if v.Provider == "spotify" && s.spotifyClientID() == "" {
-		fail(w, 400, errSpotifyClientID)
 		return
 	}
 	s.mu.Lock()

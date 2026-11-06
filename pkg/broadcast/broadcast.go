@@ -62,6 +62,7 @@ type Status struct {
 	StreamName   string `json:"streamName"`
 	CurrentTrack string `json:"currentTrack"`
 	BytesSent    int64  `json:"bytesSent"`
+	Listeners    int    `json:"listeners"` // clients on the local /live.mp3 and /live.wav fan-out
 	ConnectedAt  string `json:"connectedAt,omitempty"`
 	LastError    string `json:"lastError,omitempty"`
 }
@@ -73,10 +74,13 @@ type Broadcaster struct {
 	cfg          Config
 	currentTrack string
 	streaming    bool
+	capturing    bool // local capture loop is running (works without an external server)
 	connectedAt  string
 	lastError    string
 
 	bytesSent atomic.Int64
+
+	hub hub
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -168,7 +172,7 @@ func (b *Broadcaster) Configure(cfg Config) error {
 	}
 	b.cfg = cfg
 
-	if cfg.Enabled && cfg.ServerURL != "" {
+	if cfg.Enabled {
 		b.stopLocked()
 		b.startLocked()
 	} else {
@@ -183,7 +187,7 @@ func (b *Broadcaster) SetEnabled(on bool) error {
 	defer b.mu.Unlock()
 
 	b.cfg.Enabled = on
-	if on && b.cfg.ServerURL != "" {
+	if on {
 		b.stopLocked()
 		b.startLocked()
 	} else {
@@ -199,7 +203,7 @@ func (b *Broadcaster) Status() Status {
 
 	return Status{
 		Enabled:      b.cfg.Enabled,
-		Streaming:    b.streaming,
+		Streaming:    b.streaming || (b.capturing && b.cfg.ServerURL == ""), // with a ServerURL: the external connection
 		Protocol:     b.cfg.Protocol,
 		ServerURL:    b.cfg.ServerURL,
 		Mountpoint:   b.cfg.Mountpoint,
@@ -210,6 +214,7 @@ func (b *Broadcaster) Status() Status {
 		StreamName:   b.cfg.StreamName,
 		CurrentTrack: b.currentTrack,
 		BytesSent:    b.bytesSent.Load(),
+		Listeners:    b.hub.count(),
 		ConnectedAt:  b.connectedAt,
 		LastError:    b.lastError,
 	}
@@ -249,6 +254,7 @@ func (b *Broadcaster) stopLocked() {
 	}
 	b.streaming = false
 	b.connectedAt = ""
+	b.hub.closeAll()
 
 	b.mu.Unlock()
 	b.wg.Wait()
@@ -295,18 +301,96 @@ func sanitizeError(err error, password string) string {
 	return msg
 }
 
-// workerLoop manages continuous streaming with reconnect on drop.
+// workerLoop captures PCM every MPEG-frame interval, fans it out to local
+// listeners and, when a ServerURL is set, feeds the external Icecast/Shoutcast pusher.
 func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle) {
+	b.mu.Lock()
+	cfg := b.cfg
+	b.capturing = true
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		b.capturing = false
+		b.mu.Unlock()
+	}()
+
+	feed := make(chan []byte, 32)
+	if cfg.ServerURL != "" {
+		b.wg.Add(1)
+		go func() {
+			defer b.wg.Done()
+			b.pushLoop(ctx, cfg, feed)
+		}()
+	}
+
+	// 1152 samples per MPEG frame at 44.1kHz = ~26.122ms
+	ticker := time.NewTicker(time.Duration(1152) * time.Second / 44100)
+	defer ticker.Stop()
+
+	var inputF *os.File
+	defer func() {
+		if inputF != nil {
+			inputF.Close()
+		}
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if t != nil {
+			if err := t.Tick(); err != nil {
+				return
+			}
+		}
+		if inputF == nil { // the hook may create the PCM source after the stream is enabled
+			if f, err := os.OpenFile(cfg.InputPath, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
+				inputF = f
+			}
+		}
+		pcm := readPCM(inputF)
+		if pcm == nil {
+			b.hub.publish(make([]byte, 1152*4)) // silence keeps local players connected
+		} else {
+			b.hub.publish(pcm)
+		}
+		select {
+		case feed <- pcm:
+		default: // external server is slow or down: drop rather than stall the capture
+		}
+	}
+}
+
+// readPCM reads up to one frame of PCM from f, looping regular files; nil when nothing is available.
+func readPCM(f *os.File) []byte {
+	if f == nil {
+		return nil
+	}
+	buf := make([]byte, 1152*4)
+	n, err := f.Read(buf)
+	if err == io.EOF {
+		_, _ = f.Seek(0, 0)
+		n, _ = f.Read(buf)
+	}
+	if n <= 0 {
+		return nil
+	}
+	return buf[:n]
+}
+
+// pushLoop keeps the external Icecast/Shoutcast connection alive, reconnecting on drop.
+func (b *Broadcaster) pushLoop(ctx context.Context, cfg Config, feed <-chan []byte) {
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
-		err := b.streamOnce(ctx, t)
+		err := b.streamOnce(ctx, cfg, feed)
 		if err != nil && ctx.Err() == nil {
 			b.mu.Lock()
 			b.streaming = false
-			b.lastError = sanitizeError(err, b.cfg.Password)
+			b.lastError = sanitizeError(err, cfg.Password)
 			b.mu.Unlock()
 
 			select {
@@ -318,12 +402,8 @@ func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle)
 	}
 }
 
-// streamOnce executes one connection and streaming session.
-func (b *Broadcaster) streamOnce(ctx context.Context, t *resourceguard.Throttle) error {
-	b.mu.Lock()
-	cfg := b.cfg
-	b.mu.Unlock()
-
+// streamOnce executes one external connection and streaming session.
+func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []byte) error {
 	scheme, hostPort, err := parseServerTarget(cfg.ServerURL)
 	if err != nil {
 		return err
@@ -387,16 +467,12 @@ func (b *Broadcaster) streamOnce(ctx context.Context, t *resourceguard.Throttle)
 		b.bytesSent.Add(int64(len(bos)))
 	}
 
-	// 1152 samples per MPEG frame at 44.1kHz = ~26.122ms
-	frameInterval := time.Duration(1152) * time.Second / 44100
-	ticker := time.NewTicker(frameInterval)
-	defer ticker.Stop()
-
-	var inputF *os.File
-	if cfg.InputPath != "" {
-		if f, err := os.OpenFile(cfg.InputPath, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
-			inputF = f
-			defer inputF.Close()
+	// Drop PCM queued while we were connecting so the stream starts live.
+	for drained := false; !drained; {
+		select {
+		case <-feed:
+		default:
+			drained = true
 		}
 	}
 
@@ -404,26 +480,21 @@ func (b *Broadcaster) streamOnce(ctx context.Context, t *resourceguard.Throttle)
 	var oggGranule uint64 = 1152
 
 	for {
+		var pcm []byte
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
-		}
-
-		if t != nil {
-			if err := t.Tick(); err != nil {
-				return err
-			}
+		case pcm = <-feed:
 		}
 
 		var frame []byte
 		switch cfg.Format {
 		case "wav":
-			frame = b.nextWAVFrame(inputF)
+			frame = nextWAVFrame(pcm)
 		case "ogg":
-			frame = b.nextOggFrame(inputF, &oggSeq, &oggGranule)
+			frame = nextOggFrame(pcm, &oggSeq, &oggGranule)
 		default:
-			frame = b.nextMP3Frame(cfg, inputF)
+			frame = nextMP3Frame(cfg, pcm)
 		}
 
 		if _, err := conn.Write(frame); err != nil {
@@ -515,7 +586,7 @@ func (b *Broadcaster) handshakeShoutcast(conn net.Conn, cfg Config) error {
 }
 
 // nextMP3Frame generates a valid MPEG-1 Layer III 44.1kHz stereo audio frame.
-func (b *Broadcaster) nextMP3Frame(cfg Config, inputF *os.File) []byte {
+func nextMP3Frame(cfg Config, pcm []byte) []byte {
 	// Frame size = 144 * Bitrate / SampleRate
 	frameLen := (144 * cfg.Bitrate * 1000) / 44100
 	if frameLen < 4 {
@@ -546,52 +617,28 @@ func (b *Broadcaster) nextMP3Frame(cfg Config, inputF *os.File) []byte {
 
 	// Bytes 4..35: Side info (zeros for empty/silent granule data)
 	// Bytes 36..frameLen: Ancillary PCM digest
-	if inputF != nil {
-		pcmBuf := make([]byte, 1152*4)
-		n, err := inputF.Read(pcmBuf)
-		if err == io.EOF {
-			_, _ = inputF.Seek(0, 0)
-			n, _ = inputF.Read(pcmBuf)
-		}
-		if n > 0 {
-			digest := sha256.Sum256(pcmBuf[:n])
-			copy(frame[36:], digest[:])
-		}
+	if len(pcm) > 0 {
+		digest := sha256.Sum256(pcm)
+		copy(frame[36:], digest[:])
 	} else {
 		copy(frame[36:], []byte("EngineX-OS-MP3-Silence-Frame"))
 	}
 	return frame
 }
 
-// nextWAVFrame produces 1152 samples of 16-bit 44.1kHz stereo PCM.
-func (b *Broadcaster) nextWAVFrame(inputF *os.File) []byte {
-	const pcmBytes = 1152 * 4 // 1152 samples * 2 channels * 2 bytes/sample
-	buf := make([]byte, pcmBytes)
-	if inputF != nil {
-		n, err := inputF.Read(buf)
-		if err == io.EOF {
-			_, _ = inputF.Seek(0, 0)
-			n, _ = inputF.Read(buf)
-		}
-		if n > 0 {
-			return buf[:n]
-		}
+// nextWAVFrame returns the captured PCM, or 1152 samples of silence.
+func nextWAVFrame(pcm []byte) []byte {
+	if len(pcm) > 0 {
+		return pcm
 	}
-	return buf
+	return make([]byte, 1152*4) // 1152 samples * 2 channels * 2 bytes/sample
 }
 
 // nextOggFrame creates a valid Ogg page containing audio payload.
-func (b *Broadcaster) nextOggFrame(inputF *os.File, seq *uint32, granule *uint64) []byte {
+func nextOggFrame(pcm []byte, seq *uint32, granule *uint64) []byte {
 	payload := make([]byte, 128)
-	if inputF != nil {
-		n, err := inputF.Read(payload)
-		if err == io.EOF {
-			_, _ = inputF.Seek(0, 0)
-			n, _ = inputF.Read(payload)
-		}
-		if n > 0 {
-			payload = payload[:n]
-		}
+	if len(pcm) > 0 {
+		payload = pcm[:min(len(pcm), len(payload))]
 	} else {
 		copy(payload, []byte("EngineX-OS-Ogg-Audio-Data"))
 	}
@@ -685,6 +732,9 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 	b.mu.Unlock()
 	return nil
 }
+
+// WAVHeader is the streaming WAV header (44.1kHz, stereo, 16-bit) that precedes raw PCM on /live.wav.
+func WAVHeader() []byte { return makeWAVHeader() }
 
 // makeWAVHeader builds a standard 44-byte RIFF/WAVE header for streaming.
 func makeWAVHeader() []byte {

@@ -96,11 +96,63 @@ func TestPhoneLoginNeedsTokenAndLinksDeezer(t *testing.T) {
 	}
 }
 
-// testSpotifyClientID stands in for an owner's own Spotify app; there is no built-in one.
+// testSpotifyClientID stands in for an owner's own Spotify app.
 const testSpotifyClientID = "0123456789abcdef0123456789abcdef"
 
-// #70: Spotify needs the owner's own Client ID, set in the console.
-func TestSpotifyLoginNeedsTheOwnersClientID(t *testing.T) {
+func TestSpotifyPhoneClientIDAndAccessToken(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/me" || r.Header.Get("Authorization") != "Bearer valid-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		io.WriteString(w, `{"id":"listener"}`)
+	}))
+	defer api.Close()
+	state := t.TempDir()
+	ui := New(Config{AccessToken: "console", UIDir: t.TempDir(), StateDir: state, SpotifyBaseURL: api.URL}, nil)
+	defer ui.Close()
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	token := ui.logins["spotify"].token
+	page, err := http.Get(srv.URL + "/m/spotify?t=" + token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(page.Body)
+	page.Body.Close()
+	if !strings.Contains(string(body), `name="clientId"`) || !strings.Contains(string(body), `name="accessToken"`) {
+		t.Fatal("missing Spotify fields")
+	}
+	resp, err = http.PostForm(srv.URL+"/m/spotify?t="+token, url.Values{"clientId": {testSpotifyClientID}, "accessToken": {"bad-token"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if _, err := os.Stat(filepath.Join(state, "spotify-token.json")); !os.IsNotExist(err) {
+		t.Fatal("invalid token saved")
+	}
+	resp, err = http.PostForm(srv.URL+"/m/spotify?t="+token, url.Values{"accessToken": {"valid-token"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	var saved providers.Token
+	b, err := os.ReadFile(filepath.Join(state, "spotify-token.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if json.Unmarshal(b, &saved) != nil || saved.AccessToken != "valid-token" || saved.ClientID != testSpotifyClientID {
+		t.Fatal("validated token not saved")
+	}
+}
+
+// #104: the deck's Spotify login shows its QR code with no Client ID set, using the built-in one.
+func TestSpotifyLoginWorksWithoutAnOwnerClientID(t *testing.T) {
 	ui := New(Config{AccessToken: "test-console-code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
@@ -110,8 +162,11 @@ func TestSpotifyLoginNeedsTheOwnersClientID(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 400 || !strings.Contains(string(body), "Spotify Client ID") {
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "/m/spotify?t=") {
 		t.Fatalf("login without an ID: %d %s", resp.StatusCode, body)
+	}
+	if ui.spotifyClientID() != DefaultSpotifyClientID {
+		t.Fatalf("client id %q", ui.spotifyClientID())
 	}
 	request(t, srv.Client(), srv.URL, "POST", "/api/spotify", map[string]any{"clientId": "not-an-id"}, 400)
 	var got struct {
@@ -499,10 +554,10 @@ func TestFetchPrefersLocalDeemixThenFallsBackToNetease(t *testing.T) {
 	if p, err := jobs.Fetch(ctx, "s", own, false); err != nil || filepath.Base(p) != "netease-77.flac" {
 		t.Fatalf("%q %v", p, err)
 	}
-	// Another service's track falls back by name and duration.
+	// Another service's track is never matched on NetEase.
 	other := providers.Track{ID: "abc", Provider: "spotify", Title: "Song", Artist: "Artist", DurationMS: 200000}
-	if p, err := jobs.Fetch(ctx, "s", other, false); err != nil || filepath.Base(p) != "netease-5.flac" {
-		t.Fatalf("%q %v", p, err)
+	if p, err := jobs.Fetch(ctx, "s", other, false); err == nil {
+		t.Fatalf("spotify track played from %q", p)
 	}
 	// A saved NetEase file is reused without asking anyone.
 	jobs2 := NewJobs(Pipeline{Guard: resourceguard.New(resourceguard.Config{Disabled: true}), Catalog: catalog, Deemix: &deemixclient.Client{BaseURL: bridge.URL, DownloadDir: dir, AllowLossy: true}})
@@ -825,7 +880,7 @@ func TestRestartReusesADownloadWithoutAskingAnyone(t *testing.T) {
 		return j
 	}
 	ctx := context.Background()
-	track := providers.Track{ID: "sp1", Provider: "spotify", Title: "Found", Artist: "Artist", DurationMS: 200000}
+	track := providers.Track{ID: "sp1", Provider: "netease", Title: "Found", Artist: "Artist", DurationMS: 200000}
 	if p, err := start().Fetch(ctx, "s", track, false); err != nil || filepath.Base(p) != "9.flac" || bridgeCalls.Load() != 1 {
 		t.Fatalf("%q %v bridge=%d", p, err, bridgeCalls.Load())
 	}
@@ -854,4 +909,84 @@ type countingCatalog struct {
 func (c countingCatalog) Search(ctx context.Context, q string) ([]providers.Track, error) {
 	c.calls.Add(1)
 	return c.Catalog.Search(ctx, q)
+}
+
+func TestSpotifyConnectEndpoints(t *testing.T) {
+	state := t.TempDir()
+	ui := New(Config{AccessToken: "console", UIDir: t.TempDir(), StateDir: state}, nil)
+	defer ui.Close()
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+
+	// 1. GET /spotify-connect?action=getInfo
+	resp, err := http.Get(srv.URL + "/spotify-connect?action=getInfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /spotify-connect status %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var info struct {
+		Status       int    `json:"status"`
+		StatusString string `json:"statusString"`
+		DeviceID     string `json:"deviceID"`
+		RemoteName   string `json:"remoteName"`
+		Version      string `json:"version"`
+		AccountReq   string `json:"accountReq"`
+	}
+	if err := json.Unmarshal(body, &info); err != nil {
+		t.Fatalf("unmarshal info: %v", err)
+	}
+	if info.Status != 101 || info.StatusString != "OK" || info.DeviceID != "enginex-os-spotify-connect" || info.RemoteName != "EngineX OS" {
+		t.Fatalf("unexpected info response: %+v", info)
+	}
+
+	// 2. Start a spotify login flow to test link update
+	r, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if ui.logins["spotify"] == nil || ui.logins["spotify"].Status != "waiting" {
+		t.Fatalf("unexpected flow status: %+v", ui.logins["spotify"])
+	}
+
+	// 3. POST /spotify-connect
+	postResp, err := http.PostForm(srv.URL+"/spotify-connect", url.Values{
+		"action":      {"addUser"},
+		"userName":    {"testuser"},
+		"accessToken": {"test-connect-token"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer postResp.Body.Close()
+	if postResp.StatusCode != 200 {
+		t.Fatalf("POST /spotify-connect status %d", postResp.StatusCode)
+	}
+	var res struct {
+		Status       int    `json:"status"`
+		StatusString string `json:"statusString"`
+	}
+	postBody, _ := io.ReadAll(postResp.Body)
+	if err := json.Unmarshal(postBody, &res); err != nil || res.Status != 101 || res.StatusString != "OK" {
+		t.Fatalf("unexpected post response: %s", postBody)
+	}
+
+	// Flow status must be "linked"
+	if ui.logins["spotify"].Status != "linked" {
+		t.Fatalf("expected flow status 'linked', got %q", ui.logins["spotify"].Status)
+	}
+
+	// Token must be saved to disk
+	savedBytes, err := os.ReadFile(filepath.Join(state, "spotify-token.json"))
+	if err != nil {
+		t.Fatalf("spotify-token.json was not created: %v", err)
+	}
+	var savedTok providers.Token
+	if err := json.Unmarshal(savedBytes, &savedTok); err != nil || savedTok.AccessToken != "test-connect-token" {
+		t.Fatalf("token mismatch: %+v", savedTok)
+	}
 }

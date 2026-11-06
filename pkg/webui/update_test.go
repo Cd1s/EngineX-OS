@@ -114,7 +114,9 @@ func bundleInstallScript(t *testing.T) []byte {
 	if m == nil {
 		t.Fatal("INSTALL not found in build-data-bundle.py")
 	}
-	return m[1]
+	// The packer expands @MIGRATE_IF_DEFAULT@ into the /data migration; the test deck is not
+	// a real /data (SC5000_CUSTOM is set), so there is nothing to migrate.
+	return bytes.ReplaceAll(m[1], []byte("@MIGRATE_IF_DEFAULT@"), []byte(":"))
 }
 
 func tarOf(t *testing.T, files map[string]string) []byte {

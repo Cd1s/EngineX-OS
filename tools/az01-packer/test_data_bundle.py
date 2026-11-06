@@ -233,8 +233,12 @@ class DataBundleTest(unittest.TestCase):
         self.assertIn('regular', hook_out)
         self.assertIn('0644', hook_out)
 
-        suite_out = subprocess.run(['debugfs', '-R', 'stat /sc5000-custom/bundle/bin/sc5000-suite', str(img)], capture_output=True, text=True).stdout
+        suite_out = subprocess.run(['debugfs', '-R', 'stat /enginex/bundle/bin/sc5000-suite', str(img)], capture_output=True, text=True).stdout
         self.assertIn('0755', suite_out)
+        # #103: the old path is a symlink, and the ALSA hook's old-path library resolves through it.
+        for rel, kind in (('/sc5000-custom', 'symlink'), ('/sc5000-custom/bundle/lib/libengine-ui-hook.so', 'regular')):
+            out = subprocess.run(['debugfs', '-R', f'stat {rel}', str(img)], capture_output=True, text=True).stdout
+            self.assertIn(f'Type: {kind}', out, rel)
 
         # AZ04 (#76): the ALSA file goes where its var-lib.mount reads /var/lib from.
         for part in ('suite64', 'hook64'):
@@ -246,6 +250,67 @@ class DataBundleTest(unittest.TestCase):
         hmod.inject(img64, r64['bundle'])
         hook_out = subprocess.run(['debugfs', '-R', 'stat /system/var-lib/alsa/conf.d/99-sc5000-custom.conf', str(img64)], capture_output=True, text=True).stdout
         self.assertIn('regular', hook_out)
+
+    def test_host_install_keeps_a_legacy_dir_for_the_first_boot_to_rename(self):
+        for tool in ('debugfs', 'mkfs.ext4'):
+            if subprocess.run(['which', tool], capture_output=True).returncode != 0:
+                self.skipTest(f'{tool} not installed on this host')
+        r = self.build()
+        img = self.tmp / 'legacy.img'
+        subprocess.run(['dd', 'if=/dev/zero', f'of={img}', 'bs=1M', 'count=32'], check=True, capture_output=True)
+        subprocess.run(['mkfs.ext4', '-F', str(img)], check=True, capture_output=True)
+        subprocess.run(['debugfs', '-w', '-R', 'mkdir /sc5000-custom', str(img)], check=True, capture_output=True)
+        hspec = importlib.util.spec_from_file_location('host_install_userdata', HERE / 'host-install-userdata.py')
+        hmod = importlib.util.module_from_spec(hspec)
+        hspec.loader.exec_module(hmod)
+        hmod.inject(img, r['bundle'])
+        stat = lambda rel: subprocess.run(['debugfs', '-R', f'stat {rel}', str(img)], capture_output=True, text=True).stdout
+        self.assertIn('Type: regular', stat('/sc5000-custom/version.txt'))
+        self.assertNotIn('Type:', stat('/enginex'))
+
+    def migrate(self, legacy_files, new_files=None):
+        """Run the bundle's install.sh with /data pointed at a scratch dir."""
+        src = self.extract(self.build())
+        data = self.tmp / 'data'
+        for name, files in (('sc5000-custom', legacy_files), ('enginex', new_files)):
+            for rel, text in (files or {}).items():
+                (data / name / rel).parent.mkdir(parents=True, exist_ok=True)
+                (data / name / rel).write_text(text)
+        script = src / 'install.sh'
+        script.write_text(script.read_text().replace('/data', str(data)))
+        sums = src / 'SHA256SUMS'  # install.sh is listed: re-seal it after the path swap
+        sums.write_text(''.join(
+            (hashlib.sha256(script.read_bytes()).hexdigest() + '  install.sh\n') if l.endswith(' install.sh') or l.endswith('  install.sh') else l + '\n'
+            for l in sums.read_text().splitlines()))
+        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin')}
+        r = subprocess.run(['sh', str(script)], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return data
+
+    def test_install_renames_legacy_dir_and_leaves_a_symlink(self):
+        data = self.migrate({'authorized_keys': 'key', 'Stream/song.flac': 'x', 'settings.conf': 's'})
+        old, new = data / 'sc5000-custom', data / 'enginex'
+        self.assertTrue(old.is_symlink() and os.readlink(old) == 'enginex')
+        self.assertEqual((new / 'authorized_keys').read_text(), 'key')
+        self.assertEqual((new / 'Stream/song.flac').read_text(), 'x')
+        self.assertTrue((old / 'bundle/boot-activate.sh').exists())  # old path still reaches it
+        self.assertEqual((old / 'version.txt').read_text(), '5.3.0.1.1\n')
+
+    def test_install_merges_when_both_dirs_are_real_and_loses_nothing(self):
+        data = self.migrate({'authorized_keys': 'old', 'a.txt': 'A', 'ui/x': 'old-ui'},
+                            {'authorized_keys': 'new'})
+        new = data / 'enginex'
+        self.assertTrue((data / 'sc5000-custom').is_symlink())
+        self.assertEqual((new / 'authorized_keys').read_text(), 'new')  # enginex wins
+        self.assertEqual((new / 'a.txt').read_text(), 'A')
+        leftovers = list(new.glob('legacy-sc5000-custom.*'))
+        self.assertEqual(len(leftovers), 1)
+        self.assertEqual((leftovers[0] / 'authorized_keys').read_text(), 'old')
+
+    def test_fresh_install_creates_enginex_and_the_old_path(self):
+        data = self.migrate({})
+        self.assertTrue((data / 'enginex/bundle').is_dir())
+        self.assertTrue((data / 'sc5000-custom/version.txt').exists())
 
 
 if __name__ == '__main__':
