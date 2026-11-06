@@ -236,6 +236,7 @@ The entire system has been refactored and slimmed down so all extra features tak
 ### Option 2: One-Click On-Deck Update (When Already Running EngineX OS)
 - Connect your deck to Wi-Fi or Ethernet and open **Settings → About / Update**;
 - Tap **Update** on the screen and confirm — the deck will automatically launch the full-screen updater, download the new image, and reboot.
+- **Second-generation models** (SC LIVE 4 / 2, PRIME 4+, PRIME GO+, Mixstream Pro+ / Pro Go, PRIME 4 G2, SYSTEM ONE): once the `/data` bundle is installed, later releases (for example `5.3.0.3`) are found and installed the same way from **Settings → About / Update**. The deck downloads that release's `Data-Bundle.tar.gz`, checks `SHA256SUMS`, swaps the files in one step and restarts the EngineX services; the system partition is never touched (#86).
 
 ### Optional: Use Your Computer to Speed Up Stems
 If your Mac or PC is on the same Wi-Fi as your deck, run one command on your computer and the deck will automatically find it and use your computer's GPU/CPU for fast AI Stems separation (no IP address or password setup needed):
