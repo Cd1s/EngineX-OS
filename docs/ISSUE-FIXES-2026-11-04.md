@@ -398,3 +398,28 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **构建与 sha256**（`72f4e34`，`--clean` 目录 `/root/build/sc5000-release-86`，公钥参数 `none`）：SC5000 组 `5f886828d74147e21e3a1174620496a21fae2e9cb930eecbd2bfa1e70dbf5224`、SC6000 组 `a59871b42a33fcee1334c52643d83909dd80d1ec2e9b497bda0bc9fac0c16bbd`、PRIME 4 组 `3253fe393ae62996cc4e6704b96876abf3eaa399d3837e0362ceecbb2928b848`；数据包 SCLIVE4 `300aa7d8561019f34bfde7b7334bddbfe61b796ee84ab410ce3ae07289d660ad`、SCLIVE2 `3c233870ade728cde3fbae3039bf66d08fa6678d1d9798d241f82825f750511b`、PRIME4PLUS `e6b71a97f176939622077b3235a717c29a90989f3a9f456fb037cc7067170d38`、PRIMEGOPLUS `d0b3ae186be4f7d9fe5e6f4e2186136427ceba10d00f504077e5fab593b63734`、MIXSTREAMPROPLUS `d469f6a2e759af3d3249d16e01c6effbbf6fc64ae8d329ee1c1d3a46ac030859`、MIXSTREAMPROGO `3beccbd882bf6a3b00624f91e2f01260b21ba87f2f31a6ccabfc29ee5f457378`、PRIME4G2 `73296d60b15a4e9dfe925e11cef656f56a833e0d779a58ee4cf125b832146541`、SYSTEMONE `8c110eebfb9a275ea2d12163bd7a4972ae1d3dedb5a65d182d52c410bfaa13e9`。
 - **回滚点**：重发前的 Notes 和资产清单在 agent-backup（`EngineX-OS-v5.3.0.2-meta-before-86`，sha256 `0cf40577…`）；上一次构建提交 `ba1b56f`，旧镜像与数据包在 Batam 的 `release-5.3.0.2-ba1b56f`、`databundle-5.3.0.2-ba1b56f`。
 - **实机影响**：没有二代机实物，真机上「杀旧服务 + `boot-activate.sh`」那一步没试过，最大风险是 systemd 随主进程退出清掉整个 cgroup，分离的 shell 一起没了，用户需手动重启碟机。已装旧版 5.3.0.2 数据包的二代机没有这段代码，要手动装一次这次重发的包，之后才有屏幕一键升级。一代机的在线更新路径不变。
+
+## 2026-11-07：合并 #80–#113 功能套件与双机/CDJ-3000 串联验证（留待下个版本 v5.3.0.3 发布）
+
+- **范围**：合入全部待处理功能与修复（#80、#81、#82、#83、#84、#85、#87、#88、#98、#105、#110、#112、#113 与 PR #111），当前代码已推至 `main`（HEAD `ebfbfbc`），所有单测、沙箱及 OpenProLink/CDJ-3000 串联测试全绿。按维护者指令，所有产物不在此次 5.3.0.2 构建，全部留待 `v5.3.0.3` 正式打包发布。
+- **改动详情**：
+  - **#80**：流媒体曲目列表解锁全字段动态排序（按 BPM、Key、Title、Artist 等升降序）及双列并排（BPM + Genre 同屏展示）。
+  - **#81**：明确 Bluetooth A2DP Sink（音频输入接收）与 Source（蓝牙音箱/耳机推流）模式，修复 PRIME 4 蓝牙握手稳定性与重连逻辑。
+  - **#82**：个人自建流媒体支持：WebDAV、Subsonic/Navidrome、Plex 服务器曲库挂载与直接检索播放。
+  - **#83 & #113**：局域网超低延迟无损音视频串流（LAN RTP/Teleport）以及 USB-A 外接 DAC 声卡与 USB-B UAC2 数字音频输出支持。
+  - **#84**：解除原厂录音限制，支持本地与流媒体曲目同屏混音直录及无损广播串流。
+  - **#85**：Hot Cue 热点颜色与名称自定义编辑器，支持 WebUI 在线编辑及碟机屏幕实时持久化同步。
+  - **#87**：USB `/mods` 即插即用扩展加载器，具备 QML 语法与作用域安全校验，崩溃自动隔离至 safe-mode。
+  - **#88**：先锋 Pioneer DJ 风格 Beat FX 与 Sound Color FX DSP 算法模拟（Filter, Sweep, Crush, Dub Echo, Roll 等及完整参数映射）。
+  - **#98**：QoL 交互与控制体验强化：Jog 轮盘灯环状态联动、音调精细步进、平滑波形渲染引擎与快捷手势绑定。
+  - **#105**：Spotify Connect / 播放拉取容灾保护：音频流解密失败时自动降级回退至 Deemix ISRC 编目无损下载。
+  - **#110**：2nd-gen fastboot 设备识别适配：兼容包含 SoC/平台前缀的 product 字段（如 `rk3288-az05-jp11s`、`az05` 等），完善二代机免 root 备份说明。
+  - **#112**：Algoriddim djay 格式曲库与播放列表直接读取与无损转换（OmniSource djay 引擎）。
+  - **#111**：二代机统一安装与设备发现流程（相关实现已收敛合并至 `main`）。
+- **验证（全部在 Oracle-Batam-arm）**：
+  - Go 单测与竞态检测：`gofmt` 0、`go vet ./...`、`go test -race ./...` 22 个包全部通过；
+  - 核心脚本与工具链：`tests/test_rootfs_overlay.sh`（13 项全过）、`tools/az01-packer` 单测（64 项全过）、`tools/stems`（9 项全过）；
+  - C 运行时与 DSP 单测：`test_edisksd_hook.c`（含 `unshare -m --mounts` 命名空间隔离测试）、`test_dsp_smooth.c`（普通、ASan/UBSan、TSan 三种构建全绿）、`test_az04_hook.c`（SYSTEM ONE 64 位 Engine 6 处补丁原厂/已改/不符三态及 URL 解码验证）；
+  - 二代机沙箱：`test_sclive4_bootstrap.sh` 默认（SC LIVE 4）与 `AZ04=1`（SYSTEM ONE）方法 A/B、ALSA 启动激活、hook 加载全部 PASS；
+  - 协议与双机串联：`pkg/prolink` 与 `pkg/webui`（`TestShadow|TestProlink|TestExport` 等）全绿；`/root/build/cdj3000-virtual-lan` 下 `cdj3000-sim` 9 项 Ableton Link、Beat Sync 与双机主从握手全部 PASS。
+- **发布计划**：代码已安全落地 `main`，待下个版本 `v5.3.0.3` 统一构建镜像与二代机数据包发布。
