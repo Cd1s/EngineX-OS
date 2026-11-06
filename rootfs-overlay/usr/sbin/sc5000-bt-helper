@@ -1,0 +1,199 @@
+#!/bin/sh
+# EngineX OS - Bluetooth audio (A2DP sink/source) and pairing stability helper.
+# POSIX sh: Engine OS has BusyBox ash and no bash.
+set -u
+
+MODE_FILE="/data/enginex/ui/bt-mode"
+FALLBACK_MODE_FILE="/tmp/bt-mode"
+
+get_mode() {
+    if [ -f "$MODE_FILE" ]; then
+        mode=$(cat "$MODE_FILE" 2>/dev/null || echo "sink")
+    elif [ -f "$FALLBACK_MODE_FILE" ]; then
+        mode=$(cat "$FALLBACK_MODE_FILE" 2>/dev/null || echo "sink")
+    else
+        mode="sink"
+    fi
+    case "$mode" in
+        source) echo "source" ;;
+        *) echo "sink" ;;
+    esac
+}
+
+cmd_status() {
+    mode=$(get_mode)
+    if [ "$mode" = "source" ]; then
+        mode_label="Audio Out (Deck -> Speaker/Headphones)"
+    else
+        mode="sink"
+        mode_label="Audio In (Phone -> Deck)"
+    fi
+
+    enabled=0
+    powered=0
+    discoverable=0
+    pairable=0
+
+    if command -v bluetoothctl >/dev/null 2>&1; then
+        show_out=$(printf 'show\nquit\n' | bluetoothctl 2>/dev/null || true)
+        if echo "$show_out" | grep -qi "Powered: yes"; then
+            powered=1
+            enabled=1
+        fi
+        if echo "$show_out" | grep -qi "Discoverable: yes"; then
+            discoverable=1
+        fi
+        if echo "$show_out" | grep -qi "Pairable: yes"; then
+            pairable=1
+        fi
+    elif [ -d /sys/class/bluetooth/hci0 ]; then
+        enabled=1
+        powered=1
+    fi
+
+    echo "enabled=$enabled"
+    echo "powered=$powered"
+    echo "discoverable=$discoverable"
+    echo "pairable=$pairable"
+    echo "mode=$mode"
+    echo "mode_label=$mode_label"
+
+    if command -v bluetoothctl >/dev/null 2>&1; then
+        devs=$(printf 'devices\nquit\n' | bluetoothctl 2>/dev/null || true)
+        if [ -n "$devs" ]; then
+            echo "$devs" | while IFS= read -r line; do
+                case "$line" in
+                    Device*)
+                        mac=$(echo "$line" | awk '{print $2}')
+                        name=$(echo "$line" | cut -d' ' -f3-)
+                        echo "device_mac=$mac"
+                        echo "device_name=$name"
+                        ;;
+                esac
+            done
+        fi
+    fi
+}
+
+cmd_set_mode() {
+    target_mode="${1:-sink}"
+    if [ "$target_mode" != "sink" ] && [ "$target_mode" != "source" ]; then
+        echo "invalid mode: $target_mode (must be sink or source)" >&2
+        return 1
+    fi
+
+    mkdir -p "/data/enginex/ui" 2>/dev/null || true
+    if printf '%s\n' "$target_mode" > "$MODE_FILE" 2>/dev/null; then
+        :
+    else
+        printf '%s\n' "$target_mode" > "$FALLBACK_MODE_FILE" 2>/dev/null || true
+    fi
+
+    if [ "$target_mode" = "sink" ]; then
+        # Sink mode: Phone -> Deck Audio In
+        if command -v bluetoothctl >/dev/null 2>&1; then
+            printf 'power on\ndiscoverable on\npairable on\nquit\n' | bluetoothctl >/dev/null 2>&1 || true
+        fi
+        if command -v sdptool >/dev/null 2>&1; then
+            sdptool add a2snk >/dev/null 2>&1 || sdptool add 0x110b >/dev/null 2>&1 || true
+        fi
+        if command -v hciconfig >/dev/null 2>&1; then
+            hciconfig hci0 inqparms 18 1024 >/dev/null 2>&1 || true
+            hciconfig hci0 lp none >/dev/null 2>&1 || true
+            hciconfig hci0 nosniff >/dev/null 2>&1 || true
+            hciconfig hci0 piscan >/dev/null 2>&1 || true
+        fi
+        if command -v pkill >/dev/null 2>&1; then
+            pkill -f "alsaloop.*bt-source" >/dev/null 2>&1 || true
+        fi
+        if command -v pactl >/dev/null 2>&1; then
+            pactl unload-module module-loopback >/dev/null 2>&1 || true
+        fi
+    else
+        # Source mode: Deck -> Bluetooth Speaker/Headphones Audio Out
+        if command -v bluetoothctl >/dev/null 2>&1; then
+            printf 'power on\ndiscoverable off\npairable on\nquit\n' | bluetoothctl >/dev/null 2>&1 || true
+        fi
+        if command -v sdptool >/dev/null 2>&1; then
+            sdptool add a2src >/dev/null 2>&1 || sdptool add 0x110a >/dev/null 2>&1 || true
+        fi
+        if command -v hciconfig >/dev/null 2>&1; then
+            hciconfig hci0 lp none >/dev/null 2>&1 || true
+            hciconfig hci0 nosniff >/dev/null 2>&1 || true
+        fi
+        if command -v pactl >/dev/null 2>&1; then
+            pactl load-module module-loopback source=alsa_output.platform-sound.analog-stereo.monitor >/dev/null 2>&1 || true
+        fi
+        if command -v alsaloop >/dev/null 2>&1; then
+            if ! ps aux 2>/dev/null | grep -v grep | grep -q "alsaloop.*bt-source"; then
+                alsaloop -C hw:0,0 -P bluealsa -t 50000 --daemon >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
+}
+
+cmd_stabilize() {
+    # Unblock rfkill
+    if command -v rfkill >/dev/null 2>&1; then
+        rfkill unblock bluetooth >/dev/null 2>&1 || true
+    fi
+
+    # Reset stuck HCI scan session
+    if command -v hciconfig >/dev/null 2>&1; then
+        hciconfig hci0 reset >/dev/null 2>&1 || true
+        hciconfig hci0 up >/dev/null 2>&1 || true
+        hciconfig hci0 noscan >/dev/null 2>&1 || true
+        hciconfig hci0 piscan >/dev/null 2>&1 || true
+        hciconfig hci0 lp none >/dev/null 2>&1 || true
+        hciconfig hci0 nosniff >/dev/null 2>&1 || true
+        hciconfig hci0 auth >/dev/null 2>&1 || true
+    fi
+
+    # Reset bluetoothctl scan and trust paired devices
+    if command -v bluetoothctl >/dev/null 2>&1; then
+        printf 'scan off\npower on\nquit\n' | bluetoothctl >/dev/null 2>&1 || true
+        paired=$(printf 'paired-devices\nquit\n' | bluetoothctl 2>/dev/null | awk '/^Device/ {print $2}')
+        for dev in $paired; do
+            [ -n "$dev" ] || continue
+            printf 'trust %s\nquit\n' "$dev" | bluetoothctl >/dev/null 2>&1 || true
+        done
+    fi
+}
+
+cmd_connect() {
+    mac="${1:-}"
+    [ -n "$mac" ] || return 1
+    if command -v bluetoothctl >/dev/null 2>&1; then
+        printf 'trust %s\nconnect %s\nquit\n' "$mac" "$mac" | bluetoothctl >/dev/null 2>&1 || true
+    fi
+}
+
+cmd_disconnect() {
+    mac="${1:-}"
+    [ -n "$mac" ] || return 1
+    if command -v bluetoothctl >/dev/null 2>&1; then
+        printf 'disconnect %s\nquit\n' "$mac" | bluetoothctl >/dev/null 2>&1 || true
+    fi
+}
+
+case "${1:-}" in
+    status)
+        cmd_status
+        ;;
+    set-mode)
+        cmd_set_mode "${2:-sink}"
+        ;;
+    stabilize)
+        cmd_stabilize
+        ;;
+    connect)
+        cmd_connect "${2:-}"
+        ;;
+    disconnect)
+        cmd_disconnect "${2:-}"
+        ;;
+    *)
+        echo "usage: sc5000-bt-helper {status|set-mode <sink|source>|stabilize|connect <mac>|disconnect <mac>}" >&2
+        exit 1
+        ;;
+esac
