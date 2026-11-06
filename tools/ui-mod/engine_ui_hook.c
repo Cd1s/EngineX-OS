@@ -33,6 +33,7 @@
 #include "dsp_smooth.h"
 #include "master_limiter.h"
 #include "echo_out.h"
+#include "pioneer_fx.h"
 
 // The A32 trampoline installers: the AArch64 build (AZ04) never calls them.
 #if defined(__aarch64__)
@@ -135,11 +136,12 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 // off the audio thread; the limiter itself runs in hook_master_output.
 static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
+static int pioneer_fx_mode;           // #88 Pioneer FX emulations
 
 static void *lim_poll(void *arg) {
     (void)arg;
     for (;;) {
-        int on = 0, gain = 0, echo = 0;
+        int on = 0, gain = 0, echo = 0, pioneer_fx = 0;
         FILE *f = fopen(UI_ROOT "/settings.conf", "r");
         if (f) {
             char line[64];
@@ -147,11 +149,21 @@ static void *lim_poll(void *arg) {
                 if (!strncmp(line, "master_limiter=1", 16)) on = 1;
                 else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
                 else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
+                else if (!strncmp(line, "pioneer_fx=", 11)) {
+                    char val[64];
+                    size_t len = strcspn(line + 11, "\r\n");
+                    if (len < sizeof val) {
+                        memcpy(val, line + 11, len);
+                        val[len] = '\0';
+                        pioneer_fx = sc_pioneer_fx_parse(val);
+                    }
+                }
             fclose(f);
         }
         __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
         __atomic_store_n(&echo_enabled, echo, __ATOMIC_RELAXED);
+        __atomic_store_n(&pioneer_fx_mode, pioneer_fx, __ATOMIC_RELAXED);
         sleep(1);
     }
     return NULL;
@@ -352,6 +364,8 @@ static struct sc_lim master_lim[8];
 static struct sc_gain master_gain[8];
 #define MASTER_ECHO_PAIRS 4 // 384 KB of BSS each, untouched until Echo Out is armed
 static struct sc_echo master_echo[MASTER_ECHO_PAIRS];
+#define MASTER_PFX_PAIRS 4
+static struct sc_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
 // #49: in the 4-deck layout a player's 4-channel device (two stereo pairs) leaves
 // decks 3 and 4 without output buffers, and Engine skips rendering them ("Mixer
 // skipped ... unassigned output buffer"): their playheads stand still. All four
@@ -384,6 +398,16 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
         int echo = __atomic_load_n(&echo_enabled, __ATOMIC_RELAXED);
         for (int ch = 0; ch < out_channels && ch / 2 < MASTER_ECHO_PAIRS; ch += 2)
             if (out[ch]) sc_echo_planar(&master_echo[ch / 2], out[ch], ch + 1 < out_channels ? out[ch + 1] : NULL, (unsigned)frames, echo);
+    }
+    // #88 Pioneer FX emulations (Spiral / Pitch Echo / Slip Roll / Dub Echo / Space)
+    int pfx = __atomic_load_n(&pioneer_fx_mode, __ATOMIC_RELAXED);
+    if (pfx && out && frames > 0) {
+        for (int ch = 0; ch < out_channels && ch / 2 < MASTER_PFX_PAIRS; ch += 2) {
+            if (out[ch]) {
+                float *r = ch + 1 < out_channels ? out[ch + 1] : NULL;
+                sc_pioneer_fx_planar(&master_pfx[ch / 2], out[ch], r, (unsigned)frames, pfx);
+            }
+        }
     }
     int gain = __atomic_load_n(&gain_enabled, __ATOMIC_RELAXED);
     // Auto-Gain (#64) always runs into the limiter, so a boost never clips.
