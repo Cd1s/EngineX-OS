@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -208,5 +209,127 @@ func TestOmniSourceToggle(t *testing.T) {
 	}
 	if code, _ := uiPost(t, base, "omniSource=on"); code != 400 {
 		t.Fatal(code)
+	}
+}
+
+func TestOmniSourceDjayIntegration(t *testing.T) {
+	mediaRoot := t.TempDir()
+	usb1 := filepath.Join(mediaRoot, "USB1")
+	audio1 := filepath.Join(usb1, "Music", "DjayTrack1.mp3")
+	audio2 := filepath.Join(usb1, "Music", "DjayTrack2.flac")
+	if err := os.MkdirAll(filepath.Dir(audio1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	flacData := append([]byte("fLaC"), bytes.Repeat([]byte{1, 2, 3}, 100)...)
+	if err := os.WriteFile(audio1, []byte("ID3 mp3 data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(audio2, flacData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dbDir := filepath.Join(usb1, "djay Media Library")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dbDir, "djay_music_library.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`
+		CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT, artist TEXT, album TEXT, bpm REAL, key TEXT, duration REAL, path TEXT, beatgrid_offset REAL);
+		CREATE TABLE cues (track_id INTEGER, slot INTEGER, position_ms REAL, label TEXT, color TEXT);
+		CREATE TABLE loops (track_id INTEGER, slot INTEGER, start_ms REAL, length_ms REAL, label TEXT);
+		CREATE TABLE playlists (id INTEGER PRIMARY KEY, name TEXT);
+		CREATE TABLE playlist_tracks (playlist_id INTEGER, track_id INTEGER, position INTEGER);
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO tracks (id, title, artist, album, bpm, key, duration, path, beatgrid_offset) VALUES
+			(1, 'Djay Beat One', 'Djay Artist', 'Club Album', 128.0, '8A', 210.0, 'Music/DjayTrack1.mp3', 0.15),
+			(2, 'Djay Beat Two', 'Other Artist', 'Deep Album', 124.0, '6A', 190.0, 'Music/DjayTrack2.flac', 0.08);
+		INSERT INTO cues (track_id, slot, position_ms, label, color) VALUES
+			(1, 0, 1000.0, 'Cue 1', '#FF0000');
+		INSERT INTO loops (track_id, slot, start_ms, length_ms, label) VALUES
+			(1, 0, 30000.0, 8000.0, 'Loop 1');
+		INSERT INTO playlists (id, name) VALUES (1, 'House');
+		INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (1, 1, 1), (1, 2, 2);
+	`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	djayDir := filepath.Join(usb1, "djay")
+	if err := os.MkdirAll(djayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m3uContent := "#EXTM3U\n#EXTINF:210,Djay Artist - Djay Beat One\n#EXTDJAY:BPM=128.0,KEY=8A\n../Music/DjayTrack1.mp3\n"
+	if err := os.WriteFile(filepath.Join(djayDir, "TopPicks.m3u8"), []byte(m3uContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, base := omniServer(t, usb1, true)
+
+	// 1. Verify OmniSource sees [djay · USB1] House playlist
+	var lists tidalList
+	tidalGet(t, base, "/v1/users/1/playlists", 200, &lists)
+	var housePl *tidalPlaylist
+	for _, raw := range lists.Items {
+		var p tidalPlaylist
+		json.Unmarshal(raw, &p)
+		if p.Title == "[djay · USB1] House" {
+			housePl = &p
+			break
+		}
+	}
+	if housePl == nil {
+		t.Fatalf("expected playlist [djay · USB1] House, got lists: %+v", lists)
+	}
+	if housePl.NumberOfTracks != 2 {
+		t.Fatalf("expected 2 tracks in House playlist, got %d", housePl.NumberOfTracks)
+	}
+
+	// 2. Fetch tracks from the playlist
+	var trList tidalList
+	tidalGet(t, base, "/v1/playlists/"+housePl.UUID+"/tracks", 200, &trList)
+	gotTitles, _ := titles(t, trList.Items)
+	if strings.Join(gotTitles, "|") != "Djay Beat One|Djay Beat Two" {
+		t.Fatalf("expected tracks Djay Beat One|Djay Beat Two, got %v", gotTitles)
+	}
+
+	// 3. Search tracks
+	var searchRes struct{ Tracks tidalList }
+	tidalGet(t, base, "/v1/search?query=Djay&limit=50&offset=0&types=TRACKS", 200, &searchRes)
+	foundTitles, ids := titles(t, searchRes.Tracks.Items)
+	foundAny := false
+	for _, title := range foundTitles {
+		if strings.HasPrefix(title, "Djay Beat") {
+			foundAny = true
+			break
+		}
+	}
+	if !foundAny {
+		t.Fatalf("expected search to find Djay tracks, got %v", foundTitles)
+	}
+
+	// 4. Test playback streaming of Djay track
+	trID := ids["Djay Beat One"]
+	if trID == 0 {
+		t.Fatalf("expected non-zero track ID for Djay Beat One")
+	}
+	streamURL := base + "/v1/stream/" + strconv.FormatInt(trID, 10) + ".mp3"
+	resp, err := http.Get(streamURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !bytes.Equal(body, []byte("ID3 mp3 data")) {
+		t.Fatalf("unexpected stream response: %d, body=%q", resp.StatusCode, body)
 	}
 }
