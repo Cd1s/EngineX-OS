@@ -612,6 +612,7 @@ SERVICES_MAIN = """
 	property int scSyncGuardPct: 0
 	property bool scSwapLoopOrder: false
 	property int scLedBrightness: 100
+	property int scUIScale: 100
 	property bool scStemsEqMode: false
 	property bool scBeatJumpPads: false
 	property string scPioneerFx: "off"
@@ -833,6 +834,8 @@ SERVICES_MAIN = """
 			else if (v.swap_loop_order !== undefined) scSwapLoopOrder = v.swap_loop_order === "1" || v.swap_loop_order === 1 || v.swap_loop_order === true
 			if (v.ledBrightness !== undefined) scLedBrightness = parseInt(v.ledBrightness) || 100
 			else if (v.led_brightness !== undefined) scLedBrightness = parseInt(v.led_brightness) || 100
+			if (v.uiScale !== undefined) scUIScale = parseInt(v.uiScale) || 100
+			else if (v.ui_scale !== undefined) scUIScale = parseInt(v.ui_scale) || 100
 			if (v.stemsEqMode !== undefined) scStemsEqMode = !!v.stemsEqMode
 			else if (v.stems_eq_mode !== undefined) scStemsEqMode = v.stems_eq_mode === "1" || v.stems_eq_mode === 1 || v.stems_eq_mode === true
 			if (v.beatJumpPads !== undefined) scBeatJumpPads = !!v.beatJumpPads
@@ -1388,6 +1391,13 @@ JOG_ENTRY = """
 """
 
 EXTRA_DEVICE_ENTRIES = """
+		EntryBase.ListEntry {
+			text: "UI Scale"
+			readonly property var ids: ["100", "95", "90", "85", "80", "75"]
+			values: ["100%", "95%", "90%", "85%", "80%", "75%"]
+			currentValue: values[Math.max(0, ids.indexOf(String(root.scUIScale)))]
+			onSelected: function(index) { if (ids[index] !== String(root.scUIScale)) root.scRestartCall("uiScale=" + ids[index]) }
+		},
 		EntryBase.ListEntry {
 			text: "4-Deck Waveform"
 			visible: root.scPlayer // #49

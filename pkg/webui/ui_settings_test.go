@@ -444,6 +444,56 @@ func TestFourDeckRole(t *testing.T) {
 	}
 }
 
+// UI Scale is saved only when it is not the stock 100%, and reaches Qt through the env
+// file Engine's unit reads (engine.service.d/70-ui-scale.conf).
+func TestUIScale(t *testing.T) {
+	dir := t.TempDir()
+	uiScaleEnvPath = filepath.Join(dir, "ui-scale.env")
+	defer func() { uiScaleEnvPath = "/data/sc5000-custom/ui-scale.env" }()
+	srv := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
+	defer srv.Close()
+
+	if code, v := uiPost(t, srv.URL, "uiScale=75"); code != 200 || v.UIScale != 75 {
+		t.Fatalf("scale 75: %d %d", code, v.UIScale)
+	}
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "QT_SCALE_FACTOR=0.75\n" {
+		t.Fatalf("env file: %q", b)
+	}
+	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=75\n") {
+		t.Fatalf("not saved: %s", c)
+	}
+	for _, bad := range []string{"uiScale=50", "uiScale=101", "uiScale=abc"} {
+		if code, _ := uiPost(t, srv.URL, bad); code != 400 {
+			t.Fatalf("%s accepted: %d", bad, code)
+		}
+	}
+
+	// A server started over reads the saved scale back from disk.
+	srv2 := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
+	defer srv2.Close()
+	resp, err := http.Get(srv2.URL + "/v1/sc5000/ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got uiSettings
+	json.NewDecoder(resp.Body).Decode(&got)
+	resp.Body.Close()
+	if got.UIScale != 75 {
+		t.Fatalf("reloaded scale: %d", got.UIScale)
+	}
+
+	// Back to the stock size drops both files, so nothing overrides Denon's layout.
+	if code, v := uiPost(t, srv2.URL, "uiScale=100"); code != 200 || v.UIScale != 100 {
+		t.Fatalf("scale 100: %d %d", code, v.UIScale)
+	}
+	if _, err := os.Stat(uiScaleEnvPath); err == nil {
+		t.Fatal("env file left behind at 100%")
+	}
+	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); strings.Contains(string(c), "ui_scale") {
+		t.Fatalf("stock scale saved: %s", c)
+	}
+}
+
 func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	dir := t.TempDir()
 	token := "secret-code"
