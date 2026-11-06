@@ -24,7 +24,27 @@ var (
 	broadcasters              sync.Map // map[*Server]*broadcast.Broadcaster
 	broadcasterMu             sync.Mutex
 	broadcastRoutesRegistered sync.Map // map[*Server]bool
+	usbAudioManagers          sync.Map // map[*Server]*broadcast.USBAudioManager
+	usbAudioMu                sync.Mutex
 )
+
+// usbAudioManager returns the lazily initialized USBAudioManager for this server.
+func (s *Server) usbAudioManager() *broadcast.USBAudioManager {
+	if v, ok := usbAudioManagers.Load(s); ok {
+		return v.(*broadcast.USBAudioManager)
+	}
+
+	usbAudioMu.Lock()
+	defer usbAudioMu.Unlock()
+	if v, ok := usbAudioManagers.Load(s); ok {
+		return v.(*broadcast.USBAudioManager)
+	}
+
+	configPath := filepath.Join(s.cfg.StateDir, "usb-audio.json")
+	mgr := broadcast.NewUSBAudioManager(configPath, "", "")
+	usbAudioManagers.Store(s, mgr)
+	return mgr
+}
 
 // broadcaster returns the lazily initialized Broadcaster for this server.
 func (s *Server) broadcaster() *broadcast.Broadcaster {
@@ -95,6 +115,8 @@ type broadcastPostInput struct {
 	Bitrate    *int    `json:"bitrate"`
 	StreamName *string `json:"streamName"`
 	InputPath  *string `json:"inputPath"`
+	LANMode    *string `json:"lanMode"`
+	LANTarget  *string `json:"lanTarget"`
 }
 
 // broadcastPost handles POST /api/broadcast.
@@ -105,13 +127,19 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 
 	cfg := s.loadBroadcastConfig()
 
-	// 1. Handle query parameter ?enabled=1|0 or true|false
+	// 1. Handle query parameter ?enabled=1|0 or true|false, lanMode, lanTarget
 	if q := r.URL.Query().Get("enabled"); q != "" {
 		if q == "1" || strings.EqualFold(q, "true") {
 			cfg.Enabled = true
 		} else if q == "0" || strings.EqualFold(q, "false") {
 			cfg.Enabled = false
 		}
+	}
+	if q := r.URL.Query().Get("lanMode"); q != "" {
+		cfg.LANMode = q
+	}
+	if q := r.URL.Query().Get("lanTarget"); q != "" {
+		cfg.LANTarget = q
 	}
 
 	// 2. Handle optional JSON body
@@ -164,6 +192,12 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 			}
 			if in.InputPath != nil {
 				cfg.InputPath = *in.InputPath
+			}
+			if in.LANMode != nil {
+				cfg.LANMode = *in.LANMode
+			}
+			if in.LANTarget != nil {
+				cfg.LANTarget = *in.LANTarget
 			}
 		}
 	}
@@ -235,9 +269,101 @@ func (s *Server) RegisterBroadcastRoutes() {
 	s.mux.HandleFunc("GET /api/broadcast", s.broadcastGet)
 	s.mux.HandleFunc("POST /api/broadcast", s.broadcastPost)
 	s.mux.HandleFunc("POST /api/broadcast/metadata", s.broadcastMetadataPost)
+	s.mux.HandleFunc("GET /api/usb-audio", s.handleUSBAudio)
+	s.mux.HandleFunc("POST /api/usb-audio", s.handleUSBAudio)
+	s.mux.HandleFunc("GET /v1/sc5000/usb-audio", s.handleUSBAudio)
+	s.mux.HandleFunc("POST /v1/sc5000/usb-audio", s.handleUSBAudio)
 	// Public on purpose (like the phone pages): OBS/VLC/browsers open these without a console cookie.
 	s.mux.HandleFunc("GET /live.mp3", s.liveMP3)
 	s.mux.HandleFunc("GET /live.wav", s.liveWAV)
+}
+
+// handleUSBAudio handles GET and POST requests for /v1/sc5000/usb-audio and /api/usb-audio.
+func (s *Server) handleUSBAudio(w http.ResponseWriter, r *http.Request) {
+	mgr := s.usbAudioManager()
+
+	if r.Method == http.MethodPost {
+		s.uiMu.Lock()
+		defer s.uiMu.Unlock()
+
+		cfg := mgr.GetConfig()
+
+		if q := r.URL.Query().Get("gadgetUac2"); q != "" {
+			if q == "1" || strings.EqualFold(q, "true") {
+				cfg.GadgetUAC2 = true
+			} else if q == "0" || strings.EqualFold(q, "false") {
+				cfg.GadgetUAC2 = false
+			}
+		}
+		if q := r.URL.Query().Get("hostDacMode"); q != "" {
+			cfg.HostDACMode = q
+		}
+		if q := r.URL.Query().Get("hostDacCard"); q != "" {
+			cfg.HostDACCard = q
+		}
+		if q := r.URL.Query().Get("sampleRate"); q != "" {
+			if sr, err := strconv.Atoi(q); err == nil {
+				cfg.SampleRate = sr
+			}
+		}
+
+		if r.Body != nil {
+			bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16384))
+			if err != nil {
+				fail(w, 400, errors.New("request body too large"))
+				return
+			}
+			if len(bytes.TrimSpace(bodyBytes)) > 0 {
+				var in struct {
+					HostDACMode *string `json:"hostDacMode"`
+					HostDACCard *string `json:"hostDacCard"`
+					SampleRate  *int    `json:"sampleRate"`
+					GadgetUAC2  *bool   `json:"gadgetUac2"`
+				}
+				d := json.NewDecoder(bytes.NewReader(bodyBytes))
+				d.DisallowUnknownFields()
+				if err := d.Decode(&in); err != nil {
+					fail(w, 400, errors.New("invalid JSON request"))
+					return
+				}
+				if in.HostDACMode != nil {
+					cfg.HostDACMode = *in.HostDACMode
+				}
+				if in.HostDACCard != nil {
+					cfg.HostDACCard = *in.HostDACCard
+				}
+				if in.SampleRate != nil {
+					cfg.SampleRate = *in.SampleRate
+				}
+				if in.GadgetUAC2 != nil {
+					cfg.GadgetUAC2 = *in.GadgetUAC2
+				}
+			}
+		}
+
+		if err := mgr.Apply(cfg); err != nil {
+			fail(w, 400, err)
+			return
+		}
+	} else if r.Method != http.MethodGet {
+		fail(w, 405, errors.New("method not allowed"))
+		return
+	}
+
+	cfg := mgr.GetConfig()
+	dacs, _ := mgr.DetectDACs()
+	if dacs == nil {
+		dacs = []broadcast.USBDAC{}
+	}
+
+	respond(w, map[string]any{
+		"hostDacMode": cfg.HostDACMode,
+		"hostDacCard": cfg.HostDACCard,
+		"sampleRate":  cfg.SampleRate,
+		"gadgetUac2":  cfg.GadgetUAC2,
+		"config":      cfg,
+		"dacs":        dacs,
+	})
 }
 
 // liveSubscribe starts a local listener, or answers 503 when Live Stream is off.
@@ -252,6 +378,8 @@ func (s *Server) liveSubscribe(w http.ResponseWriter, contentType string) (<-cha
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	h := w.Header()
 	h.Set("Content-Type", contentType)
+	h.Set("Cache-Control", "no-cache")
+	h.Set("X-Audio-Format", "48000Hz-16bit-2ch-PCM")
 	h.Set("icy-name", st.StreamName)
 	if st.CurrentTrack != "" {
 		h.Set("X-EngineX-Track", strings.Map(func(r rune) rune {
@@ -265,16 +393,32 @@ func (s *Server) liveSubscribe(w http.ResponseWriter, contentType string) (<-cha
 	return ch, cancel, true
 }
 
-// liveWAV streams a 44.1kHz 16-bit stereo WAV of the deck's live mix.
+// liveWAV streams a 48000Hz 16-bit stereo audio of the deck's live mix.
+// Supports ?format=pcm for raw audio/L16;rate=48000;channels=2 stream with zero header overhead.
 func (s *Server) liveWAV(w http.ResponseWriter, r *http.Request) {
-	ch, cancel, ok := s.liveSubscribe(w, "audio/wav")
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	contentType := "audio/wav"
+	if format == "pcm" {
+		contentType = "audio/L16;rate=48000;channels=2"
+	}
+
+	ch, cancel, ok := s.liveSubscribe(w, contentType)
 	if !ok {
 		return
 	}
 	defer cancel()
+
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Audio-Format", "48000Hz-16bit-2ch-PCM")
+
 	fl, _ := w.(http.Flusher)
-	if _, err := w.Write(broadcast.WAVHeader()); err != nil {
-		return
+	if format != "pcm" {
+		if _, err := w.Write(broadcast.WAVHeader()); err != nil {
+			return
+		}
+		if fl != nil {
+			fl.Flush()
+		}
 	}
 	for {
 		select {

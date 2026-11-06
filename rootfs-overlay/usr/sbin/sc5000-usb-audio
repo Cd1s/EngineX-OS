@@ -1,0 +1,199 @@
+#!/bin/sh
+set -eu
+
+# sc5000-usb-audio: EngineX OS USB-A DAC and USB-B UAC2 Gadget management
+# Subcommands:
+#   status       - show detected USB DACs and UAC2 gadget status
+#   enable-uac2  - configure and bind USB-B UAC2 gadget via ConfigFS
+#   disable-uac2 - unbind and remove UAC2 gadget
+#   route-dac    - route audio to USB DAC (<hw:X,0> or 'stop'/'default')
+
+CONFIGFS_MNT="/sys/kernel/config"
+GADGET_DIR="$CONFIGFS_MNT/usb_gadget/enginex_uac2"
+PIDFILE="/tmp/sc5000-usb-audio.pid"
+CARDS_FILE="/proc/asound/cards"
+
+ensure_configfs() {
+    if [ ! -d "$CONFIGFS_MNT/usb_gadget" ]; then
+        if command -v mount >/dev/null 2>&1; then
+            mount -t configfs none "$CONFIGFS_MNT" 2>/dev/null || :
+        fi
+    fi
+}
+
+cmd_status() {
+    echo "=== EngineX USB Audio Status ==="
+
+    # 1. UAC2 Gadget status
+    if [ -d "$GADGET_DIR" ]; then
+        udc_bound=""
+        if [ -f "$GADGET_DIR/UDC" ]; then
+            udc_bound=$(cat "$GADGET_DIR/UDC" 2>/dev/null || :)
+        fi
+        if [ -n "$udc_bound" ]; then
+            echo "UAC2 Gadget: active (bound to $udc_bound)"
+        else
+            echo "UAC2 Gadget: configured (unbound)"
+        fi
+    else
+        echo "UAC2 Gadget: disabled"
+    fi
+
+    # 2. External USB DACs
+    echo "USB DACs:"
+    found_dac=0
+    if [ -f "$CARDS_FILE" ]; then
+        while IFS= read -r line; do
+            case "$line" in
+                *[0-9]*'['*']:'*)
+                    idx=$(echo "$line" | sed -n 's/^[[:space:]]*\([0-9]\{1,2\}\).*/\1/p')
+                    id=$(echo "$line" | sed -n 's/.*\[\([^]]*\)\].*/\1/p' | tr -d ' ')
+                    name=$(echo "$line" | sed -n 's/.*]:[[:space:]]*//p')
+
+                    # Exclude built-in cards
+                    low_line=$(echo "$line" | tr '[:upper:]' '[:lower:]')
+                    case "$low_line" in
+                        *rockchip*|*az01*|*wm8960*|*sndhdmi*|*loopback*|*uac2gadget*|*uac2_gadget*)
+                            continue
+                            ;;
+                    esac
+
+                    # Match USB audio
+                    case "$low_line" in
+                        *usb-audio*|*usb-*)
+                            clean_name=$(echo "$name" | sed 's/^USB-Audio - //')
+                            echo "  hw:$idx,0: $clean_name ($id)"
+                            found_dac=1
+                            ;;
+                    esac
+                    ;;
+            esac
+        done < "$CARDS_FILE"
+    fi
+    if [ "$found_dac" -eq 0 ]; then
+        echo "  (none detected)"
+    fi
+
+    # 3. DAC Routing status
+    if [ -f "$PIDFILE" ]; then
+        pid=$(cat "$PIDFILE" 2>/dev/null || :)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "DAC Routing: active (PID $pid)"
+        else
+            echo "DAC Routing: inactive (stale PID)"
+            rm -f "$PIDFILE"
+        fi
+    else
+        echo "DAC Routing: inactive"
+    fi
+}
+
+cmd_enable_uac2() {
+    ensure_configfs
+    if command -v modprobe >/dev/null 2>&1; then
+        modprobe libcomposite 2>/dev/null || :
+        modprobe usb_f_uac2 2>/dev/null || :
+    fi
+
+    if [ ! -d "$GADGET_DIR" ]; then
+        mkdir -p "$GADGET_DIR" 2>/dev/null || :
+        echo "0x1d6b" > "$GADGET_DIR/idVendor" 2>/dev/null || :
+        echo "0x0104" > "$GADGET_DIR/idProduct" 2>/dev/null || :
+        echo "0x0200" > "$GADGET_DIR/bcdUSB" 2>/dev/null || :
+        echo "0x0100" > "$GADGET_DIR/bcdDevice" 2>/dev/null || :
+
+        mkdir -p "$GADGET_DIR/strings/0x409" 2>/dev/null || :
+        echo "EngineX OS" > "$GADGET_DIR/strings/0x409/manufacturer" 2>/dev/null || :
+        echo "EngineX Master Out" > "$GADGET_DIR/strings/0x409/product" 2>/dev/null || :
+        echo "ENGINEX01" > "$GADGET_DIR/strings/0x409/serialnumber" 2>/dev/null || :
+
+        mkdir -p "$GADGET_DIR/configs/c.1/strings/0x409" 2>/dev/null || :
+        echo "Audio Output" > "$GADGET_DIR/configs/c.1/strings/0x409/configuration" 2>/dev/null || :
+        echo 250 > "$GADGET_DIR/configs/c.1/MaxPower" 2>/dev/null || :
+
+        mkdir -p "$GADGET_DIR/functions/uac2.usb0" 2>/dev/null || :
+        echo 3 > "$GADGET_DIR/functions/uac2.usb0/c_chmask" 2>/dev/null || :
+        echo 48000 > "$GADGET_DIR/functions/uac2.usb0/c_srate" 2>/dev/null || :
+        echo 3 > "$GADGET_DIR/functions/uac2.usb0/c_ssize" 2>/dev/null || :
+
+        ln -s "$GADGET_DIR/functions/uac2.usb0" "$GADGET_DIR/configs/c.1/" 2>/dev/null || :
+    fi
+
+    # Bind UDC
+    if [ -d /sys/class/udc ]; then
+        for udc in /sys/class/udc/*; do
+            if [ -e "$udc" ]; then
+                udc_name=${udc##*/}
+                echo "$udc_name" > "$GADGET_DIR/UDC" 2>/dev/null || :
+                echo "UAC2 gadget bound to $udc_name"
+                return 0
+            fi
+        done
+        echo "No UDC controller found in /sys/class/udc"
+    else
+        echo "UDC not supported by kernel"
+    fi
+}
+
+cmd_disable_uac2() {
+    if [ -d "$GADGET_DIR" ]; then
+        echo "" > "$GADGET_DIR/UDC" 2>/dev/null || :
+        rm -f "$GADGET_DIR/configs/c.1/uac2.usb0" 2>/dev/null || :
+        rmdir "$GADGET_DIR/configs/c.1/strings/0x409" 2>/dev/null || :
+        rmdir "$GADGET_DIR/configs/c.1" 2>/dev/null || :
+        rmdir "$GADGET_DIR/functions/uac2.usb0" 2>/dev/null || :
+        rmdir "$GADGET_DIR/strings/0x409" 2>/dev/null || :
+        rmdir "$GADGET_DIR" 2>/dev/null || :
+        echo "UAC2 gadget removed"
+    else
+        echo "UAC2 gadget already disabled"
+    fi
+}
+
+cmd_route_dac() {
+    target="${1:-}"
+    if [ -f "$PIDFILE" ]; then
+        oldpid=$(cat "$PIDFILE" 2>/dev/null || :)
+        if [ -n "$oldpid" ]; then
+            kill "$oldpid" 2>/dev/null || :
+        fi
+        rm -f "$PIDFILE"
+    fi
+
+    if [ -z "$target" ] || [ "$target" = "stop" ] || [ "$target" = "default" ]; then
+        echo "DAC routing stopped"
+        return 0
+    fi
+
+    if command -v modprobe >/dev/null 2>&1; then
+        modprobe snd-usb-audio 2>/dev/null || :
+    fi
+
+    if command -v alsaloop >/dev/null 2>&1; then
+        alsaloop -C hw:Loopback,1,0 -P "$target" -t 50000 -S 1 -b &
+        echo $! > "$PIDFILE"
+        echo "Routed loopback to $target (PID $!)"
+    else
+        echo "Configured DAC $target (alsaloop not installed)"
+    fi
+}
+
+case "${1:-status}" in
+    status)
+        cmd_status
+        ;;
+    enable-uac2)
+        cmd_enable_uac2
+        ;;
+    disable-uac2)
+        cmd_disable_uac2
+        ;;
+    route-dac)
+        shift
+        cmd_route_dac "${1:-}"
+        ;;
+    *)
+        echo "Usage: $0 {status|enable-uac2|disable-uac2|route-dac <hw:X,0>}" >&2
+        exit 1
+        ;;
+esac
