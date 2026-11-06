@@ -1,0 +1,35 @@
+#!/bin/sh
+# SC5000 storage discovery: discover mounts and scan for EngineX mods.
+set -eu
+
+MEDIA_ROOT=${SC5000_MEDIA_ROOT:-/media}
+log() { printf 'sc5000-storage-discover: %s\n' "$*" >&2; }
+
+check_drive() {
+    drive=$1
+    [ -d "$drive" ] || return 0
+    dname=${drive##*/}
+    case $dname in
+        '.'|'..') return 0 ;;
+    esac
+    for mod_path in "$drive/mods" "$drive/EngineX/mods"; do
+        if [ -d "$mod_path" ]; then
+            log "found mods directory on $dname: $mod_path"
+        fi
+    done
+}
+
+target=${1:-}
+if [ -n "$target" ] && [ "$target" != "--discover" ]; then
+    check_drive "$target"
+    exit 0
+fi
+
+if [ -d "$MEDIA_ROOT" ]; then
+    for drive in "$MEDIA_ROOT"/*; do
+        [ -d "$drive" ] || continue
+        check_drive "$drive"
+    done
+fi
+
+exit 0
