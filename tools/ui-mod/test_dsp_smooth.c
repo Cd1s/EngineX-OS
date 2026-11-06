@@ -10,6 +10,7 @@
 #include "dsp_smooth.h"
 #include "master_limiter.h"
 #include "echo_out.h"
+#include "pioneer_fx.h"
 
 static int failures;
 #define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #cond); failures++; } } while (0)
@@ -777,6 +778,167 @@ static void test_echo_out(void)
     for (unsigned i = 0; i < SC_ECHO_DELAY; i++) CHECK(isfinite(echo_state.l[i]) && isfinite(echo_state.r[i]));
 }
 
+static void test_pioneer_fx(void)
+{
+    /* 1. Test parsing of all 6 modes, including aliases, numbers, whitespace, and invalid strings */
+    CHECK(sc_pioneer_fx_parse("off") == SC_PFX_OFF);
+    CHECK(sc_pioneer_fx_parse("spiral") == SC_PFX_SPIRAL);
+    CHECK(sc_pioneer_fx_parse("pitch_echo") == SC_PFX_PITCH_ECHO);
+    CHECK(sc_pioneer_fx_parse("slip_roll") == SC_PFX_SLIP_ROLL);
+    CHECK(sc_pioneer_fx_parse("dub_echo") == SC_PFX_DUB_ECHO);
+    CHECK(sc_pioneer_fx_parse("space") == SC_PFX_SPACE);
+
+    CHECK(sc_pioneer_fx_parse("  spiral\r\n") == SC_PFX_SPIRAL);
+    CHECK(sc_pioneer_fx_parse("pitch_echo\n") == SC_PFX_PITCH_ECHO);
+    CHECK(sc_pioneer_fx_parse("slip_roll ") == SC_PFX_SLIP_ROLL);
+    CHECK(sc_pioneer_fx_parse("dub_echo\r\n") == SC_PFX_DUB_ECHO);
+    CHECK(sc_pioneer_fx_parse("space\n") == SC_PFX_SPACE);
+
+    CHECK(sc_pioneer_fx_parse(NULL) == SC_PFX_OFF);
+    CHECK(sc_pioneer_fx_parse("") == SC_PFX_OFF);
+    CHECK(sc_pioneer_fx_parse("   ") == SC_PFX_OFF);
+    CHECK(sc_pioneer_fx_parse("unknown_fx") == SC_PFX_OFF);
+
+    /* 2. Test SC_PFX_OFF: output must be 100% bit-exact identical to input */
+    static struct sc_pioneer_fx fx;
+    memset(&fx, 0, sizeof(fx));
+    float in_l[512], in_r[512], orig_l[512], orig_r[512];
+    for (int i = 0; i < 512; i++) {
+        in_l[i] = orig_l[i] = (float)sin(i * 0.1);
+        in_r[i] = orig_r[i] = (float)cos(i * 0.1);
+    }
+    sc_pioneer_fx_planar(&fx, in_l, in_r, 512, SC_PFX_OFF);
+    CHECK(!memcmp(in_l, orig_l, sizeof(orig_l)));
+    CHECK(!memcmp(in_r, orig_r, sizeof(orig_r)));
+
+    /* NULL / zero frame safety */
+    sc_pioneer_fx_planar(NULL, in_l, in_r, 512, SC_PFX_SPIRAL);
+    sc_pioneer_fx_planar(&fx, NULL, in_r, 512, SC_PFX_SPIRAL);
+    sc_pioneer_fx_planar(&fx, in_l, in_r, 0, SC_PFX_SPIRAL);
+    sc_pioneer_fx_planar(&fx, in_l, NULL, 64, SC_PFX_OFF);
+
+    /* 3. Test each active mode: SPIRAL, PITCH_ECHO, SLIP_ROLL, DUB_ECHO, SPACE */
+    const int modes[5] = {
+        SC_PFX_SPIRAL,
+        SC_PFX_PITCH_ECHO,
+        SC_PFX_SLIP_ROLL,
+        SC_PFX_DUB_ECHO,
+        SC_PFX_SPACE
+    };
+
+    for (int m = 0; m < 5; m++) {
+        int mode = modes[m];
+        memset(&fx, 0, sizeof(fx));
+
+        /* Feed a sine pulse of 1000 frames */
+        float block_l[512], block_r[512];
+        float pulse_energy = 0.0f;
+        for (int b = 0; b < 2; b++) {
+            for (int i = 0; i < 512; i++) {
+                block_l[i] = 0.6f * (float)sin((b * 512 + i) * 0.05);
+                block_r[i] = 0.6f * (float)cos((b * 512 + i) * 0.05);
+            }
+            sc_pioneer_fx_planar(&fx, block_l, block_r, 512, mode);
+            for (int i = 0; i < 512; i++) {
+                CHECK(isfinite(block_l[i]) && isfinite(block_r[i]));
+                CHECK(block_l[i] >= -4.0f && block_l[i] <= 4.0f);
+                CHECK(block_r[i] >= -4.0f && block_r[i] <= 4.0f);
+                pulse_energy += block_l[i] * block_l[i] + block_r[i] * block_r[i];
+            }
+        }
+        CHECK(pulse_energy > 0.1f);
+
+        /* Mode-specific tail / replay generation verification */
+        if (mode == SC_PFX_SLIP_ROLL) {
+            /* Feed additional frames to reach the 12000-frame slice capture requirement */
+            for (int b = 2; b < 24; b++) {
+                for (int i = 0; i < 512; i++) {
+                    block_l[i] = 0.6f * (float)sin((b * 512 + i) * 0.05);
+                    block_r[i] = 0.6f * (float)cos((b * 512 + i) * 0.05);
+                }
+                sc_pioneer_fx_planar(&fx, block_l, block_r, 512, mode);
+            }
+            CHECK(fx.roll_active == 1);
+
+            /* Now feed silence on the input, check that Slip Roll repeats the captured slice */
+            float roll_replay_energy = 0.0f;
+            for (int b = 0; b < 10; b++) {
+                memset(block_l, 0, sizeof(block_l));
+                memset(block_r, 0, sizeof(block_r));
+                sc_pioneer_fx_planar(&fx, block_l, block_r, 512, mode);
+                for (int i = 0; i < 512; i++) {
+                    CHECK(isfinite(block_l[i]) && isfinite(block_r[i]));
+                    CHECK(block_l[i] >= -4.0f && block_l[i] <= 4.0f);
+                    CHECK(block_r[i] >= -4.0f && block_r[i] <= 4.0f);
+                    roll_replay_energy += block_l[i] * block_l[i] + block_r[i] * block_r[i];
+                }
+            }
+            CHECK(roll_replay_energy > 1.0f);
+        } else {
+            /* For delay/reverb modes, feed blocks of silence to wait for delay taps / diffusion tail */
+            float tail_energy = 0.0f;
+            for (int b = 0; b < 60; b++) {
+                memset(block_l, 0, sizeof(block_l));
+                memset(block_r, 0, sizeof(block_r));
+                sc_pioneer_fx_planar(&fx, block_l, block_r, 512, mode);
+                for (int i = 0; i < 512; i++) {
+                    CHECK(isfinite(block_l[i]) && isfinite(block_r[i]));
+                    CHECK(block_l[i] >= -4.0f && block_l[i] <= 4.0f);
+                    CHECK(block_r[i] >= -4.0f && block_r[i] <= 4.0f);
+                    tail_energy += block_l[i] * block_l[i] + block_r[i] * block_r[i];
+                }
+            }
+            CHECK(tail_energy > 0.01f);
+        }
+
+        /* Test immunity to NaN / Infinity and extreme values */
+        union { uint32_t u; float f; } pun_nan = { .u = 0x7fc00000u };
+        union { uint32_t u; float f; } pun_inf = { .u = 0x7f800000u };
+        union { uint32_t u; float f; } pun_ninf = { .u = 0xff800000u };
+        float bad_l[128], bad_r[128];
+        bad_l[0] = pun_nan.f;
+        bad_l[1] = pun_inf.f;
+        bad_l[2] = pun_ninf.f;
+        bad_l[3] = 3.4e38f;
+        bad_l[4] = -3.4e38f;
+        bad_r[0] = pun_inf.f;
+        bad_r[1] = pun_nan.f;
+        bad_r[2] = 3.4e38f;
+        bad_r[3] = pun_ninf.f;
+        bad_r[4] = -3.4e38f;
+        for (int i = 5; i < 128; i++) {
+            bad_l[i] = 0.5f;
+            bad_r[i] = -0.5f;
+        }
+        sc_pioneer_fx_planar(&fx, bad_l, bad_r, 128, mode);
+        for (int i = 0; i < 128; i++) {
+            CHECK(isfinite(bad_l[i]));
+            CHECK(isfinite(bad_r[i]));
+            CHECK(bad_l[i] >= -4.0f && bad_l[i] <= 4.0f);
+            CHECK(bad_r[i] >= -4.0f && bad_r[i] <= 4.0f);
+        }
+
+        /* Verify subsequent block remains completely healthy and finite */
+        float normal_l[128], normal_r[128];
+        for (int i = 0; i < 128; i++) {
+            normal_l[i] = 0.3f;
+            normal_r[i] = 0.3f;
+        }
+        sc_pioneer_fx_planar(&fx, normal_l, normal_r, 128, mode);
+        for (int i = 0; i < 128; i++) {
+            CHECK(isfinite(normal_l[i]) && isfinite(normal_r[i]));
+        }
+
+        /* Mono processing (r == NULL) safety check */
+        float mono_l[64];
+        for (int i = 0; i < 64; i++) mono_l[i] = 0.2f;
+        sc_pioneer_fx_planar(&fx, mono_l, NULL, 64, mode);
+        for (int i = 0; i < 64; i++) {
+            CHECK(isfinite(mono_l[i]));
+        }
+    }
+}
+
 int main(void)
 {
     test_finite();
@@ -792,6 +954,7 @@ int main(void)
     test_master_limiter();
     test_auto_gain();
     test_echo_out();
+    test_pioneer_fx();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return EXIT_FAILURE;
