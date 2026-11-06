@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Cd1s/EngineX-OS/pkg/djay"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
@@ -148,6 +149,52 @@ func drivePlaylists(ctx context.Context, d drive) ([]providers.Playlist, error) 
 // driveListTracks returns a playlist's tracks in Engine's order (the
 // nextEntityId chain); entries the chain does not reach keep their row order.
 func (s *Server) driveListTracks(ctx context.Context, listID string) ([]trackRef, error) {
+	if strings.HasPrefix(listID, "djay\x00") {
+		parts := strings.Split(listID, "\x00")
+		if len(parts) < 3 {
+			return nil, fmt.Errorf("invalid djay playlist id")
+		}
+		dir := parts[1]
+		plID := parts[len(parts)-1]
+		libs, err := djay.Discover(dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, lib := range libs {
+			for _, p := range lib.Playlists {
+				if p.ID == plID || p.Name == plID {
+					var refs []trackRef
+					for _, tr := range p.Tracks {
+						if _, ok := localCodecs[strings.ToLower(filepath.Ext(tr.AbsPath))]; !ok {
+							continue
+						}
+						trackID := tr.ID
+						if trackID == "" {
+							trackID = tr.RelativePath
+						}
+						t := providers.Track{
+							ID:         "djay\x00" + dir + "\x00" + trackID,
+							Title:      tr.Title,
+							Artist:     tr.Artist,
+							Album:      tr.Album,
+							DurationMS: int64(tr.DurationSec * 1000),
+							BPM:        tr.BPM,
+							Key:        tr.Key,
+							Provider:   localProvider,
+						}
+						refs = append(refs, trackRef{
+							track: t,
+							file:  tr.AbsPath,
+							drive: dir,
+						})
+					}
+					return refs, nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("djay playlist not found: %s", plID)
+	}
+
 	dbPath, raw, _ := strings.Cut(listID, "\x00")
 	var d drive
 	for _, v := range s.drives() {
@@ -246,6 +293,27 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}
+	root := g.s.mediaRoot()
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, e := range entries {
+			dir := filepath.Join(root, e.Name())
+			libs, err := djay.Discover(dir)
+			if err != nil || len(libs) == 0 {
+				continue
+			}
+			for _, lib := range libs {
+				for _, p := range lib.Playlists {
+					listObj := providers.Playlist{
+						ID:    "djay\x00" + dir + "\x00" + p.ID,
+						Title: "[djay · " + e.Name() + "] " + p.Name,
+						Count: len(p.Tracks),
+					}
+					ref := playlistRef{"", localProvider, listObj, false}
+					add(g.refJSON(g.addPlaylist(ref), ref))
+				}
+			}
+		}
+	}
 	var others []*Session
 	for _, v := range g.sources() {
 		if v.Provider != scope {
@@ -262,11 +330,84 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 	}
 }
 
+// omniTracks searches Algoriddim djay libraries across mounted drives for tracks matching query.
+func (s *Server) omniTracks(ctx context.Context, query string) ([]trackRef, error) {
+	root := s.mediaRoot()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, nil
+	}
+	qLower := strings.ToLower(query)
+	var out []trackRef
+	seenFiles := make(map[string]bool)
+
+	for _, e := range entries {
+		dir := filepath.Join(root, e.Name())
+		libs, err := djay.Discover(dir)
+		if err != nil || len(libs) == 0 {
+			continue
+		}
+		for _, lib := range libs {
+			for _, tr := range lib.Tracks {
+				if seenFiles[tr.AbsPath] {
+					continue
+				}
+				if _, ok := localCodecs[strings.ToLower(filepath.Ext(tr.AbsPath))]; !ok {
+					continue
+				}
+				titleMatch := strings.Contains(strings.ToLower(tr.Title), qLower)
+				artistMatch := strings.Contains(strings.ToLower(tr.Artist), qLower)
+				albumMatch := strings.Contains(strings.ToLower(tr.Album), qLower)
+				if !titleMatch && !artistMatch && !albumMatch {
+					continue
+				}
+				seenFiles[tr.AbsPath] = true
+				trackID := tr.ID
+				if trackID == "" {
+					trackID = tr.RelativePath
+				}
+				t := providers.Track{
+					ID:         "djay\x00" + dir + "\x00" + trackID,
+					Title:      tr.Title,
+					Artist:     tr.Artist,
+					Album:      tr.Album,
+					DurationMS: int64(tr.DurationSec * 1000),
+					BPM:        tr.BPM,
+					Key:        tr.Key,
+					Provider:   localProvider,
+				}
+				out = append(out, trackRef{
+					track: t,
+					file:  tr.AbsPath,
+					drive: dir,
+				})
+				if len(out) >= maxLocalResults {
+					return out, nil
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
 // omniSearch returns the drives' matches as track rows, drive by drive.
 func (g *tidalGateway) omniSearch(ctx context.Context, query string) []any {
 	items := []any{}
+	seenFiles := make(map[string]bool)
 	for _, refs := range each(ctx, g.s.drives(), func(ctx context.Context, d drive) ([]trackRef, error) { return searchDrive(ctx, d, query) }) {
 		for _, ref := range refs {
+			if ref.file != "" {
+				seenFiles[ref.file] = true
+			}
+			items = append(items, g.trackJSON(g.addTrack(ref), ref.track))
+		}
+	}
+	if djayRefs, err := g.s.omniTracks(ctx, query); err == nil {
+		for _, ref := range djayRefs {
+			if seenFiles[ref.file] {
+				continue
+			}
+			seenFiles[ref.file] = true
 			items = append(items, g.trackJSON(g.addTrack(ref), ref.track))
 		}
 	}
