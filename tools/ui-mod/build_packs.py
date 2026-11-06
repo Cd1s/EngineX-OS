@@ -1031,7 +1031,7 @@ JOG_ENTRY = """
 			onSelected: function(index) { root.scCall("autoAnalyze=" + index) }
 		},
 		EntryBase.ListEntry {
-			text: "Master Soft Limiter"
+			text: "Master Soft Clipper"
 			values: ["Off", "On"]
 			currentValue: values[root.scMasterLimiter ? 1 : 0]
 			onSelected: function(index) { root.scCall("masterLimiter=" + index) }
@@ -1092,6 +1092,17 @@ EXTRA_DEVICE_ENTRIES = """
 			values: ["Off", "On"]
 			currentValue: root.scUpfaderEcho ? "On" : "Off"
 			onSelected: function(index) { root.scCall("upfaderEcho=" + ids[index]) }
+		},
+"""
+
+# #78: a deck in a booth can be switched off without reaching for the recessed rear
+# button. Engine's own quit path: the "Turn Off" confirmation, recording and library
+# migration guards, then the power-off.
+POWER_ENTRY = """
+		EntryBase.PrefsButtonEntry {
+			text: "Power"
+			buttonText: "Turn Off"
+			onClicked: Planck.quit(QuitReasons.Poweroff, false)
 		},
 """
 
@@ -1510,7 +1521,7 @@ def edits(dev: bool):
         # 5.3.0 moved it up from TabContents/, so its imports lost the "../".
         prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
-            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + QUALITY_ENTRY + JOG_ENTRY + EXTRA_DEVICE_ENTRIES + "		PlayerNumber { },\n"),
+            ("		PlayerNumber { },\n", (POWER_ENTRY if v53() else "") + LANGUAGE_ENTRY + QUALITY_ENTRY + JOG_ENTRY + EXTRA_DEVICE_ENTRIES + "		PlayerNumber { },\n"),
         ],
         prefs + ("" if v53() else "TabContents/") + "MixerTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n',
@@ -1698,6 +1709,28 @@ def edits(dev: bool):
                 # Engine's load arbitrator still checks the role's deck on load.
                 ("    textSwipeInvalid: ((readyToCommit", "    textSwipeInvalid: scDeck > 0 ? \"\" : ((readyToCommit"),
             ]
+    if v53():
+        # Stock settings a board flag hides although Engine registers the property on every
+        # board measured (JP07, JP11, JP13, JC11, NH08 in the #77 sandbox dump). Each gate
+        # keeps its flag and adds the property check, so a board without it stays stock.
+        silent = '!!(Planck.getProperty("/Engine/Deck1/SilentCue") && Planck.getProperty("/Engine/Deck1/SilentCue").translator)'
+        for rel, fixes in {
+            # Silent Cue: the Censor button mutes the deck instead of reversing it.
+            prefs + "Entries/CensorBehavior.qml": [
+                ("active: Config.device.hasSilentCue\n", f"active: Config.device.hasSilentCue || {silent}\n")],
+            "ControlSurfaceModules/ControlSurfaceModules/DeckAssignmentConfig.qml": [(
+                "readonly property bool censorIsSilentCue: Config.device.hasSilentCue &&\n",
+                'readonly property QObjProperty pSilentCueProbe: Planck.getProperty(activeDeckPath + "SilentCue")\n'
+                "    readonly property bool censorIsSilentCue: (Config.device.hasSilentCue ||\n"
+                "        !!(pSilentCueProbe && pSilentCueProbe.translator)) &&\n")],
+            # PRIME GO and Mixstream Pro have Engine's limiter (Config.audio.hasLimiter,
+            # Off / 0-18 dB) but not its setting.
+            prefs + "Entries/MasterLimiter.qml": [
+                ("active: Config.ui.preferences.hasMasterLimiter\n",
+                 "active: Config.ui.preferences.hasMasterLimiter || Config.audio.hasLimiter\n")],
+        }.items():
+            assert not isinstance(out.get(rel), str), rel
+            out.setdefault(rel, []).extend(fixes)
     for rel, fixes in legacy_qml_fixes().items():
         assert not isinstance(out.get(rel), str), rel  # a whole-file replacement already owns it
         out.setdefault(rel, []).extend(fixes)

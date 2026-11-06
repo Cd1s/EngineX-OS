@@ -264,7 +264,7 @@ Max	最高	最高
 Auto-Analyze Drives	自动分析插入的设备	自動分析插入的裝置
 Jog Light Mode	转盘灯效	轉盤燈效
 OmniSource (Drives in Streaming)	OmniSource（在流媒体中显示 U 盘/SD）	OmniSource（在串流中顯示 USB/SD）
-Master Soft Limiter	主输出软限幅	主輸出軟限幅
+Master Soft Clipper	0dB 防破音软限幅	0dB 防破音軟限幅
 Auto-Gain (0 dB Normalize)	自动增益（0 dB 归一化）	自動增益（0 dB 正規化）
 Pro DJ Link Library	Pro DJ Link 曲库	Pro DJ Link 曲庫
 Static	固定颜色	固定顏色
@@ -297,3 +297,10 @@ The QR code expired.	二维码已过期。	QR Code 已過期。
 Tap for a new QR code	点这里换一个新二维码	點這裡換一個新 QR Code
 4-Deck Role	四轨角色	四軌角色
 Auto	自动	自動
+Turn Off	关机	關機
+Power	电源	電源
+Censor Button Behavior	Censor 键行为	Censor 鍵行為
+Silent Cue	静音 Cue	靜音 Cue
+Waveform Zoom	波形缩放	波形縮放
+Open Library	打开曲库	開啟曲庫
+Master Limiter	原厂主输出限幅 (dB)	原廠主輸出限幅 (dB)

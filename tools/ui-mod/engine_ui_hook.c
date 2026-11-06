@@ -219,6 +219,9 @@ struct engine_build {
     // [135] open_v2). opendb != 0: open and open_v2 only tail-call it, hook it once.
     uint32_t sqlite_api, sqlite_exec, sqlite_open, sqlite_open_v2, sqlite_opendb;
     const char *sqlite_prefix[3]; // exec, open (or opendb), open_v2
+    // #77 Config.ui.waveform.maximumZoomSecs (int): 30 on players, 10 on all-in-ones.
+    // The QML map reads it at config+0x45c+96 (5.0.4) / +0x4c8+100 (5.3.0).
+    uint16_t config_zoom;
 };
 static const struct engine_build *build;
 
@@ -581,6 +584,8 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         0xe320f000, // strne r2, [r0, #0x90] (numberOfDecks)
         0xe320f000, // movne r2, #0
         0xe320f000, // strbne r2, [r0, #0x239]
+        0xe320f000, // #77: mov r2, #30
+        0xe320f000, // #77: str r2, [r0, #maximumZoomSecs]
         0xe59f2004, // replay the two displaced literal loads
         0xe59f3004,
         0xe59ff004,
@@ -590,6 +595,12 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     };
     const unsigned at[] = {1, 2, 3, 4, 6};
     for (unsigned i = 0; i < 5; i++) code[at[i]] = (code[at[i]] & ~0xfffu) | build->config_field[i];
+    if (build->config_zoom) {
+        // #77: the players' 30 s zoom-out limit on every model (same SoC; Engine
+        // sets 10 s on the all-in-ones). No flags touched; never above 30 in 32-bit.
+        code[13] = 0xe3a0201e;
+        code[14] = 0xe5802000 | build->config_zoom;
+    }
     if (!strcmp(build->name, "5.3.0") && four_deck_layout() > 0) {
         const uint32_t unlock[] = {0xe5d02239, 0xe3520000, 0x13a02004, 0x15802090, 0x13a02000, 0x15c02239};
         memcpy(code + 7, unlock, sizeof unlock);
@@ -744,7 +755,7 @@ static const struct engine_build engine_builds[] = {
      0xf6303c, 0xf63124, 0xf63120, {0xdb, 0x24c, 0x24e, 0x276, 0x289},
      0x842644, 0x29bc83c, 0x258e185, 0x8429b0, 0xe51b3340,
      0x29980a4, 0x1c91f74, 0x1cba858, 0x1cba874, 0,
-     {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}},
+     {"\xf4\x42\x6d\xe1\x02\x50\xa0\xe1", "\x04\xb0\x2d\xe5\x00\x30\xa0\xe3", "\x04\xb0\x2d\xe5\x00\xb0\x8d\xe2"}, 0x4bc},
     {"5.3.0", "\xbe\x53\x7e\x90\x81\x21\xe7\x61\x64\xdd\xbb\xf9\x73\x0d\x47\x2b\xa0\xb8\xf9\xd4",
      {0xe6a090, 0xe6a0bc, 0xe6a16c, 0xe6a198, 0xe6a1c4, 0xe6a0e8, 0xe6a140, 0x170e714, 0x1710c00,
       0x1710a74, 0x170f110, 0xdde87c, 0xd265cc, 0xd265f8, 0xd26624, 0xf1afa4, 0x16b38e0, 0xf1dd20, 0xf1ede4, 0xf1ab24, 0xc77934},
@@ -752,7 +763,7 @@ static const struct engine_build engine_builds[] = {
      0x1537148, 0x1537234, 0x1537230, {0xe3, 0x254, 0x256, 0x2a6, 0x2b9},
      0x8a1eac, 0x2c8e808, 0x21b8b98, 0x8a2218, 0xe51b3340,
      0x2b9bee8, 0x1d7289c, 0x1d47324, 0x1d7e2bc, 0x1d46a6c,
-     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}},
+     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c},
     {"5.3.0-sclive4", "\xb9\x46\xc3\xb8\xd9\x9d\x32\x99\x8c\x81\x97\xd5\xdc\x90\x5a\x6b\xdd\xaa\x5d\x2f",
      {0xe774fc, 0xe77528, 0xe775d8, 0xe77604, 0xe77630, 0xe77554, 0xe775ac, 0x17597bc, 0x179b090,
       0x179af04, 0x175a1b8, 0xdeacec, 0xd31818, 0xd31844, 0xd31870, 0xf27698, 0x172e668, 0xf2a410, 0xf2b9b0, 0xf27218, 0xc7cb2c},
@@ -760,7 +771,7 @@ static const struct engine_build engine_builds[] = {
      0x159f4a8, 0x159f594, 0x159f590, {0xe3, 0x254, 0x256, 0x2a6, 0x2b9},
      0x89cd64, 0x2c28744, 0x222cc8d, 0x89d0d0, 0xe51b3338,
      0x2c1bea4, 0x1ddf11c, 0x1db3ba4, 0x1deab3c, 0x1db32ec,
-     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}},
+     {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}, 0x52c},
 };
 #endif
 

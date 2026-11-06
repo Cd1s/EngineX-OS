@@ -16,8 +16,10 @@
 
 <br>
 
-**EngineX OS 5.3.0.2** 是面向天龙 Denon DJ 与 Numark 独立打碟机的增强固件，支持：
-`SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro`。
+**EngineX OS 5.3.0.2** 是基于官方 Engine OS 5.3.0+ 底层重构的定制系统，支持天龙 Denon DJ、Numark 与 Rane 全系 16 款独立设备：
+`SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro` · `SC LIVE 4` · `SC LIVE 2` · `PRIME 4+` · `PRIME GO+` · `Mixstream Pro+` · `Mixstream Pro Go` · `PRIME 4 G2` · `Rane SYSTEM ONE`。
+
+前八款用 U 盘刷 `.img`；后八款二代机的固件带签名校验，改用 `/data` 数据包（Beta，见[如何安装与升级](#install)）。
 
 操作界面与原厂保持一致，直接通过 U 盘刷入即可解锁以下功能。
 
@@ -63,11 +65,14 @@
 
 
 ### 7. 5.3.0.2 新功能
+- **波形可以缩得更远（#77）**：一体机（PRIME 4、PRIME 2、PRIME GO、Mixstream Pro、SC LIVE）的波形最远缩到 30 秒，和 SC5000 / SC6000 一样，不再是原厂的 10 秒，屏幕上能看到更多即将到来的节拍网格。`设置 → 设备 → 旋钮行为` 选 `波形缩放` 后，在打碟界面转浏览旋钮即可缩放；
+- **屏幕上直接关机（#78）**：`设置 → 设备 → 电源 → 关机` 会弹出原厂的「关机」确认框，碟机装在 DJ 台里也不用再伸手去摸背后的电源键；
+- **静音 Cue 与原厂主输出限幅**：Censor 键可以设成 `静音 Cue`（`设置 → 播放 → Censor 键行为`）；PRIME GO / Mixstream Pro 放开了原厂的 `原厂主输出限幅 (dB)`（`设置 → 混音台`，关 / 0–18 dB），与 EngineX 的 `0dB 防破音软限幅` 并存；
 - **Apple Music** 加入流媒体（共 7 个），和其他服务一样扫碟机二维码登录；
 - **Wi-Fi 传歌**：在电脑上把 MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS 文件拖进碟机网页控制台（`http://<碟机 IP>:8080`），直接存到你选的内置硬盘、SD 卡或 U 盘的 `Wi-Fi Drop/<歌单>/` 下。曲库所在盘上的 FLAC / MP3 会自动分析并加入同名歌单；不会覆盖已有文件，始终保留 256 MiB 空间；
 - **OmniSource 统一浏览**：U 盘 / SD 卡里的歌单和曲目直接显示在流媒体浏览器里，和流媒体歌单放在一起，一次搜索两边都能找到；U 盘曲目直接从盘上读取播放，音质不打折（`设置 → OmniSource`，默认关闭）；
 - **先锋 CDJ / Pro DJ Link（测试版）**：通过局域网 / Wi-Fi 读取 CDJ 上 rekordbox U 盘的曲库（`Pro DJ Link 曲库`），也能把本机曲库共享给 CDJ（实验功能）。SC5000 与 CDJ 之间始终只有一个 Master：MASTER 可以双向交接；本机当 Master 时会发出 BPM 和拍点，供 CDJ 的 BEAT SYNC 对拍。以上默认全部关闭；
-- **更干净的声音**：`主输出软限幅` 用平滑曲线把主输出压在 -0.1 dBFS 以下，零延迟，-1.5 dBFS 以下的信号原样不动；Flanger 不再让音量下沉（自动补偿到原曲电平，最多 +6 dB）；`拉杆切歌自动回音` 在拉下推子时留下回音尾巴；`自动增益（0 dB 归一化）` 把音量偏小的歌平滑地提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下的静音不提升），之后总会经过软限幅，不会爆音（默认关闭）。共 21 个实时 DSP 挂点，不增加任何延迟；
+- **更干净的声音**：`0dB 防破音软限幅` 用平滑曲线把主输出压在 -0.1 dBFS 以下，零延迟，-1.5 dBFS 以下的信号原样不动；Flanger 不再让音量下沉（自动补偿到原曲电平，最多 +6 dB）；`拉杆切歌自动回音` 在拉下推子时留下回音尾巴；`自动增益（0 dB 归一化）` 把音量偏小的歌平滑地提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下的静音不提升），之后总会经过软限幅，不会爆音（默认关闭）。共 21 个实时 DSP 挂点，不增加任何延迟；
 - **SC5000 / SC6000 原生四轨布局**：在独立播放机上解锁 Engine 自带的四轨界面，声卡仍只用 2 路。每台播放机负责自己角色的两轨（`自动`、`1+3`、`2+4`、`1+2`、`1`、`2`，在 `设置 → 设备 → 四轨角色` 或网页控制台切换），其余各轨是不出声的**影子轨道**，跟随另一台 EngineX 碟机或 CDJ 的曲目、播放 / CUE、位置、速度、Master 和同步；
 - 向 Shoutcast / Icecast 服务器 **直播推流**；
 - **曲库**：`自动分析插入的设备` 在后台分析新插入的 U 盘 / SD 卡上所有未分析的曲目，使用最低优先级，不影响播放；rekordbox 导出的 U 盘（包括 6.8.5）即使有个别文件损坏也能正常导入，那几首在加载时再分析；选中其他流媒体服务时，不再弹出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示；
@@ -179,20 +184,51 @@
 2. 将下载好的 `.img` 文件放入 **FAT32 或 exFAT 格式 U 盘的根目录**。
 3. 将 U 盘插入碟机（原厂 Engine OS 4.3.x 与 5.0.x 都可以直接刷），进入 **设置 (Settings) → 关于 / 更新 (About / Update) → 固件更新模式 (Firmware Update Mode)**，看到 `Found 5.3.0.2 on USB/SD` 时选 **USB/SD**，机器会自动完成刷入并重启。如果只弹出 *Reboot into firmware update mode?*，说明碟机没找到文件：核对机型，文件名保持原样放在根目录，再拔插一次 U 盘。
 
-> **二代机型（SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go、PRIME 4 G2、SYSTEM ONE）：`/data` 数据包，Beta**（#61、#68、#69、#76）。它们的固件带签名校验，不接受改过的 `.img`，所以没有它们的 `.img`。**二代机千万不要刷 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的镜像。** 改用 `/data` 数据包：在官方 Engine OS 5.3.0 之上加装 EngineX OS（先装好官方 5.3.0），不改动系统分区。前六款跑的是和 SC LIVE 4 同一份 Engine；PRIME 4 G2 和 SYSTEM ONE 共用一份 64 位 Engine。数据包已在官方 SC LIVE 4、Mixstream Pro+ 和 SYSTEM ONE / PRIME 4 G2 的根文件系统上通过沙箱测试，还没在实机上试过，欢迎反馈。
->
-> 1. 下载对应机型的数据包：
->    - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
->    - **Denon DJ SC LIVE 2** (JP20): [`SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
->    - **Denon DJ PRIME 4+** (JC11S): [`PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
->    - **Denon DJ PRIME GO+** (JP11S): [`PRIMEGOPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGOPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
->    - **Numark Mixstream Pro+** (NH08S): [`MIXSTREAMPROPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
->    - **Numark Mixstream Pro Go** (NH10): [`MIXSTREAMPROGO-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
->    - **Denon DJ PRIME 4 G2** (JP24): [`PRIME4G2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4G2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
->    - **Rane SYSTEM ONE** (RMZ2): [`SYSTEMONE-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SYSTEMONE-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
-> 2. 按包里的 `README-INSTALL.txt` 安装：推荐在机器上运行 `install.sh`（保留你的文件）。fastboot 方式会覆盖整个 `/data` 分区，只能用你自己 `/data` 备份做出来的镜像。
->
-> PRIME 4 G2 和 SYSTEM ONE（64 位 Engine）：已包含 UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和 EngineX 各项服务。DSP 防护、主输出限幅与自动增益、SQLite 调优和 4 台面解锁还没移植到 64 位 Engine；Stems 保持官方固件原样。这份 Engine 启动要用机器的安全芯片（OP-TEE），沙箱里只验证了 hook、内存补丁和 UI 包加载，没看到实际界面。
+### 方式一 b：二代机型（`/data` 数据包，Beta）
+
+**SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go、PRIME 4 G2 和 Rane SYSTEM ONE**（#61、#68、#69、#76）的固件带签名校验，不接受改过的 `.img`。EngineX OS 以 `/data` 数据包的形式装在官方 Engine OS 5.3.0 之上，不改动系统分区。**这些机器千万不要刷 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的 `.img`。** 数据包已在官方根文件系统上通过沙箱测试，还没在实机上试过，欢迎反馈结果。
+
+**准备**
+
+1. 先把机器升级到官方 **Engine OS 5.3.0**。
+2. 下载对应机型的数据包，并用 Release 页的 `SHA256SUMS.txt` 核对 SHA-256：
+   - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ SC LIVE 2** (JP20): [`SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ PRIME 4+** (JC11S): [`PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ PRIME GO+** (JP11S): [`PRIMEGOPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGOPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+   - **Numark Mixstream Pro+** (NH08S): [`MIXSTREAMPROPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+   - **Numark Mixstream Pro Go** (NH10): [`MIXSTREAMPROGO-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ PRIME 4 G2** (JP24): [`PRIME4G2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4G2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+   - **Rane SYSTEM ONE** (RMZ2): [`SYSTEMONE-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SYSTEMONE-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+
+**方法一（推荐）：在机器上安装**。保留你的音乐、设置和曲库。需要机器上的 root shell（SSH 或串口控制台）。
+
+1. 把 `.tar.gz` 拷到 U 盘插到机器上（也可以通过网络拷过去）。
+2. 在机器的 shell 里解压并安装（把 `<model>` 和 U 盘名换成你的）：
+   ```sh
+   cp "/media/<U 盘名>/<model>-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz" /tmp/
+   tar -xzf /tmp/<model>-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz -C /tmp
+   sh /tmp/<model>-5.3.0.2-EngineX-OS-Data-Bundle/install.sh
+   reboot
+   ```
+3. 重启后 Engine 先以原厂方式启动一次，随后自动以 EngineX OS 重新启动。之后 `设置 → 设备` 里会出现 EngineX 的选项（`语言`、`电源 → 关机` 等）。
+
+**方法二：在电脑上注入 userdata 镜像（fastboot）**。只在机器上没有 shell 时使用。需要一台装有 `python3`、`e2fsprogs`（`debugfs`）和 `fastboot` 的 Linux 电脑，以及**你自己 `/data` 分区的完整镜像**。刷写会替换整个 `/data` 分区，绝不能用空镜像或别人的镜像。
+
+1. 备份原件不动，在副本上操作：`cp my-userdata-backup.img userdata-enginex.img`
+2. 在电脑上解压数据包，再把它注入副本（两个辅助脚本在包里）：
+   ```sh
+   tar -xzf <model>-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz
+   python3 <model>-5.3.0.2-EngineX-OS-Data-Bundle/host-install-userdata.py userdata-enginex.img --bundle <model>-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz
+   ```
+3. 让机器进入 fastboot 模式并用 USB 连上电脑，然后刷入并重启：
+   ```sh
+   sh <model>-5.3.0.2-EngineX-OS-Data-Bundle/host-install-fastboot.sh userdata-enginex.img
+   ```
+
+**卸载**：`sh /data/sc5000-custom/bundle/uninstall.sh && reboot`，只删除数据包装上的内容。
+
+> **PRIME 4 G2 / SYSTEM ONE（64 位 Engine）**：已包含 UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和 EngineX 各项服务。DSP 防护、0dB 防破音软限幅与自动增益、SQLite 调优和 4 台面解锁还没移植到 64 位 Engine；Stems 保持官方固件原样。这份 Engine 启动要用机器的安全芯片（OP-TEE），沙箱里只验证了 hook、内存补丁和 UI 包加载，没看到实际界面。
 
 ### 方式二：碟机屏幕一键在线升级（已安装本系统后）
 - 连接 Wi-Fi 或网线后，打开碟机 **设置 → 关于 / 更新**；
