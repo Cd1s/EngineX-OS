@@ -82,13 +82,17 @@ class DataBundleTest(unittest.TestCase):
         self.assertEqual(a['sha256'], b['sha256'])
 
     def test_second_generation_prefixes(self):
-        # PRIME 4+ / PRIME GO+ / SC LIVE 2 run the same AZ0x firmware as SC LIVE 4 (#68).
-        for prefix in ('PRIME4PLUS', 'PRIMEGOPLUS', 'SCLIVE2'):
+        # These run SC LIVE 4's Engine on signed AZ0x firmware (#68, #69).
+        for prefix in ('PRIME4PLUS', 'PRIMEGOPLUS', 'SCLIVE2', 'MIXSTREAMPROPLUS', 'MIXSTREAMPROGO'):
             with self.subTest(prefix=prefix):
                 r = self.build(out=f'out-{prefix}', prefix=prefix)
                 self.assertTrue(os.path.basename(r['bundle']).startswith(f'{prefix}-5.3.0.1.1-EngineX-OS-Data-Bundle'))
                 with tarfile.open(r['bundle']) as t:
                     self.assertTrue(all(n.startswith(f'{prefix}-5.3.0.1.1-EngineX-OS-Data-Bundle') for n in t.getnames()))
+                    top = f'{prefix}-5.3.0.1.1-EngineX-OS-Data-Bundle'
+                    readme = t.extractfile(f'{top}/README-INSTALL.txt').read().decode()
+                    self.assertIn(bdb.MODELS[prefix], readme)
+                    self.assertIn(f'tar -xzf {top}.tar.gz', readme)
 
     def test_refuses_bad_input(self):
         (self.tmp / 'taken').mkdir()
