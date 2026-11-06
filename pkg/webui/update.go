@@ -1,8 +1,11 @@
 package webui
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -10,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -25,6 +29,11 @@ const (
 	imageVersionFile = "/etc/sc5000/version.txt"
 	stagedUpdateFile = "/data/az01-update.img"
 	updateCacheFor   = 10 * time.Minute
+
+	bundleSuffix    = "-EngineX-OS-Data-Bundle.tar.gz"
+	bundleCustomDir = "/data/sc5000-custom"
+	bundleMaxDown   = 64 << 20  // compressed download
+	bundleMaxUnpack = 128 << 20 // all extracted files together
 )
 
 var githubRepoRE = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
@@ -115,6 +124,10 @@ func hasMatchingStagedImage(path, downloadURL string) bool {
 }
 
 func (s *Server) applyOnlineUpdate(downloadURL string) {
+	if strings.HasSuffix(downloadURL, bundleSuffix) {
+		s.applyDataBundleUpdate(downloadURL)
+		return
+	}
 	uiDir := s.uiDir()
 	_ = os.Remove(filepath.Join(uiDir, "safe-mode"))
 	_ = os.Remove(filepath.Join(uiDir, "boot-count"))
@@ -270,9 +283,14 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 	v.Latest, v.URL = rel.Tag, rel.URL
 	v.UpdateAvailable = newerVersion(rel.Tag, v.Current)
 	if prefix := imagePrefix(deviceCompatible()); prefix != "" {
+		// Engine's own scan expects <PREFIX>-<version>-...Update.img; the second
+		// generation takes the /data bundle instead (#86).
+		suffix := "-Update.img"
+		if dataBundleBoards[prefix] {
+			suffix = bundleSuffix
+		}
 		for _, a := range rel.Assets {
-			// Engine's own scan expects <PREFIX>-<version>-...Update.img.
-			if strings.HasPrefix(a.Name, prefix+"-") && strings.HasSuffix(a.Name, "-Update.img") && strings.HasPrefix(a.URL, "https://") {
+			if strings.HasPrefix(a.Name, prefix+"-") && strings.HasSuffix(a.Name, suffix) && strings.HasPrefix(a.URL, "https://") {
 				v.DownloadURL = a.URL
 				break
 			}
@@ -308,6 +326,10 @@ var imagePrefixes = map[string]string{
 	"inmusic,jp24": "PRIME4G2", "inmusic,rmz2": "SYSTEMONE",
 }
 
+// dataBundleBoards update from a Data-Bundle.tar.gz, not an .img (#86).
+var dataBundleBoards = map[string]bool{"SCLIVE4": true, "SCLIVE2": true, "PRIME4PLUS": true, "PRIMEGOPLUS": true,
+	"MIXSTREAMPROPLUS": true, "MIXSTREAMPROGO": true, "PRIME4G2": true, "SYSTEMONE": true}
+
 // playerBoards are the standalone players: no channel faders, so no Upfader Echo (#52).
 var playerBoards = map[string]bool{"SC5000": true, "SC5000M": true, "SC6000": true, "SC6000M": true}
 
@@ -340,4 +362,192 @@ func newerVersion(latest, current string) bool {
 		}
 	}
 	return len(l) > len(c)
+}
+
+// applyDataBundleUpdate downloads a second-generation /data bundle, unpacks it
+// into a scratch directory next to the install and lets its own install.sh
+// verify SHA256SUMS and swap the parts in (#86).
+func (s *Server) applyDataBundleUpdate(downloadURL string) {
+	fail := func(msg string) { s.setUpdateProgress(0, msg, true) }
+	customDir := bundleCustomDir
+	if s.cfg.VersionFile != "" {
+		customDir = filepath.Dir(s.cfg.VersionFile)
+	}
+	if err := os.MkdirAll(customDir, 0o700); err != nil {
+		fail("cannot write " + customDir)
+		return
+	}
+	work, err := os.MkdirTemp(customDir, ".ota-bundle-*")
+	if err != nil {
+		fail("cannot write " + customDir)
+		return
+	}
+	defer os.RemoveAll(work)
+	archive := filepath.Join(work, "bundle.tar.gz")
+	if msg := s.downloadBundle(downloadURL, archive); msg != "" {
+		fail(msg)
+		return
+	}
+	top, err := unpackBundle(archive, filepath.Join(work, "x"))
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	s.setUpdateProgress(0.90, "", false)
+	cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
+	cmd.Env = append(os.Environ(), "SC5000_CUSTOM="+customDir)
+	if customDir != bundleCustomDir { // sandbox / test: no /data to write the ALSA file to
+		cmd.Env = append(cmd.Env, "SC5000_ALSA_OVERLAY="+filepath.Join(customDir, "alsa-conf.d"))
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		fail("bundle install: " + msg)
+		return
+	}
+	s.updateMu.Lock()
+	s.updateCache.Current = s.installedVersion()
+	s.updateCache.UpdateAvailable = false
+	s.updateMu.Unlock()
+	s.setUpdateProgress(1.0, "", true)
+	if customDir == bundleCustomDir {
+		// A detached shell outlives stream-sync, which it kills so the new suite starts.
+		// shortcut: if systemd kills the whole cgroup with the service, the reboot step is
+		// lost and the user reboots by hand; confirm on a real deck.
+		script := `sleep 2; pkill -f '[s]c5000-suite (stream-sync|rb-bridge|sc5000-deemixd)'; sleep 1; exec sh ` + bundleCustomDir + `/bundle/boot-activate.sh`
+		c := exec.Command("sh", "-c", script)
+		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		_ = c.Start()
+	}
+}
+
+// downloadBundle fetches url into dest, at most bundleMaxDown bytes; it returns an error message or "".
+func (s *Server) downloadBundle(url, dest string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "update download failed"
+	}
+	req.Header.Set("User-Agent", "EngineX-OS")
+	hc := s.cfg.HTTP
+	if hc == nil {
+		hc = &http.Client{Timeout: 10 * time.Minute}
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "update download failed"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "update download failed"
+	}
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "disk write failed"
+	}
+	defer out.Close()
+	var written int64
+	buf := make([]byte, 128*1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			written += int64(n)
+			if written > bundleMaxDown {
+				return "update download too large"
+			}
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				return "disk write failed"
+			}
+			if total := resp.ContentLength; total > 0 {
+				s.setUpdateProgress(0.05+0.80*float64(written)/float64(total), "", false)
+			}
+		}
+		if rerr == io.EOF {
+			return ""
+		}
+		if rerr != nil {
+			return "download interrupted"
+		}
+	}
+}
+
+// unpackBundle extracts a bundle into dir, refusing anything but plain files
+// and directories under one top directory, and returns that directory.
+func unpackBundle(archive, dir string) (string, error) {
+	bad := errors.New("invalid data bundle archive")
+	f, err := os.Open(archive)
+	if err != nil {
+		return "", bad
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", bad
+	}
+	tr := tar.NewReader(gz)
+	var top string
+	var total int64
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", bad
+		}
+		name := strings.TrimSuffix(h.Name, "/")
+		parts := strings.Split(name, "/")
+		if name == "" || strings.HasPrefix(h.Name, "/") {
+			return "", bad
+		}
+		for _, p := range parts {
+			if p == ".." || p == "" || p == "." {
+				return "", bad
+			}
+		}
+		if top == "" {
+			top = parts[0]
+		} else if parts[0] != top {
+			return "", bad
+		}
+		dest := filepath.Join(dir, filepath.FromSlash(name))
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(dest, 0o755); err != nil {
+				return "", bad
+			}
+		case tar.TypeReg:
+			total += h.Size
+			if h.Size < 0 || total > bundleMaxUnpack {
+				return "", bad
+			}
+			mode := os.FileMode(0o644)
+			if h.Mode&0o111 != 0 {
+				mode = 0o755
+			}
+			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+				return "", bad
+			}
+			out, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+			if err != nil {
+				return "", bad
+			}
+			_, cerr := io.Copy(out, io.LimitReader(tr, h.Size))
+			if out.Close() != nil || cerr != nil {
+				return "", bad
+			}
+		default:
+			return "", bad
+		}
+	}
+	root := filepath.Join(dir, top)
+	for _, need := range []string{"install.sh", "SHA256SUMS"} {
+		if st, err := os.Stat(filepath.Join(root, need)); top == "" || err != nil || !st.Mode().IsRegular() {
+			return "", bad
+		}
+	}
+	return root, nil
 }
