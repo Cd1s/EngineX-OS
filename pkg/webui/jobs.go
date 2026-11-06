@@ -276,7 +276,16 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 		return t, dl, err
 	case "spotify":
 		dl, err := j.fromSpotify(ctx, session, t, guest)
-		return t, dl, err
+		if err == nil {
+			return t, dl, nil
+		}
+		if matched, rerr := deemixclient.Resolve(ctx, j.p.Catalog, t); rerr == nil && j.p.Deemix != nil {
+			if dl, derr := j.p.Deemix.Download(ctx, matched, progress); derr == nil {
+				j.p.Deemix.Trim(dl.Path)
+				return matched, dl, nil
+			}
+		}
+		return t, nil, err
 	case "deezer":
 		matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
 		if err != nil {
