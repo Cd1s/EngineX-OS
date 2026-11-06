@@ -443,3 +443,130 @@ func TestFourDeckRole(t *testing.T) {
 		t.Fatalf("unresolved role exposed: %q", v.FourDeckRoleActive)
 	}
 }
+
+func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
+	dir := t.TempDir()
+	token := "secret-code"
+	cfg := Config{AccessToken: token, UIDir: dir, StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+
+	// 1. Verify defaults
+	client := srv.Client()
+	req, _ := http.NewRequest("GET", srv.URL+"/api/ui", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var v uiSettings
+	json.NewDecoder(resp.Body).Decode(&v)
+	if v.StreamSortRole != "default" || v.StreamSortOrder != "asc" || v.BrowserDualColumn != false ||
+		v.SyncGuardPct != 0 || v.SwapLoopOrder != false || v.LedBrightness != 100 ||
+		v.StemsEqMode != false || v.BeatJumpPads != false || v.PioneerFx != "off" {
+		t.Fatalf("unexpected defaults: %+v", v)
+	}
+
+	// 2. Update via POST /api/ui with query params and Bearer token
+	updateParams := "streamSortRole=bpm&streamSortOrder=desc&browserDualColumn=1&syncGuardPct=15&swapLoopOrder=1&ledBrightness=60&stemsEqMode=1&beatJumpPads=1&pioneerFx=spiral"
+	postReq, _ := http.NewRequest("POST", srv.URL+"/api/ui?"+updateParams, nil)
+	postReq.Header.Set("Authorization", "Bearer "+token)
+	postResp, err := client.Do(postReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer postResp.Body.Close()
+	if postResp.StatusCode != 200 {
+		t.Fatalf("POST /api/ui returned status %d", postResp.StatusCode)
+	}
+	var updated uiSettings
+	json.NewDecoder(postResp.Body).Decode(&updated)
+	if updated.StreamSortRole != "bpm" || updated.StreamSortOrder != "desc" || !updated.BrowserDualColumn ||
+		updated.SyncGuardPct != 15 || !updated.SwapLoopOrder || updated.LedBrightness != 60 ||
+		!updated.StemsEqMode || !updated.BeatJumpPads || updated.PioneerFx != "spiral" {
+		t.Fatalf("updated values mismatch: %+v", updated)
+	}
+
+	// 3. Verify GET /api/ui reflects the update
+	getReq, _ := http.NewRequest("GET", srv.URL+"/api/ui", nil)
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	getResp, err := client.Do(getReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer getResp.Body.Close()
+	var fetched uiSettings
+	json.NewDecoder(getResp.Body).Decode(&fetched)
+	if fetched.StreamSortRole != "bpm" || fetched.StreamSortOrder != "desc" || !fetched.BrowserDualColumn ||
+		fetched.SyncGuardPct != 15 || !fetched.SwapLoopOrder || fetched.LedBrightness != 60 ||
+		!fetched.StemsEqMode || !fetched.BeatJumpPads || fetched.PioneerFx != "spiral" {
+		t.Fatalf("fetched values mismatch: %+v", fetched)
+	}
+
+	// 4. Verify settings.conf persistence
+	confBytes, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := splitLines(confBytes)
+	for _, expected := range []string{
+		"stream_sort_role=bpm",
+		"stream_sort_order=desc",
+		"browser_dual_column=1",
+		"sync_guard_pct=15",
+		"swap_loop_order=1",
+		"led_brightness=60",
+		"stems_eq_mode=1",
+		"beat_jump_pads=1",
+		"pioneer_fx=spiral",
+	} {
+		if !slices.Contains(lines, expected) {
+			t.Errorf("settings.conf missing %q in:\n%s", expected, string(confBytes))
+		}
+	}
+
+	// 5. Reload in new Server instance
+	srv2 := httptest.NewServer(New(cfg, nil))
+	defer srv2.Close()
+	req2, _ := http.NewRequest("GET", srv2.URL+"/api/ui", nil)
+	req2.Header.Set("Authorization", "Bearer "+token)
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	var reloaded uiSettings
+	json.NewDecoder(resp2.Body).Decode(&reloaded)
+	if reloaded.StreamSortRole != "bpm" || reloaded.StreamSortOrder != "desc" || !reloaded.BrowserDualColumn ||
+		reloaded.SyncGuardPct != 15 || !reloaded.SwapLoopOrder || reloaded.LedBrightness != 60 ||
+		!reloaded.StemsEqMode || !reloaded.BeatJumpPads || reloaded.PioneerFx != "spiral" {
+		t.Fatalf("reloaded values mismatch: %+v", reloaded)
+	}
+
+	// 6. Test bad values rejected
+	badCases := []string{
+		"streamSortRole=invalid",
+		"streamSortOrder=invalid",
+		"browserDualColumn=maybe",
+		"syncGuardPct=25",
+		"swapLoopOrder=notabool",
+		"ledBrightness=10",
+		"ledBrightness=120",
+		"stemsEqMode=trueish",
+		"beatJumpPads=2",
+		"pioneerFx=echo_delay",
+	}
+	for _, bad := range badCases {
+		badReq, _ := http.NewRequest("POST", srv.URL+"/api/ui?"+bad, nil)
+		badReq.Header.Set("Authorization", "Bearer "+token)
+		badResp, err := client.Do(badReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		badResp.Body.Close()
+		if badResp.StatusCode != 400 {
+			t.Errorf("expected 400 for %s, got %d", bad, badResp.StatusCode)
+		}
+	}
+}

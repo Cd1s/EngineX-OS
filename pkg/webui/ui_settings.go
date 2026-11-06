@@ -4,7 +4,9 @@ package webui
 // engine_ui_hook.c, which only understands this key=value file.
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -26,6 +28,11 @@ var (
 	uiNeteaseModes = []string{neteaseOfficial, neteaseDeemix}
 	// TIDAL logs in through Engine's own flow against TIDAL's servers.
 	loginServices = []string{"netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
+
+	uiStreamSortRoles  = []string{"default", "bpm", "key", "rating", "song", "artist"}
+	uiStreamSortOrders = []string{"asc", "desc"}
+	uiSyncGuardPcts    = []int{0, 10, 15, 20}
+	uiPioneerFxModes   = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
 )
 
 const (
@@ -74,6 +81,16 @@ type uiSettings struct {
 	BroadcastEnabled bool     `json:"broadcastEnabled"`
 	UpfaderEcho      bool     `json:"upfaderEcho"`
 
+	StreamSortRole    string `json:"streamSortRole,omitempty"`
+	StreamSortOrder   string `json:"streamSortOrder,omitempty"`
+	BrowserDualColumn bool   `json:"browserDualColumn"`
+	SyncGuardPct      int    `json:"syncGuardPct"`
+	SwapLoopOrder     bool   `json:"swapLoopOrder"`
+	LedBrightness     int    `json:"ledBrightness"`
+	StemsEqMode       bool   `json:"stemsEqMode"`
+	BeatJumpPads      bool   `json:"beatJumpPads"`
+	PioneerFx         string `json:"pioneerFx"`
+
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
 
@@ -107,7 +124,10 @@ var uiServicesBeforeKnown = []string{"tidal", "netease", "spotify", "deezer", "s
 // loadUI must be called with uiMu held. Bad or missing values get defaults.
 func (s *Server) loadUI() uiSettings {
 	known, saved := uiServicesBeforeKnown, false
-	v := uiSettings{Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ProlinkWaveform: true}
+	v := uiSettings{
+		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ProlinkWaveform: true,
+		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off",
+	}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
 		key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
@@ -186,6 +206,34 @@ func (s *Server) loadUI() uiSettings {
 				v.UpfaderEcho = true
 			} else if val == "0" || strings.EqualFold(val, "false") {
 				v.UpfaderEcho = false
+			}
+		case "stream_sort_role":
+			if slices.Contains(uiStreamSortRoles, val) {
+				v.StreamSortRole = val
+			}
+		case "stream_sort_order":
+			if slices.Contains(uiStreamSortOrders, val) {
+				v.StreamSortOrder = val
+			}
+		case "browser_dual_column":
+			v.BrowserDualColumn = val == "1" || strings.EqualFold(val, "true")
+		case "sync_guard_pct":
+			if n, err := strconv.Atoi(val); err == nil && slices.Contains(uiSyncGuardPcts, n) {
+				v.SyncGuardPct = n
+			}
+		case "swap_loop_order":
+			v.SwapLoopOrder = val == "1" || strings.EqualFold(val, "true")
+		case "led_brightness":
+			if n, err := strconv.Atoi(val); err == nil && n >= 20 && n <= 100 {
+				v.LedBrightness = n
+			}
+		case "stems_eq_mode":
+			v.StemsEqMode = val == "1" || strings.EqualFold(val, "true")
+		case "beat_jump_pads":
+			v.BeatJumpPads = val == "1" || strings.EqualFold(val, "true")
+		case "pioneer_fx":
+			if slices.Contains(uiPioneerFxModes, val) {
+				v.PioneerFx = val
 			}
 		}
 	}
@@ -270,6 +318,33 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.ProlinkExport {
 		text += "prolink_export=1\n"
 	}
+	if v.StreamSortRole != "" && v.StreamSortRole != "default" {
+		text += "stream_sort_role=" + v.StreamSortRole + "\n"
+	}
+	if v.StreamSortOrder != "" && v.StreamSortOrder != "asc" {
+		text += "stream_sort_order=" + v.StreamSortOrder + "\n"
+	}
+	if v.BrowserDualColumn {
+		text += "browser_dual_column=1\n"
+	}
+	if v.SyncGuardPct != 0 {
+		text += "sync_guard_pct=" + strconv.Itoa(v.SyncGuardPct) + "\n"
+	}
+	if v.SwapLoopOrder {
+		text += "swap_loop_order=1\n"
+	}
+	if v.LedBrightness != 100 && v.LedBrightness >= 20 && v.LedBrightness <= 100 {
+		text += "led_brightness=" + strconv.Itoa(v.LedBrightness) + "\n"
+	}
+	if v.StemsEqMode {
+		text += "stems_eq_mode=1\n"
+	}
+	if v.BeatJumpPads {
+		text += "beat_jump_pads=1\n"
+	}
+	if v.PioneerFx != "" && v.PioneerFx != "off" {
+		text += "pioneer_fx=" + v.PioneerFx + "\n"
+	}
 	if v.GitHubRepo != defaultGitHubRepo {
 		text += "github_repo=" + v.GitHubRepo + "\n"
 	}
@@ -346,6 +421,16 @@ func parseBoolParam(val string) (bool, bool) {
 // safe mode: the user has asked for the UI to be tried again.
 func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if r.Body != nil && strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			for k, v := range body {
+				if !q.Has(k) {
+					q.Set(k, fmt.Sprint(v))
+				}
+			}
+		}
+	}
 	if q.Has("relayUrl") && !validRelayURL(q.Get("relayUrl")) {
 		fail(w, 400, errInvalidRelayURL)
 		return
@@ -355,7 +440,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) {
+	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -386,6 +471,69 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.UpfaderEcho = b
+	}
+	if q.Has("browserDualColumn") {
+		b, ok := parseBoolParam(q.Get("browserDualColumn"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.BrowserDualColumn = b
+	}
+	if q.Has("swapLoopOrder") {
+		b, ok := parseBoolParam(q.Get("swapLoopOrder"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.SwapLoopOrder = b
+	}
+	if q.Has("stemsEqMode") {
+		b, ok := parseBoolParam(q.Get("stemsEqMode"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.StemsEqMode = b
+	}
+	if q.Has("beatJumpPads") {
+		b, ok := parseBoolParam(q.Get("beatJumpPads"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.BeatJumpPads = b
+	}
+	if q.Has("syncGuardPct") {
+		n, err := strconv.Atoi(q.Get("syncGuardPct"))
+		if err != nil || !slices.Contains(uiSyncGuardPcts, n) {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.SyncGuardPct = n
+	}
+	if q.Has("ledBrightness") {
+		n, err := strconv.Atoi(q.Get("ledBrightness"))
+		if err != nil || n < 20 || n > 100 {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.LedBrightness = n
+	}
+	if q.Has("streamSortRole") {
+		v.StreamSortRole = q.Get("streamSortRole")
+	}
+	if q.Has("streamSortOrder") {
+		v.StreamSortOrder = q.Get("streamSortOrder")
+	}
+	if q.Has("pioneerFx") {
+		v.PioneerFx = q.Get("pioneerFx")
 	}
 	var (
 		hasBroadcast bool
