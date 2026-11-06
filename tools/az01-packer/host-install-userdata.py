@@ -90,13 +90,13 @@ def inject(img_path, bundle_tar, check=True):
             Path('sc5000-custom/bundle/bin'),
             Path('sc5000-custom/bundle/lib'),
             Path('sc5000-custom/ui'),
-            Path('system'),
-            Path('system/var'),
-            Path('system/var/overlay'),
-            Path('system/var/overlay/lib'),
-            Path('system/var/overlay/lib/alsa'),
-            Path('system/var/overlay/lib/alsa/conf.d'),
         }
+        # Bundles without alsa-dir predate AZ04 (#76) and all used the overlay path.
+        alsa_file = broot / 'alsa-dir'
+        alsa_rel = Path(alsa_file.read_text().strip() if alsa_file.is_file() else 'system/var/overlay/lib/alsa/conf.d')
+        if alsa_rel.is_absolute() or '..' in alsa_rel.parts:
+            fail(f'unsafe alsa-dir {alsa_rel}')
+        dirs.add(alsa_rel)
 
         files = []
 
@@ -116,6 +116,7 @@ def inject(img_path, bundle_tar, check=True):
             ('99-sc5000-custom.conf', 0o100644),
             ('uninstall.sh', 0o100755),
             ('version.txt', 0o100644),
+            ('alsa-dir', 0o100644),
             ('SHA256SUMS', 0o100644),
         ]:
             p = broot / name
@@ -147,7 +148,7 @@ def inject(img_path, bundle_tar, check=True):
         # 3. ALSA hook configuration
         alsa_conf_f = broot / '99-sc5000-custom.conf'
         if alsa_conf_f.is_file():
-            files.append((alsa_conf_f, Path('system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf'), 0o100644))
+            files.append((alsa_conf_f, alsa_rel / '99-sc5000-custom.conf', 0o100644))
 
         all_dirs = set(dirs)
         for d in dirs:

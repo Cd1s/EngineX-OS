@@ -85,6 +85,8 @@ func TestImagePrefix(t *testing.T) {
 		"inmusic,jp11s":                    "PRIMEGOPLUS",
 		"inmusic,nh08s":                    "MIXSTREAMPROPLUS",
 		"inmusic,nh10":                     "MIXSTREAMPROGO",
+		"inmusic,jp24\x00inmusic,az04":     "PRIME4G2",
+		"inmusic,rmz2\x00inmusic,az04":     "SYSTEMONE",
 		"rockchip,rk3288":                  "",
 	} {
 		if got := imagePrefix(strings.Split(in, "\x00")); got != want {

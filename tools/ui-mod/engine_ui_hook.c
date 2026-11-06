@@ -32,6 +32,13 @@
 #include "dsp_smooth.h"
 #include "master_limiter.h"
 
+// The A32 trampoline installers: the AArch64 build (AZ04) never calls them.
+#if defined(__aarch64__)
+#define A32_ONLY __attribute__((unused))
+#else
+#define A32_ONLY
+#endif
+
 #define UI_ROOT "/data/sc5000-custom/ui"
 #define FLAG_COMPRESSED 0x01
 #define FLAG_DIRECTORY 0x02
@@ -72,6 +79,9 @@ struct walk {
     size_t node_size;
     char pack[128];
     int replaced;
+#if defined(__aarch64__)
+    int failed; // a file could not be placed: register the stock tree, never half a pack
+#endif
 };
 
 static int is_engine(void) {
@@ -142,7 +152,7 @@ static void *lim_poll(void *arg) {
     return NULL;
 }
 
-static void lim_start_poll(void) {
+A32_ONLY static void lim_start_poll(void) {
     pthread_attr_t attr;
     struct sched_param param = {.sched_priority = 0};
     pthread_t thread;
@@ -461,7 +471,7 @@ static void patch_bytes(uintptr_t entry, const void *bytes, size_t size, size_t 
     __builtin___clear_cache((char *)entry, (char *)entry + size);
 }
 
-static int install_dsp_hooks(uintptr_t base, size_t page) {
+A32_ONLY static int install_dsp_hooks(uintptr_t base, size_t page) {
     // edit_engine has already verified the main ELF BuildID. Treat these hooks
     // as one group: if ANY original prefix differs, leave ALL DSP sites alone.
     if (!base || !page) return 0;
@@ -555,7 +565,7 @@ static void four_deck_role(void) {
         if (!strcmp(role, roles[i].name)) four_deck_route[0] = roles[i].a, four_deck_route[1] = roles[i].b;
 }
 
-static void prepare_config(uintptr_t base, size_t page) {
+A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     // getConfig's common return path runs after every model's constructor.
     uint32_t code[] = {
         0xe3a02001, // mov r2, #1
@@ -591,7 +601,7 @@ static void prepare_config(uintptr_t base, size_t page) {
     config_jump[1] = (uint32_t)(uintptr_t)rx_code(code, sizeof code, page);
 }
 
-static void prepare_stems_feature(uintptr_t base, size_t page) {
+A32_ONLY static void prepare_stems_feature(uintptr_t base, size_t page) {
     // The old 0x8429b0 exit misses models configured False; intercept before that split.
     uint32_t code[] = {
         0xe59f3018, // ldr r3, [pc, #24] (Stems feature object)
@@ -611,6 +621,34 @@ static void prepare_stems_feature(uintptr_t base, size_t page) {
     stems_feature_jump[1] = (uint32_t)(uintptr_t)rx_code(code, sizeof code, page);
 }
 
+#if defined(__aarch64__)
+// 5.3.0 AZ04 (PRIME 4 G2 JP24, SYSTEM ONE RMZ2; BuildID 04033591...): a 64-bit
+// Engine, so only data and single-instruction edits. The TidalAPI URLs are the
+// same encrypted bytes as 5.3.0, split into a 16-byte q and an 8-byte d literal
+// (each read once, at 0x4ecd44/0x4ecd4c and 0x4ecddc/0x4ecde4), and the auth
+// suffix "1/" is the mov w0 immediate. "aac" has one xref (0x1241cc0), next to
+// FLAC/flac/mp4 as in 5.3.0. The A32 trampolines (config, Stems feature, SQLite,
+// DSP guards) are not ported: they would write A32 code into an AArch64 Engine.
+static const struct engine_edit edits_az04[] = {
+    {0x1d40f28u, "aac", "mp3", 4, EDIT_ONE},
+    // TidalAPI base URL -> stream-sync /v1/
+    {0x1dbff30u, "\x4c\x51\x52\x57\x5b\x13\x05\x04\x4d\x5d\x47\x01\x44\x58\x56\x52",
+        "\x4c\x51\x52\x57\x12\x06\x05\x1a\x1e\x1a\x00\x1f\x1e\x01\x1c\x02", 16, EDIT_GATEWAY},
+    {0x1dc0ee0u, "\x58\x1b\x55\x58\x55\x16\x4c\x0a", "\x0e\x0d\x06\x0f\x08\x16\x4c\x0a", 8, EDIT_GATEWAY},
+    // TidalAPI auth URL -> stream-sync /au//
+    {0x1dbff40u, "\x3f\x2c\x2d\x2a\x28\x66\x72\x71\x3e\x15\x15\x0a\x4d\x10\x0c\x02",
+        "\x3f\x2c\x2d\x2a\x61\x73\x72\x6f\x6d\x57\x4f\x52\x4d\x54\x4b\x57", 16, EDIT_GATEWAY},
+    {0x1dc0ee8u, "\x06\x04\x47\x09\x04\x01\x42\x18", "\x5d\x50\x59\x52\x5b\x43\x0c\x1b", 8, EDIT_GATEWAY},
+    // TidalAPI auth URL suffix 1/ -> //: mov w0, #0x5f5e -> mov w0, #0x5f40
+    {0x4ecde0u, "\xc0\xeb\x8b\x52", "\x00\xe8\x8b\x52", 4, EDIT_GATEWAY},
+};
+
+static const struct engine_build engine_builds[] = {
+    {.name = "5.3.0-az04",
+     .id = "\x04\x03\x35\x91\x8d\xb1\x14\x4f\x0c\x34\x52\xd6\xf2\x30\x88\xd3\xc3\xa9\x46\x13",
+     .edits = edits_az04, .edit_count = sizeof edits_az04 / sizeof *edits_az04},
+};
+#else
 static const struct engine_edit edits_504[] = {
     // Stems remote processor: exact Engine build from the verified patch manifest.
     {0x85ef9cu, "\xbc\x26\x9f\xe5\xbc\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x94\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
@@ -724,6 +762,7 @@ static const struct engine_build engine_builds[] = {
      0x2c1bea4, 0x1ddf11c, 0x1db3ba4, 0x1deab3c, 0x1db32ec,
      {"\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", "\xf4\x42\x6d\xe1\x20\xe0\x8d\xe5", ""}},
 };
+#endif
 
 static void select_build(const struct engine_build *b) {
     build = b;
@@ -786,10 +825,12 @@ __attribute__((constructor)) static void edit_engine(void) {
     if (page_size <= 0) return;
     uintptr_t page = (uintptr_t)page_size;
     fprintf(stderr, "engine-ui-hook: Engine %s\n", build->name);
+#if !defined(__aarch64__)
     prepare_config(base, page);
     uint32_t expected_feature[2] = {build->feature_displaced ? build->feature_displaced : 0xe51b3340, 0xe3540000};
     if (build->feature_true && !memcmp((const void *)(base + build->feature_site), expected_feature, 8))
         prepare_stems_feature(base, page);
+#endif
     // A group is applied only if every site of it is stock or already patched.
     int ready[3] = {1, 1, 1};
     for (unsigned i = 0; i < build->edit_count; i++)
@@ -823,8 +864,10 @@ __attribute__((constructor)) static void edit_engine(void) {
         __builtin___clear_cache(at, at + e->size);
         fprintf(stderr, "engine-ui-hook: applied 0x%x (%u bytes)\n", e->offset, e->size);
     }
+#if !defined(__aarch64__)
     install_sqlite_hooks(base, page);
     if (install_dsp_hooks(base, page)) lim_start_poll();
+#endif
 }
 
 // Unknown or unsafe values fall back to the English pack.
@@ -869,6 +912,29 @@ static uchar *load_blob(const char *path) {
     close(fd);
     return blob;
 }
+
+#if defined(__aarch64__)
+// Qt finds a file at data + a 32-bit offset. On a 64-bit Engine the heap is far
+// from data, so map each blob within the 4 GiB above it instead; start 2 GiB up,
+// clear of the brk heap that follows the Engine image.
+static uchar *near_data(uchar *blob, const uchar *data) {
+    static uintptr_t next;
+    size_t page = (size_t)sysconf(_SC_PAGESIZE), n = 4 + (size_t)be32(blob), span = (n + page - 1) / page * page;
+    uintptr_t lo = ((uintptr_t)data + page - 1) / page * page, hi = (uintptr_t)data + 0xffffffffu - span;
+    if (next < lo || next > hi) next = lo + 0x80000000u;
+    for (; next <= hi; next += 0x1000000) { // 16 MiB steps past anything mapped there
+        void *p = mmap((void *)next, span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        if (p == MAP_FAILED) continue;
+        if ((uintptr_t)p != next) { munmap(p, span); continue; } // kernel without NOREPLACE took it as a hint
+        memcpy(p, blob, n);
+        free(blob);
+        next += span;
+        return p;
+    }
+    free(blob);
+    return NULL;
+}
+#endif
 
 // Node name in ASCII, or 0 for a name a pack could not use.
 static int node_name(const struct walk *w, uint32_t offset, char *out, size_t size) {
@@ -934,7 +1000,13 @@ static void apply(struct walk *w, uint32_t node, const char *prefix, int depth) 
     uchar *blob = load_blob(file);
     if (!blob)
         return;
-    // Qt adds the offset to the data pointer. On this 32-bit target it wraps,
+#if defined(__aarch64__)
+    if (!(blob = near_data(blob, w->data))) {
+        w->failed = 1;
+        return;
+    }
+#endif
+    // Qt adds the offset to the data pointer. On a 32-bit target it wraps,
     // so the blob can live anywhere in the address space.
     put32(e + 10, (uint32_t)((uintptr_t)blob - (uintptr_t)w->data));
     e[4] = (uchar)((flags & ~(FLAG_COMPRESSED | FLAG_ZSTD)) >> 8);
@@ -955,7 +1027,7 @@ int _Z21qRegisterResourceDataiPKhS0_S0_(int version, const uchar *tree, const uc
         return 0;
     if (active < 0)
         active = is_engine() && access(UI_ROOT "/safe-mode", F_OK) != 0;
-    if (!active || version < 1 || version > 3 || sizeof(void *) != 4)
+    if (!active || version < 1 || version > 3)
         return real(version, tree, names, data);
 
     struct walk w = {.tree = (uchar *)tree, .names = names, .data = data, .node_size = version >= 2 ? 22 : 14};
@@ -967,6 +1039,12 @@ int _Z21qRegisterResourceDataiPKhS0_S0_(int version, const uchar *tree, const uc
     memcpy(copy, tree, bytes);
     w.tree = copy;
     apply(&w, 0, "", 0);
+#if defined(__aarch64__)
+    if (w.failed) {
+        fprintf(stderr, "engine-ui-hook: %s: no address for a pack file, stock UI\n", w.pack);
+        w.replaced = 0;
+    }
+#endif
     if (!w.replaced) {
         free(copy);
         return real(version, tree, names, data);
@@ -1201,7 +1279,7 @@ static void redirect_function(uintptr_t entry, const void *handler, size_t page)
     __builtin___clear_cache((char *)entry, (char *)entry + sizeof jump);
 }
 
-static void install_sqlite_hooks(uintptr_t base, size_t page) {
+A32_ONLY static void install_sqlite_hooks(uintptr_t base, size_t page) {
     // Identified through sqlite3_api_routines slots 55/70/135 and ARM disassembly.
     const struct engine_build *b = build;
     const uint32_t *api = (const void *)(base + b->sqlite_api);

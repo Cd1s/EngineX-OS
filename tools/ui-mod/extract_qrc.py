@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Extract the QML/asset tree Engine embeds with rcc, straight from an official image.
 
-Build host only (needs debugfs, qemu-arm and the armhf preload built from qrc_dump.c):
+Build host only (needs debugfs, qemu-arm and the armhf preload built from qrc_dump.c;
+for a 64-bit AZ04 Engine, qemu-aarch64 and qrc_dump.c built for aarch64):
     python3 -I extract_qrc.py --image <PREFIX>-<ver>-Update.img --preload qrc_dump.so --out <new dir>
     python3 -I extract_qrc.py --tree <unpacked rootfs> --preload qrc_dump.so --out <new dir>
 
@@ -81,7 +82,9 @@ def run_engine(tree, preload, dump):
         raise SystemExit('no usr/Engine/Engine in ' + str(tree))
     os.chmod(dump, 0o777)
     env = {'PATH': '/usr/bin:/bin', 'HOME': str(dump), 'QT_QPA_PLATFORM': 'offscreen'}
-    cmd = ['qemu-arm', '-L', str(tree), '-E', 'LD_PRELOAD=' + str(preload),
+    with open(engine, 'rb') as f:
+        aarch64 = f.read(20)[18:20] == b'\xb7\x00'  # EM_AARCH64: AZ04 (PRIME 4 G2, SYSTEM ONE)
+    cmd = ['qemu-aarch64' if aarch64 else 'qemu-arm', '-L', str(tree), '-E', 'LD_PRELOAD=' + str(preload),
            '-E', 'QRC_DUMP_DIR=' + str(dump), '-E', 'QT_QPA_PLATFORM=offscreen', str(engine), '--help']
     if os.geteuid() == 0:
         cmd = ['setpriv', '--reuid=nobody', '--regid=nogroup', '--clear-groups', '--'] + cmd
@@ -109,7 +112,7 @@ def main(argv=None):
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument('--image', type=Path, help='official AZ01 update image')
     src.add_argument('--tree', type=Path, help='already unpacked rootfs tree')
-    ap.add_argument('--preload', type=Path, required=True, help='armhf qrc_dump.so')
+    ap.add_argument('--preload', type=Path, required=True, help='qrc_dump.so for the Engine\'s architecture')
     ap.add_argument('--out', type=Path, required=True, help='new output directory')
     a = ap.parse_args(argv)
     if a.out.exists():

@@ -4,8 +4,16 @@
 # ALSA-to-LD_PRELOAD one-shot boot hook, and Engine 5.3.0-sclive4 full hook application.
 set -euo pipefail
 
-ROOTFS="${ROOTFS:-/root/build/sc5000-lab/sclive4-rea61-followup/rootfs}"  # or another unpacked gen2 rootfs
-QRC="/root/build/sc5000-lab/5.3.0/qrc"
+# AZ04=1: PRIME 4 G2 / SYSTEM ONE (#76), 64-bit Engine, /var/lib bound from /data/system/var-lib.
+AZ04="${AZ04:-0}"
+if [ "$AZ04" = 1 ]; then
+    ROOTFS="${ROOTFS:-/root/build/sc5000-lab/systemone-analysis/rootfs}"
+    PREFIX=PRIME4G2 VARLIB=data/system/var-lib PROFILE=5.3.0-az04 EDITS=6
+else
+    ROOTFS="${ROOTFS:-/root/build/sc5000-lab/sclive4-rea61-followup/rootfs}"  # or another unpacked gen2 rootfs
+    PREFIX=SCLIVE4 VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=16
+fi
+QRC="${QRC:-/root/build/sc5000-lab/5.3.0/qrc}"  # AZ04's QML is byte-identical to it
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -22,14 +30,39 @@ fi
 TMP=$(mktemp -d /tmp/sclive4-sbx-XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
-echo "=== SC LIVE 4 (inmusic,jp21) Bootstrap & Installer Verification ==="
+echo "=== $PREFIX Bootstrap & Installer Verification ==="
 echo "Workdir: $TMP"
 
 # 1. Build Suite, Hook and UI Packs
 echo "[1/5] Building components and packaging data bundle..."
-(cd "$REPO/tools/ui-mod" && sh build.sh)
-HOOK="$REPO/rootfs-overlay/etc/sc5000/libengine-ui-hook.so"
-SUITE="$REPO/out/sc5000-suite"
+if [ "$AZ04" = 1 ]; then
+    HOOK="$REPO/out/aarch64/libengine-ui-hook.so"
+    SUITE="$REPO/out/aarch64/sc5000-suite"
+    mkdir -p "$REPO/out/aarch64"
+    (cd "$REPO/tools/ui-mod" && CROSS= OUT="$HOOK" sh build.sh)
+    (cd "$REPO" && . /etc/profile.d/buildtools.sh && \
+     GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$SUITE" ./cmd/sc5000-suite)
+    # Stage 1 stand-in for the stock Engine: loads alsa.conf (and so conf.d) and opens a PCM, as Engine does.
+    PROBE="$TMP/alsa-probe"
+    printf '%s\n' '#include <dlfcn.h>' \
+        'int main(void) {' \
+        '    void *h = dlopen("libasound.so.2", RTLD_NOW), *pcm = 0;' \
+        '    if (!h) return 1;' \
+        '    int (*update)(void) = (int (*)(void))dlsym(h, "snd_config_update");' \
+        '    int (*open)(void **, const char *, int, int) = (int (*)(void **, const char *, int, int))dlsym(h, "snd_pcm_open");' \
+        '    int (*close)(void *) = (int (*)(void *))dlsym(h, "snd_pcm_close");' \
+        '    if (!update || !open || !close || update() < 0) return 1;' \
+        '    if (open(&pcm, "null", 0, 0) == 0) close(pcm);' \
+        '    return 0;' \
+        '}' \
+        > "$TMP/alsa-probe.c"
+    gcc -O2 -o "$PROBE" "$TMP/alsa-probe.c" -ldl
+else
+    PROBE=/root/build/sc5000-lab/sclive4-rea61-followup/stock-alsa-probe
+    (cd "$REPO/tools/ui-mod" && sh build.sh)
+    HOOK="$REPO/rootfs-overlay/etc/sc5000/libengine-ui-hook.so"
+    SUITE="$REPO/out/sc5000-suite"
+fi
 
 if [ ! -f "$SUITE" ]; then
     echo "Building sc5000-suite..."
@@ -47,9 +80,10 @@ python3 "$REPO/tools/az01-packer/build-data-bundle.py" 5.3.0.1.1 \
     --suite "$SUITE" \
     --hook "$HOOK" \
     --ui-packs "$TMP/ui-packs.tar.gz" \
+    --prefix "$PREFIX" \
     --out "$TMP/bundle_out" >/dev/null
 
-BUNDLE="$TMP/bundle_out/SCLIVE4-5.3.0.1.1-EngineX-OS-Data-Bundle.tar.gz"
+BUNDLE="$TMP/bundle_out/$PREFIX-5.3.0.1.1-EngineX-OS-Data-Bundle.tar.gz"
 test -f "$BUNDLE"
 echo "  Data bundle: $BUNDLE"
 
@@ -66,7 +100,7 @@ python3 "$REPO/tools/az01-packer/host-install-userdata.py" "$IMG" --bundle "$BUN
 # Verify filesystem integrity
 e2fsck -f -y "$IMG" >/dev/null
 debugfs -R "stat /Music/user_track.flac" "$IMG" 2>&1 | grep -q "regular"
-debugfs -R "stat /system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf" "$IMG" 2>&1 | grep -q "regular"
+debugfs -R "stat /${VARLIB#data/}/alsa/conf.d/99-sc5000-custom.conf" "$IMG" 2>&1 | grep -q "regular"
 debugfs -R "stat /sc5000-custom/bundle/lib/libengine-ui-hook.so" "$IMG" 2>&1 | grep -q "regular"
 debugfs -R "stat /sc5000-custom/bundle/boot-activate.sh" "$IMG" 2>&1 | grep -q "regular"
 test "$(debugfs -R "cat /sc5000-custom/version.txt" "$IMG" 2>/dev/null | tr -d '\r\n')" = "5.3.0.1.1"
@@ -82,7 +116,7 @@ set -euo pipefail
 mount --bind '$ROOTFS' '$TARGET'
 mount -o remount,ro,bind '$TARGET'
 mount -o loop '$IMG' '$TARGET/data'
-mount --bind '$TARGET/data/system/var/overlay/lib' '$TARGET/var/lib'
+mount --bind '$TARGET/$VARLIB' '$TARGET/var/lib'
 mount -t tmpfs tmpfs '$TARGET/run'
 mount -t tmpfs tmpfs '$TARGET/tmp'
 mount --bind /dev '$TARGET/dev'
@@ -99,7 +133,7 @@ fi
 test -f '$TARGET/var/lib/alsa/conf.d/99-sc5000-custom.conf'
 
 # Stage 1 trigger: run probe named Engine (simulating stock un-preloaded Engine audio open)
-cp /root/build/sc5000-lab/sclive4-rea61-followup/stock-alsa-probe '$TARGET/tmp/Engine'
+cp '$PROBE' '$TARGET/tmp/Engine'
 chmod +x '$TARGET/tmp/Engine'
 
 chroot '$TARGET' /tmp/Engine / > '$TMP/stage1.log' 2>&1 || true
@@ -119,13 +153,13 @@ grep -q 'LD_PRELOAD=/data/sc5000-custom/bundle/lib/libengine-ui-hook.so' \
 echo "  Stage 1 ALSA boot activation: PASS"
 
 # 4. Stage 2: Second Boot with LD_PRELOAD
-echo "[4/5] Testing Stage 2 (SC LIVE 4 Engine running with LD_PRELOAD)..."
+echo "[4/5] Testing Stage 2 ($PREFIX Engine running with LD_PRELOAD)..."
 unshare -m -n -p -f bash -c "
 set -euo pipefail
 mount --bind '$ROOTFS' '$TARGET'
 mount -o remount,ro,bind '$TARGET'
 mount -o loop '$IMG' '$TARGET/data'
-mount --bind '$TARGET/data/system/var/overlay/lib' '$TARGET/var/lib'
+mount --bind '$TARGET/$VARLIB' '$TARGET/var/lib'
 mount -t tmpfs tmpfs '$TARGET/run'
 mount -t tmpfs tmpfs '$TARGET/tmp'
 mount --bind /dev '$TARGET/dev'
@@ -142,12 +176,18 @@ timeout 8 chroot '$TARGET' /usr/bin/env -i \
     LD_LIBRARY_PATH=/usr/qt/lib \
     /usr/Engine/Engine -d0 > '$TMP/stage2.log' 2>&1 || true
 
-grep -q 'engine-ui-hook: Engine 5.3.0-sclive4' '$TMP/stage2.log'
-test \$(grep -c 'engine-ui-hook: applied 0x' '$TMP/stage2.log') -eq 16
-grep -q 'engine-ui-hook: 21 DSP guards/transitions installed' '$TMP/stage2.log'
-grep -q 'engine-ui-hook: SQLite open/open_v2 hooks installed' '$TMP/stage2.log'
+grep -q 'engine-ui-hook: Engine $PROFILE' '$TMP/stage2.log'
+test \$(grep -c 'engine-ui-hook: applied 0x' '$TMP/stage2.log') -eq $EDITS
+grep -Eq 'engine-ui-hook: .*packs/en: [1-9][0-9]* files' '$TMP/stage2.log'
+if [ '$AZ04' = 1 ]; then
+    # The A32 trampolines must never run in the 64-bit Engine.
+    ! grep -Eq 'DSP guards|SQLite open' '$TMP/stage2.log'
+else
+    grep -q 'engine-ui-hook: 21 DSP guards/transitions installed' '$TMP/stage2.log'
+    grep -q 'engine-ui-hook: SQLite open/open_v2 hooks installed' '$TMP/stage2.log'
+fi
 "
-echo "  Stage 2 SC LIVE 4 Engine hook: PASS (16 memory edits, 21 DSP guards, SQLite hooks)"
+echo "  Stage 2 $PREFIX Engine hook: PASS ($EDITS memory edits, UI pack loaded)"
 
 # 5. Method B: On-Device install.sh / uninstall.sh
 echo "[5/5] Testing Method B (on-device install.sh / uninstall.sh)..."
@@ -156,7 +196,7 @@ set -euo pipefail
 mount --bind '$ROOTFS' '$TARGET'
 mount -o remount,ro,bind '$TARGET'
 mount -o loop '$IMG' '$TARGET/data'
-mount --bind '$TARGET/data/system/var/overlay/lib' '$TARGET/var/lib'
+mount --bind '$TARGET/$VARLIB' '$TARGET/var/lib'
 mount -t tmpfs tmpfs '$TARGET/run'
 mount -t tmpfs tmpfs '$TARGET/tmp'
 mount --bind /dev '$TARGET/dev'
@@ -165,18 +205,18 @@ mount -t sysfs sysfs '$TARGET/sys'
 
 mkdir -p '$TARGET/tmp/installer'
 tar -xzf '$BUNDLE' -C '$TARGET/tmp/installer'
-chroot '$TARGET' /bin/sh /tmp/installer/SCLIVE4-5.3.0.1.1-EngineX-OS-Data-Bundle/install.sh >/dev/null
+chroot '$TARGET' /bin/sh /tmp/installer/$PREFIX-5.3.0.1.1-EngineX-OS-Data-Bundle/install.sh >/dev/null
 
-test -f '$TARGET/data/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf'
+test -f '$TARGET/$VARLIB/alsa/conf.d/99-sc5000-custom.conf'
 test -f '$TARGET/data/sc5000-custom/version.txt'
 
 chroot '$TARGET' /bin/sh /data/sc5000-custom/bundle/uninstall.sh >/dev/null
 
-test ! -f '$TARGET/data/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf'
+test ! -f '$TARGET/$VARLIB/alsa/conf.d/99-sc5000-custom.conf'
 test ! -d '$TARGET/data/sc5000-custom/bundle'
 test -f '$TARGET/data/Music/user_track.flac'
 "
 echo "  Method B on-device install & uninstall: PASS"
 
 echo ""
-echo "=== All SC LIVE 4 verification checks PASSED ==="
+echo "=== All $PREFIX verification checks PASSED ==="

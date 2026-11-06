@@ -179,7 +179,7 @@
 2. 将下载好的 `.img` 文件放入 **FAT32 或 exFAT 格式 U 盘的根目录**。
 3. 将 U 盘插入碟机（原厂 Engine OS 4.3.x 与 5.0.x 都可以直接刷），进入 **设置 (Settings) → 关于 / 更新 (About / Update) → 固件更新模式 (Firmware Update Mode)**，看到 `Found 5.3.0.2 on USB/SD` 时选 **USB/SD**，机器会自动完成刷入并重启。如果只弹出 *Reboot into firmware update mode?*，说明碟机没找到文件：核对机型，文件名保持原样放在根目录，再拔插一次 U 盘。
 
-> **二代机型（SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go）：`/data` 数据包，Beta**（#61、#68、#69）。它们的固件带签名校验，不接受改过的 `.img`，所以没有它们的 `.img`。**二代机千万不要刷 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的镜像。** 改用 `/data` 数据包：在官方 Engine OS 5.3.0 之上加装 EngineX OS（先装好官方 5.3.0），不改动系统分区。这六款跑的是和 SC LIVE 4 同一份 Engine；数据包已在官方 SC LIVE 4 与 Mixstream Pro+ 的根文件系统上通过沙箱测试，还没在实机上试过，欢迎反馈。
+> **二代机型（SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go、PRIME 4 G2、SYSTEM ONE）：`/data` 数据包，Beta**（#61、#68、#69、#76）。它们的固件带签名校验，不接受改过的 `.img`，所以没有它们的 `.img`。**二代机千万不要刷 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的镜像。** 改用 `/data` 数据包：在官方 Engine OS 5.3.0 之上加装 EngineX OS（先装好官方 5.3.0），不改动系统分区。前六款跑的是和 SC LIVE 4 同一份 Engine；PRIME 4 G2 和 SYSTEM ONE 共用一份 64 位 Engine。数据包已在官方 SC LIVE 4、Mixstream Pro+ 和 SYSTEM ONE / PRIME 4 G2 的根文件系统上通过沙箱测试，还没在实机上试过，欢迎反馈。
 >
 > 1. 下载对应机型的数据包：
 >    - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
@@ -188,9 +188,11 @@
 >    - **Denon DJ PRIME GO+** (JP11S): [`PRIMEGOPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGOPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
 >    - **Numark Mixstream Pro+** (NH08S): [`MIXSTREAMPROPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
 >    - **Numark Mixstream Pro Go** (NH10): [`MIXSTREAMPROGO-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Denon DJ PRIME 4 G2** (JP24): [`PRIME4G2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4G2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Rane SYSTEM ONE** (RMZ2): [`SYSTEMONE-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SYSTEMONE-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
 > 2. 按包里的 `README-INSTALL.txt` 安装：推荐在机器上运行 `install.sh`（保留你的文件）。fastboot 方式会覆盖整个 `/data` 分区，只能用你自己 `/data` 备份做出来的镜像。
 >
-> PRIME 4 G2（JP24）和 SYSTEM ONE（RMZ2）不支持：它们的 5.3.0 固件是 64 位版本，Engine 也不同。
+> PRIME 4 G2 和 SYSTEM ONE（64 位 Engine）：已包含 UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和 EngineX 各项服务。DSP 防护、主输出限幅与自动增益、SQLite 调优和 4 台面解锁还没移植到 64 位 Engine；Stems 保持官方固件原样。这份 Engine 启动要用机器的安全芯片（OP-TEE），沙箱里只验证了 hook、内存补丁和 UI 包加载，没看到实际界面。
 
 ### 方式二：碟机屏幕一键在线升级（已安装本系统后）
 - 连接 Wi-Fi 或网线后，打开碟机 **设置 → 关于 / 更新**；

@@ -16,13 +16,19 @@ spec.loader.exec_module(bdb)
 TOP = 'SCLIVE4-5.3.0.1.1-EngineX-OS-Data-Bundle'
 
 
+def fake_elf(machine, tag):
+    return b'\x7fELF' + bytes(14) + machine.to_bytes(2, 'little') + tag
+
+
 class DataBundleTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.suite = self.tmp / 'sc5000-suite'
-        self.suite.write_bytes(b'\x7fELF suite')
+        self.suite_bytes = fake_elf(bdb.EM_ARM, b'suite')
+        self.suite.write_bytes(self.suite_bytes)
         self.hook = self.tmp / 'libengine-ui-hook.so'
-        self.hook.write_bytes(b'\x7fELF hook')
+        self.hook_bytes = fake_elf(bdb.EM_ARM, b'hook')
+        self.hook.write_bytes(self.hook_bytes)
         self.ui = self.ui_tar({'packs/a/Main.qml': b'Item {}', 'icons/x.svg': b'<svg/>'})
 
     def tearDown(self):
@@ -59,8 +65,8 @@ class DataBundleTest(unittest.TestCase):
                          f"{hashlib.sha256(bundle.read_bytes()).hexdigest()}  {bundle.name}\n")
         src = self.extract(r)
         self.assertEqual((src / 'version.txt').read_text(), '5.3.0.1.1\n')
-        self.assertEqual((src / 'bin/sc5000-suite').read_bytes(), b'\x7fELF suite')
-        self.assertEqual((src / 'lib/libengine-ui-hook.so').read_bytes(), b'\x7fELF hook')
+        self.assertEqual((src / 'bin/sc5000-suite').read_bytes(), self.suite_bytes)
+        self.assertEqual((src / 'lib/libengine-ui-hook.so').read_bytes(), self.hook_bytes)
         for applet in bdb.APPLETS:
             self.assertIn(f'sc5000-suite" {applet} ', (src / 'bin' / applet).read_text())
             self.assertTrue((src / 'bin' / applet).stat().st_mode & 0o100)
@@ -94,6 +100,46 @@ class DataBundleTest(unittest.TestCase):
                     self.assertIn(bdb.MODELS[prefix], readme)
                     self.assertIn(f'tar -xzf {top}.tar.gz', readme)
 
+    def test_az04_bundle_is_64_bit_with_var_lib_alsa(self):
+        # PRIME 4 G2 / SYSTEM ONE (#76): AArch64 Engine, /var/lib bound from /data/system/var-lib.
+        a64 = {'suite': self.tmp / 'suite64', 'hook': self.tmp / 'hook64'}
+        a64['suite'].write_bytes(fake_elf(bdb.EM_AARCH64, b'suite'))
+        a64['hook'].write_bytes(fake_elf(bdb.EM_AARCH64, b'hook'))
+        for prefix in bdb.AZ04:
+            with self.subTest(prefix=prefix):
+                with self.assertRaises(SystemExit):  # armhf parts
+                    self.build(out=f'bad-{prefix}', prefix=prefix)
+                r = self.build(out=f'out-{prefix}', prefix=prefix, **a64)
+                top = f'{prefix}-5.3.0.1.1-EngineX-OS-Data-Bundle'
+                with tarfile.open(r['bundle']) as t:
+                    self.assertEqual(t.extractfile(f'{top}/alsa-dir').read(), b'system/var-lib/alsa/conf.d\n')
+                    readme = t.extractfile(f'{top}/README-INSTALL.txt').read().decode()
+                self.assertIn('/data/system/var-lib/alsa/conf.d/99-sc5000-custom.conf', readme)
+                self.assertIn('64-bit (AZ04)', readme)
+        with self.assertRaises(SystemExit):  # 64-bit parts in an armhf bundle
+            self.build(out='bad-sclive4', **a64)
+        src = self.extract(self.build())
+        self.assertEqual((src / 'alsa-dir').read_text(), 'system/var/overlay/lib/alsa/conf.d\n')
+        self.assertNotIn('64-bit', (src / 'README-INSTALL.txt').read_text())
+
+    def test_install_uses_bundle_alsa_dir(self):
+        hook64 = self.tmp / 'hook64'
+        hook64.write_bytes(fake_elf(bdb.EM_AARCH64, b'hook'))
+        suite64 = self.tmp / 'suite64'
+        suite64.write_bytes(fake_elf(bdb.EM_AARCH64, b'suite'))
+        r = self.build(prefix='PRIME4G2', suite=suite64, hook=hook64)
+        dest = self.tmp / 'root/sc5000-custom'  # no /data on the test host: relative to dest
+        with tarfile.open(r['bundle']) as t:
+            t.extractall(self.tmp / 'x', **({'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}))
+        src = self.tmp / 'x/PRIME4G2-5.3.0.1.1-EngineX-OS-Data-Bundle'
+        if Path('/data').is_dir():
+            self.skipTest('/data exists on this host')
+        self.sh(src / 'install.sh', dest)
+        conf = self.tmp / 'root/system/var-lib/alsa/conf.d/99-sc5000-custom.conf'
+        self.assertTrue(conf.exists())
+        self.sh(dest / 'bundle/uninstall.sh', dest)
+        self.assertFalse(conf.exists())
+
     def test_refuses_bad_input(self):
         (self.tmp / 'taken').mkdir()
         for kw in ({'version': '5.3'}, {'version': '5.3.0-x'}, {'out': 'taken'},
@@ -120,7 +166,7 @@ class DataBundleTest(unittest.TestCase):
         (dest / 'ui').mkdir()
         (dest / 'ui/safe-mode').write_text('1')
         self.sh(src / 'install.sh', dest, alsa_dest=alsa_dest)
-        self.assertEqual((dest / 'bundle/bin/sc5000-suite').read_bytes(), b'\x7fELF suite')
+        self.assertEqual((dest / 'bundle/bin/sc5000-suite').read_bytes(), self.suite_bytes)
         self.assertEqual((dest / 'ui/packs/a/Main.qml').read_bytes(), b'Item {}')
         self.assertTrue((dest / 'ui/icons/x.svg').exists())
         self.assertFalse((dest / 'ui/safe-mode').exists())
@@ -189,6 +235,17 @@ class DataBundleTest(unittest.TestCase):
 
         suite_out = subprocess.run(['debugfs', '-R', 'stat /sc5000-custom/bundle/bin/sc5000-suite', str(img)], capture_output=True, text=True).stdout
         self.assertIn('0755', suite_out)
+
+        # AZ04 (#76): the ALSA file goes where its var-lib.mount reads /var/lib from.
+        for part in ('suite64', 'hook64'):
+            (self.tmp / part).write_bytes(fake_elf(bdb.EM_AARCH64, part.encode()))
+        r64 = self.build('out64', prefix='SYSTEMONE', suite=self.tmp / 'suite64', hook=self.tmp / 'hook64')
+        img64 = self.tmp / 'userdata64.img'
+        subprocess.run(['dd', 'if=/dev/zero', f'of={img64}', 'bs=1M', 'count=32'], check=True, capture_output=True)
+        subprocess.run(['mkfs.ext4', '-F', str(img64)], check=True, capture_output=True)
+        hmod.inject(img64, r64['bundle'])
+        hook_out = subprocess.run(['debugfs', '-R', 'stat /system/var-lib/alsa/conf.d/99-sc5000-custom.conf', str(img64)], capture_output=True, text=True).stdout
+        self.assertIn('regular', hook_out)
 
 
 if __name__ == '__main__':

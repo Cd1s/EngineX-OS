@@ -304,6 +304,8 @@ var imagePrefixes = map[string]string{
 	"inmusic,jp21": "SCLIVE4", "inmusic,jp20": "SCLIVE2",
 	"inmusic,jc11s": "PRIME4PLUS", "inmusic,jp11s": "PRIMEGOPLUS",
 	"inmusic,nh08s": "MIXSTREAMPROPLUS", "inmusic,nh10": "MIXSTREAMPROGO",
+	// PRIME 4 G2 / SYSTEM ONE: the 64-bit AZ04 firmware, also only a /data bundle (#76).
+	"inmusic,jp24": "PRIME4G2", "inmusic,rmz2": "SYSTEMONE",
 }
 
 // playerBoards are the standalone players: no channel faders, so no Upfader Echo (#52).
