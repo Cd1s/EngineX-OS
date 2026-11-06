@@ -328,6 +328,13 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}
+	if nasLists, nasProv := g.s.nasPlaylists(ctx); nasProv != nil {
+		for _, p := range nasLists {
+			p.Title = "[NAS] " + p.Title
+			ref := playlistRef{"nas", localProvider, p, false}
+			add(g.refJSON(g.addPlaylist(ref), ref))
+		}
+	}
 }
 
 // omniTracks searches Algoriddim djay libraries across mounted drives for tracks matching query.
