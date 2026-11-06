@@ -8,7 +8,7 @@ type hub struct {
 	subs map[chan []byte]struct{}
 }
 
-// Subscribe returns a stream of raw 44.1kHz 16-bit stereo PCM chunks and a cancel func.
+// Subscribe returns a stream of raw 16-bit stereo PCM chunks (44.1kHz or 48kHz) and a cancel func.
 // The channel is closed when the broadcaster stops; slow listeners drop chunks.
 func (b *Broadcaster) Subscribe() (<-chan []byte, func()) {
 	return b.hub.subscribe()

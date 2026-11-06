@@ -46,6 +46,8 @@ type Config struct {
 	Bitrate    int    `json:"bitrate"`             // 128, 192 (default), 256, 320
 	StreamName string `json:"streamName"`          // default "EngineX OS Live Mix"
 	InputPath  string `json:"inputPath,omitempty"` // optional PCM file/FIFO path (default "/tmp/sc5000-broadcast.pcm")
+	LANMode    string `json:"lanMode,omitempty"`   // "off" (default), "rtp", "teleport"
+	LANTarget  string `json:"lanTarget,omitempty"` // e.g. "239.255.0.1:5004" or "192.168.1.50:9998"
 }
 
 // Status captures real-time state of the broadcaster without revealing secrets.
@@ -65,6 +67,8 @@ type Status struct {
 	Listeners    int    `json:"listeners"` // clients on the local /live.mp3 and /live.wav fan-out
 	ConnectedAt  string `json:"connectedAt,omitempty"`
 	LastError    string `json:"lastError,omitempty"`
+	LANMode      string `json:"lanMode,omitempty"`
+	LANTarget    string `json:"lanTarget,omitempty"`
 }
 
 // Broadcaster manages background audio streaming to Icecast/Shoutcast on CPU3.
@@ -81,6 +85,8 @@ type Broadcaster struct {
 	bytesSent atomic.Int64
 
 	hub hub
+
+	lanStreamer *LANStreamer
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -105,6 +111,7 @@ func New(guard *resourceguard.Guard) *Broadcaster {
 			Bitrate:    DefaultBitrate,
 			StreamName: DefaultStreamName,
 			InputPath:  DefaultInputPath,
+			LANMode:    "off",
 		},
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -159,6 +166,15 @@ func normalizeConfig(cfg *Config) error {
 	}
 
 	cfg.ServerURL = strings.TrimSpace(cfg.ServerURL)
+
+	cfg.LANMode = strings.ToLower(strings.TrimSpace(cfg.LANMode))
+	if cfg.LANMode == "" {
+		cfg.LANMode = "off"
+	}
+	if cfg.LANMode != "off" && cfg.LANMode != "rtp" && cfg.LANMode != "teleport" {
+		return fmt.Errorf("invalid lanMode: %q (must be 'off', 'rtp', or 'teleport')", cfg.LANMode)
+	}
+	cfg.LANTarget = strings.TrimSpace(cfg.LANTarget)
 	return nil
 }
 
@@ -203,7 +219,7 @@ func (b *Broadcaster) Status() Status {
 
 	return Status{
 		Enabled:      b.cfg.Enabled,
-		Streaming:    b.streaming || (b.capturing && b.cfg.ServerURL == ""), // with a ServerURL: the external connection
+		Streaming:    b.streaming || (b.capturing && (b.cfg.ServerURL == "" || (b.cfg.LANMode != "" && b.cfg.LANMode != "off"))),
 		Protocol:     b.cfg.Protocol,
 		ServerURL:    b.cfg.ServerURL,
 		Mountpoint:   b.cfg.Mountpoint,
@@ -217,6 +233,8 @@ func (b *Broadcaster) Status() Status {
 		Listeners:    b.hub.count(),
 		ConnectedAt:  b.connectedAt,
 		LastError:    b.lastError,
+		LANMode:      b.cfg.LANMode,
+		LANTarget:    b.cfg.LANTarget,
 	}
 }
 
@@ -232,6 +250,20 @@ func (b *Broadcaster) startLocked() {
 	ctx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
 	b.wg.Add(1)
+
+	if b.cfg.LANMode != "" && b.cfg.LANMode != "off" && b.cfg.LANTarget != "" {
+		streamer, err := NewLANStreamer(LANConfig{
+			Mode:       b.cfg.LANMode,
+			Target:     b.cfg.LANTarget,
+			SampleRate: 48000,
+			Channels:   2,
+		})
+		if err == nil {
+			b.lanStreamer = streamer
+			_ = streamer.Start()
+			b.streaming = true
+		}
+	}
 
 	go func() {
 		defer b.wg.Done()
@@ -251,6 +283,10 @@ func (b *Broadcaster) stopLocked() {
 	if b.conn != nil {
 		_ = b.conn.Close()
 		b.conn = nil
+	}
+	if b.lanStreamer != nil {
+		_ = b.lanStreamer.Close()
+		b.lanStreamer = nil
 	}
 	b.streaming = false
 	b.connectedAt = ""
@@ -350,11 +386,21 @@ func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle)
 			}
 		}
 		pcm := readPCM(inputF)
+		var sendBytes []byte
 		if pcm == nil {
-			b.hub.publish(make([]byte, 1152*4)) // silence keeps local players connected
+			sendBytes = make([]byte, 1152*4) // silence keeps local players connected
 		} else {
-			b.hub.publish(pcm)
+			sendBytes = pcm
 		}
+		b.hub.publish(sendBytes)
+
+		b.mu.Lock()
+		ls := b.lanStreamer
+		b.mu.Unlock()
+		if ls != nil {
+			_ = ls.Push(sendBytes)
+		}
+
 		select {
 		case feed <- pcm:
 		default: // external server is slow or down: drop rather than stall the capture
