@@ -346,3 +346,15 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
 - **发布**：`release-5.3.0.2` 推到 `origin/main`（`--force-with-lease`，旧 main `e32a76e` 的完整历史另存了 bundle），从 `ae8f32b` 用 `--clean`、`none` 构建 `release-5.3.0.2-final`：SC5000 组 `97a2c61539029753b1aea991b3ac1c3edc03cee6b8eb28cd7811c8c352a287bb`、SC6000 组 `01c7769ed2954679d3caef3247568f4207bd8549d423ddf70b8ba6c9c7078e39`、PRIME 4 组 `56ae8088845b63acb68ae60c324669402f00ba7f220f7d8e45a9cd6862e6c7e7`。三组解包 `verified: true`、版本 5.3.0.2；门禁三组 92 PASS / 0 FAIL；Release `v5.3.0.2` 设为 Latest，9 个资产的 digest 与 `SHA256SUMS.txt` 一致，README 24 条下载链接全部 200。
 - **回滚点**：上一版 Release `v5.3.0.1.1`（构建提交 `897510d`）；改写前的 main 在备份 bundle 里。
 - **实机影响**：两台 JP07 仍是 5.3.0.1.1 镜像加 5.3.0.2 热部署（bind mount，重启后失效）；正式的 5.3.0.2 要用在线更新或 U 盘刷入。
+
+## 2026-11-06：二代机 `/data` 数据包上架 v5.3.0.2，新增 Mixstream Pro+ / Pro Go（Opus 5.5，#61、#68、#69）
+
+- **范围**：在 `v5.3.0.2` 追加 6 个 `*-Data-Bundle.tar.gz`（SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go），更新 `SHA256SUMS.txt`（14 行）和 Release Notes；8 个 `.img` 不变，版本号不变。
+- **调研（官方 5.3.0 底包，Oracle-Batam-arm 解 AZ0x 容器）**：
+  - `MIXSTREAMPROPLUS-5.3.0-Update.img` 与 `MIXSTREAMPROGO-5.3.0-Update.img` 逐字节相同（compatible `NH08S`、`NH10`，DT `inmusic,nh08s` / `inmusic,nh10`，密钥 `numark-1`）。rootfs 的 `/usr/Engine/Engine` 与 SC LIVE 4 逐字节相同（armhf，BuildID `b946c3b8d99d32998c8197d5dc905a6bddaa5d2f`），`alsa.conf`（读 `/var/lib/alsa/conf.d`）和 `var-lib.mount`（`/data/system/var/overlay/lib` bind 到 `/var/lib`）也相同，所以 SC LIVE 4 的数据包原样可用。
+  - `PRIME4G2-5.3.0-Update.img` 与 `SYSTEMONE-5.3.0-Update.img` 相同（`JP24`、`RMZ2`，「Planck AZ04 Image」，密钥 `denon-1` / `rane-1`）。Engine 是 AArch64 ELF64（BuildID `040335918db1144f0c3452d6f23088d3c3a94613`），hook 和 suite 都是 armhf，**不支持**。
+- **改动**（`6c222be`）：`update.go` 加 `inmusic,nh08s` → `MIXSTREAMPROPLUS`、`inmusic,nh10` → `MIXSTREAMPROGO`，防止落到一代 `MIXSTREAMPRO` 镜像；`build-data-bundle.py` 加这两个前缀，每个包内带 `README-INSTALL.txt`（先在机器上运行 `install.sh`；fastboot 会覆盖整个 `/data`，只能用自己的备份镜像）；`host-install-fastboot.sh` 的提示不再写死 SC LIVE 4。后续提交让 `test_sclive4_bootstrap.sh` 接受 `ROOTFS=`。
+- **验证**：gofmt、vet、`pkg/webui` 的 race 测试、`test_data_bundle.py`（8 项）通过；`test_sclive4_bootstrap.sh` 在 SC LIVE 4 rootfs 和 Mixstream Pro+ rootfs（只读 loop 挂载）上都是方法 A、启动激活、Engine hook（16 处补丁、21 个 DSP guard、SQLite hook）、方法 B 安装/卸载全部 PASS。6 个包各 16 个文件，私钥 0、私有名称 0。上传后 15 个资产的 digest 与 `SHA256SUMS.txt` 一致，6 条 `releases/latest/download/` 数据包链接都是 200。
+- **sha256**（从 `6c222be` 在 `--clean` 目录构建）：SCLIVE4 `ffb759e7…`、SCLIVE2 `1740b98d…`、PRIME4PLUS `c7e4672d…`、PRIMEGOPLUS `442f3bf9…`、MIXSTREAMPROPLUS `25e8f971…`、MIXSTREAMPROGO `823912f8…`（完整值在 Release Notes 表格）。
+- **回滚点**：上传前的 Release Notes 和 `SHA256SUMS.txt` 已存入 agent-backup（`20261106T001132Z-…-v5302-release-meta-before-gen2.tar`）；回滚就删掉 6 个资产，再传回旧的 `SHA256SUMS.txt`、恢复旧的 Notes。代码回滚点 `6f4feea`。
+- **实机影响**：没有二代机实机，数据包只在沙箱里验证过，README 和 Notes 都标了 Beta。一代机的镜像和在线更新不受影响（在线更新只匹配 `<PREFIX>-…-Update.img`）。
