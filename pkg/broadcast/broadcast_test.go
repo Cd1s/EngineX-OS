@@ -834,3 +834,62 @@ func TestLocalListenersAndExternalPushTogether(t *testing.T) {
 		t.Fatal("local listener received nothing while pushing externally")
 	}
 }
+
+func TestLANModeBroadcaster(t *testing.T) {
+	ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen error: %v", err)
+	}
+	defer ln.Close()
+
+	b := New(newTestGuard())
+	defer b.Close()
+
+	// 1. Normalization
+	if err := b.Configure(Config{LANMode: "bad"}); err == nil {
+		t.Errorf("expected error for invalid LANMode")
+	}
+
+	cfg := Config{
+		Enabled:   true,
+		LANMode:   " RTP ",
+		LANTarget: ln.LocalAddr().String(),
+	}
+	if err := b.Configure(cfg); err != nil {
+		t.Fatalf("failed to configure LANMode RTP: %v", err)
+	}
+
+	st := b.Status()
+	if st.LANMode != "rtp" {
+		t.Errorf("expected normalized lanMode 'rtp', got %q", st.LANMode)
+	}
+	if st.LANTarget != ln.LocalAddr().String() {
+		t.Errorf("expected lanTarget %q, got %q", ln.LocalAddr().String(), st.LANTarget)
+	}
+	if !st.Streaming {
+		t.Errorf("expected Streaming == true when LAN streaming is enabled")
+	}
+
+	// Verify RTP packets arrive
+	buf := make([]byte, 8192)
+	_ = ln.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := ln.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("did not receive LAN RTP packet: %v", err)
+	}
+	pkt, err := ParseRTPPacket(buf[:n])
+	if err != nil {
+		t.Fatalf("failed to parse RTP packet: %v", err)
+	}
+	if pkt.Version != 2 {
+		t.Errorf("expected RTP version 2, got %d", pkt.Version)
+	}
+
+	// Turn off
+	if err := b.Configure(Config{LANMode: "off"}); err != nil {
+		t.Fatalf("failed to turn off LANMode: %v", err)
+	}
+	if b.Status().LANMode != "off" {
+		t.Errorf("expected lanMode 'off'")
+	}
+}
