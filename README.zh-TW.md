@@ -174,6 +174,17 @@
 
 ## 如何安裝與升級
 
+### 方式零：全系列 16 款機型的 EngineX-Installer
+
+EngineX-Installer 支援一代與二代機，不必輸入 IP 或選擇機型，透過 Wi-Fi SSH 或 USB Fastboot 辨識設備並下載對應的 `.img` 或資料包安裝。
+
+- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-windows-amd64.zip)
+- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-arm64.zip)
+- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-amd64.zip)
+- [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-linux-amd64.tar.gz)
+
+解壓後分別執行 `Install-EngineX.bat`、`Install-EngineX.command` 或 `./install-enginex.sh`。網路探索依賴 StageLinQ 或 EngineX Web 介面；SSH 需要 root 權限。Fastboot 需另外安裝 `fastboot` 和 Python 3，二代機映像製作還需要 e2fsprogs；Windows 的二代機 USB 路徑需在有 USB 存取權限的 WSL 中執行 Linux 套件。請先備份播放機：Fastboot 可能造成資料遺失，尤其是新建二代機 `/data` 映像檔。一代機 rootfs 刷寫為實驗功能，尚未在全部機型上驗證。
+
 ### 方式一：隨身碟刷機（首次安裝）
 1. 點擊下方對應你機器型號的連結，直接下載升級包（或前往 [**Releases 頁面**](https://github.com/Cd1s/EngineX-OS/releases/latest)）：
    - **Denon DJ SC5000 Prime**：[`SC5000-5.3.0.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
@@ -189,12 +200,26 @@
 
 ### 方式一 b：二代機型（`/data` 資料包，Beta）
 
+**一鍵自動安裝器 EngineX-Installer（推薦）：**不必輸入 IP 或選擇機型，支援 Wi-Fi SSH 和 USB Fastboot。下載適合電腦的平台套件：
+
+- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-windows-amd64.zip)
+- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-arm64.zip)
+- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-amd64.zip)
+- [Linux x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-linux-amd64.tar.gz)
+
+1. 先將播放機升級至官方 **Engine OS 5.3.0**。
+2. 解壓安裝套件：Windows 雙擊 `Install-EngineX.bat`，macOS 雙擊 `Install-EngineX.command`，Linux 執行 `./install-enginex.sh`。
+3. 安裝器自動尋找播放機並下載對應資料包。原廠機在螢幕點選 **設定 → 關於 / 更新 → 韌體更新模式（Firmware Update Mode）**，重開機後用 USB 連接電腦；Fastboot 自動辨識機型，確認後刷寫 `/data`。已開啟 root SSH 的機器將電腦與播放機連上同一網路，安裝器透過 StageLinQ（UDP 51337）及 EngineX Web 介面掃描找到設備，在 `/data/sc5000-custom` 安裝，保留曲庫與設定。能否找到設備取決於網路設定和 StageLinQ 是否可用。
+4. 首次安裝後，後續版本可在播放機上透過 Wi-Fi 點選 **設定 → 關於 / 更新 → 更新** 線上升級（#86）。
+
+SSH 需要播放機的 root 存取權限。USB Fastboot 需要另外安裝 `fastboot`、Python 3 和 e2fsprogs；Windows 請在有 USB 存取權限的 WSL 中執行 Linux 套件。**刷入新的 `/data` 映像檔會清空該分割區上的音樂、曲庫和設定。**請先備份播放機資料，安裝前拔除隨身碟和 SD 卡。要保留 `/data`，請透過 `--userdata-backup` 提供該播放機的完整分割區映像檔。本 Beta 尚未在實機驗證。
+
 **SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go、PRIME 4 G2 和 Rane SYSTEM ONE**（#61、#68、#69、#76）的韌體帶簽章驗證，不接受修改過的 `.img`。EngineX OS 以 `/data` 資料包的形式裝在官方 Engine OS 5.3.0 之上，不改動系統分割區。**這些機器千萬不要刷 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的 `.img`。** 資料包已在官方根檔案系統上通過沙箱測試，還沒在實機上試過，歡迎回報結果。
 
-**準備**
+<details>
+<summary>進階使用者：手動指令安裝 / 移除說明</summary>
 
-1. 先把機器升級到官方 **Engine OS 5.3.0**。
-2. 下載對應機型的資料包，並用 Release 頁的 `SHA256SUMS.txt` 核對 SHA-256：
+下載對應機型的資料包，並用 Release 頁的 `SHA256SUMS.txt` 核對 SHA-256：
    - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
    - **Denon DJ SC LIVE 2** (JP20): [`SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
    - **Denon DJ PRIME 4+** (JC11S): [`PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
@@ -230,6 +255,8 @@
    ```
 
 **移除**：`sh /data/sc5000-custom/bundle/uninstall.sh && reboot`，只刪除資料包裝上的內容。
+
+</details>
 
 > **PRIME 4 G2 / SYSTEM ONE（64 位元 Engine）**：已包含 UI 包、串流閘道（Deezer、SoundCloud、Beatport）和 EngineX 各項服務。DSP 防護、0dB 防破音軟限幅與自動增益、SQLite 調校和 4 台面解鎖還沒移植到 64 位元 Engine；Stems 保持官方韌體原樣。這份 Engine 啟動要用機器的安全晶片（OP-TEE），沙箱裡只驗證了 hook、記憶體補丁和 UI 包載入，沒看到實際介面。
 

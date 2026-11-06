@@ -1,0 +1,964 @@
+// Command enginex-installer installs EngineX OS on a supported deck
+// with no input: it finds the deck, works out the model and picks the bundle (#88).
+//
+//	mode A: the deck is on the LAN with SSH open -> stream the Data-Bundle over SSH.
+//	mode B: the deck is in fastboot (USB)         -> build a /data image and flash it.
+package main
+
+import (
+	"archive/tar"
+	"bufio"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf16"
+
+	"golang.org/x/crypto/ssh"
+)
+
+const (
+	bundleSuffix    = "-EngineX-OS-Data-Bundle.tar.gz"
+	bundleMaxDown   = 64 << 20  // compressed, as the deck's own updater allows
+	bundleMaxUnpack = 256 << 20 // all files together
+	compatCmd       = "cat /sys/firmware/devicetree/base/compatible"
+	// install.sh's own default; the variable is only set by tests.
+	customDirSh = `"${SC5000_CUSTOM:-/data/sc5000-custom}"`
+)
+
+// options are the flags plus the seams the tests point at real local things.
+type options struct {
+	Bundle, Backup, Key, Password string
+	Repo, API                     string
+	Yes                           bool
+	HTTP                          *http.Client
+	Fastboot                      string // fastboot binary
+	Packer                        string
+	AirDAddr                      string        // StageLinQ listen address
+	AirDWait                      time.Duration // how long to listen
+	Subnets                       []string      // "192.168.1" prefixes to scan; nil = this machine's /24s
+	UIPort, SSHPort               int
+	WorkDir                       string
+	WaitUSB                       time.Duration
+	Out                           io.Writer
+	In                            io.Reader
+}
+
+func (o *options) defaults() {
+	if o.Repo == "" {
+		o.Repo = "Cd1s/EngineX-OS"
+	}
+	if o.API == "" {
+		o.API = "https://api.github.com"
+	}
+	if o.HTTP == nil {
+		o.HTTP = &http.Client{Timeout: 10 * time.Minute}
+	}
+	if o.Fastboot == "" {
+		o.Fastboot = "fastboot"
+	}
+	if o.AirDAddr == "" {
+		o.AirDAddr = ":51337"
+	}
+	if o.AirDWait == 0 {
+		o.AirDWait = 1500 * time.Millisecond
+	}
+	if o.UIPort == 0 {
+		o.UIPort = 8080
+	}
+	if o.SSHPort == 0 {
+		o.SSHPort = 22
+	}
+	if o.WorkDir == "" {
+		o.WorkDir = "."
+	}
+	if o.WaitUSB == 0 {
+		o.WaitUSB = 10 * time.Minute
+	}
+	if o.Out == nil {
+		o.Out = os.Stdout
+	}
+	if o.In == nil {
+		o.In = os.Stdin
+	}
+}
+
+func (o *options) say(zh, en string) { fmt.Fprintf(o.Out, "%s\n  %s\n", zh, en) }
+
+// ---- boards -----------------------------------------------------------------
+
+type model struct{ Prefix, Name string }
+
+// The key is the board code: fastboot's "product" and the device tree's "inmusic,<code>".
+var gen2Boards = map[string]model{
+	"jp21": {"SCLIVE4", "Denon DJ SC LIVE 4"}, "jp20": {"SCLIVE2", "Denon DJ SC LIVE 2"},
+	"jc11s": {"PRIME4PLUS", "Denon DJ PRIME 4+"}, "jp11s": {"PRIMEGOPLUS", "Denon DJ PRIME GO+"},
+	"nh08s": {"MIXSTREAMPROPLUS", "Numark Mixstream Pro+"}, "nh10": {"MIXSTREAMPROGO", "Numark Mixstream Pro Go"},
+	"jp24": {"PRIME4G2", "Denon DJ PRIME 4 G2"}, "rmz2": {"SYSTEMONE", "Rane SYSTEM ONE"},
+}
+
+var gen1Boards = map[string]model{
+	"jp07": {"SC5000", "Denon DJ SC5000"}, "jp08": {"SC5000M", "Denon DJ SC5000M"}, "jp11": {"PRIMEGO", "Denon DJ PRIME GO"},
+	"jp13": {"SC6000", "Denon DJ SC6000"}, "jp14": {"SC6000M", "Denon DJ SC6000M"},
+	"jc11": {"PRIME4", "Denon DJ PRIME 4"}, "jc16": {"PRIME2", "Denon DJ PRIME 2"}, "nh08": {"MIXSTREAMPRO", "Numark Mixstream Pro"},
+}
+
+func lookupBoard(code string) (m model, gen2, ok bool) {
+	code = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(code)), "inmusic,")
+	if m, ok = gen2Boards[code]; ok {
+		return m, true, true
+	}
+	m, ok = gen1Boards[code]
+	return m, false, ok
+}
+
+// ---- discovery --------------------------------------------------------------
+
+type announce struct {
+	Source, Action, Software, Version string
+	Port                              uint16
+}
+
+// parseAirD reads a StageLinQ discovery packet: "airD", a 16-byte token, four
+// length-prefixed UTF-16BE strings (device, action, software, version), a port.
+func parseAirD(b []byte) (a announce, err error) {
+	if len(b) < 20 || string(b[:4]) != "airD" {
+		return a, errors.New("not a StageLinQ discovery packet")
+	}
+	b = b[20:]
+	var s [4]string
+	for i := range s {
+		if len(b) < 4 {
+			return a, errors.New("truncated airD packet")
+		}
+		n := binary.BigEndian.Uint32(b)
+		b = b[4:]
+		if n%2 != 0 || uint64(n) > uint64(len(b)) {
+			return a, errors.New("bad airD string length")
+		}
+		u := make([]uint16, n/2)
+		for j := range u {
+			u[j] = binary.BigEndian.Uint16(b[2*j:])
+		}
+		s[i], b = string(utf16.Decode(u)), b[n:]
+	}
+	if len(b) < 2 {
+		return a, errors.New("truncated airD packet")
+	}
+	return announce{s[0], s[1], s[2], s[3], binary.BigEndian.Uint16(b)}, nil
+}
+
+type deck struct {
+	IP, Name, Board  string
+	Announced, Known bool // Known: a deck we can act on (its board code is ours, or it answers like EngineX)
+}
+
+// listenAirD collects the decks that announce themselves for o.AirDWait.
+func listenAirD(o *options) map[string]announce {
+	found := map[string]announce{}
+	pc, err := net.ListenPacket("udp4", o.AirDAddr)
+	if err != nil {
+		o.say("无法监听 StageLinQ 端口（可能被 Engine DJ 占用），只用局域网扫描。", "Cannot listen for StageLinQ ("+err.Error()+"); scanning only.")
+		return found
+	}
+	defer pc.Close()
+	pc.SetReadDeadline(time.Now().Add(o.AirDWait))
+	buf := make([]byte, 2048)
+	for {
+		n, from, err := pc.ReadFrom(buf)
+		if err != nil {
+			return found
+		}
+		a, err := parseAirD(buf[:n])
+		if err != nil || strings.Contains(a.Action, "EXIT") {
+			continue
+		}
+		found[from.(*net.UDPAddr).IP.String()] = a
+	}
+}
+
+func localSubnets() []string {
+	var out []string
+	seen := map[string]bool{}
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok || n.IP.IsLoopback() || n.IP.To4() == nil {
+			continue
+		}
+		p := strings.Join(strings.Split(n.IP.String(), ".")[:3], ".")
+		if !seen[p] {
+			seen[p], out = true, append(out, p)
+		}
+	}
+	return out
+}
+
+// isDeckUI is true when host answers /v1/sc5000/ui with a JSON object: EngineX's web UI.
+func isDeckUI(c *http.Client, host string, port int) bool {
+	resp, err := c.Get(fmt.Sprintf("http://%s:%d/v1/sc5000/ui", host, port))
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return resp.StatusCode == 200 && bytes.HasPrefix(bytes.TrimSpace(body), []byte("{"))
+}
+
+// scanLAN probes every host of the /24s with 64 workers.
+// shortcut: only EngineX's web UI is probed, so a deck without it is found by StageLinQ
+// alone; SSH banners are not scanned, as a bare port 22 says nothing about a deck.
+func scanLAN(o *options) []string {
+	prefixes := o.Subnets
+	if prefixes == nil {
+		prefixes = localSubnets()
+	}
+	c := &http.Client{Timeout: 400 * time.Millisecond, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	jobs := make(chan string)
+	var mu sync.Mutex
+	var hits []string
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for h := range jobs {
+				if isDeckUI(c, h, o.UIPort) {
+					mu.Lock()
+					hits = append(hits, h)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, p := range prefixes {
+		for i := 1; i < 255; i++ {
+			jobs <- fmt.Sprintf("%s.%d", p, i)
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	return hits
+}
+
+func discover(ctx context.Context, o *options) []deck {
+	var mu sync.Mutex
+	byIP := map[string]*deck{}
+	get := func(ip string) *deck {
+		if byIP[ip] == nil {
+			byIP[ip] = &deck{IP: ip}
+		}
+		return byIP[ip]
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for ip, a := range listenAirD(o) {
+			mu.Lock()
+			d := get(ip)
+			d.Announced, d.Name = true, a.Source
+			if _, _, ok := lookupBoard(a.Software); ok { // decks announce their board code as the software name
+				d.Board, d.Known = strings.ToLower(a.Software), true
+			}
+			mu.Unlock()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for _, ip := range scanLAN(o) {
+			mu.Lock()
+			get(ip).Known = true
+			mu.Unlock()
+		}
+	}()
+	wg.Wait()
+	var out []deck
+	for _, d := range byIP {
+		out = append(out, *d)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
+	return out
+}
+
+// ---- bundle -----------------------------------------------------------------
+
+type bundleInfo struct {
+	Path, Top, Version string
+	HostScript         []byte // host-install-userdata.py, shipped inside the bundle
+}
+
+var topRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// readBundle walks the tarball once: one top directory, and every file matches SHA256SUMS.
+func readBundle(path string) (*bundleInfo, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
+	}
+	b := &bundleInfo{Path: path}
+	sums := map[string]string{}
+	var listed, version []byte
+	var total int64
+	tr := tar.NewReader(gz)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
+		}
+		name := strings.TrimPrefix(h.Name, "./")
+		if b.Top == "" {
+			b.Top = strings.SplitN(name, "/", 2)[0]
+			if !topRE.MatchString(b.Top) {
+				return nil, fmt.Errorf("%s: unsafe top directory %q", filepath.Base(path), b.Top)
+			}
+		}
+		rel := strings.TrimPrefix(name, b.Top)
+		if rel != "" && !strings.HasPrefix(rel, "/") || strings.Contains(name, "..") {
+			return nil, fmt.Errorf("%s: %q is outside %s/", filepath.Base(path), h.Name, b.Top)
+		}
+		rel = strings.TrimPrefix(rel, "/")
+		if h.Typeflag != '0' && h.Typeflag != 0 { // directories, pax headers
+			continue
+		}
+		hash := sha256.New()
+		var keep bytes.Buffer
+		w := io.Writer(hash)
+		if rel == "SHA256SUMS" || rel == "version.txt" || rel == "host-install-userdata.py" {
+			w = io.MultiWriter(hash, &keep)
+		}
+		n, err := io.Copy(w, tr)
+		if total += n; err != nil || total > bundleMaxUnpack {
+			return nil, fmt.Errorf("%s: unpacks too large or damaged", filepath.Base(path))
+		}
+		sums[rel] = hex.EncodeToString(hash.Sum(nil))
+		switch rel {
+		case "SHA256SUMS":
+			listed = keep.Bytes()
+		case "version.txt":
+			version = keep.Bytes()
+		case "host-install-userdata.py":
+			b.HostScript = keep.Bytes()
+		}
+	}
+	if len(listed) == 0 {
+		return nil, fmt.Errorf("%s: SHA256SUMS missing in the bundle", filepath.Base(path))
+	}
+	for _, line := range strings.Split(string(listed), "\n") {
+		if f := strings.Fields(line); len(f) == 2 && sums[f[1]] != f[0] {
+			return nil, fmt.Errorf("%s: SHA256SUMS mismatch for %s, the bundle is damaged", filepath.Base(path), f[1])
+		}
+	}
+	if b.Version = strings.TrimSpace(string(version)); b.Version == "" {
+		return nil, fmt.Errorf("%s: no version.txt", filepath.Base(path))
+	}
+	return b, nil
+}
+
+type release struct {
+	Tag    string `json:"tag_name"`
+	Assets []struct {
+		Name   string `json:"name"`
+		URL    string `json:"browser_download_url"`
+		Digest string `json:"digest"`
+	} `json:"assets"`
+}
+
+// fetchBundle downloads the latest release's bundle for prefix into dir and checks GitHub's SHA-256.
+func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, error) {
+	var rel release
+	if err := getJSON(ctx, o, o.API+"/repos/"+o.Repo+"/releases/latest", &rel); err != nil {
+		return "", fmt.Errorf("GitHub release: %w", err)
+	}
+	for _, a := range rel.Assets {
+		if !strings.HasPrefix(a.Name, prefix+"-") || !strings.HasSuffix(a.Name, bundleSuffix) || !strings.HasPrefix(a.URL, "https://") {
+			continue
+		}
+		o.say("下载 "+a.Name+" ("+rel.Tag+")", "Downloading "+a.Name)
+		dest := filepath.Join(dir, filepath.Base(a.Name))
+		if err := download(ctx, o, a.URL, strings.TrimPrefix(a.Digest, "sha256:"), dest); err != nil {
+			return "", err
+		}
+		return dest, nil
+	}
+	return "", fmt.Errorf("release %s has no %s-*%s", rel.Tag, prefix, bundleSuffix)
+}
+
+// fetchImage requires a release-provided digest before handling firmware.
+func fetchImage(ctx context.Context, o *options, prefix string) (string, error) {
+	var rel release
+	if err := getJSON(ctx, o, o.API+"/repos/"+o.Repo+"/releases/latest", &rel); err != nil {
+		return "", err
+	}
+	for _, a := range rel.Assets {
+		if !strings.HasPrefix(a.Name, prefix+"-") || !strings.Contains(a.Name, "-EngineX-OS-") || !strings.HasSuffix(a.Name, "-Update.img") || !strings.HasPrefix(a.URL, "https://") {
+			continue
+		}
+		digest := strings.TrimPrefix(a.Digest, "sha256:")
+		if !strings.HasPrefix(a.Digest, "sha256:") || len(digest) != 64 {
+			return "", errors.New("release image has no SHA-256 digest")
+		}
+		path := filepath.Join(o.WorkDir, filepath.Base(a.Name))
+		if err := downloadLimit(ctx, o, a.URL, digest, path, 2<<30); err != nil {
+			return "", err
+		}
+		return path, nil
+	}
+	return "", fmt.Errorf("release %s has no %s update image", rel.Tag, prefix)
+}
+
+func getJSON(ctx context.Context, o *options, url string, v any) error {
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "enginex-installer")
+	resp, err := o.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(v)
+}
+
+func download(ctx context.Context, o *options, url, wantSHA, dest string) error {
+	return downloadLimit(ctx, o, url, wantSHA, dest, bundleMaxDown)
+}
+
+func downloadLimit(ctx context.Context, o *options, url, wantSHA, dest string, limit int64) error {
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req.Header.Set("User-Agent", "enginex-installer")
+	resp, err := o.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("download: HTTP %d", resp.StatusCode)
+	}
+	part := dest + ".part"
+	f, err := os.Create(part)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(part)
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, limit+1))
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if n > limit {
+		return errors.New("download exceeds size limit")
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); wantSHA == "" {
+		o.say("Release 没有提供 SHA-256，只校验包内 SHA256SUMS。", "The release gives no SHA-256; only the bundle's own SHA256SUMS is checked.")
+	} else if got != wantSHA {
+		return fmt.Errorf("download SHA-256 mismatch: got %s, release says %s", got, wantSHA)
+	}
+	return os.Rename(part, dest)
+}
+
+// obtainBundle uses --bundle, else the newest matching file in the work dir, else the latest release.
+func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, error) {
+	path := o.Bundle
+	if path != "" {
+		if !strings.HasPrefix(filepath.Base(path), prefix+"-") {
+			return nil, fmt.Errorf("%s is not a %s bundle: wrong model refused", filepath.Base(path), prefix)
+		}
+	} else {
+		local, _ := filepath.Glob(filepath.Join(o.WorkDir, prefix+"-*"+bundleSuffix))
+		sort.Slice(local, func(i, j int) bool { return mtime(local[i]).After(mtime(local[j])) })
+		if len(local) > 0 {
+			path = local[0]
+			o.say("使用已有的 "+filepath.Base(path), "Using the bundle already here: "+filepath.Base(path))
+		} else {
+			var err error
+			if path, err = fetchBundle(ctx, o, prefix, o.WorkDir); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return readBundle(path)
+}
+
+func mtime(p string) time.Time {
+	st, err := os.Stat(p)
+	if err != nil {
+		return time.Time{}
+	}
+	return st.ModTime()
+}
+
+// ---- mode A: SSH ------------------------------------------------------------
+
+func dialSSH(o *options, ip string) (*ssh.Client, error) {
+	var auth []ssh.AuthMethod
+	var signers []ssh.Signer
+	keys := []string{o.Key}
+	if o.Key == "" {
+		home, _ := os.UserHomeDir()
+		keys = []string{filepath.Join(home, ".ssh/id_ed25519"), filepath.Join(home, ".ssh/id_rsa"), filepath.Join(home, ".ssh/id_ecdsa")}
+	}
+	for _, k := range keys {
+		pem, err := os.ReadFile(k)
+		if err != nil {
+			if o.Key != "" {
+				return nil, err
+			}
+			continue
+		}
+		if s, err := ssh.ParsePrivateKey(pem); err == nil {
+			signers = append(signers, s)
+		} else if o.Key != "" {
+			return nil, fmt.Errorf("%s: %w", k, err)
+		}
+	}
+	if len(signers) > 0 {
+		auth = append(auth, ssh.PublicKeys(signers...))
+	}
+	passwords := []string{"denon"} // FreeMyPrime-unlocked decks
+	if o.Password != "" {
+		passwords = []string{o.Password, "denon"}
+	}
+	for _, p := range passwords {
+		auth = append(auth, ssh.Password(p))
+	}
+	cfg := &ssh.ClientConfig{User: "root", Auth: auth, Timeout: 5 * time.Second,
+		// shortcut: decks are reflashed and get new host keys, and this is a LAN install; pin keys if this ever runs over a WAN.
+		HostKeyCallback: ssh.InsecureIgnoreHostKey()}
+	return ssh.Dial("tcp", net.JoinHostPort(ip, strconv.Itoa(o.SSHPort)), cfg)
+}
+
+func isAuthErr(err error) bool { return strings.Contains(err.Error(), "unable to authenticate") }
+
+func sshRun(c *ssh.Client, cmd string, stdin io.Reader) (string, error) {
+	s, err := c.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer s.Close()
+	s.Stdin = stdin
+	out, err := s.CombinedOutput(cmd) // not one Buffer for both pipes: their copiers race on it
+	return string(out), err
+}
+
+// installCmd unpacks the streamed tarball in the deck's temp dir and runs install.sh.
+func installCmd(top string) string {
+	return fmt.Sprintf(`set -e; cd "${TMPDIR:-/tmp}"; trap 'rm -rf %[1]s' EXIT; rm -rf %[1]s; tar -xzf -; sh %[1]s/install.sh`, top)
+}
+
+func parseCompatible(out string) (code string, m model, gen2, ok bool) {
+	for _, c := range strings.Split(out, "\x00") {
+		if strings.HasPrefix(c, "inmusic,") {
+			if m, gen2, ok = lookupBoard(c); ok {
+				return strings.TrimPrefix(c, "inmusic,"), m, gen2, true
+			}
+		}
+	}
+	return "", model{}, false, false
+}
+
+func modeA(ctx context.Context, o *options, d deck) error {
+	label := fmt.Sprintf("%s (%s)", d.Name, d.IP)
+	cl, err := dialSSH(o, d.IP)
+	if err != nil {
+		if isAuthErr(err) {
+			return fmt.Errorf("%s: SSH 登录失败 / SSH login failed; use --key or --password", label)
+		}
+		return modeAB(ctx, o, d)
+	}
+	defer cl.Close()
+	out, err := sshRun(cl, compatCmd, nil)
+	if err != nil {
+		return fmt.Errorf("%s: cannot read the board: %w", label, err)
+	}
+	code, m, gen2, ok := parseCompatible(out)
+	if !ok {
+		return fmt.Errorf("%s: 未知型号 / unknown board %q", label, strings.TrimSpace(out))
+	}
+	if !gen2 {
+		path, err := fetchImage(ctx, o, m.Prefix)
+		if err != nil {
+			return err
+		}
+		if err := confirm(o, "将更新一代机 "+m.Name+"，请确认已备份数据。", "Update "+m.Name+"; confirm you have backed up your data."); err != nil {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			return err
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		cmd := fmt.Sprintf("set -e; cat > /data/az01-update.img; echo '%x  /data/az01-update.img' | sha256sum -c -; /usr/sbin/az01-update --file /data/az01-update.img", h.Sum(nil))
+		out, err := sshRun(cl, cmd, f)
+		if err != nil {
+			return fmt.Errorf("update failed: %w\n%s", err, out)
+		}
+		return nil
+	}
+	o.say(fmt.Sprintf("发现 %s，型号 %s (%s)，在线安装，保留所有音乐和曲库。", label, m.Name, code),
+		"Found "+label+", "+m.Name+"; installing online, your music and library stay.")
+	b, err := obtainBundle(ctx, o, m.Prefix)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(b.Path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if out, err := sshRun(cl, installCmd(b.Top), f); err != nil {
+		return fmt.Errorf("%s: install failed: %w\n%s", label, err, out)
+	}
+	got, err := sshRun(cl, "cat "+customDirSh+"/version.txt", nil)
+	if err != nil || strings.TrimSpace(got) != b.Version {
+		return fmt.Errorf("%s: installed version reads back as %q, expected %s", label, strings.TrimSpace(got), b.Version)
+	}
+	if out, err := sshRun(cl, `sh `+customDirSh+`/bundle/boot-activate.sh`, nil); err != nil {
+		return fmt.Errorf("%s: activation failed: %w\n%s", label, err, out)
+	}
+	o.say(fmt.Sprintf("完成：%s 已安装 EngineX OS %s，Engine 正在重启。", label, b.Version),
+		fmt.Sprintf("Done: EngineX OS %s installed on %s; Engine is restarting.", b.Version, label))
+	return nil
+}
+
+// ---- mode B: fastboot -------------------------------------------------------
+
+func fb(ctx context.Context, o *options, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, o.Fastboot, args...).CombinedOutput()
+	return string(out), err
+}
+
+func fastbootDevices(ctx context.Context, o *options) []string {
+	out, err := fb(ctx, o, "devices")
+	if err != nil {
+		return nil
+	}
+	var serials []string
+	for _, l := range strings.Split(out, "\n") {
+		if f := strings.Fields(l); len(f) >= 2 && strings.HasPrefix(f[1], "fastboot") {
+			serials = append(serials, f[0])
+		}
+	}
+	return serials
+}
+
+// modeAB: a stock deck is on the LAN but has no SSH. Ask the user to put it in fastboot and wait.
+func modeAB(ctx context.Context, o *options, d deck) error {
+	name := d.Name
+	if name == "" {
+		name = "EngineX"
+	}
+	label := fmt.Sprintf("%s (%s)", name, d.IP)
+	if _, err := exec.LookPath(o.Fastboot); err != nil {
+		return fmt.Errorf("%s 处于原厂未解锁状态，需要 fastboot 但没找到 / is locked and needs fastboot (Android platform-tools) in PATH", label)
+	}
+	model := ""
+	if m, _, ok := lookupBoard(d.Board); ok {
+		model = " [" + m.Name + "]"
+	}
+	o.say(fmt.Sprintf("已自动发现你的碟机 %s%s，当前处于原厂未解锁状态。\n  请在碟机屏幕点击 Settings → About / Update → Firmware Update Mode (Reboot)，并用 USB 线连接电脑。程序正在自动等待 USB 连接…", label, model),
+		fmt.Sprintf("Found your deck %s%s, still locked. On the deck tap Settings → About / Update → Firmware Update Mode (Reboot), then connect USB. Waiting for fastboot...", label, model))
+	deadline := time.Now().Add(o.WaitUSB)
+	for {
+		if len(fastbootDevices(ctx, o)) > 0 {
+			return modeB(ctx, o)
+		}
+		if time.Now().After(deadline) {
+			return errors.New("等待 USB Fastboot 超时 / timed out waiting for fastboot")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+var (
+	productRE  = regexp.MustCompile(`(?m)^(?:\(bootloader\) )?product:\s*(\S+)`)
+	partSizeRE = regexp.MustCompile(`partition-size:\w+:\s*(0x[0-9a-fA-F]+|\d+)`)
+)
+
+// dataPartition is the partition Engine's /data lives on: "data" if it has a size, else "userdata".
+func dataPartition(ctx context.Context, o *options) (string, int64) {
+	for _, name := range []string{"data", "userdata"} {
+		out, _ := fb(ctx, o, "getvar", "partition-size:"+name)
+		if m := partSizeRE.FindStringSubmatch(out); m != nil {
+			if n, err := strconv.ParseInt(m[1], 0, 64); err == nil && n > 0 {
+				return name, n
+			}
+		}
+	}
+	return "userdata", 0
+}
+
+func python() string {
+	for _, p := range []string{"python3", "python"} {
+		if path, err := exec.LookPath(p); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+// buildImage returns the /data image to flash and whether it is brand new (so empty of the user's files).
+func buildImage(ctx context.Context, o *options, b *bundleInfo, size int64) (string, bool, error) {
+	img := filepath.Join(o.WorkDir, "userdata-enginex.img")
+	fresh := false
+	switch {
+	case o.Backup != "":
+		if err := copyFile(o.Backup, img); err != nil {
+			return "", false, err
+		}
+	case fileExists(img):
+		o.say("使用已有的 "+img, "Reusing the image already here: "+img)
+		return img, false, nil
+	default:
+		if size <= 0 {
+			return "", false, errors.New("读不到 data 分区大小，请用 --userdata-backup / cannot read the data partition size; pass --userdata-backup")
+		}
+		f, err := os.Create(img)
+		if err != nil {
+			return "", false, err
+		}
+		if err = f.Truncate(size); err == nil {
+			err = f.Close()
+		}
+		if err != nil {
+			return "", false, err
+		}
+		if out, err := exec.CommandContext(ctx, "mke2fs", "-t", "ext4", "-O", "encrypt", "-L", "az01-data", "-F", img).CombinedOutput(); err != nil {
+			return "", false, fmt.Errorf("mke2fs: %w\n%s", err, out)
+		}
+		fresh = true
+	}
+	script := filepath.Join(mustTemp(), "host-install-userdata.py")
+	if err := os.WriteFile(script, b.HostScript, 0o700); err != nil {
+		return "", false, err
+	}
+	defer os.RemoveAll(filepath.Dir(script))
+	py := python()
+	if py == "" {
+		return "", false, errors.New("需要 python3 和 e2fsprogs (debugfs, mke2fs)；Windows 请在 WSL 里运行 / needs python3 and e2fsprogs; on Windows use WSL")
+	}
+	if out, err := exec.CommandContext(ctx, py, "-I", script, img, "--bundle", b.Path).CombinedOutput(); err != nil {
+		return "", false, fmt.Errorf("host-install-userdata: %w\n%s", err, out)
+	}
+	return img, fresh, nil
+}
+
+func mustTemp() string {
+	d, err := os.MkdirTemp("", "enginex-installer-")
+	if err != nil {
+		panic(err)
+	}
+	return d
+}
+
+func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(out, in); err == nil {
+		err = out.Close()
+	}
+	return err
+}
+
+func confirm(o *options, zh, en string) error {
+	if o.Yes {
+		return nil
+	}
+	o.say(zh+" 输入 yes 继续：", en+" Type yes to continue:")
+	line, _ := bufio.NewReader(o.In).ReadString('\n')
+	if s := strings.ToLower(strings.TrimSpace(line)); s != "yes" && s != "y" {
+		return errors.New("已取消，没有刷写任何东西 / cancelled, nothing flashed")
+	}
+	return nil
+}
+
+func modeB(ctx context.Context, o *options) error {
+	out, _ := fb(ctx, o, "getvar", "product")
+	pm := productRE.FindStringSubmatch(out)
+	if pm == nil {
+		return fmt.Errorf("读不到 fastboot product / cannot read the fastboot product: %s", strings.TrimSpace(out))
+	}
+	m, gen2, ok := lookupBoard(pm[1])
+	switch {
+	case !ok:
+		return fmt.Errorf("未知型号 %q，不刷写 / unknown board, nothing flashed", pm[1])
+	}
+	if !gen2 {
+		return modeBGen1(ctx, o, m)
+	}
+	o.say("USB Fastboot 识别到 "+m.Name+" ("+pm[1]+")", "Fastboot found "+m.Name)
+	b, err := obtainBundle(ctx, o, m.Prefix)
+	if err != nil {
+		return err
+	}
+	part, size := dataPartition(ctx, o)
+	img, fresh, err := buildImage(ctx, o, b, size)
+	if err != nil {
+		return err
+	}
+	if fresh {
+		err = confirm(o, "即将刷写全新的 "+part+" 分区：碟机上的音乐、曲库和设置会全部清空！", "This flashes a brand-new "+part+" partition: ALL music, library and settings on the deck are erased!")
+	} else {
+		err = confirm(o, "即将把 "+img+" 刷入 "+part+" 分区，必须是这台碟机的 data 备份。", "This flashes "+img+" to "+part+"; it must be a backup of this deck's data.")
+	}
+	if err != nil {
+		return err
+	}
+	if out, err := fb(ctx, o, "flash", part, img); err != nil {
+		return fmt.Errorf("fastboot flash %s: %w\n%s", part, err, out)
+	}
+	if out, err := fb(ctx, o, "reboot"); err != nil {
+		return fmt.Errorf("fastboot reboot: %w\n%s", err, out)
+	}
+	o.say(fmt.Sprintf("完成：EngineX OS %s 已刷入 %s，碟机正在重启，首次启动后自动激活。", b.Version, m.Name),
+		fmt.Sprintf("Done: EngineX OS %s flashed to %s; the deck reboots and activates itself.", b.Version, m.Name))
+	return nil
+}
+
+func modeBGen1(ctx context.Context, o *options, m model) error {
+	path, err := fetchImage(ctx, o, m.Prefix)
+	if err != nil {
+		return err
+	}
+	py := python()
+	if py == "" {
+		return errors.New("Python 3 required to unpack firmware")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	packer := o.Packer
+	if packer == "" {
+		packer = filepath.Join(filepath.Dir(exe), "az01_packer.py")
+	}
+	if !fileExists(packer) {
+		return errors.New("az01_packer.py missing beside installer")
+	}
+	tmp, err := os.MkdirTemp("", "enginex-rootfs-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	out, err := exec.CommandContext(ctx, py, "-I", packer, "unpack", path, "--output", filepath.Join(tmp, "unpacked")).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("unpack: %w\n%s", err, out)
+	}
+	rootfs := filepath.Join(tmp, "unpacked", "rootfs.ext2")
+	if !fileExists(rootfs) {
+		return errors.New("unpacked rootfs missing")
+	}
+	if err := confirm(o, "将解锁并刷写 "+m.Name+" 的 rootfs，可能损坏设备或数据，请先备份。", "Unlock and flash "+m.Name+" rootfs; device or data could be damaged. Back up first."); err != nil {
+		return err
+	}
+	for _, args := range [][]string{{"oem", "inmusic-unlock-magic-7de5fbc22b8c524e"}, {"flash", "rootfs", rootfs}, {"reboot"}} {
+		out, err := fb(ctx, o, args...)
+		if err != nil {
+			return fmt.Errorf("fastboot %s: %w\n%s", args[0], err, out)
+		}
+	}
+	return nil
+}
+
+// ---- main -------------------------------------------------------------------
+
+func run(ctx context.Context, o *options) error {
+	o.defaults()
+	if len(fastbootDevices(ctx, o)) > 0 {
+		return modeB(ctx, o)
+	}
+	o.say("正在局域网中寻找碟机…", "Looking for decks on the LAN...")
+	var errs []error
+	n := 0
+	for _, d := range discover(ctx, o) {
+		if !d.Known {
+			o.say("跳过非碟机的 StageLinQ 设备 "+d.Name+" ("+d.IP+")", "Skipping StageLinQ device "+d.Name+" ("+d.IP+")")
+			continue
+		}
+		n++
+		if err := modeA(ctx, o, d); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if n == 0 {
+		return errors.New("没有发现碟机：请开机并接入同一局域网，或把碟机进入 Firmware Update Mode 后用 USB 连接 / no deck found: power it on in this LAN, or boot it into Firmware Update Mode and connect USB")
+	}
+	return errors.Join(errs...)
+}
+
+func main() {
+	o := &options{}
+	flag.StringVar(&o.Bundle, "bundle", "", "Data-Bundle.tar.gz to install (default: newest in the current directory, else download)")
+	flag.StringVar(&o.Backup, "userdata-backup", "", "mode B: a backup image of the deck's data partition to inject into (keeps the user's files)")
+	flag.StringVar(&o.Key, "key", "", "mode A: SSH private key (default ~/.ssh/id_*; password denon is also tried)")
+	flag.StringVar(&o.Password, "password", "", "mode A: SSH password for root")
+	flag.StringVar(&o.Repo, "repo", "Cd1s/EngineX-OS", "GitHub repository to download from")
+	flag.BoolVar(&o.Yes, "yes", false, "do not ask before flashing")
+	flag.Parse()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	err := run(ctx, o)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "错误 / Error:", err)
+	}
+	if st, e := os.Stdin.Stat(); e == nil && st.Mode()&os.ModeCharDevice != 0 && !o.Yes { // double-clicked: keep the window
+		fmt.Print("\n按回车退出 / Press Enter to exit")
+		bufio.NewReader(os.Stdin).ReadString('\n')
+	}
+	if err != nil {
+		os.Exit(1)
+	}
+}

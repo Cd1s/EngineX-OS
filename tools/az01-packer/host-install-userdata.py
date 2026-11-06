@@ -19,6 +19,9 @@ import tempfile
 from pathlib import Path
 
 
+ALSA_DIRS = ('system/var/overlay/lib/alsa/conf.d', 'system/var-lib/alsa/conf.d')
+
+
 def fail(msg):
     raise SystemExit(f'host-install-userdata: {msg}')
 
@@ -96,7 +99,10 @@ def inject(img_path, bundle_tar, check=True):
         alsa_rel = Path(alsa_file.read_text().strip() if alsa_file.is_file() else 'system/var/overlay/lib/alsa/conf.d')
         if alsa_rel.is_absolute() or '..' in alsa_rel.parts:
             fail(f'unsafe alsa-dir {alsa_rel}')
-        dirs.add(alsa_rel)
+        # The image is for a deck we may not be able to name (fastboot gives a board code,
+        # not which var-lib it mounts), so the hook goes where either firmware reads it.
+        alsa_rels = [alsa_rel] + [Path(d) for d in ALSA_DIRS if Path(d) != alsa_rel]
+        dirs.update(alsa_rels)
 
         files = []
 
@@ -148,7 +154,7 @@ def inject(img_path, bundle_tar, check=True):
         # 3. ALSA hook configuration
         alsa_conf_f = broot / '99-sc5000-custom.conf'
         if alsa_conf_f.is_file():
-            files.append((alsa_conf_f, alsa_rel / '99-sc5000-custom.conf', 0o100644))
+            files.extend((alsa_conf_f, d / '99-sc5000-custom.conf', 0o100644) for d in alsa_rels)
 
         all_dirs = set(dirs)
         for d in dirs:
@@ -160,8 +166,13 @@ def inject(img_path, bundle_tar, check=True):
         script_file = tmp / 'debugfs_script.txt'
         script_file.write_text(script)
 
-        res = subprocess.run(['debugfs', '-w', '-f', str(script_file), str(img)],
-                             capture_output=True, text=True)
+        subprocess.run(['debugfs', '-w', '-f', str(script_file), str(img)],
+                       capture_output=True, text=True)
+        # debugfs exits 0 even when a write failed (full image, bad path): read back.
+        for rel in ('sc5000-custom/version.txt', 'sc5000-custom/bundle/bin/sc5000-suite'):
+            st = subprocess.run(['debugfs', '-R', f'stat /{rel}', str(img)], capture_output=True, text=True).stdout
+            if 'Type: regular' not in st:
+                fail(f'/{rel} is not in {img} after writing (image full?)')
         if check:
             fsck = subprocess.run(['e2fsck', '-f', '-y', str(img)],
                                   capture_output=True, text=True)

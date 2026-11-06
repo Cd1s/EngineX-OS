@@ -1,5 +1,6 @@
 #!/bin/sh
-# Flash modified userdata image to a second-generation deck in fastboot mode (#61).
+# Flash a modified /data image to a second-generation deck in fastboot mode (#61, #88).
+# Decks name the partition "data" or "userdata"; ask which one has a size.
 set -eu
 
 IMAGE="${1:-userdata.img}"
@@ -17,8 +18,13 @@ fi
 echo "Connecting to the device in fastboot mode..."
 fastboot devices
 
-echo "Flashing userdata partition with $IMAGE..."
-fastboot flash userdata "$IMAGE"
+PART=userdata
+if fastboot getvar partition-size:data 2>&1 | grep -Eq 'partition-size:data:[[:space:]]*(0x[0-9a-fA-F]+|[0-9]+)'; then
+    PART=data
+fi
+
+echo "Flashing the $PART partition with $IMAGE..."
+fastboot flash "$PART" "$IMAGE"
 
 echo "Rebooting device..."
 fastboot reboot

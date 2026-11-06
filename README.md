@@ -174,6 +174,17 @@ The entire system has been refactored and slimmed down so all extra features tak
 
 ## How to Install & Update
 
+### Option 0: EngineX-Installer for All 16 Models
+
+EngineX-Installer discovers supported first- and second-generation decks without entering an IP or selecting a model. It downloads the matching `.img` or data bundle and offers Wi-Fi SSH or USB Fastboot installation.
+
+- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-windows-amd64.zip)
+- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-arm64.zip)
+- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-amd64.zip)
+- [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-linux-amd64.tar.gz)
+
+Extract the archive and start `Install-EngineX.bat`, `Install-EngineX.command`, or `./install-enginex.sh` respectively. Network discovery depends on StageLinQ or the EngineX Web UI; SSH requires root access. Fastboot requires separate tools, including `fastboot` and Python 3; second-generation image creation also needs e2fsprogs. On Windows use the Linux package in WSL with USB access for that path. Back up your deck first: Fastboot can destroy data, particularly when creating a new second-generation `/data` image. First-generation rootfs flashing is experimental and has not been validated across all models.
+
 ### Option 1: USB Stick Install (First-Time Setup)
 1. Click the link for your exact player model below to download the `.img` file directly (or visit [**Releases**](https://github.com/Cd1s/EngineX-OS/releases/latest)):
    - **Denon DJ SC5000 Prime**: [`SC5000-5.3.0.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
@@ -189,12 +200,26 @@ The entire system has been refactored and slimmed down so all extra features tak
 
 ### Option 1b: Second-Generation Models (`/data` Bundle, Beta)
 
-**SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Mixstream Pro+, Mixstream Pro Go, PRIME 4 G2 and Rane SYSTEM ONE** (#61, #68, #69, #76) run signed firmware that refuses a modified `.img`. EngineX OS installs on top of the official Engine OS 5.3.0 as a `/data` bundle and leaves the system partition untouched. **Never flash a `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` `.img` on these units.** The bundles passed the sandbox tests on the official root file systems but have not been tried on real hardware yet, so please report how it goes.
+**EngineX-Installer automatic installer (recommended):** finds the deck without entering its IP or choosing its model, using Wi-Fi SSH or USB Fastboot. Download the package for your computer:
 
-**Before you start**
+- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-windows-amd64.zip)
+- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-arm64.zip)
+- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-amd64.zip)
+- [Linux x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-linux-amd64.tar.gz)
 
-1. Update the unit to the official **Engine OS 5.3.0** first.
-2. Download the bundle for your model and check its SHA-256 against `SHA256SUMS.txt` on the Release page:
+1. Update the deck to official **Engine OS 5.3.0**.
+2. Extract the package and start `Install-EngineX.bat` on Windows, `Install-EngineX.command` on macOS, or `./install-enginex.sh` on Linux.
+3. The installer looks for your deck and downloads its matching bundle. For a stock deck, select **Settings → About / Update → Firmware Update Mode**, reboot and connect USB; Fastboot identifies the model and flashes `/data` after confirmation. For a deck with root SSH enabled, connect both devices to the same network: StageLinQ (UDP 51337) and an EngineX Web UI scan discover it, then the bundle is installed under `/data/sc5000-custom` while preserving your library and settings. Discovery may depend on network configuration and StageLinQ availability.
+4. After installation, future releases can be installed on the deck using **Settings → About / Update → Update** over Wi-Fi (#86).
+
+SSH requires root access. USB Fastboot requires `fastboot`, Python 3 and e2fsprogs installed separately; on Windows, use the Linux package in WSL with USB access. **Flashing a new `/data` image erases the data on that partition, including its music, library and settings.** Back up the deck first and disconnect USB drives and SD cards before installation. To preserve `/data`, use `--userdata-backup` with a full image from the same deck. This Beta has not been tested on real hardware.
+
+**SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Mixstream Pro+, Mixstream Pro Go, PRIME 4 G2 and Rane SYSTEM ONE** run signed firmware. **Never flash a `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` `.img` on these units.**
+
+<details>
+<summary>Advanced: manual installation and removal</summary>
+
+Download the bundle for your model and check its SHA-256 against `SHA256SUMS.txt` on the Release page:
    - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
    - **Denon DJ SC LIVE 2** (JP20): [`SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
    - **Denon DJ PRIME 4+** (JC11S): [`PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
@@ -230,6 +255,8 @@ The entire system has been refactored and slimmed down so all extra features tak
    ```
 
 **Uninstall**: `sh /data/sc5000-custom/bundle/uninstall.sh && reboot` removes only what the bundle added.
+
+</details>
 
 > **PRIME 4 G2 / SYSTEM ONE (64-bit Engine)**: the UI packs, the streaming gateway (Deezer, SoundCloud, Beatport) and the EngineX services are in. The DSP guards, Master Soft Clipper and auto gain, SQLite tuning and the 4-deck unlock are not ported to the 64-bit Engine yet, and Stems stay as the official firmware has them. This Engine needs the unit's secure element (OP-TEE) to start, so the sandbox checked the hook, the edits and the pack loading but not the screens.
 

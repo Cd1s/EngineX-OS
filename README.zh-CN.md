@@ -174,6 +174,17 @@
 
 ## 如何安装与升级
 
+### 方式零：全系 16 款机型的 EngineX-Installer
+
+EngineX-Installer 支持一代与二代机，无需输入 IP 或选择机型，通过 Wi-Fi SSH 或 USB Fastboot 识别设备并下载对应的 `.img` 或数据包安装。
+
+- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-windows-amd64.zip)
+- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-arm64.zip)
+- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-amd64.zip)
+- [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-linux-amd64.tar.gz)
+
+解压后分别运行 `Install-EngineX.bat`、`Install-EngineX.command` 或 `./install-enginex.sh`。网络发现依赖 StageLinQ 或 EngineX Web 界面；SSH 需要 root 权限。Fastboot 需另装 `fastboot` 和 Python 3，二代机镜像制作还需要 e2fsprogs；Windows 的二代机 USB 路径需在有 USB 访问权限的 WSL 中运行 Linux 包。请先备份碟机：Fastboot 可能导致数据丢失，尤其是新建二代机 `/data` 镜像。一代机 rootfs 刷写为实验功能，尚未在全部机型上验证。
+
 ### 方式一：U 盘刷机（首次安装）
 1. 点击下方对应你机器型号的链接，直接下载升级包（或前往 [**Releases 页面**](https://github.com/Cd1s/EngineX-OS/releases/latest)）：
    - **Denon DJ SC5000 Prime**：[`SC5000-5.3.0.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.2-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
@@ -189,12 +200,26 @@
 
 ### 方式一 b：二代机型（`/data` 数据包，Beta）
 
+**一键自动安装器 EngineX-Installer（推荐）：**无需输入 IP 或选择机型，支持 Wi-Fi SSH 和 USB Fastboot。下载适合电脑的平台包：
+
+- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-windows-amd64.zip)
+- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-arm64.zip)
+- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-macos-amd64.zip)
+- [Linux x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.2-linux-amd64.tar.gz)
+
+1. 先将碟机升级到官方 **Engine OS 5.3.0**。
+2. 解压安装包：Windows 双击 `Install-EngineX.bat`，macOS 双击 `Install-EngineX.command`，Linux 运行 `./install-enginex.sh`。
+3. 安装器自动寻找碟机并下载对应数据包。原厂机在屏幕点 **设置 → 关于 / 更新 → 固件更新模式（Firmware Update Mode）**，重启后用 USB 连电脑；Fastboot 自动识别机型，确认后刷写 `/data`。已开启 root SSH 的机器将电脑和碟机连到同一网络，安装器通过 StageLinQ（UDP 51337）及 EngineX Web 界面扫描发现设备，在 `/data/sc5000-custom` 安装，保留曲库和设置。能否发现设备取决于网络配置和 StageLinQ 是否可用。
+4. 首次安装后，后续版本可在碟机上通过 Wi-Fi 点击 **设置 → 关于 / 更新 → 更新** 在线升级（#86）。
+
+SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboot`、Python 3 和 e2fsprogs；Windows 请在有 USB 访问权限的 WSL 中运行 Linux 包。**刷入新的 `/data` 镜像会清空该分区上的音乐、曲库和设置。**请先备份碟机数据，安装前拔下 U 盘和 SD 卡。要保留 `/data`，请通过 `--userdata-backup` 提供该碟机的完整分区镜像。本 Beta 尚未在实机验证。
+
 **SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go、PRIME 4 G2 和 Rane SYSTEM ONE**（#61、#68、#69、#76）的固件带签名校验，不接受改过的 `.img`。EngineX OS 以 `/data` 数据包的形式装在官方 Engine OS 5.3.0 之上，不改动系统分区。**这些机器千万不要刷 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的 `.img`。** 数据包已在官方根文件系统上通过沙箱测试，还没在实机上试过，欢迎反馈结果。
 
-**准备**
+<details>
+<summary>高级用户：手动命令行安装 / 卸载说明</summary>
 
-1. 先把机器升级到官方 **Engine OS 5.3.0**。
-2. 下载对应机型的数据包，并用 Release 页的 `SHA256SUMS.txt` 核对 SHA-256：
+下载对应机型的数据包，并用 Release 页的 `SHA256SUMS.txt` 核对 SHA-256：
    - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
    - **Denon DJ SC LIVE 2** (JP20): [`SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
    - **Denon DJ PRIME 4+** (JC11S): [`PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
@@ -230,6 +255,8 @@
    ```
 
 **卸载**：`sh /data/sc5000-custom/bundle/uninstall.sh && reboot`，只删除数据包装上的内容。
+
+</details>
 
 > **PRIME 4 G2 / SYSTEM ONE（64 位 Engine）**：已包含 UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和 EngineX 各项服务。DSP 防护、0dB 防破音软限幅与自动增益、SQLite 调优和 4 台面解锁还没移植到 64 位 Engine；Stems 保持官方固件原样。这份 Engine 启动要用机器的安全芯片（OP-TEE），沙箱里只验证了 hook、内存补丁和 UI 包加载，没看到实际界面。
 
