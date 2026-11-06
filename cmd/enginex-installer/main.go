@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,6 +45,36 @@ const (
 	// install.sh's own default; the variable is only set by tests.
 	customDirSh = `"${SC5000_CUSTOM:-/data/sc5000-custom}"`
 )
+
+func init() {
+	// On macOS (Darwin), Homebrew installs e2fsprogs as keg-only to
+	// /opt/homebrew/opt/e2fsprogs/sbin or /usr/local/opt/e2fsprogs/sbin.
+	// Ensure common tool paths are in PATH so mke2fs and debugfs are discovered.
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	extra := []string{
+		"/opt/homebrew/opt/e2fsprogs/sbin", "/opt/homebrew/opt/e2fsprogs/bin",
+		"/opt/homebrew/bin", "/opt/homebrew/sbin",
+		"/usr/local/opt/e2fsprogs/sbin", "/usr/local/opt/e2fsprogs/bin",
+		"/usr/local/bin", "/usr/local/sbin",
+	}
+	path := os.Getenv("PATH")
+	existing := map[string]bool{}
+	for _, p := range filepath.SplitList(path) {
+		existing[p] = true
+	}
+	var toPrepend []string
+	for _, dir := range extra {
+		if _, err := os.Stat(dir); err == nil && !existing[dir] {
+			toPrepend = append(toPrepend, dir)
+			existing[dir] = true
+		}
+	}
+	if len(toPrepend) > 0 {
+		os.Setenv("PATH", strings.Join(toPrepend, string(os.PathListSeparator))+string(os.PathListSeparator)+path)
+	}
+}
 
 // options are the flags plus the seams the tests point at real local things.
 type options struct {
@@ -122,12 +153,35 @@ var gen1Boards = map[string]model{
 	"jc11": {"PRIME4", "Denon DJ PRIME 4"}, "jc16": {"PRIME2", "Denon DJ PRIME 2"}, "nh08": {"MIXSTREAMPRO", "Numark Mixstream Pro"},
 }
 
+func boardCode(code string) string {
+	code = strings.ToLower(strings.TrimSpace(code))
+	code = strings.TrimPrefix(code, "inmusic,")
+	if _, ok := gen2Boards[code]; ok {
+		return code
+	}
+	if _, ok := gen1Boards[code]; ok {
+		return code
+	}
+	// Fastboot product strings often include SoC/platform prefixes, e.g. "rk3288-az05-jp11s".
+	// Match on the last token after '-' or '_'.
+	if idx := strings.LastIndexAny(code, "-_/"); idx >= 0 {
+		sub := strings.TrimPrefix(code[idx+1:], "inmusic,")
+		if _, ok := gen2Boards[sub]; ok {
+			return sub
+		}
+		if _, ok := gen1Boards[sub]; ok {
+			return sub
+		}
+	}
+	return code
+}
+
 func lookupBoard(code string) (m model, gen2, ok bool) {
-	code = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(code)), "inmusic,")
-	if m, ok = gen2Boards[code]; ok {
+	c := boardCode(code)
+	if m, ok = gen2Boards[c]; ok {
 		return m, true, true
 	}
-	m, ok = gen1Boards[code]
+	m, ok = gen1Boards[c]
 	return m, false, ok
 }
 
@@ -279,7 +333,7 @@ func discover(ctx context.Context, o *options) []deck {
 			d := get(ip)
 			d.Announced, d.Name = true, a.Source
 			if _, _, ok := lookupBoard(a.Software); ok { // decks announce their board code as the software name
-				d.Board, d.Known = strings.ToLower(a.Software), true
+				d.Board, d.Known = boardCode(a.Software), true
 			}
 			mu.Unlock()
 		}
@@ -583,7 +637,7 @@ func parseCompatible(out string) (code string, m model, gen2, ok bool) {
 	for _, c := range strings.Split(out, "\x00") {
 		if strings.HasPrefix(c, "inmusic,") {
 			if m, gen2, ok = lookupBoard(c); ok {
-				return strings.TrimPrefix(c, "inmusic,"), m, gen2, true
+				return boardCode(c), m, gen2, true
 			}
 		}
 	}
@@ -942,7 +996,7 @@ func run(ctx context.Context, o *options) error {
 func main() {
 	o := &options{}
 	flag.StringVar(&o.Bundle, "bundle", "", "Data-Bundle.tar.gz to install (default: newest in the current directory, else download)")
-	flag.StringVar(&o.Backup, "userdata-backup", "", "mode B: a backup image of the deck's data partition to inject into (keeps the user's files)")
+	flag.StringVar(&o.Backup, "userdata-backup", "", "mode B: a backup image of the deck's data partition to inject into (keeps the user's files; if omitted, a fresh partition is created)")
 	flag.StringVar(&o.Key, "key", "", "mode A: SSH private key (default ~/.ssh/id_*; password denon is also tried)")
 	flag.StringVar(&o.Password, "password", "", "mode A: SSH password for root")
 	flag.StringVar(&o.Repo, "repo", "Cd1s/EngineX-OS", "GitHub repository to download from")

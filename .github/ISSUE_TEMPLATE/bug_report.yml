@@ -20,6 +20,14 @@ body:
         - PRIME 2 (JC16)
         - PRIME GO (JP11)
         - Mixstream Pro (NH08)
+        - SC LIVE 4 (JP21)
+        - SC LIVE 2 (JP20)
+        - PRIME 4+ (JC11S)
+        - PRIME GO+ (JP11S)
+        - Mixstream Pro+ (NH08S)
+        - Mixstream Pro Go (NH10)
+        - PRIME 4 G2 (JP24)
+        - SYSTEM ONE (RMZ2)
     validations:
       required: true
   - type: input
