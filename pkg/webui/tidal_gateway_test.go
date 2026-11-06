@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -605,5 +606,173 @@ func TestTidalGatewaySaysWhyPlaylistsFailed(t *testing.T) {
 	}
 	if len(titles) != 1 || !strings.Contains(titles[0], "Spotify") || !strings.Contains(titles[0], "403") {
 		t.Fatalf("menu: %q", titles)
+	}
+}
+
+type sortMockProvider struct {
+	tracks []providers.Track
+}
+
+func (s sortMockProvider) Playlists(context.Context) ([]providers.Playlist, error) {
+	return []providers.Playlist{{ID: "sort-list", Title: "Sort Playlist", Count: len(s.tracks)}}, nil
+}
+
+func (s sortMockProvider) Tracks(_ context.Context, _ string) ([]providers.Track, error) {
+	return slices.Clone(s.tracks), nil
+}
+
+func TestStreamingPlaylistSortByBPMKeyTitle(t *testing.T) {
+	// 1. Direct unit test of sortStreamingTracks
+	tracks := []trackRef{
+		{track: providers.Track{Title: "Echoes", Artist: "Pink Floyd", BPM: 130, Key: "8B", DurationMS: 300000}},
+		{track: providers.Track{Title: "Abba Song", Artist: "Abba", BPM: 120, Key: "1A", DurationMS: 200000}},
+		{track: providers.Track{Title: "Zero BPM", Artist: "Ambient", BPM: 0, Key: "", DurationMS: 100000}},
+		{track: providers.Track{Title: "Negative BPM", Artist: "Glitch", BPM: -5, Key: "12B", DurationMS: 150000}},
+		{track: providers.Track{Title: "Zebra Beat", Artist: "Zulu", BPM: 125, Key: "1B", DurationMS: 250000}},
+	}
+
+	// BPM Ascending: 120, 125, 130, followed by 0, -5
+	bpmAsc := slices.Clone(tracks)
+	sortStreamingTracks(bpmAsc, "bpm", "asc")
+	if bpmAsc[0].track.BPM != 120 || bpmAsc[1].track.BPM != 125 || bpmAsc[2].track.BPM != 130 ||
+		bpmAsc[3].track.BPM != 0 || bpmAsc[4].track.BPM != -5 {
+		t.Fatalf("bpm asc: %+v", bpmAsc)
+	}
+
+	// BPM Descending: 130, 125, 120, followed by 0, -5
+	bpmDesc := slices.Clone(tracks)
+	sortStreamingTracks(bpmDesc, "bpm", "desc")
+	if bpmDesc[0].track.BPM != 130 || bpmDesc[1].track.BPM != 125 || bpmDesc[2].track.BPM != 120 ||
+		bpmDesc[3].track.BPM != 0 || bpmDesc[4].track.BPM != -5 {
+		t.Fatalf("bpm desc: %+v", bpmDesc)
+	}
+
+	// Key Ascending: 1A, 1B, 8B, 12B, followed by ""
+	keyAsc := slices.Clone(tracks)
+	sortStreamingTracks(keyAsc, "key", "asc")
+	if keyAsc[0].track.Key != "1A" || keyAsc[1].track.Key != "1B" || keyAsc[2].track.Key != "8B" ||
+		keyAsc[3].track.Key != "12B" || keyAsc[4].track.Key != "" {
+		t.Fatalf("key asc: %+v", keyAsc)
+	}
+
+	// Key Descending: 12B, 8B, 1B, 1A, followed by ""
+	keyDesc := slices.Clone(tracks)
+	sortStreamingTracks(keyDesc, "key", "desc")
+	if keyDesc[0].track.Key != "12B" || keyDesc[1].track.Key != "8B" || keyDesc[2].track.Key != "1B" ||
+		keyDesc[3].track.Key != "1A" || keyDesc[4].track.Key != "" {
+		t.Fatalf("key desc: %+v", keyDesc)
+	}
+
+	// Title Ascending: Abba Song, Echoes, Negative BPM, Zebra Beat, Zero BPM
+	titleAsc := slices.Clone(tracks)
+	sortStreamingTracks(titleAsc, "song", "asc")
+	if titleAsc[0].track.Title != "Abba Song" || titleAsc[1].track.Title != "Echoes" ||
+		titleAsc[2].track.Title != "Negative BPM" || titleAsc[3].track.Title != "Zebra Beat" ||
+		titleAsc[4].track.Title != "Zero BPM" {
+		t.Fatalf("title asc: %+v", titleAsc)
+	}
+
+	// Title Descending
+	titleDesc := slices.Clone(tracks)
+	sortStreamingTracks(titleDesc, "title", "desc")
+	if titleDesc[0].track.Title != "Zero BPM" || titleDesc[1].track.Title != "Zebra Beat" ||
+		titleDesc[2].track.Title != "Negative BPM" || titleDesc[3].track.Title != "Echoes" ||
+		titleDesc[4].track.Title != "Abba Song" {
+		t.Fatalf("title desc: %+v", titleDesc)
+	}
+
+	// Artist Ascending
+	artistAsc := slices.Clone(tracks)
+	sortStreamingTracks(artistAsc, "artist", "asc")
+	if artistAsc[0].track.Artist != "Abba" || artistAsc[1].track.Artist != "Ambient" ||
+		artistAsc[2].track.Artist != "Glitch" || artistAsc[3].track.Artist != "Pink Floyd" ||
+		artistAsc[4].track.Artist != "Zulu" {
+		t.Fatalf("artist asc: %+v", artistAsc)
+	}
+
+	// 2. Integration test via /v1/playlists/{uuid}/tracks
+	uiDir := t.TempDir()
+	mockP := sortMockProvider{
+		tracks: []providers.Track{
+			{ID: "t1", Title: "Track One", Artist: "Artist B", BPM: 130, Key: "8B", DurationMS: 300000},
+			{ID: "t2", Title: "Track Two", Artist: "Artist A", BPM: 120, Key: "1A", DurationMS: 200000},
+			{ID: "t3", Title: "Track Three", Artist: "Artist C", BPM: 0, Key: "", DurationMS: 100000},
+		},
+	}
+	ui := New(Config{
+		AccessToken: "test-code",
+		UIDir:       uiDir,
+		StateDir:    t.TempDir(),
+	}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+
+	// Seed session & playlist
+	sessionID := "mock-session"
+	ui.sessions[sessionID] = &Session{
+		ID:       sessionID,
+		Provider: "netease",
+		Ready:    true,
+		p:        mockP,
+		tracks:   map[string]providers.Track{},
+		expires:  time.Now().Add(time.Hour),
+	}
+	playlistUUID := "11111111-2222-3333-4444-555555555555"
+	ui.tidal.lists[playlistUUID] = playlistRef{
+		session:  sessionID,
+		provider: "netease",
+		list:     providers.Playlist{ID: "sort-list", Title: "Sort Playlist"},
+	}
+
+	type trackItem struct {
+		Item struct {
+			Title string `json:"title"`
+			BPM   int    `json:"bpm"`
+			Key   string `json:"key"`
+		} `json:"item"`
+	}
+
+	getTitles := func(path string) []string {
+		var list tidalList
+		tidalGet(t, srv.URL, path, 200, &list)
+		var titles []string
+		for _, raw := range list.Items {
+			var it trackItem
+			json.Unmarshal(raw, &it)
+			titles = append(titles, it.Item.Title)
+		}
+		return titles
+	}
+
+	// Query params: sort=bpm&order=asc
+	titles := getTitles("/v1/playlists/" + playlistUUID + "/tracks?sort=bpm&order=asc")
+	if len(titles) != 3 || titles[0] != "Track Two" || titles[1] != "Track One" || titles[2] != "Track Three" {
+		t.Fatalf("HTTP sort by bpm asc failed: %v", titles)
+	}
+
+	// Query params: sort=bpm&order=desc
+	titles = getTitles("/v1/playlists/" + playlistUUID + "/tracks?sort=bpm&order=desc")
+	if len(titles) != 3 || titles[0] != "Track One" || titles[1] != "Track Two" || titles[2] != "Track Three" {
+		t.Fatalf("HTTP sort by bpm desc failed: %v", titles)
+	}
+
+	// Query params: sort=artist&order=asc
+	titles = getTitles("/v1/playlists/" + playlistUUID + "/tracks?sort=artist&order=asc")
+	if len(titles) != 3 || titles[0] != "Track Two" || titles[1] != "Track One" || titles[2] != "Track Three" {
+		t.Fatalf("HTTP sort by artist asc failed: %v", titles)
+	}
+
+	// Setting via loadUI(): StreamSortRole="bpm", StreamSortOrder="desc"
+	ui.uiMu.Lock()
+	v := ui.loadUI()
+	v.StreamSortRole = "bpm"
+	v.StreamSortOrder = "desc"
+	_ = ui.saveUI(v)
+	ui.uiMu.Unlock()
+
+	// Without query params, should use configured UI sort
+	titles = getTitles("/v1/playlists/" + playlistUUID + "/tracks")
+	if len(titles) != 3 || titles[0] != "Track One" || titles[1] != "Track Two" || titles[2] != "Track Three" {
+		t.Fatalf("Configured sort by bpm desc failed: %v", titles)
 	}
 }

@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"github.com/google/uuid"
 )
@@ -260,6 +261,8 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/sc5000/bpm", s.bpmConfigGet)
 	g.mux.HandleFunc("POST /v1/sc5000/bpm", s.bpmConfigPost)
 	g.mux.HandleFunc("GET /v1/sc5000/art", g.art)
+	g.mux.HandleFunc("GET /v1/sc5000/hotcues", s.handleHotCues)
+	g.mux.HandleFunc("POST /v1/sc5000/hotcues", s.handleHotCues)
 	g.mux.HandleFunc("GET /v1/sc5000/stems/source", g.stemsSource)
 	g.mux.HandleFunc("GET /v1/sc5000/stems/local", g.stemsLocal)
 	g.mux.HandleFunc("GET /v1/sc5000/relay", s.relayConfigGet)
@@ -744,6 +747,86 @@ func (g *tidalGateway) refItems(refs []trackRef) []any {
 	}
 	return items
 }
+func camelotRank(k string) (int, bool) {
+	n, m, ok := enginedb.Camelot(k)
+	if !ok || n < 1 || n > 12 {
+		return -1, false
+	}
+	offset := 0
+	if m == 'B' {
+		offset = 1
+	}
+	return (n-1)*2 + offset, true
+}
+
+func sortStreamingTracks(refs []trackRef, role, order string) {
+	role = strings.ToLower(strings.TrimSpace(role))
+	order = strings.ToLower(strings.TrimSpace(order))
+	desc := order == "desc"
+	switch role {
+	case "bpm":
+		sort.SliceStable(refs, func(i, j int) bool {
+			a, b := refs[i].track.BPM, refs[j].track.BPM
+			validA, validB := a > 0, b > 0
+			if !validA && !validB {
+				return false
+			}
+			if !validA {
+				return false
+			}
+			if !validB {
+				return true
+			}
+			if desc {
+				return a > b
+			}
+			return a < b
+		})
+	case "key":
+		sort.SliceStable(refs, func(i, j int) bool {
+			rankA, okA := camelotRank(refs[i].track.Key)
+			rankB, okB := camelotRank(refs[j].track.Key)
+			if !okA && !okB {
+				return false
+			}
+			if !okA {
+				return false
+			}
+			if !okB {
+				return true
+			}
+			if desc {
+				return rankA > rankB
+			}
+			return rankA < rankB
+		})
+	case "rating":
+		sort.SliceStable(refs, func(i, j int) bool {
+			a, b := refs[i].track.DurationMS, refs[j].track.DurationMS
+			if desc {
+				return a > b
+			}
+			return a < b
+		})
+	case "song", "title":
+		sort.SliceStable(refs, func(i, j int) bool {
+			a, b := strings.ToLower(refs[i].track.Title), strings.ToLower(refs[j].track.Title)
+			if desc {
+				return a > b
+			}
+			return a < b
+		})
+	case "artist":
+		sort.SliceStable(refs, func(i, j int) bool {
+			a, b := strings.ToLower(refs[i].track.Artist), strings.ToLower(refs[j].track.Artist)
+			if desc {
+				return a > b
+			}
+			return a < b
+		})
+	}
+}
+
 func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("uuid")
 	if id == hintPlaylist {
@@ -759,11 +842,39 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, errors.New("playlist not found"))
 		return
 	}
+
+	q := r.URL.Query()
+	sortParam := strings.ToLower(q.Get("sort"))
+	orderParam := strings.ToLower(q.Get("order"))
+	role := sortParam
+	order := orderParam
+	if role == "" && orderParam != "" && orderParam != "asc" && orderParam != "desc" {
+		role = orderParam
+		order = ""
+	}
+	if role == "" || role == "default" {
+		g.s.uiMu.Lock()
+		ui := g.s.loadUI()
+		g.s.uiMu.Unlock()
+		if role == "" {
+			role = strings.ToLower(ui.StreamSortRole)
+		}
+		if order == "" {
+			order = strings.ToLower(ui.StreamSortOrder)
+		}
+	}
+	if order == "" {
+		order = "asc"
+	}
+
 	if ref.provider == localProvider {
 		refs, err := g.s.driveListTracks(r.Context(), ref.list.ID)
 		if err != nil {
 			fail(w, 404, err)
 			return
+		}
+		if role != "" && role != "default" {
+			sortStreamingTracks(refs, role, order)
 		}
 		respond(w, page(r, 500, g.refItems(refs)))
 		return
@@ -802,7 +913,15 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.s.cfg.BPM.Enrich(r.Context(), tracks)
-	respond(w, page(r, 500, g.trackItems(session, guest, tracks)))
+
+	refs := make([]trackRef, 0, len(tracks))
+	for _, t := range tracks {
+		refs = append(refs, trackRef{track: t, session: session, guest: guest})
+	}
+	if role != "" && role != "default" {
+		sortStreamingTracks(refs, role, order)
+	}
+	respond(w, page(r, 500, g.refItems(refs)))
 }
 
 // favoriteTracks maps to the owner's NetEase "liked songs", which NetEase
