@@ -352,3 +352,147 @@ func TestLiveMP3UsesExternalEncoder(t *testing.T) {
 		t.Errorf("encoder output not streamed: %v %v", buf, err)
 	}
 }
+
+func TestLiveWAVHeadersAndPCMFormat(t *testing.T) {
+	s, dir := newTestServer(t)
+	enableLiveWithPCM(t, s, dir)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	// 1. Standard WAV
+	resp, err := http.Get(srv.URL + "/live.wav")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("expected Cache-Control 'no-cache', got %q", cc)
+	}
+	if xf := resp.Header.Get("X-Audio-Format"); xf != "48000Hz-16bit-2ch-PCM" {
+		t.Errorf("expected X-Audio-Format '48000Hz-16bit-2ch-PCM', got %q", xf)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "audio/wav" {
+		t.Errorf("expected Content-Type 'audio/wav', got %q", ct)
+	}
+
+	// 2. Raw PCM stream via ?format=pcm (zero header overhead)
+	respPCM, err := http.Get(srv.URL + "/live.wav?format=pcm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respPCM.Body.Close()
+
+	if respPCM.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", respPCM.StatusCode)
+	}
+	if cc := respPCM.Header.Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("expected Cache-Control 'no-cache', got %q", cc)
+	}
+	if xf := respPCM.Header.Get("X-Audio-Format"); xf != "48000Hz-16bit-2ch-PCM" {
+		t.Errorf("expected X-Audio-Format '48000Hz-16bit-2ch-PCM', got %q", xf)
+	}
+	if ct := respPCM.Header.Get("Content-Type"); ct != "audio/L16;rate=48000;channels=2" {
+		t.Errorf("expected Content-Type 'audio/L16;rate=48000;channels=2', got %q", ct)
+	}
+
+	// Read first 4 bytes - must be raw PCM without any RIFF header
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(respPCM.Body, buf); err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if !bytes.Equal(buf, []byte{1, 2, 3, 4}) {
+		t.Errorf("expected raw PCM payload [1, 2, 3, 4], got %v", buf)
+	}
+}
+
+func TestBroadcastPostLANOptions(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	payload := map[string]any{
+		"lanMode":   "rtp",
+		"lanTarget": "239.255.0.1:5004",
+	}
+	body, _ := json.Marshal(payload)
+
+	resp := doAuthRequest(t, s, "POST", "/api/broadcast", body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var st broadcast.Status
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	if st.LANMode != "rtp" {
+		t.Errorf("expected lanMode 'rtp', got %q", st.LANMode)
+	}
+	if st.LANTarget != "239.255.0.1:5004" {
+		t.Errorf("expected lanTarget '239.255.0.1:5004', got %q", st.LANTarget)
+	}
+}
+
+func TestUSBAudioEndpoints(t *testing.T) {
+	s, _ := newTestServer(t)
+
+	// 1. GET /api/usb-audio
+	resp := doAuthRequest(t, s, "GET", "/api/usb-audio", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var getRes struct {
+		HostDACMode string             `json:"hostDacMode"`
+		GadgetUAC2  bool               `json:"gadgetUac2"`
+		SampleRate  int                `json:"sampleRate"`
+		DACs        []broadcast.USBDAC `json:"dacs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&getRes); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if getRes.HostDACMode != "default" {
+		t.Errorf("expected default hostDacMode, got %s", getRes.HostDACMode)
+	}
+	if getRes.SampleRate != 48000 {
+		t.Errorf("expected default sampleRate 48000, got %d", getRes.SampleRate)
+	}
+
+	// 2. POST /api/usb-audio
+	postPayload := map[string]any{
+		"hostDacMode": "external",
+		"hostDacCard": "hw:2,0",
+		"sampleRate":  96000,
+		"gadgetUac2":  true,
+	}
+	body, _ := json.Marshal(postPayload)
+	resp = doAuthRequest(t, s, "POST", "/api/usb-audio", body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var postRes struct {
+		HostDACMode string             `json:"hostDacMode"`
+		HostDACCard string             `json:"hostDacCard"`
+		GadgetUAC2  bool               `json:"gadgetUac2"`
+		SampleRate  int                `json:"sampleRate"`
+		DACs        []broadcast.USBDAC `json:"dacs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&postRes); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if postRes.HostDACMode != "external" || postRes.HostDACCard != "hw:2,0" || postRes.SampleRate != 96000 || !postRes.GadgetUAC2 {
+		t.Errorf("unexpected POST response: %+v", postRes)
+	}
+
+	// 3. Direct handleUSBAudio call simulating /v1/sc5000/usb-audio
+	req := httptest.NewRequest("GET", "/v1/sc5000/usb-audio", nil)
+	rec := httptest.NewRecorder()
+	s.handleUSBAudio(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handleUSBAudio expected 200, got %d", rec.Code)
+	}
+}
