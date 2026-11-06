@@ -608,6 +608,13 @@ SERVICES_MAIN = """
 	property bool scBroadcastOn: false
 	property bool scUpfaderEcho: false
 	property string scLastBroadcastTrack: ""
+	property bool scDualColumn: false
+	property int scSyncGuardPct: 0
+	property bool scSwapLoopOrder: false
+	property int scLedBrightness: 100
+	property bool scStemsEqMode: false
+	property bool scBeatJumpPads: false
+	property string scPioneerFx: "off"
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
 	property bool scUpdating: false
@@ -816,10 +823,42 @@ SERVICES_MAIN = """
 		scScope = v.scope
 		scBroadcastOn = !!v.broadcastEnabled
 		scUpfaderEcho = !!v.upfaderEcho
+		if (typeof v === "string") scParseSettingsConf(v)
+		else if (v) {
+			if (v.browserDualColumn !== undefined) scDualColumn = !!v.browserDualColumn
+			else if (v.browser_dual_column !== undefined) scDualColumn = v.browser_dual_column === "1" || v.browser_dual_column === 1 || v.browser_dual_column === true
+			if (v.syncGuardPct !== undefined) scSyncGuardPct = parseInt(v.syncGuardPct) || 0
+			else if (v.sync_guard_pct !== undefined) scSyncGuardPct = parseInt(v.sync_guard_pct) || 0
+			if (v.swapLoopOrder !== undefined) scSwapLoopOrder = !!v.swapLoopOrder
+			else if (v.swap_loop_order !== undefined) scSwapLoopOrder = v.swap_loop_order === "1" || v.swap_loop_order === 1 || v.swap_loop_order === true
+			if (v.ledBrightness !== undefined) scLedBrightness = parseInt(v.ledBrightness) || 100
+			else if (v.led_brightness !== undefined) scLedBrightness = parseInt(v.led_brightness) || 100
+			if (v.stemsEqMode !== undefined) scStemsEqMode = !!v.stemsEqMode
+			else if (v.stems_eq_mode !== undefined) scStemsEqMode = v.stems_eq_mode === "1" || v.stems_eq_mode === 1 || v.stems_eq_mode === true
+			if (v.beatJumpPads !== undefined) scBeatJumpPads = !!v.beatJumpPads
+			else if (v.beat_jump_pads !== undefined) scBeatJumpPads = v.beat_jump_pads === "1" || v.beat_jump_pads === 1 || v.beat_jump_pads === true
+			if (v.pioneerFx !== undefined) scPioneerFx = v.pioneerFx || "off"
+			else if (v.pioneer_fx !== undefined) scPioneerFx = v.pioneer_fx || "off"
+		}
 		const p = Planck.getProperty("/Client/Preferences/Profile/Application/WaveformStyle")
 		if (p.translator && (p.translator.index == 1) !== (v.waveform === "rgb"))
 			p.translator.index = v.waveform === "rgb" ? 1 : 0
 		scUiLoaded = true
+	}
+	function scParseSettingsConf(text) {
+		for (const line of (text || "").split("\n")) {
+			const eq = line.indexOf("=")
+			if (eq < 0) continue
+			const key = line.slice(0, eq).trim()
+			const val = line.slice(eq + 1).trim()
+			if (key === "browser_dual_column") root.scDualColumn = val === "1"
+			else if (key === "sync_guard_pct") root.scSyncGuardPct = parseInt(val) || 0
+			else if (key === "swap_loop_order") root.scSwapLoopOrder = val === "1"
+			else if (key === "led_brightness") root.scLedBrightness = parseInt(val) || 100
+			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
+			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
+			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
+		}
 	}
 	function scSyncBroadcastMeta() {
 		if (!scBroadcastOn) return
@@ -1921,12 +1960,6 @@ def edits(dev: bool):
             ),
             ("function onShowLoginDialog(provider) {\n", "function onShowLoginDialog(provider) {\n			if (root.scQuiet() || root.scUnasked(provider)) return\n"),
         ],
-        v + "BrowseView/Components/TrackList.qml": [
-            (
-                "	readonly property string selectedProviderDisplayName: Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName\n",
-                "	readonly property string selectedProviderDisplayName: root.scBrand(Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName)\n",
-            ),
-        ],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbViewContentContainer.qml": [
             (
                 "		providerName: Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName\n",
@@ -1984,8 +2017,54 @@ def edits(dev: bool):
             ("				enabled: !stackView.busy\n				isDragged:", "				enabled: !stackView.busy && !scHidden\n				isDragged:"),
             ("						return modelData.display\n					}\n					return \"\"", "						return breadcrumbView.isStreamingContent && contentView.StackView.index === 0 ? root.scT(modelData.display) : modelData.display\n					}\n					return \"\""),
         ],
+        v + "BrowseView/Components/SortMenu/SortMenu.qml": [
+            (
+                "    readonly property bool isStreamingProviderWithSort: collectionController.isCurrentCollectionStreaming &&\n"
+                "        Planck.librarianController.streamingInterfaceController.hasSortMenu\n",
+                "    readonly property bool isStreamingProviderWithSort: collectionController.isCurrentCollectionStreaming\n",
+            ),
+            (
+                "    onSortRoleChanged: {\n"
+                "        if (dialog) {\n"
+                "            dialog.sortRole = sortRole\n"
+                "        }\n"
+                "        responsiveBrowseView.sortRole = sortRole\n"
+                "    }\n",
+                "    onSortRoleChanged: {\n"
+                "        if (dialog) {\n"
+                "            dialog.sortRole = sortRole\n"
+                "        }\n"
+                "        responsiveBrowseView.sortRole = sortRole\n"
+                "        try {\n"
+                "            var scReq = new XMLHttpRequest()\n"
+                "            scReq.open(\"POST\", \"http://127.0.0.1:8080/v1/sc5000/ui\")\n"
+                "            scReq.setRequestHeader(\"Content-Type\", \"application/json\")\n"
+                "            scReq.send(JSON.stringify({\n"
+                '                "streamSortRole": sortRole,\n'
+                '                "streamSortOrder": sortOrder === Qt.DescendingOrder ? "desc" : "asc"\n'
+                "            }))\n"
+                "        } catch (e) {}\n"
+                "    }\n",
+            ),
+        ],
+        v + "BrowseView/Components/Components/SortRole.qml": [(
+            "        text: parent.displayData\n",
+            '        text: root.scDualColumn && (row.modelData.bpm || "") !== "" ? ((row.modelData.bpm || "") + (parent.displayData ? " · " + parent.displayData : "")) : parent.displayData\n',
+        )],
     }
     if v53():
+        out[v + "RecordingView/RecMainView.qml"] = [(
+            "    readonly property bool isBlockedByStreaming: pBlockedByStreaming && pBlockedByStreaming.translator\n"
+            "        ? pBlockedByStreaming.translator.state\n"
+            "        : false\n",
+            "    readonly property bool isBlockedByStreaming: false\n"
+            "    Connections {\n"
+            "        target: pBlockedByStreaming ? pBlockedByStreaming.translator : null\n"
+            "        function onStateChanged() {\n"
+            "            if (pBlockedByStreaming.translator.state) pBlockedByStreaming.translator.state = false\n"
+            "        }\n"
+            "    }\n",
+        )]
         # #99: five views kept by stream-sync (scView* in EmbeddedMain) and Save View.
         out[ROOT + "Views/ControlCenter/Tabs/Preferences/Entries/LayoutViewTab.qml"] = [
             ("        model: [\n            ViewStateControllerInterface.View.View1,\n            ViewStateControllerInterface.View.View2,\n            ViewStateControllerInterface.View.View3,\n        ]\n", "        model: 5\n"),
@@ -2093,11 +2172,23 @@ def legacy_qml_fixes():
         # CF009 / CF010 / H143: after a view switch or Instant Double the track list
         # and breadcrumb stack grabbed focus mid-transition and the encoder lost it.
         v + "BrowseView/Components/TrackList.qml": [
+            (
+                "	readonly property string selectedProviderDisplayName: Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName\n",
+                "	readonly property string selectedProviderDisplayName: root.scBrand(Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName)\n",
+            ),
             ("			onIsCurrentFocusAreaChanged: {\n				if(visible && !activeFocus && isCurrentFocusArea) {\n					forceActiveFocus()\n				}\n",
              "			function scRestoreFocusNow() {\n				" + restore_guard + "				forceActiveFocus()\n			}\n\n"
              "			onIsCurrentFocusAreaChanged: {\n				if(visible && !activeFocus && isCurrentFocusArea) {\n					Qt.callLater(scRestoreFocusNow)\n				}\n"),
             ("					if(visible && isCurrentFocusArea && !activeFocus) {\n						forceActiveFocus()\n					}\n",
              "					if(visible && isCurrentFocusArea && !activeFocus) {\n						Qt.callLater(scRestoreFocusNow)\n					}\n"),
+            (
+                "!(streamingFlags & StreamingTrackFlags.BlocksRecording)",
+                "true",
+            ),
+            (
+                "id: disableRecordOfStreaming\n            visible: trackList.recording && trackList.isStreamingCollection\n",
+                "id: disableRecordOfStreaming\n            visible: false\n",
+            ),
         ],
         v + "BrowseView/Components/BreadcrumbView/BreadcrumbStackView.qml": [(
             "						contentView.currentRowIndex = index\n					}\n					breadcrumbView.push()\n				}\n",
