@@ -176,8 +176,57 @@ def ui_packs_tar(path):
     return out.getvalue()
 
 
-# The second-generation models on the one signed AZ0x firmware (#61, #68, #69).
-PREFIXES = ('SCLIVE4', 'SCLIVE2', 'PRIME4PLUS', 'PRIMEGOPLUS')
+# The second-generation models: signed AZ0x firmware with SC LIVE 4's armhf Engine
+# (same BuildID; #61, #68, #69). PRIME 4 G2 / SYSTEM ONE run a 64-bit Engine: not here.
+MODELS = {
+    'SCLIVE4': 'Denon DJ SC LIVE 4', 'SCLIVE2': 'Denon DJ SC LIVE 2',
+    'PRIME4PLUS': 'Denon DJ PRIME 4+', 'PRIMEGOPLUS': 'Denon DJ PRIME GO+',
+    'MIXSTREAMPROPLUS': 'Numark Mixstream Pro+', 'MIXSTREAMPROGO': 'Numark Mixstream Pro Go',
+}
+PREFIXES = tuple(MODELS)
+
+README_INSTALL = '''EngineX OS {version} for {model} (data bundle, beta)
+=================================================================
+
+This bundle adds EngineX OS to /data. The system partition and the signed
+official firmware are not touched; Engine OS 5.3.0 must already be installed.
+Status: beta. Built from the same files as the released .img; tested in a
+sandbox on the official 5.3.0 root file system, not yet on a real {model}.
+Please report results in the GitHub issues (#61, #68, #69).
+
+Never flash an .img meant for a first-generation model (PRIME4, PRIMEGO,
+MIXSTREAMPRO, ...) on this device.
+
+Method B (recommended): install on the device
+---------------------------------------------
+Needs a root shell on the device. Copy this .tar.gz to the device, then:
+
+    sha256sum -c SHA256SUMS.txt          # on the computer, before copying
+    tar -xzf {top}.tar.gz -C /tmp
+    sh /tmp/{top}/install.sh
+    reboot
+
+install.sh only writes /data/sc5000-custom and one ALSA file
+(/data/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf). Music,
+settings and the Engine library are left alone.
+
+Method A: inject into a userdata image (fastboot)
+-------------------------------------------------
+Only if you have no shell on the device. "fastboot flash userdata" REPLACES
+THE WHOLE /data PARTITION: music, settings, the Engine library and logins.
+Back up /data first and use an image made from your own backup:
+
+    python3 host-install-userdata.py <your-userdata-backup.img> --bundle {top}.tar.gz
+    sh host-install-fastboot.sh <your-userdata-backup.img>
+
+Never flash an empty or someone else's userdata image.
+
+Uninstall
+---------
+    sh /data/sc5000-custom/bundle/uninstall.sh && reboot
+
+Removes only what install.sh added; Engine starts stock again.
+'''
 
 
 def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
@@ -201,13 +250,14 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
     files['99-sc5000-custom.conf'] = (ALSA_CONF.encode(), 0o644)
     files['install.sh'] = (INSTALL.encode(), 0o755)
     files['uninstall.sh'] = (UNINSTALL.encode(), 0o755)
+    top = f'{prefix}-{version}-EngineX-OS-Data-Bundle'
+    files['README-INSTALL.txt'] = (README_INSTALL.format(version=version, model=MODELS[prefix], top=top).encode(), 0o644)
     here = Path(__file__).parent
     files['host-install-userdata.py'] = ((here / 'host-install-userdata.py').read_bytes(), 0o755)
     files['host-install-fastboot.sh'] = ((here / 'host-install-fastboot.sh').read_bytes(), 0o755)
     sums = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, (data, _) in sorted(files.items()))
     files['SHA256SUMS'] = (sums.encode(), 0o644)
 
-    top = f'{prefix}-{version}-EngineX-OS-Data-Bundle'
     out.mkdir(parents=True)
     bundle = out / f'{top}.tar.gz'
     with open(bundle, 'wb') as raw, gzip.GzipFile(filename='', fileobj=raw, mode='wb', mtime=0) as gz, \

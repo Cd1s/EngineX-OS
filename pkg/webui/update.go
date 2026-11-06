@@ -297,11 +297,13 @@ var imagePrefixes = map[string]string{
 	"inmusic,jp07": "SC5000", "inmusic,jp08": "SC5000M", "inmusic,jp11": "PRIMEGO",
 	"inmusic,jp13": "SC6000", "inmusic,jp14": "SC6000M",
 	"inmusic,jc11": "PRIME4", "inmusic,jc16": "PRIME2", "inmusic,nh08": "MIXSTREAMPRO",
-	// The second generation (SC LIVE 4/2, PRIME 4+, PRIME GO+; #61, #68, #69) runs
-	// one signed AZ0x firmware: no .img, only the /data bundle, so it is never
-	// offered. Its own prefix keeps a PRIME 4+ off the first PRIME 4 image.
+	// The second generation (SC LIVE 4/2, PRIME 4+, PRIME GO+, Mixstream Pro+ / Pro Go;
+	// #61, #68, #69) runs signed AZ0x firmware with SC LIVE 4's Engine: no .img, only
+	// the /data bundle, so it is never offered. Its own prefix keeps a PRIME 4+ off
+	// the first PRIME 4 image and a Mixstream Pro+ off the Mixstream Pro one.
 	"inmusic,jp21": "SCLIVE4", "inmusic,jp20": "SCLIVE2",
 	"inmusic,jc11s": "PRIME4PLUS", "inmusic,jp11s": "PRIMEGOPLUS",
+	"inmusic,nh08s": "MIXSTREAMPROPLUS", "inmusic,nh10": "MIXSTREAMPROGO",
 }
 
 // playerBoards are the standalone players: no channel faders, so no Upfader Echo (#52).
