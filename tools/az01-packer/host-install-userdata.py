@@ -19,6 +19,17 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+# On macOS, Homebrew installs e2fsprogs keg-only (not symlinked to PATH).
+if sys.platform == 'darwin':
+    extra_paths = [
+        '/opt/homebrew/opt/e2fsprogs/sbin', '/opt/homebrew/opt/e2fsprogs/bin',
+        '/usr/local/opt/e2fsprogs/sbin', '/usr/local/opt/e2fsprogs/bin',
+    ]
+    cur_path = os.environ.get('PATH', '')
+    to_add = [p for p in extra_paths if os.path.isdir(p) and p not in cur_path]
+    if to_add:
+        os.environ['PATH'] = ':'.join(to_add) + ':' + cur_path
+
 
 ALSA_DIRS = ('system/var/overlay/lib/alsa/conf.d', 'system/var-lib/alsa/conf.d')
 

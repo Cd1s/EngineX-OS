@@ -292,18 +292,22 @@ func TestParseAirDRejectsGarbage(t *testing.T) {
 
 func TestBoardTable(t *testing.T) {
 	for code, prefix := range map[string]string{"jp21": "SCLIVE4", "JP20": "SCLIVE2", "jc11s": "PRIME4PLUS", "jp11s": "PRIMEGOPLUS",
-		"nh08s": "MIXSTREAMPROPLUS", "NH10": "MIXSTREAMPROGO", "jp24": "PRIME4G2", "inmusic,rmz2": "SYSTEMONE"} {
+		"nh08s": "MIXSTREAMPROPLUS", "NH10": "MIXSTREAMPROGO", "jp24": "PRIME4G2", "inmusic,rmz2": "SYSTEMONE",
+		"rk3288-az05-jp11s": "PRIMEGOPLUS", "rk3288-az02-jp21": "SCLIVE4", "imx8-az04-jp24": "PRIME4G2",
+		"inmusic,rk3288-az05-jp11s": "PRIMEGOPLUS"} {
 		if m, gen2, ok := lookupBoard(code); !ok || !gen2 || m.Prefix != prefix {
 			t.Errorf("%s -> %+v gen2=%v ok=%v, want %s", code, m, gen2, ok, prefix)
 		}
 	}
-	for _, code := range []string{"jp07", "jp08", "jp11", "jp13", "jp14", "jc11", "jc16", "nh08"} {
+	for _, code := range []string{"jp07", "jp08", "jp11", "jp13", "jp14", "jc11", "jc16", "nh08", "rk3288-az01-jp07", "rk3288-az01-jp11"} {
 		if _, gen2, ok := lookupBoard(code); !ok || gen2 {
 			t.Errorf("%s should be a known first-generation board", code)
 		}
 	}
-	if _, _, ok := lookupBoard("zz99"); ok {
-		t.Error("zz99 is not a deck")
+	for _, bad := range []string{"zz99", "rk3288-az05-zz99", "inmusic,unknown"} {
+		if _, _, ok := lookupBoard(bad); ok {
+			t.Errorf("%s should not be recognized", bad)
+		}
 	}
 }
 
@@ -562,6 +566,21 @@ func TestModeBFreshImageFlashedToData(t *testing.T) {
 	calls := fb.Calls()
 	if calls[len(calls)-1] != "reboot" {
 		t.Errorf("last fastboot call = %q, want reboot", calls[len(calls)-1])
+	}
+	checkImage(t, filepath.Join(fb.Dir, "flashed-data.img"), b.SuitePath)
+}
+
+func TestModeBRecognizesPlatformPrefixProduct(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck", "dumpe2fs")
+	b := buildBundle(t, "PRIMEGOPLUS", "5.3.0.2")
+	fb := newFastboot(t, "rk3288-az05-jp11s", true)
+	o := modeBOpts(t, fb, b)
+	if err := run(ctxT(t), o); err != nil {
+		t.Fatalf("run: %v\n%s", err, o.Out)
+	}
+	flashed := fb.Flashed()
+	if len(flashed) != 1 || !strings.HasPrefix(flashed[0], "flash data ") {
+		t.Fatalf("flash calls = %v", flashed)
 	}
 	checkImage(t, filepath.Join(fb.Dir, "flashed-data.img"), b.SuitePath)
 }
