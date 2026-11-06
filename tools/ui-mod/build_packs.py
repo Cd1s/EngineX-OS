@@ -1592,24 +1592,10 @@ UPFADER_ECHO_TILE = """
 				height: 104
 				radius: 16
 				color: Style.surface03Color
-				// NOW pauses the playing decks; engine_ui_hook rings the master output out
-				// when it goes silent after music. The hook reads settings.conf once a
-				// second, so NOW from OFF arms AUTO first and pauses a beat later.
-				Timer {
-					id: scEchoNowTimer
-					interval: 1200
-					onTriggered: scUpfaderEchoTile.pauseDecks()
-				}
-				function pauseDecks() {
-					for (const d of [1, 2, 3, 4]) {
-						const play = Planck.getProperty("/Engine/Deck" + d + "/PlayState")
-						if (play && play.translator && play.translator.state) Planck.getProperty("/Engine/Deck" + d + "/Play").translator.state = false
-					}
-				}
 				Text {
 					x: 14
 					y: 8
-					text: "Echo Out"
+					text: "Fader Echo"
 					font: Style.fontH4
 					color: Style.font01Color
 				}
@@ -1617,9 +1603,10 @@ UPFADER_ECHO_TILE = """
 					x: 12
 					y: 36
 					Repeater {
-						model: ["Off", "Auto", "Now"]
+						model: ["Off", "All", "Upfader"]
 						Rectangle {
-							readonly property bool selected: index < 2 && (index === 1) === root.scUpfaderEcho
+							readonly property var vfx: PlanckGUI.views.transitionFx
+							readonly property bool selected: vfx ? (index === 0 ? !vfx.enabled : (vfx.enabled && (index === 2 ? vfx.triggerSource === 1 : vfx.triggerSource !== 1))) : (index === 0 ? !root.scUpfaderEcho : (index === 2 && root.scUpfaderEcho))
 							width: (scUpfaderEchoTile.width - 24) / 3
 							height: 56
 							color: selected ? "#00c3e3" : upfaderEchoTap.pressed ? "#6a6a6a" : "#4a4a4a"
@@ -1637,9 +1624,15 @@ UPFADER_ECHO_TILE = """
 								id: upfaderEchoTap
 								anchors.fill: parent
 								onClicked: {
-									if (index < 2) { root.scCall("upfaderEcho=" + index); return }
-									if (root.scUpfaderEcho) scUpfaderEchoTile.pauseDecks()
-									else { root.scCall("upfaderEcho=1"); scEchoNowTimer.restart() }
+									const vfx = PlanckGUI.views.transitionFx
+									if (vfx) {
+										if (index === 0) vfx.enabled = false
+										else {
+											vfx.enabled = true
+											vfx.setTriggerSource(index === 2 ? 1 : 2)
+										}
+									}
+									root.scCall("upfaderEcho=" + (index === 0 ? "0" : "1"))
 								}
 							}
 						}
@@ -1648,10 +1641,21 @@ UPFADER_ECHO_TILE = """
 			}
 """
 
-# Smart Sync (5.3.0 only): a synced deck with a track widens its Pitch Range to
-# the smallest step that reaches the master tempo. It never narrows the range.
-# An empty deck still reports OriginalBPM 120, hence SongLoaded.
+# Smart Sync (5.3.0 only): half/double-time (0.5x, 2x, 0.25x, 4x) harmonic tempo matching.
+# Automatically widens Pitch Range to the smallest step needed for the best harmonic match,
+# and restores the user's original Pitch Range when Sync is turned off.
 SMART_SYNC_MAIN = """
+	function scHarmonicSyncNeed(masterBpm, origBpm) {
+		if (origBpm <= 0 || masterBpm <= 0) return 0
+		const multiples = [1.0, 0.5, 2.0, 0.25, 4.0]
+		let minNeed = 1e9
+		for (let i = 0; i < multiples.length; i++) {
+			const harmonic = origBpm * multiples[i]
+			const need = Math.abs(masterBpm - harmonic) / harmonic * 100
+			if (need < minNeed) minNeed = need
+		}
+		return minNeed
+	}
 	Instantiator {
 		model: root.decks && root.decks.length ? root.decks : [1, 2]
 		delegate: QtObject {
@@ -1660,12 +1664,36 @@ SMART_SYNC_MAIN = """
 			readonly property QObjProperty pLoaded: Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deckIdx))
 			readonly property QObjProperty pOrigBpm: Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(deckIdx))
 			readonly property QObjProperty pMasterBpm: Planck.getProperty("/Engine/Master/MasterTempo")
+			readonly property QObjProperty pRange: Planck.getProperty("/Engine/Deck%1/SpeedRange".arg(deckIdx))
+			property int savedRangeIndex: -1
+			readonly property bool syncActive: {
+				const s = pSync && pSync.translator, l = pLoaded && pLoaded.translator
+				return !!(s && l && s.string !== "Off" && l.state)
+			}
 			readonly property real syncNeed: {
 				const s = pSync && pSync.translator, l = pLoaded && pLoaded.translator, o = pOrigBpm && pOrigBpm.translator, m = pMasterBpm && pMasterBpm.translator
-				if (!s || !l || !o || !m || s.string === "Off" || !l.state || !(o.unnormalized > 0)) return 0
-				return Math.abs(m.unnormalized - o.unnormalized) / o.unnormalized * 100
+				if (!s || !l || !o || !m || s.string === "Off" || !l.state || !(o.unnormalized > 0) || !(m.unnormalized > 0)) return 0
+				return root.scHarmonicSyncNeed(m.unnormalized, o.unnormalized)
 			}
-			onSyncNeedChanged: root.scWidenRange(deckIdx, syncNeed)
+			onSyncActiveChanged: {
+				const r = pRange && pRange.translator
+				if (syncActive) {
+					if (savedRangeIndex < 0 && r) savedRangeIndex = r.index
+					if (syncNeed > 0) root.scWidenRange(deckIdx, syncNeed)
+				} else {
+					if (savedRangeIndex >= 0 && r) {
+						r.index = savedRangeIndex
+						savedRangeIndex = -1
+					}
+				}
+			}
+			onSyncNeedChanged: {
+				if (syncActive) {
+					const r = pRange && pRange.translator
+					if (savedRangeIndex < 0 && r) savedRangeIndex = r.index
+					if (syncNeed > 0) root.scWidenRange(deckIdx, syncNeed)
+				}
+			}
 		}
 	}
 	function scWidenRange(deck, need) {
@@ -1681,7 +1709,7 @@ SMART_SYNC_MAIN = """
 			const o = Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(d)).translator
 			const s = Planck.getProperty("/Engine/Deck%1/SyncMode".arg(d)).translator
 			const l = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(d)).translator
-			if (m && o && s && l && l.state && s.string !== "Off" && o.unnormalized > 0) scWidenRange(d, Math.abs(m.unnormalized - o.unnormalized) / o.unnormalized * 100)
+			if (m && o && s && l && l.state && s.string !== "Off" && o.unnormalized > 0 && m.unnormalized > 0) scWidenRange(d, scHarmonicSyncNeed(m.unnormalized, o.unnormalized))
 		}
 	}
 """
@@ -1882,11 +1910,17 @@ def edits(dev: bool):
              f'import "{"" if v53() else "../"}Entries"\nimport "{"Entries/Base" if v53() else "../Entries/Base"}" as EntryBase\nimport Planck 1.0\n'),
             ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }",
              """EntryBase.ListEntry {
-\t\t\t\ttext: "Echo Out"
-\t\t\t\treadonly property var ids: ["0", "1"]
-\t\t\t\tvalues: ["Off", "On"]
-\t\t\t\tcurrentValue: root.scUpfaderEcho ? "On" : "Off"
-\t\t\t\tonSelected: function(index) { root.scCall("upfaderEcho=" + ids[index]) }
+\t\t\t\ttext: "Fader Echo"
+\t\t\t\treadonly property var vfx: PlanckGUI.views.transitionFx
+\t\t\t\tvalues: ["Off", "All Faders", "Upfader Only"]
+\t\t\t\tcurrentValue: !vfx || !vfx.enabled ? (root.scUpfaderEcho ? "Upfader Only" : "Off") : (vfx.triggerSource === 1 ? "Upfader Only" : "All Faders")
+\t\t\t\tonSelected: function(index) {
+\t\t\t\t\tif (vfx) {
+\t\t\t\t\t\tif (index === 0) vfx.enabled = false
+\t\t\t\t\t\telse { vfx.enabled = true; vfx.setTriggerSource(index === 2 ? 1 : 2) }
+\t\t\t\t\t}
+\t\t\t\t\troot.scCall("upfaderEcho=" + (index === 0 ? "0" : "1"))
+\t\t\t\t}
 \t\t\t},
 \t\t\t""" + ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }")),
         ],
@@ -2130,6 +2164,19 @@ def edits(dev: bool):
             prefs + "Entries/MasterLimiter.qml": [
                 ("active: Config.ui.preferences.hasMasterLimiter\n",
                  "active: Config.ui.preferences.hasMasterLimiter || Config.audio.hasLimiter\n")],
+            # #104: Fader Echo / TransitionFx 3-state cycling: Off -> All Faders -> Upfader Only -> Off
+            v + "ControlCenter/Tabs/ControlCenter/Entries/TransitionFxEnable.qml": [
+                ('text: "Fader Echo"\n        icon.source: "qrc:/Skins/UIKit/Icons/Faderecho.png"\n        checked: view.enabled\n        onClicked: view.enabled = !view.enabled',
+                 'text: !view.enabled ? "Fader Echo" : (view.triggerSource === 1 ? "Fader Echo: Up" : "Fader Echo: All")\n        icon.source: "qrc:/Skins/UIKit/Icons/Faderecho.png"\n        checked: view.enabled\n        onClicked: { if (!view.enabled) { view.setTriggerSource(2); view.enabled = true } else if (view.triggerSource === 2) { view.setTriggerSource(1) } else { view.enabled = false } }'),
+            ],
+            v + "StatusBar/Buttons/TransitionFxButton.qml": [
+                ('    checked: active\n    onClicked: transitionFx.enabled = !transitionFx.enabled',
+                 '    checked: active\n    onClicked: { if (!transitionFx.enabled) { transitionFx.setTriggerSource(2); transitionFx.enabled = true } else if (transitionFx.triggerSource === 2) { transitionFx.setTriggerSource(1) } else { transitionFx.enabled = false } }'),
+            ],
+            prefs + "Entries/TransitionFxSection.qml": [
+                ('        TransitionFxSelectEffect {\n            view: transitionFx.view\n        }',
+                 '        TransitionFxSelectEffect {\n            view: transitionFx.view\n        }\n        ListEntry {\n            text: "Trigger Source"\n            readonly property var vfx: transitionFx.view\n            values: ["Off", "All Faders", "Upfader Only"]\n            currentValue: !vfx || !vfx.enabled ? "Off" : (vfx.triggerSource === 1 ? "Upfader Only" : "All Faders")\n            onSelected: function(index) {\n                if (!vfx) return\n                if (index === 0) vfx.enabled = false\n                else { vfx.enabled = true; vfx.setTriggerSource(index === 2 ? 1 : 2) }\n            }\n        }'),
+            ],
         }.items():
             assert not isinstance(out.get(rel), str), rel
             out.setdefault(rel, []).extend(fixes)
