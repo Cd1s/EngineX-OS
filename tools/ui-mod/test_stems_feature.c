@@ -508,10 +508,11 @@ static void test_config(void) {
     prepare_config((uintptr_t)image, page);
     const uint16_t *fields = build->config_field;
     for (int model = 0; model < 6; model++) {
-        uchar config[0x500], expected[0x500];
+        uchar config[0x600], expected[0x600];
         memset(config, 0xa0 + model, sizeof config);
         memcpy(expected, config, sizeof expected);
         for (size_t i = 0; i < 5; i++) expected[fields[i]] = i == 4 ? 0 : 1;
+        if (build->config_zoom) *(uint32_t *)(expected + build->config_zoom) = 30; // #77
         uint32_t out[3];
         invoke_config(config, (void *)(uintptr_t)config_jump[1], out);
         assert(!memcmp(config, expected, sizeof config));
@@ -528,13 +529,15 @@ static void test_config(void) {
         four_deck_settings = path;
         prepare_config((uintptr_t)image, page);
         for (int player = 0; player < 2; player++) {
-            uchar config[0x500];
+            uchar config[0x600];
             memset(config, 0, sizeof config);
             config[0x239] = (uchar)player;
             *(uint32_t *)(config + 0x90) = 2;
+            *(uint32_t *)(config + build->config_zoom) = player ? 30 : 10;
             uint32_t out[3];
             invoke_config(config, (void *)(uintptr_t)config_jump[1], out);
             assert(config[0x239] == 0 && *(uint32_t *)(config + 0x90) == (player ? 4u : 2u));
+            assert(*(uint32_t *)(config + build->config_zoom) == 30); // #77, also in 4-deck mode
             assert(config[fields[0]] == 1 && config[fields[4]] == 0);
             assert(out[0] == (uintptr_t)config && out[1] == 123 && out[2] == 456);
         }
@@ -996,6 +999,20 @@ static void test_patch_files(const char *filename) {
         assert(dsp_hooks[i].offset + bytes <= (size_t)size);
         assert(!memcmp(image + dsp_hooks[i].offset, expected, bytes));
     }
+    // #77: a model constructor stores the all-in-ones' 10 s zoom-out limit at config_zoom
+    // (mov rX, #10 ... str rX, [r4, #config_zoom]).
+    int zoom10 = 0;
+    for (size_t a = 0; a + 36 <= (size_t)size && !zoom10; a += 4) {
+        uint32_t x;
+        memcpy(&x, image + a, 4);
+        if ((x & 0xffff0fff) != 0xe3a0000a) continue;
+        for (int k = 1; k <= 8 && !zoom10; k++) {
+            uint32_t y;
+            memcpy(&y, image + a + 4 * k, 4);
+            zoom10 = y == (0xe5840000 | (x & 0xf000) | build->config_zoom);
+        }
+    }
+    assert(zoom10);
     const uint32_t *api = NULL;
     // The data LOAD segment's file offset differs from its runtime address.
     for (unsigned i = 0; i < info.dlpi_phnum; i++) {

@@ -205,7 +205,7 @@ and keep audio running; it does not show each pop is gone by ear.
 
 ## Master soft limiter (`master_limiter.h`, #58)
 
-Off by default; Settings → "Master Soft Limiter" or `POST /v1/sc5000/ui?masterLimiter=1`
+Off by default; Settings → "Master Soft Clipper" or `POST /v1/sc5000/ui?masterLimiter=1`
 writes `master_limiter=1` to `settings.conf`, which the hook polls once a second
 from a SCHED_OTHER thread. It is the 21st DSP site: airHost's device callback
 (5.0.4 `0x1462a6c`, 5.3.0 `0xc77934`, 7 arguments, the last three on the stack),
