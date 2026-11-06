@@ -84,12 +84,14 @@ INSTALL = r'''#!/bin/sh
 set -eu
 src=$(cd "$(dirname "$0")" && pwd)
 dest=${SC5000_CUSTOM:-/data/sc5000-custom}
+# Where /var/lib lives on /data differs by firmware: see alsa-dir.
+alsa_rel=$(cat "$src/alsa-dir")
 if [ -n "${SC5000_ALSA_OVERLAY:-}" ]; then
     alsa_dest="$SC5000_ALSA_OVERLAY"
 elif [ "$dest" != "/data/sc5000-custom" ] && [ ! -d "/data" ]; then
-    alsa_dest="$(dirname "$dest")/system/var/overlay/lib/alsa/conf.d"
+    alsa_dest="$(dirname "$dest")/$alsa_rel"
 else
-    alsa_dest="/data/system/var/overlay/lib/alsa/conf.d"
+    alsa_dest="/data/$alsa_rel"
 fi
 cd "$src"
 sha256sum -c SHA256SUMS >/dev/null || { echo "bundle damaged: SHA256SUMS mismatch" >&2; exit 1; }
@@ -102,7 +104,7 @@ umask 022
 stage=$(mktemp -d "$dest/.bundle.XXXXXX")
 trap 'rm -rf "$stage"' 0
 mkdir "$stage/bundle" "$stage/ui"
-cp -R bin lib SHA256SUMS version.txt boot-activate.sh 99-sc5000-custom.conf uninstall.sh "$stage/bundle/"
+cp -R bin lib SHA256SUMS version.txt alsa-dir boot-activate.sh 99-sc5000-custom.conf uninstall.sh "$stage/bundle/"
 tar -C "$stage/ui" -xf ui-packs.tar
 [ -d "$stage/ui/packs" ] || { echo "ui-packs.tar has no packs/" >&2; exit 1; }
 rm -rf "$dest/bundle.replaced"
@@ -131,12 +133,14 @@ UNINSTALL = r'''#!/bin/sh
 # caches and downloads stay; UI packs stay if something else replaced them.
 set -eu
 dest=${SC5000_CUSTOM:-/data/sc5000-custom}
+# Bundles before 5.3.0.2's AZ04 support had no alsa-dir; they all used the overlay path.
+alsa_rel=$(cat "$dest/bundle/alsa-dir" 2>/dev/null || echo system/var/overlay/lib/alsa/conf.d)
 if [ -n "${SC5000_ALSA_OVERLAY:-}" ]; then
     alsa_dest="$SC5000_ALSA_OVERLAY"
 elif [ "$dest" != "/data/sc5000-custom" ] && [ ! -d "/data" ]; then
-    alsa_dest="$(dirname "$dest")/system/var/overlay/lib/alsa/conf.d"
+    alsa_dest="$(dirname "$dest")/$alsa_rel"
 else
-    alsa_dest="/data/system/var/overlay/lib/alsa/conf.d"
+    alsa_dest="/data/$alsa_rel"
 fi
 for path in "$dest" "$dest/bundle" "$dest/ui"; do
     [ ! -L "$path" ] || { echo "refusing symlink: $path" >&2; exit 1; }
@@ -177,13 +181,33 @@ def ui_packs_tar(path):
 
 
 # The second-generation models: signed AZ0x firmware with SC LIVE 4's armhf Engine
-# (same BuildID; #61, #68, #69). PRIME 4 G2 / SYSTEM ONE run a 64-bit Engine: not here.
+# (same BuildID; #61, #68, #69), and the AZ04 pair with a 64-bit Engine (#76).
 MODELS = {
     'SCLIVE4': 'Denon DJ SC LIVE 4', 'SCLIVE2': 'Denon DJ SC LIVE 2',
     'PRIME4PLUS': 'Denon DJ PRIME 4+', 'PRIMEGOPLUS': 'Denon DJ PRIME GO+',
     'MIXSTREAMPROPLUS': 'Numark Mixstream Pro+', 'MIXSTREAMPROGO': 'Numark Mixstream Pro Go',
+    'PRIME4G2': 'Denon DJ PRIME 4 G2', 'SYSTEMONE': 'Rane SYSTEM ONE',
 }
 PREFIXES = tuple(MODELS)
+AZ04 = ('PRIME4G2', 'SYSTEMONE')
+EM_ARM, EM_AARCH64 = 40, 183
+
+
+def alsa_dir(prefix):
+    """/var/lib's home on /data: AZ04's var-lib.mount binds /data/system/var-lib,
+    the armhf AZ0x builds /data/system/var/overlay/lib."""
+    return 'system/var-lib/alsa/conf.d' if prefix in AZ04 else 'system/var/overlay/lib/alsa/conf.d'
+
+
+AZ04_NOTE = """
+64-bit (AZ04) build: the UI packs, the streaming gateway (Deezer, SoundCloud,
+Beatport) and the EngineX services are in. Not ported to the 64-bit Engine yet:
+the DSP guards, master limiter and auto gain, SQLite tuning and the 4-deck
+unlock; Stems stay as the official firmware has them. The 64-bit Engine
+needs the device's secure element (OP-TEE) to start, so in the sandbox it
+stops before its UI: the hook, edits and pack loading were checked, the
+screens themselves were not.
+"""
 
 README_INSTALL = '''EngineX OS {version} for {model} (data bundle, beta)
 =================================================================
@@ -192,8 +216,8 @@ This bundle adds EngineX OS to /data. The system partition and the signed
 official firmware are not touched; Engine OS 5.3.0 must already be installed.
 Status: beta. Built from the same files as the released .img; tested in a
 sandbox on the official 5.3.0 root file system, not yet on a real {model}.
-Please report results in the GitHub issues (#61, #68, #69).
-
+Please report results in the GitHub issues (#61, #68, #69, #76).
+{note}
 Never flash an .img meant for a first-generation model (PRIME4, PRIMEGO,
 MIXSTREAMPRO, ...) on this device.
 
@@ -207,7 +231,7 @@ Needs a root shell on the device. Copy this .tar.gz to the device, then:
     reboot
 
 install.sh only writes /data/sc5000-custom and one ALSA file
-(/data/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf). Music,
+(/data/{alsa}/99-sc5000-custom.conf). Music,
 settings and the Engine library are left alone.
 
 Method A: inject into a userdata image (fastboot)
@@ -237,10 +261,14 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
     if out.exists():
         fail(f'{out} exists; refusing to overwrite')
     files = {}  # path in bundle -> (bytes, mode)
+    machine = EM_AARCH64 if prefix in AZ04 else EM_ARM
     for path, name in ((suite, 'bin/sc5000-suite'), (hook, 'lib/libengine-ui-hook.so')):
         data = Path(path).read_bytes()
         if data[:4] != b'\x7fELF':
             fail(f'{path} is not an ELF file')
+        # An armhf hook in a 64-bit Engine (or the reverse) is never loaded: refuse it here.
+        if int.from_bytes(data[18:20], 'little') != machine:
+            fail(f'{path} is not a {"AArch64" if machine == EM_AARCH64 else "32-bit ARM"} ELF, needed for {prefix}')
         files[name] = (data, 0o755)
     for applet in APPLETS:
         files[f'bin/{applet}'] = (WRAPPER.format(applet).encode(), 0o755)
@@ -248,10 +276,12 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
     files['version.txt'] = (f'{version}\n'.encode(), 0o644)
     files['boot-activate.sh'] = (BOOT_ACTIVATE.encode(), 0o755)
     files['99-sc5000-custom.conf'] = (ALSA_CONF.encode(), 0o644)
+    files['alsa-dir'] = (f'{alsa_dir(prefix)}\n'.encode(), 0o644)
     files['install.sh'] = (INSTALL.encode(), 0o755)
     files['uninstall.sh'] = (UNINSTALL.encode(), 0o755)
     top = f'{prefix}-{version}-EngineX-OS-Data-Bundle'
-    files['README-INSTALL.txt'] = (README_INSTALL.format(version=version, model=MODELS[prefix], top=top).encode(), 0o644)
+    files['README-INSTALL.txt'] = (README_INSTALL.format(version=version, model=MODELS[prefix], top=top, alsa=alsa_dir(prefix),
+                                                        note=AZ04_NOTE if prefix in AZ04 else '').encode(), 0o644)
     here = Path(__file__).parent
     files['host-install-userdata.py'] = ((here / 'host-install-userdata.py').read_bytes(), 0o755)
     files['host-install-fastboot.sh'] = ((here / 'host-install-fastboot.sh').read_bytes(), 0o755)
@@ -283,7 +313,7 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     p.add_argument('version')
-    p.add_argument('--suite', required=True, type=Path, help='static ARMv7 sc5000-suite')
+    p.add_argument('--suite', required=True, type=Path, help='static sc5000-suite (ARMv7, arm64 for AZ04)')
     p.add_argument('--hook', required=True, type=Path, help='libengine-ui-hook.so')
     p.add_argument('--ui-packs', required=True, type=Path, help='build_packs.py packs.tar(.gz)')
     p.add_argument('--out', required=True, type=Path, help='new output directory')

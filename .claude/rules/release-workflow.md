@@ -38,12 +38,14 @@ git grep -n "<OLD>" -- README.md README.zh-CN.md README.zh-TW.md rootfs-overlay 
 ```sh
 gofmt -l . && go vet ./... && go test -race ./...
 bash tests/test_rootfs_overlay.sh                 # 必须用 bash
+bash tools/az01-packer/test_sclive4_bootstrap.sh  # 二代机数据包沙箱；AZ04=1 跑 PRIME 4 G2 / SYSTEM ONE
 python3 -m unittest discover -s tools/az01-packer
 python3 -m unittest discover -s tools/stems
 # C 单测：编译命令写在各文件头部
 #   tools/ui-mod/test_dsp_smooth.c（另跑 ASan/UBSan 与 TSan 各一次）
 #   tools/ui-mod/test_stems_feature.c（arm-linux-gnueabihf-gcc 编译，Batam 上原生运行；参数给两个底包的 Engine）
 #   tools/edisksd-hook/test_edisksd_hook.c（--mounts 只在 unshare -m 里跑）
+#   tools/ui-mod/test_az04_hook.c（AZ04 64 位 hook：Batam 原生 gcc 编译，参数给 AZ04 的 Engine）
 ```
 
 涉及 Factory Reset、`az01-update --erase-data`、空白 `/data` 首次启动的改动，只在 `Oracle-Batam-arm` 的 `unshare -m` + chroot 沙箱里用解包出的 rootfs 测，**绝不在实机触发**。
