@@ -161,6 +161,11 @@ func (a *AppleMusic) state() AppleMusicOwner {
 	return o
 }
 
+// DeveloperToken is the token the phone page hands to MusicKit JS.
+func (a *AppleMusic) DeveloperToken(ctx context.Context) (string, error) {
+	return a.developerToken(ctx)
+}
+
 // developerToken is the owner's own token, or the one Apple's web player
 // ships in its script bundle, refreshed a day before it expires.
 func (a *AppleMusic) developerToken(ctx context.Context) (string, error) {

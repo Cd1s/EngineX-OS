@@ -276,6 +276,9 @@ SERVICES_MAIN = """
 		prompt.finished.connect(function(r) { if (r === Prompt.AcceptRole) scCall(query + "&restart=1") })
 	}
 	property string scUpdateRepo: "Cd1s/EngineX-OS"
+	// #79: only GET /v1/sc5000/ui (loopback) carries these; shown in Settings -> About.
+	property string scConsoleUrl: ""
+	property string scAccessCode: ""
 	property string scUpdateText: ""
 	property bool scBroadcastOn: false
 	property bool scUpfaderEcho: false
@@ -470,6 +473,7 @@ SERVICES_MAIN = """
 		scQuality = v.quality || "flac"
 		scNeteaseMode = v.neteaseMode || "official"
 		scUpdateRepo = v.githubRepo || scUpdateRepo
+		if (v.accessCode) { scAccessCode = v.accessCode; scConsoleUrl = v.consoleUrl || "" }
 		scJog = v.jog || "static"
 		scMasterLimiter = !!v.masterLimiter
 		scAutoGain = !!v.autoGain
@@ -1471,7 +1475,7 @@ def edits(dev: bool):
             ("	onUpdateAvailableChanged: {\n", "	onUpdateAvailableChanged: {\n		return\n")],
         prefs + "Entries/Version.qml": [(
             "	text: `Engine OS ${versionString} <font color=\\\"${grey}\\\">(${gitHashString})</font>`",
-            "	text: `EngineX OS ${root.scVersion || versionString} <font color=\\\"${grey}\\\">(github.com/${root.scUpdateRepo})</font>`")],
+            "	text: `EngineX OS ${root.scVersion || versionString} <font color=\\\"${grey}\\\">(github.com/${root.scUpdateRepo})</font>${root.scAccessCode ? `<br><small>${root.scT(\"Web Console\")} ${root.scConsoleUrl}<br>${root.scT(\"Access Code\")} ${root.scAccessCode}</small>` : \"\"}`")],
         prefs + "Entries/Analytics.qml": [(
             "\t\tchecked = pAnalyticsEnabled.translator.state\n\t\tPlanck.quit(QuitReasons.AnalyticsChange, false)",
             "\t\tpAnalyticsEnabled.translator.state = !pAnalyticsEnabled.translator.state")],

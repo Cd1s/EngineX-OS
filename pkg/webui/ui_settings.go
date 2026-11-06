@@ -319,6 +319,14 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.ProlinkExportActive = s.prolinkExport != nil && s.prolinkExport.Status().Enabled
 	v.Player = playerBoards[imagePrefix(deviceCompatible())]
 	v.FourDeckRoleActive = s.activeRole(v)
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
+		respond(w, struct {
+			uiSettings
+			AccessCode string `json:"accessCode"`
+			ConsoleURL string `json:"consoleUrl"`
+		}{v, s.cfg.AccessToken, "http://" + lanHost() + ":8080"})
+		return
+	}
 	respond(w, v)
 }
 

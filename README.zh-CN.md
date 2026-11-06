@@ -67,6 +67,9 @@
 ### 7. 5.3.0.2 新功能
 - **波形可以缩得更远（#77）**：一体机（PRIME 4、PRIME 2、PRIME GO、Mixstream Pro、SC LIVE）的波形最远缩到 30 秒，和 SC5000 / SC6000 一样，不再是原厂的 10 秒，屏幕上能看到更多即将到来的节拍网格。`设置 → 设备 → 旋钮行为` 选 `波形缩放` 后，在打碟界面转浏览旋钮即可缩放；
 - **屏幕上直接关机（#78）**：`设置 → 设备 → 电源 → 关机` 会弹出原厂的「关机」确认框，碟机装在 DJ 台里也不用再伸手去摸背后的电源键；
+- **丢失曲目自动重定位（#74）**：同一张盘上的文件被移动或改名后，网页控制台会为每首丢失的曲目找到新位置（先按文件名和大小，再按忽略大小写的文件名，最后按清理后的文件名）。「扫描」只预览；「一键修复路径」会先备份 `m.db` 再改写路径。完成后在碟机上重新加载该盘；
+- **Apple Music 一键登录（#75）**：手机页面可以直接用 Apple Music 登录（MusicKit JS）；Apple 不允许时，页面会给出一个书签脚本，在 music.apple.com 一键复制你的令牌；
+- **碟机上查看控制台访问码（#79）**：`设置 → 关于` 显示网页控制台地址和访问码。流媒体二维码只登录对应的服务，不会打开控制台，俱乐部里扫屏幕二维码的客人拿不到碟机的控制权；
 - **静音 Cue 与原厂主输出限幅**：Censor 键可以设成 `静音 Cue`（`设置 → 播放 → Censor 键行为`）；PRIME GO / Mixstream Pro 放开了原厂的 `原厂主输出限幅 (dB)`（`设置 → 混音台`，关 / 0–18 dB），与 EngineX 的 `0dB 防破音软限幅` 并存；
 - **Apple Music** 加入流媒体（共 7 个），和其他服务一样扫碟机二维码登录；
 - **Wi-Fi 传歌**：在电脑上把 MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS 文件拖进碟机网页控制台（`http://<碟机 IP>:8080`），直接存到你选的内置硬盘、SD 卡或 U 盘的 `Wi-Fi Drop/<歌单>/` 下。曲库所在盘上的 FLAC / MP3 会自动分析并加入同名歌单；不会覆盖已有文件，始终保留 256 MiB 空间；
@@ -79,7 +82,7 @@
 - **Spotify 改用你自己的应用**：Spotify 限制每个应用的用户数和请求量，所以不再内置共用的应用。到 `developer.spotify.com/dashboard` 免费创建一个应用，把网页控制台里显示的 Redirect URI 加进去，再把它的 Client ID 填回控制台（`#70`）；
 - **流媒体与影子轨道更稳**：在碟机上开着的流媒体歌单，后台服务重启后照样能加载，不再报「Track not found」（`#73`）；影子轨道显示真实歌名，没有标签的文件也一样，另一台从流媒体浏览器加载的歌也能跟随；加载歌曲时打击垫保持在 HOT CUE（`#71`）。
 
-> **先锋联机说明**：与先锋 CDJ-3000 的联机互通（曲库共享、3-Band 波形、60fps 播放头与 Master / Beat Sync 对拍）是用维护者自研的 **OpenCDJ-3000**（Virtual CDJ-3000 硬件协议模拟器）与实机 Denon SC5000 联调验证的。手头暂时没有先锋 CDJ-3000 实体真机，接先锋真机的表现还需要大家实测，非常欢迎提交 Issue 或 PR 反馈！
+> **先锋联机说明**：与先锋 CDJ-3000 的联机互通（曲库共享、3-Band 波形、60fps 播放头与 Master / Beat Sync 对拍）是用维护者自研的 [**OpenProLink**](https://github.com/Cd1s/OpenProLink)（内置虚拟 CDJ-3000 模拟器，以及先锋全系 CDJ / XDJ 碟机与 DJM 混音台的协议采集工具 `prolink-probe`）与实机 Denon SC5000 联调验证的。手头暂时没有先锋 CDJ-3000 实体真机，接先锋真机的表现还需要大家实测。欢迎拥有先锋 CDJ-3000、CDJ-2000NXS2、XDJ-AZ / XZ 或先锋混音台（DJM-A9 / DJM-V10 / DJM-900NXS2）真机的玩家前往 [Cd1s/OpenProLink](https://github.com/Cd1s/OpenProLink) 或本仓库提交真机实测反馈与设备 / 混音台协议包信息，共同完善跨品牌曲库、混音台效果器速度同步（Beat FX Sync）、量化（Quantize）与 On-Air 联动！
 
 
 ---
@@ -91,9 +94,9 @@
 <table>
 <tr>
 <td colspan="2" align="center" valign="top">
-<img src="./docs/assets/screenshots/4deck-sc5000-cdj3000.png" width="49%" alt="原生 4 轨视图与影子轨道"> <img src="./docs/assets/screenshots/opencdj-3000.png" width="49%" alt="OpenCDJ-3000 虚拟 CDJ-3000"><br>
+<img src="./docs/assets/screenshots/4deck-sc5000-cdj3000.png" width="49%" alt="原生 4 轨视图与影子轨道"> <img src="./docs/assets/screenshots/opencdj-3000.png" width="49%" alt="OpenProLink 虚拟 CDJ-3000"><br>
 <b>原生 4 轨视图：两台 SC5000 + 一台 CDJ-3000 同一局域网联动</b><br>
-<sub>右边的 SC5000 负责第 2、4 轨；第 3 轨是开着 BEAT SYNC 的 CDJ-3000（OpenCDJ-3000 模拟器），波形和速度经 Pro DJ Link 实时跟随</sub>
+<sub>右边的 SC5000 负责第 2、4 轨；第 3 轨是开着 BEAT SYNC 的 CDJ-3000（OpenProLink 模拟器），波形和速度经 Pro DJ Link 实时跟随</sub>
 </td>
 </tr>
 <tr>
@@ -271,7 +274,7 @@ EngineX OS 按照「和陌生人共用酒吧、Club、音乐节 Wi-Fi」的场�
 
 - **没有任何默认 SSH 密码。** 密码登录已彻底关闭，公开固件也**不内置任何 SSH 公钥**，你自己没放公钥之前 SSH 根本不开放。用过旧版公开固件的碟机，升级到 5.3.0.2 时会自动清除旧固件带的那把公钥。
 - **同一个 Wi-Fi 下的人控制不了你的碟机。** 碟机内部用的所有接口（播放控制、切波形、切语言、在线升级、流媒体登录、Stems）只接受碟机自己（`127.0.0.1`）调用，别人就算和你连同一个网络，也没法远程切你的歌、改设置或重启机器。
-- **手机网页控制台必须输入你这台碟机独有的访问码。** 打开 `http://<碟机IP>:8080` 时要输入碟机随机生成的访问码；流媒体扫码登录用的是会过期的一次性链接。
+- **手机网页控制台必须输入你这台碟机独有的访问码。** 打开 `http://<碟机IP>:8080` 时要输入碟机随机生成的访问码；地址和访问码显示在碟机的 `设置 → 关于` 里；流媒体扫码登录用的是会过期的一次性链接，不会打开控制台。
 
 高级用户：
 
