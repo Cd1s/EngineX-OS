@@ -32,7 +32,9 @@ var (
 	uiStreamSortRoles  = []string{"default", "bpm", "key", "rating", "song", "artist"}
 	uiStreamSortOrders = []string{"asc", "desc"}
 	uiSyncGuardPcts    = []int{0, 10, 15, 20}
-	uiPioneerFxModes   = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
+	// UI Scale presets: Qt multiplies every size by QT_SCALE_FACTOR when Engine starts.
+	uiUIScales       = []int{100, 95, 90, 85, 80, 75}
+	uiPioneerFxModes = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
 )
 
 const (
@@ -87,9 +89,12 @@ type uiSettings struct {
 	SyncGuardPct      int    `json:"syncGuardPct"`
 	SwapLoopOrder     bool   `json:"swapLoopOrder"`
 	LedBrightness     int    `json:"ledBrightness"`
-	StemsEqMode       bool   `json:"stemsEqMode"`
-	BeatJumpPads      bool   `json:"beatJumpPads"`
-	PioneerFx         string `json:"pioneerFx"`
+	// UIScale enlarges or shrinks Engine's whole interface; it takes effect at the next
+	// Engine start, so the Control Center row asks before applying it.
+	UIScale      int    `json:"uiScale"`
+	StemsEqMode  bool   `json:"stemsEqMode"`
+	BeatJumpPads bool   `json:"beatJumpPads"`
+	PioneerFx    string `json:"pioneerFx"`
 
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
@@ -109,6 +114,28 @@ var uiFourDeckRoles = []string{"auto", "13", "24", "12", "1", "2"}
 // fourDeckRolePath is where engine-ui-guard leaves the role it applied.
 var fourDeckRolePath = "/run/sc5000-assignments/role"
 
+// uiScaleEnvPath feeds QT_SCALE_FACTOR to Engine's unit, which reads it through the
+// engine.service.d/70-ui-scale.conf drop-in. A package var so tests can point it at a
+// temp dir.
+var uiScaleEnvPath = "/data/sc5000-custom/ui-scale.env"
+
+// writeUIScaleEnv hands Qt the scale chosen in Settings -> Device for Engine's next
+// start, and drops the file again at 100% so the unit keeps Denon's stock size. It sits
+// outside ui/, which an update replaces wholesale.
+func writeUIScaleEnv(pct int) error {
+	if !slices.Contains(uiUIScales, pct) || pct == 100 {
+		if err := os.Remove(uiScaleEnvPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(uiScaleEnvPath), 0o755); err != nil {
+		return err
+	}
+	text := "QT_SCALE_FACTOR=" + strconv.FormatFloat(float64(pct)/100, 'f', -1, 64) + "\n"
+	return os.WriteFile(uiScaleEnvPath, []byte(text), 0o644)
+}
+
 func (s *Server) uiDir() string {
 	if s.cfg.UIDir != "" {
 		return s.cfg.UIDir
@@ -126,7 +153,7 @@ func (s *Server) loadUI() uiSettings {
 	known, saved := uiServicesBeforeKnown, false
 	v := uiSettings{
 		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ProlinkWaveform: true,
-		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off",
+		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 	}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
@@ -226,6 +253,10 @@ func (s *Server) loadUI() uiSettings {
 		case "led_brightness":
 			if n, err := strconv.Atoi(val); err == nil && n >= 20 && n <= 100 {
 				v.LedBrightness = n
+			}
+		case "ui_scale":
+			if n, err := strconv.Atoi(val); err == nil && slices.Contains(uiUIScales, n) {
+				v.UIScale = n
 			}
 		case "stems_eq_mode":
 			v.StemsEqMode = val == "1" || strings.EqualFold(val, "true")
@@ -336,6 +367,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.LedBrightness != 100 && v.LedBrightness >= 20 && v.LedBrightness <= 100 {
 		text += "led_brightness=" + strconv.Itoa(v.LedBrightness) + "\n"
 	}
+	if slices.Contains(uiUIScales, v.UIScale) && v.UIScale != 100 {
+		text += "ui_scale=" + strconv.Itoa(v.UIScale) + "\n"
+	}
 	if v.StemsEqMode {
 		text += "stems_eq_mode=1\n"
 	}
@@ -365,7 +399,10 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), filepath.Join(dir, "settings.conf"))
+	if err = os.Rename(tmp.Name(), filepath.Join(dir, "settings.conf")); err != nil {
+		return err
+	}
+	return writeUIScaleEnv(v.UIScale)
 }
 
 // scope is the service the deck's native browser currently shows.
@@ -525,6 +562,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.LedBrightness = n
+	}
+	if q.Has("uiScale") {
+		n, err := strconv.Atoi(q.Get("uiScale"))
+		if err != nil || !slices.Contains(uiUIScales, n) {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.UIScale = n
 	}
 	if q.Has("streamSortRole") {
 		v.StreamSortRole = q.Get("streamSortRole")
