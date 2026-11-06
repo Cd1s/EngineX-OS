@@ -2,7 +2,8 @@
 # After three Engine starts that neither survive 15 seconds nor stop cleanly,
 # the UI hook stops applying packs (safe-mode) and the deck comes back with the
 # stock UI. Deliberate stops and restarts (language switch, deploy) reset it.
-UI=${SC5000_UI_DIR:-/data/sc5000-custom/ui}
+UI=${SC5000_UI_DIR:-/data/enginex/ui}
+[ -d "$UI" ] || [ ! -d /data/sc5000-custom/ui ] || UI=/data/sc5000-custom/ui
 case ${1:-} in
 pre)
     n=$(cat "$UI/boot-count" 2>/dev/null)
@@ -11,7 +12,37 @@ pre)
     mkdir -p "$UI"
     rm -f "$UI/boot-token"
     echo "$n" > "$UI/boot-count"
-    [ "$n" -lt 3 ] || : > "$UI/safe-mode"
+    if [ "$n" -ge 3 ] || [ -e "$UI/safe-mode" ]; then
+        : > "$UI/safe-mode"
+        rm -rf "$UI/mods-overlay"
+        : > "$UI/mods-quarantined"
+        if [ "$UI" != /data/enginex/ui ] && [ -d /data/enginex/ui ]; then
+            rm -rf /data/enginex/ui/mods-overlay
+            : > /data/enginex/ui/mods-quarantined
+        fi
+    else
+        overlay=$UI/mods-overlay
+        if [ ! -d "$overlay" ] && [ -d /data/enginex/ui/mods-overlay ]; then
+            overlay=/data/enginex/ui/mods-overlay
+        fi
+        if [ ! -e "$UI/mods-quarantined" ] && [ ! -e /data/enginex/ui/mods-quarantined ] && [ -d "$overlay" ]; then
+            lang=$(sed -n 's/^lang=//p' "$UI/settings.conf" 2>/dev/null | tail -n 1)
+            case $lang in zh-Hans|zh-Hant) ;; *) lang=en ;; esac
+            seen_targets=" "
+            for target in "$UI/active" "$UI/packs/$lang" /data/enginex/ui/active; do
+                [ -d "$target" ] || continue
+                case $seen_targets in *" $target "*) continue ;; esac
+                seen_targets="$seen_targets$target "
+                (
+                    cd "$overlay" && find . -type f -name '*.qml' | while IFS= read -r f; do
+                        rel=${f#./}
+                        mkdir -p "$target/$(dirname "$rel")"
+                        cp -p "$overlay/$rel" "$target/$rel"
+                    done
+                )
+            done
+        fi
+    fi
     # Engine 5.3.0 cannot ATTACH anything while its internal m.db reserves page bytes
     # (a `.recover`ed copy did): rebuild it with reserve 0 before Engine opens it.
     guardian=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
