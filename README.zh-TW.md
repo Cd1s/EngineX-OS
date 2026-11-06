@@ -179,7 +179,18 @@
 2. 將下載好的 `.img` 檔案放進 **FAT32 或 exFAT 格式隨身碟的根目錄**。
 3. 將隨身碟插入播放機（原廠 Engine OS 4.3.x 與 5.0.x 都可以直接刷），進入 **設定 (Settings) → 關於 / 更新 (About / Update) → 韌體更新模式 (Firmware Update Mode)**，看到 `Found 5.3.0.2 on USB/SD` 時選 **USB/SD**，機器會自動完成刷入並重啟。如果只跳出 *Reboot into firmware update mode?*，代表播放機沒找到檔案：核對機型，檔名保持原樣放在根目錄，再拔插一次隨身碟。
 
-> **二代機型（SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+）**：這幾款共用一套帶簽章驗證的韌體（AZ0x），不接受修改過的 `.img`，所以沒有它們的 `.img`。**PRIME 4+ / PRIME GO+ 千萬不要刷 `PRIME4` / `PRIMEGO` 的映像檔。** 它們將以不改動系統分割區的 `/data` 資料包方式支援（#61、#68、#69），目前仍在測試，尚未發布。
+> **二代機型（SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go）：`/data` 資料包，Beta**（#61、#68、#69）。它們的韌體帶簽章驗證，不接受修改過的 `.img`，所以沒有它們的 `.img`。**二代機千萬不要刷 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的映像檔。** 改用 `/data` 資料包：在官方 Engine OS 5.3.0 之上加裝 EngineX OS（先裝好官方 5.3.0），不改動系統分割區。這六款跑的是和 SC LIVE 4 同一份 Engine；資料包已在官方 SC LIVE 4 與 Mixstream Pro+ 的根檔案系統上通過沙箱測試，還沒在實機上試過，歡迎回報。
+>
+> 1. 下載對應機型的資料包：
+>    - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Denon DJ SC LIVE 2** (JP20): [`SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Denon DJ PRIME 4+** (JC11S): [`PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Denon DJ PRIME GO+** (JP11S): [`PRIMEGOPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGOPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Numark Mixstream Pro+** (NH08S): [`MIXSTREAMPROPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Numark Mixstream Pro Go** (NH10): [`MIXSTREAMPROGO-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+> 2. 依包內的 `README-INSTALL.txt` 安裝：建議在機器上執行 `install.sh`（保留你的檔案）。fastboot 方式會覆蓋整個 `/data` 分割區，只能用你自己 `/data` 備份做出來的映像檔。
+>
+> PRIME 4 G2（JP24）和 SYSTEM ONE（RMZ2）不支援：它們的 5.3.0 韌體是 64 位元版本，Engine 也不同。
 
 ### 方式二：播放機螢幕一鍵線上升級（已安裝本系統後）
 - 連接 Wi-Fi 或網路線後，開啟播放機 **設定 → 關於 / 更新**；

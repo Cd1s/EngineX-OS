@@ -4,7 +4,7 @@
 # ALSA-to-LD_PRELOAD one-shot boot hook, and Engine 5.3.0-sclive4 full hook application.
 set -euo pipefail
 
-ROOTFS="/root/build/sc5000-lab/sclive4-rea61-followup/rootfs"
+ROOTFS="${ROOTFS:-/root/build/sc5000-lab/sclive4-rea61-followup/rootfs}"  # or another unpacked gen2 rootfs
 QRC="/root/build/sc5000-lab/5.3.0/qrc"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"

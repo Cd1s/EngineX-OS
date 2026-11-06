@@ -179,7 +179,18 @@ The entire system has been refactored and slimmed down so all extra features tak
 2. Copy the `.img` file to the **root folder of a FAT32 or exFAT USB drive**.
 3. Plug the USB drive into your deck (stock Engine OS 4.3.x and 5.0.x both work), open **Settings → About / Update → Firmware Update Mode**, choose **USB/SD** when the deck shows `Found 5.3.0.2 on USB/SD`, and let the player install and reboot. If it only asks *Reboot into firmware update mode?*, the deck did not see the file: check the model, keep the original file name in the root folder, then unplug and replug the drive.
 
-> **Second-generation models (SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+)**: they share one signed firmware (AZ0x) that refuses a modified `.img`, so there is no `.img` for them. **Never flash a `PRIME4` / `PRIMEGO` image on a PRIME 4+ / PRIME GO+.** Support for them comes as a `/data` bundle that leaves the system partition untouched (#61, #68, #69); it is in testing and not released yet.
+> **Second-generation models (SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Mixstream Pro+, Mixstream Pro Go): `/data` bundle, Beta** (#61, #68, #69). Their signed firmware refuses a modified `.img`, so there is no `.img` for them. **Never flash a `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` image on a second-generation unit.** Instead, a `/data` bundle adds EngineX OS on top of the official Engine OS 5.3.0 (install that first) and leaves the system partition untouched. All six run the same Engine build as SC LIVE 4; the bundle passed the sandbox test on the official SC LIVE 4 and Mixstream Pro+ root file systems but has not been tried on real hardware yet, so reports are welcome.
+>
+> 1. Download the bundle for your model:
+>    - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Denon DJ SC LIVE 2** (JP20): [`SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Denon DJ PRIME 4+** (JC11S): [`PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Denon DJ PRIME GO+** (JP11S): [`PRIMEGOPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGOPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Numark Mixstream Pro+** (NH08S): [`MIXSTREAMPROPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROPLUS-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+>    - **Numark Mixstream Pro Go** (NH10): [`MIXSTREAMPROGO-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.2-EngineX-OS-Data-Bundle.tar.gz)
+> 2. Follow `README-INSTALL.txt` inside: install on the device with `install.sh` (recommended, keeps your files). The fastboot method replaces the whole `/data` partition, so use it only with an image made from your own `/data` backup.
+>
+> PRIME 4 G2 (JP24) and SYSTEM ONE (RMZ2) are not supported: their 5.3.0 firmware is a 64-bit build with a different Engine.
 
 ### Option 2: One-Click On-Deck Update (When Already Running EngineX OS)
 - Connect your deck to Wi-Fi or Ethernet and open **Settings → About / Update**;
