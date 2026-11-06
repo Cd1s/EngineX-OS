@@ -3,6 +3,7 @@ import base64
 import hashlib
 import io
 import lzma
+import os
 from pathlib import Path
 import shutil
 import struct
@@ -186,7 +187,7 @@ class FilesystemTests(unittest.TestCase):
         before = self.fs.snapshot()
         az.inject(self.fs, az.public_key(self.key.with_suffix('.pub').read_text()))
         self.assertEqual(self.fs.snapshot(), before)
-        self.assertIn(b'AuthorizedKeysFile /data/sc5000-custom/',
+        self.assertIn(b'AuthorizedKeysFile /data/enginex/',
                       self.fs.read('/usr/share/sc5000-custom/sshd_config'))
         self.assertIn(b'root:$6$', self.fs.read('/etc/shadow'))
         prepare = self.fs.read('/usr/lib/systemd/system/sc5000-custom-prepare.service')
@@ -217,7 +218,7 @@ class FilesystemTests(unittest.TestCase):
         version = self.root/'version.txt'
         version.write_text('5.0.4.1\n')
         data = self.root/'data-ui'
-        ui = data/'sc5000-custom/ui'
+        ui = data/'enginex/ui'
         (ui/'packs/en').mkdir(parents=True)
         (ui/'packs/en/Main.qml').write_text('old')
         (ui/'packs.dev').mkdir()
@@ -232,7 +233,7 @@ class FilesystemTests(unittest.TestCase):
         self.assertTrue((ui/'icons/deezer.png').exists() and (ui/'packs.dev').is_dir())
         self.assertFalse((ui/'safe-mode').exists() or (ui/'boot-count').exists())
         self.assertEqual((ui/'.pack-version').read_text(), '5.0.4.1\n')
-        self.assertEqual((data/'sc5000-custom/version.txt').read_text(), '5.0.4.1\n')
+        self.assertEqual((data/'enginex/version.txt').read_text(), '5.0.4.1\n')
         self.assertEqual(list(ui.glob('.install.*')) + list(ui.glob('*.replaced')), [])
         # Same version again: a hand-deployed pack is left alone.
         (ui/'packs/en/Main.qml').write_text('dev')
@@ -245,10 +246,10 @@ class FilesystemTests(unittest.TestCase):
             info.size = 7
             t.addfile(info, io.BytesIO(b'rebuilt'))
         (seed/'ui-packs.tar.xz').write_bytes(lzma.compress(buf.getvalue(), check=lzma.CHECK_CRC32))
-        (data/'sc5000-custom/version.txt').write_text('5.0.4\n')
+        (data/'enginex/version.txt').write_text('5.0.4\n')
         subprocess.run(['sh', '-s'], input=script, check=True, capture_output=True)
         self.assertEqual((ui/'packs/en/Main.qml').read_text(), 'rebuilt')
-        self.assertEqual((data/'sc5000-custom/version.txt').read_text(), '5.0.4.1\n')
+        self.assertEqual((data/'enginex/version.txt').read_text(), '5.0.4.1\n')
 
     def test_prepare_atomic_failure_retry_identity_and_symlink_guard(self):
         # Relocate every guest state/seed path into this lab fixture. Only host
@@ -263,7 +264,7 @@ class FilesystemTests(unittest.TestCase):
         failed = subprocess.run(['sh', '-s'], input=script.replace(
             b'/usr/bin/ssh-keygen', b'/usr/bin/false'), capture_output=True)
         self.assertNotEqual(failed.returncode, 0)
-        state = data/'sc5000-custom'
+        state = data/'enginex'
         self.assertFalse((state/'ssh_host_ed25519_key').exists())
         self.assertEqual(list(state.glob('.prepare.*')), [])
         for _ in range(2):
@@ -288,14 +289,14 @@ class FilesystemTests(unittest.TestCase):
         # and the key public images up to 5.0.4.1 seeded is dropped from /data.
         az.inject(self.fs, None)
         self.assertNotIn('authorized_keys', self.fs.entries('/usr/share/sc5000-custom'))
-        self.assertIn(b'ConditionFileNotEmpty=/data/sc5000-custom/authorized_keys',
+        self.assertIn(b'ConditionFileNotEmpty=/data/enginex/authorized_keys',
                       self.fs.read('/usr/lib/systemd/system/sc5000-custom-sshd.service'))
         seed, data = self.root/'seed', self.root/'data'
         seed.mkdir()
         script = az.PREPARE.replace(b'/data', str(data).encode()).replace(
             b'/usr/share/sc5000-custom', str(seed).encode())
         run = lambda: subprocess.run(['sh', '-s'], input=script, capture_output=True)
-        state = data/'sc5000-custom'
+        state = data/'enginex'
         p = run()
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertFalse((state/'authorized_keys').exists())
@@ -320,6 +321,39 @@ class FilesystemTests(unittest.TestCase):
             self.assertEqual((state/'authorized_keys').read_bytes(), old + own)
             keep.unlink()
 
+    def test_prepare_and_etc_reset_rename_the_legacy_dir_losslessly(self):
+        # #103: /data/sc5000-custom -> /data/enginex with a symlink left behind; run twice, idempotent.
+        seed, data = self.root/'seed', self.root/'data'
+        seed.mkdir()
+        old, new = data/'sc5000-custom', data/'enginex'
+        (old/'Stream').mkdir(parents=True)
+        (old/'Stream/song.flac').write_text('x')
+        (old/'settings.conf').write_text('s')
+        own = self.key.with_suffix('.pub').read_bytes()
+        (old/'authorized_keys').write_bytes(own)
+        for template in (az.ETC_RESET, az.PREPARE):
+            script = template.replace(b'/data', str(data).encode()).replace(
+                b'/usr/share/sc5000-custom', str(seed).encode())
+            for _ in range(2):
+                p = subprocess.run(['sh', '-s'], input=script, capture_output=True)
+                self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertTrue(old.is_symlink() and os.readlink(old) == 'enginex')
+            self.assertEqual((new/'Stream/song.flac').read_text(), 'x')
+            self.assertEqual((new/'settings.conf').read_text(), 's')
+            self.assertEqual((old/'authorized_keys').read_bytes(), own)
+        # Both real (a rollback image recreated the old one): enginex wins, the old content is kept aside.
+        old.unlink()
+        old.mkdir()
+        (old/'settings.conf').write_text('older')
+        (old/'extra').write_text('e')
+        p = subprocess.run(['sh', '-s'], input=script, capture_output=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertTrue(old.is_symlink())
+        self.assertEqual((new/'settings.conf').read_text(), 's')
+        self.assertEqual((new/'extra').read_text(), 'e')
+        aside = list(new.glob('legacy-sc5000-custom.*'))
+        self.assertEqual([(a/'settings.conf').read_text() for a in aside], ['older'])
+
     def test_etc_reset_drops_stale_434_overlay_once(self):
         data = self.root/'data'
         upper = data/'system/etc/overlay'
@@ -335,7 +369,7 @@ class FilesystemTests(unittest.TestCase):
         passed = subprocess.run(['sh', '-s'], input=script, capture_output=True)
         self.assertEqual(passed.returncode, 0, passed.stderr)
         self.assertEqual((upper/'hosts').read_text(), 'user edit after upgrade')
-        (data/'sc5000-custom/etc-overlay-epoch').unlink()
+        (data/'enginex/etc-overlay-epoch').unlink()
         sentinel = self.root/'sentinel'
         sentinel.mkdir()
         (sentinel/'hosts').write_text('keep')

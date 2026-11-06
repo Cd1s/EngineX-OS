@@ -349,7 +349,7 @@ func startSSHDeck(t *testing.T, port int, compatible string) *sshDeck {
 	}
 	t.Cleanup(func() { l.Close() })
 	env := append(os.Environ(), "PATH="+shim+":"+os.Getenv("PATH"), "TMPDIR="+d.Data,
-		"SC5000_CUSTOM="+filepath.Join(d.Data, "sc5000-custom"),
+		"SC5000_CUSTOM="+filepath.Join(d.Data, "enginex"),
 		"SC5000_ALSA_OVERLAY="+filepath.Join(d.Data, "system/var/overlay/lib/alsa/conf.d"))
 	go func() {
 		for {
@@ -433,7 +433,7 @@ func TestModeAInstallsBundleOverSSH(t *testing.T) {
 	if downloads != 1 {
 		t.Errorf("bundle downloads = %d, want 1", downloads)
 	}
-	custom := filepath.Join(deck.Data, "sc5000-custom")
+	custom := filepath.Join(deck.Data, "enginex")
 	if got, want := sha(t, filepath.Join(custom, "bundle/bin/sc5000-suite")), sha(t, b.SuitePath); got != want {
 		t.Errorf("installed suite sha %s, want %s", got, want)
 	}
@@ -522,18 +522,18 @@ func checkImage(t *testing.T, img string, suitePath string) {
 	if hdr := sh(t, "dumpe2fs", "-h", img); !strings.Contains(hdr, "az01-data") || !strings.Contains(hdr, "encrypt") {
 		t.Errorf("label/features wrong:\n%s", hdr)
 	}
-	st := sh(t, "debugfs", "-R", "stat /sc5000-custom/bundle/bin/sc5000-suite", img)
+	st := sh(t, "debugfs", "-R", "stat /enginex/bundle/bin/sc5000-suite", img)
 	for _, want := range []string{"Type: regular", "Mode:  0755", "User:     0   Group:     0"} {
 		if !strings.Contains(st, want) {
 			t.Errorf("suite inode lacks %q:\n%s", want, st)
 		}
 	}
 	out := filepath.Join(t.TempDir(), "suite")
-	sh(t, "debugfs", "-R", "dump /sc5000-custom/bundle/bin/sc5000-suite "+out, img)
+	sh(t, "debugfs", "-R", "dump /enginex/bundle/bin/sc5000-suite "+out, img)
 	if sha(t, out) != sha(t, suitePath) {
 		t.Error("suite in the image differs from the bundle's")
 	}
-	for _, p := range []string{"/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf", "/system/var-lib/alsa/conf.d/99-sc5000-custom.conf", "/sc5000-custom/version.txt"} {
+	for _, p := range []string{"/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf", "/system/var-lib/alsa/conf.d/99-sc5000-custom.conf", "/enginex/version.txt"} {
 		if s := sh(t, "debugfs", "-R", "stat "+p, img); !strings.Contains(s, "Type: regular") || !strings.Contains(s, "Mode:  0644") {
 			t.Errorf("%s:\n%s", p, s)
 		}
@@ -601,7 +601,7 @@ func TestModeBKeepsTheUsersFilesWhenGivenABackup(t *testing.T) {
 	if sha(t, backup) == sha(t, img) {
 		t.Error("the backup itself must stay untouched, not be the flashed image")
 	}
-	if s := sh(t, "debugfs", "-R", "stat /sc5000-custom/version.txt", backup); strings.Contains(s, "Type: regular") {
+	if s := sh(t, "debugfs", "-R", "stat /enginex/version.txt", backup); strings.Contains(s, "Type: regular") {
 		t.Error("the backup was modified")
 	}
 }
@@ -812,5 +812,23 @@ func TestFastbootScriptPicksDataOrUserdata(t *testing.T) {
 		if f := fb.Flashed(); len(f) != 1 || !strings.HasPrefix(f[0], want) {
 			t.Errorf("hasData=%v: flash calls = %v, want %q", hasData, f, want)
 		}
+	}
+}
+
+// #104: a 1st-gen deck in normal operation is invisible to the tool; say how to flash it.
+func TestNoDeckPrintsFirstGenGuide(t *testing.T) {
+	o := testOpts(t)
+	err := run(ctxT(t), o)
+	if err == nil || !strings.Contains(err.Error(), "没有发现碟机") {
+		t.Fatalf("err = %v, want the no-deck error", err)
+	}
+	out := o.Out.(*bytes.Buffer).String()
+	for _, want := range []string{"PRIME GO", "Settings -> Update -> Reboot", "Reboot to Computer Update Mode", "15a2:007d", "FAT32/exFAT", "SYSTEM ONE"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("guide is missing %q", want)
+		}
+	}
+	if strings.Count(out, "方式 B（USB 线）") != 2 {
+		t.Error("expected the guide both at start-up and when no deck is found")
 	}
 }

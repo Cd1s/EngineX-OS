@@ -102,34 +102,145 @@ SERVICES_MAIN = """
 	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
 	property bool scFourDeckOn: false // the saved switch; Engine applies it on restart
 	property string scFourDeckRoleSetting: "auto"
-	// The 4-deck layout shows four waveform lanes; Engine keeps "2" otherwise. Once per
-	// Engine start (retried until the performance view exists), so a manual "2" sticks.
-	property bool scFourWaveSet: false
+	// #99: five Layout Manager views. Engine has three and forgets the selected one
+	// at every start, and the 4-deck layout used to force its lanes over the user's
+	// view. stream-sync keeps the active view and each one's layout (views.json);
+	// Engine starts on the active view. A view never saved has the performance pads
+	// off, and in the 4-deck layout four decks and four waveform lanes. Changes in
+	// the Layout Manager go to the active view; Save View stores it at once.
+	property bool scUiLoaded: false // scApply ran: the 4-deck role is known
+	property int scViewActive: 1
+	property var scViews: ({})
+	property bool scViewsRead: false
+	property bool scViewReady: false // the active view applied after this start
+	property real scViewQuiet: 0 // no autosave until an applied view has settled
+	property string scViewLast: ""
+	function scViewControls() {
+		const c = PlanckGUI.views.performanceViewController
+		if (!c || !c.deckController || !c.waveformController) return null
+		return {deckStyle: c.deckController.deckStyleSetting, deckLayout: c.layoutController ? c.layoutController.layoutSetting : null,
+			deckCount: c.deckController.deckCountSetting, waveformCount: c.waveformController.waveformCountSetting,
+			waveformOrientation: c.waveformController.waveformOrientationSetting}
+	}
+	function scViewSnapshot() {
+		const m = scViewControls()
+		if (!m) return null
+		const c = PlanckGUI.views.performanceViewController
+		const s = {}
+		for (const k in m) if (m[k] && m[k].currentName) s[k] = String(m[k].currentName)
+		for (const [k, path] of [["pads", "/GUI/PadsViewEnabled"], ["fx", "/GUI/FxViewEnabled"]]) {
+			const p = Planck.getProperty(path)
+			if (p && p.translator) s[k] = !!p.translator.state
+		}
+		if (c.libraryView) s.library = !!c.libraryView.visibleSettingValue
+		if (PlanckGUI.views.isPortrait) s.albumArt = !!c.deckController.albumArtVisible
+		return s
+	}
+	function scViewApply(s) {
+		const m = scViewControls()
+		if (!m || (scFourDeckRole !== "" && !(m.deckCount && m.deckCount.settingNames && m.deckCount.settingNames.length >= 2))) return false
+		const c = PlanckGUI.views.performanceViewController
+		for (const k in m) {
+			const set = m[k], i = set && set.settingNames && typeof s[k] === "string" ? set.settingNames.indexOf(s[k]) : -1
+			if (i >= 0 && set.currentName !== s[k]) set.setCurrentIndex(i)
+		}
+		for (const [k, path] of [["pads", "/GUI/PadsViewEnabled"], ["fx", "/GUI/FxViewEnabled"]]) {
+			const p = Planck.getProperty(path)
+			if (typeof s[k] === "boolean" && p && p.translator && !!p.translator.state !== s[k]) p.translator.state = s[k]
+		}
+		if (typeof s.library === "boolean" && c.libraryView && !!c.libraryView.visibleSettingValue !== s.library) c.libraryView.performanceLibraryEnableClicked()
+		if (typeof s.albumArt === "boolean" && PlanckGUI.views.isPortrait && !!c.deckController.albumArtVisible !== s.albumArt) c.deckController.onDisplayAlbumArtClicked()
+		scViewQuiet = Date.now() + 3000
+		scViewLast = ""
+		return true
+	}
+	function scViewOf(n) {
+		return scViews[String(n)] || (scFourDeckRole !== "" ? {pads: false, deckCount: "4 Decks", waveformCount: "4 Waveforms"} : {pads: false})
+	}
+	function scViewStore() {
+		const x = new XMLHttpRequest()
+		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/views")
+		x.send(JSON.stringify({active: scViewActive, views: scViews}))
+	}
+	function scViewSave() {
+		const s = scViewSnapshot()
+		if (!s) return
+		const v = Object.assign({}, scViews)
+		v[String(scViewActive)] = s
+		scViews = v
+		scViewLast = JSON.stringify(s)
+		scViewStore()
+	}
+	function scViewSelect(n) {
+		if (n === scViewActive) return
+		scViewActive = n
+		scViewApply(scViewOf(n))
+		scViewStore()
+	}
 	Timer {
-		interval: 2000; repeat: true
-		running: root.scFourDeckRole !== "" && !root.scFourWaveSet
+		interval: 2000; repeat: true; running: true
 		onTriggered: {
-			const c = PlanckGUI.views.performanceViewController
-			const w = c && c.waveformController ? c.waveformController.waveformCountSetting : null
-			const i = w ? w.settingNames.indexOf("4 Waveforms") : -1
-			if (i < 0) return
-			if (w.currentName !== "4 Waveforms") w.setCurrentIndex(i)
-			root.scFourWaveSet = true
+			if (!root.scUiLoaded) return
+			if (!root.scViewsRead) {
+				root.scViewsRead = true
+				const x = new XMLHttpRequest()
+				x.open("GET", "http://127.0.0.1:8080/v1/sc5000/views")
+				x.onreadystatechange = function() {
+					if (x.readyState !== 4) return
+					try {
+						const v = JSON.parse(x.responseText)
+						if (v.active >= 1 && v.active <= 5) root.scViewActive = v.active
+						root.scViews = v.views || {}
+					} catch (err) {
+						root.scViewsRead = x.status === 200 // retry when stream-sync was not up
+					}
+				}
+				x.send()
+				return
+			}
+			if (!root.scViewReady) {
+				if (root.scFourDeckRole !== "") {
+					const lb = Planck.getProperty("/GUI/ShowLayerB")
+					if (!lb || !lb.translator) return
+					if (!lb.translator.state) lb.translator.state = true
+				}
+				root.scViewReady = root.scViewApply(root.scViewOf(root.scViewActive))
+				return
+			}
+			if (Date.now() < root.scViewQuiet) return
+			const s = root.scViewSnapshot()
+			const j = s ? JSON.stringify(s) : ""
+			if (!j) return
+			if (root.scViewLast === "") root.scViewLast = j // what the applied view settled to
+			else if (j !== root.scViewLast) root.scViewSave()
 		}
 	}
 	// #49 shadow decks: post this player's decks for the other EngineX player and
 	// drive the decks it does not play from GET /v1/sc5000/shadow (a CDJ or the
 	// other player); the hook keeps them silent. Units measured on a JP07:
 	// TrackPosition/TrackLength are track samples, Speed is the fader (0.5 = 0 %,
-	// 0..1 = the SpeedRange), Play is a button (false -> true toggles). A seek flushes Engine's decoder and
-	// waveform (visible stutter), so while playing small drift is closed with the
-	// fader (P control, 4 s to catch up, at most +-4 %) and only > 800 ms seeks,
-	// at most every 3 s.
+	// 0..1 = the SpeedRange), Play is the play state. A seek flushes Engine's
+	// decoder and waveform, and every fader write re-tunes the time stretcher, so
+	// a playing shadow deck only takes the source's pitch and runs on its own audio
+	// clock (crystals agree to ~20 ppm).
+	// Latency: the sender samples its decks every 20 ms and posts at once on an
+	// edge (play, CUE, a jump, pitch, track), else every 120 ms; its Go pushes the
+	// post over UDP and the receiver's Go wakes the long poll below. The receiver
+	// applies a play or stop edge on the first update, never behind a lock.
 	property var scShadowAt: ({})
+	property var scShadowPrev: ({}) // own decks at the last 20 ms sample
+	property real scShadowPostAt: 0
+	property real scShadowPollAt: 0
+	property real scShadowVer: 0
+	property int scShadowGen: 0
 	Timer {
-		interval: 400; repeat: true
+		interval: 20; repeat: true
 		running: root.scFourDeckRole !== ""
 		onTriggered: root.scShadowTick()
+	}
+	Timer {
+		id: scShadowPollTimer
+		onTriggered: if (root.scFourDeckRole !== "") root.scShadowPoll()
 	}
 	property bool scShadowCdjMaster: false // a CDJ on a shadow deck holds master
 	// Engine's buttons (RequestMaster, Sync, UnSync) act on false -> true and only
@@ -158,66 +269,136 @@ SERVICES_MAIN = """
 	}
 	function scShadowTick() {
 		const g = (d, p) => Planck.getProperty("/Engine/Deck" + d + p).translator
+		const now = Date.now()
+		if (now - scShadowPollAt > 3000) scShadowPoll() // starts the chain, or restarts a hung one
+		const mine = scFourDeckRole.split("").map(c => parseInt(c))
+		let edge = now - scShadowPostAt >= 120
+		for (const d of mine) {
+			const sr = g(d, "/Track/SampleRate").value
+			const s = {ps: !!g(d, "/PlayState").state, posMs: sr > 0 ? g(d, "/Track/TrackPosition").unnormalized / sr * 1000 : 0,
+				pitch: parseFloat(g(d, "/SpeedState").string) || 0, at: now, jumps: 0,
+				net: g(d, "/Track/SongLoaded").state ? g(d, "/Track/TrackNetworkPath").string : ""}
+			const p = scShadowPrev[d]
+			// Holding CUE previews with PlayState false (measured on a JP07): CUE's
+			// LED is on and the position runs. The LED alone also blinks while paused.
+			s.cue = !s.ps && !!(g(d, "/Track/CueLEDState") || {}).state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
+			s.playing = s.ps || s.cue
+			if (p) {
+				// A jump: hot cue, beat jump, loop, CUE while playing, jog search while
+				// paused. TrackPosition moves in ~33 ms steps, so a playing deck sits
+				// off its line by that plus timer jitter; a paused one does not move.
+				s.jumps = p.jumps
+				const expect = p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0)
+				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 80 : 5)) s.jumps++
+				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02) edge = true
+			}
+			scShadowPrev[d] = s
+		}
+		if (edge) scShadowPost(mine, now)
+	}
+	function scShadowPost(mine, now) {
+		const g = (d, p) => Planck.getProperty("/Engine/Deck" + d + p).translator
 		// A networked player's MASTER LED is the unit's /Engine/Sync/Network/MasterStatus
 		// (ControlSurfaceModules/Sync.qml); DeckIsMaster is per deck. The unit's
 		// master is this player's unless a shadow deck (a CDJ) holds it.
 		const deckMaster = [1, 2, 3, 4].map(i => !!g(i, "/DeckIsMaster").state)
 		const pNet = Planck.getProperty("/Engine/Sync/Network/MasterStatus")
 		const net = !!(pNet && pNet.translator && pNet.translator.state)
-		const mine = scFourDeckRole.split("").map(c => parseInt(c))
 		const shadowLead = deckMaster.some((m, i) => m && mine.indexOf(i + 1) < 0)
 		let lead = 0
 		if (net && !shadowLead && !scShadowCdjMaster && !mine.some(d => deckMaster[d - 1]))
 			lead = mine.find(d => g(d, "/PlayState").state) || mine[0]
+		const link = (Planck.getProperty("/Network/NetworkId").translator || {}).string || ""
 		const own = []
 		for (const d of mine) {
-			const sr = g(d, "/Track/SampleRate").value
-			own.push({deck: d, net: g(d, "/Track/SongLoaded").state ? g(d, "/Track/TrackNetworkPath").string : "",
-				playing: !!g(d, "/PlayState").state, positionMs: sr > 0 ? g(d, "/Track/TrackPosition").unnormalized / sr * 1000 : 0,
-				pitch: parseFloat(g(d, "/SpeedState").string) || 0, master: deckMaster[d - 1] || d === lead,
+			const s = scShadowPrev[d]
+			const t = p => (Planck.getProperty("/Engine/Deck" + d + "/Track/" + p) || {}).translator
+			const cues = []
+			for (let i = 1; s.net && i <= 8; i++) {
+				const q = "QuickCue" + i
+				if ((t(q + "Exists") || {}).state)
+					cues.push({i: i, p: t(q + "Position").value, n: t(q + "Name").string, c: String(t(q + "Color").color)})
+			}
+			own.push({deck: d, net: s.net, cues: s.net ? cues : null, cuePos: s.net ? (t("CuePosition") || {}).value : undefined, playing: s.playing, cue: s.cue, link: link, positionMs: s.posMs, at: s.at, jumps: s.jumps,
+				pitch: s.pitch, master: deckMaster[d - 1] || d === lead,
 				bpm: (Planck.getProperty("/Engine/Deck" + d + "/OriginalBPM").translator || {}).unnormalized || 0,
 				beat: (Planck.getProperty("/Engine/Deck" + d + "/BeatNumber").translator || {}).unnormalized || 0,
 				// shortcut: raw master state for diagnosis on /peer/decks; drop once verified on hardware.
 				dbg: deckMaster.map(m => m ? 1 : 0).join("") + "/" + (net ? 1 : 0) + " " + [Config.device.isJP, Config.device.isPlayer, Config.device.name, Config.network.hasSyncing].join(",")
 					+ " sync" + [1, 2, 3, 4].map(i => g(i, "/SyncMode").string).join(",")
-					+ " play" + [1, 2, 3, 4].map(i => g(i, "/PlayState").state ? 1 : 0).join("")})
+					+ " play" + [1, 2, 3, 4].map(i => g(i, "/PlayState").state ? 1 : 0).join("")
+					// shadow decks here: drift ms / seeks while playing / loads
+					+ " sh" + Object.keys(scShadowAt).map(k => k + ":" + Math.round(scShadowAt[k].drift || 0) + "/" + (scShadowAt[k].seeks || 0) + "/" + (scShadowAt[k].loads || 0)).join(",")})
 		}
+		scShadowPostAt = now
 		const post = new XMLHttpRequest()
 		post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks")
 		post.send(JSON.stringify(own))
+	}
+	// One request at a time: Go holds it until the other player's state changes
+	// (at most 120 ms), so an edge arrives here within a millisecond of its UDP.
+	function scShadowPoll() {
+		const gen = ++scShadowGen
+		scShadowPollAt = Date.now()
 		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow")
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer)
 		x.onreadystatechange = function() {
-			if (x.readyState !== 4 || x.status !== 200) return
-			const decks = JSON.parse(x.responseText).decks || []
-			root.scShadowCdjMaster = decks.some(e => e.master)
-			for (const e of decks) root.scShadowApply(e)
-			// A shadow deck whose CDJ or player went away stops (and gives up master).
-			for (const d in root.scShadowAt) {
-				const p = Planck.getProperty("/Engine/Deck" + d + "/PlayState").translator
-				const at = root.scShadowAt[d]
-				const now = Date.now()
-				if (!decks.some(e => e.deck === parseInt(d)) && p && p.state && scFourDeckRole.indexOf(d) < 0 && !(at.playWant === false && now < at.playUntil)) {
-					Planck.getProperty("/Engine/Deck" + d + "/Play").translator.state = false
-					at.playWant = false
-					at.playUntil = now + 3000
+			if (x.readyState !== 4 || gen !== root.scShadowGen) return
+			let wait = 500
+			try {
+				if (x.status === 200) {
+					const r = JSON.parse(x.responseText)
+					root.scShadowApplyAll(r.decks || [])
+					// An older suite answers at once (no ver): keep its old pace.
+					wait = !r.role ? 500 : r.ver === undefined ? 120 : 1
+					if (r.ver !== undefined) root.scShadowVer = r.ver
 				}
+			} catch (err) {
+				console.warn("EngineX shadow decks: " + err)
 			}
+			scShadowPollTimer.interval = wait
+			scShadowPollTimer.restart()
 		}
 		x.send()
+	}
+	function scShadowApplyAll(decks) {
+		root.scShadowCdjMaster = decks.some(e => e.master)
+		for (const e of decks) root.scShadowApply(e)
+		// A shadow deck whose CDJ or player went away stops (and gives up master).
+		const now = Date.now()
+		for (const d in root.scShadowAt) {
+			const p = Planck.getProperty("/Engine/Deck" + d + "/PlayState").translator
+			const at = root.scShadowAt[d]
+			if (!decks.some(e => e.deck === parseInt(d)) && p && p.state && scFourDeckRole.indexOf(d) < 0 && !(at.cmd === false && now < at.cmdUntil)) {
+				Planck.getProperty("/Engine/Deck" + d + "/Play").translator.state = false
+				at.cmd = false
+				at.cmdUntil = now + 3000
+			}
+		}
 	}
 	function scShadowApply(e) {
 		const d = e.deck
 		if (scFourDeckRole.indexOf(String(d)) >= 0 || !e.path) return
 		const g = p => Planck.getProperty("/Engine/Deck" + d + p).translator
 		const now = Date.now()
-		const at = scShadowAt[d] || {path: "", act: 0, seek: 0}
+		const at = scShadowAt[d] || {path: ""}
 		if (at.path !== e.path) {
 			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck" + d).translator.url = "file://" + encodeURI(e.path)
-			scShadowAt[d] = {path: e.path, act: now + 1500, seek: 0}
+			scShadowAt[d] = {path: e.path, loadUntil: now + 1200, seekAt: 0, seeks: 0, loads: (at.loads || 0) + 1, jumps: e.jumps}
 			return
 		}
-		if (now < at.act || !g("/Track/SongLoaded").state) return
+		if (now < at.loadUntil || !g("/Track/SongLoaded").state) return
+		at.ready = true
+		at.link = e.link || ""
+		if (at.link) scShadowLink(d, at.link)
+		scShadowCues(d, at, e, now)
+		// Updates sent before an Engine Link edge arrive after it: skip them, or
+		// they would undo the edge for a moment.
+		if (now - (at.linkAt || 0) < 300 && (e.playing && !e.cue) !== at.linkPS) return
+		if (e.cue && at.linkCueOff && now - at.linkCueOff < 300) return
+		const wasPreview = at.preview
+		at.preview = !!e.cue
+		if (!e.playing) at.pausedAt = e.positionMs
 		// The CDJ took master: so does its shadow deck, and Engine drops it on ours
 		// (one master). Only after the change (for 5 s), so pressing MASTER here
 		// afterwards wins it back.
@@ -225,47 +406,191 @@ SERVICES_MAIN = """
 		if (!e.master) at.wantMaster = 0
 		at.master = !!e.master
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
-		if (!!g("/PlayState").state !== e.playing) {
-			// Play is the play state: true plays, false pauses. (Writing false then
-			// true as a button press left it playing, so CUE never stopped the
-			// deck.) Give PlayState up to 3 s to follow, e.g. while it brakes.
-			if (at.playWant === e.playing && now < at.playUntil) return
-			g("/Play").state = e.playing
-			at.playWant = e.playing
-			at.playUntil = now + 3000
-			at.act = now + 700 // CUE: the seek waits until Engine reports the deck stopped
+		if (!(sr > 0 && len > 0)) return
+		const seek = ms => root.scShadowSeek(d, at, ms)
+		// e.at is when Go extrapolated e.positionMs; this runs later on a busy GUI
+		// thread, so carry the target to now before comparing.
+		const target = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * (1 + e.pitch / 100) : 0)
+		const drift = target - g("/Track/TrackPosition").unnormalized / sr * 1000 // > 0: behind
+		at.drift = drift
+		const pSync = g("/SyncMode")
+		const synced = !!pSync && pSync.string !== "" && pSync.string !== "Off"
+		const range = parseFloat(g("/SpeedRange").string) || 8
+		const speed = Math.max(0, Math.min(1, 0.5 + e.pitch / (2 * range)))
+		if (!(e.sync && synced) && Math.abs(g("/Speed").value - speed) > 0.001) g("/Speed").value = speed
+		// Play, CUE held, pause, CUE released: on the first update that shows it.
+		// at.cmd only stops rewriting the same state while Engine follows (a frame
+		// or two); a change of the source's state always goes through.
+		const local = !!g("/PlayState").state
+		if (e.playing !== local) {
+			if (at.cmd !== e.playing || now >= at.cmdUntil) {
+				if (e.playing) {
+					if (Math.abs(drift) > 25) seek(target)
+					g("/Play").state = true
+				} else {
+					g("/Play").state = false
+					// CUE released: back on the cue point. After a preview the sender's
+					// TrackPosition may not have jumped back yet; the preview started there.
+					const back = wasPreview && at.pausedAt !== undefined ? at.pausedAt : e.positionMs
+					seek(back)
+					at.target = back
+					at.check = now + 60 // and where it landed once Engine stopped
+				}
+				at.cmd = e.playing
+				at.cmdUntil = now + 250
+				at.jumps = e.jumps
+			}
 			return
 		}
-		at.playWant = undefined
+		at.cmd = undefined
 		// Engine ignores RequestMaster on a stopped deck: press it once this one
 		// plays, again until it is master.
-		if (at.wantMaster && now < at.wantMaster && !g("/DeckIsMaster").state && g("/PlayState").state && now >= (at.pressed || 0)) {
+		if (at.wantMaster && now < at.wantMaster && !g("/DeckIsMaster").state && local && now >= (at.pressed || 0)) {
 			scPress("/Engine/Deck" + d + "/RequestMaster")
 			at.pressed = now + 800
 		}
 		if (g("/DeckIsMaster").state) at.wantMaster = 0
 		// The CDJ's BEAT SYNC is Engine's own Sync on the shadow deck: Engine then
 		// holds its tempo and phase to the master, so no fader and few seeks here.
-		const pSync = g("/SyncMode")
-		const synced = !!pSync && pSync.string !== "" && pSync.string !== "Off"
 		if (!!e.sync !== synced && now >= (at.syncAt || 0)) {
 			scPress("/Engine/Deck" + d + (e.sync ? "/Sync" : "/UnSync"))
 			at.syncAt = now + 800
 		}
-		const drift = sr > 0 && len > 0 ? e.positionMs - g("/Track/TrackPosition").unnormalized / sr * 1000 : 0 // > 0: behind
-		const bend = e.playing && Math.abs(drift) > 20 ? Math.max(-4, Math.min(4, drift / 40)) : 0
-		const range = parseFloat(g("/SpeedRange").string) || 8
-		const speed = Math.max(0, Math.min(1, 0.5 + (e.pitch + bend) / (2 * range)))
-		if (!(e.sync && synced) && Math.abs(g("/Speed").value - speed) > 0.001) g("/Speed").value = speed
-		// Paused: seek once per CDJ position. The landing point is off by a decoder
-		// frame (or a beat with Quantize), and seeking again every tick replayed it.
-		if (e.playing) at.target = null
-		if (Math.abs(drift) > (e.playing ? (e.sync && synced ? 2000 : 800) : 30) && now >= at.seek && (e.playing || at.target === null || at.target === undefined || Math.abs(e.positionMs - at.target) > 50)) {
-			g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, e.positionMs / (len / sr * 1000)))
-			at.seek = now + (e.playing ? 3000 : 300)
-			at.target = e.positionMs
-			at.act = now + 400
+		if (!e.playing) {
+			// Paused: seek once per source position (the cue point moved, jog
+			// search) and check the landing once. It is off by a decoder frame, or
+			// a beat with Quantize, and seeking again every tick replayed it.
+			at.jumps = e.jumps
+			const fresh = at.target === undefined || at.target === null || Math.abs(e.positionMs - at.target) > 5
+			const check = at.check && now >= at.check
+			if ((fresh || check) && Math.abs(drift) > 10 && now - at.seekAt >= 40) {
+				seek(e.positionMs)
+				at.target = e.positionMs
+				at.check = fresh ? now + 60 : 0
+			} else if (check) at.check = 0
+			scShadowBeat(d, at, e, drift, now)
+			return
 		}
+		at.target = null
+		// Playing: seek at once when the source jumped, after 1 s on a large gap
+		// (a CDJ has no jump count), and on steady drift past the limit on three
+		// updates at most every 2 s. at.wide: two steady seeks within 10 s did not
+		// land (Quantize snaps to a beat), so this track then only follows jumps.
+		const lim = e.sync && synced ? 2000 : at.wide ? 800 : 150
+		const big = Math.max(350, lim)
+		const jump = e.jumps !== at.jumps && Math.abs(drift) > 60
+		if (!jump) at.jumps = e.jumps
+		at.over = Math.abs(drift) > lim ? (at.over || 0) + 1 : 0
+		if ((jump && now - at.seekAt >= 80) || (Math.abs(drift) > big && now - at.seekAt >= 1000) || (at.over >= 3 && now - at.seekAt >= 2000)) {
+			if (!jump && Math.abs(drift) <= big) {
+				at.wide = at.wide || now - (at.lastSteady || 0) < 10000
+				at.lastSteady = now
+			}
+			seek(target)
+			at.jumps = e.jumps
+			at.over = 0
+			at.seeks = (at.seeks || 0) + 1
+		}
+	}
+	// The source's hot cues and CUE point (track samples), set through Engine's
+	// own deck properties: Engine shows them on the waveform, the overview and
+	// the pads, and stores them itself. Nothing else may write its m.db (it
+	// holds it with an exclusive lock and its own page cache; a write broke it).
+	function scShadowCues(d, at, e, now) {
+		if (!Array.isArray(e.cues)) return // a CDJ: no cues sent
+		const sig = JSON.stringify(e.cues) + "/" + e.cuePos
+		if (now < (at.cueAt || 0) + (sig === at.cueSig ? 1000 : 250)) return
+		at.cueAt = now
+		at.cueSig = sig
+		const t = p => Planck.getProperty("/Engine/Deck" + d + "/Track/" + p).translator
+		const want = {}
+		for (const c of e.cues)
+			if (c && c.i >= 1 && c.i <= 8 && isFinite(c.p) && c.p >= 0) want[c.i] = c
+		for (let i = 1; i <= 8; i++) {
+			const q = "QuickCue" + i, w = want[i], has = !!t(q + "Exists").state
+			if (!w) {
+				if (has) scPress("/Engine/Deck" + d + "/Track/DeleteQuickCue" + i)
+				continue
+			}
+			if (!has || Math.abs(t(q + "Position").value - w.p) > 0.5) t(q + "SetPosition").value = w.p
+			const n = String(w.n || "").slice(0, 64)
+			if (t(q + "Name").string !== n) t(q + "Name").string = n
+			if (/^#[0-9a-f]{6,8}$/i.test(w.c || "") && String(t(q + "Color").color) !== w.c) t(q + "Color").color = w.c
+		}
+		if (isFinite(e.cuePos) && e.cuePos >= 0 && Math.abs(t("CuePosition").value - e.cuePos) > 0.5) t("CuePosition").value = e.cuePos
+	}
+	// The shadow deck's grid is Engine's own analysis of the copy. A whole beat
+	// off (another downbeat) is fixed with Engine's OffsetPhase buttons, one
+	// press per check: Forward moves BeatNumber back by one (measured on a
+	// JP07). Part of a beat has no control short of the on-screen grid editor.
+	function scShadowBeat(d, at, e, drift, now) {
+		if ((at.beatTries || 0) >= 4 || !(e.bpm > 0) || e.beat === undefined || Math.abs(drift) > 15 || now < (at.beatAt || 0)) return
+		const local = (Planck.getProperty("/Engine/Deck" + d + "/BeatNumber").translator || {}).unnormalized
+		if (local === undefined) return
+		const k = ((Math.round(e.beat - local) % 4) + 4) % 4
+		const step = k === 3 ? -1 : k
+		if (!step) {
+			at.beatTries = 4
+			return
+		}
+		scPress("/Engine/Deck" + d + "/Track/OffsetPhase" + (step > 0 ? "Backward" : "Forward"))
+		at.beatTries = (at.beatTries || 0) + 1
+		at.beatAt = now + 600
+	}
+	function scShadowSeek(d, at, ms) {
+		const g = p => Planck.getProperty("/Engine/Deck" + d + p).translator
+		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
+		if (!(sr > 0 && len > 0)) return
+		g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, ms / (len / sr * 1000)))
+		at.seekAt = Date.now()
+	}
+	// Engine Link already mirrors the other Engine's properties here, within a
+	// few ms of that Engine changing them (measured: our own update arrives
+	// 60-130 ms later, two GUI-thread XHR hops). So play/stop and the CUE LED
+	// come from Engine Link; positions, jumps and pitch still from our updates.
+	// Register takes one path per event-loop turn: one path per update.
+	property var scShadowLinks: ({})
+	function scShadowLink(d, uuid) {
+		const k = uuid + d, n = scShadowLinks[k] || 0
+		const paths = ["/Engine/Deck" + d + "/PlayState", "/Engine/Deck" + d + "/Track/CueLEDState"]
+		if (n >= paths.length) return
+		const reg = Planck.getProperty("/RemoteState/" + uuid + "/Register")
+		if (!reg || !reg.translator) return
+		reg.translator.string = paths[n]
+		const p = Planck.getProperty("/RemoteState/" + uuid + "/RemoteProperties" + paths[n])
+		if (!p || !p.translator) return
+		scShadowLinks[k] = n + 1
+		const kind = n ? "cue" : "play"
+		p.translator.stringChanged.connect(() => root.scShadowLinkEdge(d, uuid, kind, p.translator.string))
+	}
+	function scShadowLinkEdge(d, uuid, kind, json) {
+		const at = scShadowAt[d]
+		if (!at || !at.ready || at.link !== uuid) return
+		let on
+		try { on = !!JSON.parse(json).state } catch (err) { return }
+		const g = p => Planck.getProperty("/Engine/Deck" + d + p).translator
+		const now = Date.now()
+		const local = !!g("/PlayState").state
+		if (kind === "cue") {
+			at.linkCueOff = on ? 0 : now
+			if (!on && at.preview && local) { // CUE released after a preview
+				g("/Play").state = false
+				if (at.pausedAt !== undefined) scShadowSeek(d, at, at.pausedAt)
+				at.target = at.pausedAt
+				at.check = now + 60
+				at.preview = false
+				at.cmd = false
+				at.cmdUntil = now + 250
+			}
+			return
+		}
+		at.linkAt = now
+		at.linkPS = on
+		if (on === local) return
+		g("/Play").state = on
+		at.cmd = on
+		at.cmdUntil = now + 250
+		at.target = null // the next update says where it stopped
 	}
 	function scRestartCall(query) {
 		const prompt = PlanckGUI.views.prompts.post({
@@ -494,6 +819,7 @@ SERVICES_MAIN = """
 		const p = Planck.getProperty("/Client/Preferences/Profile/Application/WaveformStyle")
 		if (p.translator && (p.translator.index == 1) !== (v.waveform === "rgb"))
 			p.translator.index = v.waveform === "rgb" ? 1 : 0
+		scUiLoaded = true
 	}
 	function scSyncBroadcastMeta() {
 		if (!scBroadcastOn) return
@@ -757,50 +1083,6 @@ SERVICES_MAIN = """
 			Component.onCompleted: ensure()
 		}
 	}
-	function scTriggerUpfaderEcho(deckIdx) {
-		const ch = "/Engine/Mixer/Channel" + deckIdx
-		const pType = Planck.getProperty(ch + "/DJFx/Type")
-		if (pType && pType.translator) pType.translator.string = "Echo"
-		const pAssigned = Planck.getProperty(ch + "/DJFx/Assigned")
-		if (pAssigned && pAssigned.translator) pAssigned.translator.state = true
-		const pMix = Planck.getProperty(ch + "/DJFx/Mix")
-		if (pMix && pMix.translator) pMix.translator.unnormalized = 0.75
-		const pActive = Planck.getProperty(ch + "/DJFx/Active")
-		if (pActive && pActive.translator) pActive.translator.state = true
-	}
-	Instantiator {
-		model: [1, 2, 3, 4]
-		delegate: QtObject {
-			readonly property int deckIdx: parseInt(modelData)
-			readonly property QObjProperty pVol: Planck.getProperty("/Engine/Mixer/Channel%1/Volume/Level".arg(deckIdx))
-			readonly property real level: pVol && pVol.translator ? (pVol.translator.value !== undefined ? pVol.translator.value : pVol.translator.unnormalized) : 0
-			property double lastHighAt: 0
-			property bool echoArmed: false
-			readonly property Timer tailTimer: Timer {
-				interval: Math.max(800, Math.min(3000, Math.round(240000 / (root.scPlayingBPM() || 128))))
-				repeat: false
-				onTriggered: {
-					const pActive = Planck.getProperty("/Engine/Mixer/Channel%1/DJFx/Active".arg(deckIdx))
-					if (pActive && pActive.translator) pActive.translator.state = false
-				}
-			}
-			onLevelChanged: {
-				if (!root.scUpfaderEcho) return
-				const now = Date.now()
-				if (level >= 0.8) {
-					lastHighAt = now
-					echoArmed = true
-					if (tailTimer.running) tailTimer.stop()
-				} else if (echoArmed && level <= 0.02) {
-					echoArmed = false
-					if (now - lastHighAt <= 300) {
-						root.scTriggerUpfaderEcho(deckIdx)
-						tailTimer.restart()
-					}
-				}
-			}
-		}
-	}
 """
 
 LOGIN_DIALOG = """
@@ -867,7 +1149,7 @@ LOGIN_DIALOG = """
 					color: Style.font02Color
 					font: Style.fontH1
 					text: {
-						if (root.scLoginStatus === "error") return root.scT("Can't start login. Check the network.")
+						if (root.scLoginStatus === "error") return root.scT("Couldn't load the login code. Tap the code to retry.")
 						if (root.scLoginStatus === "expired") return root.scT("The QR code expired.")
 						if (root.scLoginStatus === "scanned") return root.scT("Confirm on your phone")
 						if (root.scLogin === "netease") return root.scT("Scan in the NetEase Cloud Music app, not with the camera or WeChat") + "\n\n" + root.scT("Only one phone? Take a photo of this code, then in the app tap Scan and pick the photo from Album.")
@@ -1090,8 +1372,7 @@ EXTRA_DEVICE_ENTRIES = """
 			onSelected: function(index) { root.scCall("broadcast=" + ids[index]) }
 		},
 		EntryBase.ListEntry {
-			text: "Upfader Echo Out"
-			visible: !root.scPlayer // #52: players have no channel faders
+			text: "Echo Out"
 			readonly property var ids: ["0", "1"]
 			values: ["Off", "On"]
 			currentValue: root.scUpfaderEcho ? "On" : "Off"
@@ -1265,50 +1546,67 @@ BROADCAST_TILE = """
 """
 
 UPFADER_ECHO_TILE = """
-		Rectangle {
-			id: scUpfaderEchoTile
-			objectName: "ControlCenter_UpfaderEcho"
-			visible: !root.scPlayer // #52: players have no channel faders
-			width: 256
-			height: 104
-			radius: 16
-			color: Style.surface03Color
-			Text {
-				x: 14
-				y: 8
-				text: "Upfader Echo Out"
-				font: Style.fontH4
-				color: Style.font01Color
-			}
-			Row {
-				x: 12
-				y: 36
-				Repeater {
-					model: ["OFF", "ON"]
-					Rectangle {
-						readonly property bool selected: (index === 1) === root.scUpfaderEcho
-						width: (scUpfaderEchoTile.width - 24) / 2
-						height: 56
-						color: selected ? "#00c3e3" : upfaderEchoTap.pressed ? "#6a6a6a" : "#4a4a4a"
-						border {
-							width: 1
-							color: "#a8a8a8"
-						}
-						Text {
-							anchors.centerIn: parent
-							text: root.scT(index === 0 ? "Off" : "On").toUpperCase()
-							font: Style.fontH5
-							color: "#ffffff"
-						}
-						MouseArea {
-							id: upfaderEchoTap
-							anchors.fill: parent
-							onClicked: root.scCall("upfaderEcho=" + index)
+			Rectangle {
+				id: scUpfaderEchoTile
+				objectName: "ControlCenter_UpfaderEcho"
+				width: 256
+				height: 104
+				radius: 16
+				color: Style.surface03Color
+				// NOW pauses the playing decks; engine_ui_hook rings the master output out
+				// when it goes silent after music. The hook reads settings.conf once a
+				// second, so NOW from OFF arms AUTO first and pauses a beat later.
+				Timer {
+					id: scEchoNowTimer
+					interval: 1200
+					onTriggered: scUpfaderEchoTile.pauseDecks()
+				}
+				function pauseDecks() {
+					for (const d of [1, 2, 3, 4]) {
+						const play = Planck.getProperty("/Engine/Deck" + d + "/PlayState")
+						if (play && play.translator && play.translator.state) Planck.getProperty("/Engine/Deck" + d + "/Play").translator.state = false
+					}
+				}
+				Text {
+					x: 14
+					y: 8
+					text: "Echo Out"
+					font: Style.fontH4
+					color: Style.font01Color
+				}
+				Row {
+					x: 12
+					y: 36
+					Repeater {
+						model: ["Off", "Auto", "Now"]
+						Rectangle {
+							readonly property bool selected: index < 2 && (index === 1) === root.scUpfaderEcho
+							width: (scUpfaderEchoTile.width - 24) / 3
+							height: 56
+							color: selected ? "#00c3e3" : upfaderEchoTap.pressed ? "#6a6a6a" : "#4a4a4a"
+							border {
+								width: 1
+								color: "#a8a8a8"
+							}
+							Text {
+								anchors.centerIn: parent
+								text: root.scT(modelData).toUpperCase()
+								font: Style.fontH5
+								color: "#ffffff"
+							}
+							MouseArea {
+								id: upfaderEchoTap
+								anchors.fill: parent
+								onClicked: {
+									if (index < 2) { root.scCall("upfaderEcho=" + index); return }
+									if (root.scUpfaderEcho) scUpfaderEchoTile.pauseDecks()
+									else { root.scCall("upfaderEcho=1"); scEchoNowTimer.restart() }
+								}
+							}
 						}
 					}
 				}
 			}
-		}
 """
 
 # Smart Sync (5.3.0 only): a synced deck with a track widens its Pitch Range to
@@ -1336,6 +1634,16 @@ SMART_SYNC_MAIN = """
 		if (!t || need <= parseFloat(t.string)) return
 		const i = t.entries.findIndex(e => parseFloat(e) >= need)
 		t.index = i < 0 ? t.entries.length - 1 : i
+	}
+	// The Smart Sync tile calls this so a tap takes effect without waiting for a tempo change.
+	function scWidenAll() {
+		const m = Planck.getProperty("/Engine/Master/MasterTempo").translator
+		for (const d of root.decks && root.decks.length ? root.decks : [1, 2]) {
+			const o = Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(d)).translator
+			const s = Planck.getProperty("/Engine/Deck%1/SyncMode".arg(d)).translator
+			const l = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(d)).translator
+			if (m && o && s && l && l.state && s.string !== "Off" && o.unnormalized > 0) scWidenRange(d, Math.abs(m.unnormalized - o.unnormalized) / o.unnormalized * 100)
+		}
 	}
 """
 
@@ -1380,7 +1688,10 @@ SYNC_TILE = """
 						MouseArea {
 							id: syncTap
 							anchors.fill: parent
-							onClicked: scSyncTile.translator.index = index
+							onClicked: {
+								scSyncTile.translator.index = index
+								root.scWidenAll() // show the effect at once
+							}
 						}
 					}
 				}
@@ -1532,7 +1843,7 @@ def edits(dev: bool):
              f'import "{"" if v53() else "../"}Entries"\nimport "{"Entries/Base" if v53() else "../Entries/Base"}" as EntryBase\nimport Planck 1.0\n'),
             ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }",
              """EntryBase.ListEntry {
-\t\t\t\ttext: "Upfader Echo Out"
+\t\t\t\ttext: "Echo Out"
 \t\t\t\treadonly property var ids: ["0", "1"]
 \t\t\t\tvalues: ["Off", "On"]
 \t\t\t\tcurrentValue: root.scUpfaderEcho ? "On" : "Off"
@@ -1675,6 +1986,14 @@ def edits(dev: bool):
         ],
     }
     if v53():
+        # #99: five views kept by stream-sync (scView* in EmbeddedMain) and Save View.
+        out[ROOT + "Views/ControlCenter/Tabs/Preferences/Entries/LayoutViewTab.qml"] = [
+            ("        model: [\n            ViewStateControllerInterface.View.View1,\n            ViewStateControllerInterface.View.View2,\n            ViewStateControllerInterface.View.View3,\n        ]\n", "        model: 5\n"),
+            ("            Layout.preferredWidth: 120\n", "            Layout.preferredWidth: 100\n"),
+            ("            property bool isSelected: modelData === control.currentView\n", "            property bool isSelected: index + 1 === root.scViewActive\n"),
+            ("            onClicked: control.currentView = modelData\n", "            onClicked: root.scViewSelect(index + 1)\n"),
+            ('    FlatButton {\n        objectName: "ResetCurrentViewButton"\n', '    FlatButton {\n        objectName: "SaveCurrentViewButton"\n        Layout.preferredHeight: 50\n        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight\n        text: "Save View"\n        onClicked: root.scViewSave()\n        background: Rectangle {\n            color: Style.surface03Color\n        }\n    }\n\n    FlatButton {\n        objectName: "ResetCurrentViewButton"\n'),
+        ]
         # #49: Engine's own load filter (all load paths: menu, direct, browse knob) also
         # refuses decks that belong to the other player in the 4-deck layout.
         out[ROOT + "PropertyFilter/LoadToDeckFilter.qml"] = [

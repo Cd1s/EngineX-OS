@@ -30,6 +30,7 @@ type Report struct {
 	OrphanArtwork     int       `json:"orphan_artwork_references"`
 	ReanalysisPending int       `json:"reanalysis_pending"`
 	HistoryPruned     bool      `json:"history_pruned"`
+	ReserveFixed      []string  `json:"reserve_fixed,omitempty"`
 	Warnings          []string  `json:"warnings,omitempty"`
 	CheckedAt         time.Time `json:"checked_at"`
 }
@@ -218,6 +219,12 @@ func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
 	if err != nil {
 		return r, err
 	}
+	if rw {
+		// Before Engine opens the volume: a nonzero page reserve breaks every ATTACH.
+		if r.ReserveFixed, err = NormalizeDatabase2(filepath.Dir(path)); err != nil {
+			return r, err
+		}
+	}
 	db, err := Open(path, !rw)
 	if err != nil {
 		return r, err
@@ -225,10 +232,15 @@ func healMount(mount string, maxSessions int, dataOnly bool) (Report, error) {
 	if !rw {
 		db.Close()
 		r, err = InspectMount(mount)
+		if res, ok, _ := Reserve(path); ok && res != 0 {
+			r.Warnings = append(r.Warnings, fmt.Sprintf("m.db page reserve is %d: Engine 5.3.0 cannot ATTACH it; rebuild on writable media", res))
+		}
 		r.Warnings = append(r.Warnings, "read-only media: inspected without repairs or journal writes")
 		return r, err
 	}
+	fixed := r.ReserveFixed
 	r, err = heal(db, dataOnly)
+	r.ReserveFixed = fixed
 	closeErr := db.Close()
 	r.Mount = mount
 	if err != nil {

@@ -240,6 +240,28 @@ func (e *Exporter) Status() ExportStatus {
 	return ExportStatus{Enabled: true, Number: r.number(), Root: r.nfs.Root, DBAddress: r.db.Addr().String(), PortmapPort: r.nfs.PortmapPort(), DiscoveryAddress: r.discovery.LocalAddr().String(), StatusAddress: r.status.LocalAddr().String()}
 }
 
+// TrackPath is the file behind track id of the export this deck serves (the id
+// a CDJ reports after loading from it), or "" when it is not exported.
+func (e *Exporter) TrackPath(id uint32) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.run == nil {
+		return ""
+	}
+	for _, t := range e.run.lib.Tracks {
+		if t.ID == id {
+			if f := StreamFile(t.Path); f != "" {
+				return f
+			}
+			if rel, ok := SafeRel(t.Path); ok {
+				return filepath.Join(e.run.nfs.Root, rel)
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
 type exportPeer struct {
 	number byte
 	seen   time.Time
@@ -303,6 +325,10 @@ func MountedExports() []string {
 		}
 	}
 	sort.Strings(roots)
+	// No USB library: still export the streaming downloads (created by startExport).
+	if len(roots) == 0 && len(scanStreams()) > 0 {
+		roots = []string{StreamExportRoot}
+	}
 	return roots
 }
 
@@ -413,6 +439,11 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 			return nil, errors.New("prolink: mount a Rekordbox USB export first")
 		}
 		root = roots[0]
+		if root == StreamExportRoot {
+			if err := os.MkdirAll(root, 0755); err != nil {
+				return nil, err
+			}
+		}
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -425,7 +456,7 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 	if err := SyncEngineToPioneerExport(root); err != nil {
 		return nil, err
 	}
-	nfs := &NFSServer{Root: root}
+	nfs := &NFSServer{Root: root, StreamDirs: StreamDirs}
 	rel := ""
 	for _, part := range []string{"PIONEER", "rekordbox", "export.pdb"} {
 		var status uint32
@@ -616,7 +647,10 @@ func (r *exportRun) receivePeers() {
 			continue
 		}
 		mac := b[0x26:0x2c]
-		if addr.IP.Equal(r.ip) && bytes.Equal(mac, r.mac) && d.Name == "EngineX Export Beta" {
+		// Our own announcement, whichever interface it looped back on: a deck with
+		// eth0 and wlan0 on one subnet hears it from its Wi-Fi address too, and
+		// yielding to itself flipped numbers in a keepalive/media storm (#100).
+		if bytes.Equal(mac, r.mac) && d.Name == "EngineX Export Beta" {
 			continue
 		}
 		key := addr.IP.String() + "/" + net.HardwareAddr(mac).String()

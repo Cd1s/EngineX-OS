@@ -39,6 +39,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 	link := fs.Bool("prolink", false, "listen for Rekordbox / Pro DJ Link announcements and player status")
 	bind := fs.String("bind", "0.0.0.0", "IPv4 address for Pro DJ Link listeners")
 	full := fs.Bool("full", false, "with --mount-path: read every file for cues and waveforms, even if unchanged")
+	migrateArt := fs.Bool("migrate-artwork", false, "with --mount-path: only give an existing library the cover files Engine Link needs; Engine must not have the volume open")
 	smart := fs.Uint("smart-match", 0, "optional recommendation playlist relative to this Rekordbox track ID")
 	defaultStateFile := "/tmp/sc5000-prolink.json"
 	if env := os.Getenv("SC5000_PROLINK_STATE"); env != "" {
@@ -79,6 +80,11 @@ func RBBridge(args []string, stdout io.Writer) error {
 	var mu sync.Mutex
 	enc := json.NewEncoder(stdout)
 	emit := func(v any) { mu.Lock(); defer mu.Unlock(); _ = enc.Encode(v) }
+	if *mount != "" && *migrateArt {
+		n, err := enginedb.MigrateArtwork(ctx, *mount)
+		emit(map[string]int{"ArtworkMigrated": n})
+		return err
+	}
 	if *mount != "" {
 		opts := enginedb.Options{SmartMatch: *smart != 0, CurrentTrack: uint32(*smart)}
 		r, err := bridge.ConvertAtMount(ctx, *mount, opts, *full)

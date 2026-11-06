@@ -31,7 +31,7 @@ func (fixtureProvider) Tracks(_ context.Context, playlist string) ([]providers.T
 	if playlist == "p2" {
 		return []providers.Track{{ID: "s2", Title: "Other song", Provider: "spotify"}}, nil
 	}
-	return []providers.Track{{ID: "s1", Title: "Song", Artist: "Artist", ISRC: "US123", DurationMS: 8000, Provider: "spotify"}}, nil
+	return []providers.Track{{ID: "s1", Title: "Song", Artist: "Artist", ISRC: "US123", DurationMS: 8000, Provider: "deezer"}}, nil
 }
 
 type fixtureCatalog struct{}

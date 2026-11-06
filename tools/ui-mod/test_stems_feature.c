@@ -1,6 +1,10 @@
 // Compile and run with ARMv7 gcc / qemu-arm on IN.
 #define ENGINE_UI_HOOK_TEST
 int hook_test_engine;
+#define OA_LOG "/tmp/test-oa-replay.log"
+#define OA_LOADER_MS 0
+#define OA_SHADOW "/tmp/test-oa-replay/shadow-v3"
+#define OA_ENGINE_COPIES "/tmp/test-oa-replay/copies/"
 #include "engine_ui_hook.c"
 #include <assert.h>
 #include <sqlite3.h>
@@ -1066,6 +1070,102 @@ static void test_offline_analyzer(void) {
     puts("OfflineAnalyzer (#55): Engine's priority/policy changes on an analyzer stay idle, others untouched: PASS");
 }
 
+// #49: OfflineAnalyzer replays <file>.perf instead of analysing the copy.
+static int oa_seen[16], oa_count;
+static float oa_self[64]; // the runner: process() keeps its progress at +0x90
+static char oa_payload[16][64];
+static double oa_double[16];
+static void mock_activate(void *o, const void *meta, int signal, void **args) {
+    assert(o == (void *)oa_self && meta == oa_meta && oa_count < 16);
+    if (args && (signal == OA_PROGRESS_SIG || signal == OA_DONE)) oa_double[oa_count] = *(double *)args[1];
+    else if (args) {
+        const struct oa_bytes *b = args[1];
+        assert(b->size < 64 && *b->d >= 1);
+        memcpy(oa_payload[oa_count], b->ptr, (size_t)b->size);
+    } else assert(signal == OA_STARTED || signal == OA_STOPPED || signal == OA_FINISHED);
+    oa_seen[oa_count++] = signal;
+}
+static void mock_make_bytes(struct oa_bytes *b, const char *data, int len) {
+    b->d = malloc(16 + (size_t)len);
+    b->d[0] = 1;
+    b->ptr = (char *)b->d + 16;
+    b->size = len;
+    memcpy(b->ptr, data, (size_t)len);
+}
+static void test_shadow_replay(void) {
+    oa_activate = mock_activate;
+    oa_make_bytes = mock_make_bytes;
+    oa_meta = (void *)&oa_seen;
+    static const char dir[] = "/tmp/test-oa-replay";
+    mkdir(dir, 0755);
+    // "é" exercises the UTF-16 -> UTF-8 path conversion.
+    static const uint16_t name[] = {'/','t','m','p','/','t','e','s','t','-','o','a','-','r','e','p','l','a','y','/',0xe9,'.','f','l','a','c'};
+    struct oa_string qs = {NULL, name, sizeof name / sizeof *name};
+    char track[44] = "TRACK", beats[5] = "BEATS", overview[27] = "OVERVIEW";
+    double bpm = 123.456;
+    uint32_t one = 1, lt = sizeof track, lb = sizeof beats, lo = sizeof overview;
+    FILE *f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf", "wb");
+    assert(f);
+    fwrite("EXPF", 1, 4, f); fwrite(&one, 4, 1, f); fwrite(&bpm, 8, 1, f);
+    fwrite(&lt, 4, 1, f); fwrite(track, 1, lt, f);
+    fwrite(&lb, 4, 1, f); fwrite(beats, 1, lb, f);
+    fwrite(&lo, 4, 1, f); fwrite(overview, 1, lo, f);
+    fclose(f);
+    uchar prefs[13] = {0};
+    assert(oa_replay(oa_self, &qs, prefs));
+    static const int want[] = {OA_STARTED, OA_TRACK, OA_BEATS, OA_OVERVIEW, OA_OVERVIEW_RGB, OA_PROGRESS_SIG, OA_TRACK, OA_DONE, OA_FINISHED};
+    assert(oa_count == 9 && !memcmp(oa_seen, want, sizeof want));
+    assert(!strcmp(oa_payload[1], "TRACK") && !strcmp(oa_payload[2], "BEATS") && !strcmp(oa_payload[4], "OVERVIEW"));
+    assert(oa_double[5] == 1.0 && oa_self[OA_PROGRESS / 4] == 1.0f && oa_double[7] == (double)(float)bpm);
+    // stopBeatDetection while the replay waits for Engine's loader: stopped, finished.
+    oa_count = 0;
+    ((uchar *)oa_self)[OA_STOP] = 1;
+    assert(oa_replay(oa_self, &qs, prefs) && oa_count == 3 && oa_seen[0] == OA_STARTED && oa_seen[1] == OA_STOPPED && oa_seen[2] == OA_FINISHED);
+    ((uchar *)oa_self)[OA_STOP] = 0;
+    // prefs byte 12 set: the stock analysis sends no grid and no 3-band overview.
+    oa_count = 0;
+    prefs[12] = 1;
+    assert(oa_replay(oa_self, &qs, prefs) && oa_count == 7 && oa_seen[2] == OA_OVERVIEW_RGB);
+    // A corrupt or missing .perf falls through to the stock analysis.
+    f = fopen("/tmp/test-oa-replay/\xc3\xa9.flac.perf", "r+b"); assert(f); fwrite("XXXX", 1, 4, f); fclose(f);
+    oa_count = 0;
+    assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
+    unlink("/tmp/test-oa-replay/\xc3\xa9.flac.perf");
+    assert(!oa_replay(oa_self, &qs, prefs) && oa_count == 0);
+    // Engine analyses its own copy of a /data file: the shadow copy's .perf
+    // with that name and size is used; another size is a different file.
+    static const uint16_t copy[] = {'/','t','m','p','/','t','e','s','t','-','o','a','-','r','e','p','l','a','y','/',
+        'c','o','p','i','e','s','/','a','b','-','c','d','_','x','_','y','.','m','p','3'};
+    struct oa_string cs = {NULL, copy, sizeof copy / sizeof *copy};
+    mkdir("/tmp/test-oa-replay/copies", 0755);
+    mkdir("/tmp/test-oa-replay/shadow-v3", 0755);
+    mkdir("/tmp/test-oa-replay/shadow-v3/peer-1", 0755);
+    mkdir("/tmp/test-oa-replay/shadow-v3/peer-1/Contents", 0755);
+    f = fopen("/tmp/test-oa-replay/copies/ab-cd_x_y.mp3", "wb"); assert(f); fputs("AUDIO", f); fclose(f);
+    f = fopen("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3", "wb"); assert(f); fputs("AUDIOX", f); fclose(f);
+    f = fopen("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3.perf", "wb"); assert(f);
+    fwrite("EXPF", 1, 4, f); fwrite(&one, 4, 1, f); fwrite(&bpm, 8, 1, f);
+    fwrite(&lt, 4, 1, f); fwrite(track, 1, lt, f);
+    fwrite(&lb, 4, 1, f); fwrite(beats, 1, lb, f);
+    fwrite(&lo, 4, 1, f); fwrite(overview, 1, lo, f);
+    fclose(f);
+    oa_count = 0;
+    assert(!oa_replay(oa_self, &cs, prefs) && oa_count == 0);
+    f = fopen("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3", "wb"); assert(f); fputs("AUDIO", f); fclose(f);
+    prefs[12] = 0;
+    assert(oa_replay(oa_self, &cs, prefs) && oa_count == 9 && oa_seen[2] == OA_BEATS);
+    unlink("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3.perf");
+    unlink("/tmp/test-oa-replay/shadow-v3/peer-1/Contents/x_y.mp3");
+    unlink("/tmp/test-oa-replay/copies/ab-cd_x_y.mp3");
+    rmdir("/tmp/test-oa-replay/shadow-v3/peer-1/Contents");
+    rmdir("/tmp/test-oa-replay/shadow-v3/peer-1");
+    rmdir("/tmp/test-oa-replay/shadow-v3");
+    rmdir("/tmp/test-oa-replay/copies");
+    rmdir(dir);
+    unlink(OA_LOG);
+    puts("OfflineAnalyzer (#49): <file>.perf is replayed as the stock signals, bad or missing ones fall through: PASS");
+}
+
 static void test_stems_processor_fallback(void) {
     hook_test_engine = 1;
     if (access("/usr/local/bin/stems-processor", X_OK) != 0) {
@@ -1131,6 +1231,7 @@ int main(int argc, char **argv) {
     test_update_dns();
     test_resources();
     test_offline_analyzer();
+    test_shadow_replay();
     test_stems_processor_fallback();
     test_alsa_boot_hook();
     for (int i = 1; i < argc; i++) test_patch_files(argv[i]);

@@ -158,6 +158,8 @@ Recording Gain	录音增益	錄音增益
 Reload	重新加载	重新載入
 Remind Later	稍后提醒	稍後提醒
 Reset	重置	重設
+Reset Current View	重置当前视图	重設目前視圖
+Save View	保存视图	儲存視圖
 Reset Played Tracks	重置已播放曲目	重設已播放曲目
 Reset to Defaults	恢复默认	恢復預設
 Restart	重启	重新啟動
@@ -209,7 +211,8 @@ Update	更新	更新
 Update FW	更新固件	更新韌體
 Update Firmware	更新固件	更新韌體
 Update Now	立即更新	立即更新
-Upfader Echo Out	拉杆切歌自动回音	推桿切歌自動回音
+Echo Out	回声淡出	回聲淡出
+Now	立即	立即
 Username	用户名	使用者名稱
 VU Meter Mode	VU 表模式	VU 表模式
 Waveform Orientation	波形方向	波形方向
@@ -241,7 +244,7 @@ Deck Colors	碟机颜色	碟機顏色
 Theme	主题	主題
 Advanced	高级	進階
 Fx	效果	效果
-Can't start login. Check the network.	无法开始登录，请检查网络。	無法開始登入，請檢查網路。
+Couldn't load the login code. Tap the code to retry.	没能获取登录二维码，点一下二维码重试。	沒能取得登入 QR Code，點一下 QR Code 重試。
 Confirm on your phone	请在手机上确认	請在手機上確認
 Scan in the NetEase Cloud Music app, not with the camera or WeChat	用网易云音乐 App 的「扫一扫」扫码，不要用相机或微信	用網易雲音樂 App 的「掃一掃」掃碼，不要用相機或微信
 Only one phone? Take a photo of this code, then in the app tap Scan and pick the photo from Album.	只有一部手机？先用相机拍下这个二维码，再在 App 的「扫一扫」里点「相册」选这张照片。	只有一部手機？先用相機拍下這個 QR 碼，再在 App 的「掃一掃」裡點「相簿」選這張照片。

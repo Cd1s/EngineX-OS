@@ -28,9 +28,11 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 #include "dsp_smooth.h"
 #include "master_limiter.h"
+#include "echo_out.h"
 
 // The A32 trampoline installers: the AArch64 build (AZ04) never calls them.
 #if defined(__aarch64__)
@@ -132,21 +134,24 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 // #58: the toggle is master_limiter=1 in settings.conf, polled once a second
 // off the audio thread; the limiter itself runs in hook_master_output.
 static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
+static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
 
 static void *lim_poll(void *arg) {
     (void)arg;
     for (;;) {
-        int on = 0, gain = 0;
+        int on = 0, gain = 0, echo = 0;
         FILE *f = fopen(UI_ROOT "/settings.conf", "r");
         if (f) {
             char line[64];
             while (fgets(line, sizeof line, f))
                 if (!strncmp(line, "master_limiter=1", 16)) on = 1;
                 else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
+                else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
             fclose(f);
         }
         __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
+        __atomic_store_n(&echo_enabled, echo, __ATOMIC_RELAXED);
         sleep(1);
     }
     return NULL;
@@ -345,6 +350,8 @@ static void hook_flanger(void *self, float *const *input, float *const *output, 
 typedef uint32_t (*audio_callback_fn)(void *, void *, int, const float *const *, int, float *const *, int);
 static struct sc_lim master_lim[8];
 static struct sc_gain master_gain[8];
+#define MASTER_ECHO_PAIRS 4 // 384 KB of BSS each, untouched until Echo Out is armed
+static struct sc_echo master_echo[MASTER_ECHO_PAIRS];
 // #49: in the 4-deck layout a player's 4-channel device (two stereo pairs) leaves
 // decks 3 and 4 without output buffers, and Engine skips rendering them ("Mixer
 // skipped ... unassigned output buffer"): their playheads stand still. All four
@@ -371,6 +378,12 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
         }
     } else {
         rc = orig(host, context, in_channels, in, out_channels, out, frames);
+    }
+    // #104 Echo Out rings the master output out after music stops; before the limiter.
+    if (out && frames > 0) {
+        int echo = __atomic_load_n(&echo_enabled, __ATOMIC_RELAXED);
+        for (int ch = 0; ch < out_channels && ch / 2 < MASTER_ECHO_PAIRS; ch += 2)
+            if (out[ch]) sc_echo_planar(&master_echo[ch / 2], out[ch], ch + 1 < out_channels ? out[ch + 1] : NULL, (unsigned)frames, echo);
     }
     int gain = __atomic_load_n(&gain_enabled, __ATOMIC_RELAXED);
     // Auto-Gain (#64) always runs into the limiter, so a boost never clips.
@@ -1132,6 +1145,259 @@ static void guard_named_thread(pthread_t thread, const char *name) {
     errno = saved_errno;
 }
 
+// #49 shadow decks: a shadow deck's copy of a track is analysed again by
+// OfflineAnalyzer (13-18 s), and the result differs from the source's grid
+// and overview. stream-sync writes the source's analysis next to the copy as
+// <file>.perf; BeatDetectionRunner::process(path, prefs, overviewSize) then
+// emits it as the stock analysis would and skips decoding. Engine stores it in
+// its own library, so nothing outside Engine writes m.db.
+#if !defined(__aarch64__)
+// 5.3.0 armhf OfflineAnalyzer (sha256 2f328a9c…). Its analyser thread calls
+// process() through a PMF connection, so the entry itself is hooked; the
+// staticMetaObject's stringdata and static_metacall identify the build.
+#define OA_META 0x146510u
+#define OA_STRINGDATA 0x12b808u
+#define OA_METACALL 0x27b78u
+#define OA_PROCESS_FN 0x3ad7cu
+static const uint32_t oa_process_prefix[2] = {0xe16d42f4, 0xe1cd60f8}; // strd r4,[sp,#-36]!; strd r6,[sp,#8]
+#define OA_PROGRESS 0x90 // float member process() keeps in step with detectionProgress
+#define OA_STOP 16       // byte stopBeatDetection() sets under the runner's mutex
+#ifndef OA_LOADER_MS
+#define OA_LOADER_MS 1500
+#endif
+#ifndef OA_LOG
+#define OA_LOG "/var/log/sc5000-uimod-oa.log"
+#define OA_SHADOW "/data/sc5000-custom/shadow-v3" // pkg/webui shadowDir()
+#define OA_ENGINE_COPIES "/data/inMusicTempFiles/"
+#endif
+enum { OA_FINISHED = 0, OA_STARTED = 1, OA_DONE = 2, OA_STOPPED = 5, OA_PROGRESS_SIG = 6, OA_TRACK = 8, OA_BEATS = 9,
+       OA_OVERVIEW = 10, OA_OVERVIEW_RGB = 11 };
+struct oa_bytes { int *d; char *ptr; int size; };      // Qt 6 QByteArray, 32-bit
+struct oa_string { void *d; const uint16_t *ptr; int size; }; // Qt 6 QString
+typedef void (*oa_process_fn)(void *, const struct oa_string *, const uchar *, int);
+static oa_process_fn oa_orig;
+static const void *oa_meta;
+static void (*oa_activate)(void *, const void *, int, void **);
+static void (*oa_make_bytes)(struct oa_bytes *, const char *, int);
+
+// EXPF v1, little-endian: "EXPF", u32 1, f64 bpm, then trackData, beatData and
+// overviewWaveFormData uncompressed, each as u32 length + bytes (pkg/webui/shadow.go).
+struct oa_perf { double bpm; const char *part[3]; uint32_t len[3]; char *buf; };
+
+static int oa_read_perf(const char *path, struct oa_perf *p) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    struct stat st;
+    char *b = NULL;
+    size_t size = 0, got = 0;
+    if (!fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size >= 28 && st.st_size <= (16 << 20)) {
+        size = (size_t)st.st_size;
+        b = malloc(size);
+        for (ssize_t n; b && got < size && (n = read(fd, b + got, size - got)) > 0;) got += (size_t)n;
+    }
+    close(fd);
+    uint32_t v;
+    if (!b || got != size || memcmp(b, "EXPF", 4) || (memcpy(&v, b + 4, 4), v != 1)) goto bad;
+    memcpy(&p->bpm, b + 8, 8);
+    size_t off = 16;
+    for (int i = 0; i < 3; i++) {
+        if (size - off < 4) goto bad;
+        memcpy(&p->len[i], b + off, 4);
+        off += 4;
+        if (p->len[i] > size - off) goto bad;
+        p->part[i] = b + off;
+        off += p->len[i];
+    }
+    // trackData is >d Q i + peaks; an overview has its >q q d header and the 3 maxima.
+    if (off != size || p->len[0] < 20 || p->len[2] < 27 || !(p->bpm > 0 && p->bpm < 1000)) goto bad;
+    p->buf = b;
+    return 1;
+bad:
+    free(b);
+    return 0;
+}
+
+static void oa_emit(void *o, int signal, void *arg) {
+    void *args[] = {NULL, arg};
+    oa_activate(o, oa_meta, signal, arg ? args : NULL);
+}
+
+// Queued receivers copy the argument, so a refcounted QByteArray is required.
+static void oa_emit_bytes(void *o, int signal, const char *data, uint32_t len) {
+    struct oa_bytes b;
+    oa_make_bytes(&b, data, (int)len);
+    oa_emit(o, signal, &b);
+    if (b.d && __atomic_sub_fetch(b.d, 1, __ATOMIC_ACQ_REL) == 0) free(b.d); // inline ~QByteArray
+}
+
+static size_t utf16_to_utf8(const uint16_t *s, int n, char *out, size_t cap) {
+    size_t o = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t c = s[i];
+        if (c >= 0xd800 && c < 0xdc00 && i + 1 < n && s[i + 1] >= 0xdc00 && s[i + 1] < 0xe000)
+            c = 0x10000 + ((c - 0xd800) << 10) + (s[++i] - 0xdc00u);
+        if (!c || o + 5 > cap) return 0;
+        if (c < 0x80) out[o++] = (char)c;
+        else if (c < 0x800) out[o++] = (char)(0xc0 | c >> 6), out[o++] = (char)(0x80 | (c & 63));
+        else if (c < 0x10000)
+            out[o++] = (char)(0xe0 | c >> 12), out[o++] = (char)(0x80 | (c >> 6 & 63)), out[o++] = (char)(0x80 | (c & 63));
+        else
+            out[o++] = (char)(0xf0 | c >> 18), out[o++] = (char)(0x80 | (c >> 12 & 63)),
+            out[o++] = (char)(0x80 | (c >> 6 & 63)), out[o++] = (char)(0x80 | (c & 63));
+    }
+    out[o] = 0;
+    return o;
+}
+
+static void oa_log(const char *what, const char *path, long us) {
+    int fd = open(OA_LOG, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    char line[PATH_MAX + 96];
+    int n = snprintf(line, sizeof line, "%ld %s %ldus %s\n", (long)time(NULL), what, us, path);
+    if (n > 0) (void)!write(fd, line, (size_t)n < sizeof line ? (size_t)n : sizeof line - 1);
+    close(fd);
+}
+
+// Engine loads a /data file from its own copy, /data/inMusicTempFiles/<id>_<name>,
+// and analyses that: the .perf is next to the shadow copy with that name and
+// size, in <copy dir>/ or <copy dir>/Contents/ (a rekordbox export's track).
+static int oa_shadow_perf(const char *path, char *out, size_t cap) {
+    const size_t n = strlen(OA_ENGINE_COPIES);
+    const char *name = strncmp(path, OA_ENGINE_COPIES, n) ? NULL : strchr(path + n, '_');
+    struct stat st;
+    if (!name || strchr(name, '/') || stat(path, &st)) return 0;
+    DIR *dir = opendir(OA_SHADOW);
+    if (!dir) return 0;
+    int found = 0;
+    for (struct dirent *e; !found && (e = readdir(dir));) {
+        for (int sub = 0; !found && sub < 2 && e->d_name[0] != '.'; sub++) {
+            struct stat copy;
+            int len = snprintf(out, cap, "%s/%s/%s%s", OA_SHADOW, e->d_name, sub ? "Contents/" : "", name + 1);
+            found = len > 0 && (size_t)len + 6 <= cap && !stat(out, &copy) &&
+                S_ISREG(copy.st_mode) && copy.st_size == st.st_size;
+        }
+    }
+    closedir(dir);
+    if (found) strcat(out, ".perf");
+    return found;
+}
+
+// The stock process() emits: detectionStarted; per block beatData (unless
+// prefs byte 12 is set), overview and RGB overview, each a whole blob or a
+// chunk in the stored format; progress; trackData; detectionFinished(bpm as
+// float); finished. One block covering the whole track is the stored result.
+// Engine's deck loader decodes the whole file (3 s for 4 min on a JP07) and
+// then resets an unfinished analysis: grid, overview and peaks sent before it
+// were lost (BPM 120). The stock analysis always ended after the loader, so
+// the replay waits it out (idle, honouring stop) and then sends everything.
+static int oa_settle(void *o, const char *track, uint32_t len) {
+    double rate = 0, seconds = 0;
+    uint64_t samples = 0;
+    if (len >= 16) {
+        uint64_t bits = 0;
+        for (int i = 0; i < 8; i++) bits = bits << 8 | (uchar)track[i];
+        memcpy(&rate, &bits, 8);
+        for (int i = 8; i < 16; i++) samples = samples << 8 | (uchar)track[i];
+        if (rate > 0) seconds = (double)samples / rate;
+    }
+    long wait = OA_LOADER_MS + (long)(seconds * 1000 / 40);
+    if (wait > 90000) wait = 90000;
+    for (long t = 0; t < wait; t += 50) {
+        if (__atomic_load_n((uchar *)o + OA_STOP, __ATOMIC_ACQUIRE)) return 0;
+        usleep(50000);
+    }
+    return !__atomic_load_n((uchar *)o + OA_STOP, __ATOMIC_ACQUIRE);
+}
+
+static int oa_replay(void *o, const struct oa_string *s, const uchar *prefs) {
+    char path[PATH_MAX];
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (!s || s->size <= 0 || !utf16_to_utf8(s->ptr, s->size, path, sizeof path - 5)) return 0;
+    char perf[PATH_MAX + 8];
+    snprintf(perf, sizeof perf, "%s.perf", path);
+    if (access(perf, F_OK) && !oa_shadow_perf(path, perf, sizeof perf)) {
+        if (!strncmp(path, OA_ENGINE_COPIES, strlen(OA_ENGINE_COPIES))) oa_log("analyse", path, 0);
+        return 0;
+    }
+    struct oa_perf p;
+    if (!oa_read_perf(perf, &p)) {
+        oa_log("bad", perf, 0);
+        return 0;
+    }
+    oa_emit(o, OA_STARTED, NULL);
+    if (!oa_settle(o, p.part[0], p.len[0])) {
+        oa_emit(o, OA_STOPPED, NULL);
+        oa_emit(o, OA_FINISHED, NULL);
+        free(p.buf);
+        oa_log("stopped", perf, 0);
+        return 1;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long waited = (t1.tv_sec - t0.tv_sec) * 1000000L + (t1.tv_nsec - t0.tv_nsec) / 1000;
+    oa_emit_bytes(o, OA_TRACK, p.part[0], p.len[0]);
+    if (!prefs[12]) {
+        if (p.len[1]) oa_emit_bytes(o, OA_BEATS, p.part[1], p.len[1]);
+        oa_emit_bytes(o, OA_OVERVIEW, p.part[2], p.len[2]);
+    }
+    oa_emit_bytes(o, OA_OVERVIEW_RGB, p.part[2], p.len[2]);
+    double progress = 1.0, bpm = (float)p.bpm;
+    *(float *)((char *)o + OA_PROGRESS) = 1.0f;
+    oa_emit(o, OA_PROGRESS_SIG, &progress);
+    oa_emit_bytes(o, OA_TRACK, p.part[0], p.len[0]);
+    oa_emit(o, OA_DONE, &bpm);
+    oa_emit(o, OA_FINISHED, NULL);
+    free(p.buf);
+    struct timespec t2;
+    clock_gettime(CLOCK_MONOTONIC, &t2);
+    oa_log("waited", perf, waited);
+    oa_log("replayed", perf, (t2.tv_sec - t1.tv_sec) * 1000000L + (t2.tv_nsec - t1.tv_nsec) / 1000);
+    return 1;
+}
+
+// BeatDetectionRunner::process(const QString &path, const AnalysisPreferences &prefs, int overviewSize)
+static void oa_process(void *o, const struct oa_string *path, const uchar *prefs, int overview_size) {
+    if (!oa_replay(o, path, prefs)) oa_orig(o, path, prefs, overview_size);
+}
+
+static int oa_main_bias(struct dl_phdr_info *info, size_t size, void *out) {
+    (void)size;
+    *(uintptr_t *)out = info->dlpi_addr; // the first object is the executable
+    return 1;
+}
+
+static void oa_install(void) {
+    uintptr_t base = 0;
+    dl_iterate_phdr(oa_main_bias, &base);
+    const uintptr_t *meta = (const uintptr_t *)(base + OA_META), entry = base + OA_PROCESS_FN;
+    if (meta[1] != base + OA_STRINGDATA || meta[3] != base + OA_METACALL ||
+        memcmp((const void *)entry, oa_process_prefix, sizeof oa_process_prefix)) return; // other build
+    oa_activate = dlsym(RTLD_DEFAULT, "_ZN11QMetaObject8activateEP7QObjectPKS_iPPv");
+    oa_make_bytes = dlsym(RTLD_DEFAULT, "_ZN10QByteArrayC1EPKci");
+    if (!oa_activate || !oa_make_bytes) return;
+    // Constructor: no other thread runs yet. The two displaced instructions are not PC-relative.
+    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    const uint32_t orig[] = {oa_process_prefix[0], oa_process_prefix[1], 0xe51ff004, (uint32_t)(entry + 8)};
+    void *stub = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (stub == MAP_FAILED) return;
+    memcpy(stub, orig, sizeof orig);
+    if (mprotect(stub, page, PROT_READ | PROT_EXEC)) return;
+    __builtin___clear_cache(stub, (char *)stub + sizeof orig);
+    const uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)oa_process}; // ldr pc, [pc, #-4]
+    uintptr_t start = entry - entry % page;
+    size_t span = (entry + sizeof jump + page - 1) / page * page - start;
+    if (mprotect((void *)start, span, PROT_READ | PROT_WRITE)) return;
+    oa_meta = meta;
+    oa_orig = (oa_process_fn)stub;
+    memcpy((void *)entry, jump, sizeof jump);
+    mprotect((void *)start, span, PROT_READ | PROT_EXEC);
+    __builtin___clear_cache((char *)entry, (char *)entry + sizeof jump);
+    oa_log("installed", "", 0);
+}
+#else
+static void oa_install(void) {} // AZ04's OfflineAnalyzer is another build
+#endif
+
 // #55: Engine analyses in OfflineAnalyzer child processes, which inherit this
 // preload. Analysing a whole drive in the background must never compete with
 // playback: idle CPU class, nice 19 and idle I/O, off CPU 0; threads inherit all.
@@ -1150,6 +1416,7 @@ __attribute__((constructor)) static void lower_offline_analyzer(void) {
         CPU_CLR(0, &cpus);
         sched_setaffinity(0, sizeof cpus, &cpus);
     }
+    oa_install();
 }
 
 // Engine itself raises its analyzers to nice -5 / SCHED_OTHER once they connect

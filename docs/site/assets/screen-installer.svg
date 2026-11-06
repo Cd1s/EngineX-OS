@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800" width="1280" height="800" font-family="-apple-system,'Helvetica Neue','PingFang SC','Microsoft YaHei',Arial,sans-serif">
+  <title>EngineX-Installer — 一键安装器 / One-click installer</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d131b"/><stop offset="1" stop-color="#06090d"/></linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#00e5ff"/><stop offset="1" stop-color="#39ff88"/></linearGradient>
+  </defs>
+  <rect width="1280" height="800" fill="url(#bg)"/>
+  <text x="40" y="52" fill="#e8f1f8" font-size="26" font-weight="700">EngineX-Installer · 一键安装器</text>
+  <text x="40" y="80" fill="#7f93a5" font-size="15">Auto-discovery for 16 models · 16 款机型自动识别 · Mode A LAN/Wi-Fi · Mode B USB Fastboot</text>
+
+  <!-- App window -->
+  <rect x="40" y="104" width="780" height="660" rx="14" fill="#111922" stroke="#243242" stroke-width="2"/>
+  <rect x="40" y="104" width="780" height="40" rx="14" fill="#18222d"/>
+  <circle cx="64" cy="124" r="6" fill="#ff5f56"/><circle cx="84" cy="124" r="6" fill="#ffbd2e"/><circle cx="104" cy="124" r="6" fill="#27c93f"/>
+  <text x="430" y="130" fill="#9db0c0" font-size="14" text-anchor="middle">EngineX-Installer</text>
+
+  <!-- Mode tabs -->
+  <rect x="64" y="162" width="366" height="46" rx="8" fill="#00e5ff" fill-opacity="0.14" stroke="#00e5ff" stroke-width="2"/>
+  <text x="247" y="191" fill="#00e5ff" font-size="16" font-weight="700" text-anchor="middle">A · 局域网 / Wi-Fi LAN</text>
+  <rect x="440" y="162" width="356" height="46" rx="8" fill="#1a2430" stroke="#2c3b4c"/>
+  <text x="618" y="191" fill="#9db0c0" font-size="16" text-anchor="middle">B · USB Fastboot</text>
+
+  <!-- Mode A panel: discovered decks -->
+  <text x="64" y="244" fill="#7f93a5" font-size="13" letter-spacing="1">DISCOVERED DECKS · 已发现碟机</text>
+  <g>
+    <rect x="64" y="256" width="732" height="76" rx="10" fill="#16202b" stroke="#39ff88" stroke-width="2"/>
+    <circle cx="94" cy="294" r="8" fill="#39ff88"/>
+    <text x="118" y="288" fill="#e8f1f8" font-size="18" font-weight="700">Denon DJ SC5000 Prime · JP07</text>
+    <text x="118" y="314" fill="#7f93a5" font-size="14">192.168.1.xx · Engine OS 5.3.0 → EngineX OS 5.0.4.2</text>
+    <rect x="652" y="272" width="124" height="44" rx="8" fill="#39ff88"/>
+    <text x="714" y="300" fill="#04150b" font-size="16" font-weight="700" text-anchor="middle">一键升级 Upgrade</text>
+  </g>
+  <g>
+    <rect x="64" y="344" width="732" height="76" rx="10" fill="#16202b" stroke="#2c3b4c"/>
+    <circle cx="94" cy="382" r="8" fill="#39ff88"/>
+    <text x="118" y="376" fill="#e8f1f8" font-size="18" font-weight="700">Denon DJ SC LIVE 4 · 2nd-gen</text>
+    <text x="118" y="402" fill="#7f93a5" font-size="14">192.168.1.xx · /data bundle</text>
+    <rect x="652" y="360" width="124" height="44" rx="8" fill="#1f2b38" stroke="#39ff88"/>
+    <text x="714" y="388" fill="#39ff88" font-size="16" text-anchor="middle">Upgrade</text>
+  </g>
+  <rect x="64" y="432" width="732" height="44" rx="10" fill="#0e151d" stroke="#243242" stroke-dasharray="6 5"/>
+  <text x="430" y="460" fill="#7f93a5" font-size="14" text-anchor="middle">⟳ 正在扫描 mDNS / UDP … Scanning</text>
+
+  <!-- Mode B panel -->
+  <text x="64" y="520" fill="#7f93a5" font-size="13" letter-spacing="1">USB FASTBOOT · 自动识别机型</text>
+  <rect x="64" y="532" width="732" height="116" rx="10" fill="#16202b" stroke="#ff9f1c" stroke-width="2"/>
+  <rect x="88" y="552" width="64" height="76" rx="8" fill="#241a0a" stroke="#ff9f1c"/>
+  <text x="120" y="598" fill="#ff9f1c" font-size="28" text-anchor="middle">⏏</text>
+  <text x="172" y="578" fill="#e8f1f8" font-size="18" font-weight="700">已检测到 Fastboot 设备 → PRIME 4 · JC11</text>
+  <text x="172" y="604" fill="#7f93a5" font-size="14">Fastboot device detected · image group: PRIME 4 (3 models share it)</text>
+  <rect x="172" y="616" width="412" height="8" rx="4" fill="#243242"/>
+  <rect x="172" y="616" width="268" height="8" rx="4" fill="url(#bar)"/>
+  <rect x="652" y="570" width="124" height="44" rx="8" fill="#ff9f1c"/>
+  <text x="714" y="598" fill="#1b1000" font-size="16" font-weight="700" text-anchor="middle">一键刷入 Flash</text>
+
+  <text x="64" y="696" fill="#7f93a5" font-size="13">校验 SHA-256 后才写入 · SHA-256 verified before flashing · 不触发 Factory Reset</text>
+  <text x="64" y="722" fill="#7f93a5" font-size="13">SC5000 / SC5000M / PRIMEGO · SC6000 / SC6000M · PRIME 4 / 2 / MIXSTREAM PRO · SC LIVE 4 · PRIME 4 G2 · SYSTEM ONE …</text>
+
+  <!-- Callouts -->
+  <g font-size="16" font-weight="700">
+    <g transform="translate(850,168)"><circle r="20" fill="#00e5ff"/><text y="6" text-anchor="middle" fill="#001418" font-size="20">①</text></g>
+    <text x="882" y="164" fill="#00e5ff">模式 A · 局域网自动发现</text>
+    <text x="882" y="186" fill="#9db0c0" font-size="14" font-weight="400">Mode A: LAN/Wi-Fi auto-discovery</text>
+
+    <g transform="translate(850,294)"><circle r="20" fill="#39ff88"/><text y="6" text-anchor="middle" fill="#04150b" font-size="20">②</text></g>
+    <text x="882" y="290" fill="#39ff88">自动列出碟机 IP</text>
+    <text x="882" y="312" fill="#9db0c0" font-size="14" font-weight="400">Decks and their IPs listed automatically</text>
+    <path d="M830 294 H820" stroke="#39ff88" stroke-width="2"/>
+
+    <g transform="translate(850,336)"><circle r="20" fill="#39ff88"/><text y="6" text-anchor="middle" fill="#04150b" font-size="20">③</text></g>
+    <text x="882" y="332" fill="#39ff88">一键升级</text>
+    <text x="882" y="354" fill="#9db0c0" font-size="14" font-weight="400">One tap upgrade — no typing IPs</text>
+
+    <g transform="translate(850,588)"><circle r="20" fill="#ff9f1c"/><text y="6" text-anchor="middle" fill="#1b1000" font-size="20">④</text></g>
+    <text x="882" y="584" fill="#ff9f1c">模式 B · USB Fastboot</text>
+    <text x="882" y="606" fill="#9db0c0" font-size="14" font-weight="400">Mode B: plug in, model recognised</text>
+
+    <g transform="translate(850,664)"><circle r="20" fill="#ff9f1c"/><text y="6" text-anchor="middle" fill="#1b1000" font-size="20">⑤</text></g>
+    <text x="882" y="660" fill="#ff9f1c">16 款机型 一键刷入</text>
+    <text x="882" y="682" fill="#9db0c0" font-size="14" font-weight="400">All 16 models, one-click flash</text>
+  </g>
+  <!-- leader lines -->
+  <g stroke-width="2" fill="none">
+    <path d="M830 168 H804 L796 185" stroke="#00e5ff"/>
+    <path d="M830 294 H796" stroke="#39ff88"/>
+    <path d="M830 336 L804 314 L776 300" stroke="#39ff88"/>
+    <path d="M830 588 H784" stroke="#ff9f1c"/>
+    <path d="M830 664 L790 604" stroke="#ff9f1c"/>
+  </g>
+</svg>

@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/broadcast"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -41,10 +44,8 @@ func (s *Server) broadcaster() *broadcast.Broadcaster {
 	}
 	b := broadcast.New(guard)
 
-	cfg := s.loadBroadcastConfig()
-	if cfg.Enabled && cfg.ServerURL != "" {
-		_ = b.Configure(cfg)
-	}
+	// Always load the saved settings so a later SetEnabled(true) keeps ServerURL and password.
+	_ = b.Configure(s.loadBroadcastConfig())
 
 	broadcasters.Store(s, b)
 	return b
@@ -234,4 +235,138 @@ func (s *Server) RegisterBroadcastRoutes() {
 	s.mux.HandleFunc("GET /api/broadcast", s.broadcastGet)
 	s.mux.HandleFunc("POST /api/broadcast", s.broadcastPost)
 	s.mux.HandleFunc("POST /api/broadcast/metadata", s.broadcastMetadataPost)
+	// Public on purpose (like the phone pages): OBS/VLC/browsers open these without a console cookie.
+	s.mux.HandleFunc("GET /live.mp3", s.liveMP3)
+	s.mux.HandleFunc("GET /live.wav", s.liveWAV)
+}
+
+// liveSubscribe starts a local listener, or answers 503 when Live Stream is off.
+func (s *Server) liveSubscribe(w http.ResponseWriter, contentType string) (<-chan []byte, func(), bool) {
+	b := s.broadcaster()
+	st := b.Status()
+	if !st.Enabled {
+		http.Error(w, "Live Stream is off: set Live Stream to ON in the deck control centre", http.StatusServiceUnavailable)
+		return nil, nil, false
+	}
+	// The server-wide WriteTimeout would cut a live stream after two minutes.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	h := w.Header()
+	h.Set("Content-Type", contentType)
+	h.Set("icy-name", st.StreamName)
+	if st.CurrentTrack != "" {
+		h.Set("X-EngineX-Track", strings.Map(func(r rune) rune {
+			if r < 0x20 || r > 0x7e {
+				return '?'
+			}
+			return r
+		}, st.CurrentTrack))
+	}
+	ch, cancel := b.Subscribe()
+	return ch, cancel, true
+}
+
+// liveWAV streams a 44.1kHz 16-bit stereo WAV of the deck's live mix.
+func (s *Server) liveWAV(w http.ResponseWriter, r *http.Request) {
+	ch, cancel, ok := s.liveSubscribe(w, "audio/wav")
+	if !ok {
+		return
+	}
+	defer cancel()
+	fl, _ := w.(http.Flusher)
+	if _, err := w.Write(broadcast.WAVHeader()); err != nil {
+		return
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case pcm, open := <-ch:
+			if !open {
+				return
+			}
+			if _, err := w.Write(pcm); err != nil {
+				return
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	}
+}
+
+// mp3Encoder finds an external encoder that reads s16le 44.1kHz stereo on stdin and writes MP3 to stdout.
+// shortcut: no MP3 encoder is built into the binary; use lame/ffmpeg when the deck has one, upgrade to a pure-Go encoder if it never does.
+func mp3Encoder(bitrate int) *exec.Cmd {
+	br := strconv.Itoa(bitrate)
+	if p, err := exec.LookPath("lame"); err == nil {
+		return exec.Command(p, "-r", "-s", "44.1", "--signed", "--little-endian", "--bitwidth", "16", "-m", "s", "-b", br, "--silent", "-", "-")
+	}
+	if p, err := exec.LookPath("ffmpeg"); err == nil {
+		return exec.Command(p, "-loglevel", "quiet", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "pipe:0", "-f", "mp3", "-b:a", br+"k", "pipe:1")
+	}
+	return nil
+}
+
+// liveMP3 streams the deck's live mix as MP3 through an external encoder.
+func (s *Server) liveMP3(w http.ResponseWriter, r *http.Request) {
+	cmd := mp3Encoder(s.broadcaster().Status().Bitrate)
+	if cmd == nil {
+		http.Error(w, "no MP3 encoder (lame or ffmpeg) on this deck: use /live.wav", http.StatusServiceUnavailable)
+		return
+	}
+	ch, cancel, ok := s.liveSubscribe(w, "audio/mpeg")
+	if !ok {
+		return
+	}
+	defer cancel()
+
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		http.Error(w, "encoder start failed", http.StatusInternalServerError)
+		return
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		http.Error(w, "encoder start failed", http.StatusInternalServerError)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		http.Error(w, "encoder start failed", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+
+	go func() {
+		defer in.Close()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case pcm, open := <-ch:
+				if !open {
+					return
+				}
+				if _, err := in.Write(pcm); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	fl, _ := w.(http.Flusher)
+	buf := make([]byte, 4096)
+	for {
+		n, err := out.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }

@@ -218,8 +218,9 @@ type analysisFile struct {
 }
 
 // performanceEncoding is part of each track's fingerprint: raising it re-encodes
-// imported tracks' PerformanceData on their next import. 2 fixes beat spacing.
-const performanceEncoding = 2
+// imported tracks' PerformanceData on their next import. 2 fixes beat spacing;
+// 3 writes Engine 5.3.0's 68-byte trackData with waveform peaks (#101).
+const performanceEncoding = 3
 
 type fingerprint struct {
 	Encoding     int
@@ -382,6 +383,11 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 	if err != nil {
 		return result, err
 	}
+	// A read-only volume keeps the import working; its covers stay local-only.
+	artDir, artErr := compat.SafeOutputDir(mount, artworkDir)
+	if artErr != nil {
+		log.Printf("rb-bridge: no Artwork directory, covers will not reach other decks: %v", artErr)
+	}
 	for i, preparedTrack := range prepared {
 		if err = ctx.Err(); err != nil {
 			return result, err
@@ -509,11 +515,17 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		}
 		if data != nil {
 			h := sha1.Sum(data)
-			artHash := hex.EncodeToString(h[:])
+			sum := h[:]
+			if artErr == nil {
+				if e = putArtwork(artDir, sum, data); e != nil {
+					log.Printf("rb-bridge: artwork file not written: %v", e)
+				}
+			}
 			var n int64
-			e = tx.QueryRowContext(ctx, `SELECT id FROM AlbumArt WHERE hash=? LIMIT 1`, artHash).Scan(&n)
+			// An earlier build stored the hash as 40 hex characters of TEXT.
+			e = tx.QueryRowContext(ctx, `SELECT id FROM AlbumArt WHERE hash=? OR hash=? LIMIT 1`, sum, hex.EncodeToString(sum)).Scan(&n)
 			if errors.Is(e, sql.ErrNoRows) {
-				r, e := tx.ExecContext(ctx, `INSERT INTO AlbumArt(hash,albumArt) VALUES(?,?)`, artHash, data)
+				r, e := tx.ExecContext(ctx, `INSERT INTO AlbumArt(hash,albumArt) VALUES(?,?)`, sum, data)
 				if e != nil {
 					return result, e
 				}
@@ -628,6 +640,11 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 	}
 	if pending > 0 {
 		return result, fmt.Errorf("%d tracks left on a temporary path; import rolled back", pending)
+	}
+	if artErr == nil {
+		if _, err = migrateArtwork(ctx, tx, artDir); err != nil {
+			return result, err
+		}
 	}
 	err = tx.Commit()
 	return result, err

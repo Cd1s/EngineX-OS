@@ -10,6 +10,8 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"html"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -46,13 +48,9 @@ type loginFlow struct {
 	spotifyState string
 }
 
-// DefaultSpotifyClientID is empty: every owner registers their own Spotify app
-// (developer.spotify.com/dashboard), because Spotify limits each app's users and
-// requests. The console saves it (spotifyClientPath).
-const DefaultSpotifyClientID = ""
-
-// errSpotifyClientID is the answer to a Spotify login before an ID is set.
-var errSpotifyClientID = errors.New("Please set your own Spotify Client ID in the console first / 请先在网页控制台填入你自己的 Spotify Client ID")
+// DefaultSpotifyClientID is the public Spotify Desktop client ID, so the deck's
+// QR login works with nothing set. An owner's own ID (spotifyClientPath) wins.
+const DefaultSpotifyClientID = "65b708073fc0480ea92a077233ca87bd"
 
 var spotifyClientIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
@@ -322,10 +320,6 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("unsupported provider"))
 		return
 	}
-	if provider == "spotify" && s.spotifyClientID() == "" {
-		fail(w, 400, errSpotifyClientID)
-		return
-	}
 	session, err := s.ownerSession(provider)
 	if err != nil {
 		fail(w, 500, err)
@@ -468,10 +462,6 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 		}
 		phonePage(w, r, appleMusicPhonePage(lang, action, dev))
 	case "spotify":
-		if s.spotifyClientID() == "" {
-			fail(w, 400, errSpotifyClientID)
-			return
-		}
 		session := s.sessionOf(flow)
 		sp, ok := session.p.(*providers.Spotify)
 		if !ok {
@@ -486,7 +476,8 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 		s.pending[state] = pending{session.ID, verifier, spotifyLoopbackRedirect, time.Now().Add(loginLifetime)}
 		flow.spotifyState = state
 		s.mu.Unlock()
-		phonePage(w, r, spotifyPhonePage(lang, action, auth))
+		extra := `<form method="post" action="` + html.EscapeString(action) + `"><input name="clientId" placeholder="Spotify Client ID (32 hex)" autocomplete="off" autocapitalize="off" spellcheck="false"><input name="accessToken" type="password" placeholder="Spotify access token" autocomplete="off"><button>` + tr(lang, "connect") + `</button></form>`
+		phonePage(w, r, spotifyPhonePage(lang, action, auth)+extra)
 	default:
 		http.NotFound(w, r)
 	}
@@ -635,6 +626,45 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 		}
 		s.finishPhoneLogin(w, r, flow)
 	case *providers.Spotify:
+		id := strings.ToLower(strings.TrimSpace(r.Form.Get("clientId")))
+		accessToken := strings.TrimSpace(r.Form.Get("accessToken"))
+		if id != "" {
+			if !spotifyClientIDRe.MatchString(id) || (s.cfg.SpotifyClientID != "" && s.cfg.SpotifyClientID != id) {
+				refuse("badForm", "")
+				return
+			}
+			if err := os.MkdirAll(filepath.Dir(s.spotifyClientPath()), 0o700); err != nil {
+				fail(w, 500, errors.New("could not save Spotify client ID"))
+				return
+			}
+			if err := os.WriteFile(s.spotifyClientPath(), []byte(id+"\n"), 0o600); err != nil {
+				fail(w, 500, errors.New("could not save Spotify client ID"))
+				return
+			}
+		}
+		if accessToken != "" {
+			base := s.cfg.SpotifyBaseURL
+			if base == "" {
+				base = "https://api.spotify.com/v1"
+			}
+			var profile struct {
+				ID string `json:"id"`
+			}
+			if err := providers.JSON(r.Context(), s.cfg.HTTP, "GET", strings.TrimRight(base, "/")+"/me", nil, http.Header{"Authorization": {"Bearer " + accessToken}}, &profile); err != nil || profile.ID == "" {
+				refuse("spRefused", "")
+				return
+			}
+			if err := p.SetToken(providers.Token{AccessToken: accessToken, ClientID: s.spotifyClientID()}); err != nil {
+				fail(w, 500, errors.New("could not save Spotify token"))
+				return
+			}
+			s.finishPhoneLogin(w, r, flow)
+			return
+		}
+		if id != "" && strings.TrimSpace(r.Form.Get("callback")) == "" {
+			http.Redirect(w, r, phoneAction(r, flow), http.StatusSeeOther)
+			return
+		}
 		code, state := spotifyPaste(r.Form.Get("callback"))
 		if code == "" {
 			refuse("spBadPaste", tr(lang, "spHelp"))
@@ -695,4 +725,75 @@ func (s *Server) spotifyClientPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.spotifyClientGet(w, r)
+}
+
+func (s *Server) spotifyConnectGet(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":101,"statusString":"OK","spotifyError":0,"version":"2.9.0","deviceID":"enginex-os-spotify-connect","remoteName":"EngineX OS","publicKey":"AA==","deviceType":"SPEAKER","libraryVersion":"0.1.0","accountReq":"PREMIUM"}`))
+}
+
+func (s *Server) spotifyConnectPost(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 65536)
+	body, _ := io.ReadAll(r.Body)
+	var (
+		action      string
+		userName    string
+		accessToken string
+		blob        string
+	)
+	var v struct {
+		Action      string `json:"action"`
+		UserName    string `json:"userName"`
+		AccessToken string `json:"accessToken"`
+		Blob        string `json:"blob"`
+	}
+	if json.Unmarshal(body, &v) == nil {
+		action, userName, accessToken, blob = v.Action, v.UserName, v.AccessToken, v.Blob
+	}
+	if q, err := url.ParseQuery(string(body)); err == nil {
+		if action == "" {
+			action = q.Get("action")
+		}
+		if userName == "" {
+			userName = q.Get("userName")
+		}
+		if accessToken == "" {
+			accessToken = q.Get("accessToken")
+		}
+		if blob == "" {
+			blob = q.Get("blob")
+		}
+	}
+	if action == "" {
+		action = r.URL.Query().Get("action")
+	}
+	_ = action
+	_ = userName
+
+	tok := accessToken
+	if tok == "" {
+		tok = blob
+	}
+	if tok != "" {
+		session, err := s.ownerSession("spotify")
+		if err != nil {
+			fail(w, 500, err)
+			return
+		}
+		if sp, ok := session.p.(*providers.Spotify); ok {
+			if err := sp.SetToken(providers.Token{AccessToken: tok, ClientID: s.spotifyClientID()}); err != nil {
+				fail(w, 500, err)
+				return
+			}
+		}
+		s.mu.Lock()
+		session.Ready = true
+		if flow := s.logins["spotify"]; flow != nil {
+			flow.Status = "linked"
+		}
+		s.mu.Unlock()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":101,"statusString":"OK","spotifyError":0}`))
 }

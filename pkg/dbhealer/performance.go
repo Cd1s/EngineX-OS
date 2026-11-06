@@ -303,7 +303,7 @@ func healPerformance(tx *sql.Tx, r *Report) error {
 			var length float64
 			raw, trackErr := DecodeQCompress(p.track)
 			if trackErr == nil {
-				if len(raw) != 44 || !finite(beFloat(raw[:8])) || beFloat(raw[:8]) < 8000 || beFloat(raw[:8]) > 384000 {
+				if (len(raw) != 44 && len(raw) != 68) || !finite(beFloat(raw[:8])) || beFloat(raw[:8]) < 8000 || beFloat(raw[:8]) > 384000 {
 					trackErr = fmt.Errorf("unsupported trackData layout")
 				} else {
 					length = float64(binary.BigEndian.Uint64(raw[8:16]))

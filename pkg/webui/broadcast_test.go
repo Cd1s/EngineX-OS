@@ -260,3 +260,95 @@ func TestBroadcastRoutesAuthorization(t *testing.T) {
 		t.Errorf("unexpected body: %s", rec.Body.String())
 	}
 }
+
+func enableLiveWithPCM(t *testing.T, s *Server, stateDir string) {
+	t.Helper()
+	pcmFile := filepath.Join(t.TempDir(), "live.pcm")
+	pcm := bytes.Repeat([]byte{1, 2, 3, 4}, 1152)
+	if err := os.WriteFile(pcmFile, pcm, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := json.Marshal(map[string]any{"inputPath": pcmFile})
+	if err := os.WriteFile(filepath.Join(stateDir, "broadcast-config.json"), cfg, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// No ServerURL anywhere: enabling must still work (#104).
+	if err := s.SetBroadcastEnabled(true); err != nil {
+		t.Fatalf("enable without ServerURL: %v", err)
+	}
+	t.Cleanup(func() { _ = s.SetBroadcastEnabled(false) })
+}
+
+func TestLiveStreamOffReturns503(t *testing.T) {
+	s, _ := newTestServer(t)
+	for _, path := range []string{"/live.wav", "/live.mp3"} {
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s: expected 503 while Live Stream is off, got %d", path, rec.Code)
+		}
+	}
+}
+
+func TestLiveWAVStreamIsPublic(t *testing.T) {
+	s, dir := newTestServer(t)
+	enableLiveWithPCM(t, s, dir)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/live.wav") // no Authorization header, no cookie
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/wav" {
+		t.Fatalf("unexpected response: %d %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	buf := make([]byte, 44+4608)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil {
+		t.Fatalf("short stream: %v", err)
+	}
+	if string(buf[:4]) != "RIFF" || string(buf[8:12]) != "WAVE" {
+		t.Errorf("missing WAV header: %q", buf[:12])
+	}
+	if !bytes.Equal(buf[44:48], []byte{1, 2, 3, 4}) {
+		t.Errorf("PCM payload not forwarded: %v", buf[44:48])
+	}
+}
+
+func TestLiveMP3UsesExternalEncoder(t *testing.T) {
+	s, dir := newTestServer(t)
+	enableLiveWithPCM(t, s, dir)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+
+	// Without lame/ffmpeg the endpoint says so instead of sending fake audio.
+	t.Setenv("PATH", t.TempDir())
+	resp, err := http.Get(srv.URL + "/live.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 without an encoder, got %d", resp.StatusCode)
+	}
+
+	// A fake "lame" that just copies stdin to stdout proves the PCM goes through it.
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "lame"), []byte("#!/bin/sh\nexec cat\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":/bin:/usr/bin")
+	resp, err = http.Get(srv.URL + "/live.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "audio/mpeg" {
+		t.Fatalf("unexpected response: %d %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil || !bytes.Equal(buf, []byte{1, 2, 3, 4}) {
+		t.Errorf("encoder output not streamed: %v %v", buf, err)
+	}
+}

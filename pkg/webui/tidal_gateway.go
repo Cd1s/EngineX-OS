@@ -254,6 +254,8 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/sc5000/ui", s.uiStatus)
 	g.mux.HandleFunc("GET /v1/sc5000/update", s.update)
 	g.mux.HandleFunc("POST /v1/sc5000/ui", s.uiUpdate)
+	g.mux.HandleFunc("GET /v1/sc5000/views", s.viewsGet)
+	g.mux.HandleFunc("POST /v1/sc5000/views", s.viewsPost)
 	g.mux.HandleFunc("POST /v1/sc5000/relocate", s.relocate)
 	g.mux.HandleFunc("GET /v1/sc5000/bpm", s.bpmConfigGet)
 	g.mux.HandleFunc("POST /v1/sc5000/bpm", s.bpmConfigPost)
@@ -679,9 +681,7 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	if g.s.omniSource() {
 		g.omniPlaylists(r.Context(), scope, add)
 	}
-	if scope == "spotify" && len(sessions) == 0 && g.s.spotifyClientID() == "" {
-		add(playlistJSON(hintPlaylist, "Set your Spotify Client ID at sc5000.lan:8080 / 请先在网页控制台填入 Spotify Client ID", "developer.spotify.com/dashboard", 0))
-	} else if scope != "deezer" && len(sessions) == 0 {
+	if scope != "deezer" && len(sessions) == 0 {
 		add(playlistJSON(hintPlaylist, hintTitle(scope), "手机打开 http://sc5000.lan:8080 登录后，歌单会出现在这里", 0))
 	}
 	respond(w, page(r, 100, items))

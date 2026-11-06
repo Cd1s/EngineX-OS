@@ -12,6 +12,10 @@ pre)
     rm -f "$UI/boot-token"
     echo "$n" > "$UI/boot-count"
     [ "$n" -lt 3 ] || : > "$UI/safe-mode"
+    # Engine 5.3.0 cannot ATTACH anything while its internal m.db reserves page bytes
+    # (a `.recover`ed copy did): rebuild it with reserve 0 before Engine opens it.
+    guardian=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
+    [ ! -x "$guardian" ] || "$guardian" --heal-mount "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve > /dev/null 2>&1 || :
     # Engine 5.3.0 sends a TIDAL client with no saved account to the Engine DJ
     # Profile login (#56), and every EngineX service runs on that client. With the
     # account entry (no token in it) Engine logs in to the local gateway at start.
@@ -36,6 +40,25 @@ pre)
     assign=${SC5000_ASSIGNMENT_DIR:-/usr/Engine/AssignmentFiles/PresetAssignmentFiles}
     patched=${SC5000_ASSIGNMENT_PATCHED:-/run/sc5000-assignments}
     on=; ! grep -qx 'four_deck_waveform=1' "$UI/settings.conf" 2>/dev/null || on=1
+    if [ -n "$on" ]; then
+        state_dir=${SC5000_STATE_DIR:-/data/AppDataUser/AIR Music Technology/Engine/State}
+        for state_file in "$state_dir/PlanckGuiState.json" "$state_dir/PlanckClientState.json"; do
+            [ -f "$state_file" ] || continue
+            cp -p "$state_file" "$state_file.tmp" || continue
+            if awk '
+                /"ShowLayerB"[[:space:]]*:[[:space:]]*\{/ { field="layer" }
+                /"PlayerColor[34]"[[:space:]]*:[[:space:]]*\{/ { field="color" }
+                field == "layer" { sub(/"state"[[:space:]]*:[[:space:]]*false/, "\"state\": true") }
+                field == "color" { sub(/#ff000000/, "#ff02c63e") }
+                /}/ { field="" }
+                { print }
+            ' "$state_file" > "$state_file.tmp"; then
+                mv "$state_file.tmp" "$state_file"
+            else
+                rm -f "$state_file.tmp"
+            fi
+        done
+    fi
     role=$(sed -n 's/^four_deck_role=//p' "$UI/settings.conf" 2>/dev/null | tail -n 1)
     case $role in
     12|13|24|1|2) ;;
@@ -45,8 +68,13 @@ pre)
         case $n in *[02468]) role=24 ;; *) role=13 ;; esac ;;
     esac
     [ -z "$on" ] || { mkdir -p "$patched" && echo "$role" > "$patched/role"; } # the UI hook reads it
+    # The wheel display (jog screen: cover, platter ring, logo) followed the unnamed
+    # group's ActiveDeck, which stays at an empty deck 1, so it showed the logo while
+    # the deck it controls played. It also has only cover slots and ring positions
+    # for decks 1 and 2: map those two slots to this role's decks.
     for f in "$assign"/JP07/JP07_Controller_Assignments.qml "$assign"/JP08/JP08_Controller_Assignments.qml \
-        "$assign"/JP13/JP13_Controller_Assignments.qml "$assign"/JP14/JP14_Controller_Assignments.qml; do
+        "$assign"/JP13/JP13_Controller_Assignments.qml "$assign"/JP14/JP14_Controller_Assignments.qml \
+        "$assign"/JP07/JP07_Display_Assignments.qml "$assign"/JP13/JP13_Display_Assignments.qml; do
         [ -f "$f" ] || continue
         ! mountpoint -q "$f" || umount "$f" || continue
         [ -n "$on" ] || continue
@@ -55,8 +83,25 @@ BEGIN {
     group = (role == "24" || role == "2") ? "\"Right\"" : "\"Left\""
     if (role == "12") group = "Planck.getProperty(\"/GUI/Decks/DeckLeft/Layer\").translator.index === 0 ? \"Left\" : \"Right\""
     own = role == "12" || role == "1" || role == "2" # these replace the stock LAYER
+    unit = "Config.device.isPlayer ? \"\" : "
+    layer_group = role == "12" ? "\"Left\"" : group
+    decks = "(Config.device.isPlayer ? [1, 2] : " ((role == "24" || role == "2") ? "[2, 4]" : role == "12" ? "[1, 2]" : "[1, 3]") ")"
 }
-/^import airAssignments / && role == "12" {
+/"\/GUI\/Decks\/Deck\/ActiveDeck"/ {
+    print "    // EngineX #49: 4-deck role " role ": the wheel display follows the deck this unit controls"
+    sub(/"\/GUI\/Decks\/Deck\/ActiveDeck"/, "\"/GUI/Decks/Deck%1/ActiveDeck\".arg(" unit group ")")
+}
+/"\/GUI\/Decks\/Deck\/Layer"/ { sub(/"\/GUI\/Decks\/Deck\/Layer"/, "\"/GUI/Decks/Deck%1/Layer\".arg(" unit layer_group ")") }
+/"\/Engine\/Deck%1\/AlbumArt"\.arg\(index \+ 1\)/ { sub(/index \+ 1/, decks "[index]") }
+/parseInt\(assignment\.activeDeckIndex\) === index \+ 1/ { sub(/index \+ 1/, decks "[index]") }
+/"\/Private\/Deck[12]\/MidiSamplePosition"/ {
+    slot = /Deck1/ ? 0 : 1
+    sub(/"\/Private\/Deck[12]\/MidiSamplePosition"/, "\"/Private/Deck%1/MidiSamplePosition\".arg(" decks "[" slot "])")
+}
+/positionItems\[parseInt\(assignment\.activeDeckIndex\) - 1\]/ {
+    sub(/parseInt\(assignment\.activeDeckIndex\) - 1/, decks ".indexOf(parseInt(assignment.activeDeckIndex))")
+}
+/^import airAssignments / && role == "12" && FILENAME ~ /Controller/ {
     print; print "import InputAssignment 0.1"; print "import OutputAssignment 0.1"; print "import Planck 1.0"; next
 }
 /^    Layer \{$/ && own { layer = 1; next }
