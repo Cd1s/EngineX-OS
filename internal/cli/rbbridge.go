@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
+	"github.com/Cd1s/EngineX-OS/pkg/djay"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
@@ -86,6 +87,7 @@ func RBBridge(args []string, stdout io.Writer) error {
 		return err
 	}
 	if *mount != "" {
+		_ = syncDjayLibrary(*mount)
 		opts := enginedb.Options{SmartMatch: *smart != 0, CurrentTrack: uint32(*smart)}
 		r, err := bridge.ConvertAtMount(ctx, *mount, opts, *full)
 		if err != nil {
@@ -165,4 +167,23 @@ func settingOn(path, key string) bool {
 		}
 	}
 	return false
+}
+
+// syncDjayLibrary discovers and logs Algoriddim djay libraries on a mounted volume.
+func syncDjayLibrary(mountPoint string) error {
+	libs, err := djay.Discover(mountPoint)
+	if err != nil {
+		return err
+	}
+	if len(libs) == 0 {
+		return nil
+	}
+	totalTracks := 0
+	totalPlaylists := 0
+	for _, lib := range libs {
+		totalTracks += len(lib.Tracks)
+		totalPlaylists += len(lib.Playlists)
+	}
+	log.Printf("rb-bridge: discovered %d djay libraries with %d playlists and %d tracks on %s", len(libs), totalPlaylists, totalTracks, mountPoint)
+	return nil
 }
