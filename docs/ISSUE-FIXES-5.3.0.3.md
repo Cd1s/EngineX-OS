@@ -1,7 +1,7 @@
 # EngineX OS 5.3.0.3 发版与 Issue 修复记录（2026-11-07）
 
 - **发布日期**：`2026-11-07`
-- **版本范围**：`v5.3.0.2`（`e7622ac`）→ `v5.3.0.3`（构建提交：`38d5e68`；2026-11-08 同版本重发加入 #133，首次构建提交 `5b4687e`）
+- **版本范围**：`v5.3.0.2`（`e7622ac`）→ `v5.3.0.3`（构建提交：`37e83ea`；2026-11-08 第三次同版本重发加入 #139、Mod Hub 与 #138，此前构建依次为 `2357a26`（#139 + Mod Hub，未上传）、 `9616419`（#116）、`38d5e68`（#133）、首次 `5b4687e`）
 - **覆盖机型与产物（共 20 个发布资产 + `SHA256SUMS.txt`）**：
   - **8 款一代机完整固件（`*-Update.img`）**：`SC5000`（JP07）、`SC5000M`（JP08）、`PRIME GO`（JP11）、`SC6000`（JP13）、`SC6000M`（JP14）、`PRIME 4`（JC11）、`PRIME 2`（JC16）、`Mixstream Pro`（NH08）
   - **8 款二代机 `/data` 数据包（`*-Data-Bundle.tar.gz`，Beta）**：`SC LIVE 4`（JP21）、`SC LIVE 2`（JP20）、`PRIME 4+`（JC11S）、`PRIME GO+`（JP11S）、`Mixstream Pro+`（NH08S）、`Mixstream Pro Go`（NH10）、`PRIME 4 G2`（JP24，64-bit AZ04）、`Rane SYSTEM ONE`（RMZ2，64-bit AZ04）
@@ -10,7 +10,7 @@
 
 ---
 
-## 1. Issue 与 PR 修复总表（#80–#133）
+## 1. Issue 与 PR 修复总表（#80–#139）
 
 | Issue / PR | 模块 | 改动与修复摘要 | 验证与回归测试 |
 | --- | --- | --- | --- |
@@ -62,6 +62,9 @@
 | **#129 / #131** | `cmd/enginex-installer/main.go`<br>`cmd/enginex-installer/main_test.go` | **修复 PRIME 4+（`inmusic,jc11s`）在 Windows / Linux 下的发现与 `"Android Fastboot"` 识别问题**：新版 `android-tools` 将处于更新模式的二代机（USB ID `15e4:d007`）输出为 `"Android Fastboot"` 而非板号，现 `fastbootScan` 兼容该格式并通过 `getvar product` 精确提取板号，同时优先使用安装包自带的 `fastboot`；经社区用户 `@RattyDAVE` 在 PRIME 4+ 真机上实测成功刷入并点亮 3-Band 波形 | `TestFastbootScanAndroidFastboot`、用户 PRIME 4+（JC11S）真机验证通过 |
 | **#132** | `tools/az01-packer/build-data-bundle.py`（二代机 `boot-activate.sh`）<br>`tools/ui-mod/build_packs.py`<br>`pkg/webui/ui_settings.go` | **修复 PRIME 4+ 等二代机关于页不显示访问码、在线更新报 `GitHub unreachable`**：根因是二代机 `boot-activate.sh` 先拉起 `stream-sync` 等守护进程、最后才 `systemctl restart engine.service`，而 `engine.service` 默认 `KillMode=control-group`，重启时把同一 cgroup 里刚拉起的 `stream-sync` 一起杀掉，About 页拿不到 `/v1/sc5000/ui`，更新检查也无人应答。现在 `boot-activate.sh` 把 `stream-sync` / `rb-bridge` / `sc5000-deemixd` 写成 `/run/systemd/system/enginex-*.service` 独立单元，`99-sc5000.conf` drop-in 用 `Wants=` 拉起它们，重启 Engine 不再波及这些守护进程（当时一并加的 `KillMode=process` 已在 #116 重发中删除，见下一行）；只有 PID 1 是 systemd 时才走 `systemctl`，否则（chroot 沙箱）直接在后台启动；屏幕 OTA 解析 `/data/sc5000-custom` → `/data/enginex` 软链（`f4b0ce6`，编译与测试修正 `5b4687e`）。修复后一代与二代全系机型在 `Settings → About` 稳定显示 `Web Console: http://<IP>:8080` 与 `Access Code: XXXX-XXXX`（输入时忽略连字符与大小写） | `TestGenerateAccessCode`、`TestLoginAccessCodeInputAndLockout`、`gate-ui-probe.qml`、`test_sclive4_bootstrap.sh` |
 | **#116（重发）** | `cmd/enginex-installer/main.go`<br>`tools/az01-packer/host-install-usbupdate.py`（新）<br>`tools/az01-packer/host-install-userdata.py`<br>`tools/az01-packer/build-data-bundle.py` | **SYSTEM ONE / PRIME 4 G2 走 `1cc5:2027` 一键刷机、`--ssh-key`、修复关机与访问码**：① 安装器新增模式 C：开机时或等待原厂机时发现 USB `1cc5:2027`（`az0x-splash usbupdate`，无 fastboot），按局域网板号 → `--bundle` 文件名 → USB 产品名判定机型，生成 64 MiB `ext4` `/data` 镜像（`-O encrypt -L data -b 4096`），确认后调用数据包内的 `host-install-usbupdate.py`（pyusb）执行 `AZ0O` `write-part`（`status 5` → 裸流 + ZLP → `status 1`，`data` 返回 `status 3` 时回退 `userdata`），写完提示按电源键重启；协议由 `@SBDJUK` 在 Rane SYSTEM ONE 实机验证。② `host-install-userdata.py --ssh-key` 写入 `/enginex/authorized_keys`（0600），`boot-activate.sh` 在只读根上把它 bind mount 到 `/root/.ssh/authorized_keys` 并启动 `sshd`。③ 删除 `99-sc5000.conf` 的 `KillMode=process`：`engine.service` 是 `Type=forking`，主 PID 是 `Scripts/engine` 脚本，重启时只杀脚本，第一阶段无 hook 的 `/usr/Engine/Engine` 留在屏幕上（关于页无访问码），关机也没人执行 `poweroff`（`@SBDJUK` 实机现象）。门禁说明：一代 `.img` 不受影响；同版本重发不会触发二代机屏幕在线升级提示 | `TestAZModel`、`TestUSBUpdateModeFlashesA64MiBDataImage`、`TestLockedSystemOneWaitsFor1cc5`、`TestUSBUpdateModeRefusals`、`TestUSBFlashRunsTheBundleScript`、`test_host_install_usbupdate.py`（报文与 SYSTEM ONE 抓包逐字节一致）、`test_data_bundle.py`、`test_sclive4_bootstrap.sh` 默认与 `AZ04=1`（bind mount、sshd、无 KillMode） |
+| **#116 / PR #139（重发）** | `tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/test_az04_hook.c` | **修复 SYSTEM ONE / PRIME 4 G2 加载 UI 包后卡在 Engine DJ 开机屏无限重启**：去掉 `KillMode=process` 后 64 位 `Engine` 才真正带上 `LD_PRELOAD`，随即暴露 AArch64 专属问题：Qt 6.7.2 读取 qrc 节点里的 32 位数据偏移后用有符号 `sxtw` 扩展（原厂 `libQt6Core.so.6.7.2` `0x1357dc` `ldr w1` → `rev` → `0x1357e4`/`0x1357e8` `sxtw` 寻址，已反汇编核实），而 `near_data()` 从 `data + 0x80000000` 开始映射替换 QML，bit 31 为 1 被扩展成 `data − 2 GiB`，加载第一个 QML 即 `SIGSEGV`，`Restart=on-failure` 无限重启（`@SBDJUK` Rane SYSTEM ONE 实机现象）。现在映射范围改为 `data + 0x20000000 .. data + 0x7fffffff`，偏移恒为正。32 位 hook 代码路径不变（重编结果与仓库内 `libengine-ui-hook.so` 逐字节一致，sha `57e2adf8…`）；两个 AZ04 数据包使用重编的 AArch64 hook（sha `bde24f81…`） | `test_az04_hook.c`（断言偏移为正并按 `sxtw` 语义回读，对 AZ04 64 位 `Engine` PASS）、`AZ04=1 test_sclive4_bootstrap.sh`（6 处补丁、UI 包加载）；**尚未在 AZ04 实机运行** |
+| **#138** | `pkg/webui/index.html`<br>`pkg/broadcast/broadcast.go`<br>`pkg/webui/broadcast_test.go`<br>`pkg/broadcast/broadcast_test.go` | **Shoutcast / Icecast 直播卡片缺用户名、点开始/停止后填写内容消失**（`@RattyDAVE`）：后端 `Username`（默认 `source`）与 `broadcast-config.json` 持久化早已存在，问题在前端：① 表单没有用户名输入框；② 「开始/停止推流」只提交 `{enabled}`，随后 `showBroadcast()` 用服务端旧值覆盖输入框，没按「保存」的内容就丢了；③ 状态行读 `connected` / `currentArtist`，后端 `Status` 并无这些字段，永远显示 connecting。现在表单新增用户名框（placeholder `source`），开始/停止时连同表单一起保存，已存密码显示 `●●●` 标记（留空保留原密码），状态读 `streaming` / `currentTrack`；Shoutcast 的 `Username` 为数字时按 DNAS v2 流 ID 发送 `密码:#ID`，其余（含默认 `source`）保持 v1 仅发密码 | `TestBroadcastUsernamePersistsAcrossReload`（用户名落盘、空密码保留原密码、重读一致）、`TestShoutcastLoginUsesStreamID`、`TestCustomUsernameNormalized`；`gofmt` / `go vet` / `go test -race ./pkg/broadcast/... ./pkg/webui/...` PASS |
+| **Mod Hub** | `pkg/mods/mods.go`<br>`pkg/webui/mods.go`<br>`pkg/webui/index.html`<br>`docs/mods/`<br>`docs/site/mods.js`<br>`tools/mods/build_official_mods.py` | **Mod Hub：Web 控制台内上传安装 / 卸载 `.tar.gz` Mod 与 5 个官方 Mod**：`POST /v1/sc5000/mods/upload` 安装到 `/data/enginex/mods`（16 MiB 上限、拒绝链接与路径穿越、只认一个 manifest 并校验），安装后默认停用，需手动启用；官方 Mod（DMX Studio、Jog Logo Studio、Minimal Club Mode、Sampler Pad Studio，以及作为内置系统 Mod 列出的 Tailscale Remote Access）及 `registry.json` 发布在 `enginexdj.com/#mods` | `go test -race ./pkg/mods/... ./pkg/webui/...`、`docs/mods/test_mods.py`、`build_official_mods.py --check`（打包可复现） |
 | **#129 / #133** | `cmd/enginex-installer/main.go`<br>`cmd/enginex-installer/sigpipe_{unix,windows}.go`<br>`tools/az01-packer/host-install-fastboot.sh` | **安装器刷写时实时显示 fastboot 进度与分区大小提示**（`@RattyDAVE` 建议）：以前输入 `yes` 确认后，几 GB 的 userdata / rootfs 走 USB 发送和写入 eMMC 期间屏幕几分钟没有任何输出。现在 `fbLive` 把 fastboot 的 stdout / stderr 实时转发到控制台，同时保留缓冲输出用于报错；刷写大分区前（二代 `modeB` 与一代 `modeBGen1`）先显示分区名、文件大小（GB/MB/KB/B）和「通过 USB 传输可能需要几分钟，请勿断开连接或关闭电源」提示；启动时忽略 SIGPIPE，`captureWriter` 吞掉控制台管道关闭导致的 EPIPE，控制台断开不会中断刷写；`host-install-fastboot.sh` 刷写前同样打印提示 | `cmd/enginex-installer` 全套单测（含隔离子进程 SIGPIPE 测试） |
 
 ---
@@ -94,6 +97,7 @@
   - `f4b0ce6`（#132）提交时 `pkg/webui` 因多余的 `syscall` 导入无法编译，`TestUpdateAppliesTheDataBundle` 与沙箱 Method B 也未通过；`5b4687e` 修正后上述 Go / Python / overlay / 沙箱测试在编译机重跑全部 PASS。C 单测本次未改动、未重跑。
 - **同版本重发（#133，构建 `38d5e68`）回归**：编译机 `--clean` 目录重跑 `gofmt -l .`（0 差异）、`go vet ./...`、`go test -race ./cmd/enginex-installer/... ./pkg/webui/...`、`tests/test_rootfs_overlay.sh`（13 PASS）、`test_sclive4_bootstrap.sh` 默认与 `AZ04=1`（全部 PASS）、`python3 -m unittest discover -s tools/az01-packer`（88 PASS、1 跳过）；三个代表镜像解包均为 `"verified": true`，`/etc/sc5000/version.txt` 为 `5.3.0.3`，不含内置 SSH 公钥。
 - **同版本重发（#116，构建 `9616419`）回归**：编译机 `--clean` 目录跑 `gofmt -l .`（0 差异）、`go vet ./...`、`go test -race ./...`（全部 PASS）、`tests/test_rootfs_overlay.sh`（13 PASS）、`test_sclive4_bootstrap.sh` 默认与 `AZ04=1`（全部 PASS）、`python3 -m unittest discover -s tools/az01-packer`（92 PASS、1 跳过）；构建从 GitHub 克隆 `9616419`，三个代表镜像解包均为 `"verified": true`、版本 `5.3.0.3`，`/root/.ssh/authorized_keys` 只有与 `v5.3.0.2` 相同的原厂 `cert-authority` 条目。门禁：三个镜像组（JP07 / JP13 / JC11）以已发布 `v5.3.0.2` 镜像为旧版并行跑 `release-gate.sh`，三组各 **94 PASS / 0 FAIL**。
+- **同版本重发（#139 + Mod Hub + #138，构建 `37e83ea`）回归**：编译机上从 GitHub 新克隆 `37e83ea`，先重编 32 位与 AArch64 `libengine-ui-hook.so`，再跑 `gofmt -l .`（0 差异）、`go vet ./...`、`go test -race ./...`（全部 PASS）、`tests/test_rootfs_overlay.sh`（13 PASS）、`python3 -m unittest discover -s tools/az01-packer`（92 PASS、1 跳过）、`docs/mods/test_mods.py`（6 PASS）、`build_official_mods.py --check`、`test_az04_hook.c`（对 AZ04 64 位 `Engine` PASS）、`test_sclive4_bootstrap.sh` 默认（SC LIVE 4，16 处补丁）与 `AZ04=1`（PRIME 4 G2，6 处补丁）全部 PASS；三个代表镜像解包均为 `"verified": true`、版本 `5.3.0.3`，`/root/.ssh/authorized_keys` 只有原厂 `cert-authority` 条目。门禁：三组以已发布 `v5.3.0.2` 镜像（digest 已核对）为旧版并行跑 `release-gate.sh`，三组各 **94 PASS / 0 FAIL**（三个门禁错开 30 秒启动：`old` 阶段的 `stream-sync` 绑在 CPU 3 且为 `SCHED_IDLE`，三个沙箱同时满载 4 核时会被饿死，表现为 `/v1/sc5000/update offers` 偶发 FAIL；`release-gate.sh` 也不允许复用旧工作目录）。
 - **发版门禁（`tools/az01-packer/release-gate.sh`）**：
   - 三个一代镜像组（`SC5000` JP07、`SC6000` JP13、`PRIME 4` JC11）分别从已发布的 `v5.3.0.2` 镜像在线升级至 `v5.3.0.3` 并完成开机全功能验收，三组各 **94 PASS / 0 FAIL**（首次构建 `5b4687e`；2026-11-08 同版本重发构建 `38d5e68` 以已发布 `v5.3.0.2` 的 JP07 / JP13 / JC11 镜像为旧版重跑，三组仍各 94 PASS / 0 FAIL）（静态审计 `systemd-analyze verify` 0 错误、在线升级下载与篡改 1 字节拒绝、原厂 QML 缓存种入后新 UI 包强制重编、控制中心第 3 行 4 个新磁贴渲染、关于页 `EngineX OS 5.3.0.3` 与访问码渲染、16 处 Engine 补丁、21 个 DSP guard、Stems 分轨、Rekordbox 转换、下一次在线升级 mock 全部通过）。
 - **真机验证**：
@@ -107,43 +111,43 @@
 
 ## 4. 发布构建产物与 SHA-256 校验表
 
-- **构建提交**：`9616419`（2026-11-08 第二次同版本重发 #116，编译机上从 GitHub 新克隆的源码目录，`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）
-- **回滚点**：同版本上一次构建为 `38d5e68`（tag 原在 `937b082`），再上一次为 `5b4687e`（tag `df06655`）；上一版本为 `v5.3.0.2`（提交 `e7622ac` / 构建提交 `72f4e34`）
+- **构建提交**：`37e83ea`（2026-11-08 第三次同版本重发 #139 + Mod Hub + #138，编译机上从 GitHub 新克隆的源码目录，`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）
+- **回滚点**：同版本上一次构建为 `9616419`（tag 原在 `f510de0`；`2357a26` 构建的门禁因旧工作目录与残留进程未跑成，未上传），更早为 `38d5e68`（tag `937b082`）与 `5b4687e`（tag `df06655`）；上一版本为 `v5.3.0.2`（提交 `e7622ac` / 构建提交 `72f4e34`）
 
 ### 一代机型完整固件（`*-Update.img`）
 
 | 镜像组 | 机型 | 板号 | 文件名 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.3-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `acbd7a9d80dba5b9d4199fab9977e0c14e82749981749e4e12f02e58ef98befa` |
-| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.3-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `acbd7a9d80dba5b9d4199fab9977e0c14e82749981749e4e12f02e58ef98befa` |
-| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.3-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `acbd7a9d80dba5b9d4199fab9977e0c14e82749981749e4e12f02e58ef98befa` |
-| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.3-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `013aedb54a1f33ee0ce89075536aa2aece675f856eb74123f85b9e072f393407` |
-| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.3-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `013aedb54a1f33ee0ce89075536aa2aece675f856eb74123f85b9e072f393407` |
-| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `d20c0b46a61defeef29b6155e7ff603fa16b1882e26fde94eeedc3f33b6546c7` |
-| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.3-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `d20c0b46a61defeef29b6155e7ff603fa16b1882e26fde94eeedc3f33b6546c7` |
-| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.3-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `d20c0b46a61defeef29b6155e7ff603fa16b1882e26fde94eeedc3f33b6546c7` |
+| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.3-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `9b8bc24ae58ed98e3e2ad19f8f54f0608fdb4c13440050ab4d529b8b0d558681` |
+| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.3-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `9b8bc24ae58ed98e3e2ad19f8f54f0608fdb4c13440050ab4d529b8b0d558681` |
+| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.3-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `9b8bc24ae58ed98e3e2ad19f8f54f0608fdb4c13440050ab4d529b8b0d558681` |
+| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.3-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `104a5ed758a819214530558eb8daafe34377932c2c45c21e3c3a22ec3107beef` |
+| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.3-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `104a5ed758a819214530558eb8daafe34377932c2c45c21e3c3a22ec3107beef` |
+| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `d703bea024087826cb3a97e3e64754f61c50089778b6162dd026ecdc1649cb44` |
+| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.3-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `d703bea024087826cb3a97e3e64754f61c50089778b6162dd026ecdc1649cb44` |
+| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.3-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `d703bea024087826cb3a97e3e64754f61c50089778b6162dd026ecdc1649cb44` |
 
 ### 二代机型 `/data` 数据包（`*-Data-Bundle.tar.gz`，Beta）
 
 | 架构组 | 机型 | 板号 | 文件名 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `8d220bd405ee34c45ca62fc5f93196bd1211506826f2040d7ed665283302fb6a` |
-| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `f3cd56f924e99206acd7418a601dd67c4b5fe95ccc490e8ff625ef6a06f1c050` |
-| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `96e2be1a8c34ee84a61cf300350ee87bea2070e7434880419cd4c7f0fe047910` |
-| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `eff6411100c0e9eee7a5fbf721d027c3b76d84bbf903c342d01530d619433213` |
-| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `d578301c672cc92eab0a1b64f20b5ce7f9c2fa4b5a0acb2ece8ee9506485961b` |
-| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `d7f99f0e95ded49e641a0cef9cc7a53d274bd4807501bcec42c31c3801a72187` |
-| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `54f31361977b87de9834218ec29afa914675e8c46c1c83900f8f9d8f33763a75` |
-| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `c0e9eb8cbe6328c5e60886a2ef34ad135a9d4495bbb8541aeecc56df155c53b3` |
+| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `fcbbe042ee2c555d848852b450cf962fe63bdb712fb86cdce14452c815697093` |
+| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `895237d46e69891d6546816a767529d168153e1f5c9f5d63268f6684da49e63d` |
+| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `5c4d6ee3cff131b701a2f66b34b448b631f1487bc953bfa7cba73adca56acdee` |
+| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `1f624cc1e4a7fdfb98db4d7d116d59f7b23409400fa4c264988afebb7c1a78d1` |
+| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `3adc55c5059a0f31909e69a57b6bd7e33fbd8c29c0a700451d583198cd46be63` |
+| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `e169c1a06d9ba6a30b0609f4513fae39d53b5103e7d32af86b8d3a576f453682` |
+| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `88a13e87d2b3adab8bec6331827e374410dbb4c18c04982681ea54921cce0aa3` |
+| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `479b9a3052bb3f38f3a462d5d37527f639438244fec165927144ab8c5fa5313a` |
 
 ### 跨平台一键安装器（`EngineX-Installer`）
 
 | 平台 | 文件名 | SHA-256 |
 | --- | --- | --- |
-| Windows 10/11 x64 | `EngineX-Installer-5.3.0.3-windows-amd64.zip` | `9f5bf502d2955e6250c634f068a6ba271568a5ebf3cdf1ef9067669f55b50a05` |
-| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.3-macos-arm64.zip` | `3d32c15a82170038c2ad0d316ad2213a483566cf55dea6174e0043d7f4700740` |
-| macOS Intel | `EngineX-Installer-5.3.0.3-macos-amd64.zip` | `f282229cdab3971c559dd699d381b0e00f333cd9c98135690bb41d8902787080` |
-| Linux x86_64 | `EngineX-Installer-5.3.0.3-linux-amd64.tar.gz` | `8e3673c111a1f1898b3627b58ad20ab634b58d623ea3440fa2e12b18b214969c` |
+| Windows 10/11 x64 | `EngineX-Installer-5.3.0.3-windows-amd64.zip` | `6027f6aed0b53cf98f9fc1e76d330dd026744c093c2bbe22bf0d090648bb3896` |
+| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.3-macos-arm64.zip` | `12fcd822ca3708e889f0b61f575cb51a8a0e8350cf9c59bd51bb1e99a04299bd` |
+| macOS Intel | `EngineX-Installer-5.3.0.3-macos-amd64.zip` | `320819ef61ab08f67d65d3c92862ad48146b8f35c658a0d9b356c80c2c46eaf5` |
+| Linux x86_64 | `EngineX-Installer-5.3.0.3-linux-amd64.tar.gz` | `51465a913102d1d7f51568df673673ebcd6fe60935867b30fe16af1c008ed815` |
 
 ---
 
