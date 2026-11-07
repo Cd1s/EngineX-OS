@@ -2,10 +2,11 @@
 (function () {
   const D = window.DOCS;
   const UI = {
-    s: { lang: "s", search: "搜索文档…", heroT: "EngineX OS 使用文档", heroP: "16 款 Denon DJ / Numark / Rane 独立设备的安装、功能与排障指南。", model: "机型", board: "板号", type: "类型", file: "下载", all: "全部", gen1: "一代 · .img", gen2: "二代 · 数据包", none: "没有匹配的内容", top: "本章目录", hits: "条匹配", img: ".img 刷机包", bundle: "/data 数据包" },
-    t: { lang: "t", search: "搜尋文件…", heroT: "EngineX OS 使用文件", heroP: "16 款 Denon DJ / Numark / Rane 獨立設備的安裝、功能與排障指南。", model: "機型", board: "板號", type: "類型", file: "下載", all: "全部", gen1: "一代 · .img", gen2: "二代 · 資料包", none: "沒有符合的內容", top: "本章目錄", hits: "筆符合", img: ".img 刷機包", bundle: "/data 資料包" },
+    s: { lang: "s", search: "搜索文档…", heroT: "EngineX OS 使用文档", heroP: "16 款 Denon DJ / Numark / Rane 独立设备的安装、功能与排障指南。", model: "机型", board: "板号", type: "类型", file: "下载", all: "全部", gen1: "一代 · .img", gen2: "二代 · 数据包", none: "没有匹配的内容", top: "本页目录", hits: "条匹配", img: ".img 刷机包", bundle: "/data 数据包" },
+    t: { lang: "t", search: "搜尋文件…", heroT: "EngineX OS 使用文件", heroP: "16 款 Denon DJ / Numark / Rane 獨立設備的安裝、功能與排障指南。", model: "機型", board: "板號", type: "類型", file: "下載", all: "全部", gen1: "一代 · .img", gen2: "二代 · 資料包", none: "沒有符合的內容", top: "本頁目錄", hits: "筆符合", img: ".img 刷機包", bundle: "/data 資料包" },
     e: { lang: "e", search: "Search the docs…", heroT: "EngineX OS Documentation", heroP: "Install, use and troubleshoot all 16 Denon DJ / Numark / Rane standalone units.", model: "Model", board: "Board", type: "Type", file: "Download", all: "All", gen1: "Gen 1 · .img", gen2: "Gen 2 · bundle", none: "Nothing matches", top: "On this page", hits: "matches", img: ".img image", bundle: "/data bundle" },
   };
+  const NOTE_T = { warn: "WARNING", new: "NEW" };
   const SHOT_DIR = { s: "zh-CN", t: "zh-TW", e: "en" };
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -28,6 +29,7 @@
   const md = (x) => x.replace(/`([^`]+)`/g, (_, c) => "<code>" + c.replace(/</g, "&lt;").replace(/>/g, "&gt;") + "</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/\*([^*]+)\*/g, "<i>$1</i>");
   const T = (o) => md(typeof o === "string" ? o : o[lang]);
   const hid = (sec, b) => sec.id + "-" + b.id;
+  const heads = (sec) => sec.blocks.filter((b) => b.k === "h");
 
   function block(sec, b) {
     const u = UI[lang];
@@ -35,7 +37,7 @@
       case "h": return `<h3 id="${hid(sec, b)}" class="blk">${T(b.x)}</h3>`;
       case "p": return `<p class="blk">${T(b.x)}</p>`;
       case "ul": case "ol": return `<${b.k} class="blk">${b.x.map((i) => `<li>${T(i)}</li>`).join("")}</${b.k}>`;
-      case "note": return `<div class="note blk ${b.tone || ""}">${T(b.x)}</div>`;
+      case "note": return `<div class="note blk ${b.tone || ""}"><span class="note-t">${NOTE_T[b.tone] || "NOTE"}</span>${T(b.x)}</div>`;
       case "shot": {
         const src = b.src || `assets/screenshots/${SHOT_DIR[lang]}/${b.name.replace(/^zh:/, "")}`;
         return `<figure class="shot blk"><img loading="lazy" src="${esc(src)}" alt="${esc(T(b.cap).replace(/<[^>]+>/g, ""))}"><figcaption>${T(b.cap)}</figcaption></figure>`;
@@ -45,7 +47,7 @@
         const chips = ["all", "gen1", "gen2"].map((g) => `<button data-gen="${g}" class="${gen === g ? "on" : ""}">${u[g]}</button>`).join("");
         const rows = D.models.filter((m) => gen === "all" || m.gen === gen).map((m) =>
           `<tr><td><b>${esc(m.name)}</b></td><td><code>${m.board}</code></td><td><span class="tag ${m.gen}">${m.gen === "gen1" ? u.img : u.bundle}</span></td><td><a class="dl" href="${m.url}">${esc(m.file)}</a></td></tr>`).join("");
-        return `<div class="blk"><div class="chips">${chips}</div><div class="tbl"><table><thead><tr><th>${u.model}</th><th>${u.board}</th><th>${u.type}</th><th>${u.file}</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+        return `<div class="blk"><div class="chips">${chips}</div><div class="tbl models"><table><thead><tr><th>${u.model}</th><th>${u.board}</th><th>${u.type}</th><th>${u.file}</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
       }
       case "installers": return `<div class="insts blk">${D.installers.map((i) => `<a href="${i.url}"><b>${esc(i.name)}</b><small>${esc(i.file)}</small></a>`).join("")}</div>`;
       case "faq": return b.items.map((i) => `<details class="qa blk"><summary>${T(i.q)}</summary><div class="a">${T(i.a)}</div></details>`).join("");
@@ -58,14 +60,14 @@
     document.documentElement.lang = { s: "zh-CN", t: "zh-TW", e: "en" }[lang];
     document.title = u.heroT;
     $("#q").placeholder = u.search;
-    $$(".langs button").forEach((b) => b.classList.toggle("on", b.dataset.l === lang));
-    $("#nav").innerHTML = D.sections.map((s) => `<a href="#${s.id}" data-s="${s.id}">${s.icon} ${T(s.title)}</a>`).join("");
-    $("#main").innerHTML = `<div class="hero"><h1><b>EngineX OS</b> ${u.heroT.replace("EngineX OS ", "")} <small style="color:var(--dim);font-size:14px">v${D.version}</small></h1><p>${u.heroP}</p></div>` +
-      D.sections.map((s) => `<section class="sec" id="${s.id}"><h2>${s.icon} ${T(s.title)}</h2>${s.blocks.map((b) => block(s, b)).join("")}</section>`).join("") +
+    $("#lang").value = lang;
+    $("#ver").textContent = "v" + D.version;
+    $("#nav").innerHTML = D.sections.map((s) => `<div class="grp" data-s="${s.id}"><a href="#${s.id}">${T(s.title)}</a><div class="sub">${heads(s).map((b) => `<a href="#${hid(s, b)}" data-h="${hid(s, b)}">${T(b.x)}</a>`).join("")}</div></div>`).join("");
+    $("#main").innerHTML = `<div class="hero"><h1>${u.heroT}</h1><p>${u.heroP}</p></div>` +
+      D.sections.map((s) => `<section class="sec" id="${s.id}"><h2>${T(s.title)}</h2>${s.blocks.map((b) => block(s, b)).join("")}</section>`).join("") +
       `<div class="empty hide" id="empty">${u.none}</div>`;
     applySearch();
     buildToc();
-    observe();
   }
 
   /* ---- search: hide non-matching blocks, mark matches ---- */
@@ -98,23 +100,27 @@
     });
   }
 
-  /* ---- right TOC + nav highlight ---- */
-  let io;
-  function buildToc() {
-    const first = D.sections[0].id;
-    setToc(currentSec() || first);
-  }
-  function currentSec() { return $$("section.sec:not(.hide)").find((s) => s.getBoundingClientRect().bottom > 120)?.id; }
+  /* ---- right TOC + nav highlight (scroll spy) ---- */
+  let tocSec = null;
+  function buildToc() { tocSec = null; spy(); }
   function setToc(id) {
     const s = D.sections.find((x) => x.id === id) || D.sections[0];
-    $("#toc").innerHTML = `<h4>${UI[lang].top}</h4>` + s.blocks.filter((b) => b.k === "h").map((b) => `<a href="#${hid(s, b)}">${T(b.x)}</a>`).join("");
-    $$("#nav a").forEach((a) => a.classList.toggle("on", a.dataset.s === s.id));
+    if (tocSec === s.id) return;
+    tocSec = s.id;
+    const hs = heads(s);
+    $("#toc").innerHTML = hs.length ? `<h4>${UI[lang].top}</h4><div class="lst">` + hs.map((b) => `<a href="#${hid(s, b)}" data-h="${hid(s, b)}">${T(b.x)}</a>`).join("") + "</div>" : "";
+    $$("#nav .grp").forEach((g) => g.classList.toggle("on", g.dataset.s === s.id));
   }
-  function observe() {
-    if (io) io.disconnect();
-    io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) setToc(currentSec()); }, { rootMargin: "-80px 0px -60% 0px" });
-    $$("section.sec").forEach((s) => io.observe(s));
+  function spy() {
+    const secs = $$("section.sec:not(.hide)");
+    const sec = secs.find((x) => x.getBoundingClientRect().bottom > 120) || secs[secs.length - 1];
+    if (!sec) return;
+    setToc(sec.id);
+    const h = $$("h3.blk:not(.hide)", sec).filter((x) => x.getBoundingClientRect().top < 120).pop();
+    $$("#toc a, #nav .sub a").forEach((a) => a.classList.toggle("on", !!h && a.dataset.h === h.id));
   }
+  let ticking = false;
+  addEventListener("scroll", () => { if (!ticking) { ticking = true; requestAnimationFrame(() => { ticking = false; spy(); }); } }, { passive: true });
 
   /* ---- hash routing: #install  #streaming/#streaming-login ... ---- */
   function route() {
@@ -125,11 +131,14 @@
   }
 
   /* ---- events ---- */
-  $(".langs").addEventListener("click", (e) => {
-    const l = e.target.dataset.l; if (!l) return;
-    lang = l; localStorage.setItem("enginex-docs-lang", l); render(); route();
+  $("#lang").addEventListener("change", (e) => {
+    lang = e.target.value; localStorage.setItem("enginex-docs-lang", lang); render(); route();
   });
-  $("#q").addEventListener("input", (e) => { query = e.target.value; applySearch(); });
+  $("#theme").addEventListener("click", () => {
+    const t = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = t; localStorage.setItem("enginex-docs-theme", t);
+  });
+  $("#q").addEventListener("input", (e) => { query = e.target.value; applySearch(); buildToc(); });
   document.addEventListener("keydown", (e) => {
     const typing = /INPUT|TEXTAREA/.test(document.activeElement.tagName);
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); $("#q").focus(); $("#q").select(); }
