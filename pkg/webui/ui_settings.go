@@ -33,7 +33,7 @@ var (
 	uiStreamSortRoles  = []string{"default", "bpm", "key", "rating", "song", "artist"}
 	uiStreamSortOrders = []string{"asc", "desc"}
 	uiSyncGuardPcts    = []int{0, 10, 15, 20}
-	// UI Scale presets: Qt multiplies every size by QT_SCALE_FACTOR when Engine starts.
+	// UI Scale presets: the QML mod scales the loaded UI live (EmbeddedMain uiLoader).
 	uiUIScales       = []int{100, 95, 90, 85, 80, 75}
 	uiPioneerFxModes = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
 )
@@ -115,16 +115,15 @@ var uiFourDeckRoles = []string{"auto", "13", "24", "12", "1", "2"}
 // fourDeckRolePath is where engine-ui-guard leaves the role it applied.
 var fourDeckRolePath = "/run/sc5000-assignments/role"
 
-// uiScaleEnvPath feeds QT_SCALE_FACTOR to Engine's unit, which reads it through the
-// engine.service.d/70-ui-scale.conf drop-in. A package var so tests can point it at a
-// temp dir.
+// uiScaleEnvPath records the scale as SC5000_UI_SCALE for Engine's unit (the
+// engine.service.d/70-ui-scale.conf drop-in). It is deliberately not QT_SCALE_FACTOR,
+// which leaves a black band under EGLFS. A package var so tests can point it at a temp dir.
 var (
 	uiScaleMu      sync.Mutex
 	uiScaleEnvPath = "/data/sc5000-custom/ui-scale.env"
 )
 
-// writeUIScaleEnv hands Qt the scale chosen in Settings -> Device for Engine's next
-// start, and drops the file again at 100% so the unit keeps Denon's stock size. It sits
+// writeUIScaleEnv records the scale chosen in Settings -> Device, and drops the file again at 100% so the unit keeps Denon's stock size. It sits
 // outside ui/, which an update replaces wholesale.
 func writeUIScaleEnv(pct int) error {
 	uiScaleMu.Lock()
@@ -140,7 +139,7 @@ func writeUIScaleEnv(pct int) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	text := "QT_SCALE_FACTOR=" + strconv.FormatFloat(float64(pct)/100, 'f', -1, 64) + "\n"
+	text := "SC5000_UI_SCALE=" + strconv.FormatFloat(float64(pct)/100, 'f', -1, 64) + "\n"
 	tmp, err := os.CreateTemp(dir, ".ui-scale-*")
 	if err != nil {
 		return err

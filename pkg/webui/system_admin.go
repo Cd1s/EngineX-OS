@@ -561,6 +561,21 @@ func (s *Server) handleMountsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Drop the OmniSource NAS credentials that belonged to the deleted WebDAV mount.
+	if strings.ToLower(target.Protocol) == "webdav" {
+		var left *RemoteMount
+		for i := range list {
+			if strings.ToLower(list[i].Protocol) == "webdav" {
+				left = &list[i]
+			}
+		}
+		if left != nil {
+			s.syncMountToNAS(*left)
+		} else {
+			_ = os.Remove(s.nasConfigPath())
+		}
+	}
+
 	respond(w, map[string]any{"ok": true, "deleted": target.ID})
 }
 

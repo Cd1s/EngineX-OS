@@ -7,6 +7,7 @@ package webui
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -270,13 +271,24 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("POST /v1/sc5000/nas/test", s.handleNASTest)
 	g.mux.HandleFunc("GET /v1/sc5000/mods", s.handleMods)
 	g.mux.HandleFunc("POST /v1/sc5000/mods", s.handleMods)
+	g.mux.HandleFunc("GET /v1/sc5000/ssh", s.handleSSH)
+	g.mux.HandleFunc("POST /v1/sc5000/ssh", s.handleSSH)
+	g.mux.HandleFunc("GET /v1/sc5000/mounts", s.handleMounts)
+	g.mux.HandleFunc("POST /v1/sc5000/mounts", s.handleMounts)
+	g.mux.HandleFunc("DELETE /v1/sc5000/mounts", s.handleMounts)
+	g.mux.HandleFunc("DELETE /v1/sc5000/mounts/{id}", s.handleMounts)
+	g.mux.HandleFunc("GET /v1/sc5000/automix", s.handleAutomix)
+	g.mux.HandleFunc("POST /v1/sc5000/automix", s.handleAutomix)
+	g.mux.HandleFunc("POST /v1/sc5000/sampler/loop-to-pad", s.handleSamplerLoopToPad)
 	g.mux.HandleFunc("GET /v1/sc5000/usb-audio", s.handleUSBAudio)
 	g.mux.HandleFunc("POST /v1/sc5000/usb-audio", s.handleUSBAudio)
 	g.mux.HandleFunc("GET /v1/sc5000/stems/source", g.stemsSource)
 	g.mux.HandleFunc("GET /v1/sc5000/stems/local", g.stemsLocal)
+	g.mux.HandleFunc("GET /v1/sc5000/stems/track-id", g.stemsTrackID)
 	g.mux.HandleFunc("GET /v1/sc5000/relay", s.relayConfigGet)
 	g.mux.HandleFunc("POST /v1/sc5000/relay", s.relayConfigPost)
 	g.mux.HandleFunc("GET /v1/sc5000/prolink", s.prolinkGet)
+	g.mux.HandleFunc("GET /v1/sc5000/prolink/diag", s.prolinkDiagGet)
 	g.mux.HandleFunc("POST /v1/sc5000/prolink", s.prolinkPost)
 	g.mux.HandleFunc("POST /v1/sc5000/decks", s.decksPost)
 	g.mux.HandleFunc("GET /v1/sc5000/shadow", s.shadowGet)
@@ -1236,6 +1248,31 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, map[string]any{"path": p})
+}
+
+// stemsTrackID answers the internal library id of an imported file, by file name.
+// The UI cannot resolve it itself: while a streaming collection is open, its
+// collectionController does not see the internal m.db. Read-only (#49); 0 = not imported yet.
+func (g *tidalGateway) stemsTrackID(w http.ResponseWriter, r *http.Request) {
+	name := filepath.Base(r.URL.Query().Get("path"))
+	if name == "." || name == string(filepath.Separator) {
+		fail(w, 400, errors.New("path required"))
+		return
+	}
+	mdb := filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2/m.db")
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdb}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	defer db.Close()
+	var id int64
+	err = db.QueryRowContext(r.Context(), `SELECT id FROM Track WHERE filename = ? ORDER BY id DESC LIMIT 1`, name).Scan(&id)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		fail(w, 500, err)
+		return
+	}
+	respond(w, map[string]any{"trackId": id})
 }
 
 // stream serves a finished download (with Range support) or downloads it now;

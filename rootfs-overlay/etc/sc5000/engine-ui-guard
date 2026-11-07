@@ -1,15 +1,23 @@
 #!/bin/sh
-# After three Engine starts that neither survive 15 seconds nor stop cleanly,
-# the UI hook stops applying packs (safe-mode) and the deck comes back with the
-# stock UI. Deliberate stops and restarts (language switch, deploy) reset it.
+# After three Engine starts in a row that each follow a crash, the UI hook stops
+# applying packs (safe-mode) and the deck comes back with the stock UI. A clean
+# stop, or a start that stays up 15 seconds, leaves safe-mode again.
 UI=${SC5000_UI_DIR:-/data/enginex/ui}
 [ -d "$UI" ] || [ ! -d /data/sc5000-custom/ui ] || UI=/data/sc5000-custom/ui
 case ${1:-} in
 pre)
-    n=$(cat "$UI/boot-count" 2>/dev/null)
-    case $n in ''|*[!0-9]*) n=0 ;; esac
-    n=$((n + 1))
     mkdir -p "$UI"
+    # Only a start that follows a crash (the stop hook left last-crash) counts towards
+    # safe-mode; a clean start leaves safe-mode. A quarantined mod stays quarantined.
+    if [ -e "$UI/last-crash" ]; then
+        rm -f "$UI/last-crash"
+        n=$(cat "$UI/boot-count" 2>/dev/null)
+        case $n in ''|*[!0-9]*) n=1 ;; esac
+        n=$((n + 1))
+    else
+        n=1
+        rm -f "$UI/safe-mode"
+    fi
     rm -f "$UI/boot-token"
     echo "$n" > "$UI/boot-count"
     if [ "$n" -ge 3 ] || [ -e "$UI/safe-mode" ]; then
@@ -93,16 +101,10 @@ pre)
     role=$(sed -n 's/^four_deck_role=//p' "$UI/settings.conf" 2>/dev/null | tail -n 1)
     case $role in
     12|13|24|1|2) ;;
-    *) # auto: standalone defaults to 12 (Layer A + B); paired allocates 13 (Player 1) / 24 (Player 2)
-        paired=${SC5000_PAIRED_PLAYER:-/data/sc5000-custom/state/paired-player}
-        [ -e "$paired" ] || [ ! -e /data/enginex/state/paired-player ] || paired=/data/enginex/state/paired-player
-        if [ -e "$paired" ]; then
-            state=${SC5000_PLANCK_STATE:-"/data/AppDataUser/AIR Music Technology/Engine/State/PlanckClientState.json"}
-            n=$(grep -A1 '"Player": {' "$state" 2>/dev/null | sed -n 's/.*"string": "\([0-9]*\)".*/\1/p' | head -n 1)
-            case $n in *[02468]) role=24 ;; *) role=13 ;; esac
-        else
-            role=12
-        fi ;;
+    *) # FOOLPROOF INVARIANT (#49/#123): auto MUST map odd Player -> 13 and even Player -> 24 so linked SC5000 / Shadow Decks never cross-control each other. NEVER change auto to 12.
+        state=${SC5000_PLANCK_STATE:-"/data/AppDataUser/AIR Music Technology/Engine/State/PlanckClientState.json"}
+        n=$(grep -A1 '"Player": {' "$state" 2>/dev/null | sed -n 's/.*"string": "\([0-9]*\)".*/\1/p' | head -n 1)
+        case $n in *[02468]) role=24 ;; *) role=13 ;; esac ;;
     esac
     [ -z "$on" ] || { mkdir -p "$patched" && echo "$role" > "$patched/role"; } # the UI hook reads it
     # The wheel display (jog screen: cover, platter ring, logo) followed the unnamed
@@ -182,13 +184,19 @@ post)
     token=$$-$(cat "$UI/boot-count" 2>/dev/null)
     echo "$token" > "$UI/boot-token"
     ( sleep "${SC5000_UI_HEALTHY_AFTER:-15}"
-      [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$token" ] && rm -f "$UI/boot-count" "$UI/boot-token"
+      [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$token" ] && rm -f "$UI/boot-count" "$UI/boot-token" "$UI/last-crash" "$UI/safe-mode"
     ) </dev/null >/dev/null 2>&1 &
     ;;
 stop)
     # systemd sets SERVICE_RESULT=success for a requested stop/restart; a crash
     # (exit-code, signal, core-dump, timeout) keeps counting towards safe-mode.
-    [ "${SERVICE_RESULT:-}" != success ] || rm -f "$UI/boot-count" "$UI/boot-token"
+    if [ "${SERVICE_RESULT:-success}" = success ]; then
+        rm -f "$UI/boot-count" "$UI/boot-token" "$UI/last-crash" "$UI/safe-mode"
+    else
+        mkdir -p "$UI"
+        [ -s "$UI/boot-count" ] || echo 1 > "$UI/boot-count"
+        : > "$UI/last-crash"
+    fi
     # The stock script exits 0 after these quit reasons, so Restart=on-failure never
     # brings Engine back and the deck hangs on "Shutting down...". FactoryReset only
     # gets here without a reboot when az01-update --erase-data failed (not on AC power).

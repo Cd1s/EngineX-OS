@@ -206,8 +206,10 @@ SH
         check "new: Streaming hides stock Tidal" bash -c "! grep -aqF 'SCPROBE entry|$label|Tidal|1|' '$log'"
         check "new: About shows EngineX OS $NEWV" grep -aqF "SCPROBE version|EngineX OS $NEWV " "$log"
         check "new: Control Center has the waveform tile" grep -aqF 'SCPROBE tile|ControlCenter_WaveformStyle|' "$log"
-        check "new: Control Center has the Live Stream tile (#50)" grep -aqF 'SCPROBE tile|ControlCenter_LiveStream|' "$log"
+        check "new: Settings -> Services has the Live Stream entry (#50)" grep -aqF 'SCPROBE tile|ControlCenter_LiveStream|' "$log"
+        check "new: Control Center has the jog light tile" grep -aqF 'SCPROBE tile|ControlCenter_JogLight|' "$log"
         check "new: Control Center has the upfader echo tile (#52)" grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|' "$log"
+        check "new: Control Center fills uiContainer at UI Scale 75 % (root.transformed, not defaultScreenSize)" grep -aq 'SCPROBE ccsize|75|[0-9x]*|[0-9x]*|1|' "$log"
         check "new: auto-analyze toggle and Engine's AnalyzeUnanalyzed action exist (#55)" grep -aqF 'SCPROBE analyze|boolean|1|' "$log"
         note "new: render probe: $(grep -ao 'SCPROBE [a-z]*|.*|' "$log" | grep -v 'SCPROBE done' | tr '\n' ' ')"
         check "new: Engine build matched (Engine $BASE)" grep -aq "engine-ui-hook: Engine $BASE" "$log"
@@ -374,7 +376,7 @@ for side in old new; do
 done
 export BASE=$(cut -d. -f1-3 <<< "$NEWV")  # the official Engine the image is built on, as the UI hook names it (5.3.0 for 5.3.0.1.1)
 # Tools the suite runs directly (exec.Command); a base without them breaks that feature.
-SUITE_CMDS=$(cd "$REPO" && grep -rhoE 'exec\.Command(Context)?\((ctx, )?"[^"]+"' --include='*.go' --exclude='*_test.go' cmd internal pkg | sed -E 's/.*"([^"]+)"$/\1/' | sort -u | tr '\n' ' ')
+SUITE_CMDS=$(cd "$REPO" && grep -rhoE 'exec\.Command(Context)?\((ctx, )?"[^"]+"' --include='*.go' --exclude='*_test.go' --exclude-dir=enginex-installer cmd internal pkg | sed -E 's/.*"([^"]+)"$/\1/' | sort -u | tr '\n' ' ')
 export SUITE_CMDS
 
 # Host-side helpers: an armhf stems-probe and the Rekordbox fixture.

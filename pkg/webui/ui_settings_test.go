@@ -464,7 +464,7 @@ func TestUIScale(t *testing.T) {
 	if code, v := uiPost(t, srv.URL, "uiScale=75"); code != 200 || v.UIScale != 75 {
 		t.Fatalf("scale 75: %d %d", code, v.UIScale)
 	}
-	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "QT_SCALE_FACTOR=0.75\n" {
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "SC5000_UI_SCALE=0.75\n" {
 		t.Fatalf("env file: %q", b)
 	}
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=75\n") {

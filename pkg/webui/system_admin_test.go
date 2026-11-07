@@ -298,10 +298,28 @@ func TestRemoteMountsManagementAndOmniSourceSync(t *testing.T) {
 
 	// Verify sftp mount is removed
 	remList := s.loadMounts()
+	var davID string
 	for _, m := range remList {
 		if m.ID == sftpMount.ID {
 			t.Fatalf("deleted mount still present in list")
 		}
+		if m.Protocol == "webdav" {
+			davID = m.ID
+		}
+	}
+
+	// Deleting the last WebDAV mount must not leave its password in nas.json
+	delReq = httptest.NewRequest(http.MethodDelete, "/api/mounts?id="+davID, nil)
+	delW = httptest.NewRecorder()
+	s.handleMounts(delW, delReq)
+	if delW.Code != http.StatusOK {
+		t.Fatalf("expected 200 deleting webdav mount, got %d: %s", delW.Code, delW.Body.String())
+	}
+	if b, err := os.ReadFile(s.nasConfigPath()); err == nil && strings.Contains(string(b), "davpassword") {
+		t.Fatalf("nas.json still holds the deleted mount's password: %s", b)
+	}
+	if cfg := s.loadNASConfig(); cfg.Password != "" || cfg.Enabled {
+		t.Fatalf("expected cleared nas config, got %+v", cfg)
 	}
 }
 

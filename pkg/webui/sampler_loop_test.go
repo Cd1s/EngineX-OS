@@ -209,6 +209,25 @@ func TestLoopToSamplerPadDirectWavSlicing(t *testing.T) {
 	}
 }
 
+func TestLoopToSamplerPadEmptySliceRejected(t *testing.T) {
+	mediaDir := t.TempDir()
+	s := New(Config{StateDir: t.TempDir(), UIDir: t.TempDir(), MediaRoot: mediaDir}, nil)
+	trackPath := filepath.Join(mediaDir, "USB1", "Music", "short.wav")
+	createSyntheticWav(t, trackPath, 44100, 1000)
+
+	// inSample lies beyond the 1000 frames in the file
+	body, _ := json.Marshal(map[string]any{"deck": 1, "pad": 3, "trackPath": trackPath,
+		"inSample": 50000, "outSample": 60000, "sampleRate": 44100})
+	w := httptest.NewRecorder()
+	s.handleSamplerLoopToPad(w, httptest.NewRequest(http.MethodPost, "/api/sampler/loop-to-pad", bytes.NewReader(body)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(mediaDir, "USB1", "Samples from loops", "Loop_Deck1_Pad3.wav")); err == nil {
+		t.Fatalf("empty WAV must not be written")
+	}
+}
+
 func TestLoopToSamplerPadFFmpegFallback(t *testing.T) {
 	mockRunner := &mockSamplerRunner{}
 	SetSamplerRunner(mockRunner.Run)

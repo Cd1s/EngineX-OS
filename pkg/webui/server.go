@@ -4,6 +4,7 @@ package webui
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -100,13 +102,16 @@ type Server struct {
 
 	automixMu sync.Mutex
 	automix   *AutomixManager
+
+	authMu    sync.Mutex
+	authFails map[string]*authStrike // wrong access codes per client network
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
 	if cfg.AccessToken == "" {
-		cfg.AccessToken = providers.RandomID()
+		cfg.AccessToken = GenerateAccessCode()
 	}
-	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}, logins: map[string]*loginFlow{}}
+	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}, logins: map[string]*loginFlow{}, authFails: map[string]*authStrike{}}
 	s.shadow = newShadowState()
 	exportCfg := cfg.ProlinkExport
 	if exportCfg.MediaCache == nil {
@@ -191,6 +196,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/relay", s.relayConfigPost)
 	s.RegisterBroadcastRoutes()
 	s.mux.HandleFunc("GET /api/prolink", s.prolinkGet)
+	s.mux.HandleFunc("GET /api/prolink/diag", s.prolinkDiagGet)
 	s.mux.HandleFunc("POST /api/prolink", s.prolinkPost)
 	s.mux.HandleFunc("GET /api/drives", s.dropDrivesGet)
 	s.mux.HandleFunc("GET /peer/decks", s.peerDecksGet)
@@ -322,14 +328,15 @@ func (s *Server) AccessToken() string { return s.cfg.AccessToken }
 func LoadAccessToken(dir string) (token string, created bool, err error) {
 	path := filepath.Join(dir, "access-token")
 	if b, err := os.ReadFile(path); err == nil {
-		if t := strings.TrimSpace(string(b)); t != "" {
+		// A long code from older releases is too long to type on a phone: replace it.
+		if t := strings.TrimSpace(string(b)); t != "" && !legacyAccessCode.MatchString(t) {
 			return t, false, nil
 		}
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", false, err
 	}
-	token = providers.RandomID()
+	token = GenerateAccessCode()
 	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
 		return "", false, err
 	}
@@ -349,13 +356,104 @@ func (s *Server) consoleQR(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Write(png)
 }
-func (s *Server) authorized(r *http.Request) bool {
-	v := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if c, err := r.Cookie("stream_sync"); err == nil && v == "" {
-		v = c.Value
+
+// legacyAccessCode matches codes from older releases: providers.RandomID (43 base64url) or 32 hex.
+var legacyAccessCode = regexp.MustCompile(`^([A-Za-z0-9_-]{43}|[0-9a-f]{32})$`)
+
+// accessCodeAlphabet leaves out 0/O and 1/I, which read alike on the deck screen.
+const accessCodeAlphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+
+// GenerateAccessCode returns a random XXXX-XXXX code: 32^8 (40 bits) choices.
+func GenerateAccessCode() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
 	}
-	return subtle.ConstantTimeCompare([]byte(v), []byte(s.cfg.AccessToken)) == 1
+	for i := range b {
+		b[i] = accessCodeAlphabet[b[i]%32] // 256 % 32 == 0: no modulo bias
+	}
+	return string(b[:4]) + "-" + string(b[4:])
 }
+
+// normalizeAccessCode lets "k7m9 p4x2" and "K7M9-P4X2" match the same code.
+func normalizeAccessCode(s string) string {
+	return strings.ToUpper(strings.NewReplacer("-", "", " ", "").Replace(s))
+}
+
+const (
+	authMaxFails = 5
+	authWindow   = time.Minute
+	authLockout  = time.Minute
+)
+
+type authStrike struct {
+	n            int
+	first, until time.Time
+}
+
+// authKey groups IPv6 clients by /64, so rotating privacy addresses do not reset the count.
+func authKey(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(64, 128)).String()
+	}
+	return host
+}
+
+// tryCode checks code against the access code. authMaxFails wrong codes from one
+// client within authWindow lock it out for authLockout, even with the right code.
+func (s *Server) tryCode(r *http.Request, code string) (ok, locked bool) {
+	if code == "" { // no credential sent is not a guess
+		return false, false
+	}
+	key, now := authKey(r), time.Now()
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	f := s.authFails[key]
+	if f != nil && now.Before(f.until) {
+		return false, true
+	}
+	if subtle.ConstantTimeCompare([]byte(normalizeAccessCode(code)), []byte(normalizeAccessCode(s.cfg.AccessToken))) == 1 {
+		delete(s.authFails, key)
+		return true, false
+	}
+	if f == nil || now.Sub(f.first) > authWindow {
+		if len(s.authFails) >= 4096 { // bound memory against address-spraying clients
+			for k, v := range s.authFails {
+				if now.Sub(v.first) > authWindow && now.After(v.until) {
+					delete(s.authFails, k)
+				}
+			}
+		}
+		f = &authStrike{first: now}
+		s.authFails[key] = f
+	}
+	if f.n++; f.n >= authMaxFails {
+		f.until = now.Add(authLockout)
+		return false, true
+	}
+	return false, false
+}
+
+// authorized checks the bearer header or console cookie. A wrong cookie is
+// cleared so an open tab with a stale code stops counting toward the lockout.
+func (s *Server) authorized(w http.ResponseWriter, r *http.Request) (ok, locked bool) {
+	v := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	cookie := false
+	if c, err := r.Cookie("stream_sync"); err == nil && v == "" {
+		v, cookie = c.Value, true
+	}
+	if ok, locked = s.tryCode(r, v); !ok && cookie {
+		http.SetCookie(w, &http.Cookie{Name: "stream_sync", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
+	}
+	return ok, locked
+}
+
+var errAuthLocked = errors.New("too many wrong access codes, try again in a minute")
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -377,9 +475,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if strings.HasPrefix(r.URL.Path, "/api/") && !s.authorized(r) {
-		fail(w, 401, errors.New("console login required"))
-		return
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		if ok, locked := s.authorized(w, r); locked {
+			fail(w, http.StatusTooManyRequests, errAuthLocked)
+			return
+		} else if !ok {
+			fail(w, 401, errors.New("console login required"))
+			return
+		}
 	}
 	s.mux.ServeHTTP(w, r)
 }
@@ -409,7 +512,7 @@ func input(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-const consoleLoginPage = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Stream Sync</title><style>body{background:#111;color:#eee;font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px}main{max-width:460px;margin:12vh auto}h1{font-size:28px}label{display:block;font-weight:600}input,button{box-sizing:border-box;width:100%;padding:14px;margin-top:10px;border-radius:6px;font:inherit}input{background:#222;color:#fff;border:1px solid #555}button{background:#287e60;color:white;border:0;font-weight:600;cursor:pointer}p{color:#bbb}</style><main><h1>Stream Sync</h1><form method="post" action="/login"><label for="token" id="label">Console Access Code</label><input id="token" name="token" type="password" autocomplete="current-password" required><button id="submit">Sign in</button></form><p id="hint">The Console Access Code is shown on the deck screen under Settings → About.</p></main><script>const l=(navigator.language||'en').toLowerCase();const t=l.startsWith('zh')?(l.includes('hant')||/-(tw|hk|mo)/.test(l)?['控制台存取碼','登入','控制台存取碼顯示在碟機螢幕的「設定 → 關於」中。']:['控制台访问码','登录','控制台访问码显示在碟机屏幕的「设置 → 关于」中。']):null;if(t){document.documentElement.lang=l;document.getElementById('label').textContent=t[0];document.getElementById('submit').textContent=t[1];document.getElementById('hint').textContent=t[2]}</script></html>`
+const consoleLoginPage = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Stream Sync</title><style>body{background:#111;color:#eee;font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px}main{max-width:460px;margin:12vh auto}h1{font-size:28px}label{display:block;font-weight:600}input,button{box-sizing:border-box;width:100%;padding:14px;margin-top:10px;border-radius:6px;font:inherit}input{background:#222;color:#fff;border:1px solid #555}button{background:#287e60;color:white;border:0;font-weight:600;cursor:pointer}p{color:#bbb}</style><main><h1>Stream Sync</h1><form method="post" action="/login"><label for="token" id="label">Console Access Code</label><input id="token" name="token" type="text" placeholder="XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" required><button id="submit">Sign in</button></form><p id="hint">The Console Access Code is shown on the deck screen under Settings → About.</p></main><script>const l=(navigator.language||'en').toLowerCase();const t=l.startsWith('zh')?(l.includes('hant')||/-(tw|hk|mo)/.test(l)?['控制台存取碼','登入','控制台存取碼顯示在碟機螢幕的「設定 → 關於」中。']:['控制台访问码','登录','控制台访问码显示在碟机屏幕的「设置 → 关于」中。']):null;if(t){document.documentElement.lang=l;document.getElementById('label').textContent=t[0];document.getElementById('submit').textContent=t[1];document.getElementById('hint').textContent=t[2]}</script></html>`
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -417,7 +520,7 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if !s.authorized(r) {
+	if ok, _ := s.authorized(w, r); !ok {
 		io.WriteString(w, consoleLoginPage)
 		return
 	}
@@ -430,7 +533,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("invalid login"))
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(r.Form.Get("token")), []byte(s.cfg.AccessToken)) != 1 {
+	if ok, locked := s.tryCode(r, r.Form.Get("token")); locked {
+		fail(w, http.StatusTooManyRequests, errAuthLocked)
+		return
+	} else if !ok {
 		fail(w, 401, errors.New("invalid access code"))
 		return
 	}

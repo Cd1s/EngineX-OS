@@ -1,10 +1,12 @@
 // release-gate.sh only, never shipped. The gate copies this over the stock
 // qrc:/Skins/Common/Items/QmlWarnings.qml (EmbeddedMain always creates it) in its
 // sandbox /data, so Engine's own item tree reports what the shipped pack rendered:
-// Settings -> Services -> Streaming rows, the About version line, the waveform tile.
+// Settings -> Services -> Streaming rows, the About version line, the waveform tile,
+// and Control Center's size at UI Scale 75 %.
 // Lines are short "SCPROBE kind|field|...|" records: Engine splits long log lines.
 import QtQuick 2.12
 import QtQuick.Window 2.2
+import QtQuick.Controls 2.12
 import Planck 1.0
 
 Item {
@@ -39,15 +41,34 @@ Item {
     }
     function report() {
         let main = null // EmbeddedMain's root, which carries the pack's settings
+        let tabView = null
         walk(probe.Window.window.contentItem, new Set(), function (o) {
             if (!main && "scAutoAnalyze" in o) main = o
+            if (!tabView && o.objectName === "ControlCenterTabView") tabView = o
             if (o.objectName === "Version")
                 console.warn("SCPROBE version|" + String(o.text).replace(/<[^>]*>/g, "") + "|")
-            if (o.objectName === "ControlCenter_WaveformStyle" || o.objectName === "ControlCenter_LiveStream" || o.objectName === "ControlCenter_UpfaderEcho")
+            if (o.objectName === "ControlCenter_WaveformStyle" || o.objectName === "ControlCenter_LiveStream" || o.objectName === "ControlCenter_UpfaderEcho" || o.objectName === "ControlCenter_JogLight")
                 console.warn("SCPROBE tile|" + o.objectName + "|")
             if (isSection(o))
                 entries(o, function (c) { console.warn("SCPROBE entry|" + o.label + "|" + c.text + "|" + (c.visible ? 1 : 0) + "|") })
         })
+        // UI Scale < 100 %: Control Center must follow uiContainer (root.transformed), not
+        // defaultScreenSize, or a bare band shows right and below. The Drawer is not in the
+        // item tree; its popup item (the ancestor directly under the Overlay) has its size.
+        let drawer = tabView
+        while (drawer && drawer.parent && drawer.parent !== probe.Overlay.overlay) drawer = drawer.parent
+        if (main && drawer && main.transformed && "scUIScale" in main) {
+            const was = main.scUIScale
+            main.scUIScale = 75 // bindings re-evaluate synchronously; restored right after
+            const uw = Math.round(main.transformed.width), uh = Math.round(main.transformed.height)
+            const w = Math.round(drawer.width), h = Math.round(drawer.height)
+            main.scUIScale = was
+            // stock adds 1 px to the height when the screen is rotated 90 degrees
+            const ok = uw > 0 && w === uw && (h === uh || h === uh + 1)
+            console.warn("SCPROBE ccsize|75|" + w + "x" + h + "|" + uw + "x" + uh + "|" + (ok ? 1 : 0) + "|")
+        } else {
+            console.warn("SCPROBE ccsize|none|" + !!main + "|" + !!drawer + "|")
+        }
         // #55: the pack's toggle, and the Engine preference it drives.
         const aa = Planck.getProperty("/Client/Preferences/AutoAnalysis")
         console.warn("SCPROBE analyze|" + (main ? typeof main.scAutoAnalyze : "none") + "|" + (aa && aa.translator ? 1 : 0) + "|")

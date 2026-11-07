@@ -211,6 +211,9 @@ func (c *NFSClient) port(ctx context.Context, prog, vers uint32) (int, error) {
 	return int(p), nil
 }
 
+// NFSPort asks the portmapper where NFSv2 (UDP) listens: a cheap reachability probe.
+func (c *NFSClient) NFSPort(ctx context.Context) (int, error) { return c.port(ctx, rpcNFS, 2) }
+
 // Lookup mounts export ("/C/") and walks path ("/PIONEER/rekordbox/export.pdb").
 func (c *NFSClient) Lookup(ctx context.Context, export, path string) ([]byte, NFSFile, error) {
 	var file NFSFile

@@ -28,6 +28,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include "dsp_smooth.h"
@@ -1829,10 +1830,20 @@ int az01_apply_image(const char *path, int flags) {
             close(fd);
             if (n >= 19 && memmem(buf, (size_t)n, "ENGINEX_DATA_BUNDLE", 19) != NULL) {
                 fprintf(stderr, "engine-ui-hook: intercepted az01_apply_image with ENGINEX_DATA_BUNDLE (%s)\n", path);
-                char cmd[1024];
-                snprintf(cmd, sizeof(cmd), "/data/enginex/install.sh \"%s\" && systemctl reboot", path);
-                int ret = system(cmd);
-                (void)ret;
+                pid_t pid = fork();
+                if (pid == 0) {
+                    execl("/bin/sh", "sh", "/data/enginex/install.sh", path, (char *)NULL);
+                    _exit(127);
+                }
+                int status = 0;
+                if (pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                    pid_t rb = fork();
+                    if (rb == 0) {
+                        execl("/bin/systemctl", "systemctl", "reboot", (char *)NULL);
+                        _exit(127);
+                    }
+                    if (rb > 0) waitpid(rb, NULL, 0);
+                }
                 return 0;
             }
         }

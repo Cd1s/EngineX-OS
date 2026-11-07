@@ -29,7 +29,7 @@ func (v uiViews) valid() error {
 		if n, err := strconv.Atoi(k); err != nil || n < 1 || n > 5 || k != strconv.Itoa(n) {
 			return errors.New("views: views are 1..5")
 		}
-		if len(snap) > 16 {
+		if len(snap) > 32 {
 			return errors.New("views: too many settings")
 		}
 		for name, val := range snap {
