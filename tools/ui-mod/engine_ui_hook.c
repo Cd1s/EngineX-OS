@@ -963,14 +963,15 @@ static uchar *load_blob(const char *path) {
 }
 
 #if defined(__aarch64__)
-// Qt finds a file at data + a 32-bit offset. On a 64-bit Engine the heap is far
-// from data, so map each blob within the 4 GiB above it instead; start 2 GiB up,
-// clear of the brk heap that follows the Engine image.
+// Qt finds a file at data + a signed 32-bit offset (sign-extended with sxtw on AArch64).
+// On a 64-bit Engine the heap is far from data, so map each blob within 0..0x7fffffff
+// (positive signed 32-bit offset) above it; start 512 MiB up, clear of the Engine image
+// and its brk heap.
 static uchar *near_data(uchar *blob, const uchar *data) {
     static uintptr_t next;
     size_t page = (size_t)sysconf(_SC_PAGESIZE), n = 4 + (size_t)be32(blob), span = (n + page - 1) / page * page;
-    uintptr_t lo = ((uintptr_t)data + page - 1) / page * page, hi = (uintptr_t)data + 0xffffffffu - span;
-    if (next < lo || next > hi) next = lo + 0x80000000u;
+    uintptr_t lo = ((uintptr_t)data + page - 1) / page * page, hi = (uintptr_t)data + 0x7fffffffu - span;
+    if (next < lo || next > hi) next = lo + 0x20000000u;
     for (; next <= hi; next += 0x1000000) { // 16 MiB steps past anything mapped there
         void *p = mmap((void *)next, span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
         if (p == MAP_FAILED) continue;
