@@ -305,7 +305,7 @@
         ] },
         { k: "h", id: "views", x: L("视图管理（View 1–5）", "視圖管理（View 1–5）", "Layout views (View 1–5)"), nav: L("视图管理（1–5）", "視圖管理（1–5）", "Views 1–5") },
         { k: "note", tone: "new", x: L("【开发中，随后续版本】视图管理器随 Issue #102 的下一次发版上线，菜单名以发布版为准。", "【開發中，隨後續版本】視圖管理器隨 Issue #102 的下一次發版上線，選單名稱以發佈版為準。", "[In development, upcoming release] The layout manager ships with the next release of Issue #102; menu names follow the released build.") },
-        { k: "shot", src: "site/assets/shots/shot-layout-manager.png", cap: L("Layout Manager：5 个预设视图、保存视图、Pads 默认关闭、4 个波形开关", "Layout Manager：5 個預設視圖、儲存視圖、Pads 預設關閉、4 個波形開關", "Layout Manager: 5 preset views, Save View, Pads off by default, 4-waveform toggle") },
+        { k: "shot", src: "site/assets/shots/shot-layout-manager.png", cap: L("Layout Manager：5 个预设视图、保存 / 重置视图、Pads 默认关闭、EngineX 视图预设（波形样式、转盘灯效）", "Layout Manager：5 個預設視圖、儲存 / 重設視圖、Pads 預設關閉、EngineX 視圖預設（波形樣式、轉盤燈效）", "Layout Manager: 5 preset views, Save / Reset View, Pads off by default, EngineX view preset (waveform style, jog light)") },
         { k: "ul", x: [
           L("**View 1 ~ View 5**：五个预设一键切换；**保存视图**把当前布局存进该视图，重启后保持。", "**View 1 ~ View 5**：五個預設一鍵切換；**儲存視圖**把目前版面存進該視圖，重啟後保持。", "**View 1 ~ View 5**: five presets, one tap to switch; **Save View** stores the current layout into the view and it survives a reboot."),
           L("**表演打击垫（Performance Pads）默认关闭**，给波形留出更多空间。", "**表演打擊墊（Performance Pads）預設關閉**，給波形留出更多空間。", "**Performance Pads are off by default** to leave more room for waveforms."),
@@ -355,10 +355,10 @@
           L("**千兆有线网口**：从 100 Mbps 解锁到 1 Gbps；Wi-Fi 受主板 SDIO 总线限制实测约 9–10 MB/s，大曲库请走网线。", "**千兆有線網口**：從 100 Mbps 解鎖到 1 Gbps；Wi-Fi 受主機板 SDIO 匯流排限制實測約 9–10 MB/s，大曲庫請走網路線。", "**Gigabit Ethernet**: unlocked from 100 Mbps to 1 Gbps; Wi-Fi is capped by the board's SDIO bus at about 9–10 MB/s, so use the cable for large libraries."),
           L("**蓝牙音频**：手机蓝牙推流到碟机，屏幕显示曲目信息，可播放 / 暂停 / 切歌。", "**藍牙音訊**：手機藍牙推流到碟機，螢幕顯示曲目資訊，可播放 / 暫停 / 切歌。", "**Bluetooth audio**: stream from your phone; the deck shows track info and supports play / pause / skip."),
         ] },
-        { k: "shot", name: "zh:06b-preferences-device.png", cap: L("设备设置：语言、波形、流媒体音质、转盘灯效", "裝置設定：語言、波形、串流音質、轉盤燈效", "Device settings: language, waveform, streaming quality, jog lighting") },
-        { k: "shot", src: "site/assets/shots/shot-control-center.png", cap: L("实机渲染：控制中心（5.3.0.2 版，含 Live Stream 磁贴；新版第 3 行是波形样式、转盘灯效、推杆回音、智能同步，见「界面地图」）", "實機渲染：控制中心（5.3.0.2 版，含 Live Stream 磁貼；新版第 3 行是波形樣式、轉盤燈效、推桿回音、智慧同步，見「介面地圖」）", "Rendered on-device: Control Center in 5.3.0.2 with the Live Stream tile; the new third row is Waveform Style, Jog Light, Echo Out and Smart Sync (see Menu map)") },
-        { k: "shot", src: "site/assets/shots/shot-preferences-enginex.png", cap: L("实机渲染：设置 → 设备（语言、波形、流媒体音质、转盘灯效）", "實機渲染：設定 → 裝置（語言、波形、串流音質、轉盤燈效）", "Rendered on-device: Settings → Device (language, waveform, streaming quality, jog light)") },
-        { k: "shot", src: "site/assets/shots/shot-preferences-enginex-2.png", cap: L("实机渲染：设置 → 设备（软限幅、自动增益、OmniSource、Pro DJ Link、4 轨波形、Player #）", "實機渲染：設定 → 裝置（軟限幅、自動增益、OmniSource、Pro DJ Link、4 軌波形、Player #）", "Rendered on-device: Settings → Device (soft clipper, auto-gain, OmniSource, Pro DJ Link, 4-deck waveform, Player #)") },
+        { k: "shot", name: "zh:06b-preferences-device.png", cap: L("设备设置：语言、界面缩放、Pad 灯亮度、4 轨波形、转盘灯效", "裝置設定：語言、介面縮放、Pad 燈亮度、4 軌波形、轉盤燈效", "Device settings: language, UI scale, pad LED brightness, 4-deck waveform, jog lighting") },
+        { k: "shot", src: "site/assets/shots/shot-control-center.png", cap: L("实机渲染：控制中心，第 3 行是波形样式、转盘灯效、推杆回音、智能同步", "實機渲染：控制中心，第 3 行是波形樣式、轉盤燈效、推桿回音、智慧同步", "Rendered on-device: Control Center; the third row is Waveform Style, Jog Light, Fader Echo and Smart Sync") },
+        { k: "shot", src: "site/assets/shots/shot-preferences-enginex.png", cap: L("实机渲染：设置 → 设备（语言、界面缩放、Pad 灯亮度、4 轨波形、转盘灯效、Player #）", "實機渲染：設定 → 裝置（語言、介面縮放、Pad 燈亮度、4 軌波形、轉盤燈效、Player #）", "Rendered on-device: Settings → Device (language, UI scale, pad LED brightness, 4-deck waveform, jog light, Player #)") },
+        { k: "shot", src: "site/assets/shots/shot-preferences-enginex-2.png", cap: L("实机渲染：设置 → 服务（流媒体音质、网易云下载方式、Live Stream、Pro DJ Link 曲库与导出）", "實機渲染：設定 → 服務（串流音質、網易雲下載方式、Live Stream、Pro DJ Link 曲庫與匯出）", "Rendered on-device: Settings → Services (streaming quality, NetEase download, Live Stream, Pro DJ Link library and export)") },
       ],
     },
 
@@ -462,7 +462,7 @@
       gh: L("GitHub 仓库 ↗", "GitHub 儲存庫 ↗", "GitHub ↗"),
     },
     // 首屏配图用实机渲染截图；hero-banner*.svg 自带霓虹渐变和过期数字（「5 大平台」），首页不用
-    shot: { src: "assets/screenshots/zh-CN/01-deck-stems-official-pads.png", cap: L("EngineX OS 实机画面：原生 4 轨 Stems 分轨与 3-Band 波形", "EngineX OS 實機畫面：原生 4 軌 Stems 分軌與 3-Band 波形", "EngineX OS on hardware: native 4-stem separation and 3-Band waveform") },
+    shot: { src: "site/assets/shots/shot-control-center.png", cap: L("EngineX OS 控制中心：Quantize、Smart Scratch、波形样式、转盘灯效、推杆回音、智能同步一屏直达", "EngineX OS 控制中心：Quantize、Smart Scratch、波形樣式、轉盤燈效、推桿回音、智慧同步一屏直達", "EngineX OS Control Center: Quantize, Smart Scratch, Waveform Style, Jog Light, Fader Echo and Smart Sync on one screen") },
     stats: [
       ["16", L("款支持机型", "款支援機型", "supported models"), L("8 款一代 .img + 8 款二代 /data", "8 款一代 .img + 8 款二代 /data", "8 gen-1 .img + 8 gen-2 /data")],
       ["7", L("个流媒体音源", "個串流音源", "streaming services"), L("Apple Music、Spotify、Deezer、SoundCloud、Beatport、TIDAL、网易云", "Apple Music、Spotify、Deezer、SoundCloud、Beatport、TIDAL、網易雲", "Apple Music, Spotify, Deezer, SoundCloud, Beatport, TIDAL, NetEase")],

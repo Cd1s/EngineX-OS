@@ -115,9 +115,9 @@
 </tr>
 <tr>
 <td width="50%" align="center" valign="top">
-<img src="./docs/assets/screenshots/zh-CN/03-sources-5-streaming-platforms.png" width="100%" alt="五大流媒体平台"><br>
-<b>音源页内置 5 大音乐平台</b><br>
-<sub>网易云 · Spotify · Deezer · SoundCloud · TIDAL 与 U 盘并列</sub>
+<img src="./docs/assets/screenshots/zh-CN/03-sources-5-streaming-platforms.png" width="100%" alt="七大流媒体平台"><br>
+<b>音源页内置 7 大音乐平台</b><br>
+<sub>TIDAL · 网易云 · Spotify · Deezer · SoundCloud · Beatport · Apple Music 与 U 盘并列</sub>
 </td>
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/zh-CN/04-streaming-qr-login.png" width="100%" alt="手机扫码登录"><br>
@@ -134,7 +134,7 @@
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/zh-CN/06b-preferences-device.png" width="100%" alt="设备设置"><br>
 <b>设备设置菜单</b><br>
-<sub>直接切换语言、波形样式、流媒体音质与转盘灯效</sub>
+<sub>直接切换语言、界面缩放、Pad 灯亮度、4 轨波形与转盘灯效</sub>
 </td>
 </tr>
 <tr>

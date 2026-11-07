@@ -115,9 +115,9 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 </tr>
 <tr>
 <td width="50%" align="center" valign="top">
-<img src="./docs/assets/screenshots/en/03-sources-5-streaming-platforms.png" width="100%" alt="5 Streaming Services"><br>
-<b>5 Streaming Services in the Source Menu</b><br>
-<sub>NetEase · Spotify · Deezer · SoundCloud · TIDAL alongside USB & SD</sub>
+<img src="./docs/assets/screenshots/en/03-sources-5-streaming-platforms.png" width="100%" alt="7 Streaming Services"><br>
+<b>7 Streaming Services in the Source Menu</b><br>
+<sub>TIDAL · NetEase · Spotify · Deezer · SoundCloud · Beatport · Apple Music alongside USB & SD</sub>
 </td>
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/en/04-streaming-qr-login.png" width="100%" alt="Phone QR Login"><br>
@@ -134,7 +134,7 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/en/06b-preferences-device.png" width="100%" alt="Device Settings"><br>
 <b>Device Settings Menu</b><br>
-<sub>Switch language, waveform style, audio quality, and jog lights</sub>
+<sub>Language, UI scale, pad LED brightness, 4-deck waveform and jog lights</sub>
 </td>
 </tr>
 <tr>
