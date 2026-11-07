@@ -134,8 +134,12 @@ SERVICES_MAIN = """
 		}
 		if (c.libraryView) s.library = !!c.libraryView.visibleSettingValue
 		if (PlanckGUI.views.isPortrait) s.albumArt = !!c.deckController.albumArtVisible
+		for (const [k] of scViewPrefs) s[k] = typeof root[k] === "boolean" ? root[k] : String(root[k])
 		return s
 	}
+	// EngineX settings a view keeps too: [snapshot key = root property, /v1/sc5000/ui query].
+	readonly property var scViewPrefs: [["scWave", "waveform"], ["scJog", "jog"], ["scUIScale", "uiScale"],
+		["scDualColumn", "browserDualColumn"], ["scBeatJumpPads", "beatJumpPads"], ["scSwapLoopOrder", "swapLoopOrder"]]
 	function scViewApply(s) {
 		const m = scViewControls()
 		if (!m || (scFourDeckRole !== "" && !(m.deckCount && m.deckCount.settingNames && m.deckCount.settingNames.length >= 2))) return false
@@ -150,6 +154,13 @@ SERVICES_MAIN = """
 		}
 		if (typeof s.library === "boolean" && c.libraryView && !!c.libraryView.visibleSettingValue !== s.library) c.libraryView.performanceLibraryEnableClicked()
 		if (typeof s.albumArt === "boolean" && PlanckGUI.views.isPortrait && !!c.deckController.albumArtVisible !== s.albumArt) c.deckController.onDisplayAlbumArtClicked()
+		const q = [] // a view saved before these keys keeps the current settings
+		for (const [k, key] of scViewPrefs) {
+			const want = s[k]
+			if (typeof want === "boolean" && want !== !!root[k]) q.push(key + "=" + (want ? 1 : 0))
+			else if (typeof want === "string" && want !== String(root[k])) q.push(key + "=" + encodeURIComponent(want))
+		}
+		if (q.length) scCall(q.join("&"))
 		scViewQuiet = Date.now() + 3000
 		scViewLast = ""
 		return true
@@ -277,7 +288,8 @@ SERVICES_MAIN = """
 			const sr = g(d, "/Track/SampleRate").value
 			const s = {ps: !!g(d, "/PlayState").state, posMs: sr > 0 ? g(d, "/Track/TrackPosition").unnormalized / sr * 1000 : 0,
 				pitch: parseFloat(g(d, "/SpeedState").string) || 0, at: now, jumps: 0,
-				net: g(d, "/Track/SongLoaded").state ? g(d, "/Track/TrackNetworkPath").string : ""}
+				// A streaming track's TrackNetworkPath is only "net://<uuid>/(Unknown)" (5.3.0); its TrackUri names it.
+				net: g(d, "/Track/SongLoaded").state ? (g(d, "/Track/TrackUri").string || g(d, "/Track/TrackNetworkPath").string) : ""}
 			const p = scShadowPrev[d]
 			// Holding CUE previews with PlayState false (measured on a JP07): CUE's
 			// LED is on and the position runs. The LED alone also blinks while paused.
@@ -769,8 +781,18 @@ SERVICES_MAIN = """
 		{ id: "beatport", name: "Beatport" },
 		{ id: "applemusic", name: "Apple Music" }
 	]
-	readonly property var scDict: (@DICT@)
-	function scT(s) { return scDict[s] || s }
+	// Every row is keyed by all three spellings, so a string baked into the pack in
+	// one language maps to any other: changing scLang re-evaluates the bindings.
+	readonly property var scDicts: (@DICTS@)
+	readonly property var scDict: scDicts[scLang] || ({})
+	function scT(s) { const d = scDicts[scLang]; return (d && d[s]) || s }
+	// Translated literals reach this through Math.scI18n: ids here are not visible from every file.
+	QtObject {
+		id: scI18n
+		function t(s) { return root.scT(s) }
+	}
+	// Evaluated while this file's bindings are enabled, before any Loader below creates its content.
+	readonly property bool scI18nShared: { Math.scI18n = scI18n; return true }
 	function scIcon(id) {
 		if (id === "tidal") return "qrc:/@ICONS@/SourceTIDALColored.png"
 		if (id === "soundcloud") return "qrc:/@ICONS@/SourceSoundCloudColored.png"
@@ -1064,28 +1086,78 @@ SERVICES_MAIN = """
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || x.status !== 200) return
 			const url = "file://" + encodeURI(JSON.parse(x.responseText).path)
+			// Engine imports a file only through a deck load, so load it on an empty deck
+			// and eject it again once the Stems render is queued (scStemUnload).
+			const song = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deck))
+			scStemUnload.deck = deck
+			scStemUnload.armed = !(song && song.translator && song.translator.state)
 			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = url
 			scStemImport.url = url
+			scStemImport.path = JSON.parse(x.responseText).path
 			scStemImport.tries = 20
 			scStemImport.restart()
 		}
 		x.send()
 		return true
 	}
-	// Imports land in the deck's internal library, whose universal ids are plain
-	// track ids. shortcut: scans ids 1-2000; widen if that library ever grows past it.
+	// The import lands in the internal m.db, but while a streaming collection is open
+	// collectionController is that collection and cannot see it. So the gateway looks
+	// the id up by file name; the controller scan (ids 1-2000) is only the fallback.
 	Timer {
 		id: scStemImport
 		property string url: ""
+		property string path: ""
+		property int tries: 0
+		interval: 500; repeat: true
+		function render(id) {
+			if (!running) return // a slower reply after the render already started
+			Planck.librarianController.stemsQueueManager.startRenderTracks(String(id))
+			if (scStemUnload.armed) {
+				scStemUnload.name = path.slice(path.lastIndexOf("/") + 1)
+				scStemUnload.tries = 20
+				scStemUnload.restart()
+			}
+			stop()
+		}
+		onTriggered: {
+			if (tries-- <= 0) { stop(); return }
+			const x = new XMLHttpRequest()
+			x.open("GET", "http://127.0.0.1:8080/v1/sc5000/stems/track-id?path=" + encodeURIComponent(path))
+			x.onreadystatechange = function() {
+				if (x.readyState !== 4 || x.status !== 200) return
+				const r = JSON.parse(x.responseText)
+				if (r.trackId > 0) render(r.trackId)
+			}
+			x.send()
+			const ids = Array.from({ length: 2000 }, (_, i) => i + 1)
+			const lines = (Planck.librarianController.collectionController.getTrackUrisFromUniversalIds(ids) || "").split("\\n")
+			const hit = lines.find(l => l.indexOf(encodeURI(path.replace("/data/", "/")) + "?") >= 0)
+			const id = hit && /[?&]trackId=(\\d+)/.exec(hit)
+			if (id) render(id[1])
+		}
+	}
+	// Ejects the deck that scStemStream loaded only to get the file into the library,
+	// but only while it still holds that file and is not playing.
+	// shortcut: one pending import at a time; a second Stems tap re-arms the same deck.
+	Timer {
+		id: scStemUnload
+		property int deck: 0
+		property bool armed: false
+		property string name: ""
 		property int tries: 0
 		interval: 500; repeat: true
 		onTriggered: {
-			const ids = Array.from({ length: 2000 }, (_, i) => i + 1)
-			const lines = (Planck.librarianController.collectionController.getTrackUrisFromUniversalIds(ids) || "").split("\\n")
-			const hit = lines.find(l => l.startsWith(url + "?"))
-			const id = hit && /[?&]trackId=(\\d+)/.exec(hit)
-			if (id) Planck.librarianController.stemsQueueManager.startRenderTracks(id[1])
-			if (id || --tries <= 0) stop()
+			if (--tries <= 0 || !armed) { stop(); return }
+			const song = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deck))
+			const uri = Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(deck))
+			if (!song.translator.state || !uri.translator) return
+			let u = uri.translator.string
+			try { u = decodeURIComponent(u) } catch (e) { }
+			if (u.indexOf(name) < 0) return
+			if (!Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state)
+				Planck.getProperty("/Engine/Deck%1/Track/Unload".arg(deck)).translator.state = true
+			armed = false
+			stop()
 		}
 	}
 	Instantiator {
@@ -1353,29 +1425,17 @@ JOG_ENTRY = """
 			currentValue: values[Math.max(0, ids.indexOf(root.scJog))]
 			onSelected: function(index) { root.scCall("jog=" + ids[index]) }
 		},
+"""
+
+# Settings -> Services: streaming, live stream and Pro DJ Link. The gate probe looks
+# for objectName ControlCenter_LiveStream (it was a Control Center tile up to #50).
+SERVICES_ENTRIES = QUALITY_ENTRY + """
 		EntryBase.ListEntry {
-			text: "Auto-Analyze Drives"
+			text: "Live Stream"
+			objectName: "ControlCenter_LiveStream"
 			values: ["Off", "On"]
-			currentValue: values[root.scAutoAnalyze ? 1 : 0]
-			onSelected: function(index) { root.scCall("autoAnalyze=" + index) }
-		},
-		EntryBase.ListEntry {
-			text: "Master Soft Clipper"
-			values: ["Off", "On"]
-			currentValue: values[root.scMasterLimiter ? 1 : 0]
-			onSelected: function(index) { root.scCall("masterLimiter=" + index) }
-		},
-		EntryBase.ListEntry {
-			text: "Auto-Gain (0 dB Normalize)"
-			values: ["Off", "On"]
-			currentValue: values[root.scAutoGain ? 1 : 0]
-			onSelected: function(index) { root.scCall("autoGain=" + index) }
-		},
-		EntryBase.ListEntry {
-			text: "OmniSource (Drives in Streaming)"
-			values: ["Off", "On"]
-			currentValue: values[root.scOmniSource ? 1 : 0]
-			onSelected: function(index) { root.scCall("omniSource=" + index) }
+			currentValue: values[root.scBroadcastOn ? 1 : 0]
+			onSelected: function(index) { root.scCall("broadcast=" + index) }
 		},
 		EntryBase.ListEntry {
 			text: "Pro DJ Link Library"
@@ -1391,14 +1451,111 @@ JOG_ENTRY = """
 		},
 """
 
-EXTRA_DEVICE_ENTRIES = """
+# User Profile -> Playback: audio DSP and playback.
+PLAYBACK_ENTRIES = """
+		EntryBase.ListEntry {
+			text: "Master Soft Clipper"
+			values: ["Off", "On"]
+			currentValue: values[root.scMasterLimiter ? 1 : 0]
+			onSelected: function(index) { root.scCall("masterLimiter=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "Auto-Gain (0 dB Normalize)"
+			values: ["Off", "On"]
+			currentValue: values[root.scAutoGain ? 1 : 0]
+			onSelected: function(index) { root.scCall("autoGain=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "Echo Out"
+			values: ["Off", "On"]
+			currentValue: values[root.scUpfaderEcho ? 1 : 0]
+			onSelected: function(index) { root.scCall("upfaderEcho=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "Stems EQ Mode"
+			values: ["Off", "On"]
+			currentValue: values[root.scStemsEqMode ? 1 : 0]
+			onSelected: function(index) { root.scCall("stemsEqMode=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "Color FX Style"
+			readonly property var ids: ["off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"]
+			values: ["Off", "Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"]
+			currentValue: values[Math.max(0, ids.indexOf(root.scPioneerFx))]
+			onSelected: function(index) { root.scCall("pioneerFx=" + ids[index]) }
+		},
+"""
+
+BEAT_JUMP_ENTRIES = """
+		EntryBase.ListEntry {
+			text: "Beat Jump Pad Bank"
+			values: ["Off", "On"]
+			currentValue: values[root.scBeatJumpPads ? 1 : 0]
+			onSelected: function(index) { root.scCall("beatJumpPads=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "Swap Loop / Beat Jump"
+			values: ["Off", "On"]
+			currentValue: values[root.scSwapLoopOrder ? 1 : 0]
+			onSelected: function(index) { root.scCall("swapLoopOrder=" + index) }
+		},
+"""
+
+SAFETY_ENTRIES = """
+		EntryBase.ListEntry {
+			text: "Sync Guard Tolerance"
+			readonly property var ids: [0, 10, 15, 20]
+			values: ["Off", "10%", "15%", "20%"]
+			currentValue: values[Math.max(0, ids.indexOf(root.scSyncGuardPct))]
+			onSelected: function(index) { root.scCall("syncGuardPct=" + ids[index]) }
+		},
+"""
+
+DUAL_COLUMN_ENTRY = """
+		EntryBase.ListEntry {
+			text: "Dual-Column Browser"
+			values: ["Off", "On"]
+			currentValue: values[root.scDualColumn ? 1 : 0]
+			onSelected: function(index) { root.scCall("browserDualColumn=" + index) }
+		},
+"""
+
+LIBRARY_ENTRIES = """
+		EntryBase.ListEntry {
+			text: "Auto-Analyze Drives"
+			values: ["Off", "On"]
+			currentValue: values[root.scAutoAnalyze ? 1 : 0]
+			onSelected: function(index) { root.scCall("autoAnalyze=" + index) }
+		},
+		EntryBase.ListEntry {
+			text: "OmniSource (Drives in Streaming)"
+			values: ["Off", "On"]
+			currentValue: values[root.scOmniSource ? 1 : 0]
+			onSelected: function(index) { root.scCall("omniSource=" + index) }
+		},
+""" + DUAL_COLUMN_ENTRY
+
+UI_SCALE_ENTRY = """
 		EntryBase.ListEntry {
 			text: "UI Scale"
 			readonly property var ids: ["100", "95", "90", "85", "80", "75"]
 			values: ["100%", "95%", "90%", "85%", "80%", "75%"]
 			currentValue: values[Math.max(0, ids.indexOf(String(root.scUIScale)))]
-			onSelected: function(index) { if (ids[index] !== String(root.scUIScale)) root.scRestartCall("uiScale=" + ids[index]) }
+			onSelected: function(index) { if (ids[index] !== String(root.scUIScale)) root.scCall("uiScale=" + ids[index]) }
 		},
+"""
+
+LED_ENTRY = """
+		EntryBase.ListEntry {
+			text: "Pad LED Brightness"
+			readonly property var ids: [100, 80, 60, 40, 20]
+			values: ["100%", "80%", "60%", "40%", "20%"]
+			currentValue: values[Math.max(0, ids.indexOf(root.scLedBrightness))]
+			onSelected: function(index) { root.scCall("ledBrightness=" + ids[index]) }
+		},
+"""
+
+FOUR_DECK_ENTRIES = """
 		EntryBase.ListEntry {
 			text: "4-Deck Waveform"
 			visible: root.scPlayer // #49
@@ -1414,21 +1571,13 @@ EXTRA_DEVICE_ENTRIES = """
 			currentValue: values[Math.max(0, ids.indexOf(root.scFourDeckRoleSetting))]
 			onSelected: function(index) { if (ids[index] !== root.scFourDeckRoleSetting) root.scRestartCall("fourDeckRole=" + ids[index]) }
 		},
-		EntryBase.ListEntry {
-			text: "Live Stream"
-			readonly property var ids: ["0", "1"]
-			values: ["Off", "On"]
-			currentValue: values[root.scBroadcastOn ? 1 : 0]
-			onSelected: function(index) { root.scCall("broadcast=" + ids[index]) }
-		},
-		EntryBase.ListEntry {
-			text: "Echo Out"
-			readonly property var ids: ["0", "1"]
-			values: ["Off", "On"]
-			currentValue: root.scUpfaderEcho ? "On" : "Off"
-			onSelected: function(index) { root.scCall("upfaderEcho=" + ids[index]) }
-		},
 """
+
+# #99 Layout Manager: what a View 1..5 keeps besides the stock layout (scViewSnapshot).
+VIEW_ENTRIES = """
+		@HEADLINE@ { text: "ENGINEX VIEW PRESET" },
+		WaveformStyle { },
+""" + JOG_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES
 
 # #78: a deck in a booth can be switched off without reaching for the recessed rear
 # button. Engine's own quit path: the "Turn Off" confirmation, recording and library
@@ -1448,19 +1597,9 @@ LANGUAGE_ENTRY = """
 			values: ["English", "简体中文", "繁體中文"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scLang))]
 			onSelected: function(index) {
-				if (ids[index] === root.scLang) return
-				const lang = ids[index]
-				const prompt = PlanckGUI.views.prompts.post({
-					type: Prompt.Warning,
-					message: "切换语言需要重启 Engine，播放会中断。\nRestart Engine to change language? Playback will stop.",
-					options: Prompt.Cancel | Prompt.Ok
-				})
-				prompt.finished.connect(function(role) {
-					if (role === Prompt.AcceptRole) root.scCall("lang=" + lang + "&restart=1")
-				})
+				if (ids[index] !== root.scLang) root.scCall("lang=" + ids[index])
 			}
 		},
-		WaveformStyle { },
 """
 
 # Control Center: the CDJ-3000 "WAVEFORM COLOR" control, in a stock-size tile
@@ -1549,10 +1688,12 @@ WAVE_TILE = """
 		}
 """
 
-BROADCAST_TILE = """
+# Live Stream moved to Settings -> Services; the Control Center keeps performance tiles.
+JOG_TILE = """
 		Rectangle {
-			id: scBroadcastTile
-			objectName: "ControlCenter_LiveStream"
+			id: scJogTile
+			objectName: "ControlCenter_JogLight"
+			readonly property var ids: ["static", "rainbow", "fast", "bpm"]
 			width: 256
 			height: 104
 			radius: 16
@@ -1560,7 +1701,7 @@ BROADCAST_TILE = """
 			Text {
 				x: 14
 				y: 8
-				text: "Live Stream"
+				text: "Jog Light"
 				font: Style.fontH4
 				color: Style.font01Color
 			}
@@ -1568,26 +1709,26 @@ BROADCAST_TILE = """
 				x: 12
 				y: 36
 				Repeater {
-					model: ["OFF", "ON"]
+					model: ["Static", "Rainbow", "Fast", "BPM"]
 					Rectangle {
-						readonly property bool selected: (index === 1) === root.scBroadcastOn
-						width: (scBroadcastTile.width - 24) / 2
+						readonly property bool selected: root.scJog === scJogTile.ids[index]
+						width: (scJogTile.width - 24) / 4
 						height: 56
-						color: selected ? "#00c3e3" : broadcastTap.pressed ? "#6a6a6a" : "#4a4a4a"
+						color: selected ? "#00c3e3" : jogTap.pressed ? "#6a6a6a" : "#4a4a4a"
 						border {
 							width: 1
 							color: "#a8a8a8"
 						}
 						Text {
 							anchors.centerIn: parent
-							text: root.scT(index === 0 ? "Off" : "On").toUpperCase()
+							text: root.scT(modelData).toUpperCase()
 							font: Style.fontH5
 							color: "#ffffff"
 						}
 						MouseArea {
-							id: broadcastTap
+							id: jogTap
 							anchors.fill: parent
-							onClicked: root.scCall("broadcast=" + index)
+							onClicked: if (!parent.selected) root.scCall("jog=" + scJogTile.ids[index])
 						}
 					}
 				}
@@ -1843,8 +1984,21 @@ def edits(dev: bool):
         ROOT + "Items/MessageBoxes/UnsupportedStorageDeviceDetectedMessageBox.qml": [(
             "function onUnsupportedStorageDeviceDetected(name) {\n", "function onUnsupportedStorageDeviceDetected(name) {\n			return\n")],
         ROOT + "EmbeddedMain.qml": [
-            (f"	Connections {{\n		target: {window()}\n", services + main + f"\n	Connections {{\n		target: {window()}\n"),
+            (f"	Connections {{\n		target: {window()}\n", services + main + "\n	Rectangle { anchors.fill: parent; z: -1000; color: \"#000000\" } // UI Scale: no window colour round the edges\n" + f"\n	Connections {{\n		target: {window()}\n"),
+            # The overlay (Control Center, popups) fills uiContainer's unscaled box: scale it
+            # the same way about the same centre, or its top bar sits above the screen.
+            ("		Overlay.overlay.anchors.fill = uiContainer\n",
+             "		Overlay.overlay.anchors.fill = uiContainer\n		Overlay.overlay.scale = Qt.binding(function() { return uiContainer.scale })\n"),
             ("		id: uiContainer\n", "		id: uiContainer\n" + LOGIN_DIALOG),
+            # UI Scale: QT_SCALE_FACTOR leaves a black band under EGLFS (nativeScreenSize and
+            # defaultScreenSize drift apart), so scale uiContainer itself: it is centred in its
+            # parent and scales about its centre, so width*scale stays the screen size and
+            # everything under it (main view, Source, Control Center, Settings) scales together.
+            (f"		width: {window()}.defaultScreenSize.width\n		height: {window()}.defaultScreenSize.height\n		anchors.centerIn: parent\n",
+             f"		width: {window()}.defaultScreenSize.width * 100 / (root.scUIScale || 100)\n"
+             f"		height: {window()}.defaultScreenSize.height * 100 / (root.scUIScale || 100)\n"
+             "		scale: (root.scUIScale || 100) / 100\n"
+             "		anchors.centerIn: parent\n"),
         ],
         v + "Common/Waveform/Waveform.qml": wave,
         # Engine offers streamed rows only Prepare; add Stems (see scStemStream).
@@ -1916,7 +2070,21 @@ def edits(dev: bool):
         # 5.3.0 moved it up from TabContents/, so its imports lost the "../".
         prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
-            ("		PlayerNumber { },\n", (POWER_ENTRY if v53() else "") + LANGUAGE_ENTRY + QUALITY_ENTRY + JOG_ENTRY + EXTRA_DEVICE_ENTRIES + "		PlayerNumber { },\n"),
+            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + UI_SCALE_ENTRY + LED_ENTRY + FOUR_DECK_ENTRIES + JOG_ENTRY + (POWER_ENTRY if v53() else "") + "		PlayerNumber { },\n"),
+        ],
+        **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
+            (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
+            (f"{last} {{}}", f"{last} {{}}," + entries.rstrip().rstrip(",")),
+        ] for name, last, entries in [
+            ("Services", "SpotifyEnable" if v53() else "CloudServices", SERVICES_ENTRIES),
+            ("Playback", "KeySyncMode", PLAYBACK_ENTRIES),
+            ("CuesLoops", "PausedSavedLoopBehavior", BEAT_JUMP_ENTRIES),
+            ("Safety", "KeyAdjust", SAFETY_ENTRIES),
+            ("Library", "CollectionBrowseBehavior", LIBRARY_ENTRIES),
+        ]},
+        v + "ControlCenter/Tabs/LayoutManagerTab.qml": [
+            ('import "Preferences/Entries/Base"\n', 'import "Preferences/Entries/Base"\nimport "Preferences/Entries/Base" as EntryBase\n'),
+            ("DeckSwap {\n id: deckSwap\n }", "DeckSwap { id: deckSwap }," + VIEW_ENTRIES.replace("@HEADLINE@", "PrefsHeadline" if v53() else "Headline").rstrip().rstrip(",")),
         ],
         prefs + ("" if v53() else "TabContents/") + "MixerTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n',
@@ -1948,7 +2116,7 @@ def edits(dev: bool):
         ],
         v + "ControlCenter/Tabs/ControlCenterTab.qml": [
             ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),
-            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + BROADCAST_TILE + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
+            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + JOG_TILE + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
         ],
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],
@@ -2100,6 +2268,9 @@ def edits(dev: bool):
         )],
     }
     if v53():
+        # The stock "Stems Support" row downloads Denon's stems-child-process; EngineX OS ships
+        # and mounts its own, and an Install there could replace that mount.
+        out[prefs + "Entries/StemsDownload.qml"] = [("active: manager && manager.canModifyInstall", "active: false")]
         out[v + "RecordingView/RecMainView.qml"] = [(
             "    readonly property bool isBlockedByStreaming: pBlockedByStreaming && pBlockedByStreaming.translator\n"
             "        ? pBlockedByStreaming.translator.state\n"
@@ -2212,6 +2383,98 @@ def edits(dev: bool):
         }.items():
             assert not isinstance(out.get(rel), str), rel
             out.setdefault(rel, []).extend(fixes)
+    # UI Scale < 100 %: uiContainer and the Overlay holding Control Center and popups are
+    # defaultScreenSize * 100 / scale; views sized to defaultScreenSize covered only its
+    # top-left part and the Drawer's modal dim showed as a bare band right and below.
+    # These files run in main.qml's context (productLayoutComponent: EmbeddedView {}),
+    # which sees `root` but not EmbeddedMain's ids: use its stock alias for uiContainer.
+    W, H = f"{window()}.defaultScreenSize.width", f"{window()}.defaultScreenSize.height"
+    ui = 'typeof root !== "undefined" && root && root.transformed'
+    UW, UH = f"({ui} ? root.transformed.width : {W})", f"({ui} ? root.transformed.height : {H})"
+    size = [(f"width: {W}\n", f"width: {UW}\n"), (f"height: {H}\n", f"height: {UH}\n")]
+    scaled = {
+        v + "ControlCenter/ControlCenter.qml": size + [(f"height: {H} +", f"height: {UH} +")],
+        v + "ControlCenter/ControlCenterTabView.qml": [(f"{H} - height", f"{UH} - height")],
+        v + "StatusBar/AbstractStatusBar.qml": [(f"dragPosition * {H}", f"dragPosition * {UH}")],
+        v + "EmbeddedBase.qml": [(f"implicitWidth: {W}\n", f"implicitWidth: {UW}\n"), (f"implicitHeight: {H}\n", f"implicitHeight: {UH}\n")],
+        v + "StorageMode/StorageModeOverlay.qml": size,
+        ROOT + "Items/Pads/PadModeSelectDialogue.qml": size,
+        prefs + "Entries/private/ColorWheelDialog.qml": size,
+        # Settings -> Device -> Pad LED Brightness also dims the on-screen pads.
+        ROOT + "Items/Pads/Pads.qml": [("id: pads\n", "id: pads\n    opacity: typeof root !== \"undefined\" && root && root.scLedBrightness ? Math.max(0.2, Math.min(1, root.scLedBrightness / 100)) : 1\n")],
+    }
+    if v53():
+        scaled[v + "MainView/Fx/DJFxSelectCarousel.qml"] = size
+        # Pad LED Brightness on the hardware pads. The controller QML runs in its own engine
+        # (no `root`), so its one GlobalAssignmentConfig reads ledBrightness from stream-sync
+        # and the pad LEDs scale what ColorOutputAssignment sends.
+        scaled["ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml"] = [(
+            '    objectName: "Global Assignment Config"\n',
+            '    id: scGlobalConfig\n'
+            '    objectName: "Global Assignment Config"\n'
+            '    property real scPadBrightness: 1\n'
+            '    Timer {\n'
+            '        interval: 3000; running: true; repeat: true; triggeredOnStart: true\n'
+            '        onTriggered: {\n'
+            '            const x = new XMLHttpRequest()\n'
+            '            x.onreadystatechange = function() {\n'
+            '                if (x.readyState !== XMLHttpRequest.DONE || x.status !== 200) return\n'
+            '                try {\n'
+            '                    const n = parseInt(JSON.parse(x.responseText).ledBrightness)\n'
+            '                    if (n >= 20 && n <= 100) scGlobalConfig.scPadBrightness = n / 100\n'
+            '                } catch (e) {}\n'
+            '            }\n'
+            '            x.open("GET", "http://127.0.0.1:8080/v1/sc5000/ui")\n'
+            '            x.send()\n'
+            '        }\n'
+            '    }\n')]
+        pad_brt = '    scBrightness: typeof globalConfig !== "undefined" && globalConfig && globalConfig.scPadBrightness ? globalConfig.scPadBrightness : 1\n'
+        scaled["ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml"] = [("    enabled: deckConfig.inDJMode\n", "    enabled: deckConfig.inDJMode\n" + pad_brt)]
+        scaled["ControlSurfaceModules/ControlSurfaceModules/private/QuadPadRGBLed.qml"] = [("    idx: note\n", "    idx: note\n" + pad_brt)]
+        scaled["airAssignments/OutputAssignment/ColorOutputAssignment.qml"] = [
+            ("	property bool debug: false;\n",
+             "	property bool debug: false;\n"
+             "	// EngineX: 0.2-1, set by the pad LEDs (Pad LED Brightness); 1 sends the stock colour.\n"
+             "	property real scBrightness: 1\n"
+             "	onScBrightnessChanged: if (enabled) device.sendColor(channel, idx, privatePart.scScaled())\n"),
+            ("				device.sendColor(channel, idx, outputColor);\n", "				device.sendColor(channel, idx, scScaled());\n"),
+            ("		id: privatePart\n",
+             "		id: privatePart\n"
+             "		function scScaled() { const b = scBrightness, c = outputColor; return b >= 0.99 ? c : Qt.rgba(c.r * b, c.g * b, c.b * b, c.a) }\n"),
+        ]
+        # 4-deck (#49): the library deck bar lists Deck 1-4 left to right (stock groups
+        # by side: 1, 3, 2, 4), lights only this player's decks, and names the deck of a
+        # loaded track. Elsewhere `root` is not EmbeddedMain or scFourDeckRole is "": stock.
+        role = 'typeof root !== "undefined" && root && root.scFourDeckRole'
+        tabs = "Skins/EngineOS/UI/CompositeControls/Decks/DeckTabs.qml"
+        scaled[tabs] = [
+            ("                beatGridEditor ? beatGridEditor.deckLabels() : []\n",
+             "                const labels = beatGridEditor ? beatGridEditor.deckLabels() : []\n"
+             "                const deck = l => { const m = viewController.getDeckTabViewModel(l); return m ? m.deckNumber : 0 }\n"
+             f"                return {role} ? labels.slice().sort((a, b) => deck(a) - deck(b)) : labels\n"),
+            ("                    activeDeck: microDeckLoader.viewModel.activeDeck\n",
+             f"                    activeDeck: {role} ? !root.scDeckLocked(microDeckLoader.viewModel.deckNumber) : microDeckLoader.viewModel.activeDeck\n"),
+            ("                    greyOut: !microDeckLoader.viewModel.activeDeck && !deckTabs.isTouchable\n",
+             f"                    greyOut: {role} ? root.scDeckLocked(microDeckLoader.viewModel.deckNumber) : !microDeckLoader.viewModel.activeDeck && !deckTabs.isTouchable\n"),
+        ]
+        scaled["Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml"] = [(
+            "                text: microDeck.loadedDeckSongName\n",
+            f"                text: ({role} ? microDeck.deckIndex + \" · \" : \"\") + microDeck.loadedDeckSongName\n")]
+        # In the 4-deck layout the deck colour came out white (measured on a 1+3 deck with
+        # blue PlayerColor1/2), which has no gradient and draws a black strip, and an unset
+        # PlayerColor3/4 is black: use the deck's PlayerColor preference, then that of the
+        # deck on the same side (1 or 2). White and black count as unset.
+        scaled[v + "MainView/DeckInfo/DeckColor/DeckColor.qml"] = [(
+            '    readonly property color playerColor: deckView ? deckView.deckData.deckColor : "transparent"\n',
+            '    readonly property color scOwnColor: deckView ? deckView.deckData.deckColor : "transparent"\n'
+            '    function scPref(n) { const p = Planck.getProperty("/Client/Preferences/Profile/Application/PlayerColor" + n); return p && p.translator ? p.translator.color : "transparent" }\n'
+            '    function scBlank(c) { return c.a === 0 || (c.r === c.g && c.g === c.b && (c.r === 0 || c.r === 1)) }\n'
+            '    readonly property color playerColor: !deckView || !scBlank(scOwnColor) ? scOwnColor\n'
+            '        : !scBlank(scPref(deckIndex)) ? scPref(deckIndex)\n'
+            '        : deckIndex > 2 && !scBlank(scPref(deckIndex - 2)) ? scPref(deckIndex - 2) : scOwnColor\n')]
+    for rel, fixes in scaled.items():
+        assert not isinstance(out.get(rel), str), rel
+        out.setdefault(rel, []).extend(fixes)
     for rel, fixes in legacy_qml_fixes().items():
         assert not isinstance(out.get(rel), str), rel  # a whole-file replacement already owns it
         out.setdefault(rel, []).extend(fixes)
@@ -2409,12 +2672,31 @@ def compared_strings(qrc: Path):
     return found
 
 
-def translate(text, table, skip):
+def live_literal(t):
+    """A literal that follows scLang at run time. EmbeddedMain's ids are not visible from
+    every file, but the engine's Math object is (Qt refuses new properties): EmbeddedMain hangs scI18n on it (see SERVICES_MAIN). Before
+    that, or if it never happens, the baked text shows."""
+    t = json.dumps(t, ensure_ascii=False)
+    return f'(Math.scI18n ? Math.scI18n.t({t}) : {t})'
+
+
+def translate(text, table, skip, live=False):
+    # ListElement values must be constants, so lines inside such a block keep static text.
+    in_element = 0
+    static = False
+
     def literal(m):
         s, q = (m.group(1), '"') if m.group(1) is not None else (m.group(2), "`")
-        return f"{q}{table[s]}{q}" if s in table and s not in skip else m.group(0)
+        if s not in table or s in skip:
+            return m.group(0)
+        if live and not static and "${" not in s:
+            return live_literal(table[s])
+        return f"{q}{table[s]}{q}"
     out = []
     for line in text.split("\n"):
+        static = in_element > 0 or "ListElement" in line
+        if static:
+            in_element = max(0, in_element + line.count("{") - line.count("}"))
         m = TEXT_LINE.match(line)
         if m and "==" not in m.group(2) and "!=" not in m.group(2) and not m.group(2).lstrip().startswith("//"):
             line = m.group(1) + LITERAL.sub(literal, m.group(2))
@@ -2457,20 +2739,33 @@ def main():
                 raise SystemExit(f"{rel}: qrc:/{ref} is not in {a.qrc}")
     rows = load_dict()
     skip = compared_strings(a.qrc)
+    # dicts[target][any spelling] = target spelling, so the language can change without a restart.
+    dicts = {}
     for lang in ("en", "zh-Hans", "zh-Hant"):
-        table = {en: t[lang] for en, t in rows.items()} if lang != "en" else {}
+        d = {}
+        for en, t in rows.items():
+            to = en if lang == "en" else t[lang]
+            for spelling in (en, t["zh-Hans"], t["zh-Hant"]):
+                d[spelling] = to
+        dicts[lang] = d
+    for lang in ("en", "zh-Hans", "zh-Hant"):
+        table = {en: (en if lang == "en" else t[lang]) for en, t in rows.items()}
         files = dict(base)
-        if table:
-            for f, rel in translated_qml(a.qrc):
-                source = files.get(rel) or f.read_text(encoding="utf-8", errors="strict")
-                changed = translate(source, table, skip)
-                if changed != source:
-                    files[rel] = changed
+        for f, rel in translated_qml(a.qrc):
+            source = files.get(rel) or f.read_text(encoding="utf-8", errors="strict")
+            changed = translate(source, table, skip, live=rel.startswith(("Skins/EmbeddedCommon/", "Skins/Embedded/")))
+            if changed != source:
+                files[rel] = changed
         for rel, text in files.items():
-            text = text.replace("@DICT@", json.dumps(table, ensure_ascii=False))
+            text = text.replace("@DICTS@", json.dumps(dicts, ensure_ascii=False))
             target = a.out / lang / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
+        # Engine's start-up screen. Only the 1280x800 one: _16x9 is 1366x768 and would stretch.
+        splash = HERE.parent.parent / "docs/assets/boot-splash-enginex.png"
+        if ROOT == "Skins/Embedded/" and splash.is_file():
+            (a.out / lang / ROOT / "img").mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(splash, a.out / lang / ROOT / "img/SplashScreen.png")
         print(lang, len(files), "files")
     copy_icons(a.out / "icons")
     with tarfile.open(a.out.with_suffix(".tar.gz"), "w:gz") as t:

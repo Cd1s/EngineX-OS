@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -430,6 +431,54 @@ func TestShadowDeckFromStreamedRow(t *testing.T) {
 	resp.Body.Close()
 	if len(peer.Decks) != 2 || peer.Decks[0].Key == "" || peer.Decks[0].Name != "Song.flac" || peer.Decks[0].Path != "" || peer.Decks[1].Key != "" {
 		t.Fatalf("peer decks: %+v", peer.Decks)
+	}
+}
+
+// Engine 5.3.0's TrackNetworkPath for a streaming track is only
+// "net://<uuid>/(Unknown)"; the QML posts its TrackUri, and the source serves
+// Engine's own download, with its analysis, from stm.db.
+func TestShadowStreamingDownloadFromStmDB(t *testing.T) {
+	shadowBeaconOn = false
+	_, root, db := testlibrary.Create(t)
+	qc := func(b []byte) []byte { c, _ := enginedb.QCompress(b); return c }
+	if _, err := db.Exec(`INSERT INTO Track (path, filename, uri, bpmAnalyzed, isAnalyzed) VALUES ('../../../../downloads/TIDAL/abc.mp3', 'Song.mp3', 'streaming://TIDAL/Track/37', 140, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?`, qc(bytes.Repeat([]byte{0}, 68)), qc(bytes.Repeat([]byte{0}, 30)), qc([]byte("GRID"))); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	data := t.TempDir()
+	lib := filepath.Join(data, "AppDataUser/AIR Music Technology/Engine/Engine Library")
+	os.MkdirAll(filepath.Dir(lib), 0o755)
+	os.Rename(filepath.Join(root, "Engine Library"), lib)
+	os.Rename(filepath.Join(lib, "Database2", "m.db"), filepath.Join(lib, "Database2", "stm.db"))
+	os.MkdirAll(filepath.Join(data, "downloads", "TIDAL"), 0o755)
+	os.WriteFile(filepath.Join(data, "downloads", "TIDAL", "abc.mp3"), []byte("AUDIO"), 0o644)
+	shadowDataRoot = data
+	defer func() { shadowDataRoot, shadowBeaconOn = "/data", true }()
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	body := `[{"deck":3,"net":"streaming://TIDAL/Track/37"},{"deck":1,"net":"streaming://TIDAL/Track/38"}]`
+	if resp, err := http.Post(srv.URL+"/v1/sc5000/decks", "application/json", strings.NewReader(body)); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("post: %v %v", resp, err)
+	}
+	s.shadow.mu.Lock()
+	own := append([]deckState(nil), s.shadow.own...)
+	s.shadow.mu.Unlock()
+	if own[0].Path != filepath.Join(data, "downloads", "TIDAL", "abc.mp3") || own[0].Key == "" || own[1].Key != "" {
+		t.Fatalf("own decks: %+v", own)
+	}
+	resp, err := http.Get(srv.URL + "/peer/decks/3/perf?key=" + own[0].Key)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("perf: %v %v", resp, err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.HasPrefix(b, []byte("EXPF")) {
+		t.Fatalf("perf %q", b)
 	}
 }
 

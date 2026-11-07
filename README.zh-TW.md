@@ -115,9 +115,9 @@
 </tr>
 <tr>
 <td width="50%" align="center" valign="top">
-<img src="./docs/assets/screenshots/zh-TW/03-sources-5-streaming-platforms.png" width="100%" alt="五大串流平台"><br>
-<b>音源頁內建 5 大音樂平台</b><br>
-<sub>網易雲 · Spotify · Deezer · SoundCloud · TIDAL 與隨身碟並列</sub>
+<img src="./docs/assets/screenshots/zh-TW/03-sources-5-streaming-platforms.png" width="100%" alt="七大串流平台"><br>
+<b>音源頁內建 7 大音樂平台</b><br>
+<sub>TIDAL · 網易雲 · Spotify · Deezer · SoundCloud · Beatport · Apple Music 與隨身碟並列</sub>
 </td>
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/zh-TW/04-streaming-qr-login.png" width="100%" alt="手機掃碼登入"><br>
@@ -134,7 +134,7 @@
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/zh-TW/06b-preferences-device.png" width="100%" alt="裝置設定"><br>
 <b>裝置設定選單</b><br>
-<sub>直接切換語言、波形樣式、串流音質與轉盤燈效</sub>
+<sub>直接切換語言、介面縮放、Pad 燈亮度、4 軌波形與轉盤燈效</sub>
 </td>
 </tr>
 <tr>

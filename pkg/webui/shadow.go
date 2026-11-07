@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"log"
 	"math"
 	"net"
 	"net/http"
@@ -137,10 +138,12 @@ type shadowState struct {
 
 	dataRoot, mediaRoot string
 	beacon              bool
+	unresolved          [5]string         // per deck: the last TrackNetworkPath logged as having no file
+	streamFiles         map[string]string // streaming uri -> Engine's download ("" = none)
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, used: map[string]time.Time{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, used: map[string]time.Time{}, streamFiles: map[string]string{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -279,6 +282,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		if netPathFile(np, s.shadow.dataRoot, s.shadow.mediaRoot) == "" {
 			d.Net = ""
 		}
+		if f == "" && strings.HasPrefix(np, "streaming://") {
+			f = s.shadow.streamingDownload(r.Context(), np) // Engine's own download, analysed in stm.db
+		}
 		if f == "" && s.tidal != nil {
 			f = s.tidal.streamedFile(np) // loaded from the streaming browser (OmniSource too)
 		}
@@ -287,6 +293,15 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 				d.Path, d.Ext, d.Name = f, strings.ToLower(filepath.Ext(f)), filepath.Base(f)
 				d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("%s %d %d", f, st.Size(), st.ModTime().UnixNano())))
 			}
+		}
+		s.shadow.mu.Lock()
+		logIt := np != "" && d.Path == "" && s.shadow.unresolved[d.Deck] != np
+		if logIt {
+			s.shadow.unresolved[d.Deck] = np
+		}
+		s.shadow.mu.Unlock()
+		if logIt {
+			log.Printf("stream-sync: shadow: deck %d track %q has no local file", d.Deck, np)
 		}
 		own = append(own, d)
 	}
@@ -478,6 +493,35 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 	w.Write(perf)
 }
 
+// streamingDownload is Engine's own download of a streaming track (Engine
+// 5.3.0's TrackNetworkPath for one is just "net://<uuid>/(Unknown)", its
+// TrackUri "streaming://TIDAL/Track/<id>"): stm.db's row for the uri, read-only
+// (#49). Cached per uri: the QML posts every 120 ms.
+// shortcut: misses are cached too (streamedFile answers, without the analysis); stop caching them if Engine posts before its stm.db row exists.
+func (sh *shadowState) streamingDownload(ctx context.Context, uri string) string {
+	sh.mu.Lock()
+	f, ok := sh.streamFiles[uri]
+	sh.mu.Unlock()
+	if ok {
+		return f
+	}
+	lib := filepath.Join(sh.dataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library")
+	if db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(lib, "Database2", "stm.db")}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)"); err == nil {
+		var rel string
+		if db.QueryRowContext(ctx, `SELECT path FROM Track WHERE uri = ? ORDER BY id DESC LIMIT 1`, uri).Scan(&rel) == nil {
+			f = filepath.Join(lib, filepath.FromSlash(rel))
+			if !strings.HasPrefix(f, filepath.Clean(sh.dataRoot)+string(filepath.Separator)) || !regularAudioFile(f) {
+				f = ""
+			}
+		}
+		db.Close()
+	}
+	sh.mu.Lock()
+	sh.streamFiles[uri] = f
+	sh.mu.Unlock()
+	return f
+}
+
 // engineLibrary is the "Engine Library" folder whose m.db lists f: the
 // volume's for /media/<volume>/..., else the internal one.
 func engineLibrary(f, dataRoot, mediaRoot string) string {
@@ -496,7 +540,17 @@ func libraryPerf(ctx context.Context, f, dataRoot, mediaRoot string) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
-	mdb := filepath.Join(lib, "Database2", "m.db")
+	// Streaming downloads (/data/downloads/<service>/) are in stm.db, not m.db.
+	for _, name := range []string{"m.db", "stm.db"} {
+		var perf []byte
+		if perf, err = dbPerf(ctx, filepath.Join(lib, "Database2", name), filepath.ToSlash(rel)); err == nil {
+			return perf, nil
+		}
+	}
+	return nil, err
+}
+
+func dbPerf(ctx context.Context, mdb, rel string) ([]byte, error) {
 	if _, err := os.Stat(mdb); err != nil {
 		return nil, err
 	}
@@ -508,7 +562,7 @@ func libraryPerf(ctx context.Context, f, dataRoot, mediaRoot string) ([]byte, er
 	var bpm sql.NullFloat64
 	var track, beats, overview []byte
 	err = db.QueryRowContext(ctx, `SELECT coalesce(t.bpmAnalyzed, t.bpm), p.trackData, p.beatData, p.overviewWaveFormData
-		FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.path = ? AND t.isAnalyzed = 1`, filepath.ToSlash(rel)).
+		FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.path = ? AND t.isAnalyzed = 1`, rel).
 		Scan(&bpm, &track, &beats, &overview)
 	if err != nil {
 		return nil, err
