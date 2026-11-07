@@ -42,6 +42,7 @@ for gpu in "$SYS"/class/devfreq/*ffa30000* "$SYS"/devices/platform/ffa30000.gpu/
 done
 
 write_knob "$PROC/sys/vm/swappiness" 10
+write_knob "$PROC/sys/vm/vfs_cache_pressure" 50
 write_knob "$PROC/sys/vm/dirty_background_ratio" 5
 write_knob "$PROC/sys/vm/dirty_ratio" 15
 write_knob "$PROC/sys/fs/file-max" 1048576
@@ -49,9 +50,22 @@ write_knob "$PROC/sys/net/core/rmem_max" 8388608 quiet
 write_knob "$PROC/sys/net/core/wmem_max" 8388608 quiet
 write_knob "$PROC/sys/net/ipv4/tcp_rmem" "4096 131072 8388608" quiet
 write_knob "$PROC/sys/net/ipv4/tcp_wmem" "4096 65536 8388608" quiet
-# LC003: a 1 MiB read-ahead keeps far seeks in long MP3 sets fed.
-for ra in "$SYS"/block/sd*/queue/read_ahead_kb "$SYS"/block/mmcblk*/queue/read_ahead_kb; do
-    write_knob "$ra" 1024 quiet
+# LC003: 1 MiB read-ahead keeps far seeks in long MP3 sets fed; 2 MiB for large storage (>= 2TB/4TB SATA/USB).
+for dev_dir in "$SYS"/block/sd* "$SYS"/block/mmcblk*; do
+    [ -d "$dev_dir" ] || continue
+    ra="$dev_dir/queue/read_ahead_kb"
+    ra_val=1024
+    if [ -r "$dev_dir/size" ]; then
+        sectors=$(cat "$dev_dir/size" 2>/dev/null || echo 0)
+        # 4TB SATA/USB is ~7.8e9 sectors. 32-bit safe: check if >= 10 digits and trunc >= 2000 (~1TB+)
+        if [ "${#sectors}" -ge 10 ]; then
+            trunc=${sectors%??????}
+            if [ -n "$trunc" ] && [ "$trunc" -ge 2000 ] 2>/dev/null; then
+                ra_val=2048
+            fi
+        fi
+    fi
+    write_knob "$ra" "$ra_val" quiet
 done
 for scheduler in "$SYS"/block/*/queue/scheduler; do
     [ -r "$scheduler" ] || continue
