@@ -813,36 +813,49 @@ const udevHint = `printf 'SUBSYSTEM=="usb", ATTR{idVendor}=="%s", MODE="0666"\n'
 // fastbootDevices lists fastboot serials; if none show up it retries with each of fbVIDs and,
 // when one finds the deck, keeps that -i for every later fastboot call.
 func fastbootDevices(ctx context.Context, o *options) []string {
-	serials := fastbootList(ctx, o)
+	serials, _ := fastbootList(ctx, o)
 	if len(serials) > 0 || o.fbVID != "" {
 		return serials
 	}
 	for _, v := range fbVIDs {
 		o.fbVID = v
-		if serials = fastbootList(ctx, o); len(serials) > 0 {
+		var out string
+		if serials, out = fastbootList(ctx, o); len(serials) > 0 {
 			return serials
+		}
+		if strings.Contains(out, "invalid option") { // new platform-tools dropped -i (#129)
+			break
 		}
 	}
 	o.fbVID = ""
 	return nil
 }
 
-func fastbootList(ctx context.Context, o *options) []string {
+// fastbootList parses "fastboot devices": "<serial>\tfastboot", or "<serial>\tAndroid Fastboot [usb:3-3.1]"
+// from newer android-tools (#129). It also returns the raw output.
+func fastbootList(ctx context.Context, o *options) ([]string, string) {
 	out, err := fb(ctx, o, "devices")
 	if l := strings.ToLower(out); geteuid() != 0 && (strings.Contains(l, "no permissions") || strings.Contains(l, "permission denied")) {
 		o.hint("perm", "fastboot 看到了碟机，但没有 USB 权限。请用 sudo 运行本工具，或执行下面的命令添加 udev 规则后重新插拔 USB：\n  "+udevHint,
 			"fastboot sees the deck but has no USB permission. Run this tool with sudo, or add a udev rule and replug USB:\n  "+udevHint)
 	}
 	if err != nil {
-		return nil
+		return nil, out
 	}
 	var serials []string
 	for _, l := range strings.Split(out, "\n") {
-		if f := strings.Fields(l); len(f) >= 2 && strings.HasPrefix(f[1], "fastboot") {
-			serials = append(serials, f[0])
+		if ll := strings.ToLower(l); strings.Contains(ll, "no permissions") || strings.Contains(ll, "permission denied") {
+			continue
+		}
+		f := strings.Fields(l)
+		for i := 1; i < len(f) && i <= 2; i++ {
+			if strings.HasPrefix(strings.ToLower(f[i]), "fastboot") {
+				serials = append(serials, f[0])
+				break
+			}
 		}
 	}
-	return serials
+	return serials, out
 }
 
 // IsRockchipUSBLoader reports whether line describes a Rockchip USB loader device:
@@ -934,15 +947,19 @@ func diagnoseUSB(ctx context.Context, o *options) {
 			"The deck is on USB ("+dev+") in the Rockchip Loader (rkdeveloptool) mode, not fastboot: reboot it and pick Firmware Update Mode under Settings → Update.")
 		return
 	}
-	zh, en := "碟机已通过 USB 连接（"+dev+"），但还没进入 Firmware Update Mode（正常开机时也是这个 ID）：请在碟机上点 Settings → Update → Firmware Update Mode，USB 线保持连接。",
-		"The deck is on USB ("+dev+") but not in Firmware Update Mode yet (it has this id in normal use too): on the deck tap Settings → Update → Firmware Update Mode and keep the cable in."
+	// 2nd-gen decks keep the same id in normal use and in Firmware Update Mode, so the id alone can't tell which (#129).
+	zh, en := "碟机已通过 USB 连接（"+dev+"），但 fastboot 还看不到它（二代机正常开机和 Firmware Update Mode 下都是这个 ID）。如果碟机屏幕还在主界面，请点 Settings → Update → Firmware Update Mode (Reboot)，USB 线保持连接；",
+		"The deck is on USB ("+dev+") but fastboot cannot see it yet (2nd-gen decks have this id both in normal use and in Firmware Update Mode). If the deck still shows its main screen, tap Settings → Update → Firmware Update Mode (Reboot) and keep the cable in;"
 	switch {
 	case runtime.GOOS == "windows":
-		zh += "如果碟机已经显示更新界面，说明缺少 WinUSB 驱动：打开 Zadig（https://zadig.akeo.ie），Options → List All Devices，选中碟机，安装 WinUSB。"
-		en += " If it already shows the update screen, the WinUSB driver is missing: open Zadig (https://zadig.akeo.ie), Options → List All Devices, pick the deck, install WinUSB."
+		zh += "如果碟机屏幕已经处于 Firmware Update Mode，说明缺少 fastboot 驱动：打开 Zadig（https://zadig.akeo.ie），Options → List All Devices，选中 Android Fastboot 接口，安装 WinUSB。"
+		en += " if it already shows Firmware Update Mode, the fastboot driver is missing: open Zadig (https://zadig.akeo.ie), Options → List All Devices, pick the Android Fastboot interface, install WinUSB."
 	case runtime.GOOS == "linux" && geteuid() != 0:
-		zh += "如果碟机已经显示更新界面，请用 sudo 运行本工具，或添加 udev 规则：\n  " + udevHint
-		en += " If it already shows the update screen, run this tool with sudo or add a udev rule:\n  " + udevHint
+		zh += "如果碟机屏幕已经处于 Firmware Update Mode，请用 sudo 运行本工具，或添加 udev 规则：\n  " + udevHint
+		en += " if it already shows Firmware Update Mode, run this tool with sudo or add a udev rule:\n  " + udevHint
+	default:
+		zh += "如果碟机屏幕已经处于 Firmware Update Mode，请检查电脑上的 fastboot 是否能用（fastboot devices）。"
+		en += " if it already shows Firmware Update Mode, check that fastboot works on this computer (fastboot devices)."
 	}
 	o.hint("usb", zh, en)
 }
