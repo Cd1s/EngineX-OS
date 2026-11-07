@@ -23,7 +23,7 @@ if fastboot getvar partition-size:data 2>&1 | grep -Eq 'partition-size:data:[[:s
     PART=data
 fi
 
-echo "Flashing the $PART partition with $IMAGE..."
+echo "Flashing the $PART partition with $IMAGE (sending over USB may take several minutes, do not disconnect)..."
 fastboot flash "$PART" "$IMAGE"
 
 echo "Rebooting device..."

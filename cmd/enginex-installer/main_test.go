@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -488,7 +489,7 @@ getvar)
   *) echo "getvar:$2 FAILED (remote: 'GetVar Variable Not found')" >&2; exit 1 ;;
   esac
   echo "Finished. Total time: 0.001s" >&2 ;;
-flash) cp "$3" "$d/flashed-$2.img" ;;
+flash) echo "Sending '$2' (65536 KB)..." >&2; echo "Writing '$2'..." >&2; echo "OKAY" >&2; cp "$3" "$d/flashed-$2.img" ;;
 reboot) echo "Rebooting" >&2 ;;
 esac
 `
@@ -713,6 +714,21 @@ func TestGen1Fastboot(t *testing.T) {
 			for _, want := range []string{"oem inmusic-unlock-magic-7de5fbc22b8c524e", "flash rootfs ", "reboot"} {
 				if !strings.Contains(calls, want) {
 					t.Fatalf("missing %s: %s", want, calls)
+				}
+			}
+			out := o.Out.(*bytes.Buffer).String()
+			for _, want := range []string{
+				"正在解锁碟机…",
+				"Flashing rootfs partition (6 B) over USB; this may take several minutes. Do not disconnect USB or power off the deck...",
+				"正在向碟机写入 rootfs 分区 (6 B)，通过 USB 传输可能需要几分钟，请勿断开连接或关闭电源…",
+				"Sending 'rootfs'",
+				"Writing 'rootfs'",
+				"OKAY",
+				"正在重启碟机…",
+				"Rebooting deck...",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("missing %q in Gen1 output:\n%s", want, out)
 				}
 			}
 		})
@@ -1071,5 +1087,171 @@ func TestIsDeckUSB(t *testing.T) {
 `)
 	if mac != "2207:320a PRIME 4+\n05ac:0281 Keyboard\n" {
 		t.Errorf("parseIOReg = %q", mac)
+	}
+}
+
+type failWriter struct{ err error }
+
+func (f failWriter) Write(p []byte) (int, error) { return 0, f.err }
+
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func TestCaptureWriterSwallowsDisplayErrors(t *testing.T) {
+	cw := &captureWriter{
+		buf: &bytes.Buffer{},
+		out: failWriter{err: errors.New("broken pipe")},
+	}
+	msg := []byte("Sending 'userdata'...\n")
+	n, err := cw.Write(msg)
+	if err != nil || n != len(msg) {
+		t.Fatalf("Write returned (%d, %v), want (%d, nil)", n, err, len(msg))
+	}
+	if cw.buf.String() != string(msg) {
+		t.Fatalf("buffer = %q, want %q", cw.buf.String(), string(msg))
+	}
+}
+
+// #129: writing to a broken stdout pipe (fd 1) during flash must not terminate the installer with SIGPIPE.
+func TestSigpipeStdoutSubprocess(t *testing.T) {
+	if os.Getenv("TEST_SIGPIPE_CHILD") == "1" {
+		fb := newFastboot(t, "JC11S", false)
+		b := buildBundle(t, "PRIME4PLUS", "5.3.0.2")
+		o := modeBOpts(t, fb, b)
+		o.Out = os.Stdout
+		if err := run(ctxT(t), o); err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
+		if f := fb.Flashed(); len(f) != 1 || !strings.Contains(f[0], "flash userdata ") {
+			t.Fatalf("unexpected flash calls: %v", f)
+		}
+		return
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close() // close read end so descriptor 1 encounters broken pipe (SIGPIPE)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSigpipeStdoutSubprocess$")
+	cmd.Env = append(os.Environ(), "TEST_SIGPIPE_CHILD=1")
+	cmd.Stdout = w
+	err = cmd.Run()
+	w.Close()
+	if err != nil {
+		t.Fatalf("subprocess died or failed with broken pipe on fd 1: %v", err)
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	for bytes, want := range map[int64]string{
+		500:                "500 B",
+		1536:               "1.5 KB",
+		1024 * 500:         "500.0 KB",
+		1024 * 1024 * 12:   "12.0 MB",
+		1024 * 1024 * 1024: "1.0 GB",
+		15032385536:        "14.0 GB",
+	} {
+		if got := formatBytes(bytes); got != want {
+			t.Errorf("formatBytes(%d) = %q, want %q", bytes, got, want)
+		}
+	}
+}
+
+// #129: RattyDAVE reported a long pause after typing YES; the installer must stream fastboot's
+// live transfer progress to o.Out and display file size and reassurance before flashing.
+func TestModeBStreamsFlashProgressAndSize(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
+	b := buildBundle(t, "PRIME4PLUS", "5.3.0.2")
+	fb := newFastboot(t, "JC11S", false)
+	o := modeBOpts(t, fb, b)
+	if err := run(ctxT(t), o); err != nil {
+		t.Fatalf("run: %v\n%s", err, o.Out)
+	}
+	out := o.Out.(*bytes.Buffer).String()
+	for _, want := range []string{
+		"Flashing userdata partition (64.0 MB) over USB; this may take several minutes. Do not disconnect USB or power off the deck...",
+		"正在向碟机写入 userdata 分区 (64.0 MB)，通过 USB 传输可能需要几分钟，请勿断开连接或关闭电源…",
+		"Sending 'userdata'",
+		"Writing 'userdata'",
+		"OKAY",
+		"正在重启碟机…",
+		"Rebooting deck...",
+		"Done: EngineX OS",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("installer output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// #129: verify fbLive delivers stdout/stderr chunks before the process finishes.
+func TestFbLiveStreamsBeforeProcessExit(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "slow-fastboot")
+	syncFile := filepath.Join(dir, "sync")
+	script := fmt.Sprintf(`#!/bin/sh
+echo "line 1: sending" >&2
+touch %q
+for i in $(seq 1 100); do
+  if [ -f %q.ack ]; then break; fi
+  sleep 0.05
+done
+echo "line 2: done" >&2
+`, syncFile, syncFile)
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	outBuf := &safeBuffer{}
+	o := testOpts(t)
+	o.Fastboot = bin
+	o.Out = outBuf
+	o.defaults()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := fbLive(ctxT(t), o, "flash", "userdata", "dummy.img")
+		done <- err
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(outBuf.String(), "line 1: sending") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(outBuf.String(), "line 1: sending") {
+		t.Fatalf("timed out waiting for early streaming output, got %q", outBuf.String())
+	}
+
+	// Verify child process is still actively waiting and has not exited
+	select {
+	case err := <-done:
+		t.Fatalf("child process exited prematurely before ack: %v", err)
+	default:
+	}
+
+	if err := os.WriteFile(syncFile+".ack", []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("fbLive failed: %v", err)
+	}
+
+	if !strings.Contains(outBuf.String(), "line 2: done") {
+		t.Fatalf("expected completion output, got %q", outBuf.String())
 	}
 }

@@ -800,12 +800,52 @@ func fastbootMissing() error {
 	return errors.New("没有找到 fastboot 程序：请先安装，或把 fastboot 放在本工具同一目录后重新运行 / fastboot is not installed: install it, or put the fastboot binary next to this tool, then run again:\n  " + how)
 }
 
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1024*1024*1024:
+		return fmt.Sprintf("%.1f GB", float64(b)/(1024*1024*1024))
+	case b >= 1024*1024:
+		return fmt.Sprintf("%.1f MB", float64(b)/(1024*1024))
+	case b >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(b)/1024)
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
+
 func fb(ctx context.Context, o *options, args ...string) (string, error) {
 	if o.fbVID != "" {
 		args = append([]string{"-i", o.fbVID}, args...)
 	}
 	out, err := exec.CommandContext(ctx, o.Fastboot, args...).CombinedOutput()
 	return string(out), err
+}
+
+type captureWriter struct {
+	buf *bytes.Buffer
+	out io.Writer
+}
+
+func (w *captureWriter) Write(p []byte) (int, error) {
+	n, _ := w.buf.Write(p)
+	if w.out != nil {
+		_, _ = w.out.Write(p) // display error must never abort fastboot or drop buffer data (#129)
+	}
+	return n, nil
+}
+
+// fbLive runs fastboot and streams stdout and stderr directly to o.Out in real time while also
+// capturing the full output, so the user sees live progress during long flash operations (#129).
+func fbLive(ctx context.Context, o *options, args ...string) (string, error) {
+	if o.fbVID != "" {
+		args = append([]string{"-i", o.fbVID}, args...)
+	}
+	cmd := exec.CommandContext(ctx, o.Fastboot, args...)
+	cw := &captureWriter{buf: &bytes.Buffer{}, out: o.Out}
+	cmd.Stdout = cw
+	cmd.Stderr = cw
+	err := cmd.Run()
+	return cw.buf.String(), err
 }
 
 const udevHint = `printf 'SUBSYSTEM=="usb", ATTR{idVendor}=="%s", MODE="0666"\n' 15e4 1cc5 2207 18d1 | sudo tee /etc/udev/rules.d/99-enginex.rules && sudo udevadm control --reload-rules && sudo udevadm trigger`
@@ -1160,9 +1200,16 @@ func modeB(ctx context.Context, o *options) error {
 	if err != nil {
 		return err
 	}
-	if out, err := fb(ctx, o, "flash", part, img); err != nil {
+	var sizeStr string
+	if fi, err := os.Stat(img); err == nil && fi.Size() > 0 {
+		sizeStr = " (" + formatBytes(fi.Size()) + ")"
+	}
+	o.say(fmt.Sprintf("正在向碟机写入 %s 分区%s，通过 USB 传输可能需要几分钟，请勿断开连接或关闭电源…", part, sizeStr),
+		fmt.Sprintf("Flashing %s partition%s over USB; this may take several minutes. Do not disconnect USB or power off the deck...", part, sizeStr))
+	if out, err := fbLive(ctx, o, "flash", part, img); err != nil {
 		return fmt.Errorf("fastboot flash %s: %w\n%s", part, err, out)
 	}
+	o.say("正在重启碟机…", "Rebooting deck...")
 	if out, err := fb(ctx, o, "reboot"); err != nil {
 		return fmt.Errorf("fastboot reboot: %w\n%s", err, out)
 	}
@@ -1207,11 +1254,22 @@ func modeBGen1(ctx context.Context, o *options, m model) error {
 	if err := confirm(o, "将解锁并刷写 "+m.Name+" 的 rootfs，可能损坏设备或数据，请先备份。", "Unlock and flash "+m.Name+" rootfs; device or data could be damaged. Back up first."); err != nil {
 		return err
 	}
-	for _, args := range [][]string{{"oem", "inmusic-unlock-magic-7de5fbc22b8c524e"}, {"flash", "rootfs", rootfs}, {"reboot"}} {
-		out, err := fb(ctx, o, args...)
-		if err != nil {
-			return fmt.Errorf("fastboot %s: %w\n%s", args[0], err, out)
-		}
+	o.say("正在解锁碟机…", "Unlocking deck...")
+	if out, err := fb(ctx, o, "oem", "inmusic-unlock-magic-7de5fbc22b8c524e"); err != nil {
+		return fmt.Errorf("fastboot oem unlock: %w\n%s", err, out)
+	}
+	var sizeStr string
+	if fi, err := os.Stat(rootfs); err == nil && fi.Size() > 0 {
+		sizeStr = " (" + formatBytes(fi.Size()) + ")"
+	}
+	o.say(fmt.Sprintf("正在向碟机写入 rootfs 分区%s，通过 USB 传输可能需要几分钟，请勿断开连接或关闭电源…", sizeStr),
+		fmt.Sprintf("Flashing rootfs partition%s over USB; this may take several minutes. Do not disconnect USB or power off the deck...", sizeStr))
+	if out, err := fbLive(ctx, o, "flash", "rootfs", rootfs); err != nil {
+		return fmt.Errorf("fastboot flash rootfs: %w\n%s", err, out)
+	}
+	o.say("正在重启碟机…", "Rebooting deck...")
+	if out, err := fb(ctx, o, "reboot"); err != nil {
+		return fmt.Errorf("fastboot reboot: %w\n%s", err, out)
 	}
 	return nil
 }
@@ -1219,6 +1277,7 @@ func modeBGen1(ctx context.Context, o *options, m model) error {
 // ---- main -------------------------------------------------------------------
 
 func run(ctx context.Context, o *options) error {
+	ignoreSIGPIPE()
 	o.defaults()
 	o.guide()
 	if len(fastbootDevices(ctx, o)) > 0 {
