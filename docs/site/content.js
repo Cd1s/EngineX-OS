@@ -118,6 +118,95 @@
       ],
     },
 
+    /* ───────────── 2b 界面地图 ───────────── */
+    {
+      id: "menus", icon: "🧭",
+      title: L("界面地图：下拉四页与按钮排布", "介面地圖：下拉四頁與按鈕排布", "Menu map: the four pull-down pages"),
+      blocks: [
+        { k: "note", tone: "new", x: L("【随下一版发布】本章是重排后的新界面；" + V + " 及更早版本里 `Live Stream` 仍在控制中心磁贴，其余开关集中在 `设置 → 设备`。",
+                                       "【隨下一版發佈】本章是重排後的新介面；" + V + " 及更早版本中 `Live Stream` 仍在控制中心磁貼，其餘開關集中在 `設定 → 裝置`。",
+                                       "[Ships with the next release] This chapter describes the rearranged UI; in " + V + " and earlier `Live Stream` is still a Control Center tile and the other switches sit under `Settings → Device`.") },
+        { k: "p", x: L("从屏幕顶部下拉，左右滑动切换四页：**① 控制中心 → ② 个人偏好 → ③ 视图与布局 → ④ 系统设置**。演出中常用的放在第 1 页，不常改的放在第 4 页。",
+                        "從螢幕頂部下拉，左右滑動切換四頁：**① 控制中心 → ② 個人偏好 → ③ 視圖與版面 → ④ 系統設定**。演出中常用的放在第 1 頁，不常改的放在第 4 頁。",
+                        "Pull down from the top of the screen and swipe between four pages: **① Control Center → ② User Profile → ③ View / Layout Manager → ④ Settings**. What you touch during a set is on page 1; what you rarely change is on page 4.") },
+        { k: "table", head: [L("页", "頁", "Page"), L("名称", "名稱", "Name"), L("内容", "內容", "What is there")], rows: [
+          ["1", "Control Center", L("8 个原厂磁贴 + 第 3 行 4 个演出磁贴", "8 個原廠磁貼 + 第 3 行 4 個演出磁貼", "8 stock tiles + a third row of 4 performance tiles")],
+          ["2", "User Profile", L("Playback、Cues/Loops、Safety、Library", "Playback、Cues/Loops、Safety、Library", "Playback, Cues/Loops, Safety, Library")],
+          ["3", "View / Layout Manager", L("`View 1` – `View 5`、`Save View`、`ENGINEX VIEW PRESET`", "`View 1` – `View 5`、`Save View`、`ENGINEX VIEW PRESET`", "`View 1` – `View 5`, `Save View`, `ENGINEX VIEW PRESET`")],
+          ["4", "Settings", L("Device、Services、About / Update", "Device、Services、About / Update", "Device, Services, About / Update")],
+        ] },
+
+        { k: "h", id: "cc", x: L("① 控制中心（Control Center）", "① 控制中心（Control Center）", "① Control Center") },
+        { k: "p", x: L("上面两行是 8 个原厂磁贴，第 3 行是 4 个只管演出的快捷磁贴，点一下循环切换：",
+                        "上面兩行是 8 個原廠磁貼，第 3 行是 4 個只管演出的快捷磁貼，點一下循環切換：",
+                        "The top two rows are the 8 stock tiles; the third row holds 4 performance-only tiles, each tap cycles the value:") },
+        { k: "table", head: [L("磁贴", "磁貼", "Tile"), L("可选值", "可選值", "Values"), L("作用", "作用", "What it does")], rows: [
+          [L("波形样式 `Waveform Style`", "波形樣式 `Waveform Style`", "`Waveform Style`"), "`DENON` / `RGB` / `3BAND`", L("原厂绿、RGB、先锋风格三频段", "原廠綠、RGB、先鋒風格三頻段", "Stock green, RGB, Pioneer-style 3-band")],
+          [L("转盘灯效 `Jog Light`", "轉盤燈效 `Jog Light`", "`Jog Light`"), "`STATIC` / `RAINBOW` / `BPM`", L("固定色、流光、跟随 BPM", "固定色、流光、跟隨 BPM", "Solid, flowing rainbow, BPM-synced")],
+          [L("推杆回音 `Echo Out`", "推桿回音 `Echo Out`", "`Echo Out`"), "`OFF` / `ALL` / `UPFADER`", L("关闭、暂停和拉推子都出回声、只在拉推子时出回声", "關閉、暫停與拉推桿都出回聲、只在拉推桿時出回聲", "Off; echo tail on pause and fader pull; on fader pull only")],
+          [L("智能同步 `Smart Sync`", "智慧同步 `Smart Sync`", "`Smart Sync`"), "`BAR` / `BEAT` / `TEMPO`", L("按小节、按拍子、只对速度", "按小節、按拍子、只對速度", "Bar, beat, or tempo only")],
+        ] },
+        { k: "note", x: L("`Live Stream`（直播推流）已从控制中心移到 `设置 → 服务`，避免打碟时误触断流。",
+                          "`Live Stream`（直播推流）已從控制中心移到 `設定 → 服務`，避免打碟時誤觸斷流。",
+                          "`Live Stream` has moved from the Control Center to `Settings → Services` so it cannot be toggled by accident during a set.") },
+
+        { k: "h", id: "profile", x: L("② 个人偏好（User Profile）", "② 個人偏好（User Profile）", "② User Profile") },
+        { k: "table", head: [L("分组", "分組", "Group"), L("开关", "開關", "Settings")], rows: [
+          [L("`Playback` 播放与音频 DSP", "`Playback` 播放與音訊 DSP", "`Playback` (playback & audio DSP)"),
+           L("`Master Soft Clipper`（主输出软限幅）、`Auto-Gain`（0 dB 自动增益）、`Echo Out`（推杆回音）、`Stems EQ Mode`（分轨 EQ 映射）、`Color FX Style`（先锋风格滤波效果）",
+             "`Master Soft Clipper`（主輸出軟限幅）、`Auto-Gain`（0 dB 自動增益）、`Echo Out`（推桿回音）、`Stems EQ Mode`（分軌 EQ 映射）、`Color FX Style`（先鋒風格濾波效果）",
+             "`Master Soft Clipper`, `Auto-Gain` (0 dB), `Echo Out`, `Stems EQ Mode` (stem-to-EQ mapping), `Color FX Style` (Pioneer-style filter FX)")],
+          ["`Cues/Loops`", "`Beat Jump Pad Bank`、`Swap Loop / Beat Jump`"],
+          [L("`Safety` 演出防呆", "`Safety` 演出防呆", "`Safety` (gig safety)"), L("`Sync Guard Tolerance`（BPM 同步防呆范围）", "`Sync Guard Tolerance`（BPM 同步防呆範圍）", "`Sync Guard Tolerance` (BPM range the sync guard accepts)")],
+          [L("`Library` 曲库", "`Library` 曲庫", "`Library`"),
+           L("`Auto-Analyze Drives`（插盘自动分析）、`OmniSource`（全源融合浏览）、`Dual-Column Browser`（双列浏览）",
+             "`Auto-Analyze Drives`（插碟自動分析）、`OmniSource`（全源融合瀏覽）、`Dual-Column Browser`（雙列瀏覽）",
+             "`Auto-Analyze Drives`, `OmniSource` (unified browsing), `Dual-Column Browser`")],
+        ] },
+
+        { k: "h", id: "layout", x: L("③ 视图与布局（View / Layout Manager）", "③ 視圖與版面（View / Layout Manager）", "③ View / Layout Manager") },
+        { k: "ul", x: [
+          L("顶部 **`View 1` – `View 5`**：五组独立布局预设，点一下切换；**`Save View`** 把当前布局存进选中的 View，重启后保留。",
+            "頂部 **`View 1` – `View 5`**：五組獨立版面預設，點一下切換；**`Save View`** 把目前版面存進選中的 View，重啟後保留。",
+            "Top row **`View 1` – `View 5`**: five independent layout presets, one tap to switch; **`Save View`** stores the current layout into the selected view and it survives a reboot."),
+          L("下方 **`ENGINEX VIEW PRESET`**：每个 View 单独记住以下 EngineX 设置，切 View 时一起切换：",
+            "下方 **`ENGINEX VIEW PRESET`**：每個 View 單獨記住以下 EngineX 設定，切 View 時一起切換：",
+            "Below it, **`ENGINEX VIEW PRESET`**: each view remembers these EngineX settings on its own and switches them with the view:"),
+        ] },
+        { k: "table", head: [L("预设项", "預設項", "Preset item"), L("说明", "說明", "Meaning")], rows: [
+          ["`Waveform Style`", L("波形样式", "波形樣式", "Waveform style")],
+          ["`Jog Light Mode`", L("转盘灯效", "轉盤燈效", "Jog light mode")],
+          ["`UI Scale`", L("界面缩放 `100%`–`75%`", "介面縮放 `100%`–`75%`", "UI scale `100%`–`75%`")],
+          ["`Dual-Column Browser`", L("双列曲库浏览", "雙列曲庫瀏覽", "Two-column library browser")],
+          ["`Beat Jump Pad Bank`", L("Beat Jump 打击垫组", "Beat Jump 打擊墊組", "Beat Jump pad bank")],
+          ["`Swap Loop / Beat Jump`", L("交换 Loop 与 Beat Jump 旋钮", "交換 Loop 與 Beat Jump 旋鈕", "Swap the Loop and Beat Jump controls")],
+          ["`4-Deck Waveform & Role`", L("四轨同屏与机位角色", "四軌同屏與機位角色", "Four-deck waveform and deck role")],
+        ] },
+
+        { k: "h", id: "settings", x: L("④ 系统设置（Settings）", "④ 系統設定（Settings）", "④ Settings") },
+        { k: "table", head: [L("分组", "分組", "Group"), L("内容", "內容", "Contents")], rows: [
+          [L("`Device` 设备", "`Device` 裝置", "`Device`"),
+           L("`Language`（三语，免重启实时切换）、`UI Scale`（全屏无黑边实时缩放）、`Pad LED Brightness`（打击垫亮度）、`4-Deck Waveform & Role`、`Power (Turn Off)`",
+             "`Language`（三語，免重啟即時切換）、`UI Scale`（全螢幕無黑邊即時縮放）、`Pad LED Brightness`（打擊墊亮度）、`4-Deck Waveform & Role`、`Power (Turn Off)`",
+             "`Language` (three languages, switches live without a restart), `UI Scale` (full-screen live scaling, no black borders), `Pad LED Brightness`, `4-Deck Waveform & Role`, `Power (Turn Off)`")],
+          [L("`Services` 服务与网络", "`Services` 服務與網路", "`Services` (services & network)"),
+           L("7 个流媒体开关、`Streaming Quality`、`NetEase Download`、**`Live Stream`（直播推流）**、`Pro DJ Link Library`、`Pro DJ Link Export to CDJ (Beta)`",
+             "7 個串流開關、`Streaming Quality`、`NetEase Download`、**`Live Stream`（直播推流）**、`Pro DJ Link Library`、`Pro DJ Link Export to CDJ (Beta)`",
+             "7 streaming switches, `Streaming Quality`, `NetEase Download`, **`Live Stream`**, `Pro DJ Link Library`, `Pro DJ Link Export to CDJ (Beta)`")],
+          [L("`About / Update` 关于与更新", "`About / Update` 關於與更新", "`About / Update`"),
+           L("版本号、控制台地址、本机 8 位访问码、一键在线更新", "版本號、主控台位址、本機 8 位存取碼、一鍵線上更新", "Version, console address, this deck's 8-character access code, one-tap online update")],
+        ] },
+        { k: "ul", x: [
+          L("**访问码**：格式 `XXXX-XXXX`，每台机器随机生成；不含 0/O、1/I；输入不分大小写，横杠和空格可省略；同一设备 1 分钟内输错 5 次锁定 1 分钟，防止同网络的人暴力猜码。",
+            "**存取碼**：格式 `XXXX-XXXX`，每台機器隨機產生；不含 0/O、1/I；輸入不分大小寫，橫線與空格可省略；同一裝置 1 分鐘內輸錯 5 次鎖定 1 分鐘，防止同網路的人暴力猜碼。",
+            "**Access code**: format `XXXX-XXXX`, random per deck, no 0/O or 1/I; input ignores case, dashes and spaces; 5 wrong codes from one device within a minute lock it out for a minute, so nobody on the network can brute-force it."),
+          L("**Pro DJ Link 自检**：开启 `Pro DJ Link Export to CDJ (Beta)` 后，电脑浏览器打开 `http://<碟机 IP>:8080/api/prolink/diag?format=text`（先登录控制台），得到一份可直接贴进 Issue 的纯文本自检报告。",
+            "**Pro DJ Link 自檢**：開啟 `Pro DJ Link Export to CDJ (Beta)` 後，電腦瀏覽器開啟 `http://<碟機 IP>:8080/api/prolink/diag?format=text`（先登入主控台），得到一份可直接貼進 Issue 的純文字自檢報告。",
+            "**Pro DJ Link self-check**: with `Pro DJ Link Export to CDJ (Beta)` on, open `http://<deck IP>:8080/api/prolink/diag?format=text` in a browser (log in to the console first) for a plain-text report you can paste into an Issue."),
+        ] },
+      ],
+    },
+
     /* ───────────── 3 流媒体 ───────────── */
     {
       id: "streaming", icon: "🎵",
@@ -215,6 +304,8 @@
           L("**View 1 ~ View 5**：五个预设一键切换；**保存视图**把当前布局存进该视图，重启后保持。", "**View 1 ~ View 5**：五個預設一鍵切換；**儲存視圖**把目前版面存進該視圖，重啟後保持。", "**View 1 ~ View 5**: five presets, one tap to switch; **Save View** stores the current layout into the view and it survives a reboot."),
           L("**表演打击垫（Performance Pads）默认关闭**，给波形留出更多空间。", "**表演打擊墊（Performance Pads）預設關閉**，給波形留出更多空間。", "**Performance Pads are off by default** to leave more room for waveforms."),
           L("**4 个波形**开关：四轨同屏显示。", "**4 個波形**開關：四軌同屏顯示。", "**4 Waveforms** toggle: all four decks on one screen."),
+
+          L("入口：顶部下拉第 3 页。下方 `ENGINEX VIEW PRESET` 让每个 View 各自记住波形样式、转盘灯效、界面缩放、双列浏览、Beat Jump 打击垫组、Loop / Beat Jump 互换和四轨角色，详见「界面地图」。", "入口：頂部下拉第 3 頁。下方 `ENGINEX VIEW PRESET` 讓每個 View 各自記住波形樣式、轉盤燈效、介面縮放、雙列瀏覽、Beat Jump 打擊墊組、Loop / Beat Jump 互換與四軌角色，詳見「介面地圖」。", "Open it on the third pull-down page. `ENGINEX VIEW PRESET` below lets each view keep its own waveform style, jog light, UI scale, two-column browser, Beat Jump pad bank, Loop / Beat Jump swap and four-deck role; see Menu map."),
         ] },
         { k: "h", id: "zoom", x: L("波形缩得更远", "波形縮得更遠", "Zoom the waveform further out") },
         { k: "p", x: L("一体机（PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro / SC LIVE）波形最远缩到 30 秒（原厂 10 秒）。`设置 → 设备 → 旋钮行为` 选 `波形缩放` 后，在打碟界面转浏览旋钮即可（#77）。", "一體機（PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro / SC LIVE）波形最遠縮到 30 秒（原廠 10 秒）。`設定 → 裝置 → 旋鈕行為` 選 `波形縮放` 後，在打碟介面轉瀏覽旋鈕即可（#77）。", "All-in-one units (PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro / SC LIVE) zoom out to 30 s (stock 10 s). Set `Settings → Device → Knob behaviour` to `Waveform zoom`, then turn the browse knob on the deck screen (#77).") },
@@ -258,7 +349,7 @@
           L("**蓝牙音频**：手机蓝牙推流到碟机，屏幕显示曲目信息，可播放 / 暂停 / 切歌。", "**藍牙音訊**：手機藍牙推流到碟機，螢幕顯示曲目資訊，可播放 / 暫停 / 切歌。", "**Bluetooth audio**: stream from your phone; the deck shows track info and supports play / pause / skip."),
         ] },
         { k: "shot", name: "zh:06b-preferences-device.png", cap: L("设备设置：语言、波形、流媒体音质、转盘灯效", "裝置設定：語言、波形、串流音質、轉盤燈效", "Device settings: language, waveform, streaming quality, jog lighting") },
-        { k: "shot", src: "site/assets/shots/shot-control-center.png", cap: L("实机渲染：控制中心（含波形样式、Live Stream、Smart Sync 磁贴）", "實機渲染：控制中心（含波形樣式、Live Stream、Smart Sync 磁貼）", "Rendered on-device: Control Center with Waveform Style, Live Stream and Smart Sync tiles") },
+        { k: "shot", src: "site/assets/shots/shot-control-center.png", cap: L("实机渲染：控制中心（5.3.0.2 版，含 Live Stream 磁贴；新版第 3 行是波形样式、转盘灯效、推杆回音、智能同步，见「界面地图」）", "實機渲染：控制中心（5.3.0.2 版，含 Live Stream 磁貼；新版第 3 行是波形樣式、轉盤燈效、推桿回音、智慧同步，見「介面地圖」）", "Rendered on-device: Control Center in 5.3.0.2 with the Live Stream tile; the new third row is Waveform Style, Jog Light, Echo Out and Smart Sync (see Menu map)") },
         { k: "shot", src: "site/assets/shots/shot-preferences-enginex.png", cap: L("实机渲染：设置 → 设备（语言、波形、流媒体音质、转盘灯效）", "實機渲染：設定 → 裝置（語言、波形、串流音質、轉盤燈效）", "Rendered on-device: Settings → Device (language, waveform, streaming quality, jog light)") },
         { k: "shot", src: "site/assets/shots/shot-preferences-enginex-2.png", cap: L("实机渲染：设置 → 设备（软限幅、自动增益、OmniSource、Pro DJ Link、4 轨波形、Player #）", "實機渲染：設定 → 裝置（軟限幅、自動增益、OmniSource、Pro DJ Link、4 軌波形、Player #）", "Rendered on-device: Settings → Device (soft clipper, auto-gain, OmniSource, Pro DJ Link, 4-deck waveform, Player #)") },
       ],
@@ -272,6 +363,7 @@
         { k: "p", x: L("碟机和电脑 / 手机在同一网络时，浏览器打开 `http://<碟机 IP>:8080/ui`（页面三语）。", "碟機與電腦 / 手機在同一網路時，瀏覽器開啟 `http://<碟機 IP>:8080/ui`（頁面三語）。", "With the deck and your computer / phone on the same network, open `http://<deck IP>:8080/ui` in a browser (three languages).") },
         { k: "h", id: "code", x: L("访问码", "存取碼", "Access code") },
         { k: "p", x: L("碟机上 `设置 → 关于` 显示控制台地址和访问码（#79）。流媒体二维码只登录对应服务，不会打开控制台，所以俱乐部里扫屏幕二维码的人拿不到碟机控制权。", "碟機上 `設定 → 關於` 顯示主控台位址與存取碼（#79）。串流 QR Code 只登入對應服務，不會開啟主控台，所以俱樂部裡掃螢幕 QR Code 的人拿不到碟機控制權。", "`Settings → About` on the deck shows the console address and access code (#79). Streaming QR codes only log in their own service and never open the console, so nobody in the club who scans the screen gets control of the deck.") },
+        { k: "note", tone: "new", x: L("【开发中，随后续版本】访问码改为 8 位 `XXXX-XXXX`（不含 0/O、1/I），每台碟机随机生成，旧的 32 位访问码升级后自动替换，已登录的浏览器需要重新输入。输入不分大小写，横杠和空格可省略。同一设备 1 分钟内输错 5 次会被锁定 1 分钟。", "【開發中，隨後續版本】存取碼改為 8 位 `XXXX-XXXX`（不含 0/O、1/I），每台碟機隨機產生，舊的 32 位存取碼升級後自動替換，已登入的瀏覽器需要重新輸入。輸入不分大小寫，橫線與空格可省略。同一裝置 1 分鐘內輸錯 5 次會被鎖定 1 分鐘。", "[In development, upcoming release] The access code becomes 8 characters, `XXXX-XXXX` (no 0/O or 1/I), random per deck. An old 32-character code is replaced on upgrade, so signed-in browsers must enter the new one. Input ignores case, dashes and spaces. 5 wrong codes from one device within a minute lock it out for a minute.") },
         { k: "h", id: "drop", x: L("Wi-Fi 拖拽传歌", "Wi-Fi 拖曳傳歌", "Wi-Fi drag-and-drop upload") },
         { k: "ul", x: [
           L("把 MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS 拖进网页，存到你选的内置硬盘、SD 卡或 U 盘的 `Wi-Fi Drop/<歌单>/` 下。", "把 MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS 拖進網頁，存到你選的內建硬碟、SD 卡或隨身碟的 `Wi-Fi Drop/<歌單>/` 下。", "Drag MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS files into the page; they land in `Wi-Fi Drop/<playlist>/` on the internal drive, SD card or USB stick you pick."),
@@ -283,7 +375,7 @@
         { k: "p", x: L("同一张盘上的文件被移动或改名后，控制台为每首丢失曲目找新位置（先按文件名和大小，再按忽略大小写的文件名，最后按清理后的文件名）。**「扫描」只预览**；**「一键修复路径」先备份 `m.db` 再改写路径**。完成后在碟机上重新加载该盘（#74）。", "同一張碟上的檔案被移動或改名後，主控台為每首遺失曲目找新位置（先依檔名與大小，再依忽略大小寫的檔名，最後依清理後的檔名）。**「掃描」只預覽**；**「一鍵修復路徑」先備份 `m.db` 再改寫路徑**。完成後在碟機上重新載入該碟（#74）。", "When files on the same drive were moved or renamed, the console finds each missing track's new place (by file name and size, then case-insensitive name, then cleaned name). **Scan only previews**; **Fix paths** backs up `m.db` first, then rewrites the paths. Reload the drive on the deck afterwards (#74).") },
         { k: "h", id: "livestream", x: L("Live Stream：直播内录与推流", "Live Stream：直播內錄與推流", "Live Stream: capture & broadcast") },
         { k: "note", tone: "new", x: L("【开发中，随后续版本】电脑直连的 `/live.mp3`、`/live.wav` 地址随下一次发版上线。", "【開發中，隨後續版本】電腦直連的 `/live.mp3`、`/live.wav` 位址隨下一次發版上線。", "[In development, upcoming release] The direct `/live.mp3` and `/live.wav` addresses ship with the next release.") },
-        { k: "p", x: L("先在碟机下拉控制中心，把 `Live Stream` 点为 **`ON`**，再按下面任一种用法在电脑上收听 / 直播。", "先在碟機下拉控制中心，把 `Live Stream` 點為 **`ON`**，再依下面任一種用法在電腦上收聽 / 直播。", "First pull down the Control Center on the deck and set `Live Stream` to **`ON`**, then use either method below on your computer.") },
+        { k: "p", x: L("先在碟机 `设置 → 服务` 把 `Live Stream` 设为 **`ON`**（5.3.0.2 及更早版本在下拉控制中心的磁贴里），再按下面任一种用法在电脑上收听 / 直播。", "先在碟機 `設定 → 服務` 把 `Live Stream` 設為 **`ON`**（5.3.0.2 及更早版本在下拉控制中心的磁貼裡），再依下面任一種用法在電腦上收聽 / 直播。", "First set `Live Stream` to **`ON`** under `Settings → Services` on the deck (in 5.3.0.2 and earlier it is a Control Center tile), then use either method below on your computer.") },
         { k: "ul", x: [
           L("**用法一：电脑免配置直连（最简单）**。电脑不用装任何服务端软件，直接在 **OBS**（添加「媒体源」→ 取消勾选「本地文件」→ 填入地址）、**VLC** 或**浏览器**里打开：MP3 直播流 `http://<碟机 IP>:8080/live.mp3`，WAV 无损流 `http://<碟机 IP>:8080/live.wav`。直接收到碟机数字内录的主输出声音，外置声卡和录音线都省了。", "**用法一：電腦免設定直連（最簡單）**。電腦不用安裝任何伺服端軟體，直接在 **OBS**（新增「媒體來源」→ 取消勾選「本機檔案」→ 填入位址）、**VLC** 或**瀏覽器**裡開啟：MP3 直播流 `http://<碟機 IP>:8080/live.mp3`，WAV 無損流 `http://<碟機 IP>:8080/live.wav`。直接收到碟機數位內錄的主輸出聲音，外接音效卡與錄音線都省了。", "**Method 1: connect from the computer with no setup (simplest).** No server software to install. Open the address in **OBS** (add a “Media Source”, untick “Local File”, paste the address), in **VLC** or in a **browser**: MP3 live stream `http://<deck IP>:8080/live.mp3`, lossless WAV stream `http://<deck IP>:8080/live.wav`. You receive the deck’s digitally captured main output directly; no external sound card or recording cable needed."),
           L("**用法二：推送到外部 Icecast / Shoutcast 服务器**。在电脑浏览器打开 `http://<碟机 IP>:8080` 的 Web 控制台，在 Live Stream 卡片填入外部 Icecast 服务器地址、挂载点和密码。碟机会在空闲的 CPU3 核上后台推流，并实时同步当前播放的歌名。", "**用法二：推送到外部 Icecast / Shoutcast 伺服器**。在電腦瀏覽器開啟 `http://<碟機 IP>:8080` 的 Web 主控台，在 Live Stream 卡片填入外部 Icecast 伺服器位址、掛載點與密碼。碟機會在空閒的 CPU3 核上背景推流，並即時同步目前播放的歌名。", "**Method 2: push to an external Icecast / Shoutcast server.** Open the web console at `http://<deck IP>:8080` in a browser on your computer and fill in the external Icecast server address, mount point and password on the Live Stream card. The deck streams in the background on the idle CPU3 core and keeps the current song title in sync."),
