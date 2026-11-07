@@ -93,10 +93,16 @@ pre)
     role=$(sed -n 's/^four_deck_role=//p' "$UI/settings.conf" 2>/dev/null | tail -n 1)
     case $role in
     12|13|24|1|2) ;;
-    *) # auto: Engine's "Player #" (Settings): odd plays decks 1/3 (left), even 2/4 (right)
-        state=${SC5000_PLANCK_STATE:-"/data/AppDataUser/AIR Music Technology/Engine/State/PlanckClientState.json"}
-        n=$(grep -A1 '"Player": {' "$state" 2>/dev/null | sed -n 's/.*"string": "\([0-9]*\)".*/\1/p' | head -n 1)
-        case $n in *[02468]) role=24 ;; *) role=13 ;; esac ;;
+    *) # auto: standalone defaults to 12 (Layer A + B); paired allocates 13 (Player 1) / 24 (Player 2)
+        paired=${SC5000_PAIRED_PLAYER:-/data/sc5000-custom/state/paired-player}
+        [ -e "$paired" ] || [ ! -e /data/enginex/state/paired-player ] || paired=/data/enginex/state/paired-player
+        if [ -e "$paired" ]; then
+            state=${SC5000_PLANCK_STATE:-"/data/AppDataUser/AIR Music Technology/Engine/State/PlanckClientState.json"}
+            n=$(grep -A1 '"Player": {' "$state" 2>/dev/null | sed -n 's/.*"string": "\([0-9]*\)".*/\1/p' | head -n 1)
+            case $n in *[02468]) role=24 ;; *) role=13 ;; esac
+        else
+            role=12
+        fi ;;
     esac
     [ -z "$on" ] || { mkdir -p "$patched" && echo "$role" > "$patched/role"; } # the UI hook reads it
     # The wheel display (jog screen: cover, platter ring, logo) followed the unnamed

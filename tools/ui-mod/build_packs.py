@@ -1057,7 +1057,7 @@ SERVICES_MAIN = """
 		const lib = Planck.librarianController.collectionController
 		const m = /uri=streaming:\\/\\/TIDAL\\/Track\\/(\\d+)/.exec(lib.getTrackUrisFromUniversalIds([uid]) || "")
 		if (!m) return false
-		const deck = root.scDeckList().slice().reverse().find(d => !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
+		const deck = root.scDeckList().slice().reverse().find(d => !root.scDeckLocked(d) && !Planck.getProperty("/Engine/Deck%1/PlayState".arg(d)).translator.state)
 		if (!deck) return true // all decks playing: never interrupt playback
 		const x = new XMLHttpRequest()
 		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/stems/source?id=" + m[1])
@@ -1073,14 +1073,14 @@ SERVICES_MAIN = """
 		return true
 	}
 	// Imports land in the deck's internal library, whose universal ids are plain
-	// track ids. shortcut: scans ids 1-500; widen if that library ever grows past it.
+	// track ids. shortcut: scans ids 1-2000; widen if that library ever grows past it.
 	Timer {
 		id: scStemImport
 		property string url: ""
 		property int tries: 0
 		interval: 500; repeat: true
 		onTriggered: {
-			const ids = Array.from({ length: 500 }, (_, i) => i + 1)
+			const ids = Array.from({ length: 2000 }, (_, i) => i + 1)
 			const lines = (Planck.librarianController.collectionController.getTrackUrisFromUniversalIds(ids) || "").split("\\n")
 			const hit = lines.find(l => l.startsWith(url + "?"))
 			const id = hit && /[?&]trackId=(\\d+)/.exec(hit)
@@ -1885,9 +1885,11 @@ def edits(dev: bool):
         prefs + "Entries/Time.qml": [(
             '		text: "Sync Time"\n',
             '		text: "Sync Time"\n		enabled: !root.scDeckList().some(d => { const p = Planck.getProperty("/Engine/Deck" + d + "/PlayState"); return !!(p && p.translator && p.translator.state) })\n')],
-        v + "BrowseView/Components/Craylist.qml": [(
-            "				var trackInfo = info.payload[key]\n				tracks.push(trackInfo.uniqueID)\n			}\n			Planck.librarianController.stemsQueueManager.startRenderTracks(",
-            "				var trackInfo = info.payload[key]\n				if (!root.scStemStream(trackInfo.uniqueID)) tracks.push(trackInfo.uniqueID)\n			}\n			if (tracks.length) Planck.librarianController.stemsQueueManager.startRenderTracks(")],
+        v + "BrowseView/Components/Craylist.qml": [
+            ("Config.device.hasStemsProEmbeddedRendering && !isCurrentDeviceNetworkDrive" if v53() else "Config.device.hasStemsProEmbeddedRendering", "true"),
+            (
+                "				var trackInfo = info.payload[key]\n				tracks.push(trackInfo.uniqueID)\n			}\n			Planck.librarianController.stemsQueueManager.startRenderTracks(",
+                "				var trackInfo = info.payload[key]\n				if (!root.scStemStream(trackInfo.uniqueID)) tracks.push(trackInfo.uniqueID)\n			}\n			if (tracks.length) Planck.librarianController.stemsQueueManager.startRenderTracks(")],
         v + "Common/WaveformOverview/WaveformOverview.qml": deck_overview,
         v + "Common/WaveformOverview/WaveformOverviewLibrary.qml": overview,
         # Bindings, not aliases. WaveformOverviewRotatable aliases these two
@@ -2140,22 +2142,41 @@ def edits(dev: bool):
         # left/right layer deck. Only "Deck N" actions; Prepare List etc. stay stock.
         for side, right in (("left", "false"), ("right", "true")):
             a = side + "Actions"
-            out[ROOT + f"Views/BrowseView/Components/Components/Swipe{side.title()}Item.qml"] = [
-                (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
-                 f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
-                 "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
-                 f"    readonly property list<string> actionLabels: {a}.map(action => scLabel(action.display.label))\n"),
-                (f"    readonly property list<string> actionCommitMessages: {a}.map(action => action.display.commitMessage)\n",
-                 f"    readonly property list<string> actionCommitMessages: {a}.map(action => scLabel(action.display.commitMessage))\n"),
-                (f"        {a}[actionIndex].trigger(row.index)\n",
-                 f"        if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
-                 "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"
-                 "            Planck.getProperty(\"/Client/Librarian/LoadToDeck%1\".arg(scDeck)).translator.state = true\n"
-                 f"        }} else {a}[actionIndex].trigger(row.index)\n"),
-                # The stock block message is about the stock deck (the other player's);
-                # Engine's load arbitrator still checks the role's deck on load.
-                ("    textSwipeInvalid: ((readyToCommit", "    textSwipeInvalid: scDeck > 0 ? \"\" : ((readyToCommit"),
-            ]
+            if side == "left":
+                out[ROOT + f"Views/BrowseView/Components/Components/Swipe{side.title()}Item.qml"] = [
+                    (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
+                     "    readonly property bool scStem: !!(row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || \"\").startsWith(\"streaming://TIDAL/Track/\"))\n"
+                     f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
+                     "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
+                     f"    readonly property list<string> actionLabels: {a}.map(action => scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
+                    (f"    readonly property list<string> actionCommitMessages: {a}.map(action => action.display.commitMessage)\n",
+                     f"    readonly property list<string> actionCommitMessages: {a}.map(action => scLabel(action.display.commitMessage)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
+                    (f"    readonly property list<color> actionColors: {a}.map(action => action.display.color)\n",
+                     f"    readonly property list<color> actionColors: {a}.map(action => action.display.color).concat(scStem ? [Style.systemBlue01Color] : [])\n"),
+                    (f"        {a}[actionIndex].trigger(row.index)\n",
+                     "        if (actionIndex >= leftActions.length) {\n"
+                     "            root.scStemStream(row.modelData.trackId)\n"
+                     f"        }} else if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
+                     "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"
+                     "            Planck.getProperty(\"/Client/Librarian/LoadToDeck%1\".arg(scDeck)).translator.state = true\n"
+                     f"        }} else {a}[actionIndex].trigger(row.index)\n"),
+                    ("    textSwipeInvalid: ((readyToCommit", "    textSwipeInvalid: scDeck > 0 ? \"\" : ((readyToCommit"),
+                ]
+            else:
+                out[ROOT + f"Views/BrowseView/Components/Components/Swipe{side.title()}Item.qml"] = [
+                    (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
+                     f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
+                     "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
+                     f"    readonly property list<string> actionLabels: {a}.map(action => scLabel(action.display.label))\n"),
+                    (f"    readonly property list<string> actionCommitMessages: {a}.map(action => action.display.commitMessage)\n",
+                     f"    readonly property list<string> actionCommitMessages: {a}.map(action => scLabel(action.display.commitMessage))\n"),
+                    (f"        {a}[actionIndex].trigger(row.index)\n",
+                     f"        if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
+                     "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"
+                     "            Planck.getProperty(\"/Client/Librarian/LoadToDeck%1\".arg(scDeck)).translator.state = true\n"
+                     f"        }} else {a}[actionIndex].trigger(row.index)\n"),
+                    ("    textSwipeInvalid: ((readyToCommit", "    textSwipeInvalid: scDeck > 0 ? \"\" : ((readyToCommit"),
+                ]
     if v53():
         # Stock settings a board flag hides although Engine registers the property on every
         # board measured (JP07, JP11, JP13, JC11, NH08 in the #77 sandbox dump). Each gate

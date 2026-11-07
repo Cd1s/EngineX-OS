@@ -425,9 +425,15 @@ role_case 24 24 '"Right"' stock
 role_case 12 12 'Planck.getProperty' own
 role_case 1 1 '"Left"' none
 role_case 2 2 '"Right"' none
-role_case '' 24 '"Right"' stock # auto: player 2 is even
+role_case '' 12 'Planck.getProperty' own # auto standalone: default to 12
+role_case auto 12 'Planck.getProperty' own
+touch "$TMP/paired-player"
+export SC5000_PAIRED_PLAYER=$TMP/paired-player
+role_case '' 24 '"Right"' stock # auto paired: player 2 is even -> 24
 printf '{\n  "Player": {\n    "string": "1",\n    "type": 4\n  }\n}\n' > "$TMP/planck-state.json"
-role_case auto 13 '"Left"' stock
+role_case auto 13 '"Left"' stock # auto paired: player 1 is odd -> 13
+rm -f "$TMP/paired-player"
+unset SC5000_PAIRED_PLAYER
 [[ ! -e $TMP/assign-patched/JP13_Controller_Assignments.qml ]] || fail 'an unpatchable file must not be bound'
 printf 'lang=en\n' > "$TMP/ui-roles/settings.conf"
 SC5000_UI_DIR=$TMP/ui-roles PATH=$TMP/guard-bin:$PATH sh "$GUARD" pre

@@ -1,10 +1,14 @@
 package enginedb
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -86,4 +90,294 @@ func MigrateArtwork(ctx context.Context, mount string) (int, error) {
 		return 0, err
 	}
 	return n, tx.Commit()
+}
+
+var (
+	ErrNoArtwork = errors.New("artwork: no embedded artwork found")
+	ErrBadFormat = errors.New("artwork: unsupported image format")
+)
+
+func isJPEG(b []byte) bool {
+	return len(b) >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF
+}
+
+func isPNG(b []byte) bool {
+	return len(b) >= 8 && bytes.Equal(b[:8], []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A})
+}
+
+func validateImage(b []byte) ([]byte, error) {
+	if isJPEG(b) || isPNG(b) {
+		return b, nil
+	}
+	return nil, ErrBadFormat
+}
+
+func findImageOffset(b []byte) int {
+	jpegMagic := []byte{0xFF, 0xD8, 0xFF}
+	pngMagic := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	jIdx := bytes.Index(b, jpegMagic)
+	pIdx := bytes.Index(b, pngMagic)
+	if jIdx >= 0 && (pIdx < 0 || jIdx < pIdx) {
+		return jIdx
+	}
+	if pIdx >= 0 {
+		return pIdx
+	}
+	return -1
+}
+
+// ExtractEmbeddedArtwork extracts embedded cover artwork from an audio file (MP3 ID3v2 APIC,
+// FLAC METADATA_BLOCK_PICTURE, or MP4/M4A covr->data atoms), verifying PNG or JPEG headers.
+func ExtractEmbeddedArtwork(audioPath string) ([]byte, error) {
+	f, err := os.Open(audioPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	hdr := make([]byte, 12)
+	n, err := f.ReadAt(hdr, 0)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	if n < 4 {
+		return nil, ErrNoArtwork
+	}
+
+	if string(hdr[:3]) == "ID3" {
+		if _, err := f.Seek(0, io.SeekStart); err == nil {
+			if art, err := extractMP3Artwork(f); err == nil {
+				return art, nil
+			}
+		}
+	}
+	if string(hdr[:4]) == "fLaC" {
+		if _, err := f.Seek(0, io.SeekStart); err == nil {
+			if art, err := extractFLACArtwork(f); err == nil {
+				return art, nil
+			}
+		}
+	}
+	if (n >= 8 && (string(hdr[4:8]) == "ftyp" || string(hdr[4:8]) == "moov")) ||
+		filepath.Ext(audioPath) == ".m4a" || filepath.Ext(audioPath) == ".mp4" {
+		if _, err := f.Seek(0, io.SeekStart); err == nil {
+			if art, err := extractMP4Artwork(f); err == nil {
+				return art, nil
+			}
+		}
+	}
+
+	// General fallbacks in case header check was indeterminate
+	if _, err := f.Seek(0, io.SeekStart); err == nil {
+		if art, err := extractMP3Artwork(f); err == nil {
+			return art, nil
+		}
+	}
+	if _, err := f.Seek(0, io.SeekStart); err == nil {
+		if art, err := extractFLACArtwork(f); err == nil {
+			return art, nil
+		}
+	}
+	if _, err := f.Seek(0, io.SeekStart); err == nil {
+		if art, err := extractMP4Artwork(f); err == nil {
+			return art, nil
+		}
+	}
+
+	return nil, ErrNoArtwork
+}
+
+func extractMP3Artwork(f io.ReadSeeker) ([]byte, error) {
+	hdr := make([]byte, 10)
+	if _, err := io.ReadFull(f, hdr); err != nil {
+		return nil, err
+	}
+	if string(hdr[:3]) != "ID3" {
+		return nil, ErrNoArtwork
+	}
+	ver := hdr[3]
+	flags := hdr[5]
+	tagSize := int(hdr[6]&0x7F)<<21 | int(hdr[7]&0x7F)<<14 | int(hdr[8]&0x7F)<<7 | int(hdr[9]&0x7F)
+	tagData := make([]byte, tagSize)
+	if _, err := io.ReadFull(f, tagData); err != nil {
+		return nil, err
+	}
+
+	offset := 0
+	if flags&0x40 != 0 {
+		if ver == 4 && len(tagData) >= 4 {
+			extSize := int(tagData[0]&0x7F)<<21 | int(tagData[1]&0x7F)<<14 | int(tagData[2]&0x7F)<<7 | int(tagData[3]&0x7F)
+			offset = extSize
+		} else if ver == 3 && len(tagData) >= 4 {
+			extSize := int(binary.BigEndian.Uint32(tagData[:4]))
+			offset = 4 + extSize
+		}
+	}
+
+	for offset+10 <= len(tagData) {
+		if tagData[offset] == 0 {
+			break
+		}
+		frameID := string(tagData[offset : offset+4])
+		var frameSize int
+		if ver == 4 {
+			frameSize = int(tagData[offset+4]&0x7F)<<21 | int(tagData[offset+5]&0x7F)<<14 | int(tagData[offset+6]&0x7F)<<7 | int(tagData[offset+7]&0x7F)
+		} else {
+			frameSize = int(binary.BigEndian.Uint32(tagData[offset+4 : offset+8]))
+		}
+		if frameSize <= 0 || offset+10+frameSize > len(tagData) {
+			break
+		}
+		frameBody := tagData[offset+10 : offset+10+frameSize]
+		if frameID == "APIC" {
+			if idx := findImageOffset(frameBody); idx >= 0 {
+				return validateImage(frameBody[idx:])
+			}
+		}
+		offset += 10 + frameSize
+	}
+	return nil, ErrNoArtwork
+}
+
+func extractFLACArtwork(f io.ReadSeeker) ([]byte, error) {
+	magic := make([]byte, 4)
+	if _, err := io.ReadFull(f, magic); err != nil {
+		return nil, err
+	}
+	if string(magic) != "fLaC" {
+		return nil, ErrNoArtwork
+	}
+
+	for {
+		hdr := make([]byte, 4)
+		if _, err := io.ReadFull(f, hdr); err != nil {
+			return nil, ErrNoArtwork
+		}
+		isLast := (hdr[0] & 0x80) != 0
+		blockType := hdr[0] & 0x7F
+		blockLen := int(hdr[1])<<16 | int(hdr[2])<<8 | int(hdr[3])
+
+		if blockType == 6 {
+			data := make([]byte, blockLen)
+			if _, err := io.ReadFull(f, data); err != nil {
+				return nil, err
+			}
+			if len(data) >= 32 {
+				mimeLen := int(binary.BigEndian.Uint32(data[4:8]))
+				if 8+mimeLen+4 <= len(data) {
+					descLen := int(binary.BigEndian.Uint32(data[8+mimeLen : 8+mimeLen+4]))
+					dataOffset := 8 + mimeLen + 4 + descLen + 16
+					if dataOffset+4 <= len(data) {
+						imgLen := int(binary.BigEndian.Uint32(data[dataOffset : dataOffset+4]))
+						imgStart := dataOffset + 4
+						if imgStart+imgLen <= len(data) {
+							return validateImage(data[imgStart : imgStart+imgLen])
+						}
+					}
+				}
+			}
+			if idx := findImageOffset(data); idx >= 0 {
+				return validateImage(data[idx:])
+			}
+		} else {
+			if _, err := f.Seek(int64(blockLen), io.SeekCurrent); err != nil {
+				return nil, ErrNoArtwork
+			}
+		}
+		if isLast {
+			break
+		}
+	}
+	return nil, ErrNoArtwork
+}
+
+func extractMP4Artwork(f io.ReadSeeker) ([]byte, error) {
+	return parseMP4Atoms(f, 0, 0)
+}
+
+func parseMP4Atoms(f io.ReadSeeker, start, length int64) ([]byte, error) {
+	if length == 0 {
+		size, err := f.Seek(0, io.SeekEnd)
+		if err != nil {
+			return nil, err
+		}
+		length = size
+	}
+	curr := start
+	for curr+8 <= start+length {
+		if _, err := f.Seek(curr, io.SeekStart); err != nil {
+			break
+		}
+		hdr := make([]byte, 8)
+		if _, err := io.ReadFull(f, hdr); err != nil {
+			break
+		}
+		atomSize := int64(binary.BigEndian.Uint32(hdr[:4]))
+		atomType := string(hdr[4:8])
+		headerLen := int64(8)
+		if atomSize == 1 {
+			extHdr := make([]byte, 8)
+			if _, err := io.ReadFull(f, extHdr); err != nil {
+				break
+			}
+			atomSize = int64(binary.BigEndian.Uint64(extHdr))
+			headerLen = 16
+		} else if atomSize == 0 {
+			atomSize = (start + length) - curr
+		}
+		if atomSize < headerLen || curr+atomSize > start+length {
+			break
+		}
+
+		switch atomType {
+		case "moov", "udta", "ilst":
+			if art, err := parseMP4Atoms(f, curr+headerLen, atomSize-headerLen); err == nil && art != nil {
+				return art, nil
+			}
+		case "meta":
+			metaOffset := headerLen + 4
+			if atomSize > metaOffset {
+				if art, err := parseMP4Atoms(f, curr+metaOffset, atomSize-metaOffset); err == nil && art != nil {
+					return art, nil
+				}
+			}
+		case "covr":
+			if art, err := parseMP4Covr(f, curr+headerLen, atomSize-headerLen); err == nil && art != nil {
+				return art, nil
+			}
+		}
+		curr += atomSize
+	}
+	return nil, ErrNoArtwork
+}
+
+func parseMP4Covr(f io.ReadSeeker, start, length int64) ([]byte, error) {
+	curr := start
+	for curr+8 <= start+length {
+		if _, err := f.Seek(curr, io.SeekStart); err != nil {
+			break
+		}
+		hdr := make([]byte, 8)
+		if _, err := io.ReadFull(f, hdr); err != nil {
+			break
+		}
+		atomSize := int64(binary.BigEndian.Uint32(hdr[:4]))
+		atomType := string(hdr[4:8])
+		if atomSize < 8 || curr+atomSize > start+length {
+			break
+		}
+		if atomType == "data" {
+			if atomSize > 16 {
+				payloadLen := atomSize - 16
+				payload := make([]byte, payloadLen)
+				if _, err := f.Seek(curr+16, io.SeekStart); err == nil {
+					if _, err := io.ReadFull(f, payload); err == nil {
+						return validateImage(payload)
+					}
+				}
+			}
+		}
+		curr += atomSize
+	}
+	return nil, ErrNoArtwork
 }
