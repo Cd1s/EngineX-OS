@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -599,9 +600,18 @@ func (b *Broadcaster) handshakeIcecast(conn net.Conn, cfg Config) error {
 	return nil
 }
 
+// shoutcastLogin returns the DNAS source login line: a numeric Username is a
+// DNAS v2 stream ID ("password:#id"); anything else (incl. "source") is v1, password only.
+func shoutcastLogin(cfg Config) string {
+	if id, err := strconv.Atoi(cfg.Username); err == nil && id > 0 {
+		return fmt.Sprintf("%s:#%d", cfg.Password, id)
+	}
+	return cfg.Password
+}
+
 // handshakeShoutcast performs the password & ICY handshake with Shoutcast v1/v2.
 func (b *Broadcaster) handshakeShoutcast(conn net.Conn, cfg Config) error {
-	if _, err := fmt.Fprintf(conn, "%s\r\n", cfg.Password); err != nil {
+	if _, err := fmt.Fprintf(conn, "%s\r\n", shoutcastLogin(cfg)); err != nil {
 		return fmt.Errorf("shoutcast sending password failed: %w", err)
 	}
 

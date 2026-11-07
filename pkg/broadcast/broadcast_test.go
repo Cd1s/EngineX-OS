@@ -893,3 +893,30 @@ func TestLANModeBroadcaster(t *testing.T) {
 		t.Errorf("expected lanMode 'off'")
 	}
 }
+
+func TestShoutcastLoginUsesStreamID(t *testing.T) {
+	for _, c := range []struct{ user, want string }{
+		{"source", "pw"}, {"", "pw"}, {"admin", "pw"}, {"2", "pw:#2"},
+	} {
+		if got := shoutcastLogin(Config{Username: c.user, Password: "pw"}); got != c.want {
+			t.Errorf("user %q: got %q want %q", c.user, got, c.want)
+		}
+	}
+}
+
+func TestCustomUsernameNormalized(t *testing.T) {
+	b := New(newTestGuard())
+	defer b.Close()
+	if err := b.Configure(Config{Username: " admin ", Password: "pw"}); err != nil {
+		t.Fatal(err)
+	}
+	if st := b.Status(); st.Username != "admin" || !st.PasswordSet {
+		t.Fatalf("status = %+v", st)
+	}
+	if err := b.Configure(Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if st := b.Status(); st.Username != DefaultUsername {
+		t.Fatalf("empty username should default to source, got %q", st.Username)
+	}
+}
