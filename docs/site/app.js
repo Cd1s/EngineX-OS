@@ -55,29 +55,46 @@
     return "";
   }
 
+  const GH = "https://github.com/Cd1s/EngineX-OS";
   function home() {
     const H = D.home, u = UI[lang];
-    $("#tabs").innerHTML = `<a href="#home" data-tab="home">${u.tHome}</a><a href="#start" data-tab="docs">${u.tDocs}</a><a href="#start-downloads">${u.tDl}</a>`;
-    const cards = (xs, cls) => xs.map((f) => `<a class="${cls}" href="${f.href}"><b>${T(f.t)}</b><span>${T(f.d)}</span></a>`).join("");
-    $("#home").innerHTML = `<section class="landing"><div class="lhero"><div class="lin">
-      <p class="eyebrow">Denon DJ · Numark · Rane</p>
-      <h1>EngineX OS <span>${D.version}</span></h1>
-      <p class="tagline">${T(H.tagline)}</p><p class="lsub">${T(H.sub)}</p>
-      <div class="ctas"><a class="btn pri" href="#install">${T(H.cta.dl)}</a><a class="btn" href="#start">${T(H.cta.docs)}</a><a class="btn ghost" href="https://github.com/Cd1s/EngineX-OS/releases/tag/v${D.version}" target="_blank" rel="noopener">${T(H.cta.gh)}</a></div>
-      <div class="stats">${H.stats.map(([n, l]) => `<div><b>${n}</b><span>${T(l)}</span></div>`).join("")}</div>
-    </div></div>
-    <div class="lbody">
-      <h2>${T(H.featT)}</h2><div class="feats">${cards(H.features, "feat")}</div>
-      <h2>${T(H.galT)}</h2><div class="gal">${H.gallery.map((g) => `<a href="${g.href}"><img loading="lazy" src="${esc(g.src)}" alt="${esc(T(g.cap))}"><span>${T(g.cap)}</span></a>`).join("")}</div>
-      <h2 id="home-download">${T(H.dlT)}</h2><div class="dls">${cards(H.downloads, "dlc")}</div>
-    </div></section>`;
+    $("#tabs").innerHTML = `<a href="#" data-tab="home">${u.tHome}</a><a href="#start" data-tab="docs">${u.tDocs}</a><a href="#start-downloads" data-tab="dl">${u.tDl}</a>`;
+    const head = (t, p) => `<div class="h-head"><h2>${T(t)}</h2><p>${T(p)}</p></div>`;
+    const cards = (xs) => xs.map((f) => `<a class="card" href="${f.href}">${f.tag ? `<em>${T(f.tag)}</em>` : ""}<b>${T(f.t)}</b><span>${T(f.d)}</span><i aria-hidden="true">→</i></a>`).join("");
+    $("#home").innerHTML = `<div class="home">
+      <section class="h-hero">
+        <a class="badge" href="${GH}/releases/tag/v${D.version}" target="_blank" rel="noopener">${T(H.badge)}</a>
+        <h1>${T(H.title)}</h1>
+        <p class="h-sub">${T(H.sub)}</p>
+        <div class="ctas"><a class="btn pri" href="#start">${T(H.cta.docs)}</a><a class="btn" href="#start-downloads">${T(H.cta.dl)}</a><a class="btn ghost" href="${GH}" target="_blank" rel="noopener">${T(H.cta.gh)}</a></div>
+        <figure class="h-visual"><img src="${H.shot.src}" alt="${esc(T(H.shot.cap))}" width="1280" height="800"><figcaption>${T(H.shot.cap)}</figcaption></figure>
+      </section>
+      <div class="h-stats">${H.stats.map(([n, l, d]) => `<div><b>${n}</b><span>${T(l)}</span><small>${T(d)}</small></div>`).join("")}</div>
+      <section class="h-sec">${head(H.featT, H.featP)}<div class="h-grid">${cards(H.features)}</div></section>
+      <section class="h-sec">${head(H.dlT, H.dlP)}<div class="h-grid">${cards(H.downloads)}</div></section>
+      <footer class="h-foot"><span>EngineX OS · MIT License</span><span><a href="${GH}" target="_blank" rel="noopener">GitHub</a><a href="#start">${u.tDocs}</a><a href="${GH}/issues" target="_blank" rel="noopener">Issues</a></span></footer>
+    </div>`;
+  }
+
+  /* ---- 两个视图：首页（无 hash）与三栏文档（有章节 hash 或在搜索） ---- */
+  function setView(v) {
+    document.body.dataset.view = v;
+    document.title = v === "home" ? "EngineX OS" : UI[lang].heroT;
+    const h = location.hash;
+    $$("#tabs [data-tab]").forEach((a) => a.classList.toggle("on", a.dataset.tab === (v === "home" ? "home" : h.startsWith("#start-downloads") ? "dl" : "docs")));
+  }
+  function goHome(e) {
+    e.preventDefault();
+    if (query) { query = ""; $("#q").value = ""; applySearch(); }
+    history.replaceState(null, "", location.pathname + location.search);
+    setView("home");
+    scrollTo({ top: 0, behavior: "instant" });
   }
 
   function render() {
     const u = UI[lang];
     home();
     document.documentElement.lang = { s: "zh-CN", t: "zh-TW", e: "en" }[lang];
-    document.title = u.heroT;
     $("#q").placeholder = u.search;
     $("#lang").value = lang;
     $("#ver").textContent = "v" + D.version;
@@ -103,7 +120,7 @@
       sec.classList.toggle("hide", !any);
     });
     $("#empty").classList.toggle("hide", !q || hits > 0);
-    $("#home").classList.toggle("hide", !!q);
+    if (q) setView("docs");
     if (q) mark(q);
   }
   function mark(q) {
@@ -134,9 +151,7 @@
   function spy() {
     const secs = $$("section.sec:not(.hide)");
     const sec = secs.find((x) => x.getBoundingClientRect().bottom > 120) || secs[secs.length - 1];
-    const onHome = $("#home").getBoundingClientRect().bottom > 120;
-    $$("#tabs [data-tab]").forEach((a) => a.classList.toggle("on", a.dataset.tab === (onHome ? "home" : "docs")));
-    if (!sec) return;
+    if (!sec || document.body.dataset.view !== "docs") return;
     setToc(sec.id);
     const h = $$("h3.blk:not(.hide)", sec).filter((x) => x.getBoundingClientRect().top < 120).pop();
     $$("#toc a, #nav .sub a").forEach((a) => a.classList.toggle("on", !!h && a.dataset.h === h.id));
@@ -147,9 +162,11 @@
   /* ---- hash routing: #install  #streaming/#streaming-login ... ---- */
   function route() {
     const h = decodeURIComponent(location.hash.slice(1));
-    if (!h) return;
+    if (!h || h === "home") { if (!query) setView("home"); return; }
+    setView("docs");
     const el = document.getElementById(h) || document.getElementById(D.sections.map((s) => s.id).find((id) => h === id));
-    if (el && !el.closest(".hide")) el.scrollIntoView();
+    if (el && !el.closest(".hide")) el.scrollIntoView({ behavior: "instant" });
+    spy();
   }
 
   /* ---- events ---- */
@@ -174,6 +191,8 @@
   });
   $("#main").addEventListener("error", (e) => { if (e.target.matches(".shot img")) e.target.closest(".shot").classList.add("broken"); }, true);
   $("#lb").addEventListener("click", () => $("#lb").classList.remove("on"));
+  $(".brand").addEventListener("click", goHome);
+  $("#tabs").addEventListener("click", (e) => { if (e.target.closest('[data-tab="home"]')) goHome(e); });
   $(".burger").addEventListener("click", () => $("#nav").classList.toggle("open"));
   $("#nav").addEventListener("click", () => $("#nav").classList.remove("open"));
   addEventListener("hashchange", route);
