@@ -496,3 +496,32 @@ func TestUSBAudioEndpoints(t *testing.T) {
 		t.Fatalf("handleUSBAudio expected 200, got %d", rec.Code)
 	}
 }
+
+func TestBroadcastUsernamePersistsAcrossReload(t *testing.T) {
+	s, stateDir := newTestServer(t)
+	body, _ := json.Marshal(map[string]any{"serverUrl": "http://10.1.1.1:8000", "username": "admin", "password": "pw1"})
+	if resp := doAuthRequest(t, s, "POST", "/api/broadcast", body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	// Saving the form again with an empty password field omits it: stored password stays.
+	body, _ = json.Marshal(map[string]any{"serverUrl": "http://10.1.1.1:8000", "username": "admin2"})
+	doAuthRequest(t, s, "POST", "/api/broadcast", body)
+
+	// A fresh Server on the same state dir (= restart / page reload) sees the saved values.
+	raw, err := os.ReadFile(filepath.Join(stateDir, "broadcast-config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved broadcast.Config
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Username != "admin2" || saved.Password != "pw1" || saved.ServerURL != "http://10.1.1.1:8000" {
+		t.Fatalf("saved config = %+v", saved)
+	}
+	var st broadcast.Status
+	json.NewDecoder(doAuthRequest(t, s, "GET", "/api/broadcast", nil).Body).Decode(&st)
+	if st.Username != "admin2" || !st.PasswordSet || st.ServerURL != saved.ServerURL {
+		t.Fatalf("GET status = %+v", st)
+	}
+}
