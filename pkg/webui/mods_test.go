@@ -1,14 +1,103 @@
 package webui
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestModsUpload(t *testing.T) {
+	for _, multipartUpload := range []bool{false, true} {
+		t.Run(map[bool]string{false: "raw", true: "multipart"}[multipartUpload], func(t *testing.T) {
+			var archive bytes.Buffer
+			gz := gzip.NewWriter(&archive)
+			tw := tar.NewWriter(gz)
+			for name, data := range map[string]string{"mod.json": `{"id":"upload-test","qmlFiles":{"view.qml":"Views/Test.qml"}}`, "view.qml": "Item {}"} {
+				if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(data))}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := tw.Write([]byte(data)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := gz.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var body bytes.Buffer
+			contentType := "application/gzip"
+			if multipartUpload {
+				form := multipart.NewWriter(&body)
+				part, err := form.CreateFormFile("file", "mod.tar.gz")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := part.Write(archive.Bytes()); err != nil {
+					t.Fatal(err)
+				}
+				contentType = form.FormDataContentType()
+				if err := form.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				body.Write(archive.Bytes())
+			}
+			base := t.TempDir()
+			s := New(Config{StateDir: filepath.Join(base, "state"), UIDir: filepath.Join(base, "ui")}, nil)
+			req := httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods/upload", &body)
+			req.Header.Set("Content-Type", contentType)
+			w := httptest.NewRecorder()
+			s.mux.ServeHTTP(w, req)
+			if w.Code != 200 {
+				t.Fatalf("upload %d: %s", w.Code, w.Body.String())
+			}
+			if _, err := os.Stat(filepath.Join(base, "ui", "mods-overlay", "Views", "Test.qml")); err == nil {
+				t.Fatal("uploaded mod must stay disabled until enabled")
+			}
+			w = httptest.NewRecorder()
+			s.handleMods(w, httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods", bytes.NewBufferString(`{"id":"upload-test","enabled":true}`)))
+			if w.Code != 200 {
+				t.Fatalf("enable %d: %s", w.Code, w.Body.String())
+			}
+			if _, err := os.Stat(filepath.Join(base, "ui", "mods-overlay", "Views", "Test.qml")); err != nil {
+				t.Fatal(err)
+			}
+			w = httptest.NewRecorder()
+			s.handleMods(w, httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods", bytes.NewBufferString(`{"id":"upload-test","action":"uninstall"}`)))
+			if w.Code != 200 {
+				t.Fatalf("uninstall %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestModsTailscaleLifecycle(t *testing.T) {
+	fake := &tsFake{}
+	SetSystemRunner(fake.run)
+	defer SetSystemRunner(nil)
+	tsRelease(t, []byte("fake binary"), "")
+	base := t.TempDir()
+	s := New(Config{StateDir: filepath.Join(base, "state"), UIDir: filepath.Join(base, "ui")}, nil)
+	for _, body := range []string{`{"id":"tailscale-remote","enabled":true}`, `{"id":"tailscale-remote","enabled":false}`, `{"id":"tailscale-remote","action":"uninstall"}`} {
+		w := httptest.NewRecorder()
+		s.handleMods(w, httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods", bytes.NewBufferString(body)))
+		if w.Code != 200 {
+			t.Fatalf("%s: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	if s.tailscaleInstalled() || s.loadTailscaleConfig().Enabled || !fake.has("systemd-run --unit=sc5000-tailscaled") || !fake.has("systemctl stop sc5000-tailscaled") {
+		t.Fatal("tailscale lifecycle did not complete")
+	}
+}
 
 func createWebUITestMod(t *testing.T, mediaRoot, drive, id, qmlRel string) {
 	t.Helper()
@@ -79,10 +168,10 @@ func TestMods_WebUI_Get(t *testing.T) {
 	if res.SafeModeQuarantined {
 		t.Errorf("expected SafeModeQuarantined to be false")
 	}
-	if len(res.Mods) != 1 {
-		t.Fatalf("expected 1 mod, got %d", len(res.Mods))
+	if len(res.Mods) != 2 || res.Mods[0].ID != "tailscale-remote" {
+		t.Fatalf("expected system mod and external mod, got %+v", res.Mods)
 	}
-	m := res.Mods[0]
+	m := res.Mods[1]
 	if m.ID != "dark-theme" || m.Drive != "USB_KEY" || !m.Valid || m.QMLCount != 1 || m.Enabled {
 		t.Errorf("unexpected mod details: %+v", m)
 	}
@@ -129,7 +218,7 @@ func TestMods_WebUI_PostEnableAndDisable(t *testing.T) {
 		} `json:"mods"`
 	}
 	_ = json.NewDecoder(getRec.Body).Decode(&getRes)
-	if len(getRes.Mods) != 1 || !getRes.Mods[0].Enabled {
+	if len(getRes.Mods) != 2 || !getRes.Mods[1].Enabled {
 		t.Fatalf("expected mod to be reported as enabled, got: %+v", getRes.Mods)
 	}
 

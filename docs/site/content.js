@@ -485,6 +485,7 @@
       docs: L("浏览使用文档", "瀏覽使用文件", "Read the Docs"),
       dl: L(`下载固件与安装器 v${V}`, `下載韌體與安裝器 v${V}`, `Download v${V}`),
       gh: L("GitHub 仓库 ↗", "GitHub 儲存庫 ↗", "GitHub ↗"),
+      mods: L("Mod 社区", "Mod 社群", "Mod Hub"),
     },
     // 首屏配图用实机渲染截图；hero-banner*.svg 自带霓虹渐变和过期数字（「5 大平台」），首页不用
     shot: { src: "site/assets/shots/shot-control-center.png", cap: L("EngineX OS 控制中心：Quantize、Smart Scratch、波形样式、转盘灯效、推杆回音、智能同步一屏直达", "EngineX OS 控制中心：Quantize、Smart Scratch、波形樣式、轉盤燈效、推桿回音、智慧同步一屏直達", "EngineX OS Control Center: Quantize, Smart Scratch, Waveform Style, Jog Light, Fader Echo and Smart Sync on one screen") },

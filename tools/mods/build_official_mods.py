@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Build reproducible, source-included official Mod archives (stdlib only).
+
+Run: python3 tools/mods/build_official_mods.py
+Check without writing: python3 tools/mods/build_official_mods.py --check
+Runtime sources live in docs/mods/src and are shipped verbatim in each package.
+No compilation, dependency installation, network requests or device access.
+"""
+
+import argparse
+import ast
+import gzip
+import hashlib
+import io
+import json
+from pathlib import Path
+import re
+import subprocess
+import tarfile
+
+ROOT = Path(__file__).resolve().parents[2]
+DEST = ROOT / "docs/mods"
+SRC = DEST / "src"
+DATE = "2026-11-08"
+
+
+def tri(s, t, e):
+    return dict(s=s, t=t, e=e)
+
+
+def comment(author, body, number, fragment="", date=DATE):
+    return dict(author=author, body=body, date=date, issueNumber=number,
+                url=f"https://github.com/Cd1s/EngineX-OS/issues/{number}{fragment}")
+
+
+MODS = [
+    dict(id="tailscale-remote", version="1.104.5", category="network", issueNumber=130,
+         author="EngineX Official", tags=["Tailscale", "Headscale", "SSH", "SFTP"],
+         name=tri("Tailscale 远程访问", "Tailscale 遠端存取", "Tailscale Remote Access"),
+         summary=tri("用户态 Tailscale / Headscale 状态卡片与诊断助手。", "使用者態 Tailscale / Headscale 狀態卡片與診斷助手。", "Userspace Tailscale / Headscale status card and diagnostic helper."),
+         description=tri("检测现有客户端并显示连接状态；使用系统远程访问页面按需下载、校验与登录。此包不内置二进制，也不自动开启远程访问。", "偵測既有用戶端並顯示連線狀態；使用系統遠端存取頁面按需下載、校驗與登入。此套件不內建二進位檔，也不自動開啟遠端存取。", "Detects the installed client and displays connectivity. Use the system Remote access page to download, verify and sign in. No binary is bundled and remote access is never enabled automatically."),
+         upstreamReleaseUrl="https://github.com/Cd1s/EngineX-OS/releases/download/tailscale-v1.104.5/",
+         initialComments=[comment("Cd1s", "The client is a trimmed Tailscale v1.104.5 build", 130, "#issuecomment-6707656533", "2026-11-07")]),
+    dict(id="dmx-studio", version="1.0.0", category="lighting", issueNumber=134,
+         issueNumbers=[134, 137], author="EngineX Official & @TribalDE & @Djpd66",
+         tags=["DMX512", "FTDI", "uDMX", "Art-Net", "sACN", "BPM", "EFX"],
+         name=tri("DMX 独立灯光工作站", "DMX 獨立燈光工作站", "DMX Studio"),
+         summary=tri("多域灯光输出、摇头灯 EFX、烟雾控制及 512 通道监视器。", "多域燈光輸出、搖頭燈 EFX、煙霧控制及 512 通道監視器。", "Multi-universe lighting, moving-head EFX, smoke controls and a 512-channel monitor."),
+         description=tri("独立 Python 3 helper 与 QML 控制台，提供 FTDI/OpenDMX、uDMX 16c0:05dc、Art-Net/sACN 多域输出。含通用 LED Par/Bar、Beam/Wash/Spot/3-in-1 灯库，BPM Circle/8-Figure/Pan-Tilt Sweep，烟雾量、间隔、时长、按住即喷和 2D 预览。需显式启动 helper；USB 驱动与实际灯具待实机验证，通用灯库须按灯具手册核对。", "獨立 Python 3 helper 與 QML 控制台，提供 FTDI/OpenDMX、uDMX 16c0:05dc、Art-Net/sACN 多域輸出。含通用 LED Par/Bar、Beam/Wash/Spot/3-in-1 燈庫，BPM Circle/8-Figure/Pan-Tilt Sweep，煙霧量、間隔、時長、按住即噴和 2D 預覽。須明確啟動 helper；USB 驅動與實際燈具待實機驗證，通用燈庫須依燈具手冊核對。", "Standalone Python 3 helper and QML console for FTDI/OpenDMX, uDMX 16c0:05dc and multi-universe Art-Net/sACN. Generic LED Par/Bar and Beam/Wash/Spot/3-in-1 profiles, BPM Circle/8-Figure/Pan-Tilt Sweep, smoke level/interval/duration/momentary flash and 2D preview. Start the helper explicitly. USB hardware and fixture operation need hardware validation; check generic profiles against the fixture manual."),
+         initialComments=[comment("RattyDAVE", "Some sort of interface to control DMX lights.", 134), comment("Djpd66", 'A momentary "Smoke Flash" button (active only while held down)', 134, "#issuecomment-6711005897", "2026-11-07")]),
+    dict(id="jog-logo-studio", version="1.0.0", category="ui", issueNumber=137,
+         author="EngineX Official & @Djpd66", tags=["Jog Display", "600x600", "PNG", "Logo"],
+         name=tri("转盘台标工作室", "轉盤台標工作室", "Jog Logo Studio"),
+         summary=tri("裁切 600×600 logo.png，并同步到所选媒体盘。", "裁切 600×600 logo.png，並同步至所選媒體碟。", "Crop a 600×600 logo.png and synchronize selected media drives."),
+         description=tri("中心裁切图片，预览、备份并写入媒体盘 Engine Library/logo.png；提供多盘同步和启用/停用。需要 Python 3 与已安装的 ffmpeg。加载媒体配置后显示，只有带转盘屏的机型适用；尚未验证所有机型。", "中心裁切圖片，預覽、備份並寫入媒體碟 Engine Library/logo.png；提供多碟同步和啟用/停用。需要 Python 3 與已安裝的 ffmpeg。載入媒體設定後顯示，僅有轉盤螢幕的機型適用；尚未驗證所有機型。", "Center-crops images, previews, backs up and writes Engine Library/logo.png on selected media drives, with multi-drive sync and enable/disable. Requires Python 3 and an existing ffmpeg. Reload the media profile to display. Only models with a jog display benefit; all-model hardware validation is pending."),
+         initialComments=[comment("Djpd66", "set custom logos on the jog wheel displays", 137)]),
+    dict(id="sampler-pad-studio", version="1.0.0", category="audio", issueNumber=137,
+         issueNumbers=[120, 137], author="EngineX Official & @tribalwalker-sketch & @Djpd66",
+         tags=["Sampler", "8 Pads", "Loop", "WAV"],
+         name=tri("八格采样打击垫管理器", "八格取樣打擊墊管理器", "Sampler Pad Studio"),
+         summary=tri("八格音源管理、重命名、清空与 Loop 切片导出。", "八格音源管理、重新命名、清空與 Loop 切片匯出。", "Eight-slot sample management, rename, clear and loop-slice export."),
+         description=tri("可视化管理独立八格采样库，导入 WAV、重命名、清空并按采样点精确切片；其他格式使用已安装的 ffmpeg。导出后在原生浏览器加载到打击垫。固件暂未暴露原生打击垫直接绑定接口，本 Mod 不声称自动绑定或播放。", "視覺化管理獨立八格取樣庫，匯入 WAV、重新命名、清空並依取樣點精確切片；其他格式使用已安裝的 ffmpeg。匯出後在原生瀏覽器載入至打擊墊。韌體尚未公開原生打擊墊直接綁定介面，本 Mod 不宣稱自動綁定或播放。", "Manage an independent eight-slot sample bank: import WAV, rename, clear and slice precisely by sample offsets; other formats use an existing ffmpeg. Load exported files into the native pads through the browser. Firmware has no exposed direct native-pad binding API; this Mod does not claim automatic binding or playback."),
+         initialComments=[comment("tribalwalker-sketch", "One control - a Control Center row, or a long-press on an empty sampler pad", 120), comment("Djpd66", "dedicated UI tab for managing the sampler", 137)]),
+    dict(id="minimal-club-mode", version="1.0.0", category="system", issueNumber=136,
+         author="EngineX Official", tags=["Club", "USB", "SD", "Pro DJ Link", "Offline"],
+         name=tri("纯粹俱乐部演出模式", "純粹俱樂部演出模式", "Minimal Club Mode"),
+         summary=tri("暂停可选后台服务，优先本地 USB/SD 与 Pro DJ Link 演出。", "暫停選用背景服務，優先本機 USB/SD 與 Pro DJ Link 演出。", "Pause optional background services for local USB/SD and Pro DJ Link performance."),
+         description=tri("记录并暂停下载、deemix、stems、广播后台服务，退出时只恢复之前运行的服务。保留 Engine、音频、Rekordbox 桥和 Pro DJ Link；不修改音频调度，不承诺未经测量的 100% 算力或绝对稳定性。显式启用且可恢复，不永久 mask 服务。", "記錄並暫停下載、deemix、stems、廣播背景服務，退出時僅恢復原先執行中的服務。保留 Engine、音訊、Rekordbox 橋與 Pro DJ Link；不修改音訊排程，不承諾未經量測的 100% 算力或絕對穩定性。明確啟用且可還原，不永久 mask 服務。", "Records and pauses optional download, deemix, stems and broadcasting services, restoring only those previously running. Preserves Engine, audio, Rekordbox bridge and Pro DJ Link. Does not change audio scheduling or promise an unmeasured 100% CPU budget or absolute stability. Explicit, reversible activation; no permanent service masks."),
+         initialComments=[comment("u/krimsamp (quoted in issue #136)", "Can we have a stripped down version", 136)],
+         ),
+]
+
+
+def json_bytes(value):
+    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode()
+
+
+def package_files(mod):
+    mid = mod["id"]
+    manifest = {key: mod[key] for key in ("id", "version", "author", "category")}
+    manifest.update(name=mod["name"]["e"], description=mod["description"]["e"], official=True,
+                    homepage="https://enginexdj.com/#mods", license="MIT",
+                    qmlFiles={"Panel.qml": f"EngineXMods/{mid}/Panel.qml"},
+                    script="tailscale-helper.sh" if mid == "tailscale-remote" else "start.sh")
+    files = {"mod.json": json_bytes(manifest), "Panel.qml": (SRC / mid / "Panel.qml").read_bytes(),
+             "README.md": (SRC / mid / "README.md").read_bytes(),
+             "LICENSE": (ROOT / "LICENSE").read_bytes()}
+    if mid == "tailscale-remote":
+        files["tailscale-helper.sh"] = (SRC / mid / "tailscale-helper.sh").read_bytes()
+    else:
+        files["runtime.py"] = (SRC / "runtime.py").read_bytes()
+        files["feature.py"] = (SRC / mid / "feature.py").read_bytes()
+        files["start.sh"] = (SRC / "start.sh").read_bytes().replace(b"@MOD_ID@", mid.encode())
+    return files
+
+
+def archive(files):
+    out = io.BytesIO()
+    with gzip.GzipFile(fileobj=out, mode="wb", filename="", mtime=0) as gz:
+        with tarfile.open(fileobj=gz, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+            for name, data in sorted(files.items()):
+                entry = tarfile.TarInfo(name)
+                entry.size = len(data)
+                entry.mode = 0o755 if name.endswith((".sh", ".py")) else 0o644
+                entry.mtime = 0
+                tar.addfile(entry, io.BytesIO(data))
+    return out.getvalue()
+
+
+def validate(files):
+    manifest = json.loads(files["mod.json"])
+    assert re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}", manifest["id"])
+    assert manifest["script"] in files and manifest["qmlFiles"]
+    for src, dst in manifest["qmlFiles"].items():
+        assert not Path(dst).is_absolute() and ".." not in Path(dst).parts and dst.endswith(".qml")
+        assert 0 < len(files[src]) <= 512 * 1024
+        files[src].decode("utf-8")
+    for name, data in files.items():
+        assert not Path(name).is_absolute() and ".." not in Path(name).parts
+        if name.endswith(".py"):
+            ast.parse(data, filename=name)
+        if name.endswith(".sh"):
+            subprocess.run(["sh", "-n"], input=data, check=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--check", action="store_true", help="verify committed outputs without writing")
+    args = parser.parse_args()
+    registry = dict(version=1, updatedAt=DATE, mods=[])
+    for mod in MODS:
+        files = package_files(mod)
+        validate(files)
+        blob = archive(files)
+        assert blob == archive(files), "archive must be deterministic"
+        path = DEST / "packages" / f'{mod["id"]}-{mod["version"]}.tar.gz'
+        if args.check:
+            assert path.read_bytes() == blob, f"stale package: {path}"
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(blob)
+        entry = dict(mod, official=True, downloadUrl=f"mods/packages/{path.name}",
+                     sha256=hashlib.sha256(blob).hexdigest(), size=len(blob),
+                     models="All 16 Models", hardwareValidation="not-tested", stars=0, downloads=0,
+                     license="MIT", sourceUrl="https://github.com/Cd1s/EngineX-OS/tree/main/docs/mods/src",
+                     runtimeStatus="background-helper" if mod["id"] != "tailscale-remote" else "system-api-required")
+        registry["mods"].append(entry)
+        print(f'{mod["id"]}: {len(files)} files, {len(blob)} bytes, sha256={entry["sha256"]}')
+    data = json_bytes(registry)
+    if args.check:
+        assert (DEST / "registry.json").read_bytes() == data, "stale registry"
+    else:
+        (DEST / "registry.json").write_bytes(data)
+    print("PASS: deterministic archives, source syntax, shell syntax and registry integrity")
+
+
+if __name__ == "__main__":
+    main()
