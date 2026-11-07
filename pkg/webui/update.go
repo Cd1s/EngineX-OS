@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -30,11 +31,16 @@ const (
 	stagedUpdateFile = "/data/az01-update.img"
 	updateCacheFor   = 10 * time.Minute
 
-	bundleSuffix    = "-EngineX-OS-Data-Bundle.tar.gz"
-	bundleCustomDir = "/data/sc5000-custom"
-	bundleMaxDown   = 64 << 20  // compressed download
-	bundleMaxUnpack = 128 << 20 // all extracted files together
+	bundleSuffix          = "-EngineX-OS-Data-Bundle.tar.gz"
+	bundleCustomDir       = "/data/enginex"
+	legacyBundleCustomDir = "/data/sc5000-custom"
+	bundleMaxDown         = 64 << 20  // compressed download
+	bundleMaxUnpack       = 128 << 20 // all extracted files together
 )
+
+func isDeckDataDir(dir string) bool {
+	return dir == bundleCustomDir || dir == legacyBundleCustomDir
+}
 
 var githubRepoRE = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 
@@ -372,6 +378,8 @@ func (s *Server) applyDataBundleUpdate(downloadURL string) {
 	customDir := bundleCustomDir
 	if s.cfg.VersionFile != "" {
 		customDir = filepath.Dir(s.cfg.VersionFile)
+	} else if target, err := filepath.EvalSymlinks(legacyBundleCustomDir); err == nil && target != "" {
+		customDir = target
 	}
 	if err := os.MkdirAll(customDir, 0o700); err != nil {
 		fail("cannot write " + customDir)
@@ -396,7 +404,7 @@ func (s *Server) applyDataBundleUpdate(downloadURL string) {
 	s.setUpdateProgress(0.90, "", false)
 	cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
 	cmd.Env = append(os.Environ(), "SC5000_CUSTOM="+customDir)
-	if customDir != bundleCustomDir { // sandbox / test: no /data to write the ALSA file to
+	if !isDeckDataDir(customDir) { // sandbox / test: no /data to write the ALSA file to
 		cmd.Env = append(cmd.Env, "SC5000_ALSA_OVERLAY="+filepath.Join(customDir, "alsa-conf.d"))
 	}
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -411,15 +419,28 @@ func (s *Server) applyDataBundleUpdate(downloadURL string) {
 	s.updateCache.Current = s.installedVersion()
 	s.updateCache.UpdateAvailable = false
 	s.updateMu.Unlock()
-	s.setUpdateProgress(1.0, "", true)
-	if customDir == bundleCustomDir {
-		// A detached shell outlives stream-sync, which it kills so the new suite starts.
-		// shortcut: if systemd kills the whole cgroup with the service, the reboot step is
-		// lost and the user reboots by hand; confirm on a real deck.
-		script := `sleep 2; pkill -f '[s]c5000-suite (stream-sync|rb-bridge|sc5000-deemixd)'; sleep 1; exec sh ` + bundleCustomDir + `/bundle/boot-activate.sh`
-		c := exec.Command("sh", "-c", script)
-		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-		_ = c.Start()
+	if isDeckDataDir(customDir) {
+		// Run boot-activate in a transient systemd service if available so killing
+		// stream-sync does not terminate the activation script along with stream-sync's cgroup.
+		script := `sleep 2; pkill -f '[s]c5000-suite (stream-sync|rb-bridge|sc5000-deemixd)'; sleep 1; exec sh ` + customDir + `/bundle/boot-activate.sh`
+		launched := false
+		if _, err := exec.LookPath("systemd-run"); err == nil {
+			// systemd-run submits the transient unit to PID 1 and returns immediately.
+			if out, err := exec.Command("systemd-run", "--description=EngineX OTA Activation", "sh", "-c", script).CombinedOutput(); err == nil {
+				launched = true
+			} else {
+				log.Printf("stream-sync: systemd-run ota activation failed: %v (%s)", err, strings.TrimSpace(string(out)))
+			}
+		}
+		if launched {
+			s.setUpdateProgress(1.0, "", true)
+		} else {
+			// systemd-run unavailable/failed: do not kill stream-sync in a shared cgroup.
+			// Keep stream-sync running so the screen displays the prompt to reboot.
+			s.setUpdateProgress(1.0, "Update installed. Please reboot your deck.", true)
+		}
+	} else {
+		s.setUpdateProgress(1.0, "", true)
 	}
 }
 
