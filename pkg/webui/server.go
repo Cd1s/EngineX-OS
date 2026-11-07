@@ -97,6 +97,9 @@ type Server struct {
 	// beatport is the owner's account, shared because each refresh rotates its token.
 	beatport *providers.Beatport
 	shadow   *shadowState // #49 shadow decks
+
+	automixMu sync.Mutex
+	automix   *AutomixManager
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
@@ -213,6 +216,25 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/hotcues", s.handleHotCues)
 	s.mux.HandleFunc("GET /v1/sc5000/hotcues", s.handleHotCues)
 	s.mux.HandleFunc("POST /v1/sc5000/hotcues", s.handleHotCues)
+	s.mux.HandleFunc("GET /api/ssh", s.handleSSH)
+	s.mux.HandleFunc("POST /api/ssh", s.handleSSH)
+	s.mux.HandleFunc("GET /v1/sc5000/ssh", s.handleSSH)
+	s.mux.HandleFunc("POST /v1/sc5000/ssh", s.handleSSH)
+	s.mux.HandleFunc("GET /api/mounts", s.handleMounts)
+	s.mux.HandleFunc("POST /api/mounts", s.handleMounts)
+	s.mux.HandleFunc("DELETE /api/mounts", s.handleMounts)
+	s.mux.HandleFunc("DELETE /api/mounts/{id}", s.handleMounts)
+	s.mux.HandleFunc("GET /v1/sc5000/mounts", s.handleMounts)
+	s.mux.HandleFunc("POST /v1/sc5000/mounts", s.handleMounts)
+	s.mux.HandleFunc("DELETE /v1/sc5000/mounts", s.handleMounts)
+	s.mux.HandleFunc("DELETE /v1/sc5000/mounts/{id}", s.handleMounts)
+	s.mux.HandleFunc("GET /api/automix", s.handleAutomix)
+	s.mux.HandleFunc("POST /api/automix", s.handleAutomix)
+	s.mux.HandleFunc("GET /v1/sc5000/automix", s.handleAutomix)
+	s.mux.HandleFunc("POST /v1/sc5000/automix", s.handleAutomix)
+	s.mux.HandleFunc("POST /api/sampler/loop-to-pad", s.handleSamplerLoopToPad)
+	s.mux.HandleFunc("POST /v1/sc5000/sampler/loop-to-pad", s.handleSamplerLoopToPad)
+	s.automix = newAutomixManager(s.automixConfigPath())
 	s.soundCloudAuth = &providers.SoundCloudAuth{TokenURL: cfg.SoundCloudTokenURL, Path: filepath.Join(cfg.StateDir, "soundcloud-token.json"), HTTP: cfg.HTTP}
 	if cfg.BPM != nil {
 		cfg.BPM.SoundCloudAuth = s.soundCloudAuth

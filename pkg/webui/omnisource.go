@@ -195,6 +195,20 @@ func (s *Server) driveListTracks(ctx context.Context, listID string) ([]trackRef
 		return nil, fmt.Errorf("djay playlist not found: %s", plID)
 	}
 
+	if strings.HasPrefix(listID, "mount\x00") {
+		parts := strings.Split(listID, "\x00")
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("invalid mount playlist id")
+		}
+		mountID := parts[1]
+		for _, m := range s.loadMounts() {
+			if m.ID == mountID {
+				return s.mountTracks(ctx, m)
+			}
+		}
+		return nil, fmt.Errorf("mount not found: %s", mountID)
+	}
+
 	dbPath, raw, _ := strings.Cut(listID, "\x00")
 	var d drive
 	for _, v := range s.drives() {
@@ -245,6 +259,45 @@ func (s *Server) driveListTracks(ctx context.Context, listID string) ([]trackRef
 		out[i] = refs[j]
 	}
 	return out, nil
+}
+
+// mountTracks scans audio files inside a mounted remote share.
+func (s *Server) mountTracks(ctx context.Context, m RemoteMount) ([]trackRef, error) {
+	var refs []trackRef
+	mountDir := m.MountPoint
+	if mountDir == "" {
+		mountDir = filepath.Join(s.mediaRoot(), m.Name)
+	}
+	_ = filepath.WalkDir(mountDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(p))
+		if _, ok := localCodecs[ext]; !ok && ext != ".wav" {
+			return nil
+		}
+		rel, err := filepath.Rel(mountDir, p)
+		if err != nil {
+			return nil
+		}
+		title := strings.TrimSuffix(filepath.Base(p), ext)
+		t := providers.Track{
+			ID:       "mount\x00" + m.ID + "\x00" + rel,
+			Title:    title,
+			Artist:   m.Name,
+			Provider: localProvider,
+		}
+		refs = append(refs, trackRef{
+			track: t,
+			file:  p,
+			drive: mountDir,
+		})
+		if len(refs) >= 500 {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return refs, nil
 }
 
 // searchDrive finds tracks by title, artist or album on one drive.
@@ -335,6 +388,29 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}
+	for _, m := range g.s.loadMounts() {
+		if !m.Mounted && !m.Enabled {
+			continue
+		}
+		hasEngineLib := false
+		for _, d := range drives {
+			if d.root == m.MountPoint {
+				hasEngineLib = true
+				break
+			}
+		}
+		if hasEngineLib {
+			continue
+		}
+		refs, _ := g.s.mountTracks(ctx, m)
+		listObj := providers.Playlist{
+			ID:    "mount\x00" + m.ID,
+			Title: "[NAS: " + m.Name + "] Remote Share",
+			Count: len(refs),
+		}
+		ref := playlistRef{"nas", localProvider, listObj, false}
+		add(g.refJSON(g.addPlaylist(ref), ref))
+	}
 }
 
 // omniTracks searches Algoriddim djay libraries across mounted drives for tracks matching query.
@@ -388,6 +464,26 @@ func (s *Server) omniTracks(ctx context.Context, query string) ([]trackRef, erro
 					file:  tr.AbsPath,
 					drive: dir,
 				})
+				if len(out) >= maxLocalResults {
+					return out, nil
+				}
+			}
+		}
+	}
+	for _, m := range s.loadMounts() {
+		if !m.Mounted && !m.Enabled {
+			continue
+		}
+		refs, _ := s.mountTracks(ctx, m)
+		for _, ref := range refs {
+			if seenFiles[ref.file] {
+				continue
+			}
+			titleMatch := strings.Contains(strings.ToLower(ref.track.Title), qLower)
+			artistMatch := strings.Contains(strings.ToLower(ref.track.Artist), qLower)
+			if titleMatch || artistMatch {
+				seenFiles[ref.file] = true
+				out = append(out, ref)
 				if len(out) >= maxLocalResults {
 					return out, nil
 				}

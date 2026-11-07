@@ -170,7 +170,7 @@ ok 'internal eMMC, malformed devices and coldplug discovery are handled safely'
 
 fixture
 mkdir -p "$SC5000_PROC_ROOT/sys/"{vm,fs}
-for knob in vm/swappiness vm/dirty_background_ratio vm/dirty_ratio fs/file-max; do
+for knob in vm/swappiness vm/vfs_cache_pressure vm/dirty_background_ratio vm/dirty_ratio fs/file-max; do
     printf '99\n' > "$SC5000_PROC_ROOT/sys/$knob"
 done
 for cpu in 0 1 2 3; do
@@ -187,9 +187,11 @@ printf 'performance\n' > "$gpu/governor"
 printf '100000000 600000000\n' > "$gpu/available_frequencies"
 printf '600000000\n' > "$gpu/max_freq"
 printf '600000000\n' > "$gpu/min_freq"
-for dev in sda mmcblk1; do mkdir -p "$SC5000_SYS_ROOT/block/$dev/queue"; done
+for dev in sda sdb mmcblk1; do mkdir -p "$SC5000_SYS_ROOT/block/$dev/queue"; done
 printf '[none] mq-deadline kyber\n' > "$SC5000_SYS_ROOT/block/sda/queue/scheduler"
 printf '128\n' > "$SC5000_SYS_ROOT/block/sda/queue/read_ahead_kb"
+printf '7812500000\n' > "$SC5000_SYS_ROOT/block/sdb/size"
+printf '128\n' > "$SC5000_SYS_ROOT/block/sdb/queue/read_ahead_kb"
 printf '[none]\n' > "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
 mkdir -p "$SC5000_SYS_ROOT/block/mmcblk0/queue" "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand"
 printf 'none mq-deadline kyber [bfq]\n' > "$SC5000_SYS_ROOT/block/mmcblk0/queue/scheduler"
@@ -229,10 +231,12 @@ has 50 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/up_threshold"
 has 10 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/sampling_down_factor"
 has '[bfq]' "$SC5000_SYS_ROOT/block/mmcblk0/queue/scheduler"
 has 10 "$SC5000_PROC_ROOT/sys/vm/swappiness"
+has 50 "$SC5000_PROC_ROOT/sys/vm/vfs_cache_pressure"
 has 5 "$SC5000_PROC_ROOT/sys/vm/dirty_background_ratio"
 has 1048576 "$SC5000_PROC_ROOT/sys/fs/file-max"
 has mq-deadline "$SC5000_SYS_ROOT/block/sda/queue/scheduler"
 has 1024 "$SC5000_SYS_ROOT/block/sda/queue/read_ahead_kb"
+has 2048 "$SC5000_SYS_ROOT/block/sdb/queue/read_ahead_kb"
 has none "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
 lacks 'taskset <-pc> <0> <101>' "$MOCK_ROOT/log"
 lacks 'taskset <-pc> <1-2> <100>' "$MOCK_ROOT/log"
