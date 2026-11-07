@@ -930,6 +930,34 @@ func TestFastbootWithoutDeviceDoesNotKeepVID(t *testing.T) {
 	}
 }
 
+// #129: RattyDAVE's Arch android-tools prints "Android Fastboot" (capital F, two words), with or without -l,
+// and rejects -i; the deck must be found and -i must not be retried.
+func TestFastbootListsAndroidFastboot(t *testing.T) {
+	for _, line := range []string{`A12303258600613\tAndroid Fastboot`, `A12303258600613        Android Fastboot usb:3-3.1`, `A12303258600613\tfastboot`} {
+		bin, _ := logShim(t, `[ "$1" = devices ] && printf '`+line+`\n'
+exit 0
+`)
+		o := testOpts(t)
+		o.Fastboot = bin
+		o.defaults()
+		if s := fastbootDevices(ctxT(t), o); len(s) != 1 || s[0] != "A12303258600613" || o.fbVID != "" {
+			t.Errorf("%q: serials = %v, fbVID = %q", line, s, o.fbVID)
+		}
+	}
+	bin, log := logShim(t, `[ "$1" = -i ] && { echo "fastboot: invalid option -- 'i'" >&2; exit 1; }
+exit 0
+`)
+	o := testOpts(t)
+	o.Fastboot = bin
+	o.defaults()
+	if s := fastbootDevices(ctxT(t), o); len(s) != 0 || o.fbVID != "" {
+		t.Errorf("serials = %v, fbVID = %q", s, o.fbVID)
+	}
+	if b, _ := os.ReadFile(log); strings.TrimSpace(string(b)) != "devices\n-i 0x15e4 devices" {
+		t.Errorf("calls:\n%s", b)
+	}
+}
+
 // #129: Linux fastboot without udev access lists "no permissions"; tell the user how to fix it, once.
 func TestFastbootNoPermissionsHint(t *testing.T) {
 	bin, _ := logShim(t, `printf '????????????\tno permissions (missing udev rules? user is in the plugdev group); see [http://developer.android.com/tools/device.html]\n'
