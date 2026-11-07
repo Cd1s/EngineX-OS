@@ -12,7 +12,7 @@
 
 **[核心功能](#features)** · **[韌體下載](#install)** · **[實機畫面](#gallery)** · **[重構與佔用對比](#benchmarks)** · **[讚賞支持](#sponsor)**
 
-📖 **線上使用文件**：<https://cd1s.github.io/EngineX-OS/>
+📖 **線上使用文件**：<https://enginexdj.com>
 
 </div>
 
