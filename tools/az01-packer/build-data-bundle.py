@@ -47,6 +47,7 @@ mkdir -p /run/systemd/system/engine.service.d
 
 cat <<EOF > /run/systemd/system/engine.service.d/99-sc5000.conf
 [Service]
+KillMode=process
 Environment="LD_PRELOAD=$lib_hook"
 EnvironmentFile=-/data/sc5000-custom/ui-scale.env
 EOF
@@ -61,16 +62,16 @@ if [ -f "$bundle_dir/version.txt" ]; then
     fi
 fi
 
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || :
+    systemctl restart engine.service || :
+fi
+
 for applet in stream-sync rb-bridge sc5000-deemixd; do
     if [ -x "$bin_dir/$applet" ] && ! pgrep -f "bundle/bin/$applet" >/dev/null 2>&1; then
         "$bin_dir/$applet" >/dev/null 2>&1 &
     fi
 done
-
-if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload || :
-    systemctl restart engine.service || :
-fi
 '''
 
 ALSA_CONF = r'''hook_func.sc5000_alsa_boot_hook {

@@ -9,7 +9,7 @@ CPUAffinity=3
 Nice=19
 IOSchedulingClass=idle
 ExecStart=/usr/local/bin/rb-bridge --prolink
-Restart=on-failure
+Restart=always
 RestartSec=3
 
 [Install]

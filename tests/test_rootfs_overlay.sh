@@ -284,6 +284,7 @@ done
 has 'IMPORT{builtin}="blkid"' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-sc5000-storage.rules"
 lacks 'UDISKS_IGNORE' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-sc5000-storage.rules"
 lacks ', RUN+=' "$ROOT/rootfs-overlay/etc/udev/rules.d/60-sc5000-storage.rules"
+has 'Restart=always' "$ROOT/rootfs-overlay/etc/systemd/system/rb-bridge.service"
 ok 'background service isolation and systemd udev handoff are installed'
 
 for script in "$STORAGE" "$PERF" "$ROOT/rootfs-overlay/usr/local/bin/sc5000-suite-exec" "$ROOT/rootfs-overlay/etc/sc5000/engine-ui-guard"; do
@@ -425,13 +426,16 @@ role_case 24 24 '"Right"' stock
 role_case 12 12 'Planck.getProperty' own
 role_case 1 1 '"Left"' none
 role_case 2 2 '"Right"' none
-role_case '' 12 'Planck.getProperty' own # auto standalone: default to 12
-role_case auto 12 'Planck.getProperty' own
-touch "$TMP/paired-player"
+# FOOLPROOF (#49/#123): auto maps odd Player -> 13, even -> 24, with or without any paired-player file; never 12
+player_state() { printf '{\n  "Player": {\n    "string": "%s",\n    "type": 4\n  }\n}\n' "$1" > "$TMP/planck-state.json"; }
 export SC5000_PAIRED_PLAYER=$TMP/paired-player
-role_case '' 24 '"Right"' stock # auto paired: player 2 is even -> 24
-printf '{\n  "Player": {\n    "string": "1",\n    "type": 4\n  }\n}\n' > "$TMP/planck-state.json"
-role_case auto 13 '"Left"' stock # auto paired: player 1 is odd -> 13
+for paired in absent present; do
+    rm -f "$TMP/paired-player"; [[ $paired == absent ]] || touch "$TMP/paired-player"
+    for mode in '' auto; do
+        player_state 1; role_case "$mode" 13 '"Left"' stock
+        player_state 2; role_case "$mode" 24 '"Right"' stock
+    done
+done
 rm -f "$TMP/paired-player"
 unset SC5000_PAIRED_PLAYER
 [[ ! -e $TMP/assign-patched/JP13_Controller_Assignments.qml ]] || fail 'an unpatchable file must not be bound'

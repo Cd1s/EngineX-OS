@@ -207,10 +207,16 @@ func sliceWavDirect(data []byte, inSample, outSample int64) ([]byte, bool) {
 }
 
 // sliceLoop extracts [inSample, outSample) from trackPath and writes 16-bit PCM WAV to outPath.
+// errEmptyLoop means the requested range holds no audio frames.
+var errEmptyLoop = errors.New("loop range contains no audio frames")
+
 func (s *Server) sliceLoop(ctx context.Context, trackPath, outPath string, inSample, outSample int64, sampleRate int) error {
 	raw, err := os.ReadFile(trackPath)
 	if err == nil {
 		if sliced, ok := sliceWavDirect(raw, inSample, outSample); ok {
+			if len(sliced) <= 44 {
+				return errEmptyLoop
+			}
 			_ = os.MkdirAll(filepath.Dir(outPath), 0o755)
 			return os.WriteFile(outPath, sliced, 0o644)
 		}
@@ -286,6 +292,10 @@ func (s *Server) handleSamplerLoopToPad(w http.ResponseWriter, r *http.Request) 
 	outPath := s.determineSampleOutputPath(in.TrackPath, in.Deck, in.Pad)
 
 	if err := s.sliceLoop(r.Context(), in.TrackPath, outPath, in.InSample, in.OutSample, in.SampleRate); err != nil {
+		if errors.Is(err, errEmptyLoop) {
+			fail(w, http.StatusBadRequest, err)
+			return
+		}
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}

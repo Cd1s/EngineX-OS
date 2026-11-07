@@ -278,3 +278,91 @@ func TestLANCannotDriveTheDeck(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateAccessCode(t *testing.T) {
+	seen := map[string]bool{}
+	for range 200 {
+		c := GenerateAccessCode()
+		if len(c) != 9 || c[4] != '-' {
+			t.Fatalf("format: %q", c)
+		}
+		for i, r := range c {
+			if i != 4 && !strings.ContainsRune(accessCodeAlphabet, r) {
+				t.Fatalf("ambiguous or invalid character in %q", c)
+			}
+		}
+		if seen[c] {
+			t.Fatalf("repeated code %q", c)
+		}
+		seen[c] = true
+	}
+}
+
+func TestLoadAccessTokenUpgradesLegacyCode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "access-token")
+	for _, old := range []string{"0123456789abcdef0123456789abcdef", providers.RandomID()} {
+		if err := os.WriteFile(path, []byte(old+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if code, created, err := LoadAccessToken(dir); err != nil || !created || len(code) != 9 || code[4] != '-' {
+			t.Fatal(old, code, created, err)
+		}
+	}
+	code, _, _ := LoadAccessToken(dir)
+	if b, _ := os.ReadFile(path); strings.TrimSpace(string(b)) != code {
+		t.Fatalf("not written back: %q", b)
+	}
+	if again, created, _ := LoadAccessToken(dir); again != code || created {
+		t.Fatal("upgraded code is not kept", again, created)
+	}
+}
+
+func TestLoginAccessCodeInputAndLockout(t *testing.T) {
+	ui := New(Config{AccessToken: "K7M9-P4X2", StateDir: t.TempDir()}, nil)
+	login := func(code, ip string) int {
+		r := httptest.NewRequest("POST", "/login", strings.NewReader(url.Values{"token": {code}}.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.RemoteAddr = ip + ":1234"
+		w := httptest.NewRecorder()
+		ui.ServeHTTP(w, r)
+		return w.Code
+	}
+	for _, in := range []string{"K7M9-P4X2", "k7m9p4x2", "k7m9 p4x2"} {
+		if code := login(in, "192.0.2.1"); code != http.StatusSeeOther {
+			t.Fatalf("%q: %d", in, code)
+		}
+	}
+	for i := 1; i < authMaxFails; i++ {
+		if code := login("WRONG-CODE", "192.0.2.2"); code != 401 {
+			t.Fatalf("fail %d: %d", i, code)
+		}
+	}
+	if code := login("WRONG-CODE", "192.0.2.2"); code != http.StatusTooManyRequests {
+		t.Fatalf("5th fail: %d", code)
+	}
+	if code := login("K7M9-P4X2", "192.0.2.2"); code != http.StatusTooManyRequests {
+		t.Fatalf("locked IP accepted the right code: %d", code)
+	}
+	// Bearer guesses at the API count too; other clients are unaffected.
+	api := func(code, ip string) int {
+		r := httptest.NewRequest("GET", "/api/sessions", nil)
+		r.Header.Set("Authorization", "Bearer "+code)
+		r.RemoteAddr = ip + ":1"
+		w := httptest.NewRecorder()
+		ui.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := api("K7M9-P4X2", "192.0.2.2"); code != http.StatusTooManyRequests {
+		t.Fatalf("locked API: %d", code)
+	}
+	for range authMaxFails {
+		api("nope", "2001:db8::1")
+	}
+	if code := api("k7m9p4x2", "2001:db8::2"); code != http.StatusTooManyRequests {
+		t.Fatalf("same /64 not locked: %d", code)
+	}
+	if code := login("K7M9-P4X2", "192.0.2.3"); code != http.StatusSeeOther {
+		t.Fatalf("other client: %d", code)
+	}
+}

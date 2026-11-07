@@ -523,6 +523,7 @@ install_ui() {
     id=$(sha256sum < "$archive" | cut -d' ' -f1)
     if [ -d "$ui/packs" ] && [ "$(cat "$ui/.pack-version" 2>/dev/null)" = "$version" ] &&
         [ "$(cat "$ui/.pack-id" 2>/dev/null)" = "$id" ]; then
+        rm -f "$ui/safe-mode" "$ui/mods-quarantined" "$ui/boot-count" "$ui/boot-token" "$ui/last-crash"
         return 0
     fi
     for path in "$ui" "$ui/packs" "$ui/icons"; do
