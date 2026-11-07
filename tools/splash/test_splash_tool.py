@@ -1,150 +1,116 @@
-"""Unit tests for splash_tool.py (#118)."""
 import os
-import subprocess
+import struct
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+import zlib
 
-# Add tools/splash to sys.path
-SPLASH_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(SPLASH_DIR))
-import splash_tool
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import splash_tool as st  # noqa: E402
+
+W, H = st.W, st.H
 
 
-class SplashToolTests(unittest.TestCase):
-    def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory(prefix='splash-test-')
-        self.work = Path(self.tmpdir.name)
+def pattern():
+    px = bytearray(W * H * 4)
+    for i in range(W * H):
+        px[i * 4:i * 4 + 4] = bytes(((i * 7) & 255, (i >> 3) & 255, (i * 13 + 5) & 255, 255))
+    return px
 
-    def tearDown(self):
-        self.tmpdir.cleanup()
 
-    def test_enginex_preset_exact_size(self):
-        out_bin = self.work / 'splash.bin'
-        size = splash_tool.encode_splash(preset='enginex', output_path=out_bin)
-        self.assertEqual(size, splash_tool.SPLASH_SIZE)
-        self.assertEqual(out_bin.stat().st_size, 4096000)
+def filtered_png(w, h, rgb):
+    """RGB PNG whose rows cycle through filter types 0-4 (decoder coverage)."""
+    stride, prev, raw = w * 3, bytearray(w * 3), b""
+    for y in range(h):
+        line, f = rgb[y * stride:(y + 1) * stride], y % 5
+        out = bytearray(stride)
+        for i in range(stride):
+            a = line[i - 3] if i >= 3 else 0
+            b, c = prev[i], (prev[i - 3] if i >= 3 else 0)
+            pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+            pred = [0, a, b, (a + b) // 2, a if pa <= pb and pa <= pc else b if pb <= pc else c][f]
+            out[i] = (line[i] - pred) & 255
+        raw += bytes([f]) + bytes(out)
+        prev = line
 
-    def test_rotation_and_pixel_mapping(self):
-        # Create a test 1280x800 RGBA image with distinct test pixels
-        rgba = bytearray(splash_tool.SPLASH_WIDTH * splash_tool.SPLASH_HEIGHT * 4)
+    def chunk(k, d):
+        return struct.pack(">I", len(d)) + k + d + struct.pack(">I", zlib.crc32(k + d))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
-        # Mark pixel at (x_src=100, y_src=200) with RGBA = (11, 22, 33, 255)
-        x_src, y_src = 100, 200
-        src_idx = (y_src * splash_tool.SPLASH_WIDTH + x_src) * 4
-        rgba[src_idx] = 11      # R
-        rgba[src_idx + 1] = 22  # G
-        rgba[src_idx + 2] = 33  # B
-        rgba[src_idx + 3] = 255 # A
 
-        fb = splash_tool.landscape_to_framebuffer(rgba)
-        self.assertEqual(len(fb), 4096000)
+def fake_stock(bg):
+    """White blocks where the stock art sits, so presets can be rendered without firmware."""
+    px = bytearray([bg, bg, bg, 255] * (W * H))
+    for x0, y0, x1, y1 in ((180, 330, 280, 465), (360, 366, 910, 426), (960, 345, 1100, 451),
+                           (590, 265, 690, 405), (440, 522, 840, 538)) + tuple(
+            (a, 727, b, 774) for a, b in st.VERSION_GLYPHS.values()):
+        for y in range(y0, y1):
+            px[(y * W + x0) * 4:(y * W + x1) * 4] = b"\xff\xff\xff\xff" * (x1 - x0)
+    return W, H, px
 
-        # Expected in portrait framebuffer:
-        # x_rot = y_src = 200
-        # y_rot = 1279 - x_src = 1279 - 100 = 1179
-        x_rot = 200
-        y_rot = 1179
-        dst_idx = (y_rot * splash_tool.ROTATED_WIDTH + x_rot) * 4
-        # Format is BGRA8888
-        self.assertEqual(fb[dst_idx], 33)      # B
-        self.assertEqual(fb[dst_idx + 1], 22)  # G
-        self.assertEqual(fb[dst_idx + 2], 11)  # R
-        self.assertEqual(fb[dst_idx + 3], 255) # A
 
-        # Reverse back to landscape
-        restored = splash_tool.framebuffer_to_landscape(fb)
-        self.assertEqual(restored[src_idx:src_idx+4], bytes([11, 22, 33, 255]))
-        self.assertEqual(restored, bytes(rgba))
+class Codec(unittest.TestCase):
+    def test_bin_layout(self):
+        px = pattern()
+        data = st.encode_bin(W, H, px)
+        self.assertEqual(len(data), 4096000)
+        for x, y in ((0, 0), (1279, 799), (10, 20), (1279, 0), (0, 799)):
+            r, g, b, a = px[(y * W + x) * 4:(y * W + x) * 4 + 4]
+            o = ((1279 - x) * 800 + y) * 4  # x_rot = y, y_rot = 1279 - x, 800-wide rows
+            self.assertEqual(tuple(data[o:o + 4]), (b, g, r, a), (x, y))
+        self.assertEqual(st.decode_bin(data), px)
 
-    def test_encode_decode_roundtrip(self):
-        splash_bin = self.work / 'splash.bin'
-        splash_tool.encode_splash(preset='enginex', output_path=splash_bin)
-
-        out_png = self.work / 'splash.png'
-        splash_tool.decode_splash(splash_bin, out_png)
-        self.assertTrue(out_png.exists())
-
-        reencoded_bin = self.work / 'reencoded.bin'
-        splash_tool.encode_splash(input_path=out_png, output_path=reencoded_bin)
-
-        self.assertEqual(splash_bin.read_bytes(), reencoded_bin.read_bytes())
-
-    def test_ppm_encode(self):
-        # Create a valid 1280x800 P6 PPM file
-        ppm_file = self.work / 'test.ppm'
-        header = b'P6\n1280 800\n255\n'
-        # Fill with blue pixels (0, 128, 255)
-        pixel = b'\x00\x80\xff'
-        body = pixel * (1280 * 800)
-        ppm_file.write_bytes(header + body)
-
-        out_bin = self.work / 'ppm_splash.bin'
-        splash_tool.encode_splash(input_path=ppm_file, output_path=out_bin)
-        self.assertEqual(out_bin.stat().st_size, 4096000)
-
-        # Check a pixel in the framebuffer: (B=255, G=128, R=0, A=255)
-        data = out_bin.read_bytes()
-        self.assertEqual(data[:4], b'\xff\x80\x00\xff')
-
-    def test_raw_passthrough(self):
-        raw_file = self.work / 'raw_4mb.bin'
-        sample_bytes = os.urandom(4096000)
-        raw_file.write_bytes(sample_bytes)
-
-        out_bin = self.work / 'out.bin'
-        splash_tool.encode_splash(input_path=raw_file, output_path=out_bin)
-        self.assertEqual(out_bin.read_bytes(), sample_bytes)
-
-    def test_validation_errors(self):
-        # Wrong size for decode
-        bad_bin = self.work / 'short.bin'
-        bad_bin.write_bytes(b'too short')
+    def test_bad_sizes(self):
         with self.assertRaises(ValueError):
-            splash_tool.decode_splash(bad_bin, self.work / 'fail.png')
-
-        # Wrong dimensions in PNG
-        bad_png = self.work / 'small.png'
-        splash_tool.write_png_rgba(100, 100, bytes(100 * 100 * 4), bad_png)
+            st.decode_bin(b"\0" * 100)
         with self.assertRaises(ValueError):
-            splash_tool.encode_splash(input_path=bad_png, output_path=self.work / 'fail.bin')
+            st.encode_bin(800, 1280, bytearray(st.BIN_SIZE))
 
-    def test_cli_commands(self):
-        bin_path = self.work / 'cli_splash.bin'
-        png_path = self.work / 'cli_splash.png'
+    def test_png_filters_and_cli_roundtrip(self):
+        w, h = 7, 11
+        rgb = bytes((i * 37 + 11) & 255 for i in range(w * h * 3))
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "f.png")
+            open(p, "wb").write(filtered_png(w, h, rgb))
+            _, _, rgba = st.read_png(p)
+            self.assertEqual(bytes(rgba[0::4] + rgba[1::4]), bytes(rgb[0::3] + rgb[1::3]))
+            self.assertEqual(bytes(rgba[2::4]), bytes(rgb[2::3]))
 
-        # CLI encode preset
-        ret = splash_tool.main(['encode', '--preset', 'enginex', '--output', str(bin_path)])
-        self.assertEqual(ret, 0)
-        self.assertEqual(bin_path.stat().st_size, 4096000)
-
-        # CLI info
-        ret = splash_tool.main(['info', '--input', str(bin_path)])
-        self.assertEqual(ret, 0)
-
-        # CLI decode
-        ret = splash_tool.main(['decode', '--input', str(bin_path), '--output', str(png_path)])
-        self.assertEqual(ret, 0)
-        self.assertTrue(png_path.exists())
-
-    def test_bytes_api_and_return_types(self):
-        # 1. encode_splash(rgba_1280x800_bytes) -> bytes (4096000 bytes)
-        rgba = bytearray(1280 * 800 * 4)
-        rgba[0:4] = b'\xaa\xbb\xcc\xff'
-        fb = splash_tool.encode_splash(bytes(rgba))
-        self.assertIsInstance(fb, bytes)
-        self.assertEqual(len(fb), 4096000)
-
-        # 2. decode_splash(bgra_800x1280_bytes) -> bytes (valid PNG bytes)
-        png_stream = splash_tool.decode_splash(fb)
-        self.assertIsInstance(png_stream, bytes)
-        self.assertTrue(png_stream.startswith(b'\x89PNG\r\n\x1a\n'))
-        w, h, decoded_rgba = splash_tool.read_png_rgba(png_stream)
-        self.assertEqual(w, 1280)
-        self.assertEqual(h, 800)
-        self.assertEqual(decoded_rgba[0:4], b'\xaa\xbb\xcc\xff')
+            src, binf, back = (os.path.join(d, n) for n in ("a.png", "a.bin", "b.png"))
+            px = pattern()
+            px[3] = 128  # one translucent pixel forces the RGBA path
+            st.write_png(src, W, H, px)
+            st.main(["encode", "--input", src, "--output", binf])
+            st.main(["decode", "--input", binf, "--output", back])
+            self.assertEqual(os.path.getsize(binf), 4096000)
+            self.assertEqual(st.read_png(back)[2], px)
 
 
-if __name__ == '__main__':
+class Presets(unittest.TestCase):
+    def test_splash(self):
+        c = st.render_splash(fake_stock(10), "5.3.0.3")
+        at = lambda x, y: tuple(c[(y * W + x) * 4:(y * W + x) * 4 + 4])  # noqa: E731
+        self.assertEqual(at(0, 0), (10, 10, 10, 255))
+        self.assertEqual(at(640, 200), (10, 10, 10, 255))
+        self.assertEqual(at(1031, 396), (255, 255, 255, 255))  # x crossing (shifted right by 28)
+        self.assertEqual(at(1031, 370), (10, 10, 10, 255))     # open between the x arms
+        self.assertEqual(at(1100, 445), (10, 10, 10, 255))     # stock "dj" descender not copied
+        self.assertGreater(at(260, 440)[0], 60)                # icon kept
+        # "5.3.0.3" right-aligned from stock glyphs: 7 blocks, last ends at x=1257
+        lit = [at(x, 750)[0] > 60 for x in range(1000, 1280)]
+        self.assertEqual(sum(a and not b for a, b in zip(lit, [False] + lit)), 7)
+        self.assertEqual(max(i for i, v in enumerate(lit) if v) + 1000, 1257)
+        self.assertEqual(len(st.encode_bin(W, H, c)), 4096000)
+
+    def test_recovery(self):
+        stock = fake_stock(0)
+        self.assertEqual(st.render_recovery(stock), stock[2])  # stock screen kept as is
+
+    def test_unknown_version_glyph(self):
+        with self.assertRaises(ValueError):
+            st.render_splash(fake_stock(10), "5.3.1")
+
+
+if __name__ == "__main__":
     unittest.main()
