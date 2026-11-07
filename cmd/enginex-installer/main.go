@@ -3,6 +3,7 @@
 //
 //	mode A: the deck is on the LAN with SSH open -> stream the Data-Bundle over SSH.
 //	mode B: the deck is in fastboot (USB)         -> build a /data image and flash it.
+//	mode C: Firmware Update Mode as 1cc5:2027      -> build a 64 MiB /data image, write-part it over USB (#116).
 package main
 
 import (
@@ -95,6 +96,8 @@ type options struct {
 	ListUSB                       func(context.Context) string // host USB devices, one "vid:pid name" per line
 	fbVID                         string                       // "-i" vendor id fastboot needs to see the deck
 	hinted                        map[string]bool
+	// USBFlash writes img in mode C (1cc5:2027) with the bundle's host-install-usbupdate.py.
+	USBFlash func(ctx context.Context, o *options, script []byte, img string) error
 }
 
 func (o *options) defaults() {
@@ -136,6 +139,9 @@ func (o *options) defaults() {
 	}
 	if o.ListUSB == nil {
 		o.ListUSB = hostUSB
+	}
+	if o.USBFlash == nil {
+		o.USBFlash = usbFlash
 	}
 }
 
@@ -406,6 +412,7 @@ func discover(ctx context.Context, o *options) []deck {
 type bundleInfo struct {
 	Path, Top, Version string
 	HostScript         []byte // host-install-userdata.py, shipped inside the bundle
+	USBScript          []byte // host-install-usbupdate.py (mode C), in bundles since #116
 }
 
 var topRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -452,7 +459,7 @@ func readBundle(path string) (*bundleInfo, error) {
 		hash := sha256.New()
 		var keep bytes.Buffer
 		w := io.Writer(hash)
-		if rel == "SHA256SUMS" || rel == "version.txt" || rel == "host-install-userdata.py" {
+		if rel == "SHA256SUMS" || rel == "version.txt" || rel == "host-install-userdata.py" || rel == "host-install-usbupdate.py" {
 			w = io.MultiWriter(hash, &keep)
 		}
 		n, err := io.Copy(w, tr)
@@ -467,6 +474,8 @@ func readBundle(path string) (*bundleInfo, error) {
 			version = keep.Bytes()
 		case "host-install-userdata.py":
 			b.HostScript = keep.Bytes()
+		case "host-install-usbupdate.py":
+			b.USBScript = keep.Bytes()
 		}
 	}
 	if len(listed) == 0 {
@@ -1031,7 +1040,8 @@ func modeAB(ctx context.Context, o *options, d deck) error {
 		where = "USB"
 	}
 	label := fmt.Sprintf("%s (%s)", name, where)
-	if !haveFastboot(o) {
+	// AZ04 decks have no fastboot: their Firmware Update Mode is 1cc5:2027 (#116).
+	if b := boardCode(d.Board); !haveFastboot(o) && b != "rmz2" && b != "jp24" {
 		return fmt.Errorf("%s: %w", label, fastbootMissing())
 	}
 	model := ""
@@ -1044,6 +1054,9 @@ func modeAB(ctx context.Context, o *options, d deck) error {
 	for {
 		if len(fastbootDevices(ctx, o)) > 0 {
 			return modeB(ctx, o)
+		}
+		if l := azUSB(ctx, o); l != "" {
+			return modeAZ(ctx, o, d.Board, l)
 		}
 		diagnoseUSB(ctx, o)
 		if time.Now().After(deadline) {
@@ -1085,8 +1098,8 @@ func python() string {
 }
 
 // buildImage returns the /data image to flash and whether it is brand new (so empty of the user's files).
-func buildImage(ctx context.Context, o *options, b *bundleInfo, size int64) (string, bool, error) {
-	img := filepath.Join(o.WorkDir, "userdata-enginex.img")
+func buildImage(ctx context.Context, o *options, b *bundleInfo, size int64, name, label string) (string, bool, error) {
+	img := filepath.Join(o.WorkDir, name)
 	fresh := false
 	switch {
 	case o.Backup != "":
@@ -1110,7 +1123,7 @@ func buildImage(ctx context.Context, o *options, b *bundleInfo, size int64) (str
 		if err != nil {
 			return "", false, err
 		}
-		if out, err := exec.CommandContext(ctx, "mke2fs", "-t", "ext4", "-O", "encrypt", "-L", "az01-data", "-F", img).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "mke2fs", "-t", "ext4", "-O", "encrypt", "-L", label, "-b", "4096", "-F", img).CombinedOutput(); err != nil {
 			return "", false, fmt.Errorf("mke2fs: %w\n%s", err, out)
 		}
 		fresh = true
@@ -1188,7 +1201,7 @@ func modeB(ctx context.Context, o *options) error {
 		return err
 	}
 	part, size := dataPartition(ctx, o)
-	img, fresh, err := buildImage(ctx, o, b, size)
+	img, fresh, err := buildImage(ctx, o, b, size, "userdata-enginex.img", "az01-data")
 	if err != nil {
 		return err
 	}
@@ -1274,6 +1287,105 @@ func modeBGen1(ctx context.Context, o *options, m model) error {
 	return nil
 }
 
+// ---- mode C: Firmware Update Mode without fastboot (1cc5:2027) --------------
+
+const (
+	azID       = "1cc5:2027"
+	azDataSize = 64 << 20 // the fresh /data image SBDJUK flashed on a SYSTEM ONE (#116)
+)
+
+// azNames match the USB product string when nothing else names the deck; most specific first.
+var azNames = []struct{ name, board string }{
+	{"system one", "rmz2"}, {"prime 4 g2", "jp24"}, {"prime 4+", "jc11s"}, {"prime 4 plus", "jc11s"},
+	{"sc live 4", "jp21"}, {"sc live 2", "jp20"}, {"prime go+", "jp11s"}, {"mixstream pro+", "nh08s"}, {"mixstream pro go", "nh10"},
+}
+
+// azUSB returns the host USB line of a deck in 1cc5:2027 Firmware Update Mode (az0x-splash usbupdate), or "".
+func azUSB(ctx context.Context, o *options) string {
+	for _, l := range strings.Split(o.ListUSB(ctx), "\n") {
+		if l = strings.TrimSpace(l); strings.Contains(strings.ToLower(l), azID) {
+			return l
+		}
+	}
+	return ""
+}
+
+// azModel: the board seen on the LAN, else the --bundle file name, else the USB product name.
+func azModel(o *options, board, line string) (model, bool) {
+	if m, gen2, ok := lookupBoard(board); ok && gen2 {
+		return m, true
+	}
+	if base := filepath.Base(o.Bundle); o.Bundle != "" {
+		for _, m := range gen2Boards {
+			if strings.HasPrefix(base, m.Prefix+"-") {
+				return m, true
+			}
+		}
+	}
+	l := strings.ToLower(line)
+	for _, n := range azNames {
+		if strings.Contains(l, n.name) {
+			return gen2Boards[n.board], true
+		}
+	}
+	return model{}, false
+}
+
+func modeAZ(ctx context.Context, o *options, board, line string) error {
+	m, ok := azModel(o, board, line)
+	if !ok {
+		return fmt.Errorf("碟机处于 Firmware Update Mode（%s），但认不出型号：请用 --bundle 指定该机型的 Data-Bundle.tar.gz，没有刷写任何东西 / "+
+			"the deck is in Firmware Update Mode (%s) but its model is unknown: pass --bundle <MODEL>-<VERSION>-EngineX-OS-Data-Bundle.tar.gz; nothing flashed", line, line)
+	}
+	o.say("USB Firmware Update Mode（"+azID+"）识别到 "+m.Name, "Firmware Update Mode ("+azID+") found "+m.Name)
+	b, err := obtainBundle(ctx, o, m.Prefix)
+	if err != nil {
+		return err
+	}
+	if b.USBScript == nil {
+		return errors.New(filepath.Base(b.Path) + " 太旧，没有 host-install-usbupdate.py，请下载最新版 / is too old to flash over " + azID + ": get the current release")
+	}
+	img, fresh, err := buildImage(ctx, o, b, azDataSize, "data-enginex.img", "data")
+	if err != nil {
+		return err
+	}
+	if fresh {
+		err = confirm(o, "即将刷写全新的 data 分区：碟机内置存储上的音乐、曲库和设置会全部清空（外接 U 盘/SD 卡不受影响）！",
+			"This flashes a brand-new data partition: ALL music, library and settings on the deck's internal storage are erased (USB drives and SD cards are not)!")
+	} else {
+		err = confirm(o, "即将把 "+img+" 刷入 data 分区，必须是这台碟机的 data 备份。", "This flashes "+img+" to data; it must be a backup of this deck's data.")
+	}
+	if err != nil {
+		return err
+	}
+	o.say("正在通过 USB 写入 data 分区，请勿断开连接或关闭电源…", "Writing the data partition over USB. Do not disconnect USB or power off the deck...")
+	if err := o.USBFlash(ctx, o, b.USBScript, img); err != nil {
+		return fmt.Errorf("USB %s write-part: %w", azID, err)
+	}
+	// 1cc5:2027 has no reboot command over USB.
+	o.say(fmt.Sprintf("完成：EngineX OS %s 已写入 %s。请按电源键关机再开机（或拔插电源），开机后自动激活。", b.Version, m.Name),
+		fmt.Sprintf("Done: EngineX OS %s written to %s. Press the power button to turn it off and on again (or replug power); it activates on boot.", b.Version, m.Name))
+	return nil
+}
+
+// usbFlash runs the bundle's host-install-usbupdate.py (pyusb) with its progress on o.Out.
+func usbFlash(ctx context.Context, o *options, script []byte, img string) error {
+	py := python()
+	if py == "" {
+		return errors.New("需要 python3 和 pyusb / needs python3 with pyusb (pip3 install pyusb)")
+	}
+	dir := mustTemp()
+	defer os.RemoveAll(dir)
+	p := filepath.Join(dir, "host-install-usbupdate.py")
+	if err := os.WriteFile(p, script, 0o700); err != nil {
+		return err
+	}
+	// -E, not -I: pyusb is often a user-site install, which -I hides. The script's dir is ours alone.
+	cmd := exec.CommandContext(ctx, py, "-E", p, img)
+	cmd.Stdout, cmd.Stderr = o.Out, o.Out
+	return cmd.Run()
+}
+
 // ---- main -------------------------------------------------------------------
 
 func run(ctx context.Context, o *options) error {
@@ -1282,6 +1394,9 @@ func run(ctx context.Context, o *options) error {
 	o.guide()
 	if len(fastbootDevices(ctx, o)) > 0 {
 		return modeB(ctx, o)
+	}
+	if l := azUSB(ctx, o); l != "" {
+		return modeAZ(ctx, o, "", l)
 	}
 	o.say("正在局域网中寻找碟机…", "Looking for decks on the LAN...")
 	var errs []error

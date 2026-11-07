@@ -95,7 +95,8 @@ mkfs.ext4 -F -q "$IMG"
 debugfs -w -R "mkdir /Music" "$IMG" >/dev/null 2>&1
 debugfs -w -R "write /etc/hosts /Music/user_track.flac" "$IMG" >/dev/null 2>&1
 
-python3 "$REPO/tools/az01-packer/host-install-userdata.py" "$IMG" --bundle "$BUNDLE"
+echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEngineXSandboxTestKeyOnlyNotARealKey00000 enginex-sandbox' > "$TMP/id_test.pub"
+python3 "$REPO/tools/az01-packer/host-install-userdata.py" "$IMG" --bundle "$BUNDLE" --ssh-key "$TMP/id_test.pub"
 
 # Verify filesystem integrity
 e2fsck -f -y "$IMG" >/dev/null
@@ -107,6 +108,7 @@ test "$(debugfs -R "cat /enginex/version.txt" "$IMG" 2>/dev/null | tr -d '\r\n')
 # #103: the old path stays reachable (the ALSA hook and older scripts use it)
 debugfs -R "stat /sc5000-custom" "$IMG" 2>&1 | grep -q "symlink"
 debugfs -R "stat /sc5000-custom/bundle/boot-activate.sh" "$IMG" 2>&1 | grep -q "regular"
+debugfs -R "stat /enginex/authorized_keys" "$IMG" 2>&1 | grep -q "Mode:  0600"
 echo "  Method A ext4 userdata injection: PASS"
 
 # 3. Stage 1: Cold Boot ALSA One-Shot Activation
@@ -161,6 +163,15 @@ grep -q 'ExecStart=/data/enginex/bundle/bin/stream-sync' \
     '$TARGET/run/systemd/system/enginex-stream-sync.service'
 test -f '$TARGET/run/systemd/system/enginex-rb-bridge.service'
 test -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service'
+# #116: KillMode=process left the hook-less Engine running after the restart.
+! grep -q KillMode '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+# --ssh-key: the read-only stock authorized_keys is replaced by a bind mount, and sshd starts.
+for i in \$(seq 1 50); do
+    chroot '$TARGET' pgrep -x sshd >/dev/null 2>&1 && break
+    sleep 0.1
+done
+cmp '$TMP/id_test.pub' '$TARGET/root/.ssh/authorized_keys'
+chroot '$TARGET' pgrep -x sshd >/dev/null
 "
 echo "  Stage 1 ALSA boot activation: PASS"
 

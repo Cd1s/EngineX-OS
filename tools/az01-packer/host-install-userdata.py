@@ -6,7 +6,7 @@ Injects the bundle and ALSA boot hook into an existing ext4 userdata partition
 image without wiping user files, music, settings, or database.
 
 Usage:
-    host-install-userdata.py <userdata.img> --bundle <bundle.tar.gz>
+    host-install-userdata.py <userdata.img> --bundle <bundle.tar.gz> [--ssh-key ~/.ssh/id_ed25519.pub]
 """
 import argparse
 import hashlib
@@ -62,9 +62,11 @@ def generate_debugfs_script(files_to_write, dirs_to_create, links=()):
     return '\n'.join(lines) + '\n'
 
 
-def inject(img_path, bundle_tar, check=True):
+def inject(img_path, bundle_tar, check=True, ssh_key=None):
     img = Path(img_path)
     bundle = Path(bundle_tar)
+    if ssh_key is not None and (not Path(ssh_key).is_file() or not Path(ssh_key).read_bytes().strip()):
+        fail(f'SSH public key missing or empty: {ssh_key}')
     if not img.is_file():
         fail(f'image not found: {img}')
     if not bundle.is_file():
@@ -178,6 +180,10 @@ def inject(img_path, bundle_tar, check=True):
         ver_top_f.write_text(f'{version}\n')
         files.append((ver_top_f, Path(root) / 'version.txt', 0o100644))
 
+        # boot-activate.sh hands this to root's sshd (#116).
+        if ssh_key is not None:
+            files.append((Path(ssh_key), Path(root) / 'authorized_keys', 0o100600))
+
         # 3. ALSA hook configuration
         alsa_conf_f = broot / '99-sc5000-custom.conf'
         if alsa_conf_f.is_file():
@@ -213,9 +219,10 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     p.add_argument('image', help='ext4 userdata image to inject into')
     p.add_argument('--bundle', required=True, help='SCLIVE4 data bundle tar.gz')
+    p.add_argument('--ssh-key', help='SSH public key (.pub) for root, started on boot')
     p.add_argument('--no-fsck', action='store_true', help='skip e2fsck check')
     a = p.parse_args(argv)
-    r = inject(a.image, a.bundle, check=not a.no_fsck)
+    r = inject(a.image, a.bundle, check=not a.no_fsck, ssh_key=a.ssh_key)
     print(f"Successfully injected EngineX OS {r['version']} ({r['files_injected']} files) into {a.image}")
 
 

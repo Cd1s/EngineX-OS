@@ -1255,3 +1255,142 @@ echo "line 2: done" >&2
 		t.Fatalf("expected completion output, got %q", outBuf.String())
 	}
 }
+
+// ---- mode C: 1cc5:2027 Firmware Update Mode (#116) --------------------------
+
+func TestAZModel(t *testing.T) {
+	for _, c := range []struct{ board, bundle, line, want string }{
+		{"RMZ2", "", "1cc5:2027", "SYSTEMONE"},
+		{"", "/x/PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz", "1cc5:2027", "PRIME4G2"},
+		{"", "", "1cc5:2027 inMusic Rane SYSTEM ONE", "SYSTEMONE"},
+		{"", "", "1cc5:2027 Denon DJ PRIME 4 G2", "PRIME4G2"},
+		{"", "", "1cc5:2027 Denon DJ PRIME 4+", "PRIME4PLUS"},
+		{"", "", "1cc5:2027 Numark Mixstream Pro Go", "MIXSTREAMPROGO"},
+		{"", "", "1cc5:2027 Numark Mixstream Pro+", "MIXSTREAMPROPLUS"},
+		{"jp07", "", "1cc5:2027", ""},
+		{"", "", "1cc5:2027 az0x usbupdate", ""},
+	} {
+		m, ok := azModel(&options{Bundle: c.bundle}, c.board, c.line)
+		if ok != (c.want != "") || m.Prefix != c.want {
+			t.Errorf("azModel(%q, %q, %q) = %v %v, want %q", c.board, c.bundle, c.line, m, ok, c.want)
+		}
+	}
+}
+
+type usbShim struct {
+	script []byte
+	img    string
+	calls  int
+}
+
+func azOpts(t *testing.T, b bundleFile, usb func(int) string) (*options, *usbShim) {
+	o := testOpts(t)
+	useRelease(o, releaseServer(t, b, "", nil))
+	n := 0
+	o.ListUSB = func(context.Context) string { n++; return usb(n) }
+	shim := &usbShim{}
+	o.USBFlash = func(_ context.Context, o *options, script []byte, img string) error {
+		shim.calls++
+		shim.script = script
+		shim.img = filepath.Join(t.TempDir(), "flashed.img")
+		fmt.Fprintln(o.Out, "writing data: 100% (64 / 64 MiB)")
+		return copyFile(img, shim.img)
+	}
+	return o, shim
+}
+
+func TestUSBUpdateModeFlashesA64MiBDataImage(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck", "dumpe2fs")
+	b := buildBundle(t, "SYSTEMONE", "5.3.0.3")
+	o, shim := azOpts(t, b, func(int) string { return "1d6b:0002 Linux Foundation\n1cc5:2027 inMusic SYSTEM ONE\n" })
+	if err := run(ctxT(t), o); err != nil {
+		t.Fatalf("run: %v\n%s", err, o.Out)
+	}
+	if shim.calls != 1 {
+		t.Fatalf("USB flash calls = %d", shim.calls)
+	}
+	want, _ := os.ReadFile(filepath.Join(repoRoot(t), "tools/az01-packer/host-install-usbupdate.py"))
+	if !bytes.Equal(shim.script, want) {
+		t.Error("flasher is not the bundle's host-install-usbupdate.py")
+	}
+	if fi, _ := os.Stat(shim.img); fi == nil || fi.Size() != 64<<20 {
+		t.Fatalf("image size = %v, want 64 MiB", fi)
+	}
+	sh(t, "e2fsck", "-fn", shim.img)
+	hdr := sh(t, "dumpe2fs", "-h", shim.img)
+	for _, w := range []string{"Filesystem volume name:   data\n", "encrypt", "Block size:               4096"} {
+		if !strings.Contains(hdr, w) {
+			t.Errorf("superblock lacks %q:\n%s", w, hdr)
+		}
+	}
+	out := filepath.Join(t.TempDir(), "suite")
+	sh(t, "debugfs", "-R", "dump /enginex/bundle/bin/sc5000-suite "+out, shim.img)
+	if sha(t, out) != sha(t, b.SuitePath) {
+		t.Error("suite in the image differs from the bundle's")
+	}
+	if s := sh(t, "debugfs", "-R", "stat /system/var-lib/alsa/conf.d/99-sc5000-custom.conf", shim.img); !strings.Contains(s, "Type: regular") {
+		t.Errorf("AZ04 ALSA hook missing:\n%s", s)
+	}
+	if s := o.Out.(*bytes.Buffer).String(); !strings.Contains(s, "Rane SYSTEM ONE") || !strings.Contains(s, "100%") || !strings.Contains(s, "power button") {
+		t.Errorf("output:\n%s", s)
+	}
+}
+
+// A SYSTEM ONE seen on the LAN, no fastboot installed: wait until it shows up as 1cc5:2027, then flash.
+func TestLockedSystemOneWaitsFor1cc5(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
+	b := buildBundle(t, "SYSTEMONE", "5.3.0.3")
+	o, shim := azOpts(t, b, func(n int) string {
+		if n < 3 {
+			return ""
+		}
+		return "1cc5:2027 \n" // no product name: the model comes from the LAN
+	})
+	o.WaitUSB = 20 * time.Second
+	o.defaults()
+	if err := modeAB(ctxT(t), o, deck{Name: "SYSTEM ONE", IP: "127.0.0.1", Board: "RMZ2"}); err != nil {
+		t.Fatalf("modeAB: %v\n%s", err, o.Out)
+	}
+	if shim.calls != 1 {
+		t.Fatalf("USB flash calls = %d", shim.calls)
+	}
+}
+
+func TestUSBUpdateModeRefusals(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
+	b := buildBundle(t, "SYSTEMONE", "5.3.0.3")
+	o, shim := azOpts(t, b, func(int) string { return "1cc5:2027 usbupdate\n" })
+	if err := run(ctxT(t), o); err == nil || !strings.Contains(err.Error(), "--bundle") {
+		t.Errorf("unknown model: err = %v", err)
+	}
+	o, shim2 := azOpts(t, b, func(int) string { return "1cc5:2027 SYSTEM ONE\n" })
+	o.Yes, o.In = false, strings.NewReader("n\n")
+	if err := run(ctxT(t), o); err == nil || !strings.Contains(err.Error(), "取消") {
+		t.Errorf("declined: err = %v", err)
+	}
+	o, shim3 := azOpts(t, b, func(int) string { return "1cc5:2027 SYSTEM ONE\n" })
+	o.USBFlash = func(context.Context, *options, []byte, string) error { return errors.New("status 2") }
+	if err := run(ctxT(t), o); err == nil || !strings.Contains(err.Error(), "write-part: status 2") {
+		t.Errorf("flash failure: err = %v", err)
+	}
+	if shim.calls+shim2.calls+shim3.calls != 0 {
+		t.Error("flashed anyway")
+	}
+}
+
+// The real flasher runs from the bundle under python3 -E and reports why it cannot write.
+func TestUSBFlashRunsTheBundleScript(t *testing.T) {
+	if python() == "" {
+		t.Skip("python3 not installed")
+	}
+	script, _ := os.ReadFile(filepath.Join(repoRoot(t), "tools/az01-packer/host-install-usbupdate.py"))
+	img := filepath.Join(t.TempDir(), "data.img")
+	os.WriteFile(img, make([]byte, 4096), 0o644)
+	o := testOpts(t)
+	if err := usbFlash(ctxT(t), o, script, img); err == nil {
+		t.Fatal("no deck on this host, yet the flash succeeded")
+	}
+	if s := o.Out.(*bytes.Buffer).String(); !strings.Contains(s, "host-install-usbupdate: ") {
+		t.Errorf("output:\n%s", s)
+	}
+}

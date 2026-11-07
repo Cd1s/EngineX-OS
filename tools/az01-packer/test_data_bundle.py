@@ -81,6 +81,9 @@ class DataBundleTest(unittest.TestCase):
         self.assertTrue((src / '99-sc5000-custom.conf').exists())
         self.assertTrue((src / 'host-install-userdata.py').exists())
         self.assertTrue((src / 'host-install-fastboot.sh').exists())
+        self.assertTrue((src / 'host-install-usbupdate.py').stat().st_mode & 0o100)
+        code = [l for l in (src / 'boot-activate.sh').read_text().splitlines() if not l.lstrip().startswith('#')]
+        self.assertFalse([l for l in code if 'KillMode' in l])  # #116
         listed = {}
         for line in (src / 'SHA256SUMS').read_text().splitlines():
             digest, name = line.split('  ')
@@ -256,6 +259,21 @@ class DataBundleTest(unittest.TestCase):
         hmod.inject(img64, r64['bundle'])
         hook_out = subprocess.run(['debugfs', '-R', 'stat /system/var-lib/alsa/conf.d/99-sc5000-custom.conf', str(img64)], capture_output=True, text=True).stdout
         self.assertIn('regular', hook_out)
+
+        # #116: --ssh-key lands as /enginex/authorized_keys, 0600; a missing or empty key injects nothing.
+        self.assertNotIn('Type: regular', subprocess.run(['debugfs', '-R', 'stat /enginex/authorized_keys', str(img64)],
+                                                          capture_output=True, text=True).stdout)
+        key = self.tmp / 'id_ed25519.pub'
+        key.write_text('ssh-ed25519 AAAAtest user@host\n')
+        hmod.inject(img64, r64['bundle'], ssh_key=key)
+        st = subprocess.run(['debugfs', '-R', 'stat /enginex/authorized_keys', str(img64)], capture_output=True, text=True).stdout
+        self.assertIn('Mode:  0600', st)
+        got = subprocess.run(['debugfs', '-R', 'cat /enginex/authorized_keys', str(img64)], capture_output=True, text=True).stdout
+        self.assertEqual(got, key.read_text())
+        (self.tmp / 'empty.pub').write_text('\n')
+        for bad in (self.tmp / 'empty.pub', self.tmp / 'missing.pub'):
+            with self.assertRaises(SystemExit):
+                hmod.inject(img64, r64['bundle'], ssh_key=bad)
 
     def test_host_install_keeps_a_legacy_dir_for_the_first_boot_to_rename(self):
         for tool in ('debugfs', 'mkfs.ext4'):
