@@ -62,7 +62,7 @@
     $("#q").placeholder = u.search;
     $("#lang").value = lang;
     $("#ver").textContent = "v" + D.version;
-    $("#nav").innerHTML = D.sections.map((s) => `<div class="grp" data-s="${s.id}"><a href="#${s.id}">${T(s.title)}</a><div class="sub">${heads(s).map((b) => `<a href="#${hid(s, b)}" data-h="${hid(s, b)}">${T(b.x)}</a>`).join("")}</div></div>`).join("");
+    $("#nav").innerHTML = D.sections.map((s) => `<div class="grp" data-s="${s.id}"><a href="#${s.id}">${T(s.nav || s.title)}</a><div class="sub">${heads(s).map((b) => `<a href="#${hid(s, b)}" data-h="${hid(s, b)}">${T(b.nav || b.x)}</a>`).join("")}</div></div>`).join("");
     $("#main").innerHTML = `<div class="hero"><h1>${u.heroT}</h1><p>${u.heroP}</p></div>` +
       D.sections.map((s) => `<section class="sec" id="${s.id}"><h2>${T(s.title)}</h2>${s.blocks.map((b) => block(s, b)).join("")}</section>`).join("") +
       `<div class="empty hide" id="empty">${u.none}</div>`;
@@ -108,7 +108,7 @@
     if (tocSec === s.id) return;
     tocSec = s.id;
     const hs = heads(s);
-    $("#toc").innerHTML = hs.length ? `<h4>${UI[lang].top}</h4><div class="lst">` + hs.map((b) => `<a href="#${hid(s, b)}" data-h="${hid(s, b)}">${T(b.x)}</a>`).join("") + "</div>" : "";
+    $("#toc").innerHTML = hs.length ? `<h4>${UI[lang].top}</h4><div class="lst">` + hs.map((b) => `<a href="#${hid(s, b)}" data-h="${hid(s, b)}">${T(b.nav || b.x)}</a>`).join("") + "</div>" : "";
     $$("#nav .grp").forEach((g) => g.classList.toggle("on", g.dataset.s === s.id));
   }
   function spy() {
