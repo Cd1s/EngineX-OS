@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -415,6 +414,7 @@ func (s *Server) applyDataBundleUpdate(downloadURL string) {
 		fail("bundle install: " + msg)
 		return
 	}
+	os.RemoveAll(work) // before reporting done: a client polling for Done must not see the scratch dir
 	s.updateMu.Lock()
 	s.updateCache.Current = s.installedVersion()
 	s.updateCache.UpdateAvailable = false

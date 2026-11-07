@@ -116,7 +116,8 @@ WantedBy=multi-user.target
 EOF
 fi
 
-if command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1; then
+# In a chroot systemctl only prints "Running in chroot, ignoring" and exits 0, so require systemd as PID 1.
+if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
     systemctl restart enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service || :
     systemctl restart --no-block engine.service || systemctl restart engine.service || :
 else
