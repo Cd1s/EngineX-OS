@@ -129,15 +129,16 @@ details.qa .a{padding:0 4px 16px;color:var(--dim)}
 
 /* ---- views: 首页全宽 / 文档三栏 ---- */
 [data-view=home] .wrap,[data-view=home] .burger,[data-view=docs] #home{display:none}
-[data-view=home] .top{border-bottom-color:transparent}
 
 /* ---- landing (home): neutral, no gradients ---- */
 .home{max-width:1080px;margin:0 auto;padding:48px 24px 80px}
-.h-hero{text-align:center;padding-top:32px}
-.badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 14px;font-size:13px;line-height:1.6;color:var(--dim);transition:border-color .15s,color .15s}
+.h-hero{text-align:center;padding-top:28px}
+.badge{display:inline-block;border:1px solid var(--line);background:var(--panel);border-radius:999px;padding:4px 14px;font-size:13px;line-height:1.6;color:var(--dim);transition:border-color .15s,color .15s}
 .badge:hover{color:var(--tx);border-color:var(--dim)}
-.h-hero h1{max-width:820px;margin:22px auto 0;font-size:48px;line-height:1.15;font-weight:700;letter-spacing:-.03em;color:var(--tx);text-wrap:balance}
-.h-sub{max-width:720px;margin:20px auto 0;font-size:17px;line-height:1.7;color:var(--dim);text-wrap:pretty}
+.h-hero h1{max-width:820px;margin:20px auto 0;font-size:56px;line-height:1.1;font-weight:800;letter-spacing:-.035em;color:var(--tx)}
+.h-ver{font-weight:500;font-size:.62em;color:var(--dim);letter-spacing:-.01em;vertical-align:baseline}
+.h-lead{max-width:780px;margin:14px auto 0;font-size:24px;line-height:1.35;font-weight:600;letter-spacing:-.015em;color:var(--tx);text-wrap:balance}
+.h-sub{max-width:720px;margin:14px auto 0;font-size:16px;line-height:1.7;color:var(--dim);text-wrap:pretty}
 .ctas{display:flex;flex-wrap:wrap;justify-content:center;gap:12px;margin-top:32px}
 .btn{display:inline-flex;align-items:center;height:42px;padding:0 18px;border-radius:var(--r);font-weight:500;font-size:15px;color:var(--tx);border:1px solid var(--line);background:var(--bg);transition:background .15s,border-color .15s,opacity .15s}
 .btn:hover{background:var(--hover);border-color:var(--dim)}

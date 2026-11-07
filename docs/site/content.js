@@ -462,7 +462,7 @@
       gh: L("GitHub 仓库 ↗", "GitHub 儲存庫 ↗", "GitHub ↗"),
     },
     // 首屏配图用实机渲染截图；hero-banner*.svg 自带霓虹渐变和过期数字（「5 大平台」），首页不用
-    shot: { src: "site/assets/shots/shot-control-center.png", cap: L("实机渲染：EngineX OS 控制中心", "實機渲染：EngineX OS 控制中心", "Rendered on the hardware: the EngineX OS Control Center") },
+    shot: { src: "assets/screenshots/zh-CN/01-deck-stems-official-pads.png", cap: L("EngineX OS 实机画面：原生 4 轨 Stems 分轨与 3-Band 波形", "EngineX OS 實機畫面：原生 4 軌 Stems 分軌與 3-Band 波形", "EngineX OS on hardware: native 4-stem separation and 3-Band waveform") },
     stats: [
       ["16", L("款支持机型", "款支援機型", "supported models"), L("8 款一代 .img + 8 款二代 /data", "8 款一代 .img + 8 款二代 /data", "8 gen-1 .img + 8 gen-2 /data")],
       ["7", L("个流媒体音源", "個串流音源", "streaming services"), L("Apple Music、Spotify、Deezer、SoundCloud、Beatport、TIDAL、网易云", "Apple Music、Spotify、Deezer、SoundCloud、Beatport、TIDAL、網易雲", "Apple Music, Spotify, Deezer, SoundCloud, Beatport, TIDAL, NetEase")],
