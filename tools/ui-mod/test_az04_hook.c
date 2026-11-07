@@ -21,13 +21,16 @@ static void test_resources(void) {
         snprintf(w.pack, sizeof w.pack, "%s", dir);
         apply(&w, 0, "", 0);
         assert(w.replaced == 1 && !w.failed);
-        const uchar *e = tree + 22, *blob = (const uchar *)((uintptr_t)data + be32(e + 10)); // as Qt does
+        const uchar *e = tree + 22;
+        int32_t offset = (int32_t)be32(e + 10);
+        assert(offset > 0); // Qt sign-extends with sxtw on aarch64; offset must be positive
+        const uchar *blob = (const uchar *)((intptr_t)data + offset); // as Qt does: signed 32-bit sxtw offset
         assert(be32(blob) == 7 && !memcmp(blob + 4, "Item {}", 7));
         assert(!(be16(e + 4) & (FLAG_COMPRESSED | FLAG_ZSTD)));
         assert(((uint64_t)be32(e + 14) << 32 | be32(e + 18)) == content_stamp((const uchar *)"Item {}", 7));
     }
     unlink(path); rmdir(dir);
-    puts("qrc (AArch64): pack blob mapped within 4 GiB above data, readable at data + offset: PASS");
+    puts("qrc (AArch64): pack blob mapped within positive signed 32-bit offset above data: PASS");
 }
 
 static void decode(const char *image, uint32_t q, uint32_t d, const uchar *tail, size_t n, int key, char *out) {
