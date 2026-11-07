@@ -64,10 +64,11 @@
     $("#home").innerHTML = `<div class="home">
       <section class="h-hero">
         <a class="badge" href="${GH}/releases/tag/v${D.version}" target="_blank" rel="noopener">${T(H.badge)}</a>
-        <h1>${T(H.title)}</h1>
+        <h1>EngineX OS <span class="h-ver">${D.version}</span></h1>
+        <p class="h-lead">${T(H.title)}</p>
         <p class="h-sub">${T(H.sub)}</p>
         <div class="ctas"><a class="btn pri" href="#start">${T(H.cta.docs)}</a><a class="btn" href="#start-downloads">${T(H.cta.dl)}</a><a class="btn ghost" href="${GH}" target="_blank" rel="noopener">${T(H.cta.gh)}</a></div>
-        <figure class="h-visual"><img src="${H.shot.src}" alt="${esc(T(H.shot.cap))}" width="1280" height="800"><figcaption>${T(H.shot.cap)}</figcaption></figure>
+        <figure class="h-visual"><img src="assets/screenshots/${SHOT_DIR[lang]}/01-deck-stems-official-pads.png" alt="EngineX OS ${D.version}" width="1280" height="800"><figcaption>${T(H.shot.cap)}</figcaption></figure>
       </section>
       <div class="h-stats">${H.stats.map(([n, l, d]) => `<div><b>${n}</b><span>${T(l)}</span><small>${T(d)}</small></div>`).join("")}</div>
       <section class="h-sec">${head(H.featT, H.featP)}<div class="h-grid">${cards(H.features)}</div></section>
