@@ -2,9 +2,9 @@
 (function () {
   const D = window.DOCS;
   const UI = {
-    s: { lang: "s", search: "搜索文档…", heroT: "EngineX OS 使用文档", heroP: "16 款 Denon DJ / Numark / Rane 独立设备的安装、功能与排障指南。", model: "机型", board: "板号", type: "类型", file: "下载", all: "全部", gen1: "一代 · .img", gen2: "二代 · 数据包", none: "没有匹配的内容", top: "本页目录", hits: "条匹配", img: ".img 刷机包", bundle: "/data 数据包", tHome: "首页", tDocs: "使用文档", tDl: "下载" },
-    t: { lang: "t", search: "搜尋文件…", heroT: "EngineX OS 使用文件", heroP: "16 款 Denon DJ / Numark / Rane 獨立設備的安裝、功能與排障指南。", model: "機型", board: "板號", type: "類型", file: "下載", all: "全部", gen1: "一代 · .img", gen2: "二代 · 資料包", none: "沒有符合的內容", top: "本頁目錄", hits: "筆符合", img: ".img 刷機包", bundle: "/data 資料包", tHome: "首頁", tDocs: "使用文件", tDl: "下載" },
-    e: { lang: "e", search: "Search the docs…", heroT: "EngineX OS Documentation", heroP: "Install, use and troubleshoot all 16 Denon DJ / Numark / Rane standalone units.", model: "Model", board: "Board", type: "Type", file: "Download", all: "All", gen1: "Gen 1 · .img", gen2: "Gen 2 · bundle", none: "Nothing matches", top: "On this page", hits: "matches", img: ".img image", bundle: "/data bundle", tHome: "Home", tDocs: "Docs", tDl: "Downloads" },
+    s: { lang: "s", search: "搜索文档…", heroT: "EngineX OS 使用文档", heroP: "16 款 Denon DJ / Numark / Rane 独立设备的安装、功能与排障指南。", model: "机型", board: "板号", type: "类型", file: "下载", all: "全部", gen1: "一代 · .img", gen2: "二代 · 数据包", none: "没有匹配的内容", top: "本页目录", hits: "条匹配", img: ".img 刷机包", bundle: "/data 数据包", tHome: "首页", tDocs: "使用文档", tDl: "下载", tMods: "Mod 社区" },
+    t: { lang: "t", search: "搜尋文件…", heroT: "EngineX OS 使用文件", heroP: "16 款 Denon DJ / Numark / Rane 獨立設備的安裝、功能與排障指南。", model: "機型", board: "板號", type: "類型", file: "下載", all: "全部", gen1: "一代 · .img", gen2: "二代 · 資料包", none: "沒有符合的內容", top: "本頁目錄", hits: "筆符合", img: ".img 刷機包", bundle: "/data 資料包", tHome: "首頁", tDocs: "使用文件", tDl: "下載", tMods: "Mod 社群" },
+    e: { lang: "e", search: "Search the docs…", heroT: "EngineX OS Documentation", heroP: "Install, use and troubleshoot all 16 Denon DJ / Numark / Rane standalone units.", model: "Model", board: "Board", type: "Type", file: "Download", all: "All", gen1: "Gen 1 · .img", gen2: "Gen 2 · bundle", none: "Nothing matches", top: "On this page", hits: "matches", img: ".img image", bundle: "/data bundle", tHome: "Home", tDocs: "Docs", tDl: "Downloads", tMods: "Mod Hub" },
   };
   const NOTE_T = { warn: "WARNING", new: "NEW" };
   const SHOT_DIR = { s: "zh-CN", t: "zh-TW", e: "en" };
@@ -58,7 +58,7 @@
   const GH = "https://github.com/Cd1s/EngineX-OS";
   function home() {
     const H = D.home, u = UI[lang];
-    $("#tabs").innerHTML = `<a href="#" data-tab="home">${u.tHome}</a><a href="#start" data-tab="docs">${u.tDocs}</a><a href="#start-downloads" data-tab="dl">${u.tDl}</a>`;
+    $("#tabs").innerHTML = `<a href="#" data-tab="home">${u.tHome}</a><a href="#start" data-tab="docs">${u.tDocs}</a><a href="#start-downloads" data-tab="dl">${u.tDl}</a><a href="#mods" data-tab="mods">${u.tMods}</a>`;
     const head = (t, p) => `<div class="h-head"><h2>${T(t)}</h2><p>${T(p)}</p></div>`;
     const cards = (xs) => xs.map((f) => `<a class="card" href="${f.href}">${f.tag ? `<em>${T(f.tag)}</em>` : ""}<b>${T(f.t)}</b><span>${T(f.d)}</span><i aria-hidden="true">→</i></a>`).join("");
     $("#home").innerHTML = `<div class="home">
@@ -67,22 +67,23 @@
         <h1>EngineX OS <span class="h-ver">${D.version}</span></h1>
         <p class="h-lead">${T(H.title)}</p>
         <p class="h-sub">${T(H.sub)}</p>
-        <div class="ctas"><a class="btn pri" href="#start">${T(H.cta.docs)}</a><a class="btn" href="#start-downloads">${T(H.cta.dl)}</a><a class="btn ghost" href="${GH}" target="_blank" rel="noopener">${T(H.cta.gh)}</a></div>
+        <div class="ctas"><a class="btn pri" href="#start">${T(H.cta.docs)}</a><a class="btn" href="#start-downloads">${T(H.cta.dl)}</a><a class="btn" href="#mods">${T(H.cta.mods)}</a><a class="btn ghost" href="${GH}" target="_blank" rel="noopener">${T(H.cta.gh)}</a></div>
         <figure class="h-visual"><img src="${H.shot.src}" alt="EngineX OS ${D.version}" width="1280" height="800"><figcaption>${T(H.shot.cap)}</figcaption></figure>
       </section>
       <div class="h-stats">${H.stats.map(([n, l, d]) => `<div><b>${n}</b><span>${T(l)}</span><small>${T(d)}</small></div>`).join("")}</div>
       <section class="h-sec">${head(H.featT, H.featP)}<div class="h-grid">${cards(H.features)}</div></section>
       <section class="h-sec">${head(H.dlT, H.dlP)}<div class="h-grid">${cards(H.downloads)}</div></section>
-      <footer class="h-foot"><span>EngineX OS · MIT License</span><span><a href="${GH}" target="_blank" rel="noopener">GitHub</a><a href="#start">${u.tDocs}</a><a href="${GH}/issues" target="_blank" rel="noopener">Issues</a></span></footer>
+      <footer class="h-foot"><span>EngineX OS · MIT License</span><span><a href="${GH}" target="_blank" rel="noopener">GitHub</a><a href="#start">${u.tDocs}</a><a href="#mods">${u.tMods}</a><a href="${GH}/issues" target="_blank" rel="noopener">Issues</a></span></footer>
     </div>`;
   }
 
-  /* ---- 两个视图：首页（无 hash）与三栏文档（有章节 hash 或在搜索） ---- */
-  function setView(v) {
+  /* ---- 三个视图：首页（无 hash）、三栏文档（章节 hash 或在搜索）、Mod 社区（#mods，见 mods.js） ---- */
+  function setView(v, sub) {
     document.body.dataset.view = v;
-    document.title = v === "home" ? "EngineX OS" : UI[lang].heroT;
+    document.title = v === "home" ? "EngineX OS" : v === "mods" ? UI[lang].tMods + " · EngineX OS" : UI[lang].heroT;
+    if (v === "mods" && window.EXMods) window.EXMods.render(lang, sub);
     const h = location.hash;
-    $$("#tabs [data-tab]").forEach((a) => a.classList.toggle("on", a.dataset.tab === (v === "home" ? "home" : h.startsWith("#start-downloads") ? "dl" : "docs")));
+    $$("#tabs [data-tab]").forEach((a) => a.classList.toggle("on", a.dataset.tab === (v === "home" ? "home" : v === "mods" ? "mods" : h.startsWith("#start-downloads") ? "dl" : "docs")));
   }
   function goHome(e) {
     e.preventDefault();
@@ -164,6 +165,7 @@
   function route() {
     const h = decodeURIComponent(location.hash.slice(1));
     if (!h || h === "home") { if (!query) setView("home"); return; }
+    if (h === "mods" || h.startsWith("mods/")) { setView("mods", h.slice(5)); if (!h.slice(5)) scrollTo({ top: 0, behavior: "instant" }); return; }
     setView("docs");
     const el = document.getElementById(h) || document.getElementById(D.sections.map((s) => s.id).find((id) => h === id));
     if (el && !el.closest(".hide")) el.scrollIntoView({ behavior: "instant" });

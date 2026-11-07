@@ -271,6 +271,7 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("POST /v1/sc5000/nas/test", s.handleNASTest)
 	g.mux.HandleFunc("GET /v1/sc5000/mods", s.handleMods)
 	g.mux.HandleFunc("POST /v1/sc5000/mods", s.handleMods)
+	g.mux.HandleFunc("POST /v1/sc5000/mods/upload", s.handleModsUpload)
 	g.mux.HandleFunc("GET /v1/sc5000/ssh", s.handleSSH)
 	g.mux.HandleFunc("POST /v1/sc5000/ssh", s.handleSSH)
 	g.mux.HandleFunc("GET /v1/sc5000/mounts", s.handleMounts)

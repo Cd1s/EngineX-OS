@@ -4,11 +4,16 @@
 package mods
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -21,6 +26,9 @@ import (
 
 // Manifest defines the metadata and files of an external mod on a USB drive.
 type Manifest struct {
+	Category    string            `json:"category,omitempty"`
+	Homepage    string            `json:"homepage,omitempty"`
+	Official    bool              `json:"official,omitempty"`
 	ID          string            `json:"id"`                 // only [a-zA-Z0-9._-]
 	Name        string            `json:"name"`               // display name
 	Version     string            `json:"version"`            // version string
@@ -32,6 +40,9 @@ type Manifest struct {
 
 // Mod represents a discovered mod along with its runtime and validation status.
 type Mod struct {
+	Category    string            `json:"category,omitempty"`
+	Homepage    string            `json:"homepage,omitempty"`
+	Official    bool              `json:"official,omitempty"`
 	ID          string            `json:"id"`
 	Name        string            `json:"name"`
 	Version     string            `json:"version"`
@@ -72,7 +83,27 @@ type OverlayManifest struct {
 type Manager struct {
 	mediaRoot string
 	uiDir     string
-	mu        sync.Mutex
+	mu        *sync.Mutex
+	runScript func(Mod, string) error
+}
+
+var managerMu sync.Mutex
+
+func (m *Manager) lifecycle(mod Mod, action string) error {
+	if mod.Script == "" {
+		return nil
+	}
+	if m.runScript != nil {
+		return m.runScript(mod, action)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", filepath.Join(mod.Dir, mod.Script), action)
+	cmd.Env = append(os.Environ(), "ENGINEX_MOD_ID="+mod.ID, "ENGINEX_MOD_DIR="+mod.Dir, "ENGINEX_MOD_ACTION="+action)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("mod %s %s: %w", mod.ID, action, err)
+	}
+	return nil
 }
 
 // NewManager creates a mod manager operating on the given media and UI directories.
@@ -80,6 +111,7 @@ func NewManager(mediaRoot, uiDir string) *Manager {
 	return &Manager{
 		mediaRoot: mediaRoot,
 		uiDir:     uiDir,
+		mu:        &managerMu,
 	}
 }
 
@@ -313,21 +345,24 @@ func (m *Manager) discoverLocked() ([]Mod, error) {
 	var result []Mod
 	seenIDs := make(map[string]bool)
 
-	if m.mediaRoot == "" {
-		return result, nil
-	}
-	entries, err := os.ReadDir(m.mediaRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return result, nil
+	var entries []os.DirEntry
+	if m.mediaRoot != "" {
+		var err error
+		entries, err = os.ReadDir(m.mediaRoot)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
 		}
-		return nil, err
 	}
 
 	slices.SortFunc(entries, func(a, b os.DirEntry) int {
 		return strings.Compare(a.Name(), b.Name())
 	})
 
+	type source struct {
+		drive string
+		paths []string
+	}
+	sources := []source{{"internal", []string{filepath.Join(filepath.Dir(m.uiDir), "mods")}}}
 	for _, driveEntry := range entries {
 		driveName := driveEntry.Name()
 		drivePath := filepath.Join(m.mediaRoot, driveName)
@@ -336,12 +371,14 @@ func (m *Manager) discoverLocked() ([]Mod, error) {
 			continue
 		}
 
-		candidates := []string{
+		sources = append(sources, source{driveName, []string{
 			filepath.Join(drivePath, "mods"),
 			filepath.Join(drivePath, "EngineX", "mods"),
-		}
+		}})
+	}
 
-		for _, candidate := range candidates {
+	for _, source := range sources {
+		for _, candidate := range source.paths {
 			modEntries, err := os.ReadDir(candidate)
 			if err != nil {
 				continue
@@ -351,14 +388,19 @@ func (m *Manager) discoverLocked() ([]Mod, error) {
 			})
 
 			for _, me := range modEntries {
+				if source.drive == "internal" && strings.HasPrefix(me.Name(), ".install-") {
+					continue
+				}
 				modDir := filepath.Join(candidate, me.Name())
 				st, err := os.Stat(modDir)
 				if err != nil || !st.IsDir() {
 					continue
 				}
 
-				manifestPath := filepath.Join(modDir, "manifest.json")
-				data, err := os.ReadFile(manifestPath)
+				data, err := os.ReadFile(filepath.Join(modDir, "manifest.json"))
+				if os.IsNotExist(err) {
+					data, err = os.ReadFile(filepath.Join(modDir, "mod.json"))
+				}
 				if err != nil {
 					continue
 				}
@@ -368,7 +410,7 @@ func (m *Manager) discoverLocked() ([]Mod, error) {
 					mod := Mod{
 						ID:    me.Name(),
 						Name:  me.Name(),
-						Drive: driveName,
+						Drive: source.drive,
 						Valid: false,
 						Error: "invalid manifest.json: " + err.Error(),
 						Dir:   modDir,
@@ -388,12 +430,15 @@ func (m *Manager) discoverLocked() ([]Mod, error) {
 
 				modState := state.Mods[manifest.ID]
 				mod := Mod{
+					Category:    manifest.Category,
+					Homepage:    manifest.Homepage,
+					Official:    manifest.Official,
 					ID:          manifest.ID,
 					Name:        manifest.Name,
 					Version:     manifest.Version,
 					Author:      manifest.Author,
 					Description: manifest.Description,
-					Drive:       driveName,
+					Drive:       source.drive,
 					Enabled:     modState.Enabled,
 					Quarantined: quarantined || modState.Quarantined,
 					QMLFiles:    manifest.QMLFiles,
@@ -418,6 +463,186 @@ func (m *Manager) discoverLocked() ([]Mod, error) {
 		result = make([]Mod, 0)
 	}
 	return result, nil
+}
+
+// InstallArchive validates and installs a gzip-compressed tar archive.
+func (m *Manager) InstallArchive(r io.Reader) (*Mod, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	const limit = 16 << 20
+	compressed, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(compressed) > limit {
+		return nil, errors.New("archive exceeds 16 MiB")
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, err
+	}
+	defer gz.Close()
+	root := filepath.Join(filepath.Dir(m.uiDir), "mods")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		return nil, err
+	}
+	stage, err := os.MkdirTemp(root, ".install-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(stage)
+	unpacked := &io.LimitedReader{R: gz, N: (32 << 20) + 1}
+	tr := tar.NewReader(unpacked)
+	var total int64
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		name := strings.TrimSuffix(h.Name, "/")
+		if name == "." && h.Typeflag == tar.TypeDir {
+			continue
+		}
+		if !isSafeRelPath(name) || strings.Contains(name, "\\") {
+			return nil, fmt.Errorf("unsafe archive path %q", h.Name)
+		}
+		path := filepath.Join(stage, name)
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(path, 0755); err != nil {
+				return nil, err
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if h.Size < 0 || h.Size > limit-total {
+				return nil, errors.New("archive contents exceed 16 MiB")
+			}
+			total += h.Size
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				return nil, err
+			}
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+			if err != nil {
+				return nil, err
+			}
+			_, copyErr := io.Copy(f, tr)
+			closeErr := f.Close()
+			if copyErr != nil {
+				return nil, copyErr
+			}
+			if closeErr != nil {
+				return nil, closeErr
+			}
+		default:
+			return nil, fmt.Errorf("unsupported archive entry %q", h.Name)
+		}
+	}
+	// Consume the gzip trailer to detect truncation and checksum errors.
+	if _, err := io.Copy(io.Discard, unpacked); err != nil {
+		return nil, err
+	}
+	if unpacked.N == 0 {
+		return nil, errors.New("archive expands beyond limit")
+	}
+	var manifests []string
+	for _, pattern := range []string{"manifest.json", "mod.json", "*/manifest.json", "*/mod.json"} {
+		matches, err := filepath.Glob(filepath.Join(stage, pattern))
+		if err != nil {
+			return nil, err
+		}
+		manifests = append(manifests, matches...)
+	}
+	if len(manifests) != 1 {
+		return nil, errors.New("archive must contain exactly one root or first-level manifest")
+	}
+	data, err := os.ReadFile(manifests[0])
+	if err != nil {
+		return nil, err
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, err
+	}
+	dir := filepath.Dir(manifests[0])
+	if err := ValidateMod(dir, &manifest); err != nil {
+		return nil, err
+	}
+	if manifest.ID == "tailscale-remote" {
+		return nil, errors.New("tailscale-remote is built in: install and enable it from Mods in the web console")
+	}
+	discovered, err := m.discoverLocked()
+	if err != nil {
+		return nil, err
+	}
+	for _, mod := range discovered {
+		if mod.ID == manifest.ID {
+			return nil, errors.New("mod ID already installed")
+		}
+	}
+	dest := filepath.Join(root, manifest.ID)
+	if _, err := os.Lstat(dest); err == nil {
+		return nil, errors.New("mod directory already exists")
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := os.Rename(dir, dest); err != nil {
+		return nil, err
+	}
+	// Installed mods stay disabled until the user enables them (registry promises explicit activation).
+	state := m.loadStateLocked()
+	delete(state.Mods, manifest.ID)
+	if err := m.saveStateLocked(state); err != nil {
+		_ = os.RemoveAll(dest)
+		return nil, err
+	}
+	list, err := m.discoverLocked()
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if list[i].ID == manifest.ID {
+			return &list[i], nil
+		}
+	}
+	return nil, errors.New("installed mod could not be discovered")
+}
+
+// UninstallMod removes an internal mod and its state.
+func (m *Manager) UninstallMod(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !idPattern.MatchString(id) {
+		return errors.New("invalid mod ID")
+	}
+	list, err := m.discoverLocked()
+	if err != nil {
+		return err
+	}
+	for _, mod := range list {
+		if mod.ID != id {
+			continue
+		}
+		if mod.Drive != "internal" || mod.Dir != filepath.Join(filepath.Dir(m.uiDir), "mods", id) {
+			return errors.New("only internal mods can be uninstalled")
+		}
+		if mod.Enabled && mod.Valid {
+			if err := m.lifecycle(mod, "stop"); err != nil {
+				return err
+			}
+		}
+		if err := os.RemoveAll(mod.Dir); err != nil {
+			return err
+		}
+		state := m.loadStateLocked()
+		delete(state.Mods, id)
+		if err := m.saveStateLocked(state); err != nil {
+			return err
+		}
+		return m.applyActiveOverlayLocked("")
+	}
+	return errors.New("mod not found")
 }
 
 // IsSafeModeQuarantined checks if external mods are quarantined.
@@ -492,7 +717,7 @@ func (m *Manager) SetModEnabled(id string, enabled bool) error {
 	defer m.mu.Unlock()
 
 	state := m.loadStateLocked()
-	if enabled {
+	{
 		modsList, err := m.discoverLocked()
 		if err != nil {
 			return err
@@ -504,8 +729,20 @@ func (m *Manager) SetModEnabled(id string, enabled bool) error {
 				break
 			}
 		}
-		if found != nil && !found.Valid {
+		if found == nil {
+			return fmt.Errorf("mod %q not found", id)
+		}
+		if enabled && !found.Valid {
 			return fmt.Errorf("cannot enable invalid mod %q: %s", id, found.Error)
+		}
+		if found.Valid && state.Mods[id].Enabled != enabled {
+			action := "stop"
+			if enabled {
+				action = "start"
+			}
+			if err := m.lifecycle(*found, action); err != nil {
+				return err
+			}
 		}
 	}
 

@@ -1,12 +1,205 @@
 package mods
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func testArchive(t *testing.T, files map[string]string, link string) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	gz := gzip.NewWriter(&b)
+	tw := tar.NewWriter(gz)
+	for name, body := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(body))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if link != "" {
+		if err := tw.WriteHeader(&tar.Header{Name: link, Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+func TestArchiveLifecycle(t *testing.T) {
+	base := t.TempDir()
+	mgr := NewManager("", filepath.Join(base, "ui"))
+	var actions []string
+	mgr.runScript = func(mod Mod, action string) error { actions = append(actions, mod.ID+":"+action); return nil }
+	archive := testArchive(t, map[string]string{"package/mod.json": `{"id":"dmx-studio","script":"run.sh","category":"lighting"}`, "package/run.sh": "exit 0"}, "")
+	mod, err := mgr.InstallArchive(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mod.Enabled || !mod.Valid || mod.Drive != "internal" || mod.Category != "lighting" || len(actions) != 0 {
+		t.Fatalf("unexpected mod: %+v %v", mod, actions)
+	}
+	if err := mgr.SetModEnabled(mod.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.SetModEnabled(mod.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.SetModEnabled(mod.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.UninstallMod(mod.ID); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(actions, ",") != "dmx-studio:start,dmx-studio:stop,dmx-studio:start,dmx-studio:stop" {
+		t.Fatal(actions)
+	}
+	list, err := mgr.Discover()
+	if err != nil || len(list) != 0 {
+		t.Fatalf("remaining mods: %+v %v", list, err)
+	}
+}
+
+func TestArchiveRejectsUnsafe(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		link  string
+	}{
+		{"traversal", map[string]string{"../escape": "x"}, ""},
+		{"symlink", map[string]string{"mod.json": `{"id":"a","script":"run.sh"}`}, "run.sh"},
+		{"invalid manifest", map[string]string{"mod.json": `{"id":"../bad","script":"x"}`}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewManager("", filepath.Join(t.TempDir(), "ui"))
+			if _, err := mgr.InstallArchive(bytes.NewReader(testArchive(t, tc.files, tc.link))); err == nil {
+				t.Fatal("expected rejection")
+			}
+		})
+	}
+}
+
+func TestScriptEnvironment(t *testing.T) {
+	base := t.TempDir()
+	mgr := NewManager("", filepath.Join(base, "ui"))
+	archive := testArchive(t, map[string]string{
+		"mod.json": `{"id":"script-test","script":"run.sh"}`,
+		"run.sh":   `printf '%s:%s:%s:%s\n' "$ENGINEX_MOD_ID" "$ENGINEX_MOD_DIR" "$ENGINEX_MOD_ACTION" "$1" >> "$ENGINEX_MOD_DIR/log"`,
+	}, "")
+	mod, err := mgr.InstallArchive(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.SetModEnabled(mod.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.SetModEnabled(mod.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(mod.Dir, "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "script-test:" + mod.Dir + ":start:start\nscript-test:" + mod.Dir + ":stop:stop\n"
+	if string(data) != want {
+		t.Fatalf("got %q, want %q", data, want)
+	}
+}
+
+// Every shipped official package must install and validate; tailscale-remote is a built-in system Mod.
+func TestOfficialModPackagesInstallAndValidate(t *testing.T) {
+	paths, err := filepath.Glob("../../docs/mods/packages/*.tar.gz")
+	if err != nil || len(paths) != 5 {
+		t.Fatalf("official packages: %v %v", paths, err)
+	}
+	mgr := NewManager("", filepath.Join(t.TempDir(), "ui"))
+	mgr.runScript = func(Mod, string) error { return nil }
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := filepath.Base(path)
+		if strings.HasPrefix(name, "tailscale-remote-") {
+			stage := t.TempDir()
+			if err := extractForTest(data, stage); err != nil {
+				t.Fatal(err)
+			}
+			var man Manifest
+			raw, err := os.ReadFile(filepath.Join(stage, "mod.json"))
+			if err != nil || json.Unmarshal(raw, &man) != nil {
+				t.Fatalf("%s manifest: %v", name, err)
+			}
+			if err := ValidateMod(stage, &man); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if _, err := mgr.InstallArchive(bytes.NewReader(data)); err == nil || !strings.Contains(err.Error(), "built in") {
+				t.Fatalf("%s should be rejected as built in, got %v", name, err)
+			}
+			continue
+		}
+		mod, err := mgr.InstallArchive(bytes.NewReader(data))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !mod.Valid || !mod.Official || mod.Enabled || mod.Drive != "internal" || mod.QMLCount != 1 || mod.Category == "" ||
+			name != mod.ID+"-"+mod.Version+".tar.gz" {
+			t.Fatalf("%s: unexpected mod %+v", name, mod)
+		}
+		if err := mgr.SetModEnabled(mod.ID, true); err != nil {
+			t.Fatalf("%s enable: %v", name, err)
+		}
+	}
+	list, err := mgr.Discover()
+	if err != nil || len(list) != 4 {
+		t.Fatalf("installed: %+v %v", list, err)
+	}
+	for _, m := range list {
+		if !m.Valid || !m.Enabled {
+			t.Fatalf("after enable: %+v", m)
+		}
+	}
+}
+
+func extractForTest(data []byte, dir string) error {
+	gz, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	tr := tar.NewReader(gz)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if h.Typeflag != tar.TypeReg {
+			continue
+		}
+		b, err := io.ReadAll(tr)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, filepath.Base(h.Name)), b, 0755); err != nil {
+			return err
+		}
+	}
+}
 
 func createTestMod(t *testing.T, baseDir, id, relPath, qmlContent string) string {
 	t.Helper()

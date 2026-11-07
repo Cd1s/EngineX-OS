@@ -1,0 +1,273 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-08",
+  "mods": [
+    {
+      "id": "tailscale-remote",
+      "version": "1.104.5",
+      "category": "network",
+      "issueNumber": 130,
+      "author": "EngineX Official",
+      "tags": [
+        "Tailscale",
+        "Headscale",
+        "SSH",
+        "SFTP"
+      ],
+      "name": {
+        "s": "Tailscale 远程访问",
+        "t": "Tailscale 遠端存取",
+        "e": "Tailscale Remote Access"
+      },
+      "summary": {
+        "s": "用户态 Tailscale / Headscale 状态卡片与诊断助手。",
+        "t": "使用者態 Tailscale / Headscale 狀態卡片與診斷助手。",
+        "e": "Userspace Tailscale / Headscale status card and diagnostic helper."
+      },
+      "description": {
+        "s": "检测现有客户端并显示连接状态；使用系统远程访问页面按需下载、校验与登录。此包不内置二进制，也不自动开启远程访问。",
+        "t": "偵測既有用戶端並顯示連線狀態；使用系統遠端存取頁面按需下載、校驗與登入。此套件不內建二進位檔，也不自動開啟遠端存取。",
+        "e": "Detects the installed client and displays connectivity. Use the system Remote access page to download, verify and sign in. No binary is bundled and remote access is never enabled automatically."
+      },
+      "upstreamReleaseUrl": "https://github.com/Cd1s/EngineX-OS/releases/download/tailscale-v1.104.5/",
+      "initialComments": [
+        {
+          "author": "Cd1s",
+          "body": "The client is a trimmed Tailscale v1.104.5 build",
+          "date": "2026-11-07",
+          "issueNumber": 130,
+          "url": "https://github.com/Cd1s/EngineX-OS/issues/130#issuecomment-6707656533"
+        }
+      ],
+      "official": true,
+      "downloadUrl": "mods/packages/tailscale-remote-1.104.5.tar.gz",
+      "sha256": "c3a906f12efb2d8d0bc903549a97447da39ed0eda62b42541e9bcb3d310f80fe",
+      "size": 2793,
+      "models": "All 16 Models",
+      "hardwareValidation": "not-tested",
+      "stars": 0,
+      "downloads": 0,
+      "license": "MIT",
+      "sourceUrl": "https://github.com/Cd1s/EngineX-OS/tree/main/docs/mods/src",
+      "runtimeStatus": "system-api-required"
+    },
+    {
+      "id": "dmx-studio",
+      "version": "1.0.0",
+      "category": "lighting",
+      "issueNumber": 134,
+      "issueNumbers": [
+        134,
+        137
+      ],
+      "author": "EngineX Official & @TribalDE & @Djpd66",
+      "tags": [
+        "DMX512",
+        "FTDI",
+        "uDMX",
+        "Art-Net",
+        "sACN",
+        "BPM",
+        "EFX"
+      ],
+      "name": {
+        "s": "DMX 独立灯光工作站",
+        "t": "DMX 獨立燈光工作站",
+        "e": "DMX Studio"
+      },
+      "summary": {
+        "s": "多域灯光输出、摇头灯 EFX、烟雾控制及 512 通道监视器。",
+        "t": "多域燈光輸出、搖頭燈 EFX、煙霧控制及 512 通道監視器。",
+        "e": "Multi-universe lighting, moving-head EFX, smoke controls and a 512-channel monitor."
+      },
+      "description": {
+        "s": "独立 Python 3 helper 与 QML 控制台，提供 FTDI/OpenDMX、uDMX 16c0:05dc、Art-Net/sACN 多域输出。含通用 LED Par/Bar、Beam/Wash/Spot/3-in-1 灯库，BPM Circle/8-Figure/Pan-Tilt Sweep，烟雾量、间隔、时长、按住即喷和 2D 预览。需显式启动 helper；USB 驱动与实际灯具待实机验证，通用灯库须按灯具手册核对。",
+        "t": "獨立 Python 3 helper 與 QML 控制台，提供 FTDI/OpenDMX、uDMX 16c0:05dc、Art-Net/sACN 多域輸出。含通用 LED Par/Bar、Beam/Wash/Spot/3-in-1 燈庫，BPM Circle/8-Figure/Pan-Tilt Sweep，煙霧量、間隔、時長、按住即噴和 2D 預覽。須明確啟動 helper；USB 驅動與實際燈具待實機驗證，通用燈庫須依燈具手冊核對。",
+        "e": "Standalone Python 3 helper and QML console for FTDI/OpenDMX, uDMX 16c0:05dc and multi-universe Art-Net/sACN. Generic LED Par/Bar and Beam/Wash/Spot/3-in-1 profiles, BPM Circle/8-Figure/Pan-Tilt Sweep, smoke level/interval/duration/momentary flash and 2D preview. Start the helper explicitly. USB hardware and fixture operation need hardware validation; check generic profiles against the fixture manual."
+      },
+      "initialComments": [
+        {
+          "author": "RattyDAVE",
+          "body": "Some sort of interface to control DMX lights.",
+          "date": "2026-11-08",
+          "issueNumber": 134,
+          "url": "https://github.com/Cd1s/EngineX-OS/issues/134"
+        },
+        {
+          "author": "Djpd66",
+          "body": "A momentary \"Smoke Flash\" button (active only while held down)",
+          "date": "2026-11-07",
+          "issueNumber": 134,
+          "url": "https://github.com/Cd1s/EngineX-OS/issues/134#issuecomment-6711005897"
+        }
+      ],
+      "official": true,
+      "downloadUrl": "mods/packages/dmx-studio-1.0.0.tar.gz",
+      "sha256": "d64f4799b562ff752d8948dcba60f029dc27e2fe1e7f71ac6418ce33ae7276cb",
+      "size": 12699,
+      "models": "All 16 Models",
+      "hardwareValidation": "not-tested",
+      "stars": 0,
+      "downloads": 0,
+      "license": "MIT",
+      "sourceUrl": "https://github.com/Cd1s/EngineX-OS/tree/main/docs/mods/src",
+      "runtimeStatus": "background-helper"
+    },
+    {
+      "id": "jog-logo-studio",
+      "version": "1.0.0",
+      "category": "ui",
+      "issueNumber": 137,
+      "author": "EngineX Official & @Djpd66",
+      "tags": [
+        "Jog Display",
+        "600x600",
+        "PNG",
+        "Logo"
+      ],
+      "name": {
+        "s": "转盘台标工作室",
+        "t": "轉盤台標工作室",
+        "e": "Jog Logo Studio"
+      },
+      "summary": {
+        "s": "裁切 600×600 logo.png，并同步到所选媒体盘。",
+        "t": "裁切 600×600 logo.png，並同步至所選媒體碟。",
+        "e": "Crop a 600×600 logo.png and synchronize selected media drives."
+      },
+      "description": {
+        "s": "中心裁切图片，预览、备份并写入媒体盘 Engine Library/logo.png；提供多盘同步和启用/停用。需要 Python 3 与已安装的 ffmpeg。加载媒体配置后显示，只有带转盘屏的机型适用；尚未验证所有机型。",
+        "t": "中心裁切圖片，預覽、備份並寫入媒體碟 Engine Library/logo.png；提供多碟同步和啟用/停用。需要 Python 3 與已安裝的 ffmpeg。載入媒體設定後顯示，僅有轉盤螢幕的機型適用；尚未驗證所有機型。",
+        "e": "Center-crops images, previews, backs up and writes Engine Library/logo.png on selected media drives, with multi-drive sync and enable/disable. Requires Python 3 and an existing ffmpeg. Reload the media profile to display. Only models with a jog display benefit; all-model hardware validation is pending."
+      },
+      "initialComments": [
+        {
+          "author": "Djpd66",
+          "body": "set custom logos on the jog wheel displays",
+          "date": "2026-11-08",
+          "issueNumber": 137,
+          "url": "https://github.com/Cd1s/EngineX-OS/issues/137"
+        }
+      ],
+      "official": true,
+      "downloadUrl": "mods/packages/jog-logo-studio-1.0.0.tar.gz",
+      "sha256": "45553e8ffa5a901854ad2a998eb501a28430f1f1184478653e667ffc73ddcc2d",
+      "size": 7032,
+      "models": "All 16 Models",
+      "hardwareValidation": "not-tested",
+      "stars": 0,
+      "downloads": 0,
+      "license": "MIT",
+      "sourceUrl": "https://github.com/Cd1s/EngineX-OS/tree/main/docs/mods/src",
+      "runtimeStatus": "background-helper"
+    },
+    {
+      "id": "sampler-pad-studio",
+      "version": "1.0.0",
+      "category": "audio",
+      "issueNumber": 137,
+      "issueNumbers": [
+        120,
+        137
+      ],
+      "author": "EngineX Official & @tribalwalker-sketch & @Djpd66",
+      "tags": [
+        "Sampler",
+        "8 Pads",
+        "Loop",
+        "WAV"
+      ],
+      "name": {
+        "s": "八格采样打击垫管理器",
+        "t": "八格取樣打擊墊管理器",
+        "e": "Sampler Pad Studio"
+      },
+      "summary": {
+        "s": "八格音源管理、重命名、清空与 Loop 切片导出。",
+        "t": "八格音源管理、重新命名、清空與 Loop 切片匯出。",
+        "e": "Eight-slot sample management, rename, clear and loop-slice export."
+      },
+      "description": {
+        "s": "可视化管理独立八格采样库，导入 WAV、重命名、清空并按采样点精确切片；其他格式使用已安装的 ffmpeg。导出后在原生浏览器加载到打击垫。固件暂未暴露原生打击垫直接绑定接口，本 Mod 不声称自动绑定或播放。",
+        "t": "視覺化管理獨立八格取樣庫，匯入 WAV、重新命名、清空並依取樣點精確切片；其他格式使用已安裝的 ffmpeg。匯出後在原生瀏覽器載入至打擊墊。韌體尚未公開原生打擊墊直接綁定介面，本 Mod 不宣稱自動綁定或播放。",
+        "e": "Manage an independent eight-slot sample bank: import WAV, rename, clear and slice precisely by sample offsets; other formats use an existing ffmpeg. Load exported files into the native pads through the browser. Firmware has no exposed direct native-pad binding API; this Mod does not claim automatic binding or playback."
+      },
+      "initialComments": [
+        {
+          "author": "tribalwalker-sketch",
+          "body": "One control - a Control Center row, or a long-press on an empty sampler pad",
+          "date": "2026-11-08",
+          "issueNumber": 120,
+          "url": "https://github.com/Cd1s/EngineX-OS/issues/120"
+        },
+        {
+          "author": "Djpd66",
+          "body": "dedicated UI tab for managing the sampler",
+          "date": "2026-11-08",
+          "issueNumber": 137,
+          "url": "https://github.com/Cd1s/EngineX-OS/issues/137"
+        }
+      ],
+      "official": true,
+      "downloadUrl": "mods/packages/sampler-pad-studio-1.0.0.tar.gz",
+      "sha256": "8fbc45a8d9b8da91f0c2825f7c39a2786a82d1b42170fe6d568c1ff2faf1c23c",
+      "size": 7330,
+      "models": "All 16 Models",
+      "hardwareValidation": "not-tested",
+      "stars": 0,
+      "downloads": 0,
+      "license": "MIT",
+      "sourceUrl": "https://github.com/Cd1s/EngineX-OS/tree/main/docs/mods/src",
+      "runtimeStatus": "background-helper"
+    },
+    {
+      "id": "minimal-club-mode",
+      "version": "1.0.0",
+      "category": "system",
+      "issueNumber": 136,
+      "author": "EngineX Official",
+      "tags": [
+        "Club",
+        "USB",
+        "SD",
+        "Pro DJ Link",
+        "Offline"
+      ],
+      "name": {
+        "s": "纯粹俱乐部演出模式",
+        "t": "純粹俱樂部演出模式",
+        "e": "Minimal Club Mode"
+      },
+      "summary": {
+        "s": "暂停可选后台服务，优先本地 USB/SD 与 Pro DJ Link 演出。",
+        "t": "暫停選用背景服務，優先本機 USB/SD 與 Pro DJ Link 演出。",
+        "e": "Pause optional background services for local USB/SD and Pro DJ Link performance."
+      },
+      "description": {
+        "s": "记录并暂停下载、deemix、stems、广播后台服务，退出时只恢复之前运行的服务。保留 Engine、音频、Rekordbox 桥和 Pro DJ Link；不修改音频调度，不承诺未经测量的 100% 算力或绝对稳定性。显式启用且可恢复，不永久 mask 服务。",
+        "t": "記錄並暫停下載、deemix、stems、廣播背景服務，退出時僅恢復原先執行中的服務。保留 Engine、音訊、Rekordbox 橋與 Pro DJ Link；不修改音訊排程，不承諾未經量測的 100% 算力或絕對穩定性。明確啟用且可還原，不永久 mask 服務。",
+        "e": "Records and pauses optional download, deemix, stems and broadcasting services, restoring only those previously running. Preserves Engine, audio, Rekordbox bridge and Pro DJ Link. Does not change audio scheduling or promise an unmeasured 100% CPU budget or absolute stability. Explicit, reversible activation; no permanent service masks."
+      },
+      "initialComments": [
+        {
+          "author": "u/krimsamp (quoted in issue #136)",
+          "body": "Can we have a stripped down version",
+          "date": "2026-11-08",
+          "issueNumber": 136,
+          "url": "https://github.com/Cd1s/EngineX-OS/issues/136"
+        }
+      ],
+      "official": true,
+      "downloadUrl": "mods/packages/minimal-club-mode-1.0.0.tar.gz",
+      "sha256": "6307d76dc7ea4e8f2da8f1ffe61e006528bb09f039bd4620a2b58002181304d2",
+      "size": 6684,
+      "models": "All 16 Models",
+      "hardwareValidation": "not-tested",
+      "stars": 0,
+      "downloads": 0,
+      "license": "MIT",
+      "sourceUrl": "https://github.com/Cd1s/EngineX-OS/tree/main/docs/mods/src",
+      "runtimeStatus": "background-helper"
+    }
+  ]
+}
