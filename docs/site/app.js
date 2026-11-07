@@ -2,9 +2,9 @@
 (function () {
   const D = window.DOCS;
   const UI = {
-    s: { lang: "s", search: "搜索文档…", heroT: "EngineX OS 使用文档", heroP: "16 款 Denon DJ / Numark / Rane 独立设备的安装、功能与排障指南。", model: "机型", board: "板号", type: "类型", file: "下载", all: "全部", gen1: "一代 · .img", gen2: "二代 · 数据包", none: "没有匹配的内容", top: "本页目录", hits: "条匹配", img: ".img 刷机包", bundle: "/data 数据包", tHome: "首页", tDocs: "使用文档", tDl: "下载", tMods: "Mod 社区" },
-    t: { lang: "t", search: "搜尋文件…", heroT: "EngineX OS 使用文件", heroP: "16 款 Denon DJ / Numark / Rane 獨立設備的安裝、功能與排障指南。", model: "機型", board: "板號", type: "類型", file: "下載", all: "全部", gen1: "一代 · .img", gen2: "二代 · 資料包", none: "沒有符合的內容", top: "本頁目錄", hits: "筆符合", img: ".img 刷機包", bundle: "/data 資料包", tHome: "首頁", tDocs: "使用文件", tDl: "下載", tMods: "Mod 社群" },
-    e: { lang: "e", search: "Search the docs…", heroT: "EngineX OS Documentation", heroP: "Install, use and troubleshoot all 16 Denon DJ / Numark / Rane standalone units.", model: "Model", board: "Board", type: "Type", file: "Download", all: "All", gen1: "Gen 1 · .img", gen2: "Gen 2 · bundle", none: "Nothing matches", top: "On this page", hits: "matches", img: ".img image", bundle: "/data bundle", tHome: "Home", tDocs: "Docs", tDl: "Downloads", tMods: "Mod Hub" },
+    s: { lang: "s", search: "搜索文档…", heroT: "EngineX OS 使用文档", heroP: "16 款 Denon DJ / Numark / Rane 独立设备的安装、功能与排障指南。", model: "机型", board: "板号", type: "类型", file: "下载", all: "全部", gen1: "一代 · .img", gen2: "二代 · 数据包", none: "没有匹配的内容", top: "本页目录", hits: "条匹配", img: ".img 刷机包", bundle: "/data 数据包", tHome: "首页", tDocs: "使用文档", tDl: "下载", tMods: "Mod 社区", mMenu: "章节目录", mJump: "跳转章节…" },
+    t: { lang: "t", search: "搜尋文件…", heroT: "EngineX OS 使用文件", heroP: "16 款 Denon DJ / Numark / Rane 獨立設備的安裝、功能與排障指南。", model: "機型", board: "板號", type: "類型", file: "下載", all: "全部", gen1: "一代 · .img", gen2: "二代 · 資料包", none: "沒有符合的內容", top: "本頁目錄", hits: "筆符合", img: ".img 刷機包", bundle: "/data 資料包", tHome: "首頁", tDocs: "使用文件", tDl: "下載", tMods: "Mod 社群", mMenu: "章節目錄", mJump: "跳轉章節…" },
+    e: { lang: "e", search: "Search the docs…", heroT: "EngineX OS Documentation", heroP: "Install, use and troubleshoot all 16 Denon DJ / Numark / Rane standalone units.", model: "Model", board: "Board", type: "Type", file: "Download", all: "All", gen1: "Gen 1 · .img", gen2: "Gen 2 · bundle", none: "Nothing matches", top: "On this page", hits: "matches", img: ".img image", bundle: "/data bundle", tHome: "Home", tDocs: "Docs", tDl: "Downloads", tMods: "Mod Hub", mMenu: "Chapters", mJump: "Jump to section…" },
   };
   const NOTE_T = { warn: "WARNING", new: "NEW" };
   const SHOT_DIR = { s: "zh-CN", t: "zh-TW", e: "en" };
@@ -83,10 +83,17 @@
     document.title = v === "home" ? "EngineX OS" : v === "mods" ? UI[lang].tMods + " · EngineX OS" : UI[lang].heroT;
     if (v === "mods" && window.EXMods) window.EXMods.render(lang, sub);
     const h = location.hash;
-    $$("#tabs [data-tab]").forEach((a) => a.classList.toggle("on", a.dataset.tab === (v === "home" ? "home" : v === "mods" ? "mods" : h.startsWith("#start-downloads") ? "dl" : "docs")));
+    const activeTab = v === "home" ? "home" : v === "mods" ? "mods" : h.startsWith("#start-downloads") ? "dl" : "docs";
+    $$("#tabs [data-tab], .mob-tabs [data-tab], .nav-tabs [data-tab]").forEach((a) => a.classList.toggle("on", a.dataset.tab === activeTab));
+  }
+  function toggleDrawer(force) {
+    const open = typeof force === "boolean" ? force : !$("#nav").classList.contains("open");
+    $("#nav").classList.toggle("open", open);
+    $("#nav-mask").classList.toggle("on", open);
   }
   function goHome(e) {
     e.preventDefault();
+    toggleDrawer(false);
     if (query) { query = ""; $("#q").value = ""; applySearch(); }
     history.replaceState(null, "", location.pathname + location.search);
     setView("home");
@@ -100,7 +107,10 @@
     $("#q").placeholder = u.search;
     $("#lang").value = lang;
     $("#ver").textContent = "v" + D.version;
-    $("#nav").innerHTML = D.sections.map((s) => `<div class="grp" data-s="${s.id}"><a href="#${s.id}">${T(s.nav || s.title)}</a><div class="sub">${heads(s).map((b) => `<a href="#${hid(s, b)}" data-h="${hid(s, b)}">${T(b.nav || b.x)}</a>`).join("")}</div></div>`).join("");
+    const tabLinks = `<a href="#" data-tab="home">${u.tHome}</a><a href="#start" data-tab="docs">${u.tDocs}</a><a href="#start-downloads" data-tab="dl">${u.tDl}</a><a href="#mods" data-tab="mods">${u.tMods}</a>`;
+    $("#nav").innerHTML = `<div class="nav-tabs">${tabLinks}</div>` +
+      D.sections.map((s) => `<div class="grp" data-s="${s.id}"><a href="#${s.id}">${T(s.nav || s.title)}</a><div class="sub">${heads(s).map((b) => `<a href="#${hid(s, b)}" data-h="${hid(s, b)}">${T(b.nav || b.x)}</a>`).join("")}</div></div>`).join("");
+    $("#mob-bar").innerHTML = `<div class="mob-tabs">${tabLinks}</div><div class="mob-doc-nav"><button type="button" class="mob-menu-btn" id="mob-open-nav"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span>${u.mMenu}</span></button><select id="mob-sec" aria-label="${u.mJump}">${D.sections.map((s) => `<optgroup label="${esc(T(s.nav || s.title).replace(/<[^>]+>/g, ""))}"><option value="${s.id}">${T(s.nav || s.title).replace(/<[^>]+>/g, "")}</option>${heads(s).map((b) => `<option value="${hid(s, b)}">  · ${T(b.nav || b.x).replace(/<[^>]+>/g, "")}</option>`).join("")}</optgroup>`).join("")}</select></div>`;
     $("#main").innerHTML = `<div class="hero"><h1>${u.heroT}</h1><p>${u.heroP}</p></div>` +
       D.sections.map((s) => `<section class="sec" id="${s.id}"><h2>${T(s.title)}</h2>${s.blocks.map((b) => block(s, b)).join("")}</section>`).join("") +
       `<div class="empty hide" id="empty">${u.none}</div>`;
@@ -157,6 +167,8 @@
     setToc(sec.id);
     const h = $$("h3.blk:not(.hide)", sec).filter((x) => x.getBoundingClientRect().top < 120).pop();
     $$("#toc a, #nav .sub a").forEach((a) => a.classList.toggle("on", !!h && a.dataset.h === h.id));
+    const ms = $("#mob-sec");
+    if (ms && document.activeElement !== ms) ms.value = h ? h.id : sec.id;
   }
   let ticking = false;
   addEventListener("scroll", () => { if (!ticking) { ticking = true; requestAnimationFrame(() => { ticking = false; spy(); }); } }, { passive: true });
@@ -196,8 +208,19 @@
   $("#lb").addEventListener("click", () => $("#lb").classList.remove("on"));
   $(".brand").addEventListener("click", goHome);
   $("#tabs").addEventListener("click", (e) => { if (e.target.closest('[data-tab="home"]')) goHome(e); });
-  $(".burger").addEventListener("click", () => $("#nav").classList.toggle("open"));
-  $("#nav").addEventListener("click", () => $("#nav").classList.remove("open"));
+  $("#mob-bar").addEventListener("click", (e) => {
+    if (e.target.closest('[data-tab="home"]')) goHome(e);
+    else if (e.target.closest("#mob-open-nav")) toggleDrawer();
+  });
+  $("#mob-bar").addEventListener("change", (e) => {
+    if (e.target.id === "mob-sec" && e.target.value) location.hash = "#" + e.target.value;
+  });
+  $(".burger").addEventListener("click", () => toggleDrawer());
+  $("#nav-mask").addEventListener("click", () => toggleDrawer(false));
+  $("#nav").addEventListener("click", (e) => {
+    if (e.target.closest('[data-tab="home"]')) { goHome(e); return; }
+    if (e.target.closest("a")) toggleDrawer(false);
+  });
   addEventListener("hashchange", route);
 
   render();

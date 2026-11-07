@@ -424,6 +424,54 @@
       ],
     },
 
+    /* ───────────── 7b Mod 插件中心与开发指南 ───────────── */
+    {
+      id: "mods-guide",
+      title: L("Mod 插件中心与开源插件开发指南", "Mod 外掛中心與開源外掛開發指南", "Mod Hub & Open-Source Plugin Development Guide"),
+      nav: L("Mod 插件与开发指南", "Mod 外掛與開發指南", "Mods & Dev Guide"),
+      blocks: [
+        { k: "p", x: L("EngineX OS 采用**「原厂解锁内置 + 重型扩展走 Mod 插件」**的两层架构：流媒体网关、DSP 音质保护、四轨同屏与原厂 Engine Lighting 解锁直接内置于系统；而 **Tailscale 异地组网（`tailscale-remote`）**、**独立多域 DMX512 控灯工作站（`dmx-studio`）**、**转盘中心屏 Logo 管理（`jog-logo-studio`）**、**采样器 8 垫管理器（`sampler-pad-studio`）** 以及社区自定义界面扩展则作为按需启用/安装的开源 Mod 运行——未启用时 **0 内存占用、0 后台进程**。你可以前往 <a href=\"#mods\"><b>Mod 社区（enginexdj.com/#mods）</b></a> 下载、上传或评论开源 Mod。",
+          "EngineX OS 採用**「原廠解鎖內建 + 重型擴充走 Mod 外掛」**的兩層架構：串流閘道、DSP 音質保護、四軌同螢幕與原廠 Engine Lighting 解鎖直接內建於系統；而 **Tailscale 異地組網（`tailscale-remote`）**、**獨立多域 DMX512 控燈工作站（`dmx-studio`）**、**轉盤中心螢幕 Logo 管理（`jog-logo-studio`）**、**取樣器 8 墊管理器（`sampler-pad-studio`）** 以及社群自訂介面擴充則作為按需啟用/安裝的開源 Mod 執行——未啟用時 **0 記憶體佔用、0 背景行程**。你可以前往 <a href=\"#mods\"><b>Mod 社群（enginexdj.com/#mods）</b></a> 下載、上傳或評論開源 Mod。",
+          "EngineX OS uses a two-tier architecture — **stock unlocks built-in, heavy extensions as optional Mods**: the streaming gateway, DSP guards, 4-deck waveforms and stock Engine Lighting unlocks are built into the core OS, while **Tailscale remote access (`tailscale-remote`)**, **standalone multi-universe DMX512 lighting (`dmx-studio`)**, **jog wheel logo manager (`jog-logo-studio`)**, **8-pad sampler studio (`sampler-pad-studio`)** and community UI overlays run as on-demand Mods with **zero RAM or background CPU cost** when disabled. Browse, upload and review Mods at <a href=\"#mods\"><b>Mod Hub (enginexdj.com/#mods)</b></a>.") },
+        { k: "h", id: "install", x: L("如何安装与管理 Mod 插件", "如何安裝與管理 Mod 外掛", "Installing & managing Mods"), nav: L("安装与管理 Mod", "安裝與管理 Mod", "Install & manage") },
+        { k: "ol", x: [
+          L("**方式一：Web 控制台（`:8080`）一键上传安装（推荐）**。从 <a href=\"#mods\">Mod 社区</a> 下载 `.tar.gz` 插件包，打开 `http://<碟机 IP>:8080` 滚动到 **「Mod 插件中心（EngineX Mod Hub）」** 卡片，直接将 `.tar.gz` 拖入上传框即可安装到碟机内置 `/data/enginex/mods/<id>/`（安装后默认停用，打开右侧开关即可启用并触发后台脚本）。",
+            "**方式一：Web 主控台（`:8080`）一鍵上傳安裝（推薦）**。從 <a href=\"#mods\">Mod 社群</a> 下載 `.tar.gz` 外掛包，開啟 `http://<碟機 IP>:8080` 捲動至 **「Mod 外掛中心（EngineX Mod Hub）」** 卡片，直接將 `.tar.gz` 拖入上傳框即可安裝至碟機內建 `/data/enginex/mods/<id>/`（安裝後預設停用，打開右側開關即可啟用並觸發背景腳本）。",
+            "**Method 1: Drag-and-drop in the Web Console (`:8080`, recommended)**. Download a `.tar.gz` package from <a href=\"#mods\">Mod Hub</a>, open `http://<deck IP>:8080`, scroll to the **EngineX Mod Hub** card and drop the `.tar.gz` into the upload box to install it into `/data/enginex/mods/<id>/` (installed disabled by default; toggle the switch on to enable it)."),
+          L("**方式二：U 盘 / SD 卡 `/mods` 即插即用**。将插件解压到 U 盘或 SD 卡根目录的 `/mods/<插件ID>/`（或 `/EngineX/mods/<插件ID>/`），插上碟机即可自动发现。",
+            "**方式二：隨身碟 / SD 卡 `/mods` 隨插即用**。將外掛解壓到隨身碟或 SD 卡根目錄的 `/mods/<外掛ID>/`（或 `/EngineX/mods/<外掛ID>/`），插上碟機即可自動發現。",
+            "**Method 2: USB / SD drive `/mods` plug-and-play**. Extract the Mod into `/mods/<mod-id>/` (or `/EngineX/mods/<mod-id>/`) on a USB stick or SD card and plug it into the deck."),
+        ] },
+        { k: "h", id: "spec", x: L("开发一个 Mod 插件需要满足什么条件？（规范与校验规则）", "開發一個 Mod 外掛需要滿足什麼條件？（規範與校驗規則）", "What are the requirements to build a Mod? (Specification & validation rules)"), nav: L("Mod 开发规范与条件", "Mod 開發規範與條件", "Mod specification") },
+        { k: "p", x: L("每个 Mod 是一个包含 `mod.json`（或 `manifest.json`）的文件夹或 `.tar.gz` 压缩包（最大 16 MiB）。碟机后端 `ValidateMod` 与官网前端沙箱会严格执行以下 6 条安全与格式校验：",
+          "每個 Mod 是一個包含 `mod.json`（或 `manifest.json`）的資料夾或 `.tar.gz` 壓縮包（最大 16 MiB）。碟機後端 `ValidateMod` 與官網前端沙箱會嚴格執行以下 6 條安全與格式校驗：",
+          "Every Mod is a folder or `.tar.gz` archive (up to 16 MiB) containing a `mod.json` (or `manifest.json`) manifest. Both the deck's `ValidateMod` backend and the website's client-side sandbox enforce these 6 rules:") },
+        { k: "table",
+          head: [L("字段 / 条目", "欄位 / 項目", "Field / Rule"), L("类型", "類型", "Type"), L("必须满足的条件", "必須滿足的條件", "Requirement")],
+          rows: [
+            ["`id`", L("必填字符串", "必填字串", "Required string"), L("唯一标识符，必须匹配正则 `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`（仅限字母、数字、`.`、`_`、`-`，1–64 字符；`tailscale-remote` 为系统保留 ID）。", "唯一識別碼，必須符合正則 `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`（僅限字母、數字、`.`、`_`、`-`，1–64 字元；`tailscale-remote` 為系統保留 ID）。", "Unique ID matching `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$` (1–64 chars; `tailscale-remote` is reserved for the built-in system Mod).")],
+            ["`name` / `version` / `author`", L("必填字符串", "必填字串", "Required strings"), L("插件显示名称、版本号（如 `1.0.0`）与作者署名；可选填 `category`（`network` / `lighting` / `audio` / `ui` / `system`）与 `description`。", "外掛顯示名稱、版本號（如 `1.0.0`）與作者署名；可選填 `category`（`network` / `lighting` / `audio` / `ui` / `system`）與 `description`。", "Display name, version (`1.0.0`) and author; optional `category` (`network` / `lighting` / `audio` / `ui` / `system`) and `description`.")],
+            ["`qmlFiles`", L("可选映射对象", "可選映射物件", "Optional map"), L("格式 `{\"本地文件名.qml\": \"QRC目标相对路径.qml\"}`。源文件和目标路径都必须以 `.qml` 结尾，文件非空且 `<= 1 MiB`、合法 UTF-8 编码、不含 `..` 路径穿越或符号链接。Mod 必须至少包含 `qmlFiles` 或 `script` 之一。", "格式 `{\"本機檔名.qml\": \"QRC目標相對路徑.qml\"}`。來源檔與目標路徑皆須以 `.qml` 結尾，檔案非空且 `<= 1 MiB`、合法 UTF-8 編碼、不含 `..` 路徑穿越或符號連結。Mod 必須至少包含 `qmlFiles` 或 `script` 之一。", "Map of `{\"local.qml\": \"Target/Path.qml\"}`. Both paths must end with `.qml`, be non-empty `<= 1 MiB` valid UTF-8 regular files with no `..` traversal or symlinks. A Mod must define at least one of `qmlFiles` or `script`.")],
+            ["`script`", L("可选相对路径", "可選相對路徑", "Optional path"), L("生命周期入口脚本（如 `\"start.sh\"`），非空且 `<= 256 KiB` 合法 UTF-8 文本（无 NUL 字节、无符号链接）。", "生命週期入口腳本（如 `\"start.sh\"`），非空且 `<= 256 KiB` 合法 UTF-8 文字（無 NUL 位元組、無符號連結）。", "Lifecycle script path (e.g. `\"start.sh\"`), non-empty `<= 256 KiB` valid UTF-8 text file (no NUL bytes, no symlinks).")],
+            [L("脚本生命周期合同", "腳本生命週期合同", "Script lifecycle contract"), "`start` / `stop`", L("启用 Mod 时系统调用 `/bin/sh <modDir>/<script> start`，停用或卸载时调用 `stop`（附带环境变量 `ENGINEX_MOD_ID`、`ENGINEX_MOD_DIR`、`ENGINEX_MOD_ACTION`，10 秒超时）。若启动常驻后台服务，必须用 `nohup ... >/dev/null 2>&1 &` 在后台拉起并立即 `exit 0`。", "啟用 Mod 時系統呼叫 `/bin/sh <modDir>/<script> start`，停用或卸載時呼叫 `stop`（附帶環境變數 `ENGINEX_MOD_ID`、`ENGINEX_MOD_DIR`、`ENGINEX_MOD_ACTION`，10 秒逾時）。若啟動常駐背景服務，必須用 `nohup ... >/dev/null 2>&1 &` 於背景拉起並立即 `exit 0`。", "Called as `/bin/sh <modDir>/<script> start|stop` with `ENGINEX_MOD_ID`, `ENGINEX_MOD_DIR`, `ENGINEX_MOD_ACTION` (10 s timeout). Long-running helpers must background with `nohup ... >/dev/null 2>&1 &` and `exit 0` immediately.")],
+            [L("防崩溃安全隔离", "防崩潰安全隔離", "Crash quarantine"), "`engine-ui-guard`", L("若某个自定义 QML Mod 存在语法错误导致 Engine 连续异常退出，`engine-ui-guard` 会自动隔离所有外置 Mod 并回退到原厂安全界面，在 `:8080` 点「恢复并重新加载 Mods」即可解除。", "若某個自訂 QML Mod 存在語法錯誤導致 Engine 連續異常退出，`engine-ui-guard` 會自動隔離所有外置 Mod 並回退至原廠安全介面，於 `:8080` 點「恢復並重新載入 Mods」即可解除。", "If a broken QML Mod causes Engine to crash repeatedly on start, `engine-ui-guard` automatically quarantines all Mods and boots cleanly; click Reset Quarantine in `:8080` after fixing the Mod.")],
+          ],
+        },
+        { k: "h", id: "publish", x: L("如何在线打包并发布到 enginexdj.com/#mods", "如何線上打包並發佈到 enginexdj.com/#mods", "Packaging & publishing on enginexdj.com/#mods"), nav: L("在线打包与发布", "線上打包與發佈", "Package & publish") },
+        { k: "ol", x: [
+          L("打开 <a href=\"#mods\"><b>`https://enginexdj.com/#mods`</b></a>，点击右上角 **「+ 上传开源 Mod / Upload Mod」**。",
+            "開啟 <a href=\"#mods\"><b>`https://enginexdj.com/#mods`</b></a>，點擊右上角 **「+ 上傳開源 Mod / Upload Mod」**。",
+            "Open <a href=\"#mods\"><b>`https://enginexdj.com/#mods`</b></a> and click **+ Upload Mod** at the top right."),
+          L("你可以直接拖入打好的 `.tar.gz` 压缩包（浏览器会自动在本地解压校验 `mod.json` 并计算 SHA-256），也可以切换到 **「在线打包」** 标签页填写表单、选择 `.qml`/`.sh` 文件直接由浏览器生成标准 `<id>-<version>.tar.gz`。",
+            "你可以直接拖入打好的 `.tar.gz` 壓縮包（瀏覽器會自動在本機解壓校驗 `mod.json` 並計算 SHA-256），也可以切換到 **「線上打包」** 分頁填寫表單、選擇 `.qml`/`.sh` 檔案直接由瀏覽器產生標準 `<id>-<version>.tar.gz`。",
+            "Either drop an existing `.tar.gz` (validated in-browser with SHA-256 calculation) or switch to the **Build in browser** tab to fill in metadata, attach `.qml`/`.sh` files and generate a compliant `<id>-<version>.tar.gz`."),
+          L("校验通过后，点击 **「提交到 GitHub 开源 Mod 仓库」** 即可一键发布并开启社区打星与评论。",
+            "校驗通過後，點擊 **「提交到 GitHub 開源 Mod 倉庫」** 即可一鍵發佈並開啟社群打星與評論。",
+            "Once validated, click **Submit to GitHub Open-Source Mod Hub** to publish and open community ratings and comments."),
+        ] },
+      ],
+    },
+
     /* ───────────── 8 FAQ ───────────── */
     {
       id: "faq",
