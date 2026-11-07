@@ -12,6 +12,8 @@
 
 **[Unlocked Features](#features)** · **[Download Firmware](#install)** · **[Screenshots](#gallery)** · **[Before vs. After](#benchmarks)** · **[Sponsor](#sponsor)**
 
+📖 **Online User Guide**: <https://cd1s.github.io/EngineX-OS/>
+
 </div>
 
 <br>

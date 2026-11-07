@@ -12,6 +12,8 @@
 
 **[核心功能](#features)** · **[固件下载](#install)** · **[实机画面](#gallery)** · **[重构与占用对比](#benchmarks)** · **[赞赏支持](#sponsor)**
 
+📖 **在线使用文档**：<https://cd1s.github.io/EngineX-OS/>
+
 </div>
 
 <br>
