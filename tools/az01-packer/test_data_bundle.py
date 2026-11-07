@@ -72,6 +72,8 @@ class DataBundleTest(unittest.TestCase):
             self.assertTrue((src / 'bin' / applet).stat().st_mode & 0o100)
         self.assertTrue((src / 'boot-activate.sh').exists())
         self.assertTrue((src / 'boot-activate.sh').stat().st_mode & 0o100)
+        self.assertIn('EnvironmentFile=-/data/sc5000-custom/ui-scale.env',
+                      (src / 'boot-activate.sh').read_text())
         self.assertTrue((src / '99-sc5000-custom.conf').exists())
         self.assertTrue((src / 'host-install-userdata.py').exists())
         self.assertTrue((src / 'host-install-fastboot.sh').exists())

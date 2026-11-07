@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
@@ -448,8 +449,15 @@ func TestFourDeckRole(t *testing.T) {
 // file Engine's unit reads (engine.service.d/70-ui-scale.conf).
 func TestUIScale(t *testing.T) {
 	dir := t.TempDir()
+	uiScaleMu.Lock()
+	origPath := uiScaleEnvPath
 	uiScaleEnvPath = filepath.Join(dir, "ui-scale.env")
-	defer func() { uiScaleEnvPath = "/data/sc5000-custom/ui-scale.env" }()
+	uiScaleMu.Unlock()
+	defer func() {
+		uiScaleMu.Lock()
+		uiScaleEnvPath = origPath
+		uiScaleMu.Unlock()
+	}()
 	srv := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
 	defer srv.Close()
 
@@ -492,6 +500,32 @@ func TestUIScale(t *testing.T) {
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); strings.Contains(string(c), "ui_scale") {
 		t.Fatalf("stock scale saved: %s", c)
 	}
+}
+
+func TestUIScaleConcurrentWrites(t *testing.T) {
+	dir := t.TempDir()
+	uiScaleMu.Lock()
+	origPath := uiScaleEnvPath
+	uiScaleEnvPath = filepath.Join(dir, "ui-scale.env")
+	uiScaleMu.Unlock()
+	defer func() {
+		uiScaleMu.Lock()
+		uiScaleEnvPath = origPath
+		uiScaleMu.Unlock()
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		pct := uiUIScales[i%len(uiUIScales)]
+		go func(p int) {
+			defer wg.Done()
+			if err := writeUIScaleEnv(p); err != nil {
+				t.Errorf("writeUIScaleEnv(%d) failed: %v", p, err)
+			}
+		}(pct)
+	}
+	wg.Wait()
 }
 
 func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
