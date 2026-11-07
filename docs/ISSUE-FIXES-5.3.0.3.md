@@ -88,7 +88,7 @@
     - `tools/ui-mod/test_stems_feature.c`：armhf 原生编译，针对 `5.0.4`、`5.3.0` 与 `5.3.0-sclive4` 三个原厂 `Engine` 二进制及 `OfflineAnalyzer` `EXPF` 快速通道全部 PASS；
     - `tools/ui-mod/test_az04_hook.c`：AArch64 原生编译，针对 `PRIME 4 G2` / `SYSTEM ONE` 的 64 位 `Engine` 全部 PASS；
     - `tools/edisksd-hook/test_edisksd_hook.c`：含 `unshare -m` 下的 `--mounts` 全部 PASS；
-  - 二代机沙箱验收：`bash tools/az01-packer/test_sclive4_bootstrap.sh` 默认（`SC LIVE 4` armhf）Method A 注入、首次启动激活（含 `enginex-*.service` 单元）、Engine hook（16 处补丁）、Method B 安装/卸载与旧目录升级全部 PASS（`5b4687e`）；`AZ04=1` 本次未跑通：编译机上的 `SYSTEM ONE` 解包 rootfs（`systemone-analysis/rootfs`）自 2026-11-06 起为空目录，需重新解包后补测。
+  - 二代机沙箱验收：`bash tools/az01-packer/test_sclive4_bootstrap.sh` 默认（`SC LIVE 4` armhf）与 `AZ04=1`（`PRIME 4 G2` / `SYSTEM ONE` aarch64）的 Method A 注入、首次启动激活（含 `enginex-*.service` 单元）、Engine hook（armhf 16 处 / AZ04 6 处补丁）、Method B 安装/卸载与旧目录升级全部 PASS。
   - `f4b0ce6`（#132）提交时 `pkg/webui` 因多余的 `syscall` 导入无法编译，`TestUpdateAppliesTheDataBundle` 与沙箱 Method B 也未通过；`5b4687e` 修正后上述 Go / Python / overlay / 沙箱测试在 `Oracle-Batam-arm` 重跑全部 PASS。C 单测本次未改动、未重跑。
 - **发版门禁（`tools/az01-packer/release-gate.sh`）**：
   - 三个一代镜像组（`SC5000` JP07、`SC6000` JP13、`PRIME 4` JC11）分别从已发布的 `v5.3.0.2` 镜像在线升级至 `v5.3.0.3` 并完成开机全功能验收，三组各 **94 PASS / 0 FAIL**（构建提交 `5b4687e`，旧镜像 `v5.3.0.2` r86，2026-11-08）（静态审计 `systemd-analyze verify` 0 错误、在线升级下载与篡改 1 字节拒绝、原厂 QML 缓存种入后新 UI 包强制重编、控制中心第 3 行 4 个新磁贴渲染、关于页 `EngineX OS 5.3.0.3` 与访问码渲染、16 处 Engine 补丁、21 个 DSP guard、Stems 分轨、Rekordbox 转换、下一次在线升级 mock 全部通过）。

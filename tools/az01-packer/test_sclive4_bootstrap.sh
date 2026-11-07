@@ -230,9 +230,7 @@ test -f '$TARGET/run/systemd/system/enginex-rb-bridge.service'
 test -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service'
 test -f '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 for i in \$(seq 1 20); do
-chroot '$TARGET' ps -ef
     chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1 && break
-chroot '$TARGET' ps -ef
     sleep 0.1
 done
 chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1
