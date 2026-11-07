@@ -851,3 +851,29 @@ func TestNoDeckPrintsFirstGenGuide(t *testing.T) {
 		t.Error("expected the guide both at start-up and when no deck is found")
 	}
 }
+
+// #116: detect Rockchip USB loaders: 2207:350b (RK3588 RMZ2/JP24) and 2207:320a (RK3288).
+func TestIsRockchipUSBLoader(t *testing.T) {
+	tests := []struct {
+		line string
+		want bool
+	}{
+		{"Bus 001 Device 004: ID 2207:350b Fuzhou Rockchip Electronics Company", true},
+		{"2207:350b", true},
+		{"2207:350B", true},
+		{"ID 2207:320a", true},
+		{"2207:320A", true},
+		{"Bus 002 Device 005: ID 2207:320a Rockchip RK3288 Loader", true},
+		{"Bus 001 Device 003: ID 15a2:007d Freescale Semiconductor, Inc. i.MX6", false},
+		{"ID 2207:0011 Rockchip ADB", false},
+		{"", false},
+		{"some random text without rockchip vendor id", false},
+	}
+
+	for _, tt := range tests {
+		got := IsRockchipUSBLoader(tt.line)
+		if got != tt.want {
+			t.Errorf("IsRockchipUSBLoader(%q) = %v, want %v", tt.line, got, tt.want)
+		}
+	}
+}

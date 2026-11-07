@@ -1818,3 +1818,32 @@ const char _sc5000_alsa_boot_hook_dlsym_config_hook_001[] = "ALSA_0.9";
 __attribute__((used, visibility("default")))
 const char _snd_config_hook_sc5000_alsa_boot_hook_dlsym_config_hook_001[] = "ALSA_0.9";
 
+// #119: Intercept az01_apply_image when upgrading with an EngineX Data Bundle.
+__attribute__((visibility("default")))
+int az01_apply_image(const char *path, int flags) {
+    if (path) {
+        int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            char buf[64];
+            ssize_t n = read(fd, buf, sizeof(buf));
+            close(fd);
+            if (n >= 19 && memmem(buf, (size_t)n, "ENGINEX_DATA_BUNDLE", 19) != NULL) {
+                fprintf(stderr, "engine-ui-hook: intercepted az01_apply_image with ENGINEX_DATA_BUNDLE (%s)\n", path);
+                char cmd[1024];
+                snprintf(cmd, sizeof(cmd), "/data/enginex/install.sh \"%s\" && systemctl reboot", path);
+                int ret = system(cmd);
+                (void)ret;
+                return 0;
+            }
+        }
+    }
+    typedef int (*az01_apply_fn)(const char *, int);
+    static void *orig_fn = NULL;
+    az01_apply_fn fn = (az01_apply_fn)next_symbol(&orig_fn, "az01_apply_image");
+    if (fn) {
+        return fn(path, flags);
+    }
+    return -1;
+}
+
+
