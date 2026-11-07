@@ -43,7 +43,7 @@ b,strong{font-weight:600}
 [data-theme=dark] .sun,[data-theme=light] .moon{display:none}
 
 /* ---- layout ---- */
-.wrap{display:grid;grid-template-columns:260px minmax(0,1fr) 220px;padding-top:var(--top)}
+.wrap{display:grid;grid-template-columns:268px minmax(0,1fr) 220px;padding-top:var(--top)}
 .nav,.toc{position:sticky;top:var(--top);align-self:start;height:calc(100vh - var(--top));overflow-y:auto;overscroll-behavior:contain}
 .nav{background:var(--panel);border-right:1px solid var(--line);padding:24px 12px 40px}
 .nav .grp{margin-bottom:2px}
@@ -51,11 +51,11 @@ b,strong{font-weight:600}
 .nav a:hover{color:var(--tx);background:var(--hover)}
 .nav .grp>a{position:relative;font-weight:500;color:var(--tx)}
 .nav .grp.on>a{color:var(--ac);background:var(--ac-soft);font-weight:600}
-.nav .grp.on>a:before{content:"";position:absolute;left:0;top:7px;bottom:7px;width:2px;border-radius:2px;background:var(--ac)}
-.nav .sub{display:none;margin:4px 0 8px 12px;padding-left:8px;border-left:1px solid var(--line)}
+.nav .sub{display:none;margin:4px 0 10px 12px;padding-left:12px;border-left:1px solid var(--line)}
 .nav .grp.on .sub{display:block}
-.nav .sub a{font-size:13px;padding:4px 10px}
-.nav .sub a.on{color:var(--ac)}
+.nav .sub a{position:relative;font-size:13px;line-height:1.4;padding:5px 10px;border-radius:5px}
+.nav .sub a.on{color:var(--ac);font-weight:500}
+.nav .sub a.on:before{content:"";position:absolute;left:-13px;top:5px;bottom:5px;width:2px;border-radius:2px;background:var(--ac)}
 .toc{padding:32px 20px 40px 16px;font-size:13px}
 .toc h4{margin:0 0 10px;color:var(--tx);font-size:13px;font-weight:600}
 .toc .lst{border-left:1px solid var(--line)}
@@ -128,7 +128,7 @@ details.qa .a{padding:0 4px 16px;color:var(--dim)}
 #lb.on{display:flex}
 #lb img{max-width:100%;max-height:100%;border-radius:var(--r);box-shadow:var(--shadow)}
 
-@media(max-width:1200px){.wrap{grid-template-columns:260px minmax(0,1fr)}.toc{display:none}}
+@media(max-width:1200px){.wrap{grid-template-columns:268px minmax(0,1fr)}.toc{display:none}}
 @media(max-width:860px){
   .top{padding:0 16px;gap:10px}
   .wrap{grid-template-columns:1fr}

@@ -38,13 +38,14 @@
     /* ───────────── 1 快速开始 ───────────── */
     {
       id: "start",
-      title: L("快速开始 & 机型判断", "快速開始 & 機型判斷", "Quick start & your model"),
+      title: L("快速开始与机型判断", "快速開始與機型判斷", "Quick start & your model"),
+      nav: L("快速开始与机型判断", "快速開始與機型判斷", "Quick start & models"),
       blocks: [
         { k: "p", x: L(
           `EngineX OS ${V} 是基于官方 Engine OS 5.3.0+ 重构的定制系统，覆盖 Denon DJ / Numark / Rane 全系 16 款独立设备。界面和操作与原厂一致，装上即可使用下面各章的功能。`,
           `EngineX OS ${V} 是基於官方 Engine OS 5.3.0+ 重構的客製系統，涵蓋 Denon DJ / Numark / Rane 全系 16 款獨立設備。介面與操作和原廠一致，裝上即可使用以下各章的功能。`,
           `EngineX OS ${V} is a custom system rebuilt on the official Engine OS 5.3.0+ base for all 16 Denon DJ / Numark / Rane standalone units. The UI and controls stay stock; install it and every feature in this guide is available.`) },
-        { k: "h", id: "which", x: L("我的机器该下哪个？", "我的機器該下載哪個？", "Which download is mine?") },
+        { k: "h", id: "which", x: L("我的机器该下哪个？", "我的機器該下載哪個？", "Which download is mine?"), nav: L("该下哪个包？", "該下載哪個？", "Which download?") },
         { k: "ul", x: [
           L("**一代机（8 款）**：SC5000 / SC5000M / SC6000 / SC6000M / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro → 下载对应的 `.img`，U 盘刷机。",
             "**一代機（8 款）**：SC5000 / SC5000M / SC6000 / SC6000M / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro → 下載對應的 `.img`，隨身碟刷機。",
@@ -55,12 +56,12 @@
           L("不确定型号？用 EngineX-Installer（见下一章），它会自动识别机型。", "不確定型號？用 EngineX-Installer（見下一章），它會自動識別機型。", "Not sure? EngineX-Installer (next chapter) detects the model automatically."),
         ] },
         { k: "note", tone: "warn", x: L("二代机千万不要刷 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的 `.img`。", "二代機千萬不要刷 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的 `.img`。", "Never flash the `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` `.img` onto a second-generation unit.") },
-        { k: "h", id: "downloads", x: L("机型对比与下载直链", "機型對照與下載連結", "Model comparison & direct downloads") },
+        { k: "h", id: "downloads", x: L("机型对比与下载直链", "機型對照與下載連結", "Model comparison & direct downloads"), nav: L("机型对比与下载", "機型對照與下載", "Models & downloads") },
         { k: "models" },
         { k: "note", x: L("PRIME 4 G2 / SYSTEM ONE 是 64 位 Engine：已含 UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和各项服务；DSP 防护、软限幅、自动增益、SQLite 调优和 4 台面解锁还没移植，Stems 保持官方原样。",
                       "PRIME 4 G2 / SYSTEM ONE 是 64 位 Engine：已含 UI 包、串流閘道（Deezer、SoundCloud、Beatport）與各項服務；DSP 防護、軟限幅、自動增益、SQLite 調校與 4 台面解鎖尚未移植，Stems 維持官方原樣。",
                       "PRIME 4 G2 / SYSTEM ONE run the 64-bit Engine: UI pack, streaming gateway (Deezer, SoundCloud, Beatport) and services are included; DSP guards, soft limiter, auto-gain, SQLite tuning and the 4-deck unlock are not ported yet, and Stems stay stock.") },
-        { k: "h", id: "features", x: L("核心功能一览", "核心功能一覽", "Feature overview") },
+        { k: "h", id: "features", x: L("核心功能一览", "核心功能一覽", "Feature overview"), nav: L("核心功能一览", "核心功能一覽", "Features") },
         { k: "ul", x: [
           L("4 轨 Stems 实时分轨（人声 / 旋律 / 贝斯 / 鼓组）", "4 軌 Stems 即時分軌（人聲 / 旋律 / 貝斯 / 鼓組）", "Real-time 4-stem separation (vocal / melody / bass / drums)"),
           L("流媒体直接上机：手机扫码登录，Spotify 还能一键 Connect 配对", "串流直接上機：手機掃碼登入，Spotify 還能一鍵 Connect 配對", "Streaming on the deck: scan a QR code with your phone; Spotify also pairs in one tap via Connect"),
@@ -76,21 +77,22 @@
     {
       id: "install",
       title: L("一键安装与刷机教程", "一鍵安裝與刷機教學", "One-click install & flashing"),
+      nav: L("一键安装与刷机", "一鍵安裝與刷機", "Install & flashing"),
       blocks: [
         { k: "shot", src: "site/assets/screen-installer.svg", cap: L("EngineX-Installer：16 款机型自动识别，模式 A 局域网 / 模式 B USB Fastboot", "EngineX-Installer：16 款機型自動識別，模式 A 區域網路 / 模式 B USB Fastboot", "EngineX-Installer: 16 models auto-detected, Mode A LAN / Mode B USB Fastboot") },
-        { k: "h", id: "installer", x: L("EngineX-Installer（推荐，全系 16 款）", "EngineX-Installer（推薦，全系 16 款）", "EngineX-Installer (recommended, all 16)") },
+        { k: "h", id: "installer", x: L("EngineX-Installer（推荐，全系 16 款）", "EngineX-Installer（推薦，全系 16 款）", "EngineX-Installer (recommended, all 16)"), nav: L("一键安装器（推荐）", "一鍵安裝器（推薦）", "EngineX-Installer") },
         { k: "p", x: L("无需输入 IP 或选择机型。下载适合你电脑的平台包，解压后分别运行 `Install-EngineX.bat`（Windows）、`Install-EngineX.command`（macOS）或 `./install-enginex.sh`（Linux）。",
                         "無需輸入 IP 或選擇機型。下載適合你電腦的平台包，解壓後分別執行 `Install-EngineX.bat`（Windows）、`Install-EngineX.command`（macOS）或 `./install-enginex.sh`（Linux）。",
                         "No IP or model to enter. Download the package for your computer, unzip it and run `Install-EngineX.bat` (Windows), `Install-EngineX.command` (macOS) or `./install-enginex.sh` (Linux).") },
         { k: "installers" },
-        { k: "h", id: "modeA", x: L("模式 A：Wi-Fi / 局域网自动发现（已开 root SSH 的机器）", "模式 A：Wi-Fi / 區域網路自動發現（已開 root SSH 的機器）", "Mode A: Wi-Fi / LAN auto-discovery (units with root SSH)") },
+        { k: "h", id: "modeA", x: L("模式 A：Wi-Fi / 局域网自动发现（已开 root SSH 的机器）", "模式 A：Wi-Fi / 區域網路自動發現（已開 root SSH 的機器）", "Mode A: Wi-Fi / LAN auto-discovery (units with root SSH)"), nav: L("模式 A：局域网发现", "模式 A：區網自動發現", "Mode A: LAN discovery") },
         { k: "ol", x: [
           L("电脑和碟机连到同一个网络。", "電腦與碟機連到同一個網路。", "Put the computer and the deck on the same network."),
           L("安装器通过 StageLinQ（UDP 51337）及 EngineX Web 界面扫描发现设备，自动选对应数据包。", "安裝器透過 StageLinQ（UDP 51337）及 EngineX Web 介面掃描發現設備，自動選擇對應資料包。", "The installer finds the deck via StageLinQ (UDP 51337) and the EngineX web UI and picks the right package."),
           L("在 `/data/enginex` 安装，保留曲库和设置。", "於 `/data/enginex` 安裝，保留曲庫與設定。", "It installs into `/data/enginex` and keeps your library and settings."),
         ] },
         { k: "note", x: L("运行目录统一为 `/data/enginex/`。开机时旧的 `/data/sc5000-custom/` 会自动迁移，并留下软链接 `/data/sc5000-custom → /data/enginex`，旧脚本和旧路径照常可用。", "執行目錄統一為 `/data/enginex/`。開機時舊的 `/data/sc5000-custom/` 會自動遷移，並留下符號連結 `/data/sc5000-custom → /data/enginex`，舊腳本與舊路徑照常可用。", "The runtime directory is now `/data/enginex/`. On boot the old `/data/sc5000-custom/` is migrated automatically and a symlink `/data/sc5000-custom → /data/enginex` is left behind, so old scripts and paths keep working.") },
-        { k: "h", id: "modeB", x: L("模式 B：USB Fastboot（原厂机）", "模式 B：USB Fastboot（原廠機）", "Mode B: USB Fastboot (stock units)") },
+        { k: "h", id: "modeB", x: L("模式 B：USB Fastboot（原厂机）", "模式 B：USB Fastboot（原廠機）", "Mode B: USB Fastboot (stock units)"), nav: L("模式 B：USB Fastboot", "模式 B：USB Fastboot", "Mode B: USB Fastboot") },
         { k: "ol", x: [
           L("先把碟机升级到官方 **Engine OS 5.3.0**。", "先把碟機升級到官方 **Engine OS 5.3.0**。", "Update the deck to official **Engine OS 5.3.0** first."),
           L("碟机屏幕：**Settings → Update → Reboot to Computer Update Mode**（旧版菜单叫 **设置 → 关于 / 更新 → 固件更新模式**），重启进入蓝屏电脑图标的 Fastboot 模式，再用 USB-B 线连电脑。", "碟機螢幕：**Settings → Update → Reboot to Computer Update Mode**（舊版選單叫 **設定 → 關於 / 更新 → 韌體更新模式**），重啟進入藍屏電腦圖示的 Fastboot 模式，再以 USB-B 線連接電腦。", "On the deck: **Settings → Update → Reboot to Computer Update Mode** (older menus call it **Settings → About / Update → Firmware Update Mode**). The deck reboots into Fastboot mode with the blue-screen computer icon; then connect it with a USB-B cable."),
@@ -99,7 +101,7 @@
         { k: "note", tone: "warn", x: L("Fastboot 需另装 `fastboot`、Python 3 和 e2fsprogs（Windows 需在有 USB 权限的 WSL 里运行 Linux 包）。**刷入新的 `/data` 镜像会清空该分区上的音乐、曲库和设置**，请先备份并拔掉 U 盘和 SD 卡；要保留 `/data` 请用 `--userdata-backup` 提供完整分区镜像。",
                                           "Fastboot 需另裝 `fastboot`、Python 3 與 e2fsprogs（Windows 需在有 USB 權限的 WSL 中執行 Linux 包）。**刷入新的 `/data` 映像會清空該分割區上的音樂、曲庫與設定**，請先備份並拔除隨身碟與 SD 卡；要保留 `/data` 請以 `--userdata-backup` 提供完整分割區映像。",
                                           "Fastboot needs `fastboot`, Python 3 and e2fsprogs (on Windows run the Linux package in a WSL with USB access). **Writing a new `/data` image erases music, library and settings on that partition.** Back up first and unplug USB sticks and SD cards; pass a full partition image with `--userdata-backup` to keep `/data`.") },
-        { k: "h", id: "usb", x: L("U 盘刷机（一代机，首次安装）", "隨身碟刷機（一代機，首次安裝）", "USB stick flashing (gen 1, first install)") },
+        { k: "h", id: "usb", x: L("U 盘刷机（一代机，首次安装）", "隨身碟刷機（一代機，首次安裝）", "USB stick flashing (gen 1, first install)"), nav: L("U 盘刷机（一代机）", "隨身碟刷機（一代機）", "USB stick (gen 1)") },
         { k: "ol", x: [
           L("在「快速开始」的表格里下载你机型对应的 `.img`。", "於「快速開始」的表格下載你機型對應的 `.img`。", "Download the `.img` for your model from the table in Quick start."),
           L("把 `.img` 原名放进 **FAT32 / exFAT U 盘的根目录**。", "將 `.img` 以原檔名放進 **FAT32 / exFAT 隨身碟的根目錄**。", "Put the `.img` unrenamed in the root of a **FAT32 / exFAT stick**."),
@@ -107,7 +109,7 @@
           L("只弹出 *Reboot into firmware update mode?* 说明没找到文件：核对机型、文件名保持原样放在根目录，再拔插一次。", "只彈出 *Reboot into firmware update mode?* 代表沒找到檔案：核對機型、檔名保持原樣放在根目錄，再拔插一次。", "If it only asks *Reboot into firmware update mode?* the file was not found: check the model, keep the file name and root location, and re-plug the stick."),
         ] },
         { k: "note", tone: "warn", x: L("**为什么电脑刷机工具看不到 PRIME GO / SC5000？（#104）**<br>1. **推荐：免电脑 U 盘直接刷。** 一代机（SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2）不用连电脑：把 `*-Update.img` 放进 FAT32 / exFAT U 盘根目录，插到碟机上，进入 `Settings → Update → Reboot` 即可更新或恢复固件。<br>2. **电脑 USB 线刷模式：** 正常开机打碟时，电脑**绝对看不到**刷机设备！必须先在碟机屏幕点 **`Settings → Update → Reboot to Computer Update Mode`**（重启进入蓝屏电脑图标的 Fastboot 模式），再用 USB-B 线连电脑运行刷机工具。", "**為什麼電腦刷機工具看不到 PRIME GO / SC5000？（#104）**<br>1. **推薦：免電腦隨身碟直接刷。** 一代機（SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2）不用連電腦：把 `*-Update.img` 放進 FAT32 / exFAT 隨身碟根目錄，插到碟機上，進入 `Settings → Update → Reboot` 即可更新或還原韌體。<br>2. **電腦 USB 線刷模式：** 正常開機打碟時，電腦**絕對看不到**刷機裝置！必須先在碟機螢幕點 **`Settings → Update → Reboot to Computer Update Mode`**（重啟進入藍屏電腦圖示的 Fastboot 模式），再以 USB-B 線連接電腦執行刷機工具。", "**Why can’t the computer flashing tool see my PRIME GO / SC5000? (#104)**<br>1. **Recommended: flash from a USB stick, no computer.** First-generation units (SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2) need no computer: put the `*-Update.img` in the root of a FAT32 / exFAT stick, plug it into the deck and go to `Settings → Update → Reboot` to update or recover the firmware.<br>2. **Computer USB flashing mode:** while the deck is running normally, the computer **never** sees a flashing device! First tap **`Settings → Update → Reboot to Computer Update Mode`** on the deck screen (it reboots into Fastboot mode with the blue-screen computer icon), then connect a USB-B cable and run the flashing tool.") },
-        { k: "h", id: "ota", x: L("屏幕一键 OTA（已装本系统后）", "螢幕一鍵 OTA（已裝本系統後）", "On-screen one-tap OTA (once installed)") },
+        { k: "h", id: "ota", x: L("屏幕一键 OTA（已装本系统后）", "螢幕一鍵 OTA（已裝本系統後）", "On-screen one-tap OTA (once installed)"), nav: L("屏幕一键 OTA", "螢幕一鍵 OTA", "On-screen OTA") },
         { k: "ul", x: [
           L("连上 Wi-Fi 或网线，**设置 → 关于 / 更新**，检测到新版本时点屏幕上的 **「更新」**，进入原厂刷机进度条自动完成。", "連上 Wi-Fi 或網路線，**設定 → 關於 / 更新**，偵測到新版本時點螢幕上的 **「更新」**，進入原廠刷機進度條自動完成。", "Connect Wi-Fi or Ethernet, open **Settings → About / Update** and tap **Update** when a new version shows; the stock flashing progress bar takes over."),
           L("二代机装好 `/data` 数据包后同样一键：碟机下载 `Data-Bundle.tar.gz`、校验 `SHA256SUMS`、一次替换并重启 EngineX 服务，不动系统分区（#86）。", "二代機裝好 `/data` 資料包後同樣一鍵：碟機下載 `Data-Bundle.tar.gz`、校驗 `SHA256SUMS`、一次替換並重啟 EngineX 服務，不動系統分割區（#86）。", "Gen-2 units get the same one tap after the `/data` bundle is in: the deck downloads the `Data-Bundle.tar.gz`, verifies `SHA256SUMS`, swaps files once and restarts the EngineX services without touching the system partition (#86)."),
@@ -122,6 +124,7 @@
     {
       id: "menus",
       title: L("界面地图：下拉四页与按钮排布", "介面地圖：下拉四頁與按鈕排布", "Menu map: the four pull-down pages"),
+      nav: L("界面地图", "介面地圖", "Menu map"),
       blocks: [
         { k: "note", tone: "new", x: L("【随下一版发布】本章是重排后的新界面；" + V + " 及更早版本里 `Live Stream` 仍在控制中心磁贴，其余开关集中在 `设置 → 设备`。",
                                        "【隨下一版發佈】本章是重排後的新介面；" + V + " 及更早版本中 `Live Stream` 仍在控制中心磁貼，其餘開關集中在 `設定 → 裝置`。",
@@ -136,7 +139,7 @@
           ["4", "Settings", L("Device、Services、About / Update", "Device、Services、About / Update", "Device, Services, About / Update")],
         ] },
 
-        { k: "h", id: "cc", x: L("1. 控制中心（Control Center）", "1. 控制中心（Control Center）", "1. Control Center") },
+        { k: "h", id: "cc", x: L("1. 控制中心（Control Center）", "1. 控制中心（Control Center）", "1. Control Center"), nav: L("1. 控制中心", "1. 控制中心", "1. Control Center") },
         { k: "p", x: L("上面两行是 8 个原厂磁贴，第 3 行是 4 个只管演出的快捷磁贴，点一下循环切换：",
                         "上面兩行是 8 個原廠磁貼，第 3 行是 4 個只管演出的快捷磁貼，點一下循環切換：",
                         "The top two rows are the 8 stock tiles; the third row holds 4 performance-only tiles, each tap cycles the value:") },
@@ -150,7 +153,7 @@
                           "`Live Stream`（直播推流）已從控制中心移到 `設定 → 服務`，避免打碟時誤觸斷流。",
                           "`Live Stream` has moved from the Control Center to `Settings → Services` so it cannot be toggled by accident during a set.") },
 
-        { k: "h", id: "profile", x: L("2. 个人偏好（User Profile）", "2. 個人偏好（User Profile）", "2. User Profile") },
+        { k: "h", id: "profile", x: L("2. 个人偏好（User Profile）", "2. 個人偏好（User Profile）", "2. User Profile"), nav: L("2. 个人偏好", "2. 個人偏好", "2. User Profile") },
         { k: "table", head: [L("分组", "分組", "Group"), L("开关", "開關", "Settings")], rows: [
           [L("`Playback` 播放与音频 DSP", "`Playback` 播放與音訊 DSP", "`Playback` (playback & audio DSP)"),
            L("`Master Soft Clipper`（主输出软限幅）、`Auto-Gain`（0 dB 自动增益）、`Echo Out`（推杆回音）、`Stems EQ Mode`（分轨 EQ 映射）、`Color FX Style`（先锋风格滤波效果）",
@@ -164,7 +167,7 @@
              "`Auto-Analyze Drives`, `OmniSource` (unified browsing), `Dual-Column Browser`")],
         ] },
 
-        { k: "h", id: "layout", x: L("3. 视图与布局（View / Layout Manager）", "3. 視圖與版面（View / Layout Manager）", "3. View / Layout Manager") },
+        { k: "h", id: "layout", x: L("3. 视图与布局（View / Layout Manager）", "3. 視圖與版面（View / Layout Manager）", "3. View / Layout Manager"), nav: L("3. 视图与布局", "3. 視圖與版面", "3. View / Layout") },
         { k: "ul", x: [
           L("顶部 **`View 1` – `View 5`**：五组独立布局预设，点一下切换；**`Save View`** 把当前布局存进选中的 View，重启后保留。",
             "頂部 **`View 1` – `View 5`**：五組獨立版面預設，點一下切換；**`Save View`** 把目前版面存進選中的 View，重啟後保留。",
@@ -183,7 +186,7 @@
           ["`4-Deck Waveform & Role`", L("四轨同屏与机位角色", "四軌同屏與機位角色", "Four-deck waveform and deck role")],
         ] },
 
-        { k: "h", id: "settings", x: L("4. 系统设置（Settings）", "4. 系統設定（Settings）", "4. Settings") },
+        { k: "h", id: "settings", x: L("4. 系统设置（Settings）", "4. 系統設定（Settings）", "4. Settings"), nav: L("4. 系统设置", "4. 系統設定", "4. Settings") },
         { k: "table", head: [L("分组", "分組", "Group"), L("内容", "內容", "Contents")], rows: [
           [L("`Device` 设备", "`Device` 裝置", "`Device`"),
            L("`Language`（三语，免重启实时切换）、`UI Scale`（全屏无黑边实时缩放）、`Pad LED Brightness`（打击垫亮度）、`4-Deck Waveform & Role`、`Power (Turn Off)`",
@@ -211,6 +214,7 @@
     {
       id: "streaming",
       title: L("流媒体与聚合搜索", "串流與聚合搜尋", "Streaming & unified search"),
+      nav: L("流媒体与聚合搜索", "串流與聚合搜尋", "Streaming & search"),
       blocks: [
         { k: "p", x: L("碟机和手机连同一个 Wi-Fi，在音源菜单点开平台，手机扫屏幕二维码即可，不需要电脑或服务器。手机登录页默认英文，右上角可切简体 / 繁體，每页有分步教程。支持 **无损 FLAC / 320k MP3** 切换；播放过的曲目缓存在碟机内部存储，再次加载秒开。",
                         "碟機與手機連同一個 Wi-Fi，在音源選單點開平台，手機掃螢幕 QR Code 即可，不需要電腦或伺服器。手機登入頁預設英文，右上角可切簡體 / 繁體，每頁有分步教學。支援 **無損 FLAC / 320k MP3** 切換；播放過的曲目快取於碟機內部儲存，再次載入秒開。",
@@ -220,7 +224,7 @@
         { k: "shot", src: "site/assets/shots/shot-source-list.png", cap: L("实机渲染：音源列表", "實機渲染：音源列表", "Rendered on-device: source list") },
         { k: "shot", src: "site/assets/shots/shot-streaming-services.png", cap: L("实机渲染：设置 → 服务 → 流媒体，各平台一行", "實機渲染：設定 → 服務 → 串流，各平台一行", "Rendered on-device: Settings → Services → Streaming, one row per service") },
         { k: "shot", src: "site/assets/shots/shot-streaming-qr.png", cap: L("实机渲染：手机扫码登录二维码", "實機渲染：手機掃碼登入 QR Code", "Rendered on-device: scan-to-login QR code") },
-        { k: "h", id: "login", x: L("各平台登录方式", "各平台登入方式", "Login for each service") },
+        { k: "h", id: "login", x: L("各平台登录方式", "各平台登入方式", "Login for each service"), nav: L("各平台登录", "各平台登入", "Service logins") },
         { k: "table", head: [L("平台", "平台", "Service"), L("怎么登录", "怎麼登入", "How to log in")], rows: [
           ["网易云音乐 / NetEase", L("用网易云音乐 App 扫碟机屏幕二维码并确认；二维码过期点一下换新的。网易云是**唯一**提供「官方直连 / Deemix 优先」双通道切换的平台（`设置 → 设备 → 网易云下载方式`）。", "用網易雲音樂 App 掃碟機螢幕 QR Code 並確認；QR Code 過期點一下換新的。網易雲是**唯一**提供「官方直連 / Deemix 優先」雙通道切換的平台（`設定 → 裝置 → 網易雲下載方式`）。", "Scan the on-screen QR code with the NetEase Cloud Music app and confirm; tap to refresh an expired code. NetEase is the **only** service with the “Official / Deemix first” dual-channel switch (`Settings → Device → NetEase download`).")],
           ["QQ 音乐 / QQ Music", L("【开发中，随后续版本】将沿用同样的手机扫码流程。", "【開發中，隨後續版本】將沿用相同的手機掃碼流程。", "[In development, upcoming release] will use the same phone-scan flow.")],
@@ -231,7 +235,7 @@
           ["TIDAL", L("与其他服务一样扫码登录；选中其他服务时不再弹 Engine 5.3.0 的「Connect to your Engine DJ Profile」提示。", "與其他服務一樣掃碼登入；選中其他服務時不再彈出 Engine 5.3.0 的「Connect to your Engine DJ Profile」提示。", "Scan-to-login like the others; selecting another service no longer shows Engine 5.3.0's “Connect to your Engine DJ Profile” prompt.")],
           ["Beatport", L("填你自己的邮箱和密码，碟机只保存登录令牌。Professional 下 FLAC / 256k AAC，Advanced 下 128k AAC，Essential 在线播放 128k AAC；Beatport 曲目也能拆 Stems。", "填你自己的電子郵件與密碼，碟機只保存登入權杖。Professional 下載 FLAC / 256k AAC，Advanced 下載 128k AAC，Essential 線上播放 128k AAC；Beatport 曲目也能拆 Stems。", "Enter your own email and password; the deck keeps only the login token. Professional downloads FLAC or 256k AAC, Advanced 128k AAC, Essential streams 128k AAC; Beatport tracks can be split into stems too.")],
         ] },
-        { k: "h", id: "spotify", x: L("Spotify 原生直连与两种登录", "Spotify 原生直連與兩種登入", "Spotify native playback & two ways to log in") },
+        { k: "h", id: "spotify", x: L("Spotify 原生直连与两种登录", "Spotify 原生直連與兩種登入", "Spotify native playback & two ways to log in"), nav: L("Spotify 原生直连", "Spotify 原生直連", "Spotify native") },
         { k: "note", tone: "new", x: L("【开发中，随后续版本】Spotify 原生直连、Connect 配对与 Deezer 每用户扫码登录随下一次发版上线，菜单名以发布版为准。", "【開發中，隨後續版本】Spotify 原生直連、Connect 配對與 Deezer 每用戶掃碼登入隨下一次發版上線，選單名稱以發佈版為準。", "[In development, upcoming release] Spotify native playback, Connect pairing and per-user Deezer scan login ship with the next release; menu names follow the released build.") },
         { k: "ul", x: [
           L("**方式 A：局域网 Spotify Connect 一键配对（推荐）**。手机或电脑打开 Spotify App，播放任意歌曲，点右下角「连接设备」（音箱图标），在列表里点 **`EngineX OS`**，约 1 秒自动完成账号绑定。无需申请开发者 Client ID，也无需扫码。", "**方式 A：區域網路 Spotify Connect 一鍵配對（推薦）**。手機或電腦開啟 Spotify App，播放任意歌曲，點右下角「連接裝置」（喇叭圖示），在清單裡點 **`EngineX OS`**，約 1 秒自動完成帳號綁定。無需申請開發者 Client ID，也無需掃碼。", "**Method A: LAN Spotify Connect, one-tap pairing (recommended).** Open the Spotify app on your phone or computer, play any song, tap the “Connect to a device” speaker icon at the bottom right and pick **`EngineX OS`**. The account is bound automatically in about a second. No developer Client ID and no QR code."),
@@ -239,14 +243,14 @@
           L("**独立原生音源**：Spotify 曲目直接从 Spotify 拉取 320kbps Ogg Vorbis 原生音频上盘播放，不再经过 Deemix 或网易云兜底。", "**獨立原生音源**：Spotify 曲目直接從 Spotify 拉取 320kbps Ogg Vorbis 原生音訊上碟播放，不再經過 Deemix 或網易雲兜底。", "**Independent native source**: Spotify tracks are pulled straight from Spotify as 320 kbps Ogg Vorbis and played from the deck, no longer going through Deemix or a NetEase fallback."),
         ] },
         { k: "note", x: L("只有**网易云音乐（NetEase）**提供「官方直连 / Deemix 优先」双通道切换。Spotify、Deezer、SoundCloud、Beatport 都严格走各自独立的音源，不做跨平台兜底。", "只有**網易雲音樂（NetEase）**提供「官方直連 / Deemix 優先」雙通道切換。Spotify、Deezer、SoundCloud、Beatport 都嚴格走各自獨立的音源，不做跨平台兜底。", "Only **NetEase Cloud Music** offers the “Official / Deemix first” dual-channel switch. Spotify, Deezer, SoundCloud and Beatport each use their own source strictly, with no cross-platform fallback.") },
-        { k: "h", id: "deezer-arl", x: L("Deezer 每用户独立 ARL 扫码登录（解锁 FLAC 无损）", "Deezer 每用戶獨立 ARL 掃碼登入（解鎖 FLAC 無損）", "Deezer per-user ARL scan login (unlocks lossless FLAC)") },
+        { k: "h", id: "deezer-arl", x: L("Deezer 每用户独立 ARL 扫码登录（解锁 FLAC 无损）", "Deezer 每用戶獨立 ARL 掃碼登入（解鎖 FLAC 無損）", "Deezer per-user ARL scan login (unlocks lossless FLAC)"), nav: L("Deezer 扫码登录", "Deezer 掃碼登入", "Deezer ARL login") },
         { k: "p", x: L("公开固件不内置任何人的私人凭据。要用 Deezer 无损，在碟机音源列表点 Deezer 右侧的「扫码登录」，手机扫码后在页面粘贴你自己的 **Deezer `ARL` Cookie**。系统会自动识别你账号里的歌单，并把 `ARL` 同步到本机下载引擎，立即解锁 FLAC 无损加载。", "公開韌體不內建任何人的私人憑據。要用 Deezer 無損，在碟機音源清單點 Deezer 右側的「掃碼登入」，手機掃碼後在頁面貼上你自己的 **Deezer `ARL` Cookie**。系統會自動辨識你帳號裡的歌單，並把 `ARL` 同步到本機下載引擎，立即解鎖 FLAC 無損載入。", "The public firmware ships nobody’s private credentials. For Deezer lossless, tap “Scan to log in” beside Deezer in the deck’s source list, scan with your phone and paste your own **Deezer `ARL` cookie** on the page. The deck recognises your account playlists and syncs the `ARL` to its local download engine, unlocking lossless FLAC loading immediately.") },
         { k: "shot", name: "zh:05-streaming-playlists-bpm-swipe.png", cap: L("在线歌单显示 BPM / 调性，左滑一键分轨", "線上歌單顯示 BPM / 調性，左滑一鍵分軌", "Online playlists show BPM / key; swipe left to split stems") },
-        { k: "h", id: "omnisource", x: L("OmniSource 统一浏览", "OmniSource 統一瀏覽", "OmniSource unified browsing") },
+        { k: "h", id: "omnisource", x: L("OmniSource 统一浏览", "OmniSource 統一瀏覽", "OmniSource unified browsing"), nav: L("OmniSource 统一浏览", "OmniSource 統一瀏覽", "OmniSource") },
         { k: "p", x: L("U 盘 / SD 卡里的歌单和曲目直接显示在流媒体浏览器里，和流媒体歌单放一起，一次搜索两边都能找到。U 盘曲目直接从盘上读取，音质不打折。路径：`设置 → OmniSource`（默认关闭）。",
                         "隨身碟 / SD 卡裡的歌單與曲目直接顯示在串流瀏覽器中，與串流歌單放一起，一次搜尋兩邊都能找到。隨身碟曲目直接從碟上讀取，音質不打折。路徑：`設定 → OmniSource`（預設關閉）。",
                         "Playlists and tracks on USB / SD show up inside the streaming browser next to streaming playlists, so one search finds both. USB tracks play straight from the stick at full quality. Path: `Settings → OmniSource` (off by default).") },
-        { k: "h", id: "relay", x: L("可选：自建登录中继", "選配：自建登入中繼", "Optional: self-hosted login relay") },
+        { k: "h", id: "relay", x: L("可选：自建登录中继", "選配：自建登入中繼", "Optional: self-hosted login relay"), nav: L("自建登录中继", "自建登入中繼", "Self-hosted relay") },
         { k: "p", x: L("手机用移动数据时也要完成登录，或需要 Deezer 网页内登录，可在有公网 HTTPS 的服务器上运行 `sc5000-relay`，再在碟机网页控制台填入地址和密码。", "手機使用行動數據時也要完成登入，或需要 Deezer 網頁內登入，可在有公網 HTTPS 的伺服器執行 `sc5000-relay`，再於碟機網頁主控台填入位址與密碼。", "To log in from a phone on mobile data, or to get in-page Deezer login, run `sc5000-relay` on a server with public HTTPS and enter its address and password in the deck's web console.") },
       ],
     },
@@ -254,9 +258,10 @@
     /* ───────────── 4 Rekordbox / Pro DJ Link ───────────── */
     {
       id: "prolink",
-      title: L("Rekordbox 直插 & CDJ-3000 互联", "Rekordbox 直插 & CDJ-3000 互聯", "Rekordbox direct-read & CDJ-3000 link"),
+      title: L("Rekordbox 直插与 CDJ-3000 互联", "Rekordbox 直插與 CDJ-3000 互聯", "Rekordbox direct-read & CDJ-3000 link"),
+      nav: L("Rekordbox 与 CDJ 互联", "Rekordbox 與 CDJ 互聯", "Rekordbox & CDJ-3000"),
       blocks: [
-        { k: "h", id: "rekordbox", x: L("Rekordbox U 盘免重算", "Rekordbox 隨身碟免重算", "Rekordbox sticks, no re-analysis") },
+        { k: "h", id: "rekordbox", x: L("Rekordbox U 盘免重算", "Rekordbox 隨身碟免重算", "Rekordbox sticks, no re-analysis"), nav: L("Rekordbox 免重算", "Rekordbox 免重算", "Rekordbox sticks") },
         { k: "ul", x: [
           L("给先锋 CDJ 导出的 Rekordbox U 盘，直接插上即可打碟：插盘 **2 秒内**读取全部歌单、Hot Cue、Memory Cue、Loop 和拍线，不必用电脑端 Engine DJ 重新导库（再次插盘约 0.03 秒）。", "給先鋒 CDJ 匯出的 Rekordbox 隨身碟，直接插上即可打碟：插碟 **2 秒內**讀取全部歌單、Hot Cue、Memory Cue、Loop 與拍線，不必用電腦端 Engine DJ 重新匯入（再次插碟約 0.03 秒）。", "A Rekordbox stick exported for Pioneer CDJs plays as is: playlists, Hot Cues, Memory Cues, loops and beat grids are read **within 2 seconds** with no Engine DJ re-import on a computer (about 0.03 s on re-insert)."),
           L("读取已分析的满高度波形；6.8.5 导出的盘即使个别文件损坏也能导入，那几首加载时再分析。", "讀取已分析的滿高度波形；6.8.5 匯出的碟即使個別檔案損壞也能匯入，那幾首載入時再分析。", "Pre-analysed full-height waveforms are used; sticks exported by 6.8.5 import even with a few corrupt files, which are analysed on load."),
@@ -264,7 +269,7 @@
           L("`自动分析插入的设备`：后台以最低优先级分析新插入 U 盘 / SD 卡上所有未分析曲目，不影响播放。", "`自動分析插入的裝置`：背景以最低優先序分析新插入隨身碟 / SD 卡上所有未分析曲目，不影響播放。", "`Analyze inserted devices`: unanalysed tracks on a newly inserted USB / SD are analysed in the background at lowest priority."),
         ] },
         { k: "shot", src: "assets/screenshots/4deck-sc5000-cdj3000.png", cap: L("两台 SC5000 + 一台 CDJ-3000 同一局域网联动", "兩台 SC5000 + 一台 CDJ-3000 同一區域網路聯動", "Two SC5000 + one CDJ-3000 on the same LAN") },
-        { k: "h", id: "cdj", x: L("先锋 CDJ-3000 / Pro DJ Link 互联（测试版）", "先鋒 CDJ-3000 / Pro DJ Link 互聯（測試版）", "Pioneer CDJ-3000 / Pro DJ Link (beta)") },
+        { k: "h", id: "cdj", x: L("先锋 CDJ-3000 / Pro DJ Link 互联（测试版）", "先鋒 CDJ-3000 / Pro DJ Link 互聯（測試版）", "Pioneer CDJ-3000 / Pro DJ Link (beta)"), nav: L("CDJ-3000 互联（测试）", "CDJ-3000 互聯（測試）", "CDJ-3000 link (beta)") },
         { k: "ul", x: [
           L("通过局域网 / Wi-Fi 读取 CDJ 上 Rekordbox U 盘的曲库（`Pro DJ Link 曲库`）。", "透過區域網路 / Wi-Fi 讀取 CDJ 上 Rekordbox 隨身碟的曲庫（`Pro DJ Link 曲庫`）。", "Browse the Rekordbox stick in a CDJ over LAN / Wi-Fi (`Pro DJ Link library`)."),
           L("也能把本机曲库（含天龙 U 盘与 EngineX 流媒体歌单）共享给 CDJ（实验功能）。", "也能將本機曲庫（含天龍隨身碟與 EngineX 串流歌單）共享給 CDJ（實驗功能）。", "Share this deck's library (including Denon sticks and EngineX streaming playlists) to the CDJ (experimental)."),
@@ -280,10 +285,11 @@
     /* ───────────── 5 4 轨 / 影子 / 视图 ───────────── */
     {
       id: "4deck",
-      title: L("4 轨同屏、影子波形 & 视图管理", "4 軌同屏、影子波形 & 視圖管理", "4-deck view, shadow decks & layouts"),
+      title: L("4 轨同屏、影子波形与视图管理", "4 軌同屏、影子波形與視圖管理", "4-deck view, shadow decks & layouts"),
+      nav: L("四轨同屏与影子波形", "四軌同屏與影子波形", "4 decks & shadow decks"),
       blocks: [
         { k: "shot", src: "site/assets/screen-4deck-shadow.svg", cap: L("两台碟机 1+3 / 2+4：本机出声的轨 + 不出声的影子轨道", "兩台碟機 1+3 / 2+4：本機出聲的軌 + 不出聲的影子軌道", "Two decks as 1+3 / 2+4: the tracks it plays + silent shadow decks") },
-        { k: "h", id: "roles", x: L("四轨角色与影子轨道", "四軌角色與影子軌道", "Roles & shadow decks") },
+        { k: "h", id: "roles", x: L("四轨角色与影子轨道", "四軌角色與影子軌道", "Roles & shadow decks"), nav: L("四轨角色与影子轨道", "四軌角色與影子軌道", "Roles & shadow decks") },
         { k: "p", x: L("SC5000 / SC6000 上解锁 Engine 自带的四轨界面，声卡仍只用 2 路。每台负责自己角色的两轨，其余是不出声的**影子轨道**，跟随另一台 EngineX 碟机或 CDJ 的曲目、播放 / CUE、位置、速度、Master 和同步。",
                         "SC5000 / SC6000 上解鎖 Engine 內建的四軌介面，音效卡仍只用 2 路。每台負責自己角色的兩軌，其餘是不出聲的**影子軌道**，跟隨另一台 EngineX 碟機或 CDJ 的曲目、播放 / CUE、位置、速度、Master 與同步。",
                         "SC5000 / SC6000 unlock Engine's own four-deck layout while the sound card still uses two channels. Each unit plays the two decks of its role; the other two are silent **shadow decks** that follow the other EngineX deck or CDJ: track, play / CUE, position, speed, Master and sync.") },
@@ -297,7 +303,7 @@
           L("影子轨道显示真实歌名（无标签文件也一样），另一台从流媒体浏览器加载的歌也能跟随；加载歌曲时打击垫保持在 HOT CUE（#71）。", "影子軌道顯示真實歌名（無標籤檔案也一樣），另一台從串流瀏覽器載入的歌也能跟隨；載入歌曲時打擊墊保持在 HOT CUE（#71）。", "Shadow decks show the real title (untagged files too) and follow songs loaded from the streaming browser on the other unit; the pads stay on HOT CUE while a song loads (#71)."),
           L("彩色 Hot Cue 显示在波形和打击垫上，与曲库里的颜色一致。", "彩色 Hot Cue 顯示於波形與打擊墊上，與曲庫中的顏色一致。", "Coloured Hot Cues appear on the waveform and pads, matching the colours stored in the library."),
         ] },
-        { k: "h", id: "views", x: L("视图管理（View 1–5）", "視圖管理（View 1–5）", "Layout views (View 1–5)") },
+        { k: "h", id: "views", x: L("视图管理（View 1–5）", "視圖管理（View 1–5）", "Layout views (View 1–5)"), nav: L("视图管理（1–5）", "視圖管理（1–5）", "Views 1–5") },
         { k: "note", tone: "new", x: L("【开发中，随后续版本】视图管理器随 Issue #102 的下一次发版上线，菜单名以发布版为准。", "【開發中，隨後續版本】視圖管理器隨 Issue #102 的下一次發版上線，選單名稱以發佈版為準。", "[In development, upcoming release] The layout manager ships with the next release of Issue #102; menu names follow the released build.") },
         { k: "shot", src: "site/assets/shots/shot-layout-manager.png", cap: L("Layout Manager：5 个预设视图、保存视图、Pads 默认关闭、4 个波形开关", "Layout Manager：5 個預設視圖、儲存視圖、Pads 預設關閉、4 個波形開關", "Layout Manager: 5 preset views, Save View, Pads off by default, 4-waveform toggle") },
         { k: "ul", x: [
@@ -307,7 +313,7 @@
 
           L("入口：顶部下拉第 3 页。下方 `ENGINEX VIEW PRESET` 让每个 View 各自记住波形样式、转盘灯效、界面缩放、双列浏览、Beat Jump 打击垫组、Loop / Beat Jump 互换和四轨角色，详见「界面地图」。", "入口：頂部下拉第 3 頁。下方 `ENGINEX VIEW PRESET` 讓每個 View 各自記住波形樣式、轉盤燈效、介面縮放、雙列瀏覽、Beat Jump 打擊墊組、Loop / Beat Jump 互換與四軌角色，詳見「介面地圖」。", "Open it on the third pull-down page. `ENGINEX VIEW PRESET` below lets each view keep its own waveform style, jog light, UI scale, two-column browser, Beat Jump pad bank, Loop / Beat Jump swap and four-deck role; see Menu map."),
         ] },
-        { k: "h", id: "zoom", x: L("波形缩得更远", "波形縮得更遠", "Zoom the waveform further out") },
+        { k: "h", id: "zoom", x: L("波形缩得更远", "波形縮得更遠", "Zoom the waveform further out"), nav: L("波形缩得更远", "波形縮得更遠", "Wider waveform zoom") },
         { k: "p", x: L("一体机（PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro / SC LIVE）波形最远缩到 30 秒（原厂 10 秒）。`设置 → 设备 → 旋钮行为` 选 `波形缩放` 后，在打碟界面转浏览旋钮即可（#77）。", "一體機（PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro / SC LIVE）波形最遠縮到 30 秒（原廠 10 秒）。`設定 → 裝置 → 旋鈕行為` 選 `波形縮放` 後，在打碟介面轉瀏覽旋鈕即可（#77）。", "All-in-one units (PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro / SC LIVE) zoom out to 30 s (stock 10 s). Set `Settings → Device → Knob behaviour` to `Waveform zoom`, then turn the browse knob on the deck screen (#77).") },
       ],
     },
@@ -315,9 +321,10 @@
     /* ───────────── 6 Stems / DSP ───────────── */
     {
       id: "stems",
-      title: L("本机 Stems、DSP 音质 & 实用操控", "本機 Stems、DSP 音質 & 實用操控", "On-deck Stems, DSP quality & controls"),
+      title: L("本机 Stems、DSP 音质与实用操控", "本機 Stems、DSP 音質與實用操控", "On-deck Stems, DSP quality & controls"),
+      nav: L("Stems、DSP 与操控", "Stems、DSP 與操控", "Stems, DSP & controls"),
       blocks: [
-        { k: "h", id: "stems4", x: L("4 轨 Stems 独立控制", "4 軌 Stems 獨立控制", "Independent 4-stem control") },
+        { k: "h", id: "stems4", x: L("4 轨 Stems 独立控制", "4 軌 Stems 獨立控制", "Independent 4-stem control"), nav: L("4 轨 Stems 控制", "4 軌 Stems 控制", "4-stem control") },
         { k: "ul", x: [
           L("曲库侧边栏有 `Stems` 歌单；选歌时向左滑，拆出 **Vocal / Melody / Bass / Drums**。", "曲庫側邊欄有 `Stems` 歌單；選歌時向左滑，拆出 **Vocal / Melody / Bass / Drums**。", "The library sidebar has a `Stems` playlist; swipe left on a song to split **Vocal / Melody / Bass / Drums**."),
           L("打击垫一键静音：抽掉人声做 Acapella，或只留鼓点。", "打擊墊一鍵靜音：抽掉人聲做 Acapella，或只留鼓點。", "Pads mute stems in one tap: drop the vocal for an acapella or keep only the drums."),
@@ -325,9 +332,9 @@
         ] },
         { k: "shot", name: "zh:02-library-native-stems-list.png", cap: L("曲库侧边栏的 Stems 专属歌单", "曲庫側邊欄的 Stems 專屬歌單", "The Stems playlist in the library sidebar") },
         { k: "p", x: L("用电脑加速（可选）：同一局域网内运行 `tools/stems/run-home-worker.sh`（macOS / Linux）或 `tools\\stems\\run-home-worker.ps1 demucs`（Windows PowerShell），碟机自动发现，无需输入 IP 或密码。", "用電腦加速（選配）：同一區域網路內執行 `tools/stems/run-home-worker.sh`（macOS / Linux）或 `tools\\stems\\run-home-worker.ps1 demucs`（Windows PowerShell），碟機自動發現，無需輸入 IP 或密碼。", "Speed it up with a computer (optional): on the same LAN run `tools/stems/run-home-worker.sh` (macOS / Linux) or `tools\\stems\\run-home-worker.ps1 demucs` (Windows PowerShell); the deck finds it automatically, no IP or password.") },
-        { k: "h", id: "loop", x: L("Smart Loop", "Smart Loop", "Smart Loop") },
+        { k: "h", id: "loop", x: L("Smart Loop", "Smart Loop", "Smart Loop"), nav: L("Smart Loop", "Smart Loop", "Smart Loop") },
         { k: "note", tone: "new", x: L("【开发中，随后续版本】Smart Loop 随 Issue #102 的下一次发版上线，用法以发布版为准。", "【開發中，隨後續版本】Smart Loop 隨 Issue #102 的下一次發版上線，用法以發佈版為準。", "[In development, upcoming release] Smart Loop ships with the next release of Issue #102; usage follows the released build.") },
-        { k: "h", id: "dsp", x: L("DSP 音质增强", "DSP 音質增強", "DSP quality") },
+        { k: "h", id: "dsp", x: L("DSP 音质增强", "DSP 音質增強", "DSP quality"), nav: L("DSP 音质增强", "DSP 音質增強", "DSP quality") },
         { k: "ul", x: [
           L("**切效果器零爆音**：开关 / 切换 FX 时的“咔嗒”消除，双轨同时开效果器也平滑淡入。", "**切效果器零爆音**：開關 / 切換 FX 時的「喀嗒」消除，雙軌同時開效果器也平滑淡入。", "**Click-free FX**: the click when toggling or switching FX is gone, even with FX on both decks."),
           L("**0dB 防破音软限幅**：平滑曲线把主输出压在 -0.1 dBFS 以下，零延迟，-1.5 dBFS 以下原样不动。", "**0dB 防破音軟限幅**：平滑曲線把主輸出壓在 -0.1 dBFS 以下，零延遲，-1.5 dBFS 以下原樣不動。", "**0 dB soft limiter**: a smooth curve keeps the main output below -0.1 dBFS with zero latency and leaves signals under -1.5 dBFS untouched."),
@@ -335,14 +342,14 @@
           L("Flanger 不再让音量下沉（自动补偿，最多 +6 dB）。", "Flanger 不再讓音量下沉（自動補償，最多 +6 dB）。", "Flanger no longer sinks the level (auto-compensated, up to +6 dB)."),
           L("PRIME GO / Mixstream Pro 放开原厂 `原厂主输出限幅 (dB)`（`设置 → 混音台`，关 / 0–18 dB），与 0dB 软限幅并存。", "PRIME GO / Mixstream Pro 開放原廠 `原廠主輸出限幅 (dB)`（`設定 → 混音台`，關 / 0–18 dB），與 0dB 軟限幅並存。", "PRIME GO / Mixstream Pro expose the stock `Stock main output limiter (dB)` (`Settings → Mixer`, off / 0–18 dB) alongside the 0 dB soft limiter."),
         ] },
-        { k: "h", id: "echoout", x: L("Echo Out（回声淡出）", "Echo Out（回聲淡出）", "Echo Out") },
+        { k: "h", id: "echoout", x: L("Echo Out（回声淡出）", "Echo Out（回聲淡出）", "Echo Out"), nav: L("Echo Out（回声淡出）", "Echo Out（回聲淡出）", "Echo Out") },
         { k: "p", x: L("`Echo Out` 由底层 C 语言音频 DSP Hook 直接接管：在 44.1 kHz 主输出上挂一段环形延迟缓冲。开启后，一体机（PRIME GO / PRIME 4）上快速拉下通道推子，或单机播放器（SC5000 / SC6000）上暂停切歌，都会自动放出 **2.2 秒**丝滑衰减的回声尾音：尾音不会因推子归零而被切断，也不会误点亮左上角的原厂 FX 灯。开关在设备页、混音台页和控制中心磁贴里是同一个。", "`Echo Out` 由底層 C 語言音訊 DSP Hook 直接接管：在 44.1 kHz 主輸出上掛一段環形延遲緩衝。開啟後，一體機（PRIME GO / PRIME 4）上快速拉下通道推桿，或單機播放器（SC5000 / SC6000）上暫停切歌，都會自動放出 **2.2 秒**絲滑衰減的回聲尾音：尾音不會因推桿歸零而被切斷，也不會誤點亮左上角的原廠 FX 燈。開關在裝置頁、混音台頁與控制中心磁貼裡是同一個。", "`Echo Out` is handled directly by the low-level C audio DSP hook, which puts a ring delay buffer on the 44.1 kHz main output. When it is on, pulling a channel fader down quickly on an all-in-one (PRIME GO / PRIME 4), or pausing to switch tracks on a standalone player (SC5000 / SC6000), releases a smooth **2.2 s** decaying echo tail. The tail is not cut when the fader hits zero, and the stock FX light at the top left does not switch on by mistake. It is the same switch on the Device page, the Mixer page and the Control Center tile.") },
-        { k: "h", id: "smartsync", x: L("Smart Sync（智能同步与自动扩程）", "Smart Sync（智慧同步與自動擴程）", "Smart Sync (sync mode & automatic range widening)") },
+        { k: "h", id: "smartsync", x: L("Smart Sync（智能同步与自动扩程）", "Smart Sync（智慧同步與自動擴程）", "Smart Sync (sync mode & automatic range widening)"), nav: L("Smart Sync（智能同步）", "Smart Sync（智慧同步）", "Smart Sync") },
         { k: "ol", x: [
           L("**快速切换同步方式**：下拉控制中心，在 `BAR`（按小节）、`BEAT`（按拍子）、`TEMPO`（仅速度）之间一键切换。", "**快速切換同步方式**：下拉控制中心，在 `BAR`（按小節）、`BEAT`（按拍子）、`TEMPO`（僅速度）之間一鍵切換。", "**Switch the sync mode fast**: pull down the Control Center and switch between `BAR`, `BEAT` and `TEMPO` (speed only) in one tap."),
           L("**自动扩程**：两首曲目 BPM 跨度超过当前 Pitch Range（如默认 `±8%`）时，按下机身 `SYNC` 键会自动把 Pitch Range 拓宽到 `±16%` 或 `±50%`，不再有「BPM 差太大同步不上」的问题。", "**自動擴程**：兩首曲目 BPM 跨度超過目前 Pitch Range（如預設 `±8%`）時，按下機身 `SYNC` 鍵會自動把 Pitch Range 拓寬到 `±16%` 或 `±50%`，不再有「BPM 差太大同步不上」的問題。", "**Automatic range widening**: when the BPM gap between two tracks exceeds the current Pitch Range (for example the default `±8%`), pressing `SYNC` on the unit widens the Pitch Range to `±16%` or `±50%` by itself, so a large BPM gap no longer blocks sync."),
         ] },
-        { k: "h", id: "controls", x: L("实用操控", "實用操控", "Handy controls") },
+        { k: "h", id: "controls", x: L("实用操控", "實用操控", "Handy controls"), nav: L("实用操控", "實用操控", "Handy controls") },
         { k: "ul", x: [
           L("**3 种波形**：原厂绿、RGB、先锋风格 3-Band；**转盘灯效**：固定色、流光、频闪、跟随 BPM 变色。", "**3 種波形**：原廠綠、RGB、先鋒風格 3-Band；**轉盤燈效**：固定色、流光、頻閃、跟隨 BPM 變色。", "**3 waveform styles**: stock green, RGB and Pioneer-style 3-Band; **jog lighting**: solid, flowing, strobe, BPM-synced colour."),
           L("**千兆有线网口**：从 100 Mbps 解锁到 1 Gbps；Wi-Fi 受主板 SDIO 总线限制实测约 9–10 MB/s，大曲库请走网线。", "**千兆有線網口**：從 100 Mbps 解鎖到 1 Gbps；Wi-Fi 受主機板 SDIO 匯流排限制實測約 9–10 MB/s，大曲庫請走網路線。", "**Gigabit Ethernet**: unlocked from 100 Mbps to 1 Gbps; Wi-Fi is capped by the board's SDIO bus at about 9–10 MB/s, so use the cable for large libraries."),
@@ -358,31 +365,32 @@
     /* ───────────── 7 Web 控制台 ───────────── */
     {
       id: "webui",
-      title: L("Web 无线控制台（:8080/ui）", "Web 無線主控台（:8080/ui）", "Web console (:8080/ui)"),
+      title: L("Web 无线控制台（:8080）", "Web 無線主控台（:8080）", "Web console (:8080)"),
+      nav: L("Web 无线控制台", "Web 無線主控台", "Web console"),
       blocks: [
-        { k: "p", x: L("碟机和电脑 / 手机在同一网络时，浏览器打开 `http://<碟机 IP>:8080/ui`（页面三语）。", "碟機與電腦 / 手機在同一網路時，瀏覽器開啟 `http://<碟機 IP>:8080/ui`（頁面三語）。", "With the deck and your computer / phone on the same network, open `http://<deck IP>:8080/ui` in a browser (three languages).") },
-        { k: "h", id: "code", x: L("访问码", "存取碼", "Access code") },
+        { k: "p", x: L("碟机和电脑 / 手机在同一网络时，浏览器打开 `http://<碟机 IP>:8080`（页面三语）。", "碟機與電腦 / 手機在同一網路時，瀏覽器開啟 `http://<碟機 IP>:8080`（頁面三語）。", "With the deck and your computer / phone on the same network, open `http://<deck IP>:8080` in a browser (three languages).") },
+        { k: "h", id: "code", x: L("访问码", "存取碼", "Access code"), nav: L("访问码", "存取碼", "Access code") },
         { k: "p", x: L("碟机上 `设置 → 关于` 显示控制台地址和访问码（#79）。流媒体二维码只登录对应服务，不会打开控制台，所以俱乐部里扫屏幕二维码的人拿不到碟机控制权。", "碟機上 `設定 → 關於` 顯示主控台位址與存取碼（#79）。串流 QR Code 只登入對應服務，不會開啟主控台，所以俱樂部裡掃螢幕 QR Code 的人拿不到碟機控制權。", "`Settings → About` on the deck shows the console address and access code (#79). Streaming QR codes only log in their own service and never open the console, so nobody in the club who scans the screen gets control of the deck.") },
         { k: "note", tone: "new", x: L("【开发中，随后续版本】访问码改为 8 位 `XXXX-XXXX`（不含 0/O、1/I），每台碟机随机生成，旧的 32 位访问码升级后自动替换，已登录的浏览器需要重新输入。输入不分大小写，横杠和空格可省略。同一设备 1 分钟内输错 5 次会被锁定 1 分钟。", "【開發中，隨後續版本】存取碼改為 8 位 `XXXX-XXXX`（不含 0/O、1/I），每台碟機隨機產生，舊的 32 位存取碼升級後自動替換，已登入的瀏覽器需要重新輸入。輸入不分大小寫，橫線與空格可省略。同一裝置 1 分鐘內輸錯 5 次會被鎖定 1 分鐘。", "[In development, upcoming release] The access code becomes 8 characters, `XXXX-XXXX` (no 0/O or 1/I), random per deck. An old 32-character code is replaced on upgrade, so signed-in browsers must enter the new one. Input ignores case, dashes and spaces. 5 wrong codes from one device within a minute lock it out for a minute.") },
-        { k: "h", id: "drop", x: L("Wi-Fi 拖拽传歌", "Wi-Fi 拖曳傳歌", "Wi-Fi drag-and-drop upload") },
+        { k: "h", id: "drop", x: L("Wi-Fi 拖拽传歌", "Wi-Fi 拖曳傳歌", "Wi-Fi drag-and-drop upload"), nav: L("Wi-Fi 拖拽传歌", "Wi-Fi 拖曳傳歌", "Wi-Fi upload") },
         { k: "ul", x: [
           L("把 MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS 拖进网页，存到你选的内置硬盘、SD 卡或 U 盘的 `Wi-Fi Drop/<歌单>/` 下。", "把 MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS 拖進網頁，存到你選的內建硬碟、SD 卡或隨身碟的 `Wi-Fi Drop/<歌單>/` 下。", "Drag MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS files into the page; they land in `Wi-Fi Drop/<playlist>/` on the internal drive, SD card or USB stick you pick."),
           L("曲库所在盘上的 FLAC / MP3 会自动分析并加入同名歌单；不覆盖已有文件，始终保留 256 MiB 空间。", "曲庫所在碟上的 FLAC / MP3 會自動分析並加入同名歌單；不覆蓋既有檔案，始終保留 256 MiB 空間。", "FLAC / MP3 on the library's drive are analysed and added to the same-named playlist automatically; existing files are never overwritten and 256 MiB stays free."),
         ] },
         { k: "shot", src: "site/assets/shots/shot-webui-console.png", cap: L("Web 控制台首页", "Web 主控台首頁", "Web console home") },
         { k: "shot", src: "site/assets/shots/shot-webui-wifi-drop.png", cap: L("Web 控制台：Wi-Fi 拖拽传歌", "Web 主控台：Wi-Fi 拖曳傳歌", "Web console: Wi-Fi Music Drop") },
-        { k: "h", id: "relocate", x: L("曲库丢歌：一键重定位", "曲庫丟歌：一鍵重新定位", "Missing tracks: one-click relocate") },
+        { k: "h", id: "relocate", x: L("曲库丢歌：一键重定位", "曲庫丟歌：一鍵重新定位", "Missing tracks: one-click relocate"), nav: L("一键重定位", "一鍵重新定位", "Relocate tracks") },
         { k: "p", x: L("同一张盘上的文件被移动或改名后，控制台为每首丢失曲目找新位置（先按文件名和大小，再按忽略大小写的文件名，最后按清理后的文件名）。**「扫描」只预览**；**「一键修复路径」先备份 `m.db` 再改写路径**。完成后在碟机上重新加载该盘（#74）。", "同一張碟上的檔案被移動或改名後，主控台為每首遺失曲目找新位置（先依檔名與大小，再依忽略大小寫的檔名，最後依清理後的檔名）。**「掃描」只預覽**；**「一鍵修復路徑」先備份 `m.db` 再改寫路徑**。完成後在碟機上重新載入該碟（#74）。", "When files on the same drive were moved or renamed, the console finds each missing track's new place (by file name and size, then case-insensitive name, then cleaned name). **Scan only previews**; **Fix paths** backs up `m.db` first, then rewrites the paths. Reload the drive on the deck afterwards (#74).") },
-        { k: "h", id: "livestream", x: L("Live Stream：直播内录与推流", "Live Stream：直播內錄與推流", "Live Stream: capture & broadcast") },
+        { k: "h", id: "livestream", x: L("Live Stream：直播内录与推流", "Live Stream：直播內錄與推流", "Live Stream: capture & broadcast"), nav: L("Live Stream 直播", "Live Stream 直播", "Live Stream") },
         { k: "note", tone: "new", x: L("【开发中，随后续版本】电脑直连的 `/live.mp3`、`/live.wav` 地址随下一次发版上线。", "【開發中，隨後續版本】電腦直連的 `/live.mp3`、`/live.wav` 位址隨下一次發版上線。", "[In development, upcoming release] The direct `/live.mp3` and `/live.wav` addresses ship with the next release.") },
         { k: "p", x: L("先在碟机 `设置 → 服务` 把 `Live Stream` 设为 **`ON`**（5.3.0.2 及更早版本在下拉控制中心的磁贴里），再按下面任一种用法在电脑上收听 / 直播。", "先在碟機 `設定 → 服務` 把 `Live Stream` 設為 **`ON`**（5.3.0.2 及更早版本在下拉控制中心的磁貼裡），再依下面任一種用法在電腦上收聽 / 直播。", "First set `Live Stream` to **`ON`** under `Settings → Services` on the deck (in 5.3.0.2 and earlier it is a Control Center tile), then use either method below on your computer.") },
         { k: "ul", x: [
           L("**用法一：电脑免配置直连（最简单）**。电脑不用装任何服务端软件，直接在 **OBS**（添加「媒体源」→ 取消勾选「本地文件」→ 填入地址）、**VLC** 或**浏览器**里打开：MP3 直播流 `http://<碟机 IP>:8080/live.mp3`，WAV 无损流 `http://<碟机 IP>:8080/live.wav`。直接收到碟机数字内录的主输出声音，外置声卡和录音线都省了。", "**用法一：電腦免設定直連（最簡單）**。電腦不用安裝任何伺服端軟體，直接在 **OBS**（新增「媒體來源」→ 取消勾選「本機檔案」→ 填入位址）、**VLC** 或**瀏覽器**裡開啟：MP3 直播流 `http://<碟機 IP>:8080/live.mp3`，WAV 無損流 `http://<碟機 IP>:8080/live.wav`。直接收到碟機數位內錄的主輸出聲音，外接音效卡與錄音線都省了。", "**Method 1: connect from the computer with no setup (simplest).** No server software to install. Open the address in **OBS** (add a “Media Source”, untick “Local File”, paste the address), in **VLC** or in a **browser**: MP3 live stream `http://<deck IP>:8080/live.mp3`, lossless WAV stream `http://<deck IP>:8080/live.wav`. You receive the deck’s digitally captured main output directly; no external sound card or recording cable needed."),
           L("**用法二：推送到外部 Icecast / Shoutcast 服务器**。在电脑浏览器打开 `http://<碟机 IP>:8080` 的 Web 控制台，在 Live Stream 卡片填入外部 Icecast 服务器地址、挂载点和密码。碟机会在空闲的 CPU3 核上后台推流，并实时同步当前播放的歌名。", "**用法二：推送到外部 Icecast / Shoutcast 伺服器**。在電腦瀏覽器開啟 `http://<碟機 IP>:8080` 的 Web 主控台，在 Live Stream 卡片填入外部 Icecast 伺服器位址、掛載點與密碼。碟機會在空閒的 CPU3 核上背景推流，並即時同步目前播放的歌名。", "**Method 2: push to an external Icecast / Shoutcast server.** Open the web console at `http://<deck IP>:8080` in a browser on your computer and fill in the external Icecast server address, mount point and password on the Live Stream card. The deck streams in the background on the idle CPU3 core and keeps the current song title in sync."),
         ] },
-        { k: "h", id: "diag", x: L("日志与诊断", "日誌與診斷", "Logs & diagnostics") },
+        { k: "h", id: "diag", x: L("日志与诊断", "日誌與診斷", "Logs & diagnostics"), nav: L("日志与诊断", "日誌與診斷", "Logs & diagnostics") },
         { k: "p", x: L("控制台可查看后台服务状态与日志，并配置登录中继、Pro DJ Link、OmniSource、四轨角色、直播推流（Shoutcast / Icecast）等；反馈问题时请附上日志（先去掉访问码、令牌和 ARL）。", "主控台可查看背景服務狀態與日誌，並設定登入中繼、Pro DJ Link、OmniSource、四軌角色、直播推流（Shoutcast / Icecast）等；回報問題時請附上日誌（先去掉存取碼、權杖與 ARL）。", "The console shows background service status and logs and configures the login relay, Pro DJ Link, OmniSource, four-deck role and live broadcast (Shoutcast / Icecast). Attach logs when reporting problems, with the access code, tokens and ARL removed.") },
-        { k: "h", id: "security", x: L("现场网络安全", "現場網路安全", "Network safety at gigs") },
+        { k: "h", id: "security", x: L("现场网络安全", "現場網路安全", "Network safety at gigs"), nav: L("现场网络安全", "現場網路安全", "Network safety") },
         { k: "ul", x: [
           L("没有默认 SSH 密码；公开固件不内置任何 SSH 公钥，你放入公钥之前 SSH 不开放。", "沒有預設 SSH 密碼；公開韌體不內建任何 SSH 公鑰，你放入公鑰之前 SSH 不開放。", "No default SSH password; public firmware ships no SSH key and SSH stays closed until you add yours."),
           L("播放控制、切波形、切语言、在线升级、流媒体登录、Stems 等内部接口只接受碟机自己（127.0.0.1）调用，同 Wi-Fi 的人无法远程操作。", "播放控制、切波形、切語言、線上升級、串流登入、Stems 等內部介面只接受碟機自己（127.0.0.1）呼叫，同 Wi-Fi 的人無法遠端操作。", "Internal interfaces (playback, waveform, language, online update, streaming login, Stems) accept calls from the deck itself (127.0.0.1) only, so people on the same Wi-Fi cannot operate it."),
@@ -395,6 +403,7 @@
     {
       id: "faq",
       title: L("常见问题与故障排查", "常見問題與故障排除", "FAQ & troubleshooting"),
+      nav: L("常见问题与排障", "常見問題與排障", "FAQ & troubleshooting"),
       blocks: [
         { k: "faq", items: [
           { q: L("电脑刷机工具看不到 PRIME GO / SC5000 / 其他一代机？（#104）", "電腦刷機工具看不到 PRIME GO / SC5000 / 其他一代機？（#104）", "The computer flashing tool cannot see my PRIME GO / SC5000 / other first-gen unit? (#104)"),
