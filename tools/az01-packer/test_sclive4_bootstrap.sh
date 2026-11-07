@@ -143,7 +143,7 @@ chroot '$TARGET' /tmp/Engine / > '$TMP/stage1.log' 2>&1 || true
 
 # Wait briefly for background boot-activate.sh
 for i in \$(seq 1 30); do
-    if [ -f '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf' ]; then
+    if [ -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service' ]; then
         break
     fi
     sleep 0.1
@@ -154,6 +154,13 @@ grep -q 'LD_PRELOAD=/data/enginex/bundle/lib/libengine-ui-hook.so' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'EnvironmentFile=-/data/sc5000-custom/ui-scale.env' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+grep -q 'Wants=enginex-stream-sync.service' \
+    '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+test -f '$TARGET/run/systemd/system/enginex-stream-sync.service'
+grep -q 'ExecStart=/data/enginex/bundle/bin/stream-sync' \
+    '$TARGET/run/systemd/system/enginex-stream-sync.service'
+test -f '$TARGET/run/systemd/system/enginex-rb-bridge.service'
+test -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service'
 "
 echo "  Stage 1 ALSA boot activation: PASS"
 
@@ -216,11 +223,34 @@ test -f '$TARGET/$VARLIB/alsa/conf.d/99-sc5000-custom.conf'
 test -f '$TARGET/data/enginex/version.txt'
 test -L '$TARGET/data/sc5000-custom'
 
+# Run boot-activate.sh to verify service unit creation and subsequent cleanup
+chroot '$TARGET' /bin/sh /data/enginex/bundle/boot-activate.sh >/dev/null 2>&1 || true
+test -f '$TARGET/run/systemd/system/enginex-stream-sync.service'
+test -f '$TARGET/run/systemd/system/enginex-rb-bridge.service'
+test -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service'
+test -f '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+for i in \$(seq 1 20); do
+chroot '$TARGET' ps -ef
+    chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1 && break
+chroot '$TARGET' ps -ef
+    sleep 0.1
+done
+chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1
+
 chroot '$TARGET' /bin/sh /data/enginex/bundle/uninstall.sh >/dev/null
 
 test ! -f '$TARGET/$VARLIB/alsa/conf.d/99-sc5000-custom.conf'
 test ! -d '$TARGET/data/enginex/bundle'
 test -f '$TARGET/data/Music/user_track.flac'
+test ! -f '$TARGET/run/systemd/system/enginex-stream-sync.service'
+test ! -f '$TARGET/run/systemd/system/enginex-rb-bridge.service'
+test ! -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service'
+test ! -f '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+for i in \$(seq 1 20); do
+    chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1 || break
+    sleep 0.1
+done
+! chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1
 "
 echo "  Method B on-device install & uninstall: PASS"
 

@@ -74,6 +74,10 @@ class DataBundleTest(unittest.TestCase):
         self.assertTrue((src / 'boot-activate.sh').stat().st_mode & 0o100)
         self.assertIn('EnvironmentFile=-/data/sc5000-custom/ui-scale.env',
                       (src / 'boot-activate.sh').read_text())
+        self.assertIn('enginex-stream-sync.service',
+                      (src / 'boot-activate.sh').read_text())
+        self.assertIn('Wants=enginex-stream-sync.service',
+                      (src / 'boot-activate.sh').read_text())
         self.assertTrue((src / '99-sc5000-custom.conf').exists())
         self.assertTrue((src / 'host-install-userdata.py').exists())
         self.assertTrue((src / 'host-install-fastboot.sh').exists())

@@ -46,6 +46,9 @@ lib_hook="$bundle_dir/lib/libengine-ui-hook.so"
 mkdir -p /run/systemd/system/engine.service.d
 
 cat <<EOF > /run/systemd/system/engine.service.d/99-sc5000.conf
+[Unit]
+Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service
+
 [Service]
 KillMode=process
 Environment="LD_PRELOAD=$lib_hook"
@@ -62,16 +65,66 @@ if [ -f "$bundle_dir/version.txt" ]; then
     fi
 fi
 
-if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload || :
-    systemctl restart engine.service || :
+if [ -x "$bin_dir/stream-sync" ]; then
+    cat <<EOF > /run/systemd/system/enginex-stream-sync.service
+[Unit]
+Description=EngineX Stream Sync & Audio Analyzer Console
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$bin_dir/stream-sync --listen :8080 --cpu 3
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
 fi
 
-for applet in stream-sync rb-bridge sc5000-deemixd; do
-    if [ -x "$bin_dir/$applet" ] && ! pgrep -f "bundle/bin/$applet" >/dev/null 2>&1; then
-        "$bin_dir/$applet" >/dev/null 2>&1 &
-    fi
-done
+if [ -x "$bin_dir/rb-bridge" ]; then
+    cat <<EOF > /run/systemd/system/enginex-rb-bridge.service
+[Unit]
+Description=EngineX Rekordbox Zero-Scan & Pro DJ Link Bridge
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$bin_dir/rb-bridge --prolink
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
+if [ -x "$bin_dir/sc5000-deemixd" ]; then
+    cat <<EOF > /run/systemd/system/enginex-sc5000-deemixd.service
+[Unit]
+Description=EngineX Deezer Download Queue
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$bin_dir/sc5000-deemixd -state-dir $dest/state
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
+if command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1; then
+    systemctl restart enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service || :
+    systemctl restart --no-block engine.service || systemctl restart engine.service || :
+else
+    pkill -x sc5000-suite 2>/dev/null || :
+    [ -x "$bin_dir/stream-sync" ] && "$bin_dir/stream-sync" --listen :8080 --cpu 3 >/dev/null 2>&1 &
+    [ -x "$bin_dir/rb-bridge" ] && "$bin_dir/rb-bridge" --prolink >/dev/null 2>&1 &
+    [ -x "$bin_dir/sc5000-deemixd" ] && "$bin_dir/sc5000-deemixd" -state-dir "$dest/state" >/dev/null 2>&1 &
+fi
 '''
 
 ALSA_CONF = r'''hook_func.sc5000_alsa_boot_hook {
@@ -94,6 +147,9 @@ set -eu
 src=$(cd "$(dirname "$0")" && pwd)
 @MIGRATE_IF_DEFAULT@
 dest=${SC5000_CUSTOM:-/data/enginex}
+if [ -L "$dest" ]; then
+    dest=$(readlink -f "$dest" 2>/dev/null || readlink "$dest")
+fi
 # Where /var/lib lives on /data differs by firmware: see alsa-dir.
 alsa_rel=$(cat "$src/alsa-dir")
 if [ -n "${SC5000_ALSA_OVERLAY:-}" ]; then
@@ -144,6 +200,9 @@ UNINSTALL = r'''#!/bin/sh
 set -eu
 @MIGRATE_IF_DEFAULT@
 dest=${SC5000_CUSTOM:-/data/enginex}
+if [ -L "$dest" ]; then
+    dest=$(readlink -f "$dest" 2>/dev/null || readlink "$dest")
+fi
 # Bundles before 5.3.0.2's AZ04 support had no alsa-dir; they all used the overlay path.
 alsa_rel=$(cat "$dest/bundle/alsa-dir" 2>/dev/null || echo system/var/overlay/lib/alsa/conf.d)
 if [ -n "${SC5000_ALSA_OVERLAY:-}" ]; then
@@ -166,6 +225,19 @@ fi
 rm -f "$alsa_dest/99-sc5000-custom.conf"
 rmdir "$alsa_dest" 2>/dev/null || :
 rm -rf "$dest/bundle"
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active basic.target >/dev/null 2>&1; then
+    for applet in stream-sync rb-bridge sc5000-deemixd; do
+        systemctl stop "enginex-$applet.service" 2>/dev/null || :
+        rm -f "/run/systemd/system/enginex-$applet.service"
+    done
+    rm -f /run/systemd/system/engine.service.d/99-sc5000.conf
+    systemctl daemon-reload 2>/dev/null || :
+fi
+pkill -x sc5000-suite 2>/dev/null || :
+rm -f /run/systemd/system/enginex-stream-sync.service \
+      /run/systemd/system/enginex-rb-bridge.service \
+      /run/systemd/system/enginex-sc5000-deemixd.service \
+      /run/systemd/system/engine.service.d/99-sc5000.conf
 echo "EngineX OS $version removed from $dest"
 '''
 
