@@ -2,9 +2,9 @@
 (function () {
   const D = window.DOCS;
   const UI = {
-    s: { lang: "s", search: "搜索文档…", heroT: "EngineX OS 使用文档", heroP: "16 款 Denon DJ / Numark / Rane 独立设备的安装、功能与排障指南。", model: "机型", board: "板号", type: "类型", file: "下载", all: "全部", gen1: "一代 · .img", gen2: "二代 · 数据包", none: "没有匹配的内容", top: "本页目录", hits: "条匹配", img: ".img 刷机包", bundle: "/data 数据包" },
-    t: { lang: "t", search: "搜尋文件…", heroT: "EngineX OS 使用文件", heroP: "16 款 Denon DJ / Numark / Rane 獨立設備的安裝、功能與排障指南。", model: "機型", board: "板號", type: "類型", file: "下載", all: "全部", gen1: "一代 · .img", gen2: "二代 · 資料包", none: "沒有符合的內容", top: "本頁目錄", hits: "筆符合", img: ".img 刷機包", bundle: "/data 資料包" },
-    e: { lang: "e", search: "Search the docs…", heroT: "EngineX OS Documentation", heroP: "Install, use and troubleshoot all 16 Denon DJ / Numark / Rane standalone units.", model: "Model", board: "Board", type: "Type", file: "Download", all: "All", gen1: "Gen 1 · .img", gen2: "Gen 2 · bundle", none: "Nothing matches", top: "On this page", hits: "matches", img: ".img image", bundle: "/data bundle" },
+    s: { lang: "s", search: "搜索文档…", heroT: "EngineX OS 使用文档", heroP: "16 款 Denon DJ / Numark / Rane 独立设备的安装、功能与排障指南。", model: "机型", board: "板号", type: "类型", file: "下载", all: "全部", gen1: "一代 · .img", gen2: "二代 · 数据包", none: "没有匹配的内容", top: "本页目录", hits: "条匹配", img: ".img 刷机包", bundle: "/data 数据包", tHome: "首页", tDocs: "使用文档", tDl: "下载" },
+    t: { lang: "t", search: "搜尋文件…", heroT: "EngineX OS 使用文件", heroP: "16 款 Denon DJ / Numark / Rane 獨立設備的安裝、功能與排障指南。", model: "機型", board: "板號", type: "類型", file: "下載", all: "全部", gen1: "一代 · .img", gen2: "二代 · 資料包", none: "沒有符合的內容", top: "本頁目錄", hits: "筆符合", img: ".img 刷機包", bundle: "/data 資料包", tHome: "首頁", tDocs: "使用文件", tDl: "下載" },
+    e: { lang: "e", search: "Search the docs…", heroT: "EngineX OS Documentation", heroP: "Install, use and troubleshoot all 16 Denon DJ / Numark / Rane standalone units.", model: "Model", board: "Board", type: "Type", file: "Download", all: "All", gen1: "Gen 1 · .img", gen2: "Gen 2 · bundle", none: "Nothing matches", top: "On this page", hits: "matches", img: ".img image", bundle: "/data bundle", tHome: "Home", tDocs: "Docs", tDl: "Downloads" },
   };
   const NOTE_T = { warn: "WARNING", new: "NEW" };
   const SHOT_DIR = { s: "zh-CN", t: "zh-TW", e: "en" };
@@ -55,8 +55,27 @@
     return "";
   }
 
+  function home() {
+    const H = D.home, u = UI[lang];
+    $("#tabs").innerHTML = `<a href="#home" data-tab="home">${u.tHome}</a><a href="#start" data-tab="docs">${u.tDocs}</a><a href="#start-downloads">${u.tDl}</a>`;
+    const cards = (xs, cls) => xs.map((f) => `<a class="${cls}" href="${f.href}"><b>${T(f.t)}</b><span>${T(f.d)}</span></a>`).join("");
+    $("#home").innerHTML = `<section class="landing"><div class="lhero"><div class="lin">
+      <p class="eyebrow">Denon DJ · Numark · Rane</p>
+      <h1>EngineX OS <span>${D.version}</span></h1>
+      <p class="tagline">${T(H.tagline)}</p><p class="lsub">${T(H.sub)}</p>
+      <div class="ctas"><a class="btn pri" href="#install">${T(H.cta.dl)}</a><a class="btn" href="#start">${T(H.cta.docs)}</a><a class="btn ghost" href="https://github.com/Cd1s/EngineX-OS/releases/tag/v${D.version}" target="_blank" rel="noopener">${T(H.cta.gh)}</a></div>
+      <div class="stats">${H.stats.map(([n, l]) => `<div><b>${n}</b><span>${T(l)}</span></div>`).join("")}</div>
+    </div></div>
+    <div class="lbody">
+      <h2>${T(H.featT)}</h2><div class="feats">${cards(H.features, "feat")}</div>
+      <h2>${T(H.galT)}</h2><div class="gal">${H.gallery.map((g) => `<a href="${g.href}"><img loading="lazy" src="${esc(g.src)}" alt="${esc(T(g.cap))}"><span>${T(g.cap)}</span></a>`).join("")}</div>
+      <h2 id="home-download">${T(H.dlT)}</h2><div class="dls">${cards(H.downloads, "dlc")}</div>
+    </div></section>`;
+  }
+
   function render() {
     const u = UI[lang];
+    home();
     document.documentElement.lang = { s: "zh-CN", t: "zh-TW", e: "en" }[lang];
     document.title = u.heroT;
     $("#q").placeholder = u.search;
@@ -84,6 +103,7 @@
       sec.classList.toggle("hide", !any);
     });
     $("#empty").classList.toggle("hide", !q || hits > 0);
+    $("#home").classList.toggle("hide", !!q);
     if (q) mark(q);
   }
   function mark(q) {
@@ -114,6 +134,8 @@
   function spy() {
     const secs = $$("section.sec:not(.hide)");
     const sec = secs.find((x) => x.getBoundingClientRect().bottom > 120) || secs[secs.length - 1];
+    const onHome = $("#home").getBoundingClientRect().bottom > 120;
+    $$("#tabs [data-tab]").forEach((a) => a.classList.toggle("on", a.dataset.tab === (onHome ? "home" : "docs")));
     if (!sec) return;
     setToc(sec.id);
     const h = $$("h3.blk:not(.hide)", sec).filter((x) => x.getBoundingClientRect().top < 120).pop();

@@ -206,6 +206,7 @@ func testOpts(t *testing.T) *options {
 		AirDAddr: fmt.Sprintf("127.0.0.1:%d", freeUDP(t)), AirDWait: 800 * time.Millisecond,
 		Subnets: []string{"127.0.0"}, UIPort: freeTCP(t), SSHPort: freeTCP(t),
 		WorkDir: t.TempDir(), WaitUSB: time.Second, Out: &bytes.Buffer{}, In: strings.NewReader(""),
+		ListUSB: func(context.Context) string { return "" }, // never the build host's real USB bus
 	}
 }
 
@@ -842,7 +843,7 @@ func TestNoDeckPrintsFirstGenGuide(t *testing.T) {
 		t.Fatalf("err = %v, want the no-deck error", err)
 	}
 	out := o.Out.(*bytes.Buffer).String()
-	for _, want := range []string{"PRIME GO", "Settings -> Update -> Reboot", "Reboot to Computer Update Mode", "15a2:007d", "FAT32/exFAT", "SYSTEM ONE"} {
+	for _, want := range []string{"PRIME GO", "Settings -> Update -> Reboot", "Reboot to Computer Update Mode", "15a2:007d", "FAT32/exFAT", "SYSTEM ONE", "51337"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("guide is missing %q", want)
 		}
@@ -875,5 +876,172 @@ func TestIsRockchipUSBLoader(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("IsRockchipUSBLoader(%q) = %v, want %v", tt.line, got, tt.want)
 		}
+	}
+}
+
+// #129: PRIME 4+ shows up under several product spellings.
+func TestBoardCodeJC11SVariants(t *testing.T) {
+	for _, s := range []string{"inmusic,jc11s", "rk3288-az0x-jc11s", "prime4plus", "PRIME4+", "PRIME 4+", "JC11S", " jc11s\n"} {
+		if got := boardCode(s); got != "jc11s" {
+			t.Errorf("boardCode(%q) = %q, want jc11s", s, got)
+		}
+		if m, gen2, ok := lookupBoard(s); !ok || !gen2 || m.Prefix != "PRIME4PLUS" {
+			t.Errorf("lookupBoard(%q) = %v %v %v", s, m, gen2, ok)
+		}
+	}
+	if got := boardCode("jc11"); got != "jc11" {
+		t.Errorf("boardCode(jc11) = %q: PRIME 4 must stay first-gen", got)
+	}
+}
+
+func logShim(t *testing.T, body string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "fastboot")
+	os.WriteFile(bin, []byte("#!/bin/sh\necho \"$*\" >> \""+dir+"/calls.log\"\n"+body), 0o755)
+	return bin, filepath.Join(dir, "calls.log")
+}
+
+// #129: old fastboot builds only list whitelisted vendors; try inMusic 0x15e4, then Rockchip 0x2207, and keep what worked.
+func TestFastbootFallsBackToRockchipVID(t *testing.T) {
+	bin, log := logShim(t, `[ "$1 $2 $3" = "-i 0x2207 devices" ] && printf 'RK0001\tfastboot\n'
+exit 0
+`)
+	o := testOpts(t)
+	o.Fastboot = bin
+	o.defaults()
+	if s := fastbootDevices(ctxT(t), o); len(s) != 1 || s[0] != "RK0001" {
+		t.Fatalf("serials = %v", s)
+	}
+	fb(ctxT(t), o, "getvar", "product")
+	b, _ := os.ReadFile(log)
+	if got := strings.TrimSpace(string(b)); got != "devices\n-i 0x15e4 devices\n-i 0x2207 devices\n-i 0x2207 getvar product" {
+		t.Errorf("calls:\n%s", got)
+	}
+}
+
+func TestFastbootWithoutDeviceDoesNotKeepVID(t *testing.T) {
+	bin, _ := logShim(t, "exit 0\n")
+	o := testOpts(t)
+	o.Fastboot = bin
+	o.defaults()
+	if s := fastbootDevices(ctxT(t), o); len(s) != 0 || o.fbVID != "" {
+		t.Errorf("serials = %v, fbVID = %q", s, o.fbVID)
+	}
+}
+
+// #129: Linux fastboot without udev access lists "no permissions"; tell the user how to fix it, once.
+func TestFastbootNoPermissionsHint(t *testing.T) {
+	bin, _ := logShim(t, `printf '????????????\tno permissions (missing udev rules? user is in the plugdev group); see [http://developer.android.com/tools/device.html]\n'
+`)
+	t.Cleanup(func() { geteuid = os.Geteuid })
+	for _, uid := range []int{1000, 0} {
+		geteuid = func() int { return uid }
+		o := testOpts(t)
+		o.Fastboot = bin
+		o.defaults()
+		fastbootDevices(ctxT(t), o)
+		if s := fastbootDevices(ctxT(t), o); len(s) != 0 {
+			t.Errorf("serials = %v", s)
+		}
+		out := o.Out.(*bytes.Buffer).String()
+		if uid == 0 && strings.Contains(out, "sudo") { // already root: "use sudo" would be a lie
+			t.Errorf("root was told to use sudo:\n%s", out)
+		}
+		if uid != 0 && (strings.Count(out, "/etc/udev/rules.d/99-enginex.rules") != 2 || !strings.Contains(out, " 15e4 1cc5 ")) { // zh + en, printed once
+			t.Errorf("hint:\n%s", out)
+		}
+	}
+}
+
+// #129: RattyDAVE ran as root with a normally booted PRIME 4+ on USB (15e4:d007) and no fastboot installed.
+func TestUSBDeckWithoutFastbootSaysInstallFastboot(t *testing.T) {
+	t.Cleanup(func() { geteuid = os.Geteuid })
+	geteuid = func() int { return 0 }
+	o := testOpts(t)
+	o.ListUSB = func(context.Context) string {
+		return "15e4:e008 Denon DJ PRIME 4 Plus Hub\n15e4:d007 DENON DJ Denon DJ PRIME 4 Plus\n"
+	}
+	err := run(ctxT(t), o)
+	if err == nil || !strings.Contains(err.Error(), "fastboot is not installed") || !strings.Contains(err.Error(), "15e4:d007") {
+		t.Fatalf("err = %v", err)
+	}
+	if out := o.Out.(*bytes.Buffer).String() + err.Error(); strings.Contains(out, "with sudo") || strings.Contains(out, "用 sudo") {
+		t.Errorf("told to use sudo:\n%s", out)
+	}
+}
+
+// #129: a normally booted PRIME 4+ on USB, not on the LAN: wait for Firmware Update Mode, then flash.
+func TestUSBDeckWaitsForFirmwareUpdateMode(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
+	b := buildBundle(t, "PRIME4PLUS", "5.3.0.2")
+	fb := newFastboot(t, "JC11S", true)
+	hidden := filepath.Join(fb.Dir, "devices.real")
+	os.Rename(fb.Bin, hidden)
+	os.WriteFile(fb.Bin, []byte(fmt.Sprintf(`#!/bin/sh
+d=$(dirname "$0")
+if [ "$1" = devices ] && [ ! -f "$d/usb" ]; then n=$(cat "$d/n" 2>/dev/null || echo 0); echo $((n+1)) > "$d/n"; [ "$n" -ge 3 ] && touch "$d/usb"; exit 0; fi
+exec sh %q "$@"
+`, hidden)), 0o755)
+	o := modeBOpts(t, fb, b)
+	o.WaitUSB = 20 * time.Second
+	o.ListUSB = func(context.Context) string { return "15e4:d007 DENON DJ Denon DJ PRIME 4 Plus\n" }
+	if err := run(ctxT(t), o); err != nil {
+		t.Fatalf("run: %v\n%s", err, o.Out)
+	}
+	if f := fb.Flashed(); len(f) != 1 {
+		t.Fatalf("flash calls = %v", f)
+	}
+	if out := o.Out.(*bytes.Buffer).String(); !strings.Contains(out, "Denon DJ PRIME 4+") || !strings.Contains(out, "Firmware Update Mode") {
+		t.Errorf("the user was not told what to do:\n%s", out)
+	}
+}
+
+// #129: the deck is on the USB bus but fastboot sees nothing: say so, with its id.
+func TestDiagnoseUSB(t *testing.T) {
+	o := testOpts(t)
+	o.ListUSB = func(context.Context) string { return "1d6b:0002 Linux Foundation\n2207:320a Rockchip USB-MSC\n" }
+	o.defaults()
+	diagnoseUSB(ctxT(t), o)
+	diagnoseUSB(ctxT(t), o)
+	if out := o.Out.(*bytes.Buffer).String(); strings.Count(out, "2207:320a Rockchip USB-MSC") != 2 || strings.Contains(out, "1d6b") {
+		t.Errorf("diagnosis:\n%s", out)
+	}
+	o = testOpts(t)
+	o.ListUSB = func(context.Context) string { return "1d6b:0002 Linux Foundation\n" }
+	diagnoseUSB(ctxT(t), o)
+	if out := o.Out.(*bytes.Buffer).String(); out != "" {
+		t.Errorf("no deck on USB, yet:\n%s", out)
+	}
+}
+
+func TestIsDeckUSB(t *testing.T) {
+	for line, want := range map[string]bool{
+		"2207:320a": true, "2207:0006 Android": true, "18d1:4ee0 Google fastboot": true,
+		"0e8d:1234 inMusic Brands PRIME 4+": true, "1234:5678 Denon PRIME 4": true, "15e4:d012 DENON DJ SCX-4": true,
+		"15a2:007d Freescale": false, "2207:0011 Rockchip ADB": false, "": false,
+	} {
+		if got := isDeckUSB(line); got != want {
+			t.Errorf("isDeckUSB(%q) = %v", line, got)
+		}
+	}
+	win := winVIDPID.ReplaceAllString(`Instance ID:   USB\VID_2207&PID_0006\0123456789`, "$1:$2")
+	if !isDeckUSB(win) {
+		t.Errorf("pnputil line not recognised: %s", win)
+	}
+	mac := parseIOReg(`+-o Root  <class IORegistryEntry>
+  +-o PRIME 4+@14100000  <class IOUSBHostDevice>
+    {
+      "idProduct" = 12810
+      "idVendor" = 8711
+    }
+  +-o Keyboard@14200000  <class IOUSBHostDevice>
+    {
+      "idVendor" = 1452
+      "idProduct" = 641
+    }
+`)
+	if mac != "2207:320a PRIME 4+\n05ac:0281 Keyboard\n" {
+		t.Errorf("parseIOReg = %q", mac)
 	}
 }

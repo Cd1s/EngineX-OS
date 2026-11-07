@@ -92,6 +92,9 @@ type options struct {
 	WaitUSB                       time.Duration
 	Out                           io.Writer
 	In                            io.Reader
+	ListUSB                       func(context.Context) string // host USB devices, one "vid:pid name" per line
+	fbVID                         string                       // "-i" vendor id fastboot needs to see the deck
+	hinted                        map[string]bool
 }
 
 func (o *options) defaults() {
@@ -105,7 +108,7 @@ func (o *options) defaults() {
 		o.HTTP = &http.Client{Timeout: 10 * time.Minute}
 	}
 	if o.Fastboot == "" {
-		o.Fastboot = "fastboot"
+		o.Fastboot = findFastboot()
 	}
 	if o.AirDAddr == "" {
 		o.AirDAddr = ":51337"
@@ -131,6 +134,21 @@ func (o *options) defaults() {
 	if o.In == nil {
 		o.In = os.Stdin
 	}
+	if o.ListUSB == nil {
+		o.ListUSB = hostUSB
+	}
+}
+
+// hint prints a message once per run (the USB wait loop polls every second).
+func (o *options) hint(key, zh, en string) {
+	if o.hinted[key] {
+		return
+	}
+	if o.hinted == nil {
+		o.hinted = map[string]bool{}
+	}
+	o.hinted[key] = true
+	o.say(zh, en)
 }
 
 func (o *options) say(zh, en string) { fmt.Fprintf(o.Out, "%s\n  %s\n", zh, en) }
@@ -175,9 +193,15 @@ var gen1Boards = map[string]model{
 	"jc11": {"PRIME4", "Denon DJ PRIME 4"}, "jc16": {"PRIME2", "Denon DJ PRIME 2"}, "nh08": {"MIXSTREAMPRO", "Numark Mixstream Pro"},
 }
 
+// boardAliases maps marketing names some fastboot builds report as "product" (#129).
+var boardAliases = map[string]string{"prime4plus": "jc11s", "prime4+": "jc11s"}
+
 func boardCode(code string) string {
 	code = strings.ToLower(strings.TrimSpace(code))
 	code = strings.TrimPrefix(code, "inmusic,")
+	if a, ok := boardAliases[strings.ReplaceAll(code, " ", "")]; ok {
+		return a
+	}
 	if _, ok := gen2Boards[code]; ok {
 		return code
 	}
@@ -739,13 +763,76 @@ func modeA(ctx context.Context, o *options, d deck) error {
 
 // ---- mode B: fastboot -------------------------------------------------------
 
+// fbVIDs are tried with -i when plain "fastboot devices" sees nothing: old fastboot builds only
+// list whitelisted vendors. 0x15e4 is what every 2nd-gen U-Boot DTB sets (inmusic,usb-vendor), 0x2207 is Rockchip (#129).
+var fbVIDs = []string{"0x15e4", "0x2207"}
+
+// geteuid is a seam for tests (they may run as root on the build host).
+var geteuid = os.Geteuid
+
+// findFastboot prefers a fastboot binary shipped beside the installer, else the one in PATH.
+func findFastboot() string {
+	name := "fastboot"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if exe, err := os.Executable(); err == nil {
+		if p := filepath.Join(filepath.Dir(exe), name); fileExists(p) {
+			return p
+		}
+	}
+	return "fastboot"
+}
+
+func haveFastboot(o *options) bool { _, err := exec.LookPath(o.Fastboot); return err == nil }
+
+// fastbootMissing tells the user how to get fastboot on this OS (#129: "bash: fastboot: command not found").
+func fastbootMissing() error {
+	var how string
+	switch runtime.GOOS {
+	case "windows":
+		how = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip -> fastboot.exe, AdbWinApi.dll, AdbWinUsbApi.dll"
+	case "darwin":
+		how = "brew install --cask android-platform-tools"
+	default:
+		how = "sudo apt install fastboot  |  sudo dnf install android-tools  |  sudo pacman -S android-tools"
+	}
+	return errors.New("没有找到 fastboot 程序：请先安装，或把 fastboot 放在本工具同一目录后重新运行 / fastboot is not installed: install it, or put the fastboot binary next to this tool, then run again:\n  " + how)
+}
+
 func fb(ctx context.Context, o *options, args ...string) (string, error) {
+	if o.fbVID != "" {
+		args = append([]string{"-i", o.fbVID}, args...)
+	}
 	out, err := exec.CommandContext(ctx, o.Fastboot, args...).CombinedOutput()
 	return string(out), err
 }
 
+const udevHint = `printf 'SUBSYSTEM=="usb", ATTR{idVendor}=="%s", MODE="0666"\n' 15e4 1cc5 2207 18d1 | sudo tee /etc/udev/rules.d/99-enginex.rules && sudo udevadm control --reload-rules && sudo udevadm trigger`
+
+// fastbootDevices lists fastboot serials; if none show up it retries with each of fbVIDs and,
+// when one finds the deck, keeps that -i for every later fastboot call.
 func fastbootDevices(ctx context.Context, o *options) []string {
+	serials := fastbootList(ctx, o)
+	if len(serials) > 0 || o.fbVID != "" {
+		return serials
+	}
+	for _, v := range fbVIDs {
+		o.fbVID = v
+		if serials = fastbootList(ctx, o); len(serials) > 0 {
+			return serials
+		}
+	}
+	o.fbVID = ""
+	return nil
+}
+
+func fastbootList(ctx context.Context, o *options) []string {
 	out, err := fb(ctx, o, "devices")
+	if l := strings.ToLower(out); geteuid() != 0 && (strings.Contains(l, "no permissions") || strings.Contains(l, "permission denied")) {
+		o.hint("perm", "fastboot 看到了碟机，但没有 USB 权限。请用 sudo 运行本工具，或执行下面的命令添加 udev 规则后重新插拔 USB：\n  "+udevHint,
+			"fastboot sees the deck but has no USB permission. Run this tool with sudo, or add a udev rule and replug USB:\n  "+udevHint)
+	}
 	if err != nil {
 		return nil
 	}
@@ -765,15 +852,130 @@ func IsRockchipUSBLoader(line string) bool {
 	return strings.Contains(lower, "2207:350b") || strings.Contains(lower, "2207:320a")
 }
 
+// gen2USB is the USB id each 2nd-gen U-Boot DTB sets (inmusic,usb-vendor/-product); Engine keeps the
+// same id in normal operation, where RattyDAVE's PRIME 4+ showed 15e4:d007 (#129).
+var gen2USB = map[string]string{"15e4:d007": "jc11s", "15e4:c00c": "jp11s", "15e4:d011": "jp20", "15e4:d012": "jp21"}
+
+// usbDeck returns the board and host USB line of a 2nd-gen deck on the bus, in any mode.
+func usbDeck(ctx context.Context, o *options) (board, line string) {
+	for _, l := range strings.Split(o.ListUSB(ctx), "\n") {
+		if l = strings.TrimSpace(l); len(l) >= 9 && gen2USB[strings.ToLower(l[:9])] != "" {
+			return gen2USB[strings.ToLower(l[:9])], l
+		}
+	}
+	return "", ""
+}
+
+// isDeckUSB reports whether a host USB line looks like a 2nd-gen deck in an update mode (#129):
+// a Rockchip loader, Rockchip / Google fastboot ids, or inMusic / PRIME 4 product names.
+func isDeckUSB(line string) bool {
+	l := strings.ToLower(line)
+	return IsRockchipUSBLoader(l) || len(l) >= 9 && gen2USB[l[:9]] != "" || strings.Contains(l, "2207:0006") || strings.Contains(l, "18d1:4ee0") ||
+		strings.Contains(l, "inmusic") || strings.Contains(l, "prime 4")
+}
+
+var (
+	winVIDPID = regexp.MustCompile(`(?i)VID_([0-9a-f]{4})&PID_([0-9a-f]{4})`)
+	macVID    = regexp.MustCompile(`"idVendor" = (\d+)`)
+	macPID    = regexp.MustCompile(`"idProduct" = (\d+)`)
+)
+
+// hostUSB lists the host's USB devices as "vid:pid name" lines, best effort.
+func hostUSB(ctx context.Context) string {
+	switch runtime.GOOS {
+	case "windows":
+		out, _ := exec.CommandContext(ctx, "pnputil", "/enum-devices", "/connected").Output()
+		return winVIDPID.ReplaceAllString(string(out), "$1:$2")
+	case "darwin":
+		out, _ := exec.CommandContext(ctx, "ioreg", "-p", "IOUSB", "-l", "-w0").Output()
+		return parseIOReg(string(out))
+	}
+	dirs, _ := filepath.Glob("/sys/bus/usb/devices/*")
+	var b strings.Builder
+	for _, d := range dirs {
+		rd := func(n string) string { s, _ := os.ReadFile(filepath.Join(d, n)); return strings.TrimSpace(string(s)) }
+		if v := rd("idVendor"); v != "" {
+			fmt.Fprintf(&b, "%s:%s %s %s\n", v, rd("idProduct"), rd("manufacturer"), rd("product"))
+		}
+	}
+	return b.String()
+}
+
+// parseIOReg turns `ioreg -p IOUSB -l` blocks ("+-o <name>@..." then decimal idVendor/idProduct) into "vid:pid name" lines.
+func parseIOReg(out string) string {
+	var b strings.Builder
+	for _, blk := range strings.Split(out, "+-o ")[1:] {
+		v, p := macVID.FindStringSubmatch(blk), macPID.FindStringSubmatch(blk)
+		if v == nil || p == nil {
+			continue
+		}
+		vi, _ := strconv.Atoi(v[1])
+		pi, _ := strconv.Atoi(p[1])
+		name, _, _ := strings.Cut(blk, "@")
+		fmt.Fprintf(&b, "%04x:%04x %s\n", vi, pi, strings.TrimSpace(name))
+	}
+	return b.String()
+}
+
+// diagnoseUSB explains why fastboot sees nothing when the deck is on the USB bus anyway.
+func diagnoseUSB(ctx context.Context, o *options) {
+	var hits []string
+	for _, l := range strings.Split(o.ListUSB(ctx), "\n") {
+		if isDeckUSB(l) {
+			hits = append(hits, strings.TrimSpace(l))
+		}
+	}
+	if len(hits) == 0 {
+		return
+	}
+	dev := strings.Join(hits, "; ")
+	if IsRockchipUSBLoader(dev) {
+		o.hint("usb", "碟机在 USB 上（"+dev+"），但处于 Rockchip Loader（rkdeveloptool）模式而不是 fastboot：请重启碟机，改用 Settings → Update 里的 Firmware Update Mode。",
+			"The deck is on USB ("+dev+") in the Rockchip Loader (rkdeveloptool) mode, not fastboot: reboot it and pick Firmware Update Mode under Settings → Update.")
+		return
+	}
+	zh, en := "碟机已通过 USB 连接（"+dev+"），但还没进入 Firmware Update Mode（正常开机时也是这个 ID）：请在碟机上点 Settings → Update → Firmware Update Mode，USB 线保持连接。",
+		"The deck is on USB ("+dev+") but not in Firmware Update Mode yet (it has this id in normal use too): on the deck tap Settings → Update → Firmware Update Mode and keep the cable in."
+	switch {
+	case runtime.GOOS == "windows":
+		zh += "如果碟机已经显示更新界面，说明缺少 WinUSB 驱动：打开 Zadig（https://zadig.akeo.ie），Options → List All Devices，选中碟机，安装 WinUSB。"
+		en += " If it already shows the update screen, the WinUSB driver is missing: open Zadig (https://zadig.akeo.ie), Options → List All Devices, pick the deck, install WinUSB."
+	case runtime.GOOS == "linux" && geteuid() != 0:
+		zh += "如果碟机已经显示更新界面，请用 sudo 运行本工具，或添加 udev 规则：\n  " + udevHint
+		en += " If it already shows the update screen, run this tool with sudo or add a udev rule:\n  " + udevHint
+	}
+	o.hint("usb", zh, en)
+}
+
+// firewallHint: decks announce themselves by UDP broadcast to port 51337, which host firewalls
+// (ufw, Windows Defender) drop by default (#129).
+func firewallHint(o *options) {
+	var how string
+	switch runtime.GOOS {
+	case "windows":
+		how = `netsh advfirewall firewall add rule name="EngineX StageLinQ" dir=in action=allow protocol=UDP localport=51337`
+	case "darwin":
+		how = "System Settings → Network → Firewall: allow enginex-installer"
+	default:
+		how = "sudo ufw allow 51337/udp   (firewalld: sudo firewall-cmd --add-port=51337/udp)"
+	}
+	o.say("局域网里没有碟机应答。如果电脑开着防火墙，请放行 UDP 51337（StageLinQ）后重试：\n  "+how+"\n  原厂未解锁的二代机也可以直接用 USB 线连接后再运行本工具。",
+		"No deck answered on the LAN. If this computer runs a firewall, allow UDP 51337 (StageLinQ) and try again:\n  "+how+"\n  A stock 2nd-gen deck can also be connected with the USB cable before running this tool.")
+}
+
 // modeAB: a stock deck is on the LAN but has no SSH. Ask the user to put it in fastboot and wait.
 func modeAB(ctx context.Context, o *options, d deck) error {
 	name := d.Name
 	if name == "" {
 		name = "EngineX"
 	}
-	label := fmt.Sprintf("%s (%s)", name, d.IP)
-	if _, err := exec.LookPath(o.Fastboot); err != nil {
-		return fmt.Errorf("%s 处于原厂未解锁状态，需要 fastboot 但没找到 / is locked and needs fastboot (Android platform-tools) in PATH", label)
+	where := d.IP
+	if where == "" {
+		where = "USB"
+	}
+	label := fmt.Sprintf("%s (%s)", name, where)
+	if !haveFastboot(o) {
+		return fmt.Errorf("%s: %w", label, fastbootMissing())
 	}
 	model := ""
 	if m, _, ok := lookupBoard(d.Board); ok {
@@ -786,6 +988,7 @@ func modeAB(ctx context.Context, o *options, d deck) error {
 		if len(fastbootDevices(ctx, o)) > 0 {
 			return modeB(ctx, o)
 		}
+		diagnoseUSB(ctx, o)
 		if time.Now().After(deadline) {
 			return errors.New("等待 USB Fastboot 超时 / timed out waiting for fastboot")
 		}
@@ -1018,6 +1221,11 @@ func run(ctx context.Context, o *options) error {
 		}
 	}
 	if n == 0 {
+		if board, line := usbDeck(ctx, o); board != "" { // a stock deck on USB: wait for it to reboot into fastboot
+			return modeAB(ctx, o, deck{Name: line, Board: board})
+		}
+		diagnoseUSB(ctx, o)
+		firewallHint(o)
 		o.guide()
 		return errors.New("没有发现碟机：请开机并接入同一局域网，或把碟机进入 Firmware Update Mode 后用 USB 连接 / no deck found: power it on in this LAN, or boot it into Firmware Update Mode and connect USB")
 	}
