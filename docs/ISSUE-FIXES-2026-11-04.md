@@ -423,3 +423,17 @@ C hook（#17–#24、#37 以及 `dsp_smooth.h` / `engine_ui_hook.c` / `edisksd_h
   - 二代机沙箱：`test_sclive4_bootstrap.sh` 默认（SC LIVE 4）与 `AZ04=1`（SYSTEM ONE）方法 A/B、ALSA 启动激活、hook 加载全部 PASS；
   - 协议与双机串联：`pkg/prolink` 与 `pkg/webui`（`TestShadow|TestProlink|TestExport` 等）全绿；`/root/build/cdj3000-virtual-lan` 下 `cdj3000-sim` 9 项 Ableton Link、Beat Sync 与双机主从握手全部 PASS。
 - **发布计划**：代码已安全落地 `main`，待下个版本 `v5.3.0.3` 统一构建镜像与二代机数据包发布。
+
+## 2026-11-07：Tailscale / Headscale 远程访问（#130，来自 #128；计划随 v5.3.0.3 发布）
+
+- **范围**：碟机可加入用户自己的 Tailscale 内网，或自建 Headscale（控制服务器地址可改），在没有公网 IP、不改路由器的场地从任何地方连回碟机。只做 Tailscale；NetBird 不做（用户态模式下入站访问未验证），OpenVPN 做不了（需要 TUN）。CDJ-3000 风格皮肤不在本次范围。
+- **原因**：官方内核（4.3.4、5.0.4、5.3.0 / 6.18.57）没有 `CONFIG_TUN` 和 `CONFIG_WIREGUARD`，内核模块还有签名校验，补不了 `tun` 设备。Tailscale 的 `--tun=userspace-networking` 不需要 TUN，是唯一可行的办法。
+- **改动**：
+  - `pkg/webui/tailscale.go`：`GET/POST /api/tailscale` 与 `/v1/sc5000/tailscale`。动作 `install`（按需下载、校验 `SHA256SUMS`）、`login`（登录链接或一次性 Auth key）、`logout`；开关；控制服务器地址与设备名；按勾选用 `tailscale serve --tcp` 只转发 SSH/SFTP 与本控制台（:8080）。守护进程用 `systemd-run` 临时单元启动（`sc5000-background.slice`、`Nice=19`、`MemoryMax=128M`、`GOMEMLIMIT=64MiB`），镜像版与只读根的数据包机型通用；重启后由 stream-sync 恢复。Auth key 经 0600 临时文件传给 `tailscale up`，不进命令行、不写进配置、用完即删。
+  - `pkg/webui/index.html`：「远程访问」卡片（三语）；`docs/site/content.js`：三语章节（`tone: "new"`）。
+  - `tools/tailscale/build.sh`：在构建机上编译裁剪版（保留 netstack、serve；`--extra-small` 会去掉这两项，不能用）并 UPX，输出 `tailscaled-armhf`、`tailscaled-arm64`、`SHA256SUMS`。
+- **体积**：Tailscale v1.104.5 裁剪版原始约 16.6–16.9 MB，UPX 后 armhf 4.33 MB、arm64 4.35 MB；固件不变大，用户点「下载」时才取。
+- **验证（Oracle-Batam-arm）**：`gofmt` 0、静态检查通过、`-race` 测试 `./pkg/webui/` 通过，新增 `TestTailscaleRejectsBadInput`、`TestTailscaleInstallVerifiesChecksum`、`TestTailscaleLoginServeAndStop`（含 Auth key 不进命令行、不落盘、临时文件被删、错误校验和被拒）；三语表测试 `TestConsoleIsFullyTrilingual` 通过。裁剪版 armhf 与 arm64 在用户态模式启动，常驻内存约 21–25 MB。**端到端**：构建机上起 Headscale v0.29.7，碟机端（裁剪版）与对端各用 Auth key 登录，`serve --tcp` 转发后，对端 `tailscale nc` 到碟机 tailnet IP 收到本机服务横幅，`tailscale ping` 直连 1 ms。
+- **未验证**：真实碟机（RK3288）上的 CPU 与内存占用、Engine 播放时的影响；Tailscale 官方控制服务器（只测了 Headscale）；AZ04 64 位机型；Web 卡片在手机浏览器里的实际显示。
+- **回滚点**：本次提交的上一个提交（`f7f50d4`）；用户侧「关闭」即停止守护进程，登录状态保留在 `<StateDir>/tailscale/state`。
+- **实机影响**：默认关闭，不改变现有行为；开启后碟机多一个常驻后台进程，并向 tailnet 暴露用户勾选的端口。
