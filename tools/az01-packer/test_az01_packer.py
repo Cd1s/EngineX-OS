@@ -44,6 +44,33 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(changed.payload('splash'), b'S')
         self.assertEqual(changed.info()['compatible'], ['inmusic,jp07'])
 
+    def test_replace_partition_splash_and_recoverysplash(self):
+        im = az.Image(fixture())
+        splash_payload = b'S' * 4096000
+        rec_payload = b'R' * 4096000
+
+        # Replace splash
+        im_splash = az.Image(im.replace_partition('splash', splash_payload))
+        self.assertEqual(im_splash.payload('splash'), splash_payload)
+        self.assertEqual(im_splash.payload('recoverysplash'), b'R')
+        self.assertEqual(im_splash.payload('rootfs'), b'rootfs')
+        self.assertEqual(im_splash.parts[0]['sha1'], hashlib.sha1(splash_payload).hexdigest())
+
+        # Replace recoverysplash
+        im_rec = az.Image(im_splash.replace_partition('recoverysplash', rec_payload))
+        self.assertEqual(im_rec.payload('splash'), splash_payload)
+        self.assertEqual(im_rec.payload('recoverysplash'), rec_payload)
+        self.assertEqual(im_rec.payload('rootfs'), b'rootfs')
+        self.assertEqual(im_rec.parts[1]['sha1'], hashlib.sha1(rec_payload).hexdigest())
+
+        # Bad size / compressed / invalid partition
+        with self.assertRaises(az.SafetyError):
+            im.replace_partition('splash', b'too-short')
+        with self.assertRaises(az.SafetyError):
+            im.replace_partition('recoverysplash', b'\xfd7zXZ\0' + bytes(4095994))
+        with self.assertRaises(az.SafetyError):
+            im.replace_partition('unknown_part', b'X' * 4096000)
+
     def test_models_and_aligned_trailer(self):
         im = az.Image(fixture())
         self.assertEqual(im.info()['models'], [{'code': 'JP07', 'name': 'SC5000'}])
@@ -600,6 +627,24 @@ class FilesystemTests(unittest.TestCase):
             az.main(['repack', str(original), '--rootfs', str(self.disk), '--output', str(failed)])
         self.assertEqual(exc.exception.code, 2)
         self.assertFalse(failed.exists())
+
+    def test_cli_repack_with_splash_and_recoverysplash(self):
+        original = self.root/'orig_splash.img'
+        original.write_bytes(fixture(lzma.compress(self.disk.read_bytes())))
+        splash_file = self.root/'custom_splash.bin'
+        splash_file.write_bytes(b'S' * 4096000)
+        rec_file = self.root/'custom_rec.bin'
+        rec_file.write_bytes(b'R' * 4096000)
+        output = self.root/'repacked_splash.img'
+
+        ret = az.main(['repack', str(original), '--rootfs', str(self.disk),
+                       '--splash', str(splash_file),
+                       '--recoverysplash', str(rec_file),
+                       '--output', str(output)])
+        self.assertEqual(ret, 0)
+        im = az.Image(output.read_bytes())
+        self.assertEqual(im.payload('splash'), b'S' * 4096000)
+        self.assertEqual(im.payload('recoverysplash'), b'R' * 4096000)
 
     @unittest.skipUnless(shutil.which('resize2fs'), 'resize2fs required for resize attack fixture')
     def test_repack_refuses_rootfs_growth_before_publishing(self):

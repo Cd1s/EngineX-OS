@@ -758,6 +758,13 @@ func fastbootDevices(ctx context.Context, o *options) []string {
 	return serials
 }
 
+// IsRockchipUSBLoader reports whether line describes a Rockchip USB loader device:
+// 2207:350b (RK3588 RMZ2/JP24) or 2207:320a (RK3288).
+func IsRockchipUSBLoader(line string) bool {
+	lower := strings.ToLower(line)
+	return strings.Contains(lower, "2207:350b") || strings.Contains(lower, "2207:320a")
+}
+
 // modeAB: a stock deck is on the LAN but has no SSH. Ask the user to put it in fastboot and wait.
 func modeAB(ctx context.Context, o *options, d deck) error {
 	name := d.Name

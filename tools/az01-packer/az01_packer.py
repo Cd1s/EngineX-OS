@@ -168,17 +168,31 @@ class Image:
                     sha256=hashlib.sha256(self.data).hexdigest(),
                     partitions=self.parts, eof_offset=self.end, verified=True)
 
-    def replace_rootfs(self, payload):
-        p = self.parts[-1]
+    def replace_partition(self, name, payload):
+        require(name in ('splash', 'recoverysplash', 'rootfs'),
+                'unsupported partition for replacement: ' + str(name))
+        if name in ('splash', 'recoverysplash'):
+            require(len(payload) == 4096000,
+                    f'{name} payload must be exactly 4096000 bytes uncompressed')
+            require(not payload.startswith(b'\xfd7zXZ\0'),
+                    f'{name} must be uncompressed')
+        p = next((p for p in self.parts if p['name'] == name), None)
+        require(p is not None, 'partition not found: ' + str(name))
         result = bytearray(self.data[:p['offset']])
-        struct.pack_into('<Q', result, p['entry']+8, len(payload))
-        result[p['digest_at']:p['digest_at']+20] = hashlib.sha1(payload).digest()
+        struct.pack_into('<Q', result, p['entry'] + 8, len(payload))
+        result[p['digest_at']:p['digest_at'] + 20] = hashlib.sha1(payload).digest()
         result.extend(payload)
-        if self.aligned:
-            result.extend(bytes((-len(result)) % 8))
-        result.extend(self.EOF)
+        if p == self.parts[-1]:
+            if self.aligned:
+                result.extend(bytes((-len(result)) % 8))
+            result.extend(self.EOF)
+        else:
+            result.extend(self.data[p['offset'] + p['size']:])
         Image(bytes(result))
         return bytes(result)
+
+    def replace_rootfs(self, payload):
+        return self.replace_partition('rootfs', payload)
 
 
 MAX_ROOTFS = 2 * 1024**3
@@ -822,8 +836,12 @@ def main(argv=None):
             s.add_argument('--overlay', type=Path)
             s.add_argument('--service', action='append', default=[], type=Path)
             s.add_argument('--set-version', help='EngineX release written to /etc/sc5000/version.txt, e.g. 5.0.4.1')
+            s.add_argument('--splash', type=Path, help='custom 4,096,000-byte splash payload')
+            s.add_argument('--recoverysplash', type=Path, help='custom 4,096,000-byte recoverysplash payload')
         elif name == 'repack':
             s.add_argument('--rootfs', required=True, type=Path)
+            s.add_argument('--splash', type=Path, help='custom 4,096,000-byte splash payload')
+            s.add_argument('--recoverysplash', type=Path, help='custom 4,096,000-byte recoverysplash payload')
             s.add_argument('--output', required=True, help='new external AZ01 image')
     args = parser.parse_args(argv)
     try:
@@ -851,6 +869,12 @@ def main(argv=None):
                 original_fs = ExtFS(stock)
                 before = original_fs.snapshot()
                 if args.command == 'patch-rootfs':
+                    if getattr(args, 'splash', None):
+                        require(args.splash.is_file(), 'splash must be a regular file')
+                        require(len(args.splash.read_bytes()) == 4096000, 'splash payload must be 4096000 bytes')
+                    if getattr(args, 'recoverysplash', None):
+                        require(args.recoverysplash.is_file(), 'recoverysplash must be a regular file')
+                        require(len(args.recoverysplash.read_bytes()) == 4096000, 'recoverysplash payload must be 4096000 bytes')
                     key = public_key(args.ssh_public_key.read_text()) if args.ssh_public_key else None
                     candidate = Path(temp)/'patched.ext2'
                     shutil.copyfile(stock, candidate)
@@ -870,11 +894,20 @@ def main(argv=None):
                     os.link(candidate, output)
                 else:
                     result = Path(temp)/'result.img'
+                    current_img = image
+                    if getattr(args, 'splash', None):
+                        require(args.splash.is_file(), 'splash must be a regular file')
+                        splash_bytes = args.splash.read_bytes()
+                        current_img = Image(current_img.replace_partition('splash', splash_bytes))
+                    if getattr(args, 'recoverysplash', None):
+                        require(args.recoverysplash.is_file(), 'recoverysplash must be a regular file')
+                        rec_bytes = args.recoverysplash.read_bytes()
+                        current_img = Image(current_img.replace_partition('recoverysplash', rec_bytes))
                     if candidate.read_bytes() == stock.read_bytes():
-                        result.write_bytes(image.data)  # Exact no-op round trip.
+                        result.write_bytes(current_img.data)
                     else:
                         compressed = compress_rootfs(candidate.read_bytes(), image.payload())
-                        result.write_bytes(image.replace_rootfs(compressed))
+                        result.write_bytes(current_img.replace_partition('rootfs', compressed))
                     os.link(result, output)
         print(json.dumps(dict(output=str(output), verified=True)))
         return 0
