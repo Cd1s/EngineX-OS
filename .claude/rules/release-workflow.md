@@ -8,37 +8,42 @@
 - **新版本**：只有维护者明确要求才升版本号。按全部步骤做，新建 `v<VERSION>` tag 与 Release。
 - **热修复版本**：在已发布版本后加第五段（`5.3.0.1` → `5.3.0.1.1`，tag `v5.3.0.1.1`，标题 `EngineX OS <VERSION> (Hotfix)`），按「新版本」全部步骤做。碟机的 `newerVersion` 逐段比较，前四段相同时段数多者更新，所以已刷 `5.3.0.1` 的机器能收到推送，也不占用 `5.3.0.2`。`az01_packer.py` 的 `VERSION_RE` 最多接受五段，门禁的 `BASE` 取前三段作为官方底包号。
 
-## 1. 必改文件（只在新版本时改）
+## 1. 必改文件（三语 README、官网与使用文档、实测截图、版本号）
 
 | 文件 | 要改的地方 |
 | --- | --- |
 | `rootfs-overlay/etc/sc5000/version.txt` | 整个文件内容就是 `<VERSION>` |
-| `README.md`、`README.zh-CN.md`、`README.zh-TW.md` | 第 3 行 hero 图的 `alt="EngineX OS <VERSION>"`；简介里的 `**EngineX OS <VERSION>**`；性能对比表表头里的 `` `EngineX OS <VERSION>` ``；「如何安装与升级」里全部 8 个机型的文件名和下载链接（三份 README 各 8 条，共 24 条） |
+| `README.md`、`README.zh-CN.md`、`README.zh-TW.md` | 第 3 行 hero 图的 `alt="EngineX OS <VERSION>"`；简介里的 `**EngineX OS <VERSION>**`；性能对比表表头里的 `` `EngineX OS <VERSION>` ``；本版本新特性与使用教程章节；「如何安装与升级」里 4 个平台 `EngineX-Installer-<VERSION>`、8 款一代机 `*-Update.img` 与 8 款二代机 `*-Data-Bundle.tar.gz` 的文件名和下载链接（三份 README 同步更新） |
+| `docs/index.html`、`docs/site/{content.js,app.js,style.css}` | 官网 `https://enginexdj.com`（独立全屏首页 `Home` + 三栏使用文档 `Docs`）：更新三语 `version: "<VERSION>"`、新功能章节与刷机/使用教程、全部 20 条下载链接（4 个安装器 + 8 个 `.img` + 8 个 `Data-Bundle.tar.gz`），并递增 `docs/index.html` 与 `docs/site/content.js` 里的静态资源缓存参数 `?v=N` |
+| `docs/site/assets/shots/*.png`、`docs/assets/screenshots/{zh-CN,zh-TW,en}/*.png` | 凡涉及界面、菜单、控制中心磁贴或版本号变更，必须在编译机上基于 `<VERSION>` 底包通过 `QT_QPA_PLATFORM=eglfs`（`/dev/dri/card0` `virtio-gpu` + Mesa OpenGL，避免 `offscreen` 下 `ColoredImage` 图标空白）重新渲染三语实测截图并同步替换官网与 README 截图（实机硬件专属截图如 `07-bluetooth-audio.png` 保持不变） |
 | `docs/assets/hero-banner*.svg` | 三张 banner 现在不写版本号。大版本换视觉或 banner 里出现版本号时才改，三语一起改 |
 | `tools/az01-packer/README.md` | 示例命令里的版本号（可选，保持示例与现行版本一致） |
 
 下载链接格式（文件名带版本号，所以每次升版本都要改）：
 
 ```
+https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-<VERSION>-<platform>.(zip|tar.gz)
 https://github.com/Cd1s/EngineX-OS/releases/latest/download/<PREFIX>-<VERSION>-EngineX-OS-<Model>-Update.img
+https://github.com/Cd1s/EngineX-OS/releases/latest/download/<PREFIX>-<VERSION>-EngineX-OS-Data-Bundle.tar.gz
 ```
 
-改完检查没有漏掉的旧版本号（测试夹具里的版本号不用改）：
+改完检查没有漏掉的旧版本号（测试夹具与历史版本对比章节里的旧版本号不用改）：
 
 ```sh
-git grep -n "<OLD>" -- README.md README.zh-CN.md README.zh-TW.md rootfs-overlay docs/assets
+git grep -n "<OLD>" -- README.md README.zh-CN.md README.zh-TW.md rootfs-overlay docs/index.html docs/site/content.js docs/assets
 ```
 
 `tests/`、`test_az01_packer.py` 里的版本号是测试数据，不要改。镜像里的 `/etc/sc5000/version.txt` 由 `build-release.sh` 的 `--set-version` 写入，第 1 步改的仓库文件用于实机热部署和保持一致。
 
 ## 2. 测试（只在编译机编译机上跑，本机不编译）
 
-本项目的编译、单测、门禁和打包主机是 **the build host**（aarch64，支持 32 位 EL0，碟机的 armhf 程序原生运行）。2026-11-05 起不再用 IN。`remote-build` 默认仍连 IN，所以每次都写 `REMOTE_BUILD_HOST=<build host> remote-build ...`。机器上的固定材料在 `/root/build/sc5000-lab/`：`fw/`（5.0.4 官方底包）、`fw-5.3.0/`、`5.0.4/qrc`、`5.3.0/qrc`、`5.0.4|5.3.0/tree/usr/Engine/Engine`、`deps-sqlite/`（armhf `sqlite3.o`）、`sbin/fsck.hfsplus`、`release-5.0.4.2/`（已发布的旧镜像，供门禁用）。Go 1.27.1 在 `/etc/profile.d/buildtools.sh`。
+本项目的编译、单测、门禁和打包主机是 **the build host**（aarch64，支持 32 位 EL0，碟机的 armhf 程序原生运行）。2026-11-05 起不再用 IN。`remote-build` 默认仍连 IN，所以每次都写 `REMOTE_BUILD_HOST=<build host> remote-build ...`。机器上的固定材料在 `/root/build/sc5000-lab/`：`fw/`（5.0.4 官方底包）、`fw-5.3.0/`、`fw-5.3.0-gen2/`、`5.0.4/qrc`、`5.3.0/qrc`、`5.0.4|5.3.0/tree/usr/Engine/Engine`、`sclive4-rea61-followup/`、`systemone-analysis/`、`deps-sqlite/`（armhf `sqlite3.o`）、`sbin/fsck.hfsplus`、`release-<OLD>/`（上一版 3 个代表 `.img`，供门禁用）。Go 1.27.1 在 `/etc/profile.d/buildtools.sh`。
 
 ```sh
 gofmt -l . && go vet ./... && go test -race ./...
-bash tests/test_rootfs_overlay.sh                 # 必须用 bash
-bash tools/az01-packer/test_sclive4_bootstrap.sh  # 二代机数据包沙箱；AZ04=1 跑 PRIME 4 G2 / SYSTEM ONE
+bash tests/test_rootfs_overlay.sh                        # 必须用 bash
+bash tools/az01-packer/test_sclive4_bootstrap.sh         # 二代机 armhf 数据包沙箱
+AZ04=1 bash tools/az01-packer/test_sclive4_bootstrap.sh  # 二代机 AZ04 (PRIME 4 G2 / SYSTEM ONE) 沙箱
 python3 -m unittest discover -s tools/az01-packer
 python3 -m unittest discover -s tools/stems
 # C 单测：编译命令写在各文件头部
@@ -50,21 +55,26 @@ python3 -m unittest discover -s tools/stems
 
 涉及 Factory Reset、`az01-update --erase-data`、空白 `/data` 首次启动的改动，只在编译机的 `unshare -m` + chroot 沙箱里用解包出的 rootfs 测，**绝不在实机触发**。
 
-## 3. 提交与构建
+## 3. 提交与构建（16 款机型 + 4 平台一键安装器，共 20 个产物）
 
 1. 改动先提交并推送到 `origin/main`，构建必须对应一个已推送的提交。
 2. 用干净目录构建（`remote-build` 同步不会删除远端已删除的文件，旧目录会带上残留）：
 
 ```sh
 REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --clean -- \
-  '. /etc/profile.d/buildtools.sh; sh tools/az01-packer/build-release.sh <VERSION> /root/build/sc5000-lab/fw-5.3.0 none /root/build/sc5000-lab/sbin/fsck.hfsplus <新输出目录>'
+  '. /etc/profile.d/buildtools.sh
+   OUT=/var/tmp/sc5000-release-<VERSION>
+   rm -rf "$OUT"
+   sh tools/az01-packer/build-release.sh <VERSION> /root/build/sc5000-lab/fw-5.3.0 none /root/build/sc5000-lab/sbin/fsck.hfsplus "$OUT"
+   sh tools/az01-packer/build-installer.sh <VERSION> "$OUT"
+   (cd "$OUT" && sha256sum *.img *-Data-Bundle.tar.gz EngineX-Installer-<VERSION>-* > SHA256SUMS.txt)'
 ```
 
 `build-release.sh` 抽 qrc 时用 `qemu-arm -L <rootfs>` 跑 Engine 的静态初始化，编译机装了不带 binfmt 的 `qemu-user`（`--no-install-recommends`）。不要装 `qemu-user-binfmt`：注册了 `qemu-arm` 的 binfmt 会盖过原生执行，门禁会退回软模拟。
 
 第 3 个参数在公开发布时**必须是 `none`**：公开镜像不能内置任何人的 SSH 公钥（#46）。只有维护者自用的私有镜像才传公钥文件，且私有镜像不能上传到 Release。
 
-输出目录必须不存在、且不在任何 git 工作区里。产出 8 个 `*-Update.img` 和 `SHA256SUMS.txt`。
+输出目录必须不存在、且不在任何 git 工作区里。产出 **8 个一代 `*-Update.img`、8 个二代 `*-Data-Bundle.tar.gz`、4 个平台 `EngineX-Installer-<VERSION>-*` 以及汇总 20 个产物的 `SHA256SUMS.txt`**（共 21 个文件）。
 
 ## 4. 校验镜像
 
@@ -113,29 +123,32 @@ bash tools/az01-packer/release-gate.sh \
 
 ## 5. Tag 与 GitHub Release
 
-在编译机上直接上传（那边 `gh` 已登录 `Cd1s`，不用把 1.5 GB 拉回本机）：
+在编译机上直接上传全部 21 个文件（那边 `gh` 已登录 `Cd1s`，不用把 1.3 GB 拉回本机）：
 
 ```sh
 # 新版本
 gh release create v<VERSION> --repo Cd1s/EngineX-OS --title "EngineX OS <VERSION>" \
-  --notes-file notes.md --target <提交> *.img SHA256SUMS.txt
+  --notes-file notes.md --target <提交> --latest \
+  *.img *-Data-Bundle.tar.gz EngineX-Installer-<VERSION>-* SHA256SUMS.txt
 # 同一版本修复重发
-gh release upload v<VERSION> --repo Cd1s/EngineX-OS *.img SHA256SUMS.txt --clobber
+gh release upload v<VERSION> --repo Cd1s/EngineX-OS \
+  *.img *-Data-Bundle.tar.gz EngineX-Installer-<VERSION>-* SHA256SUMS.txt --clobber
 ```
 
-- Release Notes 必须有 8 个机型的 SHA-256 对照表（机型、板号、文件名、SHA-256），每次重发都要换成新值。
+- Release Notes 必须包含完整的 **20 个产物 SHA-256 对照表**（8 款一代 `.img`、8 款二代 `Data-Bundle.tar.gz`、4 平台 `EngineX-Installer`），每次重发都要换成新值。
 - tag 指向记录这次发布的提交：`git tag -f v<VERSION> <提交> && git push -f origin v<VERSION>`（同一版本重发时移动 tag）。
-- 新版本要设为 latest，README 的 `releases/latest/download/...` 链接才会指向它。
+- 新版本要设为 `--latest`，README 与官网 `enginexdj.com` 的 `releases/latest/download/...` 链接才会指向它。
 
-## 6. 发布后核对
+## 6. 发布后核对与 Issue 通知
 
 ```sh
 gh release view v<VERSION> --repo Cd1s/EngineX-OS --json assets -q '.assets[] | "\(.digest) \(.name)"'
 ```
 
-- 每个资产的 digest 与 `SHA256SUMS.txt`、Release Notes 表格一致。
-- 新版本时，抽查 README 里的下载链接：`curl -sIL <链接> | grep -i "^HTTP"` 最终是 200。
-- 在 `docs/ISSUE-FIXES-*.md` 记录：日期、范围、原因、验证、构建提交、三组 sha256、回滚点（上一次构建的提交）、实机影响。
+- 每个资产的 digest 与 `SHA256SUMS.txt`、Release Notes 表格、`docs/ISSUE-FIXES-<VERSION>.md` 完全一致（共 21 个资产）。
+- 新版本时，抽查 README 与官网 `enginexdj.com` 里的下载链接：`curl -sIL <链接> | grep -i "^HTTP"` 最终是 200。
+- 在 `docs/ISSUE-FIXES-<VERSION>.md` 记录：日期、范围、原因、验证、构建提交、全部 20 个产物 sha256、门禁结果、回滚点（上一次构建的提交）、实机影响。
+- 在本次发布解决或包含的所有关联 GitHub Issues 下逐条留言告知 `v<VERSION>` 已发布、修复点摘要与下载/升级方式。
 
 ## 7. 隐私与版权
 
@@ -146,3 +159,50 @@ gh release view v<VERSION> --repo Cd1s/EngineX-OS --json assets -q '.assets[] | 
 
 - 实机只做热部署和只读核对；部署前先备份被替换的文件。
 - 测碟机端在线更新时，要把实机两个 `version.txt`（`/data/sc5000-custom/version.txt` 和 `/etc/sc5000/version.txt`）临时改成比 `<VERSION>` 旧的版本才会出现更新提示；`/etc` 那份用 bind mount 临时文件，重启即恢复。
+
+## 9. 发版后与日常编译垃圾清理（必做，防磁盘与 tmpfs 爆满）
+
+每次发版上传完成后（或大规模沙箱/门禁测试结束后），**必须立即清理编译机（及 x86 编译机、本机 `/tmp`）上的编译、门禁、解包临时目录与 Go 缓存**，只保留 `/root/build/sc5000-lab/` 固定实验材料与当前最新版的 3 个门禁基准 `.img`：
+
+```sh
+sshctl run "$BUILD_HOST" --no-stdin --argv sh -c '
+set -eu
+# 1. 将本次发布的 3 个代表镜像（JP07、JP13、JC11）存入 sc5000-lab/release-<VERSION> 供下次门禁作 <OLD> 基准，并删除旧版 release-* / databundle-*
+mkdir -p /root/build/sc5000-lab/release-<VERSION>
+cp -f <新输出目录>/SC5000-<VERSION>-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img \
+      <新输出目录>/SC6000-<VERSION>-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img \
+      <新输出目录>/PRIME4-<VERSION>-EngineX-OS-Denon-PRIME-4-JC11-Update.img \
+      <新输出目录>/SHA256SUMS.txt \
+      /root/build/sc5000-lab/release-<VERSION>/
+for r in /root/build/sc5000-lab/release-* /root/build/sc5000-lab/databundle-*; do
+  [ "$r" = "/root/build/sc5000-lab/release-<VERSION>" ] && continue
+  rm -rf "$r"
+done
+
+# 2. 清理 /root/build 下除 sc5000-lab 外的所有 remote-build 临时工作区
+for d in /root/build/*; do
+  [ "$d" = "/root/build/sc5000-lab" ] && continue
+  rm -rf "$d"
+done
+
+# 3. 清理 /var/tmp 与 /tmp 下的所有门禁、沙箱、解包临时目录（保留 systemd-private-* 与活跃会话）
+for p in /var/tmp/*; do
+  case "$(basename "$p")" in
+    systemd-private-*) continue ;;
+    *) rm -rf "$p" ;;
+  esac
+done
+for p in /tmp/*; do
+  case "$(basename "$p")" in
+    systemd-private-*|tmux-*|ssh-*) continue ;;
+    *) rm -rf "$p" ;;
+  esac
+done
+
+# 4. 清理 Go 编译与测试缓存并核对剩余空间（根分区可用空间应 >140G，/tmp 接近 0%）
+. /etc/profile.d/buildtools.sh && go clean -cache -testcache
+df -h / /tmp /var/tmp
+'
+```
+
+- **禁止删除的固定实验目录（`/root/build/sc5000-lab/`）**：`fw/`、`fw-5.3.0/`、`fw-5.3.0-gen2/`、`5.0.4/`、`5.3.0/`、`sclive-5.0.4/`、`sclive4-rea61-followup/`、`systemone-analysis/`（含已解包的 `rootfs/`）、`deps-sqlite/`、`sbin/`、`deep-symmetry-archive/` 以及当前最新版的 `release-<VERSION>/`。
