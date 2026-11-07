@@ -45,12 +45,13 @@ lib_hook="$bundle_dir/lib/libengine-ui-hook.so"
 
 mkdir -p /run/systemd/system/engine.service.d
 
+# No KillMode=process: engine.service is Type=forking with the Scripts/engine shell as main PID, so it would
+# leave the hook-less /usr/Engine/Engine running and nobody to run poweroff (#116). The daemons have their own units.
 cat <<EOF > /run/systemd/system/engine.service.d/99-sc5000.conf
 [Unit]
 Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service
 
 [Service]
-KillMode=process
 Environment="LD_PRELOAD=$lib_hook"
 EnvironmentFile=-/data/sc5000-custom/ui-scale.env
 EOF
@@ -116,11 +117,28 @@ WantedBy=multi-user.target
 EOF
 fi
 
+# host-install-userdata.py --ssh-key (#116). The root fs is read-only on these decks, so when the
+# copy fails the key is bind-mounted over the stock /root/.ssh/authorized_keys.
+ssh_key=
+if [ -s "$dest/authorized_keys" ] && [ -x /usr/sbin/sshd ]; then
+    ssh_key=1
+    chown 0:0 "$dest/authorized_keys" 2>/dev/null || :
+    chmod 600 "$dest/authorized_keys"
+    if ! cmp -s "$dest/authorized_keys" /root/.ssh/authorized_keys 2>/dev/null; then
+        { mkdir -p -m 700 /root/.ssh && cp "$dest/authorized_keys" /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys; } 2>/dev/null ||
+            mount --bind "$dest/authorized_keys" /root/.ssh/authorized_keys 2>/dev/null || :
+    fi
+fi
+
 # In a chroot systemctl only prints "Running in chroot, ignoring" and exits 0, so require systemd as PID 1.
 if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
     systemctl restart enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service || :
+    [ -z "$ssh_key" ] || systemctl start --no-block sshd.service || :
     systemctl restart --no-block engine.service || systemctl restart engine.service || :
 else
+    if [ -n "$ssh_key" ] && ! pgrep -x sshd >/dev/null 2>&1; then
+        mkdir -p /var/run/sshd && /usr/sbin/sshd || :
+    fi
     pkill -x sc5000-suite 2>/dev/null || :
     [ -x "$bin_dir/stream-sync" ] && "$bin_dir/stream-sync" --listen :8080 --cpu 3 >/dev/null 2>&1 &
     [ -x "$bin_dir/rb-bridge" ] && "$bin_dir/rb-bridge" --prolink >/dev/null 2>&1 &
@@ -329,6 +347,15 @@ Back up /data first and use an image made from your own backup:
 
 Never flash an empty or someone else's userdata image.
 
+Decks without fastboot (SYSTEM ONE, PRIME 4 G2: Firmware Update Mode shows up
+as USB 1cc5:2027) take a NEW, EMPTY 64 MiB /data image; music, settings and the
+library on the internal /data are erased. EngineX-Installer does all of this;
+by hand (needs pyusb, see host-install-usbupdate.py):
+
+    mke2fs -t ext4 -O encrypt -L data -b 4096 -F data.img 64M
+    python3 host-install-userdata.py data.img --bundle {top}.tar.gz [--ssh-key ~/.ssh/id_ed25519.pub]
+    python3 host-install-usbupdate.py data.img     # then power-cycle the deck
+
 Uninstall
 ---------
     sh /data/enginex/bundle/uninstall.sh && reboot
@@ -369,6 +396,7 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
     here = Path(__file__).parent
     files['host-install-userdata.py'] = ((here / 'host-install-userdata.py').read_bytes(), 0o755)
     files['host-install-fastboot.sh'] = ((here / 'host-install-fastboot.sh').read_bytes(), 0o755)
+    files['host-install-usbupdate.py'] = ((here / 'host-install-usbupdate.py').read_bytes(), 0o755)
     sums = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, (data, _) in sorted(files.items()))
     files['SHA256SUMS'] = (sums.encode(), 0o644)
 
@@ -391,6 +419,8 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
     (out / 'host-install-userdata.py').chmod(0o755)
     (out / 'host-install-fastboot.sh').write_bytes(files['host-install-fastboot.sh'][0])
     (out / 'host-install-fastboot.sh').chmod(0o755)
+    (out / 'host-install-usbupdate.py').write_bytes(files['host-install-usbupdate.py'][0])
+    (out / 'host-install-usbupdate.py').chmod(0o755)
     return {'bundle': str(bundle), 'sha256': digest, 'files': len(files)}
 
 

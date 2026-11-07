@@ -80,7 +80,8 @@
 - **djay 曲库（#112）**：打开 OmniSource 后，U 盘 / SD 卡上的 Algoriddim djay 曲库，其歌单会出现在流媒体浏览器里；
 - **更短的控制台访问码**：Web 控制台访问码改为 8 位 `XXXX-XXXX`（不含 0/O、1/I，不分大小写，横杠可省略）。升级后旧的长访问码会被替换，已登录的浏览器需要重新输入 `设置 → 关于` 里显示的新访问码。同一设备 1 分钟内输错 5 次会被锁定 1 分钟；
 - **二代机一键安装器（#89、#110、#129）**：EngineX-Installer 自动识别二代机，包括被新版 `android-tools` 显示为 `Android Fastboot` 的 PRIME 4+，并使用安装包自带的 `fastboot`；
-- **二代机显示访问码（#132）**：PRIME 4+ 等二代机的 `设置 → 关于` 之前不显示 Web 控制台地址和访问码，检查更新还报 `GitHub unreachable`，原因是开机时重启 Engine 会连带杀掉刚启动的 EngineX 服务。现在先重启 Engine（加了 `KillMode=process`），再启动这些服务；
+- **二代机显示访问码（#132）**：PRIME 4+ 等二代机的 `设置 → 关于` 之前不显示 Web 控制台地址和访问码，检查更新还报 `GitHub unreachable`，原因是开机时重启 Engine 会连带杀掉刚启动的 EngineX 服务。现在这些服务是独立的 systemd 单元，重启 Engine 不再波及它们。之后加的 `KillMode=process` 会让原厂 Engine 一直占着屏幕、SYSTEM ONE 无法正常关机，已删除（#116）。
+- **SYSTEM ONE / PRIME 4 G2 走 USB 安装（#116）**：这两款没有 fastboot，固件更新模式在 USB 上是 `1cc5:2027`。EngineX-Installer 现在会生成 64 MiB 的全新 `/data` 镜像，用官方 `write-part` 协议写入（Rane SYSTEM ONE 实机验证），写完提示你按电源键重启。`host-install-userdata.py` 新增 `--ssh-key`，可开启 root SSH。
 - **实验功能，只有 API**：以下功能目前只有 Web 控制台 API，没有控制台卡片或碟机菜单，也还没有在实机上测试：通过 OmniSource 读取 WebDAV / Subsonic（Navidrome）/ Plex 歌单（#82）、Hot Cue 名称与颜色（#85）、U 盘 `/mods` QML 插件与 safe-mode 隔离（#87）、把 Loop 存到 Sampler 打击垫（#120）、局域网 RTP / Teleport 音频以及 USB DAC / USB-B UAC2 输出（#83、#113）。
 
 ### 8. 上一版新功能
@@ -272,6 +273,14 @@ SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboo
    ```sh
    sh <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-fastboot.sh userdata-enginex.img
    ```
+
+**方法 3：没有 fastboot 的 SYSTEM ONE / PRIME 4 G2（USB `1cc5:2027`）。** 在碟机上点 `Settings → About / Update → Firmware Update Mode (Reboot)`，接上 USB 后运行 EngineX-Installer，它会自动完成下面几步。这会写入**全新的空** `/data` 分区：内置存储上的音乐、曲库和设置会被清空（外接 U 盘和 SD 卡不受影响）。手动操作（需要 `python3`、`e2fsprogs` 和 `pip3 install pyusb`）：
+   ```sh
+   mke2fs -t ext4 -O encrypt -L data -b 4096 -F data.img 64M
+   python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-userdata.py data.img --bundle <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz --ssh-key ~/.ssh/id_ed25519.pub
+   python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-usbupdate.py data.img
+   ```
+   `--ssh-key` 可省略。写完按电源键关机再开机。
 
 **卸载**：`sh /data/sc5000-custom/bundle/uninstall.sh && reboot`，只删除数据包装上的内容。
 

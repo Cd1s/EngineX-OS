@@ -80,7 +80,8 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 - **djay libraries (#112)**: with OmniSource on, Algoriddim djay libraries on a USB / SD drive show their playlists in the streaming browser;
 - **Shorter console access code**: the web console code is now 8 characters (`XXXX-XXXX`, no 0/O or 1/I, case and dashes ignored). Upgrading replaces the old long code, so signed-in browsers need the new one from `Settings → About`. Five wrong codes in a minute lock that device out for a minute;
 - **Second-generation installer (#89, #110, #129)**: EngineX-Installer finds second-generation decks on its own, including a PRIME 4+ that new `android-tools` list as `Android Fastboot`, using its bundled `fastboot`;
-- **Access code on second-generation decks (#132)**: on PRIME 4+ and other second-generation units, `Settings → About` showed no web console address or access code and updates reported `GitHub unreachable`, because restarting Engine at boot also killed the EngineX services started just before it. Engine now restarts first (with `KillMode=process`), then the services start;
+- **Access code on second-generation decks (#132)**: on PRIME 4+ and other second-generation units, `Settings → About` showed no web console address or access code and updates reported `GitHub unreachable`, because restarting Engine at boot also killed the EngineX services started just before it. The services now run as their own systemd units, so restarting Engine no longer touches them. A later `KillMode=process` attempt left the stock Engine on screen and broke power-off on SYSTEM ONE; it was removed (#116).
+- **SYSTEM ONE / PRIME 4 G2 over USB (#116)**: these decks have no fastboot; their Firmware Update Mode is USB `1cc5:2027`. EngineX-Installer now builds a fresh 64 MiB `/data` image and writes it with the official `write-part` protocol (verified on a Rane SYSTEM ONE), then asks you to power-cycle the deck. `host-install-userdata.py` gains `--ssh-key` for root SSH.
 - **Experimental, API only**: the following have a web console API but no console card or deck menu yet, and have not been tested on a real deck: WebDAV / Subsonic (Navidrome) / Plex playlists through OmniSource (#82), Hot Cue names and colours (#85), USB `/mods` QML plug-ins with safe-mode quarantine (#87), copying a loop to a Sampler pad (#120), and LAN RTP / Teleport audio plus USB DAC / USB-B UAC2 output (#83, #113).
 
 ### 8. Previous Release Highlights
@@ -272,6 +273,14 @@ Download the bundle for your model and check its SHA-256 against `SHA256SUMS.txt
    ```sh
    sh <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-fastboot.sh userdata-enginex.img
    ```
+
+**Method 3: SYSTEM ONE / PRIME 4 G2 without fastboot (USB `1cc5:2027`).** Tap `Settings → About / Update → Firmware Update Mode (Reboot)` and connect USB, then run EngineX-Installer; it does the steps below. This writes a **new, empty** `/data` partition: music, library and settings on the internal storage are erased (USB drives and SD cards are not). By hand (needs `python3`, `e2fsprogs` and `pip3 install pyusb`):
+   ```sh
+   mke2fs -t ext4 -O encrypt -L data -b 4096 -F data.img 64M
+   python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-userdata.py data.img --bundle <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz --ssh-key ~/.ssh/id_ed25519.pub
+   python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-usbupdate.py data.img
+   ```
+   `--ssh-key` is optional. Then press the power button to turn the unit off and on again.
 
 **Uninstall**: `sh /data/sc5000-custom/bundle/uninstall.sh && reboot` removes only what the bundle added.
 
