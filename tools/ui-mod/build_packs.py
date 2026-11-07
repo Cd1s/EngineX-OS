@@ -858,6 +858,7 @@ SERVICES_MAIN = """
 			else if (key === "sync_guard_pct") root.scSyncGuardPct = parseInt(val) || 0
 			else if (key === "swap_loop_order") root.scSwapLoopOrder = val === "1"
 			else if (key === "led_brightness") root.scLedBrightness = parseInt(val) || 100
+			else if (key === "ui_scale") root.scUIScale = parseInt(val) || 100
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"

@@ -48,6 +48,7 @@ mkdir -p /run/systemd/system/engine.service.d
 cat <<EOF > /run/systemd/system/engine.service.d/99-sc5000.conf
 [Service]
 Environment="LD_PRELOAD=$lib_hook"
+EnvironmentFile=-/data/sc5000-custom/ui-scale.env
 EOF
 
 if [ -f "$bundle_dir/version.txt" ]; then

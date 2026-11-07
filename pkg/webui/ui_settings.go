@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const defaultUIDir = "/data/sc5000-custom/ui"
@@ -117,23 +118,47 @@ var fourDeckRolePath = "/run/sc5000-assignments/role"
 // uiScaleEnvPath feeds QT_SCALE_FACTOR to Engine's unit, which reads it through the
 // engine.service.d/70-ui-scale.conf drop-in. A package var so tests can point it at a
 // temp dir.
-var uiScaleEnvPath = "/data/sc5000-custom/ui-scale.env"
+var (
+	uiScaleMu      sync.Mutex
+	uiScaleEnvPath = "/data/sc5000-custom/ui-scale.env"
+)
 
 // writeUIScaleEnv hands Qt the scale chosen in Settings -> Device for Engine's next
 // start, and drops the file again at 100% so the unit keeps Denon's stock size. It sits
 // outside ui/, which an update replaces wholesale.
 func writeUIScaleEnv(pct int) error {
+	uiScaleMu.Lock()
+	defer uiScaleMu.Unlock()
+
 	if !slices.Contains(uiUIScales, pct) || pct == 100 {
 		if err := os.Remove(uiScaleEnvPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(uiScaleEnvPath), 0o755); err != nil {
+	dir := filepath.Dir(uiScaleEnvPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	text := "QT_SCALE_FACTOR=" + strconv.FormatFloat(float64(pct)/100, 'f', -1, 64) + "\n"
-	return os.WriteFile(uiScaleEnvPath, []byte(text), 0o644)
+	tmp, err := os.CreateTemp(dir, ".ui-scale-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err = tmp.WriteString(text); err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp.Name(), 0o644)
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), uiScaleEnvPath)
 }
 
 func (s *Server) uiDir() string {

@@ -152,6 +152,8 @@ done
 test -f '$TARGET/run/sc5000-alsa-reexec.once'
 grep -q 'LD_PRELOAD=/data/enginex/bundle/lib/libengine-ui-hook.so' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+grep -q 'EnvironmentFile=-/data/sc5000-custom/ui-scale.env' \
+    '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 "
 echo "  Stage 1 ALSA boot activation: PASS"
 
