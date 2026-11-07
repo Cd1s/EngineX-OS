@@ -37,7 +37,7 @@
   const SECTIONS = [
     /* ───────────── 1 快速开始 ───────────── */
     {
-      id: "start", icon: "🚀",
+      id: "start",
       title: L("快速开始 & 机型判断", "快速開始 & 機型判斷", "Quick start & your model"),
       blocks: [
         { k: "p", x: L(
@@ -74,7 +74,7 @@
 
     /* ───────────── 2 安装 ───────────── */
     {
-      id: "install", icon: "⚡",
+      id: "install",
       title: L("一键安装与刷机教程", "一鍵安裝與刷機教學", "One-click install & flashing"),
       blocks: [
         { k: "shot", src: "site/assets/screen-installer.svg", cap: L("EngineX-Installer：16 款机型自动识别，模式 A 局域网 / 模式 B USB Fastboot", "EngineX-Installer：16 款機型自動識別，模式 A 區域網路 / 模式 B USB Fastboot", "EngineX-Installer: 16 models auto-detected, Mode A LAN / Mode B USB Fastboot") },
@@ -106,7 +106,7 @@
           L("插入碟机（原厂 Engine OS 4.3.x 与 5.0.x 都能直接刷），**设置 → 关于 / 更新 → 固件更新模式**，看到 `Found " + V + " on USB/SD` 时选 **USB/SD**，机器自动刷入并重启。", "插入碟機（原廠 Engine OS 4.3.x 與 5.0.x 皆可直接刷），**設定 → 關於 / 更新 → 韌體更新模式**，看到 `Found " + V + " on USB/SD` 時選 **USB/SD**，機器自動刷入並重啟。", "Insert it (stock Engine OS 4.3.x and 5.0.x can flash directly), open **Settings → About / Update → Firmware Update Mode**, and choose **USB/SD** when `Found " + V + " on USB/SD` appears. The unit flashes and reboots."),
           L("只弹出 *Reboot into firmware update mode?* 说明没找到文件：核对机型、文件名保持原样放在根目录，再拔插一次。", "只彈出 *Reboot into firmware update mode?* 代表沒找到檔案：核對機型、檔名保持原樣放在根目錄，再拔插一次。", "If it only asks *Reboot into firmware update mode?* the file was not found: check the model, keep the file name and root location, and re-plug the stick."),
         ] },
-        { k: "note", tone: "warn", x: L("**为什么电脑刷机工具看不到 PRIME GO / SC5000？（#104）**<br>① **推荐：免电脑 U 盘直接刷。** 一代机（SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2）不用连电脑：把 `*-Update.img` 放进 FAT32 / exFAT U 盘根目录，插到碟机上，进入 `Settings → Update → Reboot` 即可更新或恢复固件。<br>② **电脑 USB 线刷模式：** 正常开机打碟时，电脑**绝对看不到**刷机设备！必须先在碟机屏幕点 **`Settings → Update → Reboot to Computer Update Mode`**（重启进入蓝屏电脑图标的 Fastboot 模式），再用 USB-B 线连电脑运行刷机工具。", "**為什麼電腦刷機工具看不到 PRIME GO / SC5000？（#104）**<br>① **推薦：免電腦隨身碟直接刷。** 一代機（SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2）不用連電腦：把 `*-Update.img` 放進 FAT32 / exFAT 隨身碟根目錄，插到碟機上，進入 `Settings → Update → Reboot` 即可更新或還原韌體。<br>② **電腦 USB 線刷模式：** 正常開機打碟時，電腦**絕對看不到**刷機裝置！必須先在碟機螢幕點 **`Settings → Update → Reboot to Computer Update Mode`**（重啟進入藍屏電腦圖示的 Fastboot 模式），再以 USB-B 線連接電腦執行刷機工具。", "**Why can’t the computer flashing tool see my PRIME GO / SC5000? (#104)**<br>① **Recommended: flash from a USB stick, no computer.** First-generation units (SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2) need no computer: put the `*-Update.img` in the root of a FAT32 / exFAT stick, plug it into the deck and go to `Settings → Update → Reboot` to update or recover the firmware.<br>② **Computer USB flashing mode:** while the deck is running normally, the computer **never** sees a flashing device! First tap **`Settings → Update → Reboot to Computer Update Mode`** on the deck screen (it reboots into Fastboot mode with the blue-screen computer icon), then connect a USB-B cable and run the flashing tool.") },
+        { k: "note", tone: "warn", x: L("**为什么电脑刷机工具看不到 PRIME GO / SC5000？（#104）**<br>1. **推荐：免电脑 U 盘直接刷。** 一代机（SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2）不用连电脑：把 `*-Update.img` 放进 FAT32 / exFAT U 盘根目录，插到碟机上，进入 `Settings → Update → Reboot` 即可更新或恢复固件。<br>2. **电脑 USB 线刷模式：** 正常开机打碟时，电脑**绝对看不到**刷机设备！必须先在碟机屏幕点 **`Settings → Update → Reboot to Computer Update Mode`**（重启进入蓝屏电脑图标的 Fastboot 模式），再用 USB-B 线连电脑运行刷机工具。", "**為什麼電腦刷機工具看不到 PRIME GO / SC5000？（#104）**<br>1. **推薦：免電腦隨身碟直接刷。** 一代機（SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2）不用連電腦：把 `*-Update.img` 放進 FAT32 / exFAT 隨身碟根目錄，插到碟機上，進入 `Settings → Update → Reboot` 即可更新或還原韌體。<br>2. **電腦 USB 線刷模式：** 正常開機打碟時，電腦**絕對看不到**刷機裝置！必須先在碟機螢幕點 **`Settings → Update → Reboot to Computer Update Mode`**（重啟進入藍屏電腦圖示的 Fastboot 模式），再以 USB-B 線連接電腦執行刷機工具。", "**Why can’t the computer flashing tool see my PRIME GO / SC5000? (#104)**<br>1. **Recommended: flash from a USB stick, no computer.** First-generation units (SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2) need no computer: put the `*-Update.img` in the root of a FAT32 / exFAT stick, plug it into the deck and go to `Settings → Update → Reboot` to update or recover the firmware.<br>2. **Computer USB flashing mode:** while the deck is running normally, the computer **never** sees a flashing device! First tap **`Settings → Update → Reboot to Computer Update Mode`** on the deck screen (it reboots into Fastboot mode with the blue-screen computer icon), then connect a USB-B cable and run the flashing tool.") },
         { k: "h", id: "ota", x: L("屏幕一键 OTA（已装本系统后）", "螢幕一鍵 OTA（已裝本系統後）", "On-screen one-tap OTA (once installed)") },
         { k: "ul", x: [
           L("连上 Wi-Fi 或网线，**设置 → 关于 / 更新**，检测到新版本时点屏幕上的 **「更新」**，进入原厂刷机进度条自动完成。", "連上 Wi-Fi 或網路線，**設定 → 關於 / 更新**，偵測到新版本時點螢幕上的 **「更新」**，進入原廠刷機進度條自動完成。", "Connect Wi-Fi or Ethernet, open **Settings → About / Update** and tap **Update** when a new version shows; the stock flashing progress bar takes over."),
@@ -120,15 +120,15 @@
 
     /* ───────────── 2b 界面地图 ───────────── */
     {
-      id: "menus", icon: "🧭",
+      id: "menus",
       title: L("界面地图：下拉四页与按钮排布", "介面地圖：下拉四頁與按鈕排布", "Menu map: the four pull-down pages"),
       blocks: [
         { k: "note", tone: "new", x: L("【随下一版发布】本章是重排后的新界面；" + V + " 及更早版本里 `Live Stream` 仍在控制中心磁贴，其余开关集中在 `设置 → 设备`。",
                                        "【隨下一版發佈】本章是重排後的新介面；" + V + " 及更早版本中 `Live Stream` 仍在控制中心磁貼，其餘開關集中在 `設定 → 裝置`。",
                                        "[Ships with the next release] This chapter describes the rearranged UI; in " + V + " and earlier `Live Stream` is still a Control Center tile and the other switches sit under `Settings → Device`.") },
-        { k: "p", x: L("从屏幕顶部下拉，左右滑动切换四页：**① 控制中心 → ② 个人偏好 → ③ 视图与布局 → ④ 系统设置**。演出中常用的放在第 1 页，不常改的放在第 4 页。",
-                        "從螢幕頂部下拉，左右滑動切換四頁：**① 控制中心 → ② 個人偏好 → ③ 視圖與版面 → ④ 系統設定**。演出中常用的放在第 1 頁，不常改的放在第 4 頁。",
-                        "Pull down from the top of the screen and swipe between four pages: **① Control Center → ② User Profile → ③ View / Layout Manager → ④ Settings**. What you touch during a set is on page 1; what you rarely change is on page 4.") },
+        { k: "p", x: L("从屏幕顶部下拉，左右滑动切换四页：**1. 控制中心 → 2. 个人偏好 → 3. 视图与布局 → 4. 系统设置**。演出中常用的放在第 1 页，不常改的放在第 4 页。",
+                        "從螢幕頂部下拉，左右滑動切換四頁：**1. 控制中心 → 2. 個人偏好 → 3. 視圖與版面 → 4. 系統設定**。演出中常用的放在第 1 頁，不常改的放在第 4 頁。",
+                        "Pull down from the top of the screen and swipe between four pages: **1. Control Center → 2. User Profile → 3. View / Layout Manager → 4. Settings**. What you touch during a set is on page 1; what you rarely change is on page 4.") },
         { k: "table", head: [L("页", "頁", "Page"), L("名称", "名稱", "Name"), L("内容", "內容", "What is there")], rows: [
           ["1", "Control Center", L("8 个原厂磁贴 + 第 3 行 4 个演出磁贴", "8 個原廠磁貼 + 第 3 行 4 個演出磁貼", "8 stock tiles + a third row of 4 performance tiles")],
           ["2", "User Profile", L("Playback、Cues/Loops、Safety、Library", "Playback、Cues/Loops、Safety、Library", "Playback, Cues/Loops, Safety, Library")],
@@ -136,7 +136,7 @@
           ["4", "Settings", L("Device、Services、About / Update", "Device、Services、About / Update", "Device, Services, About / Update")],
         ] },
 
-        { k: "h", id: "cc", x: L("① 控制中心（Control Center）", "① 控制中心（Control Center）", "① Control Center") },
+        { k: "h", id: "cc", x: L("1. 控制中心（Control Center）", "1. 控制中心（Control Center）", "1. Control Center") },
         { k: "p", x: L("上面两行是 8 个原厂磁贴，第 3 行是 4 个只管演出的快捷磁贴，点一下循环切换：",
                         "上面兩行是 8 個原廠磁貼，第 3 行是 4 個只管演出的快捷磁貼，點一下循環切換：",
                         "The top two rows are the 8 stock tiles; the third row holds 4 performance-only tiles, each tap cycles the value:") },
@@ -150,7 +150,7 @@
                           "`Live Stream`（直播推流）已從控制中心移到 `設定 → 服務`，避免打碟時誤觸斷流。",
                           "`Live Stream` has moved from the Control Center to `Settings → Services` so it cannot be toggled by accident during a set.") },
 
-        { k: "h", id: "profile", x: L("② 个人偏好（User Profile）", "② 個人偏好（User Profile）", "② User Profile") },
+        { k: "h", id: "profile", x: L("2. 个人偏好（User Profile）", "2. 個人偏好（User Profile）", "2. User Profile") },
         { k: "table", head: [L("分组", "分組", "Group"), L("开关", "開關", "Settings")], rows: [
           [L("`Playback` 播放与音频 DSP", "`Playback` 播放與音訊 DSP", "`Playback` (playback & audio DSP)"),
            L("`Master Soft Clipper`（主输出软限幅）、`Auto-Gain`（0 dB 自动增益）、`Echo Out`（推杆回音）、`Stems EQ Mode`（分轨 EQ 映射）、`Color FX Style`（先锋风格滤波效果）",
@@ -164,7 +164,7 @@
              "`Auto-Analyze Drives`, `OmniSource` (unified browsing), `Dual-Column Browser`")],
         ] },
 
-        { k: "h", id: "layout", x: L("③ 视图与布局（View / Layout Manager）", "③ 視圖與版面（View / Layout Manager）", "③ View / Layout Manager") },
+        { k: "h", id: "layout", x: L("3. 视图与布局（View / Layout Manager）", "3. 視圖與版面（View / Layout Manager）", "3. View / Layout Manager") },
         { k: "ul", x: [
           L("顶部 **`View 1` – `View 5`**：五组独立布局预设，点一下切换；**`Save View`** 把当前布局存进选中的 View，重启后保留。",
             "頂部 **`View 1` – `View 5`**：五組獨立版面預設，點一下切換；**`Save View`** 把目前版面存進選中的 View，重啟後保留。",
@@ -183,7 +183,7 @@
           ["`4-Deck Waveform & Role`", L("四轨同屏与机位角色", "四軌同屏與機位角色", "Four-deck waveform and deck role")],
         ] },
 
-        { k: "h", id: "settings", x: L("④ 系统设置（Settings）", "④ 系統設定（Settings）", "④ Settings") },
+        { k: "h", id: "settings", x: L("4. 系统设置（Settings）", "4. 系統設定（Settings）", "4. Settings") },
         { k: "table", head: [L("分组", "分組", "Group"), L("内容", "內容", "Contents")], rows: [
           [L("`Device` 设备", "`Device` 裝置", "`Device`"),
            L("`Language`（三语，免重启实时切换）、`UI Scale`（全屏无黑边实时缩放）、`Pad LED Brightness`（打击垫亮度）、`4-Deck Waveform & Role`、`Power (Turn Off)`",
@@ -209,7 +209,7 @@
 
     /* ───────────── 3 流媒体 ───────────── */
     {
-      id: "streaming", icon: "🎵",
+      id: "streaming",
       title: L("流媒体与聚合搜索", "串流與聚合搜尋", "Streaming & unified search"),
       blocks: [
         { k: "p", x: L("碟机和手机连同一个 Wi-Fi，在音源菜单点开平台，手机扫屏幕二维码即可，不需要电脑或服务器。手机登录页默认英文，右上角可切简体 / 繁體，每页有分步教程。支持 **无损 FLAC / 320k MP3** 切换；播放过的曲目缓存在碟机内部存储，再次加载秒开。",
@@ -253,7 +253,7 @@
 
     /* ───────────── 4 Rekordbox / Pro DJ Link ───────────── */
     {
-      id: "prolink", icon: "🔗",
+      id: "prolink",
       title: L("Rekordbox 直插 & CDJ-3000 互联", "Rekordbox 直插 & CDJ-3000 互聯", "Rekordbox direct-read & CDJ-3000 link"),
       blocks: [
         { k: "h", id: "rekordbox", x: L("Rekordbox U 盘免重算", "Rekordbox 隨身碟免重算", "Rekordbox sticks, no re-analysis") },
@@ -279,7 +279,7 @@
 
     /* ───────────── 5 4 轨 / 影子 / 视图 ───────────── */
     {
-      id: "4deck", icon: "🎛️",
+      id: "4deck",
       title: L("4 轨同屏、影子波形 & 视图管理", "4 軌同屏、影子波形 & 視圖管理", "4-deck view, shadow decks & layouts"),
       blocks: [
         { k: "shot", src: "site/assets/screen-4deck-shadow.svg", cap: L("两台碟机 1+3 / 2+4：本机出声的轨 + 不出声的影子轨道", "兩台碟機 1+3 / 2+4：本機出聲的軌 + 不出聲的影子軌道", "Two decks as 1+3 / 2+4: the tracks it plays + silent shadow decks") },
@@ -314,7 +314,7 @@
 
     /* ───────────── 6 Stems / DSP ───────────── */
     {
-      id: "stems", icon: "🎚️",
+      id: "stems",
       title: L("本机 Stems、DSP 音质 & 实用操控", "本機 Stems、DSP 音質 & 實用操控", "On-deck Stems, DSP quality & controls"),
       blocks: [
         { k: "h", id: "stems4", x: L("4 轨 Stems 独立控制", "4 軌 Stems 獨立控制", "Independent 4-stem control") },
@@ -357,7 +357,7 @@
 
     /* ───────────── 7 Web 控制台 ───────────── */
     {
-      id: "webui", icon: "🌐",
+      id: "webui",
       title: L("Web 无线控制台（:8080/ui）", "Web 無線主控台（:8080/ui）", "Web console (:8080/ui)"),
       blocks: [
         { k: "p", x: L("碟机和电脑 / 手机在同一网络时，浏览器打开 `http://<碟机 IP>:8080/ui`（页面三语）。", "碟機與電腦 / 手機在同一網路時，瀏覽器開啟 `http://<碟機 IP>:8080/ui`（頁面三語）。", "With the deck and your computer / phone on the same network, open `http://<deck IP>:8080/ui` in a browser (three languages).") },
@@ -393,7 +393,7 @@
 
     /* ───────────── 8 FAQ ───────────── */
     {
-      id: "faq", icon: "❓",
+      id: "faq",
       title: L("常见问题与故障排查", "常見問題與故障排除", "FAQ & troubleshooting"),
       blocks: [
         { k: "faq", items: [
