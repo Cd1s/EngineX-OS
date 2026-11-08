@@ -139,7 +139,7 @@ SERVICES_MAIN = """
 	}
 	// EngineX settings a view keeps too: [snapshot key = root property, /v1/sc5000/ui query].
 	readonly property var scViewPrefs: [["scWave", "waveform"], ["scJog", "jog"], ["scUIScale", "uiScale"],
-		["scDualColumn", "browserDualColumn"], ["scBeatJumpPads", "beatJumpPads"], ["scSwapLoopOrder", "swapLoopOrder"]]
+		["scTracklistWaveform", "tracklistWaveform"], ["scDualColumn", "browserDualColumn"], ["scBeatJumpPads", "beatJumpPads"], ["scSwapLoopOrder", "swapLoopOrder"]]
 	function scViewApply(s) {
 		const m = scViewControls()
 		if (!m || (scFourDeckRole !== "" && !(m.deckCount && m.deckCount.settingNames && m.deckCount.settingNames.length >= 2))) return false
@@ -658,6 +658,7 @@ SERVICES_MAIN = """
 	property bool scUpfaderEcho: false
 	property string scLastBroadcastTrack: ""
 	property bool scDualColumn: false
+	property bool scTracklistWaveform: true
 	property int scSyncGuardPct: 0
 	property bool scSwapLoopOrder: false
 	property int scLedBrightness: 100
@@ -891,6 +892,8 @@ SERVICES_MAIN = """
 		else if (v) {
 			if (v.browserDualColumn !== undefined) scDualColumn = !!v.browserDualColumn
 			else if (v.browser_dual_column !== undefined) scDualColumn = v.browser_dual_column === "1" || v.browser_dual_column === 1 || v.browser_dual_column === true
+			if (v.tracklistWaveform !== undefined) scTracklistWaveform = !!v.tracklistWaveform
+			else if (v.tracklist_waveform !== undefined) scTracklistWaveform = v.tracklist_waveform === "1" || v.tracklist_waveform === 1 || v.tracklist_waveform === true
 			if (v.syncGuardPct !== undefined) scSyncGuardPct = parseInt(v.syncGuardPct) || 0
 			else if (v.sync_guard_pct !== undefined) scSyncGuardPct = parseInt(v.sync_guard_pct) || 0
 			if (v.swapLoopOrder !== undefined) scSwapLoopOrder = !!v.swapLoopOrder
@@ -923,6 +926,7 @@ SERVICES_MAIN = """
 			const key = line.slice(0, eq).trim()
 			const val = line.slice(eq + 1).trim()
 			if (key === "browser_dual_column") root.scDualColumn = val === "1"
+			else if (key === "tracklist_waveform") root.scTracklistWaveform = val !== "0" && val !== "false"
 			else if (key === "sync_guard_pct") root.scSyncGuardPct = parseInt(val) || 0
 			else if (key === "swap_loop_order") root.scSwapLoopOrder = val === "1"
 			else if (key === "led_brightness") root.scLedBrightness = parseInt(val) || 100
@@ -1569,6 +1573,15 @@ DUAL_COLUMN_ENTRY = """
 		},
 """
 
+TRACKLIST_WAVEFORM_ENTRY = """
+		EntryBase.ListEntry {
+			text: "Tracklist Waveform"
+			values: ["Off", "On"]
+			currentValue: values[root.scTracklistWaveform ? 1 : 0]
+			onSelected: function(index) { root.scCall("tracklistWaveform=" + index) }
+		},
+"""
+
 LIBRARY_ENTRIES = """
 		EntryBase.ListEntry {
 			text: "Auto-Analyze Drives"
@@ -1582,13 +1595,13 @@ LIBRARY_ENTRIES = """
 			currentValue: values[root.scOmniSource ? 1 : 0]
 			onSelected: function(index) { root.scCall("omniSource=" + index) }
 		},
-""" + DUAL_COLUMN_ENTRY
+""" + DUAL_COLUMN_ENTRY + TRACKLIST_WAVEFORM_ENTRY
 
 UI_SCALE_ENTRY = """
 		EntryBase.ListEntry {
 			text: "UI Scale"
-			readonly property var ids: ["100", "95", "90", "85", "80", "75"]
-			values: ["100%", "95%", "90%", "85%", "80%", "75%"]
+			readonly property var ids: ["110", "105", "100", "95", "90", "85", "80", "75"]
+			values: ["110%", "105%", "100%", "95%", "90%", "85%", "80%", "75%"]
 			currentValue: values[Math.max(0, ids.indexOf(String(root.scUIScale)))]
 			onSelected: function(index) { if (ids[index] !== String(root.scUIScale)) root.scCall("uiScale=" + ids[index]) }
 		},
@@ -2702,6 +2715,12 @@ def legacy_qml_fixes():
         # CF009 / CF010 / H143: after a view switch or Instant Double the track list
         # and breadcrumb stack grabbed focus mid-transition and the encoder lost it.
         v + "BrowseView/Components/TrackList.qml": [
+            (
+                "    readonly property bool showOverView: showBrowseView && PlanckGUI.views.browseViewController.showTrackOverview\n" if v53() else
+                "\treadonly property bool showOverView: showBrowseView && PlanckGUI.views.browseViewController.showTrackOverview\n",
+                "    readonly property bool showOverView: showBrowseView && PlanckGUI.views.browseViewController.showTrackOverview && (typeof root === \"undefined\" || root.scTracklistWaveform === undefined || root.scTracklistWaveform)\n" if v53() else
+                "\treadonly property bool showOverView: showBrowseView && PlanckGUI.views.browseViewController.showTrackOverview && (typeof root === \"undefined\" || root.scTracklistWaveform === undefined || root.scTracklistWaveform)\n",
+            ),
             (
                 "	readonly property string selectedProviderDisplayName: Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName\n",
                 "	readonly property string selectedProviderDisplayName: root.scBrand(Planck.librarianController.streamingInterfaceController.selectedProviderDisplayName)\n",
