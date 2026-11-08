@@ -1019,8 +1019,8 @@ func TestExportStreamingWithoutUSB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, beats, _ := ExtractANLZ(a); len(beats) < 4 {
-		t.Fatalf("grid: %d beats", len(beats))
+	if _, beats, _ := ExtractANLZ(a); len(beats) != 0 {
+		t.Fatalf("unanalysed download acquired invented grid: %d beats", len(beats))
 	}
 	if got := e.TrackPath(cloudID); got != filepath.Join(stream, "Artist A - Cloud Song.wav") {
 		t.Fatalf("TrackPath %q", got)
