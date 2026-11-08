@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
+ "encoding/json"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -391,10 +392,15 @@ func bridgeReadLibrary(t *testing.T, root string) *rekordbox.Library {
 
 func bridgeReadAnalysis(t *testing.T, root, path string) *rekordbox.Analysis {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(root, path))
-	if err != nil {
-		t.Fatal(err)
+	var b []byte
+	var err error
+	deadline := time.Now().Add(10*time.Second)
+	for {
+		b, err = os.ReadFile(filepath.Join(root, path))
+		if err == nil || !os.IsNotExist(err) || time.Now().After(deadline) { break }
+		time.Sleep(10*time.Millisecond)
 	}
+	if err != nil { t.Fatal(err) }
 	a, err := rekordbox.ParseAnalysis(b)
 	if err != nil {
 		t.Fatal(err)
@@ -442,6 +448,7 @@ func TestEngineBridgeNativePerformance(t *testing.T) {
 		t.Fatalf("playlist: %+v", lib.Playlists)
 	}
 	tr := lib.Tracks[0]
+	if tr.SampleRate != 48000 || tr.Duration != 4 { t.Fatalf("actual audio metadata: %+v", tr) }
 	if tr.ArtworkPath == "" {
 		t.Fatal("missing artwork row/reference")
 	}
@@ -450,6 +457,12 @@ func TestEngineBridgeNativePerformance(t *testing.T) {
 		t.Fatalf("artwork: %v", err)
 	}
 	dat := bridgeReadAnalysis(t, root, tr.AnalysisPath)
+	rawDAT, err := os.ReadFile(filepath.Join(root, tr.AnalysisPath))
+	if err != nil { t.Fatal(err) }
+	at := bytes.Index(rawDAT, []byte("PQTZ"))
+	if at < 0 || binary.BigEndian.Uint32(rawDAT[at+4:]) != 24 || binary.BigEndian.Uint32(rawDAT[at+16:]) != 0x00800000 {
+		t.Fatal("PQTZ wire header differs from the documented byte layout")
+	}
 	wantTimes := []uint32{0, 500, 1000, 1500, 2167, 2833, 3500}
 	if len(dat.Beats) != len(wantTimes) {
 		t.Fatalf("beats: %+v", dat.Beats)
@@ -484,7 +497,7 @@ func TestEngineBridgeNativePerformance(t *testing.T) {
 		if len(memory) != 2 || memory[0].TimeMS != 250 || !memory[1].Loop || memory[1].TimeMS != 1250 || memory[1].EndMS != 1750 {
 			t.Errorf("memory: %+v", memory)
 		}
-		if a == ext && (got[1].Name != "一 🚀" || got[1].Color != [4]byte{255, 17, 34, 51}) {
+		if a == ext && (got[1].Name != "一 🚀" || got[1].Color != [4]byte{255, 17, 34, 51} || got[1].ColorCode == 0) {
 			t.Errorf("extended cue: %+v", got[1])
 		}
 	}
@@ -506,6 +519,14 @@ func TestEngineBridgeNativePerformance(t *testing.T) {
 	if len(missing.Waveforms) != 0 || len(missing.Cues) != 0 {
 		t.Fatal("invented missing analysis")
 	}
+	bridgeExec(t, db, `DELETE FROM Track WHERE id=2`)
+	bridgeExec(t, db, `UPDATE Playlist SET title='Renamed' WHERE id=10`)
+	if err := prolink.SyncEngineToPioneerExport(root); err != nil { t.Fatal(err) }
+	refreshed := bridgeReadLibrary(t, root)
+	if len(refreshed.Tracks) != 2 || len(refreshed.Playlists) != 1 || refreshed.Playlists[0].Name != "Renamed" || !reflect.DeepEqual(refreshed.Playlists[0].Tracks, []uint32{3,1}) {
+		t.Fatalf("stale tracks/playlists retained after source edit: %+v / %+v",refreshed.Tracks,refreshed.Playlists)
+	}
+
 }
 
 func TestEngineBridgeIncrementalAndWALRefresh(t *testing.T) {
@@ -516,28 +537,16 @@ func TestEngineBridgeIncrementalAndWALRefresh(t *testing.T) {
 	for id := 1; id <= 70; id++ {
 		bridgeExec(t, db, `INSERT INTO Track(id,title,path,filename,length) VALUES(?,?,?,?,4)`, id, fmt.Sprintf("Track %d", id), fmt.Sprintf("../Music/%d.wav", id), fmt.Sprintf("%d.wav", id))
 	}
-	previous := 0
-	for call := 0; call < 10; call++ {
-		start := time.Now()
-		if err := prolink.SyncEngineToPioneerExport(root); err != nil {
-			t.Fatal(err)
-		}
-		if elapsed := time.Since(start); elapsed > 10*time.Second {
-			t.Fatalf("batch blocked for %s", elapsed)
-		}
-		lib := bridgeReadLibrary(t, root)
-		n := len(lib.Tracks)
-		if n <= previous || n-previous > 32 {
-			t.Fatalf("batch %d: %d -> %d", call, previous, n)
-		}
-		previous = n
-		if n == 70 {
-			break
-		}
-	}
-	if previous != 70 {
-		t.Fatalf("incomplete export: %d", previous)
-	}
+	start := time.Now()
+	if err := prolink.SyncEngineToPioneerExport(root); err != nil { t.Fatal(err) }
+	if elapsed := time.Since(start); elapsed > 10*time.Second { t.Fatalf("startup blocked for %s",elapsed) }
+	lib := bridgeReadLibrary(t,root)
+	if len(lib.Tracks) != 70 { t.Fatalf("only a partial library was published: %d",len(lib.Tracks)) }
+	pdbBefore,err:=os.ReadFile(filepath.Join(root,"PIONEER/rekordbox/export.pdb"));if err!=nil {t.Fatal(err)}
+	bridgeWaitExportComplete(t,root)
+	last:=bridgeReadAnalysis(t,root,lib.Tracks[69].AnalysisPath)
+	if len(last.Beats)!=0 {t.Fatal("unanalysed track acquired invented beats")}
+	pdbAfter,err:=os.ReadFile(filepath.Join(root,"PIONEER/rekordbox/export.pdb"));if err!=nil || !bytes.Equal(pdbBefore,pdbAfter) {t.Fatalf("background analysis changed immutable browse metadata: %v",err)}
 	source, err := os.Stat(mdb)
 	if err != nil {
 		t.Fatal(err)
@@ -553,7 +562,8 @@ func TestEngineBridgeIncrementalAndWALRefresh(t *testing.T) {
 	if err := prolink.SyncEngineToPioneerExport(root); err != nil {
 		t.Fatal(err)
 	}
-	lib := bridgeReadLibrary(t, root)
+	bridgeWaitExportComplete(t, root)
+	lib = bridgeReadLibrary(t, root)
 	if len(lib.Tracks) != 70 || lib.Tracks[0].ID != 1 || lib.Tracks[0].Key != "5A" || lib.Tracks[0].Title != "Changed" {
 		t.Fatalf("stale/reassigned track: %+v", lib.Tracks[0])
 	}
@@ -726,4 +736,19 @@ func TestEngineBridgeDoesNotInventUnknownDuration(t *testing.T) {
 	if len(a.Waveforms) != 0 {
 		t.Fatal("overview was stretched onto an invented duration")
 	}
+}
+
+// Completion is independent of the caller and never requires another OFF/ON.
+func bridgeWaitExportComplete(t *testing.T,root string) {
+ t.Helper();deadline:=time.Now().Add(15*time.Second)
+ for {
+  b,err:=os.ReadFile(filepath.Join(root,"PIONEER/rekordbox/.enginex-progress"))
+  var p struct{Stamp string}
+  if err==nil && json.Unmarshal(b,&p)==nil {
+   stamp,err:=os.ReadFile(filepath.Join(root,"PIONEER/rekordbox/.enginex-stamp"))
+   if err==nil && string(stamp)==p.Stamp {return}
+  }
+  if time.Now().After(deadline) {t.Fatal("background export did not finish automatically")}
+  time.Sleep(10*time.Millisecond)
+ }
 }
