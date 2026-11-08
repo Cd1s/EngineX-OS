@@ -1,3 +1,10 @@
 # Match actual /proc/interrupts names.
 SC5000_AUDIO_IRQ_PATTERN=ffb20000|snd|alsa|i2s|spdif|audio
-SC5000_GPU_IRQ_PATTERN=ffa30000|vop|hdmi
+# 4-core policy: GUI=1; SceneGraph/GPU=2; peripherals=3; audio DMA=0.
+# Non-RT helpers/OfflineAnalyzer/workqueues=0,3 (workqueue mask 9).
+# RT audio keeps Engine's individual affinities and priorities. Other IRQ
+# threads run FIFO 40, below AudioWatcher 45 and render/output 49.
+SC5000_GPU_IRQ_PATTERN=ffa30000|panfrost|vop|hdmi
+# Continue moving late-created non-RT Engine helpers after the startup passes.
+# 0 disables periodic sweeps; RT audio names/policies are always excluded.
+SC5000_THREAD_INTERVAL=30

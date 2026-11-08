@@ -5,6 +5,30 @@ int hook_test_engine;
 #include "engine_ui_hook.c"
 #include <assert.h>
 
+static void test_thread_policy(void) {
+    const char *jobs[] = {"J:I:Takingfreez", "J:N:Searching o", "J:I:Collecting", "Taking freeze", "Collecting anal"};
+    for (size_t i = 0; i < sizeof jobs / sizeof *jobs; i++) assert(thread_class(jobs[i]) == 0);
+    assert(thread_class("Freeze Checker ") == 2);
+    assert(thread_class("Analysis Queue ") == 2);
+    assert(thread_class("OfflineAnalyzer") == 2);
+    assert(thread_class("QQuickPixmapRea") == 1);
+    assert(thread_class("AudioOut") == 0);
+    assert(thread_class("AudioRenderer2") == 0);
+    assert(thread_class("AudioWatcher") == 0);
+    // Exercise the naming guard too: a job must retain CPU, I/O and scheduling policy.
+    cpu_set_t before, after;
+    assert(!sched_getaffinity(0, sizeof before, &before));
+    int policy = sched_getscheduler(0), nice = getpriority(PRIO_PROCESS, 0);
+    long io = syscall(SYS_ioprio_get, 1, 0);
+    hook_test_engine = 1;
+    guard_named_thread(pthread_self(), "J:I:Takingfreez");
+    hook_test_engine = 0;
+    assert(!sched_getaffinity(0, sizeof after, &after) && CPU_EQUAL(&before, &after));
+    assert(sched_getscheduler(0) == policy && getpriority(PRIO_PROCESS, 0) == nice);
+    assert(syscall(SYS_ioprio_get, 1, 0) == io);
+    puts("JobController: transient job names retain scheduling, affinity and I/O priority: PASS");
+}
+
 // Qt reads a file at data + a 32-bit offset: the 64-bit hook must place the pack blob there.
 static void test_resources(void) {
     char dir[] = "/tmp/hook-qrc-XXXXXX", path[64];
@@ -272,6 +296,7 @@ static void test_led(void) {
 
 int main(int argc, char **argv) {
     assert(sizeof engine_builds / sizeof *engine_builds == 1);
+    test_thread_policy();
     test_resources();
     test_collision();
     test_led();

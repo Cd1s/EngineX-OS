@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -27,8 +29,8 @@ class UiModSourceTest(unittest.TestCase):
 
     def test_cue_info_cached_and_master_not_fought(self):
         self.assertIn("property var scCueInfoCache", bp.SERVICES_MAIN)
-        self.assertIn("c.sig === sig", bp.SERVICES_MAIN)
-        self.assertIn("interval: 200; repeat: true; running: true\n\t\tonTriggered: root.scCueTick", bp.SERVICES_MAIN)
+        self.assertIn("c.text === text && c.label === label && c.color === color && c.urgent === urgent", bp.SERVICES_MAIN)
+        self.assertNotIn("onTriggered: root.scCueTick", bp.SERVICES_MAIN)
         self.assertIn("if ((!e.link || !root.scPlayer) && e.master && !at.master) at.wantMaster", bp.SERVICES_MAIN)
 
     def test_shadow_throttles(self):
@@ -93,7 +95,7 @@ class UiModSourceTest(unittest.TestCase):
     def test_cue_countdown_151(self):
         self.assertIn("function scNextCueInfo(d, tick)", bp.SERVICES_MAIN)
         self.assertNotIn('" BARS"', bp.SERVICES_MAIN)
-        self.assertIn('String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1),', bp.SERVICES_MAIN)
+        self.assertIn('String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1)', bp.SERVICES_MAIN)
         cap = bp.cue_capsule("", "X", 30, 20)
         self.assertIn('objectName: "EngineX_CueCountdown"', cap)
         self.assertIn("visible: info !== null && root.scCueCountdown", cap)
@@ -158,6 +160,15 @@ class UiModBuildTest(unittest.TestCase):
             tl = Path(tmp) / "packs" / "en" / "Skins" / "Embedded" / "Views" / "BrowseView" / "Components" / "TrackList.qml"
             self.assertTrue(tl.is_file(), f"{tl} not found")
             self.assertIn("root.scTracklistWaveform", tl.read_text())
+            # Exercise the actual generated packs too, not only the render helper.
+            for lang in ("en", "zh-Hans", "zh-Hant"):
+                main = Path(tmp) / "packs" / lang / "Skins/Embedded/EmbeddedMain.qml"
+                text = main.read_text()
+                dictionaries = json.loads(re.search(r"readonly property var scDicts: \((.+)\)", text).group(1))
+                self.assertTrue(all(isinstance(d, str) for d in dictionaries.values()))
+                entries = len(json.loads(dictionaries[lang]))
+                old_total = sum(len(json.loads(d)) for d in dictionaries.values())
+                self.assertEqual(entries * 3, old_total)
 
 
 if __name__ == "__main__":
