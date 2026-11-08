@@ -93,6 +93,37 @@ class DataBundleTest(unittest.TestCase):
         files = {str(p.relative_to(src)) for p in src.rglob('*') if p.is_file()}
         self.assertEqual(set(listed) | {'SHA256SUMS'}, files)
 
+    def test_gen2_img_wraps_the_bundle_and_installs_with_unlock(self):
+        r = self.build()
+        img = Path(r['image'])
+        self.assertEqual(img.name, 'SCLIVE4-5.3.0.1.1-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img')
+        raw = img.read_bytes()
+        bundle = Path(r['bundle']).read_bytes()
+        self.assertEqual(raw[128:], bundle)
+        lines = raw[:128].rstrip(b'\x00').decode().split('\n')
+        self.assertEqual(lines[:4], ['ENGINEX_DATA_BUNDLE_IMG_V1', hashlib.sha256(bundle).hexdigest(), 'SCLIVE4', '5.3.0.1.1'])
+        for prefix in bdb.PREFIXES:
+            self.assertIn(prefix, bdb.MODEL_NAMES)
+        dest = self.tmp / 'data/enginex'
+        alsa = self.tmp / 'data/system/var/overlay/lib/alsa/conf.d'
+        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa)}
+        # install.sh <img>, run from a copy of the bundle's own install.sh
+        src = self.extract(r)
+        run = lambda p: subprocess.run(['sh', str(src / 'install.sh'), str(p)], env=env, capture_output=True, text=True)
+        out = run(img)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual((dest / 'gen2-unlocked').read_text(), '1\n')
+        self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
+        self.assertEqual([p.name for p in dest.glob('.img-install.*')], [])  # scratch dir removed
+        # a flipped byte in the payload and a truncated image install nothing
+        shutil.rmtree(dest)
+        bad = self.tmp / 'bad.img'
+        bad.write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))
+        self.assertNotEqual(run(bad).returncode, 0)
+        bad.write_bytes(raw[:len(raw) // 2])
+        self.assertNotEqual(run(bad).returncode, 0)
+        self.assertFalse((dest / 'version.txt').exists())
+
     def test_edisksd_hook_is_packaged_and_activated(self):
         self.assertFalse((self.extract(self.build('none')) / 'lib/libedisksd-hook.so').exists())
         shutil.rmtree(self.tmp / 'x')

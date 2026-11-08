@@ -124,6 +124,38 @@ func (s *Server) saveSSHConfigLocked(cfg SSHConfig) error {
 	return providers.SaveJSON(s.sshConfigPath(), cfg)
 }
 
+// handleUnlockGen2 reports (GET) or sets (POST) the flag that lets a second-generation deck
+// take the bundle-carrying *-Update.img through its own updater (#119).
+func (s *Server) handleUnlockGen2(w http.ResponseWriter, r *http.Request) {
+	prefix := imagePrefix(deviceCompatible())
+	gen := 1
+	if dataBundleBoards[prefix] {
+		gen = 2
+	}
+	if r.Method == http.MethodPost {
+		if gen != 2 {
+			fail(w, http.StatusBadRequest, errors.New("only second-generation decks need the .img unlock"))
+			return
+		}
+		dir := s.customDir()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			fail(w, http.StatusInternalServerError, errors.New("cannot write "+dir))
+			return
+		}
+		if err := os.WriteFile(filepath.Join(dir, "gen2-unlocked"), []byte("1\n"), 0o644); err != nil {
+			fail(w, http.StatusInternalServerError, errors.New("cannot write gen2-unlocked"))
+			return
+		}
+		if err := os.Remove(filepath.Join(dir, "gen2-locked")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fail(w, http.StatusInternalServerError, errors.New("cannot remove gen2-locked"))
+			return
+		}
+		respond(w, map[string]any{"ok": true, "unlocked": s.isGen2Unlocked(), "prefix": prefix})
+		return
+	}
+	respond(w, map[string]any{"unlocked": s.isGen2Unlocked(), "generation": gen, "prefix": prefix})
+}
+
 func (s *Server) handleSSH(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:

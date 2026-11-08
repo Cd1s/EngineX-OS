@@ -102,6 +102,37 @@ class AZ0xPackerTests(unittest.TestCase):
                 # Boot records must remain intact
                 self.assertNotEqual(rec['sha256'], expected_sha)
 
+    def test_replace_record(self):
+        raw = make_az0x_fixture(splash_payload=b'splash data')
+        for payload in (b'x', b'larger replacement payload'):
+            result = az0x_packer.replace_record(raw, 'PART', 'splash', payload, 1)
+            before = az0x_packer.parse_header(raw)['records']
+            after = az0x_packer.parse_header(result)['records']
+            self.assertEqual(result[after[4]['offset']:after[4]['offset'] + after[4]['size']], payload)
+            self.assertEqual(result[after[5]['offset']:after[5]['offset'] + after[5]['size']], b'splash data')
+            self.assertEqual((after[5]['offset'] - before[5]['offset']) % 8, 0)
+            for rec in after:
+                data = result[rec['offset']:rec['offset'] + rec['size']]
+                self.assertEqual(hashlib.sha256(data).hexdigest(), rec['sha256'])
+
+        with self.assertRaises(az0x_packer.SafetyError):
+            az0x_packer.replace_record(raw, 'PART', 'splash', b'x')
+        with self.assertRaises(az0x_packer.SafetyError):
+            az0x_packer.replace_record(raw, 'BOOT', 'boot', b'x', 1)
+        with self.assertRaises(az0x_packer.SafetyError):
+            az0x_packer.replace_record(raw[:-1] + b'X', 'PART', 'splash', b'x', 1)
+
+    def test_cli_replace_record(self):
+        original = self.work / 'original.img'
+        payload = self.work / 'payload'
+        output = self.work / 'output.img'
+        original.write_bytes(make_az0x_fixture(splash_payload=b'splash data'))
+        payload.write_bytes(b'new payload')
+        self.assertEqual(az0x_packer.main(['replace-record', '--original', str(original),
+                         '--magic', 'PART', '--name', 'splash', '--board-mask', '0x1',
+                         '--payload', str(payload), '--output', str(output)]), 0)
+        self.assertTrue(output.exists())
+
     def test_validation_errors(self):
         raw = make_az0x_fixture()
 

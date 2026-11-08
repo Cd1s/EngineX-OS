@@ -767,6 +767,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	}
 	o.say(fmt.Sprintf("完成：%s 已安装 EngineX OS %s，Engine 正在重启。", label, b.Version),
 		fmt.Sprintf("Done: EngineX OS %s installed on %s; Engine is restarting.", b.Version, label))
+	sayGen2Unlocked(o, b)
 	return nil
 }
 
@@ -1258,7 +1259,17 @@ func modeB(ctx context.Context, o *options) error {
 	}
 	o.say(fmt.Sprintf("完成：EngineX OS %s 已刷入 %s，碟机正在重启，首次启动后自动激活。", b.Version, m.Name),
 		fmt.Sprintf("Done: EngineX OS %s flashed to %s; the deck reboots and activates itself.", b.Version, m.Name))
+	sayGen2Unlocked(o, b)
 	return nil
+}
+
+// sayGen2Unlocked: bundles from #119 on switch the deck's *-Update.img upgrade path on while installing.
+func sayGen2Unlocked(o *options, b *bundleInfo) {
+	if !bytes.Contains(b.HostScript, []byte("gen2-unlocked")) {
+		return
+	}
+	o.say("已自动开启二代机 .img 升级解锁：以后可直接在碟机屏幕上在线更新，或用 U 盘刷入 *-Update.img；恢复出厂设置不会丢失 EngineX OS。",
+		"Gen-2 .img upgrade is unlocked automatically: later updates can come from the deck's screen (OTA) or an *-Update.img on a USB stick, and Factory Reset keeps EngineX OS.")
 }
 
 func modeBGen1(ctx context.Context, o *options, m model) error {
@@ -1409,6 +1420,7 @@ func modeAZ(ctx context.Context, o *options, board, line string) error {
 	// 1cc5:2027 has no reboot command over USB.
 	o.say(fmt.Sprintf("完成：EngineX OS %s 已写入 %s。请按电源键关机再开机（或拔插电源），开机后自动激活。", b.Version, m.Name),
 		fmt.Sprintf("Done: EngineX OS %s written to %s. Press the power button to turn it off and on again (or replug power); it activates on boot.", b.Version, m.Name))
+	sayGen2Unlocked(o, b)
 	return nil
 }
 

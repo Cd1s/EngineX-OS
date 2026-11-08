@@ -2079,9 +2079,191 @@ const char _sc5000_alsa_boot_hook_dlsym_config_hook_001[] = "ALSA_0.9";
 __attribute__((used, visibility("default")))
 const char _snd_config_hook_sc5000_alsa_boot_hook_dlsym_config_hook_001[] = "ALSA_0.9";
 
-// #119: Intercept az01_apply_image when upgrading with an EngineX Data Bundle.
+// ---- #119: second-generation *-Update.img (EngineX data bundle in an image-shaped file) ----
+//
+// <PREFIX>-<VERSION>-EngineX-OS-<Model>-Update.img is a 128-byte header
+// ("ENGINEX_DATA_BUNDLE_IMG_V1\n<sha256 hex>\n<prefix>\n<version>\n", NUL padded) plus the
+// Data-Bundle .tar.gz. These decks check the AZ0x signature in software, so the stock updater
+// would refuse it. The hooks below make az01-update / planck-remote-screen accept such a file
+// after checking its SHA-256 (integrity only, not a signature), and only ever write /data/enginex.
+// The child processes of Scripts/engine inherit this LD_PRELOAD, so the updater and the
+// Factory Reset path (az01-update --erase-data) see the hooks.
+#define ENGINEX_IMG_MAGIC "ENGINEX_DATA_BUNDLE_IMG_V1\n"
+#define ENGINEX_IMG_MAGIC_LEN 27
+#define ENGINEX_IMG_HEADER 128
+#define ENGINEX_DATA_DIR "/data/enginex"
+#define ENGINEX_ERR_BAD_IMAGE (-13)
+
+enum { IMG_NONE = 0, IMG_OK = 1, IMG_BAD = -1 };
+
+typedef struct {
+    uint32_t h[8];
+    uint64_t len;
+    uint8_t buf[64];
+    size_t n;
+} sha256_ctx;
+
+static const uint32_t sha256_k[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+
+#define ROR32(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+
+static void sha256_block(sha256_ctx *c, const uint8_t *p) {
+    uint32_t w[64], a, b, cc, d, e, f, g, h;
+    for (int i = 0; i < 16; i++) w[i] = be32(p + 4 * i);
+    for (int i = 16; i < 64; i++) {
+        uint32_t s0 = ROR32(w[i - 15], 7) ^ ROR32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = ROR32(w[i - 2], 17) ^ ROR32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    a = c->h[0]; b = c->h[1]; cc = c->h[2]; d = c->h[3]; e = c->h[4]; f = c->h[5]; g = c->h[6]; h = c->h[7];
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = h + (ROR32(e, 6) ^ ROR32(e, 11) ^ ROR32(e, 25)) + ((e & f) ^ (~e & g)) + sha256_k[i] + w[i];
+        uint32_t t2 = (ROR32(a, 2) ^ ROR32(a, 13) ^ ROR32(a, 22)) + ((a & b) ^ (a & cc) ^ (b & cc));
+        h = g; g = f; f = e; e = d + t1; d = cc; cc = b; b = a; a = t1 + t2;
+    }
+    c->h[0] += a; c->h[1] += b; c->h[2] += cc; c->h[3] += d; c->h[4] += e; c->h[5] += f; c->h[6] += g; c->h[7] += h;
+}
+
+static void sha256_init(sha256_ctx *c) {
+    static const uint32_t iv[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    memcpy(c->h, iv, sizeof iv);
+    c->len = 0;
+    c->n = 0;
+}
+
+static void sha256_update(sha256_ctx *c, const uint8_t *p, size_t len) {
+    c->len += len;
+    while (len) {
+        size_t k = 64 - c->n < len ? 64 - c->n : len;
+        memcpy(c->buf + c->n, p, k);
+        c->n += k; p += k; len -= k;
+        if (c->n == 64) { sha256_block(c, c->buf); c->n = 0; }
+    }
+}
+
+static void sha256_final(sha256_ctx *c, char hex[65]) {
+    uint64_t bits = c->len * 8;
+    uint8_t pad = 0x80, zero = 0, lenbe[8];
+    sha256_update(c, &pad, 1);
+    while (c->n != 56) sha256_update(c, &zero, 1);
+    for (int i = 0; i < 8; i++) lenbe[i] = (uint8_t)(bits >> (56 - 8 * i));
+    sha256_update(c, lenbe, 8);
+    for (int i = 0; i < 8; i++) snprintf(hex + 8 * i, 9, "%08x", c->h[i]);
+}
+
+// IMG_NONE: not an EngineX data bundle at all. IMG_BAD: it claims to be one but has no V1 header,
+// is truncated or its payload SHA-256 differs from the header's. IMG_OK: header and payload agree.
+static int enginex_img_check(const char *path) {
+    uint8_t head[ENGINEX_IMG_HEADER];
+    int fd = path ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+    if (fd < 0) return IMG_NONE;
+    ssize_t n = read(fd, head, sizeof head);
+    if (n < 19 || memcmp(head, "ENGINEX_DATA_BUNDLE", 19) != 0) { close(fd); return IMG_NONE; }
+    int ok = n == ENGINEX_IMG_HEADER && memcmp(head, ENGINEX_IMG_MAGIC, ENGINEX_IMG_MAGIC_LEN) == 0 &&
+             head[ENGINEX_IMG_MAGIC_LEN + 64] == '\n';
+    sha256_ctx c;
+    char hex[65];
+    uint8_t buf[16384];
+    size_t payload = 0;
+    if (ok) {
+        sha256_init(&c);
+        while ((n = read(fd, buf, sizeof buf)) > 0) { sha256_update(&c, buf, (size_t)n); payload += (size_t)n; }
+        if (n < 0 || payload == 0) ok = 0;
+    }
+    close(fd);
+    if (!ok) return IMG_BAD;
+    sha256_final(&c, hex);
+    return strncasecmp(hex, (const char *)head + ENGINEX_IMG_MAGIC_LEN, 64) == 0 ? IMG_OK : IMG_BAD;
+}
+
+static int enginex_gen2_locked(void) { return access(ENGINEX_DATA_DIR "/gen2-locked", F_OK) == 0; }
+
+static uint64_t enginex_dummy_img[16];
+static int enginex_img_state = IMG_NONE;  // result of the last az01_open_image on an EngineX image
+
+// az01_download_image / az01-update --file: open -> set_onboard_key_lookup -> verify -> close -> apply.
+// The stand-in handle is never given to the real library.
+__attribute__((visibility("default")))
+int az01_open_image(const char *path, void **img_out) {
+    int state = enginex_img_check(path);
+    if (state != IMG_NONE && img_out) {
+        enginex_img_state = state;
+        *img_out = enginex_dummy_img;
+        return 0;
+    }
+    static void *orig_fn = NULL;
+    int (*fn)(const char *, void **) = next_symbol(&orig_fn, "az01_open_image");
+    return fn ? fn(path, img_out) : -1;
+}
+
+__attribute__((visibility("default")))
+int az01_image_set_onboard_key_lookup(void *img) {
+    if (img == (void *)enginex_dummy_img) return 0;
+    static void *orig_fn = NULL;
+    int (*fn)(void *) = next_symbol(&orig_fn, "az01_image_set_onboard_key_lookup");
+    return fn ? fn(img) : -1;
+}
+
+__attribute__((visibility("default")))
+int az01_verify_image(void *img, int flags) {
+    if (img == (void *)enginex_dummy_img)
+        return enginex_img_state == IMG_OK && !enginex_gen2_locked() ? 0 : ENGINEX_ERR_BAD_IMAGE;
+    static void *orig_fn = NULL;
+    int (*fn)(void *, int) = next_symbol(&orig_fn, "az01_verify_image");
+    return fn ? fn(img, flags) : -1;
+}
+
+__attribute__((visibility("default")))
+int az01_close_image(void *img) {
+    if (img == (void *)enginex_dummy_img) return 0;
+    static void *orig_fn = NULL;
+    int (*fn)(void *) = next_symbol(&orig_fn, "az01_close_image");
+    return fn ? fn(img) : -1;
+}
+
+static int run_wait(const char *prog, char *const argv[]) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        execv(prog, argv);
+        _exit(127);
+    }
+    int status = 0;
+    return pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static void enginex_reboot(void) {
+    sync();
+    char *const argv[] = {"systemctl", "reboot", NULL};
+    run_wait("/bin/systemctl", argv);
+}
+
+// Intercepts az01_apply_image for EngineX data bundles; everything else goes to the stock updater.
 __attribute__((visibility("default")))
 int az01_apply_image(const char *path, int flags) {
+    int state = enginex_img_check(path);
+    if (state == IMG_BAD) return ENGINEX_ERR_BAD_IMAGE;
+    if (state == IMG_OK) {
+        if (enginex_gen2_locked()) return ENGINEX_ERR_BAD_IMAGE;
+        fprintf(stderr, "engine-ui-hook: intercepted az01_apply_image with an EngineX data bundle image (%s)\n", path);
+        // Unpacked next to the install (the /tmp tmpfs is small) and installed by the bundle's own
+        // install.sh, so an older install.sh that does not know "install.sh <img>" is not needed.
+        static const char script[] =
+            "set -e; mkdir -p " ENGINEX_DATA_DIR "; w=$(mktemp -d " ENGINEX_DATA_DIR "/.ota-img.XXXXXX); trap 'rm -rf \"$w\"' EXIT; "
+            "tail -c +129 \"$1\" | tar -xzf - -C \"$w\"; sh \"$w\"/*/install.sh";
+        char *const argv[] = {"sh", "-c", (char *)script, "sh", (char *)path, NULL};
+        if (run_wait("/bin/sh", argv) != 0) return -1;
+        if (flags & 1) unlink(path);
+        enginex_reboot();
+        return 0;
+    }
     if (path) {
         int fd = open(path, O_RDONLY);
         if (fd >= 0) {
@@ -2090,20 +2272,8 @@ int az01_apply_image(const char *path, int flags) {
             close(fd);
             if (n >= 19 && memmem(buf, (size_t)n, "ENGINEX_DATA_BUNDLE", 19) != NULL) {
                 fprintf(stderr, "engine-ui-hook: intercepted az01_apply_image with ENGINEX_DATA_BUNDLE (%s)\n", path);
-                pid_t pid = fork();
-                if (pid == 0) {
-                    execl("/bin/sh", "sh", "/data/enginex/install.sh", path, (char *)NULL);
-                    _exit(127);
-                }
-                int status = 0;
-                if (pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                    pid_t rb = fork();
-                    if (rb == 0) {
-                        execl("/bin/systemctl", "systemctl", "reboot", (char *)NULL);
-                        _exit(127);
-                    }
-                    if (rb > 0) waitpid(rb, NULL, 0);
-                }
+                char *const argv[] = {"sh", "/data/enginex/install.sh", (char *)path, NULL};
+                if (run_wait("/bin/sh", argv) == 0) enginex_reboot();
                 return 0;
             }
         }
@@ -2117,4 +2287,64 @@ int az01_apply_image(const char *path, int flags) {
     return -1;
 }
 
+// Removes path (a file, a symlink itself, or a directory tree) without following symlinks.
+static void rm_tree(int parent, const char *name) {
+    if (unlinkat(parent, name, 0) == 0 || errno == ENOENT) return;
+    int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd >= 0) {
+        DIR *d = fdopendir(fd);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL)
+                if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) rm_tree(dirfd(d), e->d_name);
+            closedir(d);
+        } else {
+            close(fd);
+        }
+    }
+    unlinkat(parent, name, AT_REMOVEDIR);
+}
 
+// Factory Reset on a /data-bundle deck: wipes the user's data and EngineX's own settings but keeps
+// the installed bundle, UI packs, version, unlock flag, SSH keys and /data/system, so EngineX OS
+// survives. /data/enginex and the /data/sc5000-custom compat symlink are never removed.
+// ENGINEX_TEST_DATA_ROOT redirects /data (and skips the reboot) for the unit test.
+__attribute__((visibility("default")))
+int az01_erase_data_partition(void) {
+    const char *root = getenv("ENGINEX_TEST_DATA_ROOT");
+    int testing = root && *root;
+    if (!testing) root = "/data";
+    char probe[PATH_MAX];
+    snprintf(probe, sizeof probe, "%s/enginex/bundle/install.sh", root);
+    if (getenv("SC5000_TEST_PASSTHROUGH_ERASE") || access(probe, F_OK) != 0 ||
+        access("/usr/share/sc5000-custom/sc5000-suite.xz", F_OK) == 0) {
+        // 1st-gen: EngineX lives in the rootfs and sc5000-custom-prepare restores it after the stock erase.
+        static void *orig_fn = NULL;
+        int (*fn)(void) = next_symbol(&orig_fn, "az01_erase_data_partition");
+        return fn ? fn() : -1;
+    }
+    int rootfd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (rootfd < 0) return -1;
+    DIR *d = fdopendir(rootfd);
+    if (!d) { close(rootfd); return -1; }
+    static const char *const keep[] = {"enginex", "system", "sc5000-custom", "lost+found"};
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        int skip = !strcmp(e->d_name, ".") || !strcmp(e->d_name, "..");
+        for (size_t i = 0; i < sizeof keep / sizeof *keep; i++) skip |= !strcmp(e->d_name, keep[i]);
+        if (!skip) rm_tree(rootfd, e->d_name);
+    }
+    int ef = openat(rootfd, "enginex", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (ef >= 0) {
+        static const char *const gone[] = {"state", "mods", "ui/settings.conf", "ui/views.json", "ui/mods-overlay",
+                                           "ui/mods-quarantined", "ui/safe-mode", "ui/boot-count", "ui/boot-token", "ui/last-crash"};
+        for (size_t i = 0; i < sizeof gone / sizeof *gone; i++) rm_tree(ef, gone[i]);
+        mkdirat(ef, "state", 0755);
+        mkdirat(ef, "mods", 0755);
+        close(ef);
+    }
+    closedir(d);
+    if (!testing) enginex_reboot();
+    else sync();
+    return 0;
+}

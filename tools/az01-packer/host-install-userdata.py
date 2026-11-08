@@ -180,6 +180,11 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
         ver_top_f.write_text(f'{version}\n')
         files.append((ver_top_f, Path(root) / 'version.txt', 0o100644))
 
+        # Opens the *-Update.img upgrade path on the deck (#119).
+        unlock_f = tmp / 'gen2-unlocked'
+        unlock_f.write_text('1\n')
+        files.append((unlock_f, Path(root) / 'gen2-unlocked', 0o100644))
+
         # boot-activate.sh hands this to root's sshd (#116).
         if ssh_key is not None:
             files.append((Path(ssh_key), Path(root) / 'authorized_keys', 0o100600))

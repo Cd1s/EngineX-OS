@@ -288,17 +288,26 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 	v.Latest, v.URL = rel.Tag, rel.URL
 	v.UpdateAvailable = newerVersion(rel.Tag, v.Current)
 	if prefix := imagePrefix(deviceCompatible()); prefix != "" {
-		// Engine's own scan expects <PREFIX>-<version>-...Update.img; the second
-		// generation takes the /data bundle instead (#86).
-		suffix := "-Update.img"
-		if dataBundleBoards[prefix] {
-			suffix = bundleSuffix
-		}
-		for _, a := range rel.Assets {
-			if strings.HasPrefix(a.Name, prefix+"-") && strings.HasSuffix(a.Name, suffix) && strings.HasPrefix(a.URL, "https://") {
-				v.DownloadURL = a.URL
-				break
+		// Engine's own scan expects <PREFIX>-<version>-...Update.img. The second generation
+		// takes the /data bundle (#86); once unlocked (#119) it prefers the bundle-carrying
+		// *-Update.img, which the updater hooks accept, and falls back to the bundle.
+		find := func(suffix string) string {
+			for _, a := range rel.Assets {
+				if strings.HasPrefix(a.Name, prefix+"-") && strings.HasSuffix(a.Name, suffix) && strings.HasPrefix(a.URL, "https://") {
+					return a.URL
+				}
 			}
+			return ""
+		}
+		if dataBundleBoards[prefix] {
+			if s.isGen2Unlocked() {
+				v.DownloadURL = find("-Update.img")
+			}
+			if v.DownloadURL == "" {
+				v.DownloadURL = find(bundleSuffix)
+			}
+		} else {
+			v.DownloadURL = find("-Update.img")
 		}
 	}
 	return v
@@ -369,17 +378,31 @@ func newerVersion(latest, current string) bool {
 	return len(l) > len(c)
 }
 
+// customDir is where the deck keeps EngineX's /data install (/data/enginex, or the dir of the test VersionFile).
+func (s *Server) customDir() string {
+	if s.cfg.VersionFile != "" {
+		return filepath.Dir(s.cfg.VersionFile)
+	}
+	if target, err := filepath.EvalSymlinks(legacyBundleCustomDir); err == nil && target != "" {
+		return target
+	}
+	return bundleCustomDir
+}
+
+// isGen2Unlocked: the *-Update.img path is open (set by the bundle's install.sh or the console, #119).
+func (s *Server) isGen2Unlocked() bool {
+	dir := s.customDir()
+	_, errU := os.Stat(filepath.Join(dir, "gen2-unlocked"))
+	_, errL := os.Stat(filepath.Join(dir, "gen2-locked"))
+	return errU == nil && errL != nil
+}
+
 // applyDataBundleUpdate downloads a second-generation /data bundle, unpacks it
 // into a scratch directory next to the install and lets its own install.sh
 // verify SHA256SUMS and swap the parts in (#86).
 func (s *Server) applyDataBundleUpdate(downloadURL string) {
 	fail := func(msg string) { s.setUpdateProgress(0, msg, true) }
-	customDir := bundleCustomDir
-	if s.cfg.VersionFile != "" {
-		customDir = filepath.Dir(s.cfg.VersionFile)
-	} else if target, err := filepath.EvalSymlinks(legacyBundleCustomDir); err == nil && target != "" {
-		customDir = target
-	}
+	customDir := s.customDir()
 	if err := os.MkdirAll(customDir, 0o700); err != nil {
 		fail("cannot write " + customDir)
 		return

@@ -21,11 +21,15 @@ pre)
         n=1
         rm -f "$UI/safe-mode"
     fi
+    # running-sentinel survives only if no stop hook ran (power cut, even after a healthy
+    # start): no crash to count, but the cache may be truncated.
+    dirty=$crashed; [ ! -e "$UI/running-sentinel" ] || dirty=1
     rm -f "$UI/boot-token"
+    : > "$UI/running-sentinel"
     echo "$n" > "$UI/boot-count"
     # #140: a .qmlc truncated by a power cut would trap the deck at the splash screen;
     # Qt rebuilds the cache, so drop it after any crash and in safe-mode.
-    if [ -n "$crashed" ] || [ "$n" -ge 3 ] || [ -e "$UI/safe-mode" ]; then
+    if [ -n "$dirty" ] || [ "$n" -ge 3 ] || [ -e "$UI/safe-mode" ]; then
         rm -rf "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
     fi
     if [ "$n" -ge 3 ] || [ -e "$UI/safe-mode" ]; then
@@ -60,7 +64,9 @@ pre)
     # Engine 5.3.0 cannot ATTACH anything while its internal m.db reserves page bytes
     # (a `.recover`ed copy did): rebuild it with reserve 0 before Engine opens it.
     guardian=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
-    [ ! -x "$guardian" ] || "$guardian" --heal-mount "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve > /dev/null 2>&1 || :
+    # A huge or locked m.db must not hold the splash screen forever.
+    t=; ! command -v timeout >/dev/null 2>&1 || t="timeout 10"
+    [ ! -x "$guardian" ] || $t "$guardian" --heal-mount "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve > /dev/null 2>&1 || :
     # Engine 5.3.0 sends a TIDAL client with no saved account to the Engine DJ
     # Profile login (#56), and every EngineX service runs on that client. With the
     # account entry (no token in it) Engine logs in to the local gateway at start.
@@ -190,10 +196,12 @@ post)
     token=$$-$(cat "$UI/boot-count" 2>/dev/null)
     echo "$token" > "$UI/boot-token"
     ( sleep "${SC5000_UI_HEALTHY_AFTER:-15}"
-      [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$token" ] && rm -f "$UI/boot-count" "$UI/boot-token" "$UI/last-crash" "$UI/safe-mode"
+      # An Engine that is gone by now keeps its token: the next pre counts it as a crash.
+      [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$token" ] && ${SC5000_UI_ALIVE_CMD:-systemctl is-active --quiet engine.service} && rm -f "$UI/boot-count" "$UI/boot-token" "$UI/last-crash" "$UI/safe-mode"
     ) </dev/null >/dev/null 2>&1 &
     ;;
 stop)
+    rm -f "$UI/running-sentinel"
     # systemd sets SERVICE_RESULT=success for a requested stop/restart; a crash
     # (exit-code, signal, core-dump, timeout) keeps counting towards safe-mode.
     if [ "${SERVICE_RESULT:-success}" = success ]; then

@@ -262,10 +262,19 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual((ui/'.pack-version').read_text(), '5.0.4.1\n')
         self.assertEqual((data/'enginex/version.txt').read_text(), '5.0.4.1\n')
         self.assertEqual(list(ui.glob('.install.*')) + list(ui.glob('*.replaced')), [])
-        # Same version again: a hand-deployed pack is left alone.
+        self.assertFalse((data/'AppDataUser/AIR Music Technology/Engine/.cache/qml').exists())
+        # Same version again: a hand-deployed pack is left alone, and so is the crash state
+        # engine-ui-guard needs to see (#140).
+        qml = data/'AppDataUser/AIR Music Technology/Engine/.cache/qml'
+        qml.mkdir(parents=True)
+        for name in ('safe-mode', 'mods-quarantined', 'boot-count', 'boot-token', 'last-crash'):
+            (ui/name).write_text('1')
         (ui/'packs/en/Main.qml').write_text('dev')
         subprocess.run(['sh', '-s'], input=script, check=True, capture_output=True)
         self.assertEqual((ui/'packs/en/Main.qml').read_text(), 'dev')
+        self.assertTrue(qml.is_dir())
+        for name in ('safe-mode', 'mods-quarantined', 'boot-count', 'boot-token', 'last-crash'):
+            self.assertTrue((ui/name).exists(), name)
         # A rebuilt release with the same version but new packs is installed.
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode='w') as t:
@@ -276,6 +285,9 @@ class FilesystemTests(unittest.TestCase):
         (data/'enginex/version.txt').write_text('5.0.4\n')
         subprocess.run(['sh', '-s'], input=script, check=True, capture_output=True)
         self.assertEqual((ui/'packs/en/Main.qml').read_text(), 'rebuilt')
+        self.assertFalse(qml.exists())
+        for name in ('safe-mode', 'mods-quarantined', 'boot-count', 'boot-token', 'last-crash'):
+            self.assertFalse((ui/name).exists(), name)
         self.assertEqual((data/'enginex/version.txt').read_text(), '5.0.4.1\n')
 
     def test_prepare_atomic_failure_retry_identity_and_symlink_guard(self):
