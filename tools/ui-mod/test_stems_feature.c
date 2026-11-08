@@ -751,7 +751,7 @@ static void *named_worker(void *unused) {
     (void)unused;
     assert(pthread_setname_np(pthread_self(), "Analysis Queue") == 0);
     cpu_set_t cpus; assert(pthread_getaffinity_np(pthread_self(), sizeof cpus, &cpus) == 0);
-    assert(!CPU_ISSET(0, &cpus) && CPU_COUNT(&cpus) == 1);
+    assert(!CPU_ISSET(1, &cpus) && !CPU_ISSET(2, &cpus) && CPU_COUNT(&cpus) == 1);
     int policy; struct sched_param p;
     assert(!pthread_getschedparam(pthread_self(), &policy, &p) && policy == SCHED_IDLE);
     assert(getpriority(PRIO_PROCESS, 0) == 19);
@@ -763,7 +763,7 @@ static void *foreign_named_worker(void *fd) {
     char c;
     assert(read(*(int *)fd, &c, 1) == 1);
     cpu_set_t cpus; assert(!pthread_getaffinity_np(pthread_self(), sizeof cpus, &cpus));
-    assert(!CPU_ISSET(0, &cpus));
+    assert(CPU_ISSET(0, &cpus) && !CPU_ISSET(1, &cpus) && !CPU_ISSET(2, &cpus));
     assert(getpriority(PRIO_PROCESS, 0) == 10);
     return NULL;
 }
@@ -786,7 +786,8 @@ static void *qt_named_worker(void *arg) {
     assert(actual.sched_priority == 0);
     assert(getpriority(PRIO_PROCESS, 0) == (test->kind == 2 ? 19 : 10));
     cpu_set_t wanted = engine_cpus, got, cpu1;
-    CPU_CLR(0, &wanted);
+    CPU_CLR(1, &wanted); // EMain
+    CPU_CLR(2, &wanted); // SceneGraph
     if (test->kind == 2) {
         int last = CPU_SETSIZE - 1;
         while (!CPU_ISSET(last, &wanted)) last--;

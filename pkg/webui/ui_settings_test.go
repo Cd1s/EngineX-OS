@@ -567,6 +567,9 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	defer resp.Body.Close()
 	var v uiSettings
 	json.NewDecoder(resp.Body).Decode(&v)
+	if v.DebugTelemetry {
+		t.Fatal("DebugTelemetry must default to false")
+	}
 	if v.StreamSortRole != "default" || v.StreamSortOrder != "asc" || v.BrowserDualColumn != false ||
 		!v.TracklistWaveform ||
 		v.SyncGuardPct != 0 || v.SwapLoopOrder != false || v.LedBrightness != 100 || !v.CueCountdown ||

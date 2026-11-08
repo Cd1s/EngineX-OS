@@ -1429,6 +1429,7 @@ SERVICES_MAIN = """
 	}
 	function scParseSettingsConf(text) {
 		scCueCountdown = true // default on: only an explicit cue_countdown=0 turns it off
+		scTracklistWaveform = true
 		for (const line of (text || "").split("\n")) {
 			const eq = line.indexOf("=")
 			if (eq < 0) continue
