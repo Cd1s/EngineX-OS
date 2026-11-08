@@ -38,15 +38,23 @@ class DictionaryTest(unittest.TestCase):
 @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise QML JavaScript")
 class HotPathTest(unittest.TestCase):
     def test_cue_bindings_and_status_polling(self):
-        names = ("scTr", "scCuePlaying", "scProbeCueClocks", "scCueProps", "scNextCueInfo", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
+        names = ("scDeckLocked", "scShadowVisible", "scTr", "scCuePlaying", "scProbeCueClocks", "scCueProps", "scNextCueInfo", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
         functions = []
         for name in names:
-            functions.append(re.search(r"\tfunction " + name + r"\([^\n]*\) \{\n.*?\n\t\}", packs.SERVICES_MAIN, re.S).group())
+            start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", packs.SERVICES_MAIN)
+            self.assertIsNotNone(start, name)
+            line_end = packs.SERVICES_MAIN.index("\n", start.start())
+            if packs.SERVICES_MAIN[start.start():line_end].rstrip().endswith("}"):
+                end = line_end
+            else:
+                end = packs.SERVICES_MAIN.index("\n\t}", start.end()) + 3
+            functions.append(packs.SERVICES_MAIN[start.start():end])
         running = re.findall(r"id: scCueClock[1-4].*?running: ([^\n]+)", packs.SERVICES_MAIN, re.S)
         self.assertEqual(len(running), 4)
         script = r'''
 const assert = require('node:assert/strict');
 const root = globalThis;
+var scShadowDisplayOnly = false, scFourDeckRole = "", scPlayer = false, scShadowAt = {};
 let lookups = 0, made = 0, applied = 0;
 const properties = {};
 const unavailable = new Set();

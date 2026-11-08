@@ -166,7 +166,7 @@ class ShadowDisplayTest(unittest.TestCase):
     def js(self, body):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
-                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfoRaw",
+                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo",
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress")
         functions = []
@@ -298,7 +298,7 @@ assert.deepEqual(scShadowDisplayRequests, {});
 const beats = [{ms: 0, number: 0}, {ms: 1000, number: 1}, {ms: 1500, number: 2}, {ms: 1750, number: 3}];
 const meta = {beats, cues: [{i: 1, ms: 1750, n: 'DROP', c: '#123456'}]};
 scShadowDisplay[2] = {key: 'A', meta, positionMs: 1000, at: now, pitch: 0, playing: false, bpm: 999};
-const cue = scNextCueInfoRaw(2); // must not read Engine or invent a constant-BPM grid
+const cue = scNextCueInfo(2); // must not read Engine or invent a constant-BPM grid
 assert.equal(cue.text, '0.3');
 assert.equal(cue.label, 'DROP'); assert.equal(cue.color, '#123456');
 const grid = scShadowGrid(2, meta, 900, 1600);
@@ -316,14 +316,14 @@ const meta = {key: 'A', sampleRate: 48000, durationMs: 4000,
 scShadowApplyAll([{deck: 2, key: 'A', cues: [{i: 1, p: 72000, n: 'LIVE', c: '#ff0000'}]}]);
 requests[0].finish(200, meta);
 assert.equal(scShadowCuesFor(2, scShadowData(2))[0].ms, 1500);
-assert.equal(scNextCueInfoRaw(2).text, '0.4');
+assert.equal(scNextCueInfo(2).text, '0.4');
 scShadowApplyAll([{deck: 2, key: 'A', cues: [{i: 1, p: 48000, n: 'EDIT'}]}]);
 assert.equal(requests.length, 1);
 assert.equal(scShadowCuesFor(2, scShadowData(2))[0].ms, 1000);
-assert.equal(scNextCueInfoRaw(2).label, 'EDIT');
-assert.equal(scNextCueInfoRaw(2).text, '0.3');
+assert.equal(scNextCueInfo(2).label, 'EDIT');
+assert.equal(scNextCueInfo(2).text, '0.3');
 scShadowApplyAll([{deck: 2, key: 'A', cues: []}]);
-assert.equal(scNextCueInfoRaw(2), null); // deleting all source cues must clear saved markers
+assert.equal(scNextCueInfo(2), null); // deleting all source cues must clear saved markers
 scShadowApplyAll([{deck: 2, key: 'B'}]);
 assert.equal(scShadowData(2).liveCues, null);
 """)
