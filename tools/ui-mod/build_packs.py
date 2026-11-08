@@ -2489,6 +2489,7 @@ SHADOW_LAYER = r"""
         readonly property real position: active ? root.scShadowPosition(sample, now) : 0
         readonly property bool stale: !!sample && (sample.stale || now - sample.at >= root.scShadowExpiryMs)
         readonly property real duration: meta && meta.durationMs > 0 ? meta.durationMs : 1
+        readonly property real waveformDuration: meta && meta.waveformDurationMs > 0 ? meta.waveformDurationMs : duration
         readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
         readonly property real playhead: overview ? position / duration : 0.5
         readonly property real start: overview ? 0 : position - span * playhead
@@ -2567,7 +2568,7 @@ SHADOW_LAYER = r"""
             fillMode: Image.Stretch
             x: scDisplay.screenX(0)
             y: 0
-            width: scDisplay.duration / scDisplay.span * scDisplay.width
+            width: (scDisplay.overview || !scDisplay.detailed ? scDisplay.duration : scDisplay.waveformDuration) / scDisplay.span * scDisplay.width
             height: scDisplay.height
             opacity: scDisplay.stale ? 0.55 : 1
             // No color conversion: the server PNG uses the original three-band palette.
@@ -2577,8 +2578,8 @@ SHADOW_LAYER = r"""
             delegate: Image {
                 required property int index
                 readonly property int pixels: Math.max(0, Math.min(scDisplay.tilePixels, scDisplay.totalPixels - index * scDisplay.tilePixels))
-                readonly property real startMs: index * scDisplay.tilePixels / scDisplay.totalPixels * scDisplay.duration
-                readonly property real endMs: (index * scDisplay.tilePixels + pixels) / scDisplay.totalPixels * scDisplay.duration
+                readonly property real startMs: index * scDisplay.tilePixels / scDisplay.totalPixels * scDisplay.waveformDuration
+                readonly property real endMs: (index * scDisplay.tilePixels + pixels) / scDisplay.totalPixels * scDisplay.waveformDuration
                 readonly property bool intersects: pixels > 0 && startMs < scDisplay.start + scDisplay.span && endMs > scDisplay.start
                 source: intersects ? root.scShadowAsset(scDisplay.tiles[index]) : ""
                 sourceSize.width: Math.min(2048, pixels)
