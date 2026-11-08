@@ -55,6 +55,22 @@ func TestAuthenticationAndBusy(t *testing.T) {
 			t.Fatalf("%s: %d expected %d", c.path, resp.StatusCode, c.status)
 		}
 	}
+	// Non-loopback private/CGNAT LAN decks can probe /healthz and render without the relay token.
+	for addr, want := range map[string]int{
+		"127.0.0.1:5000":     401,
+		"203.0.113.5:5000":   401,
+		"192.168.1.224:5000": 200,
+		"192.168.1.238:5000": 200,
+		"100.64.1.2:5000":    200,
+	} {
+		req := httptest.NewRequest("GET", "/healthz", nil)
+		req.RemoteAddr = addr
+		w := httptest.NewRecorder()
+		b.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("LAN direct %s: got %d, want %d", addr, w.Code, want)
+		}
+	}
 }
 
 func TestWorkerFailurePropagates(t *testing.T) {

@@ -1,0 +1,12 @@
+<?xml version="1.0" standalone='no'?><!--*-nxml-*-->
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">EngineX OS (%h)</name>
+  <service>
+    <type>_spotify-connect._tcp</type>
+    <port>8080</port>
+    <txt-record>CPath=/spotify-connect</txt-record>
+    <txt-record>VERSION=1.0</txt-record>
+    <txt-record>Stack=SP</txt-record>
+  </service>
+</service-group>

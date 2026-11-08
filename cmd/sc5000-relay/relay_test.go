@@ -35,13 +35,16 @@ func newTestServer(t *testing.T) *server {
 	if err := cfg.update(func(c *config) { c.SpotifyClientID = testSpotifyClientID }); err != nil {
 		t.Fatal(err)
 	}
+	target, _ := parseStemsTarget("127.0.0.1:1")
 	s := &server{
 		public:      "https://relay.example.com",
 		cfg:         cfg,
 		fails:       newLimiter(failWindow, failMax),
 		newSessions: newLimiter(time.Minute, 30),
 		sessions:    newSessionStore(filepath.Join(dir, "sessions.json")),
+		decks:       newDeckStore(filepath.Join(dir, "decks.json")),
 		deezer:      newDeezerClient(),
+		stems:       newStemsProxy(target, ""),
 	}
 	s.spotify = newSpotifyAuth(filepath.Join(dir, "learned.json"), s.public+"/oauth/spotify/callback")
 	s.spotify.probes[testSpotifyClientID] = probeResult{at: time.Now()} // no network probe
@@ -517,5 +520,90 @@ func TestBeatportPageLogsInAndPassesOnlyTheToken(t *testing.T) {
 	poll := do(h, "GET", "/api/relay/session?t="+tok, "", nil).Body.String()
 	if !strings.Contains(poll, `"status":"done"`) || !strings.Contains(poll, `"access_token":"bp-access"`) || strings.Contains(poll, "secret-pw") {
 		t.Fatal(poll)
+	}
+}
+
+func TestMultiDeckHubRegistrationAndAccessCodeLogin(t *testing.T) {
+	stemsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"ok":true,"protocol":"engine-5.0.4","separator":"spectral-hpss-approximation","backend":"hpss","device":"Claw-ai","sessions":1,"busy":false}`)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer stemsSrv.Close()
+
+	s := newTestServer(t)
+	target, err := parseStemsTarget(stemsSrv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.stems = newStemsProxy(target, "")
+	h := s.routes()
+
+	// Deck 1 registers via GET /api/config headers.
+	w := do(h, "GET", "/api/config?secrets=1", "", map[string]string{
+		"X-Deemix-Password":       defaultPassword,
+		"X-EngineX-Deck-IP":       "192.168.1.224",
+		"X-EngineX-Deck-Role":     "13",
+		"X-EngineX-Deck-Version":  "5.3.0.4",
+		"X-EngineX-Deck-Code":     "ABCD-1234",
+		"X-EngineX-Deck-LoggedIn": "deezer,soundcloud",
+	})
+	if w.Code != 200 {
+		t.Fatalf("deck 1 config: %d %s", w.Code, w.Body)
+	}
+
+	// Deck 2 registers via POST /api/relay/deck.
+	w = do(h, "POST", "/api/relay/deck", `{"lanIp":"192.168.1.238","role":"24","version":"5.3.0.4","accessCode":"K7M9-P4X2","loggedIn":["deezer","spotify"]}`, map[string]string{
+		"X-Deemix-Password": defaultPassword,
+		"Content-Type":      "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("deck 2 post: %d %s", w.Code, w.Body)
+	}
+
+	// Verify GET /api/config returns both decks and stems status without leaking accessCode.
+	w = do(h, "GET", "/api/config", "", map[string]string{"X-Deemix-Password": defaultPassword})
+	if w.Code != 200 {
+		t.Fatalf("config get: %d %s", w.Code, w.Body)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "ABCD-1234") || strings.Contains(body, "K7M9-P4X2") {
+		t.Fatalf("accessCode leaked in /api/config: %s", body)
+	}
+	var resp struct {
+		Decks []deckView  `json:"decks"`
+		Stems stemsStatus `json:"stems"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Decks) != 2 || !resp.Decks[0].Online || resp.Decks[0].LANIP != "192.168.1.224" || resp.Decks[0].Role != "13" || resp.Decks[1].LANIP != "192.168.1.238" || resp.Decks[1].Role != "24" {
+		t.Fatalf("unexpected decks: %+v", resp.Decks)
+	}
+	if !resp.Stems.Online || resp.Stems.Device != "Claw-ai" || resp.Stems.Backend != "hpss" || resp.Stems.Busy {
+		t.Fatalf("unexpected stems status: %+v", resp.Stems)
+	}
+
+	// Reload deckStore from disk to verify persistence in decks.json.
+	reloaded := newDeckStore(s.decks.path)
+	if !reloaded.checkAccessCode("ABCD-1234") || !reloaded.checkAccessCode("abcd1234") || !reloaded.checkAccessCode("k7m9-p4x2") {
+		t.Fatal("reloaded deckStore did not match saved access codes")
+	}
+
+	// Login at /login using Deck 1's AccessCode (exact and case/hyphen-insensitive).
+	for _, code := range []string{"ABCD-1234", "abcd1234", "k7m9-p4x2"} {
+		lw := do(h, "POST", "/login", "password="+url.QueryEscape(code), map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+		if lw.Code != 303 || len(lw.Result().Cookies()) == 0 {
+			t.Fatalf("login with deck access code %q failed: %d", code, lw.Code)
+		}
+		cookie := lw.Result().Cookies()[0]
+		pw := do(h, "GET", "/", "", map[string]string{"Cookie": cookie.Name + "=" + cookie.Value})
+		panel := pw.Body.String()
+		if pw.Code != 200 || !strings.Contains(panel, "已连接碟机集群 (Multi-Deck Hub)") || !strings.Contains(panel, "http://192.168.1.224:8080") || !strings.Contains(panel, "Claw-ai") {
+			t.Fatalf("panel missing multi-deck hub or stems info: %d %s", pw.Code, panel)
+		}
 	}
 }

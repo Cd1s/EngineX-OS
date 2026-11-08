@@ -176,11 +176,18 @@ func (a *SoundCloudAuth) UserToken(ctx context.Context, id, secret string) (stri
 		return a.saved.UserAccess, nil
 	}
 	if a.saved.UserRefresh == "" {
+		a.dropUser()
 		return "", errors.New("soundcloud: login expired")
 	}
 	var r soundCloudTokenResponse
 	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {a.saved.UserRefresh}}
 	if err := a.post(ctx, form, id, secret, &r); err != nil {
+		// A refresh token is single-use: once refused it never works again, and
+		// keeping it would make HasUser() true and every request fail with it.
+		var st StatusError
+		if errors.As(err, &st) && (st == 400 || st == 401) {
+			a.dropUser()
+		}
 		return "", err
 	}
 	a.saved.UserAccess, a.saved.UserExpiry = r.Access, r.expiry()
@@ -191,6 +198,12 @@ func (a *SoundCloudAuth) UserToken(ctx context.Context, id, secret string) (stri
 		return "", err
 	}
 	return r.Access, nil
+}
+
+// dropUser forgets a login that can no longer be renewed. Called with a.mu held.
+func (a *SoundCloudAuth) dropUser() {
+	a.saved.UserAccess, a.saved.UserRefresh, a.saved.UserExpiry = "", "", time.Time{}
+	SaveJSON(a.Path, a.saved) // best effort: the in-memory state is already cleared
 }
 
 type SoundCloud struct {
@@ -371,6 +384,12 @@ func (s *SoundCloud) headers(ctx context.Context) (http.Header, error) {
 		token, err = s.Auth.Token(ctx, s.ClientID, s.Secret)
 	default:
 		return nil, errors.New("soundcloud: not connected")
+	}
+	if err != nil && appKeys && !s.Auth.HasUser() {
+		// The account login expired for good: carry on as without one.
+		if token, err = s.Token, nil; token == "" {
+			token, err = s.Auth.Token(ctx, s.ClientID, s.Secret)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -598,8 +617,20 @@ func (s *SoundCloud) Tracks(ctx context.Context, id string) ([]Track, error) {
 		if err != nil {
 			return nil, err
 		}
-		q.Set("limit", "200")
-		return s.trackPages(ctx, s.list(root+s.path("/likes/tracks", "/track_likes"), q))
+		address := func() string { return s.list(root+s.path("/likes/tracks", "/track_likes"), q) }
+		out, err := s.trackPages(ctx, address())
+		var st StatusError
+		if errors.As(err, &st) && st == 400 {
+			q.Del("access") // some accounts' likes refuse the filter
+			out, err = s.trackPages(ctx, address())
+		}
+		if errors.As(err, &st) && (st == 400 || st == 401 || st == 403) && !s.web() && s.UserID != 0 {
+			// The login or app token is refused: a public profile's likes still read.
+			w := *s
+			w.ClientID, w.Secret, w.Token = "", "", ""
+			return w.Tracks(ctx, id)
+		}
+		return out, err
 	}
 	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
 		return nil, errors.New("soundcloud: invalid playlist ID")

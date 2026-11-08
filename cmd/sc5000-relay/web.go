@@ -365,7 +365,13 @@ func (s *server) handleSpotifyCallback(w http.ResponseWriter, r *http.Request) {
 // ---- password-protected API ----
 
 func (s *server) configView() map[string]any {
+	return s.configViewWithContext(context.Background())
+}
+
+func (s *server) configViewWithContext(ctx context.Context) map[string]any {
 	c := s.cfg.get()
+	decks := s.decks.listView(time.Now())
+	stems := s.stemsStatus(ctx)
 	v := map[string]any{
 		"backendUrl":        s.public,
 		"deezerUserId":      c.DeezerUserID,
@@ -378,6 +384,8 @@ func (s *server) configView() map[string]any {
 		"soundcloudSecretSet":   c.SoundCloudSecret != "",
 		"soundcloudTokenSet":    c.SoundCloudToken != "",
 		"getSongBpmKeySet":      c.GetSongBPMKey != "",
+		"decks":                 decks,
+		"stems":                 stems,
 	}
 	if c.DeezerARL != "" {
 		v["deezerArlMasked"] = maskSecret(c.DeezerARL)
@@ -391,11 +399,14 @@ func (s *server) configView() map[string]any {
 }
 
 func (s *server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
-	view := s.configView()
+	if s.decks != nil {
+		s.decks.observeRequest(r)
+	}
+	view := s.configViewWithContext(r.Context())
 	if r.URL.Query().Get("secrets") == "1" {
 		c := s.cfg.get()
 		if c.PasswordIsDefault {
-			writeJSON(w, 403, map[string]any{"ok": false, "error": "change the default console password before reading secrets", "config": view})
+			writeJSON(w, 403, map[string]any{"ok": false, "error": "change the default console password before reading secrets", "config": view, "decks": view["decks"], "stems": view["stems"]})
 			return
 		}
 		view["deezerArl"] = c.DeezerARL
@@ -404,7 +415,7 @@ func (s *server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		view["soundcloudToken"] = c.SoundCloudToken
 		view["getSongBpmKey"] = c.GetSongBPMKey
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "config": view})
+	writeJSON(w, 200, map[string]any{"ok": true, "config": view, "decks": view["decks"], "stems": view["stems"]})
 }
 
 func (s *server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
@@ -490,7 +501,8 @@ func (s *server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 		msgs = append(msgs, "BPM 服务密钥已保存，SC5000 会在一小时内同步（重启 stream-sync 立即同步）")
 	}
 	if np := v.Get("newPassword"); np != "" {
-		if !s.cfg.checkPassword(v.Get("currentPassword")) {
+		cur := v.Get("currentPassword")
+		if !s.cfg.checkPassword(cur) && !s.decks.checkAccessCode(cur) {
 			fail(403, "当前密码不正确")
 			return
 		}
@@ -502,7 +514,8 @@ func (s *server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 		msgs = append(msgs, "密码已修改（其它已登录设备需重新登录，SC5000 需填写新密码）")
 		log.Printf("config: password changed from %s", clientIP(r))
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "messages": msgs, "config": s.configView()})
+	view := s.configViewWithContext(r.Context())
+	writeJSON(w, 200, map[string]any{"ok": true, "messages": msgs, "config": view, "decks": view["decks"], "stems": view["stems"]})
 }
 
 // ---- web console ----
@@ -514,7 +527,12 @@ func (s *server) handlePanel(w http.ResponseWriter, r *http.Request) {
 		renderPage(w, 200, "loginPage", pageData{Title: "SC5000 Deemix 登录"})
 		return
 	}
-	renderPage(w, 200, "panelPage", pageData{Title: "SC5000 Deemix 控制台", Backend: s.public})
+	renderPage(w, 200, "panelPage", pageData{
+		Title:   "SC5000 Deemix 控制台",
+		Backend: s.public,
+		Decks:   s.decks.listView(time.Now()),
+		Stems:   s.stemsStatus(r.Context()),
+	})
 }
 
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -524,7 +542,8 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := formValues(w, r)
-	if !s.cfg.checkPassword(v.Get("password")) {
+	pw := v.Get("password")
+	if !s.cfg.checkPassword(pw) && !s.decks.checkAccessCode(pw) {
 		s.fails.fail(ip)
 		renderPage(w, 401, "loginPage", pageData{Title: "SC5000 Deemix 登录", Error: "密码不正确"})
 		return

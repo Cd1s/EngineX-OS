@@ -730,7 +730,7 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 			add(g.refJSON(g.addPlaylist(ref), ref))
 		}
 	}
-	if g.s.omniSource() {
+	if g.s.omniSource() && !favorites {
 		g.omniPlaylists(r.Context(), scope, add)
 	}
 	if scope != "deezer" && len(sessions) == 0 {

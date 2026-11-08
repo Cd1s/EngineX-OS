@@ -4,14 +4,18 @@ package webui
 // set and replaced but is never read back out.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/stems"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -60,7 +64,60 @@ func (s *Server) relayStatusView() relayConfigStatus {
 			v.LANStems = nil
 		}
 	}
+	if st := s.probeRelayStems(relay, password, v.LANStems); st != nil {
+		v.LANStems = st
+	}
 	return v
+}
+
+const relayProbeEvery = 30 * time.Second
+
+var (
+	relayProbeMu sync.Mutex
+	relayProbed  = map[string]time.Time{} // by state dir: when the relay was last asked
+)
+
+// probeRelayStems asks the cloud relay whether its Stems renderer is up, for a deck
+// whose stems-lan.json is missing, offline or older than 30 s (nothing else keeps it
+// current for a relay). Asked at most once per 30 s, answer or not, and the answer
+// is saved to stems-lan.json. nil leaves the file's state as it is.
+func (s *Server) probeRelayStems(relay, password string, saved *stems.LANState) *stems.LANState {
+	if relay == "" || password == "" || !validRelayURL(relay) {
+		return nil
+	}
+	if saved != nil && saved.Online && time.Since(saved.Checked) < relayProbeEvery {
+		return nil
+	}
+	relayProbeMu.Lock()
+	defer relayProbeMu.Unlock()
+	if time.Since(relayProbed[s.cfg.StateDir]) < relayProbeEvery {
+		return nil
+	}
+	relayProbed[s.cfg.StateDir] = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(relay, "/")+"/healthz/stems", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+password)
+	resp, err := (&http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}).Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var h struct {
+		OK      bool   `json:"ok"`
+		Backend string `json:"backend"`
+		Device  string `json:"device"`
+		Busy    bool   `json:"busy"`
+	}
+	if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&h) != nil || !h.OK {
+		return nil
+	}
+	st := &stems.LANState{Endpoint: relay, Hostname: h.Device, Backend: h.Backend, Online: !h.Busy, Checked: time.Now().UTC()}
+	providers.SaveJSON(filepath.Join(s.cfg.StateDir, stems.LANStateName), st) // best effort: the answer is returned anyway
+	return st
 }
 
 // validRelayURL refuses to send the password in the clear across the internet.

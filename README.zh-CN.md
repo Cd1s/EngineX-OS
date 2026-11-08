@@ -66,7 +66,17 @@
 - **Wi-Fi**：碟机内置 Wi-Fi 模组受限于主板 SDIO 25 MHz SDR12 总线带宽，实测极限约 `9～10 MB/s`，大体积曲库传输建议使用千兆有线网口。
 
 
-### 7. 5.3.0.3 新功能
+### 7. 5.3.0.4 新功能（开发中，尚未发布）
+- **四轨联动完整卸载与流媒体真实歌名（#49）**：对端碟机关机、重启或退歌时会发送 UDP 告别包，本机在 350 ms 防抖后自动卸载影子轨（`Unload` + `UnSync`，并自动交回 `MASTER`），清掉残留的波形和曲目。移除了可能死锁的 `RemoteState` 订阅，对端关机不再阻塞本机切换流媒体音源。流媒体曲目在影子碟机上显示真实的 `歌手 - 歌名`，不再显示内部数字缓存文件名；
+- **界面更丝滑、降低 CPU 占用**：新增 `scTr` QML 属性 translator 缓存，并给 `QuickCue` 加 500 ms 节流，消除按 `MASTER` / `SYNC` 时界面的瞬时卡顿，明显降低 Engine `EMain` GUI 线程的 CPU 占用；
+- **歌单左滑只留一个 Stems 按钮**：自动识别原厂已带 `Stem` 动作的本地曲目，去重并本地化为单一的 `分轨 Stems` 按钮，本地、流媒体、局域网曲目左滑后的体验完全一致；
+- **10 级几何平滑波形缩放（#147）与 Auto Loop 旋钮联动（#135）**：Browse 旋钮缩放波形改为 10 级等比几何步进（约 1.46 倍 / 格），并加 16 ms 帧合并防抖，低倍缩放不再跳变过大，连拧也不再卡顿。直接转动 Auto Loop 旋钮仍调整 Loop 大小，并自动开启 `LinkBeatJumpLoopSize`，让 Beat Jump 大小跟随联动；修复了 JP07 开启 `swap_loop_order` 时 `beatJumpEnabled` 的判定；
+- **OmniSource 歌单隔离（#105）**：开启 OmniSource（跨源搜索）后，搜索栏仍可同时检索各流媒体和全部 U 盘曲库，但各流媒体自己的歌单页不再混入 `[USB: ...]` 条目和其他平台的歌单；
+- **SoundCloud 点赞歌单回退（#150）**：用户 OAuth `refresh_token` 过期、SoundCloud 返回 `HTTP 400` 时，自动回退到 App Token 和公开主页接口，继续加载 `Liked Tracks & Sets`；
+- **Spotify Connect 局域网发现（#150）**：内置 Avahi `_spotify-connect._tcp` mDNS 广播和标准 768-bit Diffie-Hellman 公钥，手机 Spotify App 可在局域网里直接发现 `EngineX OS`；同时修复 OAuth 登录后曲目下载返回 `410` 的问题；
+- **`sc5000-relay` 多碟机集群后台（Multi-Deck Hub）与 `sc5000-stemsd` 局域网直连**：中继控制台新增 `已连接碟机集群（Multi-Deck Hub）` 卡片，汇总同一后端下所有碟机的在线状态、机位角色（`13` / `24`）、固件版本和流媒体登录状态，可用碟机访问码或主密码登录；各碟机 `设置 → 关于` 页会实时显示 Stems 算力节点状态。
+
+### 8. 5.3.0.3 新功能
 - **Tailscale / Headscale 远程访问（#130）**：Web 控制台的 `远程访问（Tailscale / Headscale）` 卡片按需下载精简版 Tailscale 客户端（约 4.3 MB，下载后校验 SHA-256），用登录链接或一次性 Auth key 登录，只把你勾选的服务（SSH / SFTP、Web 控制台）开放给你自己的 tailnet。不需要公网 IP，也不用改路由器，自建 Headscale 服务器同样可用。默认关闭。碟机内核没有 TUN 设备，所以以用户态模式运行。已用 Headscale 端到端测通；实机播放时的 CPU 和内存占用还没有实测；
 - **流媒体歌单排序（#98）**：所有流媒体服务都能打开 Engine 自带的排序菜单，按 BPM、调性、评级、歌名或歌手升序 / 降序排列；
 - **流媒体曲目可录音（#84）**：加载流媒体曲目时，Engine 的录音功能不再拒绝录制。录音请仅供个人使用，并遵守流媒体服务的条款；
@@ -84,7 +94,7 @@
 - **SYSTEM ONE / PRIME 4 G2 走 USB 安装（#116）**：这两款没有 fastboot，固件更新模式在 USB 上是 `1cc5:2027`。EngineX-Installer 现在会生成 64 MiB 的全新 `/data` 镜像，用官方 `write-part` 协议写入（Rane SYSTEM ONE 实机验证），写完提示你按电源键重启。`host-install-userdata.py` 新增 `--ssh-key`，可开启 root SSH。
 - **实验功能，只有 API**：以下功能目前只有 Web 控制台 API，没有控制台卡片或碟机菜单，也还没有在实机上测试：通过 OmniSource 读取 WebDAV / Subsonic（Navidrome）/ Plex 歌单（#82）、Hot Cue 名称与颜色（#85）、U 盘 `/mods` QML 插件与 safe-mode 隔离（#87）、把 Loop 存到 Sampler 打击垫（#120）、局域网 RTP / Teleport 音频以及 USB DAC / USB-B UAC2 输出（#83、#113）。
 
-### 8. 上一版新功能
+### 9. 上一版新功能
 - **波形可以缩得更远（#77）**：一体机（PRIME 4、PRIME 2、PRIME GO、Mixstream Pro、SC LIVE）的波形最远缩到 30 秒，和 SC5000 / SC6000 一样，不再是原厂的 10 秒，屏幕上能看到更多即将到来的节拍网格。`设置 → 设备 → 旋钮行为` 选 `波形缩放` 后，在打碟界面转浏览旋钮即可缩放；
 - **屏幕上直接关机（#78）**：`设置 → 设备 → 电源 → 关机` 会弹出原厂的「关机」确认框，碟机装在 DJ 台里也不用再伸手去摸背后的电源键；
 - **丢失曲目自动重定位（#74）**：同一张盘上的文件被移动或改名后，网页控制台会为每首丢失的曲目找到新位置（先按文件名和大小，再按忽略大小写的文件名，最后按清理后的文件名）。「扫描」只预览；「一键修复路径」会先备份 `m.db` 再改写路径。完成后在碟机上重新加载该盘；

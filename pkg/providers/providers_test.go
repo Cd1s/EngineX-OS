@@ -1,12 +1,18 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -341,5 +347,40 @@ func TestSpotifyPublicLinks(t *testing.T) {
 	tr, err := sp.Tracks(context.Background(), pl[0].ID)
 	if err != nil || len(tr) != 1 || tr[0].ID != "abc" || tr[0].Artist != "A, B" || tr[0].DurationMS != 1000 {
 		t.Fatalf("%+v %v", tr, err)
+	}
+}
+
+func TestSpotifyConnectBlobRoundTrip(t *testing.T) {
+	k := SpotifyConnectKeyPair()
+	pub, err := base64.StdEncoding.DecodeString(k.PublicKey())
+	if err != nil || len(pub) != 96 {
+		t.Fatalf("public key: %d bytes, %v", len(pub), err)
+	}
+	// The phone's side: its own key pair, the same derivation.
+	priv, _ := rand.Int(rand.Reader, spotifyDHPrime)
+	clientPub := new(big.Int).Exp(big.NewInt(2), priv, spotifyDHPrime).FillBytes(make([]byte, 96))
+	shared := new(big.Int).Exp(new(big.Int).SetBytes(pub), priv, spotifyDHPrime)
+	base := sha1.Sum(shared.FillBytes(make([]byte, 96)))
+	mac := func(key []byte, msg string) []byte {
+		h := hmac.New(sha1.New, key)
+		h.Write([]byte(msg))
+		return h.Sum(nil)
+	}
+	iv := bytes.Repeat([]byte{7}, 16)
+	block, _ := aes.NewCipher(mac(base[:16], "encryption")[:16])
+	data := []byte("login-credentials")
+	enc := make([]byte, len(data))
+	cipher.NewCTR(block, iv).XORKeyStream(enc, data)
+	sum := hmac.New(sha1.New, mac(base[:16], "checksum"))
+	sum.Write(enc)
+	blob := append(append(append([]byte{}, iv...), enc...), sum.Sum(nil)...)
+	ck := base64.StdEncoding.EncodeToString(clientPub)
+	got, err := k.DecryptBlob(ck, base64.StdEncoding.EncodeToString(blob))
+	if err != nil || string(got) != string(data) {
+		t.Fatalf("decrypt: %q %v", got, err)
+	}
+	blob[20] ^= 1
+	if _, err := k.DecryptBlob(ck, base64.StdEncoding.EncodeToString(blob)); err == nil {
+		t.Fatal("a tampered blob was accepted")
 	}
 }

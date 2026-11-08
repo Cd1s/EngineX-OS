@@ -755,8 +755,36 @@ func (s *Server) spotifyClientPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) spotifyConnectGet(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"status":101,"statusString":"OK","spotifyError":0,"version":"2.9.0","deviceID":"enginex-os-spotify-connect","remoteName":"EngineX OS","publicKey":"AA==","deviceType":"SPEAKER","libraryVersion":"0.1.0","accountReq":"PREMIUM"}`))
+	respond(w, providers.SpotifyConnectInfo{Status: 101, StatusString: "OK", Version: "2.9.0", DeviceID: "enginex-os-spotify-connect", RemoteName: "EngineX OS", PublicKey: providers.SpotifyConnectKeyPair().PublicKey(), DeviceType: "SPEAKER", LibraryVersion: "0.1.0", AccountReq: "PREMIUM"})
+}
+
+// spotifyConnectAvahi announces the Zeroconf endpoint, so Spotify apps on the LAN
+// list this deck. The image ships it; this repairs a deck without it.
+const spotifyConnectAvahi = `<?xml version="1.0" standalone='no'?><!--*-nxml-*-->
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">EngineX OS (%h)</name>
+  <service>
+    <type>_spotify-connect._tcp</type>
+    <port>8080</port>
+    <txt-record>CPath=/spotify-connect</txt-record>
+    <txt-record>VERSION=1.0</txt-record>
+    <txt-record>Stack=SP</txt-record>
+  </service>
+</service-group>
+`
+
+// ensureSpotifyConnectService writes the avahi service file into dir when avahi
+// is installed (dir exists) and the file is not there; avahi picks it up itself.
+func ensureSpotifyConnectService(dir string) error {
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return nil
+	}
+	path := filepath.Join(dir, "spotify-connect.service")
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	return os.WriteFile(path, []byte(spotifyConnectAvahi), 0o644)
 }
 
 func (s *Server) spotifyConnectPost(w http.ResponseWriter, r *http.Request) {
@@ -768,14 +796,16 @@ func (s *Server) spotifyConnectPost(w http.ResponseWriter, r *http.Request) {
 		accessToken string
 		blob        string
 	)
+	var clientKey string
 	var v struct {
 		Action      string `json:"action"`
 		UserName    string `json:"userName"`
 		AccessToken string `json:"accessToken"`
 		Blob        string `json:"blob"`
+		ClientKey   string `json:"clientKey"`
 	}
 	if json.Unmarshal(body, &v) == nil {
-		action, userName, accessToken, blob = v.Action, v.UserName, v.AccessToken, v.Blob
+		action, userName, accessToken, blob, clientKey = v.Action, v.UserName, v.AccessToken, v.Blob, v.ClientKey
 	}
 	if q, err := url.ParseQuery(string(body)); err == nil {
 		if action == "" {
@@ -790,16 +820,29 @@ func (s *Server) spotifyConnectPost(w http.ResponseWriter, r *http.Request) {
 		if blob == "" {
 			blob = q.Get("blob")
 		}
+		if clientKey == "" {
+			clientKey = q.Get("clientKey")
+		}
 	}
 	if action == "" {
 		action = r.URL.Query().Get("action")
 	}
-	_ = action
-	_ = userName
+
+	// A phone's addUser carries its credentials as an encrypted blob. Check it is
+	// really for this deck's key; it holds librespot-style login data, not a Web API
+	// token, so nothing here can use it yet and it is not stored.
+	if action == "addUser" && accessToken == "" && blob != "" && clientKey != "" {
+		if _, err := providers.SpotifyConnectKeyPair().DecryptBlob(clientKey, blob); err != nil {
+			log.Printf("stream-sync: spotify connect addUser from %s (%s): %v", r.RemoteAddr, userName, err)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"status":402,"statusString":"ERROR-INVALID-BLOB","spotifyError":402}`))
+			return
+		}
+		log.Printf("stream-sync: spotify connect addUser from %s (%s): blob accepted, not stored", r.RemoteAddr, userName)
+	}
 
 	// The endpoint is unauthenticated: only a pending Spotify login on the deck may
 	// accept a token, and the encrypted Zeroconf blob is never a bearer token.
-	_ = blob
 	tok := accessToken
 	if tok != "" {
 		if s.loginFlow("spotify") == nil {
