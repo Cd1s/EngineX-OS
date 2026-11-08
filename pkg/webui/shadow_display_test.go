@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"image/png"
 	"net/http"
@@ -222,6 +223,7 @@ func TestDisplayAssetRejectsInvalidData(t *testing.T) {
 		func(a *shadowDisplayAsset) { a.Key = "wrong" },
 		func(a *shadowDisplayAsset) { a.Beats[1].MS = -1 },
 		func(a *shadowDisplayAsset) { a.Overview.Bands = []byte{1, 2} },
+		func(a *shadowDisplayAsset) { a.Overview.SamplesPerBin = 1e300 },
 		func(a *shadowDisplayAsset) { a.Artwork = []byte("not an image") },
 	} {
 		a := testDisplayAsset()
@@ -339,5 +341,42 @@ func TestShadowJitterFreezesUntilConfirmedEject(t *testing.T) {
 	d = s.shadowCompose("13", now.Add(time.Minute))
 	if len(d) != 1 || d[0].Key != "" {
 		t.Fatalf("confirmed empty track not cleared: %+v", d)
+	}
+}
+
+func TestBridgeDetailsBelongToLibraryPathAndDuration(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dir, ".rb-bridge-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(`CREATE TABLE BridgeAnalysis(trackId INTEGER PRIMARY KEY, sourceJSON BLOB); CREATE TABLE BridgeState(path TEXT PRIMARY KEY, trackId INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	source := struct{ Analysis *rekordbox.Analysis }{&rekordbox.Analysis{Waveforms: []rekordbox.Waveform{{Tag: "PWV7", EntryBytes: 3, Data: bytes.Repeat([]byte{100, 50, 25}, 600)}}}}
+	b, _ := json.Marshal(source)
+	if _, err = db.Exec(`INSERT INTO BridgeAnalysis VALUES(1,?);`, b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO BridgeState VALUES('../Contents/a.flac',1)`); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	w := bridgeDisplayWave(ctx, filepath.Join(dir, "m.db"), "../Contents/a.flac", 1, 44100, 4000)
+	if w == nil || len(w.Bands) != 1800 {
+		t.Fatal("persisted PWV7 detail not read")
+	}
+	for _, tc := range []struct {
+		file, path string
+		duration   float64
+	}{
+		{"stm.db", "../Contents/a.flac", 4000},
+		{"m.db", "../Contents/other.flac", 4000},
+		{"m.db", "../Contents/a.flac", 4500},
+	} {
+		if bridgeDisplayWave(ctx, filepath.Join(dir, tc.file), tc.path, 1, 44100, tc.duration) != nil {
+			t.Fatalf("wrong bridge source accepted: %+v", tc)
+		}
 	}
 }

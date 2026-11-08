@@ -73,6 +73,10 @@ Persisted Rekordbox detail is available from rb-bridge's separate, read-only
 `.rb-bridge-state.db` / BridgeAnalysis.sourceJSON: PWV7 is three bands at
 150 entries/s; PWV5 is a two-byte RGB/height representation at 150 entries/s.
 Reuse the existing Rekordbox conversion and keep source Engine grid/cues.
+The sidecar is used only for m.db, matched against BridgeState.path and checked
+against the track duration; a matching stm.db numeric ID is never sufficient.
+Detailed columns retain their source samples/bin time axis instead of being
+stretched to the audio duration.
 
 For other supported files, a **source-only** streaming envelope worker reads
 FLAC/MP3/WAV without retaining full PCM, creates three-band 105 Hz envelope

@@ -293,6 +293,12 @@ func validateDisplayAsset(a *shadowDisplayAsset, key string) error {
 		if w != nil && (len(w.Bands) == 0 || len(w.Bands)%3 != 0 || len(w.Bands) > 6<<20 || !finite(w.SamplesPerBin) || w.SamplesPerBin <= 0) {
 			return fmt.Errorf("display: invalid bands")
 		}
+		if w != nil {
+			span := float64(len(w.Bands)/3) * w.SamplesPerBin / a.SampleRate * 1000
+			if !finite(span) || math.Abs(span-a.DurationMS) > 100 {
+				return fmt.Errorf("display: waveform span differs from track")
+			}
+		}
 	}
 	for i, b := range a.Beats {
 		if !finite(b.MS) || b.MS < 0 || b.MS > a.DurationMS || b.Number < -1000000 || b.Number > 1000000 || i > 0 && (b.MS <= a.Beats[i-1].MS || b.Number <= a.Beats[i-1].Number) {
@@ -433,8 +439,12 @@ func libraryDisplay(ctx context.Context, f, dataRoot, mediaRoot string) (*shadow
 	return nil, err
 }
 
-func bridgeDisplayWave(ctx context.Context, file string, id int64, rate float64) *enginedb.DisplayWave {
+func bridgeDisplayWave(ctx context.Context, file, rel string, id int64, rate, durationMS float64) *enginedb.DisplayWave {
 	// rb-bridge's side database is separate from Engine's library and read-only.
+	// Its track IDs belong only to m.db; stm.db can have unrelated matching IDs.
+	if filepath.Base(file) != "m.db" {
+		return nil
+	}
 	file = filepath.Join(filepath.Dir(file), ".rb-bridge-state.db")
 	if _, err := os.Stat(file); err != nil {
 		return nil
@@ -445,14 +455,18 @@ func bridgeDisplayWave(ctx context.Context, file string, id int64, rate float64)
 	}
 	defer db.Close()
 	var b []byte
-	if db.QueryRowContext(ctx, `SELECT substr(sourceJSON,1,12582913) FROM BridgeAnalysis WHERE trackId=?`, id).Scan(&b) != nil || len(b) > shadowDisplayLimit {
+	if db.QueryRowContext(ctx, `SELECT substr(a.sourceJSON,1,12582913) FROM BridgeAnalysis a JOIN BridgeState s ON s.trackId=a.trackId WHERE a.trackId=? AND s.path=?`, id, rel).Scan(&b) != nil || len(b) > shadowDisplayLimit {
 		return nil
 	}
 	var source struct{ Analysis *rekordbox.Analysis }
 	if json.Unmarshal(b, &source) != nil {
 		return nil
 	}
-	return enginedb.DisplayWaveFromRekordbox(source.Analysis, rate)
+	w := enginedb.DisplayWaveFromRekordbox(source.Analysis, rate)
+	if w == nil || math.Abs(float64(len(w.Bands)/3)*w.SamplesPerBin/rate*1000-durationMS) > 100 {
+		return nil
+	}
+	return w
 }
 
 func dbDisplay(ctx context.Context, file, rel string) (*shadowDisplayAsset, error) {
@@ -489,7 +503,7 @@ func dbDisplay(ctx context.Context, file, rel string) (*shadowDisplayAsset, erro
 	}
 	// Native Engine 5.3 stores detail only in process memory. A bridge's saved
 	// Rekordbox analysis is the only persisted detailed waveform consumed here.
-	a.Waveform = bridgeDisplayWave(ctx, file, id, a.SampleRate)
+	a.Waveform = bridgeDisplayWave(ctx, file, rel, id, a.SampleRate, a.DurationMS)
 	a.Detail = a.Waveform != nil
 	if a.Detail {
 		a.DetailSource = "rekordbox"
@@ -574,8 +588,10 @@ func (s *Server) shadowDisplayGet(w http.ResponseWriter, r *http.Request) {
 	}
 	var tiles []string
 	width := 2048
+	waveDuration := a.DurationMS
 	if a.Waveform != nil {
 		width = len(a.Waveform.Bands) / 3
+		waveDuration = float64(width) * a.Waveform.SamplesPerBin / a.SampleRate * 1000
 		for i := range e.tiles {
 			tiles = append(tiles, "http://127.0.0.1:8080/v1/sc5000/shadow/waveform.png"+q+"&tile="+strconv.Itoa(i))
 		}
@@ -591,7 +607,7 @@ func (s *Server) shadowDisplayGet(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"key": d.Key, "title": title, "artist": artist, "bpm": a.BPM, "keyName": a.KeyName,
 		"sampleRate": a.SampleRate, "durationMs": a.DurationMS, "beats": a.Beats, "cues": cues, "loops": a.Loops, "detail": a.Detail, "detailPending": a.DetailPending, "detailSource": a.DetailSource,
 		"waveformUrl":   "http://127.0.0.1:8080/v1/sc5000/shadow/waveform.png" + q,
-		"waveformTiles": tiles, "waveformWidth": width, "tileWidth": 2048,
+		"waveformTiles": tiles, "waveformWidth": width, "waveformDurationMs": waveDuration, "tileWidth": 2048,
 		"overviewUrl": "http://127.0.0.1:8080/v1/sc5000/shadow/waveform.png" + q + "&overview=1", "artworkUrl": art})
 }
 
