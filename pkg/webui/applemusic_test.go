@@ -142,6 +142,128 @@ func TestAppleMusicPageFallsBackToBookmarklet(t *testing.T) {
 	}
 }
 
+func TestAppleMusicStorefrontNormalizationAndMixedLinks(t *testing.T) {
+	am := fakeAppleMusic(t)
+
+	// Subtest 1: Post with uppercase storefront "CN" and link without country code:
+	// should normalize storefront to "cn" and format link with "/cn/"
+	t.Run("uppercase storefront and country-free link", func(t *testing.T) {
+		state := t.TempDir()
+		ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, AppleMusicURL: am.URL, AppleMusicWebURL: am.URL}, nil)
+		srv := httptest.NewServer(ui)
+		defer srv.Close()
+
+		resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=applemusic", "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		target, _ := url.Parse(ui.logins["applemusic"].Target)
+		page := srv.URL + target.Path + "?" + target.RawQuery
+
+		body := postForm(t, page, url.Values{
+			"storefront": {"CN"},
+			"links":      {"https://music.apple.com/playlist/club/pl.club"},
+		})
+		if !strings.Contains(body, "Connected") {
+			t.Fatalf("expected Connected, got: %s", body)
+		}
+		b, err := os.ReadFile(filepath.Join(state, "applemusic-owner.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var saved struct {
+			Links      []string
+			Storefront string
+		}
+		json.Unmarshal(b, &saved)
+		if saved.Storefront != "cn" {
+			t.Fatalf("expected storefront cn, got %q", saved.Storefront)
+		}
+		if len(saved.Links) != 1 || saved.Links[0] != "https://music.apple.com/cn/playlist/pl.club" {
+			t.Fatalf("expected cn link, got %v", saved.Links)
+		}
+	})
+
+	// Subtest 2: Mixed links without explicit storefront where country-free link is listed FIRST:
+	// Country-free link should resolve to "cn" derived from the subsequent link, order-independent.
+	t.Run("country-free link first with subsequent cn link", func(t *testing.T) {
+		state := t.TempDir()
+		ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, AppleMusicURL: am.URL, AppleMusicWebURL: am.URL}, nil)
+		srv := httptest.NewServer(ui)
+		defer srv.Close()
+
+		resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=applemusic", "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		target, _ := url.Parse(ui.logins["applemusic"].Target)
+		page := srv.URL + target.Path + "?" + target.RawQuery
+
+		body := postForm(t, page, url.Values{
+			"links": {"https://music.apple.com/playlist/club/pl.club https://music.apple.com/cn/playlist/club/pl.club"},
+		})
+		if !strings.Contains(body, "Connected") {
+			t.Fatalf("expected Connected, got: %s", body)
+		}
+		b, err := os.ReadFile(filepath.Join(state, "applemusic-owner.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var saved struct {
+			Links      []string
+			Storefront string
+		}
+		json.Unmarshal(b, &saved)
+		if saved.Storefront != "cn" {
+			t.Fatalf("expected storefront cn, got %q", saved.Storefront)
+		}
+		if len(saved.Links) != 1 || saved.Links[0] != "https://music.apple.com/cn/playlist/pl.club" {
+			t.Fatalf("expected cn link, got %v", saved.Links)
+		}
+	})
+
+	// Subtest 3: Mixed links with cn link listed FIRST, country-free second:
+	// Same result expected.
+	t.Run("cn link first with subsequent country-free link", func(t *testing.T) {
+		state := t.TempDir()
+		ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: state, AppleMusicURL: am.URL, AppleMusicWebURL: am.URL}, nil)
+		srv := httptest.NewServer(ui)
+		defer srv.Close()
+
+		resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=applemusic", "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		target, _ := url.Parse(ui.logins["applemusic"].Target)
+		page := srv.URL + target.Path + "?" + target.RawQuery
+
+		body := postForm(t, page, url.Values{
+			"links": {"https://music.apple.com/cn/playlist/club/pl.club https://music.apple.com/playlist/club/pl.club"},
+		})
+		if !strings.Contains(body, "Connected") {
+			t.Fatalf("expected Connected, got: %s", body)
+		}
+		b, err := os.ReadFile(filepath.Join(state, "applemusic-owner.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var saved struct {
+			Links      []string
+			Storefront string
+		}
+		json.Unmarshal(b, &saved)
+		if saved.Storefront != "cn" {
+			t.Fatalf("expected storefront cn, got %q", saved.Storefront)
+		}
+		if len(saved.Links) != 1 || saved.Links[0] != "https://music.apple.com/cn/playlist/pl.club" {
+			t.Fatalf("expected cn link, got %v", saved.Links)
+		}
+	})
+}
+
 func postForm(t *testing.T, page string, v url.Values) string {
 	t.Helper()
 	resp, err := http.PostForm(page, v)

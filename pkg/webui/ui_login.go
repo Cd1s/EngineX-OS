@@ -620,22 +620,37 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 		s.finishPhoneLogin(w, r, flow)
 	case *providers.AppleMusic:
 		o := p.Owner()
-		if links := r.Form.Get("links"); strings.TrimSpace(links) != "" {
-			o.Links = nil
-			for _, l := range providers.ParseAppleMusicLinks(links) {
-				o.Links = append(o.Links, l.URL())
-				if o.Storefront == "" {
-					o.Storefront = l.Storefront // the store the links come from
-				}
-			}
-			if len(o.Links) == 0 {
-				refuse("amFailed", tr(lang, "amFailedHint"))
-				return
-			}
-		}
 		for field, dst := range map[string]*string{"userToken": &o.UserToken, "devToken": &o.DevToken, "storefront": &o.Storefront} {
 			if v := strings.TrimSpace(r.Form.Get(field)); v != "" {
 				*dst = v // an empty field keeps what was saved
+			}
+		}
+		o.Storefront = strings.ToLower(strings.TrimSpace(o.Storefront))
+		if links := r.Form.Get("links"); strings.TrimSpace(links) != "" {
+			parsed := providers.ParseAppleMusicLinks(links)
+			if len(parsed) == 0 {
+				refuse("amFailed", tr(lang, "amFailedHint"))
+				return
+			}
+			if o.Storefront == "" {
+				for _, l := range parsed {
+					if l.Storefront != "" {
+						o.Storefront = strings.ToLower(l.Storefront)
+						break
+					}
+				}
+			}
+			if o.Storefront == "" {
+				o.Storefront = "us"
+			}
+			o.Links = nil
+			for _, l := range parsed {
+				if l.Storefront == "" {
+					l.Storefront = o.Storefront
+				} else {
+					l.Storefront = strings.ToLower(l.Storefront)
+				}
+				o.Links = append(o.Links, l.URL())
 			}
 		}
 		if err := p.SetOwner(r.Context(), o); err != nil {

@@ -84,10 +84,20 @@ func appleMusicServer(t *testing.T, scrapes *atomic.Int32, revoked *atomic.Bool)
 func TestParseAppleMusicLinks(t *testing.T) {
 	got := ParseAppleMusicLinks("look https://music.apple.com/cn/playlist/%E6%B4%BE%E5%AF%B9/pl.u-AkAm8ZKCzBN9?l=en and " +
 		"https://music.apple.com/us/album/discovery/697194953 https://music.apple.com/cn/playlist/x/pl.u-AkAm8ZKCzBN9 " +
-		"https://example.com/us/playlist/x/pl.1 https://music.apple.com/jp/artist/x/123")
-	want := []AppleMusicLink{{"cn", "playlist", "pl.u-AkAm8ZKCzBN9"}, {"us", "album", "697194953"}}
+		"https://example.com/us/playlist/x/pl.1 https://music.apple.com/jp/artist/x/123 " +
+		"<https://music.apple.com/playlist/club/pl.u-NoCountry123>, https://music.apple.com/cn/playlist/club/pl.u-NoCountry123 " +
+		"https://music.apple.com/playlist/solo/pl.u-SoloOnly")
+	want := []AppleMusicLink{
+		{"cn", "playlist", "pl.u-AkAm8ZKCzBN9"},
+		{"us", "album", "697194953"},
+		{"cn", "playlist", "pl.u-NoCountry123"},
+		{"", "playlist", "pl.u-SoloOnly"},
+	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("got %v", got)
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if u := (AppleMusicLink{Storefront: "", Kind: "playlist", ID: "pl.u-SoloOnly"}).URL(); u != "https://music.apple.com/us/playlist/pl.u-SoloOnly" {
+		t.Fatalf("default URL() expected us storefront, got %q", u)
 	}
 }
 
@@ -152,5 +162,95 @@ func TestAppleMusicDeveloperTokenOverride(t *testing.T) {
 	a.owner = AppleMusicOwner{DevToken: "own-token", Storefront: "us"}
 	if _, err := a.Search(t.Context(), "daft punk"); err == nil || scrapes.Load() != 0 {
 		t.Fatalf("override must be used as is: %v, scrapes %d", err, scrapes.Load())
+	}
+}
+
+func TestFindDeveloperToken(t *testing.T) {
+	enc := base64.RawURLEncoding.EncodeToString
+	now := time.Now()
+	// Token with typ: JWT (encodes to eyJ0...) and AMPWebPlay claims
+	jwtTyp := enc([]byte(`{"typ":"JWT","alg":"ES256","kid":"WebPlayKid"}`)) + "." +
+		enc([]byte(fmt.Sprintf(`{"iss":"AMPWebPlay","iat":%d,"exp":%d,"root_https_origin":["apple.com"]}`, now.Unix(), now.Add(24*time.Hour).Unix()))) + "." +
+		enc([]byte("signature-bytes-that-are-long-enough-001"))
+
+	// Token with alg first (encodes to eyJh...) but other issuer
+	jwtAlg := enc([]byte(`{"alg":"ES256","kid":"OTHER00001"}`)) + "." +
+		enc([]byte(fmt.Sprintf(`{"iss":"OTHER","iat":%d,"exp":%d,"root_https_origin":["apple.com"]}`, now.Unix(), now.Add(24*time.Hour).Unix()))) + "." +
+		enc([]byte("signature-bytes-that-are-long-enough-002"))
+
+	// Expired token
+	jwtExp := enc([]byte(`{"typ":"JWT","alg":"ES256","kid":"EXPIRED001"}`)) + "." +
+		enc([]byte(fmt.Sprintf(`{"iss":"OLD","iat":%d,"exp":%d}`, now.Add(-48*time.Hour).Unix(), now.Add(-24*time.Hour).Unix()))) + "." +
+		enc([]byte("signature-bytes-that-are-long-enough-003"))
+
+	// Expired AMPWebPlay token
+	jwtOldWebPlay := enc([]byte(`{"typ":"JWT","alg":"ES256","kid":"WebPlayKid"}`)) + "." +
+		enc([]byte(fmt.Sprintf(`{"iss":"AMPWebPlay","iat":%d,"exp":%d}`, now.Add(-48*time.Hour).Unix(), now.Add(-24*time.Hour).Unix()))) + "." +
+		enc([]byte("signature-bytes-that-are-long-enough-old"))
+
+	// Bundle containing both: should pick AMPWebPlay even if it appears second
+	bundle := []byte(fmt.Sprintf(`var a="%s"; var b="%s";`, jwtAlg, jwtTyp))
+	if got := findDeveloperToken(bundle); got != jwtTyp {
+		t.Fatalf("expected AMPWebPlay token, got %q", got)
+	}
+
+	// Bundle with expired AMPWebPlay before valid AMPWebPlay
+	bundleOldAndNewWebPlay := []byte(fmt.Sprintf(`var a="%s"; var b="%s";`, jwtOldWebPlay, jwtTyp))
+	if got := findDeveloperToken(bundleOldAndNewWebPlay); got != jwtTyp {
+		t.Fatalf("expected valid AMPWebPlay token over expired one, got %q", got)
+	}
+
+	// Bundle with only eyJ0 token
+	bundleTyp := []byte(fmt.Sprintf(`var b="%s";`, jwtTyp))
+	if got := findDeveloperToken(bundleTyp); got != jwtTyp {
+		t.Fatalf("expected jwtTyp token, got %q", got)
+	}
+
+	// Bundle with expired token and fallback token
+	bundleFallback := []byte(fmt.Sprintf(`var a="%s"; var b="%s";`, jwtExp, jwtAlg))
+	if got := findDeveloperToken(bundleFallback); got != jwtAlg {
+		t.Fatalf("expected non-expired fallback, got %q", got)
+	}
+
+	// Token with missing or zero exp
+	jwtNoExp := enc([]byte(`{"typ":"JWT","alg":"ES256","kid":"WebPlayKid"}`)) + "." +
+		enc([]byte(`{"iss":"AMPWebPlay","iat":1234567890}`)) + "." +
+		enc([]byte("signature-bytes-that-are-long-enough-noexp"))
+
+	// Bundle with missing/zero exp only should return empty string
+	if got := findDeveloperToken([]byte(fmt.Sprintf(`var a="%s";`, jwtNoExp))); got != "" {
+		t.Fatalf("expected empty for token with no exp, got %q", got)
+	}
+
+	// Bundle with all expired tokens returns empty string
+	bundleAllExpired := []byte(fmt.Sprintf(`var a="%s"; var b="%s";`, jwtExp, jwtOldWebPlay))
+	if got := findDeveloperToken(bundleAllExpired); got != "" {
+		t.Fatalf("expected empty for all expired tokens, got %q", got)
+	}
+
+	// Valid regex match but invalid JSON in claims
+	badJSON := enc([]byte(`{"typ":"JWT","alg":"ES256","kid":"BAD01"}`)) + "." +
+		enc([]byte(`{"invalid-json-without-closing-brace`)) + "." +
+		enc([]byte("signature-bytes-that-are-long-enough-badjson"))
+	if got := findDeveloperToken([]byte(fmt.Sprintf(`var a="%s";`, badJSON))); got != "" {
+		t.Fatalf("expected empty for malformed JSON candidate, got %q", got)
+	}
+	bundleMalformed := []byte(fmt.Sprintf(`var a="%s"; var b="%s";`, badJSON, jwtTyp))
+	if got := findDeveloperToken(bundleMalformed); got != jwtTyp {
+		t.Fatalf("expected valid token when malformed present, got %q", got)
+	}
+
+	// Substring non-match: impostor issuer/kid should not steal priority
+	jwtImpostor := enc([]byte(`{"typ":"JWT","alg":"ES256","kid":"NotWebPlayKidAtAll"}`)) + "." +
+		enc([]byte(fmt.Sprintf(`{"iss":"NotAMPWebPlayAtAll","iat":%d,"exp":%d}`, now.Unix(), now.Add(24*time.Hour).Unix()))) + "." +
+		enc([]byte("signature-bytes-that-are-long-enough-imp"))
+	bundleImpostorAndWebPlay := []byte(fmt.Sprintf(`var a="%s"; var b="%s";`, jwtImpostor, jwtTyp))
+	if got := findDeveloperToken(bundleImpostorAndWebPlay); got != jwtTyp {
+		t.Fatalf("expected real AMPWebPlay token, got %q", got)
+	}
+
+	// Bundle with no tokens
+	if got := findDeveloperToken([]byte(`var x = 123;`)); got != "" {
+		t.Fatalf("expected empty for no tokens, got %q", got)
 	}
 }
