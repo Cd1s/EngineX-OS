@@ -7,7 +7,7 @@ No service or SoundSwitch property is changed.
 
 Open the authenticated Web Console, then **DMX Lighting** (`/dmx`). Stop
 SoundSwitch before enabling standalone DMX. Add outputs and fixture patches,
-set intensity, choose a color/effect, and apply. Universe and fixture addresses
+set intensity (it defaults to zero), choose a color/effect, and apply. Universe and fixture addresses
 start at 1. Art-Net's wire Port-Address is one less than the UI universe.
 
 Outputs are Art-Net UDP 6454 and E1.31/sACN UDP 5568, at 30 Hz with 512 slots.
@@ -40,7 +40,8 @@ it adds no qrc node. It offers blackout/resume, master dimmer, four movement
 effects and color palettes. Fixture patching and intensity live in the Web
 Console. The three-language strings use the existing i18n.tsv dictionary.
 
-Blackout sends zero on every slot. Disabling, reconfiguring routes, or closing
+Blackout sends zero on every slot, including pan and tilt. Moving heads may
+therefore return to zero; this deliberately follows the original plugin. Disabling, reconfiguring routes, or closing
 the engine sends three zero frames (sACN includes Stream_Terminated) and closes
 all adapters. Live color/dimmer/effect changes preserve sockets; speed and manual BPM changes
 can jump the movement phase, matching the original plugin.
@@ -54,7 +55,8 @@ within one second. It never stops or reconfigures SoundSwitch.
 gateway (a literal loopback Host and no forwarding headers).
 Web POST actions are `configure` (with the complete `config` and `revision` from
 GET), `control` (a partial `control` object), `blackout`, and `disable`. Stale
-full configurations are rejected with 409. Native POST is performance-only:
+full configurations are rejected with 409. Performance changes also invalidate
+a pending full Web Apply; reload the Web page before editing again. Native POST is performance-only:
 `control` accepts blackout, master, effect and RGB; it cannot edit routes,
 patches or the opt-in. Blackout/disable remain effective if persistence fails.
 The clock accepts the existing array of deck-state objects.

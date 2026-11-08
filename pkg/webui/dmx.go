@@ -72,18 +72,24 @@ func (s *Server) dmxQML(w http.ResponseWriter, r *http.Request) {
 // literal loopback Host and no forwarding headers; public tunnel requests do
 // not qualify as native control requests.
 func directDMXRequest(w http.ResponseWriter, r *http.Request) bool {
+	if !isDirectDMXRequest(r) {
+		fail(w, 403, errors.New("direct loopback DMX request required"))
+		return false
+	}
+	return true
+}
+
+func isDirectDMXRequest(r *http.Request) bool {
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
 	if ip == nil || !ip.IsLoopback() {
-		fail(w, 403, errors.New("direct loopback DMX request required"))
 		return false
 	}
 	for _, h := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP", "CF-Connecting-IP", "Tailscale-User-Login"} {
 		if r.Header.Get(h) != "" {
-			fail(w, 403, errors.New("proxied DMX control is not allowed"))
 			return false
 		}
 	}
