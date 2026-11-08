@@ -105,6 +105,13 @@ exact millisecond grid/cue/loop data, base64 band bytes and optional cover.
 Key mismatch is 409; not-ready data is 404. No audio fallback, audio copy,
 shadow-v3 directory or EXPF sidecar is created by the new receive path.
 
+The public track key includes the source's loaded session as well as file
+identity. It stays stable through steady posts, but confirmed eject/reload or
+track replacement creates a new key, refreshing saved grid/loop snapshots even
+when the same file's size/mtime did not change. Within one loaded session,
+saved-grid/loop edits require confirmed eject/reload; hot/main cue edits are
+carried live and do not require reloading.
+
 The receiver fetches asynchronously, rejects redirects and oversized payloads,
 backs off failures, preserves usable overview during detail retries, and bounds
 its cache to four entries. Display keys include source identity and original
@@ -119,6 +126,12 @@ instead of publishing a false empty list. Only explicit goodbye, a confirmed
 empty/ejected track, or an explicit layout/role change clears the display.
 The old 2 s timeout + 350 ms unload behavior remains only in the opt-in legacy
 renderer. Missing packets alone do not cause a track reload or display teardown.
+
+Same-source recovery (stable Link ID or IP) updates its retained slots. A distinct
+replacement hardware identity cannot evict an old retained source just because
+a timer elapsed; when all relevant slots remain occupied, explicit goodbye,
+layout reset or suite restart is needed. This intentionally follows PM's
+no-timeout-clear requirement rather than silently stealing an offline slot.
 
 Local endpoints provide metadata, cached PNGs and cached artwork under
 `/v1/sc5000/shadow/`. Role, key and current source ownership are checked on every
@@ -180,6 +193,32 @@ Engine restart to clear any slots from the former legacy mode. Existing audio
 caches are retained; discovery no longer deletes old cache directories. PM can
 roll back the build or enable legacy and restart during deployment. No live
 restart, unload, setting/database change or flash is performed by this task.
+
+## 后续：原厂 Hybrid Mode
+
+The F1/craft-anything investigation is recorded in
+`runs/20261109-sc5000-shadow-arch/re-findings.md`. JP07 Engine 5.3.0 contains
+the full RemoteHostScreen ServicesController/Service/DeckController/TrackData
+receive/render stack, including PositionItem/ZoomItem and the remotehostscreen.v1
+protobuf UpdateWaveformChunk / SetDeckOverviewWaveform messages. Its QML binds
+WaveFormItem.trackData to the remote service's deck TrackData and reads the
+overviewWaveformUrlRGB image. This could replace the custom display renderer
+without loading audio in receiver Engine slots.
+
+The enabling gate remains unproven: candidates include Config.device.hasHybridMode,
+hybridModeHostFeature and FeatureFlagStorage.json. The sandbox's
+RemoteHostScreenCollectionController was null. A separate follow-up must prove
+initialization/handshake and a supplied waveform/grid render in an isolated
+sandbox before using that path. Library WaveformOverviewView.trackData only
+resolves local library track IDs, so binding a remote song ID there is not an
+alternative. Per PM direction, the custom PNG/QML renderer is this iteration's
+baseline; Hybrid Mode is not enabled or required by this branch.
+
+During the full race gate an existing startup ordering bug was also reproduced:
+an always-queued tunnel/Tailscale restore goroutine could observe the first
+enable request as if it were saved startup state and start a second generation.
+New now queues those restore tasks only when their pre-publication saved
+configuration is enabled. Test fake snapshots/counters are synchronized.
 
 ## Validation and physical acceptance
 

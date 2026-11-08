@@ -195,7 +195,7 @@ SERVICES_MAIN = """
 	}
 	function scShadowDisplayFetch(d, key) {
 		const s = scShadowData(d)
-		if (!scShadowVisible(d) || !s || !key || s.key !== key) return
+		if (!scShadowVisible(d) || !s || !key || s.key !== key || s.metadataOnly) return
 		const old = scShadowDisplayRequests[d]
 		if (old && old.key === key && ((old.busy && Date.now() - old.started < 10000) || Date.now() < old.next)) return
 		if (s.meta && !s.meta.detailPending) return // completed overview-only is a valid fallback
@@ -245,7 +245,7 @@ SERVICES_MAIN = """
 			}
 			const old = scShadowData(d), key = String(e.key || ""), sample = next[d] || {}
 			sample.key = key; sample.title = e.title || ""; sample.artist = e.artist || ""
-			sample.playing = !!e.playing; sample.stale = !!e.stale
+			sample.playing = !!e.playing; sample.stale = !!e.stale; sample.metadataOnly = !!e.metadataOnly
 			sample.positionMs = Number(e.positionMs) || 0; sample.at = Number(e.at) || now; sample.pitch = Number(e.pitch) || 0
 			sample.cuePos = typeof e.cuePos === "number" ? e.cuePos : undefined
 			sample.master = !!e.master; sample.sync = !!e.sync; sample.beat = Number(e.beat) || 0; sample.bpm = Number(e.bpm) || 0
@@ -627,7 +627,7 @@ SERVICES_MAIN = """
 				try {
 					if (x.status === 200) {
 						const version = x.getResponseHeader("X-Shadow-State") || ""
-						if (version && version === root.scShadowResponseVersion) {
+						if (root.scShadowDisplayOnly && version && version === root.scShadowResponseVersion) {
 							scShadowPollTimer.interval = 60; scShadowPollTimer.restart(); return
 						}
 						root.scShadowResponseVersion = version
@@ -2683,7 +2683,7 @@ SHADOW_LAYER = r"""
             visible: scDisplay.graphical && !!scDisplay.sample
             anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 2
             color: "#dddddd"; font.pixelSize: 10
-            text: (scDisplay.stale ? "OFFLINE · " : "") + (!scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed ? "OVERVIEW" : "")
+            text: (scDisplay.stale ? "OFFLINE · " : "") + (scDisplay.sample.metadataOnly ? "REMOTE" : !scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed ? "OVERVIEW" : "")
         }
         // Covers remote Stems, needle-drop, grid editing and transport touch targets.
         MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; onWheel: function(wheel) { wheel.accepted = true } }

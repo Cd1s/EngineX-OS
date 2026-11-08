@@ -172,7 +172,10 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
 	// CDJ compatibility is metadata-only in this mode. In particular this must
 	// not call shadowFetchCDJ, whose prerequisite is a full audio download.
 	for deck, dev := range cdjDecks(s.mergedDevices(), free, now) {
-		d := deckState{Deck: deck, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
+		d := deckState{Deck: deck, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
+		if dev.TrackID != 0 {
+			d.Key = fmt.Sprintf("cdj:%s:%d:%d:%d", dev.Address, dev.SourcePlayer, dev.SourceSlot, dev.TrackID)
+		}
 		if d.Playing {
 			d.PositionMS += float64(now.Sub(dev.LastSeen).Milliseconds()) * (1 + d.Pitch/100)
 		}
