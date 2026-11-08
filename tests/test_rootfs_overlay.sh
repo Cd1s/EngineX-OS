@@ -197,16 +197,19 @@ printf '[none]\n' > "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
 mkdir -p "$SC5000_SYS_ROOT/block/mmcblk0/queue" "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand"
 printf 'none mq-deadline kyber [bfq]\n' > "$SC5000_SYS_ROOT/block/mmcblk0/queue/scheduler"
 for knob in up_threshold sampling_down_factor ignore_nice_load; do printf '0\n' > "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/$knob"; done
+mkdir -p "$SC5000_SYS_ROOT/devices/virtual/workqueue"
+printf '6\n' > "$SC5000_SYS_ROOT/devices/virtual/workqueue/cpumask"
 printf ' CPU0 CPU1 CPU2 CPU3\n 42: 1 0 0 0 GIC i2s-audio\n 43: 0 1 0 0 GIC ehci\n' > "$SC5000_PROC_ROOT/interrupts"
 printf ' 44: 0 1 0 0 GIC ffa30000.gpu\n 45: 0 1 0 0 GIC ehci_hcd\n 46: 0 1 0 0 GIC ffb20000\n' >> "$SC5000_PROC_ROOT/interrupts"
 printf ' 144: 0 1 0 0 GIC ffa30000.gpu\n 145: 0 1 0 0 GIC ff540000\n 146: 0 1 0 0 GIC ffb20000\n' >> "$SC5000_PROC_ROOT/interrupts"
-for irq in 42 43 44 45 46 144 145 146; do mkdir -p "$SC5000_PROC_ROOT/irq/$irq"; printf 'f\n' > "$SC5000_PROC_ROOT/irq/$irq/smp_affinity"; done
+printf ' 51: 0 0 1 0 GIC ff650000.i2c\n 52: 0 1 0 0 GIC panfrost-gpu\n 53: 0 1 0 0 GIC ff940000.vop\n 54: 0 1 0 0 GIC panfrost-job\n 55: 0 0 1 0 GIC eth0\n 65: 0 0 1 0 GIC dw-mci\n' >> "$SC5000_PROC_ROOT/interrupts"
+for irq in 42 43 44 45 46 51 52 53 54 55 65 144 145 146; do mkdir -p "$SC5000_PROC_ROOT/irq/$irq"; printf 'f\n' > "$SC5000_PROC_ROOT/irq/$irq/smp_affinity"; done
 mkdir -p "$SC5000_PROC_ROOT/100/task/"{100,101,102} "$SC5000_PROC_ROOT/200"
 ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
 printf 'EMain\n' > "$SC5000_PROC_ROOT/100/comm"
 printf 'irq/42-i2s\n' > "$SC5000_PROC_ROOT/200/comm"
-mkdir -p "$SC5000_PROC_ROOT/100/task/"{103,104,105,106}
-for tid in 100 101 102 103 104 105 106; do
+mkdir -p "$SC5000_PROC_ROOT/100/task/"{103,104,105,106,107,108}
+for tid in 100 101 102 103 104 105 106 107 108; do
     policy=0; name=GUI
     if [[ $tid == 101 ]]; then policy=1; name=AudioRT; fi
     if [[ $tid == 102 ]]; then name=AudioHelper; fi
@@ -214,7 +217,11 @@ for tid in 100 101 102 103 104 105 106; do
     if [[ $tid == 104 ]]; then name=Streamer2; fi
     if [[ $tid == 105 ]]; then name=EMain; fi
     if [[ $tid == 106 ]]; then policy=2; name=AudioRenderer3; fi
+    if [[ $tid == 107 ]]; then name=J:I:Takingfreez; fi
+    if [[ $tid == 108 ]]; then name=QQmlThread; fi
     if (( tid >= 103 )); then printf 'Cpus_allowed_list:\t1\n' > "$SC5000_PROC_ROOT/100/task/$tid/status"; fi
+    if [[ $tid == 107 ]]; then printf 'Cpus_allowed_list:\t0-3\n' > "$SC5000_PROC_ROOT/100/task/$tid/status"; fi
+    if [[ $tid == 108 ]]; then printf 'Cpus_allowed_list:\t2\n' > "$SC5000_PROC_ROOT/100/task/$tid/status"; fi
     printf '%s\n' "$name" > "$SC5000_PROC_ROOT/100/task/$tid/comm"
     {
         printf '%s (name with spaces) S' "$tid"
@@ -222,7 +229,12 @@ for tid in 100 101 102 103 104 105 106; do
         printf ' %s\n' "$policy"
     } > "$SC5000_PROC_ROOT/100/task/$tid/stat"
 done
-for entry in '201 144-ffa3000' '202 145-ff54000' '203 99-eth0' '204 99-other' '205 146-ffb2000'; do
+# OfflineAnalyzer can inherit the GUI's single-CPU mask; include its child too.
+mkdir -p "$SC5000_PROC_ROOT/300/task"
+ln -s /usr/Engine/OfflineAnalyzer "$SC5000_PROC_ROOT/300/exe"
+cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/300/task/300"
+cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/300/task/301"
+for entry in '201 144-ffa3000' '202 145-ff54000' '203 99-eth0' '204 99-other' '205 146-ffb2000' '206 54-panfrost'; do
     read -r pid name <<< "$entry"
     mkdir -p "$SC5000_PROC_ROOT/$pid"
     printf 'irq/%s\n' "$name" > "$SC5000_PROC_ROOT/$pid/comm"
@@ -245,29 +257,41 @@ has mq-deadline "$SC5000_SYS_ROOT/block/sda/queue/scheduler"
 has 1024 "$SC5000_SYS_ROOT/block/sda/queue/read_ahead_kb"
 has 2048 "$SC5000_SYS_ROOT/block/sdb/queue/read_ahead_kb"
 has none "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
+has 9 "$SC5000_SYS_ROOT/devices/virtual/workqueue/cpumask"
 lacks 'taskset <-pc> <0> <101>' "$MOCK_ROOT/log"
 lacks 'taskset <-pc> <1-2> <100>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <1> <100>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <2> <103>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <0,3> <104>' "$MOCK_ROOT/log"
-lacks '> <105>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <0,3> <105>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <0,3> <107>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <0,3> <108>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <0,3> <300>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <0,3> <301>' "$MOCK_ROOT/log"
 lacks '> <106>' "$MOCK_ROOT/log"
+lacks 'chrt <-f> <-p> <40> <106>' "$MOCK_ROOT/log"
 has 1 "$SC5000_PROC_ROOT/irq/42/smp_affinity"
-has 4 "$SC5000_PROC_ROOT/irq/43/smp_affinity"
+has 8 "$SC5000_PROC_ROOT/irq/43/smp_affinity"
 has 'taskset <-pc> <0> <200>' "$MOCK_ROOT/log"
 has 'chrt <-f> <-p> <99> <200>' "$MOCK_ROOT/log"
-has 2 "$SC5000_PROC_ROOT/irq/44/smp_affinity"
-has 4 "$SC5000_PROC_ROOT/irq/45/smp_affinity"
+has 4 "$SC5000_PROC_ROOT/irq/44/smp_affinity"
+has 8 "$SC5000_PROC_ROOT/irq/45/smp_affinity"
 has 1 "$SC5000_PROC_ROOT/irq/46/smp_affinity"
-has 'taskset <-pc> <1> <201>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <2> <202>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <2> <203>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <2> <204>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <2> <201>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <3> <202>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <3> <203>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <3> <204>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <2> <206>' "$MOCK_ROOT/log"
+has 'chrt <-f> <-p> <40> <201>' "$MOCK_ROOT/log"
+has 'chrt <-f> <-p> <40> <202>' "$MOCK_ROOT/log"
+has 'chrt <-f> <-p> <40> <206>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <0> <205>' "$MOCK_ROOT/log"
 has 'chrt <-f> <-p> <99> <205>' "$MOCK_ROOT/log"
 has 1 "$SC5000_PROC_ROOT/irq/146/smp_affinity"
-has 2 "$SC5000_PROC_ROOT/irq/144/smp_affinity"
-has 4 "$SC5000_PROC_ROOT/irq/145/smp_affinity"
-lacks 'taskset <-pc> <3>' "$MOCK_ROOT/log"
+has 4 "$SC5000_PROC_ROOT/irq/144/smp_affinity"
+has 8 "$SC5000_PROC_ROOT/irq/145/smp_affinity"
+for irq in 52 53 54; do has 4 "$SC5000_PROC_ROOT/irq/$irq/smp_affinity"; done
+for irq in 51 55 65; do has 8 "$SC5000_PROC_ROOT/irq/$irq/smp_affinity"; done
 find "$SC5000_SYS_ROOT" "$SC5000_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/before"
 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 find "$SC5000_SYS_ROOT" "$SC5000_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/after"
