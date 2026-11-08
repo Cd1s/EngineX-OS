@@ -2,7 +2,9 @@ package webui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,6 +212,35 @@ func TestBrowseDiskIsolationSecretsAndBounds(t *testing.T) {
 	if len(c.entries) > browseEntries || len(files) > browseEntries || c.bytes > browseMemoryBytes {
 		t.Fatal("cache bound exceeded")
 	}
+
+	blob := make([]byte, browseEntryBytes)
+	for i := range 6 {
+		c.insert(browseKey("large", "", "", string(rune(i))), &browseEntry{data: blob, used: time.Now()})
+	}
+	if c.bytes > browseMemoryBytes {
+		t.Fatal("memory byte budget exceeded")
+	}
+	sparse, err := os.Create(filepath.Join(c.dir, "oversized.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sparse.Truncate(browseDiskBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	sparse.Close()
+	c.pruneDisk()
+	files, _ = os.ReadDir(c.dir)
+	var diskBytes int64
+	for _, f := range files {
+		st, err := f.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		diskBytes += st.Size()
+	}
+	if diskBytes > browseDiskBytes {
+		t.Fatal("disk byte budget exceeded")
+	}
 	// Oversized and malformed disk entries are ignored, without failing browsing.
 	if err := os.WriteFile(path, []byte(`not json`), 0o600); err != nil {
 		t.Fatal(err)
@@ -231,4 +262,112 @@ func BenchmarkBrowseWarm(b *testing.B) {
 	}
 	b.StopTimer()
 	b.ReportMetric(float64(calls.Load()-1), "upstream_calls")
+}
+
+type browseTestProvider struct{ lists, tracks atomic.Int32 }
+
+func (p *browseTestProvider) Playlists(context.Context) ([]providers.Playlist, error) {
+	p.lists.Add(1)
+	return []providers.Playlist{{ID: "playlist", Title: "a", Count: 2}}, nil
+}
+func (p *browseTestProvider) Tracks(context.Context, string) ([]providers.Track, error) {
+	p.tracks.Add(1)
+	return []providers.Track{{ID: "one", Title: "one", Provider: "spotify"}, {ID: "two", Title: "two", Provider: "spotify"}}, nil
+}
+func TestBrowseGatewayPaginationUsesSameCache(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("scope=spotify\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return nil, errors.New("unconfigured") }}, nil)
+	defer s.Close()
+	p := &browseTestProvider{}
+	s.sessions["guest-a"] = &Session{ID: "guest-a", Provider: "spotify", Guest: true, Ready: true, p: p, expires: time.Now().Add(time.Hour)}
+	request := func(path string) []byte {
+		t.Helper()
+		w := httptest.NewRecorder()
+		s.tidal.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != 200 {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+		return w.Body.Bytes()
+	}
+	var lists struct{ Items []struct{ UUID string } }
+	if err := json.Unmarshal(request("/v1/users/1/playlists?limit=1"), &lists); err != nil || len(lists.Items) != 1 {
+		t.Fatalf("lists %+v %v", lists, err)
+	}
+	request("/v1/users/1/favorites/playlists?limit=1")
+	id := lists.Items[0].UUID
+	request("/v1/playlists/" + id + "/tracks?offset=0&limit=1")
+	second := request("/v1/playlists/" + id + "/items?offset=1&limit=1")
+	if !strings.Contains(string(second), `"title":"two"`) {
+		t.Fatalf("wrong second page: %s", second)
+	}
+	if p.lists.Load() != 1 || p.tracks.Load() != 1 {
+		t.Fatalf("upstream lists=%d tracks=%d", p.lists.Load(), p.tracks.Load())
+	}
+}
+func BenchmarkBrowseWarmTracks100(b *testing.B) {
+	c := newBrowseCache("")
+	key := browseKey("netease", "owner", "tracks", "100")
+	var calls atomic.Int64
+	load := func(context.Context) (browseData, error) {
+		calls.Add(1)
+		tracks := make([]browseTrack, 100)
+		for i := range tracks {
+			tracks[i] = browseTrack{Track: providers.Track{ID: "id", Title: "track", Artist: "artist", Provider: "netease"}}
+		}
+		return browseData{Tracks: tracks}, nil
+	}
+	_, _ = c.get(context.Background(), key, load)
+	b.ResetTimer()
+	for range b.N {
+		_, _ = c.get(context.Background(), key, load)
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(calls.Load()-1), "upstream_calls")
+}
+
+type parallelBrowseSearch struct {
+	browseTestProvider
+	tracksStarted, listsStarted chan struct{}
+}
+
+func (p *parallelBrowseSearch) Search(ctx context.Context, _ string) ([]providers.Track, error) {
+	close(p.tracksStarted)
+	select {
+	case <-p.listsStarted:
+		return []providers.Track{{ID: "one", Title: "parallel", Provider: "spotify"}}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+func (p *parallelBrowseSearch) SearchPlaylists(ctx context.Context, _ string) ([]providers.Playlist, error) {
+	close(p.listsStarted)
+	select {
+	case <-p.tracksStarted:
+		return []providers.Playlist{{ID: "list", Title: "parallel"}}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+func TestBrowseSearchStartsBothKindsTogether(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("scope=spotify\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), Factory: func(string, bool, string) (providers.Provider, error) { return nil, errors.New("unconfigured") }}, nil)
+	defer s.Close()
+	p := &parallelBrowseSearch{tracksStarted: make(chan struct{}), listsStarted: make(chan struct{})}
+	s.sessions["search"] = &Session{ID: "search", Provider: "spotify", Ready: true, p: p}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	w := httptest.NewRecorder()
+	s.tidal.ServeHTTP(w, httptest.NewRequest("GET", "/v1/search?query=parallel", nil).WithContext(ctx))
+	var result struct {
+		Tracks, Playlists struct{ TotalNumberOfItems int }
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || result.Tracks.TotalNumberOfItems != 1 || result.Playlists.TotalNumberOfItems != 1 {
+		t.Fatalf("sequential search or missing result: %s (%v)", w.Body.String(), err)
+	}
 }
