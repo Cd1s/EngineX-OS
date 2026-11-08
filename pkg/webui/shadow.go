@@ -282,6 +282,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err)
 		return
 	}
+	s.setDMXDecks(decks)
 	own := decks[:0]
 	nowMS, seq := time.Now().UnixMilli(), time.Now().UnixNano()
 	var postAt int64
