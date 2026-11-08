@@ -3,12 +3,15 @@ package prolink
 import (
 	"bytes"
 	"database/sql"
-	"encoding/binary"
+	"encoding/base64"
+ "encoding/binary"
+ "encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"image"
 	"image/jpeg"
+ "io"
 	_ "image/png"
 	"math"
 	"net/url"
@@ -572,7 +575,7 @@ func engineBeats(raw []byte) ([]rekordbox.Beat, float64, float64, error) {
  bad := func() ([]rekordbox.Beat, float64, float64, error) { return nil, 0, 0, fmt.Errorf("invalid Engine beatData") }
  if len(raw) < 33 { return bad() }
  rate, samples := engineDouble(raw, binary.BigEndian), engineDouble(raw[8:], binary.BigEndian)
- if !finiteEngine(rate) || rate < 8000 || rate > 384000 || !finiteEngine(samples) || samples <= 0 || samples/rate > 3600 || raw[16] > 1 { return bad() }
+ if !finiteEngine(rate) || rate < 8000 || rate > 384000 || !finiteEngine(samples) || samples <= 0 || samples/rate > 86400 || raw[16] > 1 { return bad() }
  var grids [2][]engineBeatMarker
  off := 17
  for g := range grids {
@@ -735,9 +738,23 @@ func cueSections(cues []rekordbox.Cue, extended bool) [][]byte {
 // Covers are copied to the generated Pioneer tree; the Engine database and
 // Engine Library/Artwork are never changed. DecodeConfig bounds image work.
 func exportEngineArtwork(db *sql.DB, root string, id int64) (string,error) {
- var data []byte
- err:=db.QueryRow(`SELECT substr(albumArt,1,4194305) FROM AlbumArt WHERE id=?`,id).Scan(&data)
- if err==sql.ErrNoRows || (err==nil && len(data)==0) { return "",nil };if err!=nil { return "",err }
+ var data []byte;var hash any
+ err:=db.QueryRow(`SELECT hash, substr(albumArt,1,4194305) FROM AlbumArt WHERE id=?`,id).Scan(&hash,&data)
+ if err==sql.ErrNoRows { return "",nil };if err!=nil { return "",err }
+ if len(data)==0 {
+  // Newer Engine libraries can keep only a SHA-1 in SQLite and the JPEG
+  // in Artwork. Accept only a hash, never a database-provided arbitrary path.
+  var sum []byte
+  switch h:=hash.(type) { case []byte: if len(h)==20 { sum=h };case string: if len(h)==40 { sum,_=hex.DecodeString(h) } }
+  if len(sum)!=20 { return "",nil }
+  resolver,err:=compat.NewResolver(root);if err!=nil { return "",err }
+  rel,err:=resolver.Resolve("Engine Library/Artwork/"+base64.RawURLEncoding.EncodeToString(sum)+".jpg")
+  if err!=nil { return "",nil }
+  file,err:=os.Open(resolver.FullPath(rel));if err!=nil { return "",err }
+  data,err=io.ReadAll(io.LimitReader(file,(4<<20)+1));closeErr:=file.Close()
+  if err!=nil { return "",err };if closeErr!=nil { return "",closeErr }
+ }
+ if len(data)==0 { return "",nil }
  if len(data)>4<<20 { return "",fmt.Errorf("artwork %d exceeds size limit",id) }
  cfg,format,err:=image.DecodeConfig(bytes.NewReader(data));if err!=nil { return "",fmt.Errorf("artwork %d: %w",id,err) }
  if cfg.Width<=0 || cfg.Height<=0 || cfg.Width>4096 || cfg.Height>4096 { return "",fmt.Errorf("artwork %d exceeds dimension limit",id) }
