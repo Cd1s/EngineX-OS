@@ -4,6 +4,7 @@ import (
  "bytes"
  "crypto/sha256"
  "encoding/binary"
+ "encoding/base64"
  "fmt"
  "image"
  "image/jpeg"
@@ -397,4 +398,29 @@ func TestEngineBridgeRejectsDamagedPerformance(t *testing.T) {
   bad:=[]byte{1,2,3};bridgeExec(t,db,"UPDATE PerformanceData SET "+field+"=? WHERE trackId=1",bad)
   if err:=prolink.SyncEngineToPioneerExport(root);err==nil {t.Fatal("damaged performance accepted")}
  })}
+}
+
+func TestEngineBridgeArtworkFileAndAllHotCueSlots(t *testing.T) {
+ bridgeNoStreams(t);_,root,db:=testlibrary.Create(t)
+ bridgeExec(t,db,`INSERT INTO Track(id,path,filename,length,key,albumArtId) VALUES(1,'../Music/a.wav','a.wav',4,23,7)`)
+ beat,_,_,overview:=bridgeEnginePerformance(t)
+ var q bytes.Buffer
+ binary.Write(&q,binary.BigEndian,uint64(8))
+ for slot:=1;slot<=8;slot++ {q.WriteByte(1);q.WriteByte(byte('A'+slot-1));binary.Write(&q,binary.BigEndian,float64(slot*12000));q.Write([]byte{255,10,20,30})}
+ binary.Write(&q,binary.BigEndian,float64(-1));q.WriteByte(0);binary.Write(&q,binary.BigEndian,float64(-1))
+ quick,err:=enginedb.QCompress(q.Bytes());if err!=nil {t.Fatal(err)}
+ bridgeExec(t,db,`UPDATE PerformanceData SET beatData=?,quickCues=?,overviewWaveFormData=? WHERE trackId=1`,beat,quick,overview)
+ hash:=bytes.Repeat([]byte{7},20)
+ bridgeExec(t,db,`INSERT INTO AlbumArt(id,hash) VALUES(7,?)`,hash)
+ var cover bytes.Buffer
+ if err:=jpeg.Encode(&cover,image.NewRGBA(image.Rect(0,0,3,3)),nil);err!=nil {t.Fatal(err)}
+ testfixture.Write(t,root,"Engine Library/Artwork/"+base64.RawURLEncoding.EncodeToString(hash)+".jpg",cover.Bytes())
+ if err:=prolink.SyncEngineToPioneerExport(root);err!=nil {t.Fatal(err)}
+ lib:=bridgeReadLibrary(t,root);tr:=lib.Tracks[0]
+ if tr.ArtworkPath=="" || tr.Key!="7A" {t.Fatalf("track metadata: %+v",tr)}
+ for _,ext:=range []string{"DAT","EXT"} {
+  a:=bridgeReadAnalysis(t,root,strings.TrimSuffix(tr.AnalysisPath,"DAT")+ext)
+  if len(a.Cues)!=8 {t.Fatalf("%s: %+v",ext,a.Cues)}
+  for i,c:=range a.Cues {if c.HotCue!=uint32(i+1) || c.TimeMS!=uint32((i+1)*250) {t.Errorf("%s slot %d: %+v",ext,i,c)}}
+ }
 }
