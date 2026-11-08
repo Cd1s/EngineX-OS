@@ -140,10 +140,197 @@ static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
 static int pioneer_fx_mode;           // #88 Pioneer FX emulations
 
+// Pad LED Brightness: Engine sends every controller LED through snd_seq_event_output_direct
+// (RGB LEDs as 14/15-byte SysEx, single-colour keys as NoteOn). Scale the PWM bytes there,
+// after Engine's own gamma, and replay the cached raw events when led_brightness= changes.
+#define SEQ_EV_SIZE 28 // sizeof(snd_seq_event_t) on armhf and aarch64 (ext is packed)
+#define SEQ_SYSEX 130
+#define SEQ_NOTEON 6
+#define SEQ_NOTEOFF 7
+struct sc_seq_ext { uint32_t len; void *ptr; } __attribute__((packed)); // ALSA's snd_seq_ev_ext_t, at event+16
+
+static int led_pct = 100;
+static pthread_mutex_t led_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct led_slot { uchar len; uchar raw[15]; uchar ev[SEQ_EV_SIZE]; void *handle; } led_slots[16][128];
+static struct note_slot { uchar valid, velocity; uchar ev[SEQ_EV_SIZE]; void *handle; } note_slots[16][100];
+static void *seq_direct_cache, *seq_drain_cache;
+
+// Perceptual curve: pct^2 duty. 0 stays off; a lit LED never drops below 1.
+static uchar scale_led_pwm(uchar v, int pct) {
+    if (v == 0) return 0;
+    if (pct >= 100) return v & 0x7f;
+    unsigned s = ((unsigned)v * (unsigned)pct * (unsigned)pct + 5000u) / 10000u;
+    if (s < 1u) s = 1u;
+    if (s > 127u) s = 127u;
+    return (uchar)s;
+}
+
+// RGB LED SysEx? On match fills ch/idx and the offset of the 3 RGB bytes. Screen SysEx (0B/7C) never matches.
+static int led_sysex(const uchar *b, uint32_t len, int *ch, int *idx, int *rgb) {
+    if (len == 14 && b[0] == 0xF0 && b[1] == 0x00 && b[2] == 0x02 && b[3] == 0x0B && b[6] == 0x03 &&
+        b[7] == 0x00 && b[8] == 0x04 && b[13] == 0xF7) {
+        *ch = 0; *idx = b[9] & 0x7f; *rgb = 10;
+        return 1;
+    }
+    if (len == 15 && b[0] == 0xF0 && b[1] == 0x00 && ((b[2] == 0x02 && b[3] == 0x0B) || (b[2] == 0x00 && b[3] == 0x17)) &&
+        b[6] == 0x03 && b[7] == 0x00 && b[8] == 0x05 && b[14] == 0xF7) {
+        *ch = b[9] & 0x0f; *idx = b[10] & 0x7f; *rgb = 11;
+        return 1;
+    }
+    return 0;
+}
+
+// Engine already applied gamma 3.5: an unpressed lit hot cue arrives as m=16 (Qt.darker 1.8), a platter
+// ring or pressed pad as m=127, an unlit pad as 1..2. Scale the triple as a unit so the hue survives and
+// the curve is monotonic in pct for every m (a floor above 16 used to make 80% brighter than 100%).
+// 0 stays off.
+static void led_scaled_sysex(const uchar *raw, uint32_t len, int rgb, int pct, uchar *out) {
+    memcpy(out, raw, len);
+    if (pct >= 100) return;
+    unsigned m = raw[rgb] > raw[rgb + 1] ? raw[rgb] : raw[rgb + 1];
+    if (raw[rgb + 2] > m) m = raw[rgb + 2];
+    if (m == 0) return;
+    // Five visibly distinct steps 100/80/60/40/20 %: m=127 -> 127/64/28/10/3, m=16 -> 16/11/7/4/1,
+    // unlit offColor (m<=3) -> m/0/0/0/0; anything between interpolates linearly.
+    static const unsigned p127[4] = {64, 28, 10, 3}, p16[4] = {11, 7, 4, 1};
+    int t = pct >= 75 ? 0 : pct >= 55 ? 1 : pct >= 35 ? 2 : 3;
+    unsigned target;
+    if (m <= 3) {
+        target = 0;
+    } else {
+        if (m <= 16) target = (p16[t] * m + 8) / 16;
+        else target = p16[t] + ((p127[t] - p16[t]) * (m - 16) + 55) / 111;
+        if (target < 1) target = 1;
+        if (target >= m) target = m - 1;
+    }
+    for (int i = 0; i < 3; i++) {
+        unsigned c = raw[rgb + i] & 0x7f;
+        unsigned s = target ? (c * target + m / 2) / m : 0;
+        out[rgb + i] = (uchar)(target && c && !s ? 1 : s > 127 ? 127 : s);
+    }
+}
+
+// Single-colour keys have three hardware states in the panel MCU: velocity 0 off, 1 dim (PWM ~20%),
+// >=2 full. Below 75% brightness send the dim state; the active-deck index and the all-pixels switch
+// ride on NoteOn 0x38 / 0x3d as data, not light.
+static uchar led_scaled_note(uchar index, uchar vel, int pct) {
+    // Vinyl (note 19) is already dim at full velocity: never scale it.
+    if (vel < 2 || index == 0x38 || index == 0x3d || index == 19) return vel;
+    if (pct <= 60) return 1;
+    uchar v = scale_led_pwm(vel, pct);
+    return v < 2 ? 2 : v;
+}
+
+int snd_seq_event_output_direct(void *handle, void *ev) {
+    int (*real)(void *, void *) = next_symbol(&seq_direct_cache, "snd_seq_event_output_direct");
+    if (!real) return -ENOSYS;
+    if (!ev || !is_engine()) return real(handle, ev);
+    uchar *e = ev;
+    int pct;
+    if (e[0] == SEQ_SYSEX && (e[1] & 0x0c) == 0x04) {
+        struct sc_seq_ext ext;
+        memcpy(&ext, e + 16, sizeof ext);
+        int ch, idx, rgb;
+        if (ext.ptr && led_sysex(ext.ptr, ext.len, &ch, &idx, &rgb)) {
+            uchar scaled[16], copy[SEQ_EV_SIZE];
+            struct led_slot *slot = &led_slots[ch][idx];
+            pthread_mutex_lock(&led_mu); // also serialises with the replay on the poll thread
+            slot->len = (uchar)ext.len;
+            memcpy(slot->raw, ext.ptr, ext.len);
+            memcpy(slot->ev, e, SEQ_EV_SIZE);
+            slot->handle = handle;
+            pct = __atomic_load_n(&led_pct, __ATOMIC_RELAXED);
+            led_scaled_sysex(slot->raw, ext.len, rgb, pct, scaled);
+            memcpy(copy, e, SEQ_EV_SIZE);
+            ext.ptr = scaled;
+            memcpy(copy + 16, &ext, sizeof ext);
+            int rc = real(handle, copy);
+            pthread_mutex_unlock(&led_mu);
+            return rc;
+        }
+    } else if (e[0] == SEQ_NOTEOFF && e[17] < 100 && (e[16] & 0xf0) == 0) {
+        pthread_mutex_lock(&led_mu); // a NoteOff must not be replayed as a lit key later
+        note_slots[e[16]][e[17]].valid = 0;
+        pthread_mutex_unlock(&led_mu);
+        return real(handle, ev);
+    } else if (e[0] == SEQ_NOTEON && e[17] < 100 && (e[16] & 0xf0) == 0) {
+        struct note_slot *slot = &note_slots[e[16]][e[17]];
+        pthread_mutex_lock(&led_mu);
+        if (e[18] <= 1) {
+            slot->valid = 0;
+            int rc = real(handle, ev);
+            pthread_mutex_unlock(&led_mu);
+            return rc;
+        }
+        uchar copy[SEQ_EV_SIZE];
+        slot->valid = 1;
+        slot->velocity = e[18];
+        memcpy(slot->ev, e, SEQ_EV_SIZE);
+        slot->handle = handle;
+        memcpy(copy, e, SEQ_EV_SIZE);
+        pct = __atomic_load_n(&led_pct, __ATOMIC_RELAXED);
+        copy[18] = led_scaled_note(e[17], e[18], pct);
+        int rc = real(handle, copy);
+        pthread_mutex_unlock(&led_mu);
+        return rc;
+    }
+    return real(handle, ev);
+}
+
+// led_brightness= changed: resend everything lit so the deck dims/brightens at once.
+static void led_replay(int pct) {
+    int (*direct)(void *, void *) = next_symbol(&seq_direct_cache, "snd_seq_event_output_direct");
+    int (*drain)(void *) = next_symbol(&seq_drain_cache, "snd_seq_drain_output");
+    if (!direct) return;
+    void *handles[8] = {0};
+    int nh = 0;
+    pthread_mutex_lock(&led_mu);
+    __atomic_store_n(&led_pct, pct, __ATOMIC_RELAXED);
+    for (int c = 0; c < 16; c++)
+        for (int i = 0; i < 128; i++) {
+            struct led_slot *s = &led_slots[c][i];
+            int ch, idx, rgb;
+            if (!s->len || !s->handle || !led_sysex(s->raw, s->len, &ch, &idx, &rgb)) continue;
+            uchar scaled[16], copy[SEQ_EV_SIZE];
+            struct sc_seq_ext ext = {s->len, scaled};
+            led_scaled_sysex(s->raw, s->len, rgb, pct, scaled);
+            memcpy(copy, s->ev, SEQ_EV_SIZE);
+            memcpy(copy + 16, &ext, sizeof ext);
+            direct(s->handle, copy);
+            int k = 0;
+            while (k < nh && handles[k] != s->handle) k++;
+            if (k == nh && nh < 8) handles[nh++] = s->handle;
+        }
+    for (int c = 0; c < 16; c++)
+        for (int n = 0; n < 100; n++) {
+            struct note_slot *s = &note_slots[c][n];
+            if (!s->valid || !s->handle) continue;
+            uchar copy[SEQ_EV_SIZE];
+            memcpy(copy, s->ev, SEQ_EV_SIZE);
+            copy[18] = led_scaled_note((uchar)n, s->velocity, pct);
+            direct(s->handle, copy);
+            int k = 0;
+            while (k < nh && handles[k] != s->handle) k++;
+            if (k == nh && nh < 8) handles[nh++] = s->handle;
+        }
+    if (drain) for (int k = 0; k < nh; k++) drain(handles[k]);
+    pthread_mutex_unlock(&led_mu);
+}
+
 static void *lim_poll(void *arg) {
     (void)arg;
     for (;;) {
-        int on = 0, gain = 0, echo = 0, pioneer_fx = 0;
+        static struct timespec last_mtim;
+        static off_t last_size = -1;
+        struct stat st;
+        // Re-parse only when settings.conf changed; 80 ms poll makes brightness taps instant.
+        if (stat(UI_ROOT "/settings.conf", &st) == 0 && last_size == st.st_size &&
+            last_mtim.tv_sec == st.st_mtim.tv_sec && last_mtim.tv_nsec == st.st_mtim.tv_nsec) {
+            usleep(80000);
+            continue;
+        }
+        if (stat(UI_ROOT "/settings.conf", &st) == 0) { last_size = st.st_size; last_mtim = st.st_mtim; }
+        int on = 0, gain = 0, echo = 0, pioneer_fx = 0, led = 100;
         FILE *f = fopen(UI_ROOT "/settings.conf", "r");
         if (f) {
             char line[64];
@@ -151,6 +338,10 @@ static void *lim_poll(void *arg) {
                 if (!strncmp(line, "master_limiter=1", 16)) on = 1;
                 else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
                 else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
+                else if (!strncmp(line, "led_brightness=", 15)) {
+                    int n = atoi(line + 15);
+                    if (n >= 10 && n <= 100) led = n;
+                }
                 else if (!strncmp(line, "pioneer_fx=", 11)) {
                     char val[64];
                     size_t len = strcspn(line + 11, "\r\n");
@@ -166,7 +357,8 @@ static void *lim_poll(void *arg) {
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
         __atomic_store_n(&echo_enabled, echo, __ATOMIC_RELAXED);
         __atomic_store_n(&pioneer_fx_mode, pioneer_fx, __ATOMIC_RELAXED);
-        sleep(1);
+        if (led != __atomic_load_n(&led_pct, __ATOMIC_RELAXED)) led_replay(led);
+        usleep(80000);
     }
     return NULL;
 }

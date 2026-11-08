@@ -25,13 +25,38 @@ class UiModSourceTest(unittest.TestCase):
         l = body.index("function scShadowLinkEdge")
         self.assertNotIn("Planck.getProperty", body[:k] + body[l:])
 
+    def test_cue_info_cached_and_master_not_fought(self):
+        self.assertIn("property var scCueInfoCache", bp.SERVICES_MAIN)
+        self.assertIn("c.sig === sig", bp.SERVICES_MAIN)
+        self.assertIn("interval: 200; repeat: true; running: true\n\t\tonTriggered: root.scCueTick", bp.SERVICES_MAIN)
+        self.assertIn("if (!e.link && e.master && !at.master) at.wantMaster", bp.SERVICES_MAIN)
+
     def test_shadow_throttles(self):
         self.assertIn("interval: 40; repeat: true", bp.SERVICES_MAIN)
-        self.assertIn("r.ver === undefined ? 120 : 25", bp.SERVICES_MAIN)
+        self.assertIn("r.ver === undefined ? 120 : 60", bp.SERVICES_MAIN)
+        self.assertIn("now - scShadowPostAt >= 250", bp.SERVICES_MAIN)
         self.assertIn("scShadowCueCache", bp.SERVICES_MAIN)
         self.assertIn('dbg: ""', bp.SERVICES_MAIN)
         self.assertIn("title: s.net", bp.SERVICES_MAIN)
         self.assertIn("artist: s.net", bp.SERVICES_MAIN)
+
+    def test_shadow_exact_pitch_pll_and_debug(self):
+        m = bp.SERVICES_MAIN
+        self.assertIn('(g(d, "/CurrentBPM") || {}).unnormalized', m)
+        self.assertIn("Math.abs(exact - shown) < 0.15 ? exact : shown", m)
+        self.assertIn("(p.playing ? 180 : 5)", m)
+        self.assertIn("currentBpm: s.currentBpm", m)
+        self.assertIn("const wantSync = !!e.sync && !e.link", m)
+        self.assertIn("function scShadowSpeed(d, pitch)", m)
+        self.assertIn("at.sd * 0.85 + drift * 0.15", m)
+        self.assertIn("at.postPlay = now + 380", m)
+        self.assertIn("e.seq === at.lastSeq", m)
+        self.assertIn('x.open("POST", "http://127.0.0.1:8080/v1/sc5000/debug/shadow")', m)
+        self.assertIn("root.scShadowDebug = !!r.debug", m)
+        self.assertIn("LoadOverlay/LoadOverlayDecks.qml", SRC)
+        # EngineX peers: Engine Link owns Sync and master, the shadow code never presses them
+        self.assertIn("if (!e.link && wantSync !== synced", m)
+        self.assertIn('if (!at.link && (root.scTr("/Engine/Deck" + d + "/DeckIsMaster")', m)
 
     def test_shadow_unload_and_no_register_subscription(self):
         m = bp.SERVICES_MAIN
@@ -58,7 +83,12 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("LinkBeatJumpLoopSize", bp.SERVICES_MAIN)
 
     def test_jog_timer_slower(self):
-        self.assertIn(": 250\n\t\trepeat: true", bp.SERVICES_MAIN)
+        # smooth gradient: 25 fps in every mode, hue advanced by elapsed time
+        self.assertIn("interval: 40\n\t\trepeat: true", bp.SERVICES_MAIN)
+        self.assertIn("scJogLastTick", bp.SERVICES_MAIN)
+        self.assertNotIn("< 0.015) return", bp.SERVICES_MAIN)
+        # #157: holding the Browse encoder must not toggle Grid Edit
+        self.assertIn("BrowseEncoder.qml", SRC)
 
     def test_cue_countdown_151(self):
         self.assertIn("function scNextCueInfo(d, tick)", bp.SERVICES_MAIN)
@@ -66,10 +96,27 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn('String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1),', bp.SERVICES_MAIN)
         cap = bp.cue_capsule("", "X", 30, 20)
         self.assertIn('objectName: "EngineX_CueCountdown"', cap)
-        self.assertIn("visible: info !== null", cap)
+        self.assertIn("visible: info !== null && root.scCueCountdown", cap)
         self.assertIn("Style.surface03Color", cap)
         self.assertNotIn("border", cap)
         self.assertEqual(cap.count("{"), cap.count("}"))
+
+    def test_cue_countdown_toggle_only_in_view(self):
+        self.assertIn('["scCueCountdown", "cueCountdown"]', SRC)
+        self.assertIn('root.scCall("cueCountdown=" + index)', bp.CUE_COUNTDOWN_ENTRY)
+        self.assertIn(bp.CUE_COUNTDOWN_ENTRY, bp.VIEW_ENTRIES)
+        for dup in (bp.UI_SCALE_ENTRY, bp.JOG_ENTRY, bp.FOUR_DECK_ENTRIES, bp.DUAL_COLUMN_ENTRY, bp.BEAT_JUMP_ENTRIES):
+            self.assertIn(dup, bp.VIEW_ENTRIES)
+            self.assertNotIn(dup, bp.LIBRARY_ENTRIES)
+        self.assertNotIn("LANGUAGE_ENTRY + UI_SCALE_ENTRY", SRC)
+        self.assertNotIn('("CuesLoops", "PausedSavedLoopBehavior"', SRC)
+        rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
+        self.assertIn(["Cue Countdown", "热标拍数倒数", "熱標拍數倒數"], rows)
+
+    def test_deck_list_follows_four_deck_role(self):
+        self.assertIn('root.scFourDeckRole.split("").map(c => parseInt(c))', bp.SERVICES_MAIN)
+        self.assertEqual(SRC.count("root.decks && root.decks.length ? root.decks : [1, 2]"), 1)  # only inside scDeckList
+        self.assertIn("function scJogResetDecks()", bp.SERVICES_MAIN)
 
     def test_i18n_has_stem(self):
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]

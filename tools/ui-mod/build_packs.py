@@ -139,7 +139,7 @@ SERVICES_MAIN = """
 	}
 	// EngineX settings a view keeps too: [snapshot key = root property, /v1/sc5000/ui query].
 	readonly property var scViewPrefs: [["scWave", "waveform"], ["scJog", "jog"], ["scUIScale", "uiScale"],
-		["scDualColumn", "browserDualColumn"], ["scBeatJumpPads", "beatJumpPads"], ["scSwapLoopOrder", "swapLoopOrder"]]
+		["scDualColumn", "browserDualColumn"], ["scCueCountdown", "cueCountdown"], ["scBeatJumpPads", "beatJumpPads"], ["scSwapLoopOrder", "swapLoopOrder"]]
 	function scViewApply(s) {
 		const m = scViewControls()
 		if (!m || (scFourDeckRole !== "" && !(m.deckCount && m.deckCount.settingNames && m.deckCount.settingNames.length >= 2))) return false
@@ -235,7 +235,7 @@ SERVICES_MAIN = """
 	// a playing shadow deck only takes the source's pitch and runs on its own audio
 	// clock (crystals agree to ~20 ppm).
 	// Latency: the sender samples its decks every 40 ms and posts at once on an
-	// edge (play, CUE, a jump, pitch, track), else every 120 ms; its Go pushes the
+	// edge (play, CUE, a jump, pitch, track), else every 250 ms; its Go pushes the
 	// post over UDP and the receiver's Go wakes the long poll below. The receiver
 	// applies a play or stop edge on the first update, never behind a lock.
 	property var scShadowAt: ({})
@@ -259,10 +259,21 @@ SERVICES_MAIN = """
 	// scTr values are not bindings, so the capsules re-read on this tick.
 	property int scCueTick: 0
 	Timer {
-		interval: 120; repeat: true; running: true
+		interval: 200; repeat: true; running: true
 		onTriggered: root.scCueTick = (root.scCueTick + 1) & 0xffff
 	}
+	// Same object while text/label/color/urgent are unchanged, so bindings do not re-layout every tick.
+	property var scCueInfoCache: ({})
 	function scNextCueInfo(d, tick) {
+		const info = scNextCueInfoRaw(d)
+		if (!info) { delete scCueInfoCache[d]; return null }
+		const sig = info.text + "|" + info.label + "|" + info.color + "|" + (info.urgent ? 1 : 0)
+		const c = scCueInfoCache[d]
+		if (c && c.sig === sig) return c.obj
+		scCueInfoCache[d] = {sig: sig, obj: info}
+		return info
+	}
+	function scNextCueInfoRaw(d) {
 		const t = p => (root.scTr("/Engine/Deck" + d + p) || {})
 		if (!t("/Track/SongLoaded").state) return null
 		const pos = t("/Track/TrackPosition").unnormalized || 0
@@ -280,7 +291,7 @@ SERVICES_MAIN = """
 		const totalBeats = (best.pos - pos) / sr * (bpm / 60.0)
 		if (totalBeats <= 0 || totalBeats > 2048) return null
 		const bars = Math.floor(totalBeats / 4)
-		const nm = t("/Track/QuickCue" + best.idx + "Name").string || ("CUE " + best.idx)
+		const nm = t("/Track/QuickCue" + best.idx + "Name").string || ""
 		return {
 			text: String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1),
 			label: nm.slice(0, 7),
@@ -328,11 +339,17 @@ SERVICES_MAIN = """
 		const now = Date.now()
 		if (now - scShadowPollAt > 3000) scShadowPoll() // starts the chain, or restarts a hung one
 		const mine = scFourDeckRole.split("").map(c => parseInt(c))
-		let edge = now - scShadowPostAt >= 120
+		// Steady posts every 250 ms (the receiver extrapolates); edges go at once.
+		let edge = now - scShadowPostAt >= 250
 		for (const d of mine) {
 			const sr = g(d, "/Track/SampleRate").value
+			// SpeedState is the display, rounded to 0.1 % (+11.1 % for 126 -> 140 BPM, 14 ms/s off);
+			// CurrentBPM / OriginalBPM is the exact rate, also past the SpeedRange under Sync.
+			const shown = parseFloat(g(d, "/SpeedState").string) || 0
+			const ob = (g(d, "/OriginalBPM") || {}).unnormalized || 0, cb = (g(d, "/CurrentBPM") || {}).unnormalized || 0
+			const exact = ob > 0 && cb > 0 ? Math.round(((cb / ob - 1) * 100) * 100) / 100 : NaN
 			const s = {ps: !!g(d, "/PlayState").state, posMs: sr > 0 ? g(d, "/Track/TrackPosition").unnormalized / sr * 1000 : 0,
-				pitch: parseFloat(g(d, "/SpeedState").string) || 0, at: now, jumps: 0,
+				pitch: Math.abs(exact - shown) < 0.15 ? exact : shown, bpm: ob, currentBpm: cb, at: now, jumps: 0,
 				// A streaming track's TrackNetworkPath is only "net://<uuid>/(Unknown)" (5.3.0); its TrackUri names it.
 				net: g(d, "/Track/SongLoaded").state ? (g(d, "/Track/TrackUri").string || g(d, "/Track/TrackNetworkPath").string) : ""}
 			const p = scShadowPrev[d]
@@ -342,16 +359,18 @@ SERVICES_MAIN = """
 			s.playing = s.ps || s.cue
 			if (p) {
 				// A jump: hot cue, beat jump, loop, CUE while playing, jog search while
-				// paused. TrackPosition moves in ~33 ms steps, so a playing deck sits
-				// off its line by that plus timer jitter; a paused one does not move.
+				// paused. TrackPosition moves in ~33 ms steps and this timer stalls with
+				// the GUI thread (40-80 ms measured): 80 ms counted 84 false jumps in plain
+				// playback, so 180 ms. A paused deck does not move.
 				s.jumps = p.jumps
 				const expect = p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0)
-				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 80 : 5)) s.jumps++
+				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02) edge = true
 			}
 			scShadowPrev[d] = s
 		}
 		if (edge) scShadowPost(mine, now)
+		if (scShadowDebug) scShadowDbgFlush(now)
 	}
 	function scShadowPost(mine, now) {
 		const g = (d, p) => root.scTr("/Engine/Deck" + d + p)
@@ -383,8 +402,8 @@ SERVICES_MAIN = """
 			}
 			const cues = cc.cues
 			own.push({deck: d, net: s.net, cues: s.net ? cues : null, cuePos: s.net ? (t("CuePosition") || {}).value : undefined, playing: s.playing, cue: s.cue, link: link, positionMs: s.posMs, at: s.at, jumps: s.jumps,
-				pitch: s.pitch, master: deckMaster[d - 1] || d === lead,
-				bpm: (root.scTr("/Engine/Deck" + d + "/OriginalBPM") || {}).unnormalized || 0,
+				pitch: s.pitch, master: deckMaster[d - 1] || d === lead, bpm: s.bpm, currentBpm: s.currentBpm,
+				sync: ((root.scTr("/Engine/Deck" + d + "/SyncMode") || {}).string || "Off") !== "Off",
 				beat: (root.scTr("/Engine/Deck" + d + "/BeatNumber") || {}).unnormalized || 0,
 				// the gateway names a streamed shadow copy after the real track, not its numeric id
 				title: s.net ? ((root.scTr("/Engine/Deck" + d + "/Track/SongName") || root.scTr("/Engine/Deck" + d + "/Track/TrackName") || {}).string || "") : "",
@@ -409,9 +428,11 @@ SERVICES_MAIN = """
 			try {
 				if (x.status === 200) {
 					const r = JSON.parse(x.responseText)
+					root.scShadowDebug = !!r.debug
 					root.scShadowApplyAll(r.decks || [])
 					// An older suite answers at once (no ver): keep its old pace.
-					wait = !r.role ? 500 : r.ver === undefined ? 120 : 25
+					// 60 ms after a change: at most ~15 polls/s on the GUI thread.
+					wait = !r.role ? 500 : r.ver === undefined ? 120 : 60
 					if (r.ver !== undefined) root.scShadowVer = r.ver
 				}
 			} catch (err) {
@@ -445,8 +466,9 @@ SERVICES_MAIN = """
 		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
 		if (!at.emptyAt) at.emptyAt = now
 		if (now - at.emptyAt < 350 || !(at.path || (root.scTr("/Engine/Deck" + d + "/Track/SongLoaded") || {}).state)) return
-		if ((root.scTr("/Engine/Deck" + d + "/SyncMode") || {}).string !== "Off") scPress("/Engine/Deck" + d + "/UnSync")
-		if ((root.scTr("/Engine/Deck" + d + "/DeckIsMaster") || {}).state) {
+		// An EngineX peer (at.link): Engine Link owns Sync and master, so no presses.
+		if (!at.link && (root.scTr("/Engine/Deck" + d + "/SyncMode") || {}).string !== "Off") scPress("/Engine/Deck" + d + "/UnSync")
+		if (!at.link && (root.scTr("/Engine/Deck" + d + "/DeckIsMaster") || {}).state) {
 			const m0 = scFourDeckRole.split("")[0]
 			if (m0) scPress("/Engine/Deck" + m0 + "/RequestMaster")
 		}
@@ -465,6 +487,7 @@ SERVICES_MAIN = """
 		if (at.path !== e.path) {
 			root.scTr("/Client/Librarian/AddToDatabaseAndLoadToDeck" + d).url = "file://" + encodeURI(e.path)
 			scShadowAt[d] = {path: e.path, loadUntil: now + 1200, seekAt: 0, seeks: 0, loads: (at.loads || 0) + 1, jumps: e.jumps}
+			if (root.scShadowDebug) root.scShadowDbg({deck: d, act: "load", path: e.path, loads: scShadowAt[d].loads})
 			return
 		}
 		if (now < at.loadUntil || !g("/Track/SongLoaded").state) return
@@ -476,14 +499,18 @@ SERVICES_MAIN = """
 		// they would undo the edge for a moment.
 		if (now - (at.linkAt || 0) < 300 && (e.playing && !e.cue) !== at.linkPS) return
 		if (e.cue && at.linkCueOff && now - at.linkCueOff < 300) return
+		const local = !!g("/PlayState").state
+		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check) return
+		at.lastSeq = e.seq
 		const wasPreview = at.preview
 		at.preview = !!e.cue
 		if (!e.playing) at.pausedAt = e.positionMs
 		// The CDJ took master: so does its shadow deck, and Engine drops it on ours
 		// (one master). Only after the change (for 5 s), so pressing MASTER here
 		// afterwards wins it back.
-		if (e.master && !at.master) at.wantMaster = now + 5000
-		if (!e.master) at.wantMaster = 0
+		// Only for a CDJ: a unit with Engine Link (e.link) syncs master itself, and pressing here fights the MASTER button.
+		if (!e.link && e.master && !at.master) at.wantMaster = now + 5000
+		if (!e.master || e.link) at.wantMaster = 0
 		at.master = !!e.master
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!(sr > 0 && len > 0)) return
@@ -491,24 +518,29 @@ SERVICES_MAIN = """
 		// e.at is when Go extrapolated e.positionMs; this runs later on a busy GUI
 		// thread, so carry the target to now before comparing.
 		const target = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * (1 + e.pitch / 100) : 0)
-		const drift = target - g("/Track/TrackPosition").unnormalized / sr * 1000 // > 0: behind
+		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
+		const drift = target - posMs // > 0: behind
 		at.drift = drift
 		const pSync = g("/SyncMode")
 		const synced = !!pSync && pSync.string !== "" && pSync.string !== "Off"
-		const range = parseFloat(g("/SpeedRange").string) || 8
-		const speed = Math.max(0, Math.min(1, 0.5 + e.pitch / (2 * range)))
-		if (!(e.sync && synced) && Math.abs(g("/Speed").value - speed) > 0.001) g("/Speed").value = speed
+		// Only a CDJ's BEAT SYNC becomes Engine's Sync here. An EngineX peer's synced deck
+		// sends its exact rate (CurrentBPM), which the fader and the loop below follow.
+		const wantSync = !!e.sync && !e.link
+		const dbg = act => { if (root.scShadowDebug) root.scShadowDbg({deck: d, act: act, posMs: Math.round(posMs), target: Math.round(target), drift: Math.round(drift), sd: Math.round(at.sd || 0), pitch: e.pitch, pll: at.pll || 0, range: g("/SpeedRange").string, sync: !!e.sync, synced: synced, bpm: e.bpm, currentBpm: e.currentBpm, beat: e.beat, jumps: e.jumps, seeks: at.seeks || 0, master: !!g("/DeckIsMaster").state, link: !!e.link}) }
+		if (!e.playing) at.pll = 0
+		if (!(wantSync && synced)) scShadowSpeed(d, e.pitch)
 		// Play, CUE held, pause, CUE released: on the first update that shows it.
 		// at.cmd only stops rewriting the same state while Engine follows (a frame
 		// or two); a change of the source's state always goes through.
-		const local = !!g("/PlayState").state
 		if (e.playing !== local) {
 			if (at.cmd !== e.playing || now >= at.cmdUntil) {
 				if (e.playing) {
 					if (Math.abs(drift) > 25) seek(target)
 					g("/Play").state = true
+					at.postPlay = now + 380
 				} else {
 					g("/Play").state = false
+					at.postPlay = 0
 					// CUE released: back on the cue point. After a preview the sender's
 					// TrackPosition may not have jumped back yet; the preview started there.
 					const back = wasPreview && at.pausedAt !== undefined ? at.pausedAt : e.positionMs
@@ -519,6 +551,8 @@ SERVICES_MAIN = """
 				at.cmd = e.playing
 				at.cmdUntil = now + 250
 				at.jumps = e.jumps
+				at.sd = undefined
+				dbg(e.playing ? "play" : "pause")
 			}
 			return
 		}
@@ -532,8 +566,10 @@ SERVICES_MAIN = """
 		if (g("/DeckIsMaster").state) at.wantMaster = 0
 		// The CDJ's BEAT SYNC is Engine's own Sync on the shadow deck: Engine then
 		// holds its tempo and phase to the master, so no fader and few seeks here.
-		if (!!e.sync !== synced && now >= (at.syncAt || 0)) {
-			scPress("/Engine/Deck" + d + (e.sync ? "/Sync" : "/UnSync"))
+		// Only for a CDJ: with an EngineX peer (e.link) Engine Link syncs both units natively,
+		// and pressing Sync/UnSync on a shadow deck fought the stock SYNC and MASTER buttons.
+		if (!e.link && wantSync !== synced && now >= (at.syncAt || 0)) {
+			scPress("/Engine/Deck" + d + (wantSync ? "/Sync" : "/UnSync"))
 			at.syncAt = now + 800
 		}
 		if (!e.playing) {
@@ -543,26 +579,27 @@ SERVICES_MAIN = """
 			at.jumps = e.jumps
 			const fresh = at.target === undefined || at.target === null || Math.abs(e.positionMs - at.target) > 5
 			const check = at.check && now >= at.check
+			at.sd = undefined
 			if ((fresh || check) && Math.abs(drift) > 10 && now - at.seekAt >= 40) {
 				seek(e.positionMs)
 				at.target = e.positionMs
 				at.check = fresh ? now + 60 : 0
+				dbg("seek")
 			} else if (check) at.check = 0
 			scShadowBeat(d, at, e, drift, now)
 			return
 		}
 		at.target = null
-		// Playing: seek at once when the source jumped, after 1 s on a large gap
-		// (a CDJ has no jump count), and on steady drift past the limit on three
-		// updates at most every 2 s. at.wide: two steady seeks within 10 s did not
-		// land (Quantize snaps to a beat), so this track then only follows jumps.
-		const lim = e.sync && synced ? 2000 : at.wide ? 800 : 150
-		const big = Math.max(350, lim)
+		// Playing: a seek flushes Engine's decoder and waveform (the visible snap), so
+		// it is only for a source jump and a gap past lim on three updates in a row.
+		// at.wide: two such seeks within 10 s did not land (Quantize snaps to a
+		// beat). Steady drift below that is closed by the fader instead (at.pll).
+		const lim = wantSync && synced ? 2000 : at.wide ? 800 : 300
 		const jump = e.jumps !== at.jumps && Math.abs(drift) > 60
 		if (!jump) at.jumps = e.jumps
 		at.over = Math.abs(drift) > lim ? (at.over || 0) + 1 : 0
-		if ((jump && now - at.seekAt >= 80) || (Math.abs(drift) > big && now - at.seekAt >= 1000) || (at.over >= 3 && now - at.seekAt >= 2000)) {
-			if (!jump && Math.abs(drift) <= big) {
+		if ((jump && now - at.seekAt >= 80) || (at.over >= 3 && now - at.seekAt >= 1000)) {
+			if (!jump) {
 				at.wide = at.wide || now - (at.lastSteady || 0) < 10000
 				at.lastSteady = now
 			}
@@ -570,7 +607,61 @@ SERVICES_MAIN = """
 			at.jumps = e.jumps
 			at.over = 0
 			at.seeks = (at.seeks || 0) + 1
+			at.pll = 0
+			at.sd = undefined
+			dbg(jump ? "jump" : "seek")
+			return
 		}
+		// Never steer /Engine/DeckN/Speed with a synthetic PLL: changing Speed alters
+		// the displayed CurrentBPM on screen ("BPM moving back and forth") and forces
+		// Engine's Elastique time-stretcher to re-tune every few seconds (3-5 s stutter).
+		// Both SC5000 decks run on 20 ppm crystals at the exact unrounded e.pitch; one
+		// post-play alignment check 380 ms after Play closes decoder spin-up latency.
+		if (wantSync && synced) return dbg("sync")
+		if (now - at.seekAt < 300) return dbg("settle")
+		at.sd = at.sd === undefined ? drift : at.sd * 0.85 + drift * 0.15
+		if (at.postPlay && now >= at.postPlay) {
+			at.postPlay = 0
+			if (Math.abs(drift) > 35 && Math.abs(drift) <= lim) {
+				seek(target)
+				at.seeks = (at.seeks || 0) + 1
+				at.sd = 0
+				return dbg("align")
+			}
+		}
+		at.pll = 0
+		dbg("steady")
+	}
+	// The shadow deck's fader at pitch percent: the SpeedRange (8 % by default) is
+	// widened first, or +11.1 % (a synced 126 BPM track at 140) stuck at +8 %.
+	function scShadowSpeed(d, pitch) {
+		const pRange = root.scTr("/Engine/Deck" + d + "/SpeedRange"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
+		if (!pRange || !pSpeed) return
+		let range = parseFloat(pRange.string) || 8
+		if (Math.abs(pitch) > range - 0.2 && pRange.entries) {
+			const i = pRange.entries.findIndex(v => parseFloat(v) >= Math.abs(pitch) + 0.2)
+			pRange.index = i < 0 ? pRange.entries.length - 1 : i
+			range = parseFloat(pRange.string) || range
+		}
+		const speed = Math.max(0, Math.min(1, 0.5 + pitch / (2 * range)))
+		if (Math.abs(pSpeed.value - speed) * 2 * range > 0.03) pSpeed.value = speed
+	}
+	// Debug telemetry (debug_telemetry=1 or /tmp/sc5000-debug, told by GET /shadow):
+	// the receiver's decisions, posted in batches to Go's ring and log.
+	property bool scShadowDebug: false
+	property var scShadowDbgBuf: []
+	property real scShadowDbgAt: 0
+	function scShadowDbg(o) {
+		o.t = Date.now()
+		if (scShadowDbgBuf.length < 400) scShadowDbgBuf.push(o)
+	}
+	function scShadowDbgFlush(now) {
+		if (!scShadowDbgBuf.length || now - scShadowDbgAt < 500) return
+		scShadowDbgAt = now
+		const x = new XMLHttpRequest()
+		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/debug/shadow")
+		x.send(JSON.stringify(scShadowDbgBuf))
+		scShadowDbgBuf = []
 	}
 	// The source's hot cues and CUE point (track samples), set through Engine's
 	// own deck properties: Engine shows them on the waveform, the overview and
@@ -579,8 +670,10 @@ SERVICES_MAIN = """
 	function scShadowCues(d, at, e, now) {
 		if (!Array.isArray(e.cues)) return // a CDJ: no cues sent
 		const sig = JSON.stringify(e.cues) + "/" + e.cuePos
-		if (now < (at.cueAt || 0) + (sig === at.cueSig ? 1000 : 250)) return
+		if (sig === at.cueSig && (at.cuePasses || 0) >= 2) return
+		if (now < (at.cueAt || 0) + (sig === at.cueSig ? 1200 : 250)) return
 		at.cueAt = now
+		at.cuePasses = sig === at.cueSig ? (at.cuePasses || 0) + 1 : 1
 		at.cueSig = sig
 		const t = p => root.scTr("/Engine/Deck" + d + "/Track/" + p)
 		const want = {}
@@ -691,6 +784,7 @@ SERVICES_MAIN = """
 	property bool scUpfaderEcho: false
 	property string scLastBroadcastTrack: ""
 	property bool scDualColumn: false
+	property bool scCueCountdown: true
 	property int scSyncGuardPct: 0
 	property bool scSwapLoopOrder: false
 	property int scLedBrightness: 100
@@ -792,8 +886,27 @@ SERVICES_MAIN = """
 	// as chosen and are not written ten times a second to flash.
 	property real scJogHue: 0
 	property var scJogSaved: null
-	function scDeckList() { return (root.decks && root.decks.length ? root.decks : [1, 2]).map(d => parseInt(d)) }
+	property var scJogDecks: []
+	// On a 4-deck unit this deck's own pair (12 / 24) wins; root.decks is undefined in Engine 5.3.0.
+	function scDeckList() {
+		if (root.scFourDeckRole !== "") return root.scFourDeckRole.split("").map(c => parseInt(c)).filter(d => d >= 1 && d <= 4)
+		return (root.decks && root.decks.length ? root.decks : [1, 2]).map(d => parseInt(d))
+	}
 	function scDeckColor(deck) { const p = Planck.getProperty("/Engine/Deck" + deck + "/Color"); return p ? p.translator : null }
+	function scSetDeckJogColor(deck, col) {
+		const c = root.scDeckColor(deck)
+		if (c) c.color = col
+		const jc = Planck.getProperty("/Engine/Deck" + deck + "/JogColor")
+		if (jc && jc.translator && jc.translator.color !== undefined) jc.translator.color = col
+	}
+	// scFourDeckRole arrives over XHR after startup: put the colours back on the decks that were
+	// animated, then snapshot the decks of the current role.
+	function scJogResetDecks() {
+		if (root.scJogSaved) root.scJogDecks.forEach((d, i) => { if (root.scJogSaved[i]) root.scSetDeckJogColor(d, root.scJogSaved[i]) })
+		const decks = root.scDeckList()
+		root.scJogDecks = decks
+		root.scJogSaved = decks.map(d => { const c = root.scDeckColor(d); return c ? String(c.color) : "" })
+	}
 	// BPM sync: the tempo of the deck that is playing, the active one first; 0 when
 	// nothing plays. Rounded so the pitch fader does not restart the timer constantly.
 	function scPlayingBPM() {
@@ -810,6 +923,7 @@ SERVICES_MAIN = """
 		return 0
 	}
 	property real scJogBPM: 0
+	property real scJogLastTick: 0
 	Timer {
 		interval: 500; repeat: true
 		running: root.scJog === "bpm"
@@ -817,29 +931,29 @@ SERVICES_MAIN = """
 		onRunningChanged: root.scJogBPM = running ? root.scPlayingBPM() : 0
 	}
 	Timer {
-		// bpm: one colour step per beat, a full turn of the colour wheel every four beats.
-		interval: root.scJog === "fast" ? 60 : root.scJog === "bpm" && root.scJogBPM > 0 ? Math.round(60000 / root.scJogBPM) : 250
+		// 25 fps in every mode; the hue advances by elapsed time so the gradient is continuous.
+		// rainbow: 8 s per turn, fast: 2.4 s, bpm: one turn per four beats.
+		interval: 40
 		repeat: true
 		running: root.scJog === "rainbow" || root.scJog === "fast" || root.scJog === "bpm"
 		onRunningChanged: {
-			const decks = root.scDeckList()
+			root.scJogLastTick = 0
 			if (running) {
-				root.scJogSaved = decks.map(d => { const c = root.scDeckColor(d); return c ? String(c.color) : "" })
+				root.scJogSaved = null
+				root.scJogResetDecks()
 			} else if (root.scJogSaved) {
-				decks.forEach((d, i) => { const c = root.scDeckColor(d); if (c && root.scJogSaved[i]) c.color = root.scJogSaved[i] })
+				root.scJogDecks.forEach((d, i) => { if (root.scJogSaved[i]) root.scSetDeckJogColor(d, root.scJogSaved[i]) })
 				root.scJogSaved = null
 			}
 		}
 		onTriggered: {
-			const step = root.scJog === "fast" ? 0.05 : root.scJog === "bpm" && root.scJogBPM > 0 ? 0.25 : 0.025
-			const hue = (root.scJogHue + step) % 1
-			// a colour change under 0.015 of the wheel is invisible: skip the writes
-			if (Math.min(Math.abs(hue - root.scJogHue), 1 - Math.abs(hue - root.scJogHue)) < 0.015) return
-			root.scJogHue = hue
-			root.scDeckList().forEach((d, i) => {
-				const c = root.scDeckColor(d)
-				if (c) c.color = Qt.hsva((root.scJogHue + i * 0.35) % 1, 1, 1, 1)
-			})
+			if (root.scJogDecks.join(",") !== root.scDeckList().join(",")) root.scJogResetDecks()
+			const now = Date.now()
+			const dt = Math.min(200, Math.max(16, now - (root.scJogLastTick || now)))
+			root.scJogLastTick = now
+			const turn = root.scJog === "fast" ? dt / 2400 : root.scJog === "bpm" ? (root.scJogBPM > 0 ? dt * (root.scJogBPM / 60000) / 4 : dt / 6000) : dt / 8000
+			root.scJogHue = (root.scJogHue + turn) % 1
+			root.scJogDecks.forEach((d, i) => root.scSetDeckJogColor(d, Qt.hsva((root.scJogHue + i * 0.35) % 1, 1, 1, 1)))
 		}
 	}
 	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
@@ -876,6 +990,17 @@ SERVICES_MAIN = """
 	// Engine analysed itself always wins, so these only fill empty columns.
 	function scPreview(label) {
 		return /\\s\\[(\\d+) BPM(?: ([0-9]{1,2}[AB]))?\\]$/.exec(label || "") || ["", "", ""]
+	}
+	// Deck art for a streamed track: Engine hands the 7" deck / MicroDeck "" or image://streaming/, so ask the gateway by title+artist.
+	// tick only makes the binding re-read the (non-binding) track strings when the title arrives after the path.
+	function scDeckArtUrl(deck, path, tick) {
+		const p = String(path || "")
+		if (p !== "" && p !== "image://streaming/") return p
+		const t = k => (root.scTr("/Engine/Deck" + deck + "/Track/" + k) || {})
+		if (!t("SongLoaded").state) return p
+		const title = scPlainTitle(t("SongName").string || "")
+		if (title === "") return p
+		return "http://127.0.0.1:8080/v1/sc5000/art?song=" + encodeURIComponent(title) + "&artist=" + encodeURIComponent(t("ArtistName").string || "")
 	}
 	function scPlainTitle(song) { return (song || "").replace(/\\s\\[\\d+ BPM(?: [0-9]{1,2}[AB])?\\]$/, "") }
 	// Engine's messages name its one streaming client; say which service is showing.
@@ -922,6 +1047,8 @@ SERVICES_MAIN = """
 		scUpfaderEcho = !!v.upfaderEcho
 		if (typeof v === "string") scParseSettingsConf(v)
 		else if (v) {
+			if (v.cueCountdown !== undefined) scCueCountdown = !!v.cueCountdown
+			else if (v.cue_countdown !== undefined) scCueCountdown = v.cue_countdown !== "0" && v.cue_countdown !== 0 && v.cue_countdown !== false
 			if (v.browserDualColumn !== undefined) scDualColumn = !!v.browserDualColumn
 			else if (v.browser_dual_column !== undefined) scDualColumn = v.browser_dual_column === "1" || v.browser_dual_column === 1 || v.browser_dual_column === true
 			if (v.syncGuardPct !== undefined) scSyncGuardPct = parseInt(v.syncGuardPct) || 0
@@ -950,12 +1077,14 @@ SERVICES_MAIN = """
 		scUiLoaded = true
 	}
 	function scParseSettingsConf(text) {
+		scCueCountdown = true // default on: only an explicit cue_countdown=0 turns it off
 		for (const line of (text || "").split("\n")) {
 			const eq = line.indexOf("=")
 			if (eq < 0) continue
 			const key = line.slice(0, eq).trim()
 			const val = line.slice(eq + 1).trim()
-			if (key === "browser_dual_column") root.scDualColumn = val === "1"
+			if (key === "cue_countdown") root.scCueCountdown = val !== "0"
+			else if (key === "browser_dual_column") root.scDualColumn = val === "1"
 			else if (key === "sync_guard_pct") root.scSyncGuardPct = parseInt(val) || 0
 			else if (key === "swap_loop_order") root.scSwapLoopOrder = val === "1"
 			else if (key === "led_brightness") root.scLedBrightness = parseInt(val) || 100
@@ -1241,7 +1370,7 @@ SERVICES_MAIN = """
 		}
 	}
 	Instantiator {
-		model: root.decks && root.decks.length ? root.decks : [1, 2]
+		model: root.scDeckList()
 		delegate: QtObject {
 			readonly property int deckIdx: parseInt(modelData)
 			// Pads stay in Engine's own mode (HOT CUE) when a track loads (#71): they
@@ -1615,7 +1744,16 @@ LIBRARY_ENTRIES = """
 			currentValue: values[root.scOmniSource ? 1 : 0]
 			onSelected: function(index) { root.scCall("omniSource=" + index) }
 		},
-""" + DUAL_COLUMN_ENTRY
+"""
+
+CUE_COUNTDOWN_ENTRY = """
+		EntryBase.ListEntry {
+			text: "Cue Countdown"
+			values: ["Off", "On"]
+			currentValue: values[root.scCueCountdown ? 1 : 0]
+			onSelected: function(index) { root.scCall("cueCountdown=" + index) }
+		},
+"""
 
 UI_SCALE_ENTRY = """
 		EntryBase.ListEntry {
@@ -1659,7 +1797,7 @@ FOUR_DECK_ENTRIES = """
 VIEW_ENTRIES = """
 		@HEADLINE@ { text: "ENGINEX VIEW PRESET" },
 		WaveformStyle { },
-""" + JOG_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES
+""" + JOG_ENTRY + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES
 
 # #78: a deck in a booth can be switched off without reaching for the recessed rear
 # button. Engine's own quit path: the "Turn Off" confirmation, recording and library
@@ -1891,7 +2029,7 @@ SMART_SYNC_MAIN = """
 		return minNeed
 	}
 	Instantiator {
-		model: root.decks && root.decks.length ? root.decks : [1, 2]
+		model: root.scDeckList()
 		delegate: QtObject {
 			readonly property int deckIdx: parseInt(modelData)
 			readonly property QObjProperty pSync: Planck.getProperty("/Engine/Deck%1/SyncMode".arg(deckIdx))
@@ -1939,7 +2077,7 @@ SMART_SYNC_MAIN = """
 	// The Smart Sync tile calls this so a tap takes effect without waiting for a tempo change.
 	function scWidenAll() {
 		const m = Planck.getProperty("/Engine/Master/MasterTempo").translator
-		for (const d of root.decks && root.decks.length ? root.decks : [1, 2]) {
+		for (const d of root.scDeckList()) {
 			const o = Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(d)).translator
 			const s = Planck.getProperty("/Engine/Deck%1/SyncMode".arg(d)).translator
 			const l = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(d)).translator
@@ -2064,7 +2202,10 @@ ZOOM_STEP = """
 """
 
 
-def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False) -> str:
+GUARD = '(typeof root !== "undefined" && root && root.scDeckArtUrl)'
+
+
+def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False, lead_sep: bool = True) -> str:
     """#151: stock-style flat `| ▊ DROP  16.3` countdown (Separator + 3 px cue-colour bar + Style.fontH1 text,
     no box, like AutoLoop / BeatJump / SpeedInfo); hidden (no space) without a cue ahead.
     h, px are kept for the call sites; the flat row needs neither."""
@@ -2072,15 +2213,15 @@ def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False
     id: cueCap
     objectName: "EngineX_CueCountdown"
     readonly property var info: typeof root !== "undefined" && root && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTick) : null
-    visible: info !== null
+    visible: info !== null && root.scCueCountdown
     Layout.alignment: Qt.AlignVCenter
-    Layout.leftMargin: {2 if compact else 12}
+    Layout.leftMargin: 4
+    Layout.rightMargin: 4
     Layout.preferredHeight: {22 if compact else 30}
-    spacing: 6
-    Rectangle {{ width: 1; height: 18; anchors.verticalCenter: parent.verticalCenter; color: Style.surface03Color }}
-    Item {{ width: {2 if compact else 6}; height: 1 }}
+    spacing: 4
+{'    Rectangle { width: 1; height: 18; anchors.verticalCenter: parent.verticalCenter; color: Style.surface03Color }' if lead_sep else ''}
     Rectangle {{ width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: cueCap.info ? cueCap.info.color : "transparent" }}
-    Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: Style.font01Color; text: cueCap.info ? cueCap.info.label : "" }}
+    Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: Style.font01Color; visible: text !== ""; text: cueCap.info ? cueCap.info.label : "" }}
     Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
 }}
 """
@@ -2212,7 +2353,7 @@ def edits(dev: bool):
         # 5.3.0 moved it up from TabContents/, so its imports lost the "../".
         prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
-            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + UI_SCALE_ENTRY + LED_ENTRY + FOUR_DECK_ENTRIES + JOG_ENTRY + (POWER_ENTRY if v53() else "") + "		PlayerNumber { },\n"),
+            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY if v53() else "") + "		PlayerNumber { },\n"),
         ],
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
@@ -2220,7 +2361,6 @@ def edits(dev: bool):
         ] for name, last, entries in [
             ("Services", "SpotifyEnable" if v53() else "CloudServices", SERVICES_ENTRIES),
             ("Playback", "KeySyncMode", PLAYBACK_ENTRIES),
-            ("CuesLoops", "PausedSavedLoopBehavior", BEAT_JUMP_ENTRIES),
             ("Safety", "KeyAdjust", SAFETY_ENTRIES),
             ("Library", "CollectionBrowseBehavior", LIBRARY_ENTRIES),
         ]},
@@ -2473,6 +2613,11 @@ def edits(dev: bool):
         # There (SC5000/SC6000 boards with isPlayer off, i.e. 4-deck; Config.device.name
         # is the board, "JP07", and isJP is undefined) it shows the deck's own
         # master; every other device keeps stock.
+        # #157: holding the Browse encoder (how users zoom) fires the stock hold = Grid Edit
+        # (ActionWithGridCueEdit): the jog then moves the beatgrid phase and push/Play go to the grid-edit
+        # path, so playback looks stuck at 00:00. Plain push action only; Grid Edit stays on the touch UI.
+        out["ControlSurfaceModules/ControlSurfaceModules/BrowseEncoder.qml"] = [(
+            "if (module.hasInstantDouble) {", "if (false) {")]
         out["ControlSurfaceModules/ControlSurfaceModules/Sync.qml"] = [(
             "            readonly property string isMasterPath: Config.network.hasSyncing\n",
             "            readonly property string isMasterPath: Config.network.hasSyncing &&\n"
@@ -2640,8 +2785,9 @@ def edits(dev: bool):
         scaled[bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"] = [
             ("        view: deckPerformanceDataContent.deckView.beatJumpView\n",
              "        view: deckPerformanceDataContent.deckView.beatJumpView\n        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n"),
-            ("        visible: Config.audio.deck.hasBeatJump\n    }\n",
-             "        visible: Config.audio.deck.hasBeatJump\n    }\n\n" + cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 30, 20))]
+            # #151: the ▲▼ soft-takeover arrows give way to the countdown, right of the sync bar
+            ("        visible: !deckPerformanceDataContent.isRemoteDeck\n        speedOffsetIsUp: deckPerformanceDataContent.deckView.speedOffsetIsUp\n        speedOffsetIsDown: deckPerformanceDataContent.deckView.speedOffsetIsDown\n    }\n",
+             "        visible: false\n        speedOffsetIsUp: deckPerformanceDataContent.deckView.speedOffsetIsUp\n        speedOffsetIsDown: deckPerformanceDataContent.deckView.speedOffsetIsDown\n    }\n\n" + cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 26, 18, compact=True))]
         scaled[bj + "DeckPerformanceData/PortraitDeckPerformanceDataContent.qml"] = [
             ("                view: deckPerformanceDataContent.deckView.beatJumpView\n",
              "                view: deckPerformanceDataContent.deckView.beatJumpView\n                deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n")]
@@ -2651,15 +2797,9 @@ def edits(dev: bool):
         scaled[bj + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"] = [
             ("                    view: deckTrackDataContent.deckView.beatJumpView\n",
              "                    view: deckTrackDataContent.deckView.beatJumpView\n                    deckIndex: deckTrackDataContent.deckIndex\n"),
-            ("                    visible: Config.audio.deck.hasBeatJump\n                }\n",
-             "                    visible: Config.audio.deck.hasBeatJump\n                }\n\n" + cue_capsule("                ", "deckTrackDataContent.deckIndex", 24, 16, compact=True)),
-            ("                spacing: 16\n                visible: deckTrackDataContent.songLoaded\n",
-             "                spacing: 10\n                visible: deckTrackDataContent.songLoaded\n"),
-            # room for the capsule: AutoLoop / BeatJump 72 -> 60 px
-            ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n",
-             "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 60\n"),
-            ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n",
-             "                    textFont: Style.fontH1\n                    Layout.preferredWidth: 60\n")]
+            # #151: the countdown takes the ▲▼ slot between the sync bar's Separator and SpeedInfo
+            ("                SoftTakeoverIndicators {\n                    speedOffsetIsUp: deckTrackDataContent.deckView.speedOffsetIsUp\n                    speedOffsetIsDown: deckTrackDataContent.deckView.speedOffsetIsDown\n                }\n",
+             "                SoftTakeoverIndicators {\n                    visible: false\n                    speedOffsetIsUp: deckTrackDataContent.deckView.speedOffsetIsUp\n                    speedOffsetIsDown: deckTrackDataContent.deckView.speedOffsetIsDown\n                }\n\n" + cue_capsule("                ", "deckTrackDataContent.deckIndex", 24, 16, compact=True, lead_sep=False))]
         scaled[bj + "DeckTrackData/SplitMiniDeckTrackDataContent.qml"] = [
             ("        JP07SyncIndicator {\n",
              cue_capsule("        ", "deckTrackDataContent.deckIndex", 26, 16, compact=True) + "\n        JP07SyncIndicator {\n")]
@@ -2668,13 +2808,13 @@ def edits(dev: bool):
         scaled["airAssignments/OutputAssignment/ColorOutputAssignment.qml"] = [
             ("	property bool debug: false;\n",
              "	property bool debug: false;\n"
-             "	// EngineX: 0.2-1, set by the pad LEDs (Pad LED Brightness); 1 sends the stock colour.\n"
+             "	// EngineX: dimming now happens after gamma in the C hook (snd_seq_event_output_direct); QML sends the stock colour.\n"
              "	property real scBrightness: 1\n"
              "	onScBrightnessChanged: if (enabled) device.sendColor(channel, idx, privatePart.scScaled())\n"),
             ("				device.sendColor(channel, idx, outputColor);\n", "				device.sendColor(channel, idx, scScaled());\n"),
             ("		id: privatePart\n",
              "		id: privatePart\n"
-             "		function scScaled() { const b = scBrightness, c = outputColor; return b >= 0.99 ? c : Qt.rgba(c.r * b, c.g * b, c.b * b, c.a) }\n"),
+             "		function scScaled() { return outputColor }\n"),
         ]
         # Stock 5.3.0 defects that surface mid-set when the deck booted offline (path is
         # /Engine/DeckN/PlayState, as PausePlayingDeckHint.qml reads it).
@@ -2715,9 +2855,23 @@ def edits(dev: bool):
             ("                    greyOut: !microDeckLoader.viewModel.activeDeck && !deckTabs.isTouchable\n",
              f"                    greyOut: {role} ? root.scDeckLocked(microDeckLoader.viewModel.deckNumber) : !microDeckLoader.viewModel.activeDeck && !deckTabs.isTouchable\n"),
         ]
+        # 4-deck: the Load Track overlay shows only this player's two decks (the other
+        # two refuse loads anyway, LoadToDeckFilter), centred by the stock spacers.
+        scaled["Skins/EngineOS/UI/CompositeControls/LoadOverlay/LoadOverlayDecks.qml"] = [
+            ("        visible: repeater.count === 2\n    }\n\n    Repeater {\n",
+             f"        visible: repeater.count === 2 || !!({role})\n    }}\n\n    Repeater {{\n"),
+            ("        visible: repeater.count === 2\n", f"        visible: repeater.count === 2 || !!({role})\n"),
+            ("            visible: modelData.visible\n",
+             f"            visible: modelData.visible && !({role} && root.scDeckLocked(modelData.deckIndex))\n"),
+        ]
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml"] = [(
             "                text: microDeck.loadedDeckSongName\n",
-            f"                text: ({role} ? microDeck.deckIndex + \" · \" : \"\") + microDeck.loadedDeckSongName\n")]
+            f"                text: ({role} ? microDeck.deckIndex + \" · \" : \"\") + microDeck.loadedDeckSongName\n"),
+            ("                source: microDeck.loadedDeckAlbumArtPath\n",
+             "                source: %s ? root.scDeckArtUrl(microDeck.deckIndex, microDeck.loadedDeckAlbumArtPath, root.scCueTick) : microDeck.loadedDeckAlbumArtPath\n" % GUARD)]
+        scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml"] = [(
+            "        source: albumArt.albumArtPath\n",
+            "        source: %s ? root.scDeckArtUrl(albumArt.deckIndex, albumArt.albumArtPath, root.scCueTick) : albumArt.albumArtPath\n" % GUARD)]
         # In the 4-deck layout the deck colour came out white (measured on a 1+3 deck with
         # blue PlayerColor1/2), which has no gradient and draws a black strip, and an unset
         # PlayerColor3/4 is black: use the deck's PlayerColor preference, then that of the

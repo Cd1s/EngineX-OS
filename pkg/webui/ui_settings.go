@@ -85,10 +85,14 @@ type uiSettings struct {
 	ProlinkWaveform  bool     `json:"prolinkWaveform"`
 	BroadcastEnabled bool     `json:"broadcastEnabled"`
 	UpfaderEcho      bool     `json:"upfaderEcho"`
+	// DebugTelemetry logs every shadow deck update and decision (shadow_debug.go).
+	// Development only: off by default, and nothing in the image turns it on.
+	DebugTelemetry bool `json:"debugTelemetry"`
 
 	StreamSortRole    string `json:"streamSortRole,omitempty"`
 	StreamSortOrder   string `json:"streamSortOrder,omitempty"`
 	BrowserDualColumn bool   `json:"browserDualColumn"`
+	CueCountdown      bool   `json:"cueCountdown"`
 	SyncGuardPct      int    `json:"syncGuardPct"`
 	SwapLoopOrder     bool   `json:"swapLoopOrder"`
 	LedBrightness     int    `json:"ledBrightness"`
@@ -179,7 +183,7 @@ func (s *Server) loadUI() uiSettings {
 	known, saved := uiServicesBeforeKnown, false
 	v := uiSettings{
 		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ProlinkWaveform: true,
-		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
+		StreamSortRole: "default", StreamSortOrder: "asc", CueCountdown: true, LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 	}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
@@ -260,6 +264,8 @@ func (s *Server) loadUI() uiSettings {
 			} else if val == "0" || strings.EqualFold(val, "false") {
 				v.UpfaderEcho = false
 			}
+		case "debug_telemetry":
+			v.DebugTelemetry = val == "1" || strings.EqualFold(val, "true")
 		case "stream_sort_role":
 			if slices.Contains(uiStreamSortRoles, val) {
 				v.StreamSortRole = val
@@ -268,6 +274,8 @@ func (s *Server) loadUI() uiSettings {
 			if slices.Contains(uiStreamSortOrders, val) {
 				v.StreamSortOrder = val
 			}
+		case "cue_countdown":
+			v.CueCountdown = val != "0" && !strings.EqualFold(val, "false")
 		case "browser_dual_column":
 			v.BrowserDualColumn = val == "1" || strings.EqualFold(val, "true")
 		case "sync_guard_pct":
@@ -360,6 +368,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.AutoAnalyze {
 		text += "auto_analyze=1\n"
 	}
+	if v.DebugTelemetry {
+		text += "debug_telemetry=1\n"
+	}
 	if v.MasterLimiter {
 		text += "master_limiter=1\n"
 	}
@@ -380,6 +391,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.StreamSortOrder != "" && v.StreamSortOrder != "asc" {
 		text += "stream_sort_order=" + v.StreamSortOrder + "\n"
+	}
+	if !v.CueCountdown {
+		text += "cue_countdown=0\n"
 	}
 	if v.BrowserDualColumn {
 		text += "browser_dual_column=1\n"
@@ -536,6 +550,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.UpfaderEcho = b
+	}
+	if q.Has("cueCountdown") {
+		b, ok := parseBoolParam(q.Get("cueCountdown"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.CueCountdown = b
 	}
 	if q.Has("browserDualColumn") {
 		b, ok := parseBoolParam(q.Get("browserDualColumn"))
