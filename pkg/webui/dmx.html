@@ -11,7 +11,7 @@
 <label><span data-t="Master Dimmer"></span><input id="master" type="range" min="0" max="255"></label>
 <label><span data-t="Intensity"></span><input id="intensity" type="range" min="0" max="255"></label>
 <label><span data-t="Color"></span><input id="color" type="color"></label>
-<label><span data-t="Effect"></span><select id="effect"><option>Circle</option><option>8-Figure</option><option>Pan-Tilt Sweep</option><option>Static</option></select></label>
+<label><span data-t="Effect"></span><select id="effect"><option value="Circle" data-t="Circle">Circle</option><option value="8-Figure" data-t="8-Figure">8-Figure</option><option value="Pan-Tilt Sweep" data-t="Pan-Tilt Sweep">Pan-Tilt Sweep</option><option value="Static" data-t="Static">Static</option></select></label>
 <label><span data-t="Beats per cycle"></span><input id="speed" type="number" min="1" max="64" step="1"></label>
 <label class="check"><input id="sync" type="checkbox"><span data-t="Sync to master BPM / beat"></span></label>
 <label><span data-t="Manual BPM"></span><input id="bpm" type="number" min="20" max="300" step="0.01"></label>
@@ -25,6 +25,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 const words={
+'Circle':['圆形','圓形'],'8-Figure':['8 字形','8 字形'],'Pan-Tilt Sweep':['水平垂直扫动','水平垂直掃動'],'Static':['静态','靜態'],
 'DMX Lighting':['DMX 灯光','DMX 燈光'],'Enable DMX':['启用 DMX','啟用 DMX'],'Disable DMX':['关闭 DMX','關閉 DMX'],'Blackout':['全黑','全黑'],'Apply':['应用','套用'],'Live controls':['现场控制','現場控制'],'Master Dimmer':['总调光','總調光'],'Intensity':['亮度','亮度'],'Color':['颜色','顏色'],'Effect':['效果','效果'],'Beats per cycle':['每周期拍数','每週期拍數'],'Sync to master BPM / beat':['同步主轨 BPM / 拍相','同步主軌 BPM / 拍相'],'Manual BPM':['手动 BPM','手動 BPM'],'Pan width':['水平幅度','水平幅度'],'Tilt height':['垂直幅度','垂直幅度'],'Outputs':['输出','輸出'],'Fixture patch':['灯具配接','燈具配接'],'Add output':['添加输出','新增輸出'],'Add fixture':['添加灯具','新增燈具'],'Remove':['移除','移除'],'Protocol':['协议','協定'],'Universe':['域','域'],'Receiver IP':['接收端 IP','接收端 IP'],'Device':['设备','裝置'],'USB bus':['USB 总线','USB 匯流排'],'USB address':['USB 地址','USB 位址'],'Profile':['灯具布局','燈具配置'],'DMX address':['DMX 地址','DMX 位址'],'Running':['输出中','輸出中'],'Disabled':['已关闭','已關閉'],'Waiting for output':['等待输出','等待輸出'],'Master sync':['主轨同步','主軌同步'],'Waiting for master':['等待主轨','等待主軌'],'SoundSwitch is running':['SoundSwitch 正在运行','SoundSwitch 正在執行'],
 'Starts disabled. Stop SoundSwitch before enabling. Output returns blacked out after a restart.':['默认关闭。启用前请停止 SoundSwitch。重启后输出恢复为全黑。','預設關閉。啟用前請停止 SoundSwitch。重新啟動後輸出恢復為全黑。'],
 "Sync uses the playing master's real BPM and beat phase. Missing samples cause blackout. Manual BPM is used only with sync off.":['同步使用播放主轨的实时 BPM 与拍相。数据失联时全黑；关闭同步后才使用手动 BPM。','同步使用播放主軌的即時 BPM 與拍相。資料失聯時全黑；關閉同步後才使用手動 BPM。'],
