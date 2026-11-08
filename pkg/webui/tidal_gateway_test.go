@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -624,11 +625,11 @@ func (s sortMockProvider) Tracks(_ context.Context, _ string) ([]providers.Track
 func TestStreamingPlaylistSortByBPMKeyTitle(t *testing.T) {
 	// 1. Direct unit test of sortStreamingTracks
 	tracks := []trackRef{
-		{track: providers.Track{Title: "Echoes", Artist: "Pink Floyd", BPM: 130, Key: "8B", DurationMS: 300000}},
-		{track: providers.Track{Title: "Abba Song", Artist: "Abba", BPM: 120, Key: "1A", DurationMS: 200000}},
-		{track: providers.Track{Title: "Zero BPM", Artist: "Ambient", BPM: 0, Key: "", DurationMS: 100000}},
-		{track: providers.Track{Title: "Negative BPM", Artist: "Glitch", BPM: -5, Key: "12B", DurationMS: 150000}},
-		{track: providers.Track{Title: "Zebra Beat", Artist: "Zulu", BPM: 125, Key: "1B", DurationMS: 250000}},
+		{track: providers.Track{Title: "Echoes", Artist: "Pink Floyd", BPM: 130, Key: "8B", DurationMS: 300000, Rating: 5}},
+		{track: providers.Track{Title: "Abba Song", Artist: "Abba", BPM: 120, Key: "1A", DurationMS: 200000, Rating: 4}},
+		{track: providers.Track{Title: "Zero BPM", Artist: "Ambient", BPM: 0, Key: "", DurationMS: 100000, Rating: 1}},
+		{track: providers.Track{Title: "Negative BPM", Artist: "Glitch", BPM: -5, Key: "12B", DurationMS: 150000, Rating: 2}},
+		{track: providers.Track{Title: "Zebra Beat", Artist: "Zulu", BPM: 125, Key: "1B", DurationMS: 250000, Rating: 3}},
 	}
 
 	// BPM Ascending: 120, 125, 130, followed by 0, -5
@@ -688,6 +689,22 @@ func TestStreamingPlaylistSortByBPMKeyTitle(t *testing.T) {
 		artistAsc[2].track.Artist != "Glitch" || artistAsc[3].track.Artist != "Pink Floyd" ||
 		artistAsc[4].track.Artist != "Zulu" {
 		t.Fatalf("artist asc: %+v", artistAsc)
+	}
+
+	// Rating Descending: 5 (Echoes), 4 (Abba), 3 (Zebra), 2 (Negative), 1 (Zero)
+	ratingDesc := slices.Clone(tracks)
+	sortStreamingTracks(ratingDesc, "rating", "desc")
+	if ratingDesc[0].track.Rating != 5 || ratingDesc[1].track.Rating != 4 || ratingDesc[2].track.Rating != 3 ||
+		ratingDesc[3].track.Rating != 2 || ratingDesc[4].track.Rating != 1 {
+		t.Fatalf("rating desc: %+v", ratingDesc)
+	}
+
+	// Length Ascending: 100000, 150000, 200000, 250000, 300000
+	lengthAsc := slices.Clone(tracks)
+	sortStreamingTracks(lengthAsc, "length", "asc")
+	if lengthAsc[0].track.DurationMS != 100000 || lengthAsc[1].track.DurationMS != 150000 || lengthAsc[2].track.DurationMS != 200000 ||
+		lengthAsc[3].track.DurationMS != 250000 || lengthAsc[4].track.DurationMS != 300000 {
+		t.Fatalf("length asc: %+v", lengthAsc)
 	}
 
 	// 2. Integration test via /v1/playlists/{uuid}/tracks
@@ -774,6 +791,68 @@ func TestStreamingPlaylistSortByBPMKeyTitle(t *testing.T) {
 	titles = getTitles("/v1/playlists/" + playlistUUID + "/tracks")
 	if len(titles) != 3 || titles[0] != "Track One" || titles[1] != "Track Two" || titles[2] != "Track Three" {
 		t.Fatalf("Configured sort by bpm desc failed: %v", titles)
+	}
+}
+
+func TestEnrichRatingsFromSTMAndMDB(t *testing.T) {
+	dataDir := t.TempDir()
+	dbDir := filepath.Join(dataDir, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Create stm.db with a rated streaming track
+	stmPath := filepath.Join(dbDir, "stm.db")
+	stmDB, err := sql.Open("sqlite", stmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmDB.Close()
+	_, err = stmDB.Exec(`CREATE TABLE Track (id INTEGER PRIMARY KEY, originTrackId INTEGER, uri TEXT, title TEXT, artist TEXT, rating INTEGER)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = stmDB.Exec(`INSERT INTO Track (originTrackId, uri, title, artist, rating) VALUES (101, 'streaming://TIDAL/Track/101', 'Stream Song', 'Stream Artist', 5)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Create m.db with a rated local track
+	mPath := filepath.Join(dbDir, "m.db")
+	mDB, err := sql.Open("sqlite", mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mDB.Close()
+	_, err = mDB.Exec(`CREATE TABLE Track (id INTEGER PRIMARY KEY, title TEXT, artist TEXT, rating INTEGER)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = mDB.Exec(`INSERT INTO Track (title, artist, rating) VALUES ('Local Title', 'Local Artist', 4)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldShadow := shadowDataRoot
+	shadowDataRoot = dataDir
+	defer func() { shadowDataRoot = oldShadow }()
+
+	g := &tidalGateway{s: New(Config{}, nil)}
+	tracks := []providers.Track{
+		{ID: "101", Title: "Different Title", Artist: "Different Artist"},
+		{ID: "999", Title: "Local Title", Artist: "Local Artist"},
+		{ID: "777", Title: "Unrated", Artist: "Unrated"},
+	}
+
+	g.enrichRatingsFromDB(context.Background(), tracks)
+	if tracks[0].Rating != 5 {
+		t.Fatalf("expected track 101 to have rating 5 from stm.db, got %d", tracks[0].Rating)
+	}
+	if tracks[1].Rating != 4 {
+		t.Fatalf("expected track 999 to have rating 4 from m.db by title/artist, got %d", tracks[1].Rating)
+	}
+	if tracks[2].Rating != 0 {
+		t.Fatalf("expected track 777 to have rating 0, got %d", tracks[2].Rating)
 	}
 }
 

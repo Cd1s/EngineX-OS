@@ -851,6 +851,17 @@ func sortStreamingTracks(refs []trackRef, role, order string) {
 		})
 	case "rating":
 		sort.SliceStable(refs, func(i, j int) bool {
+			a, b := refs[i].track.Rating, refs[j].track.Rating
+			if a == b {
+				return strings.ToLower(refs[i].track.Title) < strings.ToLower(refs[j].track.Title)
+			}
+			if desc {
+				return a > b
+			}
+			return a < b
+		})
+	case "length", "duration":
+		sort.SliceStable(refs, func(i, j int) bool {
 			a, b := refs[i].track.DurationMS, refs[j].track.DurationMS
 			if desc {
 				return a > b
@@ -873,6 +884,81 @@ func sortStreamingTracks(refs []trackRef, role, order string) {
 			}
 			return a < b
 		})
+	}
+}
+
+func (g *tidalGateway) enrichRatingsFromDB(ctx context.Context, tracks []providers.Track) {
+	libDir := filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
+	idRatings := make(map[string]int)
+	nameRatings := make(map[string]int)
+
+	readDB := func(dbName string, isStm bool) {
+		p := filepath.Join(libDir, dbName)
+		if _, err := os.Stat(p); err != nil {
+			return
+		}
+		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(100)")
+		if err != nil {
+			return
+		}
+		defer db.Close()
+
+		if isStm {
+			rows, err := db.QueryContext(ctx, `SELECT COALESCE(originTrackId, 0), COALESCE(uri, ''), COALESCE(title, ''), COALESCE(artist, ''), rating FROM Track WHERE rating > 0`)
+			if err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var origID int64
+					var uri, title, artist string
+					var rating int
+					if err := rows.Scan(&origID, &uri, &title, &artist, &rating); err == nil && rating > 0 {
+						if origID > 0 {
+							idRatings[strconv.FormatInt(origID, 10)] = rating
+						}
+						if uri != "" {
+							idRatings[uri] = rating
+						}
+						key := strings.ToLower(strings.TrimSpace(title)) + "\x00" + strings.ToLower(strings.TrimSpace(artist))
+						nameRatings[key] = rating
+					}
+				}
+			}
+		} else {
+			rows, err := db.QueryContext(ctx, `SELECT title, artist, rating FROM Track WHERE rating > 0`)
+			if err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var title, artist string
+					var rating int
+					if err := rows.Scan(&title, &artist, &rating); err == nil && rating > 0 {
+						key := strings.ToLower(strings.TrimSpace(title)) + "\x00" + strings.ToLower(strings.TrimSpace(artist))
+						nameRatings[key] = rating
+					}
+				}
+			}
+		}
+	}
+
+	readDB("stm.db", true)
+	readDB("m.db", false)
+
+	for i := range tracks {
+		if tracks[i].Rating > 0 {
+			continue
+		}
+		if r, ok := idRatings[tracks[i].ID]; ok {
+			tracks[i].Rating = r
+			continue
+		}
+		uri := "streaming://TIDAL/Track/" + tracks[i].ID
+		if r, ok := idRatings[uri]; ok {
+			tracks[i].Rating = r
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(tracks[i].Title)) + "\x00" + strings.ToLower(strings.TrimSpace(tracks[i].Artist))
+		if r, ok := nameRatings[key]; ok {
+			tracks[i].Rating = r
+		}
 	}
 }
 
@@ -922,6 +1008,14 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 			fail(w, 404, err)
 			return
 		}
+		localTracks := make([]providers.Track, len(refs))
+		for i := range refs {
+			localTracks[i] = refs[i].track
+		}
+		g.enrichRatingsFromDB(r.Context(), localTracks)
+		for i := range refs {
+			refs[i].track.Rating = localTracks[i].Rating
+		}
 		if role != "" && role != "default" {
 			sortStreamingTracks(refs, role, order)
 		}
@@ -962,6 +1056,7 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g.s.cfg.BPM.Enrich(r.Context(), tracks)
+	g.enrichRatingsFromDB(r.Context(), tracks)
 
 	refs := make([]trackRef, 0, len(tracks))
 	for _, t := range tracks {
