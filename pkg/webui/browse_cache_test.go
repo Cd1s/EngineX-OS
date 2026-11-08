@@ -416,11 +416,41 @@ func TestBrowseOversizedRefreshDiscardsOlderSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.diskMu.Lock()
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(c.diskMu.Unlock) }
+	defer unlock()
 	clock.Add(int64(browseTTL + time.Second))
 	_, _ = c.get(context.Background(), key, func(context.Context) (browseData, error) {
 		return browseFixture(strings.Repeat("x", browseEntryBytes)), nil
 	})
-	if f := currentBrowseFlight(c, key); f != nil {
+	// Hold disk maintenance at the exact removal gap. A cancelled reader
+	// must join the flight, never reload the obsolete file that still exists.
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		c.mu.Lock()
+		e := c.entries[key]
+		pending := e == nil || e.data == nil
+		c.mu.Unlock()
+		if pending {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline:
+			t.Fatal("oversized refresh did not publish its tombstone")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.get(ctx, key, func(context.Context) (browseData, error) { t.Error("duplicate refresh"); return browseData{}, nil }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("reloaded old disk snapshot: %v", err)
+	}
+	f := currentBrowseFlight(c, key)
+	unlock()
+	if f != nil {
 		waitBrowse(t, f.done)
 	}
 	c.mu.Lock()

@@ -164,10 +164,9 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 		} else if oversized {
 			// Never keep returning an older small snapshot when a successful
 			// refresh grew beyond the per-entry budget. Return it uncached.
-			if e := c.entries[key]; e != nil {
-				c.bytes -= len(e.data)
-				delete(c.entries, key)
-			}
+			// Keep a tombstone until the old disk file is gone. A concurrent
+			// reader must join this flight rather than reload that snapshot.
+			c.insert(key, &browseEntry{used: now})
 		} else if err != nil {
 			if revoked {
 				c.insert(key, &browseEntry{err: err, used: now, retry: now.Add(browseRetry)})
@@ -192,6 +191,12 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 			c.diskMu.Unlock()
 		}
 		c.mu.Lock()
+		if oversized {
+			if e := c.entries[key]; e != nil {
+				c.bytes -= len(e.data)
+				delete(c.entries, key)
+			}
+		}
 		f.data, f.err = data, err
 		delete(c.flights, key)
 		close(f.done)
