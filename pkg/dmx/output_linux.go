@@ -5,6 +5,7 @@ package dmx
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"syscall"
@@ -59,7 +60,7 @@ func openUSB(o Output) (usbOutput, error) {
 	}()
 	if o.Protocol == "udmx" {
 		desc := make([]byte, 18)
-		if _, err := f.ReadAt(desc, 0); err != nil {
+		if _, err := io.ReadFull(f, desc); err != nil {
 			return nil, err
 		}
 		if desc[8] != 0xc0 || desc[9] != 0x16 || desc[10] != 0xdc || desc[11] != 0x05 {
