@@ -162,6 +162,46 @@ func (s *Server) handleUnlockGen2(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"unlocked": s.isGen2Unlocked(), "generation": gen, "prefix": prefix})
 }
 
+// modelPrefix returns the board prefix for the current hardware (e.g. "SC5000", "SCLIVE4").
+func (s *Server) modelPrefix() string {
+	return imagePrefix(deviceCompatible())
+}
+
+// handleUninstallGen2 removes the EngineX data bundle from a second-generation deck and reverts to stock (#141).
+func (s *Server) handleUninstallGen2(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		fail(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	prefix := s.modelPrefix()
+	if !dataBundleBoards[prefix] {
+		fail(w, http.StatusBadRequest, errors.New("only second-generation decks support uninstall-gen2"))
+		return
+	}
+	customDir := s.customDir()
+	uninstallScript := filepath.Join(customDir, "bundle", "uninstall.sh")
+	if _, err := os.Stat(uninstallScript); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fail(w, http.StatusNotFound, errors.New("uninstall.sh not found"))
+			return
+		}
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	runner := getSystemRunner()
+	if out, err := runner(r.Context(), "sh", uninstallScript); err != nil {
+		fail(w, http.StatusInternalServerError, fmt.Errorf("uninstall failed: %w: %s", err, out))
+		return
+	}
+	if isDeckDataDir(customDir) {
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			_, _ = runner(context.Background(), "sh", "-c", "systemctl reboot || reboot || :")
+		}()
+	}
+	respond(w, map[string]any{"ok": true, "prefix": prefix})
+}
+
 func (s *Server) handleSSH(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:

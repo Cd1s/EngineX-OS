@@ -1193,6 +1193,8 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 		switch strings.ToLower(path.Ext(g.s.jobs.File(ref.track))) {
 		case ".mp3":
 			codec, ext = "mp3", "mp3"
+		case ".ogg":
+			codec, ext = "vorbis", "ogg"
 		case ".mp4":
 			// Engine saves this codec as .mp4, which its AAC reader opens.
 			codec, ext = "mp4a.40.2", "mp4"
@@ -1209,8 +1211,16 @@ func (g *tidalGateway) streamTarget(r *http.Request, id int64, ref trackRef) (ad
 // is only known afterwards; otherwise Deemix delivers FLAC or fails.
 func (g *tidalGateway) knownCodec(w http.ResponseWriter, r *http.Request, ref trackRef) bool {
 	j := g.s.jobs
-	if ref.file != "" || j == nil || !j.Lossy() || j.File(ref.track) != "" {
+	if ref.file != "" || j == nil || j.File(ref.track) != "" {
 		return true
+	}
+	// These providers deliver mp3/mp4/ogg whatever the quality setting, so the real suffix is only known after the download.
+	switch ref.track.Provider {
+	case "soundcloud", "spotify", "beatport":
+	default:
+		if !j.Lossy() {
+			return true
+		}
 	}
 	http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	if _, err := j.Fetch(r.Context(), ref.session, ref.track, ref.guest); err != nil {
@@ -1233,6 +1243,8 @@ func (g *tidalGateway) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		mime = "audio/mpeg"
 	} else if ext := path.Ext(address); ext == ".mp4" {
 		mime = "audio/mp4"
+	} else if ext == ".ogg" {
+		mime = "audio/ogg"
 	}
 	manifest, _ := json.Marshal(map[string]any{"mimeType": mime, "codecs": codec, "encryptionType": "NONE", "urls": []string{address}})
 	respond(w, map[string]any{"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "LOSSLESS", "manifestMimeType": "application/vnd.tidal.bts", "manifestHash": "", "manifest": base64.StdEncoding.EncodeToString(manifest), "albumReplayGain": 0, "albumPeakAmplitude": 1, "trackReplayGain": 0, "trackPeakAmplitude": 1})
@@ -1307,7 +1319,7 @@ func (g *tidalGateway) stemsTrackID(w http.ResponseWriter, r *http.Request) {
 // the CPU3 analysis/import job is queued by Jobs.Fetch and runs afterwards.
 func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	file := r.PathValue("file")
-	raw := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(file, ".flac"), ".mp3"), ".mp4")
+	raw := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(file, ".flac"), ".mp3"), ".mp4"), ".ogg")
 	if raw == file {
 		http.NotFound(w, r)
 		return
@@ -1346,6 +1358,8 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/mp4")
 	} else if strings.HasSuffix(strings.ToLower(p), ".mp3") {
 		w.Header().Set("Content-Type", "audio/mpeg")
+	} else if strings.HasSuffix(strings.ToLower(p), ".ogg") {
+		w.Header().Set("Content-Type", "audio/ogg")
 	}
 	http.ServeFile(w, r, p)
 }
