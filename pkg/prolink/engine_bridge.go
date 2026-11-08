@@ -70,7 +70,8 @@ func SyncEngineToPioneerExport(root string) error {
 	progressPath := filepath.Join(root, "PIONEER", "rekordbox", ".enginex-progress")
 	progress := engineExportProgress{IDs: make(map[uint32]uint32)}
 	if b, err := os.ReadFile(progressPath); err == nil {
-		_ = json.Unmarshal(b, &progress)
+		var saved engineExportProgress
+		if json.Unmarshal(b, &saved) == nil { progress = saved }
 	}
 	if progress.IDs == nil { progress.IDs = make(map[uint32]uint32) }
 	if progress.Stamp != currentStamp { progress.LastID = 0 }
@@ -593,9 +594,11 @@ func engineBeats(raw []byte) ([]rekordbox.Beat, float64, float64, error) {
  first, last := grid[0], grid[len(grid)-1]
  firstStep := (grid[1].sample-first.sample)/float64(grid[1].index-first.index)
  lastStep := (last.sample-grid[len(grid)-2].sample)/float64(last.index-grid[len(grid)-2].index)
- start := int64(math.Ceil(float64(first.index)-first.sample/firstStep))
- end := int64(math.Floor(float64(last.index)+(samples-last.sample)/lastStep))
- if end < start || end-start > 100000 { return bad() }
+ if !finiteEngine(firstStep) || !finiteEngine(lastStep) || firstStep < 60*rate/655.35 || lastStep < 60*rate/655.35 { return bad() }
+ startFloat := math.Ceil(float64(first.index)-first.sample/firstStep)
+ endFloat := math.Floor(float64(last.index)+(samples-last.sample)/lastStep)
+ if !finiteEngine(startFloat) || !finiteEngine(endFloat) || math.Abs(startFloat)>2000000 || math.Abs(endFloat)>2000000 || endFloat<startFloat || endFloat-startFloat>100000 { return bad() }
+ start,end := int64(startFloat),int64(endFloat)
  beats := make([]rekordbox.Beat, 0, end-start+1)
  segment := 0
  for index := start; index <= end; index++ {

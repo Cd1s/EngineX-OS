@@ -424,3 +424,25 @@ func TestEngineBridgeArtworkFileAndAllHotCueSlots(t *testing.T) {
   for i,c:=range a.Cues {if c.HotCue!=uint32(i+1) || c.TimeMS!=uint32((i+1)*250) {t.Errorf("%s slot %d: %+v",ext,i,c)}}
  }
 }
+
+func TestEngineBridgeRejectsExtremeBeatAnchors(t *testing.T) {
+ for _,kind:=range []string{"count","nan","tiny-step"} {t.Run(kind,func(t *testing.T){
+  bridgeNoStreams(t);_,root,db:=testlibrary.Create(t)
+  bridgeExec(t,db,`INSERT INTO Track(id,path,filename,length) VALUES(1,'../Music/a.wav','a.wav',4)`)
+  beat,_,_,_:=bridgeEnginePerformance(t);raw,err:=enginedb.QUncompress(beat,1<<20);if err!=nil {t.Fatal(err)}
+  switch kind {
+  case "count":binary.BigEndian.PutUint64(raw[17:],math.MaxUint64)
+  case "nan":binary.BigEndian.PutUint64(raw,math.Float64bits(math.NaN()))
+  case "tiny-step":
+   // The selected adjusted grid starts at 17+8+2*24+8. Almost
+   // coincident anchors must fail before float-to-int/capacity conversion.
+   at:=81
+   binary.LittleEndian.PutUint64(raw[at:],math.Float64bits(1e-300))
+   binary.LittleEndian.PutUint64(raw[at+24:],math.Float64bits(2e-300))
+   binary.LittleEndian.PutUint64(raw[at+48:],math.Float64bits(3e-300))
+  }
+  damaged,err:=enginedb.QCompress(raw);if err!=nil {t.Fatal(err)}
+  bridgeExec(t,db,`UPDATE PerformanceData SET beatData=? WHERE trackId=1`,damaged)
+  if err:=prolink.SyncEngineToPioneerExport(root);err==nil {t.Fatal("extreme grid accepted")}
+ })}
+}
