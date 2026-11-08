@@ -282,8 +282,8 @@ SERVICES_MAIN = """
 		const bars = Math.floor(totalBeats / 4)
 		const nm = t("/Track/QuickCue" + best.idx + "Name").string || ("CUE " + best.idx)
 		return {
-			text: (bars < 10 ? "0" + bars : String(bars)) + "." + ((Math.floor(totalBeats) % 4) + 1) + " BARS",
-			label: nm.slice(0, 8),
+			text: String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1),
+			label: nm.slice(0, 7),
 			color: String(t("/Track/QuickCue" + best.idx + "Color").color || "#26a6ff"),
 			urgent: bars < 4
 		}
@@ -2065,30 +2065,23 @@ ZOOM_STEP = """
 
 
 def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False) -> str:
-    """#151: Pioneer-style `● DROP  16.3 BARS` capsule; hidden (no space) without a cue ahead.
-    compact: the 4-deck mini rows (half-screen cards) have no room for the full-size one."""
-    if compact:
-        h, px = 22, 14
-    q = f"""Rectangle {{
+    """#151: stock-style flat `| ▊ DROP  16.3` countdown (Separator + 3 px cue-colour bar + Style.fontH1 text,
+    no box, like AutoLoop / BeatJump / SpeedInfo); hidden (no space) without a cue ahead.
+    h, px are kept for the call sites; the flat row needs neither."""
+    q = f"""Row {{
+    id: cueCap
     objectName: "EngineX_CueCountdown"
     readonly property var info: typeof root !== "undefined" && root && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTick) : null
     visible: info !== null
     Layout.alignment: Qt.AlignVCenter
-    Layout.leftMargin: {2 if compact else 8}
-    Layout.preferredHeight: {h}
-    Layout.preferredWidth: cueRow.implicitWidth + {12 if compact else 16}
-    radius: 5
-    color: "#cc141820"
-    border.width: 1
-    border.color: info ? (info.urgent ? "#ff9f1c" : info.color) : "transparent"
-    Row {{
-        id: cueRow
-        anchors.centerIn: parent
-        spacing: {4 if compact else 6}
-        Rectangle {{ width: 8; height: 8; radius: 4; anchors.verticalCenter: parent.verticalCenter; color: parent.parent.info ? parent.parent.info.color : "transparent" }}
-        Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.{"fontH2" if compact else "fontH1"}; color: Style.font02Color; text: parent.parent.info ? parent.parent.info.label : "" }}
-        Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.makeFont(Style.fontDisplay.family, {px}, Font.Bold); color: parent.parent.info && parent.parent.info.urgent ? "#ffb703" : "#ffffff"; text: parent.parent.info ? parent.parent.info.text : "" }}
-    }}
+    Layout.leftMargin: {2 if compact else 12}
+    Layout.preferredHeight: {22 if compact else 30}
+    spacing: 6
+    Rectangle {{ width: 1; height: 18; anchors.verticalCenter: parent.verticalCenter; color: Style.surface03Color }}
+    Item {{ width: {2 if compact else 6}; height: 1 }}
+    Rectangle {{ width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: cueCap.info ? cueCap.info.color : "transparent" }}
+    Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: Style.font01Color; text: cueCap.info ? cueCap.info.label : "" }}
+    Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
 }}
 """
     return "".join(ind + l + "\n" if l else "\n" for l in q.splitlines())
@@ -2661,12 +2654,12 @@ def edits(dev: bool):
             ("                    visible: Config.audio.deck.hasBeatJump\n                }\n",
              "                    visible: Config.audio.deck.hasBeatJump\n                }\n\n" + cue_capsule("                ", "deckTrackDataContent.deckIndex", 24, 16, compact=True)),
             ("                spacing: 16\n                visible: deckTrackDataContent.songLoaded\n",
-             "                spacing: 8\n                visible: deckTrackDataContent.songLoaded\n"),
-            # room for the capsule: AutoLoop / BeatJump 72 -> 52 px
+             "                spacing: 10\n                visible: deckTrackDataContent.songLoaded\n"),
+            # room for the capsule: AutoLoop / BeatJump 72 -> 60 px
             ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n",
-             "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 52\n"),
+             "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 60\n"),
             ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n",
-             "                    textFont: Style.fontH1\n                    Layout.preferredWidth: 52\n")]
+             "                    textFont: Style.fontH1\n                    Layout.preferredWidth: 60\n")]
         scaled[bj + "DeckTrackData/SplitMiniDeckTrackDataContent.qml"] = [
             ("        JP07SyncIndicator {\n",
              cue_capsule("        ", "deckTrackDataContent.deckIndex", 26, 16, compact=True) + "\n        JP07SyncIndicator {\n")]

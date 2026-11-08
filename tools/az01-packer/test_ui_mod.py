@@ -62,10 +62,13 @@ class UiModSourceTest(unittest.TestCase):
 
     def test_cue_countdown_151(self):
         self.assertIn("function scNextCueInfo(d, tick)", bp.SERVICES_MAIN)
-        self.assertIn("BARS", bp.SERVICES_MAIN)
+        self.assertNotIn('" BARS"', bp.SERVICES_MAIN)
+        self.assertIn('String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1),', bp.SERVICES_MAIN)
         cap = bp.cue_capsule("", "X", 30, 20)
         self.assertIn('objectName: "EngineX_CueCountdown"', cap)
         self.assertIn("visible: info !== null", cap)
+        self.assertIn("Style.surface03Color", cap)
+        self.assertNotIn("border", cap)
         self.assertEqual(cap.count("{"), cap.count("}"))
 
     def test_i18n_has_stem(self):
