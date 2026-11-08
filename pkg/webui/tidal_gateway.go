@@ -887,25 +887,43 @@ func sortStreamingTracks(refs []trackRef, role, order string) {
 	}
 }
 
-func (g *tidalGateway) enrichRatingsFromDB(ctx context.Context, tracks []providers.Track) {
-	libDir := filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
-	idRatings := make(map[string]int)
-	nameRatings := make(map[string]int)
+// ratingCacheTTL bounds how stale a rating may be; playlistTracks runs on every
+// browse, and the two libraries are scanned in full (all rated rows), so the
+// result is reused for a short while. Tests set it to 0.
+var ratingCacheTTL = 30 * time.Second
+
+var ratingCache struct {
+	sync.Mutex
+	dir          string
+	at           time.Time
+	ids, byNames map[string]int
+}
+
+// loadRatings reads every rated row of stm.db (by origin id and uri, then by
+// title+artist) and m.db (by title+artist). ok is false when a library could
+// not be read to the end, so the partial result is not cached.
+func loadRatings(ctx context.Context, libDir string) (idRatings, nameRatings map[string]int, ok bool) {
+	idRatings = make(map[string]int)
+	nameRatings = make(map[string]int)
+	ok = true
 
 	readDB := func(dbName string, isStm bool) {
 		p := filepath.Join(libDir, dbName)
 		if _, err := os.Stat(p); err != nil {
 			return
 		}
-		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(100)")
+		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
 		if err != nil {
+			ok = false
 			return
 		}
 		defer db.Close()
 
 		if isStm {
 			rows, err := db.QueryContext(ctx, `SELECT COALESCE(originTrackId, 0), COALESCE(uri, ''), COALESCE(title, ''), COALESCE(artist, ''), rating FROM Track WHERE rating > 0`)
-			if err == nil {
+			if err != nil {
+				ok = false
+			} else {
 				defer rows.Close()
 				for rows.Next() {
 					var origID int64
@@ -922,18 +940,29 @@ func (g *tidalGateway) enrichRatingsFromDB(ctx context.Context, tracks []provide
 						nameRatings[key] = rating
 					}
 				}
+				if rows.Err() != nil {
+					ok = false
+				}
 			}
 		} else {
 			rows, err := db.QueryContext(ctx, `SELECT title, artist, rating FROM Track WHERE rating > 0`)
-			if err == nil {
+			if err != nil {
+				ok = false
+			} else {
 				defer rows.Close()
 				for rows.Next() {
 					var title, artist string
 					var rating int
 					if err := rows.Scan(&title, &artist, &rating); err == nil && rating > 0 {
 						key := strings.ToLower(strings.TrimSpace(title)) + "\x00" + strings.ToLower(strings.TrimSpace(artist))
-						nameRatings[key] = rating
+						// A streaming track's own rating (stm.db) wins over a local file of the same name.
+						if _, has := nameRatings[key]; !has {
+							nameRatings[key] = rating
+						}
 					}
+				}
+				if rows.Err() != nil {
+					ok = false
 				}
 			}
 		}
@@ -941,7 +970,25 @@ func (g *tidalGateway) enrichRatingsFromDB(ctx context.Context, tracks []provide
 
 	readDB("stm.db", true)
 	readDB("m.db", false)
+	return idRatings, nameRatings, ok
+}
 
+func cachedRatings(ctx context.Context) (map[string]int, map[string]int) {
+	libDir := filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
+	ratingCache.Lock()
+	defer ratingCache.Unlock()
+	if ratingCache.dir == libDir && time.Since(ratingCache.at) < ratingCacheTTL {
+		return ratingCache.ids, ratingCache.byNames
+	}
+	ids, names, ok := loadRatings(ctx, libDir)
+	if ok {
+		ratingCache.dir, ratingCache.at, ratingCache.ids, ratingCache.byNames = libDir, time.Now(), ids, names
+	}
+	return ids, names
+}
+
+func (g *tidalGateway) enrichRatingsFromDB(ctx context.Context, tracks []providers.Track) {
+	idRatings, nameRatings := cachedRatings(ctx)
 	for i := range tracks {
 		if tracks[i].Rating > 0 {
 			continue

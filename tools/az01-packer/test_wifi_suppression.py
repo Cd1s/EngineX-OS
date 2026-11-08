@@ -52,7 +52,7 @@ class WifiSuppressionTest(unittest.TestCase):
         sort_content = sort_qml.read_text(encoding="utf-8")
         self.assertIn("isStreamingProviderWithSort ||", sort_content)
         self.assertIn("readonly property bool isStreamingProviderWithSort: Boolean(collectionController && collectionController.isCurrentCollectionStreaming)", sort_content)
-        self.assertIn("if (isStreamingProviderWithSort) return [\"song\", \"bpm\", \"artist\", \"key\", \"rating\", \"length\", \"playOrder\"]", sort_content)
+        self.assertIn("if (isStreamingProviderWithSort) return showPlayOrderRole ? [\"song\", \"bpm\", \"artist\", \"key\", \"rating\", \"length\", \"playOrder\"] : [\"song\", \"bpm\", \"artist\", \"key\", \"rating\", \"length\"]", sort_content)
         self.assertIn("scPostSortSettings()", sort_content)
         self.assertIn("onSortOrderChanged:", sort_content)
         self.assertIn("dialog.sortRow = sortRow", sort_content)
@@ -61,7 +61,7 @@ class WifiSuppressionTest(unittest.TestCase):
         self.assertTrue(sort_dialog_qml.is_file(), f"{sort_dialog_qml} missing")
         dialog_content = sort_dialog_qml.read_text(encoding="utf-8")
         self.assertIn("property var sortRow: null", dialog_content)
-        self.assertIn("if (sortRow) {\n                            sortRow.sortRole = cell.role\n                        }", dialog_content)
+        self.assertIn("if (sortRow && sortRow.isStreamingProviderWithSort) {\n                            sortRow.sortRole = cell.role\n                        }", dialog_content)
 
         # Check UIKit SortMenuDialog.qml & SortOrderButton.qml in 5.3.0
         uikit_dialog = out / "en" / "Skins" / "UIKit" / "Elements" / "StatusBar" / "SortMenuDialog.qml"
@@ -113,7 +113,7 @@ class WifiSuppressionTest(unittest.TestCase):
         self.assertTrue(sort_qml_504.is_file(), f"{sort_qml_504} missing")
         sort_content_504 = sort_qml_504.read_text(encoding="utf-8")
         self.assertIn("|| isStreamingProviderWithSort", sort_content_504)
-        self.assertIn("if (isStreamingProviderWithSort) return [\"song\", \"bpm\", \"artist\", \"key\", \"rating\", \"length\", \"playOrder\"]", sort_content_504)
+        self.assertIn("if (isStreamingProviderWithSort) return showPlayOrderRole ? [\"song\", \"bpm\", \"artist\", \"key\", \"rating\", \"length\", \"playOrder\"] : [\"song\", \"bpm\", \"artist\", \"key\", \"rating\", \"length\"]", sort_content_504)
         self.assertIn('scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", false)', sort_content_504)
         self.assertIn("dialog.sortRow = sortRow", sort_content_504)
 
@@ -121,7 +121,7 @@ class WifiSuppressionTest(unittest.TestCase):
         self.assertTrue(sort_dialog_504.is_file(), f"{sort_dialog_504} missing")
         dialog_content_504 = sort_dialog_504.read_text(encoding="utf-8")
         self.assertIn("property var sortRow: null", dialog_content_504)
-        self.assertIn("if (sortRow) {\n                            sortRow.sortRole = cell.role\n                        }", dialog_content_504)
+        self.assertIn("if (sortRow && sortRow.isStreamingProviderWithSort) {\n                            sortRow.sortRole = cell.role\n                        }", dialog_content_504)
         self.assertTrue(dialog_content_504.index("sortRow.sortRole = cell.role") < dialog_content_504.index("collectionController.sortColumn"))
 
 

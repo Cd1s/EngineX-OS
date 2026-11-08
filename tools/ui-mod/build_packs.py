@@ -2439,7 +2439,7 @@ def edits(dev: bool):
                     "				var result = [",
                     "		property var menuRoles: {\n"
                     "			if(showButton) {\n"
-                    '				if (isStreamingProviderWithSort) return ["song", "bpm", "artist", "key", "rating", "length", "playOrder"]\n'
+                    '				if (isStreamingProviderWithSort) return showPlayOrderRole ? ["song", "bpm", "artist", "key", "rating", "length", "playOrder"] : ["song", "bpm", "artist", "key", "rating", "length"]\n'
                     "				var result = [",
                 ) if not v53() else (
                     "    property var menuRoles: {\n"
@@ -2447,7 +2447,7 @@ def edits(dev: bool):
                     "            var result = [\n",
                     "    property var menuRoles: {\n"
                     "        if (showButton) {\n"
-                    '            if (isStreamingProviderWithSort) return ["song", "bpm", "artist", "key", "rating", "length", "playOrder"]\n'
+                    '            if (isStreamingProviderWithSort) return showPlayOrderRole ? ["song", "bpm", "artist", "key", "rating", "length", "playOrder"] : ["song", "bpm", "artist", "key", "rating", "length"]\n'
                     "            var result = [\n",
                 )
             ),
@@ -2498,7 +2498,7 @@ def edits(dev: bool):
             (
                 "                        collectionController.sortColumn(cell.role, sortOrder, false)\n"
                 "                        onScreen = false\n",
-                "                        if (sortRow) {\n"
+                "                        if (sortRow && sortRow.isStreamingProviderWithSort) {\n"
                 "                            sortRow.sortRole = cell.role\n"
                 "                        }\n"
                 "                        collectionController.sortColumn(cell.role, sortOrder, false)\n"

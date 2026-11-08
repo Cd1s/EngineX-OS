@@ -921,3 +921,54 @@ func TestSoundCloudPlaybackInfoCodecMatchesStreamWhenLosslessOnly(t *testing.T) 
 		}
 	}
 }
+
+// Review of #158: a streaming track's own rating beats a local file of the same
+// name, and the full scan of both libraries is reused for ratingCacheTTL.
+func TestRatingsStreamingWinsAndAreCached(t *testing.T) {
+	dataDir := t.TempDir()
+	dbDir := filepath.Join(dataDir, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name, schema, insert string) *sql.DB {
+		db, err := sql.Open("sqlite", filepath.Join(dbDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		if _, err := db.Exec(schema); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(insert); err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	stm := mk("stm.db", `CREATE TABLE Track (id INTEGER PRIMARY KEY, originTrackId INTEGER, uri TEXT, title TEXT, artist TEXT, rating INTEGER)`,
+		`INSERT INTO Track (originTrackId, uri, title, artist, rating) VALUES (5, 'streaming://TIDAL/Track/5', 'Same', 'Same', 5)`)
+	mk("m.db", `CREATE TABLE Track (id INTEGER PRIMARY KEY, title TEXT, artist TEXT, rating INTEGER)`,
+		`INSERT INTO Track (title, artist, rating) VALUES ('Same', 'Same', 2)`)
+
+	oldRoot, oldTTL := shadowDataRoot, ratingCacheTTL
+	shadowDataRoot, ratingCacheTTL = dataDir, time.Hour
+	t.Cleanup(func() { shadowDataRoot, ratingCacheTTL = oldRoot, oldTTL })
+	g := &tidalGateway{s: New(Config{}, nil)}
+	rate := func() int {
+		tr := []providers.Track{{ID: "x", Title: "Same", Artist: "Same"}}
+		g.enrichRatingsFromDB(context.Background(), tr)
+		return tr[0].Rating
+	}
+	if got := rate(); got != 5 {
+		t.Fatalf("the streaming track's rating must win over the local file's 2, got %d", got)
+	}
+	if _, err := stm.Exec(`UPDATE Track SET rating = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if got := rate(); got != 5 {
+		t.Fatalf("within the TTL the cached ratings are reused, got %d", got)
+	}
+	ratingCacheTTL = 0
+	if got := rate(); got != 1 {
+		t.Fatalf("after the TTL the libraries are read again, got %d", got)
+	}
+}
