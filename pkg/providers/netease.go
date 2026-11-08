@@ -78,6 +78,14 @@ func remarshal(a, b any) error {
 	}
 	return json.Unmarshal(data, b)
 }
+
+// LoggedIn reports whether a user cookie is bound, safe against concurrent login.
+func (n *Netease) LoggedIn() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.UserID != 0 && n.Cookie != ""
+}
+
 func (n *Netease) get(ctx context.Context, path string, q url.Values, out any) error {
 	if q == nil {
 		q = make(url.Values)

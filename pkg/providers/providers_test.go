@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -256,10 +257,10 @@ func TestSpotifyDownloadAudio(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
-		case "/audio/encrypted-header":
+		case "/audio/encryptedheader":
 			w.Header().Set("X-Spotify-Audio-Key", hex.EncodeToString(rawKey))
 			w.Write(cipherPayload)
-		case "/audio/encrypted-field":
+		case "/audio/encryptedfield":
 			w.Write(cipherPayload)
 		case "/audio/plain":
 			w.Write([]byte("OggS-plain-content"))
@@ -275,11 +276,11 @@ func TestSpotifyDownloadAudio(t *testing.T) {
 	}
 
 	// 2. Encrypted with X-Spotify-Audio-Key header and 0xa7 stripping
-	path1, err := sp.DownloadAudio(ctx, "encrypted-header", tmpDir)
+	path1, err := sp.DownloadAudio(ctx, "encryptedheader", tmpDir)
 	if err != nil {
-		t.Fatalf("DownloadAudio encrypted-header: %v", err)
+		t.Fatalf("DownloadAudio encryptedheader: %v", err)
 	}
-	if filepath.Base(path1) != "spotify-encrypted-header.ogg" {
+	if filepath.Base(path1) != "spotify-encryptedheader.ogg" {
 		t.Fatalf("wrong file name: %s", path1)
 	}
 	data1, err := os.ReadFile(path1)
@@ -292,9 +293,9 @@ func TestSpotifyDownloadAudio(t *testing.T) {
 
 	// 3. Encrypted with sp.AudioKey
 	sp.AudioKey = rawKey
-	path2, err := sp.DownloadAudio(ctx, "encrypted-field", tmpDir)
+	path2, err := sp.DownloadAudio(ctx, "encryptedfield", tmpDir)
 	if err != nil {
-		t.Fatalf("DownloadAudio encrypted-field: %v", err)
+		t.Fatalf("DownloadAudio encryptedfield: %v", err)
 	}
 	data2, err := os.ReadFile(path2)
 	if err != nil {
@@ -316,5 +317,29 @@ func TestSpotifyDownloadAudio(t *testing.T) {
 	}
 	if string(data3) != "OggS-plain-content" {
 		t.Fatalf("unexpected plain content: %q", string(data3))
+	}
+}
+
+func TestSpotifyPublicLinks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embed/playlist/37i9dQZF1DXcBWIGoYBM5M" {
+			w.WriteHeader(404)
+			return
+		}
+		io.WriteString(w, `<html><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"state":{"data":{"entity":{"name":"Mix","trackList":[{"uri":"spotify:track:abc","title":"T","subtitle":"A, B","duration":1000},{"uri":"spotify:episode:x","title":"E"}]}}}}}}</script></html>`)
+	}))
+	defer srv.Close()
+	sp := &Spotify{LinksPath: filepath.Join(t.TempDir(), "l.json"), EmbedURL: srv.URL}
+	n, err := sp.SetLinks(context.Background(), "see https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=1")
+	if err != nil || n != 1 || !sp.HasLinks() {
+		t.Fatal(n, err)
+	}
+	pl, err := sp.Playlists(context.Background())
+	if err != nil || len(pl) != 1 || pl[0].Title != "Mix" {
+		t.Fatal(pl, err)
+	}
+	tr, err := sp.Tracks(context.Background(), pl[0].ID)
+	if err != nil || len(tr) != 1 || tr[0].ID != "abc" || tr[0].Artist != "A, B" || tr[0].DurationMS != 1000 {
+		t.Fatalf("%+v %v", tr, err)
 	}
 }

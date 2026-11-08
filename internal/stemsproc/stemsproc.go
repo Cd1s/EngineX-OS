@@ -51,14 +51,15 @@ func Main(args []string) int {
 }
 
 // run tries the configured renderer, then a LAN renderer, then local. It moves
-// on only while Engine's stream is untouched: the renderer could not be dialled,
-// or answered 502/503/504 before taking a byte of it (#41). So the stream is
-// never split between two renderers.
+// on only while the next renderer can still be given the whole stream: the
+// renderer could not be dialled, or answered 502/503/504 having read no more than
+// the replayable prefix (the greeting header, #41). So the stream is never split
+// between two renderers.
 func run(ctx context.Context, client stems.Client, findLAN func(context.Context) (string, bool), local func(io.Reader, io.Writer) error, in io.Reader, out io.Writer) error {
 	src := newStdinMux(in)
 	next := func(err error, v *view) bool {
 		v.abandon()
-		return errors.Is(err, stems.ErrUnreachable) || (errors.Is(err, stems.ErrUnavailable) && v.taken() == 0)
+		return errors.Is(err, stems.ErrUnreachable) || (errors.Is(err, stems.ErrUnavailable) && v.replayable())
 	}
 	if client.Endpoint != "" {
 		v := src.view()
@@ -90,14 +91,18 @@ func run(ctx context.Context, client stems.Client, findLAN func(context.Context)
 
 // stdinMux hands Engine's stdin to one renderer at a time. A renderer that is
 // given up may still have a read in flight (its HTTP upload); whatever that
-// read brings in is kept for the next renderer instead of being lost.
+// read brings in is kept for the next renderer instead of being lost. The first
+// replayLimit bytes are retained and replayed to every new view; once a view
+// reads past them the stream is committed and consumed bytes are dropped.
 type stdinMux struct {
-	mu      sync.Mutex
-	cond    *sync.Cond
-	src     io.Reader
-	buf     []byte
-	err     error
-	reading bool
+	mu        sync.Mutex
+	cond      *sync.Cond
+	src       io.Reader
+	buf       []byte
+	base      int64 // stream offset of buf[0]
+	committed bool
+	err       error
+	reading   bool
 }
 
 func newStdinMux(src io.Reader) *stdinMux {
@@ -119,6 +124,9 @@ func (m *stdinMux) fill() {
 	m.mu.Unlock()
 }
 
+// replayLimit covers Engine's greeting header with room for the first block.
+const replayLimit = 1 << 20
+
 func (m *stdinMux) view() *view { return &view{m: m} }
 
 var errAbandoned = errors.New("stems: renderer given up")
@@ -126,14 +134,14 @@ var errAbandoned = errors.New("stems: renderer given up")
 type view struct {
 	m    *stdinMux
 	dead bool  // guarded by m.mu
-	n    int64 // bytes handed to this renderer, guarded by m.mu
+	pos  int64 // stream offset of the next byte for this renderer, guarded by m.mu
 }
 
 func (v *view) Read(p []byte) (int, error) {
 	m := v.m
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for len(m.buf) == 0 && m.err == nil && !v.dead {
+	for v.pos >= m.base+int64(len(m.buf)) && m.err == nil && !v.dead {
 		if !m.reading {
 			m.reading = true
 			go m.fill()
@@ -143,10 +151,19 @@ func (v *view) Read(p []byte) (int, error) {
 	if v.dead {
 		return 0, errAbandoned
 	}
-	if len(m.buf) > 0 {
-		n := copy(p, m.buf)
-		m.buf = m.buf[n:]
-		v.n += int64(n)
+	if v.pos < m.base {
+		return 0, errAbandoned
+	}
+	if v.pos < m.base+int64(len(m.buf)) {
+		n := copy(p, m.buf[v.pos-m.base:])
+		v.pos += int64(n)
+		if v.pos > replayLimit {
+			m.committed = true
+		}
+		if m.committed { // nobody can restart the stream now
+			m.buf = m.buf[v.pos-m.base:]
+			m.base = v.pos
+		}
 		return n, nil
 	}
 	return 0, m.err
@@ -159,8 +176,9 @@ func (v *view) abandon() {
 	v.m.mu.Unlock()
 }
 
-func (v *view) taken() int64 {
+// replayable reports whether a fresh view would still see the stream from byte 0.
+func (v *view) replayable() bool {
 	v.m.mu.Lock()
 	defer v.m.mu.Unlock()
-	return v.n
+	return !v.m.committed
 }

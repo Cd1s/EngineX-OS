@@ -28,6 +28,7 @@ type Token struct {
 type Spotify struct {
 	BaseURL, AccountsURL, ClientID, TokenPath string
 	StreamURL                                 string
+	LinksPath, EmbedURL                       string // public playlist links (spotify_links.go)
 	AudioKey                                  []byte
 	HTTP                                      *http.Client
 	mu                                        sync.Mutex
@@ -109,6 +110,13 @@ func (s *Spotify) LoadToken() error {
 		s.ClientID = t.ClientID
 	}
 	return nil
+}
+
+// HasToken reports whether a login token is present, safe against concurrent refresh.
+func (s *Spotify) HasToken() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Token.AccessToken != ""
 }
 
 // SetToken installs and saves a token obtained elsewhere, such as the cloud relay.
@@ -198,6 +206,18 @@ func endpointMissing(err error) bool {
 const SpotifyLikedID = "liked"
 
 func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
+	linked := s.linkedPlaylists()
+	if !s.HasToken() {
+		return linked, nil
+	}
+	all, err := s.apiPlaylists(ctx)
+	if err != nil && len(linked) > 0 {
+		return linked, nil
+	}
+	return append(linked, all...), err
+}
+
+func (s *Spotify) apiPlaylists(ctx context.Context) ([]Playlist, error) {
 	var all []Playlist
 	// An older login may lack the library scope; its playlists still work.
 	liked := make(chan Playlist, 1)
@@ -269,6 +289,9 @@ func (s *Spotify) likedTracks(ctx context.Context) ([]Track, error) {
 }
 
 func (s *Spotify) Tracks(ctx context.Context, id string) ([]Track, error) {
+	if t, ok := s.linkedTracks(id); ok {
+		return t, nil
+	}
 	if id == SpotifyLikedID {
 		return s.likedTracks(ctx)
 	}

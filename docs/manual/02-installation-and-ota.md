@@ -39,23 +39,23 @@
 **简体中文**
 
 - **第一代**：固件没有签名保护，可以直接刷 `.img`（U 盘或安装器均可）。
-- **第二代**：运行**签名固件**（AZ0x 容器，密钥记录为 `denon-1` / `rane-1`），系统分区只读，不能刷第三方 `.img`。EngineX OS 改为把一个**数据包**装进可写的 `/data` 分区（`/data/enginex`），开机时由一个启动钩子在原厂 Engine 上加载 EngineX 的 UI 包、服务和 hook。原厂系统分区不被改写，卸载可还原（`uninstall.sh`）。
-- **第二代的限制（请知悉）**：效果**并不与第一代完全相同**。例如 PRIME 4 G2 / SYSTEM ONE（64 位 Engine）目前只带 UI 包、流媒体网关与 EngineX 服务；DSP guard、Master Soft Clipper、自动增益、SQLite 调优和 4-deck 解锁尚未移植，Stems 保持原厂行为。第二代整体仍是 **Beta**，README 注明尚未在真机上完整验证。
-- **绝对不要**把 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的 `.img` 刷到第二代机器上。
+- **第二代**：没有硬件 eFuse 熔断锁死，运行**软件签名校验固件**（`AZ0x` 容器，密钥记录为 `denon-1` / `rane-1`），系统分区只读。原厂升级程序（`az01-update` / `az0x-splash`）在写入前先做软件验签，在原厂未改装状态下刷入第三方或一代机的 `.img` 会在 `Verifying`（校验）阶段直接被软件拒绝退回，不会写入闪存、更不会变砖。EngineX OS 首次安装把**数据包**装进可写的 `/data` 分区（`/data/enginex`），开机时由启动钩子在原厂 Engine 上加载 EngineX 的 UI 包、服务和 hook；装好后后续版本直接在屏幕一键 OTA 升级，也可随时用 `uninstall.sh` 还原。
+- **第二代的限制（请知悉）**：PRIME 4 G2 / SYSTEM ONE（64 位 Engine）现已对齐 16 处 Engine 补丁、14 处 DSP 防护、0dB 软限幅、自动增益、Echo Out、SQLite 调优和 `OfflineAnalyzer` `.perf` 直注（#149）；4-deck 解锁仅限单机播放器，Stems 保持原厂行为。
+- 请认准对应二代型号的 `Data-Bundle.tar.gz` 或直接使用 `EngineX-Installer` 自动识别（一代机的 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` `.img` 在二代机上会被原厂升级器拒签而无法刷入）。
 
 **English**
 
 - **1st generation**: the firmware is not signature-locked, so a plain `.img` works (USB stick or the installer).
-- **2nd generation**: runs **signed firmware** (AZ0x container, key record `denon-1` / `rane-1`) with a read-only system partition, so a third-party `.img` cannot be flashed. EngineX OS instead installs a **data bundle** into the writable `/data` partition (`/data/enginex`); at boot a hook loads EngineX's UI packs, services and hook library on top of the stock Engine. The stock system partition is never rewritten, and `uninstall.sh` removes the bundle.
-- **Limits of the 2nd generation (be aware)**: the result is **not identical** to the 1st generation. For example PRIME 4 G2 / SYSTEM ONE (64-bit Engine) currently get the UI packs, the streaming gateway and EngineX services only; DSP guards, Master Soft Clipper, auto gain, SQLite tuning and the 4-deck unlock are not ported yet, and Stems stay as stock. The whole 2nd-generation path is still **Beta**; the README says it has not been fully tested on real hardware.
-- **Never** flash a `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` `.img` onto a 2nd-generation unit.
+- **2nd generation**: has no hardware eFuse lock, and runs **software-verified signed firmware** (`AZ0x` container, key record `denon-1` / `rane-1`) with a read-only system partition. The stock updater (`az01-update` / `az0x-splash`) checks the signature in software before writing, so on a stock unit a third-party or first-generation `.img` is simply rejected at the `Verifying` step—nothing is written and the unit is never bricked. For the first install, EngineX OS places a **data bundle** into the writable `/data` partition (`/data/enginex`) and loads EngineX's UI packs, services and hook library at boot; subsequent updates install in one tap from the screen, and `uninstall.sh` removes the bundle.
+- **Limits of the 2nd generation (be aware)**: PRIME 4 G2 / SYSTEM ONE (64-bit Engine) now include all 16 Engine patches, 14 DSP guards, the 0 dB Master Soft Clipper, auto gain, Echo Out, SQLite tuning and the `OfflineAnalyzer` `.perf` injection (#149); the 4-deck unlock is for the stand-alone players only and Stems stay as stock.
+- Use the matching `Data-Bundle.tar.gz` or `EngineX-Installer` for 2nd-generation units (a first-generation `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` `.img` will be rejected by the stock updater).
 
 **繁體中文**
 
 - **第一代**：韌體沒有簽章保護，可直接刷 `.img`（USB 隨身碟或安裝器皆可）。
-- **第二代**：執行**簽章韌體**（AZ0x 容器，金鑰記錄為 `denon-1` / `rane-1`），系統分割區唯讀，無法刷第三方 `.img`。EngineX OS 改為把**資料包**裝進可寫入的 `/data` 分割區（`/data/enginex`），開機時由啟動 hook 在原廠 Engine 上載入 EngineX 的 UI 包、服務與 hook。原廠系統分割區不會被改寫，可用 `uninstall.sh` 移除。
-- **第二代的限制（請知悉）**：效果**並不與第一代完全相同**。例如 PRIME 4 G2 / SYSTEM ONE（64 位元 Engine）目前只含 UI 包、串流閘道與 EngineX 服務；DSP guard、Master Soft Clipper、自動增益、SQLite 調校與 4-deck 解鎖尚未移植，Stems 維持原廠行為。第二代整體仍為 **Beta**，README 註明尚未在實機完整驗證。
-- **絕對不要**把 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的 `.img` 刷到第二代機器上。
+- **第二代**：沒有硬體 eFuse 熔斷鎖死，執行**軟體驗證簽章韌體**（`AZ0x` 容器，金鑰記錄為 `denon-1` / `rane-1`），系統分割區唯讀。原廠更新程式（`az01-update` / `az0x-splash`）在寫入前先做軟體驗簽，在原廠未改裝狀態下刷入第三方或一代機的 `.img` 會在 `Verifying`（驗證）階段直接被軟體拒絕退回，不會寫入快閃記憶體、更不會變磚。EngineX OS 首次安裝把**資料包**裝進可寫入的 `/data` 分割區（`/data/enginex`），開機時由啟動 hook 在原廠 Engine 上載入 EngineX 的 UI 包、服務與 hook；裝好後後續版本直接在螢幕一鍵 OTA 升級，也可隨時用 `uninstall.sh` 移除。
+- **第二代的限制（請知悉）**：PRIME 4 G2 / SYSTEM ONE（64 位元 Engine）現已對齊 16 處 Engine 補丁、14 處 DSP 防護、0dB 軟限幅、自動增益、Echo Out、SQLite 調校與 `OfflineAnalyzer` `.perf` 直注（#149）；4-deck 解鎖僅限單機播放器，Stems 維持原廠行為。
+- 請認準對應二代機型的 `Data-Bundle.tar.gz` 或直接使用 `EngineX-Installer` 自動識別（一代機的 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` `.img` 在二代機上會被原廠更新器拒簽而無法刷入）。
 
 > **运行目录 / Runtime directory / 執行目錄（#103）**
 > 简体中文：标准运行目录统一为 **`/data/enginex/`**。旧版使用的 `/data/sc5000-custom` 会在开机时**自动无损迁移**到 `/data/enginex`，并保留软链接 `ln -sfn /data/enginex /data/sc5000-custom`，旧路径、旧脚本和旧教程继续可用。本文所有路径均以 `/data/enginex/` 为准；若你的碟机还是旧版，看到的是 `/data/sc5000-custom` 属正常现象。

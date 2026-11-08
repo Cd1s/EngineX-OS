@@ -3,11 +3,13 @@ package enginedb
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"log"
 	"net/url"
@@ -29,6 +31,17 @@ func putArtwork(dir string, sum, data []byte) error {
 	if _, e := os.Lstat(p); e == nil {
 		return nil
 	}
+	if isPNG(data) { // Engine's .jpg reader rejects PNG bytes
+		img, e := png.Decode(bytes.NewReader(data))
+		if e != nil {
+			return e
+		}
+		var buf bytes.Buffer
+		if e = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); e != nil {
+			return e
+		}
+		data = buf.Bytes()
+	}
 	if e := os.WriteFile(p+".tmp", data, 0o644); e != nil {
 		return e
 	}
@@ -42,9 +55,9 @@ func migrateArtwork(ctx context.Context, tx *sql.Tx, dir string) (migrated int, 
 	var last int64
 	for {
 		var id int64
-		var text string
+		var raw any
 		var data []byte
-		e := tx.QueryRowContext(ctx, `SELECT id,hash,albumArt FROM AlbumArt WHERE id>? AND typeof(hash)='text' AND length(hash)=40 AND albumArt IS NOT NULL ORDER BY id LIMIT 1`, last).Scan(&id, &text, &data)
+		e := tx.QueryRowContext(ctx, `SELECT id,hash,albumArt FROM AlbumArt WHERE id>? AND albumArt IS NOT NULL ORDER BY id LIMIT 1`, last).Scan(&id, &raw, &data)
 		if e == sql.ErrNoRows {
 			return migrated, nil
 		}
@@ -52,12 +65,19 @@ func migrateArtwork(ctx context.Context, tx *sql.Tx, dir string) (migrated int, 
 			return migrated, e
 		}
 		last = id
-		sum, e := hex.DecodeString(text)
-		if e != nil {
-			continue
+		var sum []byte
+		if b, ok := raw.([]byte); ok && len(b) == 20 {
+			sum = b
+		} else {
+			// Anything else (TEXT hex, wrong length) is rehashed from the image itself.
+			h := sha1.Sum(data)
+			sum = h[:]
 		}
 		if e = putArtwork(dir, sum, data); e != nil {
 			log.Printf("rb-bridge: artwork %d left as is: %v", id, e)
+			continue
+		}
+		if b, ok := raw.([]byte); ok && bytes.Equal(b, sum) {
 			continue
 		}
 		if _, e = tx.ExecContext(ctx, `UPDATE AlbumArt SET hash=? WHERE id=?`, sum, id); e != nil {

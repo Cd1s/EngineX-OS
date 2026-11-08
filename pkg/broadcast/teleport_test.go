@@ -32,9 +32,9 @@ func TestLANStreamerRTP(t *testing.T) {
 	}
 	defer streamer.Close()
 
-	// 480 stereo 16-bit samples = 1920 bytes
-	pcm1 := bytes.Repeat([]byte{0x01, 0x02, 0x03, 0x04}, 480)
-	pcm2 := bytes.Repeat([]byte{0x05, 0x06, 0x07, 0x08}, 480)
+	// 336 stereo 16-bit samples = 1344 bytes = exactly one MTU-safe RTP chunk
+	pcm1 := bytes.Repeat([]byte{0x01, 0x02, 0x03, 0x04}, 336)
+	pcm2 := bytes.Repeat([]byte{0x05, 0x06, 0x07, 0x08}, 336)
 
 	if err := streamer.Push(pcm1); err != nil {
 		t.Fatalf("Push 1 failed: %v", err)
@@ -87,8 +87,8 @@ func TestLANStreamerRTP(t *testing.T) {
 	if pkt2.SequenceNumber != 1 {
 		t.Errorf("expected seq 1, got %d", pkt2.SequenceNumber)
 	}
-	if pkt2.Timestamp != 480 {
-		t.Errorf("expected ts 480, got %d", pkt2.Timestamp)
+	if pkt2.Timestamp != 336 {
+		t.Errorf("expected ts 336, got %d", pkt2.Timestamp)
 	}
 	if !bytes.Equal(pkt2.Payload, pcm2) {
 		t.Errorf("packet 2 payload mismatch")
@@ -96,6 +96,44 @@ func TestLANStreamerRTP(t *testing.T) {
 
 	if streamer.BytesSent() <= 0 {
 		t.Errorf("expected BytesSent > 0, got %d", streamer.BytesSent())
+	}
+}
+
+func TestLANStreamerRTPChunksUnderMTU(t *testing.T) {
+	ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	streamer, err := NewLANStreamer(LANConfig{Mode: "rtp", Target: ln.LocalAddr().String(), SampleRate: 48000, Channels: 2, PayloadType: 96})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := streamer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer streamer.Close()
+
+	// 1152 stereo frames (4608 B) must become 4 packets: 336+336+336+144 frames.
+	if err := streamer.Push(make([]byte, 1152*4)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4096)
+	wantTS := []uint32{0, 336, 672, 1008}
+	wantLen := []int{1344, 1344, 1344, 576}
+	for i := range wantTS {
+		_ = ln.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, err := ln.ReadFrom(buf)
+		if err != nil {
+			t.Fatalf("packet %d: %v", i, err)
+		}
+		pkt, err := ParseRTPPacket(buf[:n])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if int(pkt.SequenceNumber) != i || pkt.Timestamp != wantTS[i] || len(pkt.Payload) != wantLen[i] {
+			t.Errorf("packet %d: seq=%d ts=%d len=%d", i, pkt.SequenceNumber, pkt.Timestamp, len(pkt.Payload))
+		}
 	}
 }
 

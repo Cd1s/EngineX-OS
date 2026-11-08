@@ -21,6 +21,8 @@ var (
 	deemixdPause      = 3 * time.Second
 	deemixdMaxBackoff = time.Minute
 	deemixdMissing    = 30 * time.Second
+	// minimal-club-mode writes this to pause the downloader; a var so tests can point it elsewhere.
+	deemixdPausedFlag = "/data/enginex/mods-state/minimal-club-mode/paused.json"
 )
 
 // sameDeemixd reports whether base names the address sc5000-deemixd binds.
@@ -46,7 +48,9 @@ func superviseDeemixd(ctx context.Context, addr, bin string, args ...string) {
 	reported := false
 	for {
 		wait := deemixdPause
-		if !listening(addr) {
+		if _, err := os.Stat(deemixdPausedFlag); err == nil {
+			wait = deemixdPause // minimal-club-mode paused the downloader: do not respawn it
+		} else if !listening(addr) {
 			if _, err := os.Stat(bin); err != nil {
 				if !reported {
 					log.Printf("stream-sync: no downloader: %v", err)

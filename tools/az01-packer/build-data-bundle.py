@@ -42,6 +42,7 @@ dest="${SC5000_CUSTOM:-/data/enginex}"
 bundle_dir="$dest/bundle"
 bin_dir="$bundle_dir/bin"
 lib_hook="$bundle_dir/lib/libengine-ui-hook.so"
+lib_edisksd_hook="$bundle_dir/lib/libedisksd-hook.so"
 
 mkdir -p /run/systemd/system/engine.service.d
 
@@ -55,6 +56,24 @@ Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemi
 Environment="LD_PRELOAD=$lib_hook"
 EnvironmentFile=-/data/sc5000-custom/ui-scale.env
 EOF
+
+# Converts a rekordbox stick inside the mount, before Engine sees it (as on the 1st-gen images).
+edisksd_changed=0
+if [ -f "$lib_edisksd_hook" ]; then
+    dropin=/run/systemd/system/edisksd.service.d/99-sc5000.conf
+    mkdir -p /run/systemd/system/edisksd.service.d
+    cat <<EOF > "$dropin.new"
+[Service]
+Environment="LD_PRELOAD=$lib_edisksd_hook"
+EOF
+    # Restart edisksd only when the drop-in is new or changed (the .new name is not read by systemd).
+    if cmp -s "$dropin.new" "$dropin"; then
+        rm -f "$dropin.new"
+    else
+        mv -f "$dropin.new" "$dropin"
+        edisksd_changed=1
+    fi
+fi
 
 if [ -f "$bundle_dir/version.txt" ]; then
     mkdir -p /run/sc5000
@@ -77,6 +96,8 @@ Type=simple
 ExecStart=$bin_dir/stream-sync --listen :8080 --cpu 3
 Restart=always
 RestartSec=3
+Nice=19
+IOSchedulingClass=idle
 
 [Install]
 WantedBy=multi-user.target
@@ -94,6 +115,8 @@ Type=simple
 ExecStart=$bin_dir/rb-bridge --prolink
 Restart=always
 RestartSec=3
+Nice=19
+IOSchedulingClass=idle
 
 [Install]
 WantedBy=multi-user.target
@@ -111,6 +134,8 @@ Type=simple
 ExecStart=$bin_dir/sc5000-deemixd -state-dir $dest/state
 Restart=always
 RestartSec=3
+Nice=19
+IOSchedulingClass=idle
 
 [Install]
 WantedBy=multi-user.target
@@ -130,12 +155,26 @@ if [ -s "$dest/authorized_keys" ] && [ -x /usr/sbin/sshd ]; then
     fi
 fi
 
+# Sticks mounted before this ran never went through the edisksd hook.
+convert_mounted() {
+    [ -x "$bin_dir/rb-bridge" ] || return 0
+    for m in /media/*; do
+        if [ -d "$m/PIONEER" ] || [ -d "$m/.PIONEER" ]; then
+            "$bin_dir/rb-bridge" --mount-path "$m" >/dev/null 2>&1 || :
+        fi
+    done
+}
+
 # In a chroot systemctl only prints "Running in chroot, ignoring" and exits 0, so require systemd as PID 1.
 if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
-    systemctl restart enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service || :
+    systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service || :
     [ -z "$ssh_key" ] || systemctl start --no-block sshd.service || :
+    # Blocking, so edisksd is up again before convert_mounted looks at /media.
+    [ "$edisksd_changed" = 0 ] || systemctl restart edisksd.service || :
+    convert_mounted
     systemctl restart --no-block engine.service || systemctl restart engine.service || :
 else
+    convert_mounted
     if [ -n "$ssh_key" ] && ! pgrep -x sshd >/dev/null 2>&1; then
         mkdir -p /var/run/sshd && /usr/sbin/sshd || :
     fi
@@ -249,14 +288,16 @@ if command -v systemctl >/dev/null 2>&1 && systemctl is-active basic.target >/de
         systemctl stop "enginex-$applet.service" 2>/dev/null || :
         rm -f "/run/systemd/system/enginex-$applet.service"
     done
-    rm -f /run/systemd/system/engine.service.d/99-sc5000.conf
+    rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf
     systemctl daemon-reload 2>/dev/null || :
+    systemctl restart --no-block edisksd.service 2>/dev/null || :
 fi
 pkill -x sc5000-suite 2>/dev/null || :
 rm -f /run/systemd/system/enginex-stream-sync.service \
       /run/systemd/system/enginex-rb-bridge.service \
       /run/systemd/system/enginex-sc5000-deemixd.service \
-      /run/systemd/system/engine.service.d/99-sc5000.conf
+      /run/systemd/system/engine.service.d/99-sc5000.conf \
+      /run/systemd/system/edisksd.service.d/99-sc5000.conf
 echo "EngineX OS $version removed from $dest"
 '''
 
@@ -303,9 +344,11 @@ def alsa_dir(prefix):
 
 AZ04_NOTE = """
 64-bit (AZ04) build: the UI packs, the streaming gateway (Deezer, SoundCloud,
-Beatport) and the EngineX services are in. Not ported to the 64-bit Engine yet:
-the DSP guards, master limiter and auto gain, SQLite tuning and the 4-deck
-unlock; Stems stay as the official firmware has them. The 64-bit Engine
+Beatport) and the EngineX services are in, with 16 Engine patches (including
+the stock Apple Music unlock), 14 DSP guards, the 0 dB master soft clipper,
+auto gain, Echo Out, SQLite tuning and the OfflineAnalyzer .perf injection
+(#149). The 4-deck unlock is for the stand-alone players only; Stems stay as
+the official firmware has them. The 64-bit Engine
 needs the device's secure element (OP-TEE) to start, so in the sandbox it
 stops before its UI: the hook, edits and pack loading were checked, the
 screens themselves were not.
@@ -320,8 +363,12 @@ Status: beta. Built from the same files as the released .img; tested in a
 sandbox on the official 5.3.0 root file system, not yet on a real {model}.
 Please report results in the GitHub issues (#61, #68, #69, #76).
 {note}
-Never flash an .img meant for a first-generation model (PRIME4, PRIMEGO,
-MIXSTREAMPRO, ...) on this device.
+Do not flash an .img meant for a first-generation model (PRIME4, PRIMEGO,
+MIXSTREAMPRO, ...) on this device. Second-generation units have no hardware
+eFuse lock, and their stock updater checks the AZ0x container signature in
+software before writing, so a modified or first-generation .img is rejected at
+the Verifying step without writing anything. Use this data bundle or
+EngineX-Installer instead; it only writes /data/enginex.
 
 Method B (recommended): install on the device
 ---------------------------------------------
@@ -364,7 +411,7 @@ Removes only what install.sh added; Engine starts stock again.
 '''
 
 
-def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
+def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=None):
     if prefix not in PREFIXES:
         fail(f'prefix must be one of {PREFIXES}, got {prefix!r}')
     if not VERSION_RE.match(version):
@@ -373,7 +420,12 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4'):
         fail(f'{out} exists; refusing to overwrite')
     files = {}  # path in bundle -> (bytes, mode)
     machine = EM_AARCH64 if prefix in AZ04 else EM_ARM
-    for path, name in ((suite, 'bin/sc5000-suite'), (hook, 'lib/libengine-ui-hook.so')):
+    if edisksd_hook is None and (Path(hook).parent / 'libedisksd-hook.so').is_file():
+        edisksd_hook = Path(hook).parent / 'libedisksd-hook.so'
+    parts = [(suite, 'bin/sc5000-suite'), (hook, 'lib/libengine-ui-hook.so')]
+    if edisksd_hook:
+        parts.append((edisksd_hook, 'lib/libedisksd-hook.so'))
+    for path, name in parts:
         data = Path(path).read_bytes()
         if data[:4] != b'\x7fELF':
             fail(f'{path} is not an ELF file')
@@ -429,11 +481,12 @@ def main(argv=None):
     p.add_argument('version')
     p.add_argument('--suite', required=True, type=Path, help='static sc5000-suite (ARMv7, arm64 for AZ04)')
     p.add_argument('--hook', required=True, type=Path, help='libengine-ui-hook.so')
+    p.add_argument('--edisksd-hook', type=Path, help='libedisksd-hook.so (default: next to --hook, if present)')
     p.add_argument('--ui-packs', required=True, type=Path, help='build_packs.py packs.tar(.gz)')
     p.add_argument('--out', required=True, type=Path, help='new output directory')
     p.add_argument('--prefix', default='SCLIVE4', choices=PREFIXES, help='model prefix in the file name')
     a = p.parse_args(argv)
-    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix), sys.stdout, indent=2)
+    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix, a.edisksd_hook), sys.stdout, indent=2)
     print()
 
 

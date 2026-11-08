@@ -73,6 +73,8 @@ var phoneText = map[string][3]string{
 	"spPaste":       {"Paste & Connect", "粘贴并连接", "貼上並連接"},
 	"spPastePh":     {"http://127.0.0.1:8080/oauth/spotify/callback?code=…", "http://127.0.0.1:8080/oauth/spotify/callback?code=…", "http://127.0.0.1:8080/oauth/spotify/callback?code=…"},
 	"spHelp":        {"Email code or a \"new device\" page on the way? Finish them; this page waits 30 minutes. On iPhone, long-press the address bar and choose Copy. Only the part with code= matters.", "中途要邮箱验证码或「新设备」确认？照做即可，这个页面会等 30 分钟。iPhone 上长按地址栏选「拷贝」。只要包含 code= 的那部分。", "中途要電子郵件驗證碼或「新裝置」確認？照做即可，這個頁面會等 30 分鐘。iPhone 上長按網址列選「拷貝」。只要包含 code= 的那部分。"},
+	"spLinksFailed": {"Could not read these Spotify playlist links (public playlists/albums only)", "读取不了这些 Spotify 歌单链接（只支持公开歌单/专辑）", "讀取不了這些 Spotify 歌單連結（只支援公開歌單/專輯）"},
+	"spLinks":       {"No account? Paste public playlist or album links instead:", "没有账号？可以直接粘贴公开歌单/专辑链接：", "沒有帳號？可以直接貼上公開歌單/專輯連結："},
 	"spBadPaste":    {"No code= found in what you pasted", "粘贴的内容里没有 code=", "貼上的內容裡沒有 code="},
 	"spOtherLogin":  {"That address belongs to another login. Open Spotify login again from this page.", "这个地址属于另一次登录，请在本页重新打开 Spotify 登录。", "這個網址屬於另一次登入，請在本頁重新開啟 Spotify 登入。"},
 	"amIntro":       {"Paste the link of any Apple Music playlist or album: no account needed. In the Music app tap <b>···</b> → <b>Share</b> → <b>Copy Link</b>.", "粘贴任意 Apple Music 歌单或专辑的链接，不需要账号。在“音乐”App 里点 <b>···</b> → <b>分享</b> → <b>拷贝链接</b>。", "貼上任意 Apple Music 歌單或專輯的連結，不需要帳號。在「音樂」App 裡點 <b>···</b> → <b>分享</b> → <b>拷貝連結</b>。"},
@@ -217,5 +219,6 @@ func spotifyPhonePage(lang int, action, authorize string) string {
 	return phoneHeading(lang, "spotify") +
 		`<p>` + tr(lang, "spStep1") + `</p><a class="b" target="_blank" rel="noreferrer" href="` + html.EscapeString(authorize) + `">` + tr(lang, "spOpen") + `</a>` +
 		`<p>` + tr(lang, "spStep2") + `</p><form method="post" action="` + html.EscapeString(action) + `"><input name="callback" placeholder="` + tr(lang, "spPastePh") + `" required autocomplete="off" autocapitalize="off" spellcheck="false"><button>` + tr(lang, "spPaste") + `</button></form>` +
+		`<p>` + tr(lang, "spLinks") + `</p><form method="post" action="` + html.EscapeString(action) + `"><textarea name="links" rows="3" placeholder="https://open.spotify.com/playlist/…" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea><button>` + tr(lang, "connect") + `</button></form>` +
 		`<details><summary>` + tr(lang, "howTo") + `</summary><p>` + tr(lang, "spHelp") + `</p></details>`
 }

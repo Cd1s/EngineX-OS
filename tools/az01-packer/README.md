@@ -12,7 +12,7 @@ Python 3 标准库实现容器解析；文件系统操作需要 `debugfs`、`e2f
 | `SC6000` / `SC6000M-5.0.4-Update.img` | `jp13` `jp14` | SC6000、SC6000M | `EngineX-OS-5.0.4.1-SC6000-SC6000M-Update.img` |
 | `PRIME4` / `PRIME2` / `MIXSTREAMPRO-5.0.4-Update.img` | `jc11` `jc16` `nh08` | PRIME 4、PRIME 2、MIXSTREAM PRO | `EngineX-OS-5.0.4.1-PRIME4-PRIME2-MIXSTREAMPRO-Update.img` |
 
-每个包只能从同组的官方底包生成，compatible 列表原样保留，工具不提供改写目标型号的功能：把一组的 rootfs 刷到另一组硬件上可能变砖。SC LIVE 2（`SCLIVE2-5.0.4-Update.img`）是带签名的 AZ0x 容器，改过的镜像过不了设备验签，工具明确拒绝。
+每个包只能从同组的官方底包生成，compatible 列表原样保留，工具不提供改写目标型号的功能：把一组的 rootfs 刷到另一组硬件上可能变砖。SC LIVE 2（`SCLIVE2-5.0.4-Update.img`）是带软件签名的 `AZ0x` 容器（无硬件 eFuse 熔断，原厂升级程序在软件层先校验 `denon-1` / `rane-1` 容器签名，改过的无签名镜像在 `Verifying` 阶段即被软件拒绝、不会写入），因此 `az01_packer.py` 明确拒绝（`AZ0x` 容器解析见 `az0x_packer.py` / `az04_packer.py`）。
 
 整套发布镜像用 `build-release.sh` 生成（在编译机上、仓库根目录执行）：它把五个工具编成一个 ARMv7 静态 `sc5000-suite.xz`（rb-bridge、stream-sync、engine-guardian、stems-processor、sc5000-deemixd），把 UI 包打成 `ui-packs.tar.xz`，与 `rootfs-overlay` 和 `fsck.hfsplus` 组成 overlay。每组底包只打一次，然后按 `<型号前缀>-<版本>-EngineX-OS-<品牌型号>-Update.img` 复制成各型号的文件名（Engine 在 U 盘上按 `<前缀>-<数字和点>-…Update.img` 找包）。最后逐个 `info` 校验，并生成 `SHA256SUMS.txt`。
 

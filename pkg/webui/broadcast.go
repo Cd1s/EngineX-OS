@@ -164,7 +164,7 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 			if in.ServerURL != nil {
 				newHost := broadcastHost(*in.ServerURL)
 				oldHost := broadcastHost(cfg.ServerURL)
-				if oldHost != "" && newHost != oldHost && in.Password == nil {
+				if newHost != oldHost && in.Password == nil {
 					cfg.Password = ""
 				}
 				cfg.ServerURL = *in.ServerURL
@@ -202,12 +202,13 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := providers.SaveJSON(s.broadcastConfigPath(), cfg); err != nil {
-		fail(w, 500, errors.New("could not save broadcast settings"))
-		return
-	}
+	// Validate first: a rejected config must not be persisted and reloaded at next boot.
 	if err := b.Configure(cfg); err != nil {
 		fail(w, 400, err)
+		return
+	}
+	if err := providers.SaveJSON(s.broadcastConfigPath(), cfg); err != nil {
+		fail(w, 500, errors.New("could not save broadcast settings"))
 		return
 	}
 	respond(w, b.Status())
@@ -446,7 +447,7 @@ func mp3Encoder(bitrate int) *exec.Cmd {
 		return exec.Command(p, "-r", "-s", "44.1", "--signed", "--little-endian", "--bitwidth", "16", "-m", "s", "-b", br, "--silent", "-", "-")
 	}
 	if p, err := exec.LookPath("ffmpeg"); err == nil {
-		return exec.Command(p, "-loglevel", "quiet", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "pipe:0", "-f", "mp3", "-b:a", br+"k", "pipe:1")
+		return exec.Command(p, "-loglevel", "quiet", "-fflags", "+nobuffer", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "pipe:0", "-f", "mp3", "-b:a", br+"k", "-flush_packets", "1", "pipe:1")
 	}
 	return nil
 }

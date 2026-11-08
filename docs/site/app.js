@@ -80,6 +80,7 @@
   /* ---- 三个视图：首页（无 hash）、三栏文档（章节 hash 或在搜索）、Mod 社区（#mods，见 mods.js） ---- */
   function setView(v, sub) {
     document.body.dataset.view = v;
+    if (v !== "mods") $$("dialog[open]").forEach((d) => d.close());
     document.title = v === "home" ? "EngineX OS" : v === "mods" ? UI[lang].tMods + " · EngineX OS" : UI[lang].heroT;
     if (v === "mods" && window.EXMods) window.EXMods.render(lang, sub);
     const h = location.hash;
@@ -110,7 +111,7 @@
     const tabLinks = `<a href="#" data-tab="home">${u.tHome}</a><a href="#start" data-tab="docs">${u.tDocs}</a><a href="#start-downloads" data-tab="dl">${u.tDl}</a><a href="#mods" data-tab="mods">${u.tMods}</a>`;
     $("#nav").innerHTML = `<div class="nav-tabs">${tabLinks}</div>` +
       D.sections.map((s) => `<div class="grp" data-s="${s.id}"><a href="#${s.id}">${T(s.nav || s.title)}</a><div class="sub">${heads(s).map((b) => `<a href="#${hid(s, b)}" data-h="${hid(s, b)}">${T(b.nav || b.x)}</a>`).join("")}</div></div>`).join("");
-    $("#mob-bar").innerHTML = `<div class="mob-tabs">${tabLinks}</div><div class="mob-doc-nav"><button type="button" class="mob-menu-btn" id="mob-open-nav"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span>${u.mMenu}</span></button><select id="mob-sec" aria-label="${u.mJump}">${D.sections.map((s) => `<optgroup label="${esc(T(s.nav || s.title).replace(/<[^>]+>/g, ""))}"><option value="${s.id}">${T(s.nav || s.title).replace(/<[^>]+>/g, "")}</option>${heads(s).map((b) => `<option value="${hid(s, b)}">  · ${T(b.nav || b.x).replace(/<[^>]+>/g, "")}</option>`).join("")}</optgroup>`).join("")}</select></div>`;
+    $("#mob-bar").innerHTML = `<div class="mob-tabs">${tabLinks}</div><div class="mob-doc-nav"><button type="button" class="mob-menu-btn" id="mob-open-nav"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span>${u.mMenu}</span></button><select id="mob-sec" aria-label="${u.mJump}">${D.sections.map((s) => `<optgroup label="${esc(T(s.nav || s.title).replace(/<[^>]+>/g, ""))}"><option value="${s.id}">${esc(T(s.nav || s.title).replace(/<[^>]+>/g, ""))}</option>${heads(s).map((b) => `<option value="${hid(s, b)}">  · ${T(b.nav || b.x).replace(/<[^>]+>/g, "")}</option>`).join("")}</optgroup>`).join("")}</select></div>`;
     $("#main").innerHTML = `<div class="hero"><h1>${u.heroT}</h1><p>${u.heroP}</p></div>` +
       D.sections.map((s) => `<section class="sec" id="${s.id}"><h2>${T(s.title)}</h2>${s.blocks.map((b) => block(s, b)).join("")}</section>`).join("") +
       `<div class="empty hide" id="empty">${u.none}</div>`;
@@ -120,6 +121,10 @@
 
   /* ---- search: hide non-matching blocks, mark matches ---- */
   function applySearch() {
+    // Drop the old <mark> wrappers first, so they never nest or outlive a cleared query.
+    const wrappers = new Set($$("#main mark").map((m) => m.parentNode));
+    wrappers.forEach((p) => p.replaceWith(document.createTextNode(p.textContent)));
+    $("#main").normalize();
     const q = query.trim().toLowerCase();
     let hits = 0;
     $$("section.sec").forEach((sec) => {

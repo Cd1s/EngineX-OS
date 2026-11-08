@@ -553,9 +553,14 @@ func TestSoundCloudTokenIsReusedAcrossRestarts(t *testing.T) {
 	}
 }
 
-func TestSoundCloudMediaPrefersMP3AndJoinsHLS(t *testing.T) {
+func TestSoundCloudMediaPrefersAACAndJoinsHLS(t *testing.T) {
 	both := soundCloudServer(t, `{"http_mp3_128_url":"BASE/stream/mp3","hls_aac_160_url":"BASE/stream/hls","preview_mp3_128_url":"BASE/preview"}`)
 	m, err := testSoundCloud(t, both).Media(context.Background(), "99", false)
+	if err != nil || m.Ext != "mp4" || len(m.URLs) != 3 {
+		t.Fatalf("%+v %v", m, err)
+	}
+	mp3 := soundCloudServer(t, `{"http_mp3_128_url":"BASE/stream/mp3"}`)
+	m, err = testSoundCloud(t, mp3).Media(context.Background(), "99", false)
 	if err != nil || m.Ext != "mp3" || len(m.URLs) != 1 || m.URLs[0] != "https://cdn.example/audio.mp3?sig=1" {
 		t.Fatalf("%+v %v", m, err)
 	}

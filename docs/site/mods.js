@@ -208,7 +208,7 @@
   const starOf = (body) => { const m = String(body).match(/(?:★|rating|评分|評分)[^\n]{0,40}?\b([1-5])\s*\/\s*5\b/i); return m ? +m[1] : 0; };
   let lang = "s", cat = "all", sort = "hot", q = "", mods = OFFICIAL.map((m) => norm(m, "official")), ghState = "loading";
   const comments = {}; // issue → [{user, avatar, url, at, body, stars}]
-  let started = false, upload = null;
+  let started = false, loaded = false, pendingSub = "", upload = null;
 
   function catOf(c, official) {
     const s = String(c || "").toLowerCase();
@@ -283,6 +283,8 @@
       ghState = "ok";
     } catch { ghState = "fail"; }
     paint();
+    loaded = true;
+    if (pendingSub) { const k = pendingSub; pendingSub = ""; openDetail(k); } // #mods/<id> deep link opened before the registry arrived
     // 先拉官方 Mod 关联 Issue 的评论，评分排序才有数据
     await Promise.all([...officialIssues].map((n) => fetchComments(n).catch(() => {})));
     paint();
@@ -353,6 +355,7 @@
   async function openDetail(key) {
     const m = mods.find((x) => x.key === key || x.id === key);
     const dlg = $("#mx-detail");
+    if (!m && !loaded) pendingSub = key;
     if (!m || !dlg) return;
     detail(m);
     if (!dlg.open) dlg.showModal();
@@ -570,6 +573,7 @@
       paint();
       if (!started) start();
       if (sub) openDetail(sub);
+      else { pendingSub = ""; $("#mx-detail")?.close(); }
     },
   };
 })();

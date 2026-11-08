@@ -44,7 +44,7 @@ func thumbnail(src image.Image) image.Image {
 func healArtwork(tx *sql.Tx, r *Report) error {
 	var last int64 = math.MinInt64
 	for {
-		rows, err := tx.Query("SELECT id,substr(albumArt,1,33554433) FROM AlbumArt WHERE id>? ORDER BY id LIMIT 1", last)
+		rows, err := tx.Query("SELECT id,substr(albumArt,1,33554433) FROM AlbumArt WHERE id>? ORDER BY id LIMIT 250", last)
 		if err != nil {
 			return err
 		}

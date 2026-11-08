@@ -126,10 +126,11 @@ func LocalRender(in io.Reader, out io.Writer) error {
 				mid += float64(sample(c, k))
 			}
 			mid /= float64(ch)
+			// mid is mono, so every channel's vocal chain yields the same value.
+			vocals := float32(filters[0].vocalLow.step(filters[0].vocalHigh.step(mid)))
 			for c := 0; c < ch; c++ {
 				fl := filters[c]
 				v := sample(c, k)
-				vocals := float32(fl.vocalLow.step(fl.vocalHigh.step(mid)))
 				bass := float32(fl.low.step(float64(v)))
 				drums := float32(fl.high.step(float64(v)))
 				put(0, c, k, vocals)

@@ -381,3 +381,43 @@ func TestDjayDiscoverPathTraversalRejection(t *testing.T) {
 		t.Fatalf("expected only Valid Track, got: %+v", libs[0].Tracks)
 	}
 }
+
+// MediaLibrary.db is found, and columns named after SQL keywords ("index", "order") do not break the queries.
+func TestDjayMediaLibraryKeywordColumns(t *testing.T) {
+	mount := t.TempDir()
+	createDummyAudio(t, filepath.Join(mount, "Music", "T.mp3"))
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(mount, "MediaLibrary.db"))}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{
+		`CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT, path TEXT)`,
+		`CREATE TABLE cues (track_id INTEGER, "index" INTEGER, position_ms REAL, label TEXT)`,
+		`INSERT INTO tracks VALUES (1, 'T', 'Music/T.mp3')`,
+		`INSERT INTO cues VALUES (1, 0, 500.0, 'A')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+	libs, err := Discover(mount)
+	if err != nil || len(libs) != 1 || len(libs[0].Tracks) != 1 {
+		t.Fatalf("%v %+v", err, libs)
+	}
+	if c := libs[0].Tracks[0].Cues; len(c) != 1 || c[0].Label != "A" || c[0].PositionMS != 500 {
+		t.Fatalf("cues: %+v", c)
+	}
+}
+
+func TestParseExtDjayLabelsWithCommasAndColons(t *testing.T) {
+	_, _, _, cues, loops := parseExtDjay(`BPM=120,CUES=0:100:Big: Drop, part 2:#FF0000;1:200:Plain,LOOPS=0:10:20:A:B`)
+	if len(cues) != 2 || cues[0].Label != "Big: Drop, part 2" || cues[0].ColorHex != "#FF0000" || cues[1].Label != "Plain" || cues[1].ColorHex != "" {
+		t.Fatalf("cues: %+v", cues)
+	}
+	if len(loops) != 1 || loops[0].Label != "A:B" {
+		t.Fatalf("loops: %+v", loops)
+	}
+}

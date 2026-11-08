@@ -896,7 +896,7 @@ func TestLANModeBroadcaster(t *testing.T) {
 
 func TestShoutcastLoginUsesStreamID(t *testing.T) {
 	for _, c := range []struct{ user, want string }{
-		{"source", "pw"}, {"", "pw"}, {"admin", "pw"}, {"2", "pw:#2"},
+		{"source", "pw"}, {"", "pw"}, {"admin", "pw"}, {"2", "pw:#2"}, {"#1", "pw:#1"}, {" #3 ", "pw:#3"},
 	} {
 		if got := shoutcastLogin(Config{Username: c.user, Password: "pw"}); got != c.want {
 			t.Errorf("user %q: got %q want %q", c.user, got, c.want)

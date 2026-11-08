@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -45,6 +46,8 @@ type SpotifyConnectResponse struct {
 	SpotifyError int    `json:"spotifyError"`
 }
 
+var spotifyTrackIDRe = regexp.MustCompile(`^[A-Za-z0-9]+$`)
+
 // spotifyIV is the constant 16-byte IV for Spotify audio CTR decryption: 72e067fbddcbcf77ebe8bc643f630d93
 var spotifyIV = []byte{
 	0x72, 0xe0, 0x67, 0xfb, 0xdd, 0xcb, 0xcf, 0x77,
@@ -63,6 +66,9 @@ func (p *Spotify) DownloadAudio(ctx context.Context, trackID, dstDir string) (st
 		return "", errors.New("spotify: please log in via Spotify Connect or QR code on the deck first")
 	}
 
+	if !spotifyTrackIDRe.MatchString(trackID) {
+		return "", errors.New("spotify: invalid track ID")
+	}
 	streamBase := p.StreamURL
 	if streamBase == "" {
 		base := p.BaseURL
@@ -78,11 +84,7 @@ func (p *Spotify) DownloadAudio(ctx context.Context, trackID, dstDir string) (st
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 
-	client := p.HTTP
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
+	resp, err := client(p.HTTP).Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -92,9 +94,12 @@ func (p *Spotify) DownloadAudio(ctx context.Context, trackID, dstDir string) (st
 		return "", fmt.Errorf("spotify: audio request failed (%d)", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<20+1))
 	if err != nil {
 		return "", err
+	}
+	if len(body) > 256<<20 {
+		return "", errors.New("spotify: audio response too large")
 	}
 
 	var audioKey []byte
@@ -113,9 +118,7 @@ func (p *Spotify) DownloadAudio(ctx context.Context, trackID, dstDir string) (st
 			return "", err
 		}
 		stream := cipher.NewCTR(block, spotifyIV)
-		dec := make([]byte, len(body))
-		stream.XORKeyStream(dec, body)
-		body = dec
+		stream.XORKeyStream(body, body)
 	}
 
 	// If decrypted (or unencrypted) data does not start with "OggS", has length >= 0xab (171),

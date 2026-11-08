@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import io
 import os
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -91,6 +92,25 @@ class DataBundleTest(unittest.TestCase):
             self.assertEqual(hashlib.sha256((src / name).read_bytes()).hexdigest(), digest, name)
         files = {str(p.relative_to(src)) for p in src.rglob('*') if p.is_file()}
         self.assertEqual(set(listed) | {'SHA256SUMS'}, files)
+
+    def test_edisksd_hook_is_packaged_and_activated(self):
+        self.assertFalse((self.extract(self.build('none')) / 'lib/libedisksd-hook.so').exists())
+        shutil.rmtree(self.tmp / 'x')
+        edisksd = self.tmp / 'libedisksd-hook.so'  # found next to --hook
+        edisksd.write_bytes(fake_elf(bdb.EM_ARM, b'edisksd'))
+        src = self.extract(self.build('out-edisksd'))
+        self.assertEqual((src / 'lib/libedisksd-hook.so').read_bytes(), edisksd.read_bytes())
+        self.assertTrue((src / 'lib/libedisksd-hook.so').stat().st_mode & 0o100)
+        self.assertIn('libedisksd-hook.so', (src / 'SHA256SUMS').read_text())
+        boot = (src / 'boot-activate.sh').read_text()
+        self.assertIn('edisksd.service.d/99-sc5000.conf', boot)
+        self.assertIn('systemctl restart edisksd.service', boot)  # blocking, only when the drop-in changed
+        self.assertIn('cmp -s', boot)
+        self.assertIn('--mount-path "$m"', boot)
+        self.assertIn('edisksd.service.d/99-sc5000.conf', (src / 'uninstall.sh').read_text())
+        edisksd.write_bytes(fake_elf(bdb.EM_AARCH64, b'edisksd'))
+        with self.assertRaises(SystemExit):
+            self.build('out-wrong-arch')
 
     def test_rebuild_is_identical(self):
         a, b = self.build('a'), self.build('b')

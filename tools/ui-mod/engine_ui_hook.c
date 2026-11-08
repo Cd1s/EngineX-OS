@@ -83,6 +83,7 @@ struct walk {
     size_t node_size;
     char pack[128];
     int replaced;
+    int has_overlay; // mods-overlay exists and mods are not quarantined: decided once per walk
 #if defined(__aarch64__)
     int failed; // a file could not be placed: register the stock tree, never half a pack
 #endif
@@ -170,7 +171,7 @@ static void *lim_poll(void *arg) {
     return NULL;
 }
 
-A32_ONLY static void lim_start_poll(void) {
+static void lim_start_poll(void) {
     pthread_attr_t attr;
     struct sched_param param = {.sched_priority = 0};
     pthread_t thread;
@@ -195,11 +196,17 @@ static int official_update_host(const char *node) {
 static void *getaddrinfo_cache;
 
 int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **result) {
-    // device.inmusicbrands.com also serves OAuth/unlock; only deny the firmware-update host.
+    // device.inmusicbrands.com also serves OAuth/unlock; only deny the firmware-update host
+    // on 32-bit decks (AZ04 uses PrimeUpdates.xml on autoupdate.airmusictech.com to download
+    // its signed onboard Stems addon stems-child-process.sqsh.signed).
+#if !defined(__aarch64__)
     if (is_engine() && official_update_host(node)) {
         if (result) *result = NULL;
         return EAI_NONAME;
     }
+#else
+    (void)official_update_host;
+#endif
     int (*real)(const char *, const char *, const struct addrinfo *, struct addrinfo **) =
         next_symbol(&getaddrinfo_cache, "getaddrinfo");
     if (real) return real(node, service, hints, result);
@@ -266,13 +273,20 @@ enum {
 static void *dsp_originals[DSP_HOOK_COUNT];
 
 static void *dsp_bound_owner(void *handler) {
-    // ARM MemberFunctionHandler owns a bound object and a two-word member pointer.
+    // MemberFunctionHandler owns a bound object and a two-word member pointer.
     // r0 at this entry is the handler, not the bound object. Keep it intact for
     // the original dispatcher, including its virtual-function/this-adjustment path.
+#if defined(__aarch64__)
+    uint64_t owner; // AZ04: owner +24, adjustment +40 (x5 + (x3 >> 1) in the thunks)
+    int64_t adjustment;
+    memcpy(&owner, (char *)handler + 24, sizeof owner);
+    memcpy(&adjustment, (char *)handler + 40, sizeof adjustment);
+#else
     uint32_t owner;
     int32_t adjustment;
     memcpy(&owner, (char *)handler + 0x0c, sizeof owner);
     memcpy(&adjustment, (char *)handler + 0x14, sizeof adjustment);
+#endif
     return (void *)((uintptr_t)owner + (adjustment >> 1));
 }
 
@@ -402,7 +416,7 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
     }
     // #88 Pioneer FX emulations (Spiral / Pitch Echo / Slip Roll / Dub Echo / Space)
     int pfx = __atomic_load_n(&pioneer_fx_mode, __ATOMIC_RELAXED);
-    if (pfx && out && frames > 0) {
+    if (out && frames > 0) { // also when OFF: lets the effect reset its state
         for (int ch = 0; ch < out_channels && ch / 2 < MASTER_PFX_PAIRS; ch += 2) {
             if (out[ch]) {
                 float *r = ch + 1 < out_channels ? out[ch + 1] : NULL;
@@ -468,6 +482,7 @@ static void hook_fx_common_chain(void *common, float *const *input, float *const
     sc_dsp_chain_exit(chain); // NULL-safe; the slot is ours from enter to here
 }
 
+#if !defined(__aarch64__)
 static const uint32_t dsp_event_prefix[] = {0xe1c021d0, 0xe590c00c, 0xe52db004};
 static const uint32_t dsp_autogate_prefix[] = {0xe3530000, 0xe1a02001, 0x0a000035};
 static const uint32_t dsp_common_prefix[] = {0xe16d42f4, 0xe1cd60f8};
@@ -475,6 +490,7 @@ static const uint32_t dsp_sweep_prefix[] = {0xe52db004, 0xe1a02001, 0xe28db000};
 static const uint32_t dsp_flanger_prefix[] = {0xe16d42f4, 0xe3530000}; // strd r4,[sp,#-36]!; cmp r3,#0
 // strd r4,[sp,#-36]! then mov r5,r2 (5.0.4) or strd r10,[sp,#24] (5.3.0)
 static const uint32_t dsp_master_prefix[2][2] = {{0xe16d42f4, 0xe1a05002}, {0xe16d42f4, 0xe1cda1f8}};
+#endif
 struct dsp_hook_site {
     uint32_t offset;
     void *hook;
@@ -492,6 +508,7 @@ static struct dsp_hook_site dsp_hooks[DSP_HOOK_COUNT] = { // offsets: 5.0.4, rep
     {0x1462a6c, hook_master_output}
 };
 
+#if !defined(__aarch64__)
 static const void *dsp_expected(unsigned slot, size_t *size) {
     *size = slot == DSP_COMMON ? sizeof dsp_common_prefix : sizeof dsp_event_prefix;
     if (slot == DSP_DUB_ECHO || slot == DSP_WASH) return dsp_sweep_prefix;
@@ -512,7 +529,7 @@ static void patch_bytes(uintptr_t entry, const void *bytes, size_t size, size_t 
     __builtin___clear_cache((char *)entry, (char *)entry + size);
 }
 
-A32_ONLY static int install_dsp_hooks(uintptr_t base, size_t page) {
+static int install_dsp_hooks(uintptr_t base, size_t page) {
     // edit_engine has already verified the main ELF BuildID. Treat these hooks
     // as one group: if ANY original prefix differs, leave ALL DSP sites alone.
     if (!base || !page) return 0;
@@ -544,6 +561,112 @@ A32_ONLY static int install_dsp_hooks(uintptr_t base, size_t page) {
     fprintf(stderr, "engine-ui-hook: %u DSP guards/transitions installed (shared FX state)\n", DSP_HOOK_COUNT);
     return 1;
 }
+
+#else
+// AZ04 (64-bit): every site is a 16-byte prologue of four position-independent
+// instructions, so the displaced bytes are copied into a stub that continues at
+// entry + 16. The sites that need more than a copy are rewritten below. Every
+// landing site (entry + 16, the sweep body, the zero-frames tail) is in a page
+// that is hooked, so it has lost PROT_BTI and `br x16` may land there.
+static const uint32_t a64_event_thunk[4] = {0xd503245f, 0xa9418805, 0xf9401403, 0x9341fc64};
+    // bti c; ldp x5,x2,[x0,#24]; ldr x3,[x0,#40]; asr x4,x3,#1  (MemberFunctionHandler)
+static const uint32_t a64_common_prefix[4] = {0xd503233f, 0xa9ba7bfd, 0x910003fd, 0xa90153f3};
+static const uint32_t a64_flanger_prefix[4] = {0xd503233f, 0xa9b87bfd, 0x910003fd, 0xa90153f3};
+
+static uintptr_t a64_branch_target(uintptr_t at);
+static void *function_trampoline(uintptr_t entry, size_t page);
+static void redirect_function(uintptr_t entry, const void *handler, size_t page);
+
+// The event guards (Mix, Parameter, Nudge, Tempo, Jump, RampTime, MotorRampTime) read
+// fields of the event at 32-bit layout offsets; the AZ04 event layouts are not
+// verified (std::string and pointer members move them), so those sites stay stock.
+static int dsp_site_active(unsigned slot) { return slot < DSP_MIX || slot > DSP_MOTOR_RAMP_TIME; }
+
+// Builds the stub that runs the displaced prologue of slot i, or NULL if the
+// bytes at its site are not the verified ones.
+static void *a64_dsp_original(unsigned i, uintptr_t entry, size_t page) {
+    const uint32_t *p = (const uint32_t *)entry;
+    uint32_t code[12];
+    if (i == DSP_COMMON || i == DSP_FLANGER) {
+        if (memcmp(p, i == DSP_COMMON ? a64_common_prefix : a64_flanger_prefix, 16)) return NULL;
+        return function_trampoline(entry, page);
+    }
+    if (i == DSP_AUTOGATE) {
+        // bti c; mov x2,x1; cbz x3,<zero frames>; ldp x7,x6,[x1]. The cbz is PC-relative:
+        // rebuild it as cbnz over an absolute jump to its original target (in place, past the patch).
+        if (p[0] != 0xd503245f || p[1] != 0xaa0103e2 || (p[2] & 0xff00001f) != 0xb4000003 || p[3] != 0xa9401827) return NULL;
+        int32_t imm = (int32_t)(p[2] << 8) >> 13;
+        uint64_t zero = entry + 8 + (int64_t)imm * 4, back = entry + 16;
+        if (zero < entry + 16) return NULL;
+        code[0] = p[1];
+        code[1] = 0xb5000063; // cbnz x3, +12
+        code[2] = 0x580000d0; // ldr x16, [pc, #24]
+        code[3] = 0xd61f0200; // br x16
+        code[4] = p[3];
+        code[5] = 0x580000b0; // ldr x16, [pc, #20]
+        code[6] = 0xd61f0200;
+        code[7] = 0xd503201f;
+        memcpy(&code[8], &zero, 8);
+        memcpy(&code[10], &back, 8);
+        return rx_code(code, sizeof code, page);
+    }
+    if (i == DSP_DUB_ECHO || i == DSP_WASH) {
+        // bti c; mov x2,x1; add x0,x0,#imm; b <shared sweep body>
+        uintptr_t to = p[0] == 0xd503245f && p[1] == 0xaa0103e2 && (p[2] & 0xffc003ff) == 0x91000000 ?
+            a64_branch_target(entry + 12) : 0;
+        if (!to) return NULL;
+        uint64_t jump = to;
+        code[0] = p[1];
+        code[1] = p[2];
+        code[2] = 0x58000050; // ldr x16, [pc, #8]
+        code[3] = 0xd61f0200;
+        memcpy(&code[4], &jump, 8);
+        return rx_code(code, 6 * sizeof *code, page);
+    }
+    if (i == DSP_MASTER) {
+        // paciasp; sub sp,sp,#0x100; adrp x7,<GOT page>; ldr x7,[x7,#2144]: the adrp is
+        // PC-relative, so the stub loads that GOT slot's absolute address instead.
+        if (p[0] != 0xd503233f || p[1] != 0xd10403ff || (p[2] & 0x9f00001f) != 0x90000007 || p[3] != 0xf94430e7) return NULL;
+        uint64_t lo = ((p[2] >> 5) & 0x7ffff) << 2 | ((p[2] >> 29) & 3);
+        int64_t imm = (int64_t)(lo << 43) >> 43;
+        uint64_t got = (((entry + 8) & ~(uintptr_t)0xfff) + ((uint64_t)imm << 12)) + 2144, back = entry + 16;
+        code[0] = p[0];
+        code[1] = p[1];
+        code[2] = 0x58000087; // ldr x7, [pc, #16]
+        code[3] = 0xf94000e7; // ldr x7, [x7]
+        code[4] = 0x58000090; // ldr x16, [pc, #16]
+        code[5] = 0xd61f0200;
+        memcpy(&code[6], &got, 8);
+        memcpy(&code[8], &back, 8);
+        return rx_code(code, sizeof code, page);
+    }
+    if (memcmp(p, a64_event_thunk, 16)) return NULL;
+    return function_trampoline(entry, page);
+}
+
+static int install_dsp_hooks(uintptr_t base, size_t page) {
+    // edit_engine has already verified the main ELF BuildID. As on 32-bit, the hooks are
+    // one group: if ANY original prologue differs, leave ALL DSP sites alone.
+    if (!base || !page) return 0;
+    for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
+        if (!dsp_site_active(i)) continue;
+        void *original = a64_dsp_original(i, base + dsp_hooks[i].offset, page);
+        if (!original) {
+            for (unsigned j = 0; j < i; j++) dsp_originals[j] = NULL; // stubs are unreachable: nothing is patched yet
+            return 0;
+        }
+        dsp_originals[i] = original;
+    }
+    unsigned installed = 0;
+    for (unsigned i = 0; i < DSP_HOOK_COUNT; i++)
+        if (dsp_site_active(i)) {
+            redirect_function(base + dsp_hooks[i].offset, dsp_hooks[i].hook, page);
+            installed++;
+        }
+    fprintf(stderr, "engine-ui-hook: %u DSP guards/transitions installed (shared FX state)\n", installed);
+    return 1;
+}
+#endif
 
 // #49: four_deck_waveform=1 in settings.conf unlocks Engine's own 4-deck layout
 // (Layout -> Decks / Waveforms) on a player. Engine offers it only to a non-player
@@ -676,8 +799,9 @@ A32_ONLY static void prepare_stems_feature(uintptr_t base, size_t page) {
 // same encrypted bytes as 5.3.0, split into a 16-byte q and an 8-byte d literal
 // (each read once, at 0x4ecd44/0x4ecd4c and 0x4ecddc/0x4ecde4), and the auth
 // suffix "1/" is the mov w0 immediate. "aac" has one xref (0x1241cc0), next to
-// FLAC/flac/mp4 as in 5.3.0. The A32 trampolines (config, Stems feature, SQLite,
-// DSP guards) are not ported: they would write A32 code into an AArch64 Engine.
+// FLAC/flac/mp4 as in 5.3.0. The A32 trampolines (config, Stems feature) are not
+// ported: they would write A32 code into an AArch64 Engine; the SQLite hook and
+// the DSP guards have AArch64 forms (function_trampoline, install_dsp_hooks).
 static const struct engine_edit edits_az04[] = {
     {0x1d40f28u, "aac", "mp3", 4, EDIT_ONE},
     // TidalAPI base URL -> stream-sync /v1/
@@ -690,12 +814,41 @@ static const struct engine_edit edits_az04[] = {
     {0x1dc0ee8u, "\x06\x04\x47\x09\x04\x01\x42\x18", "\x5d\x50\x59\x52\x5b\x43\x0c\x1b", 8, EDIT_GATEWAY},
     // TidalAPI auth URL suffix 1/ -> //: mov w0, #0x5f5e -> mov w0, #0x5f40
     {0x4ecde0u, "\xc0\xeb\x8b\x52", "\x00\xe8\x8b\x52", 4, EDIT_GATEWAY},
+    // Native AppleMusicProvider (0x932f8c) is gated at 0x9334ac by tbz w0, #0, 0x933648: nop it.
+    {0x9334acu, "\xe0\x0c\x00\x36", "\x1f\x20\x03\xd5", 4, EDIT_ONE},
+    // unknown filesystem -> supported (mov w3, #0 -> #4)
+    {0x1a17c64u, "\x03\x00\x80\x52", "\x83\x00\x80\x52", 4, EDIT_ONE},
+    // isSupportedFilesystem always true
+    {0x1a17db8u, "\xf3\x07\x9f\x1a", "\x33\x00\x80\x52", 4, EDIT_ONE},
+    // hfsplus not rewritten to ufsd
+    {0x1717e6cu, "\x00\x36\x00\x54", "\x1f\x20\x03\xd5", 4, EDIT_ONE},
+    // read-only volume not auto-ejected
+    {0x752218u, "\x02\xa0\x4b\x39", "\x02\x00\x80\x52", 4, EDIT_ONE},
+    // DeviceManager::isReadOnly cache -> false
+    {0x1719718u, "\x60\xe2\x40\x39", "\x00\x00\x80\x52", 4, EDIT_ONE},
+    // DeviceManager::isReadOnly QFileInfo -> false
+    {0x17196b8u, "\x60\x02\x00\x52", "\x00\x00\x80\x52", 4, EDIT_ONE},
+    // Config.audio.hasLimiter (strb w20, [x19, #48])
+    {0x15f4090u, "\x74\xc2\x00\x39", "\x1f\x20\x03\xd5", 4, EDIT_ONE},
+    // ShowStemsList gate: tbz -> b
+    {0x8732ccu, "\x00\x01\x00\x36", "\x08\x00\x00\x14", 4, EDIT_ONE},
+    // #77 all-in-one maximumZoomSecs 10 -> 30
+    {0x15f4148u, "\x42\x01\x80\x52", "\xc2\x03\x80\x52", 4, EDIT_ONE},
 };
 
 static const struct engine_build engine_builds[] = {
     {.name = "5.3.0-az04",
      .id = "\x04\x03\x35\x91\x8d\xb1\x14\x4f\x0c\x34\x52\xd6\xf2\x30\x88\xd3\xc3\xa9\x46\x13",
-     .edits = edits_az04, .edit_count = sizeof edits_az04 / sizeof *edits_az04},
+     // 21 DSP sites (RTTI-verified, systemone-analysis/dsp-map.json); same order as the 5.3.0 table.
+     .dsp = {0xf22110, 0xf22140, 0xf221e8, 0xf22210, 0xf22240, 0xf22168, 0xf221c0, 0x17a2348, 0x17a46e0,
+             0x17a4560, 0x17a2cd0, 0xead030, 0xe0d5a0, 0xe0d5c8, 0xe0d5f0, 0xff5c60, 0x1747320, 0xfdc6e0,
+             0xff08c0, 0xfda420, 0xd30e68},
+     .edits = edits_az04, .edit_count = sizeof edits_az04 / sizeof *edits_az04,
+     // sqlite3_open/open_v2 only tail-call openDatabase: hook that. Its 16-byte
+     // prologue has no PC-relative instruction, so it is copied as is.
+     .sqlite_api = 0x2db6b68, .sqlite_exec = 0x1bb2f48, .sqlite_open = 0x1b8b7a0,
+     .sqlite_open_v2 = 0x1bbd5c0, .sqlite_opendb = 0x1b8b060,
+     .sqlite_prefix = {"", "\x3f\x23\x03\xd5\xff\x43\x02\xd1\xfd\x7b\x03\xa9\xfd\xc3\x00\x91", ""}},
 };
 #else
 static const struct engine_edit edits_504[] = {
@@ -783,6 +936,8 @@ static const struct engine_edit edits_sclive[] = {
     {0x5d5418u, "\x38\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4, EDIT_ONE},
     {0x16d3e3cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
     {0x16d3da0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    // Native AppleMusicProvider gate: beq 0x7f13dc -> nop (AZ04: 0x9334ac)
+    {0x7f11b4u, "\x88\x00\x00\x0a", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
 };
 
 static const struct engine_build engine_builds[] = {
@@ -913,10 +1068,8 @@ __attribute__((constructor)) static void edit_engine(void) {
         __builtin___clear_cache(at, at + e->size);
         fprintf(stderr, "engine-ui-hook: applied 0x%x (%u bytes)\n", e->offset, e->size);
     }
-#if !defined(__aarch64__)
     install_sqlite_hooks(base, page);
     if (install_dsp_hooks(base, page)) lim_start_poll();
-#endif
 }
 
 // Unknown or unsafe values fall back to the English pack.
@@ -967,18 +1120,37 @@ static uchar *load_blob(const char *path) {
 // On a 64-bit Engine the heap is far from data, so map each blob within 0..0x7fffffff
 // (positive signed 32-bit offset) above it; start 512 MiB up, clear of the Engine image
 // and its brk heap.
+// End of the first mapping overlapping [addr, addr + span), page-aligned minus one page
+// (the loop adds it back); addr itself when /proc/self/maps cannot say.
+static uintptr_t skip_mapping(uintptr_t addr, size_t span, size_t page) {
+    FILE *f = fopen("/proc/self/maps", "re");
+    if (!f) return addr;
+    unsigned long start, end;
+    uintptr_t out = addr;
+    while (fscanf(f, "%lx-%lx%*[^\n]", &start, &end) == 2)
+        if (start < addr + span && end > addr) { out = ((uintptr_t)end + page - 1) / page * page - page; break; }
+    fclose(f);
+    return out;
+}
+
+static uintptr_t near_next; // next candidate address for a blob
+
 static uchar *near_data(uchar *blob, const uchar *data) {
-    static uintptr_t next;
+    uintptr_t next = near_next;
     size_t page = (size_t)sysconf(_SC_PAGESIZE), n = 4 + (size_t)be32(blob), span = (n + page - 1) / page * page;
     uintptr_t lo = ((uintptr_t)data + page - 1) / page * page, hi = (uintptr_t)data + 0x7fffffffu - span;
     if (next < lo || next > hi) next = lo + 0x20000000u;
-    for (; next <= hi; next += 0x1000000) { // 16 MiB steps past anything mapped there
+    for (; next <= hi; next += page) {
         void *p = mmap((void *)next, span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-        if (p == MAP_FAILED) continue;
+        if (p == MAP_FAILED) {
+            if (errno != EEXIST) break; // ENOMEM/EINVAL: retrying every page cannot help
+            next = skip_mapping(next, span, page);
+            continue;
+        }
         if ((uintptr_t)p != next) { munmap(p, span); continue; } // kernel without NOREPLACE took it as a hint
         memcpy(p, blob, n);
         free(blob);
-        next += span;
+        near_next = next + span;
         return p;
     }
     free(blob);
@@ -1026,6 +1198,9 @@ static uint32_t max_node(const struct walk *w, uint32_t node) {
 }
 
 static void apply(struct walk *w, uint32_t node, const char *prefix, int depth) {
+#if defined(__aarch64__)
+    if (w->failed) return; // no address left: the whole pack is dropped anyway
+#endif
     uchar *e = w->tree + node * w->node_size;
     uint16_t flags = be16(e + 4);
     char name[128], path[512];
@@ -1046,8 +1221,16 @@ static void apply(struct walk *w, uint32_t node, const char *prefix, int depth) 
         return;
     }
     char file[700];
-    snprintf(file, sizeof file, "%s%s", w->pack, path);
-    uchar *blob = load_blob(file);
+    uchar *blob = NULL;
+    // A QML mod's file wins over the pack, which stays untouched (quarantine switches mods off).
+    if (w->has_overlay) {
+        snprintf(file, sizeof file, UI_ROOT "/mods-overlay%s", path);
+        blob = load_blob(file);
+    }
+    if (!blob) {
+        snprintf(file, sizeof file, "%s%s", w->pack, path);
+        blob = load_blob(file);
+    }
     if (!blob)
         return;
 #if defined(__aarch64__)
@@ -1080,7 +1263,8 @@ int _Z21qRegisterResourceDataiPKhS0_S0_(int version, const uchar *tree, const uc
     if (!active || version < 1 || version > 3)
         return real(version, tree, names, data);
 
-    struct walk w = {.tree = (uchar *)tree, .names = names, .data = data, .node_size = version >= 2 ? 22 : 14};
+    struct walk w = {.tree = (uchar *)tree, .names = names, .data = data, .node_size = version >= 2 ? 22 : 14,
+                  .has_overlay = access(UI_ROOT "/mods-quarantined", F_OK) != 0 && access(UI_ROOT "/mods-overlay", F_OK) == 0};
     pack_dir(w.pack, sizeof w.pack);
     size_t bytes = (size_t)(max_node(&w, 0) + 1) * w.node_size;
     uchar *copy = malloc(bytes);
@@ -1177,17 +1361,30 @@ static void guard_named_thread(pthread_t thread, const char *name) {
 // <file>.perf; BeatDetectionRunner::process(path, prefs, overviewSize) then
 // emits it as the stock analysis would and skips decoding. Engine stores it in
 // its own library, so nothing outside Engine writes m.db.
-#if !defined(__aarch64__)
-// 5.3.0 armhf OfflineAnalyzer (sha256 2f328a9c…). Its analyser thread calls
-// process() through a PMF connection, so the entry itself is hooked; the
-// staticMetaObject's stringdata and static_metacall identify the build.
+// 5.3.0 armhf OfflineAnalyzer (sha256 2f328a9c…) and AZ04's 64-bit one (sha256 22333ecb…,
+// BuildID f6566956…). Its analyser thread calls process() through a PMF connection, so
+// the entry itself is hooked; the staticMetaObject's stringdata and static_metacall
+// identify the build.
+#if defined(__aarch64__)
+#define OA_META 0x178df8u
+#define OA_STRINGDATA 0x1236b0u
+#define OA_METACALL 0x38580u
+#define OA_PROCESS_FN 0x48c20u
+// paciasp; stp x29,x30,[sp,#-160]!; mov x29,sp; stp x25,x26,[sp,#64]
+static const uint32_t oa_process_prefix[4] = {0xd503233f, 0xa9b67bfd, 0x910003fd, 0xa9046bf9};
+#define OA_PROGRESS 0xd0 // float member process() keeps in step with detectionProgress
+#define OA_STOP 32       // byte stopBeatDetection() sets under the runner's mutex
+#define OA_MAKE_BYTES "_ZN10QByteArrayC1EPKcx" // qsizetype is long long here
+#else
 #define OA_META 0x146510u
 #define OA_STRINGDATA 0x12b808u
 #define OA_METACALL 0x27b78u
 #define OA_PROCESS_FN 0x3ad7cu
 static const uint32_t oa_process_prefix[2] = {0xe16d42f4, 0xe1cd60f8}; // strd r4,[sp,#-36]!; strd r6,[sp,#8]
-#define OA_PROGRESS 0x90 // float member process() keeps in step with detectionProgress
-#define OA_STOP 16       // byte stopBeatDetection() sets under the runner's mutex
+#define OA_PROGRESS 0x90
+#define OA_STOP 16
+#define OA_MAKE_BYTES "_ZN10QByteArrayC1EPKci"
+#endif
 #ifndef OA_LOADER_MS
 #define OA_LOADER_MS 1500
 #endif
@@ -1198,13 +1395,14 @@ static const uint32_t oa_process_prefix[2] = {0xe16d42f4, 0xe1cd60f8}; // strd r
 #endif
 enum { OA_FINISHED = 0, OA_STARTED = 1, OA_DONE = 2, OA_STOPPED = 5, OA_PROGRESS_SIG = 6, OA_TRACK = 8, OA_BEATS = 9,
        OA_OVERVIEW = 10, OA_OVERVIEW_RGB = 11 };
-struct oa_bytes { int *d; char *ptr; int size; };      // Qt 6 QByteArray, 32-bit
-struct oa_string { void *d; const uint16_t *ptr; int size; }; // Qt 6 QString
+// Qt 6 QByteArray / QString: qsizetype is ssize_t-wide (int on armhf, long long on AArch64)
+struct oa_bytes { int *d; char *ptr; ssize_t size; };
+struct oa_string { void *d; const uint16_t *ptr; ssize_t size; };
 typedef void (*oa_process_fn)(void *, const struct oa_string *, const uchar *, int);
 static oa_process_fn oa_orig;
 static const void *oa_meta;
 static void (*oa_activate)(void *, const void *, int, void **);
-static void (*oa_make_bytes)(struct oa_bytes *, const char *, int);
+static void (*oa_make_bytes)(struct oa_bytes *, const char *, ssize_t);
 
 // EXPF v1, little-endian: "EXPF", u32 1, f64 bpm, then trackData, beatData and
 // overviewWaveFormData uncompressed, each as u32 length + bytes (pkg/webui/shadow.go).
@@ -1251,7 +1449,7 @@ static void oa_emit(void *o, int signal, void *arg) {
 // Queued receivers copy the argument, so a refcounted QByteArray is required.
 static void oa_emit_bytes(void *o, int signal, const char *data, uint32_t len) {
     struct oa_bytes b;
-    oa_make_bytes(&b, data, (int)len);
+    oa_make_bytes(&b, data, (ssize_t)len);
     oa_emit(o, signal, &b);
     if (b.d && __atomic_sub_fetch(b.d, 1, __ATOMIC_ACQ_REL) == 0) free(b.d); // inline ~QByteArray
 }
@@ -1399,17 +1597,26 @@ static void oa_install(void) {
     if (meta[1] != base + OA_STRINGDATA || meta[3] != base + OA_METACALL ||
         memcmp((const void *)entry, oa_process_prefix, sizeof oa_process_prefix)) return; // other build
     oa_activate = dlsym(RTLD_DEFAULT, "_ZN11QMetaObject8activateEP7QObjectPKS_iPPv");
-    oa_make_bytes = dlsym(RTLD_DEFAULT, "_ZN10QByteArrayC1EPKci");
+    oa_make_bytes = dlsym(RTLD_DEFAULT, OA_MAKE_BYTES);
     if (!oa_activate || !oa_make_bytes) return;
-    // Constructor: no other thread runs yet. The two displaced instructions are not PC-relative.
+    // Constructor: no other thread runs yet. The displaced instructions are not PC-relative.
     const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+#if defined(__aarch64__)
+    uint32_t orig[8], jump[4] = {0x58000050, 0xd61f0200}; // ldr x16, #8; br x16
+    uint64_t back = entry + sizeof oa_process_prefix, to = (uintptr_t)oa_process;
+    memcpy(orig, oa_process_prefix, sizeof oa_process_prefix);
+    orig[4] = 0x58000050, orig[5] = 0xd61f0200;
+    memcpy(&orig[6], &back, 8);
+    memcpy(&jump[2], &to, 8);
+#else
     const uint32_t orig[] = {oa_process_prefix[0], oa_process_prefix[1], 0xe51ff004, (uint32_t)(entry + 8)};
+    const uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)oa_process}; // ldr pc, [pc, #-4]
+#endif
     void *stub = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (stub == MAP_FAILED) return;
     memcpy(stub, orig, sizeof orig);
     if (mprotect(stub, page, PROT_READ | PROT_EXEC)) return;
     __builtin___clear_cache(stub, (char *)stub + sizeof orig);
-    const uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)oa_process}; // ldr pc, [pc, #-4]
     uintptr_t start = entry - entry % page;
     size_t span = (entry + sizeof jump + page - 1) / page * page - start;
     if (mprotect((void *)start, span, PROT_READ | PROT_WRITE)) return;
@@ -1420,9 +1627,6 @@ static void oa_install(void) {
     __builtin___clear_cache((char *)entry, (char *)entry + sizeof jump);
     oa_log("installed", "", 0);
 }
-#else
-static void oa_install(void) {} // AZ04's OfflineAnalyzer is another build
-#endif
 
 // #55: Engine analyses in OfflineAnalyzer child processes, which inherit this
 // preload. Analysing a whole drive in the background must never compete with
@@ -1557,6 +1761,55 @@ static int __attribute__((used)) tuned_sqlite_open(const char *filename, void **
     return rc;
 }
 
+#if defined(__aarch64__)
+// Target of an unconditional B at "at", or 0.
+static uintptr_t a64_branch_target(uintptr_t at) {
+    uint32_t insn = *(const uint32_t *)at;
+    if ((insn & 0xfc000000u) != 0x14000000u) return 0;
+    return at + (uintptr_t)((int64_t)((int32_t)(insn << 6) >> 6) * 4);
+}
+
+// The displaced 16 bytes, then ldr x16, #8; br x16 to entry + 16. The caller has checked
+// they are position independent. Hooked pages lose PROT_BTI when made RX again, so
+// landing mid-function is allowed.
+static void *function_trampoline(uintptr_t entry, size_t page) {
+    uint32_t code[8];
+    memcpy(code, (const void *)entry, 16);
+    code[4] = 0x58000050; code[5] = 0xd61f0200;
+    uint64_t back = entry + 16;
+    memcpy(&code[6], &back, 8);
+    return rx_code(code, sizeof code, page);
+}
+
+static void redirect_function(uintptr_t entry, const void *handler, size_t page) {
+    uint32_t jump[4] = {0x58000050, 0xd61f0200};
+    uint64_t to = (uintptr_t)handler;
+    memcpy(&jump[2], &to, 8);
+    uintptr_t first = entry - entry % page;
+    size_t span = ((entry + sizeof jump + page - 1) / page * page) - first;
+    if (mprotect((void *)first, span, PROT_READ | PROT_WRITE)) _exit(127);
+    memcpy((void *)entry, jump, sizeof jump);
+    if (mprotect((void *)first, span, PROT_READ | PROT_EXEC)) _exit(127);
+    __builtin___clear_cache((char *)entry, (char *)entry + sizeof jump);
+}
+
+static void install_sqlite_hooks(uintptr_t base, size_t page) {
+    const struct engine_build *b = build;
+    if (!b->sqlite_opendb) return;
+    const uint64_t *api = (const void *)(base + b->sqlite_api);
+    if (api[55] != base + b->sqlite_exec || api[70] != base + b->sqlite_open || api[135] != base + b->sqlite_open_v2) return;
+    // open = "bti c; mov x3,#0; mov w2,#6; b opendb", open_v2 = "bti c; b opendb"
+    const uint32_t *open = (const void *)(base + b->sqlite_open), *v2 = (const void *)(base + b->sqlite_open_v2);
+    if (open[0] != 0xd503245f || open[1] != 0xd2800003 || open[2] != 0x528000c2 ||
+        a64_branch_target((uintptr_t)&open[3]) != base + b->sqlite_opendb || v2[0] != 0xd503245f ||
+        a64_branch_target((uintptr_t)&v2[1]) != base + b->sqlite_opendb ||
+        memcmp((const void *)(base + b->sqlite_opendb), b->sqlite_prefix[1], 16)) return;
+    sqlite_exec_original = (sqlite_exec_fn)(base + b->sqlite_exec);
+    sqlite_open_v2_original = (sqlite_open_v2_fn)function_trampoline(base + b->sqlite_opendb, page);
+    redirect_function(base + b->sqlite_opendb, tuned_sqlite_open_v2, page);
+    fprintf(stderr, "engine-ui-hook: SQLite open/open_v2 hooks installed\n");
+}
+#else
 // Target of an unconditional ARM B at "at", or 0.
 static uintptr_t arm_branch_target(uintptr_t at) {
     uint32_t insn = *(const uint32_t *)at;
@@ -1609,9 +1862,12 @@ A32_ONLY static void install_sqlite_hooks(uintptr_t base, size_t page) {
     }
     fprintf(stderr, "engine-ui-hook: SQLite open/open_v2 hooks installed\n");
 }
+#endif
 
 static const char *volatile_path(int dirfd, const char *path, char out[PATH_MAX]) {
     if (!path || !is_engine()) return path;
+    if (*path == '/' && !strstr(path, "/analytics/posthog.db") && !strstr(path, "/analytics/events.db") &&
+        !strstr(path, "/CrashReportDB/")) return path; // fast path: the common open
     char full[PATH_MAX];
     if (*path == '/') {
         if (strlen(path) >= sizeof full) { errno = ENAMETOOLONG; return NULL; }
@@ -1700,7 +1956,10 @@ static int raw_access(const char *path, int mode) {
 }
 
 static const char *stems_processor_path(const char *path) {
-    if (path && !strcmp(path, "/usr/local/bin/stems-processor")) {
+    // AZ04 looks in the official add-on mount and /usr/Engine; redirect only while the stock binary is absent.
+    if (path && (!strcmp(path, "/usr/local/bin/stems-processor") ||
+                 !strcmp(path, "/usr/Engine/stems-processor") ||
+                 !strcmp(path, "/secure-media/stems-processor/bin/stems-processor"))) {
         if (raw_access(path, X_OK) != 0) {
             if (raw_access("/data/sc5000-custom/bundle/stems-processor", X_OK) == 0)
                 return "/data/sc5000-custom/bundle/stems-processor";

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -130,10 +131,6 @@ func RBBridge(args []string, stdout io.Writer) error {
 			tmp.Close()
 			return
 		}
-		if err := tmp.Sync(); err != nil {
-			tmp.Close()
-			return
-		}
 		if err := tmp.Close(); err != nil {
 			return
 		}
@@ -143,14 +140,33 @@ func RBBridge(args []string, stdout io.Writer) error {
 
 	_, _ = resourceguard.New(resourceguard.DefaultConfig()).ApplyToProcess(0)
 	st := &stager{mounts: localExports, last: map[string]time.Time{}}
+	// Packets arrive many times a second; snapshot at most every 500 ms and only when something changed.
+	var dirty atomic.Bool
+	if *stateFile != "" {
+		go func() {
+			tick := time.NewTicker(500 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					if dirty.Swap(false) {
+						writeState(*stateFile, prolink.BuildSnapshot(discovery.Devices(time.Now())))
+					}
+					return
+				case <-tick.C:
+					if dirty.Swap(false) {
+						writeState(*stateFile, prolink.BuildSnapshot(discovery.Devices(time.Now())))
+					}
+				}
+			}
+		}()
+	}
 	err := discovery.Listen(ctx, ip, func(d prolink.Device) {
 		emit(d)
 		if d.PacketType == 6 && d.Number >= 1 && d.Number <= 6 && settingOn(*uiSettings, "prolink_share") {
 			st.observe(ctx, d)
 		}
-		if *stateFile != "" {
-			writeState(*stateFile, prolink.BuildSnapshot(discovery.Devices(time.Now())))
-		}
+		dirty.Store(true)
 	})
 	if errors.Is(err, context.Canceled) {
 		return nil

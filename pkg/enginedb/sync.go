@@ -191,6 +191,14 @@ func open(ctx context.Context, p string) (*sql.DB, *sql.Tx, error) {
 	if _, e = tx.ExecContext(ctx, `INSERT OR IGNORE INTO BridgeLibrary(key,value) VALUES('version','1')`); e != nil {
 		return nil, nil, e
 	}
+	for _, index := range []string{
+		`CREATE INDEX IF NOT EXISTS index_PlaylistEntity_trackId ON PlaylistEntity(trackId)`,
+		`CREATE INDEX IF NOT EXISTS bridge.index_BridgeState_trackId ON BridgeState(trackId)`,
+	} {
+		if _, e = tx.ExecContext(ctx, index); e != nil {
+			return nil, nil, e
+		}
+	}
 	// The state file has no foreign keys into m.db: forget what Engine has deleted.
 	for _, prune := range []string{
 		`DELETE FROM BridgeState WHERE trackId NOT IN (SELECT id FROM main.Track)`,
@@ -510,6 +518,11 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 				degraded = true
 			}
 		}
+		if data == nil && art == nil && !fast {
+			if embedded, e := ExtractEmbeddedArtwork(full); e == nil {
+				data = embedded
+			}
+		}
 		if degraded {
 			result.Degraded++
 		}
@@ -524,7 +537,11 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			var n int64
 			// An earlier build stored the hash as 40 hex characters of TEXT.
 			e = tx.QueryRowContext(ctx, `SELECT id FROM AlbumArt WHERE hash=? OR hash=? LIMIT 1`, sum, hex.EncodeToString(sum)).Scan(&n)
-			if errors.Is(e, sql.ErrNoRows) {
+			if e == nil {
+				if _, e = tx.ExecContext(ctx, `UPDATE AlbumArt SET hash=? WHERE id=? AND typeof(hash)='text'`, sum, n); e != nil {
+					return result, e
+				}
+			} else if errors.Is(e, sql.ErrNoRows) {
 				r, e := tx.ExecContext(ctx, `INSERT INTO AlbumArt(hash,albumArt) VALUES(?,?)`, sum, data)
 				if e != nil {
 					return result, e

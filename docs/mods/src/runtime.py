@@ -81,7 +81,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(request, dict):
                 raise ValueError("expected an object")
             self.reply(200, feature.action(request))
-        except (ValueError, KeyError, TypeError) as exc:
+        except (ValueError, KeyError, TypeError, FileNotFoundError) as exc:
             self.reply(400, {"error": str(exc)})
         except Exception as exc:
             self.reply(500, {"error": str(exc)})
@@ -115,7 +115,7 @@ if __name__ == "__main__":
         proc = Path(f"/proc/{pid}")
         if proc.exists():
             argv = (proc / "cmdline").read_bytes().split(b"\x00")
-            if str(Path(__file__).resolve()).encode() not in argv or MOD.encode() not in argv or b"serve" not in argv:
+            if not any(a.endswith(b"runtime.py") for a in argv) or MOD.encode() not in argv or b"serve" not in argv:
                 raise SystemExit("PID does not belong to this Mod; refusing to signal it")
             os.kill(pid, signal.SIGTERM)
             for _ in range(25):

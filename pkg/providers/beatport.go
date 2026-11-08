@@ -452,7 +452,7 @@ func (b *Beatport) Download(ctx context.Context, id string, lossless bool) (loca
 		}
 		err := b.get(ctx, "/catalog/tracks/"+id+"/download/", url.Values{"quality": {q}}, &r)
 		var status StatusError
-		if errors.As(err, &status) && status >= 400 && status < 500 {
+		if errors.As(err, &status) && (status == http.StatusForbidden || status == http.StatusNotFound) {
 			continue // not on this subscription
 		}
 		if err != nil {

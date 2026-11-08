@@ -90,7 +90,9 @@ func TestPhoneQRDoesNotGrantConsole(t *testing.T) {
 }
 
 func TestConsoleStatusLoopbackOnly(t *testing.T) {
-	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	state := t.TempDir()
+	os.WriteFile(filepath.Join(state, "stems-lan.json"), []byte(`{"endpoint":"http://192.168.1.9:9000","hostname":"pc","online":true}`), 0o600)
+	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: state}, nil)
 	for _, tc := range []struct {
 		addr    string
 		status  int
@@ -104,7 +106,14 @@ func TestConsoleStatusLoopbackOnly(t *testing.T) {
 			t.Fatalf("status %d: %s", w.Code, w.Body.String())
 		}
 	}
-	r := httptest.NewRequest("GET", "/api/ui", nil)
+	r := httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+	r.RemoteAddr = "127.0.0.1:1"
+	w0 := httptest.NewRecorder()
+	ui.ServeHTTP(w0, r)
+	if !strings.Contains(w0.Body.String(), `"lanStems":{"endpoint":"http://192.168.1.9:9000"`) {
+		t.Fatalf("lanStems missing: %s", w0.Body.String())
+	}
+	r = httptest.NewRequest("GET", "/api/ui", nil)
 	r.Header.Set("Authorization", "Bearer code")
 	w := httptest.NewRecorder()
 	ui.ServeHTTP(w, r)

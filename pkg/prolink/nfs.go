@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 )
@@ -50,6 +51,7 @@ type NFSClient struct {
 	IP      net.IP
 	Portmap int
 	Timeout time.Duration // per RPC attempt; default 1 s, three attempts
+	portsMu sync.Mutex
 	ports   map[uint32]int
 }
 
@@ -187,8 +189,11 @@ func (c *NFSClient) call(ctx context.Context, port int, prog, vers, proc uint32,
 }
 
 func (c *NFSClient) port(ctx context.Context, prog, vers uint32) (int, error) {
-	if p, ok := c.ports[prog]; ok {
-		return p, nil
+	c.portsMu.Lock()
+	p0, ok := c.ports[prog]
+	c.portsMu.Unlock()
+	if ok {
+		return p0, nil
 	}
 	pm := c.Portmap
 	if pm == 0 {
@@ -204,10 +209,12 @@ func (c *NFSClient) port(ctx context.Context, prog, vers uint32) (int, error) {
 	if r.err != nil || p == 0 || p > 65535 {
 		return 0, fmt.Errorf("prolink: program %d is not registered", prog)
 	}
+	c.portsMu.Lock()
 	if c.ports == nil {
 		c.ports = map[uint32]int{}
 	}
 	c.ports[prog] = int(p)
+	c.portsMu.Unlock()
 	return int(p), nil
 }
 

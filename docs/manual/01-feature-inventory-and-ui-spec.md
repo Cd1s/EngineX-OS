@@ -41,7 +41,7 @@
 
 ### 1.2 二代机（8 款，`/data` 数据包 `Data-Bundle.tar.gz`，Beta）
 
-固件带签名，不接受改过的 `.img`；EngineX 装在 `<DATA>`，不动系统分区。**这些机器不能刷一代的 `.img`。**
+二代机没有硬件 eFuse 熔断锁死，原厂升级程序（`az01-update` / `az0x-splash`）在写入前用软件校验 `AZ0x` 固件签名（`denon-1` / `rane-1` 公钥）；原厂状态下刷入改过的 `.img` 或一代机的 `.img` 会在 `Verifying` 阶段直接被软件拒签退回，不会写入闪存、不会变砖。EngineX 首次安装在 `<DATA>`，不动系统分区，后续版本可直接在屏幕在线 OTA 升级。**首次安装请用对应二代型号的数据包或 EngineX-Installer。**
 
 | 机型 | 前缀 | 板号 / compatible | Engine 架构 | 安装方式 |
 |---|---|---|---|---|
@@ -56,7 +56,7 @@
 
 - 前置条件：先升到官方 Engine OS 5.3.0。首次装好后，后续版本在碟机屏幕 设置 → 关于 / 更新 → 更新 一键完成（下载 `Data-Bundle`、校验 `SHA256SUMS`、替换文件、重启服务，#86）。
 - 卸载：`sh <DATA>/bundle/uninstall.sh && reboot`。
-- **AZ04（PRIME 4 G2 / SYSTEM ONE）能力缺口**（`build-data-bundle.py` 的 `AZ04_NOTE`，README 同）：UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和各服务已有；**DSP 防护、0dB 软限幅、自动增益、SQLite 调优、4 碟解锁没有移植**；Stems 保持官方原样；只有 6 处内存补丁；沙箱里没看到实际界面（需要 OP-TEE），待实机核实。
+- **AZ04（PRIME 4 G2 / SYSTEM ONE）能力**（`build-data-bundle.py` 的 `AZ04_NOTE`，README 同，#149）：UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和各服务之外，已带 16 处 Engine 补丁（含原厂 Apple Music 解锁）、14 处 DSP 防护、0dB 软限幅、自动增益、Echo Out、SQLite 调优和 64 位 `OfflineAnalyzer` 的 `.perf` 直注；4 碟解锁仅限单机播放器；Stems 保持官方原样；沙箱里没看到实际界面（需要 OP-TEE），待实机核实。
 - 6 款 armhf 二代机共用 SC LIVE 4 的 Engine 构建（同 BuildID），功能面与一代机基本一致，但没有实机验证（README 明说）。
 
 ### 1.3 EngineX-Installer（`cmd/enginex-installer`，#88/#89）
@@ -93,8 +93,8 @@
 | 5 | NetEase Download / 网易云下载方式 / 網易雲下載方式 | 官方直下 / Deemix 优先 | `official` | `neteaseMode=official\|deemix` | `netease_mode` | Deemix 优先用来省网易云月度下载额度 |
 | 6 | Jog Light Mode / 转盘灯效 / 轉盤燈效 | 固定、迷幻流光、迷幻频闪、迷幻 BPM 同步 | `static` | `jog=static\|rainbow\|fast\|bpm` | `jog` | 只改 `/Engine/Deck<N>/Color`，不写 eMMC |
 | 7 | Auto-Analyze Drives / 自动分析插入的设备 / 自動分析插入的裝置 | 插盘 15 s 后触发 Engine 自带分析（最低优先级） | 关 | `autoAnalyze=0\|1` | `auto_analyze` | #55 |
-| 8 | Master Soft Clipper / 0dB 防破音软限幅 / 0dB 防破音軟限幅 | 主输出软限幅，峰值压到 -0.1 dBFS 以下 | 关 | `masterLimiter=0\|1` | `master_limiter` | 钩子每秒轮询，立即生效；#58。AZ04 未移植 |
-| 9 | Auto-Gain (0 dB Normalize) / 自动增益（0 dB 归一化） / 自動增益（0 dB 正規化） | 把偏小的歌平滑提到接近 0 dBFS，最多 +9 dB，低于 -42 dBFS 的静音不提 | 关 | `autoGain=0\|1` | `auto_gain` | 开启后总会过软限幅；#64。AZ04 未移植 |
+| 8 | Master Soft Clipper / 0dB 防破音软限幅 / 0dB 防破音軟限幅 | 主输出软限幅，峰值压到 -0.1 dBFS 以下 | 关 | `masterLimiter=0\|1` | `master_limiter` | 钩子每秒轮询，立即生效；#58。AZ04 已移植（#149） |
+| 9 | Auto-Gain (0 dB Normalize) / 自动增益（0 dB 归一化） / 自動增益（0 dB 正規化） | 把偏小的歌平滑提到接近 0 dBFS，最多 +9 dB，低于 -42 dBFS 的静音不提 | 关 | `autoGain=0\|1` | `auto_gain` | 开启后总会过软限幅；#64。AZ04 已移植（#149） |
 | 10 | OmniSource (Drives in Streaming) / OmniSource（在流媒体中显示 U 盘/SD） | U 盘 / SD 的歌单和曲目显示在流媒体浏览器里 | 关 | `omniSource=0\|1` | `omni_source` | #62 |
 | 11 | Pro DJ Link Library / Pro DJ Link 曲库 / Pro DJ Link 曲庫 | 读取局域网内 CDJ 上 rekordbox U 盘的曲库 | 关 | `prolinkShare=0\|1` | `prolink_share` | 测试版；#59 |
 | 12 | Pro DJ Link Export to CDJ (Beta) | 把本机 U 盘共享给 CDJ 浏览 | 关 | `prolinkExport=0\|1` | `prolink_export` | 实验功能；**简繁中文没有译文**（见 4.1）；状态 `prolinkExportActive` 只读 |
@@ -224,7 +224,7 @@
 |---|---|
 | UI 包替换 | 把 Engine 内嵌的 Qt 资源换成 `<DATA>/ui/packs/<语言>/`；设置、翻译、波形配色、流媒体、控制中心磁贴都在这里 |
 | 解锁 | Stems 实时分轨与曲库 Stems 歌单（全机型）、蓝牙 / 蓝牙分配、远程 Stems 处理器、HFS+ 启用、波形缩远 30 秒、Silent Cue |
-| 补丁数 | 5.3.0 一代机 16 处；AZ04 只有 6 处 |
+| 补丁数 | 5.3.0 一代机 16 处；AZ04 也是 16 处（#149） |
 | DSP 防爆音 | 21 个挂点：FX 开关 / 切换 128 帧淡变、NaN / Inf 清除、AutoGate 相位清零、Flanger 电平补偿（#54）、SweepFx 限幅、变速 / 跳转 / Nudge 的非法值丢弃、采样器事件、主输出软限幅（第 21 个，#58） |
 | SQLite | `synchronous=NORMAL`、`temp_store=MEMORY`、`cache_size=-8000`；遥测库改 `:memory:` |
 | 遥测与后台线程 | 屏蔽 PostHog / Crashpad，把分析 / 云 / Sentry 线程降为 idle |
@@ -243,7 +243,7 @@
 | Master 交接 | 与 CDJ 之间始终只有一个 Master，双向交接；本机当 Master 时发 BPM 和拍点供 CDJ BEAT SYNC |
 | 双机 4 轨与影子轨道 | 两台 SC5000/SC6000 或一台 + 一台 CDJ 同局域网；每台负责自己的两轨，另一台的曲目、播放 / CUE、位置、速度、Master、同步、Hot Cue 在本机以静音影子轨道跟随；延迟见 `sc5000-shadow-decks` 记录 |
 | Stems | 三级：云中继 → 局域网电脑（`sc5000-stemsd`，UDP 17891 自动发现，`tools/stems/run-home-worker.*`）→ 碟机本机分轨（比播放快 1.4 倍）；碟机上 `stems-processor` 代替原厂子进程 |
-| 流媒体网关 | 本机伪装 TIDAL，覆盖网易云、Spotify、Deezer、SoundCloud、Beatport、Apple Music；Apple Music 音频按 ISRC / 歌名匹配到 Deezer（FLAC）或网易云；Beatport 按订阅档位取 FLAC / 256k AAC / 128k AAC；播放过的曲目缓存在 `/data`，再次加载免下载 |
+| 流媒体网关 | 本机伪装 TIDAL，覆盖网易云、Spotify、Deezer、SoundCloud、Beatport、Apple Music；Apple Music 由 Engine 5.3.0 自带音源播放（EngineX 只负责解锁），网关不再匹配 Deezer 或网易云；Beatport 按订阅档位取 FLAC / 256k AAC / 128k AAC；播放过的曲目缓存在 `/data`，再次加载免下载 |
 | 登录中继 | `sc5000-relay`（可选自建）：让手机走移动数据登录，Deezer 网页内登录，Stems 公网入口 |
 | 直播推流 | Shoutcast / Icecast |
 | 曲库维护 | `dbhealer` 修复 PerformanceData、历史记录；`enginedb` 重定位、智能匹配（Camelot 兼容调性）、`analyzer` 纯 Go 分析 BPM / 拍线 / 调性 / RGB 波形 |

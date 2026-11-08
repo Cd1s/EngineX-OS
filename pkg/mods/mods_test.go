@@ -539,3 +539,95 @@ func TestMods_SafeModeQuarantine(t *testing.T) {
 		t.Fatalf("expected overlay file to be restored after quarantine reset: %v", err)
 	}
 }
+
+// A mod that replaces a file of the base UI pack must give the original back when disabled.
+func TestMods_DisableRestoresBasePackFile(t *testing.T) {
+	mediaRoot, uiDir, active := t.TempDir(), t.TempDir(), t.TempDir()
+	createTestMod(t, filepath.Join(mediaRoot, "DRIVE", "mods"), "mod-one", "Skins/One.qml", "Item { Text { text: \"mod\" } }\n")
+	target := filepath.Join(active, "Skins", "One.qml")
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("BASE"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(mediaRoot, uiDir)
+	if err := mgr.SetModEnabled("mod-one", true); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ { // second apply must not overwrite the backup with the mod's copy
+		if err := mgr.ApplyActiveOverlay(active); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if b, _ := os.ReadFile(target); !strings.Contains(string(b), "mod") {
+		t.Fatalf("mod file not applied: %q", b)
+	}
+	if err := mgr.SetModEnabled("mod-one", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ApplyActiveOverlay(active); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "BASE" {
+		t.Fatalf("base file not restored: %q", b)
+	}
+}
+
+func TestInstallArchiveAcceptsPaxGlobalHeader(t *testing.T) {
+	var b bytes.Buffer
+	gz := gzip.NewWriter(&b)
+	tw := tar.NewWriter(gz)
+	_ = tw.WriteHeader(&tar.Header{Name: "pax_global_header", Typeflag: tar.TypeXGlobalHeader, PAXRecords: map[string]string{"comment": "abc"}})
+	body := `{"id":"gh-mod","script":"run.sh"}`
+	_ = tw.WriteHeader(&tar.Header{Name: "mod.json", Mode: 0644, Size: int64(len(body))})
+	_, _ = tw.Write([]byte(body))
+	_ = tw.WriteHeader(&tar.Header{Name: "run.sh", Mode: 0644, Size: 6})
+	_, _ = tw.Write([]byte("exit 0"))
+	tw.Close()
+	gz.Close()
+	mgr := NewManager("", filepath.Join(t.TempDir(), "ui"))
+	mgr.runScript = func(Mod, string) error { return nil }
+	if _, err := mgr.InstallArchive(&b); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUninstallSurvivesFailingStopAndStartEnabledRuns(t *testing.T) {
+	mgr := NewManager("", filepath.Join(t.TempDir(), "ui"))
+	var actions []string
+	fail := false
+	mgr.runScript = func(mod Mod, action string) error {
+		actions = append(actions, mod.ID+":"+action)
+		if fail {
+			return io.ErrUnexpectedEOF
+		}
+		return nil
+	}
+	mod, err := mgr.InstallArchive(bytes.NewReader(testArchive(t, map[string]string{"mod.json": `{"id":"d1","script":"run.sh"}`, "run.sh": "exit 0"}, "")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.SetModEnabled(mod.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	actions = nil
+	mgr.StartEnabled() // boot: the enabled flag survived, the daemon did not
+	if strings.Join(actions, ",") != "d1:start" {
+		t.Fatalf("StartEnabled actions: %v", actions)
+	}
+	fail = true
+	if err := mgr.UninstallMod(mod.ID); err != nil {
+		t.Fatalf("uninstall must ignore a failing stop: %v", err)
+	}
+	if list, _ := mgr.Discover(); len(list) != 0 {
+		t.Fatalf("mod still present: %+v", list)
+	}
+}
+
+func TestValidateMissingScriptRejected(t *testing.T) {
+	dir := t.TempDir()
+	if err := ValidateMod(dir, &Manifest{ID: "x", Script: "nope.sh"}); err == nil {
+		t.Fatal("missing script must be rejected")
+	}
+}

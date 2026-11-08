@@ -270,11 +270,11 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		if d.Deck < 1 || d.Deck > 4 {
 			continue
 		}
-		postAt = max(postAt, d.At)
 		d.Seq = seq
 		if d.At > nowMS || d.At < nowMS-2000 {
 			d.At = nowMS // missing or a clock we cannot trust
 		}
+		postAt = max(postAt, d.At) // after clamping: one future timestamp must not freeze ownPostAt
 		d.Path, d.Name = "", ""
 		d.Key, d.Ext = "", ""
 		np := d.Net
@@ -496,8 +496,8 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 // streamingDownload is Engine's own download of a streaming track (Engine
 // 5.3.0's TrackNetworkPath for one is just "net://<uuid>/(Unknown)", its
 // TrackUri "streaming://TIDAL/Track/<id>"): stm.db's row for the uri, read-only
-// (#49). Cached per uri: the QML posts every 120 ms.
-// shortcut: misses are cached too (streamedFile answers, without the analysis); stop caching them if Engine posts before its stm.db row exists.
+// (#49). Hits are cached per uri (the QML posts every 120 ms); misses are not,
+// since Engine may post before its stm.db row exists.
 func (sh *shadowState) streamingDownload(ctx context.Context, uri string) string {
 	sh.mu.Lock()
 	f, ok := sh.streamFiles[uri]
@@ -516,9 +516,11 @@ func (sh *shadowState) streamingDownload(ctx context.Context, uri string) string
 		}
 		db.Close()
 	}
-	sh.mu.Lock()
-	sh.streamFiles[uri] = f
-	sh.mu.Unlock()
+	if f != "" {
+		sh.mu.Lock()
+		sh.streamFiles[uri] = f
+		sh.mu.Unlock()
+	}
 	return f
 }
 
@@ -850,7 +852,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 	if port == 0 {
 		port = 8080
 	}
-	url := fmt.Sprintf("http://%s/peer/decks/%d/audio?key=%s", net.JoinHostPort(p.ip, strconv.Itoa(port)), p.Deck, p.Key)
+	url := fmt.Sprintf("http://%s/peer/decks/%d/audio?key=%s", net.JoinHostPort(p.ip, strconv.Itoa(port)), p.Deck, url.QueryEscape(p.Key))
 	ext := ".mp3"
 	if slices.Contains(shadowAudioExt, p.Ext) {
 		ext = p.Ext

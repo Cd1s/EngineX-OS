@@ -102,3 +102,18 @@ func TestRetiredWatchExitsAtOnce(t *testing.T) {
 		t.Fatal("retired watch touched the library")
 	}
 }
+
+// --status is read-only even when --normalize-reserve is also given.
+func TestStatusWinsOverReserve(t *testing.T) {
+	mount := mountFixture(t)
+	path := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	before, _ := os.ReadFile(path)
+	var out, errOut bytes.Buffer
+	if code := Guardian([]string{"--status", "--normalize-reserve", "--heal-mount", mount}, &out, &errOut); code != 0 {
+		t.Fatalf("%d %s %s", code, &out, &errOut)
+	}
+	after, _ := os.ReadFile(path)
+	if !bytes.Equal(before, after) {
+		t.Fatal("status changed DB")
+	}
+}

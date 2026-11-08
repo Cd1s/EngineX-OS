@@ -32,6 +32,7 @@ const (
 	// deck put up a new QR code meanwhile, and the pasted callback was refused (#48).
 	loginLifetime           = 30 * time.Minute
 	spotifyLoopbackRedirect = "http://127.0.0.1:8080/oauth/spotify/callback"
+	spotifyDesktopRedirect  = "http://127.0.0.1:4381/login"
 )
 
 type loginFlow struct {
@@ -72,6 +73,19 @@ func (s *Server) spotifyClientID() string {
 		return id
 	}
 	return DefaultSpotifyClientID
+}
+
+// spotifyRedirect is the loopback address the sign-in ends on. The built-in
+// Spotify Desktop client only registers :4381/login; an owner's own app uses
+// the configured address or :8080.
+func (s *Server) spotifyRedirect() string {
+	if s.cfg.SpotifyRedirectURL != "" {
+		return s.cfg.SpotifyRedirectURL
+	}
+	if s.spotifyClientID() == DefaultSpotifyClientID {
+		return spotifyDesktopRedirect
+	}
+	return spotifyLoopbackRedirect
 }
 
 func (s *Server) savedDeezerOwner() deezerOwner {
@@ -470,10 +484,11 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 		}
 		sp.ClientID = s.spotifyClientID()
 		state := providers.RandomID()
-		auth, verifier := sp.BeginPKCE(state, spotifyLoopbackRedirect)
+		redirect := s.spotifyRedirect()
+		auth, verifier := sp.BeginPKCE(state, redirect)
 		s.mu.Lock()
 		s.prune()
-		s.pending[state] = pending{session.ID, verifier, spotifyLoopbackRedirect, time.Now().Add(loginLifetime)}
+		s.pending[state] = pending{session.ID, verifier, redirect, time.Now().Add(loginLifetime)}
 		flow.spotifyState = state
 		s.mu.Unlock()
 		extra := `<form method="post" action="` + html.EscapeString(action) + `"><input name="clientId" placeholder="Spotify Client ID (32 hex)" autocomplete="off" autocapitalize="off" spellcheck="false"><input name="accessToken" type="password" placeholder="Spotify access token" autocomplete="off"><button>` + tr(lang, "connect") + `</button></form>`
@@ -628,6 +643,18 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 	case *providers.Spotify:
 		id := strings.ToLower(strings.TrimSpace(r.Form.Get("clientId")))
 		accessToken := strings.TrimSpace(r.Form.Get("accessToken"))
+		if len(accessToken) > 7 && strings.EqualFold(accessToken[:7], "bearer ") {
+			accessToken = strings.TrimSpace(accessToken[7:])
+		}
+		if links := r.Form.Get("links"); strings.TrimSpace(links) != "" {
+			if _, err := p.SetLinks(r.Context(), links); err != nil {
+				log.Printf("stream-sync: Spotify links failed: %v", err)
+				refuse("spLinksFailed", "")
+				return
+			}
+			s.finishPhoneLogin(w, r, flow)
+			return
+		}
 		if id != "" {
 			if !spotifyClientIDRe.MatchString(id) || (s.cfg.SpotifyClientID != "" && s.cfg.SpotifyClientID != id) {
 				refuse("badForm", "")
@@ -700,7 +727,7 @@ func (s *Server) spotifyClientGet(w http.ResponseWriter, r *http.Request) {
 	if len(id) > 8 {
 		masked = id[:4] + "…" + id[len(id)-4:]
 	}
-	respond(w, map[string]any{"set": id != "", "clientId": masked, "redirectUri": spotifyLoopbackRedirect, "fixed": s.cfg.SpotifyClientID != ""})
+	respond(w, map[string]any{"set": id != "", "clientId": masked, "redirectUri": s.spotifyRedirect(), "fixed": s.cfg.SpotifyClientID != ""})
 }
 
 // spotifyClientPost saves the owner's own Spotify Client ID (32 hex digits).
@@ -770,11 +797,15 @@ func (s *Server) spotifyConnectPost(w http.ResponseWriter, r *http.Request) {
 	_ = action
 	_ = userName
 
+	// The endpoint is unauthenticated: only a pending Spotify login on the deck may
+	// accept a token, and the encrypted Zeroconf blob is never a bearer token.
+	_ = blob
 	tok := accessToken
-	if tok == "" {
-		tok = blob
-	}
 	if tok != "" {
+		if s.loginFlow("spotify") == nil {
+			fail(w, http.StatusForbidden, errors.New("no spotify login in progress"))
+			return
+		}
 		session, err := s.ownerSession("spotify")
 		if err != nil {
 			fail(w, 500, err)

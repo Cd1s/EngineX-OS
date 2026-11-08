@@ -106,7 +106,7 @@ func Relocate(ctx context.Context, opts RelocateOptions) (RelocateResult, error)
 
 	backup := dbPath + ".bak.relocate"
 	if _, err = os.Lstat(backup); err == nil {
-		backup += fmt.Sprintf(".%d", time.Now().Unix()) // keep the first backup
+		backup += fmt.Sprintf(".%d", time.Now().UnixNano()) // keep the first backup
 	}
 	if _, err = db.ExecContext(ctx, `VACUUM INTO ?`, backup); err != nil {
 		return res, fmt.Errorf("backup failed, nothing changed: %w", err)
@@ -151,17 +151,16 @@ func findMissing(ctx context.Context, db *sql.DB, root string) ([]missingTrack, 
 		if err = rows.Scan(&t.id, &t.path, &t.name, &t.bytes, &t.title, &t.artist); err != nil {
 			return nil, nil, err
 		}
-		taken[strings.ToLower(t.path)] = true
-		if t.path == "" || filepath.IsAbs(t.path) {
-			continue
-		}
+		// A missing track's own path stays free, or a file that differs only in case could never match it.
 		file := filepath.Join(lib, filepath.FromSlash(t.path))
-		if r, e := filepath.Rel(root, file); e != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
-			continue // not on this drive
+		r, e := filepath.Rel(root, file)
+		if t.path != "" && !filepath.IsAbs(t.path) && e == nil && r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			if _, err := os.Stat(file); errors.Is(err, fs.ErrNotExist) {
+				missing = append(missing, t)
+				continue
+			}
 		}
-		if _, err := os.Stat(file); errors.Is(err, fs.ErrNotExist) {
-			missing = append(missing, t)
-		}
+		taken[strings.ToLower(t.path)] = true
 	}
 	return missing, taken, rows.Err()
 }

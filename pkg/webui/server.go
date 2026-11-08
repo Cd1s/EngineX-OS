@@ -232,6 +232,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /v1/sc5000/tailscale", s.handleTailscale)
 	s.mux.HandleFunc("POST /v1/sc5000/tailscale", s.handleTailscale)
 	go s.tailscaleResume() // restarts the daemon after a reboot when it was left on (#130)
+	go s.modsResume()      // enabled mods' daemons do not survive a reboot on their own
 	s.mux.HandleFunc("GET /api/mounts", s.handleMounts)
 	s.mux.HandleFunc("POST /api/mounts", s.handleMounts)
 	s.mux.HandleFunc("DELETE /api/mounts", s.handleMounts)
@@ -595,6 +596,9 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 		p := &providers.Spotify{ClientID: s.spotifyClientID(), HTTP: s.cfg.HTTP, BaseURL: s.cfg.SpotifyBaseURL, AccountsURL: s.cfg.SpotifyAccountsURL}
 		if !guest {
 			p.TokenPath = s.cfg.SpotifyTokenPath
+			if s.cfg.StateDir != "" {
+				p.LinksPath = filepath.Join(s.cfg.StateDir, "spotify-links.json")
+			}
 			if p.TokenPath == "" && s.cfg.StateDir != "" {
 				p.TokenPath = filepath.Join(s.cfg.StateDir, "spotify-token.json")
 			}
@@ -684,10 +688,10 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	session := &Session{ID: providers.RandomID(), Provider: v.Provider, Guest: v.Guest, p: p, tracks: map[string]providers.Track{}, expires: time.Now().Add(8 * time.Hour), Ready: v.Provider == "deezer"}
 	if sp, ok := p.(*providers.Spotify); ok {
-		session.Ready = sp.Token.AccessToken != ""
+		session.Ready = sp.HasToken()
 	}
 	if np, ok := p.(*providers.Netease); ok {
-		session.Ready = np.UserID != 0 && np.Cookie != ""
+		session.Ready = np.LoggedIn()
 	}
 	if bp, ok := p.(*providers.Beatport); ok {
 		session.Ready = bp.Ready()

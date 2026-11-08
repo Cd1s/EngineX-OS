@@ -43,6 +43,9 @@ func (s *Server) modsManager() *mods.Manager {
 	return mods.NewManager(s.mediaRoot(), s.uiDir())
 }
 
+// modsResume re-runs the start script of every enabled mod after a reboot.
+func (s *Server) modsResume() { s.modsManager().StartEnabled() }
+
 func (s *Server) activePackDir() string {
 	active := filepath.Join(s.uiDir(), "active")
 	if st, err := os.Stat(active); err == nil && st.IsDir() {

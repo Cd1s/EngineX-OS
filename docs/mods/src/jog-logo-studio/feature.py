@@ -24,8 +24,8 @@ class Feature:
         path = Path(volume).resolve(strict=True)
         if not path.is_dir() or not any(path.is_relative_to(Path(root)) and path != Path(root) for root in ("/media", "/mnt")):
             raise ValueError("choose a media volume under /media or /mnt")
-        library = (path / "Engine Library").resolve(strict=True)
-        if not library.is_dir() or not library.is_relative_to(path):
+        library = path / "Engine Library"
+        if not library.is_dir() or library.is_symlink():
             raise ValueError("media must already contain an Engine Library directory")
         return library
 

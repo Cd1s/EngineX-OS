@@ -56,3 +56,34 @@ func TestIssue53FailedFirstImportLeavesNoLibrary(t *testing.T) {
 		t.Fatal("a failed first import left an Engine Library behind:", err)
 	}
 }
+
+// A stock Engine that saw a rekordbox stick leaves a skeleton m.db with an empty
+// Track table; that is not a library, so the export is still converted.
+func TestEmptySkeletonMDBIsConverted(t *testing.T) {
+	donor := t.TempDir()
+	testfixture.Export(t, donor)
+	first, err := bridge.ConvertAtMount(context.Background(), donor, enginedb.Options{}, false)
+	if err != nil || first.Added == 0 {
+		t.Fatalf("%+v %v", first, err)
+	}
+	src := dbOpen(t, donor)
+	if _, err := src.Exec(`DELETE FROM PlaylistEntity; DELETE FROM PerformanceData; DELETE FROM Track`); err != nil {
+		t.Fatal(err)
+	}
+	src.Close()
+	skeleton, err := os.ReadFile(filepath.Join(donor, "Engine Library/Database2/m.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	testfixture.Write(t, root, "Engine Library/Database2/m.db", skeleton)
+	r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	if err != nil || r.Added != first.Added {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if n := scalar[int](t, dbOpen(t, root), `SELECT count(*) FROM Track`); n != first.Added {
+		t.Fatal("tracks", n)
+	}
+}

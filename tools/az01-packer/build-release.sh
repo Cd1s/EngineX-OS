@@ -40,6 +40,15 @@ gzip -dc "$WORK/packs.tar.gz" | xz -T0 --check=crc32 --lzma2=preset=9e,dict=8MiB
 install -m 0755 "$FSCK" "$STAGE/usr/sbin/fsck.hfsplus"
 chmod 0644 "$STAGE/usr/share/sc5000-custom/"*
 
+# 1b. Second generation: /data bundles. 6 armhf models share the 32-bit suite and hooks, AZ04 (PRIME 4 G2, SYSTEM ONE) needs arm64 ones.
+mkdir -p "$WORK/hooks32" "$WORK/hooks64"
+OUT=$WORK/hooks32/libengine-ui-hook.so sh tools/ui-mod/build.sh
+OUT=$WORK/hooks32/libedisksd-hook.so sh tools/edisksd-hook/build.sh
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$WORK/sc5000-suite-arm64" ./cmd/sc5000-suite
+CROSS64=aarch64-linux-gnu-; [ "$(uname -m)" != aarch64 ] || CROSS64=
+CROSS=$CROSS64 OUT=$WORK/hooks64/libengine-ui-hook.so sh tools/ui-mod/build.sh
+CROSS=$CROSS64 OUT=$WORK/hooks64/libedisksd-hook.so sh tools/edisksd-hook/build.sh
+
 # 2. One image per official group, copied to every model name of the group.
 mkdir -p "$OUT"
 build() { # <official image prefix> <model prefix> <release name>...
@@ -68,11 +77,22 @@ wait "$p1"
 wait "$p2"
 wait "$p3"
 
+for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
+    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --prefix "$m" --suite "$WORK/sc5000-suite" \
+        --hook "$WORK/hooks32/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
+    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$OUT/"
+done
+for m in PRIME4G2 SYSTEMONE; do
+    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --prefix "$m" --suite "$WORK/sc5000-suite-arm64" \
+        --hook "$WORK/hooks64/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
+    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$OUT/"
+done
+
 # 3. Verify every image as a container again and record checksums.
 cd "$OUT"
 mkdir verify
 for f in *-Update.img; do
     python3 "$ROOT/tools/az01-packer/az01_packer.py" info "$f" > "verify/${f%.img}.info.json"
 done
-sha256sum *-Update.img > SHA256SUMS.txt
+sha256sum *-Update.img *-Data-Bundle.tar.gz > SHA256SUMS.txt
 ls -l

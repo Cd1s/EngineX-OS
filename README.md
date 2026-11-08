@@ -21,7 +21,7 @@
 **EngineX OS 5.3.0.3** is a custom system rebuilt on the official Engine OS 5.3.0+ base, for 16 Denon DJ, Numark and Rane standalone units:
 `SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro` · `SC LIVE 4` · `SC LIVE 2` · `PRIME 4+` · `PRIME GO+` · `Mixstream Pro+` · `Mixstream Pro Go` · `PRIME 4 G2` · `Rane SYSTEM ONE`.
 
-The first eight take a USB-stick `.img`; the eight second-generation units, whose firmware is signed, take a `/data` bundle (Beta, see [How to Install](#install)).
+The first eight take a USB-stick `.img`; the eight second-generation units check the firmware signature in software before anything is written, so they take a `/data` bundle instead (Beta, see [How to Install](#install)).
 
 Everything works right inside the stock Denon interface — flash it from a USB stick and unlock the features below.
 
@@ -43,7 +43,7 @@ No need to copy tracks to a USB drive before every set:
 - Scan the on-screen QR code with your phone to log in and browse your playlists, liked tracks, and search results;
 - Switch between **Lossless FLAC and 320 kbps MP3**. Tracks you play are cached locally on the deck so loading them again is instant without re-downloading.
 - **Beatport** uses your own account and plan: Professional downloads FLAC or 256k AAC, Advanced downloads 128k AAC, and Essential streams 128k AAC. Beatport tracks split into Stems like any other track.
-- **Apple Music**: paste any playlist or album link on your phone, no account needed; add your `media-user-token` to browse your own library too. Apple Music audio is protected, so each track plays from Deezer (lossless FLAC) or NetEase, matched by ISRC or by title and artist.
+- **Apple Music**: paste any playlist or album link on your phone, no account needed; add your `media-user-token` to browse your own library too. Playback uses Engine 5.3.0's own Apple Music source, which EngineX unlocks; tracks are not matched to Deezer or NetEase.
 
 ### 3. Pioneer Rekordbox USB Plug & Play (No Desktop Conversion)
 Bring the Rekordbox USB stick you exported for CDJs and plug it straight into your Denon deck:
@@ -234,7 +234,7 @@ Extract the archive and start `Install-EngineX.bat`, `Install-EngineX.command`, 
 
 SSH requires root access. USB Fastboot requires `fastboot`, Python 3 and e2fsprogs installed separately; on Windows, use the Linux package in WSL with USB access. **Flashing a new `/data` image erases the data on that partition, including its music, library and settings.** Back up the deck first and disconnect USB drives and SD cards before installation. To preserve `/data`, use `--userdata-backup` with a full image from the same deck. This Beta has not been tested on real hardware.
 
-**SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Mixstream Pro+, Mixstream Pro Go, PRIME 4 G2 and Rane SYSTEM ONE** run signed firmware. **Never flash a `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` `.img` on these units.**
+**SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Mixstream Pro+, Mixstream Pro Go, PRIME 4 G2 and Rane SYSTEM ONE** (#61, #68, #69, #76) do not have a hardware eFuse lock; their stock updater (`az01-update` / `az0x-splash`) checks the `AZ0x` container RSA signature (`denon-1` / `rane-1`) in software before writing. On a stock unit, a modified `.img` or a first-generation `.img` (`PRIME4` / `PRIMEGO` / `MIXSTREAMPRO`) is simply rejected in software at the `Verifying` step—nothing is written and the unit is never bricked. For the initial install, use your model's `Data-Bundle.tar.gz` or `EngineX-Installer` (which installs into `/data/enginex` without touching the read-only system partition); once installed, later releases update in one tap from **Settings → About / Update**.
 
 <details>
 <summary>Advanced: manual installation and removal</summary>
@@ -286,7 +286,7 @@ Download the bundle for your model and check its SHA-256 against `SHA256SUMS.txt
 
 </details>
 
-> **PRIME 4 G2 / SYSTEM ONE (64-bit Engine)**: the UI packs, the streaming gateway (Deezer, SoundCloud, Beatport) and the EngineX services are in. The DSP guards, Master Soft Clipper and auto gain, SQLite tuning and the 4-deck unlock are not ported to the 64-bit Engine yet, and Stems stay as the official firmware has them. This Engine needs the unit's secure element (OP-TEE) to start, so the sandbox checked the hook, the edits and the pack loading but not the screens.
+> **PRIME 4 G2 / SYSTEM ONE (64-bit Engine)**: the UI packs, the streaming gateway (Deezer, SoundCloud, Beatport) and the EngineX services are in. It also carries the 16 Engine binary patches (including the stock Apple Music unlock), the 14 audio and transition DSP guards, the 0 dB Master Soft Clipper, auto gain, Echo Out on the up-fader, SQLite tuning and the 64-bit `OfflineAnalyzer` `.perf` injection (#149). The 4-deck unlock is for the stand-alone players only, and Stems stay as the official firmware has them. This Engine needs the unit's secure element (OP-TEE) to start, so the sandbox checked the hook, the edits and the pack loading but not the screens.
 
 ### Option 2: One-Click On-Deck Update (When Already Running EngineX OS)
 - Connect your deck to Wi-Fi or Ethernet and open **Settings → About / Update**;
@@ -309,9 +309,10 @@ No computer and no server are needed. Put the deck and your phone on the same Wi
 | Service | What you do |
 | --- | --- |
 | NetEase Cloud Music | Scan the deck's QR code with the NetEase Cloud Music app and confirm. If the code expires, tap it for a new one. |
-| Spotify | Step 1: tap **Open Spotify login** and agree. Step 2: Spotify then opens a `127.0.0.1` page that cannot load; copy its address and tap **Paste & Connect**. |
-| Deezer | Paste your **ARL** (the guide shows how to copy it from deezer.com on a computer). The same login unlocks lossless FLAC downloads (Deemix) for Spotify, NetEase and Deezer tracks. A profile link alone shows public playlists without downloads. |
-| SoundCloud | Enter your username or profile URL. No password, Artist Pro or API app needed. For private playlists, paste the `oauth_token` from soundcloud.com under *Advanced*. |
+| Spotify | **Method A (recommended)**: open Spotify on your phone or computer, play any song, tap the **Connect to a device** speaker icon and pick **`EngineX OS`** to bind your account in ~1 second. **Method B**: tap **Scan to log in** beside Spotify on the deck screen and scan the QR code. Plays native 320 kbps Ogg Vorbis directly from Spotify. |
+| Deezer | Paste your **ARL** (the guide shows how to copy it from deezer.com on a computer). The same login unlocks lossless FLAC downloads (Deemix) for Deezer tracks; NetEase tracks use it only if you pick *Deemix first* for NetEase. Every other service plays from itself, with no fallback to another service. A profile link alone shows public playlists without downloads. |
+| SoundCloud | Enter your username or profile URL. No password, Artist Pro or API app needed. For private playlists, paste the `oauth_token` from soundcloud.com under *Advanced*. Each track plays at the best quality it offers: the uploader's original where downloads are allowed, then 256 kbps AAC, 160 kbps AAC, 128 kbps MP3. |
+| Apple Music | Engine 5.3.0's own Apple Music source is unlocked and plays from Apple Music itself; EngineX no longer looks the track up on Deezer or NetEase. On your phone you can still paste a playlist link or add a `media-user-token` to browse your library. |
 | Beatport | Enter your Beatport email and password. The deck keeps only the login token. |
 
 ### Optional: Your Own Login Relay

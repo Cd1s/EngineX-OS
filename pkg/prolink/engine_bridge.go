@@ -93,7 +93,7 @@ func SyncEngineToPioneerExport(root string) error {
 	var newPlaylists []rekordbox.Playlist
 
 	if hasMDB {
-		db, err := sql.Open("sqlite", mdbPath)
+		db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdbPath, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String()) // read-only: never create -wal/-journal on the user's USB drive
 		if err != nil {
 			return fmt.Errorf("open engine m.db: %w", err)
 		}

@@ -55,7 +55,7 @@ def generate_debugfs_script(files_to_write, dirs_to_create, links=()):
     for src_path, target_rel, mode in files_to_write:
         target = '/' + str(target_rel).replace('\\', '/').strip('/')
         lines.append(f'rm {target}')
-        lines.append(f'write {src_path} {target}')
+        lines.append(f'write "{src_path}" "{target}"')
         lines.append(f'set_inode_field {target} mode 0{mode:o}')
     for path, target in links:
         lines.append(f'symlink {path} {target}')

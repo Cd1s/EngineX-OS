@@ -1099,16 +1099,21 @@ func python() string {
 
 // buildImage returns the /data image to flash and whether it is brand new (so empty of the user's files).
 func buildImage(ctx context.Context, o *options, b *bundleInfo, size int64, name, label string) (string, bool, error) {
-	img := filepath.Join(o.WorkDir, name)
+	final := filepath.Join(o.WorkDir, name)
+	// Build and inject into a .tmp file; a half-written or stale image is never left under the real name.
+	img := final + ".tmp"
 	fresh := false
+	ok := false
+	defer func() {
+		if !ok {
+			os.Remove(img)
+		}
+	}()
 	switch {
 	case o.Backup != "":
 		if err := copyFile(o.Backup, img); err != nil {
 			return "", false, err
 		}
-	case fileExists(img):
-		o.say("使用已有的 "+img, "Reusing the image already here: "+img)
-		return img, false, nil
 	default:
 		if size <= 0 {
 			return "", false, errors.New("读不到 data 分区大小，请用 --userdata-backup / cannot read the data partition size; pass --userdata-backup")
@@ -1137,10 +1142,35 @@ func buildImage(ctx context.Context, o *options, b *bundleInfo, size int64, name
 	if py == "" {
 		return "", false, errors.New("需要 python3 和 e2fsprogs (debugfs, mke2fs)；Windows 请在 WSL 里运行 / needs python3 and e2fsprogs; on Windows use WSL")
 	}
-	if out, err := exec.CommandContext(ctx, py, "-I", script, img, "--bundle", b.Path).CombinedOutput(); err != nil {
+	args := []string{"-I", script, img, "--bundle", b.Path}
+	if pub := sshPublicKey(o); pub != "" && bytes.Contains(b.HostScript, []byte("--ssh-key")) { // older bundles do not know the flag
+		args = append(args, "--ssh-key", pub)
+	}
+	if out, err := exec.CommandContext(ctx, py, args...).CombinedOutput(); err != nil {
 		return "", false, fmt.Errorf("host-install-userdata: %w\n%s", err, out)
 	}
-	return img, fresh, nil
+	if err := os.Rename(img, final); err != nil {
+		return "", false, err
+	}
+	ok = true
+	return final, fresh, nil
+}
+
+// sshPublicKey is the .pub of --key, else of the first ~/.ssh/id_* that has one; "" when there is none.
+func sshPublicKey(o *options) string {
+	if o.Key != "" {
+		if p := o.Key + ".pub"; fileExists(p) {
+			return p
+		}
+		return ""
+	}
+	home, _ := os.UserHomeDir()
+	for _, n := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
+		if p := filepath.Join(home, ".ssh", n+".pub"); fileExists(p) {
+			return p
+		}
+	}
+	return ""
 }
 
 func mustTemp() string {
@@ -1315,17 +1345,31 @@ func azModel(o *options, board, line string) (model, bool) {
 	if m, gen2, ok := lookupBoard(board); ok && gen2 {
 		return m, true
 	}
-	if base := filepath.Base(o.Bundle); o.Bundle != "" {
-		for _, m := range gen2Boards {
-			if strings.HasPrefix(base, m.Prefix+"-") {
-				return m, true
-			}
+	if o.Bundle != "" {
+		if m, ok := bundleModel(o.Bundle); ok {
+			return m, true
 		}
 	}
 	l := strings.ToLower(line)
 	for _, n := range azNames {
 		if strings.Contains(l, n.name) {
 			return gen2Boards[n.board], true
+		}
+	}
+	// Last resort: exactly one 2nd-gen bundle already in the work directory.
+	if o.Bundle == "" && board == "" {
+		if local, _ := filepath.Glob(filepath.Join(o.WorkDir, "*"+bundleSuffix)); len(local) == 1 {
+			return bundleModel(local[0])
+		}
+	}
+	return model{}, false
+}
+
+func bundleModel(path string) (model, bool) {
+	base := filepath.Base(path)
+	for _, m := range gen2Boards {
+		if strings.HasPrefix(base, m.Prefix+"-") {
+			return m, true
 		}
 	}
 	return model{}, false

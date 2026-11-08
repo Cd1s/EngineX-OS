@@ -1,13 +1,13 @@
 # Turn this Windows PC into the Stems renderer for EngineX decks on the same
 # LAN. Decks find it by themselves (UDP 17891 / mDNS) and render on the deck
-# again once it is switched off. Allow sc5000-stemsd.exe on private networks
+# again once it is switched off. Allow enginex-stemsd.exe on private networks
 # when Windows Firewall asks.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1          # auto
 #   powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs   # NVIDIA CUDA or CPU
 #   powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 hpss
 #
-# Needs Python 3 (python.org or the py launcher) and sc5000-stemsd.exe (in
+# Needs Python 3 (python.org or the py launcher) and enginex-stemsd.exe (in
 # PATH, next to this script, or $env:SC5000_STEMSD). Packages go into
 # %USERPROFILE%\.enginex-stems\venv.
 param([ValidateSet('auto', 'hpss', 'demucs', 'htdemucs')][string]$Backend = $(if ($env:ENGINEX_STEMS_BACKEND) { $env:ENGINEX_STEMS_BACKEND } else { 'auto' }))
@@ -19,10 +19,10 @@ $venv = Join-Path $home_ 'venv'
 $py = Join-Path $venv 'Scripts\python.exe'
 
 $bin = $env:SC5000_STEMSD
-if (-not $bin) { $bin = (Get-Command sc5000-stemsd.exe -ErrorAction SilentlyContinue).Source }
-if (-not $bin) { $bin = Join-Path $here 'sc5000-stemsd.exe' }
+if (-not $bin) { $bin = (Get-Command enginex-stemsd.exe -ErrorAction SilentlyContinue).Source }
+if (-not $bin) { $bin = Join-Path $here 'enginex-stemsd.exe' }
 if (-not (Test-Path $bin)) {
-    throw "sc5000-stemsd.exe not found: put the release binary next to this script or build it with 'go build ./cmd/sc5000-stemsd'"
+    throw "enginex-stemsd.exe not found: put the release binary next to this script or build it with 'go build ./cmd/enginex-stemsd'"
 }
 
 function Invoke-Checked { & $args[0] $args[1..($args.Count - 1)]; if ($LASTEXITCODE) { throw "failed: $args" } }

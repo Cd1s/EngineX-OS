@@ -47,7 +47,7 @@ func TestFromSpotifyDownloadsAndCaches(t *testing.T) {
 	j.spotify = func() *providers.Spotify { return sp }
 
 	ctx := context.Background()
-	track := providers.Track{ID: "sp-track-1", Provider: "spotify"}
+	track := providers.Track{ID: "sptrack1", Provider: "spotify"}
 
 	// 1. First fetch: should call DownloadAudio and return OGG_320
 	dl, err := j.fromSpotify(ctx, "session1", track, false)

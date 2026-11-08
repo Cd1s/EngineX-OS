@@ -210,7 +210,7 @@ func TestEOS03CorruptWaveformsPreserveCuesAndBeatData(t *testing.T) {
 				bad = placeholder(1e7)
 				bad[len(bad)-1] ^= 255
 			case "trailing":
-				bad = append(placeholder(1e7), 0)
+				bad = append(placeholder(1e7), 0, 1) // non-zero junk is damage
 			}
 			mustExec(t, db, "UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=? WHERE trackId=1", rawTrack(1e7), bad, beat, cues)
 			r, err := Heal(db)
@@ -239,6 +239,13 @@ func TestEOS03CorruptWaveformsPreserveCuesAndBeatData(t *testing.T) {
 				t.Fatalf("not idempotent: %+v %v", r, err)
 			}
 		})
+	}
+}
+func TestDecodeQCompressAcceptsZeroPadding(t *testing.T) {
+	want := []byte("waveform")
+	got, err := DecodeQCompress(append(EncodeQCompress(want), 0, 0, 0))
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("%q %v", got, err)
 	}
 }
 func TestQCompressRejectsBombAndTrackBeatCorruption(t *testing.T) {

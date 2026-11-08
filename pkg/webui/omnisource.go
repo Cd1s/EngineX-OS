@@ -268,12 +268,15 @@ func (s *Server) mountTracks(ctx context.Context, m RemoteMount) ([]trackRef, er
 	if mountDir == "" {
 		mountDir = filepath.Join(s.mediaRoot(), m.Name)
 	}
-	_ = filepath.WalkDir(mountDir, func(p string, d os.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(mountDir, func(p string, d os.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil || d == nil || d.IsDir() {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(p))
-		if _, ok := localCodecs[ext]; !ok && ext != ".wav" {
+		if _, ok := localCodecs[ext]; !ok {
 			return nil
 		}
 		rel, err := filepath.Rel(mountDir, p)
@@ -297,6 +300,9 @@ func (s *Server) mountTracks(ctx context.Context, m RemoteMount) ([]trackRef, er
 		}
 		return nil
 	})
+	if ctx.Err() != nil {
+		return nil, walkErr
+	}
 	return refs, nil
 }
 

@@ -7,15 +7,15 @@
 #   tools/stems/run-home-worker.sh demucs     # install demucs (torch) and use it
 #   tools/stems/run-home-worker.sh hpss       # fast spectral split, numpy + scipy only
 #
-# Needs python3 and the sc5000-stemsd binary (in PATH, next to this script, or
+# Needs python3 and the enginex-stemsd binary (in PATH, next to this script, or
 # SC5000_STEMSD=/path). Python packages go into ~/.enginex-stems/venv.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 backend=${1:-${ENGINEX_STEMS_BACKEND:-auto}}
 venv=${ENGINEX_STEMS_HOME:-$HOME/.enginex-stems}/venv
-bin=${SC5000_STEMSD:-$(command -v sc5000-stemsd || echo "$here/sc5000-stemsd")}
+bin=${SC5000_STEMSD:-$(command -v enginex-stemsd || command -v sc5000-stemsd || echo "$here/enginex-stemsd")}
 if [ ! -x "$bin" ]; then
-  echo "sc5000-stemsd not found: put the release binary next to this script or build it with 'go build ./cmd/sc5000-stemsd'" >&2
+  echo "enginex-stemsd not found: put the release binary next to this script or build it with 'go build ./cmd/enginex-stemsd'" >&2
   exit 1
 fi
 [ -x "$venv/bin/python3" ] || python3 -m venv "$venv"

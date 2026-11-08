@@ -807,6 +807,9 @@ func TestExportIdentityFollowsPeers(t *testing.T) {
 // handed over the Pro DJ Link way (0x26 request, 0x27 answer on the beat port).
 func TestExportDeckMasterAndHandoff(t *testing.T) {
 	r := &exportRun{player: 3}
+	if b := r.statusPacket(); string(b[0x7c:0x80]) != "3.30" {
+		t.Fatalf("firmware %q", b[0x7c:0x80])
+	}
 	if b := r.statusPacket(); b[0x89] != 0x84 || binary.BigEndian.Uint16(b[0x92:]) != 0xffff || b[0x9f] != 0xff {
 		t.Fatalf("idle: % x", b[0x89:0xa0])
 	}

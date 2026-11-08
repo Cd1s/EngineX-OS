@@ -1277,6 +1277,27 @@ func TestAZModel(t *testing.T) {
 	}
 }
 
+func TestAZModelLocalBundle(t *testing.T) {
+	dir := t.TempDir()
+	o := &options{WorkDir: dir}
+	if _, ok := azModel(o, "", "1cc5:2027"); ok {
+		t.Fatal("empty work dir must not identify a model")
+	}
+	one := filepath.Join(dir, "PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz")
+	if err := os.WriteFile(one, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := azModel(o, "", "1cc5:2027"); !ok || m.Prefix != "PRIME4G2" {
+		t.Fatalf("one local bundle: got %v %v", m, ok)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SYSTEMONE-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := azModel(o, "", "1cc5:2027"); ok {
+		t.Fatal("two local bundles are ambiguous")
+	}
+}
+
 type usbShim struct {
 	script []byte
 	img    string

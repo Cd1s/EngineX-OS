@@ -21,7 +21,7 @@
 **EngineX OS 5.3.0.3** 是基於官方 Engine OS 5.3.0+ 底層重構的客製系統，支援天龍 Denon DJ、Numark 與 Rane 全系 16 款獨立設備：
 `SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro` · `SC LIVE 4` · `SC LIVE 2` · `PRIME 4+` · `PRIME GO+` · `Mixstream Pro+` · `Mixstream Pro Go` · `PRIME 4 G2` · `Rane SYSTEM ONE`。
 
-前八款用隨身碟刷 `.img`；後八款二代機的韌體帶簽章驗證，改用 `/data` 資料包（Beta，見[如何安裝與升級](#install)）。
+前八款用隨身碟刷 `.img`；後八款二代機的更新程式會在寫入前用軟體驗證韌體簽章，改用 `/data` 資料包（Beta，見[如何安裝與升級](#install)）。
 
 操作介面與原廠完全一致，直接透過隨身碟刷入即可解鎖以下功能。
 
@@ -43,7 +43,7 @@
 - 手機掃描播放機螢幕上的 QR Code 即可登入個人帳號，直接瀏覽個人歌單、收藏夾並線上搜歌；
 - 支援 **無損 FLAC / 320k MP3** 音質切換；播放過的曲目自動快取在播放機內部儲存，再次載入直接秒開，絕不重複下載。
 - **Beatport** 使用你自己的帳號與訂閱：Professional 下載 FLAC 或 256k AAC，Advanced 下載 128k AAC，Essential 線上播放 128k AAC 串流；Beatport 曲目同樣可以一鍵拆 Stems。
-- **Apple Music**：在手機上貼上任意歌單或專輯連結即可，不需要帳號；再填入 `media-user-token` 就能瀏覽自己的資料庫。Apple Music 的音訊受保護，所以每首歌依 ISRC 或歌名加歌手比對，從 Deezer（無損 FLAC）或網易雲播放。
+- **Apple Music**：在手機上貼上任意歌單或專輯連結即可，不需要帳號；再填入 `media-user-token` 就能瀏覽自己的資料庫。播放走 Engine 5.3.0 內建的 Apple Music 音源（EngineX 負責解鎖），不再比對 Deezer 或網易雲。
 
 ### 3. 先鋒 Rekordbox 隨身碟隨插即用（免電腦轉庫）
 平時給先鋒 CDJ 匯出的 Rekordbox 隨身碟，直接插上即可上台演出：
@@ -234,7 +234,7 @@ EngineX-Installer 支援一代與二代機，不必輸入 IP 或選擇機型，�
 
 SSH 需要播放機的 root 存取權限。USB Fastboot 需要另外安裝 `fastboot`、Python 3 和 e2fsprogs；Windows 請在有 USB 存取權限的 WSL 中執行 Linux 套件。**刷入新的 `/data` 映像檔會清空該分割區上的音樂、曲庫和設定。**請先備份播放機資料，安裝前拔除隨身碟和 SD 卡。要保留 `/data`，請透過 `--userdata-backup` 提供該播放機的完整分割區映像檔。本 Beta 尚未在實機驗證。
 
-**SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go、PRIME 4 G2 和 Rane SYSTEM ONE**（#61、#68、#69、#76）的韌體帶簽章驗證，不接受修改過的 `.img`。EngineX OS 以 `/data` 資料包的形式裝在官方 Engine OS 5.3.0 之上，不改動系統分割區。**這些機器千萬不要刷 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的 `.img`。** 資料包已在官方根檔案系統上通過沙箱測試，還沒在實機上試過，歡迎回報結果。
+**SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go、PRIME 4 G2 和 Rane SYSTEM ONE**（#61、#68、#69、#76）沒有硬體 eFuse 熔斷鎖死，原廠更新程式（`az01-update` / `az0x-splash`）是在軟體層用 `denon-1` / `rane-1` 公鑰驗證 `AZ0x` 韌體容器簽章。在原廠未改裝狀態下，刷入修改過的 `.img` 或一代機的 `.img`（如 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO`）會在寫入前的 `Verifying`（驗證）階段直接被軟體拒簽退回，根本不會寫入快閃記憶體，更不會觸發熔斷或變磚。首次安裝請使用對應二代機型的 `Data-Bundle.tar.gz` 或 `EngineX-Installer`（裝入 `/data/enginex`，不改動唯讀系統分割區，移除即恢復原廠）；首次裝好後，後續新版本可直接在播放機螢幕 **設定 → 關於 / 更新** 一鍵線上 OTA 升級。
 
 <details>
 <summary>進階使用者：手動指令安裝 / 移除說明</summary>
@@ -286,7 +286,7 @@ SSH 需要播放機的 root 存取權限。USB Fastboot 需要另外安裝 `fast
 
 </details>
 
-> **PRIME 4 G2 / SYSTEM ONE（64 位元 Engine）**：已包含 UI 包、串流閘道（Deezer、SoundCloud、Beatport）和 EngineX 各項服務。DSP 防護、0dB 防破音軟限幅與自動增益、SQLite 調校和 4 台面解鎖還沒移植到 64 位元 Engine；Stems 保持官方韌體原樣。這份 Engine 啟動要用機器的安全晶片（OP-TEE），沙箱裡只驗證了 hook、記憶體補丁和 UI 包載入，沒看到實際介面。
+> **PRIME 4 G2 / SYSTEM ONE（64 位元 Engine）**：已包含 UI 包、串流閘道（Deezer、SoundCloud、Beatport）和 EngineX 各項服務。同時帶有 16 處 Engine 二進位補丁（含原廠 Apple Music 解鎖）、14 處音訊與過渡 DSP 防護、0dB 防破音軟限幅、自動增益、推桿切歌回音（Echo Out）、SQLite 調校，以及 64 位元 `OfflineAnalyzer` 的 `.perf` 波形直注（#149）。4 台面解鎖只適用於單機播放器；Stems 保持官方韌體原樣。這份 Engine 啟動要用機器的安全晶片（OP-TEE），沙箱裡只驗證了 hook、記憶體補丁和 UI 包載入，沒看到實際介面。
 
 ### 方式二：播放機螢幕一鍵線上升級（已安裝本系統後）
 - 連接 Wi-Fi 或網路線後，開啟播放機 **設定 → 關於 / 更新**；
@@ -309,9 +309,10 @@ powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs
 | 平台 | 怎麼登入 |
 | --- | --- |
 | 網易雲音樂 | 用網易雲音樂 App 掃播放機螢幕上的 QR Code 並確認。QR Code 過期後點一下就會換新的。 |
-| Spotify | 第 1 步：點「開啟 Spotify 登入」並同意。第 2 步：隨後會開啟一個以 `127.0.0.1` 開頭、無法連線的頁面，複製它的網址，點「貼上並連接」。 |
-| Deezer | 貼上你的 **ARL**（頁面教學示範怎樣在電腦上從 deezer.com 複製）。同一次登入也為 Spotify、網易雲和 Deezer 曲目開啟 Deemix 無損 FLAC 下載。只填個人頁面連結則只顯示公開歌單、不能下載。 |
-| SoundCloud | 填使用者名稱或主頁連結即可，不用密碼、不用 Artist Pro、也不用申請 API。私人歌單在「進階」裡貼上 soundcloud.com 的 `oauth_token`。 |
+| Spotify | **方式 A（推薦）**：手機或電腦開啟 Spotify App 播放任意歌曲，點右下角「連接裝置」喇叭圖示，選擇 **`EngineX OS`** 約 1 秒自動完成帳號綁定。**方式 B**：點 Spotify 右側的「掃碼登入」用手機掃碼。直接從 Spotify 拉取 320kbps Ogg Vorbis 原生音訊播放。 |
+| Deezer | 貼上你的 **ARL**（頁面教學示範怎樣在電腦上從 deezer.com 複製）。同一次登入為 Deezer 曲目開啟 Deemix 無損 FLAC 下載；網易雲只有選了「Deemix 優先」才會用到它。其餘平台都只從自己的音源播放，不會跨平台備援。只填個人頁面連結則只顯示公開歌單、不能下載。 |
+| SoundCloud | 填使用者名稱或主頁連結即可，不用密碼、不用 Artist Pro、也不用申請 API。私人歌單在「進階」裡貼上 soundcloud.com 的 `oauth_token`。每首歌依它能提供的最高音質播放：允許下載的用上傳者原檔，其次 256kbps AAC、160kbps AAC、128kbps MP3。 |
+| Apple Music | 已解鎖 Engine 5.3.0 內建的 Apple Music 音源，直接從 Apple Music 播放，EngineX 不再去 Deezer 或網易雲找替身。手機上仍可貼上歌單連結，或填 `media-user-token` 瀏覽自己的資料庫。 |
 | Beatport | 填 Beatport 電子郵件和密碼，播放機只儲存登入權杖。 |
 
 ### 選配：自建登入中繼

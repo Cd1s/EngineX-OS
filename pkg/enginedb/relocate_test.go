@@ -97,3 +97,19 @@ func TestRelocateNeedsALibrary(t *testing.T) {
 		t.Fatal("empty drive accepted")
 	}
 }
+
+// A file whose path differs from the missing track only in case must still match at TierNoCase.
+func TestRelocateInPlaceCaseMismatch(t *testing.T) {
+	_, root, db := testlibrary.Create(t)
+	writeAudio(t, root, "Music/Song.mp3", 4)
+	if _, err := db.Exec(`INSERT INTO Track(id,path,filename,fileBytes) VALUES(1,'../Music/song.mp3','song.mp3',4)`); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Relocate(context.Background(), RelocateOptions{Root: root, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Moves) != 1 || res.Moves[0].NewPath != "../Music/Song.mp3" || res.Moves[0].Tier != TierNoCase {
+		t.Fatalf("%+v", res)
+	}
+}
