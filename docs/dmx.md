@@ -2,7 +2,7 @@
 
 The lighting engine is built into stream-sync's Go WebUI server. It does not
 need the Python dmx-studio Mod. Leave that Mod disabled when using this engine.
-The default is off: no DMX worker, timer, socket, USB open, or QML Loader item.
+The default is off: no DMX worker, timer, socket, USB open, or loaded QML component.
 No service or SoundSwitch property is changed.
 
 Open the authenticated Web Console, then **DMX Lighting** (`/dmx`). Stop
@@ -22,7 +22,9 @@ Linux USB routes are optional. Select an FTDI/OpenDMX `/dev/ttyUSB*` or
 before vendor control requests. Missing or inaccessible USB devices are
 reported in status and skipped while other routes continue. FTDI uses raw
 250000 baud 8N2 and a break; uDMX uses usbfs. Neither needs Python/libusb.
-Actual USB hardware timing remains to be verified on the deck.
+Actual USB hardware timing remains to be verified on the deck. To pick up an
+adapter plugged in later, disable and re-enable DMX; after replugging, check its
+device node or bus/address.
 
 Sync uses the selected master deck's OriginalBPM adjusted by SpeedState pitch
 and fractional BeatNumber, with timestamped extrapolation between samples.
@@ -40,16 +42,22 @@ Console. The three-language strings use the existing i18n.tsv dictionary.
 
 Blackout sends zero on every slot. Disabling, reconfiguring routes, or closing
 the engine sends three zero frames (sACN includes Stream_Terminated) and closes
-all adapters. Live color/dimmer/effect changes preserve sockets and phase.
+all adapters. Live color/dimmer/effect changes preserve sockets; speed and manual BPM changes
+can jump the movement phase, matching the original plugin.
 Restart retains the opt-in and patch but restores blackout. SoundSwitch's
 presence prevents activation; if it starts later, standalone output stops
 within one second. It never stops or reconfigures SoundSwitch.
 
 `GET/POST /api/dmx` uses the console's existing authentication and origin rules.
 `GET/POST /v1/sc5000/dmx`, `GET /v1/sc5000/dmx.qml`, and
-`POST /v1/sc5000/dmx/clock` are loopback-only through the streaming gateway.
-POST actions are `configure` (with the complete `config` from GET), `blackout`,
-and `disable`. The clock accepts the existing array of deck-state objects.
+`POST /v1/sc5000/dmx/clock` require direct loopback requests through the streaming
+gateway (a literal loopback Host and no forwarding headers).
+Web POST actions are `configure` (with the complete `config` and `revision` from
+GET), `control` (a partial `control` object), `blackout`, and `disable`. Stale
+full configurations are rejected with 409. Native POST is performance-only:
+`control` accepts blackout, master, effect and RGB; it cannot edit routes,
+patches or the opt-in. Blackout/disable remain effective if persistence fails.
+The clock accepts the existing array of deck-state objects.
 Configuration is atomically stored in `ui/dmx.json`.
 
 ## Two SC5000 verification (PM deployment only)

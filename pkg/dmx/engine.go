@@ -90,7 +90,7 @@ func (e *Engine) SetClock(c Clock) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if !e.config.Enabled || (!e.clock.At.IsZero() && !c.At.After(e.clock.At)) {
+	if !e.config.Enabled || (e.clock.Valid(now) && !c.At.After(e.clock.At)) {
 		return
 	}
 	base := c.Beat
@@ -168,9 +168,8 @@ func (e *Engine) Apply(c Config) error {
 			if o.Protocol == "sacn" {
 				port = 5568
 			}
-			// Open before selecting the destination: Linux requires SO_BROADCAST
-			// before a broadcast connect/send, so DialUDP followed by setsockopt
-			// rejects the usual Art-Net broadcast destination.
+			// Unconnected sockets support broadcast and avoid sticky ICMP
+			// "connection refused" errors if a receiver restarts.
 			r.address = &net.UDPAddr{IP: net.ParseIP(o.Host), Port: port}
 			r.network, err = net.ListenUDP("udp4", nil)
 			if err == nil {
