@@ -208,8 +208,8 @@ mkdir -p "$SC5000_PROC_ROOT/100/task/"{100,101,102} "$SC5000_PROC_ROOT/200"
 ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
 printf 'EMain\n' > "$SC5000_PROC_ROOT/100/comm"
 printf 'irq/42-i2s\n' > "$SC5000_PROC_ROOT/200/comm"
-mkdir -p "$SC5000_PROC_ROOT/100/task/"{103,104,105,106,107,108}
-for tid in 100 101 102 103 104 105 106 107 108; do
+mkdir -p "$SC5000_PROC_ROOT/100/task/"{103,104,105,106,107,108,110}
+for tid in 100 101 102 103 104 105 106 107 108 110; do
     policy=0; name=GUI
     if [[ $tid == 101 ]]; then policy=1; name=AudioRT; fi
     if [[ $tid == 102 ]]; then name=AudioHelper; fi
@@ -219,6 +219,7 @@ for tid in 100 101 102 103 104 105 106 107 108; do
     if [[ $tid == 106 ]]; then policy=2; name=AudioRenderer3; fi
     if [[ $tid == 107 ]]; then name=J:I:Takingfreez; fi
     if [[ $tid == 108 ]]; then name=QQmlThread; fi
+    if [[ $tid == 110 ]]; then name=AudioOut; fi # named before its RT policy is set
     if (( tid >= 103 )); then printf 'Cpus_allowed_list:\t1\n' > "$SC5000_PROC_ROOT/100/task/$tid/status"; fi
     if [[ $tid == 107 ]]; then printf 'Cpus_allowed_list:\t0-3\n' > "$SC5000_PROC_ROOT/100/task/$tid/status"; fi
     if [[ $tid == 108 ]]; then printf 'Cpus_allowed_list:\t2\n' > "$SC5000_PROC_ROOT/100/task/$tid/status"; fi
@@ -269,6 +270,7 @@ has 'taskset <-pc> <0,3> <108>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <0,3> <300>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <0,3> <301>' "$MOCK_ROOT/log"
 lacks '> <106>' "$MOCK_ROOT/log"
+lacks '> <110>' "$MOCK_ROOT/log"
 lacks 'chrt <-f> <-p> <40> <106>' "$MOCK_ROOT/log"
 has 1 "$SC5000_PROC_ROOT/irq/42/smp_affinity"
 has 8 "$SC5000_PROC_ROOT/irq/43/smp_affinity"
@@ -297,6 +299,42 @@ sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 find "$SC5000_SYS_ROOT" "$SC5000_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/after"
 cmp -s "$MOCK_ROOT/before" "$MOCK_ROOT/after" || fail 'performance tuning is not idempotent'
 ok 'CPU/GPU, sysctl, schedulers, IRQs and RT-vs-GUI affinity are idempotent'
+
+# A network helper born after the startup passes must leave CPU1 on a periodic
+# sweep. Fake sleep advances those phases deterministically, then ends Engine.
+cat > "$TMP/bin/sleep" <<'SLEEP'
+#!/bin/bash
+set -eu
+n=$(cat "$MOCK_ROOT/sleep-count" 2>/dev/null || printf 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$MOCK_ROOT/sleep-count"
+if [[ $n == 2 ]]; then
+    cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/100/task/109"
+    printf 'event_engine\n' > "$SC5000_PROC_ROOT/100/task/109/comm"
+elif [[ $n == 3 ]]; then
+    printf '%s\n' "$PPID" > "$MOCK_ROOT/sweeper-pid"
+    unlink "$SC5000_PROC_ROOT/100/exe"
+    touch "$MOCK_ROOT/sweeper-done"
+fi
+SLEEP
+chmod +x "$TMP/bin/sleep"
+SC5000_THREAD_DELAYS=0 SC5000_THREAD_INTERVAL=30 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
+for ((attempt=0; attempt<100; attempt++)); do
+    [[ ! -e $MOCK_ROOT/sweeper-done ]] || break
+    /bin/sleep 0.05
+done
+[[ -e $MOCK_ROOT/sweeper-done ]] || fail 'periodic sweeper did not stop with Engine'
+sweeper_pid=$(cat "$MOCK_ROOT/sweeper-pid")
+for ((attempt=0; attempt<100; attempt++)); do
+    sweeper_state=$(awk '{print $3}' "/proc/$sweeper_pid/stat" 2>/dev/null || true)
+    [[ -n $sweeper_state && $sweeper_state != Z ]] || break
+    /bin/sleep 0.05
+done
+[[ -z $sweeper_state || $sweeper_state == Z ]] || fail 'sweeper survived Engine exit'
+has 'taskset <-pc> <0,3> <109>' "$MOCK_ROOT/log"
+unlink "$TMP/bin/sleep"
+ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
+ok 'late helpers leave the GUI core and the sweeper stops with Engine'
 
 # Hot at Engine start: the GPU idles at its lowest clock.
 mkdir -p "$SC5000_SYS_ROOT/class/thermal/thermal_zone0"

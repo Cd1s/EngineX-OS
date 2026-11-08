@@ -38,7 +38,7 @@ class DictionaryTest(unittest.TestCase):
 @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise QML JavaScript")
 class HotPathTest(unittest.TestCase):
     def test_cue_bindings_and_status_polling(self):
-        names = ("scTr", "scCueProps", "scNextCueInfo", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
+        names = ("scTr", "scCuePlaying", "scProbeCueClocks", "scCueProps", "scNextCueInfo", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
         functions = []
         for name in names:
             functions.append(re.search(r"\tfunction " + name + r"\([^\n]*\) \{\n.*?\n\t\}", packs.SERVICES_MAIN, re.S).group())
@@ -49,8 +49,10 @@ const assert = require('node:assert/strict');
 const root = globalThis;
 let lookups = 0, made = 0, applied = 0;
 const properties = {};
+const unavailable = new Set();
 const Planck = {getProperty(path) {
     lookups++;
+    if (unavailable.has(path)) return null;
     return {translator: properties[path] ||= {state: false, value: 0, unnormalized: 0, string: ""}};
 }};
 var scPropCache = {}, scCuePropCache = {}, scCueInfoCache = {}, scUiPoll = null, scUiPollAt = 0;
@@ -64,7 +66,7 @@ class XMLHttpRequest {
     send() {}
     abort() { this.readyState = 0; this.aborted = true; }
 }
-''' + "\n".join(functions) + "\nroot.scTr = scTr;\n" + r'''
+''' + "\n".join(functions) + "\nroot.scTr = scTr; root.scCuePlaying = scCuePlaying; root.scCueProbe = 0;\n" + r'''
 const set = (key, fields) => Object.assign(scTr('/Engine/Deck1/' + key), fields);
 set('Track/SongLoaded', {state: true});
 set('Track/SampleRate', {value: 1000});
@@ -89,6 +91,14 @@ set('PlayState', {state: true});
 ''' + "\n".join(f"assert.equal(!!({expr}), {str(i == 0).lower()});" for i, expr in enumerate(running)) + r'''
 root.scCueCountdown = false;
 ''' + "\n".join(f"assert.equal(!!({expr}), false);" for expr in running) + r'''
+root.scCueCountdown = true;
+const missingPath = '/Engine/Deck3/PlayState';
+delete scPropCache[missingPath]; unavailable.add(missingPath);
+assert.equal(scCuePlaying(3, root.scCueProbe), false);
+scProbeCueClocks(); assert.equal(root.scCueProbe, 1); // settings poll wakes missing-property bindings
+unavailable.delete(missingPath); properties[missingPath].state = true;
+assert.equal(scCuePlaying(3, root.scCueProbe), true);
+scProbeCueClocks(); assert.equal(root.scCueProbe, 1); // stop probing once discovered
 assert(scSameItems(['tidal', 'spotify'], ['tidal', 'spotify']));
 assert(!scSameItems(['tidal'], ['spotify']));
 assert(!scSameItems(['tidal'], ['tidal', 'spotify']));

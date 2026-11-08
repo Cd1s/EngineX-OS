@@ -257,32 +257,45 @@ SERVICES_MAIN = """
 	}
 	// #151: CDJ-style BARS.BEATS countdown to the next hot cue ahead of the playhead.
 	// A paused deck must not invalidate the other decks' cue bindings.
+	property int scCueProbe: 0
+	function scCuePlaying(d, probe) {
+		const t = root.scTr("/Engine/Deck" + d + "/PlayState")
+		return !!t && t.state
+	}
+	function scProbeCueClocks() {
+		if (!root.scCueCountdown) return
+		// Reuse the existing settings poll to retry properties absent at startup.
+		// Once all translators are cached this does nothing; no extra polling Timer.
+		if (!scPropCache["/Engine/Deck1/PlayState"] || !scPropCache["/Engine/Deck2/PlayState"] ||
+			!scPropCache["/Engine/Deck3/PlayState"] || !scPropCache["/Engine/Deck4/PlayState"])
+			root.scCueProbe = (root.scCueProbe + 1) & 0xffff
+	}
 	Timer {
 		id: scCueClock1
 		property int tick: 0
 		interval: 200; repeat: true
-		running: root.scCueCountdown && !!root.scTr("/Engine/Deck1/PlayState") && root.scTr("/Engine/Deck1/PlayState").state
+		running: root.scCueCountdown && root.scCuePlaying(1, root.scCueProbe)
 		onTriggered: tick = (tick + 1) & 0xffff
 	}
 	Timer {
 		id: scCueClock2
 		property int tick: 0
 		interval: 200; repeat: true
-		running: root.scCueCountdown && !!root.scTr("/Engine/Deck2/PlayState") && root.scTr("/Engine/Deck2/PlayState").state
+		running: root.scCueCountdown && root.scCuePlaying(2, root.scCueProbe)
 		onTriggered: tick = (tick + 1) & 0xffff
 	}
 	Timer {
 		id: scCueClock3
 		property int tick: 0
 		interval: 200; repeat: true
-		running: root.scCueCountdown && !!root.scTr("/Engine/Deck3/PlayState") && root.scTr("/Engine/Deck3/PlayState").state
+		running: root.scCueCountdown && root.scCuePlaying(3, root.scCueProbe)
 		onTriggered: tick = (tick + 1) & 0xffff
 	}
 	Timer {
 		id: scCueClock4
 		property int tick: 0
 		interval: 200; repeat: true
-		running: root.scCueCountdown && !!root.scTr("/Engine/Deck4/PlayState") && root.scTr("/Engine/Deck4/PlayState").state
+		running: root.scCueCountdown && root.scCuePlaying(4, root.scCueProbe)
 		onTriggered: tick = (tick + 1) & 0xffff
 	}
 	function scCueTickFor(d) {
@@ -1163,6 +1176,7 @@ SERVICES_MAIN = """
 			if (lbj && !lbj.state) lbj.state = true
 		}
 		scUiLoaded = true
+		scProbeCueClocks()
 	}
 	function scSameItems(a, b) {
 		if (a === b) return true
