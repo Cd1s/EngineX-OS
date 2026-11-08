@@ -76,8 +76,8 @@ type Config struct {
 	Factory func(provider string, guest bool, userID string) (providers.Provider, error)
 }
 type Server struct {
-	dmx *dmx.Engine
-	dmxMu sync.Mutex
+	dmx           *dmx.Engine
+	dmxMu         sync.Mutex
 	cfg           Config
 	jobs          *Jobs
 	mu            sync.Mutex
@@ -329,7 +329,9 @@ func (s *Server) tryExport() {
 
 // Close releases optional network exports, including active dbserver clients.
 func (s *Server) Close() {
-	if s.dmx != nil { s.dmx.Close() }
+	if s.dmx != nil {
+		s.dmx.Close()
+	}
 	s.closeOnce.Do(func() { close(s.closed) })
 	if s.tidal != nil {
 		s.tidal.saveTracks() // the IDs Engine still lists, for the next run (#73)
