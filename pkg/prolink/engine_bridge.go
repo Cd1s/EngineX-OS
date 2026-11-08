@@ -194,11 +194,11 @@ func SyncEngineToPioneerExport(root string) error {
 			if effectiveBPM <= 0 && bpmInt > 0 {
 				effectiveBPM = float64(bpmInt)
 			}
-			if effectiveBPM <= 0 {
-				effectiveBPM = 120.0
+			if !finiteEngine(effectiveBPM) || effectiveBPM < 0 || effectiveBPM > 1000 {
+				effectiveBPM = 0
 			}
-			if length <= 0 {
-				length = 180
+			if length < 0 {
+				length = 0
 			}
 
 			cleanPath := rawPath
@@ -257,7 +257,7 @@ func SyncEngineToPioneerExport(root string) error {
 			if artID > 0 {
 				t.ArtworkPath, err = exportEngineArtwork(db, root, artID)
 				if err != nil {
-					return err
+					log.Printf("prolink: Engine track %d: omit unavailable artwork: %v", id, err)
 				}
 			}
 			newTracks = append(newTracks, t)
