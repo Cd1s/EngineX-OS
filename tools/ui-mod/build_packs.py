@@ -2129,9 +2129,40 @@ def edits(dev: bool):
             ("GridView.view.model.index(model.index, 0)", "Planck.librarianController.browserSourceControllerPtr().availableSourceModel().index(model.index, 0)"),
             ("GridView.isCurrentItem || cellContent.pressed", "availableSource.currentIndex === model.index || cellContent.pressed"),
         ],
+        # #142: Suppress non-interactive background Wi-Fi and network modal pop-ups
+        # ("Wi-Fi Login Error: Failed to connect / Lost connection") that disrupt live gigs
+        # and reset browse session / focus state.
+        v + "WifiSelect/WifiLoginFailed.qml": [(
+            "		function onLoginFailed(reason) {\n",
+            "		function onLoginFailed(reason) {\n"
+            "			const pShow = Planck.getProperty(\"/GUI/ShowWifiView\")\n"
+            "			const wifiVisible = !!((pShow && pShow.translator && pShow.translator.state) ||\n"
+            "			                       (target && (target.wifiSelectionVisible || target.passwordDialogVisible)) ||\n"
+            "			                       (typeof onBoardingWizardVisible !== \"undefined\" && onBoardingWizardVisible))\n"
+            "			const isPlaying = [1, 2, 3, 4].some(d => {\n"
+            "				const p = Planck.getProperty(\"/Engine/Deck\" + d + \"/PlayState\")\n"
+            "				return !!(p && p.translator && p.translator.state)\n"
+            "			})\n"
+            "			if (!wifiVisible || isPlaying || reason === \"lost-connection\") return\n",
+        )],
         v + "Streaming/StreamingDialog.qml": [
             # This limit is for TIDAL's own qualities; DJ sets here run for hours.
             ("		function onShowTrackTooLong() {\n", "		function onShowTrackTooLong() {\n			return\n"),
+            # #142: Suppress background network alerts that disrupt live playback and reset GUI focus
+            ("		function onShowNoNetwork() {\n", "		function onShowNoNetwork() {\n			return\n"),
+            ("		function onShowLostConnection() {\n", "		function onShowLostConnection() {\n			return\n"),
+            ("		function onShowLoginFailed(provider, message) {\n",
+             "		function onShowLoginFailed(provider, message) {\n"
+             "			const pShowLogin = Planck.getProperty(\"/Client/Librarian/Streaming/ShowLoginPanel\")\n"
+             "			const isLoginVisible = !!(pShowLogin && pShowLogin.translator && pShowLogin.translator.state)\n"
+             "			const isPlaying = [1, 2, 3, 4].some(d => {\n"
+             "				const p = Planck.getProperty(\"/Engine/Deck\" + d + \"/PlayState\")\n"
+             "				return !!(p && p.translator && p.translator.state)\n"
+             "			})\n"
+             "			if (!isLoginVisible || isPlaying) {\n"
+             "				Planck.librarianController.streamingInterfaceController.cancelLogoutSpinner()\n"
+             "				return\n"
+             "			}\n"),
             ("		function onShowGenericError(errorMessage, title) {\n", "		function onShowGenericError(errorMessage, title) {\n			title = root.scBrand(title)\n			errorMessage = root.scBrand(errorMessage)\n"),
             ("		function onShowGenericMessage(message, title) {\n", "		function onShowGenericMessage(message, title) {\n			title = root.scBrand(title)\n			message = root.scBrand(message)\n"),
             ("`${provider.displayName}: ${message}`", "root.scBrand(`${provider.displayName}: ${message}`)"),
