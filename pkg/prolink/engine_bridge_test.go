@@ -1,6 +1,16 @@
 package prolink_test
 
 import (
+ "bytes"
+ "crypto/sha256"
+ "encoding/binary"
+ "fmt"
+ "image"
+ "image/jpeg"
+ "math"
+ "reflect"
+ "strings"
+ "time"
 	"database/sql"
 	"net"
 	"os"
@@ -10,6 +20,8 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+ "github.com/Cd1s/EngineX-OS/internal/testlibrary"
+ "github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
@@ -136,11 +148,8 @@ func TestEngineBridgeSyncAndAnalysis(t *testing.T) {
 	}
 	wave, beats, durMS := prolink.ExtractANLZ(a)
 	_ = wave
-	if len(beats) < 100 {
-		t.Errorf("expected generated beatgrid, got %d beats", len(beats))
-	}
-	if durMS == 0 {
-		t.Errorf("expected non-zero duration from beatgrid")
+	if len(beats) != 0 || durMS != 0 {
+		t.Errorf("unanalysed audio acquired invented beats: %d, duration %d", len(beats), durMS)
 	}
 
 	// Calling SyncEngineToPioneerExport again should be a no-op (stamp match)
@@ -254,4 +263,138 @@ func TestEngineBridgeLeavesARealExportAlone(t *testing.T) {
 	if after, _ := os.ReadFile(pdbPath); string(after) != string(before) || prolink.GeneratedExport(root) {
 		t.Fatal("a real rekordbox export was rewritten")
 	}
+}
+
+// These blobs follow the captured Engine mixed-endian structures, independently
+// of the export encoder. Sparse adjusted markers exercise tempo changes and a
+// non-zero downbeat; the captured DDL provides the real tables and triggers.
+func bridgeEnginePerformance(t *testing.T) (beat, quick, loops, overview []byte) {
+ t.Helper()
+ var b bytes.Buffer
+ put:=func(buf *bytes.Buffer, order binary.ByteOrder, v any) { t.Helper();if err:=binary.Write(buf,order,v);err!=nil { t.Fatal(err) } }
+ qc:=func(raw []byte) []byte { t.Helper();v,err:=enginedb.QCompress(raw);if err!=nil { t.Fatal(err) };return v }
+ put(&b,binary.BigEndian,float64(48000));put(&b,binary.BigEndian,float64(192000));b.WriteByte(1)
+ for _,markers:=range [][][2]int64{{{0,0},{192000,8}},{{24000,0},{72000,2},{168000,5}}} {
+  put(&b,binary.BigEndian,uint64(len(markers)))
+  for _,m:=range markers { put(&b,binary.LittleEndian,float64(m[0]));put(&b,binary.LittleEndian,m[1]);put(&b,binary.LittleEndian,uint32(1));put(&b,binary.LittleEndian,uint32(0)) }
+ }
+ b.WriteByte(0);beat=qc(b.Bytes());b.Reset()
+ put(&b,binary.BigEndian,uint64(8))
+ for slot:=0;slot<8;slot++ {
+  name:="";position:=float64(-1);if slot==0 { name="一 🚀";position=48000 };if slot==7 { name="H";position=144000 }
+  b.WriteByte(byte(len(name)));b.WriteString(name);put(&b,binary.BigEndian,position);b.Write([]byte{255,17,34,51})
+ }
+ put(&b,binary.BigEndian,float64(12000));b.WriteByte(1);put(&b,binary.BigEndian,float64(0));quick=qc(b.Bytes());b.Reset()
+ put(&b,binary.LittleEndian,uint64(8))
+ for slot:=0;slot<8;slot++ {
+  name:="";start,end:=float64(-1),float64(-1);flag:=byte(0)
+  if slot==0 { name="一 🚀";start=48000;end=96000;flag=1 }
+  if slot==1 { name="Memory loop";start=60000;end=84000;flag=1 }
+  b.WriteByte(byte(len(name)));b.WriteString(name);put(&b,binary.LittleEndian,start);put(&b,binary.LittleEndian,end);b.Write([]byte{flag,flag,255,17,34,51})
+ }
+ loops=append([]byte(nil),b.Bytes()...);b.Reset()
+ put(&b,binary.BigEndian,uint64(1024));put(&b,binary.BigEndian,uint64(1024));put(&b,binary.BigEndian,float64(187.5))
+ for i:=0;i<1024;i++ { if i<512 { b.Write([]byte{10,20,30}) } else { b.Write([]byte{40,50,60}) } };b.Write([]byte{0,0,0});overview=qc(b.Bytes())
+ return
+}
+
+func bridgeNoStreams(t *testing.T) {
+ t.Helper();old:=prolink.StreamDirs;prolink.StreamDirs=nil;t.Cleanup(func(){prolink.StreamDirs=old})
+}
+
+func bridgeExec(t *testing.T,db *sql.DB,query string,args ...any) {
+ t.Helper();if _,err:=db.Exec(query,args...);err!=nil { t.Fatal(err) }
+}
+
+func bridgeReadLibrary(t *testing.T,root string) *rekordbox.Library {
+ t.Helper();lib,err:=rekordbox.ReadPDB(filepath.Join(root,"PIONEER/rekordbox/export.pdb"));if err!=nil {t.Fatal(err)};if err:=lib.Validate();err!=nil {t.Fatal(err)};return lib
+}
+
+func bridgeReadAnalysis(t *testing.T,root,path string) *rekordbox.Analysis {
+ t.Helper();b,err:=os.ReadFile(filepath.Join(root,path));if err!=nil {t.Fatal(err)};a,err:=rekordbox.ParseAnalysis(b);if err!=nil {t.Fatal(err)};return a
+}
+
+func TestEngineBridgeNativePerformance(t *testing.T) {
+ bridgeNoStreams(t)
+ mdb,root,db:=testlibrary.Create(t)
+ for id:=1;id<=3;id++ {
+  bridgeExec(t,db,`INSERT INTO Track(id,title,artist,path,filename,length,bpm,bpmAnalyzed,key) VALUES(?,?, 'Artist',?,?,4,120,120,?)`,id,fmt.Sprintf("Track %d",id),fmt.Sprintf("../Music/%d.wav",id),fmt.Sprintf("%d.wav",id),[]any{19,0,nil}[id-1])
+  testfixture.Write(t,root,fmt.Sprintf("Music/%d.wav",id),testfixture.WAV(true))
+ }
+ beat,quick,loops,overview:=bridgeEnginePerformance(t)
+ bridgeExec(t,db,`UPDATE PerformanceData SET beatData=?,quickCues=?,loops=?,overviewWaveFormData=? WHERE trackId=1`,beat,quick,loops,overview)
+ var cover bytes.Buffer
+ if err:=jpeg.Encode(&cover,image.NewRGBA(image.Rect(0,0,2,2)),nil);err!=nil { t.Fatal(err) }
+ bridgeExec(t,db,`INSERT INTO AlbumArt(id,hash,albumArt) VALUES(1,'fixture',?)`,cover.Bytes())
+ bridgeExec(t,db,`UPDATE Track SET albumArtId=1 WHERE id=1`)
+ bridgeExec(t,db,`INSERT INTO Playlist(id,title,parentListId) VALUES(10,'Ordered',0)`)
+ // id order is 1,2,3,4; the actual chain is 3 -> 1 -> missing -> 2.
+ bridgeExec(t,db,`INSERT INTO PlaylistEntity(id,listId,trackId,nextEntityId) VALUES(1,10,1,4),(2,10,2,0),(3,10,3,1),(4,10,9999,2)`)
+ before,err:=os.ReadFile(mdb);if err!=nil {t.Fatal(err)}
+ if err:=prolink.SyncEngineToPioneerExport(root);err!=nil {t.Fatal(err)}
+ after,err:=os.ReadFile(mdb);if err!=nil {t.Fatal(err)};if sha256.Sum256(before)!=sha256.Sum256(after) {t.Fatal("Engine source database changed")}
+ lib:=bridgeReadLibrary(t,root)
+ if len(lib.Tracks)!=3 || lib.Tracks[0].Key!="5A" || lib.Tracks[1].Key!="8B" || lib.Tracks[2].Key!="" {t.Fatalf("keys: %+v",lib.Tracks)}
+ if len(lib.Playlists)!=1 || !reflect.DeepEqual(lib.Playlists[0].Tracks,[]uint32{3,1,2}) {t.Fatalf("playlist: %+v",lib.Playlists)}
+ tr:=lib.Tracks[0]
+ if tr.ArtworkPath=="" {t.Fatal("missing artwork row/reference")};art,err:=os.ReadFile(filepath.Join(root,tr.ArtworkPath));if err!=nil || !bytes.Equal(art,cover.Bytes()) {t.Fatalf("artwork: %v",err)}
+ dat:=bridgeReadAnalysis(t,root,tr.AnalysisPath)
+ wantTimes:=[]uint32{0,500,1000,1500,2167,2833,3500}
+ if len(dat.Beats)!=len(wantTimes) {t.Fatalf("beats: %+v",dat.Beats)}
+ for i,b:=range dat.Beats {
+  wantBPM:=120.0;if i>=3 {wantBPM=90}
+  if b.TimeMS!=wantTimes[i] || math.Abs(b.BPM-wantBPM)>.01 || b.Number!=uint16((i+3)%4+1) {t.Errorf("beat %d: %+v",i,b)}
+ }
+ ext:=bridgeReadAnalysis(t,root,strings.TrimSuffix(tr.AnalysisPath,"DAT")+"EXT")
+ two:=bridgeReadAnalysis(t,root,strings.TrimSuffix(tr.AnalysisPath,"DAT")+"2EX")
+ for _,a:=range []*rekordbox.Analysis{dat,ext} {
+  if len(a.Cues)!=4 {t.Fatalf("cues: %+v",a.Cues)}
+  got:=map[uint32]rekordbox.Cue{};var memory []rekordbox.Cue
+  for _,c:=range a.Cues {if c.HotCue>0 {got[c.HotCue]=c}else {memory=append(memory,c)}}
+  if len(got)!=2 || !got[1].Loop || got[1].TimeMS!=1000 || got[1].EndMS!=2000 || got[8].TimeMS!=3000 {t.Errorf("hot cues: %+v",got)}
+  if len(memory)!=2 || memory[0].TimeMS!=250 || !memory[1].Loop || memory[1].TimeMS!=1250 || memory[1].EndMS!=1750 {t.Errorf("memory: %+v",memory)}
+  if a==ext && (got[1].Name!="一 🚀" || got[1].Color!=[4]byte{255,17,34,51}) {t.Errorf("extended cue: %+v",got[1])}
+ }
+ if len(ext.Waveforms)!=1 || len(two.Waveforms)!=1 {t.Fatal("missing measured waveforms")}
+ w5,w7:=ext.Waveforms[0],two.Waveforms[0]
+ if w5.Tag!="PWV5" || w5.EntryBytes!=2 || len(w5.Data)!=600*2 || w7.Tag!="PWV7" || len(w7.Data)!=600*3 {t.Fatalf("waveform timeline: %+v / %d",w5,len(w7.Data))}
+ if !bytes.Equal(w7.Data[:3],[]byte{20,30,10}) || !bytes.Equal(w7.Data[len(w7.Data)-3:],[]byte{50,60,40}) {t.Fatal("PWV7 bands/variation lost")}
+ if binary.BigEndian.Uint16(w5.Data)!=uint16(7<<13|7<<10|5<<7|2<<2) || binary.BigEndian.Uint16(w5.Data[len(w5.Data)-2:])!=uint16(7<<13|5<<10|3<<7|8<<2) {t.Fatal("PWV5 packing/variation lost")}
+ // Empty performance must stay empty, rather than generating 400 fake points.
+ missing:=bridgeReadAnalysis(t,root,strings.TrimSuffix(lib.Tracks[1].AnalysisPath,"DAT")+"EXT")
+ if len(missing.Waveforms)!=0 || len(missing.Cues)!=0 {t.Fatal("invented missing analysis")}
+}
+
+func TestEngineBridgeIncrementalAndWALRefresh(t *testing.T) {
+ bridgeNoStreams(t)
+ mdb,root,db:=testlibrary.Create(t)
+ bridgeExec(t,db,`PRAGMA journal_mode=WAL`)
+ bridgeExec(t,db,`PRAGMA wal_autocheckpoint=0`)
+ for id:=1;id<=70;id++ {bridgeExec(t,db,`INSERT INTO Track(id,title,path,filename,length) VALUES(?,?,?,?,4)`,id,fmt.Sprintf("Track %d",id),fmt.Sprintf("../Music/%d.wav",id),fmt.Sprintf("%d.wav",id))}
+ previous:=0
+ for call:=0;call<10;call++ {
+  start:=time.Now();if err:=prolink.SyncEngineToPioneerExport(root);err!=nil {t.Fatal(err)}
+  if elapsed:=time.Since(start);elapsed>10*time.Second {t.Fatalf("batch blocked for %s",elapsed)}
+  lib:=bridgeReadLibrary(t,root);n:=len(lib.Tracks)
+  if n<=previous || n-previous>32 {t.Fatalf("batch %d: %d -> %d",call,previous,n)};previous=n;if n==70 {break}
+ }
+ if previous!=70 {t.Fatalf("incomplete export: %d",previous)}
+ source,err:=os.Stat(mdb);if err!=nil {t.Fatal(err)}
+ bridgeExec(t,db,`UPDATE Track SET key=19,title='Changed' WHERE id=1`)
+ sourceAfter,err:=os.Stat(mdb);if err!=nil {t.Fatal(err)}
+ if source.ModTime()!=sourceAfter.ModTime() || source.Size()!=sourceAfter.Size() {t.Fatal("fixture did not isolate WAL-only update")}
+ if err:=prolink.SyncEngineToPioneerExport(root);err!=nil {t.Fatal(err)}
+ lib:=bridgeReadLibrary(t,root)
+ if len(lib.Tracks)!=70 || lib.Tracks[0].ID!=1 || lib.Tracks[0].Key!="5A" || lib.Tracks[0].Title!="Changed" {t.Fatalf("stale/reassigned track: %+v",lib.Tracks[0])}
+}
+
+func TestEngineBridgeRejectsDamagedPerformance(t *testing.T) {
+ for _,field:=range []string{"beatData","quickCues","loops","overviewWaveFormData"} {t.Run(field,func(t *testing.T){
+  bridgeNoStreams(t);_,root,db:=testlibrary.Create(t)
+  bridgeExec(t,db,`INSERT INTO Track(id,path,filename,length) VALUES(1,'../Music/a.wav','a.wav',4)`)
+  beat,quick,loops,overview:=bridgeEnginePerformance(t)
+  bridgeExec(t,db,`UPDATE PerformanceData SET beatData=?,quickCues=?,loops=?,overviewWaveFormData=? WHERE trackId=1`,beat,quick,loops,overview)
+  bad:=[]byte{1,2,3};bridgeExec(t,db,"UPDATE PerformanceData SET "+field+"=? WHERE trackId=1",bad)
+  if err:=prolink.SyncEngineToPioneerExport(root);err==nil {t.Fatal("damaged performance accepted")}
+ })}
 }
