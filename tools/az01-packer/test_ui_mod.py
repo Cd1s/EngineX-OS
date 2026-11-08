@@ -338,6 +338,18 @@ scShadowApplyAll([{deck:2}]);
 assert.equal(scShadowData(2),null); // explicit empty source, not a time-based eject
 """)
 
+    def test_live_main_cue_marker_is_separate_from_hot_cue_countdown(self):
+        self.js(r"""
+scShadowApplyAll([{deck:2,key:'A',positionMs:0,cuePos:24000,cues:[{i:1,p:72000,n:'DROP'}]}]);
+requests[0].finish(200,{key:'A',sampleRate:48000,durationMs:4000,
+    beats:[{ms:0,number:0},{ms:500,number:1},{ms:1000,number:2},{ms:1500,number:3}],cues:[]});
+assert.equal(scShadowCuesFor(2,scShadowData(2)).find(c=>c.i===0).ms,500);
+assert.equal(scShadowNextCue(2).label,'DROP');
+scShadowApplyAll([{deck:2,key:'A',positionMs:0,cuePos:48000,cues:[]}]);
+assert.equal(scShadowCuesFor(2,scShadowData(2)).find(c=>c.i===0).ms,1000);
+assert.equal(scShadowNextCue(2),null);
+""")
+
     def test_sampling_reuses_buffers_and_post_transport(self):
         self.js(r"""
 let created=0;
