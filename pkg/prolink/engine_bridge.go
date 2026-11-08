@@ -168,7 +168,7 @@ func SyncEngineToPioneerExport(root string) error {
 		defer db.Close()
 
 		// Older hand-built/test databases may not contain the optional analysis columns.
-		keyColumn, artColumn, bytesColumn := "NULL", "0", "0"
+		keyColumn, artColumn, bytesColumn, beatHeaderColumn := "NULL", "0", "0", "NULL"
 		if engineColumn(db, "Track", "key") {
 			keyColumn = "key"
 		}
@@ -178,7 +178,10 @@ func SyncEngineToPioneerExport(root string) error {
 		if engineColumn(db, "Track", "fileBytes") {
 			bytesColumn = "COALESCE(fileBytes, 0)"
 		}
-		trackRows, err := db.Query(`SELECT id, COALESCE(title, ''), COALESCE(artist, ''), COALESCE(bpm, 0), COALESCE(bpmAnalyzed, 0), COALESCE(length, 0), COALESCE(path, ''), COALESCE(filename, ''), `+keyColumn+`, `+artColumn+`, `+bytesColumn+` FROM Track ORDER BY id`)
+		if engineColumn(db, "PerformanceData", "beatData") {
+			beatHeaderColumn = "substr((SELECT beatData FROM PerformanceData WHERE trackId=Track.id),1,2097153)"
+		}
+		trackRows, err := db.Query(`SELECT id, COALESCE(title, ''), COALESCE(artist, ''), COALESCE(bpm, 0), COALESCE(bpmAnalyzed, 0), COALESCE(length, 0), COALESCE(path, ''), COALESCE(filename, ''), `+keyColumn+`, `+artColumn+`, `+bytesColumn+`, `+beatHeaderColumn+` FROM Track ORDER BY id`)
 		if err != nil {
 			return fmt.Errorf("query engine tracks: %w", err)
 		}
@@ -198,8 +201,9 @@ func SyncEngineToPioneerExport(root string) error {
 				key         sql.NullInt64
 				artID       int64
 				fileSize    int64
+				beatHeader  []byte
 			)
-			if err := trackRows.Scan(&id, &title, &artist, &bpmInt, &bpmAnalyzed, &length, &rawPath, &filename, &key, &artID, &fileSize); err != nil {
+			if err := trackRows.Scan(&id, &title, &artist, &bpmInt, &bpmAnalyzed, &length, &rawPath, &filename, &key, &artID, &fileSize, &beatHeader); err != nil {
 				return fmt.Errorf("scan engine track: %w", err)
 			}
 			if id == 0 {
@@ -287,9 +291,10 @@ func SyncEngineToPioneerExport(root string) error {
 			if analysis != nil {
 				t.SampleRate = int(analysis.rate)
 				if t.Duration <= 0 { t.Duration = analysis.duration }
-			} else if existing, ok := existingPaths[cleanPath]; ok {
-				t.SampleRate = existing.SampleRate
-				if t.Duration <= 0 { t.Duration = existing.Duration }
+			} else {
+				rate, duration := engineAudioMetadata(beatHeader)
+				t.SampleRate = int(rate)
+				if t.Duration <= 0 { t.Duration = duration }
 			}
 			if artID > 0 {
 				t.ArtworkPath = engineArtworkPath(artID)
@@ -761,6 +766,17 @@ func engineDouble(b []byte, order binary.ByteOrder) float64 {
 
 // Only these four performance fields are read. Qt validation/decompression is
 // shared with the importer; SQL substr also bounds the compressed input itself.
+// Metadata needs only the beatData audio header, never the waveform payload.
+// Qt validation stays shared with enginedb, including its decompression bound.
+func engineAudioMetadata(blob []byte) (float64,float64) {
+ if len(blob)==0 {return 0,0}
+ raw,err:=enginedb.QUncompress(blob,engineBlobLimit)
+ if err!=nil || len(raw)<17 {return 0,0}
+ rate,samples:=engineDouble(raw,binary.BigEndian),engineDouble(raw[8:],binary.BigEndian)
+ if !finiteEngine(rate) || rate<8000 || rate>384000 || !finiteEngine(samples) || samples<=0 || samples/rate>86400 {return 0,0}
+ return rate,samples/rate
+}
+
 type engineExportAnalysis struct {
 	*rekordbox.Analysis
 	rate, duration float64

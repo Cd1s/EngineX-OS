@@ -537,6 +537,8 @@ func TestEngineBridgeIncrementalAndWALRefresh(t *testing.T) {
 	for id := 1; id <= 70; id++ {
 		bridgeExec(t, db, `INSERT INTO Track(id,title,path,filename,length) VALUES(?,?,?,?,4)`, id, fmt.Sprintf("Track %d", id), fmt.Sprintf("../Music/%d.wav", id), fmt.Sprintf("%d.wav", id))
 	}
+	beat, quick, loops, overview := bridgeEnginePerformance(t)
+	bridgeExec(t, db, `UPDATE PerformanceData SET beatData=?,quickCues=?,loops=?,overviewWaveFormData=? WHERE trackId=70`,beat,quick,loops,overview)
 	start := time.Now()
 	if err := prolink.SyncEngineToPioneerExport(root); err != nil { t.Fatal(err) }
 	if elapsed := time.Since(start); elapsed > 10*time.Second { t.Fatalf("startup blocked for %s",elapsed) }
@@ -545,7 +547,10 @@ func TestEngineBridgeIncrementalAndWALRefresh(t *testing.T) {
 	pdbBefore,err:=os.ReadFile(filepath.Join(root,"PIONEER/rekordbox/export.pdb"));if err!=nil {t.Fatal(err)}
 	bridgeWaitExportComplete(t,root)
 	last:=bridgeReadAnalysis(t,root,lib.Tracks[69].AnalysisPath)
-	if len(last.Beats)!=0 {t.Fatal("unanalysed track acquired invented beats")}
+	if len(last.Beats)!=7 || len(last.Cues)!=4 {t.Fatal("background job did not export its actual grid/cues")}
+	if lib.Tracks[69].SampleRate != 48000 {t.Fatal("deferred track lost its actual audio metadata")}
+	lastWave := bridgeReadAnalysis(t,root,strings.TrimSuffix(lib.Tracks[69].AnalysisPath,"DAT")+"2EX")
+	if len(lastWave.Waveforms)!=1 || len(lastWave.Waveforms[0].Data)!=600*3 {t.Fatal("background waveform did not complete")}
 	pdbAfter,err:=os.ReadFile(filepath.Join(root,"PIONEER/rekordbox/export.pdb"));if err!=nil || !bytes.Equal(pdbBefore,pdbAfter) {t.Fatalf("background analysis changed immutable browse metadata: %v",err)}
 	source, err := os.Stat(mdb)
 	if err != nil {
