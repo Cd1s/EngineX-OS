@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1182,10 +1183,11 @@ func TestIsDeckUSB(t *testing.T) {
 	for line, want := range map[string]bool{
 		"2207:320a": true, "2207:0006 Android": true, "18d1:4ee0 Google fastboot": true,
 		"0e8d:1234 inMusic Brands PRIME 4+": true, "1234:5678 Denon PRIME 4": true, "15e4:d012 DENON DJ SCX-4": true,
-		"15a2:007d Freescale": false, "2207:0011 Rockchip ADB": false, "": false,
+		"15e4:d012 Denon DJ SC LIVE 4 Update": true, "15e4:d011 SC LIVE 2": true, "15e4:c00c PRIME GO+": true,
+		"1234:5678 adapter for 15e4:d012": false, "15a2:007d Freescale": false, "2207:0011 Rockchip ADB": false, "": false,
 	} {
 		if got := isDeckUSB(line); got != want {
-			t.Errorf("isDeckUSB(%q) = %v", line, got)
+			t.Errorf("isDeckUSB(%q) = %v, want %v", line, got, want)
 		}
 	}
 	win := winVIDPID.ReplaceAllString(`Instance ID:   USB\VID_2207&PID_0006\0123456789`, "$1:$2")
@@ -1193,19 +1195,131 @@ func TestIsDeckUSB(t *testing.T) {
 		t.Errorf("pnputil line not recognised: %s", win)
 	}
 	mac := parseIOReg(`+-o Root  <class IORegistryEntry>
-  +-o PRIME 4+@14100000  <class IOUSBHostDevice>
-    {
-      "idProduct" = 12810
-      "idVendor" = 8711
-    }
-  +-o Keyboard@14200000  <class IOUSBHostDevice>
-    {
-      "idVendor" = 1452
-      "idProduct" = 641
-    }
+	  +-o PRIME 4+@14100000  <class IOUSBHostDevice>
+	    {
+	      "idProduct" = 12810
+	      "idVendor" = 8711
+	    }
+	  +-o Keyboard@14200000  <class IOUSBHostDevice>
+	    {
+	      "idVendor" = 1452
+	      "idProduct" = 641
+	    }
 `)
 	if mac != "2207:320a PRIME 4+\n05ac:0281 Keyboard\n" {
 		t.Errorf("parseIOReg = %q", mac)
+	}
+}
+
+func TestParsePnPUtil(t *testing.T) {
+	// Polish Windows output with CRLF (Issue #161: bogiepl's screenshot)
+	polish := "Narzędzie Microsoft PnP Utility\r\n\r\n" +
+		"Identyfikator wystąpienia:  USB\\VID_15E4&PID_D012\\6&14562B34&0&1\r\n" +
+		"Opis urządzenia:            Denon DJ SC LIVE 4 Update\r\n" +
+		"Nazwa klasy:                MEDIA\r\n" +
+		"Identyfikator GUID klasy:   {4d36e96c-e325-11ce-bfc1-08002be10318}\r\n" +
+		"Nazwa producenta:           InMusic\r\n" +
+		"Stan:                       Started\r\n" +
+		"Nazwa sterownika:           oem123.inf\r\n\r\n" +
+		"Identyfikator wystąpienia:  USB\\VID_046D&PID_C52B\\5&26f7a627&0&1\r\n" +
+		"Opis urządzenia:            Logitech USB Receiver\r\n" +
+		"Nazwa klasy:                USB\r\n"
+	got := parsePnPUtil(polish)
+	want := "15e4:d012 Denon DJ SC LIVE 4 Update\n046d:c52b Logitech USB Receiver\n"
+	if got != want {
+		t.Errorf("parsePnPUtil(polish) = %q, want %q", got, want)
+	}
+
+	// English Windows output
+	english := `Instance ID:                USB\VID_15E4&PID_D007\0123456789
+Device Description:         Denon DJ PRIME 4 Plus
+Class Name:                 MEDIA
+Class GUID:                 {4d36e96c-e325-11ce-bfc1-08002be10318}
+Manufacturer Name:          InMusic
+Status:                     Started
+Driver Name:                oem456.inf
+`
+	gotEng := parsePnPUtil(english)
+	wantEng := "15e4:d007 Denon DJ PRIME 4 Plus\n"
+	if gotEng != wantEng {
+		t.Errorf("parsePnPUtil(english) = %q, want %q", gotEng, wantEng)
+	}
+
+	// German and Chinese Windows output with swapped field orders
+	multilingual := `Instanz-ID:                 USB\VID_15E4&PID_D011\1234
+Klassenname:                MEDIA
+Gerätebeschreibung:         Denon DJ SC LIVE 2
+Status:                     Started
+
+Instance ID:                USB\VID_15E4&PID_C00C\5678
+设备描述:                   Denon DJ PRIME GO+
+Class Name:                 MEDIA
+
+Instance ID:                USB\VID_2207&PID_320A\9999
+`
+	gotMulti := parsePnPUtil(multilingual)
+	wantMulti := "15e4:d011 Denon DJ SC LIVE 2\n15e4:c00c Denon DJ PRIME GO+\n2207:320a\n"
+	if gotMulti != wantMulti {
+		t.Errorf("parsePnPUtil(multilingual) = %q, want %q", gotMulti, wantMulti)
+	}
+}
+
+// #161: On Windows, SC LIVE 4 (15e4:d012) in Computer Update mode with vendor drivers must be
+// recognized by usbDeck and diagnoseUSB even when fastboot has no WinUSB driver bound.
+func TestWindowsSCLive4Detection(t *testing.T) {
+	t.Cleanup(func() { goos = runtime.GOOS })
+	goos = "windows"
+	pnputilOut := `Identyfikator wystąpienia:  USB\VID_15E4&PID_D012\6&14562B34&0&1
+Opis urządzenia:            Denon DJ SC LIVE 4 Update
+Nazwa klasy:                MEDIA
+Stan:                       Started
+`
+	o := testOpts(t)
+	o.ListUSB = func(context.Context) string {
+		return parsePnPUtil(pnputilOut)
+	}
+	board, line := usbDeck(ctxT(t), o, gen2USB)
+	if board != "jp21" || !strings.Contains(line, "15e4:d012") || !strings.Contains(line, "Denon DJ SC LIVE 4 Update") {
+		t.Errorf("usbDeck = %q, %q; want jp21 with SC LIVE 4 Update line", board, line)
+	}
+
+	// Negative case: a device whose product name mentions another deck's ID must NOT match
+	o.ListUSB = func(context.Context) string {
+		return "1234:5678 adapter for 15e4:d012\n"
+	}
+	if b, l := usbDeck(ctxT(t), o, gen2USB); b != "" || l != "" {
+		t.Errorf("usbDeck matched non-deck line: board=%q, line=%q", b, l)
+	}
+
+	// Positive diagnosis
+	o.ListUSB = func(context.Context) string {
+		return parsePnPUtil(pnputilOut)
+	}
+	diagnoseUSB(ctxT(t), o)
+	out := o.Out.(*bytes.Buffer).String()
+	if !strings.Contains(out, "15e4:d012") || !strings.Contains(out, "Denon DJ SC LIVE 4 Update") || !strings.Contains(out, "Zadig") {
+		t.Errorf("diagnoseUSB did not give the Zadig WinUSB hint for SC LIVE 4:\n%s", out)
+	}
+}
+
+// Keep the main branch's Windows first-generation fallback working after pnputil normalization.
+func TestWindowsGen1PnPUtilDetection(t *testing.T) {
+	o := testOpts(t)
+	o.ListUSB = func(context.Context) string {
+		return parsePnPUtil("Instance ID: USB\\VID_15E4&PID_D006\\SC5000\r\nDevice Description: Denon DJ SC5000 Update\r\n")
+	}
+	if board, line := usbDeck(ctxT(t), o, gen1USB); board != "jp07" || !strings.Contains(line, "Denon DJ SC5000 Update") {
+		t.Fatalf("usbDeck = %q, %q; want jp07 with the Windows device description", board, line)
+	}
+}
+
+func TestBuildImageMissingMke2fsSaysWSL(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // empty PATH so mke2fs is not found
+	b := &bundleInfo{Path: "test.tar.gz", Version: "5.3.0.3"}
+	o := testOpts(t)
+	_, _, err := buildImage(ctxT(t), o, b, 64<<20, "test.img", "data")
+	if err == nil || !strings.Contains(err.Error(), "WSL") || !strings.Contains(err.Error(), "mke2fs") {
+		t.Fatalf("buildImage without mke2fs err = %v, want WSL / mke2fs guide", err)
 	}
 }
 
