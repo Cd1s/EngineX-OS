@@ -5,7 +5,6 @@ package dmx
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"syscall"
@@ -30,6 +29,7 @@ func allowBroadcast(c *net.UDPConn) error {
 // Only explicitly selected device nodes are opened, with O_NONBLOCK.
 type usbDevice struct {
 	file *os.File
+	fd uintptr
 	udmx bool
 }
 
@@ -48,7 +48,7 @@ func openUSB(o Output) (usbOutput, error) {
 	}
 	// uDMX is a specific vendor protocol, never send vendor requests to an
 	// arbitrary selected USB device. Verify the usbfs device descriptor first.
-	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK, 0)
+	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK|syscall.O_NOCTTY, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -58,16 +58,24 @@ func openUSB(o Output) (usbOutput, error) {
 			f.Close()
 		}
 	}()
+	// File.Fd may restore blocking mode. Obtain it once, then explicitly
+	// restore O_NONBLOCK and keep using the raw descriptor for bounded I/O.
+	fd := f.Fd()
+	if err := syscall.SetNonblock(int(fd), true); err != nil {
+		return nil, err
+	}
 	if o.Protocol == "udmx" {
 		desc := make([]byte, 18)
-		if _, err := io.ReadFull(f, desc); err != nil {
+		n, err := syscall.Read(int(fd), desc)
+		if err != nil {
 			return nil, err
 		}
+		if n != len(desc) { return nil, errors.New("short USB device descriptor") }
 		if desc[8] != 0xc0 || desc[9] != 0x16 || desc[10] != 0xdc || desc[11] != 0x05 {
 			return nil, errors.New("selected USB device is not uDMX 16c0:05dc")
 		}
 		ok = true
-		return &usbDevice{file: f, udmx: true}, nil
+		return &usbDevice{file: f, fd:fd, udmx: true}, nil
 	}
 	// asm-generic termios2 (ARM and x86): 250000 baud, 8N2, raw mode.
 	var t struct {
@@ -76,16 +84,16 @@ func openUSB(o Output) (usbOutput, error) {
 		CC             [19]byte
 		ISpeed, OSpeed uint32
 	}
-	if err := ioctl(f.Fd(), 0x802c542a, unsafe.Pointer(&t)); err != nil {
+	if err := ioctl(fd, 0x802c542a, unsafe.Pointer(&t)); err != nil {
 		return nil, err
 	}
 	t.I, t.O, t.L, t.C = 0, 0, 0, 0x1000|0x30|0x40|0x80|0x800
 	t.ISpeed, t.OSpeed = 250000, 250000
-	if err := ioctl(f.Fd(), 0x402c542b, unsafe.Pointer(&t)); err != nil {
+	if err := ioctl(fd, 0x402c542b, unsafe.Pointer(&t)); err != nil {
 		return nil, err
 	}
 	ok = true
-	return &usbDevice{file: f}, nil
+	return &usbDevice{file: f, fd:fd}, nil
 }
 
 func (u *usbDevice) Send(frame [512]byte) error {
@@ -99,13 +107,13 @@ func (u *usbDevice) Send(frame [512]byte) error {
 			Data                 unsafe.Pointer
 		}{0x40, 2, 512, 0, 512, 30, unsafe.Pointer(&frame[0])}
 		request := uintptr(0xc0005500) | unsafe.Sizeof(c)<<16
-		return ioctl(u.file.Fd(), request, unsafe.Pointer(&c))
+		return ioctl(u.fd, request, unsafe.Pointer(&c))
 	}
-	if err := ioctl(u.file.Fd(), syscall.TIOCSBRK, nil); err != nil {
+	if err := ioctl(u.fd, syscall.TIOCSBRK, nil); err != nil {
 		return err
 	}
 	time.Sleep(120 * time.Microsecond)
-	if err := ioctl(u.file.Fd(), syscall.TIOCCBRK, nil); err != nil {
+	if err := ioctl(u.fd, syscall.TIOCCBRK, nil); err != nil {
 		return err
 	}
 	time.Sleep(12 * time.Microsecond)
@@ -114,7 +122,7 @@ func (u *usbDevice) Send(frame [512]byte) error {
 	// A serial route is bounded; a faulty adapter cannot hold up shutdown.
 	deadline := time.Now().Add(30 * time.Millisecond)
 	for len(p) > 0 {
-		n, err := syscall.Write(int(u.file.Fd()), p)
+		n, err := syscall.Write(int(u.fd), p)
 		if n > 0 {
 			p = p[n:]
 		}
