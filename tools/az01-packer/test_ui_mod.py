@@ -166,7 +166,7 @@ class ShadowDisplayTest(unittest.TestCase):
     def js(self, body):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
-                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo",
+                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress")
         functions = []
@@ -192,7 +192,7 @@ Object.assign(globalThis, {
     scShadowMineRole: "?", scShadowMine: [], scShadowSampleSpare: {}, scShadowDeckProperties: {}, scShadowOwn: [],
     scShadowPostRequest: null, scShadowPollRequest: null, scShadowResponseVersion: "", scShadowPostPending: false,
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
-    scShadowGen: 0, scShadowVer: 0,
+    scShadowGen: 0, scShadowVer: 0, scShadowFrame: 17, scCueInfoCache: {},
     scTr() { throw Error('Engine access forbidden'); },
     Planck: { getProperty() { throw Error('Engine access forbidden'); } }
 });
@@ -301,6 +301,9 @@ scShadowDisplay[2] = {key: 'A', meta, positionMs: 1000, at: now, pitch: 0, playi
 const cue = scNextCueInfo(2); // must not read Engine or invent a constant-BPM grid
 assert.equal(cue.text, '0.3');
 assert.equal(cue.label, 'DROP'); assert.equal(cue.color, '#123456');
+assert.strictEqual(scNextCueInfo(2), cue); // retain shadow display object caching
+assert.equal(scCueTickFor(2), 17); // a shadow countdown must not depend on stopped local Engine clocks
+assert.equal(scNextCueInfo(4), null);
 const grid = scShadowGrid(2, meta, 900, 1600);
 assert.deepEqual(grid, beats.slice(1, 3));
 assert.strictEqual(scShadowGrid(2, meta, 910, 1610), grid); // same delegates until a grid boundary
