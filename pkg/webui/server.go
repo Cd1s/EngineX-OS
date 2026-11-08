@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/dmx"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"github.com/skip2/go-qrcode"
@@ -75,6 +76,8 @@ type Config struct {
 	Factory func(provider string, guest bool, userID string) (providers.Provider, error)
 }
 type Server struct {
+	dmx *dmx.Engine
+	dmxMu sync.Mutex
 	cfg           Config
 	jobs          *Jobs
 	mu            sync.Mutex
@@ -113,6 +116,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}, logins: map[string]*loginFlow{}, authFails: map[string]*authStrike{}}
 	s.shadow = newShadowState()
+	s.initDMX()
 	if cfg.StateDir == "/data/sc5000-custom/state" { // on the deck, not in tests
 		go ensureSpotifyConnectService("/etc/avahi/services")
 	}
@@ -172,6 +176,13 @@ func New(cfg Config, jobs *Jobs) *Server {
 		os.MkdirAll(cfg.StateDir, 0o700)
 	}
 	s.mux.HandleFunc("GET /", s.index)
+	s.mux.HandleFunc("GET /dmx", s.dmxPage)
+	s.mux.HandleFunc("GET /api/dmx", s.handleDMX)
+	s.mux.HandleFunc("POST /api/dmx", s.handleDMX)
+	s.mux.HandleFunc("GET /v1/sc5000/dmx", s.handleDMX)
+	s.mux.HandleFunc("POST /v1/sc5000/dmx", s.handleDMX)
+	s.mux.HandleFunc("GET /v1/sc5000/dmx.qml", s.dmxQML)
+	s.mux.HandleFunc("POST /v1/sc5000/dmx/clock", s.dmxClockPost)
 	s.mux.HandleFunc("POST /login", s.login)
 	s.mux.HandleFunc("GET /oauth/spotify/callback", s.callback)
 	s.mux.HandleFunc("GET /api/sessions", s.listSessions)
@@ -318,6 +329,7 @@ func (s *Server) tryExport() {
 
 // Close releases optional network exports, including active dbserver clients.
 func (s *Server) Close() {
+	if s.dmx != nil { s.dmx.Close() }
 	s.closeOnce.Do(func() { close(s.closed) })
 	if s.tidal != nil {
 		s.tidal.saveTracks() // the IDs Engine still lists, for the next run (#73)

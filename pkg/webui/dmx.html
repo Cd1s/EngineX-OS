@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EngineX · DMX</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui;background:#090d13;color:#e6edf5}body{max-width:1100px;margin:auto;padding:18px}a{color:#2ee6d6}header,.bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap}header select{margin-left:auto}section{background:#171d27;border:1px solid #303b4c;border-radius:14px;padding:18px;margin:16px 0}h2{margin:0 0 12px;font-size:19px}label{display:flex;flex-direction:column;gap:6px}input,select,button{font:inherit;color:inherit;background:#0e141e;border:1px solid #405067;border-radius:8px;padding:10px;min-height:42px;box-sizing:border-box}button{cursor:pointer}button.primary{background:#126954}button.danger{background:#8b2533}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.route,.fixture{border-top:1px solid #405067;margin-top:12px;padding-top:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px;align-items:end}.check{flex-direction:row;align-items:center}.check input{width:24px;min-height:24px}input[type=range]{width:100%}input[type=color]{width:100%;padding:3px}small{display:block;color:#aebaca;margin:8px 0}#error{color:#ff99a6;white-space:pre-wrap}#status{white-space:pre-wrap}button:disabled{opacity:.5}
+</style>
+<header><a href="/">← EngineX</a><h1 data-t="DMX Lighting"></h1><select id="language"><option value="en">English</option><option value="zh-Hans">简体中文</option><option value="zh-Hant">繁體中文</option></select></header>
+<p id="error" role="alert"></p>
+<section><div class="bar"><label class="check"><input id="enabled" type="checkbox"><span data-t="Enable DMX"></span></label><button class="danger" id="blackout" data-t="Blackout"></button><button id="disable" data-t="Disable DMX"></button><button class="primary" id="apply" data-t="Apply"></button></div><small data-t="Starts disabled. Stop SoundSwitch before enabling. Output returns blacked out after a restart."></small><p id="status" aria-live="polite"></p></section>
+<section><h2 data-t="Live controls"></h2><div class="grid">
+<label><span data-t="Master Dimmer"></span><input id="master" type="range" min="0" max="255"></label>
+<label><span data-t="Intensity"></span><input id="intensity" type="range" min="0" max="255"></label>
+<label><span data-t="Color"></span><input id="color" type="color"></label>
+<label><span data-t="Effect"></span><select id="effect"><option>Circle</option><option>8-Figure</option><option>Pan-Tilt Sweep</option><option>Static</option></select></label>
+<label><span data-t="Beats per cycle"></span><input id="speed" type="number" min="1" max="64" step="1"></label>
+<label class="check"><input id="sync" type="checkbox"><span data-t="Sync to master BPM / beat"></span></label>
+<label><span data-t="Manual BPM"></span><input id="bpm" type="number" min="20" max="300" step="0.01"></label>
+<label class="check"><input id="blackoutState" type="checkbox"><span data-t="Blackout"></span></label>
+<label>Pan<input id="pan" type="number" min="0" max="65535"></label><label>Tilt<input id="tilt" type="number" min="0" max="65535"></label>
+<label><span data-t="Pan width"></span><input id="width" type="number" min="0" max="32767"></label><label><span data-t="Tilt height"></span><input id="height" type="number" min="0" max="32767"></label>
+</div><small data-t="Sync uses the playing master's real BPM and beat phase. Missing samples cause blackout. Manual BPM is used only with sync off."></small></section>
+<section><h2 data-t="Outputs"></h2><small data-t="Universe numbers start at 1. Art-Net uses UDP 6454; sACN uses UDP 5568. Configure the receiver IP, or the sACN multicast group 239.255.H.L."></small><div id="outputs"></div><button id="addOutput" data-t="Add output"></button></section>
+<section><h2 data-t="Fixture patch"></h2><small data-t="Generic profiles: compare the channel order with the fixture manual. No automatic smoke output. USB adapters are optional; a missing adapter does not block network output."></small><div id="patch"></div><button id="addFixture" data-t="Add fixture"></button></section>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const words={
+'DMX Lighting':['DMX 灯光','DMX 燈光'],'Enable DMX':['启用 DMX','啟用 DMX'],'Disable DMX':['关闭 DMX','關閉 DMX'],'Blackout':['全黑','全黑'],'Apply':['应用','套用'],'Live controls':['现场控制','現場控制'],'Master Dimmer':['总调光','總調光'],'Intensity':['亮度','亮度'],'Color':['颜色','顏色'],'Effect':['效果','效果'],'Beats per cycle':['每周期拍数','每週期拍數'],'Sync to master BPM / beat':['同步主轨 BPM / 拍相','同步主軌 BPM / 拍相'],'Manual BPM':['手动 BPM','手動 BPM'],'Pan width':['水平幅度','水平幅度'],'Tilt height':['垂直幅度','垂直幅度'],'Outputs':['输出','輸出'],'Fixture patch':['灯具配接','燈具配接'],'Add output':['添加输出','新增輸出'],'Add fixture':['添加灯具','新增燈具'],'Remove':['移除','移除'],'Protocol':['协议','協定'],'Universe':['域','域'],'Receiver IP':['接收端 IP','接收端 IP'],'Device':['设备','裝置'],'USB bus':['USB 总线','USB 匯流排'],'USB address':['USB 地址','USB 位址'],'Profile':['灯具布局','燈具配置'],'DMX address':['DMX 地址','DMX 位址'],'Running':['输出中','輸出中'],'Disabled':['已关闭','已關閉'],'Waiting for output':['等待输出','等待輸出'],'Master sync':['主轨同步','主軌同步'],'Waiting for master':['等待主轨','等待主軌'],'SoundSwitch is running':['SoundSwitch 正在运行','SoundSwitch 正在執行'],
+'Starts disabled. Stop SoundSwitch before enabling. Output returns blacked out after a restart.':['默认关闭。启用前请停止 SoundSwitch。重启后输出恢复为全黑。','預設關閉。啟用前請停止 SoundSwitch。重新啟動後輸出恢復為全黑。'],
+"Sync uses the playing master's real BPM and beat phase. Missing samples cause blackout. Manual BPM is used only with sync off.":['同步使用播放主轨的实时 BPM 与拍相。数据失联时全黑；关闭同步后才使用手动 BPM。','同步使用播放主軌的即時 BPM 與拍相。資料失聯時全黑；關閉同步後才使用手動 BPM。'],
+'Universe numbers start at 1. Art-Net uses UDP 6454; sACN uses UDP 5568. Configure the receiver IP, or the sACN multicast group 239.255.H.L.':['域从 1 开始。Art-Net 使用 UDP 6454，sACN 使用 UDP 5568。填写接收端 IP 或 sACN 多播组 239.255.H.L。','域從 1 開始。Art-Net 使用 UDP 6454，sACN 使用 UDP 5568。填寫接收端 IP 或 sACN 多播組 239.255.H.L。'],
+'Generic profiles: compare the channel order with the fixture manual. No automatic smoke output. USB adapters are optional; a missing adapter does not block network output.':['通用布局：请对照灯具说明书的通道顺序。不自动输出烟雾。USB 适配器可选，缺失时不阻塞网络输出。','通用配置：請對照燈具說明書的通道順序。不自動輸出煙霧。USB 轉接器可選，缺少時不阻塞網路輸出。']};
+let lang=localStorage.getItem('enginex-console-lang')||(/^zh-(tw|hk|mo|hant)/i.test(navigator.language)?'zh-Hant':/^zh/i.test(navigator.language)?'zh-Hans':'en');
+const t=s=>lang==='en'?s:(words[s]||[s,s])[lang==='zh-Hant'?1:0];
+let config,profiles,loading=false;
+function translate(){document.documentElement.lang=lang;$('language').value=lang;document.querySelectorAll('[data-t]').forEach(e=>e.textContent=t(e.dataset.t))}
+$('language').onchange=()=>{lang=$('language').value;localStorage.setItem('enginex-console-lang',lang);translate()};translate();
+async function request(body){const r=await fetch('/api/dmx',body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});const v=await r.json();if(!r.ok)throw Error(v.error||r.status);return v}
+async function action(fn){$('error').textContent='';try{await fn()}catch(e){$('error').textContent=e.message}}
+function label(text,input){const e=document.createElement('label'),s=document.createElement('span');s.dataset.t=text;s.textContent=t(text);e.append(s,input);return e}
+function field(obj,key,text,type='number',min=0,max=255){const e=document.createElement('input');e.type=type;e.value=obj[key]??'';if(type==='number'){e.min=min;e.max=max;e.step=1}e.oninput=()=>{obj[key]=type==='number'?Number(e.value):e.value};return label(text,e)}
+function select(obj,key,text,values){const e=document.createElement('select');values.forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;e.append(o)});e.value=obj[key];e.onchange=()=>obj[key]=e.value;return label(text,e)}
+function remove(list,obj,redraw){const b=document.createElement('button');b.textContent=t('Remove');b.dataset.t='Remove';b.onclick=()=>{list.splice(list.indexOf(obj),1);redraw()};return b}
+function outputs(){const box=$('outputs');box.replaceChildren();for(const o of config.outputs){const row=document.createElement('div');row.className='route';row.append(select(o,'protocol','Protocol',['artnet','sacn','ftdi','udmx']),field(o,'universe','Universe','number',1,32768),field(o,'host','Receiver IP','text'),field(o,'device','Device','text'),field(o,'bus','USB bus','number',1,255),field(o,'address','USB address','number',1,127),remove(config.outputs,o,outputs));box.append(row)}}
+function patch(){const box=$('patch');box.replaceChildren();for(const f of config.patch){const row=document.createElement('div');row.className='fixture';row.append(select(f,'profile','Profile',Object.keys(profiles)),field(f,'universe','Universe','number',1,32768),field(f,'address','DMX address','number',1,512),field(f,'gobo','Gobo'),field(f,'beam','Beam'),field(f,'mode','Mode'),field(f,'strobe','Strobe'),remove(config.patch,f,patch));box.append(row)}}
+function fill(v){config=v.config;profiles=v.profiles;for(const k of ['enabled','sync'])$(k).checked=config[k];$('blackoutState').checked=config.blackout;for(const k of ['master','intensity','effect','speed','bpm','pan','tilt','width','height'])$(k).value=config[k];$('color').value='#'+['red','green','blue'].map(k=>config[k].toString(16).padStart(2,'0')).join('');outputs();patch();status(v)}
+function status(v){$('status').textContent=[t(v.running?'Running':v.config.enabled?'Waiting for output':'Disabled'),v.config.blackout?t('Blackout'):'',v.config.sync?(v.synced?t('Master sync')+' · '+v.clock.bpm.toFixed(2)+' BPM · '+v.clock.beat.toFixed(2):t('Waiting for master')):'',v.soundSwitch?t('SoundSwitch is running'):'',v.error].filter(Boolean).join(' · ')}
+function collect(){for(const k of ['enabled','sync'])config[k]=$(k).checked;config.blackout=$('blackoutState').checked;for(const k of ['master','intensity','speed','bpm','pan','tilt','width','height'])config[k]=Number($(k).value);config.effect=$('effect').value;['red','green','blue'].forEach((k,i)=>config[k]=parseInt($('color').value.slice(1+i*2,3+i*2),16));return config}
+$('apply').onclick=()=>action(async()=>fill(await request({action:'configure',config:collect()})));
+$('blackout').onclick=()=>action(async()=>fill(await request({action:'blackout'})));
+$('disable').onclick=()=>action(async()=>fill(await request({action:'disable'})));
+$('addOutput').onclick=()=>{if(config.outputs.length<8){config.outputs.push({protocol:'artnet',universe:1,host:'127.0.0.1'});outputs()}};
+$('addFixture').onclick=()=>{if(config.patch.length<128){config.patch.push({profile:'LED Par',universe:1,address:1});patch()}};
+action(async()=>fill(await request()));
+setInterval(async()=>{if(loading||!config)return;loading=true;try{status(await request())}catch(e){$('error').textContent=e.message}finally{loading=false}},1000);
+</script></html>
