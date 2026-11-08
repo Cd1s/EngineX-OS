@@ -79,11 +79,9 @@ exec sleep 30
 		cloudflaredInstallPath = oldInstall
 	}()
 
-	// Exercise the tunnel API without New's asynchronous startup resume. That
-	// goroutine could observe the config written by the first POST, start a
-	// second Configure, and outlive restoration of the package-level mocks.
-	s := &Server{cfg: Config{StateDir: stateDir, UIDir: uiDir, AccessToken: "ABCD-2345"}, mux: http.NewServeMux(), authFails: map[string]*authStrike{}}
-	s.RegisterTunnelRoutes()
+	// Use the real constructor: startup resume must finish before the first
+	// enable request and before the package-level mocks are restored.
+	s := New(Config{StateDir: stateDir, UIDir: uiDir, AccessToken: "ABCD-2345"}, nil)
 	defer func() { s.TunnelManager().Stop(); tunnelManagers.Delete(s) }()
 
 	// 1. Initial GET /api/tunnel is stopped.
