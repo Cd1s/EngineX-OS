@@ -61,9 +61,10 @@ type deckState struct {
 	PositionMS float64 `json:"positionMs"`
 	Pitch      float64 `json:"pitch"` // percent
 	Master     bool    `json:"master,omitempty"`
-	Sync       bool    `json:"sync,omitempty"` // a CDJ's BEAT SYNC: the shadow deck syncs in Engine
-	BPM        float64 `json:"bpm,omitempty"`  // the track's
-	Beat       float64 `json:"beat,omitempty"` // Engine's BeatNumber: beats into the bar, 0..4
+	Sync       bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
+	BPM        float64 `json:"bpm,omitempty"`        // the track's
+	CurrentBPM float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
+	Beat       float64 `json:"beat,omitempty"`       // Engine's BeatNumber: beats into the bar, 0..4
 	// At is when PositionMS was read, Unix ms on this machine's clock: the QML's
 	// GUI thread and our niced HTTP handler both lag by tens of ms, so the
 	// position is extrapolated from the sample time, not from arrival.
@@ -129,7 +130,7 @@ type shadowState struct {
 	ownPostAt int64                // the QML's clock on the newest post
 	peers     map[string]time.Time // EngineX players heard on the beacon
 	peerDecks map[int]peerDeck
-	peerSeq   map[string]int64  // newest Seq per peer
+	peerSeq   map[string]int64  // newest Seq per peer (Engine Link id, else address)
 	ver       uint64            // bumped on every new peer update
 	notify    chan struct{}     // closed on the bump: wakes the long polls
 	conn      *net.UDPConn      // the beacon socket while shadowLoop runs
@@ -145,7 +146,8 @@ type shadowState struct {
 	beacon              bool
 	unresolved          [5]string              // per deck: the last TrackNetworkPath logged as having no file
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
-	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer
+	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
+	dbg                 shadowDebug
 }
 
 func newShadowState() *shadowState {
@@ -348,6 +350,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	}
 	s.shadow.ownPostAt = postAt
 	s.shadow.own, s.shadow.ownAt = own, time.Now()
+	s.shadow.dbg.event("post", map[string]any{"decks": slimDecks(own)})
 	claimed := ex.Master && !s.shadow.ownMaster
 	s.shadow.ownMaster = ex.Master
 	s.shadow.mu.Unlock()
@@ -420,35 +423,43 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 	for _, d := range decks {
 		seq = max(seq, d.Seq)
 	}
+	// A player on eth0 and wlan0 sends every update from both addresses: order
+	// by its Engine Link id, or each copy was taken and woke the QML's poll twice.
+	id := ip
+	if len(decks) > 0 && decks[0].Link != "" {
+		id = decks[0].Link
+	}
 	// A peer silent for over 2 s may have restarted with a clock behind its old Seq.
-	if t, ok := sh.peerTaken[ip]; !ok || now.Sub(t) > 2*time.Second {
-		delete(sh.peerSeq, ip)
+	if t, ok := sh.peerTaken[id]; !ok || now.Sub(t) > 2*time.Second {
+		delete(sh.peerSeq, id)
 	}
 	// A clock stepped back by more than 10 s (NTP) restarts the order.
-	if last := sh.peerSeq[ip]; seq != 0 && seq <= last && seq > last-int64(10*time.Second) {
+	if last := sh.peerSeq[id]; seq != 0 && seq <= last && seq > last-int64(10*time.Second) {
+		sh.dbg.event("peer-stale", map[string]any{"ip": ip, "seq": seq, "last": last})
 		return
 	}
-	sh.peerSeq[ip] = seq
+	sh.dbg.event("peer", map[string]any{"ip": ip, "seq": seq, "decks": slimDecks(decks)})
+	sh.peerSeq[id] = seq
 	for slot, v := range sh.peerDecks {
-		if v.ip == ip && !slices.ContainsFunc(decks, func(d deckState) bool { return d.Deck == v.Deck }) {
+		if (v.ip == ip || v.Link != "" && v.Link == id) && !slices.ContainsFunc(decks, func(d deckState) bool { return d.Deck == v.Deck }) {
 			delete(sh.peerDecks, slot) // the peer ejected it, or restarted empty
 		}
 	}
-	sh.peerTaken[ip] = now
+	sh.peerTaken[id] = now
 	for _, d := range decks {
 		if d.Deck < 1 || d.Deck > 4 {
 			continue
 		}
 		slot := d.Deck
 		for s, v := range sh.peerDecks {
-			if v.ip == ip && v.Deck == d.Deck {
+			if (v.ip == ip || v.Link != "" && v.Link == id) && v.Deck == d.Deck {
 				slot = s
 				break
 			}
 		}
-		if cur, ok := sh.peerDecks[slot]; ok && cur.ip != "" && cur.ip != ip && now.Sub(cur.at) < 2*time.Second {
+		if cur, ok := sh.peerDecks[slot]; ok && cur.ip != "" && cur.ip != ip && (cur.Link == "" || cur.Link != id) && now.Sub(cur.at) < 2*time.Second {
 			for s := 1; s <= 4; s++ {
-				if c, taken := sh.peerDecks[s]; !taken || c.ip == ip || now.Sub(c.at) >= 2*time.Second {
+				if c, taken := sh.peerDecks[s]; !taken || c.ip == ip || c.Link != "" && c.Link == id || now.Sub(c.at) >= 2*time.Second {
 					slot = s
 					break
 				}
@@ -751,7 +762,11 @@ func (sh *shadowState) observe(d prolink.Device) {
 // past N, else as soon as it does, at the latest after 120 ms (the CDJ decks
 // and the steady positions refresh at that rate).
 func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
-	role := s.role()
+	s.uiMu.Lock()
+	v := s.loadUI()
+	s.uiMu.Unlock()
+	role := s.activeRole(v)
+	debug := s.shadow.dbg.set(v.DebugTelemetry || fileExists(shadowDebugFlag))
 	out := []deckState{}
 	var ver uint64
 	if role != "" {
@@ -764,7 +779,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 		s.shadow.mu.Unlock()
 		out = s.shadowCompose(role, time.Now())
 	}
-	respond(w, map[string]any{"role": role, "decks": out, "ver": ver})
+	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug})
 }
 
 func (s *Server) shadowCompose(role string, now time.Time) []deckState {
@@ -1127,10 +1142,46 @@ func (s *Server) shadowLoop() {
 		}
 		sh.mu.Unlock()
 		if conn != nil && i%8 == 0 {
-			// shortcut: limited broadcast leaves on the default route only; enough for one DJ LAN.
-			conn.WriteToUDP([]byte("EngineX-shadow 1"), &net.UDPAddr{IP: net.IPv4bcast, Port: shadowBeaconPort})
+			shadowSendBeacons(conn)
 		}
 		s.shadowPollPeers()
+	}
+}
+
+// shadowSendBeacons sends the discovery beacon on the default route and from
+// each broadcast-capable IPv4 interface (so eth0 is always discovered even when
+// the default route is on wlan0).
+func shadowSendBeacons(conn *net.UDPConn) {
+	msg := []byte("EngineX-shadow 1")
+	conn.WriteToUDP(msg, &net.UDPAddr{IP: net.IPv4bcast, Port: shadowBeaconPort})
+	ifs, _ := net.Interfaces()
+	for _, ifi := range ifs {
+		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagBroadcast == 0 || ifi.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := ifi.Addrs()
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipn.IP.To4()
+			mask := ipn.Mask
+			if ip4 == nil || len(mask) != 4 {
+				continue
+			}
+			bcast := net.IPv4(ip4[0]|^mask[0], ip4[1]|^mask[1], ip4[2]|^mask[2], ip4[3]|^mask[3])
+			lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+				c.Control(func(fd uintptr) {
+					_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+				})
+				return nil
+			}}
+			if pc, err := lc.ListenPacket(context.Background(), "udp4", net.JoinHostPort(ip4.String(), "0")); err == nil {
+				_, _ = pc.WriteTo(msg, &net.UDPAddr{IP: bcast, Port: shadowBeaconPort})
+				pc.Close()
+			}
+		}
 	}
 }
 

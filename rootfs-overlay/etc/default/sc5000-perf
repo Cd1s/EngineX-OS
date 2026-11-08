@@ -1,4 +1,3 @@
 # Match actual /proc/interrupts names.
 SC5000_AUDIO_IRQ_PATTERN=ffb20000|snd|alsa|i2s|spdif|audio
-SC5000_GPU_IRQ_PATTERN=ffa30000
-SC5000_IO_IRQ_PATTERN=ehci_hcd|ff540000|eth0
+SC5000_GPU_IRQ_PATTERN=ffa30000|vop|hdmi

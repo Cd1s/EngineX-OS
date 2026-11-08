@@ -65,13 +65,16 @@ These settings do not reserve CPU0 against every stock daemon or unmovable
 kernel interrupt, and do not replace a verified RT kernel/boot policy.
 
 `sc5000-perf-tune` sets CPU0-3 to `ondemand` with a 1.2 GHz minimum (lower
-clocks caused ALSA xruns), `up_threshold` 50 and `sampling_down_factor` 10, and the `ffa30000.gpu` devfreq
-to `simple_ondemand` at its lowest frequency (audio over UI frame rate). It writes sysctl
+clocks caused ALSA xruns), `up_threshold` 50 and `sampling_down_factor` 10, and the `ffa30000.gpu`
+devfreq to `simple_ondemand` from 300 MHz (its lowest clock on battery or above 85 C). IRQs:
+audio on CPU0, GPU/VOP/HDMI on CPU1 (Engine's GUI core), everything else (touch I2C, MMC, USB,
+eth0) on CPU2. Engine's SceneGraph thread moves to CPU2 and its normal-priority helpers on CPU1
+to CPUs 0 and 3 (again 20 s and 60 s after each Engine start); EMain and real-time threads stay. It writes sysctl
 values (swappiness 10, dirty background 5, dirty ratio 15, file-max 1048576),
 and selects `mq-deadline`, otherwise `none`, when advertised, except on devices
 where Engine already chose `bfq`. USB and SD devices read ahead 1 MiB (LC003). Movable IRQs and their
 PREEMPT_RT threads are placed by name; `/etc/default/sc5000-perf` holds the
-patterns. Engine's threads keep the scheduler's placement.
+patterns.
 
 The service runs at boot and after each Engine start, because Engine's setup
 script sets the GPU back to `performance`. Missing,

@@ -105,6 +105,7 @@ fixture() {
     export MOCK_ROOT=$TMP/case-$count
     mkdir -p "$MOCK_ROOT"/{types,uuid,sys/class/block,proc,media,internal,outside}
     export SC5000_SYS_ROOT=$MOCK_ROOT/sys SC5000_PROC_ROOT=$MOCK_ROOT/proc
+    export SC5000_THREAD_DELAYS= # no delayed Engine thread passes outliving a case
     export SC5000_RUN_ROOT=$MOCK_ROOT/run SC5000_MEDIA_ROOT=$MOCK_ROOT/media
     export SC5000_INTERNAL_CACHE=$MOCK_ROOT/internal
     export SC5000_ENGINE_GUARDIAN=$TMP/bin/engine-guardian
@@ -184,7 +185,7 @@ done
 gpu=$SC5000_SYS_ROOT/class/devfreq/ffa30000.gpu
 mkdir -p "$gpu"
 printf 'performance\n' > "$gpu/governor"
-printf '100000000 600000000\n' > "$gpu/available_frequencies"
+printf '100000000 200000000 300000000 400000000 600000000\n' > "$gpu/available_frequencies"
 printf '600000000\n' > "$gpu/max_freq"
 printf '600000000\n' > "$gpu/min_freq"
 for dev in sda sdb mmcblk1; do mkdir -p "$SC5000_SYS_ROOT/block/$dev/queue"; done
@@ -202,12 +203,18 @@ printf ' 144: 0 1 0 0 GIC ffa30000.gpu\n 145: 0 1 0 0 GIC ff540000\n 146: 0 1 0 
 for irq in 42 43 44 45 46 144 145 146; do mkdir -p "$SC5000_PROC_ROOT/irq/$irq"; printf 'f\n' > "$SC5000_PROC_ROOT/irq/$irq/smp_affinity"; done
 mkdir -p "$SC5000_PROC_ROOT/100/task/"{100,101,102} "$SC5000_PROC_ROOT/200"
 ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
-printf 'Engine\n' > "$SC5000_PROC_ROOT/100/comm"
+printf 'EMain\n' > "$SC5000_PROC_ROOT/100/comm"
 printf 'irq/42-i2s\n' > "$SC5000_PROC_ROOT/200/comm"
-for tid in 100 101 102; do
+mkdir -p "$SC5000_PROC_ROOT/100/task/"{103,104,105,106}
+for tid in 100 101 102 103 104 105 106; do
     policy=0; name=GUI
     if [[ $tid == 101 ]]; then policy=1; name=AudioRT; fi
     if [[ $tid == 102 ]]; then name=AudioHelper; fi
+    if [[ $tid == 103 ]]; then name=SceneGraph; fi
+    if [[ $tid == 104 ]]; then name=Streamer2; fi
+    if [[ $tid == 105 ]]; then name=EMain; fi
+    if [[ $tid == 106 ]]; then policy=2; name=AudioRenderer3; fi
+    if (( tid >= 103 )); then printf 'Cpus_allowed_list:\t1\n' > "$SC5000_PROC_ROOT/100/task/$tid/status"; fi
     printf '%s\n' "$name" > "$SC5000_PROC_ROOT/100/task/$tid/comm"
     {
         printf '%s (name with spaces) S' "$tid"
@@ -226,7 +233,7 @@ for cpu in 0 1 2 3; do
     has 1200000 "$SC5000_SYS_ROOT/devices/system/cpu/cpu$cpu/cpufreq/scaling_min_freq"
 done
 has simple_ondemand "$gpu/governor"
-has 100000000 "$gpu/min_freq"
+has 300000000 "$gpu/min_freq"
 has 50 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/up_threshold"
 has 10 "$SC5000_SYS_ROOT/devices/system/cpu/cpufreq/ondemand/sampling_down_factor"
 has '[bfq]' "$SC5000_SYS_ROOT/block/mmcblk0/queue/scheduler"
@@ -240,8 +247,12 @@ has 2048 "$SC5000_SYS_ROOT/block/sdb/queue/read_ahead_kb"
 has none "$SC5000_SYS_ROOT/block/mmcblk1/queue/scheduler"
 lacks 'taskset <-pc> <0> <101>' "$MOCK_ROOT/log"
 lacks 'taskset <-pc> <1-2> <100>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <2> <103>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <0,3> <104>' "$MOCK_ROOT/log"
+lacks '> <105>' "$MOCK_ROOT/log"
+lacks '> <106>' "$MOCK_ROOT/log"
 has 1 "$SC5000_PROC_ROOT/irq/42/smp_affinity"
-has 6 "$SC5000_PROC_ROOT/irq/43/smp_affinity"
+has 4 "$SC5000_PROC_ROOT/irq/43/smp_affinity"
 has 'taskset <-pc> <0> <200>' "$MOCK_ROOT/log"
 has 'chrt <-f> <-p> <99> <200>' "$MOCK_ROOT/log"
 has 2 "$SC5000_PROC_ROOT/irq/44/smp_affinity"
@@ -250,7 +261,7 @@ has 1 "$SC5000_PROC_ROOT/irq/46/smp_affinity"
 has 'taskset <-pc> <1> <201>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <2> <202>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <2> <203>' "$MOCK_ROOT/log"
-has 'taskset <-pc> <1-2> <204>' "$MOCK_ROOT/log"
+has 'taskset <-pc> <2> <204>' "$MOCK_ROOT/log"
 has 'taskset <-pc> <0> <205>' "$MOCK_ROOT/log"
 has 'chrt <-f> <-p> <99> <205>' "$MOCK_ROOT/log"
 has 1 "$SC5000_PROC_ROOT/irq/146/smp_affinity"
@@ -262,6 +273,13 @@ sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 find "$SC5000_SYS_ROOT" "$SC5000_PROC_ROOT" -type f -exec sha256sum {} + | sort > "$MOCK_ROOT/after"
 cmp -s "$MOCK_ROOT/before" "$MOCK_ROOT/after" || fail 'performance tuning is not idempotent'
 ok 'CPU/GPU, sysctl, schedulers, IRQs and RT-vs-GUI affinity are idempotent'
+
+# Hot at Engine start: the GPU idles at its lowest clock.
+mkdir -p "$SC5000_SYS_ROOT/class/thermal/thermal_zone0"
+printf '90000\n' > "$SC5000_SYS_ROOT/class/thermal/thermal_zone0/temp"
+sh "$PERF" > "$MOCK_ROOT/output" 2>&1
+has 100000000 "$gpu/min_freq"
+ok 'a hot deck keeps the lowest GPU clock'
 
 MOCK_TASKSET_FAIL=1 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
 rm "$gpu/governor"
