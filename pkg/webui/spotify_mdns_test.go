@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"net"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -39,5 +41,13 @@ func TestSpotifyMDNSAnswerCarriesPortTXTAndAddress(t *testing.T) {
 		if !bytes.Contains(m, []byte(want)) {
 			t.Errorf("answer lacks %q", want)
 		}
+	}
+}
+
+// The A record must never claim the system host name avahi-daemon owns (#mDNS conflict loop).
+func TestSpotifyMDNSHostIsNotSystemHost(t *testing.T) {
+	h, _ := os.Hostname()
+	if got := spotifyMDNSHost(); !strings.HasPrefix(got, "enginex-spotify") || got == h {
+		t.Fatalf("host %q (system %q)", got, h)
 	}
 }
