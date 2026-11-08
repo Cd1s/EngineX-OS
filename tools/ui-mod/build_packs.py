@@ -469,12 +469,19 @@ SERVICES_MAIN = """
 		onTriggered: tick = (tick + 1) & 0xffff
 	}
 	function scCueTickFor(d) {
-		return d === 1 ? scCueClock1.tick : d === 2 ? scCueClock2.tick : d === 3 ? scCueClock3.tick : scCueClock4.tick
+		return scShadowVisible(d) ? scShadowFrame : d === 1 ? scCueClock1.tick : d === 2 ? scCueClock2.tick : d === 3 ? scCueClock3.tick : scCueClock4.tick
 	}
 	// Same object while text/label/color/urgent are unchanged, so bindings do not re-layout every tick.
 	property var scCueInfoCache: ({})
 	function scNextCueInfo(d, tick) {
-		if (scShadowVisible(d)) return scShadowNextCue(d)
+		if (scShadowVisible(d)) {
+			const info = scShadowNextCue(d)
+			if (!info) { delete scCueInfoCache[d]; return null }
+			const c = scCueInfoCache[d]
+			if (c && c.text === info.text && c.label === info.label && c.color === info.color && c.urgent === info.urgent) return c
+			scCueInfoCache[d] = info
+			return info
+		}
 		const p = scCueProps(d)
 		if (!p.loaded || !p.loaded.state) return null
 		const pos = p.position ? p.position.unnormalized || 0 : 0
@@ -2597,7 +2604,7 @@ SHADOW_LAYER = r"""
         readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
         readonly property real playhead: overview ? position / duration : 0.5
         readonly property real start: overview ? 0 : position - span * playhead
-        readonly property var cueInfo: { const tick = root.scCueTick; return active ? root.scShadowNextCue(deck) : null }
+        readonly property var cueInfo: { const tick = root.scShadowFrame; return active ? root.scNextCueInfo(deck, tick) : null }
         readonly property var cues: active ? root.scShadowCuesFor(deck, sample) : []
         readonly property var grid: wave && meta ? root.scShadowGrid(deck, meta, start, start + span) : []
         readonly property var tiles: meta && meta.detail && Array.isArray(meta.waveformTiles) ? meta.waveformTiles : []
