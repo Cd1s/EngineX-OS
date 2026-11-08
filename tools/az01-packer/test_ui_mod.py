@@ -74,6 +74,15 @@ class UiModSourceTest(unittest.TestCase):
     def test_i18n_has_stem(self):
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
         self.assertIn(["Stem", "分轨 Stems", "分軌 Stems"], rows)
+        self.assertIn(["Tracklist Waveform", "曲目列表波形", "曲目列表波形"], rows)
+
+    def test_tracklist_waveform_and_ui_scale(self):
+        self.assertIn('text: "Tracklist Waveform"', bp.LIBRARY_ENTRIES)
+        self.assertIn("root.scTracklistWaveform", bp.LIBRARY_ENTRIES)
+        self.assertIn("tracklistWaveform=", bp.LIBRARY_ENTRIES)
+        self.assertIn('"110", "105", "100"', bp.UI_SCALE_ENTRY)
+        self.assertIn('"110%", "105%", "100%"', bp.UI_SCALE_ENTRY)
+        self.assertIn("root.scTracklistWaveform", SRC)
 
 
 class UiModBuildTest(unittest.TestCase):
@@ -85,6 +94,9 @@ class UiModBuildTest(unittest.TestCase):
             res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(Path(tmp) / "packs")],
                                  capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, res.stderr)
+            tl = Path(tmp) / "packs" / "en" / "Skins" / "Embedded" / "Views" / "BrowseView" / "Components" / "TrackList.qml"
+            self.assertTrue(tl.is_file(), f"{tl} not found")
+            self.assertIn("root.scTracklistWaveform", tl.read_text())
 
 
 if __name__ == "__main__":

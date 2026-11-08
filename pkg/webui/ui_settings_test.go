@@ -470,7 +470,25 @@ func TestUIScale(t *testing.T) {
 	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=75\n") {
 		t.Fatalf("not saved: %s", c)
 	}
-	for _, bad := range []string{"uiScale=50", "uiScale=101", "uiScale=abc"} {
+	if code, v := uiPost(t, srv.URL, "uiScale=105"); code != 200 || v.UIScale != 105 {
+		t.Fatalf("scale 105: %d %d", code, v.UIScale)
+	}
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "SC5000_UI_SCALE=1.05\n" {
+		t.Fatalf("env file: %q", b)
+	}
+	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=105\n") {
+		t.Fatalf("not saved: %s", c)
+	}
+	if code, v := uiPost(t, srv.URL, "uiScale=110"); code != 200 || v.UIScale != 110 {
+		t.Fatalf("scale 110: %d %d", code, v.UIScale)
+	}
+	if b, _ := os.ReadFile(uiScaleEnvPath); string(b) != "SC5000_UI_SCALE=1.1\n" {
+		t.Fatalf("env file: %q", b)
+	}
+	if c, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(c), "ui_scale=110\n") {
+		t.Fatalf("not saved: %s", c)
+	}
+	for _, bad := range []string{"uiScale=50", "uiScale=101", "uiScale=115", "uiScale=abc"} {
 		if code, _ := uiPost(t, srv.URL, bad); code != 400 {
 			t.Fatalf("%s accepted: %d", bad, code)
 		}
@@ -486,7 +504,7 @@ func TestUIScale(t *testing.T) {
 	var got uiSettings
 	json.NewDecoder(resp.Body).Decode(&got)
 	resp.Body.Close()
-	if got.UIScale != 75 {
+	if got.UIScale != 110 {
 		t.Fatalf("reloaded scale: %d", got.UIScale)
 	}
 
@@ -547,13 +565,14 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	var v uiSettings
 	json.NewDecoder(resp.Body).Decode(&v)
 	if v.StreamSortRole != "default" || v.StreamSortOrder != "asc" || v.BrowserDualColumn != false ||
+		!v.TracklistWaveform ||
 		v.SyncGuardPct != 0 || v.SwapLoopOrder != false || v.LedBrightness != 100 ||
 		v.StemsEqMode != false || v.BeatJumpPads != false || v.PioneerFx != "off" {
 		t.Fatalf("unexpected defaults: %+v", v)
 	}
 
 	// 2. Update via POST /api/ui with query params and Bearer token
-	updateParams := "streamSortRole=bpm&streamSortOrder=desc&browserDualColumn=1&syncGuardPct=15&swapLoopOrder=1&ledBrightness=60&stemsEqMode=1&beatJumpPads=1&pioneerFx=spiral"
+	updateParams := "streamSortRole=bpm&streamSortOrder=desc&browserDualColumn=1&tracklistWaveform=0&syncGuardPct=15&swapLoopOrder=1&ledBrightness=60&stemsEqMode=1&beatJumpPads=1&pioneerFx=spiral"
 	postReq, _ := http.NewRequest("POST", srv.URL+"/api/ui?"+updateParams, nil)
 	postReq.Header.Set("Authorization", "Bearer "+token)
 	postResp, err := client.Do(postReq)
@@ -567,6 +586,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	var updated uiSettings
 	json.NewDecoder(postResp.Body).Decode(&updated)
 	if updated.StreamSortRole != "bpm" || updated.StreamSortOrder != "desc" || !updated.BrowserDualColumn ||
+		updated.TracklistWaveform ||
 		updated.SyncGuardPct != 15 || !updated.SwapLoopOrder || updated.LedBrightness != 60 ||
 		!updated.StemsEqMode || !updated.BeatJumpPads || updated.PioneerFx != "spiral" {
 		t.Fatalf("updated values mismatch: %+v", updated)
@@ -583,6 +603,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	var fetched uiSettings
 	json.NewDecoder(getResp.Body).Decode(&fetched)
 	if fetched.StreamSortRole != "bpm" || fetched.StreamSortOrder != "desc" || !fetched.BrowserDualColumn ||
+		fetched.TracklistWaveform ||
 		fetched.SyncGuardPct != 15 || !fetched.SwapLoopOrder || fetched.LedBrightness != 60 ||
 		!fetched.StemsEqMode || !fetched.BeatJumpPads || fetched.PioneerFx != "spiral" {
 		t.Fatalf("fetched values mismatch: %+v", fetched)
@@ -598,6 +619,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 		"stream_sort_role=bpm",
 		"stream_sort_order=desc",
 		"browser_dual_column=1",
+		"tracklist_waveform=0",
 		"sync_guard_pct=15",
 		"swap_loop_order=1",
 		"led_brightness=60",
@@ -623,6 +645,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	var reloaded uiSettings
 	json.NewDecoder(resp2.Body).Decode(&reloaded)
 	if reloaded.StreamSortRole != "bpm" || reloaded.StreamSortOrder != "desc" || !reloaded.BrowserDualColumn ||
+		reloaded.TracklistWaveform ||
 		reloaded.SyncGuardPct != 15 || !reloaded.SwapLoopOrder || reloaded.LedBrightness != 60 ||
 		!reloaded.StemsEqMode || !reloaded.BeatJumpPads || reloaded.PioneerFx != "spiral" {
 		t.Fatalf("reloaded values mismatch: %+v", reloaded)
@@ -633,6 +656,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 		"streamSortRole=invalid",
 		"streamSortOrder=invalid",
 		"browserDualColumn=maybe",
+		"tracklistWaveform=maybe",
 		"syncGuardPct=25",
 		"swapLoopOrder=notabool",
 		"ledBrightness=10",
