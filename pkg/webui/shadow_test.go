@@ -177,7 +177,7 @@ func TestShadowPerfFromPeer(t *testing.T) {
 	if _, err := src.Exec(`INSERT INTO Track (path, filename, bpmAnalyzed, isAnalyzed) VALUES ('../Contents/it''s.mp3', 'it''s.mp3', 130.5, 1), ('../Contents/raw.mp3', 'raw.mp3', 120, 0)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := src.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?`, qc(track), qc(overview), qc(beats)); err != nil {
+	if _, err := src.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=? WHERE trackId=(SELECT min(id) FROM Track)`, qc(track), qc(overview), qc(beats)); err != nil {
 		t.Fatal(err)
 	}
 	as := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
@@ -715,7 +715,7 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	delete(s.shadow.peerDecks, 4)
 	s.shadow.peerDecks[1] = peerDeck{deckState: deckState{Deck: 1, Key: "k1", Ext: ".flac", Name: "sc5000.flac", Playing: true}, ip: "192.0.2.8", at: now}
 	s.shadow.mu.Unlock()
-	out = s.shadowCompose("12", now)
+	out = s.shadowComposeLegacy("12", now)
 	if len(out) != 1 || out[0].Deck != 3 || !out[0].Loading || !out[0].Playing {
 		t.Fatalf("overlapping peer deck on 12 role: %+v, want shadow deck 3", out)
 	}
@@ -725,7 +725,7 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	s.shadow.takePeer("192.0.2.8", []deckState{{Deck: 1, Seq: 1, Key: "k1", Ext: ".flac", Name: "p1.flac", Playing: true}}, now)
 	s.shadow.takePeer("192.0.2.9", []deckState{{Deck: 1, Seq: 1, Key: "k2", Ext: ".flac", Name: "p2.flac", Playing: true}}, now)
 	s.shadow.mu.Unlock()
-	out = s.shadowCompose("12", now)
+	out = s.shadowComposeLegacy("12", now)
 	if len(out) != 2 || out[0].Deck != 3 || out[1].Deck != 4 {
 		t.Fatalf("two peers on Deck 1 with 12 role: %+v, want shadow decks 3 and 4", out)
 	}

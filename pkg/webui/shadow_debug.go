@@ -120,6 +120,21 @@ func (s *Server) shadowDebugGet(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"enabled": sh.dbg.on.Load(), "ver": sh.ver, "own": sh.own, "ownAgeMs": now.Sub(sh.ownAt).Milliseconds(),
 		"peers": peers, "peerDecks": decks, "peerSeq": maps.Clone(sh.peerSeq), "files": maps.Clone(sh.files), "running": sh.running}
 	sh.mu.Unlock()
+	sh.display.mu.Lock()
+	ready, busy, detail := 0, 0, 0
+	for _, e := range sh.display.entries {
+		if e.busy {
+			busy++
+		}
+		if e.asset != nil {
+			ready++
+			if e.asset.Detail {
+				detail++
+			}
+		}
+	}
+	out["displayCache"] = map[string]int{"entries": len(sh.display.entries), "ready": ready, "busy": busy, "detail": detail}
+	sh.display.mu.Unlock()
 	out["log"] = sh.dbg.lines()
 	respond(w, out)
 }
