@@ -58,15 +58,23 @@ func TestDMXRoutesAuthPersistenceAndClock(t *testing.T) {
 	// Native performance changes merge onto the latest patch, and do not
 	// accept configuration or mutate other controls from a stale QML snapshot.
 	w = do("POST", "/v1/sc5000/dmx", `{"action":"control","control":{"master":64}}`, "127.0.0.1:1234", "")
-	if w.Code != 200 || s.dmx.Status().Config.Master != 64 { t.Fatal("native control", w.Code) }
+	if w.Code != 200 || s.dmx.Status().Config.Master != 64 {
+		t.Fatal("native control", w.Code)
+	}
 	w = do("POST", "/v1/sc5000/dmx", string(b), "127.0.0.1:1234", "")
-	if w.Code != 400 { t.Fatal("invalid native request", w.Code) }
+	if w.Code != 400 {
+		t.Fatal("invalid native request", w.Code)
+	}
 	c.Master = 255
-	b, _ = json.Marshal(map[string]any{"action":"configure","config":c,"revision":0})
+	b, _ = json.Marshal(map[string]any{"action": "configure", "config": c, "revision": 0})
 	w = do("POST", "/v1/sc5000/dmx", string(b), "127.0.0.1:1234", "")
-	if w.Code != 403 { t.Fatal("native patch accepted", w.Code) }
+	if w.Code != 403 {
+		t.Fatal("native patch accepted", w.Code)
+	}
 	w = do("POST", "/api/dmx", string(b), "192.0.2.1:1234", "test-dmx-access")
-	if w.Code != 409 || s.dmx.Status().Config.Master != 64 { t.Fatal("stale full config accepted", w.Code) }
+	if w.Code != 409 || s.dmx.Status().Config.Master != 64 {
+		t.Fatal("stale full config accepted", w.Code)
+	}
 	w = do("POST", "/api/dmx", `{"action":"blackout"}`, "192.0.2.1:1234", "test-dmx-access")
 	if w.Code != 200 || !s.dmx.Status().Config.Blackout {
 		t.Fatal("blackout", w.Code)
@@ -80,30 +88,49 @@ func TestDMXRoutesAuthPersistenceAndClock(t *testing.T) {
 }
 
 func TestDMXRejectsForwardedNativeRequests(t *testing.T) {
-	s := New(Config{UIDir:t.TempDir(), StateDir:t.TempDir()}, nil)
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	defer s.Close()
 	for _, tc := range []struct{ host, header string }{{"public.example", ""}, {"127.0.0.1:8080", "X-Forwarded-For"}, {"127.0.0.1:8080", "Forwarded"}, {"127.0.0.1:8080", "CF-Connecting-IP"}} {
 		for _, path := range []string{"/v1/sc5000/dmx", "/v1/sc5000/dmx.qml", "/v1/sc5000/dmx/clock"} {
-			method := "GET"; if strings.HasSuffix(path,"/clock") { method = "POST" }
-			r := httptest.NewRequest(method, path, strings.NewReader("[]")); r.RemoteAddr="127.0.0.1:1234"; r.Host=tc.host
-			if tc.header!="" { r.Header.Set(tc.header,"192.0.2.1") }
-			w:=httptest.NewRecorder(); s.ServeHTTP(w,r)
-			if w.Code!=403 { t.Fatalf("proxy %s %s: %d",tc.header,path,w.Code) }
+			method := "GET"
+			if strings.HasSuffix(path, "/clock") {
+				method = "POST"
+			}
+			r := httptest.NewRequest(method, path, strings.NewReader("[]"))
+			r.RemoteAddr = "127.0.0.1:1234"
+			r.Host = tc.host
+			if tc.header != "" {
+				r.Header.Set(tc.header, "192.0.2.1")
+			}
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, r)
+			if w.Code != 403 {
+				t.Fatalf("proxy %s %s: %d", tc.header, path, w.Code)
+			}
 		}
 	}
 }
 
 func TestDMXBlackoutAndDisableSurviveSaveFailure(t *testing.T) {
 	badDir := filepath.Join(t.TempDir(), "not-a-directory")
-	if err:=os.WriteFile(badDir, []byte("x"), 0600); err!=nil { t.Fatal(err) }
-	s:=New(Config{UIDir:badDir, StateDir:t.TempDir(), AccessToken:"test-dmx-access"}, nil)
+	if err := os.WriteFile(badDir, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{UIDir: badDir, StateDir: t.TempDir(), AccessToken: "test-dmx-access"}, nil)
 	defer s.Close()
-	for _, action := range []string{"blackout","disable"} {
-		c:=dmx.DefaultConfig(); c.Enabled=true
-		if err:=s.dmx.Apply(c);err!=nil { t.Fatal(err) }
-		r:=httptest.NewRequest("POST","/api/dmx",strings.NewReader(`{"action":"`+action+`"}`));r.Header.Set("Authorization","Bearer test-dmx-access")
-		w:=httptest.NewRecorder(); s.ServeHTTP(w,r)
-		got:=s.dmx.Status().Config
-		if w.Code!=500 || (action=="blackout" && !got.Blackout) || (action=="disable" && got.Enabled) { t.Fatalf("%s save failure: %d %+v",action,w.Code,got) }
+	for _, action := range []string{"blackout", "disable"} {
+		c := dmx.DefaultConfig()
+		c.Enabled = true
+		if err := s.dmx.Apply(c); err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest("POST", "/api/dmx", strings.NewReader(`{"action":"`+action+`"}`))
+		r.Header.Set("Authorization", "Bearer test-dmx-access")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		got := s.dmx.Status().Config
+		if w.Code != 500 || (action == "blackout" && !got.Blackout) || (action == "disable" && got.Enabled) {
+			t.Fatalf("%s save failure: %d %+v", action, w.Code, got)
+		}
 	}
 }

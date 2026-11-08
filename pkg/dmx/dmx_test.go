@@ -188,7 +188,9 @@ func TestMasterPhaseUnwrapAndPause(t *testing.T) {
 	// wall-clock timestamp catches up.
 	e.clock.At = time.Now().Add(time.Hour)
 	e.SetClock(Clock{Deck: 1, BPM: 120, Beat: 1, At: time.Now().Add(-time.Millisecond)})
-	if e.clock.Deck != 1 { t.Fatal("clock step prevented resynchronization") }
+	if e.clock.Deck != 1 {
+		t.Fatal("clock step prevented resynchronization")
+	}
 }
 
 func TestDisabledAndMissingUSB(t *testing.T) {
