@@ -782,6 +782,8 @@ func TestSoundCloudPlaybackInfoCodecMatchesStreamWhenLosslessOnly(t *testing.T) 
 	var cdn *httptest.Server
 	cdn = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/me": // the Go+ check
+			w.WriteHeader(http.StatusNotFound)
 		case "/tracks/5":
 			w.Write([]byte(`{"id":5,"access":"playable"}`))
 		case "/tracks/5/streams":

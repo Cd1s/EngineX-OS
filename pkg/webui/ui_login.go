@@ -358,7 +358,11 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 		s.uiMu.Lock()
 		lang := s.loadUI().Language
 		s.uiMu.Unlock()
-		flow.Target = "http://" + lanHost() + ":8080/m/" + provider + "?t=" + url.QueryEscape(flow.token) + "&lang=" + url.QueryEscape(lang)
+		if pub := s.PublicTunnelURL(); pub != "" {
+			flow.Target = strings.TrimRight(pub, "/") + "/m/" + provider + "?t=" + url.QueryEscape(flow.token) + "&lang=" + url.QueryEscape(lang)
+		} else {
+			flow.Target = "http://" + lanHost() + ":8080/m/" + provider + "?t=" + url.QueryEscape(flow.token) + "&lang=" + url.QueryEscape(lang)
+		}
 	}
 	s.mu.Lock()
 	s.logins[provider] = flow

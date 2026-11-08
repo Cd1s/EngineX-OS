@@ -3,8 +3,8 @@ package providers
 // SoundCloud through its official API with the owner's registered app: the Client ID
 // and secret are exchanged for an access token, or a user's own token is used.
 // Registering an app needs Artist Pro, so a deck without either reads public
-// profiles through the web API soundcloud.com itself uses (see web). Only what is
-// fully playable is fetched. Previews are refused, and nothing is decrypted.
+// profiles through the web API soundcloud.com itself uses (see web). Previews are listed
+// (Track.PreviewOnly) but never downloaded as if whole, and nothing is decrypted.
 
 import (
 	"bufio"
@@ -217,6 +217,59 @@ type SoundCloud struct {
 	Username string
 	WebURL   string // overrides the web API in tests
 	SiteURL  string // overrides soundcloud.com in tests
+
+	// goPlus caches HasGoPlus under scGoPlusMu (a package lock keeps the struct copyable).
+	goPlus   bool
+	goPlusAt time.Time
+}
+
+var scGoPlusMu sync.Mutex
+
+const scGoPlusTTL = 10 * time.Minute
+
+// HasGoPlus reports whether the logged-in account has a Go/Go+ subscription,
+// which is what makes preview-only (SNIP) tracks play in full. An app token or
+// public profile never does. A failed /me lookup counts as no and is retried.
+func (s *SoundCloud) HasGoPlus(ctx context.Context) bool {
+	if s.Token == "" && !s.Auth.HasUser() {
+		return false
+	}
+	scGoPlusMu.Lock()
+	if !s.goPlusAt.IsZero() && time.Since(s.goPlusAt) < scGoPlusTTL {
+		ok := s.goPlus
+		scGoPlusMu.Unlock()
+		return ok
+	}
+	scGoPlusMu.Unlock()
+	var me struct {
+		Sub  *scSubscription  `json:"consumer_subscription"`
+		Subs []scSubscription `json:"consumer_subscriptions"`
+	}
+	if err := s.get(ctx, s.base()+"/me", &me); err != nil {
+		return false
+	}
+	ok := me.Sub.goPlus()
+	for i := range me.Subs {
+		ok = ok || me.Subs[i].goPlus()
+	}
+	scGoPlusMu.Lock()
+	s.goPlus, s.goPlusAt = ok, time.Now()
+	scGoPlusMu.Unlock()
+	return ok
+}
+
+type scSubscription struct {
+	Product struct {
+		ID string `json:"id"`
+	} `json:"product"`
+}
+
+func (c *scSubscription) goPlus() bool {
+	if c == nil {
+		return false
+	}
+	id := strings.ToLower(c.Product.ID)
+	return strings.Contains(id, "high_tier") || strings.Contains(id, "high-tier") || strings.HasPrefix(id, "go")
 }
 
 // web reports whether the deck has no app of its own. Public profiles, likes and
@@ -352,7 +405,7 @@ func (t scTrack) cover() string {
 }
 
 func (t scTrack) track() Track {
-	return Track{ID: strconv.FormatInt(t.ID, 10), Title: t.Title, Artist: t.User.Username, Artists: []string{t.User.Username}, ISRC: t.ISRC, DurationMS: t.Duration, Provider: "soundcloud", BPM: t.BPM, Key: camelotFromName(t.Key), CoverURL: t.cover()}
+	return Track{ID: strconv.FormatInt(t.ID, 10), Title: t.Title, Artist: t.User.Username, Artists: []string{t.User.Username}, ISRC: t.ISRC, DurationMS: t.Duration, Provider: "soundcloud", BPM: t.BPM, Key: camelotFromName(t.Key), CoverURL: t.cover(), PreviewOnly: t.Policy == "SNIP" || t.Access == "preview"}
 }
 
 func (s *SoundCloud) base() string {
@@ -601,7 +654,7 @@ func (s *SoundCloud) trackPages(ctx context.Context, address string) ([]Track, e
 			return nil, err
 		}
 		for _, t := range r.Collection {
-			if t.ID != 0 && t.Access != "blocked" && t.Policy != "BLOCK" && t.Policy != "SNIP" {
+			if t.ID != 0 && t.Access != "blocked" && t.Policy != "BLOCK" {
 				out = append(out, t.track())
 			}
 		}
@@ -611,7 +664,7 @@ func (s *SoundCloud) trackPages(ctx context.Context, address string) ([]Track, e
 }
 
 func (s *SoundCloud) Tracks(ctx context.Context, id string) ([]Track, error) {
-	q := url.Values{"limit": {"100"}, "access": {"playable"}}
+	q := url.Values{"limit": {"100"}, "access": {"playable,preview"}}
 	if id == soundCloudLikesID {
 		root, err := s.library()
 		if err != nil {
@@ -672,7 +725,7 @@ func (s *SoundCloud) webPlaylistTracks(ctx context.Context, id string) ([]Track,
 	}
 	var out []Track
 	for _, ref := range list.Tracks {
-		if t, ok := full[ref.ID]; ok && t.Policy != "BLOCK" && t.Policy != "SNIP" && len(out) < soundCloudListLimit {
+		if t, ok := full[ref.ID]; ok && t.Policy != "BLOCK" && len(out) < soundCloudListLimit {
 			out = append(out, t.track())
 		}
 	}
@@ -680,7 +733,7 @@ func (s *SoundCloud) webPlaylistTracks(ctx context.Context, id string) ([]Track,
 }
 
 func (s *SoundCloud) Search(ctx context.Context, query string) ([]Track, error) {
-	return s.trackPages(ctx, s.list(s.path("/tracks", "/search/tracks"), url.Values{"q": {query}, "limit": {"30"}, "access": {"playable"}}))
+	return s.trackPages(ctx, s.list(s.path("/tracks", "/search/tracks"), url.Values{"q": {query}, "limit": {"30"}, "access": {"playable,preview"}}))
 }
 
 func (s *SoundCloud) SearchPlaylists(ctx context.Context, query string) ([]Playlist, error) {

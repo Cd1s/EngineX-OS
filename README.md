@@ -42,6 +42,8 @@ No need to copy tracks to a USB drive before every set:
 - **NetEase Cloud Music, Spotify, Deezer, SoundCloud, TIDAL, Beatport, and Apple Music** sit right next to your USB and SD drives in the Source menu;
 - Scan the on-screen QR code with your phone to log in and browse your playlists, liked tracks, and search results;
 - Switch between **Lossless FLAC and 320 kbps MP3**. Tracks you play are cached locally on the deck so loading them again is instant without re-downloading.
+- **Cache isolation and shared Deemix cache**: Spotify (`spotify-<id>.*`), Beatport (`beatport-<id>.*`), SoundCloud (`soundcloud-<id>.*`) and NetEase in *Official* mode (`netease-<id>.*`) each download through their own channel into their own cache namespace. A song you already fetched from Deezer or NetEase is downloaded again, and cached separately, when you play it from Spotify. When NetEase is set to *Deemix first*, NetEase and Deezer share the same lossless Deemix source, so a song played from one and then from the other reuses the cached file without downloading again; with NetEase on *Official*, the two caches stay independent.
+- **SoundCloud Go+ and high-quality routing**: DJ sets and long mixes (over 10 minutes) always play SoundCloud's own stream, the uploader's original 320k / WAV first, then 256k / 160k AAC or progressive MP3. For Go+-only tracks and ordinary non-set tracks: with a **SoundCloud Go+** account bound, the deck plays SoundCloud's own high-quality stream; without Go+ (the official stream gives Go+-only tracks just a 30-second preview), it matches the song on whichever of Deezer / NetEase / Beatport you are signed in to, pulls the lossless / 320k audio and caches it as `soundcloud-<id>.*`; if none of them is signed in, or the track is a SoundCloud-exclusive upload, it plays from SoundCloud directly, and for a Go+-only preview with no usable service signed in the deck prompts you to scan a QR code for SoundCloud Go+ or another streaming account.
 - **Beatport** uses your own account and plan: Professional downloads FLAC or 256k AAC, Advanced downloads 128k AAC, and Essential streams 128k AAC. Beatport tracks split into Stems like any other track.
 - **Apple Music**: paste any playlist or album link on your phone, no account needed; add your `media-user-token` to browse your own library too. Playback uses Engine 5.3.0's own Apple Music source, which EngineX unlocks; tracks are not matched to Deezer or NetEase.
 
@@ -73,8 +75,8 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 - **10-step geometric waveform zoom (#147) and Auto Loop knob link (#135)**: the Browse knob now zooms the waveform in 10 geometric steps (about 1.46× per click) with 16 ms frame coalescing, so low zoom levels no longer jump and fast turns no longer stutter. Turning the Auto Loop knob still changes the loop size, and `LinkBeatJumpLoopSize` is switched on so Beat Jump size follows it; the `beatJumpEnabled` check is fixed on the JP07 when `swap_loop_order` is on;
 - **OmniSource playlist isolation (#105)**: with OmniSource on, the search bar still searches all streaming services and every USB drive, but a streaming service's own playlist page no longer mixes in `[USB: ...]` entries or other services' playlists;
 - **SoundCloud Liked Tracks fallback (#150)**: when the user's OAuth `refresh_token` has expired and SoundCloud answers `HTTP 400`, the deck falls back to the app token and the public profile API to load `Liked Tracks & Sets`;
-- **Spotify Connect on the LAN (#150)**: the deck advertises `_spotify-connect._tcp` over Avahi mDNS with the standard 768-bit Diffie-Hellman public key, so the Spotify app on a phone finds `EngineX OS` on the local network; the track-download `410` after OAuth login is fixed;
-- **Multi-Deck Hub in `sc5000-relay`, and LAN `sc5000-stemsd`**: the relay console gains a `Connected decks (Multi-Deck Hub)` card that lists every deck behind the same backend with its online state, role (`13` / `24`), firmware version and streaming sign-in status. Sign in with a deck access code or the master password; each deck's `Settings → About` page shows the live state of its Stems compute node.
+- **Spotify Connect on the LAN (#150)**: the deck advertises `_spotify-connect._tcp` over Avahi mDNS plus a built-in pure-Go `_spotify-connect._tcp.local.` responder in `stream-sync` (found on both wired `eth0` and wireless `wlan0`) with the standard 768-bit Diffie-Hellman public key, so the Spotify app on a phone finds `EngineX OS` on the local network; the track-download `410` after OAuth login is fixed;
+- **Multi-Deck Hub in `enginex-relay` (formerly `sc5000-relay`), and LAN `enginex-stemsd` (formerly `sc5000-stemsd`)**: the relay console gains a `Connected decks (Multi-Deck Hub)` card that lists every deck behind the same backend with its online state, role (`13` / `24`), firmware version and streaming sign-in status. Sign in with a deck access code or the master password; each deck's `Settings → About` page shows the live state of its Stems compute node.
 
 ### 8. New in 5.3.0.3
 - **Remote access with Tailscale / Headscale (#130)**: the web console's `Remote access (Tailscale / Headscale)` card downloads a trimmed Tailscale client only when you ask for it (about 4.3 MB, checksum verified), signs in with a login link or a one-time auth key, and shares only what you tick (SSH / SFTP, the web console) with your own tailnet. No public IP or router changes needed, and your own Headscale server works too. Off by default. It runs in userspace mode because the deck kernel has no TUN device. Tested end to end with Headscale; CPU and memory use on a real deck during playback are not measured yet;
@@ -239,7 +241,7 @@ Extract the archive and start `Install-EngineX.bat`, `Install-EngineX.command`, 
 
 1. Update the deck to official **Engine OS 5.3.0**.
 2. Extract the package and start `Install-EngineX.bat` on Windows, `Install-EngineX.command` on macOS, or `./install-enginex.sh` on Linux.
-3. The installer looks for your deck and downloads its matching bundle. For a stock deck, select **Settings → About / Update → Firmware Update Mode**, reboot and connect USB; Fastboot identifies the model and flashes `/data` after confirmation. For a deck with root SSH enabled, connect both devices to the same network: StageLinQ (UDP 51337) and an EngineX Web UI scan discover it, then the bundle is installed under `/data/sc5000-custom` while preserving your library and settings. Discovery may depend on network configuration and StageLinQ availability.
+3. The installer looks for your deck and downloads its matching bundle. For a stock deck, select **Settings → About / Update → Firmware Update Mode**, reboot and connect USB; Fastboot identifies the model and flashes `/data` after confirmation. For a deck with root SSH enabled, connect both devices to the same network: StageLinQ (UDP 51337) and an EngineX Web UI scan discover it, then the bundle is installed under `/data/enginex` while preserving your library and settings. Discovery may depend on network configuration and StageLinQ availability.
 4. After installation, future releases can be installed on the deck using **Settings → About / Update → Update** over Wi-Fi (#86).
 
 SSH requires root access. USB Fastboot requires `fastboot`, Python 3 and e2fsprogs installed separately; on Windows, use the Linux package in WSL with USB access. **Flashing a new `/data` image erases the data on that partition, including its music, library and settings.** Back up the deck first and disconnect USB drives and SD cards before installation. To preserve `/data`, use `--userdata-backup` with a full image from the same deck. This Beta has not been tested on real hardware.
@@ -292,7 +294,7 @@ Download the bundle for your model and check its SHA-256 against `SHA256SUMS.txt
    ```
    `--ssh-key` is optional. Then press the power button to turn the unit off and on again.
 
-**Uninstall**: `sh /data/sc5000-custom/bundle/uninstall.sh && reboot` removes only what the bundle added.
+**Uninstall**: `sh /data/enginex/bundle/uninstall.sh && reboot` removes only what the bundle added.
 
 </details>
 
@@ -320,18 +322,24 @@ No computer and no server are needed. Put the deck and your phone on the same Wi
 | --- | --- |
 | NetEase Cloud Music | Scan the deck's QR code with the NetEase Cloud Music app and confirm. If the code expires, tap it for a new one. |
 | Spotify | **Method A (recommended)**: open Spotify on your phone or computer, play any song, tap the **Connect to a device** speaker icon and pick **`EngineX OS`** to bind your account in ~1 second. **Method B**: tap **Scan to log in** beside Spotify on the deck screen and scan the QR code. Plays native 320 kbps Ogg Vorbis directly from Spotify. |
-| Deezer | Paste your **ARL** (the guide shows how to copy it from deezer.com on a computer). The same login unlocks lossless FLAC downloads (Deemix) for Deezer tracks; NetEase tracks use it only if you pick *Deemix first* for NetEase. Every other service plays from itself, with no fallback to another service. A profile link alone shows public playlists without downloads. |
-| SoundCloud | Enter your username or profile URL. No password, Artist Pro or API app needed. For private playlists, paste the `oauth_token` from soundcloud.com under *Advanced*. Each track plays at the best quality it offers: the uploader's original where downloads are allowed, then 256 kbps AAC, 160 kbps AAC, 128 kbps MP3. |
+| Deezer | Paste your **ARL** (the guide shows how to copy it from deezer.com on a computer). The same login unlocks lossless FLAC downloads (Deemix) for Deezer tracks; NetEase tracks use it only if you pick *Deemix first* for NetEase. Spotify, Beatport and Apple Music play from themselves with no fallback to another service; SoundCloud only borrows a signed-in Deezer / NetEase / Beatport for Go+-only and ordinary single tracks when you have no Go+ (see the SoundCloud row). A profile link alone shows public playlists without downloads. |
+| SoundCloud | Enter your username or profile URL. No password, Artist Pro or API app needed. For private playlists, paste the `oauth_token` from soundcloud.com under *Advanced*. Each track plays at the best quality it offers: the uploader's original where downloads are allowed, then 256 kbps AAC, 160 kbps AAC, 128 kbps MP3. Go+-only tracks and ordinary single tracks (not DJ sets over 10 minutes) play SoundCloud's own stream when a Go+ account is bound; without Go+ they are matched on a signed-in Deezer / NetEase / Beatport instead (cached as `soundcloud-<id>.*`). |
 | Apple Music | Engine 5.3.0's own Apple Music source is unlocked and plays from Apple Music itself; EngineX no longer looks the track up on Deezer or NetEase. On your phone you can still paste a playlist link or add a `media-user-token` to browse your library. |
 | Beatport | Enter your Beatport email and password. The deck keeps only the login token. |
 
 ### Optional: Your Own Login Relay
-A relay lets a phone on mobile data finish logins and adds Deezer's in-browser login. Run it on any server with a public HTTPS address, then enter its address and password in the deck's web console (`http://<deck-ip>:8080`):
+The relay is `enginex-relay` (the old name `sc5000-relay` is still accepted). A relay lets a phone on mobile data finish logins and adds Deezer's in-browser login. Run it on any server with a public HTTPS address, then enter its address and password in the deck's web console (`http://<deck-ip>:8080`):
 ```sh
-go build -o sc5000-relay ./cmd/sc5000-relay
-./sc5000-relay -public https://relay.example.com -listen 0.0.0.0:6595
+go build -o enginex-relay ./cmd/sc5000-relay
+./enginex-relay -public https://relay.example.com -listen 0.0.0.0:6595
 # the first console password is written to /var/lib/sc5000-relay/initial-password
 ```
+
+**No domain? One-click public access with Cloudflare Quick Tunnel.** You do not need to buy a domain or set up a reverse proxy:
+1. **On the deck**: open the console at `:8080` and click **Enable domain-free public tunnel (Cloudflare Quick Tunnel)**. The deck installs and starts `cloudflared` for its architecture and, within seconds, gives you an `https://*.trycloudflare.com` address. Open it from your phone on 4G/5G to reach the console remotely; the streaming-login QR codes on the deck screen then use that public address for their callback automatically.
+2. **Self-hosted `enginex-relay`**: run `enginex-relay -public auto` (or `run-home-worker.sh --with-tunnel`). It opens a Cloudflare Quick Tunnel by itself, prints a public HTTPS relay address, and manages all your decks from it.
+
+The `trycloudflare.com` address changes whenever the tunnel restarts; use your own domain if you need a fixed one.
 
 ---
 
@@ -345,8 +353,8 @@ EngineX OS is built to be safe on a club, bar or festival Wi-Fi shared with stra
 
 For advanced users:
 
-- To use SSH, put your public key in `/data/sc5000-custom/authorized_keys` (for example with a private build of the image), then reboot. Key login only, no passwords.
-- The console access code is stored in `/data/sc5000-custom/state/access-token`. Delete that file and restart the deck to get a new one.
+- To use SSH, put your public key in `/data/enginex/authorized_keys` (for example with a private build of the image), then reboot. Key login only, no passwords.
+- The console access code is stored in `/data/enginex/state/access-token`. Delete that file and restart the deck to get a new one.
 - If you play on a network you do not trust, you do not need Wi-Fi for USB, SD or Bluetooth playback: leave the deck offline.
 
 ---

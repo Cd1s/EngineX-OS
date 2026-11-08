@@ -179,7 +179,7 @@
 | 碟机显示与音频 | 流媒体音质、碟机界面语言、波形样式、原厂 4 碟布局（开关）、4 碟分工、拉杆回音、软限幅、自动增益、OmniSource、插盘自动分析、Pro DJ Link 曲库、Pro DJ Link 共享（实验性）共 12 项 | 与屏幕设置同一份 conf。4 碟项和回音项按 `player` 显示 / 隐藏；切 4 碟、切语言会先确认再重启 Engine |
 | 下载与分析 | 任务列表 + 最新曲目 RGB 波形画布 | 下载、分析进度 |
 | 直播推流（折叠） | 服务器、挂载点、协议（Icecast / Shoutcast）、格式（MP3 / OGG-Opus / WAV）、码率（128–320）、密码；保存、开始 / 停止 | 屏幕上只有开关，参数全在这里 |
-| 云端登录服务（折叠） | 中继地址、新密码 | 让移动数据的手机也能登录；`sc5000-relay` 自建 |
+| 云端登录服务（折叠） | 中继地址、新密码 | 让移动数据的手机也能登录；`enginex-relay` 自建 |
 | BPM 数据来源（可选，折叠） | SoundCloud Client ID / Secret / oauth_token、GetSongBPM Key | 给没有 BPM 的曲目补预览 |
 | 手机扫码打开控制台（折叠） | 二维码 | 同局域网手机打开 |
 
@@ -204,7 +204,7 @@
 
 | 能力 | 载体 | 说明 |
 |---|---|---|
-| 五合一静态二进制 | `sc5000-suite`（多入口：`rb-bridge`、`stream-sync`、`engine-guardian`、`stems-processor`、`sc5000-deemixd`） | 为塞进固定几何的 5.0.4 rootfs，`sc5000-suite-exec` 首次从 `.xz` 解到 `<DATA>/bin`，按内容哈希刷新 |
+| 五合一静态二进制 | `enginex-suite`（兼容旧名 `sc5000-suite`，多入口：`rb-bridge`、`stream-sync`、`engine-guardian`、`stems-processor`、`sc5000-deemixd`） | 为塞进固定几何的 5.0.4 rootfs，`sc5000-suite-exec` 首次从 `.xz` 解到 `<DATA>/bin`，按内容哈希刷新 |
 | `stream-sync` | `stream-sync.service`，`:8080`，CPU3 | Web 控制台、流媒体网关（假装 TIDAL 的本机网关，`/au/oauth2/*`、`/v1/*`）、下载 / 分析队列、OTA、设置接口、影子轨道、Wi-Fi 传歌、重定位 |
 | `sc5000-deemixd` | `127.0.0.1:6595` | Deezer 直连下载队列（无损 FLAC / 320k），Deezer 曲目和网易云「Deemix 优先」通道使用；Spotify 走原生直连，不经过它 |
 | `rb-bridge` | 挂载钩子 + `rb-bridge.service --prolink` | 挂载时 2 秒内转换 Rekordbox 导出（歌单、Hot Cue、Memory Cue、Loop、拍线）；`--prolink` 只收 Pro DJ Link，不写库；`--watch` 已退役（立即退出） |
@@ -242,9 +242,9 @@
 | Pro DJ Link 共享给 CDJ | `prolink_export=1`，实验功能；没有 rekordbox U 盘时保持 ON 等待，插盘后自动启动（`retryExport` 每 10 s） |
 | Master 交接 | 与 CDJ 之间始终只有一个 Master，双向交接；本机当 Master 时发 BPM 和拍点供 CDJ BEAT SYNC |
 | 双机 4 轨与影子轨道 | 两台 SC5000/SC6000 或一台 + 一台 CDJ 同局域网；每台负责自己的两轨，另一台的曲目、播放 / CUE、位置、速度、Master、同步、Hot Cue 在本机以静音影子轨道跟随；延迟见 `sc5000-shadow-decks` 记录 |
-| Stems | 三级：云中继 → 局域网电脑（`sc5000-stemsd`，UDP 17891 自动发现，`tools/stems/run-home-worker.*`）→ 碟机本机分轨（比播放快 1.4 倍）；碟机上 `stems-processor` 代替原厂子进程 |
+| Stems | 三级：云中继 → 局域网电脑（`enginex-stemsd`，UDP 17891 自动发现，`tools/stems/run-home-worker.*`）→ 碟机本机分轨（比播放快 1.4 倍）；碟机上 `stems-processor` 代替原厂子进程 |
 | 流媒体网关 | 本机伪装 TIDAL，覆盖网易云、Spotify、Deezer、SoundCloud、Beatport、Apple Music；Apple Music 由 Engine 5.3.0 自带音源播放（EngineX 只负责解锁），网关不再匹配 Deezer 或网易云；Beatport 按订阅档位取 FLAC / 256k AAC / 128k AAC；播放过的曲目缓存在 `/data`，再次加载免下载 |
-| 登录中继 | `sc5000-relay`（可选自建）：让手机走移动数据登录，Deezer 网页内登录，Stems 公网入口 |
+| 登录中继 | `enginex-relay`（可选自建）：让手机走移动数据登录，Deezer 网页内登录，Stems 公网入口 |
 | 直播推流 | Shoutcast / Icecast |
 | 曲库维护 | `dbhealer` 修复 PerformanceData、历史记录；`enginedb` 重定位、智能匹配（Camelot 兼容调性）、`analyzer` 纯 Go 分析 BPM / 拍线 / 调性 / RGB 波形 |
 | 在线升级 | 一代机下载 `.img`，校验 AZ01 头尾，调用原厂 `az01-update --net`；二代机下载 `Data-Bundle` 并就地替换，64 MiB 下载上限、128 MiB 解包上限、只接受普通文件 |

@@ -189,7 +189,8 @@ func TestSoundCloudWithoutCredentialsUsesTheWebAPI(t *testing.T) {
 		t.Fatalf("playlists %+v", lists)
 	}
 	likes, err := sc.Tracks(ctx, soundCloudLikesID)
-	if err != nil || len(likes) != 1 || likes[0].ID != "11" {
+	// Go+ (SNIP) tracks are listed, marked preview-only.
+	if err != nil || len(likes) != 2 || likes[0].ID != "11" || likes[0].PreviewOnly || likes[1].ID != "12" || !likes[1].PreviewOnly {
 		t.Fatalf("likes %+v %v", likes, err)
 	}
 	list, err := sc.Tracks(ctx, "5")
@@ -302,5 +303,32 @@ func TestSoundCloudDeadLoginFallsBackToAppAndPublicLikes(t *testing.T) {
 	json.Unmarshal(b, &saved)
 	if saved.UserAccess != "" || saved.UserRefresh != "" {
 		t.Fatalf("saved %+v", saved)
+	}
+}
+
+func TestSoundCloudHasGoPlus(t *testing.T) {
+	var hits int
+	current := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		io.WriteString(w, `{"id":1,"consumer_subscription":{"product":{"id":"`+current+`"}}}`)
+	}))
+	defer srv.Close()
+	t.Cleanup(func() { delete(scWebIDs, srv.URL) })
+	scWebIDs[srv.URL] = "stale0000000000000000000000000000"
+	ctx := context.Background()
+	if (&SoundCloud{WebURL: srv.URL, SiteURL: srv.URL}).HasGoPlus(ctx) || hits != 0 {
+		t.Fatal("a deck without an account cannot have Go+")
+	}
+	for product, want := range map[string]bool{"free": false, "high_tier": true, "go": true} {
+		current, hits = product, 0
+		sc := &SoundCloud{WebURL: srv.URL, SiteURL: srv.URL, Token: "t"}
+		if got := sc.HasGoPlus(ctx); got != want {
+			t.Fatalf("%s: got %v", product, got)
+		}
+		sc.HasGoPlus(ctx)
+		if hits != 1 {
+			t.Fatalf("%s: /me asked %d times, want 1 (cached)", product, hits)
+		}
 	}
 }

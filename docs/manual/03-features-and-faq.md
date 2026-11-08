@@ -36,7 +36,7 @@
 | 网易云音乐 | 用**网易云音乐 App 里的「扫一扫」**扫碟机屏幕二维码并确认 | 不要用手机相机或微信扫。二维码过期后点屏幕上「点这里换一个新二维码」。只有一部手机时，先用相机拍下二维码，再在 App 扫一扫里选相册里的照片。网易云是**唯一**提供「官方直连 / Deemix 优先」双通道切换的平台（见 1.4） |
 | Spotify | **方式 A（推荐，局域网 Spotify Connect 一键配对）**：手机或电脑打开 Spotify App，播放任意歌曲，点右下角「连接设备」（音箱图标），在列表中点 **`EngineX OS`**，约 1 秒自动完成账号绑定。**方式 B（碟机屏幕二维码）**：在碟机音源列表点 Spotify 右侧的「扫码登录（Scan to log in）」，用手机相机扫码，在手机页面完成 OAuth 授权或填入凭证 | 不再需要申请开发者 Client ID（旧的 `#70` 做法已取消）。详见 1.2a |
 | Deezer | 在碟机音源列表点 Deezer 右侧的「扫码登录」，手机扫码后在页面粘贴你自己的 **Deezer `ARL` Cookie**（页面里有教程，演示怎样在电脑上从 deezer.com 复制） | 系统自动识别账号歌单，并把 `ARL` 同步到本机下载引擎，立即解锁 FLAC 无损。公开固件不内置任何人的私人凭据。只填资料页链接则只显示公开歌单，不能下载。详见 1.2b |
-| SoundCloud | 填用户名或主页链接即可 | 不用密码，也不用申请 API。私密歌单在「高级」里粘贴 soundcloud.com 的 `oauth_token`。只列出 SoundCloud 允许完整播放的曲目，Go+ 试听片段会跳过 |
+| SoundCloud | 填用户名或主页链接即可 | 不用密码，也不用申请 API。私密歌单在「高级」里粘贴 soundcloud.com 的 `oauth_token`。Go+ 专享曲目和非 Set 单曲的取源规则见 1.4「SoundCloud Go+ 智能路由」 |
 | Beatport | 填 Beatport 邮箱和密码 | 碟机只保存登录令牌，不保存密码。用你自己的订阅：Professional 下载 FLAC 或 256k AAC，Advanced 下载 128k AAC，Essential 只能在线播放 128k AAC。**未用真实账号完整验证**，遇到问题请反馈 |
 | Apple Music | 见 1.3 | 不需要账号也能用公开歌单 |
 | TIDAL | 在 Engine 原厂的 TIDAL 页面登录 | 选中其他流媒体服务时，不会再弹出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示 |
@@ -48,7 +48,8 @@
 - **方式 A：局域网 Spotify Connect 一键配对（推荐）。** 手机或电脑和碟机在同一局域网；打开 Spotify App，播放任意歌曲，点右下角「连接设备」（音箱图标），在列表中点 **`EngineX OS`**，约 1 秒自动完成账号绑定。**无需申请开发者 Client ID，也无需扫码。**
 - **方式 B：碟机屏幕二维码扫码登录。** 在碟机音源列表点 Spotify 右侧的「扫码登录（Scan to log in）」，用手机相机扫码，在手机页面完成 OAuth 授权或填入凭证。
 - **独立原生音源。** Spotify 曲目直接从 Spotify 拉取 **320kbps Ogg Vorbis** 原生音频上盘播放，**不走 Deemix，也不用网易云兜底**。
-- **双通道只属于网易云。** 只有**网易云音乐（NetEase）**提供「官方直连 / Deemix 优先」双通道切换；Spotify、Deezer、SoundCloud、Beatport 都严格走各自独立的音源，不做跨平台兜底。
+- **局域网零配置发现。** `stream-sync` 内置纯 Go 的 `_spotify-connect._tcp.local.` mDNS 广播器（配合 Avahi 服务），有线 `eth0` + 无线 `wlan0` 双网卡环境下，同一局域网的手机 Spotify App 也能秒级发现 `EngineX OS`。
+- **双通道只属于网易云。** 只有**网易云音乐（NetEase）**提供「官方直连 / Deemix 优先」双通道切换；Spotify、Beatport、Apple Music 都严格走各自独立的音源，不做跨平台兜底。SoundCloud 与 Deezer 的取源规则见 1.4。
 
 ### 1.2b Deezer 每用户独立 ARL 扫码登录（解锁 FLAC 无损）
 
@@ -72,8 +73,21 @@
 
 - `设置 → 设备 → 流媒体音质`：**Lossless（无损 FLAC）** 或 **320kbps MP3**。
 - SoundCloud 按最高可用音质取：上传者原档（允许下载时，如 320k MP3 / WAV / FLAC）→ 256kbps AAC → 160kbps AAC → 128kbps MP3；没有原档时两档结果相同。
-- 只有网易云有 `网易云下载方式`（Spotify、Deezer、SoundCloud、Beatport 没有这个开关，各走各自的音源）：`Official（官方直下）` 或 `Deemix 优先`（先走 Deemix，省网易云自己的每月下载额度，失败再回退官方）。
+- 只有网易云有 `网易云下载方式`（Spotify、Deezer、SoundCloud、Beatport 没有这个开关）：`Official（官方直下）` 或 `Deemix 优先`（先走 Deemix，省网易云自己的每月下载额度，失败再回退官方）。
 - 播放过的曲目缓存在碟机内部存储（`/data/enginex/Stream`），再次加载直接秒开，不会重复下载。
+
+**各平台缓存规则（独立缓存与 Deemix 智能共享）**
+
+- **各平台独立下载、独立缓存。** Spotify（`spotify-<id>.*`）、Beatport（`beatport-<id>.*`）、SoundCloud（`soundcloud-<id>.*`）以及「官方直连（Official）」模式的网易云音乐（`netease-<id>.*`）各自使用独立的下载通道和专属缓存命名空间。即使同一首歌曾在 Deezer 或网易云下载过，在 Spotify 点播也会走 Spotify 自己的流程重新拉取并独立缓存，互不混用。
+- **网易云（Deemix 模式）与 Deezer 共享缓存。** 网易云开启「Deemix 优先」时，底层同走 Deemix 无损音源：在网易云点播过的歌切到 Deezer 点播同一首（或反之），会直接复用已下载的无损缓存文件，不重复下载。网易云切回「官方直连（Official）」后，与 Deezer 各自独立缓存。
+
+**SoundCloud Go+ 智能路由**
+
+- **DJ Set / 长混音（超过 10 分钟）**：始终直连 SoundCloud 官方流，优先取上传者原始 320k / WAV 母带，其次 256k / 160k AAC 或渐进式 MP3。
+- **Go+ 专享曲目与非 Set 普通单曲**：
+  1. 已绑定有 **SoundCloud Go+** 订阅的账号：优先直连 SoundCloud 官方高音质流；
+  2. 没有 Go+：Go+ 专享曲目（官方只给 30 秒试听）和非 Set 普通单曲，会自动在本机**已登录的其他流媒体（Deezer / 网易云 / Beatport）**里匹配并拉取无损 / 320k 音频，缓存为 `soundcloud-<id>.*` 上盘播放；
+  3. 其他流媒体都没登录（或曲目是 SoundCloud 独占作品）：直连 SoundCloud 播放；遇到必须 Go+ 的试听曲目又没有任何可用平台，碟机会明确提示扫码登录 SoundCloud Go+ 或其他流媒体账号。
 - 歌单里每首歌加载前就能看到 BPM 和调性。
 
 ### 1.5 为什么长时间待机不会掉线
@@ -256,6 +270,15 @@
 - 局域网内的人没有访问码就控制不了碟机；流媒体二维码链接**不会**打开控制台。
 - 控制台是普通 HTTP，没有加密，只在信任的网络里使用；在不信任的场地可以干脆不连 Wi-Fi，U 盘、SD 卡和蓝牙播放都不需要联网。
 
+### 5.1a 没有域名：免域名一键公网连接（Cloudflare Quick Tunnel）
+
+没有域名的普通用户**不需要买域名，也不用配置反向代理**：
+
+1. **碟机端一键开启**：在碟机 `:8080` 控制台直接点「开启免域名公网隧道 (Cloudflare Quick Tunnel)」，系统会按架构自动安装并启动 `cloudflared`，秒级生成 `https://*.trycloudflare.com` 公网 HTTPS 地址。手机用 4G/5G 流量即可远程打开控制台，碟机屏幕上的流媒体登录二维码也会自动使用该公网地址回调。
+2. **自建 `enginex-relay`（兼容旧名 `sc5000-relay`）免域名启动**：运行 `enginex-relay -public auto`（或 `run-home-worker.sh --with-tunnel`），自动通过 Cloudflare Quick Tunnel 生成免域名公网 HTTPS 中继地址，并汇总管理多台碟机。
+
+注意：`trycloudflare.com` 地址在隧道重启后会变化；公网访问仍需要控制台访问码，需要固定地址请改用自己的域名。
+
 ### 5.2 无线传歌（Wi-Fi Drop，`#66`）
 
 1. 打开控制台，找到 Wi-Fi Drop。
@@ -305,7 +328,7 @@
 这个问题在 5.3.0.2 修了（`#73`）：后台服务重启后，流媒体歌单仍然能加载。如果还出现，重新进入一次歌单。
 
 **8. 流媒体歌为什么每次不用重新下载？**
-下载后缓存在碟机内部存储，再次加载直接秒开。
+下载后缓存在碟机内部存储，再次加载直接秒开。各平台缓存相互独立（Spotify、Beatport、SoundCloud、官方直连模式的网易云各用自己的缓存）；网易云开了「Deemix 优先」时与 Deezer 共享无损缓存，换着点同一首不会重复下载。详见 1.4。
 
 **9. Spotify 还需要自己建应用、申请 Client ID 吗？**
 不需要。用 Spotify Connect 在设备列表里点 `EngineX OS` 即可一键绑定，或在碟机上点 Spotify 右侧的「扫码登录」，见 1.2a。Spotify 曲目直接拉取 320kbps Ogg Vorbis 原生音频，不走 Deemix 或网易云。

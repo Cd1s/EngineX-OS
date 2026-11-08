@@ -60,6 +60,14 @@ class UiModSourceTest(unittest.TestCase):
     def test_jog_timer_slower(self):
         self.assertIn(": 250\n\t\trepeat: true", bp.SERVICES_MAIN)
 
+    def test_cue_countdown_151(self):
+        self.assertIn("function scNextCueInfo(d, tick)", bp.SERVICES_MAIN)
+        self.assertIn("BARS", bp.SERVICES_MAIN)
+        cap = bp.cue_capsule("", "X", 30, 20)
+        self.assertIn('objectName: "EngineX_CueCountdown"', cap)
+        self.assertIn("visible: info !== null", cap)
+        self.assertEqual(cap.count("{"), cap.count("}"))
+
     def test_i18n_has_stem(self):
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
         self.assertIn(["Stem", "分轨 Stems", "分軌 Stems"], rows)

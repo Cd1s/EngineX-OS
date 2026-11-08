@@ -663,7 +663,7 @@ func playlistJSON(id, title, description string, count int) map[string]any {
 }
 func (g *tidalGateway) refJSON(id string, ref playlistRef) map[string]any {
 	label := providerLabels[ref.provider]
-	return playlistJSON(id, ref.list.Title, label+" 歌单，经 SC5000 Stream Sync 下载播放", ref.list.Count)
+	return playlistJSON(id, ref.list.Title, label+" 歌单，经 EngineX OS 下载播放", ref.list.Count)
 }
 func page(r *http.Request, def int, items []any) map[string]any {
 	q := r.URL.Query()

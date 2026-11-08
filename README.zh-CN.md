@@ -42,6 +42,8 @@
 - 音源菜单直接内置 **网易云音乐、Spotify、Deezer、SoundCloud、TIDAL、Beatport、Apple Music**；
 - 手机扫描碟机屏幕上的二维码即可登录个人账号，直接浏览红心歌单、收藏夹并在线搜歌；
 - 支持 **无损 FLAC / 320k MP3** 音质切换；播放过的曲目自动缓存在碟机内部存储，再次加载直接秒开，绝不重复下载。
+- **各平台独立缓存与 Deemix 智能共享**：Spotify（`spotify-<id>.*`）、Beatport（`beatport-<id>.*`）、SoundCloud（`soundcloud-<id>.*`）以及「官方直连（Official）」模式的网易云音乐（`netease-<id>.*`）各自使用独立的下载通道和专属缓存命名空间；即使同一首歌曾在 Deezer 或网易云下载过，在 Spotify 点播也会走 Spotify 自己的流程重新拉取并独立缓存，互不混用。网易云开启「Deemix 优先」时，底层与 Deezer 同走 Deemix 无损音源，在网易云点播过的歌切到 Deezer 点播同一首（或反之）会直接复用已下载的无损缓存，不重复下载；网易云切回「官方直连」后则与 Deezer 各自独立缓存。
+- **SoundCloud Go+ 与非 Set 单曲高清智能路由**：DJ Set / 长混音（超过 10 分钟）始终直连 SoundCloud 官方流，优先取上传者原始 320k / WAV 母带，其次 256k / 160k AAC 或渐进式 MP3。Go+ 专享曲目和非 Set 的普通单曲：已绑定 **SoundCloud Go+** 账号时优先直连官方高音质流；没有 Go+ 时（Go+ 专享曲目官方只给 30 秒试听），自动在本机已登录的其他流媒体（Deezer / 网易云 / Beatport）里匹配并拉取无损 / 320k 音频，缓存为 `soundcloud-<id>.*` 上盘播放；其他流媒体都没登录、或曲目是 SoundCloud 独占作品时直连 SoundCloud 播放，遇到必须 Go+ 的试听曲目又没有任何可用平台，碟机会明确提示扫码登录 SoundCloud Go+ 或其他流媒体账号。
 - **Beatport** 使用你自己的账号与订阅：Professional 下载 FLAC 或 256k AAC，Advanced 下载 128k AAC，Essential 在线播放 128k AAC 流；Beatport 曲目同样可以一键拆 Stems。
 - **Apple Music**：在手机上粘贴任意歌单或专辑链接即可，不需要账号；再填入 `media-user-token` 就能浏览自己的资料库。播放走 Engine 5.3.0 自带的 Apple Music 音源（EngineX 负责解锁），不再匹配 Deezer 或网易云。
 
@@ -73,8 +75,8 @@
 - **10 级几何平滑波形缩放（#147）与 Auto Loop 旋钮联动（#135）**：Browse 旋钮缩放波形改为 10 级等比几何步进（约 1.46 倍 / 格），并加 16 ms 帧合并防抖，低倍缩放不再跳变过大，连拧也不再卡顿。直接转动 Auto Loop 旋钮仍调整 Loop 大小，并自动开启 `LinkBeatJumpLoopSize`，让 Beat Jump 大小跟随联动；修复了 JP07 开启 `swap_loop_order` 时 `beatJumpEnabled` 的判定；
 - **OmniSource 歌单隔离（#105）**：开启 OmniSource（跨源搜索）后，搜索栏仍可同时检索各流媒体和全部 U 盘曲库，但各流媒体自己的歌单页不再混入 `[USB: ...]` 条目和其他平台的歌单；
 - **SoundCloud 点赞歌单回退（#150）**：用户 OAuth `refresh_token` 过期、SoundCloud 返回 `HTTP 400` 时，自动回退到 App Token 和公开主页接口，继续加载 `Liked Tracks & Sets`；
-- **Spotify Connect 局域网发现（#150）**：内置 Avahi `_spotify-connect._tcp` mDNS 广播和标准 768-bit Diffie-Hellman 公钥，手机 Spotify App 可在局域网里直接发现 `EngineX OS`；同时修复 OAuth 登录后曲目下载返回 `410` 的问题；
-- **`sc5000-relay` 多碟机集群后台（Multi-Deck Hub）与 `sc5000-stemsd` 局域网直连**：中继控制台新增 `已连接碟机集群（Multi-Deck Hub）` 卡片，汇总同一后端下所有碟机的在线状态、机位角色（`13` / `24`）、固件版本和流媒体登录状态，可用碟机访问码或主密码登录；各碟机 `设置 → 关于` 页会实时显示 Stems 算力节点状态。
+- **Spotify Connect 局域网发现（#150）**：内置 Avahi `_spotify-connect._tcp` mDNS 广播，`stream-sync` 另带纯 Go 的 `_spotify-connect._tcp.local.` mDNS 广播器（有线 `eth0` + 无线 `wlan0` 双网卡也能被发现），并使用标准 768-bit Diffie-Hellman 公钥，手机 Spotify App 可在局域网里直接发现 `EngineX OS`；同时修复 OAuth 登录后曲目下载返回 `410` 的问题；
+- **`enginex-relay`（原 `sc5000-relay`）多碟机集群后台（Multi-Deck Hub）与 `enginex-stemsd`（原 `sc5000-stemsd`）局域网直连**：中继控制台新增 `已连接碟机集群（Multi-Deck Hub）` 卡片，汇总同一后端下所有碟机的在线状态、机位角色（`13` / `24`）、固件版本和流媒体登录状态，可用碟机访问码或主密码登录；各碟机 `设置 → 关于` 页会实时显示 Stems 算力节点状态。
 
 ### 8. 5.3.0.3 新功能
 - **Tailscale / Headscale 远程访问（#130）**：Web 控制台的 `远程访问（Tailscale / Headscale）` 卡片按需下载精简版 Tailscale 客户端（约 4.3 MB，下载后校验 SHA-256），用登录链接或一次性 Auth key 登录，只把你勾选的服务（SSH / SFTP、Web 控制台）开放给你自己的 tailnet。不需要公网 IP，也不用改路由器，自建 Headscale 服务器同样可用。默认关闭。碟机内核没有 TUN 设备，所以以用户态模式运行。已用 Headscale 端到端测通；实机播放时的 CPU 和内存占用还没有实测；
@@ -239,7 +241,7 @@ EngineX-Installer 支持一代与二代机，无需输入 IP 或选择机型，�
 
 1. 先将碟机升级到官方 **Engine OS 5.3.0**。
 2. 解压安装包：Windows 双击 `Install-EngineX.bat`，macOS 双击 `Install-EngineX.command`，Linux 运行 `./install-enginex.sh`。
-3. 安装器自动寻找碟机并下载对应数据包。原厂机在屏幕点 **设置 → 关于 / 更新 → 固件更新模式（Firmware Update Mode）**，重启后用 USB 连电脑；Fastboot 自动识别机型，确认后刷写 `/data`。已开启 root SSH 的机器将电脑和碟机连到同一网络，安装器通过 StageLinQ（UDP 51337）及 EngineX Web 界面扫描发现设备，在 `/data/sc5000-custom` 安装，保留曲库和设置。能否发现设备取决于网络配置和 StageLinQ 是否可用。
+3. 安装器自动寻找碟机并下载对应数据包。原厂机在屏幕点 **设置 → 关于 / 更新 → 固件更新模式（Firmware Update Mode）**，重启后用 USB 连电脑；Fastboot 自动识别机型，确认后刷写 `/data`。已开启 root SSH 的机器将电脑和碟机连到同一网络，安装器通过 StageLinQ（UDP 51337）及 EngineX Web 界面扫描发现设备，在 `/data/enginex` 安装，保留曲库和设置。能否发现设备取决于网络配置和 StageLinQ 是否可用。
 4. 首次安装后，后续版本可在碟机上通过 Wi-Fi 点击 **设置 → 关于 / 更新 → 更新** 在线升级（#86）。
 
 SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboot`、Python 3 和 e2fsprogs；Windows 请在有 USB 访问权限的 WSL 中运行 Linux 包。**刷入新的 `/data` 镜像会清空该分区上的音乐、曲库和设置。**请先备份碟机数据，安装前拔下 U 盘和 SD 卡。要保留 `/data`，请通过 `--userdata-backup` 提供该碟机的完整分区镜像。本 Beta 尚未在实机验证。
@@ -292,7 +294,7 @@ SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboo
    ```
    `--ssh-key` 可省略。写完按电源键关机再开机。
 
-**卸载**：`sh /data/sc5000-custom/bundle/uninstall.sh && reboot`，只删除数据包装上的内容。
+**卸载**：`sh /data/enginex/bundle/uninstall.sh && reboot`，只删除数据包装上的内容。
 
 </details>
 
@@ -320,18 +322,24 @@ powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs
 | --- | --- |
 | 网易云音乐 | 用网易云音乐 App 扫碟机屏幕上的二维码并确认。二维码过期后点一下就会换新的。 |
 | Spotify | **方式 A（推荐）**：手机或电脑打开 Spotify App 播放任意歌曲，点右下角「连接设备」音箱图标，选择 **`EngineX OS`** 约 1 秒自动完成账号绑定。**方式 B**：点 Spotify 右侧的「扫码登录」用手机扫码。直接从 Spotify 拉取 320kbps Ogg Vorbis 原生音频播放。 |
-| Deezer | 粘贴你的 **ARL**（页面教程演示怎样在电脑上从 deezer.com 复制）。同一次登录为 Deezer 曲目打开 Deemix 无损 FLAC 下载；网易云只有选了「Deemix 优先」才会用到它。其余平台都只从自己的音源播放，不会跨平台兜底。只填资料页链接则只显示公开歌单、不能下载。 |
-| SoundCloud | 填用户名或主页链接即可，不用密码、不用 Artist Pro、也不用申请 API。私密歌单在「高级」里粘贴 soundcloud.com 的 `oauth_token`。每首歌按它能提供的最高音质播放：允许下载的用上传者原档，其次 256kbps AAC、160kbps AAC、128kbps MP3。 |
+| Deezer | 粘贴你的 **ARL**（页面教程演示怎样在电脑上从 deezer.com 复制）。同一次登录为 Deezer 曲目打开 Deemix 无损 FLAC 下载；网易云只有选了「Deemix 优先」才会用到它。Spotify、Beatport、Apple Music 都只从自己的音源播放，不会跨平台兜底；SoundCloud 仅在没有 Go+ 时，才为 Go+ 专享曲目和非 Set 单曲改用已登录的 Deezer / 网易云 / Beatport（见 SoundCloud 一行）。只填资料页链接则只显示公开歌单、不能下载。 |
+| SoundCloud | 填用户名或主页链接即可，不用密码、不用 Artist Pro、也不用申请 API。私密歌单在「高级」里粘贴 soundcloud.com 的 `oauth_token`。每首歌按它能提供的最高音质播放：允许下载的用上传者原档，其次 256kbps AAC、160kbps AAC、128kbps MP3。Go+ 专享曲目和非 Set 单曲：已绑定 Go+ 账号直连官方高音质流；没有 Go+ 时改用已登录的 Deezer / 网易云 / Beatport 匹配无损 / 320k 并缓存为 `soundcloud-<id>.*`；超过 10 分钟的 DJ Set 始终直连 SoundCloud。 |
 | Apple Music | 已解锁 Engine 5.3.0 自带的 Apple Music 音源，直接从 Apple Music 播放，EngineX 不再去 Deezer 或网易云找替身。手机上仍可粘贴歌单链接，或填 `media-user-token` 浏览自己的资料库。 |
 | Beatport | 填 Beatport 邮箱和密码，碟机只保存登录令牌。 |
 
 ### 选配：自建登录中继
-中继让用移动数据的手机也能完成登录，并提供 Deezer 网页内登录。在任意有公网 HTTPS 地址的服务器上运行，然后在碟机网页控制台（`http://<碟机 IP>:8080`）填入它的地址和密码：
+中继程序名为 `enginex-relay`（兼容旧名 `sc5000-relay`）。中继让用移动数据的手机也能完成登录，并提供 Deezer 网页内登录。在任意有公网 HTTPS 地址的服务器上运行，然后在碟机网页控制台（`http://<碟机 IP>:8080`）填入它的地址和密码：
 ```sh
-go build -o sc5000-relay ./cmd/sc5000-relay
-./sc5000-relay -public https://relay.example.com -listen 0.0.0.0:6595
+go build -o enginex-relay ./cmd/sc5000-relay
+./enginex-relay -public https://relay.example.com -listen 0.0.0.0:6595
 # 首次控制台密码写在 /var/lib/sc5000-relay/initial-password
 ```
+
+**没有域名？用 Cloudflare Quick Tunnel 一键公网连接。** 无需购买域名，也不用配置反向代理：
+1. **碟机端一键开启**：在碟机 `:8080` 控制台点击「开启免域名公网隧道 (Cloudflare Quick Tunnel)」，系统会按架构自动安装并启动 `cloudflared`，秒级生成 `https://*.trycloudflare.com` 公网 HTTPS 地址。手机用 4G/5G 流量即可远程打开控制台，碟机屏幕上的流媒体登录二维码也会自动使用该公网地址回调。
+2. **自建 `enginex-relay` 免域名启动**：运行 `enginex-relay -public auto`（或 `run-home-worker.sh --with-tunnel`），自动通过 Cloudflare Quick Tunnel 生成免域名公网 HTTPS 中继地址，并汇总管理多台碟机。
+
+`trycloudflare.com` 地址在隧道重启后会变化；需要固定地址请改用自己的域名。
 
 ---
 
@@ -345,8 +353,8 @@ EngineX OS 按照「和陌生人共用酒吧、Club、音乐节 Wi-Fi」的场�
 
 高级用户：
 
-- 想用 SSH：把你自己的公钥放进 `/data/sc5000-custom/authorized_keys`（例如自己构建带公钥的私有镜像），重启后生效。只能用密钥登录，不能用密码。
-- 控制台访问码保存在 `/data/sc5000-custom/state/access-token`，删掉这个文件再重启碟机就会生成新码。
+- 想用 SSH：把你自己的公钥放进 `/data/enginex/authorized_keys`（例如自己构建带公钥的私有镜像），重启后生效。只能用密钥登录，不能用密码。
+- 控制台访问码保存在 `/data/enginex/state/access-token`，删掉这个文件再重启碟机就会生成新码。
 - 在不信任的网络演出时，U 盘、SD 卡和蓝牙播放都不需要联网，可以直接不连 Wi-Fi。
 
 ---

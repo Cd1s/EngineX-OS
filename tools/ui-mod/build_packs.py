@@ -255,6 +255,39 @@ SERVICES_MAIN = """
 		}
 		return t
 	}
+	// #151: CDJ-style BARS.BEATS countdown to the next hot cue ahead of the playhead.
+	// scTr values are not bindings, so the capsules re-read on this tick.
+	property int scCueTick: 0
+	Timer {
+		interval: 120; repeat: true; running: true
+		onTriggered: root.scCueTick = (root.scCueTick + 1) & 0xffff
+	}
+	function scNextCueInfo(d, tick) {
+		const t = p => (root.scTr("/Engine/Deck" + d + p) || {})
+		if (!t("/Track/SongLoaded").state) return null
+		const pos = t("/Track/TrackPosition").unnormalized || 0
+		const sr = t("/Track/SampleRate").value || 44100
+		const bpm = t("/OriginalBPM").unnormalized || t("/Track/CurrentBPM").unnormalized || 0
+		if (!(sr > 0 && bpm > 0)) return null
+		let best = null
+		for (let i = 1; i <= 8; i++) {
+			if (!t("/Track/QuickCue" + i + "Exists").state) continue
+			const cp = t("/Track/QuickCue" + i + "Position").value
+			if (!(cp > pos + sr * 0.05) || (best && cp >= best.pos)) continue
+			best = {idx: i, pos: cp}
+		}
+		if (!best) return null
+		const totalBeats = (best.pos - pos) / sr * (bpm / 60.0)
+		if (totalBeats <= 0 || totalBeats > 2048) return null
+		const bars = Math.floor(totalBeats / 4)
+		const nm = t("/Track/QuickCue" + best.idx + "Name").string || ("CUE " + best.idx)
+		return {
+			text: (bars < 10 ? "0" + bars : String(bars)) + "." + ((Math.floor(totalBeats) % 4) + 1) + " BARS",
+			label: nm.slice(0, 8),
+			color: String(t("/Track/QuickCue" + best.idx + "Color").color || "#26a6ff"),
+			urgent: bars < 4
+		}
+	}
 	property var scShadowCueCache: ({})
 	Timer {
 		interval: 40; repeat: true
@@ -2031,6 +2064,33 @@ ZOOM_STEP = """
 """
 
 
+def cue_capsule(ind: str, deck_expr: str, h: int, px: int) -> str:
+    """#151: Pioneer-style `● DROP  16.3 BARS` capsule; hidden (no space) without a cue ahead."""
+    q = f"""Rectangle {{
+    objectName: "EngineX_CueCountdown"
+    readonly property var info: typeof root !== "undefined" && root && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTick) : null
+    visible: info !== null
+    Layout.alignment: Qt.AlignVCenter
+    Layout.leftMargin: 8
+    Layout.preferredHeight: {h}
+    Layout.preferredWidth: cueRow.implicitWidth + 16
+    radius: 5
+    color: "#cc141820"
+    border.width: 1
+    border.color: info ? (info.urgent ? "#ff9f1c" : info.color) : "transparent"
+    Row {{
+        id: cueRow
+        anchors.centerIn: parent
+        spacing: 6
+        Rectangle {{ width: 8; height: 8; radius: 4; anchors.verticalCenter: parent.verticalCenter; color: parent.parent.info ? parent.parent.info.color : "transparent" }}
+        Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: Style.font02Color; text: parent.parent.info ? parent.parent.info.label : "" }}
+        Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.makeFont(Style.fontDisplay.family, {px}, Font.Bold); color: parent.parent.info && parent.parent.info.urgent ? "#ffb703" : "#ffffff"; text: parent.parent.info ? parent.parent.info.text : "" }}
+    }}
+}}
+"""
+    return "".join(ind + l + "\n" if l else "\n" for l in q.splitlines())
+
+
 def edits(dev: bool):
     v = ROOT + "Views/"
     prefs = v + "ControlCenter/Tabs/Preferences/"
@@ -2583,7 +2643,9 @@ def edits(dev: bool):
              "            view: deckSharedItems.deckView.beatJumpView\n            deckIndex: deckSharedItems.deckData.deckIndex\n")]
         scaled[bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"] = [
             ("        view: deckPerformanceDataContent.deckView.beatJumpView\n",
-             "        view: deckPerformanceDataContent.deckView.beatJumpView\n        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n")]
+             "        view: deckPerformanceDataContent.deckView.beatJumpView\n        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n"),
+            ("        visible: Config.audio.deck.hasBeatJump\n    }\n",
+             "        visible: Config.audio.deck.hasBeatJump\n    }\n\n" + cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 30, 20))]
         scaled[bj + "DeckPerformanceData/PortraitDeckPerformanceDataContent.qml"] = [
             ("                view: deckPerformanceDataContent.deckView.beatJumpView\n",
              "                view: deckPerformanceDataContent.deckView.beatJumpView\n                deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n")]
@@ -2592,7 +2654,9 @@ def edits(dev: bool):
              "                    view: control.deckView.beatJumpView\n                    deckIndex: control.deckView.deckData.deckIndex\n")]
         scaled[bj + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"] = [
             ("                    view: deckTrackDataContent.deckView.beatJumpView\n",
-             "                    view: deckTrackDataContent.deckView.beatJumpView\n                    deckIndex: deckTrackDataContent.deckIndex\n")]
+             "                    view: deckTrackDataContent.deckView.beatJumpView\n                    deckIndex: deckTrackDataContent.deckIndex\n"),
+            ("                    visible: Config.audio.deck.hasBeatJump\n                }\n",
+             "                    visible: Config.audio.deck.hasBeatJump\n                }\n\n" + cue_capsule("                ", "deckTrackDataContent.deckIndex", 24, 16))]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml"] =[("    enabled: deckConfig.inDJMode\n", "    enabled: deckConfig.inDJMode\n" + pad_brt)]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/QuadPadRGBLed.qml"] = [("    idx: note\n", "    idx: note\n" + pad_brt)]
         scaled["airAssignments/OutputAssignment/ColorOutputAssignment.qml"] = [
