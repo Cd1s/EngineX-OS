@@ -44,6 +44,7 @@ type Engine struct {
 	done     chan struct{}
 	cid      [16]byte
 	sequence byte
+	artSequence byte
 	closed   bool
 	blocked  func() bool
 	enabled  atomic.Bool
@@ -153,6 +154,8 @@ func (e *Engine) Apply(c Config) error {
 		if _, err := rand.Read(e.cid[:]); err != nil {
 			return err
 		}
+		e.cid[6] = e.cid[6]&0x0f | 0x40 // RFC 4122 version 4 CID
+		e.cid[8] = e.cid[8]&0x3f | 0x80
 	}
 	var routes []route
 	var warnings []string
@@ -264,13 +267,14 @@ func (e *Engine) run(routes []route, stop <-chan struct{}, done chan<- struct{})
 }
 
 func (e *Engine) send(routes []route, frames map[int][512]byte, terminated bool) {
-	e.sequence = e.sequence%255 + 1
+	e.sequence++ // E1.31 uses the full modulo-256 sequence space.
+	e.artSequence = e.artSequence%255 + 1 // Art-Net reserves zero for disabled sequencing.
 	var failures []string
 	for _, r := range routes {
 		f := frames[r.output.Universe]
 		var err error
 		if r.network != nil {
-			p := ArtNet(r.output.Universe, e.sequence, f)
+			p := ArtNet(r.output.Universe, e.artSequence, f)
 			if r.output.Protocol == "sacn" {
 				p = SACN(r.output.Universe, e.sequence, f, e.cid, terminated)
 			}
