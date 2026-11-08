@@ -9,7 +9,7 @@
 | 文件：函数/属性 | 修改 | 预期效果 |
 | --- | --- | --- |
 | `tools/ui-mod/build_packs.py`：`encoded_dicts`、`render_language`、`SERVICES_MAIN.scDict/scT` | 非当前语言词典保存为 JSON 标量字符串，只解析当前语言；语言包用本包语言初始化 `scLang`。保留每个词条的三种输入写法，以及即时语言切换 | 只保留一份活跃 JS 词典，减少 GC 需要遍历的属性和对象 |
-| 同文件：`scCueClock1..4`、`scCueTickFor`、`cue_capsule` | 四轨独立 200 ms 时钟，仅对应轨道播放且开启倒数时运行；每个胶囊只依赖自己的轨道时钟，关闭倒数时不计算 cue | 全部暂停时无 cue 计时；一轨播放不会周期性刷新其它轨道胶囊 |
+| 同文件：`scCueClock1..4`、`scCueTickFor`、`scCuePlaying/scProbeCueClocks`、`cue_capsule` | 四轨独立 200 ms 时钟，仅对应轨道播放且开启倒数时运行；每个胶囊只依赖自己的轨道时钟，关闭倒数时不计算 cue。首次 PlayState 尚未出现时，借用原有设置轮询重试发现，缓存齐后停止探测，不另加 Timer | 全部暂停时无 cue 计时；一轨播放不会周期性刷新其它轨道胶囊；避免冷启动缺属性导致时钟永远不启动 |
 | 同文件：`scCueProps`、`scNextCueInfo` | 缓存各轨 cue 的 translator；不再每次创建查询闭包、临时 best 对象、签名对象；显示字段未变时直接返回原显示对象 | 减少每秒临时对象、字符串和布局变更；`scTr` 的 translator 缓存仍保留 |
 | 同文件：`scApply`、`scSameItems` | `scSources/scLoggedIn` 比较数组长度及每个字符串，内容不变就保留原引用；其它标量由 QML 同值赋值机制避免变更通知 | 相同状态的 3 s 轮询不再触发 ConnectedSource 的 Repeater 重建 |
 | 同文件：`scCall`、`scUiPollReply` | 常规 GET 轮询复用一个 XHR 和回调，已有在途请求时不重叠；超过 10 s 则中止旧请求后重试。设置写入仍独立请求 | 降低常态轮询分配，服务暂时挂起后可恢复 |
@@ -18,7 +18,7 @@
 
 实际生成的三种 5.3.0 语言包均为 **924 个活跃词典条目 / 原 2772 个条目 = 33.333%**。与报告按 TSV 行数估算的 3042 不同，2772 是合并重复输入写法后的实际属性数。非当前语言的文字仍以字符串保留，选择“避免根对象常驻数千个 JS 属性”的方案，以保留即时切换而无需重启；并未宣称消除了所有文字的内存占用。
 
-新增 `tools/az01-packer/test_ui_perf.py`：验证字典条目比例、所有旧输入写法及三语输出一致；用 Node 执行实际 QML JS 函数，验证 translator/显示对象复用、暂停条件、只读取目标轨道时钟、数组内容比较，以及 XHR 复用/挂起恢复。原 `test_ui_mod.py` 的完整语言包生成测试也核对每包 1/3 活跃字典条目。
+新增 `tools/az01-packer/test_ui_perf.py`：验证字典条目比例、所有旧输入写法及三语输出一致；用 Node 执行实际 QML JS 函数，验证 translator/显示对象复用、暂停条件、只读取目标轨道时钟、启动缺属性重试和停止、数组内容比较，以及 XHR 复用/挂起恢复。原 `test_ui_mod.py` 的完整语言包生成测试也核对每包 1/3 活跃字典条目。
 
 ## 根因 2：通用 JobController 不再被误降级
 
@@ -60,12 +60,12 @@ L 主 PID 6642，另两个同名 EMain 是 6904、6915；R 主 PID 1258，另两
 实现位置：
 
 - `rootfs-overlay/usr/local/bin/sc5000-perf-tune:classify`：音频 IRQ→0，GPU/VOP→2，其它可移动 IRQ→3；同时设置 IRQ 掩码和 PREEMPT_RT IRQ 线程亲和度。音频 IRQ 仍 FIFO 99，非音频 IRQ FIFO 40，低于 45/49 的 RT 音频。
-- 同文件 `engine_threads`：用 TID==PID 识别真正 GUI 主线程并固定到 1；SceneGraph→2；所有策略为 OTHER/BATCH/IDLE 的辅助线程→0,3，不再只处理原来在 CPU1 的线程，也不因 comm 同为 EMain 而漏掉。FIFO/RR 等实时线程跳过。OfflineAnalyzer 进程及其子线程也覆盖到 0,3。原启动及延迟重扫机制保留。
+- 同文件 `engine_threads`：用 TID==PID 识别真正 GUI 主线程并固定到 1；SceneGraph→2；所有策略为 OTHER/BATCH/IDLE 的辅助线程→0,3，不再只处理原来在 CPU1 的线程，也不因 comm 同为 EMain 而漏掉。FIFO/RR 等实时线程跳过；AudioOut/AudioRenderer*/AudioWatcher 即使仍处于初始化的普通策略也跳过。OfflineAnalyzer 进程及其子线程也覆盖到 0,3。启动及延迟扫描后，每 30 s 继续扫描晚生线程；worker 自身也限制到 0,3，并在 Engine 退出后结束，在 engine.service 的控制组内随服务停止。
 - 同文件 workqueue 设置：`cpumask=9`，避开 GUI/SceneGraph 的 1/2。
-- `rootfs-overlay/etc/default/sc5000-perf`：补齐 `panfrost` 名称，写明四核分配和 IRQ 优先级。
+- `rootfs-overlay/etc/default/sc5000-perf`：补齐 `panfrost` 名称，写明四核分配和 IRQ 优先级；`SC5000_THREAD_INTERVAL=30` 控制持续重扫间隔，设为 0 可只保留启动扫描。
 - `tools/ui-mod/engine_ui_hook.c:guard_affinity`：后台类也避开 1/2，防止后续命名或设置亲和度重新放回 GUI/GL 核。
 - 同文件 `lower_offline_analyzer`：从在线 CPU 集合选择非 GUI/GL 核，四核机为 0,3；即使从 EMain 继承单核 CPU1 也可以移开，保留 SCHED_IDLE / nice19 / idle I/O。
-- `tests/test_rootfs_overlay.sh`：同步真实 IRQ 名称、mask9、主/同名辅助 EMain、其它核的普通工作线程、OfflineAnalyzer 主/子线程，以及 RT 线程不动和非音频 IRQ 40 的断言。
+- `tests/test_rootfs_overlay.sh`：同步真实 IRQ 名称、mask9、主/同名辅助 EMain、其它核的普通工作线程、OfflineAnalyzer 主/子线程，以及 RT/初始化中音频线程不动和非音频 IRQ 40 的断言；模拟启动阶段之后才出现的 event_engine 线程，验证它被移开，Engine 退出后 worker 确实结束。
 
 ## 验证
 
@@ -76,7 +76,7 @@ L 主 PID 6642，另两个同名 EMain 是 6904、6915；R 主 PID 1258，另两
 | `. /etc/profile.d/buildtools.sh; gofmt -l .` | 无输出，格式干净 |
 | `go vet ./...` | PASS |
 | `go test -race ./...` | PASS，24 个有测试包 |
-| `bash tests/test_rootfs_overlay.sh` | PASS，17 项模拟存储/硬件测试 |
+| `bash tests/test_rootfs_overlay.sh` | PASS，18 项模拟存储/硬件测试 |
 | `python3 -m unittest discover -s tools/az01-packer` | PASS，118 项，1 项安全跳过（宿主已有 `/data`，不在共享主机上运行对应真实目标路径安装测试） |
 | 完整 `build_packs.py --qrc /root/build/sc5000-lab/5.3.0/qrc` | PASS；en 279 文件、简/繁各 283 文件；每包 924/2772 活跃词典条目；临时 packs 和 tar.gz 已清理 |
 | `tools/ui-mod/build.sh`，默认 armhf 交叉编译 | PASS，含目标 glibc 符号版本检查 |
@@ -90,9 +90,11 @@ L 主 PID 6642，另两个同名 EMain 是 6904、6915；R 主 PID 1258，另两
 ## 拿不准
 
 1. **四核全部已有 RT 音频，没有完全不放 GUI/SceneGraph/RT 音频的第五个核。** “音频 RT 优先级与独立性不能变差”和“外设核完全无 RT 音频”无法同时满足。按 PM「不用等回答，按原则决定并记入报告」的指示，保留五个 RT 音频线程所有原有单核分配/优先级，选择 CPU3 承载外设 IRQ，并将非音频 IRQ 从 FIFO50 降到 FIFO40。CPU1/2 是尽量干净的 GUI/GL 核，仍有原有音频 RT 抢占；不能称为完全隔离。
-2. **FIFO40 是保护音频的默认选择，真实外设延迟须复测。** 预计可减少非音频 IRQ 抢占音频，但网络、触摸、eMMC、GPU 完成通知会等到音频 RT 让出 CPU；检查触摸响应、网络吞吐、GPU 帧耗时以及 ALSA xrun。不可移动/managed/per-CPU IRQ 的亲和度写入可能被内核拒绝，脚本按原规则 best effort，不改变其 RT 音频策略。
+2. **FIFO40 是保护音频的默认选择，真实外设延迟须复测。** 预计可减少非音频 IRQ 抢占音频，但网络、触摸、eMMC、GPU 完成通知会等到音频 RT 让出 CPU；检查触摸响应、网络吞吐、GPU 帧耗时以及 ALSA xrun。CPU0 现在也允许 workqueue/OfflineAnalyzer，新增的内核工作与不可抢占区影响不能仅由线程优先级排除，必须做 xrun 浸泡验证。不可移动/managed/per-CPU IRQ 的亲和度写入可能被内核拒绝，脚本按原规则 best effort，不改变音频线程的 RT 优先级或单核掩码。
 3. **GC 根缩小不等于全部 GC 问题已消除。** 原影子轨高频采样/HTTP 路径按任务严格保留，仍可能贡献分配；未做实机 A/B 就不承诺 GC 周期或时长能达到某个数值。新 art 元数据绑定及按需重试，也应在播放、暂停换歌和慢元数据场景确认。
-4. **线程亲和度的持久性要在实际工作流核对。** 原启动/延迟重扫覆盖 Engine 启动后创建的线程；需验证后续加载、流媒体重连、分析进程新建时，Engine 是否再次主动改写辅助线程掩码。若存在，应以新的实机采样作为后续持续策略的依据，避免未经验证改动更多音频调度路径。
+4. **持续扫描存在有限的纠正延迟。** 已补上默认 30 s 重扫，解决原来启动扫描结束后新建线程永不迁移的问题。后续加载、流媒体重连、分析进程新建时，仍需核对 Engine 是否反复主动改写辅助线程掩码；新线程在下一轮扫描前可能短暂继承 GUI 掩码。先用现有采样验证，不为追求瞬时迁移而接管所有未知线程的创建/调度路径。
+
+严DE 的 v2 审查给出 PASS，并用旧/新 cue 逻辑做了 20000 组随机状态差分，结果 0 差异；提出的晚生线程和 PlayState 初次缺失建议已补上。对封面 songName 属性的疑问，补充核对原生 5.3.0 `DeckItem/ArtistSong.qml`：其 `ArtistSongViewInterface view` 直接读取 `view.songName` / `view.artistName`，与 `deckView.artistSongView` 所用接口一致；换歌封面仍列入实机冒烟。
 
 ## PM 部署后复测
 
@@ -109,5 +111,6 @@ L 主 PID 6642，另两个同名 EMain 是 6904、6915；R 主 PID 1258，另两
 
 - `20261108T220823Z-Oracle-Batam-arm-before-perf-gc-affinity-20261109-83f83cb5d516-sc5000-perf-20261109-before.tar.gz`
 - `20261108T221613Z-Oracle-Batam-arm-before-perf-ui-assertions-20261109-4e895fc658da-test_ui_mod.py`
+- `20261108T223612Z-Oracle-Batam-arm-before-perf-late-threads-20261109-54ec26a019b4-sc5000-perf-qa-followup-before.tar.gz`
 
 本任务只读采样、验证摘要和审查结果交付到 `fleet-share` 的 `runs/20261109-sc5000-perf-fix/`。没有推送 main、创建 tag/Release/评论、刷机或向碟机部署。

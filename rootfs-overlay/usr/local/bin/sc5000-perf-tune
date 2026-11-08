@@ -157,16 +157,20 @@ done
 # Identify the GUI by TID == PID, not comm: 5.3.0 has two EMain helpers too.
 # Every non-RT helper (including JobController and OfflineAnalyzer) avoids 1/2,
 # regardless of its inherited mask. Never change RT audio/MIDI policy or mask.
+engine_path=
 engine_threads() {
+    engine_path=
     for p in "$PROC"/[0-9]*; do
         analyzer=
         case $(readlink "$p/exe" 2>/dev/null) in
-            */Engine/Engine) ;;
+            */Engine/Engine) engine_path=$p ;;
             */OfflineAnalyzer) analyzer=1 ;;
             *) continue ;;
         esac
         for task in "$p"/task/[0-9]*; do
             name=$(cat "$task/comm" 2>/dev/null) || continue
+            # An audio thread can be named before Engine promotes it to RT.
+            case $name in AudioOut|AudioRenderer*|AudioWatcher) continue ;; esac
             cpus=$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' "$task/status" 2>/dev/null)
             stat=$(cat "$task/stat" 2>/dev/null) || continue
             # policy is field 41: 39th after the ") " that ends comm (comm may hold spaces)
@@ -182,11 +186,28 @@ engine_threads() {
         done
     done
 }
+engine_alive() {
+    [ -n "$engine_path" ] || return 1
+    case $(readlink "$engine_path/exe" 2>/dev/null) in */Engine/Engine) return 0 ;; *) return 1 ;; esac
+}
 engine_threads
 # Engine starts most threads 10-20 s after its start; engine-ui-guard post runs
-# this inside engine.service, so the delayed passes live as long as Engine.
+# this inside engine.service, so the worker is stopped with Engine. Keep sweeping
+# late network/job threads too, rather than leaving them on an inherited GUI core.
 delays=${SC5000_THREAD_DELAYS-20 40}
+interval=${SC5000_THREAD_INTERVAL-30}
+case $interval in ''|*[!0-9]*) interval= ;; esac
+if [ -n "$interval" ] && ! [ "$interval" -gt 0 ] 2>/dev/null; then interval=; fi
 if [ -n "$delays" ]; then
-    ( for d in $delays; do sleep "$d"; engine_threads; done ) </dev/null >/dev/null 2>&1 &
+    (
+        for d in $delays; do sleep "$d" || exit; engine_threads; done
+        while [ -n "$interval" ] && engine_alive; do
+            sleep "$interval" || exit
+            engine_alive || break
+            engine_threads
+        done
+    ) </dev/null >/dev/null 2>&1 &
+    # The sweeper and its subprocesses must also stay off the two UI cores.
+    taskset -pc 0,3 "$!" >/dev/null 2>&1 || :
 fi
 exit 0
