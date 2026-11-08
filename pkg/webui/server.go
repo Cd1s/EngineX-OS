@@ -208,6 +208,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /peer/decks", s.peerDecksGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/audio", s.peerAudioGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/perf", s.peerPerfGet)
+	s.mux.HandleFunc("GET /peer/decks/{n}/display", s.peerDisplayGet)
 	s.mux.HandleFunc("POST /api/drop", s.drop)
 	s.mux.HandleFunc("POST /api/relocate", s.relocate)
 	s.mux.HandleFunc("GET /api/bluetooth", s.handleBluetooth)
@@ -243,8 +244,13 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/tailscale", s.handleTailscale)
 	s.mux.HandleFunc("GET /v1/sc5000/tailscale", s.handleTailscale)
 	s.mux.HandleFunc("POST /v1/sc5000/tailscale", s.handleTailscale)
-	go s.tailscaleResume() // restarts the daemon after a reboot when it was left on (#130)
-	go s.modsResume()      // enabled mods' daemons do not survive a reboot on their own
+	// Decide whether to resume before publishing the server. A delayed startup
+	// goroutine must not treat the first user's enable request as saved boot state
+	// and start that service a second time.
+	if s.loadTailscaleConfig().Enabled {
+		go s.tailscaleResume() // restarts the daemon when it was left on (#130)
+	}
+	go s.modsResume() // enabled mods' daemons do not survive a reboot on their own
 	s.mux.HandleFunc("GET /api/mounts", s.handleMounts)
 	s.mux.HandleFunc("POST /api/mounts", s.handleMounts)
 	s.mux.HandleFunc("DELETE /api/mounts", s.handleMounts)
@@ -268,7 +274,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.beatport = &providers.Beatport{BaseURL: cfg.BeatportURL, HTTP: cfg.HTTP, Path: filepath.Join(cfg.StateDir, "beatport-owner.json")}
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
-	go s.tunnelResume()
+	if s.TunnelManager().loadConfig().Enabled {
+		go s.tunnelResume()
+	}
 	if jobs != nil {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor

@@ -71,20 +71,21 @@ type uiSettings struct {
 	OmniSource bool `json:"omniSource"`
 	// ProlinkShare lets rb-bridge read the Rekordbox library of Pioneer
 	// players on the LAN (#59). Off by default.
-	ProlinkShare     bool     `json:"prolinkShare"`
-	ProlinkExport    bool     `json:"prolinkExport"` // experimental Denon -> CDJ export; default OFF
-	Language         string   `json:"language"`
-	Waveform         string   `json:"waveform"`
-	Sources          []string `json:"sources"`
-	Scope            string   `json:"scope"`
-	GitHubRepo       string   `json:"githubRepo"`
-	SafeMode         bool     `json:"safeMode"`
-	LoggedIn         []string `json:"loggedIn"`
-	FourDeckWaveform bool     `json:"fourDeckWaveform"`
-	FourDeckRole     string   `json:"fourDeckRole"`
-	ProlinkWaveform  bool     `json:"prolinkWaveform"`
-	BroadcastEnabled bool     `json:"broadcastEnabled"`
-	UpfaderEcho      bool     `json:"upfaderEcho"`
+	ProlinkShare       bool     `json:"prolinkShare"`
+	ProlinkExport      bool     `json:"prolinkExport"` // experimental Denon -> CDJ export; default OFF
+	Language           string   `json:"language"`
+	Waveform           string   `json:"waveform"`
+	Sources            []string `json:"sources"`
+	Scope              string   `json:"scope"`
+	GitHubRepo         string   `json:"githubRepo"`
+	SafeMode           bool     `json:"safeMode"`
+	LoggedIn           []string `json:"loggedIn"`
+	FourDeckWaveform   bool     `json:"fourDeckWaveform"`
+	FourDeckRole       string   `json:"fourDeckRole"`
+	ShadowLegacyEngine bool     `json:"shadowLegacyEngine"` // opt-in rollback; change at a planned Engine restart
+	ProlinkWaveform    bool     `json:"prolinkWaveform"`
+	BroadcastEnabled   bool     `json:"broadcastEnabled"`
+	UpfaderEcho        bool     `json:"upfaderEcho"`
 	// DebugTelemetry logs every shadow deck update and decision (shadow_debug.go).
 	// Development only: off by default, and nothing in the image turns it on.
 	DebugTelemetry bool `json:"debugTelemetry"`
@@ -254,6 +255,8 @@ func (s *Server) loadUI() uiSettings {
 			} else if val == "0" || strings.EqualFold(val, "false") {
 				v.FourDeckWaveform = false
 			}
+		case "shadow_legacy_engine":
+			v.ShadowLegacyEngine = val == "1" || strings.EqualFold(val, "true")
 		case "prolink_waveform":
 			if val == "0" || strings.EqualFold(val, "false") {
 				v.ProlinkWaveform = false
@@ -363,6 +366,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\njog=" + v.Jog + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
 	if v.FourDeckWaveform {
 		text += "four_deck_waveform=1\n"
+	}
+	if v.ShadowLegacyEngine {
+		text += "shadow_legacy_engine=1\n"
 	}
 	if v.FourDeckRole != "auto" {
 		text += "four_deck_role=" + v.FourDeckRole + "\n"
@@ -534,6 +540,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
+	}
+	if q.Has("shadowLegacyEngine") {
+		b, ok := parseBoolParam(q.Get("shadowLegacyEngine"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.ShadowLegacyEngine = b
 	}
 	if q.Has("fourDeckWaveform") {
 		b, ok := parseBoolParam(q.Get("fourDeckWaveform"))

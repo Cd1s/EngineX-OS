@@ -97,11 +97,167 @@ SERVICES_MAIN = """
 	// The board (device tree), not Config.device.isPlayer: the 4-deck layout turns a
 	// player into a non-player inside Engine (#49).
 	property bool scPlayer: false
-	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 && (scPlayer || !!(scShadowAt[deck] && scShadowAt[deck].path)) }
+	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 && (scShadowDisplayOnly || scPlayer || !!(scShadowAt[deck] && scShadowAt[deck].path)) }
 	// Swipe left loads the role's first deck, swipe right its second (0: stock).
 	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
 	property bool scFourDeckOn: false // the saved switch; Engine applies it on restart
 	property string scFourDeckRoleSetting: "auto"
+	property bool scShadowLegacyEngine: false // saved preference; switching requires a manual Engine restart
+	property bool scShadowDisplayOnly: true // the /shadow response is authoritative; missing means the safe default
+	property var scShadowDisplay: ({})
+	property var scShadowDisplaySpare: ({})
+	property var scShadowDisplayRequests: ({})
+	property var scShadowGridCache: ({})
+	property var scShadowLiveCueCache: ({})
+	property int scShadowFrame: 0
+	readonly property int scShadowExpiryMs: 3000
+	function scShadowVisible(d) { return d >= 1 && d <= 4 && scShadowDisplayOnly && scDeckLocked(d) }
+	function scShadowDeckFor(item) {
+		// Stock skins put the deck on different wrappers (deckIndex / deckData / deckView).
+		for (let p = item; p; p = p.parent) {
+			for (const data of [p, p.deckData, p.deckView && p.deckView.deckData, p.view && p.view.deckData]) {
+				const d = data && Number(data.deckIndex)
+				if (d >= 1 && d <= 4) return d
+			}
+		}
+		return 0
+	}
+	function scShadowData(d) { return scShadowDisplay[d] || null }
+	function scShadowPosition(s, now) {
+		if (!s) return 0
+		const elapsed = s.stale ? 0 : Math.min(scShadowExpiryMs, Math.max(0, now - s.at))
+		const pos = Math.max(0, s.positionMs + (s.playing ? elapsed * Math.max(0, 1 + s.pitch / 100) : 0))
+		return s.meta && s.meta.durationMs > 0 ? Math.min(s.meta.durationMs, pos) : pos
+	}
+	// Binary searches keep the source grid and #151 independent of Engine's empty slots.
+	function scShadowBeatIndex(beats, ms) {
+		let lo = 0, hi = beats.length
+		while (lo < hi) { const mid = (lo + hi) >> 1; if (beats[mid].ms < ms) lo = mid + 1; else hi = mid }
+		return lo
+	}
+	function scShadowBeatAt(beats, ms) {
+		if (beats.length < 2) return NaN
+		const i = Math.max(0, Math.min(beats.length - 2, scShadowBeatIndex(beats, ms) - 1))
+		const a = beats[i], b = beats[i + 1]
+		if (!(b.ms > a.ms)) return NaN
+		return a.number + (ms - a.ms) / (b.ms - a.ms) * (b.number - a.number)
+	}
+	function scShadowGrid(d, meta, start, end) {
+		const beats = meta && meta.beats || []
+		const a = scShadowBeatIndex(beats, start), b = Math.min(a + 512, scShadowBeatIndex(beats, end))
+		const c = scShadowGridCache[d]
+		if (c && c.beats === beats && c.a === a && c.b === b) return c.rows
+		const rows = beats.slice(a, b)
+		scShadowGridCache[d] = {beats: beats, a: a, b: b, rows: rows}
+		return rows
+	}
+	function scShadowNextCue(d) {
+		const s = scShadowData(d), m = s && s.meta
+		if (!m) return null
+		const pos = scShadowPosition(s, Date.now())
+		let best = null
+		for (const c of scShadowCuesFor(d, s)) if (c.i > 0 && c.ms > pos + 50 && (!best || c.ms < best.ms)) best = c
+		if (!best) return null
+		const beats = m.beats || []
+		const totalBeats = scShadowBeatAt(beats, best.ms) - scShadowBeatAt(beats, pos)
+		if (!(totalBeats > 0 && totalBeats <= 2048)) return null
+		const bars = Math.floor(totalBeats / 4)
+		return {text: String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1),
+			label: String(best.n || "").slice(0, 7), color: best.c || "#26a6ff", urgent: bars < 4}
+	}
+	function scShadowCuesFor(d, s) {
+		const m = s && s.meta
+		if (!m) return scShadowEmptyArray
+		if (!Array.isArray(s.liveCues) || !(m.sampleRate > 0)) return m.cues || scShadowEmptyArray
+		const c = scShadowLiveCueCache[d], raw = s.liveCues
+		let same = !!c && c.key === s.key && c.rate === m.sampleRate && c.cuePos === s.cuePos && c.raw.length === raw.length
+		if (same) for (let i = 0; i < raw.length; i++) {
+			const a = c.raw[i], b = raw[i]
+			if (a.i !== b.i || a.p !== b.p || a.n !== b.n || a.c !== b.c) { same = false; break }
+		}
+		if (same) return c.rows
+		const rows = []
+		for (let i = 0; i < raw.length; i++) {
+			const q = raw[i], ms = q.p / m.sampleRate * 1000
+			if (q.i >= 1 && q.i <= 8 && isFinite(ms) && ms >= 0 && ms <= m.durationMs)
+				rows.push({i: q.i, ms: ms, n: q.n || "", c: q.c || "#26a6ff"})
+		}
+		if (isFinite(s.cuePos) && s.cuePos >= 0 && s.cuePos / m.sampleRate * 1000 <= m.durationMs)
+			rows.push({i: 0, ms: s.cuePos / m.sampleRate * 1000, n: "CUE", c: "#ffffff"})
+		else if (s.cuePos === undefined) for (const q of m.cues || scShadowEmptyArray) if (q.i === 0) rows.push(q)
+		scShadowLiveCueCache[d] = {key: s.key, rate: m.sampleRate, cuePos: s.cuePos, raw: raw, rows: rows}
+		return rows
+	}
+	function scShadowAsset(url) {
+		// Assets are display resources served by the gateway, never Engine track paths.
+		if (!url) return ""
+		return url[0] === "/" ? "http://127.0.0.1:8080" + url : /^https?:/.test(url) ? url : ""
+	}
+	function scShadowDisplayFetch(d, key) {
+		const s = scShadowData(d)
+		if (!scShadowVisible(d) || !s || !key || s.key !== key || s.metadataOnly) return
+		const old = scShadowDisplayRequests[d]
+		if (old && old.key === key && ((old.busy && Date.now() - old.started < 10000) || Date.now() < old.next)) return
+		if (s.meta && !s.meta.detailPending) return // completed overview-only is a valid fallback
+		const req = {key: key, busy: true, started: Date.now(), next: 0, tries: old && old.key === key ? old.tries + 1 : 1}
+		scShadowDisplayRequests[d] = req
+		const x = new XMLHttpRequest()
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow/display?deck=" + d + "&key=" + encodeURIComponent(key))
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4 || root.scShadowDisplayRequests[d] !== req) return
+			req.busy = false
+			req.next = Date.now() + Math.min(8000, 500 * Math.pow(2, Math.min(req.tries - 1, 4)))
+			const current = root.scShadowData(d)
+			if (!root.scShadowVisible(d) || !current || current.key !== key) return
+			try {
+				if (x.status !== 200) return // including 404: retry this key on the metadata timer
+				const m = JSON.parse(x.responseText)
+				if (m.key !== key) return
+				if (m.detailPending) req.next = Date.now() + 2000
+				const next = Object.assign({}, root.scShadowDisplay)
+				next[d] = Object.assign({}, current, {meta: m})
+				root.scShadowDisplay = next
+			} catch (err) { console.warn("EngineX shadow display: " + err) }
+		}
+		x.send()
+	}
+	Timer {
+		interval: 40; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowDisplayOnly
+		onTriggered: root.scShadowFrame = (root.scShadowFrame + 1) & 0xffff
+	}
+	Timer {
+		interval: 500; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowDisplayOnly
+		onTriggered: {
+			for (let d = 1; d <= 4; d++) {
+				const s = root.scShadowData(d)
+				if (s && s.key) root.scShadowDisplayFetch(d, s.key)
+			}
+		}
+	}
+	function scShadowApplyDisplay(decks) {
+		const next = scShadowDisplaySpare, now = Date.now()
+		for (let d = 1; d <= 4; d++) {
+			let e = null
+			for (let i = 0; i < decks.length; i++) if (Number(decks[i].deck) === d) { e = decks[i]; break }
+			if (!e || !scDeckLocked(d) || !(e.key || e.loading)) {
+				delete next[d]; delete scShadowDisplayRequests[d]; delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
+				continue
+			}
+			const old = scShadowData(d), key = String(e.key || ""), sample = next[d] || {}
+			sample.key = key; sample.title = e.title || ""; sample.artist = e.artist || ""
+			sample.playing = !!e.playing; sample.stale = !!e.stale; sample.metadataOnly = !!e.metadataOnly
+			sample.positionMs = Number(e.positionMs) || 0; sample.at = Number(e.at) || now; sample.pitch = Number(e.pitch) || 0
+			sample.cuePos = typeof e.cuePos === "number" ? e.cuePos : undefined
+			sample.master = !!e.master; sample.sync = !!e.sync; sample.beat = Number(e.beat) || 0; sample.bpm = Number(e.bpm) || 0
+			sample.loading = !!e.loading; sample.meta = old && old.key === key ? old.meta : null
+			sample.liveCues = Array.isArray(e.cues) ? e.cues : old && old.key === key ? old.liveCues : null
+			next[d] = sample
+			if (!old || old.key !== key) delete scShadowDisplayRequests[d]
+		}
+		scShadowDisplaySpare = scShadowDisplay
+		scShadowDisplay = next
+		for (let d = 1; d <= 4; d++) if (next[d] && next[d].key) scShadowDisplayFetch(d, next[d].key)
+	}
 	// #99: five Layout Manager views. Engine has three and forgets the selected one
 	// at every start, and the 4-deck layout used to force its lanes over the user's
 	// view. stream-sync keeps the active view and each one's layout (views.json);
@@ -304,6 +460,7 @@ SERVICES_MAIN = """
 	// Same object while text/label/color/urgent are unchanged, so bindings do not re-layout every tick.
 	property var scCueInfoCache: ({})
 	function scNextCueInfo(d, tick) {
+		if (scShadowVisible(d)) return scShadowNextCue(d)
 		const p = scCueProps(d)
 		if (!p.loaded || !p.loaded.state) return null
 		const pos = p.position ? p.position.unnormalized || 0 : 0
@@ -365,6 +522,8 @@ SERVICES_MAIN = """
 	// (true plays, false pauses), so it is written, not pressed.
 	property var scPressQueue: []
 	function scPress(path) {
+		const remote = /^[/]Engine[/]Deck([1-4])[/]/.exec(path)
+		if (remote && scShadowVisible(Number(remote[1]))) return
 		scPressQueue = scPressQueue.concat([{path: path, step: 0}])
 		scPressTimer.restart()
 	}
@@ -374,6 +533,8 @@ SERVICES_MAIN = """
 		onTriggered: {
 			const next = []
 			for (const e of root.scPressQueue) {
+				const remote = /^[/]Engine[/]Deck([1-4])[/]/.exec(e.path)
+				if (remote && root.scShadowVisible(Number(remote[1]))) continue
 				const t = root.scTr(e.path)
 				if (!t) continue
 				t.state = e.step === 1
@@ -383,116 +544,174 @@ SERVICES_MAIN = """
 			if (next.length) restart()
 		}
 	}
+	// Reuse the sampling buffers, translators and HTTP object after warm-up.
+	readonly property var scShadowEmptyArray: []
+	readonly property var scShadowEmptyObject: ({})
+	readonly property var scShadowDecks: [1, 2, 3, 4]
+	property string scShadowMineRole: "?"
+	property var scShadowMine: []
+	property var scShadowSampleSpare: ({})
+	property var scShadowDeckProperties: ({})
+	property var scShadowOwn: []
+	property var scShadowPostRequest: null
+	property var scShadowPollRequest: null
+	property string scShadowResponseVersion: ""
+	property bool scShadowPostPending: false
+	function scShadowProperties(d) {
+		let p = scShadowDeckProperties[d]
+		if (p) return p
+		p = {}
+		const prefix = "/Engine/Deck" + d
+		for (const pair of [["rate", "/Track/SampleRate"], ["shown", "/SpeedState"], ["original", "/OriginalBPM"],
+			["current", "/CurrentBPM"], ["play", "/PlayState"], ["position", "/Track/TrackPosition"],
+			["loaded", "/Track/SongLoaded"], ["uri", "/Track/TrackUri"], ["net", "/Track/TrackNetworkPath"],
+			["cueLED", "/Track/CueLEDState"], ["master", "/DeckIsMaster"], ["sync", "/SyncMode"],
+			["beat", "/BeatNumber"], ["cuePosition", "/Track/CuePosition"], ["title", "/Track/SongName"],
+			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"]])
+			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
+		p.cues = []
+		for (let i = 1; i <= 8; i++) {
+			const q = prefix + "/Track/QuickCue" + i
+			p.cues.push({exists: root.scTr(q + "Exists") || scShadowEmptyObject,
+				position: root.scTr(q + "Position") || scShadowEmptyObject, name: root.scTr(q + "Name") || scShadowEmptyObject,
+				color: root.scTr(q + "Color") || scShadowEmptyObject})
+		}
+		scShadowDeckProperties[d] = p
+		return p
+	}
 	function scShadowTick() {
-		const g = (d, p) => root.scTr("/Engine/Deck" + d + p)
 		const now = Date.now()
-		if (now - scShadowPollAt > 3000) scShadowPoll() // starts the chain, or restarts a hung one
-		const mine = scFourDeckRole.split("").map(c => parseInt(c))
-		// Steady posts every 250 ms (the receiver extrapolates); edges go at once.
-		let edge = now - scShadowPostAt >= 250
-		for (const d of mine) {
-			const sr = g(d, "/Track/SampleRate").value
-			// SpeedState is the display, rounded to 0.1 % (+11.1 % for 126 -> 140 BPM, 14 ms/s off);
-			// CurrentBPM / OriginalBPM is the exact rate, also past the SpeedRange under Sync.
-			const shown = parseFloat(g(d, "/SpeedState").string) || 0
-			const ob = (g(d, "/OriginalBPM") || {}).unnormalized || 0, cb = (g(d, "/CurrentBPM") || {}).unnormalized || 0
+		if (now - scShadowPollAt > 3000) scShadowPoll()
+		if (scShadowMineRole !== scFourDeckRole) {
+			scShadowMineRole = scFourDeckRole
+			scShadowMine = scFourDeckRole.split("").map(c => parseInt(c))
+			scShadowOwn.length = scShadowMine.length
+		}
+		const mine = scShadowMine
+		let edge = scShadowPostPending || now - scShadowPostAt >= 250
+		for (let n = 0; n < mine.length; n++) {
+			const d = mine[n], g = scShadowProperties(d), p = scShadowPrev[d]
+			const s = scShadowSampleSpare[d] || {}
+			const sr = g.rate.value, shown = parseFloat(g.shown.string) || 0
+			const ob = g.original.unnormalized || 0, cb = g.current.unnormalized || 0
 			const exact = ob > 0 && cb > 0 ? Math.round(((cb / ob - 1) * 100) * 100) / 100 : NaN
-			const s = {ps: !!g(d, "/PlayState").state, posMs: sr > 0 ? g(d, "/Track/TrackPosition").unnormalized / sr * 1000 : 0,
-				pitch: Math.abs(exact - shown) < 0.15 ? exact : shown, bpm: ob, currentBpm: cb, at: now, jumps: 0,
-				// A streaming track's TrackNetworkPath is only "net://<uuid>/(Unknown)" (5.3.0); its TrackUri names it.
-				net: g(d, "/Track/SongLoaded").state ? (g(d, "/Track/TrackUri").string || g(d, "/Track/TrackNetworkPath").string) : ""}
-			const p = scShadowPrev[d]
-			// Holding CUE previews with PlayState false (measured on a JP07): CUE's
-			// LED is on and the position runs. The LED alone also blinks while paused.
-			s.cue = !s.ps && !!(g(d, "/Track/CueLEDState") || {}).state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
+			s.ps = !!g.play.state
+			s.posMs = sr > 0 ? g.position.unnormalized / sr * 1000 : 0
+			s.pitch = Math.abs(exact - shown) < 0.15 ? exact : shown
+			s.bpm = ob; s.currentBpm = cb; s.at = now; s.jumps = p ? p.jumps : 0
+			s.net = g.loaded.state ? g.uri.string || g.net.string || "" : ""
+			s.cue = !s.ps && !!g.cueLED.state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
 			s.playing = s.ps || s.cue
+			s.master = !!g.master.state; s.sync = (g.sync.string || "Off") !== "Off"
 			if (p) {
-				// A jump: hot cue, beat jump, loop, CUE while playing, jog search while
-				// paused. TrackPosition moves in ~33 ms steps and this timer stalls with
-				// the GUI thread (40-80 ms measured): 80 ms counted 84 false jumps in plain
-				// playback, so 180 ms. A paused deck does not move.
-				s.jumps = p.jumps
 				const expect = p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0)
 				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
-				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02) edge = true
+				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync) edge = true
 			}
 			scShadowPrev[d] = s
+			scShadowSampleSpare[d] = p || {}
 		}
 		if (edge) scShadowPost(mine, now)
 		if (scShadowDebug) scShadowDbgFlush(now)
 	}
 	function scShadowPost(mine, now) {
-		const g = (d, p) => root.scTr("/Engine/Deck" + d + p)
-		// A networked player's MASTER LED is the unit's /Engine/Sync/Network/MasterStatus
-		// (ControlSurfaceModules/Sync.qml); DeckIsMaster is per deck. The unit's
-		// master is this player's unless a shadow deck (a CDJ) holds it.
-		const deckMaster = [1, 2, 3, 4].map(i => !!g(i, "/DeckIsMaster").state)
+		let post = scShadowPostRequest
+		if (!post) { post = new XMLHttpRequest(); scShadowPostRequest = post }
+		if (post.readyState > 0 && post.readyState < 4) {
+			scShadowPostPending = true
+			if (now - scShadowPostAt < 3000) return
+			post.abort()
+		}
 		const pNet = root.scTr("/Engine/Sync/Network/MasterStatus")
 		const net = !!(pNet && pNet.state)
-		const shadowLead = deckMaster.some((m, i) => m && mine.indexOf(i + 1) < 0)
-		let lead = 0
-		if (net && !shadowLead && !scShadowCdjMaster && !mine.some(d => deckMaster[d - 1]))
-			lead = mine.find(d => g(d, "/PlayState").state) || mine[0]
-		const link = (root.scTr("/Network/NetworkId") || {}).string || ""
-		const own = []
-		for (const d of mine) {
-			const s = scShadowPrev[d]
-			const t = p => root.scTr("/Engine/Deck" + d + "/Track/" + p)
-			// 32 property reads: rescan at most every 500 ms per deck, or at once on a new track.
-			let cc = scShadowCueCache[d]
-			if (!cc || cc.net !== s.net || now - cc.at >= 500) {
-				const cues = []
-				for (let i = 1; s.net && i <= 8; i++) {
-					const q = "QuickCue" + i
-					if ((t(q + "Exists") || {}).state)
-						cues.push({i: i, p: t(q + "Position").value, n: t(q + "Name").string, c: String(t(q + "Color").color)})
-				}
-				cc = scShadowCueCache[d] = {net: s.net, at: now, cues: cues}
-			}
-			const cues = cc.cues
-			own.push({deck: d, net: s.net, cues: s.net ? cues : null, cuePos: s.net ? (t("CuePosition") || {}).value : undefined, playing: s.playing, cue: s.cue, link: link, positionMs: s.posMs, at: s.at, jumps: s.jumps,
-				pitch: s.pitch, master: deckMaster[d - 1] || d === lead, bpm: s.bpm, currentBpm: s.currentBpm,
-				sync: ((root.scTr("/Engine/Deck" + d + "/SyncMode") || {}).string || "Off") !== "Off",
-				beat: (root.scTr("/Engine/Deck" + d + "/BeatNumber") || {}).unnormalized || 0,
-				// the gateway names a streamed shadow copy after the real track, not its numeric id
-				title: s.net ? ((root.scTr("/Engine/Deck" + d + "/Track/SongName") || root.scTr("/Engine/Deck" + d + "/Track/TrackName") || {}).string || "") : "",
-				artist: s.net ? ((root.scTr("/Engine/Deck" + d + "/Track/ArtistName") || {}).string || "") : "",
-				dbg: ""})
+		let shadowLead = false, localMaster = false, lead = 0
+		for (let d = 1; d <= 4; d++) {
+			if (!scShadowProperties(d).master.state) continue
+			if (mine.indexOf(d) < 0) shadowLead = true
+			else localMaster = true
 		}
-		scShadowPostAt = now
-		const post = new XMLHttpRequest()
+		if (net && !shadowLead && !scShadowCdjMaster && !localMaster) {
+			for (let i = 0; i < mine.length; i++) if (scShadowPrev[mine[i]].playing) { lead = mine[i]; break }
+			if (!lead) lead = mine[0]
+		}
+		const link = (root.scTr("/Network/NetworkId") || scShadowEmptyObject).string || ""
+		const own = scShadowOwn
+		for (let n = 0; n < mine.length; n++) {
+			const d = mine[n], s = scShadowPrev[d], g = scShadowProperties(d)
+			let cc = scShadowCueCache[d]
+			if (!cc) cc = scShadowCueCache[d] = {net: "?", at: 0, cues: [], pool: []}
+			if (cc.net !== s.net || now - cc.at >= 500) {
+				let count = 0
+				for (let i = 0; s.net && i < 8; i++) {
+					const q = g.cues[i]
+					if (!q.exists.state) continue
+					const c = cc.pool[i] || (cc.pool[i] = {})
+					c.i = i + 1; c.p = q.position.value; c.n = q.name.string || ""; c.c = String(q.color.color || "#ffffff")
+					cc.cues[count++] = c
+				}
+				cc.cues.length = count; cc.net = s.net; cc.at = now
+			}
+			const o = own[n] || (own[n] = {})
+			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
+			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.posMs; o.at = s.at; o.jumps = s.jumps
+			o.pitch = s.pitch; o.master = s.master || d === lead; o.bpm = s.bpm; o.currentBpm = s.currentBpm
+			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
+			o.title = s.net ? g.title.string || g.trackName.string || "" : ""
+			o.artist = s.net ? g.artist.string || "" : ""; o.dbg = ""
+		}
+		scShadowPostAt = now; scShadowPostPending = false
 		post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks")
 		post.send(JSON.stringify(own))
 	}
 	// One request at a time: Go holds it until the other player's state changes
 	// (at most 120 ms), so an edge arrives here within a millisecond of its UDP.
 	function scShadowPoll() {
-		const gen = ++scShadowGen
-		scShadowPollAt = Date.now()
-		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer)
-		x.onreadystatechange = function() {
-			if (x.readyState !== 4 || gen !== root.scShadowGen) return
-			let wait = 500
-			try {
-				if (x.status === 200) {
-					const r = JSON.parse(x.responseText)
-					root.scShadowDebug = !!r.debug
-					root.scShadowApplyAll(r.decks || [])
-					// An older suite answers at once (no ver): keep its old pace.
-					// 60 ms after a change: at most ~15 polls/s on the GUI thread.
-					wait = !r.role ? 500 : r.ver === undefined ? 120 : 60
-					if (r.ver !== undefined) root.scShadowVer = r.ver
-				}
-			} catch (err) {
-				console.warn("EngineX shadow decks: " + err)
+		let x = scShadowPollRequest
+		if (!x) {
+			x = new XMLHttpRequest()
+			scShadowPollRequest = x
+			x.onreadystatechange = function() {
+				if (x.readyState !== 4) return
+				let wait = 500
+				try {
+					if (x.status === 200) {
+						const version = x.getResponseHeader("X-Shadow-State") || ""
+						if (root.scShadowDisplayOnly && version && version === root.scShadowResponseVersion) {
+							scShadowPollTimer.interval = 60; scShadowPollTimer.restart(); return
+						}
+						root.scShadowResponseVersion = version
+						const r = JSON.parse(x.responseText)
+						root.scShadowDebug = !!r.debug
+						root.scShadowApplyAll(r.decks || root.scShadowEmptyArray, r.displayOnly !== false)
+						wait = !r.role ? 500 : r.ver === undefined ? 120 : 60
+						if (r.ver !== undefined) root.scShadowVer = r.ver
+					}
+				} catch (err) { console.warn("EngineX shadow decks: " + err) }
+				scShadowPollTimer.interval = wait
+				scShadowPollTimer.restart()
 			}
-			scShadowPollTimer.interval = wait
-			scShadowPollTimer.restart()
 		}
+		if (x.readyState > 0 && x.readyState < 4) {
+			if (Date.now() - scShadowPollAt < 3000) return
+			x.abort()
+		}
+		++scShadowGen
+		scShadowPollAt = Date.now()
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer)
 		x.send()
 	}
-	function scShadowApplyAll(decks) {
+	function scShadowApplyAll(decks, displayOnly) {
+		scShadowDisplayOnly = displayOnly !== false
+		if (scShadowDisplayOnly) {
+			// No Planck reads/writes or legacy helpers here, even when path is empty.
+			scShadowCdjMaster = false // display flags must never suppress the real network master
+			scShadowApplyDisplay(decks)
+			return
+		}
+		scShadowDisplay = ({})
+		scShadowDisplayRequests = ({})
+		scShadowGridCache = ({})
+		scShadowLiveCueCache = ({})
 		root.scShadowCdjMaster = decks.some(e => e.master)
 		for (const e of decks) root.scShadowApply(e)
 		const now = Date.now()
@@ -510,6 +729,7 @@ SERVICES_MAIN = """
 	// shadow deck and, after 350 ms (one dropped update must not eject), unload it
 	// so no stale track or waveform stays, handing master back to our own deck.
 	function scShadowEmpty(d, now) {
+		if (scShadowDisplayOnly) return
 		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
 		// On an all-in-one console (#160), leave Decks 3/4 alone unless a shadow peer loaded them.
 		if (!root.scPlayer && !at.path) return
@@ -530,6 +750,7 @@ SERVICES_MAIN = """
 		delete scShadowAt[d]
 	}
 	function scShadowApply(e) {
+		if (scShadowDisplayOnly) return
 		const d = e.deck
 		if (scFourDeckRole.indexOf(String(d)) >= 0 || !e.path) return
 		const g = p => root.scTr("/Engine/Deck" + d + p)
@@ -686,6 +907,7 @@ SERVICES_MAIN = """
 	// The shadow deck's fader at pitch percent: the SpeedRange (8 % by default) is
 	// widened first, or +11.1 % (a synced 126 BPM track at 140) stuck at +8 %.
 	function scShadowSpeed(d, pitch) {
+		if (scShadowDisplayOnly) return
 		const pRange = root.scTr("/Engine/Deck" + d + "/SpeedRange"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
 		if (!pRange || !pSpeed) return
 		let range = parseFloat(pRange.string) || 8
@@ -719,6 +941,7 @@ SERVICES_MAIN = """
 	// the pads, and stores them itself. Nothing else may write its m.db (it
 	// holds it with an exclusive lock and its own page cache; a write broke it).
 	function scShadowCues(d, at, e, now) {
+		if (scShadowDisplayOnly) return
 		if (!Array.isArray(e.cues)) return // a CDJ: no cues sent
 		const sig = JSON.stringify(e.cues) + "/" + e.cuePos
 		if (sig === at.cueSig && (at.cuePasses || 0) >= 2) return
@@ -748,6 +971,7 @@ SERVICES_MAIN = """
 	// press per check: Forward moves BeatNumber back by one (measured on a
 	// JP07). Part of a beat has no control short of the on-screen grid editor.
 	function scShadowBeat(d, at, e, drift, now) {
+		if (scShadowDisplayOnly) return
 		if ((at.beatTries || 0) >= 4 || !(e.bpm > 0) || e.beat === undefined || Math.abs(drift) > 15 || now < (at.beatAt || 0)) return
 		const local = (root.scTr("/Engine/Deck" + d + "/BeatNumber") || {}).unnormalized
 		if (local === undefined) return
@@ -762,6 +986,7 @@ SERVICES_MAIN = """
 		at.beatAt = now + 600
 	}
 	function scShadowSeek(d, at, ms) {
+		if (scShadowDisplayOnly) return
 		const g = p => root.scTr("/Engine/Deck" + d + p)
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!(sr > 0 && len > 0)) return
@@ -775,6 +1000,7 @@ SERVICES_MAIN = """
 	// Register takes one path per event-loop turn: one path per update.
 	property var scShadowLinks: ({})
 	function scShadowLink(d, uuid) {
+		if (scShadowDisplayOnly) return
 		const k = uuid + d, n = scShadowLinks[k] || 0
 		const paths = ["/Engine/Deck" + d + "/PlayState", "/Engine/Deck" + d + "/Track/CueLEDState"]
 		if (n >= paths.length) return
@@ -788,6 +1014,7 @@ SERVICES_MAIN = """
 		p.translator.stringChanged.connect(() => root.scShadowLinkEdge(d, uuid, kind, p.translator.string))
 	}
 	function scShadowLinkEdge(d, uuid, kind, json) {
+		if (scShadowDisplayOnly) return
 		const at = scShadowAt[d]
 		if (!at || !at.ready || at.link !== uuid) return
 		let on
@@ -1131,6 +1358,7 @@ SERVICES_MAIN = """
 		scFourDeckRole = v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
 		scFourDeckOn = !!v.fourDeckWaveform
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
+		scShadowLegacyEngine = v.shadowLegacyEngine === true
 		scKeepPlayhead(v.playhead || 0)
 		if (!scSameItems(scSources, v.sources)) scSources = v.sources
 		if (!scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
@@ -1909,6 +2137,13 @@ FOUR_DECK_ENTRIES = """
 			currentValue: values[Math.max(0, ids.indexOf(root.scFourDeckRoleSetting))]
 			onSelected: function(index) { if (ids[index] !== root.scFourDeckRoleSetting) root.scRestartCall("fourDeckRole=" + ids[index]) }
 		},
+		EntryBase.ListEntry {
+			text: "Legacy Shadow Engine (restart Engine manually to clear old slots)"
+			visible: root.scFourDeckOn
+			values: ["Off", "On"]
+			currentValue: values[root.scShadowLegacyEngine ? 1 : 0]
+			onSelected: function(index) { if ((index === 1) !== root.scShadowLegacyEngine) root.scCall("shadowLegacyEngine=" + index) }
+		},
 """
 
 # #99 Layout Manager: what a View 1..5 keeps besides the stock layout (scViewSnapshot).
@@ -2321,6 +2556,265 @@ ZOOM_STEP = """
 
 
 GUARD = '(typeof root !== "undefined" && root && root.scDeckArtUrl)'
+
+# Owned by stock visual roots; painted in the transformed UI, outside their Row/ColumnLayouts.
+# PNGs are full-track horizontal textures; only Image geometry moves on a display tick.
+SHADOW_LAYER = r"""
+    Rectangle {
+        id: scDisplay
+        objectName: "EngineX_Shadow_@KIND@"
+        readonly property Item owner: @OWNER@
+        parent: typeof root !== "undefined" && root && root.transformed ? root.transformed : owner
+        readonly property int deck: typeof root !== "undefined" && root && root.scShadowDeckFor ? root.scShadowDeckFor(owner) : 0
+        readonly property bool active: typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(deck)
+        readonly property bool wave: "@KIND@" === "waveform"
+        readonly property bool overview: "@KIND@" === "overview"
+        readonly property bool performance: "@KIND@" === "performance"
+        readonly property bool graphical: wave || overview
+        readonly property var sample: active ? root.scShadowData(deck) : null
+        readonly property var meta: sample && sample.meta
+        readonly property real now: { const tick = root.scShadowFrame; return Date.now() }
+        readonly property real position: active ? root.scShadowPosition(sample, now) : 0
+        readonly property bool stale: !!sample && (sample.stale || now - sample.at >= root.scShadowExpiryMs)
+        readonly property real duration: meta && meta.durationMs > 0 ? meta.durationMs : 1
+        readonly property real waveformDuration: meta && meta.waveformDurationMs > 0 ? meta.waveformDurationMs : duration
+        readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
+        readonly property real playhead: overview ? position / duration : 0.5
+        readonly property real start: overview ? 0 : position - span * playhead
+        readonly property var cueInfo: { const tick = root.scCueTick; return active ? root.scShadowNextCue(deck) : null }
+        readonly property var cues: active ? root.scShadowCuesFor(deck, sample) : []
+        readonly property var grid: wave && meta ? root.scShadowGrid(deck, meta, start, start + span) : []
+        readonly property var tiles: meta && meta.detail && Array.isArray(meta.waveformTiles) ? meta.waveformTiles : []
+        readonly property int totalPixels: meta && meta.waveformWidth > 0 && meta.waveformWidth <= 65536 ? meta.waveformWidth : 0
+        readonly property int tilePixels: meta && meta.tileWidth > 0 ? Math.min(2048, meta.tileWidth) : 2048
+        readonly property bool tiled: wave && totalPixels > 0 && tiles.length > 0 && tiles.length <= 32
+        readonly property bool detailed: !!meta && !!meta.detail && (!!meta.waveformUrl || tiled)
+        readonly property string imageUrl: meta ? (overview || !detailed ? meta.overviewUrl || meta.waveformUrl : meta.waveformUrl || meta.overviewUrl) || "" : ""
+        function screenX(ms) { return (ms - start) / span * width }
+        width: owner.width
+        height: owner.height
+        // Follow geometry signals, not the animation tick. Reparented layers must
+        // also respect the visibility of every original ancestor.
+        property bool inheritedVisible: false
+        property var geometryWatches: []
+        property var basis: Qt.matrix4x4(1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1)
+        property real ax: NaN
+        property real ay: NaN
+        property real bx: NaN
+        property real by: NaN
+        property real cx: NaN
+        property real cy: NaN
+        function refreshGeometry() {
+            let shown = active
+            for (let p = owner; p && p !== parent; p = p.parent) if (!p.visible) { shown = false; break }
+            inheritedVisible = shown
+            if (!shown || !(owner.width > 0 && owner.height > 0)) return
+            const a = owner.mapToItem(parent,0,0), b = owner.mapToItem(parent,1,0), c = owner.mapToItem(parent,0,1)
+            if (ax === a.x && ay === a.y && bx === b.x && by === b.y && cx === c.x && cy === c.y) return
+            ax=a.x; ay=a.y; bx=b.x; by=b.y; cx=c.x; cy=c.y
+            basis = Qt.matrix4x4(b.x-a.x,c.x-a.x,0,a.x, b.y-a.y,c.y-a.y,0,a.y, 0,0,1,0, 0,0,0,1)
+        }
+        function unwatchGeometry() {
+            for (let i=0;i<geometryWatches.length;i++) {
+                const w=geometryWatches[i]
+                try { w.signal.disconnect(w.callback) } catch(err) {}
+            }
+            geometryWatches=[]
+        }
+        function watchGeometry() {
+            unwatchGeometry()
+            for (let p=owner;p && p!==parent;p=p.parent) {
+                for (const name of ["xChanged","yChanged","widthChanged","heightChanged","rotationChanged","scaleChanged","visibleChanged","parentChanged"]) {
+                    const signal=p[name], callback=name === "parentChanged" ? watchGeometry : refreshGeometry
+                    if (signal && signal.connect) {
+                        signal.connect(callback)
+                        geometryWatches.push({signal:signal,callback:callback})
+                    }
+                }
+            }
+            refreshGeometry()
+        }
+        onActiveChanged: refreshGeometry()
+        Component.onCompleted: watchGeometry()
+        Component.onDestruction: unwatchGeometry()
+        transform: Matrix4x4 { matrix: scDisplay.basis }
+        z: 10000
+        clip: true
+        visible: active && inheritedVisible && owner.width > 0 && owner.height > 0
+        color: "#101114"
+        // Stock roots can hide an empty Engine slot. Restore their original bindings on exit.
+        Binding { target: scDisplay.owner; property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
+        Binding { target: scDisplay.owner; property: "enabled"; value: false; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
+        Image {
+            visible: scDisplay.graphical && source !== ""
+            source: scDisplay.graphical && !scDisplay.tiled ? root.scShadowAsset(scDisplay.imageUrl) : ""
+            sourceSize.width: scDisplay.overview || !scDisplay.detailed ? 1024 : 2048
+            sourceSize.height: scDisplay.overview || !scDisplay.detailed ? 64 : 128
+            asynchronous: true
+            cache: false
+            smooth: true
+            fillMode: Image.Stretch
+            x: scDisplay.screenX(0)
+            y: 0
+            width: (scDisplay.overview || !scDisplay.detailed ? scDisplay.duration : scDisplay.waveformDuration) / scDisplay.span * scDisplay.width
+            height: scDisplay.height
+            opacity: scDisplay.stale ? 0.55 : 1
+            // No color conversion: the server PNG uses the original three-band palette.
+        }
+        Repeater {
+            model: scDisplay.tiled ? Math.min(32, scDisplay.tiles.length) : 0
+            delegate: Image {
+                required property int index
+                readonly property int pixels: Math.max(0, Math.min(scDisplay.tilePixels, scDisplay.totalPixels - index * scDisplay.tilePixels))
+                readonly property real startMs: index * scDisplay.tilePixels / scDisplay.totalPixels * scDisplay.waveformDuration
+                readonly property real endMs: (index * scDisplay.tilePixels + pixels) / scDisplay.totalPixels * scDisplay.waveformDuration
+                readonly property bool intersects: pixels > 0 && startMs < scDisplay.start + scDisplay.span && endMs > scDisplay.start
+                source: intersects ? root.scShadowAsset(scDisplay.tiles[index]) : ""
+                sourceSize.width: Math.min(2048, pixels)
+                sourceSize.height: 128
+                asynchronous: true; cache: false; smooth: true
+                fillMode: Image.Stretch
+                x: scDisplay.screenX(startMs)
+                y: 0
+                width: (endMs - startMs) / scDisplay.span * scDisplay.width
+                height: scDisplay.height
+                opacity: scDisplay.stale ? 0.55 : 1
+            }
+        }
+        Repeater {
+            model: scDisplay.grid
+            delegate: Rectangle {
+                required property var modelData
+                x: scDisplay.screenX(modelData.ms)
+                height: scDisplay.height
+                width: modelData.number % 4 === 0 ? 2 : 1
+                color: "white"
+                opacity: modelData.number % 4 === 0 ? 0.55 : 0.22
+            }
+        }
+        Repeater {
+            model: scDisplay.graphical && scDisplay.meta ? scDisplay.meta.loops || [] : []
+            delegate: Rectangle {
+                required property var modelData
+                readonly property real clipLeft: Math.max(0, scDisplay.screenX(modelData.startMs))
+                readonly property real clipRight: Math.min(scDisplay.width, scDisplay.screenX(modelData.endMs))
+                visible: clipRight > clipLeft
+                x: clipLeft; width: Math.max(0, clipRight - clipLeft); height: scDisplay.height
+                color: modelData.c || "#26a6ff"
+                opacity: 0.18
+                Text { textFormat: Text.PlainText; text: modelData.n || ""; color: "white"; font.pixelSize: 10; elide: Text.ElideRight; width: parent.width }
+            }
+        }
+        Repeater {
+            model: scDisplay.graphical ? scDisplay.cues : []
+            delegate: Item {
+                required property var modelData
+                x: scDisplay.screenX(modelData.ms)
+                width: 2; height: scDisplay.height
+                visible: x >= 0 && x <= scDisplay.width
+                Rectangle { anchors.fill: parent; color: modelData.c || "#26a6ff" }
+                Text { textFormat: Text.PlainText; x: 3; text: modelData.n || String(modelData.i); color: modelData.c || "#26a6ff"; font.pixelSize: 11 }
+            }
+        }
+        Rectangle {
+            visible: scDisplay.graphical && !!scDisplay.sample
+            x: Math.max(0, Math.min(scDisplay.width - width, scDisplay.playhead * scDisplay.width))
+            width: 2; height: scDisplay.height; color: "white"
+        }
+        Image {
+            id: scCover
+            visible: !scDisplay.graphical && scDisplay.height >= 48 && !!(scDisplay.meta && scDisplay.meta.artworkUrl)
+            source: root.scShadowAsset(scDisplay.meta && scDisplay.meta.artworkUrl)
+            sourceSize.width: 128; sourceSize.height: 128
+            width: visible ? Math.min(64, scDisplay.height) : 0; height: width
+            anchors.verticalCenter: parent.verticalCenter
+            fillMode: Image.PreserveAspectFit; asynchronous: true; cache: false
+        }
+        Column {
+            visible: !scDisplay.graphical
+            x: scCover.width + 4
+            width: scDisplay.width - x - 4
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 2
+            Text { textFormat: Text.PlainText;
+                visible: !scDisplay.performance || scDisplay.height >= 48
+                width: parent.width; elide: Text.ElideRight
+                color: "white"; font.pixelSize: Math.min(18, Math.max(11, scDisplay.height / 3))
+                text: scDisplay.deck + " · " + (scDisplay.sample ? scDisplay.sample.title || (scDisplay.meta && scDisplay.meta.title) || (scDisplay.sample.loading ? "Loading…" : "") : "")
+            }
+            Text { textFormat: Text.PlainText;
+                visible: scDisplay.height >= 58
+                width: parent.width; elide: Text.ElideRight; color: "#aaaaaa"; font.pixelSize: 12
+                text: scDisplay.sample ? scDisplay.sample.artist || (scDisplay.meta && scDisplay.meta.artist) || "" : ""
+            }
+            Item {
+                width: parent.width; height: 16
+                Text { textFormat: Text.PlainText;
+                    width: Math.max(0, parent.width - scBadges.width - 4)
+                    elide: Text.ElideRight; color: "#dddddd"; font.pixelSize: 12
+                    text: {
+                        const s = scDisplay.sample, m = scDisplay.meta
+                        if (!s) return ""
+                        const bpm = s.bpm || (m && m.bpm) || 0
+                        const cue = scDisplay.cueInfo && root.scCueCountdown ? "   " + scDisplay.cueInfo.label + " " + scDisplay.cueInfo.text : ""
+                        return (bpm > 0 ? (bpm * (1 + s.pitch / 100)).toFixed(1) + " BPM" : "") + "   " + (m && m.keyName || "") + cue
+                    }
+                }
+                Text { textFormat: Text.PlainText;
+                    id: scBadges
+                    anchors.right: parent.right; color: "#eeeeee"; font.pixelSize: 11
+                    text: !scDisplay.sample ? "" : (scDisplay.sample.master ? "MASTER " : "") + (scDisplay.sample.sync ? "SYNC " : "") + (scDisplay.stale ? "OFFLINE" : "")
+                }
+            }
+        }
+        Text { textFormat: Text.PlainText;
+            visible: scDisplay.graphical && !!scDisplay.sample
+            anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 2
+            color: "#dddddd"; font.pixelSize: 10
+            text: !scDisplay.sample ? "" : (scDisplay.stale ? "OFFLINE · " : "") + (scDisplay.sample.metadataOnly ? "REMOTE" : !scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed ? "OVERVIEW" : "")
+        }
+        // Covers remote Stems, needle-drop, grid editing and transport touch targets.
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; onWheel: function(wheel) { wheel.accepted = true } }
+    }
+"""
+
+
+def shadow_layer(text: str, kind: str) -> str:
+    """Own the layer with the stock root; reparent its visual item outside stock layouts."""
+    # Stock roots request QtQuick 2.0/2.1; Matrix4x4 and Binding.restoreMode
+    # need the newer revisions available in both supported Engine Qt builds.
+    text = re.sub(r"(?m)^import QtQuick(?: \d+\.\d+)?\s*$", "import QtQuick 2.15", text)
+    root_object = re.search(r"(?m)^[A-Za-z_]\w*(?:\.\w+)*\s*\{", text)
+    if root_object is None:
+        raise ValueError("shadow display target has no QML root object")
+    owner = re.search(r"(?m)^(?:    |\t)id:\s*([A-Za-z_]\w*)\s*$", text)
+    if owner:
+        owner_id = owner.group(1)
+    else:
+        owner_id = "scStockShadowHost"
+        pos = root_object.end()
+        text = text[:pos] + "\n    id: " + owner_id + "\n" + text[pos:]
+    end = text.rfind("}")
+    if end < 0:
+        raise ValueError("shadow display target has no QML root")
+    layer = SHADOW_LAYER.replace("@KIND@", kind).replace("@OWNER@", owner_id)
+    return text[:end] + layer + text[end:]
+
+
+def shadow_targets(qrc: Path):
+    """Stock visual roots (5.0.4 and 5.3); only patch files actually shipped by this QRC."""
+    v = ROOT + "Views/"
+    composite = "Skins/EngineOS/UI/CompositeControls/"
+    targets = {
+        v + "Common/Waveform/Waveform.qml": "waveform",
+        v + "Common/WaveformOverview/WaveformOverview.qml": "overview",
+        composite + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml": "track",
+        composite + "DeckTrackData/SplitMiniDeckTrackDataContent.qml": "track",
+        composite + "DeckTrackData/DeckTrackDataContent.qml": "track",
+        composite + "DeckPerformanceData/DeckPerformanceDataContent.qml": "performance",
+        composite + "DeckPerformanceData/PortraitDeckPerformanceDataContent.qml": "performance",
+    }
+    return {rel: kind for rel, kind in targets.items() if (qrc / rel).is_file()}
 
 
 def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False, lead_sep: bool = True) -> str:
@@ -3507,6 +4001,11 @@ def main():
         for old, new in change:
             text = patch(text, old, new, rel)
         base[rel] = text
+    for rel, kind in shadow_targets(a.qrc).items():
+        text = base.get(rel)
+        if text is None:
+            text = (a.qrc / rel).read_text(encoding="utf-8")
+        base[rel] = shadow_layer(text, kind)
     # A qrc path this base does not ship renders as a blank icon (5.3.0 has no UIKit.1/).
     for rel, text in base.items():
         for ref in re.findall(r'"qrc:/([^"$%{}+]+\.(?:png|svg|jpg|qml))"', text.replace("%20", " ")):

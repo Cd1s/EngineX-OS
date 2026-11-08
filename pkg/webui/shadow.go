@@ -1,11 +1,11 @@
 package webui
 
 // Shadow decks (#49). In the 4-deck layout a player plays the decks of its
-// role and shows the other two. Its QML polls GET /v1/sc5000/shadow and drives
-// those decks (silent: the hook routes only the role's decks to the outputs)
-// from whoever plays them: the other EngineX player, whose QML posts its own
+// role and shows the other two. By default QML renders source display assets
+// (shadow_display.go), keeping the corresponding local Engine slots empty.
+// The opt-in legacy mode drives silent local Engine decks and copies audio.
+// Sources are the other EngineX player, whose QML posts its own
 // decks to POST /v1/sc5000/decks, or a CDJ on Pro DJ Link, by player number.
-// Track audio is copied to this deck.
 //
 // Latency: the sender's QML posts on every edge (play, CUE, jump, pitch) within
 // 20 ms, Go pushes the post to the other player over UDP at once, and there it
@@ -48,23 +48,26 @@ var shadowDataRoot, shadowMediaRoot, shadowBeaconOn = "/data", "/media", true
 
 // deckState is one deck as a shadow deck follows it.
 type deckState struct {
-	Deck       int     `json:"deck"`
-	Path       string  `json:"path,omitempty"` // a file on this deck
-	Net        string  `json:"net,omitempty"`  // Engine's TrackNetworkPath, posted by the QML
-	Key        string  `json:"key,omitempty"`  // changes with the track
-	Ext        string  `json:"ext,omitempty"`
-	Name       string  `json:"name,omitempty"`  // the file's name, which the copy keeps
-	Title      string  `json:"title,omitempty"` // a streaming track's real title (QML or stm.db): the copy is named after it
-	Artist     string  `json:"artist,omitempty"`
-	Loading    bool    `json:"loading,omitempty"` // shadow deck: the peer has a track whose audio is still being fetched
-	Playing    bool    `json:"playing"`
-	PositionMS float64 `json:"positionMs"`
-	Pitch      float64 `json:"pitch"` // percent
-	Master     bool    `json:"master,omitempty"`
-	Sync       bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
-	BPM        float64 `json:"bpm,omitempty"`        // the track's
-	CurrentBPM float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
-	Beat       float64 `json:"beat,omitempty"`       // Engine's BeatNumber: beats into the bar, 0..4
+	baseKey      string  // source-only file identity; Key also identifies the loaded session
+	Deck         int     `json:"deck"`
+	Path         string  `json:"path,omitempty"` // a file on this deck
+	Net          string  `json:"net,omitempty"`  // Engine's TrackNetworkPath, posted by the QML
+	Key          string  `json:"key,omitempty"`  // changes with the track
+	Ext          string  `json:"ext,omitempty"`
+	Name         string  `json:"name,omitempty"`  // the file's name, which the copy keeps
+	Title        string  `json:"title,omitempty"` // a streaming track's real title (QML or stm.db): the copy is named after it
+	Artist       string  `json:"artist,omitempty"`
+	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
+	Stale        bool    `json:"stale,omitempty"`        // frozen display sample; not an eject/goodbye
+	MetadataOnly bool    `json:"metadataOnly,omitempty"` // CDJ state has no peer display asset endpoint
+	Playing      bool    `json:"playing"`
+	PositionMS   float64 `json:"positionMs"`
+	Pitch        float64 `json:"pitch"` // percent
+	Master       bool    `json:"master,omitempty"`
+	Sync         bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
+	BPM          float64 `json:"bpm,omitempty"`        // the track's
+	CurrentBPM   float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
+	Beat         float64 `json:"beat,omitempty"`       // Engine's BeatNumber: beats into the bar, 0..4
 	// At is when PositionMS was read, Unix ms on this machine's clock: the QML's
 	// GUI thread and our niced HTTP handler both lag by tens of ms, so the
 	// position is extrapolated from the sample time, not from arrival.
@@ -148,6 +151,8 @@ type shadowState struct {
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
 	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
 	dbg                 shadowDebug
+	display             shadowDisplayCache
+	sourceDisplay       shadowSourceCache
 }
 
 func newShadowState() *shadowState {
@@ -321,6 +326,16 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.shadow.mu.Lock()
+		if d.Key != "" {
+			d.baseKey = d.Key
+			d.Key = fmt.Sprintf("%s-%x", d.baseKey, seq)
+			for _, previous := range s.shadow.own {
+				if previous.Deck == d.Deck && previous.baseKey == d.baseKey && previous.Path == d.Path && previous.Key != "" {
+					d.Key = previous.Key
+					break
+				}
+			}
+		}
 		logIt := np != "" && d.Path == "" && s.shadow.unresolved[d.Deck] != np
 		if logIt {
 			s.shadow.unresolved[d.Deck] = np
@@ -377,11 +392,12 @@ const shadowDecksMagic = "EngineX-decks 1\n"
 // now (its clock means nothing there). Called with sh.mu held.
 func (sh *shadowState) ownForPeer(now time.Time) []deckState {
 	var out []deckState
-	if now.Sub(sh.ownAt) < 2*time.Second {
+	if len(sh.own) != 0 {
 		for _, d := range sh.own {
 			d.Path = ""
+			d.Stale = now.Sub(sh.ownAt) >= 2*time.Second
 			if d.Playing {
-				d.PositionMS += float64(now.UnixMilli()-d.At) * (1 + d.Pitch/100)
+				d.PositionMS += float64(min(int64(2000), max(int64(0), now.UnixMilli()-d.At))) * (1 + d.Pitch/100)
 			}
 			d.At = 0
 			out = append(out, d)
@@ -457,14 +473,18 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 				break
 			}
 		}
-		if cur, ok := sh.peerDecks[slot]; ok && cur.ip != "" && cur.ip != ip && (cur.Link == "" || cur.Link != id) && now.Sub(cur.at) < 2*time.Second {
+		if cur, ok := sh.peerDecks[slot]; ok && !(cur.Deck == d.Deck && (cur.ip == ip || cur.Link != "" && cur.Link == id)) {
+			slot = 0
 			for s := 1; s <= 4; s++ {
-				if c, taken := sh.peerDecks[s]; !taken || c.ip == ip || c.Link != "" && c.Link == id || now.Sub(c.at) >= 2*time.Second {
+				if c, taken := sh.peerDecks[s]; !taken || c.Deck == d.Deck && (c.ip == ip || c.Link != "" && c.Link == id) {
 					slot = s
 					break
 				}
 			}
 		}
+		if slot == 0 {
+			continue
+		} // all slots belong to other tracks; never overwrite a sibling
 		sh.peerDecks[slot] = peerDeck{deckState: d, ip: ip, at: now}
 	}
 	sh.bump()
@@ -653,7 +673,7 @@ func dbPerf(ctx context.Context, mdb, rel string) ([]byte, error) {
 	var bpm sql.NullFloat64
 	var track, beats, overview []byte
 	err = db.QueryRowContext(ctx, `SELECT coalesce(t.bpmAnalyzed, t.bpm), p.trackData, p.beatData, p.overviewWaveFormData
-		FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.path = ? AND t.isAnalyzed = 1`, rel).
+		FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.path = ? AND length(p.trackData)>4 AND length(p.beatData)>4 AND length(p.overviewWaveFormData)>4`, rel).
 		Scan(&bpm, &track, &beats, &overview)
 	if err != nil {
 		return nil, err
@@ -779,10 +799,26 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 		s.shadow.mu.Unlock()
 		out = s.shadowCompose(role, time.Now())
 	}
-	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug})
+	stale := slices.ContainsFunc(out, func(d deckState) bool { return d.Stale })
+	// CDJ continuous positions do not advance the EngineX peer version. Those
+	// responses, like legacy responses, must always reach QML.
+	if !v.ShadowLegacyEngine && !slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly }) {
+		w.Header().Set("X-Shadow-State", fmt.Sprintf("%d:%t:%s:%t:%t", ver, true, role, stale, debug))
+	}
+	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug, "displayOnly": !v.ShadowLegacyEngine})
 }
 
 func (s *Server) shadowCompose(role string, now time.Time) []deckState {
+	s.uiMu.Lock()
+	legacy := s.loadUI().ShadowLegacyEngine
+	s.uiMu.Unlock()
+	if !legacy {
+		return s.shadowComposeDisplay(role, now)
+	}
+	return s.shadowComposeLegacy(role, now)
+}
+
+func (s *Server) shadowComposeLegacy(role string, now time.Time) []deckState {
 	devices := s.mergedDevices()
 	// The exporter's lock is taken before ours, never under it: closing the
 	// exporter waits for its observer, which takes ours.
@@ -813,7 +849,7 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 			continue
 		}
 		shadowDecks = append(shadowDecks, deck)
-		if p, ok := sh.peerDecks[deck]; ok && now.Sub(p.at) < 2*time.Second {
+		if p, ok := sh.peerDecks[deck]; ok && !p.Stale && now.Sub(p.at) < 2*time.Second {
 			placed[deck] = p
 			usedPeer[deck] = true
 		}
@@ -829,7 +865,7 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 			if usedPeer[src] {
 				continue
 			}
-			if p, ok := sh.peerDecks[src]; ok && now.Sub(p.at) < 2*time.Second {
+			if p, ok := sh.peerDecks[src]; ok && !p.Stale && now.Sub(p.at) < 2*time.Second {
 				placed[deck] = p
 				usedPeer[src] = true
 				break
@@ -1080,7 +1116,8 @@ func (s *Server) shadowWake() {
 	if sh.running {
 		return
 	}
-	os.RemoveAll(filepath.Join(filepath.Dir(s.uiDir()), "shadow")) // before shadow-v3
+	// Retain older caches for an explicit rollback; starting display discovery
+	// must not delete files from an earlier mode.
 	sh.running = true
 	go s.shadowLoop()
 }
