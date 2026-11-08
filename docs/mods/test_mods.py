@@ -151,7 +151,7 @@ class ModTests(unittest.TestCase):
 
     def test_club_pause_restore_and_partial_restore(self):
         club = feature("minimal-club-mode")
-        live = {club.SERVICES[0], club.SERVICES[2]}
+        live = {club.SERVICES[0], club.SERVICES[1]}
         calls = []
         fail_start = set()
         def command(action, unit):
@@ -168,12 +168,12 @@ class ModTests(unittest.TestCase):
             app.action({"action":"enable"})
             self.assertEqual(live, set())
             self.assertEqual(len(app.status()["services"]), 2)
-            fail_start.add(club.SERVICES[2])
+            fail_start.add(club.SERVICES[1])
             with self.assertRaises(RuntimeError): app.action({"action":"disable"})
-            self.assertEqual(app.status()["services"], [club.SERVICES[2]])
+            self.assertEqual(app.status()["services"], [club.SERVICES[1]])
             fail_start.clear()
             app.action({"action":"disable"})
-            self.assertEqual(live, {club.SERVICES[0], club.SERVICES[2]})
+            self.assertEqual(live, {club.SERVICES[0], club.SERVICES[1]})
             self.assertFalse(app.path.exists())
             self.assertTrue(all(unit in club.SERVICES for _, unit in calls))
 
