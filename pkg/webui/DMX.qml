@@ -27,13 +27,13 @@ Item {
             } catch (e) { statusText = String(e) }
         }
         x.setRequestHeader("Content-Type", "application/json")
-        x.send(action ? JSON.stringify({action: action, config: value}) : "")
+        x.send(action ? JSON.stringify({action: action, control: value}) : "")
     }
     function setValue(key, value) {
         if (!config) return
-        const c = JSON.parse(JSON.stringify(config))
-        c[key] = value
-        call("configure", c)
+        const values = {}
+        values[key] = value
+        call("control", values)
     }
     function sample() {
         if (!read || !config || !config.enabled || soundSwitch) return
@@ -55,6 +55,7 @@ Item {
             decks.push({deck: master, master: true, at: now,
                 playing: !!g("/PlayState").state,
                 bpm: g("/OriginalBPM").unnormalized || 0,
+                currentBpm: g("/CurrentBPM").unnormalized || 0,
                 pitch: parseFloat(g("/SpeedState").string) || 0,
                 beat: g("/BeatNumber").unnormalized || 0})
         }
@@ -66,7 +67,7 @@ Item {
     }
     Component.onCompleted: call("", null)
     Timer { interval: 1000; repeat: true; running: true; onTriggered: panel.call("", null) }
-    Timer { interval: 100; repeat: true; running: panel.config && panel.config.enabled && !panel.soundSwitch; onTriggered: panel.sample() }
+    Timer { interval: 100; repeat: true; running: !!panel.config && panel.config.enabled && !panel.soundSwitch; onTriggered: panel.sample() }
     Rectangle {
         anchors.right: parent.right; anchors.bottom: parent.bottom
         anchors.margins: 12; width: 156; height: 44; radius: 8
@@ -118,9 +119,9 @@ Item {
                             anchors.fill: parent
                             onClicked: {
                                 if (!panel.config) return
-                                const c = JSON.parse(JSON.stringify(panel.config))
+                                const c = {}
                                 c.red = parseInt(modelData.slice(1,3),16); c.green = parseInt(modelData.slice(3,5),16); c.blue = parseInt(modelData.slice(5,7),16)
-                                panel.call("configure", c)
+                                panel.call("control", c)
                             }
                         }
                     }

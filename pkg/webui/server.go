@@ -78,6 +78,7 @@ type Config struct {
 type Server struct {
 	dmx           *dmx.Engine
 	dmxMu         sync.Mutex
+	dmxRevision   uint64
 	cfg           Config
 	jobs          *Jobs
 	mu            sync.Mutex

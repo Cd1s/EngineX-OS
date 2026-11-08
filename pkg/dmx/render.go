@@ -92,7 +92,9 @@ func (c Config) Validate() error {
 		case "ftdi", "udmx":
 			key := o.Device
 			if o.Protocol == "ftdi" {
-				if !(strings.HasPrefix(key, "/dev/ttyUSB") || strings.HasPrefix(key, "/dev/ttyACM")) || strings.Contains(key, "..") || strings.ContainsAny(strings.TrimPrefix(strings.TrimPrefix(key, "/dev/ttyUSB"), "/dev/ttyACM"), "/") {
+				suffix := strings.TrimPrefix(key, "/dev/ttyUSB")
+				if suffix == key { suffix = strings.TrimPrefix(key, "/dev/ttyACM") }
+				if suffix == key || strings.Contains(key, "..") || strings.Contains(suffix, "/") {
 					return errors.New("invalid FTDI device")
 				}
 			} else {

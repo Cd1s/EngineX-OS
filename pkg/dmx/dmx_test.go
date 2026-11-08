@@ -184,6 +184,11 @@ func TestMasterPhaseUnwrapAndPause(t *testing.T) {
 	if e.clock.Valid(time.Now().Add(2 * time.Second)) {
 		t.Fatal("stale master accepted")
 	}
+	// An NTP backward step must not keep rejecting new samples until the old
+	// wall-clock timestamp catches up.
+	e.clock.At = time.Now().Add(time.Hour)
+	e.SetClock(Clock{Deck: 1, BPM: 120, Beat: 1, At: time.Now().Add(-time.Millisecond)})
+	if e.clock.Deck != 1 { t.Fatal("clock step prevented resynchronization") }
 }
 
 func TestDisabledAndMissingUSB(t *testing.T) {
