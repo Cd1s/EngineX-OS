@@ -1,6 +1,6 @@
 [Unit]
 Description=SC5000 On-Device Stream Sync & CPU3 Audio Analyzer Console
-After=local-fs.target network.target data.mount
+After=local-fs.target network.target data.mount sc5000-deemixd.service
 
 [Service]
 Type=simple

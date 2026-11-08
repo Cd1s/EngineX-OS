@@ -516,6 +516,7 @@ static void test_config(void) {
         memset(config, 0xa0 + model, sizeof config);
         memcpy(expected, config, sizeof expected);
         for (size_t i = 0; i < 5; i++) expected[fields[i]] = i == 4 ? 0 : 1;
+        if (build->config_zoom == 0x52c) expected[0x54] = 1; // #152: Config.audio.hasStemsLevel
         if (build->config_zoom) *(uint32_t *)(expected + build->config_zoom) = 30; // #77
         uint32_t out[3];
         invoke_config(config, (void *)(uintptr_t)config_jump[1], out);
@@ -564,7 +565,7 @@ static void test_config(void) {
         // answer (none here: 13), anything unknown is 13.
         four_deck_resolved = "/nonexistent/role";
         const struct { const char *role; signed char a, b; } roles[] = {
-            {"24", 1, 3}, {"13", 0, 2}, {"2", 1, -1}, {"1", 0, -1}, {"12", 0, 1}, {"auto", 0, 2}, {"9;rm", 0, 2}};
+            {"24", 1, 3}, {"13", 0, 2}, {"34", 2, 3}, {"2", 1, -1}, {"1", 0, -1}, {"12", 0, 1}, {"auto", 0, 2}, {"9;rm", 0, 2}};
         for (size_t i = 0; i < sizeof roles / sizeof *roles; i++) {
             FILE *f = fopen(path, "w");
             assert(f && fprintf(f, "four_deck_waveform=1\nfour_deck_role=%s\n", roles[i].role) > 0 && !fclose(f));

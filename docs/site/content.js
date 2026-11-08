@@ -348,7 +348,7 @@
         { k: "table", head: [L("角色", "角色", "Role"), L("含义", "含義", "Meaning")], rows: [
           ["自动 / Auto", L("按机位号自动结对：奇数机位（主碟机 Player 1）负责 `1+3`，偶数机位（右机 Player 2）负责 `2+4`", "依機位號自動結對：奇數機位（主碟機 Player 1）負責 `1+3`，偶數機位（右機 Player 2）負責 `2+4`", "Auto-paired by player number: odd player (main unit Player 1) takes `1+3`, even player (right unit Player 2) takes `2+4`")],
           ["1+3 / 2+4", L("双机标准分工（主碟机 1/3 与右机 2/4 互补）", "雙機標準分工（主碟機 1/3 與右機 2/4 互補）", "Standard two-deck split (main deck 1/3 paired with right deck 2/4)")],
-          ["1+2 / 1 / 2", L("单机或自定义", "單機或自訂", "Single unit or custom")],
+          ["1+2 / 3+4 / 1 / 2", L("PRIME 4 / PRIME 4+ 跨机型联机（一体机负责 `1+2`，外接 SC5000 / SC6000 映射至 `3+4` 影子轨，#160）或单机双层四轨", "PRIME 4 / PRIME 4+ 跨機型聯機（一體機負責 `1+2`，外接 SC5000 / SC6000 映射至 `3+4` 影子軌，#160）或單機雙層四軌", "PRIME 4 / PRIME 4+ cross-unit linking (console plays `1+2`, linked SC5000 / SC6000 mapped to shadow decks `3+4`, #160) or single-unit dual-layer")],
         ] },
         { k: "p", x: L("切换位置：`设置 → 设备 → 4-Deck Role`（或视图预设 / 网页控制台）。实测另一台 Play / 暂停经网络到达约 40 ms，稳态位置漂移中位数约 11–16 ms（p95 约 38 ms）。", "切換位置：`設定 → 裝置 → 4-Deck Role`（或視圖預設 / 網頁主控台）。實測另一台 Play / 暫停經網路到達約 40 ms，穩態位置漂移中位數約 11–16 ms（p95 約 38 ms）。", "Switch under `Settings → Device → 4-Deck Role` (or in the view preset / web console). Measured: the other unit's play / pause arrives in about 40 ms and steady position drift has a median of 11–16 ms (p95 about 38 ms).") },
         { k: "ul", x: [
@@ -382,7 +382,7 @@
         { k: "h", id: "stems4", x: L("4 轨 Stems 独立控制", "4 軌 Stems 獨立控制", "Independent 4-stem control"), nav: L("4 轨 Stems 控制", "4 軌 Stems 控制", "4-stem control") },
         { k: "ul", x: [
           L("曲库侧边栏有 `Stems` 歌单；选歌时向左滑，拆出 **Vocal / Melody / Bass / Drums**。", "曲庫側邊欄有 `Stems` 歌單；選歌時向左滑，拆出 **Vocal / Melody / Bass / Drums**。", "The library sidebar has a `Stems` playlist; swipe left on a song to split **Vocal / Melody / Bass / Drums**."),
-          L("打击垫一键静音：抽掉人声做 Acapella，或只留鼓点。", "打擊墊一鍵靜音：抽掉人聲做 Acapella，或只留鼓點。", "Pads mute stems in one tap: drop the vocal for an acapella or keep only the drums."),
+          L("打击垫一键静音：抽掉人声做 Acapella，或只留鼓点；在一体机（PRIME 2 / PRIME 4 / PRIME GO / SC LIVE / Mixstream Pro）上按各通道 **Shift + Cue (PFL)**（或开启 `个人偏好 → Playback → Stems EQ Mode`）即可将实体 `HIGH / MID / LOW` 三段 EQ 旋钮切换为 **Stems 分轨音量（人声 / 旋律+贝斯 / 鼓组）**，带原厂软接管保护（#152）。", "打擊墊一鍵靜音：抽掉人聲做 Acapella，或只留鼓點；在一體機（PRIME 2 / PRIME 4 / PRIME GO / SC LIVE / Mixstream Pro）上按各通道 **Shift + Cue (PFL)**（或開啟 `個人偏好 → Playback → Stems EQ Mode`）即可將實體 `HIGH / MID / LOW` 三段 EQ 旋鈕切換為 **Stems 分軌音量（人聲 / 旋律+貝斯 / 鼓組）**，帶原廠軟接管保護（#152）。", "Pads mute stems in one tap: drop the vocal for an acapella or keep only the drums; on all-in-one units (PRIME 2 / PRIME 4 / PRIME GO / SC LIVE / Mixstream Pro), press **Shift + Cue (PFL)** on any channel (or enable `User Profile → Playback → Stems EQ Mode`) to switch the physical `HIGH / MID / LOW` EQ knobs to **Stems Level (Vocal / Melody+Bass / Drums)** with native soft takeover (#152)."),
           L("不连电脑碟机本机分轨（比播放快约 1.4 倍）；同一局域网有电脑或云端服务器时自动调用显卡，4 分钟歌曲约 35 秒。", "不連電腦碟機本機分軌（比播放快約 1.4 倍）；同一區域網路有電腦或雲端伺服器時自動調用顯卡，4 分鐘歌曲約 35 秒。", "No computer needed: the deck separates locally (about 1.4× faster than playback); a computer or cloud server on the LAN is used automatically with its GPU, about 35 s for a 4-minute song."),
         ] },
         { k: "shot", name: "zh:02-library-native-stems-list.png", cap: L("曲库侧边栏的 Stems 专属歌单", "曲庫側邊欄的 Stems 專屬歌單", "The Stems playlist in the library sidebar") },

@@ -156,15 +156,26 @@ func newShadowState() *shadowState {
 // and Engine keeps a path's analysis; new paths get the source's (#49).
 func (s *Server) shadowDir() string { return filepath.Join(filepath.Dir(s.uiDir()), "shadow-v3") }
 
-// activeRole is the role engine-ui-guard applied ("13", "24", "12", "1", "2"),
+// activeRole is the role engine-ui-guard applied ("13", "24", "12", "34", "1", "2"),
 // or "" without the 4-deck layout.
 func (s *Server) activeRole(v uiSettings) string {
 	if !v.FourDeckWaveform {
 		return ""
 	}
-	b, _ := os.ReadFile(fourDeckRolePath)
+	b, err := os.ReadFile(fourDeckRolePath)
 	if role := strings.TrimSpace(string(b)); slices.Contains(uiFourDeckRoles[1:], role) {
 		return role
+	}
+	// #160: on an all-in-one console (PRIME 4 / PRIME 4+ / PRIME 4 G2 / SC LIVE 4)
+	// Engine already has its decks and needs no player assignment bind-mount; when
+	// engine-ui-guard has not written fourDeckRolePath yet, resolve the role directly.
+	if err != nil && os.IsNotExist(err) {
+		if p := imagePrefix(deviceCompatible()); p != "" && !playerBoards[p] {
+			if slices.Contains(uiFourDeckRoles[1:], v.FourDeckRole) {
+				return v.FourDeckRole
+			}
+			return "12"
+		}
 	}
 	return ""
 }
@@ -418,16 +429,32 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		return
 	}
 	sh.peerSeq[ip] = seq
-	for deck, v := range sh.peerDecks {
-		if v.ip == ip && !slices.ContainsFunc(decks, func(d deckState) bool { return d.Deck == deck }) {
-			delete(sh.peerDecks, deck) // the peer ejected it, or restarted empty
+	for slot, v := range sh.peerDecks {
+		if v.ip == ip && !slices.ContainsFunc(decks, func(d deckState) bool { return d.Deck == v.Deck }) {
+			delete(sh.peerDecks, slot) // the peer ejected it, or restarted empty
 		}
 	}
 	sh.peerTaken[ip] = now
 	for _, d := range decks {
-		if d.Deck >= 1 && d.Deck <= 4 {
-			sh.peerDecks[d.Deck] = peerDeck{deckState: d, ip: ip, at: now}
+		if d.Deck < 1 || d.Deck > 4 {
+			continue
 		}
+		slot := d.Deck
+		for s, v := range sh.peerDecks {
+			if v.ip == ip && v.Deck == d.Deck {
+				slot = s
+				break
+			}
+		}
+		if cur, ok := sh.peerDecks[slot]; ok && cur.ip != "" && cur.ip != ip && now.Sub(cur.at) < 2*time.Second {
+			for s := 1; s <= 4; s++ {
+				if c, taken := sh.peerDecks[s]; !taken || c.ip == ip || now.Sub(c.at) >= 2*time.Second {
+					slot = s
+					break
+				}
+			}
+		}
+		sh.peerDecks[slot] = peerDeck{deckState: d, ip: ip, at: now}
 	}
 	sh.bump()
 }
@@ -763,17 +790,51 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 	wanted := sh.used
 	var out []deckState
 	var free []int // shadow decks the other EngineX player does not fill
+	var shadowDecks []int
+	usedPeer := map[int]bool{}
+	placed := map[int]peerDeck{}
 	for deck := 1; deck <= 4; deck++ {
 		if strings.Contains(role, strconv.Itoa(deck)) {
 			continue
 		}
-		p, ok := sh.peerDecks[deck]
-		if !ok || now.Sub(p.at) >= 2*time.Second {
+		shadowDecks = append(shadowDecks, deck)
+		if p, ok := sh.peerDecks[deck]; ok && now.Sub(p.at) < 2*time.Second {
+			placed[deck] = p
+			usedPeer[deck] = true
+		}
+	}
+	// #160: a linked player whose deck number overlaps with our own role (e.g. an
+	// SC5000 playing on Deck 1 while a PRIME 4 owns Decks 1+2) fills the next free
+	// shadow deck (Decks 3/4), while shadowFetchPeer still fetches from p.Deck.
+	for _, deck := range shadowDecks {
+		if _, ok := placed[deck]; ok {
+			continue
+		}
+		for src := 1; src <= 4; src++ {
+			if usedPeer[src] {
+				continue
+			}
+			if p, ok := sh.peerDecks[src]; ok && now.Sub(p.at) < 2*time.Second {
+				placed[deck] = p
+				usedPeer[src] = true
+				break
+			}
+		}
+	}
+	for _, deck := range shadowDecks {
+		p, ok := placed[deck]
+		if !ok {
 			free = append(free, deck)
 			continue
 		}
 		d := p.deckState
-		d.Master = false // the two Engines share master natively (Engine Link)
+		d.Deck = deck
+		// Two standalone players share master natively over Engine Link; an
+		// all-in-one console linked to an SC5000/SC6000 (#160) does not, so keep
+		// the peer's master flag when this unit is not a standalone player.
+		if pfx := imagePrefix(deviceCompatible()); pfx == "" || playerBoards[pfx] {
+			d.Master = false
+		}
 		if d.Playing {
 			d.PositionMS += float64(now.Sub(p.at).Milliseconds()) * (1 + d.Pitch/100)
 		}

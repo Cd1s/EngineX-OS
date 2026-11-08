@@ -342,10 +342,12 @@ GUARD=$ROOT/rootfs-overlay/etc/sc5000/engine-ui-guard
 export SC5000_UI_DIR=$TMP/ui-guard SC5000_STREAMING_ACCOUNTS=$TMP/StreamingAccounts.json
 # #56: every start leaves Engine a TIDAL account entry (valid JSON, other accounts
 # kept) unless TIDAL itself is the selected service.
-tidal_entry() { python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); assert json.loads(a["TIDAL"])["providerType"] == "TIDAL"; print(len(a))' "$SC5000_STREAMING_ACCOUNTS"; }
-sh "$GUARD" pre; [[ $(tidal_entry) == 1 ]] || fail 'guard must create the TIDAL account entry'
+tidal_entry() { python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); d=json.loads(a["TIDAL"]); assert d["providerType"] == "TIDAL" and d.get("accessToken") == "enginex" and d.get("refreshToken") == "enginex"; print(len(a))' "$SC5000_STREAMING_ACCOUNTS"; }
+sh "$GUARD" pre; [[ $(tidal_entry) == 1 ]] || fail 'guard must create the TIDAL account entry with non-SSO tokens (#159)'
 printf '{\n    "SoundCloud": "{\\"provider\\":\\"SoundCloud\\"}"\n}\n' > "$SC5000_STREAMING_ACCOUNTS"
 sh "$GUARD" pre; [[ $(tidal_entry) == 2 ]] || fail 'guard must add TIDAL beside other accounts'
+printf '{\n    "TIDAL": "{\\"provider\\":\\"TIDAL\\",\\"providerType\\":\\"TIDAL\\"}"\n}\n' > "$SC5000_STREAMING_ACCOUNTS"
+sh "$GUARD" pre; [[ $(tidal_entry) == 1 ]] || fail 'guard must upgrade legacy tokenless TIDAL entry (#159)'
 cp "$SC5000_STREAMING_ACCOUNTS" "$TMP/accounts.before"; sh "$GUARD" pre
 cmp -s "$TMP/accounts.before" "$SC5000_STREAMING_ACCOUNTS" || fail 'guard must leave an existing TIDAL entry alone'
 rm "$SC5000_STREAMING_ACCOUNTS"; mkdir -p "$SC5000_UI_DIR"; echo scope=tidal > "$SC5000_UI_DIR/settings.conf"
@@ -447,6 +449,7 @@ role_case() { # <four_deck_role or ""> <resolved role> <group in the name bindin
 role_case 13 13 '"Left"' stock
 role_case 24 24 '"Right"' stock
 role_case 12 12 'Planck.getProperty' own
+role_case 34 34 'Planck.getProperty' own
 role_case 1 1 '"Left"' none
 role_case 2 2 '"Right"' none
 # FOOLPROOF (#49/#123): auto maps odd Player -> 13, even -> 24, with or without any paired-player file; never 12

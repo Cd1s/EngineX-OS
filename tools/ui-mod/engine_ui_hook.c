@@ -723,7 +723,7 @@ static void four_deck_role(void) {
         read_role(four_deck_resolved, "", role, sizeof role);
     }
     static const struct { const char *name; signed char a, b; } roles[] = {
-        {"12", 0, 1}, {"13", 0, 2}, {"24", 1, 3}, {"1", 0, -1}, {"2", 1, -1}};
+        {"12", 0, 1}, {"13", 0, 2}, {"24", 1, 3}, {"34", 2, 3}, {"1", 0, -1}, {"2", 1, -1}};
     four_deck_route[0] = 0, four_deck_route[1] = 2;
     for (size_t i = 0; i < sizeof roles / sizeof *roles; i++)
         if (!strcmp(role, roles[i].name)) four_deck_route[0] = roles[i].a, four_deck_route[1] = roles[i].b;
@@ -737,6 +737,7 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         0xe5c0224c, // hasBluetooth
         0xe5c0224e, // hasBluetoothSendToAssignment
         0xe5c02276, // remote Stems processor support
+        0xe320f000, // #152 (5.3.0+): Config.audio.hasStemsLevel ([r0, #0x54] = 1)
         0xe3a02000, // mov r2, #0
         0xe5c02289, // disableHfsPlus
         0xe320f000, // #49 when enabled: ldrb r2, [r0, #0x239] (isPlayer)
@@ -754,17 +755,21 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         *(const uint32_t *)(base + build->config_r3),
         (uint32_t)(base + build->config_site + 8),
     };
-    const unsigned at[] = {1, 2, 3, 4, 6};
+    const unsigned at[] = {1, 2, 3, 4, 7};
     for (unsigned i = 0; i < 5; i++) code[at[i]] = (code[at[i]] & ~0xfffu) | build->config_field[i];
+    if (build->config_zoom == 0x52c) {
+        // #152: unlock native 3-band Stems Level EQ (ChannelStrip) on all 5.3.0 models.
+        code[5] = 0xe5c02054;
+    }
     if (build->config_zoom) {
         // #77: the players' 30 s zoom-out limit on every model (same SoC; Engine
         // sets 10 s on the all-in-ones). No flags touched; never above 30 in 32-bit.
-        code[13] = 0xe3a0201e;
-        code[14] = 0xe5802000 | build->config_zoom;
+        code[14] = 0xe3a0201e;
+        code[15] = 0xe5802000 | build->config_zoom;
     }
     if (!strcmp(build->name, "5.3.0") && four_deck_layout() > 0) {
         const uint32_t unlock[] = {0xe5d02239, 0xe3520000, 0x13a02004, 0x15802090, 0x13a02000, 0x15c02239};
-        memcpy(code + 7, unlock, sizeof unlock);
+        memcpy(code + 8, unlock, sizeof unlock);
         four_deck_pad_on = player_board();
         four_deck_role();
         fprintf(stderr, "engine-ui-hook: 4-deck layout unlocked (#49)\n");
@@ -834,6 +839,9 @@ static const struct engine_edit edits_az04[] = {
     {0x8732ccu, "\x00\x01\x00\x36", "\x08\x00\x00\x14", 4, EDIT_ONE},
     // #77 all-in-one maximumZoomSecs 10 -> 30
     {0x15f4148u, "\x42\x01\x80\x52", "\xc2\x03\x80\x52", 4, EDIT_ONE},
+    // #159 StreamingProviderInterface::connectedSSO() -> true, isDisconnectedFromProfile() -> false
+    {0xc9cab4u, "\x00\x58\x64\x39", "\x20\x00\x80\x52", 4, EDIT_ONE},
+    {0xc9cb0cu, "\xe0\x03\x01\x2a", "\x00\x00\x80\x52", 4, EDIT_ONE},
 };
 
 static const struct engine_build engine_builds[] = {
@@ -916,6 +924,9 @@ static const struct engine_edit edits_530[] = {
     {0x5e28ccu, "\x38\x32\xd0\xe5", "\x00\x30\xa0\xe3", 4, EDIT_ONE},
     {0x167e32cu, "\x1c\x00\xd4\xe5", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
     {0x167e290u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    // #159 StreamingProviderInterface::connectedSSO() -> true, isDisconnectedFromProfile() -> false
+    {0xbf59bcu, "\xc2\x05\xd0\xe5", "\x01\x00\xa0\xe3", 4, EDIT_ONE},
+    {0xbf5a18u, "\x01\x00\x20\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
 };
 
 static const struct engine_edit edits_sclive[] = {
@@ -938,6 +949,9 @@ static const struct engine_edit edits_sclive[] = {
     {0x16d3da0u, "\x01\x00\x24\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
     // Native AppleMusicProvider gate: beq 0x7f13dc -> nop (AZ04: 0x9334ac)
     {0x7f11b4u, "\x88\x00\x00\x0a", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
+    // #159 StreamingProviderInterface::connectedSSO() -> true, isDisconnectedFromProfile() -> false
+    {0xbf91d8u, "\xc2\x05\xd0\xe5", "\x01\x00\xa0\xe3", 4, EDIT_ONE},
+    {0xbf9234u, "\x01\x00\x20\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
 };
 
 static const struct engine_build engine_builds[] = {
