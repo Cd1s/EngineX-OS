@@ -708,3 +708,22 @@ func TestEngineBridgeDoesNotFollowAnalysisOutputSymlinks(t *testing.T) {
 		t.Fatalf("source database was changed via output symlink: %v", err)
 	}
 }
+
+func TestEngineBridgeDoesNotInventUnknownDuration(t *testing.T) {
+	bridgeNoStreams(t)
+	_, root, db := testlibrary.Create(t)
+	bridgeExec(t, db, `INSERT INTO Track(id,path,filename) VALUES(1,'../Music/absent.wav','absent.wav')`)
+	_, _, _, overview := bridgeEnginePerformance(t)
+	bridgeExec(t, db, `UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=1`, overview)
+	if err := prolink.SyncEngineToPioneerExport(root); err != nil {
+		t.Fatal(err)
+	}
+	tr := bridgeReadLibrary(t, root).Tracks[0]
+	if tr.Duration != 0 || tr.BPM != 0 {
+		t.Fatalf("invented metadata: %+v", tr)
+	}
+	a := bridgeReadAnalysis(t, root, strings.TrimSuffix(tr.AnalysisPath, "DAT")+"EXT")
+	if len(a.Waveforms) != 0 {
+		t.Fatal("overview was stretched onto an invented duration")
+	}
+}
