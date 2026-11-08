@@ -2683,7 +2683,7 @@ SHADOW_LAYER = r"""
             visible: scDisplay.graphical && !!scDisplay.sample
             anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 2
             color: "#dddddd"; font.pixelSize: 10
-            text: (scDisplay.stale ? "OFFLINE · " : "") + (scDisplay.sample.metadataOnly ? "REMOTE" : !scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed ? "OVERVIEW" : "")
+            text: !scDisplay.sample ? "" : (scDisplay.stale ? "OFFLINE · " : "") + (scDisplay.sample.metadataOnly ? "REMOTE" : !scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed ? "OVERVIEW" : "")
         }
         // Covers remote Stems, needle-drop, grid editing and transport touch targets.
         MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; onWheel: function(wheel) { wheel.accepted = true } }
