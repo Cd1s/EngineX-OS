@@ -185,7 +185,14 @@ func TestBrowseDiskIsolationSecretsAndBounds(t *testing.T) {
 		t.Fatal("metadata permissions")
 	}
 	// Disk rows can be returned while the missing artwork is restored in background.
+	interrupted := filepath.Join(c.dir, ".write-interrupted")
+	if err := os.WriteFile(interrupted, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	restored := newBrowseCache(state)
+	if _, err := os.Stat(interrupted); !os.IsNotExist(err) {
+		t.Fatal("interrupted write was not reclaimed")
+	}
 	started, release := make(chan struct{}), make(chan struct{})
 	disk, err := restored.get(context.Background(), key, func(ctx context.Context) (browseData, error) {
 		close(started)
@@ -286,7 +293,9 @@ func TestBrowseGatewayPaginationUsesSameCache(t *testing.T) {
 	request := func(path string) []byte {
 		t.Helper()
 		w := httptest.NewRecorder()
-		s.tidal.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		req := httptest.NewRequest("GET", path, nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		s.tidal.ServeHTTP(w, req)
 		if w.Code != 200 {
 			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
 		}
@@ -363,11 +372,64 @@ func TestBrowseSearchStartsBothKindsTogether(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	w := httptest.NewRecorder()
-	s.tidal.ServeHTTP(w, httptest.NewRequest("GET", "/v1/search?query=parallel", nil).WithContext(ctx))
+	req := httptest.NewRequest("GET", "/v1/search?query=parallel", nil).WithContext(ctx)
+	req.RemoteAddr = "127.0.0.1:12345"
+	s.tidal.ServeHTTP(w, req)
 	var result struct {
 		Tracks, Playlists struct{ TotalNumberOfItems int }
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || result.Tracks.TotalNumberOfItems != 1 || result.Playlists.TotalNumberOfItems != 1 {
 		t.Fatalf("sequential search or missing result: %s (%v)", w.Body.String(), err)
+	}
+}
+
+func TestBrowseRevokedLoginDropsStaleMetadata(t *testing.T) {
+	c := newBrowseCache(t.TempDir())
+	clock := cacheClock(c)
+	key := browseKey("spotify", "owner", "lists", "")
+	_, err := c.get(context.Background(), key, func(context.Context) (browseData, error) { return browseFixture("private"), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Add(int64(browseTTL + time.Second))
+	_, _ = c.get(context.Background(), key, func(context.Context) (browseData, error) { return browseData{}, providers.StatusError(401) })
+	if f := currentBrowseFlight(c, key); f != nil {
+		waitBrowse(t, f.done)
+	}
+	_, err = c.get(context.Background(), key, func(context.Context) (browseData, error) {
+		t.Error("retried revoked login during backoff")
+		return browseData{}, nil
+	})
+	if err == nil {
+		t.Fatal("revoked login still served stale private metadata")
+	}
+	if _, err := os.Stat(filepath.Join(c.dir, key+".json")); !os.IsNotExist(err) {
+		t.Fatal("revoked metadata remained on disk")
+	}
+}
+
+func TestBrowseOversizedRefreshDiscardsOlderSnapshot(t *testing.T) {
+	c := newBrowseCache(t.TempDir())
+	clock := cacheClock(c)
+	key := browseKey("deezer", "owner", "lists", "")
+	_, err := c.get(context.Background(), key, func(context.Context) (browseData, error) { return browseFixture("old"), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Add(int64(browseTTL + time.Second))
+	_, _ = c.get(context.Background(), key, func(context.Context) (browseData, error) {
+		return browseFixture(strings.Repeat("x", browseEntryBytes)), nil
+	})
+	if f := currentBrowseFlight(c, key); f != nil {
+		waitBrowse(t, f.done)
+	}
+	c.mu.Lock()
+	retained := c.entries[key] != nil
+	c.mu.Unlock()
+	if retained {
+		t.Fatal("oversized successful refresh kept the old snapshot")
+	}
+	if _, err := os.Stat(filepath.Join(c.dir, key+".json")); !os.IsNotExist(err) {
+		t.Fatal("older disk snapshot survived oversized refresh")
 	}
 }

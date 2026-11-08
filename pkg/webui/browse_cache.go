@@ -53,6 +53,7 @@ type browseFlight struct {
 	err  error
 }
 type browseCache struct {
+	diskMu  sync.Mutex
 	mu      sync.Mutex
 	dir     string
 	entries map[string]*browseEntry
@@ -69,7 +70,9 @@ func newBrowseCache(state string) *browseCache {
 			dir = "/data/enginex/cache/browse-v1"
 		}
 	}
-	return &browseCache{dir: dir, entries: map[string]*browseEntry{}, flights: map[string]*browseFlight{}, now: time.Now}
+	c := &browseCache{dir: dir, entries: map[string]*browseEntry{}, flights: map[string]*browseFlight{}, now: time.Now}
+	c.pruneDisk()
+	return c
 }
 
 func browseKey(provider, session, operation, id string) string {
@@ -134,7 +137,7 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 	f := &browseFlight{done: make(chan struct{})}
 	c.flights[key] = f
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		var data []byte
 		var err error
@@ -151,21 +154,48 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 			}
 		}()
 		c.mu.Lock()
-		defer c.mu.Unlock()
 		now := c.now()
-		if err == nil {
-			if len(data) <= browseEntryBytes {
-				c.insert(key, &browseEntry{data: data, at: now, used: now})
+		persist := err == nil && len(data) <= browseEntryBytes
+		oversized := err == nil && !persist
+		var status providers.StatusError
+		revoked := errors.As(err, &status) && (status == 401 || status == 403)
+		if persist {
+			c.insert(key, &browseEntry{data: data, at: now, used: now})
+		} else if oversized {
+			// Never keep returning an older small snapshot when a successful
+			// refresh grew beyond the per-entry budget. Return it uncached.
+			if e := c.entries[key]; e != nil {
+				c.bytes -= len(e.data)
+				delete(c.entries, key)
+			}
+		} else if err != nil {
+			if revoked {
+				c.insert(key, &browseEntry{err: err, used: now, retry: now.Add(browseRetry)})
+			} else if e := c.entries[key]; e != nil {
+				e.err, e.retry = err, now.Add(browseRetry)
+			} else {
+				c.insert(key, &browseEntry{err: err, used: now, retry: now.Add(browseRetry)})
+			}
+		}
+		c.mu.Unlock()
+		// Slow flash writes cannot hold up unrelated warm reads. Serialize disk
+		// maintenance independently; atomic rename makes concurrent reads safe.
+		if persist || revoked || oversized {
+			c.diskMu.Lock()
+			if revoked || oversized {
+				if c.dir != "" {
+					_ = os.Remove(filepath.Join(c.dir, key+".json"))
+				}
+			} else {
 				c.writeDisk(key, data, now)
 			}
-		} else if e := c.entries[key]; e != nil {
-			e.err, e.retry = err, now.Add(browseRetry)
-		} else {
-			c.insert(key, &browseEntry{err: err, used: now, retry: now.Add(browseRetry)})
+			c.diskMu.Unlock()
 		}
+		c.mu.Lock()
 		f.data, f.err = data, err
 		delete(c.flights, key)
 		close(f.done)
+		c.mu.Unlock()
 	}()
 	return f
 }
@@ -255,6 +285,9 @@ func (c *browseCache) writeDisk(key string, data []byte, now time.Time) {
 }
 
 func (c *browseCache) pruneDisk() {
+	if c.dir == "" {
+		return
+	}
 	files, _ := os.ReadDir(c.dir)
 	type file struct {
 		name string
@@ -264,6 +297,10 @@ func (c *browseCache) pruneDisk() {
 	var all []file
 	var size int64
 	for _, f := range files {
+		if strings.HasPrefix(f.Name(), ".write-") {
+			_ = os.Remove(filepath.Join(c.dir, f.Name()))
+			continue
+		}
 		if !strings.HasSuffix(f.Name(), ".json") {
 			continue
 		}
