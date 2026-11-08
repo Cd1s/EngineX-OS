@@ -191,6 +191,7 @@ Object.assign(globalThis, {
     scShadowMineRole: "?", scShadowMine: [], scShadowSampleSpare: {}, scShadowDeckProperties: {}, scShadowOwn: [],
     scShadowPostRequest: null, scShadowPollRequest: null, scShadowResponseVersion: "", scShadowPostPending: false,
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
+    scShadowGen: 0, scShadowVer: 0,
     scTr() { throw Error('Engine access forbidden'); },
     Planck: { getProperty() { throw Error('Engine access forbidden'); } }
 });
@@ -348,6 +349,28 @@ assert.equal(scShadowNextCue(2).label,'DROP');
 scShadowApplyAll([{deck:2,key:'A',positionMs:0,cuePos:48000,cues:[]}]);
 assert.equal(scShadowCuesFor(2,scShadowData(2)).find(c=>c.i===0).ms,1000);
 assert.equal(scShadowNextCue(2),null);
+""")
+
+    def test_legacy_polls_are_not_skipped_by_display_version_cache(self):
+        self.js(r"""
+let applied=0, header='1:false:13:false:false';
+globalThis.scShadowPollTimer={interval:0,restart(){}};
+XMLHttpRequest.prototype.getResponseHeader=()=>header;
+globalThis.scShadowApplyAll=(decks,displayOnly)=>{applied++;scShadowDisplayOnly=displayOnly;};
+scShadowPoll();requests[0].finish(200,{role:'13',displayOnly:false,decks:[],ver:1});
+scShadowPoll();requests[0].finish(200,{role:'13',displayOnly:false,decks:[],ver:1});
+assert.equal(applied,2);assert.equal(requests.length,1);
+header='1:true:13:false:false';
+scShadowPoll();requests[0].finish(200,{role:'13',displayOnly:true,decks:[],ver:1});
+scShadowPoll();requests[0].finish(200,{role:'13',displayOnly:true,decks:[],ver:1});
+assert.equal(applied,3); // display-only can skip identical snapshots
+""")
+
+    def test_cdj_metadata_only_does_not_request_unavailable_assets(self):
+        self.js(r"""
+scShadowApplyAll([{deck:2,key:'cdj:fixture',metadataOnly:true,title:'CDJ source',bpm:120,master:true}]);
+assert.equal(scShadowData(2).title,'CDJ source');assert.equal(scShadowData(2).master,true);
+assert.equal(requests.length,0);
 """)
 
     def test_sampling_reuses_buffers_and_post_transport(self):

@@ -92,3 +92,11 @@ func TestSourceEnvelopeCompletesWithoutChangingSavedGrid(t *testing.T) {
 		t.Fatalf("source key cache has %d entries", count)
 	}
 }
+
+func TestSourceEnvelopeDeadlineDoesNotBecomeUnloadRetry(t *testing.T) {
+	s:=New(Config{UIDir:t.TempDir(),StateDir:t.TempDir()},nil);defer s.Close()
+	ticker:=shadowSourceTicker{s:s,key:"not-loaded",deadline:time.Now().Add(-time.Second)}
+	if err:=ticker.Tick();err!=context.DeadlineExceeded {t.Fatalf("deadline classified as unload: %v",err)}
+	ticker.deadline=time.Now().Add(time.Hour)
+	if err:=ticker.Tick();err!=context.Canceled {t.Fatalf("unload not canceled: %v",err)}
+}

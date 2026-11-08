@@ -95,7 +95,10 @@ type shadowSourceTicker struct {
 }
 
 func (t *shadowSourceTicker) Tick() error {
-	if time.Now().After(t.deadline) || !t.s.shadowSourceLoaded(t.key) {
+	if time.Now().After(t.deadline) {
+		return context.DeadlineExceeded
+	}
+	if !t.s.shadowSourceLoaded(t.key) {
 		return context.Canceled
 	}
 	// At most a 5 ms work burst followed by 15 ms yielded time: <=25% of one
