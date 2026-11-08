@@ -5,7 +5,7 @@ set -u
 SYS=${SC5000_SYS_ROOT:-/sys}
 PROC=${SC5000_PROC_ROOT:-/proc}
 AUDIO_IRQ=${SC5000_AUDIO_IRQ_PATTERN:-ffb20000|snd|alsa|i2s|spdif|audio}
-GPU_IRQ=${SC5000_GPU_IRQ_PATTERN:-ffa30000|vop|hdmi}
+GPU_IRQ=${SC5000_GPU_IRQ_PATTERN:-ffa30000|panfrost|vop|hdmi}
 export LC_ALL=C
 log() { printf 'sc5000-perf: %s\n' "$*" >&2; }
 # Case-insensitive extended-regex match of $1 against pattern $2.
@@ -94,8 +94,8 @@ for scheduler in "$SYS"/block/*/queue/scheduler; do
     esac
 done
 # CF018/CF001/LC001: Keep PRIME 4 JMicron USB-SATA, USB SSDs and DMX adapters from autosuspending,
-# and keep unbound kernel workqueues off CPU0 (ALSA DMA core).
-write_knob "$SYS/devices/virtual/workqueue/cpumask" 6 quiet
+# and keep unbound kernel workqueues off the GUI (1) and SceneGraph (2) cores.
+write_knob "$SYS/devices/virtual/workqueue/cpumask" 9 quiet
 write_knob "$SYS/module/usbcore/parameters/autosuspend" -1 quiet
 for lpm in "$SYS"/class/scsi_host/host*/link_power_management_policy; do
     [ -e "$lpm" ] && write_knob "$lpm" max_performance quiet
@@ -107,14 +107,15 @@ for dly in "$SYS"/block/sd*/device/power/autosuspend_delay_ms; do
     [ -e "$dly" ] && write_knob "$dly" -1 quiet
 done
 
-# CPU 0 audio, CPU 1 display (GPU, VOP, HDMI) next to Engine's GUI and
-# SceneGraph threads, CPU 2 everything else. A 1-2 mask meant CPU 1 on the GIC
-# (lowest CPU in the mask): the touch I2C (millions of IRQs), MMC, USB and eth0
-# landed on the GUI core while CPU 2 idled.
+# CPU 1 GUI, CPU 2 SceneGraph + GPU/VOP, CPU 3 peripheral IRQs,
+# CPU 0 audio DMA. Helpers/workqueues use 0,3. Engine's RT audio threads keep
+# their separate original cores and priorities: all four cores already host RT
+# audio, so complete audio/IRQ isolation is impossible without moving them.
+# Keep non-audio IRQ threads below AudioWatcher (45) and render/output (49).
 classify() {
     if matches "$1" "$AUDIO_IRQ"; then echo 0
-    elif matches "$1" "$GPU_IRQ"; then echo 1
-    else echo 2
+    elif matches "$1" "$GPU_IRQ"; then echo 2
+    else echo 3
     fi
 }
 # Route movable non-audio interrupts away from CPU0. Per-CPU/managed IRQs may
@@ -125,7 +126,7 @@ if [ -r "$PROC/interrupts" ]; then
         irq=$(printf '%s\n' "$line" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\):.*/\1/p')
         [ -n "$irq" ] || continue
         cpu=$(classify "$line")
-        case $cpu in 0) mask=1 ;; 1) mask=2 ;; *) mask=4 ;; esac
+        case $cpu in 0) mask=1 ;; 2) mask=4 ;; *) mask=8 ;; esac
         irq_map="$irq_map $irq=$cpu"
         write_knob "$PROC/irq/$irq/smp_affinity" "$mask" quiet
     done < "$PROC/interrupts"
@@ -149,40 +150,64 @@ for process in "$PROC"/[0-9]*; do
     taskset -pc "$cpu" "$pid" >/dev/null 2>&1 || log "thread exited or affinity unavailable: $pid"
     if [ "$cpu" = 0 ]; then
         chrt -f -p 99 "$pid" >/dev/null 2>&1 || log "IRQ priority unavailable: $pid"
+    else
+        chrt -f -p 40 "$pid" >/dev/null 2>&1 || log "IRQ priority unavailable: $pid"
     fi
 done
-# Engine pins every thread to one CPU itself. Measured on a JP07 in 4-deck mode:
-# EMain (GUI/QML), SceneGraph (GL) and ~30 helpers (QNetworkAccessManager, event
-# engine, grpc, streaming providers, Link) all on CPU 1 while CPU 2 idled. The GL
-# thread gets CPU 2 and normal-priority helpers left on CPU 1 get CPUs 0 and 3, so
-# CPU 1 is EMain's. Real-time threads (audio renderers and output, MIDI) stay where
-# Engine put them: moving one next to another RR thread risks the audio.
+# Identify the GUI by TID == PID, not comm: 5.3.0 has two EMain helpers too.
+# Every non-RT helper (including JobController and OfflineAnalyzer) avoids 1/2,
+# regardless of its inherited mask. Never change RT audio/MIDI policy or mask.
+engine_path=
 engine_threads() {
+    engine_path=
     for p in "$PROC"/[0-9]*; do
-        # Its main thread renames itself EMain, which is also the process comm.
-        case $(readlink "$p/exe" 2>/dev/null) in */Engine/Engine) ;; *) continue ;; esac
+        analyzer=
+        case $(readlink "$p/exe" 2>/dev/null) in
+            */Engine/Engine) engine_path=$p ;;
+            */OfflineAnalyzer) analyzer=1 ;;
+            *) continue ;;
+        esac
         for task in "$p"/task/[0-9]*; do
             name=$(cat "$task/comm" 2>/dev/null) || continue
+            # An audio thread can be named before Engine promotes it to RT.
+            case $name in AudioOut|AudioRenderer*|AudioWatcher) continue ;; esac
             cpus=$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' "$task/status" 2>/dev/null)
             stat=$(cat "$task/stat" 2>/dev/null) || continue
             # policy is field 41: 39th after the ") " that ends comm (comm may hold spaces)
             policy=$(printf '%s\n' "${stat##*) }" | awk '{print $39}')
             [ "$policy" = 0 ] || [ "$policy" = 3 ] || [ "$policy" = 5 ] || continue
-            case $name in
-                EMain) continue ;;
-                SceneGraph) want=2 ;;
-                *) [ "$cpus" = 1 ] || continue; want=0,3 ;;
-            esac
+            if [ -n "$analyzer" ]; then want=0,3
+            elif [ "${task##*/}" = "${p##*/}" ]; then want=1
+            elif [ "$name" = SceneGraph ]; then want=2
+            else want=0,3
+            fi
             [ "$cpus" = "$want" ] && continue
             taskset -pc "$want" "${task##*/}" >/dev/null 2>&1 || log "thread exited or affinity unavailable: ${task##*/}"
         done
     done
 }
+engine_alive() {
+    [ -n "$engine_path" ] || return 1
+    case $(readlink "$engine_path/exe" 2>/dev/null) in */Engine/Engine) return 0 ;; *) return 1 ;; esac
+}
 engine_threads
 # Engine starts most threads 10-20 s after its start; engine-ui-guard post runs
-# this inside engine.service, so the delayed passes live as long as Engine.
+# this inside engine.service, so the worker is stopped with Engine. Keep sweeping
+# late network/job threads too, rather than leaving them on an inherited GUI core.
 delays=${SC5000_THREAD_DELAYS-20 40}
+interval=${SC5000_THREAD_INTERVAL-30}
+case $interval in ''|*[!0-9]*) interval= ;; esac
+if [ -n "$interval" ] && ! [ "$interval" -gt 0 ] 2>/dev/null; then interval=; fi
 if [ -n "$delays" ]; then
-    ( for d in $delays; do sleep "$d"; engine_threads; done ) </dev/null >/dev/null 2>&1 &
+    (
+        for d in $delays; do sleep "$d" || exit; engine_threads; done
+        while [ -n "$interval" ] && engine_alive; do
+            sleep "$interval" || exit
+            engine_alive || break
+            engine_threads
+        done
+    ) </dev/null >/dev/null 2>&1 &
+    # The sweeper and its subprocesses must also stay off the two UI cores.
+    taskset -pc 0,3 "$!" >/dev/null 2>&1 || :
 fi
 exit 0

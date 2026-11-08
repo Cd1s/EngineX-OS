@@ -65,7 +65,7 @@ def patch(text: str, old: str, new: str, path: str) -> str:
 SERVICES_MAIN = """
 	// SC5000 UI mod: settings owned by stream-sync (see pkg/webui/ui_settings.go).
 	property string scVersion: ""
-	property string scLang: "en"
+	property string scLang: "@LANG@"
 	property string scWave: "denon"
 	property string scQuality: "flac"
 	property string scNeteaseMode: "official"
@@ -256,48 +256,97 @@ SERVICES_MAIN = """
 		return t
 	}
 	// #151: CDJ-style BARS.BEATS countdown to the next hot cue ahead of the playhead.
-	// scTr values are not bindings, so the capsules re-read on this tick.
-	property int scCueTick: 0
+	// A paused deck must not invalidate the other decks' cue bindings.
+	property int scCueProbe: 0
+	function scCuePlaying(d, probe) {
+		const t = root.scTr("/Engine/Deck" + d + "/PlayState")
+		return !!t && t.state
+	}
+	function scProbeCueClocks() {
+		if (!root.scCueCountdown) return
+		// Reuse the existing settings poll to retry properties absent at startup.
+		// Once all translators are cached this does nothing; no extra polling Timer.
+		if (!scPropCache["/Engine/Deck1/PlayState"] || !scPropCache["/Engine/Deck2/PlayState"] ||
+			!scPropCache["/Engine/Deck3/PlayState"] || !scPropCache["/Engine/Deck4/PlayState"])
+			root.scCueProbe = (root.scCueProbe + 1) & 0xffff
+	}
 	Timer {
-		interval: 200; repeat: true; running: true
-		onTriggered: root.scCueTick = (root.scCueTick + 1) & 0xffff
+		id: scCueClock1
+		property int tick: 0
+		interval: 200; repeat: true
+		running: root.scCueCountdown && root.scCuePlaying(1, root.scCueProbe)
+		onTriggered: tick = (tick + 1) & 0xffff
+	}
+	Timer {
+		id: scCueClock2
+		property int tick: 0
+		interval: 200; repeat: true
+		running: root.scCueCountdown && root.scCuePlaying(2, root.scCueProbe)
+		onTriggered: tick = (tick + 1) & 0xffff
+	}
+	Timer {
+		id: scCueClock3
+		property int tick: 0
+		interval: 200; repeat: true
+		running: root.scCueCountdown && root.scCuePlaying(3, root.scCueProbe)
+		onTriggered: tick = (tick + 1) & 0xffff
+	}
+	Timer {
+		id: scCueClock4
+		property int tick: 0
+		interval: 200; repeat: true
+		running: root.scCueCountdown && root.scCuePlaying(4, root.scCueProbe)
+		onTriggered: tick = (tick + 1) & 0xffff
+	}
+	function scCueTickFor(d) {
+		return d === 1 ? scCueClock1.tick : d === 2 ? scCueClock2.tick : d === 3 ? scCueClock3.tick : scCueClock4.tick
 	}
 	// Same object while text/label/color/urgent are unchanged, so bindings do not re-layout every tick.
 	property var scCueInfoCache: ({})
 	function scNextCueInfo(d, tick) {
-		const info = scNextCueInfoRaw(d)
-		if (!info) { delete scCueInfoCache[d]; return null }
-		const sig = info.text + "|" + info.label + "|" + info.color + "|" + (info.urgent ? 1 : 0)
-		const c = scCueInfoCache[d]
-		if (c && c.sig === sig) return c.obj
-		scCueInfoCache[d] = {sig: sig, obj: info}
-		return info
-	}
-	function scNextCueInfoRaw(d) {
-		const t = p => (root.scTr("/Engine/Deck" + d + p) || {})
-		if (!t("/Track/SongLoaded").state) return null
-		const pos = t("/Track/TrackPosition").unnormalized || 0
-		const sr = t("/Track/SampleRate").value || 44100
-		const bpm = t("/OriginalBPM").unnormalized || t("/Track/CurrentBPM").unnormalized || 0
+		const p = scCueProps(d)
+		if (!p.loaded || !p.loaded.state) return null
+		const pos = p.position ? p.position.unnormalized || 0 : 0
+		const sr = p.sampleRate ? p.sampleRate.value || 44100 : 44100
+		const bpm = (p.bpm ? p.bpm.unnormalized : 0) || (p.trackBpm ? p.trackBpm.unnormalized : 0) || 0
 		if (!(sr > 0 && bpm > 0)) return null
-		let best = null
-		for (let i = 1; i <= 8; i++) {
-			if (!t("/Track/QuickCue" + i + "Exists").state) continue
-			const cp = t("/Track/QuickCue" + i + "Position").value
-			if (!(cp > pos + sr * 0.05) || (best && cp >= best.pos)) continue
-			best = {idx: i, pos: cp}
+		let best = -1, bestPos = Infinity
+		for (let i = 0; i < p.cues.length; i++) {
+			const cue = p.cues[i]
+			if (!cue.exists || !cue.exists.state || !cue.position) continue
+			const cp = cue.position.value
+			if (!(cp > pos + sr * 0.05) || cp >= bestPos) continue
+			best = i; bestPos = cp
 		}
-		if (!best) return null
-		const totalBeats = (best.pos - pos) / sr * (bpm / 60.0)
+		if (best < 0) return null
+		const totalBeats = (bestPos - pos) / sr * (bpm / 60.0)
 		if (totalBeats <= 0 || totalBeats > 2048) return null
 		const bars = Math.floor(totalBeats / 4)
-		const nm = t("/Track/QuickCue" + best.idx + "Name").string || ""
-		return {
-			text: String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1),
-			label: nm.slice(0, 7),
-			color: String(t("/Track/QuickCue" + best.idx + "Color").color || "#26a6ff"),
-			urgent: bars < 4
+		const cue = p.cues[best]
+		const text = String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1)
+		const label = (cue.name ? cue.name.string || "" : "").slice(0, 7)
+		const color = String((cue.color && cue.color.color) || "#26a6ff")
+		const urgent = bars < 4
+		const c = scCueInfoCache[d]
+		if (c && c.text === text && c.label === label && c.color === color && c.urgent === urgent) return c
+		const info = {text: text, label: label, color: color, urgent: urgent}
+		scCueInfoCache[d] = info
+		return info
+	}
+	property var scCuePropCache: ({})
+	function scCueProps(d) {
+		if (scCuePropCache[d]) return scCuePropCache[d]
+		const prefix = "/Engine/Deck" + d
+		const t = p => root.scTr(prefix + p)
+		const p = {loaded: t("/Track/SongLoaded"), position: t("/Track/TrackPosition"), sampleRate: t("/Track/SampleRate"),
+			bpm: t("/OriginalBPM"), trackBpm: t("/Track/CurrentBPM"), cues: []}
+		for (let i = 1; i <= 8; i++) {
+			const key = "/Track/QuickCue" + i
+			p.cues.push({exists: t(key + "Exists"), position: t(key + "Position"), name: t(key + "Name"), color: t(key + "Color")})
 		}
+		// Retry discovery if the Engine deck has not been constructed yet.
+		if (p.loaded && p.position && p.cues.every(c => c.exists && c.position && c.name && c.color)) scCuePropCache[d] = p
+		return p
 	}
 	property var scShadowCueCache: ({})
 	Timer {
@@ -899,6 +948,9 @@ SERVICES_MAIN = """
 	property real scJogHue: 0
 	property var scJogSaved: null
 	property var scJogDecks: []
+	readonly property var scJogWantedDecks: root.scDeckList()
+	onScJogWantedDecksChanged: if (scJogSaved) scJogResetDecks()
+	property var scJogTargets: ({})
 	// On a 4-deck unit this deck's own pair (12 / 24) wins; root.decks is undefined in Engine 5.3.0.
 	function scDeckList() {
 		if (root.scFourDeckRole !== "") return root.scFourDeckRole.split("").map(c => parseInt(c)).filter(d => d >= 1 && d <= 4)
@@ -906,23 +958,26 @@ SERVICES_MAIN = """
 	}
 	function scDeckColor(deck) { const p = Planck.getProperty("/Engine/Deck" + deck + "/Color"); return p ? p.translator : null }
 	function scSetDeckJogColor(deck, col) {
-		const c = root.scDeckColor(deck)
-		if (c) c.color = col
-		const jc = Planck.getProperty("/Engine/Deck" + deck + "/JogColor")
-		if (jc && jc.translator && jc.translator.color !== undefined) jc.translator.color = col
+		let target = scJogTargets[deck]
+		if (!target) {
+			target = {color: root.scTr("/Engine/Deck" + deck + "/Color"), jog: root.scTr("/Engine/Deck" + deck + "/JogColor")}
+			if (target.color && target.jog) scJogTargets[deck] = target
+		}
+		if (target.color) target.color.color = col
+		if (target.jog && target.jog.color !== undefined) target.jog.color = col
 	}
 	// scFourDeckRole arrives over XHR after startup: put the colours back on the decks that were
 	// animated, then snapshot the decks of the current role.
 	function scJogResetDecks() {
 		if (root.scJogSaved) root.scJogDecks.forEach((d, i) => { if (root.scJogSaved[i]) root.scSetDeckJogColor(d, root.scJogSaved[i]) })
-		const decks = root.scDeckList()
+		const decks = root.scJogWantedDecks
 		root.scJogDecks = decks
 		root.scJogSaved = decks.map(d => { const c = root.scDeckColor(d); return c ? String(c.color) : "" })
 	}
 	// BPM sync: the tempo of the deck that is playing, the active one first; 0 when
 	// nothing plays. Rounded so the pitch fader does not restart the timer constantly.
 	function scPlayingBPM() {
-		const decks = (root.activeDecks || []).map(d => parseInt(d)).concat(root.scDeckList())
+		const decks = root.scBpmDecks
 		for (const d of decks) {
 			const play = Planck.getProperty("/Engine/Deck" + d + "/PlayState")
 			let bpm = Planck.getProperty("/Engine/Deck" + d + "/Track/CurrentBPM")
@@ -935,6 +990,7 @@ SERVICES_MAIN = """
 		return 0
 	}
 	property real scJogBPM: 0
+	readonly property var scBpmDecks: (root.activeDecks || []).map(d => parseInt(d)).concat(root.scJogWantedDecks)
 	property real scJogLastTick: 0
 	Timer {
 		interval: 500; repeat: true
@@ -959,13 +1015,13 @@ SERVICES_MAIN = """
 			}
 		}
 		onTriggered: {
-			if (root.scJogDecks.join(",") !== root.scDeckList().join(",")) root.scJogResetDecks()
 			const now = Date.now()
 			const dt = Math.min(200, Math.max(16, now - (root.scJogLastTick || now)))
 			root.scJogLastTick = now
 			const turn = root.scJog === "fast" ? dt / 2400 : root.scJog === "bpm" ? (root.scJogBPM > 0 ? dt * (root.scJogBPM / 60000) / 4 : dt / 6000) : dt / 8000
 			root.scJogHue = (root.scJogHue + turn) % 1
-			root.scJogDecks.forEach((d, i) => root.scSetDeckJogColor(d, Qt.hsva((root.scJogHue + i * 0.35) % 1, 1, 1, 1)))
+			for (let i = 0; i < root.scJogDecks.length; i++)
+				root.scSetDeckJogColor(root.scJogDecks[i], Qt.hsva((root.scJogHue + i * 0.35) % 1, 1, 1, 1))
 		}
 	}
 	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
@@ -980,11 +1036,11 @@ SERVICES_MAIN = """
 		{ id: "beatport", name: "Beatport" },
 		{ id: "applemusic", name: "Apple Music" }
 	]
-	// Every row is keyed by all three spellings, so a string baked into the pack in
-	// one language maps to any other: changing scLang re-evaluates the bindings.
+	// Keep inactive dictionaries as scalar JSON strings. Only the selected language
+	// becomes a JS object/GC root; retain all spellings for live language switching.
 	readonly property var scDicts: (@DICTS@)
-	readonly property var scDict: scDicts[scLang] || ({})
-	function scT(s) { const d = scDicts[scLang]; return (d && d[s]) || s }
+	readonly property var scDict: JSON.parse(scDicts[scLang] || scDicts.en)
+	function scT(s) { return scDict[s] || s }
 	// Translated literals reach this through Math.scI18n: ids here are not visible from every file.
 	QtObject {
 		id: scI18n
@@ -1004,8 +1060,8 @@ SERVICES_MAIN = """
 		return /\\s\\[(\\d+) BPM(?: ([0-9]{1,2}[AB]))?\\]$/.exec(label || "") || ["", "", ""]
 	}
 	// Deck art for a streamed track: Engine hands the 7" deck / MicroDeck "" or image://streaming/, so ask the gateway by title+artist.
-	// tick only makes the binding re-read the (non-binding) track strings when the title arrives after the path.
-	function scDeckArtUrl(deck, path, tick) {
+	// Native song-name bindings invalidate on track changes; retry only while metadata is missing.
+	function scDeckArtUrl(deck, path, tick, metadata) {
 		const p = String(path || "")
 		if (p !== "" && p !== "image://streaming/") return p
 		const t = k => (root.scTr("/Engine/Deck" + deck + "/Track/" + k) || {})
@@ -1014,6 +1070,11 @@ SERVICES_MAIN = """
 		if (title === "") return p
 		return "http://127.0.0.1:8080/v1/sc5000/art?song=" + encodeURIComponent(title) + "&artist=" + encodeURIComponent(t("ArtistName").string || "")
 	}
+	function scDeckArtPending(deck, path, url) {
+		if (path !== "" && path !== "image://streaming/") return false
+		const loaded = root.scTr("/Engine/Deck" + deck + "/Track/SongLoaded")
+		return !!loaded && loaded.state && String(url).indexOf("http://127.0.0.1:8080/v1/sc5000/art?") !== 0
+	}
 	function scPlainTitle(song) { return (song || "").replace(/\\s\\[\\d+ BPM(?: [0-9]{1,2}[AB])?\\]$/, "") }
 	// Engine's messages name its one streaming client; say which service is showing.
 	function scBrand(s) {
@@ -1021,6 +1082,20 @@ SERVICES_MAIN = """
 		return s && service && scScope !== "tidal" ? String(s).replace(/TIDAL/gi, service.name) : s
 	}
 	function scCall(query, done) {
+		if (!query && !done) {
+			if (!scUiPoll) {
+				scUiPoll = new XMLHttpRequest()
+				scUiPoll.onreadystatechange = scUiPollReply
+			}
+			if (scUiPoll.readyState !== 0 && scUiPoll.readyState !== 4) {
+				if (Date.now() - scUiPollAt < 10000) return
+				scUiPoll.abort()
+			}
+			scUiPollAt = Date.now()
+			scUiPoll.open("GET", "http://127.0.0.1:8080/v1/sc5000/ui")
+			scUiPoll.send()
+			return
+		}
 		const x = new XMLHttpRequest()
 		x.open(query ? "POST" : "GET", "http://127.0.0.1:8080/v1/sc5000/ui" + (query ? "?" + query : ""))
 		x.onreadystatechange = function() {
@@ -1029,6 +1104,11 @@ SERVICES_MAIN = """
 			if (done) done()
 		}
 		x.send()
+	}
+	property var scUiPoll: null
+	property real scUiPollAt: 0
+	function scUiPollReply() {
+		if (scUiPoll.readyState === 4 && scUiPoll.status === 200) scApply(JSON.parse(scUiPoll.responseText))
 	}
 	function scApply(v) {
 		scEnsureTidal()
@@ -1052,8 +1132,8 @@ SERVICES_MAIN = """
 		scFourDeckOn = !!v.fourDeckWaveform
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
 		scKeepPlayhead(v.playhead || 0)
-		scSources = v.sources
-		scLoggedIn = v.loggedIn
+		if (!scSameItems(scSources, v.sources)) scSources = v.sources
+		if (!scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
 		scScope = v.scope
 		scBroadcastOn = !!v.broadcastEnabled
 		scUpfaderEcho = !!v.upfaderEcho
@@ -1096,6 +1176,13 @@ SERVICES_MAIN = """
 			if (lbj && !lbj.state) lbj.state = true
 		}
 		scUiLoaded = true
+		scProbeCueClocks()
+	}
+	function scSameItems(a, b) {
+		if (a === b) return true
+		if (!a || !b || a.length !== b.length) return false
+		for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+		return true
 	}
 	function scParseSettingsConf(text) {
 		scCueCountdown = true // default on: only an explicit cue_countdown=0 turns it off
@@ -1339,6 +1426,7 @@ SERVICES_MAIN = """
 		property string url: ""
 		property string path: ""
 		property int tries: 0
+		property var trackIds: null
 		interval: 500; repeat: true
 		function render(id) {
 			if (!running) return // a slower reply after the render already started
@@ -1360,8 +1448,8 @@ SERVICES_MAIN = """
 				if (r.trackId > 0) render(r.trackId)
 			}
 			x.send()
-			const ids = Array.from({ length: 2000 }, (_, i) => i + 1)
-			const lines = (Planck.librarianController.collectionController.getTrackUrisFromUniversalIds(ids) || "").split("\\n")
+			if (!trackIds) trackIds = Array.from({ length: 2000 }, (_, i) => i + 1)
+			const lines = (Planck.librarianController.collectionController.getTrackUrisFromUniversalIds(trackIds) || "").split("\\n")
 			const hit = lines.find(l => l.indexOf(encodeURI(path.replace("/data/", "/")) + "?") >= 0)
 			const id = hit && /[?&]trackId=(\\d+)/.exec(hit)
 			if (id) render(id[1])
@@ -2242,7 +2330,7 @@ def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False
     q = f"""Row {{
     id: cueCap
     objectName: "EngineX_CueCountdown"
-    readonly property var info: typeof root !== "undefined" && root && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTick) : null
+    readonly property var info: typeof root !== "undefined" && root && root.scCueCountdown && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTickFor({deck_expr})) : null
     visible: info !== null && root.scCueCountdown
     Layout.alignment: Qt.AlignVCenter
     Layout.leftMargin: 4
@@ -2256,6 +2344,20 @@ def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False
 }}
 """
     return "".join(ind + l + "\n" if l else "\n" for l in q.splitlines())
+
+
+def art_source(ind, deck, path, metadata, image, add_id=False):
+    """An art lookup follows its deck's metadata, independently of playing/cue ticks."""
+    lines = ([f"id: {image}"] if add_id else []) + [
+        "property int scArtTick: 0",
+        f"source: {GUARD} ? root.scDeckArtUrl({deck}, {path}, scArtTick, {metadata}) : {path}",
+        "Timer {",
+        "    interval: 500; repeat: true",
+        f"    running: {image}.visible && {GUARD} && root.scDeckArtPending({deck}, {path}, {image}.source)",
+        f"    onTriggered: {image}.scArtTick = ({image}.scArtTick + 1) & 0xffff",
+        "}",
+    ]
+    return "".join(ind + line + "\n" for line in lines)
 
 
 def edits(dev: bool):
@@ -3076,10 +3178,10 @@ def edits(dev: bool):
             "                text: microDeck.loadedDeckSongName\n",
             f"                text: ({role} ? microDeck.deckIndex + \" · \" : \"\") + microDeck.loadedDeckSongName\n"),
             ("                source: microDeck.loadedDeckAlbumArtPath\n",
-             "                source: %s ? root.scDeckArtUrl(microDeck.deckIndex, microDeck.loadedDeckAlbumArtPath, root.scCueTick) : microDeck.loadedDeckAlbumArtPath\n" % GUARD)]
+             art_source("                ", "microDeck.deckIndex", "microDeck.loadedDeckAlbumArtPath", "microDeck.loadedDeckSongName", "albumArt"))]
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml"] = [(
             "        source: albumArt.albumArtPath\n",
-            "        source: %s ? root.scDeckArtUrl(albumArt.deckIndex, albumArt.albumArtPath, root.scCueTick) : albumArt.albumArtPath\n" % GUARD)]
+            art_source("        ", "albumArt.deckIndex", "albumArt.albumArtPath", "albumArt.deckView && albumArt.deckView.artistSongView ? albumArt.deckView.artistSongView.songName : \"\"", "scArtImage", add_id=True))]
         # In the 4-deck layout the deck colour came out white (measured on a 1+3 deck with
         # blue PlayerColor1/2), which has no gradient and draws a black strip, and an unset
         # PlayerColor3/4 is black: use the deck's PlayerColor preference, then that of the
@@ -3313,6 +3415,23 @@ def load_dict():
     return rows
 
 
+def encoded_dicts(rows):
+    """Inactive languages stay scalar strings, not thousands of traced JS properties."""
+    result = {}
+    for lang in ("en", "zh-Hans", "zh-Hant"):
+        d = {}
+        for en, t in rows.items():
+            to = en if lang == "en" else t[lang]
+            for spelling in (en, t["zh-Hans"], t["zh-Hant"]):
+                d[spelling] = to
+        result[lang] = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
+    return result
+
+
+def render_language(text, lang, dicts):
+    return text.replace("@DICTS@", json.dumps(dicts, ensure_ascii=False)).replace("@LANG@", lang)
+
+
 def translated_qml(qrc: Path):
     for f in sorted(qrc.rglob("*.qml")):
         rel = f.relative_to(qrc).as_posix()
@@ -3395,15 +3514,7 @@ def main():
                 raise SystemExit(f"{rel}: qrc:/{ref} is not in {a.qrc}")
     rows = load_dict()
     skip = compared_strings(a.qrc)
-    # dicts[target][any spelling] = target spelling, so the language can change without a restart.
-    dicts = {}
-    for lang in ("en", "zh-Hans", "zh-Hant"):
-        d = {}
-        for en, t in rows.items():
-            to = en if lang == "en" else t[lang]
-            for spelling in (en, t["zh-Hans"], t["zh-Hant"]):
-                d[spelling] = to
-        dicts[lang] = d
+    dicts = encoded_dicts(rows)
     for lang in ("en", "zh-Hans", "zh-Hant"):
         table = {en: (en if lang == "en" else t[lang]) for en, t in rows.items()}
         files = dict(base)
@@ -3413,7 +3524,7 @@ def main():
             if changed != source:
                 files[rel] = changed
         for rel, text in files.items():
-            text = text.replace("@DICTS@", json.dumps(dicts, ensure_ascii=False))
+            text = render_language(text, lang, dicts)
             target = a.out / lang / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
