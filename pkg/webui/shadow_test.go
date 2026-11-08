@@ -441,7 +441,7 @@ func TestShadowStreamingDownloadFromStmDB(t *testing.T) {
 	shadowBeaconOn = false
 	_, root, db := testlibrary.Create(t)
 	qc := func(b []byte) []byte { c, _ := enginedb.QCompress(b); return c }
-	if _, err := db.Exec(`INSERT INTO Track (path, filename, uri, bpmAnalyzed, isAnalyzed) VALUES ('../../../../downloads/TIDAL/abc.mp3', 'Song.mp3', 'streaming://TIDAL/Track/37', 140, 1)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO Track (path, filename, uri, title, artist, bpmAnalyzed, isAnalyzed) VALUES ('../../../../downloads/TIDAL/abc.mp3', 'Song.mp3', 'streaming://TIDAL/Track/37', 'Laor: The/Greater?', 'Some Artist', 140, 1)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?`, qc(bytes.Repeat([]byte{0}, 68)), qc(bytes.Repeat([]byte{0}, 30)), qc([]byte("GRID"))); err != nil {
@@ -468,7 +468,7 @@ func TestShadowStreamingDownloadFromStmDB(t *testing.T) {
 	s.shadow.mu.Lock()
 	own := append([]deckState(nil), s.shadow.own...)
 	s.shadow.mu.Unlock()
-	if own[0].Path != filepath.Join(data, "downloads", "TIDAL", "abc.mp3") || own[0].Key == "" || own[1].Key != "" {
+	if own[0].Path != filepath.Join(data, "downloads", "TIDAL", "abc.mp3") || own[0].Key == "" || own[1].Key != "" || own[0].Name != "Some Artist - Laor TheGreater.mp3" {
 		t.Fatalf("own decks: %+v", own)
 	}
 	resp, err := http.Get(srv.URL + "/peer/decks/3/perf?key=" + own[0].Key)
@@ -652,5 +652,60 @@ func TestCDJObserveEdges(t *testing.T) {
 	pos(52)          // back on the cue point
 	if ver() != 4 || sh.cdj[3].jumps != 2 || sh.cdj[3].playing {
 		t.Fatalf("CUE release: ver %d %+v", ver(), sh.cdj[3])
+	}
+}
+
+func TestDisplayFileName(t *testing.T) {
+	for _, c := range []struct{ artist, title, ext, want string }{
+		{"", "Laor The Greater", ".flac", "Laor The Greater.flac"},
+		{"A", "B", ".mp3", "A - B.mp3"},
+		{"A|B", "x\\y*z\n", ".flac", "AB - xyz.flac"},
+		{"A", "", ".flac", ""},
+		{"", "...", ".flac", ".flac"},
+	} {
+		if got := displayFileName(c.artist, c.title, c.ext); got != c.want {
+			t.Errorf("displayFileName(%q, %q) = %q, want %q", c.artist, c.title, got, c.want)
+		}
+	}
+}
+
+// A peer that ejects its track, goes quiet, or restarts with a clock behind its
+// old Seq must not leave a shadow deck loaded or its updates dropped.
+func TestTakePeerClearsEjectedDecksAndResetsSeq(t *testing.T) {
+	sh := newShadowState()
+	now := time.Now()
+	sh.takePeer("192.0.2.7", []deckState{{Deck: 1, Seq: 1000, Key: "a"}, {Deck: 2, Seq: 1000, Key: "b"}}, now)
+	sh.takePeer("192.0.2.9", []deckState{{Deck: 3, Seq: 5, Key: "c"}}, now)
+	sh.takePeer("192.0.2.7", []deckState{{Deck: 2, Seq: 1001, Key: "b"}}, now.Add(time.Second))
+	if _, ok := sh.peerDecks[1]; ok || sh.peerDecks[2].Key != "b" || sh.peerDecks[3].Key != "c" {
+		t.Fatalf("ejected deck kept or other peer touched: %+v", sh.peerDecks)
+	}
+	ver := sh.ver
+	sh.takePeer("192.0.2.7", []deckState{}, now.Add(1500*time.Millisecond)) // goodbye
+	if _, ok := sh.peerDecks[2]; ok || sh.peerDecks[3].Key != "c" || sh.ver == ver {
+		t.Fatalf("goodbye: %+v ver %d->%d", sh.peerDecks, ver, sh.ver)
+	}
+	// Restart after a long silence with an older Seq (clock not yet synced).
+	sh.takePeer("192.0.2.7", []deckState{{Deck: 2, Seq: 500, Key: "n"}}, now.Add(time.Minute))
+	if sh.peerDecks[2].Key != "n" {
+		t.Fatalf("restarted peer dropped: %+v", sh.peerDecks)
+	}
+}
+
+func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	now := time.Now()
+	s.shadow.mu.Lock()
+	s.shadow.peerDecks[3] = peerDeck{deckState: deckState{Deck: 3, Key: "k", Ext: ".flac", Name: "x.flac"}, ip: "192.0.2.7", at: now}
+	s.shadow.peerDecks[4] = peerDeck{deckState: deckState{Deck: 4}, ip: "192.0.2.7", at: now}
+	s.shadow.mu.Unlock()
+	out := s.shadowCompose("12", now)
+	var got = map[int]deckState{}
+	for _, d := range out {
+		got[d.Deck] = d
+	}
+	if !got[3].Loading || got[3].Path != "" || got[4].Loading || got[4].Path != "" {
+		t.Fatalf("compose: %+v", out)
 	}
 }

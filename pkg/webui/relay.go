@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -143,8 +144,8 @@ func (s *Server) relayCollect(session *Session, v relaySession) error {
 	return errRelayIncomplete
 }
 
-// bpmSyncInterval paces the pull of BPM service keys saved on the relay's console.
-const bpmSyncInterval = time.Hour
+// bpmSyncInterval paces the pull of BPM service keys and deck heartbeat on the relay's console.
+const bpmSyncInterval = 90 * time.Second
 
 // bpmSyncRetries back off a failed pull; at boot the network is often not up yet (#14).
 var bpmSyncRetries = []time.Duration{10 * time.Second, 30 * time.Second, 2 * time.Minute}
@@ -154,7 +155,7 @@ func (s *Server) SyncRelaySettings(ctx context.Context) {
 	failures := 0
 	for {
 		wait := bpmSyncInterval
-		if err := s.pullBPMConfig(ctx); err != nil {
+		if err := s.pullRelayConfig(ctx); err != nil {
 			log.Printf("stream-sync: BPM settings not synced: %v", err)
 			if failures < len(bpmSyncRetries) {
 				wait = bpmSyncRetries[failures]
@@ -171,22 +172,56 @@ func (s *Server) SyncRelaySettings(ctx context.Context) {
 	}
 }
 
+func (s *Server) loggedInServices() []string {
+	var out []string
+	if s.tidal == nil {
+		return out
+	}
+	for _, session := range s.tidal.sources() {
+		if !session.Guest && ready(session.p) && !slices.Contains(out, session.Provider) {
+			out = append(out, session.Provider)
+		}
+	}
+	return out
+}
+
 // pullBPMConfig copies keys set on the relay. A key the relay does not have is left
 // alone, so one entered on this deck's own console survives.
 func (s *Server) pullBPMConfig(ctx context.Context) error {
-	if s.cfg.BPM == nil {
-		return nil
-	}
-	if base, password := s.relaySettings(); base == "" || password == "" {
+	return s.pullRelayConfig(ctx)
+}
+
+func (s *Server) pullRelayConfig(ctx context.Context) error {
+	base, password := s.relaySettings()
+	if base == "" || password == "" {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, relayTimeout)
 	defer cancel()
+	h := http.Header{"Content-Type": {"application/json"}}
+	h.Set("X-Deemix-Password", password)
+	h.Set("Authorization", "Bearer "+password)
+	h.Set("X-EngineX-Deck-IP", lanHost())
+	h.Set("X-EngineX-Deck-Role", s.role())
+	h.Set("X-EngineX-Deck-Version", s.installedVersion())
+	h.Set("X-EngineX-Deck-Code", s.cfg.AccessToken)
+	h.Set("X-EngineX-Deck-LoggedIn", strings.Join(s.loggedInServices(), ","))
+	if model := imagePrefix(deviceCompatible()); model != "" {
+		h.Set("X-EngineX-Deck-Model", model)
+	}
+	c := http.Client{Timeout: relayTimeout}
+	if s.cfg.HTTP != nil {
+		c = *s.cfg.HTTP
+	}
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	var r struct {
 		Config providers.BPMConfig `json:"config"`
 	}
-	if err := s.relayCall(ctx, "GET", "/api/config?secrets=1", nil, &r); err != nil {
+	if err := providers.JSON(ctx, &c, "GET", strings.TrimRight(base, "/")+"/api/config?secrets=1", nil, h, &r); err != nil {
 		return err
+	}
+	if s.cfg.BPM == nil {
+		return nil
 	}
 	v := s.cfg.BPM.Config()
 	next := v

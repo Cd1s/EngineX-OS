@@ -267,15 +267,21 @@ func (f *flushWriter) Write(p []byte) (int, error) {
 	return n, e
 }
 func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
 	if b.Secret == "" {
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if !lanIP(net.ParseIP(host)) {
+		if !lanIP(ip) {
 			http.Error(w, "LAN only", http.StatusForbidden)
 			return
 		}
 	} else if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+b.Secret)) != 1 {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
+		if ip == nil || ip.IsLoopback() || !(ip.IsPrivate() || cgnat.Contains(ip)) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 	if r.Method == "GET" && r.URL.Path == "/healthz" {
 		name, separator := cmp.Or(b.Name, "hpss"), "spectral-hpss-approximation"

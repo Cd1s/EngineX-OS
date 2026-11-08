@@ -28,6 +28,7 @@ type server struct {
 	// newSessions caps sessions created by unauthenticated callers.
 	newSessions *failLimiter
 	sessions    *sessionStore
+	decks       *deckStore
 	spotify     *spotifyAuth
 	deezer      *deezerClient
 	browser     *deezerBrowser
@@ -71,6 +72,7 @@ func main() {
 		fails:       newLimiter(failWindow, failMax),
 		newSessions: newLimiter(time.Minute, 30),
 		sessions:    newSessionStore(filepath.Join(*stateDir, "sessions.json")),
+		decks:       newDeckStore(filepath.Join(*stateDir, "decks.json")),
 		deezer:      newDeezerClient(),
 		browser:     newDeezerBrowser("http://127.0.0.1:9222"),
 		stems:       newStemsProxy(target, *stemsToken),
@@ -123,6 +125,7 @@ func (s *server) routes() http.Handler {
 	// Remote Stems: console password in, local daemon token out.
 	mux.HandleFunc("POST /v1/engine", s.requireStemsAuth(func(w http.ResponseWriter, r *http.Request) { s.stems.engine(w, r) }))
 	mux.HandleFunc("GET /healthz/stems", s.requireStemsAuth(func(w http.ResponseWriter, r *http.Request) { s.stems.health(w, r) }))
+	mux.HandleFunc("POST /api/relay/deck", s.requireStemsAuth(s.handleDeckPost))
 	mux.HandleFunc("GET /api/config", s.requireAuth(s.handleConfigGet))
 	mux.HandleFunc("POST /api/config", s.requireAuth(s.handleConfigPost))
 	// Web console.

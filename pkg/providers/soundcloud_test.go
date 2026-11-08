@@ -249,3 +249,58 @@ func TestSoundCloudWebMediaPrefersHighestQuality(t *testing.T) {
 		t.Fatalf("no downloads %+v %v", m, err)
 	}
 }
+
+// A login whose single-use refresh token is refused for good is dropped: the app
+// token (or a public profile) serves the lists instead of failing with HTTP 400.
+func TestSoundCloudDeadLoginFallsBackToAppAndPublicLikes(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			r.ParseForm()
+			if r.Form.Get("grant_type") == "refresh_token" {
+				w.WriteHeader(400)
+				io.WriteString(w, `{"error":"invalid_grant"}`)
+				return
+			}
+			io.WriteString(w, `{"access_token":"app1","expires_in":3600}`)
+		case "/users/9/playlists", "/users/9/likes/playlists":
+			io.WriteString(w, `{"collection":[]}`)
+		default: // /me/... and /users/9/likes/tracks refuse; the public web API answers
+			w.WriteHeader(403)
+		}
+	}))
+	defer api.Close()
+	var web *httptest.Server
+	web = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/": // the site page names its script, which carries the client id
+			io.WriteString(w, `<script src="`+web.URL+`/app.js"></script>`)
+		case "/app.js":
+			io.WriteString(w, `client_id:"0123456789abcdef0123456789abcdef"`)
+		case "/users/9/track_likes":
+			if r.URL.Query().Get("client_id") != "0123456789abcdef0123456789abcdef" {
+				w.WriteHeader(401)
+				return
+			}
+			io.WriteString(w, `{"collection":[{"track":{"id":31,"title":"Public like","access":"playable","user":{"username":"dj"}}}]}`)
+		}
+	}))
+	defer web.Close()
+	path := filepath.Join(t.TempDir(), "soundcloud-token.json")
+	SaveJSON(path, soundCloudToken{ClientID: "cid", UserAccess: "u1", UserRefresh: "r1", UserExpiry: time.Now().Add(-time.Hour)})
+	auth := &SoundCloudAuth{TokenURL: api.URL + "/token", Path: path}
+	sc := &SoundCloud{BaseURL: api.URL, WebURL: web.URL, SiteURL: web.URL, ClientID: "cid", Secret: "shh", Auth: auth, UserID: 9}
+	likes, err := sc.Tracks(context.Background(), soundCloudLikesID)
+	if err != nil || len(likes) != 1 || likes[0].ID != "31" {
+		t.Fatalf("likes %+v %v", likes, err)
+	}
+	if auth.HasUser() {
+		t.Fatal("the dead login was kept")
+	}
+	var saved soundCloudToken
+	b, _ := os.ReadFile(path)
+	json.Unmarshal(b, &saved)
+	if saved.UserAccess != "" || saved.UserRefresh != "" {
+		t.Fatalf("saved %+v", saved)
+	}
+}

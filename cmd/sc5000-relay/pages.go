@@ -15,6 +15,8 @@ type pageData struct {
 	Auto                                             bool
 	// panel
 	Backend string
+	Decks   []deckView
+	Stems   stemsStatus
 }
 
 func renderPage(w http.ResponseWriter, code int, name string, d pageData) {
@@ -228,16 +230,24 @@ document.getElementById('clip').onclick=async function(){
 </script>{{end}}
 
 {{define "loginPage"}}{{template "head" .}}<div class="wrap">
-<h1>SC5000 Deemix</h1><p class="sub">扫码登录与凭证中继 · 请输入访问密码</p>
+<h1>SC5000 Deemix</h1><p class="sub">扫码登录与凭证中继 · 请输入主密码或已连接碟机的本机访问码</p>
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
-<form method="post" action="login" class="card"><label for="pw">访问密码</label>
-<input id="pw" type="password" name="password" autocomplete="current-password" autofocus>
+<form method="post" action="login" class="card"><label for="pw">访问密码 / 碟机访问码</label>
+<input id="pw" type="password" name="password" placeholder="主密码或碟机访问码 (如 ABCD-1234)" autocomplete="current-password" autofocus>
 <button class="btn purple" type="submit">登录</button></form></div></body></html>{{end}}
 
 {{define "panelPage"}}{{template "head" .}}<div class="wrap wide">
 <div style="display:flex;justify-content:space-between;align-items:center"><h1>SC5000 Deemix 控制台</h1>
 <form method="post" action="logout"><button class="btn ghost small" type="submit">退出</button></form></div>
 <div id="msg"></div>
+<div class="card"><h2>已连接碟机集群 (Multi-Deck Hub)</h2>
+<p class="hint">同一后端下的多台碟机自动合并共享 Deezer / SoundCloud / Spotify / Beatport 配置与 Stems 算力节点</p>
+<div id="decks">{{if .Decks}}{{range .Decks}}<div style="border-top:1px solid var(--line);padding:10px 0;margin-top:8px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><b>{{.Name}}</b> {{if .Online}}<span class="badge good">在线</span>{{else}}<span class="badge warn">离线</span>{{end}}{{if .Role}} <span class="badge">Role {{.Role}}</span>{{end}}{{if .Version}} <span class="badge">{{.Version}}</span>{{end}}</div>{{if .LANIP}}<a class="btn ghost small" style="margin:0" href="http://{{.LANIP}}:8080" target="_blank" rel="noreferrer">打开碟机控制台 (http://{{.LANIP}}:8080)</a>{{end}}</div><div class="hint" style="margin-top:6px">局域网 IP：<code>{{.LANIP}}</code> · 已登录流媒体：{{if .LoggedIn}}{{range .LoggedIn}}<span class="badge good" style="margin-right:4px">{{.}}</span>{{end}}{{else}}<span class="badge">无</span>{{end}}</div></div>{{end}}{{else}}<p class="hint">暂无已连接碟机。在碟机控制台填入此后端地址与访问密码后将自动注册合并。</p>{{end}}</div></div>
+
+<div class="card"><h2>Stems 远程算力节点</h2>
+<div id="stemsstate">{{if .Stems.Online}}<span class="badge good">{{if .Stems.Device}}{{.Stems.Device}}{{else}}stemsd{{end}} · {{if .Stems.Backend}}{{.Stems.Backend}}{{else}}hpss{{end}} · {{if .Stems.Busy}}繁忙{{else}}在线{{end}}</span>{{else}}<span class="badge warn">离线 / 未连接</span>{{end}}</div>
+<p class="hint">多台碟机共享此远程 Stems 分轨算力节点，同时支持家庭局域网直连免密探测与分轨。</p></div>
+
 <div class="card"><h2>SC5000 后端</h2><div class="kv">
 <b>后端地址</b><span class="mono" id="backend">{{.Backend}}</span>
 <b>访问密码</b><span id="pwstate">…</span>
@@ -282,6 +292,10 @@ function render(c){
  el('redir').textContent=c.spotifyRedirect;
  el('arlstate').innerHTML=c.deezerArlSet?'已保存：<code>'+esc(c.deezerArlMasked)+'</code>'+(c.deezerArlUser?' · 用户 '+esc(c.deezerArlUser):''):'<span class="badge warn">未设置 ARL</span>（请先保存 ARL，供 SC5000 同步登录）';
  el('bpmstate').textContent='SoundCloud Client ID：'+(c.soundcloudClientIdSet?'已设置':'未设置')+' · Secret：'+(c.soundcloudSecretSet?'已设置':'未设置')+' · Token：'+(c.soundcloudTokenSet?'已设置':'未设置')+' · GetSongBPM：'+(c.getSongBpmKeySet?'已设置':'未设置');
+ const stems=c.stems||{};
+ el('stemsstate').innerHTML=stems.online?'<span class="badge good">'+esc((stems.device||'stemsd')+' · '+(stems.backend||'hpss')+' · '+(stems.busy?'繁忙':'在线'))+'</span>':'<span class="badge warn">离线 / 未连接</span>';
+ const decks=Array.isArray(c.decks)?c.decks:[];
+ el('decks').innerHTML=decks.length?decks.map(d=>{const svcs=Array.isArray(d.loggedIn)&&d.loggedIn.length?d.loggedIn.map(x=>'<span class="badge good" style="margin-right:4px">'+esc(x)+'</span>').join(''):'<span class="badge">无</span>';const u=d.consoleUrl||(d.lanIp?'http://'+d.lanIp+':8080':'');return '<div style="border-top:1px solid var(--line);padding:10px 0;margin-top:8px"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><b>'+esc(d.name||d.model||'SC5000')+'</b> '+(d.online?'<span class="badge good">在线</span>':'<span class="badge warn">离线</span>')+(d.role?' <span class="badge">Role '+esc(d.role)+'</span>':'')+(d.version?' <span class="badge">'+esc(d.version)+'</span>':'')+'</div>'+(u?'<a class="btn ghost small" style="margin:0" href="'+esc(u)+'" target="_blank" rel="noreferrer">打开碟机控制台 ('+esc(u)+')</a>':'')+'</div><div class="hint" style="margin-top:6px">局域网 IP：<code>'+esc(d.lanIp||'-')+'</code> · 已登录流媒体：'+svcs+'</div></div>'}).join(''):'<p class="hint">暂无已连接碟机。在碟机控制台填入此后端地址与访问密码后将自动注册合并。</p>';
  el('uid').value=c.deezerUserId||'';el('cid').value=c.spotifyClientId||'';}
 async function api(path,opt){const r=await fetch(path,Object.assign({credentials:'same-origin',headers:{'Content-Type':'application/json'}},opt||{}));
  if(r.status==401){location.reload();throw new Error('unauthorized')}return r.json()}

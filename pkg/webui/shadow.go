@@ -14,6 +14,7 @@ package webui
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -22,6 +23,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -51,7 +53,10 @@ type deckState struct {
 	Net        string  `json:"net,omitempty"`  // Engine's TrackNetworkPath, posted by the QML
 	Key        string  `json:"key,omitempty"`  // changes with the track
 	Ext        string  `json:"ext,omitempty"`
-	Name       string  `json:"name,omitempty"` // the file's name, which the copy keeps
+	Name       string  `json:"name,omitempty"`  // the file's name, which the copy keeps
+	Title      string  `json:"title,omitempty"` // a streaming track's real title (QML or stm.db): the copy is named after it
+	Artist     string  `json:"artist,omitempty"`
+	Loading    bool    `json:"loading,omitempty"` // shadow deck: the peer has a track whose audio is still being fetched
 	Playing    bool    `json:"playing"`
 	PositionMS float64 `json:"positionMs"`
 	Pitch      float64 `json:"pitch"` // percent
@@ -138,12 +143,13 @@ type shadowState struct {
 
 	dataRoot, mediaRoot string
 	beacon              bool
-	unresolved          [5]string         // per deck: the last TrackNetworkPath logged as having no file
-	streamFiles         map[string]string // streaming uri -> Engine's download ("" = none)
+	unresolved          [5]string              // per deck: the last TrackNetworkPath logged as having no file
+	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
+	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, used: map[string]time.Time{}, streamFiles: map[string]string{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, peerTaken: map[string]time.Time{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -276,14 +282,18 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		}
 		postAt = max(postAt, d.At) // after clamping: one future timestamp must not freeze ownPostAt
 		d.Path, d.Name = "", ""
-		d.Key, d.Ext = "", ""
+		d.Key, d.Ext, d.Loading = "", "", false
 		np := d.Net
 		f := resolveNetPathFile(np, s.shadow.dataRoot, s.shadow.mediaRoot, true)
 		if netPathFile(np, s.shadow.dataRoot, s.shadow.mediaRoot) == "" {
 			d.Net = ""
 		}
 		if f == "" && strings.HasPrefix(np, "streaming://") {
-			f = s.shadow.streamingDownload(r.Context(), np) // Engine's own download, analysed in stm.db
+			st := s.shadow.streamingDownload(r.Context(), np) // Engine's own download, analysed in stm.db
+			f = st.path
+			if d.Title == "" {
+				d.Title, d.Artist = st.title, st.artist
+			}
 		}
 		if f == "" && s.tidal != nil {
 			f = s.tidal.streamedFile(np) // loaded from the streaming browser (OmniSource too)
@@ -291,6 +301,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		if f != "" && slices.Contains(shadowAudioExt, strings.ToLower(filepath.Ext(f))) {
 			if st, err := os.Stat(f); err == nil && st.Mode().IsRegular() {
 				d.Path, d.Ext, d.Name = f, strings.ToLower(filepath.Ext(f)), filepath.Base(f)
+				if n := displayFileName(d.Artist, d.Title, d.Ext); n != "" {
+					d.Name = n // Engine shows a tagless streaming cache file by its name
+				}
 				d.Key = fmt.Sprintf("%x", fnvSum(fmt.Sprintf("%s %d %d", f, st.Size(), st.ModTime().UnixNano())))
 			}
 		}
@@ -396,11 +409,21 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 	for _, d := range decks {
 		seq = max(seq, d.Seq)
 	}
+	// A peer silent for over 2 s may have restarted with a clock behind its old Seq.
+	if t, ok := sh.peerTaken[ip]; !ok || now.Sub(t) > 2*time.Second {
+		delete(sh.peerSeq, ip)
+	}
 	// A clock stepped back by more than 10 s (NTP) restarts the order.
 	if last := sh.peerSeq[ip]; seq != 0 && seq <= last && seq > last-int64(10*time.Second) {
 		return
 	}
 	sh.peerSeq[ip] = seq
+	for deck, v := range sh.peerDecks {
+		if v.ip == ip && !slices.ContainsFunc(decks, func(d deckState) bool { return d.Deck == deck }) {
+			delete(sh.peerDecks, deck) // the peer ejected it, or restarted empty
+		}
+	}
+	sh.peerTaken[ip] = now
 	for _, d := range decks {
 		if d.Deck >= 1 && d.Deck <= 4 {
 			sh.peerDecks[d.Deck] = peerDeck{deckState: d, ip: ip, at: now}
@@ -498,30 +521,58 @@ func (s *Server) peerPerfGet(w http.ResponseWriter, r *http.Request) {
 // TrackUri "streaming://TIDAL/Track/<id>"): stm.db's row for the uri, read-only
 // (#49). Hits are cached per uri (the QML posts every 120 ms); misses are not,
 // since Engine may post before its stm.db row exists.
-func (sh *shadowState) streamingDownload(ctx context.Context, uri string) string {
+func (sh *shadowState) streamingDownload(ctx context.Context, uri string) streamTrack {
 	sh.mu.Lock()
-	f, ok := sh.streamFiles[uri]
+	t, ok := sh.streamFiles[uri]
 	sh.mu.Unlock()
 	if ok {
-		return f
+		return t
 	}
 	lib := filepath.Join(sh.dataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library")
 	if db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: filepath.Join(lib, "Database2", "stm.db")}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)"); err == nil {
 		var rel string
-		if db.QueryRowContext(ctx, `SELECT path FROM Track WHERE uri = ? ORDER BY id DESC LIMIT 1`, uri).Scan(&rel) == nil {
-			f = filepath.Join(lib, filepath.FromSlash(rel))
-			if !strings.HasPrefix(f, filepath.Clean(sh.dataRoot)+string(filepath.Separator)) || !regularAudioFile(f) {
-				f = ""
+		if db.QueryRowContext(ctx, `SELECT path, COALESCE(title,''), COALESCE(artist,'') FROM Track WHERE uri = ? ORDER BY id DESC LIMIT 1`, uri).Scan(&rel, &t.title, &t.artist) == nil {
+			t.path = filepath.Join(lib, filepath.FromSlash(rel))
+			if !strings.HasPrefix(t.path, filepath.Clean(sh.dataRoot)+string(filepath.Separator)) || !regularAudioFile(t.path) {
+				t = streamTrack{}
 			}
 		}
 		db.Close()
 	}
-	if f != "" {
+	if t.path != "" {
 		sh.mu.Lock()
-		sh.streamFiles[uri] = f
+		sh.streamFiles[uri] = t
 		sh.mu.Unlock()
 	}
-	return f
+	return t
+}
+
+// streamTrack is a streaming track's Engine download and its tags in stm.db.
+type streamTrack struct{ path, title, artist string }
+
+// displayFileName is "Artist - Title<ext>" without the characters a file name
+// cannot carry; "" when there is no title.
+func displayFileName(artist, title, ext string) string {
+	clean := func(v string) string {
+		v = strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f || strings.ContainsRune(`/\:*?"<>|`, r) {
+				return -1
+			}
+			return r
+		}, v)
+		return strings.TrimSpace(v)
+	}
+	title, artist = clean(title), clean(artist)
+	if title == "" {
+		return ""
+	}
+	if artist != "" {
+		title = artist + " - " + title
+	}
+	if r := []rune(title); len(r) > 120 {
+		title = string(r[:120])
+	}
+	return strings.TrimRight(title, ". ") + ext
 }
 
 // engineLibrary is the "Engine Library" folder whose m.db lists f: the
@@ -736,6 +787,12 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 			if d.Path == "" {
 				s.shadowFetchPeer(key, p)
 			}
+		}
+		// Audio still on its way: the QML shows the deck as loading. No track on
+		// the peer at all: nothing to hold, so the QML unloads the shadow deck.
+		d.Loading = d.Path == "" && d.Key != ""
+		if p.Net == "" && p.Key == "" {
+			d.Path, d.Loading = "", false
 		}
 		d.Key, d.Ext, d.Net = "", "", ""
 		d.At = now.UnixMilli()
@@ -988,7 +1045,16 @@ func (s *Server) shadowLoop() {
 		case <-s.closed:
 			sh.mu.Lock()
 			sh.running = false
+			ips, port := slices.Collect(maps.Keys(sh.peers)), cmp.Or(sh.pushPort, shadowBeaconPort)
 			sh.mu.Unlock()
+			if conn != nil {
+				// Goodbye (no decks): the other player unloads its shadow decks at once.
+				bye := []byte(shadowDecksMagic + "[]")
+				conn.WriteToUDP(bye, &net.UDPAddr{IP: net.IPv4bcast, Port: port})
+				for _, ip := range ips {
+					conn.WriteToUDP(bye, &net.UDPAddr{IP: net.ParseIP(ip), Port: port})
+				}
+			}
 			return
 		case <-tick.C:
 		}

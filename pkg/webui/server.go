@@ -113,6 +113,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	s := &Server{cfg: cfg, jobs: jobs, sessions: map[string]*Session{}, pending: map[string]pending{}, mux: http.NewServeMux(), ownerDeleted: map[string]bool{}, logins: map[string]*loginFlow{}, authFails: map[string]*authStrike{}}
 	s.shadow = newShadowState()
+	if cfg.StateDir == "/data/sc5000-custom/state" { // on the deck, not in tests
+		go ensureSpotifyConnectService("/etc/avahi/services")
+	}
 	exportCfg := cfg.ProlinkExport
 	if exportCfg.MediaCache == nil {
 		cacheRoot := cfg.StateDir

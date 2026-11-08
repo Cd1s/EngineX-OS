@@ -4,16 +4,23 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha1"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // SpotifyConnectInfo represents the Zeroconf getInfo response payload.
@@ -44,6 +51,60 @@ type SpotifyConnectResponse struct {
 	Status       int    `json:"status"`
 	StatusString string `json:"statusString"`
 	SpotifyError int    `json:"spotifyError"`
+}
+
+// spotifyDHPrime is the 768-bit Oakley group 1 prime (generator 2) that Spotify's
+// Zeroconf login uses: getInfo's publicKey is g^x mod p, 96 bytes, base64.
+var spotifyDHPrime, _ = new(big.Int).SetString("ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a63a3620ffffffffffffffff", 16)
+
+// SpotifyConnectKey is this process's Zeroconf key pair.
+type SpotifyConnectKey struct {
+	priv *big.Int
+	pub  []byte
+}
+
+var spotifyConnectKey = sync.OnceValue(func() *SpotifyConnectKey {
+	priv, err := rand.Int(rand.Reader, spotifyDHPrime)
+	if err != nil {
+		panic(err) // crypto/rand failing is not recoverable
+	}
+	return &SpotifyConnectKey{priv, new(big.Int).Exp(big.NewInt(2), priv, spotifyDHPrime).FillBytes(make([]byte, 96))}
+})
+
+// SpotifyConnectKeyPair returns the key pair, generated once per process.
+func SpotifyConnectKeyPair() *SpotifyConnectKey { return spotifyConnectKey() }
+
+// PublicKey is what getInfo advertises.
+func (k *SpotifyConnectKey) PublicKey() string { return base64.StdEncoding.EncodeToString(k.pub) }
+
+// DecryptBlob opens addUser's blob with the phone's clientKey: iv(16) | AES-128-CTR
+// data | HMAC-SHA1(20), keyed from SHA1 of the shared secret. A wrong MAC is an error.
+func (k *SpotifyConnectKey) DecryptBlob(clientKey, blob string) ([]byte, error) {
+	ck, err := base64.StdEncoding.DecodeString(clientKey)
+	raw, err2 := base64.StdEncoding.DecodeString(blob)
+	if err != nil || err2 != nil || len(ck) == 0 || len(ck) > 96 || len(raw) < 16+20 {
+		return nil, errors.New("spotify connect: malformed blob")
+	}
+	shared := new(big.Int).Exp(new(big.Int).SetBytes(ck), k.priv, spotifyDHPrime)
+	base := sha1.Sum(shared.FillBytes(make([]byte, 96)))
+	mac := func(key []byte, msg string) []byte {
+		h := hmac.New(sha1.New, key)
+		h.Write([]byte(msg))
+		return h.Sum(nil)
+	}
+	iv, data, sum := raw[:16], raw[16:len(raw)-20], raw[len(raw)-20:]
+	h := hmac.New(sha1.New, mac(base[:16], "checksum"))
+	h.Write(data)
+	if subtle.ConstantTimeCompare(h.Sum(nil), sum) != 1 {
+		return nil, errors.New("spotify connect: blob checksum mismatch")
+	}
+	block, err := aes.NewCipher(mac(base[:16], "encryption")[:16])
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, len(data))
+	cipher.NewCTR(block, iv).XORKeyStream(out, data)
+	return out, nil
 }
 
 var spotifyTrackIDRe = regexp.MustCompile(`^[A-Za-z0-9]+$`)
