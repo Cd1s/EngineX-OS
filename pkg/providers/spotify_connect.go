@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 // SpotifyConnectInfo represents the Zeroconf getInfo response payload.
@@ -119,6 +120,15 @@ var spotifyIV = []byte{
 func (p *Spotify) DownloadAudio(ctx context.Context, trackID, dstDir string) (string, error) {
 	if p == nil {
 		return "", errors.New("spotify: please log in via Spotify Connect or QR code on the deck first")
+	}
+	p.mu.Lock()
+	expired := p.Token.RefreshToken != "" && !p.Token.Expiry.IsZero() && time.Now().Add(30*time.Second).After(p.Token.Expiry)
+	p.mu.Unlock()
+	if expired {
+		// authorization renews the token; an expired one would only earn a 401.
+		if _, err := p.authorization(ctx); err != nil {
+			return "", err
+		}
 	}
 	p.mu.Lock()
 	tok := p.Token.AccessToken

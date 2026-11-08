@@ -193,6 +193,72 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 	}
 }
 
+// DownloadAs is Download for a service that keeps its own files: the result is
+// name.flac/.mp3, never the shared <Deezer ID> file (a hard link, so a track that
+// Deezer already holds costs no space or time, and trimming one name keeps the other).
+func (c *Client) DownloadAs(ctx context.Context, t providers.Track, name string, progress func(QueueStatus)) (*Download, error) {
+	if name == "" || filepath.Base(name) != name || strings.HasPrefix(name, ".") {
+		return nil, errors.New("deemix: invalid file name")
+	}
+	if dl := c.Cached(name); dl != nil {
+		return dl, nil
+	}
+	src, err := c.Download(ctx, t, progress)
+	if err != nil {
+		return nil, err
+	}
+	return c.LinkAs(src, name)
+}
+
+// LinkAs gives the file of src a second name, name.flac/.mp3 (a hard link, or a
+// copy where links are not possible).
+func (c *Client) LinkAs(src *Download, name string) (*Download, error) {
+	if name == "" || filepath.Base(name) != name || strings.HasPrefix(name, ".") {
+		return nil, errors.New("deemix: invalid file name")
+	}
+	dst := filepath.Join(c.DownloadDir, name+filepath.Ext(src.Path))
+	if dst == src.Path {
+		return src, nil
+	}
+	tmp := filepath.Join(c.DownloadDir, ".part-as-"+name)
+	os.Remove(tmp)
+	if err := os.Link(src.Path, tmp); err != nil {
+		if err = copyFile(src.Path, tmp); err != nil {
+			os.Remove(tmp)
+			return nil, err
+		}
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return nil, err
+	}
+	// Only one of name's formats is kept, so Cached finds the one just saved.
+	for _, ext := range []string{".flac", ".mp3", ".mp4"} {
+		if other := filepath.Join(c.DownloadDir, name+ext); other != dst {
+			os.Remove(other)
+		}
+	}
+	c.Trim(dst)
+	return &Download{Path: dst, Quality: src.Quality}, nil
+}
+
+func copyFile(from, to string) error {
+	in, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 // downloadDirectory supports services with a submission endpoint but no HTTP
 // queue status API. Configure their output template as <id>.<ext> and publish
 // final names only after download completion. Never select an unrelated newest

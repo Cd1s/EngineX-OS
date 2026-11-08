@@ -29,6 +29,8 @@ type Track struct {
 	Provider   string   `json:"provider"`
 	BPM        float64  `json:"bpm,omitempty"`
 	Key        string   `json:"key,omitempty"` // Camelot, e.g. 8A
+	// PreviewOnly marks a SoundCloud Go+ track that plays only a preview without a Go+ login.
+	PreviewOnly bool `json:"previewOnly,omitempty"`
 	// CoverURL is the album artwork, embedded in the downloaded file for the deck.
 	CoverURL string `json:"coverUrl,omitempty"`
 	// ThumbURL is a smaller version for list rows, where the service offers one.

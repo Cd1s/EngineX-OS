@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -126,7 +127,7 @@ func TestLoginCookieAndPasswordChange(t *testing.T) {
 	if w := do(h, "GET", "/api/config", "", hdr); w.Code != 200 || !strings.Contains(w.Body.String(), `"passwordIsDefault":false`) {
 		t.Fatalf("cookie auth: %d %s", w.Code, w.Body)
 	}
-	if w := do(h, "GET", "/sc5000/", "", hdr); !strings.Contains(w.Body.String(), "SC5000 Deemix 控制台") {
+	if w := do(h, "GET", "/sc5000/", "", hdr); !strings.Contains(w.Body.String(), "EngineX OS 控制台") {
 		t.Fatal("panel expected under /sc5000/")
 	}
 	hdr["Content-Type"] = "application/json"
@@ -605,5 +606,67 @@ func TestMultiDeckHubRegistrationAndAccessCodeLogin(t *testing.T) {
 		if pw.Code != 200 || !strings.Contains(panel, "已连接碟机集群 (Multi-Deck Hub)") || !strings.Contains(panel, "http://192.168.1.224:8080") || !strings.Contains(panel, "Claw-ai") {
 			t.Fatalf("panel missing multi-deck hub or stems info: %d %s", pw.Code, panel)
 		}
+	}
+}
+
+func TestRelayQuickTunnelAndDynamicPublicURL(t *testing.T) {
+	stateDir := t.TempDir()
+	fakeScript := `#!/bin/sh
+echo "2026-11-08T00:00:00Z INF Requesting new quick Tunnel on trycloudflare.com..."
+echo "2026-11-08T00:00:00Z INF |  https://enginex-relay-4321.trycloudflare.com  |"
+exec sleep 30
+`
+	dlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/cloudflared-linux-arm64" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fakeScript))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer dlSrv.Close()
+
+	oldBase := relayCloudflaredDownloadBaseURL
+	oldArch := relayCloudflaredGOARCH
+	oldPaths := relayCloudflaredSearchPaths
+	oldLook := relayCloudflaredLookPath
+
+	relayCloudflaredDownloadBaseURL = dlSrv.URL
+	relayCloudflaredGOARCH = "arm64"
+	relayCloudflaredSearchPaths = nil
+	relayCloudflaredLookPath = func(string) (string, error) { return "", os.ErrNotExist }
+
+	defer func() {
+		relayCloudflaredDownloadBaseURL = oldBase
+		relayCloudflaredGOARCH = oldArch
+		relayCloudflaredSearchPaths = oldPaths
+		relayCloudflaredLookPath = oldLook
+	}()
+
+	s := newTestServer(t)
+	s.setPublicURL("")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	gotURL, err := startQuickTunnel(ctx, "0.0.0.0:6595", stateDir, s.setPublicURL)
+	if err != nil {
+		t.Fatalf("startQuickTunnel error: %v", err)
+	}
+	wantURL := "https://enginex-relay-4321.trycloudflare.com"
+	if gotURL != wantURL {
+		t.Fatalf("gotURL = %q, want %q", gotURL, wantURL)
+	}
+	if s.publicURL() != wantURL {
+		t.Fatalf("s.publicURL() = %q, want %q", s.publicURL(), wantURL)
+	}
+	if s.spotifyHTTPSRedirect() != wantURL+"/oauth/spotify/callback" {
+		t.Fatalf("spotifyHTTPSRedirect() = %q", s.spotifyHTTPSRedirect())
+	}
+
+	h := s.routes()
+	w := do(h, "GET", "/api/config", "", map[string]string{"X-Deemix-Password": defaultPassword})
+	if w.Code != 200 || !strings.Contains(w.Body.String(), wantURL) {
+		t.Fatalf("GET /api/config missing tunnel URL: %d %s", w.Code, w.Body)
 	}
 }

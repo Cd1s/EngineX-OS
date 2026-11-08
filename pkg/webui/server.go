@@ -157,6 +157,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	s.prolinkExport = prolink.NewExporter(exportCfg)
 	s.closed = make(chan struct{})
+	if cfg.StateDir == "/data/sc5000-custom/state" { // on the deck, not in tests
+		go serveSpotifyConnectMDNS(s.closed)
+	}
 	go s.retryExport(10 * time.Second)
 	if s.loadUI().ProlinkExport {
 		// A missing drive or occupied port must not prevent the normal console
@@ -264,6 +267,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	s.beatport = &providers.Beatport{BaseURL: cfg.BeatportURL, HTTP: cfg.HTTP, Path: filepath.Join(cfg.StateDir, "beatport-owner.json")}
 	s.tidal = newTidalGateway(s)
+	s.RegisterTunnelRoutes()
+	go s.tunnelResume()
 	if jobs != nil {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor
@@ -840,7 +845,7 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	v.Ready = true
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	io.WriteString(w, "<meta name=viewport content=width=device-width><p>Spotify 已登录，可以回到 SC5000 控制台浏览歌单。</p>")
+	io.WriteString(w, "<meta name=viewport content=width=device-width><p>Spotify 已登录，可以回到 EngineX OS 控制台浏览歌单。</p>")
 }
 func (s *Server) playlists(w http.ResponseWriter, r *http.Request) {
 	v, err := s.session(r)

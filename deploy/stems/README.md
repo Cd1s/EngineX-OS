@@ -1,11 +1,13 @@
-# Remote Stems renderer (`sc5000-stemsd`)
+# Remote Stems renderer (`enginex-stemsd`)
+
+> `enginex-stemsd` was called `sc5000-stemsd`; the old name, `sc5000-stemsd.service`, `/opt/sc5000-stems/` and the `cmd/sc5000-*` directories remain valid. `enginex-relay` was `sc5000-relay`, `enginex-suite` was `sc5000-suite`.
 
 Engine 5.0.4 runs its Stems separator as a child process. On SC5000 that child
 is `stems-processor`, which forwards the child's byte stream unchanged to a
 remote renderer; Engine still writes the encrypted `.stems` file itself.
 
 ```text
-Engine ─stdin/stdout─ stems-processor ══HTTPS══ sc5000-relay /v1/engine ── 127.0.0.1:6596 sc5000-stemsd ── worker.py
+Engine ─stdin/stdout─ stems-processor ══HTTPS══ enginex-relay /v1/engine ── 127.0.0.1:6596 enginex-stemsd ── worker.py
           (deck)          console password          (public)      internal token        (loopback)
 ```
 
@@ -19,7 +21,7 @@ default) and an optional HTDemucs 4-stem neural GPU/CPU separator
 | Path | Role |
 |---|---|
 | `internal/stems` | Wire protocol: client `Proxy`, renderer `Backend`, LAN mDNS/UDP discovery (`FindLAN`), on-deck `RenderLocal` |
-| `internal/stemsproc` | Deck client, run as `sc5000-suite stems-processor` (`/usr/local/bin/stems-processor`) |
+| `internal/stemsproc` | Deck client, run as `enginex-suite stems-processor` (`/usr/local/bin/stems-processor`) |
 | `cmd/sc5000-stemsd` | Renderer HTTP service with multi-session support and LAN mDNS/UDP responder |
 | `cmd/sc5000-relay` | Public entry point (`POST /v1/engine`, `GET /healthz/stems`) |
 | `tools/stems` | `worker.py`, `run-home-worker.sh`, `run-home-worker.ps1`, `render.py`, `test_worker.py` |
@@ -27,11 +29,11 @@ default) and an optional HTDemucs 4-stem neural GPU/CPU separator
 ## Deck client settings
 
 With no environment variables the client reads stream-sync's
-`/data/sc5000-custom/state/deemix-config.json` — the optional relay address
+`/data/enginex/state/deemix-config.json` — the optional relay address
 (`relayUrl`, e.g. `https://relay.example.com`) and password (`deemixPassword`)
 the deck console manages — and posts to `<relayUrl>/v1/engine`. If no cloud
 `relayUrl` is configured, `stems-processor` automatically discovers a home PC
-running `sc5000-stemsd` on the LAN via mDNS (`_enginex-stems._tcp.local.`) /
+running `enginex-stemsd` on the LAN via mDNS (`_enginex-stems._tcp.local.`) /
 UDP broadcast (`17891`), or falls back to on-deck `RenderLocal` (`CPU3`).
 
 | Variable | Effect |
@@ -56,7 +58,7 @@ any client and writes vocals/bass/drums/melody WAVs.
 
 ## Session end
 
-The client sends `X-Stems-Framing: 1`; `sc5000-stemsd` then wraps its reply in
+The client sends `X-Stems-Framing: 1`; `enginex-stemsd` then wraps its reply in
 `'D'` + uint32 length frames and closes with `'E'` + `ok|failed` only after the
 worker exited cleanly. The relay passes the header through. The client exits 0
 only on `E ok` with a session `internal/stems.Session` finds complete (done,
@@ -77,7 +79,7 @@ long the child took to exit. See `docs/STEMS-REMOTE-ACCEPTANCE-20261103.md`.
    overwrite). It generates `/etc/sc5000-stems/token` (0600) and starts
    [`sc5000-stemsd.service`](sc5000-stemsd.service) on `127.0.0.1:6596`. The
    worker needs system `python3` with NumPy and SciPy.
-3. Relay: install the new `sc5000-relay` binary and the credential drop-in
+3. Relay: install the new `enginex-relay` binary and the credential drop-in
    [`../relay-host/50-stems.conf`](../relay-host/50-stems.conf); restart it and check
    `GET /healthz/stems` with the console password from a program that reads it
    from a file (not on a command line).

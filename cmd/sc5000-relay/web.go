@@ -83,7 +83,7 @@ func (s *server) handleMobileGet(w http.ResponseWriter, r *http.Request) {
 		// Go straight to the service's own login when its redirect is known to work.
 		// Without that, this page explains the pasting fallback. So does ?manual=1.
 		if straightToLogin(r, sess) && s.spotify.useHTTPS(r.Context(), sess.SpotifyClientID) {
-			http.Redirect(w, r, s.spotify.authorizeURL(sess.SpotifyClientID, s.spotify.httpsRedirect, token, sess.Verifier), http.StatusFound)
+			http.Redirect(w, r, s.spotify.authorizeURL(sess.SpotifyClientID, s.spotifyHTTPSRedirect(), token, sess.Verifier), http.StatusFound)
 			return
 		}
 		s.renderSpotify(w, r, sess, "")
@@ -301,6 +301,7 @@ func (s *server) mobileResult(w http.ResponseWriter, r *http.Request, provider, 
 
 func (s *server) renderSpotify(w http.ResponseWriter, r *http.Request, sess session, errMsg string) {
 	auto := s.spotify.useHTTPS(r.Context(), sess.SpotifyClientID)
+	httpsRedir := s.spotifyHTTPSRedirect()
 	d := pageData{
 		Title:         "连接 Spotify",
 		Token:         sess.Token,
@@ -308,8 +309,8 @@ func (s *server) renderSpotify(w http.ResponseWriter, r *http.Request, sess sess
 		Error:         errMsg,
 		ClientID:      sess.SpotifyClientID,
 		Auto:          auto,
-		HTTPSRedirect: s.spotify.httpsRedirect,
-		AuthHTTPS:     s.spotify.authorizeURL(sess.SpotifyClientID, s.spotify.httpsRedirect, sess.Token, sess.Verifier),
+		HTTPSRedirect: httpsRedir,
+		AuthHTTPS:     s.spotify.authorizeURL(sess.SpotifyClientID, httpsRedir, sess.Token, sess.Verifier),
 		AuthLoopback:  s.spotify.authorizeURL(sess.SpotifyClientID, spotifyLoopbackURI, sess.Token, sess.Verifier),
 	}
 	code := 200
@@ -335,7 +336,7 @@ func (s *server) finishSpotify(ctx context.Context, sess session, code, redirect
 		log.Printf("spotify: exchange failed: %v", err)
 		return fmt.Errorf("Spotify 换取令牌失败：%v", err)
 	}
-	if redirect == s.spotify.httpsRedirect {
+	if redirect == s.spotifyHTTPSRedirect() {
 		s.spotify.learnHTTPS(sess.SpotifyClientID)
 	}
 	return doneOK(s.sessions.complete(sess.Token, "spotify", nil, func(x *session) { x.SpotifyToken = tok }))
@@ -355,7 +356,7 @@ func (s *server) handleSpotifyCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if err := s.finishSpotify(ctx, sess, q.Get("code"), s.spotify.httpsRedirect); err != nil {
+	if err := s.finishSpotify(ctx, sess, q.Get("code"), s.spotifyHTTPSRedirect()); err != nil {
 		s.renderSpotify(w, r, sess, err.Error())
 		return
 	}
@@ -373,12 +374,13 @@ func (s *server) configViewWithContext(ctx context.Context) map[string]any {
 	decks := s.decks.listView(time.Now())
 	stems := s.stemsStatus(ctx)
 	v := map[string]any{
-		"backendUrl":        s.public,
+		"backendUrl":        s.publicURL(),
+		"tunnelUrl":         s.quickTunnelURL(),
 		"deezerUserId":      c.DeezerUserID,
 		"deezerArlSet":      c.DeezerARL != "",
 		"spotifyClientId":   c.SpotifyClientID,
 		"passwordIsDefault": c.PasswordIsDefault,
-		"spotifyRedirect":   s.spotify.httpsRedirect,
+		"spotifyRedirect":   s.spotifyHTTPSRedirect(),
 
 		"soundcloudClientIdSet": c.SoundCloudClientID != "",
 		"soundcloudSecretSet":   c.SoundCloudSecret != "",
@@ -498,7 +500,7 @@ func (s *server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 			fail(500, err.Error())
 			return
 		}
-		msgs = append(msgs, "BPM 服务密钥已保存，SC5000 会在一小时内同步（重启 stream-sync 立即同步）")
+		msgs = append(msgs, "BPM 服务密钥已保存，EngineX OS 碟机会在一小时内同步（重启 stream-sync 立即同步）")
 	}
 	if np := v.Get("newPassword"); np != "" {
 		cur := v.Get("currentPassword")
@@ -511,7 +513,7 @@ func (s *server) handleConfigPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.cfg.issueCookie(w, r) // old cookies are now invalid; keep this browser in
-		msgs = append(msgs, "密码已修改（其它已登录设备需重新登录，SC5000 需填写新密码）")
+		msgs = append(msgs, "密码已修改（其它已登录设备需重新登录，EngineX OS 碟机需填写新密码）")
 		log.Printf("config: password changed from %s", clientIP(r))
 	}
 	view := s.configViewWithContext(r.Context())
@@ -524,28 +526,29 @@ func (s *server) handlePanel(w http.ResponseWriter, r *http.Request) {
 	// Cookie only: password guessing goes through /login and its limiter.
 	c, err := r.Cookie(authCookie)
 	if err != nil || !s.cfg.validCookie(c.Value) {
-		renderPage(w, 200, "loginPage", pageData{Title: "SC5000 Deemix 登录"})
+		renderPage(w, 200, "loginPage", pageData{Title: "EngineX OS 登录"})
 		return
 	}
 	renderPage(w, 200, "panelPage", pageData{
-		Title:   "SC5000 Deemix 控制台",
-		Backend: s.public,
-		Decks:   s.decks.listView(time.Now()),
-		Stems:   s.stemsStatus(r.Context()),
+		Title:     "EngineX OS 控制台",
+		Backend:   s.publicURL(),
+		TunnelURL: s.quickTunnelURL(),
+		Decks:     s.decks.listView(time.Now()),
+		Stems:     s.stemsStatus(r.Context()),
 	})
 }
 
 func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 	if s.fails.blocked(ip) {
-		renderPage(w, 429, "loginPage", pageData{Title: "SC5000 Deemix 登录", Error: "失败次数过多，请 5 分钟后再试"})
+		renderPage(w, 429, "loginPage", pageData{Title: "EngineX OS 登录", Error: "失败次数过多，请 5 分钟后再试"})
 		return
 	}
 	v := formValues(w, r)
 	pw := v.Get("password")
 	if !s.cfg.checkPassword(pw) && !s.decks.checkAccessCode(pw) {
 		s.fails.fail(ip)
-		renderPage(w, 401, "loginPage", pageData{Title: "SC5000 Deemix 登录", Error: "密码不正确"})
+		renderPage(w, 401, "loginPage", pageData{Title: "EngineX OS 登录", Error: "密码不正确"})
 		return
 	}
 	s.cfg.issueCookie(w, r)

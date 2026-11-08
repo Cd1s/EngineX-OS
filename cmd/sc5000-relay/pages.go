@@ -14,9 +14,10 @@ type pageData struct {
 	ClientID, HTTPSRedirect, AuthHTTPS, AuthLoopback string
 	Auto                                             bool
 	// panel
-	Backend string
-	Decks   []deckView
-	Stems   stemsStatus
+	Backend   string
+	TunnelURL string
+	Decks     []deckView
+	Stems     stemsStatus
 }
 
 func renderPage(w http.ResponseWriter, code int, name string, d pageData) {
@@ -63,7 +64,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 <h1 class="center">已完成连接！</h1><p class="sub center">{{if eq .Provider "deezer"}}碟机已自动登录 Deezer 与 Deemix。<br>{{end}}碟机屏幕上的二维码将自动关闭并加载歌单。<br>现在可以关闭此页面。</p></div></body></html>{{end}}
 
 {{define "soundcloudPage"}}{{template "head" .}}<div class="wrap">
-<h1>连接 SoundCloud</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
+<h1>连接 SoundCloud</h1><p class="sub">EngineX OS 碟机扫码登录 · 手机用 5G/4G 也可以</p>
 {{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的设置。</div>{{end}}
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 {{if .AuthLoopback}}<div class="card"><h2>方式一：登录账号（可读私密歌单和私人收藏）</h2>
@@ -89,7 +90,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 </form></div></body></html>{{end}}
 
 {{define "beatportPage"}}{{template "head" .}}<div class="wrap">
-<h1>连接 Beatport</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
+<h1>连接 Beatport</h1><p class="sub">EngineX OS 碟机扫码登录 · 手机用 5G/4G 也可以</p>
 {{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的登录。</div>{{end}}
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 <form class="card" method="post" action="/m/beatport?t={{.Token}}">
@@ -104,7 +105,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 </form></div></body></html>{{end}}
 
 {{define "deezerPage"}}{{template "head" .}}<div class="wrap">
-<h1>连接 Deezer</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
+<h1>连接 Deezer</h1><p class="sub">EngineX OS 碟机扫码登录 · 手机用 5G/4G 也可以</p>
 {{if .Done}}<div class="ok">此二维码已完成连接。重新提交会覆盖之前的设置。</div>{{end}}
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 <div class="card">
@@ -192,7 +193,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 </form></div></body></html>{{end}}
 
 {{define "spotifyPage"}}{{template "head" .}}<div class="wrap">
-<h1>连接 Spotify</h1><p class="sub">SC5000 碟机扫码登录 · 手机用 5G/4G 也可以</p>
+<h1>连接 Spotify</h1><p class="sub">EngineX OS 碟机扫码登录 · 手机用 5G/4G 也可以</p>
 {{if .Done}}<div class="ok">此二维码已完成连接，碟机会自动加载歌单。</div>{{end}}
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 {{if .Auto}}
@@ -230,14 +231,14 @@ document.getElementById('clip').onclick=async function(){
 </script>{{end}}
 
 {{define "loginPage"}}{{template "head" .}}<div class="wrap">
-<h1>SC5000 Deemix</h1><p class="sub">扫码登录与凭证中继 · 请输入主密码或已连接碟机的本机访问码</p>
+<h1>EngineX OS</h1><p class="sub">扫码登录与凭证中继 · 请输入主密码或已连接碟机的本机访问码</p>
 {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
 <form method="post" action="login" class="card"><label for="pw">访问密码 / 碟机访问码</label>
 <input id="pw" type="password" name="password" placeholder="主密码或碟机访问码 (如 ABCD-1234)" autocomplete="current-password" autofocus>
 <button class="btn purple" type="submit">登录</button></form></div></body></html>{{end}}
 
 {{define "panelPage"}}{{template "head" .}}<div class="wrap wide">
-<div style="display:flex;justify-content:space-between;align-items:center"><h1>SC5000 Deemix 控制台</h1>
+<div style="display:flex;justify-content:space-between;align-items:center"><h1>EngineX OS 控制台</h1>
 <form method="post" action="logout"><button class="btn ghost small" type="submit">退出</button></form></div>
 <div id="msg"></div>
 <div class="card"><h2>已连接碟机集群 (Multi-Deck Hub)</h2>
@@ -248,11 +249,12 @@ document.getElementById('clip').onclick=async function(){
 <div id="stemsstate">{{if .Stems.Online}}<span class="badge good">{{if .Stems.Device}}{{.Stems.Device}}{{else}}stemsd{{end}} · {{if .Stems.Backend}}{{.Stems.Backend}}{{else}}hpss{{end}} · {{if .Stems.Busy}}繁忙{{else}}在线{{end}}</span>{{else}}<span class="badge warn">离线 / 未连接</span>{{end}}</div>
 <p class="hint">多台碟机共享此远程 Stems 分轨算力节点，同时支持家庭局域网直连免密探测与分轨。</p></div>
 
-<div class="card"><h2>SC5000 后端</h2><div class="kv">
+<div class="card"><h2>EngineX OS 后端</h2><div class="kv">
 <b>后端地址</b><span class="mono" id="backend">{{.Backend}}</span>
+<b>免域名公网隧道</b><span class="mono" id="tunnelurl">{{if .TunnelURL}}{{.TunnelURL}}{{else if .Backend}}{{.Backend}}{{else}}正在分配 trycloudflare.com 地址…{{end}}</span>
 <b>访问密码</b><span id="pwstate">…</span>
 <b>Spotify 回调</b><span class="mono" id="redir"></span></div>
-<p class="hint">此网页用于登录和传递凭证。音频由 SC5000 本机直接下载并保存。</p></div>
+<p class="hint">此网页用于登录和传递凭证。音频由 EngineX OS 碟机本机直接下载并保存。</p></div>
 
 <div class="card"><h2>Deezer ARL Cookie</h2><p class="hint" id="arlstate">…</p>
 <textarea id="arl" placeholder="粘贴新的 arl（保存时自动校验并提取 User ID）" autocomplete="off" spellcheck="false"></textarea>
@@ -288,9 +290,11 @@ const el=id=>document.getElementById(id),val=id=>el(id).value.trim();
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function show(ok,lines){el('msg').innerHTML=lines.length?'<div class="'+(ok?'ok':'err')+'">'+lines.map(esc).join('<br>')+'</div>':''}
 function render(c){
+ if(c.backendUrl)el('backend').textContent=c.backendUrl;
+ if(el('tunnelurl'))el('tunnelurl').textContent=c.tunnelUrl||c.backendUrl||'未启用';
  el('pwstate').innerHTML=c.passwordIsDefault?'<span class="badge warn">仍为默认初始密码，建议修改</span>':'<span class="badge good">已自定义</span>'+(c.passwordChangedAt?' '+esc(new Date(c.passwordChangedAt).toLocaleString()):'');
  el('redir').textContent=c.spotifyRedirect;
- el('arlstate').innerHTML=c.deezerArlSet?'已保存：<code>'+esc(c.deezerArlMasked)+'</code>'+(c.deezerArlUser?' · 用户 '+esc(c.deezerArlUser):''):'<span class="badge warn">未设置 ARL</span>（请先保存 ARL，供 SC5000 同步登录）';
+ el('arlstate').innerHTML=c.deezerArlSet?'已保存：<code>'+esc(c.deezerArlMasked)+'</code>'+(c.deezerArlUser?' · 用户 '+esc(c.deezerArlUser):''):'<span class="badge warn">未设置 ARL</span>（请先保存 ARL，供 EngineX OS 碟机同步登录）';
  el('bpmstate').textContent='SoundCloud Client ID：'+(c.soundcloudClientIdSet?'已设置':'未设置')+' · Secret：'+(c.soundcloudSecretSet?'已设置':'未设置')+' · Token：'+(c.soundcloudTokenSet?'已设置':'未设置')+' · GetSongBPM：'+(c.getSongBpmKeySet?'已设置':'未设置');
  const stems=c.stems||{};
  el('stemsstate').innerHTML=stems.online?'<span class="badge good">'+esc((stems.device||'stemsd')+' · '+(stems.backend||'hpss')+' · '+(stems.busy?'繁忙':'在线'))+'</span>':'<span class="badge warn">离线 / 未连接</span>';

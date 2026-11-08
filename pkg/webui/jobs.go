@@ -125,6 +125,9 @@ func (j *Jobs) File(t providers.Track) string {
 		path = f.dl.Path
 	} else if name := j.loadSources()[key]; name != "" && j.p.Deemix != nil {
 		j.mu.Unlock()
+		if !j.reusable(t, name) {
+			return ""
+		}
 		dl := j.p.Deemix.Cached(strings.TrimSuffix(name, filepath.Ext(name)))
 		if dl == nil {
 			return ""
@@ -136,10 +139,44 @@ func (j *Jobs) File(t providers.Track) string {
 		return dl.Path
 	}
 	j.mu.Unlock()
-	if st, err := os.Stat(path); path == "" || err != nil || !st.Mode().IsRegular() {
+	if st, err := os.Stat(path); path == "" || err != nil || !st.Mode().IsRegular() || !j.reusable(t, path) {
 		return ""
 	}
 	return path
+}
+
+// reusable tells whether an earlier file may stand in for t. Every service keeps
+// its own files, except that Deezer and NetEase in Deemix mode share the Deezer
+// download (<Deezer ID>.flac). Spotify, Beatport, SoundCloud and NetEase official
+// mode only take their own prefix, so a file saved for another service is ignored
+// and the track is fetched again from its own service.
+func (j *Jobs) reusable(t providers.Track, path string) bool {
+	base := filepath.Base(path)
+	switch t.Provider {
+	case "spotify", "beatport", "soundcloud":
+		return strings.HasPrefix(base, t.Provider+"-")
+	case "netease":
+		j.mu.Lock()
+		direct := j.neteaseDirect
+		j.mu.Unlock()
+		return direct == nil || !direct() || strings.HasPrefix(base, "netease-")
+	}
+	return true
+}
+
+// dropUnusable forgets an in-memory download that t may no longer reuse.
+func (j *Jobs) dropUnusable(t providers.Track) {
+	key := trackKey(t)
+	j.mu.Lock()
+	f, ok := j.files[key]
+	j.mu.Unlock()
+	if ok && !j.reusable(t, f.dl.Path) {
+		j.mu.Lock()
+		if j.files[key].dl == f.dl {
+			delete(j.files, key)
+		}
+		j.mu.Unlock()
+	}
 }
 
 const sourcesFile = ".sources.json"
@@ -193,6 +230,7 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	}
 	key := trackKey(t)
 	j.File(t) // loads a download saved before a restart
+	j.dropUnusable(t)
 	for {
 		// Check the cache and claim the download under one lock so a fetch
 		// finishing in between cannot trigger a second download.
@@ -239,6 +277,10 @@ func (j *Jobs) Fetch(wait context.Context, session string, t providers.Track, gu
 	j.addCover(ctx, t, dl)
 	f := fetched{matched, dl}
 	j.putFile(key, f)
+	// NetEase in Deemix mode downloaded the Deezer file: Deezer finds it as well.
+	if t.Provider == "netease" && matched.Provider == "deezer" {
+		j.putFile(trackKey(matched), f)
+	}
 	j.queueImport(session, t, guest, f)
 	return dl.Path, nil
 }
@@ -269,7 +311,7 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 	// without the user asking for it. Only NetEase has a Deemix mode (below).
 	switch t.Provider {
 	case "soundcloud":
-		dl, err := j.fromSoundCloud(ctx, t)
+		dl, err := j.acquireSoundCloud(ctx, session, t, guest, progress)
 		return t, dl, err
 	case "beatport":
 		dl, err := j.fromBeatport(ctx, t)
@@ -281,13 +323,14 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 		}
 		// Spotify's Web API token cannot fetch audio (/audio/ answers 410): a
 		// logged-in owner gets the same recording, by ISRC, from the deck's Deemix.
+		// It is saved as spotify-<id>, never as the shared Deezer file.
 		j.mu.Lock()
 		lookup := j.spotify
 		j.mu.Unlock()
 		if lookup != nil && j.p.Deemix != nil && j.p.Catalog != nil {
 			if sp := lookup(); sp != nil && sp.HasToken() {
 				if matched, rerr := deemixclient.Resolve(ctx, j.p.Catalog, t); rerr == nil {
-					if dl, derr := j.p.Deemix.Download(ctx, matched, progress); derr == nil {
+					if dl, derr := j.p.Deemix.DownloadAs(ctx, matched, "spotify-"+t.ID, progress); derr == nil {
 						j.p.Deemix.Trim(dl.Path)
 						return t, dl, nil
 					}
@@ -328,6 +371,7 @@ func (j *Jobs) fromNeteaseMode(ctx context.Context, session string, t providers.
 	if dl := j.p.Deemix.Cached("netease-" + t.ID); dl != nil {
 		return t, dl, nil
 	}
+	// Official mode never touches Deemix or its shared <Deezer ID> files.
 	if direct == nil || !direct() {
 		matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
 		if err == nil {
@@ -382,6 +426,113 @@ func (j *Jobs) fromSpotify(ctx context.Context, session string, t providers.Trac
 	}
 	j.p.Deemix.Trim(path)
 	return &deemixclient.Download{Path: path, Quality: deemixclient.Quality{Format: "OGG_320"}}, nil
+}
+
+// isSoundCloudSet tells a DJ set, podcast or radio show (played from SoundCloud,
+// which is the only place it exists) from a single, which other services carry.
+func isSoundCloudSet(t providers.Track) bool {
+	if t.DurationMS > 10*60*1000 {
+		return true
+	}
+	if t.DurationMS == 0 {
+		title := strings.ToLower(t.Title)
+		for _, w := range []string{"dj set", "live set", "boiler room", "podcast", "radio show", "continuous mix"} {
+			if strings.Contains(title, w) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+const soundCloudLoginHint = "soundcloud: Go+ track requires SoundCloud Go+ login or another logged-in streaming service (scan QR code to log in) / 此为 SoundCloud Go+ 专享曲目，请扫码登录 SoundCloud Go+ 或其他流媒体账号"
+
+// acquireSoundCloud plays a SoundCloud single from the best source the owner has:
+// SoundCloud itself with Go+, else the same recording on a logged-in service (its
+// lossless or 320k beats SoundCloud's stream, and a Go+ track is only a 30 s
+// preview without Go+), else SoundCloud. A set always comes from SoundCloud.
+func (j *Jobs) acquireSoundCloud(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (*deemixclient.Download, error) {
+	if cached := j.p.Deemix.Cached("soundcloud-" + t.ID); cached != nil && (cached.Quality.Lossless || !j.p.Deemix.Lossless()) {
+		return cached, nil
+	}
+	if isSoundCloudSet(t) {
+		return j.fromSoundCloud(ctx, t)
+	}
+	j.mu.Lock()
+	lookup := j.soundcloud
+	j.mu.Unlock()
+	var sc *providers.SoundCloud
+	if lookup != nil {
+		sc = lookup()
+	}
+	if sc != nil && sc.HasGoPlus(ctx) {
+		dl, err := j.fromSoundCloud(ctx, t)
+		if err == nil {
+			return dl, nil
+		}
+		if other, oerr := j.fromLoggedInServicesForSoundCloud(ctx, session, t, guest, progress); oerr == nil {
+			return other, nil
+		}
+		return nil, err
+	}
+	if dl, err := j.fromLoggedInServicesForSoundCloud(ctx, session, t, guest, progress); err == nil {
+		return dl, nil
+	}
+	dl, err := j.fromSoundCloud(ctx, t)
+	if errors.Is(err, providers.ErrNoFullStream) {
+		return nil, errors.New(soundCloudLoginHint)
+	}
+	return dl, err
+}
+
+var errNoOtherService = errors.New("soundcloud: no other logged-in service has this track")
+
+// fromLoggedInServicesForSoundCloud looks for t on Deezer, then NetEase, then
+// Beatport, whichever the owner is logged in to, and saves it as soundcloud-<id>.
+func (j *Jobs) fromLoggedInServicesForSoundCloud(ctx context.Context, session string, t providers.Track, guest bool, progress func(deemixclient.QueueStatus)) (*deemixclient.Download, error) {
+	name := "soundcloud-" + t.ID
+	j.mu.Lock()
+	deezerReady, lookup, beatport := j.deezerReady, j.netease, j.beatport
+	j.mu.Unlock()
+	if deezerReady != nil && deezerReady() && j.p.Catalog != nil {
+		if matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t); err == nil {
+			if dl, err := j.p.Deemix.DownloadAs(ctx, matched, name, progress); err == nil {
+				return dl, nil
+			}
+		}
+	}
+	if lookup != nil {
+		if n := lookup(session, guest); n != nil {
+			if _, dl, err := j.fromNetease(ctx, n, t); err == nil {
+				if dl, err = j.p.Deemix.LinkAs(dl, name); err == nil {
+					return dl, nil
+				}
+			}
+		}
+	}
+	if beatport != nil {
+		if b := beatport(); b != nil {
+			if found, err := b.Search(ctx, soundCloudSearch(t)); err == nil {
+				if matched, err := deemixclient.MatchNearby(t, found, neteaseMatchToleranceMS); err == nil {
+					if dl, err := j.fromBeatport(ctx, matched); err == nil {
+						if dl, err = j.p.Deemix.LinkAs(dl, name); err == nil {
+							return dl, nil
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil, errNoOtherService
+}
+
+// soundCloudSearch is "artist title" as the other services' search wants it.
+func soundCloudSearch(t providers.Track) string {
+	primary := t.Artist
+	if len(t.Artists) > 0 {
+		primary = t.Artists[0]
+	}
+	return strings.TrimSpace(strings.Split(primary, ",")[0] + " " + deemixclient.SearchTitle(t.Title))
 }
 
 // addCover embeds the artwork, which Engine reads from the file for its screens. A

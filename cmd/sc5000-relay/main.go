@@ -1,5 +1,6 @@
-// Command sc5000-relay relays Spotify/Deezer QR login credentials to SC5000
-// and is the single public entry point for remote Stems rendering.
+// Command sc5000-relay (enginex-relay) relays Spotify/Deezer/SoundCloud/Beatport
+// QR login credentials to EngineX OS decks and is the single public entry point
+// for remote Stems rendering.
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -22,9 +24,11 @@ import (
 const defaultSpotifyClientID = ""
 
 type server struct {
-	public string // public base URL, no trailing slash
-	cfg    *configStore
-	fails  *failLimiter
+	publicMu  sync.RWMutex
+	public    string // public base URL, no trailing slash
+	tunnelURL string // Quick Tunnel URL when running in domain-free mode
+	cfg       *configStore
+	fails     *failLimiter
 	// newSessions caps sessions created by unauthenticated callers.
 	newSessions *failLimiter
 	sessions    *sessionStore
@@ -36,16 +40,33 @@ type server struct {
 	beatportURL string // tests; empty is Beatport's API
 }
 
+func envOrDefault(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func defaultRelayStateDir() string {
+	if v := strings.TrimSpace(os.Getenv("ENGINEX_RELAY_STATE")); v != "" {
+		return v
+	}
+	if _, err := os.Stat("/var/lib/enginex-relay"); err == nil {
+		return "/var/lib/enginex-relay"
+	}
+	return "/var/lib/sc5000-relay"
+}
+
 func main() {
-	listen := flag.String("listen", "0.0.0.0:6595", "listen address")
-	public := flag.String("public", "", "public base URL of your self-hosted sc5000-relay (required; OAuth callbacks use it)")
-	stateDir := flag.String("state", "/var/lib/sc5000-relay", "state directory (config.json, sessions)")
-	stemsTarget := flag.String("stems-target", "http://127.0.0.1:6596", "local sc5000-stemsd base URL (/v1/engine is appended)")
-	stemsToken := flag.String("stems-token-file", defaultStemsTokenFile(), "sc5000-stemsd internal token; missing file sends none")
-	proxies := flag.String("trusted-proxies", "", "comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted; empty trusts all private, loopback and tailnet peers")
+	listen := flag.String("listen", envOrDefault("ENGINEX_RELAY_LISTEN", "0.0.0.0:6595"), "listen address")
+	public := flag.String("public", envOrDefault("ENGINEX_RELAY_PUBLIC", ""), "public base URL of your self-hosted enginex-relay (empty or 'auto' starts a domain-free Cloudflare Quick Tunnel)")
+	stateDir := flag.String("state", defaultRelayStateDir(), "state directory (config.json, sessions)")
+	stemsTarget := flag.String("stems-target", envOrDefault("ENGINEX_RELAY_STEMS_TARGET", "http://127.0.0.1:6596"), "local enginex-stemsd base URL (/v1/engine is appended)")
+	stemsToken := flag.String("stems-token-file", envOrDefault("ENGINEX_RELAY_STEMS_TOKEN_FILE", defaultStemsTokenFile()), "enginex-stemsd internal token; missing file sends none")
+	proxies := flag.String("trusted-proxies", envOrDefault("ENGINEX_RELAY_TRUSTED_PROXIES", ""), "comma-separated proxy IPs/CIDRs whose X-Forwarded-For is trusted; empty trusts all private, loopback and tailnet peers")
 	flag.Parse()
-	if *public == "" || strings.Contains(*public, "relay.example.com") {
-		log.Fatal("-public must be this relay's real public URL (relay.example.com is a placeholder)")
+	if strings.Contains(*public, "relay.example.com") {
+		log.Fatal("-public must be this relay's real public URL or 'auto' (relay.example.com is a placeholder)")
 	}
 	tp, err := parseTrustedProxies(*proxies)
 	if err != nil {
@@ -66,8 +87,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	autoTunnel := strings.TrimSpace(*public) == "" || strings.EqualFold(strings.TrimSpace(*public), "auto")
+	initialPublic := strings.TrimRight(strings.TrimSpace(*public), "/")
+	if autoTunnel {
+		initialPublic = ""
+	}
 	s := &server{
-		public:      strings.TrimRight(*public, "/"),
+		public:      initialPublic,
 		cfg:         cfg,
 		fails:       newLimiter(failWindow, failMax),
 		newSessions: newLimiter(time.Minute, 30),
@@ -78,6 +104,24 @@ func main() {
 		stems:       newStemsProxy(target, *stemsToken),
 	}
 	s.spotify = newSpotifyAuth(filepath.Join(*stateDir, "spotify-https-ok.json"), s.public+"/oauth/spotify/callback")
+
+	tunnelCtx, tunnelCancel := context.WithCancel(context.Background())
+	defer tunnelCancel()
+	if autoTunnel {
+		go func() {
+			u, err := startQuickTunnel(tunnelCtx, *listen, *stateDir, func(url string) {
+				s.setPublicURL(url)
+				log.Printf("enginex-relay (sc5000-relay) quick tunnel active: %s", url)
+			})
+			if err != nil && tunnelCtx.Err() == nil {
+				log.Printf("enginex-relay (sc5000-relay) quick tunnel error: %v", err)
+				return
+			}
+			if u != "" {
+				s.setPublicURL(u)
+			}
+		}()
+	}
 
 	srv := &http.Server{
 		Addr:              *listen,
@@ -90,12 +134,17 @@ func main() {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 		<-ch
+		tunnelCancel()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		s.browser.close()
 		_ = srv.Shutdown(ctx)
 	}()
-	log.Printf("sc5000-relay listening on %s (public %s)", *listen, s.public)
+	pubLabel := s.publicURL()
+	if pubLabel == "" {
+		pubLabel = "auto-quick-tunnel"
+	}
+	log.Printf("enginex-relay (sc5000-relay) listening on %s (public %s)", *listen, pubLabel)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -187,7 +236,7 @@ func validProvider(p string) bool {
 }
 
 func (s *server) mobileURL(provider, token string) string {
-	return s.public + "/m/" + provider + "?t=" + token
+	return s.publicURL() + "/m/" + provider + "?t=" + token
 }
 
 func (s *server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
