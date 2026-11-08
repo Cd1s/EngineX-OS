@@ -1034,7 +1034,10 @@ func cueSections(cues []rekordbox.Cue, extended bool) [][]byte {
 				binary.BigEndian.PutUint32(p[36:], end)
 				payload = append(payload, p...)
 			} else {
-				label := utf16.Encode([]rune(c.Name + "\x00"))
+				var label []uint16
+				if c.Name != "" {
+					label = utf16.Encode([]rune(c.Name + "\x00"))
+				}
 				p := make([]byte, 48+2*len(label))
 				copy(p, "PCP2")
 				binary.BigEndian.PutUint32(p[4:], 16)
