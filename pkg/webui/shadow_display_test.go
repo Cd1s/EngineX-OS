@@ -166,7 +166,9 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 		t.Fatal("rollback setting lost")
 	}
 	resp = get("/v1/sc5000/shadow")
-	if resp.Header.Get("X-Shadow-State")!="" {t.Fatal("legacy responses must always be applied")}
+	if resp.Header.Get("X-Shadow-State") != "" {
+		t.Fatal("legacy responses must always be applied")
+	}
 	json.NewDecoder(resp.Body).Decode(&state)
 	resp.Body.Close()
 	if state.DisplayOnly {
@@ -383,29 +385,48 @@ func TestBridgeDetailsBelongToLibraryPathAndDuration(t *testing.T) {
 }
 
 func TestLegacyExcludesStaleSourceWithoutDisplayFlapping(t *testing.T) {
-	s:=New(Config{UIDir:t.TempDir(),StateDir:t.TempDir()},nil);defer s.Close()
-	now:=time.Now()
-	p:=peerDeck{deckState:deckState{Deck:2,Key:"track-a",Stale:true,Playing:true,PositionMS:1234},at:now}
-	s.shadow.peerDecks[2]=p
-	s.shadow.display.entries=map[string]*shadowDisplayEntry{displayPeerID(p):{asset:testDisplayAsset()}}
-	if d:=s.shadowComposeLegacy("13",now);len(d)!=0 {t.Fatalf("legacy took stale source: %+v",d)}
-	if d:=s.shadowComposeDisplay("13",now);len(d)!=1 || !d[0].Stale || d[0].PositionMS!=1234 {t.Fatalf("display discarded/followed stale source: %+v",d)}
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	now := time.Now()
+	p := peerDeck{deckState: deckState{Deck: 2, Key: "track-a", Stale: true, Playing: true, PositionMS: 1234}, at: now}
+	s.shadow.peerDecks[2] = p
+	s.shadow.display.entries = map[string]*shadowDisplayEntry{displayPeerID(p): {asset: testDisplayAsset()}}
+	if d := s.shadowComposeLegacy("13", now); len(d) != 0 {
+		t.Fatalf("legacy took stale source: %+v", d)
+	}
+	if d := s.shadowComposeDisplay("13", now); len(d) != 1 || !d[0].Stale || d[0].PositionMS != 1234 {
+		t.Fatalf("display discarded/followed stale source: %+v", d)
+	}
 }
 
 func TestDisplayKeyStaysStableUntilConfirmedTrackReload(t *testing.T) {
-	s:=New(Config{UIDir:t.TempDir(),StateDir:t.TempDir()},nil);defer s.Close()
-	s.shadow.dataRoot=t.TempDir()
-	if err:=os.WriteFile(filepath.Join(s.shadow.dataRoot,"song.mp3"),[]byte("audio"),0600);err!=nil {t.Fatal(err)}
-	post:=func(net string)string {
-		t.Helper()
-		body,_:=json.Marshal([]deckState{{Deck:1,Net:net}})
-		w:=httptest.NewRecorder();s.decksPost(w,httptest.NewRequest("POST","/v1/sc5000/decks",bytes.NewReader(body)))
-		if w.Code!=200 {t.Fatal(w.Code)}
-		s.shadow.mu.Lock();defer s.shadow.mu.Unlock();return s.shadow.own[0].Key
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	s.shadow.dataRoot = t.TempDir()
+	if err := os.WriteFile(filepath.Join(s.shadow.dataRoot, "song.mp3"), []byte("audio"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	path:="net://uuid/(Unknown)/song.mp3"
-	first:=post(path)
-	if first=="" || post(path)!=first {t.Fatal("steady source posts changed the asset key")}
-	if post("")!="" {t.Fatal("eject did not clear the loaded key")}
-	if post(path)==first {t.Fatal("reloading the same file reused stale grid/assets")}
+	post := func(net string) string {
+		t.Helper()
+		body, _ := json.Marshal([]deckState{{Deck: 1, Net: net}})
+		w := httptest.NewRecorder()
+		s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", bytes.NewReader(body)))
+		if w.Code != 200 {
+			t.Fatal(w.Code)
+		}
+		s.shadow.mu.Lock()
+		defer s.shadow.mu.Unlock()
+		return s.shadow.own[0].Key
+	}
+	path := "net://uuid/(Unknown)/song.mp3"
+	first := post(path)
+	if first == "" || post(path) != first {
+		t.Fatal("steady source posts changed the asset key")
+	}
+	if post("") != "" {
+		t.Fatal("eject did not clear the loaded key")
+	}
+	if post(path) == first {
+		t.Fatal("reloading the same file reused stale grid/assets")
+	}
 }
