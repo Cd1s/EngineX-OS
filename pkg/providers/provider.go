@@ -28,7 +28,8 @@ type Track struct {
 	DurationMS int64    `json:"durationMs"`
 	Provider   string   `json:"provider"`
 	BPM        float64  `json:"bpm,omitempty"`
-	Key        string   `json:"key,omitempty"` // Camelot, e.g. 8A
+	Key        string   `json:"key,omitempty"`    // Camelot, e.g. 8A
+	Rating     int      `json:"rating,omitempty"` // 1-5 stars
 	// PreviewOnly marks a SoundCloud Go+ track that plays only a preview without a Go+ login.
 	PreviewOnly bool `json:"previewOnly,omitempty"`
 	// CoverURL is the album artwork, embedded in the downloaded file for the deck.

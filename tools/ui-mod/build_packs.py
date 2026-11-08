@@ -2420,9 +2420,49 @@ def edits(dev: bool):
         ],
         v + "BrowseView/Components/SortMenu/SortMenu.qml": [
             (
+                (
+                    "		visible: Planck.getProperty(\"/Client/Librarian/CollectionCategories\").translator.string === CollectionCategoryPlanck\n"
+                    "				|| Planck.librarianController.streamingInterfaceController.hasSortMenu\n",
+                    "		visible: Planck.getProperty(\"/Client/Librarian/CollectionCategories\").translator.string === CollectionCategoryPlanck\n"
+                    "				|| isStreamingProviderWithSort\n"
+                    "				|| Planck.librarianController.streamingInterfaceController.hasSortMenu\n",
+                ) if not v53() else (
+                    "    visible: Planck.getProperty(\"/Client/Librarian/CollectionCategories\").translator.string ===\n"
+                    "            CollectionCategoryPlanck ||\n"
+                    "        Planck.getProperty(\"/Client/Librarian/CollectionCategories\").translator.string ===\n"
+                    "            CollectionCategoryOfflineLibrary ||\n"
+                    "        Planck.librarianController.streamingInterfaceController.hasSortMenu\n",
+                    "    visible: Planck.getProperty(\"/Client/Librarian/CollectionCategories\").translator.string ===\n"
+                    "            CollectionCategoryPlanck ||\n"
+                    "        Planck.getProperty(\"/Client/Librarian/CollectionCategories\").translator.string ===\n"
+                    "            CollectionCategoryOfflineLibrary ||\n"
+                    "        isStreamingProviderWithSort ||\n"
+                    "        Planck.librarianController.streamingInterfaceController.hasSortMenu\n",
+                )
+            ),
+            (
                 "    readonly property bool isStreamingProviderWithSort: collectionController.isCurrentCollectionStreaming &&\n"
                 "        Planck.librarianController.streamingInterfaceController.hasSortMenu\n",
-                "    readonly property bool isStreamingProviderWithSort: collectionController.isCurrentCollectionStreaming\n",
+                "    readonly property bool isStreamingProviderWithSort: Boolean(collectionController && collectionController.isCurrentCollectionStreaming)\n",
+            ),
+            (
+                (
+                    "		property var menuRoles: {\n"
+                    "			if(showButton) {\n"
+                    "				var result = [",
+                    "		property var menuRoles: {\n"
+                    "			if(showButton) {\n"
+                    '				if (isStreamingProviderWithSort) return showPlayOrderRole ? ["song", "bpm", "artist", "key", "rating", "length", "playOrder"] : ["song", "bpm", "artist", "key", "rating", "length"]\n'
+                    "				var result = [",
+                ) if not v53() else (
+                    "    property var menuRoles: {\n"
+                    "        if (showButton) {\n"
+                    "            var result = [\n",
+                    "    property var menuRoles: {\n"
+                    "        if (showButton) {\n"
+                    '            if (isStreamingProviderWithSort) return showPlayOrderRole ? ["song", "bpm", "artist", "key", "rating", "length", "playOrder"] : ["song", "bpm", "artist", "key", "rating", "length"]\n'
+                    "            var result = [\n",
+                )
             ),
             (
                 "    onSortRoleChanged: {\n"
@@ -2436,16 +2476,46 @@ def edits(dev: bool):
                 "            dialog.sortRole = sortRole\n"
                 "        }\n"
                 "        responsiveBrowseView.sortRole = sortRole\n"
+                "        scPostSortSettings()\n"
+                "    }\n"
+                "    onSortOrderChanged: {\n"
+                "        scPostSortSettings()\n"
+                "    }\n"
+                "    function scPostSortSettings() {\n"
+                "        if (!isStreamingProviderWithSort) return\n"
                 "        try {\n"
                 "            var scReq = new XMLHttpRequest()\n"
-                "            scReq.open(\"POST\", \"http://127.0.0.1:8080/v1/sc5000/ui\")\n"
-                "            scReq.setRequestHeader(\"Content-Type\", \"application/json\")\n"
+                '            scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", false)\n'
+                '            scReq.setRequestHeader("Content-Type", "application/json")\n'
                 "            scReq.send(JSON.stringify({\n"
-                '                "streamSortRole": sortRole,\n'
+                '                "streamSortRole": sortRole === "playOrder" ? "default" : sortRole,\n'
                 '                "streamSortOrder": sortOrder === Qt.DescendingOrder ? "desc" : "asc"\n'
                 "            }))\n"
                 "        } catch (e) {}\n"
                 "    }\n",
+            ),
+            (
+                "        dialog.collectionController = sortRow.collectionController\n",
+                "        dialog.collectionController = sortRow.collectionController\n"
+                "        dialog.sortRow = sortRow\n",
+            ),
+        ],
+        v + "BrowseView/Components/SortMenu/SortMenuDialog.qml": [
+            (
+                "    property AbstractCollectionController collectionController\n"
+                "    property SortControllerInterface sortController: PlanckGUI.views.sortController\n",
+                "    property AbstractCollectionController collectionController\n"
+                "    property var sortRow: null\n"
+                "    property SortControllerInterface sortController: PlanckGUI.views.sortController\n",
+            ),
+            (
+                "                        collectionController.sortColumn(cell.role, sortOrder, false)\n"
+                "                        onScreen = false\n",
+                "                        if (sortRow && sortRow.isStreamingProviderWithSort) {\n"
+                "                            sortRow.sortRole = cell.role\n"
+                "                        }\n"
+                "                        collectionController.sortColumn(cell.role, sortOrder, false)\n"
+                "                        onScreen = false\n",
             ),
         ],
         v + "BrowseView/Components/Components/SortRole.qml": [(
@@ -2466,6 +2536,53 @@ def edits(dev: bool):
             "        target: pBlockedByStreaming ? pBlockedByStreaming.translator : null\n"
             "        function onStateChanged() {\n"
             "            if (pBlockedByStreaming.translator.state) pBlockedByStreaming.translator.state = false\n"
+            "        }\n"
+            "    }\n",
+        )]
+        out["Skins/UIKit/Elements/StatusBar/SortMenuDialog.qml"] = [(
+            "                    onClicked: {\n"
+            "                        if (sortMenuDialog.sortViewModel) {\n"
+            "                            sortMenuDialog.sortViewModel.selectRole(modelData.role)\n"
+            "                        }\n"
+            "                        onScreen = false\n"
+            "                    }\n",
+            "                    onClicked: {\n"
+            "                        const cc = Planck.librarianController.currentCollectionController\n"
+            "                        if (cc && cc.isCurrentCollectionStreaming) {\n"
+            "                            try {\n"
+            "                                var scReq = new XMLHttpRequest()\n"
+            '                                scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", false)\n'
+            '                                scReq.setRequestHeader("Content-Type", "application/json")\n'
+            "                                scReq.send(JSON.stringify({\n"
+            '                                    "streamSortRole": modelData.role === "playOrder" ? "default" : modelData.role\n'
+            "                                }))\n"
+            "                            } catch (e) {}\n"
+            "                        }\n"
+            "                        if (sortMenuDialog.sortViewModel) {\n"
+            "                            sortMenuDialog.sortViewModel.selectRole(modelData.role)\n"
+            "                        }\n"
+            "                        onScreen = false\n"
+            "                    }\n",
+        )]
+        out["Skins/UIKit/Elements/StatusBar/SortOrderButton.qml"] = [(
+            "    onClicked: {\n"
+            "        if (sortViewModel) sortViewModel.toggleOrder()\n"
+            "    }\n",
+            "    onClicked: {\n"
+            "        if (sortViewModel) {\n"
+            "            const cc = Planck.librarianController.currentCollectionController\n"
+            "            if (cc && cc.isCurrentCollectionStreaming) {\n"
+            "                var willBeAsc = !sortViewModel.isAscending\n"
+            "                try {\n"
+            "                    var scReq = new XMLHttpRequest()\n"
+            '                    scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", false)\n'
+            '                    scReq.setRequestHeader("Content-Type", "application/json")\n'
+            "                    scReq.send(JSON.stringify({\n"
+            '                        "streamSortOrder": willBeAsc ? "asc" : "desc"\n'
+            "                    }))\n"
+            "                } catch (e) {}\n"
+            "            }\n"
+            "            sortViewModel.toggleOrder()\n"
             "        }\n"
             "    }\n",
         )]

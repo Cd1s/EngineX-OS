@@ -32,7 +32,7 @@ var (
 	// TIDAL logs in through Engine's own flow against TIDAL's servers.
 	loginServices = []string{"netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
 
-	uiStreamSortRoles  = []string{"default", "bpm", "key", "rating", "song", "artist"}
+	uiStreamSortRoles  = []string{"default", "bpm", "key", "rating", "song", "artist", "length"}
 	uiStreamSortOrders = []string{"asc", "desc"}
 	uiSyncGuardPcts    = []int{0, 10, 15, 20}
 	// UI Scale presets: the QML mod scales the loaded UI live (EmbeddedMain uiLoader).
