@@ -29,7 +29,7 @@ func allowBroadcast(c *net.UDPConn) error {
 // Only explicitly selected device nodes are opened, with O_NONBLOCK.
 type usbDevice struct {
 	file *os.File
-	fd uintptr
+	fd   uintptr
 	udmx bool
 }
 
@@ -70,12 +70,14 @@ func openUSB(o Output) (usbOutput, error) {
 		if err != nil {
 			return nil, err
 		}
-		if n != len(desc) { return nil, errors.New("short USB device descriptor") }
+		if n != len(desc) {
+			return nil, errors.New("short USB device descriptor")
+		}
 		if desc[8] != 0xc0 || desc[9] != 0x16 || desc[10] != 0xdc || desc[11] != 0x05 {
 			return nil, errors.New("selected USB device is not uDMX 16c0:05dc")
 		}
 		ok = true
-		return &usbDevice{file: f, fd:fd, udmx: true}, nil
+		return &usbDevice{file: f, fd: fd, udmx: true}, nil
 	}
 	// asm-generic termios2 (ARM and x86): 250000 baud, 8N2, raw mode.
 	var t struct {
@@ -93,7 +95,7 @@ func openUSB(o Output) (usbOutput, error) {
 		return nil, err
 	}
 	ok = true
-	return &usbDevice{file: f, fd:fd}, nil
+	return &usbDevice{file: f, fd: fd}, nil
 }
 
 func (u *usbDevice) Send(frame [512]byte) error {
