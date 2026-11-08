@@ -233,9 +233,7 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 			l.Playlists[i].Tracks = append(l.Playlists[i].Tracks, e.track)
 		}
 	}
-	if len(entries) != 0 {
-		return nil, fmt.Errorf("pdb: entries reference missing playlists")
-	}
+	// Rekordbox leaves entries of deleted playlists behind; ignore them.
 	if err := l.Validate(); err != nil {
 		return nil, err
 	}

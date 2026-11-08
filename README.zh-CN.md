@@ -21,7 +21,7 @@
 **EngineX OS 5.3.0.3** 是基于官方 Engine OS 5.3.0+ 底层重构的定制系统，支持天龙 Denon DJ、Numark 与 Rane 全系 16 款独立设备：
 `SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro` · `SC LIVE 4` · `SC LIVE 2` · `PRIME 4+` · `PRIME GO+` · `Mixstream Pro+` · `Mixstream Pro Go` · `PRIME 4 G2` · `Rane SYSTEM ONE`。
 
-前八款用 U 盘刷 `.img`；后八款二代机的固件带签名校验，改用 `/data` 数据包（Beta，见[如何安装与升级](#install)）。
+前八款用 U 盘刷 `.img`；后八款二代机的升级程序会在写入前用软件校验固件签名，改用 `/data` 数据包（Beta，见[如何安装与升级](#install)）。
 
 操作界面与原厂保持一致，直接通过 U 盘刷入即可解锁以下功能。
 
@@ -43,7 +43,7 @@
 - 手机扫描碟机屏幕上的二维码即可登录个人账号，直接浏览红心歌单、收藏夹并在线搜歌；
 - 支持 **无损 FLAC / 320k MP3** 音质切换；播放过的曲目自动缓存在碟机内部存储，再次加载直接秒开，绝不重复下载。
 - **Beatport** 使用你自己的账号与订阅：Professional 下载 FLAC 或 256k AAC，Advanced 下载 128k AAC，Essential 在线播放 128k AAC 流；Beatport 曲目同样可以一键拆 Stems。
-- **Apple Music**：在手机上粘贴任意歌单或专辑链接即可，不需要账号；再填入 `media-user-token` 就能浏览自己的资料库。Apple Music 的音频受保护，所以每首歌按 ISRC 或歌名加歌手匹配，从 Deezer（无损 FLAC）或网易云播放。
+- **Apple Music**：在手机上粘贴任意歌单或专辑链接即可，不需要账号；再填入 `media-user-token` 就能浏览自己的资料库。播放走 Engine 5.3.0 自带的 Apple Music 音源（EngineX 负责解锁），不再匹配 Deezer 或网易云。
 
 ### 3. 先锋 Rekordbox U 盘即插即用（免电脑转换）
 平时给先锋 CDJ 导出的 Rekordbox U 盘，直接插上即可上台打碟：
@@ -234,7 +234,7 @@ EngineX-Installer 支持一代与二代机，无需输入 IP 或选择机型，�
 
 SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboot`、Python 3 和 e2fsprogs；Windows 请在有 USB 访问权限的 WSL 中运行 Linux 包。**刷入新的 `/data` 镜像会清空该分区上的音乐、曲库和设置。**请先备份碟机数据，安装前拔下 U 盘和 SD 卡。要保留 `/data`，请通过 `--userdata-backup` 提供该碟机的完整分区镜像。本 Beta 尚未在实机验证。
 
-**SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go、PRIME 4 G2 和 Rane SYSTEM ONE**（#61、#68、#69、#76）的固件带签名校验，不接受改过的 `.img`。EngineX OS 以 `/data` 数据包的形式装在官方 Engine OS 5.3.0 之上，不改动系统分区。**这些机器千万不要刷 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO` 的 `.img`。** 数据包已在官方根文件系统上通过沙箱测试，还没在实机上试过，欢迎反馈结果。
+**SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go、PRIME 4 G2 和 Rane SYSTEM ONE**（#61、#68、#69、#76）没有硬件 eFuse 熔断锁死，原厂升级程序（`az01-update` / `az0x-splash`）是在软件层用 `denon-1` / `rane-1` 公钥校验 `AZ0x` 固件容器签名。在原厂未改装状态下，刷入修改过的 `.img` 或一代机的 `.img`（如 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO`）会在写入前的 `Verifying`（校验）阶段直接被软件拒签退回，根本不会写入闪存，更不会触发熔断或变砖。首次安装请使用对应二代型号的 `Data-Bundle.tar.gz` 或 `EngineX-Installer`（装入 `/data/enginex`，不改动只读系统分区，卸载即恢复原厂）；首次装好后，后续新版本可直接在碟机屏幕 **设置 → 关于 / 更新** 一键在线 OTA 升级。
 
 <details>
 <summary>高级用户：手动命令行安装 / 卸载说明</summary>
@@ -286,7 +286,7 @@ SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboo
 
 </details>
 
-> **PRIME 4 G2 / SYSTEM ONE（64 位 Engine）**：已包含 UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和 EngineX 各项服务。DSP 防护、0dB 防破音软限幅与自动增益、SQLite 调优和 4 台面解锁还没移植到 64 位 Engine；Stems 保持官方固件原样。这份 Engine 启动要用机器的安全芯片（OP-TEE），沙箱里只验证了 hook、内存补丁和 UI 包加载，没看到实际界面。
+> **PRIME 4 G2 / SYSTEM ONE（64 位 Engine）**：已包含 UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和 EngineX 各项服务。同时带有 16 处 Engine 二进制补丁（含原厂 Apple Music 解锁）、14 处音频与过渡 DSP 防护、0dB 防破音软限幅、自动增益、推子切歌回音（Echo Out）、SQLite 调优，以及 64 位 `OfflineAnalyzer` 的 `.perf` 波形直注（#149）。4 台面解锁只适用于单机播放器；Stems 保持官方固件原样。这份 Engine 启动要用机器的安全芯片（OP-TEE），沙箱里只验证了 hook、内存补丁和 UI 包加载，没看到实际界面。
 
 ### 方式二：碟机屏幕一键在线升级（已安装本系统后）
 - 连接 Wi-Fi 或网线后，打开碟机 **设置 → 关于 / 更新**；
@@ -309,9 +309,10 @@ powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs
 | 平台 | 怎么登录 |
 | --- | --- |
 | 网易云音乐 | 用网易云音乐 App 扫碟机屏幕上的二维码并确认。二维码过期后点一下就会换新的。 |
-| Spotify | 第 1 步：点「打开 Spotify 登录」并同意。第 2 步：随后会打开一个以 `127.0.0.1` 开头、无法访问的页面，复制它的地址，点「粘贴并连接」。 |
-| Deezer | 粘贴你的 **ARL**（页面教程演示怎样在电脑上从 deezer.com 复制）。同一次登录也为 Spotify、网易云和 Deezer 曲目打开 Deemix 无损 FLAC 下载。只填资料页链接则只显示公开歌单、不能下载。 |
-| SoundCloud | 填用户名或主页链接即可，不用密码、不用 Artist Pro、也不用申请 API。私密歌单在「高级」里粘贴 soundcloud.com 的 `oauth_token`。 |
+| Spotify | **方式 A（推荐）**：手机或电脑打开 Spotify App 播放任意歌曲，点右下角「连接设备」音箱图标，选择 **`EngineX OS`** 约 1 秒自动完成账号绑定。**方式 B**：点 Spotify 右侧的「扫码登录」用手机扫码。直接从 Spotify 拉取 320kbps Ogg Vorbis 原生音频播放。 |
+| Deezer | 粘贴你的 **ARL**（页面教程演示怎样在电脑上从 deezer.com 复制）。同一次登录为 Deezer 曲目打开 Deemix 无损 FLAC 下载；网易云只有选了「Deemix 优先」才会用到它。其余平台都只从自己的音源播放，不会跨平台兜底。只填资料页链接则只显示公开歌单、不能下载。 |
+| SoundCloud | 填用户名或主页链接即可，不用密码、不用 Artist Pro、也不用申请 API。私密歌单在「高级」里粘贴 soundcloud.com 的 `oauth_token`。每首歌按它能提供的最高音质播放：允许下载的用上传者原档，其次 256kbps AAC、160kbps AAC、128kbps MP3。 |
+| Apple Music | 已解锁 Engine 5.3.0 自带的 Apple Music 音源，直接从 Apple Music 播放，EngineX 不再去 Deezer 或网易云找替身。手机上仍可粘贴歌单链接，或填 `media-user-token` 浏览自己的资料库。 |
 | Beatport | 填 Beatport 邮箱和密码，碟机只保存登录令牌。 |
 
 ### 选配：自建登录中继

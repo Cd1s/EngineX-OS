@@ -302,6 +302,8 @@ multi-function program with two complete update engines:
    key drivers, and recovery environment; locate actual USB scan and filename.
 3. Identify ADC channel 1 wiring using schematics or non-destructive measurement,
    then perform explicitly supervised hardware verification.
-4. Establish RKSS/secure-boot fuse state independently. Absence of an RKSS
-   magic in one image does not prove fuse state or that modified boot stages
-   will boot. No flash, bypass, or hardware test was performed here.
+4. Verify the full end-to-end software signature chain (`az01-update` / `az0x-splash`
+   container RSA check -> U-Boot FIT verification -> `dm-verity` rootfs) in a
+   sandbox before any on-device image test. No hardware eFuse lock is used by the
+   updater; modified `.img` files on a stock system are rejected in software at the
+   `Verifying` step before any partition write occurs.

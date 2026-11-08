@@ -109,8 +109,11 @@ func (r *exportRun) beatPacket(d ExportDeck, inBar int, frac float64) []byte {
 // crosses a beat.
 func (r *exportRun) beatLoop() {
 	defer r.wg.Done()
-	tick := time.NewTicker(5 * time.Millisecond)
+	// Idle: poll slowly. Only a deck playing as master needs beat-accurate 5 ms polling.
+	const idlePoll, playPoll = 50 * time.Millisecond, 5 * time.Millisecond
+	tick := time.NewTicker(idlePoll)
 	defer tick.Stop()
+	fast := false
 	last := -1
 	for {
 		select {
@@ -119,6 +122,14 @@ func (r *exportRun) beatLoop() {
 		case now := <-tick.C:
 			r.mu.Lock()
 			beat, frac, ok := r.deck.beatAt(now)
+			if ok != fast {
+				fast = ok
+				if ok {
+					tick.Reset(playPoll)
+				} else {
+					tick.Reset(idlePoll)
+				}
+			}
 			if !ok {
 				last = -1
 			} else if beat != last {
@@ -264,6 +275,7 @@ func (e *Exporter) TrackPath(id uint32) string {
 
 type exportPeer struct {
 	number byte
+	name   string
 	seen   time.Time
 	ip     net.IP
 }
@@ -662,7 +674,7 @@ func (r *exportRun) receivePeers() {
 			r.db.closeClients()
 			continue
 		}
-		r.peers[key] = exportPeer{number: d.Number, seen: time.Now(), ip: append(net.IP(nil), addr.IP...)}
+		r.peers[key] = exportPeer{number: d.Number, name: d.Name, seen: time.Now(), ip: append(net.IP(nil), addr.IP...)}
 		old := r.player
 		// No disk, menu work, or periodic timer on the collision path.
 		if old == d.Number {
@@ -874,10 +886,10 @@ func (r *exportRun) statusPacket() []byte {
 	b := linkPacket(0x0a, 0x11c, 11)
 	b[0x20], b[0x21], b[0x24], b[0x26] = 4, r.player, r.player, 1
 	binary.BigEndian.PutUint16(b[0x22:], uint16(len(b)-0x24))
-	b[0x6a], b[0x6b], b[0x6f], b[0x73] = 4, 4, 0, 4 // USB mounted, no SD
-	b[0x75] = 1                                     // LINK available while the exported USB is mounted
-	binary.BigEndian.PutUint16(b[0x90:], 0x7fff)    // no loaded track / meaningful master BPM
-	copy(b[0x7c:0x80], "1.00")
+	b[0x6a], b[0x6b], b[0x6f], b[0x73] = 4, 4, 0, 4             // USB mounted, no SD
+	b[0x75] = 1                                                 // LINK available while the exported USB is mounted
+	binary.BigEndian.PutUint16(b[0x90:], 0x7fff)                // no loaded track / meaningful master BPM
+	copy(b[0x7c:0x80], "3.30")                                  // newer than every Pioneer unit's minimum, no "older firmware" warning
 	b[0x89], b[0x8b], b[0x9f], b[0xcc] = 0x84, 0x7e, 0xff, 0x0f // idle, no master/sync
 	for _, off := range []int{0x8c, 0x98, 0xc0, 0xc4} {
 		binary.BigEndian.PutUint32(b[off:], 0x00100000)
@@ -926,13 +938,12 @@ func (r *exportRun) peerIPsLocked() []net.IP {
 
 func (r *exportRun) sendStatus() {
 	r.mu.Lock()
-	peers := r.peerIPsLocked()
-	r.mu.Unlock()
-	for _, ip := range peers {
-		r.mu.Lock()
-		if r.player != 0 {
-			r.sendLocked(r.status, r.statusPacket(), &net.UDPAddr{IP: ip, Port: 50002})
-		}
-		r.mu.Unlock()
+	defer r.mu.Unlock()
+	if r.player == 0 {
+		return
+	}
+	pkt := r.statusPacket() // identical for every peer
+	for _, ip := range r.peerIPsLocked() {
+		r.sendLocked(r.status, pkt, &net.UDPAddr{IP: ip, Port: 50002})
 	}
 }

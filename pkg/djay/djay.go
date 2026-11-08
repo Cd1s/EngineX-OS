@@ -84,6 +84,9 @@ func Discover(mountRoot string) ([]Library, error) {
 		filepath.Join(mountRoot, "djay Media Library", "djay_music_library.db"),
 		filepath.Join(mountRoot, "Algoriddim", "djay_music_library.db"),
 		filepath.Join(mountRoot, "djay_music_library.db"),
+		filepath.Join(mountRoot, "djay Media Library", "MediaLibrary.db"),
+		filepath.Join(mountRoot, "Algoriddim", "MediaLibrary.db"),
+		filepath.Join(mountRoot, "MediaLibrary.db"),
 	}
 
 	for _, dbPath := range dbCandidates {
@@ -166,7 +169,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 		if tbl == "" {
 			return cols
 		}
-		cRows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", tbl))
+		cRows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", quoteIdent(tbl)))
 		if err != nil {
 			return cols
 		}
@@ -186,7 +189,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 	findCol := func(cols map[string]string, candidates ...string) string {
 		for _, c := range candidates {
 			if actual, ok := cols[strings.ToLower(c)]; ok {
-				return actual
+				return quoteIdent(actual)
 			}
 		}
 		return ""
@@ -202,7 +205,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 	trCols := getCols(trackTable)
 	idCol := findCol(trCols, "id", "rowid", "uuid", "track_id")
 	if idCol == "" {
-		idCol = "rowid"
+		idCol = `"rowid"`
 	}
 	pathCol := findCol(trCols, "path", "file_path", "filepath", "relative_path", "url", "location")
 	titleCol := findCol(trCols, "title", "name")
@@ -223,7 +226,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 		colOrLit(keyCol, "''"),
 		colOrLit(durCol, "0.0"),
 		colOrLit(offsetCol, "0.0"),
-		trackTable,
+		quoteIdent(trackTable),
 	)
 
 	tRows, err := db.QueryContext(ctx, trQuery)
@@ -304,7 +307,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 				cPosCol,
 				colOrLit(cLabelCol, "''"),
 				colOrLit(cColorCol, "''"),
-				cueTable,
+				quoteIdent(cueTable),
 			)
 			if cSlotCol != "" {
 				cueQuery += fmt.Sprintf(" ORDER BY %s", cSlotCol)
@@ -367,7 +370,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 				lStartCol,
 				lLenCol,
 				colOrLit(lLabelCol, "''"),
-				loopTable,
+				quoteIdent(loopTable),
 			)
 			if lSlotCol != "" {
 				loopQuery += fmt.Sprintf(" ORDER BY %s", lSlotCol)
@@ -447,11 +450,11 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 		plCols := getCols(playlistTable)
 		plIdCol := findCol(plCols, "id", "rowid", "uuid", "list_id")
 		if plIdCol == "" {
-			plIdCol = "rowid"
+			plIdCol = `"rowid"`
 		}
 		plNameCol := findCol(plCols, "name", "title")
 
-		plQuery := fmt.Sprintf("SELECT %s, %s FROM %s", plIdCol, colOrLit(plNameCol, "''"), playlistTable)
+		plQuery := fmt.Sprintf("SELECT %s, %s FROM %s", plIdCol, colOrLit(plNameCol, "''"), quoteIdent(playlistTable))
 		plRows, err := db.QueryContext(ctx, plQuery)
 		if err == nil {
 			defer plRows.Close()
@@ -481,7 +484,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 		orderCol := findCol(itemCols, "position", "sort_order", "item_order", "rank", "index", "id", "rowid")
 
 		if pIdCol != "" && tIdCol != "" {
-			itemQuery := fmt.Sprintf("SELECT %s, %s FROM %s", pIdCol, tIdCol, playlistItemTable)
+			itemQuery := fmt.Sprintf("SELECT %s, %s FROM %s", pIdCol, tIdCol, quoteIdent(playlistItemTable))
 			if orderCol != "" {
 				itemQuery += fmt.Sprintf(" ORDER BY %s", orderCol)
 			}
@@ -681,7 +684,15 @@ func parseM3UFile(mountRoot, m3uPath string) (*Playlist, error) {
 }
 
 func parseExtDjay(line string) (bpm float64, key string, offset float64, cues []CuePoint, loops []SavedLoop) {
-	parts := strings.Split(line, ",")
+	// A segment without "=" continues the previous value (a label with a comma).
+	var parts []string
+	for _, seg := range strings.Split(line, ",") {
+		if n := len(parts); n > 0 && !strings.Contains(seg, "=") {
+			parts[n-1] += "," + seg
+		} else {
+			parts = append(parts, seg)
+		}
+	}
 	for _, part := range parts {
 		k, v, found := strings.Cut(part, "=")
 		if !found {
@@ -705,6 +716,9 @@ func parseExtDjay(line string) (bpm float64, key string, offset float64, cues []
 	return
 }
 
+// quoteIdent makes a table or column name safe in SQL ("index", "order", ...).
+func quoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+
 func parseM3UCues(v string) []CuePoint {
 	var cues []CuePoint
 	items := strings.Split(v, ";")
@@ -721,12 +735,12 @@ func parseM3UCues(v string) []CuePoint {
 		if len(parts) >= 2 {
 			cp.PositionMS, _ = strconv.ParseFloat(parts[1], 64)
 		}
-		if len(parts) >= 3 {
-			cp.Label = parts[2]
+		mid := parts[min(2, len(parts)):]
+		if len(parts) >= 4 && strings.HasPrefix(parts[len(parts)-1], "#") {
+			cp.ColorHex = parseColorHex(parts[len(parts)-1])
+			mid = mid[:len(mid)-1]
 		}
-		if len(parts) >= 4 {
-			cp.ColorHex = parseColorHex(parts[3])
-		}
+		cp.Label = strings.Join(mid, ":") // labels may hold colons
 		cues = append(cues, cp)
 	}
 	return cues
@@ -752,7 +766,7 @@ func parseM3ULoops(v string) []SavedLoop {
 			sl.LengthMS, _ = strconv.ParseFloat(parts[2], 64)
 		}
 		if len(parts) >= 4 {
-			sl.Label = parts[3]
+			sl.Label = strings.Join(parts[3:], ":")
 		}
 		loops = append(loops, sl)
 	}

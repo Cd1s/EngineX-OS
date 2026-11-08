@@ -202,3 +202,50 @@ func TestSoundCloudWithoutCredentialsUsesTheWebAPI(t *testing.T) {
 		t.Fatalf("media %+v %v", m, err)
 	}
 }
+
+// The best stream wins over the 128 kbps MP3 that is listed first: hq (256 kbps) AAC,
+// then 160 kbps AAC; lossless also takes the original where downloads are allowed.
+func TestSoundCloudWebMediaPrefersHighestQuality(t *testing.T) {
+	const id = "0123456789abcdefABCDEF0123456789"
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".m3u8") {
+			io.WriteString(w, "#EXTM3U\n#EXTINF:10,\n"+strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/cdn/"), ".m3u8")+".m4s\n")
+			return
+		}
+		switch r.URL.Path {
+		case "/tracks/31", "/tracks/32":
+			dl := r.URL.Path == "/tracks/31"
+			io.WriteString(w, `{"policy":"ALLOW","downloadable":`+map[bool]string{true: "true", false: "false"}[dl]+`,"has_downloads_left":true,"media":{"transcodings":[
+				{"url":"`+srv.URL+`/media/mp3","format":{"protocol":"progressive","mime_type":"audio/mpeg"}},
+				{"url":"`+srv.URL+`/media/sq","quality":"sq","preset":"aac_160k","format":{"protocol":"hls","mime_type":"audio/mp4"}},
+				{"url":"`+srv.URL+`/media/hq","quality":"hq","preset":"aac_256k","format":{"protocol":"hls","mime_type":"audio/mp4"}}]}}`)
+		case "/tracks/31/download":
+			io.WriteString(w, `{"redirectUri":"`+srv.URL+`/orig.wav"}`)
+		case "/media/mp3":
+			io.WriteString(w, `{"url":"`+srv.URL+`/mp3"}`)
+		case "/media/sq":
+			io.WriteString(w, `{"url":"`+srv.URL+`/cdn/sq.m3u8"}`)
+		case "/media/hq":
+			io.WriteString(w, `{"url":"`+srv.URL+`/cdn/hq.m3u8"}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	t.Cleanup(func() { delete(scWebIDs, srv.URL) })
+	scWebIDs[srv.URL] = id
+	sc := &SoundCloud{WebURL: srv.URL, SiteURL: srv.URL}
+	ctx := context.Background()
+	m, err := sc.Media(ctx, "31", true)
+	if err != nil || m.Ext != "mp4" || strings.Join(m.URLs, " ") != srv.URL+"/cdn/hq.m4s" || m.Original != srv.URL+"/orig.wav" {
+		t.Fatalf("lossless %+v %v", m, err)
+	}
+	// Without lossless, or without downloads allowed, there is no original.
+	if m, err = sc.Media(ctx, "31", false); err != nil || m.Original != "" || m.Ext != "mp4" {
+		t.Fatalf("lossy %+v %v", m, err)
+	}
+	if m, err = sc.Media(ctx, "32", true); err != nil || m.Original != "" || m.Ext != "mp4" {
+		t.Fatalf("no downloads %+v %v", m, err)
+	}
+}

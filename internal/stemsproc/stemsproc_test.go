@@ -134,3 +134,30 @@ func TestBusyRelayFallsBackWithoutSplittingTheStream(t *testing.T) {
 	}
 	checkSession(t, in, out.Bytes())
 }
+
+// A renderer that read only the greeting may be replaced; once the stream is
+// past the replay window it may not.
+func TestMuxReplaysPrefixUntilCommitted(t *testing.T) {
+	data := bytes.Repeat([]byte("x"), replayLimit+10)
+	m := newStdinMux(bytes.NewReader(data))
+	v1 := m.view()
+	buf := make([]byte, 100)
+	if _, err := v1.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	if !v1.replayable() {
+		t.Fatal("not replayable after the greeting")
+	}
+	v1.abandon()
+	v2 := m.view()
+	got, err := io.ReadAll(io.LimitReader(v2, replayLimit))
+	if err != nil || !bytes.Equal(got, data[:replayLimit]) {
+		t.Fatalf("replay differs: %d bytes, %v", len(got), err)
+	}
+	if v2.replayable() {
+		_, _ = v2.Read(buf)
+	}
+	if v2.replayable() {
+		t.Fatal("still replayable past the window")
+	}
+}

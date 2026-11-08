@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
 
 const defaultUIDir = "/data/sc5000-custom/ui"
@@ -460,7 +462,9 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 			uiSettings
 			AccessCode string `json:"accessCode"`
 			ConsoleURL string `json:"consoleUrl"`
-		}{v, s.cfg.AccessToken, "http://" + lanHost() + ":8080"})
+			// LANStems: the home sc5000-stemsd last seen, for Settings -> About (#148).
+			LANStems *stems.LANState `json:"lanStems,omitempty"`
+		}{v, s.cfg.AccessToken, "http://" + lanHost() + ":8080", relay.LANStems})
 		return
 	}
 	respond(w, v)

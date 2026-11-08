@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -44,9 +45,11 @@ var tailscaleReleaseURL = "https://github.com/Cd1s/EngineX-OS/releases/download/
 var tailscaleGOARCH = runtime.GOARCH
 
 var (
-	tailscaleMu   sync.Mutex
-	tailscaleHost = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
-	tailscaleKey  = regexp.MustCompile(`^[A-Za-z0-9_-]{8,256}$`)
+	tailscaleMu sync.Mutex
+	// tailscaleServed: the forwards were applied since the daemon last left "Running".
+	tailscaleServed atomic.Bool
+	tailscaleHost   = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
+	tailscaleKey    = regexp.MustCompile(`^[A-Za-z0-9_-]{8,256}$`)
 )
 
 type TailscaleForward struct {
@@ -166,6 +169,7 @@ func (s *Server) tailscaleStart(ctx context.Context) error {
 }
 
 func (s *Server) tailscaleStop(ctx context.Context) {
+	tailscaleServed.Store(false)
 	_, _ = getSystemRunner()(ctx, "systemctl", "stop", tailscaleUnit)
 }
 
@@ -196,6 +200,23 @@ func (s *Server) tailscaleView(ctx context.Context) TailscaleStatusView {
 	return v
 }
 
+// tailscaleAutoServe applies the forwards once the browser login completes, so
+// they work without a reboot. The status poll drives it; a POST in flight serves itself.
+func (s *Server) tailscaleAutoServe(ctx context.Context, v TailscaleStatusView) {
+	if v.State != "Running" {
+		tailscaleServed.Store(false)
+		return
+	}
+	cfg := s.loadTailscaleConfig()
+	if !cfg.Enabled || !(cfg.Forward.SSH || cfg.Forward.WebUI) || tailscaleServed.Load() || !tailscaleMu.TryLock() {
+		return
+	}
+	defer tailscaleMu.Unlock()
+	if !tailscaleServed.Load() {
+		s.tailscaleServe(ctx, cfg)
+	}
+}
+
 func validLoginServer(raw string) error {
 	if raw == "" {
 		return nil
@@ -209,6 +230,7 @@ func validLoginServer(raw string) error {
 
 // tailscaleServe replaces the forwards with exactly the ticked services.
 func (s *Server) tailscaleServe(ctx context.Context, cfg TailscaleConfig) {
+	tailscaleServed.Store(true)
 	_, _ = s.tailscaleCmd(ctx, "serve", "reset")
 	ports := []int{}
 	if cfg.Forward.SSH {
@@ -319,7 +341,9 @@ func (s *Server) tailscaleLogin(ctx context.Context, cfg TailscaleConfig, authKe
 func (s *Server) handleTailscale(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		respond(w, s.tailscaleView(r.Context()))
+		v := s.tailscaleView(r.Context())
+		s.tailscaleAutoServe(r.Context(), v)
+		respond(w, v)
 	case http.MethodPost:
 		s.handleTailscalePost(w, r)
 	default:

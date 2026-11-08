@@ -431,21 +431,43 @@ func (g *tidalGateway) subscription(w http.ResponseWriter, r *http.Request) {
 // restart so the deck works without opening the phone console first.
 func (g *tidalGateway) sources() []*Session {
 	s := g.s
+	// Restoring a login can refresh tokens over the network (ready), so it runs
+	// outside s.mu; only the session map is touched under the lock.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.prune()
+	var restore []string
 	for _, name := range loginServices {
 		owned := false
 		for _, v := range s.sessions {
 			owned = owned || (!v.Guest && v.Provider == name)
 		}
-		if owned || s.ownerDeleted[name] || len(s.sessions) >= 16 {
+		if !(owned || s.ownerDeleted[name]) {
+			restore = append(restore, name)
+		}
+	}
+	s.mu.Unlock()
+	type restored struct {
+		name string
+		p    providers.Provider
+	}
+	var found []restored
+	for _, name := range restore {
+		if p, err := s.makeProvider(name, false, ""); err == nil && ready(p) {
+			found = append(found, restored{name, p})
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, f := range found {
+		owned := s.ownerDeleted[f.name]
+		for _, v := range s.sessions {
+			owned = owned || (!v.Guest && v.Provider == f.name)
+		}
+		if owned || len(s.sessions) >= 16 {
 			continue
 		}
-		if p, err := s.makeProvider(name, false, ""); err == nil && ready(p) {
-			id := providers.RandomID()
-			s.sessions[id] = &Session{ID: id, Provider: name, Ready: true, p: p, tracks: map[string]providers.Track{}, expires: time.Now().Add(8 * time.Hour)}
-		}
+		id := providers.RandomID()
+		s.sessions[id] = &Session{ID: id, Provider: f.name, Ready: true, p: f.p, tracks: map[string]providers.Track{}, expires: time.Now().Add(8 * time.Hour)}
 	}
 	var out []*Session
 	for _, v := range s.sessions {
@@ -468,9 +490,9 @@ func (g *tidalGateway) sources() []*Session {
 func ready(p providers.Provider) bool {
 	switch v := p.(type) {
 	case *providers.Spotify:
-		return v.Token.AccessToken != ""
+		return v.HasToken() || v.HasLinks()
 	case *providers.Netease:
-		return v.UserID != 0 && v.Cookie != ""
+		return v.LoggedIn()
 	case *providers.Deezer:
 		return v.UserID != ""
 	case *providers.SoundCloud:
@@ -502,6 +524,11 @@ func each[T, R any](ctx context.Context, in []T, fn func(context.Context, T) ([]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("gateway: provider panic: %v", r)
+				}
+			}()
 			r, err := fn(ctx, v)
 			if err != nil {
 				log.Printf("stream-sync: gateway source failed: %v", err)

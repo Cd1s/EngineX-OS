@@ -90,6 +90,10 @@ func readSQLRows(ctx context.Context, db *sql.DB, table string) ([]sqlRecord, er
 	if e != nil {
 		return nil, e
 	}
+	normCols := make([]string, len(cols))
+	for i, c := range cols {
+		normCols[i] = normalized(c)
+	}
 	out := make([]sqlRecord, 0)
 	for rows.Next() {
 		values := make([]any, len(cols))
@@ -105,9 +109,9 @@ func readSQLRows(ctx context.Context, db *sql.DB, table string) ([]sqlRecord, er
 			switch v := v.(type) {
 			case nil:
 			case []byte:
-				r[normalized(cols[i])] = string(v)
+				r[normCols[i]] = string(v)
 			default:
-				r[normalized(cols[i])] = fmt.Sprint(v)
+				r[normCols[i]] = fmt.Sprint(v)
 			}
 		}
 		out = append(out, r)
@@ -210,15 +214,13 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	for i, p := range l.Playlists {
 		byID[p.ID] = i
 	}
-	for _, r := range es {
-		if _, ok := byID[r.num("playlist_id")]; !ok {
-			return nil, fmt.Errorf("OneLibrary: orphan playlist entry")
-		}
-	}
 	type entry struct{ seq, id uint32 }
 	grouped := map[uint32][]entry{}
 	for _, r := range es {
 		id := r.num("playlist_id")
+		if _, ok := byID[id]; !ok { // orphan left by a deleted playlist
+			continue
+		}
 		grouped[id] = append(grouped[id], entry{r.num("sequenceNo", "track_no", "seq", "entry_index", "position"), r.num("content_id", "track_id")})
 	}
 	for i, p := range l.Playlists {

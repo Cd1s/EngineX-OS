@@ -403,18 +403,19 @@ static void after_mount(struct libmnt_context *ctx) {
     int pioneer=has_export(target);char lib[PATH_MAX];
     if(path_join(lib,sizeof lib,target,"Engine Library")||safe_path(lib,1)) {note("unsafe library path rejected on",target,errno);return;}
     struct stat existing;
-    if(!lstat(lib,&existing)) {
+    struct statfs f;struct statvfs v;
+    int hfs_ro=!statfs(target,&f)&&f.f_type==HFSPLUS_MAGIC&&!statvfs(target,&v)&&(v.f_flag&ST_RDONLY);
+    if(!hfs_ro&&!lstat(lib,&existing)) { // an HFS+ view is validated by prepare_view
         int fd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
         if(fd<0)return;
         int unsafe=copy_tree(fd,-1,deadline,0);close(fd);
         if(unsafe){note("unsafe library contents rejected on",target,errno);return;}
     }
-    struct statfs f;struct statvfs v;
-    if(!statfs(target,&f)&&f.f_type==HFSPLUS_MAGIC&&!statvfs(target,&v)&&(v.f_flag&ST_RDONLY)) {
+    if(hfs_ro) {
         char identity[80];
         if(volume_identity(mnt_context_get_source(ctx),identity)||prepare_view(target,identity,deadline)){note("HFS view unavailable on",target,errno);return;}
     }
-    if(pioneer){char *const a[]={"/usr/local/bin/rb-bridge","--mount-path",(char *)target,NULL};if(run(a,deadline))note("bridge failed on",target,errno);}
+    if(pioneer){const char *rb=access("/usr/local/bin/rb-bridge",X_OK)?"/data/enginex/bundle/bin/rb-bridge":"/usr/local/bin/rb-bridge";char *const a[]={(char *)rb,"--mount-path",(char *)target,NULL};if(run(a,deadline))note("bridge failed on",target,errno);}
     char db[PATH_MAX];
     if(!pioneer&&!path_join(db,sizeof db,lib,"Database2/m.db")&&!safe_path(db,0)) {
         char *const a[]={"/usr/local/bin/engine-guardian","--heal-mount",(char *)target,"--data-only",NULL};if(run(a,deadline))note("guardian failed on",target,errno);

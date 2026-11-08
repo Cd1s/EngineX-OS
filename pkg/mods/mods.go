@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -96,14 +98,40 @@ func (m *Manager) lifecycle(mod Mod, action string) error {
 	if m.runScript != nil {
 		return m.runScript(mod, action)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/bin/sh", filepath.Join(mod.Dir, mod.Script), action)
+	// stream-sync runs SCHED_IDLE, nice 19 and pinned to the background CPU; mod daemons must not
+	// inherit that. Reset best-effort inside the child before handing over to the script.
+	const reset = `chrt -o -p 0 $$ 2>/dev/null; renice -n 0 -p $$ >/dev/null 2>&1; taskset -pc 0-3 $$ >/dev/null 2>&1; exec /bin/sh "$@"`
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", reset, "sh", filepath.Join(mod.Dir, mod.Script), action)
 	cmd.Env = append(os.Environ(), "ENGINEX_MOD_ID="+mod.ID, "ENGINEX_MOD_DIR="+mod.Dir, "ENGINEX_MOD_ACTION="+action)
+	// Own process group: a timeout kills the script's children too, not just sh.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = time.Second
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("mod %s %s: %w", mod.ID, action, err)
 	}
 	return nil
+}
+
+// StartEnabled runs the "start" script of every enabled, valid, non-quarantined mod; used at boot
+// because the enabled flag survives reboots but the daemons do not. Failures are logged only.
+func (m *Manager) StartEnabled() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	list, err := m.discoverLocked()
+	if err != nil {
+		log.Printf("mods: start enabled: %v", err)
+		return
+	}
+	for _, mod := range list {
+		if mod.Enabled && mod.Valid && !mod.Quarantined && mod.Script != "" {
+			if err := m.lifecycle(mod, "start"); err != nil {
+				log.Printf("mods: %v", err)
+			}
+		}
+	}
 }
 
 // NewManager creates a mod manager operating on the given media and UI directories.
@@ -235,7 +263,7 @@ func validateScript(modDir, evalModDir, script string) error {
 		if err == nil && !st.Mode().IsRegular() {
 			return fmt.Errorf("script %q is not a regular file", script)
 		}
-	} else if !os.IsNotExist(err) {
+	} else {
 		return fmt.Errorf("cannot resolve script %q: %w", script, err)
 	}
 	return nil
@@ -515,6 +543,8 @@ func (m *Manager) InstallArchive(r io.Reader) (*Mod, error) {
 			if err := os.MkdirAll(path, 0755); err != nil {
 				return nil, err
 			}
+		case tar.TypeXGlobalHeader: // git archive / GitHub tarballs start with a pax global header
+			continue
 		case tar.TypeReg, tar.TypeRegA:
 			if h.Size < 0 || h.Size > limit-total {
 				return nil, errors.New("archive contents exceed 16 MiB")
@@ -629,7 +659,7 @@ func (m *Manager) UninstallMod(id string) error {
 		}
 		if mod.Enabled && mod.Valid {
 			if err := m.lifecycle(mod, "stop"); err != nil {
-				return err
+				log.Printf("mods: uninstall %s: ignoring failed stop: %v", id, err) // a broken script must not make the mod permanent
 			}
 		}
 		if err := os.RemoveAll(mod.Dir); err != nil {
@@ -735,19 +765,24 @@ func (m *Manager) SetModEnabled(id string, enabled bool) error {
 		if enabled && !found.Valid {
 			return fmt.Errorf("cannot enable invalid mod %q: %s", id, found.Error)
 		}
-		if found.Valid && state.Mods[id].Enabled != enabled {
+		prev := state.Mods[id]
+		if found.Valid && (prev.Enabled != enabled || (enabled && prev.Quarantined)) {
 			action := "stop"
 			if enabled {
 				action = "start"
 			}
-			if err := m.lifecycle(*found, action); err != nil {
-				return err
+			// A safe-mode quarantine keeps daemons stopped until ResetQuarantine.
+			if action == "stop" || !m.isSafeModeQuarantinedLocked(state) {
+				if err := m.lifecycle(*found, action); err != nil {
+					return err
+				}
 			}
 		}
 	}
 
 	modState := state.Mods[id]
 	modState.Enabled = enabled
+	modState.Quarantined = false // an explicit user choice lifts a per-mod quarantine
 	state.Mods[id] = modState
 
 	if err := m.saveStateLocked(state); err != nil {
@@ -762,6 +797,15 @@ func (m *Manager) QuarantineAll() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Quarantine means "off": stop the daemons of enabled mods too (best effort).
+	if list, err := m.discoverLocked(); err == nil {
+		for _, mod := range list {
+			if mod.Enabled && mod.Valid && mod.Script != "" {
+				_ = m.lifecycle(mod, "stop")
+			}
+		}
+	}
+
 	state := m.loadStateLocked()
 	state.SafeModeQuarantined = true
 	for id, ms := range state.Mods {
@@ -775,6 +819,7 @@ func (m *Manager) QuarantineAll() error {
 	_ = os.MkdirAll(m.uiDir, 0755)
 	_ = os.WriteFile(filepath.Join(m.uiDir, "mods-quarantined"), []byte("quarantined\n"), 0644)
 	_ = os.RemoveAll(filepath.Join(m.uiDir, "mods-overlay"))
+	m.cleanupActivePackDir(filepath.Join(m.uiDir, "active"), nil)
 
 	return nil
 }
@@ -796,6 +841,15 @@ func (m *Manager) ResetQuarantine() error {
 
 	_ = os.Remove(filepath.Join(m.uiDir, "mods-quarantined"))
 
+	if list, err := m.discoverLocked(); err == nil {
+		for _, mod := range list {
+			if mod.Enabled && mod.Valid && !mod.Quarantined && mod.Script != "" {
+				if err := m.lifecycle(mod, "start"); err != nil {
+					log.Printf("mods: %v", err)
+				}
+			}
+		}
+	}
 	return m.applyActiveOverlayLocked("")
 }
 
@@ -856,32 +910,59 @@ func (m *Manager) applyActiveOverlayLocked(activePackDir string) error {
 		return strings.Compare(a.ID, b.ID)
 	})
 
+	stateDirty := false
 	for _, mod := range activeMods {
-		appliedMods = append(appliedMods, mod.ID)
-		var dsts []string
-		for _, dst := range mod.QMLFiles {
-			dsts = append(dsts, dst)
+		// Stage every file of the mod under a temp name first: one unreadable file must
+		// quarantine only this mod, never leave it half applied or abort the others.
+		srcs := make([]string, 0, len(mod.QMLFiles))
+		for src := range mod.QMLFiles {
+			srcs = append(srcs, src)
 		}
-		sort.Strings(dsts)
-
-		for _, dst := range dsts {
-			var src string
-			for s, d := range mod.QMLFiles {
-				if d == dst {
-					src = s
-					break
-				}
+		sort.Strings(srcs)
+		var staged []string // destination names
+		var copyErr error
+		for _, src := range srcs {
+			dst := mod.QMLFiles[src]
+			if copyErr = copyFile(filepath.Join(mod.Dir, src), filepath.Join(stagingDir, dst+".modtmp")); copyErr != nil {
+				copyErr = fmt.Errorf("failed to copy %s to overlay: %w", src, copyErr)
+				break
 			}
-			srcFile := filepath.Join(mod.Dir, src)
-			dstFile := filepath.Join(stagingDir, dst)
-			if err := copyFile(srcFile, dstFile); err != nil {
-				return fmt.Errorf("failed to copy %s to overlay: %w", src, err)
+			staged = append(staged, dst)
+		}
+		if copyErr != nil {
+			for _, dst := range staged {
+				_ = os.Remove(filepath.Join(stagingDir, dst+".modtmp"))
+			}
+			log.Printf("mods: quarantining %s: %v", mod.ID, copyErr)
+			ms := state.Mods[mod.ID]
+			ms.Quarantined = true
+			state.Mods[mod.ID] = ms
+			stateDirty = true
+			_ = m.lifecycle(mod, "stop")
+			continue
+		}
+		for _, dst := range staged {
+			if err := os.Rename(filepath.Join(stagingDir, dst+".modtmp"), filepath.Join(stagingDir, dst)); err != nil {
+				return err
 			}
 			if _, exists := sources[dst]; !exists {
 				appliedFiles = append(appliedFiles, dst)
 			}
 			sources[dst] = mod.ID
 		}
+		appliedMods = append(appliedMods, mod.ID)
+	}
+	if stateDirty {
+		if err := m.saveStateLocked(state); err != nil {
+			log.Printf("mods: saving quarantine state: %v", err)
+		}
+	}
+	if len(appliedMods) == 0 {
+		_ = os.RemoveAll(overlayDir)
+		if activePackDir != "" {
+			m.cleanupActivePackDir(activePackDir, nil)
+		}
+		return nil
 	}
 
 	manifest := OverlayManifest{
@@ -953,14 +1034,22 @@ func copyDir(src, dst string) error {
 	})
 }
 
+// modsBackupDir keeps the base UI pack's own copy of any file a mod replaced in the active pack.
+const modsBackupDir = ".mods-backup"
+
+func readOldManifest(activePackDir string) (OverlayManifest, bool) {
+	var old OverlayManifest
+	data, err := os.ReadFile(filepath.Join(activePackDir, ".mods-manifest.json"))
+	if err != nil || json.Unmarshal(data, &old) != nil {
+		return old, false
+	}
+	return old, true
+}
+
 func (m *Manager) cleanupActivePackDir(activePackDir string, keepFiles []string) {
 	manifestPath := filepath.Join(activePackDir, ".mods-manifest.json")
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return
-	}
-	var oldManifest OverlayManifest
-	if err := json.Unmarshal(data, &oldManifest); err != nil {
+	oldManifest, ok := readOldManifest(activePackDir)
+	if !ok {
 		return
 	}
 	keepSet := make(map[string]bool)
@@ -968,23 +1057,48 @@ func (m *Manager) cleanupActivePackDir(activePackDir string, keepFiles []string)
 		keepSet[f] = true
 	}
 	for _, oldFile := range oldManifest.Files {
-		if !keepSet[oldFile] {
-			_ = os.Remove(filepath.Join(activePackDir, oldFile))
-			_ = os.Remove(filepath.Join(activePackDir, "mods-overlay", oldFile))
+		if keepSet[oldFile] {
+			continue
+		}
+		dst := filepath.Join(activePackDir, oldFile)
+		_ = os.Remove(dst)
+		_ = os.Remove(filepath.Join(activePackDir, "mods-overlay", oldFile))
+		// Put the base pack's original back instead of leaving a hole.
+		if bak := filepath.Join(activePackDir, modsBackupDir, oldFile); fileExists(bak) {
+			if err := os.Rename(bak, dst); err != nil {
+				log.Printf("mods: restoring %s: %v", oldFile, err)
+			}
 		}
 	}
 	if len(keepFiles) == 0 {
 		_ = os.Remove(manifestPath)
 		_ = os.RemoveAll(filepath.Join(activePackDir, "mods-overlay"))
+		_ = os.RemoveAll(filepath.Join(activePackDir, modsBackupDir))
 	}
 }
 
+func fileExists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
+}
+
 func (m *Manager) syncToActivePackDir(activePackDir, overlayDir string, appliedFiles []string, manifestData []byte) error {
+	ours := make(map[string]bool) // files a previous sync already wrote (their original is in the backup dir, if any)
+	if old, ok := readOldManifest(activePackDir); ok {
+		for _, f := range old.Files {
+			ours[f] = true
+		}
+	}
 	m.cleanupActivePackDir(activePackDir, appliedFiles)
 
 	for _, f := range appliedFiles {
 		src := filepath.Join(overlayDir, f)
 		dst := filepath.Join(activePackDir, f)
+		if bak := filepath.Join(activePackDir, modsBackupDir, f); !ours[f] && fileExists(dst) && !fileExists(bak) {
+			if err := copyFile(dst, bak); err != nil {
+				return err
+			}
+		}
 		if err := copyFile(src, dst); err != nil {
 			return err
 		}

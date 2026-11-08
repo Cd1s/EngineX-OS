@@ -9,7 +9,10 @@ pre)
     mkdir -p "$UI"
     # Only a start that follows a crash (the stop hook left last-crash) counts towards
     # safe-mode; a clean start leaves safe-mode. A quarantined mod stays quarantined.
-    if [ -e "$UI/last-crash" ]; then
+    # A boot-token still here means the last start never reached its healthy timer and
+    # no stop hook ran (hang or hard power-off, #140): count it as a crash too.
+    crashed=; { [ -e "$UI/last-crash" ] || [ -e "$UI/boot-token" ]; } && crashed=1
+    if [ -n "$crashed" ]; then
         rm -f "$UI/last-crash"
         n=$(cat "$UI/boot-count" 2>/dev/null)
         case $n in ''|*[!0-9]*) n=1 ;; esac
@@ -20,6 +23,11 @@ pre)
     fi
     rm -f "$UI/boot-token"
     echo "$n" > "$UI/boot-count"
+    # #140: a .qmlc truncated by a power cut would trap the deck at the splash screen;
+    # Qt rebuilds the cache, so drop it after any crash and in safe-mode.
+    if [ -n "$crashed" ] || [ "$n" -ge 3 ] || [ -e "$UI/safe-mode" ]; then
+        rm -rf "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
+    fi
     if [ "$n" -ge 3 ] || [ -e "$UI/safe-mode" ]; then
         : > "$UI/safe-mode"
         rm -rf "$UI/mods-overlay"
@@ -34,10 +42,8 @@ pre)
             overlay=/data/enginex/ui/mods-overlay
         fi
         if [ ! -e "$UI/mods-quarantined" ] && [ ! -e /data/enginex/ui/mods-quarantined ] && [ -d "$overlay" ]; then
-            lang=$(sed -n 's/^lang=//p' "$UI/settings.conf" 2>/dev/null | tail -n 1)
-            case $lang in zh-Hans|zh-Hant) ;; *) lang=en ;; esac
             seen_targets=" "
-            for target in "$UI/active" "$UI/packs/$lang" /data/enginex/ui/active; do
+            for target in "$UI/active" /data/enginex/ui/active; do
                 [ -d "$target" ] || continue
                 case $seen_targets in *" $target "*) continue ;; esac
                 seen_targets="$seen_targets$target "

@@ -48,7 +48,7 @@ static void set_phase(unsigned char *gate, float v)
 
 static void test_autogate(void)
 {
-    static unsigned char gate[0x200], other[0x200];
+    static unsigned char gate[0x300], other[0x300]; // phase offset: 0x1e8 armhf, 0x260 AArch64
     set_phase(gate, 0.7f);
     set_phase(other, 0.3f);
     sc_dsp_autogate_pre_process(gate, 450);   /* first sight: nothing to undo */
@@ -76,7 +76,7 @@ static void test_autogate(void)
     CHECK(phase_of(gate) == 0.0f && phase_of(other) == 0.0f);
 
     /* More instances than slots never write out of bounds or crash. */
-    static unsigned char many[12][0x200];
+    static unsigned char many[12][0x300];
     for (int i = 0; i < 12; i++)
         sc_dsp_autogate_pre_process(many[i], 1);
     sc_dsp_autogate_pre_process(NULL, 1);
@@ -778,6 +778,22 @@ static void test_echo_out(void)
     for (unsigned i = 0; i < SC_ECHO_DELAY; i++) CHECK(isfinite(echo_state.l[i]) && isfinite(echo_state.r[i]));
 }
 
+/* The Slip Roll loop must not jump back 63 samples when it wraps. */
+static void test_slip_roll_seam(void)
+{
+    static struct sc_pioneer_fx fx;
+    static float l[SC_PFX_ROLL_FRAMES], r[SC_PFX_ROLL_FRAMES], o[2 * SC_PFX_ROLL_FRAMES];
+    memset(&fx, 0, sizeof fx);
+    for (unsigned i = 0; i < SC_PFX_ROLL_FRAMES; i++)
+        l[i] = r[i] = 1.0e-4f * (float)(i + 1);
+    sc_pioneer_fx_planar(&fx, l, r, SC_PFX_ROLL_FRAMES, SC_PFX_SLIP_ROLL);
+    CHECK(fx.roll_active == 1);
+    memset(o, 0, sizeof o);
+    sc_pioneer_fx_planar(&fx, o, NULL, 2 * SC_PFX_ROLL_FRAMES, SC_PFX_SLIP_ROLL);
+    unsigned w = SC_PFX_ROLL_FRAMES - SC_PFX_ROLL_XFADE; /* first sample of the second pass */
+    CHECK(fabsf(o[w] - o[w - 1]) < 5.0e-4f);
+}
+
 static void test_pioneer_fx(void)
 {
     /* 1. Test parsing of all 6 modes, including aliases, numbers, whitespace, and invalid strings */
@@ -955,6 +971,7 @@ int main(void)
     test_auto_gain();
     test_echo_out();
     test_pioneer_fx();
+    test_slip_roll_seam();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return EXIT_FAILURE;

@@ -3,11 +3,13 @@ package enginedb
 
 import (
 	"bytes"
+	"cmp"
 	"compress/zlib"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
@@ -297,6 +299,10 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 			}
 		}
 	}
+	// Rekordbox stores memory cues in creation order; the earliest is the main cue.
+	byTime := func(a, b rekordbox.Cue) int { return cmp.Compare(a.TimeMS, b.TimeMS) }
+	slices.SortStableFunc(memory, byTime)
+	slices.SortStableFunc(memoryLoops, byTime)
 	var q bytes.Buffer
 	put(&q, big, uint64(8))
 	writeCue := func(c *rekordbox.Cue) {

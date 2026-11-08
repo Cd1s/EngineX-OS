@@ -36,7 +36,8 @@ func DecodeQCompress(blob []byte) ([]byte, error) {
 	if closeErr != nil {
 		return nil, closeErr
 	}
-	if len(raw) != int(size) || input.Len() != 0 {
+	// Zero padding after the zlib stream is harmless; anything else is damage.
+	if len(raw) != int(size) || bytes.Count(blob[len(blob)-input.Len():], []byte{0}) != input.Len() {
 		return nil, fmt.Errorf("qCompress length/trailing-data mismatch")
 	}
 	return raw, nil
@@ -265,7 +266,7 @@ func healPerformance(tx *sql.Tx, r *Report) error {
 	// cursor before issuing writes on the same SQLite connection.
 	var last int64 = math.MinInt64
 	for {
-		rows, err := tx.Query("SELECT trackId,substr(trackData,1,33554433),substr(overviewWaveFormData,1,33554433),substr(beatData,1,33554433),substr(quickCues,1,33554433),substr(loops,1,33554433) FROM PerformanceData WHERE trackId>? ORDER BY trackId LIMIT 1", last)
+		rows, err := tx.Query("SELECT trackId,substr(trackData,1,33554433),substr(overviewWaveFormData,1,33554433),substr(beatData,1,33554433),substr(quickCues,1,33554433),substr(loops,1,33554433) FROM PerformanceData WHERE trackId>? ORDER BY trackId LIMIT 250", last)
 		if err != nil {
 			return err
 		}

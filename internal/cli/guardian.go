@@ -56,12 +56,12 @@ func Guardian(args []string, out, errOut io.Writer) int {
 		var r dbhealer.Report
 		var err error
 		switch {
+		case *status: // read-only, so it wins over --reserve
+			r, err = dbhealer.InspectMount(m)
 		case *reserve:
 			r.Mount, r.CheckedAt = m, time.Now().UTC()
 			r.ReserveFixed, err = dbhealer.NormalizeDatabase2(filepath.Join(m, "Engine Library", "Database2"))
 			r.Healthy = err == nil
-		case *status:
-			r, err = dbhealer.InspectMount(m)
 		case *dataOnly:
 			r, err = dbhealer.HealMountDataOnly(m, *sessions)
 		default:

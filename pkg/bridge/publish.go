@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -47,7 +48,7 @@ func snapshot(src, dst string) error {
 	} else if err != nil {
 		return err
 	}
-	db, err := sql.Open("sqlite", src)
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: src, RawQuery: "_pragma=busy_timeout(5000)"}).String())
 	if err != nil {
 		return err
 	}

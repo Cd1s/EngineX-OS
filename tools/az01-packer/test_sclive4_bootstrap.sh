@@ -8,10 +8,10 @@ set -euo pipefail
 AZ04="${AZ04:-0}"
 if [ "$AZ04" = 1 ]; then
     ROOTFS="${ROOTFS:-/root/build/sc5000-lab/systemone-analysis/rootfs}"
-    PREFIX=PRIME4G2 VARLIB=data/system/var-lib PROFILE=5.3.0-az04 EDITS=6
+    PREFIX=PRIME4G2 VARLIB=data/system/var-lib PROFILE=5.3.0-az04 EDITS=16
 else
     ROOTFS="${ROOTFS:-/root/build/sc5000-lab/sclive4-rea61-followup/rootfs}"  # or another unpacked gen2 rootfs
-    PREFIX=SCLIVE4 VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=16
+    PREFIX=SCLIVE4 VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=17
 fi
 QRC="${QRC:-/root/build/sc5000-lab/5.3.0/qrc}"  # AZ04's QML is byte-identical to it
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +40,7 @@ if [ "$AZ04" = 1 ]; then
     SUITE="$REPO/out/aarch64/sc5000-suite"
     mkdir -p "$REPO/out/aarch64"
     (cd "$REPO/tools/ui-mod" && CROSS= OUT="$HOOK" sh build.sh)
+    (cd "$REPO/tools/edisksd-hook" && CROSS= OUT="$REPO/out/aarch64/libedisksd-hook.so" sh build.sh)
     (cd "$REPO" && . /etc/profile.d/buildtools.sh && \
      GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$SUITE" ./cmd/sc5000-suite)
     # Stage 1 stand-in for the stock Engine: loads alsa.conf (and so conf.d) and opens a PCM, as Engine does.
@@ -60,6 +61,7 @@ if [ "$AZ04" = 1 ]; then
 else
     PROBE=/root/build/sc5000-lab/sclive4-rea61-followup/stock-alsa-probe
     (cd "$REPO/tools/ui-mod" && sh build.sh)
+    (cd "$REPO/tools/edisksd-hook" && sh build.sh)
     HOOK="$REPO/rootfs-overlay/etc/sc5000/libengine-ui-hook.so"
     SUITE="$REPO/out/sc5000-suite"
 fi
@@ -103,6 +105,7 @@ e2fsck -f -y "$IMG" >/dev/null
 debugfs -R "stat /Music/user_track.flac" "$IMG" 2>&1 | grep -q "regular"
 debugfs -R "stat /${VARLIB#data/}/alsa/conf.d/99-sc5000-custom.conf" "$IMG" 2>&1 | grep -q "regular"
 debugfs -R "stat /enginex/bundle/lib/libengine-ui-hook.so" "$IMG" 2>&1 | grep -q "regular"
+debugfs -R "stat /enginex/bundle/lib/libedisksd-hook.so" "$IMG" 2>&1 | grep -q "regular"
 debugfs -R "stat /enginex/bundle/boot-activate.sh" "$IMG" 2>&1 | grep -q "regular"
 test "$(debugfs -R "cat /enginex/version.txt" "$IMG" 2>/dev/null | tr -d '\r\n')" = "5.3.0.1.1"
 # #103: the old path stays reachable (the ALSA hook and older scripts use it)
@@ -162,6 +165,8 @@ test -f '$TARGET/run/systemd/system/enginex-stream-sync.service'
 grep -q 'ExecStart=/data/enginex/bundle/bin/stream-sync' \
     '$TARGET/run/systemd/system/enginex-stream-sync.service'
 test -f '$TARGET/run/systemd/system/enginex-rb-bridge.service'
+# rekordbox sticks are converted inside the mount, as on the 1st-gen images.
+grep -q 'LD_PRELOAD=/data/enginex/bundle/lib/libedisksd-hook.so' '$TARGET/run/systemd/system/edisksd.service.d/99-sc5000.conf'
 test -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service'
 # #116: KillMode=process left the hook-less Engine running after the restart.
 ! grep -q KillMode '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
@@ -203,8 +208,9 @@ grep -q 'engine-ui-hook: Engine $PROFILE' '$TMP/stage2.log'
 test \$(grep -c 'engine-ui-hook: applied 0x' '$TMP/stage2.log') -eq $EDITS
 grep -Eq 'engine-ui-hook: .*packs/en: [1-9][0-9]* files' '$TMP/stage2.log'
 if [ '$AZ04' = 1 ]; then
-    # The A32 trampolines must never run in the 64-bit Engine.
-    ! grep -Eq 'DSP guards|SQLite open' '$TMP/stage2.log'
+    # AArch64 DSP guards: 14 of the 21 sites (the 7 event guards need an unverified event layout).
+    grep -q 'engine-ui-hook: 14 DSP guards/transitions installed' '$TMP/stage2.log'
+    grep -q 'engine-ui-hook: SQLite open/open_v2 hooks installed' '$TMP/stage2.log'
 else
     grep -q 'engine-ui-hook: 21 DSP guards/transitions installed' '$TMP/stage2.log'
     grep -q 'engine-ui-hook: SQLite open/open_v2 hooks installed' '$TMP/stage2.log'
@@ -255,6 +261,7 @@ test ! -f '$TARGET/run/systemd/system/enginex-stream-sync.service'
 test ! -f '$TARGET/run/systemd/system/enginex-rb-bridge.service'
 test ! -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service'
 test ! -f '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+test ! -f '$TARGET/run/systemd/system/edisksd.service.d/99-sc5000.conf'
 for i in \$(seq 1 20); do
     chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1 || break
     sleep 0.1

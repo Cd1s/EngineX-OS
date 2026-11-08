@@ -55,9 +55,11 @@ func ParseAnalysis(b []byte) (*Analysis, error) {
 		return nil, fmt.Errorf("anlz: invalid PMAI header")
 	}
 	h, n := int(be.Uint32(b[4:])), int(be.Uint32(b[8:]))
-	if h < 12 || h > n || n != len(b) {
+	// FAT32/exFAT exports may pad the file past the declared length.
+	if h < 12 || h > n || n > len(b) {
 		return nil, fmt.Errorf("anlz: invalid file length")
 	}
+	b = b[:n]
 	a := &Analysis{Unknown: map[string][][]byte{}}
 	for off := h; off < n; {
 		if n-off < 12 {

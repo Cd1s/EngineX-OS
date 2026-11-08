@@ -265,17 +265,30 @@ func (s *LANStreamer) Push(pcm []byte) error {
 	var packet []byte
 	switch s.cfg.Mode {
 	case "rtp":
-		// RFC 3550 12-byte RTP header
-		packet = make([]byte, 12+len(pcm))
-		packet[0] = 0x80 // V=2, P=0, X=0, CC=0
-		packet[1] = byte(s.cfg.PayloadType & 0x7F)
-		binary.BigEndian.PutUint16(packet[2:4], s.seq)
-		binary.BigEndian.PutUint32(packet[4:8], s.timestamp)
-		binary.BigEndian.PutUint32(packet[8:12], s.cfg.SSRC)
-		copy(packet[12:], pcm)
-
-		s.seq++
-		s.timestamp += uint32(sampleCount)
+		// Chunk below the 1500-byte MTU so Wi-Fi never sees IP fragments.
+		chunk := (1344 / sampleBytes) * sampleBytes
+		var firstErr error
+		for off := 0; off < len(pcm); off += chunk {
+			part := pcm[off:min(off+chunk, len(pcm))]
+			// RFC 3550 12-byte RTP header
+			packet = make([]byte, 12+len(part))
+			packet[0] = 0x80 // V=2, P=0, X=0, CC=0
+			packet[1] = byte(s.cfg.PayloadType & 0x7F)
+			binary.BigEndian.PutUint16(packet[2:4], s.seq)
+			binary.BigEndian.PutUint32(packet[4:8], s.timestamp)
+			binary.BigEndian.PutUint32(packet[8:12], s.cfg.SSRC)
+			copy(packet[12:], part)
+			s.seq++
+			s.timestamp += uint32(len(part) / sampleBytes)
+			n, err := s.conn.Write(packet)
+			if n > 0 {
+				s.bytesSent.Add(int64(n))
+			}
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
 
 	case "teleport":
 		// 24-byte Teleport/OMT header:

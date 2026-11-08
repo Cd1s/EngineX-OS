@@ -355,6 +355,15 @@ for _ in 1 2 3; do SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre; don
 [[ ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'clean restarts must not reach safe-mode'
 for result in signal core-dump exit-code; do SERVICE_RESULT=$result sh "$GUARD" stop; sh "$GUARD" pre; done
 [[ -e $SC5000_UI_DIR/safe-mode ]] || fail 'three crashed starts must enter safe-mode'
+# #140: a corrupt Qt QML cache must not survive a crash, safe-mode or a hung/hard-powered-off start (boot-token left).
+export SC5000_ENGINE_DATA_DIR=$TMP/engine-data
+SERVICE_RESULT=signal sh "$GUARD" stop; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
+[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a crashed start must clear the QML disk cache'
+rm -f "$SC5000_UI_DIR"/*; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
+[[ -d $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean start must keep the QML disk cache'
+sh "$GUARD" post; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
+[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && $(cat "$SC5000_UI_DIR/boot-count") == 2 ]] || fail 'a leftover boot-token must count as a crash and clear the QML cache'
+unset SC5000_ENGINE_DATA_DIR
 # #7: a crashed start's timer must not reset the streak of the starts after it.
 rm -f "$SC5000_UI_DIR"/*
 export SC5000_UI_HEALTHY_AFTER=1
@@ -453,6 +462,21 @@ done
 has 'SC5000_UI_HEALTHY_AFTER:-15' "$GUARD"
 unset SC5000_UI_DIR
 ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode, failed FactoryReset restarts Engine'
+
+has '"/GUI/Scripted/ZoomIn"' "$ROOT/tools/ui-mod/build_packs.py"
+has 'function scZoom(dir)' "$ROOT/tools/ui-mod/build_packs.py"
+ok 'browse encoder waveform zoom uses 10 steps'
+
+# #148: About shows the LAN stems renderer.
+has 'scLanStems' "$ROOT/tools/ui-mod/build_packs.py"
+has 'lanStems' "$ROOT/pkg/webui/ui_settings.go"
+ok 'About shows the LAN stems renderer'
+
+# #146: on-screen previous/next track only on PRIME GO / Mixstream (no physical Track Skip keys).
+has 'scNoSkipKeys' "$ROOT/tools/ui-mod/build_packs.py"
+has 'NH08S' "$ROOT/tools/ui-mod/build_packs.py"
+has '/Track/${modelData.n}' "$ROOT/tools/ui-mod/build_packs.py"
+ok 'on-screen track skip buttons only on models without physical keys'
 
 python3 -m unittest discover -s "$ROOT/sim/qengine" -p test_smoke.py >/dev/null
 printf 'PASS: %d tests (mocked storage and hardware; no privileged operations)\n' "$count"

@@ -16,6 +16,7 @@ Rectangle {
             if (xhr.status !== 200) { root.message = xhr.responseText || "Helper unavailable"; return }
             root.state = JSON.parse(xhr.responseText)
             root.message = root.state.note
+            if (!body) { volumes.text = (root.state.volumes || []).join("\n"); sync.checked = !!root.state.sync; enabled.checked = !!root.state.enabled }
             if (body && body.action === "crop") { preview.source = ""; preview.source = root.state.preview + "?t=" + Date.now() }
         }
         xhr.send(body ? JSON.stringify(body) : "")

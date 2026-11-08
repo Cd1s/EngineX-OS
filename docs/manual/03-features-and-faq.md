@@ -66,12 +66,12 @@
 
 1. **只看公开歌单或专辑**：在手机页粘贴 `music.apple.com` 的歌单或专辑链接，不需要账号。
 2. **想浏览自己的资料库**：在手机页点「用 Apple Music 登录」（MusicKit JS，`#75`）。Apple 不允许在手机页登录时，页面会给出一个**书签脚本**：在 music.apple.com 登录后运行它，它会复制你的 `media-user-token`，再粘贴回手机页。
-3. **音频从哪来**：Apple Music 的音频受 FairPlay 保护，EngineX 不会去取。每首歌按 ISRC，或「歌名 + 歌手」匹配，改从 **Deezer（无损 FLAC）或网易云**播放。所以要想真正出声，通常还需要先登录 Deezer 或网易云。
+3. **音频从哪来**：EngineX 解锁了 Engine 5.3.0 自带的 `AppleMusicProvider`（原厂登录与播放），音频由 Apple Music 自己提供；EngineX 不再按 ISRC 或歌名去 Deezer、网易云找替身，也不做跨平台兜底。手机页的歌单链接和 `media-user-token` 只用于浏览资料库。
 
 ### 1.4 音质与缓存
 
 - `设置 → 设备 → 流媒体音质`：**Lossless（无损 FLAC）** 或 **320kbps MP3**。
-- SoundCloud 的无损只在上传者开放原档下载时生效；否则两档结果相同（SoundCloud 自己只提供 128k MP3 / 160k AAC 串流）。
+- SoundCloud 按最高可用音质取：上传者原档（允许下载时，如 320k MP3 / WAV / FLAC）→ 256kbps AAC → 160kbps AAC → 128kbps MP3；没有原档时两档结果相同。
 - 只有网易云有 `网易云下载方式`（Spotify、Deezer、SoundCloud、Beatport 没有这个开关，各走各自的音源）：`Official（官方直下）` 或 `Deemix 优先`（先走 Deemix，省网易云自己的每月下载额度，失败再回退官方）。
 - 播放过的曲目缓存在碟机内部存储（`/data/enginex/Stream`），再次加载直接秒开，不会重复下载。
 - 歌单里每首歌加载前就能看到 BPM 和调性。
@@ -163,7 +163,7 @@
 
 - 声卡仍然只出 2 路声音（你自己负责的那两轨）。其余轨是**不出声的影子轨道**。
 - 屏幕上滑动加载时，只会加载到你负责的轨道，其余被锁定（避免误加载到别人的轨）。
-- 二代机（SC LIVE、PRIME 4+、PRIME 4 G2 等）当前没有 4 轨解锁，64 位 AZ04 Engine（PRIME 4 G2 / SYSTEM ONE）尚未移植。
+- 二代机（SC LIVE、PRIME 4+、PRIME 4 G2 等）当前没有 4 轨解锁，64 位 AZ04 Engine（PRIME 4 G2 / SYSTEM ONE）已对齐（#149：16 处补丁、DSP 防护、软限幅、自动增益、SQLite 调优）。
 
 ### 3.2 影子波形怎么跟随对端
 
@@ -293,7 +293,7 @@
 没有。用手机页的 Apple Music 登录，或粘贴歌单链接，见 1.3。
 
 **4. Apple Music 能直接播吗？**
-Apple Music 的音频受保护，EngineX 不取。它按 ISRC / 歌名歌手匹配，从 Deezer 或网易云播放，所以需要先登录其中之一。
+能。EngineX 解锁了 Engine 5.3.0 自带的 Apple Music 音源，由它直接播放，不再借 Deezer 或网易云。
 
 **5. 登录后过几天又要重新扫码？**
 令牌有自动续期，一般不用。但如果你改了密码、对方平台撤销了授权，或网易云 / Deezer 登录本身过期，就要重新扫一次。

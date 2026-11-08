@@ -3,9 +3,11 @@ package bridge
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -235,6 +237,9 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	}
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	if !full && !opts.SmartMatch && importedStamp(dir) == stamp {
+		if writable(mount) { // drives imported by an earlier build still get their covers
+			_, _ = enginedb.MigrateArtwork(ctx, mount)
+		}
 		return enginedb.Result{Bypassed: true}, nil
 	}
 	var result enginedb.Result
@@ -290,17 +295,29 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 }
 
 func importedStamp(dir string) string {
-	if st, err := os.Stat(filepath.Join(dir, "m.db")); err != nil || st.Size() == 0 {
+	if !hasLibrary(dir) {
 		return ""
 	}
 	b, _ := os.ReadFile(filepath.Join(dir, stampName))
 	return strings.TrimSpace(string(b))
 }
 
-// hasLibrary reports a non-empty m.db, whatever wrote it.
+// hasLibrary reports an m.db with tracks, whatever wrote it. Stock Engine leaves a
+// ~80 KB skeleton with an empty Track table when it saw a rekordbox stick without
+// the unpatched import, and that is not a library. An m.db that cannot be read
+// counts as one, so it is never replaced blindly.
 func hasLibrary(dir string) bool {
-	st, err := os.Stat(filepath.Join(dir, "m.db"))
-	return err == nil && st.Size() > 0
+	p := filepath.Join(dir, "m.db")
+	if st, err := os.Stat(p); err != nil || st.Size() == 0 {
+		return false
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String())
+	if err != nil {
+		return true
+	}
+	defer db.Close()
+	var n int
+	return db.QueryRow(`SELECT count(*) FROM Track`).Scan(&n) != nil || n > 0
 }
 
 func writeStamp(dir, stamp string) {

@@ -191,6 +191,12 @@ func (s *DBServer) Listen(address string) error {
 	if s.Library == nil {
 		return errors.New("prolink: dbserver needs a Rekordbox library")
 	}
+	s.mu.Lock()
+	active := s.listener != nil
+	s.mu.Unlock()
+	if active {
+		return errors.New("prolink: dbserver already listening")
+	}
 	s.tracks = make(map[uint32]rekordbox.Track, len(s.Library.Tracks))
 	for _, t := range s.Library.Tracks {
 		s.tracks[t.ID] = t
@@ -207,6 +213,11 @@ func (s *DBServer) Listen(address string) error {
 		return err
 	}
 	s.mu.Lock()
+	if s.listener != nil { // lost a race with another Listen
+		s.mu.Unlock()
+		l.Close()
+		return errors.New("prolink: dbserver already listening")
+	}
 	s.listener, s.clients = l, make(map[net.Conn]bool)
 	s.mu.Unlock()
 	s.wg.Add(1)
@@ -215,7 +226,11 @@ func (s *DBServer) Listen(address string) error {
 		for {
 			c, err := l.Accept()
 			if err != nil {
-				return
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
+				time.Sleep(20 * time.Millisecond) // e.g. EMFILE: retry without spinning
+				continue
 			}
 			s.mu.Lock()
 			if s.listener == nil || len(s.clients) >= 16 {

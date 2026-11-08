@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,6 +75,7 @@ type Status struct {
 
 // Broadcaster manages background audio streaming to Icecast/Shoutcast on CPU3.
 type Broadcaster struct {
+	ctl          sync.Mutex // serializes Configure/SetEnabled/Close; stopLocked drops mu while waiting
 	mu           sync.Mutex
 	guard        *resourceguard.Guard
 	cfg          Config
@@ -181,6 +183,8 @@ func normalizeConfig(cfg *Config) error {
 
 // Configure validates and updates settings, starting or stopping streaming as needed.
 func (b *Broadcaster) Configure(cfg Config) error {
+	b.ctl.Lock()
+	defer b.ctl.Unlock()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -200,6 +204,8 @@ func (b *Broadcaster) Configure(cfg Config) error {
 
 // SetEnabled toggles live streaming on or off.
 func (b *Broadcaster) SetEnabled(on bool) error {
+	b.ctl.Lock()
+	defer b.ctl.Unlock()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -241,6 +247,8 @@ func (b *Broadcaster) Status() Status {
 
 // Close shuts down the broadcaster and waits for the worker goroutine to exit.
 func (b *Broadcaster) Close() {
+	b.ctl.Lock()
+	defer b.ctl.Unlock()
 	b.mu.Lock()
 	b.stopLocked()
 	b.mu.Unlock()
@@ -426,56 +434,65 @@ func readPCM(f *os.File) []byte {
 	return buf[:n]
 }
 
-// pushLoop keeps the external Icecast/Shoutcast connection alive, reconnecting on drop.
+// pushLoop keeps the external Icecast/Shoutcast connection alive, reconnecting with
+// exponential backoff (1s..30s) so a wrong password is not retried every second.
 func (b *Broadcaster) pushLoop(ctx context.Context, cfg Config, feed <-chan []byte) {
+	const maxDelay = 30 * time.Second
+	delay := time.Second
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
-		err := b.streamOnce(ctx, cfg, feed)
+		t0 := time.Now()
+		handshook, err := b.streamOnce(ctx, cfg, feed)
+		healthy := handshook && time.Since(t0) >= 10*time.Second
 		if err != nil && ctx.Err() == nil {
 			b.mu.Lock()
 			b.streaming = false
 			b.lastError = sanitizeError(err, cfg.Password)
 			b.mu.Unlock()
 
+			if healthy {
+				delay = time.Second // it ran a while before dropping: reconnect quickly
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(1 * time.Second):
+			case <-time.After(delay):
+			}
+			if !healthy {
+				delay = min(delay*2, maxDelay)
 			}
 		}
 	}
 }
 
 // streamOnce executes one external connection and streaming session.
-func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []byte) error {
+// handshook reports whether the server accepted the source login.
+func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []byte) (handshook bool, err error) {
 	scheme, hostPort, err := parseServerTarget(cfg.ServerURL)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	var conn net.Conn
 	if scheme == "https" {
 		host, _, _ := net.SplitHostPort(hostPort)
-		conn, err = tls.DialWithDialer(dialer, "tcp", hostPort, &tls.Config{
+		conn, err = (&tls.Dialer{NetDialer: dialer, Config: &tls.Config{
 			ServerName: host,
 			MinVersion: tls.VersionTLS12,
-		})
+		}}).DialContext(ctx, "tcp", hostPort)
 	} else {
 		conn, err = dialer.DialContext(ctx, "tcp", hostPort)
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	b.mu.Lock()
-	b.conn = conn
-	b.streaming = true
-	b.connectedAt = time.Now().UTC().Format(time.RFC3339)
-	b.lastError = ""
+	b.conn = conn // so stopLocked can interrupt the handshake
 	b.mu.Unlock()
 
 	defer func() {
@@ -488,27 +505,47 @@ func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []
 		b.mu.Unlock()
 	}()
 
-	// Perform server handshake
+	// Perform server handshake under a deadline: a silent server must not hang us.
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if cfg.Protocol == "shoutcast" {
-		if err := b.handshakeShoutcast(conn, cfg); err != nil {
-			return err
-		}
+		err = b.handshakeShoutcast(conn, cfg)
 	} else {
-		if err := b.handshakeIcecast(conn, cfg); err != nil {
-			return err
-		}
+		err = b.handshakeIcecast(conn, cfg)
 	}
+	if err != nil {
+		return false, err
+	}
+	_ = conn.SetDeadline(time.Time{})
+	handshook = true
 
+	b.mu.Lock()
+	b.streaming = true
+	b.connectedAt = time.Now().UTC().Format(time.RFC3339)
+	b.lastError = ""
+	b.mu.Unlock()
+
+	return true, b.streamFrames(ctx, conn, cfg, feed)
+}
+
+// writeConn writes with a 5s deadline so a stalled server cannot block the session forever.
+func writeConn(conn net.Conn, p []byte) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_, err := conn.Write(p)
+	return err
+}
+
+// streamFrames sends the container header and then frames until ctx ends or a write fails.
+func (b *Broadcaster) streamFrames(ctx context.Context, conn net.Conn, cfg Config, feed <-chan []byte) error {
 	// Send initial container header if required
 	if cfg.Format == "wav" {
 		hdr := makeWAVHeader()
-		if _, err := conn.Write(hdr); err != nil {
+		if err := writeConn(conn, hdr); err != nil {
 			return err
 		}
 		b.bytesSent.Add(int64(len(hdr)))
 	} else if cfg.Format == "ogg" {
 		bos := makeOggPage(0x02, 0, 0x12345678, 0, []byte("EngineX-OS-Audio-BOS"))
-		if _, err := conn.Write(bos); err != nil {
+		if err := writeConn(conn, bos); err != nil {
 			return err
 		}
 		b.bytesSent.Add(int64(len(bos)))
@@ -520,6 +557,12 @@ func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []
 		case <-feed:
 		default:
 			drained = true
+		}
+	}
+
+	if cfg.Format == "mp3" {
+		if cmd := mp3EncoderFn(ctx, cfg.Bitrate); cmd != nil {
+			return b.streamEncodedMP3(ctx, conn, cmd, feed)
 		}
 	}
 
@@ -544,22 +587,102 @@ func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []
 			frame = nextMP3Frame(cfg, pcm)
 		}
 
-		if _, err := conn.Write(frame); err != nil {
+		if err := writeConn(conn, frame); err != nil {
 			return err
 		}
 		b.bytesSent.Add(int64(len(frame)))
 	}
 }
 
+// mp3EncoderFn builds the external MP3 encoder command; tests replace it.
+var mp3EncoderFn = newMP3Encoder
+
+// newMP3Encoder returns lame or ffmpeg reading s16le 44.1kHz stereo on stdin and writing MP3
+// to stdout, or nil when neither is on PATH (callers then fall back to nextMP3Frame placeholders).
+// The command is killed with its whole process group when ctx ends.
+func newMP3Encoder(ctx context.Context, bitrate int) *exec.Cmd {
+	br := strconv.Itoa(bitrate)
+	var cmd *exec.Cmd
+	if p, err := exec.LookPath("lame"); err == nil {
+		cmd = exec.CommandContext(ctx, p, "-r", "-s", "44.1", "--signed", "--little-endian", "--bitwidth", "16", "-m", "s", "-b", br, "--silent", "-", "-")
+	} else if p, err := exec.LookPath("ffmpeg"); err == nil {
+		cmd = exec.CommandContext(ctx, p, "-loglevel", "quiet", "-fflags", "+nobuffer", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "pipe:0", "-f", "mp3", "-b:a", br+"k", "-flush_packets", "1", "pipe:1")
+	} else {
+		return nil
+	}
+	return groupKill(cmd)
+}
+
+// groupKill runs cmd in its own process group and kills the whole group on cancel.
+func groupKill(cmd *exec.Cmd) *exec.Cmd {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = time.Second
+	return cmd
+}
+
+// streamEncodedMP3 pipes PCM through cmd and forwards the real MP3 bytes to conn.
+func (b *Broadcaster) streamEncodedMP3(ctx context.Context, conn net.Conn, cmd *exec.Cmd, feed <-chan []byte) error {
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("mp3 encoder start failed: %w", err)
+	}
+	defer func() {
+		_ = in.Close()
+		_ = cmd.Cancel() // also reaps children of the encoder
+		_ = cmd.Wait()
+	}()
+
+	outErr := make(chan error, 1)
+	go func() {
+		// Nobody drains stdout after we return: kill the encoder so the main loop's
+		// in.Write gets EPIPE instead of blocking forever on a full stdin pipe.
+		defer func() { _ = cmd.Cancel() }()
+		buf := make([]byte, 4096)
+		for {
+			n, err := out.Read(buf)
+			if n > 0 {
+				if werr := writeConn(conn, buf[:n]); werr != nil {
+					outErr <- werr
+					return
+				}
+				b.bytesSent.Add(int64(n))
+			}
+			if err != nil {
+				outErr <- fmt.Errorf("mp3 encoder stopped: %w", err)
+				return
+			}
+		}
+	}()
+
+	silence := make([]byte, 1152*4)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-outErr:
+			return err
+		case pcm := <-feed:
+			if len(pcm) == 0 {
+				pcm = silence
+			}
+			if _, err := in.Write(pcm); err != nil {
+				return fmt.Errorf("mp3 encoder write failed: %w", err)
+			}
+		}
+	}
+}
+
 // handshakeIcecast performs the HTTP SOURCE handshake with Icecast v2.
 func (b *Broadcaster) handshakeIcecast(conn net.Conn, cfg Config) error {
-	contentType := "audio/mpeg"
-	switch cfg.Format {
-	case "ogg":
-		contentType = "audio/ogg"
-	case "wav":
-		contentType = "audio/wav"
-	}
+	contentType := contentTypeFor(cfg.Format)
 
 	auth := base64.StdEncoding.EncodeToString([]byte(cfg.Username + ":" + cfg.Password))
 	req := fmt.Sprintf(
@@ -603,10 +726,29 @@ func (b *Broadcaster) handshakeIcecast(conn net.Conn, cfg Config) error {
 // shoutcastLogin returns the DNAS source login line: a numeric Username is a
 // DNAS v2 stream ID ("password:#id"); anything else (incl. "source") is v1, password only.
 func shoutcastLogin(cfg Config) string {
-	if id, err := strconv.Atoi(cfg.Username); err == nil && id > 0 {
+	if id := shoutcastStreamID(cfg); id > 0 {
 		return fmt.Sprintf("%s:#%d", cfg.Password, id)
 	}
 	return cfg.Password
+}
+
+// shoutcastStreamID returns the DNAS v2 stream ID from Username ("1" or "#1"), or 0 for v1.
+func shoutcastStreamID(cfg Config) int {
+	id, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(cfg.Username), "#"))
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
+}
+
+func contentTypeFor(format string) string {
+	switch format {
+	case "ogg":
+		return "audio/ogg"
+	case "wav":
+		return "audio/wav"
+	}
+	return "audio/mpeg"
 }
 
 // handshakeShoutcast performs the password & ICY handshake with Shoutcast v1/v2.
@@ -630,9 +772,9 @@ func (b *Broadcaster) handshakeShoutcast(conn net.Conn, cfg Config) error {
 		"icy-name:%s\r\n"+
 			"icy-pub:0\r\n"+
 			"icy-br:%d\r\n"+
-			"content-type:audio/mpeg\r\n"+
+			"content-type:%s\r\n"+
 			"\r\n",
-		cfg.StreamName, cfg.Bitrate,
+		cfg.StreamName, cfg.Bitrate, contentTypeFor(cfg.Format),
 	)
 
 	if _, err := io.WriteString(conn, icyHeaders); err != nil {
@@ -740,6 +882,9 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 	if cfg.Protocol == "shoutcast" {
 		metaURL = fmt.Sprintf("%s://%s/admin.cgi?mode=updinfo&pass=%s&song=%s",
 			scheme, hostPort, url.QueryEscape(cfg.Password), url.QueryEscape(song))
+		if id := shoutcastStreamID(cfg); id > 0 {
+			metaURL += fmt.Sprintf("&sid=%d", id) // DNAS v2 multi-stream
+		}
 	} else {
 		metaURL = fmt.Sprintf("%s://%s/admin/metadata?mode=updinfo&mount=%s&song=%s",
 			scheme, hostPort, url.QueryEscape(cfg.Mountpoint), url.QueryEscape(song))

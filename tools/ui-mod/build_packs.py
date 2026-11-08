@@ -616,6 +616,8 @@ SERVICES_MAIN = """
 	// #79: only GET /v1/sc5000/ui (loopback) carries these; shown in Settings -> About.
 	property string scConsoleUrl: ""
 	property string scAccessCode: ""
+	// #148: home sc5000-stemsd last seen by stems-processor; "" = never checked.
+	property string scLanStems: ""
 	property string scUpdateText: ""
 	property bool scBroadcastOn: false
 	property bool scUpfaderEcho: false
@@ -829,6 +831,7 @@ SERVICES_MAIN = """
 		scNeteaseMode = v.neteaseMode || "official"
 		scUpdateRepo = v.githubRepo || scUpdateRepo
 		if (v.accessCode) { scAccessCode = v.accessCode; scConsoleUrl = v.consoleUrl || "" }
+		scLanStems = v.lanStems ? (v.lanStems.online ? scT("Stems LAN renderer online:") : scT("Stems LAN renderer offline:")) + " " + (v.lanStems.hostname || v.lanStems.endpoint || "") : ""
 		scJog = v.jog || "static"
 		scMasterLimiter = !!v.masterLimiter
 		scAutoGain = !!v.autoGain
@@ -1085,6 +1088,7 @@ SERVICES_MAIN = """
 		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/stems/source?id=" + m[1])
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || x.status !== 200) return
+			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return // started playing while we waited
 			const url = "file://" + encodeURI(JSON.parse(x.responseText).path)
 			// Engine imports a file only through a deck load, so load it on an empty deck
 			// and eject it again once the Stems render is queued (scStemUnload).
@@ -1182,6 +1186,8 @@ SERVICES_MAIN = """
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || x.status !== 200) return
 			if (Planck.getProperty("/Engine/Deck%1/PlayState".arg(deck)).translator.state) return
+			const cur = Planck.getProperty("/Engine/Deck%1/Track/TrackUri".arg(deck)) // another track may have been loaded meanwhile
+			if (!cur || !cur.translator || cur.translator.string !== uri) return
 			Planck.getProperty("/Client/Librarian/AddToDatabaseAndLoadToDeck%1".arg(deck)).translator.url = "file://" + encodeURI(JSON.parse(x.responseText).path)
 		}
 		x.send()
@@ -1950,6 +1956,21 @@ def window():
     return "planckQuickView" if v53() else "MainWindow"
 
 
+ZOOM_STEP = """
+	// 10 waveform zoom steps across the whole range, however far #77 raised the limit:
+	// stock steps 0.5 s per detent, which is 60 detents out to 30 s.
+	function scZoom(dir) {
+		const t = Planck.getProperty("/Engine/Master/WaveformZoom")?.translator
+		if (!t || !t.editable) return
+		const lo = t.minimum !== undefined ? t.minimum : 0, hi = t.maximum !== undefined ? t.maximum : 30
+		t.unnormalized = Math.max(lo, Math.min(hi, t.unnormalized + dir * Math.max(1, Math.round((hi - lo) / 10))))
+	}
+	readonly property var scZoomProps: [Planck.createProperty("ZoomIn", true, 3), Planck.createProperty("ZoomOut", true, 3)]
+	ActionTranslatorStateChangeNotifier { prop: scZoomProps && Planck.getProperty("/GUI/Scripted/ZoomIn"); enabled: true; onChanged: root.scZoom(1) }
+	ActionTranslatorStateChangeNotifier { prop: scZoomProps && Planck.getProperty("/GUI/Scripted/ZoomOut"); enabled: true; onChanged: root.scZoom(-1) }
+"""
+
+
 def edits(dev: bool):
     v = ROOT + "Views/"
     prefs = v + "ControlCenter/Tabs/Preferences/"
@@ -1983,8 +2004,13 @@ def edits(dev: bool):
         # Nothing here can repair a drive; one that does not mount stays off the list.
         ROOT + "Items/MessageBoxes/UnsupportedStorageDeviceDetectedMessageBox.qml": [(
             "function onUnsupportedStorageDeviceDetected(name) {\n", "function onUnsupportedStorageDeviceDetected(name) {\n			return\n")],
+        # Browse encoder in the performance views: 10 zoom steps instead of stock's 60 (see ZOOM_STEP).
+        **({ROOT + f"StateNodes/States/{n}.qml": [
+            ('"/Engine/Master/DecrementWaveformZoom"', '"/GUI/Scripted/ZoomOut"'),
+            ('"/Engine/Master/IncrementWaveformZoom"', '"/GUI/Scripted/ZoomIn"')]
+           for n in ("PerformanceViewState", "PerformanceViewLibraryViewState", "PerformanceViewRemoteHostScreenState", "PerformanceViewStreamingState", "PerformanceViewNoLibraryState")} if v53() else {}),
         ROOT + "EmbeddedMain.qml": [
-            (f"	Connections {{\n		target: {window()}\n", services + main + "\n	Rectangle { anchors.fill: parent; z: -1000; color: \"#000000\" } // UI Scale: no window colour round the edges\n" + f"\n	Connections {{\n		target: {window()}\n"),
+            (f"	Connections {{\n		target: {window()}\n", services + main + ZOOM_STEP + "\n	Rectangle { anchors.fill: parent; z: -1000; color: \"#000000\" } // UI Scale: no window colour round the edges\n" + f"\n	Connections {{\n		target: {window()}\n"),
             # The overlay (Control Center, popups) fills uiContainer's unscaled box: scale it
             # the same way about the same centre, or its top bar sits above the screen.
             ("		Overlay.overlay.anchors.fill = uiContainer\n",
@@ -2018,7 +2044,7 @@ def edits(dev: bool):
             ("	onUpdateAvailableChanged: {\n", "	onUpdateAvailableChanged: {\n		return\n")],
         prefs + "Entries/Version.qml": [(
             "	text: `Engine OS ${versionString} <font color=\\\"${grey}\\\">(${gitHashString})</font>`",
-            "	text: `EngineX OS ${root.scVersion || versionString} <font color=\\\"${grey}\\\">(github.com/${root.scUpdateRepo})</font>${root.scAccessCode ? `<br><small>${root.scT(\"Web Console\")} ${root.scConsoleUrl}<br>${root.scT(\"Access Code\")} ${root.scAccessCode}</small>` : \"\"}`")],
+            "	text: `EngineX OS ${root.scVersion || versionString} <font color=\\\"${grey}\\\">(github.com/${root.scUpdateRepo})</font>${root.scAccessCode ? `<br><small>${root.scT(\"Web Console\")} ${root.scConsoleUrl}<br>${root.scT(\"Access Code\")} ${root.scAccessCode}${root.scLanStems ? `<br>${root.scLanStems}` : \"\"}</small>` : \"\"}`")],
         prefs + "Entries/Analytics.qml": [(
             "\t\tchecked = pAnalyticsEnabled.translator.state\n\t\tPlanck.quit(QuitReasons.AnalyticsChange, false)",
             "\t\tpAnalyticsEnabled.translator.state = !pAnalyticsEnabled.translator.state")],
@@ -2347,7 +2373,7 @@ def edits(dev: bool):
             if side == "left":
                 out[ROOT + f"Views/BrowseView/Components/Components/Swipe{side.title()}Item.qml"] = [
                     (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
-                     "    readonly property bool scStem: !!(row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || \"\").startsWith(\"streaming://TIDAL/Track/\"))\n"
+                     "    readonly property bool scStem: !!(row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || \"\").startsWith(\"streaming://TIDAL/Track/\") || (row.modelData && row.modelData.trackId > 0))\n"
                      f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
                      "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
                      f"    readonly property list<string> actionLabels: {a}.map(action => scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
@@ -2357,7 +2383,8 @@ def edits(dev: bool):
                      f"    readonly property list<color> actionColors: {a}.map(action => action.display.color).concat(scStem ? [Style.systemBlue01Color] : [])\n"),
                     (f"        {a}[actionIndex].trigger(row.index)\n",
                      "        if (actionIndex >= leftActions.length) {\n"
-                     "            root.scStemStream(row.modelData.trackId)\n"
+                     "            // streamed rows go through the gateway; local USB/SD tracks are rendered by Engine itself\n"
+                     "            if (!root.scStemStream(row.modelData.trackId)) Planck.librarianController.stemsQueueManager.startRenderTracks(String(row.modelData.trackId))\n"
                      f"        }} else if (scDeck > 0 && /\\d/.test({a}[actionIndex].display.label)) {{\n"
                      "            trackList.pCurrentIndex.translator.unnormalized = row.index\n"
                      "            Planck.getProperty(\"/Client/Librarian/LoadToDeck%1\".arg(scDeck)).translator.state = true\n"
@@ -2472,6 +2499,30 @@ def edits(dev: bool):
             ("		id: privatePart\n",
              "		id: privatePart\n"
              "		function scScaled() { const b = scBrightness, c = outputColor; return b >= 0.99 ? c : Qt.rgba(c.r * b, c.g * b, c.b * b, c.a) }\n"),
+        ]
+        # Stock 5.3.0 defects that surface mid-set when the deck booted offline (path is
+        # /Engine/DeckN/PlayState, as PausePlayingDeckHint.qml reads it).
+        playing = '(() => { for (let i = 1; i <= 4; i++) { const p = Planck.getProperty("/Engine/Deck" + i + "/PlayState"); if (p && p.translator && p.translator.state) return true } return false })()'
+        scaled[v + "WifiSelect/WifiLoginFailed.qml"] = [
+            # wpa_supplicant's background retries fail 30-60 s after boot; only report while the Wi-Fi screen is open.
+            ("        function onLoginFailed(reason) {\n", "        function onLoginFailed(reason) {\n            if (!target.wifiSelectionVisible) return\n"),
+        ]
+        scaled[v + "EmbeddedView.qml"] = [
+            # A background cloud/profile source timing out cleared currentDevice and threw the DJ out of the browser.
+            ("                if (!failToLoginEaasSource) {\n                    pShowBrowseView.translator.state = false\n",
+             "                if (numberOfConnectedDevices > 0) Planck.librarianController.devicesController.autoSelectDevice()\n"
+             "                if (currentDevice.length > 0) { pShowBrowseView.translator.state = true; return }\n"
+             f"                if (!failToLoginEaasSource && !{playing}) {{\n                    pShowBrowseView.translator.state = false\n"),
+        ]
+        # Stock forgot "= true": the Wi-Fi button of these two dialogs did nothing.
+        scaled[v + "Streaming/StreamingDialog.qml"] = [
+            ('                    Planck.getProperty("/GUI/ShowWifiView").translator.state\n                }\n            })\n        }\n        function onSessionInvalidated',
+             '                    Planck.getProperty("/GUI/ShowWifiView").translator.state = true\n                }\n            })\n        }\n        function onSessionInvalidated'),
+            ('                    Planck.getProperty("/GUI/ShowWifiView").translator.state\n                }\n            })\n        }\n\n        function onShowLogoutMessage',
+             '                    Planck.getProperty("/GUI/ShowWifiView").translator.state = true\n                }\n            })\n        }\n\n        function onShowLogoutMessage'),
+        ]
+        scaled[ROOT + "Items/MessageBoxes/TimeSyncDialog.qml"] = [
+            ("        function onNetworkNotConnected() {\n", "        function onNetworkNotConnected() {\n            if (" + playing + ") return\n"),
         ]
         # 4-deck (#49): the library deck bar lists Deck 1-4 left to right (stock groups
         # by side: 1, 3, 2, 4), lights only this player's decks, and names the deck of a
@@ -2668,6 +2719,36 @@ def legacy_qml_fixes():
              "				providerName: artistSong.trackSource\n				respectHideTitleArtist: true\n"),
             ("			visible: !artistSong.onlyFileName && text.length > 0\n",
              "			visible: !artistSong.onlyFileName && !displayText.hideTitleArtist && text.length > 0\n"),
+            # #146: PRIME GO / Mixstream have no physical Previous/Next Track keys (every other
+            # model does), so the title bar gets on-screen ‹ ›. Never while the deck plays.
+            ("	Column {\n		id: layout\n",
+             "	readonly property bool scNoSkipKeys: [\"JP11\", \"JP11S\", \"NH08\", \"NH08S\", \"NH10\"].indexOf(Config.device.name) >= 0\n"
+             "	readonly property QObjProperty pScPlay: Planck.getProperty(`/Engine/Deck${deckIndex}/PlayState`)\n"
+             "	readonly property bool scPlaying: !!(pScPlay && pScPlay.translator && pScPlay.translator.state)\n"
+             "	Row {\n"
+             "		id: scSkipKeys\n"
+             "		visible: artistSong.scNoSkipKeys\n"
+             "		anchors { right: parent.right; top: parent.top; bottom: parent.bottom }\n"
+             "		opacity: artistSong.scPlaying ? 0.3 : 1\n"
+             "		Repeater {\n"
+             "			model: [{g: \"\\u2039\", n: \"PreviousTrack\"}, {g: \"\\u203a\", n: \"NextTrack\"}]\n"
+             "			Item {\n"
+             "				width: 48; height: scSkipKeys.height\n"
+             "				Text { anchors.centerIn: parent; text: modelData.g; color: Style.font02Color; font.pixelSize: 40 }\n"
+             "				MouseArea {\n"
+             "					anchors.fill: parent\n"
+             "					onClicked: {\n"
+             "						if (artistSong.scPlaying) return\n"
+             "						const t = Planck.getProperty(`/Engine/Deck${artistSong.deckIndex}/Track/${modelData.n}`)\n"
+             "						if (t && t.translator) t.translator.state = true\n"
+             "					}\n"
+             "				}\n"
+             "			}\n"
+             "		}\n"
+             "	}\n"
+             "	Column {\n		id: layout\n"),
+            ("			right: parent.right\n			margins: parent.margins\n		}\n\n		spacing: -15\n",
+             "			right: scSkipKeys.visible ? scSkipKeys.left : parent.right\n			margins: parent.margins\n		}\n\n		spacing: -15\n"),
         ],
     }
 

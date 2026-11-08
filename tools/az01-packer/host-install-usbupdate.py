@@ -36,11 +36,17 @@ def write_part_header(part, total, seq):
     return struct.pack('<4sIQIHHQQ', b'AZ0O', CMD_WRITE_PART, total, seq, 0, 40 + len(name), 0, 1) + name
 
 
-def parse_reply(rx):
+def send(ep_out, data, timeout):
+    n = ep_out.write(data, timeout=timeout)
+    if n != len(data):
+        raise FlashError(f'short USB write: {n} of {len(data)} bytes')
+
+
+def parse_reply(rx, cmd=CMD_WRITE_PART):
     if len(rx) < 24:
         raise FlashError(f'short reply from the deck: {bytes(rx).hex(" ")}')
-    magic, _cmd, _, seq, status, _len = struct.unpack('<4sIQIHH', bytes(rx[:24]))
-    if magic != b'AZ0I':
+    magic, got, _, seq, status, _len = struct.unpack('<4sIQIHH', bytes(rx[:24]))
+    if magic != b'AZ0I' or got != cmd:
         raise FlashError(f'unexpected reply from the deck: {bytes(rx).hex(" ")}')
     return seq, status
 
@@ -49,7 +55,7 @@ def flash(ep_out, ep_in, f, total, out=sys.stdout):
     """Run write-part on ep_out/ep_in (pyusb endpoints or fakes); f is the image opened for reading. Returns the partition."""
     seq = 1
     for part in PARTS:
-        ep_out.write(write_part_header(part, total, seq), timeout=5000)
+        send(ep_out, write_part_header(part, total, seq), 5000)
         _, status = parse_reply(ep_in.read(512, timeout=5000))
         seq += 1
         if status == ST_READY:
@@ -64,13 +70,13 @@ def flash(ep_out, ep_in, f, total, out=sys.stdout):
         chunk = f.read(min(CHUNK, total - sent))
         if not chunk:
             raise FlashError(f'image ended after {sent} of {total} bytes')
-        ep_out.write(chunk, timeout=10000)
+        send(ep_out, chunk, 10000)
         sent += len(chunk)
         if (pct := sent * 100 // total) != shown:
             shown = pct
             print(f'\rwriting {part.decode()}: {pct:3d}% ({sent >> 20} / {total >> 20} MiB)', end='', file=out, flush=True)
     print(file=out)
-    ep_out.write(b'', timeout=30000)  # zero-length packet ends the raw stream
+    send(ep_out, b'', 30000)  # zero-length packet ends the raw stream
     _, status = parse_reply(ep_in.read(512, timeout=300000))
     if status != ST_WRITTEN:
         raise FlashError(f'deck did not confirm the write: status {status}')

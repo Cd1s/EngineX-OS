@@ -240,8 +240,8 @@ func (s *SoundCloud) webClientID(ctx context.Context, renew bool) (string, error
 		return "", err
 	}
 	scripts := scScriptRe.FindAllStringSubmatch(page, -1)
-	// It sits in one of the last bundles.
-	for i := len(scripts) - 1; i >= 0 && i >= len(scripts)-8; i-- {
+	// Usually in one of the last bundles; walk back to the first.
+	for i := len(scripts) - 1; i >= 0; i-- {
 		js, err := s.text(ctx, scripts[i][1])
 		if err != nil {
 			continue
@@ -683,7 +683,7 @@ func (s *SoundCloud) Media(ctx context.Context, id string, lossless bool) (Sound
 		return SoundCloudMedia{}, errors.New("soundcloud: invalid track ID")
 	}
 	if s.web() {
-		return s.webMedia(ctx, id)
+		return s.webMedia(ctx, id, lossless)
 	}
 	var t scTrack
 	if err := s.get(ctx, s.base()+"/tracks/"+id, &t); err != nil {
@@ -703,9 +703,10 @@ func (s *SoundCloud) Media(ctx context.Context, id string, lossless bool) (Sound
 		}
 	}
 	var streams struct {
-		HTTPMP3 string `json:"http_mp3_128_url"`
-		HLSMP3  string `json:"hls_mp3_128_url"`
-		HLSAAC  string `json:"hls_aac_160_url"`
+		HTTPMP3   string `json:"http_mp3_128_url"`
+		HLSMP3    string `json:"hls_mp3_128_url"`
+		HLSAAC    string `json:"hls_aac_160_url"`
+		HLSAAC256 string `json:"hls_aac_256_url"`
 	}
 	if err := s.get(ctx, s.base()+"/tracks/"+id+"/streams", &streams); err != nil {
 		if m.Original != "" {
@@ -713,54 +714,54 @@ func (s *SoundCloud) Media(ctx context.Context, id string, lossless bool) (Sound
 		}
 		return SoundCloudMedia{}, err
 	}
-	if streams.HTTPMP3 != "" {
-		// That address answers with a signed redirect, which needs no credentials.
-		location, err := s.signedAddress(ctx, streams.HTTPMP3)
+	// Best first: 256 and 160 kbps AAC, then the 128 kbps MP3 (plain, then HLS).
+	var lastErr error
+	for _, c := range []struct{ address, ext string }{
+		{streams.HLSAAC256, "mp4"}, {streams.HLSAAC, "mp4"}, {streams.HTTPMP3, "mp3"}, {streams.HLSMP3, "mp3"},
+	} {
+		if c.address == "" {
+			continue
+		}
+		location, err := s.signedAddress(ctx, c.address)
+		var urls []string
 		if err == nil {
-			m.Ext, m.URLs = "mp3", []string{location}
-			return m, nil
+			urls = []string{location}
+			// The plain MP3 address answers with a signed redirect, which needs no credentials.
+			if c.address != streams.HTTPMP3 {
+				urls, err = s.segments(ctx, location)
+			}
 		}
-		if m.Original != "" {
-			return m, nil
+		if err != nil {
+			lastErr = err
+			continue
 		}
-		return SoundCloudMedia{}, err
+		m.Ext, m.URLs = c.ext, urls
+		return m, nil
 	}
-	ext, playlist := "mp3", streams.HLSMP3
-	if playlist == "" {
-		ext, playlist = "mp4", streams.HLSAAC
+	if m.Original != "" {
+		return m, nil
 	}
-	if playlist == "" {
-		if m.Original != "" {
-			return m, nil
-		}
-		return SoundCloudMedia{}, ErrNoFullStream
+	if lastErr != nil {
+		return SoundCloudMedia{}, lastErr
 	}
-	location, err := s.signedAddress(ctx, playlist)
-	var urls []string
-	if err == nil {
-		urls, err = s.segments(ctx, location)
-	}
-	if err != nil {
-		if m.Original != "" {
-			return m, nil
-		}
-		return SoundCloudMedia{}, err
-	}
-	m.Ext, m.URLs = ext, urls
-	return m, nil
+	return SoundCloudMedia{}, ErrNoFullStream
 }
 
-// webMedia picks a full-length stream from the web API: plain MP3 where there still is
-// one, else the AAC HLS stream, else HLS MP3. Encrypted streams are refused.
-// shortcut: the uploader's original file is not offered here; it needs an app.
-func (s *SoundCloud) webMedia(ctx context.Context, id string) (SoundCloudMedia, error) {
+// webMedia picks the best full-length stream from the web API: 256 kbps AAC (hq), 160 kbps
+// AAC, then 128 kbps MP3 (plain, then HLS). Encrypted streams are refused. Lossless also
+// asks for the uploader's original when the track allows downloads.
+func (s *SoundCloud) webMedia(ctx context.Context, id string, lossless bool) (SoundCloudMedia, error) {
 	var t struct {
-		Policy string `json:"policy"`
-		Auth   string `json:"track_authorization"`
-		Media  struct {
+		Policy           string `json:"policy"`
+		Auth             string `json:"track_authorization"`
+		Downloadable     bool   `json:"downloadable"`
+		HasDownloadsLeft bool   `json:"has_downloads_left"`
+		Media            struct {
 			Transcodings []struct {
 				URL     string `json:"url"`
 				Snipped bool   `json:"snipped"`
+				Quality string `json:"quality"`
+				Preset  string `json:"preset"`
 				Format  struct {
 					Protocol string `json:"protocol"`
 					MimeType string `json:"mime_type"`
@@ -774,11 +775,27 @@ func (s *SoundCloud) webMedia(ctx context.Context, id string) (SoundCloudMedia, 
 	if t.Policy == "SNIP" || t.Policy == "BLOCK" {
 		return SoundCloudMedia{}, ErrNoFullStream
 	}
-	for _, want := range []struct{ protocol, mime, ext string }{
-		{"progressive", "audio/mpeg", "mp3"}, {"hls", "audio/mp4", "mp4"}, {"hls", "audio/mpeg", "mp3"},
+	var m SoundCloudMedia
+	if lossless && t.Downloadable && t.HasDownloadsLeft {
+		var dl struct {
+			RedirectURI string `json:"redirectUri"`
+		}
+		if s.get(ctx, s.base()+"/tracks/"+id+"/download", &dl) == nil {
+			m.Original = dl.RedirectURI
+		}
+	}
+	for _, want := range []struct {
+		protocol, mime, ext string
+		hq                  bool
+	}{
+		{"hls", "audio/mp4", "mp4", true}, {"hls", "audio/mp4", "mp4", false},
+		{"progressive", "audio/mpeg", "mp3", false}, {"hls", "audio/mpeg", "mp3", false},
 	} {
 		for _, c := range t.Media.Transcodings {
 			if c.Snipped || c.Format.Protocol != want.protocol || !strings.HasPrefix(c.Format.MimeType, want.mime) {
+				continue
+			}
+			if want.hq && c.Quality != "hq" && !strings.Contains(c.Preset, "256") {
 				continue
 			}
 			var stream struct {
@@ -792,12 +809,15 @@ func (s *SoundCloud) webMedia(ctx context.Context, id string) (SoundCloudMedia, 
 				continue
 			}
 			if want.protocol == "progressive" {
-				return SoundCloudMedia{Ext: want.ext, URLs: []string{stream.URL}}, nil
+				return SoundCloudMedia{Ext: want.ext, URLs: []string{stream.URL}, Original: m.Original}, nil
 			}
 			if urls, err := s.segments(ctx, stream.URL); err == nil {
-				return SoundCloudMedia{Ext: want.ext, URLs: urls}, nil
+				return SoundCloudMedia{Ext: want.ext, URLs: urls, Original: m.Original}, nil
 			}
 		}
+	}
+	if m.Original != "" {
+		return m, nil
 	}
 	return SoundCloudMedia{}, ErrNoFullStream
 }

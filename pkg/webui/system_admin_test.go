@@ -62,6 +62,10 @@ func TestSSHManagement(t *testing.T) {
 	SetSystemRunner(mockRunner.Run)
 	defer SetSystemRunner(nil)
 
+	oldDropIn := sshPortDropInPath
+	sshPortDropInPath = filepath.Join(t.TempDir(), "51-port.conf")
+	defer func() { sshPortDropInPath = oldDropIn }()
+
 	stateDir := t.TempDir()
 	uiDir := t.TempDir()
 	s := New(Config{StateDir: stateDir, UIDir: uiDir}, nil)
@@ -98,8 +102,21 @@ func TestSSHManagement(t *testing.T) {
 		t.Fatalf("expected 400 for port 0, got %d", w.Code)
 	}
 
+	// Reserved EngineX ports and multi-line passwords are refused before anything runs.
+	for _, bad := range []string{`{"port": 8080}`, `{"port": 6595}`, `{"port": 13579}`, `{"password": "a\nroot:b"}`, `{"password": "a\u0000b"}`} {
+		req = httptest.NewRequest(http.MethodPost, "/api/ssh", strings.NewReader(bad))
+		w = httptest.NewRecorder()
+		s.handleSSH(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d", bad, w.Code)
+		}
+	}
+	if mockRunner.hasCommand("sh") || mockRunner.hasCommand("systemctl", "daemon-reload") {
+		t.Fatal("a rejected request must not run commands")
+	}
+
 	// 3. Update port and password
-	postBody := `{"port": 2222, "password": "enginex_secret"}`
+	postBody := `{"port": 2222, "password": "$(touch /tmp/pwn)` + "`id`" + `\"x"}`
 	req = httptest.NewRequest(http.MethodPost, "/api/ssh", bytes.NewReader([]byte(postBody)))
 	w = httptest.NewRecorder()
 	s.handleSSH(w, req)
@@ -112,8 +129,24 @@ func TestSSHManagement(t *testing.T) {
 	if view.Port != 2222 || !view.HasPassword {
 		t.Fatalf("expected port 2222 and hasPassword true, got: %+v", view)
 	}
-	if !mockRunner.hasCommand("systemctl", "restart", "sshd") {
-		t.Fatalf("expected systemctl restart sshd")
+	if !mockRunner.hasCommand("systemctl", "restart", "sshd") || !mockRunner.hasCommand("systemctl", "daemon-reload") {
+		t.Fatalf("expected daemon-reload and restart sshd")
+	}
+	// The password reaches chpasswd as $1, never inside the shell script text.
+	found := false
+	for _, c := range mockRunner.commands {
+		if c[0] == "sh" {
+			found = true
+			if len(c) != 5 || strings.Contains(c[2], "touch") || c[4] != "$(touch /tmp/pwn)`id`\"x" {
+				t.Fatalf("unsafe chpasswd command: %q", c)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("chpasswd was not run")
+	}
+	if b, _ := os.ReadFile(filepath.Join(stateDir, "ssh-config.json")); strings.Contains(string(b), "touch") || !strings.Contains(string(b), `"hasPassword": true`) && !strings.Contains(string(b), `"hasPassword":true`) {
+		t.Fatalf("password persisted or hasPassword lost: %s", b)
 	}
 
 	// 4. Verify password is saved to disk but not in GET
@@ -142,7 +175,7 @@ func TestSSHManagement(t *testing.T) {
 	// 6. Persistence across restart
 	s2 := New(Config{StateDir: stateDir, UIDir: uiDir}, nil)
 	savedCfg := s2.loadSSHConfig()
-	if savedCfg.Enabled || savedCfg.Port != 2222 || savedCfg.Password != "enginex_secret" {
+	if savedCfg.Enabled || savedCfg.Port != 2222 || !savedCfg.HasPassword || savedCfg.Password != "" {
 		t.Fatalf("persisted config mismatch: %+v", savedCfg)
 	}
 }
@@ -424,5 +457,46 @@ func TestAutomixStateMachine(t *testing.T) {
 	status = mgr.Status()
 	if status.CurrentDeck != 1 || status.CurrentIndex != 2 || status.CurrentTrack.ID != "tr3" {
 		t.Fatalf("expected transition to Deck 1 and tr3, got: %+v", status)
+	}
+}
+
+func TestSSHAuthorizedKeyAndReadOnlyEtc(t *testing.T) {
+	mockRunner := &mockSystemRunner{outputs: make(map[string][]byte)}
+	SetSystemRunner(mockRunner.Run)
+	defer SetSystemRunner(nil)
+
+	dir := t.TempDir()
+	oldA, oldB, oldC := sshPortDropInPath, sshRunDropInPath, sshPersistKeyDir
+	sshPortDropInPath = filepath.Join(dir, "missing-file", "x", "51-port.conf") // parent is a file -> write fails
+	_ = os.WriteFile(filepath.Join(dir, "missing-file"), nil, 0o644)
+	sshRunDropInPath = filepath.Join(dir, "run", "51-port.conf")
+	sshPersistKeyDir = filepath.Join(dir, "no-data")
+	defer func() { sshPortDropInPath, sshRunDropInPath, sshPersistKeyDir = oldA, oldB, oldC }()
+
+	stateDir := t.TempDir()
+	s := New(Config{StateDir: stateDir, UIDir: t.TempDir()}, nil)
+
+	post := func(body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		s.handleSSH(w, httptest.NewRequest(http.MethodPost, "/api/ssh", strings.NewReader(body)))
+		return w
+	}
+	if w := post(`{"authorizedKey":"ssh-ed25519 AAAA\u0000x"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("NUL key: expected 400, got %d", w.Code)
+	}
+	if w := post(`{"authorizedKey":"ssh-ed25519 AAAA test","port":2200}`); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	st, err := os.Stat(filepath.Join(stateDir, "authorized_keys"))
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("key file missing or wrong mode: %v %v", st, err)
+	}
+	if _, err := os.Stat(sshRunDropInPath); err != nil {
+		t.Fatalf("expected /run drop-in fallback: %v", err)
+	}
+	w := httptest.NewRecorder()
+	s.handleSSH(w, httptest.NewRequest(http.MethodGet, "/api/ssh", nil))
+	if !strings.Contains(w.Body.String(), `"hasAuthorizedKey":true`) {
+		t.Fatalf("hasAuthorizedKey not reported: %s", w.Body.String())
 	}
 }

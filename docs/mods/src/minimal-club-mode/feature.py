@@ -6,8 +6,7 @@ from __main__ import save_json
 
 # Never include engine, rb-bridge, network, audio, Pro DJ Link, or the WebUI host.
 # stream-sync also hosts control/bridge functionality, so pausing it is unsafe.
-SERVICES = ("sc5000-deemixd.service", "stems-processor.service", "icecast-stream.service",
-            "enginex-download-queue.service", "enginex-streaming-sync.service")
+SERVICES = ("sc5000-deemixd.service", "enginex-sc5000-deemixd.service")  # 1st-gen / 2nd-gen unit names
 
 
 def systemctl(*args):

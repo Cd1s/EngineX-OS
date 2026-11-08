@@ -68,6 +68,14 @@ class USBUpdateTest(unittest.TestCase):
             hiu.parse_reply(b'AZ0O' + bytes(20))
         with self.assertRaisesRegex(hiu.FlashError, 'short reply'):
             hiu.parse_reply(b'AZ0I')
+        with self.assertRaisesRegex(hiu.FlashError, 'unexpected reply'):  # right magic, other command
+            hiu.parse_reply(struct.pack('<4sIQIHH', b'AZ0I', 0x5AA5FB05, 0, 1, 5, 24))
+
+    def test_short_usb_write_is_an_error(self):
+        deck = FakeDeck(hiu.ST_READY, hiu.ST_WRITTEN)
+        deck.write = lambda data, timeout: len(data) - 1
+        with self.assertRaisesRegex(hiu.FlashError, 'short USB write'):
+            hiu.flash(deck, deck, io.BytesIO(b'x' * 10), 10, io.StringIO())
 
 
 if __name__ == '__main__':

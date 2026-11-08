@@ -104,3 +104,28 @@ func TestSQLiteEmptyFilenameStaysEmptyAndIsRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestSQLiteSkipsOrphanPlaylistEntries(t *testing.T) {
+	db, e := sql.Open("sqlite", ":memory:")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, e = db.Exec(`CREATE TABLE content(id INTEGER,title TEXT,folder_path TEXT,file_name TEXT); INSERT INTO content VALUES(1,'A','/MUSIC','a.wav');
+CREATE TABLE playlist(id INTEGER,name TEXT); INSERT INTO playlist VALUES(1,'Live');
+CREATE TABLE playlist_content(playlist_id INTEGER,content_id INTEGER,sequenceNo INTEGER); INSERT INTO playlist_content VALUES(1,1,1),(99,1,1)`); e != nil {
+		t.Fatal(e)
+	}
+	l, e := (OneLibraryAdapter{}).Read(context.Background(), db)
+	if e != nil || len(l.Playlists) != 1 || len(l.Playlists[0].Tracks) != 1 {
+		t.Fatalf("orphan entry not skipped: %+v %v", l, e)
+	}
+}
+
+func TestAnalysisIgnoresTrailingPadding(t *testing.T) {
+	b := append(testfixture.DAT(), make([]byte, 512)...)
+	if a, e := ParseAnalysis(b); e != nil || len(a.Beats) == 0 {
+		t.Fatalf("padded ANLZ rejected: %v", e)
+	}
+}

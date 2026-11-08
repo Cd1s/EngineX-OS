@@ -26,7 +26,11 @@ enum {
 #define SC_DSP_AUTOGATE_SLOTS 8
 #define SC_DSP_CHAIN_SLOTS 32
 #define SC_DSP_CHAIN_STALE_GENERATIONS 8
+#if defined(__aarch64__)
+#define SC_DSP_AUTOGATE_PHASE_OFFSET 0x260 /* AZ04 (64-bit) Effects::AutoGate: x0+0x258, float at +8 */
+#else
 #define SC_DSP_AUTOGATE_PHASE_OFFSET 0x1e8
+#endif
 /* Emergency ceiling, retaining 18 dB of headroom above normalized full scale.
  * This is an output guard, not a limiter or a reset of vendor feedback state. */
 #define SC_DSP_SWEEP_SAMPLE_LIMIT 8.0f

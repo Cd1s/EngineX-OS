@@ -6,6 +6,7 @@ Rectangle {
     id: root
     width: 1024; height: 640; color: "#111923"
     property var state: ({})
+    property string lastText: ""
     property var config: ({})
     property string message: "Start this Mod's start.sh helper to connect."
     property int universe: 1
@@ -18,6 +19,8 @@ Rectangle {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
             if (xhr.status !== 200) { root.message = xhr.responseText || "Helper unavailable. Run start.sh on the player."; return }
             var value = JSON.parse(xhr.responseText)
+            var changed = xhr.responseText !== root.lastText
+            root.lastText = xhr.responseText
             root.state = value
             root.message = value.error || (value.running ? "OUTPUT LIVE — 30 Hz" : "Output stopped / preview only")
             if (!root.initialized) {
@@ -26,7 +29,7 @@ Rectangle {
                 patch.text = JSON.stringify(value.config.patch, null, 2)
                 root.initialized = true
             }
-            stage.requestPaint()
+            if (changed) stage.requestPaint()
         }
         xhr.send(body ? JSON.stringify(body) : "")
     }
@@ -41,7 +44,7 @@ Rectangle {
         } catch (error) { message = String(error) }
     }
     Component.onCompleted: request(null)
-    Timer { interval: 250; running: root.visible; repeat: true; onTriggered: root.request(null) }
+    Timer { interval: 500; running: root.visible; repeat: true; onTriggered: root.request(null) }
     Timer { interval: 150; running: flash.down; repeat: true; onTriggered: root.request({action:"flash", held:true}) }
     ColumnLayout {
         anchors.fill: parent; anchors.margins: 14; spacing: 8

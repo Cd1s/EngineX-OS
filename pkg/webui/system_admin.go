@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,24 +51,46 @@ func getSystemRunner() SystemRunner {
 // SSH Management (#114)
 // --------------------------------------------------------------------------
 
+// sshPortDropInPath is a var so tests do not write the host's /etc.
+var sshPortDropInPath = "/etc/systemd/system/sshd.service.d/51-port.conf"
+
+// sshReservedPorts are EngineX's own listeners (console, relay, stems).
+var sshReservedPorts = []int{8080, 6595, 13579}
+
 type SSHConfig struct {
-	Enabled     bool   `json:"enabled"`
-	Port        int    `json:"port"`
-	Password    string `json:"password,omitempty"`
-	HasPassword bool   `json:"hasPassword"`
+	Enabled          bool   `json:"enabled"`
+	Port             int    `json:"port"`
+	Password         string `json:"-"` // never persisted: chpasswd gets it once, HasPassword remembers that one was set
+	HasPassword      bool   `json:"hasPassword"`
+	HasAuthorizedKey bool   `json:"hasAuthorizedKey"`
 }
 
 type SSHStatusView struct {
-	Enabled     bool `json:"enabled"`
-	Port        int  `json:"port"`
-	HasPassword bool `json:"hasPassword"`
-	Running     bool `json:"running"`
+	Enabled          bool `json:"enabled"`
+	Port             int  `json:"port"`
+	HasPassword      bool `json:"hasPassword"`
+	HasAuthorizedKey bool `json:"hasAuthorizedKey"`
+	Running          bool `json:"running"`
 }
 
 type sshPostRequest struct {
-	Enabled  *bool   `json:"enabled"`
-	Port     *int    `json:"port"`
-	Password *string `json:"password"`
+	Enabled       *bool   `json:"enabled"`
+	Port          *int    `json:"port"`
+	Password      *string `json:"password"`
+	AuthorizedKey *string `json:"authorizedKey,omitempty"`
+}
+
+// sshRunDropInPath is the /run fallback for read-only roots (2nd-gen decks); a var for tests.
+var sshRunDropInPath = "/run/systemd/system/sshd.service.d/51-port.conf"
+
+// sshPersistKeyDir is where authorized_keys survives reboot; falls back to StateDir when absent.
+var sshPersistKeyDir = "/data/enginex"
+
+func (s *Server) sshKeyStorePath() string {
+	if st, err := os.Stat(sshPersistKeyDir); err == nil && st.IsDir() {
+		return filepath.Join(sshPersistKeyDir, "authorized_keys")
+	}
+	return filepath.Join(s.cfg.StateDir, "authorized_keys")
 }
 
 func (s *Server) sshConfigPath() string {
@@ -88,7 +111,6 @@ func (s *Server) loadSSHConfigLocked() SSHConfig {
 	if cfg.Port <= 0 || cfg.Port > 65535 {
 		cfg.Port = 22
 	}
-	cfg.HasPassword = cfg.Password != ""
 	return cfg
 }
 
@@ -99,7 +121,6 @@ func (s *Server) loadSSHConfig() SSHConfig {
 }
 
 func (s *Server) saveSSHConfigLocked(cfg SSHConfig) error {
-	cfg.HasPassword = cfg.Password != ""
 	return providers.SaveJSON(s.sshConfigPath(), cfg)
 }
 
@@ -126,10 +147,11 @@ func (s *Server) handleSSHGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond(w, SSHStatusView{
-		Enabled:     cfg.Enabled,
-		Port:        cfg.Port,
-		HasPassword: cfg.HasPassword,
-		Running:     running,
+		Enabled:          cfg.Enabled,
+		Port:             cfg.Port,
+		HasPassword:      cfg.HasPassword,
+		HasAuthorizedKey: cfg.HasAuthorizedKey,
+		Running:          running,
 	})
 }
 
@@ -148,24 +170,60 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if in.Port != nil && slices.Contains(sshReservedPorts, *in.Port) {
+		fail(w, http.StatusBadRequest, errors.New("invalid port: reserved by EngineX services"))
+		return
+	}
+	setPassword := in.Password != nil && *in.Password != "" && *in.Password != "***"
+	if setPassword && strings.ContainsAny(*in.Password, "\r\n\x00") {
+		fail(w, http.StatusBadRequest, errors.New("invalid password: line breaks and NUL are not allowed"))
+		return
+	}
+
+	setKey := in.AuthorizedKey != nil && strings.TrimSpace(*in.AuthorizedKey) != ""
+	if setKey && strings.ContainsRune(*in.AuthorizedKey, 0) {
+		fail(w, http.StatusBadRequest, errors.New("invalid public key: NUL is not allowed"))
+		return
+	}
+
 	s.uiMu.Lock()
 	defer s.uiMu.Unlock()
 
 	cfg := s.loadSSHConfigLocked()
 	runner := getSystemRunner()
 
+	if setKey {
+		store := s.sshKeyStorePath()
+		_ = os.MkdirAll(filepath.Dir(store), 0o700)
+		if err := os.WriteFile(store, []byte(strings.TrimSpace(*in.AuthorizedKey)+"\n"), 0o600); err != nil {
+			fail(w, http.StatusInternalServerError, errors.New("could not save public key"))
+			return
+		}
+		// Same as boot-activate.sh: copy, else bind-mount over the read-only /root.
+		_, _ = runner(r.Context(), "sh", "-c", `{ mkdir -p -m 700 /root/.ssh && cp "$1" /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys; } 2>/dev/null || mount --bind "$1" /root/.ssh/authorized_keys 2>/dev/null || :`, "sh", store)
+		cfg.HasAuthorizedKey = true
+	}
+
 	if in.Port != nil {
 		cfg.Port = *in.Port
 		// Apply port configuration drop-in if directory exists or via runner
 		portDropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -p %d\n", cfg.Port)
-		_ = os.MkdirAll("/etc/systemd/system/sshd.service.d", 0o755)
-		_ = os.WriteFile("/etc/systemd/system/sshd.service.d/51-port.conf", []byte(portDropIn), 0o644)
+		_ = os.MkdirAll(filepath.Dir(sshPortDropInPath), 0o755)
+		if err := os.WriteFile(sshPortDropInPath, []byte(portDropIn), 0o644); err != nil {
+			// read-only /etc (2nd-gen decks): /run is honoured by systemd until reboot
+			_ = os.MkdirAll(filepath.Dir(sshRunDropInPath), 0o755)
+			_ = os.WriteFile(sshRunDropInPath, []byte(portDropIn), 0o644)
+		}
+		_, _ = runner(r.Context(), "systemctl", "daemon-reload") // the drop-in is ignored until reloaded
 	}
 
-	if in.Password != nil && *in.Password != "" && *in.Password != "***" {
-		cfg.Password = *in.Password
-		// Update root password via chpasswd
-		_, _ = runner(r.Context(), "sh", "-c", fmt.Sprintf("printf 'root:%%s\\n' %q | chpasswd", *in.Password))
+	if setPassword {
+		// The password is a positional parameter, so the shell never expands it.
+		if _, err := runner(r.Context(), "sh", "-c", `printf 'root:%s\n' "$1" | chpasswd`, "sh", *in.Password); err != nil {
+			fail(w, http.StatusInternalServerError, errors.New("could not set root password"))
+			return
+		}
+		cfg.HasPassword = true
 	}
 
 	if in.Enabled != nil {
@@ -186,10 +244,11 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond(w, SSHStatusView{
-		Enabled:     cfg.Enabled,
-		Port:        cfg.Port,
-		HasPassword: cfg.Password != "",
-		Running:     cfg.Enabled,
+		Enabled:          cfg.Enabled,
+		Port:             cfg.Port,
+		HasPassword:      cfg.HasPassword,
+		HasAuthorizedKey: cfg.HasAuthorizedKey,
+		Running:          cfg.Enabled,
 	})
 }
 

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unicode/utf16"
 
 	"golang.org/x/text/unicode/norm"
@@ -58,6 +59,12 @@ type NFSServer struct {
 // Listen binds the portmapper on pmAddr (":111" on a deck) and MOUNT+NFS on
 // one ephemeral port of the same IP.
 func (s *NFSServer) Listen(pmAddr string) error {
+	s.mu.Lock()
+	active := len(s.conns) != 0
+	s.mu.Unlock()
+	if active {
+		return errors.New("prolink: nfs server already listening")
+	}
 	root, err := os.OpenRoot(s.Root)
 	if err != nil {
 		return err
@@ -84,6 +91,12 @@ func (s *NFSServer) Listen(pmAddr string) error {
 	var g [4]byte
 	_, _ = rand.Read(g[:])
 	s.mu.Lock()
+	if len(s.conns) != 0 { // lost a race with another Listen
+		s.mu.Unlock()
+		pm.Close()
+		svc.Close()
+		return errors.New("prolink: nfs server already listening")
+	}
 	s.gen = binary.BigEndian.Uint32(g[:])
 	s.paths, s.index = []string{""}, map[string]uint32{"": 0}
 	s.conns = []*net.UDPConn{pm, svc}
@@ -147,6 +160,7 @@ func (s *NFSServer) serve(c *net.UDPConn, port uint32) {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
+			time.Sleep(20 * time.Millisecond) // do not spin on a persistent error
 			continue
 		}
 		if reply := s.handle(buf[:n], port); reply != nil {

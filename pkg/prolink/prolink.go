@@ -101,7 +101,7 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 		d.Number = b[0x21]
 		trackLen := binary.BigEndian.Uint32(b[0x24:0x28])
 		if trackLen > 0 && trackLen != 0xffffffff {
-			d.DurationMS = trackLen * 1000
+			d.DurationMS = uint32(min(uint64(trackLen)*1000, math.MaxInt32)) // clamp: uint32 multiply would wrap
 		}
 		playhead := binary.BigEndian.Uint32(b[0x28:0x2c])
 		if playhead != 0xffffffff {
