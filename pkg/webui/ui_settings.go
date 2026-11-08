@@ -36,7 +36,7 @@ var (
 	uiStreamSortOrders = []string{"asc", "desc"}
 	uiSyncGuardPcts    = []int{0, 10, 15, 20}
 	// UI Scale presets: the QML mod scales the loaded UI live (EmbeddedMain uiLoader).
-	uiUIScales       = []int{100, 95, 90, 85, 80, 75}
+	uiUIScales       = []int{110, 105, 100, 95, 90, 85, 80, 75}
 	uiPioneerFxModes = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
 )
 
@@ -89,6 +89,7 @@ type uiSettings struct {
 	StreamSortRole    string `json:"streamSortRole,omitempty"`
 	StreamSortOrder   string `json:"streamSortOrder,omitempty"`
 	BrowserDualColumn bool   `json:"browserDualColumn"`
+	TracklistWaveform bool   `json:"tracklistWaveform"`
 	SyncGuardPct      int    `json:"syncGuardPct"`
 	SwapLoopOrder     bool   `json:"swapLoopOrder"`
 	LedBrightness     int    `json:"ledBrightness"`
@@ -179,7 +180,8 @@ func (s *Server) loadUI() uiSettings {
 	known, saved := uiServicesBeforeKnown, false
 	v := uiSettings{
 		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ProlinkWaveform: true,
-		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
+		TracklistWaveform: true,
+		StreamSortRole:    "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 	}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
@@ -270,6 +272,12 @@ func (s *Server) loadUI() uiSettings {
 			}
 		case "browser_dual_column":
 			v.BrowserDualColumn = val == "1" || strings.EqualFold(val, "true")
+		case "tracklist_waveform":
+			if val == "0" || strings.EqualFold(val, "false") {
+				v.TracklistWaveform = false
+			} else if val == "1" || strings.EqualFold(val, "true") {
+				v.TracklistWaveform = true
+			}
 		case "sync_guard_pct":
 			if n, err := strconv.Atoi(val); err == nil && slices.Contains(uiSyncGuardPcts, n) {
 				v.SyncGuardPct = n
@@ -383,6 +391,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.BrowserDualColumn {
 		text += "browser_dual_column=1\n"
+	}
+	if !v.TracklistWaveform {
+		text += "tracklist_waveform=0\n"
 	}
 	if v.SyncGuardPct != 0 {
 		text += "sync_guard_pct=" + strconv.Itoa(v.SyncGuardPct) + "\n"
@@ -545,6 +556,19 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.BrowserDualColumn = b
+	}
+	if q.Has("tracklistWaveform") || q.Has("libraryWaveform") {
+		param := q.Get("tracklistWaveform")
+		if !q.Has("tracklistWaveform") {
+			param = q.Get("libraryWaveform")
+		}
+		b, ok := parseBoolParam(param)
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.TracklistWaveform = b
 	}
 	if q.Has("swapLoopOrder") {
 		b, ok := parseBoolParam(q.Get("swapLoopOrder"))
