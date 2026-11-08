@@ -23,19 +23,20 @@ Thanks for helping. EngineX OS runs on decks that people play live on, so the ba
 - **Engine databases**: while Engine has a library open, no other process may write `m.db` / `hm.db`.
 - **Vendor units**: never put a hard `Requires=`, `BindsTo=` or `Requisite=` on a unit the vendor ships, because a new base may drop it (5.3.0 dropped `etc.mount`, and the 5.0.4.2 → 5.3.0.1 online update lost the UI packs and SSH). Use `RequiresMountsFor=` for mounts and `Wants=` + `After=` for everything else.
 
-### Tests
+### Tests & Experimental Inspection
 
-Run on a Linux x86_64 host with Go, an armhf cross compiler and `qemu-arm`:
+Run builds and tests on **`Oracle-Batam-arm`** (`REMOTE_BUILD_HOST=Oracle-Batam-arm remote-build ...`, aarch64 with native 32-bit `armhf` execution). For experimental component inspection and ABI/resource analysis, use **`craft-anything`** (`craft-anything-cli` / `craft-anything` skill) with **`deepseek-v4.1-flash`** (`deepseek4.1 flash`) on `Oracle-Batam-arm`:
 
 ```sh
-go vet ./... && go test -race ./...
+gofmt -l . && go vet ./... && go test -race ./...
 bash tests/test_rootfs_overlay.sh            # bash, not sh
 python3 -m unittest discover -s tools/az01-packer
 python3 -m unittest discover -s tools/stems
-# C hooks: build commands are in the header of each file
+# C compatibility adapters: build commands are in the header of each file
 #   tools/ui-mod/test_dsp_smooth.c   (also with ASan/UBSan and TSan)
-#   tools/ui-mod/test_stems_feature.c (armhf + qemu-arm)
+#   tools/ui-mod/test_stems_feature.c (armhf native on Oracle-Batam-arm)
 #   tools/edisksd-hook/test_edisksd_hook.c
+#   tools/ui-mod/test_az04_hook.c
 ```
 
 ## Releasing a new version

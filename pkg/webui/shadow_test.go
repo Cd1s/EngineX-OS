@@ -709,3 +709,92 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 		t.Fatalf("compose: %+v", out)
 	}
 }
+
+// Debug telemetry: off writes nothing; on, posts, peer updates and the QML's
+// records reach the ring and the log, which rotates at shadowDebugMax.
+func TestShadowDebugTelemetry(t *testing.T) {
+	dir := t.TempDir()
+	oldLog, oldMax := shadowDebugLog, shadowDebugMax
+	shadowDebugLog, shadowDebugMax = filepath.Join(dir, "debug.log"), 600
+	defer func() { shadowDebugLog, shadowDebugMax = oldLog, oldMax }()
+	s := New(Config{UIDir: filepath.Join(dir, "ui"), StateDir: t.TempDir()}, nil)
+	post := `[{"deck":1,"playing":true,"positionMs":5000,"pitch":11.1111,"bpm":126,"currentBpm":140,"sync":true}]`
+	s.decksPost(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(post)))
+	if _, err := os.Stat(shadowDebugLog); err == nil || len(s.shadow.dbg.lines()) != 0 {
+		t.Fatal("telemetry written while off")
+	}
+	if s.shadow.ownForPeer(time.Now())[0].CurrentBPM != 140 {
+		t.Fatalf("currentBpm not kept: %+v", s.shadow.own)
+	}
+
+	os.MkdirAll(filepath.Join(dir, "ui"), 0o755)
+	os.WriteFile(filepath.Join(dir, "ui", "settings.conf"), []byte("debug_telemetry=1\n"), 0o644)
+	s.uiMu.Lock()
+	on := s.loadUI().DebugTelemetry
+	s.uiMu.Unlock()
+	if !on || !s.shadow.dbg.set(on) {
+		t.Fatal("debug_telemetry=1 not read")
+	}
+	for range 5 {
+		s.decksPost(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(post)))
+	}
+	s.shadow.mu.Lock()
+	s.shadow.takePeer("192.0.2.9", []deckState{{Deck: 2, Seq: 1, Playing: true}}, time.Now())
+	s.shadow.mu.Unlock()
+	w := httptest.NewRecorder()
+	s.shadowDebugPost(w, httptest.NewRequest("POST", "/v1/sc5000/debug/shadow", strings.NewReader(`[{"deck":2,"act":"pll","drift":40,"pll":3.2,"t":1}]`)))
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	w = httptest.NewRecorder()
+	s.shadowDebugGet(w, httptest.NewRequest("GET", "/v1/sc5000/debug/shadow", nil))
+	var got struct {
+		Enabled   bool
+		PeerDecks []struct {
+			Deck int
+			IP   string
+		}
+		Log []struct {
+			Ev  string
+			Act string
+			Qt  float64
+		}
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || !got.Enabled || len(got.PeerDecks) != 1 || got.PeerDecks[0].IP != "192.0.2.9" || len(got.Log) != 7 {
+		t.Fatalf("debug state: %s %v", w.Body, err)
+	}
+	if l := got.Log[6]; l.Ev != "qml" || l.Act != "pll" || l.Qt != 1 {
+		t.Fatalf("qml record: %+v", l)
+	}
+	cur, _ := os.Stat(shadowDebugLog)
+	if _, err := os.Stat(shadowDebugLog + ".1"); err != nil || cur.Size() > shadowDebugMax {
+		t.Fatalf("not rotated: %v, %d bytes", err, cur.Size())
+	}
+	if strings.Contains(string(must(os.ReadFile(shadowDebugLog))), `"cues"`+":[") {
+		t.Fatal("cues logged")
+	}
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+// One player heard on two addresses (eth0 and wlan0) is one peer: the second
+// copy of an update is stale and does not wake the long poll again.
+func TestTakePeerDedupesByLinkAcrossAddresses(t *testing.T) {
+	sh := newShadowState()
+	now := time.Now()
+	up := []deckState{{Deck: 1, Seq: 5, Link: "{u}", Playing: true}}
+	sh.takePeer("192.0.2.1", up, now)
+	sh.takePeer("192.0.2.2", up, now)
+	if sh.ver != 1 {
+		t.Fatalf("same update via the second address bumped: ver %d", sh.ver)
+	}
+	sh.takePeer("192.0.2.2", []deckState{{Deck: 3, Seq: 6, Link: "{u}"}}, now) // deck 1 ejected, seen via the other address
+	if _, ok := sh.peerDecks[1]; ok || sh.ver != 2 {
+		t.Fatalf("eject via the other address: %+v ver %d", sh.peerDecks, sh.ver)
+	}
+}

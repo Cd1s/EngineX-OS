@@ -3,6 +3,8 @@ package webui
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -840,5 +842,58 @@ func TestSoundCloudPlaybackInfoCodecMatchesStreamWhenLosslessOnly(t *testing.T) 
 		if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != want[0] {
 			t.Fatalf("track %s stream: %d %q", id, resp.StatusCode, resp.Header.Get("Content-Type"))
 		}
+	}
+}
+
+func TestSyncStmAlbumArtFillsOnlyEmptyRow(t *testing.T) {
+	data := t.TempDir()
+	old := shadowDataRoot
+	shadowDataRoot = data
+	defer func() { shadowDataRoot = old }()
+	lib := filepath.Join(data, "AppDataUser/AIR Music Technology/Engine/Engine Library")
+	if err := os.MkdirAll(filepath.Join(lib, "Database2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stm := filepath.Join(lib, "Database2", "stm.db")
+	db, err := sql.Open("sqlite", stm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{
+		`CREATE TABLE AlbumArt (id INTEGER PRIMARY KEY, hash TEXT, albumArt BLOB)`,
+		`CREATE TABLE Track (id INTEGER PRIMARY KEY, uri TEXT, albumArtId INTEGER)`,
+		`INSERT INTO AlbumArt VALUES (1, 'image://streaming/', NULL), (2, 'keep', x'01')`,
+		`INSERT INTO Track VALUES (1, 'streaming://TIDAL/Track/7', 1), (2, 'streaming://TIDAL/Track/8', 2)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g := newTidalGateway(New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
+	jpg := []byte{0xff, 0xd8, 0xff, 0xe0, 1, 2, 3}
+	g.artCache["https://img.example/c.jpg"] = jpg
+	tr := providers.Track{CoverURL: "https://img.example/c.jpg"}
+	g.syncStmAlbumArt(context.Background(), 7, tr)
+	g.syncStmAlbumArt(context.Background(), 8, tr)
+	sum := sha1.Sum(jpg)
+	var hash, art []byte
+	if err := db.QueryRow(`SELECT hash, albumArt FROM AlbumArt WHERE id = 1`).Scan(&hash, &art); err != nil || !bytes.Equal(hash, sum[:]) || !bytes.Equal(art, jpg) {
+		t.Fatalf("row 1: %x %x %v", hash, art, err)
+	}
+	var kept string
+	if err := db.QueryRow(`SELECT hash FROM AlbumArt WHERE id = 2`).Scan(&kept); err != nil || kept != "keep" {
+		t.Fatalf("row 2 was rewritten: %q %v", kept, err)
+	}
+	if _, err := os.Stat(filepath.Join(lib, "Artwork", base64.RawURLEncoding.EncodeToString(sum[:])+".jpg")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTTPSCover(t *testing.T) {
+	tr := providers.Track{CoverURL: "http://p1.music.126.net/a.jpg", ThumbURL: "https://x/y.jpg"}
+	httpsCover(&tr)
+	if tr.CoverURL != "https://p1.music.126.net/a.jpg" || tr.ThumbURL != "https://x/y.jpg" {
+		t.Fatalf("%+v", tr)
 	}
 }

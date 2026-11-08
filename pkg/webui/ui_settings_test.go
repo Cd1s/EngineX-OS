@@ -547,13 +547,13 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	var v uiSettings
 	json.NewDecoder(resp.Body).Decode(&v)
 	if v.StreamSortRole != "default" || v.StreamSortOrder != "asc" || v.BrowserDualColumn != false ||
-		v.SyncGuardPct != 0 || v.SwapLoopOrder != false || v.LedBrightness != 100 ||
+		v.SyncGuardPct != 0 || v.SwapLoopOrder != false || v.LedBrightness != 100 || !v.CueCountdown ||
 		v.StemsEqMode != false || v.BeatJumpPads != false || v.PioneerFx != "off" {
 		t.Fatalf("unexpected defaults: %+v", v)
 	}
 
 	// 2. Update via POST /api/ui with query params and Bearer token
-	updateParams := "streamSortRole=bpm&streamSortOrder=desc&browserDualColumn=1&syncGuardPct=15&swapLoopOrder=1&ledBrightness=60&stemsEqMode=1&beatJumpPads=1&pioneerFx=spiral"
+	updateParams := "streamSortRole=bpm&streamSortOrder=desc&browserDualColumn=1&cueCountdown=0&syncGuardPct=15&swapLoopOrder=1&ledBrightness=60&stemsEqMode=1&beatJumpPads=1&pioneerFx=spiral"
 	postReq, _ := http.NewRequest("POST", srv.URL+"/api/ui?"+updateParams, nil)
 	postReq.Header.Set("Authorization", "Bearer "+token)
 	postResp, err := client.Do(postReq)
@@ -566,7 +566,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	}
 	var updated uiSettings
 	json.NewDecoder(postResp.Body).Decode(&updated)
-	if updated.StreamSortRole != "bpm" || updated.StreamSortOrder != "desc" || !updated.BrowserDualColumn ||
+	if updated.StreamSortRole != "bpm" || updated.StreamSortOrder != "desc" || !updated.BrowserDualColumn || updated.CueCountdown ||
 		updated.SyncGuardPct != 15 || !updated.SwapLoopOrder || updated.LedBrightness != 60 ||
 		!updated.StemsEqMode || !updated.BeatJumpPads || updated.PioneerFx != "spiral" {
 		t.Fatalf("updated values mismatch: %+v", updated)
@@ -622,7 +622,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	defer resp2.Body.Close()
 	var reloaded uiSettings
 	json.NewDecoder(resp2.Body).Decode(&reloaded)
-	if reloaded.StreamSortRole != "bpm" || reloaded.StreamSortOrder != "desc" || !reloaded.BrowserDualColumn ||
+	if reloaded.StreamSortRole != "bpm" || reloaded.StreamSortOrder != "desc" || !reloaded.BrowserDualColumn || reloaded.CueCountdown ||
 		reloaded.SyncGuardPct != 15 || !reloaded.SwapLoopOrder || reloaded.LedBrightness != 60 ||
 		!reloaded.StemsEqMode || !reloaded.BeatJumpPads || reloaded.PioneerFx != "spiral" {
 		t.Fatalf("reloaded values mismatch: %+v", reloaded)
@@ -633,6 +633,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 		"streamSortRole=invalid",
 		"streamSortOrder=invalid",
 		"browserDualColumn=maybe",
+		"cueCountdown=maybe",
 		"syncGuardPct=25",
 		"swapLoopOrder=notabool",
 		"ledBrightness=10",

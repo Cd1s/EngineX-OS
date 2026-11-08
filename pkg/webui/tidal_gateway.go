@@ -7,6 +7,7 @@ package webui
 
 import (
 	"context"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -27,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
@@ -106,6 +108,7 @@ type tidalGateway struct {
 	artMu    sync.Mutex
 	artCache map[string][]byte
 	artAge   []string
+	warming  atomic.Bool // a prewarmArt run is going
 
 	// Last-use sequence numbers for evicting the least recently used refs.
 	seq       int64
@@ -293,6 +296,8 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("POST /v1/sc5000/prolink", s.prolinkPost)
 	g.mux.HandleFunc("POST /v1/sc5000/decks", s.decksPost)
 	g.mux.HandleFunc("GET /v1/sc5000/shadow", s.shadowGet)
+	g.mux.HandleFunc("GET /v1/sc5000/debug/shadow", s.shadowDebugGet)
+	g.mux.HandleFunc("POST /v1/sc5000/debug/shadow", s.shadowDebugPost)
 	g.mux.HandleFunc("GET /v1/sc5000/broadcast", s.broadcastGet)
 	g.mux.HandleFunc("POST /v1/sc5000/broadcast", s.broadcastPost)
 	g.mux.HandleFunc("POST /v1/sc5000/broadcast/metadata", s.broadcastMetadataPost)
@@ -564,6 +569,7 @@ func (g *tidalGateway) list(id string) (playlistRef, bool) {
 
 // addTrack assigns stable positive IDs per source track, kept across restarts.
 func (g *tidalGateway) addTrack(ref trackRef) int64 {
+	httpsCover(&ref.track)
 	key := refKey(ref)
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -617,43 +623,130 @@ func (g *tidalGateway) art(w http.ResponseWriter, r *http.Request) {
 		address = g.artURLs[artKey(q.Get("song"), "")]
 	}
 	g.mu.Unlock()
-	if !strings.HasPrefix(address, "https://") {
+	data := g.artBytes(r.Context(), address)
+	if data == nil {
 		http.NotFound(w, r)
 		return
+	}
+	w.Header().Set("Content-Type", http.DetectContentType(data))
+	w.Write(data)
+}
+
+// artClient pools connections: a list opens a dozen covers from one CDN at once.
+var artClient = func() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = 8
+	return &http.Client{Timeout: 6 * time.Second, Transport: t}
+}()
+
+// artBytes is the cover at address (https only), from memory or fetched; nil on any failure.
+func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
+	if !strings.HasPrefix(address, "https://") {
+		return nil
 	}
 	g.artMu.Lock()
 	data := g.artCache[address]
 	g.artMu.Unlock()
-	if data == nil {
-		req, err := http.NewRequestWithContext(r.Context(), "GET", address, nil)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		defer resp.Body.Close()
-		data, err = io.ReadAll(io.LimitReader(resp.Body, maxArtBytes+1))
-		if err != nil || resp.StatusCode != http.StatusOK || len(data) > maxArtBytes {
-			http.NotFound(w, r)
-			return
-		}
-		g.artMu.Lock()
-		if len(g.artAge) >= maxArtEntries {
-			delete(g.artCache, g.artAge[0])
-			g.artAge = append(g.artAge[:0], g.artAge[1:]...) // keep the backing array bounded
-		}
-		if _, ok := g.artCache[address]; !ok {
-			g.artCache[address] = data
-			g.artAge = append(g.artAge, address)
-		}
-		g.artMu.Unlock()
+	if data != nil {
+		return data
 	}
-	w.Header().Set("Content-Type", http.DetectContentType(data))
-	w.Write(data)
+	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := artClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	data, err = io.ReadAll(io.LimitReader(resp.Body, maxArtBytes+1))
+	if err != nil || resp.StatusCode != http.StatusOK || len(data) > maxArtBytes {
+		return nil
+	}
+	g.artMu.Lock()
+	defer g.artMu.Unlock()
+	if len(g.artAge) >= maxArtEntries {
+		delete(g.artCache, g.artAge[0])
+		g.artAge = append(g.artAge[:0], g.artAge[1:]...) // keep the backing array bounded
+	}
+	if _, ok := g.artCache[address]; !ok {
+		g.artCache[address] = data
+		g.artAge = append(g.artAge, address)
+	}
+	return data
+}
+
+// prewarmArt fetches the first covers of a listing in the background so the rows
+// and the jog wheel find them cached. One run at a time: a busy deck skips it.
+func (g *tidalGateway) prewarmArt(refs []trackRef) {
+	if !g.warming.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer g.warming.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		for _, ref := range refs[:min(len(refs), 12)] {
+			g.artBytes(ctx, thumbURL(ref.track))
+		}
+	}()
+}
+
+// syncStmAlbumArt gives the streaming row Engine inserted into stm.db a real
+// cover. Engine writes it as hash "image://streaming/" with no image, never reads
+// the file's embedded picture for a row that already has an AlbumArt id, and so the
+// jog wheel (GET_ALBUM_ART) shows nothing. Writing Engine's live database is how
+// m.db got corrupted before (sc5000-shadow-decks), so this stays one UPDATE on a
+// PERSIST-journal connection: the default DELETE mode unlinks the stm.db-journal
+// Engine keeps open. Only a still-empty row is touched.
+func (g *tidalGateway) syncStmAlbumArt(ctx context.Context, id int64, t providers.Track) {
+	address := t.CoverURL
+	if address == "" {
+		address = thumbURL(t)
+	}
+	data := g.artBytes(ctx, address)
+	if len(data) < 3 || data[0] != 0xff || data[1] != 0xd8 { // Engine's Artwork files are JPEG
+		return
+	}
+	sum := sha1.Sum(data)
+	lib := filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library")
+	stm := filepath.Join(lib, "Database2", "stm.db")
+	if _, err := os.Stat(stm); err != nil {
+		return
+	}
+	file := filepath.Join(lib, "Artwork", base64.RawURLEncoding.EncodeToString(sum[:])+".jpg")
+	if _, err := os.Stat(file); err != nil {
+		if os.MkdirAll(filepath.Dir(file), 0o755) != nil {
+			return
+		}
+		tmp := file + ".part"
+		if os.WriteFile(tmp, data, 0o644) != nil || os.Rename(tmp, file) != nil {
+			os.Remove(tmp)
+			return
+		}
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: stm}).String()+"?_pragma=busy_timeout(2000)&_pragma=journal_mode(persist)")
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	res, err := db.ExecContext(ctx, `UPDATE AlbumArt SET hash = ?, albumArt = ? WHERE albumArt IS NULL AND id = (SELECT albumArtId FROM Track WHERE uri = ? ORDER BY id DESC LIMIT 1)`, sum[:], data, fmt.Sprintf("streaming://TIDAL/Track/%d", id))
+	if err != nil {
+		log.Printf("stream-sync: stm.db cover for track %d: %v", id, err)
+	} else if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("stream-sync: stm.db cover set for track %d", id)
+	}
+}
+
+// httpsCover upgrades http:// cover links (NetEase serves them on both): the
+// cover embed and the thumbnail proxy accept https only.
+func httpsCover(t *providers.Track) {
+	for _, p := range []*string{&t.CoverURL, &t.ThumbURL} {
+		if rest, ok := strings.CutPrefix(*p, "http://"); ok {
+			*p = "https://" + rest
+		}
+	}
 }
 
 func tidalTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000-0700") }
@@ -794,6 +887,7 @@ func (g *tidalGateway) refItems(refs []trackRef) []any {
 		}
 		items = append(items, flat)
 	}
+	g.prewarmArt(refs)
 	return items
 }
 func camelotRank(k string) (int, bool) {
@@ -1324,7 +1418,7 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	_, ref, ok := g.lookup(w, raw)
+	id, ref, ok := g.lookup(w, raw)
 	if !ok {
 		return
 	}
@@ -1361,5 +1455,14 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	} else if strings.HasSuffix(strings.ToLower(p), ".ogg") {
 		w.Header().Set("Content-Type", "audio/ogg")
 	}
+	// Engine's stm.db row exists by now; it may still be settling, so retry a few times.
+	go func() {
+		for _, wait := range []time.Duration{0, 800 * time.Millisecond, 1700 * time.Millisecond, 3500 * time.Millisecond} {
+			time.Sleep(wait)
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			g.syncStmAlbumArt(ctx, id, ref.track)
+			cancel()
+		}
+	}()
 	http.ServeFile(w, r, p)
 }
