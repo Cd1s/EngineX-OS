@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -624,11 +625,11 @@ func (s sortMockProvider) Tracks(_ context.Context, _ string) ([]providers.Track
 func TestStreamingPlaylistSortByBPMKeyTitle(t *testing.T) {
 	// 1. Direct unit test of sortStreamingTracks
 	tracks := []trackRef{
-		{track: providers.Track{Title: "Echoes", Artist: "Pink Floyd", BPM: 130, Key: "8B", DurationMS: 300000}},
-		{track: providers.Track{Title: "Abba Song", Artist: "Abba", BPM: 120, Key: "1A", DurationMS: 200000}},
-		{track: providers.Track{Title: "Zero BPM", Artist: "Ambient", BPM: 0, Key: "", DurationMS: 100000}},
-		{track: providers.Track{Title: "Negative BPM", Artist: "Glitch", BPM: -5, Key: "12B", DurationMS: 150000}},
-		{track: providers.Track{Title: "Zebra Beat", Artist: "Zulu", BPM: 125, Key: "1B", DurationMS: 250000}},
+		{track: providers.Track{Title: "Echoes", Artist: "Pink Floyd", BPM: 130, Key: "8B", DurationMS: 300000, Rating: 5}},
+		{track: providers.Track{Title: "Abba Song", Artist: "Abba", BPM: 120, Key: "1A", DurationMS: 200000, Rating: 4}},
+		{track: providers.Track{Title: "Zero BPM", Artist: "Ambient", BPM: 0, Key: "", DurationMS: 100000, Rating: 1}},
+		{track: providers.Track{Title: "Negative BPM", Artist: "Glitch", BPM: -5, Key: "12B", DurationMS: 150000, Rating: 2}},
+		{track: providers.Track{Title: "Zebra Beat", Artist: "Zulu", BPM: 125, Key: "1B", DurationMS: 250000, Rating: 3}},
 	}
 
 	// BPM Ascending: 120, 125, 130, followed by 0, -5
@@ -688,6 +689,22 @@ func TestStreamingPlaylistSortByBPMKeyTitle(t *testing.T) {
 		artistAsc[2].track.Artist != "Glitch" || artistAsc[3].track.Artist != "Pink Floyd" ||
 		artistAsc[4].track.Artist != "Zulu" {
 		t.Fatalf("artist asc: %+v", artistAsc)
+	}
+
+	// Rating Descending: 5 (Echoes), 4 (Abba), 3 (Zebra), 2 (Negative), 1 (Zero)
+	ratingDesc := slices.Clone(tracks)
+	sortStreamingTracks(ratingDesc, "rating", "desc")
+	if ratingDesc[0].track.Rating != 5 || ratingDesc[1].track.Rating != 4 || ratingDesc[2].track.Rating != 3 ||
+		ratingDesc[3].track.Rating != 2 || ratingDesc[4].track.Rating != 1 {
+		t.Fatalf("rating desc: %+v", ratingDesc)
+	}
+
+	// Length Ascending: 100000, 150000, 200000, 250000, 300000
+	lengthAsc := slices.Clone(tracks)
+	sortStreamingTracks(lengthAsc, "length", "asc")
+	if lengthAsc[0].track.DurationMS != 100000 || lengthAsc[1].track.DurationMS != 150000 || lengthAsc[2].track.DurationMS != 200000 ||
+		lengthAsc[3].track.DurationMS != 250000 || lengthAsc[4].track.DurationMS != 300000 {
+		t.Fatalf("length asc: %+v", lengthAsc)
 	}
 
 	// 2. Integration test via /v1/playlists/{uuid}/tracks
@@ -777,6 +794,68 @@ func TestStreamingPlaylistSortByBPMKeyTitle(t *testing.T) {
 	}
 }
 
+func TestEnrichRatingsFromSTMAndMDB(t *testing.T) {
+	dataDir := t.TempDir()
+	dbDir := filepath.Join(dataDir, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Create stm.db with a rated streaming track
+	stmPath := filepath.Join(dbDir, "stm.db")
+	stmDB, err := sql.Open("sqlite", stmPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmDB.Close()
+	_, err = stmDB.Exec(`CREATE TABLE Track (id INTEGER PRIMARY KEY, originTrackId INTEGER, uri TEXT, title TEXT, artist TEXT, rating INTEGER)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = stmDB.Exec(`INSERT INTO Track (originTrackId, uri, title, artist, rating) VALUES (101, 'streaming://TIDAL/Track/101', 'Stream Song', 'Stream Artist', 5)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Create m.db with a rated local track
+	mPath := filepath.Join(dbDir, "m.db")
+	mDB, err := sql.Open("sqlite", mPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mDB.Close()
+	_, err = mDB.Exec(`CREATE TABLE Track (id INTEGER PRIMARY KEY, title TEXT, artist TEXT, rating INTEGER)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = mDB.Exec(`INSERT INTO Track (title, artist, rating) VALUES ('Local Title', 'Local Artist', 4)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldShadow := shadowDataRoot
+	shadowDataRoot = dataDir
+	defer func() { shadowDataRoot = oldShadow }()
+
+	g := &tidalGateway{s: New(Config{}, nil)}
+	tracks := []providers.Track{
+		{ID: "101", Title: "Different Title", Artist: "Different Artist"},
+		{ID: "999", Title: "Local Title", Artist: "Local Artist"},
+		{ID: "777", Title: "Unrated", Artist: "Unrated"},
+	}
+
+	g.enrichRatingsFromDB(context.Background(), tracks)
+	if tracks[0].Rating != 5 {
+		t.Fatalf("expected track 101 to have rating 5 from stm.db, got %d", tracks[0].Rating)
+	}
+	if tracks[1].Rating != 4 {
+		t.Fatalf("expected track 999 to have rating 4 from m.db by title/artist, got %d", tracks[1].Rating)
+	}
+	if tracks[2].Rating != 0 {
+		t.Fatalf("expected track 777 to have rating 0, got %d", tracks[2].Rating)
+	}
+}
+
 // #150: with lossy off, the manifest must still name the file the stream will serve.
 func TestSoundCloudPlaybackInfoCodecMatchesStreamWhenLosslessOnly(t *testing.T) {
 	var cdn *httptest.Server
@@ -840,5 +919,56 @@ func TestSoundCloudPlaybackInfoCodecMatchesStreamWhenLosslessOnly(t *testing.T) 
 		if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != want[0] {
 			t.Fatalf("track %s stream: %d %q", id, resp.StatusCode, resp.Header.Get("Content-Type"))
 		}
+	}
+}
+
+// Review of #158: a streaming track's own rating beats a local file of the same
+// name, and the full scan of both libraries is reused for ratingCacheTTL.
+func TestRatingsStreamingWinsAndAreCached(t *testing.T) {
+	dataDir := t.TempDir()
+	dbDir := filepath.Join(dataDir, "AppDataUser/AIR Music Technology/Engine/Engine Library/Database2")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name, schema, insert string) *sql.DB {
+		db, err := sql.Open("sqlite", filepath.Join(dbDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		if _, err := db.Exec(schema); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(insert); err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	stm := mk("stm.db", `CREATE TABLE Track (id INTEGER PRIMARY KEY, originTrackId INTEGER, uri TEXT, title TEXT, artist TEXT, rating INTEGER)`,
+		`INSERT INTO Track (originTrackId, uri, title, artist, rating) VALUES (5, 'streaming://TIDAL/Track/5', 'Same', 'Same', 5)`)
+	mk("m.db", `CREATE TABLE Track (id INTEGER PRIMARY KEY, title TEXT, artist TEXT, rating INTEGER)`,
+		`INSERT INTO Track (title, artist, rating) VALUES ('Same', 'Same', 2)`)
+
+	oldRoot, oldTTL := shadowDataRoot, ratingCacheTTL
+	shadowDataRoot, ratingCacheTTL = dataDir, time.Hour
+	t.Cleanup(func() { shadowDataRoot, ratingCacheTTL = oldRoot, oldTTL })
+	g := &tidalGateway{s: New(Config{}, nil)}
+	rate := func() int {
+		tr := []providers.Track{{ID: "x", Title: "Same", Artist: "Same"}}
+		g.enrichRatingsFromDB(context.Background(), tr)
+		return tr[0].Rating
+	}
+	if got := rate(); got != 5 {
+		t.Fatalf("the streaming track's rating must win over the local file's 2, got %d", got)
+	}
+	if _, err := stm.Exec(`UPDATE Track SET rating = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if got := rate(); got != 5 {
+		t.Fatalf("within the TTL the cached ratings are reused, got %d", got)
+	}
+	ratingCacheTTL = 0
+	if got := rate(); got != 1 {
+		t.Fatalf("after the TTL the libraries are read again, got %d", got)
 	}
 }
