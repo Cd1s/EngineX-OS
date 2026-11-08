@@ -1,7 +1,7 @@
 # EngineX OS 5.3.0.3 发版与 Issue 修复记录（2026-11-07）
 
 - **发布日期**：`2026-11-07`
-- **版本范围**：`v5.3.0.2`（`e7622ac`）→ `v5.3.0.3`（构建提交：`37e83ea`；2026-11-08 第三次同版本重发加入 #139、Mod Hub 与 #138，此前构建依次为 `2357a26`（#139 + Mod Hub，未上传）、 `9616419`（#116）、`38d5e68`（#133）、首次 `5b4687e`）
+- **版本范围**：`v5.3.0.2`（`e7622ac`）→ `v5.3.0.3`（构建提交：`b941ea4`；2026-11-09 同版本重发加入 #98、#152、#153、#156、#157、#159、#160，此前构建依次为 `37e83ea`、`9616419`、`38d5e68`、`5b4687e`）
 - **覆盖机型与产物（共 20 个发布资产 + `SHA256SUMS.txt`）**：
   - **8 款一代机完整固件（`*-Update.img`）**：`SC5000`（JP07）、`SC5000M`（JP08）、`PRIME GO`（JP11）、`SC6000`（JP13）、`SC6000M`（JP14）、`PRIME 4`（JC11）、`PRIME 2`（JC16）、`Mixstream Pro`（NH08）
   - **8 款二代机 `/data` 数据包（`*-Data-Bundle.tar.gz`，Beta）**：`SC LIVE 4`（JP21）、`SC LIVE 2`（JP20）、`PRIME 4+`（JC11S）、`PRIME GO+`（JP11S）、`Mixstream Pro+`（NH08S）、`Mixstream Pro Go`（NH10）、`PRIME 4 G2`（JP24，64-bit AZ04）、`Rane SYSTEM ONE`（RMZ2，64-bit AZ04）
@@ -122,34 +122,34 @@
 
 ## 4. 发布构建产物与 SHA-256 校验表
 
-- **构建提交**：`37e83ea`（2026-11-08 第三次同版本重发 #139 + Mod Hub + #138，Batam 上从 GitHub 新克隆的源码目录，`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）
-- **回滚点**：同版本上一次构建为 `9616419`（tag 原在 `f510de0`；`2357a26` 构建的门禁因旧工作目录与残留进程未跑成，未上传），更早为 `38d5e68`（tag `937b082`）与 `5b4687e`（tag `df06655`）；上一版本为 `v5.3.0.2`（提交 `e7622ac` / 构建提交 `72f4e34`）
+- **构建提交**：`b941ea4`（2026-11-09 同版本重发 #98、#152、#153、#156、#157、#159、#160，`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）
+- **回滚点**：同版本上一次构建为 `37e83ea`，更早为 `9616419`（tag `f510de0`）、`38d5e68`（tag `937b082`）与 `5b4687e`（tag `df06655`）；上一版本为 `v5.3.0.2`（提交 `e7622ac` / 构建提交 `72f4e34`）
 
 ### 一代机型完整固件（`*-Update.img`）
 
 | 镜像组 | 机型 | 板号 | 文件名 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.3-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `9b8bc24ae58ed98e3e2ad19f8f54f0608fdb4c13440050ab4d529b8b0d558681` |
-| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.3-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `9b8bc24ae58ed98e3e2ad19f8f54f0608fdb4c13440050ab4d529b8b0d558681` |
-| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.3-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `9b8bc24ae58ed98e3e2ad19f8f54f0608fdb4c13440050ab4d529b8b0d558681` |
-| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.3-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `104a5ed758a819214530558eb8daafe34377932c2c45c21e3c3a22ec3107beef` |
-| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.3-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `104a5ed758a819214530558eb8daafe34377932c2c45c21e3c3a22ec3107beef` |
-| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `d703bea024087826cb3a97e3e64754f61c50089778b6162dd026ecdc1649cb44` |
-| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.3-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `d703bea024087826cb3a97e3e64754f61c50089778b6162dd026ecdc1649cb44` |
-| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.3-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `d703bea024087826cb3a97e3e64754f61c50089778b6162dd026ecdc1649cb44` |
+| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.3-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `4e131f5fa5eaef1b00611cf89528802664adf2b3d07c6bf451579b419fae49f1` |
+| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.3-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `4e131f5fa5eaef1b00611cf89528802664adf2b3d07c6bf451579b419fae49f1` |
+| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.3-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `4e131f5fa5eaef1b00611cf89528802664adf2b3d07c6bf451579b419fae49f1` |
+| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.3-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `5c137b9b2cdde42c18132da130ab730d57045f35a83d4ec69db0fd285b9a27d3` |
+| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.3-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `5c137b9b2cdde42c18132da130ab730d57045f35a83d4ec69db0fd285b9a27d3` |
+| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `58291e818dcd35f8c2d8b870287424f796b7603e4b162421cf7ad395ff02c6a7` |
+| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.3-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `58291e818dcd35f8c2d8b870287424f796b7603e4b162421cf7ad395ff02c6a7` |
+| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.3-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `58291e818dcd35f8c2d8b870287424f796b7603e4b162421cf7ad395ff02c6a7` |
 
 ### 二代机型 `/data` 数据包（`*-Data-Bundle.tar.gz`，Beta）
 
 | 架构组 | 机型 | 板号 | 文件名 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `fcbbe042ee2c555d848852b450cf962fe63bdb712fb86cdce14452c815697093` |
-| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `895237d46e69891d6546816a767529d168153e1f5c9f5d63268f6684da49e63d` |
-| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `5c4d6ee3cff131b701a2f66b34b448b631f1487bc953bfa7cba73adca56acdee` |
-| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `1f624cc1e4a7fdfb98db4d7d116d59f7b23409400fa4c264988afebb7c1a78d1` |
-| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `3adc55c5059a0f31909e69a57b6bd7e33fbd8c29c0a700451d583198cd46be63` |
-| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `e169c1a06d9ba6a30b0609f4513fae39d53b5103e7d32af86b8d3a576f453682` |
-| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `88a13e87d2b3adab8bec6331827e374410dbb4c18c04982681ea54921cce0aa3` |
-| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `479b9a3052bb3f38f3a462d5d37527f639438244fec165927144ab8c5fa5313a` |
+| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `52d24d7c3887e3c7b97d0542f95a3707f3a5db2facb6c312f3b636d762b6e7ad` |
+| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `310b93144c3f4dadd8c368a8c9caf40f4f06ffe4bb85f70ef169851608ac6fd4` |
+| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `f67d214cfbe4512d9afb37ff82baec8d3ffa814085594bdd05d8aa3ab0d0e3fd` |
+| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `7206104de17eb645e7200a8332788c0c7af2ea4a66b37d071be5e29a23510d53` |
+| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `7347a2ae4bb0e13b84f398e5f4dbaa12836e4f17c9c367d43bbf3eb5708f87d7` |
+| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `a2245f38ab7fa76119856abb119ab9e058cea1fbf3a6f23542dd9d972113c60b` |
+| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `1dd617027a99652f32388d5a686790ab7e5cde9fb2eb38e15e1c8205162c7c25` |
+| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz` | `207eec65e8963e787762c7425bd796d03e482d7dd21ab26cbdf6672703f20a7a` |
 
 ### 跨平台一键安装器（`EngineX-Installer`）
 
