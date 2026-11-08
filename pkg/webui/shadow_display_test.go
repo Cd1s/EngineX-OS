@@ -131,16 +131,21 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 	if !state.DisplayOnly {
 		t.Fatal("new mode not default")
 	}
-	if resp.Header.Get("X-Shadow-State")=="" {t.Fatal("EngineX-only display response lost version caching")}
+	if resp.Header.Get("X-Shadow-State") == "" {
+		t.Fatal("EngineX-only display response lost version caching")
+	}
 	s.shadow.mu.Lock()
-	p.MetadataOnly=true
-	s.shadow.peerDecks[2]=p
+	p.MetadataOnly = true
+	s.shadow.peerDecks[2] = p
 	s.shadow.mu.Unlock()
-	resp=get("/v1/sc5000/shadow");resp.Body.Close()
-	if resp.Header.Get("X-Shadow-State")!="" {t.Fatal("CDJ continuous state must not be skipped by peer version")}
+	resp = get("/v1/sc5000/shadow")
+	resp.Body.Close()
+	if resp.Header.Get("X-Shadow-State") != "" {
+		t.Fatal("CDJ continuous state must not be skipped by peer version")
+	}
 	s.shadow.mu.Lock()
-	p.MetadataOnly=false
-	s.shadow.peerDecks[2]=p
+	p.MetadataOnly = false
+	s.shadow.peerDecks[2] = p
 	s.shadow.mu.Unlock()
 	resp = get("/v1/sc5000/shadow/display?deck=2&key=" + displayTrackKey(p))
 	var meta struct{ Cues []enginedb.DisplayCue }
