@@ -26,6 +26,7 @@ type Status struct {
 type route struct {
 	output  Output
 	network *net.UDPConn
+	address *net.UDPAddr
 	usb     usbOutput
 }
 
@@ -167,7 +168,11 @@ func (e *Engine) Apply(c Config) error {
 			if o.Protocol == "sacn" {
 				port = 5568
 			}
-			r.network, err = net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.ParseIP(o.Host), Port: port})
+			// Open before selecting the destination: Linux requires SO_BROADCAST
+			// before a broadcast connect/send, so DialUDP followed by setsockopt
+			// rejects the usual Art-Net broadcast destination.
+			r.address = &net.UDPAddr{IP: net.ParseIP(o.Host), Port: port}
+			r.network, err = net.ListenUDP("udp4", nil)
 			if err == nil {
 				err = allowBroadcast(r.network)
 			}
@@ -279,7 +284,11 @@ func (e *Engine) send(routes []route, frames map[int][512]byte, terminated bool)
 				p = SACN(r.output.Universe, e.sequence, f, e.cid, terminated)
 			}
 			r.network.SetWriteDeadline(time.Now().Add(30 * time.Millisecond))
-			_, err = r.network.Write(p)
+			if r.address != nil {
+				_, err = r.network.WriteToUDP(p, r.address)
+			} else {
+				_, err = r.network.Write(p)
+			}
 		} else {
 			err = r.usb.Send(f)
 		}
