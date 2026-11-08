@@ -148,7 +148,7 @@ func (s *Server) dmxClockPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setDMXDecks(decks []deckState) {
-	if s.dmx == nil {
+	if s.dmx == nil || !s.dmx.Enabled() {
 		return
 	}
 	for _, d := range decks {

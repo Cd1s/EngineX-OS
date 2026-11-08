@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -45,6 +46,7 @@ type Engine struct {
 	sequence byte
 	closed   bool
 	blocked  func() bool
+	enabled  atomic.Bool
 }
 
 func New(blocked ...func() bool) *Engine {
@@ -61,6 +63,8 @@ func cloneConfig(c Config) Config {
 	return c
 }
 
+func (e *Engine) Enabled() bool { return e.enabled.Load() }
+
 func (e *Engine) Status() Status {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -75,6 +79,9 @@ func (e *Engine) Status() Status {
 // source immediately, including cue/loop jumps; timestamp ordering rejects
 // delayed HTTP posts. No work is scheduled by a sample.
 func (e *Engine) SetClock(c Clock) {
+	if !e.Enabled() {
+		return
+	}
 	now := time.Now()
 	if !c.Valid(now) {
 		return
@@ -134,6 +141,7 @@ func (e *Engine) Apply(c Config) error {
 	e.stopRun()
 	e.mu.Lock()
 	e.config, e.err, e.running, e.frames = cloneConfig(c), "", false, nil
+	e.enabled.Store(c.Enabled)
 	if !c.Enabled {
 		e.clock, e.beatBase = Clock{}, 0
 	}
@@ -187,7 +195,21 @@ func (e *Engine) Close() {
 	e.op.Lock()
 	defer e.op.Unlock()
 	e.stopRun()
+	e.enabled.Store(false)
 	e.closed = true
+}
+
+func phaseAt(c Config, clock Clock, base float64, start, now time.Time) (float64, bool) {
+	if !c.Sync {
+		return now.Sub(start).Seconds() * c.BPM / 60, true
+	}
+	if !clock.Valid(now) {
+		return base, false
+	}
+	if clock.Playing {
+		base += now.Sub(clock.At).Seconds() * clock.BPM / 60
+	}
+	return base, true
 }
 
 func (e *Engine) run(routes []route, stop <-chan struct{}, done chan<- struct{}) {
@@ -231,16 +253,8 @@ func (e *Engine) run(routes []route, stop <-chan struct{}, done chan<- struct{})
 			}
 			e.mu.Lock()
 			c := e.config
-			beats := now.Sub(start).Seconds() * c.BPM / 60
-			if c.Sync {
-				beats = e.beatBase
-				if e.clock.Valid(now) && e.clock.Playing {
-					beats += now.Sub(e.clock.At).Seconds() * e.clock.BPM / 60
-				}
-				if !e.clock.Valid(now) {
-					c.Blackout = true
-				} // no guessed live phase
-			}
+			beats, live := phaseAt(c, e.clock, e.beatBase, start, now)
+			c.Blackout = c.Blackout || !live // no guessed live phase
 			frames := Render(c, beats)
 			e.frames = frames
 			e.mu.Unlock()
