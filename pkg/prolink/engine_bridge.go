@@ -36,15 +36,15 @@ var engineExportMu sync.Mutex
 var engineExportWorkers sync.Map // absolute root -> *engineExportWorker
 
 type engineExportWorker struct {
- stop chan struct{}
- done chan struct{}
+	stop chan struct{}
+	done chan struct{}
 }
 
 type engineExportJob struct {
- engineID, exportID uint32
- path string
- length int
- artID int64
+	engineID, exportID uint32
+	path               string
+	length             int
+	artID              int64
 }
 
 const engineExportBatch = 32
@@ -65,7 +65,9 @@ func SyncEngineToPioneerExport(root string) error {
 	defer engineExportMu.Unlock()
 	var err error
 	root, err = filepath.Abs(root)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	if active, ok := engineExportWorkers.Load(root); ok {
 		worker := active.(*engineExportWorker)
 		close(worker.stop)
@@ -181,7 +183,7 @@ func SyncEngineToPioneerExport(root string) error {
 		if engineColumn(db, "PerformanceData", "beatData") {
 			beatHeaderColumn = "substr((SELECT beatData FROM PerformanceData WHERE trackId=Track.id),1,2097153)"
 		}
-		trackRows, err := db.Query(`SELECT id, COALESCE(title, ''), COALESCE(artist, ''), COALESCE(bpm, 0), COALESCE(bpmAnalyzed, 0), COALESCE(length, 0), COALESCE(path, ''), COALESCE(filename, ''), `+keyColumn+`, `+artColumn+`, `+bytesColumn+`, `+beatHeaderColumn+` FROM Track ORDER BY id`)
+		trackRows, err := db.Query(`SELECT id, COALESCE(title, ''), COALESCE(artist, ''), COALESCE(bpm, 0), COALESCE(bpmAnalyzed, 0), COALESCE(length, 0), COALESCE(path, ''), COALESCE(filename, ''), ` + keyColumn + `, ` + artColumn + `, ` + bytesColumn + `, ` + beatHeaderColumn + ` FROM Track ORDER BY id`)
 		if err != nil {
 			return fmt.Errorf("query engine tracks: %w", err)
 		}
@@ -259,8 +261,12 @@ func SyncEngineToPioneerExport(root string) error {
 			if id > progress.LastID {
 				if len(jobs) == 0 && processed < engineExportBatch && (processed == 0 || time.Since(started) < 750*time.Millisecond) {
 					analysis, err = readEngineAnalysis(db, root, id, cleanPath, length)
-					if err != nil { return fmt.Errorf("engine analysis %d: %w", id, err) }
-					if _, err := writeANLZ(root, newID, cleanPath, analysis.Analysis); err != nil { return err }
+					if err != nil {
+						return fmt.Errorf("engine analysis %d: %w", id, err)
+					}
+					if _, err := writeANLZ(root, newID, cleanPath, analysis.Analysis); err != nil {
+						return err
+					}
 					processed++
 					progress.LastID = id
 				} else {
@@ -290,17 +296,23 @@ func SyncEngineToPioneerExport(root string) error {
 			}
 			if analysis != nil {
 				t.SampleRate = int(analysis.rate)
-				if t.Duration <= 0 { t.Duration = analysis.duration }
+				if t.Duration <= 0 {
+					t.Duration = analysis.duration
+				}
 			} else {
 				rate, duration := engineAudioMetadata(beatHeader)
 				t.SampleRate = int(rate)
-				if t.Duration <= 0 { t.Duration = duration }
+				if t.Duration <= 0 {
+					t.Duration = duration
+				}
 			}
 			if artID > 0 {
 				t.ArtworkPath = engineArtworkPath(artID)
 				if analysis != nil {
 					t.ArtworkPath, err = exportEngineArtwork(db, root, artID, artResolver)
-					if err != nil { log.Printf("prolink: Engine track %d: omit unavailable artwork: %v", id, err) }
+					if err != nil {
+						log.Printf("prolink: Engine track %d: omit unavailable artwork: %v", id, err)
+					}
 				}
 			}
 			newTracks = append(newTracks, t)
@@ -309,7 +321,11 @@ func SyncEngineToPioneerExport(root string) error {
 			return fmt.Errorf("read engine tracks: %w", err)
 		}
 		trackRows.Close()
-		for id := range trackIDMap { if !seenEngineIDs[id] { delete(trackIDMap, id) } }
+		for id := range trackIDMap {
+			if !seenEngineIDs[id] {
+				delete(trackIDMap, id)
+			}
+		}
 
 		playlistRows, err := db.Query(`SELECT id, COALESCE(title, ''), COALESCE(parentListId, 0) FROM Playlist WHERE title NOT LIKE '[Pro DJ Link:%' ORDER BY id`)
 		if err != nil {
@@ -424,9 +440,13 @@ func SyncEngineToPioneerExport(root string) error {
 				id = maxTrackID
 				analysisPath := engineAnalysisPath(id)
 				if processed < engineExportBatch && (processed == 0 || time.Since(started) < 750*time.Millisecond) {
-					if _, err := writeANLZ(root, id, path, &rekordbox.Analysis{}); err != nil { return err }
+					if _, err := writeANLZ(root, id, path, &rekordbox.Analysis{}); err != nil {
+						return err
+					}
 					processed++
-				} else { jobs = append(jobs, engineExportJob{exportID:id,path:path}) }
+				} else {
+					jobs = append(jobs, engineExportJob{exportID: id, path: path})
+				}
 				m.ID, m.Path, m.AnalysisPath = id, path, analysisPath
 				newTracks = append(newTracks, m)
 			}
@@ -439,7 +459,9 @@ func SyncEngineToPioneerExport(root string) error {
 			byPlatform[st.platform] = append(byPlatform[st.platform], id)
 		}
 		streamPlaylistID := func(parent uint32, name string) uint32 {
-			if old, ok := existingPlaylistNames[fmt.Sprintf("%d/%s", parent, name)]; ok { return old.ID }
+			if old, ok := existingPlaylistNames[fmt.Sprintf("%d/%s", parent, name)]; ok {
+				return old.ID
+			}
 			maxPlaylistID++
 			return maxPlaylistID
 		}
@@ -465,7 +487,9 @@ func SyncEngineToPioneerExport(root string) error {
 	var mergedTracks []rekordbox.Track
 	if existingLib != nil {
 		for _, t := range existingLib.Tracks {
-			if !hasMDB || strings.HasPrefix(t.Path, "/"+StreamPrefix+"/") { mergedTracks = append(mergedTracks, t) }
+			if !hasMDB || strings.HasPrefix(t.Path, "/"+StreamPrefix+"/") {
+				mergedTracks = append(mergedTracks, t)
+			}
 		}
 	}
 	trackIndex := make(map[uint32]int, len(mergedTracks))
@@ -547,75 +571,134 @@ func SyncEngineToPioneerExport(root string) error {
 // finish in a single worker per root, so startExport need not reload its immutable
 // Library and a large USB never needs repeated OFF/ON cycles to become visible.
 func engineAnalysisPath(id uint32) string {
- return fmt.Sprintf("/PIONEER/USBANLZ/P%03d/ANLZ0000.DAT", id)
+	return fmt.Sprintf("/PIONEER/USBANLZ/P%03d/ANLZ0000.DAT", id)
 }
 
 func engineArtworkPath(id int64) string {
- return fmt.Sprintf("/PIONEER/Artwork/A%d.jpg", id)
+	return fmt.Sprintf("/PIONEER/Artwork/A%d.jpg", id)
 }
 
 func engineSourceStamp(path string) string {
- st,err:=os.Stat(path);if err!=nil { return "" }
- stamp:=pdbStamp(st)
- if wal,err:=os.Stat(path+"-wal");err==nil { stamp+="|wal:"+pdbStamp(wal) }
- return stamp
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	stamp := pdbStamp(st)
+	if wal, err := os.Stat(path + "-wal"); err == nil {
+		stamp += "|wal:" + pdbStamp(wal)
+	}
+	return stamp
 }
 
 func startEngineExportWorker(root, mdbPath, sourceStamp, stamp string, progress engineExportProgress, jobs []engineExportJob) {
- marker,err:=os.ReadFile(filepath.Join(root,generatedMarker));if err!=nil { return }
- worker:=&engineExportWorker{stop:make(chan struct{}),done:make(chan struct{})}
- engineExportWorkers.Store(root,worker)
- go func() {
-  defer func(){engineExportWorkers.CompareAndDelete(root,worker);close(worker.done)}()
-  current:=func()bool {
-   select {case <-worker.stop:return false;default:}
-   b,err:=os.ReadFile(filepath.Join(root,generatedMarker));if err!=nil || !bytes.Equal(b,marker) { return false }
-   st,err:=os.Stat(filepath.Join(root,"PIONEER/rekordbox/export.pdb"));return err==nil && pdbStamp(st)==string(marker)
-  }
-  var db *sql.DB
-  for _,job:=range jobs { if job.engineID!=0 {
-   db,err=sql.Open("sqlite",(&url.URL{Scheme:"file",Path:mdbPath,RawQuery:"mode=ro&_pragma=busy_timeout(500)"}).String())
-   if err!=nil { log.Printf("prolink: open background Engine export: %v",err);return };defer db.Close();break
-  } }
-  resolver,_:=compat.NewResolver(root)
-  checkpoint:=func()error {
-   // IDs were persisted with the metadata; only the tiny cursor changes here.
-   b,err:=json.Marshal(engineExportProgress{Stamp:stamp,LastID:progress.LastID});if err!=nil {return err}
-   return writeEngineExportFile(filepath.Join(root,"PIONEER/rekordbox/.enginex-cursor"),b,0644)
-  }
-  batchStart:=time.Now();batch:=0
-  artDone:=make(map[int64]bool)
-  for _,job:=range jobs {
-   if !current() {return}
-   analysis:=&rekordbox.Analysis{}
-   if job.engineID!=0 {
-    data,err:=readEngineAnalysis(db,root,job.engineID,job.path,job.length)
-    if err!=nil {log.Printf("prolink: background Engine track %d: %v",job.engineID,err);return}
-    analysis=data.Analysis
-   }
-   if !current() {return}
-   if _,err:=writeANLZ(root,job.exportID,job.path,analysis);err!=nil {log.Printf("prolink: background ANLZ: %v",err);return}
-   if job.artID>0 && !artDone[job.artID] {
-    if _,err:=exportEngineArtwork(db,root,job.artID,resolver);err!=nil {log.Printf("prolink: background artwork %d: %v",job.artID,err)}
-    artDone[job.artID]=true
-   }
-   if job.engineID>progress.LastID {progress.LastID=job.engineID}
-   batch++
-   if batch>=engineExportBatch || time.Since(batchStart)>750*time.Millisecond {
-    if !current() {return};if err:=checkpoint();err!=nil {log.Printf("prolink: checkpoint Engine export: %v",err);return}
-    batch=0;batchStart=time.Now()
-    // Yield between bounded batches, and make an overlapping Sync cancellable.
-    select {case <-worker.stop:return;case <-time.After(10*time.Millisecond):}
-   }
-  }
-  if !current() {return}
-  if err:=checkpoint();err!=nil {log.Printf("prolink: checkpoint Engine export: %v",err);return}
-  // Do not endlessly restart a large pass when playback updates history in WAL.
-  // Finish this pass; a later Sync will refresh metadata for the new source.
-  if engineSourceStamp(mdbPath)==sourceStamp {
-   if err:=writeEngineExportFile(filepath.Join(root,"PIONEER/rekordbox/.enginex-stamp"),[]byte(stamp),0644);err!=nil {log.Printf("prolink: complete Engine export: %v",err)}
-  }
- }()
+	marker, err := os.ReadFile(filepath.Join(root, generatedMarker))
+	if err != nil {
+		return
+	}
+	worker := &engineExportWorker{stop: make(chan struct{}), done: make(chan struct{})}
+	engineExportWorkers.Store(root, worker)
+	go func() {
+		defer func() { engineExportWorkers.CompareAndDelete(root, worker); close(worker.done) }()
+		current := func() bool {
+			select {
+			case <-worker.stop:
+				return false
+			default:
+			}
+			b, err := os.ReadFile(filepath.Join(root, generatedMarker))
+			if err != nil || !bytes.Equal(b, marker) {
+				return false
+			}
+			st, err := os.Stat(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
+			return err == nil && pdbStamp(st) == string(marker)
+		}
+		var db *sql.DB
+		for _, job := range jobs {
+			if job.engineID != 0 {
+				db, err = sql.Open("sqlite", (&url.URL{Scheme: "file", Path: mdbPath, RawQuery: "mode=ro&_pragma=busy_timeout(500)"}).String())
+				if err != nil {
+					log.Printf("prolink: open background Engine export: %v", err)
+					return
+				}
+				defer db.Close()
+				break
+			}
+		}
+		resolver, _ := compat.NewResolver(root)
+		checkpoint := func() error {
+			// IDs were persisted with the metadata; only the tiny cursor changes here.
+			b, err := json.Marshal(engineExportProgress{Stamp: stamp, LastID: progress.LastID})
+			if err != nil {
+				return err
+			}
+			return writeEngineExportFile(filepath.Join(root, "PIONEER/rekordbox/.enginex-cursor"), b, 0644)
+		}
+		batchStart := time.Now()
+		batch := 0
+		artDone := make(map[int64]bool)
+		for _, job := range jobs {
+			if !current() {
+				return
+			}
+			analysis := &rekordbox.Analysis{}
+			if job.engineID != 0 {
+				data, err := readEngineAnalysis(db, root, job.engineID, job.path, job.length)
+				if err != nil {
+					log.Printf("prolink: background Engine track %d: %v", job.engineID, err)
+					return
+				}
+				analysis = data.Analysis
+			}
+			if !current() {
+				return
+			}
+			if _, err := writeANLZ(root, job.exportID, job.path, analysis); err != nil {
+				log.Printf("prolink: background ANLZ: %v", err)
+				return
+			}
+			if job.artID > 0 && !artDone[job.artID] {
+				if _, err := exportEngineArtwork(db, root, job.artID, resolver); err != nil {
+					log.Printf("prolink: background artwork %d: %v", job.artID, err)
+				}
+				artDone[job.artID] = true
+			}
+			if job.engineID > progress.LastID {
+				progress.LastID = job.engineID
+			}
+			batch++
+			if batch >= engineExportBatch || time.Since(batchStart) > 750*time.Millisecond {
+				if !current() {
+					return
+				}
+				if err := checkpoint(); err != nil {
+					log.Printf("prolink: checkpoint Engine export: %v", err)
+					return
+				}
+				batch = 0
+				batchStart = time.Now()
+				// Yield between bounded batches, and make an overlapping Sync cancellable.
+				select {
+				case <-worker.stop:
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+		}
+		if !current() {
+			return
+		}
+		if err := checkpoint(); err != nil {
+			log.Printf("prolink: checkpoint Engine export: %v", err)
+			return
+		}
+		// Do not endlessly restart a large pass when playback updates history in WAL.
+		// Finish this pass; a later Sync will refresh metadata for the new source.
+		if engineSourceStamp(mdbPath) == sourceStamp {
+			if err := writeEngineExportFile(filepath.Join(root, "PIONEER/rekordbox/.enginex-stamp"), []byte(stamp), 0644); err != nil {
+				log.Printf("prolink: complete Engine export: %v", err)
+			}
+		}
+	}()
 }
 
 // generatedMarker holds the size and mtime of the export.pdb this bridge wrote.
@@ -768,13 +851,19 @@ func engineDouble(b []byte, order binary.ByteOrder) float64 {
 // shared with the importer; SQL substr also bounds the compressed input itself.
 // Metadata needs only the beatData audio header, never the waveform payload.
 // Qt validation stays shared with enginedb, including its decompression bound.
-func engineAudioMetadata(blob []byte) (float64,float64) {
- if len(blob)==0 {return 0,0}
- raw,err:=enginedb.QUncompress(blob,engineBlobLimit)
- if err!=nil || len(raw)<17 {return 0,0}
- rate,samples:=engineDouble(raw,binary.BigEndian),engineDouble(raw[8:],binary.BigEndian)
- if !finiteEngine(rate) || rate<8000 || rate>384000 || !finiteEngine(samples) || samples<=0 || samples/rate>86400 {return 0,0}
- return rate,samples/rate
+func engineAudioMetadata(blob []byte) (float64, float64) {
+	if len(blob) == 0 {
+		return 0, 0
+	}
+	raw, err := enginedb.QUncompress(blob, engineBlobLimit)
+	if err != nil || len(raw) < 17 {
+		return 0, 0
+	}
+	rate, samples := engineDouble(raw, binary.BigEndian), engineDouble(raw[8:], binary.BigEndian)
+	if !finiteEngine(rate) || rate < 8000 || rate > 384000 || !finiteEngine(samples) || samples <= 0 || samples/rate > 86400 {
+		return 0, 0
+	}
+	return rate, samples / rate
 }
 
 type engineExportAnalysis struct {
@@ -1191,14 +1280,21 @@ var enginePioneerCuePalette = [][3]byte{
 }
 
 func enginePioneerCueColor(c rekordbox.Cue) byte {
- if c.ColorCode != 0 || c.Color == [4]byte{} { return c.ColorCode }
- best, distance := byte(1), int(^uint(0)>>1)
- for i, rgb := range enginePioneerCuePalette {
-  d := 0
-  for j := range rgb { delta := int(rgb[j])-int(c.Color[j+1]); d += delta*delta }
-  if d < distance { best, distance = byte(i+1), d }
- }
- return best
+	if c.ColorCode != 0 || c.Color == [4]byte{} {
+		return c.ColorCode
+	}
+	best, distance := byte(1), int(^uint(0)>>1)
+	for i, rgb := range enginePioneerCuePalette {
+		d := 0
+		for j := range rgb {
+			delta := int(rgb[j]) - int(c.Color[j+1])
+			d += delta * delta
+		}
+		if d < distance {
+			best, distance = byte(i+1), d
+		}
+	}
+	return best
 }
 
 // Emit separate memory/hot lists. PCOB supports older players, PCO2 carries
@@ -1325,7 +1421,9 @@ func exportEngineArtwork(db *sql.DB, root string, id int64, resolver *compat.Res
 		}
 		if resolver == nil {
 			resolver, err = compat.NewResolver(root)
-			if err != nil { return "", err }
+			if err != nil {
+				return "", err
+			}
 		}
 		rel, err := resolver.Resolve("Engine Library/Artwork/" + base64.RawURLEncoding.EncodeToString(sum) + ".jpg")
 		if err != nil {
