@@ -2064,16 +2064,19 @@ ZOOM_STEP = """
 """
 
 
-def cue_capsule(ind: str, deck_expr: str, h: int, px: int) -> str:
-    """#151: Pioneer-style `● DROP  16.3 BARS` capsule; hidden (no space) without a cue ahead."""
+def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False) -> str:
+    """#151: Pioneer-style `● DROP  16.3 BARS` capsule; hidden (no space) without a cue ahead.
+    compact: the 4-deck mini rows (half-screen cards) have no room for the full-size one."""
+    if compact:
+        h, px = 22, 14
     q = f"""Rectangle {{
     objectName: "EngineX_CueCountdown"
     readonly property var info: typeof root !== "undefined" && root && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTick) : null
     visible: info !== null
     Layout.alignment: Qt.AlignVCenter
-    Layout.leftMargin: 8
+    Layout.leftMargin: {2 if compact else 8}
     Layout.preferredHeight: {h}
-    Layout.preferredWidth: cueRow.implicitWidth + 16
+    Layout.preferredWidth: cueRow.implicitWidth + {12 if compact else 16}
     radius: 5
     color: "#cc141820"
     border.width: 1
@@ -2081,9 +2084,9 @@ def cue_capsule(ind: str, deck_expr: str, h: int, px: int) -> str:
     Row {{
         id: cueRow
         anchors.centerIn: parent
-        spacing: 6
+        spacing: {4 if compact else 6}
         Rectangle {{ width: 8; height: 8; radius: 4; anchors.verticalCenter: parent.verticalCenter; color: parent.parent.info ? parent.parent.info.color : "transparent" }}
-        Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: Style.font02Color; text: parent.parent.info ? parent.parent.info.label : "" }}
+        Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.{"fontH2" if compact else "fontH1"}; color: Style.font02Color; text: parent.parent.info ? parent.parent.info.label : "" }}
         Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.makeFont(Style.fontDisplay.family, {px}, Font.Bold); color: parent.parent.info && parent.parent.info.urgent ? "#ffb703" : "#ffffff"; text: parent.parent.info ? parent.parent.info.text : "" }}
     }}
 }}
@@ -2656,7 +2659,17 @@ def edits(dev: bool):
             ("                    view: deckTrackDataContent.deckView.beatJumpView\n",
              "                    view: deckTrackDataContent.deckView.beatJumpView\n                    deckIndex: deckTrackDataContent.deckIndex\n"),
             ("                    visible: Config.audio.deck.hasBeatJump\n                }\n",
-             "                    visible: Config.audio.deck.hasBeatJump\n                }\n\n" + cue_capsule("                ", "deckTrackDataContent.deckIndex", 24, 16))]
+             "                    visible: Config.audio.deck.hasBeatJump\n                }\n\n" + cue_capsule("                ", "deckTrackDataContent.deckIndex", 24, 16, compact=True)),
+            ("                spacing: 16\n                visible: deckTrackDataContent.songLoaded\n",
+             "                spacing: 8\n                visible: deckTrackDataContent.songLoaded\n"),
+            # room for the capsule: AutoLoop / BeatJump 72 -> 52 px
+            ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n",
+             "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 52\n"),
+            ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n",
+             "                    textFont: Style.fontH1\n                    Layout.preferredWidth: 52\n")]
+        scaled[bj + "DeckTrackData/SplitMiniDeckTrackDataContent.qml"] = [
+            ("        JP07SyncIndicator {\n",
+             cue_capsule("        ", "deckTrackDataContent.deckIndex", 26, 16, compact=True) + "\n        JP07SyncIndicator {\n")]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml"] =[("    enabled: deckConfig.inDJMode\n", "    enabled: deckConfig.inDJMode\n" + pad_brt)]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/QuadPadRGBLed.qml"] = [("    idx: note\n", "    idx: note\n" + pad_brt)]
         scaled["airAssignments/OutputAssignment/ColorOutputAssignment.qml"] = [
