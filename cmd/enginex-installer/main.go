@@ -935,11 +935,24 @@ func IsRockchipUSBLoader(line string) bool {
 // same id in normal operation, where RattyDAVE's PRIME 4+ showed 15e4:d007 (#129).
 var gen2USB = map[string]string{"15e4:d007": "jc11s", "15e4:c00c": "jp11s", "15e4:d011": "jp20", "15e4:d012": "jp21"}
 
-// usbDeck returns the board and host USB line of a 2nd-gen deck on the bus, in any mode.
-func usbDeck(ctx context.Context, o *options) (board, line string) {
+// gen1USB is the usb_devices table of the official 5.3.0 1st-gen images, in their compatible order.
+// Their fastboot has no "getvar product" ("Variable not implemented" on an SC5000), so modeB
+// names the deck by this id; all boards of one image group get the same image anyway.
+var gen1USB = map[string]string{
+	"15e4:d006": "jp07", "15e4:d00a": "jp08", "15e4:d00c": "jp11", "15e4:d00d": "jp13", "15e4:d00e": "jp14",
+	"15e4:d008": "jc11", "15e4:d00b": "jc16", "15e4:203f": "nh08",
+}
+
+var vidPID = regexp.MustCompile(`(?i)\b[0-9a-f]{4}:[0-9a-f]{4}\b`)
+
+// usbDeck returns the board and host USB line of the first deck from ids on the bus. The id may sit
+// anywhere in the line: Windows lines read "Instance ID: USB\15E4:D006\...".
+func usbDeck(ctx context.Context, o *options, ids map[string]string) (board, line string) {
 	for _, l := range strings.Split(o.ListUSB(ctx), "\n") {
-		if l = strings.TrimSpace(l); len(l) >= 9 && gen2USB[strings.ToLower(l[:9])] != "" {
-			return gen2USB[strings.ToLower(l[:9])], l
+		for _, id := range vidPID.FindAllString(l, -1) {
+			if b := ids[strings.ToLower(id)]; b != "" {
+				return b, strings.TrimSpace(l)
+			}
 		}
 	}
 	return "", ""
@@ -1230,19 +1243,21 @@ func confirm(o *options, zh, en string) error {
 
 func modeB(ctx context.Context, o *options) error {
 	out, _ := fb(ctx, o, "getvar", "product")
-	pm := productRE.FindStringSubmatch(out)
-	if pm == nil {
+	board := ""
+	if pm := productRE.FindStringSubmatch(out); pm != nil {
+		board = pm[1]
+	} else if board, _ = usbDeck(ctx, o, gen1USB); board == "" {
 		return fmt.Errorf("读不到 fastboot product / cannot read the fastboot product: %s", strings.TrimSpace(out))
 	}
-	m, gen2, ok := lookupBoard(pm[1])
+	m, gen2, ok := lookupBoard(board)
 	switch {
 	case !ok:
-		return fmt.Errorf("未知型号 %q，不刷写 / unknown board, nothing flashed", pm[1])
+		return fmt.Errorf("未知型号 %q，不刷写 / unknown board, nothing flashed", board)
 	}
+	o.say("USB Fastboot 识别到 "+m.Name+" ("+board+")", "Fastboot found "+m.Name)
 	if !gen2 {
 		return modeBGen1(ctx, o, m)
 	}
-	o.say("USB Fastboot 识别到 "+m.Name+" ("+pm[1]+")", "Fastboot found "+m.Name)
 	b, err := obtainBundle(ctx, o, m.Prefix)
 	if err != nil {
 		return err
@@ -1484,7 +1499,7 @@ func run(ctx context.Context, o *options) error {
 		}
 	}
 	if n == 0 {
-		if board, line := usbDeck(ctx, o); board != "" { // a stock deck on USB: wait for it to reboot into fastboot
+		if board, line := usbDeck(ctx, o, gen2USB); board != "" { // a stock 2nd-gen deck on USB, in any mode: wait for it to reboot into fastboot
 			return modeAB(ctx, o, deck{Name: line, Board: board})
 		}
 		diagnoseUSB(ctx, o)

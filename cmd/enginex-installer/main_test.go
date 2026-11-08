@@ -543,7 +543,10 @@ case "$1" in
 devices) printf 'LAB0001\tfastboot\n' ;;
 getvar)
   case "$2" in
-  product) echo "product: $(cat "$d/product")" >&2 ;;
+  product)
+    # An empty product is a real SC5000 in Firmware Update Mode: no getvar product.
+    if [ ! -s "$d/product" ]; then echo "getvar:product                                     FAILED (remote: 'Variable not implemented')" >&2; exit 1; fi
+    echo "product: $(cat "$d/product")" >&2 ;;
   partition-size:data)
     if [ -f "$d/nodata" ]; then echo "getvar:partition-size:data FAILED (remote: 'GetVar Variable Not found')" >&2; exit 1; fi
     echo "partition-size:data: 0x4000000" >&2 ;;
@@ -794,6 +797,60 @@ func TestGen1Fastboot(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A real SC5000 answers "getvar product" with "Variable not implemented": modeB names it by USB id.
+func TestGen1FastbootWithoutProductUsesUSBID(t *testing.T) {
+	o := testOpts(t)
+	o.defaults()
+	fb := newFastboot(t, "", true)
+	o.Fastboot = fb.Bin
+	o.ListUSB = func(context.Context) string { return "05e3:0610 USB2.1 Hub\n15e4:d006 SC5000 Prime\n" }
+	srv, _ := imageRelease(t, "SC5000")
+	useRelease(o, srv)
+	o.Packer = filepath.Join(t.TempDir(), "packer.py")
+	if err := os.WriteFile(o.Packer, []byte("import pathlib,sys\np=pathlib.Path(sys.argv[sys.argv.index('--output')+1]); p.mkdir(); (p/'rootfs.ext2').write_bytes(b'rootfs')\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := modeB(ctxT(t), o); err != nil {
+		t.Fatalf("modeB: %v\n%s", err, o.Out)
+	}
+	if f := fb.Flashed(); len(f) != 1 || !strings.HasPrefix(f[0], "flash rootfs ") {
+		t.Fatalf("flash calls = %v", f)
+	}
+	if out := o.Out.(*bytes.Buffer).String(); !strings.Contains(out, "Denon DJ SC5000 (jp07)") {
+		t.Errorf("model not announced:\n%s", out)
+	}
+}
+
+func TestModeBWithoutProductOrKnownUSBRefuses(t *testing.T) {
+	o := testOpts(t)
+	o.defaults()
+	fb := newFastboot(t, "", true)
+	o.Fastboot = fb.Bin
+	o.ListUSB = func(context.Context) string { return "15e4:d007 PRIME 4 Plus\n" } // 2nd gen answers getvar product itself
+	err := modeB(ctxT(t), o)
+	if err == nil || !strings.Contains(err.Error(), "cannot read the fastboot product") {
+		t.Fatalf("err = %v", err)
+	}
+	if f := fb.Flashed(); len(f) != 0 {
+		t.Fatalf("flashed %v", f)
+	}
+}
+
+func TestUSBDeckFindsIDsAnywhereInTheLine(t *testing.T) {
+	o := testOpts(t)
+	for line, want := range map[string]string{
+		"15e4:d00d SC6000 PRIME":                          "jp13",
+		`Instance ID:   USB\15E4:203F\5&2B1C0A3E&0&2`:     "nh08",
+		"1d6b:0002 Linux Foundation 2.0 root hub":         "",
+		"15e4:d007 DENON DJ Denon DJ PRIME 4 Plus (gen2)": "",
+	} {
+		o.ListUSB = func(context.Context) string { return line + "\n" }
+		if got, _ := usbDeck(ctxT(t), o, gen1USB); got != want {
+			t.Errorf("usbDeck(%q) = %q, want %q", line, got, want)
+		}
 	}
 }
 

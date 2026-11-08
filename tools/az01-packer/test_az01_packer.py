@@ -10,6 +10,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 
 import az01_packer as az
 
@@ -639,6 +640,18 @@ class FilesystemTests(unittest.TestCase):
             az.main(['repack', str(original), '--rootfs', str(self.disk), '--output', str(failed)])
         self.assertEqual(exc.exception.code, 2)
         self.assertFalse(failed.exists())
+
+    def test_cli_unpack_needs_no_debugfs(self):
+        # enginex-installer unpacks 1st-gen images on macOS/Windows hosts without e2fsprogs.
+        original = self.root/'nodebugfs.img'
+        original.write_bytes(fixture(lzma.compress(self.disk.read_bytes())))
+        unpacked = self.root/'unpacked-nodebugfs'
+        which = shutil.which
+        with unittest.mock.patch.object(az.shutil, 'which', lambda n: None if n == 'debugfs' else which(n)):
+            self.assertEqual(az.main(['unpack', str(original), '--output', str(unpacked)]), 0)
+            with self.assertRaisesRegex(az.SafetyError, 'debugfs is required'):
+                az.ExtFS(unpacked/'rootfs.ext2').cmd('ls /')
+        self.assertEqual((unpacked/'rootfs.ext2').read_bytes(), self.disk.read_bytes())
 
     def test_cli_repack_with_splash_and_recoverysplash(self):
         original = self.root/'orig_splash.img'

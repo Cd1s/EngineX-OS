@@ -243,9 +243,11 @@ class ExtFS:
         with self.path.open('rb') as f:
             f.seek(1080)
             require(f.read(2) == b'\x53\xef', 'rootfs is not ext2/3/4')
-        require(shutil.which('debugfs'), 'debugfs is required (e2fsprogs)')
 
     def cmd(self, command, write=False):
+        # Checked here, not in __init__: unpack never runs debugfs, and the installer
+        # unpacks on macOS/Windows hosts that have no e2fsprogs.
+        require(shutil.which('debugfs'), 'debugfs is required (e2fsprogs)')
         argv = ['debugfs'] + (['-w'] if write else []) + ['-R', command, str(self.path)]
         p = subprocess.run(argv, capture_output=True, text=True)
         # debugfs often returns 0 even when its command failed.
