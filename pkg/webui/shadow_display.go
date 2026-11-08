@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
 const shadowDisplayLimit = 12 << 20
@@ -40,8 +41,10 @@ type shadowDisplayAsset struct {
 	BPM     float64 `json:"bpm"`
 	KeyName string  `json:"keyName"`
 	enginedb.DisplayPerformance
-	Artwork []byte `json:"artwork,omitempty"`
-	Detail  bool   `json:"detail"`
+	Artwork       []byte `json:"artwork,omitempty"`
+	Detail        bool   `json:"detail"`
+	DetailPending bool   `json:"detailPending"`
+	DetailSource  string `json:"detailSource,omitempty"`
 }
 
 type shadowDisplayEntry struct {
@@ -50,6 +53,8 @@ type shadowDisplayEntry struct {
 	busy           bool
 	at             time.Time
 	retry          time.Time
+	tileMu         sync.Mutex
+	tiles          [][]byte // detailed images are generated once, on first visible use
 }
 
 type shadowDisplayCache struct {
@@ -65,7 +70,7 @@ func (c *shadowDisplayCache) claim(id string, now time.Time) *shadowDisplayEntry
 	if e := c.entries[id]; e != nil {
 		return e
 	}
-	if len(c.entries) >= 8 {
+	if len(c.entries) >= 4 {
 		oldest := ""
 		for k, e := range c.entries {
 			if !e.busy && (oldest == "" || e.at.Before(c.entries[oldest].at)) {
@@ -90,6 +95,43 @@ func displayPeerID(p peerDeck) string {
 	return fmt.Sprintf("peer:%s:%d:%s", id, p.Deck, p.Key)
 }
 
+func displayTrackKey(p peerDeck) string {
+	if p.Key == "" {
+		return ""
+	}
+	return fmt.Sprintf("%x", fnvSum(displayPeerID(p)))
+}
+
+// Preserve #160's role-overlap mapping, while retaining the source deck for
+// asset requests. The map key is the receiver slot, p.Deck is the source slot.
+func placeDisplayPeers(peers map[int]peerDeck, role string, now time.Time) map[int]peerDeck {
+	placed, used := map[int]peerDeck{}, map[int]bool{}
+	var slots []int
+	for n := 1; n <= 4; n++ {
+		if strings.Contains(role, strconv.Itoa(n)) {
+			continue
+		}
+		slots = append(slots, n)
+		if p, ok := peers[n]; ok {
+			placed[n] = p
+			used[n] = true
+		}
+	}
+	for _, n := range slots {
+		if _, ok := placed[n]; ok {
+			continue
+		}
+		for src := 1; src <= 4; src++ {
+			if p, ok := peers[src]; ok && !used[src] {
+				placed[n] = p
+				used[src] = true
+				break
+			}
+		}
+	}
+	return placed
+}
+
 // shadowComposeDisplay has no file resolver, download, EXPF or Engine control
 // path. Even a locally accessible peer file must not load into Engine.
 func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
@@ -100,6 +142,7 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
 		peers[n] = p
 	}
 	sh.mu.Unlock()
+	peers = placeDisplayPeers(peers, role, now)
 	out := []deckState{}
 	free := []int{}
 	for deck := 1; deck <= 4; deck++ {
@@ -107,13 +150,17 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
 			continue
 		}
 		p, ok := peers[deck]
-		if !ok || now.Sub(p.at) >= 2*time.Second {
+		if !ok {
 			free = append(free, deck)
 			continue
 		}
 		d := p.deckState
+		d.Deck, d.Key = deck, displayTrackKey(p)
+		d.Stale = p.Stale || now.Sub(p.at) >= 2*time.Second
 		if d.Playing {
-			d.PositionMS += float64(now.Sub(p.at).Milliseconds()) * (1 + d.Pitch/100)
+			if !p.Stale {
+				d.PositionMS += float64(min(int64(2000), max(int64(0), now.Sub(p.at).Milliseconds()))) * (1 + d.Pitch/100)
+			}
 		}
 		d.Path, d.Ext, d.Net = "", "", ""
 		d.At = now.UnixMilli()
@@ -145,7 +192,7 @@ func (s *Server) ensureShadowDisplay(p peerDeck, now time.Time) *shadowDisplayEn
 		return nil
 	}
 	e.at = now
-	if e.asset != nil {
+	if e.asset != nil && (!e.asset.DetailPending || now.Before(e.retry) || e.busy) {
 		c.mu.Unlock()
 		return e // immutable after publication
 	}
@@ -156,6 +203,9 @@ func (s *Server) ensureShadowDisplay(p peerDeck, now time.Time) *shadowDisplayEn
 	e.busy = true
 	c.mu.Unlock()
 	go s.fetchShadowDisplay(p, id, e)
+	if e.asset != nil {
+		return e
+	}
 	return nil
 }
 
@@ -193,6 +243,10 @@ func (s *Server) fetchShadowDisplay(p peerDeck, id string, slot *shadowDisplayEn
 			if err == nil {
 				err = validateDisplayAsset(a, p.Key)
 			}
+			if err == nil && a.Waveform != nil {
+				w := downsampleDisplayWave(*a.Waveform, 65536)
+				a.Waveform = &w
+			}
 			if err == nil {
 				overview, err = renderShadowWave(a.Overview, 1024, 64)
 			}
@@ -209,9 +263,14 @@ func (s *Server) fetchShadowDisplay(p peerDeck, id string, slot *shadowDisplayEn
 	c.mu.Lock()
 	// Replacing the whole entry makes values returned to HTTP readers immutable.
 	if c.entries[id] == slot {
-		e := &shadowDisplayEntry{at: time.Now(), retry: time.Now().Add(time.Second)}
+		e := &shadowDisplayEntry{at: time.Now(), retry: time.Now().Add(2 * time.Second)}
 		if err == nil {
 			e.asset, e.wave, e.overview = a, wave, overview
+			if a.Waveform != nil {
+				e.tiles = make([][]byte, (len(a.Waveform.Bands)/3+2047)/2048)
+			}
+		} else if slot.asset != nil {
+			e.asset, e.wave, e.overview = slot.asset, slot.wave, slot.overview
 		}
 		c.entries[id] = e
 	}
@@ -258,7 +317,7 @@ func validateDisplayAsset(a *shadowDisplayAsset, key string) error {
 }
 
 func displayHexColor(c string) bool {
-	if len(c) != 7 || c[0] != '#' {
+	if (len(c) != 7 && len(c) != 9) || c[0] != '#' {
 		return false
 	}
 	_, err := hex.DecodeString(c[1:])
@@ -271,6 +330,22 @@ func validDisplayArtwork(b []byte) bool {
 	}
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(b))
 	return err == nil && cfg.Width > 0 && cfg.Height > 0 && cfg.Width <= 2048 && cfg.Height <= 2048
+}
+
+func downsampleDisplayWave(w enginedb.DisplayWave, limit int) enginedb.DisplayWave {
+	n := len(w.Bands) / 3
+	if n <= limit {
+		return w
+	}
+	b := make([]byte, limit*3)
+	for x := 0; x < limit; x++ {
+		for i := x * n / limit; i < (x+1)*n/limit; i++ {
+			for c := 0; c < 3; c++ {
+				b[x*3+c] = max(b[x*3+c], w.Bands[i*3+c])
+			}
+		}
+	}
+	return enginedb.DisplayWave{Bands: b, SamplesPerBin: w.SamplesPerBin * float64(n) / float64(limit)}
 }
 
 // Peak-preserving downsampling and a fixed, three-band palette. This runs once
@@ -315,7 +390,7 @@ func (s *Server) peerDisplayGet(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 750*time.Millisecond)
 	defer cancel()
-	a, err := libraryDisplay(ctx, path, s.shadow.dataRoot, s.shadow.mediaRoot)
+	a, err := s.sourceDisplayAsset(ctx, path, r.URL.Query().Get("key"))
 	if err != nil {
 		http.Error(w, "display data not ready", http.StatusNotFound)
 		return
@@ -325,13 +400,21 @@ func (s *Server) peerDisplayGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "track changed", http.StatusConflict)
 		return
 	}
+	copyAsset := *a
+	a = &copyAsset
 	a.Version, a.Key = 1, r.URL.Query().Get("key")
 	if validateDisplayAsset(a, a.Key) != nil {
 		http.Error(w, "unsupported display data", http.StatusNotFound)
 		return
 	}
+	b, err := json.Marshal(a)
+	if err != nil || len(b) > shadowDisplayLimit {
+		http.Error(w, "display data too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	respond(w, a)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
 }
 
 func libraryDisplay(ctx context.Context, f, dataRoot, mediaRoot string) (*shadowDisplayAsset, error) {
@@ -350,6 +433,28 @@ func libraryDisplay(ctx context.Context, f, dataRoot, mediaRoot string) (*shadow
 	return nil, err
 }
 
+func bridgeDisplayWave(ctx context.Context, file string, id int64, rate float64) *enginedb.DisplayWave {
+	// rb-bridge's side database is separate from Engine's library and read-only.
+	file = filepath.Join(filepath.Dir(file), ".rb-bridge-state.db")
+	if _, err := os.Stat(file); err != nil {
+		return nil
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: file}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(100)")
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	var b []byte
+	if db.QueryRowContext(ctx, `SELECT substr(sourceJSON,1,12582913) FROM BridgeAnalysis WHERE trackId=?`, id).Scan(&b) != nil || len(b) > shadowDisplayLimit {
+		return nil
+	}
+	var source struct{ Analysis *rekordbox.Analysis }
+	if json.Unmarshal(b, &source) != nil {
+		return nil
+	}
+	return enginedb.DisplayWaveFromRekordbox(source.Analysis, rate)
+}
+
 func dbDisplay(ctx context.Context, file, rel string) (*shadowDisplayAsset, error) {
 	if _, err := os.Stat(file); err != nil {
 		return nil, err
@@ -363,9 +468,14 @@ func dbDisplay(ctx context.Context, file, rel string) (*shadowDisplayAsset, erro
 	var id int64
 	var key sql.NullInt64
 	var track, overview, beats, cues, loops []byte
-	err = db.QueryRowContext(ctx, `SELECT t.id, COALESCE(t.title,''), COALESCE(t.artist,''), COALESCE(t.bpmAnalyzed,t.bpm,0), t.key,
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	err = tx.QueryRowContext(ctx, `SELECT t.id, substr(COALESCE(t.title,''),1,4097), substr(COALESCE(t.artist,''),1,4097), COALESCE(t.bpmAnalyzed,t.bpm,0), t.key,
 		substr(p.trackData,1,4097), substr(p.overviewWaveFormData,1,8388609), substr(p.beatData,1,8388609), substr(p.quickCues,1,65537), substr(p.loops,1,65537)
-		FROM Track t JOIN PerformanceData p ON p.trackId=t.id WHERE t.path=? AND t.isAnalyzed=1`, rel).
+		FROM Track t JOIN PerformanceData p ON p.trackId=t.id WHERE t.path=? AND length(p.trackData)>4 AND length(p.overviewWaveFormData)>4 AND length(p.beatData)>4`, rel).
 		Scan(&id, &a.Title, &a.Artist, &a.BPM, &key, &track, &overview, &beats, &cues, &loops)
 	if err != nil {
 		return nil, err
@@ -377,16 +487,15 @@ func dbDisplay(ctx context.Context, file, rel string) (*shadowDisplayAsset, erro
 	if key.Valid && key.Int64 >= 0 && key.Int64 < 24 {
 		a.KeyName = []string{"8B", "8A", "9B", "9A", "10B", "10A", "11B", "11A", "12B", "12A", "1B", "1A", "2B", "2A", "3B", "3A", "4B", "4A", "5B", "5A", "6B", "6A", "7B", "7A"}[key.Int64]
 	}
-	// Do not assume this optional column exists: measured 5.x schemas omit it.
-	var detail []byte
-	if db.QueryRowContext(ctx, `SELECT substr(highResolutionWaveFormData,1,8388609) FROM PerformanceData WHERE trackId=?`, id).Scan(&detail) == nil && len(detail) > 0 {
-		if d, e := enginedb.ParseDisplayWave(detail); e == nil {
-			a.Waveform = &d
-			a.Detail = true
-		}
+	// Native Engine 5.3 stores detail only in process memory. A bridge's saved
+	// Rekordbox analysis is the only persisted detailed waveform consumed here.
+	a.Waveform = bridgeDisplayWave(ctx, file, id, a.SampleRate)
+	a.Detail = a.Waveform != nil
+	if a.Detail {
+		a.DetailSource = "rekordbox"
 	}
 	var hash, cover []byte
-	if db.QueryRowContext(ctx, `SELECT a.hash, substr(a.albumArt,1,1048577) FROM AlbumArt a JOIN Track t ON t.albumArtId=a.id WHERE t.id=?`, id).Scan(&hash, &cover) == nil {
+	if tx.QueryRowContext(ctx, `SELECT a.hash, substr(a.albumArt,1,1048577) FROM AlbumArt a JOIN Track t ON t.albumArtId=a.id WHERE t.id=?`, id).Scan(&hash, &cover) == nil {
 		if validDisplayArtwork(cover) {
 			a.Artwork = cover
 		} else if len(hash) == 20 {
@@ -417,12 +526,18 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 		return nil, deckState{}
 	}
 	s.shadow.mu.Lock()
-	p, ok := s.shadow.peerDecks[deck]
+	peers := make(map[int]peerDeck, len(s.shadow.peerDecks))
+	for n, p := range s.shadow.peerDecks {
+		peers[n] = p
+	}
 	s.shadow.mu.Unlock()
-	if !ok || p.Key != key || time.Since(p.at) >= 2*time.Second {
+	p, ok := placeDisplayPeers(peers, role, time.Now())[deck]
+	if !ok || displayTrackKey(p) != key {
 		return nil, deckState{}
 	}
-	return s.ensureShadowDisplay(p, time.Now()), p.deckState
+	d := p.deckState
+	d.Deck, d.Key = deck, key
+	return s.ensureShadowDisplay(p, time.Now()), d
 }
 
 func (s *Server) shadowDisplayGet(w http.ResponseWriter, r *http.Request) {
@@ -438,8 +553,12 @@ func (s *Server) shadowDisplayGet(w http.ResponseWriter, r *http.Request) {
 		cues = []enginedb.DisplayCue{}
 		for _, c := range d.Cues {
 			ms := c.P * 1000 / a.SampleRate
-			if c.I >= 1 && c.I <= 8 && ms >= 0 && ms <= a.DurationMS && !math.IsNaN(ms) && !math.IsInf(ms, 0) && len(c.N) <= 255 && displayHexColor(c.C) {
-				cues = append(cues, enginedb.DisplayCue{I: c.I, MS: ms, N: c.N, C: c.C})
+			if c.I >= 1 && c.I <= 8 && ms >= 0 && ms <= a.DurationMS && !math.IsNaN(ms) && !math.IsInf(ms, 0) && len(c.N) <= 255 {
+				col := c.C
+				if !displayHexColor(col) {
+					col = "#ffffff"
+				}
+				cues = append(cues, enginedb.DisplayCue{I: c.I, MS: ms, N: c.N, C: col})
 			}
 		}
 	}
@@ -453,10 +572,26 @@ func (s *Server) shadowDisplayGet(w http.ResponseWriter, r *http.Request) {
 	if len(a.Artwork) != 0 {
 		art = "http://127.0.0.1:8080/v1/sc5000/shadow/artwork" + q
 	}
+	var tiles []string
+	width := 2048
+	if a.Waveform != nil {
+		width = len(a.Waveform.Bands) / 3
+		for i := range e.tiles {
+			tiles = append(tiles, "http://127.0.0.1:8080/v1/sc5000/shadow/waveform.png"+q+"&tile="+strconv.Itoa(i))
+		}
+	}
+	title, artist := a.Title, a.Artist
+	if title == "" {
+		title = d.Title
+	}
+	if artist == "" {
+		artist = d.Artist
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	respond(w, map[string]any{"key": a.Key, "title": a.Title, "artist": a.Artist, "bpm": a.BPM, "keyName": a.KeyName,
-		"sampleRate": a.SampleRate, "durationMs": a.DurationMS, "beats": a.Beats, "cues": cues, "loops": a.Loops, "detail": a.Detail,
-		"waveformUrl": "http://127.0.0.1:8080/v1/sc5000/shadow/waveform.png" + q,
+	respond(w, map[string]any{"key": d.Key, "title": title, "artist": artist, "bpm": a.BPM, "keyName": a.KeyName,
+		"sampleRate": a.SampleRate, "durationMs": a.DurationMS, "beats": a.Beats, "cues": cues, "loops": a.Loops, "detail": a.Detail, "detailPending": a.DetailPending, "detailSource": a.DetailSource,
+		"waveformUrl":   "http://127.0.0.1:8080/v1/sc5000/shadow/waveform.png" + q,
+		"waveformTiles": tiles, "waveformWidth": width, "tileWidth": 2048,
 		"overviewUrl": "http://127.0.0.1:8080/v1/sc5000/shadow/waveform.png" + q + "&overview=1", "artworkUrl": art})
 }
 
@@ -467,7 +602,25 @@ func (s *Server) shadowWaveformGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b := e.wave
-	if r.URL.Query().Get("overview") == "1" {
+	if r.URL.Query().Has("tile") {
+		n, err := strconv.Atoi(r.URL.Query().Get("tile"))
+		if err != nil || n < 0 || n >= len(e.tiles) || e.asset.Waveform == nil {
+			http.NotFound(w, r)
+			return
+		}
+		e.tileMu.Lock()
+		if e.tiles[n] == nil {
+			bands := e.asset.Waveform.Bands
+			lo, hi := n*2048*3, min(len(bands), (n+1)*2048*3)
+			e.tiles[n], err = renderShadowWave(enginedb.DisplayWave{Bands: bands[lo:hi]}, (hi-lo)/3, 128)
+		}
+		b = e.tiles[n]
+		e.tileMu.Unlock()
+		if err != nil {
+			http.Error(w, "render failed", 500)
+			return
+		}
+	} else if r.URL.Query().Get("overview") == "1" {
 		b = e.overview
 	}
 	w.Header().Set("Content-Type", "image/png")

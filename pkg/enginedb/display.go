@@ -6,6 +6,7 @@ package enginedb
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 	"math"
 	"unicode/utf8"
 )
@@ -37,11 +38,43 @@ type DisplayWave struct {
 type DisplayPerformance struct {
 	SampleRate float64       `json:"sampleRate"`
 	DurationMS float64       `json:"durationMs"`
+	Peaks      [3]float64    `json:"peaks"`
 	Overview   DisplayWave   `json:"overview"`
 	Waveform   *DisplayWave  `json:"waveform,omitempty"`
 	Beats      []DisplayBeat `json:"beats"`
 	Cues       []DisplayCue  `json:"cues"`
 	Loops      []DisplayLoop `json:"loops"`
+}
+
+// DisplayWaveFromRekordbox preserves persisted 150 Hz PWV7/PWV5 detail. It
+// never decodes the song and never mistakes a 1024-bin overview for detail.
+func DisplayWaveFromRekordbox(a *rekordbox.Analysis, sampleRate float64) *DisplayWave {
+	if a == nil {
+		return nil
+	}
+	var best *rekordbox.Waveform
+	for i := range a.Waveforms {
+		w := &a.Waveforms[i]
+		if (w.Tag != "PWV7" || w.EntryBytes != 3) && (w.Tag != "PWV5" || w.EntryBytes != 2) {
+			continue
+		}
+		if len(w.Data) == 0 || len(w.Data)%int(w.EntryBytes) != 0 || len(w.Data)/int(w.EntryBytes) > 2<<20 {
+			continue
+		}
+		if best == nil || w.Tag == "PWV7" && best.Tag != "PWV7" {
+			best = w
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	n := len(best.Data) / int(best.EntryBytes)
+	w := &DisplayWave{Bands: make([]byte, n*3), SamplesPerBin: sampleRate / 150}
+	for i := 0; i < n; i++ {
+		v := waveRGB(*best, i)
+		copy(w.Bands[i*3:], v[:])
+	}
+	return w
 }
 
 func displayFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
@@ -87,6 +120,12 @@ func ParseDisplayPerformance(track, overview, beats, cues, loops []byte) (Displa
 		return out, fmt.Errorf("display: invalid trackData")
 	}
 	out.DurationMS = float64(samples) * 1000 / out.SampleRate
+	for i := range out.Peaks {
+		v := displayFloat(raw[20+8*i:], big)
+		if displayFinite(v) && v > 0 && v <= 1 {
+			out.Peaks[i] = v
+		}
+	}
 	if out.Overview, err = ParseDisplayWave(overview); err != nil {
 		return out, err
 	}
