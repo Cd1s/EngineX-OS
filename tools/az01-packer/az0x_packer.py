@@ -104,6 +104,44 @@ def info(data):
     }
 
 
+def replace_record(data, magic, name, new_payload, board_mask=None):
+    """Replace one record for offline analysis; the container signature is invalidated."""
+    require(isinstance(new_payload, bytes) and new_payload, 'replacement payload must be non-empty bytes')
+    hdr = parse_header(data)
+    records = hdr['records']
+    for rec in records:
+        start, size = rec['offset'], rec['size']
+        require(size > 0 and start >= HEADER_SIZE and start + size <= len(data), 'invalid record bounds')
+        require(hashlib.sha256(data[start:start + size]).hexdigest() == rec['sha256'],
+                f'record {rec["index"]} SHA-256 mismatch')
+    matches = [r for r in records if r['magic'] == magic and r['name'] == name
+               and (board_mask is None or r['board_mask'] == board_mask)]
+    require(len(matches) == 1, 'expected exactly one matching record; specify board_mask if needed')
+    target = matches[0]
+    start, end = target['offset'], target['offset'] + target['size']
+    for rec in records:
+        if rec is not target:
+            require(rec['offset'] + rec['size'] <= start or rec['offset'] >= end,
+                    'replacement overlaps another record')
+
+    # Preserve the alignment of all later data and the original gaps and trailer.
+    padding = (target['size'] - len(new_payload)) % 8
+    delta = len(new_payload) + padding - target['size']
+    result = bytearray(data[:start] + new_payload + b'\0' * padding + data[end:])
+    for rec in records:
+        roff = rec['record_offset']
+        if rec is target:
+            struct.pack_into('<Q', result, roff + 16, len(new_payload))
+            result[roff + 32:roff + 64] = hashlib.sha256(new_payload).digest()
+        elif rec['offset'] >= end:
+            struct.pack_into('<Q', result, roff + 8, rec['offset'] + delta)
+    for rec in parse_header(result)['records']:
+        payload = result[rec['offset']:rec['offset'] + rec['size']]
+        require(len(payload) == rec['size'] and hashlib.sha256(payload).hexdigest() == rec['sha256'],
+                f'output record {rec["index"]} SHA-256 mismatch')
+    return bytes(result)
+
+
 def replace_splash(data, splash_bytes):
     """Replace PART splash partition payload and update 32-byte sha256 in header.
 
@@ -150,6 +188,14 @@ def main(argv=None):
     p_replace.add_argument('--splash', required=True, type=Path, help='4,096,000-byte raw splash file')
     p_replace.add_argument('--output', required=True, type=Path, help='Output AZ0x container (.img)')
 
+    p_record = sub.add_parser('replace-record', help='Replace a record for offline analysis (output is unsigned)')
+    p_record.add_argument('--original', required=True, type=Path)
+    p_record.add_argument('--magic', required=True)
+    p_record.add_argument('--name', required=True)
+    p_record.add_argument('--board-mask', type=lambda value: int(value, 0))
+    p_record.add_argument('--payload', required=True, type=Path)
+    p_record.add_argument('--output', required=True, type=Path)
+
     args = parser.parse_args(argv)
 
     try:
@@ -158,6 +204,15 @@ def main(argv=None):
             data = args.input.read_bytes()
             meta = info(data)
             print(json.dumps(meta, indent=2))
+            return 0
+        elif args.command == 'replace-record':
+            require(args.original.resolve() != args.output.resolve(), 'output must differ from original')
+            new_img = replace_record(args.original.read_bytes(), args.magic, args.name,
+                                     args.payload.read_bytes(), args.board_mask)
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_bytes(new_img)
+            print(json.dumps({'output': str(args.output), 'record_hashes_verified': True,
+                              'signature_verified': False, 'warning': 'not suitable for flashing'}))
             return 0
         elif args.command == 'replace-splash':
             require(args.original.is_file(), f'original file not found: {args.original}')

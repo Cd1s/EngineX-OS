@@ -202,6 +202,19 @@ INSTALL = r'''#!/bin/sh
 # Installs this bundle under /data/enginex (/data/sc5000-custom stays as a symlink). Checks SHA256SUMS first and
 # replaces each part in one rename, so a failed install leaves the old one.
 set -eu
+# <MODEL>-<VERSION>-EngineX-OS-<Name>-Update.img (128-byte header + this bundle's .tar.gz): check the SHA-256
+# in the header, unpack the payload and run its own install.sh.
+if [ "$#" -gt 0 ] && [ -f "$1" ] && [ "$(dd if="$1" bs=27 count=1 2>/dev/null)" = ENGINEX_DATA_BUNDLE_IMG_V1 ]; then
+    want=$(dd if="$1" bs=128 count=1 2>/dev/null | tr -d '\000' | sed -n 2p)
+    got=$(tail -c +129 "$1" | sha256sum | cut -d' ' -f1)
+    [ -n "$want" ] && [ "$want" = "$got" ] || { echo "image damaged: SHA-256 mismatch" >&2; exit 1; }
+    mkdir -p "${SC5000_CUSTOM:-/data/enginex}"
+    work=$(mktemp -d "${SC5000_CUSTOM:-/data/enginex}/.img-install.XXXXXX")
+    trap 'rm -rf "$work"' 0
+    tail -c +129 "$1" | tar -xzf - -C "$work"
+    sh "$work"/*/install.sh
+    exit 0
+fi
 src=$(cd "$(dirname "$0")" && pwd)
 @MIGRATE_IF_DEFAULT@
 dest=${SC5000_CUSTOM:-/data/enginex}
@@ -249,6 +262,8 @@ rm -f "$dest/ui/safe-mode" "$dest/ui/boot-count" "$dest/ui/boot-token"
 cp version.txt "$dest/ui/.pack-version"
 sha256sum < ui-packs.tar | cut -d' ' -f1 > "$dest/ui/.pack-id"
 cp version.txt "$dest/version.txt"
+# Opens the *-Update.img upgrade path (screen OTA / USB stick); gen2-locked still wins.
+printf '1\n' > "$dest/gen2-unlocked"
 echo "EngineX OS $(cat version.txt) installed in $dest"
 '''
 
@@ -280,6 +295,7 @@ if [ "$(cat "$dest/ui/.pack-id" 2>/dev/null)" = "$ui_id" ]; then
     rm -rf "$dest/ui/packs" "$dest/ui/icons" "$dest/ui/.pack-version" "$dest/ui/.pack-id"
 fi
 [ "$(cat "$dest/version.txt" 2>/dev/null)" != "$version" ] || rm -f "$dest/version.txt"
+rm -f "$dest/gen2-unlocked"
 rm -f "$alsa_dest/99-sc5000-custom.conf"
 rmdir "$alsa_dest" 2>/dev/null || :
 rm -rf "$dest/bundle"
@@ -332,8 +348,26 @@ MODELS = {
     'PRIME4G2': 'Denon DJ PRIME 4 G2', 'SYSTEMONE': 'Rane SYSTEM ONE',
 }
 PREFIXES = tuple(MODELS)
+# File-name model part of <PREFIX>-<VERSION>-EngineX-OS-<name>-Update.img
+MODEL_NAMES = {
+    'SCLIVE4': 'Denon-SC-LIVE-4-JP21', 'SCLIVE2': 'Denon-SC-LIVE-2-JP20',
+    'PRIME4PLUS': 'Denon-PRIME-4-Plus-JC11S', 'PRIMEGOPLUS': 'Denon-PRIME-GO-Plus-JP11S',
+    'MIXSTREAMPROPLUS': 'Numark-Mixstream-Pro-Plus-NH08S', 'MIXSTREAMPROGO': 'Numark-Mixstream-Pro-Go-NH10',
+    'PRIME4G2': 'Denon-PRIME-4-G2-JP24', 'SYSTEMONE': 'Rane-SYSTEM-ONE-RMZ2',
+}
+IMG_MAGIC = b'ENGINEX_DATA_BUNDLE_IMG_V1\n'
+IMG_HEADER = 128
 AZ04 = ('PRIME4G2', 'SYSTEMONE')
 EM_ARM, EM_AARCH64 = 40, 183
+
+
+def build_gen2_img(bundle_bytes, prefix, version):
+    """A 128-byte header (magic, payload SHA-256, prefix, version) followed by the .tar.gz.
+    The deck's updater hook checks the SHA-256, then installs the payload under /data only."""
+    head = (IMG_MAGIC.decode() + f'{hashlib.sha256(bundle_bytes).hexdigest()}\n{prefix}\n{version}\n').encode('ascii')
+    if len(head) > IMG_HEADER:
+        fail('image header does not fit in 128 bytes')
+    return head.ljust(IMG_HEADER, b'\x00') + bundle_bytes
 
 
 def alsa_dir(prefix):
@@ -369,6 +403,10 @@ eFuse lock, and their stock updater checks the AZ0x container signature in
 software before writing, so a modified or first-generation .img is rejected at
 the Verifying step without writing anything. Use this data bundle or
 EngineX-Installer instead; it only writes /data/enginex.
+
+Update.img: {prefix}-{version}-EngineX-OS-*-Update.img is this same bundle with a 128-byte header. It is for
+the deck's own screen update or a USB stick; the hook checks the header's SHA-256 and writes only /data/enginex.
+It is NOT an AZ0x firmware image and never touches the system partition. "sh install.sh <that .img>" works too.
 
 Method B (recommended): install on the device
 ---------------------------------------------
@@ -444,7 +482,7 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
     files['uninstall.sh'] = (UNINSTALL.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)
     top = f'{prefix}-{version}-EngineX-OS-Data-Bundle'
     files['README-INSTALL.txt'] = (README_INSTALL.format(version=version, model=MODELS[prefix], top=top, alsa=alsa_dir(prefix),
-                                                        note=AZ04_NOTE if prefix in AZ04 else '').encode(), 0o644)
+                                                        note=AZ04_NOTE if prefix in AZ04 else '', prefix=prefix).encode(), 0o644)
     here = Path(__file__).parent
     files['host-install-userdata.py'] = ((here / 'host-install-userdata.py').read_bytes(), 0o755)
     files['host-install-fastboot.sh'] = ((here / 'host-install-fastboot.sh').read_bytes(), 0o755)
@@ -465,7 +503,10 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
             info = tarfile.TarInfo(f'{top}/{name}')
             info.size, info.mode = len(data), mode
             tar.addfile(info, io.BytesIO(data))
-    digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    bundle_bytes = bundle.read_bytes()
+    digest = hashlib.sha256(bundle_bytes).hexdigest()
+    img_path = out / f'{prefix}-{version}-EngineX-OS-{MODEL_NAMES[prefix]}-Update.img'
+    img_path.write_bytes(build_gen2_img(bundle_bytes, prefix, version))
     (out / 'SHA256SUMS.txt').write_text(f'{digest}  {bundle.name}\n')
     (out / 'host-install-userdata.py').write_bytes(files['host-install-userdata.py'][0])
     (out / 'host-install-userdata.py').chmod(0o755)
@@ -473,7 +514,7 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
     (out / 'host-install-fastboot.sh').chmod(0o755)
     (out / 'host-install-usbupdate.py').write_bytes(files['host-install-usbupdate.py'][0])
     (out / 'host-install-usbupdate.py').chmod(0o755)
-    return {'bundle': str(bundle), 'sha256': digest, 'files': len(files)}
+    return {'bundle': str(bundle), 'image': str(img_path), 'sha256': digest, 'files': len(files)}
 
 
 def main(argv=None):

@@ -523,7 +523,8 @@ install_ui() {
     id=$(sha256sum < "$archive" | cut -d' ' -f1)
     if [ -d "$ui/packs" ] && [ "$(cat "$ui/.pack-version" 2>/dev/null)" = "$version" ] &&
         [ "$(cat "$ui/.pack-id" 2>/dev/null)" = "$id" ]; then
-        rm -f "$ui/safe-mode" "$ui/mods-quarantined" "$ui/boot-count" "$ui/boot-token" "$ui/last-crash"
+        # Same release: engine-ui-guard owns the crash state (#140). Clearing boot-token
+        # here hid every hang from it, so a stuck deck never reached safe-mode.
         return 0
     fi
     for path in "$ui" "$ui/packs" "$ui/icons"; do
@@ -545,7 +546,9 @@ install_ui() {
     done
     rm -rf "$stage"
     # New packs deserve a fresh try, even after the old ones hit safe mode.
-    rm -f "$ui/safe-mode" "$ui/boot-count" "$ui/boot-token"
+    rm -f "$ui/safe-mode" "$ui/mods-quarantined" "$ui/boot-count" "$ui/boot-token" "$ui/last-crash"
+    # A .qmlc cached from the old packs must not be read against the new ones.
+    rm -rf "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
     printf '%s\n' "$version" > "$ui/.pack-version"
     printf '%s\n' "$id" > "$ui/.pack-id"
     printf '%s\n' "$version" > "${SC5000_VERSION_FILE:-/data/enginex/version.txt}"

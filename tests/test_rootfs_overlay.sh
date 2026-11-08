@@ -363,17 +363,31 @@ rm -f "$SC5000_UI_DIR"/*; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GU
 [[ -d $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean start must keep the QML disk cache'
 sh "$GUARD" post; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
 [[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && $(cat "$SC5000_UI_DIR/boot-count") == 2 ]] || fail 'a leftover boot-token must count as a crash and clear the QML cache'
+# #140: power cut after a healthy start (no stop hook, no boot-token) still drops the cache but is no crash.
+rm -f "$SC5000_UI_DIR"/*; sh "$GUARD" pre; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
+[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'a start without a stop hook must clear the QML cache without counting a crash'
+SERVICE_RESULT=success sh "$GUARD" stop; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
+[[ -d $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean stop must keep the QML disk cache'
+# #140: the healthy timer leaves the token when Engine is gone, so the next pre counts a crash.
+SC5000_UI_HEALTHY_AFTER=1 SC5000_UI_ALIVE_CMD=false sh "$GUARD" post; sleep 1.5
+[[ -e $SC5000_UI_DIR/boot-token ]] || fail 'a dead Engine must not clear boot-token'
+# #140: a hung engine-guardian must not block Engine start.
+if command -v timeout >/dev/null; then
+    printf '#!/bin/sh\nsleep 60\n' > "$TMP/slow-guardian"; chmod +x "$TMP/slow-guardian"
+    start=$SECONDS; SC5000_ENGINE_GUARDIAN=$TMP/slow-guardian sh "$GUARD" pre
+    (( SECONDS - start < 20 )) || fail 'guard pre must time out a hung engine-guardian'
+fi
 unset SC5000_ENGINE_DATA_DIR
 # #7: a crashed start's timer must not reset the streak of the starts after it.
 rm -f "$SC5000_UI_DIR"/*
-export SC5000_UI_HEALTHY_AFTER=1
+export SC5000_UI_HEALTHY_AFTER=1 SC5000_UI_ALIVE_CMD=true
 sh "$GUARD" pre; sh "$GUARD" post
 SERVICE_RESULT=signal sh "$GUARD" stop; sh "$GUARD" pre
 sleep 1.5
 [[ $(cat "$SC5000_UI_DIR/boot-count") == 2 ]] || fail 'stale timer reset the crash streak'
 sh "$GUARD" post; sleep 1.5
 [[ ! -e $SC5000_UI_DIR/boot-count ]] || fail 'a start that survives the window must clear boot-count'
-unset SC5000_UI_HEALTHY_AFTER
+unset SC5000_UI_HEALTHY_AFTER SC5000_UI_ALIVE_CMD
 # Quit reasons the stock script exits 0 after: the guard must restart Engine unless
 # the system is already rebooting (FactoryReset when az01-update --erase-data worked).
 mkdir -p "$TMP/guard-bin"

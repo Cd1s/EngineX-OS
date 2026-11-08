@@ -228,6 +228,64 @@ func TestUpdatePicksTheDataBundleOnSecondGeneration(t *testing.T) {
 	}
 }
 
+func TestUpdatePicksGen2ImgWhenUnlocked(t *testing.T) {
+	const img, bundle = "SCLIVE4-5.3.0.3-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img", "SCLIVE4-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz"
+	both := func(base string) string {
+		return fmt.Sprintf(`{"name":%q,"browser_download_url":%q},{"name":%q,"browser_download_url":%q}`, bundle, base+"/dl/"+bundle, img, base+"/dl/"+img)
+	}
+	onlyBundle := func(base string) string {
+		return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, bundle, base+"/dl/"+bundle)
+	}
+	for _, c := range []struct {
+		name, marker string
+		assets       func(string) string
+		want         string
+	}{
+		{"locked by default", "", both, bundle},
+		{"unlocked", "gen2-unlocked", both, img},
+		{"unlocked, release has no img", "gen2-unlocked", onlyBundle, bundle},
+		{"unlocked but gen2-locked wins", "both", both, bundle},
+	} {
+		s, custom := bundleDeck(t, "inmusic,jp21", c.assets, nil)
+		switch c.marker {
+		case "gen2-unlocked":
+			os.WriteFile(filepath.Join(custom, "gen2-unlocked"), []byte("1\n"), 0o644)
+		case "both":
+			os.WriteFile(filepath.Join(custom, "gen2-unlocked"), []byte("1\n"), 0o644)
+			os.WriteFile(filepath.Join(custom, "gen2-locked"), []byte("1\n"), 0o644)
+		}
+		if v := getUpdate(s, ""); !strings.HasSuffix(v.DownloadURL, "/dl/"+c.want) {
+			t.Errorf("%s: %+v, want %s", c.name, v, c.want)
+		}
+	}
+}
+
+func TestUnlockGen2Endpoint(t *testing.T) {
+	call := func(s *Server, method string) map[string]any {
+		w := httptest.NewRecorder()
+		s.handleUnlockGen2(w, httptest.NewRequest(method, "/v1/sc5000/unlock-gen2", nil))
+		var v map[string]any
+		json.Unmarshal(w.Body.Bytes(), &v)
+		v["status"] = w.Code
+		return v
+	}
+	s, custom := bundleDeck(t, "inmusic,jp21", func(string) string { return "" }, nil)
+	if v := call(s, "GET"); v["unlocked"] != false || v["generation"] != float64(2) || v["prefix"] != "SCLIVE4" {
+		t.Fatalf("GET before: %v", v)
+	}
+	os.WriteFile(filepath.Join(custom, "gen2-locked"), []byte("1\n"), 0o644)
+	if v := call(s, "POST"); v["ok"] != true || v["unlocked"] != true || v["prefix"] != "SCLIVE4" {
+		t.Fatalf("POST: %v", v)
+	}
+	if _, err := os.Stat(filepath.Join(custom, "gen2-locked")); err == nil || !s.isGen2Unlocked() {
+		t.Error("POST must write gen2-unlocked and remove gen2-locked")
+	}
+	g, _ := bundleDeck(t, "inmusic,jp07", func(string) string { return "" }, nil)
+	if v := call(g, "POST"); v["status"] != 400 {
+		t.Errorf("1st-gen POST: %v", v)
+	}
+}
+
 func waitUpdate(t *testing.T, s *Server) updateStatus {
 	for i := 0; i < 200; i++ {
 		s.updateMu.Lock()

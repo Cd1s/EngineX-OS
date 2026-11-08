@@ -77,22 +77,24 @@ wait "$p1"
 wait "$p2"
 wait "$p3"
 
+# 3. Verify every 1st-gen AZ01 image as a container again, then copy 2nd-gen images and record checksums.
+mkdir "$OUT/verify"
+for f in "$OUT/"*-Update.img; do
+    b=$(basename "$f")
+    python3 "$ROOT/tools/az01-packer/az01_packer.py" info "$f" > "$OUT/verify/${b%.img}.info.json"
+done
+
 for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
     python3 tools/az01-packer/build-data-bundle.py "$VERSION" --prefix "$m" --suite "$WORK/sc5000-suite" \
         --hook "$WORK/hooks32/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
-    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$OUT/"
+    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done
 for m in PRIME4G2 SYSTEMONE; do
     python3 tools/az01-packer/build-data-bundle.py "$VERSION" --prefix "$m" --suite "$WORK/sc5000-suite-arm64" \
         --hook "$WORK/hooks64/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
-    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$OUT/"
+    cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done
 
-# 3. Verify every image as a container again and record checksums.
 cd "$OUT"
-mkdir verify
-for f in *-Update.img; do
-    python3 "$ROOT/tools/az01-packer/az01_packer.py" info "$f" > "verify/${f%.img}.info.json"
-done
 sha256sum *-Update.img *-Data-Bundle.tar.gz > SHA256SUMS.txt
 ls -l
