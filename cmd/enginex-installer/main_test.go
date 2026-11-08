@@ -463,6 +463,68 @@ func TestModeAInstallsBundleOverSSH(t *testing.T) {
 	}
 }
 
+func TestModeAUninstallsSecondGenBundle(t *testing.T) {
+	need(t, "unshare")
+
+	// 1. 1st-generation deck fails with error directing user to USB flashing
+	p1 := freeTCP(t)
+	_ = startSSHDeck(t, p1, "inmusic,jp07\x00rockchip,rk3288\x00")
+	o1 := testOpts(t)
+	o1.Uninstall = true
+	o1.Yes = true
+	o1.SSHPort = p1
+	err := modeA(ctxT(t), o1, deck{IP: "127.0.0.1", Name: "sc5000-lab"})
+	if err == nil || (!strings.Contains(err.Error(), "一代机") && !strings.Contains(err.Error(), "1st-generation")) {
+		t.Fatalf("expected error indicating 1st-gen deck, got: %v", err)
+	}
+
+	// 2. 2nd-generation deck runs uninstall.sh and reports success
+	p2 := freeTCP(t)
+	deck2 := startSSHDeck(t, p2, "inmusic,jc11s\x00nxp,imx8mm\x00")
+	bundleDir := filepath.Join(deck2.Data, "enginex", "bundle")
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	marker := filepath.Join(deck2.Data, "uninstalled.marker")
+	uninstallScript := fmt.Sprintf("#!/bin/sh\ntouch '%s'\nexit 0\n", marker)
+	if err := os.WriteFile(filepath.Join(bundleDir, "uninstall.sh"), []byte(uninstallScript), 0o755); err != nil {
+		t.Fatalf("write uninstall.sh: %v", err)
+	}
+
+	// Test user cancellation when Yes is false and input is "no"
+	oCancel := testOpts(t)
+	oCancel.Uninstall = true
+	oCancel.Yes = false
+	oCancel.In = strings.NewReader("no\n")
+	oCancel.SSHPort = p2
+	if errCancel := modeA(ctxT(t), oCancel, deck{IP: "127.0.0.1", Name: "prime4plus-lab"}); errCancel == nil || !strings.Contains(errCancel.Error(), "cancelled") {
+		t.Fatalf("expected cancel error when user answers no, got: %v", errCancel)
+	}
+
+	// Test confirmed uninstall
+	o2 := testOpts(t)
+	o2.Uninstall = true
+	o2.Yes = true
+	o2.SSHPort = p2
+	if err := modeA(ctxT(t), o2, deck{IP: "127.0.0.1", Name: "prime4plus-lab"}); err != nil {
+		t.Fatalf("modeA uninstall failed: %v", err)
+	}
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("uninstall.sh was not executed: marker missing")
+	}
+
+	cmds := strings.Join(deck2.Commands(), "\n")
+	if !strings.Contains(cmds, "uninstall.sh") {
+		t.Fatalf("remote commands lack uninstall.sh:\n%s", cmds)
+	}
+
+	outStr := o2.Out.(*bytes.Buffer).String()
+	if !strings.Contains(outStr, "已从 /data 卸载 EngineX OS") || !strings.Contains(outStr, "EngineX OS removed from /data") {
+		t.Fatalf("output missing uninstall bilingual completion notice: %s", outStr)
+	}
+}
+
 // ---- Test 3: mode B against a fastboot shim and real ext4 images ---------------
 
 type fbShim struct{ Bin, Dir string }

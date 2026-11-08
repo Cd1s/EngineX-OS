@@ -82,6 +82,7 @@ type options struct {
 	Bundle, Backup, Key, Password string
 	Repo, API                     string
 	Yes                           bool
+	Uninstall                     bool
 	HTTP                          *http.Client
 	Fastboot                      string // fastboot binary
 	Packer                        string
@@ -716,6 +717,21 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	code, m, gen2, ok := parseCompatible(out)
 	if !ok {
 		return fmt.Errorf("%s: 未知型号 / unknown board %q", label, strings.TrimSpace(out))
+	}
+	if o.Uninstall {
+		if !gen2 {
+			return fmt.Errorf("%s (%s): 一代机请使用 U 盘刷回官方固件 / 1st-generation deck; copy the stock firmware *.img to a USB stick to revert to stock", label, m.Name)
+		}
+		if err := confirm(o, fmt.Sprintf("确认从 %s 卸载 EngineX OS 并恢复原厂系统？", label), fmt.Sprintf("Uninstall EngineX OS from %s and revert to stock firmware?", label)); err != nil {
+			return err
+		}
+		uninstallCmd := `sh ` + customDirSh + `/bundle/uninstall.sh && (systemctl reboot || reboot || :)`
+		if out, err := sshRun(cl, uninstallCmd, nil); err != nil {
+			return fmt.Errorf("%s: uninstall failed: %w\n%s", label, err, out)
+		}
+		o.say("已从 /data 卸载 EngineX OS，碟机正在重启回到原厂系统",
+			"EngineX OS removed from /data; the deck is rebooting to stock firmware")
+		return nil
 	}
 	if !gen2 {
 		path, err := fetchImage(ctx, o, m.Prefix)
@@ -1487,6 +1503,7 @@ func main() {
 	flag.StringVar(&o.Password, "password", "", "mode A: SSH password for root")
 	flag.StringVar(&o.Repo, "repo", "Cd1s/EngineX-OS", "GitHub repository to download from")
 	flag.BoolVar(&o.Yes, "yes", false, "do not ask before flashing")
+	flag.BoolVar(&o.Uninstall, "uninstall", false, "remove the EngineX data bundle from a 2nd-generation deck over SSH and return to stock")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

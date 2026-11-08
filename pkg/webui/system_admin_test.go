@@ -500,3 +500,80 @@ func TestSSHAuthorizedKeyAndReadOnlyEtc(t *testing.T) {
 		t.Fatalf("hasAuthorizedKey not reported: %s", w.Body.String())
 	}
 }
+
+func TestUninstallGen2Endpoint(t *testing.T) {
+	mockRunner := &mockSystemRunner{outputs: make(map[string][]byte)}
+	SetSystemRunner(mockRunner.Run)
+	defer SetSystemRunner(nil)
+
+	stateDir := t.TempDir()
+	uiDir := t.TempDir()
+	compatDir := t.TempDir()
+	compatible := filepath.Join(compatDir, "compatible")
+	defer func(old string) { deviceCompatiblePath = old }(deviceCompatiblePath)
+	deviceCompatiblePath = compatible
+
+	version := filepath.Join(stateDir, "version.txt")
+	_ = os.WriteFile(version, []byte("5.3.0.3\n"), 0o644)
+	s := New(Config{StateDir: stateDir, UIDir: uiDir, VersionFile: version}, nil)
+
+	// 1. Generation 1 deck (e.g. SC5000 JP07) -> 400 Bad Request
+	_ = os.WriteFile(compatible, []byte("inmusic,jp07\x00rockchip,rk3288\x00"), 0o644)
+	for _, path := range []string{"/v1/sc5000/uninstall-gen2", "/api/uninstall-gen2"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		w := httptest.NewRecorder()
+		s.handleUninstallGen2(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400 for 1st-gen deck, got %d: %s", path, w.Code, w.Body.String())
+		}
+	}
+
+	// 2. Generation 2 deck (e.g. SC LIVE 4 JP21) without uninstall.sh -> 404 Not Found
+	_ = os.WriteFile(compatible, []byte("inmusic,jp21\x00rockchip,rk3288\x00"), 0o644)
+	for _, path := range []string{"/v1/sc5000/uninstall-gen2", "/api/uninstall-gen2"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		w := httptest.NewRecorder()
+		s.handleUninstallGen2(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("%s: expected 404 when uninstall.sh missing, got %d: %s", path, w.Code, w.Body.String())
+		}
+	}
+
+	// 3. Generation 2 deck with uninstall.sh -> 200 OK and runs sh <customDir>/bundle/uninstall.sh
+	bundleDir := filepath.Join(stateDir, "bundle")
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	uninstallPath := filepath.Join(bundleDir, "uninstall.sh")
+	if err := os.WriteFile(uninstallPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write uninstall.sh: %v", err)
+	}
+
+	for _, path := range []string{"/v1/sc5000/uninstall-gen2", "/api/uninstall-gen2"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		w := httptest.NewRecorder()
+		s.handleUninstallGen2(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d: %s", path, w.Code, w.Body.String())
+		}
+		var res map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+			t.Fatalf("%s: unmarshal error: %v", path, err)
+		}
+		if res["ok"] != true || res["prefix"] != "SCLIVE4" {
+			t.Fatalf("%s: unexpected response: %+v", path, res)
+		}
+	}
+
+	if !mockRunner.hasCommand("sh", uninstallPath) {
+		t.Fatalf("expected sh %s to be executed", uninstallPath)
+	}
+
+	// 4. Method not allowed for GET
+	req := httptest.NewRequest(http.MethodGet, "/api/uninstall-gen2", nil)
+	w := httptest.NewRecorder()
+	s.handleUninstallGen2(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET, got %d", w.Code)
+	}
+}

@@ -2471,6 +2471,7 @@ def edits(dev: bool):
             '    id: scGlobalConfig\n'
             '    objectName: "Global Assignment Config"\n'
             '    property real scPadBrightness: 1\n'
+            '    property bool scSwapLoopOrder: false\n'
             '    Timer {\n'
             '        interval: 3000; running: true; repeat: true; triggeredOnStart: true\n'
             '        onTriggered: {\n'
@@ -2478,8 +2479,10 @@ def edits(dev: bool):
             '            x.onreadystatechange = function() {\n'
             '                if (x.readyState !== XMLHttpRequest.DONE || x.status !== 200) return\n'
             '                try {\n'
-            '                    const n = parseInt(JSON.parse(x.responseText).ledBrightness)\n'
+            '                    const j = JSON.parse(x.responseText)\n'
+            '                    const n = parseInt(j.ledBrightness)\n'
             '                    if (n >= 20 && n <= 100) scGlobalConfig.scPadBrightness = n / 100\n'
+            '                    scGlobalConfig.scSwapLoopOrder = !!j.swapLoopOrder\n'
             '                } catch (e) {}\n'
             '            }\n'
             '            x.open("GET", "http://127.0.0.1:8080/v1/sc5000/ui")\n'
@@ -2487,7 +2490,47 @@ def edits(dev: bool):
             '        }\n'
             '    }\n')]
         pad_brt = '    scBrightness: typeof globalConfig !== "undefined" && globalConfig && globalConfig.scPadBrightness ? globalConfig.scPadBrightness : 1\n'
-        scaled["ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml"] = [("    enabled: deckConfig.inDJMode\n", "    enabled: deckConfig.inDJMode\n" + pad_brt)]
+        # #135: Swap Loop / Beat Jump: the Auto Loop knob beat-jumps unshifted and resizes the loop with Shift.
+        scaled["ControlSurfaceModules/ControlSurfaceModules/private/AutoLoopKnob.qml"] = [(
+            "        output: globalConfig.shift ? shiftTurnOutput : normalTurnOutput\n",
+            '        output: (globalConfig.shift !== (typeof globalConfig !== "undefined" && globalConfig && !!globalConfig.scSwapLoopOrder)) ? shiftTurnOutput : normalTurnOutput\n')]
+        # #135: touch Beat Jump on the deck screen: icon = jump back, size text = next size
+        # (cycles through 16/32/64 phrase jumps), » = jump forward. BeatJump gets its deck
+        # from deckIndex; the five users pass theirs (default 1).
+        bj = "Skins/EngineOS/UI/CompositeControls/"
+        def bj_tap(action, call="p.translator.state = true"):
+            return ('        MouseArea {\n            anchors.fill: parent\n            anchors.margins: -6\n'
+                    f'            onClicked: {{ const p = Planck.getProperty("/Engine/Deck" + beatJump.deckIndex + "/Track/BeatJump/{action}"); if (p && p.translator) {call} }}\n'
+                    '        }\n')
+        scaled[bj + "Deck/DeckItem/BeatJump.qml"] = [
+            ("    required property BeatJumpViewInterface view\n",
+             "    required property BeatJumpViewInterface view\n    property int deckIndex: 1\n"),
+            ("        SequentialAnimation {\n            id: beatJumpImageAnimation\n",
+             bj_tap("JumpBack") + "\n        SequentialAnimation {\n            id: beatJumpImageAnimation\n"),
+            ("        SequentialAnimation {\n            id: beatJumpTextAnimation\n",
+             bj_tap("BeatJumpIndex", "p.translator.incValue(0, 1, 0, true)") + "\n        SequentialAnimation {\n            id: beatJumpTextAnimation\n"),
+            ("                to: Style.font01Color\n                duration: Style.colorAnimationDuration\n            }\n        }\n    }\n",
+             "                to: Style.font01Color\n                duration: Style.colorAnimationDuration\n            }\n        }\n    }\n\n"
+             '    Text {\n        objectName: "Deck_BeatJump_Forward"\n        verticalAlignment: Text.AlignVCenter\n'
+             '        font: beatJumpText.font\n        color: Style.font01Color\n        text: "\\u00bb"\n\n'
+             + bj_tap("JumpForward") + "    }\n"),
+        ]
+        scaled[bj + "Deck/DeckSharedItems/DeckSharedItems.qml"] = [
+            ("            view: deckSharedItems.deckView.beatJumpView\n",
+             "            view: deckSharedItems.deckView.beatJumpView\n            deckIndex: deckSharedItems.deckData.deckIndex\n")]
+        scaled[bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"] = [
+            ("        view: deckPerformanceDataContent.deckView.beatJumpView\n",
+             "        view: deckPerformanceDataContent.deckView.beatJumpView\n        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n")]
+        scaled[bj + "DeckPerformanceData/PortraitDeckPerformanceDataContent.qml"] = [
+            ("                view: deckPerformanceDataContent.deckView.beatJumpView\n",
+             "                view: deckPerformanceDataContent.deckView.beatJumpView\n                deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n")]
+        scaled[bj + "DeckOverview/DeckOverview.qml"] = [
+            ("                    view: control.deckView.beatJumpView\n",
+             "                    view: control.deckView.beatJumpView\n                    deckIndex: control.deckView.deckData.deckIndex\n")]
+        scaled[bj + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"] = [
+            ("                    view: deckTrackDataContent.deckView.beatJumpView\n",
+             "                    view: deckTrackDataContent.deckView.beatJumpView\n                    deckIndex: deckTrackDataContent.deckIndex\n")]
+        scaled["ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml"] =[("    enabled: deckConfig.inDJMode\n", "    enabled: deckConfig.inDJMode\n" + pad_brt)]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/QuadPadRGBLed.qml"] = [("    idx: note\n", "    idx: note\n" + pad_brt)]
         scaled["airAssignments/OutputAssignment/ColorOutputAssignment.qml"] = [
             ("	property bool debug: false;\n",

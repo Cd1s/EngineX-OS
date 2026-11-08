@@ -231,6 +231,8 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /v1/sc5000/unlock-gen2", s.handleUnlockGen2)
 	s.mux.HandleFunc("GET /api/unlock-gen2", s.handleUnlockGen2)
 	s.mux.HandleFunc("POST /api/unlock-gen2", s.handleUnlockGen2)
+	s.mux.HandleFunc("POST /v1/sc5000/uninstall-gen2", s.handleUninstallGen2)
+	s.mux.HandleFunc("POST /api/uninstall-gen2", s.handleUninstallGen2)
 	s.mux.HandleFunc("GET /api/tailscale", s.handleTailscale)
 	s.mux.HandleFunc("POST /api/tailscale", s.handleTailscale)
 	s.mux.HandleFunc("GET /v1/sc5000/tailscale", s.handleTailscale)

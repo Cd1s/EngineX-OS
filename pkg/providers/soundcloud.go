@@ -803,7 +803,11 @@ func (s *SoundCloud) webMedia(ctx context.Context, id string, lossless bool) (So
 			}
 			address := c.URL
 			if t.Auth != "" {
-				address += "?" + url.Values{"track_authorization": {t.Auth}}.Encode()
+				sep := "?"
+				if strings.Contains(address, "?") {
+					sep = "&"
+				}
+				address += sep + url.Values{"track_authorization": {t.Auth}}.Encode()
 			}
 			if s.get(ctx, address, &stream) != nil || stream.URL == "" {
 				continue

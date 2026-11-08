@@ -776,3 +776,67 @@ func TestStreamingPlaylistSortByBPMKeyTitle(t *testing.T) {
 		t.Fatalf("Configured sort by bpm desc failed: %v", titles)
 	}
 }
+
+// #150: with lossy off, the manifest must still name the file the stream will serve.
+func TestSoundCloudPlaybackInfoCodecMatchesStreamWhenLosslessOnly(t *testing.T) {
+	var cdn *httptest.Server
+	cdn = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tracks/5":
+			w.Write([]byte(`{"id":5,"access":"playable"}`))
+		case "/tracks/5/streams":
+			w.Write([]byte(`{"http_mp3_128_url":"` + cdn.URL + `/stream"}`))
+		case "/stream":
+			http.Redirect(w, r, cdn.URL+"/cdn/stream.mp3", http.StatusFound)
+		case "/cdn/stream.mp3":
+			http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(testMP3(200)))
+		default:
+			t.Errorf("unexpected %s", r.URL)
+		}
+	}))
+	defer cdn.Close()
+	dir := t.TempDir()
+	jobs := NewJobs(Pipeline{Catalog: fixtureCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dir, AllowLossy: false}})
+	defer jobs.Close()
+	sc := &providers.SoundCloud{BaseURL: cdn.URL, ClientID: "cid", Secret: "shh", Token: "t"}
+	ui := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: t.TempDir()}, jobs)
+	jobs.mu.Lock()
+	jobs.soundcloud = func() *providers.SoundCloud { return sc } // New wires its own
+	jobs.mu.Unlock()
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+
+	// A Spotify track whose Ogg is already on disk (Jobs.Fetch is covered elsewhere).
+	ogg := filepath.Join(dir, "spotify-9.ogg")
+	os.WriteFile(ogg, []byte("OggS"), 0o644)
+	spotify := providers.Track{ID: "9", Provider: "spotify"}
+	jobs.files[trackKey(spotify)] = fetched{dl: &deemixclient.Download{Path: ogg}}
+	ui.tidal.mu.Lock()
+	ui.tidal.tracks[1] = trackRef{track: providers.Track{ID: "5", Provider: "soundcloud"}}
+	ui.tidal.tracks[2] = trackRef{track: spotify}
+	ui.tidal.mu.Unlock()
+
+	for id, want := range map[string][2]string{"1": {"audio/mpeg", ".mp3"}, "2": {"audio/ogg", ".ogg"}} {
+		var info struct {
+			Manifest string `json:"manifest"`
+		}
+		tidalGet(t, srv.URL, "/v1/tracks/"+id+"/playbackinfopostpaywall", 200, &info)
+		raw, _ := base64.StdEncoding.DecodeString(info.Manifest)
+		var m struct {
+			MimeType string   `json:"mimeType"`
+			URLs     []string `json:"urls"`
+		}
+		json.Unmarshal(raw, &m)
+		if m.MimeType != want[0] || len(m.URLs) != 1 || !strings.HasSuffix(m.URLs[0], want[1]) {
+			t.Fatalf("track %s: %s", id, raw)
+		}
+		resp, err := http.Get(m.URLs[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != want[0] {
+			t.Fatalf("track %s stream: %d %q", id, resp.StatusCode, resp.Header.Get("Content-Type"))
+		}
+	}
+}
