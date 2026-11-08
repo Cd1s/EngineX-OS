@@ -156,7 +156,7 @@ SERVICES_MAIN = """
 		if (!m) return null
 		const pos = scShadowPosition(s, Date.now())
 		let best = null
-		for (const c of scShadowCuesFor(d, s)) if (c.ms > pos + 50 && (!best || c.ms < best.ms)) best = c
+		for (const c of scShadowCuesFor(d, s)) if (c.i > 0 && c.ms > pos + 50 && (!best || c.ms < best.ms)) best = c
 		if (!best) return null
 		const beats = m.beats || []
 		const totalBeats = scShadowBeatAt(beats, best.ms) - scShadowBeatAt(beats, pos)
@@ -170,7 +170,7 @@ SERVICES_MAIN = """
 		if (!m) return scShadowEmptyArray
 		if (!Array.isArray(s.liveCues) || !(m.sampleRate > 0)) return m.cues || scShadowEmptyArray
 		const c = scShadowLiveCueCache[d], raw = s.liveCues
-		let same = !!c && c.key === s.key && c.rate === m.sampleRate && c.raw.length === raw.length
+		let same = !!c && c.key === s.key && c.rate === m.sampleRate && c.cuePos === s.cuePos && c.raw.length === raw.length
 		if (same) for (let i = 0; i < raw.length; i++) {
 			const a = c.raw[i], b = raw[i]
 			if (a.i !== b.i || a.p !== b.p || a.n !== b.n || a.c !== b.c) { same = false; break }
@@ -182,7 +182,10 @@ SERVICES_MAIN = """
 			if (q.i >= 1 && q.i <= 8 && isFinite(ms) && ms >= 0 && ms <= m.durationMs)
 				rows.push({i: q.i, ms: ms, n: q.n || "", c: q.c || "#26a6ff"})
 		}
-		scShadowLiveCueCache[d] = {key: s.key, rate: m.sampleRate, raw: raw, rows: rows}
+		if (isFinite(s.cuePos) && s.cuePos >= 0 && s.cuePos / m.sampleRate * 1000 <= m.durationMs)
+			rows.push({i: 0, ms: s.cuePos / m.sampleRate * 1000, n: "CUE", c: "#ffffff"})
+		else if (s.cuePos === undefined) for (const q of m.cues || scShadowEmptyArray) if (q.i === 0) rows.push(q)
+		scShadowLiveCueCache[d] = {key: s.key, rate: m.sampleRate, cuePos: s.cuePos, raw: raw, rows: rows}
 		return rows
 	}
 	function scShadowAsset(url) {
@@ -244,6 +247,7 @@ SERVICES_MAIN = """
 			sample.key = key; sample.title = e.title || ""; sample.artist = e.artist || ""
 			sample.playing = !!e.playing; sample.stale = !!e.stale
 			sample.positionMs = Number(e.positionMs) || 0; sample.at = Number(e.at) || now; sample.pitch = Number(e.pitch) || 0
+			sample.cuePos = typeof e.cuePos === "number" ? e.cuePos : undefined
 			sample.master = !!e.master; sample.sync = !!e.sync; sample.beat = Number(e.beat) || 0; sample.bpm = Number(e.bpm) || 0
 			sample.loading = !!e.loading; sample.meta = old && old.key === key ? old.meta : null
 			sample.liveCues = Array.isArray(e.cues) ? e.cues : old && old.key === key ? old.liveCues : null
