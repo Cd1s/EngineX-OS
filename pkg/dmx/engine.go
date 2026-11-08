@@ -32,22 +32,22 @@ type route struct {
 // Engine owns no goroutines, timers or sockets until explicitly enabled.
 // Apply and Close serialize teardown, including the last blackout frames.
 type Engine struct {
-	op       sync.Mutex
-	mu       sync.Mutex
-	config   Config
-	clock    Clock
-	beatBase float64
-	running  bool
-	err      string
-	frames   map[int][512]byte
-	stop     chan struct{}
-	done     chan struct{}
-	cid      [16]byte
-	sequence byte
+	op          sync.Mutex
+	mu          sync.Mutex
+	config      Config
+	clock       Clock
+	beatBase    float64
+	running     bool
+	err         string
+	frames      map[int][512]byte
+	stop        chan struct{}
+	done        chan struct{}
+	cid         [16]byte
+	sequence    byte
 	artSequence byte
-	closed   bool
-	blocked  func() bool
-	enabled  atomic.Bool
+	closed      bool
+	blocked     func() bool
+	enabled     atomic.Bool
 }
 
 func New(blocked ...func() bool) *Engine {
@@ -267,7 +267,7 @@ func (e *Engine) run(routes []route, stop <-chan struct{}, done chan<- struct{})
 }
 
 func (e *Engine) send(routes []route, frames map[int][512]byte, terminated bool) {
-	e.sequence++ // E1.31 uses the full modulo-256 sequence space.
+	e.sequence++                          // E1.31 uses the full modulo-256 sequence space.
 	e.artSequence = e.artSequence%255 + 1 // Art-Net reserves zero for disabled sequencing.
 	var failures []string
 	for _, r := range routes {
