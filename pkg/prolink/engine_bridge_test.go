@@ -395,8 +395,16 @@ func TestEngineBridgeRejectsDamagedPerformance(t *testing.T) {
   bridgeExec(t,db,`INSERT INTO Track(id,path,filename,length) VALUES(1,'../Music/a.wav','a.wav',4)`)
   beat,quick,loops,overview:=bridgeEnginePerformance(t)
   bridgeExec(t,db,`UPDATE PerformanceData SET beatData=?,quickCues=?,loops=?,overviewWaveFormData=? WHERE trackId=1`,beat,quick,loops,overview)
+  testfixture.Write(t,root,"Music/a.wav",testfixture.WAV(true))
   bad:=[]byte{1,2,3};bridgeExec(t,db,"UPDATE PerformanceData SET "+field+"=? WHERE trackId=1",bad)
-  if err:=prolink.SyncEngineToPioneerExport(root);err==nil {t.Fatal("damaged performance accepted")}
+  if err:=prolink.SyncEngineToPioneerExport(root);err!=nil {t.Fatal(err)}
+  tr:=bridgeReadLibrary(t,root).Tracks[0]
+  dat:=bridgeReadAnalysis(t,root,tr.AnalysisPath)
+  ext:=bridgeReadAnalysis(t,root,strings.TrimSuffix(tr.AnalysisPath,"DAT")+"EXT")
+  if field=="beatData" && len(dat.Beats)!=0 {t.Fatal("damaged beats were exported")}
+  if field=="overviewWaveFormData" && len(ext.Waveforms)!=0 {t.Fatal("damaged waveform was exported")}
+  if field!="beatData" && len(dat.Beats)==0 {t.Fatal("valid independent beat grid was lost")}
+  if field=="loops" {for _,c:=range ext.Cues {if c.Loop {t.Fatal("damaged loop was exported")}}}
  })}
 }
 
@@ -443,6 +451,18 @@ func TestEngineBridgeRejectsExtremeBeatAnchors(t *testing.T) {
   }
   damaged,err:=enginedb.QCompress(raw);if err!=nil {t.Fatal(err)}
   bridgeExec(t,db,`UPDATE PerformanceData SET beatData=? WHERE trackId=1`,damaged)
-  if err:=prolink.SyncEngineToPioneerExport(root);err==nil {t.Fatal("extreme grid accepted")}
+  if err:=prolink.SyncEngineToPioneerExport(root);err!=nil {t.Fatal(err)}
+  tr:=bridgeReadLibrary(t,root).Tracks[0]
+  if len(bridgeReadAnalysis(t,root,tr.AnalysisPath).Beats)!=0 {t.Fatal("extreme grid was exported")}
  })}
+}
+
+func TestEngineBridgeDoesNotFollowAnalysisOutputSymlinks(t *testing.T) {
+ bridgeNoStreams(t);mdb,root,db:=testlibrary.Create(t)
+ bridgeExec(t,db,`INSERT INTO Track(id,path,filename,length) VALUES(1,'../Music/a.wav','a.wav',4)`)
+ dir:=filepath.Join(root,"PIONEER/USBANLZ/P001");if err:=os.MkdirAll(dir,0755);err!=nil {t.Fatal(err)}
+ if err:=os.Symlink(mdb,filepath.Join(dir,"ANLZ0000.DAT"));err!=nil {t.Fatal(err)}
+ before,err:=os.ReadFile(mdb);if err!=nil {t.Fatal(err)}
+ if err:=prolink.SyncEngineToPioneerExport(root);err!=nil {t.Fatal(err)}
+ after,err:=os.ReadFile(mdb);if err!=nil || !bytes.Equal(before,after) {t.Fatalf("source database was changed via output symlink: %v",err)}
 }
