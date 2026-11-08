@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log"
@@ -35,6 +37,9 @@ const (
 	legacyBundleCustomDir = "/data/sc5000-custom"
 	bundleMaxDown         = 64 << 20  // compressed download
 	bundleMaxUnpack       = 128 << 20 // all extracted files together
+	gen2ImgPrefix         = "ENGINEX_DATA_BUNDLE"
+	gen2ImgMagic          = "ENGINEX_DATA_BUNDLE_IMG_V1\n"
+	gen2ImgHeader         = 128
 )
 
 func isDeckDataDir(dir string) bool {
@@ -133,28 +138,36 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		s.applyDataBundleUpdate(downloadURL)
 		return
 	}
+	customDir := s.customDir()
 	uiDir := s.uiDir()
 	_ = os.Remove(filepath.Join(uiDir, "safe-mode"))
 	_ = os.Remove(filepath.Join(uiDir, "boot-count"))
 	// Trigger stock Denon full-screen graphical updater (/usr/bin/planck-remote-screen --update)
 	// via /usr/Engine/Scripts/engine's native UpdateFromUrl quit handler.
-	if err := os.WriteFile("/tmp/update-file-url", []byte(downloadURL+"\n"), 0o644); err == nil {
-		if err := os.WriteFile("/tmp/engine-quit-reason", []byte("UpdateFromUrl\n"), 0o644); err == nil {
-			s.setUpdateProgress(0.10, "", false)
-			time.Sleep(150 * time.Millisecond)
-			// Engine renames itself "EMain", so match the command line, not the name.
-			if exec.Command("pkill", "-TERM", "-f", "^/usr/Engine/Engine( |$)").Run() == nil {
-				s.setUpdateProgress(1.0, "", true)
-				return
+	if isDeckDataDir(customDir) {
+		if err := os.WriteFile("/tmp/update-file-url", []byte(downloadURL+"\n"), 0o644); err == nil {
+			if err := os.WriteFile("/tmp/engine-quit-reason", []byte("UpdateFromUrl\n"), 0o644); err == nil {
+				s.setUpdateProgress(0.10, "", false)
+				time.Sleep(150 * time.Millisecond)
+				// Engine renames itself "EMain", so match the command line, not the name.
+				if exec.Command("pkill", "-TERM", "-f", "^/usr/Engine/Engine( |$)").Run() == nil {
+					s.setUpdateProgress(1.0, "", true)
+					return
+				}
+				_ = os.Remove("/tmp/engine-quit-reason")
+				_ = os.Remove("/tmp/update-file-url")
 			}
-			_ = os.Remove("/tmp/engine-quit-reason")
-			_ = os.Remove("/tmp/update-file-url")
 		}
 	}
-	if !hasMatchingStagedImage(stagedUpdateFile, downloadURL) {
-		part := stagedUpdateFile + ".part"
+	staged := stagedUpdateFile
+	if !isDeckDataDir(customDir) {
+		_ = os.MkdirAll(customDir, 0o700)
+		staged = filepath.Join(customDir, "az01-update.img")
+	}
+	if !hasMatchingStagedImage(staged, downloadURL) {
+		part := staged + ".part"
 		_ = os.Remove(part)
-		_ = os.Remove(stagedUpdateFile + ".url")
+		_ = os.Remove(staged + ".url")
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 		req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 		if err != nil {
@@ -222,17 +235,20 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		out.Close()
 		resp.Body.Close()
 		cancel()
-		if !hasValidAZ01Image(part) || os.Rename(part, stagedUpdateFile) != nil {
+		if s.tryApplyGen2Image(part) {
+			return
+		}
+		if !hasValidAZ01Image(part) || os.Rename(part, staged) != nil {
 			_ = os.Remove(part)
 			s.setUpdateProgress(0, "downloaded image failed AZ01 check", true)
 			return
 		}
-		_ = os.WriteFile(stagedUpdateFile+".url", []byte(downloadURL+"\n"), 0o644)
+		_ = os.WriteFile(staged+".url", []byte(downloadURL+"\n"), 0o644)
 	}
 	s.setUpdateProgress(0.97, "", false)
 	_ = os.Remove(filepath.Join(uiDir, "safe-mode"))
 	_ = os.Remove(filepath.Join(uiDir, "boot-count"))
-	cmd := exec.Command("/usr/sbin/az01-update", "--file", stagedUpdateFile)
+	cmd := exec.Command("/usr/sbin/az01-update", "--file", staged)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
@@ -242,6 +258,45 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		return
 	}
 	s.setUpdateProgress(1.0, "", false)
+}
+
+// tryApplyGen2Image handles a 2nd-generation *-Update.img (128-byte ENGINEX_DATA_BUNDLE_IMG_V1
+// header + Data-Bundle.tar.gz) when the background download fallback ran instead of Engine's
+// Quit-to-Updater path. Returns false only if part is not a 2nd-gen bundle image.
+func (s *Server) tryApplyGen2Image(part string) bool {
+	f, err := os.Open(part)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var head [gen2ImgHeader]byte
+	n, _ := io.ReadFull(f, head[:])
+	if !bytes.HasPrefix(head[:n], []byte(gen2ImgPrefix)) && !dataBundleBoards[imagePrefix(deviceCompatible())] {
+		return false
+	}
+	_ = os.Remove(part)
+	if !s.isGen2Unlocked() {
+		s.setUpdateProgress(0, "gen2 .img update is locked", true)
+		return true
+	}
+	st, err := f.Stat()
+	if err != nil || n != gen2ImgHeader || string(head[:len(gen2ImgMagic)]) != gen2ImgMagic ||
+		head[len(gen2ImgMagic)+64] != '\n' || st.Size() <= gen2ImgHeader || st.Size()-gen2ImgHeader > bundleMaxDown {
+		s.setUpdateProgress(0, "downloaded image failed SHA-256 check", true)
+		return true
+	}
+	wantHex := strings.ToLower(string(head[len(gen2ImgMagic) : len(gen2ImgMagic)+64]))
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil || hex.EncodeToString(h.Sum(nil)) != wantHex {
+		s.setUpdateProgress(0, "downloaded image failed SHA-256 check", true)
+		return true
+	}
+	if _, err := f.Seek(gen2ImgHeader, io.SeekStart); err != nil {
+		s.setUpdateProgress(0, "downloaded image failed SHA-256 check", true)
+		return true
+	}
+	s.applyDataBundleFromReader(f)
+	return true
 }
 
 func (s *Server) installedVersion() string {
@@ -418,7 +473,37 @@ func (s *Server) applyDataBundleUpdate(downloadURL string) {
 		fail(msg)
 		return
 	}
-	top, err := unpackBundle(archive, filepath.Join(work, "x"))
+	f, err := os.Open(archive)
+	if err != nil {
+		fail("invalid data bundle archive")
+		return
+	}
+	defer f.Close()
+	s.installDataBundleReader(f, work)
+}
+
+// applyDataBundleFromReader unpacks a Data-Bundle.tar.gz stream into a scratch directory
+// under customDir and runs its install.sh (#119).
+func (s *Server) applyDataBundleFromReader(r io.Reader) {
+	fail := func(msg string) { s.setUpdateProgress(0, msg, true) }
+	customDir := s.customDir()
+	if err := os.MkdirAll(customDir, 0o700); err != nil {
+		fail("cannot write " + customDir)
+		return
+	}
+	work, err := os.MkdirTemp(customDir, ".ota-bundle-*")
+	if err != nil {
+		fail("cannot write " + customDir)
+		return
+	}
+	defer os.RemoveAll(work)
+	s.installDataBundleReader(r, work)
+}
+
+func (s *Server) installDataBundleReader(r io.Reader, work string) {
+	fail := func(msg string) { s.setUpdateProgress(0, msg, true) }
+	customDir := s.customDir()
+	top, err := unpackBundleReader(r, filepath.Join(work, "x"))
 	if err != nil {
 		fail(err.Error())
 		return
@@ -521,16 +606,21 @@ func (s *Server) downloadBundle(url, dest string) string {
 // unpackBundle extracts a bundle into dir, refusing anything but plain files
 // and directories under one top directory, and returns that directory.
 func unpackBundle(archive, dir string) (string, error) {
-	bad := errors.New("invalid data bundle archive")
 	f, err := os.Open(archive)
 	if err != nil {
-		return "", bad
+		return "", errors.New("invalid data bundle archive")
 	}
 	defer f.Close()
-	gz, err := gzip.NewReader(f)
+	return unpackBundleReader(f, dir)
+}
+
+func unpackBundleReader(r io.Reader, dir string) (string, error) {
+	bad := errors.New("invalid data bundle archive")
+	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return "", bad
 	}
+	defer gz.Close()
 	tr := tar.NewReader(gz)
 	var top string
 	var total int64

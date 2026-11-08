@@ -116,6 +116,8 @@ class AZ0xPackerTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(data).hexdigest(), rec['sha256'])
 
         with self.assertRaises(az0x_packer.SafetyError):
+            az0x_packer.replace_record(raw, 'PART', 'splash', b'')
+        with self.assertRaises(az0x_packer.SafetyError):
             az0x_packer.replace_record(raw, 'PART', 'splash', b'x')
         with self.assertRaises(az0x_packer.SafetyError):
             az0x_packer.replace_record(raw, 'BOOT', 'boot', b'x', 1)
@@ -132,6 +134,11 @@ class AZ0xPackerTests(unittest.TestCase):
                          '--magic', 'PART', '--name', 'splash', '--board-mask', '0x1',
                          '--payload', str(payload), '--output', str(output)]), 0)
         self.assertTrue(output.exists())
+        with self.assertRaises(SystemExit) as cm:
+            az0x_packer.main(['replace-record', '--original', str(original),
+                              '--magic', 'PART', '--name', 'splash', '--board-mask', '0x1',
+                              '--payload', str(payload), '--output', str(original)])
+        self.assertEqual(cm.exception.code, 2)
 
     def test_validation_errors(self):
         raw = make_az0x_fixture()

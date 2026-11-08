@@ -241,7 +241,7 @@ umask 022
 stage=$(mktemp -d "$dest/.bundle.XXXXXX")
 trap 'rm -rf "$stage"' 0
 mkdir "$stage/bundle" "$stage/ui"
-cp -R bin lib SHA256SUMS version.txt alsa-dir boot-activate.sh 99-sc5000-custom.conf uninstall.sh "$stage/bundle/"
+cp -R bin lib SHA256SUMS version.txt alsa-dir boot-activate.sh 99-sc5000-custom.conf install.sh uninstall.sh "$stage/bundle/"
 tar -C "$stage/ui" -xf ui-packs.tar
 [ -d "$stage/ui/packs" ] || { echo "ui-packs.tar has no packs/" >&2; exit 1; }
 rm -rf "$dest/bundle.replaced"
@@ -258,7 +258,10 @@ done
 mkdir -p "$alsa_dest"
 cp 99-sc5000-custom.conf "$alsa_dest/99-sc5000-custom.conf"
 # Same markers as sc5000-custom-prepare: new packs get a fresh try after safe mode.
-rm -f "$dest/ui/safe-mode" "$dest/ui/boot-count" "$dest/ui/boot-token"
+rm -f "$dest/ui/safe-mode" "$dest/ui/mods-quarantined" "$dest/ui/boot-count" "$dest/ui/boot-token" "$dest/ui/last-crash"
+if [ -z "${SC5000_CUSTOM:-}" ]; then
+    rm -rf "/data/AppDataUser/AIR Music Technology/Engine/.cache/qml"
+fi
 cp version.txt "$dest/ui/.pack-version"
 sha256sum < ui-packs.tar | cut -d' ' -f1 > "$dest/ui/.pack-id"
 cp version.txt "$dest/version.txt"

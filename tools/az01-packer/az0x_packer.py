@@ -8,6 +8,7 @@ struct.unpack("<4sIQQII", rec[:32]) + 32-byte sha256).
 Provides:
 - info(data) / CLI: prints container metadata and record descriptors.
 - replace_splash(data, splash_bytes): replaces PART splash payload and recalculates SHA-256.
+- replace_record(data, magic, name, new_payload, board_mask=None): replaces one record for offline analysis.
 """
 import argparse
 import hashlib
@@ -106,39 +107,41 @@ def info(data):
 
 def replace_record(data, magic, name, new_payload, board_mask=None):
     """Replace one record for offline analysis; the container signature is invalidated."""
-    require(isinstance(new_payload, bytes) and new_payload, 'replacement payload must be non-empty bytes')
+    require(isinstance(new_payload, (bytes, bytearray)) and len(new_payload) > 0,
+            'replacement payload must be non-empty bytes')
     hdr = parse_header(data)
     records = hdr['records']
     for rec in records:
         start, size = rec['offset'], rec['size']
-        require(size > 0 and start >= HEADER_SIZE and start + size <= len(data), 'invalid record bounds')
+        require(size > 0 and start >= HEADER_SIZE and start + size <= len(data),
+                f'invalid record {rec["index"]} bounds: offset={start:#x} size={size:#x}')
         require(hashlib.sha256(data[start:start + size]).hexdigest() == rec['sha256'],
                 f'record {rec["index"]} SHA-256 mismatch')
-    matches = [r for r in records if r['magic'] == magic and r['name'] == name
-               and (board_mask is None or r['board_mask'] == board_mask)]
+
+    matches = [
+        r for r in records
+        if r['magic'] == magic and r['name'] == name and (board_mask is None or r['board_mask'] == board_mask)
+    ]
     require(len(matches) == 1, 'expected exactly one matching record; specify board_mask if needed')
     target = matches[0]
     start, end = target['offset'], target['offset'] + target['size']
     for rec in records:
         if rec is not target:
             require(rec['offset'] + rec['size'] <= start or rec['offset'] >= end,
-                    'replacement overlaps another record')
+                    f'replacement overlaps record {rec["index"]}')
 
-    # Preserve the alignment of all later data and the original gaps and trailer.
+    # Preserve 8-byte alignment of all subsequent records, inter-record gaps, and trailer.
     padding = (target['size'] - len(new_payload)) % 8
     delta = len(new_payload) + padding - target['size']
-    result = bytearray(data[:start] + new_payload + b'\0' * padding + data[end:])
+    result = bytearray(data[:start]) + new_payload + (b'\x00' * padding) + data[end:]
+    new_sha = hashlib.sha256(new_payload).digest()
     for rec in records:
         roff = rec['record_offset']
         if rec is target:
             struct.pack_into('<Q', result, roff + 16, len(new_payload))
-            result[roff + 32:roff + 64] = hashlib.sha256(new_payload).digest()
+            result[roff + 32:roff + 64] = new_sha
         elif rec['offset'] >= end:
             struct.pack_into('<Q', result, roff + 8, rec['offset'] + delta)
-    for rec in parse_header(result)['records']:
-        payload = result[rec['offset']:rec['offset'] + rec['size']]
-        require(len(payload) == rec['size'] and hashlib.sha256(payload).hexdigest() == rec['sha256'],
-                f'output record {rec["index"]} SHA-256 mismatch')
     return bytes(result)
 
 
@@ -147,11 +150,9 @@ def replace_splash(data, splash_bytes):
 
     Returns the updated AZ0x image bytes.
     """
-    require(data[:4] == MAGIC, f'not an AZ0x container: {data[:4]!r}')
+    hdr = parse_header(data)
     require(len(splash_bytes) == SPLASH_SIZE,
             f'splash payload must be exactly {SPLASH_SIZE} bytes (got {len(splash_bytes)})')
-
-    hdr = parse_header(data)
     splash_records = [r for r in hdr['records'] if r['magic'] == 'PART' and r['name'] == 'splash']
     require(splash_records, 'no PART splash record found in AZ0x container')
 
@@ -189,12 +190,12 @@ def main(argv=None):
     p_replace.add_argument('--output', required=True, type=Path, help='Output AZ0x container (.img)')
 
     p_record = sub.add_parser('replace-record', help='Replace a record for offline analysis (output is unsigned)')
-    p_record.add_argument('--original', required=True, type=Path)
-    p_record.add_argument('--magic', required=True)
-    p_record.add_argument('--name', required=True)
-    p_record.add_argument('--board-mask', type=lambda value: int(value, 0))
-    p_record.add_argument('--payload', required=True, type=Path)
-    p_record.add_argument('--output', required=True, type=Path)
+    p_record.add_argument('--original', required=True, type=Path, help='Stock AZ0x container (.img)')
+    p_record.add_argument('--magic', required=True, help='4-char record tag (e.g. PART, BOOT)')
+    p_record.add_argument('--name', required=True, help='Record name (e.g. splash, rootfs, boot)')
+    p_record.add_argument('--board-mask', type=lambda value: int(value, 0), help='Optional board mask filter')
+    p_record.add_argument('--payload', required=True, type=Path, help='Replacement payload file')
+    p_record.add_argument('--output', required=True, type=Path, help='Output AZ0x container (.img)')
 
     args = parser.parse_args(argv)
 
@@ -206,6 +207,8 @@ def main(argv=None):
             print(json.dumps(meta, indent=2))
             return 0
         elif args.command == 'replace-record':
+            require(args.original.is_file(), f'original file not found: {args.original}')
+            require(args.payload.is_file(), f'payload file not found: {args.payload}')
             require(args.original.resolve() != args.output.resolve(), 'output must differ from original')
             new_img = replace_record(args.original.read_bytes(), args.magic, args.name,
                                      args.payload.read_bytes(), args.board_mask)
@@ -217,6 +220,7 @@ def main(argv=None):
         elif args.command == 'replace-splash':
             require(args.original.is_file(), f'original file not found: {args.original}')
             require(args.splash.is_file(), f'splash file not found: {args.splash}')
+            require(args.original.resolve() != args.output.resolve(), 'output must differ from original')
             orig_data = args.original.read_bytes()
             splash_data = args.splash.read_bytes()
             new_img = replace_splash(orig_data, splash_data)
