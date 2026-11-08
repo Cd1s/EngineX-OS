@@ -208,6 +208,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /peer/decks", s.peerDecksGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/audio", s.peerAudioGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/perf", s.peerPerfGet)
+	s.mux.HandleFunc("GET /peer/decks/{n}/display", s.peerDisplayGet)
 	s.mux.HandleFunc("POST /api/drop", s.drop)
 	s.mux.HandleFunc("POST /api/relocate", s.relocate)
 	s.mux.HandleFunc("GET /api/bluetooth", s.handleBluetooth)
