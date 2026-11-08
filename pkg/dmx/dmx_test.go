@@ -87,6 +87,7 @@ func TestMovementTiming(t *testing.T) {
 		}
 	}
 	// 120 BPM reaches beat one after 500 ms; 60 BPM takes one second.
+	c.Effect = "Circle"
 	if Render(c, 0.5*120/60)[1] != Render(c, 1*60/60)[1] {
 		t.Fatal("BPM timing")
 	}
@@ -94,6 +95,39 @@ func TestMovementTiming(t *testing.T) {
 	f := Render(c, 1)[1]
 	if f != [512]byte{} {
 		t.Fatal("blackout must clear every channel")
+	}
+}
+
+func TestTimestampedBPMPhase(t *testing.T) {
+	c := movingConfig()
+	c.Sync = true
+	at := time.Unix(100, 0)
+	clock := Clock{Deck: 1, BPM: 120, Beat: 0.5, Playing: true, At: at}
+	beats, valid := phaseAt(c, clock, 4.5, at, at.Add(250*time.Millisecond))
+	if !valid || beats != 5 {
+		t.Fatalf("120 BPM extrapolation: %v %v", beats, valid)
+	}
+	f := Render(c, beats)[1]
+	if pan := int(f[0])<<8 | int(f[1]); pan != 48768 {
+		t.Fatalf("quarter-cycle master phase: %d", pan)
+	}
+	clock.BPM = 60
+	beats, _ = phaseAt(c, clock, 4.5, at, at.Add(500*time.Millisecond))
+	if beats != 5 {
+		t.Fatal("pitch/tempo change did not change phase speed")
+	}
+	clock.Playing = false
+	beats, valid = phaseAt(c, clock, 4.5, at, at.Add(500*time.Millisecond))
+	if !valid || beats != 4.5 {
+		t.Fatal("paused master did not freeze phase")
+	}
+	if _, valid = phaseAt(c, clock, 4.5, at, at.Add(2*time.Second)); valid {
+		t.Fatal("stale sample did not request blackout")
+	}
+	c.Sync = false
+	beats, valid = phaseAt(c, Clock{}, 0, at, at.Add(500*time.Millisecond))
+	if !valid || beats != 1 {
+		t.Fatal("manual BPM fallback")
 	}
 }
 

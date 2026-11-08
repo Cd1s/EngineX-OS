@@ -279,7 +279,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.beatport = &providers.Beatport{BaseURL: cfg.BeatportURL, HTTP: cfg.HTTP, Path: filepath.Join(cfg.StateDir, "beatport-owner.json")}
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
-	go s.tunnelResume()
+	// Resume before accepting requests: a delayed resume could see a newly
+	// enabled tunnel and restart it underneath its first Configure call.
+	s.tunnelResume()
 	if jobs != nil {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor
