@@ -245,14 +245,14 @@ func TestNetworkFramesAndShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer recv.Close()
-	send, err := net.DialUDP("udp4", nil, recv.LocalAddr().(*net.UDPAddr))
+	send, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e := New()
 	e.config = movingConfig()
 	stop, done := make(chan struct{}), make(chan struct{})
-	go e.run([]route{{output: Output{Protocol: "sacn", Universe: 1}, network: send}}, stop, done)
+	go e.run([]route{{output: Output{Protocol: "sacn", Universe: 1}, network: send, address: recv.LocalAddr().(*net.UDPAddr)}}, stop, done)
 	buf := make([]byte, 1024)
 	recv.SetReadDeadline(time.Now().Add(time.Second))
 	n, _, err := recv.ReadFromUDP(buf)
