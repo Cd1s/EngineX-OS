@@ -148,6 +148,7 @@ type shadowState struct {
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
 	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
 	dbg                 shadowDebug
+	display             shadowDisplayCache
 }
 
 func newShadowState() *shadowState {
@@ -779,10 +780,20 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 		s.shadow.mu.Unlock()
 		out = s.shadowCompose(role, time.Now())
 	}
-	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug})
+	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug, "displayOnly": !v.ShadowLegacyEngine})
 }
 
 func (s *Server) shadowCompose(role string, now time.Time) []deckState {
+	s.uiMu.Lock()
+	legacy := s.loadUI().ShadowLegacyEngine
+	s.uiMu.Unlock()
+	if !legacy {
+		return s.shadowComposeDisplay(role, now)
+	}
+	return s.shadowComposeLegacy(role, now)
+}
+
+func (s *Server) shadowComposeLegacy(role string, now time.Time) []deckState {
 	devices := s.mergedDevices()
 	// The exporter's lock is taken before ours, never under it: closing the
 	// exporter waits for its observer, which takes ours.

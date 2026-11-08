@@ -51,7 +51,7 @@ func TestShadowNetworkVolumeSuffix(t *testing.T) {
 	}
 	now := time.Now()
 	s.shadow.peerDecks[1] = peerDeck{deckState: deckState{Deck: 1, Net: "net://7022ea42-920b-4c66-b913-1892c3ee73af/KDATA KF328 (USB 3)/" + rel, Playing: true}, at: now}
-	got := s.shadowCompose("24", now)
+	got := s.shadowComposeLegacy("24", now)
 	if len(got) != 1 || got[0].Path != local || !got[0].Playing {
 		t.Fatalf("shadow: %+v, want path %q and playing", got, local)
 	}
@@ -133,7 +133,7 @@ func TestShadowDeckFromPeer(t *testing.T) {
 		t.Fatalf("shadow without the 4-deck layout: %q %+v", role, decks)
 	}
 	os.MkdirAll(filepath.Join(dirB, "ui"), 0o755)
-	uiPost(t, b.URL, "fourDeckWaveform=1")
+	uiPost(t, b.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
 	u, _ := url.Parse(a.URL)
 	bs.shadow.peerPort, _ = strconv.Atoi(u.Port())
 	bs.shadow.peers["127.0.0.1"] = time.Now()
@@ -261,7 +261,7 @@ func TestShadowSharedUSBAndEngineCache(t *testing.T) {
 	if err := os.WriteFile(fourDeckRolePath, []byte("24\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	uiPost(t, server.URL, "fourDeckWaveform=1")
+	uiPost(t, server.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
 	local := filepath.Join(b.shadow.mediaRoot, "USB", "track.flac")
 	if err := os.MkdirAll(filepath.Dir(local), 0755); err != nil {
 		t.Fatal(err)
@@ -323,7 +323,7 @@ func TestShadowDeckFromCDJ(t *testing.T) {
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = "/run/sc5000-assignments/role" }()
 	os.WriteFile(fourDeckRolePath, []byte("24\n"), 0o644)
-	uiPost(t, srv.URL, "fourDeckWaveform=1")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
 	dev := `{"address":"127.0.0.1","name":"CDJ-3000","number":3,"playing":true,"play_position_ms":5000,"pitch":-1.5,"master":true,"sync":true}`
 	if resp, err := http.Post(srv.URL+"/v1/sc5000/prolink", "application/json", strings.NewReader(dev)); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("post device: %v %v", resp, err)
@@ -506,7 +506,7 @@ func TestShadowPositionFromSampleTime(t *testing.T) {
 	d := v.Decks[0]
 	d.Deck = 2
 	s.shadow.peerDecks[2] = peerDeck{deckState: d, at: time.Now()}
-	if got := s.shadowCompose("13", time.Now()); len(got) != 1 || got[0].At == 0 {
+	if got := s.shadowComposeLegacy("13", time.Now()); len(got) != 1 || got[0].At == 0 {
 		t.Fatalf("shadow lacks its clock: %+v", got)
 	}
 }
@@ -540,7 +540,7 @@ func TestShadowUDPPushWakesLongPoll(t *testing.T) {
 	defer func() { fourDeckRolePath = "/run/sc5000-assignments/role" }()
 	os.WriteFile(fourDeckRolePath, []byte("13\n"), 0o644)
 	os.MkdirAll(filepath.Join(dirB, "ui"), 0o755)
-	uiPost(t, b.URL, "fourDeckWaveform=1")
+	uiPost(t, b.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
 
 	var first struct{ Ver uint64 }
 	resp, err := http.Get(b.URL + "/v1/sc5000/shadow")
@@ -700,7 +700,7 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	s.shadow.peerDecks[3] = peerDeck{deckState: deckState{Deck: 3, Key: "k", Ext: ".flac", Name: "x.flac"}, ip: "192.0.2.7", at: now}
 	s.shadow.peerDecks[4] = peerDeck{deckState: deckState{Deck: 4}, ip: "192.0.2.7", at: now}
 	s.shadow.mu.Unlock()
-	out := s.shadowCompose("12", now)
+	out := s.shadowComposeLegacy("12", now)
 	var got = map[int]deckState{}
 	for _, d := range out {
 		got[d.Deck] = d
