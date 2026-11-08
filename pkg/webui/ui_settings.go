@@ -52,7 +52,7 @@ const (
 )
 
 type uiSettings struct {
-	DMXEnabled bool `json:"dmxEnabled"` // status only; opt-in is in dmx.json
+	DMXEnabled  bool    `json:"dmxEnabled"` // status only; opt-in is in dmx.json
 	Version     string  `json:"version,omitempty"`
 	Quality     string  `json:"quality"`
 	Jog         string  `json:"jog"`
