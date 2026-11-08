@@ -89,7 +89,7 @@ if [ -x "$bin_dir/stream-sync" ]; then
     cat <<EOF > /run/systemd/system/enginex-stream-sync.service
 [Unit]
 Description=EngineX Stream Sync & Audio Analyzer Console
-After=network.target
+After=network.target enginex-sc5000-deemixd.service
 
 [Service]
 Type=simple
@@ -153,6 +153,37 @@ if [ -s "$dest/authorized_keys" ] && [ -x /usr/sbin/sshd ]; then
         { mkdir -p -m 700 /root/.ssh && cp "$dest/authorized_keys" /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys; } 2>/dev/null ||
             mount --bind "$dest/authorized_keys" /root/.ssh/authorized_keys 2>/dev/null || :
     fi
+fi
+
+# Seed /data/StreamingAccounts.json with a stored-credential TIDAL entry (#56, #159)
+# so Engine 5.3.0 logs in to the local gateway at boot instead of waiting for Profile SSO.
+accounts=/data/StreamingAccounts.json
+if [ -d /data ] && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
+    export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\",\"accessToken\":\"enginex\",\"refreshToken\":\"enginex\"}"'
+    if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
+        awk '{
+            if ($0 ~ /"TIDAL"[[:space:]]*:/ && $0 !~ /accessToken/) {
+                comma = ($0 ~ /,[[:space:]]*$/) ? "," : ""
+                print "    " ENVIRON["T"] comma
+            } else {
+                print
+            }
+        }' "$accounts" > "$accounts.tmp" && mv "$accounts.tmp" "$accounts"
+    elif ! grep -q '"TIDAL"' "$accounts" 2>/dev/null; then
+        if grep -q '"' "$accounts" 2>/dev/null; then
+            awk '!d && (i = index($0, "{")) { $0 = substr($0, 1, i) "\n    " ENVIRON["T"] "," substr($0, i + 1); d = 1 } 1' "$accounts" > "$accounts.tmp"
+        else
+            printf '{\n    %s\n}\n' "$T" > "$accounts.tmp"
+        fi
+        mv "$accounts.tmp" "$accounts"
+    fi
+fi
+
+# #160: record the 4-deck satellite link role on Gen2/AZ04 consoles when four_deck_waveform=1.
+if grep -qx 'four_deck_waveform=1' "$dest/ui/settings.conf" 2>/dev/null; then
+    role=$(sed -n 's/^four_deck_role=//p' "$dest/ui/settings.conf" 2>/dev/null | tail -n 1)
+    case $role in 12|13|24|34|1|2) ;; *) role=12 ;; esac
+    mkdir -p /run/sc5000-assignments && echo "$role" > /run/sc5000-assignments/role
 fi
 
 # Sticks mounted before this ran never went through the edisksd hook.

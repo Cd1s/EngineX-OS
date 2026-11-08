@@ -97,7 +97,7 @@ SERVICES_MAIN = """
 	// The board (device tree), not Config.device.isPlayer: the 4-deck layout turns a
 	// player into a non-player inside Engine (#49).
 	property bool scPlayer: false
-	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 }
+	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 && (scPlayer || !!(scShadowAt[deck] && scShadowAt[deck].path)) }
 	// Swipe left loads the role's first deck, swipe right its second (0: stock).
 	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
 	property bool scFourDeckOn: false // the saved switch; Engine applies it on restart
@@ -440,9 +440,11 @@ SERVICES_MAIN = """
 	// shadow deck and, after 350 ms (one dropped update must not eject), unload it
 	// so no stale track or waveform stays, handing master back to our own deck.
 	function scShadowEmpty(d, now) {
+		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
+		// On an all-in-one console (#160), leave Decks 3/4 alone unless a shadow peer loaded them.
+		if (!root.scPlayer && !at.path) return
 		const pPlay = root.scTr("/Engine/Deck" + d + "/Play")
 		if (pPlay && pPlay.state) pPlay.state = false
-		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
 		if (!at.emptyAt) at.emptyAt = now
 		if (now - at.emptyAt < 350 || !(at.path || (root.scTr("/Engine/Deck" + d + "/Track/SongLoaded") || {}).state)) return
 		if ((root.scTr("/Engine/Deck" + d + "/SyncMode") || {}).string !== "Off") scPress("/Engine/Deck" + d + "/UnSync")
@@ -697,6 +699,15 @@ SERVICES_MAIN = """
 	property int scLedBrightness: 100
 	property int scUIScale: 100
 	property bool scStemsEqMode: false
+	property bool scStemsEqApplied: false
+	onScStemsEqModeChanged: {
+		if (!scUiLoaded && !scStemsEqMode) return
+		scStemsEqApplied = true
+		for (let ch = 1; ch <= 4; ch++) {
+			const m = root.scTr("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode")
+			if (m) m.index = scStemsEqMode ? 1 : 0
+		}
+	}
 	property bool scBeatJumpPads: false
 	property string scPioneerFx: "off"
 	// Offers this model's release image to EngineX's online updater.
@@ -912,7 +923,7 @@ SERVICES_MAIN = """
 		scProlinkShare = !!v.prolinkShare
 		scProlinkExport = !!v.prolinkExport
 		scPlayer = !!v.player
-		scFourDeckRole = v.player && v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
+		scFourDeckRole = v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
 		scFourDeckOn = !!v.fourDeckWaveform
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
 		scKeepPlayhead(v.playhead || 0)
@@ -941,6 +952,13 @@ SERVICES_MAIN = """
 			else if (v.beat_jump_pads !== undefined) scBeatJumpPads = v.beat_jump_pads === "1" || v.beat_jump_pads === 1 || v.beat_jump_pads === true
 			if (v.pioneerFx !== undefined) scPioneerFx = v.pioneerFx || "off"
 			else if (v.pioneer_fx !== undefined) scPioneerFx = v.pioneer_fx || "off"
+		}
+		if (scStemsEqMode && !scStemsEqApplied) {
+			scStemsEqApplied = true
+			for (let ch = 1; ch <= 4; ch++) {
+				const m = root.scTr("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode")
+				if (m) m.index = 1
+			}
 		}
 		const p = Planck.getProperty("/Client/Preferences/Profile/Application/WaveformStyle")
 		if (p.translator && (p.translator.index == 1) !== (v.waveform === "rgb"))
@@ -1653,16 +1671,15 @@ LED_ENTRY = """
 FOUR_DECK_ENTRIES = """
 		EntryBase.ListEntry {
 			text: "4-Deck Waveform"
-			visible: root.scPlayer // #49
 			values: ["Off", "On"]
 			currentValue: root.scFourDeckOn ? "On" : "Off"
 			onSelected: function(index) { if ((index === 1) !== root.scFourDeckOn) root.scRestartCall("fourDeckWaveform=" + index) }
 		},
 		EntryBase.ListEntry {
 			text: "4-Deck Role"
-			visible: root.scPlayer && root.scFourDeckOn
-			readonly property var ids: ["auto", "13", "24", "12", "1", "2"]
-			values: ["Auto", "1+3", "2+4", "1+2", "1", "2"]
+			visible: root.scFourDeckOn
+			readonly property var ids: ["auto", "13", "24", "12", "34", "1", "2"]
+			values: ["Auto", "1+3", "2+4", "1+2", "3+4", "1", "2"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scFourDeckRoleSetting))]
 			onSelected: function(index) { if (ids[index] !== root.scFourDeckRoleSetting) root.scRestartCall("fourDeckRole=" + ids[index]) }
 		},
@@ -2743,6 +2760,67 @@ def edits(dev: bool):
             # JP07's AutoLoop has no loopInactiveShiftTurnAction (default None), so the swapped turn did nothing.
             ("        readonly property bool beatJumpEnabled: module.loopInactiveShiftTurnAction === Action.BeatJump &&",
              '        readonly property bool beatJumpEnabled: (module.loopInactiveShiftTurnAction === Action.BeatJump || (typeof globalConfig !== "undefined" && globalConfig && !!globalConfig.scSwapLoopOrder)) &&')]
+        # #152: unlock Shift + Cue (PFL) channel-strip mode toggle (EQ <-> Stems Level) on all
+        # mixer boards, and prevent rapid double-tapping Hot Cue from bouncing STEMS back to CUES.
+        scaled["ControlSurfaceModules/ControlSurfaceModules/MixerChannelCore.qml"] = [(
+            "    readonly property bool canToggleMode: module.pflShiftAction == Action.ToggleChannelStripMode\n",
+            "    readonly property bool canToggleMode: Config.audio.hasStemsLevel || module.pflShiftAction == Action.ToggleChannelStripMode\n",
+        )]
+        scaled["ControlSurfaceModules/ControlSurfaceModules/PadModeSelect.qml"] = [(
+            "            ValueNoteAssignment {\n"
+            "                id: padModeSelect\n",
+            "            property double scStemsLatchedAt: 0\n\n"
+            "            ValueNoteAssignment {\n"
+            "                id: padModeSelect\n",
+        ), (
+            "                        } else {\n"
+            "                            Planck.getProperty(\n"
+            "                                `${deckConfig.activeDeckPath}PadModeButton${model.index}Pressed`\n"
+            "                            ).translator.trigger()\n"
+            "                        }\n",
+            "                        } else {\n"
+            "                            const now = Date.now()\n"
+            "                            if (model.index === 0 && now - button.scStemsLatchedAt < 350) {\n"
+            "                                if (!deckConfig.padsModeIsStems && deckConfig.pPadsView && deckConfig.pPadsView.translator) {\n"
+            "                                    deckConfig.pPadsView.translator.string = \"STEMS\"\n"
+            "                                }\n"
+            "                                return\n"
+            "                            }\n"
+            "                            const wasStems = deckConfig.padsModeIsStems\n"
+            "                            Planck.getProperty(\n"
+            "                                `${deckConfig.activeDeckPath}PadModeButton${model.index}Pressed`\n"
+            "                            ).translator.trigger()\n"
+            "                            if (model.index === 0 && !wasStems) {\n"
+            "                                button.scStemsLatchedAt = now\n"
+            "                            }\n"
+            "                        }\n",
+        )]
+        # #157: holding the Browse/Zoom encoder (or Slip/Vinyl) while a deck is playing must not
+        # enter BeatGrid Edit (which in C++ Engine pauses playback, jumps to 00:00, and locks Play),
+        # and Jog Touch must stay disabled while BeatGrid Edit is active (matching Motorized.qml).
+        scaled["ControlSurfaceModules/ControlSurfaceModules/DeckAction.qml"] = [(
+            "    function toggleGridEdit() {\n"
+            "        if (!deckConfig.songLoaded) {\n"
+            "            return\n"
+            "        }\n",
+            "    function toggleGridEdit() {\n"
+            "        if (!deckConfig.songLoaded || (!deckConfig.gridEditActive && deckConfig.playing)) {\n"
+            "            return\n"
+            "        }\n",
+        )]
+        scaled["ControlSurfaceModules/ControlSurfaceModules/Vinyl.qml"] = [(
+            "        if (shiftActionIsGridEdit && (globalConfig.shift || deckConfig.gridEditActive)) {\n",
+            "        if (shiftActionIsGridEdit && ((globalConfig.shift && !deckConfig.playing) || deckConfig.gridEditActive)) {\n",
+        )]
+        scaled["ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml"] = [(
+            "        enabled: {\n"
+            "            deckConfig.inDJMode &&\n"
+            "                !deckConfig.loopInEdit &&\n",
+            "        enabled: {\n"
+            "            deckConfig.inDJMode &&\n"
+            "                !deckConfig.gridEditActive &&\n"
+            "                !deckConfig.loopInEdit &&\n",
+        )]
         # #135: touch Beat Jump on the deck screen: icon = jump back, size text = next size
         # (cycles through 16/32/64 phrase jumps), » = jump forward. BeatJump gets its deck
         # from deckIndex; the five users pass theirs (default 1).

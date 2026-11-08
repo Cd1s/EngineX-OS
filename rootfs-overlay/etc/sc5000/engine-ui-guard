@@ -67,19 +67,31 @@ pre)
     # A huge or locked m.db must not hold the splash screen forever.
     t=; ! command -v timeout >/dev/null 2>&1 || t="timeout 10"
     [ ! -x "$guardian" ] || $t "$guardian" --heal-mount "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve > /dev/null 2>&1 || :
-    # Engine 5.3.0 sends a TIDAL client with no saved account to the Engine DJ
-    # Profile login (#56), and every EngineX service runs on that client. With the
-    # account entry (no token in it) Engine logs in to the local gateway at start.
+    # Engine 5.3.0 sends a TIDAL client with no saved account (or a tokenless SSO
+    # account) to the Engine DJ Profile login (#56, #159), and every EngineX service
+    # runs on that client. With stored accessToken/refreshToken credentials Engine
+    # logs in to the local gateway at start instead of timing out after 150 s.
     # Real TIDAL (scope=tidal) keeps the stock login.
     accounts=${SC5000_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
-    if ! grep -qx 'scope=tidal' "$UI/settings.conf" 2>/dev/null && ! grep -q '"TIDAL"' "$accounts" 2>/dev/null; then
-        export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\"}"'
-        if grep -q '"' "$accounts" 2>/dev/null; then
-            awk '!d && (i = index($0, "{")) { $0 = substr($0, 1, i) "\n    " ENVIRON["T"] "," substr($0, i + 1); d = 1 } 1' "$accounts" > "$accounts.tmp"
-        else
-            printf '{\n    %s\n}\n' "$T" > "$accounts.tmp"
+    export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\",\"accessToken\":\"enginex\",\"refreshToken\":\"enginex\"}"'
+    if ! grep -qx 'scope=tidal' "$UI/settings.conf" 2>/dev/null; then
+        if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
+            awk '{
+                if ($0 ~ /"TIDAL"[[:space:]]*:/ && $0 !~ /accessToken/) {
+                    comma = ($0 ~ /,[[:space:]]*$/) ? "," : ""
+                    print "    " ENVIRON["T"] comma
+                } else {
+                    print
+                }
+            }' "$accounts" > "$accounts.tmp" && mv "$accounts.tmp" "$accounts"
+        elif ! grep -q '"TIDAL"' "$accounts" 2>/dev/null; then
+            if grep -q '"' "$accounts" 2>/dev/null; then
+                awk '!d && (i = index($0, "{")) { $0 = substr($0, 1, i) "\n    " ENVIRON["T"] "," substr($0, i + 1); d = 1 } 1' "$accounts" > "$accounts.tmp"
+            else
+                printf '{\n    %s\n}\n' "$T" > "$accounts.tmp"
+            fi
+            mv "$accounts.tmp" "$accounts"
         fi
-        mv "$accounts.tmp" "$accounts"
     fi
     # #49: the 4-deck layout (four_deck_waveform=1) makes Engine a non-player with a
     # "Left" (decks 1/3) and a "Right" (2/4) group, while the players' preset assignment
@@ -112,7 +124,7 @@ pre)
     fi
     role=$(sed -n 's/^four_deck_role=//p' "$UI/settings.conf" 2>/dev/null | tail -n 1)
     case $role in
-    12|13|24|1|2) ;;
+    12|13|24|34|1|2) ;;
     *) # FOOLPROOF INVARIANT (#49/#123): auto MUST map odd Player -> 13 and even Player -> 24 so linked SC5000 / Shadow Decks never cross-control each other. NEVER change auto to 12.
         state=${SC5000_PLANCK_STATE:-"/data/AppDataUser/AIR Music Technology/Engine/State/PlanckClientState.json"}
         n=$(grep -A1 '"Player": {' "$state" 2>/dev/null | sed -n 's/.*"string": "\([0-9]*\)".*/\1/p' | head -n 1)
@@ -132,11 +144,11 @@ pre)
         cat > "$patched/role.awk" <<'AWK'
 BEGIN {
     group = (role == "24" || role == "2") ? "\"Right\"" : "\"Left\""
-    if (role == "12") group = "Planck.getProperty(\"/GUI/Decks/DeckLeft/Layer\").translator.index === 0 ? \"Left\" : \"Right\""
-    own = role == "12" || role == "1" || role == "2" # these replace the stock LAYER
+    if (role == "12" || role == "34") group = "Planck.getProperty(\"/GUI/Decks/DeckLeft/Layer\").translator.index === 0 ? \"Left\" : \"Right\""
+    own = role == "12" || role == "34" || role == "1" || role == "2" # these replace the stock LAYER
     unit = "Config.device.isPlayer ? \"\" : "
-    layer_group = role == "12" ? "\"Left\"" : group
-    decks = "(Config.device.isPlayer ? [1, 2] : " ((role == "24" || role == "2") ? "[2, 4]" : role == "12" ? "[1, 2]" : "[1, 3]") ")"
+    layer_group = (role == "12" || role == "34") ? "\"Left\"" : group
+    decks = "(Config.device.isPlayer ? [1, 2] : " ((role == "24" || role == "2") ? "[2, 4]" : role == "12" ? "[1, 2]" : role == "34" ? "[3, 4]" : "[1, 3]") ")"
 }
 /"\/GUI\/Decks\/Deck\/ActiveDeck"/ {
     print "    // EngineX #49: 4-deck role " role ": the wheel display follows the deck this unit controls"
@@ -152,7 +164,7 @@ BEGIN {
 /positionItems\[parseInt\(assignment\.activeDeckIndex\) - 1\]/ {
     sub(/parseInt\(assignment\.activeDeckIndex\) - 1/, decks ".indexOf(parseInt(assignment.activeDeckIndex))")
 }
-/^import airAssignments / && role == "12" && FILENAME ~ /Controller/ {
+/^import airAssignments / && (role == "12" || role == "34") && FILENAME ~ /Controller/ {
     print; print "import InputAssignment 0.1"; print "import OutputAssignment 0.1"; print "import Planck 1.0"; next
 }
 /^    Layer \{$/ && own { layer = 1; next }
@@ -160,7 +172,7 @@ layer {
     if ($1 == "note:") note = $2
     if ($0 != "    }") next
     layer = 0
-    if (role != "12" || note == "") next
+    if ((role != "12" && role != "34") || note == "") next
     print "    ValueNoteAssignment { // EngineX #49: LAYER toggles DeckLeft's layer, which picks decks 1/2"
     print "        objectName: \"Layer\""
     print "        channel: globalConfig.midiChannel"

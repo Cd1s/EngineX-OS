@@ -426,7 +426,10 @@ func TestFourDeckRole(t *testing.T) {
 	if code, v := uiPost(t, srv.URL, "fourDeckRole=24"); code != 200 || v.FourDeckRole != "24" {
 		t.Fatalf("role 24: %d %q", code, v.FourDeckRole)
 	}
-	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(b), "four_deck_role=24\n") {
+	if code, v := uiPost(t, srv.URL, "fourDeckRole=34"); code != 200 || v.FourDeckRole != "34" {
+		t.Fatalf("role 34 (#160): %d %q", code, v.FourDeckRole)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); !strings.Contains(string(b), "four_deck_role=34\n") {
 		t.Fatalf("not saved: %s", b)
 	}
 	if code, _ := uiPost(t, srv.URL, "fourDeckRole=3"); code != 400 {

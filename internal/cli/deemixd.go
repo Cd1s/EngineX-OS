@@ -64,14 +64,20 @@ func superviseDeemixd(ctx context.Context, addr, bin string, args ...string) {
 				if ctx.Err() != nil {
 					return
 				}
-				// A crash loop must not spin; a long run earns a quick restart.
-				if time.Since(started) > 30*time.Second {
+				if listening(addr) {
+					// systemd's sc5000-deemixd bound 127.0.0.1:6595 while this child started (#159).
 					backoff = deemixdPause
-				} else if backoff *= 2; backoff > deemixdMaxBackoff {
-					backoff = deemixdMaxBackoff
+					wait = deemixdPause
+				} else {
+					// A crash loop must not spin; a long run earns a quick restart.
+					if time.Since(started) > 30*time.Second {
+						backoff = deemixdPause
+					} else if backoff *= 2; backoff > deemixdMaxBackoff {
+						backoff = deemixdMaxBackoff
+					}
+					wait = backoff
+					log.Printf("stream-sync: sc5000-deemixd exited (%v); checking again in %s", err, wait)
 				}
-				wait = backoff
-				log.Printf("stream-sync: sc5000-deemixd exited (%v); checking again in %s", err, wait)
 			}
 		}
 		select {

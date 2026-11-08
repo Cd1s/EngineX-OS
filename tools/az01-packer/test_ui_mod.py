@@ -84,6 +84,20 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn('"110%", "105%", "100%"', bp.UI_SCALE_ENTRY)
         self.assertIn("root.scTracklistWaveform", SRC)
 
+    def test_stems_eq_and_grid_edit_guard_and_four_deck_roles(self):
+        # #152: Stems EQ Mode syncs ChannelStrip/Mode, unlocks Shift+PFL, and latches Hot Cue double-tap
+        self.assertIn('"/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode"', bp.SERVICES_MAIN)
+        self.assertIn("Config.audio.hasStemsLevel || module.pflShiftAction == Action.ToggleChannelStripMode", SRC)
+        self.assertIn("scStemsLatchedAt", SRC)
+        # #157: holding Browse/Zoom encoder while playing must not enter BeatGrid Edit
+        self.assertIn("if (!deckConfig.songLoaded || (!deckConfig.gridEditActive && deckConfig.playing))", SRC)
+        self.assertIn("!deckConfig.gridEditActive &&\\n", SRC)
+        # #160: 4-Deck Waveform and 3+4 role available across players and all-in-one consoles
+        self.assertIn('"34"', bp.FOUR_DECK_ENTRIES)
+        self.assertIn('"3+4"', bp.FOUR_DECK_ENTRIES)
+        self.assertNotIn("visible: root.scPlayer", bp.FOUR_DECK_ENTRIES)
+        self.assertIn("scFourDeckRole = v.fourDeckWaveform ? (v.fourDeckRoleActive || \"\") : \"\"", bp.SERVICES_MAIN)
+
 
 class UiModBuildTest(unittest.TestCase):
     def test_build_530(self):

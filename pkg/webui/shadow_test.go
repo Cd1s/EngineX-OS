@@ -708,4 +708,25 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	if !got[3].Loading || got[3].Path != "" || got[4].Loading || got[4].Path != "" {
 		t.Fatalf("compose: %+v", out)
 	}
+	// #160: an overlapping peer deck (e.g. an SC5000 on Deck 1 while a PRIME 4 owns
+	// Decks 1+2) is placed onto the next free shadow deck (Deck 3).
+	s.shadow.mu.Lock()
+	delete(s.shadow.peerDecks, 3)
+	delete(s.shadow.peerDecks, 4)
+	s.shadow.peerDecks[1] = peerDeck{deckState: deckState{Deck: 1, Key: "k1", Ext: ".flac", Name: "sc5000.flac", Playing: true}, ip: "192.0.2.8", at: now}
+	s.shadow.mu.Unlock()
+	out = s.shadowCompose("12", now)
+	if len(out) != 1 || out[0].Deck != 3 || !out[0].Loading || !out[0].Playing {
+		t.Fatalf("overlapping peer deck on 12 role: %+v, want shadow deck 3", out)
+	}
+	// Two SC5000 players both playing on their own Deck 1 map to shadow Decks 3 and 4.
+	s.shadow.mu.Lock()
+	s.shadow.peerDecks = map[int]peerDeck{}
+	s.shadow.takePeer("192.0.2.8", []deckState{{Deck: 1, Seq: 1, Key: "k1", Ext: ".flac", Name: "p1.flac", Playing: true}}, now)
+	s.shadow.takePeer("192.0.2.9", []deckState{{Deck: 1, Seq: 1, Key: "k2", Ext: ".flac", Name: "p2.flac", Playing: true}}, now)
+	s.shadow.mu.Unlock()
+	out = s.shadowCompose("12", now)
+	if len(out) != 2 || out[0].Deck != 3 || out[1].Deck != 4 {
+		t.Fatalf("two peers on Deck 1 with 12 role: %+v, want shadow decks 3 and 4", out)
+	}
 }

@@ -111,9 +111,9 @@ type uiSettings struct {
 	FourDeckRoleActive string `json:"fourDeckRoleActive,omitempty"`
 }
 
-// uiFourDeckRoles are the decks a player plays in the 4-deck layout (#49), RCA A then B.
-// auto: 13 for an odd Engine player number, 24 for an even one (engine-ui-guard).
-var uiFourDeckRoles = []string{"auto", "13", "24", "12", "1", "2"}
+// uiFourDeckRoles are the decks a player plays in the 4-deck layout (#49/#160), RCA A then B.
+// auto: 13 for an odd Engine player number, 24 for an even one (engine-ui-guard), or 12 on an all-in-one console.
+var uiFourDeckRoles = []string{"auto", "13", "24", "12", "34", "1", "2"}
 
 // fourDeckRolePath is where engine-ui-guard leaves the role it applied.
 var fourDeckRolePath = "/run/sc5000-assignments/role"
