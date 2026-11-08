@@ -55,13 +55,15 @@ func TestDMXRoutesAuthPersistenceAndClock(t *testing.T) {
 	if got := s.dmx.Status().Clock; got.BPM != 132 || got.Beat != 2.5 || got.Deck != 2 {
 		t.Fatalf("master tempo/phase: %+v", got)
 	}
-	proxyBody, _ := json.Marshal([]deckState{{Deck:1, Master:true, BPM:100, Beat:1, At:time.Now().UnixMilli()}})
+	proxyBody, _ := json.Marshal([]deckState{{Deck: 1, Master: true, BPM: 100, Beat: 1, At: time.Now().UnixMilli()}})
 	proxy := httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(string(proxyBody)))
 	proxy.RemoteAddr, proxy.Host = "127.0.0.1:1234", "127.0.0.1:8080"
 	proxy.Header.Set("X-Forwarded-For", "192.0.2.1")
 	proxyResult := httptest.NewRecorder()
 	s.ServeHTTP(proxyResult, proxy)
-	if proxyResult.Code != 200 || s.dmx.Status().Clock.Deck != 2 { t.Fatal("proxied legacy deck post affected DMX clock", proxyResult.Code) }
+	if proxyResult.Code != 200 || s.dmx.Status().Clock.Deck != 2 {
+		t.Fatal("proxied legacy deck post affected DMX clock", proxyResult.Code)
+	}
 	// Native performance changes merge onto the latest patch, and do not
 	// accept configuration or mutate other controls from a stale QML snapshot.
 	w = do("POST", "/v1/sc5000/dmx", `{"action":"control","control":{"master":64}}`, "127.0.0.1:1234", "")
