@@ -46,6 +46,38 @@ class WifiSuppressionTest(unittest.TestCase):
         self.assertIn("isLoginVisible", s_content)
         self.assertIn("cancelLogoutSpinner", s_content)
 
+        # Check SortMenu.qml & SortMenuDialog.qml in 5.3.0
+        sort_qml = out / "en" / "Skins" / "Embedded" / "Views" / "BrowseView" / "Components" / "SortMenu" / "SortMenu.qml"
+        self.assertTrue(sort_qml.is_file(), f"{sort_qml} missing")
+        sort_content = sort_qml.read_text(encoding="utf-8")
+        self.assertIn("isStreamingProviderWithSort ||", sort_content)
+        self.assertIn("readonly property bool isStreamingProviderWithSort: Boolean(collectionController && collectionController.isCurrentCollectionStreaming)", sort_content)
+        self.assertIn("if (isStreamingProviderWithSort) return [\"song\", \"bpm\", \"artist\", \"key\", \"rating\", \"length\", \"playOrder\"]", sort_content)
+        self.assertIn("scPostSortSettings()", sort_content)
+        self.assertIn("onSortOrderChanged:", sort_content)
+        self.assertIn("dialog.sortRow = sortRow", sort_content)
+
+        sort_dialog_qml = out / "en" / "Skins" / "Embedded" / "Views" / "BrowseView" / "Components" / "SortMenu" / "SortMenuDialog.qml"
+        self.assertTrue(sort_dialog_qml.is_file(), f"{sort_dialog_qml} missing")
+        dialog_content = sort_dialog_qml.read_text(encoding="utf-8")
+        self.assertIn("property var sortRow: null", dialog_content)
+        self.assertIn("if (sortRow) {\n                            sortRow.sortRole = cell.role\n                        }", dialog_content)
+
+        # Check UIKit SortMenuDialog.qml & SortOrderButton.qml in 5.3.0
+        uikit_dialog = out / "en" / "Skins" / "UIKit" / "Elements" / "StatusBar" / "SortMenuDialog.qml"
+        self.assertTrue(uikit_dialog.is_file(), f"{uikit_dialog} missing")
+        uikit_dialog_content = uikit_dialog.read_text(encoding="utf-8")
+        self.assertIn("cc.isCurrentCollectionStreaming", uikit_dialog_content)
+        self.assertIn('scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", false)', uikit_dialog_content)
+        self.assertTrue(uikit_dialog_content.index("http://127.0.0.1:8080/v1/sc5000/ui") < uikit_dialog_content.index("selectRole"))
+
+        uikit_order = out / "en" / "Skins" / "UIKit" / "Elements" / "StatusBar" / "SortOrderButton.qml"
+        self.assertTrue(uikit_order.is_file(), f"{uikit_order} missing")
+        uikit_order_content = uikit_order.read_text(encoding="utf-8")
+        self.assertIn("cc.isCurrentCollectionStreaming", uikit_order_content)
+        self.assertIn('scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", false)', uikit_order_content)
+        self.assertTrue(uikit_order_content.index("http://127.0.0.1:8080/v1/sc5000/ui") < uikit_order_content.index("toggleOrder"))
+
     def test_wifi_and_streaming_suppression_504(self):
         qrc = LAB / "5.0.4" / "qrc"
         if not qrc.is_dir():
@@ -75,6 +107,22 @@ class WifiSuppressionTest(unittest.TestCase):
         self.assertIn("function onShowLostConnection() {\n\t\t\treturn", s_content)
         self.assertIn("isLoginVisible", s_content)
         self.assertIn("cancelLogoutSpinner", s_content)
+
+        # Check SortMenu.qml & SortMenuDialog.qml in 5.0.4
+        sort_qml_504 = out / "en" / "Skins" / "EmbeddedCommon" / "Views" / "BrowseView" / "Components" / "SortMenu" / "SortMenu.qml"
+        self.assertTrue(sort_qml_504.is_file(), f"{sort_qml_504} missing")
+        sort_content_504 = sort_qml_504.read_text(encoding="utf-8")
+        self.assertIn("|| isStreamingProviderWithSort", sort_content_504)
+        self.assertIn("if (isStreamingProviderWithSort) return [\"song\", \"bpm\", \"artist\", \"key\", \"rating\", \"length\", \"playOrder\"]", sort_content_504)
+        self.assertIn('scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", false)', sort_content_504)
+        self.assertIn("dialog.sortRow = sortRow", sort_content_504)
+
+        sort_dialog_504 = out / "en" / "Skins" / "EmbeddedCommon" / "Views" / "BrowseView" / "Components" / "SortMenu" / "SortMenuDialog.qml"
+        self.assertTrue(sort_dialog_504.is_file(), f"{sort_dialog_504} missing")
+        dialog_content_504 = sort_dialog_504.read_text(encoding="utf-8")
+        self.assertIn("property var sortRow: null", dialog_content_504)
+        self.assertIn("if (sortRow) {\n                            sortRow.sortRole = cell.role\n                        }", dialog_content_504)
+        self.assertTrue(dialog_content_504.index("sortRow.sortRole = cell.role") < dialog_content_504.index("collectionController.sortColumn"))
 
 
 if __name__ == "__main__":

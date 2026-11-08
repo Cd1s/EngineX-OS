@@ -301,7 +301,7 @@ func (m *TunnelManager) Configure(enabled bool, token *string) error {
 
 	select {
 	case <-ready:
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(3 * time.Second):
 	}
 	return nil
 }
