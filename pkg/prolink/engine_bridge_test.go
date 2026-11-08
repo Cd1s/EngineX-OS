@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
- "encoding/json"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -394,13 +394,17 @@ func bridgeReadAnalysis(t *testing.T, root, path string) *rekordbox.Analysis {
 	t.Helper()
 	var b []byte
 	var err error
-	deadline := time.Now().Add(10*time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		b, err = os.ReadFile(filepath.Join(root, path))
-		if err == nil || !os.IsNotExist(err) || time.Now().After(deadline) { break }
-		time.Sleep(10*time.Millisecond)
+		if err == nil || !os.IsNotExist(err) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	a, err := rekordbox.ParseAnalysis(b)
 	if err != nil {
 		t.Fatal(err)
@@ -448,7 +452,9 @@ func TestEngineBridgeNativePerformance(t *testing.T) {
 		t.Fatalf("playlist: %+v", lib.Playlists)
 	}
 	tr := lib.Tracks[0]
-	if tr.SampleRate != 48000 || tr.Duration != 4 { t.Fatalf("actual audio metadata: %+v", tr) }
+	if tr.SampleRate != 48000 || tr.Duration != 4 {
+		t.Fatalf("actual audio metadata: %+v", tr)
+	}
 	if tr.ArtworkPath == "" {
 		t.Fatal("missing artwork row/reference")
 	}
@@ -458,7 +464,9 @@ func TestEngineBridgeNativePerformance(t *testing.T) {
 	}
 	dat := bridgeReadAnalysis(t, root, tr.AnalysisPath)
 	rawDAT, err := os.ReadFile(filepath.Join(root, tr.AnalysisPath))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	at := bytes.Index(rawDAT, []byte("PQTZ"))
 	if at < 0 || binary.BigEndian.Uint32(rawDAT[at+4:]) != 24 || binary.BigEndian.Uint32(rawDAT[at+16:]) != 0x00800000 {
 		t.Fatal("PQTZ wire header differs from the documented byte layout")
@@ -521,10 +529,12 @@ func TestEngineBridgeNativePerformance(t *testing.T) {
 	}
 	bridgeExec(t, db, `DELETE FROM Track WHERE id=2`)
 	bridgeExec(t, db, `UPDATE Playlist SET title='Renamed' WHERE id=10`)
-	if err := prolink.SyncEngineToPioneerExport(root); err != nil { t.Fatal(err) }
+	if err := prolink.SyncEngineToPioneerExport(root); err != nil {
+		t.Fatal(err)
+	}
 	refreshed := bridgeReadLibrary(t, root)
-	if len(refreshed.Tracks) != 2 || len(refreshed.Playlists) != 1 || refreshed.Playlists[0].Name != "Renamed" || !reflect.DeepEqual(refreshed.Playlists[0].Tracks, []uint32{3,1}) {
-		t.Fatalf("stale tracks/playlists retained after source edit: %+v / %+v",refreshed.Tracks,refreshed.Playlists)
+	if len(refreshed.Tracks) != 2 || len(refreshed.Playlists) != 1 || refreshed.Playlists[0].Name != "Renamed" || !reflect.DeepEqual(refreshed.Playlists[0].Tracks, []uint32{3, 1}) {
+		t.Fatalf("stale tracks/playlists retained after source edit: %+v / %+v", refreshed.Tracks, refreshed.Playlists)
 	}
 
 }
@@ -538,20 +548,38 @@ func TestEngineBridgeIncrementalAndWALRefresh(t *testing.T) {
 		bridgeExec(t, db, `INSERT INTO Track(id,title,path,filename,length) VALUES(?,?,?,?,4)`, id, fmt.Sprintf("Track %d", id), fmt.Sprintf("../Music/%d.wav", id), fmt.Sprintf("%d.wav", id))
 	}
 	beat, quick, loops, overview := bridgeEnginePerformance(t)
-	bridgeExec(t, db, `UPDATE PerformanceData SET beatData=?,quickCues=?,loops=?,overviewWaveFormData=? WHERE trackId=70`,beat,quick,loops,overview)
+	bridgeExec(t, db, `UPDATE PerformanceData SET beatData=?,quickCues=?,loops=?,overviewWaveFormData=? WHERE trackId=70`, beat, quick, loops, overview)
 	start := time.Now()
-	if err := prolink.SyncEngineToPioneerExport(root); err != nil { t.Fatal(err) }
-	if elapsed := time.Since(start); elapsed > 10*time.Second { t.Fatalf("startup blocked for %s",elapsed) }
-	lib := bridgeReadLibrary(t,root)
-	if len(lib.Tracks) != 70 { t.Fatalf("only a partial library was published: %d",len(lib.Tracks)) }
-	pdbBefore,err:=os.ReadFile(filepath.Join(root,"PIONEER/rekordbox/export.pdb"));if err!=nil {t.Fatal(err)}
-	bridgeWaitExportComplete(t,root)
-	last:=bridgeReadAnalysis(t,root,lib.Tracks[69].AnalysisPath)
-	if len(last.Beats)!=7 || len(last.Cues)!=4 {t.Fatal("background job did not export its actual grid/cues")}
-	if lib.Tracks[69].SampleRate != 48000 {t.Fatal("deferred track lost its actual audio metadata")}
-	lastWave := bridgeReadAnalysis(t,root,strings.TrimSuffix(lib.Tracks[69].AnalysisPath,"DAT")+"2EX")
-	if len(lastWave.Waveforms)!=1 || len(lastWave.Waveforms[0].Data)!=600*3 {t.Fatal("background waveform did not complete")}
-	pdbAfter,err:=os.ReadFile(filepath.Join(root,"PIONEER/rekordbox/export.pdb"));if err!=nil || !bytes.Equal(pdbBefore,pdbAfter) {t.Fatalf("background analysis changed immutable browse metadata: %v",err)}
+	if err := prolink.SyncEngineToPioneerExport(root); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("startup blocked for %s", elapsed)
+	}
+	lib := bridgeReadLibrary(t, root)
+	if len(lib.Tracks) != 70 {
+		t.Fatalf("only a partial library was published: %d", len(lib.Tracks))
+	}
+	pdbBefore, err := os.ReadFile(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridgeWaitExportComplete(t, root)
+	last := bridgeReadAnalysis(t, root, lib.Tracks[69].AnalysisPath)
+	if len(last.Beats) != 7 || len(last.Cues) != 4 {
+		t.Fatal("background job did not export its actual grid/cues")
+	}
+	if lib.Tracks[69].SampleRate != 48000 {
+		t.Fatal("deferred track lost its actual audio metadata")
+	}
+	lastWave := bridgeReadAnalysis(t, root, strings.TrimSuffix(lib.Tracks[69].AnalysisPath, "DAT")+"2EX")
+	if len(lastWave.Waveforms) != 1 || len(lastWave.Waveforms[0].Data) != 600*3 {
+		t.Fatal("background waveform did not complete")
+	}
+	pdbAfter, err := os.ReadFile(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
+	if err != nil || !bytes.Equal(pdbBefore, pdbAfter) {
+		t.Fatalf("background analysis changed immutable browse metadata: %v", err)
+	}
 	source, err := os.Stat(mdb)
 	if err != nil {
 		t.Fatal(err)
@@ -744,16 +772,21 @@ func TestEngineBridgeDoesNotInventUnknownDuration(t *testing.T) {
 }
 
 // Completion is independent of the caller and never requires another OFF/ON.
-func bridgeWaitExportComplete(t *testing.T,root string) {
- t.Helper();deadline:=time.Now().Add(15*time.Second)
- for {
-  b,err:=os.ReadFile(filepath.Join(root,"PIONEER/rekordbox/.enginex-progress"))
-  var p struct{Stamp string}
-  if err==nil && json.Unmarshal(b,&p)==nil {
-   stamp,err:=os.ReadFile(filepath.Join(root,"PIONEER/rekordbox/.enginex-stamp"))
-   if err==nil && string(stamp)==p.Stamp {return}
-  }
-  if time.Now().After(deadline) {t.Fatal("background export did not finish automatically")}
-  time.Sleep(10*time.Millisecond)
- }
+func bridgeWaitExportComplete(t *testing.T, root string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		b, err := os.ReadFile(filepath.Join(root, "PIONEER/rekordbox/.enginex-progress"))
+		var p struct{ Stamp string }
+		if err == nil && json.Unmarshal(b, &p) == nil {
+			stamp, err := os.ReadFile(filepath.Join(root, "PIONEER/rekordbox/.enginex-stamp"))
+			if err == nil && string(stamp) == p.Stamp {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background export did not finish automatically")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
