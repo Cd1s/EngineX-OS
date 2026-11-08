@@ -284,7 +284,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	}
 	// Existing shadow traffic keeps its behavior. Only direct native samples
 	// may additionally drive DMX; a local reverse proxy is not a deck clock.
-	if isDirectDMXRequest(r) { s.setDMXDecks(decks) }
+	if isDirectDMXRequest(r) {
+		s.setDMXDecks(decks)
+	}
 	own := decks[:0]
 	nowMS, seq := time.Now().UnixMilli(), time.Now().UnixNano()
 	var postAt int64
