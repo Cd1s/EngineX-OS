@@ -63,6 +63,7 @@ L 主 PID 6642，另两个同名 EMain 是 6904、6915；R 主 PID 1258，另两
 - 同文件 `engine_threads`：用 TID==PID 识别真正 GUI 主线程并固定到 1；SceneGraph→2；所有策略为 OTHER/BATCH/IDLE 的辅助线程→0,3，不再只处理原来在 CPU1 的线程，也不因 comm 同为 EMain 而漏掉。FIFO/RR 等实时线程跳过；AudioOut/AudioRenderer*/AudioWatcher 即使仍处于初始化的普通策略也跳过。OfflineAnalyzer 进程及其子线程也覆盖到 0,3。启动及延迟扫描后，每 30 s 继续扫描晚生线程；worker 自身也限制到 0,3，并在 Engine 退出后结束，在 engine.service 的控制组内随服务停止。
 - 同文件 workqueue 设置：`cpumask=9`，避开 GUI/SceneGraph 的 1/2。
 - `rootfs-overlay/etc/default/sc5000-perf`：补齐 `panfrost` 名称，写明四核分配和 IRQ 优先级；`SC5000_THREAD_INTERVAL=30` 控制持续重扫间隔，设为 0 可只保留启动扫描。
+- `rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf`：加载同一份 `/etc/default/sc5000-perf`，确保 Engine 的 ExecStartPost 调优也继承 IRQ 规则和重扫间隔，而非仅独立的 perf-tune oneshot 服务读取配置。
 - `tools/ui-mod/engine_ui_hook.c:guard_affinity`：后台类也避开 1/2，防止后续命名或设置亲和度重新放回 GUI/GL 核。
 - 同文件 `lower_offline_analyzer`：从在线 CPU 集合选择非 GUI/GL 核，四核机为 0,3；即使从 EMain 继承单核 CPU1 也可以移开，保留 SCHED_IDLE / nice19 / idle I/O。
 - `tests/test_rootfs_overlay.sh`：同步真实 IRQ 名称、mask9、主/同名辅助 EMain、其它核的普通工作线程、OfflineAnalyzer 主/子线程，以及 RT/初始化中音频线程不动和非音频 IRQ 40 的断言；模拟启动阶段之后才出现的 event_engine 线程，验证它被移开，Engine 退出后 worker 确实结束。
@@ -112,5 +113,6 @@ L 主 PID 6642，另两个同名 EMain 是 6904、6915；R 主 PID 1258，另两
 - `20261108T220823Z-build-host-before-perf-gc-affinity-20261109-83f83cb5d516-sc5000-perf-20261109-before.tar.gz`
 - `20261108T221613Z-build-host-before-perf-ui-assertions-20261109-4e895fc658da-test_ui_mod.py`
 - `20261108T223612Z-build-host-before-perf-late-threads-20261109-54ec26a019b4-sc5000-perf-qa-followup-before.tar.gz`
+- `20261108T224744Z-build-host-before-perf-env-wiring-20261109-2d9dedae7c0f-60-ui-hook.conf`
 
 本任务只读采样、验证摘要和审查结果交付到 `fleet-share` 的 `runs/20261109-sc5000-perf-fix/`。没有推送 main、创建 tag/Release/评论、刷机或向碟机部署。
