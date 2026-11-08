@@ -94,6 +94,7 @@ type playlistSearcher interface {
 	SearchPlaylists(context.Context, string) ([]providers.Playlist, error)
 }
 type tidalGateway struct {
+	browse  *browseCache
 	s       *Server
 	catalog *providers.Deezer
 	mux     *http.ServeMux
@@ -249,7 +250,7 @@ func evict[K comparable](seen map[K]int64, limit int, drop func(K)) {
 }
 
 func newTidalGateway(s *Server) *tidalGateway {
-	g := &tidalGateway{artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
+	g := &tidalGateway{browse: newBrowseCache(s.cfg.StateDir), artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
 	g.loadTracks()
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
@@ -783,7 +784,7 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	var failedMu sync.Mutex
 	failed := map[*Session]error{}
 	lists := each(r.Context(), sessions, func(ctx context.Context, v *Session) ([]providers.Playlist, error) {
-		l, err := v.p.Playlists(ctx)
+		l, err := g.browseLists(ctx, v)
 		if err != nil {
 			failedMu.Lock()
 			failed[v] = err
@@ -819,7 +820,11 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	// Deezer's public charts need no login; the others explain how to log in.
 	if scope == "deezer" {
 		defaults := each(r.Context(), []*providers.Deezer{g.catalog}, func(ctx context.Context, d *providers.Deezer) ([]providers.Playlist, error) {
-			return d.ChartPlaylists(ctx)
+			data, err := g.browse.get(ctx, browseKey("deezer", "public", "charts", ""), func(ctx context.Context) (browseData, error) {
+				lists, err := d.ChartPlaylists(ctx)
+				return browseData{Lists: lists}, err
+			})
+			return data.Lists, err
 		})
 		for _, p := range defaults[0] {
 			ref := playlistRef{"", "deezer", p, false}
@@ -1190,9 +1195,13 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		}
 		p, guest, session = v.p, v.Guest, v.ID
 	}
-	tracks, err := p.Tracks(r.Context(), ref.list.ID)
+	tracks, err := g.browseTracks(r.Context(), ref.provider, session, p, ref.list.ID)
 	if err != nil {
-		fail(w, 502, err)
+		status := 502
+		if errors.Is(err, errBrowseTooLarge) {
+			status = 400
+		}
+		fail(w, status, err)
 		return
 	}
 	if len(tracks) > maxPlaylistTracks {
@@ -1226,13 +1235,13 @@ func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 		switch scope {
 		case "netease":
 			var lists []providers.Playlist
-			if lists, err = v.p.Playlists(r.Context()); err == nil && len(lists) > 0 {
-				tracks, err = v.p.Tracks(r.Context(), lists[0].ID)
+			if lists, err = g.browseLists(r.Context(), v); err == nil && len(lists) > 0 {
+				tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, lists[0].ID)
 			}
 		case "spotify":
-			tracks, err = v.p.Tracks(r.Context(), providers.SpotifyLikedID)
+			tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, providers.SpotifyLikedID)
 		case "soundcloud":
-			tracks, err = v.p.Tracks(r.Context(), "likes")
+			tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, "likes")
 		}
 		if err == nil && len(tracks) <= maxPlaylistTracks {
 			g.s.cfg.BPM.Enrich(r.Context(), tracks)
@@ -1293,7 +1302,7 @@ func (g *tidalGateway) albumTracks(w http.ResponseWriter, r *http.Request) {
 		respond(w, page(r, 100, []any{}))
 		return
 	}
-	tracks, err := n.Tracks(r.Context(), "album:"+r.PathValue("id"))
+	tracks, err := g.browseTracks(r.Context(), "netease", session.ID, n, "album:"+r.PathValue("id"))
 	if err != nil {
 		fail(w, 502, err)
 		return
@@ -1336,18 +1345,29 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 			sources = append(sources, source{"", "soundcloud", false, p})
 		}
 	}
-	tracks := each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Track, error) {
-		if p, ok := v.p.(trackSearcher); ok {
-			return p.Search(ctx, query)
-		}
-		return nil, nil
-	})
-	lists := each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Playlist, error) {
-		if p, ok := v.p.(playlistSearcher); ok {
-			return p.SearchPlaylists(ctx, query)
-		}
-		return nil, nil
-	})
+	var tracks [][]providers.Track
+	var lists [][]providers.Playlist
+	var searches sync.WaitGroup
+	searches.Add(2)
+	go func() {
+		defer searches.Done()
+		tracks = each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Track, error) {
+			if p, ok := v.p.(trackSearcher); ok {
+				return p.Search(ctx, query)
+			}
+			return nil, nil
+		})
+	}()
+	go func() {
+		defer searches.Done()
+		lists = each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Playlist, error) {
+			if p, ok := v.p.(playlistSearcher); ok {
+				return p.SearchPlaylists(ctx, query)
+			}
+			return nil, nil
+		})
+	}()
+	searches.Wait()
 	trackItems, listItems := []any{}, []any{}
 	for i, v := range sources {
 		g.s.cfg.BPM.Enrich(r.Context(), tracks[i])

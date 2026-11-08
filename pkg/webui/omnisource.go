@@ -379,7 +379,7 @@ func (g *tidalGateway) omniPlaylists(ctx context.Context, scope string, add func
 			others = append(others, v)
 		}
 	}
-	lists := each(ctx, others, func(ctx context.Context, v *Session) ([]providers.Playlist, error) { return v.p.Playlists(ctx) })
+	lists := each(ctx, others, func(ctx context.Context, v *Session) ([]providers.Playlist, error) { return g.browseLists(ctx, v) })
 	for i, v := range others {
 		for _, p := range lists[i] {
 			p.Title = "[" + providerLabels[v.Provider] + "] " + p.Title
