@@ -1494,8 +1494,12 @@ int _Z21qRegisterResourceDataiPKhS0_S0_(int version, const uchar *tree, const uc
 }
 
 static int thread_class(const char *name) {
+    // J:* names describe the current job, not a dedicated background thread.
+    // 5.3.0's four JobController workers all become J:I:Takingfreez at startup;
+    // demoting one here persists when it switches to search/load/history work.
+    if (!strncmp(name, "J:", 2)) return 0;
     static const char *idle[] = {"Analysis Queue", "OfflineAnalyzer", "Dropbox", "Beatport",
-        "J:I:Takingfreez", "Taking freeze", "Freeze Checker", "Collecting anal", "sentry", "CrashHandler"};
+        "Freeze Checker", "sentry", "CrashHandler"};
     for (size_t i = 0; i < sizeof idle / sizeof *idle; i++)
         if (!strncmp(name, idle[i], strlen(idle[i]))) return 2;
     return !strncmp(name, "QQuickPixmapRea", 15) || !strncmp(name, "FileInfoThread", 14);
@@ -1512,8 +1516,9 @@ static int guard_affinity(pthread_t thread, int kind) {
         int rc = get(thread, sizeof allowed, &allowed);
         if (rc) return rc;
     }
-    CPU_CLR(0, &allowed);
-    if (!CPU_COUNT(&allowed)) return EINVAL; // A single-core target cannot avoid CPU0.
+    CPU_CLR(1, &allowed); // EMain
+    CPU_CLR(2, &allowed); // SceneGraph
+    if (!CPU_COUNT(&allowed)) return EINVAL;
     if (kind == 2) {
         int last = CPU_SETSIZE - 1;
         while (!CPU_ISSET(last, &allowed)) last--;
@@ -1836,7 +1841,7 @@ static void oa_install(void) {
 
 // #55: Engine analyses in OfflineAnalyzer child processes, which inherit this
 // preload. Analysing a whole drive in the background must never compete with
-// playback: idle CPU class, nice 19 and idle I/O, off CPU 0; threads inherit all.
+// playback: idle CPU class, nice 19 and idle I/O, off GUI/GL (1/2); threads inherit all.
 __attribute__((constructor)) static void lower_offline_analyzer(void) {
     char exe[64];
     ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
@@ -1847,9 +1852,12 @@ __attribute__((constructor)) static void lower_offline_analyzer(void) {
     struct sched_param param = {.sched_priority = 0};
     sched_setscheduler(0, SCHED_IDLE, &param);
     lower_io_nice(0, 19, 1);
-    cpu_set_t cpus;
-    if (!sched_getaffinity(0, sizeof cpus, &cpus) && CPU_ISSET(0, &cpus) && CPU_COUNT(&cpus) > 1) {
-        CPU_CLR(0, &cpus);
+    // It may inherit only CPU1 from EMain: use the online set, not that mask.
+    initialize_engine_cpus();
+    cpu_set_t cpus = engine_cpus;
+    CPU_CLR(1, &cpus);
+    CPU_CLR(2, &cpus);
+    if (engine_cpus_ready && CPU_COUNT(&cpus)) {
         sched_setaffinity(0, sizeof cpus, &cpus);
     }
     oa_install();
