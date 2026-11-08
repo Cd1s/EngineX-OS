@@ -102,7 +102,8 @@
 | 14 | 4-Deck Role / 四轨角色 / 四軌角色 | 本机负责哪两台：自动、1+3、2+4、1+2、1、2 | `auto` | `fourDeckRole=auto\|13\|24\|12\|1\|2` | `four_deck_role` | 仅当 #13 开启时显示；重启 Engine。自动按 Engine 的 Player # 奇偶取 13 / 24 |
 | 15 | Live Stream / 直播推流 | 碟机数字内录主输出：电脑免配置直连 `http://<碟机IP>:8080/live.mp3`、`/live.wav`（OBS 媒体源 / VLC / 浏览器）；或向 Shoutcast / Icecast 推流（CPU3 空闲核后台推送并同步歌名） | 关 | `broadcast=0\|1` | 不在 conf，落在 `<DATA>/state/broadcast-config.json` | 直连地址不需任何配置；推流的服务器地址、挂载点和密码在 Web 控制台 `http://<碟机IP>:8080` 的 Live Stream 卡片填。直连地址随下一次发版上线 |
 | 16 | Echo Out / Upfader Echo Out / 拉杆切歌自动回音 / 推桿切歌自動回音 | C 语言 DSP Hook 在 44.1 kHz 主输出挂环形延迟缓冲：一体机快速拉下推子、单机播放器暂停切歌时释放 2.2 秒衰减回声尾音，不被推子归零切断，也不误开原厂 FX 灯 | 关 | `upfaderEcho=0\|1` | `upfader_echo` | **同一开关在 3 处出现**，见 4.2 |
-| 17 | UI Scale / 界面缩放 / 介面縮放 | 整体缩放 Engine 界面（100%、95%、90%、85%、80%、75%），小屏一体机一屏能看到更多内容 | `100` | `uiScale=100\|95\|90\|85\|80\|75`（屏幕走 `scRestartCall`） | `ui_scale` | 经 `<DATA>/ui-scale.env` 里的 `QT_SCALE_FACTOR` 交给 Engine（drop-in `engine.service.d/70-ui-scale.conf`），重启 Engine 生效；选回 100% 时删掉 env 文件，恢复原厂尺寸 |
+| 17 | UI Scale / 界面缩放 / 介面縮放 | 整体缩放 Engine 界面（110%、105%、100%、95%、90%、85%、80%、75%），既可放大照顾视力，亦可缩小以容纳更多内容 | `100` | `uiScale=110\|105\|100\|95\|90\|85\|80\|75`（屏幕走 `scCall` 即时生效） | `ui_scale` | 界面 live 缩放，经 `<DATA>/ui-scale.env` 记录 `SC5000_UI_SCALE`（drop-in `engine.service.d/70-ui-scale.conf`）；选回 100% 时删掉 env 文件恢复原厂尺寸；#117、#153 |
+| 18 | Tracklist Waveform / 曲目列表波形 / 曲目列表波形 | 在展开曲库时显示曲目缩略波形；关闭后曲目标题与艺人名横向完整延展占满留白空间 | 开 | `tracklistWaveform=0\|1` | `tracklist_waveform` | #153 |
 
 ### 2.3 设置 → 混音台
 
