@@ -34,6 +34,20 @@ DEV_HARNESS = """
 """
 
 
+# Standalone DMX is a separate loopback QML asset: the qrc hook can replace
+# existing resources only. Disabled means no Loader item and no new timers.
+DMX_MOUNT = """
+    property bool scDmxEnabled: false
+    Loader {
+        anchors.fill: parent
+        z: 1000
+        active: root.scDmxEnabled
+        source: active ? "http://127.0.0.1:8080/v1/sc5000/dmx.qml" : ""
+        onLoaded: { item.read = root.scTr; item.translateText = root.scT }
+    }
+"""
+
+
 def anchor_pattern(old: str) -> str:
     """old as a regex that ignores layout only: 5.3.0 ran qmlformat over every file
     (tabs -> spaces, `if(` -> `if (`, wrapped lines). Tokens and their order must
@@ -1352,6 +1366,7 @@ SERVICES_MAIN = """
 		scAutoGain = !!v.autoGain
 		scAutoAnalyze = !!v.autoAnalyze
 		scOmniSource = !!v.omniSource
+		scDmxEnabled = !!v.dmxEnabled
 		scProlinkShare = !!v.prolinkShare
 		scProlinkExport = !!v.prolinkExport
 		scPlayer = !!v.player
@@ -2893,7 +2908,7 @@ def edits(dev: bool):
             ('"/Engine/Master/IncrementWaveformZoom"', '"/GUI/Scripted/ZoomIn"')]
            for n in ("PerformanceViewState", "PerformanceViewLibraryViewState", "PerformanceViewRemoteHostScreenState", "PerformanceViewStreamingState", "PerformanceViewNoLibraryState")} if v53() else {}),
         ROOT + "EmbeddedMain.qml": [
-            (f"	Connections {{\n		target: {window()}\n", services + main + ZOOM_STEP + "\n	Rectangle { anchors.fill: parent; z: -1000; color: \"#000000\" } // UI Scale: no window colour round the edges\n" + f"\n	Connections {{\n		target: {window()}\n"),
+            (f"	Connections {{\n		target: {window()}\n", services + DMX_MOUNT + main + ZOOM_STEP + "\n	Rectangle { anchors.fill: parent; z: -1000; color: \"#000000\" } // UI Scale: no window colour round the edges\n" + f"\n	Connections {{\n		target: {window()}\n"),
             # The overlay (Control Center, popups) fills uiContainer's unscaled box: scale it
             # the same way about the same centre, or its top bar sits above the screen.
             ("		Overlay.overlay.anchors.fill = uiContainer\n",
