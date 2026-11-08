@@ -45,28 +45,41 @@ type AppleMusicLink struct{ Storefront, Kind, ID string }
 
 // URL is the short form saved for the owner.
 func (l AppleMusicLink) URL() string {
-	return "https://music.apple.com/" + l.Storefront + "/" + l.Kind + "/" + l.ID
+	sf := l.Storefront
+	if sf == "" {
+		sf = "us"
+	}
+	return "https://music.apple.com/" + sf + "/" + l.Kind + "/" + l.ID
 }
 
 var (
-	amLinkRE = regexp.MustCompile(`^https?://(?:geo\.|beta\.)?music\.apple\.com/([a-z]{2})/(playlist|album)/(?:[^/?#]+/)?((?:pl\.[A-Za-z0-9._-]+)|[0-9]+)`)
+	amLinkRE = regexp.MustCompile(`^https?://(?:geo\.|beta\.)?music\.apple\.com/(?:([a-z]{2})/)?(playlist|album)/(?:[^/?#]+/)?((?:pl\.[A-Za-z0-9._-]+)|[0-9]+)`)
 	amStore  = regexp.MustCompile(`^[a-z]{2}$`)
 	amScript = regexp.MustCompile(`/assets/index[^"'\s]*\.js`)
-	amJWT    = regexp.MustCompile(`eyJh[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}`)
+	amJWT    = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}`)
 )
 
 // ParseAppleMusicLinks finds every playlist or album link in pasted text, as
 // Share → Copy Link gives them. Unknown text is ignored.
 func ParseAppleMusicLinks(text string) []AppleMusicLink {
 	var out []AppleMusicLink
-	seen := map[string]bool{}
+	index := map[string]int{}
 	for _, f := range strings.Fields(text) {
+		f = strings.Trim(f, `<>"'()[],;`)
 		m := amLinkRE.FindStringSubmatch(f)
-		if m == nil || seen[m[2]+m[3]] {
+		if m == nil {
 			continue
 		}
-		seen[m[2]+m[3]] = true
-		out = append(out, AppleMusicLink{m[1], m[2], m[3]})
+		sf, kind, id := m[1], m[2], m[3]
+		key := kind + ":" + id
+		if idx, seen := index[key]; seen {
+			if out[idx].Storefront == "" && sf != "" {
+				out[idx].Storefront = sf
+			}
+			continue
+		}
+		index[key] = len(out)
+		out = append(out, AppleMusicLink{Storefront: sf, Kind: kind, ID: id})
 	}
 	return out
 }
@@ -191,7 +204,7 @@ func (a *AppleMusic) developerToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("applemusic: web player script: %w", err)
 	}
-	token := string(amJWT.Find(js))
+	token := findDeveloperToken(js)
 	if token == "" {
 		return "", errors.New("applemusic: no developer token in the web player")
 	}
@@ -205,17 +218,74 @@ func (a *AppleMusic) developerToken(ctx context.Context) (string, error) {
 	return token, nil
 }
 
-func jwtExpiry(token string) time.Time {
+type amJWTHeader struct {
+	Typ string `json:"typ"`
+	Alg string `json:"alg"`
+	Kid string `json:"kid"`
+}
+
+type amJWTClaims struct {
+	Iss string `json:"iss"`
+	Exp int64  `json:"exp"`
+}
+
+func parseJWT(token string) (header amJWTHeader, claims amJWTClaims, ok bool) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
+		return header, claims, false
+	}
+	hb, err1 := base64.RawURLEncoding.DecodeString(parts[0])
+	cb, err2 := base64.RawURLEncoding.DecodeString(parts[1])
+	if err1 != nil || err2 != nil {
+		return header, claims, false
+	}
+	if json.Unmarshal(hb, &header) != nil || json.Unmarshal(cb, &claims) != nil {
+		return header, claims, false
+	}
+	return header, claims, true
+}
+
+// findDeveloperToken extracts the web player's MusicKit developer token from
+// Apple Music's JavaScript bundle. It prefers a non-expired token issued for
+// AMPWebPlay (or with kid: WebPlayKid), which has permission to access the
+// catalog and library API from web origins, falling back to any non-expired JWT.
+func findDeveloperToken(js []byte) string {
+	matches := amJWT.FindAll(js, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	now := time.Now()
+	var webPlayToken string
+	var firstValidToken string
+
+	for _, m := range matches {
+		tok := string(m)
+		header, claims, ok := parseJWT(tok)
+		if !ok {
+			continue
+		}
+		if claims.Exp <= now.Unix() {
+			continue
+		}
+		if (claims.Iss == "AMPWebPlay" || header.Kid == "WebPlayKid") && webPlayToken == "" {
+			webPlayToken = tok
+		}
+		if firstValidToken == "" {
+			firstValidToken = tok
+		}
+	}
+	if webPlayToken != "" {
+		return webPlayToken
+	}
+	return firstValidToken
+}
+
+func jwtExpiry(token string) time.Time {
+	_, claims, ok := parseJWT(token)
+	if !ok || claims.Exp == 0 {
 		return time.Time{}
 	}
-	b, err := base64.RawURLEncoding.DecodeString(parts[1])
-	var c struct{ Exp int64 }
-	if err != nil || json.Unmarshal(b, &c) != nil || c.Exp == 0 {
-		return time.Time{}
-	}
-	return time.Unix(c.Exp, 0)
+	return time.Unix(claims.Exp, 0)
 }
 
 func (a *AppleMusic) fetch(ctx context.Context, u string, max int64) ([]byte, error) {
@@ -340,6 +410,9 @@ func (a *AppleMusic) linkPlaylist(ctx context.Context, raw string) (Playlist, er
 		return Playlist{}, errors.New("not an Apple Music playlist or album link")
 	}
 	l := links[0]
+	if l.Storefront == "" {
+		l.Storefront = a.state().Storefront
+	}
 	var p amPage
 	if err := a.get(ctx, "/v1/catalog/"+l.Storefront+"/"+l.Kind+"s/"+url.PathEscape(l.ID), false, &p); err != nil {
 		return Playlist{}, err
