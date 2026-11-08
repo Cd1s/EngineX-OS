@@ -51,19 +51,55 @@ static void test_sha256(void) {
     FILE *p = popen("i=0; while [ $i -lt 1000 ]; do printf abcdefghij; i=$((i+1)); done | sha256sum", "r");
     assert(p && fread(want, 1, 64, p) == 64); pclose(p);
     assert(!strcmp(hex, want));
+    // 56-byte boundary: forces 0x80 at index 56 and wraps length into a second block
+    static const char msg56[] = "0123456789abcdef0123456789abcdef0123456789abcdef01234567";
+    sha256_init(&c);
+    sha256_update(&c, (const uint8_t *)msg56, 56);
+    sha256_final(&c, hex);
+    p = popen("printf '%s' '0123456789abcdef0123456789abcdef0123456789abcdef01234567' | sha256sum", "r");
+    assert(p && fread(want, 1, 64, p) == 64); pclose(p);
+    assert(!strcmp(hex, want));
     puts("sha256: PASS");
 }
 
 static void test_open_verify(void) {
-    char dir[] = "/tmp/gen2-img-XXXXXX", img[PATH_MAX];
+    char dir[] = "/tmp/gen2-img-XXXXXX", img[PATH_MAX], cmd[PATH_MAX * 2 + 64];
     assert(mkdtemp(dir));
     snprintf(img, sizeof img, "%s/ok.img", dir);
     make_img(dir, "ok.img", "payload-bytes-0123456789", NULL, 0);
     void *h = NULL;
+    assert(az01_open_image(img, NULL) == ENGINEX_ERR_BAD_IMAGE);
     assert(az01_open_image(img, &h) == 0 && h == enginex_dummy_img);
     assert(az01_image_set_onboard_key_lookup(h) == 0);
     assert(az01_verify_image(h, 0) == 0);
     assert(az01_close_image(h) == 0);
+    assert(az01_verify_image(h, 0) == ENGINEX_ERR_BAD_IMAGE); // closed handle cannot verify again
+
+    // gen2-locked must reject both verify and apply even on a valid image
+    setenv("ENGINEX_TEST_DATA_ROOT", dir, 1);
+    put(dir, "enginex/gen2-locked", "1\n");
+    assert(az01_open_image(img, &h) == 0 && az01_verify_image(h, 0) == ENGINEX_ERR_BAD_IMAGE);
+    assert(az01_apply_image(img, 0) == ENGINEX_ERR_BAD_IMAGE);
+    snprintf(cmd, sizeof cmd, "%s/enginex/gen2-locked", dir);
+    assert(unlink(cmd) == 0);
+
+    // Valid bundle .tar.gz inside ENGINEX_DATA_BUNDLE_IMG_V1: az01_apply_image unpacks, runs install.sh, and unlinks when flags=1
+    put(dir, "pkg/top/install.sh", "#!/bin/sh\nprintf '5.3.0.3\\n' > \"$SC5000_CUSTOM/applied-version.txt\"\n");
+    snprintf(cmd, sizeof cmd, "chmod +x %s/pkg/top/install.sh && tar -C %s/pkg -czf %s/bundle.tar.gz top", dir, dir, dir);
+    assert(system(cmd) == 0);
+    char hex[65] = {0};
+    snprintf(cmd, sizeof cmd, "sha256sum < %s/bundle.tar.gz", dir);
+    FILE *p = popen(cmd, "r"); assert(p && fread(hex, 1, 64, p) == 64); pclose(p);
+    uint8_t head[ENGINEX_IMG_HEADER] = {0};
+    snprintf((char *)head, sizeof head, ENGINEX_IMG_MAGIC "%s\nSCLIVE4\n5.3.0.3\n", hex);
+    snprintf(img, sizeof img, "%s/apply.img", dir);
+    FILE *f = fopen(img, "wb"); assert(f && fwrite(head, 1, sizeof head, f) == sizeof head && !fclose(f));
+    snprintf(cmd, sizeof cmd, "cat %s/bundle.tar.gz >> %s/apply.img", dir, dir);
+    assert(system(cmd) == 0);
+    assert(az01_apply_image(img, 1) == 0);
+    assert(!exists(dir, "apply.img") && exists(dir, "enginex/applied-version.txt"));
+    unsetenv("ENGINEX_TEST_DATA_ROOT");
+
     make_img(dir, "flip.img", "payload-bytes-0123456789", "0000000000000000000000000000000000000000000000000000000000000000", 0);
     snprintf(img, sizeof img, "%s/flip.img", dir);
     assert(az01_open_image(img, &h) == 0 && h == enginex_dummy_img && az01_verify_image(h, 0) == ENGINEX_ERR_BAD_IMAGE);
@@ -77,7 +113,6 @@ static void test_open_verify(void) {
     put(dir, "other.img", "AZ01 not ours");
     snprintf(img, sizeof img, "%s/other.img", dir);
     assert(enginex_img_check(img) == IMG_NONE && enginex_img_check("/nonexistent") == IMG_NONE);
-    char cmd[PATH_MAX + 16];
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
     assert(system(cmd) == 0);
     puts("open/verify/close/apply checks: PASS");
@@ -88,11 +123,12 @@ static void test_erase(void) {
     assert(mkdtemp(root));
     static const char *const wiped[] = {
         "AppDataUser/x.db", "Engine Library/m.db", "StreamingAccounts.json", "Wi-Fi Drop/a.wav", "az01-update.img",
-        "enginex/state/tokens.json", "enginex/mods/m1/mod.json", "enginex/ui/settings.conf", "enginex/ui/views.json",
+        "enginex/state/tokens.json", "enginex/mods/m1/mod.json", "enginex/Stream/track.flac", "enginex/shadow-v3/a",
+        "enginex/ui-scale.env", "enginex/ui/settings.conf", "enginex/ui/views.json",
         "enginex/ui/mods-overlay/a.qml", "enginex/ui/mods-quarantined/b", "enginex/ui/safe-mode", "enginex/ui/boot-count",
-        "enginex/ui/boot-token", "enginex/ui/last-crash"};
+        "enginex/ui/boot-token", "enginex/ui/last-crash", "enginex/ui/running-sentinel"};
     static const char *const kept[] = {
-        "enginex/bundle/install.sh", "enginex/bundle/bin/sc5000-suite", "enginex/ui/packs/a/Main.qml", "enginex/ui/icons/x.svg",
+        "enginex/bundle/boot-activate.sh", "enginex/bundle/bin/sc5000-suite", "enginex/ui/packs/a/Main.qml", "enginex/ui/icons/x.svg",
         "enginex/version.txt", "enginex/gen2-unlocked", "enginex/authorized_keys", "enginex/ssh_host_ed25519_key",
         "system/var-lib/alsa/conf.d/99-sc5000-custom.conf"};
     for (size_t i = 0; i < sizeof wiped / sizeof *wiped; i++) put(root, wiped[i], "x");

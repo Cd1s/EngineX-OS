@@ -2062,6 +2062,7 @@ int sc5000_alsa_boot_hook(void *root, void *config, void **dst, void *private_da
             dup2(devnull, 2);
             if (devnull > 2) close(devnull);
         }
+        unsetenv("LD_PRELOAD");
         char *const argv[] = {"/bin/sh", "/data/sc5000-custom/bundle/boot-activate.sh", NULL};
         execv("/bin/sh", argv);
         _exit(1);
@@ -2159,13 +2160,31 @@ static void sha256_final(sha256_ctx *c, char hex[65]) {
     for (int i = 0; i < 8; i++) snprintf(hex + 8 * i, 9, "%08x", c->h[i]);
 }
 
+static ssize_t read_retry(int fd, void *buf, size_t count) {
+    ssize_t n;
+    do {
+        n = read(fd, buf, count);
+    } while (n < 0 && errno == EINTR);
+    return n;
+}
+
+static size_t read_full(int fd, uint8_t *buf, size_t count) {
+    size_t total = 0;
+    while (total < count) {
+        ssize_t n = read_retry(fd, buf + total, count - total);
+        if (n <= 0) break;
+        total += (size_t)n;
+    }
+    return total;
+}
+
 // IMG_NONE: not an EngineX data bundle at all. IMG_BAD: it claims to be one but has no V1 header,
 // is truncated or its payload SHA-256 differs from the header's. IMG_OK: header and payload agree.
 static int enginex_img_check(const char *path) {
     uint8_t head[ENGINEX_IMG_HEADER];
     int fd = path ? open(path, O_RDONLY | O_CLOEXEC) : -1;
     if (fd < 0) return IMG_NONE;
-    ssize_t n = read(fd, head, sizeof head);
+    size_t n = read_full(fd, head, sizeof head);
     if (n < 19 || memcmp(head, "ENGINEX_DATA_BUNDLE", 19) != 0) { close(fd); return IMG_NONE; }
     int ok = n == ENGINEX_IMG_HEADER && memcmp(head, ENGINEX_IMG_MAGIC, ENGINEX_IMG_MAGIC_LEN) == 0 &&
              head[ENGINEX_IMG_MAGIC_LEN + 64] == '\n';
@@ -2175,8 +2194,12 @@ static int enginex_img_check(const char *path) {
     size_t payload = 0;
     if (ok) {
         sha256_init(&c);
-        while ((n = read(fd, buf, sizeof buf)) > 0) { sha256_update(&c, buf, (size_t)n); payload += (size_t)n; }
-        if (n < 0 || payload == 0) ok = 0;
+        ssize_t r;
+        while ((r = read_retry(fd, buf, sizeof buf)) > 0) {
+            sha256_update(&c, buf, (size_t)r);
+            payload += (size_t)r;
+        }
+        if (r < 0 || payload == 0) ok = 0;
     }
     close(fd);
     if (!ok) return IMG_BAD;
@@ -2184,7 +2207,15 @@ static int enginex_img_check(const char *path) {
     return strncasecmp(hex, (const char *)head + ENGINEX_IMG_MAGIC_LEN, 64) == 0 ? IMG_OK : IMG_BAD;
 }
 
-static int enginex_gen2_locked(void) { return access(ENGINEX_DATA_DIR "/gen2-locked", F_OK) == 0; }
+static int enginex_gen2_locked(void) {
+    const char *root = getenv("ENGINEX_TEST_DATA_ROOT");
+    if (root && *root) {
+        char path[PATH_MAX];
+        snprintf(path, sizeof path, "%s/enginex/gen2-locked", root);
+        return access(path, F_OK) == 0;
+    }
+    return access(ENGINEX_DATA_DIR "/gen2-locked", F_OK) == 0;
+}
 
 static uint64_t enginex_dummy_img[16];
 static int enginex_img_state = IMG_NONE;  // result of the last az01_open_image on an EngineX image
@@ -2194,8 +2225,9 @@ static int enginex_img_state = IMG_NONE;  // result of the last az01_open_image 
 __attribute__((visibility("default")))
 int az01_open_image(const char *path, void **img_out) {
     int state = enginex_img_check(path);
-    if (state != IMG_NONE && img_out) {
-        enginex_img_state = state;
+    if (state != IMG_NONE) {
+        if (!img_out) return ENGINEX_ERR_BAD_IMAGE;
+        __atomic_store_n(&enginex_img_state, state, __ATOMIC_RELEASE);
         *img_out = enginex_dummy_img;
         return 0;
     }
@@ -2214,8 +2246,10 @@ int az01_image_set_onboard_key_lookup(void *img) {
 
 __attribute__((visibility("default")))
 int az01_verify_image(void *img, int flags) {
-    if (img == (void *)enginex_dummy_img)
-        return enginex_img_state == IMG_OK && !enginex_gen2_locked() ? 0 : ENGINEX_ERR_BAD_IMAGE;
+    if (img == (void *)enginex_dummy_img) {
+        int state = __atomic_load_n(&enginex_img_state, __ATOMIC_ACQUIRE);
+        return state == IMG_OK && !enginex_gen2_locked() ? 0 : ENGINEX_ERR_BAD_IMAGE;
+    }
     static void *orig_fn = NULL;
     int (*fn)(void *, int) = next_symbol(&orig_fn, "az01_verify_image");
     return fn ? fn(img, flags) : -1;
@@ -2223,7 +2257,10 @@ int az01_verify_image(void *img, int flags) {
 
 __attribute__((visibility("default")))
 int az01_close_image(void *img) {
-    if (img == (void *)enginex_dummy_img) return 0;
+    if (img == (void *)enginex_dummy_img) {
+        __atomic_store_n(&enginex_img_state, IMG_NONE, __ATOMIC_RELEASE);
+        return 0;
+    }
     static void *orig_fn = NULL;
     int (*fn)(void *) = next_symbol(&orig_fn, "az01_close_image");
     return fn ? fn(img) : -1;
@@ -2232,17 +2269,24 @@ int az01_close_image(void *img) {
 static int run_wait(const char *prog, char *const argv[]) {
     pid_t pid = fork();
     if (pid == 0) {
+        unsetenv("LD_PRELOAD");
         execv(prog, argv);
         _exit(127);
     }
+    if (pid < 0) return -1;
     int status = 0;
-    return pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    pid_t rc;
+    do {
+        rc = waitpid(pid, &status, 0);
+    } while (rc < 0 && errno == EINTR);
+    return rc == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
 static void enginex_reboot(void) {
     sync();
     char *const argv[] = {"systemctl", "reboot", NULL};
-    run_wait("/bin/systemctl", argv);
+    if (run_wait("/bin/systemctl", argv) != 0)
+        run_wait("/usr/bin/systemctl", argv);
 }
 
 // Intercepts az01_apply_image for EngineX data bundles; everything else goes to the stock updater.
@@ -2253,30 +2297,22 @@ int az01_apply_image(const char *path, int flags) {
     if (state == IMG_OK) {
         if (enginex_gen2_locked()) return ENGINEX_ERR_BAD_IMAGE;
         fprintf(stderr, "engine-ui-hook: intercepted az01_apply_image with an EngineX data bundle image (%s)\n", path);
+        const char *test_root = getenv("ENGINEX_TEST_DATA_ROOT");
+        int testing = test_root && *test_root;
+        char custom_dir[PATH_MAX] = "";
+        if (testing) snprintf(custom_dir, sizeof custom_dir, "%s/enginex", test_root);
         // Unpacked next to the install (the /tmp tmpfs is small) and installed by the bundle's own
         // install.sh, so an older install.sh that does not know "install.sh <img>" is not needed.
         static const char script[] =
-            "set -e; mkdir -p " ENGINEX_DATA_DIR "; w=$(mktemp -d " ENGINEX_DATA_DIR "/.ota-img.XXXXXX); trap 'rm -rf \"$w\"' EXIT; "
+            "set -e; d=\"${2:-" ENGINEX_DATA_DIR "}\"; "
+            "[ -z \"$2\" ] || export SC5000_CUSTOM=\"$d\" SC5000_ALSA_OVERLAY=\"$d/alsa-conf.d\"; "
+            "mkdir -p \"$d\"; w=$(mktemp -d \"$d/.ota-img.XXXXXX\"); trap 'rm -rf \"$w\"' 0; "
             "tail -c +129 \"$1\" | tar -xzf - -C \"$w\"; sh \"$w\"/*/install.sh";
-        char *const argv[] = {"sh", "-c", (char *)script, "sh", (char *)path, NULL};
+        char *const argv[] = {"sh", "-c", (char *)script, "sh", (char *)path, custom_dir, NULL};
         if (run_wait("/bin/sh", argv) != 0) return -1;
         if (flags & 1) unlink(path);
-        enginex_reboot();
+        if (!testing) enginex_reboot();
         return 0;
-    }
-    if (path) {
-        int fd = open(path, O_RDONLY);
-        if (fd >= 0) {
-            char buf[64];
-            ssize_t n = read(fd, buf, sizeof(buf));
-            close(fd);
-            if (n >= 19 && memmem(buf, (size_t)n, "ENGINEX_DATA_BUNDLE", 19) != NULL) {
-                fprintf(stderr, "engine-ui-hook: intercepted az01_apply_image with ENGINEX_DATA_BUNDLE (%s)\n", path);
-                char *const argv[] = {"sh", "/data/enginex/install.sh", (char *)path, NULL};
-                if (run_wait("/bin/sh", argv) == 0) enginex_reboot();
-                return 0;
-            }
-        }
     }
     typedef int (*az01_apply_fn)(const char *, int);
     static void *orig_fn = NULL;
@@ -2287,17 +2323,24 @@ int az01_apply_image(const char *path, int flags) {
     return -1;
 }
 
-// Removes path (a file, a symlink itself, or a directory tree) without following symlinks.
-static void rm_tree(int parent, const char *name) {
+// Removes path (a file, a symlink itself, or a directory tree on root_dev) without following symlinks
+// or crossing a mount point.
+static void rm_tree(int parent, const char *name, dev_t root_dev) {
     if (unlinkat(parent, name, 0) == 0 || errno == ENOENT) return;
+    struct stat st;
+    if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) != 0 || st.st_dev != root_dev) return;
     int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd >= 0) {
-        DIR *d = fdopendir(fd);
-        if (d) {
-            struct dirent *e;
-            while ((e = readdir(d)) != NULL)
-                if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) rm_tree(dirfd(d), e->d_name);
-            closedir(d);
+        if (fstat(fd, &st) == 0 && st.st_dev == root_dev) {
+            DIR *d = fdopendir(fd);
+            if (d) {
+                struct dirent *e;
+                while ((e = readdir(d)) != NULL)
+                    if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) rm_tree(dirfd(d), e->d_name, root_dev);
+                closedir(d);
+            } else {
+                close(fd);
+            }
         } else {
             close(fd);
         }
@@ -2314,9 +2357,11 @@ int az01_erase_data_partition(void) {
     const char *root = getenv("ENGINEX_TEST_DATA_ROOT");
     int testing = root && *root;
     if (!testing) root = "/data";
-    char probe[PATH_MAX];
-    snprintf(probe, sizeof probe, "%s/enginex/bundle/install.sh", root);
-    if (getenv("SC5000_TEST_PASSTHROUGH_ERASE") || access(probe, F_OK) != 0 ||
+    char probe_boot[PATH_MAX], probe_inst[PATH_MAX];
+    snprintf(probe_boot, sizeof probe_boot, "%s/enginex/bundle/boot-activate.sh", root);
+    snprintf(probe_inst, sizeof probe_inst, "%s/enginex/bundle/install.sh", root);
+    if (getenv("SC5000_TEST_PASSTHROUGH_ERASE") ||
+        (access(probe_boot, F_OK) != 0 && access(probe_inst, F_OK) != 0) ||
         access("/usr/share/sc5000-custom/sc5000-suite.xz", F_OK) == 0) {
         // 1st-gen: EngineX lives in the rootfs and sc5000-custom-prepare restores it after the stock erase.
         static void *orig_fn = NULL;
@@ -2325,6 +2370,8 @@ int az01_erase_data_partition(void) {
     }
     int rootfd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (rootfd < 0) return -1;
+    struct stat root_st;
+    if (fstat(rootfd, &root_st) != 0) { close(rootfd); return -1; }
     DIR *d = fdopendir(rootfd);
     if (!d) { close(rootfd); return -1; }
     static const char *const keep[] = {"enginex", "system", "sc5000-custom", "lost+found"};
@@ -2332,13 +2379,15 @@ int az01_erase_data_partition(void) {
     while ((e = readdir(d)) != NULL) {
         int skip = !strcmp(e->d_name, ".") || !strcmp(e->d_name, "..");
         for (size_t i = 0; i < sizeof keep / sizeof *keep; i++) skip |= !strcmp(e->d_name, keep[i]);
-        if (!skip) rm_tree(rootfd, e->d_name);
+        if (!skip) rm_tree(rootfd, e->d_name, root_st.st_dev);
     }
     int ef = openat(rootfd, "enginex", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (ef >= 0) {
-        static const char *const gone[] = {"state", "mods", "ui/settings.conf", "ui/views.json", "ui/mods-overlay",
-                                           "ui/mods-quarantined", "ui/safe-mode", "ui/boot-count", "ui/boot-token", "ui/last-crash"};
-        for (size_t i = 0; i < sizeof gone / sizeof *gone; i++) rm_tree(ef, gone[i]);
+        static const char *const gone[] = {
+            "state", "mods", "Stream", "shadow-v3", "ui-scale.env", "ssh-config.json", "mounts.json", "automix.json",
+            "ui/settings.conf", "ui/views.json", "ui/mods-overlay", "ui/mods-quarantined",
+            "ui/safe-mode", "ui/boot-count", "ui/boot-token", "ui/last-crash", "ui/running-sentinel"};
+        for (size_t i = 0; i < sizeof gone / sizeof *gone; i++) rm_tree(ef, gone[i], root_st.st_dev);
         mkdirat(ef, "state", 0755);
         mkdirat(ef, "mods", 0755);
         close(ef);

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
@@ -150,6 +151,11 @@ func (s *Server) handleUnlockGen2(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusInternalServerError, errors.New("cannot remove gen2-locked"))
 			return
 		}
+		s.updateMu.Lock()
+		if !s.updateCache.Updating {
+			s.updateCache.checked = time.Time{}
+		}
+		s.updateMu.Unlock()
 		respond(w, map[string]any{"ok": true, "unlocked": s.isGen2Unlocked(), "prefix": prefix})
 		return
 	}

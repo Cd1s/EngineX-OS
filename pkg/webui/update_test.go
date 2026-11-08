@@ -180,7 +180,7 @@ func bundleDeck(t *testing.T, compatible string, assets func(base string) string
 		switch {
 		case r.URL.Path == "/repos/Cd1s/EngineX-OS/releases/latest":
 			fmt.Fprintf(w, `{"tag_name":"v5.3.0.3","html_url":"https://x/r","assets":[%s]}`, assets(base))
-		case strings.HasSuffix(r.URL.Path, ".tar.gz"):
+		case strings.HasSuffix(r.URL.Path, ".tar.gz") || strings.HasSuffix(r.URL.Path, "-Update.img"):
 			w.Write(bundle)
 		default:
 			http.NotFound(w, r)
@@ -335,6 +335,52 @@ func TestUpdateAppliesTheDataBundle(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(custom, "bundle")); err == nil {
 			t.Error("bundle installed despite the mismatch")
+		}
+	})
+	t.Run("applies Gen-2 Update.img in fallback path", func(t *testing.T) {
+		imgName := "SCLIVE4-5.3.0.3-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img"
+		imgAssets := func(base string) string {
+			return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, imgName, base+"/dl/"+imgName)
+		}
+		bundle := testBundle(t, "SCLIVE4", "5.3.0.3", false)
+		sum := sha256.Sum256(bundle)
+		var head [gen2ImgHeader]byte
+		copy(head[:], fmt.Sprintf("%s%x\nSCLIVE4\n5.3.0.3\n", gen2ImgMagic, sum))
+		validImg := append(head[:], bundle...)
+
+		s, custom := bundleDeck(t, "inmusic,jp21", imgAssets, validImg)
+		// Initially locked: checkRelease finds no bundle asset, then POST unlock-gen2 invalidates cache and picks .img.
+		if v := getUpdate(s, ""); v.DownloadURL != "" {
+			t.Fatalf("locked deck picked .img: %+v", v)
+		}
+		s.handleUnlockGen2(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/unlock-gen2", nil))
+		if v := getUpdate(s, ""); !strings.HasSuffix(v.DownloadURL, "/dl/"+imgName) {
+			t.Fatalf("after unlock: %+v", v)
+		}
+		getUpdate(s, "?apply=1")
+		v := waitUpdate(t, s)
+		if v.Error != "" || v.UpdateAvailable || v.Current != "5.3.0.3" || v.Progress != 1 {
+			t.Fatalf("after Gen-2 .img apply: %+v", v)
+		}
+		for path, want := range map[string]string{"version.txt": "5.3.0.3\n", "bundle/version.txt": "5.3.0.3\n", "ui/packs/a.txt": "5.3.0.3"} {
+			if b, err := os.ReadFile(filepath.Join(custom, path)); err != nil || string(b) != want {
+				t.Errorf("%s = %q, %v", path, b, err)
+			}
+		}
+
+		// Corrupted payload byte in Gen-2 .img must be rejected by SHA-256 check.
+		badImg := append([]byte(nil), validImg...)
+		badImg[len(badImg)-1] ^= 1
+		sBad, customBad := bundleDeck(t, "inmusic,jp21", imgAssets, badImg)
+		os.WriteFile(filepath.Join(customBad, "gen2-unlocked"), []byte("1\n"), 0o644)
+		getUpdate(sBad, "")
+		getUpdate(sBad, "?apply=1")
+		vBad := waitUpdate(t, sBad)
+		if vBad.Error != "downloaded image failed SHA-256 check" {
+			t.Fatalf("corrupted Gen-2 .img accepted: %+v", vBad)
+		}
+		if b, _ := os.ReadFile(filepath.Join(customBad, "version.txt")); string(b) != "5.3.0.2\n" {
+			t.Errorf("version.txt changed to %q", b)
 		}
 	})
 }
