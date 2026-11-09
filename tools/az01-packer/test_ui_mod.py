@@ -210,6 +210,57 @@ class UiModSourceTest(unittest.TestCase):
         self.assertNotIn("visible: root.scPlayer", bp.FOUR_DECK_ENTRIES)
         self.assertIn("scFourDeckRole = v.fourDeckWaveform ? (v.fourDeckRoleActive || \"\") : \"\"", bp.SERVICES_MAIN)
 
+    def test_splash_and_shutdown_scaling_175(self):
+        # #175: SplashScreen images and shutdown overlay Rectangle must fill
+        # the enlarged logical canvas so they don't shrink to 3/4 under UI Scale.
+        self.assertIn(r'ROOT + "Items/SplashScreen.qml"', SRC)
+        self.assertIn(r'"\t\tImage {\n\t\t\tanchors.fill: parent\n\t\t\tsource:"', SRC)
+        self.assertIn(r'"\t\t\tid: overlay\n\t\t\tanchors.fill: parent\n"', SRC)
+        self.assertIn(r'"\t\t\tparent: Overlay.overlay ? Overlay.overlay : uiContainer\n"', SRC)
+        self.assertIn(r'"\t\t\tanchors.fill: parent\n"', SRC)
+
+    def test_scaling_matrix_all_generations_and_scales(self):
+        # Resolution inventory:
+        # Gen 2 landscape (1280x800): SC LIVE 4 (JP21), SC LIVE 2 (JP20), PRIME 4+ (JC11S),
+        #                            PRIME GO+ (JP11S), MIXSTREAM PRO+ (NH08S),
+        #                            MIXSTREAM PRO GO (NH10), PRIME 4 G2 (JP24)
+        # Gen 2 portrait (800x1280):  SYSTEM ONE (RMZ2)
+        # Gen 1 16:9 (1280x720):      SC5000 (JP07), SC5000M (JP08), PRIME GO (JP11),
+        #                            PRIME 2 (JC16), MIXSTREAM PRO (NH08)
+        # Gen 1 16:10 (1280x800):     PRIME 4 (JC11)
+        # Gen 1 wide (1440x900):      SC6000 (JP13), SC6000M (JP14)
+        resolutions = {
+            "gen2_landscape_1280x800": (1280, 800),
+            "gen2_portrait_rmz2_800x1280": (800, 1280),
+            "gen1_16x9_sc5000_1280x720": (1280, 720),
+            "gen1_16x10_prime4_1280x800": (1280, 800),
+            "gen1_wide_sc6000_1440x900": (1440, 900),
+        }
+        scales = [75, 80, 85, 90, 95, 100, 105, 110]
+        for name, (w, h) in resolutions.items():
+            for s in scales:
+                scale_factor = s / 100.0
+                logical_w = w * 100 / s
+                logical_h = h * 100 / s
+                # With anchors.fill: parent inside scaled uiContainer:
+                rendered_w = logical_w * scale_factor
+                rendered_h = logical_h * scale_factor
+                self.assertAlmostEqual(rendered_w, w, places=5,
+                                       msg=f"{name} at {s}% width mismatch")
+                self.assertAlmostEqual(rendered_h, h, places=5,
+                                       msg=f"{name} at {s}% height mismatch")
+                # At scale 100 (stock / default), logical equals physical
+                if s == 100:
+                    self.assertEqual(logical_w, w)
+                    self.assertEqual(logical_h, h)
+                # Unfixed behavior: unanchored items had fixed size (w, h) inside
+                # scaled container, shrinking to w * (s / 100) (e.g. 75% at s=75).
+                unfixed_rendered_w = w * scale_factor
+                unfixed_rendered_h = h * scale_factor
+                if s != 100:
+                    self.assertNotAlmostEqual(unfixed_rendered_w, w, places=1)
+                    self.assertNotAlmostEqual(unfixed_rendered_h, h, places=1)
+
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
 class ShadowDisplayTest(unittest.TestCase):
@@ -919,7 +970,8 @@ class UiModBuildTest(unittest.TestCase):
         qrc = LAB / "5.3.0" / "qrc"
         if not qrc.is_dir():
             self.skipTest(f"{qrc} not found (run on Oracle-Batam-arm)")
-        with tempfile.TemporaryDirectory(prefix="ui-mod-test-") as tmp:
+        tmp_dir = Path("/var/tmp/s175b") if Path("/var/tmp/s175b").is_dir() else None
+        with tempfile.TemporaryDirectory(prefix="ui-mod-test-", dir=tmp_dir) as tmp:
             res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(Path(tmp) / "packs")],
                                  capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, res.stderr)
@@ -973,6 +1025,19 @@ for(const board of ['JP20','JP22','JP24','JC11S','JP21X']) {
             self.assertNotIn("Canvas {", bp.SHADOW_LAYER)
             overview = (embedded / "Views/Common/WaveformOverview/WaveformOverview.qml").read_text()
             self.assertIn('objectName: "EngineX_Shadow_overview"', overview)
+
+            # #175: verify built SplashScreen.qml and EmbeddedMain.qml
+            splash = Path(tmp) / "packs" / "en" / "Skins" / "Embedded" / "Items" / "SplashScreen.qml"
+            self.assertTrue(splash.is_file(), f"{splash} not found")
+            splash_text = splash.read_text()
+            self.assertIn("anchors.fill: parent\n\t\t\tsource:", splash_text)
+            self.assertIn("id: overlay\n\t\t\tanchors.fill: parent\n", splash_text)
+
+            main = Path(tmp) / "packs" / "en" / "Skins" / "Embedded" / "EmbeddedMain.qml"
+            self.assertTrue(main.is_file(), f"{main} not found")
+            main_text = main.read_text()
+            self.assertIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer\n\t\t\tanchors.fill: parent\n", main_text)
+            self.assertNotIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer\n\t\t\twidth: planckQuickView.defaultScreenSize.width", main_text)
 
 
 if __name__ == "__main__":
