@@ -94,7 +94,7 @@ find "$R/tmp" -maxdepth 3 -type f -printf '%P\n' > "$W/guest-files-$lang.txt"
 if [ -f "$R/tmp/engine-quit-reason" ]; then cp "$R/tmp/engine-quit-reason" "$W/quit-reason-$lang.txt"; fi
 mkdir -p "$W/qrc-$lang"
 cp -a "$R/tmp/qrc-dump/." "$W/qrc-$lang/"
-grep -aE 'X171 (CONFIG|PROPERTY|PAGE|INPUTS|SELECTOR|PASS|ERROR|DONE)' "$W/engine-$lang.log" | cut -c1-200 | head -n 40
+grep -aE 'X171 (CONFIG|PROPERTY|PAGE|INPUTS|SELECTOR|PASS|ERROR|DONE)' "$W/engine-$lang.log" | cut -c1-200 | sed -n '1,40p'  # sed reads all input: head would SIGPIPE grep under pipefail
 ! grep -aq 'X171 ERROR|' "$W/engine-$lang.log"
 grep -aq 'X171 DONE|PASS|' "$W/engine-$lang.log"
 if [ "${X171_LIVE_AUDIO:-0}" = 1 ]; then
