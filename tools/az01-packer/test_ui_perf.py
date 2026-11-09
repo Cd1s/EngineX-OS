@@ -38,7 +38,7 @@ class DictionaryTest(unittest.TestCase):
 @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise QML JavaScript")
 class HotPathTest(unittest.TestCase):
     def test_cue_bindings_and_status_polling(self):
-        names = ("scDeckLocked", "scShadowVisible", "scTr", "scCuePlaying", "scProbeCueClocks", "scCueProps", "scNextCueInfo", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
+        names = ("scDeckLocked", "scShadowVisible", "scTr", "scCuePlaying", "scProbeCueClocks", "scCueProps", "scNextCueInfo", "scNextCueCompute", "scCueTickFor", "scSameItems", "scCall", "scUiPollReply")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", packs.SERVICES_MAIN)
@@ -63,7 +63,8 @@ const Planck = {getProperty(path) {
     if (unavailable.has(path)) return null;
     return {translator: properties[path] ||= {state: false, value: 0, unnormalized: 0, string: ""}};
 }};
-var scPropCache = {}, scCuePropCache = {}, scCueInfoCache = {}, scUiPoll = null, scUiPollAt = 0;
+var scPropCache = {}, scCuePropCache = {}, scCueInfoCache = {}, scCueInfoMemo = {}, scUiPoll = null, scUiPollAt = 0, scUiDigest = "", scUiAppliedAt = 0, ensured = 0;
+function scEnsureTidal() { ensured++; }
 const reads = [];
 const clock = d => ({get tick() { reads.push(d); return d; }});
 const scCueClock1 = clock(1), scCueClock2 = clock(2), scCueClock3 = clock(3), scCueClock4 = clock(4);
@@ -73,6 +74,7 @@ class XMLHttpRequest {
     open(method, url) { this.readyState = 1; }
     send() {}
     abort() { this.readyState = 0; this.aborted = true; }
+    getResponseHeader(name) { return (this.headers || {})[name] || null; }
 }
 ''' + "\n".join(functions) + "\nroot.scTr = scTr; root.scCuePlaying = scCuePlaying; root.scCueProbe = 0;\n" + r'''
 const set = (key, fields) => Object.assign(scTr('/Engine/Deck1/' + key), fields);
@@ -90,6 +92,13 @@ for (let i = 0; i < 60; i++) assert.equal(scNextCueInfo(1, i), info);
 assert.equal(lookups, initialLookups); // same translators and same display object
 set('Track/TrackPosition', {unnormalized: 1000});
 assert.equal(scNextCueInfo(1, 1).text, '4.1');
+// Every deck view evaluates on the same clock edge: computed once per deck and tick.
+const edge = scNextCueInfo(1, 7), before = lookups;
+set('Track/TrackPosition', {unnormalized: 3000});
+assert.strictEqual(scNextCueInfo(1, 7), edge);
+scCueInfoMemo[1].at -= 100; // a later re-evaluation on the same tick (a load or cue edit while paused)
+assert.equal(scNextCueInfo(1, 7).text, '3.1'); assert.equal(edge.text, '4.1');
+set('Track/TrackPosition', {unnormalized: 1000});
 set('Track/SongLoaded', {state: false});
 assert.equal(scNextCueInfo(1, 2), null);
 assert.equal(scCueTickFor(2), 2);
@@ -123,6 +132,13 @@ scUiPoll.onreadystatechange();
 scCall('');
 assert.equal(made, 1); // reuse both the XHR and its callback
 assert.equal(applied, 1);
+// stream-sync's digest: an unchanged body is neither parsed nor applied (30 s safety re-apply).
+const reply = digest => { scUiPoll.headers = {'X-UI-Digest': digest}; scUiPoll.readyState = 4; scUiPoll.onreadystatechange(); };
+reply('a1'); assert.equal(applied, 2);
+reply('a1'); reply('a1'); assert.equal(applied, 2); assert.equal(ensured, 2);
+reply('b2'); assert.equal(applied, 3);
+scUiAppliedAt -= 31000; reply('b2'); assert.equal(applied, 4);
+scCall(''); // the next poll is in flight again
 scUiPollAt = Date.now() - 11000;
 scCall('');
 assert(scUiPoll.aborted); // a hung server cannot disable polling forever
