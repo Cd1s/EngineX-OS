@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
@@ -106,6 +107,14 @@ func displayTrackKey(p peerDeck) string {
 // Preserve #160's role-overlap mapping, while retaining the source deck for
 // asset requests. The map key is the receiver slot, p.Deck is the source slot.
 func placeDisplayPeers(peers map[int]peerDeck, role string, now time.Time) map[int]peerDeck {
+	// Expiry matches a goodbye: free shadow slots on every model.
+	fresh := make(map[int]peerDeck, len(peers))
+	for n, p := range peers {
+		if now.Sub(p.at) <= 15*time.Second {
+			fresh[n] = p
+		}
+	}
+	peers = fresh
 	placed, used := map[int]peerDeck{}, map[int]bool{}
 	var slots []int
 	for n := 1; n <= 4; n++ {
@@ -170,20 +179,191 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
 		}
 		out = append(out, d)
 	}
-	// CDJ compatibility is metadata-only in this mode. In particular this must
-	// not call shadowFetchCDJ, whose prerequisite is a full audio download.
-	for deck, dev := range cdjDecks(s.mergedDevices(), free, now) {
+	// Only cached rekordbox analysis is used here, never shadowFetchCDJ/audio.
+	devices := s.mergedDevices()
+	for deck, dev := range cdjDecks(devices, free, now) {
 		d := deckState{Deck: deck, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
 		if dev.TrackID != 0 {
-			d.Key = fmt.Sprintf("cdj:%s:%d:%d:%d", dev.Address, dev.SourcePlayer, dev.SourceSlot, dev.TrackID)
+			host := net.ParseIP(dev.Address)
+			if dev.SourcePlayer != dev.Number {
+				host = sourceHost(prolink.ExportStatus{}, devices, dev.SourcePlayer)
+			}
+			version := ""
+			if s.loadUI().ProlinkShare && s.prolinkExport != nil {
+				version = s.prolinkExport.DisplayMediaCache().MediaIdentity(dev, host)
+			}
+			d.Key = fmt.Sprintf("cdj:%s:%d:%d:%d:%s", host, dev.SourcePlayer, dev.SourceSlot, dev.TrackID, version)
+			d.MetadataOnly = s.ensureCDJDisplay(dev, host, d.Key, version, now) == nil
 		}
+		at := dev.LastSeen
+		sh.mu.Lock()
+		if p, ok := sh.precise[dev.Number]; ok && now.Sub(p.at) < time.Second {
+			d.PositionMS, at = p.ms, p.at
+		}
+		sh.mu.Unlock()
 		if d.Playing {
-			d.PositionMS += float64(now.Sub(dev.LastSeen).Milliseconds()) * (1 + d.Pitch/100)
+			d.PositionMS += float64(max(int64(0), now.Sub(at).Milliseconds())) * (1 + d.Pitch/100)
 		}
 		out = append(out, d)
 	}
 	slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
 	return out
+}
+
+func (s *Server) ensureCDJDisplay(dev prolink.Device, host net.IP, key, version string, now time.Time) *shadowDisplayEntry {
+	if version == "" || !s.loadUI().ProlinkShare || s.prolinkExport == nil {
+		return nil
+	}
+	media := s.prolinkExport.DisplayMediaCache()
+	if version != media.MediaIdentity(dev, host) {
+		return nil
+	}
+	c := &s.shadow.display
+	c.mu.Lock()
+	slot := c.claim(key, now)
+	if slot == nil {
+		c.mu.Unlock()
+		return nil
+	}
+	slot.at = now
+	if slot.asset != nil {
+		c.mu.Unlock()
+		return slot
+	}
+	if slot.busy || now.Before(slot.retry) {
+		c.mu.Unlock()
+		return nil
+	}
+	slot.busy = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		if c.entries[key] == slot {
+			slot.busy = false
+			slot.retry = now.Add(3 * time.Second)
+		}
+		c.mu.Unlock()
+	}()
+	a, title, artist := media.CachedAnalysisVersion(dev, host, version)
+	if a == nil {
+		return nil
+	}
+	wave, _, duration := prolink.ExtractANLZ(a)
+	if len(wave) == 0 {
+		return nil
+	}
+	const rate = 44100.0 // display timebase, no audio is opened
+	detail := enginedb.DisplayWaveFromRekordbox(a, rate)
+	if detail != nil {
+		span := float64(len(detail.Bands)/3) * detail.SamplesPerBin / rate * 1000
+		if span+100 < float64(duration) {
+			detail = nil // truncated ANLZ detail must not stretch over the song
+		} else {
+			duration = uint32(span)
+			w := downsampleDisplayWave(*detail, 65536)
+			detail = &w
+		}
+	}
+	if detail == nil && a.DurationMS > 0 {
+		duration = a.DurationMS
+	}
+	if duration == 0 {
+		duration = dev.DurationMS
+	}
+	if duration == 0 {
+		return nil
+	}
+	asset := &shadowDisplayAsset{Version: 1, Key: key, Title: title, Artist: artist, BPM: dev.BPM,
+		DisplayPerformance: enginedb.DisplayPerformance{SampleRate: rate, DurationMS: float64(duration), Waveform: detail,
+			Overview: enginedb.DisplayWave{SamplesPerBin: rate * float64(duration) / 1000 / float64(len(wave))},
+			Beats:    []enginedb.DisplayBeat{}, Cues: []enginedb.DisplayCue{}, Loops: []enginedb.DisplayLoop{}}}
+	for _, b := range wave {
+		asset.Overview.Bands = append(asset.Overview.Bands, b[:]...)
+	}
+	// ANLZ beat numbers are beats within the bar; the display expects a
+	// monotonically increasing zero-based index and the complete track grid.
+	for i, b := range a.Beats {
+		if float64(b.TimeMS) > asset.DurationMS {
+			continue
+		} // PDB duration is rounded to whole seconds
+		asset.Beats = append(asset.Beats, enginedb.DisplayBeat{MS: float64(b.TimeMS), Number: int64(i) + int64(a.Beats[0].Number) - 1})
+	}
+	filterCDJDisplayCues(asset, a.Cues, float64(dev.PlayPositionMS))
+	if detail != nil {
+		asset.DetailSource = "rekordbox"
+	}
+	if validateDisplayAsset(asset, key) != nil {
+		return nil
+	}
+	overview, err := renderShadowWave(asset.Overview, 1024, 64)
+	if err != nil {
+		return nil
+	}
+	w, err := renderShadowWave(asset.Overview, 2048, 128)
+	if err != nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries[key] != slot || version != media.MediaIdentity(dev, host) || !s.loadUI().ProlinkShare {
+		return nil
+	}
+	e := &shadowDisplayEntry{asset: asset, overview: overview, wave: w, at: now}
+	if detail != nil {
+		e.tiles = make([][]byte, (len(detail.Bands)/3+2047)/2048)
+	}
+	c.entries[key] = e
+	return e
+}
+
+// Keep valid Hot Cues A-H first; fill remaining marker slots with the nearest
+// Memory Cues. I=9 is reserved for memory, separate from Engine's main CUE (0).
+func filterCDJDisplayCues(asset *shadowDisplayAsset, cues []rekordbox.Cue, positionMS float64) {
+	var hot, memory []rekordbox.Cue
+	for _, cue := range cues {
+		if cue.HotCue > 8 || float64(cue.TimeMS) > asset.DurationMS || len(cue.Name) > 255 {
+			continue
+		}
+		if cue.Loop && (cue.EndMS <= cue.TimeMS || float64(cue.EndMS) > asset.DurationMS) {
+			continue
+		}
+		if cue.HotCue == 0 {
+			memory = append(memory, cue)
+		} else {
+			hot = append(hot, cue)
+		}
+	}
+	slices.SortStableFunc(hot, func(a, b rekordbox.Cue) int { return int(a.HotCue) - int(b.HotCue) })
+	slices.SortStableFunc(memory, func(a, b rekordbox.Cue) int {
+		da, db := math.Abs(float64(a.TimeMS)-positionMS), math.Abs(float64(b.TimeMS)-positionMS)
+		if da < db {
+			return -1
+		}
+		if da > db {
+			return 1
+		}
+		return 0
+	})
+	seen := map[uint32]bool{}
+	for _, cue := range append(hot, memory...) {
+		col := fmt.Sprintf("#%02x%02x%02x", cue.Color[1], cue.Color[2], cue.Color[3])
+		if cue.Color == [4]byte{} {
+			col = "#ffffff"
+		}
+		if cue.Loop && len(asset.Loops) < 8 {
+			asset.Loops = append(asset.Loops, enginedb.DisplayLoop{StartMS: float64(cue.TimeMS), EndMS: float64(cue.EndMS), N: cue.Name, C: col})
+		}
+		if len(asset.Cues) >= 9 || cue.HotCue > 0 && seen[cue.HotCue] {
+			continue
+		}
+		i := int(cue.HotCue)
+		if i == 0 {
+			i = 9
+		} else {
+			seen[cue.HotCue] = true
+		}
+		asset.Cues = append(asset.Cues, enginedb.DisplayCue{I: i, MS: float64(cue.TimeMS), N: cue.Name, C: col})
+	}
 }
 
 func (s *Server) ensureShadowDisplay(p peerDeck, now time.Time) *shadowDisplayEntry {
@@ -310,7 +490,7 @@ func validateDisplayAsset(a *shadowDisplayAsset, key string) error {
 		}
 	}
 	for _, c := range a.Cues {
-		if !finite(c.MS) || c.MS < 0 || c.MS > a.DurationMS || c.I < 0 || c.I > 8 || len(c.N) > 255 || !displayHexColor(c.C) {
+		if !finite(c.MS) || c.MS < 0 || c.MS > a.DurationMS || c.I < 0 || c.I > 9 || len(c.N) > 255 || !displayHexColor(c.C) {
 			return fmt.Errorf("display: invalid cue")
 		}
 	}
@@ -630,7 +810,21 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 	}
 	s.shadow.mu.Unlock()
 	p, ok := placeDisplayPeers(peers, role, time.Now())[deck]
-	if !ok || displayTrackKey(p) != key {
+	if !ok {
+		// Compose and HTTP use the same placement, including peer priority and
+		// exact current track keys. An old CDJ URL cannot read a different song.
+		for _, d := range s.shadowComposeDisplay(role, time.Now()) {
+			if d.Deck == deck && d.Key == key && !d.MetadataOnly {
+				c := &s.shadow.display
+				c.mu.Lock()
+				e := c.entries[key]
+				c.mu.Unlock()
+				return e, d
+			}
+		}
+		return nil, deckState{}
+	}
+	if displayTrackKey(p) != key {
 		return nil, deckState{}
 	}
 	d := p.deckState

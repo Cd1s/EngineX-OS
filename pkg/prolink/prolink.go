@@ -213,6 +213,9 @@ func ExtractANLZ(a *rekordbox.Analysis) (waveform [][3]byte, beats []BeatGridPoi
 			wave = w
 		}
 	}
+	if a.DurationMS > 0 && (wave == nil || wave.Tag != "PWV7" && wave.Tag != "PWV5" && wave.Tag != "PWV3") {
+		durationMS = a.DurationMS
+	}
 	if wave != nil && int(wave.EntryBytes) <= len(wave.Data) {
 		total := len(wave.Data) / int(wave.EntryBytes)
 		getCol := func(i int) [3]byte {
@@ -445,10 +448,14 @@ func (d *Discovery) SetMediaCache(m *MediaCache) {
 
 // hostIP runs with the mutex held: the address of player number n.
 func (d *Discovery) hostIP(n byte) net.IP {
+	var host string
 	for _, dev := range d.devices {
-		if dev.Number == n && dev.Address != "" {
-			return net.ParseIP(dev.Address)
+		if dev.Number == n && dev.Address != "" && (host == "" || dev.Address < host) {
+			host = dev.Address
 		}
+	}
+	if host != "" {
+		return net.ParseIP(host)
 	}
 	return nil
 }
@@ -470,6 +477,28 @@ func (d *Discovery) SetResolver(fn func(Device) (*rekordbox.Analysis, string, st
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.resolver = fn
+}
+
+// CachedAnalysis returns the current track's immutable analysis, never resolving
+// media or fetching audio. The full device identity prevents a delayed display
+// request from borrowing analysis from a newly loaded track or another player.
+// Callers must not modify the returned analysis.
+func (d *Discovery) CachedAnalysis(dev Device) (*rekordbox.Analysis, string, string) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	current, ok := d.devices[fmt.Sprintf("%s/%d", dev.Address, dev.Number)]
+	if !ok || dev.TrackID == 0 || current.TrackID != dev.TrackID || current.SourcePlayer != dev.SourcePlayer || current.SourceSlot != dev.SourceSlot {
+		return nil, "", ""
+	}
+	host := net.ParseIP(dev.Address)
+	if dev.SourcePlayer != dev.Number {
+		host = d.hostIP(dev.SourcePlayer)
+	}
+	if d.media != nil {
+		return d.media.CachedAnalysis(dev, host)
+	}
+	c := d.trackCache[fmt.Sprintf("%s:%d:%d:%d", host, dev.SourcePlayer, dev.SourceSlot, dev.TrackID)]
+	return c.analysis, c.title, c.artist
 }
 
 func defaultResolveWithRoot(anlzRoot string, device Device) (*rekordbox.Analysis, string, string) {
@@ -723,7 +752,13 @@ func (d *Discovery) Observe(device Device) Device {
 			host = d.hostIP(device.SourcePlayer)
 		}
 		cacheKey = fmt.Sprintf("%s:%d:%d:%d", host, device.SourcePlayer, device.SourceSlot, device.TrackID)
-		if cached, ok := d.trackCache[cacheKey]; ok {
+		mediaOn := d.media.allowed()
+		if mediaOn {
+			cacheKey += ":" + d.media.MediaIdentity(device, host)
+		}
+		// Only full status packets need to probe for a replacement medium. Beat,
+		// keepalive and 30ms position packets reuse the matching local generation.
+		if cached, ok := d.trackCache[cacheKey]; ok && (!mediaOn || device.PacketType != 0x0a) {
 			if len(device.Waveform) == 0 {
 				device.Waveform = cached.waveform
 			}
@@ -769,6 +804,9 @@ func (d *Discovery) Observe(device Device) Device {
 		if anlz != nil {
 			wf, bts, dur = ExtractANLZ(anlz)
 		}
+		if media.allowed() {
+			cacheKey = fmt.Sprintf("%s:%d:%d:%d:%s", host, device.SourcePlayer, device.SourceSlot, device.TrackID, media.MediaIdentity(device, host))
+		}
 		entry := cachedTrack{
 			analysis:   anlz,
 			title:      title,
@@ -791,6 +829,7 @@ func (d *Discovery) Observe(device Device) Device {
 			d.trackCache[cacheKey] = entry
 			d.trackKeys = append(d.trackKeys, cacheKey)
 		}
+		d.trackCache[cacheKey] = entry
 		if len(device.Waveform) == 0 {
 			device.Waveform = wf
 		}

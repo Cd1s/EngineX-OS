@@ -207,7 +207,7 @@ func TestSimCDJ3000ServerToDenon(t *testing.T) {
 		t.Fatal("waveform missing from display snapshot")
 	}
 	for _, ext := range []string{"DAT", "EXT", "2EX"} {
-		if _, err := os.Stat(filepath.Join(cache, "4-3/PIONEER/USBANLZ/P001/ANLZ0000."+ext)); err != nil {
+		if _, err := os.Stat(filepath.Join(cache, "127.63.0.2", "4-3/PIONEER/USBANLZ/P001/ANLZ0000."+ext)); err != nil {
 			t.Fatal("missing fetched analysis", err)
 		}
 	}
