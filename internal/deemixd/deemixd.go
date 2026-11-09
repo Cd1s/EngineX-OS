@@ -99,6 +99,12 @@ func Main(args []string) error {
 	d := newDaemon(ctx, *stateDir, absDir)
 	srv := &http.Server{Addr: "127.0.0.1:6595", Handler: d.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	listener, err := net.Listen("tcp", srv.Addr)
+	if errors.Is(err, syscall.EADDRINUSE) {
+		// stream-sync already supervises a downloader here (#159). Exit 0 so
+		// systemd's Restart=on-failure does not respawn this every 3 s.
+		log.Printf("sc5000-deemixd: %s already served; exiting", srv.Addr)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
