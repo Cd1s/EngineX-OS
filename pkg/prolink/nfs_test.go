@@ -40,12 +40,12 @@ func TestMediaCacheReadsTrackFromPlayer(t *testing.T) {
 	if obs.Title == "" || len(obs.Waveform) == 0 || len(obs.Beats) == 0 {
 		t.Fatalf("track not read from the player: %+v", obs)
 	}
-	if _, err := os.Stat(filepath.Join(cache, "2-3", "PIONEER", "rekordbox", "export.pdb")); err != nil {
+	if _, err := os.Stat(filepath.Join(cache, "127.0.0.1", "2-3", "PIONEER", "rekordbox", "export.pdb")); err != nil {
 		t.Fatal(err)
 	}
 
 	// Another track on the same stick: export.pdb is not read again.
-	cached := filepath.Join(cache, "2-3", "PIONEER", "rekordbox", "export.pdb")
+	cached := filepath.Join(cache, "127.0.0.1", "2-3", "PIONEER", "rekordbox", "export.pdb")
 	before, _ := os.Stat(cached)
 	status.TrackID = 2
 	d.Observe(status)
@@ -60,6 +60,7 @@ func TestMediaCacheReadsTrackFromPlayer(t *testing.T) {
 		t.Fatal(err)
 	}
 	status.TrackID = 3
+	time.Sleep(2100 * time.Millisecond) // media probes are bounded to once per two seconds
 	d.Observe(status)
 	if after, _ := os.Stat(cached); os.SameFile(before, after) {
 		t.Fatalf("export.pdb not refreshed after the stick changed")
@@ -215,5 +216,34 @@ func TestFetchTrackCopiesOneTrack(t *testing.T) {
 	}
 	if _, err := prolink.FetchTrack(t.Context(), c, 3, 999, dir); err == nil {
 		t.Fatal("unknown track fetched")
+	}
+}
+
+func TestMediaCacheSameTrackIDDiscSwap(t *testing.T) {
+	usb := t.TempDir()
+	testfixture.Export(t, usb)
+	player := newFakePlayer(t, usb)
+	m := &prolink.MediaCache{Dir: t.TempDir(), Portmap: player.port()}
+	d := prolink.NewDiscovery()
+	d.SetMediaCache(m)
+	dev := prolink.Device{Address: "127.0.0.1", Number: 1, SourcePlayer: 1, SourceSlot: 3, TrackID: 1, PacketType: 0x0a}
+	first := d.Observe(dev)
+	version := m.MediaIdentity(dev, net.ParseIP(dev.Address))
+	// Only the new disc's DAT remains; its same ID no longer has a waveform.
+	for _, ext := range []string{".EXT", ".2EX"} {
+		os.Remove(filepath.Join(usb, "PIONEER/USBANLZ/P001/ANLZ0000"+ext))
+	}
+	pdb := filepath.Join(usb, "PIONEER/rekordbox/export.pdb")
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(pdb, later, later); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2100 * time.Millisecond) // next bounded media probe observes the replacement
+	second := d.Observe(dev)
+	if version == m.MediaIdentity(dev, net.ParseIP(dev.Address)) || len(first.Waveform) == 0 || len(second.Waveform) != 0 {
+		t.Fatalf("same ID kept old disc: %d -> %d columns", len(first.Waveform), len(second.Waveform))
+	}
+	if a, _, _ := d.CachedAnalysis(second); a == nil || len(a.Waveforms) != 0 {
+		t.Fatal("cached analysis borrowed previous disc")
 	}
 }

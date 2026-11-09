@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -124,26 +125,28 @@ type cdjSeen struct {
 }
 
 type shadowState struct {
-	mu        sync.Mutex
-	precise   map[byte]precisePos
-	cdj       map[byte]cdjSeen // per CDJ player number: its last edges and jumps
-	own       []deckState
-	ownMaster bool
-	ownAt     time.Time
-	ownPostAt int64                // the QML's clock on the newest post
-	peers     map[string]time.Time // EngineX players heard on the beacon
-	peerDecks map[int]peerDeck
-	peerSeq   map[string]int64  // newest Seq per peer (Engine Link id, else address)
-	ver       uint64            // bumped on every new peer update
-	notify    chan struct{}     // closed on the bump: wakes the long polls
-	conn      *net.UDPConn      // the beacon socket while shadowLoop runs
-	files     map[string]string // track key -> local copy
-	busy      map[string]bool
-	used      map[string]time.Time // when a shadow deck last wanted a copy
-	polled    time.Time
-	running   bool
-	peerPort  int // tests only; 0 is 8080
-	pushPort  int // tests only; 0 is shadowBeaconPort
+	fetchCalls    atomic.Uint64
+	fetchCDJCalls atomic.Uint64
+	mu            sync.Mutex
+	precise       map[byte]precisePos
+	cdj           map[byte]cdjSeen // per CDJ player number: its last edges and jumps
+	own           []deckState
+	ownMaster     bool
+	ownAt         time.Time
+	ownPostAt     int64                // the QML's clock on the newest post
+	peers         map[string]time.Time // EngineX players heard on the beacon
+	peerDecks     map[int]peerDeck
+	peerSeq       map[string]int64  // newest Seq per peer (Engine Link id, else address)
+	ver           uint64            // bumped on every new peer update
+	notify        chan struct{}     // closed on the bump: wakes the long polls
+	conn          *net.UDPConn      // the beacon socket while shadowLoop runs
+	files         map[string]string // track key -> local copy
+	busy          map[string]bool
+	used          map[string]time.Time // when a shadow deck last wanted a copy
+	polled        time.Time
+	running       bool
+	peerPort      int // tests only; 0 is 8080
+	pushPort      int // tests only; 0 is shadowBeaconPort
 
 	dataRoot, mediaRoot string
 	beacon              bool
@@ -994,16 +997,21 @@ func sourceHost(st prolink.ExportStatus, devices []prolink.Device, n byte) net.I
 			return net.ParseIP(host)
 		}
 	}
+	var host string
 	for _, d := range devices {
-		if d.Number == n {
-			return net.ParseIP(d.Address)
+		if d.Number == n && d.Address != "" && (host == "" || d.Address < host) {
+			host = d.Address
 		}
+	}
+	if host != "" {
+		return net.ParseIP(host)
 	}
 	return nil
 }
 
 // shadowFetch* run with sh.mu held; the copy itself runs unlocked.
 func (s *Server) shadowFetchCDJ(key string, host net.IP, slot byte, id uint32) {
+	s.shadow.fetchCDJCalls.Add(1)
 	s.shadowFetch(key, func(ctx context.Context) (string, error) {
 		c := &prolink.NFSClient{IP: host}
 		local, err := prolink.FetchTrack(ctx, c, slot, id, s.shadowDir())
@@ -1078,6 +1086,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 }
 
 func (s *Server) shadowFetch(key string, fetch func(context.Context) (string, error)) {
+	s.shadow.fetchCalls.Add(1)
 	sh := s.shadow
 	if sh.busy[key] {
 		return

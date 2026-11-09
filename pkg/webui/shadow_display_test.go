@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"image/color"
 	"image/png"
 	"net/http"
@@ -14,8 +16,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,6 +35,11 @@ import (
 // CDJ-3000 simulator. Only discovery may fetch metadata; display is offline.
 func cachedDisplayCDJ(t *testing.T) (*prolink.MediaCache, prolink.Device) {
 	t.Helper()
+	return cachedDisplayCDJWith(t, nil)
+}
+
+func cachedDisplayCDJWith(t *testing.T, change func(string)) (*prolink.MediaCache, prolink.Device) {
+	t.Helper()
 	usb := t.TempDir()
 	testfixture.Export(t, usb)
 	// A real 150 Hz detail stream covering the fixture's 1.5 second beat grid.
@@ -41,6 +50,9 @@ func cachedDisplayCDJ(t *testing.T) (*prolink.MediaCache, prolink.Device) {
 		copy(wave[i:], []byte{10, 20, 30})
 	}
 	testfixture.Write(t, usb, "PIONEER/USBANLZ/P001/ANLZ0000.2EX", testfixture.PMAI(testfixture.Section("PWV7", 24, wave)))
+	if change != nil {
+		change(usb)
+	}
 	nfs := &prolink.NFSServer{Root: usb}
 	if err := nfs.Listen("127.0.0.1:0"); err != nil {
 		t.Fatal(err)
@@ -66,7 +78,7 @@ func TestCDJDisplayCachedANLZWithoutAudio(t *testing.T) {
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = oldRole }()
 	os.WriteFile(fourDeckRolePath, []byte("24"), 0600)
-	uiPost(t, srv.URL, "fourDeckWaveform=1")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&prolinkShare=1")
 	prolinkMu.Lock()
 	postedDevices[s] = map[string]prolink.Device{deviceKey(dev): dev}
 	prolinkMu.Unlock()
@@ -115,13 +127,7 @@ func TestCDJDisplayCachedANLZWithoutAudio(t *testing.T) {
 	if got[0].PositionMS < 900 || got[0].PositionMS > 1000 {
 		t.Fatalf("precise CDJ position lost: %+v", got[0])
 	}
-	// shadowFetchCDJ registers every download here before spawning its worker.
-	s.shadow.mu.Lock()
-	jobs, files := len(s.shadow.busy), len(s.shadow.files)
-	s.shadow.mu.Unlock()
-	if jobs != 0 || files != 0 {
-		t.Fatalf("audio downloads started: busy=%d files=%d", jobs, files)
-	}
+	assertNoShadowAudioFetch(t, s)
 	if _, err := os.Stat(s.shadowDir()); !os.IsNotExist(err) {
 		t.Fatalf("audio directory created: %v", err)
 	}
@@ -143,8 +149,8 @@ func TestCDJDisplayWithoutANLZIsMetadataOnly(t *testing.T) {
 	if len(decks) != 1 || !decks[0].MetadataOnly || decks[0].Title != dev.Title || decks[0].Path != "" {
 		t.Fatalf("metadata fallback: %+v", decks)
 	}
+	assertNoShadowAudioFetch(t, s)
 }
-
 func TestJC11DisplayRoleWithSC5000AndCDJ(t *testing.T) {
 	cache, dev := cachedDisplayCDJ(t)
 	oldRole, oldCompatible := fourDeckRolePath, deviceCompatiblePath
@@ -156,6 +162,7 @@ func TestJC11DisplayRoleWithSC5000AndCDJ(t *testing.T) {
 			os.WriteFile(deviceCompatiblePath, []byte("inmusic,"+board+"\x00"), 0600)
 			s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir(), ProlinkExport: prolink.ExportConfig{MediaCache: cache}}, nil)
 			defer s.Close()
+			os.WriteFile(filepath.Join(s.uiDir(), "settings.conf"), []byte("prolink_share=1\n"), 0600)
 			if s.activeRole(uiSettings{}) != "" || s.activeRole(uiSettings{FourDeckWaveform: true}) != "12" {
 				t.Fatal("console must opt into role 12")
 			}
@@ -517,7 +524,7 @@ func TestPeerTwoDeckConflictKeepsEachSourceDeck(t *testing.T) {
 	}
 }
 
-func TestShadowJitterFreezesUntilConfirmedEject(t *testing.T) {
+func TestShadowJitterFreezesThenExpiresOrConfirmsEject(t *testing.T) {
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	now := time.Now()
 	s.shadow.peerDecks[2] = peerDeck{deckState: deckState{Deck: 2, Key: "track-a", Playing: true, PositionMS: 1000}, at: now}
@@ -529,8 +536,8 @@ func TestShadowJitterFreezesUntilConfirmedEject(t *testing.T) {
 		t.Fatalf("jitter: %+v", d)
 	}
 	d = s.shadowCompose("13", now.Add(time.Minute))
-	if len(d) != 1 || d[0].PositionMS != 3000 {
-		t.Fatalf("stale display kept running: %+v", d)
+	if len(d) != 0 {
+		t.Fatalf("expired display still occupies a slot: %+v", d)
 	}
 	s.shadow.own = []deckState{{Deck: 1, Key: "own", Playing: true, PositionMS: 1000, At: now.UnixMilli()}}
 	s.shadow.ownAt = now
@@ -693,5 +700,269 @@ func TestShadowWaveLocalPalette(t *testing.T) {
 	q.Set("brightGain", "NaN")
 	if _, err := parseShadowWaveStyle(q); err == nil {
 		t.Fatal("accepted nonfinite brightness")
+	}
+}
+
+func assertNoShadowAudioFetch(t *testing.T, s *Server) {
+	t.Helper()
+	if n, c := s.shadow.fetchCalls.Load(), s.shadow.fetchCDJCalls.Load(); n != 0 || c != 0 {
+		t.Fatalf("audio fetch calls=%d CDJ=%d", n, c)
+	}
+}
+
+func displayCDJServer(t *testing.T, cache *prolink.MediaCache, dev prolink.Device) *Server {
+	t.Helper()
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("prolink_share=1\n"), 0600)
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), ProlinkExport: prolink.ExportConfig{MediaCache: cache}}, nil)
+	t.Cleanup(s.Close)
+	prolinkMu.Lock()
+	postedDevices[s] = map[string]prolink.Device{deviceKey(dev): dev}
+	prolinkMu.Unlock()
+	return s
+}
+
+func TestCDJDisplayFiltersCueAndLoopLimits(t *testing.T) {
+	cache, dev := cachedDisplayCDJWith(t, func(root string) {
+		os.Remove(filepath.Join(root, "PIONEER/USBANLZ/P001/ANLZ0000.EXT"))
+		hot := make([]byte, 8)
+		binary.BigEndian.PutUint32(hot, 1)
+		binary.BigEndian.PutUint16(hot[4:], 9)
+		for i := uint32(1); i <= 8; i++ {
+			hot = append(hot, testfixture.CueExtended(i, i*100, 0, fmt.Sprint(i), [3]byte{})...)
+		}
+		hot = append(hot, testfixture.CueExtended(9, 1600, 0, "invalid", [3]byte{})...)
+		memory := make([]byte, 8)
+		binary.BigEndian.PutUint16(memory[4:], 4)
+		for _, ms := range []uint32{200, 490, 1200} {
+			memory = append(memory, testfixture.CueExtended(0, ms, 0, "memory", [3]byte{})...)
+		}
+		memory = append(memory, testfixture.CueExtended(0, 700, 1000, "loop", [3]byte{})...)
+		// No old cues; the fixture beat grid and detail still cover 1500 ms.
+		dat, err := rekordbox.ParseAnalysis(testfixture.DAT())
+		if err != nil {
+			t.Fatal(err)
+		}
+		beats := make([]byte, 12+len(dat.Beats)*8)
+		binary.BigEndian.PutUint32(beats[8:], uint32(len(dat.Beats)))
+		for i, b := range dat.Beats {
+			off := 12 + i*8
+			binary.BigEndian.PutUint16(beats[off:], b.Number)
+			binary.BigEndian.PutUint16(beats[off+2:], uint16(b.BPM*100))
+			binary.BigEndian.PutUint32(beats[off+4:], b.TimeMS)
+		}
+		testfixture.Write(t, root, "PIONEER/USBANLZ/P001/ANLZ0000.DAT", testfixture.PMAI(testfixture.Section("PQTZ", 24, beats), testfixture.Section("PCO2", 20, hot), testfixture.Section("PCO2", 20, memory)))
+	})
+	s := displayCDJServer(t, cache, dev)
+	decks := s.shadowComposeDisplay("24", time.Now())
+	if len(decks) != 1 || decks[0].MetadataOnly {
+		t.Fatalf("waveform lost: %+v", decks)
+	}
+	e := s.shadow.display.entries[decks[0].Key]
+	if e == nil || e.asset.Waveform == nil || len(e.wave) == 0 || len(e.asset.Cues) != 9 || len(e.asset.Loops) != 1 {
+		t.Fatalf("filtered asset: %+v", e)
+	}
+	for i := 0; i < 8; i++ {
+		if e.asset.Cues[i].I != i+1 {
+			t.Fatal(e.asset.Cues)
+		}
+	}
+	if c := e.asset.Cues[8]; c.I != 9 || c.MS != 490 {
+		t.Fatalf("nearest memory / main CUE collision: %+v", c)
+	}
+	if err := validateDisplayAsset(e.asset, decks[0].Key); err != nil {
+		t.Fatal(err)
+	}
+	assertNoShadowAudioFetch(t, s)
+}
+
+func TestCDJDisplayNegativeCacheAndConcurrentCompose(t *testing.T) {
+	cache, dev := cachedDisplayCDJ(t)
+	root := filepath.Join(cache.Dir, dev.Address, "1-3", "PIONEER/USBANLZ/P001")
+	for _, ext := range []string{".DAT", ".EXT", ".2EX"} {
+		if err := os.Remove(filepath.Join(root, "ANLZ0000"+ext)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache = &prolink.MediaCache{Dir: cache.Dir}
+	s := displayCDJServer(t, cache, dev)
+	var wg sync.WaitGroup
+	now := time.Now()
+	for i := 0; i < 50; i++ {
+		s.shadowComposeDisplay("24", now)
+	}
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); s.shadowComposeDisplay("24", now) }()
+	}
+	wg.Wait()
+	if n := cache.PDBParseCount(); n != 1 {
+		t.Fatalf("50 failed composes parsed PDB %d times", n)
+	}
+	for _, e := range s.shadow.display.entries {
+		if e.busy || e.asset != nil || !e.retry.Equal(now.Add(3*time.Second)) {
+			t.Fatalf("negative cache: %+v", e)
+		}
+	}
+	// ANLZ appearing during backoff is retried afterwards without reparsing PDB.
+	testfixture.Write(t, filepath.Join(cache.Dir, dev.Address, "1-3"), "PIONEER/USBANLZ/P001/ANLZ0000.EXT", testfixture.EXT())
+	if got := s.shadowComposeDisplay("24", now.Add(time.Second)); !got[0].MetadataOnly {
+		t.Fatal("negative cache ignored")
+	}
+	dev.LastSeen = now.Add(4 * time.Second)
+	prolinkMu.Lock()
+	postedDevices[s][deviceKey(dev)] = dev
+	prolinkMu.Unlock()
+	if got := s.shadowComposeDisplay("24", now.Add(4*time.Second)); got[0].MetadataOnly {
+		t.Fatal("negative cache did not retry")
+	}
+	assertNoShadowAudioFetch(t, s)
+}
+
+func TestCDJDisplayMediumSwapAndShareOff(t *testing.T) {
+	cache, dev := cachedDisplayCDJ(t)
+	s := displayCDJServer(t, cache, dev)
+	before := s.shadowComposeDisplay("24", time.Now())
+	root := filepath.Join(cache.Dir, dev.Address, "1-3")
+	testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb.stamp", []byte("disc-two"))
+	// Change the same track ID's waveform, with no audio service available.
+	os.Remove(filepath.Join(root, "PIONEER/USBANLZ/P001/ANLZ0000.2EX"))
+	after := s.shadowComposeDisplay("24", time.Now())
+	if before[0].Key == after[0].Key || after[0].MetadataOnly {
+		t.Fatalf("medium swap: %+v -> %+v", before, after)
+	}
+	if s.shadow.display.entries[after[0].Key].asset.Waveform != nil {
+		t.Fatal("old detail waveform survived disc swap")
+	}
+	os.WriteFile(filepath.Join(s.uiDir(), "settings.conf"), []byte("prolink_share=0\n"), 0600)
+	off := s.shadowComposeDisplay("24", time.Now())
+	if !off[0].MetadataOnly || off[0].Key == after[0].Key {
+		t.Fatalf("share off used old cache: %+v", off)
+	}
+	assertNoShadowAudioFetch(t, s)
+}
+
+func TestDisplayPeerExpiresAndReleasesConsoleSlots(t *testing.T) {
+	for _, role := range []string{"12", "24", "13"} {
+		t.Run(role, func(t *testing.T) {
+			s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+			defer s.Close()
+			now := time.Now()
+			for i := 1; i <= 2; i++ {
+				p := peerDeck{deckState: deckState{Deck: i, Key: fmt.Sprint(i)}, ip: "192.0.2.1", at: now}
+				s.shadow.peerDecks[i] = p
+				s.shadow.display.entries = map[string]*shadowDisplayEntry{}
+			}
+			for _, p := range s.shadow.peerDecks {
+				s.shadow.display.entries[displayPeerID(p)] = &shadowDisplayEntry{asset: testDisplayAsset()}
+			}
+			if decks := s.shadowComposeDisplay(role, now.Add(15*time.Second)); len(decks) != 2 {
+				t.Fatalf("early expiry: %+v", decks)
+			}
+			if decks := s.shadowComposeDisplay(role, now.Add(15*time.Second+time.Millisecond)); len(decks) != 0 {
+				t.Fatalf("shadow slots still locked: %+v", decks)
+			}
+		})
+	}
+}
+
+func TestShadowAudioFetchCountersDetectCalls(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	assertNoShadowAudioFetch(t, s)
+	done := make(chan struct{})
+	s.shadow.mu.Lock()
+	s.shadowFetch("counter", func(context.Context) (string, error) { close(done); return "", errors.New("counter test") })
+	// Mark busy to exercise the CDJ entry without starting an NFS request.
+	s.shadow.busy["cdj-counter"] = true
+	s.shadowFetchCDJ("cdj-counter", nil, 3, 1)
+	s.shadow.mu.Unlock()
+	<-done
+	if s.shadow.fetchCalls.Load() != 2 || s.shadow.fetchCDJCalls.Load() != 1 {
+		t.Fatal("counters missed a download entry")
+	}
+}
+
+func TestCDJDisplayFiltersMalformedAndExcessLoops(t *testing.T) {
+	a := testDisplayAsset()
+	cues := []rekordbox.Cue{{HotCue: 1, TimeMS: 9000}, {HotCue: 99, TimeMS: 100}, {TimeMS: 500, EndMS: 400, Loop: true}, {TimeMS: 500, EndMS: 9000, Loop: true}}
+	for i := 0; i < 12; i++ {
+		cues = append(cues, rekordbox.Cue{TimeMS: uint32(i * 100), EndMS: uint32(i*100 + 50), Loop: true})
+	}
+	filterCDJDisplayCues(a, cues, 100)
+	if len(a.Loops) != 8 || len(a.Cues) != 9 {
+		t.Fatalf("loop/cue caps: %d/%d", len(a.Loops), len(a.Cues))
+	}
+	if err := validateDisplayAsset(a, a.Key); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range a.Cues {
+		if c.I == 0 {
+			t.Fatal("memory cue became main CUE")
+		}
+	}
+}
+
+func TestCDJOverviewUsesPDBDuration(t *testing.T) {
+	cache, dev := cachedDisplayCDJWith(t, func(root string) {
+		os.Remove(filepath.Join(root, "PIONEER/USBANLZ/P001/ANLZ0000.2EX"))
+		// Only a PWAV overview: last beat is 1500ms, PDB duration is 2000ms.
+		dat := testfixture.DAT()
+		overview := make([]byte, 8+4)
+		binary.BigEndian.PutUint32(overview, 4)
+		copy(overview[8:], []byte{1, 2, 3, 4})
+		dat = append(dat, testfixture.Section("PWAV", 20, overview)...)
+		binary.BigEndian.PutUint32(dat[8:], uint32(len(dat)))
+		testfixture.Write(t, root, "PIONEER/USBANLZ/P001/ANLZ0000.DAT", dat)
+		os.Remove(filepath.Join(root, "PIONEER/USBANLZ/P001/ANLZ0000.EXT"))
+	})
+	s := displayCDJServer(t, cache, dev)
+	decks := s.shadowComposeDisplay("24", time.Now())
+	if len(decks) != 1 || decks[0].MetadataOnly {
+		t.Fatal(decks)
+	}
+	a := s.shadow.display.entries[decks[0].Key].asset
+	if a.DurationMS != 2000 || a.Waveform != nil {
+		t.Fatalf("overview duration: %v detail=%v", a.DurationMS, a.Waveform != nil)
+	}
+}
+
+func TestCDJSourceHostDeterministicForDuplicatePlayerNumbers(t *testing.T) {
+	devices := []prolink.Device{{Number: 2, Address: "192.0.2.9"}, {Number: 2, Address: "192.0.2.1"}}
+	if host := sourceHost(prolink.ExportStatus{}, devices, 2); host.String() != "192.0.2.1" {
+		t.Fatal(host)
+	}
+	slices.Reverse(devices)
+	if host := sourceHost(prolink.ExportStatus{}, devices, 2); host.String() != "192.0.2.1" {
+		t.Fatal(host)
+	}
+}
+
+func TestCDJOverviewFiltersBeatBeyondPDBDuration(t *testing.T) {
+	cache, dev := cachedDisplayCDJWith(t, func(root string) {
+		for _, ext := range []string{".EXT", ".2EX"} {
+			os.Remove(filepath.Join(root, "PIONEER/USBANLZ/P001/ANLZ0000"+ext))
+		}
+		beats := make([]byte, 28)
+		binary.BigEndian.PutUint32(beats[8:], 2)
+		for i, ms := range []uint32{0, 2500} {
+			off := 12 + i*8
+			binary.BigEndian.PutUint16(beats[off:], uint16(i+1))
+			binary.BigEndian.PutUint16(beats[off+2:], 12000)
+			binary.BigEndian.PutUint32(beats[off+4:], ms)
+		}
+		overview := make([]byte, 12)
+		binary.BigEndian.PutUint32(overview, 4)
+		copy(overview[8:], []byte{1, 2, 3, 4})
+		testfixture.Write(t, root, "PIONEER/USBANLZ/P001/ANLZ0000.DAT", testfixture.PMAI(testfixture.Section("PQTZ", 24, beats), testfixture.Section("PWAV", 20, overview)))
+	})
+	s := displayCDJServer(t, cache, dev)
+	decks := s.shadowComposeDisplay("24", time.Now())
+	if len(decks) != 1 || decks[0].MetadataOnly {
+		t.Fatal("rounded PDB duration rejected overview", decks)
+	}
+	a := s.shadow.display.entries[decks[0].Key].asset
+	if a.DurationMS != 2000 || len(a.Beats) != 1 {
+		t.Fatalf("duration=%v beats=%+v", a.DurationMS, a.Beats)
 	}
 }

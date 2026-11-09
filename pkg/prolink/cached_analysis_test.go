@@ -44,7 +44,7 @@ func TestCachedAnalysisReadOnlyAndIdentity(t *testing.T) {
 	if a, _, _ := m.CachedAnalysis(dev, net.ParseIP("127.0.0.2")); a != nil {
 		t.Fatal("disk cache borrowed another host's drive")
 	}
-	if _, err := os.Stat(filepath.Join(m.Dir, "2-3", "MUSIC")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(m.Dir, "127.0.0.1", "2-3", "MUSIC")); !os.IsNotExist(err) {
 		t.Fatalf("audio was cached: %v", err)
 	}
 }

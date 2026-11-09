@@ -123,11 +123,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	exportCfg := cfg.ProlinkExport
 	if exportCfg.MediaCache == nil {
-		cacheRoot := cfg.StateDir
-		if cacheRoot == "" {
-			cacheRoot = s.uiDir()
-		}
-		exportCfg.MediaCache = &prolink.MediaCache{Dir: filepath.Join(cacheRoot, "prolink-media"), Enabled: func() bool { return s.loadUI().ProlinkShare }}
+		exportCfg.MediaCache = &prolink.MediaCache{Dir: prolink.SharedMediaCacheDir(), Enabled: func() bool { return s.loadUI().ProlinkShare }}
 	}
 	if exportCfg.Observe == nil {
 		exportCfg.Observe = func(d prolink.Device) {
