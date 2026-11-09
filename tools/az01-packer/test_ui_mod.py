@@ -56,7 +56,10 @@ class UiModSourceTest(unittest.TestCase):
             layer = bp.shadow_layer("import QtQuick 2.0\n" + source, "track")
             self.assertIn("import QtQuick 2.15",layer)
             self.assertIn("readonly property Item owner: " + owner, layer)
-            self.assertIn("root.transformed : owner", layer)
+            self.assertIn("parent: layoutParent()", layer)
+            self.assertNotIn("parent: root.transformed", layer)
+            self.assertNotIn("z: 10000", layer)
+            self.assertNotIn("scShadowFrame", bp.SHADOW_LAYER)
             self.assertNotIn("@OWNER@", layer)
             self.assertEqual(layer.count("{"), layer.count("}"))
 
