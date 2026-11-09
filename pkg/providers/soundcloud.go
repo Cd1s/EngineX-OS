@@ -712,16 +712,15 @@ func (s *SoundCloud) webPlaylistTracks(ctx context.Context, id string) ([]Track,
 			missing = append(missing, strconv.FormatInt(t.ID, 10))
 		}
 	}
-	for len(missing) > 0 {
-		n := min(50, len(missing))
-		var got []scTrack
-		if err := s.get(ctx, s.base()+"/tracks?"+url.Values{"ids": {strings.Join(missing[:n], ",")}}.Encode(), &got); err != nil {
-			break // what was already read is still worth showing
-		}
-		for _, t := range got {
-			full[t.ID] = t
-		}
-		missing = missing[n:]
+	// Preserve the successful prefix if a detail batch fails, as before.
+	got, _ := collectBatches(ctx, soundcloudPages, (len(missing)+49)/50, func(batch int) ([]scTrack, error) {
+		start := batch * 50
+		var tracks []scTrack
+		err := s.get(ctx, s.base()+"/tracks?"+url.Values{"ids": {strings.Join(missing[start:min(start+50, len(missing))], ",")}}.Encode(), &tracks)
+		return tracks, err
+	})
+	for _, t := range got {
+		full[t.ID] = t
 	}
 	var out []Track
 	for _, ref := range list.Tracks {

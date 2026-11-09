@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -137,6 +138,33 @@ func (j *Jobs) File(t providers.Track) string {
 		os.Chtimes(dl.Path, now, now)
 		j.putFile(key, fetched{t, dl})
 		return dl.Path
+	} else if j.p.Deemix != nil {
+		// A finished provider file may predate the source index (or have been
+		// downloaded via Deemix directly). Discover it before knownCodec/Fetch
+		// would enter acquisition and synchronously fetch/embed artwork again.
+		c := j.p.Deemix
+		j.mu.Unlock()
+		name := ""
+		switch t.Provider {
+		case "deezer":
+			// Match Download's positive numeric-ID rule without interpreting
+			// another provider's numeric ID as a Deezer ID.
+			if id, err := strconv.ParseUint(t.ID, 10, 64); err == nil && id > 0 {
+				name = t.ID
+			}
+		case "spotify", "beatport", "netease":
+			name = t.Provider + "-" + t.ID
+		}
+		if name == "" || t.ID == "" || filepath.Base(name) != name || strings.ContainsAny(name, `/\\`) {
+			return ""
+		}
+		if dl := c.Cached(name); dl != nil {
+			now := time.Now()
+			os.Chtimes(dl.Path, now, now)
+			j.putFile(key, fetched{t, dl})
+			return dl.Path
+		}
+		return ""
 	}
 	j.mu.Unlock()
 	if st, err := os.Stat(path); path == "" || err != nil || !st.Mode().IsRegular() || !j.reusable(t, path) {
