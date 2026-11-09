@@ -784,10 +784,16 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	// An EAAS beacon does not prove this is a deck. Even a matching HTTP response
 	// must not upgrade this hint into permission to send SSH credentials (#164).
 	if d.FromEAAS && d.Board == "" {
+		if o.Uninstall {
+			return fmt.Errorf("%s: 收到未验证的 EAAS 广播，无法执行网络卸载 / received unverified EAAS beacon, cannot uninstall over SSH", label)
+		}
 		return modeAB(ctx, o, d)
 	}
 	cl, err := dialSSH(o, d.IP)
 	if err != nil {
+		if o.Uninstall {
+			return fmt.Errorf("%s: 卸载需通过 SSH 连接碟机，无法连接 SSH / --uninstall requires SSH access to the deck, cannot connect: %w", label, err)
+		}
 		if isAuthErr(err) {
 			return fmt.Errorf("%s: SSH 登录失败 / SSH login failed; use --key or --password", label)
 		}
@@ -1180,8 +1186,8 @@ func diagnoseUSB(ctx context.Context, o *options) {
 		"The deck is on USB ("+dev+") but fastboot cannot see it yet (USB enumeration does not prove fastboot is available). If the deck still shows its main screen, tap Settings → Update → Firmware Update Mode (Reboot) and keep the cable in;"
 	switch {
 	case goos == "windows":
-		zh += "如果已处于 Firmware Update Mode，请检查 fastboot 与驱动设置：原生 Windows 下 Google fastboot 要求设备注册 Android 设备接口 GUID（{F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}）。在设备管理器中选择更新接口安装「Android Device / Android Bootloader Interface」驱动，或使用 Zadig（https://zadig.akeo.ie）选择对应的碟机更新接口（如 Denon DJ SC LIVE 4 Update 或 Numark MIXSTREAM PRO PLUS），勾选编辑接口 GUID 设为上述值安装 WinUSB。更推荐在 WSL 中运行 Linux 安装包并用 usbipd-win 直通 USB（WSL 下 libusb fastboot 原生识别且支持 mke2fs）。"
-		en += " if it already shows Firmware Update Mode, check fastboot and driver configuration: native Windows Google fastboot requires the device to expose the Android device interface GUID ({F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}). In Device Manager, install the 'Android Device / Android Bootloader Interface' driver for the update interface, or use Zadig (https://zadig.akeo.ie) to select the deck update interface (e.g. Denon DJ SC LIVE 4 Update or Numark MIXSTREAM PRO PLUS) and configure the device interface GUID to that value. Alternatively, running the Linux package in WSL with usbipd-win is recommended (WSL libusb fastboot recognizes it directly and supports mke2fs formatting)."
+		zh += "如果已处于 Firmware Update Mode，请检查 fastboot 与驱动设置：原生 Windows 下 Google fastboot 要求设备注册 Android 设备接口 GUID（{F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}）。在设备管理器中选择更新接口安装「Android Device / Android Bootloader Interface」驱动，或使用 Zadig（https://zadig.akeo.ie）选择对应的碟机更新接口（如 Denon DJ SC LIVE 4 Update 或 Numark MIXSTREAM PRO PLUS），勾选编辑接口 GUID 设为上述值安装 WinUSB。更推荐在 WSL 中运行 Linux 安装包并用 usbipd-win 直通 USB（WSL 下安装 fastboot 与 e2fsprogs，且须以 root 身份运行如 wsl -u root，避免 usbipd 设备节点权限不足导致 fastboot 识别为空）。"
+		en += " if it already shows Firmware Update Mode, check fastboot and driver configuration: native Windows Google fastboot requires the device to expose the Android device interface GUID ({F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}). In Device Manager, install the 'Android Device / Android Bootloader Interface' driver for the update interface, or use Zadig (https://zadig.akeo.ie) to select the deck update interface (e.g. Denon DJ SC LIVE 4 Update or Numark MIXSTREAM PRO PLUS) and configure the device interface GUID to that value. Alternatively, running the Linux package in WSL with usbipd-win is recommended (install fastboot and e2fsprogs in WSL, and run as root via 'wsl -u root' to ensure usbipd-forwarded USB device nodes are accessible to fastboot)."
 	case goos == "linux" && geteuid() != 0:
 		zh += "如果碟机屏幕已经处于 Firmware Update Mode，请用 sudo 运行本工具，或添加 udev 规则：\n  " + udevHint
 		en += " if it already shows Firmware Update Mode, run this tool with sudo or add a udev rule:\n  " + udevHint
@@ -1303,8 +1309,8 @@ func buildImage(ctx context.Context, o *options, b *bundleInfo, size int64, name
 			return "", false, errors.New("读不到 data 分区大小，请用 --userdata-backup / cannot read the data partition size; pass --userdata-backup")
 		}
 		if _, err := exec.LookPath("mke2fs"); err != nil {
-			return "", false, errors.New("制作二代机 data 镜像需要 e2fsprogs (mke2fs, debugfs) 与 Python 3：Windows 请在 WSL 中运行 Linux 安装包，并通过 usbipd-win 直通 USB；或在 Linux / macOS 电脑上运行本工具 / " +
-				"building a 2nd-gen data image requires e2fsprogs (mke2fs, debugfs) and Python 3: on Windows run the Linux package in WSL with usbipd-win, or run this tool on Linux or macOS")
+			return "", false, errors.New("制作二代机 data 镜像需要 e2fsprogs (mke2fs, debugfs) 与 Python 3：Windows 请在 WSL 中以 root 运行 Linux 安装包（wsl -u root）并安装 fastboot 与 e2fsprogs，通过 usbipd-win 直通 USB；或在 Linux / macOS 电脑上运行本工具 / " +
+				"building a 2nd-gen data image requires e2fsprogs (mke2fs, debugfs) and Python 3: on Windows run the Linux package in WSL as root (wsl -u root) with fastboot and e2fsprogs installed, forwarding USB via usbipd-win, or run this tool on Linux or macOS")
 		}
 		f, err := os.Create(img)
 		if err != nil {
@@ -1641,11 +1647,13 @@ func run(ctx context.Context, o *options) error {
 	ignoreSIGPIPE()
 	o.defaults()
 	o.guide()
-	if len(fastbootDevices(ctx, o)) > 0 {
-		return modeB(ctx, o)
-	}
-	if l := azUSB(ctx, o); l != "" {
-		return modeAZ(ctx, o, "", l)
+	if !o.Uninstall {
+		if len(fastbootDevices(ctx, o)) > 0 {
+			return modeB(ctx, o)
+		}
+		if l := azUSB(ctx, o); l != "" {
+			return modeAZ(ctx, o, "", l)
+		}
 	}
 	o.say("正在局域网中寻找碟机…", "Looking for decks on the LAN...")
 	var errs []error
@@ -1666,6 +1674,9 @@ func run(ctx context.Context, o *options) error {
 		}
 	}
 	if n == 0 {
+		if o.Uninstall {
+			return errors.New("局域网中未发现可卸载的碟机：--uninstall 需碟机开机、接入同一网络并开启 SSH / no deck found on the LAN to uninstall: --uninstall requires the deck to be powered on, on the same network, with SSH accessible")
+		}
 		if board, line := usbDeck(ctx, o, gen2USB); board != "" { // a stock 2nd-gen deck on USB, in any mode: wait for it to reboot into fastboot
 			return modeAB(ctx, o, deck{Name: line, Board: board})
 		}

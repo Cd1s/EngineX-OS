@@ -248,7 +248,7 @@ Extract the archive and start `Install-EngineX.bat`, `Install-EngineX.command`, 
 3. The installer looks for your deck and downloads its matching bundle. For a stock deck, select **Settings → About / Update → Firmware Update Mode**, reboot and connect USB; Fastboot identifies the model and flashes `/data` after confirmation. For a deck with root SSH enabled, connect both devices to the same network: StageLinQ (UDP 51337) and an EngineX Web UI scan discover it, then the bundle is installed under `/data/enginex` while preserving your library and settings. Discovery may depend on network configuration and StageLinQ availability.
 4. After installation, future releases can be installed on the deck using **Settings → About / Update → Update** over Wi-Fi (#86).
 
-SSH requires root access. USB Fastboot requires `fastboot`, Python 3 and e2fsprogs installed separately; on Windows, use the Linux package in WSL with USB access. **Flashing a new `/data` image erases the data on that partition, including its music, library and settings.** Back up the deck first and disconnect USB drives and SD cards before installation. To preserve `/data`, use `--userdata-backup` with a full image from the same deck. This Beta has not been tested on real hardware.
+SSH requires root access. USB Fastboot requires `fastboot`, Python 3 and e2fsprogs installed separately; on Windows, use the Linux package in WSL as root (`wsl -u root`) with USB access (via `usbipd-win`). **Flashing a new `/data` image erases the data on that partition, including its music, library and settings.** Back up the deck first and disconnect USB drives and SD cards before installation. To preserve `/data`, use `--userdata-backup` with a full image from the same deck. This Beta has not been tested on real hardware.
 
 **SC LIVE 4, SC LIVE 2, PRIME 4+, PRIME GO+, Mixstream Pro+, Mixstream Pro Go, PRIME 4 G2 and Rane SYSTEM ONE** (#61, #68, #69, #76) do not have a hardware eFuse lock; their stock updater (`az01-update` / `az0x-splash`) checks the `AZ0x` container RSA signature (`denon-1` / `rane-1`) in software before writing. On a stock unit, a modified `.img` or a first-generation `.img` (`PRIME4` / `PRIMEGO` / `MIXSTREAMPRO`) is simply rejected in software at the `Verifying` step—nothing is written and the unit is never bricked. For the initial install, use your model's `Data-Bundle.tar.gz` or `EngineX-Installer` (which installs into `/data/enginex` without touching the read-only system partition); once installed, later releases update in one tap from **Settings → About / Update**.
 
@@ -277,18 +277,19 @@ Download the bundle for your model and check its SHA-256 against `SHA256SUMS.txt
    ```
 3. After the reboot Engine starts once in stock form, then restarts by itself with EngineX OS. `Settings → Device` then shows the EngineX entries (`Language`, `Power → Turn Off`, …).
 
-**Method 2: inject into a userdata image on a computer (fastboot).** Only if you have no shell on the unit. Needs a Linux computer with `python3`, `e2fsprogs` (`debugfs`) and `fastboot`, and **a full image of your own `/data` partition**. Flashing replaces the whole `/data` partition, so never use an empty image or someone else's.
-
-1. Keep your backup untouched and work on a copy: `cp my-userdata-backup.img userdata-enginex.img`
-2. Unpack the bundle on the computer and inject it into the copy (the two helper scripts are inside the bundle):
-   ```sh
-   tar -xzf <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
-   python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-userdata.py userdata-enginex.img --bundle <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
-   ```
-3. Put the unit into fastboot mode, connect it over USB, then flash and reboot:
-   ```sh
-   sh <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-fastboot.sh userdata-enginex.img
-   ```
+**Method 2: fastboot flash from a computer.** Only if you have no shell on the unit. Needs a Linux computer (or WSL as root) with `python3`, `e2fsprogs` (`debugfs`) and `fastboot`.
+- **Recommended (EngineX-Installer)**: Run the installer. It detects the deck in fastboot, formats a fresh `/data` partition automatically, injects the bundle and flashes it (internal settings/database reset to defaults; external USB/SD music is unaffected). If you already have a full `/data` backup, pass `--userdata-backup <image>` to preserve your settings. Reverting to stock later removes only the bundle and does not depend on a pre-install backup.
+- **Manual steps (requires a `/data` backup)**:
+  1. Keep your backup untouched and work on a copy: `cp my-userdata-backup.img userdata-enginex.img`
+  2. Unpack the bundle on the computer and inject it into the copy (the two helper scripts are inside the bundle):
+     ```sh
+     tar -xzf <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
+     python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-userdata.py userdata-enginex.img --bundle <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
+     ```
+  3. Put the unit into fastboot mode, connect it over USB, then flash and reboot:
+     ```sh
+     sh <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-fastboot.sh userdata-enginex.img
+     ```
 
 **Method 3: SYSTEM ONE / PRIME 4 G2 without fastboot (USB `1cc5:2027`).** Tap `Settings → About / Update → Firmware Update Mode (Reboot)` and connect USB, then run EngineX-Installer; it does the steps below. This writes a **new, empty** `/data` partition: music, library and settings on the internal storage are erased (USB drives and SD cards are not). By hand (needs `python3`, `e2fsprogs` and `pip3 install pyusb`):
    ```sh

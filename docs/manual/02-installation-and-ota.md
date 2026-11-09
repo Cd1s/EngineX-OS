@@ -214,6 +214,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 4. 准备 `/data` 镜像并用 `host-install-userdata.py`（经 `debugfs`）把数据包和 ALSA 启动钩子写进去：
    - **推荐**：加 `--userdata-backup 你自己这台碟机的data备份.img`，在备份的**副本**上注入，**保留你的音乐和设置**；
    - 不加该参数：程序会新建一个**全新的空 `/data` 镜像**，刷入后**碟机上的音乐、曲库、设置全部清空**。此时程序会特别警告并要求你输入 `yes`。
+   > 注：碟机原厂 U-Boot 的 fastboot 协议不支持导出分区（`fastboot fetch` 未实现），因此在未获得 shell 权限的原厂机上无法直接通过 fastboot 备份 `/data`。首次通过模式 B 刷机若无预先提取的备份，将刷入全新分区（机身内置设置与数据库清空，外接 U 盘/SD 卡不受影响）。二代机回退原厂并不依赖预先备份：EngineX 仅改动 `/data` 分区，刷机后可通过本地脚本（`/data/enginex/bundle/uninstall.sh`）、Web 控制台回退按钮或网络运行安装器 `--uninstall` 参数一键恢复原厂启动（卸载数据包与 ALSA 引导钩子，保留用户曲库、设置与 SSH 密钥，重启后进入原厂 Engine OS）。
 5. `fastboot flash <分区> 镜像`，然后 `fastboot reboot`。
 6. 首次开机先以原厂状态启动一次，随后 Engine 会自动重启并载入 EngineX OS。
 
@@ -227,6 +228,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 4. It prepares the `/data` image and injects the bundle and the ALSA boot hook with `host-install-userdata.py` (through `debugfs`):
    - **Recommended**: pass `--userdata-backup <a backup image of this deck's own data>`; it injects into a **copy** and **keeps your music and settings**;
    - without it the installer makes a **brand-new empty `/data` image**, and **all music, library and settings on the deck are erased**. It warns loudly and asks you to type `yes`.
+   > Note: Stock inMusic U-Boot fastboot does not implement partition dumping (`fastboot fetch` is not implemented). On a locked stock deck without previous shell access, `/data` cannot be pulled over fastboot. The first Mode B install without an existing backup will initialize a fresh partition (internal settings and database are reset to defaults; external USB/SD content is completely untouched). Reverting to stock on Gen 2 does not require a pre-install backup: because EngineX OS only touches `/data` while system partitions remain untouched, you can revert anytime via `/data/enginex/bundle/uninstall.sh`, the Web Console "Revert to Stock" button, or `EngineX-Installer --uninstall` over the network (removes the bundle and ALSA boot hook, preserving user library, settings, and SSH keys, booting stock Engine OS on restart).
 5. `fastboot flash <partition> <image>`, then `fastboot reboot`.
 6. The first boot runs stock Engine once, then Engine restarts by itself with EngineX OS.
 
@@ -240,6 +242,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 4. 準備 `/data` 映像，並用 `host-install-userdata.py`（經 `debugfs`）寫入資料包與 ALSA 啟動 hook：
    - **建議**：加上 `--userdata-backup <這台碟機自己的 data 備份映像>`，在備份的**副本**上注入，**保留音樂與設定**；
    - 不加此參數：程式會建立**全新的空 `/data` 映像**，刷入後**碟機上的音樂、曲庫、設定全部清空**；程式會明確警告並要求輸入 `yes`。
+   > 註：播放機原廠 U-Boot 的 fastboot 協定不支援匯出分割區（未實作 `fastboot fetch`），因此在未取得 shell 權限的原廠機上無法直接透過 fastboot 備份 `/data`。首次透過模式 B 刷機若無預先提取的備份，將刷入全新分割區（機身內建設定與資料庫清空，外接隨身碟/SD 卡不受影響）。二代機回退原廠並不依賴預先備份：EngineX 僅改動 `/data` 分割區，刷機後可透過本機指令稿（`/data/enginex/bundle/uninstall.sh`）、Web 控制台回退按鈕或網路執行安裝器 `--uninstall` 參數一鍵還原原廠開機（移除資料包與 ALSA 引導 hook，保留使用者曲庫、設定與 SSH 金鑰，重開機後進入原廠 Engine OS）。
 5. `fastboot flash <分割區> <映像>`，然後 `fastboot reboot`。
 6. 首次開機先以原廠狀態啟動一次，之後 Engine 會自動重啟並載入 EngineX OS。
 
@@ -258,7 +261,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 | `fastboot` | Android platform-tools，需在 PATH 中 / must be in PATH / 須在 PATH 中 |
 | Python 3 | 注入 `/data` 镜像用 / injects the `/data` image / 用於注入 `/data` 映像 |
 | e2fsprogs | `debugfs`、`mke2fs`（新建镜像时）/ (and `mke2fs` for a new image) / （新建映像時需 `mke2fs`） |
-| Windows | 请在 **WSL** 中用 Linux 包，并让 WSL 能访问 USB / use the Linux package in **WSL** with USB access / 請在 **WSL** 中使用 Linux 版，並讓 WSL 可存取 USB |
+| Windows | 请在 **WSL** 中用 Linux 包，并通过 `usbipd` 直通 USB；WSL 中须安装 `fastboot`、`python3` 与 `e2fsprogs`，并以 `wsl -u root` 运行（避免直通 USB 节点权限不足）/ use the Linux package in **WSL** with USB forwarded via `usbipd`; install `fastboot`, `python3`, and `e2fsprogs` in WSL, and run as root via `wsl -u root` (usbipd device nodes require root) / 請在 **WSL** 中使用 Linux 版，並透過 `usbipd` 直通 USB；WSL 中須安裝 `fastboot`、`python3` 與 `e2fsprogs`，並以 `wsl -u root` 執行（避免直通 USB 節點權限不足） |
 
 ### 2.7 常用参数 / Useful flags / 常用參數
 
@@ -482,15 +485,19 @@ You can do the same from the web console at `http://<deck IP>:8080` on the same 
 
 **第二代 / 2nd gen / 第二代**
 
+二代机系统分区（rootfs）为只读且从未被修改，恢复原厂启动只需移除数据包与 ALSA 引导钩子（保留用户曲库、设置与 SSH 密钥）：
+- **Web 控制台一键回退**：浏览器打开碟机 IP，在 Web 控制台点击「Revert to Stock」（或发送 `POST /v1/sc5000/uninstall-gen2`）。
+- **安装器网络卸载**：电脑端运行 `EngineX-Installer --uninstall`（需碟机在同一局域网并可访问 SSH）。
+- **本地 shell 脚本**：
 ```sh
 # 在碟机的 root shell 里 / in the deck's root shell / 在碟機的 root shell 中
 sh /data/enginex/bundle/uninstall.sh && reboot
 ```
 
 - 中：只移除数据包新增的内容，系统分区本来就没被改过。
-- EN: It removes only what the bundle added; the system partition was never modified.
-- 繁：只移除資料包新增的內容，系統分割區本來就未被改動。
-- 没有 shell 时：用模式 B 的原理，刷回你自己 `/data` 的**原始备份**（未注入的那一份）。/ With no shell, flash back your **original, un-injected** `/data` backup via Fastboot. / 沒有 shell 時，經 Fastboot 刷回你**未注入的原始** `/data` 備份。
+- EN: It removes only what the bundle added; the system partition was never modified. You can also revert in one click via Web Console ("Revert to Stock"), `POST /v1/sc5000/uninstall-gen2`, or `EngineX-Installer --uninstall` over the network (SSH).
+- 繁：只移除資料包新增的內容，系統分割區本來就未被改動。亦可透過 Web 控制台（「Revert to Stock」）、`POST /v1/sc5000/uninstall-gen2` 或 `EngineX-Installer --uninstall`（經網路 SSH）一鍵還原。
+- 无法连接网络或 shell 时：经 Fastboot（AZ04 机型经 1cc5:2027 usbupdate）刷回你自己的原始 `/data` 分区备份。/ With no shell or network access: flash back your original `/data` backup via Fastboot (or 1cc5:2027 usbupdate on AZ04). / 無法連線網路或 shell 時：經 Fastboot（AZ04 機型經 1cc5:2027 usbupdate）刷回自己的原始 `/data` 分割區備份。
 
 **第一代 / 1st gen / 第一代**
 

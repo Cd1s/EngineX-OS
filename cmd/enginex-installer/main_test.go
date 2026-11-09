@@ -1498,8 +1498,8 @@ Status:                     Started
 
 	diagnoseUSB(ctxT(t), o)
 	out := o.Out.(*bytes.Buffer).String()
-	if !strings.Contains(out, "15e4:303f") || !strings.Contains(out, "Numark MIXSTREAM PRO PLUS") || !strings.Contains(out, "Zadig") || !strings.Contains(out, "{F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}") {
-		t.Errorf("diagnoseUSB did not give Zadig WinUSB and Android GUID hint for Mixstream Pro+:\n%s", out)
+	if !strings.Contains(out, "15e4:303f") || !strings.Contains(out, "Numark MIXSTREAM PRO PLUS") || !strings.Contains(out, "Zadig") || !strings.Contains(out, "{F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}") || !strings.Contains(out, "wsl -u root") {
+		t.Errorf("diagnoseUSB did not give Zadig WinUSB, Android GUID, and WSL root hint for Mixstream Pro+:\n%s", out)
 	}
 }
 
@@ -1557,8 +1557,47 @@ func TestBuildImageMissingMke2fsSaysWSL(t *testing.T) {
 	b := &bundleInfo{Path: "test.tar.gz", Version: "5.3.0.3"}
 	o := testOpts(t)
 	_, _, err := buildImage(ctxT(t), o, b, 64<<20, "test.img", "data")
-	if err == nil || !strings.Contains(err.Error(), "WSL") || !strings.Contains(err.Error(), "mke2fs") {
-		t.Fatalf("buildImage without mke2fs err = %v, want WSL / mke2fs guide", err)
+	if err == nil || !strings.Contains(err.Error(), "wsl -u root") || !strings.Contains(err.Error(), "fastboot") || !strings.Contains(err.Error(), "mke2fs") {
+		t.Fatalf("buildImage without mke2fs err = %v, want wsl -u root, fastboot, and mke2fs guide", err)
+	}
+}
+
+func TestRunUninstallSkipsFastbootAndUSB(t *testing.T) {
+	fb := newFastboot(t, "nh08s", true)
+	o := testOpts(t)
+	o.Uninstall = true
+	o.Fastboot = fb.Bin
+	o.ListUSB = func(context.Context) string { return "1cc5:2027 Rane SYSTEM ONE\n" }
+	err := run(ctxT(t), o)
+	if err == nil || !strings.Contains(err.Error(), "--uninstall") {
+		t.Fatalf("run with --uninstall while USB/fastboot present err = %v, want uninstall network SSH error", err)
+	}
+}
+
+func TestModeAUninstallFailsFastWithoutCallingModeAB(t *testing.T) {
+	fb := newFastboot(t, "nh08s", true)
+	o := testOpts(t)
+	o.Uninstall = true
+	o.Fastboot = fb.Bin
+
+	// Case 1: LAN deck discovered but SSH fails -> must NOT call modeAB or flash
+	d := deck{Name: "Denon DJ SC LIVE 4", IP: "127.0.0.1", Board: "jp21", Known: true}
+	err := modeA(ctxT(t), o, d)
+	if err == nil || !strings.Contains(err.Error(), "--uninstall requires SSH access") {
+		t.Fatalf("modeA uninstall with unreachable SSH err = %v, want SSH required error", err)
+	}
+	if f := fb.Flashed(); len(f) > 0 {
+		t.Fatalf("modeA uninstall flashed devices: %v", f)
+	}
+
+	// Case 2: Unverified EAAS candidate -> must NOT call modeAB
+	dEAAS := deck{Name: "Candidate", IP: "127.0.0.1", FromEAAS: true, Board: ""}
+	err = modeA(ctxT(t), o, dEAAS)
+	if err == nil || !strings.Contains(err.Error(), "cannot uninstall over SSH") {
+		t.Fatalf("modeA uninstall with EAAS err = %v, want EAAS rejected error", err)
+	}
+	if f := fb.Flashed(); len(f) > 0 {
+		t.Fatalf("modeA uninstall flashed devices: %v", f)
 	}
 }
 
