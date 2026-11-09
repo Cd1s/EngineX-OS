@@ -159,6 +159,11 @@ func (j *Jobs) File(t providers.Track) string {
 			return ""
 		}
 		if dl := c.Cached(name); dl != nil {
+			// Beatport may upgrade an earlier AAC stream to the subscription's
+			// lossless file. Leave that decision to fromBeatport, as before.
+			if t.Provider == "beatport" && c.Lossless() && !dl.Quality.Lossless {
+				return ""
+			}
 			now := time.Now()
 			os.Chtimes(dl.Path, now, now)
 			j.putFile(key, fetched{t, dl})

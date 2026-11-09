@@ -58,7 +58,7 @@ func TestColdFileDiscoveryKeepsProviderIsolationAndFinalNames(t *testing.T) {
 	if err := testaudio.FLAC(&audio, testaudio.Song(1)); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"42.flac", ".part-99.flac", "spotify-13.flac"} {
+	for _, name := range []string{"42.flac", ".part-99.flac", ".deemix-99-test.part", "spotify-13.flac"} {
 		if err := os.WriteFile(filepath.Join(dir, name), audio.Bytes(), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -70,6 +70,25 @@ func TestColdFileDiscoveryKeepsProviderIsolationAndFinalNames(t *testing.T) {
 		if path := j.File(tr); path != "" {
 			t.Fatalf("%s:%s crossed cache boundary: %q", tr.Provider, tr.ID, path)
 		}
+	}
+}
+
+func TestColdBeatportDiscoveryPreservesLosslessUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "beatport-42.mp4")
+	if err := os.WriteFile(path, []byte("\x00\x00\x00\x18ftyp"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := &deemixclient.Client{DownloadDir: dir}
+	j := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: c})
+	defer j.Close()
+	track := providers.Track{ID: "42", Provider: "beatport"}
+	if got := j.File(track); got != "" {
+		t.Fatalf("lossless request bypassed upgrade: %q", got)
+	}
+	c.PreferMP3 = func() bool { return true }
+	if got := j.File(track); got != path {
+		t.Fatalf("stream quality did not reuse AAC: %q", got)
 	}
 }
 

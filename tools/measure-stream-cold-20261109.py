@@ -64,11 +64,15 @@ done
     # deck's argument is a shell command. Quote both shell boundaries; sshctl
     # itself receives literal argv. Keep output capped, with no raw response body.
     remote = "deck " + args.deck + " " + shlex.quote("sh -c " + shlex.quote(script))
-    result = subprocess.run(
-        ["sshctl", "run", "the build host", "--no-stdin", "--timeout", "60m",
-         "--argv", "sh", "-c", remote],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["sshctl", "run", "the build host", "--no-stdin",
+             "--argv", "sh", "-c", remote],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+            timeout=60 * 60,
+        )
+    except subprocess.TimeoutExpired:
+        parser.exit(1, "measurement exceeded the local 60 minute limit; raw output suppressed\n")
     # Print only our numeric measurement records, even if SSH/deck emits banners.
     allowed = re.compile(r"^(?:[a-z0-9-]+ code=\d{3} ttfb=[0-9.]+ total=[0-9.]+|"
                          r"uptime_s=[0-9.]+ stream_files:bytes=\d+:\d+ engine_temp_files:bytes=\d+:\d+)$")
