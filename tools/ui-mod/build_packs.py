@@ -94,7 +94,6 @@ SERVICES_MAIN = """
 	property bool scShadowLegacyEngine: false // saved preference; switching requires a manual Engine restart
 	property bool scShadowDisplayOnly: true // the /shadow response is authoritative; missing means the safe default
 	property var scShadowDisplay: ({})
-	property var scShadowDisplaySpare: ({})
 	property var scShadowDisplayRequests: ({})
 	property var scShadowGridCache: ({})
 	property var scShadowLiveCueCache: ({})
@@ -145,7 +144,8 @@ SERVICES_MAIN = """
 		if (!m) return null
 		const pos = scShadowPosition(s, Date.now())
 		let best = null
-		for (const c of scShadowCuesFor(d, s)) if (c.i > 0 && c.ms > pos + 50 && (!best || c.ms < best.ms)) best = c
+		const cues = scShadowCuesFor(d, s) // indexed: for...of allocates an iterator per 200 ms tick
+		for (let i = 0; i < cues.length; i++) { const c = cues[i]; if (c.i > 0 && c.ms > pos + 50 && (!best || c.ms < best.ms)) best = c }
 		if (!best) return null
 		const beats = m.beats || []
 		const totalBeats = scShadowBeatAt(beats, best.ms) - scShadowBeatAt(beats, pos)
@@ -202,10 +202,13 @@ SERVICES_MAIN = """
 				if (x.status !== 200) return // including 404: retry this key on the metadata timer
 				const m = JSON.parse(x.responseText)
 				if (m.key !== key) return
-				if (m.detailPending) req.next = Date.now() + 2000
+				// Pending detail: each reply is a 10+ kB JSON with every beat (hundreds of
+				// objects); back off 2, 4, 8 s instead of re-parsing it every 2 s.
+				if (m.detailPending) req.next = Date.now() + 2000 * Math.pow(2, Math.min(req.tries - 1, 2))
 				const next = Object.assign({}, root.scShadowDisplay)
 				next[d] = Object.assign({}, current, {meta: m})
 				root.scShadowDisplay = next
+				root.scGcLoadSeq++ // the parse garbage of a 10+ kB display reply
 			} catch (err) { console.warn("EngineX shadow display: " + err) }
 		}
 		x.send()
@@ -223,29 +226,98 @@ SERVICES_MAIN = """
 			}
 		}
 	}
+	// V4 collects stop-the-world on the GUI thread: 100-180 ms on SC5000 for the
+	// stock heap plus ours, i.e. a visible hitch of every moving waveform. Start
+	// each playback on a clean heap instead: collect once when every deck on this
+	// screen (own and shadow) has stopped, and once after a track or its display
+	// data finished loading while nothing plays. Never while a deck plays.
+	property int scGcLoadSeq: 0
+	property int scGcRuns: 0
+	property real scGcLastMs: 0
+	property var scGcProps: null
+	property var scGcState: ({armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0}) // start-up garbage counts as a stop
+	function scGcCheck() {
+		const now = Date.now(), g = scGcState
+		let p = scGcProps
+		if (!p) {
+			p = []
+			for (let d = 1; d <= 4; d++) p.push({play: scTr("/Engine/Deck" + d + "/PlayState"), length: scTr("/Engine/Deck" + d + "/Track/TrackLength")})
+			if (p.every(x => x.play && x.length)) scGcProps = p // retry until Engine built every deck
+		}
+		let playing = false, sig = 0
+		for (let d = 1; d <= 4; d++) {
+			const x = p[d - 1], s = scShadowDisplay[d]
+			if ((x.play && x.play.state) || (s && s.playing && !s.stale)) playing = true
+			sig = sig * 31 + (x.length ? x.length.unnormalized || 0 : 0)
+		}
+		if (sig !== g.loadSig || scGcLoadSeq !== g.loadSeq) { g.loadSig = sig; g.loadSeq = scGcLoadSeq; g.loadAt = now }
+		if (playing) { g.armed = true; g.quietSince = 0; g.loadAt = 0; return false }
+		if (!g.quietSince) g.quietSince = now
+		// 1.5 s settle: a cue-play tap or a quick pause/play must not collect.
+		const stopped = g.armed && now - g.quietSince >= 1500
+		const loaded = g.loadAt > 0 && now - g.loadAt >= 1500
+		// 3 s apart: a load and its display data arriving a moment later both count.
+		if (!(stopped || loaded) || now - g.lastRun < 3000) return false
+		g.armed = false; g.loadAt = 0; g.lastRun = now
+		gc()
+		scGcRuns++; scGcLastMs = Date.now() - now
+		return true
+	}
+	Timer { interval: 500; repeat: true; running: true; onTriggered: root.scGcCheck() }
+	// True when e shows exactly what s shows: the peer's 500 ms heartbeats and
+	// steady playback then only move the extrapolation anchor (read imperatively
+	// by the displays) instead of re-running every shadow binding per reply.
+	function scShadowSameSample(s, key, e) {
+		if (s.key !== key || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.playing !== !!e.playing ||
+			s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.pitch !== (Number(e.pitch) || 0) ||
+			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
+			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.loading !== !!e.loading) return false
+		if (Array.isArray(e.cues)) {
+			const a = s.liveCues, b = e.cues
+			if (!Array.isArray(a) || a.length !== b.length) return false
+			for (let i = 0; i < b.length; i++) if (a[i].i !== b[i].i || a[i].p !== b[i].p || a[i].n !== b[i].n || a[i].c !== b[i].c) return false
+		}
+		return true
+	}
 	function scShadowApplyDisplay(decks) {
-		const next = scShadowDisplaySpare, now = Date.now()
+		const now = Date.now()
+		let next = null // copied on the first real change only
 		for (let d = 1; d <= 4; d++) {
 			let e = null
 			for (let i = 0; i < decks.length; i++) if (Number(decks[i].deck) === d) { e = decks[i]; break }
+			const old = scShadowData(d)
 			if (!e || !scDeckLocked(d) || !(e.key || e.loading)) {
-				delete next[d]; delete scShadowDisplayRequests[d]; delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
+				if (old) { if (!next) next = Object.assign({}, scShadowDisplay); delete next[d] }
+				delete scShadowDisplayRequests[d]; delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
 				continue
 			}
-			const old = scShadowData(d), key = String(e.key || ""), sample = next[d] || {}
-			sample.key = key; sample.title = e.title || ""; sample.artist = e.artist || ""
-			sample.playing = !!e.playing; sample.stale = !!e.stale; sample.metadataOnly = !!e.metadataOnly
-			sample.positionMs = Number(e.positionMs) || 0; sample.at = Number(e.at) || now; sample.pitch = Number(e.pitch) || 0
-			sample.cuePos = typeof e.cuePos === "number" ? e.cuePos : undefined
-			sample.master = !!e.master; sample.sync = !!e.sync; sample.beat = Number(e.beat) || 0; sample.bpm = Number(e.bpm) || 0
-			sample.loading = !!e.loading; sample.meta = old && old.key === key ? old.meta : null
-			sample.liveCues = Array.isArray(e.cues) ? e.cues : old && old.key === key ? old.liveCues : null
+			const key = String(e.key || ""), pos = Number(e.positionMs) || 0, at = Number(e.at) || now
+			const same = !!old && scShadowSameSample(old, key, e)
+			if (same) {
+				// Same picture: a paused deck at the same spot, or a playing one within
+				// 12 ms of its line (the scroll keeps running within 12 ms too).
+				// Refresh the anchor in place well before the 3 s expiry.
+				const drift = old.playing ? old.positionMs + (at - old.at) * Math.max(0, 1 + old.pitch / 100) - pos : old.positionMs - pos
+				if (Math.abs(drift) <= (old.playing ? 12 : 0)) {
+					old.positionMs = pos; old.at = at; old.beat = Number(e.beat) || 0
+					continue
+				}
+			}
+			const sample = {key: key, title: e.title || "", artist: e.artist || "", playing: !!e.playing, stale: !!e.stale,
+				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0,
+				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master, sync: !!e.sync,
+				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, loading: !!e.loading,
+				meta: old && old.key === key ? old.meta : null,
+				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
+			if (!next) next = Object.assign({}, scShadowDisplay)
 			next[d] = sample
 			if (!old || old.key !== key) delete scShadowDisplayRequests[d]
 		}
-		scShadowDisplaySpare = scShadowDisplay
-		scShadowDisplay = next
-		for (let d = 1; d <= 4; d++) if (next[d] && next[d].key) scShadowDisplayFetch(d, next[d].key)
+		if (next) scShadowDisplay = next
+		for (let d = 1; d <= 4; d++) {
+			const s = scShadowDisplay[d]
+			if (s && s.key && (!s.meta || s.meta.detailPending)) scShadowDisplayFetch(d, s.key)
+		}
 	}
 	// #99: five Layout Manager views. Engine has three and forgets the selected one
 	// at every start, and the 4-deck layout used to force its lanes over the user's
@@ -380,7 +452,7 @@ SERVICES_MAIN = """
 	// a playing shadow deck only takes the source's pitch and runs on its own audio
 	// clock (crystals agree to ~20 ppm).
 	// Latency: the sender samples its decks every 40 ms and posts at once on an
-	// edge (play, CUE, a jump, pitch, track), else every 250 ms; its Go pushes the
+	// edge (play, CUE, a jump, pitch, track), else every 500 ms; its Go pushes the
 	// post over UDP and the receiver's Go wakes the long poll below. The receiver
 	// applies a play or stop edge on the first update, never behind a lock.
 	property var scShadowAt: ({})
@@ -553,6 +625,9 @@ SERVICES_MAIN = """
 	property var scShadowPollRequest: null
 	property string scShadowResponseVersion: ""
 	property bool scShadowPostPending: false
+	property string scShadowLinkId: ""
+	property real scShadowLinkAt: -Infinity
+	property var scShadowTextAt: ({})
 	function scShadowProperties(d) {
 		let p = scShadowDeckProperties[d]
 		if (p) return p
@@ -584,21 +659,31 @@ SERVICES_MAIN = """
 			scShadowOwn.length = scShadowMine.length
 		}
 		const mine = scShadowMine
-		let edge = scShadowPostPending || now - scShadowPostAt >= 250
+		let edge = scShadowPostPending
 		for (let n = 0; n < mine.length; n++) {
 			const d = mine[n], g = scShadowProperties(d), p = scShadowPrev[d]
 			const s = scShadowSampleSpare[d] || {}
-			const sr = g.rate.value, shown = parseFloat(g.shown.string) || 0
+			const sr = g.rate.value
 			const ob = g.original.unnormalized || 0, cb = g.current.unnormalized || 0
-			const exact = ob > 0 && cb > 0 ? Math.round(((cb / ob - 1) * 100) * 100) / 100 : NaN
+			// 25 Hz: every .string read allocates a JS string (and counts toward V4's
+			// GC trigger). Re-read the strings only when they can have changed.
+			if (p && p.bpm === ob && p.currentBpm === cb && now - p.pitchAt < 1000) { s.pitch = p.pitch; s.pitchAt = p.pitchAt }
+			else {
+				const shown = parseFloat(g.shown.string) || 0
+				const exact = ob > 0 && cb > 0 ? Math.round(((cb / ob - 1) * 100) * 100) / 100 : NaN
+				s.pitch = Math.abs(exact - shown) < 0.15 ? exact : shown; s.pitchAt = now
+			}
 			s.ps = !!g.play.state
 			s.posMs = sr > 0 ? g.position.unnormalized / sr * 1000 : 0
-			s.pitch = Math.abs(exact - shown) < 0.15 ? exact : shown
 			s.bpm = ob; s.currentBpm = cb; s.at = now; s.jumps = p ? p.jumps : 0
-			s.net = g.loaded.state ? g.uri.string || g.net.string || "" : ""
+			s.loaded = !!g.loaded.state
+			if (p && p.loaded === s.loaded && now - p.netAt < 500) { s.net = p.net; s.netAt = p.netAt }
+			else { s.net = s.loaded ? g.uri.string || g.net.string || "" : ""; s.netAt = now }
 			s.cue = !s.ps && !!g.cueLED.state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
 			s.playing = s.ps || s.cue
-			s.master = !!g.master.state; s.sync = (g.sync.string || "Off") !== "Off"
+			s.master = !!g.master.state
+			if (p && now - p.syncAt < 200) { s.sync = p.sync; s.syncAt = p.syncAt }
+			else { s.sync = (g.sync.string || "Off") !== "Off"; s.syncAt = now }
 			if (p) {
 				const expect = p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0)
 				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
@@ -607,7 +692,12 @@ SERVICES_MAIN = """
 			scShadowPrev[d] = s
 			scShadowSampleSpare[d] = p || {}
 		}
-		if (edge) scShadowPost(mine, now)
+		// Every edge (play, CUE, jump, pitch, master, sync, track) posts at once. The
+		// heartbeat only proves liveness (Go marks a peer stale after 2 s) and corrects
+		// the peer's extrapolation, which runs on the exact pitch: 500 ms keeps 1.5 s of
+		// margin for a busy GUI thread. Each post and the peer's reply are JS strings
+		// that drive V4's GC trigger (250 ms here meant a GC every ~75-150 s of play).
+		if (edge || now - scShadowPostAt >= 500) scShadowPost(mine, now)
 		if (scShadowDebug) scShadowDbgFlush(now)
 	}
 	function scShadowPost(mine, now) {
@@ -630,30 +720,41 @@ SERVICES_MAIN = """
 			for (let i = 0; i < mine.length; i++) if (scShadowPrev[mine[i]].playing) { lead = mine[i]; break }
 			if (!lead) lead = mine[0]
 		}
-		const link = (root.scTr("/Network/NetworkId") || scShadowEmptyObject).string || ""
+		if (now - scShadowLinkAt >= 2000) { scShadowLinkId = (root.scTr("/Network/NetworkId") || scShadowEmptyObject).string || ""; scShadowLinkAt = now }
+		const link = scShadowLinkId
 		const own = scShadowOwn
 		for (let n = 0; n < mine.length; n++) {
 			const d = mine[n], s = scShadowPrev[d], g = scShadowProperties(d)
 			let cc = scShadowCueCache[d]
-			if (!cc) cc = scShadowCueCache[d] = {net: "?", at: 0, cues: [], pool: []}
+			if (!cc) cc = scShadowCueCache[d] = {net: "?", at: 0, textAt: 0, cues: [], pool: []}
 			if (cc.net !== s.net || now - cc.at >= 500) {
+				// Names and colours are strings: re-read them with a new or moved cue, else every 2 s.
+				const text = cc.net !== s.net || now - cc.textAt >= 2000
 				let count = 0
 				for (let i = 0; s.net && i < 8; i++) {
 					const q = g.cues[i]
 					if (!q.exists.state) continue
 					const c = cc.pool[i] || (cc.pool[i] = {})
-					c.i = i + 1; c.p = q.position.value; c.n = q.name.string || ""; c.c = String(q.color.color || "#ffffff")
+					const pos = q.position.value
+					if (text || c.i !== i + 1 || c.p !== pos || cc.cues[count] !== c) { c.n = q.name.string || ""; c.c = String(q.color.color || "#ffffff") }
+					c.i = i + 1; c.p = pos
 					cc.cues[count++] = c
 				}
 				cc.cues.length = count; cc.net = s.net; cc.at = now
+				if (text) cc.textAt = now
 			}
 			const o = own[n] || (own[n] = {})
+			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000)
 			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
 			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.posMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
-			o.title = s.net ? g.title.string || g.trackName.string || "" : ""
-			o.artist = s.net ? g.artist.string || "" : ""; o.dbg = ""
+			// Titles arrive after the load: re-read on a new track and every 2 s.
+			if (fresh) {
+				o.title = s.net ? g.title.string || g.trackName.string || "" : ""
+				o.artist = s.net ? g.artist.string || "" : ""; scShadowTextAt[d] = now
+			}
+			o.dbg = ""
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks")
@@ -2573,51 +2674,106 @@ SHADOW_LAYER = r"""
         readonly property bool overview: "@KIND@" === "overview"
         readonly property bool performance: "@KIND@" === "performance"
         readonly property bool graphical: wave || overview
-        readonly property var sample: active ? root.scShadowData(deck) : null
-        readonly property var meta: sample && sample.meta
+        // Only a displayed layer follows the shadow state. Stock views keep hidden
+        // instances of every lane (16-18 waveforms per player); each one used to
+        // re-run its whole binding tree on every poll reply (16-20 ms GUI time).
+        readonly property bool live: active && inheritedVisible
+        readonly property var sample: live ? root.scShadowData(deck) : null
+        // var properties notify on every write, even with the same object: copy
+        // meta/cues/loops/grid/cueInfo only when the object itself changes.
+        property var meta: null
+        property var cues: root.scShadowEmptyArray
+        property var loops: root.scShadowEmptyArray
         property real position: 0
         property bool stale: false
         property var cueInfo: null
-        property var grid: []
+        property var grid: root.scShadowEmptyArray
+        property int gridSlots: 0 // grows in powers of two while shown; hidden layers keep none
+        property int tileLo: 0
+        property int tileHi: 31
+        onLiveChanged: if (!live) gridSlots = 0
         property real gridAnchor: -Infinity
-        // The poll clock updates targets, not scene geometry or image sources.
+        function refreshSample() {
+            const s = sample, m = s && s.meta || null
+            if (m !== meta) meta = m
+            const c = graphical && s ? root.scShadowCuesFor(deck, s) : root.scShadowEmptyArray
+            if (c !== cues) cues = c
+            refreshPosition()
+            if (wave) refreshDetails()
+        }
+        // The waveform scrolls on the render thread: one XAnimator per speed change,
+        // no per-frame property writes or bindings on the GUI thread. The overview
+        // moves < 4 px/s and follows the 200 ms clock without animation.
+        property real scrollFrom: 0
+        property real scrollAt: 0
+        property real scrollSpeed: 0
+        function contentX(ms) { return -(ms - span * playhead) / span * width }
         function refreshPosition() {
-            motion.stop()
             const now = Date.now(), s = sample
-            position = active ? root.scShadowPosition(s, now) : 0
-            stale = !!s && (s.stale || now - s.at >= root.scShadowExpiryMs)
-            if (active && visible && s && s.playing && !stale) {
-                motion.from = position
-                motion.duration = Math.max(1, Math.min(400, root.scShadowExpiryMs - Math.max(0, now - s.at)))
-                motion.to = Math.min(duration, position + motion.duration * Math.max(0, 1 + s.pitch / 100))
-                motion.start()
+            const pos = s ? root.scShadowPosition(s, now) : 0
+            if (pos !== position) position = pos
+            const st = !!s && (s.stale || now - s.at >= root.scShadowExpiryMs)
+            if (st !== stale) stale = st
+            if (!wave) return
+            const speed = live && visible && s && s.playing && !st && pos < duration ? Math.max(0, 1 + s.pitch / 100) : 0
+            if (speed > 0) {
+                // Keep the running scroll unless it is off by more than 12 ms of track.
+                if (scroll.running && speed === scrollSpeed && Math.abs(scrollFrom + (now - scrollAt) * speed - pos) <= 12) return
+                scroll.stop()
+                scrollFrom = pos; scrollAt = now; scrollSpeed = speed
+                scroll.from = contentX(pos)
+                scroll.to = contentX(duration)
+                scroll.duration = Math.max(1, Math.round((duration - pos) / speed))
+                scroll.start()
+            } else {
+                scroll.stop()
+                scrollSpeed = 0
+                scMoving.x = contentX(pos)
             }
         }
+        function restartScroll() { scroll.stop(); scrollSpeed = 0; refreshPosition() }
         function refreshDetails() {
-            if (!graphical) cueInfo = active ? root.scNextCueInfo(deck, 0) : null
+            if (!graphical) {
+                const ci = live ? root.scNextCueInfo(deck, 0) : null
+                if (ci !== cueInfo) cueInfo = ci
+            }
             if (!wave || !meta) {
                 if (grid.length) grid = root.scShadowEmptyArray
                 gridAnchor = -Infinity
                 return
             }
             const padding = Math.min(span / 2, 10000)
-            if (Math.abs(start - gridAnchor) > padding) {
+            // Re-anchor at half the padding: the view (scrolled on the render thread)
+            // runs up to one 200 ms clock ahead of start.
+            if (Math.abs(start - gridAnchor) > padding / 2) {
                 gridAnchor = start
-                grid = root.scShadowGrid(deck, meta, start - padding, start + span + padding)
+                // Only the tiles under this window are drawn: every Image is its own
+                // texture batch, and clipped ones still cost the render thread.
+                const tileMs = totalPixels > 0 ? tilePixels / totalPixels * waveformDuration : 0
+                const lo = tileMs > 0 ? Math.floor((start - padding) / tileMs) : 0, hi = tileMs > 0 ? Math.floor((start + span + padding) / tileMs) : 31
+                if (lo !== tileLo) tileLo = lo
+                if (hi !== tileHi) tileHi = hi
+                const rows = root.scShadowGrid(deck, meta, start - padding, start + span + padding)
+                if (rows.length > gridSlots) gridSlots = Math.max(32, 1 << Math.ceil(Math.log2(rows.length)))
+                if (rows !== grid) grid = rows
             }
         }
-        onSampleChanged: { refreshPosition(); if (wave) refreshDetails() }
-        onVisibleChanged: refreshPosition()
-        onMetaChanged: { gridAnchor = -Infinity; refreshPosition(); refreshDetails() }
-        onSpanChanged: { gridAnchor = -Infinity; refreshPosition(); refreshDetails() }
-        NumberAnimation { id: motion; target: scDisplay; property: "position"; easing.type: Easing.Linear }
-        Timer { interval: 200; repeat: true; running: scDisplay.active && scDisplay.visible; onTriggered: { scDisplay.refreshPosition(); scDisplay.refreshDetails() } }
+        onSampleChanged: refreshSample()
+        onVisibleChanged: restartScroll()
+        onWidthChanged: restartScroll()
+        onMetaChanged: {
+            const l = graphical && meta && meta.loops || root.scShadowEmptyArray
+            if (l !== loops) loops = l
+            gridAnchor = -Infinity; restartScroll(); refreshDetails()
+        }
+        onSpanChanged: { gridAnchor = -Infinity; restartScroll(); refreshDetails() }
+        // The stale cut-off and the grid window still need a clock between replies.
+        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible; onTriggered: { scDisplay.refreshPosition(); scDisplay.refreshDetails() } }
         readonly property real duration: meta && meta.durationMs > 0 ? meta.durationMs : 1
         readonly property real waveformDuration: meta && meta.waveformDurationMs > 0 ? meta.waveformDurationMs : duration
         readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
         readonly property real playhead: overview ? position / duration : 0.5
         readonly property real start: overview ? 0 : position - span * playhead
-        readonly property var cues: active ? root.scShadowCuesFor(deck, sample) : []
         readonly property var tiles: meta && meta.detail && Array.isArray(meta.waveformTiles) ? meta.waveformTiles : []
         readonly property int totalPixels: meta && meta.waveformWidth > 0 && meta.waveformWidth <= 65536 ? meta.waveformWidth : 0
         readonly property int tilePixels: meta && meta.tileWidth > 0 ? Math.min(2048, meta.tileWidth) : 2048
@@ -2711,7 +2867,8 @@ SHADOW_LAYER = r"""
             id: scMoving
             objectName: "EngineX_Shadow_Content"
             width: scDisplay.width; height: scDisplay.height
-            x: -scDisplay.start / scDisplay.span * width
+            // x: written by refreshPosition / XAnimator only (track coordinates inside).
+            XAnimator { id: scroll; target: scMoving; easing.type: Easing.Linear }
         Image {
             visible: scDisplay.graphical && source !== ""
             source: scDisplay.graphical && !scDisplay.tiled ? scDisplay.waveAsset(scDisplay.imageUrl) : ""
@@ -2736,6 +2893,7 @@ SHADOW_LAYER = r"""
                 readonly property real startMs: index * scDisplay.tilePixels / scDisplay.totalPixels * scDisplay.waveformDuration
                 readonly property real endMs: (index * scDisplay.tilePixels + pixels) / scDisplay.totalPixels * scDisplay.waveformDuration
                 source: scDisplay.waveAsset(scDisplay.tiles[index])
+                visible: index >= scDisplay.tileLo && index <= scDisplay.tileHi
                 sourceSize.width: Math.min(2048, pixels)
                 sourceSize.height: 128
                 asynchronous: true; cache: false; smooth: true
@@ -2763,19 +2921,24 @@ SHADOW_LAYER = r"""
                 opacity: scDisplay.stale ? 0.55 : 1
             }
         }
+        // A fixed pool of grid lines: a new grid window (every half span of play)
+        // re-reads grid[index] instead of destroying and creating every delegate,
+        // which was the main JS garbage of a playing shadow deck.
         Repeater {
-            model: scDisplay.grid
+            model: scDisplay.gridSlots
             delegate: Rectangle {
-                required property var modelData
-                x: scDisplay.screenX(modelData.ms)
+                required property int index
+                readonly property var beat: index < scDisplay.grid.length ? scDisplay.grid[index] : null
+                visible: beat !== null
+                x: beat ? scDisplay.screenX(beat.ms) : 0
                 height: scDisplay.height
-                width: modelData.number % 4 === 0 ? 2 : 1
+                width: beat && beat.number % 4 === 0 ? 2 : 1
                 color: "white"
-                opacity: modelData.number % 4 === 0 ? 0.55 : 0.22
+                opacity: beat && beat.number % 4 === 0 ? 0.55 : 0.22
             }
         }
         Repeater {
-            model: scDisplay.graphical && scDisplay.meta ? scDisplay.meta.loops || [] : []
+            model: scDisplay.loops
             delegate: Rectangle {
                 required property var modelData
                 readonly property real clipLeft: scDisplay.screenX(modelData.startMs)
@@ -2788,7 +2951,7 @@ SHADOW_LAYER = r"""
             }
         }
         Repeater {
-            model: scDisplay.graphical ? scDisplay.cues : []
+            model: scDisplay.cues
             delegate: Item {
                 required property var modelData
                 x: scDisplay.screenX(modelData.ms)
