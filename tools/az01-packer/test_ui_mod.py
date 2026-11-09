@@ -219,49 +219,6 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn(r'"\t\t\tparent: Overlay.overlay ? Overlay.overlay : uiContainer\n"', SRC)
         self.assertIn(r'"\t\t\tanchors.fill: parent\n"', SRC)
 
-    def test_scaling_matrix_all_generations_and_scales(self):
-        # Resolution inventory:
-        # Gen 2 landscape (1280x800): SC LIVE 4 (JP21), SC LIVE 2 (JP20), PRIME 4+ (JC11S),
-        #                            PRIME GO+ (JP11S), MIXSTREAM PRO+ (NH08S),
-        #                            MIXSTREAM PRO GO (NH10), PRIME 4 G2 (JP24)
-        # Gen 2 portrait (800x1280):  SYSTEM ONE (RMZ2)
-        # Gen 1 16:9 (1280x720):      SC5000 (JP07), SC5000M (JP08), PRIME GO (JP11),
-        #                            PRIME 2 (JC16), MIXSTREAM PRO (NH08)
-        # Gen 1 16:10 (1280x800):     PRIME 4 (JC11)
-        # Gen 1 wide (1440x900):      SC6000 (JP13), SC6000M (JP14)
-        resolutions = {
-            "gen2_landscape_1280x800": (1280, 800),
-            "gen2_portrait_rmz2_800x1280": (800, 1280),
-            "gen1_16x9_sc5000_1280x720": (1280, 720),
-            "gen1_16x10_prime4_1280x800": (1280, 800),
-            "gen1_wide_sc6000_1440x900": (1440, 900),
-        }
-        scales = [75, 80, 85, 90, 95, 100, 105, 110]
-        for name, (w, h) in resolutions.items():
-            for s in scales:
-                scale_factor = s / 100.0
-                logical_w = w * 100 / s
-                logical_h = h * 100 / s
-                # With anchors.fill: parent inside scaled uiContainer:
-                rendered_w = logical_w * scale_factor
-                rendered_h = logical_h * scale_factor
-                self.assertAlmostEqual(rendered_w, w, places=5,
-                                       msg=f"{name} at {s}% width mismatch")
-                self.assertAlmostEqual(rendered_h, h, places=5,
-                                       msg=f"{name} at {s}% height mismatch")
-                # At scale 100 (stock / default), logical equals physical
-                if s == 100:
-                    self.assertEqual(logical_w, w)
-                    self.assertEqual(logical_h, h)
-                # Unfixed behavior: unanchored items had fixed size (w, h) inside
-                # scaled container, shrinking to w * (s / 100) (e.g. 75% at s=75).
-                unfixed_rendered_w = w * scale_factor
-                unfixed_rendered_h = h * scale_factor
-                if s != 100:
-                    self.assertNotAlmostEqual(unfixed_rendered_w, w, places=1)
-                    self.assertNotAlmostEqual(unfixed_rendered_h, h, places=1)
-
-
 @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
 class ShadowDisplayTest(unittest.TestCase):
     """Run the actual QML JS functions with a fake clock and an Engine that rejects all access."""
@@ -317,6 +274,34 @@ globalThis.XMLHttpRequest = class {
 """
         res = subprocess.run(["node", "-e", setup + "\n".join(functions) + "\n" + body], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_same_track_line_state_changes_are_applied(self):
+        self.js(r"""
+scPlayer = false; scFourDeckRole = '12';
+scShadowApplyAll([{deck:3,key:'cdj:same',lineIn:false}]);
+assert.equal(scShadowData(3).lineIn, false);
+scShadowApplyAll([{deck:3,key:'cdj:same',lineIn:true}]);
+assert.equal(scShadowData(3).lineIn, true);
+scShadowApplyAll([{deck:3,key:'cdj:same',lineIn:false}]);
+assert.equal(scShadowData(3).lineIn, false);
+""")
+
+    def test_line_hint_stays_stock_without_cdj(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            patch = bp.edits(False)[bp.ROOT + "Views/Common/Waveform/WaveformLineInHint.qml"][0][1]
+        finally:
+            bp.ROOT = old_root
+        expression = patch.strip().removeprefix("visible: ")
+        self.js("globalThis.deckIndex = 3; globalThis.pLine = {translator:{state:true}};\n"
+                "scPlayer = false; scFourDeckRole = '12';\n"
+                "scShadowApplyAll([{deck:3,key:'peer:sc'}]);\n"
+                f"assert.equal(!!({expression}), true);\n"
+                "scShadowApplyAll([{deck:3,key:'cdj:fixture',lineIn:true}]);\n"
+                f"assert.equal(!!({expression}), false);\n"
+                "scShadowApplyAll([]);\n"
+                f"assert.equal(!!({expression}), true);\n")
 
     def test_cdj_cached_analysis_uses_normal_display_and_console_free_lanes(self):
         self.js(r"""
@@ -981,8 +966,7 @@ class UiModBuildTest(unittest.TestCase):
         qrc = LAB / "5.3.0" / "qrc"
         if not qrc.is_dir():
             self.skipTest(f"{qrc} not found (run on Oracle-Batam-arm)")
-        tmp_dir = Path("/var/tmp/s175b") if Path("/var/tmp/s175b").is_dir() else None
-        with tempfile.TemporaryDirectory(prefix="ui-mod-test-", dir=tmp_dir) as tmp:
+        with tempfile.TemporaryDirectory(prefix="ui-mod-test-") as tmp:
             res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(Path(tmp) / "packs")],
                                  capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, res.stderr)

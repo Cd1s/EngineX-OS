@@ -914,11 +914,9 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	out := []deckState{}
 	var ver uint64
 	if role != "" {
-		if r.URL.Query().Has("line") {
-			s.shadow.mu.Lock()
-			s.shadow.lines = parseLineChannels(r.URL.Query().Get("line"))
-			s.shadow.mu.Unlock()
-		}
+		s.shadow.mu.Lock()
+		s.shadow.lines = parseLineChannels(r.URL.Query().Get("line"))
+		s.shadow.mu.Unlock()
 		s.shadowWake()
 		if seen, err := strconv.ParseUint(r.URL.Query().Get("ver"), 10, 64); err == nil {
 			s.shadow.wait(r.Context(), seen, s.shadow.pollWait(v.ShadowLegacyEngine, time.Now()))
@@ -992,24 +990,14 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		consoleLines = slices.Clone(lines[0])
 		slices.Sort(consoleLines)
 	}
-	if len(consoleLines) > 0 {
-		for _, deck := range consoleLines {
-			shadowDecks = append(shadowDecks, deck)
-			if p, ok := sh.peerDecks[deck]; ok && !p.Stale && now.Sub(p.at) < 2*time.Second {
-				placed[deck] = p
-				usedPeer[deck] = true
-			}
+	for deck := 1; deck <= 4; deck++ {
+		if strings.Contains(role, strconv.Itoa(deck)) {
+			continue
 		}
-	} else {
-		for deck := 1; deck <= 4; deck++ {
-			if strings.Contains(role, strconv.Itoa(deck)) {
-				continue
-			}
-			shadowDecks = append(shadowDecks, deck)
-			if p, ok := sh.peerDecks[deck]; ok && !p.Stale && now.Sub(p.at) < 2*time.Second {
-				placed[deck] = p
-				usedPeer[deck] = true
-			}
+		shadowDecks = append(shadowDecks, deck)
+		if p, ok := sh.peerDecks[deck]; ok && !p.Stale && now.Sub(p.at) < 2*time.Second {
+			placed[deck] = p
+			usedPeer[deck] = true
 		}
 	}
 	// #160: a linked player whose deck number overlaps with our own role (e.g. an
@@ -1038,9 +1026,7 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		}
 		d := p.deckState
 		d.Deck = deck
-		if len(consoleLines) > 0 {
-			d.LineIn = true
-		}
+		d.LineIn = false
 		// Two standalone players share master natively over Engine Link; an
 		// all-in-one console linked to an SC5000/SC6000 (#160) does not, so keep
 		// the peer's master flag when this unit is not a standalone player.
@@ -1073,6 +1059,12 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 	}
 	var lineFree []int
 	if len(consoleLines) > 0 {
+		free = nil
+		for _, deck := range consoleLines {
+			if _, occupied := placed[deck]; !occupied {
+				free = append(free, deck)
+			}
+		}
 		lineFree = free
 	}
 	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
