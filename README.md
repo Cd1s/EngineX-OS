@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/assets/hero-banner.svg" alt="EngineX OS 5.3.0.3" width="100%">
+<img src="./docs/assets/hero-banner.svg" alt="EngineX OS 5.3.0.4" width="100%">
 
 <br>
 
@@ -18,7 +18,7 @@
 
 <br>
 
-**EngineX OS 5.3.0.3** is a custom system rebuilt on the official Engine OS 5.3.0+ base, for 16 Denon DJ, Numark and Rane standalone units:
+**EngineX OS 5.3.0.4** is a custom system rebuilt on the official Engine OS 5.3.0+ base, for 16 Denon DJ, Numark and Rane standalone units:
 `SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro` · `SC LIVE 4` · `SC LIVE 2` · `PRIME 4+` · `PRIME GO+` · `Mixstream Pro+` · `Mixstream Pro Go` · `PRIME 4 G2` · `Rane SYSTEM ONE`.
 
 The first eight take a USB-stick `.img`; the eight second-generation units check the firmware signature in software before anything is written, so they take a `/data` bundle instead (Beta, see [How to Install](#install)).
@@ -68,7 +68,7 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 - **Wi-Fi**: the deck's built-in Wi-Fi module is limited by the board's 25 MHz SDR12 SDIO bus to about `9–10 MB/s` in practice. Use the Gigabit port to copy large libraries.
 
 
-### 7. New in 5.3.0.4 (in development, not yet released)
+### 7. New in 5.3.0.4
 - **4-deck link: clean unload and real streaming titles (#49)**: when the other player powers off, reboots or ejects its track, it sends a goodbye packet; after a 350 ms debounce this deck unloads its shadow deck (`Unload` + `UnSync`, handing `MASTER` back automatically) and clears the leftover waveform and track. The `RemoteState` subscription that could deadlock is gone, so a partner powering off never blocks you from switching streaming sources. Streaming tracks now show the real `Artist - Title` on the shadow deck instead of an internal numeric cache file name;
 - **Smoother UI under load**: a cached `scTr` QML property translator and a 500 ms throttle on `QuickCue` remove the brief stutter when pressing `MASTER` / `SYNC` and cut the CPU use of Engine's `EMain` GUI thread;
 - **One Stems button in the track-list swipe menu**: local tracks that already carry Engine's own `Stem` action are de-duplicated into a single localized `Stems` button (`分轨 Stems` / `分軌 Stems`), so swiping left on a local, streaming or LAN track looks and works the same;
@@ -76,7 +76,12 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 - **OmniSource playlist isolation (#105)**: with OmniSource on, the search bar still searches all streaming services and every USB drive, but a streaming service's own playlist page no longer mixes in `[USB: ...]` entries or other services' playlists;
 - **SoundCloud Liked Tracks fallback (#150)**: when the user's OAuth `refresh_token` has expired and SoundCloud answers `HTTP 400`, the deck falls back to the app token and the public profile API to load `Liked Tracks & Sets`;
 - **Spotify Connect on the LAN (#150)**: the deck advertises `_spotify-connect._tcp` over Avahi mDNS plus a built-in pure-Go `_spotify-connect._tcp.local.` responder in `stream-sync` (found on both wired `eth0` and wireless `wlan0`) with the standard 768-bit Diffie-Hellman public key, so the Spotify app on a phone finds `EngineX OS` on the local network; the track-download `410` after OAuth login is fixed;
-- **Multi-Deck Hub in `enginex-relay` (formerly `sc5000-relay`), and LAN `enginex-stemsd` (formerly `sc5000-stemsd`)**: the relay console gains a `Connected decks (Multi-Deck Hub)` card that lists every deck behind the same backend with its online state, role (`13` / `24`), firmware version and streaming sign-in status. Sign in with a deck access code or the master password; each deck's `Settings → About` page shows the live state of its Stems compute node.
+- **Cache isolation and shared Deemix cache**: Spotify, Beatport, SoundCloud, and NetEase in *Official* mode each download through their own channel into their own cache namespace; when NetEase is set to *Deemix first*, NetEase and Deezer share the lossless cache without re-downloading;
+- **SoundCloud Go+ and high-quality routing**: DJ sets and long mixes (over 10 minutes) always stream from SoundCloud directly; ordinary tracks and Go+ exclusives play SoundCloud's high-quality stream if signed in to Go+, or automatically match lossless / 320k audio across signed-in Deezer / NetEase / Beatport to avoid 30-second preview cutoffs;
+- **Brand unification & zero-domain remote connection**: user-facing components are unified as `enginex-relay` (formerly `sc5000-relay`), `enginex-stemsd` (formerly `sc5000-stemsd`), and `enginex-suite`, and run under `/data/enginex` (with `/data/sc5000-custom` preserved as a compatibility symlink); 1-click Cloudflare Quick Tunnel provides domain-free public access for mobile streaming QR code logins; the relay gains a `Connected decks (Multi-Deck Hub)` card monitoring all connected players;
+- **Mixstream Pro / Pro+ / Pro Go (#164, #166)**: physical FILTER knobs control native Filter / Dub Echo / Noise / Filter Roll / Wash via `SWEEP FX` in each deck’s Pads bar; touch Beat Jump is restored with `Beat Jump Pad Bank`; channel EQ knobs switch to Stems EQ; `EngineX-Installer` supports strict EAAS discovery with port reuse, fastboot 35+, Windows WSL 2 + usbipd-win flashing, and recognises Mixstream Pro Go (`15e4:2059`) on USB; verified on a physical NH08S unit;
+- **1st-gen USB fastboot line flashing & debugfs decoupling**: restores computer line flashing for SC5000, SC6000 and PRIME 4 units when `fastboot getvar product` is unimplemented by falling back to USB IDs; unpacks firmware images on macOS and Windows without debugfs;
+- **PRIME 4 hardware FX selector (#168) and PRIME 4+ activation verification (#169)**: refreshes the JC11 hardware FX selector with rearming and wet fade burst protection; hardens PRIME 4+ (JC11S) activation files and data target checks; retains Beatport lossless upgrade on cold cache lookups, and exits `deemixd` gracefully when `stream-sync` binds port 6595.
 
 ### 8. New in 5.3.0.3
 - **Remote access with Tailscale / Headscale (#130)**: the web console's `Remote access (Tailscale / Headscale)` card downloads a trimmed Tailscale client only when you ask for it (about 4.3 MB, checksum verified), signs in with a login link or a one-time auth key, and shares only what you tick (SSH / SFTP, the web console) with your own tailnet. No public IP or router changes needed, and your own Headscale server works too. Off by default. It runs in userspace mode because the deck kernel has no TUN device. Tested end to end with Headscale; CPU and memory use on a real deck during playback are not measured yet;
@@ -87,7 +92,6 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 - **New Control Center tiles**: a third row of four tiles, `Waveform Style`, `Jog Light`, `Fader Echo` and `Smart Sync`; each tap cycles the value. `Live Stream` moved to `Settings → Services`;
 - **Pioneer-style Beat FX & Sound Color FX (#88)**: on JC11 PRIME 4 with Engine 5.3.0, choose `Spiral (PX)`, `Pitch Echo (PX)`, `Slip Roll (PX)`, `Dub Echo (PX)` or `Space (PX)` at the end of the FX selector. The controls apply to that FX unit and its assigned channels: Parameter adjusts time/character/feedback, and Wet/Dry adjusts the blend. Original FX remain available; the separate Time/Rate knob is not wired yet. JP07 SC5000 has no native FX selector and retains its global `Color FX Style` menu, master effects and saved setting. AZ04 keeps the legacy `Color FX Style` setting; PRIME 4 hardware verification is pending;
 - **UI scale (110%–75%), tracklist waveform toggle and pad LEDs (#153, #117, #85)**: `Settings → Device → UI Scale` scales Engine's whole interface from 110% down to 75%, with the Control Center and pop-ups still filling the screen; `User Profile → Library → Tracklist Waveform` hides the mini waveform in the track list so track titles expand across the full row; `Pad LED Brightness` sets the pads and buttons from 100% down to 20%;
-- **Mixstream Pro / Pro+ / Pro Go (#166)**: the physical FILTER knobs drive native Filter / Dub Echo / Noise / Filter Roll / Wash, selected with `SWEEP FX` in each deck’s Pads bar using the native carousel. Touch Beat Jump is restored; enable `User Profile → Cues/Loops → Beat Jump Pad Bank` for back, forward, halve and double in each deck's Pads bar. The per-deck `EQ / STEMS` button switches that channel's three EQ knobs to Stems EQ. Swipe left on a track to analyse stems locally or offload over LAN (local RK3288 processing is slower).
 - **Physical 3-band Stems EQ Mode & hardware shortcuts (#152)**: `User Profile → Playback → Stems EQ Mode` or **Shift + Cue (PFL)** on any mixer channel switches that channel's physical `HIGH / MID / LOW` EQ knobs to **Stems Level** (`Vocal`, `Melody + Bass`, `Drums`) with native soft takeover and on-screen status indicator; rapid double-pressing `Hot Cue` on PRIME 2 / PRIME 4 latches `STEMS` pad mode cleanly without bouncing back to `CUES`;
 - **Browse/Zoom encoder & jog wheel playback guard (#157)**: holding the Browse/Zoom encoder (or Slip/Vinyl) while a deck is playing no longer enters BeatGrid Edit (which previously jumped to `00:00` and locked the Play button), and Jog Touch stays disabled while BeatGrid Edit is active;
 - **PRIME 4 / PRIME 4+ / SC5000 / SC6000 cross-unit 4-deck LAN linking (#160)**: `4-Deck Waveform` and `4-Deck Role` (`Auto`, `1+3`, `2+4`, `1+2`, `3+4`, `1`, `2`) are available on both standalone players and 4-deck all-in-one consoles, so a PRIME 4 / PRIME 4+ can play Decks 1+2 locally while Decks 3+4 mirror linked SC5000 / SC6000 players over LAN;
@@ -196,7 +200,7 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 
 The entire system has been refactored and slimmed down so all extra features take minimal space and leave more free memory than stock firmware:
 
-| Metric | Stock / Before Refactoring | `EngineX OS 5.3.0.3` (Measured on SC5000) | What It Means for DJs |
+| Metric | Stock / Before Refactoring | `EngineX OS 5.3.0.4` (Measured on SC5000) | What It Means for DJs |
 | :--- | :--- | :--- | :--- |
 | **Firmware Image Size (`*-Update.img`)** | Official stock 5.3.0: `147.79 MB`<br>Earlier custom build: `~210 MB` | **`151.44 MB`** (SC6000 `151.58 MB`, PRIME 4 `151.52 MB`) | **Only `3.64 MB` larger than stock firmware** |
 | **Internal Storage Used After Clean Flash** | `~243 MB` left behind by older builds | **`17.2 MB` for core app + 3-language UI** (`45.6 MB` including extra drive format drivers) | Frees up **nearly `200 MB`** of internal flash space |
@@ -217,34 +221,34 @@ The entire system has been refactored and slimmed down so all extra features tak
 
 EngineX-Installer discovers supported first- and second-generation decks without entering an IP or selecting a model. It downloads the matching `.img` or data bundle and offers Wi-Fi SSH or USB Fastboot installation.
 
-- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-windows-amd64.zip)
-- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-macos-arm64.zip)
-- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-macos-amd64.zip)
-- [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-linux-amd64.tar.gz)
+- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-windows-amd64.zip)
+- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-macos-arm64.zip)
+- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-macos-amd64.zip)
+- [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-linux-amd64.tar.gz)
 
 Extract the archive and start `Install-EngineX.bat`, `Install-EngineX.command`, or `./install-enginex.sh` respectively. Network discovery depends on StageLinQ or the EngineX Web UI; SSH requires root access. Fastboot requires separate tools, including `fastboot` and Python 3; second-generation image creation also needs e2fsprogs. On Windows use the Linux package in WSL with USB access for that path. Back up your deck first: Fastboot can destroy data, particularly when creating a new second-generation `/data` image. First-generation rootfs flashing is experimental and has not been validated across all models.
 
 ### Option 1: USB Stick Install (First-Time Setup)
 1. Click the link for your exact player model below to download the `.img` file directly (or visit [**Releases**](https://github.com/Cd1s/EngineX-OS/releases/latest)):
-   - **Denon DJ SC5000 Prime**: [`SC5000-5.3.0.3-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.3-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
-   - **Denon DJ SC5000M Prime**: [`SC5000M-5.3.0.3-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.3-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
-   - **Denon DJ SC6000 Prime**: [`SC6000-5.3.0.3-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.3-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
-   - **Denon DJ SC6000M Prime**: [`SC6000M-5.3.0.3-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.3-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
-   - **Denon DJ PRIME 4**: [`PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
-   - **Denon DJ PRIME 2**: [`PRIME2-5.3.0.3-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.3-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
-   - **Denon DJ PRIME GO**: [`PRIMEGO-5.3.0.3-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.3-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
-   - **Numark Mixstream Pro**: [`MIXSTREAMPRO-5.3.0.3-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.3-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
+   - **Denon DJ SC5000 Prime**: [`SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
+   - **Denon DJ SC5000M Prime**: [`SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
+   - **Denon DJ SC6000 Prime**: [`SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
+   - **Denon DJ SC6000M Prime**: [`SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
+   - **Denon DJ PRIME 4**: [`PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
+   - **Denon DJ PRIME 2**: [`PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
+   - **Denon DJ PRIME GO**: [`PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
+   - **Numark Mixstream Pro**: [`MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
 2. Copy the `.img` file to the **root folder of a FAT32 or exFAT USB drive**.
-3. Plug the USB drive into your deck (stock Engine OS 4.3.x and 5.0.x both work), open **Settings → About / Update → Firmware Update Mode**, choose **USB/SD** when the deck shows `Found 5.3.0.3 on USB/SD`, and let the player install and reboot. If it only asks *Reboot into firmware update mode?*, the deck did not see the file: check the model, keep the original file name in the root folder, then unplug and replug the drive.
+3. Plug the USB drive into your deck (stock Engine OS 4.3.x and 5.0.x both work), open **Settings → About / Update → Firmware Update Mode**, choose **USB/SD** when the deck shows `Found 5.3.0.4 on USB/SD`, and let the player install and reboot. If it only asks *Reboot into firmware update mode?*, the deck did not see the file: check the model, keep the original file name in the root folder, then unplug and replug the drive.
 
 ### Option 1b: Second-Generation Models (`/data` Bundle, Beta)
 
 **EngineX-Installer automatic installer (recommended):** finds the deck without entering its IP or choosing its model, using Wi-Fi SSH or USB Fastboot. Download the package for your computer:
 
-- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-windows-amd64.zip)
-- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-macos-arm64.zip)
-- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-macos-amd64.zip)
-- [Linux x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-linux-amd64.tar.gz)
+- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-windows-amd64.zip)
+- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-macos-arm64.zip)
+- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-macos-amd64.zip)
+- [Linux x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-linux-amd64.tar.gz)
 
 1. Update the deck to official **Engine OS 5.3.0**.
 2. Extract the package and start `Install-EngineX.bat` on Windows, `Install-EngineX.command` on macOS, or `./install-enginex.sh` on Linux.
@@ -259,23 +263,23 @@ SSH requires root access. USB Fastboot requires `fastboot`, Python 3 and e2fspro
 <summary>Advanced: manual installation and removal</summary>
 
 Download the bundle for your model and check its SHA-256 against `SHA256SUMS.txt` on the Release page:
-   - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Denon DJ SC LIVE 2** (JP20): [`SCLIVE2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Denon DJ PRIME 4+** (JC11S): [`PRIME4PLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Denon DJ PRIME GO+** (JP11S): [`PRIMEGOPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGOPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Numark Mixstream Pro+** (NH08S): [`MIXSTREAMPROPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Numark Mixstream Pro Go** (NH10): [`MIXSTREAMPROGO-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Denon DJ PRIME 4 G2** (JP24): [`PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Rane SYSTEM ONE** (RMZ2): [`SYSTEMONE-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SYSTEMONE-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ SC LIVE 2** (JP20): [`SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ PRIME 4+** (JC11S): [`PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ PRIME GO+** (JP11S): [`PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Numark Mixstream Pro+** (NH08S): [`MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Numark Mixstream Pro Go** (NH10): [`MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ PRIME 4 G2** (JP24): [`PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Rane SYSTEM ONE** (RMZ2): [`SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
 
 **Method 1 (recommended): install on the unit.** Keeps your music, settings and library. Needs a root shell on the unit (SSH or serial console).
 
 1. Copy the `.tar.gz` to a USB drive and plug it into the unit (or copy it over the network).
 2. In the unit's shell, unpack and install it (replace `<model>` and the drive name):
    ```sh
-   cp "/media/<USB drive>/<model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz" /tmp/
-   tar -xzf /tmp/<model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz -C /tmp
-   sh /tmp/<model>-5.3.0.3-EngineX-OS-Data-Bundle/install.sh
+   cp "/media/<USB drive>/<model>-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz" /tmp/
+   tar -xzf /tmp/<model>-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz -C /tmp
+   sh /tmp/<model>-5.3.0.4-EngineX-OS-Data-Bundle/install.sh
    reboot
    ```
 3. After the reboot Engine starts once in stock form, then restarts by itself with EngineX OS. `Settings → Device` then shows the EngineX entries (`Language`, `Power → Turn Off`, …).
@@ -286,19 +290,19 @@ Download the bundle for your model and check its SHA-256 against `SHA256SUMS.txt
   1. Keep your backup untouched and work on a copy: `cp my-userdata-backup.img userdata-enginex.img`
   2. Unpack the bundle on the computer and inject it into the copy (the two helper scripts are inside the bundle):
      ```sh
-     tar -xzf <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
-     python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-userdata.py userdata-enginex.img --bundle <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
+     tar -xzf <model>-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+     python3 <model>-5.3.0.4-EngineX-OS-Data-Bundle/host-install-userdata.py userdata-enginex.img --bundle <model>-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
      ```
   3. Put the unit into fastboot mode, connect it over USB, then flash and reboot:
      ```sh
-     sh <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-fastboot.sh userdata-enginex.img
+     sh <model>-5.3.0.4-EngineX-OS-Data-Bundle/host-install-fastboot.sh userdata-enginex.img
      ```
 
 **Method 3: SYSTEM ONE / PRIME 4 G2 without fastboot (USB `1cc5:2027`).** Tap `Settings → About / Update → Firmware Update Mode (Reboot)` and connect USB, then run EngineX-Installer; it does the steps below. This writes a **new, empty** `/data` partition: music, library and settings on the internal storage are erased (USB drives and SD cards are not). By hand (needs `python3`, `e2fsprogs` and `pip3 install pyusb`):
    ```sh
    mke2fs -t ext4 -O encrypt -L data -b 4096 -F data.img 64M
-   python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-userdata.py data.img --bundle <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz --ssh-key ~/.ssh/id_ed25519.pub
-   python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-usbupdate.py data.img
+   python3 <model>-5.3.0.4-EngineX-OS-Data-Bundle/host-install-userdata.py data.img --bundle <model>-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz --ssh-key ~/.ssh/id_ed25519.pub
+   python3 <model>-5.3.0.4-EngineX-OS-Data-Bundle/host-install-usbupdate.py data.img
    ```
    `--ssh-key` is optional. Then press the power button to turn the unit off and on again.
 
@@ -311,7 +315,7 @@ Download the bundle for your model and check its SHA-256 against `SHA256SUMS.txt
 ### Option 2: One-Click On-Deck Update (When Already Running EngineX OS)
 - Connect your deck to Wi-Fi or Ethernet and open **Settings → About / Update**;
 - Tap **Update** on the screen and confirm — the deck will automatically launch the full-screen updater, download the new image, and reboot.
-- **Second-generation models** (SC LIVE 4 / 2, PRIME 4+, PRIME GO+, Mixstream Pro+ / Pro Go, PRIME 4 G2, SYSTEM ONE): once the `/data` bundle is installed, later releases (for example `5.3.0.3`) are found and installed the same way from **Settings → About / Update**. The deck downloads that release's `Data-Bundle.tar.gz`, checks `SHA256SUMS`, swaps the files in one step and restarts the EngineX services; the system partition is never touched (#86).
+- **Second-generation models** (SC LIVE 4 / 2, PRIME 4+, PRIME GO+, Mixstream Pro+ / Pro Go, PRIME 4 G2, SYSTEM ONE): once the `/data` bundle is installed, later releases (for example `5.3.0.4`) are found and installed the same way from **Settings → About / Update**. The deck downloads that release's `Data-Bundle.tar.gz`, checks `SHA256SUMS`, swaps the files in one step and restarts the EngineX services; the system partition is never touched (#86).
 
 ### Optional: Use Your Computer to Speed Up Stems
 If your Mac or PC is on the same Wi-Fi as your deck, run one command on your computer and the deck will automatically find it and use your computer's GPU/CPU for fast AI Stems separation (no IP address or password setup needed):
