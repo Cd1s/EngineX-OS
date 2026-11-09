@@ -662,6 +662,17 @@ scope.sample=Object.assign(sample(next,{key:'B',playing:true}),{positionMs:1000}
 assert.equal(scroll.running,true); assert.equal(scroll.to,scope.contentX(180000));
 """)
 
+    def test_scrolling_lane_hides_the_stretched_overview_until_the_detail_arrives(self):
+        # User report 11-10: the left deck's small waveform showed the whole song (a stretched overview).
+        expr = re.search(r"(?m)^        readonly property string imageUrl: (.*)$", bp.SHADOW_LAYER).group(1)
+        self.js("const url=(overview,detailed,meta)=>{with({overview,detailed,meta}){return " + expr + "}};\n" + r"""
+const m={overviewUrl:'/o.png',waveformUrl:'/w.png'};
+assert.equal(url(false,false,Object.assign({detailPending:true},m)),'');           // still coming: grid + playhead only
+assert.equal(url(false,false,Object.assign({detailPending:false},m)),'/o.png');    // overview-only source: keep the fallback
+assert.equal(url(false,true,m),'/w.png'); assert.equal(url(true,false,Object.assign({detailPending:true},m)),'/o.png');
+assert.equal(url(false,false,null),'');
+""")
+
     def test_shadow_layer_scroll_settle_and_grid_pool_behaviour(self):
         self.js(r"""
 const starts=[];

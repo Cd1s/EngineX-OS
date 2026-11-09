@@ -3196,7 +3196,8 @@ SHADOW_LAYER = r"""
         readonly property int tilePixels: metaTilePixels(meta)
         readonly property bool tiled: wave && totalPixels > 0 && tiles.length > 0 && tiles.length <= 32
         readonly property bool detailed: !!meta && !!meta.detail && (!!meta.waveformUrl || tiled)
-        readonly property string imageUrl: meta ? (overview || !detailed ? meta.overviewUrl || meta.waveformUrl : meta.waveformUrl || meta.overviewUrl) || "" : ""
+        // While the detail is still coming, the scrolling lane shows only grid + playhead; a stretched overview there looks like the whole song (user report 11-10).
+        readonly property string imageUrl: !meta ? "" : (overview ? meta.overviewUrl || meta.waveformUrl : detailed ? meta.waveformUrl || meta.overviewUrl : meta.detailPending ? "" : meta.overviewUrl || meta.waveformUrl) || ""
         readonly property bool rgb: graphical && (wave && typeof owner.waveformStyleProperty !== "undefined" && owner.waveformStyleProperty.translator ? owner.waveformStyleProperty.translator.index === 1 : root.scWave === "rgb")
         @PALETTE@
         property string paletteQuery: ""
@@ -3405,7 +3406,7 @@ SHADOW_LAYER = r"""
             visible: !!scDisplay.sample
             anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 2
             color: "#dddddd"; font.pixelSize: 10
-            text: !scDisplay.sample ? "" : (scDisplay.stale ? "OFFLINE · " : "") + (scDisplay.sample.metadataOnly ? "REMOTE" : !scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed ? "OVERVIEW" : "")
+            text: !scDisplay.sample ? "" : (scDisplay.stale ? "OFFLINE · " : "") + (scDisplay.sample.metadataOnly ? "REMOTE" : !scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed && !(scDisplay.meta.detailPending && !scDisplay.overview) ? "OVERVIEW" : "")
         }
             } }
         }
