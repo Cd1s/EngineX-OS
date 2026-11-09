@@ -218,7 +218,6 @@ func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 }
 
 func (s *Spotify) apiPlaylists(ctx context.Context) ([]Playlist, error) {
-	var all []Playlist
 	// An older login may lack the library scope; its playlists still work.
 	liked := make(chan Playlist, 1)
 	go func() {
@@ -230,64 +229,80 @@ func (s *Spotify) apiPlaylists(ctx context.Context) ([]Playlist, error) {
 		}
 		close(liked)
 	}()
-	for offset := 0; offset < 100000; offset += 50 {
+	all, err := collectPages(ctx, spotifyPages, 50, 2000, func(page int) (listPage[Playlist], error) {
 		var r struct {
 			Items []struct {
 				ID     string
 				Name   string
-				Tracks struct{ Total int } `json:"tracks"`
-				Items  struct{ Total int } `json:"items"`
+				Tracks struct{ Total int }
+				Items  struct{ Total int }
 			}
-			Next *string
+			Next  *string
+			Total int
 		}
-		if err := s.get(ctx, "/me/playlists?limit=50&offset="+strconv.Itoa(offset), &r); err != nil {
-			return nil, err
-		}
+		err := s.get(ctx, "/me/playlists?limit=50&offset="+strconv.Itoa(page*50), &r)
+		out := listPage[Playlist]{more: r.Next != nil && *r.Next != "", total: r.Total}
 		for _, p := range r.Items {
 			total := p.Items.Total
 			if total == 0 {
 				total = p.Tracks.Total
 			}
-			all = append(all, Playlist{p.ID, p.Name, total})
+			out.items = append(out.items, Playlist{p.ID, p.Name, total})
 		}
-		if r.Next == nil || *r.Next == "" {
-			if p, ok := <-liked; ok {
-				all = append([]Playlist{p}, all...)
-			}
-			return all, nil
-		}
+		return out, err
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil, errors.New("spotify: pagination limit")
+	if p, ok := <-liked; ok {
+		all = append([]Playlist{p}, all...)
+	}
+	return all, nil
 }
-func (s *Spotify) likedTracks(ctx context.Context) ([]Track, error) {
-	var all []Track
-	for offset := 0; offset < 100000; offset += 50 {
+
+// spPageItem accepts both the current /items schema and the legacy /tracks
+// schema. Local tracks, episodes and unavailable rows keep their old filtering.
+type spPageItem struct {
+	IsLocal bool `json:"is_local"`
+	Track   *spTrack
+	Item    *spTrack
+}
+
+func (s *Spotify) trackPages(ctx context.Context, path string, size int, fallback bool) ([]Track, error) {
+	all, err := collectPages(ctx, spotifyPages, size, 100000/size, func(page int) (listPage[Track], error) {
 		var r struct {
-			Items []struct {
-				Track *spTrack `json:"track"`
-				Item  *spTrack `json:"item"`
-			}
-			Next *string
+			Items []spPageItem
+			Next  *string
+			Total int
 		}
-		if err := s.get(ctx, "/me/tracks?limit=50&offset="+strconv.Itoa(offset), &r); err != nil {
-			return nil, err
+		query := "?limit=" + strconv.Itoa(size) + "&offset=" + strconv.Itoa(page*size)
+		err := s.get(ctx, path+query, &r)
+		// Only an endpoint that is gone falls back; never retry a 429 or 5xx.
+		if err != nil && page == 0 && fallback && endpointMissing(err) {
+			path = strings.TrimSuffix(path, "/items") + "/tracks"
+			err = s.get(ctx, path+query, &r)
 		}
+		out := listPage[Track]{more: r.Next != nil && *r.Next != "", total: r.Total}
 		for _, item := range r.Items {
 			t := item.Item
 			if t == nil {
 				t = item.Track
 			}
-			if t != nil && t.ID != "" {
-				all = append(all, t.track())
+			if t == nil || t.ID == "" || (fallback && (item.IsLocal || (t.Type != "" && t.Type != "track"))) {
+				continue
 			}
+			out.items = append(out.items, t.track())
 		}
-		if r.Next == nil || *r.Next == "" {
-			return all, nil
-		}
+		return out, err
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil, errors.New("spotify: pagination limit")
+	return all, nil
 }
-
+func (s *Spotify) likedTracks(ctx context.Context) ([]Track, error) {
+	return s.trackPages(ctx, "/me/tracks", 50, false)
+}
 func (s *Spotify) Tracks(ctx context.Context, id string) ([]Track, error) {
 	if t, ok := s.linkedTracks(id); ok {
 		return t, nil
@@ -295,42 +310,9 @@ func (s *Spotify) Tracks(ctx context.Context, id string) ([]Track, error) {
 	if id == SpotifyLikedID {
 		return s.likedTracks(ctx)
 	}
-	var all []Track
-	endpointName := "/items"
-	for offset := 0; offset < 100000; offset += 100 {
-		var r struct {
-			Items []struct {
-				IsLocal bool     `json:"is_local"`
-				Track   *spTrack `json:"track"`
-				Item    *spTrack `json:"item"`
-			}
-			Next *string
-		}
-		err := s.get(ctx, "/playlists/"+url.PathEscape(id)+endpointName+"?limit=100&offset="+strconv.Itoa(offset), &r)
-		// Only an endpoint that is gone falls back; a 429 or 5xx is returned as is (#15).
-		if err != nil && offset == 0 && endpointName == "/items" && endpointMissing(err) {
-			endpointName = "/tracks"
-			err = s.get(ctx, "/playlists/"+url.PathEscape(id)+endpointName+"?limit=100&offset="+strconv.Itoa(offset), &r)
-		}
-		if err != nil {
-			return nil, err
-		}
-		for _, item := range r.Items {
-			t := item.Item
-			if t == nil {
-				t = item.Track
-			}
-			if t == nil || item.IsLocal || t.ID == "" || (t.Type != "" && t.Type != "track") {
-				continue
-			}
-			all = append(all, t.track())
-		}
-		if r.Next == nil || *r.Next == "" {
-			return all, nil
-		}
-	}
-	return nil, errors.New("spotify: pagination limit")
+	return s.trackPages(ctx, "/playlists/"+url.PathEscape(id)+"/items", 100, true)
 }
+
 func (s *Spotify) Search(ctx context.Context, query string) ([]Track, error) {
 	var r struct{ Tracks struct{ Items []*spTrack } }
 	if err := s.get(ctx, "/search?"+url.Values{"q": {query}, "type": {"track"}, "limit": {"10"}}.Encode(), &r); err != nil {
