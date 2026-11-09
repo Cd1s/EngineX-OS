@@ -18,6 +18,38 @@ SRC = BUILD_PACKS.read_text()
 
 
 class UiModSourceTest(unittest.TestCase):
+    def test_auto_analyze_cannot_submit_native_work(self):
+        # Saved-on settings, drive insertion, playback and arbitrary filesystem
+        # contents must all have the same result: zero automatic submissions.
+        # For this fail-closed implementation, reject any native Analyzer path
+        # in the injected main/entry code, including batch and per-track calls.
+        for qml in (bp.SERVICES_MAIN, bp.LIBRARY_ENTRIES):
+            self.assertNotIn("/Client/Librarian/Analyzer/", qml)
+            self.assertNotIn("scAutoAnalyzeTimer", qml)
+            self.assertNotIn("onScAutoAnalyzeChanged", qml)
+            self.assertNotIn("onScDriveCountChanged", qml)
+        self.assertIn("readonly property bool scAutoAnalyzeAvailable: false", bp.SERVICES_MAIN)
+
+    def test_auto_analyze_preserves_preference_and_labels_unavailability(self):
+        self.assertIn("property bool scAutoAnalyze: false", bp.SERVICES_MAIN)
+        self.assertIn("scAutoAnalyze = !!v.autoAnalyze", bp.SERVICES_MAIN)
+        self.assertIn('values: ["Off", "On"]', bp.LIBRARY_ENTRIES)
+        self.assertIn('currentValue: values[root.scAutoAnalyze ? 1 : 0]', bp.LIBRARY_ENTRIES)
+        self.assertIn('root.scCall("autoAnalyze=" + index)', bp.LIBRARY_ENTRIES)
+        label = "Auto-Analyze Drives (Unavailable)"
+        self.assertIn('text: "' + label + '"', bp.LIBRARY_ENTRIES)
+        translations = bp.load_dict()[label]
+        self.assertIn("暂不可用", translations["zh-Hans"])
+        self.assertIn("暫不可用", translations["zh-Hant"])
+
+    def test_auto_analyze_gate_requires_fail_closed_capability(self):
+        probe = (BUILD_PACKS.parent.parent / "az01-packer/gate-ui-probe.qml").read_text()
+        gate = (BUILD_PACKS.parent.parent / "az01-packer/release-gate.sh").read_text()
+        self.assertIn("main.scAutoAnalyzeAvailable", probe)
+        self.assertNotIn("/Client/Preferences/AutoAnalysis", probe)
+        self.assertIn("SCPROBE analyze|boolean|false|", gate)
+        self.assertNotIn("SCPROBE analyze|boolean|1|", gate)
+
     def test_shadow_layer_uses_stock_owner_outside_layouts(self):
         for source, owner in (("RowLayout {\n    id: deckInfo\n}\n", "deckInfo"),
                               ("Item {\n    width: 800\n}\n", "scStockShadowHost")):

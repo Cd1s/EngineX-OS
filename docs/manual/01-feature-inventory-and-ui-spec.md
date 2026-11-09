@@ -92,7 +92,7 @@
 | 4 | Streaming Quality / 流媒体音质 / 串流音質 | 下载音质 Lossless / 320kbps | `flac` | `quality=flac\|320k` | `quality` | 下一次下载起生效 |
 | 5 | NetEase Download / 网易云下载方式 / 網易雲下載方式 | 官方直下 / Deemix 优先 | `official` | `neteaseMode=official\|deemix` | `netease_mode` | Deemix 优先用来省网易云月度下载额度 |
 | 6 | Jog Light Mode / 转盘灯效 / 轉盤燈效 | 固定、迷幻流光、迷幻频闪、迷幻 BPM 同步 | `static` | `jog=static\|rainbow\|fast\|bpm` | `jog` | 只改 `/Engine/Deck<N>/Color`，不写 eMMC |
-| 7 | Auto-Analyze Drives / 自动分析插入的设备 / 自動分析插入的裝置 | 插盘 15 s 后触发 Engine 自带分析（最低优先级） | 关 | `autoAnalyze=0\|1` | `auto_analyze` | #55 |
+| 7 | Auto-Analyze Drives (Unavailable) / 自动分析插入的设备（暂不可用） / 自動分析插入的裝置（暫不可用） | 暂停自动提交分析任务，仅保留偏好 | 关 | `autoAnalyze=0\|1` | `auto_analyze` | #55；逐曲有界接口尚未验证 |
 | 8 | Master Soft Clipper / 0dB 防破音软限幅 / 0dB 防破音軟限幅 | 主输出软限幅，峰值压到 -0.1 dBFS 以下 | 关 | `masterLimiter=0\|1` | `master_limiter` | 钩子每秒轮询，立即生效；#58。AZ04 已移植（#149） |
 | 9 | Auto-Gain (0 dB Normalize) / 自动增益（0 dB 归一化） / 自動增益（0 dB 正規化） | 把偏小的歌平滑提到接近 0 dBFS，最多 +9 dB，低于 -42 dBFS 的静音不提 | 关 | `autoGain=0\|1` | `auto_gain` | 开启后总会过软限幅；#64。AZ04 已移植（#149） |
 | 10 | OmniSource (Drives in Streaming) / OmniSource（在流媒体中显示 U 盘/SD） | U 盘 / SD 的歌单和曲目显示在流媒体浏览器里 | 关 | `omniSource=0\|1` | `omni_source` | #62 |
@@ -292,7 +292,7 @@ APFS 备注：README 写"Mac 的 APFS 插上直读"。仓库里 `kernel-modules/
 | A | Display / 显示 / 顯示 | Language、Waveform Style、Jog Light Mode | 设置 → 设备（置顶，EngineX 区块） | "碟机显示与音频"卡片的"显示"小节 |
 | B | Streaming / 流媒体 / 串流 | 7 个服务开关、Streaming Quality、NetEase Download、OmniSource | 设置 → 服务 → 流媒体（全部集中到这一页） | "流媒体"卡片 + 补上服务开关与 NetEase Download |
 | C | Audio Protection / 音频保护 / 音訊保護 | Master Soft Clipper、Auto-Gain、原厂 Master Limiter（不动）、Upfader Echo Out | 设置 → 混音台（EngineX 软限幅与自动增益从设备页移来；Upfader Echo 只留这里和控制中心磁贴） | "音频"小节 |
-| D | Library / 曲库 / 曲庫 | Auto-Analyze Drives | 设置 → 曲库（Library） | "曲库"小节 |
+| D | Library / 曲库 / 曲庫 | Auto-Analyze Drives (Unavailable) | 设置 → 曲库（Library） | "曲库"小节 |
 | E | Network & CDJ / 网络与 CDJ / 網路與 CDJ | Pro DJ Link Library（测试版）、Pro DJ Link 共享给 CDJ（测试版）、Pro DJ Link 波形 | 设置 → 网络（Network） | "联机"小节 |
 | F | Layout / 布局 / 版面 | 4-Deck Layout、4-Deck Role | 设置 → 设备，紧挨 Player # | "4 碟"小节 |
 | G | System / 系统 / 系統 | Live Stream（配置未填时置灰并提示"先在 Web 控制台填写服务器"）、Power → Turn Off | 设置 → 设备末尾 | "直播推流"折叠卡片保留 |
