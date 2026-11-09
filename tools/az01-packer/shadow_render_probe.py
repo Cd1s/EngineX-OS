@@ -40,9 +40,14 @@ def main():
                           positionMs=2000, at=0, playing=True, pitch=0, master=d == 2, sync=d == 4)
     components = []
     for kind in ("waveform", "overview", "track"):
-        layer = bp.SHADOW_LAYER.replace("@KIND@", kind).replace("@OWNER@", "owner")
+        # Use the same palette expansion as the shipped stock-root patch.
+        layer = bp.shadow_layer("import QtQuick 2.15\nItem {\n    id: owner\n}\n", kind)
+        layer = layer[layer.index("    Rectangle {"):layer.rfind("}")]
+
         components.append("Component { id: " + kind + "Component; Item { id: owner; "
-                          "property int deckIndex: parent.deckIndex; width:parent.width; height:parent.height; " + layer + "} }")
+                          "property int deckIndex: parent.deckIndex; width:parent.width; height:parent.height; "
+                          "property color heightLowColor: '#3a62dd'; property color heightMidColor: '#d89e00'; property color heightHighColor: '#f0f4ff'; "
+                          "property real saturationRgbWave: 1; property real brightAmpFactorRgbWave: 1; property real brightGainRgbWave: 1; property real brightFloorRgbWave: 1; " + layer + "} }")
     qml = """import QtQuick 2.15
 import QtQuick.Window 2.15
 import QtQuick.Layouts 1.15
@@ -51,9 +56,11 @@ Item {
  width: 1200; height: 700; z: 30000
  property var transformed: root
  property string scFourDeckRole: "13"
+ property string scWave: "3band"
  property bool scPlayer: true
  property bool scShadowDisplayOnly: true
  property bool scCueCountdown: true
+ function scNextCueInfo(deck, tick) { return scShadowNextCue(deck) }
  property int scShadowExpiryMs: 3000
  property int scShadowFrame: 0
  property int scCueTick: 0
@@ -86,10 +93,13 @@ Item {
  Timer { interval:1800; running:true; onTriggered: testWave4.visible=false }
  Timer { interval:2200; running:true; onTriggered: {
    let found=false, hidden=false
-   for(let i=0;i<root.children.length;i++) {
-     const c=root.children[i]
-     if(c.objectName === "EngineX_Shadow_waveform" && c.deck === 4) {found=true; hidden=!c.visible}
+   function visit(p) {
+     for(const c of p.children) {
+       if(c.objectName === "EngineX_Shadow_waveform" && c.deck === 4) {found=true; hidden=!c.visible}
+       visit(c)
+     }
    }
+   visit(root)
    console.warn("SHADOWPROBE ancestor-hidden|"+(found && hidden))
    testWave4.visible=true
  } }
