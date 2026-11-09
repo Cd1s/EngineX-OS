@@ -82,7 +82,11 @@
 - **Mixstream Pro / Pro+ / Pro Go（#164、#166）**：实体 FILTER 旋钮控制原厂 Filter / Dub Echo / Noise / Filter Roll / Wash，点击各轨 Pads 栏的 `SWEEP FX` 打开原厂选择轮盘；恢复触屏 Beat Jump，在 `个人偏好 → Cues/Loops` 开启 `Beat Jump Pad Bank` 即可后跳、前跳、减半、加倍；各轨 `EQ / STEMS` 按钮切换通道三段旋钮 Stems EQ；安装器支持严格 EAAS 协议发现二代机并消除端口冲突，兼容 fastboot 35+，完善 Windows WSL 2 + usbipd-win 刷机指引，已在 NH08S 实机完整刷入验证；识别 Mixstream Pro Go（`15e4:2059`）USB 设备；
 - **一代机电脑线刷与免 debugfs 解包**：修复 SC5000 / SC6000 / PRIME 4 等一代机在固件更新模式下 fastboot product 缺失时的 USB ID 识别，恢复电脑线刷支持；打包工具在 macOS 与 Windows 上无 debugfs 时也能正常解包镜像；
 - **PRIME 4 硬件 FX 选择器（#168）与 PRIME 4+ 激活校验（#169）**：重整 JC11 硬件效果选择器，修复切效果器重置与 Wet/Dry 淡入淡出爆音；强化 PRIME 4+（JC11S）激活文件与数据目录校验；修复 Beatport 无损升级在冷缓存下的命中，并在 `stream-sync` 占用端口时让 `deemixd` 优雅退出。
-- **SC LIVE 4 AUX（#171，新功能，待实机验证）**：在原厂 `混音台菜单 → 通道 → 输入` 中把 AUX 送入通道 3 或 4，使用通道 CUE、推子、EQ 和 Sweep FX；仅在 AUX 模式且任一通道选择线路输入时屏蔽 AUX 直通，MIC2 保持原厂路由。两路共享一个 AUX 源，同时推起会叠加。Mixer Menu（Beta）会迁移部分偏好设置，并允许向线路输入通道载歌；JP21 隐藏未验证的 Bluetooth/Computer 选项。详见[路由说明与实机检查](docs/issue171-sclive4-aux.md)。
+- **SC LIVE 4 AUX（#171，新功能，待实机验证）**：在原厂 `混音台菜单 → 通道 → 输入` 中把 AUX 送入通道 3 或 4，使用通道 CUE、推子、EQ 和 Sweep FX；仅在 AUX 模式且任一通道选择线路输入时屏蔽 AUX 直通，MIC2 保持原厂路由。两路共享一个 AUX 源，同时推起会叠加。Mixer Menu（Beta）会迁移部分偏好设置，并允许向线路输入通道载歌；JP21 隐藏未验证的 Bluetooth/Computer 选项。详见[路由说明与实机检查](docs/issue171-sclive4-aux.md)；
+- **PRIME 4 等一体机连 CDJ-3000 波形（新功能，待实机验证）**：在 PRIME 4 等一体机上把混音台通道切至线路输入（Line In）后，Pro DJ Link 连接的 CDJ-3000 波形会显示在该通道上（按 CDJ 播放机编号从小到大依次对应 Line In 通道从小到大）；SC5000 / SC6000 独立播放机行为不变；
+- **开机与关机画面全屏铺满（#175）**：开启界面缩放（UI Scale，非 100% 如 75%）时，开机启动画面与关机遮罩现补齐全屏锚定，在所有缩放比例下均完整铺满屏幕，消除黑边（覆盖 SC LIVE 4 等全系机型）；
+- **影子轨细波形显示修复**：暂停状态下刚加载的影子轨不再出现空白（解决切细波形时的渲染时序问题）；细波形切片尚未下载完成时，滚动波形泳道不再将整首歌的概览图拉伸挤入小波形，而是保持干净的拍线与指针显示，就绪后平滑渲染；
+- **Mod 安装保留可执行权限（#170）**：Web 控制台安装 Mod 压缩包（`.tar.gz`）时，保留 tar 包中文件的可执行权限位（保留 `0111`，安全过滤 setuid/setgid/sticky 位），自带二进制可执行文件（ELF）或启动程序的 Mod 安装后可正常启动运行。
 
 ### 8. 5.3.0.3 新功能
 - **Tailscale / Headscale 远程访问（#130）**：Web 控制台的 `远程访问（Tailscale / Headscale）` 卡片按需下载精简版 Tailscale 客户端（约 4.3 MB，下载后校验 SHA-256），用登录链接或一次性 Auth key 登录，只把你勾选的服务（SSH / SFTP、Web 控制台）开放给你自己的 tailnet。不需要公网 IP，也不用改路由器，自建 Headscale 服务器同样可用。默认关闭。碟机内核没有 TUN 设备，所以以用户态模式运行。已用 Headscale 端到端测通；实机播放时的 CPU 和内存占用还没有实测；
