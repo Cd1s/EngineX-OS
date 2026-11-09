@@ -7,6 +7,7 @@ package webui
 
 import (
 	"context"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -27,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
@@ -92,20 +94,23 @@ type playlistSearcher interface {
 	SearchPlaylists(context.Context, string) ([]providers.Playlist, error)
 }
 type tidalGateway struct {
-	s       *Server
-	catalog *providers.Deezer
-	mux     *http.ServeMux
-	mu      sync.Mutex
-	ids     map[string]int64
-	tracks  map[int64]trackRef
-	lists   map[string]playlistRef
-	next    int64
+	browse   *browseCache
+	searches *searchCache
+	s        *Server
+	catalog  *providers.Deezer
+	mux      *http.ServeMux
+	mu       sync.Mutex
+	ids      map[string]int64
+	tracks   map[int64]trackRef
+	lists    map[string]playlistRef
+	next     int64
 
 	// Artwork for list rows, by what the row knows: title and artist.
 	artURLs  map[string]string
 	artMu    sync.Mutex
 	artCache map[string][]byte
 	artAge   []string
+	warming  atomic.Bool // a prewarmArt run is going
 
 	// Last-use sequence numbers for evicting the least recently used refs.
 	seq       int64
@@ -246,7 +251,8 @@ func evict[K comparable](seen map[K]int64, limit int, drop func(K)) {
 }
 
 func newTidalGateway(s *Server) *tidalGateway {
-	g := &tidalGateway{artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
+	g := &tidalGateway{browse: newBrowseCache(s.cfg.StateDir), artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
+	g.searches = newSearchCache()
 	g.loadTracks()
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
@@ -292,7 +298,13 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("GET /v1/sc5000/prolink/diag", s.prolinkDiagGet)
 	g.mux.HandleFunc("POST /v1/sc5000/prolink", s.prolinkPost)
 	g.mux.HandleFunc("POST /v1/sc5000/decks", s.decksPost)
+	g.mux.HandleFunc("POST /v1/sc5000/decks/alive", s.decksAlive)
 	g.mux.HandleFunc("GET /v1/sc5000/shadow", s.shadowGet)
+	g.mux.HandleFunc("GET /v1/sc5000/shadow/display", s.shadowDisplayGet)
+	g.mux.HandleFunc("GET /v1/sc5000/shadow/waveform.png", s.shadowWaveformGet)
+	g.mux.HandleFunc("GET /v1/sc5000/shadow/artwork", s.shadowArtworkGet)
+	g.mux.HandleFunc("GET /v1/sc5000/debug/shadow", s.shadowDebugGet)
+	g.mux.HandleFunc("POST /v1/sc5000/debug/shadow", s.shadowDebugPost)
 	g.mux.HandleFunc("GET /v1/sc5000/broadcast", s.broadcastGet)
 	g.mux.HandleFunc("POST /v1/sc5000/broadcast", s.broadcastPost)
 	g.mux.HandleFunc("POST /v1/sc5000/broadcast/metadata", s.broadcastMetadataPost)
@@ -430,6 +442,12 @@ func (g *tidalGateway) subscription(w http.ResponseWriter, r *http.Request) {
 // sources returns ready sessions, restoring persisted owner logins after a
 // restart so the deck works without opening the phone console first.
 func (g *tidalGateway) sources() []*Session {
+	return g.sourcesFor("")
+}
+
+// A search only needs the selected service. Do not restore unrelated accounts
+// (or their credentials) on its critical path.
+func (g *tidalGateway) sourcesFor(scope string) []*Session {
 	s := g.s
 	// Restoring a login can refresh tokens over the network (ready), so it runs
 	// outside s.mu; only the session map is touched under the lock.
@@ -437,6 +455,9 @@ func (g *tidalGateway) sources() []*Session {
 	s.prune()
 	var restore []string
 	for _, name := range loginServices {
+		if scope != "" && name != scope {
+			continue
+		}
 		owned := false
 		for _, v := range s.sessions {
 			owned = owned || (!v.Guest && v.Provider == name)
@@ -471,7 +492,7 @@ func (g *tidalGateway) sources() []*Session {
 	}
 	var out []*Session
 	for _, v := range s.sessions {
-		if v.Ready {
+		if v.Ready && (scope == "" || v.Provider == scope) {
 			out = append(out, v)
 		}
 	}
@@ -564,6 +585,7 @@ func (g *tidalGateway) list(id string) (playlistRef, bool) {
 
 // addTrack assigns stable positive IDs per source track, kept across restarts.
 func (g *tidalGateway) addTrack(ref trackRef) int64 {
+	httpsCover(&ref.track)
 	key := refKey(ref)
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -617,43 +639,130 @@ func (g *tidalGateway) art(w http.ResponseWriter, r *http.Request) {
 		address = g.artURLs[artKey(q.Get("song"), "")]
 	}
 	g.mu.Unlock()
-	if !strings.HasPrefix(address, "https://") {
+	data := g.artBytes(r.Context(), address)
+	if data == nil {
 		http.NotFound(w, r)
 		return
+	}
+	w.Header().Set("Content-Type", http.DetectContentType(data))
+	w.Write(data)
+}
+
+// artClient pools connections: a list opens a dozen covers from one CDN at once.
+var artClient = func() *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = 8
+	return &http.Client{Timeout: 6 * time.Second, Transport: t}
+}()
+
+// artBytes is the cover at address (https only), from memory or fetched; nil on any failure.
+func (g *tidalGateway) artBytes(ctx context.Context, address string) []byte {
+	if !strings.HasPrefix(address, "https://") {
+		return nil
 	}
 	g.artMu.Lock()
 	data := g.artCache[address]
 	g.artMu.Unlock()
-	if data == nil {
-		req, err := http.NewRequestWithContext(r.Context(), "GET", address, nil)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		defer resp.Body.Close()
-		data, err = io.ReadAll(io.LimitReader(resp.Body, maxArtBytes+1))
-		if err != nil || resp.StatusCode != http.StatusOK || len(data) > maxArtBytes {
-			http.NotFound(w, r)
-			return
-		}
-		g.artMu.Lock()
-		if len(g.artAge) >= maxArtEntries {
-			delete(g.artCache, g.artAge[0])
-			g.artAge = append(g.artAge[:0], g.artAge[1:]...) // keep the backing array bounded
-		}
-		if _, ok := g.artCache[address]; !ok {
-			g.artCache[address] = data
-			g.artAge = append(g.artAge, address)
-		}
-		g.artMu.Unlock()
+	if data != nil {
+		return data
 	}
-	w.Header().Set("Content-Type", http.DetectContentType(data))
-	w.Write(data)
+	req, err := http.NewRequestWithContext(ctx, "GET", address, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := artClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	data, err = io.ReadAll(io.LimitReader(resp.Body, maxArtBytes+1))
+	if err != nil || resp.StatusCode != http.StatusOK || len(data) > maxArtBytes {
+		return nil
+	}
+	g.artMu.Lock()
+	defer g.artMu.Unlock()
+	if len(g.artAge) >= maxArtEntries {
+		delete(g.artCache, g.artAge[0])
+		g.artAge = append(g.artAge[:0], g.artAge[1:]...) // keep the backing array bounded
+	}
+	if _, ok := g.artCache[address]; !ok {
+		g.artCache[address] = data
+		g.artAge = append(g.artAge, address)
+	}
+	return data
+}
+
+// prewarmArt fetches the first covers of a listing in the background so the rows
+// and the jog wheel find them cached. One run at a time: a busy deck skips it.
+func (g *tidalGateway) prewarmArt(refs []trackRef) {
+	if !g.warming.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer g.warming.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		for _, ref := range refs[:min(len(refs), 12)] {
+			g.artBytes(ctx, thumbURL(ref.track))
+		}
+	}()
+}
+
+// syncStmAlbumArt gives the streaming row Engine inserted into stm.db a real
+// cover. Engine writes it as hash "image://streaming/" with no image, never reads
+// the file's embedded picture for a row that already has an AlbumArt id, and so the
+// jog wheel (GET_ALBUM_ART) shows nothing. Writing Engine's live database is how
+// m.db got corrupted before (sc5000-shadow-decks), so this stays one UPDATE on a
+// PERSIST-journal connection: the default DELETE mode unlinks the stm.db-journal
+// Engine keeps open. Only a still-empty row is touched.
+func (g *tidalGateway) syncStmAlbumArt(ctx context.Context, id int64, t providers.Track) {
+	address := t.CoverURL
+	if address == "" {
+		address = thumbURL(t)
+	}
+	data := g.artBytes(ctx, address)
+	if len(data) < 3 || data[0] != 0xff || data[1] != 0xd8 { // Engine's Artwork files are JPEG
+		return
+	}
+	sum := sha1.Sum(data)
+	lib := filepath.Join(shadowDataRoot, "AppDataUser/AIR Music Technology/Engine/Engine Library")
+	stm := filepath.Join(lib, "Database2", "stm.db")
+	if _, err := os.Stat(stm); err != nil {
+		return
+	}
+	file := filepath.Join(lib, "Artwork", base64.RawURLEncoding.EncodeToString(sum[:])+".jpg")
+	if _, err := os.Stat(file); err != nil {
+		if os.MkdirAll(filepath.Dir(file), 0o755) != nil {
+			return
+		}
+		tmp := file + ".part"
+		if os.WriteFile(tmp, data, 0o644) != nil || os.Rename(tmp, file) != nil {
+			os.Remove(tmp)
+			return
+		}
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: stm}).String()+"?_pragma=busy_timeout(2000)&_pragma=journal_mode(persist)")
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	res, err := db.ExecContext(ctx, `UPDATE AlbumArt SET hash = ?, albumArt = ? WHERE albumArt IS NULL AND id = (SELECT albumArtId FROM Track WHERE uri = ? ORDER BY id DESC LIMIT 1)`, sum[:], data, fmt.Sprintf("streaming://TIDAL/Track/%d", id))
+	if err != nil {
+		log.Printf("stream-sync: stm.db cover for track %d: %v", id, err)
+	} else if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("stream-sync: stm.db cover set for track %d", id)
+	}
+}
+
+// httpsCover upgrades http:// cover links (NetEase serves them on both): the
+// cover embed and the thumbnail proxy accept https only.
+func httpsCover(t *providers.Track) {
+	for _, p := range []*string{&t.CoverURL, &t.ThumbURL} {
+		if rest, ok := strings.CutPrefix(*p, "http://"); ok {
+			*p = "https://" + rest
+		}
+	}
 }
 
 func tidalTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000-0700") }
@@ -687,7 +796,7 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	var failedMu sync.Mutex
 	failed := map[*Session]error{}
 	lists := each(r.Context(), sessions, func(ctx context.Context, v *Session) ([]providers.Playlist, error) {
-		l, err := v.p.Playlists(ctx)
+		l, err := g.browseLists(ctx, v)
 		if err != nil {
 			failedMu.Lock()
 			failed[v] = err
@@ -723,7 +832,11 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 	// Deezer's public charts need no login; the others explain how to log in.
 	if scope == "deezer" {
 		defaults := each(r.Context(), []*providers.Deezer{g.catalog}, func(ctx context.Context, d *providers.Deezer) ([]providers.Playlist, error) {
-			return d.ChartPlaylists(ctx)
+			data, err := g.browse.get(ctx, browseKey("deezer", "public", "charts", ""), func(ctx context.Context) (browseData, error) {
+				lists, err := d.ChartPlaylists(ctx)
+				return browseData{Lists: lists}, err
+			})
+			return data.Lists, err
 		})
 		for _, p := range defaults[0] {
 			ref := playlistRef{"", "deezer", p, false}
@@ -794,6 +907,7 @@ func (g *tidalGateway) refItems(refs []trackRef) []any {
 		}
 		items = append(items, flat)
 	}
+	g.prewarmArt(refs)
 	return items
 }
 func camelotRank(k string) (int, bool) {
@@ -1093,9 +1207,13 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 		}
 		p, guest, session = v.p, v.Guest, v.ID
 	}
-	tracks, err := p.Tracks(r.Context(), ref.list.ID)
+	tracks, err := g.browseTracks(r.Context(), ref.provider, session, p, ref.list.ID)
 	if err != nil {
-		fail(w, 502, err)
+		status := 502
+		if errors.Is(err, errBrowseTooLarge) {
+			status = 400
+		}
+		fail(w, status, err)
 		return
 	}
 	if len(tracks) > maxPlaylistTracks {
@@ -1129,13 +1247,13 @@ func (g *tidalGateway) favoriteTracks(w http.ResponseWriter, r *http.Request) {
 		switch scope {
 		case "netease":
 			var lists []providers.Playlist
-			if lists, err = v.p.Playlists(r.Context()); err == nil && len(lists) > 0 {
-				tracks, err = v.p.Tracks(r.Context(), lists[0].ID)
+			if lists, err = g.browseLists(r.Context(), v); err == nil && len(lists) > 0 {
+				tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, lists[0].ID)
 			}
 		case "spotify":
-			tracks, err = v.p.Tracks(r.Context(), providers.SpotifyLikedID)
+			tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, providers.SpotifyLikedID)
 		case "soundcloud":
-			tracks, err = v.p.Tracks(r.Context(), "likes")
+			tracks, err = g.browseTracks(r.Context(), scope, v.ID, v.p, "likes")
 		}
 		if err == nil && len(tracks) <= maxPlaylistTracks {
 			g.s.cfg.BPM.Enrich(r.Context(), tracks)
@@ -1196,7 +1314,7 @@ func (g *tidalGateway) albumTracks(w http.ResponseWriter, r *http.Request) {
 		respond(w, page(r, 100, []any{}))
 		return
 	}
-	tracks, err := n.Tracks(r.Context(), "album:"+r.PathValue("id"))
+	tracks, err := g.browseTracks(r.Context(), "netease", session.ID, n, "album:"+r.PathValue("id"))
 	if err != nil {
 		fail(w, 502, err)
 		return
@@ -1226,31 +1344,36 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := g.s.scope()
 	sources := []source{}
-	if scope == "deezer" {
-		sources = append(sources, source{"", "deezer", false, g.catalog})
-	}
-	for _, v := range g.sources() {
-		if v.Provider == scope && v.Provider != "deezer" {
+	// Gateway search deliberately requires a login, including services whose
+	// provider APIs also support anonymous/public search.
+	for _, v := range g.sourcesFor(scope) {
+		if v.Provider == scope {
 			sources = append(sources, source{v.ID, v.Provider, v.Guest, v.p})
 		}
 	}
-	if scope == "soundcloud" && len(sources) == 0 {
-		if p := g.s.ownerSoundCloud(); p != nil {
-			sources = append(sources, source{"", "soundcloud", false, p})
-		}
-	}
-	tracks := each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Track, error) {
-		if p, ok := v.p.(trackSearcher); ok {
-			return p.Search(ctx, query)
-		}
-		return nil, nil
-	})
-	lists := each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Playlist, error) {
-		if p, ok := v.p.(playlistSearcher); ok {
-			return p.SearchPlaylists(ctx, query)
-		}
-		return nil, nil
-	})
+	var tracks [][]providers.Track
+	var lists [][]providers.Playlist
+	var searches sync.WaitGroup
+	searches.Add(2)
+	go func() {
+		defer searches.Done()
+		tracks = each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Track, error) {
+			if p, ok := v.p.(trackSearcher); ok {
+				return g.searchTracks(ctx, v.provider, v.session, p, query)
+			}
+			return nil, nil
+		})
+	}()
+	go func() {
+		defer searches.Done()
+		lists = each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Playlist, error) {
+			if p, ok := v.p.(playlistSearcher); ok {
+				return g.searchLists(ctx, v.provider, v.session, p, query)
+			}
+			return nil, nil
+		})
+	}()
+	searches.Wait()
 	trackItems, listItems := []any{}, []any{}
 	for i, v := range sources {
 		g.s.cfg.BPM.Enrich(r.Context(), tracks[i])
@@ -1466,7 +1589,7 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	_, ref, ok := g.lookup(w, raw)
+	id, ref, ok := g.lookup(w, raw)
 	if !ok {
 		return
 	}
@@ -1503,5 +1626,14 @@ func (g *tidalGateway) stream(w http.ResponseWriter, r *http.Request) {
 	} else if strings.HasSuffix(strings.ToLower(p), ".ogg") {
 		w.Header().Set("Content-Type", "audio/ogg")
 	}
+	// Engine's stm.db row exists by now; it may still be settling, so retry a few times.
+	go func() {
+		for _, wait := range []time.Duration{0, 800 * time.Millisecond, 1700 * time.Millisecond, 3500 * time.Millisecond} {
+			time.Sleep(wait)
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			g.syncStmAlbumArt(ctx, id, ref.track)
+			cancel()
+		}
+	}()
 	http.ServeFile(w, r, p)
 }

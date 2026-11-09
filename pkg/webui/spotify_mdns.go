@@ -7,8 +7,8 @@ package webui
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
-	"os"
 	"strings"
 	"time"
 )
@@ -31,12 +31,18 @@ func mdnsLabels(b []byte, labels ...string) []byte {
 	return append(b, 0)
 }
 
+// spotifyMDNSHost is the SRV target and A record name: never the system host
+// name, which avahi-daemon owns. Every deck is "sc5000", and our cache-flush A
+// record for sc5000.local made avahi on both decks loop on "Host name conflict"
+// (every 20 s), which also broke Engine Link's discovery. One per deck, by MAC.
 func spotifyMDNSHost() string {
-	h, _ := os.Hostname()
-	if h, _, _ = strings.Cut(h, "."); h != "" {
-		return h
+	ifs, _ := net.Interfaces()
+	for _, i := range ifs {
+		if i.Flags&net.FlagLoopback == 0 && len(i.HardwareAddr) == 6 {
+			return fmt.Sprintf("enginex-spotify-%x", []byte(i.HardwareAddr[3:]))
+		}
 	}
-	return "enginex"
+	return "enginex-spotify"
 }
 
 // spotifyMDNSWants reports whether msg is a query for our service, instance or host name.

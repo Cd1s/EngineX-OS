@@ -34,7 +34,11 @@
 #include "dsp_smooth.h"
 #include "master_limiter.h"
 #include "echo_out.h"
+#include "pioneer_master.h"
+#if !defined(__aarch64__)
 #include "pioneer_fx.h"
+#include "fx_selector.h"
+#endif
 
 // The A32 trampoline installers: the AArch64 build (AZ04) never calls them.
 #if defined(__aarch64__)
@@ -140,10 +144,265 @@ static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
 static int pioneer_fx_mode;           // #88 Pioneer FX emulations
 
+// Pad LED Brightness: Engine sends every controller LED through snd_seq_event_output_direct
+// (RGB LEDs as 14/15-byte SysEx, single-colour keys as NoteOn). Scale the PWM bytes there,
+// after Engine's own gamma, and replay the cached raw events when led_brightness= changes.
+#define SEQ_EV_SIZE 28 // sizeof(snd_seq_event_t) on armhf and aarch64 (ext is packed)
+#define SEQ_SYSEX 130
+#define SEQ_NOTEON 6
+#define SEQ_NOTEOFF 7
+struct sc_seq_ext { uint32_t len; void *ptr; } __attribute__((packed)); // ALSA's snd_seq_ev_ext_t, at event+16
+
+static int led_pct = 100;
+static pthread_mutex_t led_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct led_slot { uchar len; uchar raw[15]; uchar ev[SEQ_EV_SIZE]; void *handle; } led_slots[16][128];
+static struct note_slot { uchar valid, velocity; uchar ev[SEQ_EV_SIZE]; void *handle; } note_slots[16][100];
+static void *seq_direct_cache, *seq_drain_cache;
+
+// Perceptual curve: pct^2 duty. 0 stays off; a lit LED never drops below 1.
+static uchar scale_led_pwm(uchar v, int pct) {
+    if (v == 0) return 0;
+    if (pct >= 100) return v & 0x7f;
+    unsigned s = ((unsigned)v * (unsigned)pct * (unsigned)pct + 5000u) / 10000u;
+    if (s < 1u) s = 1u;
+    if (s > 127u) s = 127u;
+    return (uchar)s;
+}
+
+// RGB LED SysEx? On match fills ch/idx and the offset of the 3 RGB bytes. Screen SysEx (0B/7C) never matches.
+static int led_sysex(const uchar *b, uint32_t len, int *ch, int *idx, int *rgb) {
+    if (len == 14 && b[0] == 0xF0 && b[1] == 0x00 && b[2] == 0x02 && b[3] == 0x0B && b[6] == 0x03 &&
+        b[7] == 0x00 && b[8] == 0x04 && b[13] == 0xF7) {
+        *ch = 0; *idx = b[9] & 0x7f; *rgb = 10;
+        return 1;
+    }
+    if (len == 15 && b[0] == 0xF0 && b[1] == 0x00 && ((b[2] == 0x02 && b[3] == 0x0B) || (b[2] == 0x00 && b[3] == 0x17)) &&
+        b[6] == 0x03 && b[7] == 0x00 && b[8] == 0x05 && b[14] == 0xF7) {
+        *ch = b[9] & 0x0f; *idx = b[10] & 0x7f; *rgb = 11;
+        return 1;
+    }
+    return 0;
+}
+
+// Engine already applied gamma 3.5: an unpressed lit hot cue arrives as m=16 (Qt.darker 1.8), a platter
+// ring or pressed pad as m=127, an unlit pad as 1..2. Scale the triple as a unit so the hue survives and
+// the curve is monotonic in pct for every m (a floor above 16 used to make 80% brighter than 100%).
+// 0 stays off.
+static void led_scaled_sysex(const uchar *raw, uint32_t len, int rgb, int pct, uchar *out) {
+    memcpy(out, raw, len);
+    if (pct >= 100) return;
+    unsigned m = raw[rgb] > raw[rgb + 1] ? raw[rgb] : raw[rgb + 1];
+    if (raw[rgb + 2] > m) m = raw[rgb + 2];
+    if (m == 0) return;
+    // Five visibly distinct steps 100/80/60/40/20 %: m=127 -> 127/64/28/10/3, m=16 -> 16/11/7/4/1,
+    // unlit offColor (m<=3) -> m/0/0/0/0; anything between interpolates linearly.
+    static const unsigned p127[4] = {64, 28, 10, 3}, p16[4] = {11, 7, 4, 1};
+    int t = pct >= 75 ? 0 : pct >= 55 ? 1 : pct >= 35 ? 2 : 3;
+    unsigned target;
+    if (m <= 3) {
+        target = 0;
+    } else {
+        if (m <= 16) target = (p16[t] * m + 8) / 16;
+        else target = p16[t] + ((p127[t] - p16[t]) * (m - 16) + 55) / 111;
+        if (target < 1) target = 1;
+        if (target >= m) target = m - 1;
+    }
+    for (int i = 0; i < 3; i++) {
+        unsigned c = raw[rgb + i] & 0x7f;
+        unsigned s = target ? (c * target + m / 2) / m : 0;
+        out[rgb + i] = (uchar)(target && c && !s ? 1 : s > 127 ? 127 : s);
+    }
+}
+
+// Single-colour keys have three hardware states in the panel MCU: velocity 0 off, 1 dim (PWM ~20%),
+// >=2 full. Below 75% brightness send the dim state; the active-deck index and the all-pixels switch
+// ride on NoteOn 0x38 / 0x3d as data, not light.
+static uchar led_scaled_note(uchar index, uchar vel, int pct) {
+    // Vinyl (note 19) is already dim at full velocity: never scale it.
+    if (vel < 2 || index == 0x38 || index == 0x3d || index == 19) return vel;
+    if (pct <= 60) return 1;
+    uchar v = scale_led_pwm(vel, pct);
+    return v < 2 ? 2 : v;
+}
+
+int snd_seq_event_output_direct(void *handle, void *ev) {
+    int (*real)(void *, void *) = next_symbol(&seq_direct_cache, "snd_seq_event_output_direct");
+    if (!real) return -ENOSYS;
+    if (!ev || !is_engine()) return real(handle, ev);
+    uchar *e = ev;
+    int pct;
+    if (e[0] == SEQ_SYSEX && (e[1] & 0x0c) == 0x04) {
+        struct sc_seq_ext ext;
+        memcpy(&ext, e + 16, sizeof ext);
+        int ch, idx, rgb;
+        if (ext.ptr && led_sysex(ext.ptr, ext.len, &ch, &idx, &rgb)) {
+            uchar scaled[16], copy[SEQ_EV_SIZE];
+            struct led_slot *slot = &led_slots[ch][idx];
+            pthread_mutex_lock(&led_mu); // also serialises with the replay on the poll thread
+            slot->len = (uchar)ext.len;
+            memcpy(slot->raw, ext.ptr, ext.len);
+            memcpy(slot->ev, e, SEQ_EV_SIZE);
+            slot->handle = handle;
+            pct = __atomic_load_n(&led_pct, __ATOMIC_RELAXED);
+            led_scaled_sysex(slot->raw, ext.len, rgb, pct, scaled);
+            memcpy(copy, e, SEQ_EV_SIZE);
+            ext.ptr = scaled;
+            memcpy(copy + 16, &ext, sizeof ext);
+            int rc = real(handle, copy);
+            pthread_mutex_unlock(&led_mu);
+            return rc;
+        }
+    } else if (e[0] == SEQ_NOTEOFF && e[17] < 100 && (e[16] & 0xf0) == 0) {
+        pthread_mutex_lock(&led_mu); // a NoteOff must not be replayed as a lit key later
+        note_slots[e[16]][e[17]].valid = 0;
+        pthread_mutex_unlock(&led_mu);
+        return real(handle, ev);
+    } else if (e[0] == SEQ_NOTEON && e[17] < 100 && (e[16] & 0xf0) == 0) {
+        struct note_slot *slot = &note_slots[e[16]][e[17]];
+        pthread_mutex_lock(&led_mu);
+        if (e[18] <= 1) {
+            slot->valid = 0;
+            int rc = real(handle, ev);
+            pthread_mutex_unlock(&led_mu);
+            return rc;
+        }
+        uchar copy[SEQ_EV_SIZE];
+        slot->valid = 1;
+        slot->velocity = e[18];
+        memcpy(slot->ev, e, SEQ_EV_SIZE);
+        slot->handle = handle;
+        memcpy(copy, e, SEQ_EV_SIZE);
+        pct = __atomic_load_n(&led_pct, __ATOMIC_RELAXED);
+        copy[18] = led_scaled_note(e[17], e[18], pct);
+        int rc = real(handle, copy);
+        pthread_mutex_unlock(&led_mu);
+        return rc;
+    }
+    return real(handle, ev);
+}
+
+// led_brightness= changed: resend everything lit so the deck dims/brightens at once.
+static void led_replay(int pct) {
+    int (*direct)(void *, void *) = next_symbol(&seq_direct_cache, "snd_seq_event_output_direct");
+    int (*drain)(void *) = next_symbol(&seq_drain_cache, "snd_seq_drain_output");
+    if (!direct) return;
+    void *handles[8] = {0};
+    int nh = 0;
+    pthread_mutex_lock(&led_mu);
+    __atomic_store_n(&led_pct, pct, __ATOMIC_RELAXED);
+    for (int c = 0; c < 16; c++)
+        for (int i = 0; i < 128; i++) {
+            struct led_slot *s = &led_slots[c][i];
+            int ch, idx, rgb;
+            if (!s->len || !s->handle || !led_sysex(s->raw, s->len, &ch, &idx, &rgb)) continue;
+            uchar scaled[16], copy[SEQ_EV_SIZE];
+            struct sc_seq_ext ext = {s->len, scaled};
+            led_scaled_sysex(s->raw, s->len, rgb, pct, scaled);
+            memcpy(copy, s->ev, SEQ_EV_SIZE);
+            memcpy(copy + 16, &ext, sizeof ext);
+            direct(s->handle, copy);
+            int k = 0;
+            while (k < nh && handles[k] != s->handle) k++;
+            if (k == nh && nh < 8) handles[nh++] = s->handle;
+        }
+    for (int c = 0; c < 16; c++)
+        for (int n = 0; n < 100; n++) {
+            struct note_slot *s = &note_slots[c][n];
+            if (!s->valid || !s->handle) continue;
+            uchar copy[SEQ_EV_SIZE];
+            memcpy(copy, s->ev, SEQ_EV_SIZE);
+            copy[18] = led_scaled_note((uchar)n, s->velocity, pct);
+            direct(s->handle, copy);
+            int k = 0;
+            while (k < nh && handles[k] != s->handle) k++;
+            if (k == nh && nh < 8) handles[nh++] = s->handle;
+        }
+    if (drain) for (int k = 0; k < nh; k++) drain(handles[k]);
+    pthread_mutex_unlock(&led_mu);
+}
+
+A32_ONLY static int fx_selector_supported;
+static int fx_selector_master_bypass;
+
+#if !defined(__aarch64__)
+/* Verified Config.audio.fx: JC11 hasDJFx=true; JP07 has neither selector flag.
+ * Other products/builds require their own Config/ABI verification. */
+static int px_selector_capable(const char *version, const char *product) {
+    return !strcmp(version, "5.3.0") && !strcmp(product, "JC11");
+}
+static int px_write_ready(const char *path) {
+    char tmp[PATH_MAX];
+    int n = snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if (n < 0 || (size_t)n >= sizeof tmp) return 0;
+    FILE *f = fopen(tmp, "w");
+    if (!f) return 0;
+    int ok = fputs("armhf-px-v2 JC11\n", f) >= 0;
+    if (fclose(f)) ok = 0;
+    /* Go validates the marker body: never expose a truncated heartbeat. */
+    if (ok && !rename(tmp, path)) return 1;
+    unlink(tmp);
+    return 0;
+}
+#endif
+
+/* Ordinary worker only: never poll files, log, or wait in an audio callback. */
+static void fx_selector_poll(void) {
+#if !defined(__aarch64__)
+    if (!fx_selector_supported) return;
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+        sc_pfx_instance_prepare(&sc_pfx_routes[i].dsp);
+    static unsigned long long last_request;
+    static unsigned last_bound[SC_PFX_UNITS];
+    static time_t heartbeat;
+    time_t now = time(NULL);
+    if (now != heartbeat) {
+        if (px_write_ready("/run/enginex-fx-selector.ready")) heartbeat = now;
+    }
+    FILE *f = fopen(UI_ROOT "/fx-selector.request", "r");
+    unsigned unit, mode, a, b;
+    unsigned long long request, expires;
+    int n = f ? fscanf(f, "%u %u %llu %u %u %llu", &unit, &mode, &request, &a, &b, &expires) : 0;
+    struct timespec wall; clock_gettime(CLOCK_REALTIME, &wall);
+    unsigned long long millis = (unsigned long long)wall.tv_sec * 1000 + wall.tv_nsec / 1000000;
+    if (f) fclose(f);
+    if (n == 6 && millis < expires && expires - millis <= 1000 && unit >= 1 && unit <= SC_PFX_UNITS && mode <= 5 && request != last_request &&
+        (a & 0x7f800007u) == (0x35800000u | (unit - 1)) &&
+        (b & 0x7f800007u) == (0x36000000u | (unit - 1))) {
+        int reused = sc_pfx_arm(unit - 1, mode, a, b);
+        __atomic_store_n(&fx_selector_master_bypass, 1, __ATOMIC_RELEASE);
+        f = fopen(UI_ROOT "/fx-selector.ack.tmp", "w");
+        if (f) {
+            fprintf(f, "%u %u %llu %u %u %llu %d\n", unit, mode, request, a, b, expires, reused);
+            int ok = !fclose(f);
+            if (ok && !rename(UI_ROOT "/fx-selector.ack.tmp", UI_ROOT "/fx-selector.ack")) last_request = request;
+        }
+    }
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
+        unsigned bound = __atomic_load_n(&sc_pfx_routes[i].bound, __ATOMIC_ACQUIRE);
+        if (bound && bound != last_bound[i])
+            fprintf(stderr, "engine-ui-hook: PX unit=%u mode=%u owner=%p instance=%p bound\n", i + 1, bound & 7,
+                    __atomic_load_n(&sc_pfx_routes[i].owner, __ATOMIC_ACQUIRE),
+                    __atomic_load_n(&sc_pfx_routes[i].effect, __ATOMIC_ACQUIRE));
+        last_bound[i] = bound;
+    }
+#endif
+}
+
 static void *lim_poll(void *arg) {
     (void)arg;
     for (;;) {
-        int on = 0, gain = 0, echo = 0, pioneer_fx = 0;
+        fx_selector_poll();
+        static struct timespec last_mtim;
+        static off_t last_size = -1;
+        struct stat st;
+        // Re-parse only when settings.conf changed; 80 ms poll makes brightness taps instant.
+        if (stat(UI_ROOT "/settings.conf", &st) == 0 && last_size == st.st_size &&
+            last_mtim.tv_sec == st.st_mtim.tv_sec && last_mtim.tv_nsec == st.st_mtim.tv_nsec) {
+            usleep(80000);
+            continue;
+        }
+        if (stat(UI_ROOT "/settings.conf", &st) == 0) { last_size = st.st_size; last_mtim = st.st_mtim; }
+        int on = 0, gain = 0, echo = 0, pioneer_fx = 0, led = 100;
         FILE *f = fopen(UI_ROOT "/settings.conf", "r");
         if (f) {
             char line[64];
@@ -151,13 +410,17 @@ static void *lim_poll(void *arg) {
                 if (!strncmp(line, "master_limiter=1", 16)) on = 1;
                 else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
                 else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
+                else if (!strncmp(line, "led_brightness=", 15)) {
+                    int n = atoi(line + 15);
+                    if (n >= 10 && n <= 100) led = n;
+                }
                 else if (!strncmp(line, "pioneer_fx=", 11)) {
                     char val[64];
                     size_t len = strcspn(line + 11, "\r\n");
                     if (len < sizeof val) {
                         memcpy(val, line + 11, len);
                         val[len] = '\0';
-                        pioneer_fx = sc_pioneer_fx_parse(val);
+                        pioneer_fx = sc_master_pioneer_fx_parse(val);
                     }
                 }
             fclose(f);
@@ -166,7 +429,8 @@ static void *lim_poll(void *arg) {
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
         __atomic_store_n(&echo_enabled, echo, __ATOMIC_RELAXED);
         __atomic_store_n(&pioneer_fx_mode, pioneer_fx, __ATOMIC_RELAXED);
-        sleep(1);
+        if (led != __atomic_load_n(&led_pct, __ATOMIC_RELAXED)) led_replay(led);
+        usleep(80000);
     }
     return NULL;
 }
@@ -271,6 +535,68 @@ enum {
     DSP_AUTOGATE, DSP_COMMON, DSP_DUB_ECHO, DSP_WASH, DSP_FLANGER, DSP_MASTER, DSP_HOOK_COUNT
 };
 static void *dsp_originals[DSP_HOOK_COUNT];
+#if !defined(__aarch64__)
+static uintptr_t px_engine_base;
+static void *px_destructor_original;
+static void hook_px_destroy(void *self) {
+    sc_pfx_forget_owner(self);
+    ((void (*)(void *))px_destructor_original)(self);
+}
+
+static void *px_carrier(void *owner) {
+    if (!owner) return NULL;
+    uintptr_t vtable;
+    memcpy(&vtable, owner, sizeof vtable);
+    if (vtable != px_engine_base + 0x2b21eec) return NULL;
+    void *collection;
+    memcpy(&collection, (char *)owner + 0x28, sizeof collection);
+    if (!collection) return NULL;
+    uintptr_t begin, end;
+    memcpy(&begin, (char *)collection + 4, 4);
+    memcpy(&end, (char *)collection + 8, 4);
+    if (!begin || end < begin || (begin & 3) || (end & 3) || end - begin > 128 * 4) return NULL;
+    void *found = NULL;
+    for (uintptr_t at = begin; at < end; at += 4) {
+        void *effect; uintptr_t vt, process; const char *name; uint32_t length;
+        memcpy(&effect, (void *)at, 4);
+        if (!effect) continue;
+        memcpy(&vt, effect, 4);
+        memcpy(&process, (void *)(vt + 8), 4);
+        if (process != px_engine_base + 0xf1ab24) continue;
+        memcpy(&name, (char *)effect + 0x28, 4);
+        memcpy(&length, (char *)effect + 0x2c, 4);
+        if (length != 7 || !name || memcmp(name, "Flanger", 7)) continue;
+        if (found) return NULL;
+        found = effect;
+    }
+    return found;
+}
+
+static int px_is_carrier(void *owner) {
+    if (!owner) return 0;
+    const char *name; uint32_t length;
+    memcpy(&name, (char *)owner + 0x294, 4);
+    memcpy(&length, (char *)owner + 0x298, 4);
+    return length == 7 && name && !memcmp(name, "Flanger", 7);
+}
+
+static void px_restore(struct sc_pfx_route *r) {
+    if (!__atomic_exchange_n(&r->native_override, 0, __ATOMIC_ACQ_REL)) return;
+    void *h = __atomic_load_n(&r->mix_handler, __ATOMIC_ACQUIRE);
+    if (!h) return;
+    unsigned char event[16] = {0};
+    unsigned mix = __atomic_load_n(&r->mix, __ATOMIC_ACQUIRE);
+    memcpy(event + 0x0c, &mix, 4);
+    ((dsp_event_fn)dsp_originals[DSP_MIX])(h, event);
+    __atomic_store_n(&r->restore_mix, 0, __ATOMIC_RELEASE);
+}
+
+static void px_restore_owner(void *owner) {
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+        if (__atomic_load_n(&sc_pfx_routes[i].native_owner, __ATOMIC_ACQUIRE) == owner)
+            px_restore(&sc_pfx_routes[i]);
+}
+#endif
 
 static void *dsp_bound_owner(void *handler) {
     // MemberFunctionHandler owns a bound object and a two-word member pointer.
@@ -291,6 +617,16 @@ static void *dsp_bound_owner(void *handler) {
 }
 
 static void dsp_transition(unsigned slot, uint32_t kind, void *handler, const void *event) {
+#if !defined(__aarch64__)
+    if (fx_selector_supported && (slot == DSP_SWITCH || slot == DSP_CHANGE)) {
+        px_restore_owner(dsp_bound_owner(handler));
+        sc_pfx_unbind_owner(dsp_bound_owner(handler));
+    }
+#endif
+#if !defined(__aarch64__)
+    if (fx_selector_supported && (slot == DSP_TURN_OFF || slot == DSP_TURN_ON))
+        sc_pfx_reset_owner(dsp_bound_owner(handler));
+#endif
     sc_dsp_fx_mark_transition(dsp_bound_owner(handler), kind);
     ((dsp_event_fn)dsp_originals[slot])(handler, event);
 }
@@ -318,6 +654,63 @@ static void dsp_finite_event(unsigned slot, size_t offset, int is_double,
         float value;
         memcpy(&value, (const char *)event + offset, sizeof value);
         if (!sc_dsp_finite_f32(value)) return;
+#if !defined(__aarch64__)
+        if (fx_selector_supported && (slot == DSP_MIX || slot == DSP_PARAMETER)) {
+            void *owner = dsp_bound_owner(handler);
+            if (slot == DSP_MIX && sc_pfx_challenge(owner, value)) {
+                for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
+                    struct sc_pfx_route *r = &sc_pfx_routes[i];
+                    if (__atomic_load_n(&r->owner, __ATOMIC_ACQUIRE) != owner) continue;
+                    void *carrier = px_carrier(owner);
+                    if (!carrier) { sc_pfx_unbind_owner(owner); break; }
+                    __atomic_store_n(&r->mix_handler, handler, __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->native_owner, owner, __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->input_a, (char *)owner + 0x30 + 0xf8, __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->input_b, (char *)owner + 0x160 + 0xf8, __ATOMIC_RELEASE);
+                    sc_pfx_bind(i, owner, carrier);
+                }
+                return;
+            }
+            int target_parameter = 1;
+            if (slot == DSP_PARAMETER) {
+                const char *name; uint32_t length;
+                memcpy(&name, (const char *)event + 8, 4);
+                memcpy(&length, (const char *)event + 12, 4);
+                target_parameter = length == 7 && name && !memcmp(name, "Flanger", 7);
+            }
+            if (target_parameter) sc_pfx_control(owner, slot == DSP_MIX ? 0 : 1, value);
+            if (slot == DSP_MIX) for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
+                struct sc_pfx_route *r = &sc_pfx_routes[i];
+                if (__atomic_load_n(&r->native_owner, __ATOMIC_ACQUIRE) != owner) continue;
+                if (!(__atomic_load_n(&r->route, __ATOMIC_ACQUIRE) & 7) ||
+                    !__atomic_load_n(&r->bound, __ATOMIC_ACQUIRE)) {
+                    __atomic_store_n(&r->mix, sc_pfx_bits(value), __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->native_override, 0, __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->restore_mix, 0, __ATOMIC_RELEASE);
+                }
+            }
+            if (slot == DSP_MIX) for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
+                struct sc_pfx_route *r = &sc_pfx_routes[i];
+                if (__atomic_load_n(&r->owner, __ATOMIC_ACQUIRE) != owner) continue;
+                unsigned route = __atomic_load_n(&r->route, __ATOMIC_ACQUIRE);
+                if (!(route & 7) || !__atomic_load_n(&r->bound, __ATOMIC_ACQUIRE) || !px_is_carrier(owner)) continue;
+                unsigned char copy[16];
+                const float one = 1.0f;
+                memcpy(copy, event, sizeof copy);
+                memcpy(copy + 0x0c, &one, 4);
+                __atomic_store_n(&r->mix_handler, handler, __ATOMIC_RELEASE);
+                __atomic_store_n(&r->native_owner, owner, __ATOMIC_RELEASE);
+                sc_pfx_activate(r);
+                // Our DSP owns Wet/Dry. Keep the stock carrier's surrounding
+                // processor at unity, avoiding a second application of Mix.
+                ((dsp_event_fn)dsp_originals[slot])(handler, copy);
+                if (!(__atomic_load_n(&r->route, __ATOMIC_ACQUIRE) & 7) ||
+                    !__atomic_load_n(&r->bound, __ATOMIC_ACQUIRE))
+                    __atomic_store_n(&r->restore_mix, 1, __ATOMIC_RELEASE);
+                return;
+            }
+        }
+#endif
     }
     ((dsp_event_fn)dsp_originals[slot])(handler, event);
 }
@@ -364,11 +757,59 @@ static void hook_autogate_process(void *self, float *const *input, float *const 
 // FlangerNegative (their vtables are its only references). It works in place
 // on `input` and tail-calls the common chain with (input, input), so `input`
 // holds the final block on return (#54).
+#if defined(__aarch64__)
+// Keep AZ04's existing opaque third-argument ABI until separately verified.
 static void hook_flanger(void *self, float *const *input, float *const *output, uint32_t frames) {
     float dry = sc_dsp_block_energy(input, frames);
     ((dsp_process_fn)dsp_originals[DSP_FLANGER])(self, input, output, frames);
     sc_dsp_makeup_apply(self, input, frames, dry);
 }
+#else
+typedef void (*dsp_effect_fn)(void *, float *const *, int, uint32_t);
+static void hook_flanger(void *self, float *const *input, float *const *output, uint32_t frames) {
+    if (!fx_selector_supported) {
+        /* Unverified armhf builds/boards retain the original opaque ABI/body. */
+        float dry = sc_dsp_block_energy(input, frames);
+        ((dsp_process_fn)dsp_originals[DSP_FLANGER])(self, input, output, frames);
+        sc_dsp_makeup_apply(self, input, frames, dry);
+        return;
+    }
+    int channels = (int)(uintptr_t)output; /* verified JP07/JC11 5.3.0 only */
+    {
+        // A disabled mapping can still have a deferred stock-Mix restoration.
+        // This executes on the original DSP thread, never the polling worker.
+        for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
+            struct sc_pfx_route *r = &sc_pfx_routes[i];
+            if (__atomic_load_n(&r->effect, __ATOMIC_ACQUIRE) == self &&
+                __atomic_exchange_n(&r->restore_mix, 0, __ATOMIC_ACQ_REL)) px_restore(r);
+        }
+        unsigned mode;
+        struct sc_pfx_route *r = channels == 2 && input && input[0] && input[1] ? sc_pfx_enter_input(self, (void *)input, &mode) : NULL;
+        if (r) {
+            if (__atomic_load_n(&r->native_override, __ATOMIC_ACQUIRE)) {
+                unsigned reset = __atomic_load_n(&r->reset_epoch, __ATOMIC_ACQUIRE);
+                if (r->audio_effect != self || r->audio_epoch != r->render_epoch || r->audio_reset != reset) {
+                    sc_pfx_instance_reset(&r->dsp);
+                    r->audio_effect = self; r->audio_epoch = r->render_epoch; r->audio_reset = reset;
+                }
+                float mix = sc_pfx_float(__atomic_load_n(&r->mix, __ATOMIC_ACQUIRE));
+                float param = sc_pfx_float(__atomic_load_n(&r->parameter, __ATOMIC_ACQUIRE));
+                // Rate vector is not captured yet: Parameter also maps time.
+                (void)sc_pfx_process(&r->dsp, input[0], input[1], frames, (int)mode, param, param, mix);
+                sc_pfx_leave(r);
+                /* No READY bank after rapid resets: reset Wet is zero. The
+                 * Mix=1 processor must receive untouched dry input, never a
+                 * full-wet native Flanger burst while the worker prepares. */
+                return;
+            }
+            sc_pfx_leave(r);
+        }
+    }
+    float dry = channels == 2 ? sc_dsp_block_energy(input, frames) : 0.0f;
+    ((dsp_effect_fn)dsp_originals[DSP_FLANGER])(self, input, channels, frames);
+    if (channels == 2) sc_dsp_makeup_apply(self, input, frames, dry);
+}
+#endif
 
 // airHost's device callback (5.0.4 0x1462a6c, 5.3.0 0xc77934): it zeroes and
 // then fills Engine's planar float outputs, before the resampler and the S32_LE
@@ -380,7 +821,7 @@ static struct sc_gain master_gain[8];
 #define MASTER_ECHO_PAIRS 4 // 384 KB of BSS each, untouched until Echo Out is armed
 static struct sc_echo master_echo[MASTER_ECHO_PAIRS];
 #define MASTER_PFX_PAIRS 4
-static struct sc_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
+static struct sc_master_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
 // #49: in the 4-deck layout a player's 4-channel device (two stereo pairs) leaves
 // decks 3 and 4 without output buffers, and Engine skips rendering them ("Mixer
 // skipped ... unassigned output buffer"): their playheads stand still. All four
@@ -416,11 +857,12 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
     }
     // #88 Pioneer FX emulations (Spiral / Pitch Echo / Slip Roll / Dub Echo / Space)
     int pfx = __atomic_load_n(&pioneer_fx_mode, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&fx_selector_master_bypass, __ATOMIC_ACQUIRE)) pfx = 0;
     if (out && frames > 0) { // also when OFF: lets the effect reset its state
         for (int ch = 0; ch < out_channels && ch / 2 < MASTER_PFX_PAIRS; ch += 2) {
             if (out[ch]) {
                 float *r = ch + 1 < out_channels ? out[ch + 1] : NULL;
-                sc_pioneer_fx_planar(&master_pfx[ch / 2], out[ch], r, (unsigned)frames, pfx);
+                sc_master_pioneer_fx_planar(&master_pfx[ch / 2], out[ch], r, (unsigned)frames, pfx);
             }
         }
     }
@@ -528,6 +970,38 @@ static void patch_bytes(uintptr_t entry, const void *bytes, size_t size, size_t 
     if (mprotect((void *)start, span, PROT_READ | PROT_EXEC)) _exit(127);
     __builtin___clear_cache((char *)entry, (char *)entry + size);
 }
+
+#if !defined(__aarch64__)
+static int install_px_scope(uintptr_t base, size_t page, const char *version) {
+    if (strcmp(version, "5.3.0")) return 0;
+    char product[8] = {0};
+    FILE *f = fopen("/sys/firmware/devicetree/base/inmusic,product-code", "r");
+    size_t n = f ? fread(product, 1, sizeof product - 1, f) : 0;
+    if (f) fclose(f);
+    if (n < 4 || !px_selector_capable(version, product)) return 0;
+    static const uint32_t prefix[] = {0xe59f1ad0, 0xe59f2ad0};
+    uintptr_t entry = base + 0xe99000;
+    if (memcmp((void *)entry, prefix, 8)) return 0;
+    /* Fail back to legacy master/menu if the device cannot publish readiness. */
+    if (!px_write_ready("/run/enginex-fx-selector.ready")) return 0;
+    // Both displaced instructions are PC-relative loads. Preserve their values
+    // in literal words, then resume at the original +8 (including original PC).
+    uint32_t literals[2];
+    memcpy(&literals[0], (void *)(base + 0xe99ad8), 4);
+    memcpy(&literals[1], (void *)(base + 0xe99adc), 4);
+    uint32_t code[] = {0xe59f1004, 0xe59f2004, 0xe59ff004, literals[0], literals[1], (uint32_t)(entry + 8)};
+    px_destructor_original = rx_code(code, sizeof code, page);
+    uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_px_destroy};
+    patch_bytes(entry, jump, sizeof jump, page);
+    px_engine_base = base;
+    fx_selector_master_bypass = 1; /* no hidden legacy master FX on any PX-enabled board */
+    fprintf(stderr, "engine-ui-hook: PX product=%s master-bypass=1 installed\n", product);
+    unlink(UI_ROOT "/fx-selector.ready");
+    unlink(UI_ROOT "/fx-selector.request");
+    unlink(UI_ROOT "/fx-selector.ack");
+    return 1;
+}
+#endif
 
 static int install_dsp_hooks(uintptr_t base, size_t page) {
     // edit_engine has already verified the main ELF BuildID. Treat these hooks
@@ -748,6 +1222,13 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         0xe320f000, // strbne r2, [r0, #0x239]
         0xe320f000, // #77: mov r2, #30
         0xe320f000, // #77: str r2, [r0, #maximumZoomSecs]
+        0xe320f000, // #166 (5.3.0+): ldrb r2, [r0, #0x12e] (hasNHFx)
+        0xe320f000, // cmp r2, #0
+        0xe320f000, // movne r2, #1
+        0xe320f000, // strbne r2, [r0, #0xe1] (hasBeatJump)
+        0xe320f000, // strbne r2, [r0, #0x19c] (hasNoiseSweep)
+        0xe320f000, // strbne r2, [r0, #0x19d] (hasFilterRoll)
+        0xe320f000, // strbne r2, [r0, #0x4cd] (hasSweepFxSelectionPopup)
         0xe59f2004, // replay the two displaced literal loads
         0xe59f3004,
         0xe59ff004,
@@ -760,6 +1241,14 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     if (build->config_zoom == 0x52c) {
         // #152: unlock native 3-band Stems Level EQ (ChannelStrip) on all 5.3.0 models.
         code[5] = 0xe5c02054;
+        // Keep hasNHFx: Mixstream's Main FX switches still need Nh effects.
+        // Only its channel Sweep FX collection changes; every non-NH config
+        // retains these bytes, including models with Beat Jump disabled.
+        // Both return tails execute eors before the next conditional branch,
+        // so no incoming CPSR flags are consumed after this cmp.
+        const uint32_t mixstream[] = {0xe5d0212e, 0xe3520000, 0x13a02001,
+                                     0x15c020e1, 0x15c0219c, 0x15c0219d, 0x15c024cd};
+        memcpy(code + 16, mixstream, sizeof mixstream);
     }
     if (build->config_zoom) {
         // #77: the players' 30 s zoom-out limit on every model (same SoC; Engine
@@ -905,6 +1394,9 @@ static const struct engine_edit edits_530[] = {
         "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x03\x80\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
     {0x8be39cu, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
     {0x1537148u, "\xe4\x20\x9f\xe5\xdc\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
+    // #166 ChannelSweepFx: hasNHFx == 0 already takes the full collection.
+    // Force that same native Filter/Dub Echo/Noise/Filter Roll/Wash path on NH.
+    {0xd1aaf4u, "\xbb\x03\x00\x0a", "\xbb\x03\x00\xea", 4, EDIT_STEMS},
     {0x1efc6bcu, "aac", "mp3", 4, EDIT_ONE},
     // Config.audio.hasLimiter (root +0x24), as the 5.0.4 +0x24 patch.
     {0x153DDB0u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
@@ -934,6 +1426,8 @@ static const struct engine_edit edits_sclive[] = {
         "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x47\x9c\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
     {0x8bbaa4u, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
     {0x159f4a8u, "\xe4\x20\x9f\xe5\xdc\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
+    // Same ChannelSweepFx constructor and hasNHFx gate in the gen-2 Engine.
+    {0xd27e14u, "\xbb\x03\x00\x0a", "\xbb\x03\x00\xea", 4, EDIT_STEMS},
     {0x1f69520u, "aac", "mp3", 4, EDIT_ONE},
     {0x15b6fb0u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
     {0x89cd64u, "\x38\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8, EDIT_ONE},
@@ -1083,7 +1577,12 @@ __attribute__((constructor)) static void edit_engine(void) {
         fprintf(stderr, "engine-ui-hook: applied 0x%x (%u bytes)\n", e->offset, e->size);
     }
     install_sqlite_hooks(base, page);
-    if (install_dsp_hooks(base, page)) lim_start_poll();
+    if (install_dsp_hooks(base, page)) {
+#if !defined(__aarch64__)
+        fx_selector_supported = install_px_scope(base, page, build->name);
+#endif
+        lim_start_poll();
+    }
 }
 
 // Unknown or unsafe values fall back to the English pack.
@@ -1302,14 +1801,22 @@ int _Z21qRegisterResourceDataiPKhS0_S0_(int version, const uchar *tree, const uc
 }
 
 static int thread_class(const char *name) {
-    static const char *idle[] = {"Analysis Queue", "OfflineAnalyzer", "Dropbox", "Beatport",
-        "J:I:Takingfreez", "Taking freeze", "Freeze Checker", "Collecting anal", "sentry", "CrashHandler"};
-    for (size_t i = 0; i < sizeof idle / sizeof *idle; i++)
-        if (!strncmp(name, idle[i], strlen(idle[i]))) return 2;
+    // J:* names describe the current job, not a dedicated background thread.
+    // 5.3.0's four JobController workers all become J:I:Takingfreez at startup;
+    // demoting one here persists when it switches to search/load/history work.
+    if (!strncmp(name, "J:", 2)) return 0;
+    // These threads can hold locks used by EMain. SCHED_IDLE and idle I/O
+    // provide no progress guarantee against ordinary runnable work. Keep
+    // background work in the fair scheduler; leave the health monitor alone.
+    static const char *background[] = {"Analysis Queue", "OfflineAnalyzer", "Dropbox", "Beatport",
+        "sentry", "CrashHandler"};
+    for (size_t i = 0; i < sizeof background / sizeof *background; i++)
+        if (!strncmp(name, background[i], strlen(background[i]))) return 2;
     return !strncmp(name, "QQuickPixmapRea", 15) || !strncmp(name, "FileInfoThread", 14);
 }
 
 static int guard_affinity(pthread_t thread, int kind) {
+    (void)kind;
     static void *get_cache, *set_cache;
     int (*get)(pthread_t, size_t, cpu_set_t *) = next_symbol(&get_cache, "pthread_getaffinity_np");
     int (*set)(pthread_t, size_t, const cpu_set_t *) = next_symbol(&set_cache, "pthread_setaffinity_np");
@@ -1320,20 +1827,15 @@ static int guard_affinity(pthread_t thread, int kind) {
         int rc = get(thread, sizeof allowed, &allowed);
         if (rc) return rc;
     }
-    CPU_CLR(0, &allowed);
-    if (!CPU_COUNT(&allowed)) return EINVAL; // A single-core target cannot avoid CPU0.
-    if (kind == 2) {
-        int last = CPU_SETSIZE - 1;
-        while (!CPU_ISSET(last, &allowed)) last--;
-        CPU_ZERO(&allowed);
-        CPU_SET(last, &allowed);
-    }
+    CPU_CLR(1, &allowed); // EMain
+    CPU_CLR(2, &allowed); // SceneGraph
+    if (!CPU_COUNT(&allowed)) return EINVAL;
     return set(thread, sizeof allowed, &allowed);
 }
 
-static void lower_io_nice(pid_t tid, int nice, int idle_io) {
+static void lower_io_nice(pid_t tid, int nice, int background_io) {
     setpriority(PRIO_PROCESS, (id_t)tid, nice);
-    if (idle_io) syscall(SYS_ioprio_set, 1, tid, 3 << 13);
+    if (background_io) syscall(SYS_ioprio_set, 1, tid, (2 << 13) | 7);
 }
 
 static void guard_named_thread(pthread_t thread, const char *name) {
@@ -1342,10 +1844,10 @@ static void guard_named_thread(pthread_t thread, const char *name) {
     if (!kind) return;
     int saved_errno = errno;
     struct sched_param param = {.sched_priority = 0};
-    if (kind == 2) pthread_setschedparam(thread, SCHED_IDLE, &param);
+    if (kind == 2) pthread_setschedparam(thread, SCHED_OTHER, &param);
     guard_affinity(thread, kind);
     if (pthread_equal(thread, pthread_self())) {
-        lower_io_nice((pid_t)syscall(SYS_gettid), kind == 2 ? 19 : 10, kind == 2);
+        lower_io_nice((pid_t)syscall(SYS_gettid), 10, kind == 2);
     } else {
         // Naming another pthread must not lower the caller (often Engine's main thread).
         // Equal kernel names have the same policy, so duplicate worker names are safe.
@@ -1362,7 +1864,7 @@ static void guard_named_thread(pthread_t thread, const char *name) {
             int match = fgets(comm, sizeof comm, f) &&
                 (comm[strcspn(comm, "\n")] = 0, !strncmp(comm, name, 15));
             fclose(f);
-            if (match) lower_io_nice((pid_t)tid, kind == 2 ? 19 : 10, kind == 2);
+            if (match) lower_io_nice((pid_t)tid, 10, kind == 2);
         }
         if (tasks) closedir(tasks);
     }
@@ -1644,7 +2146,7 @@ static void oa_install(void) {
 
 // #55: Engine analyses in OfflineAnalyzer child processes, which inherit this
 // preload. Analysing a whole drive in the background must never compete with
-// playback: idle CPU class, nice 19 and idle I/O, off CPU 0; threads inherit all.
+// playback: fair CPU class, nice 10 and best-effort I/O, off GUI/GL (1/2).
 __attribute__((constructor)) static void lower_offline_analyzer(void) {
     char exe[64];
     ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
@@ -1653,18 +2155,21 @@ __attribute__((constructor)) static void lower_offline_analyzer(void) {
     const char *name = strrchr(exe, '/');
     if (strcmp(name ? name + 1 : exe, "OfflineAnalyzer")) return;
     struct sched_param param = {.sched_priority = 0};
-    sched_setscheduler(0, SCHED_IDLE, &param);
-    lower_io_nice(0, 19, 1);
-    cpu_set_t cpus;
-    if (!sched_getaffinity(0, sizeof cpus, &cpus) && CPU_ISSET(0, &cpus) && CPU_COUNT(&cpus) > 1) {
-        CPU_CLR(0, &cpus);
+    sched_setscheduler(0, SCHED_OTHER, &param);
+    lower_io_nice(0, 10, 1);
+    // It may inherit only CPU1 from EMain: use the online set, not that mask.
+    initialize_engine_cpus();
+    cpu_set_t cpus = engine_cpus;
+    CPU_CLR(1, &cpus);
+    CPU_CLR(2, &cpus);
+    if (engine_cpus_ready && CPU_COUNT(&cpus)) {
         sched_setaffinity(0, sizeof cpus, &cpus);
     }
     oa_install();
 }
 
 // Engine itself raises its analyzers to nice -5 / SCHED_OTHER once they connect
-// (seen on 5.3.0): keep them idle (#55).
+// (seen on 5.3.0): keep them in the fair background class (#55).
 static int offline_analyzer(pid_t pid) {
     char path[48], comm[32] = "";
     if (pid <= 0) return 0;
@@ -1680,7 +2185,7 @@ int setpriority(__priority_which_t which, id_t who, int prio) {
     static void *cache;
     int (*real)(__priority_which_t, id_t, int) = next_symbol(&cache, "setpriority");
     if (!real) { errno = ENOSYS; return -1; }
-    if (which == PRIO_PROCESS && is_engine() && offline_analyzer((pid_t)who)) prio = 19;
+    if (which == PRIO_PROCESS && is_engine() && offline_analyzer((pid_t)who)) prio = 10;
     return real(which, who, prio);
 }
 
@@ -1689,7 +2194,7 @@ int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param) {
     int (*real)(pid_t, int, const struct sched_param *) = next_symbol(&cache, "sched_setscheduler");
     if (!real) { errno = ENOSYS; return -1; }
     static const struct sched_param idle = {.sched_priority = 0};
-    if (is_engine() && offline_analyzer(pid)) policy = SCHED_IDLE, param = &idle;
+    if (is_engine() && offline_analyzer(pid)) policy = SCHED_OTHER, param = &idle;
     return real(pid, policy, param);
 }
 
@@ -1730,7 +2235,7 @@ int pthread_setschedparam(pthread_t thread, int policy, const struct sched_param
     char name[16];
     struct sched_param idle = {.sched_priority = 0};
     if (is_engine() && !pthread_getname_np(thread, name, sizeof name) && thread_class(name) == 2) {
-        policy = SCHED_IDLE;
+        policy = SCHED_OTHER;
         param = &idle;
     }
     return real(thread, policy, param);

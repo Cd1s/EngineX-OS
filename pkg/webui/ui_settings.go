@@ -57,8 +57,8 @@ type uiSettings struct {
 	Jog         string  `json:"jog"`
 	NeteaseMode string  `json:"neteaseMode"`
 	Playhead    float64 `json:"playhead"`
-	// AutoAnalyze has the UI pack start Engine's own analysis of every
-	// unanalysed track whenever a drive is inserted (#55). Off by default.
+	// AutoAnalyze retains the user's preference (#55). The UI pack currently
+	// fails closed: no automatic analysis until a bounded native adapter is verified.
 	AutoAnalyze bool `json:"autoAnalyze"`
 	// MasterLimiter turns on the soft clipper / peak limiter engine_ui_hook.c
 	// applies to Engine's audio output (#58). Off by default.
@@ -71,34 +71,40 @@ type uiSettings struct {
 	OmniSource bool `json:"omniSource"`
 	// ProlinkShare lets rb-bridge read the Rekordbox library of Pioneer
 	// players on the LAN (#59). Off by default.
-	ProlinkShare     bool     `json:"prolinkShare"`
-	ProlinkExport    bool     `json:"prolinkExport"` // experimental Denon -> CDJ export; default OFF
-	Language         string   `json:"language"`
-	Waveform         string   `json:"waveform"`
-	Sources          []string `json:"sources"`
-	Scope            string   `json:"scope"`
-	GitHubRepo       string   `json:"githubRepo"`
-	SafeMode         bool     `json:"safeMode"`
-	LoggedIn         []string `json:"loggedIn"`
-	FourDeckWaveform bool     `json:"fourDeckWaveform"`
-	FourDeckRole     string   `json:"fourDeckRole"`
-	ProlinkWaveform  bool     `json:"prolinkWaveform"`
-	BroadcastEnabled bool     `json:"broadcastEnabled"`
-	UpfaderEcho      bool     `json:"upfaderEcho"`
+	ProlinkShare       bool     `json:"prolinkShare"`
+	ProlinkExport      bool     `json:"prolinkExport"` // experimental Denon -> CDJ export; default OFF
+	Language           string   `json:"language"`
+	Waveform           string   `json:"waveform"`
+	Sources            []string `json:"sources"`
+	Scope              string   `json:"scope"`
+	GitHubRepo         string   `json:"githubRepo"`
+	SafeMode           bool     `json:"safeMode"`
+	LoggedIn           []string `json:"loggedIn"`
+	FourDeckWaveform   bool     `json:"fourDeckWaveform"`
+	FourDeckRole       string   `json:"fourDeckRole"`
+	ShadowLegacyEngine bool     `json:"shadowLegacyEngine"` // opt-in rollback; change at a planned Engine restart
+	ProlinkWaveform    bool     `json:"prolinkWaveform"`
+	BroadcastEnabled   bool     `json:"broadcastEnabled"`
+	UpfaderEcho        bool     `json:"upfaderEcho"`
+	// DebugTelemetry logs every shadow deck update and decision (shadow_debug.go).
+	// Development only: off by default, and nothing in the image turns it on.
+	DebugTelemetry bool `json:"debugTelemetry"`
 
 	StreamSortRole    string `json:"streamSortRole,omitempty"`
 	StreamSortOrder   string `json:"streamSortOrder,omitempty"`
 	BrowserDualColumn bool   `json:"browserDualColumn"`
 	TracklistWaveform bool   `json:"tracklistWaveform"`
+	CueCountdown      bool   `json:"cueCountdown"`
 	SyncGuardPct      int    `json:"syncGuardPct"`
 	SwapLoopOrder     bool   `json:"swapLoopOrder"`
 	LedBrightness     int    `json:"ledBrightness"`
 	// UIScale enlarges or shrinks Engine's whole interface; it takes effect at the next
 	// Engine start, so the Control Center row asks before applying it.
-	UIScale      int    `json:"uiScale"`
-	StemsEqMode  bool   `json:"stemsEqMode"`
-	BeatJumpPads bool   `json:"beatJumpPads"`
-	PioneerFx    string `json:"pioneerFx"`
+	UIScale             int    `json:"uiScale"`
+	StemsEqMode         bool   `json:"stemsEqMode"`
+	BeatJumpPads        bool   `json:"beatJumpPads"`
+	PioneerFx           string `json:"pioneerFx"`
+	FXSelectorAvailable bool   `json:"fxSelectorAvailable"`
 
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
@@ -180,8 +186,8 @@ func (s *Server) loadUI() uiSettings {
 	known, saved := uiServicesBeforeKnown, false
 	v := uiSettings{
 		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ProlinkWaveform: true,
-		TracklistWaveform: true,
-		StreamSortRole:    "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
+		TracklistWaveform: true, CueCountdown: true,
+		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 	}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
@@ -250,6 +256,8 @@ func (s *Server) loadUI() uiSettings {
 			} else if val == "0" || strings.EqualFold(val, "false") {
 				v.FourDeckWaveform = false
 			}
+		case "shadow_legacy_engine":
+			v.ShadowLegacyEngine = val == "1" || strings.EqualFold(val, "true")
 		case "prolink_waveform":
 			if val == "0" || strings.EqualFold(val, "false") {
 				v.ProlinkWaveform = false
@@ -262,6 +270,8 @@ func (s *Server) loadUI() uiSettings {
 			} else if val == "0" || strings.EqualFold(val, "false") {
 				v.UpfaderEcho = false
 			}
+		case "debug_telemetry":
+			v.DebugTelemetry = val == "1" || strings.EqualFold(val, "true")
 		case "stream_sort_role":
 			if slices.Contains(uiStreamSortRoles, val) {
 				v.StreamSortRole = val
@@ -270,6 +280,8 @@ func (s *Server) loadUI() uiSettings {
 			if slices.Contains(uiStreamSortOrders, val) {
 				v.StreamSortOrder = val
 			}
+		case "cue_countdown":
+			v.CueCountdown = val != "0" && !strings.EqualFold(val, "false")
 		case "browser_dual_column":
 			v.BrowserDualColumn = val == "1" || strings.EqualFold(val, "true")
 		case "tracklist_waveform":
@@ -356,6 +368,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.FourDeckWaveform {
 		text += "four_deck_waveform=1\n"
 	}
+	if v.ShadowLegacyEngine {
+		text += "shadow_legacy_engine=1\n"
+	}
 	if v.FourDeckRole != "auto" {
 		text += "four_deck_role=" + v.FourDeckRole + "\n"
 	}
@@ -367,6 +382,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.AutoAnalyze {
 		text += "auto_analyze=1\n"
+	}
+	if v.DebugTelemetry {
+		text += "debug_telemetry=1\n"
 	}
 	if v.MasterLimiter {
 		text += "master_limiter=1\n"
@@ -388,6 +406,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.StreamSortOrder != "" && v.StreamSortOrder != "asc" {
 		text += "stream_sort_order=" + v.StreamSortOrder + "\n"
+	}
+	if !v.CueCountdown {
+		text += "cue_countdown=0\n"
 	}
 	if v.BrowserDualColumn {
 		text += "browser_dual_column=1\n"
@@ -413,7 +434,7 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.BeatJumpPads {
 		text += "beat_jump_pads=1\n"
 	}
-	if v.PioneerFx != "" && v.PioneerFx != "off" {
+	if !s.fxSelectorAvailable() && v.PioneerFx != "" && v.PioneerFx != "off" {
 		text += "pioneer_fx=" + v.PioneerFx + "\n"
 	}
 	if v.GitHubRepo != defaultGitHubRepo {
@@ -442,6 +463,47 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	return writeUIScaleEnv(v.UIScale)
 }
 
+// Caller holds uiMu. Preserve unrelated/unknown settings during migration.
+func (s *Server) migratePioneerFX() error {
+	path := filepath.Join(s.uiDir(), "settings.conf")
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(b), "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "pioneer_fx=") {
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == len(lines) {
+		return nil
+	}
+	f, err := os.CreateTemp(s.uiDir(), ".fx-settings-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	_, err = f.WriteString(strings.Join(kept, "\n"))
+	if err == nil {
+		err = f.Sync()
+	}
+	if ce := f.Close(); err == nil {
+		err = ce
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(f.Name(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
 // scope is the service the deck's native browser currently shows.
 func (s *Server) scope() string {
 	s.uiMu.Lock()
@@ -452,6 +514,13 @@ func (s *Server) scope() string {
 func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
+	v.FXSelectorAvailable = s.fxSelectorAvailable()
+	if v.FXSelectorAvailable {
+		if err := s.migratePioneerFX(); err != nil {
+			log.Printf("FX selector settings migration: %v", err)
+		}
+		v.PioneerFx = "off"
+	}
 	s.uiMu.Unlock()
 	v.BroadcastEnabled = s.BroadcastEnabled()
 	if ver := s.installedVersion(); ver != "" && ver != "dev" {
@@ -469,13 +538,22 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.Player = playerBoards[imagePrefix(deviceCompatible())]
 	v.FourDeckRoleActive = s.activeRole(v)
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
-		respond(w, struct {
+		body, err := json.Marshal(struct {
 			uiSettings
 			AccessCode string `json:"accessCode"`
 			ConsoleURL string `json:"consoleUrl"`
 			// LANStems: the home sc5000-stemsd last seen, for Settings -> About (#148).
 			LANStems *stems.LANState `json:"lanStems,omitempty"`
 		}{v, s.cfg.AccessToken, "http://" + lanHost() + ":8080", relay.LANStems})
+		if err != nil {
+			fail(w, http.StatusInternalServerError, err)
+			return
+		}
+		// The Engine UI polls this every 3 s; an unchanged digest spares it the
+		// JSON.parse and ~40 property writes (V4 garbage on the GUI thread).
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-UI-Digest", strconv.FormatUint(fnvSum(string(body)), 16))
+		w.Write(append(body, '\n'))
 		return
 	}
 	respond(w, v)
@@ -497,6 +575,10 @@ func parseBoolParam(val string) (bool, bool) {
 // safe mode: the user has asked for the UI to be tried again.
 func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if q.Has("fxUnit") || q.Has("fxMode") {
+		s.fxSelectorUpdate(w, r, q)
+		return
+	}
 	if r.Body != nil && strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
@@ -520,6 +602,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
+	}
+	if q.Has("shadowLegacyEngine") {
+		b, ok := parseBoolParam(q.Get("shadowLegacyEngine"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.ShadowLegacyEngine = b
 	}
 	if q.Has("fourDeckWaveform") {
 		b, ok := parseBoolParam(q.Get("fourDeckWaveform"))
@@ -547,6 +638,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.UpfaderEcho = b
+	}
+	if q.Has("cueCountdown") {
+		b, ok := parseBoolParam(q.Get("cueCountdown"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.CueCountdown = b
 	}
 	if q.Has("browserDualColumn") {
 		b, ok := parseBoolParam(q.Get("browserDualColumn"))

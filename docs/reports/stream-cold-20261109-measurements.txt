@@ -1,0 +1,103 @@
+=== RUN   TestColdListingLatency300ms
+=== RUN   TestColdListingLatency300ms/deezer-lists
+    pages_test.go:206: 300ms/request: serial=1.546s parallel=928ms requests=5 peak=2 rows=500
+=== RUN   TestColdListingLatency300ms/deezer-tracks
+    pages_test.go:206: 300ms/request: serial=1.545s parallel=928ms requests=5 peak=2 rows=500
+=== RUN   TestColdListingLatency300ms/spotify-lists
+    pages_test.go:206: 300ms/request: serial=1.517s parallel=911ms requests=6 peak=2 rows=251
+=== RUN   TestColdListingLatency300ms/spotify-tracks
+    pages_test.go:206: 300ms/request: serial=1.528s parallel=918ms requests=5 peak=2 rows=500
+=== RUN   TestColdListingLatency300ms/spotify-likes
+    pages_test.go:206: 300ms/request: serial=1.517s parallel=911ms requests=5 peak=2 rows=250
+=== RUN   TestColdListingLatency300ms/beatport-lists
+    pages_test.go:206: 300ms/request: serial=1.817s parallel=1.212s requests=6 peak=2 rows=251
+=== RUN   TestColdListingLatency300ms/beatport-tracks
+    pages_test.go:206: 300ms/request: serial=1.541s parallel=927ms requests=5 peak=2 rows=500
+=== RUN   TestColdListingLatency300ms/netease-tracks
+    pages_test.go:206: 300ms/request: serial=1.568s parallel=950ms requests=5 peak=2 rows=800
+=== RUN   TestColdListingLatency300ms/soundcloud-web-tracks
+    pages_test.go:206: 300ms/request: serial=1.549s parallel=943ms requests=5 peak=2 rows=201
+--- PASS: TestColdListingLatency300ms (22.77s)
+    --- PASS: TestColdListingLatency300ms/deezer-lists (2.48s)
+    --- PASS: TestColdListingLatency300ms/deezer-tracks (2.47s)
+    --- PASS: TestColdListingLatency300ms/spotify-lists (2.43s)
+    --- PASS: TestColdListingLatency300ms/spotify-tracks (2.45s)
+    --- PASS: TestColdListingLatency300ms/spotify-likes (2.43s)
+    --- PASS: TestColdListingLatency300ms/beatport-lists (3.03s)
+    --- PASS: TestColdListingLatency300ms/beatport-tracks (2.47s)
+    --- PASS: TestColdListingLatency300ms/netease-tracks (2.52s)
+    --- PASS: TestColdListingLatency300ms/soundcloud-web-tracks (2.49s)
+=== RUN   TestPagesTotalsCursorsErrorsAndCancellation
+=== RUN   TestPagesTotalsCursorsErrorsAndCancellation/0
+=== RUN   TestPagesTotalsCursorsErrorsAndCancellation/2
+=== RUN   TestPagesTotalsCursorsErrorsAndCancellation/5
+=== RUN   TestPagesTotalsCursorsErrorsAndCancellation/1000000000
+--- PASS: TestPagesTotalsCursorsErrorsAndCancellation (0.04s)
+    --- PASS: TestPagesTotalsCursorsErrorsAndCancellation/0 (0.01s)
+    --- PASS: TestPagesTotalsCursorsErrorsAndCancellation/2 (0.01s)
+    --- PASS: TestPagesTotalsCursorsErrorsAndCancellation/5 (0.01s)
+    --- PASS: TestPagesTotalsCursorsErrorsAndCancellation/1000000000 (0.01s)
+=== RUN   TestPageBudgetSharedAcrossColdLists
+--- PASS: TestPageBudgetSharedAcrossColdLists (0.04s)
+=== RUN   TestColdCursorLatency300ms
+=== RUN   TestColdCursorLatency300ms/applemusic-lists
+    pages_unchanged_test.go:96: unchanged run=0 cold=1.556s requests=5 rows=500
+    pages_unchanged_test.go:96: unchanged run=1 cold=1.554s requests=5 rows=500
+=== RUN   TestColdCursorLatency300ms/applemusic-tracks
+    pages_unchanged_test.go:96: unchanged run=0 cold=1.576s requests=5 rows=500
+    pages_unchanged_test.go:96: unchanged run=1 cold=1.574s requests=5 rows=500
+=== RUN   TestColdCursorLatency300ms/soundcloud-likes
+    pages_unchanged_test.go:96: unchanged run=0 cold=1.612s requests=5 rows=500
+    pages_unchanged_test.go:96: unchanged run=1 cold=1.604s requests=5 rows=500
+=== RUN   TestColdCursorLatency300ms/soundcloud-lists
+    pages_unchanged_test.go:96: unchanged run=0 cold=1.841s requests=6 rows=501
+    pages_unchanged_test.go:96: unchanged run=1 cold=1.84s requests=6 rows=501
+=== RUN   TestColdCursorLatency300ms/netease-lists
+    pages_unchanged_test.go:96: unchanged run=0 cold=1.542s requests=7 rows=500
+    pages_unchanged_test.go:96: unchanged run=1 cold=1.542s requests=7 rows=500
+--- PASS: TestColdCursorLatency300ms (16.24s)
+    --- PASS: TestColdCursorLatency300ms/applemusic-lists (3.11s)
+    --- PASS: TestColdCursorLatency300ms/applemusic-tracks (3.15s)
+    --- PASS: TestColdCursorLatency300ms/soundcloud-likes (3.22s)
+    --- PASS: TestColdCursorLatency300ms/soundcloud-lists (3.68s)
+    --- PASS: TestColdCursorLatency300ms/netease-lists (3.09s)
+=== RUN   TestColdSelfHostedLatency300ms
+=== RUN   TestColdSelfHostedLatency300ms/subsonic
+    pages_unchanged_test.go:131: unchanged run=0 lists=302ms tracks=301ms requests=1 each
+    pages_unchanged_test.go:131: unchanged run=1 lists=301ms tracks=301ms requests=1 each
+=== RUN   TestColdSelfHostedLatency300ms/webdav
+    pages_unchanged_test.go:131: unchanged run=0 lists=301ms tracks=301ms requests=1 each
+    pages_unchanged_test.go:131: unchanged run=1 lists=301ms tracks=301ms requests=1 each
+=== RUN   TestColdSelfHostedLatency300ms/plex
+    pages_unchanged_test.go:131: unchanged run=0 lists=301ms tracks=301ms requests=1 each
+    pages_unchanged_test.go:131: unchanged run=1 lists=301ms tracks=301ms requests=1 each
+--- PASS: TestColdSelfHostedLatency300ms (3.62s)
+    --- PASS: TestColdSelfHostedLatency300ms/subsonic (1.21s)
+    --- PASS: TestColdSelfHostedLatency300ms/webdav (1.21s)
+    --- PASS: TestColdSelfHostedLatency300ms/plex (1.21s)
+PASS
+ok  	github.com/Cd1s/EngineX-OS/pkg/providers	43.742s
+=== RUN   TestColdFetchDiscoversFinishedProviderFileWithoutNetwork
+=== RUN   TestColdFetchDiscoversFinishedProviderFileWithoutNetwork/deezer
+    jobs_cold_test.go:50: finished deezer cache -> playable path: 1.286ms, upstream requests=0
+=== RUN   TestColdFetchDiscoversFinishedProviderFileWithoutNetwork/netease
+    jobs_cold_test.go:50: finished netease cache -> playable path: 204µs, upstream requests=0
+=== RUN   TestColdFetchDiscoversFinishedProviderFileWithoutNetwork/spotify
+    jobs_cold_test.go:50: finished spotify cache -> playable path: 189µs, upstream requests=0
+=== RUN   TestColdFetchDiscoversFinishedProviderFileWithoutNetwork/beatport
+    jobs_cold_test.go:50: finished beatport cache -> playable path: 167µs, upstream requests=0
+--- PASS: TestColdFetchDiscoversFinishedProviderFileWithoutNetwork (0.05s)
+    --- PASS: TestColdFetchDiscoversFinishedProviderFileWithoutNetwork/deezer (0.00s)
+    --- PASS: TestColdFetchDiscoversFinishedProviderFileWithoutNetwork/netease (0.00s)
+    --- PASS: TestColdFetchDiscoversFinishedProviderFileWithoutNetwork/spotify (0.00s)
+    --- PASS: TestColdFetchDiscoversFinishedProviderFileWithoutNetwork/beatport (0.00s)
+=== RUN   TestColdFileDiscoveryKeepsProviderIsolationAndFinalNames
+--- PASS: TestColdFileDiscoveryKeepsProviderIsolationAndFinalNames (0.05s)
+=== RUN   TestColdTidalPassthroughLatency300ms
+    jobs_cold_test.go:103: unchanged run=0 /v1/users/1/playlists?limit=10&offset=0 cold=302ms requests=1
+    jobs_cold_test.go:103: unchanged run=0 /v1/playlists/fixture/items?limit=10&offset=0 cold=302ms requests=1
+    jobs_cold_test.go:103: unchanged run=1 /v1/users/1/playlists?limit=10&offset=0 cold=302ms requests=1
+    jobs_cold_test.go:103: unchanged run=1 /v1/playlists/fixture/items?limit=10&offset=0 cold=302ms requests=1
+--- PASS: TestColdTidalPassthroughLatency300ms (1.22s)
+PASS
+ok  	github.com/Cd1s/EngineX-OS/pkg/webui	2.373s

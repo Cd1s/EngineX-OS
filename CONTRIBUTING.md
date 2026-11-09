@@ -23,20 +23,30 @@ Thanks for helping. EngineX OS runs on decks that people play live on, so the ba
 - **Engine databases**: while Engine has a library open, no other process may write `m.db` / `hm.db`.
 - **Vendor units**: never put a hard `Requires=`, `BindsTo=` or `Requisite=` on a unit the vendor ships, because a new base may drop it (5.3.0 dropped `etc.mount`, and the 5.0.4.2 → 5.3.0.1 online update lost the UI packs and SSH). Use `RequiresMountsFor=` for mounts and `Wants=` + `After=` for everything else.
 
-### Tests
+### Tests & Experimental Inspection
 
-Run on a Linux x86_64 host with Go, an armhf cross compiler and `qemu-arm`:
+Run builds and tests on **the build host** (`REMOTE_BUILD_HOST=<build host> remote-build ...`, aarch64 with native 32-bit `armhf` execution). For experimental component inspection and ABI/resource analysis, use **`craft-anything`** (`craft-anything-cli` / `craft-anything` skill) with **`deepseek-v4.1-flash`** (`deepseek4.1 flash`) on the build host:
 
 ```sh
-go vet ./... && go test -race ./...
+gofmt -l . && go vet ./... && go test -race ./...
 bash tests/test_rootfs_overlay.sh            # bash, not sh
+JC11S_ROOTFS=/path/to/official/PRIME4PLUS/rootfs bash tools/az01-packer/test_sclive4_bootstrap.sh
 python3 -m unittest discover -s tools/az01-packer
 python3 -m unittest discover -s tools/stems
-# C hooks: build commands are in the header of each file
+# C compatibility adapters: build commands are in the header of each file
 #   tools/ui-mod/test_dsp_smooth.c   (also with ASan/UBSan and TSan)
-#   tools/ui-mod/test_stems_feature.c (armhf + qemu-arm)
+#   tools/ui-mod/test_stems_feature.c (armhf native on the build host)
 #   tools/edisksd-hook/test_edisksd_hook.c
+#   tools/ui-mod/test_az04_hook.c
 ```
+
+The armhf bootstrap command above includes both SC LIVE 4 and the separate
+official PRIME4PLUS (JC11S) rootfs. Without `JC11S_ROOTFS`, a standalone run
+warns that JC11S was not tested; release validation must supply the fixture.
+An explicitly supplied missing directory is an error. For the actual published
+archive through the installer shim, set `JC11S_RELEASE_BUNDLE` to its verified
+PRIME4PLUS data-bundle path when running Go tests. See
+`docs/issue169-prime4plus-investigation.md` for official-image and bundle digests.
 
 ## Releasing a new version
 

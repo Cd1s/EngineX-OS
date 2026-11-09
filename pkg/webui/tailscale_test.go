@@ -69,6 +69,12 @@ func (f *tsFake) has(sub string) bool {
 	return false
 }
 
+func (f *tsFake) snapshot() ([]string, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cmds...), f.keyFile
+}
+
 func tsPost(t *testing.T, s *Server, body string) (int, TailscaleStatusView, string) {
 	t.Helper()
 	w := httptest.NewRecorder()
@@ -155,7 +161,8 @@ func TestTailscaleLoginServeAndStop(t *testing.T) {
 		t.Fatalf("login URL flow: %d %s", code, out)
 	}
 	if !f.has("systemd-run --unit=sc5000-tailscaled") || !f.has("--tun=userspace-networking") || !f.has("--login-server=https://hs.example ") && !f.has("--login-server=https://hs.example") {
-		t.Fatalf("daemon/up flags wrong: %v", f.cmds)
+		cmds, _ := f.snapshot()
+		t.Fatalf("daemon/up flags wrong: %v", cmds)
 	}
 	if f.has("serve --bg") {
 		t.Fatal("must not forward before the node is logged in")
@@ -166,10 +173,11 @@ func TestTailscaleLoginServeAndStop(t *testing.T) {
 	if code != http.StatusOK || v.State != "Running" || len(v.IPs) != 1 {
 		t.Fatalf("auth key flow: %d %s", code, out)
 	}
-	if f.keyFile != "tskey-auth-SECRET1234" {
-		t.Fatalf("auth key file content: %q", f.keyFile)
+	cmds, keyFile := f.snapshot()
+	if keyFile != "tskey-auth-SECRET1234" {
+		t.Fatalf("auth key file content differs from test fixture")
 	}
-	for _, c := range f.cmds {
+	for _, c := range cmds {
 		if strings.Contains(c, "SECRET1234") {
 			t.Fatalf("auth key leaked into a command line: %s", c)
 		}
@@ -181,7 +189,8 @@ func TestTailscaleLoginServeAndStop(t *testing.T) {
 		t.Fatalf("temporary key file left behind: %v", left)
 	}
 	if !f.has("serve reset") || !f.has("serve --bg --tcp=22 tcp://127.0.0.1:22") || !f.has("serve --bg --tcp=8080 tcp://127.0.0.1:8080") {
-		t.Fatalf("forwards wrong: %v", f.cmds)
+		cmds, _ := f.snapshot()
+		t.Fatalf("forwards wrong: %v", cmds)
 	}
 
 	// Off stops the daemon but keeps the login state and settings.

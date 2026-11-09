@@ -40,11 +40,12 @@ type SongStructure struct {
 	Phrases       []Phrase
 }
 type Analysis struct {
-	Beats     []Beat
-	Cues      []Cue
-	Waveforms []Waveform
-	Structure *SongStructure
-	Unknown   map[string][][]byte
+	DurationMS uint32 // track duration from PDB, when available (overview has no timebase)
+	Beats      []Beat
+	Cues       []Cue
+	Waveforms  []Waveform
+	Structure  *SongStructure
+	Unknown    map[string][][]byte
 }
 
 const MaxAnalysisBytes = 128 << 20

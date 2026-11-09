@@ -138,7 +138,8 @@ func TestOmniSourceListsDrivePlaylistsAndOtherServices(t *testing.T) {
 func TestOmniSourceSearchFindsDriveTracksBesideStreaming(t *testing.T) {
 	dbPath, root, _ := omniDrive(t)
 	before, _ := os.ReadFile(dbPath)
-	_, base := omniServer(t, root, true)
+	s, base := omniServer(t, root, true)
+	s.sessions["deezer-search"] = &Session{ID: "deezer-search", Provider: "deezer", Ready: true, p: &providers.Deezer{BaseURL: s.tidal.catalog.BaseURL, UserID: "fixture"}}
 	var res struct{ Tracks tidalList }
 	tidalGet(t, base, "/v1/search?query=Omni&limit=50&offset=0&types=TRACKS", 200, &res)
 	got, _ := titles(t, res.Tracks.Items)

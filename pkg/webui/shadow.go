@@ -1,11 +1,11 @@
 package webui
 
 // Shadow decks (#49). In the 4-deck layout a player plays the decks of its
-// role and shows the other two. Its QML polls GET /v1/sc5000/shadow and drives
-// those decks (silent: the hook routes only the role's decks to the outputs)
-// from whoever plays them: the other EngineX player, whose QML posts its own
+// role and shows the other two. By default QML renders source display assets
+// (shadow_display.go), keeping the corresponding local Engine slots empty.
+// The opt-in legacy mode drives silent local Engine decks and copies audio.
+// Sources are the other EngineX player, whose QML posts its own
 // decks to POST /v1/sc5000/decks, or a CDJ on Pro DJ Link, by player number.
-// Track audio is copied to this deck.
 //
 // Latency: the sender's QML posts on every edge (play, CUE, jump, pitch) within
 // 20 ms, Go pushes the post to the other player over UDP at once, and there it
@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -48,22 +49,26 @@ var shadowDataRoot, shadowMediaRoot, shadowBeaconOn = "/data", "/media", true
 
 // deckState is one deck as a shadow deck follows it.
 type deckState struct {
-	Deck       int     `json:"deck"`
-	Path       string  `json:"path,omitempty"` // a file on this deck
-	Net        string  `json:"net,omitempty"`  // Engine's TrackNetworkPath, posted by the QML
-	Key        string  `json:"key,omitempty"`  // changes with the track
-	Ext        string  `json:"ext,omitempty"`
-	Name       string  `json:"name,omitempty"`  // the file's name, which the copy keeps
-	Title      string  `json:"title,omitempty"` // a streaming track's real title (QML or stm.db): the copy is named after it
-	Artist     string  `json:"artist,omitempty"`
-	Loading    bool    `json:"loading,omitempty"` // shadow deck: the peer has a track whose audio is still being fetched
-	Playing    bool    `json:"playing"`
-	PositionMS float64 `json:"positionMs"`
-	Pitch      float64 `json:"pitch"` // percent
-	Master     bool    `json:"master,omitempty"`
-	Sync       bool    `json:"sync,omitempty"` // a CDJ's BEAT SYNC: the shadow deck syncs in Engine
-	BPM        float64 `json:"bpm,omitempty"`  // the track's
-	Beat       float64 `json:"beat,omitempty"` // Engine's BeatNumber: beats into the bar, 0..4
+	baseKey      string  // source-only file identity; Key also identifies the loaded session
+	Deck         int     `json:"deck"`
+	Path         string  `json:"path,omitempty"` // a file on this deck
+	Net          string  `json:"net,omitempty"`  // Engine's TrackNetworkPath, posted by the QML
+	Key          string  `json:"key,omitempty"`  // changes with the track
+	Ext          string  `json:"ext,omitempty"`
+	Name         string  `json:"name,omitempty"`  // the file's name, which the copy keeps
+	Title        string  `json:"title,omitempty"` // a streaming track's real title (QML or stm.db): the copy is named after it
+	Artist       string  `json:"artist,omitempty"`
+	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
+	Stale        bool    `json:"stale,omitempty"`        // frozen display sample; not an eject/goodbye
+	MetadataOnly bool    `json:"metadataOnly,omitempty"` // CDJ state has no peer display asset endpoint
+	Playing      bool    `json:"playing"`
+	PositionMS   float64 `json:"positionMs"`
+	Pitch        float64 `json:"pitch"` // percent
+	Master       bool    `json:"master,omitempty"`
+	Sync         bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
+	BPM          float64 `json:"bpm,omitempty"`        // the track's
+	CurrentBPM   float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
+	Beat         float64 `json:"beat,omitempty"`       // Engine's BeatNumber: beats into the bar, 0..4
 	// At is when PositionMS was read, Unix ms on this machine's clock: the QML's
 	// GUI thread and our niced HTTP handler both lag by tens of ms, so the
 	// position is extrapolated from the sample time, not from arrival.
@@ -85,6 +90,9 @@ type deckState struct {
 	// null when the sender does not say (a CDJ), [] when the track has none.
 	CuePos *float64    `json:"cuePos,omitempty"`
 	Cues   []shadowCue `json:"cues"`
+	// DisplayDetail (display compose only): the detail waveform of this deck's
+	// display data is ready here, so the QML re-reads it once instead of polling.
+	DisplayDetail bool `json:"displayDetail,omitempty"`
 }
 
 // shadowCue is one hot cue (I 1..8); the receiver checks it before use.
@@ -99,6 +107,39 @@ type peerDeck struct {
 	deckState
 	ip string
 	at time.Time
+	// The playhead line as of the last version bump: what the QML extrapolates
+	// from until the next bump. Updates on this line do not bump (see takePeer).
+	anchorPos float64
+	anchorAt  time.Time
+}
+
+// Tolerances of samePeerPicture: a playing deck's position may run this far off
+// the line the QML extrapolates before the long poll is woken. The sender samples
+// at 40 ms (its positions are ~10-17 ms noisy at high pitch) and our HTTP fallback
+// is niced on CPU3: re-anchoring on that noise woke the QML ~once a second without
+// making the picture any truer. A paused deck must not move at all.
+const (
+	shadowPlayingDriftMS = 25
+	shadowPausedDriftMS  = 0.5
+)
+
+// samePeerPicture is true when d shows what old already shows: the same track,
+// state and markers, and a playhead on old's anchored line. Seq, At, Beat,
+// CurrentBPM and Dbg do not count: the display QML does not use them.
+func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
+	o := old.deckState
+	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
+		o.Title != d.Title || o.Artist != d.Artist || o.Loading != d.Loading || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
+		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.Sync != d.Sync || o.BPM != d.BPM ||
+		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
+		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
+		return false
+	}
+	if !o.Playing {
+		return math.Abs(old.anchorPos-d.PositionMS) <= shadowPausedDriftMS
+	}
+	expect := old.anchorPos + float64(now.Sub(old.anchorAt).Microseconds())/1000*(1+o.Pitch/100)
+	return math.Abs(expect-d.PositionMS) <= shadowPlayingDriftMS
 }
 
 // precisePos is a CDJ-3000's playhead from its absolute position packet (0x0b,
@@ -120,32 +161,39 @@ type cdjSeen struct {
 }
 
 type shadowState struct {
-	mu        sync.Mutex
-	precise   map[byte]precisePos
-	cdj       map[byte]cdjSeen // per CDJ player number: its last edges and jumps
-	own       []deckState
-	ownMaster bool
-	ownAt     time.Time
-	ownPostAt int64                // the QML's clock on the newest post
-	peers     map[string]time.Time // EngineX players heard on the beacon
-	peerDecks map[int]peerDeck
-	peerSeq   map[string]int64  // newest Seq per peer
-	ver       uint64            // bumped on every new peer update
-	notify    chan struct{}     // closed on the bump: wakes the long polls
-	conn      *net.UDPConn      // the beacon socket while shadowLoop runs
-	files     map[string]string // track key -> local copy
-	busy      map[string]bool
-	used      map[string]time.Time // when a shadow deck last wanted a copy
-	polled    time.Time
-	running   bool
-	peerPort  int // tests only; 0 is 8080
-	pushPort  int // tests only; 0 is shadowBeaconPort
+	fetchCalls    atomic.Uint64
+	fetchCDJCalls atomic.Uint64
+	mu            sync.Mutex
+	precise       map[byte]precisePos
+	cdj           map[byte]cdjSeen // per CDJ player number: its last edges and jumps
+	own           []deckState
+	ownMaster     bool
+	ownAt         time.Time            // the newest post or alive ping
+	ownExport     prolink.ExportDeck   // what the newest post told the Pro DJ Link export
+	ownPostAt     int64                // the QML's clock on the newest post
+	peers         map[string]time.Time // EngineX players heard on the beacon
+	peerDecks     map[int]peerDeck
+	peerSeq       map[string]int64  // newest Seq per peer (Engine Link id, else address)
+	ver           uint64            // bumped on every new peer update
+	notify        chan struct{}     // closed on the bump: wakes the long polls
+	conn          *net.UDPConn      // the beacon socket while shadowLoop runs
+	files         map[string]string // track key -> local copy
+	busy          map[string]bool
+	used          map[string]time.Time // when a shadow deck last wanted a copy
+	polled        time.Time
+	running       bool
+	peerPort      int // tests only; 0 is 8080
+	pushPort      int // tests only; 0 is shadowBeaconPort
 
 	dataRoot, mediaRoot string
 	beacon              bool
 	unresolved          [5]string              // per deck: the last TrackNetworkPath logged as having no file
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
-	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer
+	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
+	dbg                 shadowDebug
+	metaOnlyPoll        bool // the newest compose had a CDJ deck, including cached display assets: 120 ms polls
+	display             shadowDisplayCache
+	sourceDisplay       shadowSourceCache
 }
 
 func newShadowState() *shadowState {
@@ -319,6 +367,16 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.shadow.mu.Lock()
+		if d.Key != "" {
+			d.baseKey = d.Key
+			d.Key = fmt.Sprintf("%s-%x", d.baseKey, seq)
+			for _, previous := range s.shadow.own {
+				if previous.Deck == d.Deck && previous.baseKey == d.baseKey && previous.Path == d.Path && previous.Key != "" {
+					d.Key = previous.Key
+					break
+				}
+			}
+		}
 		logIt := np != "" && d.Path == "" && s.shadow.unresolved[d.Deck] != np
 		if logIt {
 			s.shadow.unresolved[d.Deck] = np
@@ -347,7 +405,8 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.shadow.ownPostAt = postAt
-	s.shadow.own, s.shadow.ownAt = own, time.Now()
+	s.shadow.own, s.shadow.ownAt, s.shadow.ownExport = own, time.Now(), ex
+	s.shadow.dbg.event("post", map[string]any{"decks": slimDecks(own)})
 	claimed := ex.Master && !s.shadow.ownMaster
 	s.shadow.ownMaster = ex.Master
 	s.shadow.mu.Unlock()
@@ -370,15 +429,48 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 
 const shadowDecksMagic = "EngineX-decks 1\n"
 
+// decksAlive is the QML's heartbeat between posts: nothing changed on its decks
+// since the last post, so it sends no JSON (each serialisation is garbage on
+// Engine's GUI-thread heap). Its decks stay fresh for the peer, which extrapolates
+// them; 409 asks the QML for a full post (we restarted, or never had one).
+func (s *Server) decksAlive(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	sh := s.shadow
+	sh.mu.Lock()
+	if sh.ownAt.IsZero() || now.Sub(sh.ownAt) >= 2*time.Second {
+		sh.mu.Unlock()
+		w.WriteHeader(http.StatusConflict) // stale or unknown: the post brings the state back
+		return
+	}
+	sh.ownAt = now
+	seq := now.UnixNano()
+	for i := range sh.own {
+		sh.own[i].Seq = seq // a new update for the peer's order check (UDP and HTTP fallback)
+	}
+	ex := sh.ownExport.Carried(now)
+	sh.ownExport = ex
+	sh.mu.Unlock()
+	if s.prolinkExport != nil {
+		s.prolinkExport.SetDeck(ex)
+	}
+	s.shadowWake()
+	s.shadowPush()
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ownForPeer is this player's decks for the other one, positions carried to
 // now (its clock means nothing there). Called with sh.mu held.
 func (sh *shadowState) ownForPeer(now time.Time) []deckState {
 	var out []deckState
-	if now.Sub(sh.ownAt) < 2*time.Second {
+	if len(sh.own) != 0 {
 		for _, d := range sh.own {
 			d.Path = ""
+			d.Stale = now.Sub(sh.ownAt) >= 2*time.Second
 			if d.Playing {
-				d.PositionMS += float64(now.UnixMilli()-d.At) * (1 + d.Pitch/100)
+				// The QML posts only on a change and pings in between: carry the
+				// position on while it is alive, at most 2 s past its last word.
+				until := min(now.UnixMilli(), sh.ownAt.UnixMilli()+2000)
+				d.PositionMS += float64(max(int64(0), until-d.At)) * (1 + d.Pitch/100)
 			}
 			d.At = 0
 			out = append(out, d)
@@ -420,43 +512,68 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 	for _, d := range decks {
 		seq = max(seq, d.Seq)
 	}
+	// A player on eth0 and wlan0 sends every update from both addresses: order
+	// by its Engine Link id, or each copy was taken and woke the QML's poll twice.
+	id := ip
+	if len(decks) > 0 && decks[0].Link != "" {
+		id = decks[0].Link
+	}
 	// A peer silent for over 2 s may have restarted with a clock behind its old Seq.
-	if t, ok := sh.peerTaken[ip]; !ok || now.Sub(t) > 2*time.Second {
-		delete(sh.peerSeq, ip)
+	if t, ok := sh.peerTaken[id]; !ok || now.Sub(t) > 2*time.Second {
+		delete(sh.peerSeq, id)
 	}
 	// A clock stepped back by more than 10 s (NTP) restarts the order.
-	if last := sh.peerSeq[ip]; seq != 0 && seq <= last && seq > last-int64(10*time.Second) {
+	if last := sh.peerSeq[id]; seq != 0 && seq <= last && seq > last-int64(10*time.Second) {
+		sh.dbg.event("peer-stale", map[string]any{"ip": ip, "seq": seq, "last": last})
 		return
 	}
-	sh.peerSeq[ip] = seq
+	sh.dbg.event("peer", map[string]any{"ip": ip, "seq": seq, "decks": slimDecks(decks)})
+	sh.peerSeq[id] = seq
+	changed := false
 	for slot, v := range sh.peerDecks {
-		if v.ip == ip && !slices.ContainsFunc(decks, func(d deckState) bool { return d.Deck == v.Deck }) {
+		if (v.ip == ip || v.Link != "" && v.Link == id) && !slices.ContainsFunc(decks, func(d deckState) bool { return d.Deck == v.Deck }) {
 			delete(sh.peerDecks, slot) // the peer ejected it, or restarted empty
+			changed = true
 		}
 	}
-	sh.peerTaken[ip] = now
+	sh.peerTaken[id] = now
 	for _, d := range decks {
 		if d.Deck < 1 || d.Deck > 4 {
 			continue
 		}
 		slot := d.Deck
 		for s, v := range sh.peerDecks {
-			if v.ip == ip && v.Deck == d.Deck {
+			if (v.ip == ip || v.Link != "" && v.Link == id) && v.Deck == d.Deck {
 				slot = s
 				break
 			}
 		}
-		if cur, ok := sh.peerDecks[slot]; ok && cur.ip != "" && cur.ip != ip && now.Sub(cur.at) < 2*time.Second {
+		if cur, ok := sh.peerDecks[slot]; ok && !(cur.Deck == d.Deck && (cur.ip == ip || cur.Link != "" && cur.Link == id)) {
+			slot = 0
 			for s := 1; s <= 4; s++ {
-				if c, taken := sh.peerDecks[s]; !taken || c.ip == ip || now.Sub(c.at) >= 2*time.Second {
+				if c, taken := sh.peerDecks[s]; !taken || c.Deck == d.Deck && (c.ip == ip || c.Link != "" && c.Link == id) {
 					slot = s
 					break
 				}
 			}
 		}
-		sh.peerDecks[slot] = peerDeck{deckState: d, ip: ip, at: now}
+		if slot == 0 {
+			continue
+		} // all slots belong to other tracks; never overwrite a sibling
+		p := peerDeck{deckState: d, ip: ip, at: now, anchorPos: d.PositionMS, anchorAt: now}
+		if old, ok := sh.peerDecks[slot]; ok && (old.ip == ip || old.Link != "" && old.Link == d.Link) && samePeerPicture(old, d, now) {
+			p.anchorPos, p.anchorAt = old.anchorPos, old.anchorAt
+		} else {
+			changed = true
+		}
+		sh.peerDecks[slot] = p
 	}
-	sh.bump()
+	// Heartbeats and steady playback refresh the stored decks (their liveness and
+	// extrapolation) without a new version: the display QML then skips the reply
+	// body (X-Shadow-State unchanged) instead of parsing it on its GUI thread.
+	if changed {
+		sh.bump()
+	}
 }
 
 // bump marks new state and wakes the long polls. Called with sh.mu held.
@@ -464,6 +581,29 @@ func (sh *shadowState) bump() {
 	sh.ver++
 	close(sh.notify)
 	sh.notify = make(chan struct{})
+}
+
+// shadowQuietPoll bounds a long poll whose answer cannot change by itself.
+// Each poll is a QML XMLHttpRequest and its strings on V4's heap: 120 ms
+// holds were ~8 requests/s, the largest steady allocation of the display.
+var shadowQuietPoll = time.Second
+
+// pollWait is how long a long poll may hold an unchanged answer: a quiet poll
+// unless a CDJ deck's positions refresh, cut short when a peer deck would turn
+// stale (compose derives that from time, so no bump announces it).
+func (sh *shadowState) pollWait(legacy bool, now time.Time) time.Duration {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if legacy || sh.metaOnlyPoll {
+		return 120 * time.Millisecond
+	}
+	d := shadowQuietPoll
+	for _, p := range sh.peerDecks {
+		if left := p.at.Add(2 * time.Second).Sub(now); !p.Stale && left > 0 && left < d {
+			d = left
+		}
+	}
+	return d
 }
 
 // wait returns once the peer state is newer than ver, or after d.
@@ -642,7 +782,7 @@ func dbPerf(ctx context.Context, mdb, rel string) ([]byte, error) {
 	var bpm sql.NullFloat64
 	var track, beats, overview []byte
 	err = db.QueryRowContext(ctx, `SELECT coalesce(t.bpmAnalyzed, t.bpm), p.trackData, p.beatData, p.overviewWaveFormData
-		FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.path = ? AND t.isAnalyzed = 1`, rel).
+		FROM Track t JOIN PerformanceData p ON p.trackId = t.id WHERE t.path = ? AND length(p.trackData)>4 AND length(p.beatData)>4 AND length(p.overviewWaveFormData)>4`, rel).
 		Scan(&bpm, &track, &beats, &overview)
 	if err != nil {
 		return nil, err
@@ -748,26 +888,57 @@ func (sh *shadowState) observe(d prolink.Device) {
 
 // shadowGet is what the QML applies to the decks this player does not play.
 // With ?ver=N it is a long poll: it answers at once when the peer state moved
-// past N, else as soon as it does, at the latest after 120 ms (the CDJ decks
-// and the steady positions refresh at that rate).
+// past N, else as soon as it does, at the latest after pollWait (120 ms while
+// CDJ decks refresh their positions, else up to a second).
 func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
-	role := s.role()
+	s.uiMu.Lock()
+	v := s.loadUI()
+	s.uiMu.Unlock()
+	role := s.activeRole(v)
+	debug := s.shadow.dbg.set(v.DebugTelemetry || fileExists(shadowDebugFlag))
 	out := []deckState{}
 	var ver uint64
 	if role != "" {
 		s.shadowWake()
-		if v, err := strconv.ParseUint(r.URL.Query().Get("ver"), 10, 64); err == nil {
-			s.shadow.wait(r.Context(), v, 120*time.Millisecond)
+		if seen, err := strconv.ParseUint(r.URL.Query().Get("ver"), 10, 64); err == nil {
+			s.shadow.wait(r.Context(), seen, s.shadow.pollWait(v.ShadowLegacyEngine, time.Now()))
 		}
 		s.shadow.mu.Lock()
 		ver = s.shadow.ver
 		s.shadow.mu.Unlock()
 		out = s.shadowCompose(role, time.Now())
 	}
-	respond(w, map[string]any{"role": role, "decks": out, "ver": ver})
+	metaOnly := slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly || strings.HasPrefix(d.Key, "cdj:") })
+	s.shadow.mu.Lock()
+	s.shadow.metaOnlyPoll = metaOnly
+	s.shadow.mu.Unlock()
+	stale := slices.ContainsFunc(out, func(d deckState) bool { return d.Stale })
+	// The version covers peer updates; what compose derives from time and the
+	// display cache (stale, loading, the placed slot and key) goes in a digest.
+	h := fnv.New64a()
+	for _, d := range out {
+		fmt.Fprintf(h, "%d|%s|%t|%t|%t|%t;", d.Deck, d.Key, d.Loading, d.Stale, d.MetadataOnly, d.DisplayDetail)
+	}
+	// CDJ continuous positions do not advance the EngineX peer version. Those
+	// responses, like legacy responses, must always reach QML.
+	if !v.ShadowLegacyEngine && !metaOnly {
+		w.Header().Set("X-Shadow-State", fmt.Sprintf("%d:%t:%s:%t:%t:%x", ver, true, role, stale, debug, h.Sum64()))
+
+	}
+	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug, "displayOnly": !v.ShadowLegacyEngine})
 }
 
 func (s *Server) shadowCompose(role string, now time.Time) []deckState {
+	s.uiMu.Lock()
+	legacy := s.loadUI().ShadowLegacyEngine
+	s.uiMu.Unlock()
+	if !legacy {
+		return s.shadowComposeDisplay(role, now)
+	}
+	return s.shadowComposeLegacy(role, now)
+}
+
+func (s *Server) shadowComposeLegacy(role string, now time.Time) []deckState {
 	devices := s.mergedDevices()
 	// The exporter's lock is taken before ours, never under it: closing the
 	// exporter waits for its observer, which takes ours.
@@ -798,7 +969,7 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 			continue
 		}
 		shadowDecks = append(shadowDecks, deck)
-		if p, ok := sh.peerDecks[deck]; ok && now.Sub(p.at) < 2*time.Second {
+		if p, ok := sh.peerDecks[deck]; ok && !p.Stale && now.Sub(p.at) < 2*time.Second {
 			placed[deck] = p
 			usedPeer[deck] = true
 		}
@@ -814,7 +985,7 @@ func (s *Server) shadowCompose(role string, now time.Time) []deckState {
 			if usedPeer[src] {
 				continue
 			}
-			if p, ok := sh.peerDecks[src]; ok && now.Sub(p.at) < 2*time.Second {
+			if p, ok := sh.peerDecks[src]; ok && !p.Stale && now.Sub(p.at) < 2*time.Second {
 				placed[deck] = p
 				usedPeer[src] = true
 				break
@@ -938,16 +1109,21 @@ func sourceHost(st prolink.ExportStatus, devices []prolink.Device, n byte) net.I
 			return net.ParseIP(host)
 		}
 	}
+	var host string
 	for _, d := range devices {
-		if d.Number == n {
-			return net.ParseIP(d.Address)
+		if d.Number == n && d.Address != "" && (host == "" || d.Address < host) {
+			host = d.Address
 		}
+	}
+	if host != "" {
+		return net.ParseIP(host)
 	}
 	return nil
 }
 
 // shadowFetch* run with sh.mu held; the copy itself runs unlocked.
 func (s *Server) shadowFetchCDJ(key string, host net.IP, slot byte, id uint32) {
+	s.shadow.fetchCDJCalls.Add(1)
 	s.shadowFetch(key, func(ctx context.Context) (string, error) {
 		c := &prolink.NFSClient{IP: host}
 		local, err := prolink.FetchTrack(ctx, c, slot, id, s.shadowDir())
@@ -1022,6 +1198,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 }
 
 func (s *Server) shadowFetch(key string, fetch func(context.Context) (string, error)) {
+	s.shadow.fetchCalls.Add(1)
 	sh := s.shadow
 	if sh.busy[key] {
 		return
@@ -1065,7 +1242,8 @@ func (s *Server) shadowWake() {
 	if sh.running {
 		return
 	}
-	os.RemoveAll(filepath.Join(filepath.Dir(s.uiDir()), "shadow")) // before shadow-v3
+	// Retain older caches for an explicit rollback; starting display discovery
+	// must not delete files from an earlier mode.
 	sh.running = true
 	go s.shadowLoop()
 }
@@ -1127,10 +1305,46 @@ func (s *Server) shadowLoop() {
 		}
 		sh.mu.Unlock()
 		if conn != nil && i%8 == 0 {
-			// shortcut: limited broadcast leaves on the default route only; enough for one DJ LAN.
-			conn.WriteToUDP([]byte("EngineX-shadow 1"), &net.UDPAddr{IP: net.IPv4bcast, Port: shadowBeaconPort})
+			shadowSendBeacons(conn)
 		}
 		s.shadowPollPeers()
+	}
+}
+
+// shadowSendBeacons sends the discovery beacon on the default route and from
+// each broadcast-capable IPv4 interface (so eth0 is always discovered even when
+// the default route is on wlan0).
+func shadowSendBeacons(conn *net.UDPConn) {
+	msg := []byte("EngineX-shadow 1")
+	conn.WriteToUDP(msg, &net.UDPAddr{IP: net.IPv4bcast, Port: shadowBeaconPort})
+	ifs, _ := net.Interfaces()
+	for _, ifi := range ifs {
+		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagBroadcast == 0 || ifi.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := ifi.Addrs()
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipn.IP.To4()
+			mask := ipn.Mask
+			if ip4 == nil || len(mask) != 4 {
+				continue
+			}
+			bcast := net.IPv4(ip4[0]|^mask[0], ip4[1]|^mask[1], ip4[2]|^mask[2], ip4[3]|^mask[3])
+			lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+				c.Control(func(fd uintptr) {
+					_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+				})
+				return nil
+			}}
+			if pc, err := lc.ListenPacket(context.Background(), "udp4", net.JoinHostPort(ip4.String(), "0")); err == nil {
+				_, _ = pc.WriteTo(msg, &net.UDPAddr{IP: bcast, Port: shadowBeaconPort})
+				pc.Close()
+			}
+		}
 	}
 }
 

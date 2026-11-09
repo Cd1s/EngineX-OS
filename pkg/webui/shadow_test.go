@@ -51,7 +51,7 @@ func TestShadowNetworkVolumeSuffix(t *testing.T) {
 	}
 	now := time.Now()
 	s.shadow.peerDecks[1] = peerDeck{deckState: deckState{Deck: 1, Net: "net://7022ea42-920b-4c66-b913-1892c3ee73af/KDATA KF328 (USB 3)/" + rel, Playing: true}, at: now}
-	got := s.shadowCompose("24", now)
+	got := s.shadowComposeLegacy("24", now)
 	if len(got) != 1 || got[0].Path != local || !got[0].Playing {
 		t.Fatalf("shadow: %+v, want path %q and playing", got, local)
 	}
@@ -133,7 +133,7 @@ func TestShadowDeckFromPeer(t *testing.T) {
 		t.Fatalf("shadow without the 4-deck layout: %q %+v", role, decks)
 	}
 	os.MkdirAll(filepath.Join(dirB, "ui"), 0o755)
-	uiPost(t, b.URL, "fourDeckWaveform=1")
+	uiPost(t, b.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
 	u, _ := url.Parse(a.URL)
 	bs.shadow.peerPort, _ = strconv.Atoi(u.Port())
 	bs.shadow.peers["127.0.0.1"] = time.Now()
@@ -177,7 +177,7 @@ func TestShadowPerfFromPeer(t *testing.T) {
 	if _, err := src.Exec(`INSERT INTO Track (path, filename, bpmAnalyzed, isAnalyzed) VALUES ('../Contents/it''s.mp3', 'it''s.mp3', 130.5, 1), ('../Contents/raw.mp3', 'raw.mp3', 120, 0)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := src.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=?`, qc(track), qc(overview), qc(beats)); err != nil {
+	if _, err := src.Exec(`UPDATE PerformanceData SET trackData=?, overviewWaveFormData=?, beatData=? WHERE trackId=(SELECT min(id) FROM Track)`, qc(track), qc(overview), qc(beats)); err != nil {
 		t.Fatal(err)
 	}
 	as := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
@@ -261,7 +261,7 @@ func TestShadowSharedUSBAndEngineCache(t *testing.T) {
 	if err := os.WriteFile(fourDeckRolePath, []byte("24\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	uiPost(t, server.URL, "fourDeckWaveform=1")
+	uiPost(t, server.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
 	local := filepath.Join(b.shadow.mediaRoot, "USB", "track.flac")
 	if err := os.MkdirAll(filepath.Dir(local), 0755); err != nil {
 		t.Fatal(err)
@@ -323,7 +323,7 @@ func TestShadowDeckFromCDJ(t *testing.T) {
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = "/run/sc5000-assignments/role" }()
 	os.WriteFile(fourDeckRolePath, []byte("24\n"), 0o644)
-	uiPost(t, srv.URL, "fourDeckWaveform=1")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
 	dev := `{"address":"127.0.0.1","name":"CDJ-3000","number":3,"playing":true,"play_position_ms":5000,"pitch":-1.5,"master":true,"sync":true}`
 	if resp, err := http.Post(srv.URL+"/v1/sc5000/prolink", "application/json", strings.NewReader(dev)); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("post device: %v %v", resp, err)
@@ -506,7 +506,7 @@ func TestShadowPositionFromSampleTime(t *testing.T) {
 	d := v.Decks[0]
 	d.Deck = 2
 	s.shadow.peerDecks[2] = peerDeck{deckState: d, at: time.Now()}
-	if got := s.shadowCompose("13", time.Now()); len(got) != 1 || got[0].At == 0 {
+	if got := s.shadowComposeLegacy("13", time.Now()); len(got) != 1 || got[0].At == 0 {
 		t.Fatalf("shadow lacks its clock: %+v", got)
 	}
 }
@@ -540,7 +540,7 @@ func TestShadowUDPPushWakesLongPoll(t *testing.T) {
 	defer func() { fourDeckRolePath = "/run/sc5000-assignments/role" }()
 	os.WriteFile(fourDeckRolePath, []byte("13\n"), 0o644)
 	os.MkdirAll(filepath.Join(dirB, "ui"), 0o755)
-	uiPost(t, b.URL, "fourDeckWaveform=1")
+	uiPost(t, b.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
 
 	var first struct{ Ver uint64 }
 	resp, err := http.Get(b.URL + "/v1/sc5000/shadow")
@@ -700,7 +700,7 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	s.shadow.peerDecks[3] = peerDeck{deckState: deckState{Deck: 3, Key: "k", Ext: ".flac", Name: "x.flac"}, ip: "192.0.2.7", at: now}
 	s.shadow.peerDecks[4] = peerDeck{deckState: deckState{Deck: 4}, ip: "192.0.2.7", at: now}
 	s.shadow.mu.Unlock()
-	out := s.shadowCompose("12", now)
+	out := s.shadowComposeLegacy("12", now)
 	var got = map[int]deckState{}
 	for _, d := range out {
 		got[d.Deck] = d
@@ -715,7 +715,7 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	delete(s.shadow.peerDecks, 4)
 	s.shadow.peerDecks[1] = peerDeck{deckState: deckState{Deck: 1, Key: "k1", Ext: ".flac", Name: "sc5000.flac", Playing: true}, ip: "192.0.2.8", at: now}
 	s.shadow.mu.Unlock()
-	out = s.shadowCompose("12", now)
+	out = s.shadowComposeLegacy("12", now)
 	if len(out) != 1 || out[0].Deck != 3 || !out[0].Loading || !out[0].Playing {
 		t.Fatalf("overlapping peer deck on 12 role: %+v, want shadow deck 3", out)
 	}
@@ -725,8 +725,119 @@ func TestShadowComposeMarksLoadingAndUnloads(t *testing.T) {
 	s.shadow.takePeer("192.0.2.8", []deckState{{Deck: 1, Seq: 1, Key: "k1", Ext: ".flac", Name: "p1.flac", Playing: true}}, now)
 	s.shadow.takePeer("192.0.2.9", []deckState{{Deck: 1, Seq: 1, Key: "k2", Ext: ".flac", Name: "p2.flac", Playing: true}}, now)
 	s.shadow.mu.Unlock()
-	out = s.shadowCompose("12", now)
+	out = s.shadowComposeLegacy("12", now)
 	if len(out) != 2 || out[0].Deck != 3 || out[1].Deck != 4 {
 		t.Fatalf("two peers on Deck 1 with 12 role: %+v, want shadow decks 3 and 4", out)
+	}
+}
+
+// Debug telemetry: off writes nothing; on, posts, peer updates and the QML's
+// records reach the ring and the log, which rotates at shadowDebugMax.
+func TestShadowDebugTelemetry(t *testing.T) {
+	dir := t.TempDir()
+	oldLog, oldMax := shadowDebugLog, shadowDebugMax
+	shadowDebugLog, shadowDebugMax = filepath.Join(dir, "debug.log"), 600
+	defer func() { shadowDebugLog, shadowDebugMax = oldLog, oldMax }()
+	s := New(Config{UIDir: filepath.Join(dir, "ui"), StateDir: t.TempDir()}, nil)
+	post := `[{"deck":1,"playing":true,"positionMs":5000,"pitch":11.1111,"bpm":126,"currentBpm":140,"sync":true}]`
+	s.decksPost(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(post)))
+	if _, err := os.Stat(shadowDebugLog); err == nil || len(s.shadow.dbg.lines()) != 0 {
+		t.Fatal("telemetry written while off")
+	}
+	if s.shadow.ownForPeer(time.Now())[0].CurrentBPM != 140 {
+		t.Fatalf("currentBpm not kept: %+v", s.shadow.own)
+	}
+
+	os.MkdirAll(filepath.Join(dir, "ui"), 0o755)
+	os.WriteFile(filepath.Join(dir, "ui", "settings.conf"), []byte("debug_telemetry=1\n"), 0o644)
+	s.uiMu.Lock()
+	on := s.loadUI().DebugTelemetry
+	s.uiMu.Unlock()
+	if !on || !s.shadow.dbg.set(on) {
+		t.Fatal("debug_telemetry=1 not read")
+	}
+	for range 5 {
+		s.decksPost(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(post)))
+	}
+	s.shadow.mu.Lock()
+	s.shadow.takePeer("192.0.2.9", []deckState{{Deck: 2, Seq: 1, Playing: true}}, time.Now())
+	s.shadow.mu.Unlock()
+	w := httptest.NewRecorder()
+	s.shadowDebugPost(w, httptest.NewRequest("POST", "/v1/sc5000/debug/shadow", strings.NewReader(`[{"deck":2,"act":"pll","drift":40,"pll":3.2,"t":1}]`)))
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	w = httptest.NewRecorder()
+	s.shadowDebugGet(w, httptest.NewRequest("GET", "/v1/sc5000/debug/shadow", nil))
+	var got struct {
+		Enabled   bool
+		PeerDecks []struct {
+			Deck int
+			IP   string
+		}
+		Log []struct {
+			Ev  string
+			Act string
+			Qt  float64
+		}
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || !got.Enabled || len(got.PeerDecks) != 1 || got.PeerDecks[0].IP != "192.0.2.9" || len(got.Log) != 7 {
+		t.Fatalf("debug state: %s %v", w.Body, err)
+	}
+	if l := got.Log[6]; l.Ev != "qml" || l.Act != "pll" || l.Qt != 1 {
+		t.Fatalf("qml record: %+v", l)
+	}
+	cur, _ := os.Stat(shadowDebugLog)
+	if _, err := os.Stat(shadowDebugLog + ".1"); err != nil || cur.Size() > shadowDebugMax {
+		t.Fatalf("not rotated: %v, %d bytes", err, cur.Size())
+	}
+	if strings.Contains(string(must(os.ReadFile(shadowDebugLog))), `"cues"`+":[") {
+		t.Fatal("cues logged")
+	}
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+// One player heard on two addresses (eth0 and wlan0) is one peer: the second
+// copy of an update is stale and does not wake the long poll again.
+func TestTakePeerDedupesByLinkAcrossAddresses(t *testing.T) {
+	sh := newShadowState()
+	now := time.Now()
+	up := []deckState{{Deck: 1, Seq: 5, Link: "{u}", Playing: true}}
+	sh.takePeer("192.0.2.1", up, now)
+	sh.takePeer("192.0.2.2", up, now)
+	if sh.ver != 1 {
+		t.Fatalf("same update via the second address bumped: ver %d", sh.ver)
+	}
+	sh.takePeer("192.0.2.2", []deckState{{Deck: 3, Seq: 6, Link: "{u}"}}, now) // deck 1 ejected, seen via the other address
+	if _, ok := sh.peerDecks[1]; ok || sh.ver != 2 {
+		t.Fatalf("eject via the other address: %+v ver %d", sh.peerDecks, sh.ver)
+	}
+}
+
+// #160's colliding deck slots must remain stable when a wip peer changes address.
+func TestTakePeerCollisionAcrossAddresses(t *testing.T) {
+	sh := newShadowState()
+	now := time.Now()
+	sh.takePeer("192.0.2.1", []deckState{{Deck: 1, Seq: 5, Link: "a"}}, now)
+	sh.takePeer("192.0.2.2", []deckState{{Deck: 1, Seq: 5, Link: "b"}}, now)
+	sh.takePeer("192.0.2.3", []deckState{{Deck: 1, Seq: 6, Link: "b"}}, now)
+	if len(sh.peerDecks) != 2 || sh.peerDecks[1].Link != "a" || sh.peerDecks[2].Link != "b" || sh.peerDecks[2].ip != "192.0.2.3" {
+		t.Fatalf("address change duplicated or displaced a peer: %+v", sh.peerDecks)
+	}
+	sh.takePeer("192.0.2.2", []deckState{{Deck: 1, Seq: 6, Link: "b"}}, now)
+	// Two new decks bump; the move to .3 and this duplicate show nothing new
+	// (an address that changes the display key changes the header digest instead).
+	if sh.ver != 2 {
+		t.Fatalf("duplicate or address-only update bumped version: %d", sh.ver)
+	}
+	sh.takePeer("192.0.2.2", []deckState{{Deck: 3, Seq: 7, Link: "b"}}, now)
+	if len(sh.peerDecks) != 2 || sh.peerDecks[1].Link != "a" || sh.peerDecks[3].Link != "b" {
+		t.Fatalf("eject used slot instead of original deck: %+v", sh.peerDecks)
 	}
 }

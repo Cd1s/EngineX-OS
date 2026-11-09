@@ -7,6 +7,220 @@ import shutil
 import tarfile
 from pathlib import Path
 
+FX_CONTROLLER = r'''
+    property var scFxControllers: []
+    Repeater {
+        model: root.scFxSelectorAvailable ? 6 : 0
+        delegate: Item {
+            id: scCtrl
+            width: 0; height: 0; visible: false
+
+    // Scripted actions cross QQmlEngine/context boundaries through Planck.
+    readonly property int scFxUnit: index + 1
+    property var djFxView: null
+    readonly property string scFxPath: Config.audio.fx.sendEffectSlots > 0
+        ? "/Engine/Mixer/DJFxUnit" + scFxUnit + "/"
+        : "/Engine/Mixer/Channel" + (scFxUnit - 2) + "/DJFx/"
+    readonly property var scFxType: Planck.getProperty(scFxPath + "Type")
+    readonly property string scFxTypeName: scFxType && scFxType.translator ? scFxType.translator.string : ""
+    onScFxTypeNameChanged: {
+        if (scFxSelected >= 0 && !scFxBusy && scFxTypeName !== "Flanger") {
+            scFxSelected = -1; scFxIndex = djFxView ? djFxView.selectionIndex : -1
+            root.scCall("fxUnit=" + scFxUnit + "&fxMode=0")
+        }
+    }
+    Connections {
+        target: scCtrl.djFxView
+        function onSelectionIndexChanged() {
+            if (scCtrl.scFxSelected < 0 && !scCtrl.scFxBusy && !scCtrl.scFxBrowsing) scCtrl.scFxIndex = scCtrl.djFxView.selectionIndex
+        }
+    }
+    readonly property string scFxBus: "EngineXFx" + scFxUnit
+    readonly property var scFxProps: [
+        Planck.createProperty(scFxBus + "Plus", false, 3),
+        Planck.createProperty(scFxBus + "Minus", false, 3),
+        Planck.createProperty(scFxBus + "Accept", false, 3),
+        Planck.createProperty(scFxBus + "Ready", false, 1)]
+    readonly property var scFxReady: scFxProps && Planck.getProperty("/GUI/Scripted/" + scFxBus + "Ready")
+    readonly property var scFxStock: djFxView ? Array.from(djFxView.effectsNames) : []
+    readonly property bool scFxEnabled: !!root.scFxSelectorAvailable && scFxStock.indexOf("Flanger") >= 0
+    readonly property var scFxNames: scFxEnabled ? scFxStock.concat([
+        "Spiral (PX)", "Pitch Echo (PX)", "Slip Roll (PX)", "Dub Echo (PX)", "Space (PX)"]) : scFxStock
+    property int scFxIndex: -1
+    property int scFxSelected: -1
+    property int scFxRequest: 0
+    property bool scFxBusy: false
+    property bool scFxBrowsing: false
+    property int scFxQueued: -1
+    Timer {
+        interval: 2000; running: scCtrl.scFxBusy
+        onTriggered: {
+            ++scCtrl.scFxRequest
+            scCtrl.scFxBusy = false; scCtrl.scFxQueued = -1
+            scCtrl.scFxIndex = scCtrl.scFxSelected
+        }
+    }
+    function scFxSetReady() {
+        if (scFxReady && scFxReady.translator) scFxReady.translator.state = scFxEnabled
+    }
+    onScFxEnabledChanged: scFxSetReady()
+    Component.onCompleted: {
+        const next = root.scFxControllers.slice(); next[index] = scCtrl
+        root.scFxControllers = next
+        scFxSetReady()
+    }
+    Component.onDestruction: {
+        if (scFxHandshakePhase && scFxMix && scFxMix.translator) scFxMix.translator.value = scFxSavedWet
+        if (scFxReady && scFxReady.translator) scFxReady.translator.state = false
+    }
+    function scFxTurn(delta) {
+        if (!scFxEnabled || !djFxView) return
+        let at = scFxIndex >= 0 ? scFxIndex : (scFxSelected >= 0 ? scFxSelected : djFxView.selectionIndex)
+        const next = Math.max(0, Math.min(scFxNames.length - 1, at + delta))
+        if (next === at) return
+        scFxIndex = next
+        if (Config.device.hasDJFxContinuousKnobs) scFxAccept(scFxIndex)
+        else { scFxBrowsing = true; djFxView.selecting() }
+    }
+    function scFxAccept(index) {
+        if (!djFxView || index < 0 || index >= scFxNames.length) return
+        if (!scFxEnabled) { djFxView.selectEffect(index); return }
+        if (scFxBusy) { scFxQueued = index; return }
+        const mode = index >= scFxStock.length ? index - scFxStock.length + 1 : 0
+        const request = ++scFxRequest
+        scFxIndex = index
+        scFxBusy = true
+        // The hook acknowledgement is a barrier: mapping ALWAYS precedes Type.
+        root.scCall("fxUnit=" + scFxUnit + "&fxMode=" + mode, function(reply) {
+            if (request !== scFxRequest || !djFxView) return
+            scFxSelected = mode ? index : -1
+            scFxBrowsing = false
+            if (!mode || reply.fxBind) djFxView.selectEffect(mode ? scFxStock.indexOf("Flanger") : index)
+            if (mode && reply.fxBind) {
+                scFxMix = Planck.getProperty(scFxPath + "Mix")
+                if (!scFxMix || !scFxMix.translator) { scFxBusy = false; return }
+                scFxSavedWet = scFxMix.translator.value
+                scFxChallengeB = reply.fxChallengeB
+                scFxMix.translator.value = reply.fxChallengeA
+                scFxHandshakePhase = 1
+                scFxHandshake.start()
+            } else scFxFinish()
+            djFxView.abortSelecting()
+        })
+    }
+    property var scFxMix: null
+    property real scFxSavedWet: 0
+    property real scFxChallengeB: 0
+    property int scFxHandshakePhase: 0
+    Connections {
+        target: scCtrl.scFxMix ? scCtrl.scFxMix.translator : null
+        function onValueChanged() {
+            const value = target.value
+            if (scCtrl.scFxHandshakePhase && (value === 0 || value > 0.0001)) scCtrl.scFxSavedWet = value
+        }
+    }
+    Timer {
+        id: scFxHandshake
+        interval: 40; repeat: true
+        onTriggered: {
+            if (!scCtrl.scFxMix || !scCtrl.scFxMix.translator) { stop(); scCtrl.scFxFinish(); return }
+            if (scCtrl.scFxHandshakePhase === 1) {
+                scCtrl.scFxMix.translator.value = scCtrl.scFxChallengeB
+                scCtrl.scFxHandshakePhase = 2
+            } else {
+                scCtrl.scFxMix.translator.value = scCtrl.scFxSavedWet
+                stop(); scCtrl.scFxFinish()
+            }
+        }
+    }
+    function scFxFinish() {
+        scFxHandshakePhase = 0
+        scFxBusy = false
+        if (scFxQueued >= 0) { const next = scFxQueued; scFxQueued = -1; scFxAccept(next) }
+    }
+    ActionTranslatorStateChangeNotifier {
+        prop: scCtrl.scFxProps && Planck.getProperty("/GUI/Scripted/" + scCtrl.scFxBus + "Plus")
+        enabled: scCtrl.scFxEnabled
+        onChanged: scCtrl.scFxTurn(1)
+    }
+    ActionTranslatorStateChangeNotifier {
+        prop: scCtrl.scFxProps && Planck.getProperty("/GUI/Scripted/" + scCtrl.scFxBus + "Minus")
+        enabled: scCtrl.scFxEnabled
+        onChanged: scCtrl.scFxTurn(-1)
+    }
+    ActionTranslatorStateChangeNotifier {
+        prop: scCtrl.scFxProps && Planck.getProperty("/GUI/Scripted/" + scCtrl.scFxBus + "Accept")
+        enabled: scCtrl.scFxEnabled
+        onChanged: {
+            if (!scCtrl.djFxView) return
+            if (!scCtrl.djFxView.selectionPopoutVisible) {
+                if (scCtrl.scFxIndex < 0) scCtrl.scFxIndex = scCtrl.scFxSelected >= 0 ? scCtrl.scFxSelected : scCtrl.djFxView.selectionIndex
+                scCtrl.scFxBrowsing = true
+                scCtrl.djFxView.selecting()
+            } else if (scCtrl.scFxIndex >= 0) scCtrl.scFxAccept(scCtrl.scFxIndex)
+        }
+    }
+
+        }
+    }
+'''
+
+FX_SELECTOR = r'''
+    readonly property int scFxUnit: Config.audio.fx.sendEffectSlots > 0 ? (indicator === "2" ? 2 : 1) : 3
+    readonly property var scFxController: root.scFxControllers[scFxUnit - 1] || null
+    readonly property var scFxNames: scFxController ? scFxController.scFxNames : (djFxView ? Array.from(djFxView.effectsNames) : [])
+    readonly property int scFxIndex: scFxController ? scFxController.scFxIndex : -1
+    readonly property int scFxSelected: scFxController ? scFxController.scFxSelected : -1
+    function scFxRegister() { if (scFxController && djFxView) scFxController.djFxView = djFxView }
+    onScFxControllerChanged: scFxRegister()
+    onDjFxViewChanged: scFxRegister()
+    Component.onCompleted: scFxRegister()
+    function scFxAccept(index) {
+        if (scFxController && scFxController.scFxEnabled) scFxController.scFxAccept(index)
+        else if (djFxView) djFxView.selectEffect(index)
+    }
+    function scFxAbort() {
+        if (scFxController) {
+            scFxController.scFxBrowsing = false
+            scFxController.scFxIndex = scFxController.scFxSelected
+        }
+        if (djFxView) djFxView.abortSelecting()
+    }
+'''
+
+FX_KNOB = r'''
+            readonly property int scFxUnit: fxConfig.hasSendStyleEffects ? Number(modelData) : 3 + Math.max(0, Number(String(modelData).replace("Channel", "")) - 1)
+            readonly property string scFxBus: "/GUI/Scripted/EngineXFx" + scFxUnit
+            readonly property var scFxReady: Planck.getProperty(scFxBus + "Ready")
+            property bool scFxPushOwned: false
+            function scFxCanUse() {
+                const ready = scFxReady && scFxReady.translator
+                return ready && ready.state && Planck.getProperty(scFxBus + "Plus").translator &&
+                    Planck.getProperty(scFxBus + "Minus").translator && Planck.getProperty(scFxBus + "Accept").translator
+            }
+            function scFxAction(suffix) { Planck.getProperty(scFxBus + suffix).translator.state = true }
+            function scFxMove(direction, amount) {
+                if (!(amount > 0)) return // MIDI zero means no movement.
+                // JogOutput normalizes one detent to 1/63; preserve its decoded
+                // magnitude rather than changing continuous encoder behaviour.
+                const steps = Math.max(1, Math.min(63, Math.round(amount * 63)))
+                for (let n = 0; n < steps; ++n) scFxAction(direction > 0 ? "Plus" : "Minus")
+            }
+'''
+
+FX_JOG_TARGET = r'''
+                target: QtObject {
+                    property QtObject px: QtObject {
+                        readonly property bool editable: true
+                        function incValue(amount) { scFxMove(1, amount) }
+                        function decValue(amount) { scFxMove(-1, amount) }
+                    }
+                    function get(channel, value) {
+                        return scFxCanUse() ? px : fxConfig.channel[modelData].pEffectIndex.translator
+                    }
+                }
+'''
+
 HERE = Path(__file__).resolve().parent
 # The deck skin: Skins/EmbeddedCommon up to 5.0.4, Skins/Embedded from 5.3.0 (set in main).
 ROOT = "Skins/EmbeddedCommon/"
@@ -65,30 +279,19 @@ def patch(text: str, old: str, new: str, path: str) -> str:
 SERVICES_MAIN = """
 	// SC5000 UI mod: settings owned by stream-sync (see pkg/webui/ui_settings.go).
 	property string scVersion: ""
-	property string scLang: "en"
+	property string scLang: "@LANG@"
 	property string scWave: "denon"
 	property string scQuality: "flac"
 	property string scNeteaseMode: "official"
 	property string scJog: "static"
 	property bool scMasterLimiter: false // #58, applied by engine_ui_hook.c
 	property bool scAutoGain: false // #64, applied by engine_ui_hook.c
-	// #55: once a drive is in, Engine's own analysis queue takes every unanalysed
-	// track (rb-bridge's quick imports included). Its OfflineAnalyzer processes and
-	// queue threads run at idle priority (engine_ui_hook.c), so playback keeps priority.
+	// #55: retain the saved preference, but fail closed until a bounded native
+	// per-track adapter is verified. See AUTO_ANALYZE.md. No drive/toggle handler
+	// may submit a whole-library scan or guess an ITrackDataPtr payload.
 	property bool scAutoAnalyze: false
+	readonly property bool scAutoAnalyzeAvailable: false
 	property bool scOmniSource: false // #62, served by the streaming gateway
-	readonly property var scDrives: Planck.librarianController.devicesController.deviceModelCountObserver
-	readonly property int scDriveCount: scDrives ? scDrives.count : 0
-	onScDriveCountChanged: scAutoAnalyzeTimer.restart()
-	onScAutoAnalyzeChanged: scAutoAnalyzeTimer.restart()
-	Timer {
-		id: scAutoAnalyzeTimer
-		interval: 15000 // after rb-bridge and Engine have attached the drive's library
-		onTriggered: {
-			const p = Planck.getProperty("/Client/Librarian/Analyzer/AnalyzeUnanalyzed")
-			if (root.scAutoAnalyze && root.scDriveCount > 0 && p && p.translator) p.translator.state = true
-		}
-	}
 	property bool scProlinkShare: false // #59, read by rb-bridge
 	property bool scProlinkExport: false // #63, experimental export to CDJs
 	// #49: the decks this player owns in the 4-deck layout ("13", "24", "12", "1", "2";
@@ -97,11 +300,272 @@ SERVICES_MAIN = """
 	// The board (device tree), not Config.device.isPlayer: the 4-deck layout turns a
 	// player into a non-player inside Engine (#49).
 	property bool scPlayer: false
-	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 && (scPlayer || !!(scShadowAt[deck] && scShadowAt[deck].path)) }
+	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 && (scPlayer || (scShadowDisplayOnly ? !!scShadowData(deck) : !!(scShadowAt[deck] && scShadowAt[deck].path))) }
 	// Swipe left loads the role's first deck, swipe right its second (0: stock).
 	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
 	property bool scFourDeckOn: false // the saved switch; Engine applies it on restart
 	property string scFourDeckRoleSetting: "auto"
+	property bool scShadowLegacyEngine: false // saved preference; switching requires a manual Engine restart
+	property bool scShadowDisplayOnly: true // the /shadow response is authoritative; missing means the safe default
+	property var scShadowDisplay: ({})
+	property var scShadowDisplayRequests: ({})
+	property var scShadowGridCache: ({})
+	property var scShadowLiveCueCache: ({})
+	property int scShadowFrame: 0
+	readonly property int scShadowExpiryMs: 3000
+	// When stream-sync last confirmed the shadow state (an unchanged version counts):
+	// a plain object, so no binding re-evaluates on every long-poll reply.
+	readonly property var scShadowLive: ({seen: 0})
+	function scShadowVisible(d) { return d >= 1 && d <= 4 && scShadowDisplayOnly && scDeckLocked(d) }
+	function scShadowDeckFor(item) {
+		// Stock skins put the deck on different wrappers (deckIndex / deckData / deckView).
+		for (let p = item; p; p = p.parent) {
+			for (const data of [p, p.deckData, p.deckView && p.deckView.deckData, p.view && p.view.deckData]) {
+				const d = data && Number(data.deckIndex)
+				if (d >= 1 && d <= 4) return d
+			}
+		}
+		return 0
+	}
+	function scShadowData(d) { return scShadowDisplay[d] || null }
+	function scShadowPosition(s, now) {
+		if (!s) return 0
+		// Unchanged replies keep a sample alive: carry it on until 3 s after the last one.
+		const alive = Math.max(s.at, scShadowLive.seen) + scShadowExpiryMs
+		const elapsed = s.stale ? 0 : Math.max(0, Math.min(now, alive) - s.at)
+		const pos = Math.max(0, s.positionMs + (s.playing ? elapsed * Math.max(0, 1 + s.pitch / 100) : 0))
+		return s.meta && s.meta.durationMs > 0 ? Math.min(s.meta.durationMs, pos) : pos
+	}
+	// Binary searches keep the source grid and #151 independent of Engine's empty slots.
+	function scShadowBeatIndex(beats, ms) {
+		let lo = 0, hi = beats.length
+		while (lo < hi) { const mid = (lo + hi) >> 1; if (beats[mid].ms < ms) lo = mid + 1; else hi = mid }
+		return lo
+	}
+	function scShadowBeatAt(beats, ms) {
+		if (beats.length < 2) return NaN
+		const i = Math.max(0, Math.min(beats.length - 2, scShadowBeatIndex(beats, ms) - 1))
+		const a = beats[i], b = beats[i + 1]
+		if (!(b.ms > a.ms)) return NaN
+		return a.number + (ms - a.ms) / (b.ms - a.ms) * (b.number - a.number)
+	}
+	function scShadowGrid(d, meta, start, end) {
+		const beats = meta && meta.beats || []
+		const a = scShadowBeatIndex(beats, start), b = Math.min(a + 512, scShadowBeatIndex(beats, end))
+		const c = scShadowGridCache[d]
+		if (c && c.beats === beats && c.a === a && c.b === b) return c.rows
+		const rows = beats.slice(a, b)
+		scShadowGridCache[d] = {beats: beats, a: a, b: b, rows: rows}
+		return rows
+	}
+	function scShadowNextCue(d) {
+		const s = scShadowData(d), m = s && s.meta
+		if (!m) return null
+		const pos = scShadowPosition(s, Date.now())
+		let best = null
+		const cues = scShadowCuesFor(d, s) // indexed: for...of allocates an iterator per 200 ms tick
+		for (let i = 0; i < cues.length; i++) { const c = cues[i]; if (c.i > 0 && c.ms > pos + 50 && (!best || c.ms < best.ms)) best = c }
+		if (!best) return null
+		const beats = m.beats || []
+		const totalBeats = scShadowBeatAt(beats, best.ms) - scShadowBeatAt(beats, pos)
+		if (!(totalBeats > 0 && totalBeats <= 2048)) return null
+		const bars = Math.floor(totalBeats / 4)
+		return {text: String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1),
+			label: String(best.n || "").slice(0, 7), color: best.c || "#26a6ff", urgent: bars < 4}
+	}
+	function scShadowCuesFor(d, s) {
+		const m = s && s.meta
+		if (!m) return scShadowEmptyArray
+		if (!Array.isArray(s.liveCues) || !(m.sampleRate > 0)) return m.cues || scShadowEmptyArray
+		const c = scShadowLiveCueCache[d], raw = s.liveCues
+		let same = !!c && c.key === s.key && c.rate === m.sampleRate && c.cuePos === s.cuePos && c.raw.length === raw.length
+		if (same) for (let i = 0; i < raw.length; i++) {
+			const a = c.raw[i], b = raw[i]
+			if (a.i !== b.i || a.p !== b.p || a.n !== b.n || a.c !== b.c) { same = false; break }
+		}
+		if (same) return c.rows
+		const rows = []
+		for (let i = 0; i < raw.length; i++) {
+			const q = raw[i], ms = q.p / m.sampleRate * 1000
+			if (q.i >= 1 && q.i <= 8 && isFinite(ms) && ms >= 0 && ms <= m.durationMs)
+				rows.push({i: q.i, ms: ms, n: q.n || "", c: q.c || "#26a6ff"})
+		}
+		if (isFinite(s.cuePos) && s.cuePos >= 0 && s.cuePos / m.sampleRate * 1000 <= m.durationMs)
+			rows.push({i: 0, ms: s.cuePos / m.sampleRate * 1000, n: "CUE", c: "#ffffff"})
+		else if (s.cuePos === undefined) for (const q of m.cues || scShadowEmptyArray) if (q.i === 0) rows.push(q)
+		for (const q of m.cues || scShadowEmptyArray) if (q.i === 9) rows.push(q)
+		scShadowLiveCueCache[d] = {key: s.key, rate: m.sampleRate, cuePos: s.cuePos, raw: raw, rows: rows}
+		return rows
+	}
+	function scShadowAsset(url) {
+		// Assets are display resources served by the gateway, never Engine track paths.
+		if (!url) return ""
+		return url[0] === "/" ? "http://127.0.0.1:8080" + url : /^https?:/.test(url) ? url : ""
+	}
+	property var scShadowDisplayText: ({}) // per deck: the newest display reply applied
+	function scShadowDisplayFetch(d, key) {
+		const s = scShadowData(d)
+		if (!scShadowVisible(d) || !s || !key || s.key !== key || s.metadataOnly) return
+		const old = scShadowDisplayRequests[d]
+		if (old && old.key === key && ((old.busy && Date.now() - old.started < 10000) || Date.now() < old.next)) return
+		if (s.meta && !s.meta.detailPending) return // completed overview-only is a valid fallback
+		const req = {key: key, busy: true, started: Date.now(), next: 0, tries: old && old.key === key ? old.tries + 1 : 1}
+		scShadowDisplayRequests[d] = req
+		const x = new XMLHttpRequest()
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow/display?deck=" + d + "&key=" + encodeURIComponent(key))
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4 || root.scShadowDisplayRequests[d] !== req) return
+			req.busy = false
+			req.next = Date.now() + Math.min(8000, 500 * Math.pow(2, Math.min(req.tries - 1, 4)))
+			const current = root.scShadowData(d)
+			if (!root.scShadowVisible(d) || !current || current.key !== key) return
+			try {
+				if (x.status !== 200) return // including 404: retry this key on the metadata timer
+				// A safety retry that brings the same pending reply: keep the meta object
+				// (a new one re-creates every tile, grid and cue delegate for nothing).
+				const text = x.responseText, last = root.scShadowDisplayText[d]
+				if (current.meta && last && last.key === key && last.text === text) {
+					if (current.meta.detailPending) req.next = Date.now() + Math.min(30000, 2000 * Math.pow(2, Math.min(req.tries - 1, 4)))
+					return
+				}
+				const m = JSON.parse(text)
+				if (m.key !== key) return
+				root.scShadowDisplayText[d] = {key: key, text: text}
+				// Pending detail: each reply is a 10+ kB JSON with every beat (hundreds of
+				// objects). stream-sync says when the detail is ready (displayDetail),
+				// which re-reads it at once; until then only a slow safety retry.
+				if (m.detailPending) req.next = Date.now() + Math.min(30000, 2000 * Math.pow(2, Math.min(req.tries - 1, 4)))
+				const next = Object.assign({}, root.scShadowDisplay)
+				next[d] = Object.assign({}, current, {meta: m})
+				root.scShadowDisplay = next
+				root.scGcLoadSeq++ // the parse garbage of a 10+ kB display reply
+			} catch (err) { console.warn("EngineX shadow display: " + err) }
+		}
+		x.send()
+	}
+	// The shadow decks' cue countdown clock: only while one of them plays. Every
+	// tick re-evaluates each deck view's countdown (~36 V4 allocations).
+	function scShadowAnyPlaying(m) {
+		for (let d = 1; d <= 4; d++) if (m[d] && m[d].playing && !m[d].stale) return true
+		return false
+	}
+	Timer {
+		interval: 200; repeat: true
+		running: root.scFourDeckRole !== "" && root.scShadowDisplayOnly && root.scShadowAnyPlaying(root.scShadowDisplay)
+		onTriggered: root.scShadowFrame = (root.scShadowFrame + 1) & 0xffff
+	}
+	Timer {
+		interval: 500; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowDisplayOnly
+		onTriggered: {
+			for (let d = 1; d <= 4; d++) {
+				const s = root.scShadowData(d)
+				if (s && s.key) root.scShadowDisplayFetch(d, s.key)
+			}
+		}
+	}
+	// V4 collects stop-the-world on the GUI thread: 100-180 ms on SC5000 for the
+	// stock heap plus ours, i.e. a visible hitch of every moving waveform. Start
+	// each playback on a clean heap instead: collect once when every deck on this
+	// screen (own and shadow) has stopped, and once after a track or its display
+	// data finished loading while nothing plays. Never while a deck plays.
+	property int scGcLoadSeq: 0
+	property int scGcRuns: 0
+	property real scGcLastMs: 0
+	property var scGcProps: null
+	property var scGcState: ({armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0}) // start-up garbage counts as a stop
+	function scGcCheck() {
+		const now = Date.now(), g = scGcState
+		let p = scGcProps
+		if (!p) {
+			p = []
+			for (let d = 1; d <= 4; d++) p.push({play: scTr("/Engine/Deck" + d + "/PlayState"), cmd: scTr("/Engine/Deck" + d + "/Play"), length: scTr("/Engine/Deck" + d + "/Track/TrackLength")})
+			if (!p.every(x => x.play && x.cmd && x.length)) return false // never collect blind: Engine is still building its decks
+			scGcProps = p
+		}
+		let playing = false, sig = 0
+		for (let d = 1; d <= 4; d++) {
+			// Playing also means a held CUE preview: PlayState stays false while it
+			// sounds and scrolls (scShadowTick's sample, own decks), or the Play command.
+			const x = p[d - 1], s = scShadowDisplay[d], own = scShadowPrev[d]
+			if (x.play.state || x.cmd.state || (own && own.playing) || (s && s.playing && !s.stale)) playing = true
+			sig = sig * 31 + (x.length ? x.length.unnormalized || 0 : 0)
+		}
+		if (sig !== g.loadSig || scGcLoadSeq !== g.loadSeq) { g.loadSig = sig; g.loadSeq = scGcLoadSeq; g.loadAt = now }
+		if (playing) { g.armed = true; g.quietSince = 0; g.loadAt = 0; g.followAt = 0; return false }
+		if (!g.quietSince) g.quietSince = now
+		// 1.5 s settle: a cue-play tap or a quick pause/play must not collect.
+		const stopped = g.armed && now - g.quietSince >= 1500
+		const loaded = g.loadAt > 0 && now - g.loadAt >= 1500
+		// Engine keeps loading (waveform, analysis, library) for seconds after the
+		// length is known: collect once more 6 s on if the deck still rests.
+		const follow = g.followAt > 0 && now >= g.followAt
+		// 3 s apart: a load and its display data arriving a moment later both count.
+		if (!(stopped || loaded || follow) || now - g.lastRun < 3000) return false
+		g.followAt = loaded ? now + 6000 : 0
+		g.armed = false; g.loadAt = 0; g.lastRun = now
+		gc()
+		scGcRuns++; scGcLastMs = Date.now() - now
+		return true
+	}
+	Timer { interval: 500; repeat: true; running: true; onTriggered: root.scGcCheck() }
+	// True when e shows exactly what s shows: the peer's 500 ms heartbeats and
+	// steady playback then only move the extrapolation anchor (read imperatively
+	// by the displays) instead of re-running every shadow binding per reply.
+	function scShadowSameSample(s, key, e) {
+		if (s.key !== key || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.playing !== !!e.playing ||
+			s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.pitch !== (Number(e.pitch) || 0) ||
+			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
+			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail) return false
+		if (Array.isArray(e.cues)) {
+			const a = s.liveCues, b = e.cues
+			if (!Array.isArray(a) || a.length !== b.length) return false
+			for (let i = 0; i < b.length; i++) if (a[i].i !== b[i].i || a[i].p !== b[i].p || a[i].n !== b[i].n || a[i].c !== b[i].c) return false
+		}
+		return true
+	}
+	function scShadowApplyDisplay(decks) {
+		const now = Date.now()
+		let next = null // copied on the first real change only
+		for (let d = 1; d <= 4; d++) {
+			let e = null
+			for (let i = 0; i < decks.length; i++) if (Number(decks[i].deck) === d) { e = decks[i]; break }
+			const old = scShadowData(d)
+			if (!e || scFourDeckRole === "" || scFourDeckRole.indexOf(String(d)) >= 0 || !(e.key || e.loading)) {
+				if (old) { if (!next) next = Object.assign({}, scShadowDisplay); delete next[d] }
+				delete scShadowDisplayRequests[d]; delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
+				continue
+			}
+			const key = String(e.key || ""), pos = Number(e.positionMs) || 0, at = Number(e.at) || now
+			const same = !!old && scShadowSameSample(old, key, e)
+			if (same) {
+				// Same picture: a paused deck at the same spot, or a playing one within
+				// 12 ms of its line (the scroll keeps running within 12 ms too).
+				// Refresh the anchor in place well before the 3 s expiry.
+				const drift = old.playing ? old.positionMs + (at - old.at) * Math.max(0, 1 + old.pitch / 100) - pos : old.positionMs - pos
+				if (Math.abs(drift) <= (old.playing ? 12 : 0)) {
+					old.positionMs = pos; old.at = at; old.beat = Number(e.beat) || 0
+					continue
+				}
+			}
+			const sample = {key: key, title: e.title || "", artist: e.artist || "", playing: !!e.playing, stale: !!e.stale,
+				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0,
+				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master, sync: !!e.sync,
+				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
+				meta: old && old.key === key ? old.meta : null,
+				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
+			if (!next) next = Object.assign({}, scShadowDisplay)
+			next[d] = sample
+			if (!old || old.key !== key) delete scShadowDisplayRequests[d]
+		}
+		if (next) scShadowDisplay = next
+		for (let d = 1; d <= 4; d++) {
+			const s = scShadowDisplay[d]
+			if (!s || !s.key || (s.meta && !s.meta.detailPending)) continue
+			const r = scShadowDisplayRequests[d]
+			if (s.meta && s.displayDetail && r && r.key === s.key && !r.busy) r.next = 0 // ready here now
+			scShadowDisplayFetch(d, s.key)
+		}
+	}
 	// #99: five Layout Manager views. Engine has three and forgets the selected one
 	// at every start, and the 4-deck layout used to force its lanes over the user's
 	// view. stream-sync keeps the active view and each one's layout (views.json);
@@ -139,7 +603,7 @@ SERVICES_MAIN = """
 	}
 	// EngineX settings a view keeps too: [snapshot key = root property, /v1/sc5000/ui query].
 	readonly property var scViewPrefs: [["scWave", "waveform"], ["scJog", "jog"], ["scUIScale", "uiScale"],
-		["scTracklistWaveform", "tracklistWaveform"], ["scDualColumn", "browserDualColumn"], ["scBeatJumpPads", "beatJumpPads"], ["scSwapLoopOrder", "swapLoopOrder"]]
+		["scTracklistWaveform", "tracklistWaveform"], ["scDualColumn", "browserDualColumn"], ["scCueCountdown", "cueCountdown"], ["scBeatJumpPads", "beatJumpPads"], ["scSwapLoopOrder", "swapLoopOrder"]]
 	function scViewApply(s) {
 		const m = scViewControls()
 		if (!m || (scFourDeckRole !== "" && !(m.deckCount && m.deckCount.settingNames && m.deckCount.settingNames.length >= 2))) return false
@@ -162,7 +626,7 @@ SERVICES_MAIN = """
 		}
 		if (q.length) scCall(q.join("&"))
 		scViewQuiet = Date.now() + 3000
-		scViewLast = ""
+		scViewLast = ""; scViewDirty = true
 		return true
 	}
 	function scViewOf(n) {
@@ -218,13 +682,47 @@ SERVICES_MAIN = """
 				root.scViewReady = root.scViewApply(root.scViewOf(root.scViewActive))
 				return
 			}
-			if (Date.now() < root.scViewQuiet) return
-			const s = root.scViewSnapshot()
-			const j = s ? JSON.stringify(s) : ""
-			if (!j) return
-			if (root.scViewLast === "") root.scViewLast = j // what the applied view settled to
-			else if (j !== root.scViewLast) root.scViewSave()
+			root.scViewCheck(Date.now())
 		}
+	}
+	// Autosave compares a snapshot of the view (setting names, Engine and EngineX
+	// switches, JSON) with the last one: ~230 V4 allocations, every 2 s. Take it
+	// only after a change signal, plus every 30 s should one be missed.
+	property bool scViewDirty: true
+	property bool scViewHooked: false
+	property real scViewCheckAt: 0
+	function scViewMark() { scViewDirty = true }
+	onScWaveChanged: scViewDirty = true
+	onScJogChanged: scViewDirty = true
+	onScUIScaleChanged: scViewDirty = true
+	onScTracklistWaveformChanged: scViewDirty = true
+	onScDualColumnChanged: scViewDirty = true
+	onScCueCountdownChanged: scViewDirty = true
+	onScBeatJumpPadsChanged: scViewDirty = true
+	onScSwapLoopOrderChanged: scViewDirty = true
+	function scViewHook() {
+		const m = scViewControls()
+		if (!m) return
+		for (const k in m) if (m[k] && m[k].settingChanged) m[k].settingChanged.connect(root.scViewMark)
+		for (const path of ["/GUI/PadsViewEnabled", "/GUI/FxViewEnabled"]) {
+			const p = Planck.getProperty(path)
+			if (p && p.translator && p.translator.stateChanged) p.translator.stateChanged.connect(root.scViewMark)
+		}
+		const c = PlanckGUI.views.performanceViewController
+		if (c.libraryView && c.libraryView.visibleSettingValueChanged) c.libraryView.visibleSettingValueChanged.connect(root.scViewMark)
+		if (c.deckController && c.deckController.albumArtVisibleChanged) c.deckController.albumArtVisibleChanged.connect(root.scViewMark)
+		scViewHooked = true
+	}
+	function scViewCheck(now) {
+		if (now < scViewQuiet) return
+		if (!scViewHooked) scViewHook()
+		if (!scViewDirty && now - scViewCheckAt < 30000) return
+		scViewDirty = false; scViewCheckAt = now
+		const s = scViewSnapshot()
+		const j = s ? JSON.stringify(s) : ""
+		if (!j) return
+		if (scViewLast === "") scViewLast = j // what the applied view settled to
+		else if (j !== scViewLast) scViewSave()
 	}
 	// #49 shadow decks: post this player's decks for the other EngineX player and
 	// drive the decks it does not play from GET /v1/sc5000/shadow (a CDJ or the
@@ -235,7 +733,7 @@ SERVICES_MAIN = """
 	// a playing shadow deck only takes the source's pitch and runs on its own audio
 	// clock (crystals agree to ~20 ppm).
 	// Latency: the sender samples its decks every 40 ms and posts at once on an
-	// edge (play, CUE, a jump, pitch, track), else every 120 ms; its Go pushes the
+	// edge (play, CUE, a jump, pitch, track), else every 500 ms; its Go pushes the
 	// post over UDP and the receiver's Go wakes the long poll below. The receiver
 	// applies a play or stop edge on the first update, never behind a lock.
 	property var scShadowAt: ({})
@@ -256,43 +754,140 @@ SERVICES_MAIN = """
 		return t
 	}
 	// #151: CDJ-style BARS.BEATS countdown to the next hot cue ahead of the playhead.
-	// scTr values are not bindings, so the capsules re-read on this tick.
-	property int scCueTick: 0
-	Timer {
-		interval: 120; repeat: true; running: true
-		onTriggered: root.scCueTick = (root.scCueTick + 1) & 0xffff
+	// A paused deck must not invalidate the other decks' cue bindings.
+	property int scCueProbe: 0
+	function scCuePlaying(d, probe) {
+		const t = root.scTr("/Engine/Deck" + d + "/PlayState")
+		return !!t && t.state
 	}
+	function scProbeCueClocks() {
+		if (!root.scCueCountdown) return
+		// Reuse the existing settings poll to retry properties absent at startup.
+		// Once all translators are cached this does nothing; no extra polling Timer.
+		if (!scPropCache["/Engine/Deck1/PlayState"] || !scPropCache["/Engine/Deck2/PlayState"] ||
+			!scPropCache["/Engine/Deck3/PlayState"] || !scPropCache["/Engine/Deck4/PlayState"])
+			root.scCueProbe = (root.scCueProbe + 1) & 0xffff
+	}
+	Timer {
+		id: scCueClock1
+		property int tick: 0
+		interval: 200; repeat: true
+		running: root.scCueCountdown && root.scCuePlaying(1, root.scCueProbe)
+		onTriggered: tick = (tick + 1) & 0xffff
+	}
+	Timer {
+		id: scCueClock2
+		property int tick: 0
+		interval: 200; repeat: true
+		running: root.scCueCountdown && root.scCuePlaying(2, root.scCueProbe)
+		onTriggered: tick = (tick + 1) & 0xffff
+	}
+	Timer {
+		id: scCueClock3
+		property int tick: 0
+		interval: 200; repeat: true
+		running: root.scCueCountdown && root.scCuePlaying(3, root.scCueProbe)
+		onTriggered: tick = (tick + 1) & 0xffff
+	}
+	Timer {
+		id: scCueClock4
+		property int tick: 0
+		interval: 200; repeat: true
+		running: root.scCueCountdown && root.scCuePlaying(4, root.scCueProbe)
+		onTriggered: tick = (tick + 1) & 0xffff
+	}
+	function scCueTickFor(d) {
+		// A resting shadow deck's countdown does not move: no clock dependency.
+		if (scShadowVisible(d)) return scShadowDisplay[d] && scShadowDisplay[d].playing && !scShadowDisplay[d].stale ? scShadowFrame : 0
+		return d === 1 ? scCueClock1.tick : d === 2 ? scCueClock2.tick : d === 3 ? scCueClock3.tick : scCueClock4.tick
+	}
+	// Same object while text/label/color/urgent are unchanged, so bindings do not re-layout every tick.
+	property var scCueInfoCache: ({})
+	// Every deck view (and layout variant) evaluates its countdown on the same
+	// clock tick: compute once per deck and tick, the rest share the answer.
+	property var scCueInfoMemo: ({})
 	function scNextCueInfo(d, tick) {
-		const t = p => (root.scTr("/Engine/Deck" + d + p) || {})
-		if (!t("/Track/SongLoaded").state) return null
-		const pos = t("/Track/TrackPosition").unnormalized || 0
-		const sr = t("/Track/SampleRate").value || 44100
-		const bpm = t("/OriginalBPM").unnormalized || t("/Track/CurrentBPM").unnormalized || 0
-		if (!(sr > 0 && bpm > 0)) return null
-		let best = null
-		for (let i = 1; i <= 8; i++) {
-			if (!t("/Track/QuickCue" + i + "Exists").state) continue
-			const cp = t("/Track/QuickCue" + i + "Position").value
-			if (!(cp > pos + sr * 0.05) || (best && cp >= best.pos)) continue
-			best = {idx: i, pos: cp}
+		// Same tick within 50 ms: the same clock edge. A later re-evaluation (a load
+		// or cue edit while paused) computes afresh.
+		const memo = scCueInfoMemo[d], now = Date.now()
+		if (typeof tick === "number" && tick !== 0 && memo && memo.tick === tick && now - memo.at < 50) return memo.info
+		const info = scNextCueCompute(d)
+		if (typeof tick === "number" && tick !== 0) {
+			if (memo) { memo.tick = tick; memo.info = info; memo.at = now } else scCueInfoMemo[d] = {tick: tick, info: info, at: now}
 		}
-		if (!best) return null
-		const totalBeats = (best.pos - pos) / sr * (bpm / 60.0)
+		return info
+	}
+	function scNextCueCompute(d) {
+		if (scShadowVisible(d)) {
+			const info = scShadowNextCue(d)
+			if (!info) { delete scCueInfoCache[d]; return null }
+			const c = scCueInfoCache[d]
+			if (c && c.text === info.text && c.label === info.label && c.color === info.color && c.urgent === info.urgent) return c
+			scCueInfoCache[d] = info
+			return info
+		}
+		const p = scCueProps(d)
+		if (!p.loaded || !p.loaded.state) return null
+		const pos = p.position ? p.position.unnormalized || 0 : 0
+		const sr = p.sampleRate ? p.sampleRate.value || 44100 : 44100
+		const bpm = (p.bpm ? p.bpm.unnormalized : 0) || (p.trackBpm ? p.trackBpm.unnormalized : 0) || 0
+		if (!(sr > 0 && bpm > 0)) return null
+		let best = -1, bestPos = Infinity
+		for (let i = 0; i < p.cues.length; i++) {
+			const cue = p.cues[i]
+			if (!cue.exists || !cue.exists.state || !cue.position) continue
+			const cp = cue.position.value
+			if (!(cp > pos + sr * 0.05) || cp >= bestPos) continue
+			best = i; bestPos = cp
+		}
+		if (best < 0) return null
+		const totalBeats = (bestPos - pos) / sr * (bpm / 60.0)
 		if (totalBeats <= 0 || totalBeats > 2048) return null
 		const bars = Math.floor(totalBeats / 4)
-		const nm = t("/Track/QuickCue" + best.idx + "Name").string || ("CUE " + best.idx)
-		return {
-			text: String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1),
-			label: nm.slice(0, 7),
-			color: String(t("/Track/QuickCue" + best.idx + "Color").color || "#26a6ff"),
-			urgent: bars < 4
+		const cue = p.cues[best]
+		const text = String(bars) + "." + ((Math.floor(totalBeats) % 4) + 1)
+		const label = (cue.name ? cue.name.string || "" : "").slice(0, 7)
+		const color = String((cue.color && cue.color.color) || "#26a6ff")
+		const urgent = bars < 4
+		const c = scCueInfoCache[d]
+		if (c && c.text === text && c.label === label && c.color === color && c.urgent === urgent) return c
+		const info = {text: text, label: label, color: color, urgent: urgent}
+		scCueInfoCache[d] = info
+		return info
+	}
+	property var scCuePropCache: ({})
+	function scCueProps(d) {
+		if (scCuePropCache[d]) return scCuePropCache[d]
+		const prefix = "/Engine/Deck" + d
+		const t = p => root.scTr(prefix + p)
+		const p = {loaded: t("/Track/SongLoaded"), position: t("/Track/TrackPosition"), sampleRate: t("/Track/SampleRate"),
+			bpm: t("/OriginalBPM"), trackBpm: t("/Track/CurrentBPM"), cues: []}
+		for (let i = 1; i <= 8; i++) {
+			const key = "/Track/QuickCue" + i
+			p.cues.push({exists: t(key + "Exists"), position: t(key + "Position"), name: t(key + "Name"), color: t(key + "Color")})
 		}
+		// Retry discovery if the Engine deck has not been constructed yet.
+		if (p.loaded && p.position && p.cues.every(c => c.exists && c.position && c.name && c.color)) scCuePropCache[d] = p
+		return p
 	}
 	property var scShadowCueCache: ({})
+	// 25 Hz around every edge and a CUE preview, 12.5 Hz in steady playback (the
+	// sender posts the filtered line twice a second anyway), 5 Hz while all own
+	// decks rest. Each tick reads ~20 Engine properties, and every read allocates
+	// on V4's heap: at 25 Hz this was a third of the idle allocation (GC trigger).
+	// Play and CUE presses wake it at once.
 	Timer {
+		id: scShadowTickTimer
 		interval: 40; repeat: true
 		running: root.scFourDeckRole !== ""
 		onTriggered: root.scShadowTick()
+	}
+	property real scShadowBusyAt: 0
+	property bool scShadowRoleDirty: true
+	onScFourDeckRoleChanged: scShadowRoleDirty = true
+	function scShadowWake() {
+		scShadowBusyAt = Date.now()
+		if (scShadowTickTimer.interval !== 40) scShadowTickTimer.interval = 40
 	}
 	Timer {
 		id: scShadowPollTimer
@@ -305,6 +900,8 @@ SERVICES_MAIN = """
 	// (true plays, false pauses), so it is written, not pressed.
 	property var scPressQueue: []
 	function scPress(path) {
+		const remote = /^[/]Engine[/]Deck([1-4])[/]/.exec(path)
+		if (remote && scShadowVisible(Number(remote[1]))) return
 		scPressQueue = scPressQueue.concat([{path: path, step: 0}])
 		scPressTimer.restart()
 	}
@@ -314,6 +911,8 @@ SERVICES_MAIN = """
 		onTriggered: {
 			const next = []
 			for (const e of root.scPressQueue) {
+				const remote = /^[/]Engine[/]Deck([1-4])[/]/.exec(e.path)
+				if (remote && root.scShadowVisible(Number(remote[1]))) continue
 				const t = root.scTr(e.path)
 				if (!t) continue
 				t.state = e.step === 1
@@ -323,106 +922,264 @@ SERVICES_MAIN = """
 			if (next.length) restart()
 		}
 	}
-	function scShadowTick() {
-		const g = (d, p) => root.scTr("/Engine/Deck" + d + p)
-		const now = Date.now()
-		if (now - scShadowPollAt > 3000) scShadowPoll() // starts the chain, or restarts a hung one
-		const mine = scFourDeckRole.split("").map(c => parseInt(c))
-		let edge = now - scShadowPostAt >= 120
-		for (const d of mine) {
-			const sr = g(d, "/Track/SampleRate").value
-			const s = {ps: !!g(d, "/PlayState").state, posMs: sr > 0 ? g(d, "/Track/TrackPosition").unnormalized / sr * 1000 : 0,
-				pitch: parseFloat(g(d, "/SpeedState").string) || 0, at: now, jumps: 0,
-				// A streaming track's TrackNetworkPath is only "net://<uuid>/(Unknown)" (5.3.0); its TrackUri names it.
-				net: g(d, "/Track/SongLoaded").state ? (g(d, "/Track/TrackUri").string || g(d, "/Track/TrackNetworkPath").string) : ""}
-			const p = scShadowPrev[d]
-			// Holding CUE previews with PlayState false (measured on a JP07): CUE's
-			// LED is on and the position runs. The LED alone also blinks while paused.
-			s.cue = !s.ps && !!(g(d, "/Track/CueLEDState") || {}).state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
-			s.playing = s.ps || s.cue
-			if (p) {
-				// A jump: hot cue, beat jump, loop, CUE while playing, jog search while
-				// paused. TrackPosition moves in ~33 ms steps, so a playing deck sits
-				// off its line by that plus timer jitter; a paused one does not move.
-				s.jumps = p.jumps
-				const expect = p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0)
-				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 80 : 5)) s.jumps++
-				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02) edge = true
-			}
-			scShadowPrev[d] = s
+	// Reuse the sampling buffers, translators and HTTP object after warm-up.
+	readonly property var scShadowEmptyArray: []
+	readonly property var scShadowEmptyObject: ({})
+	readonly property var scShadowDecks: [1, 2, 3, 4]
+	property string scShadowMineRole: "?"
+	property var scShadowMine: []
+	property var scShadowSampleSpare: ({})
+	property var scShadowDeckProperties: ({})
+	property var scShadowOwn: []
+	property var scShadowPostRequest: null
+	property var scShadowPollRequest: null
+	property string scShadowResponseVersion: ""
+	property bool scShadowPostPending: false
+	property string scShadowLinkId: ""
+	property var scShadowSent: [] // per own deck: what the newest full post told the peer
+	property real scShadowFullAt: 0
+	property bool scShadowPostFull: true
+	property real scShadowLinkAt: -Infinity
+	property var scShadowTextAt: ({})
+	function scShadowProperties(d) {
+		let p = scShadowDeckProperties[d]
+		if (p) return p
+		p = {}
+		const prefix = "/Engine/Deck" + d
+		for (const pair of [["rate", "/Track/SampleRate"], ["shown", "/SpeedState"], ["original", "/OriginalBPM"],
+			["current", "/CurrentBPM"], ["play", "/PlayState"], ["position", "/Track/TrackPosition"],
+			["loaded", "/Track/SongLoaded"], ["uri", "/Track/TrackUri"], ["net", "/Track/TrackNetworkPath"],
+			["cueLED", "/Track/CueLEDState"], ["master", "/DeckIsMaster"], ["sync", "/SyncMode"],
+			["beat", "/BeatNumber"], ["cuePosition", "/Track/CuePosition"], ["title", "/Track/SongName"],
+			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"]])
+			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
+		p.cues = []
+		for (let i = 1; i <= 8; i++) {
+			const q = prefix + "/Track/QuickCue" + i
+			p.cues.push({exists: root.scTr(q + "Exists") || scShadowEmptyObject,
+				position: root.scTr(q + "Position") || scShadowEmptyObject, name: root.scTr(q + "Name") || scShadowEmptyObject,
+				color: root.scTr(q + "Color") || scShadowEmptyObject})
 		}
-		if (edge) scShadowPost(mine, now)
+		// Rare signals: a play or CUE press restores the 25 Hz sampling at once.
+		for (const t of [p.play, p.cueLED]) if (t.stateChanged) t.stateChanged.connect(root.scShadowWake)
+		scShadowDeckProperties[d] = p
+		return p
 	}
-	function scShadowPost(mine, now) {
-		const g = (d, p) => root.scTr("/Engine/Deck" + d + p)
-		// A networked player's MASTER LED is the unit's /Engine/Sync/Network/MasterStatus
-		// (ControlSurfaceModules/Sync.qml); DeckIsMaster is per deck. The unit's
-		// master is this player's unless a shadow deck (a CDJ) holds it.
-		const deckMaster = [1, 2, 3, 4].map(i => !!g(i, "/DeckIsMaster").state)
+	function scShadowTick() {
+		const now = Date.now()
+		if (now - scShadowPollAt > 3000) scShadowPoll()
+		if (scShadowRoleDirty) {
+			scShadowRoleDirty = false
+			scShadowMineRole = scFourDeckRole
+			scShadowMine = scFourDeckRole.split("").map(c => parseInt(c))
+			scShadowOwn.length = scShadowMine.length
+		}
+		const mine = scShadowMine
+		let edge = scShadowPostPending, busy = false, moving = false
+		for (let n = 0; n < mine.length; n++) {
+			const d = mine[n], g = scShadowProperties(d), p = scShadowPrev[d]
+			const s = scShadowSampleSpare[d] || {}
+			const sr = g.rate.value
+			const ob = g.original.unnormalized || 0, cb = g.current.unnormalized || 0
+			// 25 Hz: every .string read allocates a JS string (and counts toward V4's
+			// GC trigger). Re-read the strings only when they can have changed.
+			if (p && p.bpm === ob && p.currentBpm === cb && now - p.pitchAt < 1000) { s.pitch = p.pitch; s.pitchAt = p.pitchAt }
+			else {
+				const shown = parseFloat(g.shown.string) || 0
+				const exact = ob > 0 && cb > 0 ? Math.round(((cb / ob - 1) * 100) * 100) / 100 : NaN
+				s.pitch = Math.abs(exact - shown) < 0.15 ? exact : shown; s.pitchAt = now
+			}
+			s.ps = !!g.play.state
+			s.posMs = sr > 0 ? g.position.unnormalized / sr * 1000 : 0
+			s.bpm = ob; s.currentBpm = cb; s.at = now; s.jumps = p ? p.jumps : 0
+			s.loaded = !!g.loaded.state
+			if (p && p.loaded === s.loaded && now - p.netAt < 500) { s.net = p.net; s.netAt = p.netAt }
+			else { s.net = s.loaded ? g.uri.string || g.net.string || "" : ""; s.netAt = now }
+			s.cue = !s.ps && !!g.cueLED.state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
+			s.playing = s.ps || s.cue
+			s.master = !!g.master.state
+			if (p && now - p.syncAt < 200) { s.sync = p.sync; s.syncAt = p.syncAt }
+			else { s.sync = (g.sync.string || "Off") !== "Off"; s.syncAt = now }
+			if (p) {
+				const expect = p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0)
+				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
+				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync) edge = true
+				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
+			}
+			if (s.cue) busy = true
+			if (s.ps) moving = true
+			// Engine moves TrackPosition in audio blocks: at 25 Hz a playing deck's raw
+			// position is up to ~35 ms of track time behind (high pitch). With the speed
+			// known, the upper envelope of position - speed * time is the newest block:
+			// post that line (noise of a few ms), decaying 2 ms/s to follow pitch rounding.
+			const speed = 1 + s.pitch / 100
+			if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.jumps === s.jumps && isFinite(p.env))
+				s.env = Math.max(s.posMs - speed * now, p.env - 0.002 * (now - p.at))
+			else s.env = s.posMs - speed * now
+			s.lineMs = s.ps ? s.env + speed * now : s.posMs
+			scShadowPrev[d] = s
+			scShadowSampleSpare[d] = p || {}
+		}
+		// Every edge (play, CUE, jump, pitch, master, sync, track) posts at once. The
+		// heartbeat only proves liveness (Go marks a peer stale after 2 s) and corrects
+		// the peer's extrapolation, which runs on the exact pitch: 500 ms keeps 1.5 s of
+		// margin for a busy GUI thread. Each post and the peer's reply are JS strings
+		// that drive V4's GC trigger (250 ms here meant a GC every ~75-150 s of play).
+		if (edge || now - scShadowPostAt >= 500) scShadowPost(mine, now, edge)
+		if (edge || busy) scShadowBusyAt = now
+		const rate = now - scShadowBusyAt < 2000 ? 40 : moving ? 80 : 200
+		if (scShadowTickTimer.interval !== rate) scShadowTickTimer.interval = rate
+		if (scShadowDebug) scShadowDbgFlush(now)
+	}
+	function scShadowPost(mine, now, edge) {
+		let post = scShadowPostRequest
+		if (!post) {
+			post = new XMLHttpRequest(); scShadowPostRequest = post
+			// 409 on a ping: stream-sync restarted or our decks went stale there.
+			post.onreadystatechange = function() { if (post.readyState === 4 && post.status === 409) root.scShadowPostFull = true }
+		}
+		if (post.readyState > 0 && post.readyState < 4) {
+			scShadowPostPending = true
+			if (now - scShadowPostAt < 3000) return
+			post.abort()
+		}
 		const pNet = root.scTr("/Engine/Sync/Network/MasterStatus")
 		const net = !!(pNet && pNet.state)
-		const shadowLead = deckMaster.some((m, i) => m && mine.indexOf(i + 1) < 0)
-		let lead = 0
-		if (net && !shadowLead && !scShadowCdjMaster && !mine.some(d => deckMaster[d - 1]))
-			lead = mine.find(d => g(d, "/PlayState").state) || mine[0]
-		const link = (root.scTr("/Network/NetworkId") || {}).string || ""
-		const own = []
-		for (const d of mine) {
-			const s = scShadowPrev[d]
-			const t = p => root.scTr("/Engine/Deck" + d + "/Track/" + p)
-			// 32 property reads: rescan at most every 500 ms per deck, or at once on a new track.
-			let cc = scShadowCueCache[d]
-			if (!cc || cc.net !== s.net || now - cc.at >= 500) {
-				const cues = []
-				for (let i = 1; s.net && i <= 8; i++) {
-					const q = "QuickCue" + i
-					if ((t(q + "Exists") || {}).state)
-						cues.push({i: i, p: t(q + "Position").value, n: t(q + "Name").string, c: String(t(q + "Color").color)})
-				}
-				cc = scShadowCueCache[d] = {net: s.net, at: now, cues: cues}
-			}
-			const cues = cc.cues
-			own.push({deck: d, net: s.net, cues: s.net ? cues : null, cuePos: s.net ? (t("CuePosition") || {}).value : undefined, playing: s.playing, cue: s.cue, link: link, positionMs: s.posMs, at: s.at, jumps: s.jumps,
-				pitch: s.pitch, master: deckMaster[d - 1] || d === lead,
-				bpm: (root.scTr("/Engine/Deck" + d + "/OriginalBPM") || {}).unnormalized || 0,
-				beat: (root.scTr("/Engine/Deck" + d + "/BeatNumber") || {}).unnormalized || 0,
-				// the gateway names a streamed shadow copy after the real track, not its numeric id
-				title: s.net ? ((root.scTr("/Engine/Deck" + d + "/Track/SongName") || root.scTr("/Engine/Deck" + d + "/Track/TrackName") || {}).string || "") : "",
-				artist: s.net ? ((root.scTr("/Engine/Deck" + d + "/Track/ArtistName") || {}).string || "") : "",
-				dbg: ""})
+		let shadowLead = false, localMaster = false, lead = 0
+		for (let d = 1; d <= 4; d++) {
+			if (!scShadowProperties(d).master.state) continue
+			if (mine.indexOf(d) < 0) shadowLead = true
+			else localMaster = true
 		}
-		scShadowPostAt = now
-		const post = new XMLHttpRequest()
+		if (net && !shadowLead && !scShadowCdjMaster && !localMaster) {
+			for (let i = 0; i < mine.length; i++) if (scShadowPrev[mine[i]].playing) { lead = mine[i]; break }
+			if (!lead) lead = mine[0]
+		}
+		if (now - scShadowLinkAt >= 2000) { scShadowLinkId = (root.scTr("/Network/NetworkId") || scShadowEmptyObject).string || ""; scShadowLinkAt = now }
+		const link = scShadowLinkId
+		const own = scShadowOwn
+		for (let n = 0; n < mine.length; n++) {
+			const d = mine[n], s = scShadowPrev[d], g = scShadowProperties(d)
+			let cc = scShadowCueCache[d]
+			if (!cc) cc = scShadowCueCache[d] = {net: "?", at: 0, textAt: 0, rev: 0, cues: [], pool: []}
+			if (cc.net !== s.net || now - cc.at >= 500) {
+				// Names and colours are strings: re-read them with a new or moved cue, else every 2 s.
+				const text = cc.net !== s.net || now - cc.textAt >= 2000
+				let count = 0, changed = cc.net !== s.net
+				for (let i = 0; s.net && i < 8; i++) {
+					const q = g.cues[i]
+					if (!q.exists.state) continue
+					const c = cc.pool[i] || (cc.pool[i] = {})
+					const pos = q.position.value
+					if (text || c.i !== i + 1 || c.p !== pos || cc.cues[count] !== c) {
+						const name = q.name.string || "", color = String(q.color.color || "#ffffff")
+						if (name !== c.n || color !== c.c) changed = true
+						c.n = name; c.c = color
+					}
+					if (c.i !== i + 1 || c.p !== pos || cc.cues[count] !== c) changed = true
+					c.i = i + 1; c.p = pos
+					cc.cues[count++] = c
+				}
+				if (count !== cc.cues.length) changed = true
+				cc.cues.length = count; cc.net = s.net; cc.at = now
+				if (text) cc.textAt = now
+				if (changed) cc.rev++
+			}
+			const o = own[n] || (own[n] = {})
+			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000)
+			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
+			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
+			o.pitch = s.pitch; o.master = s.master || d === lead; o.bpm = s.bpm; o.currentBpm = s.currentBpm
+			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
+			// Titles arrive after the load: re-read on a new track and every 2 s.
+			if (fresh) {
+				o.title = s.net ? g.title.string || g.trackName.string || "" : ""
+				o.artist = s.net ? g.artist.string || "" : ""
+				scShadowTextAt[d] = !s.net || o.title ? now : 0 // Engine fills SongName after the load: retry until it does
+			}
+			o.dbg = ""
+			// What the peer shows from this deck, as last sent in full.
+			const sent = scShadowSent[n] || (scShadowSent[n] = {})
+			// The peer carries the position on from the last full post at its pitch;
+			// o.positionMs is the filtered line (scShadowTick), so a real slip only.
+			let onLine = false
+			if (sent.deck === d && sent.net === o.net && sent.playing === o.playing && sent.pitch === o.pitch && sent.jumps === o.jumps) {
+				const expect = sent.positionMs + (o.playing ? (o.at - sent.at) * (1 + o.pitch / 100) : 0)
+				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
+			}
+			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
+				sent.title !== o.title || sent.artist !== o.artist || sent.link !== o.link || sent.bpm !== o.bpm || sent.cuesRev !== cc.rev) edge = true
+		}
+		scShadowPostAt = now; scShadowPostPending = false
+		// Nothing the peer shows changed: ping instead of serialising the decks again
+		// (stream-sync keeps them live and extrapolated). Full post at least every 5 s.
+		if (!edge && !scShadowPostFull && now - scShadowFullAt < 5000 && own.length === scShadowSent.length) {
+			post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks/alive")
+			post.send()
+			return
+		}
+		for (let n = 0; n < own.length; n++) {
+			const o = own[n], sent = scShadowSent[n]
+			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
+			sent.master = o.master; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist
+			sent.link = o.link; sent.bpm = o.bpm; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
+		}
+		scShadowSent.length = own.length
+		scShadowFullAt = now; scShadowPostFull = false
 		post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks")
 		post.send(JSON.stringify(own))
 	}
 	// One request at a time: Go holds it until the other player's state changes
-	// (at most 120 ms), so an edge arrives here within a millisecond of its UDP.
+	// (at most a second; 120 ms while CDJ positions refresh), so an edge arrives
+	// here within a millisecond of its UDP.
 	function scShadowPoll() {
-		const gen = ++scShadowGen
-		scShadowPollAt = Date.now()
-		const x = new XMLHttpRequest()
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer)
-		x.onreadystatechange = function() {
-			if (x.readyState !== 4 || gen !== root.scShadowGen) return
-			let wait = 500
-			try {
-				if (x.status === 200) {
-					const r = JSON.parse(x.responseText)
-					root.scShadowApplyAll(r.decks || [])
-					// An older suite answers at once (no ver): keep its old pace.
-					wait = !r.role ? 500 : r.ver === undefined ? 120 : 25
-					if (r.ver !== undefined) root.scShadowVer = r.ver
-				}
-			} catch (err) {
-				console.warn("EngineX shadow decks: " + err)
+		let x = scShadowPollRequest
+		if (!x) {
+			x = new XMLHttpRequest()
+			scShadowPollRequest = x
+			x.onreadystatechange = function() {
+				if (x.readyState !== 4) return
+				let wait = 500
+				try {
+					if (x.status === 200) {
+						const version = x.getResponseHeader("X-Shadow-State") || ""
+						root.scShadowLive.seen = Date.now()
+						if (root.scShadowDisplayOnly && version && version === root.scShadowResponseVersion) {
+							scShadowPollTimer.interval = 60; scShadowPollTimer.restart(); return
+						}
+						root.scShadowResponseVersion = version
+						const r = JSON.parse(x.responseText)
+						root.scShadowDebug = !!r.debug
+						root.scShadowApplyAll(r.decks || root.scShadowEmptyArray, r.displayOnly !== false)
+						wait = !r.role ? 500 : r.ver === undefined ? 120 : 60
+						if (r.ver !== undefined) root.scShadowVer = r.ver
+					}
+				} catch (err) { console.warn("EngineX shadow decks: " + err) }
+				scShadowPollTimer.interval = wait
+				scShadowPollTimer.restart()
 			}
-			scShadowPollTimer.interval = wait
-			scShadowPollTimer.restart()
 		}
+		if (x.readyState > 0 && x.readyState < 4) {
+			if (Date.now() - scShadowPollAt < 3000) return
+			x.abort()
+		}
+		++scShadowGen
+		scShadowPollAt = Date.now()
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer)
 		x.send()
 	}
-	function scShadowApplyAll(decks) {
+	function scShadowApplyAll(decks, displayOnly) {
+		scShadowDisplayOnly = displayOnly !== false
+		if (scShadowDisplayOnly) {
+			// No Planck reads/writes or legacy helpers here, even when path is empty.
+			scShadowCdjMaster = false // display flags must never suppress the real network master
+			scShadowApplyDisplay(decks)
+			return
+		}
+		scShadowDisplay = ({})
+		scShadowDisplayRequests = ({})
+		scShadowGridCache = ({})
+		scShadowLiveCueCache = ({})
 		root.scShadowCdjMaster = decks.some(e => e.master)
 		for (const e of decks) root.scShadowApply(e)
 		const now = Date.now()
@@ -440,6 +1197,7 @@ SERVICES_MAIN = """
 	// shadow deck and, after 350 ms (one dropped update must not eject), unload it
 	// so no stale track or waveform stays, handing master back to our own deck.
 	function scShadowEmpty(d, now) {
+		if (scShadowDisplayOnly) return
 		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
 		// On an all-in-one console (#160), leave Decks 3/4 alone unless a shadow peer loaded them.
 		if (!root.scPlayer && !at.path) return
@@ -447,8 +1205,9 @@ SERVICES_MAIN = """
 		if (pPlay && pPlay.state) pPlay.state = false
 		if (!at.emptyAt) at.emptyAt = now
 		if (now - at.emptyAt < 350 || !(at.path || (root.scTr("/Engine/Deck" + d + "/Track/SongLoaded") || {}).state)) return
-		if ((root.scTr("/Engine/Deck" + d + "/SyncMode") || {}).string !== "Off") scPress("/Engine/Deck" + d + "/UnSync")
-		if ((root.scTr("/Engine/Deck" + d + "/DeckIsMaster") || {}).state) {
+		// Standalone players share Sync/master through Engine Link; consoles (#160) need presses.
+		if ((!at.link || !root.scPlayer) && (root.scTr("/Engine/Deck" + d + "/SyncMode") || {}).string !== "Off") scPress("/Engine/Deck" + d + "/UnSync")
+		if ((!at.link || !root.scPlayer) && (root.scTr("/Engine/Deck" + d + "/DeckIsMaster") || {}).state) {
 			const m0 = scFourDeckRole.split("")[0]
 			if (m0) scPress("/Engine/Deck" + m0 + "/RequestMaster")
 		}
@@ -459,6 +1218,7 @@ SERVICES_MAIN = """
 		delete scShadowAt[d]
 	}
 	function scShadowApply(e) {
+		if (scShadowDisplayOnly) return
 		const d = e.deck
 		if (scFourDeckRole.indexOf(String(d)) >= 0 || !e.path) return
 		const g = p => root.scTr("/Engine/Deck" + d + p)
@@ -467,6 +1227,7 @@ SERVICES_MAIN = """
 		if (at.path !== e.path) {
 			root.scTr("/Client/Librarian/AddToDatabaseAndLoadToDeck" + d).url = "file://" + encodeURI(e.path)
 			scShadowAt[d] = {path: e.path, loadUntil: now + 1200, seekAt: 0, seeks: 0, loads: (at.loads || 0) + 1, jumps: e.jumps}
+			if (root.scShadowDebug) root.scShadowDbg({deck: d, act: "load", path: e.path, loads: scShadowAt[d].loads})
 			return
 		}
 		if (now < at.loadUntil || !g("/Track/SongLoaded").state) return
@@ -478,14 +1239,18 @@ SERVICES_MAIN = """
 		// they would undo the edge for a moment.
 		if (now - (at.linkAt || 0) < 300 && (e.playing && !e.cue) !== at.linkPS) return
 		if (e.cue && at.linkCueOff && now - at.linkCueOff < 300) return
+		const local = !!g("/PlayState").state
+		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check) return
+		at.lastSeq = e.seq
 		const wasPreview = at.preview
 		at.preview = !!e.cue
 		if (!e.playing) at.pausedAt = e.positionMs
 		// The CDJ took master: so does its shadow deck, and Engine drops it on ours
 		// (one master). Only after the change (for 5 s), so pressing MASTER here
 		// afterwards wins it back.
-		if (e.master && !at.master) at.wantMaster = now + 5000
-		if (!e.master) at.wantMaster = 0
+		// Standalone players share master through Engine Link; consoles (#160) need the shadow master.
+		if ((!e.link || !root.scPlayer) && e.master && !at.master) at.wantMaster = now + 5000
+		if (!e.master || (e.link && root.scPlayer)) at.wantMaster = 0
 		at.master = !!e.master
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!(sr > 0 && len > 0)) return
@@ -493,24 +1258,29 @@ SERVICES_MAIN = """
 		// e.at is when Go extrapolated e.positionMs; this runs later on a busy GUI
 		// thread, so carry the target to now before comparing.
 		const target = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * (1 + e.pitch / 100) : 0)
-		const drift = target - g("/Track/TrackPosition").unnormalized / sr * 1000 // > 0: behind
+		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
+		const drift = target - posMs // > 0: behind
 		at.drift = drift
 		const pSync = g("/SyncMode")
 		const synced = !!pSync && pSync.string !== "" && pSync.string !== "Off"
-		const range = parseFloat(g("/SpeedRange").string) || 8
-		const speed = Math.max(0, Math.min(1, 0.5 + e.pitch / (2 * range)))
-		if (!(e.sync && synced) && Math.abs(g("/Speed").value - speed) > 0.001) g("/Speed").value = speed
+		// CDJs and consoles (#160) need Engine Sync here. A standalone peer's synced deck
+		// sends its exact rate (CurrentBPM), which the fader and the loop below follow.
+		const wantSync = !!e.sync && (!e.link || !root.scPlayer)
+		const dbg = act => { if (root.scShadowDebug) root.scShadowDbg({deck: d, act: act, posMs: Math.round(posMs), target: Math.round(target), drift: Math.round(drift), sd: Math.round(at.sd || 0), pitch: e.pitch, pll: at.pll || 0, range: g("/SpeedRange").string, sync: !!e.sync, synced: synced, bpm: e.bpm, currentBpm: e.currentBpm, beat: e.beat, jumps: e.jumps, seeks: at.seeks || 0, master: !!g("/DeckIsMaster").state, link: !!e.link}) }
+		if (!e.playing) at.pll = 0
+		if (!(wantSync && synced)) scShadowSpeed(d, e.pitch)
 		// Play, CUE held, pause, CUE released: on the first update that shows it.
 		// at.cmd only stops rewriting the same state while Engine follows (a frame
 		// or two); a change of the source's state always goes through.
-		const local = !!g("/PlayState").state
 		if (e.playing !== local) {
 			if (at.cmd !== e.playing || now >= at.cmdUntil) {
 				if (e.playing) {
 					if (Math.abs(drift) > 25) seek(target)
 					g("/Play").state = true
+					at.postPlay = now + 380
 				} else {
 					g("/Play").state = false
+					at.postPlay = 0
 					// CUE released: back on the cue point. After a preview the sender's
 					// TrackPosition may not have jumped back yet; the preview started there.
 					const back = wasPreview && at.pausedAt !== undefined ? at.pausedAt : e.positionMs
@@ -521,6 +1291,8 @@ SERVICES_MAIN = """
 				at.cmd = e.playing
 				at.cmdUntil = now + 250
 				at.jumps = e.jumps
+				at.sd = undefined
+				dbg(e.playing ? "play" : "pause")
 			}
 			return
 		}
@@ -534,8 +1306,10 @@ SERVICES_MAIN = """
 		if (g("/DeckIsMaster").state) at.wantMaster = 0
 		// The CDJ's BEAT SYNC is Engine's own Sync on the shadow deck: Engine then
 		// holds its tempo and phase to the master, so no fader and few seeks here.
-		if (!!e.sync !== synced && now >= (at.syncAt || 0)) {
-			scPress("/Engine/Deck" + d + (e.sync ? "/Sync" : "/UnSync"))
+		// Standalone players with an EngineX peer (e.link) share Engine Link sync natively,
+		// and pressing Sync/UnSync on a shadow deck fought the stock SYNC and MASTER buttons.
+		if ((!e.link || !root.scPlayer) && wantSync !== synced && now >= (at.syncAt || 0)) {
+			scPress("/Engine/Deck" + d + (wantSync ? "/Sync" : "/UnSync"))
 			at.syncAt = now + 800
 		}
 		if (!e.playing) {
@@ -545,26 +1319,27 @@ SERVICES_MAIN = """
 			at.jumps = e.jumps
 			const fresh = at.target === undefined || at.target === null || Math.abs(e.positionMs - at.target) > 5
 			const check = at.check && now >= at.check
+			at.sd = undefined
 			if ((fresh || check) && Math.abs(drift) > 10 && now - at.seekAt >= 40) {
 				seek(e.positionMs)
 				at.target = e.positionMs
 				at.check = fresh ? now + 60 : 0
+				dbg("seek")
 			} else if (check) at.check = 0
 			scShadowBeat(d, at, e, drift, now)
 			return
 		}
 		at.target = null
-		// Playing: seek at once when the source jumped, after 1 s on a large gap
-		// (a CDJ has no jump count), and on steady drift past the limit on three
-		// updates at most every 2 s. at.wide: two steady seeks within 10 s did not
-		// land (Quantize snaps to a beat), so this track then only follows jumps.
-		const lim = e.sync && synced ? 2000 : at.wide ? 800 : 150
-		const big = Math.max(350, lim)
+		// Playing: a seek flushes Engine's decoder and waveform (the visible snap), so
+		// it is only for a source jump and a gap past lim on three updates in a row.
+		// at.wide: two such seeks within 10 s did not land (Quantize snaps to a
+		// beat). Steady drift below that is closed by the fader instead (at.pll).
+		const lim = wantSync && synced ? 2000 : at.wide ? 800 : 300
 		const jump = e.jumps !== at.jumps && Math.abs(drift) > 60
 		if (!jump) at.jumps = e.jumps
 		at.over = Math.abs(drift) > lim ? (at.over || 0) + 1 : 0
-		if ((jump && now - at.seekAt >= 80) || (Math.abs(drift) > big && now - at.seekAt >= 1000) || (at.over >= 3 && now - at.seekAt >= 2000)) {
-			if (!jump && Math.abs(drift) <= big) {
+		if ((jump && now - at.seekAt >= 80) || (at.over >= 3 && now - at.seekAt >= 1000)) {
+			if (!jump) {
 				at.wide = at.wide || now - (at.lastSteady || 0) < 10000
 				at.lastSteady = now
 			}
@@ -572,17 +1347,75 @@ SERVICES_MAIN = """
 			at.jumps = e.jumps
 			at.over = 0
 			at.seeks = (at.seeks || 0) + 1
+			at.pll = 0
+			at.sd = undefined
+			dbg(jump ? "jump" : "seek")
+			return
 		}
+		// Never steer /Engine/DeckN/Speed with a synthetic PLL: changing Speed alters
+		// the displayed CurrentBPM on screen ("BPM moving back and forth") and forces
+		// Engine's Elastique time-stretcher to re-tune every few seconds (3-5 s stutter).
+		// Both SC5000 decks run on 20 ppm crystals at the exact unrounded e.pitch; one
+		// post-play alignment check 380 ms after Play closes decoder spin-up latency.
+		if (wantSync && synced) return dbg("sync")
+		if (now - at.seekAt < 300) return dbg("settle")
+		at.sd = at.sd === undefined ? drift : at.sd * 0.85 + drift * 0.15
+		if (at.postPlay && now >= at.postPlay) {
+			at.postPlay = 0
+			if (Math.abs(drift) > 35 && Math.abs(drift) <= lim) {
+				seek(target)
+				at.seeks = (at.seeks || 0) + 1
+				at.sd = 0
+				return dbg("align")
+			}
+		}
+		at.pll = 0
+		dbg("steady")
+	}
+	// The shadow deck's fader at pitch percent: the SpeedRange (8 % by default) is
+	// widened first, or +11.1 % (a synced 126 BPM track at 140) stuck at +8 %.
+	function scShadowSpeed(d, pitch) {
+		if (scShadowDisplayOnly) return
+		const pRange = root.scTr("/Engine/Deck" + d + "/SpeedRange"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
+		if (!pRange || !pSpeed) return
+		let range = parseFloat(pRange.string) || 8
+		if (Math.abs(pitch) > range - 0.2 && pRange.entries) {
+			const i = pRange.entries.findIndex(v => parseFloat(v) >= Math.abs(pitch) + 0.2)
+			pRange.index = i < 0 ? pRange.entries.length - 1 : i
+			range = parseFloat(pRange.string) || range
+		}
+		const speed = Math.max(0, Math.min(1, 0.5 + pitch / (2 * range)))
+		if (Math.abs(pSpeed.value - speed) * 2 * range > 0.03) pSpeed.value = speed
+	}
+	// Debug telemetry (debug_telemetry=1 or /tmp/sc5000-debug, told by GET /shadow):
+	// the receiver's decisions, posted in batches to Go's ring and log.
+	property bool scShadowDebug: false
+	property var scShadowDbgBuf: []
+	property real scShadowDbgAt: 0
+	function scShadowDbg(o) {
+		o.t = Date.now()
+		if (scShadowDbgBuf.length < 400) scShadowDbgBuf.push(o)
+	}
+	function scShadowDbgFlush(now) {
+		if (!scShadowDbgBuf.length || now - scShadowDbgAt < 500) return
+		scShadowDbgAt = now
+		const x = new XMLHttpRequest()
+		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/debug/shadow")
+		x.send(JSON.stringify(scShadowDbgBuf))
+		scShadowDbgBuf = []
 	}
 	// The source's hot cues and CUE point (track samples), set through Engine's
 	// own deck properties: Engine shows them on the waveform, the overview and
 	// the pads, and stores them itself. Nothing else may write its m.db (it
 	// holds it with an exclusive lock and its own page cache; a write broke it).
 	function scShadowCues(d, at, e, now) {
+		if (scShadowDisplayOnly) return
 		if (!Array.isArray(e.cues)) return // a CDJ: no cues sent
 		const sig = JSON.stringify(e.cues) + "/" + e.cuePos
-		if (now < (at.cueAt || 0) + (sig === at.cueSig ? 1000 : 250)) return
+		if (sig === at.cueSig && (at.cuePasses || 0) >= 2) return
+		if (now < (at.cueAt || 0) + (sig === at.cueSig ? 1200 : 250)) return
 		at.cueAt = now
+		at.cuePasses = sig === at.cueSig ? (at.cuePasses || 0) + 1 : 1
 		at.cueSig = sig
 		const t = p => root.scTr("/Engine/Deck" + d + "/Track/" + p)
 		const want = {}
@@ -606,6 +1439,7 @@ SERVICES_MAIN = """
 	// press per check: Forward moves BeatNumber back by one (measured on a
 	// JP07). Part of a beat has no control short of the on-screen grid editor.
 	function scShadowBeat(d, at, e, drift, now) {
+		if (scShadowDisplayOnly) return
 		if ((at.beatTries || 0) >= 4 || !(e.bpm > 0) || e.beat === undefined || Math.abs(drift) > 15 || now < (at.beatAt || 0)) return
 		const local = (root.scTr("/Engine/Deck" + d + "/BeatNumber") || {}).unnormalized
 		if (local === undefined) return
@@ -620,6 +1454,7 @@ SERVICES_MAIN = """
 		at.beatAt = now + 600
 	}
 	function scShadowSeek(d, at, ms) {
+		if (scShadowDisplayOnly) return
 		const g = p => root.scTr("/Engine/Deck" + d + p)
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!(sr > 0 && len > 0)) return
@@ -633,6 +1468,7 @@ SERVICES_MAIN = """
 	// Register takes one path per event-loop turn: one path per update.
 	property var scShadowLinks: ({})
 	function scShadowLink(d, uuid) {
+		if (scShadowDisplayOnly) return
 		const k = uuid + d, n = scShadowLinks[k] || 0
 		const paths = ["/Engine/Deck" + d + "/PlayState", "/Engine/Deck" + d + "/Track/CueLEDState"]
 		if (n >= paths.length) return
@@ -646,6 +1482,7 @@ SERVICES_MAIN = """
 		p.translator.stringChanged.connect(() => root.scShadowLinkEdge(d, uuid, kind, p.translator.string))
 	}
 	function scShadowLinkEdge(d, uuid, kind, json) {
+		if (scShadowDisplayOnly) return
 		const at = scShadowAt[d]
 		if (!at || !at.ready || at.link !== uuid) return
 		let on
@@ -694,6 +1531,7 @@ SERVICES_MAIN = """
 	property string scLastBroadcastTrack: ""
 	property bool scDualColumn: false
 	property bool scTracklistWaveform: true
+	property bool scCueCountdown: true
 	property int scSyncGuardPct: 0
 	property bool scSwapLoopOrder: false
 	property int scLedBrightness: 100
@@ -709,7 +1547,10 @@ SERVICES_MAIN = """
 		}
 	}
 	property bool scBeatJumpPads: false
+	property bool scMixstreamSweepOpen: false
 	property string scPioneerFx: "off"
+	property bool scFxSelectorAvailable: false
+	property bool scFxMasterBypassed: false
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
 	property bool scUpdating: false
@@ -804,12 +1645,37 @@ SERVICES_MAIN = """
 	// as chosen and are not written ten times a second to flash.
 	property real scJogHue: 0
 	property var scJogSaved: null
-	function scDeckList() { return (root.decks && root.decks.length ? root.decks : [1, 2]).map(d => parseInt(d)) }
+	property var scJogDecks: []
+	readonly property var scJogWantedDecks: root.scDeckList()
+	onScJogWantedDecksChanged: if (scJogSaved) scJogResetDecks()
+	property var scJogTargets: ({})
+	// On a 4-deck unit this deck's own pair (12 / 24) wins; root.decks is undefined in Engine 5.3.0.
+	function scDeckList() {
+		if (root.scFourDeckRole !== "") return root.scFourDeckRole.split("").map(c => parseInt(c)).filter(d => d >= 1 && d <= 4)
+		return (root.decks && root.decks.length ? root.decks : [1, 2]).map(d => parseInt(d))
+	}
 	function scDeckColor(deck) { const p = Planck.getProperty("/Engine/Deck" + deck + "/Color"); return p ? p.translator : null }
+	function scSetDeckJogColor(deck, col) {
+		let target = scJogTargets[deck]
+		if (!target) {
+			target = {color: root.scTr("/Engine/Deck" + deck + "/Color"), jog: root.scTr("/Engine/Deck" + deck + "/JogColor")}
+			if (target.color && target.jog) scJogTargets[deck] = target
+		}
+		if (target.color) target.color.color = col
+		if (target.jog && target.jog.color !== undefined) target.jog.color = col
+	}
+	// scFourDeckRole arrives over XHR after startup: put the colours back on the decks that were
+	// animated, then snapshot the decks of the current role.
+	function scJogResetDecks() {
+		if (root.scJogSaved) root.scJogDecks.forEach((d, i) => { if (root.scJogSaved[i]) root.scSetDeckJogColor(d, root.scJogSaved[i]) })
+		const decks = root.scJogWantedDecks
+		root.scJogDecks = decks
+		root.scJogSaved = decks.map(d => { const c = root.scDeckColor(d); return c ? String(c.color) : "" })
+	}
 	// BPM sync: the tempo of the deck that is playing, the active one first; 0 when
 	// nothing plays. Rounded so the pitch fader does not restart the timer constantly.
 	function scPlayingBPM() {
-		const decks = (root.activeDecks || []).map(d => parseInt(d)).concat(root.scDeckList())
+		const decks = root.scBpmDecks
 		for (const d of decks) {
 			const play = Planck.getProperty("/Engine/Deck" + d + "/PlayState")
 			let bpm = Planck.getProperty("/Engine/Deck" + d + "/Track/CurrentBPM")
@@ -822,6 +1688,8 @@ SERVICES_MAIN = """
 		return 0
 	}
 	property real scJogBPM: 0
+	readonly property var scBpmDecks: (root.activeDecks || []).map(d => parseInt(d)).concat(root.scJogWantedDecks)
+	property real scJogLastTick: 0
 	Timer {
 		interval: 500; repeat: true
 		running: root.scJog === "bpm"
@@ -829,29 +1697,29 @@ SERVICES_MAIN = """
 		onRunningChanged: root.scJogBPM = running ? root.scPlayingBPM() : 0
 	}
 	Timer {
-		// bpm: one colour step per beat, a full turn of the colour wheel every four beats.
-		interval: root.scJog === "fast" ? 60 : root.scJog === "bpm" && root.scJogBPM > 0 ? Math.round(60000 / root.scJogBPM) : 250
+		// 25 fps in every mode; the hue advances by elapsed time so the gradient is continuous.
+		// rainbow: 8 s per turn, fast: 2.4 s, bpm: one turn per four beats.
+		interval: 40
 		repeat: true
 		running: root.scJog === "rainbow" || root.scJog === "fast" || root.scJog === "bpm"
 		onRunningChanged: {
-			const decks = root.scDeckList()
+			root.scJogLastTick = 0
 			if (running) {
-				root.scJogSaved = decks.map(d => { const c = root.scDeckColor(d); return c ? String(c.color) : "" })
+				root.scJogSaved = null
+				root.scJogResetDecks()
 			} else if (root.scJogSaved) {
-				decks.forEach((d, i) => { const c = root.scDeckColor(d); if (c && root.scJogSaved[i]) c.color = root.scJogSaved[i] })
+				root.scJogDecks.forEach((d, i) => { if (root.scJogSaved[i]) root.scSetDeckJogColor(d, root.scJogSaved[i]) })
 				root.scJogSaved = null
 			}
 		}
 		onTriggered: {
-			const step = root.scJog === "fast" ? 0.05 : root.scJog === "bpm" && root.scJogBPM > 0 ? 0.25 : 0.025
-			const hue = (root.scJogHue + step) % 1
-			// a colour change under 0.015 of the wheel is invisible: skip the writes
-			if (Math.min(Math.abs(hue - root.scJogHue), 1 - Math.abs(hue - root.scJogHue)) < 0.015) return
-			root.scJogHue = hue
-			root.scDeckList().forEach((d, i) => {
-				const c = root.scDeckColor(d)
-				if (c) c.color = Qt.hsva((root.scJogHue + i * 0.35) % 1, 1, 1, 1)
-			})
+			const now = Date.now()
+			const dt = Math.min(200, Math.max(16, now - (root.scJogLastTick || now)))
+			root.scJogLastTick = now
+			const turn = root.scJog === "fast" ? dt / 2400 : root.scJog === "bpm" ? (root.scJogBPM > 0 ? dt * (root.scJogBPM / 60000) / 4 : dt / 6000) : dt / 8000
+			root.scJogHue = (root.scJogHue + turn) % 1
+			for (let i = 0; i < root.scJogDecks.length; i++)
+				root.scSetDeckJogColor(root.scJogDecks[i], Qt.hsva((root.scJogHue + i * 0.35) % 1, 1, 1, 1))
 		}
 	}
 	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
@@ -866,11 +1734,11 @@ SERVICES_MAIN = """
 		{ id: "beatport", name: "Beatport" },
 		{ id: "applemusic", name: "Apple Music" }
 	]
-	// Every row is keyed by all three spellings, so a string baked into the pack in
-	// one language maps to any other: changing scLang re-evaluates the bindings.
+	// Keep inactive dictionaries as scalar JSON strings. Only the selected language
+	// becomes a JS object/GC root; retain all spellings for live language switching.
 	readonly property var scDicts: (@DICTS@)
-	readonly property var scDict: scDicts[scLang] || ({})
-	function scT(s) { const d = scDicts[scLang]; return (d && d[s]) || s }
+	readonly property var scDict: JSON.parse(scDicts[scLang] || scDicts.en)
+	function scT(s) { return scDict[s] || s }
 	// Translated literals reach this through Math.scI18n: ids here are not visible from every file.
 	QtObject {
 		id: scI18n
@@ -889,6 +1757,22 @@ SERVICES_MAIN = """
 	function scPreview(label) {
 		return /\\s\\[(\\d+) BPM(?: ([0-9]{1,2}[AB]))?\\]$/.exec(label || "") || ["", "", ""]
 	}
+	// Deck art for a streamed track: Engine hands the 7" deck / MicroDeck "" or image://streaming/, so ask the gateway by title+artist.
+	// Native song-name bindings invalidate on track changes; retry only while metadata is missing.
+	function scDeckArtUrl(deck, path, tick, metadata) {
+		const p = String(path || "")
+		if (p !== "" && p !== "image://streaming/") return p
+		const t = k => (root.scTr("/Engine/Deck" + deck + "/Track/" + k) || {})
+		if (!t("SongLoaded").state) return p
+		const title = scPlainTitle(t("SongName").string || "")
+		if (title === "") return p
+		return "http://127.0.0.1:8080/v1/sc5000/art?song=" + encodeURIComponent(title) + "&artist=" + encodeURIComponent(t("ArtistName").string || "")
+	}
+	function scDeckArtPending(deck, path, url) {
+		if (path !== "" && path !== "image://streaming/") return false
+		const loaded = root.scTr("/Engine/Deck" + deck + "/Track/SongLoaded")
+		return !!loaded && loaded.state && String(url).indexOf("http://127.0.0.1:8080/v1/sc5000/art?") !== 0
+	}
 	function scPlainTitle(song) { return (song || "").replace(/\\s\\[\\d+ BPM(?: [0-9]{1,2}[AB])?\\]$/, "") }
 	// Engine's messages name its one streaming client; say which service is showing.
 	function scBrand(s) {
@@ -896,16 +1780,48 @@ SERVICES_MAIN = """
 		return s && service && scScope !== "tidal" ? String(s).replace(/TIDAL/gi, service.name) : s
 	}
 	function scCall(query, done) {
+		if (!query && !done) {
+			if (!scUiPoll) {
+				scUiPoll = new XMLHttpRequest()
+				scUiPoll.onreadystatechange = scUiPollReply
+			}
+			if (scUiPoll.readyState !== 0 && scUiPoll.readyState !== 4) {
+				if (Date.now() - scUiPollAt < 10000) return
+				scUiPoll.abort()
+			}
+			scUiPollAt = Date.now()
+			scUiPoll.open("GET", "http://127.0.0.1:8080/v1/sc5000/ui")
+			scUiPoll.send()
+			return
+		}
 		const x = new XMLHttpRequest()
 		x.open(query ? "POST" : "GET", "http://127.0.0.1:8080/v1/sc5000/ui" + (query ? "?" + query : ""))
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || x.status !== 200) return
-			scApply(JSON.parse(x.responseText))
-			if (done) done()
+			const reply = JSON.parse(x.responseText)
+			if (!reply.fxSelectorReady) scApply(reply)
+			if (done) done(reply)
 		}
 		x.send()
 	}
+	property var scUiPoll: null
+	property real scUiPollAt: 0
+	property string scUiDigest: ""
+	property real scUiAppliedAt: 0
+	function scUiPollReply() {
+		if (scUiPoll.readyState !== 4 || scUiPoll.status !== 200) return
+		// Unchanged settings (stream-sync's digest): skip the parse and the writes,
+		// but re-apply every 30 s in case a local change raced a reply.
+		const digest = scUiPoll.getResponseHeader("X-UI-Digest") || "", now = Date.now()
+		if (digest && digest === scUiDigest && now - scUiAppliedAt < 30000) { scEnsureTidal(); return }
+		scApply(JSON.parse(scUiPoll.responseText))
+		scUiDigest = digest; scUiAppliedAt = now
+	}
 	function scApply(v) {
+		if (v.fxSelectorAvailable !== undefined) {
+			scFxMasterBypassed = !!v.fxSelectorAvailable
+			scFxSelectorAvailable = scFxMasterBypassed && (Config.audio.fx.hasDJFx || Config.audio.fx.hasNHFx)
+		}
 		scEnsureTidal()
 		if (v.version) scVersion = v.version
 		scLang = v.language
@@ -926,14 +1842,17 @@ SERVICES_MAIN = """
 		scFourDeckRole = v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
 		scFourDeckOn = !!v.fourDeckWaveform
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
+		scShadowLegacyEngine = v.shadowLegacyEngine === true
 		scKeepPlayhead(v.playhead || 0)
-		scSources = v.sources
-		scLoggedIn = v.loggedIn
+		if (!scSameItems(scSources, v.sources)) scSources = v.sources
+		if (!scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
 		scScope = v.scope
 		scBroadcastOn = !!v.broadcastEnabled
 		scUpfaderEcho = !!v.upfaderEcho
 		if (typeof v === "string") scParseSettingsConf(v)
 		else if (v) {
+			if (v.cueCountdown !== undefined) scCueCountdown = !!v.cueCountdown
+			else if (v.cue_countdown !== undefined) scCueCountdown = v.cue_countdown !== "0" && v.cue_countdown !== 0 && v.cue_countdown !== false
 			if (v.browserDualColumn !== undefined) scDualColumn = !!v.browserDualColumn
 			else if (v.browser_dual_column !== undefined) scDualColumn = v.browser_dual_column === "1" || v.browser_dual_column === 1 || v.browser_dual_column === true
 			if (v.tracklistWaveform !== undefined) scTracklistWaveform = !!v.tracklistWaveform
@@ -969,8 +1888,17 @@ SERVICES_MAIN = """
 			if (lbj && !lbj.state) lbj.state = true
 		}
 		scUiLoaded = true
+		scProbeCueClocks()
+	}
+	function scSameItems(a, b) {
+		if (a === b) return true
+		if (!a || !b || a.length !== b.length) return false
+		for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+		return true
 	}
 	function scParseSettingsConf(text) {
+		scCueCountdown = true // default on: only an explicit cue_countdown=0 turns it off
+		scTracklistWaveform = true
 		for (const line of (text || "").split("\n")) {
 			const eq = line.indexOf("=")
 			if (eq < 0) continue
@@ -978,6 +1906,7 @@ SERVICES_MAIN = """
 			const val = line.slice(eq + 1).trim()
 			if (key === "browser_dual_column") root.scDualColumn = val === "1"
 			else if (key === "tracklist_waveform") root.scTracklistWaveform = val !== "0" && val !== "false"
+			else if (key === "cue_countdown") root.scCueCountdown = val !== "0"
 			else if (key === "sync_guard_pct") root.scSyncGuardPct = parseInt(val) || 0
 			else if (key === "swap_loop_order") root.scSwapLoopOrder = val === "1"
 			else if (key === "led_brightness") root.scLedBrightness = parseInt(val) || 100
@@ -1210,6 +2139,7 @@ SERVICES_MAIN = """
 		property string url: ""
 		property string path: ""
 		property int tries: 0
+		property var trackIds: null
 		interval: 500; repeat: true
 		function render(id) {
 			if (!running) return // a slower reply after the render already started
@@ -1231,8 +2161,8 @@ SERVICES_MAIN = """
 				if (r.trackId > 0) render(r.trackId)
 			}
 			x.send()
-			const ids = Array.from({ length: 2000 }, (_, i) => i + 1)
-			const lines = (Planck.librarianController.collectionController.getTrackUrisFromUniversalIds(ids) || "").split("\\n")
+			if (!trackIds) trackIds = Array.from({ length: 2000 }, (_, i) => i + 1)
+			const lines = (Planck.librarianController.collectionController.getTrackUrisFromUniversalIds(trackIds) || "").split("\\n")
 			const hit = lines.find(l => l.indexOf(encodeURI(path.replace("/data/", "/")) + "?") >= 0)
 			const id = hit && /[?&]trackId=(\\d+)/.exec(hit)
 			if (id) render(id[1])
@@ -1263,7 +2193,7 @@ SERVICES_MAIN = """
 		}
 	}
 	Instantiator {
-		model: root.decks && root.decks.length ? root.decks : [1, 2]
+		model: root.scDeckList()
 		delegate: QtObject {
 			readonly property int deckIdx: parseInt(modelData)
 			// Pads stay in Engine's own mode (HOT CUE) when a track loads (#71): they
@@ -1583,6 +2513,7 @@ PLAYBACK_ENTRIES = """
 		},
 		EntryBase.ListEntry {
 			text: "Color FX Style"
+			visible: !root.scFxMasterBypassed
 			readonly property var ids: ["off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"]
 			values: ["Off", "Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scPioneerFx))]
@@ -1635,7 +2566,7 @@ TRACKLIST_WAVEFORM_ENTRY = """
 
 LIBRARY_ENTRIES = """
 		EntryBase.ListEntry {
-			text: "Auto-Analyze Drives"
+			text: "Auto-Analyze Drives (Unavailable)"
 			values: ["Off", "On"]
 			currentValue: values[root.scAutoAnalyze ? 1 : 0]
 			onSelected: function(index) { root.scCall("autoAnalyze=" + index) }
@@ -1646,7 +2577,16 @@ LIBRARY_ENTRIES = """
 			currentValue: values[root.scOmniSource ? 1 : 0]
 			onSelected: function(index) { root.scCall("omniSource=" + index) }
 		},
-""" + DUAL_COLUMN_ENTRY + TRACKLIST_WAVEFORM_ENTRY
+""" + TRACKLIST_WAVEFORM_ENTRY
+
+CUE_COUNTDOWN_ENTRY = """
+		EntryBase.ListEntry {
+			text: "Cue Countdown"
+			values: ["Off", "On"]
+			currentValue: values[root.scCueCountdown ? 1 : 0]
+			onSelected: function(index) { root.scCall("cueCountdown=" + index) }
+		},
+"""
 
 UI_SCALE_ENTRY = """
 		EntryBase.ListEntry {
@@ -1683,13 +2623,20 @@ FOUR_DECK_ENTRIES = """
 			currentValue: values[Math.max(0, ids.indexOf(root.scFourDeckRoleSetting))]
 			onSelected: function(index) { if (ids[index] !== root.scFourDeckRoleSetting) root.scRestartCall("fourDeckRole=" + ids[index]) }
 		},
+		EntryBase.ListEntry {
+			text: "Legacy Shadow Engine (restart Engine manually to clear old slots)"
+			visible: root.scFourDeckOn
+			values: ["Off", "On"]
+			currentValue: values[root.scShadowLegacyEngine ? 1 : 0]
+			onSelected: function(index) { if ((index === 1) !== root.scShadowLegacyEngine) root.scCall("shadowLegacyEngine=" + index) }
+		},
 """
 
 # #99 Layout Manager: what a View 1..5 keeps besides the stock layout (scViewSnapshot).
 VIEW_ENTRIES = """
 		@HEADLINE@ { text: "ENGINEX VIEW PRESET" },
 		WaveformStyle { },
-""" + JOG_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES
+""" + JOG_ENTRY + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES
 
 # #78: a deck in a booth can be switched off without reaching for the recessed rear
 # button. Engine's own quit path: the "Turn Off" confirmation, recording and library
@@ -1921,7 +2868,7 @@ SMART_SYNC_MAIN = """
 		return minNeed
 	}
 	Instantiator {
-		model: root.decks && root.decks.length ? root.decks : [1, 2]
+		model: root.scDeckList()
 		delegate: QtObject {
 			readonly property int deckIdx: parseInt(modelData)
 			readonly property QObjProperty pSync: Planck.getProperty("/Engine/Deck%1/SyncMode".arg(deckIdx))
@@ -1969,7 +2916,7 @@ SMART_SYNC_MAIN = """
 	// The Smart Sync tile calls this so a tap takes effect without waiting for a tempo change.
 	function scWidenAll() {
 		const m = Planck.getProperty("/Engine/Master/MasterTempo").translator
-		for (const d of root.decks && root.decks.length ? root.decks : [1, 2]) {
+		for (const d of root.scDeckList()) {
 			const o = Planck.getProperty("/Engine/Deck%1/OriginalBPM".arg(d)).translator
 			const s = Planck.getProperty("/Engine/Deck%1/SyncMode".arg(d)).translator
 			const l = Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(d)).translator
@@ -2094,27 +3041,509 @@ ZOOM_STEP = """
 """
 
 
-def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False) -> str:
+GUARD = '(typeof root !== "undefined" && root && root.scDeckArtUrl)'
+
+# Keep the stock stacking context: native modal views must cover every shadow item.
+# Full-track textures and marker delegates are static; a single content x offset moves.
+SHADOW_LAYER = r"""
+    Rectangle {
+        id: scDisplay
+        objectName: "EngineX_Shadow_@KIND@"
+        readonly property Item owner: @OWNER@
+        parent: layoutParent()
+        function layoutParent() {
+            let p = owner.parent
+            while (p && (p instanceof RowLayout || p instanceof ColumnLayout || p instanceof GridLayout || p instanceof StackLayout || p instanceof Row || p instanceof Column || p instanceof Grid || p instanceof Flow)) p = p.parent
+            return p
+        }
+        readonly property int deck: typeof root !== "undefined" && root && root.scShadowDeckFor ? root.scShadowDeckFor(owner) : 0
+        readonly property bool active: typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(deck)
+        readonly property bool wave: "@KIND@" === "waveform"
+        readonly property bool overview: "@KIND@" === "overview"
+        readonly property bool performance: "@KIND@" === "performance"
+        readonly property bool graphical: wave || overview
+        // Only a displayed layer follows the shadow state. Stock views keep hidden
+        // instances of every lane (16-18 waveforms per player); each one used to
+        // re-run its whole binding tree on every poll reply (16-20 ms GUI time).
+        readonly property bool live: active && inheritedVisible
+        readonly property var sample: live ? root.scShadowData(deck) : null
+        // var properties notify on every write, even with the same object: copy
+        // meta/cues/loops/grid/cueInfo only when the object itself changes.
+        property var meta: null
+        property var cues: root.scShadowEmptyArray
+        property var loops: root.scShadowEmptyArray
+        property real position: 0
+        property bool stale: false
+        property var cueInfo: null
+        property var grid: root.scShadowEmptyArray
+        property int gridSlots: 0 // grows in powers of two while shown; hidden layers keep none
+        property int tileLo: 0
+        property int tileHi: 31
+        onLiveChanged: if (!live) gridSlots = 0
+        property real gridAnchor: -Infinity
+        function refreshSample() {
+            const s = sample, m = s && s.meta || null
+            if (m !== meta) meta = m
+            const c = graphical && s ? root.scShadowCuesFor(deck, s) : root.scShadowEmptyArray
+            if (c !== cues) cues = c
+            refreshPosition()
+            refreshDetails() // track/performance: cueInfo follows a jump or a cue edit at once
+        }
+        // The waveform scrolls on the render thread: one XAnimator per speed change,
+        // no per-frame property writes or bindings on the GUI thread. The overview
+        // moves < 4 px/s and follows the 200 ms clock without animation.
+        property real scrollFrom: 0
+        property real scrollAt: 0
+        property real scrollSpeed: 0
+        function contentX(ms) { return -(ms - span * playhead) / span * width }
+        function refreshPosition() {
+            const now = Date.now(), s = sample
+            const pos = s ? root.scShadowPosition(s, now) : 0
+            if (pos !== position) position = pos
+            const st = !!s && (s.stale || now - Math.max(s.at, root.scShadowLive.seen) >= root.scShadowExpiryMs)
+            if (st !== stale) stale = st
+            if (!wave) return
+            const speed = live && visible && s && s.playing && !st && pos < duration ? Math.max(0, 1 + s.pitch / 100) : 0
+            if (speed > 0) {
+                // Keep the running scroll unless it is off by more than 12 ms of track.
+                if (scroll.running && speed === scrollSpeed && Math.abs(scrollFrom + (now - scrollAt) * speed - pos) <= 12) return
+                scroll.stop()
+                scrollFrom = pos; scrollAt = now; scrollSpeed = speed
+                scroll.from = contentX(pos)
+                scroll.to = contentX(duration)
+                scroll.duration = Math.max(1, Math.round((duration - pos) / speed))
+                scroll.start()
+            } else {
+                const x = contentX(pos)
+                if (scrollSpeed > 0 || scroll.running) {
+                    // A stopped Animator writes its own value back at the next sync,
+                    // after any x set here: settle with a 1 ms run to x instead, so the
+                    // write-back and the scene both end at x (CUE released on its spot).
+                    scroll.stop()
+                    scroll.from = x; scroll.to = x; scroll.duration = 1
+                    scroll.start()
+                } else if (scMoving.x !== x) scMoving.x = x
+                scrollSpeed = 0
+            }
+        }
+        // Forget the running line (zoom, size, visibility); refreshPosition restarts or settles.
+        function restartScroll() { scrollAt = -Infinity; refreshPosition() }
+        function refreshDetails() {
+            if (!graphical) {
+                const ci = live ? root.scNextCueInfo(deck, 0) : null
+                if (ci !== cueInfo) cueInfo = ci
+            }
+            if (!wave || !meta) {
+                if (grid.length) grid = root.scShadowEmptyArray
+                gridAnchor = -Infinity
+                return
+            }
+            const padding = Math.min(span / 2, 10000)
+            // Re-anchor at half the padding: the view (scrolled on the render thread)
+            // runs up to one 200 ms clock ahead of start.
+            if (Math.abs(start - gridAnchor) > padding / 2) {
+                gridAnchor = start
+                // Only the tiles under this window are drawn: every Image is its own
+                // texture batch, and clipped ones still cost the render thread.
+                const tileMs = totalPixels > 0 ? tilePixels / totalPixels * waveformDuration : 0
+                const lo = tileMs > 0 ? Math.floor((start - padding) / tileMs) : 0, hi = tileMs > 0 ? Math.floor((start + span + padding) / tileMs) : 31
+                if (lo !== tileLo) tileLo = lo
+                if (hi !== tileHi) tileHi = hi
+                const rows = root.scShadowGrid(deck, meta, start - padding, start + span + padding)
+                if (rows.length > gridSlots) gridSlots = Math.max(32, 1 << Math.ceil(Math.log2(rows.length)))
+                if (rows !== grid) grid = rows
+            }
+        }
+        onSampleChanged: refreshSample()
+        onVisibleChanged: { restartScroll(); if (visible) refreshDetails() }
+        onWidthChanged: restartScroll()
+        onMetaChanged: {
+            const l = graphical && meta && meta.loops || root.scShadowEmptyArray
+            if (l !== loops) loops = l
+            gridAnchor = -Infinity; restartScroll(); refreshDetails()
+        }
+        onSpanChanged: { gridAnchor = -Infinity; restartScroll(); refreshDetails() }
+        // The stale cut-off and the grid window still need a clock between replies.
+        // A resting or stale sample does not move: its refreshes come with the sample.
+        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(); scDisplay.refreshDetails() } }
+        readonly property real duration: meta && meta.durationMs > 0 ? meta.durationMs : 1
+        readonly property real waveformDuration: meta && meta.waveformDurationMs > 0 ? meta.waveformDurationMs : duration
+        readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
+        readonly property real playhead: overview ? position / duration : 0.5
+        readonly property real start: overview ? 0 : position - span * playhead
+        readonly property var tiles: meta && meta.detail && Array.isArray(meta.waveformTiles) ? meta.waveformTiles : []
+        readonly property int totalPixels: meta && meta.waveformWidth > 0 && meta.waveformWidth <= 65536 ? meta.waveformWidth : 0
+        readonly property int tilePixels: meta && meta.tileWidth > 0 ? Math.min(2048, meta.tileWidth) : 2048
+        readonly property bool tiled: wave && totalPixels > 0 && tiles.length > 0 && tiles.length <= 32
+        readonly property bool detailed: !!meta && !!meta.detail && (!!meta.waveformUrl || tiled)
+        readonly property string imageUrl: meta ? (overview || !detailed ? meta.overviewUrl || meta.waveformUrl : meta.waveformUrl || meta.overviewUrl) || "" : ""
+        readonly property bool rgb: graphical && (wave && typeof owner.waveformStyleProperty !== "undefined" && owner.waveformStyleProperty.translator ? owner.waveformStyleProperty.translator.index === 1 : root.scWave === "rgb")
+        @PALETTE@
+        property string paletteQuery: ""
+        property string pastPaletteQuery: ""
+        function refreshPalette() {
+            const suffix = "&saturation=" + saturation + "&brightAmp=" + brightAmp + "&brightGain=" + brightGain + "&brightFloor=" + brightFloor
+            paletteQuery = "rgb=" + (rgb ? "1" : "0") + "&low=" + String(lowColor).slice(1) + "&mid=" + String(midColor).slice(1) + "&high=" + String(highColor).slice(1) + suffix
+            pastPaletteQuery = rgb ? paletteQuery + "&dim=0.6" : "rgb=0&low=" + String(pastLowColor).slice(1) + "&mid=" + String(pastMidColor).slice(1) + "&high=" + String(pastHighColor).slice(1) + suffix
+        }
+        onRgbChanged: paletteUpdate.restart()
+        onLowColorChanged: paletteUpdate.restart()
+        onMidColorChanged: paletteUpdate.restart()
+        onHighColorChanged: paletteUpdate.restart()
+        onPastLowColorChanged: paletteUpdate.restart()
+        onPastMidColorChanged: paletteUpdate.restart()
+        onPastHighColorChanged: paletteUpdate.restart()
+        onSaturationChanged: paletteUpdate.restart()
+        onBrightAmpChanged: paletteUpdate.restart()
+        onBrightGainChanged: paletteUpdate.restart()
+        onBrightFloorChanged: paletteUpdate.restart()
+        // Coalesce the stock properties: never request intermediate mixed palettes.
+        Timer { id: paletteUpdate; interval: 16; onTriggered: scDisplay.refreshPalette() }
+        function waveAsset(url, past) { const query = past ? pastPaletteQuery : paletteQuery; return url && query ? root.scShadowAsset(url) + (url.indexOf("?") < 0 ? "?" : "&") + query : "" }
+        function screenX(ms) { return ms / span * width }
+        width: owner.width
+        height: owner.height
+        // Follow geometry signals, not the animation tick. Reparented layers must
+        // also respect the visibility of every original ancestor.
+        property bool inheritedVisible: false
+        property var geometryWatches: []
+        property var basis: Qt.matrix4x4(1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1)
+        property real ax: NaN
+        property real ay: NaN
+        property real bx: NaN
+        property real by: NaN
+        property real cx: NaN
+        property real cy: NaN
+        function refreshGeometry() {
+            let shown = active
+            for (let p = owner; p && p !== parent; p = p.parent) if (!p.visible) { shown = false; break }
+            inheritedVisible = shown
+            if (!shown || !(owner.width > 0 && owner.height > 0)) return
+            const a = owner.mapToItem(parent,0,0), b = owner.mapToItem(parent,1,0), c = owner.mapToItem(parent,0,1)
+            if (ax === a.x && ay === a.y && bx === b.x && by === b.y && cx === c.x && cy === c.y) return
+            ax=a.x; ay=a.y; bx=b.x; by=b.y; cx=c.x; cy=c.y
+            basis = Qt.matrix4x4(b.x-a.x,c.x-a.x,0,a.x, b.y-a.y,c.y-a.y,0,a.y, 0,0,1,0, 0,0,0,1)
+        }
+        function unwatchGeometry() {
+            for (let i=0;i<geometryWatches.length;i++) {
+                const w=geometryWatches[i]
+                try { w.signal.disconnect(w.callback) } catch(err) {}
+            }
+            geometryWatches=[]
+        }
+        function watchGeometry() {
+            unwatchGeometry()
+            for (let p=owner;p && p!==parent;p=p.parent) {
+                for (const name of ["xChanged","yChanged","widthChanged","heightChanged","rotationChanged","scaleChanged","visibleChanged","parentChanged"]) {
+                    const signal=p[name], callback=name === "parentChanged" ? watchGeometry : refreshGeometry
+                    if (signal && signal.connect) {
+                        signal.connect(callback)
+                        geometryWatches.push({signal:signal,callback:callback})
+                    }
+                }
+            }
+            refreshGeometry()
+        }
+        onActiveChanged: refreshGeometry()
+        onParentChanged: if (geometryWatches) watchGeometry()
+        Component.onCompleted: { watchGeometry(); paletteUpdate.restart() }
+        Component.onDestruction: unwatchGeometry()
+        transform: Matrix4x4 { matrix: scDisplay.basis }
+        z: {
+            let p = owner
+            while (p.parent && p.parent !== parent) p = p.parent
+            return p.z + 0.01
+        }
+        clip: true
+        visible: active && inheritedVisible && owner.width > 0 && owner.height > 0
+        color: "#101114"
+        // Stock roots can hide an empty Engine slot. Restore their original bindings on exit.
+        Binding { target: scDisplay.owner; property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
+        Binding { target: scDisplay.owner; property: "enabled"; value: false; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
+        // The stock view under this one is fully covered: opacity 0 keeps its layout
+        // but drops it from the scene graph (-2 % render thread at rest).
+        Binding { target: scDisplay.owner; property: "opacity"; value: 0; when: scDisplay.visible; restoreMode: Binding.RestoreBindingOrValue }
+        // Text lanes (track, performance) and the overview change a few times a
+        // second at most: render them once into a texture (-3 % render thread at rest).
+        layer.enabled: live && !wave
+        Item {
+            id: scMoving
+            objectName: "EngineX_Shadow_Content"
+            width: scDisplay.width; height: scDisplay.height
+            // x: written by refreshPosition / XAnimator only (track coordinates inside).
+            XAnimator { id: scroll; target: scMoving; easing.type: Easing.Linear }
+            // Hidden stock lanes (most instances) build none of this: fewer objects and
+            // bindings for every V4 collection to mark.
+            Loader {
+                active: scDisplay.live && scDisplay.graphical
+                width: scDisplay.width; height: scDisplay.height
+                sourceComponent: Component { Item {
+        Image {
+            visible: scDisplay.graphical && source !== ""
+            source: scDisplay.graphical && !scDisplay.tiled ? scDisplay.waveAsset(scDisplay.imageUrl) : ""
+            sourceSize.width: scDisplay.overview || !scDisplay.detailed ? 1024 : 2048
+            sourceSize.height: scDisplay.overview || !scDisplay.detailed ? 64 : 128
+            asynchronous: true
+            cache: false
+            smooth: true
+            fillMode: Image.Stretch
+            x: scDisplay.screenX(0)
+            y: 0
+            width: (scDisplay.overview || !scDisplay.detailed ? scDisplay.duration : scDisplay.waveformDuration) / scDisplay.span * scDisplay.width
+            height: scDisplay.height
+            opacity: scDisplay.stale ? 0.55 : 1
+            // Palette comes from the local stock waveform/theme, never the peer.
+        }
+        Repeater {
+            model: scDisplay.tiled ? Math.min(32, scDisplay.tiles.length) : 0
+            delegate: Image {
+                required property int index
+                readonly property int pixels: Math.max(0, Math.min(scDisplay.tilePixels, scDisplay.totalPixels - index * scDisplay.tilePixels))
+                readonly property real startMs: index * scDisplay.tilePixels / scDisplay.totalPixels * scDisplay.waveformDuration
+                readonly property real endMs: (index * scDisplay.tilePixels + pixels) / scDisplay.totalPixels * scDisplay.waveformDuration
+                source: scDisplay.waveAsset(scDisplay.tiles[index])
+                visible: index >= scDisplay.tileLo && index <= scDisplay.tileHi
+                sourceSize.width: Math.min(2048, pixels)
+                sourceSize.height: 128
+                asynchronous: true; cache: false; smooth: true
+                fillMode: Image.Stretch
+                x: scDisplay.screenX(startMs)
+                y: 0
+                width: (endMs - startMs) / scDisplay.span * scDisplay.width
+                height: scDisplay.height
+                opacity: scDisplay.stale ? 0.55 : 1
+            }
+        }
+        // Native overview: elapsed RGB is 60%; band mode uses the stock Past colors.
+        // This texture stays static; only the clipping width follows the playhead.
+        Item {
+            visible: scDisplay.overview
+            clip: true
+            width: Math.max(0, Math.min(scDisplay.width, scDisplay.playhead * scDisplay.width))
+            height: scDisplay.height
+            Image {
+                source: scDisplay.overview ? scDisplay.waveAsset(scDisplay.imageUrl, true) : ""
+                sourceSize.width: 1024; sourceSize.height: 64
+                width: scDisplay.width; height: scDisplay.height
+                asynchronous: true; cache: false; smooth: true
+                fillMode: Image.Stretch
+                opacity: scDisplay.stale ? 0.55 : 1
+            }
+        }
+        // A fixed pool of grid lines: a new grid window (every half span of play)
+        // re-reads grid[index] instead of destroying and creating every delegate,
+        // which was the main JS garbage of a playing shadow deck.
+        Repeater {
+            model: scDisplay.gridSlots
+            delegate: Rectangle {
+                required property int index
+                readonly property var beat: index < scDisplay.grid.length ? scDisplay.grid[index] : null
+                visible: beat !== null
+                x: beat ? scDisplay.screenX(beat.ms) : 0
+                height: scDisplay.height
+                width: beat && beat.number % 4 === 0 ? 2 : 1
+                color: "white"
+                opacity: beat && beat.number % 4 === 0 ? 0.55 : 0.22
+            }
+        }
+        Repeater {
+            model: scDisplay.loops
+            delegate: Rectangle {
+                required property var modelData
+                readonly property real clipLeft: scDisplay.screenX(modelData.startMs)
+                readonly property real clipRight: scDisplay.screenX(modelData.endMs)
+                visible: clipRight > clipLeft
+                x: clipLeft; width: Math.max(0, clipRight - clipLeft); height: scDisplay.height
+                color: modelData.c || "#26a6ff"
+                opacity: 0.18
+                Text { textFormat: Text.PlainText; text: modelData.n || ""; color: "white"; font.pixelSize: 10; elide: Text.ElideRight; width: parent.width }
+            }
+        }
+        Repeater {
+            model: scDisplay.cues
+            delegate: Item {
+                required property var modelData
+                x: scDisplay.screenX(modelData.ms)
+                width: 2; height: scDisplay.height
+                Rectangle { anchors.fill: parent; color: modelData.c || "#26a6ff" }
+                Text { textFormat: Text.PlainText; x: 3; text: modelData.n || String(modelData.i); color: modelData.c || "#26a6ff"; font.pixelSize: 11 }
+            }
+        }
+                } }
+            }
+        } // scMoving: only this item moves each animation frame
+        Loader {
+            active: scDisplay.live && scDisplay.graphical
+            anchors.fill: parent
+            sourceComponent: Component { Item {
+        Rectangle {
+            visible: scDisplay.graphical && !!scDisplay.sample
+            x: Math.max(0, Math.min(scDisplay.width - width, scDisplay.playhead * scDisplay.width))
+            width: 2; height: scDisplay.height; color: "white"
+        }
+        Text { textFormat: Text.PlainText;
+            visible: !!scDisplay.sample
+            anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 2
+            color: "#dddddd"; font.pixelSize: 10
+            text: !scDisplay.sample ? "" : (scDisplay.stale ? "OFFLINE · " : "") + (scDisplay.sample.metadataOnly ? "REMOTE" : !scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed ? "OVERVIEW" : "")
+        }
+            } }
+        }
+        Loader {
+            active: scDisplay.live && !scDisplay.graphical
+            anchors.fill: parent
+            sourceComponent: Component { Item {
+        Image {
+            id: scCover
+            visible: !scDisplay.graphical && scDisplay.height >= 48 && !!(scDisplay.meta && scDisplay.meta.artworkUrl)
+            source: root.scShadowAsset(scDisplay.meta && scDisplay.meta.artworkUrl)
+            sourceSize.width: 128; sourceSize.height: 128
+            width: visible ? Math.min(64, scDisplay.height) : 0; height: width
+            anchors.verticalCenter: parent.verticalCenter
+            fillMode: Image.PreserveAspectFit; asynchronous: true; cache: false
+        }
+        Column {
+            visible: !scDisplay.graphical
+            x: scCover.width + 4
+            width: scDisplay.width - x - 4
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 2
+            Text { textFormat: Text.PlainText;
+                visible: !scDisplay.performance || scDisplay.height >= 48
+                width: parent.width; elide: Text.ElideRight
+                color: "white"; font.pixelSize: Math.min(18, Math.max(11, scDisplay.height / 3))
+                text: scDisplay.deck + " · " + (scDisplay.sample ? scDisplay.sample.title || (scDisplay.meta && scDisplay.meta.title) || (scDisplay.sample.loading ? "Loading…" : "") : "")
+            }
+            Text { textFormat: Text.PlainText;
+                visible: scDisplay.height >= 58
+                width: parent.width; elide: Text.ElideRight; color: "#aaaaaa"; font.pixelSize: 12
+                text: scDisplay.sample ? scDisplay.sample.artist || (scDisplay.meta && scDisplay.meta.artist) || "" : ""
+            }
+            Item {
+                width: parent.width; height: 16
+                Text { textFormat: Text.PlainText;
+                    width: Math.max(0, parent.width - scBadges.width - 4)
+                    elide: Text.ElideRight; color: "#dddddd"; font.pixelSize: 12
+                    text: {
+                        const s = scDisplay.sample, m = scDisplay.meta
+                        if (!s) return ""
+                        const bpm = s.bpm || (m && m.bpm) || 0
+                        const cue = scDisplay.cueInfo && root.scCueCountdown ? "   " + scDisplay.cueInfo.label + " " + scDisplay.cueInfo.text : ""
+                        return (bpm > 0 ? (bpm * (1 + s.pitch / 100)).toFixed(1) + " BPM" : "") + "   " + (m && m.keyName || "") + cue
+                    }
+                }
+                Text { textFormat: Text.PlainText;
+                    id: scBadges
+                    anchors.right: parent.right; color: "#eeeeee"; font.pixelSize: 11
+                    text: !scDisplay.sample ? "" : (scDisplay.sample.master ? "MASTER " : "") + (scDisplay.sample.sync ? "SYNC " : "") + (scDisplay.stale ? "OFFLINE" : "")
+                }
+            }
+        }
+            } }
+        }
+        // Covers remote Stems, needle-drop, grid editing and transport touch targets.
+        MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; onWheel: function(wheel) { wheel.accepted = true } }
+    }
+"""
+
+
+def shadow_layer(text: str, kind: str) -> str:
+    """Keep visual items inside the stock stacking context, outside Row/ColumnLayouts."""
+    # Stock roots request QtQuick 2.0/2.1; Matrix4x4 and Binding.restoreMode
+    # need the newer revisions available in both supported Engine Qt builds.
+    text = re.sub(r"(?m)^import QtQuick(?: \d+\.\d+)?\s*$", "import QtQuick 2.15", text)
+    text = re.sub(r"(?m)^import QtQuick.Layouts(?: \d+\.\d+)?[ \t]*$", "import QtQuick.Layouts 1.15", text)
+    if not re.search(r"(?m)^import QtQuick.Layouts(?: \d+\.\d+)?[ \t]*$", text):
+        text = "import QtQuick.Layouts 1.15\n" + text
+    root_object = re.search(r"(?m)^[A-Za-z_]\w*(?:\.\w+)*\s*\{", text)
+    if root_object is None:
+        raise ValueError("shadow display target has no QML root object")
+    owner = re.search(r"(?m)^(?:    |\t)id:\s*([A-Za-z_]\w*)\s*$", text)
+    if owner:
+        owner_id = owner.group(1)
+    else:
+        owner_id = "scStockShadowHost"
+        pos = root_object.end()
+        text = text[:pos] + "\n    id: " + owner_id + "\n" + text[pos:]
+    end = text.rfind("}")
+    if end < 0:
+        raise ValueError("shadow display target has no QML root")
+    palette = []
+    for band, prop in (("Low", "lowColor"), ("Mid", "midColor"), ("High", "highColor")):
+        stock = f"waveform{band}{'Fade' if kind == 'waveform' else ''}Color"
+        colors = BAND_FADE if kind == "waveform" else BAND_COLORS
+        fallback = f'(rgb ? "{RGB_COLORS[band]}" : {three_band(stock, band, colors)})'
+        value = f'(typeof owner.height{band}Color !== "undefined" ? owner.height{band}Color : {fallback})' if kind == "waveform" else fallback
+        if kind not in ("waveform", "overview"):
+            value = '"#000000"'
+        palette.append(f"readonly property color {prop}: {value}")
+        past = three_band(f"waveform{band}PastColor", band, BAND_PAST) if kind == "overview" else '"#000000"'
+        palette.append(f"readonly property color past{band}Color: {past}")
+    # The stock overview RGB QSB hardcodes these same WaveFormItem defaults.
+    for prop, native, default in (("saturation", "saturationRgbWave", 1.612), ("brightAmp", "brightAmpFactorRgbWave", 0.473), ("brightGain", "brightGainRgbWave", 2.405), ("brightFloor", "brightFloorRgbWave", 0.197)):
+        value = f'(typeof owner.{native} !== "undefined" ? owner.{native} : {default})' if kind == "waveform" else str(default)
+        palette.append(f"readonly property real {prop}: {value}")
+    layer = SHADOW_LAYER.replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette))
+    return text[:end] + layer + text[end:]
+
+
+def shadow_targets(qrc: Path):
+    """Stock visual roots (5.0.4 and 5.3); only patch files actually shipped by this QRC."""
+    v = ROOT + "Views/"
+    composite = "Skins/EngineOS/UI/CompositeControls/"
+    targets = {
+        v + "Common/Waveform/Waveform.qml": "waveform",
+        v + "Common/WaveformOverview/WaveformOverview.qml": "overview",
+        composite + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml": "track",
+        composite + "DeckTrackData/SplitMiniDeckTrackDataContent.qml": "track",
+        composite + "DeckTrackData/DeckTrackDataContent.qml": "track",
+        composite + "DeckPerformanceData/DeckPerformanceDataContent.qml": "performance",
+        composite + "DeckPerformanceData/PortraitDeckPerformanceDataContent.qml": "performance",
+    }
+    return {rel: kind for rel, kind in targets.items() if (qrc / rel).is_file()}
+
+
+def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False, lead_sep: bool = True) -> str:
     """#151: stock-style flat `| ▊ DROP  16.3` countdown (Separator + 3 px cue-colour bar + Style.fontH1 text,
     no box, like AutoLoop / BeatJump / SpeedInfo); hidden (no space) without a cue ahead.
     h, px are kept for the call sites; the flat row needs neither."""
     q = f"""Row {{
     id: cueCap
     objectName: "EngineX_CueCountdown"
-    readonly property var info: typeof root !== "undefined" && root && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTick) : null
-    visible: info !== null
+    readonly property var info: typeof root !== "undefined" && root && root.scCueCountdown && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTickFor({deck_expr})) : null
+    visible: info !== null && root.scCueCountdown
     Layout.alignment: Qt.AlignVCenter
-    Layout.leftMargin: {2 if compact else 12}
+    Layout.leftMargin: 4
+    Layout.rightMargin: 4
     Layout.preferredHeight: {22 if compact else 30}
-    spacing: 6
-    Rectangle {{ width: 1; height: 18; anchors.verticalCenter: parent.verticalCenter; color: Style.surface03Color }}
-    Item {{ width: {2 if compact else 6}; height: 1 }}
+    spacing: 4
+{'    Rectangle { width: 1; height: 18; anchors.verticalCenter: parent.verticalCenter; color: Style.surface03Color }' if lead_sep else ''}
     Rectangle {{ width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: cueCap.info ? cueCap.info.color : "transparent" }}
-    Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: Style.font01Color; text: cueCap.info ? cueCap.info.label : "" }}
+    Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: Style.font01Color; visible: text !== ""; text: cueCap.info ? cueCap.info.label : "" }}
     Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
 }}
 """
     return "".join(ind + l + "\n" if l else "\n" for l in q.splitlines())
+
+
+def art_retry(ind, deck, path, image):
+    """Keep retry state and its Timer on the Image, outside PropertyChanges."""
+    lines = [
+        "property int scArtTick: 0",
+        "Timer {",
+        "    interval: 500; repeat: true",
+        f"    running: {image}.visible && {GUARD} && root.scDeckArtPending({deck}, {path}, {image}.source)",
+        f"    onTriggered: {image}.scArtTick = ({image}.scArtTick + 1) & 0xffff",
+        "}",
+    ]
+    return "".join(ind + line + "\n" for line in lines)
+
+
+def art_source(ind, deck, path, metadata, image, add_id=False):
+    """An art lookup follows its deck's metadata, independently of playing/cue ticks."""
+    identity = f"{ind}id: {image}\n" if add_id else ""
+    return identity + art_retry(ind, deck, path, image) + (
+        f"{ind}source: {GUARD} ? root.scDeckArtUrl({deck}, {path}, {image}.scArtTick, {metadata}) : {path}\n")
 
 
 def edits(dev: bool):
@@ -2139,7 +3568,7 @@ def edits(dev: bool):
          "			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n"),
     ]
     main = DEV_HARNESS if dev else ""
-    services = SERVICES_MAIN.replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons").replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS)) + (SMART_SYNC_MAIN if v53() else "")
+    services = (SERVICES_MAIN + FX_CONTROLLER).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons").replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS)) + (SMART_SYNC_MAIN if v53() else "")
     out = {
         # The flag is still cleared, which is what pressing "Ok" would do.
         ROOT + "Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml": [(
@@ -2242,7 +3671,7 @@ def edits(dev: bool):
         # 5.3.0 moved it up from TabContents/, so its imports lost the "../".
         prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
-            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + UI_SCALE_ENTRY + LED_ENTRY + FOUR_DECK_ENTRIES + JOG_ENTRY + (POWER_ENTRY if v53() else "") + "		PlayerNumber { },\n"),
+            ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY if v53() else "") + "		PlayerNumber { },\n"),
         ],
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
@@ -2250,7 +3679,6 @@ def edits(dev: bool):
         ] for name, last, entries in [
             ("Services", "SpotifyEnable" if v53() else "CloudServices", SERVICES_ENTRIES),
             ("Playback", "KeySyncMode", PLAYBACK_ENTRIES),
-            ("CuesLoops", "PausedSavedLoopBehavior", BEAT_JUMP_ENTRIES),
             ("Safety", "KeyAdjust", SAFETY_ENTRIES),
             ("Library", "CollectionBrowseBehavior", LIBRARY_ENTRIES),
         ]},
@@ -2620,6 +4048,11 @@ def edits(dev: bool):
         # There (SC5000/SC6000 boards with isPlayer off, i.e. 4-deck; Config.device.name
         # is the board, "JP07", and isJP is undefined) it shows the deck's own
         # master; every other device keeps stock.
+        # #157: holding the Browse encoder (how users zoom) fires the stock hold = Grid Edit
+        # (ActionWithGridCueEdit): the jog then moves the beatgrid phase and push/Play go to the grid-edit
+        # path, so playback looks stuck at 00:00. Plain push action only; Grid Edit stays on the touch UI.
+        out["ControlSurfaceModules/ControlSurfaceModules/BrowseEncoder.qml"] = [(
+            "if (module.hasInstantDouble) {", "if (false) {")]
         out["ControlSurfaceModules/ControlSurfaceModules/Sync.qml"] = [(
             "            readonly property string isMasterPath: Config.network.hasSyncing\n",
             "            readonly property string isMasterPath: Config.network.hasSyncing &&\n"
@@ -2726,6 +4159,106 @@ def edits(dev: bool):
     }
     if v53():
         scaled[v + "MainView/Fx/DJFxSelectCarousel.qml"] = size
+        # Keep the stock carousel, entries, controls and native popup selection.
+        # A touch tap latches it open; the hardware Selecting property is a
+        # momentary hold on consoles with a physical Sweep FX button.
+        scaled[v + "MainView/Fx/SweepFxSelectCarousel.qml"] = [
+            ('Loader {\n', '''Loader {
+    id: scSweepCarousel
+    readonly property bool scTouchOpen: Config.audio.fx.hasNHFx && typeof root !== "undefined" && root.scMixstreamSweepOpen
+'''),
+            ('visible: view.popup.visible\n', 'visible: view.popup.visible || scSweepCarousel.scTouchOpen\n'),
+            ('hasCloseButton: view.popup.hasCloseButton\n', 'hasCloseButton: view.popup.hasCloseButton || scSweepCarousel.scTouchOpen\n'),
+            ('onAccepted: result => view.popup.select(result)\n', '''onAccepted: result => {
+            if (scSweepCarousel.scTouchOpen) {
+                // Native model order differs from SweepEffect's wire values.
+                // The hold-button adapter has no active selection on a touch
+                // tap; write the same native Type property as SweepFxSelect.
+                const types = {"Filter": 1, "Wash": 2, "Dub Echo": 3, "Noise": 5, "Filter Roll": 4}
+                const type = types[view.popup.entries[result]]
+                if (type !== undefined) for (let ch = 1; ch <= 2; ch++) {
+                    const p = Planck.getProperty("/Engine/Mixer/Channel" + ch + "/SweepFx/Type")
+                    if (p && p.translator) p.translator.unnormalized = type
+                }
+                root.scMixstreamSweepOpen = false
+            } else view.popup.select(result)
+        }
+'''),
+            ('onRejected: view.popup.abort()\n', '''onRejected: {
+            if (scSweepCarousel.scTouchOpen) root.scMixstreamSweepOpen = false
+            view.popup.abort()
+        }
+'''),
+        ]
+        # #166: the compact Numark decks have four pads and no Stems EQ key.
+        # Leave hardware pad modes alone; the preference selects a touch bank.
+        scaled[ROOT + "Items/Pads/Pads.qml"].extend([
+            ('    required property int deckIndex\n', '''    required property int deckIndex
+    readonly property bool scMixstream: Config.audio.fx.hasNHFx
+    readonly property bool scBeatJumpBank: scMixstream && Config.audio.deck.hasBeatJump && typeof root !== "undefined" && !!root.scBeatJumpPads
+    readonly property var scStripProperty: scMixstream ? Planck.getProperty("/Engine/Mixer/Channel" + deckIndex + "/ChannelStrip/Mode") : null
+    readonly property var scStripMode: scStripProperty ? scStripProperty.translator : null
+    function scJump(action) {
+        const p = Planck.getProperty("/Engine/Deck" + deckIndex + "/Track/BeatJump/" + action)
+        if (p && p.translator) p.translator.state = true
+    }
+'''),
+            ('        GridLayout {\n            id: padsLayout\n', '''        ColumnLayout {
+            visible: pads.scMixstream
+            Layout.preferredWidth: 84
+            Layout.fillHeight: true
+            Layout.topMargin: 16
+            Layout.bottomMargin: 16
+            spacing: 4
+            Button {
+                objectName: "MixstreamSweepFx" + pads.deckIndex
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                text: "SWEEP FX"
+                enabled: Config.ui.hasSweepFxSelectionPopup
+                onClicked: root.scMixstreamSweepOpen = true
+            }
+            Button {
+                objectName: "MixstreamStemsEq" + pads.deckIndex
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                text: "EQ / STEMS"
+                highlighted: !!pads.scStripMode && pads.scStripMode.index === 1
+                enabled: Config.audio.hasStemsLevel && !!pads.scStripMode
+                onClicked: pads.scStripMode.index = pads.scStripMode.index === 1 ? 0 : 1
+            }
+        }
+
+        RowLayout {
+            objectName: "MixstreamBeatJumpBank" + pads.deckIndex
+            visible: pads.scBeatJumpBank
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.margins: 16
+            spacing: 4
+            Repeater {
+                model: [
+                    {label: "Jump −", action: "JumpBack"},
+                    {label: "Jump +", action: "JumpForward"},
+                    {label: "½", action: "BeatJumpHalve"},
+                    {label: "×2", action: "BeatJumpDouble"}
+                ]
+                delegate: Button {
+                    required property var modelData
+                    objectName: "Mixstream" + modelData.action + pads.deckIndex
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    text: modelData.label
+                    onClicked: pads.scJump(modelData.action)
+                }
+            }
+        }
+
+        GridLayout {
+            id: padsLayout
+            visible: !pads.scBeatJumpBank
+'''),
+        ])
         # Pad LED Brightness on the hardware pads. The controller QML runs in its own engine
         # (no `root`), so its one GlobalAssignmentConfig reads ledBrightness from stream-sync
         # and the pad LEDs scale what ColorOutputAssignment sends.
@@ -2848,8 +4381,9 @@ def edits(dev: bool):
         scaled[bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"] = [
             ("        view: deckPerformanceDataContent.deckView.beatJumpView\n",
              "        view: deckPerformanceDataContent.deckView.beatJumpView\n        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n"),
-            ("        visible: Config.audio.deck.hasBeatJump\n    }\n",
-             "        visible: Config.audio.deck.hasBeatJump\n    }\n\n" + cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 30, 20))]
+            # #151: the ▲▼ soft-takeover arrows give way to the countdown, right of the sync bar
+            ("        visible: !deckPerformanceDataContent.isRemoteDeck\n        speedOffsetIsUp: deckPerformanceDataContent.deckView.speedOffsetIsUp\n        speedOffsetIsDown: deckPerformanceDataContent.deckView.speedOffsetIsDown\n    }\n",
+             "        visible: false\n        speedOffsetIsUp: deckPerformanceDataContent.deckView.speedOffsetIsUp\n        speedOffsetIsDown: deckPerformanceDataContent.deckView.speedOffsetIsDown\n    }\n\n" + cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 26, 18, compact=True))]
         scaled[bj + "DeckPerformanceData/PortraitDeckPerformanceDataContent.qml"] = [
             ("                view: deckPerformanceDataContent.deckView.beatJumpView\n",
              "                view: deckPerformanceDataContent.deckView.beatJumpView\n                deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n")]
@@ -2859,15 +4393,9 @@ def edits(dev: bool):
         scaled[bj + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"] = [
             ("                    view: deckTrackDataContent.deckView.beatJumpView\n",
              "                    view: deckTrackDataContent.deckView.beatJumpView\n                    deckIndex: deckTrackDataContent.deckIndex\n"),
-            ("                    visible: Config.audio.deck.hasBeatJump\n                }\n",
-             "                    visible: Config.audio.deck.hasBeatJump\n                }\n\n" + cue_capsule("                ", "deckTrackDataContent.deckIndex", 24, 16, compact=True)),
-            ("                spacing: 16\n                visible: deckTrackDataContent.songLoaded\n",
-             "                spacing: 10\n                visible: deckTrackDataContent.songLoaded\n"),
-            # room for the capsule: AutoLoop / BeatJump 72 -> 60 px
-            ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n",
-             "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 60\n"),
-            ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n",
-             "                    textFont: Style.fontH1\n                    Layout.preferredWidth: 60\n")]
+            # #151: the countdown takes the ▲▼ slot between the sync bar's Separator and SpeedInfo
+            ("                SoftTakeoverIndicators {\n                    speedOffsetIsUp: deckTrackDataContent.deckView.speedOffsetIsUp\n                    speedOffsetIsDown: deckTrackDataContent.deckView.speedOffsetIsDown\n                }\n",
+             "                SoftTakeoverIndicators {\n                    visible: false\n                    speedOffsetIsUp: deckTrackDataContent.deckView.speedOffsetIsUp\n                    speedOffsetIsDown: deckTrackDataContent.deckView.speedOffsetIsDown\n                }\n\n" + cue_capsule("                ", "deckTrackDataContent.deckIndex", 24, 16, compact=True, lead_sep=False))]
         scaled[bj + "DeckTrackData/SplitMiniDeckTrackDataContent.qml"] = [
             ("        JP07SyncIndicator {\n",
              cue_capsule("        ", "deckTrackDataContent.deckIndex", 26, 16, compact=True) + "\n        JP07SyncIndicator {\n")]
@@ -2876,13 +4404,13 @@ def edits(dev: bool):
         scaled["airAssignments/OutputAssignment/ColorOutputAssignment.qml"] = [
             ("	property bool debug: false;\n",
              "	property bool debug: false;\n"
-             "	// EngineX: 0.2-1, set by the pad LEDs (Pad LED Brightness); 1 sends the stock colour.\n"
+             "	// EngineX: dimming now happens after gamma in the C hook (snd_seq_event_output_direct); QML sends the stock colour.\n"
              "	property real scBrightness: 1\n"
              "	onScBrightnessChanged: if (enabled) device.sendColor(channel, idx, privatePart.scScaled())\n"),
             ("				device.sendColor(channel, idx, outputColor);\n", "				device.sendColor(channel, idx, scScaled());\n"),
             ("		id: privatePart\n",
              "		id: privatePart\n"
-             "		function scScaled() { const b = scBrightness, c = outputColor; return b >= 0.99 ? c : Qt.rgba(c.r * b, c.g * b, c.b * b, c.a) }\n"),
+             "		function scScaled() { return outputColor }\n"),
         ]
         # Stock 5.3.0 defects that surface mid-set when the deck booted offline (path is
         # /Engine/DeckN/PlayState, as PausePlayingDeckHint.qml reads it).
@@ -2923,9 +4451,25 @@ def edits(dev: bool):
             ("                    greyOut: !microDeckLoader.viewModel.activeDeck && !deckTabs.isTouchable\n",
              f"                    greyOut: {role} ? root.scDeckLocked(microDeckLoader.viewModel.deckNumber) : !microDeckLoader.viewModel.activeDeck && !deckTabs.isTouchable\n"),
         ]
+        # 4-deck: the Load Track overlay shows only this player's two decks (the other
+        # two refuse loads anyway, LoadToDeckFilter), centred by the stock spacers.
+        scaled["Skins/EngineOS/UI/CompositeControls/LoadOverlay/LoadOverlayDecks.qml"] = [
+            ("        visible: repeater.count === 2\n    }\n\n    Repeater {\n",
+             f"        visible: repeater.count === 2 || !!({role})\n    }}\n\n    Repeater {{\n"),
+            ("        visible: repeater.count === 2\n", f"        visible: repeater.count === 2 || !!({role})\n"),
+            ("            visible: modelData.visible\n",
+             f"            visible: modelData.visible && !({role} && root.scDeckLocked(modelData.deckIndex))\n"),
+        ]
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml"] = [(
             "                text: microDeck.loadedDeckSongName\n",
-            f"                text: ({role} ? microDeck.deckIndex + \" · \" : \"\") + microDeck.loadedDeckSongName\n")]
+            f"                text: ({role} ? microDeck.deckIndex + \" · \" : \"\") + microDeck.loadedDeckSongName\n"),
+            ("                id: albumArt\n",
+             "                id: albumArt\n" + art_retry("                ", "microDeck.deckIndex", "microDeck.loadedDeckAlbumArtPath", "albumArt")),
+            ("                source: microDeck.loadedDeckAlbumArtPath\n",
+             f"                source: {GUARD} ? root.scDeckArtUrl(microDeck.deckIndex, microDeck.loadedDeckAlbumArtPath, albumArt.scArtTick, microDeck.loadedDeckSongName) : microDeck.loadedDeckAlbumArtPath\n")]
+        scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml"] = [(
+            "        source: albumArt.albumArtPath\n",
+            art_source("        ", "albumArt.deckIndex", "albumArt.albumArtPath", "albumArt.deckView && albumArt.deckView.artistSongView ? albumArt.deckView.artistSongView.songName : \"\"", "scArtImage", add_id=True))]
         # In the 4-deck layout the deck colour came out white (measured on a 1+3 deck with
         # blue PlayerColor1/2), which has no gradient and draws a black strip, and an unset
         # PlayerColor3/4 is black: use the deck's PlayerColor preference, then that of the
@@ -2944,6 +4488,29 @@ def edits(dev: bool):
     for rel, fixes in legacy_qml_fixes().items():
         assert not isinstance(out.get(rel), str), rel  # a whole-file replacement already owns it
         out.setdefault(rel, []).extend(fixes)
+    if v53():
+        out[ROOT + "Views/MainView/Fx/DJFx.qml"] = [
+            ("import Planck 1.0", "import Planck 1.0\nimport Common"),
+            ("    property string indicator\n", "    property string indicator\n" + FX_SELECTOR),
+            ("model: djFxView ? djFxView.effectsNames : {}", "model: djFx.scFxNames"),
+            ("index: djFxView ? djFxView.selectionIndex : 0", "index: djFx.scFxIndex >= 0 ? djFx.scFxIndex : (djFxView ? djFxView.selectionIndex : 0)"),
+            ("onAccepted: result => djFxView.selectEffect(result)", "onAccepted: result => djFx.scFxAccept(result)"),
+            ("onRejected: djFxView.abortSelecting()", "onRejected: djFx.scFxAbort()"),
+            ("parameter: djFxView ? djFxView.selectParameter : null", "parameter: djFxView ? djFxView.selectParameter : null\n            text: djFx.scFxSelected >= 0 ? djFx.scFxNames[djFx.scFxSelected] : (parameter ? parameter.valueText : \"\")"),
+        ]
+        out["ControlSurfaceModules/ControlSurfaceModules/private/DJFxSelectKnob.qml"] = [
+            ("        Item {\n", "        Item {\n" + FX_KNOB),
+            ("                            fxConfig.channel[modelData].pSelectPressed.translator.state = value > 0", """                            if (value > 0) scFxPushOwned = !!scFxCanUse()
+                            if (scFxPushOwned) {
+                                if (value > 0) scFxAction("Accept")
+                                else scFxPushOwned = false
+                            } else fxConfig.channel[modelData].pSelectPressed.translator.state = value > 0"""),
+            ("                    if (fxConfig.channel[modelData].selecting) {", """                    if (scFxCanUse()) { scFxAction(value > 0.5 ? "Minus" : "Plus"); return }
+                    if (fxConfig.channel[modelData].selecting) {"""),
+            ("""                target: PropertyTarget {
+                    prop: fxConfig.channel[modelData].pEffectIndex
+                }""", FX_JOG_TARGET.strip("\n")),
+        ]
     return out
 
 
@@ -3159,6 +4726,23 @@ def load_dict():
     return rows
 
 
+def encoded_dicts(rows):
+    """Inactive languages stay scalar strings, not thousands of traced JS properties."""
+    result = {}
+    for lang in ("en", "zh-Hans", "zh-Hant"):
+        d = {}
+        for en, t in rows.items():
+            to = en if lang == "en" else t[lang]
+            for spelling in (en, t["zh-Hans"], t["zh-Hant"]):
+                d[spelling] = to
+        result[lang] = json.dumps(d, ensure_ascii=False, separators=(",", ":"))
+    return result
+
+
+def render_language(text, lang, dicts):
+    return text.replace("@DICTS@", json.dumps(dicts, ensure_ascii=False)).replace("@LANG@", lang)
+
+
 def translated_qml(qrc: Path):
     for f in sorted(qrc.rglob("*.qml")):
         rel = f.relative_to(qrc).as_posix()
@@ -3234,6 +4818,11 @@ def main():
         for old, new in change:
             text = patch(text, old, new, rel)
         base[rel] = text
+    for rel, kind in shadow_targets(a.qrc).items():
+        text = base.get(rel)
+        if text is None:
+            text = (a.qrc / rel).read_text(encoding="utf-8")
+        base[rel] = shadow_layer(text, kind)
     # A qrc path this base does not ship renders as a blank icon (5.3.0 has no UIKit.1/).
     for rel, text in base.items():
         for ref in re.findall(r'"qrc:/([^"$%{}+]+\.(?:png|svg|jpg|qml))"', text.replace("%20", " ")):
@@ -3241,15 +4830,7 @@ def main():
                 raise SystemExit(f"{rel}: qrc:/{ref} is not in {a.qrc}")
     rows = load_dict()
     skip = compared_strings(a.qrc)
-    # dicts[target][any spelling] = target spelling, so the language can change without a restart.
-    dicts = {}
-    for lang in ("en", "zh-Hans", "zh-Hant"):
-        d = {}
-        for en, t in rows.items():
-            to = en if lang == "en" else t[lang]
-            for spelling in (en, t["zh-Hans"], t["zh-Hant"]):
-                d[spelling] = to
-        dicts[lang] = d
+    dicts = encoded_dicts(rows)
     for lang in ("en", "zh-Hans", "zh-Hant"):
         table = {en: (en if lang == "en" else t[lang]) for en, t in rows.items()}
         files = dict(base)
@@ -3259,7 +4840,7 @@ def main():
             if changed != source:
                 files[rel] = changed
         for rel, text in files.items():
-            text = text.replace("@DICTS@", json.dumps(dicts, ensure_ascii=False))
+            text = render_language(text, lang, dicts)
             target = a.out / lang / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")

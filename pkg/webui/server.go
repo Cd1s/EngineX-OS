@@ -57,6 +57,8 @@ type Config struct {
 	GitHubURL, VersionFile                                                string // tests; defaults are api.github.com and versionFile
 	// UIDir holds the deck UI settings; empty means the on-device default.
 	UIDir string
+	// FXSelectorReadyFile overrides the tmpfs heartbeat path in sandbox tests.
+	FXSelectorReadyFile string
 	// RelayURL is the cloud login service; it passes credentials and never audio.
 	// Empty keeps phone logins on the LAN, where the phone must reach this deck.
 	RelayURL string
@@ -83,6 +85,7 @@ type Server struct {
 	mux           *http.ServeMux
 	tidal         *tidalGateway
 	uiMu          sync.Mutex
+	fxMu          sync.Mutex // transient FX commands never hold the settings lock
 	stemsMu       sync.Mutex // streaming-stems.json
 	prolinkExport *prolink.Exporter
 	closed        chan struct{}
@@ -118,11 +121,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	exportCfg := cfg.ProlinkExport
 	if exportCfg.MediaCache == nil {
-		cacheRoot := cfg.StateDir
-		if cacheRoot == "" {
-			cacheRoot = s.uiDir()
-		}
-		exportCfg.MediaCache = &prolink.MediaCache{Dir: filepath.Join(cacheRoot, "prolink-media"), Enabled: func() bool { return s.loadUI().ProlinkShare }}
+		exportCfg.MediaCache = &prolink.MediaCache{Dir: prolink.SharedMediaCacheDir(), Enabled: func() bool { return s.loadUI().ProlinkShare }}
 	}
 	if exportCfg.Observe == nil {
 		exportCfg.Observe = func(d prolink.Device) {
@@ -208,6 +207,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /peer/decks", s.peerDecksGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/audio", s.peerAudioGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/perf", s.peerPerfGet)
+	s.mux.HandleFunc("GET /peer/decks/{n}/display", s.peerDisplayGet)
 	s.mux.HandleFunc("POST /api/drop", s.drop)
 	s.mux.HandleFunc("POST /api/relocate", s.relocate)
 	s.mux.HandleFunc("GET /api/bluetooth", s.handleBluetooth)
@@ -243,8 +243,13 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /api/tailscale", s.handleTailscale)
 	s.mux.HandleFunc("GET /v1/sc5000/tailscale", s.handleTailscale)
 	s.mux.HandleFunc("POST /v1/sc5000/tailscale", s.handleTailscale)
-	go s.tailscaleResume() // restarts the daemon after a reboot when it was left on (#130)
-	go s.modsResume()      // enabled mods' daemons do not survive a reboot on their own
+	// Decide whether to resume before publishing the server. A delayed startup
+	// goroutine must not treat the first user's enable request as saved boot state
+	// and start that service a second time.
+	if s.loadTailscaleConfig().Enabled {
+		go s.tailscaleResume() // restarts the daemon when it was left on (#130)
+	}
+	go s.modsResume() // enabled mods' daemons do not survive a reboot on their own
 	s.mux.HandleFunc("GET /api/mounts", s.handleMounts)
 	s.mux.HandleFunc("POST /api/mounts", s.handleMounts)
 	s.mux.HandleFunc("DELETE /api/mounts", s.handleMounts)
@@ -268,7 +273,9 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.beatport = &providers.Beatport{BaseURL: cfg.BeatportURL, HTTP: cfg.HTTP, Path: filepath.Join(cfg.StateDir, "beatport-owner.json")}
 	s.tidal = newTidalGateway(s)
 	s.RegisterTunnelRoutes()
-	go s.tunnelResume()
+	// Resume before accepting requests: a delayed resume could see a newly
+	// enabled tunnel and restart it underneath its first Configure call.
+	s.tunnelResume()
 	if jobs != nil {
 		jobs.mu.Lock()
 		jobs.netease = s.neteaseFor

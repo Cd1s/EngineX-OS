@@ -5,6 +5,30 @@ int hook_test_engine;
 #include "engine_ui_hook.c"
 #include <assert.h>
 
+static void test_thread_policy(void) {
+    const char *jobs[] = {"J:I:Takingfreez", "J:N:Searching o", "J:I:Collecting", "Taking freeze", "Collecting anal", "Freeze Checker "};
+    for (size_t i = 0; i < sizeof jobs / sizeof *jobs; i++) assert(thread_class(jobs[i]) == 0);
+    assert(thread_class("Freeze Checker ") == 0);
+    assert(thread_class("Analysis Queue ") == 2);
+    assert(thread_class("OfflineAnalyzer") == 2);
+    assert(thread_class("QQuickPixmapRea") == 1);
+    assert(thread_class("AudioOut") == 0);
+    assert(thread_class("AudioRenderer2") == 0);
+    assert(thread_class("AudioWatcher") == 0);
+    // Exercise the naming guard too: a job must retain CPU, I/O and scheduling policy.
+    cpu_set_t before, after;
+    assert(!sched_getaffinity(0, sizeof before, &before));
+    int policy = sched_getscheduler(0), nice = getpriority(PRIO_PROCESS, 0);
+    long io = syscall(SYS_ioprio_get, 1, 0);
+    hook_test_engine = 1;
+    guard_named_thread(pthread_self(), "J:I:Takingfreez");
+    hook_test_engine = 0;
+    assert(!sched_getaffinity(0, sizeof after, &after) && CPU_EQUAL(&before, &after));
+    assert(sched_getscheduler(0) == policy && getpriority(PRIO_PROCESS, 0) == nice);
+    assert(syscall(SYS_ioprio_get, 1, 0) == io);
+    puts("JobController: transient job names retain scheduling, affinity and I/O priority: PASS");
+}
+
 // Qt reads a file at data + a 32-bit offset: the 64-bit hook must place the pack blob there.
 static void test_resources(void) {
     char dir[] = "/tmp/hook-qrc-XXXXXX", path[64];
@@ -203,10 +227,79 @@ static void test_offline_analyzer(const char *filename) {
     puts("AZ04 OfflineAnalyzer: process() prologue matches the .perf replay hook: PASS");
 }
 
+// Pad LED Brightness: SysEx RGB / NoteOn are scaled after gamma and replayed when the level changes.
+static uchar sent[32][SEQ_EV_SIZE], sent_sx[32][16];
+static int nsent;
+static int fake_direct(void *h, void *ev) {
+    (void)h;
+    memcpy(sent[nsent], ev, SEQ_EV_SIZE);
+    struct sc_seq_ext x; memcpy(&x, (uchar *)ev + 16, sizeof x);
+    if (sent[nsent][0] == SEQ_SYSEX) memcpy(sent_sx[nsent], x.ptr, x.len);
+    return nsent++;
+}
+static void test_led(void) {
+    assert(scale_led_pwm(0, 20) == 0 && scale_led_pwm(127, 100) == 127 && scale_led_pwm(127, 20) == 5 && scale_led_pwm(1, 10) == 1);
+    uchar msg[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 2, 7, 127, 0, 64, 0xF7}, screen[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x7C};
+    int ch, idx, rgb;
+    assert(led_sysex(msg, 15, &ch, &idx, &rgb) && ch == 2 && idx == 7 && rgb == 11 && !led_sysex(screen, 15, &ch, &idx, &rgb));
+    uchar ev[SEQ_EV_SIZE] = {SEQ_SYSEX, 0x04};
+    struct sc_seq_ext x = {15, msg};
+    memcpy(ev + 16, &x, sizeof x);
+    seq_direct_cache = fake_direct;
+    hook_test_engine = 1;
+    led_pct = 100;
+    snd_seq_event_output_direct((void *)1, ev);
+    assert(sent_sx[0][11] == 127 && sent_sx[0][13] == 64);
+    uchar note[SEQ_EV_SIZE] = {SEQ_NOTEON, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 100};
+    snd_seq_event_output_direct((void *)1, note);
+    assert(sent[1][18] == 100);
+    led_replay(20); // resends both, dimmed, from the raw cache
+    assert(nsent == 4 && sent_sx[2][11] == 3 && sent_sx[2][12] == 0 && sent_sx[2][13] == 2 && sent[3][18] == 1 && msg[11] == 127);
+    // a dim hot cue (gamma'd 30/10/0) stays visible and keeps its hue; an unlit pad (1/2/0) turns off when dimmed
+    uchar out[16], cue[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, 30, 10, 0, 0xF7}, off[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, 1, 2, 0, 0xF7};
+    led_scaled_sysex(cue, 15, 11, 20, out);
+    assert(out[11] == 1 && out[12] == 1 && out[13] == 0);
+    led_scaled_sysex(off, 15, 11, 20, out);
+    assert(out[11] == 0 && out[12] == 0 && out[13] == 0);
+    led_scaled_sysex(off, 15, 11, 80, out);
+    assert(out[11] == 0 && out[12] == 0 && out[13] == 0);
+    led_scaled_sysex(cue, 15, 11, 50, out);
+    assert(out[11] == 5 && out[12] == 2);
+    // monotonic: no brightness step may be brighter than the one above it, for every m (the unpressed hot cue is m=16)
+    for (unsigned m = 1; m <= 127; m++) {
+        uchar px[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, (uchar)m, 0, 0, 0xF7};
+        unsigned prev = m;
+        for (int pct = 100; pct >= 20; pct -= 20) {
+            led_scaled_sysex(px, 15, 11, pct, out);
+            assert(out[11] <= prev);
+            prev = out[11];
+        }
+    }
+    uchar c16[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, 16, 0, 0, 0xF7};
+    led_scaled_sysex(c16, 15, 11, 80, out); assert(out[11] == 11);
+    led_scaled_sysex(c16, 15, 11, 60, out); assert(out[11] == 7);
+    led_scaled_sysex(c16, 15, 11, 40, out); assert(out[11] == 4);
+    led_scaled_sysex(c16, 15, 11, 20, out); assert(out[11] == 1);
+    led_scaled_sysex(cue, 15, 11, 100, out);
+    assert(out[11] == 30 && out[12] == 10);
+    // single-colour keys: dim state below 75%, but the deck index (0x38) and all-pixels (0x3d) data pass through
+    assert(led_scaled_note(5, 100, 20) == 1 && led_scaled_note(5, 100, 50) == 1 && led_scaled_note(5, 100, 75) == 56 && led_scaled_note(5, 1, 20) == 1);
+    assert(led_scaled_note(19, 127, 20) == 127 && led_scaled_note(1, 127, 20) == 1 && led_scaled_note(2, 127, 60) == 1);
+    assert(led_scaled_note(0x38, 3, 20) == 3 && led_scaled_note(0x3d, 127, 20) == 127);
+    note[18] = 1; // dim state: passes through and is forgotten
+    snd_seq_event_output_direct((void *)1, note);
+    led_replay(100);
+    assert(nsent == 6 && sent_sx[5][11] == 127);
+    hook_test_engine = 0;
+    puts("pad LED brightness: scale after gamma, replay from cache: PASS");
+}
+
 int main(int argc, char **argv) {
     assert(sizeof engine_builds / sizeof *engine_builds == 1);
+    test_thread_policy();
     test_resources();
     test_collision();
+    test_led();
     for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); }
     const char *oa = getenv("AZ04_OFFLINE_ANALYZER");
     if (oa) test_offline_analyzer(oa);

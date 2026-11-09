@@ -142,6 +142,9 @@ func (s *Server) mergedDevices() []prolink.Device {
 		result = append(result, d)
 	}
 	sort.Slice(result, func(i, j int) bool {
+		if result[i].Number == result[j].Number {
+			return result[i].Address < result[j].Address
+		}
 		return result[i].Number < result[j].Number
 	})
 	return result

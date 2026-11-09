@@ -37,12 +37,13 @@ git grep -n "<OLD>" -- README.md README.zh-CN.md README.zh-TW.md rootfs-overlay 
 
 ## 2. 测试（只在编译机编译机上跑，本机不编译）
 
-本项目的编译、单测、门禁和打包主机是 **the build host**（aarch64，支持 32 位 EL0，碟机的 armhf 程序原生运行）。2026-11-05 起不再用 IN。`remote-build` 默认仍连 IN，所以每次都写 `REMOTE_BUILD_HOST=<build host> remote-build ...`。机器上的固定材料在 `/root/build/sc5000-lab/`：`fw/`（5.0.4 官方底包）、`fw-5.3.0/`、`fw-5.3.0-gen2/`、`5.0.4/qrc`、`5.3.0/qrc`、`5.0.4|5.3.0/tree/usr/Engine/Engine`、`sclive4-rea61-followup/`、`systemone-analysis/`、`deps-sqlite/`（armhf `sqlite3.o`）、`sbin/fsck.hfsplus`、`release-<OLD>/`（上一版 3 个代表 `.img`，供门禁用）。Go 1.27.1 在 `/etc/profile.d/buildtools.sh`。
+本项目的编译、单测、门禁、打包与组件实验分析主机是 **the build host**（aarch64，支持 32 位 EL0，碟机的 armhf 程序原生运行）。2026-11-05 起不再用 IN。`remote-build` 默认仍连 IN，所以每次都写 `REMOTE_BUILD_HOST=<build host> remote-build ...`。实验与组件结构分析统一使用 **`craft-anything`**（`craft-anything` skill / `craft-anything-cli`）配合新加的 **`deepseek-v4.1-flash`**（`deepseek4.1 flash`）模型在编译机上进行。机器上的固定材料在 `/root/build/sc5000-lab/`：`fw/`（5.0.4 官方底包）、`fw-5.3.0/`、`fw-5.3.0-gen2/`、`5.0.4/qrc`、`5.3.0/qrc`、`5.0.4|5.3.0/tree/usr/Engine/Engine`、`systemone-analysis/`、`deps-sqlite/`（armhf `sqlite3.o`）、`sbin/fsck.hfsplus`、`release-<OLD>/`（上一版 3 个代表 `.img`，供门禁用）。Go 1.27.1 在 `/etc/profile.d/buildtools.sh`。
 
 ```sh
 gofmt -l . && go vet ./... && go test -race ./...
 bash tests/test_rootfs_overlay.sh                        # 必须用 bash
-bash tools/az01-packer/test_sclive4_bootstrap.sh         # 二代机 armhf 数据包沙箱
+JC11S_ROOTFS="${JC11S_ROOTFS:?先设置为官方 PRIME4PLUS-5.3.0 的解包 rootfs}" \
+  bash tools/az01-packer/test_sclive4_bootstrap.sh       # SC LIVE 4 + JC11S，两款均须 PASS
 AZ04=1 bash tools/az01-packer/test_sclive4_bootstrap.sh  # 二代机 AZ04 (PRIME 4 G2 / SYSTEM ONE) 沙箱
 python3 -m unittest discover -s tools/az01-packer
 python3 -m unittest discover -s tools/stems
@@ -52,6 +53,13 @@ python3 -m unittest discover -s tools/stems
 #   tools/edisksd-hook/test_edisksd_hook.c（--mounts 只在 unshare -m 里跑）
 #   tools/ui-mod/test_az04_hook.c（AZ04 64 位 hook：编译机原生 gcc 编译，参数给 AZ04 的 Engine）
 ```
+
+JC11S fixture 是独立的官方 PRIME4PLUS rootfs，不能用 SC LIVE 4 或 PRIME 4 G2 代替。
+准备与校验摘要见 `docs/issue169-prime4plus-investigation.md`。把镜像解包到本次任务
+自建的目录后设置 `JC11S_ROOTFS`；不要写入只读的固定实验材料目录。普通 SC LIVE 4
+单独检查不设置此变量时会明确 WARN 跳过 JC11S，**发版不得跳过**。若要同时回归真实
+发布包的安装器回读，设置 `JC11S_RELEASE_BUNDLE` 为已校验 SHA-256 的 PRIME4PLUS
+Data-Bundle.tar.gz 后运行 Go 测试；该 fixture 测试覆盖新目录与旧 `sc5000-custom` 目录。
 
 涉及 Factory Reset、`az01-update --erase-data`、空白 `/data` 首次启动的改动，只在编译机的 `unshare -m` + chroot 沙箱里用解包出的 rootfs 测，**绝不在实机触发**。
 
