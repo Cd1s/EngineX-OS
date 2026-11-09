@@ -53,13 +53,14 @@ type browseFlight struct {
 	err  error
 }
 type browseCache struct {
-	diskMu  sync.Mutex
-	mu      sync.Mutex
-	dir     string
-	entries map[string]*browseEntry
-	flights map[string]*browseFlight
-	bytes   int
-	now     func() time.Time
+	diskMu     sync.Mutex
+	mu         sync.Mutex
+	dir        string
+	entries    map[string]*browseEntry
+	flights    map[string]*browseFlight
+	bytes      int
+	now        func() time.Time
+	ttl, stale time.Duration
 }
 
 func newBrowseCache(state string) *browseCache {
@@ -70,7 +71,7 @@ func newBrowseCache(state string) *browseCache {
 			dir = "/data/enginex/cache/browse-v1"
 		}
 	}
-	c := &browseCache{dir: dir, entries: map[string]*browseEntry{}, flights: map[string]*browseFlight{}, now: time.Now}
+	c := &browseCache{dir: dir, entries: map[string]*browseEntry{}, flights: map[string]*browseFlight{}, now: time.Now, ttl: browseTTL, stale: browseStale}
 	c.pruneDisk()
 	return c
 }
@@ -95,8 +96,8 @@ func (c *browseCache) get(ctx context.Context, key string, load func(context.Con
 	}
 	if e != nil {
 		e.used = now
-		if e.data != nil && now.Sub(e.at) < browseStale {
-			if (e.disk || now.Sub(e.at) >= browseTTL) && !now.Before(e.retry) {
+		if e.data != nil && now.Sub(e.at) < c.stale {
+			if (e.disk || now.Sub(e.at) >= c.ttl) && !now.Before(e.retry) {
 				c.start(key, load)
 			}
 			data := e.data

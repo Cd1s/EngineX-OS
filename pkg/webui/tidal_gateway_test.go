@@ -324,7 +324,10 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 		Playlists tidalList `json:"playlists"`
 		Albums    tidalList `json:"albums"`
 	}
-	// Search follows the active service; the catalog answers for Deezer.
+	// Search follows the active service and only searches logged-in accounts.
+	ui.mu.Lock()
+	ui.sessions["deezer-search"] = &Session{ID: "deezer-search", Provider: "deezer", Ready: true, p: ui.tidal.catalog}
+	ui.mu.Unlock()
 	if resp, err := http.Post(srv.URL+"/v1/sc5000/ui?scope=deezer", "", nil); err != nil {
 		t.Fatal(err)
 	} else {
