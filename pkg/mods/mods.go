@@ -553,7 +553,9 @@ func (m *Manager) InstallArchive(r io.Reader) (*Mod, error) {
 			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 				return nil, err
 			}
-			f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+			// Keep only the exec bits so a mod's own binaries can run; never setuid/setgid/sticky (#170).
+			mode := 0644 | h.FileInfo().Mode().Perm()&0111
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 			if err != nil {
 				return nil, err
 			}
