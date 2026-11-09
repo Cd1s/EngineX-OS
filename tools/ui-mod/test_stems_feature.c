@@ -514,9 +514,12 @@ static void test_config(void) {
     for (int model = 0; model < 6; model++) {
         uchar config[0x600], expected[0x600];
         memset(config, 0xa0 + model, sizeof config);
+        if (build->config_zoom == 0x52c) config[0x12e] = model & 1; // #166: NH and non-NH
         memcpy(expected, config, sizeof expected);
         for (size_t i = 0; i < 5; i++) expected[fields[i]] = i == 4 ? 0 : 1;
         if (build->config_zoom == 0x52c) expected[0x54] = 1; // #152: Config.audio.hasStemsLevel
+        if (build->config_zoom == 0x52c && config[0x12e])
+            expected[0xe1] = expected[0x19c] = expected[0x19d] = expected[0x4cd] = 1; // #166; retain hasNHFx
         if (build->config_zoom) *(uint32_t *)(expected + build->config_zoom) = 30; // #77
         uint32_t out[3];
         invoke_config(config, (void *)(uintptr_t)config_jump[1], out);

@@ -71,6 +71,7 @@ class DataBundleTest(unittest.TestCase):
         for applet in bdb.APPLETS:
             self.assertIn(f'sc5000-suite" {applet} ', (src / 'bin' / applet).read_text())
             self.assertTrue((src / 'bin' / applet).stat().st_mode & 0o100)
+
         self.assertTrue((src / 'boot-activate.sh').exists())
         self.assertTrue((src / 'boot-activate.sh').stat().st_mode & 0o100)
         self.assertIn('EnvironmentFile=-/data/sc5000-custom/ui-scale.env',
@@ -92,6 +93,20 @@ class DataBundleTest(unittest.TestCase):
             self.assertEqual(hashlib.sha256((src / name).read_bytes()).hexdigest(), digest, name)
         files = {str(p.relative_to(src)) for p in src.rglob('*') if p.is_file()}
         self.assertEqual(set(listed) | {'SHA256SUMS'}, files)
+
+    def test_mixstream_gen2_stems_processor_delivery(self):
+        # The read-only root's /usr/local/bin/stems-processor request is
+        # redirected by the UI hook to bundle/bin/stems-processor.
+        for prefix in ('MIXSTREAMPROPLUS', 'MIXSTREAMPROGO'):
+            with self.subTest(prefix=prefix):
+                result = self.build(out=prefix, prefix=prefix)
+                top = f'{prefix}-5.3.0.1.1-EngineX-OS-Data-Bundle'
+                with tarfile.open(result['bundle']) as bundle:
+                    wrapper = bundle.getmember(f'{top}/bin/stems-processor')
+                    self.assertEqual(wrapper.mode, 0o755)
+                    self.assertEqual(bundle.extractfile(wrapper).read(),
+                                     bdb.WRAPPER.format('stems-processor').encode())
+                    self.assertEqual(bundle.extractfile(f'{top}/bin/sc5000-suite').read(), self.suite_bytes)
 
     def test_gen2_img_wraps_the_bundle_and_installs_with_unlock(self):
         r = self.build()
