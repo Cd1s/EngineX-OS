@@ -4103,6 +4103,30 @@ def edits(dev: bool):
                     ("    textSwipeInvalid: ((readyToCommit", "    textSwipeInvalid: scDeck > 0 ? \"\" : ((readyToCommit"),
                 ]
     if v53():
+        # #171 uses the stock Mixer Menu -> Channels -> Input selectors. Its
+        # C++ labels need the same live dictionary as the QML literals.
+        out[ROOT + "Views/MixerMenu/Pages/ChannelsPageItems/InputSelect.qml"] = [
+            ("property MixerMenuChannelSection controller",
+             '''property MixerMenuChannelSection controller
+    readonly property string scAuxChannel: Config.device.name === "JP21" && Config.audio.hasSoftwareLineIn && inputSelect.controller
+        ? (String(inputSelect.controller.title).match(/[34]/) || [""])[0] : ""
+    readonly property var scAuxLine: scAuxChannel ? Planck.getProperty("/Engine/Mixer/Channel" + scAuxChannel + "/Line") : null
+    readonly property bool scAuxLineActive: !!scAuxLine && !!scAuxLine.translator && scAuxLine.translator.state'''),
+            ('text: "Input"', 'text: Config.device.name === "JP21" ? root.scT("Input") : "Input"'),
+            ("inputSelect.controller.selectInput(index)",
+             '''inputSelect.controller.selectInput(index)
+            // An empty channel's native currentInput can remain Engine while
+            // Line is true. Clear that native switch explicitly on Engine.
+            if (scAuxLine && scAuxLine.translator && inputSelect.controller.inputs[index] === "Engine")
+                scAuxLine.translator.state = false'''),
+            ("labelText: inputSelect.controller.currentInput",
+             'labelText: Config.device.name === "JP21" ? root.scT(inputSelect.scAuxLineActive ? "Line In" : inputSelect.controller.currentInput) : inputSelect.controller.currentInput'),
+            ("optionName: inputSelect.controller.inputs[i],",
+             'optionName: Config.device.name === "JP21" ? root.scT(inputSelect.controller.inputs[i]) : inputSelect.controller.inputs[i],'),
+        ]
+        out[ROOT + "Views/MixerMenu/MixerMenu.qml"] = [
+            ("text: modelData.title", 'text: Config.device.name === "JP21" ? root.scT(modelData.title) : modelData.title'),
+        ]
         # Stock settings a board flag hides although Engine registers the property on every
         # board measured (JP07, JP11, JP13, JC11, NH08 in the #77 sandbox dump). Each gate
         # keeps its flag and adds the property check, so a board without it stays stock.
