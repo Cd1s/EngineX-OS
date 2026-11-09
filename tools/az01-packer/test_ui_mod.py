@@ -562,7 +562,8 @@ JSON.parse=realParse;
         """The real SHADOW_LAYER functions, bound to a mock QML scope with `with`."""
         layer = bp.SHADOW_LAYER
         parts = []
-        for name in ("contentX", "refreshSample", "refreshPosition", "restartScroll", "refreshDetails"):
+        for name in ("contentX", "metaDuration", "metaWaveDuration", "metaTotalPixels", "metaTilePixels",
+                     "refreshSample", "refreshPosition", "restartScroll", "refreshDetails"):
             m = re.search(r"(?m)^        function " + name + r"\(", layer)
             self.assertIsNotNone(m, name)
             line_end = layer.index("\n", m.start())
@@ -575,6 +576,40 @@ JSON.parse=realParse;
                 body = layer[m.start(1):layer.index("\n        }", m.start(1)) + 10].strip()
             parts.append("scope." + handler + " = function() " + (body if body.startswith("{") else "{ " + body + " }"))
         return "with (scope) {\n" + "\n".join(parts) + "\n}\n"
+
+    def test_detail_arriving_while_paused_draws_the_tiles_under_the_playhead(self):
+        # QML runs onMetaChanged before the bindings that derive from meta (duration,
+        # totalPixels, ...) see the new object: model that order. The left deck showed
+        # an empty waveform (grid and CUE only) until playback moved the window.
+        self.js(r"""
+const scroll={running:false,from:0,to:0,duration:0,stop(){this.running=false},start(){this.running=true}};
+const scMoving={x:0};
+const beats=[]; for(let i=0;i<800;i++) beats.push({ms:i*300,number:i});
+const pending={key:'A',durationMs:225045,waveformDurationMs:225045,beats,cues:[],loops:[],detail:false,detailPending:true,waveformWidth:2048,tileWidth:2048};
+const detail={key:'A',durationMs:225076,waveformDurationMs:225076,beats,cues:[],loops:[],detail:true,waveformWidth:23633,tileWidth:2048,waveformTiles:Array(12).fill('/t.png')};
+let metaValue=null, bound=null; // bound: what the bindings saw last (updated after the handler)
+const derived=m=>({duration:m&&m.durationMs>0?m.durationMs:1,waveformDuration:m&&m.waveformDurationMs>0?m.waveformDurationMs:1,
+  totalPixels:m?m.waveformWidth:0,tilePixels:m&&m.tileWidth?m.tileWidth:2048});
+const scope={live:true,visible:true,wave:true,overview:false,graphical:true,deck:2,sample:null,cues:scShadowEmptyArray,loops:scShadowEmptyArray,
+  position:0,stale:false,cueInfo:null,grid:scShadowEmptyArray,gridAnchor:-Infinity,gridSlots:0,tileLo:0,tileHi:31,scrollFrom:0,scrollAt:0,scrollSpeed:0,width:1000,
+  scroll,scMoving,root:globalThis,
+  get meta(){return metaValue}, set meta(v){if(v!==metaValue){metaValue=v;scope.onMetaChanged();bound=derived(v)}},
+  get duration(){return bound?bound.duration:1}, get waveformDuration(){return bound?bound.waveformDuration:1},
+  get totalPixels(){return bound?bound.totalPixels:0}, get tilePixels(){return bound?bound.tilePixels:2048},
+  get span(){return 12180}, get playhead(){return 0.5}, get start(){return this.position-this.span*this.playhead}};
+""" + self.layer_js() + r"""
+const sample=(m,extra)=>Object.assign({key:'A',meta:m,positionMs:29310,at:now,playing:false,pitch:0,stale:false},extra||{});
+scope.sample=sample(pending); scope.refreshSample();
+scope.sample=sample(detail); scope.refreshSample(); // stream-sync has the detail; the deck stays paused
+const tileMs=2048/23633*225076, from=29310-12180/2, pad=6090;
+assert.equal(scope.tileLo,Math.floor((from-pad)/tileMs)); assert.equal(scope.tileHi,Math.floor((from+12180+pad)/tileMs));
+assert(scope.tileLo<=Math.floor(29310/tileMs) && Math.floor(29310/tileMs)<=scope.tileHi,'the tile under the playhead is drawn');
+assert.equal(scope.tileHi,2);
+// A new track while playing: the scroll runs to the new track's end, not to the stale duration.
+const next={key:'B',durationMs:180000,waveformDurationMs:180000,beats,cues:[],loops:[],detail:true,waveformWidth:20000,tileWidth:2048,waveformTiles:Array(10).fill('/t.png')};
+scope.sample=Object.assign(sample(next,{key:'B',playing:true}),{positionMs:1000}); scope.refreshSample();
+assert.equal(scroll.running,true); assert.equal(scroll.to,scope.contentX(180000));
+""")
 
     def test_shadow_layer_scroll_settle_and_grid_pool_behaviour(self):
         self.js(r"""
