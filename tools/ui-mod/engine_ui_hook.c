@@ -34,7 +34,11 @@
 #include "dsp_smooth.h"
 #include "master_limiter.h"
 #include "echo_out.h"
+#include "pioneer_master.h"
+#if !defined(__aarch64__)
 #include "pioneer_fx.h"
+#include "fx_selector.h"
+#endif
 
 // The A32 trampoline installers: the AArch64 build (AZ04) never calls them.
 #if defined(__aarch64__)
@@ -317,9 +321,77 @@ static void led_replay(int pct) {
     pthread_mutex_unlock(&led_mu);
 }
 
+A32_ONLY static int fx_selector_supported;
+static int fx_selector_master_bypass;
+
+#if !defined(__aarch64__)
+/* Verified Config.audio.fx: JC11 hasDJFx=true; JP07 has neither selector flag.
+ * Other products/builds require their own Config/ABI verification. */
+static int px_selector_capable(const char *version, const char *product) {
+    return !strcmp(version, "5.3.0") && !strcmp(product, "JC11");
+}
+static int px_write_ready(const char *path) {
+    char tmp[PATH_MAX];
+    int n = snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if (n < 0 || (size_t)n >= sizeof tmp) return 0;
+    FILE *f = fopen(tmp, "w");
+    if (!f) return 0;
+    int ok = fputs("armhf-px-v2 JC11\n", f) >= 0;
+    if (fclose(f)) ok = 0;
+    /* Go validates the marker body: never expose a truncated heartbeat. */
+    if (ok && !rename(tmp, path)) return 1;
+    unlink(tmp);
+    return 0;
+}
+#endif
+
+/* Ordinary worker only: never poll files, log, or wait in an audio callback. */
+static void fx_selector_poll(void) {
+#if !defined(__aarch64__)
+    if (!fx_selector_supported) return;
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+        sc_pfx_instance_prepare(&sc_pfx_routes[i].dsp);
+    static unsigned long long last_request;
+    static unsigned last_bound[SC_PFX_UNITS];
+    static time_t heartbeat;
+    time_t now = time(NULL);
+    if (now != heartbeat) {
+        if (px_write_ready("/run/enginex-fx-selector.ready")) heartbeat = now;
+    }
+    FILE *f = fopen(UI_ROOT "/fx-selector.request", "r");
+    unsigned unit, mode, a, b;
+    unsigned long long request, expires;
+    int n = f ? fscanf(f, "%u %u %llu %u %u %llu", &unit, &mode, &request, &a, &b, &expires) : 0;
+    struct timespec wall; clock_gettime(CLOCK_REALTIME, &wall);
+    unsigned long long millis = (unsigned long long)wall.tv_sec * 1000 + wall.tv_nsec / 1000000;
+    if (f) fclose(f);
+    if (n == 6 && millis < expires && expires - millis <= 1000 && unit >= 1 && unit <= SC_PFX_UNITS && mode <= 5 && request != last_request &&
+        (a & 0x7f800007u) == (0x35800000u | (unit - 1)) &&
+        (b & 0x7f800007u) == (0x36000000u | (unit - 1))) {
+        int reused = sc_pfx_arm(unit - 1, mode, a, b);
+        __atomic_store_n(&fx_selector_master_bypass, 1, __ATOMIC_RELEASE);
+        f = fopen(UI_ROOT "/fx-selector.ack.tmp", "w");
+        if (f) {
+            fprintf(f, "%u %u %llu %u %u %llu %d\n", unit, mode, request, a, b, expires, reused);
+            int ok = !fclose(f);
+            if (ok && !rename(UI_ROOT "/fx-selector.ack.tmp", UI_ROOT "/fx-selector.ack")) last_request = request;
+        }
+    }
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
+        unsigned bound = __atomic_load_n(&sc_pfx_routes[i].bound, __ATOMIC_ACQUIRE);
+        if (bound && bound != last_bound[i])
+            fprintf(stderr, "engine-ui-hook: PX unit=%u mode=%u owner=%p instance=%p bound\n", i + 1, bound & 7,
+                    __atomic_load_n(&sc_pfx_routes[i].owner, __ATOMIC_ACQUIRE),
+                    __atomic_load_n(&sc_pfx_routes[i].effect, __ATOMIC_ACQUIRE));
+        last_bound[i] = bound;
+    }
+#endif
+}
+
 static void *lim_poll(void *arg) {
     (void)arg;
     for (;;) {
+        fx_selector_poll();
         static struct timespec last_mtim;
         static off_t last_size = -1;
         struct stat st;
@@ -348,7 +420,7 @@ static void *lim_poll(void *arg) {
                     if (len < sizeof val) {
                         memcpy(val, line + 11, len);
                         val[len] = '\0';
-                        pioneer_fx = sc_pioneer_fx_parse(val);
+                        pioneer_fx = sc_master_pioneer_fx_parse(val);
                     }
                 }
             fclose(f);
@@ -463,6 +535,68 @@ enum {
     DSP_AUTOGATE, DSP_COMMON, DSP_DUB_ECHO, DSP_WASH, DSP_FLANGER, DSP_MASTER, DSP_HOOK_COUNT
 };
 static void *dsp_originals[DSP_HOOK_COUNT];
+#if !defined(__aarch64__)
+static uintptr_t px_engine_base;
+static void *px_destructor_original;
+static void hook_px_destroy(void *self) {
+    sc_pfx_forget_owner(self);
+    ((void (*)(void *))px_destructor_original)(self);
+}
+
+static void *px_carrier(void *owner) {
+    if (!owner) return NULL;
+    uintptr_t vtable;
+    memcpy(&vtable, owner, sizeof vtable);
+    if (vtable != px_engine_base + 0x2b21eec) return NULL;
+    void *collection;
+    memcpy(&collection, (char *)owner + 0x28, sizeof collection);
+    if (!collection) return NULL;
+    uintptr_t begin, end;
+    memcpy(&begin, (char *)collection + 4, 4);
+    memcpy(&end, (char *)collection + 8, 4);
+    if (!begin || end < begin || (begin & 3) || (end & 3) || end - begin > 128 * 4) return NULL;
+    void *found = NULL;
+    for (uintptr_t at = begin; at < end; at += 4) {
+        void *effect; uintptr_t vt, process; const char *name; uint32_t length;
+        memcpy(&effect, (void *)at, 4);
+        if (!effect) continue;
+        memcpy(&vt, effect, 4);
+        memcpy(&process, (void *)(vt + 8), 4);
+        if (process != px_engine_base + 0xf1ab24) continue;
+        memcpy(&name, (char *)effect + 0x28, 4);
+        memcpy(&length, (char *)effect + 0x2c, 4);
+        if (length != 7 || !name || memcmp(name, "Flanger", 7)) continue;
+        if (found) return NULL;
+        found = effect;
+    }
+    return found;
+}
+
+static int px_is_carrier(void *owner) {
+    if (!owner) return 0;
+    const char *name; uint32_t length;
+    memcpy(&name, (char *)owner + 0x294, 4);
+    memcpy(&length, (char *)owner + 0x298, 4);
+    return length == 7 && name && !memcmp(name, "Flanger", 7);
+}
+
+static void px_restore(struct sc_pfx_route *r) {
+    if (!__atomic_exchange_n(&r->native_override, 0, __ATOMIC_ACQ_REL)) return;
+    void *h = __atomic_load_n(&r->mix_handler, __ATOMIC_ACQUIRE);
+    if (!h) return;
+    unsigned char event[16] = {0};
+    unsigned mix = __atomic_load_n(&r->mix, __ATOMIC_ACQUIRE);
+    memcpy(event + 0x0c, &mix, 4);
+    ((dsp_event_fn)dsp_originals[DSP_MIX])(h, event);
+    __atomic_store_n(&r->restore_mix, 0, __ATOMIC_RELEASE);
+}
+
+static void px_restore_owner(void *owner) {
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+        if (__atomic_load_n(&sc_pfx_routes[i].native_owner, __ATOMIC_ACQUIRE) == owner)
+            px_restore(&sc_pfx_routes[i]);
+}
+#endif
 
 static void *dsp_bound_owner(void *handler) {
     // MemberFunctionHandler owns a bound object and a two-word member pointer.
@@ -483,6 +617,16 @@ static void *dsp_bound_owner(void *handler) {
 }
 
 static void dsp_transition(unsigned slot, uint32_t kind, void *handler, const void *event) {
+#if !defined(__aarch64__)
+    if (fx_selector_supported && (slot == DSP_SWITCH || slot == DSP_CHANGE)) {
+        px_restore_owner(dsp_bound_owner(handler));
+        sc_pfx_unbind_owner(dsp_bound_owner(handler));
+    }
+#endif
+#if !defined(__aarch64__)
+    if (fx_selector_supported && (slot == DSP_TURN_OFF || slot == DSP_TURN_ON))
+        sc_pfx_reset_owner(dsp_bound_owner(handler));
+#endif
     sc_dsp_fx_mark_transition(dsp_bound_owner(handler), kind);
     ((dsp_event_fn)dsp_originals[slot])(handler, event);
 }
@@ -510,6 +654,63 @@ static void dsp_finite_event(unsigned slot, size_t offset, int is_double,
         float value;
         memcpy(&value, (const char *)event + offset, sizeof value);
         if (!sc_dsp_finite_f32(value)) return;
+#if !defined(__aarch64__)
+        if (fx_selector_supported && (slot == DSP_MIX || slot == DSP_PARAMETER)) {
+            void *owner = dsp_bound_owner(handler);
+            if (slot == DSP_MIX && sc_pfx_challenge(owner, value)) {
+                for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
+                    struct sc_pfx_route *r = &sc_pfx_routes[i];
+                    if (__atomic_load_n(&r->owner, __ATOMIC_ACQUIRE) != owner) continue;
+                    void *carrier = px_carrier(owner);
+                    if (!carrier) { sc_pfx_unbind_owner(owner); break; }
+                    __atomic_store_n(&r->mix_handler, handler, __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->native_owner, owner, __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->input_a, (char *)owner + 0x30 + 0xf8, __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->input_b, (char *)owner + 0x160 + 0xf8, __ATOMIC_RELEASE);
+                    sc_pfx_bind(i, owner, carrier);
+                }
+                return;
+            }
+            int target_parameter = 1;
+            if (slot == DSP_PARAMETER) {
+                const char *name; uint32_t length;
+                memcpy(&name, (const char *)event + 8, 4);
+                memcpy(&length, (const char *)event + 12, 4);
+                target_parameter = length == 7 && name && !memcmp(name, "Flanger", 7);
+            }
+            if (target_parameter) sc_pfx_control(owner, slot == DSP_MIX ? 0 : 1, value);
+            if (slot == DSP_MIX) for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
+                struct sc_pfx_route *r = &sc_pfx_routes[i];
+                if (__atomic_load_n(&r->native_owner, __ATOMIC_ACQUIRE) != owner) continue;
+                if (!(__atomic_load_n(&r->route, __ATOMIC_ACQUIRE) & 7) ||
+                    !__atomic_load_n(&r->bound, __ATOMIC_ACQUIRE)) {
+                    __atomic_store_n(&r->mix, sc_pfx_bits(value), __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->native_override, 0, __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->restore_mix, 0, __ATOMIC_RELEASE);
+                }
+            }
+            if (slot == DSP_MIX) for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
+                struct sc_pfx_route *r = &sc_pfx_routes[i];
+                if (__atomic_load_n(&r->owner, __ATOMIC_ACQUIRE) != owner) continue;
+                unsigned route = __atomic_load_n(&r->route, __ATOMIC_ACQUIRE);
+                if (!(route & 7) || !__atomic_load_n(&r->bound, __ATOMIC_ACQUIRE) || !px_is_carrier(owner)) continue;
+                unsigned char copy[16];
+                const float one = 1.0f;
+                memcpy(copy, event, sizeof copy);
+                memcpy(copy + 0x0c, &one, 4);
+                __atomic_store_n(&r->mix_handler, handler, __ATOMIC_RELEASE);
+                __atomic_store_n(&r->native_owner, owner, __ATOMIC_RELEASE);
+                sc_pfx_activate(r);
+                // Our DSP owns Wet/Dry. Keep the stock carrier's surrounding
+                // processor at unity, avoiding a second application of Mix.
+                ((dsp_event_fn)dsp_originals[slot])(handler, copy);
+                if (!(__atomic_load_n(&r->route, __ATOMIC_ACQUIRE) & 7) ||
+                    !__atomic_load_n(&r->bound, __ATOMIC_ACQUIRE))
+                    __atomic_store_n(&r->restore_mix, 1, __ATOMIC_RELEASE);
+                return;
+            }
+        }
+#endif
     }
     ((dsp_event_fn)dsp_originals[slot])(handler, event);
 }
@@ -556,11 +757,59 @@ static void hook_autogate_process(void *self, float *const *input, float *const 
 // FlangerNegative (their vtables are its only references). It works in place
 // on `input` and tail-calls the common chain with (input, input), so `input`
 // holds the final block on return (#54).
+#if defined(__aarch64__)
+// Keep AZ04's existing opaque third-argument ABI until separately verified.
 static void hook_flanger(void *self, float *const *input, float *const *output, uint32_t frames) {
     float dry = sc_dsp_block_energy(input, frames);
     ((dsp_process_fn)dsp_originals[DSP_FLANGER])(self, input, output, frames);
     sc_dsp_makeup_apply(self, input, frames, dry);
 }
+#else
+typedef void (*dsp_effect_fn)(void *, float *const *, int, uint32_t);
+static void hook_flanger(void *self, float *const *input, float *const *output, uint32_t frames) {
+    if (!fx_selector_supported) {
+        /* Unverified armhf builds/boards retain the original opaque ABI/body. */
+        float dry = sc_dsp_block_energy(input, frames);
+        ((dsp_process_fn)dsp_originals[DSP_FLANGER])(self, input, output, frames);
+        sc_dsp_makeup_apply(self, input, frames, dry);
+        return;
+    }
+    int channels = (int)(uintptr_t)output; /* verified JP07/JC11 5.3.0 only */
+    {
+        // A disabled mapping can still have a deferred stock-Mix restoration.
+        // This executes on the original DSP thread, never the polling worker.
+        for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
+            struct sc_pfx_route *r = &sc_pfx_routes[i];
+            if (__atomic_load_n(&r->effect, __ATOMIC_ACQUIRE) == self &&
+                __atomic_exchange_n(&r->restore_mix, 0, __ATOMIC_ACQ_REL)) px_restore(r);
+        }
+        unsigned mode;
+        struct sc_pfx_route *r = channels == 2 && input && input[0] && input[1] ? sc_pfx_enter_input(self, (void *)input, &mode) : NULL;
+        if (r) {
+            if (__atomic_load_n(&r->native_override, __ATOMIC_ACQUIRE)) {
+                unsigned reset = __atomic_load_n(&r->reset_epoch, __ATOMIC_ACQUIRE);
+                if (r->audio_effect != self || r->audio_epoch != r->render_epoch || r->audio_reset != reset) {
+                    sc_pfx_instance_reset(&r->dsp);
+                    r->audio_effect = self; r->audio_epoch = r->render_epoch; r->audio_reset = reset;
+                }
+                float mix = sc_pfx_float(__atomic_load_n(&r->mix, __ATOMIC_ACQUIRE));
+                float param = sc_pfx_float(__atomic_load_n(&r->parameter, __ATOMIC_ACQUIRE));
+                // Rate vector is not captured yet: Parameter also maps time.
+                (void)sc_pfx_process(&r->dsp, input[0], input[1], frames, (int)mode, param, param, mix);
+                sc_pfx_leave(r);
+                /* No READY bank after rapid resets: reset Wet is zero. The
+                 * Mix=1 processor must receive untouched dry input, never a
+                 * full-wet native Flanger burst while the worker prepares. */
+                return;
+            }
+            sc_pfx_leave(r);
+        }
+    }
+    float dry = channels == 2 ? sc_dsp_block_energy(input, frames) : 0.0f;
+    ((dsp_effect_fn)dsp_originals[DSP_FLANGER])(self, input, channels, frames);
+    if (channels == 2) sc_dsp_makeup_apply(self, input, frames, dry);
+}
+#endif
 
 // airHost's device callback (5.0.4 0x1462a6c, 5.3.0 0xc77934): it zeroes and
 // then fills Engine's planar float outputs, before the resampler and the S32_LE
@@ -572,7 +821,7 @@ static struct sc_gain master_gain[8];
 #define MASTER_ECHO_PAIRS 4 // 384 KB of BSS each, untouched until Echo Out is armed
 static struct sc_echo master_echo[MASTER_ECHO_PAIRS];
 #define MASTER_PFX_PAIRS 4
-static struct sc_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
+static struct sc_master_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
 // #49: in the 4-deck layout a player's 4-channel device (two stereo pairs) leaves
 // decks 3 and 4 without output buffers, and Engine skips rendering them ("Mixer
 // skipped ... unassigned output buffer"): their playheads stand still. All four
@@ -608,11 +857,12 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
     }
     // #88 Pioneer FX emulations (Spiral / Pitch Echo / Slip Roll / Dub Echo / Space)
     int pfx = __atomic_load_n(&pioneer_fx_mode, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&fx_selector_master_bypass, __ATOMIC_ACQUIRE)) pfx = 0;
     if (out && frames > 0) { // also when OFF: lets the effect reset its state
         for (int ch = 0; ch < out_channels && ch / 2 < MASTER_PFX_PAIRS; ch += 2) {
             if (out[ch]) {
                 float *r = ch + 1 < out_channels ? out[ch + 1] : NULL;
-                sc_pioneer_fx_planar(&master_pfx[ch / 2], out[ch], r, (unsigned)frames, pfx);
+                sc_master_pioneer_fx_planar(&master_pfx[ch / 2], out[ch], r, (unsigned)frames, pfx);
             }
         }
     }
@@ -720,6 +970,38 @@ static void patch_bytes(uintptr_t entry, const void *bytes, size_t size, size_t 
     if (mprotect((void *)start, span, PROT_READ | PROT_EXEC)) _exit(127);
     __builtin___clear_cache((char *)entry, (char *)entry + size);
 }
+
+#if !defined(__aarch64__)
+static int install_px_scope(uintptr_t base, size_t page, const char *version) {
+    if (strcmp(version, "5.3.0")) return 0;
+    char product[8] = {0};
+    FILE *f = fopen("/sys/firmware/devicetree/base/inmusic,product-code", "r");
+    size_t n = f ? fread(product, 1, sizeof product - 1, f) : 0;
+    if (f) fclose(f);
+    if (n < 4 || !px_selector_capable(version, product)) return 0;
+    static const uint32_t prefix[] = {0xe59f1ad0, 0xe59f2ad0};
+    uintptr_t entry = base + 0xe99000;
+    if (memcmp((void *)entry, prefix, 8)) return 0;
+    /* Fail back to legacy master/menu if the device cannot publish readiness. */
+    if (!px_write_ready("/run/enginex-fx-selector.ready")) return 0;
+    // Both displaced instructions are PC-relative loads. Preserve their values
+    // in literal words, then resume at the original +8 (including original PC).
+    uint32_t literals[2];
+    memcpy(&literals[0], (void *)(base + 0xe99ad8), 4);
+    memcpy(&literals[1], (void *)(base + 0xe99adc), 4);
+    uint32_t code[] = {0xe59f1004, 0xe59f2004, 0xe59ff004, literals[0], literals[1], (uint32_t)(entry + 8)};
+    px_destructor_original = rx_code(code, sizeof code, page);
+    uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_px_destroy};
+    patch_bytes(entry, jump, sizeof jump, page);
+    px_engine_base = base;
+    fx_selector_master_bypass = 1; /* no hidden legacy master FX on any PX-enabled board */
+    fprintf(stderr, "engine-ui-hook: PX product=%s master-bypass=1 installed\n", product);
+    unlink(UI_ROOT "/fx-selector.ready");
+    unlink(UI_ROOT "/fx-selector.request");
+    unlink(UI_ROOT "/fx-selector.ack");
+    return 1;
+}
+#endif
 
 static int install_dsp_hooks(uintptr_t base, size_t page) {
     // edit_engine has already verified the main ELF BuildID. Treat these hooks
@@ -1295,7 +1577,12 @@ __attribute__((constructor)) static void edit_engine(void) {
         fprintf(stderr, "engine-ui-hook: applied 0x%x (%u bytes)\n", e->offset, e->size);
     }
     install_sqlite_hooks(base, page);
-    if (install_dsp_hooks(base, page)) lim_start_poll();
+    if (install_dsp_hooks(base, page)) {
+#if !defined(__aarch64__)
+        fx_selector_supported = install_px_scope(base, page, build->name);
+#endif
+        lim_start_poll();
+    }
 }
 
 // Unknown or unsafe values fall back to the English pack.
