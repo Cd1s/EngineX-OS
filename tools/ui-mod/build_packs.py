@@ -2171,6 +2171,19 @@ def edits(dev: bool):
              f"		height: {window()}.defaultScreenSize.height * 100 / (root.scUIScale || 100)\n"
              "		scale: (root.scUIScale || 100) / 100\n"
              "		anchors.centerIn: parent\n"),
+            # #175: the shutdown overlay must cover the enlarged logical canvas too.
+            (f"\t\t\tparent: Overlay.overlay ? Overlay.overlay : uiContainer\n"
+             f"\t\t\twidth: {window()}.defaultScreenSize.width\n"
+             f"\t\t\theight: {window()}.defaultScreenSize.height\n",
+             "\t\t\tparent: Overlay.overlay ? Overlay.overlay : uiContainer\n"
+             "\t\t\tanchors.fill: parent\n"),
+        ],
+        # #175: natural PNG dimensions shrink with UI Scale; fill the logical canvas.
+        # Keep the stock geometryTag and multi-screen image selection for every panel.
+        ROOT + "Items/SplashScreen.qml": [
+            ("\t\tImage {\n\t\t\tsource:",
+             "\t\tImage {\n\t\t\tanchors.fill: parent\n\t\t\tsource:"),
+            ("\t\t\tid: overlay\n", "\t\t\tid: overlay\n\t\t\tanchors.fill: parent\n"),
         ],
         v + "Common/Waveform/Waveform.qml": wave,
         # Engine offers streamed rows only Prepare; add Stems (see scStemStream).
