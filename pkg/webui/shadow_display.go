@@ -55,6 +55,7 @@ type shadowDisplayEntry struct {
 	retry          time.Time
 	tileMu         sync.Mutex
 	tiles          [][]byte // detailed images are generated once, on first visible use
+	styled         map[shadowWaveStyle]map[int][]byte
 }
 
 type shadowDisplayCache struct {
@@ -357,14 +358,66 @@ func downsampleDisplayWave(w enginedb.DisplayWave, limit int) enginedb.DisplayWa
 	return enginedb.DisplayWave{Bands: b, SamplesPerBin: w.SamplesPerBin * float64(n) / float64(limit)}
 }
 
-// Peak-preserving downsampling and a fixed, three-band palette. This runs once
-// at fetch completion, never in a position poll or QML animation frame.
+// Peak-preserving downsampling. The default is retained for older clients.
+// Local UI clients supply their stock palette; rendering never runs on a frame tick.
 func renderShadowWave(w enginedb.DisplayWave, width, height int) ([]byte, error) {
+	return renderShadowWaveStyle(w, width, height, defaultShadowWaveStyle())
+}
+
+type shadowWaveStyle struct {
+	Colors                                         [3]color.NRGBA
+	RGB                                            bool
+	Dim                                            float64
+	Saturation, BrightAmp, BrightGain, BrightFloor float64
+}
+
+func defaultShadowWaveStyle() shadowWaveStyle {
+	return shadowWaveStyle{Dim: 1, Colors: [3]color.NRGBA{{0x4a, 0x78, 0xff, 255}, {0xf0, 0xb4, 0, 255}, {255, 255, 255, 255}}}
+}
+
+// Values are the local WaveFormItem's properties after EngineX/theme overrides.
+func parseShadowWaveStyle(q url.Values) (shadowWaveStyle, error) {
+	style := defaultShadowWaveStyle()
+	style.RGB = q.Get("rgb") == "1"
+	if raw := q.Get("dim"); raw != "" {
+		dim, err := strconv.ParseFloat(raw, 64)
+		if err != nil || math.IsNaN(dim) || math.IsInf(dim, 0) || dim < 0 || dim > 1 {
+			return style, fmt.Errorf("invalid dim")
+		}
+		style.Dim = dim
+	}
+	for i, name := range []string{"low", "mid", "high"} {
+		b, err := hex.DecodeString(q.Get(name))
+		if err != nil || (len(b) != 3 && len(b) != 4) {
+			return style, fmt.Errorf("invalid %s color", name)
+		}
+		if len(b) == 4 {
+			style.Colors[i] = color.NRGBA{b[1], b[2], b[3], b[0]} // QColor's #AARRGGBB
+		} else {
+			style.Colors[i] = color.NRGBA{b[0], b[1], b[2], 255}
+		}
+	}
+	for _, field := range []struct {
+		name  string
+		value *float64
+	}{
+		{"saturation", &style.Saturation}, {"brightAmp", &style.BrightAmp}, {"brightGain", &style.BrightGain}, {"brightFloor", &style.BrightFloor},
+	} {
+		v, err := strconv.ParseFloat(q.Get(field.name), 64)
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 16 {
+			return style, fmt.Errorf("invalid %s", field.name)
+		}
+		*field.value = v
+	}
+	return style, nil
+}
+
+func renderShadowWaveStyle(w enginedb.DisplayWave, width, height int, style shadowWaveStyle) ([]byte, error) {
 	if width < 1 || width > 2048 || height < 2 || height > 128 || len(w.Bands) == 0 || len(w.Bands)%3 != 0 {
 		return nil, fmt.Errorf("display: invalid render size/bands")
 	}
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	palette := [3]color.NRGBA{{0x4a, 0x78, 0xff, 255}, {0xf0, 0xb4, 0, 255}, {255, 255, 255, 255}}
+	palette := style.Colors
 	n := len(w.Bands) / 3
 	for x := 0; x < width; x++ {
 		lo, hi := x*n/width, max(x*n/width+1, (x+1)*n/width)
@@ -373,6 +426,34 @@ func renderShadowWave(w enginedb.DisplayWave, width, height int) ([]byte, error)
 			for band := range peak {
 				peak[band] = max(peak[band], int(w.Bands[i*3+band]))
 			}
+		}
+		if style.RGB {
+			// WaveFormFBORGB.ps: mix L/M/H, normalize, saturate, then apply
+			// amplitude brightness. Preserve mixed red/orange/green/cyan columns.
+			amp := float64(peak[0]+peak[1]+peak[2]) / 255
+			var c [3]float64
+			for band, p := range peak {
+				c[0] += float64(p) / 255 * float64(palette[band].R) / 255
+				c[1] += float64(p) / 255 * float64(palette[band].G) / 255
+				c[2] += float64(p) / 255 * float64(palette[band].B) / 255
+			}
+			sum := c[0] + c[1] + c[2] + 1e-5
+			for j := range c {
+				c[j] /= sum
+			}
+			gray := c[0]*0.299 + c[1]*0.587 + c[2]*0.114
+			brightness := math.Pow(amp, style.BrightAmp)*style.BrightGain + style.BrightFloor
+			for j := range c {
+				c[j] = min(1, max(0, (gray+(c[j]-gray)*style.Saturation)*brightness))
+			}
+			pixel := color.NRGBA{uint8(math.Round(c[0] * 255 * style.Dim)), uint8(math.Round(c[1] * 255 * style.Dim)), uint8(math.Round(c[2] * 255 * style.Dim)), 255}
+			// Both native RGB shaders apply 0.9 to the amplitude. Overview's
+			// waveformColor() applies it before calcDistances(), not in calcDist().
+			h := min(height/2, int(math.Ceil(amp*0.9*float64(height/2))))
+			for y := height/2 - h; y < height/2+h; y++ {
+				img.SetNRGBA(x, y, pixel)
+			}
+			continue
 		}
 		// Layer the cumulative band amplitudes: lows outside, highs at center.
 		for band := range peak {
@@ -618,6 +699,60 @@ func (s *Server) shadowWaveformGet(w http.ResponseWriter, r *http.Request) {
 	e, _ := s.currentShadowDisplay(r)
 	if e == nil {
 		http.Error(w, "display data not ready", http.StatusNotFound)
+		return
+	}
+	if r.URL.Query().Has("low") {
+		style, err := parseShadowWaveStyle(r.URL.Query())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		index, width, height := -1, 2048, 128
+		wave := e.asset.Overview
+		if e.asset.Waveform != nil {
+			wave = *e.asset.Waveform
+		}
+		if r.URL.Query().Get("overview") == "1" {
+			index, width, height, wave = -2, 1024, 64, e.asset.Overview
+		}
+		if r.URL.Query().Has("tile") {
+			index, err = strconv.Atoi(r.URL.Query().Get("tile"))
+			if err != nil || index < 0 || index >= len(e.tiles) || e.asset.Waveform == nil {
+				http.NotFound(w, r)
+				return
+			}
+			bands := e.asset.Waveform.Bands
+			lo, hi := index*2048*3, min(len(bands), (index+1)*2048*3)
+			wave, width, height = enginedb.DisplayWave{Bands: bands[lo:hi]}, (hi-lo)/3, 128
+		}
+		e.tileMu.Lock()
+		if e.styled == nil {
+			e.styled = make(map[shadowWaveStyle]map[int][]byte)
+		}
+		images := e.styled[style]
+		if images == nil {
+			// Bound theme/brightness variants even for arbitrary local requests.
+			if len(e.styled) >= 8 {
+				clear(e.styled)
+			}
+			images = make(map[int][]byte)
+			e.styled[style] = images
+		}
+		b := images[index]
+		if b == nil {
+			b, err = renderShadowWaveStyle(wave, width, height, style)
+			if err == nil {
+				images[index] = b
+			}
+		}
+		e.tileMu.Unlock()
+		if err != nil {
+			http.Error(w, "render failed", 500)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Write(b)
 		return
 	}
 	b := e.wave

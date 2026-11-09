@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"image/color"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
@@ -286,6 +287,22 @@ func TestDisplayTilesAndSourceIdentity(t *testing.T) {
 			t.Fatal(im.Bounds())
 		}
 	}
+	// Combining overview and tile must not poison the detailed tile cache.
+	palette := "&low=ff1428&mid=00e632&high=0078ff&rgb=1&saturation=1.612&brightAmp=0.473&brightGain=2.405&brightFloor=0.197"
+	for _, extra := range []string{"&overview=1", ""} {
+		r, err := http.Get(srv.URL + "/v1/sc5000/shadow/waveform.png" + q + "&tile=2" + palette + extra)
+		if err != nil {
+			t.Fatal(err)
+		}
+		im, err := png.Decode(r.Body)
+		r.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if im.Bounds().Dx() != 3 || im.Bounds().Dy() != 128 {
+			t.Fatalf("styled tile cache dimensions: %v", im.Bounds())
+		}
+	}
 	r, err := http.Get(srv.URL + "/v1/sc5000/shadow/display" + q)
 	if err != nil {
 		t.Fatal(err)
@@ -444,5 +461,72 @@ func TestDisplayKeyStaysStableUntilConfirmedTrackReload(t *testing.T) {
 	}
 	if post(path) == first {
 		t.Fatal("reloading the same file reused stale grid/assets")
+	}
+}
+
+// The same L/M/H fixture must change with the local palette and mix bands in RGB.
+func TestShadowWaveLocalPalette(t *testing.T) {
+	wave := enginedb.DisplayWave{Bands: []byte{180, 0, 0, 100, 80, 0, 0, 180, 0, 0, 100, 80, 0, 0, 180}}
+	style := defaultShadowWaveStyle()
+	style.Colors = [3]color.NRGBA{{255, 20, 40, 255}, {0, 230, 50, 255}, {0, 120, 255, 255}}
+	style.RGB, style.Saturation, style.BrightAmp, style.BrightGain, style.BrightFloor = true, 1.612, 0.473, 2.405, 0.197
+	b, err := renderShadowWaveStyle(wave, 5, 32, style)
+	if err != nil {
+		t.Fatal(err)
+	}
+	im, err := png.Decode(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// WaveFormFBORGB.ps with the measured local parameters above.
+	golden := []color.NRGBA{{255, 0, 14, 255}, {255, 215, 4, 255}, {0, 255, 0, 255}, {0, 255, 255, 255}, {0, 202, 255, 255}}
+	for x, want := range golden {
+		if got := color.NRGBAModel.Convert(im.At(x, 16)); got != want {
+			t.Fatalf("native RGB column %d: got %v want %v", x, got, want)
+		}
+	}
+	if _, _, _, a := im.At(0, 4).RGBA(); a != 0 {
+		t.Fatal("detail RGB edge must use native 0.9 amplitude")
+	}
+	style.Dim = 0.6
+	b, err = renderShadowWaveStyle(wave, 5, 32, style)
+	if err != nil {
+		t.Fatal(err)
+	}
+	im, err = png.Decode(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := color.NRGBAModel.Convert(im.At(0, 16)).(color.NRGBA); got.R != 153 || got.A != 255 {
+		t.Fatalf("native elapsed RGB: %v", got)
+	}
+	if _, _, _, a := im.At(0, 4).RGBA(); a != 0 {
+		t.Fatal("overview RGB must also use native 0.9 amplitude")
+	}
+	style.Dim = 1
+	style.RGB = false
+	b, err = renderShadowWaveStyle(wave, 5, 32, style)
+	if err != nil {
+		t.Fatal(err)
+	}
+	im, err = png.Decode(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := color.NRGBAModel.Convert(im.At(0, 16)); got != style.Colors[0] {
+		t.Fatalf("local low color: %v", got)
+	}
+	q := url.Values{"low": {"ff1428"}, "mid": {"00e632"}, "high": {"0078ff"}, "rgb": {"1"}, "saturation": {"1"}, "brightAmp": {"1"}, "brightGain": {"1"}, "brightFloor": {"1"}}
+	if _, err := parseShadowWaveStyle(q); err != nil {
+		t.Fatal(err)
+	}
+	q.Set("low", "80ff1428")
+	parsed, err := parseShadowWaveStyle(q)
+	if err != nil || parsed.Colors[0] != (color.NRGBA{255, 20, 40, 128}) {
+		t.Fatalf("QColor alpha: %+v %v", parsed, err)
+	}
+	q.Set("brightGain", "NaN")
+	if _, err := parseShadowWaveStyle(q); err == nil {
+		t.Fatal("accepted nonfinite brightness")
 	}
 }
