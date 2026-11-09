@@ -39,7 +39,10 @@ type browseData struct {
 	Tracks []browseTrack        `json:"tracks,omitempty"`
 }
 
-var errBrowseTooLarge = errors.New("playlist too large")
+var (
+	errBrowseTooLarge = errors.New("playlist too large")
+	errBrowseBusy     = errors.New("metadata provider busy")
+)
 
 type browseEntry struct {
 	data            []byte
@@ -113,7 +116,7 @@ func (c *browseCache) get(ctx context.Context, key string, load func(context.Con
 	f := c.start(key, load)
 	c.mu.Unlock()
 	if f == nil {
-		return browseData{}, errors.New("browse cache busy")
+		return browseData{}, errBrowseBusy
 	}
 	select {
 	case <-ctx.Done():
@@ -168,7 +171,7 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 			// Keep a tombstone until the old disk file is gone. A concurrent
 			// reader must join this flight rather than reload that snapshot.
 			c.insert(key, &browseEntry{used: now})
-		} else if err != nil {
+		} else if err != nil && !errors.Is(err, errBrowseBusy) {
 			if revoked {
 				c.insert(key, &browseEntry{err: err, used: now, retry: now.Add(browseRetry)})
 			} else if e := c.entries[key]; e != nil {

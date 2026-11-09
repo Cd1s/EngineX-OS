@@ -18,38 +18,52 @@ const (
 type searchCache struct {
 	*browseCache
 	workerMu sync.Mutex
-	workers  map[string]int
+	workers  map[string]map[*searchWorker]struct{}
 	active   int
 }
+
+type searchWorker struct{ started time.Time }
 
 func newSearchCache() *searchCache {
 	// Search is volatile: keep the existing provider/session/operation/query key
 	// scheme and memory budgets, but never persist or serve day-old search hits.
 	c := newBrowseCache("")
 	c.ttl, c.stale = searchTTL, searchTTL
-	return &searchCache{browseCache: c, workers: make(map[string]int)}
+	return &searchCache{browseCache: c, workers: make(map[string]map[*searchWorker]struct{})}
 }
 
 // A timed-out worker retains its slot until it really exits. New queries cannot
 // accumulate an unlimited number of workers behind one stuck provider/lock.
-// Each kind/session has two slots, leaving capacity for other sessions; the
-// global budget also bounds workers belonging to sessions that have expired.
+// Only workers past their deadline count against the per-session/kind limit;
+// healthy overlapping queries while typing must still run. The total budget
+// also bounds workers belonging to sessions that have expired.
 func (c *searchCache) call(ctx context.Context, provider, session, kind string, load func(context.Context) (browseData, error)) (browseData, error) {
 	key := browseKey(provider, session, kind, "")
 	c.workerMu.Lock()
-	if c.active >= 32 || c.workers[key] >= 2 {
-		c.workerMu.Unlock()
-		return browseData{}, errors.New("search provider busy")
+	now := c.now()
+	abandoned := 0
+	for w := range c.workers[key] {
+		if now.Sub(w.started) >= searchTimeout {
+			abandoned++
+		}
 	}
-	c.workers[key]++
+	if c.active >= 64 || abandoned >= 2 {
+		c.workerMu.Unlock()
+		return browseData{}, errBrowseBusy
+	}
+	w := &searchWorker{started: now}
+	if c.workers[key] == nil {
+		c.workers[key] = make(map[*searchWorker]struct{})
+	}
+	c.workers[key][w] = struct{}{}
 	c.active++
 	c.workerMu.Unlock()
 	return searchCall(ctx, provider, kind, func(ctx context.Context) (browseData, error) {
 		defer func() {
 			c.workerMu.Lock()
-			c.workers[key]--
+			delete(c.workers[key], w)
 			c.active--
-			if c.workers[key] == 0 {
+			if len(c.workers[key]) == 0 {
 				delete(c.workers, key)
 			}
 			c.workerMu.Unlock()

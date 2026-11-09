@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -211,6 +212,7 @@ func TestSearchCallHonorsCallerCancellation(t *testing.T) {
 
 func TestSearchWorkerLimitSurvivesTimeoutAndReleases(t *testing.T) {
 	c := newSearchCache()
+	clock := cacheClock(c.browseCache)
 	release := make(chan struct{})
 	closeRelease := sync.OnceFunc(func() { close(release) })
 	defer closeRelease()
@@ -228,7 +230,11 @@ func TestSearchWorkerLimitSurvivesTimeoutAndReleases(t *testing.T) {
 			t.Fatalf("expected timeout: %v", err)
 		}
 	}
-	if _, err := c.call(context.Background(), "spotify", "stuck", "tracks", blocked); err == nil || calls.Load() != 2 {
+	clock.Add(int64(searchTimeout))
+	key := browseKey("spotify", "stuck", "search-tracks", "last-keystroke")
+	if _, err := c.get(context.Background(), key, func(ctx context.Context) (browseData, error) {
+		return c.call(ctx, "spotify", "stuck", "tracks", blocked)
+	}); !errors.Is(err, errBrowseBusy) || calls.Load() != 2 {
 		t.Fatal("timed-out workers released slots before exiting")
 	}
 	quick := func(context.Context) (browseData, error) { return browseFixture("healthy"), nil }
@@ -248,7 +254,46 @@ func TestSearchWorkerLimitSurvivesTimeoutAndReleases(t *testing.T) {
 			t.Fatal("completed workers did not release slots")
 		}
 	}
-	if _, err := c.call(context.Background(), "spotify", "stuck", "tracks", quick); err != nil {
+	if _, err := c.get(context.Background(), key, func(ctx context.Context) (browseData, error) { return c.call(ctx, "spotify", "stuck", "tracks", quick) }); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSearchWorkerLimitAllowsHealthyTyping(t *testing.T) {
+	c := newSearchCache()
+	started := make(chan struct{}, 4)
+	release := make(chan struct{})
+	closeRelease := sync.OnceFunc(func() { close(release) })
+	defer closeRelease()
+	done := make(chan error, 4)
+	for i := range 4 {
+		go func() {
+			_, err := c.get(context.Background(), browseKey("spotify", "owner", "search-tracks", strconv.Itoa(i)), func(ctx context.Context) (browseData, error) {
+				return c.call(ctx, "spotify", "owner", "tracks", func(context.Context) (browseData, error) {
+					started <- struct{}{}
+					<-release
+					return browseFixture("healthy"), nil
+				})
+			})
+			done <- err
+		}()
+	}
+	for range 4 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("normal concurrent keystrokes rejected as hung workers")
+		}
+	}
+	closeRelease()
+	for range 4 {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("healthy query did not finish")
+		}
 	}
 }
