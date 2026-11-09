@@ -278,7 +278,7 @@ SSH 需要播放機的 root 存取權限。USB Fastboot 需要另外安裝 `fast
 3. 重開機後 Engine 先以原廠方式啟動一次，隨後自動以 EngineX OS 重新啟動。之後 `設定 → 裝置` 裡會出現 EngineX 的選項（`語言`、`電源 → 關機` 等）。
 
 **方法二：電腦端 Fastboot 線刷**。只在機器上沒有 shell 時使用。需要一台裝有 `python3`、`e2fsprogs`（`debugfs`）和 `fastboot` 的 Linux 電腦（或 Windows WSL 以 root 執行）。
-- **建議做法（EngineX-Installer 自動處理）**：直接執行安裝器。它能自動識別 fastboot 模式下的播放機，自動建立並格式化出廠預設 `/data` 分割區、注入資料包並刷入（內建設定與曲庫清空，外接隨身碟與 SD 卡不受影響）。若已有該機型的完整 `/data` 備份，可透過 `--userdata-backup <映像>` 保留原有資料。後續還原原廠只需移除資料包，不依賴初次刷機前的預先備份。
+- **建議做法（EngineX-Installer 自動處理）**：直接執行安裝器。它能自動識別 fastboot 模式下的播放機，自動建立並格式化出廠預設 `/data` 分割區、注入資料包並刷入（**播放機 `/data` 裡的音樂、曲庫與設定會被清空**，安裝器會要求輸入 `yes` 確認；外接隨身碟與 SD 卡不受影響）。若已有這台播放機自己的完整 `/data` 備份，可透過 `--userdata-backup <映像>` 保留原有資料。後續還原原廠只需移除資料包，不依賴初次刷機前的預先備份。
 - **手動操作（需已有 `/data` 分割區備份）**：
   1. 備份原檔不動，在副本上操作：`cp my-userdata-backup.img userdata-enginex.img`
   2. 在電腦上解壓資料包，再把它注入副本（兩個輔助腳本在包裡）：

@@ -278,7 +278,7 @@ SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboo
 3. 重启后 Engine 先以原厂方式启动一次，随后自动以 EngineX OS 重新启动。之后 `设置 → 设备` 里会出现 EngineX 的选项（`语言`、`电源 → 关机` 等）。
 
 **方法二：电脑端 Fastboot 线刷**。只在机器上没有 shell 时使用。需要一台装有 `python3`、`e2fsprogs`（`debugfs`）和 `fastboot` 的 Linux 电脑（或 Windows WSL 以 root 运行）。
-- **推荐做法（EngineX-Installer 自动处理）**：直接运行安装器。它能自动识别 fastboot 模式下的碟机，自动建立并格式化出厂默认 `/data` 分区、注入数据包并刷入（内置设置与曲库清空，外接 U 盘与 SD 卡不受影响）。若已有该机型的完整 `/data` 备份，可通过 `--userdata-backup <镜像>` 保留原有数据。后续回退原厂只需移除数据包，不依赖初次刷机前的预先备份。
+- **推荐做法（EngineX-Installer 自动处理）**：直接运行安装器。它能自动识别 fastboot 模式下的碟机，自动建立并格式化出厂默认 `/data` 分区、注入数据包并刷入（**碟机 `/data` 里的音乐、曲库和设置会被清空**，安装器会要求输入 `yes` 确认；外接 U 盘与 SD 卡不受影响）。若已有这台碟机自己的完整 `/data` 备份，可通过 `--userdata-backup <镜像>` 保留原有数据。后续回退原厂只需移除数据包，不依赖初次刷机前的预先备份。
 - **手动操作（需已有 `/data` 分区备份）**：
   1. 备份原件不动，在副本上操作：`cp my-userdata-backup.img userdata-enginex.img`
   2. 在电脑上解压数据包，再把它注入副本（两个辅助脚本在包里）：
