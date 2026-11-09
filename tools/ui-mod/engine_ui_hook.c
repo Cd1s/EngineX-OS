@@ -487,7 +487,7 @@ struct engine_edit {
     uint32_t size;
     int group; // all sites of a group are applied together or not at all
 };
-enum { EDIT_ONE, EDIT_STEMS, EDIT_GATEWAY };
+enum { EDIT_ONE, EDIT_STEMS, EDIT_GATEWAY, EDIT_AUX, EDIT_GROUP_COUNT };
 
 // Everything that differs between Engine builds. The hook only patches a build
 // listed here (exact GNU BuildID), and every site is checked byte for byte first.
@@ -1150,6 +1150,114 @@ static int install_dsp_hooks(uintptr_t base, size_t page) {
 static const char *four_deck_settings = UI_ROOT "/settings.conf";
 static const char *product_code_path = "/sys/firmware/devicetree/base/inmusic,product-code";
 
+// #171, only b946c3b8 / JP21. This Engine passes pairs of float pointers in
+// MixerBuffers, rather than the AudioBuffer stack objects in the older analysis.
+// Keep the capture pointers intact until BOTH native LineInChannels have read
+// them; only the two legacy AuxMic2 inputs receive silence. No Qt, allocation,
+// lock, I/O or control-property writes run on the audio thread.
+static uint32_t aux_process_jump[2], aux_control_jump[2];
+static void (*aux_process_native)(void *, void *);
+static void (*aux_control_native)(void *, void *, uintptr_t, uintptr_t);
+static int aux_input_select = -1; // unknown / startup is denied
+static int aux_ready;
+
+static int sclive4_board(void) {
+    char code[16] = "";
+    FILE *f = fopen(product_code_path, "r");
+    if (f) {
+        if (!fgets(code, sizeof code, f)) code[0] = 0;
+        fclose(f);
+    }
+    code[strcspn(code, "\r\n")] = 0;
+    return !strcmp(code, "JP21"); // JP21X and JP20 are deliberately excluded
+}
+
+static float **aux_output(void *channel) {
+    if (!channel) return NULL;
+    void *graph = *(void **)((char *)channel + 0x2c);
+    if (!graph) return NULL;
+    void *buffers = *(void **)((char *)graph + 8);
+    return buffers ? *(float ***)((char *)buffers + 0x0c) : NULL;
+}
+
+static void aux_zero(float **pair, unsigned frames) {
+    memset(pair[0], 0, (size_t)frames * sizeof(float));
+    if (pair[1] != pair[0]) memset(pair[1], 0, (size_t)frames * sizeof(float));
+}
+
+static void sclive_aux_process(void *mixer, void *buffers) {
+    char *m = mixer;
+    float **io = buffers;
+    void **channels = *(void ***)(m + 0x40);
+    unsigned count = *(unsigned *)(m + 0x18);
+    if (count < 4 || !channels || !channels[2] || !channels[3] ||
+        (!__atomic_load_n((uchar *)channels[2] + 0x7a, __ATOMIC_RELAXED) &&
+         !__atomic_load_n((uchar *)channels[3] + 0x7a, __ATOMIC_RELAXED))) {
+        aux_process_native(mixer, buffers);
+        return;
+    }
+    unsigned frames = *(unsigned *)((char *)buffers + 0x140);
+    // These are Engine's own, correctly sized output buffers. Borrowing them
+    // for zero input avoids a fixed-size scratch buffer or an audio allocation.
+    float **zero[4];
+    for (unsigned i = 0; i < 4; i++) {
+        zero[i] = aux_output(*(void **)(m + 0x9c + i * 4));
+        if (!zero[i] || !zero[i][0] || !zero[i][1]) {
+            aux_process_native(mixer, buffers);
+            return;
+        }
+    }
+    float *saved[8];
+    memcpy(saved, io + 0x2e, sizeof saved); // Mic2, Aux, LineIn3, LineIn4
+    int selected = __atomic_load_n(&aux_input_select, __ATOMIC_ACQUIRE);
+    // Save the raw pre-gate capture pair BEFORE silencing the legacy inputs.
+    float *left = io[0x30], *right = io[0x31];
+    for (unsigned i = 0; i < 4; i++) {
+        if (i < 2 || selected != 1 || !left || !right) aux_zero(zero[i], frames);
+        io[0x2e + i * 2] = i >= 2 && selected == 1 && left && right ? left : zero[i][0];
+        io[0x2f + i * 2] = i >= 2 && selected == 1 && left && right ? right : zero[i][1];
+    }
+    aux_process_native(mixer, buffers);
+    memcpy(io + 0x2e, saved, sizeof saved);
+}
+
+static void sclive_aux_changed(void *control, void *property, uintptr_t a, uintptr_t b) {
+    // Only a selector transition revokes the input. The ON button must not
+    // interrupt LineIn. -2 also prevents a nested startup event publishing an
+    // intermediate selector value before the native transition finishes.
+    int selecting = property == *(void **)((char *)control + 0x78);
+    if (selecting) __atomic_store_n(&aux_input_select, -2, __ATOMIC_RELEASE);
+    aux_control_native(control, property, a, b);
+    if (selecting || __atomic_load_n(&aux_input_select, __ATOMIC_ACQUIRE) == -1) {
+        int selected = *(int *)((char *)control + 0x88);
+        __atomic_store_n(&aux_input_select, selected == 1 ? 1 : 0, __ATOMIC_RELEASE);
+    }
+}
+
+A32_ONLY static void prepare_aux(uintptr_t base, size_t page) {
+    aux_ready = 0;
+    aux_process_jump[1] = aux_control_jump[1] = 0;
+    if (strcmp(build->name, "5.3.0-sclive4") || !sclive4_board()) return;
+    // The config and both routing sites are one prerequisite set. A mismatch
+    // leaves the feature disabled, including hasSoftwareLineIn / Mixer Menu.
+    for (unsigned i = 0; i < build->edit_count; i++) {
+        const struct engine_edit *e = &build->edits[i];
+        if ((e->group == EDIT_AUX || e->group == EDIT_STEMS) &&
+            memcmp((void *)(base + e->offset), e->expected, e->size)) return;
+    }
+    uint32_t process[] = {0xe16d42f4, 0xe1cd60f8, 0xe51ff004, (uint32_t)(base + 0xcbd974)};
+    aux_process_native = rx_code(process, sizeof process, page);
+    // Displaced ldr ip is PC-relative. Replay its literal value, then return
+    // before the original add ip,pc,ip so the PIC calculation stays native.
+    uint32_t control[] = {0xe16d41f8, 0xe59fc004, 0xe59ff004, 0xe320f000,
+                         *(uint32_t *)(base + 0xdba74c), (uint32_t)(base + 0xdba45c)};
+    aux_control_native = rx_code(control, sizeof control, page);
+    aux_process_jump[0] = aux_control_jump[0] = 0xe51ff004;
+    aux_process_jump[1] = (uint32_t)(uintptr_t)sclive_aux_process;
+    aux_control_jump[1] = (uint32_t)(uintptr_t)sclive_aux_changed;
+    aux_ready = 1;
+}
+
 // The standalone players (SC5000, SC5000M, SC6000, SC6000M).
 static int player_board(void) {
     char code[8] = "";
@@ -1262,6 +1370,12 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         four_deck_pad_on = player_board();
         four_deck_role();
         fprintf(stderr, "engine-ui-hook: 4-deck layout unlocked (#49)\n");
+    }
+    if (aux_ready) {
+        // hasMixerMenu is UI +9, root +0x4d1 (QVariant registration
+        // 0x15a612c), rather than the older report's root +0x4c9.
+        const uint32_t aux[] = {0xe3a02001, 0xe5c02026, 0xe5c024d1, 0xe3a02000};
+        memcpy(code + 8, aux, sizeof aux);
     }
     config_jump[0] = 0xe51ff004;
     config_jump[1] = (uint32_t)(uintptr_t)rx_code(code, sizeof code, page);
@@ -1422,6 +1536,8 @@ static const struct engine_edit edits_530[] = {
 };
 
 static const struct engine_edit edits_sclive[] = {
+    {0xcbd96cu, "\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", (const char *)aux_process_jump, 8, EDIT_AUX},
+    {0xdba454u, "\xf8\x41\x6d\xe1\xec\xc2\x9f\xe5", (const char *)aux_control_jump, 8, EDIT_AUX},
     {0x8ba000u, "\xc0\x26\x9f\xe5\xc0\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x98\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
         "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x47\x9c\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
     {0x8bbaa4u, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
@@ -1538,13 +1654,16 @@ __attribute__((constructor)) static void edit_engine(void) {
     uintptr_t page = (uintptr_t)page_size;
     fprintf(stderr, "engine-ui-hook: Engine %s\n", build->name);
 #if !defined(__aarch64__)
+    prepare_aux(base, page);
     prepare_config(base, page);
     uint32_t expected_feature[2] = {build->feature_displaced ? build->feature_displaced : 0xe51b3340, 0xe3540000};
     if (build->feature_true && !memcmp((const void *)(base + build->feature_site), expected_feature, 8))
         prepare_stems_feature(base, page);
 #endif
     // A group is applied only if every site of it is stock or already patched.
-    int ready[3] = {1, 1, 1};
+    int ready[EDIT_GROUP_COUNT];
+    for (unsigned i = 0; i < EDIT_GROUP_COUNT; i++) ready[i] = 1;
+    ready[EDIT_AUX] = aux_ready;
     for (unsigned i = 0; i < build->edit_count; i++)
         if (!edit_state(base, &build->edits[i])) ready[build->edits[i].group] = 0;
     for (unsigned i = 0; i < build->edit_count; i++) {

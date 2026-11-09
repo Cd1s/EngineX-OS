@@ -37,7 +37,7 @@ if [ ! -d "$ROOTFS" ]; then
     exit 1
 fi
 
-TMP=$(mktemp -d /tmp/sclive4-sbx-XXXXXX)
+TMP=$(mktemp -d "${BOOTSTRAP_TMP_PARENT:-/tmp}/sclive4-sbx-XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
 echo "=== $PREFIX Bootstrap & Installer Verification ==="
