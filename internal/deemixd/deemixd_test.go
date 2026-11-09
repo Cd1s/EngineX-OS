@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -315,5 +316,16 @@ func TestMissingDownloadDirectoryIsNotRecreated(t *testing.T) {
 	}
 	if _, err := os.Stat(d.downloadDir); !os.IsNotExist(err) {
 		t.Fatal("missing SD directory was recreated")
+	}
+}
+
+func TestMainExitsCleanlyWhenPortIsTaken(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:6595")
+	if err != nil {
+		t.Skipf("port 6595 unavailable: %v", err)
+	}
+	defer l.Close()
+	if err := Main([]string{"-state-dir", t.TempDir(), "-download-dir", t.TempDir()}); err != nil {
+		t.Fatalf("second instance must exit 0 so systemd does not respawn it: %v", err)
 	}
 }
