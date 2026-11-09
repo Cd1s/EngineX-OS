@@ -1333,6 +1333,7 @@ SERVICES_MAIN = """
 		}
 	}
 	property bool scBeatJumpPads: false
+	property bool scMixstreamSweepOpen: false
 	property string scPioneerFx: "off"
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
@@ -3936,6 +3937,106 @@ def edits(dev: bool):
     }
     if v53():
         scaled[v + "MainView/Fx/DJFxSelectCarousel.qml"] = size
+        # Keep the stock carousel, entries, controls and native popup selection.
+        # A touch tap latches it open; the hardware Selecting property is a
+        # momentary hold on consoles with a physical Sweep FX button.
+        scaled[v + "MainView/Fx/SweepFxSelectCarousel.qml"] = [
+            ('Loader {\n', '''Loader {
+    id: scSweepCarousel
+    readonly property bool scTouchOpen: Config.audio.fx.hasNHFx && typeof root !== "undefined" && root.scMixstreamSweepOpen
+'''),
+            ('visible: view.popup.visible\n', 'visible: view.popup.visible || scSweepCarousel.scTouchOpen\n'),
+            ('hasCloseButton: view.popup.hasCloseButton\n', 'hasCloseButton: view.popup.hasCloseButton || scSweepCarousel.scTouchOpen\n'),
+            ('onAccepted: result => view.popup.select(result)\n', '''onAccepted: result => {
+            if (scSweepCarousel.scTouchOpen) {
+                // Native model order differs from SweepEffect's wire values.
+                // The hold-button adapter has no active selection on a touch
+                // tap; write the same native Type property as SweepFxSelect.
+                const types = {"Filter": 1, "Wash": 2, "Dub Echo": 3, "Noise": 5, "Filter Roll": 4}
+                const type = types[view.popup.entries[result]]
+                if (type !== undefined) for (let ch = 1; ch <= 2; ch++) {
+                    const p = Planck.getProperty("/Engine/Mixer/Channel" + ch + "/SweepFx/Type")
+                    if (p && p.translator) p.translator.unnormalized = type
+                }
+                root.scMixstreamSweepOpen = false
+            } else view.popup.select(result)
+        }
+'''),
+            ('onRejected: view.popup.abort()\n', '''onRejected: {
+            if (scSweepCarousel.scTouchOpen) root.scMixstreamSweepOpen = false
+            view.popup.abort()
+        }
+'''),
+        ]
+        # #166: the compact Numark decks have four pads and no Stems EQ key.
+        # Leave hardware pad modes alone; the preference selects a touch bank.
+        scaled[ROOT + "Items/Pads/Pads.qml"].extend([
+            ('    required property int deckIndex\n', '''    required property int deckIndex
+    readonly property bool scMixstream: Config.audio.fx.hasNHFx
+    readonly property bool scBeatJumpBank: scMixstream && Config.audio.deck.hasBeatJump && typeof root !== "undefined" && !!root.scBeatJumpPads
+    readonly property var scStripProperty: scMixstream ? Planck.getProperty("/Engine/Mixer/Channel" + deckIndex + "/ChannelStrip/Mode") : null
+    readonly property var scStripMode: scStripProperty ? scStripProperty.translator : null
+    function scJump(action) {
+        const p = Planck.getProperty("/Engine/Deck" + deckIndex + "/Track/BeatJump/" + action)
+        if (p && p.translator) p.translator.state = true
+    }
+'''),
+            ('        GridLayout {\n            id: padsLayout\n', '''        ColumnLayout {
+            visible: pads.scMixstream
+            Layout.preferredWidth: 84
+            Layout.fillHeight: true
+            Layout.topMargin: 16
+            Layout.bottomMargin: 16
+            spacing: 4
+            Button {
+                objectName: "MixstreamSweepFx" + pads.deckIndex
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                text: "SWEEP FX"
+                enabled: Config.ui.hasSweepFxSelectionPopup
+                onClicked: root.scMixstreamSweepOpen = true
+            }
+            Button {
+                objectName: "MixstreamStemsEq" + pads.deckIndex
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                text: "EQ / STEMS"
+                highlighted: !!pads.scStripMode && pads.scStripMode.index === 1
+                enabled: Config.audio.hasStemsLevel && !!pads.scStripMode
+                onClicked: pads.scStripMode.index = pads.scStripMode.index === 1 ? 0 : 1
+            }
+        }
+
+        RowLayout {
+            objectName: "MixstreamBeatJumpBank" + pads.deckIndex
+            visible: pads.scBeatJumpBank
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.margins: 16
+            spacing: 4
+            Repeater {
+                model: [
+                    {label: "Jump −", action: "JumpBack"},
+                    {label: "Jump +", action: "JumpForward"},
+                    {label: "½", action: "BeatJumpHalve"},
+                    {label: "×2", action: "BeatJumpDouble"}
+                ]
+                delegate: Button {
+                    required property var modelData
+                    objectName: "Mixstream" + modelData.action + pads.deckIndex
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    text: modelData.label
+                    onClicked: pads.scJump(modelData.action)
+                }
+            }
+        }
+
+        GridLayout {
+            id: padsLayout
+            visible: !pads.scBeatJumpBank
+'''),
+        ])
         # Pad LED Brightness on the hardware pads. The controller QML runs in its own engine
         # (no `root`), so its one GlobalAssignmentConfig reads ledBrightness from stream-sync
         # and the pad LEDs scale what ColorOutputAssignment sends.
