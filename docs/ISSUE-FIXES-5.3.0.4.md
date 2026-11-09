@@ -34,3 +34,10 @@
 - 回滚点：`v5.3.0.3`（构建提交 `37e83ea`）
 - 实机影响与升级说明
 - 本次包含的所有关联 GitHub Issues 逐条留言（#49、#105、#135、#147、#150）
+
+## 2026-11-10：#164 Mixstream Pro+ (NH08S) 真机安装验证与后续
+
+- **真机结果**：提问者在 NH08S 上用 WSL 2 + usbipd-win + fastboot（root）和 PR #173 的 Linux 版安装器完整刷入 5.3.0.3：识别 `rk3288-az05-nh08s`，data 分区 2,413,280,768 字节写入约 74 秒，`INSTALLER_EXIT=0`，开机后 `:8080` 出现 Stream Sync 控制台，首次开机钩子激活正常。这是 NH08S 第一例安装；`SO_REUSEADDR` 修复与 `gen2USB` 识别也在真机上得到确认。
+- **改动**：`isDeckUI()` 在 `/v1/sc5000/ui` 返回 403/401（控制台要访问码）时，改看 `/` 上的登录页是否是 `<title>Stream Sync</title>`，认得出已装 EngineX 的碟机，避免局域网发现和 OTA 发现漏掉它；单测 `TestIsDeckUIRecognisesTheLoginPage` 覆盖 JSON、403/401 加登录页、别家 403、404、200 非 JSON。官网安装章节补上经真机验证的 WSL + usbipd-win 步骤和 fastboot 的 AVB 提示说明。
+- **不改**：NH08S 不发 StageLinQ `airD`，局域网发现只能靠 EAAS 线索，属于板子本身的特性；fastboot 的 `avb footer` 提示是 fastboot 对非 AVB 镜像的探测输出，刷机会自动跳过。
+- **未验证**：OTA 在线升级、`uninstall.sh`、#166 的 Mixstream Filter 旋钮 / FX 还没有在 NH08S 真机上验证（提问者表示愿意测）。

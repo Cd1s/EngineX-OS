@@ -386,7 +386,8 @@ func localSubnets() []string {
 	return out
 }
 
-// isDeckUI is true when host answers /v1/sc5000/ui with a JSON object: EngineX's web UI.
+// isDeckUI is true when host is EngineX's web UI: /v1/sc5000/ui answers with a JSON object, or
+// (403/401 when the console asks for its access code) the login page on / is the Stream Sync one (#164).
 func isDeckUI(c *http.Client, host string, port int) bool {
 	resp, err := c.Get(fmt.Sprintf("http://%s:%d/v1/sc5000/ui", host, port))
 	if err != nil {
@@ -394,7 +395,19 @@ func isDeckUI(c *http.Client, host string, port int) bool {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return resp.StatusCode == 200 && bytes.HasPrefix(bytes.TrimSpace(body), []byte("{"))
+	if resp.StatusCode == http.StatusOK {
+		return bytes.HasPrefix(bytes.TrimSpace(body), []byte("{"))
+	}
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+	page, err := c.Get(fmt.Sprintf("http://%s:%d/", host, port))
+	if err != nil {
+		return false
+	}
+	defer page.Body.Close()
+	html, _ := io.ReadAll(io.LimitReader(page.Body, 2048))
+	return page.StatusCode == http.StatusOK && bytes.Contains(html, []byte("<title>Stream Sync</title>"))
 }
 
 // scanLAN probes every host of the /24s with 64 workers.
