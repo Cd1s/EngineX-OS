@@ -100,10 +100,11 @@ type uiSettings struct {
 	LedBrightness     int    `json:"ledBrightness"`
 	// UIScale enlarges or shrinks Engine's whole interface; it takes effect at the next
 	// Engine start, so the Control Center row asks before applying it.
-	UIScale      int    `json:"uiScale"`
-	StemsEqMode  bool   `json:"stemsEqMode"`
-	BeatJumpPads bool   `json:"beatJumpPads"`
-	PioneerFx    string `json:"pioneerFx"`
+	UIScale             int    `json:"uiScale"`
+	StemsEqMode         bool   `json:"stemsEqMode"`
+	BeatJumpPads        bool   `json:"beatJumpPads"`
+	PioneerFx           string `json:"pioneerFx"`
+	FXSelectorAvailable bool   `json:"fxSelectorAvailable"`
 
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
@@ -472,6 +473,7 @@ func (s *Server) scope() string {
 func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
+	v.FXSelectorAvailable = s.fxSelectorAvailable()
 	s.uiMu.Unlock()
 	v.BroadcastEnabled = s.BroadcastEnabled()
 	if ver := s.installedVersion(); ver != "" && ver != "dev" {
@@ -517,6 +519,10 @@ func parseBoolParam(val string) (bool, bool) {
 // safe mode: the user has asked for the UI to be tried again.
 func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if q.Has("fxUnit") || q.Has("fxMode") {
+		s.fxSelectorUpdate(w, r, q)
+		return
+	}
 	if r.Body != nil && strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {

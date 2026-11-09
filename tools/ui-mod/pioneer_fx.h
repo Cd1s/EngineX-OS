@@ -33,6 +33,9 @@ struct sc_pioneer_fx {
     float buf_r[SC_PFX_RING_SIZE];
     uint32_t write_pos;
     int active_mode;
+    /* Zero preserves the legacy AZ04 master effect exactly. */
+    int controlled;
+    float time, parameter;
 
     /* Spiral: variable fractional delay pitch-shifting feedback delay */
     float spiral_head_a;   /* fractional head offset [0, W) */
@@ -195,6 +198,11 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
         memset(s->ap3_r, 0, sizeof(s->ap3_r));
     }
 
+    const float time = s->controlled ? s->time : 0.5f;
+    const float param = s->controlled ? s->parameter : 0.5f;
+    const float delay = s->controlled ? 4800.0f + time * 38400.0f : 24000.0f;
+    const float feedback = s->controlled ? 0.15f + param * 0.70f : 0.68f;
+    const uint32_t roll_frames = s->controlled ? 512u + (uint32_t)(time * (SC_PFX_ROLL_FRAMES - 512u)) : SC_PFX_ROLL_FRAMES;
     uint32_t wpos = s->write_pos;
 
     for (unsigned i = 0; i < frames; i++) {
@@ -205,9 +213,9 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
         switch (mode) {
         case SC_PFX_SPIRAL: {
             /* Spiral: variable fractional delay pitch-shifting recirculation delay */
-            const float D = 24000.0f;
+            const float D = delay;
             const float W = 4096.0f;
-            const float speed = 0.05f; /* pitch upward shift increment per sample */
+            const float speed = s->controlled ? 0.005f + param * 0.15f : 0.05f; /* pitch upward shift increment per sample */
 
             float pA = s->spiral_head_a / W;
             float pB = pA + 0.5f;
@@ -231,8 +239,8 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
             if (s->spiral_head_a >= W)
                 s->spiral_head_a -= W;
 
-            float fb_l = sc_pfx_soft_sat(dl * 0.68f);
-            float fb_r = sc_pfx_soft_sat(dr * 0.68f);
+            float fb_l = sc_pfx_soft_sat(dl * feedback);
+            float fb_r = sc_pfx_soft_sat(dr * feedback);
 
             s->buf_l[wpos] = sc_pfx_state(in_l + fb_l);
             s->buf_r[wpos] = sc_pfx_state(in_r + fb_r);
@@ -244,7 +252,7 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
 
         case SC_PFX_PITCH_ECHO: {
             /* Pitch Echo: dual harmonic octave/fifth pitch-shifted delay with 1st-order low-pass */
-            const float D = 24000.0f;
+            const float D = delay;
             const float W1 = 3072.0f; /* Fifth window */
             const float W2 = 2048.0f; /* Octave window */
 
@@ -284,8 +292,8 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
             s->pe_lp_l = sc_pfx_state(s->pe_lp_l + 0.40f * (mix_l - s->pe_lp_l));
             s->pe_lp_r = sc_pfx_state(s->pe_lp_r + 0.40f * (mix_r - s->pe_lp_r));
 
-            float fb_l = sc_pfx_soft_sat(s->pe_lp_l * 0.65f);
-            float fb_r = sc_pfx_soft_sat(s->pe_lp_r * 0.65f);
+            float fb_l = sc_pfx_soft_sat(s->pe_lp_l * (s->controlled ? feedback : 0.65f));
+            float fb_r = sc_pfx_soft_sat(s->pe_lp_r * (s->controlled ? feedback : 0.65f));
 
             s->buf_l[wpos] = sc_pfx_state(in_l + fb_l);
             s->buf_r[wpos] = sc_pfx_state(in_r + fb_r);
@@ -298,12 +306,23 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
         case SC_PFX_SLIP_ROLL: {
             /* Slip Roll: 12000-frame slice repeater with 64-frame crossfade & background timeline */
             float mag = (in_l < 0.0f ? -in_l : in_l) + (in_r < 0.0f ? -in_r : in_r);
+            if (s->controlled && s->roll_active) {
+                if (roll_frames > s->roll_captured + SC_PFX_ROLL_XFADE) {
+                    // A longer slice must capture live audio, rather than play
+                    // the zero-filled, never-captured part of the buffer.
+                    s->roll_active = 0; s->roll_captured = 0; s->roll_play_pos = 0;
+                } else if (s->roll_captured < roll_frames) {
+                    s->roll_buf_l[s->roll_captured] = in_l;
+                    s->roll_buf_r[s->roll_captured++] = in_r;
+                }
+            }
             if (!s->roll_active) {
                 if (s->roll_captured > 0 || mag > 1.0e-4f) {
+                    if (s->roll_captured >= roll_frames) s->roll_captured = 0;
                     s->roll_buf_l[s->roll_captured] = in_l;
                     s->roll_buf_r[s->roll_captured] = in_r;
                     s->roll_captured++;
-                    if (s->roll_captured == SC_PFX_ROLL_FRAMES) {
+                    if (s->roll_captured >= roll_frames) {
                         s->roll_active = 1;
                         s->roll_play_pos = 0;
                     }
@@ -312,18 +331,19 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
                 out_r = in_r;
             } else {
                 uint32_t p = s->roll_play_pos;
+                if (p >= roll_frames - SC_PFX_ROLL_XFADE) p = 0;
                 float rl = s->roll_buf_l[p];
                 float rr = s->roll_buf_r[p];
                 if (p < SC_PFX_ROLL_XFADE) {
                     float fade_in = (float)p / (float)SC_PFX_ROLL_XFADE;
                     float fade_out = 1.0f - fade_in;
-                    uint32_t tail_idx = SC_PFX_ROLL_FRAMES - SC_PFX_ROLL_XFADE + p;
+                    uint32_t tail_idx = roll_frames - SC_PFX_ROLL_XFADE + p;
                     rl = fade_in * rl + fade_out * s->roll_buf_l[tail_idx];
                     rr = fade_in * rr + fade_out * s->roll_buf_r[tail_idx];
                 }
                 /* Wrap before the tail: its last XFADE frames are only blended into the start,
                  * so the loop stays continuous (wrapping at FRAMES jumped back XFADE-1 samples). */
-                if (++p >= SC_PFX_ROLL_FRAMES - SC_PFX_ROLL_XFADE)
+                if (++p >= roll_frames - SC_PFX_ROLL_XFADE)
                     p = 0;
                 s->roll_play_pos = p;
                 out_l = rl;
@@ -337,7 +357,7 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
 
         case SC_PFX_DUB_ECHO: {
             /* Dub Echo: resonant bandpass (HPF + LPF) + tape saturation */
-            const uint32_t D = 24000u;
+            const uint32_t D = (uint32_t)delay;
             uint32_t rpos = (wpos >= D) ? (wpos - D) : (wpos + SC_PFX_RING_SIZE - D);
 
             float dl = s->buf_l[rpos];
@@ -357,8 +377,8 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
             float sat_l = sc_pfx_soft_sat(s->dub_lp_l * 1.35f);
             float sat_r = sc_pfx_soft_sat(s->dub_lp_r * 1.35f);
 
-            s->buf_l[wpos] = sc_pfx_state(in_l + sat_l * 0.68f);
-            s->buf_r[wpos] = sc_pfx_state(in_r + sat_r * 0.68f);
+            s->buf_l[wpos] = sc_pfx_state(in_l + sat_l * feedback);
+            s->buf_r[wpos] = sc_pfx_state(in_r + sat_r * feedback);
 
             out_l = in_l + s->dub_lp_l * 0.70f;
             out_r = in_r + s->dub_lp_r * 0.70f;
@@ -380,8 +400,10 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
 
             float sum_l = 0.0f, sum_r = 0.0f;
             for (int t = 0; t < 4; t++) {
-                uint32_t tl = (wpos >= tap_l[t]) ? (wpos - tap_l[t]) : (wpos + SC_PFX_RING_SIZE - tap_l[t]);
-                uint32_t tr = (wpos >= tap_r[t]) ? (wpos - tap_r[t]) : (wpos + SC_PFX_RING_SIZE - tap_r[t]);
+                uint32_t dl = s->controlled ? (uint32_t)((float)tap_l[t] * (0.2f + 1.5f * time)) : tap_l[t];
+                uint32_t tl = (wpos >= dl) ? (wpos - dl) : (wpos + SC_PFX_RING_SIZE - dl);
+                uint32_t dr = s->controlled ? (uint32_t)((float)tap_r[t] * (0.2f + 1.5f * time)) : tap_r[t];
+                uint32_t tr = (wpos >= dr) ? (wpos - dr) : (wpos + SC_PFX_RING_SIZE - dr);
                 sum_l += s->buf_l[tl];
                 sum_r += s->buf_r[tr];
             }
@@ -391,8 +413,8 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
             s->space_lp_l = sc_pfx_state(s->space_lp_l + 0.35f * (sum_l - s->space_lp_l));
             s->space_lp_r = sc_pfx_state(s->space_lp_r + 0.35f * (sum_r - s->space_lp_r));
 
-            float fb_l = sc_pfx_soft_sat(s->space_lp_l * 0.55f);
-            float fb_r = sc_pfx_soft_sat(s->space_lp_r * 0.55f);
+            float fb_l = sc_pfx_soft_sat(s->space_lp_l * (s->controlled ? feedback : 0.55f));
+            float fb_r = sc_pfx_soft_sat(s->space_lp_r * (s->controlled ? feedback : 0.55f));
 
             s->buf_l[wpos] = sc_pfx_state(d_l + fb_l);
             s->buf_r[wpos] = sc_pfx_state(d_r + fb_r);
@@ -415,6 +437,78 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
     }
 
     s->write_pos = wpos;
+}
+
+/* Selector instances own both banks; only their audio thread touches them.
+ * Crossfade wet signals for 256 frames, including rapid successive changes.
+ * Wet=0 is a literal bypass: even signed zero / NaN input bits are preserved.
+ * Controls are normalized. Time spans 50..450 ms at Engine's 96 kHz.
+ */
+struct sc_pfx_instance {
+    struct sc_pioneer_fx bank[2];
+    int mode, current;
+    unsigned fade;
+    float last_l, last_r, from_l, from_r;
+    float wet, time, parameter;
+};
+
+static inline float sc_pfx_unit(float x) {
+    return !(x >= 0.0f) ? 0.0f : (x > 1.0f ? 1.0f : x);
+}
+
+static inline void sc_pfx_instance_reset(struct sc_pfx_instance *s) {
+    /* Invalidate both banks without clearing megabytes on the callback. Each
+     * bank clears its own delay only when first rendered in a new mode. */
+    s->bank[0].active_mode = s->bank[1].active_mode = SC_PFX_OFF;
+    s->bank[0].write_pos = s->bank[1].write_pos = 0;
+    s->mode = SC_PFX_OFF; s->current = 0; s->fade = 0;
+    s->last_l = s->last_r = s->from_l = s->from_r = 0;
+    s->wet = s->time = s->parameter = 0;
+}
+
+static inline void sc_pfx_process(struct sc_pfx_instance *s, float *l, float *r,
+                                 unsigned frames, int mode, float time, float param, float wet) {
+    if (!s || !l || !r) return;
+    time = sc_pfx_unit(time); param = sc_pfx_unit(param); wet = sc_pfx_unit(wet);
+    if (mode < SC_PFX_OFF || mode > SC_PFX_SPACE) mode = SC_PFX_OFF;
+    if (mode == SC_PFX_OFF) wet = 0.0f;
+    if (mode != s->mode) {
+        s->mode = mode;
+        s->current ^= 1;
+        /* The inactive bank is reset by its first render; the previous bank
+         * keeps its delay tail throughout the crossfade. */
+        s->bank[s->current].active_mode = SC_PFX_OFF;
+        s->fade = 256;
+        s->from_l = s->last_l; s->from_r = s->last_r;
+    }
+    for (unsigned i = 0; i < frames; ++i) {
+        float dl = l[i], dr = r[i], nl = dl, nr = dr, ol = dl, or_ = dr;
+        s->time += (time - s->time) * (1.0f / 256.0f);
+        s->parameter += (param - s->parameter) * (1.0f / 256.0f);
+        s->wet += (wet - s->wet) * (1.0f / 256.0f);
+        struct sc_pioneer_fx *n = &s->bank[s->current], *o = &s->bank[s->current ^ 1];
+        n->controlled = 1; n->time = s->time; n->parameter = s->parameter;
+        sc_pioneer_fx_planar(n, &nl, &nr, 1, mode);
+        if (mode != SC_PFX_SLIP_ROLL) { nl -= dl; nr -= dr; }
+        if (!mode) nl = nr = 0.0f;
+        if (s->fade) {
+            int previous = o->active_mode;
+            sc_pioneer_fx_planar(o, &ol, &or_, 1, previous);
+            if (previous != SC_PFX_SLIP_ROLL) { ol -= dl; or_ -= dr; }
+            if (!previous) ol = or_ = 0.0f;
+            float a = (float)(256 - s->fade) / 256.0f;
+            /* Start at the actual last wet sample. This also handles another
+             * selection arriving before the preceding crossfade has finished. */
+            float old_l = previous ? s->from_l + a * (ol - s->from_l) : dl;
+            float old_r = previous ? s->from_r + a * (or_ - s->from_r) : dr;
+            nl = old_l + a * (nl - old_l); nr = old_r + a * (nr - old_r);
+            --s->fade;
+        }
+        s->last_l = sc_pfx_clamp_out(nl); s->last_r = sc_pfx_clamp_out(nr);
+        if (wet == 0.0f) continue;
+        l[i] = sc_pfx_clamp_out(dl * (1.0f - s->wet) + s->last_l * s->wet);
+        r[i] = sc_pfx_clamp_out(dr * (1.0f - s->wet) + s->last_r * s->wet);
+    }
 }
 
 #endif
