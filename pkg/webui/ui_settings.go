@@ -100,10 +100,11 @@ type uiSettings struct {
 	LedBrightness     int    `json:"ledBrightness"`
 	// UIScale enlarges or shrinks Engine's whole interface; it takes effect at the next
 	// Engine start, so the Control Center row asks before applying it.
-	UIScale      int    `json:"uiScale"`
-	StemsEqMode  bool   `json:"stemsEqMode"`
-	BeatJumpPads bool   `json:"beatJumpPads"`
-	PioneerFx    string `json:"pioneerFx"`
+	UIScale             int    `json:"uiScale"`
+	StemsEqMode         bool   `json:"stemsEqMode"`
+	BeatJumpPads        bool   `json:"beatJumpPads"`
+	PioneerFx           string `json:"pioneerFx"`
+	FXSelectorAvailable bool   `json:"fxSelectorAvailable"`
 
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
@@ -433,7 +434,7 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.BeatJumpPads {
 		text += "beat_jump_pads=1\n"
 	}
-	if v.PioneerFx != "" && v.PioneerFx != "off" {
+	if !s.fxSelectorAvailable() && v.PioneerFx != "" && v.PioneerFx != "off" {
 		text += "pioneer_fx=" + v.PioneerFx + "\n"
 	}
 	if v.GitHubRepo != defaultGitHubRepo {
@@ -462,6 +463,47 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	return writeUIScaleEnv(v.UIScale)
 }
 
+// Caller holds uiMu. Preserve unrelated/unknown settings during migration.
+func (s *Server) migratePioneerFX() error {
+	path := filepath.Join(s.uiDir(), "settings.conf")
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(b), "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "pioneer_fx=") {
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == len(lines) {
+		return nil
+	}
+	f, err := os.CreateTemp(s.uiDir(), ".fx-settings-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	_, err = f.WriteString(strings.Join(kept, "\n"))
+	if err == nil {
+		err = f.Sync()
+	}
+	if ce := f.Close(); err == nil {
+		err = ce
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(f.Name(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
 // scope is the service the deck's native browser currently shows.
 func (s *Server) scope() string {
 	s.uiMu.Lock()
@@ -472,6 +514,13 @@ func (s *Server) scope() string {
 func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
+	v.FXSelectorAvailable = s.fxSelectorAvailable()
+	if v.FXSelectorAvailable {
+		if err := s.migratePioneerFX(); err != nil {
+			log.Printf("FX selector settings migration: %v", err)
+		}
+		v.PioneerFx = "off"
+	}
 	s.uiMu.Unlock()
 	v.BroadcastEnabled = s.BroadcastEnabled()
 	if ver := s.installedVersion(); ver != "" && ver != "dev" {
@@ -526,6 +575,10 @@ func parseBoolParam(val string) (bool, bool) {
 // safe mode: the user has asked for the UI to be tried again.
 func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if q.Has("fxUnit") || q.Has("fxMode") {
+		s.fxSelectorUpdate(w, r, q)
+		return
+	}
 	if r.Body != nil && strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
