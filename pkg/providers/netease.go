@@ -362,8 +362,8 @@ func (n *Netease) Tracks(ctx context.Context, id string) ([]Track, error) {
 	if err := n.get(ctx, "/playlist/detail", url.Values{"id": {id}}, &p); err != nil {
 		return nil, err
 	}
-	var all []Track
-	for start := 0; start < len(p.Playlist.TrackIDs); start += 200 {
+	all, err := collectBatches(ctx, neteasePages, (len(p.Playlist.TrackIDs)+199)/200, func(batch int) ([]Track, error) {
+		start := batch * 200
 		ids := []string{}
 		for _, v := range p.Playlist.TrackIDs[start:min(start+200, len(p.Playlist.TrackIDs))] {
 			ids = append(ids, strconv.FormatInt(v.ID, 10))
@@ -372,12 +372,18 @@ func (n *Netease) Tracks(ctx context.Context, id string) ([]Track, error) {
 		if err := n.get(ctx, "/song/detail", url.Values{"ids": {strings.Join(ids, ",")}}, &r); err != nil {
 			return nil, err
 		}
+		var out []Track
 		for _, s := range r.Songs {
-			all = append(all, s.track())
+			out = append(out, s.track())
 		}
+		return out, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return all, nil
 }
+
 func (n *Netease) Search(ctx context.Context, query string) ([]Track, error) {
 	var r struct{ Result struct{ Songs []neSong } }
 	if err := n.get(ctx, "/cloudsearch", url.Values{"keywords": {query}, "type": {"1"}, "limit": {"30"}}, &r); err != nil {
