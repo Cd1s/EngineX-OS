@@ -354,6 +354,43 @@ func TestEAASListenerRejectsMalformedAndSelfBeacons(t *testing.T) {
 	}
 }
 
+// #164: listenEAAS and listenAirD must set SO_REUSEADDR so they can bind successfully
+// even when Engine DJ holds UDP 11224 and 51337 on the host.
+func TestDiscoveryListenersSharePortsWithSOReuseAddr(t *testing.T) {
+	o := testOpts(t)
+	port := freeUDPFromAddr(o.EAASAddr)
+	targetAddr := fmt.Sprintf("127.0.0.1:%d", port)
+	lc := net.ListenConfig{Control: setReuseControl}
+	pre, err := lc.ListenPacket(context.Background(), "udp4", targetAddr)
+	if err != nil {
+		t.Fatalf("failed to bind preexisting socket: %v", err)
+	}
+	defer pre.Close()
+
+	o.EAASAddr = targetAddr
+	o.AirDWait = 100 * time.Millisecond
+	_ = listenEAAS(o)
+	if out := o.Out.(*bytes.Buffer).String(); strings.Contains(out, "Cannot listen for EAAS") || strings.Contains(out, "无法监听 EAAS") {
+		t.Fatalf("listenEAAS logged bind error when port was shared:\n%s", out)
+	}
+
+	// Also verify listenAirD binds without error when port is shared
+	airDPort := freeUDPFrom(o)
+	airDAddr := fmt.Sprintf("127.0.0.1:%d", airDPort)
+	preAirD, err := lc.ListenPacket(context.Background(), "udp4", airDAddr)
+	if err != nil {
+		t.Fatalf("failed to bind preexisting airD socket: %v", err)
+	}
+	defer preAirD.Close()
+
+	o.AirDAddr = airDAddr
+	o.Out.(*bytes.Buffer).Reset()
+	_ = listenAirD(o)
+	if out := o.Out.(*bytes.Buffer).String(); strings.Contains(out, "Cannot listen for StageLinQ") || strings.Contains(out, "无法监听 StageLinQ") {
+		t.Fatalf("listenAirD logged bind error when port was shared:\n%s", out)
+	}
+}
+
 func TestRunWaitsForEAASCandidatesOnlyOnce(t *testing.T) {
 	o := testOpts(t)
 	o.Fastboot = "true"
@@ -1253,6 +1290,23 @@ exit 0
 	}
 }
 
+// #164: modern platform-tools (fastboot 35+) prints "fastboot: unknown option -- i";
+// fastbootDevices must stop after the first attempt and not try further fbVIDs.
+func TestFastbootStopsOnUnknownOption(t *testing.T) {
+	bin, log := logShim(t, `[ "$1" = -i ] && { echo "fastboot: unknown option -- i" >&2; exit 1; }
+exit 0
+`)
+	o := testOpts(t)
+	o.Fastboot = bin
+	o.defaults()
+	if s := fastbootDevices(ctxT(t), o); len(s) != 0 || o.fbVID != "" {
+		t.Errorf("serials = %v, fbVID = %q", s, o.fbVID)
+	}
+	if b, _ := os.ReadFile(log); strings.TrimSpace(string(b)) != "devices\n-i 0x15e4 devices" {
+		t.Errorf("calls:\n%s", b)
+	}
+}
+
 // #129: Linux fastboot without udev access lists "no permissions"; tell the user how to fix it, once.
 func TestFastbootNoPermissionsHint(t *testing.T) {
 	bin, _ := logShim(t, `printf '????????????\tno permissions (missing udev rules? user is in the plugdev group); see [http://developer.android.com/tools/device.html]\n'
@@ -1444,8 +1498,8 @@ Status:                     Started
 
 	diagnoseUSB(ctxT(t), o)
 	out := o.Out.(*bytes.Buffer).String()
-	if !strings.Contains(out, "15e4:303f") || !strings.Contains(out, "Numark MIXSTREAM PRO PLUS") || !strings.Contains(out, "Zadig") {
-		t.Errorf("diagnoseUSB did not give Zadig WinUSB hint for Mixstream Pro+:\n%s", out)
+	if !strings.Contains(out, "15e4:303f") || !strings.Contains(out, "Numark MIXSTREAM PRO PLUS") || !strings.Contains(out, "Zadig") || !strings.Contains(out, "{F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}") || !strings.Contains(out, "wsl -u root") {
+		t.Errorf("diagnoseUSB did not give Zadig WinUSB, Android GUID, and WSL root hint for Mixstream Pro+:\n%s", out)
 	}
 }
 
@@ -1503,8 +1557,47 @@ func TestBuildImageMissingMke2fsSaysWSL(t *testing.T) {
 	b := &bundleInfo{Path: "test.tar.gz", Version: "5.3.0.3"}
 	o := testOpts(t)
 	_, _, err := buildImage(ctxT(t), o, b, 64<<20, "test.img", "data")
-	if err == nil || !strings.Contains(err.Error(), "WSL") || !strings.Contains(err.Error(), "mke2fs") {
-		t.Fatalf("buildImage without mke2fs err = %v, want WSL / mke2fs guide", err)
+	if err == nil || !strings.Contains(err.Error(), "wsl -u root") || !strings.Contains(err.Error(), "fastboot") || !strings.Contains(err.Error(), "mke2fs") {
+		t.Fatalf("buildImage without mke2fs err = %v, want wsl -u root, fastboot, and mke2fs guide", err)
+	}
+}
+
+func TestRunUninstallSkipsFastbootAndUSB(t *testing.T) {
+	fb := newFastboot(t, "nh08s", true)
+	o := testOpts(t)
+	o.Uninstall = true
+	o.Fastboot = fb.Bin
+	o.ListUSB = func(context.Context) string { return "1cc5:2027 Rane SYSTEM ONE\n" }
+	err := run(ctxT(t), o)
+	if err == nil || !strings.Contains(err.Error(), "--uninstall") {
+		t.Fatalf("run with --uninstall while USB/fastboot present err = %v, want uninstall network SSH error", err)
+	}
+}
+
+func TestModeAUninstallFailsFastWithoutCallingModeAB(t *testing.T) {
+	fb := newFastboot(t, "nh08s", true)
+	o := testOpts(t)
+	o.Uninstall = true
+	o.Fastboot = fb.Bin
+
+	// Case 1: LAN deck discovered but SSH fails -> must NOT call modeAB or flash
+	d := deck{Name: "Denon DJ SC LIVE 4", IP: "127.0.0.1", Board: "jp21", Known: true}
+	err := modeA(ctxT(t), o, d)
+	if err == nil || !strings.Contains(err.Error(), "--uninstall requires SSH access") {
+		t.Fatalf("modeA uninstall with unreachable SSH err = %v, want SSH required error", err)
+	}
+	if f := fb.Flashed(); len(f) > 0 {
+		t.Fatalf("modeA uninstall flashed devices: %v", f)
+	}
+
+	// Case 2: Unverified EAAS candidate -> must NOT call modeAB
+	dEAAS := deck{Name: "Candidate", IP: "127.0.0.1", FromEAAS: true, Board: ""}
+	err = modeA(ctxT(t), o, dEAAS)
+	if err == nil || !strings.Contains(err.Error(), "cannot uninstall over SSH") {
+		t.Fatalf("modeA uninstall with EAAS err = %v, want EAAS rejected error", err)
+	}
+	if f := fb.Flashed(); len(f) > 0 {
+		t.Fatalf("modeA uninstall flashed devices: %v", f)
 	}
 }
 
@@ -1699,6 +1792,9 @@ echo "line 2: done" >&2
 func TestAZModel(t *testing.T) {
 	for _, c := range []struct{ board, bundle, line, want string }{
 		{"RMZ2", "", "1cc5:2027", "SYSTEMONE"},
+		{"JP24", "", "1cc5:2027", "PRIME4G2"},
+		{"nh08s", "", "1cc5:2027", ""},
+		{"jp21", "", "1cc5:2027", ""},
 		{"", "/x/PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz", "1cc5:2027", "PRIME4G2"},
 		{"", "", "1cc5:2027 inMusic Rane SYSTEM ONE", "SYSTEMONE"},
 		{"", "", "1cc5:2027 Denon DJ PRIME 4 G2", "PRIME4G2"},
@@ -1904,5 +2000,40 @@ Instance ID:                USB\VID_2207&PID_320A\9999
 	wantMulti := "15e4:d011 Denon DJ SC LIVE 2\n15e4:2059 Numark MIXSTREAM PRO GO\n2207:320a\n"
 	if gotMulti != wantMulti {
 		t.Errorf("parsePnPUtil(multilingual) = %q, want %q", gotMulti, wantMulti)
+	}
+}
+
+// #164: an installed deck asks for its access code (403 on /v1/sc5000/ui) and must still be recognised;
+// a bare 403 from some other web server must not be.
+func TestIsDeckUIRecognisesTheLoginPage(t *testing.T) {
+	login := `<!doctype html><title>Stream Sync</title><h1>Stream Sync</h1>`
+	cases := []struct {
+		name string
+		ui   func(w http.ResponseWriter)
+		root string
+		want bool
+	}{
+		{"json", func(w http.ResponseWriter) { w.Write([]byte(`{"language":"en"}`)) }, "", true},
+		{"403 with the Stream Sync login page", func(w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) }, login, true},
+		{"401 with the Stream Sync login page", func(w http.ResponseWriter) { w.WriteHeader(http.StatusUnauthorized) }, login, true},
+		{"403 from another web server", func(w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) }, `<title>nginx</title>`, false},
+		{"404", func(w http.ResponseWriter) { w.WriteHeader(http.StatusNotFound) }, login, false},
+		{"200 but not JSON", func(w http.ResponseWriter) { w.Write([]byte(`<html>`)) }, login, false},
+	}
+	for _, c := range cases {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/sc5000/ui" {
+				c.ui(w)
+				return
+			}
+			w.Write([]byte(c.root))
+		}))
+		host, portText, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+		var port int
+		fmt.Sscanf(portText, "%d", &port)
+		if got := isDeckUI(srv.Client(), host, port); got != c.want {
+			t.Errorf("%s: isDeckUI = %v, want %v", c.name, got, c.want)
+		}
+		srv.Close()
 	}
 }

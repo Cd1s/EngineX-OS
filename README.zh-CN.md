@@ -248,7 +248,7 @@ EngineX-Installer 支持一代与二代机，无需输入 IP 或选择机型，�
 3. 安装器自动寻找碟机并下载对应数据包。原厂机在屏幕点 **设置 → 关于 / 更新 → 固件更新模式（Firmware Update Mode）**，重启后用 USB 连电脑；Fastboot 自动识别机型，确认后刷写 `/data`。已开启 root SSH 的机器将电脑和碟机连到同一网络，安装器通过 StageLinQ（UDP 51337）及 EngineX Web 界面扫描发现设备，在 `/data/enginex` 安装，保留曲库和设置。能否发现设备取决于网络配置和 StageLinQ 是否可用。
 4. 首次安装后，后续版本可在碟机上通过 Wi-Fi 点击 **设置 → 关于 / 更新 → 更新** 在线升级（#86）。
 
-SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboot`、Python 3 和 e2fsprogs；Windows 请在有 USB 访问权限的 WSL 中运行 Linux 包。**刷入新的 `/data` 镜像会清空该分区上的音乐、曲库和设置。**请先备份碟机数据，安装前拔下 U 盘和 SD 卡。要保留 `/data`，请通过 `--userdata-backup` 提供该碟机的完整分区镜像。本 Beta 尚未在实机验证。
+SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboot`、Python 3 和 e2fsprogs；Windows 请在有 USB 访问权限的 WSL 中以 root 运行（`wsl -u root`，经 `usbipd-win` 直通）Linux 包。**刷入新的 `/data` 镜像会清空该分区上的音乐、曲库和设置。**请先备份碟机数据，安装前拔下 U 盘和 SD 卡。要保留 `/data`，请通过 `--userdata-backup` 提供该碟机的完整分区镜像。本 Beta 尚未在实机验证。
 
 **SC LIVE 4、SC LIVE 2、PRIME 4+、PRIME GO+、Mixstream Pro+、Mixstream Pro Go、PRIME 4 G2 和 Rane SYSTEM ONE**（#61、#68、#69、#76）没有硬件 eFuse 熔断锁死，原厂升级程序（`az01-update` / `az0x-splash`）是在软件层用 `denon-1` / `rane-1` 公钥校验 `AZ0x` 固件容器签名。在原厂未改装状态下，刷入修改过的 `.img` 或一代机的 `.img`（如 `PRIME4` / `PRIMEGO` / `MIXSTREAMPRO`）会在写入前的 `Verifying`（校验）阶段直接被软件拒签退回，根本不会写入闪存，更不会触发熔断或变砖。首次安装请使用对应二代型号的 `Data-Bundle.tar.gz` 或 `EngineX-Installer`（装入 `/data/enginex`，不改动只读系统分区，卸载即恢复原厂）；首次装好后，后续新版本可直接在碟机屏幕 **设置 → 关于 / 更新** 一键在线 OTA 升级。
 
@@ -277,18 +277,19 @@ SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboo
    ```
 3. 重启后 Engine 先以原厂方式启动一次，随后自动以 EngineX OS 重新启动。之后 `设置 → 设备` 里会出现 EngineX 的选项（`语言`、`电源 → 关机` 等）。
 
-**方法二：在电脑上注入 userdata 镜像（fastboot）**。只在机器上没有 shell 时使用。需要一台装有 `python3`、`e2fsprogs`（`debugfs`）和 `fastboot` 的 Linux 电脑，以及**你自己 `/data` 分区的完整镜像**。刷写会替换整个 `/data` 分区，绝不能用空镜像或别人的镜像。
-
-1. 备份原件不动，在副本上操作：`cp my-userdata-backup.img userdata-enginex.img`
-2. 在电脑上解压数据包，再把它注入副本（两个辅助脚本在包里）：
-   ```sh
-   tar -xzf <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
-   python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-userdata.py userdata-enginex.img --bundle <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
-   ```
-3. 让机器进入 fastboot 模式并用 USB 连上电脑，然后刷入并重启：
-   ```sh
-   sh <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-fastboot.sh userdata-enginex.img
-   ```
+**方法二：电脑端 Fastboot 线刷**。只在机器上没有 shell 时使用。需要一台装有 `python3`、`e2fsprogs`（`debugfs`）和 `fastboot` 的 Linux 电脑（或 Windows WSL 以 root 运行）。
+- **推荐做法（EngineX-Installer 自动处理）**：直接运行安装器。它能自动识别 fastboot 模式下的碟机，自动建立并格式化出厂默认 `/data` 分区、注入数据包并刷入（**碟机 `/data` 里的音乐、曲库和设置会被清空**，安装器会要求输入 `yes` 确认；外接 U 盘与 SD 卡不受影响）。若已有这台碟机自己的完整 `/data` 备份，可通过 `--userdata-backup <镜像>` 保留原有数据。后续回退原厂只需移除数据包，不依赖初次刷机前的预先备份。
+- **手动操作（需已有 `/data` 分区备份）**：
+  1. 备份原件不动，在副本上操作：`cp my-userdata-backup.img userdata-enginex.img`
+  2. 在电脑上解压数据包，再把它注入副本（两个辅助脚本在包里）：
+     ```sh
+     tar -xzf <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
+     python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-userdata.py userdata-enginex.img --bundle <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
+     ```
+  3. 让机器进入 fastboot 模式并用 USB 连上电脑，然后刷入并重启：
+     ```sh
+     sh <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-fastboot.sh userdata-enginex.img
+     ```
 
 **方法 3：没有 fastboot 的 SYSTEM ONE / PRIME 4 G2（USB `1cc5:2027`）。** 在碟机上点 `Settings → About / Update → Firmware Update Mode (Reboot)`，接上 USB 后运行 EngineX-Installer，它会自动完成下面几步。这会写入**全新的空** `/data` 分区：内置存储上的音乐、曲库和设置会被清空（外接 U 盘和 SD 卡不受影响）。手动操作（需要 `python3`、`e2fsprogs` 和 `pip3 install pyusb`）：
    ```sh
