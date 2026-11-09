@@ -3096,6 +3096,14 @@ SHADOW_LAYER = r"""
         property real scrollAt: 0
         property real scrollSpeed: 0
         function contentX(ms) { return -(ms - span * playhead) / span * width }
+        // Read from meta itself in the refresh functions: inside onMetaChanged the
+        // bindings below (duration, totalPixels, ...) still hold the previous meta,
+        // so a pending -> detail switch while paused drew the tile window of the
+        // overview-only reply (no tile under the playhead: blank waveform).
+        function metaDuration(m) { return m && m.durationMs > 0 ? m.durationMs : 1 }
+        function metaWaveDuration(m) { return m && m.waveformDurationMs > 0 ? m.waveformDurationMs : metaDuration(m) }
+        function metaTotalPixels(m) { return m && m.waveformWidth > 0 && m.waveformWidth <= 65536 ? m.waveformWidth : 0 }
+        function metaTilePixels(m) { return m && m.tileWidth > 0 ? Math.min(2048, m.tileWidth) : 2048 }
         function refreshPosition() {
             const now = Date.now(), s = sample
             const pos = s ? root.scShadowPosition(s, now) : 0
@@ -3103,15 +3111,16 @@ SHADOW_LAYER = r"""
             const st = !!s && (s.stale || now - Math.max(s.at, root.scShadowLive.seen) >= root.scShadowExpiryMs)
             if (st !== stale) stale = st
             if (!wave) return
-            const speed = live && visible && s && s.playing && !st && pos < duration ? Math.max(0, 1 + s.pitch / 100) : 0
+            const end = metaDuration(meta)
+            const speed = live && visible && s && s.playing && !st && pos < end ? Math.max(0, 1 + s.pitch / 100) : 0
             if (speed > 0) {
                 // Keep the running scroll unless it is off by more than 12 ms of track.
                 if (scroll.running && speed === scrollSpeed && Math.abs(scrollFrom + (now - scrollAt) * speed - pos) <= 12) return
                 scroll.stop()
                 scrollFrom = pos; scrollAt = now; scrollSpeed = speed
                 scroll.from = contentX(pos)
-                scroll.to = contentX(duration)
-                scroll.duration = Math.max(1, Math.round((duration - pos) / speed))
+                scroll.to = contentX(end)
+                scroll.duration = Math.max(1, Math.round((end - pos) / speed))
                 scroll.start()
             } else {
                 const x = contentX(pos)
@@ -3138,18 +3147,18 @@ SHADOW_LAYER = r"""
                 gridAnchor = -Infinity
                 return
             }
-            const padding = Math.min(span / 2, 10000)
+            const padding = Math.min(span / 2, 10000), from = position - span * playhead, m = meta
             // Re-anchor at half the padding: the view (scrolled on the render thread)
             // runs up to one 200 ms clock ahead of start.
-            if (Math.abs(start - gridAnchor) > padding / 2) {
-                gridAnchor = start
+            if (Math.abs(from - gridAnchor) > padding / 2) {
+                gridAnchor = from
                 // Only the tiles under this window are drawn: every Image is its own
                 // texture batch, and clipped ones still cost the render thread.
-                const tileMs = totalPixels > 0 ? tilePixels / totalPixels * waveformDuration : 0
-                const lo = tileMs > 0 ? Math.floor((start - padding) / tileMs) : 0, hi = tileMs > 0 ? Math.floor((start + span + padding) / tileMs) : 31
+                const total = metaTotalPixels(m), tileMs = total > 0 ? metaTilePixels(m) / total * metaWaveDuration(m) : 0
+                const lo = tileMs > 0 ? Math.floor((from - padding) / tileMs) : 0, hi = tileMs > 0 ? Math.floor((from + span + padding) / tileMs) : 31
                 if (lo !== tileLo) tileLo = lo
                 if (hi !== tileHi) tileHi = hi
-                const rows = root.scShadowGrid(deck, meta, start - padding, start + span + padding)
+                const rows = root.scShadowGrid(deck, m, from - padding, from + span + padding)
                 if (rows.length > gridSlots) gridSlots = Math.max(32, 1 << Math.ceil(Math.log2(rows.length)))
                 if (rows !== grid) grid = rows
             }
@@ -3166,14 +3175,14 @@ SHADOW_LAYER = r"""
         // The stale cut-off and the grid window still need a clock between replies.
         // A resting or stale sample does not move: its refreshes come with the sample.
         Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(); scDisplay.refreshDetails() } }
-        readonly property real duration: meta && meta.durationMs > 0 ? meta.durationMs : 1
-        readonly property real waveformDuration: meta && meta.waveformDurationMs > 0 ? meta.waveformDurationMs : duration
+        readonly property real duration: metaDuration(meta)
+        readonly property real waveformDuration: metaWaveDuration(meta)
         readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
         readonly property real playhead: overview ? position / duration : 0.5
         readonly property real start: overview ? 0 : position - span * playhead
         readonly property var tiles: meta && meta.detail && Array.isArray(meta.waveformTiles) ? meta.waveformTiles : []
-        readonly property int totalPixels: meta && meta.waveformWidth > 0 && meta.waveformWidth <= 65536 ? meta.waveformWidth : 0
-        readonly property int tilePixels: meta && meta.tileWidth > 0 ? Math.min(2048, meta.tileWidth) : 2048
+        readonly property int totalPixels: metaTotalPixels(meta)
+        readonly property int tilePixels: metaTilePixels(meta)
         readonly property bool tiled: wave && totalPixels > 0 && tiles.length > 0 && tiles.length <= 32
         readonly property bool detailed: !!meta && !!meta.detail && (!!meta.waveformUrl || tiled)
         readonly property string imageUrl: meta ? (overview || !detailed ? meta.overviewUrl || meta.waveformUrl : meta.waveformUrl || meta.overviewUrl) || "" : ""
