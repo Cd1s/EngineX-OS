@@ -6,7 +6,16 @@ set -euo pipefail
 
 # AZ04=1: PRIME 4 G2 / SYSTEM ONE (#76), 64-bit Engine, /var/lib bound from /data/system/var-lib.
 AZ04="${AZ04:-0}"
-if [ "$AZ04" = 1 ]; then
+BOOTSTRAP_MODEL="${BOOTSTRAP_MODEL:-SCLIVE4}"
+JC11S_ROOTFS="${JC11S_ROOTFS:-}"
+if [ "$AZ04" != 1 ] && [ -n "$JC11S_ROOTFS" ] && [ ! -d "$JC11S_ROOTFS" ]; then
+    echo "test_sclive4_bootstrap: explicit JC11S_ROOTFS not found: $JC11S_ROOTFS" >&2
+    exit 1
+fi
+if [ "$BOOTSTRAP_MODEL" = PRIME4PLUS ]; then
+    ROOTFS="${JC11S_ROOTFS:?set JC11S_ROOTFS to the unpacked official PRIME4PLUS rootfs}"
+    PREFIX=PRIME4PLUS VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=19
+elif [ "$AZ04" = 1 ]; then
     ROOTFS="${ROOTFS:-/root/build/sc5000-lab/systemone-analysis/rootfs}"
     PREFIX=PRIME4G2 VARLIB=data/system/var-lib PROFILE=5.3.0-az04 EDITS=18
 else
@@ -23,7 +32,7 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 if [ ! -d "$ROOTFS" ]; then
-    echo "test_sclive4_bootstrap: SC LIVE 4 rootfs not found at $ROOTFS" >&2
+    echo "test_sclive4_bootstrap: $PREFIX rootfs not found at $ROOTFS" >&2
     exit 1
 fi
 
@@ -93,7 +102,7 @@ echo "  Data bundle: $BUNDLE"
 echo "[2/5] Testing Method A (host-install-userdata.py ext4 injection)..."
 IMG="$TMP/userdata.img"
 dd if=/dev/zero of="$IMG" bs=1M count=64 status=none
-mkfs.ext4 -F -q "$IMG"
+mkfs.ext4 -F -q -O encrypt -L az01-data "$IMG"
 debugfs -w -R "mkdir /Music" "$IMG" >/dev/null 2>&1
 debugfs -w -R "write /etc/hosts /Music/user_track.flac" "$IMG" >/dev/null 2>&1
 
@@ -113,6 +122,17 @@ debugfs -R "stat /sc5000-custom" "$IMG" 2>&1 | grep -q "symlink"
 debugfs -R "stat /sc5000-custom/bundle/boot-activate.sh" "$IMG" 2>&1 | grep -q "regular"
 debugfs -R "stat /enginex/authorized_keys" "$IMG" 2>&1 | grep -q "Mode:  0600"
 echo "  Method A ext4 userdata injection: PASS"
+
+if [ "$PREFIX" = PRIME4PLUS ]; then
+    # Verify the actual JC11S unit chain, not SC LIVE 4's similar layout.
+    grep -q 'What=PARTUUID=931ad49d-ad59-0849-833a-9bf00af5b60e' "$ROOTFS/lib/systemd/system/data.mount"
+    grep -q 'Requires=az0x-data-mkfs.service' "$ROOTFS/lib/systemd/system/data.mount"
+    grep -q 'What=/data/system/var/overlay/lib' "$ROOTFS/lib/systemd/system/var-lib.mount"
+    test -L "$ROOTFS/etc/systemd/system/local-fs.target.wants/data.mount"
+    test -L "$ROOTFS/etc/systemd/system/local-fs.target.wants/var-lib.mount"
+    test -L "$ROOTFS/etc/systemd/system/multi-user.target.wants/engine.service"
+    unshare -m -n -p -f bash "$SCRIPT_DIR/test_jc11s_firstboot.sh" "$ROOTFS" "$IMG" "$TMP"
+fi
 
 # 3. Stage 1: Cold Boot ALSA One-Shot Activation
 echo "[3/5] Testing Stage 1 (Cold boot ALSA hook trigger & activation)..."
@@ -302,3 +322,13 @@ echo "  Legacy directory upgrade: PASS"
 
 echo ""
 echo "=== All $PREFIX verification checks PASSED ==="
+
+# Include the separate official JC11S rootfs when its fixture is supplied. Set
+# JC11S_ROOTFS to an unpacked PRIME4PLUS-5.3.0 image (never a live deck).
+if [ "$AZ04" != 1 ] && [ "$BOOTSTRAP_MODEL" = SCLIVE4 ]; then
+    if [ -n "$JC11S_ROOTFS" ]; then
+        BOOTSTRAP_MODEL=PRIME4PLUS JC11S_ROOTFS="$JC11S_ROOTFS" bash "$0"
+    else
+        echo 'WARN: JC11S not tested; set JC11S_ROOTFS to include the official PRIME4PLUS first-boot case (required for release).'
+    fi
+fi
