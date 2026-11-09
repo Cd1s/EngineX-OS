@@ -471,6 +471,23 @@ const b=bodies[bodies.length-1][0], seen=b.positionMs+(now-b.at)*(1+b.pitch/100)
 assert(Math.abs(seen-truth())<=8, 'peer line off by '+(seen-truth()));
 """)
 
+    def test_late_song_name_is_not_cached_empty(self):
+        self.js(r"""
+let bodies=[], title='';
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(!this.url.endsWith('/alive'))bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,unnormalized:0,state:path.endsWith('/SongLoaded'),
+    get string(){return path.endsWith('/TrackUri')?'file:///new.mp3':path.endsWith('/SongName')?title:''},color:'#fff'});
+now+=40; scShadowTick(); assert.equal(bodies.length,1); assert.equal(bodies[0][0].title,''); // loaded before Engine named it
+title='Late Name'; now+=520; scShadowTick();
+assert.equal(bodies.length,2); assert.equal(bodies[1][0].title,'Late Name'); // next heartbeat, not 2 s later
+""")
+
     def test_unchanged_version_keeps_samples_alive_without_parsing(self):
         self.js(r"""
 let header='5:true:13:false:false:ab', parsed=0;
@@ -487,6 +504,71 @@ assert.equal(scShadowPosition(s,now),11000); // carried on 10 s: stream-sync vou
 now+=4000;
 assert.equal(scShadowPosition(s,now),14000); // 3 s after the last confirmation it stops
 JSON.parse=realParse;
+""")
+
+    def layer_js(self):
+        """The real SHADOW_LAYER functions, bound to a mock QML scope with `with`."""
+        layer = bp.SHADOW_LAYER
+        parts = []
+        for name in ("contentX", "refreshSample", "refreshPosition", "restartScroll", "refreshDetails"):
+            m = re.search(r"(?m)^        function " + name + r"\(", layer)
+            self.assertIsNotNone(m, name)
+            line_end = layer.index("\n", m.start())
+            end = line_end if layer[m.start():line_end].rstrip().endswith("}") else layer.index("\n        }", m.start()) + 10
+            parts.append("scope." + name + " = " + layer[m.start():end].strip())
+        for handler in ("onMetaChanged", "onLiveChanged"):
+            m = re.search(r"(?m)^        " + handler + r": (.*)$", layer)
+            body = m.group(1)
+            if body.startswith("{"):
+                body = layer[m.start(1):layer.index("\n        }", m.start(1)) + 10].strip()
+            parts.append("scope." + handler + " = function() " + (body if body.startswith("{") else "{ " + body + " }"))
+        return "with (scope) {\n" + "\n".join(parts) + "\n}\n"
+
+    def test_shadow_layer_scroll_settle_and_grid_pool_behaviour(self):
+        self.js(r"""
+const starts=[];
+const scroll={running:false,from:0,to:0,duration:0,stop(){this.running=false},start(){this.running=true;starts.push({from:this.from,to:this.to,duration:this.duration})}};
+const scMoving={x:0};
+const beats=[]; for(let i=0;i<660;i++) beats.push({ms:i*300,number:i}); // ~53 beats per window: not a power of two
+const meta={key:'A',durationMs:200000,waveformDurationMs:200000,beats,cues:[],loops:[],detail:true,waveformWidth:20480,tileWidth:2048,waveformTiles:Array(10).fill('/t.png')};
+let metaValue=null;
+const scope={live:true,visible:true,wave:true,overview:false,graphical:true,deck:2,sample:null,cues:scShadowEmptyArray,loops:scShadowEmptyArray,
+  position:0,stale:false,cueInfo:null,grid:scShadowEmptyArray,gridAnchor:-Infinity,gridSlots:0,tileLo:0,tileHi:31,scrollFrom:0,scrollAt:0,scrollSpeed:0,width:1000,
+  scroll,scMoving,root:globalThis,
+  get meta(){return metaValue}, set meta(v){if(v!==metaValue){metaValue=v;scope.onMetaChanged()}},
+  get duration(){return metaValue&&metaValue.durationMs>0?metaValue.durationMs:1},
+  get waveformDuration(){return metaValue&&metaValue.waveformDurationMs>0?metaValue.waveformDurationMs:this.duration},
+  get span(){return 8000}, get playhead(){return 0.5}, get start(){return this.position-this.span*this.playhead},
+  get totalPixels(){return metaValue?metaValue.waveformWidth:0}, get tilePixels(){return metaValue?metaValue.tileWidth:2048}};
+""" + self.layer_js() + r"""
+const sample=(pos,playing,extra)=>Object.assign({key:'A',meta,positionMs:pos,at:now,playing,pitch:0,stale:false},extra||{});
+scope.sample=sample(10000,true); scope.refreshSample();
+assert.strictEqual(scope.meta,meta);
+assert.equal(starts.length,1); // one render-thread scroll to the end of the track
+assert.equal(starts[0].from,scope.contentX(10000)); assert.equal(starts[0].to,scope.contentX(200000)); assert.equal(starts[0].duration,190000);
+// Grid pool: power of two above the window's beats; tiles under the window only.
+assert(scope.grid.length>0 && scope.gridSlots>=scope.grid.length && (scope.gridSlots&(scope.gridSlots-1))===0 && scope.gridSlots>=32);
+assert.equal(scope.tileLo,0); assert.equal(scope.tileHi,Math.floor((6000+12000)/20000));
+now+=200; scope.refreshPosition(); assert.equal(starts.length,1); // on its line: keeps running
+scope.sample=sample(10000+200+20,true); scope.refreshSample(); assert.equal(starts.length,2); // 20 ms off: restarted
+scope.sample=sample(10220,true,{pitch:8}); scope.refreshSample(); assert.equal(starts.length,3); // new speed: restarted
+// CUE released back on its spot: a 1 ms settle to x, never a bare x write the write-back would undo.
+scope.sample=sample(10000,false); scope.refreshSample();
+const settle=starts[starts.length-1];
+assert.equal(starts.length,4); assert.equal(settle.from,scope.contentX(10000)); assert.equal(settle.to,settle.from); assert.equal(settle.duration,1);
+assert.equal(scope.scrollSpeed,0);
+scroll.running=false; scope.refreshPosition(); assert.equal(starts.length,4); // settled: nothing more
+scope.sample=sample(12000,false); scope.refreshSample(); assert.equal(starts.length,4); assert.equal(scMoving.x,scope.contentX(12000)); // paused seek, no animation running
+scope.sample=sample(12000,true); scope.refreshSample(); assert.equal(starts.length,5);
+scope.restartScroll(); assert.equal(starts.length,6); // zoom/size/visibility: a fresh line
+// Grid window moves with the playhead, the pool never shrinks while shown.
+const slots=scope.gridSlots; scope.position=60000; scope.refreshDetails();
+assert(scope.grid[0].ms>=60000-4000-4000-1 && scope.gridSlots===slots && scope.tileLo===Math.floor((56000-4000)/20000));
+scope.live=false; scope.onLiveChanged(); assert.equal(scope.gridSlots,0); // hidden layer: no delegates
+// track/performance layers recompute cueInfo on every sample.
+let asked=0; const ci={text:'1.1'}; globalThis.scNextCueInfo=(d,t)=>{asked++;return ci};
+scope.live=true; scope.wave=false; scope.graphical=false; scope.sample=sample(1000,false); scope.refreshSample();
+assert.strictEqual(scope.cueInfo,ci); assert.equal(asked,1);
 """)
 
     def test_shadow_layer_moves_only_on_the_render_thread(self):
@@ -508,6 +590,9 @@ JSON.parse=realParse;
         self.assertIn("if (m !== meta) meta = m", layer)
         self.assertIn("if (rows !== grid) grid = rows", layer)
         self.assertIn("model: scDisplay.loops", layer)
+        # 7c29415: an empty shadow slot runs no 200 ms clock.
+        self.assertIn("running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null", layer)
+        self.assertIn("onVisibleChanged: { restartScroll(); if (visible) refreshDetails() }", layer)
         # Grid lines are a pool: a new grid window must not recreate the delegates.
         self.assertIn("model: scDisplay.gridSlots", layer)
         self.assertNotIn("model: scDisplay.grid\n", layer)
@@ -601,9 +686,21 @@ cueName='DROP'; tick(2600); assert.equal(bodies.length,5); assert.equal(bodies[4
 
     def test_safe_gc_only_when_nothing_plays(self):
         self.js(r"""
-let runs=0, plays=[false,false,false,false], lengths=[0,0,0,0];
+let runs=0, plays=[false,false,false,false], cmds=[false,false,false,false], lengths=[0,0,0,0];
 globalThis.gc=()=>runs++;
-globalThis.scTr=path=>{const d=+path[12]-1;return path.endsWith('/PlayState')?{get state(){return plays[d]}}:{get unnormalized(){return lengths[d]}}};
+globalThis.scTr=path=>{const d=+path[12]-1;return path.endsWith('/PlayState')?{get state(){return plays[d]}}:path.endsWith('/Play')?{get state(){return cmds[d]}}:{get unnormalized(){return lengths[d]}}};
+// A held CUE preview sounds and scrolls with PlayState false (scShadowTick's sample),
+// and the Play command leads PlayState: neither may collect.
+scShadowPrev[1]={playing:true};
+for(let i=0;i<10;i++){now+=500;scGcCheck();}
+assert.equal(runs,0);
+scShadowPrev[1]={playing:false}; cmds[2]=true;
+for(let i=0;i<10;i++){now+=500;scGcCheck();}
+assert.equal(runs,0);
+cmds[2]=false; scGcState.armed=false; // back to the scenario below
+const missing=globalThis.scTr; globalThis.scTr=()=>null; scGcProps=null;
+for(let i=0;i<10;i++){now+=500;assert.equal(scGcCheck(),false);} // Engine decks not built yet: never blind
+globalThis.scTr=missing;
 plays[0]=true;
 for(let i=0;i<10;i++){now+=500;scGcCheck();}
 assert.equal(runs,0); // never while a local deck plays

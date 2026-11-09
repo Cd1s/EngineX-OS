@@ -247,13 +247,16 @@ SERVICES_MAIN = """
 		let p = scGcProps
 		if (!p) {
 			p = []
-			for (let d = 1; d <= 4; d++) p.push({play: scTr("/Engine/Deck" + d + "/PlayState"), length: scTr("/Engine/Deck" + d + "/Track/TrackLength")})
-			if (p.every(x => x.play && x.length)) scGcProps = p // retry until Engine built every deck
+			for (let d = 1; d <= 4; d++) p.push({play: scTr("/Engine/Deck" + d + "/PlayState"), cmd: scTr("/Engine/Deck" + d + "/Play"), length: scTr("/Engine/Deck" + d + "/Track/TrackLength")})
+			if (!p.every(x => x.play && x.cmd && x.length)) return false // never collect blind: Engine is still building its decks
+			scGcProps = p
 		}
 		let playing = false, sig = 0
 		for (let d = 1; d <= 4; d++) {
-			const x = p[d - 1], s = scShadowDisplay[d]
-			if ((x.play && x.play.state) || (s && s.playing && !s.stale)) playing = true
+			// Playing also means a held CUE preview: PlayState stays false while it
+			// sounds and scrolls (scShadowTick's sample, own decks), or the Play command.
+			const x = p[d - 1], s = scShadowDisplay[d], own = scShadowPrev[d]
+			if (x.play.state || x.cmd.state || (own && own.playing) || (s && s.playing && !s.stale)) playing = true
 			sig = sig * 31 + (x.length ? x.length.unnormalized || 0 : 0)
 		}
 		if (sig !== g.loadSig || scGcLoadSeq !== g.loadSeq) { g.loadSig = sig; g.loadSeq = scGcLoadSeq; g.loadAt = now }
@@ -784,7 +787,8 @@ SERVICES_MAIN = """
 			// Titles arrive after the load: re-read on a new track and every 2 s.
 			if (fresh) {
 				o.title = s.net ? g.title.string || g.trackName.string || "" : ""
-				o.artist = s.net ? g.artist.string || "" : ""; scShadowTextAt[d] = now
+				o.artist = s.net ? g.artist.string || "" : ""
+				scShadowTextAt[d] = !s.net || o.title ? now : 0 // Engine fills SongName after the load: retry until it does
 			}
 			o.dbg = ""
 			// What the peer shows from this deck, as last sent in full.
@@ -2758,7 +2762,7 @@ SHADOW_LAYER = r"""
             const c = graphical && s ? root.scShadowCuesFor(deck, s) : root.scShadowEmptyArray
             if (c !== cues) cues = c
             refreshPosition()
-            if (wave) refreshDetails()
+            refreshDetails() // track/performance: cueInfo follows a jump or a cue edit at once
         }
         // The waveform scrolls on the render thread: one XAnimator per speed change,
         // no per-frame property writes or bindings on the GUI thread. The overview
@@ -2785,12 +2789,20 @@ SHADOW_LAYER = r"""
                 scroll.duration = Math.max(1, Math.round((duration - pos) / speed))
                 scroll.start()
             } else {
-                scroll.stop()
+                const x = contentX(pos)
+                if (scrollSpeed > 0 || scroll.running) {
+                    // A stopped Animator writes its own value back at the next sync,
+                    // after any x set here: settle with a 1 ms run to x instead, so the
+                    // write-back and the scene both end at x (CUE released on its spot).
+                    scroll.stop()
+                    scroll.from = x; scroll.to = x; scroll.duration = 1
+                    scroll.start()
+                } else if (scMoving.x !== x) scMoving.x = x
                 scrollSpeed = 0
-                scMoving.x = contentX(pos)
             }
         }
-        function restartScroll() { scroll.stop(); scrollSpeed = 0; refreshPosition() }
+        // Forget the running line (zoom, size, visibility); refreshPosition restarts or settles.
+        function restartScroll() { scrollAt = -Infinity; refreshPosition() }
         function refreshDetails() {
             if (!graphical) {
                 const ci = live ? root.scNextCueInfo(deck, 0) : null
@@ -2818,7 +2830,7 @@ SHADOW_LAYER = r"""
             }
         }
         onSampleChanged: refreshSample()
-        onVisibleChanged: restartScroll()
+        onVisibleChanged: { restartScroll(); if (visible) refreshDetails() }
         onWidthChanged: restartScroll()
         onMetaChanged: {
             const l = graphical && meta && meta.loops || root.scShadowEmptyArray
