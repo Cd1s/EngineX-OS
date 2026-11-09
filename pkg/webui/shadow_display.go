@@ -106,7 +106,7 @@ func displayTrackKey(p peerDeck) string {
 
 // Preserve #160's role-overlap mapping, while retaining the source deck for
 // asset requests. The map key is the receiver slot, p.Deck is the source slot.
-func placeDisplayPeers(peers map[int]peerDeck, role string, now time.Time, lines ...[]int) map[int]peerDeck {
+func placeDisplayPeers(peers map[int]peerDeck, role string, now time.Time) map[int]peerDeck {
 	// Expiry matches a goodbye: free shadow slots on every model.
 	fresh := make(map[int]peerDeck, len(peers))
 	for n, p := range peers {
@@ -117,25 +117,14 @@ func placeDisplayPeers(peers map[int]peerDeck, role string, now time.Time, lines
 	peers = fresh
 	placed, used := map[int]peerDeck{}, map[int]bool{}
 	var slots []int
-	if len(lines) > 0 && len(lines[0]) > 0 {
-		slots = slices.Clone(lines[0])
-		slices.Sort(slots)
-		for _, n := range slots {
-			if p, ok := peers[n]; ok {
-				placed[n] = p
-				used[n] = true
-			}
+	for n := 1; n <= 4; n++ {
+		if strings.Contains(role, strconv.Itoa(n)) {
+			continue
 		}
-	} else {
-		for n := 1; n <= 4; n++ {
-			if strings.Contains(role, strconv.Itoa(n)) {
-				continue
-			}
-			slots = append(slots, n)
-			if p, ok := peers[n]; ok {
-				placed[n] = p
-				used[n] = true
-			}
+		slots = append(slots, n)
+		if p, ok := peers[n]; ok {
+			placed[n] = p
+			used[n] = true
 		}
 	}
 	for _, n := range slots {
@@ -171,19 +160,15 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 		peers[n] = p
 	}
 	sh.mu.Unlock()
-	peers = placeDisplayPeers(peers, role, now, consoleLines)
+	peers = placeDisplayPeers(peers, role, now)
 	out := []deckState{}
 	free := []int{}
 	var candidates []int
-	if len(consoleLines) > 0 {
-		candidates = consoleLines
-	} else {
-		for deck := 1; deck <= 4; deck++ {
-			if strings.Contains(role, strconv.Itoa(deck)) {
-				continue
-			}
-			candidates = append(candidates, deck)
+	for deck := 1; deck <= 4; deck++ {
+		if strings.Contains(role, strconv.Itoa(deck)) {
+			continue
 		}
+		candidates = append(candidates, deck)
 	}
 	for _, deck := range candidates {
 		p, ok := peers[deck]
@@ -193,9 +178,7 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 		}
 		d := p.deckState
 		d.Deck, d.Key = deck, displayTrackKey(p)
-		if len(consoleLines) > 0 {
-			d.LineIn = true
-		}
+		d.LineIn = false
 		d.Stale = p.Stale || now.Sub(p.at) >= 2*time.Second
 		if d.Playing {
 			if !p.Stale {
@@ -215,6 +198,12 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 	devices := s.mergedDevices()
 	var lineFree []int
 	if len(consoleLines) > 0 {
+		free = nil
+		for _, deck := range consoleLines {
+			if _, occupied := peers[deck]; !occupied {
+				free = append(free, deck)
+			}
+		}
 		lineFree = free
 	}
 	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
@@ -858,7 +847,13 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 	v := s.loadUI()
 	s.uiMu.Unlock()
 	role := s.activeRole(v)
-	if role == "" || v.ShadowLegacyEngine || strings.Contains(role, strconv.Itoa(deck)) {
+	s.shadow.mu.Lock()
+	lines := slices.Clone(s.shadow.lines)
+	s.shadow.mu.Unlock()
+	if pfx := imagePrefix(deviceCompatible()); pfx == "" || playerBoards[pfx] {
+		lines = nil
+	}
+	if role == "" || v.ShadowLegacyEngine || (strings.Contains(role, strconv.Itoa(deck)) && !slices.Contains(lines, deck)) {
 		return nil, deckState{}
 	}
 	s.shadow.mu.Lock()
@@ -867,10 +862,7 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 		peers[n] = p
 	}
 	s.shadow.mu.Unlock()
-	s.shadow.mu.Lock()
-	lines := slices.Clone(s.shadow.lines)
-	s.shadow.mu.Unlock()
-	p, ok := placeDisplayPeers(peers, role, time.Now(), lines)[deck]
+	p, ok := placeDisplayPeers(peers, role, time.Now())[deck]
 	if !ok {
 		// Compose and HTTP use the same placement, including peer priority and
 		// exact current track keys. An old CDJ URL cannot read a different song.
