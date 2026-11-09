@@ -2002,3 +2002,38 @@ Instance ID:                USB\VID_2207&PID_320A\9999
 		t.Errorf("parsePnPUtil(multilingual) = %q, want %q", gotMulti, wantMulti)
 	}
 }
+
+// #164: an installed deck asks for its access code (403 on /v1/sc5000/ui) and must still be recognised;
+// a bare 403 from some other web server must not be.
+func TestIsDeckUIRecognisesTheLoginPage(t *testing.T) {
+	login := `<!doctype html><title>Stream Sync</title><h1>Stream Sync</h1>`
+	cases := []struct {
+		name string
+		ui   func(w http.ResponseWriter)
+		root string
+		want bool
+	}{
+		{"json", func(w http.ResponseWriter) { w.Write([]byte(`{"language":"en"}`)) }, "", true},
+		{"403 with the Stream Sync login page", func(w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) }, login, true},
+		{"401 with the Stream Sync login page", func(w http.ResponseWriter) { w.WriteHeader(http.StatusUnauthorized) }, login, true},
+		{"403 from another web server", func(w http.ResponseWriter) { w.WriteHeader(http.StatusForbidden) }, `<title>nginx</title>`, false},
+		{"404", func(w http.ResponseWriter) { w.WriteHeader(http.StatusNotFound) }, login, false},
+		{"200 but not JSON", func(w http.ResponseWriter) { w.Write([]byte(`<html>`)) }, login, false},
+	}
+	for _, c := range cases {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/sc5000/ui" {
+				c.ui(w)
+				return
+			}
+			w.Write([]byte(c.root))
+		}))
+		host, portText, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+		var port int
+		fmt.Sscanf(portText, "%d", &port)
+		if got := isDeckUI(srv.Client(), host, port); got != c.want {
+			t.Errorf("%s: isDeckUI = %v, want %v", c.name, got, c.want)
+		}
+		srv.Close()
+	}
+}
