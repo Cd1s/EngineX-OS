@@ -1498,14 +1498,18 @@ static int thread_class(const char *name) {
     // 5.3.0's four JobController workers all become J:I:Takingfreez at startup;
     // demoting one here persists when it switches to search/load/history work.
     if (!strncmp(name, "J:", 2)) return 0;
-    static const char *idle[] = {"Analysis Queue", "OfflineAnalyzer", "Dropbox", "Beatport",
-        "Freeze Checker", "sentry", "CrashHandler"};
-    for (size_t i = 0; i < sizeof idle / sizeof *idle; i++)
-        if (!strncmp(name, idle[i], strlen(idle[i]))) return 2;
+    // These threads can hold locks used by EMain. SCHED_IDLE and idle I/O
+    // provide no progress guarantee against ordinary runnable work. Keep
+    // background work in the fair scheduler; leave the health monitor alone.
+    static const char *background[] = {"Analysis Queue", "OfflineAnalyzer", "Dropbox", "Beatport",
+        "sentry", "CrashHandler"};
+    for (size_t i = 0; i < sizeof background / sizeof *background; i++)
+        if (!strncmp(name, background[i], strlen(background[i]))) return 2;
     return !strncmp(name, "QQuickPixmapRea", 15) || !strncmp(name, "FileInfoThread", 14);
 }
 
 static int guard_affinity(pthread_t thread, int kind) {
+    (void)kind;
     static void *get_cache, *set_cache;
     int (*get)(pthread_t, size_t, cpu_set_t *) = next_symbol(&get_cache, "pthread_getaffinity_np");
     int (*set)(pthread_t, size_t, const cpu_set_t *) = next_symbol(&set_cache, "pthread_setaffinity_np");
@@ -1519,18 +1523,12 @@ static int guard_affinity(pthread_t thread, int kind) {
     CPU_CLR(1, &allowed); // EMain
     CPU_CLR(2, &allowed); // SceneGraph
     if (!CPU_COUNT(&allowed)) return EINVAL;
-    if (kind == 2) {
-        int last = CPU_SETSIZE - 1;
-        while (!CPU_ISSET(last, &allowed)) last--;
-        CPU_ZERO(&allowed);
-        CPU_SET(last, &allowed);
-    }
     return set(thread, sizeof allowed, &allowed);
 }
 
-static void lower_io_nice(pid_t tid, int nice, int idle_io) {
+static void lower_io_nice(pid_t tid, int nice, int background_io) {
     setpriority(PRIO_PROCESS, (id_t)tid, nice);
-    if (idle_io) syscall(SYS_ioprio_set, 1, tid, 3 << 13);
+    if (background_io) syscall(SYS_ioprio_set, 1, tid, (2 << 13) | 7);
 }
 
 static void guard_named_thread(pthread_t thread, const char *name) {
@@ -1539,10 +1537,10 @@ static void guard_named_thread(pthread_t thread, const char *name) {
     if (!kind) return;
     int saved_errno = errno;
     struct sched_param param = {.sched_priority = 0};
-    if (kind == 2) pthread_setschedparam(thread, SCHED_IDLE, &param);
+    if (kind == 2) pthread_setschedparam(thread, SCHED_OTHER, &param);
     guard_affinity(thread, kind);
     if (pthread_equal(thread, pthread_self())) {
-        lower_io_nice((pid_t)syscall(SYS_gettid), kind == 2 ? 19 : 10, kind == 2);
+        lower_io_nice((pid_t)syscall(SYS_gettid), 10, kind == 2);
     } else {
         // Naming another pthread must not lower the caller (often Engine's main thread).
         // Equal kernel names have the same policy, so duplicate worker names are safe.
@@ -1559,7 +1557,7 @@ static void guard_named_thread(pthread_t thread, const char *name) {
             int match = fgets(comm, sizeof comm, f) &&
                 (comm[strcspn(comm, "\n")] = 0, !strncmp(comm, name, 15));
             fclose(f);
-            if (match) lower_io_nice((pid_t)tid, kind == 2 ? 19 : 10, kind == 2);
+            if (match) lower_io_nice((pid_t)tid, 10, kind == 2);
         }
         if (tasks) closedir(tasks);
     }
@@ -1841,7 +1839,7 @@ static void oa_install(void) {
 
 // #55: Engine analyses in OfflineAnalyzer child processes, which inherit this
 // preload. Analysing a whole drive in the background must never compete with
-// playback: idle CPU class, nice 19 and idle I/O, off GUI/GL (1/2); threads inherit all.
+// playback: fair CPU class, nice 10 and best-effort I/O, off GUI/GL (1/2).
 __attribute__((constructor)) static void lower_offline_analyzer(void) {
     char exe[64];
     ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
@@ -1850,8 +1848,8 @@ __attribute__((constructor)) static void lower_offline_analyzer(void) {
     const char *name = strrchr(exe, '/');
     if (strcmp(name ? name + 1 : exe, "OfflineAnalyzer")) return;
     struct sched_param param = {.sched_priority = 0};
-    sched_setscheduler(0, SCHED_IDLE, &param);
-    lower_io_nice(0, 19, 1);
+    sched_setscheduler(0, SCHED_OTHER, &param);
+    lower_io_nice(0, 10, 1);
     // It may inherit only CPU1 from EMain: use the online set, not that mask.
     initialize_engine_cpus();
     cpu_set_t cpus = engine_cpus;
@@ -1864,7 +1862,7 @@ __attribute__((constructor)) static void lower_offline_analyzer(void) {
 }
 
 // Engine itself raises its analyzers to nice -5 / SCHED_OTHER once they connect
-// (seen on 5.3.0): keep them idle (#55).
+// (seen on 5.3.0): keep them in the fair background class (#55).
 static int offline_analyzer(pid_t pid) {
     char path[48], comm[32] = "";
     if (pid <= 0) return 0;
@@ -1880,7 +1878,7 @@ int setpriority(__priority_which_t which, id_t who, int prio) {
     static void *cache;
     int (*real)(__priority_which_t, id_t, int) = next_symbol(&cache, "setpriority");
     if (!real) { errno = ENOSYS; return -1; }
-    if (which == PRIO_PROCESS && is_engine() && offline_analyzer((pid_t)who)) prio = 19;
+    if (which == PRIO_PROCESS && is_engine() && offline_analyzer((pid_t)who)) prio = 10;
     return real(which, who, prio);
 }
 
@@ -1889,7 +1887,7 @@ int sched_setscheduler(pid_t pid, int policy, const struct sched_param *param) {
     int (*real)(pid_t, int, const struct sched_param *) = next_symbol(&cache, "sched_setscheduler");
     if (!real) { errno = ENOSYS; return -1; }
     static const struct sched_param idle = {.sched_priority = 0};
-    if (is_engine() && offline_analyzer(pid)) policy = SCHED_IDLE, param = &idle;
+    if (is_engine() && offline_analyzer(pid)) policy = SCHED_OTHER, param = &idle;
     return real(pid, policy, param);
 }
 
@@ -1930,7 +1928,7 @@ int pthread_setschedparam(pthread_t thread, int policy, const struct sched_param
     char name[16];
     struct sched_param idle = {.sched_priority = 0};
     if (is_engine() && !pthread_getname_np(thread, name, sizeof name) && thread_class(name) == 2) {
-        policy = SCHED_IDLE;
+        policy = SCHED_OTHER;
         param = &idle;
     }
     return real(thread, policy, param);
