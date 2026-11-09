@@ -2768,7 +2768,7 @@ SHADOW_LAYER = r"""
         }
         onSpanChanged: { gridAnchor = -Infinity; restartScroll(); refreshDetails() }
         // The stale cut-off and the grid window still need a clock between replies.
-        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible; onTriggered: { scDisplay.refreshPosition(); scDisplay.refreshDetails() } }
+        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null; onTriggered: { scDisplay.refreshPosition(); scDisplay.refreshDetails() } }
         readonly property real duration: meta && meta.durationMs > 0 ? meta.durationMs : 1
         readonly property real waveformDuration: meta && meta.waveformDurationMs > 0 ? meta.waveformDurationMs : duration
         readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
