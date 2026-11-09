@@ -34,10 +34,8 @@
 #include "dsp_smooth.h"
 #include "master_limiter.h"
 #include "echo_out.h"
-#if defined(__aarch64__)
-/* AZ04: preserve the original DSP source and floating-point evaluation. */
-#include "pioneer_fx_legacy.h"
-#else
+#include "pioneer_master.h"
+#if !defined(__aarch64__)
 #include "pioneer_fx.h"
 #include "fx_selector.h"
 #endif
@@ -326,6 +324,27 @@ static void led_replay(int pct) {
 A32_ONLY static int fx_selector_supported;
 static int fx_selector_master_bypass;
 
+#if !defined(__aarch64__)
+/* Verified Config.audio.fx: JC11 hasDJFx=true; JP07 has neither selector flag.
+ * Other products/builds require their own Config/ABI verification. */
+static int px_selector_capable(const char *version, const char *product) {
+    return !strcmp(version, "5.3.0") && !strcmp(product, "JC11");
+}
+static int px_write_ready(const char *path) {
+    char tmp[PATH_MAX];
+    int n = snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if (n < 0 || (size_t)n >= sizeof tmp) return 0;
+    FILE *f = fopen(tmp, "w");
+    if (!f) return 0;
+    int ok = fputs("armhf-px-v2 JC11\n", f) >= 0;
+    if (fclose(f)) ok = 0;
+    /* Go validates the marker body: never expose a truncated heartbeat. */
+    if (ok && !rename(tmp, path)) return 1;
+    unlink(tmp);
+    return 0;
+}
+#endif
+
 /* Ordinary worker only: never poll files, log, or wait in an audio callback. */
 static void fx_selector_poll(void) {
 #if !defined(__aarch64__)
@@ -337,8 +356,7 @@ static void fx_selector_poll(void) {
     static time_t heartbeat;
     time_t now = time(NULL);
     if (now != heartbeat) {
-        FILE *ready = fopen("/run/enginex-fx-selector.ready", "w");
-        if (ready) { fputs("armhf-px-v1\n", ready); fclose(ready); heartbeat = now; }
+        if (px_write_ready("/run/enginex-fx-selector.ready")) heartbeat = now;
     }
     FILE *f = fopen(UI_ROOT "/fx-selector.request", "r");
     unsigned unit, mode, a, b;
@@ -402,7 +420,7 @@ static void *lim_poll(void *arg) {
                     if (len < sizeof val) {
                         memcpy(val, line + 11, len);
                         val[len] = '\0';
-                        pioneer_fx = sc_pioneer_fx_parse(val);
+                        pioneer_fx = sc_master_pioneer_fx_parse(val);
                     }
                 }
             fclose(f);
@@ -606,7 +624,7 @@ static void dsp_transition(unsigned slot, uint32_t kind, void *handler, const vo
     }
 #endif
 #if !defined(__aarch64__)
-    if (fx_selector_supported && (slot == DSP_TURN_OFF || slot == DSP_TURN_ON || slot == DSP_ENABLE))
+    if (fx_selector_supported && (slot == DSP_TURN_OFF || slot == DSP_TURN_ON))
         sc_pfx_reset_owner(dsp_bound_owner(handler));
 #endif
     sc_dsp_fx_mark_transition(dsp_bound_owner(handler), kind);
@@ -777,15 +795,16 @@ static void hook_flanger(void *self, float *const *input, float *const *output, 
                 float mix = sc_pfx_float(__atomic_load_n(&r->mix, __ATOMIC_ACQUIRE));
                 float param = sc_pfx_float(__atomic_load_n(&r->parameter, __ATOMIC_ACQUIRE));
                 // Rate vector is not captured yet: Parameter also maps time.
-                int rendered = sc_pfx_process(&r->dsp, input[0], input[1], frames, (int)mode, param, param, mix);
+                (void)sc_pfx_process(&r->dsp, input[0], input[1], frames, (int)mode, param, param, mix);
                 sc_pfx_leave(r);
-                if (rendered) return;
-                goto stock_carrier;
+                /* No READY bank after rapid resets: reset Wet is zero. The
+                 * Mix=1 processor must receive untouched dry input, never a
+                 * full-wet native Flanger burst while the worker prepares. */
+                return;
             }
             sc_pfx_leave(r);
         }
     }
-stock_carrier:;
     float dry = channels == 2 ? sc_dsp_block_energy(input, frames) : 0.0f;
     ((dsp_effect_fn)dsp_originals[DSP_FLANGER])(self, input, channels, frames);
     if (channels == 2) sc_dsp_makeup_apply(self, input, frames, dry);
@@ -802,7 +821,7 @@ static struct sc_gain master_gain[8];
 #define MASTER_ECHO_PAIRS 4 // 384 KB of BSS each, untouched until Echo Out is armed
 static struct sc_echo master_echo[MASTER_ECHO_PAIRS];
 #define MASTER_PFX_PAIRS 4
-static struct sc_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
+static struct sc_master_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
 // #49: in the 4-deck layout a player's 4-channel device (two stereo pairs) leaves
 // decks 3 and 4 without output buffers, and Engine skips rendering them ("Mixer
 // skipped ... unassigned output buffer"): their playheads stand still. All four
@@ -843,7 +862,7 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
         for (int ch = 0; ch < out_channels && ch / 2 < MASTER_PFX_PAIRS; ch += 2) {
             if (out[ch]) {
                 float *r = ch + 1 < out_channels ? out[ch + 1] : NULL;
-                sc_pioneer_fx_planar(&master_pfx[ch / 2], out[ch], r, (unsigned)frames, pfx);
+                sc_master_pioneer_fx_planar(&master_pfx[ch / 2], out[ch], r, (unsigned)frames, pfx);
             }
         }
     }
@@ -959,10 +978,12 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     FILE *f = fopen("/sys/firmware/devicetree/base/inmusic,product-code", "r");
     size_t n = f ? fread(product, 1, sizeof product - 1, f) : 0;
     if (f) fclose(f);
-    if (n < 4 || (strcmp(product, "JP07") && strcmp(product, "JC11"))) return 0;
+    if (n < 4 || !px_selector_capable(version, product)) return 0;
     static const uint32_t prefix[] = {0xe59f1ad0, 0xe59f2ad0};
     uintptr_t entry = base + 0xe99000;
     if (memcmp((void *)entry, prefix, 8)) return 0;
+    /* Fail back to legacy master/menu if the device cannot publish readiness. */
+    if (!px_write_ready("/run/enginex-fx-selector.ready")) return 0;
     // Both displaced instructions are PC-relative loads. Preserve their values
     // in literal words, then resume at the original +8 (including original PC).
     uint32_t literals[2];
@@ -975,7 +996,6 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     px_engine_base = base;
     fx_selector_master_bypass = 1; /* no hidden legacy master FX on any PX-enabled board */
     fprintf(stderr, "engine-ui-hook: PX product=%s master-bypass=1 installed\n", product);
-    unlink("/run/enginex-fx-selector.ready");
     unlink(UI_ROOT "/fx-selector.ready");
     unlink(UI_ROOT "/fx-selector.request");
     unlink(UI_ROOT "/fx-selector.ack");

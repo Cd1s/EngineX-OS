@@ -5,6 +5,7 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 PRODUCT=${FX_PRODUCT:-JC11}
 case "$PRODUCT" in JP07|JC11) ;; *) exit 2 ;; esac
 W=$REPO/out/fx-selector-native-$PRODUCT
+if [ "${FX_READY_READONLY:-0}" = 1 ]; then W=$W-readonly; fi
 if [ "${1:-}" != --inner ]; then
     test "$(uname -m)" = aarch64
     mkdir -p "$W"
@@ -64,6 +65,7 @@ QML
 fi
 printf 'lang=en\npioneer_fx=spiral\n' > "$R/data/sc5000-custom/ui/settings.conf"
 chroot "$R" /usr/bin/dbus-daemon --system --fork --nopidfile > "$W/dbus.log" 2>&1 || true
+if [ "${FX_READY_READONLY:-0}" = 1 ]; then mount -o remount,ro "$R/run"; fi
 "$W/ui-server" "$R/data/sc5000-custom/ui" "$R/tmp/fx-state" > "$W/http.log" 2>&1 &
 server=$!
 trap 'kill "$server" 2>/dev/null || true' EXIT
@@ -80,11 +82,18 @@ set -e
 printf '%s\n' "$engine_rc" > "$W/engine-exit.txt"
 case "$engine_rc" in 0|124|137) ;; *) echo "Engine exited $engine_rc" >&2; exit 1 ;; esac
 grep -a -m 40 -E 'FXCONFIG|FXPROBE|FXNATIVE|engine-ui-hook: PX' "$W/engine.log" | cut -c1-200 | head -n 40
-grep -aq "PX product=$PRODUCT master-bypass=1 installed" "$W/engine.log"
-! grep -q '^pioneer_fx=' "$R/data/sc5000-custom/ui/settings.conf"
-echo "FXCONFIG legacy-master-bypass-and-migration|PASS"
+if [ "$PRODUCT" = JC11 ] && [ "${FX_READY_READONLY:-0}" != 1 ]; then
+    grep -aq "PX product=JC11 master-bypass=1 installed" "$W/engine.log"
+    ! grep -q '^pioneer_fx=' "$R/data/sc5000-custom/ui/settings.conf"
+    echo "FXCONFIG legacy-master-bypass-and-migration|PASS"
+else
+    ! grep -aq "PX product=$PRODUCT" "$W/engine.log"
+    test ! -e "$R/run/enginex-fx-selector.ready"
+    grep -q '^pioneer_fx=spiral$' "$R/data/sc5000-custom/ui/settings.conf"
+    echo "FXCONFIG $PRODUCT-legacy-preserved|PASS"
+fi
 if [ "${FX_CONFIG_ONLY:-0}" = 1 ]; then
-    grep -aq 'FXCONFIG master-bypassed=true selector=false' "$W/engine.log"
+    grep -aq 'FXCONFIG master-bypassed=false selector=false' "$W/engine.log"
     grep -a -m 1 'FXCONFIG product=' "$W/engine.log" | cut -c1-200 | head -n 40
     exit
 fi

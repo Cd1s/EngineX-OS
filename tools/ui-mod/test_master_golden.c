@@ -1,4 +1,4 @@
-/* Native AArch64 AZ04 compatibility oracle. FNV-1a over exact float words,
+/* Native AArch64 AZ04 and armhf non-PX compatibility oracle. FNV-1a over exact float words,
  * 20 seconds per mode at 96 kHz. Expected values originate from dfdef97's
  * actual hook_master_output with this same deterministic callback/fixture.
  * gcc -O2 test_master_golden.c -ldl -lpthread -o test_master_golden
@@ -20,7 +20,8 @@ static uint32_t copy_callback(void *host, void *context, int ic, const float *co
 }
 
 int main(void) {
-#ifdef GOLDEN_FP_OFF
+/* armhf dfdef97 is identical under both contraction flags (no FMA). */
+#if defined(__arm__) || defined(GOLDEN_FP_OFF)
     static const uint64_t expected[5] = {UINT64_C(0x2b14589a7cbaec75), UINT64_C(0x92b5494acccf3730),
         UINT64_C(0xb560e4dd037650cc), UINT64_C(0x2c70597c4940e052), UINT64_C(0xc96acf49bea7c17f)};
 #else
@@ -28,6 +29,19 @@ int main(void) {
         UINT64_C(0xb560e4dd037650cc), UINT64_C(0x67a1e86321990ee5), UINT64_C(0x0340f2cb5a582c6b)};
 #endif
     dsp_originals[DSP_MASTER] = (void *)copy_callback;
+#if defined(__arm__)
+    static const char *const scopes[][2] = {
+        {"5.3.0", "JP07"}, {"5.3.0", "JP08"}, {"5.0.4", "JP07"}, {"5.3.0-sclive4", "JC11"}
+    };
+#else
+    static const char *const scopes[][2] = {{"AZ04", "legacy"}};
+#endif
+    for (unsigned scope = 0; scope < sizeof scopes / sizeof *scopes; ++scope) {
+#if defined(__arm__) && !defined(GOLDEN_BASELINE)
+        assert(!px_selector_capable(scopes[scope][0], scopes[scope][1]));
+        fx_selector_supported = 0;
+        fx_selector_master_bypass = 0;
+#endif
     for (int mode = 1; mode <= 5; ++mode) {
         memset(master_pfx, 0, sizeof master_pfx);
         pioneer_fx_mode = mode;
@@ -49,10 +63,11 @@ int main(void) {
                 }
             }
         }
-        printf("AZ04 hook_master_output mode=%d hash=%016llx\n", mode, (unsigned long long)hash);
+        printf("master %s/%s mode=%d hash=%016llx\n", scopes[scope][0], scopes[scope][1], mode, (unsigned long long)hash);
 #ifndef PRINT_GOLDEN
         assert(hash == expected[mode - 1]);
 #endif
+    }
     }
     (void)expected;
     puts("test_master_golden PASS");

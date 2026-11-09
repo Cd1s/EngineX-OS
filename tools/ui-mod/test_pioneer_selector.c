@@ -128,16 +128,16 @@ static void test_worker_banks(void) {
     CHECK(!sc_pfx_process(&fx[0], l, r, 512, 1, 0.5f, 0.5f, 1));
     sc_pfx_instance_prepare(&fx[0]);
     /* Poison an unused delay cell: rendering may not secretly clear it. */
-    fx[0].bank[0].buf_l[50000] = 0.75f;
+    fx[0].bank[0].buf_l[SC_PFX_RING_SIZE - 1000] = 0.75f;
     CHECK(sc_pfx_process(&fx[0], l, r, 512, 1, 0.5f, 0.5f, 1));
-    CHECK(fx[0].bank[0].buf_l[50000] == 0.75f);
+    CHECK(fx[0].bank[0].buf_l[SC_PFX_RING_SIZE - 1000] == 0.75f);
     CHECK(sc_pfx_process(&fx[0], l, r, 512, 2, 0.5f, 0.5f, 1));
     CHECK(fx[0].mode == 2);
     /* No prepared spare yet: retain mode 2 without clearing on audio thread. */
     CHECK(sc_pfx_process(&fx[0], l, r, 512, 3, 0.5f, 0.5f, 1));
     CHECK(fx[0].mode == 2);
     sc_pfx_instance_prepare(&fx[0]);
-    CHECK(fx[0].bank[0].buf_l[50000] == 0);
+    CHECK(fx[0].bank[0].buf_l[SC_PFX_RING_SIZE - 1000] == 0);
     CHECK(sc_pfx_process(&fx[0], l, r, 512, 3, 0.5f, 0.5f, 1));
     CHECK(fx[0].mode == 3);
     sc_pfx_instance_reset(&fx[0]);
@@ -146,6 +146,22 @@ static void test_worker_banks(void) {
     CHECK(sc_pfx_process(&fx[0], l, r, 512, 3, 0.5f, 0.5f, 1));
     for (unsigned i = 0; i < 512; ++i) CHECK(l[i] == 0 && r[i] == 0);
     puts("test_worker_banks PASS");
+}
+
+static void test_double_reset_no_prepare(void) {
+    memset(&fx[0], 0, sizeof fx[0]);
+    sc_pfx_instance_prepare(&fx[0]);
+    float l[128], r[128], dry[128];
+    for (unsigned i = 0; i < 128; ++i) l[i] = r[i] = dry[i] = fixture(i);
+    CHECK(sc_pfx_process(&fx[0], l, r, 128, 1, 0.5f, 0.5f, 0.8f));
+    sc_pfx_instance_reset(&fx[0]);
+    CHECK(sc_pfx_process(&fx[0], l, r, 128, 1, 0.5f, 0.5f, 0.8f));
+    sc_pfx_instance_reset(&fx[0]);
+    memcpy(l, dry, sizeof l); memcpy(r, dry, sizeof r);
+    CHECK(!sc_pfx_process(&fx[0], l, r, 128, 1, 0.5f, 0.5f, 0.8f));
+    CHECK(!memcmp(l, dry, sizeof l) && !memcmp(r, dry, sizeof r));
+    CHECK(fx[0].wet == 0);
+    puts("test_double_reset_no_prepare PASS");
 }
 
 static void test_smoother_denormals(void) {
@@ -281,7 +297,7 @@ static void test_concurrent_routes(void) {
 }
 
 int main(void) {
-    test_wet_zero_fade(); test_worker_banks(); test_smoother_denormals(); test_arm_arm();
+    test_wet_zero_fade(); test_worker_banks(); test_double_reset_no_prepare(); test_smoother_denormals(); test_arm_arm();
     test_modes(); test_switch(); test_roll_time_increase(); test_routes(); test_concurrent_routes();
     pthread_t a, b;
     CHECK(!pthread_create(&a, NULL, independent, &fx[1]));

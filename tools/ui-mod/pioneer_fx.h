@@ -478,7 +478,7 @@ static inline void sc_pfx_instance_reset(struct sc_pfx_instance *s) {
     s->wet = s->time = s->parameter = 0;
 }
 
-/* Zero means no prepared bank: caller must render the unchanged carrier. */
+/* Zero means no prepared bank: input is unchanged; override callers keep it dry. */
 static inline int sc_pfx_process(struct sc_pfx_instance *s, float *l, float *r,
                                 unsigned frames, int mode, float time, float param, float wet) {
     if (!s || !l || !r) return 0;

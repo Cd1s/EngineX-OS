@@ -12,7 +12,7 @@ import (
 func TestFXSelectorRequiresMatchingAcknowledgement(t *testing.T) {
 	dir := t.TempDir()
 	s := New(Config{UIDir: dir, StateDir: t.TempDir(), FXSelectorReadyFile: filepath.Join(dir, "fx-selector.ready")}, nil)
-	if err := os.WriteFile(filepath.Join(dir, "fx-selector.ready"), nil, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "fx-selector.ready"), []byte("armhf-px-v2 JC11\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "fx-selector.ack"), []byte("1 2 old\n"), 0600); err != nil {
@@ -81,7 +81,7 @@ func TestFXSelectorMigratesLegacySettings(t *testing.T) {
 	if string(b) != legacy {
 		t.Fatal("legacy settings changed without PX hook")
 	}
-	if err := os.WriteFile(s.fxSelectorReadyFile(), nil, 0600); err != nil {
+	if err := os.WriteFile(s.fxSelectorReadyFile(), []byte("armhf-px-v2 JC11\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	w = httptest.NewRecorder()
@@ -89,6 +89,9 @@ func TestFXSelectorMigratesLegacySettings(t *testing.T) {
 	b, _ = os.ReadFile(path)
 	if strings.Contains(string(b), "pioneer_fx=") || !strings.Contains(string(b), "unknown_setting=preserved") {
 		t.Fatalf("migration: %s", b)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0644 {
+		t.Fatalf("migration permissions: %v %v", info, err)
 	}
 	if !strings.Contains(w.Body.String(), `"pioneerFx":"off"`) {
 		t.Fatal(w.Body.String())
@@ -107,7 +110,7 @@ func TestFXSelectorMigratesLegacySettings(t *testing.T) {
 func TestFXSelectorTimeoutDoesNotBlockSettings(t *testing.T) {
 	dir := t.TempDir()
 	s := New(Config{UIDir: dir, StateDir: t.TempDir(), FXSelectorReadyFile: filepath.Join(dir, "ready")}, nil)
-	if err := os.WriteFile(s.fxSelectorReadyFile(), nil, 0600); err != nil {
+	if err := os.WriteFile(s.fxSelectorReadyFile(), []byte("armhf-px-v2 JC11\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan int, 1)
@@ -140,5 +143,97 @@ func TestFXSelectorTimeoutDoesNotBlockSettings(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "fx-selector.request")); !os.IsNotExist(err) {
 		t.Fatal("timed out request survives")
+	}
+}
+
+func TestFXSelectorJP07PreservesLegacy(t *testing.T) {
+	dir := t.TempDir()
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), FXSelectorReadyFile: filepath.Join(dir, "ready")}, nil)
+	path := filepath.Join(dir, "settings.conf")
+	legacy := "lang=en\npioneer_fx=spiral\nunknown_setting=preserved\n"
+	if err := os.WriteFile(path, []byte(legacy), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, heartbeat := range []string{"armhf-px-v1\n", "armhf-px-v2 JP07\n"} {
+		if err := os.WriteFile(s.fxSelectorReadyFile(), []byte(heartbeat), 0600); err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		s.uiStatus(w, httptest.NewRequest("GET", "/api/ui", nil))
+		b, _ := os.ReadFile(path)
+		if string(b) != legacy {
+			t.Fatal("JP07 preference was migrated")
+		}
+		if !strings.Contains(w.Body.String(), `"fxSelectorAvailable":false`) || !strings.Contains(w.Body.String(), `"pioneerFx":"spiral"`) {
+			t.Fatal(w.Body.String())
+		}
+	}
+	v := s.loadUI()
+	v.PioneerFx = "space"
+	if err := s.saveUI(v); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), "pioneer_fx=space\n") {
+		t.Fatal("JP07 cannot save legacy master FX")
+	}
+}
+
+func TestFXSelectorQueuesOverlappingUnits(t *testing.T) {
+	dir := t.TempDir()
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), FXSelectorReadyFile: filepath.Join(dir, "ready")}, nil)
+	if err := os.WriteFile(s.fxSelectorReadyFile(), []byte("armhf-px-v2 JC11\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(chan struct{})
+	worker := make(chan error, 1)
+	go func() {
+		last := ""
+		for count := 0; count < 2; count++ {
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				b, err := os.ReadFile(filepath.Join(dir, "fx-selector.request"))
+				if err == nil && string(b) != last {
+					last = string(b)
+					if count == 0 {
+						close(seen)
+						time.Sleep(100 * time.Millisecond)
+					}
+					if err := os.WriteFile(filepath.Join(dir, "fx-selector.ack"), []byte(strings.TrimSpace(last)+" 0\n"), 0600); err != nil {
+						worker <- err
+						return
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					worker <- os.ErrDeadlineExceeded
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
+		worker <- nil
+	}()
+	first := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		s.uiUpdate(w, httptest.NewRequest("POST", "/api/ui?fxUnit=1&fxMode=1", nil))
+		first <- w.Code
+	}()
+	select {
+	case <-seen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first request not observed")
+	}
+	w := httptest.NewRecorder()
+	s.uiUpdate(w, httptest.NewRequest("POST", "/api/ui?fxUnit=2&fxMode=2", nil))
+	if code := <-first; code != 200 {
+		t.Fatalf("unit 1: %d", code)
+	}
+	if w.Code != 200 {
+		t.Fatalf("unit 2 overlap lost: %d", w.Code)
+	}
+	if err := <-worker; err != nil {
+		t.Fatal(err)
 	}
 }
