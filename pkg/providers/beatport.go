@@ -278,27 +278,29 @@ func (b *Beatport) get(ctx context.Context, path string, q url.Values, out any) 
 
 // beatportPages reads a paginated listing until it ends or reaches limit items.
 func beatportPages[T any](ctx context.Context, b *Beatport, path string, q url.Values, perPage, limit int, add func(T)) error {
-	q.Set("per_page", strconv.Itoa(perPage))
-	for page := 1; (page-1)*perPage < limit; page++ {
+	items, err := collectPages(ctx, beatportPageSlots, perPage, (limit+perPage-1)/perPage, func(page int) (listPage[T], error) {
+		// Every request owns its query: pagination may now run concurrently.
+		query := make(url.Values, len(q)+2)
+		for k, v := range q {
+			query[k] = append([]string(nil), v...)
+		}
+		query.Set("per_page", strconv.Itoa(perPage))
+		query.Set("page", strconv.Itoa(page+1))
 		var r struct {
-			Next    *string `json:"next"`
-			Results []T     `json:"results"`
+			Next    *string
+			Results []T
+			Count   int
 		}
-		q.Set("page", strconv.Itoa(page))
-		if err := b.get(ctx, path, q, &r); err != nil {
-			if page > 1 {
-				return nil // what was already read is still worth showing
-			}
-			return err
-		}
-		for _, v := range r.Results {
-			add(v)
-		}
-		if r.Next == nil || *r.Next == "" || len(r.Results) == 0 {
-			return nil
-		}
+		err := b.get(ctx, path, query, &r)
+		return listPage[T]{items: r.Results, more: r.Next != nil && *r.Next != "" && len(r.Results) > 0, total: r.Count}, err
+	})
+	for _, v := range items {
+		add(v)
 	}
-	return nil
+	if len(items) > 0 || errors.Is(err, errPageLimit) {
+		return nil
+	}
+	return err
 }
 
 type bpImage struct {

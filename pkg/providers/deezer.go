@@ -178,46 +178,46 @@ func (d *Deezer) Playlists(ctx context.Context) ([]Playlist, error) {
 	if d.UserID == "" {
 		return nil, errors.New("deezer: set a public user ID or open a playlist ID")
 	}
-	var all []Playlist
-	for index := 0; index < 100000; index += 100 {
+	all, err := collectPages(ctx, deezerPages, 100, 1000, func(page int) (listPage[Playlist], error) {
 		var r struct {
 			Data []struct {
-				ID    int64  `json:"id"`
-				Title string `json:"title"`
-				Count int    `json:"nb_tracks"`
+				ID    int64
+				Title string
+				Count int `json:"nb_tracks"`
 			}
-			Next string `json:"next"`
+			Next  string
+			Total int
 		}
-		if err := d.get(ctx, "/user/"+url.PathEscape(d.UserID)+"/playlists", url.Values{"index": {strconv.Itoa(index)}, "limit": {"100"}}, &r); err != nil {
-			return nil, err
-		}
+		err := d.get(ctx, "/user/"+url.PathEscape(d.UserID)+"/playlists", url.Values{"index": {strconv.Itoa(page * 100)}, "limit": {"100"}}, &r)
+		out := listPage[Playlist]{more: r.Next != "", total: r.Total}
 		for _, p := range r.Data {
-			all = append(all, Playlist{strconv.FormatInt(p.ID, 10), p.Title, p.Count})
+			out.items = append(out.items, Playlist{strconv.FormatInt(p.ID, 10), p.Title, p.Count})
 		}
-		if r.Next == "" {
-			return all, nil
-		}
+		return out, err
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil, errors.New("deezer: pagination limit")
+	return all, nil
 }
 func (d *Deezer) Tracks(ctx context.Context, id string) ([]Track, error) {
-	var all []Track
-	for index := 0; index < 100000; index += 100 {
+	all, err := collectPages(ctx, deezerPages, 100, 1000, func(page int) (listPage[Track], error) {
 		var r struct {
-			Data []dzTrack
-			Next string `json:"next"`
+			Data  []dzTrack
+			Next  string
+			Total int
 		}
-		if err := d.get(ctx, "/playlist/"+url.PathEscape(id)+"/tracks", url.Values{"index": {strconv.Itoa(index)}, "limit": {"100"}}, &r); err != nil {
-			return nil, err
-		}
+		err := d.get(ctx, "/playlist/"+url.PathEscape(id)+"/tracks", url.Values{"index": {strconv.Itoa(page * 100)}, "limit": {"100"}}, &r)
+		out := listPage[Track]{more: r.Next != "", total: r.Total}
 		for _, t := range r.Data {
-			all = append(all, t.track())
+			out.items = append(out.items, t.track())
 		}
-		if r.Next == "" {
-			return all, nil
-		}
+		return out, err
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil, errors.New("deezer: pagination limit")
+	return all, nil
 }
 func (d *Deezer) Search(ctx context.Context, query string) ([]Track, error) {
 	var r struct{ Data []dzTrack }
