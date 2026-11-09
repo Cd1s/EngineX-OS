@@ -32,7 +32,8 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn('ActionTranslatorStateChangeNotifier', qml)
         self.assertIn('scFxReady.translator.state = false', qml)
         self.assertIn('return scFxCanUse() ? px : fxConfig.channel[modelData].pEffectIndex.translator', bp.FX_JOG_TARGET)
-        self.assertIn('visible: !root.scFxSelectorAvailable', bp.PLAYBACK_ENTRIES)
+        self.assertIn('visible: !root.scFxMasterBypassed', bp.PLAYBACK_ENTRIES)
+        self.assertIn('scFxSelectorAvailable = scFxMasterBypassed && (Config.audio.fx.hasDJFx || Config.audio.fx.hasNHFx)', SRC)
 
     def test_auto_analyze_cannot_submit_native_work(self):
         # Saved-on settings, drive insertion, playback and arbitrary filesystem

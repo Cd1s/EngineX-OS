@@ -15,6 +15,7 @@ struct sc_pfx_route {
     unsigned native_override, restore_mix;
     unsigned mix, parameter, time;
     void *audio_effect;
+    unsigned reset_epoch, audio_reset;
     unsigned audio_epoch, render_epoch; /* audio owner only */
     struct sc_pfx_instance dsp;
 };
@@ -140,6 +141,19 @@ static inline void sc_pfx_forget_owner(void *owner) {
         if (__atomic_load_n(&r->challenge_owner, __ATOMIC_ACQUIRE) == owner)
             __atomic_store_n(&r->challenge_owner, NULL, __ATOMIC_RELEASE);
     }
+}
+
+/* Event thread: a later render starts with fresh delay/roll state after off/on. */
+static inline void sc_pfx_reset_owner(void *owner) {
+    if (!owner) return;
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+        if (__atomic_load_n(&sc_pfx_routes[i].owner, __ATOMIC_ACQUIRE) == owner)
+            __atomic_fetch_add(&sc_pfx_routes[i].reset_epoch, 1, __ATOMIC_RELEASE);
+}
+
+static inline void sc_pfx_activate(struct sc_pfx_route *r) {
+    __atomic_store_n(&r->restore_mix, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&r->native_override, 1, __ATOMIC_RELEASE);
 }
 
 static inline void sc_pfx_control(void *owner, unsigned kind, float value) {

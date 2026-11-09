@@ -15,23 +15,56 @@ Build/test host: Oracle-Batam-arm, native aarch64 host with armhf compatibility;
 | test_rootfs_overlay.sh | 18 tests, PASS; mocked storage/hardware |
 | test_pioneer_selector | plain + ASan/UBSan + TSan PASS |
 | test_dsp_smooth | plain + ASan/UBSan + TSan PASS |
+| Native armhf non-PX Flanger | PASS; opaque argument 0/1/2/4/0x12345678, bit-exact original body and makeup |
 | Site JavaScript syntax | PASS |
 | armhf hook, two builds | Byte-identical |
-| AZ04 hook compilation | PASS; existing third-argument ABI/body retained |
+| AZ04 hook compilation and master golden | PASS; frozen dfdef97 DSP source; all five modes × 20 seconds, both `-ffp-contract=fast` and `off` |
 
 Both committed armhf copies have SHA256:
 
 ```text
-0f068e987f66945608f66d30076cf81caacf9f83411995a68d53265b2dee5d6d
+51c99fdf4dd10c91a95eb50a7d4866a48d5f2df7ef1c15384fc1985ac1e1d8b6
 ```
 
-Paths: `rootfs-overlay/etc/sc5000/libengine-ui-hook.so` and `rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so`. ELF32 ARM EABI5, stripped; BuildID `10324fe3df12c8a252a7a5ae395d39eec5d80fb1`.
+Paths: `rootfs-overlay/etc/sc5000/libengine-ui-hook.so` and `rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so`. ELF32 ARM EABI5, stripped; BuildID `72f0707a8ebefb8b8950e54eb0aa92aad3672b00`.
+
+## R5 regressions
+
+Follow-up to review of `9e66cba`, all builds/tests on Batam:
+
+| Review | Fix and regression |
+| --- | --- |
+| M1 | `sc_pfx_activate` clears pending restore before native override; `test_arm_arm` arms/off/arms without rendering between selections |
+| M2 | Wait for smoothed Wet <1e-6 before literal bypass; `test_wet_zero_fade` checks every adjacent sample during each mode's 0.8→0 fade (<0.025), then bit-exact dry |
+| M3 | Unverified armhf scope retains the opaque argument/body; `test_flanger_scope`. AZ04 compiles original DSP source; `test_master_golden` checks exact float-word hashes against dfdef97 under both FP policies |
+| M4 | Install-time master bypass on every PX-enabled board; API migration preserves unrelated settings; `test_px_master_bypass`, `TestFXSelectorMigratesLegacySettings`, both rootfs probes |
+| L1 | Worker-only preparation with atomic bank ownership; `test_worker_banks` checks no unprepared render, no hidden callback clear, deferred rapid change and fresh reset; concurrent routes run under TSan |
+| L2 | Flush tiny smoother states; `test_smoother_denormals` |
+| L3 | NULL carrier/current-name guards; `test_px_null_owner`. Destructor-versus-restoration lifetime serialization remains unproven |
+| L4 | Off/on/enable events increment reset epoch; `test_px_off_on_reset` plus fresh-buffer assertion in `test_worker_banks` |
+| L5 | Heartbeat moved to `/run/enginex-fx-selector.ready`; real API readiness exercised by both sandboxes |
+| L6 | Dedicated try-lock, 750 ms command expiry and unread-request cleanup; `TestFXSelectorTimeoutDoesNotBlockSettings`. Cancellation after worker application starts remains deferred |
+| I1 | Tester documentation distinguishes consumed-handshake ducking from normal wet-only delay startup |
+| I2 | Live event ordering, channel assignment, toggles and teardown remain PRIME 4 hardware checks; no deck was contacted |
+
+The JP07 rootfs probe reports `hasDJFx=false`, `hasNHFx=false`: it has no native FX selector. Its supported hook still immediately bypasses old master FX; the legacy menu is hidden and the old key is removed, as requested by R5. JC11 provides the native selector.
+
+## JP07 config probe
+
+```text
+engine-ui-hook: PX product=JP07 master-bypass=1 installed
+FXCONFIG product=JP07 hasDJFx=false hasNHFx=false
+FXCONFIG master-bypassed=true selector=false
+FXCONFIG legacy-master-bypass-and-migration|PASS
+```
 
 ## JC11 sandbox excerpt
 
 Real PRIME4 5.3.0 rootfs, production hook, generated UI pack and production Go API handlers, in private mount/network/PID namespaces. The real private knob component is instantiated using original assignment modules and MIDI configuration fixtures.
 
 ```text
+FXCONFIG product=JC11 hasDJFx=true hasNHFx=false
+FXPROBE legacy-master-menu-hidden|PASS
 FXPROBE appended-list|PASS
 FXPROBE native-knob-component|PASS
 FXPROBE three-plus-one-minus|PASS
@@ -52,6 +85,7 @@ FXNATIVE stock-mix-restored|PASS
 FXNATIVE offline-driver|PASS
 FXPROBE stock-flanger-selectable|PASS
 FXPROBE done|PASS
+FXCONFIG legacy-master-bypass-and-migration|PASS
 ```
 
 The wire check compares the exact float bits stored by Planck against the acknowledged command. The native driver then replays ABI fixtures into two distinct real ChannelDJFx handler/collection pairs and feeds real carrier pointers with their owner-embedded buffer-array addresses through the installed process hook. Output is finite and nonzero, changes with Parameter, and is bit-identical to input at Wet=0. Selecting stock Flanger restores native Mix.

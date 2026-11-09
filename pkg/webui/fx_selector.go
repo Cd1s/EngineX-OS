@@ -17,8 +17,15 @@ import (
 	"time"
 )
 
+func (s *Server) fxSelectorReadyFile() string {
+	if s.cfg.FXSelectorReadyFile != "" {
+		return s.cfg.FXSelectorReadyFile
+	}
+	return "/run/enginex-fx-selector.ready"
+}
+
 func (s *Server) fxSelectorAvailable() bool {
-	i, err := os.Stat(filepath.Join(s.uiDir(), "fx-selector.ready"))
+	i, err := os.Stat(s.fxSelectorReadyFile())
 	return err == nil && time.Since(i.ModTime()) < 2*time.Second
 }
 
@@ -29,8 +36,11 @@ func (s *Server) fxSelectorUpdate(w http.ResponseWriter, r *http.Request, q url.
 		fail(w, http.StatusBadRequest, errors.New("invalid FX unit or mode"))
 		return
 	}
-	s.uiMu.Lock()
-	defer s.uiMu.Unlock()
+	if !s.fxMu.TryLock() {
+		fail(w, http.StatusConflict, errors.New("FX selection already pending"))
+		return
+	}
+	defer s.fxMu.Unlock()
 	if !s.fxSelectorAvailable() {
 		fail(w, http.StatusServiceUnavailable, errors.New("FX selector hook unavailable"))
 		return
@@ -43,7 +53,7 @@ func (s *Server) fxSelectorUpdate(w http.ResponseWriter, r *http.Request, q url.
 	// Distinct exponents and unit bits prevent cross-unit challenge matches.
 	a := uint32(0x35800000) | (binary.LittleEndian.Uint32(nonce[:4]) & 0x007ffff8) | uint32(u-1)
 	btoken := uint32(0x36000000) | (binary.LittleEndian.Uint32(nonce[4:]) & 0x007ffff8) | uint32(u-1)
-	command := fmt.Sprintf("%d %d %d %d %d\n", u, m, time.Now().UnixNano(), a, btoken)
+	command := fmt.Sprintf("%d %d %d %d %d %d\n", u, m, time.Now().UnixNano(), a, btoken, time.Now().Add(750*time.Millisecond).UnixMilli())
 	dir := s.uiDir()
 	f, err := os.CreateTemp(dir, ".fx-selector-*")
 	if err == nil {
@@ -60,6 +70,12 @@ func (s *Server) fxSelectorUpdate(w http.ResponseWriter, r *http.Request, q url.
 		fail(w, http.StatusInternalServerError, errors.New("cannot notify FX selector hook"))
 		return
 	}
+	acked := false
+	defer func() {
+		if !acked {
+			_ = os.Remove(filepath.Join(dir, "fx-selector.request"))
+		}
+	}()
 	// Type may only be written once the hook has published the route. A stale
 	// acknowledgement from a previous selection cannot satisfy this barrier.
 	timer := time.NewTimer(time.Second)
@@ -69,8 +85,9 @@ func (s *Server) fxSelectorUpdate(w http.ResponseWriter, r *http.Request, q url.
 	for {
 		b, _ := os.ReadFile(filepath.Join(dir, "fx-selector.ack"))
 		fields := strings.Fields(string(b))
-		if len(fields) == 6 && strings.Join(fields[:5], " ") == strings.TrimSpace(command) && (fields[5] == "0" || fields[5] == "1") {
-			respond(w, map[string]any{"fxSelectorReady": true, "fxBind": m > 0 && fields[5] == "0", "fxChallengeA": math.Float32frombits(a), "fxChallengeB": math.Float32frombits(btoken)})
+		if len(fields) == 7 && strings.Join(fields[:6], " ") == strings.TrimSpace(command) && (fields[6] == "0" || fields[6] == "1") {
+			acked = true
+			respond(w, map[string]any{"fxSelectorReady": true, "fxBind": m > 0 && fields[6] == "0", "fxChallengeA": math.Float32frombits(a), "fxChallengeB": math.Float32frombits(btoken)})
 			return
 		}
 		select {

@@ -89,15 +89,15 @@ static void parameter(struct owner *o, float value) {
 }
 static int command(unsigned unit, unsigned mode, unsigned *a, unsigned *b) {
     FILE *f = fopen("/data/sc5000-custom/ui/fx-selector.request", "r");
-    unsigned u, m; unsigned long long seq;
-    int n = f ? fscanf(f, "%u %u %llu %u %u", &u, &m, &seq, a, b) : 0;
+    unsigned u, m; unsigned long long seq, expires;
+    int n = f ? fscanf(f, "%u %u %llu %u %u %llu", &u, &m, &seq, a, b, &expires) : 0;
     if (f) fclose(f);
-    if (n != 5 || u != unit || m != mode) return 0;
-    unsigned au, am, aa, ab, reused; unsigned long long as;
+    if (n != 6 || u != unit || m != mode) return 0;
+    unsigned au, am, aa, ab, reused; unsigned long long as, ae;
     f = fopen("/data/sc5000-custom/ui/fx-selector.ack", "r");
-    n = f ? fscanf(f, "%u %u %llu %u %u %u", &au, &am, &as, &aa, &ab, &reused) : 0;
+    n = f ? fscanf(f, "%u %u %llu %u %u %llu %u", &au, &am, &as, &aa, &ab, &ae, &reused) : 0;
     if (f) fclose(f);
-    return n == 6 && au == u && am == m && as == seq && aa == *a && ab == *b;
+    return n == 7 && ae == expires && au == u && am == m && as == seq && aa == *a && ab == *b;
 }
 static double render(struct owner *o, float wet, float param, int *ok) {
     mix(o, wet); parameter(o, param);
@@ -109,7 +109,7 @@ static double render(struct owner *o, float wet, float param, int *ok) {
         for (unsigned i = 0; i < 128; ++i) dry[i] = l[i] = r[i] = 0.2f * sinf((float)(block * 128 + i) * 0.027f);
         ((effect_fn)(base + 0xf1ab24))(o->effect, p, 2, 128);
         p[0] = saved[0]; p[1] = saved[1];
-        if (wet == 0 && (memcmp(l, dry, sizeof l) || memcmp(r, dry, sizeof r))) *ok = 0;
+        if (wet == 0 && block * 128 >= 4096 && (memcmp(l, dry, sizeof l) || memcmp(r, dry, sizeof r))) *ok = 0;
         for (unsigned i = 0; i < 128; ++i) {
             if (!isfinite(l[i]) || fabsf(l[i]) > 4) *ok = 0;
             energy += (double)l[i] * l[i];

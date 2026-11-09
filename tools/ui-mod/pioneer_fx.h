@@ -439,14 +439,15 @@ static inline void sc_pioneer_fx_planar(struct sc_pioneer_fx *s, float *l, float
     s->write_pos = wpos;
 }
 
-/* Selector instances own both banks; only their audio thread touches them.
- * Crossfade wet signals for 256 frames, including rapid successive changes.
- * Wet=0 is a literal bypass: even signed zero / NaN input bits are preserved.
- * Controls are normalized. Time spans 50..450 ms at Engine's 96 kHz.
- */
+/* Worker clears only DIRTY banks. READY -> LIVE is an acquire transfer to
+ * the audio thread; LIVE -> DIRTY releases it after the last crossfade read.
+ * A rapid selection waits for a prepared spare, retaining the current effect.
+ * Legacy master DSP above deliberately keeps its original reset behavior. */
+enum { SC_PFX_DIRTY, SC_PFX_PREPARING, SC_PFX_READY, SC_PFX_LIVE };
 struct sc_pfx_instance {
     struct sc_pioneer_fx bank[2];
-    int mode, current;
+    unsigned bank_state[2];
+    int mode, current; /* current is bank index + 1; zero means no live bank */
     unsigned fade;
     float last_l, last_r, from_l, from_r;
     float wet, time, parameter;
@@ -456,59 +457,79 @@ static inline float sc_pfx_unit(float x) {
     return !(x >= 0.0f) ? 0.0f : (x > 1.0f ? 1.0f : x);
 }
 
+/* Ordinary polling worker only. This also faults in every delay-buffer page. */
+static inline void sc_pfx_instance_prepare(struct sc_pfx_instance *s) {
+    for (unsigned i = 0; i < 2; ++i) {
+        unsigned expected = SC_PFX_DIRTY;
+        if (!__atomic_compare_exchange_n(&s->bank_state[i], &expected, SC_PFX_PREPARING,
+                                         0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) continue;
+        memset(&s->bank[i], 0, sizeof s->bank[i]);
+        __atomic_store_n(&s->bank_state[i], SC_PFX_READY, __ATOMIC_RELEASE);
+    }
+}
+
+/* Audio owner only: invalidate live banks without touching their buffers. */
 static inline void sc_pfx_instance_reset(struct sc_pfx_instance *s) {
-    /* Invalidate both banks without clearing megabytes on the callback. Each
-     * bank clears its own delay only when first rendered in a new mode. */
-    s->bank[0].active_mode = s->bank[1].active_mode = SC_PFX_OFF;
-    s->bank[0].write_pos = s->bank[1].write_pos = 0;
+    for (unsigned i = 0; i < 2; ++i)
+        if (__atomic_load_n(&s->bank_state[i], __ATOMIC_RELAXED) == SC_PFX_LIVE)
+            __atomic_store_n(&s->bank_state[i], SC_PFX_DIRTY, __ATOMIC_RELEASE);
     s->mode = SC_PFX_OFF; s->current = 0; s->fade = 0;
     s->last_l = s->last_r = s->from_l = s->from_r = 0;
     s->wet = s->time = s->parameter = 0;
 }
 
-static inline void sc_pfx_process(struct sc_pfx_instance *s, float *l, float *r,
-                                 unsigned frames, int mode, float time, float param, float wet) {
-    if (!s || !l || !r) return;
+/* Zero means no prepared bank: caller must render the unchanged carrier. */
+static inline int sc_pfx_process(struct sc_pfx_instance *s, float *l, float *r,
+                                unsigned frames, int mode, float time, float param, float wet) {
+    if (!s || !l || !r) return 0;
     time = sc_pfx_unit(time); param = sc_pfx_unit(param); wet = sc_pfx_unit(wet);
     if (mode < SC_PFX_OFF || mode > SC_PFX_SPACE) mode = SC_PFX_OFF;
     if (mode == SC_PFX_OFF) wet = 0.0f;
-    if (mode != s->mode) {
-        s->mode = mode;
-        s->current ^= 1;
-        /* The inactive bank is reset by its first render; the previous bank
-         * keeps its delay tail throughout the crossfade. */
-        s->bank[s->current].active_mode = SC_PFX_OFF;
-        s->fade = 256;
-        s->from_l = s->last_l; s->from_r = s->last_r;
+    if ((mode != s->mode || !s->current) && !s->fade) {
+        for (unsigned i = 0; i < 2; ++i) {
+            unsigned expected = SC_PFX_READY;
+            if (!__atomic_compare_exchange_n(&s->bank_state[i], &expected, SC_PFX_LIVE,
+                                             0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) continue;
+            s->bank[i].active_mode = mode; /* all other state was cleared by worker */
+            s->bank[i].controlled = 1;
+            s->current = (int)i + 1; s->mode = mode; s->fade = 256;
+            s->from_l = s->last_l; s->from_r = s->last_r;
+            break;
+        }
     }
+    if (!s->current) return 0;
+    /* A pending selection must not reset the current bank in planar(). */
+    mode = s->mode;
     for (unsigned i = 0; i < frames; ++i) {
         float dl = l[i], dr = r[i], nl = dl, nr = dr, ol = dl, or_ = dr;
-        s->time += (time - s->time) * (1.0f / 256.0f);
-        s->parameter += (param - s->parameter) * (1.0f / 256.0f);
-        s->wet += (wet - s->wet) * (1.0f / 256.0f);
-        struct sc_pioneer_fx *n = &s->bank[s->current], *o = &s->bank[s->current ^ 1];
-        n->controlled = 1; n->time = s->time; n->parameter = s->parameter;
+        s->time = sc_pfx_state(s->time + (time - s->time) * (1.0f / 256.0f));
+        s->parameter = sc_pfx_state(s->parameter + (param - s->parameter) * (1.0f / 256.0f));
+        s->wet = sc_pfx_state(s->wet + (wet - s->wet) * (1.0f / 256.0f));
+        unsigned current = (unsigned)s->current - 1, previous = current ^ 1;
+        struct sc_pioneer_fx *n = &s->bank[current], *o = &s->bank[previous];
+        n->time = s->time; n->parameter = s->parameter;
         sc_pioneer_fx_planar(n, &nl, &nr, 1, mode);
         if (mode != SC_PFX_SLIP_ROLL) { nl -= dl; nr -= dr; }
         if (!mode) nl = nr = 0.0f;
         if (s->fade) {
-            int previous = o->active_mode;
-            sc_pioneer_fx_planar(o, &ol, &or_, 1, previous);
-            if (previous != SC_PFX_SLIP_ROLL) { ol -= dl; or_ -= dr; }
-            if (!previous) ol = or_ = 0.0f;
+            int old_mode = __atomic_load_n(&s->bank_state[previous], __ATOMIC_RELAXED) == SC_PFX_LIVE ? o->active_mode : 0;
+            if (old_mode) {
+                sc_pioneer_fx_planar(o, &ol, &or_, 1, old_mode);
+                if (old_mode != SC_PFX_SLIP_ROLL) { ol -= dl; or_ -= dr; }
+            } else ol = or_ = 0.0f;
             float a = (float)(256 - s->fade) / 256.0f;
-            /* Start at the actual last wet sample. This also handles another
-             * selection arriving before the preceding crossfade has finished. */
-            float old_l = previous ? s->from_l + a * (ol - s->from_l) : dl;
-            float old_r = previous ? s->from_r + a * (or_ - s->from_r) : dr;
+            float old_l = old_mode ? s->from_l + a * (ol - s->from_l) : dl;
+            float old_r = old_mode ? s->from_r + a * (or_ - s->from_r) : dr;
             nl = old_l + a * (nl - old_l); nr = old_r + a * (nr - old_r);
-            --s->fade;
+            if (!--s->fade && __atomic_load_n(&s->bank_state[previous], __ATOMIC_RELAXED) == SC_PFX_LIVE)
+                __atomic_store_n(&s->bank_state[previous], SC_PFX_DIRTY, __ATOMIC_RELEASE);
         }
         s->last_l = sc_pfx_clamp_out(nl); s->last_r = sc_pfx_clamp_out(nr);
-        if (wet == 0.0f) continue;
+        if (wet == 0.0f && s->wet < 1.0e-6f) { s->wet = 0.0f; continue; }
         l[i] = sc_pfx_clamp_out(dl * (1.0f - s->wet) + s->last_l * s->wet);
         r[i] = sc_pfx_clamp_out(dr * (1.0f - s->wet) + s->last_r * s->wet);
     }
+    return 1;
 }
 
 #endif
