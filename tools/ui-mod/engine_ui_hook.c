@@ -1153,13 +1153,39 @@ static const char *product_code_path = "/sys/firmware/devicetree/base/inmusic,pr
 // #171, only b946c3b8 / JP21. This Engine passes pairs of float pointers in
 // MixerBuffers, rather than the AudioBuffer stack objects in the older analysis.
 // Keep the capture pointers intact until BOTH native LineInChannels have read
-// them; only the two legacy AuxMic2 inputs receive silence. No Qt, allocation,
+// them; only the legacy AUX input receives silence, and only in AUX mode.
+// MIC2 retains its native gate and routing. No Qt, allocation,
 // lock, I/O or control-property writes run on the audio thread.
-static uint32_t aux_process_jump[2], aux_control_jump[2];
+static uint32_t aux_process_jump[2], aux_control_jump[2], aux_init_jump[2];
 static void (*aux_process_native)(void *, void *);
 static void (*aux_control_native)(void *, void *, uintptr_t, uintptr_t);
-static int aux_input_select = -1; // unknown / startup is denied
+static void *(*aux_init_native)(void *, void *, void *, void *, uintptr_t);
+static int aux_input_select; // native constructor's Mic2 default; published at construction
 static int aux_ready;
+
+#ifdef ENGINE_UI_HOOK_AUX_TRACE
+// Test build only. The live ALSA fixture reads these counters; it never calls
+// the Mixer or its guard. No counters/syscalls are present in shipped builds.
+unsigned sclive_aux_trace[16];
+extern void sclive_aux_boot_fixture(void *) __attribute__((weak));
+#endif
+
+static void *sclive_aux_construct(void *control, void *definition, void *mic2, void *aux, uintptr_t flag) {
+    void *result = aux_init_native(control, definition, mic2, aux, flag);
+#ifdef ENGINE_UI_HOOK_AUX_TRACE
+    if (sclive_aux_boot_fixture) sclive_aux_boot_fixture(control);
+#endif
+    // Read the completed native state even if initialization/restoration emitted
+    // no property notification. Later physical selector events update it below.
+    int selected = *(int *)((char *)control + 0x88);
+    __atomic_store_n(&aux_input_select, selected == 1 ? 1 : 0, __ATOMIC_RELEASE);
+#ifdef ENGINE_UI_HOOK_AUX_TRACE
+    __atomic_store_n(&sclive_aux_trace[6], (unsigned)selected, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&sclive_aux_trace[7], 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&sclive_aux_trace[11], __atomic_load_n(&sclive_aux_trace[10], __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+#endif
+    return result;
+}
 
 static int sclive4_board(void) {
     char code[16] = "";
@@ -1181,11 +1207,31 @@ static float **aux_output(void *channel) {
 }
 
 static void aux_zero(float **pair, unsigned frames) {
-    memset(pair[0], 0, (size_t)frames * sizeof(float));
-    if (pair[1] != pair[0]) memset(pair[1], 0, (size_t)frames * sizeof(float));
+    // Volatile stores prevent GCC from turning the first audio-block clear
+    // into a lazily bound memset@plt call (and taking the loader lock).
+    volatile float *left = pair[0], *right = pair[1];
+    for (unsigned i = 0; i < frames; i++) {
+        left[i] = 0;
+        if (right != left) right[i] = 0;
+    }
+}
+
+static void aux_call_native(void *mixer, void *buffers) {
+    aux_process_native(mixer, buffers);
+#ifdef ENGINE_UI_HOOK_AUX_TRACE
+    __atomic_fetch_add(&sclive_aux_trace[5], 1, __ATOMIC_RELAXED);
+#endif
 }
 
 static void sclive_aux_process(void *mixer, void *buffers) {
+#ifdef ENGINE_UI_HOOK_AUX_TRACE
+    unsigned tid = (unsigned)syscall(SYS_gettid);
+    __atomic_fetch_add(&sclive_aux_trace[0], 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&sclive_aux_trace[1], tid, __ATOMIC_RELAXED);
+    if (tid == (unsigned)getpid()) __atomic_fetch_add(&sclive_aux_trace[2], 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&sclive_aux_trace[3], (unsigned)(uintptr_t)__builtin_return_address(0), __ATOMIC_RELAXED);
+    __atomic_store_n(&sclive_aux_trace[4], *(unsigned *)((char *)buffers + 0x140), __ATOMIC_RELAXED);
+#endif
     char *m = mixer;
     float **io = buffers;
     void **channels = *(void ***)(m + 0x40);
@@ -1193,7 +1239,7 @@ static void sclive_aux_process(void *mixer, void *buffers) {
     if (count < 4 || !channels || !channels[2] || !channels[3] ||
         (!__atomic_load_n((uchar *)channels[2] + 0x7a, __ATOMIC_RELAXED) &&
          !__atomic_load_n((uchar *)channels[3] + 0x7a, __ATOMIC_RELAXED))) {
-        aux_process_native(mixer, buffers);
+        aux_call_native(mixer, buffers);
         return;
     }
     unsigned frames = *(unsigned *)((char *)buffers + 0x140);
@@ -1203,21 +1249,50 @@ static void sclive_aux_process(void *mixer, void *buffers) {
     for (unsigned i = 0; i < 4; i++) {
         zero[i] = aux_output(*(void **)(m + 0x9c + i * 4));
         if (!zero[i] || !zero[i][0] || !zero[i][1]) {
-            aux_process_native(mixer, buffers);
+            aux_call_native(mixer, buffers);
             return;
         }
     }
     float *saved[8];
     memcpy(saved, io + 0x2e, sizeof saved); // Mic2, Aux, LineIn3, LineIn4
     int selected = __atomic_load_n(&aux_input_select, __ATOMIC_ACQUIRE);
+#ifdef ENGINE_UI_HOOK_AUX_TRACE
+    __atomic_fetch_add(&sclive_aux_trace[selected == 1 ? 8 : 9], 1, __ATOMIC_RELAXED);
+#endif
     // Save the raw pre-gate capture pair BEFORE silencing the legacy inputs.
     float *left = io[0x30], *right = io[0x31];
-    for (unsigned i = 0; i < 4; i++) {
-        if (i < 2 || selected != 1 || !left || !right) aux_zero(zero[i], frames);
+#ifdef ENGINE_UI_HOOK_AUX_TRACE
+    float capture_before[4] = {0};
+    if (left && right && frames >= 2) {
+        capture_before[0] = left[0]; capture_before[1] = left[1];
+        capture_before[2] = right[0]; capture_before[3] = right[1];
+    }
+    if (selected == 1 && left && right) {
+        if (__atomic_load_n(&sclive_aux_trace[10], __ATOMIC_RELAXED) ==
+            __atomic_load_n(&sclive_aux_trace[11], __ATOMIC_RELAXED))
+            __atomic_fetch_add(&sclive_aux_trace[12], 1, __ATOMIC_RELAXED);
+        if (frames && (left[0] != 0 || right[0] != 0))
+            __atomic_fetch_add(&sclive_aux_trace[13], 1, __ATOMIC_RELAXED);
+        for (unsigned i = 1; i < 4; i++)
+            if (zero[i][0] == left || zero[i][0] == right || zero[i][1] == left || zero[i][1] == right)
+                __atomic_fetch_add(&sclive_aux_trace[15], 1, __ATOMIC_RELAXED);
+    }
+#endif
+    for (unsigned i = 1; i < 4; i++) {
+        if (i == 1 && selected != 1) continue; // preserve the stock direct path
+        if (i == 1 || selected != 1 || !left || !right) aux_zero(zero[i], frames);
         io[0x2e + i * 2] = i >= 2 && selected == 1 && left && right ? left : zero[i][0];
         io[0x2f + i * 2] = i >= 2 && selected == 1 && left && right ? right : zero[i][1];
     }
-    aux_process_native(mixer, buffers);
+    aux_call_native(mixer, buffers);
+#ifdef ENGINE_UI_HOOK_AUX_TRACE
+    if (selected == 1 && frames && (zero[2][0][0] != 0 || zero[2][1][0] != 0))
+        __atomic_fetch_add(&sclive_aux_trace[14], 1, __ATOMIC_RELAXED);
+    if (selected == 1 && left && right && frames >= 2 &&
+        (capture_before[0] != left[0] || capture_before[1] != left[1] ||
+         capture_before[2] != right[0] || capture_before[3] != right[1]))
+        __atomic_fetch_add(&sclive_aux_trace[15], 1, __ATOMIC_RELAXED);
+#endif
     memcpy(io + 0x2e, saved, sizeof saved);
 }
 
@@ -1226,17 +1301,25 @@ static void sclive_aux_changed(void *control, void *property, uintptr_t a, uintp
     // interrupt LineIn. -2 also prevents a nested startup event publishing an
     // intermediate selector value before the native transition finishes.
     int selecting = property == *(void **)((char *)control + 0x78);
+#ifdef ENGINE_UI_HOOK_AUX_TRACE
+    int previous = *(int *)((char *)control + 0x88);
+#endif
     if (selecting) __atomic_store_n(&aux_input_select, -2, __ATOMIC_RELEASE);
     aux_control_native(control, property, a, b);
-    if (selecting || __atomic_load_n(&aux_input_select, __ATOMIC_ACQUIRE) == -1) {
+    if (selecting) {
         int selected = *(int *)((char *)control + 0x88);
+#ifdef ENGINE_UI_HOOK_AUX_TRACE
+        // Native subscriptions may republish the same startup enum. Count real
+        // value transitions so the boot test does not require suppressing them.
+        if (selected != previous) __atomic_fetch_add(&sclive_aux_trace[10], 1, __ATOMIC_RELAXED);
+#endif
         __atomic_store_n(&aux_input_select, selected == 1 ? 1 : 0, __ATOMIC_RELEASE);
     }
 }
 
 A32_ONLY static void prepare_aux(uintptr_t base, size_t page) {
     aux_ready = 0;
-    aux_process_jump[1] = aux_control_jump[1] = 0;
+    aux_process_jump[1] = aux_control_jump[1] = aux_init_jump[1] = 0;
     if (strcmp(build->name, "5.3.0-sclive4") || !sclive4_board()) return;
     // The config and both routing sites are one prerequisite set. A mismatch
     // leaves the feature disabled, including hasSoftwareLineIn / Mixer Menu.
@@ -1252,9 +1335,12 @@ A32_ONLY static void prepare_aux(uintptr_t base, size_t page) {
     uint32_t control[] = {0xe16d41f8, 0xe59fc004, 0xe59ff004, 0xe320f000,
                          *(uint32_t *)(base + 0xdba74c), (uint32_t)(base + 0xdba45c)};
     aux_control_native = rx_code(control, sizeof control, page);
-    aux_process_jump[0] = aux_control_jump[0] = 0xe51ff004;
+    uint32_t init[] = {0xe16d42f4, 0xe1a04000, 0xe51ff004, (uint32_t)(base + 0x1ba13c8)};
+    aux_init_native = rx_code(init, sizeof init, page);
+    aux_process_jump[0] = aux_control_jump[0] = aux_init_jump[0] = 0xe51ff004;
     aux_process_jump[1] = (uint32_t)(uintptr_t)sclive_aux_process;
     aux_control_jump[1] = (uint32_t)(uintptr_t)sclive_aux_changed;
+    aux_init_jump[1] = (uint32_t)(uintptr_t)sclive_aux_construct;
     aux_ready = 1;
 }
 
@@ -1538,6 +1624,7 @@ static const struct engine_edit edits_530[] = {
 static const struct engine_edit edits_sclive[] = {
     {0xcbd96cu, "\xf4\x42\x6d\xe1\xf8\x60\xcd\xe1", (const char *)aux_process_jump, 8, EDIT_AUX},
     {0xdba454u, "\xf8\x41\x6d\xe1\xec\xc2\x9f\xe5", (const char *)aux_control_jump, 8, EDIT_AUX},
+    {0x1ba13c0u, "\xf4\x42\x6d\xe1\x00\x40\xa0\xe1", (const char *)aux_init_jump, 8, EDIT_AUX},
     {0x8ba000u, "\xc0\x26\x9f\xe5\xc0\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x98\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
         "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x47\x9c\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
     {0x8bbaa4u, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},

@@ -21,6 +21,7 @@ static float input_aux[2][8192], input_mic[2][8192];
 static unsigned observed_off, observed_aux3, observed_aux4, observed_mic, observed_both, observed_on, bad;
 static void *control_seen;
 static void (*changed)(void *, void *, uintptr_t, uintptr_t);
+static void *(*constructed)(void *, void *, void *, void *, uintptr_t);
 static void *allocations[8192];
 static unsigned allocation_count;
 static pthread_mutex_t driver_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -38,6 +39,11 @@ void *_Znwj(size_t n) {
 static void observe_control(void *c, void *p, uintptr_t a, uintptr_t b) {
     changed(c, p, a, b);
     __atomic_store_n(&control_seen, c, __ATOMIC_RELEASE);
+}
+static void *observe_initial(void *c, void *d, void *mic2, void *aux, uintptr_t flag) {
+    void *result = constructed(c, d, mic2, aux, flag);
+    __atomic_store_n(&control_seen, c, __ATOMIC_RELEASE);
+    return result;
 }
 static void inject_capture(void *m, void *buffers) {
     pthread_mutex_lock(&driver_lock); // fixture only: serialize the offline driver
@@ -72,10 +78,13 @@ static void source_trap(int signal, siginfo_t *info, void *context) {
     int three = channels && *(unsigned char *)((char *)channels[2] + 0x7a);
     int four = channels && *(unsigned char *)((char *)channels[3] + 0x7a);
     if (three || four) {
-        for (unsigned i = 0x2e; i < 0x32; i++)
-            if (!silent(io[i], frames)) __atomic_fetch_add(&bad, 1, __ATOMIC_RELAXED);
+        if (io[0x2e] != input_mic[0] || io[0x2f] != input_mic[1])
+            __atomic_fetch_add(&bad, 1, __ATOMIC_RELAXED);
         void *c = __atomic_load_n(&control_seen, __ATOMIC_ACQUIRE);
         int select = c ? *(int *)((char *)c + 0x88) : -1;
+        for (unsigned i = 0x30; i < 0x32; i++)
+            if (select == 1 ? !silent(io[i], frames) : io[i] != input_aux[i - 0x30])
+                __atomic_fetch_add(&bad, 1, __ATOMIC_RELAXED);
         if (io[0x32] == input_aux[0] && io[0x33] == input_aux[1] &&
             io[0x34] == input_aux[0] && io[0x35] == input_aux[1]) {
             if (select == 1) {
@@ -176,9 +185,11 @@ __attribute__((constructor)) static void mock_hardware(void) {
     if (mprotect(start, page, PROT_READ | PROT_EXEC)) _exit(127);
     __builtin___clear_cache(at, (char *)at + sizeof replacement);
     uint32_t *process = (void *)(base + 0xcbd96c), *control = (void *)(base + 0xdba454);
+    uint32_t *init = (void *)(base + 0x1ba13c0);
     uint32_t *observe = (void *)(base + 0xcbd974);
-    if (process[0] != 0xe51ff004 || control[0] != 0xe51ff004 || *observe != 0xe1cda1f8) _exit(127);
+    if (process[0] != 0xe51ff004 || control[0] != 0xe51ff004 || init[0] != 0xe51ff004 || *observe != 0xe1cda1f8) _exit(127);
     route = (void *)(uintptr_t)process[1]; changed = (void *)(uintptr_t)control[1];
+    constructed = (void *)(uintptr_t)init[1];
     for (unsigned i = 0; i < 8192; i++) {
         input_aux[0][i] = 0.125f; input_aux[1][i] = 0.25f;
         input_mic[0][i] = input_mic[1][i] = -0.75f;
@@ -188,12 +199,17 @@ __attribute__((constructor)) static void mock_hardware(void) {
     if (sigaction(SIGILL, &trap, NULL)) _exit(127);
     void *process_page = (void *)((uintptr_t)process & ~(page - 1));
     void *control_page = (void *)((uintptr_t)control & ~(page - 1));
-    if (mprotect(process_page, page, PROT_READ | PROT_WRITE) || mprotect(control_page, page, PROT_READ | PROT_WRITE)) _exit(127);
+    void *init_page = (void *)((uintptr_t)init & ~(page - 1));
+    if (mprotect(process_page, page, PROT_READ | PROT_WRITE) || mprotect(control_page, page, PROT_READ | PROT_WRITE) ||
+        mprotect(init_page, page, PROT_READ | PROT_WRITE)) _exit(127);
     process[1] = (uintptr_t)inject_capture; control[1] = (uintptr_t)observe_control;
+    init[1] = (uintptr_t)observe_initial;
     *observe = 0xe7f000f0; // UDF #0
-    if (mprotect(process_page, page, PROT_READ | PROT_EXEC) || mprotect(control_page, page, PROT_READ | PROT_EXEC)) _exit(127);
+    if (mprotect(process_page, page, PROT_READ | PROT_EXEC) || mprotect(control_page, page, PROT_READ | PROT_EXEC) ||
+        mprotect(init_page, page, PROT_READ | PROT_EXEC)) _exit(127);
     __builtin___clear_cache(process, (char *)observe + 4);
     __builtin___clear_cache(control, (char *)control + 8);
+    __builtin___clear_cache(init, (char *)init + 8);
     pthread_t reporter;
     if (pthread_create(&reporter, NULL, report_sources, NULL)) _exit(127);
     pthread_detach(reporter);

@@ -4108,21 +4108,35 @@ def edits(dev: bool):
         out[ROOT + "Views/MixerMenu/Pages/ChannelsPageItems/InputSelect.qml"] = [
             ("property MixerMenuChannelSection controller",
              '''property MixerMenuChannelSection controller
+    // SC LIVE 4 Bluetooth/Computer routes are unverified. Keep native indices
+    // when filtering the visible options, including the original icon mapping.
+    readonly property var scInputIndexes: {
+        const result = []
+        if (controller) for (let i = 0; i < controller.inputs.length; i++) {
+            const name = controller.inputs[i]
+            if (Config.device.name !== "JP21" || name === "Engine" || name === "Line In") result.push(i)
+        }
+        return result
+    }
     readonly property string scAuxChannel: Config.device.name === "JP21" && Config.audio.hasSoftwareLineIn && inputSelect.controller
         ? (String(inputSelect.controller.title).match(/[34]/) || [""])[0] : ""
     readonly property var scAuxLine: scAuxChannel ? Planck.getProperty("/Engine/Mixer/Channel" + scAuxChannel + "/Line") : null
     readonly property bool scAuxLineActive: !!scAuxLine && !!scAuxLine.translator && scAuxLine.translator.state'''),
             ('text: "Input"', 'text: Config.device.name === "JP21" ? root.scT("Input") : "Input"'),
             ("inputSelect.controller.selectInput(index)",
-             '''inputSelect.controller.selectInput(index)
+             '''const nativeIndex = inputSelect.scInputIndexes[index]
+            inputSelect.controller.selectInput(nativeIndex)
             // An empty channel's native currentInput can remain Engine while
             // Line is true. Clear that native switch explicitly on Engine.
-            if (scAuxLine && scAuxLine.translator && inputSelect.controller.inputs[index] === "Engine")
+            if (scAuxLine && scAuxLine.translator && inputSelect.controller.inputs[nativeIndex] === "Engine")
                 scAuxLine.translator.state = false'''),
             ("labelText: inputSelect.controller.currentInput",
              'labelText: Config.device.name === "JP21" ? root.scT(inputSelect.scAuxLineActive ? "Line In" : inputSelect.controller.currentInput) : inputSelect.controller.currentInput'),
+            ("i < inputSelect.controller.inputs.length", "i < inputSelect.scInputIndexes.length"),
             ("optionName: inputSelect.controller.inputs[i],",
-             'optionName: Config.device.name === "JP21" ? root.scT(inputSelect.controller.inputs[i]) : inputSelect.controller.inputs[i],'),
+             'optionName: Config.device.name === "JP21" ? root.scT(inputSelect.controller.inputs[inputSelect.scInputIndexes[i]]) : inputSelect.controller.inputs[inputSelect.scInputIndexes[i]],'),
+            ("optionIcon: inputSelect.controller.inputIcons[i],",
+             "optionIcon: inputSelect.controller.inputIcons[inputSelect.scInputIndexes[i]],"),
         ]
         out[ROOT + "Views/MixerMenu/MixerMenu.qml"] = [
             ("text: modelData.title", 'text: Config.device.name === "JP21" ? root.scT(modelData.title) : modelData.title'),

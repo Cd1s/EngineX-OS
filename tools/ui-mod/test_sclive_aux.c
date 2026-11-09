@@ -14,6 +14,22 @@ static unsigned calls, mask;
 static int selection, expect_selecting = 1;
 static float **original_io;
 static float *raw_left, *raw_right;
+static void *fake_init(void *c, void *definition, void *mic2, void *aux, uintptr_t flag) {
+    assert(definition == (void *)0x1234 && mic2 == (void *)0x2345 && aux == (void *)0x3456 && flag == 1);
+    // Model a restored selector without emitting ANY property callback.
+    *(int *)((char *)c + 0x88) = selection;
+    return c;
+}
+static void test_startup(void) {
+    _Alignas(8) uchar c[0xa0] = {0};
+    aux_init_native = fake_init;
+    for (selection = 0; selection <= 1; selection++) {
+        aux_input_select = 0;
+        assert(sclive_aux_construct(c, (void *)0x1234, (void *)0x2345, (void *)0x3456, 1) == c);
+        assert(aux_input_select == selection);
+    }
+    puts("Boot selector already AUX: publish native +0x88 without any InputSelect/ON event: PASS");
+}
 static void fake_process(void *m, void *b) {
     (void)m;
     float **io = b;
@@ -24,7 +40,9 @@ static void fake_process(void *m, void *b) {
         return;
     }
     for (unsigned i = 0x2e; i < 0x36; i++) {
-        if (i >= 0x32 && selection == 1) {
+        if (i < 0x30 || (i < 0x32 && selection != 1)) {
+            assert(io[i] == original_io[i]); // MIC2, and AUX outside AUX mode
+        } else if (i >= 0x32 && selection == 1 && raw_left && raw_right) {
             assert(io[i] == (i & 1 ? raw_right : raw_left));
         } else {
             assert(io[i]);
@@ -60,7 +78,7 @@ static void test_sources(void) {
     aux_process_native = fake_process;
     for (mask = 0; mask < 4; mask++) {
         channel[2][0x7a] = mask & 1; channel[3][0x7a] = !!(mask & 2);
-        for (selection = -1; selection <= 2; selection++) {
+        for (selection = -2; selection <= 2; selection++) {
             for (unsigned i = 0; i < sizeof output / sizeof(float); i++) ((float *)output)[i] = 123;
             aux_input_select = selection;
             unsigned before = calls;
@@ -71,7 +89,52 @@ static void test_sources(void) {
             if (!mask) for (unsigned i = 0; i < sizeof output / sizeof(float); i++) assert(((float *)output)[i] == 123);
         }
     }
-    puts("AUX source matrix: masks 0/3/4/both x unknown/Mic2/Aux/invalid; dry silence, Mic1/capture immutability, exact restore: PASS");
+    channel[2][0x7a] = 1; channel[3][0x7a] = 0;
+    mask = 0; // every incomplete graph must call native with byte-identical inputs
+    *(unsigned *)(mixer + 0x18) = 3;
+    sclive_aux_process(mixer, io);
+    *(unsigned *)(mixer + 0x18) = 4;
+    *(void ***)(mixer + 0x40) = NULL;
+    sclive_aux_process(mixer, io);
+    *(void ***)(mixer + 0x40) = channels;
+    channels[2] = NULL; sclive_aux_process(mixer, io); channels[2] = channel[2];
+    channels[3] = NULL; sclive_aux_process(mixer, io); channels[3] = channel[3];
+    for (unsigned i = 0; i < 4; i++) {
+        *(void **)(mixer + 0x9c + i * 4) = NULL;
+        sclive_aux_process(mixer, io);
+        *(void **)(mixer + 0x9c + i * 4) = input[i];
+        *(void **)(input[i] + 0x2c) = NULL;
+        sclive_aux_process(mixer, io);
+        *(void **)(input[i] + 0x2c) = graph[i];
+        *(void **)(graph[i] + 8) = NULL;
+        sclive_aux_process(mixer, io);
+        *(void **)(graph[i] + 8) = buffers[i];
+        *(float ***)(buffers[i] + 0x0c) = NULL;
+        sclive_aux_process(mixer, io);
+        *(float ***)(buffers[i] + 0x0c) = pairs[i];
+        for (unsigned side = 0; side < 2; side++) {
+            pairs[i][side] = NULL; sclive_aux_process(mixer, io); pairs[i][side] = output[i][side];
+        }
+    }
+    assert(!memcmp(saved, io, sizeof saved));
+    mask = 1; selection = aux_input_select = 1;
+    for (unsigned side = 0; side < 2; side++) {
+        io[0x30 + side] = NULL;
+        memcpy(saved, io, sizeof saved);
+        raw_left = io[0x30]; raw_right = io[0x31];
+        sclive_aux_process(mixer, io);
+        assert(!memcmp(saved, io, sizeof saved));
+        io[0x30 + side] = samples[0x30 + side];
+    }
+    memcpy(saved, io, sizeof saved);
+    raw_left = io[0x30]; raw_right = io[0x31];
+    for (unsigned i = 0; i < 4; i++) pairs[i][1] = pairs[i][0];
+    selection = aux_input_select = 0;
+    sclive_aux_process(mixer, io); // a mono output pair may alias itself
+    assert(!memcmp(saved, io, sizeof saved));
+    puts("AUX source matrix incl. transition -2: MIC2 unchanged; AUX dry silence only in AUX mode; capture immutable; exact restore: PASS");
+    puts("Incomplete graph: short channel count, null channel/vector/output/graph/buffer/pair/side fallbacks unchanged: PASS");
+    puts("Missing AUX capture is denied; aliased stereo silence pairs are supported: PASS");
 }
 
 static void fake_control(void *c, void *p, uintptr_t a, uintptr_t b) {
@@ -93,6 +156,34 @@ static void test_selector(void) {
     sclive_aux_changed(c, (void *)0x1234, 9, 11);
     assert(aux_input_select == 1);
     puts("InputSelect: revoke before native event; publish Aux only after native update; invalid states denied, ON event uninterrupted: PASS");
+}
+
+static int transition_entered, transition_finish;
+static void paused_control(void *c, void *p, uintptr_t a, uintptr_t b) {
+    (void)p; (void)a; (void)b;
+    assert(__atomic_load_n(&aux_input_select, __ATOMIC_ACQUIRE) == -2);
+    __atomic_store_n(&transition_entered, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&transition_finish, __ATOMIC_ACQUIRE)) sched_yield();
+    *(int *)((char *)c + 0x88) = 1;
+}
+static void *select_on_control_thread(void *c) {
+    sclive_aux_changed(c, *(void **)((char *)c + 0x78), 0, 0);
+    return NULL;
+}
+static void test_selector_threads(void) {
+    _Alignas(8) uchar c[0xa0] = {0};
+    *(void **)(c + 0x78) = (void *)0x1234;
+    aux_input_select = 0; aux_control_native = paused_control;
+    transition_entered = transition_finish = 0;
+    pthread_t control;
+    assert(!pthread_create(&control, NULL, select_on_control_thread, c));
+    while (!__atomic_load_n(&transition_entered, __ATOMIC_ACQUIRE)) sched_yield();
+    for (unsigned i = 0; i < 10000; i++)
+        assert(__atomic_load_n(&aux_input_select, __ATOMIC_ACQUIRE) == -2);
+    __atomic_store_n(&transition_finish, 1, __ATOMIC_RELEASE);
+    assert(!pthread_join(control, NULL));
+    assert(__atomic_load_n(&aux_input_select, __ATOMIC_ACQUIRE) == 1);
+    puts("Concurrent selector transition: 10000 audio-side snapshots revoked until native update completes: PASS");
 }
 
 static void board(const char *s) {
@@ -121,7 +212,7 @@ static void test_image(const char *path, int sclive) {
         assert((size_t)e->offset + e->size <= size && edit_state((uintptr_t)image, e) == 1);
         if (e->group == EDIT_AUX) sites++;
     }
-    assert(sites == (sclive ? 2u : 0u));
+    assert(sites == (sclive ? 3u : 0u));
     const char *boards[] = {"JP21", "JP21X", "JP20", "JC11", "JC11S", "JP22", "JP23", "JP24", "JP07", "JP08", "JP11", "JP11S", "JP13", "JP14", "JC16", "NH08", "NH08S", "NH10", "RMZ2", ""};
     for (unsigned b = 0; b < sizeof boards / sizeof *boards; b++) {
         board(boards[b]);
@@ -142,7 +233,7 @@ static void test_image(const char *path, int sclive) {
         assert(!memcmp(config, expected, sizeof config));
         memcpy(image + build->config_site + 8, stock + build->config_site + 8, 4);
         munmap((void *)(uintptr_t)config_jump[1], page);
-        if (enabled) { munmap((void *)aux_process_native, page); munmap((void *)aux_control_native, page); }
+        if (enabled) { munmap((void *)aux_process_native, page); munmap((void *)aux_control_native, page); munmap((void *)aux_init_native, page); }
     }
     if (sclive) {
         board("JP21");
@@ -150,22 +241,25 @@ static void test_image(const char *path, int sclive) {
             const struct engine_edit *e = &build->edits[i];
             if (e->group != EDIT_AUX && e->offset != build->config_site) continue;
             image[e->offset] ^= 1; prepare_aux((uintptr_t)image, page);
-            assert(!aux_ready && !aux_process_jump[1] && !aux_control_jump[1]);
+            assert(!aux_ready && !aux_process_jump[1] && !aux_control_jump[1] && !aux_init_jump[1]);
             image[e->offset] ^= 1;
         }
         prepare_aux((uintptr_t)image, page); assert(aux_ready);
         // Execute the REAL displaced prologues, returning immediately afterwards.
         const uint32_t process_return[] = {0xe5801000, 0xe1cd40d0, 0xe1cd60d8, 0xe28dd024, 0xe12fff1e};
         const uint32_t control_return[] = {0xe580c000, 0xe1cd40d0, 0xe28dd018, 0xe12fff1e};
+        const uint32_t init_return[] = {0xe5801000, 0xe1cd40d0, 0xe28dd024, 0xe12fff1e};
         memcpy(image + 0xcbd974, process_return, sizeof process_return);
         memcpy(image + 0xdba45c, control_return, sizeof control_return);
+        memcpy(image + 0x1ba13c8, init_return, sizeof init_return);
         __builtin___clear_cache((char *)image, (char *)image + len);
         uintptr_t marker = 0;
         aux_process_native(&marker, (void *)0x1234); assert(marker == 0x1234);
         aux_control_native(&marker, NULL, 0, 0);
         uint32_t literal; memcpy(&literal, stock + 0xdba74c, 4); assert(marker == literal);
-        munmap((void *)aux_process_native, page); munmap((void *)aux_control_native, page);
-        puts("Real Engine: both A32 prologue trampolines incl. relocated PIC literal; mismatch/config refusal: PASS");
+        assert(aux_init_native(&marker, (void *)0x5678, NULL, NULL, 0) == &marker && marker == 0x5678);
+        munmap((void *)aux_process_native, page); munmap((void *)aux_control_native, page); munmap((void *)aux_init_native, page);
+        puts("Real Engine: three A32 prologue trampolines incl. relocated PIC literal; mismatch/config refusal: PASS");
     }
     aux_ready = 0;
     printf("%s: exact BuildID, stock site bytes, JP21-only config, all other tested boards unchanged: PASS\n", build->name);
@@ -177,7 +271,7 @@ int main(int argc, char **argv) {
     int fd = mkstemp(path); assert(fd >= 0); close(fd);
     board_file = product_code_path = path;
     test_image(argv[1], 0); test_image(argv[2], 1);
-    test_sources(); test_selector();
+    test_startup(); test_sources(); test_selector(); test_selector_threads();
     unlink(path);
     return 0;
 }
