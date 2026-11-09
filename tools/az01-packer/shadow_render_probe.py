@@ -68,6 +68,7 @@ Item {
  property var scShadowAt: ({})
  property var scShadowGridCache: ({})
  property var scShadowLiveCueCache: ({})
+ readonly property var scShadowLive: ({seen: 0})
  property var scShadowEmptyArray: []
  property var scShadowDisplay: @SAMPLES@
  Rectangle { anchors.fill:parent; color:"#000000"; z:-1 }

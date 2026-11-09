@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -109,7 +110,10 @@ func (s *Server) prolinkDiag(ctx context.Context, now time.Time) prolinkDiag {
 		d.Export = s.prolinkExport.Status()
 	}
 	if role := d.Settings.FourDeckRoleActive; role != "" {
-		d.ShadowDecks = len(s.shadowCompose(role, now))
+		s.shadow.mu.Lock()
+		lines := slices.Clone(s.shadow.lines)
+		s.shadow.mu.Unlock()
+		d.ShadowDecks = len(s.shadowCompose(role, now, lines))
 	}
 
 	var nets []*net.IPNet

@@ -408,6 +408,65 @@ func TestCDJDecksAllInOne(t *testing.T) {
 	}
 }
 
+func TestCDJDecksConsoleHostLines(t *testing.T) {
+	now := time.Now()
+	dev := func(n byte) prolink.Device {
+		return prolink.Device{Number: n, Name: "CDJ-3000", Address: "10.0.0." + strconv.Itoa(int(n)), LastSeen: now}
+	}
+	for _, tc := range []struct {
+		name  string
+		cdjs  []byte
+		free  []int
+		lines []int
+		want  map[int]byte
+	}{
+		{
+			name:  "1 CDJ (player 4) to Channel 3 Line",
+			cdjs:  []byte{4},
+			free:  []int{3, 4},
+			lines: []int{3},
+			want:  map[int]byte{3: 4},
+		},
+		{
+			name:  "2 CDJs (player 2 and 4) to Channels 3 and 4 Line",
+			cdjs:  []byte{4, 2},
+			free:  []int{3, 4},
+			lines: []int{4, 3},
+			want:  map[int]byte{3: 2, 4: 4},
+		},
+		{
+			name:  "2 CDJs with only 1 Line channel",
+			cdjs:  []byte{4, 2},
+			free:  []int{3, 4},
+			lines: []int{3},
+			want:  map[int]byte{3: 2},
+		},
+		{
+			name:  "No Line channels retains status quo",
+			cdjs:  []byte{4},
+			free:  []int{2, 4},
+			lines: nil,
+			want:  map[int]byte{4: 4},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var devices []prolink.Device
+			for _, n := range tc.cdjs {
+				devices = append(devices, dev(n))
+			}
+			got := cdjDecks(devices, tc.free, now, tc.lines)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for deck, n := range tc.want {
+				if got[deck].Number != n {
+					t.Fatalf("deck %d has CDJ %d, want %d (got %v)", deck, got[deck].Number, n, got)
+				}
+			}
+		})
+	}
+}
+
 // A track loaded from the streaming browser (here an OmniSource drive row) is a
 // file the other player can copy, under its own name.
 func TestShadowDeckFromStreamedRow(t *testing.T) {
