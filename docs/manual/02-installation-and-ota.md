@@ -214,7 +214,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 4. 准备 `/data` 镜像并用 `host-install-userdata.py`（经 `debugfs`）把数据包和 ALSA 启动钩子写进去：
    - **推荐**：加 `--userdata-backup 你自己这台碟机的data备份.img`，在备份的**副本**上注入，**保留你的音乐和设置**；
    - 不加该参数：程序会新建一个**全新的空 `/data` 镜像**，刷入后**碟机上的音乐、曲库、设置全部清空**。此时程序会特别警告并要求你输入 `yes`。
-   > 注：碟机原厂 U-Boot 的 fastboot 协议不支持导出分区（`fastboot fetch` 未实现），因此在未获得 shell 权限的原厂机上无法直接通过 fastboot 备份 `/data`。首次通过模式 B 刷机若无预先提取的备份，将刷入全新分区（机身内置设置与数据库清空，外接 U 盘/SD 卡不受影响）。二代机回退原厂并不依赖预先备份：EngineX 仅改动 `/data` 分区，刷机后可通过本地脚本（`/data/enginex/bundle/uninstall.sh`）、Web 控制台回退按钮或网络运行安装器 `--uninstall` 参数一键恢复原厂启动（卸载数据包与 ALSA 引导钩子，保留用户曲库、设置与 SSH 密钥，重启后进入原厂 Engine OS）。
+   > 注：碟机原厂 U-Boot 的 fastboot 协议不支持导出分区（`fastboot fetch` 未实现），因此在未获得 shell 权限的原厂机上无法直接通过 fastboot 备份 `/data`。首次通过模式 B 刷机若无预先提取的备份，将刷入全新分区（机身 `/data` 里的音乐、曲库与设置清空，外接 U 盘/SD 卡不受影响）。二代机回退原厂并不依赖预先备份：EngineX 仅改动 `/data` 分区，刷机后可通过本地脚本（`/data/enginex/bundle/uninstall.sh`）、Web 控制台回退按钮或网络运行安装器 `--uninstall` 参数一键恢复原厂启动（卸载数据包与 ALSA 引导钩子，保留用户曲库、设置与 SSH 密钥，重启后进入原厂 Engine OS）。
 5. `fastboot flash <分区> 镜像`，然后 `fastboot reboot`。
 6. 首次开机先以原厂状态启动一次，随后 Engine 会自动重启并载入 EngineX OS。
 
@@ -228,7 +228,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 4. It prepares the `/data` image and injects the bundle and the ALSA boot hook with `host-install-userdata.py` (through `debugfs`):
    - **Recommended**: pass `--userdata-backup <a backup image of this deck's own data>`; it injects into a **copy** and **keeps your music and settings**;
    - without it the installer makes a **brand-new empty `/data` image**, and **all music, library and settings on the deck are erased**. It warns loudly and asks you to type `yes`.
-   > Note: Stock inMusic U-Boot fastboot does not implement partition dumping (`fastboot fetch` is not implemented). On a locked stock deck without previous shell access, `/data` cannot be pulled over fastboot. The first Mode B install without an existing backup will initialize a fresh partition (internal settings and database are reset to defaults; external USB/SD content is completely untouched). Reverting to stock on Gen 2 does not require a pre-install backup: because EngineX OS only touches `/data` while system partitions remain untouched, you can revert anytime via `/data/enginex/bundle/uninstall.sh`, the Web Console "Revert to Stock" button, or `EngineX-Installer --uninstall` over the network (removes the bundle and ALSA boot hook, preserving user library, settings, and SSH keys, booting stock Engine OS on restart).
+   > Note: Stock inMusic U-Boot fastboot does not implement partition dumping (`fastboot fetch` is not implemented). On a locked stock deck without previous shell access, `/data` cannot be pulled over fastboot. The first Mode B install without an existing backup will initialize a fresh partition (music, library and settings on the deck's `/data` are erased; external USB/SD content is untouched). Reverting to stock on Gen 2 does not require a pre-install backup: because EngineX OS only touches `/data` while system partitions remain untouched, you can revert anytime via `/data/enginex/bundle/uninstall.sh`, the Web Console "Revert to Stock" button, or `EngineX-Installer --uninstall` over the network (removes the bundle and ALSA boot hook, preserving user library, settings, and SSH keys, booting stock Engine OS on restart).
 5. `fastboot flash <partition> <image>`, then `fastboot reboot`.
 6. The first boot runs stock Engine once, then Engine restarts by itself with EngineX OS.
 
@@ -242,7 +242,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 4. 準備 `/data` 映像，並用 `host-install-userdata.py`（經 `debugfs`）寫入資料包與 ALSA 啟動 hook：
    - **建議**：加上 `--userdata-backup <這台碟機自己的 data 備份映像>`，在備份的**副本**上注入，**保留音樂與設定**；
    - 不加此參數：程式會建立**全新的空 `/data` 映像**，刷入後**碟機上的音樂、曲庫、設定全部清空**；程式會明確警告並要求輸入 `yes`。
-   > 註：播放機原廠 U-Boot 的 fastboot 協定不支援匯出分割區（未實作 `fastboot fetch`），因此在未取得 shell 權限的原廠機上無法直接透過 fastboot 備份 `/data`。首次透過模式 B 刷機若無預先提取的備份，將刷入全新分割區（機身內建設定與資料庫清空，外接隨身碟/SD 卡不受影響）。二代機回退原廠並不依賴預先備份：EngineX 僅改動 `/data` 分割區，刷機後可透過本機指令稿（`/data/enginex/bundle/uninstall.sh`）、Web 控制台回退按鈕或網路執行安裝器 `--uninstall` 參數一鍵還原原廠開機（移除資料包與 ALSA 引導 hook，保留使用者曲庫、設定與 SSH 金鑰，重開機後進入原廠 Engine OS）。
+   > 註：播放機原廠 U-Boot 的 fastboot 協定不支援匯出分割區（未實作 `fastboot fetch`），因此在未取得 shell 權限的原廠機上無法直接透過 fastboot 備份 `/data`。首次透過模式 B 刷機若無預先提取的備份，將刷入全新分割區（機身 `/data` 裡的音樂、曲庫與設定清空，外接隨身碟/SD 卡不受影響）。二代機回退原廠並不依賴預先備份：EngineX 僅改動 `/data` 分割區，刷機後可透過本機指令稿（`/data/enginex/bundle/uninstall.sh`）、Web 控制台回退按鈕或網路執行安裝器 `--uninstall` 參數一鍵還原原廠開機（移除資料包與 ALSA 引導 hook，保留使用者曲庫、設定與 SSH 金鑰，重開機後進入原廠 Engine OS）。
 5. `fastboot flash <分割區> <映像>`，然後 `fastboot reboot`。
 6. 首次開機先以原廠狀態啟動一次，之後 Engine 會自動重啟並載入 EngineX OS。
 

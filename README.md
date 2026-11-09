@@ -278,7 +278,7 @@ Download the bundle for your model and check its SHA-256 against `SHA256SUMS.txt
 3. After the reboot Engine starts once in stock form, then restarts by itself with EngineX OS. `Settings → Device` then shows the EngineX entries (`Language`, `Power → Turn Off`, …).
 
 **Method 2: fastboot flash from a computer.** Only if you have no shell on the unit. Needs a Linux computer (or WSL as root) with `python3`, `e2fsprogs` (`debugfs`) and `fastboot`.
-- **Recommended (EngineX-Installer)**: Run the installer. It detects the deck in fastboot, formats a fresh `/data` partition automatically, injects the bundle and flashes it (internal settings/database reset to defaults; external USB/SD music is unaffected). If you already have a full `/data` backup, pass `--userdata-backup <image>` to preserve your settings. Reverting to stock later removes only the bundle and does not depend on a pre-install backup.
+- **Recommended (EngineX-Installer)**: Run the installer. It detects the deck in fastboot, formats a fresh `/data` partition automatically, injects the bundle and flashes it (**music, library and settings stored on the deck's `/data` are erased**, and the installer asks you to type `yes`; USB drives and SD cards are unaffected). If you already have a full `/data` backup of this same deck, pass `--userdata-backup <image>` to keep them. Reverting to stock later removes only the bundle and does not depend on a pre-install backup.
 - **Manual steps (requires a `/data` backup)**:
   1. Keep your backup untouched and work on a copy: `cp my-userdata-backup.img userdata-enginex.img`
   2. Unpack the bundle on the computer and inject it into the copy (the two helper scripts are inside the bundle):
