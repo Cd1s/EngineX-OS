@@ -25,10 +25,14 @@ func TestColdListingLatency300ms(t *testing.T) {
 			var active, peak, calls atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
-				n := active.Add(1)
-				for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+				// Spotify's Liked Songs count is an independent probe outside the page pool
+				// (pages.go); under load it can overlap the second page wave.
+				if !(name == "spotify-lists" && r.URL.Path == "/me/tracks") {
+					n := active.Add(1)
+					for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+					}
+					defer active.Add(-1)
 				}
-				defer active.Add(-1)
 				select {
 				case <-time.After(300 * time.Millisecond):
 				case <-r.Context().Done():
