@@ -99,6 +99,9 @@ SERVICES_MAIN = """
 	property var scShadowLiveCueCache: ({})
 	property int scShadowFrame: 0
 	readonly property int scShadowExpiryMs: 3000
+	// When stream-sync last confirmed the shadow state (an unchanged version counts):
+	// a plain object, so no binding re-evaluates on every long-poll reply.
+	readonly property var scShadowLive: ({seen: 0})
 	function scShadowVisible(d) { return d >= 1 && d <= 4 && scShadowDisplayOnly && scDeckLocked(d) }
 	function scShadowDeckFor(item) {
 		// Stock skins put the deck on different wrappers (deckIndex / deckData / deckView).
@@ -113,7 +116,9 @@ SERVICES_MAIN = """
 	function scShadowData(d) { return scShadowDisplay[d] || null }
 	function scShadowPosition(s, now) {
 		if (!s) return 0
-		const elapsed = s.stale ? 0 : Math.min(scShadowExpiryMs, Math.max(0, now - s.at))
+		// Unchanged replies keep a sample alive: carry it on until 3 s after the last one.
+		const alive = Math.max(s.at, scShadowLive.seen) + scShadowExpiryMs
+		const elapsed = s.stale ? 0 : Math.max(0, Math.min(now, alive) - s.at)
 		const pos = Math.max(0, s.positionMs + (s.playing ? elapsed * Math.max(0, 1 + s.pitch / 100) : 0))
 		return s.meta && s.meta.durationMs > 0 ? Math.min(s.meta.durationMs, pos) : pos
 	}
@@ -626,6 +631,9 @@ SERVICES_MAIN = """
 	property string scShadowResponseVersion: ""
 	property bool scShadowPostPending: false
 	property string scShadowLinkId: ""
+	property var scShadowSent: [] // per own deck: what the newest full post told the peer
+	property real scShadowFullAt: 0
+	property bool scShadowPostFull: true
 	property real scShadowLinkAt: -Infinity
 	property var scShadowTextAt: ({})
 	function scShadowProperties(d) {
@@ -697,12 +705,16 @@ SERVICES_MAIN = """
 		// the peer's extrapolation, which runs on the exact pitch: 500 ms keeps 1.5 s of
 		// margin for a busy GUI thread. Each post and the peer's reply are JS strings
 		// that drive V4's GC trigger (250 ms here meant a GC every ~75-150 s of play).
-		if (edge || now - scShadowPostAt >= 500) scShadowPost(mine, now)
+		if (edge || now - scShadowPostAt >= 500) scShadowPost(mine, now, edge)
 		if (scShadowDebug) scShadowDbgFlush(now)
 	}
-	function scShadowPost(mine, now) {
+	function scShadowPost(mine, now, edge) {
 		let post = scShadowPostRequest
-		if (!post) { post = new XMLHttpRequest(); scShadowPostRequest = post }
+		if (!post) {
+			post = new XMLHttpRequest(); scShadowPostRequest = post
+			// 409 on a ping: stream-sync restarted or our decks went stale there.
+			post.onreadystatechange = function() { if (post.readyState === 4 && post.status === 409) root.scShadowPostFull = true }
+		}
 		if (post.readyState > 0 && post.readyState < 4) {
 			scShadowPostPending = true
 			if (now - scShadowPostAt < 3000) return
@@ -726,22 +738,29 @@ SERVICES_MAIN = """
 		for (let n = 0; n < mine.length; n++) {
 			const d = mine[n], s = scShadowPrev[d], g = scShadowProperties(d)
 			let cc = scShadowCueCache[d]
-			if (!cc) cc = scShadowCueCache[d] = {net: "?", at: 0, textAt: 0, cues: [], pool: []}
+			if (!cc) cc = scShadowCueCache[d] = {net: "?", at: 0, textAt: 0, rev: 0, cues: [], pool: []}
 			if (cc.net !== s.net || now - cc.at >= 500) {
 				// Names and colours are strings: re-read them with a new or moved cue, else every 2 s.
 				const text = cc.net !== s.net || now - cc.textAt >= 2000
-				let count = 0
+				let count = 0, changed = cc.net !== s.net
 				for (let i = 0; s.net && i < 8; i++) {
 					const q = g.cues[i]
 					if (!q.exists.state) continue
 					const c = cc.pool[i] || (cc.pool[i] = {})
 					const pos = q.position.value
-					if (text || c.i !== i + 1 || c.p !== pos || cc.cues[count] !== c) { c.n = q.name.string || ""; c.c = String(q.color.color || "#ffffff") }
+					if (text || c.i !== i + 1 || c.p !== pos || cc.cues[count] !== c) {
+						const name = q.name.string || "", color = String(q.color.color || "#ffffff")
+						if (name !== c.n || color !== c.c) changed = true
+						c.n = name; c.c = color
+					}
+					if (c.i !== i + 1 || c.p !== pos || cc.cues[count] !== c) changed = true
 					c.i = i + 1; c.p = pos
 					cc.cues[count++] = c
 				}
+				if (count !== cc.cues.length) changed = true
 				cc.cues.length = count; cc.net = s.net; cc.at = now
 				if (text) cc.textAt = now
+				if (changed) cc.rev++
 			}
 			const o = own[n] || (own[n] = {})
 			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000)
@@ -755,8 +774,34 @@ SERVICES_MAIN = """
 				o.artist = s.net ? g.artist.string || "" : ""; scShadowTextAt[d] = now
 			}
 			o.dbg = ""
+			// What the peer shows from this deck, as last sent in full.
+			const sent = scShadowSent[n] || (scShadowSent[n] = {})
+			if (sent.deck !== d || sent.net !== o.net || sent.playing !== o.playing || sent.cue !== o.cue || sent.jumps !== o.jumps ||
+				sent.pitch !== o.pitch || sent.master !== o.master || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
+				sent.title !== o.title || sent.artist !== o.artist || sent.link !== o.link || sent.bpm !== o.bpm || sent.cuesRev !== cc.rev) edge = true
+			else {
+				// The peer carries the position on from the last full post at its pitch.
+				const expect = sent.positionMs + (o.playing ? (o.at - sent.at) * (1 + o.pitch / 100) : 0)
+				// 15 ms: above the 40 ms sampling jitter; the peer's Go re-anchors at 10 ms.
+				if (Math.abs(o.positionMs - expect) > (o.playing ? 15 : 0.5)) edge = true
+			}
 		}
 		scShadowPostAt = now; scShadowPostPending = false
+		// Nothing the peer shows changed: ping instead of serialising the decks again
+		// (stream-sync keeps them live and extrapolated). Full post at least every 5 s.
+		if (!edge && !scShadowPostFull && now - scShadowFullAt < 5000 && own.length === scShadowSent.length) {
+			post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks/alive")
+			post.send()
+			return
+		}
+		for (let n = 0; n < own.length; n++) {
+			const o = own[n], sent = scShadowSent[n]
+			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
+			sent.master = o.master; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist
+			sent.link = o.link; sent.bpm = o.bpm; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
+		}
+		scShadowSent.length = own.length
+		scShadowFullAt = now; scShadowPostFull = false
 		post.open("POST", "http://127.0.0.1:8080/v1/sc5000/decks")
 		post.send(JSON.stringify(own))
 	}
@@ -773,6 +818,7 @@ SERVICES_MAIN = """
 				try {
 					if (x.status === 200) {
 						const version = x.getResponseHeader("X-Shadow-State") || ""
+						root.scShadowLive.seen = Date.now()
 						if (root.scShadowDisplayOnly && version && version === root.scShadowResponseVersion) {
 							scShadowPollTimer.interval = 60; scShadowPollTimer.restart(); return
 						}
@@ -2712,7 +2758,7 @@ SHADOW_LAYER = r"""
             const now = Date.now(), s = sample
             const pos = s ? root.scShadowPosition(s, now) : 0
             if (pos !== position) position = pos
-            const st = !!s && (s.stale || now - s.at >= root.scShadowExpiryMs)
+            const st = !!s && (s.stale || now - Math.max(s.at, root.scShadowLive.seen) >= root.scShadowExpiryMs)
             if (st !== stale) stale = st
             if (!wave) return
             const speed = live && visible && s && s.playing && !st && pos < duration ? Math.max(0, 1 + s.pitch / 100) : 0

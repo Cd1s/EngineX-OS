@@ -85,6 +85,19 @@ func (d ExportDeck) beatAt(now time.Time) (beat int, frac float64, ok bool) {
 	return int(whole) % 4, pos - whole, true
 }
 
+// Carried is d read again at now: the beat moved on with the tempo, so a deck
+// that has not changed since At keeps its beat packets (beatAt gives up after 2 s).
+func (d ExportDeck) Carried(now time.Time) ExportDeck {
+	if d.At.IsZero() {
+		return d
+	}
+	if bpm := d.BPM * (1 + d.Pitch/100); d.Playing && bpm > 0 && d.Beat >= 0 {
+		d.Beat = math.Mod(d.Beat+now.Sub(d.At).Seconds()*bpm/60, 4)
+	}
+	d.At = now
+	return d
+}
+
 // beatPacket is a Pro DJ Link beat (0x28): beat in bar (1..4) just hit, the
 // time to the following beats and bars, pitch and BPM.
 func (r *exportRun) beatPacket(d ExportDeck, inBar int, frac float64) []byte {
