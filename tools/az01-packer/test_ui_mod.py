@@ -201,9 +201,9 @@ class ShadowDisplayTest(unittest.TestCase):
     def js(self, body):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
-                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scCueTickFor",
+                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
-                 "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck")
+                 "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
@@ -222,16 +222,17 @@ globalThis.root = globalThis;
 Object.assign(globalThis, {
     scFourDeckRole: '13', scPlayer: true, scShadowDisplayOnly: true,
     scShadowExpiryMs: 3000, scShadowAt: {}, scShadowDisplay: {}, scShadowEmptyArray: [],
-    scShadowDisplayRequests: {}, scShadowGridCache: {}, scShadowLiveCueCache: {},
+    scShadowDisplayRequests: {}, scShadowDisplayText: {}, scShadowGridCache: {}, scShadowLiveCueCache: {},
     scShadowCdjMaster: false, scPressQueue: [], scShadowEmptyObject: {},
     scShadowMineRole: "?", scShadowMine: [], scShadowSampleSpare: {}, scShadowDeckProperties: {}, scShadowOwn: [],
     scShadowPostRequest: null, scShadowPollRequest: null, scShadowResponseVersion: "", scShadowPostPending: false,
     scShadowLinkId: '', scShadowLinkAt: -Infinity, scShadowTextAt: {},
     scShadowSent: [], scShadowFullAt: 0, scShadowPostFull: true, scShadowLive: {seen: 0},
+    scShadowTickTimer: {interval: 40}, scShadowBusyAt: 0, scShadowRoleDirty: true,
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
-    scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0},
+    scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
-    scShadowGen: 0, scShadowVer: 0, scShadowFrame: 17, scCueInfoCache: {},
+    scShadowGen: 0, scShadowVer: 0, scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {},
     scTr() { throw Error('Engine access forbidden'); },
     Planck: { getProperty() { throw Error('Engine access forbidden'); } }
 });
@@ -341,7 +342,12 @@ const cue = scNextCueInfo(2); // must not read Engine or invent a constant-BPM g
 assert.equal(cue.text, '0.3');
 assert.equal(cue.label, 'DROP'); assert.equal(cue.color, '#123456');
 assert.strictEqual(scNextCueInfo(2), cue); // retain shadow display object caching
+assert.equal(scCueTickFor(2), 0); // a resting shadow deck's countdown has no clock at all
+scShadowDisplay[2].playing = true;
 assert.equal(scCueTickFor(2), 17); // a shadow countdown must not depend on stopped local Engine clocks
+assert.equal(scShadowAnyPlaying(scShadowDisplay), true);
+scShadowDisplay[2].stale = true; assert.equal(scCueTickFor(2), 0); assert.equal(scShadowAnyPlaying(scShadowDisplay), false);
+scShadowDisplay[2].playing = false; scShadowDisplay[2].stale = false;
 assert.equal(scNextCueInfo(4), null);
 const grid = scShadowGrid(2, meta, 900, 1600);
 assert.deepEqual(grid, beats.slice(1, 3));
@@ -427,9 +433,12 @@ assert.equal(requests.length, 1); // complete metadata is never re-fetched per r
         self.js(r"""
 scShadowApplyAll([{deck:2,key:'A'}]);
 requests[0].finish(200,{key:'A',detailPending:true,beats:[]});
+const firstMeta=scShadowData(2).meta, firstMap=scShadowDisplay;
 now+=1999; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,1);
 now+=1; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,2); // 2 s
 requests[1].finish(200,{key:'A',detailPending:true,beats:[]});
+assert.strictEqual(scShadowData(2).meta,firstMeta); // the same pending reply: no new meta, no delegate churn
+assert.strictEqual(scShadowDisplay,firstMap);
 now+=3999; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,2);
 now+=1; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,3); // 4 s
 requests[2].finish(200,{key:'A',detailPending:true,beats:[]});
@@ -439,6 +448,7 @@ requests[3].finish(200,{key:'A',detailPending:true,beats:[]});
 now+=1000; scShadowApplyAll([{deck:2,key:'A'}]); assert.equal(requests.length,4); // still pending: no re-read
 scShadowApplyAll([{deck:2,key:'A',displayDetail:true}]); assert.equal(requests.length,5); // stream-sync has it: at once
 requests[4].finish(200,{key:'A',detailPending:false,detail:true,beats:[]});
+assert.notStrictEqual(scShadowData(2).meta,firstMeta); assert.equal(scShadowData(2).meta.detail,true);
 now+=60000; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,5);
 """)
 
@@ -592,6 +602,9 @@ assert.strictEqual(scope.cueInfo,ci); assert.equal(asked,1);
         self.assertIn("model: scDisplay.loops", layer)
         # 7c29415: an empty shadow slot runs no 200 ms clock.
         self.assertIn("running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null", layer)
+        self.assertIn("scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered", layer)
+        self.assertIn('Binding { target: scDisplay.owner; property: "opacity"; value: 0; when: scDisplay.visible; restoreMode: Binding.RestoreBindingOrValue }', layer)
+        self.assertIn("layer.enabled: live && !wave", layer)
         self.assertIn("onVisibleChanged: { restartScroll(); if (visible) refreshDetails() }", layer)
         # Grid lines are a pool: a new grid window must not recreate the delegates.
         self.assertIn("model: scDisplay.gridSlots", layer)
@@ -684,6 +697,70 @@ assert(Math.abs(bodies[3][0].positionMs-pos/48)<1e-6);
 cueName='DROP'; tick(2600); assert.equal(bodies.length,5); assert.equal(bodies[4][0].cues[0].n,'DROP'); // a renamed cue
 """)
 
+    def test_view_autosave_snapshots_only_after_a_change(self):
+        fns = []
+        for name in ("scViewCheck", "scViewMark"):
+            m = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
+            self.assertIsNotNone(m, name)
+            line_end = bp.SERVICES_MAIN.index("\n", m.start())
+            end = line_end if bp.SERVICES_MAIN[m.start():line_end].rstrip().endswith("}") else bp.SERVICES_MAIN.index("\n\t}", m.end()) + 3
+            fns.append(bp.SERVICES_MAIN[m.start():end])
+        self.assertIn("onScWaveChanged: scViewDirty = true", bp.SERVICES_MAIN)
+        self.assertIn("root.scViewCheck(Date.now())", bp.SERVICES_MAIN)
+        js = r"""
+const assert = require('assert');
+globalThis.root = globalThis;
+let snaps = 0, saves = 0, hooks = 0, view = {deckCount: '4 Decks'};
+Object.assign(globalThis, {scViewQuiet: 0, scViewHooked: false, scViewDirty: true, scViewCheckAt: 0, scViewLast: '',
+    scViewHook() { hooks++; scViewHooked = true }, scViewSnapshot() { snaps++; return Object.assign({}, view) }, scViewSave() { saves++ }});
+""" + "\n".join(fns) + r"""
+let now = 100000;
+scViewQuiet = now + 3000; scViewCheck(now); assert.equal(snaps, 0); // an applied view settles first
+now += 4000; scViewCheck(now); assert.equal(hooks, 1); assert.equal(snaps, 1); assert.equal(scViewLast, '{"deckCount":"4 Decks"}');
+for (let i = 0; i < 10; i++) { now += 2000; scViewCheck(now); }
+assert.equal(snaps, 1, 'no change signal: no snapshot');
+view.deckCount = '2 Decks'; scViewMark(); now += 2000; scViewCheck(now);
+assert.equal(snaps, 2); assert.equal(saves, 1); assert.equal(hooks, 1);
+now += 2000; scViewCheck(now); assert.equal(snaps, 2);
+now += 30000; scViewCheck(now); assert.equal(snaps, 3, 'a missed signal is caught within 30 s');
+"""
+        res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_sender_tick_rate_follows_activity(self):
+        self.js(r"""
+let bodies=[], pings=0, pos=0, playing=false, cue=false, wakes=[];
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(this.url.endsWith('/alive'))pings++;else bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+const sig=()=>({connect(f){wakes.push(f)}});
+globalThis.scTr=path=>({
+    get value(){return path.endsWith('/SampleRate')?48000:0},
+    get unnormalized(){return path.endsWith('/TrackPosition')?pos:path.endsWith('BPM')?120:0},
+    get state(){return path.endsWith('/SongLoaded')||(path.endsWith('/PlayState')&&playing)||(path.endsWith('/CueLEDState')&&cue)},
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':''}, color:'#ffffff', stateChanged: sig()});
+// The timer fires at whatever interval the sender asked for.
+const run=ms=>{const end=now+ms;while(now<end){const dt=scShadowTickTimer.interval;now+=dt;if(playing||cue)pos+=dt*48;scShadowTick();}};
+run(400);
+run(3000); assert.equal(scShadowTickTimer.interval,200,'resting decks sample at 5 Hz');
+assert.equal(wakes.length,8); // PlayState and CueLEDState per deck (own deck 1 first)
+playing=true; wakes[0](); assert.equal(scShadowTickTimer.interval,40,'a play press wakes the sender at once');
+const n=bodies.length; run(40); assert.equal(bodies.length,n+1); assert.equal(bodies[n][0].playing,true);
+run(2500); assert.equal(scShadowTickTimer.interval,80,'steady playback samples at 12.5 Hz');
+const p0=pings; run(4000); assert(pings-p0>=6,'heartbeats keep at least ~2 Hz'); assert.equal(scShadowTickTimer.interval,80);
+pos+=48*500; run(80); assert.equal(scShadowTickTimer.interval,40,'a jump goes back to 25 Hz');
+playing=false; run(2500); assert.equal(scShadowTickTimer.interval,200);
+pos+=48*300; run(200); assert.equal(scShadowTickTimer.interval,40,'a paused seek or scrub samples at 25 Hz');
+run(2500); assert.equal(scShadowTickTimer.interval,200);
+cue=true; wakes[1](); run(1000); assert.equal(scShadowTickTimer.interval,40); // CUE preview: moving with PlayState false
+run(3000); assert.equal(scShadowTickTimer.interval,40,'a held CUE preview keeps 25 Hz');
+cue=false; run(2500); assert.equal(scShadowTickTimer.interval,200);
+""")
+
     def test_safe_gc_only_when_nothing_plays(self):
         self.js(r"""
 let runs=0, plays=[false,false,false,false], cmds=[false,false,false,false], lengths=[0,0,0,0];
@@ -721,6 +798,17 @@ assert.equal(runs,3); // the stop of that shadow deck
 scGcLoadSeq++; now+=500; scGcCheck(); now+=1500; scGcCheck();
 assert.equal(runs,3); // at most one collection per 3 s
 now+=1000; scGcCheck(); assert.equal(runs,4); // display data of a peer load
+for(let i=0;i<11;i++){now+=500;scGcCheck();}
+assert.equal(runs,4);
+now+=500; scGcCheck(); assert.equal(runs,5); // once more 6 s after a load: Engine's own load garbage
+for(let i=0;i<40;i++){now+=500;scGcCheck();}
+assert.equal(runs,5); // and only once
+lengths[2]=4242; now+=500; scGcCheck(); now+=1500; scGcCheck(); assert.equal(runs,6);
+plays[3]=true; now+=500; scGcCheck(); plays[3]=false;
+for(let i=0;i<13;i++){now+=500;scGcCheck();}
+assert.equal(runs,7); // a play in between drops the follow-up (this one is the stop)
+for(let i=0;i<20;i++){now+=500;scGcCheck();}
+assert.equal(runs,7);
 """)
 
 

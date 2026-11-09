@@ -187,6 +187,7 @@ SERVICES_MAIN = """
 		if (!url) return ""
 		return url[0] === "/" ? "http://127.0.0.1:8080" + url : /^https?:/.test(url) ? url : ""
 	}
+	property var scShadowDisplayText: ({}) // per deck: the newest display reply applied
 	function scShadowDisplayFetch(d, key) {
 		const s = scShadowData(d)
 		if (!scShadowVisible(d) || !s || !key || s.key !== key || s.metadataOnly) return
@@ -205,8 +206,16 @@ SERVICES_MAIN = """
 			if (!root.scShadowVisible(d) || !current || current.key !== key) return
 			try {
 				if (x.status !== 200) return // including 404: retry this key on the metadata timer
-				const m = JSON.parse(x.responseText)
+				// A safety retry that brings the same pending reply: keep the meta object
+				// (a new one re-creates every tile, grid and cue delegate for nothing).
+				const text = x.responseText, last = root.scShadowDisplayText[d]
+				if (current.meta && last && last.key === key && last.text === text) {
+					if (current.meta.detailPending) req.next = Date.now() + Math.min(30000, 2000 * Math.pow(2, Math.min(req.tries - 1, 4)))
+					return
+				}
+				const m = JSON.parse(text)
 				if (m.key !== key) return
+				root.scShadowDisplayText[d] = {key: key, text: text}
 				// Pending detail: each reply is a 10+ kB JSON with every beat (hundreds of
 				// objects). stream-sync says when the detail is ready (displayDetail),
 				// which re-reads it at once; until then only a slow safety retry.
@@ -219,8 +228,15 @@ SERVICES_MAIN = """
 		}
 		x.send()
 	}
+	// The shadow decks' cue countdown clock: only while one of them plays. Every
+	// tick re-evaluates each deck view's countdown (~36 V4 allocations).
+	function scShadowAnyPlaying(m) {
+		for (let d = 1; d <= 4; d++) if (m[d] && m[d].playing && !m[d].stale) return true
+		return false
+	}
 	Timer {
-		interval: 200; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowDisplayOnly
+		interval: 200; repeat: true
+		running: root.scFourDeckRole !== "" && root.scShadowDisplayOnly && root.scShadowAnyPlaying(root.scShadowDisplay)
 		onTriggered: root.scShadowFrame = (root.scShadowFrame + 1) & 0xffff
 	}
 	Timer {
@@ -241,7 +257,7 @@ SERVICES_MAIN = """
 	property int scGcRuns: 0
 	property real scGcLastMs: 0
 	property var scGcProps: null
-	property var scGcState: ({armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0}) // start-up garbage counts as a stop
+	property var scGcState: ({armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0}) // start-up garbage counts as a stop
 	function scGcCheck() {
 		const now = Date.now(), g = scGcState
 		let p = scGcProps
@@ -260,13 +276,17 @@ SERVICES_MAIN = """
 			sig = sig * 31 + (x.length ? x.length.unnormalized || 0 : 0)
 		}
 		if (sig !== g.loadSig || scGcLoadSeq !== g.loadSeq) { g.loadSig = sig; g.loadSeq = scGcLoadSeq; g.loadAt = now }
-		if (playing) { g.armed = true; g.quietSince = 0; g.loadAt = 0; return false }
+		if (playing) { g.armed = true; g.quietSince = 0; g.loadAt = 0; g.followAt = 0; return false }
 		if (!g.quietSince) g.quietSince = now
 		// 1.5 s settle: a cue-play tap or a quick pause/play must not collect.
 		const stopped = g.armed && now - g.quietSince >= 1500
 		const loaded = g.loadAt > 0 && now - g.loadAt >= 1500
+		// Engine keeps loading (waveform, analysis, library) for seconds after the
+		// length is known: collect once more 6 s on if the deck still rests.
+		const follow = g.followAt > 0 && now >= g.followAt
 		// 3 s apart: a load and its display data arriving a moment later both count.
-		if (!(stopped || loaded) || now - g.lastRun < 3000) return false
+		if (!(stopped || loaded || follow) || now - g.lastRun < 3000) return false
+		g.followAt = loaded ? now + 6000 : 0
 		g.armed = false; g.loadAt = 0; g.lastRun = now
 		gc()
 		scGcRuns++; scGcLastMs = Date.now() - now
@@ -391,7 +411,7 @@ SERVICES_MAIN = """
 		}
 		if (q.length) scCall(q.join("&"))
 		scViewQuiet = Date.now() + 3000
-		scViewLast = ""
+		scViewLast = ""; scViewDirty = true
 		return true
 	}
 	function scViewOf(n) {
@@ -447,13 +467,47 @@ SERVICES_MAIN = """
 				root.scViewReady = root.scViewApply(root.scViewOf(root.scViewActive))
 				return
 			}
-			if (Date.now() < root.scViewQuiet) return
-			const s = root.scViewSnapshot()
-			const j = s ? JSON.stringify(s) : ""
-			if (!j) return
-			if (root.scViewLast === "") root.scViewLast = j // what the applied view settled to
-			else if (j !== root.scViewLast) root.scViewSave()
+			root.scViewCheck(Date.now())
 		}
+	}
+	// Autosave compares a snapshot of the view (setting names, Engine and EngineX
+	// switches, JSON) with the last one: ~230 V4 allocations, every 2 s. Take it
+	// only after a change signal, plus every 30 s should one be missed.
+	property bool scViewDirty: true
+	property bool scViewHooked: false
+	property real scViewCheckAt: 0
+	function scViewMark() { scViewDirty = true }
+	onScWaveChanged: scViewDirty = true
+	onScJogChanged: scViewDirty = true
+	onScUIScaleChanged: scViewDirty = true
+	onScTracklistWaveformChanged: scViewDirty = true
+	onScDualColumnChanged: scViewDirty = true
+	onScCueCountdownChanged: scViewDirty = true
+	onScBeatJumpPadsChanged: scViewDirty = true
+	onScSwapLoopOrderChanged: scViewDirty = true
+	function scViewHook() {
+		const m = scViewControls()
+		if (!m) return
+		for (const k in m) if (m[k] && m[k].settingChanged) m[k].settingChanged.connect(root.scViewMark)
+		for (const path of ["/GUI/PadsViewEnabled", "/GUI/FxViewEnabled"]) {
+			const p = Planck.getProperty(path)
+			if (p && p.translator && p.translator.stateChanged) p.translator.stateChanged.connect(root.scViewMark)
+		}
+		const c = PlanckGUI.views.performanceViewController
+		if (c.libraryView && c.libraryView.visibleSettingValueChanged) c.libraryView.visibleSettingValueChanged.connect(root.scViewMark)
+		if (c.deckController && c.deckController.albumArtVisibleChanged) c.deckController.albumArtVisibleChanged.connect(root.scViewMark)
+		scViewHooked = true
+	}
+	function scViewCheck(now) {
+		if (now < scViewQuiet) return
+		if (!scViewHooked) scViewHook()
+		if (!scViewDirty && now - scViewCheckAt < 30000) return
+		scViewDirty = false; scViewCheckAt = now
+		const s = scViewSnapshot()
+		const j = s ? JSON.stringify(s) : ""
+		if (!j) return
+		if (scViewLast === "") scViewLast = j // what the applied view settled to
+		else if (j !== scViewLast) scViewSave()
 	}
 	// #49 shadow decks: post this player's decks for the other EngineX player and
 	// drive the decks it does not play from GET /v1/sc5000/shadow (a CDJ or the
@@ -528,11 +582,27 @@ SERVICES_MAIN = """
 		onTriggered: tick = (tick + 1) & 0xffff
 	}
 	function scCueTickFor(d) {
-		return scShadowVisible(d) ? scShadowFrame : d === 1 ? scCueClock1.tick : d === 2 ? scCueClock2.tick : d === 3 ? scCueClock3.tick : scCueClock4.tick
+		// A resting shadow deck's countdown does not move: no clock dependency.
+		if (scShadowVisible(d)) return scShadowDisplay[d] && scShadowDisplay[d].playing && !scShadowDisplay[d].stale ? scShadowFrame : 0
+		return d === 1 ? scCueClock1.tick : d === 2 ? scCueClock2.tick : d === 3 ? scCueClock3.tick : scCueClock4.tick
 	}
 	// Same object while text/label/color/urgent are unchanged, so bindings do not re-layout every tick.
 	property var scCueInfoCache: ({})
+	// Every deck view (and layout variant) evaluates its countdown on the same
+	// clock tick: compute once per deck and tick, the rest share the answer.
+	property var scCueInfoMemo: ({})
 	function scNextCueInfo(d, tick) {
+		// Same tick within 50 ms: the same clock edge. A later re-evaluation (a load
+		// or cue edit while paused) computes afresh.
+		const memo = scCueInfoMemo[d], now = Date.now()
+		if (typeof tick === "number" && tick !== 0 && memo && memo.tick === tick && now - memo.at < 50) return memo.info
+		const info = scNextCueCompute(d)
+		if (typeof tick === "number" && tick !== 0) {
+			if (memo) { memo.tick = tick; memo.info = info; memo.at = now } else scCueInfoMemo[d] = {tick: tick, info: info, at: now}
+		}
+		return info
+	}
+	function scNextCueCompute(d) {
 		if (scShadowVisible(d)) {
 			const info = scShadowNextCue(d)
 			if (!info) { delete scCueInfoCache[d]; return null }
@@ -586,10 +656,23 @@ SERVICES_MAIN = """
 		return p
 	}
 	property var scShadowCueCache: ({})
+	// 25 Hz around every edge and a CUE preview, 12.5 Hz in steady playback (the
+	// sender posts the filtered line twice a second anyway), 5 Hz while all own
+	// decks rest. Each tick reads ~20 Engine properties, and every read allocates
+	// on V4's heap: at 25 Hz this was a third of the idle allocation (GC trigger).
+	// Play and CUE presses wake it at once.
 	Timer {
+		id: scShadowTickTimer
 		interval: 40; repeat: true
 		running: root.scFourDeckRole !== ""
 		onTriggered: root.scShadowTick()
+	}
+	property real scShadowBusyAt: 0
+	property bool scShadowRoleDirty: true
+	onScFourDeckRoleChanged: scShadowRoleDirty = true
+	function scShadowWake() {
+		scShadowBusyAt = Date.now()
+		if (scShadowTickTimer.interval !== 40) scShadowTickTimer.interval = 40
 	}
 	Timer {
 		id: scShadowPollTimer
@@ -662,19 +745,22 @@ SERVICES_MAIN = """
 				position: root.scTr(q + "Position") || scShadowEmptyObject, name: root.scTr(q + "Name") || scShadowEmptyObject,
 				color: root.scTr(q + "Color") || scShadowEmptyObject})
 		}
+		// Rare signals: a play or CUE press restores the 25 Hz sampling at once.
+		for (const t of [p.play, p.cueLED]) if (t.stateChanged) t.stateChanged.connect(root.scShadowWake)
 		scShadowDeckProperties[d] = p
 		return p
 	}
 	function scShadowTick() {
 		const now = Date.now()
 		if (now - scShadowPollAt > 3000) scShadowPoll()
-		if (scShadowMineRole !== scFourDeckRole) {
+		if (scShadowRoleDirty) {
+			scShadowRoleDirty = false
 			scShadowMineRole = scFourDeckRole
 			scShadowMine = scFourDeckRole.split("").map(c => parseInt(c))
 			scShadowOwn.length = scShadowMine.length
 		}
 		const mine = scShadowMine
-		let edge = scShadowPostPending
+		let edge = scShadowPostPending, busy = false, moving = false
 		for (let n = 0; n < mine.length; n++) {
 			const d = mine[n], g = scShadowProperties(d), p = scShadowPrev[d]
 			const s = scShadowSampleSpare[d] || {}
@@ -703,7 +789,10 @@ SERVICES_MAIN = """
 				const expect = p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0)
 				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync) edge = true
+				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
 			}
+			if (s.cue) busy = true
+			if (s.ps) moving = true
 			// Engine moves TrackPosition in audio blocks: at 25 Hz a playing deck's raw
 			// position is up to ~35 ms of track time behind (high pitch). With the speed
 			// known, the upper envelope of position - speed * time is the newest block:
@@ -722,6 +811,9 @@ SERVICES_MAIN = """
 		// margin for a busy GUI thread. Each post and the peer's reply are JS strings
 		// that drive V4's GC trigger (250 ms here meant a GC every ~75-150 s of play).
 		if (edge || now - scShadowPostAt >= 500) scShadowPost(mine, now, edge)
+		if (edge || busy) scShadowBusyAt = now
+		const rate = now - scShadowBusyAt < 2000 ? 40 : moving ? 80 : 200
+		if (scShadowTickTimer.interval !== rate) scShadowTickTimer.interval = rate
 		if (scShadowDebug) scShadowDbgFlush(now)
 	}
 	function scShadowPost(mine, now, edge) {
@@ -823,7 +915,8 @@ SERVICES_MAIN = """
 		post.send(JSON.stringify(own))
 	}
 	// One request at a time: Go holds it until the other player's state changes
-	// (at most 120 ms), so an edge arrives here within a millisecond of its UDP.
+	// (at most a second; 120 ms while CDJ positions refresh), so an edge arrives
+	// here within a millisecond of its UDP.
 	function scShadowPoll() {
 		let x = scShadowPollRequest
 		if (!x) {
@@ -1494,8 +1587,16 @@ SERVICES_MAIN = """
 	}
 	property var scUiPoll: null
 	property real scUiPollAt: 0
+	property string scUiDigest: ""
+	property real scUiAppliedAt: 0
 	function scUiPollReply() {
-		if (scUiPoll.readyState === 4 && scUiPoll.status === 200) scApply(JSON.parse(scUiPoll.responseText))
+		if (scUiPoll.readyState !== 4 || scUiPoll.status !== 200) return
+		// Unchanged settings (stream-sync's digest): skip the parse and the writes,
+		// but re-apply every 30 s in case a local change raced a reply.
+		const digest = scUiPoll.getResponseHeader("X-UI-Digest") || "", now = Date.now()
+		if (digest && digest === scUiDigest && now - scUiAppliedAt < 30000) { scEnsureTidal(); return }
+		scApply(JSON.parse(scUiPoll.responseText))
+		scUiDigest = digest; scUiAppliedAt = now
 	}
 	function scApply(v) {
 		scEnsureTidal()
@@ -2839,7 +2940,8 @@ SHADOW_LAYER = r"""
         }
         onSpanChanged: { gridAnchor = -Infinity; restartScroll(); refreshDetails() }
         // The stale cut-off and the grid window still need a clock between replies.
-        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null; onTriggered: { scDisplay.refreshPosition(); scDisplay.refreshDetails() } }
+        // A resting or stale sample does not move: its refreshes come with the sample.
+        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(); scDisplay.refreshDetails() } }
         readonly property real duration: meta && meta.durationMs > 0 ? meta.durationMs : 1
         readonly property real waveformDuration: meta && meta.waveformDurationMs > 0 ? meta.waveformDurationMs : duration
         readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
@@ -2934,12 +3036,24 @@ SHADOW_LAYER = r"""
         // Stock roots can hide an empty Engine slot. Restore their original bindings on exit.
         Binding { target: scDisplay.owner; property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
         Binding { target: scDisplay.owner; property: "enabled"; value: false; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
+        // The stock view under this one is fully covered: opacity 0 keeps its layout
+        // but drops it from the scene graph (-2 % render thread at rest).
+        Binding { target: scDisplay.owner; property: "opacity"; value: 0; when: scDisplay.visible; restoreMode: Binding.RestoreBindingOrValue }
+        // Text lanes (track, performance) and the overview change a few times a
+        // second at most: render them once into a texture (-3 % render thread at rest).
+        layer.enabled: live && !wave
         Item {
             id: scMoving
             objectName: "EngineX_Shadow_Content"
             width: scDisplay.width; height: scDisplay.height
             // x: written by refreshPosition / XAnimator only (track coordinates inside).
             XAnimator { id: scroll; target: scMoving; easing.type: Easing.Linear }
+            // Hidden stock lanes (most instances) build none of this: fewer objects and
+            // bindings for every V4 collection to mark.
+            Loader {
+                active: scDisplay.live && scDisplay.graphical
+                width: scDisplay.width; height: scDisplay.height
+                sourceComponent: Component { Item {
         Image {
             visible: scDisplay.graphical && source !== ""
             source: scDisplay.graphical && !scDisplay.tiled ? scDisplay.waveAsset(scDisplay.imageUrl) : ""
@@ -3031,12 +3145,30 @@ SHADOW_LAYER = r"""
                 Text { textFormat: Text.PlainText; x: 3; text: modelData.n || String(modelData.i); color: modelData.c || "#26a6ff"; font.pixelSize: 11 }
             }
         }
+                } }
+            }
         } // scMoving: only this item moves each animation frame
+        Loader {
+            active: scDisplay.live && scDisplay.graphical
+            anchors.fill: parent
+            sourceComponent: Component { Item {
         Rectangle {
             visible: scDisplay.graphical && !!scDisplay.sample
             x: Math.max(0, Math.min(scDisplay.width - width, scDisplay.playhead * scDisplay.width))
             width: 2; height: scDisplay.height; color: "white"
         }
+        Text { textFormat: Text.PlainText;
+            visible: !!scDisplay.sample
+            anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 2
+            color: "#dddddd"; font.pixelSize: 10
+            text: !scDisplay.sample ? "" : (scDisplay.stale ? "OFFLINE · " : "") + (scDisplay.sample.metadataOnly ? "REMOTE" : !scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed ? "OVERVIEW" : "")
+        }
+            } }
+        }
+        Loader {
+            active: scDisplay.live && !scDisplay.graphical
+            anchors.fill: parent
+            sourceComponent: Component { Item {
         Image {
             id: scCover
             visible: !scDisplay.graphical && scDisplay.height >= 48 && !!(scDisplay.meta && scDisplay.meta.artworkUrl)
@@ -3083,11 +3215,7 @@ SHADOW_LAYER = r"""
                 }
             }
         }
-        Text { textFormat: Text.PlainText;
-            visible: scDisplay.graphical && !!scDisplay.sample
-            anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 2
-            color: "#dddddd"; font.pixelSize: 10
-            text: !scDisplay.sample ? "" : (scDisplay.stale ? "OFFLINE · " : "") + (scDisplay.sample.metadataOnly ? "REMOTE" : !scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed ? "OVERVIEW" : "")
+            } }
         }
         // Covers remote Stems, needle-drop, grid editing and transport touch targets.
         MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; onWheel: function(wheel) { wheel.accepted = true } }
