@@ -267,6 +267,7 @@ Low	低	低
 High	高	高
 Max	最高	最高
 Auto-Analyze Drives	自动分析插入的设备	自動分析插入的裝置
+Auto-Analyze Drives (Unavailable)	自动分析插入的设备（暂不可用）	自動分析插入的裝置（暫不可用）
 Jog Light Mode	转盘灯效	轉盤燈效
 OmniSource (Drives in Streaming)	OmniSource（在流媒体中显示 U 盘/SD）	OmniSource（在串流中顯示 USB/SD）
 Master Soft Clipper	0dB 防破音软限幅	0dB 防破音軟限幅
@@ -336,3 +337,4 @@ ENGINEX VIEW PRESET	ENGINEX 视图预设	ENGINEX 視圖預設
 Stems LAN renderer online:	局域网分轨主机在线：	區域網路分軌主機在線：
 Stems LAN renderer offline:	局域网分轨主机离线：	區域網路分軌主機離線：
 Stem	分轨 Stems	分軌 Stems
+Cue Countdown	热标拍数倒数	熱標拍數倒數

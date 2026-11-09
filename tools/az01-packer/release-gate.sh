@@ -210,18 +210,18 @@ SH
         check "new: Control Center has the jog light tile" grep -aqF 'SCPROBE tile|ControlCenter_JogLight|' "$log"
         check "new: Control Center has the upfader echo tile (#52)" grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|' "$log"
         check "new: Control Center fills uiContainer at UI Scale 75 % (root.transformed, not defaultScreenSize)" grep -aq 'SCPROBE ccsize|75|[0-9x]*|[0-9x]*|1|' "$log"
-        check "new: auto-analyze toggle and Engine's AnalyzeUnanalyzed action exist (#55)" grep -aqF 'SCPROBE analyze|boolean|1|' "$log"
+        check "new: auto-analyze preference retained, automatic submission unavailable (#55)" grep -aqF 'SCPROBE analyze|boolean|false|' "$log"
         note "new: render probe: $(grep -ao 'SCPROBE [a-z]*|.*|' "$log" | grep -v 'SCPROBE done' | tr '\n' ' ')"
         check "new: Engine build matched (Engine $BASE)" grep -aq "engine-ui-hook: Engine $BASE" "$log"
         check "new: $EXPECT_APPLIED Engine patches applied (TidalAPI gateway, Stems, getConfig...)" \
             test "$(grep -ac 'engine-ui-hook: applied 0x' "$log")" -eq "$EXPECT_APPLIED"
         check "new: $EXPECT_DSP DSP guards installed" grep -aq "engine-ui-hook: $EXPECT_DSP DSP guards/transitions installed" "$log"
         check "new: SQLite hooks installed" grep -aq 'engine-ui-hook: SQLite open/open_v2 hooks installed' "$log"
-        check "new: no QML load errors" bash -c "! grep -aE 'is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component' '$log'"
+        check "new: no QML load errors" bash -c "! grep -aE 'Type [A-Za-z_][A-Za-z0-9_]* unavailable|PropertyChanges does not support creating|state-specific objects|is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component' '$log'"
         check "new: no Engine crash" bash -c "! grep -aE 'Crash with|Unknown exit code' '$log'"
         for v in "${!pid[@]}"; do check "new: $v still running after ${ENGINE_SECONDS}s" kill -0 "${pid[$v]}"; done
-        # Field 41 of /proc/PID/stat is the policy; 5 is SCHED_IDLE.
-        check "new: OfflineAnalyzer runs at idle priority (#55)" bash -c "chroot '$R' /bin/sh -c 'cat /proc/[0-9]*/stat 2>/dev/null' | awk '\$2 == \"(OfflineAnalyzer)\" { n++; if (\$41 != 5) bad = 1 } END { exit !(n && !bad) }'"
+        # Fields 41/19 are policy/nice: fair background work must retain progress.
+        check "new: OfflineAnalyzer uses SCHED_OTHER and nice 10 (#55)" bash -c "chroot '$R' /bin/sh -c 'cat /proc/[0-9]*/stat 2>/dev/null' | awk '\$2 == \"(OfflineAnalyzer)\" { n++; if (\$41 != 0 || \$19 != 10) bad = 1 } END { exit !(n && !bad) }'"
         check "new: edisksd starts with the hook preloaded (LD_BIND_NOW)" bash -c "grep -aq 'Loaded configuration' '$W/new-edisksd.log' && ! grep -aiE 'symbol lookup error|undefined symbol|cannot open shared object|cannot be preloaded' '$W/new-edisksd.log'"
         curl -sf http://127.0.0.1:8080/v1/sc5000/ui > "$W/new-ui.json" || :
         check "new: GET /v1/sc5000/ui reports $NEWV" json "$W/new-ui.json" "j.get('version') == '$NEWV'"

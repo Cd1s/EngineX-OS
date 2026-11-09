@@ -85,6 +85,19 @@ func (d ExportDeck) beatAt(now time.Time) (beat int, frac float64, ok bool) {
 	return int(whole) % 4, pos - whole, true
 }
 
+// Carried is d read again at now: the beat moved on with the tempo, so a deck
+// that has not changed since At keeps its beat packets (beatAt gives up after 2 s).
+func (d ExportDeck) Carried(now time.Time) ExportDeck {
+	if d.At.IsZero() {
+		return d
+	}
+	if bpm := d.BPM * (1 + d.Pitch/100); d.Playing && bpm > 0 && d.Beat >= 0 {
+		d.Beat = math.Mod(d.Beat+now.Sub(d.At).Seconds()*bpm/60, 4)
+	}
+	d.At = now
+	return d
+}
+
 // beatPacket is a Pro DJ Link beat (0x28): beat in bar (1..4) just hit, the
 // time to the following beats and bars, pitch and BPM.
 func (r *exportRun) beatPacket(d ExportDeck, inBar int, frac float64) []byte {
@@ -160,6 +173,16 @@ func (e *Exporter) SetDeck(d ExportDeck) {
 		e.run.mu.Unlock()
 	}
 }
+
+// CachedAnalysis exposes only the already observed track; it cannot start export
+// or perform network I/O, and never takes the exporter lifecycle mutex.
+func (e *Exporter) CachedAnalysis(dev Device, host net.IP) (*rekordbox.Analysis, string, string) {
+	return e.cfg.MediaCache.CachedAnalysis(dev, host)
+}
+
+// DisplayMediaCache is immutable configuration. Display polling never takes the
+// lifecycle mutex, which may be waiting for network workers during shutdown.
+func (e *Exporter) DisplayMediaCache() *MediaCache { return e.cfg.MediaCache }
 
 // RequestMaster asks the tempo master at ip to hand master over to this player
 // (Pro DJ Link master handoff request, type 0x26, to its beat port).
@@ -576,8 +599,7 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 		ctx, cancel := context.WithCancel(context.Background())
 		r.cancel = cancel
 		if cfg.MediaCache != nil {
-			cache := *cfg.MediaCache
-			cache.Context = ctx
+			cache := MediaCache{Context: ctx, Dir: cfg.MediaCache.Dir, Enabled: cfg.MediaCache.Enabled, Portmap: cfg.MediaCache.Portmap}
 			r.mediaCache = &cache
 			r.observer = NewDiscovery()
 			r.observer.SetMediaCache(&cache)

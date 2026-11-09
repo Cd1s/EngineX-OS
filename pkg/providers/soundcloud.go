@@ -712,16 +712,15 @@ func (s *SoundCloud) webPlaylistTracks(ctx context.Context, id string) ([]Track,
 			missing = append(missing, strconv.FormatInt(t.ID, 10))
 		}
 	}
-	for len(missing) > 0 {
-		n := min(50, len(missing))
-		var got []scTrack
-		if err := s.get(ctx, s.base()+"/tracks?"+url.Values{"ids": {strings.Join(missing[:n], ",")}}.Encode(), &got); err != nil {
-			break // what was already read is still worth showing
-		}
-		for _, t := range got {
-			full[t.ID] = t
-		}
-		missing = missing[n:]
+	// Preserve the successful prefix if a detail batch fails, as before.
+	got, _ := collectBatches(ctx, soundcloudPages, (len(missing)+49)/50, func(batch int) ([]scTrack, error) {
+		start := batch * 50
+		var tracks []scTrack
+		err := s.get(ctx, s.base()+"/tracks?"+url.Values{"ids": {strings.Join(missing[start:min(start+50, len(missing))], ",")}}.Encode(), &tracks)
+		return tracks, err
+	})
+	for _, t := range got {
+		full[t.ID] = t
 	}
 	var out []Track
 	for _, ref := range list.Tracks {
@@ -733,7 +732,21 @@ func (s *SoundCloud) webPlaylistTracks(ctx context.Context, id string) ([]Track,
 }
 
 func (s *SoundCloud) Search(ctx context.Context, query string) ([]Track, error) {
-	return s.trackPages(ctx, s.list(s.path("/tracks", "/search/tracks"), url.Values{"q": {query}, "limit": {"30"}, "access": {"playable,preview"}}))
+	// Search is a single page, unlike a library/playlist. Following next_href
+	// here can fetch up to 2,000 hits and consume the gateway's whole deadline.
+	var r struct {
+		Collection []scTrack `json:"collection"`
+	}
+	if err := s.get(ctx, s.list(s.path("/tracks", "/search/tracks"), url.Values{"q": {query}, "limit": {"30"}, "access": {"playable,preview"}}), &r); err != nil {
+		return nil, err
+	}
+	out := make([]Track, 0, len(r.Collection))
+	for _, t := range r.Collection {
+		if t.ID != 0 && t.Access != "blocked" && t.Policy != "BLOCK" {
+			out = append(out, t.track())
+		}
+	}
+	return out, nil
 }
 
 func (s *SoundCloud) SearchPlaylists(ctx context.Context, query string) ([]Playlist, error) {

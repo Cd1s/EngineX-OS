@@ -132,17 +132,21 @@ not an overlay for mkdir/stat/rename/unlink or other processes.
 
 Crashpad exec/spawn requests fail with the normal ENOENT result; they never
 claim success or invent a child PID. Other exec/spawn calls pass through.
-The listed analysis/cloud/Sentry/freeze workers receive SCHED_IDLE, nice 19,
-idle I/O, and the last online CPU outside CPU0. Pixmap/FileInfo workers receive
-nice 10 and CPUs 1 through the last online CPU. The mask is built from the online
-CPU count rather than Engine's inherited CPU1-only startup affinity. Both pthread
-naming and Qt's prctl/__prctl_time64 naming apply these guards; later
-pthread_setschedparam calls cannot reset idle workers to SCHED_OTHER. Naming
-another pthread targets that thread, never blindly applies nice/ioprio to its
-caller. Subsequent affinity requests retain these guards. CPU0-only systems
-cannot satisfy the CPU guard.
-AudioOut/AudioRenderer names are excluded. Freeze/Sentry threads are deprioritized,
-not terminated; independent OfflineAnalyzer processes are outside is_engine().
+The named analysis/cloud/Sentry workers use SCHED_OTHER, nice 10 and
+best-effort I/O priority 7. Analysis Queue and other potential lock holders
+must make progress under ordinary CPU and I/O load; SCHED_IDLE/idle I/O
+cannot guarantee that. Freeze Checker and transient JobController names
+are left alone. Named helpers share all online CPUs except EMain/SceneGraph
+(1/2), instead of the old single last CPU. The perf-tune sweeper uses the
+same helper mask. Pixmap/FileInfo workers retain nice 10 and the helper mask.
+
+Both pthread naming and Qt prctl/__prctl_time64 naming apply these guards;
+later pthread_setschedparam calls cannot put named background workers back
+into SCHED_IDLE. Naming another pthread targets that thread, never its caller.
+Standalone OfflineAnalyzer also starts with SCHED_OTHER/nice 10/BE7, and
+Engine cannot promote it to nice -5 or demote it into SCHED_IDLE afterward.
+RT audio names/policies are not changed. This is starvation prevention,
+not proof of the reported main-thread freeze's cause. See the R2 report.
 
 NORMAL still permits journal writes/fsync. The 8000 KiB cache is per connection,
 not a total RAM bound, and later application PRAGMAs can override it. Telemetry

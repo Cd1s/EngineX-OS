@@ -736,6 +736,9 @@ getvar)
     if [ -f "$d/nodata" ]; then echo "getvar:partition-size:data FAILED (remote: 'GetVar Variable Not found')" >&2; exit 1; fi
     echo "partition-size:data: 0x4000000" >&2 ;;
   partition-size:userdata) echo "partition-size:userdata: 0x4000000" >&2 ;;
+  partition-type:data)
+    if [ -f "$d/rawdata" ]; then echo "partition-type:data: raw" >&2
+    else echo "partition-type:data: ext4" >&2; fi ;;
   *) echo "getvar:$2 FAILED (remote: 'GetVar Variable Not found')" >&2; exit 1 ;;
   esac
   echo "Finished. Total time: 0.001s" >&2 ;;
@@ -839,8 +842,8 @@ func TestModeBRecognizesPlatformPrefixProduct(t *testing.T) {
 
 func TestModeBFlashesUserdataWhenThereIsNoDataPartition(t *testing.T) {
 	need(t, "python3", "mke2fs", "debugfs", "e2fsck", "dumpe2fs")
-	b := buildBundle(t, "PRIME4PLUS", "5.3.0.2")
-	fb := newFastboot(t, "jc11s", false)
+	b := buildBundle(t, "SCLIVE4", "5.3.0.2")
+	fb := newFastboot(t, "jp21", false)
 	if err := run(ctxT(t), modeBOpts(t, fb, b)); err != nil {
 		t.Fatal(err)
 	}
@@ -848,6 +851,121 @@ func TestModeBFlashesUserdataWhenThereIsNoDataPartition(t *testing.T) {
 		t.Fatalf("flash calls = %v", f)
 	}
 	checkImage(t, filepath.Join(fb.Dir, "flashed-userdata.img"), b.SuitePath)
+}
+
+func TestModeBJC11SRefusesUnverifiedPartition(t *testing.T) {
+	for _, tc := range []struct{ name, marker, want string }{
+		{"missing-data", "nodata", "refusing userdata fallback"},
+		{"wrong-type", "rawdata", "expected partition-type:data: ext4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := buildBundle(t, "PRIME4PLUS", "5.3.0.3")
+			fb := newFastboot(t, "rk3288-az01-jc11s", true)
+			if err := os.WriteFile(filepath.Join(fb.Dir, tc.marker), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := run(ctxT(t), modeBOpts(t, fb, b))
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "nothing flashed") {
+				t.Fatalf("err = %v", err)
+			}
+			if calls := fb.Flashed(); len(calls) != 0 {
+				t.Fatalf("flashed an unverified partition: %v", calls)
+			}
+		})
+	}
+}
+
+func TestModeBJC11SRefusesUnverifiableActivation(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
+	realDebugfs, err := exec.LookPath("debugfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := buildBundle(t, "PRIME4PLUS", "5.3.0.3")
+	for _, path := range []string{
+		"/enginex/version.txt", "/enginex/bundle/version.txt",
+		"/enginex/bundle/boot-activate.sh", "/enginex/bundle/lib/libengine-ui-hook.so",
+		"/sc5000-custom/bundle/boot-activate.sh", "/sc5000-custom/bundle/lib/libengine-ui-hook.so",
+		"/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf",
+	} {
+		t.Run(path, func(t *testing.T) {
+			shim := t.TempDir()
+			// Simulate debugfs' success exit with missing/stale file contents.
+			script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = -R ] && [ \"$2\" = %q ]; then echo stale; exit 0; fi\nexec %q \"$@\"\n", "cat "+path, realDebugfs)
+			if err := os.WriteFile(filepath.Join(shim, "debugfs"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", shim+string(os.PathListSeparator)+os.Getenv("PATH"))
+			fb := newFastboot(t, "JC11S", true)
+			err := run(ctxT(t), modeBOpts(t, fb, b))
+			if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "nothing flashed") {
+				t.Fatalf("err = %v", err)
+			}
+			if calls := fb.Flashed(); len(calls) != 0 {
+				t.Fatalf("flashed without activation files: %v", calls)
+			}
+		})
+	}
+}
+
+func jc11sLegacyBackup(t *testing.T) string {
+	t.Helper()
+	img := filepath.Join(t.TempDir(), "legacy-data.img")
+	sh(t, "truncate", "-s", "64M", img)
+	sh(t, "mke2fs", "-t", "ext4", "-O", "encrypt", "-L", "az01-data", "-F", img)
+	sh(t, "debugfs", "-w", "-R", "mkdir /sc5000-custom", img)
+	sh(t, "debugfs", "-w", "-R", "mkdir /Music", img)
+	sh(t, "debugfs", "-w", "-R", "write /etc/hostname /Music/keep.mp3", img)
+	return img
+}
+
+func TestModeBJC11SLegacyBackup(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
+	b := buildBundle(t, "PRIME4PLUS", "5.3.0.3")
+	fb := newFastboot(t, "JC11S", true)
+	o := modeBOpts(t, fb, b)
+	o.Backup = jc11sLegacyBackup(t)
+	o.Key = filepath.Join(t.TempDir(), "no-host-key")
+	if err := run(ctxT(t), o); err != nil {
+		t.Fatal(err)
+	}
+	img := filepath.Join(fb.Dir, "flashed-data.img")
+	sh(t, "e2fsck", "-fn", img)
+	for _, path := range []string{"/sc5000-custom/bundle/boot-activate.sh", "/Music/keep.mp3"} {
+		if out := sh(t, "debugfs", "-R", "stat "+path, img); !strings.Contains(out, "Type: regular") {
+			t.Fatalf("missing %s: %s", path, out)
+		}
+	}
+	if out := sh(t, "debugfs", "-R", "stat /enginex", img); strings.Contains(out, "Type: directory") {
+		t.Fatal("fixture did not exercise a real legacy installation directory")
+	}
+}
+
+// Optional external fixture: the real released archive, not a current bundle
+// with an old version label. Run this on the ARM build host with its path set.
+func TestModeBJC11SPublishedBundle(t *testing.T) {
+	path := os.Getenv("JC11S_RELEASE_BUNDLE")
+	if path == "" {
+		t.Skip("set JC11S_RELEASE_BUNDLE to the published PRIME4PLUS data bundle")
+	}
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			fb := newFastboot(t, "JC11S", true)
+			o := testOpts(t)
+			o.Fastboot, o.Bundle = fb.Bin, path
+			o.Key = filepath.Join(t.TempDir(), "no-host-key")
+			if legacy {
+				o.Backup = jc11sLegacyBackup(t)
+			}
+			if err := run(ctxT(t), o); err != nil {
+				t.Fatal(err)
+			}
+			if calls := fb.Flashed(); len(calls) != 1 || !strings.HasPrefix(calls[0], "flash data ") {
+				t.Fatalf("published archive was not verified and flashed: %v", calls)
+			}
+		})
+	}
 }
 
 func TestModeBKeepsTheUsersFilesWhenGivenABackup(t *testing.T) {
@@ -1660,14 +1778,14 @@ func TestCaptureWriterSwallowsDisplayErrors(t *testing.T) {
 // #129: writing to a broken stdout pipe (fd 1) during flash must not terminate the installer with SIGPIPE.
 func TestSigpipeStdoutSubprocess(t *testing.T) {
 	if os.Getenv("TEST_SIGPIPE_CHILD") == "1" {
-		fb := newFastboot(t, "JC11S", false)
+		fb := newFastboot(t, "JC11S", true)
 		b := buildBundle(t, "PRIME4PLUS", "5.3.0.2")
 		o := modeBOpts(t, fb, b)
 		o.Out = os.Stdout
 		if err := run(ctxT(t), o); err != nil {
 			t.Fatalf("run failed: %v", err)
 		}
-		if f := fb.Flashed(); len(f) != 1 || !strings.Contains(f[0], "flash userdata ") {
+		if f := fb.Flashed(); len(f) != 1 || !strings.Contains(f[0], "flash data ") {
 			t.Fatalf("unexpected flash calls: %v", f)
 		}
 		return
@@ -1708,21 +1826,21 @@ func TestFormatBytes(t *testing.T) {
 func TestModeBStreamsFlashProgressAndSize(t *testing.T) {
 	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
 	b := buildBundle(t, "PRIME4PLUS", "5.3.0.2")
-	fb := newFastboot(t, "JC11S", false)
+	fb := newFastboot(t, "JC11S", true)
 	o := modeBOpts(t, fb, b)
 	if err := run(ctxT(t), o); err != nil {
 		t.Fatalf("run: %v\n%s", err, o.Out)
 	}
 	out := o.Out.(*bytes.Buffer).String()
 	for _, want := range []string{
-		"Flashing userdata partition (64.0 MB) over USB; this may take several minutes. Do not disconnect USB or power off the deck...",
-		"正在向碟机写入 userdata 分区 (64.0 MB)，通过 USB 传输可能需要几分钟，请勿断开连接或关闭电源…",
-		"Sending 'userdata'",
-		"Writing 'userdata'",
+		"Flashing data partition (64.0 MB) over USB; this may take several minutes. Do not disconnect USB or power off the deck...",
+		"正在向碟机写入 data 分区 (64.0 MB)，通过 USB 传输可能需要几分钟，请勿断开连接或关闭电源…",
+		"Sending 'data'",
+		"Writing 'data'",
 		"OKAY",
 		"正在重启碟机…",
 		"Rebooting deck...",
-		"Done: EngineX OS",
+		"USB write complete; activation after reboot is not verified",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("installer output missing %q:\n%s", want, out)

@@ -2,6 +2,8 @@ package webui
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -567,15 +569,18 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	defer resp.Body.Close()
 	var v uiSettings
 	json.NewDecoder(resp.Body).Decode(&v)
+	if v.DebugTelemetry {
+		t.Fatal("DebugTelemetry must default to false")
+	}
 	if v.StreamSortRole != "default" || v.StreamSortOrder != "asc" || v.BrowserDualColumn != false ||
 		!v.TracklistWaveform ||
-		v.SyncGuardPct != 0 || v.SwapLoopOrder != false || v.LedBrightness != 100 ||
+		v.SyncGuardPct != 0 || v.SwapLoopOrder != false || v.LedBrightness != 100 || !v.CueCountdown ||
 		v.StemsEqMode != false || v.BeatJumpPads != false || v.PioneerFx != "off" {
 		t.Fatalf("unexpected defaults: %+v", v)
 	}
 
 	// 2. Update via POST /api/ui with query params and Bearer token
-	updateParams := "streamSortRole=bpm&streamSortOrder=desc&browserDualColumn=1&tracklistWaveform=0&syncGuardPct=15&swapLoopOrder=1&ledBrightness=60&stemsEqMode=1&beatJumpPads=1&pioneerFx=spiral"
+	updateParams := "streamSortRole=bpm&streamSortOrder=desc&browserDualColumn=1&tracklistWaveform=0&cueCountdown=0&syncGuardPct=15&swapLoopOrder=1&ledBrightness=60&stemsEqMode=1&beatJumpPads=1&pioneerFx=spiral"
 	postReq, _ := http.NewRequest("POST", srv.URL+"/api/ui?"+updateParams, nil)
 	postReq.Header.Set("Authorization", "Bearer "+token)
 	postResp, err := client.Do(postReq)
@@ -588,7 +593,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	}
 	var updated uiSettings
 	json.NewDecoder(postResp.Body).Decode(&updated)
-	if updated.StreamSortRole != "bpm" || updated.StreamSortOrder != "desc" || !updated.BrowserDualColumn ||
+	if updated.StreamSortRole != "bpm" || updated.StreamSortOrder != "desc" || !updated.BrowserDualColumn || updated.CueCountdown ||
 		updated.TracklistWaveform ||
 		updated.SyncGuardPct != 15 || !updated.SwapLoopOrder || updated.LedBrightness != 60 ||
 		!updated.StemsEqMode || !updated.BeatJumpPads || updated.PioneerFx != "spiral" {
@@ -647,7 +652,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 	defer resp2.Body.Close()
 	var reloaded uiSettings
 	json.NewDecoder(resp2.Body).Decode(&reloaded)
-	if reloaded.StreamSortRole != "bpm" || reloaded.StreamSortOrder != "desc" || !reloaded.BrowserDualColumn ||
+	if reloaded.StreamSortRole != "bpm" || reloaded.StreamSortOrder != "desc" || !reloaded.BrowserDualColumn || reloaded.CueCountdown ||
 		reloaded.TracklistWaveform ||
 		reloaded.SyncGuardPct != 15 || !reloaded.SwapLoopOrder || reloaded.LedBrightness != 60 ||
 		!reloaded.StemsEqMode || !reloaded.BeatJumpPads || reloaded.PioneerFx != "spiral" {
@@ -660,6 +665,7 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 		"streamSortOrder=invalid",
 		"browserDualColumn=maybe",
 		"tracklistWaveform=maybe",
+		"cueCountdown=maybe",
 		"syncGuardPct=25",
 		"swapLoopOrder=notabool",
 		"ledBrightness=10",
@@ -679,5 +685,37 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 		if badResp.StatusCode != 400 {
 			t.Errorf("expected 400 for %s, got %d", bad, badResp.StatusCode)
 		}
+	}
+}
+
+func TestUIStatusDigestFollowsTheBody(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	get := func() (string, string) {
+		t.Helper()
+		r, err := http.Get(srv.URL + "/v1/sc5000/ui")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		var v map[string]any
+		if err := json.Unmarshal(b, &v); err != nil {
+			t.Fatalf("body %q: %v", b, err)
+		}
+		return r.Header.Get("X-UI-Digest"), string(b)
+	}
+	d1, b1 := get()
+	d2, b2 := get()
+	if d1 == "" || d1 != d2 || b1 != b2 {
+		t.Fatalf("same settings: %q %q", d1, d2)
+	}
+	if fmt.Sprintf("%x", fnvSum(strings.TrimSuffix(b1, "\n"))) != d1 {
+		t.Fatalf("digest %q is not the body's", d1)
+	}
+	uiPost(t, srv.URL, "jog=rainbow")
+	if d3, _ := get(); d3 == d1 {
+		t.Fatal("a changed setting kept the digest")
 	}
 }

@@ -514,9 +514,12 @@ static void test_config(void) {
     for (int model = 0; model < 6; model++) {
         uchar config[0x600], expected[0x600];
         memset(config, 0xa0 + model, sizeof config);
+        if (build->config_zoom == 0x52c) config[0x12e] = model & 1; // #166: NH and non-NH
         memcpy(expected, config, sizeof expected);
         for (size_t i = 0; i < 5; i++) expected[fields[i]] = i == 4 ? 0 : 1;
         if (build->config_zoom == 0x52c) expected[0x54] = 1; // #152: Config.audio.hasStemsLevel
+        if (build->config_zoom == 0x52c && config[0x12e])
+            expected[0xe1] = expected[0x19c] = expected[0x19d] = expected[0x4cd] = 1; // #166; retain hasNHFx
         if (build->config_zoom) *(uint32_t *)(expected + build->config_zoom) = 30; // #77
         uint32_t out[3];
         invoke_config(config, (void *)(uintptr_t)config_jump[1], out);
@@ -751,11 +754,13 @@ static void *named_worker(void *unused) {
     (void)unused;
     assert(pthread_setname_np(pthread_self(), "Analysis Queue") == 0);
     cpu_set_t cpus; assert(pthread_getaffinity_np(pthread_self(), sizeof cpus, &cpus) == 0);
-    assert(!CPU_ISSET(0, &cpus) && CPU_COUNT(&cpus) == 1);
-    int policy; struct sched_param p;
-    assert(!pthread_getschedparam(pthread_self(), &policy, &p) && policy == SCHED_IDLE);
-    assert(getpriority(PRIO_PROCESS, 0) == 19);
-    assert((syscall(SYS_ioprio_get, 1, 0) >> 13) == 3);
+    assert(!CPU_ISSET(1, &cpus) && !CPU_ISSET(2, &cpus) && CPU_COUNT(&cpus) == CPU_COUNT(&engine_cpus) - 2);
+    int policy; struct sched_param p = {.sched_priority = 0};
+    // A later Qt priority request must never reintroduce the starvation class.
+    assert(!pthread_setschedparam(pthread_self(), SCHED_IDLE, &p));
+    assert(!pthread_getschedparam(pthread_self(), &policy, &p) && policy == SCHED_OTHER);
+    assert(getpriority(PRIO_PROCESS, 0) == 10);
+    assert(syscall(SYS_ioprio_get, 1, 0) == ((2 << 13) | 7));
     return NULL;
 }
 
@@ -763,7 +768,7 @@ static void *foreign_named_worker(void *fd) {
     char c;
     assert(read(*(int *)fd, &c, 1) == 1);
     cpu_set_t cpus; assert(!pthread_getaffinity_np(pthread_self(), sizeof cpus, &cpus));
-    assert(!CPU_ISSET(0, &cpus));
+    assert(CPU_ISSET(0, &cpus) && !CPU_ISSET(1, &cpus) && !CPU_ISSET(2, &cpus));
     assert(getpriority(PRIO_PROCESS, 0) == 10);
     return NULL;
 }
@@ -782,16 +787,14 @@ static void *qt_named_worker(void *arg) {
     assert(!pthread_setschedparam(pthread_self(), SCHED_OTHER, &normal));
     int policy;
     assert(!pthread_getschedparam(pthread_self(), &policy, &actual));
-    assert(policy == (test->kind == 2 ? SCHED_IDLE : SCHED_OTHER));
+    assert(policy == SCHED_OTHER);
     assert(actual.sched_priority == 0);
-    assert(getpriority(PRIO_PROCESS, 0) == (test->kind == 2 ? 19 : 10));
+    assert(getpriority(PRIO_PROCESS, 0) == 10);
     cpu_set_t wanted = engine_cpus, got, cpu1;
-    CPU_CLR(0, &wanted);
+    CPU_CLR(1, &wanted); // EMain
+    CPU_CLR(2, &wanted); // SceneGraph
     if (test->kind == 2) {
-        int last = CPU_SETSIZE - 1;
-        while (!CPU_ISSET(last, &wanted)) last--;
-        CPU_ZERO(&wanted); CPU_SET(last, &wanted);
-        assert((syscall(SYS_ioprio_get, 1, 0) >> 13) == 3);
+        assert(syscall(SYS_ioprio_get, 1, 0) == ((2 << 13) | 7));
     }
     assert(!pthread_getaffinity_np(pthread_self(), sizeof got, &got));
     assert(CPU_EQUAL(&got, &wanted));
@@ -826,7 +829,7 @@ static void test_threads(void) {
     assert(!pthread_join(thread, NULL));
     close(fds[0]); close(fds[1]);
     const struct qt_thread_case cases[] = {
-        {"Analysis Queue ", 0, 2}, {"Freeze Checker ", 1, 2},
+        {"Analysis Queue ", 0, 2}, {"Dropbox", 1, 2},
         {"QQuickPixmapRea", 0, 1}, {"FileInfoThread", 1, 1},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
@@ -838,7 +841,7 @@ static void test_threads(void) {
     assert(getpriority(PRIO_PROCESS, 0) == before);
     assert(hook_prctl_time64(PR_GET_DUMPABLE, 0UL, 0UL, 0UL, 0UL) >= 0);
     assert(thread_class("AudioOut") == 0 && thread_class("AudioRenderer") == 0);
-    assert(thread_class("QQuickPixmapRea") == 1 && thread_class("Freeze Checker") == 2);
+    assert(thread_class("QQuickPixmapRea") == 1 && thread_class("Freeze Checker") == 0);
     hook_test_engine = 0;
     struct sched_param normal = {.sched_priority = 0};
     assert(!pthread_setschedparam(pthread_self(), SCHED_OTHER, &normal));
@@ -1045,7 +1048,7 @@ static void test_patch_files(const char *filename) {
     printf("Stock/patched/mismatched edit classification: %s PASS\n", filename);
 }
 
-// #55: Engine's own setpriority/sched_setscheduler on an analyzer keep it idle.
+// #55: Engine's analyzer policy overrides retain fair scheduling.
 static void test_offline_analyzer(void) {
     int ready[2];
     assert(!pipe(ready));
@@ -1059,8 +1062,8 @@ static void test_offline_analyzer(void) {
     char c; assert(read(ready[0], &c, 1) == 1);
     hook_test_engine = 1;
     struct sched_param other = {.sched_priority = 0};
-    assert(!setpriority(PRIO_PROCESS, (id_t)child, 5) && getpriority(PRIO_PROCESS, (id_t)child) == 19);
-    assert(!sched_setscheduler(child, SCHED_OTHER, &other) && sched_getscheduler(child) == SCHED_IDLE);
+    assert(!setpriority(PRIO_PROCESS, (id_t)child, 5) && getpriority(PRIO_PROCESS, (id_t)child) == 10);
+    assert(!sched_setscheduler(child, SCHED_OTHER, &other) && sched_getscheduler(child) == SCHED_OTHER);
     // Anything else, and anything outside Engine, is left alone.
     assert(!setpriority(PRIO_PROCESS, 0, 3) && getpriority(PRIO_PROCESS, 0) == 3);
     hook_test_engine = 0;
@@ -1068,7 +1071,7 @@ static void test_offline_analyzer(void) {
     kill(child, SIGKILL);
     assert(waitpid(child, NULL, 0) == child);
     setpriority(PRIO_PROCESS, 0, 0); // only effective as root; harmless otherwise
-    puts("OfflineAnalyzer (#55): Engine's priority/policy changes on an analyzer stay idle, others untouched: PASS");
+    puts("OfflineAnalyzer (#55): Engine's priority/policy changes on an analyzer stay fair, others untouched: PASS");
 }
 
 // #49: OfflineAnalyzer replays <file>.perf instead of analysing the copy.

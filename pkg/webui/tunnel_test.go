@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -45,10 +46,10 @@ echo "2026-11-08T00:00:00Z INF |  https://enginex-deck-9876.trycloudflare.com   
 echo "2026-11-08T00:00:00Z INF +--------------------------------------------------------------------------------------------+"
 exec sleep 30
 `
-	var downloads int
+	var downloads atomic.Int32
 	dlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/cloudflared-linux-arm64" {
-			downloads++
+			downloads.Add(1)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(fakeScript))
 			return
@@ -78,9 +79,10 @@ exec sleep 30
 		cloudflaredInstallPath = oldInstall
 	}()
 
+	// Use the real constructor: startup resume must finish before the first
+	// enable request and before the package-level mocks are restored.
 	s := New(Config{StateDir: stateDir, UIDir: uiDir, AccessToken: "ABCD-2345"}, nil)
-	s.RegisterTunnelRoutes()
-	defer s.TunnelManager().Stop()
+	defer func() { s.TunnelManager().Stop(); tunnelManagers.Delete(s) }()
 
 	// 1. Initial GET /api/tunnel is stopped.
 	code, st, raw := doTunnelReq(t, s, http.MethodGet, "")
@@ -102,8 +104,8 @@ exec sleep 30
 	if got := s.PublicTunnelURL(); got != "https://enginex-deck-9876.trycloudflare.com" {
 		t.Fatalf("PublicTunnelURL() = %q", got)
 	}
-	if downloads != 1 {
-		t.Fatalf("expected 1 on-demand binary download, got %d", downloads)
+	if n := downloads.Load(); n != 1 {
+		t.Fatalf("expected 1 on-demand binary download, got %d", n)
 	}
 	if info, err := os.Stat(installTarget); err != nil || info.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("installed binary not executable: %v %v", info, err)

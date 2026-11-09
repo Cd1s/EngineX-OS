@@ -71,6 +71,9 @@
         ] },
         { k: "h", id: "whatsnew-5304", x: L("5.3.0.4 新功能（开发中）", "5.3.0.4 新功能（開發中）", "New in 5.3.0.4 (in development)"), nav: L("5.3.0.4 新功能", "5.3.0.4 新功能", "New in 5.3.0.4") },
         { k: "note", tone: "new", x: L("以下功能属于 5.3.0.4，尚未发布；正式发布后删除本提示。", "以下功能屬於 5.3.0.4，尚未發佈；正式發佈後刪除本提示。", "The items below belong to 5.3.0.4 and are not released yet; remove this note on release.") },
+        { k: "note", tone: "new", x: L("**Mixstream Pro / Pro+ / Pro Go（#166）**：FILTER 旋钮控制原厂 Filter / Dub Echo / Noise / Filter Roll / Wash，点击各轨 Pads 栏的 `SWEEP FX` 打开原厂选择轮盘。恢复触屏 Beat Jump；在 `个人偏好 → Cues/Loops` 开启 `Beat Jump Pad Bank`，各轨 Pads 栏可后跳、前跳、减半、加倍；各轨 `EQ / STEMS` 按钮切换该通道三段旋钮的 Stems EQ。分轨可从歌单左滑菜单触发，支持本机分析或局域网卸载（RK3288 本机处理较慢）。",
+          "**Mixstream Pro / Pro+ / Pro Go（#166）**：FILTER 旋鈕控制原廠 Filter / Dub Echo / Noise / Filter Roll / Wash，點擊各軌 Pads 列的 `SWEEP FX` 開啟原廠選擇輪盤。恢復觸控 Beat Jump；於 `個人偏好 → Cues/Loops` 開啟 `Beat Jump Pad Bank`，各軌 Pads 列可後跳、前跳、減半、加倍；各軌 `EQ / STEMS` 按鈕切換該通道三段旋鈕的 Stems EQ。分軌可從歌單左滑選單觸發，支援本機分析或區域網路卸載（RK3288 本機處理較慢）。",
+          "**Mixstream Pro / Pro+ / Pro Go (#166)**: FILTER knobs control the native Filter / Dub Echo / Noise / Filter Roll / Wash, selected with `SWEEP FX` in each deck’s Pads bar using the native carousel. Touch Beat Jump is restored; enable `User Profile → Cues/Loops → Beat Jump Pad Bank` for back, forward, halve and double in each deck's Pads bar. Each deck's `EQ / STEMS` button switches that channel's three knobs to Stems EQ. Swipe left on a track to analyse stems locally or offload over LAN (local RK3288 processing is slower).") },
         { k: "ul", x: [
           L("**四轨联动完整卸载与流媒体真实歌名（#49）**：对端碟机关机、重启或退歌时发送 UDP 告别包，本机在 350 ms 防抖后自动卸载影子轨（`Unload` + `UnSync`，自动交回 `MASTER`），清掉残留波形和曲目；移除可能死锁的 `RemoteState` 订阅，对端关机不再阻塞本机切换流媒体音源；流媒体曲目在影子碟机上显示真实的 `歌手 - 歌名`，不再显示内部数字缓存文件名。",
             "**四軌聯動完整卸載與串流真實歌名（#49）**：對端播放機關機、重啟或退歌時發送 UDP 告別封包，本機在 350 ms 防抖後自動卸載影子軌（`Unload` + `UnSync`，自動交回 `MASTER`），清掉殘留波形與曲目；移除可能死鎖的 `RemoteState` 訂閱，對端關機不再阻塞本機切換串流音源；串流曲目在影子播放機上顯示真實的 `歌手 - 歌名`，不再顯示內部數字快取檔名。",
@@ -201,15 +204,15 @@
         { k: "h", id: "profile", x: L("2. 个人偏好（User Profile）", "2. 個人偏好（User Profile）", "2. User Profile"), nav: L("2. 个人偏好", "2. 個人偏好", "2. User Profile") },
         { k: "table", head: [L("分组", "分組", "Group"), L("开关", "開關", "Settings")], rows: [
           [L("`Playback` 播放与音频 DSP", "`Playback` 播放與音訊 DSP", "`Playback` (playback & audio DSP)"),
-           L("`Master Soft Clipper`（主输出软限幅）、`Auto-Gain`（0 dB 自动增益）、`Echo Out`（推杆回音）、`Stems EQ Mode`（分轨 EQ 映射）、`Color FX Style`（先锋风格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
-             "`Master Soft Clipper`（主輸出軟限幅）、`Auto-Gain`（0 dB 自動增益）、`Echo Out`（推桿回音）、`Stems EQ Mode`（分軌 EQ 映射）、`Color FX Style`（先鋒風格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
-             "`Master Soft Clipper`, `Auto-Gain` (0 dB), `Echo Out`, `Stems EQ Mode` (stem-to-EQ mapping), `Color FX Style` (Pioneer-style `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`, #88)")],
+           L("`Master Soft Clipper`（主输出软限幅）、`Auto-Gain`（0 dB 自动增益）、`Echo Out`（推杆回音）、`Stems EQ Mode`（分轨 EQ 映射）",
+             "`Master Soft Clipper`（主輸出軟限幅）、`Auto-Gain`（0 dB 自動增益）、`Echo Out`（推桿回音）、`Stems EQ Mode`（分軌 EQ 映射）",
+             "`Master Soft Clipper`, `Auto-Gain` (0 dB), `Echo Out`, `Stems EQ Mode` (stem-to-EQ mapping)")],
           ["`Cues/Loops`", "`Beat Jump Pad Bank`、`Swap Loop / Beat Jump`"],
           [L("`Safety` 演出防呆", "`Safety` 演出防呆", "`Safety` (gig safety)"), L("`Sync Guard Tolerance`（BPM 同步防呆范围：`Off` / `10%` / `15%` / `20%`）", "`Sync Guard Tolerance`（BPM 同步防呆範圍：`Off` / `10%` / `15%` / `20%`）", "`Sync Guard Tolerance` (BPM range the sync guard accepts: `Off` / `10%` / `15%` / `20%`)")],
           [L("`Library` 曲库", "`Library` 曲庫", "`Library`"),
-           L("`Auto-Analyze Drives`（插盘自动分析）、`OmniSource`（全源融合浏览，含 U 盘 / SD 卡、自建服务器与 djay 曲库）、`Dual-Column Browser`（双列浏览）、`Tracklist Waveform`（曲目列表波形开关，关闭后标题完整延展）",
-             "`Auto-Analyze Drives`（插碟自動分析）、`OmniSource`（全源融合瀏覽，含隨身碟 / SD 卡、自建伺服器與 djay 曲庫）、`Dual-Column Browser`（雙列瀏覽）、`Tracklist Waveform`（曲目列表波形開關，關閉後標題完整延展）",
-             "`Auto-Analyze Drives`, `OmniSource` (unified browsing across USB / SD, self-hosted servers and djay libraries), `Dual-Column Browser`, `Tracklist Waveform` (hide to let track title & artist expand)")],
+           L("`Auto-Analyze Drives`（暂不可用，仅保留偏好）、`OmniSource`（全源融合浏览，含 U 盘 / SD 卡、自建服务器与 djay 曲库）、`Dual-Column Browser`（双列浏览）、`Tracklist Waveform`（曲目列表波形开关，关闭后标题完整延展）",
+             "`Auto-Analyze Drives`（暫不可用，僅保留偏好）、`OmniSource`（全源融合瀏覽，含隨身碟 / SD 卡、自建伺服器與 djay 曲庫）、`Dual-Column Browser`（雙列瀏覽）、`Tracklist Waveform`（曲目列表波形開關，關閉後標題完整延展）",
+             "`Auto-Analyze Drives` (temporarily unavailable; preference retained), `OmniSource` (unified browsing across USB / SD, self-hosted servers and djay libraries), `Dual-Column Browser`, `Tracklist Waveform` (hide to let track title & artist expand)")],
         ] },
 
         { k: "h", id: "layout", x: L("3. 视图与布局（View / Layout Manager）", "3. 視圖與版面（View / Layout Manager）", "3. View / Layout Manager"), nav: L("3. 视图与布局", "3. 視圖與版面", "3. View / Layout") },
@@ -326,10 +329,11 @@
           L("给先锋 CDJ 导出的 Rekordbox U 盘，直接插上即可打碟：插盘 **2 秒内**读取全部歌单、Hot Cue、Memory Cue、Loop 和拍线，不必用电脑端 Engine DJ 重新导库（再次插盘约 0.03 秒）。", "給先鋒 CDJ 匯出的 Rekordbox 隨身碟，直接插上即可打碟：插碟 **2 秒內**讀取全部歌單、Hot Cue、Memory Cue、Loop 與拍線，不必用電腦端 Engine DJ 重新匯入（再次插碟約 0.03 秒）。", "A Rekordbox stick exported for Pioneer CDJs plays as is: playlists, Hot Cues, Memory Cues, loops and beat grids are read **within 2 seconds** with no Engine DJ re-import on a computer (about 0.03 s on re-insert)."),
           L("读取已分析的满高度波形；6.8.5 导出的盘即使个别文件损坏也能导入，那几首加载时再分析。", "讀取已分析的滿高度波形；6.8.5 匯出的碟即使個別檔案損壞也能匯入，那幾首載入時再分析。", "Pre-analysed full-height waveforms are used; sticks exported by 6.8.5 import even with a few corrupt files, which are analysed on load."),
           L("兼容 Windows 的 `FAT32` / `exFAT` / `NTFS` 与 Mac 的 `HFS+` / `APFS`；自动修复异常拔盘造成的数据库损坏，并去掉“未安全弹出”报错。", "相容 Windows 的 `FAT32` / `exFAT` / `NTFS` 與 Mac 的 `HFS+` / `APFS`；自動修復異常拔碟造成的資料庫損壞，並移除「未安全退出」報錯。", "Works with Windows `FAT32` / `exFAT` / `NTFS` and Mac `HFS+` / `APFS`; databases damaged by an unsafe unplug are repaired and the “not safely ejected” popup is gone."),
-          L("`自动分析插入的设备`：后台以最低优先级分析新插入 U 盘 / SD 卡上所有未分析曲目，不影响播放。", "`自動分析插入的裝置`：背景以最低優先序分析新插入隨身碟 / SD 卡上所有未分析曲目，不影響播放。", "`Analyze inserted devices`: unanalysed tracks on a newly inserted USB / SD are analysed in the background at lowest priority."),
+          L("`自动分析插入的设备`：暂不可用，仅保留偏好设置，不会自动提交分析任务。", "`自動分析插入的裝置`：暫不可用，僅保留偏好設定，不會自動提交分析工作。", "`Analyze inserted devices`: temporarily unavailable. The preference is retained; no analysis work is submitted automatically."),
         ] },
         { k: "shot", src: "assets/screenshots/4deck-sc5000-cdj3000.png", cap: L("两台 SC5000 + 一台 CDJ-3000 同一局域网联动", "兩台 SC5000 + 一台 CDJ-3000 同一區域網路聯動", "Two SC5000 + one CDJ-3000 on the same LAN") },
         { k: "h", id: "cdj", x: L("先锋 CDJ-3000 / Pro DJ Link 互联（测试版）", "先鋒 CDJ-3000 / Pro DJ Link 互聯（測試版）", "Pioneer CDJ-3000 / Pro DJ Link (beta)"), nav: L("CDJ-3000 互联（测试）", "CDJ-3000 互聯（測試）", "CDJ-3000 link (beta)") },
+        { k: "note", tone: "new", x: L("CDJ 曲目可在影子轨显示 rekordbox 已分析好的波形、拍线与 Cue，无需下载音频；没有分析数据时保留元数据显示。", "CDJ 曲目可在影子軌顯示 rekordbox 已分析好的波形、拍線與 Cue，無需下載音訊；沒有分析資料時保留中繼資料顯示。", "Shadow decks show CDJ tracks’ existing rekordbox waveforms, beat grids and cues without downloading audio; tracks without analysis keep their metadata display.") },
         { k: "ul", x: [
           L("通过局域网 / Wi-Fi 读取 CDJ 上 Rekordbox U 盘的曲库（`Pro DJ Link 曲库`）。", "透過區域網路 / Wi-Fi 讀取 CDJ 上 Rekordbox 隨身碟的曲庫（`Pro DJ Link 曲庫`）。", "Browse the Rekordbox stick in a CDJ over LAN / Wi-Fi (`Pro DJ Link library`)."),
           L("也能把本机曲库（含天龙 U 盘与 EngineX 流媒体歌单）共享给 CDJ（实验功能）。", "也能將本機曲庫（含天龍隨身碟與 EngineX 串流歌單）共享給 CDJ（實驗功能）。", "Share this deck's library (including Denon sticks and EngineX streaming playlists) to the CDJ (experimental)."),
@@ -350,6 +354,7 @@
       blocks: [
         { k: "shot", src: "site/assets/screen-4deck-shadow.svg", cap: L("两台碟机 1+3 / 2+4：本机出声的轨 + 不出声的影子轨道", "兩台碟機 1+3 / 2+4：本機出聲的軌 + 不出聲的影子軌道", "Two decks as 1+3 / 2+4: the tracks it plays + silent shadow decks") },
         { k: "h", id: "roles", x: L("四轨角色与影子轨道", "四軌角色與影子軌道", "Roles & shadow decks"), nav: L("四轨角色与影子轨道", "四軌角色與影子軌道", "Roles & shadow decks") },
+        { k: "note", tone: "new", x: L("PRIME 4 / PRIME 4+ / PRIME 4 G2、SC LIVE 4 等一体机开启 `4-Deck Waveform` 后，默认保留本机 1、2 轨，3、4 轨显示对端影子波形；没有对端的轨道仍可本机使用。", "PRIME 4 / PRIME 4+ / PRIME 4 G2、SC LIVE 4 等一體機開啟 `4-Deck Waveform` 後，預設保留本機 1、2 軌，3、4 軌顯示對端影子波形；沒有對端的軌道仍可本機使用。", "On PRIME 4 / PRIME 4+ / PRIME 4 G2, SC LIVE 4 and other consoles, enabling `4-Deck Waveform` keeps local decks 1–2 and uses decks 3–4 for remote shadow waveforms by default; a lane without a remote source remains available locally.") },
         { k: "p", x: L("SC5000 / SC6000 上解锁 Engine 自带的四轨界面，声卡仍只用 2 路。每台负责自己角色的两轨，其余是不出声的**影子轨道**，跟随另一台 EngineX 碟机或 CDJ 的曲目、播放 / CUE、位置、速度、Master 和同步。",
                         "SC5000 / SC6000 上解鎖 Engine 內建的四軌介面，音效卡仍只用 2 路。每台負責自己角色的兩軌，其餘是不出聲的**影子軌道**，跟隨另一台 EngineX 碟機或 CDJ 的曲目、播放 / CUE、位置、速度、Master 與同步。",
                         "SC5000 / SC6000 unlock Engine's own four-deck layout while the sound card still uses two channels. Each unit plays the two decks of its role; the other two are silent **shadow decks** that follow the other EngineX deck or CDJ: track, play / CUE, position, speed, Master and sync.") },
@@ -406,8 +411,8 @@
         ] },
         { k: "note", tone: "warn", x: L("Loop 转采样垫目前是实验功能（#120）：只能通过 Web 控制台 API `/v1/sc5000/sampler/loop-to-pad` 调用，还没有控制台卡片或碟机菜单，也还没有在实机上测试。", "Loop 轉取樣墊目前是實驗功能（#120）：只能透過 Web 主控台 API `/v1/sc5000/sampler/loop-to-pad` 呼叫，還沒有主控台卡片或播放機選單，也尚未在實機上測試。", "Loop to Sampler Pad is experimental (#120): it is only reachable through the web console API `/v1/sc5000/sampler/loop-to-pad`, has no console card or deck menu yet, and has not been tested on a real deck.") },
         { k: "h", id: "dsp", x: L("DSP 音质增强与先锋风格 FX", "DSP 音質增強與先鋒風格 FX", "DSP quality & Pioneer-style FX"), nav: L("DSP 音质增强", "DSP 音質增強", "DSP quality") },
+        { k: "note", tone: "new", x: L("**先锋风格 FX（#88）**：JC11 PRIME 4（Engine 5.3.0）在 FX 选择器末尾选择 `Spiral (PX)` / `Pitch Echo (PX)` / `Slip Roll (PX)` / `Dub Echo (PX)` / `Space (PX)`，按单元及分配通道生效；Parameter 可调时间、音色与反馈，Wet/Dry 可调干湿比，原厂效果继续可用。 独立的时间 / Rate 事件尚未接入，当前由 Parameter 同时映射时间；PRIME 4 实机验证待完成。JP07 SC5000 没有原生 FX 选择器，保留全局 Color FX 菜单、master 效果和保存的设置。AZ04 保留原有全局 `Color FX Style`。", "**先鋒風格 FX（#88）**：JC11 PRIME 4（Engine 5.3.0）於 FX 選擇器末尾選擇 `Spiral (PX)` / `Pitch Echo (PX)` / `Slip Roll (PX)` / `Dub Echo (PX)` / `Space (PX)`，按單元及分配通道生效；Parameter 可調時間、音色與回授，Wet/Dry 可調乾濕比，原廠效果繼續可用。 獨立的時間 / Rate 事件尚未接入，目前由 Parameter 同時映射時間；PRIME 4 實機驗證待完成。JP07 SC5000 沒有原生 FX 選擇器，保留全域 Color FX 選單、master 效果及儲存的設定。AZ04 保留原有全域 `Color FX Style`。", "**Pioneer-style FX (#88)**: on JC11 PRIME 4 (Engine 5.3.0), choose `Spiral (PX)` / `Pitch Echo (PX)` / `Slip Roll (PX)` / `Dub Echo (PX)` / `Space (PX)` in the FX selector. Parameter adjusts time, character and feedback; Wet/Dry adjusts the blend for that unit and its assigned channels. Stock FX remain available. The separate Time/Rate event is not captured yet; Parameter currently also maps time. PRIME 4 hardware validation is pending. JP07 SC5000 has no native FX selector and retains its global Color FX menu, master effects and saved setting. AZ04 retains the legacy global `Color FX Style`.") },
         { k: "ul", x: [
-          L("**先锋风格 Beat FX 与 Sound Color FX（#88）**：在 Engine 音频回调里实时模拟 **`Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo`、`Space`** 五种经典效果，以及 **`Stems EQ Mode`**（分轨 EQ 映射），可在 `个人偏好 → Playback → Color FX Style` 切换（默认关闭）。", "**先鋒風格 Beat FX 與 Sound Color FX（#88）**：於 Engine 音訊回呼中即時模擬 **`Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo`、`Space`** 五種經典效果，以及 **`Stems EQ Mode`**（分軌 EQ 映射），可於 `個人偏好 → Playback → Color FX Style` 切換（預設關閉）。", "**Pioneer-style Beat FX & Sound Color FX (#88)**: real-time audio-callback emulation of **`Spiral`, `Pitch Echo`, `Slip Roll`, `Dub Echo` and `Space`**, plus **`Stems EQ Mode`**, selectable under `User Profile → Playback → Color FX Style` (off by default)."),
           L("**切效果器零爆音**：开关 / 切换 FX 时的“咔嗒”消除，双轨同时开效果器也平滑淡入。", "**切效果器零爆音**：開關 / 切換 FX 時的「喀嗒」消除，雙軌同時開效果器也平滑淡入。", "**Click-free FX**: the click when toggling or switching FX is gone, even with FX on both decks."),
           L("**0dB 防破音软限幅**：平滑曲线把主输出压在 -0.1 dBFS 以下，零延迟，-1.5 dBFS 以下原样不动。", "**0dB 防破音軟限幅**：平滑曲線把主輸出壓在 -0.1 dBFS 以下，零延遲，-1.5 dBFS 以下原樣不動。", "**0 dB soft limiter**: a smooth curve keeps the main output below -0.1 dBFS with zero latency and leaves signals under -1.5 dBFS untouched."),
           L("**自动增益（0 dB 归一化）**：把偏小的歌平滑提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下静音不提升），之后总经过软限幅（默认关闭）。", "**自動增益（0 dB 正規化）**：把偏小的歌平滑提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下靜音不提升），之後總經過軟限幅（預設關閉）。", "**Auto-Gain (0 dB normalise)**: lifts quiet songs smoothly towards 0 dBFS (up to +9 dB, silence below -42 dBFS is not boosted) and always passes through the soft limiter (off by default)."),
@@ -466,6 +471,15 @@
           L("播放控制、切波形、切语言、在线升级、流媒体登录、Stems 等内部接口只接受碟机自己（127.0.0.1）调用，同 Wi-Fi 的人无法远程操作。", "播放控制、切波形、切語言、線上升級、串流登入、Stems 等內部介面只接受碟機自己（127.0.0.1）呼叫，同 Wi-Fi 的人無法遠端操作。", "Internal interfaces (playback, waveform, language, online update, streaming login, Stems) accept calls from the deck itself (127.0.0.1) only, so people on the same Wi-Fi cannot operate it."),
         ] },
         { k: "shot", name: "zh:07-bluetooth-audio.png", cap: L("蓝牙音频输入与播放控制", "藍牙音訊輸入與播放控制", "Bluetooth audio input and transport control") },
+      ],
+    },
+
+    {
+      id: "dmx-studio",
+      title: L("灯光扩展 Mod", "燈光擴充 Mod", "Lighting extension Mod"),
+      nav: L("灯光扩展 Mod", "燈光擴充 Mod", "Lighting Mod"),
+      blocks: [
+        { k: "p", x: L("额外灯光功能请安装 Mod 社区的 **dmx-studio** Mod。", "額外燈光功能請安裝 Mod 社群的 **dmx-studio** Mod。", "For additional lighting features, install the **dmx-studio** Mod from the Mod Hub.") },
       ],
     },
 
@@ -547,7 +561,7 @@
           { q: L("封面不显示？", "封面不顯示？", "Artwork is missing?"),
             a: L("5.3.0 的封面由 m.db 里的 20 字节哈希加 `Artwork/<base64url>.jpg` 组成；库损坏或封面文件缺失会显示空白。先在网页控制台跑「扫描」确认路径，再重新加载该盘；仍不行请附日志反馈。", "5.3.0 的封面由 m.db 中的 20 位元組雜湊加 `Artwork/<base64url>.jpg` 組成；資料庫損壞或封面檔缺失會顯示空白。先在網頁主控台執行「掃描」確認路徑，再重新載入該碟；仍不行請附日誌回報。", "In 5.3.0 artwork is a 20-byte hash in m.db plus `Artwork/<base64url>.jpg`; a damaged database or missing file shows blank. Run Scan in the web console to check paths, reload the drive, and report with logs if it persists.") },
           { q: L("Rekordbox U 盘插上后波形是空的 / 没有曲库？", "Rekordbox 隨身碟插上後波形是空的 / 沒有曲庫？", "Rekordbox stick shows empty waveforms / no library?"),
-            a: L("确认盘是用 Rekordbox 导出的（含 `PIONEER` 目录）；未分析的曲目会在加载时分析，或开启 `自动分析插入的设备` 后台分析。异常拔盘造成的损坏会自动修复，重新插一次。", "確認碟是用 Rekordbox 匯出的（含 `PIONEER` 目錄）；未分析的曲目會在載入時分析，或開啟 `自動分析插入的裝置` 背景分析。異常拔碟造成的損壞會自動修復，重新插一次。", "Make sure the stick was exported by Rekordbox (it has a `PIONEER` folder). Unanalysed tracks are analysed on load, or enable `Analyze inserted devices`. Damage from an unsafe unplug is repaired automatically; re-insert once.") },
+            a: L("确认盘是用 Rekordbox 导出的（含 `PIONEER` 目录）；未分析的曲目会在加载时分析；`自动分析插入的设备` 暂不可用。异常拔盘造成的损坏会自动修复，重新插一次。", "確認碟是用 Rekordbox 匯出的（含 `PIONEER` 目錄）；未分析的曲目會在載入時分析；`自動分析插入的裝置` 暫不可用。異常拔碟造成的損壞會自動修復，重新插一次。", "Make sure the stick was exported by Rekordbox (it has a `PIONEER` folder). Unanalysed tracks are analysed on load; `Analyze inserted devices` is temporarily unavailable. Damage from an unsafe unplug is repaired automatically; re-insert once.") },
           { q: L("丢失曲目怎么批量修复？", "遺失曲目怎麼批次修復？", "How do I fix many missing tracks?"),
             a: L("网页控制台 → 曲库丢歌：先「扫描」预览，再「一键修复路径」（会先备份 `m.db`），最后在碟机上重新加载该盘。", "網頁主控台 → 曲庫丟歌：先「掃描」預覽，再「一鍵修復路徑」（會先備份 `m.db`），最後在碟機上重新載入該碟。", "Web console → missing tracks: Scan to preview, then Fix paths (backs up `m.db` first), then reload the drive on the deck.") },
           { q: L("4 轨模式下另一台的波形卡顿或不跟随？", "4 軌模式下另一台的波形卡頓或不跟隨？", "Shadow deck stutters or does not follow in 4-deck mode?"),
