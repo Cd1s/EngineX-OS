@@ -831,8 +831,10 @@ func TestTakePeerCollisionAcrossAddresses(t *testing.T) {
 		t.Fatalf("address change duplicated or displaced a peer: %+v", sh.peerDecks)
 	}
 	sh.takePeer("192.0.2.2", []deckState{{Deck: 1, Seq: 6, Link: "b"}}, now)
-	if sh.ver != 3 {
-		t.Fatalf("duplicate update bumped version: %d", sh.ver)
+	// Two new decks bump; the move to .3 and this duplicate show nothing new
+	// (an address that changes the display key changes the header digest instead).
+	if sh.ver != 2 {
+		t.Fatalf("duplicate or address-only update bumped version: %d", sh.ver)
 	}
 	sh.takePeer("192.0.2.2", []deckState{{Deck: 3, Seq: 7, Link: "b"}}, now)
 	if len(sh.peerDecks) != 2 || sh.peerDecks[1].Link != "a" || sh.peerDecks[3].Link != "b" {

@@ -227,6 +227,7 @@ Object.assign(globalThis, {
     scShadowMineRole: "?", scShadowMine: [], scShadowSampleSpare: {}, scShadowDeckProperties: {}, scShadowOwn: [],
     scShadowPostRequest: null, scShadowPollRequest: null, scShadowResponseVersion: "", scShadowPostPending: false,
     scShadowLinkId: '', scShadowLinkAt: -Infinity, scShadowTextAt: {},
+    scShadowSent: [], scShadowFullAt: 0, scShadowPostFull: true, scShadowLive: {seen: 0},
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0},
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
@@ -438,6 +439,24 @@ requests[3].finish(200,{key:'A',detailPending:false,detail:true,beats:[]});
 now+=60000; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,4);
 """)
 
+    def test_unchanged_version_keeps_samples_alive_without_parsing(self):
+        self.js(r"""
+let header='5:true:13:false:false:ab', parsed=0;
+globalThis.scShadowPollTimer={interval:0,restart(){}};
+XMLHttpRequest.prototype.getResponseHeader=()=>header;
+const realParse=JSON.parse; JSON.parse=s=>{parsed++;return realParse(s)};
+scShadowPoll();requests[0].finish(200,{role:'13',displayOnly:true,ver:5,decks:[{deck:2,key:'A',playing:true,positionMs:1000,at:now}]});
+assert.equal(parsed,1); const s=scShadowData(2);
+now+=10000;
+for(let i=0;i<5;i++){scShadowPoll();requests[0].responseText='{"never":"read"}';requests[0].finish(200,{});} // finish stringifies; the QML must not parse
+assert.equal(parsed,1,'an unchanged version was parsed');
+assert.equal(scShadowLive.seen,now);
+assert.equal(scShadowPosition(s,now),11000); // carried on 10 s: stream-sync vouches for it
+now+=4000;
+assert.equal(scShadowPosition(s,now),14000); // 3 s after the last confirmation it stops
+JSON.parse=realParse;
+""")
+
     def test_shadow_layer_moves_only_on_the_render_thread(self):
         layer = bp.SHADOW_LAYER
         # Hidden stock lanes must not follow the shadow state at all.
@@ -489,11 +508,14 @@ assert.equal(requests.length,0);
 
     def test_sampling_reuses_buffers_and_post_transport(self):
         self.js(r"""
-let created=0;
+let created=0, full=0, pings=0;
 globalThis.XMLHttpRequest=class {
     constructor(){created++;this.readyState=0;}
-    open(method,url){assert.equal(method,'POST');this.readyState=1;}
-    send(body){assert.equal(JSON.parse(body).length,2);this.readyState=4;}
+    open(method,url){assert.equal(method,'POST');this.url=url;this.readyState=1;}
+    send(body){
+        if(this.url.endsWith('/decks/alive')){assert.equal(body,undefined);pings++}
+        else{assert(this.url.endsWith('/decks'));assert.equal(JSON.parse(body).length,2);full++}
+        this.readyState=4;this.status=this.url.endsWith('/alive')?204:200;if(this.onreadystatechange)this.onreadystatechange();}
 };
 globalThis.scShadowPoll=()=>{};
 let strings=0;
@@ -509,6 +531,35 @@ assert.equal(created,1);
 // (600 JS strings); only changes and the slow refresh re-read them now.
 assert(strings < 120, 'string reads ' + strings);
 assert.equal(scShadowPrev[1].net, 'file:///a.mp3');
+// 4 s of unchanged paused decks: one full post, then pings only (no JSON).
+assert.equal(full, 1); assert(pings >= 7 && pings <= 9, 'pings ' + pings);
+for(let i=0;i<30;i++){now+=40;scShadowTick();}
+assert.equal(full, 2); // at least one full post every 5 s
+scShadowPostRequest.status=409; scShadowPostRequest.onreadystatechange(); // stream-sync lost our decks
+now+=520;scShadowTick(); assert.equal(full, 3);
+""")
+
+    def test_sender_posts_changes_and_pings_steady_playback(self):
+        self.js(r"""
+let bodies=[], pings=0, pos=0, playing=false, cueName='A';
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(this.url.endsWith('/alive'))pings++;else bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+globalThis.scTr=path=>({
+    get value(){return path.endsWith('/SampleRate')?48000:path.endsWith('QuickCue1Position')?96000:0},
+    get unnormalized(){return path.endsWith('/TrackPosition')?pos:path.endsWith('BPM')?120:0},
+    get state(){return path.endsWith('/SongLoaded')||path.endsWith('QuickCue1Exists')||(path.endsWith('/PlayState')&&playing)},
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':path.endsWith('QuickCue1Name')?cueName:''}, color:'#ffffff'});
+const tick=ms=>{for(let t=0;t<ms;t+=40){now+=40;if(playing)pos+=40*48;scShadowTick();}};
+tick(1000); const n0=bodies.length; assert.equal(n0,1);
+playing=true; tick(40); assert.equal(bodies.length,2); assert.equal(bodies[1][0].playing,true); // play edge at once
+tick(4000); assert.equal(bodies.length,2,'steady playback must only ping'); assert(pings>=8);
+pos+=48*200; tick(40); assert.equal(bodies.length,3); // a 200 ms slip: full post
+cueName='DROP'; tick(2600); assert.equal(bodies.length,4); assert.equal(bodies[3][0].cues[0].n,'DROP'); // a renamed cue
 """)
 
     def test_safe_gc_only_when_nothing_plays(self):
