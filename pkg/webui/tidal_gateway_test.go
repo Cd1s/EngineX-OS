@@ -379,6 +379,7 @@ func TestSearchAnswersLaterPagesWithoutAskingProviders(t *testing.T) {
 	}))
 	defer deezer.Close()
 	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: t.TempDir(), DeezerURL: deezer.URL}, nil)
+	ui.sessions["deezer-search"] = &Session{ID: "deezer-search", Provider: "deezer", Ready: true, p: ui.tidal.catalog}
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	var first struct{ Tracks tidalList }

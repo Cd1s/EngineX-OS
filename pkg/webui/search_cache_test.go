@@ -82,10 +82,10 @@ func TestSearchHungSourceKeepsOtherResultsAndOrder(t *testing.T) {
 	if elapsed := time.Since(started); elapsed < searchTimeout || elapsed > searchTimeout+time.Second {
 		t.Fatalf("unexpected deadline: %s", elapsed)
 	}
+	t.Logf("hung source response: %s", time.Since(started))
 	var result struct {
 		Tracks, Playlists struct {
 			Items []struct {
-				Item  struct{ Title string }
 				Title string
 			}
 		}
@@ -95,7 +95,7 @@ func TestSearchHungSourceKeepsOtherResultsAndOrder(t *testing.T) {
 	}
 	var tracks, lists []string
 	for _, v := range result.Tracks.Items {
-		tracks = append(tracks, v.Item.Title)
+		tracks = append(tracks, v.Title)
 	}
 	for _, v := range result.Playlists.Items {
 		lists = append(lists, v.Title)
@@ -105,6 +105,7 @@ func TestSearchHungSourceKeepsOtherResultsAndOrder(t *testing.T) {
 	}
 	started = time.Now()
 	w = searchResponse(s, context.Background())
+	t.Logf("warm search response: %s", time.Since(started))
 	if time.Since(started) > time.Second || first.calls.Load() != 1 || second.calls.Load() != 1 || slow.calls.Load() != 1 {
 		t.Fatalf("repeat search missed cache/backoff: %s", w.Body.String())
 	}
