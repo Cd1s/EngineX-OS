@@ -513,7 +513,7 @@ SERVICES_MAIN = """
 	// by the displays) instead of re-running every shadow binding per reply.
 	function scShadowSameSample(s, key, e) {
 		if (s.key !== key || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.playing !== !!e.playing ||
-			s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.pitch !== (Number(e.pitch) || 0) ||
+			s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
 			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail) return false
 		if (Array.isArray(e.cues)) {
@@ -4538,15 +4538,13 @@ def edits(dev: bool):
             ("                id: albumArt\n",
              "                id: albumArt\n" + art_retry("                ", "microDeck.deckIndex", "microDeck.loadedDeckAlbumArtPath", "albumArt")),
             ("                source: microDeck.loadedDeckAlbumArtPath\n",
-             f"                source: {GUARD} ? root.scDeckArtUrl(microDeck.deckIndex, microDeck.loadedDeckAlbumArtPath, albumArt.scArtTick, microDeck.loadedDeckSongName) : microDeck.loadedDeckAlbumArtPath\n"),
-            ('                text: "Line In"\n',
-             '                text: (typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(microDeck.deckIndex) && root.scShadowData(microDeck.deckIndex)) ? (microDeck.deckIndex + " · " + (root.scShadowData(microDeck.deckIndex).title || "Track")) : "Line In"\n')]
+             f"                source: {GUARD} ? root.scDeckArtUrl(microDeck.deckIndex, microDeck.loadedDeckAlbumArtPath, albumArt.scArtTick, microDeck.loadedDeckSongName) : microDeck.loadedDeckAlbumArtPath\n")]
         scaled["Skins/EngineOS/UI/CompositeControls/Waveform/Waveform.qml"] = [(
             "                visible: lockedDeckHint.active\n",
             '                visible: lockedDeckHint.active && !(typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(waveform.deckIndex))\n')]
         scaled[ROOT + "Views/Common/Waveform/WaveformLineInHint.qml"] = [(
             "    visible: deckIndex >= 1 && pLine.translator && pLine.translator.state\n",
-            '    visible: deckIndex >= 1 && pLine.translator && pLine.translator.state && !(typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(deckIndex))\n')]
+            '    visible: deckIndex >= 1 && pLine.translator && pLine.translator.state && !(typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(deckIndex) && root.scShadowData(deckIndex).lineIn)\n')]
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml"] = [(
             "        source: albumArt.albumArtPath\n",
             art_source("        ", "albumArt.deckIndex", "albumArt.albumArtPath", "albumArt.deckView && albumArt.deckView.artistSongView ? albumArt.deckView.artistSongView.songName : \"\"", "scArtImage", add_id=True))]
