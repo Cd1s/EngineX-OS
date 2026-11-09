@@ -86,7 +86,7 @@ type options struct {
 	HTTP                          *http.Client
 	Fastboot                      string // fastboot binary
 	Packer                        string
-	AirDAddr                      string        // StageLinQ listen address
+	AirDAddr, EAASAddr            string        // StageLinQ and EAAS UDP listen addresses
 	AirDWait                      time.Duration // how long to listen
 	Subnets                       []string      // "192.168.1" prefixes to scan; nil = this machine's /24s
 	UIPort, SSHPort               int
@@ -117,8 +117,11 @@ func (o *options) defaults() {
 	if o.AirDAddr == "" {
 		o.AirDAddr = ":51337"
 	}
+	if o.EAASAddr == "" {
+		o.EAASAddr = ":11224"
+	}
 	if o.AirDWait == 0 {
-		o.AirDWait = 1500 * time.Millisecond
+		o.AirDWait = 3500 * time.Millisecond
 	}
 	if o.UIPort == 0 {
 		o.UIPort = 8080
@@ -277,6 +280,23 @@ func parseAirD(b []byte) (a announce, err error) {
 type deck struct {
 	IP, Name, Board  string
 	Announced, Known bool // Known: a deck we can act on (its board code is ours, or it answers like EngineX)
+	FromEAAS         bool // unauthenticated discovery hint; never a board identity
+}
+
+func isLocalIP(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok {
+			if n.IP.Equal(parsed) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // listenAirD collects the decks that announce themselves for o.AirDWait.
@@ -300,6 +320,44 @@ func listenAirD(o *options) map[string]announce {
 			continue
 		}
 		found[from.(*net.UDPAddr).IP.String()] = a
+	}
+}
+
+// isEAAS accepts only the six-byte beacon captured on the Mixstream Pro+ (#164).
+// It carries no model or authentication information.
+func isEAAS(b []byte) bool {
+	return len(b) == 6 && string(b) == "EAAS\x01\x00"
+}
+
+// listenEAAS collects candidate IPs, not verified decks or model identities.
+func listenEAAS(o *options) map[string]bool {
+	found := map[string]bool{}
+	addr, err := net.ResolveUDPAddr("udp4", o.EAASAddr)
+	if err != nil {
+		return found
+	}
+	pc, err := net.ListenUDP("udp4", addr)
+	if err != nil {
+		o.say("无法监听 EAAS 端口（"+err.Error()+"），只用 StageLinQ 与扫描。", "Cannot listen for EAAS ("+err.Error()+"); scanning only.")
+		return found
+	}
+	defer pc.Close()
+	pc.SetReadDeadline(time.Now().Add(o.AirDWait))
+	// Hold any UDP datagram: Windows reports WSAEMSGSIZE on truncation, which
+	// would otherwise stop discovery when unrelated larger broadcasts arrive.
+	buf := make([]byte, 65535)
+	for {
+		n, from, err := pc.ReadFromUDP(buf)
+		if err != nil {
+			return found
+		}
+		if isEAAS(buf[:n]) {
+			ip := from.IP.String()
+			// Bound memory even if many spoofed source addresses send valid beacons.
+			if len(found) < 256 && !from.IP.IsUnspecified() && !from.IP.IsMulticast() && !isLocalIP(ip) {
+				found[ip] = true
+			}
+		}
 	}
 }
 
@@ -378,7 +436,7 @@ func discover(ctx context.Context, o *options) []deck {
 		return byIP[ip]
 	}
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		for ip, a := range listenAirD(o) {
@@ -387,6 +445,19 @@ func discover(ctx context.Context, o *options) []deck {
 			d.Announced, d.Name = true, a.Source
 			if _, _, ok := lookupBoard(a.Software); ok { // decks announce their board code as the software name
 				d.Board, d.Known = boardCode(a.Software), true
+			}
+			mu.Unlock()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for ip := range listenEAAS(o) {
+			mu.Lock()
+			d := get(ip)
+			d.Announced = true
+			d.FromEAAS = true
+			if d.Name == "" {
+				d.Name = "Unverified EAAS device"
 			}
 			mu.Unlock()
 		}
@@ -702,6 +773,11 @@ func parseCompatible(out string) (code string, m model, gen2, ok bool) {
 
 func modeA(ctx context.Context, o *options, d deck) error {
 	label := fmt.Sprintf("%s (%s)", d.Name, d.IP)
+	// An EAAS beacon does not prove this is a deck. Even a matching HTTP response
+	// must not upgrade this hint into permission to send SSH credentials (#164).
+	if d.FromEAAS && d.Board == "" {
+		return modeAB(ctx, o, d)
+	}
 	cl, err := dialSSH(o, d.IP)
 	if err != nil {
 		if isAuthErr(err) {
@@ -936,7 +1012,12 @@ func IsRockchipUSBLoader(line string) bool {
 
 // gen2USB is the USB id each 2nd-gen U-Boot DTB sets (inmusic,usb-vendor/-product); Engine keeps the
 // same id in normal operation, where RattyDAVE's PRIME 4+ showed 15e4:d007 (#129).
-var gen2USB = map[string]string{"15e4:d007": "jc11s", "15e4:c00c": "jp11s", "15e4:d011": "jp20", "15e4:d012": "jp21"}
+// Mixstream Pro+ uses 15e4:103f (computer mode) and 15e4:303f (firmware update mode),
+// both captured on NH08S in #164. Do not infer NH10's ID from those values.
+var gen2USB = map[string]string{
+	"15e4:d007": "jc11s", "15e4:c00c": "jp11s", "15e4:d011": "jp20", "15e4:d012": "jp21",
+	"15e4:103f": "nh08s", "15e4:303f": "nh08s",
+}
 
 // gen1USB is the usb_devices table of the official 5.3.0 1st-gen images, in their compatible order.
 // Their fastboot has no "getvar product" ("Variable not implemented" on an SC5000), so modeB
@@ -948,8 +1029,8 @@ var gen1USB = map[string]string{
 
 var vidPID = regexp.MustCompile(`(?i)\b[0-9a-f]{4}:[0-9a-f]{4}\b`)
 
-// usbDeck returns the board and host USB line of the first deck from ids on the bus. The id may sit
-// anywhere in the line: Windows lines read "Instance ID: USB\15E4:D006\...".
+// usbDeck returns the board and host USB line of the first deck from ids on the bus.
+// The first VID:PID on the line identifies the device, so product names cannot impersonate a deck.
 func usbDeck(ctx context.Context, o *options, ids map[string]string) (board, line string) {
 	for _, l := range strings.Split(o.ListUSB(ctx), "\n") {
 		// The first VID:PID identifies the device; later IDs may be part of its name.
@@ -963,19 +1044,20 @@ func usbDeck(ctx context.Context, o *options, ids map[string]string) (board, lin
 }
 
 // isDeckUSB reports whether a host USB line looks like a 2nd-gen deck in an update mode (#129):
-// a Rockchip loader, Rockchip / Google fastboot ids, or inMusic / PRIME 4 / SC LIVE product names.
+// a Rockchip loader, Rockchip / Google fastboot ids, or inMusic / PRIME 4 / SC LIVE / Mixstream product names.
 func isDeckUSB(line string) bool {
 	lower := strings.ToLower(line)
 	id := vidPID.FindString(lower)
 	return IsRockchipUSBLoader(lower) || gen2USB[id] != "" || id == "2207:0006" || id == "18d1:4ee0" ||
-		strings.Contains(lower, "inmusic") || strings.Contains(lower, "prime 4") || strings.Contains(lower, "sc live")
+		strings.Contains(lower, "inmusic") || strings.Contains(lower, "prime 4") || strings.Contains(lower, "sc live") || strings.Contains(lower, "mixstream")
 }
 
 var (
-	winVIDPID = regexp.MustCompile(`(?i)VID_([0-9a-f]{4})&PID_([0-9a-f]{4})`)
-	descKeyRE = regexp.MustCompile(`(?i)(description|opis|beschreibung|descrip|descriz|описание|描述|説明|설명)`)
-	macVID    = regexp.MustCompile(`"idVendor" = (\d+)`)
-	macPID    = regexp.MustCompile(`"idProduct" = (\d+)`)
+	pnpBlockRE = regexp.MustCompile(`\n[ \t]*\n`)
+	winVIDPID  = regexp.MustCompile(`(?i)VID_([0-9a-f]{4})&PID_([0-9a-f]{4})`)
+	descKeyRE  = regexp.MustCompile(`(?i)(description|opis|beschreibung|descrip|descriz|описание|描述|説明|설명)`)
+	macVID     = regexp.MustCompile(`"idVendor" = (\d+)`)
+	macPID     = regexp.MustCompile(`"idProduct" = (\d+)`)
 )
 
 // hostUSB lists the host's USB devices as "vid:pid name" lines, best effort.
@@ -1004,22 +1086,23 @@ func hostUSB(ctx context.Context) string {
 // VID_xxxx&PID_yyyy and the device description from following lines in the device block.
 func parsePnPUtil(out string) string {
 	var b strings.Builder
-	lines := strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n")
-	for i := 0; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
-		m := winVIDPID.FindStringSubmatch(line)
+	// pnputil emits one blank-line-separated block per device, with its instance
+	// path first. Only that path can identify the device; descriptions and other
+	// fields may themselves contain VID/PID text supplied by an unrelated device.
+	for _, block := range pnpBlockRE.Split(strings.TrimSpace(strings.ReplaceAll(out, "\r\n", "\n")), -1) {
+		lines := strings.Split(strings.TrimSpace(block), "\n")
+		_, instance, ok := strings.Cut(strings.TrimSpace(lines[0]), ":")
+		instance = strings.TrimSpace(instance)
+		if !ok || !strings.HasPrefix(strings.ToUpper(instance), `USB\VID_`) {
+			continue
+		}
+		m := winVIDPID.FindStringSubmatch(instance)
 		if m == nil {
 			continue
 		}
-		vid, pid := strings.ToLower(m[1]), strings.ToLower(m[2])
-		desc := ""
-		// Look for the device description in the lines of the same block
-		for j := i + 1; j < len(lines); j++ {
-			next := strings.TrimSpace(lines[j])
-			if next == "" || winVIDPID.MatchString(next) {
-				break
-			}
-			key, val, ok := strings.Cut(next, ":")
+		desc, fallback := "", ""
+		for _, line := range lines[1:] {
+			key, val, ok := strings.Cut(strings.TrimSpace(line), ":")
 			if !ok {
 				continue
 			}
@@ -1034,14 +1117,18 @@ func parsePnPUtil(out string) string {
 				desc = val
 				break
 			}
-			if desc == "" {
-				desc = val
+			if fallback == "" {
+				fallback = val
 			}
 		}
+		if desc == "" {
+			desc = fallback
+		}
+		id := strings.ToLower(m[1] + ":" + m[2])
 		if desc != "" {
-			fmt.Fprintf(&b, "%s:%s %s\n", vid, pid, desc)
+			fmt.Fprintf(&b, "%s %s\n", id, desc)
 		} else {
-			fmt.Fprintf(&b, "%s:%s\n", vid, pid)
+			fmt.Fprintln(&b, id)
 		}
 	}
 	return b.String()
@@ -1080,13 +1167,13 @@ func diagnoseUSB(ctx context.Context, o *options) {
 			"The deck is on USB ("+dev+") in the Rockchip Loader (rkdeveloptool) mode, not fastboot: reboot it and pick Firmware Update Mode under Settings → Update.")
 		return
 	}
-	// 2nd-gen decks keep the same id in normal use and in Firmware Update Mode, so the id alone can't tell which (#129).
-	zh, en := "碟机已通过 USB 连接（"+dev+"），但 fastboot 还看不到它（二代机正常开机和 Firmware Update Mode 下都是这个 ID）。如果碟机屏幕还在主界面，请点 Settings → Update → Firmware Update Mode (Reboot)，USB 线保持连接；",
-		"The deck is on USB ("+dev+") but fastboot cannot see it yet (2nd-gen decks have this id both in normal use and in Firmware Update Mode). If the deck still shows its main screen, tap Settings → Update → Firmware Update Mode (Reboot) and keep the cable in;"
+	// USB enumeration does not prove the fastboot protocol is available (#129, #164).
+	zh, en := "碟机已通过 USB 连接（"+dev+"），但 fastboot 还看不到它（USB 识别不代表 fastboot 协议可用）。如果碟机屏幕还在主界面，请点 Settings → Update → Firmware Update Mode (Reboot)，USB 线保持连接；",
+		"The deck is on USB ("+dev+") but fastboot cannot see it yet (USB enumeration does not prove fastboot is available). If the deck still shows its main screen, tap Settings → Update → Firmware Update Mode (Reboot) and keep the cable in;"
 	switch {
 	case goos == "windows":
-		zh += "如果碟机屏幕已经处于 Firmware Update Mode，说明缺少 fastboot 驱动：打开 Zadig（https://zadig.akeo.ie），Options → List All Devices，选中碟机（如 Denon DJ SC LIVE 4 Update 或 Android Fastboot，USB ID 15e4:...），安装 WinUSB 驱动。"
-		en += " if it already shows Firmware Update Mode, the fastboot driver is missing: open Zadig (https://zadig.akeo.ie), Options → List All Devices, pick the deck (e.g. Denon DJ SC LIVE 4 Update or Android Fastboot, USB ID 15e4:...), install WinUSB."
+		zh += "如果已处于 Firmware Update Mode，请先检查 USB 线、fastboot 版本与驱动绑定。Mixstream Pro+ 15e4:303f 可自动绑定 WinUSB；已绑定时无需 Zadig。仅在更新接口缺少 WinUSB 时，用 Zadig（https://zadig.akeo.ie）选择对应的碟机更新接口（如 Denon DJ SC LIVE 4 Update 或 Android Fastboot）安装 WinUSB，不要替换音频、MIDI 或 Screen 接口驱动。"
+		en += " if it already shows Firmware Update Mode, check the USB cable, fastboot version and driver binding. Mixstream Pro+ 15e4:303f can bind WinUSB automatically; Zadig is unnecessary when it is already bound. Only if the update interface lacks WinUSB, use Zadig (https://zadig.akeo.ie) to select that update interface (e.g. Denon DJ SC LIVE 4 Update or Android Fastboot) and install WinUSB. Do not replace audio, MIDI or Screen interface drivers."
 	case goos == "linux" && geteuid() != 0:
 		zh += "如果碟机屏幕已经处于 Firmware Update Mode，请用 sudo 运行本工具，或添加 udev 规则：\n  " + udevHint
 		en += " if it already shows Firmware Update Mode, run this tool with sudo or add a udev rule:\n  " + udevHint
@@ -1097,20 +1184,20 @@ func diagnoseUSB(ctx context.Context, o *options) {
 	o.hint("usb", zh, en)
 }
 
-// firewallHint: decks announce themselves by UDP broadcast to port 51337, which host firewalls
-// (ufw, Windows Defender) drop by default (#129).
+// firewallHint: decks announce themselves by UDP broadcast to port 51337 or 11224, which host firewalls
+// (ufw, Windows Defender) drop by default (#129, #164).
 func firewallHint(o *options) {
 	var how string
 	switch goos {
 	case "windows":
-		how = `netsh advfirewall firewall add rule name="EngineX StageLinQ" dir=in action=allow protocol=UDP localport=51337`
+		how = `netsh advfirewall firewall add rule name="EngineX StageLinQ" dir=in action=allow protocol=UDP localport=51337 && netsh advfirewall firewall add rule name="EngineX EAAS" dir=in action=allow protocol=UDP localport=11224`
 	case "darwin":
 		how = "System Settings → Network → Firewall: allow enginex-installer"
 	default:
-		how = "sudo ufw allow 51337/udp   (firewalld: sudo firewall-cmd --add-port=51337/udp)"
+		how = "sudo ufw allow 51337/udp && sudo ufw allow 11224/udp   (firewalld: sudo firewall-cmd --add-port=51337/udp --add-port=11224/udp)"
 	}
-	o.say("局域网里没有碟机应答。如果电脑开着防火墙，请放行 UDP 51337（StageLinQ）后重试：\n  "+how+"\n  原厂未解锁的二代机也可以直接用 USB 线连接后再运行本工具。",
-		"No deck answered on the LAN. If this computer runs a firewall, allow UDP 51337 (StageLinQ) and try again:\n  "+how+"\n  A stock 2nd-gen deck can also be connected with the USB cable before running this tool.")
+	o.say("局域网里没有碟机应答。如果电脑开着防火墙，请放行 UDP 51337（StageLinQ）与 11224（EAAS）后重试：\n  "+how+"\n  原厂未解锁的二代机（如 Mixstream Pro+、SC LIVE 系列）也可以直接进入 Firmware Update Mode 并用 USB 线连接后再运行本工具。",
+		"No deck answered on the LAN. If this computer runs a firewall, allow UDP 51337 (StageLinQ) and 11224 (EAAS) and try again:\n  "+how+"\n  A stock 2nd-gen deck (e.g. Mixstream Pro+, SC LIVE) can also be booted into Firmware Update Mode and connected via USB before running this tool.")
 }
 
 // modeAB: a stock deck is on the LAN but has no SSH. Ask the user to put it in fastboot and wait.
@@ -1132,8 +1219,13 @@ func modeAB(ctx context.Context, o *options, d deck) error {
 	if m, _, ok := lookupBoard(d.Board); ok {
 		model = " [" + m.Name + "]"
 	}
-	o.say(fmt.Sprintf("已自动发现你的碟机 %s%s，当前处于原厂未解锁状态。\n  请在碟机屏幕点击 Settings → About / Update → Firmware Update Mode (Reboot)，并用 USB 线连接电脑。程序正在自动等待 USB 连接…", label, model),
-		fmt.Sprintf("Found your deck %s%s, still locked. On the deck tap Settings → About / Update → Firmware Update Mode (Reboot), then connect USB. Waiting for fastboot...", label, model))
+	if d.FromEAAS && d.Board == "" {
+		o.say("收到来自 "+d.IP+" 的 EAAS 广播，尚不能确认设备型号。如果这是你的碟机，请在碟机上进入 Firmware Update Mode 并连接 USB；将通过 fastboot 确认型号。",
+			"Received an unverified EAAS beacon from "+d.IP+"; its model is unknown. If this is your deck, enter Firmware Update Mode on the deck and connect USB; fastboot must identify the model.")
+	} else {
+		o.say(fmt.Sprintf("已自动发现你的碟机 %s%s，当前处于原厂未解锁状态。\n  请在碟机屏幕点击 Settings → About / Update → Firmware Update Mode (Reboot)，并用 USB 线连接电脑。程序正在自动等待 USB 连接…", label, model),
+			fmt.Sprintf("Found your deck %s%s, still locked. On the deck tap Settings → About / Update → Firmware Update Mode (Reboot), then connect USB. Waiting for fastboot...", label, model))
+	}
 	deadline := time.Now().Add(o.WaitUSB)
 	for {
 		if len(fastbootDevices(ctx, o)) > 0 {
@@ -1546,8 +1638,13 @@ func run(ctx context.Context, o *options) error {
 	o.say("正在局域网中寻找碟机…", "Looking for decks on the LAN...")
 	var errs []error
 	n := 0
+	var eaas []deck
 	for _, d := range discover(ctx, o) {
-		if !d.Known {
+		if d.FromEAAS && d.Board == "" {
+			eaas = append(eaas, d)
+			continue
+		}
+		if !d.Known && !d.FromEAAS {
 			o.say("跳过非碟机的 StageLinQ 设备 "+d.Name+" ("+d.IP+")", "Skipping StageLinQ device "+d.Name+" ("+d.IP+")")
 			continue
 		}
@@ -1559,6 +1656,11 @@ func run(ctx context.Context, o *options) error {
 	if n == 0 {
 		if board, line := usbDeck(ctx, o, gen2USB); board != "" { // a stock 2nd-gen deck on USB, in any mode: wait for it to reboot into fastboot
 			return modeAB(ctx, o, deck{Name: line, Board: board})
+		}
+		// Every unverified candidate shares the same host USB bus. Wait once,
+		// rather than giving each unauthenticated IP its own full USB timeout.
+		if len(eaas) > 0 {
+			return modeAB(ctx, o, eaas[0])
 		}
 		diagnoseUSB(ctx, o)
 		firewallHint(o)
