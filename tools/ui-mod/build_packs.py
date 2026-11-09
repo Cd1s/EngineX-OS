@@ -86,23 +86,12 @@ SERVICES_MAIN = """
 	property string scJog: "static"
 	property bool scMasterLimiter: false // #58, applied by engine_ui_hook.c
 	property bool scAutoGain: false // #64, applied by engine_ui_hook.c
-	// #55: once a drive is in, Engine's own analysis queue takes every unanalysed
-	// track (rb-bridge's quick imports included). Its OfflineAnalyzer processes and
-	// queue threads run at idle priority (engine_ui_hook.c), so playback keeps priority.
+	// #55: retain the saved preference, but fail closed until a bounded native
+	// per-track adapter is verified. See AUTO_ANALYZE.md. No drive/toggle handler
+	// may submit a whole-library scan or guess an ITrackDataPtr payload.
 	property bool scAutoAnalyze: false
+	readonly property bool scAutoAnalyzeAvailable: false
 	property bool scOmniSource: false // #62, served by the streaming gateway
-	readonly property var scDrives: Planck.librarianController.devicesController.deviceModelCountObserver
-	readonly property int scDriveCount: scDrives ? scDrives.count : 0
-	onScDriveCountChanged: scAutoAnalyzeTimer.restart()
-	onScAutoAnalyzeChanged: scAutoAnalyzeTimer.restart()
-	Timer {
-		id: scAutoAnalyzeTimer
-		interval: 15000 // after rb-bridge and Engine have attached the drive's library
-		onTriggered: {
-			const p = Planck.getProperty("/Client/Librarian/Analyzer/AnalyzeUnanalyzed")
-			if (root.scAutoAnalyze && root.scDriveCount > 0 && p && p.translator) p.translator.state = true
-		}
-	}
 	property bool scProlinkShare: false // #59, read by rb-bridge
 	property bool scProlinkExport: false // #63, experimental export to CDJs
 	// #49: the decks this player owns in the 4-deck layout ("13", "24", "12", "1", "2";
@@ -2103,7 +2092,7 @@ TRACKLIST_WAVEFORM_ENTRY = """
 
 LIBRARY_ENTRIES = """
 		EntryBase.ListEntry {
-			text: "Auto-Analyze Drives"
+			text: "Auto-Analyze Drives (Unavailable)"
 			values: ["Off", "On"]
 			currentValue: values[root.scAutoAnalyze ? 1 : 0]
 			onSelected: function(index) { root.scCall("autoAnalyze=" + index) }

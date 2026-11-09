@@ -69,9 +69,9 @@ Item {
         } else {
             console.warn("SCPROBE ccsize|none|" + !!main + "|" + !!drawer + "|")
         }
-        // #55: the pack's toggle, and the Engine preference it drives.
-        const aa = Planck.getProperty("/Client/Preferences/AutoAnalysis")
-        console.warn("SCPROBE analyze|" + (main ? typeof main.scAutoAnalyze : "none") + "|" + (aa && aa.translator ? 1 : 0) + "|")
+        // #55: the preference survives, but automatic submission is unavailable.
+        // A native property merely existing does not prove a safe queue adapter.
+        console.warn("SCPROBE analyze|" + (main ? typeof main.scAutoAnalyze : "none") + "|" + (main ? main.scAutoAnalyzeAvailable : "none") + "|")
     }
 
     // A whole-tree walk takes 20-35 s under qemu: find the section once, then only poll it.

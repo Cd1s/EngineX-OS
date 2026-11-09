@@ -6,9 +6,9 @@ int hook_test_engine;
 #include <assert.h>
 
 static void test_thread_policy(void) {
-    const char *jobs[] = {"J:I:Takingfreez", "J:N:Searching o", "J:I:Collecting", "Taking freeze", "Collecting anal"};
+    const char *jobs[] = {"J:I:Takingfreez", "J:N:Searching o", "J:I:Collecting", "Taking freeze", "Collecting anal", "Freeze Checker "};
     for (size_t i = 0; i < sizeof jobs / sizeof *jobs; i++) assert(thread_class(jobs[i]) == 0);
-    assert(thread_class("Freeze Checker ") == 2);
+    assert(thread_class("Freeze Checker ") == 0);
     assert(thread_class("Analysis Queue ") == 2);
     assert(thread_class("OfflineAnalyzer") == 2);
     assert(thread_class("QQuickPixmapRea") == 1);

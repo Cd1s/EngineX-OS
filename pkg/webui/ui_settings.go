@@ -58,8 +58,8 @@ type uiSettings struct {
 	Jog         string  `json:"jog"`
 	NeteaseMode string  `json:"neteaseMode"`
 	Playhead    float64 `json:"playhead"`
-	// AutoAnalyze has the UI pack start Engine's own analysis of every
-	// unanalysed track whenever a drive is inserted (#55). Off by default.
+	// AutoAnalyze retains the user's preference (#55). The UI pack currently
+	// fails closed: no automatic analysis until a bounded native adapter is verified.
 	AutoAnalyze bool `json:"autoAnalyze"`
 	// MasterLimiter turns on the soft clipper / peak limiter engine_ui_hook.c
 	// applies to Engine's audio output (#58). Off by default.
