@@ -1040,10 +1040,12 @@ func IsRockchipUSBLoader(line string) bool {
 // gen2USB is the USB id each 2nd-gen U-Boot DTB sets (inmusic,usb-vendor/-product); Engine keeps the
 // same id in normal operation, where RattyDAVE's PRIME 4+ showed 15e4:d007 (#129).
 // Mixstream Pro+ uses 15e4:103f (computer mode) and 15e4:303f (firmware update mode),
-// both captured on NH08S in #164. Do not infer NH10's ID from those values.
+// both captured on NH08S in #164. The official 5.3.0 Mixstream image that both NH08S and NH10
+// accept lists usb_devices 15e4:303f and 15e4:2059, so 2059 is taken as NH10's update-mode id
+// (not yet seen on a real NH10; modeB still reads the model from fastboot before flashing).
 var gen2USB = map[string]string{
 	"15e4:d007": "jc11s", "15e4:c00c": "jp11s", "15e4:d011": "jp20", "15e4:d012": "jp21",
-	"15e4:103f": "nh08s", "15e4:303f": "nh08s",
+	"15e4:103f": "nh08s", "15e4:303f": "nh08s", "15e4:2059": "nh10",
 }
 
 // gen1USB is the usb_devices table of the official 5.3.0 1st-gen images, in their compatible order.
