@@ -1293,6 +1293,92 @@ func dataPartition(ctx context.Context, o *options) (string, int64) {
 	return "userdata", 0
 }
 
+// JC11S stock 5.3.0 mounts the GPT entry named data, UUID
+// 931ad49d-ad59-0849-833a-9bf00af5b60e. Its U-Boot exposes size/type,
+// but not partition UUID. Never fall back to an unrelated userdata entry.
+func jc11sDataPartition(ctx context.Context, o *options) (int64, error) {
+	out, err := fb(ctx, o, "getvar", "partition-size:data")
+	m := regexp.MustCompile(`(?m)^(?:\(bootloader\) )?partition-size:data:\s*(0x[0-9a-fA-F]+|\d+)\s*$`).FindStringSubmatch(out)
+	var size int64
+	if err == nil && m != nil {
+		size, _ = strconv.ParseInt(m[1], 0, 64)
+	}
+	if size <= 0 {
+		return 0, errors.New("JC11S: cannot verify the stock data partition size; refusing userdata fallback, nothing flashed")
+	}
+	out, err = fb(ctx, o, "getvar", "partition-type:data")
+	if err != nil || !regexp.MustCompile(`(?m)^(?:\(bootloader\) )?partition-type:data:\s*ext4\s*$`).MatchString(out) {
+		return 0, errors.New("JC11S: expected partition-type:data: ext4; target not verified, nothing flashed")
+	}
+	return size, nil
+}
+
+// debugfs can return success after failed writes. Check the activation chain,
+// including the legacy path ALSA loads, even with an older bundle's injector.
+func verifyJC11SImage(ctx context.Context, img string, b *bundleInfo, size int64) error {
+	fi, err := os.Stat(img)
+	if err != nil {
+		return err
+	}
+	if fi.Size() > size {
+		return errors.New("JC11S: image exceeds the verified data partition; nothing flashed")
+	}
+	for _, path := range []string{"/enginex/version.txt", "/enginex/bundle/version.txt"} {
+		out, err := exec.CommandContext(ctx, "debugfs", "-R", "cat "+path, img).Output()
+		if err != nil || strings.TrimSpace(string(out)) != b.Version {
+			return fmt.Errorf("JC11S: %s does not read back as %s; nothing flashed", path, b.Version)
+		}
+	}
+	f, err := os.Open(b.Path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	want := map[string][]string{
+		"boot-activate.sh":         {"/enginex/bundle/boot-activate.sh", "/sc5000-custom/bundle/boot-activate.sh"},
+		"lib/libengine-ui-hook.so": {"/enginex/bundle/lib/libengine-ui-hook.so", "/sc5000-custom/bundle/lib/libengine-ui-hook.so"},
+		"99-sc5000-custom.conf":    {"/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf"},
+	}
+	tr := tar.NewReader(gz)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		rel := strings.TrimPrefix(strings.TrimPrefix(h.Name, "./"), b.Top+"/")
+		paths, ok := want[rel]
+		if !ok {
+			continue
+		}
+		if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA || h.Size <= 0 || h.Size > 32<<20 {
+			return fmt.Errorf("JC11S: invalid activation file %s; nothing flashed", rel)
+		}
+		expected, err := io.ReadAll(tr)
+		if err != nil {
+			return err
+		}
+		for _, path := range paths {
+			out, err := exec.CommandContext(ctx, "debugfs", "-R", "cat "+path, img).Output()
+			if err != nil || !bytes.Equal(out, expected) {
+				return fmt.Errorf("JC11S: activation file %s differs after injection; nothing flashed", path)
+			}
+		}
+		delete(want, rel)
+	}
+	if len(want) != 0 {
+		return errors.New("JC11S: bundle lacks activation files; download a current PRIME4PLUS data bundle, nothing flashed")
+	}
+	return nil
+}
+
 func python() string {
 	for _, p := range []string{"python3", "python"} {
 		if path, err := exec.LookPath(p); err == nil {
@@ -1441,10 +1527,23 @@ func modeB(ctx context.Context, o *options) error {
 	if err != nil {
 		return err
 	}
-	part, size := dataPartition(ctx, o)
+	part, size := "data", int64(0)
+	if boardCode(board) == "jc11s" {
+		size, err = jc11sDataPartition(ctx, o)
+		if err != nil {
+			return err
+		}
+	} else {
+		part, size = dataPartition(ctx, o)
+	}
 	img, fresh, err := buildImage(ctx, o, b, size, "userdata-enginex.img", "az01-data")
 	if err != nil {
 		return err
+	}
+	if boardCode(board) == "jc11s" {
+		if err := verifyJC11SImage(ctx, img, b, size); err != nil {
+			return err
+		}
 	}
 	if fresh {
 		err = confirm(o, "即将刷写全新的 "+part+" 分区：碟机上的音乐、曲库和设置会全部清空！", "This flashes a brand-new "+part+" partition: ALL music, library and settings on the deck are erased!")
@@ -1466,6 +1565,11 @@ func modeB(ctx context.Context, o *options) error {
 	o.say("正在重启碟机…", "Rebooting deck...")
 	if out, err := fb(ctx, o, "reboot"); err != nil {
 		return fmt.Errorf("fastboot reboot: %w\n%s", err, out)
+	}
+	if boardCode(board) == "jc11s" {
+		o.say("USB 写入完成；重启后的激活尚未验证。请在 Settings → About 确认显示 EngineX OS，并检查 EngineX 页面。若仍为原厂 5.3.0，请保留日志并报告 #169；不要重复清空 data 或恢复出厂。",
+			"USB write complete; activation after reboot is not verified. Confirm EngineX OS in Settings → About and open the EngineX page. If it still shows stock 5.3.0, keep this log and report #169; do not repeatedly erase data or factory-reset.")
+		return nil
 	}
 	o.say(fmt.Sprintf("完成：EngineX OS %s 已刷入 %s，碟机正在重启，首次启动后自动激活。", b.Version, m.Name),
 		fmt.Sprintf("Done: EngineX OS %s flashed to %s; the deck reboots and activates itself.", b.Version, m.Name))
