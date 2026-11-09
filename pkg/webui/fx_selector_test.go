@@ -11,7 +11,7 @@ import (
 
 func TestFXSelectorRequiresMatchingAcknowledgement(t *testing.T) {
 	dir := t.TempDir()
-	s := New(Config{UIDir: dir, StateDir: t.TempDir()}, nil)
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), FXSelectorReadyFile: filepath.Join(dir, "fx-selector.ready")}, nil)
 	if err := os.WriteFile(filepath.Join(dir, "fx-selector.ready"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestFXSelectorRequiresMatchingAcknowledgement(t *testing.T) {
 
 func TestFXSelectorRejectsMissingHookAndInvalidUnits(t *testing.T) {
 	dir := t.TempDir()
-	s := New(Config{UIDir: dir, StateDir: t.TempDir()}, nil)
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), FXSelectorReadyFile: filepath.Join(dir, "fx-selector.ready")}, nil)
 	for _, tc := range []struct {
 		query string
 		code  int
@@ -63,5 +63,82 @@ func TestFXSelectorRejectsMissingHookAndInvalidUnits(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "fx-selector.request")); !os.IsNotExist(err) {
 		t.Fatal("rejected request wrote a route")
+	}
+}
+
+func TestFXSelectorMigratesLegacySettings(t *testing.T) {
+	dir := t.TempDir()
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), FXSelectorReadyFile: filepath.Join(dir, "ready")}, nil)
+	path := filepath.Join(dir, "settings.conf")
+	legacy := "lang=en\npioneer_fx=spiral\nunknown_setting=preserved\npioneer_fx=space\n"
+	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Unsupported boards (including AZ04) keep their legacy master preference.
+	w := httptest.NewRecorder()
+	s.uiStatus(w, httptest.NewRequest("GET", "/api/ui", nil))
+	b, _ := os.ReadFile(path)
+	if string(b) != legacy {
+		t.Fatal("legacy settings changed without PX hook")
+	}
+	if err := os.WriteFile(s.fxSelectorReadyFile(), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	s.uiStatus(w, httptest.NewRequest("GET", "/api/ui", nil))
+	b, _ = os.ReadFile(path)
+	if strings.Contains(string(b), "pioneer_fx=") || !strings.Contains(string(b), "unknown_setting=preserved") {
+		t.Fatalf("migration: %s", b)
+	}
+	if !strings.Contains(w.Body.String(), `"pioneerFx":"off"`) {
+		t.Fatal(w.Body.String())
+	}
+	v := s.loadUI()
+	v.PioneerFx = "space"
+	if err := s.saveUI(v); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(path)
+	if strings.Contains(string(b), "pioneer_fx=") {
+		t.Fatal("PX board resurrected master FX")
+	}
+}
+
+func TestFXSelectorTimeoutDoesNotBlockSettings(t *testing.T) {
+	dir := t.TempDir()
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), FXSelectorReadyFile: filepath.Join(dir, "ready")}, nil)
+	if err := os.WriteFile(s.fxSelectorReadyFile(), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		s.uiUpdate(w, httptest.NewRequest("POST", "/api/ui?fxUnit=1&fxMode=2", nil))
+		done <- w.Code
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "fx-selector.request")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no request")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !s.uiMu.TryLock() {
+		t.Fatal("FX ACK wait holds settings lock")
+	}
+	s.uiMu.Unlock()
+	w := httptest.NewRecorder()
+	s.uiUpdate(w, httptest.NewRequest("POST", "/api/ui?fxUnit=2&fxMode=1", nil))
+	if w.Code != 409 {
+		t.Fatalf("concurrent FX request: %d", w.Code)
+	}
+	if code := <-done; code != 504 {
+		t.Fatalf("timeout: %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "fx-selector.request")); !os.IsNotExist(err) {
+		t.Fatal("timed out request survives")
 	}
 }

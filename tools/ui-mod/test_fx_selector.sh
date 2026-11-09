@@ -16,3 +16,14 @@ for test in test_pioneer_selector test_dsp_smooth; do
         echo "$test $sanitizer PASS"
     done
 done
+
+arm-linux-gnueabihf-gcc -O2 -Wall -Wextra -Werror -Wl,-z,max-page-size=4096 \
+    "$repo/tools/ui-mod/test_flanger_scope.c" -ldl -lpthread -o "$work/test_flanger_scope"
+"$work/test_flanger_scope" > "$work/test_flanger_scope.log" 2>&1
+echo "test_flanger_scope armhf PASS"
+for contract in fast off; do
+    define=(); if [ "$contract" = off ]; then define=(-DGOLDEN_FP_OFF); fi
+    gcc -O2 "${define[@]}" -ffp-contract="$contract" "$repo/tools/ui-mod/test_master_golden.c" -ldl -lpthread -o "$work/test_master_golden-$contract"
+    "$work/test_master_golden-$contract" > "$work/test_master_golden-$contract.log" 2>&1
+    echo "test_master_golden AZ04 $contract PASS"
+done

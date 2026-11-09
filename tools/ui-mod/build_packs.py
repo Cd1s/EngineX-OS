@@ -1292,6 +1292,7 @@ SERVICES_MAIN = """
 	property bool scBeatJumpPads: false
 	property string scPioneerFx: "off"
 	property bool scFxSelectorAvailable: false
+	property bool scFxMasterBypassed: false
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
 	property bool scUpdating: false
@@ -1551,7 +1552,10 @@ SERVICES_MAIN = """
 		if (scUiPoll.readyState === 4 && scUiPoll.status === 200) scApply(JSON.parse(scUiPoll.responseText))
 	}
 	function scApply(v) {
-		if (v.fxSelectorAvailable !== undefined) scFxSelectorAvailable = !!v.fxSelectorAvailable && (Config.audio.fx.hasDJFx || Config.audio.fx.hasNHFx)
+		if (v.fxSelectorAvailable !== undefined) {
+			scFxMasterBypassed = !!v.fxSelectorAvailable
+			scFxSelectorAvailable = scFxMasterBypassed && (Config.audio.fx.hasDJFx || Config.audio.fx.hasNHFx)
+		}
 		scEnsureTidal()
 		if (v.version) scVersion = v.version
 		scLang = v.language
@@ -2243,7 +2247,7 @@ PLAYBACK_ENTRIES = """
 		},
 		EntryBase.ListEntry {
 			text: "Color FX Style"
-			visible: !root.scFxSelectorAvailable
+			visible: !root.scFxMasterBypassed
 			readonly property var ids: ["off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"]
 			values: ["Off", "Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scPioneerFx))]

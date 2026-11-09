@@ -14,6 +14,13 @@ static int failures;
 static struct sc_pfx_instance fx[3];
 static float fixture(unsigned n) { return 0.2f * sinf((float)n * 0.027f); }
 
+/* Stand-in for the ordinary worker between callback blocks. */
+static int prepared_process(struct sc_pfx_instance *s, float *l, float *r, unsigned frames,
+                            int mode, float time, float param, float wet) {
+    sc_pfx_instance_prepare(s);
+    return sc_pfx_process(s, l, r, frames, mode, time, param, wet);
+}
+
 static double render(int mode, float time, float param, float wet) {
     memset(&fx[0], 0, sizeof fx[0]);
     double signature = 0;
@@ -23,7 +30,7 @@ static double render(int mode, float time, float param, float wet) {
             dl[i] = l[i] = fixture(n + i);
             dr[i] = r[i] = fixture(n + i + 12);
         }
-        sc_pfx_process(&fx[0], l, r, 128, mode, time, param, wet);
+        prepared_process(&fx[0], l, r, 128, mode, time, param, wet);
         if (wet == 0) {
             CHECK(!memcmp(l, dl, sizeof l)); CHECK(!memcmp(r, dr, sizeof r));
         }
@@ -48,9 +55,10 @@ static void test_modes(void) {
         CHECK(fabs(a - b) > 0.001);
     }
     /* Literal bypass includes signed zeros and invalid source samples. */
+    memset(&fx[0], 0, sizeof fx[0]);
     float l[] = {-0.0f, NAN, INFINITY, -INFINITY}, r[4], original[4];
     memcpy(r, l, sizeof l); memcpy(original, l, sizeof l);
-    sc_pfx_process(&fx[0], l, r, 4, 3, NAN, INFINITY, 0);
+    prepared_process(&fx[0], l, r, 4, 3, NAN, INFINITY, 0);
     CHECK(!memcmp(l, original, sizeof l) && !memcmp(r, original, sizeof r));
 }
 
@@ -61,7 +69,7 @@ static void test_switch(void) {
         float l[128], r[128];
         for (unsigned i = 0; i < 128; ++i) l[i] = r[i] = 0.1f;
         int mode = block < 200 ? 1 : 1 + (int)((block / 4) % 5);
-        sc_pfx_process(&fx[0], l, r, 128, mode, 0.3f, 0.5f, 0.7f);
+        prepared_process(&fx[0], l, r, 128, mode, 0.3f, 0.5f, 0.7f);
         if (block > 10) CHECK(fabsf(l[0] - previous) < 0.02f);
         previous = l[127];
     }
@@ -72,13 +80,13 @@ static void test_roll_time_increase(void) {
     for (unsigned block = 0; block < 1000; ++block) {
         float l[128], r[128];
         for (unsigned i = 0; i < 128; ++i) l[i] = r[i] = 0.1f;
-        sc_pfx_process(&fx[0], l, r, 128, SC_PFX_SLIP_ROLL, block < 500 ? 0.1f : 1.0f, 0.5f, 1.0f);
+        prepared_process(&fx[0], l, r, 128, SC_PFX_SLIP_ROLL, block < 500 ? 0.1f : 1.0f, 0.5f, 1.0f);
         for (unsigned i = 0; i < 128; ++i) CHECK(l[i] > 0.09f && r[i] > 0.09f);
     }
     sc_pfx_instance_reset(&fx[0]);
     for (unsigned block = 0; block < 400; ++block) {
         float l[128] = {0}, r[128] = {0};
-        sc_pfx_process(&fx[0], l, r, 128, SC_PFX_SPACE, 0.5f, 0.5f, 1.0f);
+        prepared_process(&fx[0], l, r, 128, SC_PFX_SPACE, 0.5f, 0.5f, 1.0f);
         for (unsigned i = 0; i < 128; ++i) CHECK(l[i] == 0 && r[i] == 0);
     }
 }
@@ -87,9 +95,85 @@ static void *independent(void *arg) {
     struct sc_pfx_instance *s = arg;
     for (unsigned n = 0; n < 1000; ++n) {
         float l[64] = {0.1f}, r[64] = {0.2f};
-        sc_pfx_process(s, l, r, 64, 1 + n % 5, 0.5f, 0.5f, 0.5f);
+        prepared_process(s, l, r, 64, 1 + n % 5, 0.5f, 0.5f, 0.5f);
     }
     return NULL;
+}
+
+static void test_wet_zero_fade(void) {
+    for (int mode = 1; mode <= 5; ++mode) {
+        memset(&fx[0], 0, sizeof fx[0]);
+        float previous = 0;
+        for (unsigned n = 0; n < 120000; n += 128) {
+            float l[128], r[128], dry[128];
+            for (unsigned i = 0; i < 128; ++i) dry[i] = l[i] = r[i] = fixture(n + i);
+            float wet = n < 96000 ? 0.8f : 0.0f;
+            CHECK(prepared_process(&fx[0], l, r, 128, mode, 0.5f, 0.5f, wet));
+            if (n >= 96000 && n < 100096) {
+                for (unsigned i = 0; i < 128; ++i) {
+                    CHECK(fabsf(l[i] - previous) < 0.025f);
+                    previous = l[i];
+                }
+            } else previous = l[127];
+            if (n >= 100096) CHECK(!memcmp(l, dry, sizeof l));
+        }
+        CHECK(fx[0].wet == 0);
+    }
+    puts("test_wet_zero_fade PASS");
+}
+
+static void test_worker_banks(void) {
+    memset(&fx[0], 0, sizeof fx[0]);
+    float l[512] = {0}, r[512] = {0};
+    CHECK(!sc_pfx_process(&fx[0], l, r, 512, 1, 0.5f, 0.5f, 1));
+    sc_pfx_instance_prepare(&fx[0]);
+    /* Poison an unused delay cell: rendering may not secretly clear it. */
+    fx[0].bank[0].buf_l[50000] = 0.75f;
+    CHECK(sc_pfx_process(&fx[0], l, r, 512, 1, 0.5f, 0.5f, 1));
+    CHECK(fx[0].bank[0].buf_l[50000] == 0.75f);
+    CHECK(sc_pfx_process(&fx[0], l, r, 512, 2, 0.5f, 0.5f, 1));
+    CHECK(fx[0].mode == 2);
+    /* No prepared spare yet: retain mode 2 without clearing on audio thread. */
+    CHECK(sc_pfx_process(&fx[0], l, r, 512, 3, 0.5f, 0.5f, 1));
+    CHECK(fx[0].mode == 2);
+    sc_pfx_instance_prepare(&fx[0]);
+    CHECK(fx[0].bank[0].buf_l[50000] == 0);
+    CHECK(sc_pfx_process(&fx[0], l, r, 512, 3, 0.5f, 0.5f, 1));
+    CHECK(fx[0].mode == 3);
+    sc_pfx_instance_reset(&fx[0]);
+    sc_pfx_instance_prepare(&fx[0]);
+    memset(l, 0, sizeof l); memset(r, 0, sizeof r);
+    CHECK(sc_pfx_process(&fx[0], l, r, 512, 3, 0.5f, 0.5f, 1));
+    for (unsigned i = 0; i < 512; ++i) CHECK(l[i] == 0 && r[i] == 0);
+    puts("test_worker_banks PASS");
+}
+
+static void test_smoother_denormals(void) {
+    memset(&fx[0], 0, sizeof fx[0]);
+    sc_pfx_instance_prepare(&fx[0]);
+    fx[0].time = fx[0].parameter = fx[0].wet = 1.0e-25f;
+    float l = 0, r = 0;
+    CHECK(sc_pfx_process(&fx[0], &l, &r, 1, 1, 0, 0, 0));
+    CHECK(fx[0].time == 0 && fx[0].parameter == 0 && fx[0].wet == 0);
+    puts("test_smoother_denormals PASS");
+}
+
+static void test_arm_arm(void) {
+    int owner, effect;
+    struct sc_pfx_route *r = &sc_pfx_routes[0];
+    memset(sc_pfx_routes, 0, sizeof sc_pfx_routes);
+    sc_pfx_arm(0, 1, 0x35800000, 0x36000000);
+    CHECK(sc_pfx_bind(0, &owner, &effect)); sc_pfx_activate(r);
+    sc_pfx_arm(0, 0, 0, 0); /* FX off: no process/restore between selections */
+    CHECK(__atomic_load_n(&r->restore_mix, __ATOMIC_ACQUIRE));
+    sc_pfx_arm(0, 2, 0x35800000, 0x36000000);
+    CHECK(sc_pfx_bind(0, &owner, &effect)); sc_pfx_activate(r);
+    CHECK(!__atomic_load_n(&r->restore_mix, __ATOMIC_ACQUIRE));
+    CHECK(__atomic_load_n(&r->native_override, __ATOMIC_ACQUIRE));
+    sc_pfx_reset_owner(&owner);
+    CHECK(__atomic_load_n(&r->reset_epoch, __ATOMIC_ACQUIRE) == 1);
+    sc_pfx_forget_owner(&owner);
+    puts("test_arm_arm PASS");
 }
 
 static void test_routes(void) {
@@ -163,6 +247,7 @@ static void *route_writer(void *unused) {
         sc_pfx_challenge(&concurrent_owner, sc_pfx_float(0x35800000));
         sc_pfx_challenge(&concurrent_owner, sc_pfx_float(0x36000000));
         sc_pfx_bind_context(&concurrent_owner, &concurrent_effect);
+        sc_pfx_instance_prepare(&sc_pfx_routes[0].dsp);
         sc_pfx_control(&concurrent_owner, 0, 0.5f);
         sc_pfx_control(&concurrent_owner, 1, (float)(n % 100) / 100.0f);
     }
@@ -196,6 +281,7 @@ static void test_concurrent_routes(void) {
 }
 
 int main(void) {
+    test_wet_zero_fade(); test_worker_banks(); test_smoother_denormals(); test_arm_arm();
     test_modes(); test_switch(); test_roll_time_increase(); test_routes(); test_concurrent_routes();
     pthread_t a, b;
     CHECK(!pthread_create(&a, NULL, independent, &fx[1]));

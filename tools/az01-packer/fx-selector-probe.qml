@@ -5,6 +5,7 @@ import QtQuick.Window 2.2
 import Planck 1.0
 Item {
     id: probe
+    Component.onCompleted: console.warn("FXCONFIG product=" + Config.device.name + " hasDJFx=" + Config.audio.fx.hasDJFx + " hasNHFx=" + Config.audio.fx.hasNHFx)
     property int phase: 0
     property int attempts: 0
     property bool failed: false
@@ -58,7 +59,7 @@ Item {
         x.open("GET", "file:///data/sc5000-custom/ui/fx-selector.request", false); x.send()
         const fields = x.responseText.trim().split(/\s+/)
         const values = unit === 1 ? capturedOne : capturedTwo
-        check(fields.length === 5 && values.indexOf(Number(fields[3])) >= 0 && values.indexOf(Number(fields[4])) >= 0, "unit" + unit + "-Mix-wire-bits")
+        check(fields.length === 6 && values.indexOf(Number(fields[3])) >= 0 && values.indexOf(Number(fields[4])) >= 0, "unit" + unit + "-Mix-wire-bits")
     }
     function channel(u) {
         const path = "/Engine/Mixer/DJFxUnit" + u + "/"
@@ -75,6 +76,7 @@ Item {
             const a = root.scFxControllers[0], b = root.scFxControllers[1]
             if (probe.phase === 0) {
                 if (!a || !b || !a.scFxEnabled || !b.scFxEnabled) return
+                probe.check(root.scFxMasterBypassed, "legacy-master-menu-hidden")
                 probe.check(a.scFxNames.length === a.scFxStock.length + 5 && b.scFxNames.length === b.scFxStock.length + 5, "appended-list")
                 for (let i = a.scFxStock.length; i < a.scFxNames.length; ++i) console.warn("FXPROBE name|" + a.scFxNames[i])
                 probe.fxConfig.channel = {"1": probe.channel(1), "2": probe.channel(2)}

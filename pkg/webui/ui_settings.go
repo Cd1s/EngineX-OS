@@ -434,7 +434,7 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.BeatJumpPads {
 		text += "beat_jump_pads=1\n"
 	}
-	if v.PioneerFx != "" && v.PioneerFx != "off" {
+	if !s.fxSelectorAvailable() && v.PioneerFx != "" && v.PioneerFx != "off" {
 		text += "pioneer_fx=" + v.PioneerFx + "\n"
 	}
 	if v.GitHubRepo != defaultGitHubRepo {
@@ -463,6 +463,41 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	return writeUIScaleEnv(v.UIScale)
 }
 
+// Caller holds uiMu. Preserve unrelated/unknown settings during migration.
+func (s *Server) migratePioneerFX() error {
+	path := filepath.Join(s.uiDir(), "settings.conf")
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(b), "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "pioneer_fx=") {
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == len(lines) {
+		return nil
+	}
+	f, err := os.CreateTemp(s.uiDir(), ".fx-settings-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	_, err = f.WriteString(strings.Join(kept, "\n"))
+	if ce := f.Close(); err == nil {
+		err = ce
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
 // scope is the service the deck's native browser currently shows.
 func (s *Server) scope() string {
 	s.uiMu.Lock()
@@ -474,6 +509,12 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
 	v.FXSelectorAvailable = s.fxSelectorAvailable()
+	if v.FXSelectorAvailable {
+		if err := s.migratePioneerFX(); err != nil {
+			log.Printf("FX selector settings migration: %v", err)
+		}
+		v.PioneerFx = "off"
+	}
 	s.uiMu.Unlock()
 	v.BroadcastEnabled = s.BroadcastEnabled()
 	if ver := s.installedVersion(); ver != "" && ver != "dev" {

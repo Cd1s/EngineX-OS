@@ -34,8 +34,11 @@
 #include "dsp_smooth.h"
 #include "master_limiter.h"
 #include "echo_out.h"
+#if defined(__aarch64__)
+/* AZ04: preserve the original DSP source and floating-point evaluation. */
+#include "pioneer_fx_legacy.h"
+#else
 #include "pioneer_fx.h"
-#if !defined(__aarch64__)
 #include "fx_selector.h"
 #endif
 
@@ -327,27 +330,31 @@ static int fx_selector_master_bypass;
 static void fx_selector_poll(void) {
 #if !defined(__aarch64__)
     if (!fx_selector_supported) return;
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+        sc_pfx_instance_prepare(&sc_pfx_routes[i].dsp);
     static unsigned long long last_request;
     static unsigned last_bound[SC_PFX_UNITS];
     static time_t heartbeat;
     time_t now = time(NULL);
     if (now != heartbeat) {
-        FILE *ready = fopen(UI_ROOT "/fx-selector.ready", "w");
+        FILE *ready = fopen("/run/enginex-fx-selector.ready", "w");
         if (ready) { fputs("armhf-px-v1\n", ready); fclose(ready); heartbeat = now; }
     }
     FILE *f = fopen(UI_ROOT "/fx-selector.request", "r");
     unsigned unit, mode, a, b;
-    unsigned long long request;
-    int n = f ? fscanf(f, "%u %u %llu %u %u", &unit, &mode, &request, &a, &b) : 0;
+    unsigned long long request, expires;
+    int n = f ? fscanf(f, "%u %u %llu %u %u %llu", &unit, &mode, &request, &a, &b, &expires) : 0;
+    struct timespec wall; clock_gettime(CLOCK_REALTIME, &wall);
+    unsigned long long millis = (unsigned long long)wall.tv_sec * 1000 + wall.tv_nsec / 1000000;
     if (f) fclose(f);
-    if (n == 5 && unit >= 1 && unit <= SC_PFX_UNITS && mode <= 5 && request != last_request &&
+    if (n == 6 && millis < expires && expires - millis <= 1000 && unit >= 1 && unit <= SC_PFX_UNITS && mode <= 5 && request != last_request &&
         (a & 0x7f800007u) == (0x35800000u | (unit - 1)) &&
         (b & 0x7f800007u) == (0x36000000u | (unit - 1))) {
         int reused = sc_pfx_arm(unit - 1, mode, a, b);
         __atomic_store_n(&fx_selector_master_bypass, 1, __ATOMIC_RELEASE);
         f = fopen(UI_ROOT "/fx-selector.ack.tmp", "w");
         if (f) {
-            fprintf(f, "%u %u %llu %u %u %d\n", unit, mode, request, a, b, reused);
+            fprintf(f, "%u %u %llu %u %u %llu %d\n", unit, mode, request, a, b, expires, reused);
             int ok = !fclose(f);
             if (ok && !rename(UI_ROOT "/fx-selector.ack.tmp", UI_ROOT "/fx-selector.ack")) last_request = request;
         }
@@ -519,6 +526,7 @@ static void hook_px_destroy(void *self) {
 }
 
 static void *px_carrier(void *owner) {
+    if (!owner) return NULL;
     uintptr_t vtable;
     memcpy(&vtable, owner, sizeof vtable);
     if (vtable != px_engine_base + 0x2b21eec) return NULL;
@@ -547,6 +555,7 @@ static void *px_carrier(void *owner) {
 }
 
 static int px_is_carrier(void *owner) {
+    if (!owner) return 0;
     const char *name; uint32_t length;
     memcpy(&name, (char *)owner + 0x294, 4);
     memcpy(&length, (char *)owner + 0x298, 4);
@@ -595,6 +604,10 @@ static void dsp_transition(unsigned slot, uint32_t kind, void *handler, const vo
         px_restore_owner(dsp_bound_owner(handler));
         sc_pfx_unbind_owner(dsp_bound_owner(handler));
     }
+#endif
+#if !defined(__aarch64__)
+    if (fx_selector_supported && (slot == DSP_TURN_OFF || slot == DSP_TURN_ON || slot == DSP_ENABLE))
+        sc_pfx_reset_owner(dsp_bound_owner(handler));
 #endif
     sc_dsp_fx_mark_transition(dsp_bound_owner(handler), kind);
     ((dsp_event_fn)dsp_originals[slot])(handler, event);
@@ -669,7 +682,7 @@ static void dsp_finite_event(unsigned slot, size_t offset, int is_double,
                 memcpy(copy + 0x0c, &one, 4);
                 __atomic_store_n(&r->mix_handler, handler, __ATOMIC_RELEASE);
                 __atomic_store_n(&r->native_owner, owner, __ATOMIC_RELEASE);
-                __atomic_store_n(&r->native_override, 1, __ATOMIC_RELEASE);
+                sc_pfx_activate(r);
                 // Our DSP owns Wet/Dry. Keep the stock carrier's surrounding
                 // processor at unity, avoiding a second application of Mix.
                 ((dsp_event_fn)dsp_originals[slot])(handler, copy);
@@ -735,9 +748,16 @@ static void hook_flanger(void *self, float *const *input, float *const *output, 
 }
 #else
 typedef void (*dsp_effect_fn)(void *, float *const *, int, uint32_t);
-static void hook_flanger(void *self, float *const *input, int channels, uint32_t frames) {
-#if !defined(__aarch64__)
-    if (fx_selector_supported) {
+static void hook_flanger(void *self, float *const *input, float *const *output, uint32_t frames) {
+    if (!fx_selector_supported) {
+        /* Unverified armhf builds/boards retain the original opaque ABI/body. */
+        float dry = sc_dsp_block_energy(input, frames);
+        ((dsp_process_fn)dsp_originals[DSP_FLANGER])(self, input, output, frames);
+        sc_dsp_makeup_apply(self, input, frames, dry);
+        return;
+    }
+    int channels = (int)(uintptr_t)output; /* verified JP07/JC11 5.3.0 only */
+    {
         // A disabled mapping can still have a deferred stock-Mix restoration.
         // This executes on the original DSP thread, never the polling worker.
         for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
@@ -749,21 +769,23 @@ static void hook_flanger(void *self, float *const *input, int channels, uint32_t
         struct sc_pfx_route *r = channels == 2 && input && input[0] && input[1] ? sc_pfx_enter_input(self, (void *)input, &mode) : NULL;
         if (r) {
             if (__atomic_load_n(&r->native_override, __ATOMIC_ACQUIRE)) {
-                if (r->audio_effect != self || r->audio_epoch != r->render_epoch) {
+                unsigned reset = __atomic_load_n(&r->reset_epoch, __ATOMIC_ACQUIRE);
+                if (r->audio_effect != self || r->audio_epoch != r->render_epoch || r->audio_reset != reset) {
                     sc_pfx_instance_reset(&r->dsp);
-                    r->audio_effect = self; r->audio_epoch = r->render_epoch;
+                    r->audio_effect = self; r->audio_epoch = r->render_epoch; r->audio_reset = reset;
                 }
                 float mix = sc_pfx_float(__atomic_load_n(&r->mix, __ATOMIC_ACQUIRE));
                 float param = sc_pfx_float(__atomic_load_n(&r->parameter, __ATOMIC_ACQUIRE));
                 // Rate vector is not captured yet: Parameter also maps time.
-                sc_pfx_process(&r->dsp, input[0], input[1], frames, (int)mode, param, param, mix);
+                int rendered = sc_pfx_process(&r->dsp, input[0], input[1], frames, (int)mode, param, param, mix);
                 sc_pfx_leave(r);
-                return;
+                if (rendered) return;
+                goto stock_carrier;
             }
             sc_pfx_leave(r);
         }
     }
-#endif
+stock_carrier:;
     float dry = channels == 2 ? sc_dsp_block_energy(input, frames) : 0.0f;
     ((dsp_effect_fn)dsp_originals[DSP_FLANGER])(self, input, channels, frames);
     if (channels == 2) sc_dsp_makeup_apply(self, input, frames, dry);
@@ -951,7 +973,9 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_px_destroy};
     patch_bytes(entry, jump, sizeof jump, page);
     px_engine_base = base;
-    fx_selector_master_bypass = !strcmp(product, "JC11");
+    fx_selector_master_bypass = 1; /* no hidden legacy master FX on any PX-enabled board */
+    fprintf(stderr, "engine-ui-hook: PX product=%s master-bypass=1 installed\n", product);
+    unlink("/run/enginex-fx-selector.ready");
     unlink(UI_ROOT "/fx-selector.ready");
     unlink(UI_ROOT "/fx-selector.request");
     unlink(UI_ROOT "/fx-selector.ack");
