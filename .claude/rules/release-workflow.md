@@ -42,7 +42,8 @@ git grep -n "<OLD>" -- README.md README.zh-CN.md README.zh-TW.md rootfs-overlay 
 ```sh
 gofmt -l . && go vet ./... && go test -race ./...
 bash tests/test_rootfs_overlay.sh                        # 必须用 bash
-bash tools/az01-packer/test_sclive4_bootstrap.sh         # 二代机 armhf 数据包沙箱
+JC11S_ROOTFS="${JC11S_ROOTFS:?先设置为官方 PRIME4PLUS-5.3.0 的解包 rootfs}" \
+  bash tools/az01-packer/test_sclive4_bootstrap.sh       # SC LIVE 4 + JC11S，两款均须 PASS
 AZ04=1 bash tools/az01-packer/test_sclive4_bootstrap.sh  # 二代机 AZ04 (PRIME 4 G2 / SYSTEM ONE) 沙箱
 python3 -m unittest discover -s tools/az01-packer
 python3 -m unittest discover -s tools/stems
@@ -52,6 +53,13 @@ python3 -m unittest discover -s tools/stems
 #   tools/edisksd-hook/test_edisksd_hook.c（--mounts 只在 unshare -m 里跑）
 #   tools/ui-mod/test_az04_hook.c（AZ04 64 位 hook：编译机原生 gcc 编译，参数给 AZ04 的 Engine）
 ```
+
+JC11S fixture 是独立的官方 PRIME4PLUS rootfs，不能用 SC LIVE 4 或 PRIME 4 G2 代替。
+准备与校验摘要见 `docs/issue169-prime4plus-investigation.md`。把镜像解包到本次任务
+自建的目录后设置 `JC11S_ROOTFS`；不要写入只读的固定实验材料目录。普通 SC LIVE 4
+单独检查不设置此变量时会明确 WARN 跳过 JC11S，**发版不得跳过**。若要同时回归真实
+发布包的安装器回读，设置 `JC11S_RELEASE_BUNDLE` 为已校验 SHA-256 的 PRIME4PLUS
+Data-Bundle.tar.gz 后运行 Go 测试；该 fixture 测试覆盖新目录与旧 `sc5000-custom` 目录。
 
 涉及 Factory Reset、`az01-update --erase-data`、空白 `/data` 首次启动的改动，只在编译机的 `unshare -m` + chroot 沙箱里用解包出的 rootfs 测，**绝不在实机触发**。
 

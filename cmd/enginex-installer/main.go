@@ -1323,7 +1323,23 @@ func verifyJC11SImage(ctx context.Context, img string, b *bundleInfo, size int64
 	if fi.Size() > size {
 		return errors.New("JC11S: image exceeds the verified data partition; nothing flashed")
 	}
-	for _, path := range []string{"/enginex/version.txt", "/enginex/bundle/version.txt"} {
+	// A real legacy directory is retained by the injector until first boot
+	// migrates it. Older bundles also install only to sc5000-custom (#103).
+	root := ""
+	for _, path := range []string{"/enginex", "/sc5000-custom"} {
+		out, err := exec.CommandContext(ctx, "debugfs", "-R", "stat "+path, img).Output()
+		if err != nil {
+			return fmt.Errorf("JC11S: cannot read image with debugfs: %w; nothing flashed", err)
+		}
+		if strings.Contains(string(out), "Type: directory") {
+			root = path
+			break
+		}
+	}
+	if root == "" {
+		return errors.New("JC11S: no EngineX installation directory after injection; nothing flashed")
+	}
+	for _, path := range []string{root + "/version.txt", root + "/bundle/version.txt"} {
 		out, err := exec.CommandContext(ctx, "debugfs", "-R", "cat "+path, img).Output()
 		if err != nil || strings.TrimSpace(string(out)) != b.Version {
 			return fmt.Errorf("JC11S: %s does not read back as %s; nothing flashed", path, b.Version)
@@ -1340,8 +1356,8 @@ func verifyJC11SImage(ctx context.Context, img string, b *bundleInfo, size int64
 	}
 	defer gz.Close()
 	want := map[string][]string{
-		"boot-activate.sh":         {"/enginex/bundle/boot-activate.sh", "/sc5000-custom/bundle/boot-activate.sh"},
-		"lib/libengine-ui-hook.so": {"/enginex/bundle/lib/libengine-ui-hook.so", "/sc5000-custom/bundle/lib/libengine-ui-hook.so"},
+		"boot-activate.sh":         {root + "/bundle/boot-activate.sh", "/sc5000-custom/bundle/boot-activate.sh"},
+		"lib/libengine-ui-hook.so": {root + "/bundle/lib/libengine-ui-hook.so", "/sc5000-custom/bundle/lib/libengine-ui-hook.so"},
 		"99-sc5000-custom.conf":    {"/system/var/overlay/lib/alsa/conf.d/99-sc5000-custom.conf"},
 	}
 	tr := tar.NewReader(gz)
