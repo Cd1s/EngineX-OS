@@ -161,7 +161,13 @@ func (o *options) hint(key, zh, en string) {
 	o.say(zh, en)
 }
 
-func (o *options) say(zh, en string) { fmt.Fprintf(o.Out, "%s\n  %s\n", zh, en) }
+var sayMu sync.Mutex
+
+func (o *options) say(zh, en string) {
+	sayMu.Lock()
+	defer sayMu.Unlock()
+	fmt.Fprintf(o.Out, "%s\n  %s\n", zh, en)
+}
 
 // firstGenGuide is shown at start-up and when no deck is found: the first-generation decks
 // are invisible to this tool in normal operation (#104, "flasher doesn't see Prime Go").
@@ -302,9 +308,10 @@ func isLocalIP(ip string) bool {
 // listenAirD collects the decks that announce themselves for o.AirDWait.
 func listenAirD(o *options) map[string]announce {
 	found := map[string]announce{}
-	pc, err := net.ListenPacket("udp4", o.AirDAddr)
+	lc := net.ListenConfig{Control: setReuseControl}
+	pc, err := lc.ListenPacket(context.Background(), "udp4", o.AirDAddr)
 	if err != nil {
-		o.say("无法监听 StageLinQ 端口（可能被 Engine DJ 占用），只用局域网扫描。", "Cannot listen for StageLinQ ("+err.Error()+"); scanning only.")
+		o.say("无法监听 StageLinQ 端口（"+err.Error()+"），只用局域网扫描。", "Cannot listen for StageLinQ ("+err.Error()+"); scanning only.")
 		return found
 	}
 	defer pc.Close()
@@ -332,11 +339,8 @@ func isEAAS(b []byte) bool {
 // listenEAAS collects candidate IPs, not verified decks or model identities.
 func listenEAAS(o *options) map[string]bool {
 	found := map[string]bool{}
-	addr, err := net.ResolveUDPAddr("udp4", o.EAASAddr)
-	if err != nil {
-		return found
-	}
-	pc, err := net.ListenUDP("udp4", addr)
+	lc := net.ListenConfig{Control: setReuseControl}
+	pc, err := lc.ListenPacket(context.Background(), "udp4", o.EAASAddr)
 	if err != nil {
 		o.say("无法监听 EAAS 端口（"+err.Error()+"），只用 StageLinQ 与扫描。", "Cannot listen for EAAS ("+err.Error()+"); scanning only.")
 		return found
@@ -347,14 +351,18 @@ func listenEAAS(o *options) map[string]bool {
 	// would otherwise stop discovery when unrelated larger broadcasts arrive.
 	buf := make([]byte, 65535)
 	for {
-		n, from, err := pc.ReadFromUDP(buf)
+		n, from, err := pc.ReadFrom(buf)
 		if err != nil {
 			return found
 		}
 		if isEAAS(buf[:n]) {
-			ip := from.IP.String()
+			udpAddr, ok := from.(*net.UDPAddr)
+			if !ok {
+				continue
+			}
+			ip := udpAddr.IP.String()
 			// Bound memory even if many spoofed source addresses send valid beacons.
-			if len(found) < 256 && !from.IP.IsUnspecified() && !from.IP.IsMulticast() && !isLocalIP(ip) {
+			if len(found) < 256 && !udpAddr.IP.IsUnspecified() && !udpAddr.IP.IsMulticast() && !isLocalIP(ip) {
 				found[ip] = true
 			}
 		}
@@ -968,7 +976,7 @@ func fastbootDevices(ctx context.Context, o *options) []string {
 		if serials, out = fastbootList(ctx, o); len(serials) > 0 {
 			return serials
 		}
-		if strings.Contains(out, "invalid option") { // new platform-tools dropped -i (#129)
+		if strings.Contains(out, "invalid option") || strings.Contains(out, "unknown option") { // new platform-tools dropped -i (#129, #164)
 			break
 		}
 	}
@@ -1172,8 +1180,8 @@ func diagnoseUSB(ctx context.Context, o *options) {
 		"The deck is on USB ("+dev+") but fastboot cannot see it yet (USB enumeration does not prove fastboot is available). If the deck still shows its main screen, tap Settings → Update → Firmware Update Mode (Reboot) and keep the cable in;"
 	switch {
 	case goos == "windows":
-		zh += "如果已处于 Firmware Update Mode，请先检查 USB 线、fastboot 版本与驱动绑定。Mixstream Pro+ 15e4:303f 可自动绑定 WinUSB；已绑定时无需 Zadig。仅在更新接口缺少 WinUSB 时，用 Zadig（https://zadig.akeo.ie）选择对应的碟机更新接口（如 Denon DJ SC LIVE 4 Update 或 Android Fastboot）安装 WinUSB，不要替换音频、MIDI 或 Screen 接口驱动。"
-		en += " if it already shows Firmware Update Mode, check the USB cable, fastboot version and driver binding. Mixstream Pro+ 15e4:303f can bind WinUSB automatically; Zadig is unnecessary when it is already bound. Only if the update interface lacks WinUSB, use Zadig (https://zadig.akeo.ie) to select that update interface (e.g. Denon DJ SC LIVE 4 Update or Android Fastboot) and install WinUSB. Do not replace audio, MIDI or Screen interface drivers."
+		zh += "如果已处于 Firmware Update Mode，请检查 fastboot 与驱动设置：原生 Windows 下 Google fastboot 要求设备注册 Android 设备接口 GUID（{F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}）。在设备管理器中选择更新接口安装「Android Device / Android Bootloader Interface」驱动，或使用 Zadig（https://zadig.akeo.ie）选择对应的碟机更新接口（如 Denon DJ SC LIVE 4 Update 或 Numark MIXSTREAM PRO PLUS），勾选编辑接口 GUID 设为上述值安装 WinUSB。更推荐在 WSL 中运行 Linux 安装包并用 usbipd-win 直通 USB（WSL 下 libusb fastboot 原生识别且支持 mke2fs）。"
+		en += " if it already shows Firmware Update Mode, check fastboot and driver configuration: native Windows Google fastboot requires the device to expose the Android device interface GUID ({F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}). In Device Manager, install the 'Android Device / Android Bootloader Interface' driver for the update interface, or use Zadig (https://zadig.akeo.ie) to select the deck update interface (e.g. Denon DJ SC LIVE 4 Update or Numark MIXSTREAM PRO PLUS) and configure the device interface GUID to that value. Alternatively, running the Linux package in WSL with usbipd-win is recommended (WSL libusb fastboot recognizes it directly and supports mke2fs formatting)."
 	case goos == "linux" && geteuid() != 0:
 		zh += "如果碟机屏幕已经处于 Firmware Update Mode，请用 sudo 运行本工具，或添加 udev 规则：\n  " + udevHint
 		en += " if it already shows Firmware Update Mode, run this tool with sudo or add a udev rule:\n  " + udevHint
@@ -1532,10 +1540,14 @@ func azUSB(ctx context.Context, o *options) string {
 	return ""
 }
 
-// azModel: the board seen on the LAN, else the --bundle file name, else the USB product name.
+// azModel: the board seen on the LAN (if an AZ04 deck without fastboot), else the --bundle file name, else the USB product name.
 func azModel(o *options, board, line string) (model, bool) {
-	if m, gen2, ok := lookupBoard(board); ok && gen2 {
-		return m, true
+	// Only AZ04 decks without fastboot (rmz2 SYSTEM ONE, jp24 PRIME 4 G2) use 1cc5:2027 write-part.
+	// A fastboot deck (e.g. nh08s, jp21) discovered on the LAN must never be passed to modeAZ (#164).
+	if b := boardCode(board); b == "rmz2" || b == "jp24" {
+		if m, gen2, ok := lookupBoard(board); ok && gen2 {
+			return m, true
+		}
 	}
 	if o.Bundle != "" {
 		if m, ok := bundleModel(o.Bundle); ok {
