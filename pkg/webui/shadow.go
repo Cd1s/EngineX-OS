@@ -191,7 +191,7 @@ type shadowState struct {
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
 	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
 	dbg                 shadowDebug
-	metaOnlyPoll        bool // the newest compose had a CDJ (metadata-only) deck: 120 ms polls
+	metaOnlyPoll        bool // the newest compose had a CDJ deck, including cached display assets: 120 ms polls
 	display             shadowDisplayCache
 	sourceDisplay       shadowSourceCache
 }
@@ -908,7 +908,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 		s.shadow.mu.Unlock()
 		out = s.shadowCompose(role, time.Now())
 	}
-	metaOnly := slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly })
+	metaOnly := slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly || strings.HasPrefix(d.Key, "cdj:") })
 	s.shadow.mu.Lock()
 	s.shadow.metaOnlyPoll = metaOnly
 	s.shadow.mu.Unlock()
@@ -921,7 +921,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	}
 	// CDJ continuous positions do not advance the EngineX peer version. Those
 	// responses, like legacy responses, must always reach QML.
-	if !v.ShadowLegacyEngine && !slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly || strings.HasPrefix(d.Key, "cdj:") }) {
+	if !v.ShadowLegacyEngine && !metaOnly {
 		w.Header().Set("X-Shadow-State", fmt.Sprintf("%d:%t:%s:%t:%t:%x", ver, true, role, stale, debug, h.Sum64()))
 
 	}

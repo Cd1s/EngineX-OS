@@ -101,6 +101,9 @@ func TestCDJDisplayCachedANLZWithoutAudio(t *testing.T) {
 		t.Fatalf("CDJ display state: %+v", decks)
 	}
 	get("/v1/sc5000/shadow", 200)
+	if wait := s.shadow.pollWait(false, time.Now()); wait != 120*time.Millisecond {
+		t.Fatalf("cached CDJ positions must retain 120 ms polls, got %v", wait)
+	}
 	q := "?deck=1&key=" + url.QueryEscape(decks[0].Key)
 	var meta struct {
 		Title         string
