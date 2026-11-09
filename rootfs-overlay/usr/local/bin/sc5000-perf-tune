@@ -93,7 +93,7 @@ for scheduler in "$SYS"/block/*/queue/scheduler; do
         *[\ \[]none[\ \]]*) write_knob "$scheduler" none ;;
     esac
 done
-# CF018/CF001/LC001: Keep PRIME 4 JMicron USB-SATA, USB SSDs and DMX adapters from autosuspending,
+# CF018/CF001/LC001: Keep PRIME 4 JMicron USB-SATA, USB SSDs and lighting Mod adapters from autosuspending,
 # and keep unbound kernel workqueues off the GUI (1) and SceneGraph (2) cores.
 write_knob "$SYS/devices/virtual/workqueue/cpumask" 9 quiet
 write_knob "$SYS/module/usbcore/parameters/autosuspend" -1 quiet

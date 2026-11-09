@@ -52,7 +52,6 @@ const (
 )
 
 type uiSettings struct {
-	DMXEnabled  bool    `json:"dmxEnabled"` // status only; opt-in is in dmx.json
 	Version     string  `json:"version,omitempty"`
 	Quality     string  `json:"quality"`
 	Jog         string  `json:"jog"`
@@ -475,7 +474,6 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v := s.loadUI()
 	s.uiMu.Unlock()
 	v.BroadcastEnabled = s.BroadcastEnabled()
-	v.DMXEnabled = s.dmx != nil && s.dmx.Enabled()
 	if ver := s.installedVersion(); ver != "" && ver != "dev" {
 		v.Version = ver
 	}
