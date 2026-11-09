@@ -217,7 +217,7 @@ SH
             test "$(grep -ac 'engine-ui-hook: applied 0x' "$log")" -eq "$EXPECT_APPLIED"
         check "new: $EXPECT_DSP DSP guards installed" grep -aq "engine-ui-hook: $EXPECT_DSP DSP guards/transitions installed" "$log"
         check "new: SQLite hooks installed" grep -aq 'engine-ui-hook: SQLite open/open_v2 hooks installed' "$log"
-        check "new: no QML load errors" bash -c "! grep -aE 'is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component' '$log'"
+        check "new: no QML load errors" bash -c "! grep -aE 'Type [A-Za-z_][A-Za-z0-9_]* unavailable|PropertyChanges does not support creating|state-specific objects|is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component' '$log'"
         check "new: no Engine crash" bash -c "! grep -aE 'Crash with|Unknown exit code' '$log'"
         for v in "${!pid[@]}"; do check "new: $v still running after ${ENGINE_SECONDS}s" kill -0 "${pid[$v]}"; done
         # Field 41 of /proc/PID/stat is the policy; 5 is SCHED_IDLE.

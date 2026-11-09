@@ -418,6 +418,17 @@ class UiModBuildTest(unittest.TestCase):
                 entries = len(json.loads(dictionaries[lang]))
                 old_total = sum(len(json.loads(d)) for d in dictionaries.values())
                 self.assertEqual(entries * 3, old_total)
+                micro = (Path(tmp) / "packs" / lang / "Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml").read_text()
+                states = re.findall(r"PropertyChanges \{\s+target: albumArt\s+visible: microDeck.albumArtVisible\s+(.*?)\n            \}", micro, re.S)
+                self.assertTrue(states)
+                for state in states:
+                    self.assertNotRegex(state, r"\bTimer\s*\{")
+                    self.assertNotRegex(state, r"\bproperty\s")
+                self.assertTrue(any("albumArt.scArtTick" in state for state in states))
+                image = re.search(r"Image \{\s+id: albumArt\s+(.*?)objectName:", micro, re.S)
+                self.assertIsNotNone(image)
+                self.assertIn("property int scArtTick", image.group(1))
+                self.assertIn("Timer {", image.group(1))
             embedded = Path(tmp) / "packs" / "en" / "Skins" / "Embedded"
             wave = (embedded / "Views/Common/Waveform/Waveform.qml").read_text()
             self.assertIn('objectName: "EngineX_Shadow_waveform"', wave)

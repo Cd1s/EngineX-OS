@@ -2863,11 +2863,10 @@ def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False
     return "".join(ind + l + "\n" if l else "\n" for l in q.splitlines())
 
 
-def art_source(ind, deck, path, metadata, image, add_id=False):
-    """An art lookup follows its deck's metadata, independently of playing/cue ticks."""
-    lines = ([f"id: {image}"] if add_id else []) + [
+def art_retry(ind, deck, path, image):
+    """Keep retry state and its Timer on the Image, outside PropertyChanges."""
+    lines = [
         "property int scArtTick: 0",
-        f"source: {GUARD} ? root.scDeckArtUrl({deck}, {path}, scArtTick, {metadata}) : {path}",
         "Timer {",
         "    interval: 500; repeat: true",
         f"    running: {image}.visible && {GUARD} && root.scDeckArtPending({deck}, {path}, {image}.source)",
@@ -2875,6 +2874,13 @@ def art_source(ind, deck, path, metadata, image, add_id=False):
         "}",
     ]
     return "".join(ind + line + "\n" for line in lines)
+
+
+def art_source(ind, deck, path, metadata, image, add_id=False):
+    """An art lookup follows its deck's metadata, independently of playing/cue ticks."""
+    identity = f"{ind}id: {image}\n" if add_id else ""
+    return identity + art_retry(ind, deck, path, image) + (
+        f"{ind}source: {GUARD} ? root.scDeckArtUrl({deck}, {path}, {image}.scArtTick, {metadata}) : {path}\n")
 
 
 def edits(dev: bool):
@@ -3694,8 +3700,10 @@ def edits(dev: bool):
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml"] = [(
             "                text: microDeck.loadedDeckSongName\n",
             f"                text: ({role} ? microDeck.deckIndex + \" · \" : \"\") + microDeck.loadedDeckSongName\n"),
+            ("                id: albumArt\n",
+             "                id: albumArt\n" + art_retry("                ", "microDeck.deckIndex", "microDeck.loadedDeckAlbumArtPath", "albumArt")),
             ("                source: microDeck.loadedDeckAlbumArtPath\n",
-             art_source("                ", "microDeck.deckIndex", "microDeck.loadedDeckAlbumArtPath", "microDeck.loadedDeckSongName", "albumArt"))]
+             f"                source: {GUARD} ? root.scDeckArtUrl(microDeck.deckIndex, microDeck.loadedDeckAlbumArtPath, albumArt.scArtTick, microDeck.loadedDeckSongName) : microDeck.loadedDeckAlbumArtPath\n")]
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml"] = [(
             "        source: albumArt.albumArtPath\n",
             art_source("        ", "albumArt.deckIndex", "albumArt.albumArtPath", "albumArt.deckView && albumArt.deckView.artistSongView ? albumArt.deckView.artistSongView.songName : \"\"", "scArtImage", add_id=True))]
