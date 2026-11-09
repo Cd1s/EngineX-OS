@@ -161,7 +161,13 @@ func (o *options) hint(key, zh, en string) {
 	o.say(zh, en)
 }
 
-func (o *options) say(zh, en string) { fmt.Fprintf(o.Out, "%s\n  %s\n", zh, en) }
+var sayMu sync.Mutex
+
+func (o *options) say(zh, en string) {
+	sayMu.Lock()
+	defer sayMu.Unlock()
+	fmt.Fprintf(o.Out, "%s\n  %s\n", zh, en)
+}
 
 // firstGenGuide is shown at start-up and when no deck is found: the first-generation decks
 // are invisible to this tool in normal operation (#104, "flasher doesn't see Prime Go").
@@ -302,9 +308,10 @@ func isLocalIP(ip string) bool {
 // listenAirD collects the decks that announce themselves for o.AirDWait.
 func listenAirD(o *options) map[string]announce {
 	found := map[string]announce{}
-	pc, err := net.ListenPacket("udp4", o.AirDAddr)
+	lc := net.ListenConfig{Control: setReuseControl}
+	pc, err := lc.ListenPacket(context.Background(), "udp4", o.AirDAddr)
 	if err != nil {
-		o.say("无法监听 StageLinQ 端口（可能被 Engine DJ 占用），只用局域网扫描。", "Cannot listen for StageLinQ ("+err.Error()+"); scanning only.")
+		o.say("无法监听 StageLinQ 端口（"+err.Error()+"），只用局域网扫描。", "Cannot listen for StageLinQ ("+err.Error()+"); scanning only.")
 		return found
 	}
 	defer pc.Close()
@@ -332,11 +339,8 @@ func isEAAS(b []byte) bool {
 // listenEAAS collects candidate IPs, not verified decks or model identities.
 func listenEAAS(o *options) map[string]bool {
 	found := map[string]bool{}
-	addr, err := net.ResolveUDPAddr("udp4", o.EAASAddr)
-	if err != nil {
-		return found
-	}
-	pc, err := net.ListenUDP("udp4", addr)
+	lc := net.ListenConfig{Control: setReuseControl}
+	pc, err := lc.ListenPacket(context.Background(), "udp4", o.EAASAddr)
 	if err != nil {
 		o.say("无法监听 EAAS 端口（"+err.Error()+"），只用 StageLinQ 与扫描。", "Cannot listen for EAAS ("+err.Error()+"); scanning only.")
 		return found
@@ -347,14 +351,18 @@ func listenEAAS(o *options) map[string]bool {
 	// would otherwise stop discovery when unrelated larger broadcasts arrive.
 	buf := make([]byte, 65535)
 	for {
-		n, from, err := pc.ReadFromUDP(buf)
+		n, from, err := pc.ReadFrom(buf)
 		if err != nil {
 			return found
 		}
 		if isEAAS(buf[:n]) {
-			ip := from.IP.String()
+			udpAddr, ok := from.(*net.UDPAddr)
+			if !ok {
+				continue
+			}
+			ip := udpAddr.IP.String()
 			// Bound memory even if many spoofed source addresses send valid beacons.
-			if len(found) < 256 && !from.IP.IsUnspecified() && !from.IP.IsMulticast() && !isLocalIP(ip) {
+			if len(found) < 256 && !udpAddr.IP.IsUnspecified() && !udpAddr.IP.IsMulticast() && !isLocalIP(ip) {
 				found[ip] = true
 			}
 		}
@@ -378,7 +386,8 @@ func localSubnets() []string {
 	return out
 }
 
-// isDeckUI is true when host answers /v1/sc5000/ui with a JSON object: EngineX's web UI.
+// isDeckUI is true when host is EngineX's web UI: /v1/sc5000/ui answers with a JSON object, or
+// (403/401 when the console asks for its access code) the login page on / is the Stream Sync one (#164).
 func isDeckUI(c *http.Client, host string, port int) bool {
 	resp, err := c.Get(fmt.Sprintf("http://%s:%d/v1/sc5000/ui", host, port))
 	if err != nil {
@@ -386,7 +395,19 @@ func isDeckUI(c *http.Client, host string, port int) bool {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return resp.StatusCode == 200 && bytes.HasPrefix(bytes.TrimSpace(body), []byte("{"))
+	if resp.StatusCode == http.StatusOK {
+		return bytes.HasPrefix(bytes.TrimSpace(body), []byte("{"))
+	}
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+	page, err := c.Get(fmt.Sprintf("http://%s:%d/", host, port))
+	if err != nil {
+		return false
+	}
+	defer page.Body.Close()
+	html, _ := io.ReadAll(io.LimitReader(page.Body, 2048))
+	return page.StatusCode == http.StatusOK && bytes.Contains(html, []byte("<title>Stream Sync</title>"))
 }
 
 // scanLAN probes every host of the /24s with 64 workers.
@@ -776,10 +797,16 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	// An EAAS beacon does not prove this is a deck. Even a matching HTTP response
 	// must not upgrade this hint into permission to send SSH credentials (#164).
 	if d.FromEAAS && d.Board == "" {
+		if o.Uninstall {
+			return fmt.Errorf("%s: 收到未验证的 EAAS 广播，无法执行网络卸载 / received unverified EAAS beacon, cannot uninstall over SSH", label)
+		}
 		return modeAB(ctx, o, d)
 	}
 	cl, err := dialSSH(o, d.IP)
 	if err != nil {
+		if o.Uninstall {
+			return fmt.Errorf("%s: 卸载需通过 SSH 连接碟机，无法连接 SSH / --uninstall requires SSH access to the deck, cannot connect: %w", label, err)
+		}
 		if isAuthErr(err) {
 			return fmt.Errorf("%s: SSH 登录失败 / SSH login failed; use --key or --password", label)
 		}
@@ -968,7 +995,7 @@ func fastbootDevices(ctx context.Context, o *options) []string {
 		if serials, out = fastbootList(ctx, o); len(serials) > 0 {
 			return serials
 		}
-		if strings.Contains(out, "invalid option") { // new platform-tools dropped -i (#129)
+		if strings.Contains(out, "invalid option") || strings.Contains(out, "unknown option") { // new platform-tools dropped -i (#129, #164)
 			break
 		}
 	}
@@ -1172,8 +1199,8 @@ func diagnoseUSB(ctx context.Context, o *options) {
 		"The deck is on USB ("+dev+") but fastboot cannot see it yet (USB enumeration does not prove fastboot is available). If the deck still shows its main screen, tap Settings → Update → Firmware Update Mode (Reboot) and keep the cable in;"
 	switch {
 	case goos == "windows":
-		zh += "如果已处于 Firmware Update Mode，请先检查 USB 线、fastboot 版本与驱动绑定。Mixstream Pro+ 15e4:303f 可自动绑定 WinUSB；已绑定时无需 Zadig。仅在更新接口缺少 WinUSB 时，用 Zadig（https://zadig.akeo.ie）选择对应的碟机更新接口（如 Denon DJ SC LIVE 4 Update 或 Android Fastboot）安装 WinUSB，不要替换音频、MIDI 或 Screen 接口驱动。"
-		en += " if it already shows Firmware Update Mode, check the USB cable, fastboot version and driver binding. Mixstream Pro+ 15e4:303f can bind WinUSB automatically; Zadig is unnecessary when it is already bound. Only if the update interface lacks WinUSB, use Zadig (https://zadig.akeo.ie) to select that update interface (e.g. Denon DJ SC LIVE 4 Update or Android Fastboot) and install WinUSB. Do not replace audio, MIDI or Screen interface drivers."
+		zh += "如果已处于 Firmware Update Mode，请检查 fastboot 与驱动设置：原生 Windows 下 Google fastboot 要求设备注册 Android 设备接口 GUID（{F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}）。在设备管理器中选择更新接口安装「Android Device / Android Bootloader Interface」驱动，或使用 Zadig（https://zadig.akeo.ie）选择对应的碟机更新接口（如 Denon DJ SC LIVE 4 Update 或 Numark MIXSTREAM PRO PLUS），勾选编辑接口 GUID 设为上述值安装 WinUSB。更推荐在 WSL 中运行 Linux 安装包并用 usbipd-win 直通 USB（WSL 下安装 fastboot 与 e2fsprogs，且须以 root 身份运行如 wsl -u root，避免 usbipd 设备节点权限不足导致 fastboot 识别为空）。"
+		en += " if it already shows Firmware Update Mode, check fastboot and driver configuration: native Windows Google fastboot requires the device to expose the Android device interface GUID ({F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}). In Device Manager, install the 'Android Device / Android Bootloader Interface' driver for the update interface, or use Zadig (https://zadig.akeo.ie) to select the deck update interface (e.g. Denon DJ SC LIVE 4 Update or Numark MIXSTREAM PRO PLUS) and configure the device interface GUID to that value. Alternatively, running the Linux package in WSL with usbipd-win is recommended (install fastboot and e2fsprogs in WSL, and run as root via 'wsl -u root' to ensure usbipd-forwarded USB device nodes are accessible to fastboot)."
 	case goos == "linux" && geteuid() != 0:
 		zh += "如果碟机屏幕已经处于 Firmware Update Mode，请用 sudo 运行本工具，或添加 udev 规则：\n  " + udevHint
 		en += " if it already shows Firmware Update Mode, run this tool with sudo or add a udev rule:\n  " + udevHint
@@ -1295,8 +1322,8 @@ func buildImage(ctx context.Context, o *options, b *bundleInfo, size int64, name
 			return "", false, errors.New("读不到 data 分区大小，请用 --userdata-backup / cannot read the data partition size; pass --userdata-backup")
 		}
 		if _, err := exec.LookPath("mke2fs"); err != nil {
-			return "", false, errors.New("制作二代机 data 镜像需要 e2fsprogs (mke2fs, debugfs) 与 Python 3：Windows 请在 WSL 中运行 Linux 安装包，并通过 usbipd-win 直通 USB；或在 Linux / macOS 电脑上运行本工具 / " +
-				"building a 2nd-gen data image requires e2fsprogs (mke2fs, debugfs) and Python 3: on Windows run the Linux package in WSL with usbipd-win, or run this tool on Linux or macOS")
+			return "", false, errors.New("制作二代机 data 镜像需要 e2fsprogs (mke2fs, debugfs) 与 Python 3：Windows 请在 WSL 中以 root 运行 Linux 安装包（wsl -u root）并安装 fastboot 与 e2fsprogs，通过 usbipd-win 直通 USB；或在 Linux / macOS 电脑上运行本工具 / " +
+				"building a 2nd-gen data image requires e2fsprogs (mke2fs, debugfs) and Python 3: on Windows run the Linux package in WSL as root (wsl -u root) with fastboot and e2fsprogs installed, forwarding USB via usbipd-win, or run this tool on Linux or macOS")
 		}
 		f, err := os.Create(img)
 		if err != nil {
@@ -1532,10 +1559,14 @@ func azUSB(ctx context.Context, o *options) string {
 	return ""
 }
 
-// azModel: the board seen on the LAN, else the --bundle file name, else the USB product name.
+// azModel: the board seen on the LAN (if an AZ04 deck without fastboot), else the --bundle file name, else the USB product name.
 func azModel(o *options, board, line string) (model, bool) {
-	if m, gen2, ok := lookupBoard(board); ok && gen2 {
-		return m, true
+	// Only AZ04 decks without fastboot (rmz2 SYSTEM ONE, jp24 PRIME 4 G2) use 1cc5:2027 write-part.
+	// A fastboot deck (e.g. nh08s, jp21) discovered on the LAN must never be passed to modeAZ (#164).
+	if b := boardCode(board); b == "rmz2" || b == "jp24" {
+		if m, gen2, ok := lookupBoard(board); ok && gen2 {
+			return m, true
+		}
 	}
 	if o.Bundle != "" {
 		if m, ok := bundleModel(o.Bundle); ok {
@@ -1629,11 +1660,13 @@ func run(ctx context.Context, o *options) error {
 	ignoreSIGPIPE()
 	o.defaults()
 	o.guide()
-	if len(fastbootDevices(ctx, o)) > 0 {
-		return modeB(ctx, o)
-	}
-	if l := azUSB(ctx, o); l != "" {
-		return modeAZ(ctx, o, "", l)
+	if !o.Uninstall {
+		if len(fastbootDevices(ctx, o)) > 0 {
+			return modeB(ctx, o)
+		}
+		if l := azUSB(ctx, o); l != "" {
+			return modeAZ(ctx, o, "", l)
+		}
 	}
 	o.say("正在局域网中寻找碟机…", "Looking for decks on the LAN...")
 	var errs []error
@@ -1654,6 +1687,9 @@ func run(ctx context.Context, o *options) error {
 		}
 	}
 	if n == 0 {
+		if o.Uninstall {
+			return errors.New("局域网中未发现可卸载的碟机：--uninstall 需碟机开机、接入同一网络并开启 SSH / no deck found on the LAN to uninstall: --uninstall requires the deck to be powered on, on the same network, with SSH accessible")
+		}
 		if board, line := usbDeck(ctx, o, gen2USB); board != "" { // a stock 2nd-gen deck on USB, in any mode: wait for it to reboot into fastboot
 			return modeAB(ctx, o, deck{Name: line, Board: board})
 		}
