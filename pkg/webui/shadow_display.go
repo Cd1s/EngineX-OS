@@ -106,7 +106,7 @@ func displayTrackKey(p peerDeck) string {
 
 // Preserve #160's role-overlap mapping, while retaining the source deck for
 // asset requests. The map key is the receiver slot, p.Deck is the source slot.
-func placeDisplayPeers(peers map[int]peerDeck, role string, now time.Time) map[int]peerDeck {
+func placeDisplayPeers(peers map[int]peerDeck, role string, now time.Time, lines ...[]int) map[int]peerDeck {
 	// Expiry matches a goodbye: free shadow slots on every model.
 	fresh := make(map[int]peerDeck, len(peers))
 	for n, p := range peers {
@@ -117,14 +117,25 @@ func placeDisplayPeers(peers map[int]peerDeck, role string, now time.Time) map[i
 	peers = fresh
 	placed, used := map[int]peerDeck{}, map[int]bool{}
 	var slots []int
-	for n := 1; n <= 4; n++ {
-		if strings.Contains(role, strconv.Itoa(n)) {
-			continue
+	if len(lines) > 0 && len(lines[0]) > 0 {
+		slots = slices.Clone(lines[0])
+		slices.Sort(slots)
+		for _, n := range slots {
+			if p, ok := peers[n]; ok {
+				placed[n] = p
+				used[n] = true
+			}
 		}
-		slots = append(slots, n)
-		if p, ok := peers[n]; ok {
-			placed[n] = p
-			used[n] = true
+	} else {
+		for n := 1; n <= 4; n++ {
+			if strings.Contains(role, strconv.Itoa(n)) {
+				continue
+			}
+			slots = append(slots, n)
+			if p, ok := peers[n]; ok {
+				placed[n] = p
+				used[n] = true
+			}
 		}
 	}
 	for _, n := range slots {
@@ -144,7 +155,15 @@ func placeDisplayPeers(peers map[int]peerDeck, role string, now time.Time) map[i
 
 // shadowComposeDisplay has no file resolver, download, EXPF or Engine control
 // path. Even a locally accessible peer file must not load into Engine.
-func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
+func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int) []deckState {
+	pfx := imagePrefix(deviceCompatible())
+	isConsole := pfx != "" && !playerBoards[pfx]
+	var consoleLines []int
+	if isConsole && len(lines) > 0 && len(lines[0]) > 0 {
+		consoleLines = slices.Clone(lines[0])
+		slices.Sort(consoleLines)
+	}
+
 	sh := s.shadow
 	sh.mu.Lock()
 	peers := make(map[int]peerDeck, len(sh.peerDecks))
@@ -152,13 +171,21 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
 		peers[n] = p
 	}
 	sh.mu.Unlock()
-	peers = placeDisplayPeers(peers, role, now)
+	peers = placeDisplayPeers(peers, role, now, consoleLines)
 	out := []deckState{}
 	free := []int{}
-	for deck := 1; deck <= 4; deck++ {
-		if strings.Contains(role, strconv.Itoa(deck)) {
-			continue
+	var candidates []int
+	if len(consoleLines) > 0 {
+		candidates = consoleLines
+	} else {
+		for deck := 1; deck <= 4; deck++ {
+			if strings.Contains(role, strconv.Itoa(deck)) {
+				continue
+			}
+			candidates = append(candidates, deck)
 		}
+	}
+	for _, deck := range candidates {
 		p, ok := peers[deck]
 		if !ok {
 			free = append(free, deck)
@@ -166,6 +193,9 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
 		}
 		d := p.deckState
 		d.Deck, d.Key = deck, displayTrackKey(p)
+		if len(consoleLines) > 0 {
+			d.LineIn = true
+		}
 		d.Stale = p.Stale || now.Sub(p.at) >= 2*time.Second
 		if d.Playing {
 			if !p.Stale {
@@ -183,8 +213,15 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
 	}
 	// Only cached rekordbox analysis is used here, never shadowFetchCDJ/audio.
 	devices := s.mergedDevices()
-	for deck, dev := range cdjDecks(devices, free, now) {
+	var lineFree []int
+	if len(consoleLines) > 0 {
+		lineFree = free
+	}
+	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
 		d := deckState{Deck: deck, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
+		if len(consoleLines) > 0 {
+			d.LineIn = true
+		}
 		if dev.TrackID != 0 {
 			host := net.ParseIP(dev.Address)
 			if dev.SourcePlayer != dev.Number {
@@ -830,11 +867,14 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 		peers[n] = p
 	}
 	s.shadow.mu.Unlock()
-	p, ok := placeDisplayPeers(peers, role, time.Now())[deck]
+	s.shadow.mu.Lock()
+	lines := slices.Clone(s.shadow.lines)
+	s.shadow.mu.Unlock()
+	p, ok := placeDisplayPeers(peers, role, time.Now(), lines)[deck]
 	if !ok {
 		// Compose and HTTP use the same placement, including peer priority and
 		// exact current track keys. An old CDJ URL cannot read a different song.
-		for _, d := range s.shadowComposeDisplay(role, time.Now()) {
+		for _, d := range s.shadowComposeDisplay(role, time.Now(), lines) {
 			if d.Deck == deck && d.Key == key && !d.MetadataOnly {
 				c := &s.shadow.display
 				c.mu.Lock()

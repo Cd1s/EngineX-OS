@@ -300,7 +300,7 @@ SERVICES_MAIN = """
 	// The board (device tree), not Config.device.isPlayer: the 4-deck layout turns a
 	// player into a non-player inside Engine (#49).
 	property bool scPlayer: false
-	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 && (scPlayer || (scShadowDisplayOnly ? !!scShadowData(deck) : !!(scShadowAt[deck] && scShadowAt[deck].path))) }
+	function scDeckLocked(deck) { const isLine = !!(scShadowDisplay[deck] && scShadowDisplay[deck].lineIn); return scFourDeckRole !== "" && (isLine || scFourDeckRole.indexOf(String(deck)) < 0) && (scPlayer || (scShadowDisplayOnly ? !!scShadowData(deck) : !!(scShadowAt[deck] && scShadowAt[deck].path))) }
 	// Swipe left loads the role's first deck, swipe right its second (0: stock).
 	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
 	property bool scFourDeckOn: false // the saved switch; Engine applies it on restart
@@ -530,7 +530,8 @@ SERVICES_MAIN = """
 			let e = null
 			for (let i = 0; i < decks.length; i++) if (Number(decks[i].deck) === d) { e = decks[i]; break }
 			const old = scShadowData(d)
-			if (!e || scFourDeckRole === "" || scFourDeckRole.indexOf(String(d)) >= 0 || !(e.key || e.loading)) {
+			const isLine = !!(e && e.lineIn)
+			if (!e || scFourDeckRole === "" || (!isLine && scFourDeckRole.indexOf(String(d)) >= 0) || !(e.key || e.loading)) {
 				if (old) { if (!next) next = Object.assign({}, scShadowDisplay); delete next[d] }
 				delete scShadowDisplayRequests[d]; delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
 				continue
@@ -548,7 +549,7 @@ SERVICES_MAIN = """
 				}
 			}
 			const sample = {key: key, title: e.title || "", artist: e.artist || "", playing: !!e.playing, stale: !!e.stale,
-				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0,
+				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master, sync: !!e.sync,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				meta: old && old.key === key ? old.meta : null,
@@ -1165,7 +1166,17 @@ SERVICES_MAIN = """
 		}
 		++scShadowGen
 		scShadowPollAt = Date.now()
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer)
+		let scLines = []
+		if (typeof root !== "undefined" && root && root.scTr) {
+			for (let d = 1; d <= 4; d++) {
+				try {
+					const p = root.scTr("/Engine/Mixer/Channel" + d + "/Line")
+					if (p && p.state) scLines.push(d)
+				} catch (e) {}
+			}
+		}
+		const scLineQuery = scLines.length > 0 ? "&line=" + scLines.join(",") : ""
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer + scLineQuery)
 		x.send()
 	}
 	function scShadowApplyAll(decks, displayOnly) {
@@ -4526,7 +4537,15 @@ def edits(dev: bool):
             ("                id: albumArt\n",
              "                id: albumArt\n" + art_retry("                ", "microDeck.deckIndex", "microDeck.loadedDeckAlbumArtPath", "albumArt")),
             ("                source: microDeck.loadedDeckAlbumArtPath\n",
-             f"                source: {GUARD} ? root.scDeckArtUrl(microDeck.deckIndex, microDeck.loadedDeckAlbumArtPath, albumArt.scArtTick, microDeck.loadedDeckSongName) : microDeck.loadedDeckAlbumArtPath\n")]
+             f"                source: {GUARD} ? root.scDeckArtUrl(microDeck.deckIndex, microDeck.loadedDeckAlbumArtPath, albumArt.scArtTick, microDeck.loadedDeckSongName) : microDeck.loadedDeckAlbumArtPath\n"),
+            ('                text: "Line In"\n',
+             '                text: (typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(microDeck.deckIndex) && root.scShadowData(microDeck.deckIndex)) ? (microDeck.deckIndex + " · " + (root.scShadowData(microDeck.deckIndex).title || "Track")) : "Line In"\n')]
+        scaled["Skins/EngineOS/UI/CompositeControls/Waveform/Waveform.qml"] = [(
+            "                visible: lockedDeckHint.active\n",
+            '                visible: lockedDeckHint.active && !(typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(waveform.deckIndex))\n')]
+        scaled[ROOT + "Views/Common/Waveform/WaveformLineInHint.qml"] = [(
+            "    visible: deckIndex >= 1 && pLine.translator && pLine.translator.state\n",
+            '    visible: deckIndex >= 1 && pLine.translator && pLine.translator.state && !(typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(deckIndex))\n')]
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml"] = [(
             "        source: albumArt.albumArtPath\n",
             art_source("        ", "albumArt.deckIndex", "albumArt.albumArtPath", "albumArt.deckView && albumArt.deckView.artistSongView ? albumArt.deckView.artistSongView.songName : \"\"", "scArtImage", add_id=True))]

@@ -61,6 +61,7 @@ type deckState struct {
 	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
 	Stale        bool    `json:"stale,omitempty"`        // frozen display sample; not an eject/goodbye
 	MetadataOnly bool    `json:"metadataOnly,omitempty"` // CDJ state has no peer display asset endpoint
+	LineIn       bool    `json:"lineIn,omitempty"`       // all-in-one console: shadow source mapped to Line In channel
 	Playing      bool    `json:"playing"`
 	PositionMS   float64 `json:"positionMs"`
 	Pitch        float64 `json:"pitch"` // percent
@@ -194,6 +195,7 @@ type shadowState struct {
 	metaOnlyPoll        bool // the newest compose had a CDJ deck, including cached display assets: 120 ms polls
 	display             shadowDisplayCache
 	sourceDisplay       shadowSourceCache
+	lines               []int // Line/Phono mixer channel inputs on all-in-one consoles
 }
 
 func newShadowState() *shadowState {
@@ -886,6 +888,19 @@ func (sh *shadowState) observe(d prolink.Device) {
 	}
 }
 
+func parseLineChannels(s string) []int {
+	var out []int
+	for _, part := range strings.Split(s, ",") {
+		if n, err := strconv.Atoi(strings.TrimSpace(part)); err == nil && n >= 1 && n <= 4 {
+			if !slices.Contains(out, n) {
+				out = append(out, n)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // shadowGet is what the QML applies to the decks this player does not play.
 // With ?ver=N it is a long poll: it answers at once when the peer state moved
 // past N, else as soon as it does, at the latest after pollWait (120 ms while
@@ -899,14 +914,20 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	out := []deckState{}
 	var ver uint64
 	if role != "" {
+		if r.URL.Query().Has("line") {
+			s.shadow.mu.Lock()
+			s.shadow.lines = parseLineChannels(r.URL.Query().Get("line"))
+			s.shadow.mu.Unlock()
+		}
 		s.shadowWake()
 		if seen, err := strconv.ParseUint(r.URL.Query().Get("ver"), 10, 64); err == nil {
 			s.shadow.wait(r.Context(), seen, s.shadow.pollWait(v.ShadowLegacyEngine, time.Now()))
 		}
 		s.shadow.mu.Lock()
 		ver = s.shadow.ver
+		lines := slices.Clone(s.shadow.lines)
 		s.shadow.mu.Unlock()
-		out = s.shadowCompose(role, time.Now())
+		out = s.shadowCompose(role, time.Now(), lines)
 	}
 	metaOnly := slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly || strings.HasPrefix(d.Key, "cdj:") })
 	s.shadow.mu.Lock()
@@ -928,17 +949,17 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug, "displayOnly": !v.ShadowLegacyEngine})
 }
 
-func (s *Server) shadowCompose(role string, now time.Time) []deckState {
+func (s *Server) shadowCompose(role string, now time.Time, lines ...[]int) []deckState {
 	s.uiMu.Lock()
 	legacy := s.loadUI().ShadowLegacyEngine
 	s.uiMu.Unlock()
 	if !legacy {
-		return s.shadowComposeDisplay(role, now)
+		return s.shadowComposeDisplay(role, now, lines...)
 	}
-	return s.shadowComposeLegacy(role, now)
+	return s.shadowComposeLegacy(role, now, lines...)
 }
 
-func (s *Server) shadowComposeLegacy(role string, now time.Time) []deckState {
+func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int) []deckState {
 	devices := s.mergedDevices()
 	// The exporter's lock is taken before ours, never under it: closing the
 	// exporter waits for its observer, which takes ours.
@@ -964,14 +985,31 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time) []deckState {
 	var shadowDecks []int
 	usedPeer := map[int]bool{}
 	placed := map[int]peerDeck{}
-	for deck := 1; deck <= 4; deck++ {
-		if strings.Contains(role, strconv.Itoa(deck)) {
-			continue
+	pfx := imagePrefix(deviceCompatible())
+	isConsole := pfx != "" && !playerBoards[pfx]
+	var consoleLines []int
+	if isConsole && len(lines) > 0 && len(lines[0]) > 0 {
+		consoleLines = slices.Clone(lines[0])
+		slices.Sort(consoleLines)
+	}
+	if len(consoleLines) > 0 {
+		for _, deck := range consoleLines {
+			shadowDecks = append(shadowDecks, deck)
+			if p, ok := sh.peerDecks[deck]; ok && !p.Stale && now.Sub(p.at) < 2*time.Second {
+				placed[deck] = p
+				usedPeer[deck] = true
+			}
 		}
-		shadowDecks = append(shadowDecks, deck)
-		if p, ok := sh.peerDecks[deck]; ok && !p.Stale && now.Sub(p.at) < 2*time.Second {
-			placed[deck] = p
-			usedPeer[deck] = true
+	} else {
+		for deck := 1; deck <= 4; deck++ {
+			if strings.Contains(role, strconv.Itoa(deck)) {
+				continue
+			}
+			shadowDecks = append(shadowDecks, deck)
+			if p, ok := sh.peerDecks[deck]; ok && !p.Stale && now.Sub(p.at) < 2*time.Second {
+				placed[deck] = p
+				usedPeer[deck] = true
+			}
 		}
 	}
 	// #160: a linked player whose deck number overlaps with our own role (e.g. an
@@ -1000,6 +1038,9 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time) []deckState {
 		}
 		d := p.deckState
 		d.Deck = deck
+		if len(consoleLines) > 0 {
+			d.LineIn = true
+		}
 		// Two standalone players share master natively over Engine Link; an
 		// all-in-one console linked to an SC5000/SC6000 (#160) does not, so keep
 		// the peer's master flag when this unit is not a standalone player.
@@ -1030,9 +1071,16 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time) []deckState {
 		d.At = now.UnixMilli()
 		out = append(out, d)
 	}
-	for deck, dev := range cdjDecks(devices, free, now) {
+	var lineFree []int
+	if len(consoleLines) > 0 {
+		lineFree = free
+	}
+	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
 		cue := dev.PlayState1 == cdjCuePlay
 		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM}
+		if len(consoleLines) > 0 {
+			d.LineIn = true
+		}
 		at := dev.LastSeen
 		if p, ok := sh.precise[dev.Number]; ok && now.Sub(p.at) < time.Second {
 			d.PositionMS, at = p.ms, p.at
@@ -1062,7 +1110,9 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time) []deckState {
 // cdjDecks puts the CDJs on the free shadow decks: on their own player number
 // when it is free, the rest on what is left, Deck 2 first. A lone CDJ next to
 // a 1+3 player then shows beside Deck 1 also in the 2-waveform layout.
-func cdjDecks(devices []prolink.Device, free []int, now time.Time) map[int]prolink.Device {
+// On an all-in-one console with Line channels, CDJs are mapped to the Line
+// channels in player-number order.
+func cdjDecks(devices []prolink.Device, free []int, now time.Time, lines ...[]int) map[int]prolink.Device {
 	// A CDJ that changed its number keeps its old entry for a few seconds, which
 	// became a second (master) CDJ. An all-in-one (XDJ-XZ, XDJ-AZ) is several
 	// players on one address, all sending every 200 ms or so. So keep only the
@@ -1085,6 +1135,14 @@ func cdjDecks(devices []prolink.Device, free []int, now time.Time) map[int]proli
 	}
 	slices.SortFunc(cdjs, func(a, b prolink.Device) int { return int(a.Number) - int(b.Number) })
 	out := map[int]prolink.Device{}
+	if len(lines) > 0 && len(lines[0]) > 0 {
+		lineSlots := slices.Clone(lines[0])
+		slices.Sort(lineSlots)
+		for i := 0; i < len(cdjs) && i < len(lineSlots); i++ {
+			out[lineSlots[i]] = cdjs[i]
+		}
+		return out
+	}
 	var rest []prolink.Device
 	for _, dev := range cdjs {
 		if deck := int(dev.Number); slices.Contains(free, deck) {

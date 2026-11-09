@@ -5,7 +5,9 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 W=$REPO/out/shadow-native
 if [ "${1:-}" != --inner ]; then
     mkdir -p "$W"
-    python3 "$REPO/tools/az01-packer/az01_packer.py" unpack /root/build/sc5000-lab/fw-5.3.0/SC5000-5.3.0-Update.img --output "$W/image" > "$W/unpack.json"
+    if [ ! -e "$W/image/rootfs.ext2" ]; then
+        python3 "$REPO/tools/az01-packer/az01_packer.py" unpack /root/build/sc5000-lab/fw-5.3.0/SC5000-5.3.0-Update.img --output "$W/image" > "$W/unpack.json"
+    fi
     python3 "$REPO/tools/ui-mod/build_packs.py" --qrc /root/build/sc5000-lab/5.3.0/qrc --out "$W/packs" > "$W/packs.log"
     python3 "$REPO/tools/az01-packer/shadow_render_probe.py" --out "$W/probe.qml"
     unshare -m -n -p -f --kill-child "$0" --inner
