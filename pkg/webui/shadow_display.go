@@ -175,7 +175,9 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
 		d.Path, d.Ext, d.Net = "", "", ""
 		d.At = now.UnixMilli()
 		if p.Key != "" {
-			d.Loading = s.ensureShadowDisplay(p, now) == nil
+			e := s.ensureShadowDisplay(p, now)
+			d.Loading = e == nil
+			d.DisplayDetail = e != nil && e.asset != nil && !e.asset.DetailPending
 		}
 		out = append(out, d)
 	}
@@ -445,6 +447,7 @@ func (s *Server) fetchShadowDisplay(p peerDeck, id string, slot *shadowDisplayEn
 	}
 	c := &sh.display
 	c.mu.Lock()
+	changed := false
 	// Replacing the whole entry makes values returned to HTTP readers immutable.
 	if c.entries[id] == slot {
 		e := &shadowDisplayEntry{at: time.Now(), retry: time.Now().Add(2 * time.Second)}
@@ -457,12 +460,30 @@ func (s *Server) fetchShadowDisplay(p peerDeck, id string, slot *shadowDisplayEn
 			e.asset, e.wave, e.overview = slot.asset, slot.wave, slot.overview
 		}
 		c.entries[id] = e
+		changed = displayReadinessChanged(slot, e)
 	}
 	c.mu.Unlock()
-	sh.dbg.event("display-fetch", map[string]any{"deck": p.Deck, "ok": err == nil})
-	sh.mu.Lock()
-	sh.bump()
-	sh.mu.Unlock()
+	sh.dbg.event("display-fetch", map[string]any{"deck": p.Deck, "ok": err == nil, "changed": changed})
+	// A retry while the source still analyses (every 2 s) changes nothing the
+	// display shows: do not wake the long polls (each wake is a JSON parse on
+	// Engine's GUI thread). Readiness also reaches the QML through the
+	// X-Shadow-State digest (loading).
+	if changed {
+		sh.mu.Lock()
+		sh.bump()
+		sh.mu.Unlock()
+	}
+}
+
+// displayReadinessChanged: e is the first usable asset, or its detail arrived.
+func displayReadinessChanged(old, e *shadowDisplayEntry) bool {
+	if old == nil || (old.asset == nil) != (e.asset == nil) {
+		return true
+	}
+	if e.asset == nil {
+		return false
+	}
+	return old.asset.DetailPending != e.asset.DetailPending || old.asset.Detail != e.asset.Detail || (old.asset.Waveform == nil) != (e.asset.Waveform == nil)
 }
 
 func validateDisplayAsset(a *shadowDisplayAsset, key string) error {

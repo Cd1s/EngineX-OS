@@ -2,6 +2,8 @@ package webui
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -683,5 +685,37 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 		if badResp.StatusCode != 400 {
 			t.Errorf("expected 400 for %s, got %d", bad, badResp.StatusCode)
 		}
+	}
+}
+
+func TestUIStatusDigestFollowsTheBody(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	get := func() (string, string) {
+		t.Helper()
+		r, err := http.Get(srv.URL + "/v1/sc5000/ui")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		var v map[string]any
+		if err := json.Unmarshal(b, &v); err != nil {
+			t.Fatalf("body %q: %v", b, err)
+		}
+		return r.Header.Get("X-UI-Digest"), string(b)
+	}
+	d1, b1 := get()
+	d2, b2 := get()
+	if d1 == "" || d1 != d2 || b1 != b2 {
+		t.Fatalf("same settings: %q %q", d1, d2)
+	}
+	if fmt.Sprintf("%x", fnvSum(strings.TrimSuffix(b1, "\n"))) != d1 {
+		t.Fatalf("digest %q is not the body's", d1)
+	}
+	uiPost(t, srv.URL, "jog=rainbow")
+	if d3, _ := get(); d3 == d1 {
+		t.Fatal("a changed setting kept the digest")
 	}
 }

@@ -83,7 +83,7 @@ class UiModSourceTest(unittest.TestCase):
     def test_shadow_throttles(self):
         self.assertIn("interval: 40; repeat: true", bp.SERVICES_MAIN)
         self.assertIn("r.ver === undefined ? 120 : 60", bp.SERVICES_MAIN)
-        self.assertIn("now - scShadowPostAt >= 250", bp.SERVICES_MAIN)
+        self.assertIn("now - scShadowPostAt >= 500", bp.SERVICES_MAIN)
         self.assertIn("scShadowCueCache", bp.SERVICES_MAIN)
         self.assertIn('o.dbg = ""', bp.SERVICES_MAIN)
         self.assertIn("o.title = s.net", bp.SERVICES_MAIN)
@@ -202,9 +202,9 @@ class ShadowDisplayTest(unittest.TestCase):
     def js(self, body):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
-                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scCueTickFor",
+                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
-                 "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress")
+                 "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
@@ -222,13 +222,18 @@ Date.now = () => now;
 globalThis.root = globalThis;
 Object.assign(globalThis, {
     scFourDeckRole: '13', scPlayer: true, scShadowDisplayOnly: true,
-    scShadowExpiryMs: 3000, scShadowAt: {}, scShadowDisplay: {}, scShadowDisplaySpare: {}, scShadowEmptyArray: [],
-    scShadowDisplayRequests: {}, scShadowGridCache: {}, scShadowLiveCueCache: {},
+    scShadowExpiryMs: 3000, scShadowAt: {}, scShadowDisplay: {}, scShadowEmptyArray: [],
+    scShadowDisplayRequests: {}, scShadowDisplayText: {}, scShadowGridCache: {}, scShadowLiveCueCache: {},
     scShadowCdjMaster: false, scPressQueue: [], scShadowEmptyObject: {},
     scShadowMineRole: "?", scShadowMine: [], scShadowSampleSpare: {}, scShadowDeckProperties: {}, scShadowOwn: [],
     scShadowPostRequest: null, scShadowPollRequest: null, scShadowResponseVersion: "", scShadowPostPending: false,
+    scShadowLinkId: '', scShadowLinkAt: -Infinity, scShadowTextAt: {},
+    scShadowSent: [], scShadowFullAt: 0, scShadowPostFull: true, scShadowLive: {seen: 0},
+    scShadowTickTimer: {interval: 40}, scShadowBusyAt: 0, scShadowRoleDirty: true,
+    scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
+    scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
-    scShadowGen: 0, scShadowVer: 0, scShadowFrame: 17, scCueInfoCache: {},
+    scShadowGen: 0, scShadowVer: 0, scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {},
     scTr() { throw Error('Engine access forbidden'); },
     Planck: { getProperty() { throw Error('Engine access forbidden'); } }
 });
@@ -363,7 +368,12 @@ const cue = scNextCueInfo(2); // must not read Engine or invent a constant-BPM g
 assert.equal(cue.text, '0.3');
 assert.equal(cue.label, 'DROP'); assert.equal(cue.color, '#123456');
 assert.strictEqual(scNextCueInfo(2), cue); // retain shadow display object caching
+assert.equal(scCueTickFor(2), 0); // a resting shadow deck's countdown has no clock at all
+scShadowDisplay[2].playing = true;
 assert.equal(scCueTickFor(2), 17); // a shadow countdown must not depend on stopped local Engine clocks
+assert.equal(scShadowAnyPlaying(scShadowDisplay), true);
+scShadowDisplay[2].stale = true; assert.equal(scCueTickFor(2), 0); assert.equal(scShadowAnyPlaying(scShadowDisplay), false);
+scShadowDisplay[2].playing = false; scShadowDisplay[2].stale = false;
 assert.equal(scNextCueInfo(4), null);
 const grid = scShadowGrid(2, meta, 900, 1600);
 assert.deepEqual(grid, beats.slice(1, 3));
@@ -416,6 +426,220 @@ assert.equal(scShadowCuesFor(2,scShadowData(2)).find(c=>c.i===0).ms,1000);
 assert.equal(scShadowNextCue(2),null);
 """)
 
+    def test_equivalent_replies_do_not_republish_shadow_state(self):
+        self.js(r"""
+scShadowApplyAll([{deck:2,key:'A',playing:false,positionMs:1000,at:now,cues:[{i:1,p:4800,n:'X',c:'#fff'}]}]);
+requests[0].finish(200,{key:'A',durationMs:60000,beats:[]});
+const map = scShadowDisplay, s = scShadowData(2), cues = s.liveCues;
+now += 250; // paused heartbeat: new arrays from JSON.parse, same picture
+scShadowApplyAll([{deck:2,key:'A',playing:false,positionMs:1000,at:now,cues:[{i:1,p:4800,n:'X',c:'#fff'}]}]);
+assert.strictEqual(scShadowDisplay, map); // no binding of any shadow layer re-evaluates
+assert.strictEqual(scShadowData(2), s);
+assert.strictEqual(s.liveCues, cues);
+assert.equal(s.at, now); // anchor refreshed in place: never expires while the peer is alive
+scShadowApplyAll([{deck:2,key:'A',playing:true,positionMs:1000,at:now}]);
+const p = scShadowData(2);
+assert.notStrictEqual(p, s); // a play edge publishes at once
+assert.strictEqual(p.meta, s.meta);
+now += 250; // steady playback on its line
+scShadowApplyAll([{deck:2,key:'A',playing:true,positionMs:1250,at:now}]);
+assert.strictEqual(scShadowData(2), p);
+assert.equal(scShadowPosition(p, now + 100), 1350);
+now += 250; // a beat jump or tempo slip is published
+scShadowApplyAll([{deck:2,key:'A',playing:true,positionMs:1530,at:now}]);
+assert.notStrictEqual(scShadowData(2), p);
+assert.equal(scShadowPosition(scShadowData(2), now), 1530);
+const q = scShadowData(2);
+scShadowApplyAll([{deck:2,key:'A',playing:true,positionMs:1530,at:now,stale:true}]);
+assert.notStrictEqual(scShadowData(2), q); // the stale flag is part of the picture
+assert.equal(requests.length, 1); // complete metadata is never re-fetched per reply
+""")
+
+    def test_pending_detail_refetch_backs_off(self):
+        self.js(r"""
+scShadowApplyAll([{deck:2,key:'A'}]);
+requests[0].finish(200,{key:'A',detailPending:true,beats:[]});
+const firstMeta=scShadowData(2).meta, firstMap=scShadowDisplay;
+now+=1999; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,1);
+now+=1; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,2); // 2 s
+requests[1].finish(200,{key:'A',detailPending:true,beats:[]});
+assert.strictEqual(scShadowData(2).meta,firstMeta); // the same pending reply: no new meta, no delegate churn
+assert.strictEqual(scShadowDisplay,firstMap);
+now+=3999; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,2);
+now+=1; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,3); // 4 s
+requests[2].finish(200,{key:'A',detailPending:true,beats:[]});
+now+=7999; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,3);
+now+=1; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,4); // 8 s
+requests[3].finish(200,{key:'A',detailPending:true,beats:[]});
+now+=1000; scShadowApplyAll([{deck:2,key:'A'}]); assert.equal(requests.length,4); // still pending: no re-read
+scShadowApplyAll([{deck:2,key:'A',displayDetail:true}]); assert.equal(requests.length,5); // stream-sync has it: at once
+requests[4].finish(200,{key:'A',detailPending:false,detail:true,beats:[]});
+assert.notStrictEqual(scShadowData(2).meta,firstMeta); assert.equal(scShadowData(2).meta.detail,true);
+now+=60000; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,5);
+""")
+
+    def test_sender_filters_block_quantised_positions(self):
+        self.js(r"""
+// Engine moves TrackPosition in blocks (up to ~36 ms of track time measured at +59.5 %, 45 here): the
+// posted line must not carry that noise (no re-anchoring full posts).
+let bodies=[], pings=0, t0=now, playing=false;
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(this.url.endsWith('/alive'))pings++;else bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+const truth=()=>playing?(now-t0)*1.595:0, block=45;
+globalThis.scTr=path=>({
+    get value(){return path.endsWith('/SampleRate')?1000:0},
+    get unnormalized(){return path.endsWith('/TrackPosition')?Math.floor(truth()/block)*block:path.endsWith('/OriginalBPM')?82:path.endsWith('/CurrentBPM')?82*1.5954:0},
+    get state(){return path.endsWith('/SongLoaded')||(path.endsWith('/PlayState')&&playing)},
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':path.endsWith('/SpeedState')?'59.54':''}, color:'#ffffff'});
+const tick=ms=>{for(let t=0;t<ms;t+=40){now+=40;scShadowTick();}};
+tick(400); playing=true; t0=now; tick(40);
+const start=bodies.length;
+tick(20000);
+assert(bodies.length-start<=5, 'noisy positions re-anchored '+(bodies.length-start)+' times in 20 s');
+// What the peer extrapolates (the newest full post) stays within a few ms of the
+// true playhead; the raw sample would anchor anywhere up to a block behind.
+const b=bodies[bodies.length-1][0], seen=b.positionMs+(now-b.at)*(1+b.pitch/100);
+assert(Math.abs(seen-truth())<=8, 'peer line off by '+(seen-truth()));
+""")
+
+    def test_late_song_name_is_not_cached_empty(self):
+        self.js(r"""
+let bodies=[], title='';
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(!this.url.endsWith('/alive'))bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,unnormalized:0,state:path.endsWith('/SongLoaded'),
+    get string(){return path.endsWith('/TrackUri')?'file:///new.mp3':path.endsWith('/SongName')?title:''},color:'#fff'});
+now+=40; scShadowTick(); assert.equal(bodies.length,1); assert.equal(bodies[0][0].title,''); // loaded before Engine named it
+title='Late Name'; now+=520; scShadowTick();
+assert.equal(bodies.length,2); assert.equal(bodies[1][0].title,'Late Name'); // next heartbeat, not 2 s later
+""")
+
+    def test_unchanged_version_keeps_samples_alive_without_parsing(self):
+        self.js(r"""
+let header='5:true:13:false:false:ab', parsed=0;
+globalThis.scShadowPollTimer={interval:0,restart(){}};
+XMLHttpRequest.prototype.getResponseHeader=()=>header;
+const realParse=JSON.parse; JSON.parse=s=>{parsed++;return realParse(s)};
+scShadowPoll();requests[0].finish(200,{role:'13',displayOnly:true,ver:5,decks:[{deck:2,key:'A',playing:true,positionMs:1000,at:now}]});
+assert.equal(parsed,1); const s=scShadowData(2);
+now+=10000;
+for(let i=0;i<5;i++){scShadowPoll();requests[0].responseText='{"never":"read"}';requests[0].finish(200,{});} // finish stringifies; the QML must not parse
+assert.equal(parsed,1,'an unchanged version was parsed');
+assert.equal(scShadowLive.seen,now);
+assert.equal(scShadowPosition(s,now),11000); // carried on 10 s: stream-sync vouches for it
+now+=4000;
+assert.equal(scShadowPosition(s,now),14000); // 3 s after the last confirmation it stops
+JSON.parse=realParse;
+""")
+
+    def layer_js(self):
+        """The real SHADOW_LAYER functions, bound to a mock QML scope with `with`."""
+        layer = bp.SHADOW_LAYER
+        parts = []
+        for name in ("contentX", "refreshSample", "refreshPosition", "restartScroll", "refreshDetails"):
+            m = re.search(r"(?m)^        function " + name + r"\(", layer)
+            self.assertIsNotNone(m, name)
+            line_end = layer.index("\n", m.start())
+            end = line_end if layer[m.start():line_end].rstrip().endswith("}") else layer.index("\n        }", m.start()) + 10
+            parts.append("scope." + name + " = " + layer[m.start():end].strip())
+        for handler in ("onMetaChanged", "onLiveChanged"):
+            m = re.search(r"(?m)^        " + handler + r": (.*)$", layer)
+            body = m.group(1)
+            if body.startswith("{"):
+                body = layer[m.start(1):layer.index("\n        }", m.start(1)) + 10].strip()
+            parts.append("scope." + handler + " = function() " + (body if body.startswith("{") else "{ " + body + " }"))
+        return "with (scope) {\n" + "\n".join(parts) + "\n}\n"
+
+    def test_shadow_layer_scroll_settle_and_grid_pool_behaviour(self):
+        self.js(r"""
+const starts=[];
+const scroll={running:false,from:0,to:0,duration:0,stop(){this.running=false},start(){this.running=true;starts.push({from:this.from,to:this.to,duration:this.duration})}};
+const scMoving={x:0};
+const beats=[]; for(let i=0;i<660;i++) beats.push({ms:i*300,number:i}); // ~53 beats per window: not a power of two
+const meta={key:'A',durationMs:200000,waveformDurationMs:200000,beats,cues:[],loops:[],detail:true,waveformWidth:20480,tileWidth:2048,waveformTiles:Array(10).fill('/t.png')};
+let metaValue=null;
+const scope={live:true,visible:true,wave:true,overview:false,graphical:true,deck:2,sample:null,cues:scShadowEmptyArray,loops:scShadowEmptyArray,
+  position:0,stale:false,cueInfo:null,grid:scShadowEmptyArray,gridAnchor:-Infinity,gridSlots:0,tileLo:0,tileHi:31,scrollFrom:0,scrollAt:0,scrollSpeed:0,width:1000,
+  scroll,scMoving,root:globalThis,
+  get meta(){return metaValue}, set meta(v){if(v!==metaValue){metaValue=v;scope.onMetaChanged()}},
+  get duration(){return metaValue&&metaValue.durationMs>0?metaValue.durationMs:1},
+  get waveformDuration(){return metaValue&&metaValue.waveformDurationMs>0?metaValue.waveformDurationMs:this.duration},
+  get span(){return 8000}, get playhead(){return 0.5}, get start(){return this.position-this.span*this.playhead},
+  get totalPixels(){return metaValue?metaValue.waveformWidth:0}, get tilePixels(){return metaValue?metaValue.tileWidth:2048}};
+""" + self.layer_js() + r"""
+const sample=(pos,playing,extra)=>Object.assign({key:'A',meta,positionMs:pos,at:now,playing,pitch:0,stale:false},extra||{});
+scope.sample=sample(10000,true); scope.refreshSample();
+assert.strictEqual(scope.meta,meta);
+assert.equal(starts.length,1); // one render-thread scroll to the end of the track
+assert.equal(starts[0].from,scope.contentX(10000)); assert.equal(starts[0].to,scope.contentX(200000)); assert.equal(starts[0].duration,190000);
+// Grid pool: power of two above the window's beats; tiles under the window only.
+assert(scope.grid.length>0 && scope.gridSlots>=scope.grid.length && (scope.gridSlots&(scope.gridSlots-1))===0 && scope.gridSlots>=32);
+assert.equal(scope.tileLo,0); assert.equal(scope.tileHi,Math.floor((6000+12000)/20000));
+now+=200; scope.refreshPosition(); assert.equal(starts.length,1); // on its line: keeps running
+scope.sample=sample(10000+200+20,true); scope.refreshSample(); assert.equal(starts.length,2); // 20 ms off: restarted
+scope.sample=sample(10220,true,{pitch:8}); scope.refreshSample(); assert.equal(starts.length,3); // new speed: restarted
+// CUE released back on its spot: a 1 ms settle to x, never a bare x write the write-back would undo.
+scope.sample=sample(10000,false); scope.refreshSample();
+const settle=starts[starts.length-1];
+assert.equal(starts.length,4); assert.equal(settle.from,scope.contentX(10000)); assert.equal(settle.to,settle.from); assert.equal(settle.duration,1);
+assert.equal(scope.scrollSpeed,0);
+scroll.running=false; scope.refreshPosition(); assert.equal(starts.length,4); // settled: nothing more
+scope.sample=sample(12000,false); scope.refreshSample(); assert.equal(starts.length,4); assert.equal(scMoving.x,scope.contentX(12000)); // paused seek, no animation running
+scope.sample=sample(12000,true); scope.refreshSample(); assert.equal(starts.length,5);
+scope.restartScroll(); assert.equal(starts.length,6); // zoom/size/visibility: a fresh line
+// Grid window moves with the playhead, the pool never shrinks while shown.
+const slots=scope.gridSlots; scope.position=60000; scope.refreshDetails();
+assert(scope.grid[0].ms>=60000-4000-4000-1 && scope.gridSlots===slots && scope.tileLo===Math.floor((56000-4000)/20000));
+scope.live=false; scope.onLiveChanged(); assert.equal(scope.gridSlots,0); // hidden layer: no delegates
+// track/performance layers recompute cueInfo on every sample.
+let asked=0; const ci={text:'1.1'}; globalThis.scNextCueInfo=(d,t)=>{asked++;return ci};
+scope.live=true; scope.wave=false; scope.graphical=false; scope.sample=sample(1000,false); scope.refreshSample();
+assert.strictEqual(scope.cueInfo,ci); assert.equal(asked,1);
+""")
+
+    def test_shadow_layer_moves_only_on_the_render_thread(self):
+        layer = bp.SHADOW_LAYER
+        # Hidden stock lanes must not follow the shadow state at all.
+        self.assertIn("readonly property bool live: active && inheritedVisible", layer)
+        self.assertIn("readonly property var sample: live ? root.scShadowData(deck) : null", layer)
+        # No GUI-thread position animation; the content scrolls with one XAnimator.
+        self.assertNotIn("NumberAnimation", layer)
+        self.assertIn("XAnimator { id: scroll; target: scMoving", layer)
+        moving = layer[layer.index("id: scMoving"):layer.index("} // scMoving")]
+        self.assertNotRegex(moving, r"(?m)^\s*x:\s*-?\s*scDisplay\.(start|position)")
+        # Markers, loops and tiles sit in track coordinates: their x never depends on time.
+        for x in re.findall(r"(?m)^\s*(?:x|readonly property real clip\w+):\s*(.+)$", moving):
+            self.assertNotRegex(x, r"scDisplay\.(start|position|playhead)\b", x)
+        # var properties notify on every write: copy only changed objects.
+        for name in ("meta", "cues", "loops", "grid", "cueInfo"):
+            self.assertNotRegex(layer, r"readonly property var " + name + r":")
+        self.assertIn("if (m !== meta) meta = m", layer)
+        self.assertIn("if (rows !== grid) grid = rows", layer)
+        self.assertIn("model: scDisplay.loops", layer)
+        # 7c29415: an empty shadow slot runs no 200 ms clock.
+        self.assertIn("running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null", layer)
+        self.assertIn("scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered", layer)
+        self.assertIn('Binding { target: scDisplay.owner; property: "opacity"; value: 0; when: scDisplay.visible; restoreMode: Binding.RestoreBindingOrValue }', layer)
+        self.assertIn("layer.enabled: live && !wave", layer)
+        self.assertIn("onVisibleChanged: { restartScroll(); if (visible) refreshDetails() }", layer)
+        # Grid lines are a pool: a new grid window must not recreate the delegates.
+        self.assertIn("model: scDisplay.gridSlots", layer)
+        self.assertNotIn("model: scDisplay.grid\n", layer)
+        self.assertIn("scDisplay.grid[index]", layer)
+        # Off-window tiles are not drawn; the window moves with the grid, not per frame.
+        self.assertIn("visible: index >= scDisplay.tileLo && index <= scDisplay.tileHi", layer)
+        self.assertIn("model: scDisplay.cues", layer)
+
     def test_legacy_polls_are_not_skipped_by_display_version_cache(self):
         self.js(r"""
 let applied=0, header='1:false:13:false:false';
@@ -440,14 +664,18 @@ assert.equal(requests.length,0);
 
     def test_sampling_reuses_buffers_and_post_transport(self):
         self.js(r"""
-let created=0;
+let created=0, full=0, pings=0;
 globalThis.XMLHttpRequest=class {
     constructor(){created++;this.readyState=0;}
-    open(method,url){assert.equal(method,'POST');this.readyState=1;}
-    send(body){assert.equal(JSON.parse(body).length,2);this.readyState=4;}
+    open(method,url){assert.equal(method,'POST');this.url=url;this.readyState=1;}
+    send(body){
+        if(this.url.endsWith('/decks/alive')){assert.equal(body,undefined);pings++}
+        else{assert(this.url.endsWith('/decks'));assert.equal(JSON.parse(body).length,2);full++}
+        this.readyState=4;this.status=this.url.endsWith('/alive')?204:200;if(this.onreadystatechange)this.onreadystatechange();}
 };
 globalThis.scShadowPoll=()=>{};
-globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,unnormalized:0,state:false,string:'',color:'#ffffff'});
+let strings=0;
+globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,unnormalized:0,state:path.endsWith('/SongLoaded'),get string(){strings++;return path.endsWith('/TrackUri')?'file:///a.mp3':''},color:'#ffffff'});
 scShadowTick();const first=scShadowPrev[1], own=scShadowOwn, post=scShadowPostRequest;
 now+=40;scShadowTick();const second=scShadowPrev[1];
 assert.notStrictEqual(first,second);
@@ -455,6 +683,158 @@ now+=40;scShadowTick();assert.strictEqual(scShadowPrev[1],first);
 for(let i=0;i<100;i++){now+=40;scShadowTick();}
 assert.strictEqual(scShadowOwn,own);assert.strictEqual(scShadowPostRequest,post);
 assert.equal(created,1);
+// 4 s at 25 Hz, 2 decks: each tick used to read SpeedState, TrackUri and SyncMode
+// (600 JS strings); only changes and the slow refresh re-read them now.
+assert(strings < 120, 'string reads ' + strings);
+assert.equal(scShadowPrev[1].net, 'file:///a.mp3');
+// 4 s of unchanged paused decks: one full post, then pings only (no JSON).
+assert.equal(full, 1); assert(pings >= 7 && pings <= 9, 'pings ' + pings);
+for(let i=0;i<30;i++){now+=40;scShadowTick();}
+assert.equal(full, 2); // at least one full post every 5 s
+scShadowPostRequest.status=409; scShadowPostRequest.onreadystatechange(); // stream-sync lost our decks
+now+=520;scShadowTick(); assert.equal(full, 3);
+""")
+
+    def test_sender_posts_changes_and_pings_steady_playback(self):
+        self.js(r"""
+let bodies=[], pings=0, pos=0, playing=false, cueName='A';
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(this.url.endsWith('/alive'))pings++;else bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+globalThis.scTr=path=>({
+    get value(){return path.endsWith('/SampleRate')?48000:path.endsWith('QuickCue1Position')?96000:0},
+    get unnormalized(){return path.endsWith('/TrackPosition')?pos:path.endsWith('BPM')?120:0},
+    get state(){return path.endsWith('/SongLoaded')||path.endsWith('QuickCue1Exists')||(path.endsWith('/PlayState')&&playing)},
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':path.endsWith('QuickCue1Name')?cueName:''}, color:'#ffffff'});
+const tick=ms=>{for(let t=0;t<ms;t+=40){now+=40;if(playing)pos+=40*48;scShadowTick();}};
+tick(1000); const n0=bodies.length; assert.equal(n0,1);
+playing=true; tick(40); assert.equal(bodies.length,2); assert.equal(bodies[1][0].playing,true); // play edge at once
+tick(4000); assert.equal(bodies.length,2,'steady playback must only ping'); assert(pings>=8);
+pos-=48*20; tick(40); assert.equal(bodies.length,2); // a sample one block (20 ms) behind: still a ping
+pos+=48*20; tick(6000); assert.equal(bodies.length,3); // the 5 s full post stays on the same line
+const b2=bodies[2][0], b1=bodies[1][0];
+assert(Math.abs(b2.positionMs-(b1.positionMs+(b2.at-b1.at)))<2, 'safety post moved the line');
+pos+=48*200; tick(40); assert.equal(bodies.length,4); // a 200 ms slip: full post at once
+assert(Math.abs(bodies[3][0].positionMs-pos/48)<1e-6);
+cueName='DROP'; tick(2600); assert.equal(bodies.length,5); assert.equal(bodies[4][0].cues[0].n,'DROP'); // a renamed cue
+""")
+
+    def test_view_autosave_snapshots_only_after_a_change(self):
+        fns = []
+        for name in ("scViewCheck", "scViewMark"):
+            m = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
+            self.assertIsNotNone(m, name)
+            line_end = bp.SERVICES_MAIN.index("\n", m.start())
+            end = line_end if bp.SERVICES_MAIN[m.start():line_end].rstrip().endswith("}") else bp.SERVICES_MAIN.index("\n\t}", m.end()) + 3
+            fns.append(bp.SERVICES_MAIN[m.start():end])
+        self.assertIn("onScWaveChanged: scViewDirty = true", bp.SERVICES_MAIN)
+        self.assertIn("root.scViewCheck(Date.now())", bp.SERVICES_MAIN)
+        js = r"""
+const assert = require('assert');
+globalThis.root = globalThis;
+let snaps = 0, saves = 0, hooks = 0, view = {deckCount: '4 Decks'};
+Object.assign(globalThis, {scViewQuiet: 0, scViewHooked: false, scViewDirty: true, scViewCheckAt: 0, scViewLast: '',
+    scViewHook() { hooks++; scViewHooked = true }, scViewSnapshot() { snaps++; return Object.assign({}, view) }, scViewSave() { saves++ }});
+""" + "\n".join(fns) + r"""
+let now = 100000;
+scViewQuiet = now + 3000; scViewCheck(now); assert.equal(snaps, 0); // an applied view settles first
+now += 4000; scViewCheck(now); assert.equal(hooks, 1); assert.equal(snaps, 1); assert.equal(scViewLast, '{"deckCount":"4 Decks"}');
+for (let i = 0; i < 10; i++) { now += 2000; scViewCheck(now); }
+assert.equal(snaps, 1, 'no change signal: no snapshot');
+view.deckCount = '2 Decks'; scViewMark(); now += 2000; scViewCheck(now);
+assert.equal(snaps, 2); assert.equal(saves, 1); assert.equal(hooks, 1);
+now += 2000; scViewCheck(now); assert.equal(snaps, 2);
+now += 30000; scViewCheck(now); assert.equal(snaps, 3, 'a missed signal is caught within 30 s');
+"""
+        res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_sender_tick_rate_follows_activity(self):
+        self.js(r"""
+let bodies=[], pings=0, pos=0, playing=false, cue=false, wakes=[];
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(this.url.endsWith('/alive'))pings++;else bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+const sig=()=>({connect(f){wakes.push(f)}});
+globalThis.scTr=path=>({
+    get value(){return path.endsWith('/SampleRate')?48000:0},
+    get unnormalized(){return path.endsWith('/TrackPosition')?pos:path.endsWith('BPM')?120:0},
+    get state(){return path.endsWith('/SongLoaded')||(path.endsWith('/PlayState')&&playing)||(path.endsWith('/CueLEDState')&&cue)},
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':''}, color:'#ffffff', stateChanged: sig()});
+// The timer fires at whatever interval the sender asked for.
+const run=ms=>{const end=now+ms;while(now<end){const dt=scShadowTickTimer.interval;now+=dt;if(playing||cue)pos+=dt*48;scShadowTick();}};
+run(400);
+run(3000); assert.equal(scShadowTickTimer.interval,200,'resting decks sample at 5 Hz');
+assert.equal(wakes.length,8); // PlayState and CueLEDState per deck (own deck 1 first)
+playing=true; wakes[0](); assert.equal(scShadowTickTimer.interval,40,'a play press wakes the sender at once');
+const n=bodies.length; run(40); assert.equal(bodies.length,n+1); assert.equal(bodies[n][0].playing,true);
+run(2500); assert.equal(scShadowTickTimer.interval,80,'steady playback samples at 12.5 Hz');
+const p0=pings; run(4000); assert(pings-p0>=6,'heartbeats keep at least ~2 Hz'); assert.equal(scShadowTickTimer.interval,80);
+pos+=48*500; run(80); assert.equal(scShadowTickTimer.interval,40,'a jump goes back to 25 Hz');
+playing=false; run(2500); assert.equal(scShadowTickTimer.interval,200);
+pos+=48*300; run(200); assert.equal(scShadowTickTimer.interval,40,'a paused seek or scrub samples at 25 Hz');
+run(2500); assert.equal(scShadowTickTimer.interval,200);
+cue=true; wakes[1](); run(1000); assert.equal(scShadowTickTimer.interval,40); // CUE preview: moving with PlayState false
+run(3000); assert.equal(scShadowTickTimer.interval,40,'a held CUE preview keeps 25 Hz');
+cue=false; run(2500); assert.equal(scShadowTickTimer.interval,200);
+""")
+
+    def test_safe_gc_only_when_nothing_plays(self):
+        self.js(r"""
+let runs=0, plays=[false,false,false,false], cmds=[false,false,false,false], lengths=[0,0,0,0];
+globalThis.gc=()=>runs++;
+globalThis.scTr=path=>{const d=+path[12]-1;return path.endsWith('/PlayState')?{get state(){return plays[d]}}:path.endsWith('/Play')?{get state(){return cmds[d]}}:{get unnormalized(){return lengths[d]}}};
+// A held CUE preview sounds and scrolls with PlayState false (scShadowTick's sample),
+// and the Play command leads PlayState: neither may collect.
+scShadowPrev[1]={playing:true};
+for(let i=0;i<10;i++){now+=500;scGcCheck();}
+assert.equal(runs,0);
+scShadowPrev[1]={playing:false}; cmds[2]=true;
+for(let i=0;i<10;i++){now+=500;scGcCheck();}
+assert.equal(runs,0);
+cmds[2]=false; scGcState.armed=false; // back to the scenario below
+const missing=globalThis.scTr; globalThis.scTr=()=>null; scGcProps=null;
+for(let i=0;i<10;i++){now+=500;assert.equal(scGcCheck(),false);} // Engine decks not built yet: never blind
+globalThis.scTr=missing;
+plays[0]=true;
+for(let i=0;i<10;i++){now+=500;scGcCheck();}
+assert.equal(runs,0); // never while a local deck plays
+plays[0]=false; now+=500; scGcCheck(); now+=1000; scGcCheck();
+assert.equal(runs,0); // 1.5 s settle after the stop
+now+=500; scGcCheck(); assert.equal(runs,1);
+for(let i=0;i<40;i++){now+=500;scGcCheck();}
+assert.equal(runs,1); // once per stop, not periodically
+lengths[1]=12345; now+=500; scGcCheck(); assert.equal(runs,1);
+now+=1500; scGcCheck(); assert.equal(runs,2); // a finished load collects once
+scShadowDisplay[2]={playing:true,stale:false};
+lengths[1]=777; now+=500; scGcCheck();
+for(let i=0;i<20;i++){now+=500;scGcCheck();}
+assert.equal(runs,2); // a playing shadow deck blocks it too, and the load is dropped
+scShadowDisplay[2]={playing:false,stale:false};
+for(let i=0;i<4;i++){now+=500;scGcCheck();}
+assert.equal(runs,3); // the stop of that shadow deck
+scGcLoadSeq++; now+=500; scGcCheck(); now+=1500; scGcCheck();
+assert.equal(runs,3); // at most one collection per 3 s
+now+=1000; scGcCheck(); assert.equal(runs,4); // display data of a peer load
+for(let i=0;i<11;i++){now+=500;scGcCheck();}
+assert.equal(runs,4);
+now+=500; scGcCheck(); assert.equal(runs,5); // once more 6 s after a load: Engine's own load garbage
+for(let i=0;i<40;i++){now+=500;scGcCheck();}
+assert.equal(runs,5); // and only once
+lengths[2]=4242; now+=500; scGcCheck(); now+=1500; scGcCheck(); assert.equal(runs,6);
+plays[3]=true; now+=500; scGcCheck(); plays[3]=false;
+for(let i=0;i<13;i++){now+=500;scGcCheck();}
+assert.equal(runs,7); // a play in between drops the follow-up (this one is the stop)
+for(let i=0;i<20;i++){now+=500;scGcCheck();}
+assert.equal(runs,7);
 """)
 
 
