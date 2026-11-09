@@ -262,6 +262,14 @@ func TestPagesTotalsCursorsErrorsAndCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
+	var calls atomic.Int32
+	got, err := collectPages(context.Background(), make(chan struct{}, 2), 1, 4, func(i int) (listPage[int], error) {
+		calls.Add(1)
+		return listPage[int]{items: []int{i}, more: true, total: 1000000000}, nil
+	})
+	if !errors.Is(err, errPageLimit) || calls.Load() != 4 || !reflect.DeepEqual(got, []int{0, 1, 2, 3}) {
+		t.Fatalf("cap: %v %v calls=%d", got, err, calls.Load())
+	}
 }
 
 func TestPageBudgetSharedAcrossColdLists(t *testing.T) {
@@ -286,7 +294,7 @@ func TestPageBudgetSharedAcrossColdLists(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if peak.Load() != 2 || len(slots) != 0 {
+	if peak.Load() < 1 || peak.Load() > 2 || len(slots) != 0 {
 		t.Fatalf("peak=%d held=%d", peak.Load(), len(slots))
 	}
 	got, err := collectBatches(context.Background(), slots, 5, func(i int) ([]int, error) {

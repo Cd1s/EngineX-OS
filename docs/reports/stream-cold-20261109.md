@@ -9,7 +9,7 @@
 - 不猜 SoundCloud/Apple 的游标，不提前发布前缀。错误/429 不重试，最多已有同波另一请求在飞；不会发布失败页之后的结果。Deezer/Spotify/网易云保留整次失败；Beatport、SoundCloud Web 保留成功前缀。过小的陈旧总数不会截断仍有 next 的列表，超出已知范围后继续串行；总数过大仍受原分页上限约束。
 - 上限是**分页/批量详情**请求数；Spotify liked 总数探测、网易云收藏专辑/电台等已有独立元数据探测保持原逻辑。不是整个平台所有 HTTP 的统一 QPS 限流器。真实账号 429 仍需 PM 测量；若出现，应将该平台并发调为 1，不能盲目重试。
 - 网关在整表后才按 BPM/key/title/rating 等排序并分页。直接先返回平台首屏会改变全局排序。本轮选择完整列表并行取回；没有新增 partial-cache 状态或改变 TTL、后台刷新、磁盘策略、session 隔离、singleflight。原缓存和排序测试继续通过。
-- `Jobs.File` 可发现缺少 `.sources.json` 索引的已完成文件：Deezer 仅正整数 ID，网易云/Spotify/Beatport 仅自己的前缀；先通过已有 `Cached` 的音频检查。`knownCodec`/`Fetch` 因而直接命中，避免进入音源获取和同步封面抓取。已有来源索引的 Deezer↔网易云 Deemix 共享及网易云 official 隔离继续适用。不把网易云 ID 当 Deezer ID，也不根据 ISRC 猜本地共享关系。SoundCloud 的 lossless/Go+ 回退保持原路径。
+- `Jobs.File` 可发现缺少 `.sources.json` 索引的已完成文件：Deezer 仅正整数 ID，网易云/Spotify/Beatport 仅自己的前缀；先通过已有 `Cached` 的音频检查。`knownCodec`/`Fetch` 因而直接命中，避免进入音源获取和同步封面抓取。已有来源索引的 Deezer↔网易云 Deemix 共享及网易云 official 隔离继续适用。不把网易云 ID 当 Deezer ID，也不根据 ISRC 猜本地共享关系。SoundCloud 的 lossless/Go+ 回退保持原路径；Beatport 无损模式下的 AAC→无损升级仍交给原获取逻辑。
 
 ## 冷启动请求数与往返估算
 
@@ -19,7 +19,7 @@ R=一次上游请求耗时；P=该接口页数；B=详情批次数；L=Apple 已
 | --- | --- | --- |
 | Deezer 歌单 / 曲目（100/页） | P；P×R | P；W(P)×R |
 | Spotify 歌单（50/页） | P+1；P×R（liked 探测并行） | P+1；W(P)×R（探测慢时仍需等它） |
-| Spotify 曲目（100/页）/likes（50/页） | P；P×R | P；W(P)×R；首个 `/items` 404/410 的兼容 fallback 各另加 1×R |
+| Spotify 曲目（100/页）/likes（50/页） | P；P×R | P；W(P)×R；首个 `/items` 404/405 的兼容 fallback 各另加 1×R |
 | 网易云曲目（200/批） | 1+B；(1+B)×R | 1+B；(1+ceil(B/2))×R |
 | 网易云歌单目录 | P+A+D；max(P,A,D)×R | 相同；没有可依赖总数 |
 | 网易云专辑 / 电台曲目 | 1 / P；1 / P×R | 相同；电台仍最多 500 个节目 |
@@ -81,7 +81,7 @@ Batam 检查通过：`gofmt -l .` 无输出；`go vet ./...` 退出 0；`go test
 
 ## PM 空出碟机后执行
 
-脚本 `tools/measure-stream-cold-20261109.py` 仅调用指定的 `sshctl run Oracle-Batam-arm --no-stdin --argv sh -c 'deck L/R ...'`。不切 scope、不登录、不清缓存、不改文件；输出仅 code/TTFB/total 或匿名文件数/字节数。UUID 从当前 Engine 已显示歌单取得，不输出列表响应、日志正文、媒体地址或任何凭据。
+脚本 `tools/measure-stream-cold-20261109.py` 仅调用指定的 `sshctl run Oracle-Batam-arm --no-stdin --argv sh -c 'deck L/R ...'`。不切 scope、不登录、不清缓存、不改文件；元数据 GET 仍可能沿原逻辑触发最多 12 张封面的后台内存预热，并非完全没有出站请求。输出仅 code/TTFB/total 或匿名文件数/字节数。UUID 从当前 Engine 已显示歌单取得，不输出列表响应、日志正文、媒体地址或任何凭据。
 
 ```sh
 # 左/右分别用当前 scope 下已经显示的真实 playlist UUID。
