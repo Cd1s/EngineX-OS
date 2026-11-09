@@ -593,6 +593,38 @@ func TestInstallArchiveAcceptsPaxGlobalHeader(t *testing.T) {
 	}
 }
 
+func TestInstallArchiveKeepsExecBitsOnly(t *testing.T) {
+	var b bytes.Buffer
+	gz := gzip.NewWriter(&b)
+	tw := tar.NewWriter(gz)
+	for _, f := range []struct {
+		name string
+		mode int64
+		body string
+	}{{"mod.json", 0644, `{"id":"bin-mod","script":"start.sh"}`}, {"start.sh", 0644, "exit 0"}, {"server", 04755, "ELF"}} {
+		_ = tw.WriteHeader(&tar.Header{Name: f.name, Mode: f.mode, Size: int64(len(f.body))})
+		_, _ = tw.Write([]byte(f.body))
+	}
+	tw.Close()
+	gz.Close()
+	mgr := NewManager("", filepath.Join(t.TempDir(), "ui"))
+	mgr.runScript = func(Mod, string) error { return nil }
+	mod, err := mgr.InstallArchive(&b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(filepath.Join(mod.Dir, "server"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode()&0100 == 0 || st.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		t.Fatalf("server mode = %v, want executable without setuid", st.Mode())
+	}
+	if st, _ := os.Stat(filepath.Join(mod.Dir, "start.sh")); st.Mode()&0111 != 0 {
+		t.Fatalf("start.sh mode = %v, want not executable", st.Mode())
+	}
+}
+
 func TestUninstallSurvivesFailingStopAndStartEnabledRuns(t *testing.T) {
 	mgr := NewManager("", filepath.Join(t.TempDir(), "ui"))
 	var actions []string
