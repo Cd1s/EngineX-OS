@@ -120,6 +120,20 @@ Stage 2 PRIME4PLUS Engine hook: PASS (19 memory edits, UI pack loaded)
 The initial JC11S run also passed before installer hardening. No change to the
 bundle's activation implementation is justified by these results.
 
+The **published v5.3.0.3 PRIME4PLUS data bundle** was then tested separately,
+using the GitHub asset whose SHA-256 is
+`f67d214cfbe4512d9afb37ff82baec8d3ffa814085594bdd05d8aa3ab0d0e3fd`.
+Its download matched that digest. With this actual released hook and data
+payload, host injection (867 files), the official JC11S blank/existing mkfs and
+fscrypt checks, and Stage 1 ALSA boot activation all passed. This additional run
+ended after Stage 1; the 19-edit/UI-pack Stage 2 assertion above uses the current
+integration hook. The ALSA one-shot activation source between its #61/#67 and
+#119 markers is byte-identical in `b941ea4` and `dfdef97` (SHA-256
+`22c6052b442f00e19ad22be9709ece2898044242cb37c088c75d0effaf100941`).
+Thus the released bootstrap itself also works in this sandbox; the integrated
+discovery fixes must not be described as a demonstrated fix for the reporter's
+post-reboot symptom.
+
 Required checks passed on the ARM build/test host:
 
 ```text
