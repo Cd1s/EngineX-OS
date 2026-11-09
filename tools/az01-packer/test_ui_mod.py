@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import tarfile
 import unittest
 from pathlib import Path
 
@@ -213,6 +214,29 @@ globalThis.XMLHttpRequest = class {
         res = subprocess.run(["node", "-e", setup + "\n".join(functions) + "\n" + body], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
+    def test_cdj_cached_analysis_uses_normal_display_and_console_free_lanes(self):
+        self.js(r"""
+scPlayer = false; scFourDeckRole = '12';
+assert.equal(scDeckLocked(3), false); assert.equal(scDeckLocked(4), false);
+scShadowApplyAll([{deck:3,key:'cdj:fixture',metadataOnly:true,title:'CDJ'}, {deck:1,key:'local'}]);
+assert.equal(requests.length, 0); assert.equal(scShadowData(1), null);
+assert.equal(scDeckLocked(3), true); assert.equal(scDeckLocked(4), false);
+// Analysis may arrive later for the same track, without loading it in Engine.
+scShadowApplyAll([{deck:3,key:'cdj:fixture',metadataOnly:false,playing:true,at:now,positionMs:500}]);
+assert.equal(requests.length, 1);
+assert.ok(requests[0].url.includes('/shadow/display?deck=3'));
+requests[0].finish(200,{key:'cdj:fixture',sampleRate:44100,durationMs:4000,detail:true,
+    beats:[{ms:0,number:0},{ms:500,number:1},{ms:1000,number:2}],cues:[],waveformUrl:'/wave.png'});
+assert.equal(scShadowPosition(scShadowData(3), now+100),600);
+assert.equal(scShadowGrid(3, scShadowData(3).meta, 0, 1500).length,3);
+assert.equal(scShadowVisible(3),true); assert.equal(scDeckLocked(1),false); assert.equal(scDeckLocked(2),false);
+scShadowApplyAll([{deck:4,key:'peer:fixture'}]);
+assert.equal(scDeckLocked(3),false); assert.equal(scDeckLocked(4),true);
+scShadowApplyAll([]);
+assert.equal(scDeckLocked(3),false); assert.equal(scDeckLocked(4),false);
+assert.deepEqual(legacy,[]);
+""")
+
     def test_safe_default_empty_path_ownership_and_legacy_opt_in(self):
         self.js(r"""
 globalThis.scShadowApply = e => legacy.push(e.deck);
@@ -226,7 +250,7 @@ assert.equal(requests.length, 1);
 assert.deepEqual(legacy, []);
 assert.deepEqual(scPressQueue, [{path: '/Engine/Deck1/RequestMaster', step: 1}]); // local controls are preserved
 assert.equal(scShadowVisible(0), false);
-scPlayer = false; // console role decks are also reserved without any loaded shadow audio
+scPlayer = false; // an existing display source reserves the console lane without audio
 assert.equal(scDeckLocked(2), true);
 assert.equal(scShadowVisible(2), true);
 scShadowApplyAll([{deck: 2, loading: true}]);
@@ -234,6 +258,8 @@ assert.equal(scShadowData(2).loading, true);
 assert.equal(requests.length, 1);
 scShadowApplyAll([]);
 assert.equal(scShadowData(2), null);
+assert.equal(scDeckLocked(2), false); // no source: a console can still load its local deck
+assert.equal(scShadowVisible(2), false);
 assert.deepEqual(legacy, []);
 scShadowApplyAll([{deck: 2, path: '/old.wav'}], false);
 assert.equal(scShadowDisplayOnly, false);
@@ -401,6 +427,28 @@ assert.equal(created,1);
 
 
 class UiModBuildTest(unittest.TestCase):
+    def test_jc11_jc11s_packs_contain_shadow_display(self):
+        # AZ01 JC11 and JC11S install the same board-independent UI packs.
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on the build host)")
+        with tempfile.TemporaryDirectory(prefix="ui-console-test-") as tmp:
+            out = Path(tmp) / "packs"
+            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                                 capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            with tarfile.open(out.with_suffix(".tar.gz")) as pack:
+                for board in ("JC11", "JC11S"):
+                    with self.subTest(board=board):
+                        for lang in ("en", "zh-Hans", "zh-Hant"):
+                            main = pack.extractfile(f"packs/{lang}/Skins/Embedded/EmbeddedMain.qml").read().decode()
+                            self.assertIn("function scShadowApplyDisplay(decks)", main)
+                            self.assertIn("s.metadataOnly", main)
+                            self.assertIn("/v1/sc5000/shadow/display?deck=", main)
+                            for component, name in (("Waveform", "waveform"), ("WaveformOverview", "overview")):
+                                wave = pack.extractfile(f"packs/{lang}/Skins/Embedded/Views/Common/{component}/{component}.qml").read().decode()
+                                self.assertIn(f'objectName: "EngineX_Shadow_{name}"', wave)
+
     def test_build_530(self):
         qrc = LAB / "5.3.0" / "qrc"
         if not qrc.is_dir():

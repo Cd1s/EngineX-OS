@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
+	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
 )
 
@@ -170,20 +171,123 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
 		}
 		out = append(out, d)
 	}
-	// CDJ compatibility is metadata-only in this mode. In particular this must
-	// not call shadowFetchCDJ, whose prerequisite is a full audio download.
-	for deck, dev := range cdjDecks(s.mergedDevices(), free, now) {
+	// Only cached rekordbox analysis is used here, never shadowFetchCDJ/audio.
+	devices := s.mergedDevices()
+	for deck, dev := range cdjDecks(devices, free, now) {
 		d := deckState{Deck: deck, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
 		if dev.TrackID != 0 {
 			d.Key = fmt.Sprintf("cdj:%s:%d:%d:%d", dev.Address, dev.SourcePlayer, dev.SourceSlot, dev.TrackID)
+			d.MetadataOnly = s.ensureCDJDisplay(dev, devices, d.Key, now) == nil
 		}
+		at := dev.LastSeen
+		sh.mu.Lock()
+		if p, ok := sh.precise[dev.Number]; ok && now.Sub(p.at) < time.Second {
+			d.PositionMS, at = p.ms, p.at
+		}
+		sh.mu.Unlock()
 		if d.Playing {
-			d.PositionMS += float64(now.Sub(dev.LastSeen).Milliseconds()) * (1 + d.Pitch/100)
+			d.PositionMS += float64(max(int64(0), now.Sub(at).Milliseconds())) * (1 + d.Pitch/100)
 		}
 		out = append(out, d)
 	}
 	slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
 	return out
+}
+
+func (s *Server) ensureCDJDisplay(dev prolink.Device, devices []prolink.Device, key string, now time.Time) *shadowDisplayEntry {
+	c := &s.shadow.display
+	c.mu.Lock()
+	if e := c.entries[key]; e != nil && e.asset != nil {
+		e.at = now
+		c.mu.Unlock()
+		return e
+	}
+	c.mu.Unlock()
+	host := net.ParseIP(dev.Address)
+	if dev.SourcePlayer != dev.Number {
+		host = sourceHost(prolink.ExportStatus{}, devices, dev.SourcePlayer)
+	}
+	var a *rekordbox.Analysis
+	var title, artist string
+	if s.prolinkExport != nil {
+		a, title, artist = s.prolinkExport.CachedAnalysis(dev, host)
+	}
+	if a == nil {
+		// rb-bridge runs in a separate process with this shared metadata cache.
+		a, title, artist = (&prolink.MediaCache{Dir: prolink.DefaultMediaCacheDir}).CachedAnalysis(dev, host)
+	}
+	if a == nil {
+		return nil
+	}
+	wave, _, duration := prolink.ExtractANLZ(a)
+	if len(wave) == 0 {
+		return nil
+	}
+	const rate = 44100.0 // display timebase, no audio is opened
+	detail := enginedb.DisplayWaveFromRekordbox(a, rate)
+	if detail != nil {
+		span := float64(len(detail.Bands)/3) * detail.SamplesPerBin / rate * 1000
+		if span+100 < float64(duration) {
+			detail = nil // truncated ANLZ detail must not stretch over the song
+		} else {
+			duration = uint32(span)
+			w := downsampleDisplayWave(*detail, 65536)
+			detail = &w
+		}
+	}
+	if duration == 0 {
+		duration = dev.DurationMS
+	}
+	if duration == 0 {
+		return nil
+	}
+	asset := &shadowDisplayAsset{Version: 1, Key: key, Title: title, Artist: artist, BPM: dev.BPM,
+		DisplayPerformance: enginedb.DisplayPerformance{SampleRate: rate, DurationMS: float64(duration), Waveform: detail,
+			Overview: enginedb.DisplayWave{SamplesPerBin: rate * float64(duration) / 1000 / float64(len(wave))},
+			Beats:    []enginedb.DisplayBeat{}, Cues: []enginedb.DisplayCue{}, Loops: []enginedb.DisplayLoop{}}}
+	for _, b := range wave {
+		asset.Overview.Bands = append(asset.Overview.Bands, b[:]...)
+	}
+	// ANLZ beat numbers are beats within the bar; the display expects a
+	// monotonically increasing zero-based index and the complete track grid.
+	for i, b := range a.Beats {
+		asset.Beats = append(asset.Beats, enginedb.DisplayBeat{MS: float64(b.TimeMS), Number: int64(i) + int64(a.Beats[0].Number) - 1})
+	}
+	for _, cue := range a.Cues {
+		col := fmt.Sprintf("#%02x%02x%02x", cue.Color[1], cue.Color[2], cue.Color[3])
+		if cue.Color == [4]byte{} {
+			col = "#ffffff"
+		}
+		asset.Cues = append(asset.Cues, enginedb.DisplayCue{I: int(cue.HotCue), MS: float64(cue.TimeMS), N: cue.Name, C: col})
+		if cue.Loop {
+			asset.Loops = append(asset.Loops, enginedb.DisplayLoop{StartMS: float64(cue.TimeMS), EndMS: float64(cue.EndMS), N: cue.Name, C: col})
+		}
+	}
+	if detail != nil {
+		asset.DetailSource = "rekordbox"
+	}
+	if validateDisplayAsset(asset, key) != nil {
+		return nil
+	}
+	overview, err := renderShadowWave(asset.Overview, 1024, 64)
+	if err != nil {
+		return nil
+	}
+	w, err := renderShadowWave(asset.Overview, 2048, 128)
+	if err != nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.claim(key, now) == nil {
+		return nil
+	}
+	e := &shadowDisplayEntry{asset: asset, overview: overview, wave: w, at: now}
+	if detail != nil {
+		e.tiles = make([][]byte, (len(detail.Bands)/3+2047)/2048)
+	}
+	c.entries[key] = e
+	return e
 }
 
 func (s *Server) ensureShadowDisplay(p peerDeck, now time.Time) *shadowDisplayEntry {
@@ -630,7 +734,21 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 	}
 	s.shadow.mu.Unlock()
 	p, ok := placeDisplayPeers(peers, role, time.Now())[deck]
-	if !ok || displayTrackKey(p) != key {
+	if !ok {
+		// Compose and HTTP use the same placement, including peer priority and
+		// exact current track keys. An old CDJ URL cannot read a different song.
+		for _, d := range s.shadowComposeDisplay(role, time.Now()) {
+			if d.Deck == deck && d.Key == key && !d.MetadataOnly {
+				c := &s.shadow.display
+				c.mu.Lock()
+				e := c.entries[key]
+				c.mu.Unlock()
+				return e, d
+			}
+		}
+		return nil, deckState{}
+	}
+	if displayTrackKey(p) != key {
 		return nil, deckState{}
 	}
 	d := p.deckState

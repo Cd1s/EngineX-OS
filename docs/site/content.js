@@ -322,6 +322,7 @@
         ] },
         { k: "shot", src: "assets/screenshots/4deck-sc5000-cdj3000.png", cap: L("两台 SC5000 + 一台 CDJ-3000 同一局域网联动", "兩台 SC5000 + 一台 CDJ-3000 同一區域網路聯動", "Two SC5000 + one CDJ-3000 on the same LAN") },
         { k: "h", id: "cdj", x: L("先锋 CDJ-3000 / Pro DJ Link 互联（测试版）", "先鋒 CDJ-3000 / Pro DJ Link 互聯（測試版）", "Pioneer CDJ-3000 / Pro DJ Link (beta)"), nav: L("CDJ-3000 互联（测试）", "CDJ-3000 互聯（測試）", "CDJ-3000 link (beta)") },
+        { k: "note", tone: "new", x: L("CDJ 曲目可在影子轨显示 rekordbox 已分析好的波形、拍线与 Cue，无需下载音频；没有分析数据时保留元数据显示。", "CDJ 曲目可在影子軌顯示 rekordbox 已分析好的波形、拍線與 Cue，無需下載音訊；沒有分析資料時保留中繼資料顯示。", "Shadow decks show CDJ tracks’ existing rekordbox waveforms, beat grids and cues without downloading audio; tracks without analysis keep their metadata display.") },
         { k: "ul", x: [
           L("通过局域网 / Wi-Fi 读取 CDJ 上 Rekordbox U 盘的曲库（`Pro DJ Link 曲库`）。", "透過區域網路 / Wi-Fi 讀取 CDJ 上 Rekordbox 隨身碟的曲庫（`Pro DJ Link 曲庫`）。", "Browse the Rekordbox stick in a CDJ over LAN / Wi-Fi (`Pro DJ Link library`)."),
           L("也能把本机曲库（含天龙 U 盘与 EngineX 流媒体歌单）共享给 CDJ（实验功能）。", "也能將本機曲庫（含天龍隨身碟與 EngineX 串流歌單）共享給 CDJ（實驗功能）。", "Share this deck's library (including Denon sticks and EngineX streaming playlists) to the CDJ (experimental)."),
@@ -342,6 +343,7 @@
       blocks: [
         { k: "shot", src: "site/assets/screen-4deck-shadow.svg", cap: L("两台碟机 1+3 / 2+4：本机出声的轨 + 不出声的影子轨道", "兩台碟機 1+3 / 2+4：本機出聲的軌 + 不出聲的影子軌道", "Two decks as 1+3 / 2+4: the tracks it plays + silent shadow decks") },
         { k: "h", id: "roles", x: L("四轨角色与影子轨道", "四軌角色與影子軌道", "Roles & shadow decks"), nav: L("四轨角色与影子轨道", "四軌角色與影子軌道", "Roles & shadow decks") },
+        { k: "note", tone: "new", x: L("PRIME 4 / PRIME 4+、SC LIVE 4 等一体机开启 `4-Deck Waveform` 后，默认保留本机 1、2 轨，3、4 轨显示对端影子波形；没有对端的轨道仍可本机使用。", "PRIME 4 / PRIME 4+、SC LIVE 4 等一體機開啟 `4-Deck Waveform` 後，預設保留本機 1、2 軌，3、4 軌顯示對端影子波形；沒有對端的軌道仍可本機使用。", "On PRIME 4 / PRIME 4+, SC LIVE 4 and other consoles, enabling `4-Deck Waveform` keeps local decks 1–2 and uses decks 3–4 for remote shadow waveforms by default; a lane without a remote source remains available locally.") },
         { k: "p", x: L("SC5000 / SC6000 上解锁 Engine 自带的四轨界面，声卡仍只用 2 路。每台负责自己角色的两轨，其余是不出声的**影子轨道**，跟随另一台 EngineX 碟机或 CDJ 的曲目、播放 / CUE、位置、速度、Master 和同步。",
                         "SC5000 / SC6000 上解鎖 Engine 內建的四軌介面，音效卡仍只用 2 路。每台負責自己角色的兩軌，其餘是不出聲的**影子軌道**，跟隨另一台 EngineX 碟機或 CDJ 的曲目、播放 / CUE、位置、速度、Master 與同步。",
                         "SC5000 / SC6000 unlock Engine's own four-deck layout while the sound card still uses two channels. Each unit plays the two decks of its role; the other two are silent **shadow decks** that follow the other EngineX deck or CDJ: track, play / CUE, position, speed, Master and sync.") },
