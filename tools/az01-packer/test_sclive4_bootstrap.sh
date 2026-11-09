@@ -14,7 +14,8 @@ if [ "$AZ04" != 1 ] && [ -n "$JC11S_ROOTFS" ] && [ ! -d "$JC11S_ROOTFS" ]; then
 fi
 if [ "$BOOTSTRAP_MODEL" = PRIME4PLUS ]; then
     ROOTFS="${JC11S_ROOTFS:?set JC11S_ROOTFS to the unpacked official PRIME4PLUS rootfs}"
-    PREFIX=PRIME4PLUS VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=19
+    # JC11S uses the same Engine/edit table as SC LIVE 4, including #166 SweepFX.
+    PREFIX=PRIME4PLUS VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=20
 elif [ "$AZ04" = 1 ]; then
     ROOTFS="${ROOTFS:-/root/build/sc5000-lab/systemone-analysis/rootfs}"
     PREFIX=PRIME4G2 VARLIB=data/system/var-lib PROFILE=5.3.0-az04 EDITS=18
