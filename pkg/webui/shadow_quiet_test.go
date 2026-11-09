@@ -3,6 +3,7 @@ package webui
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -251,5 +252,70 @@ func TestShadowStateHeaderCarriesDisplayDetail(t *testing.T) {
 	h2, d2 := get()
 	if h1 == h2 || len(d1) != 1 || len(d2) != 1 || d1[0].DisplayDetail || !d2[0].DisplayDetail || s.shadow.ver != ver {
 		t.Fatalf("detail readiness: %q %+v -> %q %+v (ver %d -> %d)", h1, d1, h2, d2, ver, s.shadow.ver)
+	}
+}
+
+func TestShadowLongPollHoldsQuietAnswers(t *testing.T) {
+	old := shadowQuietPoll
+	shadowQuietPoll = 400 * time.Millisecond
+	defer func() { shadowQuietPoll = old }()
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	oldRole := fourDeckRolePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = oldRole }()
+	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
+	uiPost(t, srv.URL, "fourDeckWaveform=1")
+	poll := func() (string, time.Duration) {
+		t.Helper()
+		s.shadow.mu.Lock()
+		ver := s.shadow.ver
+		s.shadow.mu.Unlock()
+		start := time.Now()
+		r, err := http.Get(fmt.Sprintf("%s/v1/sc5000/shadow?ver=%d", srv.URL, ver))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+		return r.Header.Get("X-Shadow-State"), time.Since(start)
+	}
+	s.shadow.mu.Lock()
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Playing: true, PositionMS: 1000, Seq: 1}}, time.Now())
+	s.shadow.mu.Unlock()
+	h1, took := poll()
+	if took < 350*time.Millisecond {
+		t.Fatalf("a quiet poll answered after %v, want the full hold", took)
+	}
+	// A peer deck about to turn stale: the hold ends when it does and the header shows it.
+	s.shadow.mu.Lock()
+	p := s.shadow.peerDecks[2]
+	p.at = time.Now().Add(-1850 * time.Millisecond)
+	s.shadow.peerDecks[2] = p
+	s.shadow.mu.Unlock()
+	h2, took := poll()
+	if took > 300*time.Millisecond || h2 == h1 || !strings.Contains(h2, ":true:13:true:") {
+		t.Fatalf("stale transition: %v %q -> %q", took, h1, h2)
+	}
+	// A real change still answers at once.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		s.shadow.mu.Lock()
+		s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "b", Seq: 2}}, time.Now())
+		s.shadow.mu.Unlock()
+	}()
+	if _, took := poll(); took > 300*time.Millisecond {
+		t.Fatalf("a bump waited %v", took)
+	}
+	// CDJ (metadata-only) decks refresh positions at 120 ms.
+	s.shadow.mu.Lock()
+	s.shadow.metaOnlyPoll = true
+	s.shadow.mu.Unlock()
+	if d := s.shadow.pollWait(false, time.Now()); d != 120*time.Millisecond {
+		t.Fatalf("CDJ poll wait %v", d)
+	}
+	if d := s.shadow.pollWait(true, time.Now()); d != 120*time.Millisecond {
+		t.Fatalf("legacy poll wait %v", d)
 	}
 }

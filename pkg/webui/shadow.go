@@ -188,6 +188,7 @@ type shadowState struct {
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
 	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
 	dbg                 shadowDebug
+	metaOnlyPoll        bool // the newest compose had a CDJ (metadata-only) deck: 120 ms polls
 	display             shadowDisplayCache
 	sourceDisplay       shadowSourceCache
 }
@@ -579,6 +580,29 @@ func (sh *shadowState) bump() {
 	sh.notify = make(chan struct{})
 }
 
+// shadowQuietPoll bounds a long poll whose answer cannot change by itself.
+// Each poll is a QML XMLHttpRequest and its strings on V4's heap: 120 ms
+// holds were ~8 requests/s, the largest steady allocation of the display.
+var shadowQuietPoll = time.Second
+
+// pollWait is how long a long poll may hold an unchanged answer: a quiet poll
+// unless a CDJ deck's positions refresh, cut short when a peer deck would turn
+// stale (compose derives that from time, so no bump announces it).
+func (sh *shadowState) pollWait(legacy bool, now time.Time) time.Duration {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if legacy || sh.metaOnlyPoll {
+		return 120 * time.Millisecond
+	}
+	d := shadowQuietPoll
+	for _, p := range sh.peerDecks {
+		if left := p.at.Add(2 * time.Second).Sub(now); !p.Stale && left > 0 && left < d {
+			d = left
+		}
+	}
+	return d
+}
+
 // wait returns once the peer state is newer than ver, or after d.
 func (sh *shadowState) wait(ctx context.Context, ver uint64, d time.Duration) {
 	sh.mu.Lock()
@@ -861,8 +885,8 @@ func (sh *shadowState) observe(d prolink.Device) {
 
 // shadowGet is what the QML applies to the decks this player does not play.
 // With ?ver=N it is a long poll: it answers at once when the peer state moved
-// past N, else as soon as it does, at the latest after 120 ms (the CDJ decks
-// and the steady positions refresh at that rate).
+// past N, else as soon as it does, at the latest after pollWait (120 ms while
+// CDJ decks refresh their positions, else up to a second).
 func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
@@ -873,14 +897,18 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	var ver uint64
 	if role != "" {
 		s.shadowWake()
-		if v, err := strconv.ParseUint(r.URL.Query().Get("ver"), 10, 64); err == nil {
-			s.shadow.wait(r.Context(), v, 120*time.Millisecond)
+		if seen, err := strconv.ParseUint(r.URL.Query().Get("ver"), 10, 64); err == nil {
+			s.shadow.wait(r.Context(), seen, s.shadow.pollWait(v.ShadowLegacyEngine, time.Now()))
 		}
 		s.shadow.mu.Lock()
 		ver = s.shadow.ver
 		s.shadow.mu.Unlock()
 		out = s.shadowCompose(role, time.Now())
 	}
+	metaOnly := slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly })
+	s.shadow.mu.Lock()
+	s.shadow.metaOnlyPoll = metaOnly
+	s.shadow.mu.Unlock()
 	stale := slices.ContainsFunc(out, func(d deckState) bool { return d.Stale })
 	// The version covers peer updates; what compose derives from time and the
 	// display cache (stale, loading, the placed slot and key) goes in a digest.
@@ -890,7 +918,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	}
 	// CDJ continuous positions do not advance the EngineX peer version. Those
 	// responses, like legacy responses, must always reach QML.
-	if !v.ShadowLegacyEngine && !slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly }) {
+	if !v.ShadowLegacyEngine && !metaOnly {
 		w.Header().Set("X-Shadow-State", fmt.Sprintf("%d:%t:%s:%t:%t:%x", ver, true, role, stale, debug, h.Sum64()))
 	}
 	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug, "displayOnly": !v.ShadowLegacyEngine})
