@@ -199,6 +199,55 @@ func TestJC11DisplayRoleWithSC5000AndCDJ(t *testing.T) {
 	}
 }
 
+func TestConsoleHostCDJLineInDisplay(t *testing.T) {
+	oldRole, oldCompatible := fourDeckRolePath, deviceCompatiblePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "missing-role")
+	deviceCompatiblePath = filepath.Join(t.TempDir(), "compatible")
+	defer func() { fourDeckRolePath, deviceCompatiblePath = oldRole, oldCompatible }()
+	os.WriteFile(deviceCompatiblePath, []byte("inmusic,jc11\x00rockchip,rk3288\x00"), 0600)
+
+	cache, dev := cachedDisplayCDJ(t)
+	dev.Number = 4 // CDJ set to Player 4 as in Reddit user report
+	dev.SourcePlayer = 4
+	if err := os.Symlink(filepath.Join(cache.Dir, "127.0.0.1", "1-3"), filepath.Join(cache.Dir, "127.0.0.1", "4-3")); err != nil {
+		t.Fatal(err)
+	}
+	s := displayCDJServer(t, cache, dev)
+	now := time.Now()
+
+	// 1 CDJ (Player 4) with Channel 3 set to Line In: maps to Deck 3.
+	decks := s.shadowComposeDisplay(s.activeRole(uiSettings{FourDeckWaveform: true}), now, []int{3})
+	if len(decks) != 1 || decks[0].Deck != 3 || decks[0].MetadataOnly {
+		t.Fatalf("CDJ on Channel 3 Line: %+v", decks)
+	}
+	if !strings.HasPrefix(decks[0].Key, "cdj:") {
+		t.Fatalf("expected CDJ key prefix, got %s", decks[0].Key)
+	}
+	e := s.shadow.display.entries[decks[0].Key]
+	if e == nil || e.asset == nil || len(e.wave) == 0 {
+		t.Fatalf("display asset missing or incomplete: %+v", e)
+	}
+
+	// 2 CDJs (Player 2 and Player 4) with Channels 3 and 4 Line In: map in order (P2->3, P4->4).
+	dev2 := dev
+	dev2.Number = 2
+	dev2.Address = "127.0.0.2"
+	prolinkMu.Lock()
+	postedDevices[s][deviceKey(dev2)] = dev2
+	prolinkMu.Unlock()
+
+	decks2 := s.shadowComposeDisplay(s.activeRole(uiSettings{FourDeckWaveform: true}), now, []int{3, 4})
+	if len(decks2) != 2 || decks2[0].Deck != 3 || decks2[1].Deck != 4 {
+		t.Fatalf("2 CDJs on Channels 3 and 4 Line: %+v", decks2)
+	}
+
+	// Without Line channels on console: retains status quo (decks 3 and 4).
+	noLine := s.shadowComposeDisplay(s.activeRole(uiSettings{FourDeckWaveform: true}), now, nil)
+	if len(noLine) != 2 || noLine[0].Deck != 3 || noLine[1].Deck != 4 {
+		t.Fatalf("expected status quo without Line channels on console, got %+v", noLine)
+	}
+}
+
 func testDisplayAsset() *shadowDisplayAsset {
 	return &shadowDisplayAsset{Version: 1, Key: "track-a", Title: "Source title", BPM: 120,
 		DisplayPerformance: enginedb.DisplayPerformance{SampleRate: 44100, DurationMS: 4000,
