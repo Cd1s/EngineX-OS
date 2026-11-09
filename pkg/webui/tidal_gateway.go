@@ -95,7 +95,7 @@ type playlistSearcher interface {
 }
 type tidalGateway struct {
 	browse   *browseCache
-	searches *browseCache
+	searches *searchCache
 	s        *Server
 	catalog  *providers.Deezer
 	mux      *http.ServeMux
@@ -1347,6 +1347,8 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := g.s.scope()
 	sources := []source{}
+	// Gateway search deliberately requires a login, including services whose
+	// provider APIs also support anonymous/public search.
 	for _, v := range g.sourcesFor(scope) {
 		if v.Provider == scope {
 			sources = append(sources, source{v.ID, v.Provider, v.Guest, v.p})

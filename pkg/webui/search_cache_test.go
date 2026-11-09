@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -113,7 +114,7 @@ func TestSearchHungSourceKeepsOtherResultsAndOrder(t *testing.T) {
 
 func TestSearchCacheNamespaceExpiryAndPrivateCopies(t *testing.T) {
 	s := searchServer(t, "spotify")
-	clock := cacheClock(s.tidal.searches)
+	clock := cacheClock(s.tidal.searches.browseCache)
 	p := &searchFixture{title: "one"}
 	get := func(provider, session, query string) []providers.Track {
 		t.Helper()
@@ -205,5 +206,49 @@ func TestSearchCallHonorsCallerCancellation(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("caller cancellation blocked")
+	}
+}
+
+func TestSearchWorkerLimitSurvivesTimeoutAndReleases(t *testing.T) {
+	c := newSearchCache()
+	release := make(chan struct{})
+	closeRelease := sync.OnceFunc(func() { close(release) })
+	defer closeRelease()
+	var calls atomic.Int32
+	blocked := func(context.Context) (browseData, error) {
+		calls.Add(1)
+		<-release
+		return browseData{}, nil
+	}
+	for range 2 {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		_, err := c.call(ctx, "spotify", "stuck", "tracks", blocked)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected timeout: %v", err)
+		}
+	}
+	if _, err := c.call(context.Background(), "spotify", "stuck", "tracks", blocked); err == nil || calls.Load() != 2 {
+		t.Fatal("timed-out workers released slots before exiting")
+	}
+	quick := func(context.Context) (browseData, error) { return browseFixture("healthy"), nil }
+	if data, err := c.call(context.Background(), "spotify", "healthy", "tracks", quick); err != nil || len(data.Lists) != 1 {
+		t.Fatalf("stuck session consumed healthy session's slots: %+v %v", data, err)
+	}
+	closeRelease()
+	// Wait for actual worker completion, then prove that capacity is reusable.
+	for deadline := time.Now().Add(time.Second); ; time.Sleep(time.Millisecond) {
+		c.workerMu.Lock()
+		active := c.active
+		c.workerMu.Unlock()
+		if active == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("completed workers did not release slots")
+		}
+	}
+	if _, err := c.call(context.Background(), "spotify", "stuck", "tracks", quick); err != nil {
+		t.Fatal(err)
 	}
 }
