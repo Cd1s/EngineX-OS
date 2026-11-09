@@ -354,6 +354,43 @@ func TestEAASListenerRejectsMalformedAndSelfBeacons(t *testing.T) {
 	}
 }
 
+// #164: listenEAAS and listenAirD must set SO_REUSEADDR so they can bind successfully
+// even when Engine DJ holds UDP 11224 and 51337 on the host.
+func TestDiscoveryListenersSharePortsWithSOReuseAddr(t *testing.T) {
+	o := testOpts(t)
+	port := freeUDPFromAddr(o.EAASAddr)
+	targetAddr := fmt.Sprintf("127.0.0.1:%d", port)
+	lc := net.ListenConfig{Control: setReuseControl}
+	pre, err := lc.ListenPacket(context.Background(), "udp4", targetAddr)
+	if err != nil {
+		t.Fatalf("failed to bind preexisting socket: %v", err)
+	}
+	defer pre.Close()
+
+	o.EAASAddr = targetAddr
+	o.AirDWait = 100 * time.Millisecond
+	_ = listenEAAS(o)
+	if out := o.Out.(*bytes.Buffer).String(); strings.Contains(out, "Cannot listen for EAAS") || strings.Contains(out, "无法监听 EAAS") {
+		t.Fatalf("listenEAAS logged bind error when port was shared:\n%s", out)
+	}
+
+	// Also verify listenAirD binds without error when port is shared
+	airDPort := freeUDPFrom(o)
+	airDAddr := fmt.Sprintf("127.0.0.1:%d", airDPort)
+	preAirD, err := lc.ListenPacket(context.Background(), "udp4", airDAddr)
+	if err != nil {
+		t.Fatalf("failed to bind preexisting airD socket: %v", err)
+	}
+	defer preAirD.Close()
+
+	o.AirDAddr = airDAddr
+	o.Out.(*bytes.Buffer).Reset()
+	_ = listenAirD(o)
+	if out := o.Out.(*bytes.Buffer).String(); strings.Contains(out, "Cannot listen for StageLinQ") || strings.Contains(out, "无法监听 StageLinQ") {
+		t.Fatalf("listenAirD logged bind error when port was shared:\n%s", out)
+	}
+}
+
 func TestRunWaitsForEAASCandidatesOnlyOnce(t *testing.T) {
 	o := testOpts(t)
 	o.Fastboot = "true"
@@ -1253,6 +1290,23 @@ exit 0
 	}
 }
 
+// #164: modern platform-tools (fastboot 35+) prints "fastboot: unknown option -- i";
+// fastbootDevices must stop after the first attempt and not try further fbVIDs.
+func TestFastbootStopsOnUnknownOption(t *testing.T) {
+	bin, log := logShim(t, `[ "$1" = -i ] && { echo "fastboot: unknown option -- i" >&2; exit 1; }
+exit 0
+`)
+	o := testOpts(t)
+	o.Fastboot = bin
+	o.defaults()
+	if s := fastbootDevices(ctxT(t), o); len(s) != 0 || o.fbVID != "" {
+		t.Errorf("serials = %v, fbVID = %q", s, o.fbVID)
+	}
+	if b, _ := os.ReadFile(log); strings.TrimSpace(string(b)) != "devices\n-i 0x15e4 devices" {
+		t.Errorf("calls:\n%s", b)
+	}
+}
+
 // #129: Linux fastboot without udev access lists "no permissions"; tell the user how to fix it, once.
 func TestFastbootNoPermissionsHint(t *testing.T) {
 	bin, _ := logShim(t, `printf '????????????\tno permissions (missing udev rules? user is in the plugdev group); see [http://developer.android.com/tools/device.html]\n'
@@ -1444,8 +1498,8 @@ Status:                     Started
 
 	diagnoseUSB(ctxT(t), o)
 	out := o.Out.(*bytes.Buffer).String()
-	if !strings.Contains(out, "15e4:303f") || !strings.Contains(out, "Numark MIXSTREAM PRO PLUS") || !strings.Contains(out, "Zadig") {
-		t.Errorf("diagnoseUSB did not give Zadig WinUSB hint for Mixstream Pro+:\n%s", out)
+	if !strings.Contains(out, "15e4:303f") || !strings.Contains(out, "Numark MIXSTREAM PRO PLUS") || !strings.Contains(out, "Zadig") || !strings.Contains(out, "{F72FE0D4-CBCB-407D-8814-9ED673D0DD6B}") {
+		t.Errorf("diagnoseUSB did not give Zadig WinUSB and Android GUID hint for Mixstream Pro+:\n%s", out)
 	}
 }
 
@@ -1699,6 +1753,9 @@ echo "line 2: done" >&2
 func TestAZModel(t *testing.T) {
 	for _, c := range []struct{ board, bundle, line, want string }{
 		{"RMZ2", "", "1cc5:2027", "SYSTEMONE"},
+		{"JP24", "", "1cc5:2027", "PRIME4G2"},
+		{"nh08s", "", "1cc5:2027", ""},
+		{"jp21", "", "1cc5:2027", ""},
 		{"", "/x/PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz", "1cc5:2027", "PRIME4G2"},
 		{"", "", "1cc5:2027 inMusic Rane SYSTEM ONE", "SYSTEMONE"},
 		{"", "", "1cc5:2027 Denon DJ PRIME 4 G2", "PRIME4G2"},
