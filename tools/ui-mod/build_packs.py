@@ -208,8 +208,9 @@ SERVICES_MAIN = """
 				const m = JSON.parse(x.responseText)
 				if (m.key !== key) return
 				// Pending detail: each reply is a 10+ kB JSON with every beat (hundreds of
-				// objects); back off 2, 4, 8 s instead of re-parsing it every 2 s.
-				if (m.detailPending) req.next = Date.now() + 2000 * Math.pow(2, Math.min(req.tries - 1, 2))
+				// objects). stream-sync says when the detail is ready (displayDetail),
+				// which re-reads it at once; until then only a slow safety retry.
+				if (m.detailPending) req.next = Date.now() + Math.min(30000, 2000 * Math.pow(2, Math.min(req.tries - 1, 4)))
 				const next = Object.assign({}, root.scShadowDisplay)
 				next[d] = Object.assign({}, current, {meta: m})
 				root.scShadowDisplay = next
@@ -276,7 +277,7 @@ SERVICES_MAIN = """
 		if (s.key !== key || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.playing !== !!e.playing ||
 			s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
-			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.loading !== !!e.loading) return false
+			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail) return false
 		if (Array.isArray(e.cues)) {
 			const a = s.liveCues, b = e.cues
 			if (!Array.isArray(a) || a.length !== b.length) return false
@@ -311,7 +312,7 @@ SERVICES_MAIN = """
 			const sample = {key: key, title: e.title || "", artist: e.artist || "", playing: !!e.playing, stale: !!e.stale,
 				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master, sync: !!e.sync,
-				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, loading: !!e.loading,
+				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				meta: old && old.key === key ? old.meta : null,
 				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
 			if (!next) next = Object.assign({}, scShadowDisplay)
@@ -321,7 +322,10 @@ SERVICES_MAIN = """
 		if (next) scShadowDisplay = next
 		for (let d = 1; d <= 4; d++) {
 			const s = scShadowDisplay[d]
-			if (s && s.key && (!s.meta || s.meta.detailPending)) scShadowDisplayFetch(d, s.key)
+			if (!s || !s.key || (s.meta && !s.meta.detailPending)) continue
+			const r = scShadowDisplayRequests[d]
+			if (s.meta && s.displayDetail && r && r.key === s.key && !r.busy) r.next = 0 // ready here now
+			scShadowDisplayFetch(d, s.key)
 		}
 	}
 	// #99: five Layout Manager views. Engine has three and forgets the selected one
@@ -697,6 +701,15 @@ SERVICES_MAIN = """
 				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync) edge = true
 			}
+			// Engine moves TrackPosition in audio blocks: at 25 Hz a playing deck's raw
+			// position is up to ~35 ms of track time behind (high pitch). With the speed
+			// known, the upper envelope of position - speed * time is the newest block:
+			// post that line (noise of a few ms), decaying 2 ms/s to follow pitch rounding.
+			const speed = 1 + s.pitch / 100
+			if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.jumps === s.jumps && isFinite(p.env))
+				s.env = Math.max(s.posMs - speed * now, p.env - 0.002 * (now - p.at))
+			else s.env = s.posMs - speed * now
+			s.lineMs = s.ps ? s.env + speed * now : s.posMs
 			scShadowPrev[d] = s
 			scShadowSampleSpare[d] = p || {}
 		}
@@ -765,7 +778,7 @@ SERVICES_MAIN = """
 			const o = own[n] || (own[n] = {})
 			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000)
 			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
-			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.posMs; o.at = s.at; o.jumps = s.jumps
+			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
 			// Titles arrive after the load: re-read on a new track and every 2 s.
@@ -776,15 +789,15 @@ SERVICES_MAIN = """
 			o.dbg = ""
 			// What the peer shows from this deck, as last sent in full.
 			const sent = scShadowSent[n] || (scShadowSent[n] = {})
-			if (sent.deck !== d || sent.net !== o.net || sent.playing !== o.playing || sent.cue !== o.cue || sent.jumps !== o.jumps ||
-				sent.pitch !== o.pitch || sent.master !== o.master || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
-				sent.title !== o.title || sent.artist !== o.artist || sent.link !== o.link || sent.bpm !== o.bpm || sent.cuesRev !== cc.rev) edge = true
-			else {
-				// The peer carries the position on from the last full post at its pitch.
+			// The peer carries the position on from the last full post at its pitch;
+			// o.positionMs is the filtered line (scShadowTick), so a real slip only.
+			let onLine = false
+			if (sent.deck === d && sent.net === o.net && sent.playing === o.playing && sent.pitch === o.pitch && sent.jumps === o.jumps) {
 				const expect = sent.positionMs + (o.playing ? (o.at - sent.at) * (1 + o.pitch / 100) : 0)
-				// 15 ms: above the 40 ms sampling jitter; the peer's Go re-anchors at 10 ms.
-				if (Math.abs(o.positionMs - expect) > (o.playing ? 15 : 0.5)) edge = true
+				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
 			}
+			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
+				sent.title !== o.title || sent.artist !== o.artist || sent.link !== o.link || sent.bpm !== o.bpm || sent.cuesRev !== cc.rev) edge = true
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
