@@ -489,13 +489,22 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.Player = playerBoards[imagePrefix(deviceCompatible())]
 	v.FourDeckRoleActive = s.activeRole(v)
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
-		respond(w, struct {
+		body, err := json.Marshal(struct {
 			uiSettings
 			AccessCode string `json:"accessCode"`
 			ConsoleURL string `json:"consoleUrl"`
 			// LANStems: the home sc5000-stemsd last seen, for Settings -> About (#148).
 			LANStems *stems.LANState `json:"lanStems,omitempty"`
 		}{v, s.cfg.AccessToken, "http://" + lanHost() + ":8080", relay.LANStems})
+		if err != nil {
+			fail(w, http.StatusInternalServerError, err)
+			return
+		}
+		// The Engine UI polls this every 3 s; an unchanged digest spares it the
+		// JSON.parse and ~40 property writes (V4 garbage on the GUI thread).
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-UI-Digest", strconv.FormatUint(fnvSum(string(body)), 16))
+		w.Write(append(body, '\n'))
 		return
 	}
 	respond(w, v)
