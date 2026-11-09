@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
@@ -14,12 +15,47 @@ const (
 	searchTTL     = time.Minute
 )
 
-func newSearchCache() *browseCache {
+type searchCache struct {
+	*browseCache
+	workerMu sync.Mutex
+	workers  map[string]int
+	active   int
+}
+
+func newSearchCache() *searchCache {
 	// Search is volatile: keep the existing provider/session/operation/query key
 	// scheme and memory budgets, but never persist or serve day-old search hits.
 	c := newBrowseCache("")
 	c.ttl, c.stale = searchTTL, searchTTL
-	return c
+	return &searchCache{browseCache: c, workers: make(map[string]int)}
+}
+
+// A timed-out worker retains its slot until it really exits. New queries cannot
+// accumulate an unlimited number of workers behind one stuck provider/lock.
+// Each kind/session has two slots, leaving capacity for other sessions; the
+// global budget also bounds workers belonging to sessions that have expired.
+func (c *searchCache) call(ctx context.Context, provider, session, kind string, load func(context.Context) (browseData, error)) (browseData, error) {
+	key := browseKey(provider, session, kind, "")
+	c.workerMu.Lock()
+	if c.active >= 32 || c.workers[key] >= 2 {
+		c.workerMu.Unlock()
+		return browseData{}, errors.New("search provider busy")
+	}
+	c.workers[key]++
+	c.active++
+	c.workerMu.Unlock()
+	return searchCall(ctx, provider, kind, func(ctx context.Context) (browseData, error) {
+		defer func() {
+			c.workerMu.Lock()
+			c.workers[key]--
+			c.active--
+			if c.workers[key] == 0 {
+				delete(c.workers, key)
+			}
+			c.workerMu.Unlock()
+		}()
+		return load(ctx)
+	})
 }
 
 // searchCall bounds each independent search, including providers waiting on a
@@ -68,7 +104,7 @@ func searchCall(ctx context.Context, provider, kind string, load func(context.Co
 
 func (g *tidalGateway) searchTracks(ctx context.Context, provider, session string, p trackSearcher, query string) ([]providers.Track, error) {
 	data, err := g.searches.get(ctx, browseKey(provider, session, "search-tracks", query), func(ctx context.Context) (browseData, error) {
-		return searchCall(ctx, provider, "tracks", func(ctx context.Context) (browseData, error) {
+		return g.searches.call(ctx, provider, session, "tracks", func(ctx context.Context) (browseData, error) {
 			tracks, err := p.Search(ctx, query)
 			out := make([]browseTrack, len(tracks))
 			for i, t := range tracks {
@@ -87,7 +123,7 @@ func (g *tidalGateway) searchTracks(ctx context.Context, provider, session strin
 
 func (g *tidalGateway) searchLists(ctx context.Context, provider, session string, p playlistSearcher, query string) ([]providers.Playlist, error) {
 	data, err := g.searches.get(ctx, browseKey(provider, session, "search-playlists", query), func(ctx context.Context) (browseData, error) {
-		return searchCall(ctx, provider, "playlists", func(ctx context.Context) (browseData, error) {
+		return g.searches.call(ctx, provider, session, "playlists", func(ctx context.Context) (browseData, error) {
 			lists, err := p.SearchPlaylists(ctx, query)
 			return browseData{Lists: lists}, err
 		})
