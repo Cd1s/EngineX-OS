@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	pdbPath    = "PIONEER/rekordbox/export.pdb"
-	maxPDB     = 64 << 20
-	maxANLZ    = 16 << 20
-	mediaFetch = 4 * time.Second // bounds how long Observe holds the discovery lock
+	DefaultMediaCacheDir = "/tmp/sc5000-prolink-media"
+	pdbPath              = "PIONEER/rekordbox/export.pdb"
+	maxPDB               = 64 << 20
+	maxANLZ              = 16 << 20
+	mediaFetch           = 4 * time.Second // bounds how long Observe holds the discovery lock
 )
 
 // MediaCache reads a track's Rekordbox metadata and ANLZ waveform straight
@@ -56,13 +57,14 @@ func (m *MediaCache) resolve(dev Device, host net.IP) (*rekordbox.Analysis, stri
 		return nil, "", ""
 	}
 	stamp := fmt.Sprintf("%d %d", file.Size, file.MTime)
-	if old, _ := os.ReadFile(local + ".stamp"); string(old) != stamp {
+	owner, _ := os.ReadFile(filepath.Join(root, ".host"))
+	if old, _ := os.ReadFile(local + ".stamp"); string(old) != stamp || string(owner) != host.String() {
 		data, _, err := c.Fetch(ctx, export, "/"+pdbPath, maxPDB)
 		if err != nil {
 			return nil, "", ""
 		}
 		_ = os.RemoveAll(root) // ANLZ files of the previous stick
-		if writeFile(local, data) != nil || writeFile(local+".stamp", []byte(stamp)) != nil {
+		if writeFile(local, data) != nil || writeFile(local+".stamp", []byte(stamp)) != nil || writeFile(filepath.Join(root, ".host"), []byte(host.String())) != nil {
 			return nil, "", ""
 		}
 	}
@@ -102,6 +104,46 @@ func (m *MediaCache) resolve(dev Device, host net.IP) (*rekordbox.Analysis, stri
 				}
 			}
 			if a, err := rekordbox.ReadAnalysis(path); err == nil && a != nil {
+				if merged == nil {
+					merged = a
+				} else {
+					merged.Merge(a)
+				}
+			}
+		}
+		return merged, trk.Title, trk.Artist
+	}
+	return nil, "", ""
+}
+
+// CachedAnalysis reads the exact track from an existing media cache. This also
+// lets WebUI consume rb-bridge's cache across the process boundary. It never
+// opens a network client, writes files, scans unrelated ANLZ, or reads audio.
+func (m *MediaCache) CachedAnalysis(dev Device, host net.IP) (*rekordbox.Analysis, string, string) {
+	if m == nil || m.Dir == "" || host == nil || dev.TrackID == 0 {
+		return nil, "", ""
+	}
+	root := filepath.Join(m.Dir, fmt.Sprintf("%d-%d", dev.SourcePlayer, dev.SourceSlot))
+	owner, err := os.ReadFile(filepath.Join(root, ".host"))
+	if err != nil || string(owner) != host.String() {
+		return nil, "", ""
+	}
+	lib, err := rekordbox.ReadPDB(filepath.Join(root, pdbPath))
+	if err != nil || lib == nil {
+		return nil, "", ""
+	}
+	for _, trk := range lib.Tracks {
+		if trk.ID != dev.TrackID {
+			continue
+		}
+		rel := filepath.Clean(strings.TrimPrefix(trk.AnalysisPath, "/"))
+		if !filepath.IsLocal(rel) || !strings.HasPrefix(rel, "PIONEER/USBANLZ/") {
+			return nil, trk.Title, trk.Artist
+		}
+		base := strings.TrimSuffix(rel, filepath.Ext(rel))
+		var merged *rekordbox.Analysis
+		for _, ext := range []string{".DAT", ".EXT", ".2EX"} {
+			if a, err := rekordbox.ReadAnalysis(filepath.Join(root, base+ext)); err == nil {
 				if merged == nil {
 					merged = a
 				} else {

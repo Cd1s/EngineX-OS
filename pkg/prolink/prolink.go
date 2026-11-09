@@ -472,6 +472,25 @@ func (d *Discovery) SetResolver(fn func(Device) (*rekordbox.Analysis, string, st
 	d.resolver = fn
 }
 
+// CachedAnalysis returns the current track's immutable analysis, never resolving
+// media or fetching audio. The full device identity prevents a delayed display
+// request from borrowing analysis from a newly loaded track or another player.
+// Callers must not modify the returned analysis.
+func (d *Discovery) CachedAnalysis(dev Device) (*rekordbox.Analysis, string, string) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	current, ok := d.devices[fmt.Sprintf("%s/%d", dev.Address, dev.Number)]
+	if !ok || dev.TrackID == 0 || current.TrackID != dev.TrackID || current.SourcePlayer != dev.SourcePlayer || current.SourceSlot != dev.SourceSlot {
+		return nil, "", ""
+	}
+	host := net.ParseIP(dev.Address)
+	if dev.SourcePlayer != dev.Number {
+		host = d.hostIP(dev.SourcePlayer)
+	}
+	c := d.trackCache[fmt.Sprintf("%s:%d:%d:%d", host, dev.SourcePlayer, dev.SourceSlot, dev.TrackID)]
+	return c.analysis, c.title, c.artist
+}
+
 func defaultResolveWithRoot(anlzRoot string, device Device) (*rekordbox.Analysis, string, string) {
 	if anlzRoot == "" || device.TrackID == 0 {
 		return nil, "", ""

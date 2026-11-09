@@ -161,6 +161,20 @@ func (e *Exporter) SetDeck(d ExportDeck) {
 	}
 }
 
+// CachedAnalysis exposes only the already observed track; it cannot start export
+// or perform network I/O. The analysis is immutable and belongs to Discovery.
+func (e *Exporter) CachedAnalysis(dev Device, host net.IP) (*rekordbox.Analysis, string, string) {
+	e.mu.Lock()
+	r := e.run
+	e.mu.Unlock()
+	if r != nil && r.observer != nil {
+		if a, title, artist := r.observer.CachedAnalysis(dev); a != nil {
+			return a, title, artist
+		}
+	}
+	return e.cfg.MediaCache.CachedAnalysis(dev, host)
+}
+
 // RequestMaster asks the tempo master at ip to hand master over to this player
 // (Pro DJ Link master handoff request, type 0x26, to its beat port).
 func (e *Exporter) RequestMaster(ip net.IP) error {

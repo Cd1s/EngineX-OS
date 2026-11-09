@@ -807,7 +807,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	stale := slices.ContainsFunc(out, func(d deckState) bool { return d.Stale })
 	// CDJ continuous positions do not advance the EngineX peer version. Those
 	// responses, like legacy responses, must always reach QML.
-	if !v.ShadowLegacyEngine && !slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly }) {
+	if !v.ShadowLegacyEngine && !slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly || strings.HasPrefix(d.Key, "cdj:") }) {
 		w.Header().Set("X-Shadow-State", fmt.Sprintf("%d:%t:%s:%t:%t", ver, true, role, stale, debug))
 	}
 	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug, "displayOnly": !v.ShadowLegacyEngine})
