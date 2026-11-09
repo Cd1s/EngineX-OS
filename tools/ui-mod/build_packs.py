@@ -225,7 +225,7 @@ SERVICES_MAIN = """
 		x.send()
 	}
 	Timer {
-		interval: 40; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowDisplayOnly
+		interval: 200; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowDisplayOnly
 		onTriggered: root.scShadowFrame = (root.scShadowFrame + 1) & 0xffff
 	}
 	Timer {
@@ -2569,14 +2569,19 @@ ZOOM_STEP = """
 
 GUARD = '(typeof root !== "undefined" && root && root.scDeckArtUrl)'
 
-# Owned by stock visual roots; painted in the transformed UI, outside their Row/ColumnLayouts.
-# PNGs are full-track horizontal textures; only Image geometry moves on a display tick.
+# Keep the stock stacking context: native modal views must cover every shadow item.
+# Full-track textures and marker delegates are static; a single content x offset moves.
 SHADOW_LAYER = r"""
     Rectangle {
         id: scDisplay
         objectName: "EngineX_Shadow_@KIND@"
         readonly property Item owner: @OWNER@
-        parent: typeof root !== "undefined" && root && root.transformed ? root.transformed : owner
+        parent: layoutParent()
+        function layoutParent() {
+            let p = owner.parent
+            while (p && (p instanceof RowLayout || p instanceof ColumnLayout || p instanceof GridLayout || p instanceof StackLayout || p instanceof Row || p instanceof Column || p instanceof Grid || p instanceof Flow)) p = p.parent
+            return p
+        }
         readonly property int deck: typeof root !== "undefined" && root && root.scShadowDeckFor ? root.scShadowDeckFor(owner) : 0
         readonly property bool active: typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(deck)
         readonly property bool wave: "@KIND@" === "waveform"
@@ -2585,24 +2590,79 @@ SHADOW_LAYER = r"""
         readonly property bool graphical: wave || overview
         readonly property var sample: active ? root.scShadowData(deck) : null
         readonly property var meta: sample && sample.meta
-        readonly property real now: { const tick = root.scShadowFrame; return Date.now() }
-        readonly property real position: active ? root.scShadowPosition(sample, now) : 0
-        readonly property bool stale: !!sample && (sample.stale || now - sample.at >= root.scShadowExpiryMs)
+        property real position: 0
+        property bool stale: false
+        property var cueInfo: null
+        property var grid: []
+        property real gridAnchor: -Infinity
+        // The poll clock updates targets, not scene geometry or image sources.
+        function refreshPosition() {
+            motion.stop()
+            const now = Date.now(), s = sample
+            position = active ? root.scShadowPosition(s, now) : 0
+            stale = !!s && (s.stale || now - s.at >= root.scShadowExpiryMs)
+            if (active && visible && s && s.playing && !stale) {
+                motion.from = position
+                motion.duration = Math.max(1, Math.min(400, root.scShadowExpiryMs - Math.max(0, now - s.at)))
+                motion.to = Math.min(duration, position + motion.duration * Math.max(0, 1 + s.pitch / 100))
+                motion.start()
+            }
+        }
+        function refreshDetails() {
+            if (!graphical) cueInfo = active ? root.scNextCueInfo(deck, 0) : null
+            if (!wave || !meta) {
+                if (grid.length) grid = root.scShadowEmptyArray
+                gridAnchor = -Infinity
+                return
+            }
+            const padding = Math.min(span / 2, 10000)
+            if (Math.abs(start - gridAnchor) > padding) {
+                gridAnchor = start
+                grid = root.scShadowGrid(deck, meta, start - padding, start + span + padding)
+            }
+        }
+        onSampleChanged: { refreshPosition(); if (wave) refreshDetails() }
+        onVisibleChanged: refreshPosition()
+        onMetaChanged: { gridAnchor = -Infinity; refreshPosition(); refreshDetails() }
+        onSpanChanged: { gridAnchor = -Infinity; refreshPosition(); refreshDetails() }
+        NumberAnimation { id: motion; target: scDisplay; property: "position"; easing.type: Easing.Linear }
+        Timer { interval: 200; repeat: true; running: scDisplay.active && scDisplay.visible; onTriggered: { scDisplay.refreshPosition(); scDisplay.refreshDetails() } }
         readonly property real duration: meta && meta.durationMs > 0 ? meta.durationMs : 1
         readonly property real waveformDuration: meta && meta.waveformDurationMs > 0 ? meta.waveformDurationMs : duration
         readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
         readonly property real playhead: overview ? position / duration : 0.5
         readonly property real start: overview ? 0 : position - span * playhead
-        readonly property var cueInfo: { const tick = root.scShadowFrame; return active ? root.scNextCueInfo(deck, tick) : null }
         readonly property var cues: active ? root.scShadowCuesFor(deck, sample) : []
-        readonly property var grid: wave && meta ? root.scShadowGrid(deck, meta, start, start + span) : []
         readonly property var tiles: meta && meta.detail && Array.isArray(meta.waveformTiles) ? meta.waveformTiles : []
         readonly property int totalPixels: meta && meta.waveformWidth > 0 && meta.waveformWidth <= 65536 ? meta.waveformWidth : 0
         readonly property int tilePixels: meta && meta.tileWidth > 0 ? Math.min(2048, meta.tileWidth) : 2048
         readonly property bool tiled: wave && totalPixels > 0 && tiles.length > 0 && tiles.length <= 32
         readonly property bool detailed: !!meta && !!meta.detail && (!!meta.waveformUrl || tiled)
         readonly property string imageUrl: meta ? (overview || !detailed ? meta.overviewUrl || meta.waveformUrl : meta.waveformUrl || meta.overviewUrl) || "" : ""
-        function screenX(ms) { return (ms - start) / span * width }
+        readonly property bool rgb: graphical && (wave && typeof owner.waveformStyleProperty !== "undefined" && owner.waveformStyleProperty.translator ? owner.waveformStyleProperty.translator.index === 1 : root.scWave === "rgb")
+        @PALETTE@
+        property string paletteQuery: ""
+        property string pastPaletteQuery: ""
+        function refreshPalette() {
+            const suffix = "&saturation=" + saturation + "&brightAmp=" + brightAmp + "&brightGain=" + brightGain + "&brightFloor=" + brightFloor
+            paletteQuery = "rgb=" + (rgb ? "1" : "0") + "&low=" + String(lowColor).slice(1) + "&mid=" + String(midColor).slice(1) + "&high=" + String(highColor).slice(1) + suffix
+            pastPaletteQuery = rgb ? paletteQuery + "&dim=0.6" : "rgb=0&low=" + String(pastLowColor).slice(1) + "&mid=" + String(pastMidColor).slice(1) + "&high=" + String(pastHighColor).slice(1) + suffix
+        }
+        onRgbChanged: paletteUpdate.restart()
+        onLowColorChanged: paletteUpdate.restart()
+        onMidColorChanged: paletteUpdate.restart()
+        onHighColorChanged: paletteUpdate.restart()
+        onPastLowColorChanged: paletteUpdate.restart()
+        onPastMidColorChanged: paletteUpdate.restart()
+        onPastHighColorChanged: paletteUpdate.restart()
+        onSaturationChanged: paletteUpdate.restart()
+        onBrightAmpChanged: paletteUpdate.restart()
+        onBrightGainChanged: paletteUpdate.restart()
+        onBrightFloorChanged: paletteUpdate.restart()
+        // Coalesce the stock properties: never request intermediate mixed palettes.
+        Timer { id: paletteUpdate; interval: 16; onTriggered: scDisplay.refreshPalette() }
+        function waveAsset(url, past) { const query = past ? pastPaletteQuery : paletteQuery; return url && query ? root.scShadowAsset(url) + (url.indexOf("?") < 0 ? "?" : "&") + query : "" }
+        function screenX(ms) { return ms / span * width }
         width: owner.width
         height: owner.height
         // Follow geometry signals, not the animation tick. Reparented layers must
@@ -2647,19 +2707,29 @@ SHADOW_LAYER = r"""
             refreshGeometry()
         }
         onActiveChanged: refreshGeometry()
-        Component.onCompleted: watchGeometry()
+        onParentChanged: if (geometryWatches) watchGeometry()
+        Component.onCompleted: { watchGeometry(); paletteUpdate.restart() }
         Component.onDestruction: unwatchGeometry()
         transform: Matrix4x4 { matrix: scDisplay.basis }
-        z: 10000
+        z: {
+            let p = owner
+            while (p.parent && p.parent !== parent) p = p.parent
+            return p.z + 0.01
+        }
         clip: true
         visible: active && inheritedVisible && owner.width > 0 && owner.height > 0
         color: "#101114"
         // Stock roots can hide an empty Engine slot. Restore their original bindings on exit.
         Binding { target: scDisplay.owner; property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
         Binding { target: scDisplay.owner; property: "enabled"; value: false; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
+        Item {
+            id: scMoving
+            objectName: "EngineX_Shadow_Content"
+            width: scDisplay.width; height: scDisplay.height
+            x: -scDisplay.start / scDisplay.span * width
         Image {
             visible: scDisplay.graphical && source !== ""
-            source: scDisplay.graphical && !scDisplay.tiled ? root.scShadowAsset(scDisplay.imageUrl) : ""
+            source: scDisplay.graphical && !scDisplay.tiled ? scDisplay.waveAsset(scDisplay.imageUrl) : ""
             sourceSize.width: scDisplay.overview || !scDisplay.detailed ? 1024 : 2048
             sourceSize.height: scDisplay.overview || !scDisplay.detailed ? 64 : 128
             asynchronous: true
@@ -2671,7 +2741,7 @@ SHADOW_LAYER = r"""
             width: (scDisplay.overview || !scDisplay.detailed ? scDisplay.duration : scDisplay.waveformDuration) / scDisplay.span * scDisplay.width
             height: scDisplay.height
             opacity: scDisplay.stale ? 0.55 : 1
-            // No color conversion: the server PNG uses the original three-band palette.
+            // Palette comes from the local stock waveform/theme, never the peer.
         }
         Repeater {
             model: scDisplay.tiled ? Math.min(32, scDisplay.tiles.length) : 0
@@ -2680,8 +2750,7 @@ SHADOW_LAYER = r"""
                 readonly property int pixels: Math.max(0, Math.min(scDisplay.tilePixels, scDisplay.totalPixels - index * scDisplay.tilePixels))
                 readonly property real startMs: index * scDisplay.tilePixels / scDisplay.totalPixels * scDisplay.waveformDuration
                 readonly property real endMs: (index * scDisplay.tilePixels + pixels) / scDisplay.totalPixels * scDisplay.waveformDuration
-                readonly property bool intersects: pixels > 0 && startMs < scDisplay.start + scDisplay.span && endMs > scDisplay.start
-                source: intersects ? root.scShadowAsset(scDisplay.tiles[index]) : ""
+                source: scDisplay.waveAsset(scDisplay.tiles[index])
                 sourceSize.width: Math.min(2048, pixels)
                 sourceSize.height: 128
                 asynchronous: true; cache: false; smooth: true
@@ -2690,6 +2759,22 @@ SHADOW_LAYER = r"""
                 y: 0
                 width: (endMs - startMs) / scDisplay.span * scDisplay.width
                 height: scDisplay.height
+                opacity: scDisplay.stale ? 0.55 : 1
+            }
+        }
+        // Native overview: elapsed RGB is 60%; band mode uses the stock Past colors.
+        // This texture stays static; only the clipping width follows the playhead.
+        Item {
+            visible: scDisplay.overview
+            clip: true
+            width: Math.max(0, Math.min(scDisplay.width, scDisplay.playhead * scDisplay.width))
+            height: scDisplay.height
+            Image {
+                source: scDisplay.overview ? scDisplay.waveAsset(scDisplay.imageUrl, true) : ""
+                sourceSize.width: 1024; sourceSize.height: 64
+                width: scDisplay.width; height: scDisplay.height
+                asynchronous: true; cache: false; smooth: true
+                fillMode: Image.Stretch
                 opacity: scDisplay.stale ? 0.55 : 1
             }
         }
@@ -2708,8 +2793,8 @@ SHADOW_LAYER = r"""
             model: scDisplay.graphical && scDisplay.meta ? scDisplay.meta.loops || [] : []
             delegate: Rectangle {
                 required property var modelData
-                readonly property real clipLeft: Math.max(0, scDisplay.screenX(modelData.startMs))
-                readonly property real clipRight: Math.min(scDisplay.width, scDisplay.screenX(modelData.endMs))
+                readonly property real clipLeft: scDisplay.screenX(modelData.startMs)
+                readonly property real clipRight: scDisplay.screenX(modelData.endMs)
                 visible: clipRight > clipLeft
                 x: clipLeft; width: Math.max(0, clipRight - clipLeft); height: scDisplay.height
                 color: modelData.c || "#26a6ff"
@@ -2723,11 +2808,11 @@ SHADOW_LAYER = r"""
                 required property var modelData
                 x: scDisplay.screenX(modelData.ms)
                 width: 2; height: scDisplay.height
-                visible: x >= 0 && x <= scDisplay.width
                 Rectangle { anchors.fill: parent; color: modelData.c || "#26a6ff" }
                 Text { textFormat: Text.PlainText; x: 3; text: modelData.n || String(modelData.i); color: modelData.c || "#26a6ff"; font.pixelSize: 11 }
             }
         }
+        } // scMoving: only this item moves each animation frame
         Rectangle {
             visible: scDisplay.graphical && !!scDisplay.sample
             x: Math.max(0, Math.min(scDisplay.width - width, scDisplay.playhead * scDisplay.width))
@@ -2792,10 +2877,13 @@ SHADOW_LAYER = r"""
 
 
 def shadow_layer(text: str, kind: str) -> str:
-    """Own the layer with the stock root; reparent its visual item outside stock layouts."""
+    """Keep visual items inside the stock stacking context, outside Row/ColumnLayouts."""
     # Stock roots request QtQuick 2.0/2.1; Matrix4x4 and Binding.restoreMode
     # need the newer revisions available in both supported Engine Qt builds.
     text = re.sub(r"(?m)^import QtQuick(?: \d+\.\d+)?\s*$", "import QtQuick 2.15", text)
+    text = re.sub(r"(?m)^import QtQuick.Layouts(?: \d+\.\d+)?[ \t]*$", "import QtQuick.Layouts 1.15", text)
+    if not re.search(r"(?m)^import QtQuick.Layouts(?: \d+\.\d+)?[ \t]*$", text):
+        text = "import QtQuick.Layouts 1.15\n" + text
     root_object = re.search(r"(?m)^[A-Za-z_]\w*(?:\.\w+)*\s*\{", text)
     if root_object is None:
         raise ValueError("shadow display target has no QML root object")
@@ -2809,7 +2897,22 @@ def shadow_layer(text: str, kind: str) -> str:
     end = text.rfind("}")
     if end < 0:
         raise ValueError("shadow display target has no QML root")
-    layer = SHADOW_LAYER.replace("@KIND@", kind).replace("@OWNER@", owner_id)
+    palette = []
+    for band, prop in (("Low", "lowColor"), ("Mid", "midColor"), ("High", "highColor")):
+        stock = f"waveform{band}{'Fade' if kind == 'waveform' else ''}Color"
+        colors = BAND_FADE if kind == "waveform" else BAND_COLORS
+        fallback = f'(rgb ? "{RGB_COLORS[band]}" : {three_band(stock, band, colors)})'
+        value = f'(typeof owner.height{band}Color !== "undefined" ? owner.height{band}Color : {fallback})' if kind == "waveform" else fallback
+        if kind not in ("waveform", "overview"):
+            value = '"#000000"'
+        palette.append(f"readonly property color {prop}: {value}")
+        past = three_band(f"waveform{band}PastColor", band, BAND_PAST) if kind == "overview" else '"#000000"'
+        palette.append(f"readonly property color past{band}Color: {past}")
+    # The stock overview RGB QSB hardcodes these same WaveFormItem defaults.
+    for prop, native, default in (("saturation", "saturationRgbWave", 1.612), ("brightAmp", "brightAmpFactorRgbWave", 0.473), ("brightGain", "brightGainRgbWave", 2.405), ("brightFloor", "brightFloorRgbWave", 0.197)):
+        value = f'(typeof owner.{native} !== "undefined" ? owner.{native} : {default})' if kind == "waveform" else str(default)
+        palette.append(f"readonly property real {prop}: {value}")
+    layer = SHADOW_LAYER.replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette))
     return text[:end] + layer + text[end:]
 
 

@@ -58,7 +58,7 @@ for y in range(h):
 png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(b''.join(rows)))+chunk(b'IEND',b'')
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path!='/tile.png': self.send_error(404);return
+        if self.path.split('?',1)[0]!='/tile.png': self.send_error(404);return
         self.send_response(200);self.send_header('Content-Type','image/png');self.end_headers();self.wfile.write(png)
 http.server.HTTPServer(('127.0.0.1',8080),Handler).serve_forever()
 PY
