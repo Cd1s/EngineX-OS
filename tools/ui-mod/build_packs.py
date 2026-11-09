@@ -199,6 +199,7 @@ SERVICES_MAIN = """
 		if (isFinite(s.cuePos) && s.cuePos >= 0 && s.cuePos / m.sampleRate * 1000 <= m.durationMs)
 			rows.push({i: 0, ms: s.cuePos / m.sampleRate * 1000, n: "CUE", c: "#ffffff"})
 		else if (s.cuePos === undefined) for (const q of m.cues || scShadowEmptyArray) if (q.i === 0) rows.push(q)
+		for (const q of m.cues || scShadowEmptyArray) if (q.i === 9) rows.push(q)
 		scShadowLiveCueCache[d] = {key: s.key, rate: m.sampleRate, cuePos: s.cuePos, raw: raw, rows: rows}
 		return rows
 	}

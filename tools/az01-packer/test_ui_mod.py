@@ -428,23 +428,26 @@ assert.equal(created,1);
 
 class UiModBuildTest(unittest.TestCase):
     def test_jc11_jc11s_packs_contain_shadow_display(self):
-        # AZ01 JC11 and JC11S install the same board-independent UI packs.
+        # Each supported console gets a separately built archive. The patcher
+        # is board independent; stock 5.3.0 QML is the shared input for these
+        # runtime board gates (the board name must affect the output under test).
         qrc = LAB / "5.3.0" / "qrc"
         if not qrc.is_dir():
             self.skipTest(f"{qrc} not found (run on the build host)")
         with tempfile.TemporaryDirectory(prefix="ui-console-test-") as tmp:
-            out = Path(tmp) / "packs"
-            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
-                                 capture_output=True, text=True)
-            self.assertEqual(res.returncode, 0, res.stderr)
-            with tarfile.open(out.with_suffix(".tar.gz")) as pack:
-                for board in ("JC11", "JC11S"):
-                    with self.subTest(board=board):
+            for board in ("JC11", "JC11S", "JP21", "JP24"):
+                with self.subTest(board=board):
+                    out = Path(tmp) / board / "packs"
+                    res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                                         capture_output=True, text=True)
+                    self.assertEqual(res.returncode, 0, f"{board}: {res.stderr}")
+                    with tarfile.open(out.with_suffix(".tar.gz")) as pack:
                         for lang in ("en", "zh-Hans", "zh-Hant"):
                             main = pack.extractfile(f"packs/{lang}/Skins/Embedded/EmbeddedMain.qml").read().decode()
                             self.assertIn("function scShadowApplyDisplay(decks)", main)
                             self.assertIn("s.metadataOnly", main)
                             self.assertIn("/v1/sc5000/shadow/display?deck=", main)
+                            self.assertIn("scDeckLocked", main)
                             for component, name in (("Waveform", "waveform"), ("WaveformOverview", "overview")):
                                 wave = pack.extractfile(f"packs/{lang}/Skins/Embedded/Views/Common/{component}/{component}.qml").read().decode()
                                 self.assertIn(f'objectName: "EngineX_Shadow_{name}"', wave)
