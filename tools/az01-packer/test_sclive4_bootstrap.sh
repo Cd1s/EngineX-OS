@@ -7,9 +7,13 @@ set -euo pipefail
 # AZ04=1: PRIME 4 G2 / SYSTEM ONE (#76), 64-bit Engine, /var/lib bound from /data/system/var-lib.
 AZ04="${AZ04:-0}"
 BOOTSTRAP_MODEL="${BOOTSTRAP_MODEL:-SCLIVE4}"
-JC11S_ROOTFS="${JC11S_ROOTFS:-/root/build/sc5000-lab/prime4plus-analysis/rootfs}"
+JC11S_ROOTFS="${JC11S_ROOTFS:-}"
+if [ "$AZ04" != 1 ] && [ -n "$JC11S_ROOTFS" ] && [ ! -d "$JC11S_ROOTFS" ]; then
+    echo "test_sclive4_bootstrap: explicit JC11S_ROOTFS not found: $JC11S_ROOTFS" >&2
+    exit 1
+fi
 if [ "$BOOTSTRAP_MODEL" = PRIME4PLUS ]; then
-    ROOTFS="$JC11S_ROOTFS"
+    ROOTFS="${JC11S_ROOTFS:?set JC11S_ROOTFS to the unpacked official PRIME4PLUS rootfs}"
     PREFIX=PRIME4PLUS VARLIB=data/system/var/overlay/lib PROFILE=5.3.0-sclive4 EDITS=19
 elif [ "$AZ04" = 1 ]; then
     ROOTFS="${ROOTFS:-/root/build/sc5000-lab/systemone-analysis/rootfs}"
@@ -319,8 +323,12 @@ echo "  Legacy directory upgrade: PASS"
 echo ""
 echo "=== All $PREFIX verification checks PASSED ==="
 
-# Default armhf run includes the separate official JC11S rootfs. Set
+# Include the separate official JC11S rootfs when its fixture is supplied. Set
 # JC11S_ROOTFS to an unpacked PRIME4PLUS-5.3.0 image (never a live deck).
 if [ "$AZ04" != 1 ] && [ "$BOOTSTRAP_MODEL" = SCLIVE4 ]; then
-    BOOTSTRAP_MODEL=PRIME4PLUS JC11S_ROOTFS="$JC11S_ROOTFS" bash "$0"
+    if [ -n "$JC11S_ROOTFS" ]; then
+        BOOTSTRAP_MODEL=PRIME4PLUS JC11S_ROOTFS="$JC11S_ROOTFS" bash "$0"
+    else
+        echo 'WARN: JC11S not tested; set JC11S_ROOTFS to include the official PRIME4PLUS first-boot case (required for release).'
+    fi
 fi

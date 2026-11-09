@@ -908,6 +908,66 @@ func TestModeBJC11SRefusesUnverifiableActivation(t *testing.T) {
 	}
 }
 
+func jc11sLegacyBackup(t *testing.T) string {
+	t.Helper()
+	img := filepath.Join(t.TempDir(), "legacy-data.img")
+	sh(t, "truncate", "-s", "64M", img)
+	sh(t, "mke2fs", "-t", "ext4", "-O", "encrypt", "-L", "az01-data", "-F", img)
+	sh(t, "debugfs", "-w", "-R", "mkdir /sc5000-custom", img)
+	sh(t, "debugfs", "-w", "-R", "mkdir /Music", img)
+	sh(t, "debugfs", "-w", "-R", "write /etc/hostname /Music/keep.mp3", img)
+	return img
+}
+
+func TestModeBJC11SLegacyBackup(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
+	b := buildBundle(t, "PRIME4PLUS", "5.3.0.3")
+	fb := newFastboot(t, "JC11S", true)
+	o := modeBOpts(t, fb, b)
+	o.Backup = jc11sLegacyBackup(t)
+	o.Key = filepath.Join(t.TempDir(), "no-host-key")
+	if err := run(ctxT(t), o); err != nil {
+		t.Fatal(err)
+	}
+	img := filepath.Join(fb.Dir, "flashed-data.img")
+	sh(t, "e2fsck", "-fn", img)
+	for _, path := range []string{"/sc5000-custom/bundle/boot-activate.sh", "/Music/keep.mp3"} {
+		if out := sh(t, "debugfs", "-R", "stat "+path, img); !strings.Contains(out, "Type: regular") {
+			t.Fatalf("missing %s: %s", path, out)
+		}
+	}
+	if out := sh(t, "debugfs", "-R", "stat /enginex", img); strings.Contains(out, "Type: directory") {
+		t.Fatal("fixture did not exercise a real legacy installation directory")
+	}
+}
+
+// Optional external fixture: the real released archive, not a current bundle
+// with an old version label. Run this on the ARM build host with its path set.
+func TestModeBJC11SPublishedBundle(t *testing.T) {
+	path := os.Getenv("JC11S_RELEASE_BUNDLE")
+	if path == "" {
+		t.Skip("set JC11S_RELEASE_BUNDLE to the published PRIME4PLUS data bundle")
+	}
+	need(t, "python3", "mke2fs", "debugfs", "e2fsck")
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			fb := newFastboot(t, "JC11S", true)
+			o := testOpts(t)
+			o.Fastboot, o.Bundle = fb.Bin, path
+			o.Key = filepath.Join(t.TempDir(), "no-host-key")
+			if legacy {
+				o.Backup = jc11sLegacyBackup(t)
+			}
+			if err := run(ctxT(t), o); err != nil {
+				t.Fatal(err)
+			}
+			if calls := fb.Flashed(); len(calls) != 1 || !strings.HasPrefix(calls[0], "flash data ") {
+				t.Fatalf("published archive was not verified and flashed: %v", calls)
+			}
+		})
+	}
+}
+
 func TestModeBKeepsTheUsersFilesWhenGivenABackup(t *testing.T) {
 	need(t, "python3", "mke2fs", "debugfs", "e2fsck", "dumpe2fs")
 	b := buildBundle(t, "PRIME4PLUS", "5.3.0.2")

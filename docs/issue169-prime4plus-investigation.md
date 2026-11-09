@@ -74,8 +74,9 @@ version, bundle and ALSA hook survived.
 The stock Engine launch script calls `encrypt-fs.sh`. That script recreates and
 applies fscrypt policy to **only `downloads` and `stems`**. The sandbox ran this
 script and the real stock `fscryptctl`, checked both policies, and verified that
-the EngineX directory and ALSA configuration remained. The sandbox exposes only
-its own loop device; Reporter, reset and reboot paths are blocked.
+the EngineX directory and ALSA configuration remained. The chroot exposes only
+its own loop device, allocated from the host's loop pool and detached on exit;
+Reporter, reset and reboot paths are blocked.
 
 ALSA loads `/var/lib/alsa/conf.d/99-sc5000-custom.conf`, which loads the hook via
 `/data/sc5000-custom/bundle/lib/libengine-ui-hook.so`. Its one-shot callback runs
@@ -93,7 +94,8 @@ was supplied. Official U-Boot contains size/type getvars and does not expose a
 partition-UUID getvar, so this verifies the documented partition name/type, not
 the live GPT UUID. Unknown responses stop before writing.
 
-After injection, the installer reads both version markers and compares the
+After injection, the installer finds the real installation directory (`enginex`
+or the legacy `sc5000-custom` retained until first boot), reads both version markers and compares the
 activator, hook library (including their legacy paths) and active ALSA config
 byte-for-byte with the checked bundle. Missing or stale data causes a clear
 `nothing flashed` error. This also works with an older bundle injector, which
@@ -102,10 +104,14 @@ rejected. A USB write completion message explicitly leaves activation pending
 and gives an About-screen check; it no longer says activation or the custom
 Update.img path is already unlocked.
 
-The shim tests cover the JC11S path, wrong/missing target partitions and stale
-readback of every checked activation artifact. The bootstrap script now includes
-both SC LIVE 4 and a separate real PRIME4PLUS rootfs; provide its location with
-`JC11S_ROOTFS=/path/to/prime4plus/rootfs`. The existing AZ04-only mode is retained.
+The shim tests cover the JC11S path, wrong/missing target partitions, a real
+legacy directory backup, and stale readback of every checked activation artifact.
+`JC11S_RELEASE_BUNDLE` also exercises the actual published archive through the Go
+verifier with both fresh and legacy images. To include both SC LIVE 4 and a
+separate real PRIME4PLUS rootfs in the bootstrap script, provide
+`JC11S_ROOTFS=/path/to/prime4plus/rootfs`. A standalone run without this fixture
+explicitly warns that JC11S was not tested; an explicitly missing path fails.
+The release workflow requires the fixture. The existing AZ04-only mode is retained.
 
 Recorded sandbox output:
 
@@ -139,12 +145,21 @@ Required checks passed on the ARM build/test host:
 ```text
 gofmt -l .: PASS (empty)
 go vet ./...: PASS
+go test -race ./...: PASS
 go test -race ./cmd/enginex-installer/... ./pkg/...: PASS
+Published v5.3.0.3 bundle through Go verifier (fresh + legacy images): PASS
+tests/test_rootfs_overlay.sh: PASS (18 tests, mocked storage/hardware)
 python3 -m unittest discover -s tools/az01-packer:
-Ran 135 tests in 36.449s
+Ran 135 tests in 35.452s
 OK (skipped=1)
 bash syntax: PASS
 ```
+
+After review remediation, all the checks above were rerun. The full bootstrap
+run supplied the real JC11S fixture; a separate SC LIVE 4 run without it emitted
+the expected WARN and succeeded, while an explicitly missing JC11S path failed
+before building. The published-bundle Go fixture was supplied for both race
+commands and both fresh/legacy subcases passed.
 
 The first full race run caught the old SIGPIPE fixture's assumption that JC11S
 could fall back to `userdata`. The fixture now uses JC11S's verified `data`
@@ -169,6 +184,12 @@ does not assign a board identity from it.
 - The exact original activation failure remains unknown. Sandbox success and
   pre-write checks do not prove that a particular physical deck booted the
   installation. This change does not implement post-reboot version readback.
+- No physical JC11S `getvar partition-type:data` transcript is available. Static
+  analysis establishes that U-Boot implements the type getvar, but not its exact
+  response on the reporter's data partition. An erased/unrecognized partition
+  may report `raw` or an error and will be refused. This fail-closed guard may
+  require a read-only bootloader transcript before hardware acceptance; do not
+  override it or write `userdata` to work around an unknown response.
 - #165's six-byte EAAS listener is model-independent and can discover a JC11S
   emitting that beacon. It deliberately treats it as an unverified candidate,
   then obtains model identity from USB/fastboot. A JC11S capture is still needed
@@ -193,14 +214,16 @@ After a normal reboot, check Settings → About. It should say **EngineX OS** wi
 the EngineX version. Also try the EngineX page at `http://<deck-IP>:8080` from
 the same LAN. Seeing stock 5.3.0 means activation has not been confirmed, even
 if the file-transfer step said it succeeded.
+The EngineX page may ask for the access code shown by the deck.
 
 Once the maintainer supplies the updated installer, back up the deck's internal
 music, library and settings first. Use the **PRIME4PLUS** data bundle and the
 matching installer, enter Firmware Update Mode on the deck, and connect a USB
 data cable directly to the computer. On Windows, follow the existing WinUSB /
 WSL prerequisites. A fresh USB data-image installation replaces the entire
-internal data partition; using a verified backup from your own deck is the
-preserving route. Do not use a first-generation PRIME4 image or expect a custom
+internal data partition; `--userdata-backup` requires a verified **raw ext4 image
+of this deck's data partition**, not a folder or a file-level music backup.
+That is the preserving route. Do not use a first-generation PRIME4 image or expect a custom
 Gen-2 Update.img on a USB stick to unlock stock firmware.
 
 Keep the complete installer log. The updated installer checks the JC11S target

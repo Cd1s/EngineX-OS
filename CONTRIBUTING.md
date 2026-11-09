@@ -30,6 +30,7 @@ Run on a Linux x86_64 host with Go, an armhf cross compiler and `qemu-arm`:
 ```sh
 go vet ./... && go test -race ./...
 bash tests/test_rootfs_overlay.sh            # bash, not sh
+JC11S_ROOTFS=/path/to/official/PRIME4PLUS/rootfs bash tools/az01-packer/test_sclive4_bootstrap.sh
 python3 -m unittest discover -s tools/az01-packer
 python3 -m unittest discover -s tools/stems
 # C hooks: build commands are in the header of each file
@@ -37,6 +38,14 @@ python3 -m unittest discover -s tools/stems
 #   tools/ui-mod/test_stems_feature.c (armhf + qemu-arm)
 #   tools/edisksd-hook/test_edisksd_hook.c
 ```
+
+The armhf bootstrap command above includes both SC LIVE 4 and the separate
+official PRIME4PLUS (JC11S) rootfs. Without `JC11S_ROOTFS`, a standalone run
+warns that JC11S was not tested; release validation must supply the fixture.
+An explicitly supplied missing directory is an error. For the actual published
+archive through the installer shim, set `JC11S_RELEASE_BUNDLE` to its verified
+PRIME4PLUS data-bundle path when running Go tests. See
+`docs/issue169-prime4plus-investigation.md` for official-image and bundle digests.
 
 ## Releasing a new version
 
