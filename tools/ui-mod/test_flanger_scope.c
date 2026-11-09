@@ -43,9 +43,74 @@ static void test_px_off_on_reset(void) {
     fx_selector_supported = 1;
     dsp_originals[DSP_TURN_OFF] = dsp_originals[DSP_TURN_ON] = dsp_originals[DSP_ENABLE] = (void *)transition_original;
     hook_fx_turn_off(handler, event); hook_fx_turn_on(handler, event); hook_fx_enable(handler, event);
-    assert(sc_pfx_routes[0].reset_epoch == 3);
+    assert(sc_pfx_routes[0].reset_epoch == 2); /* ENABLE must preserve delay tails */
     fx_selector_supported = 0;
     puts("test_px_off_on_reset PASS");
+}
+
+static void test_double_reset_dry(void) {
+    int owner, effect;
+    float l[128], right[128], dry_l[128], dry_r[128];
+    float *in[] = {l, right};
+    memset(sc_pfx_routes, 0, sizeof sc_pfx_routes);
+    struct sc_pfx_route *r = &sc_pfx_routes[0];
+    sc_pfx_select(0, 1); assert(sc_pfx_bind(0, &owner, &effect));
+    r->input_a = in; r->mix = sc_pfx_bits(0.8f); r->parameter = sc_pfx_bits(0.5f);
+    sc_pfx_activate(r); sc_pfx_instance_prepare(&r->dsp);
+    fx_selector_supported = 1;
+    unsigned before = calls;
+    /* Initial render, then two resets in consecutive 128-frame blocks. No
+     * prepare between them: both banks become DIRTY on the second reset. */
+    for (unsigned block = 0; block < 4; ++block) {
+        for (unsigned i = 0; i < 128; ++i) {
+            l[i] = dry_l[i] = (float)((int)i - 64) / 512.0f;
+            right[i] = dry_r[i] = (float)((int)i - 32) / 512.0f;
+        }
+        if (block == 1 || block == 2) sc_pfx_reset_owner(&owner);
+        hook_flanger(&effect, in, (float *const *)2, 128);
+        if (block >= 2) {
+            assert(!memcmp(l, dry_l, sizeof l) && !memcmp(right, dry_r, sizeof right));
+            assert(r->native_override && r->dsp.wet == 0);
+            assert(r->dsp.bank_state[0] == SC_PFX_DIRTY && r->dsp.bank_state[1] == SC_PFX_DIRTY);
+        }
+    }
+    assert(calls == before); /* never fall through to full-wet stock Flanger */
+    sc_pfx_instance_prepare(&r->dsp);
+    hook_flanger(&effect, in, (float *const *)2, 128);
+    assert(r->dsp.current && calls == before);
+    fx_selector_supported = 0;
+    puts("test_double_reset_dry PASS");
+}
+
+static void *ready_writer(void *path) {
+    for (unsigned i = 0; i < 200; ++i) assert(px_write_ready(path));
+    return NULL;
+}
+
+static void test_px_product_scope(void) {
+    assert(px_selector_capable("5.3.0", "JC11"));
+    assert(!px_selector_capable("5.3.0", "JP07"));
+    assert(!px_selector_capable("5.3.0", "JP08"));
+    assert(!px_selector_capable("5.0.4", "JC11"));
+    assert(!px_selector_capable("5.3.0-sclive4", "JC11"));
+    char dir[] = "/tmp/px-ready-XXXXXX", path[128];
+    assert(mkdtemp(dir));
+    snprintf(path, sizeof path, "%s/ready", dir);
+    assert(px_write_ready(path));
+    FILE *f = fopen(path, "r"); char text[64] = {0};
+    assert(f && fgets(text, sizeof text, f) && !fclose(f));
+    assert(!strcmp(text, "armhf-px-v2 JC11\n"));
+    pthread_t writer;
+    assert(!pthread_create(&writer, NULL, ready_writer, path));
+    for (unsigned i = 0; i < 500; ++i) {
+        f = fopen(path, "r");
+        assert(f && fgets(text, sizeof text, f) && !fclose(f));
+        assert(!strcmp(text, "armhf-px-v2 JC11\n"));
+    }
+    assert(!pthread_join(writer, NULL));
+    assert(!unlink(path) && !rmdir(dir));
+    assert(!px_write_ready(path)); /* unavailable /run: do not install/bypass */
+    puts("test_px_product_scope PASS; test_px_ready_preflight PASS; test_atomic_ready PASS");
 }
 
 int main(void) {
@@ -69,6 +134,8 @@ int main(void) {
     }
     assert(calls == 10);
     assert(!px_carrier(NULL) && !px_is_carrier(NULL));
+    test_double_reset_dry();
+    test_px_product_scope();
     test_px_off_on_reset();
     test_px_master_bypass();
     puts("test_flanger_scope PASS; test_px_null_owner PASS");

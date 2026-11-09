@@ -3,6 +3,7 @@ package webui
 // Transient commands to Engine's UI hook. These are deliberately outside the
 // saved preferences: a new Engine process always starts with stock effects.
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -26,7 +27,35 @@ func (s *Server) fxSelectorReadyFile() string {
 
 func (s *Server) fxSelectorAvailable() bool {
 	i, err := os.Stat(s.fxSelectorReadyFile())
-	return err == nil && time.Since(i.ModTime()) < 2*time.Second
+	if err != nil || time.Since(i.ModTime()) >= 2*time.Second {
+		return false
+	}
+	b, err := os.ReadFile(s.fxSelectorReadyFile())
+	return err == nil && strings.TrimSpace(string(b)) == "armhf-px-v2 JC11"
+}
+
+// Queue ordinary cross-unit overlaps without holding the saved-settings lock.
+// Bound the wait so a stalled hook cannot leave arbitrarily late selections.
+func (s *Server) lockFXSelector(ctx context.Context) bool {
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if ctx.Err() != nil {
+			return false
+		}
+		if s.fxMu.TryLock() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return false
+		case <-tick.C:
+		}
+	}
 }
 
 func (s *Server) fxSelectorUpdate(w http.ResponseWriter, r *http.Request, q url.Values) {
@@ -36,7 +65,7 @@ func (s *Server) fxSelectorUpdate(w http.ResponseWriter, r *http.Request, q url.
 		fail(w, http.StatusBadRequest, errors.New("invalid FX unit or mode"))
 		return
 	}
-	if !s.fxMu.TryLock() {
+	if !s.lockFXSelector(r.Context()) {
 		fail(w, http.StatusConflict, errors.New("FX selection already pending"))
 		return
 	}

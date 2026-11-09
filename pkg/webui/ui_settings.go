@@ -489,10 +489,16 @@ func (s *Server) migratePioneerFX() error {
 	}
 	defer os.Remove(f.Name())
 	_, err = f.WriteString(strings.Join(kept, "\n"))
+	if err == nil {
+		err = f.Sync()
+	}
 	if ce := f.Close(); err == nil {
 		err = ce
 	}
 	if err != nil {
+		return err
+	}
+	if err := os.Chmod(f.Name(), 0o644); err != nil {
 		return err
 	}
 	return os.Rename(f.Name(), path)

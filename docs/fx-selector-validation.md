@@ -1,97 +1,82 @@
-# FX selector validation — 2026-11-09
+# FX selector R5b validation — 2026-11-09
 
-Base: `dfdef97e04621e1fc7fc8f4e2f0fc607a00b316d`.
-Branch: `agent/fx-selector-20261109`.
-Build/test host: the build host, native aarch64 host with armhf compatibility; no qemu and no deck connection.
+Follow-up to `03d9404`; branch `agent/fx-selector-20261109`. Baseline master DSP: `dfdef97e04621e1fc7fc8f4e2f0fc607a00b316d`.
+All compilation/tests/sandboxes ran on the build host. Native armhf execution; no qemu or deck connection. The shared laboratory remained read only.
 
 | Check | Result |
 | --- | --- |
-| Kernel-native armhf execution | Parent inspected the live child via /proc/PID/exe: the executable itself is ELF32 ARM, not an emulator |
-| gofmt -l . | No files |
-| go vet ./... | PASS |
+| gofmt -l . / go vet ./... | PASS |
 | go test -race ./... | PASS |
 | Python az01-packer discovery | 136 tests, OK, 1 skipped |
-| UI source/behavior subset after final encoder changes | 34 tests, OK |
-| test_rootfs_overlay.sh | 18 tests, PASS; mocked storage/hardware |
-| test_pioneer_selector | plain + ASan/UBSan + TSan PASS |
-| test_dsp_smooth | plain + ASan/UBSan + TSan PASS |
-| Native armhf non-PX Flanger | PASS; opaque argument 0/1/2/4/0x12345678, bit-exact original body and makeup |
+| Rootfs overlay | 18 tests, PASS; mocked storage/hardware |
+| test_pioneer_selector / test_dsp_smooth | plain, ASan+UBSan, TSan PASS; UBSan recovery disabled |
+| Native armhf Flanger/control regressions | PASS |
+| Master golden | AZ04 and armhf, fast/off; five modes × 20 seconds per scope |
+| Hook rebuild | Two armhf builds byte-identical; AZ04 compilation PASS |
 | Site JavaScript syntax | PASS |
-| armhf hook, two builds | Byte-identical |
-| AZ04 hook compilation and master golden | PASS; frozen dfdef97 DSP source; all five modes × 20 seconds, both `-ffp-contract=fast` and `off` |
+| JC11 rootfs | PASS; selector, two bindings, parameter/Wet, migration |
+| JP07 rootfs | PASS; no PX install/bypass/menu hiding/migration |
+| JC11 rootfs with read-only /run | PASS; readiness preflight fails back to legacy |
 
-Both committed armhf copies have SHA256:
+Both committed armhf hook copies have SHA256:
 
 ```text
-51c99fdf4dd10c91a95eb50a7d4866a48d5f2df7ef1c15384fc1985ac1e1d8b6
+d5970f5227e9d65c9150d14596845a495ef00364a871645e6468ef3f2ca1087d
 ```
 
-Paths: `rootfs-overlay/etc/sc5000/libengine-ui-hook.so` and `rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so`. ELF32 ARM EABI5, stripped; BuildID `72f0707a8ebefb8b8950e54eb0aa92aad3672b00`.
+Paths: `rootfs-overlay/etc/sc5000/libengine-ui-hook.so` and `rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so`.
 
-## R5 regressions
+## Review coverage
 
-Follow-up to review of `9e66cba`, all builds/tests on the build host:
-
-| Review | Fix and regression |
+| Review | Fix / regression |
 | --- | --- |
-| M1 | `sc_pfx_activate` clears pending restore before native override; `test_arm_arm` arms/off/arms without rendering between selections |
-| M2 | Wait for smoothed Wet <1e-6 before literal bypass; `test_wet_zero_fade` checks every adjacent sample during each mode's 0.8→0 fade (<0.025), then bit-exact dry |
-| M3 | Unverified armhf scope retains the opaque argument/body; `test_flanger_scope`. AZ04 compiles original DSP source; `test_master_golden` checks exact float-word hashes against dfdef97 under both FP policies |
-| M4 | Install-time master bypass on every PX-enabled board; API migration preserves unrelated settings; `test_px_master_bypass`, `TestFXSelectorMigratesLegacySettings`, both rootfs probes |
-| L1 | Worker-only preparation with atomic bank ownership; `test_worker_banks` checks no unprepared render, no hidden callback clear, deferred rapid change and fresh reset; concurrent routes run under TSan |
-| L2 | Flush tiny smoother states; `test_smoother_denormals` |
-| L3 | NULL carrier/current-name guards; `test_px_null_owner`. Destructor-versus-restoration lifetime serialization remains unproven |
-| L4 | Off/on/enable events increment reset epoch; `test_px_off_on_reset` plus fresh-buffer assertion in `test_worker_banks` |
-| L5 | Heartbeat moved to `/run/enginex-fx-selector.ready`; real API readiness exercised by both sandboxes |
-| L6 | Dedicated try-lock, 750 ms command expiry and unread-request cleanup; `TestFXSelectorTimeoutDoesNotBlockSettings`. Cancellation after worker application starts remains deferred |
-| I1 | Tester documentation distinguishes consumed-handshake ducking from normal wet-only delay startup |
-| I2 | Live event ordering, channel assignment, toggles and teardown remain PRIME 4 hardware checks; no deck was contacted |
+| R1 | A mapped override with no READY bank returns untouched dry input without calling Flanger. `test_double_reset_dry` calls the actual hook through two resets with no prepare, verifies sample-exact dry and unchanged original-call count, then resumes after worker preparation. `test_double_reset_no_prepare` repeats the lifecycle in the sanitizer matrix |
+| R2 | Install/master bypass/menu hiding/migration restricted to verified JC11 5.3.0 (`hasDJFx=true`). JP07 has neither selector flag and keeps the original global menu, master DSP and preference. `test_px_product_scope`, `TestFXSelectorJP07PreservesLegacy`, JP07 rootfs probe and master golden |
+| R3 | Poison index is `SC_PFX_RING_SIZE - 1000`, within the actual 48000-sample ring. ASan+UBSan uses `-fno-sanitize-recover=undefined`; a UBSan finding now fails the gate |
+| R4 | Dedicated FX lock queues ordinary overlaps for at most 250 ms, with context cancellation. `TestFXSelectorQueuesOverlappingUnits` forces a 100 ms overlap and verifies both units receive matching successful ACKs; the stalled-hook test still bounds waiting and leaves settings unlocked |
+| R5 | Migration writes 0644 and Syncs before atomic rename, matching saveUI; permission/content assertions in `TestFXSelectorMigratesLegacySettings`. Migration remains a one-time side effect of status discovery on a supported selector |
+| R6 | ENABLE does not increment the reset epoch (`test_px_off_on_reset`). Readiness preflight fails back to the original master/menu when /run cannot be written (`test_px_ready_preflight`, read-only-rootfs probe). Heartbeat replacement is atomic (`test_atomic_ready`). Live hardware event semantics remain unverified |
+| Non-PX armhf golden | Master uses the frozen dfdef97 DSP on both architectures, separately namespaced from selector DSP. `test_master_golden` checks JP07, JP08, 5.0.4 and sclive4 scopes, each mode for 20 seconds under fast/off, against hashes generated from the actual dfdef97 hook source |
 
-The JP07 rootfs probe reports `hasDJFx=false`, `hasNHFx=false`: it has no native FX selector. Its supported hook still immediately bypasses old master FX; the legacy menu is hidden and the old key is removed, as requested by R5. JC11 provides the native selector.
+## Golden provenance
 
-## JP07 config probe
+The armhf baseline was separately compiled from `git archive dfdef97 tools/ui-mod` with the same deterministic callback fixture. Both FP-contraction flags produced these exact float-word FNV-1a hashes:
 
 ```text
-engine-ui-hook: PX product=JP07 master-bypass=1 installed
-FXCONFIG product=JP07 hasDJFx=false hasNHFx=false
-FXCONFIG master-bypassed=true selector=false
-FXCONFIG legacy-master-bypass-and-migration|PASS
+Spiral      2b14589a7cbaec75
+Pitch Echo  92b5494acccf3730
+Slip Roll   b560e4dd037650cc
+Dub Echo    2c70597c4940e052
+Space       c96acf49bea7c17f
 ```
 
-## JC11 sandbox excerpt
+The golden is a C callback oracle for the shared hook path and product/build policy. It does not run JP08/5.0.4/sclive4 firmware images. `pioneer_fx_legacy.h` remains byte-identical to dfdef97; `pioneer_master.h` namespaces that frozen source without editing its arithmetic. Existing separate AZ04 fast/off expected hashes remain pinned.
 
-Real PRIME4 5.3.0 rootfs, production hook, generated UI pack and production Go API handlers, in private mount/network/PID namespaces. The real private knob component is instantiated using original assignment modules and MIDI configuration fixtures.
+## Sandbox excerpts
 
 ```text
-FXCONFIG product=JC11 hasDJFx=true hasNHFx=false
-FXPROBE legacy-master-menu-hidden|PASS
+JC11: hasDJFx=true hasNHFx=false
+engine-ui-hook: PX product=JC11 master-bypass=1 installed
 FXPROBE appended-list|PASS
-FXPROBE native-knob-component|PASS
-FXPROBE three-plus-one-minus|PASS
-FXPROBE unit-bus-isolation|PASS
-FXPROBE continuous-zero-no-movement|PASS
-FXPROBE continuous-five-step-burst-clamps|PASS
-FXPROBE unit1-Mix-wire-bits|PASS
-FXPROBE unit1-carrier|PASS
-FXPROBE unit1-px-label|PASS
-FXNATIVE distinct-collections|true
-engine-ui-hook: PX unit=1 mode=1 ... bound
 FXNATIVE unit=1 finite+param+wet0|PASS
-engine-ui-hook: PX unit=2 mode=2 ... bound
 FXNATIVE unit=2 finite+param+wet0|PASS
-FXPROBE unit2-Mix-wire-bits|PASS
-FXPROBE unit2-carrier|PASS
 FXNATIVE stock-mix-restored|PASS
-FXNATIVE offline-driver|PASS
-FXPROBE stock-flanger-selectable|PASS
 FXPROBE done|PASS
 FXCONFIG legacy-master-bypass-and-migration|PASS
+
+JP07: hasDJFx=false hasNHFx=false
+FXCONFIG master-bypassed=false selector=false
+FXCONFIG JP07-legacy-preserved|PASS
+
+JC11 with read-only /run: hasDJFx=true hasNHFx=false
+FXCONFIG master-bypassed=false selector=false
+FXCONFIG JC11-legacy-preserved|PASS
 ```
 
-The wire check compares the exact float bits stored by Planck against the acknowledged command. The native driver then replays ABI fixtures into two distinct real ChannelDJFx handler/collection pairs and feeds real carrier pointers with their owner-embedded buffer-array addresses through the installed process hook. Output is finite and nonzero, changes with Parameter, and is bit-identical to input at Wet=0. Selecting stock Flanger restores native Mix.
+All three sandbox Engine runs ended with the planned 40-second timeout (exit 124), after their probes passed.
 
-There is no ALSA device in this sandbox. The fixture unit numbers are assigned by the offline driver; this does not prove the live audio-device event queue, physical unit/channel assignment, end-to-end gain, latency, or listening quality. The bounded Engine run ends via the 40-second timeout (124), so graceful native destructor teardown is not claimed as a runtime result. Destructor unregister logic is covered by the C unit test, and its displaced instructions/offsets were checked statically.
+The JC11 probe uses a real PRIME4 5.3.0 rootfs, production hook, generated UI pack and production Go API in private mount/network/PID namespaces. It tests native knob context, appended list, exact Planck challenge bits, two distinct real ChannelDJFx collections, parameter/Wet-zero output, and native Mix restoration.
 
-Independent Time/Rate is not wired: Parameter currently also controls time. PRIME 4 hardware verification remains necessary; the steps and verified offset table are in [fx-selector.md](fx-selector.md).
+There is no ALSA device. A separate offline driver replays DSP event fixtures into captured real handlers, rather than exercising the live device event queue. Therefore physical unit/channel routing, end-to-end knob latency, event ordering/bit preservation and destructor-versus-restoration serialization are not established. Independent Rate is still not captured; Parameter also maps time.
 
-Read-only architecture consultation used paseo-committee: 严IN (Sonnet), agent `815450da-81cc-4b4a-9bd7-71bed88bef11`, verified the owner/collection/ABI chain; 程IN (GPT61), agent `c1592103-ed34-43b8-9003-bdf567262f87`, identified the native Scripted-action registration and encoder bridge. Both are archived. This consultation does not replace the PM's planned independent code review.
+PRIME 4 verification must cover rapid off/on, ENABLE/reassignment and echo tails, overlapping unit selection, rapid mode changes, return to stock Flanger with the prior Mix position, writable /run, and teardown. Steps and the previously checked Engine offsets remain in [fx-selector.md](fx-selector.md).
