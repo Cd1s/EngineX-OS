@@ -94,15 +94,16 @@ type playlistSearcher interface {
 	SearchPlaylists(context.Context, string) ([]providers.Playlist, error)
 }
 type tidalGateway struct {
-	browse  *browseCache
-	s       *Server
-	catalog *providers.Deezer
-	mux     *http.ServeMux
-	mu      sync.Mutex
-	ids     map[string]int64
-	tracks  map[int64]trackRef
-	lists   map[string]playlistRef
-	next    int64
+	browse   *browseCache
+	searches *searchCache
+	s        *Server
+	catalog  *providers.Deezer
+	mux      *http.ServeMux
+	mu       sync.Mutex
+	ids      map[string]int64
+	tracks   map[int64]trackRef
+	lists    map[string]playlistRef
+	next     int64
 
 	// Artwork for list rows, by what the row knows: title and artist.
 	artURLs  map[string]string
@@ -251,6 +252,7 @@ func evict[K comparable](seen map[K]int64, limit int, drop func(K)) {
 
 func newTidalGateway(s *Server) *tidalGateway {
 	g := &tidalGateway{browse: newBrowseCache(s.cfg.StateDir), artURLs: map[string]string{}, artCache: map[string][]byte{}, s: s, catalog: &providers.Deezer{BaseURL: s.cfg.DeezerURL, HTTP: s.cfg.HTTP}, mux: http.NewServeMux(), ids: map[string]int64{}, tracks: map[int64]trackRef{}, lists: map[string]playlistRef{}, trackSeen: map[int64]int64{}, listSeen: map[string]int64{}}
+	g.searches = newSearchCache()
 	g.loadTracks()
 	g.mux.HandleFunc("POST /au/oauth2/device_authorization", g.deviceAuthorization)
 	g.mux.HandleFunc("POST /au/oauth2/token", g.token)
@@ -443,6 +445,12 @@ func (g *tidalGateway) subscription(w http.ResponseWriter, r *http.Request) {
 // sources returns ready sessions, restoring persisted owner logins after a
 // restart so the deck works without opening the phone console first.
 func (g *tidalGateway) sources() []*Session {
+	return g.sourcesFor("")
+}
+
+// A search only needs the selected service. Do not restore unrelated accounts
+// (or their credentials) on its critical path.
+func (g *tidalGateway) sourcesFor(scope string) []*Session {
 	s := g.s
 	// Restoring a login can refresh tokens over the network (ready), so it runs
 	// outside s.mu; only the session map is touched under the lock.
@@ -450,6 +458,9 @@ func (g *tidalGateway) sources() []*Session {
 	s.prune()
 	var restore []string
 	for _, name := range loginServices {
+		if scope != "" && name != scope {
+			continue
+		}
 		owned := false
 		for _, v := range s.sessions {
 			owned = owned || (!v.Guest && v.Provider == name)
@@ -484,7 +495,7 @@ func (g *tidalGateway) sources() []*Session {
 	}
 	var out []*Session
 	for _, v := range s.sessions {
-		if v.Ready {
+		if v.Ready && (scope == "" || v.Provider == scope) {
 			out = append(out, v)
 		}
 	}
@@ -1336,17 +1347,11 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := g.s.scope()
 	sources := []source{}
-	if scope == "deezer" {
-		sources = append(sources, source{"", "deezer", false, g.catalog})
-	}
-	for _, v := range g.sources() {
-		if v.Provider == scope && v.Provider != "deezer" {
+	// Gateway search deliberately requires a login, including services whose
+	// provider APIs also support anonymous/public search.
+	for _, v := range g.sourcesFor(scope) {
+		if v.Provider == scope {
 			sources = append(sources, source{v.ID, v.Provider, v.Guest, v.p})
-		}
-	}
-	if scope == "soundcloud" && len(sources) == 0 {
-		if p := g.s.ownerSoundCloud(); p != nil {
-			sources = append(sources, source{"", "soundcloud", false, p})
 		}
 	}
 	var tracks [][]providers.Track
@@ -1357,7 +1362,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 		defer searches.Done()
 		tracks = each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Track, error) {
 			if p, ok := v.p.(trackSearcher); ok {
-				return p.Search(ctx, query)
+				return g.searchTracks(ctx, v.provider, v.session, p, query)
 			}
 			return nil, nil
 		})
@@ -1366,7 +1371,7 @@ func (g *tidalGateway) search(w http.ResponseWriter, r *http.Request) {
 		defer searches.Done()
 		lists = each(r.Context(), sources, func(ctx context.Context, v source) ([]providers.Playlist, error) {
 			if p, ok := v.p.(playlistSearcher); ok {
-				return p.SearchPlaylists(ctx, query)
+				return g.searchLists(ctx, v.provider, v.session, p, query)
 			}
 			return nil, nil
 		})

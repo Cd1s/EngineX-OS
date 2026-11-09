@@ -39,7 +39,10 @@ type browseData struct {
 	Tracks []browseTrack        `json:"tracks,omitempty"`
 }
 
-var errBrowseTooLarge = errors.New("playlist too large")
+var (
+	errBrowseTooLarge = errors.New("playlist too large")
+	errBrowseBusy     = errors.New("metadata provider busy")
+)
 
 type browseEntry struct {
 	data            []byte
@@ -53,13 +56,14 @@ type browseFlight struct {
 	err  error
 }
 type browseCache struct {
-	diskMu  sync.Mutex
-	mu      sync.Mutex
-	dir     string
-	entries map[string]*browseEntry
-	flights map[string]*browseFlight
-	bytes   int
-	now     func() time.Time
+	diskMu     sync.Mutex
+	mu         sync.Mutex
+	dir        string
+	entries    map[string]*browseEntry
+	flights    map[string]*browseFlight
+	bytes      int
+	now        func() time.Time
+	ttl, stale time.Duration
 }
 
 func newBrowseCache(state string) *browseCache {
@@ -70,7 +74,7 @@ func newBrowseCache(state string) *browseCache {
 			dir = "/data/enginex/cache/browse-v1"
 		}
 	}
-	c := &browseCache{dir: dir, entries: map[string]*browseEntry{}, flights: map[string]*browseFlight{}, now: time.Now}
+	c := &browseCache{dir: dir, entries: map[string]*browseEntry{}, flights: map[string]*browseFlight{}, now: time.Now, ttl: browseTTL, stale: browseStale}
 	c.pruneDisk()
 	return c
 }
@@ -95,8 +99,8 @@ func (c *browseCache) get(ctx context.Context, key string, load func(context.Con
 	}
 	if e != nil {
 		e.used = now
-		if e.data != nil && now.Sub(e.at) < browseStale {
-			if (e.disk || now.Sub(e.at) >= browseTTL) && !now.Before(e.retry) {
+		if e.data != nil && now.Sub(e.at) < c.stale {
+			if (e.disk || now.Sub(e.at) >= c.ttl) && !now.Before(e.retry) {
 				c.start(key, load)
 			}
 			data := e.data
@@ -112,7 +116,7 @@ func (c *browseCache) get(ctx context.Context, key string, load func(context.Con
 	f := c.start(key, load)
 	c.mu.Unlock()
 	if f == nil {
-		return browseData{}, errors.New("browse cache busy")
+		return browseData{}, errBrowseBusy
 	}
 	select {
 	case <-ctx.Done():
@@ -167,7 +171,7 @@ func (c *browseCache) start(key string, load func(context.Context) (browseData, 
 			// Keep a tombstone until the old disk file is gone. A concurrent
 			// reader must join this flight rather than reload that snapshot.
 			c.insert(key, &browseEntry{used: now})
-		} else if err != nil {
+		} else if err != nil && !errors.Is(err, errBrowseBusy) {
 			if revoked {
 				c.insert(key, &browseEntry{err: err, used: now, retry: now.Add(browseRetry)})
 			} else if e := c.entries[key]; e != nil {
