@@ -86,7 +86,7 @@ SERVICES_MAIN = """
 	// The board (device tree), not Config.device.isPlayer: the 4-deck layout turns a
 	// player into a non-player inside Engine (#49).
 	property bool scPlayer: false
-	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 && (scShadowDisplayOnly || scPlayer || !!(scShadowAt[deck] && scShadowAt[deck].path)) }
+	function scDeckLocked(deck) { return scFourDeckRole !== "" && scFourDeckRole.indexOf(String(deck)) < 0 && (scPlayer || (scShadowDisplayOnly ? !!scShadowData(deck) : !!(scShadowAt[deck] && scShadowAt[deck].path))) }
 	// Swipe left loads the role's first deck, swipe right its second (0: stock).
 	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
 	property bool scFourDeckOn: false // the saved switch; Engine applies it on restart
@@ -174,6 +174,7 @@ SERVICES_MAIN = """
 		if (isFinite(s.cuePos) && s.cuePos >= 0 && s.cuePos / m.sampleRate * 1000 <= m.durationMs)
 			rows.push({i: 0, ms: s.cuePos / m.sampleRate * 1000, n: "CUE", c: "#ffffff"})
 		else if (s.cuePos === undefined) for (const q of m.cues || scShadowEmptyArray) if (q.i === 0) rows.push(q)
+		for (const q of m.cues || scShadowEmptyArray) if (q.i === 9) rows.push(q)
 		scShadowLiveCueCache[d] = {key: s.key, rate: m.sampleRate, cuePos: s.cuePos, raw: raw, rows: rows}
 		return rows
 	}
@@ -228,7 +229,7 @@ SERVICES_MAIN = """
 		for (let d = 1; d <= 4; d++) {
 			let e = null
 			for (let i = 0; i < decks.length; i++) if (Number(decks[i].deck) === d) { e = decks[i]; break }
-			if (!e || !scDeckLocked(d) || !(e.key || e.loading)) {
+			if (!e || scFourDeckRole === "" || scFourDeckRole.indexOf(String(d)) >= 0 || !(e.key || e.loading)) {
 				delete next[d]; delete scShadowDisplayRequests[d]; delete scShadowGridCache[d]; delete scShadowLiveCueCache[d]
 				continue
 			}

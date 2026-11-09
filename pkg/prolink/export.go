@@ -161,6 +161,16 @@ func (e *Exporter) SetDeck(d ExportDeck) {
 	}
 }
 
+// CachedAnalysis exposes only the already observed track; it cannot start export
+// or perform network I/O, and never takes the exporter lifecycle mutex.
+func (e *Exporter) CachedAnalysis(dev Device, host net.IP) (*rekordbox.Analysis, string, string) {
+	return e.cfg.MediaCache.CachedAnalysis(dev, host)
+}
+
+// DisplayMediaCache is immutable configuration. Display polling never takes the
+// lifecycle mutex, which may be waiting for network workers during shutdown.
+func (e *Exporter) DisplayMediaCache() *MediaCache { return e.cfg.MediaCache }
+
 // RequestMaster asks the tempo master at ip to hand master over to this player
 // (Pro DJ Link master handoff request, type 0x26, to its beat port).
 func (e *Exporter) RequestMaster(ip net.IP) error {
@@ -576,8 +586,7 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 		ctx, cancel := context.WithCancel(context.Background())
 		r.cancel = cancel
 		if cfg.MediaCache != nil {
-			cache := *cfg.MediaCache
-			cache.Context = ctx
+			cache := MediaCache{Context: ctx, Dir: cfg.MediaCache.Dir, Enabled: cfg.MediaCache.Enabled, Portmap: cfg.MediaCache.Portmap}
 			r.mediaCache = &cache
 			r.observer = NewDiscovery()
 			r.observer.SetMediaCache(&cache)
