@@ -25,8 +25,9 @@ Item {
     }
     function select(channel, label) {
         const section = probe.sections[channel - 1]
-        const index = Array.from(section.inputs).indexOf(label)
-        probe.check(index >= 0, "native input choice " + label + " channel " + channel)
+        const nativeIndex = Array.from(section.inputs).indexOf(label)
+        const index = Array.from(probe.selectors[channel - 1].scInputIndexes).indexOf(nativeIndex)
+        probe.check(index >= 0, "visible native input choice " + label + " channel " + channel)
         probe.button(channel).optionSelected(index)
     }
 
@@ -67,6 +68,11 @@ Item {
                         const control = component.createObject(probe.Window.window.contentItem, {controller: probe.sections[channel - 1], visible: false})
                         probe.check(!!control, "create shipped input selector " + channel)
                         probe.selectors.push(control)
+                        const names = Array.from(control.scInputIndexes).map(i => probe.sections[channel - 1].inputs[i])
+                        const expectedInputs = channel < 3 ? ["Engine"] : ["Engine", "Line In"]
+                        probe.check(JSON.stringify(names) === JSON.stringify(expectedInputs), "JP21 only verified inputs channel " + channel)
+                        for (let i = 0; i < probe.button(channel).options.count; i++)
+                            probe.check(probe.button(channel).options.get(i).optionName === root.scT(names[i]), "visible input label/index " + channel + ":" + i)
                     }
                     for (let i = 0; i < 4; i++) console.warn("X171 INPUTS|" + (i + 1) + "|" + JSON.stringify(Array.from(probe.sections[i].inputs)) + "|")
                     probe.stage++
