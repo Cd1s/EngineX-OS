@@ -62,7 +62,11 @@ def main():
                 if i >= 0 and address < table[starts[i]][0]:
                     symbol = table[starts[i]][1]
                     functions[symbol] += 1
-                    if any(key in symbol for key in ("MemoryManager", "MarkStack", "markOnce", "markObjects", "GCStateMachine")):
+                    # MemoryManager also allocates strings/data outside GC.
+                    # Count only known marking, sweeping and collection symbols.
+                    if any(key in symbol for key in ("MemoryManager5runGC", "MemoryManager12collectRoots",
+                                                     "MemoryManager5sweep", "MarkStack", "markOnce",
+                                                     "markObjects", "GCStateMachine")):
                         gc_bins[stamp // 100] += 1
             break
         else:
