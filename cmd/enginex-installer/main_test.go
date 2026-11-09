@@ -205,8 +205,10 @@ func testOpts(t *testing.T) *options {
 	t.Helper()
 	return &options{
 		Repo: "Cd1s/EngineX-OS", Yes: true, Fastboot: "no-such-fastboot-binary",
-		AirDAddr: fmt.Sprintf("127.0.0.1:%d", freeUDP(t)), AirDWait: 800 * time.Millisecond,
-		Subnets: []string{"127.0.0"}, UIPort: freeTCP(t), SSHPort: freeTCP(t),
+		AirDAddr: fmt.Sprintf("127.0.0.1:%d", freeUDP(t)),
+		EAASAddr: fmt.Sprintf("127.0.0.1:%d", freeUDP(t)),
+		AirDWait: 800 * time.Millisecond,
+		Subnets:  []string{"127.0.0"}, UIPort: freeTCP(t), SSHPort: freeTCP(t),
 		WorkDir: t.TempDir(), WaitUSB: time.Second, Out: &bytes.Buffer{}, In: strings.NewReader(""),
 		ListUSB: func(context.Context) string { return "" }, // never the build host's real USB bus
 	}
@@ -261,10 +263,155 @@ func TestDiscoverFindsDecksWithoutAnIP(t *testing.T) {
 }
 
 func freeUDPFrom(o *options) int {
-	_, p, _ := net.SplitHostPort(o.AirDAddr)
+	return freeUDPFromAddr(o.AirDAddr)
+}
+
+func freeUDPFromAddr(addr string) int {
+	_, p, _ := net.SplitHostPort(addr)
 	var n int
 	fmt.Sscan(p, &n)
 	return n
+}
+
+// Numark Mixstream Pro+ (NH08S) only broadcasts EAAS on UDP 11224, not StageLinQ airD (#164).
+func TestDiscoverFindsEAASDeck(t *testing.T) {
+	o := testOpts(t)
+	announceFrom(t, "127.0.0.9", freeUDPFromAddr(o.EAASAddr), []byte("EAAS\x01\x00"))
+	decks := discover(ctxT(t), o)
+	var found *deck
+	for i := range decks {
+		if decks[i].IP == "127.0.0.9" {
+			found = &decks[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("discover did not find EAAS beacon from 127.0.0.9; got: %+v", decks)
+	}
+	if !found.Announced || found.Known || !found.FromEAAS || found.Board != "" || found.Name != "Unverified EAAS device" {
+		t.Errorf("deck = %+v, want an announced but unverified EAAS candidate without a board", found)
+	}
+}
+
+func TestEAASPacketValidation(t *testing.T) {
+	valid := []byte("EAAS\x01\x00")
+	for n := 0; n < len(valid); n++ {
+		if isEAAS(valid[:n]) {
+			t.Errorf("accepted truncated beacon of length %d", n)
+		}
+	}
+	for _, pkt := range [][]byte{
+		[]byte("airD\x01\x00"), []byte("EAAS\x00\x00"), []byte("EAAS\x01\x01"),
+		append(append([]byte{}, valid...), 0), append(append([]byte{}, valid...), make([]byte, 4096)...),
+	} {
+		if isEAAS(pkt) {
+			t.Errorf("accepted invalid beacon of length %d", len(pkt))
+		}
+	}
+	if !isEAAS(valid) {
+		t.Fatal("rejected the captured six-byte beacon")
+	}
+}
+
+func TestPnPDescriptionCannotImpersonateADeck(t *testing.T) {
+	o := testOpts(t)
+	for _, instance := range []string{`USB\VID_046D&PID_C52B\1234`, `HID\VID_046D&PID_C52B\1234`} {
+		pnputil := "Instance ID: " + instance + "\r\n" +
+			"Device Description: USB\\VID_15E4&PID_303F\\fake adapter for 15e4:303f\r\n" +
+			"Manufacturer Name: USB\\VID_15E4&PID_103F\\fake\r\n"
+		o.ListUSB = func(context.Context) string { return parsePnPUtil(pnputil) }
+		if board, line := usbDeck(ctxT(t), o, gen2USB); board != "" || line != "" {
+			t.Fatalf("product text impersonated a deck: %q, %q", board, line)
+		}
+	}
+}
+
+func TestPnPUtilExtraBlankLinesKeepAllDevices(t *testing.T) {
+	first := "Instance ID: USB\\VID_046D&PID_C52B\\1234\nDevice Description: Keyboard"
+	second := "Instance ID: USB\\VID_15E4&PID_303F\\5678\nDevice Description: Numark MIXSTREAM PRO PLUS"
+	for _, separator := range []string{"\n\n", "\n\n\n", "\n\n\n\n", "\n \t\n\n"} {
+		got := parsePnPUtil(first + separator + second)
+		want := "046d:c52b Keyboard\n15e4:303f Numark MIXSTREAM PRO PLUS\n"
+		if got != want {
+			t.Errorf("separator %q: got %q, want %q", separator, got, want)
+		}
+	}
+}
+
+func TestEAASListenerRejectsMalformedAndSelfBeacons(t *testing.T) {
+	o := testOpts(t)
+	port := freeUDPFromAddr(o.EAASAddr)
+	announceFrom(t, "127.0.0.1", port, []byte("EAAS\x01\x00")) // this host
+	announceFrom(t, "127.0.0.2", port, []byte("EAAS"))
+	announceFrom(t, "127.0.0.3", port, []byte("EAAS\x02\x00"))
+	announceFrom(t, "127.0.0.4", port, []byte("EAAS\x01\x00\x00"))
+	announceFrom(t, "127.0.0.5", port, append([]byte("EAAS\x01\x00"), make([]byte, 4096)...))
+	announceFrom(t, "127.0.0.6", port, append([]byte("EAAS\x01\x00"), make([]byte, 65501)...)) // maximum IPv4 UDP payload
+	announceFrom(t, "127.0.0.9", port, []byte("EAAS\x01\x00"))
+	got := listenEAAS(o)
+	if len(got) != 1 || !got["127.0.0.9"] {
+		t.Fatalf("candidates = %v, want only 127.0.0.9", got)
+	}
+}
+
+func TestRunWaitsForEAASCandidatesOnlyOnce(t *testing.T) {
+	o := testOpts(t)
+	o.Fastboot = "true"
+	o.WaitUSB = -time.Second
+	for _, ip := range []string{"127.0.0.8", "127.0.0.9"} {
+		announceFrom(t, ip, freeUDPFromAddr(o.EAASAddr), []byte("EAAS\x01\x00"))
+	}
+	err := run(ctxT(t), o)
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for fastboot") {
+		t.Fatalf("expected a single USB timeout, got %v", err)
+	}
+	if out := o.Out.(*bytes.Buffer).String(); strings.Count(out, "unverified EAAS") != 1 {
+		t.Fatalf("multiple candidates must share one USB wait: %s", out)
+	}
+}
+
+func TestDiscoverEAASDoesNotPromoteUnknownAirD(t *testing.T) {
+	o := testOpts(t)
+	announceFrom(t, "127.0.0.9", freeUDPFromAddr(o.EAASAddr), []byte("EAAS\x01\x00"))
+	announceFrom(t, "127.0.0.9", freeUDPFrom(o), airD("laptop", "DISCOVERER_HOWDY_", "Engine DJ", "4.0", 1))
+	got := discover(ctxT(t), o)
+	if len(got) != 1 || !got[0].FromEAAS || got[0].Known || got[0].Board != "" {
+		t.Fatalf("EAAS must not promote an unknown StageLinQ device: %+v", got)
+	}
+}
+
+func TestEAASNeverDialsSSHBasedOnHTTPResponse(t *testing.T) {
+	o := testOpts(t)
+	o.Fastboot = "true" // no USB devices; do not invoke a real fastboot binary
+	o.WaitUSB = -time.Second
+	o.defaults()
+	l, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", o.SSHPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	dialed := make(chan struct{}, 1)
+	go func() {
+		if c, err := l.Accept(); err == nil {
+			dialed <- struct{}{}
+			c.Close()
+		}
+	}()
+	serveHTTP(t, fmt.Sprintf("127.0.0.1:%d", o.UIPort), func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"ok":true}`) // an impostor can forge the EngineX HTTP response
+	})
+	err = modeA(ctxT(t), o, deck{IP: "127.0.0.1", FromEAAS: true, Known: true})
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for fastboot") {
+		t.Fatalf("unverified candidate should only wait for USB: %v", err)
+	}
+	select {
+	case <-dialed:
+		t.Fatal("EAAS and an HTTP response triggered an SSH connection")
+	default:
+	}
+	if out := o.Out.(*bytes.Buffer).String(); !strings.Contains(out, "unverified EAAS") || strings.Contains(out, "still locked") {
+		t.Fatalf("candidate was presented as a verified deck: %s", out)
+	}
 }
 
 func serveHTTP(t *testing.T, addr string, h http.HandlerFunc) {
@@ -850,7 +997,19 @@ func TestUSBDeckFindsIDsAnywhereInTheLine(t *testing.T) {
 	} {
 		o.ListUSB = func(context.Context) string { return line + "\n" }
 		if got, _ := usbDeck(ctxT(t), o, gen1USB); got != want {
-			t.Errorf("usbDeck(%q) = %q, want %q", line, got, want)
+			t.Errorf("usbDeck(%q, gen1USB) = %q, want %q", line, got, want)
+		}
+	}
+	for line, want := range map[string]string{
+		"15e4:303f Numark MIXSTREAM PRO PLUS":         "nh08s",
+		`Instance ID:   USB\15E4:303F\5&2B1C0A3E&0&2`: "nh08s",
+		"15e4:2059 Numark MIXSTREAM PRO GO":           "", // not captured in #164; no inferred board
+		"15e4:d012 Denon DJ SC LIVE 4 Update":         "jp21",
+		"1d6b:0002 Linux Foundation 2.0 root hub":     "",
+	} {
+		o.ListUSB = func(context.Context) string { return line + "\n" }
+		if got, _ := usbDeck(ctxT(t), o, gen2USB); got != want {
+			t.Errorf("usbDeck(%q, gen2USB) = %q, want %q", line, got, want)
 		}
 	}
 }
@@ -1184,7 +1343,8 @@ func TestIsDeckUSB(t *testing.T) {
 		"2207:320a": true, "2207:0006 Android": true, "18d1:4ee0 Google fastboot": true,
 		"0e8d:1234 inMusic Brands PRIME 4+": true, "1234:5678 Denon PRIME 4": true, "15e4:d012 DENON DJ SCX-4": true,
 		"15e4:d012 Denon DJ SC LIVE 4 Update": true, "15e4:d011 SC LIVE 2": true, "15e4:c00c PRIME GO+": true,
-		"1234:5678 adapter for 15e4:d012": false, "15a2:007d Freescale": false, "2207:0011 Rockchip ADB": false, "": false,
+		"1234:5678 adapter for 15e4:d012": false, "1234:5678 adapter for 15e4:303f": false,
+		"15e4:103f MIXSTREAM PRO PLUS": true, "15e4:303f Numark MIXSTREAM PRO PLUS": true, "15e4:2059 Numark MIXSTREAM PRO GO": true, "15a2:007d Freescale": false, "2207:0011 Rockchip ADB": false, "": false,
 	} {
 		if got := isDeckUSB(line); got != want {
 			t.Errorf("isDeckUSB(%q) = %v, want %v", line, got, want)
@@ -1264,8 +1424,33 @@ Instance ID:                USB\VID_2207&PID_320A\9999
 	}
 }
 
-// #161: On Windows, SC LIVE 4 (15e4:d012) in Computer Update mode with vendor drivers must be
-// recognized by usbDeck and diagnoseUSB even when fastboot has no WinUSB driver bound.
+// Mixstream Pro+ (15e4:303f) on Windows in Firmware Update Mode (#164)
+func TestWindowsMixstreamProPlusDetection(t *testing.T) {
+	t.Cleanup(func() { goos = runtime.GOOS })
+	goos = "windows"
+	pnputilOut := `Instance ID:                USB\VID_15E4&PID_303F\0123456789
+Device Description:         Numark MIXSTREAM PRO PLUS
+Class Name:                 USBDevice
+Status:                     Started
+`
+	o := testOpts(t)
+	o.ListUSB = func(context.Context) string {
+		return parsePnPUtil(pnputilOut)
+	}
+	board, line := usbDeck(ctxT(t), o, gen2USB)
+	if board != "nh08s" || !strings.Contains(line, "15e4:303f") || !strings.Contains(line, "Numark MIXSTREAM PRO PLUS") {
+		t.Errorf("usbDeck = %q, %q; want nh08s with Numark MIXSTREAM PRO PLUS line", board, line)
+	}
+
+	diagnoseUSB(ctxT(t), o)
+	out := o.Out.(*bytes.Buffer).String()
+	if !strings.Contains(out, "15e4:303f") || !strings.Contains(out, "Numark MIXSTREAM PRO PLUS") || !strings.Contains(out, "Zadig") {
+		t.Errorf("diagnoseUSB did not give Zadig WinUSB hint for Mixstream Pro+:\n%s", out)
+	}
+}
+
+// On Windows, SC LIVE 4 (15e4:d012) in Computer Update mode with vendor drivers must be
+// recognized by usbDeck and diagnoseUSB even when fastboot has no WinUSB driver bound (#161).
 func TestWindowsSCLive4Detection(t *testing.T) {
 	t.Cleanup(func() { goos = runtime.GOOS })
 	goos = "windows"
@@ -1320,6 +1505,26 @@ func TestBuildImageMissingMke2fsSaysWSL(t *testing.T) {
 	_, _, err := buildImage(ctxT(t), o, b, 64<<20, "test.img", "data")
 	if err == nil || !strings.Contains(err.Error(), "WSL") || !strings.Contains(err.Error(), "mke2fs") {
 		t.Fatalf("buildImage without mke2fs err = %v, want WSL / mke2fs guide", err)
+	}
+}
+
+func TestModeBMixstreamProPlusFastboot(t *testing.T) {
+	need(t, "python3", "mke2fs", "debugfs")
+	o := testOpts(t)
+	o.defaults()
+	fb := newFastboot(t, "nh08s", true)
+	o.Fastboot = fb.Bin
+	o.ListUSB = func(context.Context) string { return "15e4:303f Numark MIXSTREAM PRO PLUS\n" }
+	b := buildBundle(t, "MIXSTREAMPROPLUS", "5.3.0.3")
+	o.Bundle = b.Path
+	if err := modeB(ctxT(t), o); err != nil {
+		t.Fatalf("modeB with nh08s err: %v\n%s", err, o.Out)
+	}
+	if out := o.Out.(*bytes.Buffer).String(); !strings.Contains(out, "Numark Mixstream Pro+ (nh08s)") {
+		t.Errorf("expected Numark Mixstream Pro+ announced, got:\n%s", out)
+	}
+	if f := fb.Flashed(); len(f) != 1 || !strings.HasPrefix(f[0], "flash data ") {
+		t.Fatalf("flash calls = %v", f)
 	}
 }
 
@@ -1646,5 +1851,58 @@ func TestUSBFlashRunsTheBundleScript(t *testing.T) {
 	}
 	if s := o.Out.(*bytes.Buffer).String(); !strings.Contains(s, "host-install-usbupdate: ") {
 		t.Errorf("output:\n%s", s)
+	}
+}
+
+func TestParsePnPUtilMixstream(t *testing.T) {
+	// Polish Windows output with CRLF (Issue #161)
+	polish := "Narzędzie Microsoft PnP Utility\r\n\r\n" +
+		"Identyfikator wystąpienia:  USB\\VID_15E4&PID_D012\\6&14562B34&0&1\r\n" +
+		"Opis urządzenia:            Denon DJ SC LIVE 4 Update\r\n" +
+		"Nazwa klasy:                MEDIA\r\n" +
+		"Identyfikator GUID klasy:   {4d36e96c-e325-11ce-bfc1-08002be10318}\r\n" +
+		"Nazwa producenta:           InMusic\r\n" +
+		"Stan:                       Started\r\n" +
+		"Nazwa sterownika:           oem123.inf\r\n\r\n" +
+		"Identyfikator wystąpienia:  USB\\VID_046D&PID_C52B\\5&26f7a627&0&1\r\n" +
+		"Opis urządzenia:            Logitech USB Receiver\r\n" +
+		"Nazwa klasy:                USB\r\n"
+	got := parsePnPUtil(polish)
+	want := "15e4:d012 Denon DJ SC LIVE 4 Update\n046d:c52b Logitech USB Receiver\n"
+	if got != want {
+		t.Errorf("parsePnPUtil(polish) = %q, want %q", got, want)
+	}
+
+	// English Windows output with Mixstream Pro+ (#164)
+	english := `Instance ID:                USB\VID_15E4&PID_303F\0123456789
+Device Description:         Numark MIXSTREAM PRO PLUS
+Class Name:                 USBDevice
+Class GUID:                 {88bae032-5a81-49f0-bc3d-a4ff138216d6}
+Manufacturer Name:          Numark
+Status:                     Started
+Driver Name:                oem789.inf
+`
+	gotEng := parsePnPUtil(english)
+	wantEng := "15e4:303f Numark MIXSTREAM PRO PLUS\n"
+	if gotEng != wantEng {
+		t.Errorf("parsePnPUtil(english) = %q, want %q", gotEng, wantEng)
+	}
+
+	// German and Chinese Windows output with swapped field orders
+	multilingual := `Instanz-ID:                 USB\VID_15E4&PID_D011\1234
+Klassenname:                MEDIA
+Gerätebeschreibung:         Denon DJ SC LIVE 2
+Status:                     Started
+
+Instance ID:                USB\VID_15E4&PID_2059\5678
+设备描述:                   Numark MIXSTREAM PRO GO
+Class Name:                 MEDIA
+
+Instance ID:                USB\VID_2207&PID_320A\9999
+`
+	gotMulti := parsePnPUtil(multilingual)
+	wantMulti := "15e4:d011 Denon DJ SC LIVE 2\n15e4:2059 Numark MIXSTREAM PRO GO\n2207:320a\n"
+	if gotMulti != wantMulti {
+		t.Errorf("parsePnPUtil(multilingual) = %q, want %q", gotMulti, wantMulti)
 	}
 }
