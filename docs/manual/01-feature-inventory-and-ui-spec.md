@@ -292,7 +292,7 @@ APFS 备注：README 写"Mac 的 APFS 插上直读"。仓库里 `kernel-modules/
 | A | Display / 显示 / 顯示 | Language、Waveform Style、Jog Light Mode | 设置 → 设备（置顶，EngineX 区块） | "碟机显示与音频"卡片的"显示"小节 |
 | B | Streaming / 流媒体 / 串流 | 7 个服务开关、Streaming Quality、NetEase Download、OmniSource | 设置 → 服务 → 流媒体（全部集中到这一页） | "流媒体"卡片 + 补上服务开关与 NetEase Download |
 | C | Audio Protection / 音频保护 / 音訊保護 | Master Soft Clipper、Auto-Gain、原厂 Master Limiter（不动）、Upfader Echo Out | 设置 → 混音台（EngineX 软限幅与自动增益从设备页移来；Upfader Echo 只留这里和控制中心磁贴） | "音频"小节 |
-| D | Library / 曲库 / 曲庫 | Auto-Analyze Drives | 设置 → 曲库（Library） | "曲库"小节 |
+| D | Library / 曲库 / 曲庫 | Auto-Analyze Drives (Unavailable) | 设置 → 曲库（Library） | "曲库"小节 |
 | E | Network & CDJ / 网络与 CDJ / 網路與 CDJ | Pro DJ Link Library（测试版）、Pro DJ Link 共享给 CDJ（测试版）、Pro DJ Link 波形 | 设置 → 网络（Network） | "联机"小节 |
 | F | Layout / 布局 / 版面 | 4-Deck Layout、4-Deck Role | 设置 → 设备，紧挨 Player # | "4 碟"小节 |
 | G | System / 系统 / 系統 | Live Stream（配置未填时置灰并提示"先在 Web 控制台填写服务器"）、Power → Turn Off | 设置 → 设备末尾 | "直播推流"折叠卡片保留 |
