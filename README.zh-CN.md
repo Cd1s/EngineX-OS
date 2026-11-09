@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/assets/hero-banner-zh-CN.svg" alt="EngineX OS 5.3.0.3" width="100%">
+<img src="./docs/assets/hero-banner-zh-CN.svg" alt="EngineX OS 5.3.0.4" width="100%">
 
 <br>
 
@@ -18,7 +18,7 @@
 
 <br>
 
-**EngineX OS 5.3.0.3** 是基于官方 Engine OS 5.3.0+ 底层重构的定制系统，支持天龙 Denon DJ、Numark 与 Rane 全系 16 款独立设备：
+**EngineX OS 5.3.0.4** 是基于官方 Engine OS 5.3.0+ 底层重构的定制系统，支持天龙 Denon DJ、Numark 与 Rane 全系 16 款独立设备：
 `SC5000` · `SC5000M` · `SC6000` · `SC6000M` · `PRIME 4` · `PRIME 2` · `PRIME GO` · `Mixstream Pro` · `SC LIVE 4` · `SC LIVE 2` · `PRIME 4+` · `PRIME GO+` · `Mixstream Pro+` · `Mixstream Pro Go` · `PRIME 4 G2` · `Rane SYSTEM ONE`。
 
 前八款用 U 盘刷 `.img`；后八款二代机的升级程序会在写入前用软件校验固件签名，改用 `/data` 数据包（Beta，见[如何安装与升级](#install)）。
@@ -68,7 +68,7 @@
 - **Wi-Fi**：碟机内置 Wi-Fi 模组受限于主板 SDIO 25 MHz SDR12 总线带宽，实测极限约 `9～10 MB/s`，大体积曲库传输建议使用千兆有线网口。
 
 
-### 7. 5.3.0.4 新功能（开发中，尚未发布）
+### 7. 5.3.0.4 新功能
 - **四轨联动完整卸载与流媒体真实歌名（#49）**：对端碟机关机、重启或退歌时会发送 UDP 告别包，本机在 350 ms 防抖后自动卸载影子轨（`Unload` + `UnSync`，并自动交回 `MASTER`），清掉残留的波形和曲目。移除了可能死锁的 `RemoteState` 订阅，对端关机不再阻塞本机切换流媒体音源。流媒体曲目在影子碟机上显示真实的 `歌手 - 歌名`，不再显示内部数字缓存文件名；
 - **界面更丝滑、降低 CPU 占用**：新增 `scTr` QML 属性 translator 缓存，并给 `QuickCue` 加 500 ms 节流，消除按 `MASTER` / `SYNC` 时界面的瞬时卡顿，明显降低 Engine `EMain` GUI 线程的 CPU 占用；
 - **歌单左滑只留一个 Stems 按钮**：自动识别原厂已带 `Stem` 动作的本地曲目，去重并本地化为单一的 `分轨 Stems` 按钮，本地、流媒体、局域网曲目左滑后的体验完全一致；
@@ -76,7 +76,13 @@
 - **OmniSource 歌单隔离（#105）**：开启 OmniSource（跨源搜索）后，搜索栏仍可同时检索各流媒体和全部 U 盘曲库，但各流媒体自己的歌单页不再混入 `[USB: ...]` 条目和其他平台的歌单；
 - **SoundCloud 点赞歌单回退（#150）**：用户 OAuth `refresh_token` 过期、SoundCloud 返回 `HTTP 400` 时，自动回退到 App Token 和公开主页接口，继续加载 `Liked Tracks & Sets`；
 - **Spotify Connect 局域网发现（#150）**：内置 Avahi `_spotify-connect._tcp` mDNS 广播，`stream-sync` 另带纯 Go 的 `_spotify-connect._tcp.local.` mDNS 广播器（有线 `eth0` + 无线 `wlan0` 双网卡也能被发现），并使用标准 768-bit Diffie-Hellman 公钥，手机 Spotify App 可在局域网里直接发现 `EngineX OS`；同时修复 OAuth 登录后曲目下载返回 `410` 的问题；
-- **`enginex-relay`（原 `sc5000-relay`）多碟机集群后台（Multi-Deck Hub）与 `enginex-stemsd`（原 `sc5000-stemsd`）局域网直连**：中继控制台新增 `已连接碟机集群（Multi-Deck Hub）` 卡片，汇总同一后端下所有碟机的在线状态、机位角色（`13` / `24`）、固件版本和流媒体登录状态，可用碟机访问码或主密码登录；各碟机 `设置 → 关于` 页会实时显示 Stems 算力节点状态。
+- **流媒体缓存隔离与 Deemix 智能共享**：Spotify、Beatport、SoundCloud 与网易云官方模式各用独立下载通道与缓存命名空间；网易云「Deemix 优先」时与 Deezer 共享无损缓存，互相点播同一首不重复下载；
+- **SoundCloud Go+ 与高清智能路由**：长混音 / DJ Set（超过 10 分钟）始终直连 SoundCloud 官方流；非 Set 普通单曲与 Go+ 专享曲目：已绑定 Go+ 优先官方高音质流，未绑定时自动在已登录的其他流媒体（Deezer / 网易云 / Beatport）匹配无损 / 320k 音频，避免 30 秒试听限制；
+- **品牌统一与免域名公网连接**：面向用户的组件统一为 `enginex-relay`（原 `sc5000-relay`）、`enginex-stemsd`（原 `sc5000-stemsd`）、`enginex-suite`，运行目录为 `/data/enginex`（保留 `/data/sc5000-custom` 兼容软链接）；支持 Cloudflare Quick Tunnel 免域名一键公网穿透，手机扫码即可远程登录流媒体；中继控制台新增 `已连接碟机集群（Multi-Deck Hub）` 卡片，汇总同一后端下所有碟机的在线状态、机位角色（`13` / `24`）、固件版本和流媒体登录状态，可用碟机访问码或主密码登录；各碟机 `设置 → 关于` 页会实时显示 Stems 算力节点状态；
+- **Mixstream Pro / Pro+ / Pro Go（#164、#166）**：实体 FILTER 旋钮控制原厂 Filter / Dub Echo / Noise / Filter Roll / Wash，点击各轨 Pads 栏的 `SWEEP FX` 打开原厂选择轮盘；恢复触屏 Beat Jump，在 `个人偏好 → Cues/Loops` 开启 `Beat Jump Pad Bank` 即可后跳、前跳、减半、加倍；各轨 `EQ / STEMS` 按钮切换通道三段旋钮 Stems EQ；安装器支持严格 EAAS 协议发现二代机并消除端口冲突，兼容 fastboot 35+，完善 Windows WSL 2 + usbipd-win 刷机指引，已在 NH08S 实机完整刷入验证；识别 Mixstream Pro Go（`15e4:2059`）USB 设备；
+- **一代机电脑线刷与免 debugfs 解包**：修复 SC5000 / SC6000 / PRIME 4 等一代机在固件更新模式下 fastboot product 缺失时的 USB ID 识别，恢复电脑线刷支持；打包工具在 macOS 与 Windows 上无 debugfs 时也能正常解包镜像；
+- **PRIME 4 硬件 FX 选择器（#168）与 PRIME 4+ 激活校验（#169）**：重整 JC11 硬件效果选择器，修复切效果器重置与 Wet/Dry 淡入淡出爆音；强化 PRIME 4+（JC11S）激活文件与数据目录校验；修复 Beatport 无损升级在冷缓存下的命中，并在 `stream-sync` 占用端口时让 `deemixd` 优雅退出。
+- **SC LIVE 4 AUX（#171，新功能，待实机验证）**：在原厂 `混音台菜单 → 通道 → 输入` 中把 AUX 送入通道 3 或 4，使用通道 CUE、推子、EQ 和 Sweep FX；仅在 AUX 模式且任一通道选择线路输入时屏蔽 AUX 直通，MIC2 保持原厂路由。两路共享一个 AUX 源，同时推起会叠加。Mixer Menu（Beta）会迁移部分偏好设置，并允许向线路输入通道载歌；JP21 隐藏未验证的 Bluetooth/Computer 选项。详见[路由说明与实机检查](docs/issue171-sclive4-aux.md)。
 
 ### 8. 5.3.0.3 新功能
 - **Tailscale / Headscale 远程访问（#130）**：Web 控制台的 `远程访问（Tailscale / Headscale）` 卡片按需下载精简版 Tailscale 客户端（约 4.3 MB，下载后校验 SHA-256），用登录链接或一次性 Auth key 登录，只把你勾选的服务（SSH / SFTP、Web 控制台）开放给你自己的 tailnet。不需要公网 IP，也不用改路由器，自建 Headscale 服务器同样可用。默认关闭。碟机内核没有 TUN 设备，所以以用户态模式运行。已用 Headscale 端到端测通；实机播放时的 CPU 和内存占用还没有实测；
@@ -87,8 +93,6 @@
 - **控制中心新磁贴**：第 3 行新增 4 个磁贴 `波形样式`、`转盘灯光`、`推子回音`、`智能同步`，点一下循环切换；`Live Stream` 移到 `设置 → 服务`；
 - **先锋风格 Beat FX 与 Sound Color FX（#88）**：JC11 PRIME 4（Engine 5.3.0）可在列表末尾选择 `Spiral (PX)`、`Pitch Echo (PX)`、`Slip Roll (PX)`、`Dub Echo (PX)`、`Space (PX)`，按 FX 单元及其分配通道生效。Parameter 可调时间、音色与反馈，Wet/Dry 可调干湿比，原厂效果继续可选；独立 Time/Rate 旋钮暂未接入。AZ04 保留原来的 `Color FX Style` 设置；PRIME 4 实机验证待完成； JP07 SC5000 没有原生 FX 选择器，保留全局 `Color FX Style` 菜单、master 效果和保存的设置。
 - **界面缩放（110%–75%）、曲目列表波形开关与打击垫亮度（#153、#117、#85）**：`设置 → 设备 → 界面缩放` 可把 Engine 整个界面在 110% 到 75% 之间无黑边缩放，控制中心和弹窗仍然铺满屏幕；`个人偏好（User Profile）→ 曲库 → 曲目列表波形` 关闭后可隐藏列表里的缩略波形，让歌名与艺人完整展开；`打击垫亮度` 可把打击垫和按键灯光从 100% 调到 20%；
-- **SC LIVE 4 AUX（#171，新功能，待实机验证）**：在原厂 `混音台菜单 → 通道 → 输入` 中把 AUX 送入通道 3 或 4，使用通道 CUE、推子、EQ 和 Sweep FX；仅在 AUX 模式且任一通道选择线路输入时屏蔽 AUX 直通，MIC2 保持原厂路由。两路共享一个 AUX 源，同时推起会叠加。Mixer Menu（Beta）会迁移部分偏好设置，并允许向线路输入通道载歌；JP21 隐藏未验证的 Bluetooth/Computer 选项。详见[路由说明与实机检查](docs/issue171-sclive4-aux.md)。
-- **Mixstream Pro / Pro+ / Pro Go（#166）**：实体 FILTER 旋钮控制原厂 Filter / Dub Echo / Noise / Filter Roll / Wash，点击各轨 Pads 栏的 `SWEEP FX` 打开原厂选择轮盘。恢复触屏 Beat Jump；在 `个人偏好 → Cues/Loops → Beat Jump Pad Bank` 开启各轨 Pads 栏的后跳、前跳、减半、加倍。各轨 `EQ / STEMS` 按钮切换该通道三段 EQ 旋钮的 Stems EQ。歌单左滑可触发本机分轨或局域网卸载（RK3288 本机分析较慢）。
 - **实体三段 EQ 旋钮 Stems 分轨控制与快捷键（#152）**：通过 `个人偏好 → 播放 → Stems EQ Mode` 或按各通道 **Shift + Cue (PFL)**，即可将该通道的实体 `HIGH / MID / LOW` 三段 EQ 旋钮切换为 **Stems Level**（`Vocal 人声`、`Melody + Bass 旋律+贝斯`、`Drums 鼓组`），内置原厂软接管（Soft Takeover）防跳变与屏幕提示；修复 PRIME 2 / PRIME 4 快速双击 `Hot Cue` 时 Stems 模式闪退回 Hot Cue 的问题；
 - **播放中按住浏览/缩放旋钮转动转盘防误入网格编辑（#157）**：曲目播放中按住 Browse/Zoom 旋钮（或 Slip/Vinyl）不再误触进入 BeatGrid Edit（此前会导致瞬间跳回 `00:00` 且 Play 键锁死），网格编辑激活时禁用转盘触摸；
 - **PRIME 4 / PRIME 4+ 与 SC5000 / SC6000 局域网跨机型四轨联动（#160）**：一体机与独立播放机均开放 `四轨波形显示` 与 `四轨角色`（`自动`、`1+3`、`2+4`、`1+2`、`3+4`、`1`、`2`），支持 PRIME 4 / PRIME 4+ 本机负责 1+2 轨、同时将局域网内 SC5000 / SC6000 的实时波形、热标与对拍映射至 3+4 影子轨；
@@ -197,7 +201,7 @@
 
 系统经过全面重构与瘦身，所有新增功能仅占极小空间，比原厂固件留出更多可用内存：
 
-| 对比项 | 官方原厂 / 重构前 | 重构后（`EngineX OS 5.3.0.3` 实测） | 实际打碟提升 |
+| 对比项 | 官方原厂 / 重构前 | 重构后（`EngineX OS 5.3.0.4` 实测） | 实际打碟提升 |
 | :--- | :--- | :--- | :--- |
 | **刷机包体积 (`*-Update.img`)** | 官方原厂 5.3.0 `147.79 MB`<br>重构前改版 `~210 MB` | **`151.44 MB`**（SC6000 `151.58 MB`，PRIME 4 `151.52 MB`） | **仅比官方原厂大 `3.64 MB`** |
 | **纯刷机开机硬盘占用 (`/data`)** | 重构前残留约 `243 MB` | **核心程序 + 三语界面仅占 `17.2 MB`**（含扩展文件系统库共 `45.6 MB`） | 内置闪存多腾出 **近 `200 MB`** 空间 |
@@ -218,34 +222,34 @@
 
 EngineX-Installer 支持一代与二代机，无需输入 IP 或选择机型，通过 Wi-Fi SSH 或 USB Fastboot 识别设备并下载对应的 `.img` 或数据包安装。
 
-- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-windows-amd64.zip)
-- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-macos-arm64.zip)
-- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-macos-amd64.zip)
-- [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-linux-amd64.tar.gz)
+- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-windows-amd64.zip)
+- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-macos-arm64.zip)
+- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-macos-amd64.zip)
+- [Linux x86_64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-linux-amd64.tar.gz)
 
 解压后分别运行 `Install-EngineX.bat`、`Install-EngineX.command` 或 `./install-enginex.sh`。网络发现依赖 StageLinQ 或 EngineX Web 界面；SSH 需要 root 权限。Fastboot 需另装 `fastboot` 和 Python 3，二代机镜像制作还需要 e2fsprogs；Windows 的二代机 USB 路径需在有 USB 访问权限的 WSL 中运行 Linux 包。请先备份碟机：Fastboot 可能导致数据丢失，尤其是新建二代机 `/data` 镜像。一代机 rootfs 刷写为实验功能，尚未在全部机型上验证。
 
 ### 方式一：U 盘刷机（首次安装）
 1. 点击下方对应你机器型号的链接，直接下载升级包（或前往 [**Releases 页面**](https://github.com/Cd1s/EngineX-OS/releases/latest)）：
-   - **Denon DJ SC5000 Prime**：[`SC5000-5.3.0.3-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.3-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
-   - **Denon DJ SC5000M Prime**：[`SC5000M-5.3.0.3-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.3-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
-   - **Denon DJ SC6000 Prime**：[`SC6000-5.3.0.3-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.3-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
-   - **Denon DJ SC6000M Prime**：[`SC6000M-5.3.0.3-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.3-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
-   - **Denon DJ PRIME 4**：[`PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.3-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
-   - **Denon DJ PRIME 2**：[`PRIME2-5.3.0.3-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.3-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
-   - **Denon DJ PRIME GO**：[`PRIMEGO-5.3.0.3-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.3-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
-   - **Numark Mixstream Pro**：[`MIXSTREAMPRO-5.3.0.3-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.3-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
+   - **Denon DJ SC5000 Prime**：[`SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img)
+   - **Denon DJ SC5000M Prime**：[`SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img)
+   - **Denon DJ SC6000 Prime**：[`SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img)
+   - **Denon DJ SC6000M Prime**：[`SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img)
+   - **Denon DJ PRIME 4**：[`PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img)
+   - **Denon DJ PRIME 2**：[`PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img)
+   - **Denon DJ PRIME GO**：[`PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img)
+   - **Numark Mixstream Pro**：[`MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img)
 2. 将下载好的 `.img` 文件放入 **FAT32 或 exFAT 格式 U 盘的根目录**。
-3. 将 U 盘插入碟机（原厂 Engine OS 4.3.x 与 5.0.x 都可以直接刷），进入 **设置 (Settings) → 关于 / 更新 (About / Update) → 固件更新模式 (Firmware Update Mode)**，看到 `Found 5.3.0.3 on USB/SD` 时选 **USB/SD**，机器会自动完成刷入并重启。如果只弹出 *Reboot into firmware update mode?*，说明碟机没找到文件：核对机型，文件名保持原样放在根目录，再拔插一次 U 盘。
+3. 将 U 盘插入碟机（原厂 Engine OS 4.3.x 与 5.0.x 都可以直接刷），进入 **设置 (Settings) → 关于 / 更新 (About / Update) → 固件更新模式 (Firmware Update Mode)**，看到 `Found 5.3.0.4 on USB/SD` 时选 **USB/SD**，机器会自动完成刷入并重启。如果只弹出 *Reboot into firmware update mode?*，说明碟机没找到文件：核对机型，文件名保持原样放在根目录，再拔插一次 U 盘。
 
 ### 方式一 b：二代机型（`/data` 数据包，Beta）
 
 **一键自动安装器 EngineX-Installer（推荐）：**无需输入 IP 或选择机型，支持 Wi-Fi SSH 和 USB Fastboot。下载适合电脑的平台包：
 
-- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-windows-amd64.zip)
-- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-macos-arm64.zip)
-- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-macos-amd64.zip)
-- [Linux x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.3-linux-amd64.tar.gz)
+- [Windows 10/11 x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-windows-amd64.zip)
+- [macOS Apple Silicon M1–M4](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-macos-arm64.zip)
+- [macOS Intel](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-macos-amd64.zip)
+- [Linux x64](https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-5.3.0.4-linux-amd64.tar.gz)
 
 1. 先将碟机升级到官方 **Engine OS 5.3.0**。
 2. 解压安装包：Windows 双击 `Install-EngineX.bat`，macOS 双击 `Install-EngineX.command`，Linux 运行 `./install-enginex.sh`。
@@ -260,23 +264,23 @@ SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboo
 <summary>高级用户：手动命令行安装 / 卸载说明</summary>
 
 下载对应机型的数据包，并用 Release 页的 `SHA256SUMS.txt` 核对 SHA-256：
-   - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Denon DJ SC LIVE 2** (JP20): [`SCLIVE2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Denon DJ PRIME 4+** (JC11S): [`PRIME4PLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Denon DJ PRIME GO+** (JP11S): [`PRIMEGOPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGOPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Numark Mixstream Pro+** (NH08S): [`MIXSTREAMPROPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROPLUS-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Numark Mixstream Pro Go** (NH10): [`MIXSTREAMPROGO-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Denon DJ PRIME 4 G2** (JP24): [`PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4G2-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
-   - **Rane SYSTEM ONE** (RMZ2): [`SYSTEMONE-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SYSTEMONE-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ SC LIVE 4** (JP21): [`SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ SC LIVE 2** (JP20): [`SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ PRIME 4+** (JC11S): [`PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ PRIME GO+** (JP11S): [`PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Numark Mixstream Pro+** (NH08S): [`MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Numark Mixstream Pro Go** (NH10): [`MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Denon DJ PRIME 4 G2** (JP24): [`PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
+   - **Rane SYSTEM ONE** (RMZ2): [`SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz`](https://github.com/Cd1s/EngineX-OS/releases/latest/download/SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz)
 
 **方法一（推荐）：在机器上安装**。保留你的音乐、设置和曲库。需要机器上的 root shell（SSH 或串口控制台）。
 
 1. 把 `.tar.gz` 拷到 U 盘插到机器上（也可以通过网络拷过去）。
 2. 在机器的 shell 里解压并安装（把 `<model>` 和 U 盘名换成你的）：
    ```sh
-   cp "/media/<U 盘名>/<model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz" /tmp/
-   tar -xzf /tmp/<model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz -C /tmp
-   sh /tmp/<model>-5.3.0.3-EngineX-OS-Data-Bundle/install.sh
+   cp "/media/<U 盘名>/<model>-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz" /tmp/
+   tar -xzf /tmp/<model>-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz -C /tmp
+   sh /tmp/<model>-5.3.0.4-EngineX-OS-Data-Bundle/install.sh
    reboot
    ```
 3. 重启后 Engine 先以原厂方式启动一次，随后自动以 EngineX OS 重新启动。之后 `设置 → 设备` 里会出现 EngineX 的选项（`语言`、`电源 → 关机` 等）。
@@ -287,19 +291,19 @@ SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboo
   1. 备份原件不动，在副本上操作：`cp my-userdata-backup.img userdata-enginex.img`
   2. 在电脑上解压数据包，再把它注入副本（两个辅助脚本在包里）：
      ```sh
-     tar -xzf <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
-     python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-userdata.py userdata-enginex.img --bundle <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz
+     tar -xzf <model>-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+     python3 <model>-5.3.0.4-EngineX-OS-Data-Bundle/host-install-userdata.py userdata-enginex.img --bundle <model>-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
      ```
   3. 让机器进入 fastboot 模式并用 USB 连上电脑，然后刷入并重启：
      ```sh
-     sh <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-fastboot.sh userdata-enginex.img
+     sh <model>-5.3.0.4-EngineX-OS-Data-Bundle/host-install-fastboot.sh userdata-enginex.img
      ```
 
 **方法 3：没有 fastboot 的 SYSTEM ONE / PRIME 4 G2（USB `1cc5:2027`）。** 在碟机上点 `Settings → About / Update → Firmware Update Mode (Reboot)`，接上 USB 后运行 EngineX-Installer，它会自动完成下面几步。这会写入**全新的空** `/data` 分区：内置存储上的音乐、曲库和设置会被清空（外接 U 盘和 SD 卡不受影响）。手动操作（需要 `python3`、`e2fsprogs` 和 `pip3 install pyusb`）：
    ```sh
    mke2fs -t ext4 -O encrypt -L data -b 4096 -F data.img 64M
-   python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-userdata.py data.img --bundle <model>-5.3.0.3-EngineX-OS-Data-Bundle.tar.gz --ssh-key ~/.ssh/id_ed25519.pub
-   python3 <model>-5.3.0.3-EngineX-OS-Data-Bundle/host-install-usbupdate.py data.img
+   python3 <model>-5.3.0.4-EngineX-OS-Data-Bundle/host-install-userdata.py data.img --bundle <model>-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz --ssh-key ~/.ssh/id_ed25519.pub
+   python3 <model>-5.3.0.4-EngineX-OS-Data-Bundle/host-install-usbupdate.py data.img
    ```
    `--ssh-key` 可省略。写完按电源键关机再开机。
 
@@ -312,7 +316,7 @@ SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboo
 ### 方式二：碟机屏幕一键在线升级（已安装本系统后）
 - 连接 Wi-Fi 或网线后，打开碟机 **设置 → 关于 / 更新**；
 - 检测到新版本时直接点击屏幕上的 **「更新」** 按钮，确认后碟机将自动进入原厂刷机进度条界面完成下载与升级。
-- **二代机**（SC LIVE 4 / 2、PRIME 4+、PRIME GO+、Mixstream Pro+ / Pro Go、PRIME 4 G2、SYSTEM ONE）首次装好 `/data` 数据包后，之后的新版本（如 `5.3.0.3`）同样在 **设置 → 关于 / 更新** 里一键完成：碟机下载对应的 `Data-Bundle.tar.gz`，校验 `SHA256SUMS`，一次性替换文件并重启 EngineX 服务，不会改动系统分区（#86）。
+- **二代机**（SC LIVE 4 / 2、PRIME 4+、PRIME GO+、Mixstream Pro+ / Pro Go、PRIME 4 G2、SYSTEM ONE）首次装好 `/data` 数据包后，之后的新版本（如 `5.3.0.4`）同样在 **设置 → 关于 / 更新** 里一键完成：碟机下载对应的 `Data-Bundle.tar.gz`，校验 `SHA256SUMS`，一次性替换文件并重启 EngineX 服务，不会改动系统分区（#86）。
 
 ### 选配：用电脑为碟机加速 Stems 分轨
 当电脑与碟机处于同一 Wi-Fi / 局域网时，在电脑上运行以下命令，碟机即可自动发现电脑并调用电脑显卡进行高速 AI 分轨（无需在碟机上输入 IP 或密码）：

@@ -4,7 +4,7 @@
  * 带 new:true 的章节或 note 表示「已规划、未随当前 Release 发布」，发版后去掉。 */
 (function () {
   const L = (s, t, e) => ({ s, t, e });
-  const V = "5.3.0.3";
+  const V = "5.3.0.4";
   const BASE = "https://github.com/Cd1s/EngineX-OS/releases/latest/download/";
 
   // 一代机：.img；二代机：/data 数据包
@@ -69,7 +69,7 @@
           L("三语界面、RGB / 3-Band 波形、转盘彩灯", "三語介面、RGB / 3-Band 波形、轉盤彩燈", "Three-language UI, RGB / 3-Band waveforms, jog-wheel lighting"),
           L("切效果器零爆音、0 dB 软限幅、智能同步、千兆有线网口", "切效果器零爆音、0 dB 軟限幅、智慧同步、千兆有線網口", "Click-free FX switching, 0 dB soft limiter, Smart Sync, gigabit Ethernet"),
         ] },
-        { k: "h", id: "whatsnew-5304", x: L("5.3.0.4 新功能（开发中）", "5.3.0.4 新功能（開發中）", "New in 5.3.0.4 (in development)"), nav: L("5.3.0.4 新功能", "5.3.0.4 新功能", "New in 5.3.0.4") },
+        { k: "h", id: "whatsnew-5304", x: L("5.3.0.4 新功能", "5.3.0.4 新功能", "New in 5.3.0.4"), nav: L("5.3.0.4 新功能", "5.3.0.4 新功能", "New in 5.3.0.4") },
         { k: "note", tone: "new", x: L("以下功能属于 5.3.0.4，尚未发布；正式发布后删除本提示。", "以下功能屬於 5.3.0.4，尚未發佈；正式發佈後刪除本提示。", "The items below belong to 5.3.0.4 and are not released yet; remove this note on release.") },
         { k: "note", tone: "new", x: L("**SC LIVE 4 AUX（#171，待实机验证）**：原厂 `混音台菜单 → 通道 → 输入` 可把 AUX 送入通道 3 或 4，使用通道 CUE、推子、EQ 和 Sweep FX；仅在 AUX 模式屏蔽 AUX 直通，MIC2 保持原厂路由；两路共享 AUX，同时推起会叠加。Mixer Menu（Beta）迁移部分偏好设置并允许向线路输入通道载歌；JP21 隐藏未验证的 Bluetooth/Computer。",
           "**SC LIVE 4 AUX（#171，待實機驗證）**：原廠 `混音台選單 → 通道 → 輸入` 可把 AUX 送入通道 3 或 4，使用通道 CUE、推桿、EQ 與 Sweep FX；僅在 AUX 模式封鎖 AUX 直通，MIC2 保持原廠路由；兩路共用 AUX，同時推起會疊加。Mixer Menu（Beta）搬移部分偏好設定並允許向線路輸入通道載歌；JP21 隱藏未驗證的 Bluetooth/Computer。",
@@ -105,6 +105,15 @@
           L("**`enginex-relay` 多碟机集群后台（Multi-Deck Hub）**：中继控制台新增 `已连接碟机集群` 卡片，汇总同一后端下所有碟机的在线状态、机位角色（`13` / `24`）、固件版本和流媒体登录状态，可用碟机访问码或主密码登录，并实时探测各碟机 `设置 → 关于` 页的 Stems 算力节点状态（`enginex-stemsd` 局域网直连）。",
             "**`enginex-relay` 多播放機叢集後台（Multi-Deck Hub）**：中繼主控台新增 `已連線播放機叢集` 卡片，彙整同一後端下所有播放機的上線狀態、機位角色（`13` / `24`）、韌體版本與串流登入狀態，可用播放機存取碼或主密碼登入，並即時偵測各播放機 `設定 → 關於` 頁的 Stems 算力節點狀態（`enginex-stemsd` 區域網路直連）。",
             "**`enginex-relay` Multi-Deck Hub**: the relay console gains a `Connected decks` card listing every deck behind the same backend with its online state, role (`13` / `24`), firmware version and streaming sign-in status; sign in with a deck access code or the master password. Each deck's `Settings → About` page shows the live state of its Stems compute node (`enginex-stemsd` over the LAN)."),
+          L("**品牌统一与免域名公网连接**：组件名统一为 `enginex-relay`、`enginex-stemsd`、`enginex-suite`，系统运行目录为 `/data/enginex`（保留 `/data/sc5000-custom` 兼容软链接）。支持 Cloudflare Quick Tunnel 免域名一键公网穿透，手机可直接扫码远程登录流媒体。",
+            "**品牌統一與免網域公網連線**：組件名稱統一為 `enginex-relay`、`enginex-stemsd`、`enginex-suite`，系統執行目錄為 `/data/enginex`（保留 `/data/sc5000-custom` 相容符號連結）。支援 Cloudflare Quick Tunnel 免網域一鍵公網穿透，手機可直接掃碼遠端登入串流。",
+            "**Brand unification and zero-domain remote connection**: user-facing components are unified as `enginex-relay`, `enginex-stemsd` and `enginex-suite`, and the runtime path is `/data/enginex` (with `/data/sc5000-custom` kept as a compatibility symlink). Cloudflare Quick Tunnel is supported for one-click zero-domain public remote access, allowing mobile QR code streaming logins without a domain."),
+          L("**安装器与线刷强化（#164、#169）**：`EngineX-Installer` 支持严格 EAAS 协议发现二代机（如 Mixstream Pro+ NH08S），解决端口冲突；支持现代 fastboot 35+，完善 Windows WSL 2 + usbipd-win 刷机指引；一代机（SC5000 / SC6000 / PRIME 4 等）修复 Computer Update Mode 下缺失 fastboot product 时的 USB ID 识别，并在 Windows / macOS 缺 debugfs 时可顺利解包线刷；强化 PRIME 4+（JC11S）激活校验与 bundle 引导。",
+            "**安裝器與線刷強化（#164、#169）**：`EngineX-Installer` 支援嚴格 EAAS 協定探索二代機（如 Mixstream Pro+ NH08S），解決連接埠衝突；支援現代 fastboot 35+，完善 Windows WSL 2 + usbipd-win 刷機指引；一代機（SC5000 / SC6000 / PRIME 4 等）修復 Computer Update Mode 下缺少 fastboot product 時的 USB ID 識別，並在 Windows / macOS 缺少 debugfs 時可順利解包線刷；強化 PRIME 4+（JC11S）啟用校驗與 bundle 引導。",
+            "**Installer and flashing enhancements (#164, #169)**: `EngineX-Installer` supports strict EAAS discovery for Gen-2 units (e.g. Mixstream Pro+ NH08S) with port reuse; supports modern fastboot 35+, with detailed Windows WSL 2 + usbipd-win instructions; fixes 1st-gen (SC5000 / SC6000 / PRIME 4) USB ID detection when fastboot product is missing in Computer Update Mode, and enables unpack on macOS / Windows without debugfs; hardens PRIME 4+ (JC11S) activation verification and bundle bootstrap."),
+          L("**PRIME 4 硬件 FX 选择器（#168）与音频稳定性**：重整 JC11 硬件效果选择器，修复切效果器重置（rearming）与 Wet/Dry 淡入淡出爆音，保护单机效果；修复 Beatport 无损升级在冷缓存下的命中，并在 `stream-sync` 占用端口时让 `deemixd` 优雅退出。",
+            "**PRIME 4 硬體 FX 選擇器（#168）與音訊穩定性**：重整 JC11 硬體效果選擇器，修復切效果器重設（rearming）與 Wet/Dry 淡入淡出爆音，保護單機效果；修復 Beatport 無損升級在冷快取下的命中，並在 `stream-sync` 佔用連接埠時讓 `deemixd` 優雅退出。",
+            "**PRIME 4 hardware FX selector (#168) and audio stability**: refreshes the JC11 hardware FX selector, fixes rearming and wet fade burst protection; ensures Beatport lossless upgrades hit on cold caches, and allows `deemixd` to exit gracefully when `stream-sync` is already bound."),
         ] },
         { k: "shot", name: "zh:01-deck-stems-official-pads.png", cap: L("原生 4 轨 Stems 分轨与 3-Band 波形", "原生 4 軌 Stems 分軌與 3-Band 波形", "Native 4-stem separation with 3-Band waveform") },
       ],
