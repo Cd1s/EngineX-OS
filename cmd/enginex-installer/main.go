@@ -793,8 +793,11 @@ func modeA(ctx context.Context, o *options, d deck) error {
 // list whitelisted vendors. 0x15e4 is what every 2nd-gen U-Boot DTB sets (inmusic,usb-vendor), 0x2207 is Rockchip (#129).
 var fbVIDs = []string{"0x15e4", "0x2207"}
 
-// geteuid is a seam for tests (they may run as root on the build host).
-var geteuid = os.Geteuid
+// geteuid and goos are seams for tests (they may run as root on the build host).
+var (
+	geteuid = os.Geteuid
+	goos    = runtime.GOOS
+)
 
 // findFastboot prefers a fastboot binary shipped beside the installer, else the one in PATH.
 func findFastboot() string {
@@ -949,7 +952,8 @@ var vidPID = regexp.MustCompile(`(?i)\b[0-9a-f]{4}:[0-9a-f]{4}\b`)
 // anywhere in the line: Windows lines read "Instance ID: USB\15E4:D006\...".
 func usbDeck(ctx context.Context, o *options, ids map[string]string) (board, line string) {
 	for _, l := range strings.Split(o.ListUSB(ctx), "\n") {
-		for _, id := range vidPID.FindAllString(l, -1) {
+		// The first VID:PID identifies the device; later IDs may be part of its name.
+		if id := vidPID.FindString(l); id != "" {
 			if b := ids[strings.ToLower(id)]; b != "" {
 				return b, strings.TrimSpace(l)
 			}
@@ -959,15 +963,17 @@ func usbDeck(ctx context.Context, o *options, ids map[string]string) (board, lin
 }
 
 // isDeckUSB reports whether a host USB line looks like a 2nd-gen deck in an update mode (#129):
-// a Rockchip loader, Rockchip / Google fastboot ids, or inMusic / PRIME 4 product names.
+// a Rockchip loader, Rockchip / Google fastboot ids, or inMusic / PRIME 4 / SC LIVE product names.
 func isDeckUSB(line string) bool {
-	l := strings.ToLower(line)
-	return IsRockchipUSBLoader(l) || len(l) >= 9 && gen2USB[l[:9]] != "" || strings.Contains(l, "2207:0006") || strings.Contains(l, "18d1:4ee0") ||
-		strings.Contains(l, "inmusic") || strings.Contains(l, "prime 4")
+	lower := strings.ToLower(line)
+	id := vidPID.FindString(lower)
+	return IsRockchipUSBLoader(lower) || gen2USB[id] != "" || id == "2207:0006" || id == "18d1:4ee0" ||
+		strings.Contains(lower, "inmusic") || strings.Contains(lower, "prime 4") || strings.Contains(lower, "sc live")
 }
 
 var (
 	winVIDPID = regexp.MustCompile(`(?i)VID_([0-9a-f]{4})&PID_([0-9a-f]{4})`)
+	descKeyRE = regexp.MustCompile(`(?i)(description|opis|beschreibung|descrip|descriz|описание|描述|説明|설명)`)
 	macVID    = regexp.MustCompile(`"idVendor" = (\d+)`)
 	macPID    = regexp.MustCompile(`"idProduct" = (\d+)`)
 )
@@ -977,7 +983,7 @@ func hostUSB(ctx context.Context) string {
 	switch runtime.GOOS {
 	case "windows":
 		out, _ := exec.CommandContext(ctx, "pnputil", "/enum-devices", "/connected").Output()
-		return winVIDPID.ReplaceAllString(string(out), "$1:$2")
+		return parsePnPUtil(string(out))
 	case "darwin":
 		out, _ := exec.CommandContext(ctx, "ioreg", "-p", "IOUSB", "-l", "-w0").Output()
 		return parseIOReg(string(out))
@@ -988,6 +994,54 @@ func hostUSB(ctx context.Context) string {
 		rd := func(n string) string { s, _ := os.ReadFile(filepath.Join(d, n)); return strings.TrimSpace(string(s)) }
 		if v := rd("idVendor"); v != "" {
 			fmt.Fprintf(&b, "%s:%s %s %s\n", v, rd("idProduct"), rd("manufacturer"), rd("product"))
+		}
+	}
+	return b.String()
+}
+
+// parsePnPUtil turns `pnputil /enum-devices /connected` output into "vid:pid name" lines.
+// It works across all Windows languages (English, Polish, German, French, Chinese, etc.) by extracting
+// VID_xxxx&PID_yyyy and the device description from following lines in the device block.
+func parsePnPUtil(out string) string {
+	var b strings.Builder
+	lines := strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		m := winVIDPID.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		vid, pid := strings.ToLower(m[1]), strings.ToLower(m[2])
+		desc := ""
+		// Look for the device description in the lines of the same block
+		for j := i + 1; j < len(lines); j++ {
+			next := strings.TrimSpace(lines[j])
+			if next == "" || winVIDPID.MatchString(next) {
+				break
+			}
+			key, val, ok := strings.Cut(next, ":")
+			if !ok {
+				continue
+			}
+			val = strings.TrimSpace(val)
+			if val == "" || strings.HasPrefix(val, "{") || strings.HasSuffix(strings.ToLower(val), ".inf") {
+				continue
+			}
+			if strings.EqualFold(val, "started") || strings.EqualFold(val, "stopped") || strings.EqualFold(val, "disconnected") {
+				continue
+			}
+			if descKeyRE.MatchString(key) {
+				desc = val
+				break
+			}
+			if desc == "" {
+				desc = val
+			}
+		}
+		if desc != "" {
+			fmt.Fprintf(&b, "%s:%s %s\n", vid, pid, desc)
+		} else {
+			fmt.Fprintf(&b, "%s:%s\n", vid, pid)
 		}
 	}
 	return b.String()
@@ -1030,10 +1084,10 @@ func diagnoseUSB(ctx context.Context, o *options) {
 	zh, en := "碟机已通过 USB 连接（"+dev+"），但 fastboot 还看不到它（二代机正常开机和 Firmware Update Mode 下都是这个 ID）。如果碟机屏幕还在主界面，请点 Settings → Update → Firmware Update Mode (Reboot)，USB 线保持连接；",
 		"The deck is on USB ("+dev+") but fastboot cannot see it yet (2nd-gen decks have this id both in normal use and in Firmware Update Mode). If the deck still shows its main screen, tap Settings → Update → Firmware Update Mode (Reboot) and keep the cable in;"
 	switch {
-	case runtime.GOOS == "windows":
-		zh += "如果碟机屏幕已经处于 Firmware Update Mode，说明缺少 fastboot 驱动：打开 Zadig（https://zadig.akeo.ie），Options → List All Devices，选中 Android Fastboot 接口，安装 WinUSB。"
-		en += " if it already shows Firmware Update Mode, the fastboot driver is missing: open Zadig (https://zadig.akeo.ie), Options → List All Devices, pick the Android Fastboot interface, install WinUSB."
-	case runtime.GOOS == "linux" && geteuid() != 0:
+	case goos == "windows":
+		zh += "如果碟机屏幕已经处于 Firmware Update Mode，说明缺少 fastboot 驱动：打开 Zadig（https://zadig.akeo.ie），Options → List All Devices，选中碟机（如 Denon DJ SC LIVE 4 Update 或 Android Fastboot，USB ID 15e4:...），安装 WinUSB 驱动。"
+		en += " if it already shows Firmware Update Mode, the fastboot driver is missing: open Zadig (https://zadig.akeo.ie), Options → List All Devices, pick the deck (e.g. Denon DJ SC LIVE 4 Update or Android Fastboot, USB ID 15e4:...), install WinUSB."
+	case goos == "linux" && geteuid() != 0:
 		zh += "如果碟机屏幕已经处于 Firmware Update Mode，请用 sudo 运行本工具，或添加 udev 规则：\n  " + udevHint
 		en += " if it already shows Firmware Update Mode, run this tool with sudo or add a udev rule:\n  " + udevHint
 	default:
@@ -1047,7 +1101,7 @@ func diagnoseUSB(ctx context.Context, o *options) {
 // (ufw, Windows Defender) drop by default (#129).
 func firewallHint(o *options) {
 	var how string
-	switch runtime.GOOS {
+	switch goos {
 	case "windows":
 		how = `netsh advfirewall firewall add rule name="EngineX StageLinQ" dir=in action=allow protocol=UDP localport=51337`
 	case "darwin":
@@ -1147,6 +1201,10 @@ func buildImage(ctx context.Context, o *options, b *bundleInfo, size int64, name
 	default:
 		if size <= 0 {
 			return "", false, errors.New("读不到 data 分区大小，请用 --userdata-backup / cannot read the data partition size; pass --userdata-backup")
+		}
+		if _, err := exec.LookPath("mke2fs"); err != nil {
+			return "", false, errors.New("制作二代机 data 镜像需要 e2fsprogs (mke2fs, debugfs) 与 Python 3：Windows 请在 WSL 中运行 Linux 安装包，并通过 usbipd-win 直通 USB；或在 Linux / macOS 电脑上运行本工具 / " +
+				"building a 2nd-gen data image requires e2fsprogs (mke2fs, debugfs) and Python 3: on Windows run the Linux package in WSL with usbipd-win, or run this tool on Linux or macOS")
 		}
 		f, err := os.Create(img)
 		if err != nil {
