@@ -49,6 +49,7 @@ type shadowDisplayAsset struct {
 
 type shadowDisplayEntry struct {
 	asset          *shadowDisplayAsset
+	revision       string // CDJ content version, so QML invalidates metadata after a media change
 	wave, overview []byte
 	busy           bool
 	at             time.Time
@@ -133,8 +134,8 @@ func placeDisplayPeers(peers map[int]peerDeck, role string, now time.Time) map[i
 	return placed
 }
 
-// shadowComposeDisplay has no file resolver, download, EXPF or Engine control
-// path. Even a locally accessible peer file must not load into Engine.
+// shadowComposeDisplay reads display assets only, with no audio download, EXPF
+// or Engine control path. Even a locally accessible file must not load into Engine.
 func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
 	sh := s.shadow
 	sh.mu.Lock()
@@ -170,18 +171,39 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time) []deckState {
 		}
 		out = append(out, d)
 	}
-	// CDJ compatibility is metadata-only in this mode. In particular this must
-	// not call shadowFetchCDJ, whose prerequisite is a full audio download.
-	for deck, dev := range cdjDecks(s.mergedDevices(), free, now) {
+	devices := s.mergedDevices()
+	wantedCDJ := map[string]bool{}
+	for deck, dev := range cdjDecks(devices, free, now) {
 		d := deckState{Deck: deck, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
 		if dev.TrackID != 0 {
 			d.Key = fmt.Sprintf("cdj:%s:%d:%d:%d", dev.Address, dev.SourcePlayer, dev.SourceSlot, dev.TrackID)
+			if host := cdjDisplayHost(dev, devices); host != nil {
+				d.Key = fmt.Sprintf("cdj:%s:%s:%d:%d:%d", dev.Address, host, dev.SourcePlayer, dev.SourceSlot, dev.TrackID)
+				d.displayID = d.Key
+				wantedCDJ[d.displayID] = true
+				e := s.ensureCDJDisplay(dev, host, d.Key, now)
+				d.MetadataOnly = e == nil
+				if e != nil {
+					d.Key += ":" + e.revision
+				}
+			}
 		}
 		if d.Playing {
 			d.PositionMS += float64(now.Sub(dev.LastSeen).Milliseconds()) * (1 + d.Pitch/100)
 		}
 		out = append(out, d)
 	}
+	// An eject, changed source, or peer taking the slot must not let a later
+	// same-ID load reuse assets from the previous stick. In-flight publication
+	// checks the original entry pointer and will discard removed requests.
+	c := &sh.display
+	c.mu.Lock()
+	for id := range c.entries {
+		if strings.HasPrefix(id, "cdj:") && !wantedCDJ[id] {
+			delete(c.entries, id)
+		}
+	}
+	c.mu.Unlock()
 	slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
 	return out
 }
@@ -621,6 +643,20 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 	s.uiMu.Unlock()
 	role := s.activeRole(v)
 	if role == "" || v.ShadowLegacyEngine || strings.Contains(role, strconv.Itoa(deck)) {
+		return nil, deckState{}
+	}
+	if strings.HasPrefix(key, "cdj:") {
+		for _, d := range s.shadowComposeDisplay(role, time.Now()) {
+			if d.Deck == deck && d.Key == key && !d.MetadataOnly {
+				c := &s.shadow.display
+				c.mu.Lock()
+				e := c.entries[d.displayID]
+				c.mu.Unlock()
+				if e != nil && e.asset != nil && key == d.displayID+":"+e.revision {
+					return e, d
+				}
+			}
+		}
 		return nil, deckState{}
 	}
 	s.shadow.mu.Lock()

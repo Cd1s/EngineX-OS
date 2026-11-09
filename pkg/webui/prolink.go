@@ -53,6 +53,9 @@ func mergeDevice(old, updated prolink.Device) prolink.Device {
 	if updated.SourceSlot != 0 {
 		res.SourceSlot = updated.SourceSlot
 	}
+	if updated.PacketType == 0x0a || updated.TrackType != 0 {
+		res.TrackType = updated.TrackType
+	}
 	if !updated.LastSeen.IsZero() {
 		res.LastSeen = updated.LastSeen
 	}

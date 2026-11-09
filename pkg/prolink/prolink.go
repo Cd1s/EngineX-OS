@@ -34,6 +34,7 @@ type Device struct {
 	PacketType               byte   `json:"packet_type"`
 	TrackID                  uint32 `json:"track_id,omitempty"`
 	SourcePlayer, SourceSlot byte
+	TrackType                byte      `json:"track_type,omitempty"` // status 0x2a: 1 = rekordbox, 2 = unanalysed, 5 = CD
 	LastSeen                 time.Time `json:"last_seen"`
 	BPM                      float64   `json:"bpm,omitempty"`
 	Pitch                    float64   `json:"pitch,omitempty"`
@@ -141,6 +142,7 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 		d.Number = b[0x21]
 		d.SourcePlayer = b[0x28]
 		d.SourceSlot = b[0x29]
+		d.TrackType = b[0x2a]
 		d.TrackID = binary.BigEndian.Uint32(b[0x2c:])
 		d.PlayState1 = b[0x7b]
 		d.Playing = b[0x89]&0x40 != 0 || len(b) < 0xd4 && (b[0x7b] == 3 || b[0x7b] == 4 || b[0x7b] == 9)
@@ -614,6 +616,7 @@ func (d *Discovery) Observe(device Device) Device {
 			device.PrecisePosition, device.lastPrecise = old.PrecisePosition, old.lastPrecise
 		}
 		if device.PacketType == 6 || device.PacketType == 0x28 || device.PacketType == 0x0b {
+			device.TrackType = old.TrackType
 			if device.TrackID == 0 {
 				device.TrackID = old.TrackID
 			}

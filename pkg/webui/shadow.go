@@ -48,6 +48,7 @@ var shadowDataRoot, shadowMediaRoot, shadowBeaconOn = "/data", "/media", true
 
 // deckState is one deck as a shadow deck follows it.
 type deckState struct {
+	displayID    string  // stable CDJ cache identity; Key also includes the current asset revision
 	baseKey      string  // source-only file identity; Key also identifies the loaded session
 	Deck         int     `json:"deck"`
 	Path         string  `json:"path,omitempty"` // a file on this deck
@@ -59,7 +60,7 @@ type deckState struct {
 	Artist       string  `json:"artist,omitempty"`
 	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
 	Stale        bool    `json:"stale,omitempty"`        // frozen display sample; not an eject/goodbye
-	MetadataOnly bool    `json:"metadataOnly,omitempty"` // CDJ state has no peer display asset endpoint
+	MetadataOnly bool    `json:"metadataOnly,omitempty"` // remote source has no usable display analysis
 	Playing      bool    `json:"playing"`
 	PositionMS   float64 `json:"positionMs"`
 	Pitch        float64 `json:"pitch"` // percent
@@ -152,6 +153,8 @@ type shadowState struct {
 	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
 	dbg                 shadowDebug
 	display             shadowDisplayCache
+	cdjAnalysis         prolink.DisplayAnalysisCache
+	cdjReader           func(net.IP) prolink.AnalysisReader // nil uses the real read-only NFS client
 	sourceDisplay       shadowSourceCache
 }
 
@@ -807,7 +810,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	stale := slices.ContainsFunc(out, func(d deckState) bool { return d.Stale })
 	// CDJ continuous positions do not advance the EngineX peer version. Those
 	// responses, like legacy responses, must always reach QML.
-	if !v.ShadowLegacyEngine && !slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly }) {
+	if !v.ShadowLegacyEngine && !slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly || strings.HasPrefix(d.Key, "cdj:") }) {
 		w.Header().Set("X-Shadow-State", fmt.Sprintf("%d:%t:%s:%t:%t", ver, true, role, stale, debug))
 	}
 	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug, "displayOnly": !v.ShadowLegacyEngine})
