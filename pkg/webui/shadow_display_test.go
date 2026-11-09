@@ -1018,3 +1018,94 @@ func TestCDJOverviewFiltersBeatBeyondPDBDuration(t *testing.T) {
 		t.Fatalf("duration=%v beats=%+v", a.DurationMS, a.Beats)
 	}
 }
+
+// Exercise the UI's real poll/asset routes with the console's default role 12.
+func consoleLineHTTPServer(t *testing.T) (*Server, string) {
+	t.Helper()
+	oldRole, oldCompatible := fourDeckRolePath, deviceCompatiblePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "missing-role")
+	deviceCompatiblePath = filepath.Join(t.TempDir(), "compatible")
+	t.Cleanup(func() { fourDeckRolePath, deviceCompatiblePath = oldRole, oldCompatible })
+	if err := os.WriteFile(deviceCompatiblePath, []byte("inmusic,jc11\x00"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cache, dev := cachedDisplayCDJ(t)
+	s := displayCDJServer(t, cache, dev)
+	srv := httptest.NewServer(s)
+	t.Cleanup(srv.Close)
+	if code, _ := uiPost(t, srv.URL, "fourDeckWaveform=1&prolinkShare=1"); code != http.StatusOK {
+		t.Fatalf("enable shadow: %d", code)
+	}
+	return s, srv.URL
+}
+
+func TestConsoleLineStateClearedWhenParameterMissing(t *testing.T) {
+	_, base := consoleLineHTTPServer(t)
+	_, decks := shadowGetJSON(t, base+"/v1/sc5000/shadow?line=1")
+	if len(decks) != 1 || decks[0].Deck != 1 || !decks[0].LineIn {
+		t.Fatalf("Line channel 1: %+v", decks)
+	}
+	_, decks = shadowGetJSON(t, base+"/v1/sc5000/shadow")
+	if len(decks) != 1 || decks[0].Deck != 4 || decks[0].LineIn {
+		t.Fatalf("switch back to Engine must restore default slot: %+v", decks)
+	}
+}
+
+func TestConsoleLineCDJAssetsAllChannels(t *testing.T) {
+	_, base := consoleLineHTTPServer(t)
+	for channel := 1; channel <= 4; channel++ {
+		t.Run(strconv.Itoa(channel), func(t *testing.T) {
+			_, decks := shadowGetJSON(t, base+"/v1/sc5000/shadow?line="+strconv.Itoa(channel))
+			if len(decks) != 1 || decks[0].Deck != channel || !decks[0].LineIn || decks[0].MetadataOnly {
+				t.Fatalf("Line channel %d: %+v", channel, decks)
+			}
+			q := "?deck=" + strconv.Itoa(channel) + "&key=" + url.QueryEscape(decks[0].Key)
+			for _, route := range []string{"display", "waveform.png"} {
+				resp, err := http.Get(base + "/v1/sc5000/shadow/" + route + q)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Errorf("channel %d %s: %d", channel, route, resp.StatusCode)
+				}
+			}
+		})
+	}
+}
+
+func TestConsoleLineKeepsSCPlayerSlots(t *testing.T) {
+	s, _ := consoleLineHTTPServer(t)
+	now := time.Now()
+	p := peerDeck{deckState: deckState{Deck: 3, Key: "sc-track", Title: "SC player"}, at: now}
+	s.shadow.peerDecks = map[int]peerDeck{3: p}
+	s.shadow.busy["peer:sc-track"] = true
+	s.shadow.display.entries = map[string]*shadowDisplayEntry{displayPeerID(p): {asset: testDisplayAsset()}}
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			compose := s.shadowComposeDisplay
+			if legacy {
+				compose = s.shadowComposeLegacy
+			}
+			decks := compose("12", now, []int{1})
+			if len(decks) != 2 || decks[0].Deck != 1 || !decks[0].LineIn || decks[0].Title == p.Title || decks[1].Deck != 3 || decks[1].LineIn || decks[1].Title != p.Title {
+				t.Fatalf("CDJ must use Line 1 and SC must stay on 3: %+v", decks)
+			}
+			// A Line slot already occupied by the original peer mapping cannot
+			// redirect CDJ to a non-Line slot or mark the peer as a Line source.
+			decks = compose("12", now, []int{3})
+			if len(decks) != 1 || decks[0].Deck != 3 || decks[0].LineIn || decks[0].Title != p.Title {
+				t.Fatalf("occupied Line slot: %+v", decks)
+			}
+		})
+	}
+	prolinkMu.Lock()
+	delete(postedDevices, s)
+	prolinkMu.Unlock()
+	for _, compose := range []func(string, time.Time, ...[]int) []deckState{s.shadowComposeDisplay, s.shadowComposeLegacy} {
+		decks := compose("12", now, []int{1})
+		if len(decks) != 1 || decks[0].Deck != 3 || decks[0].LineIn || decks[0].Title != p.Title {
+			t.Fatalf("without CDJ, Line must keep stock behavior and SC stays on 3: %+v", decks)
+		}
+	}
+}
