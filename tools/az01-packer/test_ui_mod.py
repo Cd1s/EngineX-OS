@@ -434,9 +434,41 @@ now+=3999; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,2);
 now+=1; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,3); // 4 s
 requests[2].finish(200,{key:'A',detailPending:true,beats:[]});
 now+=7999; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,3);
-now+=1; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,4); // 8 s at most
-requests[3].finish(200,{key:'A',detailPending:false,detail:true,beats:[]});
-now+=60000; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,4);
+now+=1; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,4); // 8 s
+requests[3].finish(200,{key:'A',detailPending:true,beats:[]});
+now+=1000; scShadowApplyAll([{deck:2,key:'A'}]); assert.equal(requests.length,4); // still pending: no re-read
+scShadowApplyAll([{deck:2,key:'A',displayDetail:true}]); assert.equal(requests.length,5); // stream-sync has it: at once
+requests[4].finish(200,{key:'A',detailPending:false,detail:true,beats:[]});
+now+=60000; scShadowDisplayFetch(2,'A'); assert.equal(requests.length,5);
+""")
+
+    def test_sender_filters_block_quantised_positions(self):
+        self.js(r"""
+// Engine moves TrackPosition in blocks (up to ~36 ms of track time measured at +59.5 %, 45 here): the
+// posted line must not carry that noise (no re-anchoring full posts).
+let bodies=[], pings=0, t0=now, playing=false;
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(this.url.endsWith('/alive'))pings++;else bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+const truth=()=>playing?(now-t0)*1.595:0, block=45;
+globalThis.scTr=path=>({
+    get value(){return path.endsWith('/SampleRate')?1000:0},
+    get unnormalized(){return path.endsWith('/TrackPosition')?Math.floor(truth()/block)*block:path.endsWith('/OriginalBPM')?82:path.endsWith('/CurrentBPM')?82*1.5954:0},
+    get state(){return path.endsWith('/SongLoaded')||(path.endsWith('/PlayState')&&playing)},
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':path.endsWith('/SpeedState')?'59.54':''}, color:'#ffffff'});
+const tick=ms=>{for(let t=0;t<ms;t+=40){now+=40;scShadowTick();}};
+tick(400); playing=true; t0=now; tick(40);
+const start=bodies.length;
+tick(20000);
+assert(bodies.length-start<=5, 'noisy positions re-anchored '+(bodies.length-start)+' times in 20 s');
+// What the peer extrapolates (the newest full post) stays within a few ms of the
+// true playhead; the raw sample would anchor anywhere up to a block behind.
+const b=bodies[bodies.length-1][0], seen=b.positionMs+(now-b.at)*(1+b.pitch/100);
+assert(Math.abs(seen-truth())<=8, 'peer line off by '+(seen-truth()));
 """)
 
     def test_unchanged_version_keeps_samples_alive_without_parsing(self):
@@ -558,8 +590,13 @@ const tick=ms=>{for(let t=0;t<ms;t+=40){now+=40;if(playing)pos+=40*48;scShadowTi
 tick(1000); const n0=bodies.length; assert.equal(n0,1);
 playing=true; tick(40); assert.equal(bodies.length,2); assert.equal(bodies[1][0].playing,true); // play edge at once
 tick(4000); assert.equal(bodies.length,2,'steady playback must only ping'); assert(pings>=8);
-pos+=48*200; tick(40); assert.equal(bodies.length,3); // a 200 ms slip: full post
-cueName='DROP'; tick(2600); assert.equal(bodies.length,4); assert.equal(bodies[3][0].cues[0].n,'DROP'); // a renamed cue
+pos-=48*20; tick(40); assert.equal(bodies.length,2); // a sample one block (20 ms) behind: still a ping
+pos+=48*20; tick(6000); assert.equal(bodies.length,3); // the 5 s full post stays on the same line
+const b2=bodies[2][0], b1=bodies[1][0];
+assert(Math.abs(b2.positionMs-(b1.positionMs+(b2.at-b1.at)))<2, 'safety post moved the line');
+pos+=48*200; tick(40); assert.equal(bodies.length,4); // a 200 ms slip: full post at once
+assert(Math.abs(bodies[3][0].positionMs-pos/48)<1e-6);
+cueName='DROP'; tick(2600); assert.equal(bodies.length,5); assert.equal(bodies[4][0].cues[0].n,'DROP'); // a renamed cue
 """)
 
     def test_safe_gc_only_when_nothing_plays(self):

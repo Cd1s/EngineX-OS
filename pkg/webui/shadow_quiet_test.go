@@ -43,17 +43,17 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 		t.Fatalf("liveness or anchor: %+v", p)
 	}
 	// Small drifts accumulate against the anchored line, not the previous sample.
-	steady.PositionMS = 2007 // +7 ms at 1 s
+	steady.PositionMS = 2018 // +18 ms at 1 s: sampling noise
 	if take(steady, time.Second) != v {
-		t.Fatal("7 ms drift bumped")
+		t.Fatal("18 ms drift bumped")
 	}
-	steady.PositionMS = 2514 // +14 ms at 1.5 s: each step was only 7 ms
+	steady.PositionMS = 2536 // +36 ms at 1.5 s: each step was only 18 ms
 	if v2 := take(steady, 1500*time.Millisecond); v2 == v {
 		t.Fatal("accumulated drift never woke the QML")
 	} else {
 		v = v2
 	}
-	if p := sh.peerDecks[2]; p.anchorPos != 2514 || p.anchorAt != t0.Add(1500*time.Millisecond) {
+	if p := sh.peerDecks[2]; p.anchorPos != 2536 || p.anchorAt != t0.Add(1500*time.Millisecond) {
 		t.Fatalf("re-anchored: %+v", p)
 	}
 	for name, edit := range map[string]func(*deckState){
@@ -67,7 +67,7 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 		"track":  func(d *deckState) { d.Key = "k2" },
 	} {
 		d := steady
-		d.PositionMS = 2514 + 500 // on the line at 2 s
+		d.PositionMS = 2536 + 500 // on the line at 2 s
 		edit(&d)
 		if take(d, 2*time.Second) == v {
 			t.Fatalf("%s did not bump", name)
@@ -188,5 +188,68 @@ func TestShadowStateHeaderSkipsHeartbeats(t *testing.T) {
 	s.shadow.mu.Unlock()
 	if h3 := header(); h3 == h1 {
 		t.Fatal("a stale deck kept the header")
+	}
+}
+
+// A display retry while the source still analyses must not wake the QML.
+func TestDisplayRetryBumpsOnlyOnReadiness(t *testing.T) {
+	pending := &shadowDisplayAsset{DetailPending: true}
+	ready := &shadowDisplayAsset{Detail: true}
+	for _, c := range []struct {
+		name     string
+		old, new *shadowDisplayEntry
+		want     bool
+	}{
+		{"first fetch", nil, &shadowDisplayEntry{}, true},
+		{"first asset", &shadowDisplayEntry{}, &shadowDisplayEntry{asset: pending}, true},
+		{"still pending", &shadowDisplayEntry{asset: pending}, &shadowDisplayEntry{asset: &shadowDisplayAsset{DetailPending: true}}, false},
+		{"detail arrived", &shadowDisplayEntry{asset: pending}, &shadowDisplayEntry{asset: ready}, true},
+		{"failed retry", &shadowDisplayEntry{}, &shadowDisplayEntry{}, false},
+	} {
+		if got := displayReadinessChanged(c.old, c.new); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// Detail readiness reaches the QML through the header digest and displayDetail,
+// so it neither polls the display JSON nor needs a version bump.
+func TestShadowStateHeaderCarriesDisplayDetail(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	oldRole := fourDeckRolePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = oldRole }()
+	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
+	uiPost(t, srv.URL, "fourDeckWaveform=1")
+	get := func() (string, []deckState) {
+		t.Helper()
+		r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var v struct{ Decks []deckState }
+		json.NewDecoder(r.Body).Decode(&v)
+		r.Body.Close()
+		return r.Header.Get("X-Shadow-State"), v.Decks
+	}
+	s.shadow.mu.Lock()
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Seq: 1}}, time.Now())
+	p := s.shadow.peerDecks[2]
+	s.shadow.mu.Unlock()
+	id := displayPeerID(p)
+	set := func(a *shadowDisplayAsset) {
+		s.shadow.display.mu.Lock()
+		s.shadow.display.entries = map[string]*shadowDisplayEntry{id: {asset: a, at: time.Now(), retry: time.Now().Add(time.Hour)}}
+		s.shadow.display.mu.Unlock()
+	}
+	set(&shadowDisplayAsset{DetailPending: true})
+	h1, d1 := get()
+	ver := s.shadow.ver
+	set(&shadowDisplayAsset{Detail: true})
+	h2, d2 := get()
+	if h1 == h2 || len(d1) != 1 || len(d2) != 1 || d1[0].DisplayDetail || !d2[0].DisplayDetail || s.shadow.ver != ver {
+		t.Fatalf("detail readiness: %q %+v -> %q %+v (ver %d -> %d)", h1, d1, h2, d2, ver, s.shadow.ver)
 	}
 }

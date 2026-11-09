@@ -89,6 +89,9 @@ type deckState struct {
 	// null when the sender does not say (a CDJ), [] when the track has none.
 	CuePos *float64    `json:"cuePos,omitempty"`
 	Cues   []shadowCue `json:"cues"`
+	// DisplayDetail (display compose only): the detail waveform of this deck's
+	// display data is ready here, so the QML re-reads it once instead of polling.
+	DisplayDetail bool `json:"displayDetail,omitempty"`
 }
 
 // shadowCue is one hot cue (I 1..8); the receiver checks it before use.
@@ -110,10 +113,12 @@ type peerDeck struct {
 }
 
 // Tolerances of samePeerPicture: a playing deck's position may run this far off
-// the line the QML extrapolates before the long poll is woken (sub-pixel at
-// every zoom); a paused deck must not move at all.
+// the line the QML extrapolates before the long poll is woken. The sender samples
+// at 40 ms (its positions are ~10-17 ms noisy at high pitch) and our HTTP fallback
+// is niced on CPU3: re-anchoring on that noise woke the QML ~once a second without
+// making the picture any truer. A paused deck must not move at all.
 const (
-	shadowPlayingDriftMS = 10
+	shadowPlayingDriftMS = 25
 	shadowPausedDriftMS  = 0.5
 )
 
@@ -881,7 +886,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	// display cache (stale, loading, the placed slot and key) goes in a digest.
 	h := fnv.New64a()
 	for _, d := range out {
-		fmt.Fprintf(h, "%d|%s|%t|%t|%t;", d.Deck, d.Key, d.Loading, d.Stale, d.MetadataOnly)
+		fmt.Fprintf(h, "%d|%s|%t|%t|%t|%t;", d.Deck, d.Key, d.Loading, d.Stale, d.MetadataOnly, d.DisplayDetail)
 	}
 	// CDJ continuous positions do not advance the EngineX peer version. Those
 	// responses, like legacy responses, must always reach QML.
