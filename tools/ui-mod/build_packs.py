@@ -2860,7 +2860,7 @@ FOUR_DECK_ENTRIES = """
 			wrapMode: Text.WordWrap
 			Layout.preferredHeight: implicitHeight
 			color: "#9a9a9a"
-			text: ["Auto: Engine loads every track it can copy and shows it exactly like a local deck; a CDJ track with no file to copy (streaming, rekordbox Link) shows its rekordbox waveform", "All Engine Mode: Engine loads every source and shows it exactly like a local deck", "All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)"][scShadowModeEntry.at]
+			text: ["Auto: copyable tracks load locally like a local deck; uncopyable CDJ tracks show CDJ waveforms", "All Engine Mode: Engine loads every source and shows it exactly like a local deck", "All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)"][scShadowModeEntry.at]
 		},
 """
 
@@ -3712,7 +3712,7 @@ SHADOW_BUSY = r"""
                     anchors.verticalCenter: parent.verticalCenter
                     color: Style.font02Color; font: Style.fontH1
                     readonly property int retried: scDisplay.busyState > 3 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0
-                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || {streaming: "Streaming track: no file to copy from the CDJ.", link: "rekordbox Link track: no file to copy from the CDJ.", media: "CD or second USB: no file to copy from the CDJ.", network: "Could not load via network.", timeout: "Failed to open file within appropriate time."}[scBusy.why] || " ") + [" ", " " + "Retrying…"][retried]
+                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || {streaming: "Streaming: no file to copy from CDJ.", link: "rekordbox Link: no file to copy from CDJ.", media: "CD or 2nd USB: no file to copy from CDJ.", network: "Could not load via network.", timeout: "Failed to open file within appropriate time."}[scBusy.why] || " ") + [" ", " " + "Retrying…"][retried]
                 }
             } }
         }
