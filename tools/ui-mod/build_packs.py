@@ -3312,7 +3312,7 @@ SHADOW_LAYER = r"""
         }
         clip: true
         visible: active && inheritedVisible && owner.width > 0 && owner.height > 0
-        color: "#101114"
+        color: wave ? "black" : "#101114" // the stock lanes are black: on grey the stock fade over the left edge shows as a band
         // Stock roots can hide an empty Engine slot. Restore their original bindings on exit.
         Binding { target: scDisplay.owner; property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
         Binding { target: scDisplay.owner; property: "enabled"; value: false; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
@@ -3391,15 +3391,20 @@ SHADOW_LAYER = r"""
         // which was the main JS garbage of a playing shadow deck.
         Repeater {
             model: scDisplay.gridSlots
-            delegate: Rectangle {
+            // The stock grid: a short grey tick at both edges on every beat; a bar
+            // has red ticks, a line between them and its number at the bottom left.
+            delegate: Item {
+                id: scBeat
                 required property int index
                 readonly property var beat: index < scDisplay.grid.length ? scDisplay.grid[index] : null
+                readonly property bool bar: beat !== null && beat.number % 4 === 0
                 visible: beat !== null
-                x: beat ? scDisplay.screenX(beat.ms) : 0
-                height: scDisplay.height
-                width: beat && beat.number % 4 === 0 ? 2 : 1
-                color: "white"
-                opacity: beat && beat.number % 4 === 0 ? 0.55 : 0.22
+                x: beat ? scDisplay.screenX(beat.ms) - 2 : 0
+                width: 4; height: scDisplay.height
+                Rectangle { width: 4; height: 8; color: scBeat.bar ? "#ff4d4d" : "#636363" }
+                Rectangle { y: scBeat.height - 8; width: 4; height: 8; color: scBeat.bar ? "#ff4d4d" : "#636363" }
+                Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: "#b7b7b7" }
+                Text { textFormat: Text.PlainText; visible: scBeat.bar; anchors.right: scBeat.left; anchors.rightMargin: 5; anchors.bottom: scBeat.bottom; anchors.bottomMargin: 3; text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""; color: "white"; font.pixelSize: 15 }
             }
         }
         Repeater {
@@ -3543,7 +3548,9 @@ def shadow_layer(text: str, kind: str) -> str:
         stock = f"waveform{band}{'Fade' if kind == 'waveform' else ''}Color"
         colors = BAND_FADE if kind == "waveform" else BAND_COLORS
         fallback = f'(rgb ? "{RGB_COLORS[band]}" : {three_band(stock, band, colors)})'
-        value = f'(typeof owner.height{band}Color !== "undefined" ? owner.height{band}Color : {fallback})' if kind == "waveform" else fallback
+        # 3-band lanes take the stock main colours. height*Color is the Fade set there
+        # (45-60 % alpha): drawn alone, the whole lane looked greyed out and translucent.
+        value = f'(!rgb && typeof owner.color{band}Color !== "undefined" ? owner.color{band}Color : typeof owner.height{band}Color !== "undefined" ? owner.height{band}Color : {fallback})' if kind == "waveform" else fallback
         if kind not in ("waveform", "overview"):
             value = '"#000000"'
         palette.append(f"readonly property color {prop}: {value}")
