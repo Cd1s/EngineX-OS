@@ -420,7 +420,8 @@ func TestShadowPathBySource(t *testing.T) {
 			t.Fatalf("%s: displayOnly=%v %+v", step, all, decks)
 		}
 		// Deck 2: the EngineX track, loaded by Engine. A displayOnly sent by the peer is not ours.
-		if e := decks[0]; e.Deck != 2 || e.DisplayOnly || e.Path != audio || e.Key != "" || e.Loading {
+		// Its key is the display key, for the cover while Engine loads (head only: TestShadowLegacyCoverReadsDisplayHead).
+		if e := decks[0]; e.Deck != 2 || e.DisplayOnly || e.Path != audio || e.Key != displayTrackKey(pd) || e.Loading {
 			t.Fatalf("%s: EngineX slot: %+v", step, e)
 		}
 		// Deck 4: the CDJ, drawn from its cached analysis; its audio is never copied.
@@ -431,8 +432,8 @@ func TestShadowPathBySource(t *testing.T) {
 		if code := asset(c, c.Key); code != 200 {
 			t.Fatalf("%s: CDJ display asset: %d", step, code)
 		}
-		if code := asset(decks[0], displayTrackKey(pd)); code != 404 {
-			t.Fatalf("%s: Engine-loaded slot served a display asset: %d", step, code)
+		if code := asset(decks[0], c.Key); code != 404 {
+			t.Fatalf("%s: the EngineX slot served the CDJ's display asset: %d", step, code)
 		}
 	}
 	mixed("mixed")
@@ -1113,7 +1114,7 @@ func TestShadowAudioFetchCountersDetectCalls(t *testing.T) {
 	assertNoShadowAudioFetch(t, s)
 	done := make(chan struct{})
 	s.shadow.mu.Lock()
-	s.shadowFetch("counter", func(context.Context) (string, error) { close(done); return "", errors.New("counter test") })
+	s.shadowFetch("counter", func(context.Context, *shadowCopy) (string, error) { close(done); return "", errors.New("counter test") })
 	// Mark busy to exercise the CDJ entry without starting an NFS request.
 	s.shadow.busy["cdj-counter"] = true
 	s.shadowFetchCDJ("cdj-counter", nil, 3, 1)
