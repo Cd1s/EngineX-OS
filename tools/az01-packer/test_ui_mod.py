@@ -131,11 +131,13 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("/RequestMaster", m)
         self.assertIn("e.loading", m)
 
-    def test_zoom_is_ten_geometric_levels(self):
-        self.assertIn("function scZoom(dir)", bp.ZOOM_STEP)  # tests/test_rootfs_overlay.sh greps this
-        self.assertIn("Planck.getProperty(\"/Engine/Master/WaveformZoom\")", bp.ZOOM_STEP)
-        self.assertIn("Math.pow(hi / lo, 1 / 9)", bp.ZOOM_STEP)
-        self.assertIn("interval: 16", bp.ZOOM_STEP)
+    def test_zoom_and_browse_encoder_are_stock(self):
+        # The maintainer wants the stock ZOOM / Browse knob: 0.5 s per detent, hold = Grid Edit,
+        # Shift+hold = Cue Edit, double press = Instant Double, also while playing (#147, #157 undone).
+        for gone in ("/GUI/Scripted/Zoom", "scZoom(", "BrowseEncoder.qml", "DeckAction.qml", "Vinyl.qml",
+                     "JogWheel.qml", "!deckConfig.gridEditActive && deckConfig.playing"):
+            self.assertNotIn(gone, SRC)
+        self.assertIn("Planck.getProperty(\"/Engine/Master/WaveformZoom\")", bp.ZOOM_PROP)  # the shadow lane reads it
 
     def test_swipe_left_has_one_stems(self):
         self.assertEqual(SRC.count("!leftActions.some(action => /stem/i.test("), 2)
@@ -152,8 +154,6 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("interval: 40\n\t\trepeat: true", bp.SERVICES_MAIN)
         self.assertIn("scJogLastTick", bp.SERVICES_MAIN)
         self.assertNotIn("< 0.015) return", bp.SERVICES_MAIN)
-        # #157: holding the Browse encoder must not toggle Grid Edit
-        self.assertIn("BrowseEncoder.qml", SRC)
 
     def test_cue_countdown_151(self):
         self.assertIn("function scNextCueInfo(d, tick)", bp.SERVICES_MAIN)
@@ -201,9 +201,6 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn('"/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode"', bp.SERVICES_MAIN)
         self.assertIn("Config.audio.hasStemsLevel || module.pflShiftAction == Action.ToggleChannelStripMode", SRC)
         self.assertIn("scStemsLatchedAt", SRC)
-        # #157: holding Browse/Zoom encoder while playing must not enter BeatGrid Edit
-        self.assertIn("if (!deckConfig.songLoaded || (!deckConfig.gridEditActive && deckConfig.playing))", SRC)
-        self.assertIn("!deckConfig.gridEditActive &&\\n", SRC)
         # #160: 4-Deck Waveform and 3+4 role available across players and all-in-one consoles
         self.assertIn('"34"', bp.FOUR_DECK_ENTRIES)
         self.assertIn('"3+4"', bp.FOUR_DECK_ENTRIES)
