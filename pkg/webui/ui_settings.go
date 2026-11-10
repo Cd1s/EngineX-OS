@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,6 +21,92 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
 
+// Build metadata injected at link time via -ldflags:
+//
+//	-X github.com/Cd1s/EngineX-OS/pkg/webui.BuildTag=...
+//	-X github.com/Cd1s/EngineX-OS/pkg/webui.BuildTrack=...
+//	-X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1
+var (
+	BuildTag     string
+	BuildTrack   = "dev"
+	ReleaseBuild string
+)
+
+func currentBuildTag() string {
+	if ReleaseBuild == "1" {
+		return ""
+	}
+	if tag := strings.TrimSpace(BuildTag); tag != "" {
+		return tag
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	var rev string
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" && s.Value != "" {
+			rev = s.Value
+			if len(rev) > 7 {
+				rev = rev[:7]
+			}
+			break
+		}
+	}
+	if rev == "" {
+		return ""
+	}
+	track := strings.TrimSpace(os.Getenv("ENGINEX_BUILD_TRACK"))
+	if track == "" {
+		track = strings.TrimSpace(BuildTrack)
+	}
+	if track == "" {
+		track = "dev"
+	}
+	return track + " " + rev
+}
+
+// uiCapabilities describes hardware-gated EngineX features derived from the
+// device-tree board prefix (never Engine's Config.device.isPlayer).
+type uiCapabilities struct {
+	Mixer         bool `json:"mixer"`
+	FourDeck      bool `json:"fourDeck"`
+	AutoLoopKnob  bool `json:"autoLoopKnob"`
+	BeatJumpPads  bool `json:"beatJumpPads"`
+	TrackSkipKeys bool `json:"trackSkipKeys"`
+	StemsEq       bool `json:"stemsEq"`
+	LineInAux     bool `json:"lineInAux"`
+	Gen2          bool `json:"gen2"`
+	RemoteStems   bool `json:"remoteStems"`
+}
+
+func boardCapabilities(board string) uiCapabilities {
+	if board == "" {
+		return uiCapabilities{
+			Mixer:         true,
+			FourDeck:      true,
+			AutoLoopKnob:  true,
+			TrackSkipKeys: true,
+			StemsEq:       true,
+			RemoteStems:   true,
+		}
+	}
+	isPlayer := playerBoards[board]
+	isMixstream := mixstreamBoards[board]
+	isAZ04 := az04Boards[board]
+	return uiCapabilities{
+		Mixer:         !isPlayer,
+		FourDeck:      fourDeckBoards[board],
+		AutoLoopKnob:  !isMixstream,
+		BeatJumpPads:  isMixstream,
+		TrackSkipKeys: !noTrackSkipKeyBoards[board],
+		StemsEq:       !isPlayer && board != "PRIME4G2",
+		LineInAux:     board == "SCLIVE4",
+		Gen2:          dataBundleBoards[board],
+		RemoteStems:   !isAZ04,
+	}
+}
+
 const defaultUIDir = "/data/sc5000-custom/ui"
 
 var (
@@ -27,7 +114,6 @@ var (
 	uiWaveforms    = []string{"denon", "rgb", "3band"}
 	uiServices     = []string{"tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
 	uiQualities    = []string{qualityFLAC, quality320k}
-	uiJogModes     = []string{"static", "rainbow", "fast", "bpm"}
 	uiNeteaseModes = []string{neteaseOfficial, neteaseDeemix}
 	// TIDAL logs in through Engine's own flow against TIDAL's servers.
 	loginServices = []string{"netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
@@ -55,7 +141,6 @@ const (
 type uiSettings struct {
 	Version     string  `json:"version,omitempty"`
 	Quality     string  `json:"quality"`
-	Jog         string  `json:"jog"`
 	NeteaseMode string  `json:"neteaseMode"`
 	Playhead    float64 `json:"playhead"`
 	// AutoAnalyze retains the user's preference (#55). The UI pack currently
@@ -112,8 +197,11 @@ type uiSettings struct {
 
 	// Status only, never saved: the export runs (ON waits for a Rekordbox USB), and
 	// the board is a standalone player without channel faders (#52).
-	ProlinkExportActive bool `json:"prolinkExportActive"`
-	Player              bool `json:"player"`
+	ProlinkExportActive bool           `json:"prolinkExportActive"`
+	Player              bool           `json:"player"`
+	Board               string         `json:"board,omitempty"`
+	BuildTag            string         `json:"buildTag,omitempty"`
+	Capabilities        uiCapabilities `json:"capabilities"`
 	// The role engine-ui-guard applied at Engine's last start (auto resolved).
 	FourDeckRoleActive string `json:"fourDeckRoleActive,omitempty"`
 }
@@ -186,7 +274,7 @@ var uiServicesBeforeKnown = []string{"tidal", "netease", "spotify", "deezer", "s
 func (s *Server) loadUI() uiSettings {
 	known, saved, shadowModeSet := uiServicesBeforeKnown, false, false
 	v := uiSettings{
-		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowMode: "auto", ProlinkWaveform: true,
+		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowMode: "auto", ProlinkWaveform: true,
 		TracklistWaveform: true, CueCountdown: true,
 		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 	}
@@ -216,10 +304,6 @@ func (s *Server) loadUI() uiSettings {
 		case "quality":
 			if slices.Contains(uiQualities, val) {
 				v.Quality = val
-			}
-		case "jog":
-			if slices.Contains(uiJogModes, val) {
-				v.Jog = val
 			}
 		case "netease_mode":
 			if slices.Contains(uiNeteaseModes, val) {
@@ -371,7 +455,7 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\njog=" + v.Jog + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
+	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
 	if v.FourDeckWaveform {
 		text += "four_deck_waveform=1\n"
 	}
@@ -542,7 +626,11 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	relay := s.relayStatusView()
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
 	v.ProlinkExportActive = s.prolinkExport != nil && s.prolinkExport.Status().Enabled
-	v.Player = playerBoards[imagePrefix(deviceCompatible())]
+	board := imagePrefix(deviceCompatible())
+	v.Board = board
+	v.BuildTag = currentBuildTag()
+	v.Player = playerBoards[board]
+	v.Capabilities = boardCapabilities(board)
 	v.FourDeckRoleActive = s.activeRole(v)
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
 		body, err := json.Marshal(struct {
@@ -605,7 +693,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) {
+	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -759,9 +847,6 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("quality") {
 		v.Quality = q.Get("quality")
-	}
-	if q.Has("jog") {
-		v.Jog = q.Get("jog")
 	}
 	if q.Has("fourDeckRole") {
 		v.FourDeckRole = q.Get("fourDeckRole")

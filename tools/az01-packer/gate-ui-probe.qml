@@ -1,7 +1,7 @@
 // release-gate.sh only, never shipped. The gate copies this over the stock
 // qrc:/Skins/Common/Items/QmlWarnings.qml (EmbeddedMain always creates it) in its
 // sandbox /data, so Engine's own item tree reports what the shipped pack rendered:
-// Settings -> Services -> Streaming rows, the About version line, the waveform tile,
+// Settings -> Services -> Streaming rows, the About version line, the Upfader Echo tile,
 // and Control Center's size at UI Scale 75 %.
 // Lines are short "SCPROBE kind|field|...|" records: Engine splits long log lines.
 import QtQuick 2.12
@@ -47,8 +47,8 @@ Item {
             if (!tabView && o.objectName === "ControlCenterTabView") tabView = o
             if (o.objectName === "Version")
                 console.warn("SCPROBE version|" + String(o.text).replace(/<[^>]*>/g, "") + "|")
-            if (o.objectName === "ControlCenter_WaveformStyle" || o.objectName === "ControlCenter_LiveStream" || o.objectName === "ControlCenter_UpfaderEcho" || o.objectName === "ControlCenter_JogLight")
-                console.warn("SCPROBE tile|" + o.objectName + "|")
+            if (o.objectName === "ControlCenter_LiveStream")
+                console.warn("SCPROBE tile|" + o.objectName + "|" + (o.visible ? 1 : 0) + "|")
             if (isSection(o))
                 entries(o, function (c) { console.warn("SCPROBE entry|" + o.label + "|" + c.text + "|" + (c.visible ? 1 : 0) + "|") })
         })
@@ -78,6 +78,7 @@ Item {
     property var section: null
     property var tabNames: []
     property int tabTry: 0
+    property int phase: 0
 
     Timer {
         property int step: 0
@@ -86,6 +87,19 @@ Item {
         running: true
         onTriggered: {
             try {
+                if (probe.phase === 1) {
+                    let stockFaderEcho = 0
+                    walk(probe.Window.window.contentItem, new Set(), function (o) {
+                        if (o.objectName === "ControlCenter_WaveformStyle" || o.objectName === "ControlCenter_UpfaderEcho")
+                            console.warn("SCPROBE tile|" + o.objectName + "|" + (o.visible ? 1 : 0) + "|")
+                        if (o.objectName === "Preferences_Entry" && o.icon && String(o.icon.source || "").indexOf("Faderecho.png") >= 0 && o.visible && (!o.parent || o.parent.visible))
+                            stockFaderEcho = 1
+                    })
+                    console.warn("SCPROBE tile|ControlCenter_StockFaderEcho|" + stockFaderEcho + "|")
+                    console.warn("SCPROBE done|")
+                    running = false
+                    return
+                }
                 step++
                 if (!probe.section) {
                     PlanckGUI.views.controlCenter.openTab(ControlCenterTabNameSettings)
@@ -106,11 +120,14 @@ Item {
                 }
                 if (!(probe.section && probe.section.visible)) console.warn("SCPROBE error|Settings -> Services never showed|")
                 report()
+                probe.phase = 1
+                PlanckGUI.views.controlCenter.openTab(ControlCenterTabNameControlCenter)
+                return
             } catch (e) {
                 console.warn("SCPROBE error|" + e + "|")
+                console.warn("SCPROBE done|")
+                running = false
             }
-            console.warn("SCPROBE done|")
-            running = false
         }
     }
 }
