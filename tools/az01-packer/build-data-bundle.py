@@ -54,6 +54,7 @@ Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemi
 
 [Service]
 Environment="LD_PRELOAD=$lib_hook"
+Environment="QT_LOGGING_CONF=/data/logging.ini"
 EnvironmentFile=-/data/sc5000-custom/ui-scale.env
 EOF
 
@@ -333,21 +334,23 @@ rm -f "$dest/gen2-unlocked"
 rm -f "$alsa_dest/99-sc5000-custom.conf"
 rmdir "$alsa_dest" 2>/dev/null || :
 rm -rf "$dest/bundle"
-if command -v systemctl >/dev/null 2>&1 && systemctl is-active basic.target >/dev/null 2>&1; then
-    for applet in stream-sync rb-bridge sc5000-deemixd; do
-        systemctl stop "enginex-$applet.service" 2>/dev/null || :
-        rm -f "/run/systemd/system/enginex-$applet.service"
-    done
-    rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf
-    systemctl daemon-reload 2>/dev/null || :
-    systemctl restart --no-block edisksd.service 2>/dev/null || :
+if [ -z "${SC5000_CUSTOM:-}" ]; then
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active basic.target >/dev/null 2>&1; then
+        for applet in stream-sync rb-bridge sc5000-deemixd; do
+            systemctl stop "enginex-$applet.service" 2>/dev/null || :
+            rm -f "/run/systemd/system/enginex-$applet.service"
+        done
+        rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf
+        systemctl daemon-reload 2>/dev/null || :
+        systemctl restart --no-block edisksd.service 2>/dev/null || :
+    fi
+    pkill -x sc5000-suite 2>/dev/null || :
+    rm -f /run/systemd/system/enginex-stream-sync.service \
+          /run/systemd/system/enginex-rb-bridge.service \
+          /run/systemd/system/enginex-sc5000-deemixd.service \
+          /run/systemd/system/engine.service.d/99-sc5000.conf \
+          /run/systemd/system/edisksd.service.d/99-sc5000.conf
 fi
-pkill -x sc5000-suite 2>/dev/null || :
-rm -f /run/systemd/system/enginex-stream-sync.service \
-      /run/systemd/system/enginex-rb-bridge.service \
-      /run/systemd/system/enginex-sc5000-deemixd.service \
-      /run/systemd/system/engine.service.d/99-sc5000.conf \
-      /run/systemd/system/edisksd.service.d/99-sc5000.conf
 echo "EngineX OS $version removed from $dest"
 '''
 

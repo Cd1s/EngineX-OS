@@ -68,10 +68,11 @@
 
 
 ### 7. 5.3.0.4 新功能
+- **詳細日誌與日誌下載**：網頁主控台的播放機設定新增 **詳細日誌**（預設關），切換會重新啟動 Engine，播放會中斷。點擊旁邊的 **下載日誌**，儲存最近 30 分鐘已脫敏的純文字日誌（最多 5,000 筆 / 2 MiB），不需 SSH；重現問題後請關閉詳細日誌。
 - **四軌聯動完整卸載與串流真實歌名（#49）**：對端播放機關機、重啟或退歌時會發送 UDP 告別封包，本機在 350 ms 防抖後自動卸載影子軌（`Unload` + `UnSync`，並自動交回 `MASTER`），清掉殘留的波形與曲目。移除了可能死鎖的 `RemoteState` 訂閱，對端關機不再阻塞本機切換串流音源。串流曲目在影子播放機上顯示真實的 `歌手 - 歌名`，不再顯示內部數字快取檔名；
 - **介面更流暢、降低 CPU 佔用**：新增 `scTr` QML 屬性 translator 快取，並給 `QuickCue` 加 500 ms 節流，消除按 `MASTER` / `SYNC` 時介面的瞬間卡頓，明顯降低 Engine `EMain` GUI 執行緒的 CPU 佔用；
 - **歌單左滑只留一個 Stems 按鈕**：自動辨識原廠已帶 `Stem` 動作的本機曲目，去重並在地化為單一的 `分軌 Stems` 按鈕，本機、串流、區域網路曲目左滑後的體驗完全一致；
-- **10 級幾何平滑波形縮放（#147）與 Auto Loop 旋鈕聯動（#135）**：Browse 旋鈕縮放波形改為 10 級等比幾何步進（約 1.46 倍 / 格），並加 16 ms 影格合併防抖，低倍縮放不再跳變過大，連續轉動也不再卡頓。直接轉動 Auto Loop 旋鈕仍調整 Loop 大小，並自動開啟 `LinkBeatJumpLoopSize`，讓 Beat Jump 大小跟隨聯動；修復 JP07 開啟 `swap_loop_order` 時 `beatJumpEnabled` 的判定；
+- **Auto Loop 旋鈕聯動與節拍跳躍互換修復（#135）**：直接轉動 Auto Loop 旋鈕調整 Loop 大小，並自動開啟 `LinkBeatJumpLoopSize` 讓節拍跳躍（Beat Jump）大小跟隨聯動；修復 JP07 開啟 `互換循環 / 節拍跳躍`（`swap_loop_order`）時 `beatJumpEnabled` 的判定；
 - **OmniSource 歌單隔離（#105）**：開啟 OmniSource（跨源搜尋）後，搜尋列仍可同時檢索各串流與全部隨身碟曲庫，但各串流自己的歌單頁不再混入 `[USB: ...]` 項目與其他平台的歌單；
 - **SoundCloud 按讚歌單回退（#150）**：使用者 OAuth `refresh_token` 過期、SoundCloud 回傳 `HTTP 400` 時，自動回退到 App Token 與公開個人頁介面，繼續載入 `Liked Tracks & Sets`；
 - **Spotify Connect 區域網路探索（#150）**：內建 Avahi `_spotify-connect._tcp` mDNS 廣播，`stream-sync` 另帶純 Go 的 `_spotify-connect._tcp.local.` mDNS 廣播器（有線 `eth0` + 無線 `wlan0` 雙網卡也能被發現），並使用標準 768-bit Diffie-Hellman 公鑰，手機 Spotify App 可在區域網路中直接發現 `EngineX OS`；同時修復 OAuth 登入後曲目下載回傳 `410` 的問題；
@@ -85,7 +86,10 @@
 - **PRIME 4 等一體機連 CDJ-3000 波形（新功能，待實機驗證）**：在 PRIME 4 等一體機上將混音台通道切至線路輸入（Line In）後，Pro DJ Link 連接的 CDJ-3000 波形會顯示在該通道上（依 CDJ 播放機編號從小到大依序對應 Line In 通道從小到大）；SC5000 / SC6000 獨立播放機行為不變；
 - **開機與關機畫面全螢幕鋪滿（#175）**：開啟介面縮放（UI Scale，非 100% 如 75%）時，開機啟動畫面與關機遮罩現補齊全螢幕錨定，於所有縮放比例下皆完整鋪滿螢幕，消除黑邊（涵蓋 SC LIVE 4 等全系機型）；
 - **影子軌細波形顯示修復**：暫停狀態下剛載入的影子軌不再出現空白（解決切細波形時的渲染時序問題）；細波形切片尚未下載完成時，滾動波形泳道不再將整首歌的概覽圖拉伸擠入小波形，而是維持乾淨的拍線與指標顯示，就緒後平滑渲染；
-- **Mod 安裝保留可執行權限（#170）**：Web 主控台安裝 Mod 壓縮包（`.tar.gz`）時，保留 tar 包中檔案的可執行權限位（保留 `0111`，安全過濾 setuid/setgid/sticky 位），自帶二進位可執行檔（ELF）或輔助程式的 Mod 安裝後可正常啟動執行。
+- **Mod 安裝保留可執行權限（#170）**：Web 主控台安裝 Mod 壓縮包（`.tar.gz`）時，保留 tar 包中檔案的可執行權限位（保留 `0111`，安全過濾 setuid/setgid/sticky 位），自帶二進位可執行檔（ELF）或輔助程式的 Mod 安裝後可正常啟動執行；
+- **SC5000 / SC6000 開啟四軌後保持原廠播放機行為與圖層顏色（#49）**：在獨立播放機（`SC5000 / SC5000M / SC6000 / SC6000M`）上開啟 `控制中心 → 版面 → 四軌波形顯示`（`4-Deck Waveform`）後，完整保持原廠播放機行為——各軌顏色依 `設定 → 裝置 → 碟機編號 #`（`Player #`）與 `圖層（Layer A / B）` 自動映射 `個人偏好 → 顯示 → 碟機顏色`（保留 `Layer A / B` 雙層選色盤），於曲庫按 `Browse` 瀏覽旋鈕直接載入至本機目前圖層（`Layer A` 或 `Layer B`），並恢復 `設定 → 裝置 → 碟機編號 #`（`Player #`）、`個人偏好 → 播放 → 啟用雙層播放`（`Enable for Dual Deck`，即 `Layer B` 開關）、遠端碟機選擇、`Engine Connect` 與 `觸控效果 (Touch FX)` 的 `Mute` 靜音按鈕；
+- **`全部 CDJ 模式` 與 CDJ 回退時影子軌頭部對齊原廠樣式（#49）**：當 `控制中心 → 版面 → ENGINEX 視圖預設 → 影子軌模式`（`Shadow Deck Mode`）設為 `全部 CDJ 模式`（`All CDJ Mode`），或在 `自動`（`Auto`）模式下遇到無法複製音訊的 CDJ 曲目回退至顯示模式（以及一體機 `Line In` 通道顯示 CDJ 波形）時，影子軌頭部改用原廠樣式：專輯封面（`顯示專輯封面`）、滾動歌名與歌手（`隱藏歌名/歌手`）、剩餘 / 已播時間（點擊可切換）、跟隨原廠顯示設定的調性與調性色及鎖調 `Key Lock` 圖示（先鋒稱 `Master Tempo`）、開啟 `同步`（`Sync`，先鋒稱 `Beat Sync`）時變綠的大號 `BPM`、`變速範圍`（`Pitch Range`，先鋒稱 `Tempo Range`）與變速百分比（`pitch`）、軟接管箭頭 `▲▼`、`主控 (LEAD)` 指示（先鋒稱 `MASTER`）、`循環 (Loop)` 與 `節拍跳躍 (Beat Jump)`、`熱標拍數倒數`（`Hot Cue Countdown`）以及依原廠 `曲目結束提醒`（`Track End Warning`）設定時間觸發的曲末紅閃；
+- **通用 USB MIDI 控制器映射器 Mod（`midi-controller-mapper`，#137，待實機驗證）**：將外部 USB MIDI 控制器（首發內建 **Pioneer CDJ-400** `PC MODE` 預設，支援自訂 JSON 預設）直接映射至四軌模式下的內部 `Deck 3` 或 `Deck 4`，無須切換硬體 Layer。未啟用時橋接完全停止（零背景輪詢）；啟用後 helper 以最低排程優先級 `os.nice(19)` 按需 60 Hz 同步（5.3.0 沙箱自測橋接延遲 `p50 ≈ 1.6 ms`），支援 CDJ-400 連續速度轉盤積分（`Bn 10`，`64=停止`）、帶螢幕 `▲` / `▼`（`SpeedOffsetUp` / `SpeedOffsetDown` / `SpeedNeutral`）指示的變速推桿軟接管，以及 USB 熱拔插 / MIDI 風暴自動停用保護（註：CDJ-400 標準 USB MIDI 模式不接收外部 Note/CC LED 回傳，狀態與 `▲▼` 指示直接顯示於播放機螢幕上）。
 
 ### 8. 5.3.0.3 新功能
 - **Tailscale / Headscale 遠端存取（#130）**：Web 控制台的 `遠端存取（Tailscale / Headscale）` 卡片按需下載精簡版 Tailscale 用戶端（約 4.3 MB，下載後校驗 SHA-256），以登入連結或一次性 Auth key 登入，只把你勾選的服務（SSH / SFTP、Web 控制台）開放給你自己的 tailnet。不需要公網 IP，也不用改路由器，自架 Headscale 伺服器同樣可用。預設關閉。播放機核心沒有 TUN 裝置，所以以使用者空間模式執行。已用 Headscale 端對端測通；實機播放時的 CPU 與記憶體占用尚未實測；

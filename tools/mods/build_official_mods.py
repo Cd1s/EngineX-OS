@@ -21,14 +21,15 @@ import tarfile
 ROOT = Path(__file__).resolve().parents[2]
 DEST = ROOT / "docs/mods"
 SRC = DEST / "src"
-DATE = "2026-11-08"
+DATE = "2026-11-10"
+LEGACY_COMMENT_DATE = "2026-11-08"
 
 
 def tri(s, t, e):
     return dict(s=s, t=t, e=e)
 
 
-def comment(author, body, number, fragment="", date=DATE):
+def comment(author, body, number, fragment="", date=LEGACY_COMMENT_DATE):
     return dict(author=author, body=body, date=date, issueNumber=number,
                 url=f"https://github.com/Cd1s/EngineX-OS/issues/{number}{fragment}")
 
@@ -68,6 +69,13 @@ MODS = [
          description=tri("记录并暂停下载、deemix、stems、广播后台服务，退出时只恢复之前运行的服务。保留 Engine、音频、Rekordbox 桥和 Pro DJ Link；不修改音频调度，不承诺未经测量的 100% 算力或绝对稳定性。显式启用且可恢复，不永久 mask 服务。", "記錄並暫停下載、deemix、stems、廣播背景服務，退出時僅恢復原先執行中的服務。保留 Engine、音訊、Rekordbox 橋與 Pro DJ Link；不修改音訊排程，不承諾未經量測的 100% 算力或絕對穩定性。明確啟用且可還原，不永久 mask 服務。", "Records and pauses optional download, deemix, stems and broadcasting services, restoring only those previously running. Preserves Engine, audio, Rekordbox bridge and Pro DJ Link. Does not change audio scheduling or promise an unmeasured 100% CPU budget or absolute stability. Explicit, reversible activation; no permanent service masks."),
          initialComments=[comment("u/krimsamp (quoted in issue #136)", "Can we have a stripped down version", 136)],
          ),
+    dict(id="midi-controller-mapper", version="1.0.0", category="midi", issueNumber=137,
+         author="EngineX Official", tags=["MIDI", "CDJ-400", "4-Deck", "Jog", "Soft Takeover"],
+         name=tri("通用 MIDI 控制器映射器", "通用 MIDI 控制器映射器", "Generic MIDI Controller Mapper"),
+         summary=tri("将外部 USB MIDI 控制器（首发 Pioneer CDJ-400）映射到内部 Deck 3/4。", "將外部 USB MIDI 控制器（首發 Pioneer CDJ-400）映射至內部 Deck 3/4。", "Map external USB MIDI controllers (Pioneer CDJ-400 first) to internal Deck 3/4."),
+         description=tri("低优先级 (nice 19) ALSA Sequencer helper 与按需 60 Hz QML 桥接（未启用时零轮询），将外部 USB MIDI 控制器直接映射到四轨模式下的内部 Deck 3/4，无需切换硬件 Layer。含 CDJ-400 连续速度转盘积分器 (64=停止)、带 ▲▼ 指示的 Pitch 软接管、热拔插与 MIDI 风暴自动停用保护。CDJ-400 标准 USB MIDI 模式不接收外部 Note/CC LED 回传，状态与 ▲▼ 指示显示在屏幕上。需实机验证。", "低優先級 (nice 19) ALSA Sequencer helper 與按需 60 Hz QML 橋接（未啟用時零輪詢），將外部 USB MIDI 控制器直接映射至四軌模式下的內部 Deck 3/4，無須切換硬體 Layer。含 CDJ-400 連續速度轉盤積分器 (64=停止)、帶 ▲▼ 指示的 Pitch 軟接管、熱拔插與 MIDI 風暴自動停用保護。CDJ-400 標準 USB MIDI 模式不接收外部 Note/CC LED 回傳，狀態與 ▲▼ 指示顯示於螢幕上。須實機驗證。", "Low-priority (nice 19) ALSA Sequencer helper and on-demand 60 Hz QML bridge (zero polling when disabled) mapping external USB MIDI controllers directly to internal Deck 3/4 in 4-deck mode without switching hardware layers. Includes CDJ-400 continuous velocity jog time-integration (64=stop), tempo slider soft takeover with ▲▼ indicators, and hot-unplug/storm auto-disable. CDJ-400 in standard USB MIDI mode does not accept external MIDI Note/CC LED feedback; status and ▲▼ indicators are shown on screen. Hardware validation pending."),
+         initialComments=[comment("Djpd66", "connect a USB MIDI controller (Pioneer CDJ-400) to control Deck 3/4", 137, "", "2026-11-10")],
+         ),
 ]
 
 
@@ -91,6 +99,10 @@ def package_files(mod):
         files["runtime.py"] = (SRC / "runtime.py").read_bytes()
         files["feature.py"] = (SRC / mid / "feature.py").read_bytes()
         files["start.sh"] = (SRC / "start.sh").read_bytes().replace(b"@MOD_ID@", mid.encode())
+    presets_dir = SRC / mid / "presets"
+    if presets_dir.is_dir():
+        for preset in sorted(presets_dir.glob("*.json")):
+            files[f"presets/{preset.name}"] = preset.read_bytes()
     return files
 
 

@@ -31,7 +31,7 @@ static int main_base(struct dl_phdr_info *info, size_t n, void *arg) {
 }
 typedef void (*event_fn)(void *, const void *);
 typedef void (*effect_fn)(void *, float *const *, int, unsigned);
-struct owner { void *self, *effect, *mix, *parameter, *change, *collection; };
+struct owner { void *self, *effect, *mix, *parameter, *rate, *change, *collection; };
 
 static void *carrier(void *owner) {
     void *col = *(void **)((char *)owner + 0x28);
@@ -69,11 +69,12 @@ static int owners(struct owner out[2]) {
         if (pread64(fd, w, sizeof w, (off64_t)(uintptr_t)p) != sizeof w) continue;
         for (unsigned u = 0; u < 2; ++u) if (w[3] == (uintptr_t)out[u].self) {
             if (w[0] == base + 0x2b411ac && w[4] == base + 0xe942c4) out[u].parameter = p;
+            if (w[4] == base + 0xe94320 && !w[5]) out[u].rate = p;
             if (w[0] == base + 0x2b41184 && w[4] == base + 0xe8f36c) out[u].change = p;
         }
     }
     close(fd);
-    return found == 2 && out[0].parameter && out[1].parameter && out[0].change && out[1].change;
+    return found == 2 && out[0].parameter && out[1].parameter && out[0].rate && out[1].rate && out[0].change && out[1].change;
 }
 static void named_event(unsigned char *e) {
     const char *name = "Flanger"; unsigned length = 7;
@@ -87,6 +88,10 @@ static void parameter(struct owner *o, float value) {
     unsigned char e[36] = {0}; named_event(e); memcpy(e + 32, &value, 4);
     ((event_fn)(base + 0xe6a140))(o->parameter, e);
 }
+static void rate(struct owner *o, unsigned index) {
+    unsigned char e[40] = {0}; named_event(e); memcpy(e + 36, &index, 4);
+    ((event_fn)(base + 0xe6a114))(o->rate, e);
+}
 static int command(unsigned unit, unsigned mode, unsigned *a, unsigned *b) {
     FILE *f = fopen("/data/sc5000-custom/ui/fx-selector.request", "r");
     unsigned u, m; unsigned long long seq, expires;
@@ -99,8 +104,8 @@ static int command(unsigned unit, unsigned mode, unsigned *a, unsigned *b) {
     if (f) fclose(f);
     return n == 7 && ae == expires && au == u && am == m && as == seq && aa == *a && ab == *b;
 }
-static double render(struct owner *o, float wet, float param, int *ok) {
-    mix(o, wet); parameter(o, param);
+static double render(struct owner *o, float wet, float param, unsigned index, int *ok) {
+    mix(o, wet); parameter(o, param); rate(o, index);
     double energy = 0;
     for (unsigned block = 0; block < 750; ++block) {
         float l[128], r[128], dry[128];
@@ -137,14 +142,16 @@ static void *run(void *unused) {
          * as tested by this offline driver. */
         unsigned char change[32] = {0}; named_event(change);
         ((event_fn)(base + 0xe6a198))(o[u].change, change);
+        rate(&o[u], 4); /* Native Rate can precede the owner-binding handshake. */
         float fa, fb; memcpy(&fa, &a, 4); memcpy(&fb, &b, 4);
         mix(&o[u], fa); mix(&o[u], fb);
-        double ea = render(&o[u], 0.7f, 0.15f, &ok);
-        double eb = render(&o[u], 0.7f, 0.85f, &ok);
-        render(&o[u], 0, 0.5f, &ok);
-        if (fabs(ea - eb) < 0.001 || ea <= 0 || eb <= 0) ok = 0;
-        if (u) render(&o[0], 0, 0.5f, &ok); /* unit 2 changes preserve unit 1's literal bypass */
-        fprintf(stderr, "FXNATIVE unit=%u finite+param+wet0|%s\n", u + 1, ok ? "PASS" : "FAIL");
+        double ea = render(&o[u], 0.7f, 0.15f, 1, &ok);
+        double eb = render(&o[u], 0.7f, 0.15f, 9, &ok);
+        double ec = render(&o[u], 0.7f, 0.85f, 9, &ok);
+        render(&o[u], 0, 0.5f, 5, &ok);
+        if (fabs(ea - eb) < 0.001 || fabs(eb - ec) < 0.001 || ea <= 0 || eb <= 0 || ec <= 0) ok = 0;
+        if (u) render(&o[0], 0, 0.5f, 5, &ok); /* unit 2 changes preserve unit 1's literal bypass */
+        fprintf(stderr, "FXNATIVE unit=%u finite+time+param+wet0|%s\n", u + 1, ok ? "PASS" : "FAIL");
         marker(u ? "/tmp/fx-native-stage2" : "/tmp/fx-native-stage1");
     }
     unsigned a, b; int released = 0;

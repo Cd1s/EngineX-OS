@@ -8,7 +8,7 @@
   const CACHE_MS = 10 * 60 * 1000; // 未登录 GitHub API 每小时 60 次，列表与评论缓存 10 分钟
   const MAX_PKG = 50 * 1024 * 1024, MAX_KEEP = 1536 * 1024; // 上传上限；超过 1.5 MB 的包不存 localStorage
   const ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/; // 与 pkg/mods.idPattern 相同
-  const CATS = ["all", "official", "network", "lighting", "audio", "ui", "community"];
+  const CATS = ["all", "official", "network", "lighting", "audio", "midi", "ui", "community"];
 
   const L = (s, t, e) => ({ s, t, e });
   const ALL16 = L("全部 16 款（一代 armhf / 二代 armhf / AZ04 arm64）", "全部 16 款（一代 armhf / 二代 armhf / AZ04 arm64）", "All 16 models (gen-1 armhf / gen-2 armhf / AZ04 arm64)");
@@ -35,13 +35,18 @@
     { id: "minimal-club-mode", name: "Minimal Club Mode", version: "1.0.0", author: "EngineX OS", category: "ui", issues: [136],
       description: L("俱乐部演出纯净模式：隐藏演出时用不到的菜单与提示，只留波形、曲库和关键控制。", "俱樂部演出純淨模式：隱藏演出時用不到的選單與提示，只留波形、曲庫與關鍵控制。", "Club performance mode: hides menus and prompts you do not need on stage, leaving waveforms, the library and key controls."),
       models: ALL16, packages: [pkg("minimal-club-mode", "1.0.0")] },
+    { id: "midi-controller-mapper", name: "Generic MIDI Controller Mapper", version: "1.0.0", author: "EngineX OS", category: "midi", issues: [137],
+      description: L("外部 USB MIDI 控制器映射器（首发支持 Pioneer CDJ-400）：低优先级 (nice 19) ALSA Sequencer helper 与 60 Hz QML 桥接，将外部控制器直接映射到四轨模式下的内部 Deck 3/4，含连续速度转盘积分器 (64=停止)、带 ▲▼ 指示的 Pitch 软接管及热拔插自动停用保护。",
+        "外部 USB MIDI 控制器映射器（首發支援 Pioneer CDJ-400）：低優先級 (nice 19) ALSA Sequencer helper 與 60 Hz QML 橋接，將外部控制器直接映射至四軌模式下的內部 Deck 3/4，含連續速度轉盤積分器 (64=停止)、帶 ▲▼ 指示的 Pitch 軟接管及熱拔插自動停用保護。",
+        "External USB MIDI controller mapper (Pioneer CDJ-400 first): low-priority (nice 19) ALSA Sequencer helper and 60 Hz QML bridge mapping external controllers directly to internal Deck 3/4 in 4-deck mode, with continuous velocity jog time-integration (64=stop), tempo soft takeover with ▲▼ indicators, and hot-unplug auto-disable."),
+      models: ALL16, packages: [pkg("midi-controller-mapper", "1.0.0")] },
   ].map((m) => ({ ...m, official: true }));
 
   const UI = {
     s: { title: "Mod 社区", lead: "开源 Mod 的下载、上传与评价。所有包都公开源码，碟机安装前会再校验一次。", upload: "+ 上传开源 Mod",
       archT: "两层架构", arch1T: "内置于系统", arch1: "原厂能力（含原厂 Engine Lighting 解锁）、流媒体、Stems、DSP 防护直接装在 EngineX OS 里，不需要额外安装。",
       arch2T: "开源 Mod 按需安装", arch2: "Tailscale 远程访问、专业多域 DMX 控灯台等大型插件做成 Mod，需要时再装；未启用时 0 内存占用。",
-      cats: { all: "全部", official: "官方", network: "网络与远程", lighting: "舞台灯光", audio: "音频与采样", ui: "界面与转盘", community: "社区上传", other: "其它" },
+      cats: { all: "全部", official: "官方", network: "网络与远程", lighting: "舞台灯光", audio: "音频与采样", midi: "MIDI 控制器", ui: "界面与转盘", community: "社区上传", other: "其它" },
       search: "搜索 Mod…", sort: { hot: "最热", rating: "最高评分", new: "最新上传" }, none: "没有匹配的 Mod", loading: "正在加载社区 Mod…", ghFail: "GitHub 暂时无法访问，只显示官方与本机 Mod",
       official: "官方", community: "社区", local: "本机预览", by: "作者", ver: "版本", models: "支持机型", sha: "SHA-256", files: "包内文件", hw: "实机验证", dl: "下载", dlPkg: "下载 .tar.gz", noPkg: "作者还没上传包，去 Issue 查看",
       install: "安装方式", inst1: "碟机与电脑在同一网络时，打开 `http://<碟机 IP>:8080` → **Mods**，把 `.tar.gz` 拖进去上传，启用后立即生效。", inst2: "或者把 `.tar.gz` 解压到 U 盘根目录的 `/mods/` 下（得到 `/mods/<id>/mod.json`），插上碟机即用。",
@@ -55,7 +60,7 @@
     t: { title: "Mod 社群", lead: "開源 Mod 的下載、上傳與評價。所有套件都公開原始碼，碟機安裝前會再校驗一次。", upload: "+ 上傳開源 Mod",
       archT: "兩層架構", arch1T: "內建於系統", arch1: "原廠能力（含原廠 Engine Lighting 解鎖）、串流、Stems、DSP 防護直接裝在 EngineX OS 裡，不需要額外安裝。",
       arch2T: "開源 Mod 按需安裝", arch2: "Tailscale 遠端存取、專業多域 DMX 控燈台等大型外掛做成 Mod，需要時再裝；未啟用時 0 記憶體占用。",
-      cats: { all: "全部", official: "官方", network: "網路與遠端", lighting: "舞台燈光", audio: "音訊與取樣", ui: "介面與轉盤", community: "社群上傳", other: "其他" },
+      cats: { all: "全部", official: "官方", network: "網路與遠端", lighting: "舞台燈光", audio: "音訊與取樣", midi: "MIDI 控制器", ui: "介面與轉盤", community: "社群上傳", other: "其他" },
       search: "搜尋 Mod…", sort: { hot: "最熱門", rating: "最高評分", new: "最新上傳" }, none: "沒有符合的 Mod", loading: "正在載入社群 Mod…", ghFail: "GitHub 暫時無法存取，只顯示官方與本機 Mod",
       official: "官方", community: "社群", local: "本機預覽", by: "作者", ver: "版本", models: "支援機型", sha: "SHA-256", files: "套件內檔案", hw: "實機驗證", dl: "下載", dlPkg: "下載 .tar.gz", noPkg: "作者尚未上傳套件，請到 Issue 查看",
       install: "安裝方式", inst1: "碟機與電腦在同一網路時，開啟 `http://<碟機 IP>:8080` → **Mods**，把 `.tar.gz` 拖進去上傳，啟用後立即生效。", inst2: "或者把 `.tar.gz` 解壓到隨身碟根目錄的 `/mods/` 下（得到 `/mods/<id>/mod.json`），插上碟機即用。",
@@ -69,7 +74,7 @@
     e: { title: "Mod Hub", lead: "Download, publish and review open-source mods. Every package ships its source and is validated again on the deck before install.", upload: "+ Upload Mod",
       archT: "Two layers", arch1T: "Built into the system", arch1: "Stock features (including the unlocked stock Engine Lighting), streaming, Stems and DSP guards ship inside EngineX OS with nothing extra to install.",
       arch2T: "Open-source mods on demand", arch2: "Large add-ons such as Tailscale remote access and the multi-universe DMX console are mods you install when you need them; disabled mods use 0 memory.",
-      cats: { all: "All", official: "Official", network: "Network · Tailscale", lighting: "DMX & Lighting", audio: "Audio & Sampler", ui: "UI & Jog", community: "Community", other: "Other" },
+      cats: { all: "All", official: "Official", network: "Network · Tailscale", lighting: "DMX & Lighting", audio: "Audio & Sampler", midi: "MIDI Controllers", ui: "UI & Jog", community: "Community", other: "Other" },
       search: "Search mods…", sort: { hot: "Most popular", rating: "Top rated", new: "Newest" }, none: "No mods match", loading: "Loading community mods…", ghFail: "GitHub is unreachable right now; showing official and local mods only",
       official: "Official", community: "Community", local: "Local preview", by: "Author", ver: "Version", models: "Models", sha: "SHA-256", files: "Files", hw: "Hardware validation", dl: "Download", dlPkg: "Download .tar.gz", noPkg: "No package attached yet; see the Issue",
       install: "How to install", inst1: "With the deck on your network, open `http://<deck IP>:8080` → **Mods** and drop the `.tar.gz` in; it takes effect once enabled.", inst2: "Or extract the `.tar.gz` into `/mods/` on a USB stick (giving `/mods/<id>/mod.json`) and plug it into the deck.",
@@ -212,6 +217,7 @@
 
   function catOf(c, official) {
     const s = String(c || "").toLowerCase();
+    if (/midi/.test(s)) return "midi";
     if (/net|remote|tailscale|vpn/.test(s)) return "network";
     if (/light|dmx/.test(s)) return "lighting";
     if (/audio|sampl|fx|sound/.test(s)) return "audio";
