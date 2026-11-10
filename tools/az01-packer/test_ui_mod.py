@@ -1025,6 +1025,7 @@ class UiModBuildTest(unittest.TestCase):
                     for action in ("JumpBack", "JumpForward", "BeatJumpIndex"):
                         self.assertIn("/Track/BeatJump/" + action, jump)
                     self.assertNotIn("anchors.margins: -6", jump)
+                    self.assertIn("rightPadding: 14", jump)
                     self.assertIn("EngineXEmbedded.Bpm {", performance)
                     self.assertIn("s.currentBpm ||", performance)
                     self.assertNotIn(".toFixed(1)", bp.SHADOW_LAYER)
