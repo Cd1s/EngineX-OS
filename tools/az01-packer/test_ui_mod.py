@@ -391,6 +391,105 @@ assert.strictEqual(vfx.enabled, false);
             'v + "TouchFx/TouchFxViewLowerBar.qml"',
         ):
             self.assertIn(target, SRC)
+        if shutil.which("node"):
+            old_root = bp.ROOT
+            try:
+                bp.ROOT = "Skins/Embedded/"
+                edits_map = bp.edits(False)
+                deck_color_patch = edits_map[bp.ROOT + "Views/MainView/DeckInfo/DeckColor/DeckColor.qml"][0][1]
+                dual_layer_patch = edits_map[bp.ROOT + "Views/ControlCenter/Tabs/Preferences/Entries/private/DualLayerColorSelect.qml"][0][1]
+                engine_conn_patch = edits_map[bp.ROOT + "Views/EngineConnect/EngineConnect.qml"][1][1]
+            finally:
+                bp.ROOT = old_root
+            js = re.sub(r"readonly property \w+ (\w+):", r"const \1 =", deck_color_patch)
+            dual_js = re.sub(r"readonly property var scLayerTr:", "const scLayerTr = (() =>", dual_layer_patch)
+            dual_js = dual_js.replace("        visible:", "        )();\n        const visible =")
+            conn_js = re.sub(r"readonly property var scLayerTr:", "const scLayerTr = (() =>", engine_conn_patch)
+            conn_js = conn_js.replace("                        deckLayer:", "                        )();\n                        const deckLayer =")
+            script = r"""
+const assert = require('assert');
+const WHITE = {r: 1, g: 1, b: 1, a: 1, hex: '#ffffff'};
+const BLACK = {r: 0, g: 0, b: 0, a: 1, hex: '#000000'};
+const TRANSPARENT = {r: 0, g: 0, b: 0, a: 0, hex: 'transparent'};
+const CONSOLE_BLUE = {r: 0.14, g: 0.27, b: 0.40, a: 1, hex: '#234567'};
+const LAYER_PINK = {r: 0.67, g: 0.80, b: 0.94, a: 1, hex: '#abcdef'};
+const OWN_GREEN = {r: 0, g: 0.9, b: 0.4, a: 1, hex: '#00e666'};
+function evalDeckColor(board, isPlayerBoard, role, deckIndex, ownColor, prefs) {
+    const Config = {device: {name: board}};
+    const root = {scIsPlayerBoard: isPlayerBoard, scFourDeckRole: role};
+    const deckView = {deckData: {deckColor: ownColor}};
+    const Planck = {
+        getProperty(p) {
+            if (p === '/Client/Preferences/Player') return {translator: {string: '1'}};
+            const k = p.replace('/Client/Preferences/Profile/Application/PlayerColor', '');
+            return prefs[k] ? {translator: {color: prefs[k]}} : null;
+        }
+    };
+""" + js + r"""
+    return playerColor;
+}
+const prefs = {'1': CONSOLE_BLUE, '1A': LAYER_PINK, '3': BLACK};
+for (const blank of [WHITE, BLACK, TRANSPARENT]) {
+    // 1. All-in-one consoles (2-deck or 4-deck) must never take PlayerColor1A/1B:
+    for (const board of ['JC11', 'JP11', 'JC16', 'NH08', 'JP21', 'JP24']) {
+        for (const role of ['', '12', '13']) {
+            assert.strictEqual(evalDeckColor(board, false, role, 1, blank, prefs), CONSOLE_BLUE);
+            assert.strictEqual(evalDeckColor(board, false, role, 3, blank, prefs), CONSOLE_BLUE);
+        }
+    }
+    // 2. Player board with 4-deck off (2-deck mode) must also keep pre-48109aa fallback:
+    assert.strictEqual(evalDeckColor('JP07', true, '', 1, blank, prefs), CONSOLE_BLUE);
+    assert.strictEqual(evalDeckColor('JP07', true, '', 3, blank, prefs), CONSOLE_BLUE);
+    // 3. Player board with 4-deck enabled uses Layer preference:
+    assert.strictEqual(evalDeckColor('JP07', true, '13', 1, blank, prefs), LAYER_PINK);
+}
+// Non-blank own color is preserved everywhere:
+assert.strictEqual(evalDeckColor('JC11', false, '12', 1, OWN_GREEN, prefs), OWN_GREEN);
+assert.strictEqual(evalDeckColor('JP07', true, '13', 1, OWN_GREEN, prefs), OWN_GREEN);
+
+function evalLayerFallback(role, propMap, index = 0, deckLayerIndex = 0) {
+    const root = {scFourDeckRole: role};
+    const enabled = true;
+    const asked = [];
+    const Planck = { getProperty(p) { asked.push(p); return p in propMap ? propMap[p] : null; } };
+    let visible, deckLayer;
+    { """ + dual_js.replace("const visible =", "visible =") + r""" }
+    { """ + conn_js.replace("const deckLayer =", "deckLayer =") + r""" }
+    return {visible, deckLayer, asked};
+}
+// Branch 1: primary property is null, fallback exists on Left (role 13) or Right (role 24):
+let r1 = evalLayerFallback('13', {'/GUI/Decks/Deck/Layer': null, '/GUI/Decks/DeckLeft/Layer': {translator: {numEntries: 2, entries: ['1', '3']}}}, 1, 1);
+assert.strictEqual(r1.visible, true);
+assert.strictEqual(r1.deckLayer, 'B');
+assert.ok(r1.asked.includes('/GUI/Decks/DeckLeft/Layer'));
+let r2 = evalLayerFallback('24', {'/GUI/Decks/Deck/Layer': null, '/GUI/Decks/DeckRight/Layer': {translator: {numEntries: 2, entries: ['2', '4']}}}, 0, 0);
+assert.strictEqual(r2.visible, true);
+assert.strictEqual(r2.deckLayer, 'A');
+assert.ok(r2.asked.includes('/GUI/Decks/DeckRight/Layer'));
+// Branch 2: primary property exists but translator is null:
+let r3 = evalLayerFallback('13', {'/GUI/Decks/Deck/Layer': {translator: null}, '/GUI/Decks/DeckLeft/Layer': {translator: {numEntries: 2, entries: ['1', '3']}}}, 0, 0);
+assert.strictEqual(r3.visible, true);
+assert.strictEqual(r3.deckLayer, 'A');
+// Branch 3: both primary and fallback are null / translator null (or 2-deck with missing property):
+for (const map of [
+    {},
+    {'/GUI/Decks/Deck/Layer': null, '/GUI/Decks/DeckLeft/Layer': null},
+    {'/GUI/Decks/Deck/Layer': {translator: null}, '/GUI/Decks/DeckLeft/Layer': {translator: null}},
+]) {
+    let rNone = evalLayerFallback('13', map, 0, 0);
+    assert.strictEqual(rNone.visible, false);
+    assert.strictEqual(rNone.deckLayer, '-');
+    let rTwoDeck = evalLayerFallback('', map, 0, 0);
+    assert.strictEqual(rTwoDeck.visible, false);
+    assert.strictEqual(rTwoDeck.deckLayer, '-');
+}
+// Stock 2-deck path with primary translator present:
+let rStock = evalLayerFallback('', {'/GUI/Decks/Deck/Layer': {translator: {numEntries: 2, entries: ['A', 'B']}}}, 1, 1);
+assert.strictEqual(rStock.visible, true);
+assert.strictEqual(rStock.deckLayer, 'B');
+"""
+            res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
 
     def test_display_only_shadow_header_matches_stock_deck_header(self):
         layer = bp.SHADOW_LAYER
@@ -412,6 +511,82 @@ assert.strictEqual(vfx.enabled, false);
             'Planck.getKeyIndex(rawKey)',
         ):
             self.assertIn(item, layer)
+        if shutil.which("node"):
+            title_expr = re.search(r'objectName: "Deck_Title".*?text: ([^\n]+)', layer, re.S).group(1)
+            artist_vis_expr = re.search(r'objectName: "Deck_Artist".*?visible: ([^\n]+)', layer, re.S).group(1)
+            artist_expr = re.search(r'objectName: "Deck_Artist".*?text: ([^\n]+)', layer, re.S).group(1)
+            tdt_patch = bp.legacy_qml_fixes()[bp.ROOT + "Items/Utils/TrackDisplayText.qml"]
+            tdt_display_expr = tdt_patch[1][1].split("display: ", 1)[1].strip()
+            js = f"""
+const assert = require('assert');
+function evalHeaderText(loaded, hideTitleArtist, showFilename, rawTitle, fileName, artistName, hasBottomRow = false) {{
+    const canShowFilename = true;
+    const shouldShowFilename = showFilename;
+    const title = rawTitle, filename = fileName;
+    const display = {tdt_display_expr};
+    const scTitleDisplay = {{ hideTitleArtist, shouldShowFilename, display }};
+    const scHeader = {{ loaded, rawTitle, fileName, artistName, hasBottomRow, deckLabel: 'Deck 2' }};
+    return {{
+        titleText: {title_expr},
+        artistVisible: {artist_vis_expr},
+        artistText: {artist_expr},
+    }};
+}}
+// 4 combinations of Hide Title/Artist (off/on) x Display File Name (off/on):
+assert.deepStrictEqual(evalHeaderText(true, false, false, 'My Song', '01_my_song.flac', 'DJ Test'),
+    {{ titleText: 'My Song', artistVisible: true, artistText: 'DJ Test' }});
+assert.deepStrictEqual(evalHeaderText(true, false, true, 'My Song', '01_my_song.flac', 'DJ Test'),
+    {{ titleText: '01_my_song.flac', artistVisible: false, artistText: '' }});
+assert.deepStrictEqual(evalHeaderText(true, true, false, 'My Song', '01_my_song.flac', 'DJ Test'),
+    {{ titleText: '', artistVisible: false, artistText: '' }});
+assert.deepStrictEqual(evalHeaderText(true, true, true, 'My Song', '01_my_song.flac', 'DJ Test'),
+    {{ titleText: '', artistVisible: false, artistText: '' }});
+// Unloaded fallback:
+assert.deepStrictEqual(evalHeaderText(false, true, true, '', '', ''),
+    {{ titleText: 'Deck 2', artistVisible: true, artistText: 'No Track Loaded' }});
+"""
+            res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            # F4 & F5: blocker MouseArea stays above scHeaderLoader, forwards only time-slot presses to timeView.flip(),
+            # and isLead respects explicit lead=false when master=true.
+            self.assertLess(layer.index("id: scHeaderLoader"), layer.index('objectName: "EngineX_ShadowBlocker"'))
+            flip_fn = re.search(r"function tryFlipTime\(x, y\) \{.*?\n                \}", layer, re.S).group(0)
+            lead_expr = re.search(r"readonly property bool isLead: ([^\n]+)", layer).group(1)
+            f4_js = f"""
+const assert = require('assert');
+let flips = 0;
+const timeView = {{ flip() {{ flips++ }} }};
+const scTimeSlot = {{ visible: true, x: 323, y: 3, width: 58, height: 27 }};
+let loaded = true;
+const scDisplay = {{
+    performance: false,
+    graphical: false,
+    sample: null,
+    mapToItem(item, x, y) {{ return {{ x: x - item.x, y: y - item.y }} }}
+}};
+{flip_fn}
+// Press inside time slot (including +12px vertical touch padding): flips once
+assert.strictEqual(tryFlipTime(350, 16), true);
+assert.strictEqual(flips, 1);
+assert.strictEqual(tryFlipTime(350, -5), true);
+assert.strictEqual(flips, 2);
+// Press outside time slot (e.g., on AutoLoop at x=80, y=45 or BeatJump at x=140, y=45): blocked, does not flip
+assert.strictEqual(tryFlipTime(80, 45), false);
+assert.strictEqual(tryFlipTime(140, 45), false);
+assert.strictEqual(flips, 2);
+// Unloaded deck: does not flip
+loaded = false;
+assert.strictEqual(tryFlipTime(350, 16), false);
+assert.strictEqual(flips, 2);
+// F5: lead=false with master=true must evaluate isLead to false; missing lead falls back to master
+function evalIsLead(sample) {{ scDisplay.sample = sample; return {lead_expr}; }}
+assert.strictEqual(evalIsLead({{ master: true, lead: false }}), false);
+assert.strictEqual(evalIsLead({{ master: true, lead: true }}), true);
+assert.strictEqual(evalIsLead({{ master: true }}), true);
+assert.strictEqual(evalIsLead({{ master: false }}), false);
+"""
+            res_f4 = subprocess.run(["node", "-e", f4_js], capture_output=True, text=True)
+            self.assertEqual(res_f4.returncode, 0, res_f4.stderr)
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
 class ShadowDisplayTest(unittest.TestCase):
