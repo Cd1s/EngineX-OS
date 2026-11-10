@@ -14,12 +14,15 @@ and beatgrid. Converting a beat fraction to an `ms` label would not provide it.
 
 ## Stock evidence and search boundary
 
-Static inspection used the stock 5.3.0 JP07 Engine and its extracted QML:
+Static inspection used the supplied stock 5.3.0 Engine and its extracted QML:
 
 - Engine BuildID: `be537e908121e76164ddbbf9730d472ba0b8f9d4`.
 - Engine SHA-256: `51dd0cc10bcfae46edf4e94e889facd0a510785f1cbcb91d6cacb604b5283b1a`.
 - The executable was read, not started. Findings about this binary do not
   establish behaviour across all 16 models.
+- The laboratory directory does not establish the source hardware model.
+  This review identifies the executable by its fingerprints, without a model
+  attribution.
 
 Paths below are relative to the extracted QML root:
 
@@ -45,6 +48,9 @@ String absence does not exclude an unnamed or unexposed implementation.
 The earlier report's decision to avoid a speculative audio change is reasonable,
 but several supporting claims exceed the evidence:
 
+- The earlier report's JP07 attribution was not established by the laboratory
+  path. The binary fingerprints identify the inspected material without
+  assuming its source model.
 - No-BPM fallback values of 60/120 BPM and lack of fractional-delay interpolation
   were not established by this review. They must remain unknown.
 - The continuous knob route exists. A single stepped-encoder assumption and a
