@@ -2026,7 +2026,49 @@ SERVICES_MAIN = """
 	property real scMidiLastApplyMs: 0
 	property real scMidiSendAt: 0
 	property bool scMidiActive: false
+	property int scMidiFailCount: 0
 	property var scMidiXhr: null
+	function scMidiInitBridge() {
+		if (!Math.scMidiBridge || !Math.scMidiBridge.installed) {
+			Math.scMidiBridge = {
+				installed: true,
+				enabled: false,
+				connected: false,
+				helperOnline: false,
+				lastError: "",
+				wake: function() {
+					root.scMidiFailCount = 0
+					Math.scMidiBridge.enabled = true
+					scMidiPollTimer.interval = 16
+					scMidiPollTimer.restart()
+				},
+				stop: function() {
+					root.scMidiActive = false
+					Math.scMidiBridge.enabled = false
+					scMidiPollTimer.stop()
+				}
+			}
+		}
+		const probe = new XMLHttpRequest()
+		probe.onreadystatechange = function() {
+			if (probe.readyState !== 4) return
+			if (probe.status === 200) {
+				try {
+					const st = JSON.parse(probe.responseText)
+					Math.scMidiBridge.helperOnline = true
+					Math.scMidiBridge.connected = !!st.connected
+					Math.scMidiBridge.enabled = !!st.enabled
+					Math.scMidiBridge.lastError = st.error ? String(st.error) : ""
+					if (st.targetDeck) root.scMidiTargetDeck = st.targetDeck
+					if (st.enabled) Math.scMidiBridge.wake()
+					return
+				} catch (e) {}
+			}
+			Math.scMidiBridge.helperOnline = false
+		}
+		probe.open("GET", "http://127.0.0.1:17838/status")
+		probe.send("")
+	}
 	function scMidiReadDeck(d) {
 		const b = "/Engine/Deck" + d + "/"
 		const tLoaded = root.scTr(b + "Track/SongLoaded"), tPlay = root.scTr(b + "PlayState")
@@ -2053,17 +2095,16 @@ SERVICES_MAIN = """
 			if (t) {
 				if (v.jogMoveTicks > 0) t.incValue(v.jogMoveTicks, 0.0, 0.0, false, true, 0.0)
 				else t.decValue(-v.jogMoveTicks, 0.0, 0.0, false, true, 0.0)
-			}
+			} else if (v.setPosNorm !== undefined) { const tp = root.scTr(b + "Track/SetSongPosition"); if (tp) tp.value = v.setPosNorm }
 		} else if (v.setPosNorm !== undefined) { const t = root.scTr(b + "Track/SetSongPosition"); if (t) t.value = v.setPosNorm }
 		if (v.nudgeFwd !== undefined) { const t = root.scTr(b + "Track/NudgeForward"); if (t) t.value = v.nudgeFwd }
 		if (v.nudgeBwd !== undefined) { const t = root.scTr(b + "Track/NudgeBackward"); if (t) t.value = v.nudgeBwd }
-		if (v.speed !== undefined) { const t = root.scTr(b + "Speed"); if (t) t.setValue(v.speed, 1, 0) }
+		if (v.speed !== undefined) { const t = root.scTr(b + "Speed"); if (t) t.setValue(v.speed, 7000 + d + 2, 0) }
 		if (v.speedOffsetUp !== undefined) { const t = root.scTr(b + "SpeedOffsetUp"); if (t) t.state = !!v.speedOffsetUp }
 		if (v.speedOffsetDown !== undefined) { const t = root.scTr(b + "SpeedOffsetDown"); if (t) t.state = !!v.speedOffsetDown }
 		if (v.speedNeutral !== undefined) { const t = root.scTr(b + "SpeedNeutral"); if (t) t.state = !!v.speedNeutral }
 		if (v.play !== undefined) { const t = root.scTr(b + "Play"); if (t) t.state = !!v.play }
 		if (v.cueHold !== undefined) { const t = root.scTr(b + "Track/CueAction"); if (t) t.value = v.cueHold ? 1.0 : 0.0 }
-		if (v.vinylMode !== undefined) { const t = root.scTr(b + "ExternalScratchWheelScratchEnable"); if (t) t.state = !!v.vinylMode }
 		const acts = r.actions || []
 		for (let i = 0; i < acts.length; i++) {
 			const a = acts[i].action
@@ -2091,7 +2132,7 @@ SERVICES_MAIN = """
 	}
 	Timer {
 		id: scMidiPollTimer
-		interval: 1500; running: true; repeat: true
+		interval: 16; running: false; repeat: true
 		onTriggered: {
 			if (!root.scUiLoaded) return
 			let x = root.scMidiXhr
@@ -2103,20 +2144,36 @@ SERVICES_MAIN = """
 					if (x.status === 200) {
 						try {
 							const r = JSON.parse(x.responseText)
+							root.scMidiFailCount = 0
 							root.scMidiActive = !!r.enabled
-							Math.scMidiBridgeActive = !!r.enabled
+							if (Math.scMidiBridge) {
+								Math.scMidiBridge.helperOnline = true
+								Math.scMidiBridge.enabled = !!r.enabled
+							}
 							if (r.targetDeck) root.scMidiTargetDeck = r.targetDeck
-							if (r.enabled && r.seq) {
+							if (r.seq) {
 								root.scMidiApplyOps(r)
 								root.scMidiLastApplyMs = Math.max(0.5, (Date.now() - root.scMidiSendAt) * 0.5)
 							}
-							scMidiPollTimer.interval = r.enabled ? 16 : 1000
+							if (!r.enabled) {
+								scMidiPollTimer.stop()
+							} else {
+								scMidiPollTimer.interval = 16
+							}
 							return
 						} catch (e) {}
 					}
 					root.scMidiActive = false
-					Math.scMidiBridgeActive = false
-					scMidiPollTimer.interval = 2000
+					root.scMidiFailCount = (root.scMidiFailCount || 0) + 1
+					if (Math.scMidiBridge) {
+						Math.scMidiBridge.helperOnline = false
+						Math.scMidiBridge.lastError = "MIDI Mapper helper unreachable"
+					}
+					if (root.scMidiFailCount >= 3) {
+						scMidiPollTimer.stop()
+					} else {
+						scMidiPollTimer.interval = 2000
+					}
 				}
 			}
 			if (x.readyState > 0 && x.readyState < 4) return
@@ -2251,7 +2308,9 @@ SERVICES_MAIN = """
 			const lbj = root.scTr("/Client/Preferences/Profile/Application/LinkBeatJumpLoopSize")
 			if (lbj && !lbj.state) lbj.state = true
 		}
+		const wasUiLoaded = scUiLoaded
 		scUiLoaded = true
+		if (!wasUiLoaded) scMidiInitBridge()
 		scProbeCueClocks()
 	}
 	function scSameItems(a, b) {

@@ -1316,6 +1316,30 @@ for(const board of ['JP20','JP22','JP24','JC11S','JP21X']) {
             self.assertIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer\n\t\t\tanchors.fill: parent\n", main_text)
             self.assertNotIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer\n\t\t\twidth: planckQuickView.defaultScreenSize.width", main_text)
 
+            # #137: verify MIDI bridge timer is stopped by default and scMidiApplyOps drives mock translators
+            self.assertIn("id: scMidiPollTimer\n\t\tinterval: 16; running: false; repeat: true", main_text)
+            midi_fn = re.search(r"(function scMidiApplyOps\(r\) \{.*?\n\t\})", main_text, re.S)
+            self.assertIsNotNone(midi_fn)
+            midi_script = (
+                "const assert=require('node:assert/strict');\n"
+                "let scMidiLastAckSeq=0; const trMap={};\n"
+                "const root={scTr(p){if(!trMap[p])trMap[p]={state:false,value:0,index:0,entries:[0,1,2,3],incCalls:[],decCalls:[],setCalls:[],incValue(...a){this.incCalls.push(a)},decValue(...a){this.decCalls.push(a)},setValue(...a){this.setCalls.push(a)}};return trMap[p];}};\n"
+                + midi_fn.group(1) + "\n"
+                "scMidiApplyOps({seq:7,targetDeck:3,values:{vinylMode:true,jogTouch:true,jogMoveTicks:9600,nudgeFwd:0.4,nudgeBwd:0,speed:0.62,speedOffsetUp:true,speedOffsetDown:false,speedNeutral:false,cueHold:true},actions:[{action:'toggle_play'},{action:'cycle_tempo_range'},{action:'load_selected_track'},{action:'browse_scroll',steps:2}]});\n"
+                "assert.equal(scMidiLastAckSeq,7);\n"
+                "assert.equal(trMap['/Engine/Deck3/ExternalScratchWheelScratchEnable'].state,true);\n"
+                "assert.equal(trMap['/Engine/Deck3/ExternalScratchWheelTouch'].value,1.0);\n"
+                "assert.equal(trMap['/Engine/Deck3/ExternalScratchWheelMove'].incCalls[0][0],9600);\n"
+                "assert.deepEqual(trMap['/Engine/Deck3/Speed'].setCalls[0],[0.62,7005,0]);\n"
+                "assert.equal(trMap['/Engine/Deck3/SpeedOffsetUp'].state,true);\n"
+                "assert.equal(trMap['/Engine/Deck3/Track/CueAction'].value,1.0);\n"
+                "assert.equal(trMap['/Engine/Deck3/Play'].state,true);\n"
+                "assert.equal(trMap['/Engine/Deck3/SpeedRange'].index,1);\n"
+                "assert.equal(trMap['/Client/Librarian/LoadToDeck3'].state,true);\n"
+            )
+            midi_run = subprocess.run(["node", "-e", midi_script], capture_output=True, text=True)
+            self.assertEqual(midi_run.returncode, 0, midi_run.stderr)
+
 
 class ShadowNudgeTest(unittest.TestCase):
     """#5/#7: a jog nudge and the peer's clock drift move the shadow lane without jumps."""
