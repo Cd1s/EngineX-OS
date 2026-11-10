@@ -2099,7 +2099,7 @@ SERVICES_MAIN = """
 		} else if (v.setPosNorm !== undefined) { const t = root.scTr(b + "Track/SetSongPosition"); if (t) t.value = v.setPosNorm }
 		if (v.nudgeFwd !== undefined) { const t = root.scTr(b + "Track/NudgeForward"); if (t) t.value = v.nudgeFwd }
 		if (v.nudgeBwd !== undefined) { const t = root.scTr(b + "Track/NudgeBackward"); if (t) t.value = v.nudgeBwd }
-		if (v.speed !== undefined) { const t = root.scTr(b + "Speed"); if (t) t.setValue(v.speed, 7000 + d + 2, 0) }
+		if (v.speed !== undefined) { const t = root.scTr(b + "Speed"); if (t) t.setValue(v.speed, 1, 0) }
 		if (v.speedOffsetUp !== undefined) { const t = root.scTr(b + "SpeedOffsetUp"); if (t) t.state = !!v.speedOffsetUp }
 		if (v.speedOffsetDown !== undefined) { const t = root.scTr(b + "SpeedOffsetDown"); if (t) t.state = !!v.speedOffsetDown }
 		if (v.speedNeutral !== undefined) { const t = root.scTr(b + "SpeedNeutral"); if (t) t.state = !!v.speedNeutral }
