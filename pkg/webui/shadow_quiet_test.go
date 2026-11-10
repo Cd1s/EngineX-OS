@@ -537,4 +537,3 @@ func TestShadowDisplayCarriesKeyNameAndLead(t *testing.T) {
 		t.Fatalf("shadow reply: %v %+v", err, v.Decks)
 	}
 }
-
