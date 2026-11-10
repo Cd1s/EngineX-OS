@@ -1951,7 +1951,7 @@ SERVICES_MAIN = """
 		return p && p.translator ? p.translator.color : "transparent"
 	}
 	readonly property bool scPlayerColorsSynced: {
-		if (!Config.device.isPlayer && root.scIsPlayerBoard) {
+		if (!Config.device.isPlayer && root.scIsPlayerBoard && root.scFourDeckRole !== "") {
 			const pp = Planck.getProperty("/Client/Preferences/Player")
 			const pn = (pp && pp.translator && parseInt(pp.translator.string)) || 1
 			const role = root.scFourDeckRole || (pn === 2 ? "24" : "13")
@@ -5425,6 +5425,7 @@ def edits(dev: bool):
         scaled[v + "MainView/DeckInfo/DeckColor/DeckColor.qml"] = [(
             '    readonly property color playerColor: deckView ? deckView.deckData.deckColor : "transparent"\n',
             '    readonly property color scOwnColor: deckView ? deckView.deckData.deckColor : "transparent"\n'
+            '    readonly property bool scPlayerFourDeck: typeof root !== "undefined" && !!root && !!root.scFourDeckRole && (!!root.scIsPlayerBoard || ["JP07", "JP08", "JP13", "JP14"].indexOf(Config.device.name) >= 0)\n'
             '    function scPref(n) { const p = Planck.getProperty("/Client/Preferences/Profile/Application/PlayerColor" + n); return p && p.translator ? p.translator.color : "transparent" }\n'
             '    function scLayerPref(n) {\n'
             '        const pp = Planck.getProperty("/Client/Preferences/Player")\n'
@@ -5438,7 +5439,7 @@ def edits(dev: bool):
             '    }\n'
             '    function scBlank(c) { return c.a === 0 || (c.r === c.g && c.g === c.b && (c.r === 0 || c.r === 1)) }\n'
             '    readonly property color playerColor: !deckView || !scBlank(scOwnColor) ? scOwnColor\n'
-            '        : !scBlank(scLayerPref(deckIndex)) ? scLayerPref(deckIndex)\n'
+            '        : scPlayerFourDeck && !scBlank(scLayerPref(deckIndex)) ? scLayerPref(deckIndex)\n'
             '        : !scBlank(scPref(deckIndex)) ? scPref(deckIndex)\n'
             '        : deckIndex > 2 && !scBlank(scPref(deckIndex - 2)) ? scPref(deckIndex - 2) : scOwnColor\n')]
         # #49: 4-deck mode clears Config.device.isPlayer in C++ so Engine builds the 4-deck
