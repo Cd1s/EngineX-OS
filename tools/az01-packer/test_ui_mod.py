@@ -1217,6 +1217,30 @@ for(let i=0;i<20;i++){now+=500;scGcCheck();}
 assert.equal(runs,7);
 """)
 
+    def test_gc_check_initializes_and_collects_on_two_deck_hardware(self):
+        self.js(r"""
+let runs = 0, plays = [false, false], cmds = [false, false], lengths = [0, 0];
+globalThis.gc = () => runs++;
+// SC5000 / SC6000: only Decks 1 and 2 exist in Engine's property tree; Decks 3 and 4 return null.
+globalThis.scTr = path => {
+    const d = +path[12] - 1;
+    if (d >= 2) return null;
+    return path.endsWith('/PlayState') ? {get state(){ return plays[d]; }}
+         : path.endsWith('/Play') ? {get state(){ return cmds[d]; }}
+         : {get unnormalized(){ return lengths[d]; }};
+};
+scGcProps = null;
+scGcState = {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0};
+assert.equal(scGcProps, null);
+now += 500; scGcCheck();
+assert.notEqual(scGcProps, null, "scGcProps must initialize on 2-deck hardware");
+assert.equal(runs, 0); // 1.5 s settle has not elapsed yet
+now += 1500; scGcCheck();
+assert.equal(runs, 1, "startup gc() must run after 1.5s quiet settle on 2-deck hardware");
+for (let i = 0; i < 20; i++) { now += 500; scGcCheck(); }
+assert.equal(runs, 1, "startup gc() runs only once, not repeatedly");
+""")
+
 
 class UiModBuildTest(unittest.TestCase):
     def test_jc11_jc11s_packs_contain_shadow_display(self):
