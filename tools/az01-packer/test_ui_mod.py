@@ -372,6 +372,26 @@ assert.strictEqual(vfx.enabled, false);
         self.assertIn("if (m <= 3) {\n        target = 1;", hook)
         self.assertIn("if (target < 2) target = 2;", hook)
 
+    def test_four_deck_player_board_preserves_stock_player_ui(self):
+        # #49: 4-deck mode clears Config.device.isPlayer in C++ so Engine builds the 4-deck
+        # layout, while QML restores stock player behaviour on JP07/JP08/JP13/JP14 boards
+        # without altering all-in-one consoles (JC11, JP11, JP21, etc.).
+        self.assertIn("readonly property bool scPlayerColorsSynced:", bp.SERVICES_MAIN)
+        self.assertIn("function scPlayerColorOf(tag)", bp.SERVICES_MAIN)
+        for target in (
+            'ROOT + "main.qml"',
+            'prefs + "Entries/DeckColorSelect.qml"',
+            'prefs + "Entries/private/DualLayerColorSelect.qml"',
+            'ROOT + "StateNodes/States/PerformanceViewState.qml"',
+            'ROOT + "StateNodes/States/PerformanceViewStreamingState.qml"',
+            'ROOT + "StateNodes/ControlFocusNode.qml"',
+            'prefs + "Entries/PlayerNumber.qml"',
+            'prefs + "Entries/ShowLayerB.qml"',
+            'v + "EngineConnect/EngineConnect.qml"',
+            'v + "TouchFx/TouchFxViewLowerBar.qml"',
+        ):
+            self.assertIn(target, SRC)
+
 @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
 class ShadowDisplayTest(unittest.TestCase):
     """Run the actual QML JS functions with a fake clock and an Engine that rejects all access."""
