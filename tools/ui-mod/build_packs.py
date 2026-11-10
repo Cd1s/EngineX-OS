@@ -552,6 +552,7 @@ SERVICES_MAIN = """
 				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master, sync: !!e.sync,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
+				jumps: Number(e.jumps) || 0,
 				meta: old && old.key === key ? old.meta : null,
 				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
 			if (!next) next = Object.assign({}, scShadowDisplay)
@@ -1013,11 +1014,20 @@ SERVICES_MAIN = """
 			// position is up to ~35 ms of track time behind (high pitch). With the speed
 			// known, the upper envelope of position - speed * time is the newest block:
 			// post that line (noise of a few ms), decaying 2 ms/s to follow pitch rounding.
-			const speed = 1 + s.pitch / 100
-			if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.jumps === s.jumps && isFinite(p.env))
-				s.env = Math.max(s.posMs - speed * now, p.env - 0.002 * (now - p.at))
-			else s.env = s.posMs - speed * now
+			const speed = 1 + s.pitch / 100, raw = s.posMs - speed * now
+			if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.jumps === s.jumps && isFinite(p.env)) {
+				s.avg = p.avg + (raw - p.avg) * 0.2
+				s.env = Math.max(raw, p.env - 0.002 * (now - p.at))
+				// A jog brake: the positions run ~17 ms behind the line on average (30 at
+				// most); 42 ms means the deck is slower than its pitch, and the line follows.
+				if (s.env - s.avg > 42) s.env = Math.max(raw, s.avg + 17)
+			} else s.env = s.avg = raw
 			s.lineMs = s.ps ? s.env + speed * now : s.posMs
+			// A jog nudge moves the line off the one the peer carries on: post it at once,
+			// not at the next heartbeat (25 Hz for 2 s, so the peer follows the nudge).
+			const sent = scShadowSent[n]
+			if (s.ps && sent && sent.playing && sent.deck === d && sent.net === s.net && sent.pitch === s.pitch && sent.jumps === s.jumps &&
+				Math.abs(s.lineMs - sent.positionMs - (now - sent.at) * speed) > 15) edge = true
 			scShadowPrev[d] = s
 			scShadowSampleSpare[d] = p || {}
 		}
@@ -3106,6 +3116,20 @@ SHADOW_LAYER = r"""
         property real scrollFrom: 0
         property real scrollAt: 0
         property real scrollSpeed: 0
+        property string scrollKey: ""
+        property int scrollJumps: 0
+        // A slipped line (the peer's clock, a jog nudge) glides back on scGlide, also
+        // on the render thread: ms of track on top of the scroll, which keeps running.
+        property real glideFrom: 0
+        property real glideTo: 0
+        property real glideAt: 0
+        property real glideMs: 1
+        function glideRun(from, to, ms) {
+            glideFrom = from; glideTo = to; glideMs = ms
+            glide.stop()
+            glide.from = -from / span * width; glide.to = -to / span * width; glide.duration = ms
+            glide.start()
+        }
         function contentX(ms) { return -(ms - span * playhead) / span * width }
         // Read from meta itself in the refresh functions: inside onMetaChanged the
         // bindings below (duration, totalPixels, ...) still hold the previous meta,
@@ -3125,14 +3149,26 @@ SHADOW_LAYER = r"""
             const end = metaDuration(meta)
             const speed = live && visible && s && s.playing && !st && pos < end ? Math.max(0, 1 + s.pitch / 100) : 0
             if (speed > 0) {
-                // Keep the running scroll unless it is off by more than 12 ms of track.
-                if (scroll.running && speed === scrollSpeed && Math.abs(scrollFrom + (now - scrollAt) * speed - pos) <= 12) return
+                if (scroll.running && speed === scrollSpeed) {
+                    // Keep the running scroll unless it is off by more than 12 ms of track.
+                    const off = pos - (scrollFrom + (now - scrollAt) * speed + glideTo)
+                    if (Math.abs(off) <= 12) return
+                    // Same track, no jump: catch up over the time since the last slip (0.1-0.5 s),
+                    // so a run of slips moves at the speed they describe. Only a jump jumps.
+                    if (Math.abs(off) <= 300 && s.key === scrollKey && s.jumps === scrollJumps) {
+                        const since = now - glideAt
+                        glideAt = now
+                        glideRun(glideFrom + (glideTo - glideFrom) * Math.min(1, since / glideMs), glideTo + off, Math.max(100, Math.min(500, since)))
+                        return
+                    }
+                }
                 scroll.stop()
-                scrollFrom = pos; scrollAt = now; scrollSpeed = speed
+                scrollFrom = pos; scrollAt = now; scrollSpeed = speed; scrollKey = s.key; scrollJumps = s.jumps
                 scroll.from = contentX(pos)
                 scroll.to = contentX(end)
                 scroll.duration = Math.max(1, Math.round((end - pos) / speed))
                 scroll.start()
+                if (glideTo !== 0 || glide.running) glideRun(0, 0, 1)
             } else {
                 const x = contentX(pos)
                 if (scrollSpeed > 0 || scroll.running) {
@@ -3144,6 +3180,7 @@ SHADOW_LAYER = r"""
                     scroll.start()
                 } else if (scMoving.x !== x) scMoving.x = x
                 scrollSpeed = 0
+                if (glideTo !== 0 || glide.running) glideRun(0, 0, 1)
             }
         }
         // Forget the running line (zoom, size, visibility); refreshPosition restarts or settles.
@@ -3299,9 +3336,11 @@ SHADOW_LAYER = r"""
             width: scDisplay.width; height: scDisplay.height
             // x: written by refreshPosition / XAnimator only (track coordinates inside).
             XAnimator { id: scroll; target: scMoving; easing.type: Easing.Linear }
+            XAnimator { id: glide; target: scGlide; easing.type: Easing.Linear }
             // Hidden stock lanes (most instances) build none of this: fewer objects and
             // bindings for every V4 collection to mark.
             Loader {
+                id: scGlide // x: written by the glide XAnimator only
                 active: scDisplay.live && scDisplay.graphical
                 width: scDisplay.width; height: scDisplay.height
                 sourceComponent: Component { Item {
