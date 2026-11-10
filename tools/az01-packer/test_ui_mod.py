@@ -2824,6 +2824,106 @@ assert.deepEqual(scShadowHead[2], {master: undefined, sync: false, title: 'A', a
             self.assertIn(anchor, SRC)
 
 
+class PatchTableIntegrityTest(unittest.TestCase):
+    def test_patch_dict_rejects_duplicate_key_overwrites_during_pack_build(self):
+        import ast
+
+        d = bp.PatchDict({"a.qml": [("old1", "new1")]})
+        d["a.qml"] += [("old2", "new2")]
+        d["a.qml"].extend([("old3", "new3")])
+        self.assertEqual(len(d["a.qml"]), 3)
+        with self.assertRaises(ValueError):
+            d["a.qml"] = [("other", "replacement")]
+
+        tree = ast.parse(SRC)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                seen = set()
+                for k in node.keys:
+                    if k is None:
+                        continue
+                    expr = ast.unparse(k)
+                    self.assertNotIn(expr, seen, f"duplicate dict literal key at line {k.lineno}: {expr}")
+                    seen.add(expr)
+
+        old_root = getattr(bp, "ROOT", None)
+        try:
+            for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+                bp.ROOT = root
+                self.assertIsInstance(bp.legacy_qml_fixes(), bp.PatchDict)
+                for dev in (False, True):
+                    out = bp.edits(dev)
+                    self.assertIsInstance(out, bp.PatchDict)
+        finally:
+            bp.ROOT = old_root
+
+        for ver in ("5.0.4", "5.3.0"):
+            qrc = LAB / ver / "qrc"
+            if not qrc.is_dir():
+                continue
+            with tempfile.TemporaryDirectory(prefix=f"ui-dedup-{ver}-") as tmp:
+                for extra in ([], ["--dev"]):
+                    res = subprocess.run(
+                        ["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(Path(tmp) / "packs"), *extra],
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_artist_song_retains_both_shadow_head_and_hide_title_artist_patches(self):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on the build host)")
+        with tempfile.TemporaryDirectory(prefix="ui-artistsong-") as tmp:
+            out = Path(tmp) / "packs"
+            res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
+                                 capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            for lang in ("en", "zh-Hans", "zh-Hant"):
+                qml = (out / lang / "Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/ArtistSong.qml").read_text()
+                for expected in (
+                    'readonly property var scHead: typeof root !== "undefined" && root && root.scShadowHeadOf ? root.scShadowHeadOf(deckIndex) : null',
+                    'readonly property string songTextString: deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title) || displayText.display) : deckLabel',
+                    'readonly property string artistTextString: deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title ? scHead.artist : artistName)) : "No Track Loaded"',
+                    'readonly property bool onlyFileName: view.onlyFileName && !(scHead && scHead.title)',
+                    'readonly property bool isStemmed: scHead && scHead.title ? scHead.stems : view.stemmed',
+                    'respectHideTitleArtist: true',
+                    'visible: artistSong.artistVisible && !artistSong.onlyFileName && !displayText.hideTitleArtist && artistSong.artistTextString.length > 0',
+                ):
+                    self.assertIn(expected, qml)
+
+        if shutil.which("node"):
+            ShadowDisplayTest.js(self, r"""
+let deckLoaded = true, deckLabel = 'Deck 2', artistName = 'Local Artist', view = {onlyFileName: false, stemmed: false};
+let displayText = {hideTitleArtist: false, display: 'Local Song'};
+let scHead = {title: 'Shadow Song', artist: 'Shadow Artist', stems: true};
+const songTextString = () => deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title) || displayText.display) : deckLabel;
+const artistTextString = () => deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title ? scHead.artist : artistName)) : "No Track Loaded";
+const onlyFileName = () => view.onlyFileName && !(scHead && scHead.title);
+const isStemmed = () => scHead && scHead.title ? scHead.stems : view.stemmed;
+
+assert.equal(songTextString(), 'Shadow Song');
+assert.equal(artistTextString(), 'Shadow Artist');
+assert.equal(onlyFileName(), false);
+assert.equal(isStemmed(), true);
+
+displayText.hideTitleArtist = true;
+displayText.display = '';
+assert.equal(songTextString(), '', 'shadow song title hidden when Hide Title/Artist is on');
+assert.equal(artistTextString(), '', 'shadow artist hidden when Hide Title/Artist is on');
+
+scHead = null;
+assert.equal(songTextString(), '', 'local song title hidden when Hide Title/Artist is on');
+assert.equal(artistTextString(), '', 'local artist hidden when Hide Title/Artist is on');
+
+displayText.hideTitleArtist = false;
+displayText.display = 'track_file.flac';
+view.onlyFileName = true;
+assert.equal(songTextString(), 'track_file.flac', 'Display File Name preserved on local deck');
+assert.equal(artistTextString(), 'Local Artist');
+assert.equal(onlyFileName(), true);
+""")
+
+
 if __name__ == "__main__":
     unittest.main()
 
