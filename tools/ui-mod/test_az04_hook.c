@@ -203,10 +203,68 @@ static void test_offline_analyzer(const char *filename) {
     puts("AZ04 OfflineAnalyzer: process() prologue matches the .perf replay hook: PASS");
 }
 
+static void test_stems_processor_fallback(void) {
+    hook_test_engine = 1;
+    if (access("/usr/local/bin/stems-processor", X_OK) != 0) {
+        assert(!strcmp(stems_processor_path("/usr/local/bin/stems-processor"), "/usr/local/bin/stems-processor"));
+        struct statx stx;
+        if (access("/data/sc5000-custom/bundle/stems-processor", X_OK) != 0 &&
+            access("/data/sc5000-custom/bundle/bin/stems-processor", X_OK) != 0) {
+            assert(statx(AT_FDCWD, "/usr/local/bin/stems-processor", 0, 0xfffu, &stx) == -1);
+            assert(open("/usr/local/bin/stems-processor", O_RDONLY) == -1);
+        }
+        int created_bundle = system("mkdir -p /data/sc5000-custom/bundle 2>/dev/null") == 0;
+        if (created_bundle) {
+            const char *bundle_file = "/data/sc5000-custom/bundle/stems-processor";
+            if (access(bundle_file, F_OK) != 0) {
+                FILE *f = fopen(bundle_file, "w");
+                if (f) {
+                    fputs("#!/bin/sh\nexit 0\n", f);
+                    fclose(f);
+                    chmod(bundle_file, 0755);
+                    assert(!strcmp(stems_processor_path("/usr/local/bin/stems-processor"), bundle_file));
+                    assert(access("/usr/local/bin/stems-processor", X_OK) == 0);
+                    memset(&stx, 0, sizeof stx);
+                    assert(statx(AT_FDCWD, "/usr/local/bin/stems-processor", 0, 0xfffu, &stx) == 0);
+                    assert(S_ISREG(stx.stx_mode) && stx.stx_size > 0);
+                    int fd = open("/usr/local/bin/stems-processor", O_RDONLY);
+                    assert(fd >= 0);
+                    close(fd);
+                    unlink(bundle_file);
+                }
+            }
+            int created_bin = mkdir("/data/sc5000-custom/bundle/bin", 0755) == 0;
+            const char *bin_file = "/data/sc5000-custom/bundle/bin/stems-processor";
+            if (access(bin_file, F_OK) != 0) {
+                FILE *f = fopen(bin_file, "w");
+                if (f) {
+                    fputs("#!/bin/sh\nexit 0\n", f);
+                    fclose(f);
+                    chmod(bin_file, 0755);
+                    assert(!strcmp(stems_processor_path("/usr/local/bin/stems-processor"), bin_file));
+                    assert(access("/usr/local/bin/stems-processor", X_OK) == 0);
+                    memset(&stx, 0, sizeof stx);
+                    assert(statx(AT_FDCWD, "/usr/local/bin/stems-processor", 0, 0xfffu, &stx) == 0);
+                    assert(S_ISREG(stx.stx_mode) && stx.stx_size > 0);
+                    int fd = open("/usr/local/bin/stems-processor", O_RDONLY);
+                    assert(fd >= 0);
+                    close(fd);
+                    unlink(bin_file);
+                }
+            }
+            if (created_bin) rmdir("/data/sc5000-custom/bundle/bin");
+        }
+    }
+    assert(!strcmp(stems_processor_path("/bin/sh"), "/bin/sh"));
+    hook_test_engine = 0;
+    puts("AZ04 stems-processor fallback: redirects access/statx/open to /data/sc5000-custom/bundle/(bin/)stems-processor when absent: PASS");
+}
+
 int main(int argc, char **argv) {
     assert(sizeof engine_builds / sizeof *engine_builds == 1);
     test_resources();
     test_collision();
+    test_stems_processor_fallback();
     for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); }
     const char *oa = getenv("AZ04_OFFLINE_ANALYZER");
     if (oa) test_offline_analyzer(oa);
