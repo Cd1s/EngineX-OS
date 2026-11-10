@@ -284,9 +284,10 @@ class DataBundleTest(unittest.TestCase):
     def test_uninstall_keeps_packs_installed_by_someone_else(self):
         src = self.extract(self.build())
         dest = self.tmp / 'custom'
-        self.sh(src / 'install.sh', dest)
+        alsa = self.tmp / 'alsa'
+        self.sh(src / 'install.sh', dest, alsa_dest=alsa)
         (dest / 'ui/.pack-id').write_text('image\n')  # the image's prepare unit took over
-        self.sh(dest / 'bundle/uninstall.sh', dest)
+        self.sh(dest / 'bundle/uninstall.sh', dest, alsa_dest=alsa)
         self.assertTrue((dest / 'ui/packs/a/Main.qml').exists())
         self.assertFalse((dest / 'bundle').exists())
 
@@ -294,7 +295,7 @@ class DataBundleTest(unittest.TestCase):
         src = self.extract(self.build())
         (src / 'bin/sc5000-suite').write_bytes(b'\x7fELF tampered')
         dest = self.tmp / 'custom'
-        r = self.sh(src / 'install.sh', dest, check=False)
+        r = self.sh(src / 'install.sh', dest, alsa_dest=self.tmp / 'alsa', check=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('SHA256SUMS mismatch', r.stderr)
         self.assertFalse(dest.exists())
