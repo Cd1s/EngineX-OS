@@ -54,6 +54,7 @@ Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemi
 
 [Service]
 Environment="LD_PRELOAD=$lib_hook"
+Environment="QT_LOGGING_CONF=/data/logging.ini"
 EnvironmentFile=-/data/sc5000-custom/ui-scale.env
 EOF
 

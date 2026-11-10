@@ -85,6 +85,7 @@ type Server struct {
 	mux           *http.ServeMux
 	tidal         *tidalGateway
 	uiMu          sync.Mutex
+	logsMu        sync.Mutex
 	fxMu          sync.Mutex // transient FX commands never hold the settings lock
 	stemsMu       sync.Mutex // streaming-stems.json
 	prolinkExport *prolink.Exporter
@@ -178,6 +179,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /icons/{id}", s.serviceIcon)
 	s.mux.HandleFunc("POST /m/{provider}", s.phonePost)
 	s.mux.HandleFunc("GET /api/ui", s.uiStatus)
+	s.mux.HandleFunc("GET /api/logs", s.downloadLogs)
 	s.mux.HandleFunc("GET /api/update", s.update)
 	s.mux.HandleFunc("POST /api/ui", s.uiUpdate)
 	s.mux.HandleFunc("GET /api/console-qr", s.consoleQR)
