@@ -309,6 +309,36 @@ SERVICES_MAIN = """
 	readonly property bool scIsMixstream: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.audio.fx.hasNHFx !== undefined ? !!Config.audio.fx.hasNHFx : ["NH08", "NH08S", "NH10"].indexOf(scBoard) >= 0
 	readonly property bool scHasStemsEq: scHasMixer && (typeof Config !== "undefined" && Config && Config.audio ? !!Config.audio.hasStemsLevel : false)
 	readonly property bool scIsAZ04: ["JP24", "RMZ2"].indexOf(scBoard) >= 0
+	readonly property var scTransitionFxView: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views ? (PlanckGUI.views.transitionFx || null) : null
+	readonly property bool scHasStockTransitionTile: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.device
+		? (!!Config.audio.fx.hasTransitionFx && !Config.device.hasHardwareFaderFxButtons && !!scTransitionFxView)
+		: false
+	Connections {
+		target: root.scTransitionFxView
+		ignoreUnknownSignals: true
+		function onEnabledChanged() {
+			if (!root.scUiLoaded || !root.scHasMixer || !root.scTransitionFxView) return
+			const on = !!root.scTransitionFxView.enabled
+			if (on !== root.scUpfaderEcho) {
+				root.scUpfaderEcho = on
+				root.scCall("upfaderEcho=" + (on ? "1" : "0"))
+			}
+		}
+	}
+	function scSetTransitionFx(vfx, on, upfaderOnly) {
+		if (!vfx) return
+		if (!on) {
+			vfx.enabled = false
+			return
+		}
+		const opts = vfx.triggerSourceOptions
+		if (opts && opts.length > 0) {
+			const idx = upfaderOnly ? 1 : 2
+			const val = opts[idx] !== undefined ? opts[idx] : opts[opts.length - 1]
+			if (val !== undefined) vfx.setTriggerSource(String(val))
+		}
+		vfx.enabled = true
+	}
 	readonly property string scPackBuildTag: @BUILD_TAG@
 	property string scBuildTag: ""
 	function scAboutBuildTag() {
@@ -1992,7 +2022,12 @@ SERVICES_MAIN = """
 		if (!scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
 		scScope = v.scope
 		scBroadcastOn = !!v.broadcastEnabled
+		const prevUpfaderEcho = scUpfaderEcho
 		scUpfaderEcho = !!v.upfaderEcho
+		if (scHasMixer && scTransitionFxView && (!scUiLoaded || scUpfaderEcho !== prevUpfaderEcho)) {
+			if (!!scTransitionFxView.enabled !== scUpfaderEcho)
+				scTransitionFxView.enabled = scUpfaderEcho
+		}
 		if (typeof v === "string") scParseSettingsConf(v)
 		else if (v) {
 			if (v.cueCountdown !== undefined) scCueCountdown = !!v.cueCountdown
@@ -2894,7 +2929,7 @@ UPFADER_ECHO_TILE = """
 			Rectangle {
 				id: scUpfaderEchoTile
 				objectName: "ControlCenter_UpfaderEcho"
-				visible: root.scHasMixer
+				visible: root.scHasMixer && !root.scHasStockTransitionTile && !(typeof Config !== "undefined" && Config && Config.device && Config.device.hasHardwareFaderFxButtons)
 				width: 256
 				height: 104
 				radius: 16
@@ -2932,14 +2967,10 @@ UPFADER_ECHO_TILE = """
 								anchors.fill: parent
 								onClicked: {
 									const vfx = PlanckGUI.views.transitionFx
-									if (vfx) {
-										if (index === 0) vfx.enabled = false
-										else {
-											vfx.enabled = true
-											vfx.setTriggerSource(index === 2 ? 1 : 2)
-										}
-									}
-									root.scCall("upfaderEcho=" + (index === 0 ? "0" : "1"))
+									const on = index !== 0
+									root.scUpfaderEcho = on
+									root.scSetTransitionFx(vfx, on, index === 2)
+									root.scCall("upfaderEcho=" + (on ? "1" : "0"))
 								}
 							}
 						}
@@ -3856,13 +3887,12 @@ def edits(dev: bool):
 \t\t\t\tvisible: root.scHasMixer
 \t\t\t\treadonly property var vfx: PlanckGUI.views.transitionFx
 \t\t\t\tvalues: ["Off", "All Faders", "Upfader Only"]
-\t\t\t\tcurrentValue: !vfx || !vfx.enabled ? (root.scUpfaderEcho ? "Upfader Only" : "Off") : (vfx.triggerSource === 1 ? "Upfader Only" : "All Faders")
+\t\t\t\tcurrentValue: vfx ? (!vfx.enabled ? "Off" : (vfx.triggerSource === 1 ? "Upfader Only" : "All Faders")) : (root.scUpfaderEcho ? "Upfader Only" : "Off")
 \t\t\t\tonSelected: function(index) {
-\t\t\t\t\tif (vfx) {
-\t\t\t\t\t\tif (index === 0) vfx.enabled = false
-\t\t\t\t\t\telse { vfx.enabled = true; vfx.setTriggerSource(index === 2 ? 1 : 2) }
-\t\t\t\t\t}
-\t\t\t\t\troot.scCall("upfaderEcho=" + (index === 0 ? "0" : "1"))
+\t\t\t\t\tconst on = index !== 0
+\t\t\t\t\troot.scUpfaderEcho = on
+\t\t\t\t\troot.scSetTransitionFx(vfx, on, index === 2)
+\t\t\t\t\troot.scCall("upfaderEcho=" + (on ? "1" : "0"))
 \t\t\t\t}
 \t\t\t},
 \t\t\t""" + ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }")),
@@ -4316,21 +4346,16 @@ def edits(dev: bool):
             prefs + "Entries/MasterLimiter.qml": [
                 ("active: Config.ui.preferences.hasMasterLimiter\n",
                  "active: Config.ui.preferences.hasMasterLimiter || Config.audio.hasLimiter\n")],
-            # #104: ControlCenter_UpfaderEcho (UPFADER_ECHO_TILE) provides direct Off/All/Upfader
-            # selection on consoles, so hide stock TransitionFxEnable to avoid two Fader Echo tiles.
-            v + "ControlCenter/Tabs/ControlCenter/Entries/TransitionFxEnable.qml": [
-                ("active: Config.audio.fx.hasTransitionFx && !Config.device.hasHardwareFaderFxButtons && view\n",
-                 "active: false\n"),
-            ],
+            # Stock TransitionFxEnable stays untouched in Control Center (active when
+            # hasTransitionFx && !hasHardwareFaderFxButtons); UPFADER_ECHO_TILE hides itself there,
+            # while Settings -> Mixer keeps Off / All Faders / Upfader Only synced with it.
             v + "StatusBar/Buttons/TransitionFxButton.qml": [
                 ("    visible: Config.audio.fx.hasTransitionFx && transitionFx && !Config.ui.hasTransitionFxSelectionPopup\n",
                  '    visible: Config.audio.fx.hasTransitionFx && transitionFx && !Config.ui.hasTransitionFxSelectionPopup && (typeof root === "undefined" || !root || root.scHasMixer)\n'),
-                ('    checked: active\n    onClicked: transitionFx.enabled = !transitionFx.enabled',
-                 '    checked: active\n    onClicked: { if (!transitionFx.enabled) { transitionFx.setTriggerSource(2); transitionFx.enabled = true } else if (transitionFx.triggerSource === 2) { transitionFx.setTriggerSource(1) } else { transitionFx.enabled = false } }'),
             ],
             prefs + "Entries/TransitionFxSection.qml": [
                 ('        TransitionFxSelectEffect {\n            view: transitionFx.view\n        }',
-                 '        TransitionFxSelectEffect {\n            view: transitionFx.view\n        }\n        ListEntry {\n            text: "Trigger Source"\n            visible: typeof root !== "undefined" && root && root.scHasMixer\n            readonly property var vfx: transitionFx.view\n            values: ["Off", "All Faders", "Upfader Only"]\n            currentValue: !vfx || !vfx.enabled ? "Off" : (vfx.triggerSource === 1 ? "Upfader Only" : "All Faders")\n            onSelected: function(index) {\n                if (!vfx) return\n                if (index === 0) vfx.enabled = false\n                else { vfx.enabled = true; vfx.setTriggerSource(index === 2 ? 1 : 2) }\n            }\n        }'),
+                 '        TransitionFxSelectEffect {\n            view: transitionFx.view\n        }\n        ListEntry {\n            text: "Trigger Source"\n            visible: typeof root !== "undefined" && root && root.scHasMixer\n            readonly property var vfx: transitionFx.view\n            values: ["Off", "All Faders", "Upfader Only"]\n            currentValue: vfx ? (!vfx.enabled ? "Off" : (vfx.triggerSource === 1 ? "Upfader Only" : "All Faders")) : (root.scUpfaderEcho ? "Upfader Only" : "Off")\n            onSelected: function(index) {\n                const on = index !== 0\n                root.scUpfaderEcho = on\n                root.scSetTransitionFx(vfx, on, index === 2)\n                root.scCall("upfaderEcho=" + (on ? "1" : "0"))\n            }\n        }'),
             ],
         }.items():
             assert not isinstance(out.get(rel), str), rel

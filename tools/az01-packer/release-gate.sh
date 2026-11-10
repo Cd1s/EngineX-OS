@@ -208,9 +208,9 @@ SH
         check "new: Settings -> Services has the Live Stream entry (#50)" grep -aqF 'SCPROBE tile|ControlCenter_LiveStream|1|' "$log"
         check "new: Control Center has the waveform style tile (#45)" grep -aqF 'SCPROBE tile|ControlCenter_WaveformStyle|1|' "$log"
         if [ "$PRODUCT" = JP07 ] || [ "$PRODUCT" = JP08 ] || [ "$PRODUCT" = JP13 ] || [ "$PRODUCT" = JP14 ]; then
-            check "new: Control Center hides upfader echo tile on standalone player $PRODUCT (#52)" grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|0|' "$log"
+            check "new: Control Center hides Fader Echo tiles on standalone player $PRODUCT (#52)" bash -c "grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|0|' '$log' && grep -aqF 'SCPROBE tile|ControlCenter_StockFaderEcho|0|' '$log'"
         else
-            check "new: Control Center has the upfader echo tile on console $PRODUCT (#52)" grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|1|' "$log"
+            check "new: Control Center uses stock Fader Echo tile without duplicate on console $PRODUCT (#52)" bash -c "grep -aqF 'SCPROBE tile|ControlCenter_StockFaderEcho|1|' '$log' && grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|0|' '$log'"
         fi
         check "new: Control Center fills uiContainer at UI Scale 75 % (root.transformed, not defaultScreenSize)" grep -aq 'SCPROBE ccsize|75|[0-9x]*|[0-9x]*|1|' "$log"
         check "new: auto-analyze preference retained, automatic submission unavailable (#55)" grep -aqF 'SCPROBE analyze|boolean|false|' "$log"
