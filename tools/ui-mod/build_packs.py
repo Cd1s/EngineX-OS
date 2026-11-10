@@ -5487,7 +5487,15 @@ def edits(dev: bool):
         )]
         scaled[prefs + "Entries/private/DualLayerColorSelect.qml"] = [(
             '        visible: Planck.getProperty("/GUI/Decks/Deck/Layer").translator.numEntries === 2\n',
-            '        visible: (Planck.getProperty("/GUI/Decks/Deck/Layer").translator || Planck.getProperty("/GUI/Decks/DeckLeft/Layer").translator).numEntries === 2\n',
+            '        readonly property var scLayerTr: {\n'
+            '            const p = Planck.getProperty("/GUI/Decks/Deck/Layer")\n'
+            '            if (p && p.translator) return p.translator\n'
+            '            const role = typeof root !== "undefined" && root && root.scFourDeckRole ? root.scFourDeckRole : ""\n'
+            '            if (!role) return null\n'
+            '            const fb = Planck.getProperty(role === "24" || role === "2" ? "/GUI/Decks/DeckRight/Layer" : "/GUI/Decks/DeckLeft/Layer")\n'
+            '            return fb && fb.translator ? fb.translator : null\n'
+            '        }\n'
+            '        visible: !!scLayerTr && scLayerTr.numEntries === 2\n',
         )]
         scaled[ROOT + "StateNodes/States/PerformanceViewState.qml"] = [
             (
@@ -5552,9 +5560,16 @@ def edits(dev: bool):
                 '                        Planck.getProperty("/GUI/Decks/Deck/Layer").translator.numEntries - 1 >= index\n'
                 '                            ? Planck.getProperty("/GUI/Decks/Deck/Layer").translator.entries[deckLayerIndex]\n'
                 '                            : "-"\n',
-                '                        readonly property var scLayerTr: Planck.getProperty("/GUI/Decks/Deck/Layer").translator || Planck.getProperty("/GUI/Decks/DeckLeft/Layer").translator\n'
+                '                        readonly property var scLayerTr: {\n'
+                '                            const p = Planck.getProperty("/GUI/Decks/Deck/Layer")\n'
+                '                            if (p && p.translator) return p.translator\n'
+                '                            const role = typeof root !== "undefined" && root && root.scFourDeckRole ? root.scFourDeckRole : ""\n'
+                '                            if (!role) return null\n'
+                '                            const fb = Planck.getProperty(role === "24" || role === "2" ? "/GUI/Decks/DeckRight/Layer" : "/GUI/Decks/DeckLeft/Layer")\n'
+                '                            return fb && fb.translator ? fb.translator : null\n'
+                '                        }\n'
                 "                        deckLayer: enabled && scLayerTr && scLayerTr.numEntries - 1 >= index\n"
-                '                            ? (deckLayerIndex === 0 ? "A" : "B")\n'
+                '                            ? (typeof root !== "undefined" && root && root.scFourDeckRole ? (deckLayerIndex === 0 ? "A" : "B") : scLayerTr.entries[deckLayerIndex])\n'
                 '                            : "-"\n',
             ),
             (
