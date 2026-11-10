@@ -4,7 +4,7 @@
   "vendor": "Pioneer DJ",
   "model": "CDJ-400",
   "version": "1.0.0",
-  "description": "Pioneer CDJ-400 standard USB MIDI mode (PC MODE) preset for EngineX OS 4-deck internal Deck 3/4 control.",
+  "description": "Pioneer CDJ-400 standard USB MIDI mode (PC MODE) preset for EngineX OS 4-deck internal Deck 3/4 control (verified against Pioneer CDJ-400 manual DRB1452 p.20).",
   "match": {
     "alsaClientPatterns": [
       "CDJ-400",
@@ -27,8 +27,7 @@
     "centerValue": 64,
     "maxOffset": 63,
     "scratchSensitivitySecPerSec": 1.8,
-    "pitchBendMaxAmount": 0.65,
-    "pitchBendTimeoutMs": 120
+    "pitchBendMaxAmount": 0.65
   },
   "tempoSlider": {
     "cc": 29,
@@ -44,110 +43,110 @@
       "type": "note",
       "number": 0,
       "action": "toggle_play",
-      "label": "Play / Pause (9n 00)"
+      "label": "Play / Pause (Note 0 / 0x00)"
     },
     "cue": {
       "type": "note",
       "number": 1,
       "action": "hold_cue",
-      "label": "Cue (9n 01)"
+      "label": "Cue (Note 1 / 0x01)"
     },
     "searchFwd": {
       "type": "note",
       "number": 2,
       "action": "seek_forward",
-      "label": "Search >> (9n 02)"
+      "label": "Search >> (Note 2 / 0x02)"
     },
     "searchRev": {
       "type": "note",
       "number": 3,
       "action": "seek_backward",
-      "label": "Search << (9n 03)"
+      "label": "Search << (Note 3 / 0x03)"
     },
     "trackSearchNext": {
       "type": "note",
       "number": 4,
       "action": "track_next",
-      "label": "Track Search >>| (9n 04)"
+      "label": "Track Search >>| (Note 4 / 0x04)"
     },
     "trackSearchPrev": {
       "type": "note",
       "number": 5,
       "action": "track_prev",
-      "label": "Track Search |<< (9n 05)"
+      "label": "Track Search |<< (Note 5 / 0x05)"
     },
     "loopIn": {
       "type": "note",
       "number": 6,
       "action": "loop_in",
-      "label": "Loop In / Realtime Cue (9n 06)"
+      "label": "Loop In / Realtime Cue (Note 6 / 0x06)"
     },
     "loopOut": {
       "type": "note",
       "number": 7,
       "action": "loop_out",
-      "label": "Loop Out / Out Adjust (9n 07)"
+      "label": "Loop Out / Out Adjust (Note 7 / 0x07)"
     },
     "reloopExit": {
       "type": "note",
       "number": 8,
       "action": "reloop_exit",
-      "label": "Reloop / Exit (9n 08)"
+      "label": "Reloop / Exit (Note 8 / 0x08)"
     },
     "tempoRange": {
       "type": "note",
       "number": 16,
       "action": "cycle_tempo_range",
-      "label": "Tempo Range ±6/10/16/100% (9n 10)"
+      "label": "Tempo Range ±6/10/16/100% (Note 16 / 0x10)"
     },
     "masterTempo": {
       "type": "note",
       "number": 17,
       "action": "toggle_keylock",
-      "label": "Master Tempo / Key Lock (9n 11)"
+      "label": "Master Tempo / Key Lock (Note 17 / 0x11)"
     },
     "jogMode": {
       "type": "note",
       "number": 18,
       "action": "toggle_vinyl_mode",
-      "label": "Jog Mode Vinyl/CDJ (9n 12)"
-    },
-    "sync": {
-      "type": "note",
-      "number": 19,
-      "action": "toggle_sync",
-      "label": "Beat Sync (9n 13)"
+      "label": "Jog Mode Vinyl/CDJ (Note 18 / 0x12)"
     },
     "loopDivide": {
       "type": "note",
       "number": 22,
       "action": "loop_halve",
-      "label": "Beat Loop Divide 1/2X (9n 16)"
+      "label": "Beat Loop Divide 1/2X (Note 22 / 0x16)"
     },
     "loopDouble": {
       "type": "note",
       "number": 23,
       "action": "loop_double",
-      "label": "Beat Loop Double 2X (9n 17)"
+      "label": "Beat Loop Double 2X (Note 23 / 0x17)"
     },
-    "browsePush": {
+    "sync": {
       "type": "note",
-      "number": 50,
-      "action": "load_selected_track",
-      "label": "Rotary Push / Load Track (9n 32)"
+      "number": 34,
+      "action": "toggle_sync",
+      "label": "Hold / Beat Sync (Note 34 / 0x22)"
     },
     "backButton": {
       "type": "note",
-      "number": 51,
+      "number": 50,
       "action": "toggle_browse_view",
-      "label": "Back / Toggle Browse View (9n 33)"
+      "label": "Back / Toggle Browse View (Note 50 / 0x32)"
+    },
+    "browsePush": {
+      "type": "note",
+      "number": 51,
+      "action": "load_selected_track",
+      "label": "Encoder Push / Load Track (Note 51 / 0x33)"
     },
     "browseEncoder": {
       "type": "cc",
       "number": 79,
       "encoding": "relative_center_64",
       "action": "browse_scroll",
-      "label": "Rotary Selector Browse (Bn 4F)"
+      "label": "Rotary Selector Browse (CC 79 / 0x4F)"
     }
   },
   "ledFeedback": {

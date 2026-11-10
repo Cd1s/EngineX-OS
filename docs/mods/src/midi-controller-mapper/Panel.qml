@@ -7,18 +7,26 @@ Rectangle {
     width: 1024; height: 640; color: "#0f1722"
     property var state: ({})
     property string message: "Connect a USB MIDI controller (e.g. Pioneer CDJ-400) and enable the mapper."
-    property int lastAckSeq: 0
-    property var propCache: ({})
 
-    function tr(path) {
-        if (typeof Planck === "undefined" || !Planck) return null
-        if (!root.propCache) root.propCache = ({})
-        var p = root.propCache[path]
-        if (!p) {
-            p = Planck.getProperty(path)
-            if (p) root.propCache[path] = p
+    function syncBridgeState(val) {
+        if (typeof Math.scMidiBridge === "undefined" || !Math.scMidiBridge) {
+            Math.scMidiBridge = {
+                installed: false,
+                enabled: !!(val && val.enabled),
+                connected: !!(val && val.connected),
+                helperOnline: !!val,
+                lastError: (val && val.error) ? String(val.error) : ""
+            }
+        } else {
+            Math.scMidiBridge.helperOnline = !!val
+            Math.scMidiBridge.connected = !!(val && val.connected)
+            Math.scMidiBridge.lastError = (val && val.error) ? String(val.error) : ""
+            if (val && val.enabled && Math.scMidiBridge.wake) {
+                Math.scMidiBridge.wake()
+            } else if (val && !val.enabled && Math.scMidiBridge.stop) {
+                Math.scMidiBridge.stop()
+            }
         }
-        return p ? p.translator : null
     }
 
     function request(body, cb) {
@@ -28,10 +36,12 @@ Rectangle {
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
             if (xhr.status !== 200) {
+                root.syncBridgeState(null)
                 root.message = xhr.responseText || "MIDI Mapper helper unavailable. Run start.sh on the player."
                 return
             }
             var val = JSON.parse(xhr.responseText)
+            root.syncBridgeState(val)
             if (cb) {
                 cb(val)
                 return
@@ -39,188 +49,26 @@ Rectangle {
             root.state = val
             if (val.error) {
                 root.message = "SAFETY AUTO-DISABLED: " + val.error
+            } else if (val.presetErrors && val.presetErrors.length > 0) {
+                root.message = "PRESET WARNING: " + val.presetErrors[0]
             } else if (val.running) {
                 root.message = "LIVE · " + (val.connectedDevice || "MIDI Controller") + " → Deck " + val.targetDeck + " (" + (val.vinylMode ? "VINYL SCRATCH" : "CDJ PITCH BEND") + ")"
             } else if (val.enabled) {
                 root.message = "Waiting for USB MIDI controller (" + (val.presetName || "CDJ-400") + ")..."
             } else {
-                root.message = "Mapper disabled · Hardware layers and active deck untouched."
+                root.message = "Mapper disabled · Zero background polling · Hardware layers untouched."
             }
         }
         xhr.send(body ? JSON.stringify(body) : "")
     }
 
-    function readDeckState(d) {
-        var base = "/Engine/Deck" + d + "/"
-        var tLoaded = root.tr(base + "Track/SongLoaded")
-        var tPlay = root.tr(base + "PlayState")
-        var tPos = root.tr(base + "Track/TrackPosition")
-        var tLen = root.tr(base + "Track/TrackLength")
-        var tSr = root.tr(base + "Track/SampleRate")
-        var tSpd = root.tr(base + "Speed")
-        var tRng = root.tr(base + "SpeedRange")
-        var tKey = root.tr(base + "Track/KeyLock")
-        var tSync = root.tr(base + "Sync")
-        var tLoop = root.tr(base + "Track/LoopEnableState")
-        var tBrw = root.tr("/GUI/ShowBrowseView")
-        var lenSamples = tLen ? (tLen.unnormalized || 0) : 0
-        var posSamples = tPos ? (tPos.unnormalized || 0) : 0
-        var sr = tSr && tSr.value > 0 ? tSr.value : 44100
-        return {
-            songLoaded: !!(tLoaded && tLoaded.state),
-            playing: !!(tPlay && tPlay.state),
-            posNorm: lenSamples > 0 ? (posSamples / lenSamples) : 0.0,
-            durationSec: lenSamples > 0 ? (lenSamples / sr) : 0.0,
-            speed: tSpd ? tSpd.value : 0.5,
-            speedRangeIndex: tRng ? tRng.index : 0,
-            speedRangeCount: (tRng && tRng.entries) ? tRng.entries.length : 4,
-            keylock: !!(tKey && tKey.state),
-            sync: !!(tSync && tSync.state),
-            loopEnabled: !!(tLoop && tLoop.state),
-            browseOpen: !!(tBrw && tBrw.state)
-        }
-    }
-
-    function applyBridgeOps(reply) {
-        if (!reply || !reply.seq) return
-        var d = reply.targetDeck || 3
-        var base = "/Engine/Deck" + d + "/"
-        var vals = reply.values || ({})
-        if (vals.vinylMode !== undefined) {
-            var tVin = root.tr(base + "ExternalScratchWheelScratchEnable")
-            if (tVin) tVin.state = !!vals.vinylMode
-        }
-        if (vals.jogTouch !== undefined) {
-            var tTch = root.tr(base + "ExternalScratchWheelTouch")
-            if (tTch) tTch.value = vals.jogTouch ? 1.0 : 0.0
-        }
-        if (vals.jogMoveTicks !== undefined && vals.jogMoveTicks !== 0) {
-            var tMv = root.tr(base + "ExternalScratchWheelMove")
-            if (tMv) {
-                if (vals.jogMoveTicks > 0) tMv.incValue(vals.jogMoveTicks, 0.0, 0.0, false, true, 0.0)
-                else tMv.decValue(-vals.jogMoveTicks, 0.0, 0.0, false, true, 0.0)
-            }
-        } else if (vals.setPosNorm !== undefined) {
-            var tSetPos = root.tr(base + "Track/SetSongPosition")
-            if (tSetPos) tSetPos.value = vals.setPosNorm
-        }
-        if (vals.nudgeFwd !== undefined) {
-            var tNF = root.tr(base + "Track/NudgeForward")
-            if (tNF) tNF.value = vals.nudgeFwd
-        }
-        if (vals.nudgeBwd !== undefined) {
-            var tNB = root.tr(base + "Track/NudgeBackward")
-            if (tNB) tNB.value = vals.nudgeBwd
-        }
-        if (vals.speed !== undefined) {
-            var tSpd = root.tr(base + "Speed")
-            if (tSpd) tSpd.setValue(vals.speed, 1, 0)
-        }
-        if (vals.speedOffsetUp !== undefined) {
-            var tUp = root.tr(base + "SpeedOffsetUp")
-            if (tUp) tUp.state = !!vals.speedOffsetUp
-        }
-        if (vals.speedOffsetDown !== undefined) {
-            var tDn = root.tr(base + "SpeedOffsetDown")
-            if (tDn) tDn.state = !!vals.speedOffsetDown
-        }
-        if (vals.speedNeutral !== undefined) {
-            var tNe = root.tr(base + "SpeedNeutral")
-            if (tNe) tNe.state = !!vals.speedNeutral
-        }
-        if (vals.play !== undefined) {
-            var tPl = root.tr(base + "Play")
-            if (tPl) tPl.state = !!vals.play
-        }
-        if (vals.cueHold !== undefined) {
-            var tCue = root.tr(base + "Track/CueAction")
-            if (tCue) tCue.value = vals.cueHold ? 1.0 : 0.0
-        }
-        if (vals.vinylMode !== undefined) {
-            var tVin = root.tr(base + "ExternalScratchWheelScratchEnable")
-            if (tVin) tVin.state = !!vals.vinylMode
-        }
-        var acts = reply.actions || []
-        for (var i = 0; i < acts.length; i++) {
-            var a = acts[i].action
-            if (a === "toggle_play") {
-                var tp = root.tr(base + "Play")
-                var tps = root.tr(base + "PlayState")
-                if (tp) tp.state = !(tps ? tps.state : tp.state)
-            } else if (a === "track_next") {
-                var tn = root.tr(base + "Track/NextTrack")
-                if (tn) tn.state = true
-            } else if (a === "track_prev") {
-                var tpr = root.tr(base + "Track/PreviousTrack")
-                if (tpr) tpr.state = true
-            } else if (a === "seek_forward") {
-                var tsf = root.tr(base + "Track/SeekForward")
-                if (tsf) tsf.state = true
-            } else if (a === "seek_backward") {
-                var tsb = root.tr(base + "Track/SeekBackward")
-                if (tsb) tsb.state = true
-            } else if (a === "loop_in") {
-                var tli = root.tr(base + "Track/LoopIn")
-                if (tli) tli.state = true
-            } else if (a === "loop_out") {
-                var tlo = root.tr(base + "Track/LoopOut")
-                if (tlo) tlo.state = true
-            } else if (a === "reloop_exit") {
-                var trl = root.tr(base + "Track/Reloop")
-                if (trl) trl.state = true
-            } else if (a === "loop_halve") {
-                var tlh = root.tr(base + "Track/LoopHalveDouble")
-                if (tlh) tlh.decValue(0.1, 0.0, 1.0, false, false)
-            } else if (a === "loop_double") {
-                var tld = root.tr(base + "Track/LoopHalveDouble")
-                if (tld) tld.incValue(0.1, 0.0, 1.0, false, false)
-            } else if (a === "cycle_tempo_range") {
-                var trg = root.tr(base + "SpeedRange")
-                if (trg) {
-                    var cnt = trg.entries ? trg.entries.length : 4
-                    trg.index = (trg.index + 1) % cnt
-                }
-            } else if (a === "toggle_keylock") {
-                var tkl = root.tr(base + "Track/KeyLock")
-                if (tkl) tkl.state = !tkl.state
-            } else if (a === "toggle_sync") {
-                var tsy = root.tr(base + "Sync")
-                var tus = root.tr(base + "UnSync")
-                if (tsy && !tsy.state) tsy.state = true
-                else if (tus) tus.state = true
-            } else if (a === "load_selected_track") {
-                var tldk = root.tr("/Client/Librarian/LoadToDeck" + d)
-                if (tldk) tldk.state = true
-            } else if (a === "toggle_browse_view") {
-                var tbv = root.tr("/GUI/ShowBrowseView")
-                if (tbv) tbv.state = !tbv.state
-            } else if (a === "browse_scroll") {
-                var steps = acts[i].steps || 0
-                var dirPath = steps > 0 ? "/Qml/ControlFocus/Increment" : "/Qml/ControlFocus/Decrement"
-                var tbr = root.tr(dirPath)
-                for (var s = 0; s < Math.min(8, Math.abs(steps)); s++) {
-                    if (tbr) tbr.state = true
-                }
-            }
-        }
-        root.lastAckSeq = reply.seq
-    }
-
     Component.onCompleted: request(null)
-    Timer { interval: 400; running: root.visible; repeat: true; onTriggered: root.request(null) }
+    // Only poll status while the panel is visible AND the Mod is enabled
     Timer {
-        interval: 16
-        running: !!(root.state && root.state.enabled && typeof Planck !== "undefined" && !Math.scMidiBridgeActive)
+        interval: 2000
+        running: !!(root.visible && root.state && root.state.enabled)
         repeat: true
-        onTriggered: {
-            var d = (root.state && root.state.targetDeck) ? root.state.targetDeck : 3
-            var payload = { action: "poll", deckState: root.readDeckState(d) }
-            if (root.lastAckSeq > 0) {
-                payload.ackSeq = root.lastAckSeq
-                root.lastAckSeq = 0
-            }
-            root.request(payload, function(reply) { root.applyBridgeOps(reply) })
-        }
+        onTriggered: root.request(null)
     }
 
     ColumnLayout {
@@ -244,6 +92,11 @@ Rectangle {
                 text: (root.state && root.state.enabled) ? "DISABLE MAPPER" : "ENABLE MAPPER"
                 highlighted: !!(root.state && root.state.enabled)
                 onClicked: root.request({ action: (root.state && root.state.enabled) ? "disable" : "enable" })
+            }
+            Button {
+                visible: !!(root.state && (root.state.error || (root.state.alsaAvailable && !root.state.threadAlive)))
+                text: "Restart Worker"
+                onClicked: root.request({ action: "restart_worker" })
             }
             Button {
                 text: "Refresh USB MIDI"
@@ -378,8 +231,11 @@ Rectangle {
                     color: "#b8cae0"; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true
                 }
                 Label {
-                    text: "Custom controller JSON presets can be placed in /data/enginex/mods-state/midi-controller-mapper/presets/*.json."
-                    color: "#7f96b0"; font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true
+                    text: (root.state && root.state.presetErrors && root.state.presetErrors.length > 0)
+                        ? ("Ignored invalid preset files: " + root.state.presetErrors.join("; "))
+                        : "Custom controller JSON presets can be placed in /data/enginex/mods-state/midi-controller-mapper/presets/*.json."
+                    color: (root.state && root.state.presetErrors && root.state.presetErrors.length > 0) ? "#ff9da5" : "#7f96b0"
+                    font.pixelSize: 12; wrapMode: Text.Wrap; Layout.fillWidth: true
                 }
             }
         }

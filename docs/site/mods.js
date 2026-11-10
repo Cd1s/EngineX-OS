@@ -217,6 +217,7 @@
 
   function catOf(c, official) {
     const s = String(c || "").toLowerCase();
+    if (/midi/.test(s)) return "midi";
     if (/net|remote|tailscale|vpn/.test(s)) return "network";
     if (/light|dmx/.test(s)) return "lighting";
     if (/audio|sampl|fx|sound/.test(s)) return "audio";

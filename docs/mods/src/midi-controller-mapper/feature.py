@@ -1,15 +1,16 @@
 """Generic MIDI Controller Mapper Mod helper (Pioneer CDJ-400 first target).
 
 Runs at lowest scheduling priority (os.nice(19)), reads USB MIDI controllers via
-ALSA sequencer (libasound.so.2) without touching Denon's internal KnownDevices
-SysEx gate or switching hardware layers, integrates CDJ-400 continuous jog wheel
-velocity (Bn 10, 64=stop) over dt, enforces soft takeover with ▲▼ indicators on
-the tempo slider (Bn 1D), and coalesces Engine property updates at ~60 Hz.
+ALSA sequencer (libasound.so.2) without switching hardware layers, integrates
+CDJ-400 continuous jog wheel velocity (Bn 10, 64=stop) over dt, enforces soft
+takeover with ▲▼ indicators on the tempo slider (Bn 1D), and coalesces Engine
+property updates at ~60 Hz when enabled.
 """
 import ctypes
 from pathlib import Path
 import json
 import os
+import re
 import select
 import threading
 import time
@@ -30,6 +31,8 @@ SND_SEQ_PORT_TYPE_APPLICATION = 1 << 20
 SND_SEQ_EVENT_CLIENT_EXIT = 61
 SND_SEQ_EVENT_PORT_EXIT = 64
 SND_SEQ_EVENT_NONE = 255
+
+PRESET_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 
 VALID_ACTIONS = {
     "toggle_play",
@@ -68,29 +71,76 @@ class pollfd(ctypes.Structure):
     ]
 
 
+def _strict_int(val, name, lo=None, hi=None):
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise ValueError(f"{name} must be an integer")
+    if lo is not None and val < lo:
+        raise ValueError(f"{name} must be >= {lo}")
+    if hi is not None and val > hi:
+        raise ValueError(f"{name} must be <= {hi}")
+    return val
+
+
+def _strict_float(val, name, lo=None, hi=None):
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise ValueError(f"{name} must be a number")
+    f = float(val)
+    if lo is not None and f < lo:
+        raise ValueError(f"{name} must be >= {lo}")
+    if hi is not None and f > hi:
+        raise ValueError(f"{name} must be <= {hi}")
+    return f
+
+
 def validate_preset(data):
     if not isinstance(data, dict):
         raise ValueError("preset must be a JSON object")
     for req in ("id", "name", "jog", "tempoSlider", "controls"):
         if req not in data:
             raise ValueError(f"preset missing required field '{req}'")
-    pid = str(data["id"]).strip()
-    if not pid or any(c in pid for c in "/\\.."):
+    pid = data["id"]
+    if not isinstance(pid, str) or ".." in pid or not PRESET_ID_RE.match(pid):
         raise ValueError("invalid preset id")
+    name = data["name"]
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("preset 'name' must be a non-empty string")
+    if "match" in data and data["match"] is not None:
+        match = data["match"]
+        if not isinstance(match, dict):
+            raise ValueError("preset 'match' must be an object")
+        if "alsaClientPatterns" in match and match["alsaClientPatterns"] is not None:
+            pats = match["alsaClientPatterns"]
+            if not isinstance(pats, list) or not all(isinstance(p, str) and p.strip() for p in pats):
+                raise ValueError("preset 'match.alsaClientPatterns' must be a list of non-empty strings")
+    if "malformedLimit" in data and data["malformedLimit"] is not None:
+        _strict_int(data["malformedLimit"], "malformedLimit", 1, 1000)
+    if "stormLimitPerSec" in data and data["stormLimitPerSec"] is not None:
+        _strict_int(data["stormLimitPerSec"], "stormLimitPerSec", 10, 100000)
+    if "midiChannel" in data and data["midiChannel"] is not None and data["midiChannel"] != "any":
+        _strict_int(data["midiChannel"], "midiChannel", 0, 15)
     jog = data["jog"]
     if not isinstance(jog, dict):
         raise ValueError("preset 'jog' must be an object")
     enc = jog.get("encoding", "cdj_continuous_velocity")
-    if enc not in VALID_JOG_ENCODINGS:
+    if not isinstance(enc, str) or enc not in VALID_JOG_ENCODINGS:
         raise ValueError(f"unsupported jog encoding '{enc}'")
-    for k in ("touchNote", "scratchCc", "pitchBendCc"):
+    for k in ("touchNote", "scratchCc", "pitchBendCc", "centerValue"):
         if k in jog and jog[k] is not None:
-            v = int(jog[k])
-            if not 0 <= v <= 127:
-                raise ValueError(f"jog.{k} out of MIDI range 0..127")
+            _strict_int(jog[k], f"jog.{k}", 0, 127)
+    if "maxOffset" in jog and jog["maxOffset"] is not None:
+        _strict_int(jog["maxOffset"], "jog.maxOffset", 1, 127)
+    if "scratchSensitivitySecPerSec" in jog and jog["scratchSensitivitySecPerSec"] is not None:
+        _strict_float(jog["scratchSensitivitySecPerSec"], "jog.scratchSensitivitySecPerSec", 0.01, 50.0)
+    if "pitchBendMaxAmount" in jog and jog["pitchBendMaxAmount"] is not None:
+        _strict_float(jog["pitchBendMaxAmount"], "jog.pitchBendMaxAmount", 0.01, 1.0)
     ts = data["tempoSlider"]
-    if not isinstance(ts, dict) or not 0 <= int(ts.get("cc", 29)) <= 127:
-        raise ValueError("preset 'tempoSlider.cc' must be in 0..127")
+    if not isinstance(ts, dict):
+        raise ValueError("preset 'tempoSlider' must be an object")
+    _strict_int(ts.get("cc", 29), "tempoSlider.cc", 0, 127)
+    if "pickupThreshold" in ts and ts["pickupThreshold"] is not None:
+        _strict_float(ts["pickupThreshold"], "tempoSlider.pickupThreshold", 0.001, 0.5)
+    if "neutralDeadband" in ts and ts["neutralDeadband"] is not None:
+        _strict_float(ts["neutralDeadband"], "tempoSlider.neutralDeadband", 0.0, 0.2)
     controls = data["controls"]
     if not isinstance(controls, dict) or not controls:
         raise ValueError("preset 'controls' must be a non-empty object")
@@ -100,11 +150,9 @@ def validate_preset(data):
         ctype = spec.get("type")
         if ctype not in ("note", "cc"):
             raise ValueError(f"control '{cname}' has invalid type '{ctype}'")
-        num = int(spec.get("number", -1))
-        if not 0 <= num <= 127:
-            raise ValueError(f"control '{cname}' number {num} out of range 0..127")
+        _strict_int(spec.get("number", -1), f"control '{cname}' number", 0, 127)
         act = spec.get("action")
-        if act not in VALID_ACTIONS:
+        if not isinstance(act, str) or act not in VALID_ACTIONS:
             raise ValueError(f"control '{cname}' has unknown action '{act}'")
     return data
 
@@ -131,24 +179,30 @@ class Feature:
         self.lock = threading.RLock()
 
         self.presets = {}
+        self.preset_errors = []
         self._load_presets()
 
         saved = {}
         if self.config_path.is_file():
             try:
-                saved = json.loads(self.config_path.read_text())
+                loaded = json.loads(self.config_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    saved = loaded
             except Exception:
                 saved = {}
 
         default_preset = "pioneer-cdj-400" if "pioneer-cdj-400" in self.presets else next(iter(self.presets), "")
-        self.enabled = bool(saved.get("enabled", False))
-        self.target_deck = int(saved.get("targetDeck", 3))
-        if self.target_deck not in (1, 2, 3, 4):
+        raw_enabled = saved.get("enabled", False)
+        self.enabled = raw_enabled if isinstance(raw_enabled, bool) else False
+        raw_td = saved.get("targetDeck", 3)
+        if not isinstance(raw_td, bool) and isinstance(raw_td, int) and raw_td in (1, 2, 3, 4):
+            self.target_deck = raw_td
+        else:
             self.target_deck = 3
-        self.preset_id = str(saved.get("presetId", default_preset))
-        if self.preset_id not in self.presets and default_preset:
-            self.preset_id = default_preset
-        self.selected_device = str(saved.get("selectedDevice", "auto"))
+        raw_pid = saved.get("presetId", default_preset)
+        self.preset_id = raw_pid if isinstance(raw_pid, str) and raw_pid in self.presets else default_preset
+        raw_dev = saved.get("selectedDevice", "auto")
+        self.selected_device = raw_dev if isinstance(raw_dev, str) and raw_dev.strip() else "auto"
 
         preset = self.current_preset()
         self.vinyl_mode = (preset.get("jog", {}).get("modeDefault", "vinyl") == "vinyl") if preset else True
@@ -183,6 +237,7 @@ class Feature:
         self.fader_norm = 0.5
         self.fader_seen = False
         self.soft_locked = False
+        self.pre_write_speed = None
         self.last_written_speed = None
         self.last_written_speed_at = 0.0
         self.speed_offset_up = False
@@ -225,8 +280,16 @@ class Feature:
         self.midi_dev = ctypes.c_void_p()
         self.stop_event = threading.Event()
         self.thread = None
+        self.thread_error = ""
+        self.last_thread_heartbeat = 0.0
+        self._start_alsa_worker()
+
+    def _start_alsa_worker(self):
+        self.stop_event.clear()
+        self.thread_error = ""
         self._init_alsa()
         if self.asound and self.seq_handle.value:
+            self.last_thread_heartbeat = time.monotonic()
             self.thread = threading.Thread(target=self._alsa_loop, name="midi-alsa-seq", daemon=True)
             self.thread.start()
 
@@ -241,6 +304,7 @@ class Feature:
 
     def _load_presets(self):
         self.presets.clear()
+        self.preset_errors.clear()
         for folder in (BUILTIN_PRESETS_DIR, self.user_presets_dir):
             if not folder.is_dir():
                 continue
@@ -248,9 +312,13 @@ class Feature:
                 try:
                     raw = json.loads(p.read_text(encoding="utf-8"))
                     validate_preset(raw)
-                    self.presets[raw["id"]] = raw
-                except Exception:
-                    continue
+                    pid = raw["id"]
+                    if pid in self.presets and folder == self.user_presets_dir and (BUILTIN_PRESETS_DIR / f"{pid}.json").is_file():
+                        self.preset_errors.append(f"{p.name}: cannot override built-in preset '{pid}'")
+                        continue
+                    self.presets[pid] = raw
+                except Exception as exc:
+                    self.preset_errors.append(f"{p.name}: {exc}")
 
     def current_preset(self):
         return self.presets.get(self.preset_id) or next(iter(self.presets.values()), {})
@@ -300,83 +368,97 @@ class Feature:
     def list_alsa_devices(self):
         if not self.asound or not self.seq_handle.value:
             return []
-        asound = self.asound
-        seq = self.seq_handle
-        my_client = asound.snd_seq_client_id(seq)
-        cinfo = ctypes.create_string_buffer(256)
-        pinfo = ctypes.create_string_buffer(256)
-        asound.snd_seq_client_info_set_client(cinfo, -1)
-        asound.snd_seq_client_info_get_name.restype = ctypes.c_char_p
-        asound.snd_seq_port_info_get_name.restype = ctypes.c_char_p
+        try:
+            asound = self.asound
+            seq = self.seq_handle
+            my_client = asound.snd_seq_client_id(seq)
+            cinfo = ctypes.create_string_buffer(256)
+            pinfo = ctypes.create_string_buffer(256)
+            asound.snd_seq_client_info_set_client(cinfo, -1)
+            asound.snd_seq_client_info_get_name.restype = ctypes.c_char_p
+            asound.snd_seq_port_info_get_name.restype = ctypes.c_char_p
 
-        devices = []
-        while asound.snd_seq_query_next_client(seq, cinfo) >= 0:
-            cid = asound.snd_seq_client_info_get_client(cinfo)
-            if cid in (0, 14, my_client):
-                continue
-            cname = (asound.snd_seq_client_info_get_name(cinfo) or b"").decode("utf-8", "replace").strip()
-            if cname.startswith("Midi::Out::") or cname.startswith("EngineX-"):
-                continue
-            asound.snd_seq_port_info_set_client(pinfo, cid)
-            asound.snd_seq_port_info_set_port(pinfo, -1)
-            while asound.snd_seq_query_next_port(seq, pinfo) >= 0:
-                pid = asound.snd_seq_port_info_get_port(pinfo)
-                caps = asound.snd_seq_port_info_get_capability(pinfo)
-                if (caps & SND_SEQ_PORT_CAP_READ) and (caps & SND_SEQ_PORT_CAP_SUBS_READ):
-                    pname = (asound.snd_seq_port_info_get_name(pinfo) or b"").decode("utf-8", "replace").strip()
-                    devices.append(
-                        {
-                            "id": f"{cid}:{pid}",
-                            "client": cid,
-                            "port": pid,
-                            "clientName": cname,
-                            "portName": pname,
-                            "label": f"{cname} [{cid}:{pid}]",
-                        }
-                    )
-        return devices
+            devices = []
+            while asound.snd_seq_query_next_client(seq, cinfo) >= 0:
+                cid = asound.snd_seq_client_info_get_client(cinfo)
+                if cid in (0, 14, my_client):
+                    continue
+                cname = (asound.snd_seq_client_info_get_name(cinfo) or b"").decode("utf-8", "replace").strip()
+                if cname.startswith("Midi::Out::") or cname.startswith("EngineX-"):
+                    continue
+                asound.snd_seq_port_info_set_client(pinfo, cid)
+                asound.snd_seq_port_info_set_port(pinfo, -1)
+                while asound.snd_seq_query_next_port(seq, pinfo) >= 0:
+                    pid = asound.snd_seq_port_info_get_port(pinfo)
+                    caps = asound.snd_seq_port_info_get_capability(pinfo)
+                    if (caps & SND_SEQ_PORT_CAP_READ) and (caps & SND_SEQ_PORT_CAP_SUBS_READ):
+                        pname = (asound.snd_seq_port_info_get_name(pinfo) or b"").decode("utf-8", "replace").strip()
+                        devices.append(
+                            {
+                                "id": f"{cid}:{pid}",
+                                "client": cid,
+                                "port": pid,
+                                "clientName": cname,
+                                "portName": pname,
+                                "label": f"{cname} [{cid}:{pid}]",
+                            }
+                        )
+            return devices
+        except Exception:
+            return []
 
     def _try_connect_device(self):
         with self.lock:
-            if not self.asound or not self.seq_handle.value:
-                return False
-            devices = self.list_alsa_devices()
-            if not devices:
-                self.connected = False
-                return False
-            chosen = None
-            if self.selected_device and self.selected_device != "auto":
-                for d in devices:
-                    if d["id"] == self.selected_device or d["clientName"] == self.selected_device:
-                        chosen = d
-                        break
-            if chosen is None:
-                patterns = [p.lower() for p in self.current_preset().get("match", {}).get("alsaClientPatterns", [])]
-                for d in devices:
-                    cname_l = d["clientName"].lower()
-                    if any(pat in cname_l for pat in patterns):
-                        chosen = d
-                        break
-                if chosen is None and self.selected_device == "auto":
-                    chosen = devices[0]
-            if chosen is None:
-                self.connected = False
-                return False
-            if self.connected and self.connected_client == chosen["client"] and self.connected_port == chosen["port"]:
+            try:
+                if not self.asound or not self.seq_handle.value:
+                    return False
+                devices = self.list_alsa_devices()
+                if not devices:
+                    self.connected = False
+                    return False
+                chosen = None
+                if self.selected_device and self.selected_device != "auto":
+                    for d in devices:
+                        if d["id"] == self.selected_device or d["clientName"] == self.selected_device:
+                            chosen = d
+                            break
+                if chosen is None:
+                    match_cfg = self.current_preset().get("match", {})
+                    raw_patterns = match_cfg.get("alsaClientPatterns", []) if isinstance(match_cfg, dict) else []
+                    patterns = [
+                        p.strip().lower()
+                        for p in (raw_patterns if isinstance(raw_patterns, list) else [])
+                        if isinstance(p, str) and p.strip()
+                    ]
+                    for d in devices:
+                        cname_l = d["clientName"].lower()
+                        if any(pat in cname_l for pat in patterns):
+                            chosen = d
+                            break
+                    if chosen is None and self.selected_device == "auto":
+                        chosen = devices[0]
+                if chosen is None:
+                    self.connected = False
+                    return False
+                if self.connected and self.connected_client == chosen["client"] and self.connected_port == chosen["port"]:
+                    return True
+                self._disconnect_alsa_locked()
+                rc = self.asound.snd_seq_connect_from(
+                    self.seq_handle, self.in_port, chosen["client"], chosen["port"]
+                )
+                if rc < 0:
+                    self.connected = False
+                    return False
+                self.connected = True
+                self.connected_client = chosen["client"]
+                self.connected_port = chosen["port"]
+                self.connected_name = chosen["label"]
+                self.error = ""
                 return True
-            self._disconnect_alsa_locked()
-            rc = self.asound.snd_seq_connect_from(
-                self.seq_handle, self.in_port, chosen["client"], chosen["port"]
-            )
-            if rc < 0:
+            except Exception as exc:
                 self.connected = False
+                self.error = f"Failed to connect ALSA MIDI device: {exc}"
                 return False
-            self.connected = True
-            self.connected_client = chosen["client"]
-            self.connected_port = chosen["port"]
-            self.connected_name = chosen["label"]
-            self.error = ""
-            return True
 
     def _disconnect_alsa_locked(self):
         if self.asound and self.seq_handle.value and self.connected_client >= 0 and self.connected_port >= 0:
@@ -391,9 +473,7 @@ class Feature:
         self.connected_port = -1
         self.connected_name = ""
 
-    def _auto_disable_on_error_locked(self, reason):
-        self.enabled = False
-        self.error = reason
+    def _queue_safety_reset_locked(self):
         self.jog_velocity = 0
         self.jog_touched = False
         self.pitch_bend_dir = 0
@@ -401,66 +481,87 @@ class Feature:
         self.pending_values["nudgeFwd"] = 0.0
         self.pending_values["nudgeBwd"] = 0.0
         self.pending_values["cueHold"] = False
+        self.pending_values["jogTouch"] = False
+
+    def _auto_disable_on_error_locked(self, reason):
+        self.enabled = False
+        self.error = reason
+        self._queue_safety_reset_locked()
         self._disconnect_alsa_locked()
 
-    def simulate_disconnect(self, client_id=None):
+    def simulate_disconnect(self, client_id=None, port_id=None):
         with self.lock:
-            if client_id is None or client_id == self.connected_client or self.enabled:
-                cname = self.connected_name or "USB MIDI controller"
-                self._auto_disable_on_error_locked(
-                    f"MIDI controller disconnected ({cname}). Mapper auto-disabled for deck safety."
-                )
+            if client_id is not None:
+                if not self.connected or client_id != self.connected_client:
+                    return False
+                if port_id is not None and self.connected_port >= 0 and port_id != self.connected_port:
+                    return False
+            elif not self.enabled and not self.connected:
+                return False
+            cname = self.connected_name or "USB MIDI controller"
+            self._auto_disable_on_error_locked(
+                f"MIDI controller disconnected ({cname}). Mapper auto-disabled for deck safety."
+            )
+            return True
 
     def _mark_batch_t0_locked(self, now):
         self.pending_batch_t0 = now
 
     def _alsa_loop(self):
-        self._apply_low_priority()
-        asound = self.asound
-        seq = self.seq_handle
-        npfds = asound.snd_seq_poll_descriptors_count(seq, select.POLLIN)
-        pfds = (pollfd * max(1, npfds))()
-        asound.snd_seq_poll_descriptors(seq, pfds, npfds, select.POLLIN)
-        poller = select.poll()
-        for i in range(npfds):
-            poller.register(pfds[i].fd, pfds[i].events)
+        try:
+            self._apply_low_priority()
+            asound = self.asound
+            seq = self.seq_handle
+            npfds = asound.snd_seq_poll_descriptors_count(seq, select.POLLIN)
+            pfds = (pollfd * max(1, npfds))()
+            asound.snd_seq_poll_descriptors(seq, pfds, npfds, select.POLLIN)
+            poller = select.poll()
+            for i in range(npfds):
+                poller.register(pfds[i].fd, pfds[i].events)
 
-        ev_ptr = ctypes.c_void_p()
-        midi_buf = (ctypes.c_ubyte * 32)()
+            ev_ptr = ctypes.c_void_p()
+            midi_buf = (ctypes.c_ubyte * 32)()
 
-        while not self.stop_event.is_set():
-            with self.lock:
-                active_motion = self.enabled and (self.jog_velocity != 0 or self.pitch_bend_dir != 0)
-            timeout_ms = 16 if active_motion else 250
-            poller.poll(timeout_ms)
-            if self.stop_event.is_set():
-                break
-            now = time.monotonic()
-            while True:
-                rc = asound.snd_seq_event_input(seq, ctypes.byref(ev_ptr))
-                if rc < 0 or not ev_ptr.value:
+            while not self.stop_event.is_set():
+                self.last_thread_heartbeat = time.monotonic()
+                with self.lock:
+                    active_motion = self.enabled and (self.jog_velocity != 0 or self.pitch_bend_dir != 0)
+                timeout_ms = 16 if active_motion else 250
+                poller.poll(timeout_ms)
+                self.last_thread_heartbeat = time.monotonic()
+                if self.stop_event.is_set():
                     break
-                raw = ctypes.string_at(ev_ptr.value, 28)
-                ev_type = raw[0]
-                if ev_type in (SND_SEQ_EVENT_CLIENT_EXIT, SND_SEQ_EVENT_PORT_EXIT):
-                    addr_client = raw[16]
-                    with self.lock:
-                        if self.connected and addr_client == self.connected_client:
-                            self.simulate_disconnect(addr_client)
-                    continue
-                if not self.enabled:
-                    continue
-                if self.midi_dev.value:
-                    asound.snd_midi_event_reset_decode(self.midi_dev)
-                    nbytes = asound.snd_midi_event_decode(self.midi_dev, midi_buf, 32, ev_ptr)
-                    if nbytes > 0:
-                        msg = [ int(midi_buf[i]) for i in range(nbytes) ]
-                        self.process_midi_message(msg, now=now)
-                    elif ev_type not in (60, 62, 63, 65, 66, 67):
-                        self.record_malformed("unrecognized ALSA event payload", now=now)
+                now = time.monotonic()
+                while True:
+                    rc = asound.snd_seq_event_input(seq, ctypes.byref(ev_ptr))
+                    if rc < 0 or not ev_ptr.value:
+                        break
+                    raw = ctypes.string_at(ev_ptr.value, 28)
+                    ev_type = raw[0]
+                    if ev_type in (SND_SEQ_EVENT_CLIENT_EXIT, SND_SEQ_EVENT_PORT_EXIT):
+                        addr_client = raw[16]
+                        addr_port = raw[17] if ev_type == SND_SEQ_EVENT_PORT_EXIT else None
+                        with self.lock:
+                            if self.connected and addr_client == self.connected_client:
+                                self.simulate_disconnect(addr_client, addr_port)
+                        continue
+                    if not self.enabled:
+                        continue
+                    if self.midi_dev.value:
+                        asound.snd_midi_event_reset_decode(self.midi_dev)
+                        nbytes = asound.snd_midi_event_decode(self.midi_dev, midi_buf, 32, ev_ptr)
+                        if nbytes > 0:
+                            msg = [int(midi_buf[i]) for i in range(nbytes)]
+                            self.process_midi_message(msg, now=now)
+                        elif ev_type not in (60, 62, 63, 65, 66, 67):
+                            self.record_malformed("unrecognized ALSA event payload", now=now)
+                with self.lock:
+                    if self.enabled and self.jog_velocity != 0:
+                        self.integrate_jog_step(now=time.monotonic())
+        except Exception as exc:
             with self.lock:
-                if self.enabled and (self.jog_velocity != 0 or self.pitch_bend_dir != 0):
-                    self.integrate_jog_step(now=time.monotonic())
+                self.thread_error = f"ALSA sequencer worker error: {exc}"
+                self._auto_disable_on_error_locked(self.thread_error)
 
     def record_malformed(self, detail="malformed MIDI message", now=None):
         if now is None:
@@ -482,9 +583,13 @@ class Feature:
             if not isinstance(raw_bytes, (list, tuple, bytes, bytearray)) or len(raw_bytes) < 2 or len(raw_bytes) > 3:
                 self.record_malformed("invalid MIDI message length", now=now)
                 return False
-            b0 = int(raw_bytes[0])
-            b1 = int(raw_bytes[1])
-            b2 = int(raw_bytes[2]) if len(raw_bytes) > 2 else 0
+            try:
+                b0 = int(raw_bytes[0])
+                b1 = int(raw_bytes[1])
+                b2 = int(raw_bytes[2]) if len(raw_bytes) > 2 else 0
+            except (ValueError, TypeError):
+                self.record_malformed("non-integer MIDI byte", now=now)
+                return False
             if not (0x80 <= b0 <= 0xEF) or not (0 <= b1 <= 127) or not (0 <= b2 <= 127):
                 self.record_malformed("invalid MIDI status or data byte", now=now)
                 return False
@@ -577,9 +682,6 @@ class Feature:
                     self.pitch_bend_amount = 0.0
                     self.pending_values["nudgeFwd"] = 0.0
                     self.pending_values["nudgeBwd"] = 0.0
-                else:
-                    # Apply immediate initial micro-step (4 ms equivalent) for zero-wait responsiveness
-                    self.integrate_jog_step(dt_override=0.004, now=now)
                 return True
             else:
                 delta = self._decode_relative_cc(value, enc, center)
@@ -589,7 +691,7 @@ class Feature:
                 )
                 return True
 
-        # Outer-ring pitch bend CC (CDJ-400 Bn 30)
+        # Outer-ring pitch bend CC (CDJ-400 Bn 30: stays active until 64=stop arrives)
         if pb_cc is not None and int(pb_cc) == cc:
             self._mark_batch_t0_locked(now)
             center = int(jog.get("centerValue", 64))
@@ -655,16 +757,21 @@ class Feature:
         use_soft = bool(ts_cfg.get("softTakeover", True))
         deck_speed = float(self.deck_state.get("speed", 0.5))
 
-        prev_fader = self.fader_norm if self.fader_seen else norm
+        was_seen = self.fader_seen
+        prev_fader = self.fader_norm
         self.fader_norm = norm
         self.fader_seen = True
 
         if not use_soft:
             self.soft_locked = True
-        else:
-            # Check if physical fader crossed or entered pickup window around deck_speed
-            crossed = (prev_fader <= deck_speed <= norm) or (norm <= deck_speed <= prev_fader)
+        elif not self.soft_locked:
+            # Only lock when physical fader enters pickup window or continuously sweeps across deck_speed
             close_enough = abs(norm - deck_speed) <= pickup
+            crossed = (
+                was_seen
+                and (prev_fader != norm)
+                and ((prev_fader < deck_speed <= norm) or (norm <= deck_speed < prev_fader))
+            )
             if crossed or close_enough:
                 self.soft_locked = True
 
@@ -673,6 +780,8 @@ class Feature:
             self.speed_offset_down = False
             self.speed_neutral = abs(norm - 0.5) <= deadband
             target_speed = 0.5 if self.speed_neutral else round(norm, 5)
+            if "speed" not in self.pending_values:
+                self.pre_write_speed = deck_speed
             self.last_written_speed = target_speed
             self.last_written_speed_at = time.monotonic()
             self.deck_state["speed"] = target_speed
@@ -700,14 +809,6 @@ class Feature:
             if not self.enabled:
                 return 0.0
             jog = self.current_preset().get("jog", {})
-            pb_timeout_sec = float(jog.get("pitchBendTimeoutMs", 120)) / 1000.0
-            if self.pitch_bend_dir != 0 and self.last_pitch_bend_at > 0 and (now - self.last_pitch_bend_at) > pb_timeout_sec and self.jog_velocity == 0:
-                self.pitch_bend_dir = 0
-                self.pitch_bend_amount = 0.0
-                self.pending_values["nudgeFwd"] = 0.0
-                self.pending_values["nudgeBwd"] = 0.0
-                self._mark_batch_t0_locked(now)
-
             if self.jog_velocity == 0:
                 self.last_jog_step_at = now
                 return 0.0
@@ -715,7 +816,8 @@ class Feature:
             if dt_override is not None:
                 dt = float(dt_override)
             else:
-                dt = max(0.0, min(0.1, now - self.last_jog_step_at)) if self.last_jog_step_at > 0 else 0.016
+                # Cap dt at 0.5s (2x the 250ms idle poll period) so slow jog turns are never truncated
+                dt = max(0.0, min(0.5, now - self.last_jog_step_at)) if self.last_jog_step_at > 0 else 0.0
             self.last_jog_step_at = now
             if dt <= 0.0:
                 return 0.0
@@ -755,7 +857,9 @@ class Feature:
         self.virtual_pos_valid = True
         self.deck_state["posNorm"] = next_pos
         self.last_delta_pos_sec = round(delta_sec, 5)
-        # 26325.0 unnormalized ExternalScratchWheelMove ticks = 1.0s of audio in Engine 5.3.0
+        # Empirically calibrated in Engine 5.3.0 sandbox: incValue(9600.0) on a paused
+        # 44.1 kHz track advanced TrackPosition.unnormalized by +16,082 samples (+0.36467s),
+        # yielding ~26,325 ticks/s at scratchSensitivitySecPerSec = 1.0.
         prev_ticks = float(self.pending_values.get("jogMoveTicks", 0.0))
         self.pending_values["jogMoveTicks"] = round(prev_ticks + delta_sec * 26325.0, 2)
         self.pending_values["setPosNorm"] = round(next_pos, 6)
@@ -786,21 +890,26 @@ class Feature:
 
             if "speed" in state and state["speed"] is not None:
                 new_speed = float(state["speed"])
-                now_m = time.monotonic()
-                if self.last_written_speed is not None and (now_m - self.last_written_speed_at) < 0.35:
-                    pass
-                else:
-                    self.deck_state["speed"] = new_speed
-                    pickup = float(self.current_preset().get("tempoSlider", {}).get("pickupThreshold", 0.025))
-                    if self.fader_seen and abs(new_speed - self.fader_norm) > pickup:
-                        if self.last_written_speed is None or abs(new_speed - self.last_written_speed) > (pickup * 0.6):
-                            self.soft_locked = False
-                            self.speed_offset_up = self.fader_norm < (new_speed - pickup)
-                            self.speed_offset_down = self.fader_norm > (new_speed + pickup)
-                            self.speed_neutral = False
-                            self.pending_values["speedOffsetUp"] = self.speed_offset_up
-                            self.pending_values["speedOffsetDown"] = self.speed_offset_down
-                            self.pending_values["speedNeutral"] = self.speed_neutral
+                # Ignore pre-write echo only while a fader speed write is still queued in pending_values
+                if (
+                    "speed" in self.pending_values
+                    and self.pre_write_speed is not None
+                    and abs(new_speed - self.pre_write_speed) <= 1e-4
+                ):
+                    return
+                self.deck_state["speed"] = new_speed
+                pickup = float(self.current_preset().get("tempoSlider", {}).get("pickupThreshold", 0.025))
+                if self.fader_seen and abs(new_speed - self.fader_norm) > pickup:
+                    if self.last_written_speed is None or abs(new_speed - self.last_written_speed) > (pickup * 0.6):
+                        self.soft_locked = False
+                        self.pending_values.pop("speed", None)
+                        self.pre_write_speed = None
+                        self.speed_offset_up = self.fader_norm < (new_speed - pickup)
+                        self.speed_offset_down = self.fader_norm > (new_speed + pickup)
+                        self.speed_neutral = False
+                        self.pending_values["speedOffsetUp"] = self.speed_offset_up
+                        self.pending_values["speedOffsetDown"] = self.speed_offset_down
+                        self.pending_values["speedNeutral"] = self.speed_neutral
 
     def poll_bridge(self, deck_state=None, ack_seq=None, ack_apply_ms=None, now=None):
         if now is None:
@@ -821,10 +930,10 @@ class Feature:
             if deck_state:
                 self.update_deck_state(deck_state)
 
-            if self.enabled and (self.jog_velocity != 0 or self.pitch_bend_dir != 0):
+            if self.enabled and self.jog_velocity != 0:
                 self.integrate_jog_step(now=now)
 
-            if not self.enabled or (not self.pending_values and not self.pending_actions):
+            if not self.pending_values and not self.pending_actions:
                 return {
                     "enabled": self.enabled,
                     "targetDeck": self.target_deck,
@@ -839,8 +948,9 @@ class Feature:
             queue_wait_ms = max(0.05, (now - t0) * 1000.0)
             self.inflight_batches[seq] = queue_wait_ms
             self.pending_batch_t0 = None
+            self.pre_write_speed = None
             values = dict(self.pending_values)
-            actions = list(self.pending_actions)
+            actions = list(self.pending_actions) if self.enabled else []
             self.pending_values.clear()
             self.pending_actions.clear()
             return {
@@ -874,9 +984,23 @@ class Feature:
                 "avgMs": round(sum(s) / len(s), 3),
             }
 
+    def is_thread_alive(self):
+        if not self.asound or not self.seq_handle.value:
+            return False
+        if not self.thread or not self.thread.is_alive():
+            return False
+        if self.last_thread_heartbeat > 0 and (time.monotonic() - self.last_thread_heartbeat) > 5.0:
+            return False
+        return True
+
     def status(self):
         with self.lock:
             self._update_cpu_percent()
+            alsa_avail = bool(self.asound and self.seq_handle.value)
+            thread_alive = self.is_thread_alive()
+            if alsa_avail and not thread_alive and not self.stop_event.is_set():
+                if not self.error:
+                    self.error = self.thread_error or "ALSA sequencer worker thread stopped unexpectedly."
             if self.enabled and not self.connected:
                 self._try_connect_device()
             preset = self.current_preset()
@@ -888,6 +1012,9 @@ class Feature:
                 "connected": self.connected,
                 "connectedDevice": self.connected_name,
                 "selectedDevice": self.selected_device,
+                "alsaAvailable": alsa_avail,
+                "threadAlive": thread_alive,
+                "threadError": self.thread_error,
                 "devices": devices,
                 "targetDeck": self.target_deck,
                 "presetId": self.preset_id,
@@ -896,6 +1023,7 @@ class Feature:
                     {"id": k, "name": v.get("name", k), "model": v.get("model", "")}
                     for k, v in sorted(self.presets.items())
                 ],
+                "presetErrors": list(self.preset_errors),
                 "vinylMode": self.vinyl_mode,
                 "softTakeover": {
                     "locked": self.soft_locked,
@@ -934,6 +1062,9 @@ class Feature:
             )
         with self.lock:
             if act == "enable":
+                if self.asound and self.seq_handle.value and not self.is_thread_alive():
+                    self.close()
+                    self._start_alsa_worker()
                 self.error = ""
                 self.malformed_count = 0
                 self.enabled = True
@@ -942,33 +1073,45 @@ class Feature:
                 return self.status()
             if act == "disable":
                 self.enabled = False
-                self.jog_velocity = 0
-                self.jog_touched = False
-                self.pitch_bend_dir = 0
+                self._queue_safety_reset_locked()
                 self._disconnect_alsa_locked()
                 self._save_config()
                 return self.status()
+            if act == "restart_worker":
+                self.close()
+                self.error = ""
+                self.malformed_count = 0
+                self._start_alsa_worker()
+                if self.enabled:
+                    self._try_connect_device()
+                return self.status()
             if act == "configure":
                 if "targetDeck" in req:
-                    td = int(req["targetDeck"])
-                    if td not in (1, 2, 3, 4):
-                        raise ValueError("targetDeck must be 1, 2, 3, or 4")
+                    td = _strict_int(req["targetDeck"], "targetDeck", 1, 4)
                     self.target_deck = td
                 if "presetId" in req:
-                    pid = str(req["presetId"])
+                    pid = req["presetId"]
+                    if not isinstance(pid, str):
+                        raise ValueError("presetId must be a string")
                     self._load_presets()
                     if pid not in self.presets:
                         raise ValueError(f"unknown preset '{pid}'")
                     self.preset_id = pid
                     self.vinyl_mode = self.current_preset().get("jog", {}).get("modeDefault", "vinyl") == "vinyl"
                 if "selectedDevice" in req:
-                    self.selected_device = str(req["selectedDevice"])
+                    if not isinstance(req["selectedDevice"], str):
+                        raise ValueError("selectedDevice must be a string")
+                    self.selected_device = req["selectedDevice"]
                     self._disconnect_alsa_locked()
                 if "enabled" in req:
-                    self.enabled = bool(req["enabled"])
+                    if not isinstance(req["enabled"], bool):
+                        raise ValueError("enabled must be a boolean")
+                    self.enabled = req["enabled"]
                     if self.enabled:
                         self.error = ""
                         self.malformed_count = 0
+                    else:
+                        self._queue_safety_reset_locked()
                 if self.enabled:
                     self._try_connect_device()
                 else:
@@ -986,14 +1129,6 @@ class Feature:
                 pid = preset_obj["id"]
                 save_json(self.user_presets_dir / f"{pid}.json", preset_obj)
                 self._load_presets()
-                return self.status()
-            if act == "inject_midi":
-                # Used by unit tests and sandbox benchmark harness
-                messages = req.get("messages", [])
-                if not isinstance(messages, list):
-                    raise ValueError("messages must be a list")
-                for m in messages:
-                    self.process_midi_message(m)
                 return self.status()
             if act == "reset_telemetry":
                 self.latency_samples.clear()
@@ -1017,3 +1152,4 @@ class Feature:
                 if self.seq_handle.value:
                     self.asound.snd_seq_close(self.seq_handle)
                     self.seq_handle = ctypes.c_void_p()
+            self.thread = None
