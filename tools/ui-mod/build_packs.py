@@ -4335,7 +4335,7 @@ def edits(dev: bool):
                     objectName: "Mixstream" + modelData.action + pads.deckIndex
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    text: modelData.label
+                    text: typeof root !== "undefined" && root.scT ? root.scT(modelData.label) : modelData.label
                     onClicked: pads.scJump(modelData.action)
                 }
             }
