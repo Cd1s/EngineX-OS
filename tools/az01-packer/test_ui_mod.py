@@ -392,6 +392,27 @@ assert.strictEqual(vfx.enabled, false);
         ):
             self.assertIn(target, SRC)
 
+    def test_display_only_shadow_header_matches_stock_deck_header(self):
+        layer = bp.SHADOW_LAYER
+        for item in (
+            'EngineXEmbedded.TrackDisplayText {',
+            'EngineXEmbedded.JP07SyncIndicator {',
+            'EngineXEmbedded.Bpm {',
+            'EngineXEmbedded.ColoredImage {',
+            'AutoLoop {',
+            'BeatJump {',
+            'SoftTakeoverIndicators {',
+            'SpeedInfo {',
+            'objectName: "EngineX_TrackEndWarning"',
+            'objectName: "Deck_TimeInfo_TextItem"',
+            'objectName: "KeyInfo"',
+            'objectName: "PerformanceView_Deck_BpmInfo"',
+            'color: scHeader.isSync ? Style.active01Color : Style.font02Color',
+            'isMaster: scHeader.isLead',
+            'Planck.getKeyIndex(rawKey)',
+        ):
+            self.assertIn(item, layer)
+
 @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
 class ShadowDisplayTest(unittest.TestCase):
     """Run the actual QML JS functions with a fake clock and an Engine that rejects all access."""

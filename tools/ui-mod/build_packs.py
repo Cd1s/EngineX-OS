@@ -563,10 +563,11 @@ SERVICES_MAIN = """
 	// steady playback then only move the extrapolation anchor (read imperatively
 	// by the displays) instead of re-running every shadow binding per reply.
 	function scShadowSameSample(s, key, e) {
-		if (s.key !== key || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.playing !== !!e.playing ||
-			s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
+		if (s.key !== key || s.name !== (e.name || "") || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.keyName !== (e.keyName || "") ||
+			s.playing !== !!e.playing || s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
-			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
+			s.lead !== (e.lead !== undefined ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
+			s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
 			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail || s.progress !== (Number(e.progress) || 0) || s.error !== (e.error || "") ||
 			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "")) return false
 		if (Array.isArray(e.cues)) {
@@ -601,9 +602,11 @@ SERVICES_MAIN = """
 					continue
 				}
 			}
-			const sample = {key: key, title: e.title || "", artist: e.artist || "", playing: !!e.playing, stale: !!e.stale,
-				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
-				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master, sync: !!e.sync,
+			const sample = {key: key, name: e.name || "", title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
+				playing: !!e.playing, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
+				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
+				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master,
+				lead: e.lead !== undefined ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				jumps: Number(e.jumps) || 0,
 				progress: Number(e.progress) || 0, error: e.error || "", engine: !!e.engine, copying: !!e.copying, durationMs: Number(e.durationMs) || 0,
@@ -1008,7 +1011,7 @@ SERVICES_MAIN = """
 			["cueLED", "/Track/CueLEDState"], ["master", "/DeckIsMaster"], ["sync", "/SyncMode"],
 			["beat", "/BeatNumber"], ["cuePosition", "/Track/CuePosition"], ["title", "/Track/SongName"],
 			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"],
-			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"]])
+			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"], ["currentKey", "/Track/CurrentKey"]])
 			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
 		p.cues = []
 		for (let i = 1; i <= 8; i++) {
@@ -1163,13 +1166,14 @@ SERVICES_MAIN = """
 			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000)
 			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
 			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
-			o.pitch = s.pitch; o.master = s.master || d === lead; o.bpm = s.bpm; o.currentBpm = s.currentBpm
+			o.pitch = s.pitch; o.master = s.master || d === lead; o.lead = s.master; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
 			// Titles arrive after the load: re-read on a new track and every 2 s.
 			if (fresh) {
 				o.title = s.net ? g.title.string || g.trackName.string || "" : ""
 				o.artist = s.net ? g.artist.string || "" : ""
+				o.keyName = s.net && o.title ? g.currentKey.string || "-" : ""
 				const sr = g.rate.value, len = g.length.unnormalized
 				o.durationMs = s.net && sr > 0 && len > 0 ? Math.round(len / sr * 1000) : 0 // the peer tells its shadow deck's track by it
 				scShadowTextAt[d] = !s.net || o.title ? now : 0 // Engine fills SongName after the load: retry until it does
@@ -1184,8 +1188,8 @@ SERVICES_MAIN = """
 				const expect = sent.positionMs + (o.playing ? (o.at - sent.at) * (1 + o.pitch / 100) : 0)
 				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
 			}
-			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
-				sent.title !== o.title || sent.artist !== o.artist || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev) edge = true
+			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
+				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev) edge = true
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -1198,7 +1202,7 @@ SERVICES_MAIN = """
 		for (let n = 0; n < own.length; n++) {
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
-			sent.master = o.master; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.durationMs = o.durationMs
+			sent.master = o.master; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
 			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
 		}
 		scShadowSent.length = own.length
@@ -3471,6 +3475,7 @@ SHADOW_LAYER = r"""
         clip: true
         visible: active && inheritedVisible && owner.width > 0 && owner.height > 0
         color: wave ? "black" : "#101114" // the stock lanes are black: on grey the stock fade over the left edge shows as a band
+        Binding { target: scDisplay; property: "color"; value: "transparent"; when: !scDisplay.graphical; restoreMode: Binding.RestoreBindingOrValue }
         // Stock roots can hide an empty Engine slot. Restore their original bindings on exit;
         // never a value: read while the view was off screen, visible is false, and writing
         // that back hid the stock lane for good (Engine mode showed no waveform).
@@ -3587,7 +3592,7 @@ SHADOW_LAYER = r"""
                 x: scDisplay.screenX(modelData.ms)
                 width: 2; height: scDisplay.height
                 Rectangle { anchors.fill: parent; color: modelData.c || "#26a6ff" }
-                Text { textFormat: Text.PlainText; x: 3; text: modelData.n || String(modelData.i); color: modelData.c || "#26a6ff"; font.pixelSize: 11 }
+                Text { textFormat: Text.PlainText; visible: scDisplay.wave; x: 3; text: modelData.n || String(modelData.i); color: modelData.c || "#26a6ff"; font.pixelSize: 11 }
             }
         }
                 } }
@@ -3611,6 +3616,20 @@ SHADOW_LAYER = r"""
                 color: scMinutes.step > 1 ? Style.active01Color : Style.icon02Color
             }
         }
+        // Stock TrackEndFlashWarning: red flash on the overview when remaining time <= TrackEndWarningTime.
+        Rectangle {
+            objectName: "EngineX_TrackEndWarning"
+            visible: scDisplay.overview
+            anchors.fill: parent
+            readonly property var warnTr: scDisplay.overview ? root.scTr("/Client/Preferences/Profile/Application/TrackEndWarningTime") : null
+            readonly property real warnSec: warnTr ? (parseInt(warnTr.string) || warnTr.unnormalized || 0) : 0
+            readonly property real totalMs: (scDisplay.sample && scDisplay.sample.durationMs) || scDisplay.duration
+            readonly property bool endWarning: scDisplay.overview && !!scDisplay.sample && scDisplay.sample.playing && !scDisplay.stale && totalMs > 0 && warnSec > 0 && totalMs - scDisplay.position > 0 && totalMs - scDisplay.position <= warnSec * 1000
+            readonly property var flashTr: endWarning ? root.scTr("/Engine/Master/GlobalButtonFlashState") : null
+            color: Style.systemRed01Color
+            opacity: endWarning && flashTr && flashTr.state ? 0.7 : 0.0
+            Behavior on opacity { OpacityAnimator { duration: 280 } }
+        }
         Rectangle {
             visible: scDisplay.graphical && !!scDisplay.sample && !scDisplay.sample.engine // a track on its way has no position yet
             x: Math.max(0, Math.min(scDisplay.width - width, scDisplay.playhead * scDisplay.width))
@@ -3628,81 +3647,378 @@ SHADOW_LAYER = r"""
             active: scDisplay.live && !scDisplay.graphical
             anchors.fill: parent
             sourceComponent: Component { Item {
-        Image {
-            id: scCover
-            visible: !scDisplay.graphical && scDisplay.height >= 48 && !!(scDisplay.meta && scDisplay.meta.artworkUrl)
-            source: root.scShadowAsset(scDisplay.meta && scDisplay.meta.artworkUrl)
-            sourceSize.width: 128; sourceSize.height: 128
-            width: visible ? Math.min(64, scDisplay.height) : 0; height: width
-            anchors.verticalCenter: parent.verticalCenter
-            fillMode: Image.PreserveAspectFit; asynchronous: true; cache: false
-        }
-        Column {
-            visible: !scDisplay.graphical
-            x: scCover.width + 4
-            width: scDisplay.width - x - 4
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 2
-            Text { textFormat: Text.PlainText;
-                visible: !scDisplay.performance || scDisplay.height >= 48
-                width: parent.width; elide: Text.ElideRight
-                color: "white"; font.pixelSize: Math.min(18, Math.max(11, scDisplay.height / 3))
-                text: scDisplay.deck + " · " + (scDisplay.sample ? scDisplay.sample.title || (scDisplay.meta && scDisplay.meta.title) || (scDisplay.sample.loading ? "Loading…" : "") : "")
-            }
-            Text { textFormat: Text.PlainText;
-                visible: scDisplay.height >= 58
-                width: parent.width; elide: Text.ElideRight; color: "#aaaaaa"; font.pixelSize: 12
-                text: scDisplay.sample ? scDisplay.sample.artist || (scDisplay.meta && scDisplay.meta.artist) || "" : ""
-            }
-            Item {
-                width: parent.width; height: 16
-                Item {
-                    id: scShadowBpmSlot
-                    width: scShadowBpm.displayWidth
-                    height: parent.height
-                    EngineXEmbedded.Bpm {
-                        id: scShadowBpm
-                        deckIndex: scDisplay.deck
-                        deckLoaded: bpmValue > 0
-                        songAnalyzed: true
-                        decimalPlaces: 2
-                        bpmValue: {
-                            const s = scDisplay.sample, m = scDisplay.meta
-                            return s ? s.currentBpm || (s.bpm || (m && m.bpm) || 0) * (1 + (s.pitch || 0) / 100) : 0
+                id: scHeader
+                anchors.fill: parent
+                readonly property var dv: scDisplay.owner && scDisplay.owner.deckView ? scDisplay.owner.deckView : null
+                readonly property bool groupedMain: !!dv && dv.deckGroupMode === 0 && dv.deckSizeMode === 0
+                readonly property bool splitMain: !!dv && dv.deckGroupMode === 1 && dv.deckSizeMode === 0
+                readonly property bool splitMini: !!dv && dv.deckGroupMode === 1 && dv.deckSizeMode === 1
+                readonly property bool hasBottomRow: !scDisplay.performance && !groupedMain && !splitMain
+                readonly property bool loaded: !!scDisplay.sample
+                readonly property bool isSync: !!(scDisplay.sample && scDisplay.sample.sync)
+                readonly property bool isLead: !!(scDisplay.sample && (scDisplay.sample.lead !== undefined ? scDisplay.sample.lead : scDisplay.sample.master))
+                readonly property bool keyLock: !!(scDisplay.sample && scDisplay.sample.keylock)
+                readonly property real pitchVal: scDisplay.sample ? Math.round((Number(scDisplay.sample.pitch) || 0) * 100) / 100 : 0
+                readonly property string rangeStr: scDisplay.sample && scDisplay.sample.range > 0 ? String(scDisplay.sample.range) : "8"
+                readonly property string deckLabel: "Deck " + scDisplay.deck
+                readonly property string rawTitle: scDisplay.sample ? scDisplay.sample.title || (scDisplay.meta && scDisplay.meta.title) || scDisplay.sample.name || (scDisplay.sample.loading ? "Loading…" : "") : ""
+                readonly property string fileName: scDisplay.sample ? scDisplay.sample.name || rawTitle : ""
+                readonly property string artistName: scDisplay.sample ? scDisplay.sample.artist || (scDisplay.meta && scDisplay.meta.artist) || "" : ""
+                readonly property string artUrl: (scDisplay.meta && scDisplay.meta.artworkUrl ? root.scShadowAsset(scDisplay.meta.artworkUrl) : "") || (dv && dv.artistSongView ? dv.artistSongView.albumArtPath : "")
+                readonly property var timeView: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views && PlanckGUI.views.timeInfoViewController && scDisplay.deck > 0
+                    ? PlanckGUI.views.timeInfoViewController.timeInfoViews[scDisplay.deck - 1] : null
+                readonly property bool timeElapsed: !!(timeView && timeView.flipped)
+                readonly property var timeModeTr: root.scTr("/Client/Preferences/Profile/Application/TimeDisplayMode")
+                readonly property bool timeDynamic: !!(timeModeTr && timeModeTr.index === 0)
+                readonly property real totalMs: (scDisplay.sample && scDisplay.sample.durationMs) || (scDisplay.meta && scDisplay.meta.durationMs) || 0
+                readonly property string timeText: {
+                    if (!loaded || !(totalMs > 0)) return ""
+                    const pos = Math.max(0, Math.min(totalMs, scDisplay.position))
+                    const raw = timeElapsed ? pos : Math.max(0, totalMs - pos)
+                    const rate = timeDynamic ? Math.max(0.01, 1 + pitchVal / 100) : 1
+                    const sec = Math.floor(raw / (rate * 1000))
+                    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60
+                    const pfx = timeElapsed ? "" : "-"
+                    return pfx + (h > 0 ? h + ":" + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s : m + ":" + (s < 10 ? "0" : "") + s)
+                }
+                readonly property var keyModeTr: root.scTr("/Client/Preferences/Profile/Application/KeyDisplayMode")
+                readonly property int keyModeIdx: keyModeTr && keyModeTr.index !== undefined ? keyModeTr.index : 3
+                readonly property var colorizeKeyTr: root.scTr("/Client/Preferences/Profile/Application/ColorizeKey")
+                readonly property bool colorizeKey: !colorizeKeyTr || colorizeKeyTr.state
+                readonly property string rawKey: {
+                    const sk = scDisplay.sample && scDisplay.sample.keyName || ""
+                    if (sk === "-") return ""
+                    return sk || (scDisplay.meta && scDisplay.meta.keyName) || ""
+                }
+                readonly property string keyText: {
+                    if (!rawKey) return "-"
+                    const idx = typeof Planck !== "undefined" && Planck && Planck.getKeyIndex ? Planck.getKeyIndex(rawKey) : -1
+                    if (idx < 0 || idx >= 24) return rawKey
+                    const tables = [
+                        ["C","Am","G","Em","D","Bm","A","F#m","E","C#m","B","G#m","F#","D#m","C#","A#m","G#","Fm","D#","Cm","A#","Gm","F","Dm"],
+                        ["C","Am","G","Em","D","Bm","A","Gbm","E","Dbm","B","Abm","Gb","Ebm","Db","Bbm","Ab","Fm","Eb","Cm","Bb","Gm","F","Dm"],
+                        ["1d","1m","2d","2m","3d","3m","4d","4m","5d","5m","6d","6m","7d","7m","8d","8m","9d","9m","10d","10m","11d","11m","12d","12m"],
+                        ["8B","8A","9B","9A","10B","10A","11B","11A","12B","12A","1B","1A","2B","2A","3B","3A","4B","4A","5B","5A","6B","6A","7B","7A"]
+                    ]
+                    const tbl = tables[keyModeIdx] || tables[3]
+                    return tbl[idx] || rawKey
+                }
+                readonly property color keyColor: keyText !== "-" && colorizeKey && root && root.getColorForKey
+                    ? root.getColorForKey(keyText, Style.font01Color)
+                    : (keyLock ? Style.active01Color : Style.font01Color)
+                RowLayout {
+                    visible: !scDisplay.performance
+                    anchors.fill: parent
+                    spacing: scHeader.splitMain || scHeader.splitMini ? 16 : 8
+                    Item {
+                        Layout.fillHeight: true
+                        Layout.minimumWidth: height
+                        Layout.maximumWidth: height
+                        Image {
+                            id: scCover
+                            anchors.fill: parent
+                            antialiasing: true
+                            fillMode: Image.PreserveAspectCrop
+                            asynchronous: true
+                            cache: false
+                            source: scHeader.artUrl
                         }
-                        fractionSeparator: "."
-                        emptyIntegral: ""
-                        animateWhenUnanalysed: false
-                        font: Qt.font({pixelSize: 12})
-                        fractionFont: font
-                        color: "#dddddd"
-                        fractionColor: color
-                        fractionalBottomMargin: 0
+                    }
+                    ColumnLayout {
+                        Layout.fillHeight: true
+                        Layout.fillWidth: true
+                        spacing: 0
+                        RowLayout {
+                            Layout.fillHeight: true
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Layout.bottomMargin: scHeader.hasBottomRow ? 4 : 0
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                Layout.rightMargin: 8
+                                spacing: 0
+                                EngineXEmbedded.TrackDisplayText {
+                                    id: scTitleDisplay
+                                    respectHideTitleArtist: true
+                                    filename: scHeader.fileName
+                                    title: scHeader.rawTitle
+                                    providerName: ""
+                                }
+                                Text {
+                                    objectName: "Deck_Title"
+                                    Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignVCenter
+                                    elide: Text.ElideRight
+                                    font: scHeader.splitMain ? Style.fontDisplay : scHeader.groupedMain ? Style.fontH1 : Style.fontH0
+                                    color: Style.font02Color
+                                    text: scHeader.loaded ? (scTitleDisplay.display || scHeader.rawTitle) : scHeader.deckLabel
+                                    textFormat: Text.PlainText
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                                Text {
+                                    objectName: "Deck_Artist"
+                                    Layout.fillWidth: true
+                                    Layout.alignment: Qt.AlignVCenter
+                                    visible: !scHeader.loaded || (!scHeader.hasBottomRow && !scTitleDisplay.hideTitleArtist && scHeader.artistName.length > 0)
+                                    elide: Text.ElideRight
+                                    font: scHeader.splitMain ? Style.fontH1 : Style.fontH3
+                                    color: Style.font01Color
+                                    text: scHeader.loaded ? (scTitleDisplay.hideTitleArtist ? "" : scHeader.artistName) : "No Track Loaded"
+                                    textFormat: Text.PlainText
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                            }
+                            RowLayout {
+                                Layout.preferredHeight: 26
+                                spacing: 0
+                                visible: scHeader.loaded
+                                Layout.bottomMargin: 3
+                                Layout.topMargin: 3
+                                Item {
+                                    Layout.fillHeight: true
+                                    Layout.rightMargin: scHeader.splitMain ? 40 : 16
+                                    implicitWidth: scTimeText.implicitWidth
+                                    Text {
+                                        id: scTimeText
+                                        objectName: "Deck_TimeInfo_TextItem"
+                                        anchors.centerIn: parent
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignBottom
+                                        textFormat: Text.PlainText
+                                        font: scHeader.splitMain ? Style.fontDisplay : scHeader.splitMini ? Style.fontTitle : Style.fontH0
+                                        color: scHeader.timeText !== "" ? Style.font02Color : Style.font01Color
+                                        text: scHeader.timeText
+                                    }
+                                    MouseArea {
+                                        anchors.centerIn: parent
+                                        width: parent.width
+                                        height: parent.height + 24
+                                        onPressed: if (scHeader.timeView) scHeader.timeView.flip()
+                                    }
+                                }
+                                Rectangle { width: 1; height: scHeader.splitMain || scHeader.splitMini ? 56 : scHeader.groupedMain ? 32 : 20; Layout.alignment: Qt.AlignVCenter; color: Style.surface03Color }
+                                Item {
+                                    id: scKeyItem
+                                    objectName: "KeyInfo"
+                                    Layout.fillHeight: true
+                                    readonly property int horizontalSpacing: scHeader.splitMain || scHeader.splitMini ? 36 : 18
+                                    readonly property int internalSpacing: 5
+                                    Layout.preferredWidth: horizontalSpacing * 2 + scKeyText.width + scKeyIcon.width + 4
+                                    RowLayout {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        spacing: 0
+                                        Item { Layout.fillWidth: true; Layout.preferredHeight: 1 }
+                                        Text {
+                                            id: scKeyText
+                                            text: scHeader.keyText
+                                            font: scHeader.splitMain ? Style.fontDisplay : scHeader.splitMini ? Style.fontTitle : Style.fontH0
+                                            Layout.alignment: Qt.AlignBaseline
+                                            Layout.topMargin: scKeyMetrics.height % 2 ? 0 : 1
+                                            color: scHeader.keyColor
+                                            readonly property int pixelHeight: font.pixelSize
+                                            TextMetrics {
+                                                id: scKeyMetrics
+                                                font: scKeyText.font
+                                                text: scHeader.keyText
+                                            }
+                                        }
+                                        Item { Layout.preferredWidth: scKeyItem.internalSpacing; Layout.preferredHeight: 1 }
+                                        EngineXEmbedded.ColoredImage {
+                                            id: scKeyIcon
+                                            source: scHeader.splitMain ? "qrc:/@ICONS@/KeyLock.png" : "qrc:/@ICONS@/KeyLock2.png"
+                                            color: scHeader.keyLock ? scKeyText.color : Style.disabled01Color
+                                            property real scale: (scKeyText.pixelHeight * 0.75) / src.implicitHeight
+                                            implicitHeight: src.implicitHeight * scale
+                                            implicitWidth: src.implicitWidth * scale
+                                            Layout.bottomMargin: scKeyIcon.implicitHeight % 2 ? 2 : 3
+                                        }
+                                        Item { Layout.fillWidth: true; Layout.preferredHeight: 1 }
+                                    }
+                                }
+                                Rectangle { width: 1; height: scHeader.splitMain || scHeader.splitMini ? 56 : scHeader.groupedMain ? 32 : 20; Layout.alignment: Qt.AlignVCenter; color: Style.surface03Color }
+                                Item {
+                                    objectName: "PerformanceView_Deck_BpmInfo"
+                                    Layout.leftMargin: 16
+                                    Layout.preferredWidth: scHeader.splitMain ? 184 : scHeader.splitMini ? 148 : scHeader.groupedMain ? 104 : 88
+                                    Layout.minimumWidth: scShadowBpm.displayWidth
+                                    Layout.fillHeight: true
+                                    Item {
+                                        id: scShadowBpmSlot
+                                        width: scShadowBpm.displayWidth
+                                        height: scShadowBpm.implicitHeight
+                                        anchors.centerIn: parent
+                                        EngineXEmbedded.Bpm {
+                                            id: scShadowBpm
+                                            deckIndex: scDisplay.deck
+                                            deckLoaded: scHeader.loaded
+                                            songAnalyzed: bpmValue > 0
+                                            decimalPlaces: 2
+                                            bpmValue: {
+                                                const s = scDisplay.sample, m = scDisplay.meta
+                                                return s ? s.currentBpm || (s.bpm || (m && m.bpm) || 0) * (1 + (s.pitch || 0) / 100) : 0
+                                            }
+                                            fractionSeparator: "."
+                                            emptyIntegral: "-"
+                                            animateWhenUnanalysed: false
+                                            font: Style.makeFont(Style.fontDisplay.family, scHeader.splitMain ? 72 : scHeader.splitMini ? 48 : 36, Font.Normal)
+                                            fractionFont: font
+                                            color: scHeader.isSync ? Style.active01Color : Style.font02Color
+                                            fractionColor: color
+                                            fractionalBottomMargin: 0
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            visible: scHeader.loaded && scHeader.hasBottomRow
+                            AutoLoop {
+                                Layout.alignment: Qt.AlignLeft
+                                Layout.preferredWidth: 52
+                                view: scHeader.dv ? scHeader.dv.autoLoopView : null
+                                spacing: 4
+                                iconWidth: 16
+                                iconHeight: 10
+                                textFont: Style.fontH3
+                            }
+                            BeatJump {
+                                view: scHeader.dv ? scHeader.dv.beatJumpView : null
+                                deckIndex: scDisplay.deck
+                                spacing: 4
+                                iconWidth: 16
+                                iconHeight: 10
+                                textFont: Style.fontH3
+                                Layout.preferredWidth: 64
+                                Layout.alignment: Qt.AlignLeft
+                                visible: Config.audio.deck.hasBeatJump
+                            }
+                            Rectangle { width: 1; height: 18; Layout.alignment: Qt.AlignVCenter; color: Style.surface03Color }
+                            EngineXEmbedded.JP07SyncIndicator {
+                                Layout.preferredHeight: 24
+                                Layout.fillWidth: true
+                                Layout.maximumWidth: 200
+                                Layout.alignment: Qt.AlignCenter
+                                deckIndex: scDisplay.deck
+                                isMaster: scHeader.isLead
+                            }
+                            Rectangle { width: 1; height: 18; Layout.alignment: Qt.AlignVCenter; color: Style.surface03Color }
+                            Item {
+                                Layout.alignment: Qt.AlignVCenter
+                                Layout.preferredHeight: 22
+                                Layout.minimumWidth: 96
+                                Layout.preferredWidth: 96
+                                Layout.maximumWidth: 96
+                                RowLayout {
+                                    objectName: "EngineX_ShadowCueCountdown"
+                                    anchors.fill: parent
+                                    readonly property var info: scDisplay.cueInfo
+                                    visible: info !== null && root.scCueCountdown
+                                    spacing: 4
+                                    Rectangle { width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: parent.info ? parent.info.color : "transparent" }
+                                    Text { Layout.fillWidth: true; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== ""; text: parent.info ? parent.info.label : "" }
+                                    Text { font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
+                                }
+                            }
+                            SoftTakeoverIndicators {
+                                speedOffsetIsUp: false
+                                speedOffsetIsDown: false
+                            }
+                            SpeedInfo {
+                                Layout.fillHeight: true
+                                speedState: scHeader.pitchVal
+                                speedRange: scHeader.rangeStr
+                                speedRangeTextFont: Style.fontH1
+                                speedStateTextFont: Style.fontH1
+                                speedRangeTextHorizontalAlignment: Text.AlignRight
+                                speedStateTextHorizontalAlignment: Text.AlignRight
+                                textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter
+                                flat: true
+                            }
+                        }
                     }
                 }
-                Text { textFormat: Text.PlainText;
-                    x: scShadowBpmSlot.width
-                    width: Math.max(0, parent.width - x - scBadges.width - 4)
-                    elide: Text.ElideRight; color: "#dddddd"; font.pixelSize: 12
-                    text: {
-                        const s = scDisplay.sample, m = scDisplay.meta
-                        if (!s) return ""
-                        const cue = scDisplay.cueInfo && root.scCueCountdown ? "   " + scDisplay.cueInfo.label + " " + scDisplay.cueInfo.text : ""
-                        const pitch = Math.round(s.pitch * 100) / 100 || 0 // as the source's header: ±8  +0.01%
-                        const speed = s.range > 0 ? "   \u00b1" + s.range + "  " + (pitch > 0 ? "+" : "") + pitch.toFixed(2) + "%" : ""
-                        // A track on its way: its length, as the stock header shows at once.
-                        const sec = s.loading && s.durationMs > 0 ? Math.floor(s.durationMs / 1000) : 0
-                        const length = sec > 0 ? "   " + Math.floor(sec / 60) + ":" + (sec % 60 < 10 ? "0" : "") + sec % 60 : ""
-                        return (scShadowBpm.deckLoaded ? " BPM" : "") + speed + "   " + (m && m.keyName || "") + length + cue
+                RowLayout {
+                    visible: scDisplay.performance && scHeader.loaded
+                    anchors.fill: parent
+                    spacing: 0
+                    AutoLoop {
+                        Layout.fillHeight: true
+                        Layout.preferredWidth: 52
+                        Layout.rightMargin: 4
+                        view: scHeader.dv ? scHeader.dv.autoLoopView : null
+                        spacing: 4
+                        iconWidth: 16
+                        iconHeight: 10
+                        textFont: Style.fontH3
+                    }
+                    BeatJump {
+                        Layout.fillHeight: true
+                        Layout.preferredWidth: 64
+                        view: scHeader.dv ? scHeader.dv.beatJumpView : null
+                        deckIndex: scDisplay.deck
+                        spacing: 4
+                        iconWidth: 16
+                        iconHeight: 10
+                        textFont: Style.fontH3
+                        visible: Config.audio.deck.hasBeatJump
+                    }
+                    Rectangle { Layout.fillHeight: true; Layout.topMargin: 2; Layout.bottomMargin: 2; width: 1; color: Style.surface03Color }
+                    EngineXEmbedded.JP07SyncIndicator {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 24
+                        Layout.maximumWidth: 200
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.alignment: Qt.AlignCenter
+                        deckIndex: scDisplay.deck
+                        isMaster: scHeader.isLead
+                    }
+                    Rectangle { Layout.fillHeight: true; Layout.topMargin: 2; Layout.bottomMargin: 2; width: 1; color: Style.surface03Color }
+                    Item {
+                        Layout.alignment: Qt.AlignVCenter
+                        Layout.preferredHeight: 22
+                        Layout.minimumWidth: 96
+                        Layout.preferredWidth: 96
+                        Layout.maximumWidth: 96
+                        RowLayout {
+                            objectName: "EngineX_ShadowCueCountdown"
+                            anchors.fill: parent
+                            readonly property var info: scDisplay.cueInfo
+                            visible: info !== null && root.scCueCountdown
+                            spacing: 4
+                            Rectangle { width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: parent.info ? parent.info.color : "transparent" }
+                            Text { Layout.fillWidth: true; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== ""; text: parent.info ? parent.info.label : "" }
+                            Text { font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
+                        }
+                    }
+                    SoftTakeoverIndicators {
+                        Layout.alignment: Qt.AlignCenter
+                        Layout.leftMargin: 8
+                        Layout.rightMargin: 12
+                        flow: Flow.LeftToRight
+                        spacing: -4
+                        speedOffsetIsUp: false
+                        speedOffsetIsDown: false
+                    }
+                    SpeedInfo {
+                        Layout.fillHeight: true
+                        speedState: scHeader.pitchVal
+                        speedRange: scHeader.rangeStr
+                        speedRangeTextFont: Style.fontH1
+                        speedRangeTextWidth: 80
+                        speedRangeTextHorizontalAlignment: Text.AlignHCenter
+                        speedStateTextFont: Style.fontH1
+                        speedStateTextWidth: 80
+                        speedStateTextHorizontalAlignment: Text.AlignRight
+                        textLayoutAlignment: Qt.AlignCenter
+                        columnSpacing: 0
+                        flat: true
                     }
                 }
-                Text { textFormat: Text.PlainText;
-                    id: scBadges
-                    anchors.right: parent.right; color: "#eeeeee"; font.pixelSize: 11
-                    text: !scDisplay.sample ? "" : (scDisplay.sample.master ? "MASTER " : "") + (scDisplay.sample.sync ? "SYNC " : "") + (scDisplay.stale ? "OFFLINE" : "")
-                }
-            }
-        }
             } }
         }
 @BUSY@        // Covers remote Stems, needle-drop, grid editing and transport touch targets.
@@ -3810,7 +4126,13 @@ def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
         value = f'(typeof owner.{native} !== "undefined" ? owner.{native} : {default})' if kind == "waveform" else str(default)
         palette.append(f"readonly property real {prop}: {value}")
     busy = SHADOW_BUSY.lstrip("\n").replace("@RING@", SHADOW_RING.lstrip("\n") if ring else "") if kind == "waveform" else ""
-    layer = SHADOW_LAYER.replace("@BUSY@", busy).replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette))
+    icons = "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons"
+    raw_layer = SHADOW_LAYER
+    if kind in ("waveform", "overview"):
+        h_start = raw_layer.index("        Loader {\n            active: scDisplay.live && !scDisplay.graphical\n")
+        h_end = raw_layer.index("@BUSY@")
+        raw_layer = raw_layer[:h_start] + raw_layer[h_end:]
+    layer = raw_layer.replace("@BUSY@", busy).replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette)).replace("@ICONS@", icons)
     return text[:end] + layer + text[end:]
 
 
@@ -3822,7 +4144,9 @@ def shadow_targets(qrc: Path):
         v + "Common/Waveform/Waveform.qml": "waveform",
         v + "Common/WaveformOverview/WaveformOverview.qml": "overview",
         composite + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml": "track",
+        composite + "DeckTrackData/GroupedMainDeckTrackDataContent.qml": "track",
         composite + "DeckTrackData/SplitMiniDeckTrackDataContent.qml": "track",
+        composite + "DeckTrackData/SplitMainDeckTrackDataContent.qml": "track",
         composite + "DeckTrackData/DeckTrackDataContent.qml": "track",
         composite + "DeckPerformanceData/DeckPerformanceDataContent.qml": "performance",
         composite + "DeckPerformanceData/PortraitDeckPerformanceDataContent.qml": "performance",
