@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -180,6 +181,9 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		if r.get("bpmx100") != "" || bpm > 1000 {
 			bpm /= 100
 		}
+		if bpm < 0 || bpm > 1000 || math.IsNaN(bpm) || math.IsInf(bpm, 0) {
+			bpm = 0
+		}
 		key := r.get("key_name")
 		if key == "" {
 			key = lookups["key"][r.num("key_id")]
@@ -223,11 +227,17 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		}
 		grouped[id] = append(grouped[id], entry{r.num("sequenceNo", "track_no", "seq", "entry_index", "position"), r.num("content_id", "track_id")})
 	}
+	knownTracks := make(map[uint32]bool, len(l.Tracks))
+	for _, tr := range l.Tracks {
+		knownTracks[tr.ID] = true
+	}
 	for i, p := range l.Playlists {
 		xs := grouped[p.ID]
 		sort.SliceStable(xs, func(i, j int) bool { return xs[i].seq < xs[j].seq })
 		for _, x := range xs {
-			l.Playlists[i].Tracks = append(l.Playlists[i].Tracks, x.id)
+			if knownTracks[x.id] {
+				l.Playlists[i].Tracks = append(l.Playlists[i].Tracks, x.id)
+			}
 		}
 	}
 	return l, nil

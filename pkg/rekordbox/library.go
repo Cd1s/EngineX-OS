@@ -71,8 +71,14 @@ func (l *Library) Validate() error {
 		if t.Path == "" {
 			return fmt.Errorf("rekordbox: track %d has no path", t.ID)
 		}
-		if math.IsNaN(t.BPM) || math.IsInf(t.BPM, 0) || t.BPM < 0 || t.BPM > 1000 || math.IsNaN(t.Duration) || math.IsInf(t.Duration, 0) || t.Duration < 0 || t.Duration > 1e7 || t.SampleRate < 0 || t.SampleRate > 768000 {
-			return fmt.Errorf("rekordbox: invalid audio metadata for track %d", t.ID)
+		if math.IsNaN(t.BPM) || math.IsInf(t.BPM, 0) || t.BPM < 0 || t.BPM > 1000 {
+			t.BPM = 0
+		}
+		if math.IsNaN(t.Duration) || math.IsInf(t.Duration, 0) || t.Duration < 0 || t.Duration > 1e7 {
+			t.Duration = 0
+		}
+		if t.SampleRate < 0 || t.SampleRate > 768000 {
+			t.SampleRate = 0
 		}
 		if t.RecordHash == "" {
 			t.RecordHash = RecordHash(*t)
@@ -80,30 +86,52 @@ func (l *Library) Validate() error {
 	}
 	parents := map[uint32]uint32{}
 	names := map[string]bool{}
-	for _, p := range l.Playlists {
+	for i := range l.Playlists {
+		p := &l.Playlists[i]
 		if _, ok := parents[p.ID]; p.ID == 0 || ok {
 			return fmt.Errorf("rekordbox: duplicate/zero playlist id %d", p.ID)
 		}
 		parents[p.ID] = p.ParentID
 		k := fmt.Sprintf("%d/%s", p.ParentID, p.Name)
 		if names[k] {
-			return fmt.Errorf("rekordbox: duplicate sibling playlist %q", p.Name)
+			baseName := p.Name
+			for count := 2; ; count++ {
+				cand := fmt.Sprintf("%s (%d)", baseName, count)
+				candKey := fmt.Sprintf("%d/%s", p.ParentID, cand)
+				if !names[candKey] {
+					p.Name = cand
+					names[candKey] = true
+					break
+				}
+			}
+		} else {
+			names[k] = true
 		}
-		names[k] = true
+		validTracks := make([]uint32, 0, len(p.Tracks))
 		for _, id := range p.Tracks {
-			if !tracks[id] {
-				return fmt.Errorf("rekordbox: playlist %d references absent track %d", p.ID, id)
+			if tracks[id] {
+				validTracks = append(validTracks, id)
 			}
 		}
+		p.Tracks = validTracks
+	}
+	for i := range l.Playlists {
+		p := &l.Playlists[i]
+		if p.ParentID != 0 {
+			if _, ok := parents[p.ParentID]; !ok {
+				p.ParentID = 0
+			}
+		}
+	}
+	parents = map[uint32]uint32{}
+	for _, p := range l.Playlists {
+		parents[p.ID] = p.ParentID
 	}
 	for id := range parents {
 		seen := map[uint32]bool{}
 		for p := id; p != 0; p = parents[p] {
 			if seen[p] {
 				return fmt.Errorf("rekordbox: playlist cycle at %d", p)
-			}
-			if _, ok := parents[p]; !ok {
-				return fmt.Errorf("rekordbox: missing parent %d", p)
 			}
 			seen[p] = true
 		}

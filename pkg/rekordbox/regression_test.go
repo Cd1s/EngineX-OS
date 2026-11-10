@@ -129,3 +129,97 @@ func TestAnalysisIgnoresTrailingPadding(t *testing.T) {
 		t.Fatalf("padded ANLZ rejected: %v", e)
 	}
 }
+
+func TestPDBUnanalyzedBPMOverflow(t *testing.T) {
+	b := testfixture.PDB()
+	const ps = testfixture.PageSize
+	// Mutate track 1 tempo to 0xFFFFFFFF (unanalyzed/raw in Rekordbox 5)
+	le.PutUint32(b[2*ps+40+56:], 0xffffffff)
+	l, err := ParsePDB(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		t.Fatalf("ParsePDB failed on 0xFFFFFFFF BPM: %v", err)
+	}
+	if l.Tracks[0].BPM != 0 {
+		t.Fatalf("expected 0 BPM for unanalyzed track, got %f", l.Tracks[0].BPM)
+	}
+}
+
+func TestPDBOrphanPlaylistEntries(t *testing.T) {
+	b := testfixture.PDB()
+	const ps = testfixture.PageSize
+	// Table 4 (type 8, playlist entries) is at page 6 (index 6*ps)
+	p := b[6*ps : 7*ps]
+	// Add an entry pointing to non-existent track 999
+	entryBytes := make([]byte, 12)
+	le.PutUint32(entryBytes, 99)      // order
+	le.PutUint32(entryBytes[4:], 999) // non-existent track
+	le.PutUint32(entryBytes[8:], 12)  // playlist 12
+	off := 40 + int(le.Uint16(p[30:]))
+	copy(p[off:], entryBytes)
+	le.PutUint16(p[30:], uint16(off+len(entryBytes)-40))
+	count := int(le.Uint16(p[24:]))
+	base := ps - (count/16)*36
+	le.PutUint16(p[base-6-2*(count%16):], uint16(off-40))
+	flags := le.Uint16(p[base-4:])
+	le.PutUint16(p[base-4:], flags|1<<uint(count%16))
+	le.PutUint16(p[24:], uint16(count+1))
+
+	l, err := ParsePDB(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		t.Fatalf("ParsePDB rejected orphan playlist entry: %v", err)
+	}
+	for _, p := range l.Playlists {
+		for _, tid := range p.Tracks {
+			if tid == 999 {
+				t.Fatalf("orphan track 999 was not filtered from playlist %d", p.ID)
+			}
+		}
+	}
+}
+
+func TestValidateResilientDuplicateSiblingPlaylists(t *testing.T) {
+	l := &Library{
+		Tracks: []Track{
+			{ID: 1, Path: "/Contents/test.mp3", BPM: 120.0, Duration: 180},
+		},
+		Playlists: []Playlist{
+			{ID: 1, ParentID: 0, Name: "Favorites", Tracks: []uint32{1}},
+			{ID: 2, ParentID: 0, Name: "Favorites", Tracks: []uint32{1}},
+		},
+	}
+	if err := l.Validate(); err != nil {
+		t.Fatalf("Validate failed on duplicate sibling playlists: %v", err)
+	}
+	if l.Playlists[0].Name == l.Playlists[1].Name {
+		t.Fatalf("duplicate sibling playlist was not disambiguated: %q vs %q", l.Playlists[0].Name, l.Playlists[1].Name)
+	}
+}
+
+func TestValidateResilientDanglingParent(t *testing.T) {
+	l := &Library{
+		Tracks: []Track{
+			{ID: 1, Path: "/Contents/test.mp3", BPM: 120.0, Duration: 180},
+		},
+		Playlists: []Playlist{
+			{ID: 10, ParentID: 999, Name: "Subtree Parent", Folder: true},
+			{ID: 20, ParentID: 10, Name: "Nested Folder", Folder: true},
+			{ID: 30, ParentID: 20, Name: "Leaf Playlist", Tracks: []uint32{1}},
+		},
+	}
+	if err := l.Validate(); err != nil {
+		t.Fatalf("Validate failed on dangling parent: %v", err)
+	}
+	byID := map[uint32]Playlist{}
+	for _, p := range l.Playlists {
+		byID[p.ID] = p
+	}
+	if byID[10].ParentID != 0 {
+		t.Fatalf("expected root of orphan subtree (10) to be reset to 0, got %d", byID[10].ParentID)
+	}
+	if byID[20].ParentID != 10 {
+		t.Fatalf("expected nested folder (20) to retain parent 10, got %d", byID[20].ParentID)
+	}
+	if byID[30].ParentID != 20 {
+		t.Fatalf("expected leaf playlist (30) to retain parent 20, got %d", byID[30].ParentID)
+	}
+}
