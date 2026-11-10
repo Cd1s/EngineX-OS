@@ -112,6 +112,12 @@ type peerDeck struct {
 	// from until the next bump. Updates on this line do not bump (see takePeer).
 	anchorPos float64
 	anchorAt  time.Time
+	local     string // this deck's own copy of the track, see localPeerTrack
+}
+
+type peerLocalFile struct {
+	file, key string
+	at        time.Time
 }
 
 // Tolerances of samePeerPicture: a playing deck's position may run this far off
@@ -174,11 +180,12 @@ type shadowState struct {
 	ownPostAt     int64                // the QML's clock on the newest post
 	peers         map[string]time.Time // EngineX players heard on the beacon
 	peerDecks     map[int]peerDeck
-	peerSeq       map[string]int64  // newest Seq per peer (Engine Link id, else address)
-	ver           uint64            // bumped on every new peer update
-	notify        chan struct{}     // closed on the bump: wakes the long polls
-	conn          *net.UDPConn      // the beacon socket while shadowLoop runs
-	files         map[string]string // track key -> local copy
+	peerLocal     map[string]peerLocalFile // by TrackNetworkPath
+	peerSeq       map[string]int64         // newest Seq per peer (Engine Link id, else address)
+	ver           uint64                   // bumped on every new peer update
+	notify        chan struct{}            // closed on the bump: wakes the long polls
+	conn          *net.UDPConn             // the beacon socket while shadowLoop runs
+	files         map[string]string        // track key -> local copy
 	busy          map[string]bool
 	used          map[string]time.Time // when a shadow deck last wanted a copy
 	polled        time.Time

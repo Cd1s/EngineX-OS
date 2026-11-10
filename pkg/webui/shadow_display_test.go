@@ -1109,3 +1109,84 @@ func TestConsoleLineKeepsSCPlayerSlots(t *testing.T) {
 		}
 	}
 }
+
+func TestOverviewHalfWaveGrowsFromTheBottomEdge(t *testing.T) {
+	q := url.Values{"low": {"0000ff"}, "mid": {"00ff00"}, "high": {"ff0000"}, "saturation": {"1"}, "brightAmp": {"1"}, "brightGain": {"1"}, "brightFloor": {"0"}}
+	wave := enginedb.DisplayWave{Bands: []byte{64, 32, 16}} // a quiet column: 112/255 of the height
+	for _, half := range []bool{false, true} {
+		if half {
+			q.Set("half", "1")
+		}
+		style, err := parseShadowWaveStyle(q)
+		if err != nil || style.Half != half {
+			t.Fatalf("style: %+v %v", style, err)
+		}
+		b, err := renderShadowWaveStyle(wave, 1, 64, style)
+		if err != nil {
+			t.Fatal(err)
+		}
+		img, err := png.Decode(bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		drawn := func(y int) bool { _, _, _, a := img.At(0, y).RGBA(); return a != 0 }
+		if half { // the local Praline overview: 29 rows up from the bottom edge
+			if !drawn(63) || !drawn(35) || drawn(34) || drawn(0) {
+				t.Fatal("half wave must grow from the bottom edge")
+			}
+		} else if !drawn(32) || !drawn(31) || drawn(63) || drawn(0) || drawn(16) != drawn(47) {
+			t.Fatal("default stays mirrored around the centre")
+		}
+	}
+}
+
+func TestDisplayPeerTrackOnOwnDrive(t *testing.T) {
+	// The peer has no drive: it plays our file over Engine's network, cannot
+	// read its analysis and sends no Key. This deck's own library has it.
+	_, root, db := testlibrary.Create(t)
+	p, err := enginedb.EncodePerformance(rekordbox.Track{Duration: 4, SampleRate: 44100}, &rekordbox.Analysis{Beats: []rekordbox.Beat{{TimeMS: 0, BPM: 120, Number: 1}, {TimeMS: 500, BPM: 120, Number: 2}}, Waveforms: []rekordbox.Waveform{{Tag: "PWV7", EntryBytes: 3, Data: []byte{100, 50, 25}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO Track(path,filename,title,artist,bpmAnalyzed,key,isAnalyzed) VALUES('../Contents/song.flac','song.flac','Title','Artist',120,1,0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?`, p.TrackData, p.Overview, p.Beats, p.QuickCues, p.Loops); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(root, "Contents"), 0700)
+	if err = os.WriteFile(filepath.Join(root, "Contents/song.flac"), []byte("audio"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Config{UIDir: filepath.Join(t.TempDir(), "ui"), StateDir: t.TempDir()}, nil)
+	s.shadow.dataRoot, s.shadow.mediaRoot = t.TempDir(), filepath.Dir(root)
+	now := time.Now()
+	peer := peerDeck{deckState: deckState{Deck: 1, Net: "net://uuid/" + filepath.Base(root) + " (USB 3)/Contents/song.flac", Title: "From the peer"}, ip: "127.0.0.1", at: now}
+	s.shadow.peerDecks[1] = peer
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		d := s.shadowCompose("24", now)
+		if len(d) != 1 || d[0].Key == "" || d[0].Path != "" || d[0].Net != "" {
+			t.Fatalf("display state: %+v", d)
+		}
+		if !d[0].Loading {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("display never ready")
+		}
+	}
+	local := s.localPeerTrack(peer, now)
+	s.shadow.display.mu.Lock()
+	e := s.shadow.display.entries[displayPeerID(local)]
+	s.shadow.display.mu.Unlock()
+	if e == nil || e.asset == nil || e.asset.Title != "Title" || len(e.asset.Beats) != 2 || len(e.overview) == 0 {
+		t.Fatalf("own library not used: %+v", e)
+	}
+	if !s.shadowSourceLoaded(local.Key) {
+		t.Fatal("the envelope worker would drop a peer track on our drive")
+	}
+	peer.Net = "net://uuid/USB/elsewhere.flac"
+	if got := s.localPeerTrack(peer, now); got.Key != "" || got.local != "" {
+		t.Fatalf("a track that is not on this deck got a key: %+v", got)
+	}
+}

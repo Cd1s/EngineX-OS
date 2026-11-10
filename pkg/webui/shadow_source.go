@@ -84,6 +84,11 @@ func (s *Server) shadowSourceLoaded(key string) bool {
 			return true
 		}
 	}
+	for _, p := range s.shadow.peerDecks { // a peer's track on our own drive
+		if c := s.shadow.peerLocal[p.Net]; p.Key == "" && c.file != "" && c.key == key {
+			return true
+		}
+	}
 	return false
 }
 

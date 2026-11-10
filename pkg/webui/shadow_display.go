@@ -97,6 +97,35 @@ func displayPeerID(p peerDeck) string {
 	return fmt.Sprintf("peer:%s:%d:%s", id, p.Deck, p.Key)
 }
 
+// localPeerTrack covers a peer that plays a track from this deck's drive over
+// Engine's network: it has no file to analyse and sends no Key, but the same
+// file and its analysis are here. Display data only, as for any peer track.
+func (s *Server) localPeerTrack(p peerDeck, now time.Time) peerDeck {
+	if p.Key != "" || p.Net == "" {
+		return p
+	}
+	sh := s.shadow
+	sh.mu.Lock()
+	c, ok := sh.peerLocal[p.Net]
+	sh.mu.Unlock()
+	if !ok || (c.file == "" && now.Sub(c.at) > 2*time.Second) {
+		c = peerLocalFile{at: now}
+		if f := resolveNetPathFile(p.Net, sh.dataRoot, sh.mediaRoot, false); f != "" {
+			if st, err := os.Stat(f); err == nil {
+				c.file, c.key = f, fmt.Sprintf("local-%x", fnvSum(fmt.Sprintf("%s %d %d", f, st.Size(), st.ModTime().UnixNano())))
+			}
+		}
+		sh.mu.Lock()
+		if sh.peerLocal == nil || len(sh.peerLocal) >= 8 {
+			sh.peerLocal = map[string]peerLocalFile{}
+		}
+		sh.peerLocal[p.Net] = c
+		sh.mu.Unlock()
+	}
+	p.Key, p.local = c.key, c.file
+	return p
+}
+
 func displayTrackKey(p peerDeck) string {
 	if p.Key == "" {
 		return ""
@@ -176,6 +205,7 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 			free = append(free, deck)
 			continue
 		}
+		p = s.localPeerTrack(p, now)
 		d := p.deckState
 		d.Deck, d.Key = deck, displayTrackKey(p)
 		d.LineIn = false
@@ -431,45 +461,54 @@ func (s *Server) fetchShadowDisplay(p peerDeck, id string, slot *shadowDisplayEn
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	u := fmt.Sprintf("http://%s/peer/decks/%d/display?key=%s", net.JoinHostPort(p.ip, strconv.Itoa(port)), p.Deck, url.QueryEscape(p.Key))
-	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
-	// A peer must not redirect this read-only request to arbitrary URLs.
-	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req)
 	var a *shadowDisplayAsset
 	var wave, overview []byte
-	if err == nil {
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			err = fmt.Errorf("display peer: HTTP %d", resp.StatusCode)
-		} else {
-			var b []byte
-			b, err = io.ReadAll(io.LimitReader(resp.Body, shadowDisplayLimit+1))
-			if err == nil && len(b) > shadowDisplayLimit {
-				err = fmt.Errorf("display peer: response too large")
-			}
-			if err == nil {
-				a = &shadowDisplayAsset{}
-				err = json.Unmarshal(b, a)
-			}
-			if err == nil {
-				err = validateDisplayAsset(a, p.Key)
-			}
-			if err == nil && a.Waveform != nil {
-				w := downsampleDisplayWave(*a.Waveform, 65536)
-				a.Waveform = &w
-			}
-			if err == nil {
-				overview, err = renderShadowWave(a.Overview, 1024, 64)
-			}
-			if err == nil {
-				w := a.Overview
-				if a.Waveform != nil {
-					w = *a.Waveform
+	var err error
+	if p.local != "" {
+		var own *shadowDisplayAsset
+		if own, err = s.sourceDisplayAsset(ctx, p.local, p.Key); err == nil {
+			copyAsset := *own // the source cache's asset stays immutable
+			a = &copyAsset
+		}
+	} else {
+		u := fmt.Sprintf("http://%s/peer/decks/%d/display?key=%s", net.JoinHostPort(p.ip, strconv.Itoa(port)), p.Deck, url.QueryEscape(p.Key))
+		req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+		// A peer must not redirect this read-only request to arbitrary URLs.
+		client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		var resp *http.Response
+		if resp, err = client.Do(req); err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				err = fmt.Errorf("display peer: HTTP %d", resp.StatusCode)
+			} else {
+				var b []byte
+				b, err = io.ReadAll(io.LimitReader(resp.Body, shadowDisplayLimit+1))
+				if err == nil && len(b) > shadowDisplayLimit {
+					err = fmt.Errorf("display peer: response too large")
 				}
-				wave, err = renderShadowWave(w, 2048, 128)
+				if err == nil {
+					a = &shadowDisplayAsset{}
+					err = json.Unmarshal(b, a)
+				}
 			}
 		}
+	}
+	if err == nil {
+		err = validateDisplayAsset(a, p.Key)
+	}
+	if err == nil && a.Waveform != nil {
+		w := downsampleDisplayWave(*a.Waveform, 65536)
+		a.Waveform = &w
+	}
+	if err == nil {
+		overview, err = renderShadowWave(a.Overview, 1024, 64)
+	}
+	if err == nil {
+		w := a.Overview
+		if a.Waveform != nil {
+			w = *a.Waveform
+		}
+		wave, err = renderShadowWave(w, 2048, 128)
 	}
 	c := &sh.display
 	c.mu.Lock()
@@ -593,7 +632,7 @@ func renderShadowWave(w enginedb.DisplayWave, width, height int) ([]byte, error)
 
 type shadowWaveStyle struct {
 	Colors                                         [3]color.NRGBA
-	RGB                                            bool
+	RGB, Half                                      bool // Half: from the bottom edge (stock overview, Praline)
 	Dim                                            float64
 	Saturation, BrightAmp, BrightGain, BrightFloor float64
 }
@@ -606,6 +645,7 @@ func defaultShadowWaveStyle() shadowWaveStyle {
 func parseShadowWaveStyle(q url.Values) (shadowWaveStyle, error) {
 	style := defaultShadowWaveStyle()
 	style.RGB = q.Get("rgb") == "1"
+	style.Half = q.Get("half") == "1"
 	if raw := q.Get("dim"); raw != "" {
 		dim, err := strconv.ParseFloat(raw, 64)
 		if err != nil || math.IsNaN(dim) || math.IsInf(dim, 0) || dim < 0 || dim > 1 {
@@ -646,6 +686,19 @@ func renderShadowWaveStyle(w enginedb.DisplayWave, width, height int, style shad
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
 	palette := style.Colors
 	n := len(w.Bands) / 3
+	full := height / 2
+	if style.Half {
+		full = height
+	}
+	column := func(x, h int, c color.NRGBA) {
+		lo, hi := height/2-h, height/2+h
+		if style.Half {
+			lo, hi = height-h, height
+		}
+		for y := lo; y < hi; y++ {
+			img.SetNRGBA(x, y, c)
+		}
+	}
 	for x := 0; x < width; x++ {
 		lo, hi := x*n/width, max(x*n/width+1, (x+1)*n/width)
 		var peak [3]int
@@ -676,10 +729,7 @@ func renderShadowWaveStyle(w enginedb.DisplayWave, width, height int, style shad
 			pixel := color.NRGBA{uint8(math.Round(c[0] * 255 * style.Dim)), uint8(math.Round(c[1] * 255 * style.Dim)), uint8(math.Round(c[2] * 255 * style.Dim)), 255}
 			// Both native RGB shaders apply 0.9 to the amplitude. Overview's
 			// waveformColor() applies it before calcDistances(), not in calcDist().
-			h := min(height/2, int(math.Ceil(amp*0.9*float64(height/2))))
-			for y := height/2 - h; y < height/2+h; y++ {
-				img.SetNRGBA(x, y, pixel)
-			}
+			column(x, min(full, int(math.Ceil(amp*0.9*float64(full)))), pixel)
 			continue
 		}
 		// Layer the cumulative band amplitudes: lows outside, highs at center.
@@ -688,10 +738,7 @@ func renderShadowWaveStyle(w enginedb.DisplayWave, width, height int, style shad
 			for j := band; j < 3; j++ {
 				amp += peak[j]
 			}
-			h := min(height/2, (amp*(height/2)+254)/255)
-			for y := height/2 - h; y < height/2+h; y++ {
-				img.SetNRGBA(x, y, palette[band])
-			}
+			column(x, min(full, (amp*full+254)/255), palette[band])
 		}
 	}
 	var b bytes.Buffer
@@ -877,6 +924,7 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 		}
 		return nil, deckState{}
 	}
+	p = s.localPeerTrack(p, time.Now())
 	if displayTrackKey(p) != key {
 		return nil, deckState{}
 	}
