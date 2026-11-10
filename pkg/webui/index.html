@@ -269,10 +269,11 @@ async function jobs(){
 }
 const toggleKeys=['upfaderEcho','masterLimiter','autoGain','omniSource','autoAnalyze','prolinkShare','prolinkExport'];
 function showUI(v){lastUI=v;
- if(v.version){$('version').textContent='v'+v.version;$('version').hidden=false}
+ if(v.version||v.buildTag){$('version').textContent=(v.version?'v'+v.version:'')+(v.buildTag?(v.version?' · ':'')+v.buildTag:'');$('version').hidden=false}
  for(const e of document.querySelectorAll('[data-toggle]'))e.checked=!!v[e.dataset.toggle];
  const tg=k=>document.querySelector('[data-toggle="'+k+'"]');
- tg('upfaderEcho').closest('.setting').hidden=!!v.player; // #52: players have no channel faders
+ const caps=v.capabilities||{};
+ tg('upfaderEcho').closest('.setting').hidden=caps.mixer!==undefined?!caps.mixer:!!v.player; // #52: players have no channel faders
  why(tg('prolinkExport'),v.prolinkExport&&!v.prolinkExportActive?t('waitRbUsb'):'');
  const segs={quality:v.quality,lang:v.language};
  for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.classList.toggle('on',b.dataset.v===segs[g.dataset.seg]);
