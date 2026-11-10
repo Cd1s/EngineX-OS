@@ -482,7 +482,7 @@ SERVICES_MAIN = """
 		if (!p) {
 			p = []
 			for (let d = 1; d <= 4; d++) p.push({play: scTr("/Engine/Deck" + d + "/PlayState"), cmd: scTr("/Engine/Deck" + d + "/Play"), length: scTr("/Engine/Deck" + d + "/Track/TrackLength")})
-			if (!p.every(x => x.play && x.cmd && x.length)) return false // never collect blind: Engine is still building its decks
+			if (!p[0].play || !p[0].cmd || !p[0].length) return false // wait for deck 1 to build
 			scGcProps = p
 		}
 		let playing = false, sig = 0
@@ -490,7 +490,7 @@ SERVICES_MAIN = """
 			// Playing also means a held CUE preview: PlayState stays false while it
 			// sounds and scrolls (scShadowTick's sample, own decks), or the Play command.
 			const x = p[d - 1], s = scShadowDisplay[d], own = scShadowPrev[d]
-			if (x.play.state || x.cmd.state || (own && own.playing) || (s && s.playing && !s.stale)) playing = true
+			if ((x.play && x.play.state) || (x.cmd && x.cmd.state) || (own && own.playing) || (s && s.playing && !s.stale)) playing = true
 			sig = sig * 31 + (x.length ? x.length.unnormalized || 0 : 0)
 		}
 		if (sig !== g.loadSig || scGcLoadSeq !== g.loadSeq) { g.loadSig = sig; g.loadSeq = scGcLoadSeq; g.loadAt = now }
@@ -950,6 +950,7 @@ SERVICES_MAIN = """
 	readonly property var scShadowEmptyArray: []
 	readonly property var scShadowEmptyObject: ({})
 	readonly property var scShadowDecks: [1, 2, 3, 4]
+	readonly property var scChannelLinePaths: ["/Engine/Mixer/Channel1/Line", "/Engine/Mixer/Channel2/Line", "/Engine/Mixer/Channel3/Line", "/Engine/Mixer/Channel4/Line"]
 	property string scShadowMineRole: "?"
 	property var scShadowMine: []
 	property var scShadowSampleSpare: ({})
@@ -1203,8 +1204,15 @@ SERVICES_MAIN = """
 				let wait = 500
 				try {
 					if (x.status === 200) {
-						const version = x.getResponseHeader("X-Shadow-State") || ""
 						root.scShadowLive.seen = Date.now()
+						const verHeader = x.getResponseHeader("X-Shadow-Ver")
+						const rVer = verHeader ? Number(verHeader) : NaN
+						const version = x.getResponseHeader("X-Shadow-State") || ""
+						if (rVer === root.scShadowVer && root.scShadowVer > 0) {
+							scShadowPollTimer.interval = 60
+							scShadowPollTimer.restart()
+							return
+						}
 						if (root.scShadowDisplayOnly && version && version === root.scShadowResponseVersion) {
 							scShadowPollTimer.interval = 60; scShadowPollTimer.restart(); return
 						}
@@ -1230,7 +1238,7 @@ SERVICES_MAIN = """
 		if (typeof root !== "undefined" && root && root.scTr) {
 			for (let d = 1; d <= 4; d++) {
 				try {
-					const p = root.scTr("/Engine/Mixer/Channel" + d + "/Line")
+					const p = root.scTr(root.scChannelLinePaths[d - 1])
 					if (p && p.state) scLines.push(d)
 				} catch (e) {}
 			}
@@ -1249,7 +1257,8 @@ SERVICES_MAIN = """
 		scShadowDisplayOnly = displayOnly !== false
 		const head = {}
 		if (!scShadowDisplayOnly) for (const e of decks) if (e.path && scFourDeckRole.indexOf(String(e.deck)) < 0) head[e.deck] = {master: !!e.lead, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || ""}
-		if (JSON.stringify(head) !== JSON.stringify(scShadowHead)) scShadowHead = head
+		if (Object.keys(head).length === 0 && Object.keys(scShadowHead).length === 0) {
+		} else if (JSON.stringify(head) !== JSON.stringify(scShadowHead)) scShadowHead = head
 		let peerLead = 0, peerPlaying = false
 		for (const e of decks) { if (e.shadowMaster && !e.stale) peerLead = e.shadowMaster; if (e.playing && !e.cue && !e.stale) peerPlaying = true }
 		scShadowPeerLead = peerLead; scShadowPeerPlaying = peerPlaying
@@ -1259,10 +1268,10 @@ SERVICES_MAIN = """
 			scShadowApplyDisplay(decks)
 			return
 		}
-		scShadowDisplay = ({})
-		scShadowDisplayRequests = ({})
-		scShadowGridCache = ({})
-		scShadowLiveCueCache = ({})
+		if (Object.keys(scShadowDisplay).length > 0) scShadowDisplay = ({})
+		if (Object.keys(scShadowDisplayRequests).length > 0) scShadowDisplayRequests = ({})
+		if (Object.keys(scShadowGridCache).length > 0) scShadowGridCache = ({})
+		if (Object.keys(scShadowLiveCueCache).length > 0) scShadowLiveCueCache = ({})
 		root.scShadowCdjMaster = decks.some(e => e.master)
 		for (const e of decks) root.scShadowApply(e)
 		const now = Date.now()

@@ -1039,12 +1039,16 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	debug := s.shadow.dbg.set(v.DebugTelemetry || fileExists(shadowDebugFlag))
 	out := []deckState{}
 	var ver uint64
+	seenVer := false
+	var seen uint64
 	if role != "" {
 		s.shadow.mu.Lock()
 		s.shadow.lines = parseLineChannels(r.URL.Query().Get("line"))
 		s.shadow.mu.Unlock()
 		s.shadowWake()
-		if seen, err := strconv.ParseUint(r.URL.Query().Get("ver"), 10, 64); err == nil {
+		if val, err := strconv.ParseUint(r.URL.Query().Get("ver"), 10, 64); err == nil {
+			seen = val
+			seenVer = true
 			s.shadow.wait(r.Context(), seen, s.shadow.pollWait(v.ShadowLegacyEngine, time.Now()))
 		}
 		s.shadow.mu.Lock()
@@ -1069,6 +1073,11 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	if !v.ShadowLegacyEngine && !metaOnly {
 		w.Header().Set("X-Shadow-State", fmt.Sprintf("%d:%t:%s:%t:%t:%x", ver, true, role, stale, debug, h.Sum64()))
 
+	}
+	w.Header().Set("X-Shadow-Ver", strconv.FormatUint(ver, 10))
+	if seenVer && seen > 0 && ver == seen && !metaOnly {
+		respond(w, map[string]any{"role": role, "ver": ver, "unchanged": true, "displayOnly": !v.ShadowLegacyEngine})
+		return
 	}
 	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug, "displayOnly": !v.ShadowLegacyEngine})
 }
