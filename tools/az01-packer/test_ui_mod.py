@@ -599,7 +599,7 @@ JSON.parse=realParse;
         layer = bp.SHADOW_LAYER
         parts = []
         for name in ("contentX", "metaDuration", "metaWaveDuration", "metaTotalPixels", "metaTilePixels",
-                     "refreshSample", "refreshPosition", "restartScroll", "refreshDetails"):
+                     "glideRun", "refreshSample", "refreshPosition", "restartScroll", "refreshDetails"):
             m = re.search(r"(?m)^        function " + name + r"\(", layer)
             self.assertIsNotNone(m, name)
             line_end = layer.index("\n", m.start())
@@ -611,7 +611,10 @@ JSON.parse=realParse;
             if body.startswith("{"):
                 body = layer[m.start(1):layer.index("\n        }", m.start(1)) + 10].strip()
             parts.append("scope." + handler + " = function() " + (body if body.startswith("{") else "{ " + body + " }"))
-        return "with (scope) {\n" + "\n".join(parts) + "\n}\n"
+        glide = ("for (const [k, v] of Object.entries({scrollKey: '', scrollJumps: 0, glideFrom: 0, glideTo: 0, glideAt: 0, glideMs: 1, glide: {running: false, runs: [], "
+                 "stop() { this.running = false }, start() { this.running = true; this.runs.push({from: this.from, to: this.to, duration: this.duration}) }}})) "
+                 "if (!(k in scope)) scope[k] = v\n")
+        return glide + "with (scope) {\n" + "\n".join(parts) + "\n}\n"
 
     def test_detail_arriving_while_paused_draws_the_tiles_under_the_playhead(self):
         # QML runs onMetaChanged before the bindings that derive from meta (duration,
@@ -703,7 +706,7 @@ assert.equal(starts[0].from,scope.contentX(10000)); assert.equal(starts[0].to,sc
 assert(scope.grid.length>0 && scope.gridSlots>=scope.grid.length && (scope.gridSlots&(scope.gridSlots-1))===0 && scope.gridSlots>=32);
 assert.equal(scope.tileLo,0); assert.equal(scope.tileHi,Math.floor((6000+12000)/20000));
 now+=200; scope.refreshPosition(); assert.equal(starts.length,1); // on its line: keeps running
-scope.sample=sample(10000+200+20,true); scope.refreshSample(); assert.equal(starts.length,2); // 20 ms off: restarted
+scope.sample=sample(10000+200+20,true,{jumps:1}); scope.refreshSample(); assert.equal(starts.length,2); // 20 ms off after a jump: restarted
 scope.sample=sample(10220,true,{pitch:8}); scope.refreshSample(); assert.equal(starts.length,3); // new speed: restarted
 // CUE released back on its spot: a 1 ms settle to x, never a bare x write the write-back would undo.
 scope.sample=sample(10000,false); scope.refreshSample();
@@ -732,6 +735,7 @@ assert.strictEqual(scope.cueInfo,ci); assert.equal(asked,1);
         # No GUI-thread position animation; the content scrolls with one XAnimator.
         self.assertNotIn("NumberAnimation", layer)
         self.assertIn("XAnimator { id: scroll; target: scMoving", layer)
+        self.assertIn("XAnimator { id: glide; target: scGlide", layer)
         moving = layer[layer.index("id: scMoving"):layer.index("} // scMoving")]
         self.assertNotRegex(moving, r"(?m)^\s*x:\s*-?\s*scDisplay\.(start|position)")
         # Markers, loops and tiles sit in track coordinates: their x never depends on time.
@@ -1052,6 +1056,78 @@ for(const board of ['JP20','JP22','JP24','JC11S','JP21X']) {
             main_text = main.read_text()
             self.assertIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer\n\t\t\tanchors.fill: parent\n", main_text)
             self.assertNotIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer\n\t\t\twidth: planckQuickView.defaultScreenSize.width", main_text)
+
+
+class ShadowNudgeTest(unittest.TestCase):
+    """#5/#7: a jog nudge and the peer's clock drift move the shadow lane without jumps."""
+    js = ShadowDisplayTest.js
+    layer_js = ShadowDisplayTest.layer_js
+
+    def test_receiver_glides_over_a_slip_and_jumps_only_on_a_jump(self):
+        self.js(r"""
+const starts=[];
+const scroll={running:false,from:0,to:0,duration:0,stop(){this.running=false},start(){this.running=true;starts.push({from:this.from,to:this.to,duration:this.duration})}};
+const scMoving={x:0};
+const meta={key:'A',durationMs:200000,waveformDurationMs:200000,beats:[],cues:[],loops:[],detail:true,waveformWidth:20480,tileWidth:2048,waveformTiles:Array(10).fill('/t.png')};
+const scope={live:true,visible:true,wave:true,overview:false,graphical:true,deck:2,sample:null,cues:scShadowEmptyArray,loops:scShadowEmptyArray,
+  position:0,stale:false,cueInfo:null,grid:scShadowEmptyArray,gridAnchor:-Infinity,gridSlots:0,tileLo:0,tileHi:31,scrollFrom:0,scrollAt:0,scrollSpeed:0,width:1000,
+  scroll,scMoving,root:globalThis,meta,duration:200000,waveformDuration:200000,span:8000,playhead:0.5,totalPixels:20480,tilePixels:2048,
+  get start(){return this.position-this.span*this.playhead}};
+""" + self.layer_js() + r"""
+const sample=(pos,extra)=>Object.assign({key:'A',meta,positionMs:pos,at:now,playing:true,pitch:0,jumps:0,stale:false},extra||{});
+const glides=scope.glide.runs;
+scope.sample=sample(10000); scope.refreshSample(); assert.equal(starts.length,1); assert.equal(glides.length,0);
+now+=200; scope.sample=sample(10200+12); scope.refreshSample(); assert.equal(starts.length,1); assert.equal(glides.length,0); // within 12 ms: nothing moves
+// 20 ms off (the peer's clock, a jog nudge): the scroll keeps running and the content glides there.
+scope.sample=sample(10200+20); scope.refreshSample(); assert.equal(starts.length,1);
+assert.equal(glides.length,1); assert.equal(glides[0].from,0); assert.equal(glides[0].to,-20/8000*1000); assert.equal(glides[0].duration,500);
+now+=100; scope.refreshPosition(); assert.equal(starts.length,1); assert.equal(glides.length,1); // on the glided line
+// 16 ms more 100 ms later: on from where the first glide is, in the time the slip took.
+scope.sample=sample(10300+20+16); scope.refreshSample(); assert.equal(starts.length,1);
+assert.equal(glides.length,2); assert.equal(glides[1].from,-4/8000*1000); assert.equal(glides[1].to,-36/8000*1000); assert.equal(glides[1].duration,100);
+// A brake glides back the same way.
+now+=300; scope.sample=sample(10600+36-30); scope.refreshSample(); assert.equal(starts.length,1);
+assert.equal(glides.length,3); assert.equal(glides[2].from,-36/8000*1000); assert.equal(glides[2].to,-6/8000*1000); assert.equal(glides[2].duration,300);
+// A jump (seek, hot cue, loop), another track or more than 300 ms: a fresh line, the glide back at 0.
+scope.sample=sample(10600+6+20,{jumps:1}); scope.refreshSample(); assert.equal(starts.length,2);
+assert.equal(starts[1].from,scope.contentX(10626)); assert.equal(glides.length,4); assert.equal(glides[3].to,0); assert.equal(glides[3].duration,1); assert.equal(scope.glideTo,0);
+scope.glide.running=false;
+scope.sample=sample(10626+301,{jumps:1}); scope.refreshSample(); assert.equal(starts.length,3); assert.equal(glides.length,4);
+scope.sample=sample(10927+20,{jumps:1,key:'B'}); scope.refreshSample(); assert.equal(starts.length,4); assert.equal(glides.length,4);
+// Paused while a glide runs: both settle.
+scope.sample=sample(10947+20,{jumps:1,key:'B'}); scope.refreshSample(); assert.equal(glides.length,5);
+scope.sample=sample(10967,{jumps:1,key:'B',playing:false}); scope.refreshSample();
+assert.equal(scope.scrollSpeed,0); assert.equal(glides.length,6); assert.equal(glides[5].to,0); assert.equal(glides[5].duration,1);
+""")
+
+    def test_sender_follows_a_jog_nudge(self):
+        # The peer carries the posted line on at the pitch: a nudge must reach it while it
+        # happens (it arrived in 25 ms jumps, a brake only after 180 ms).
+        self.js(r"""
+let bodies=[], pos=0, rate=1;
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(!this.url.endsWith('/alive'))bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+globalThis.scTr=path=>({
+    get value(){return path.endsWith('/SampleRate')?48000:0},
+    get unnormalized(){return path.endsWith('/TrackPosition')?pos:path.endsWith('BPM')?120:0},
+    get state(){return path.endsWith('/SongLoaded')||path.endsWith('/PlayState')},
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':''}, color:'#ffffff', stateChanged:{connect(){}}});
+const run=ms=>{const end=now+ms;while(now<end){const dt=scShadowTickTimer.interval;now+=dt;pos+=dt*48*rate;scShadowTick();}};
+// Where the peer shows the deck (the last full post carried on at pitch 0) minus where it is.
+const ahead=()=>{const b=bodies[bodies.length-1][0];return b.positionMs+(now-b.at)-pos/48};
+run(6000); let n=bodies.length;
+run(3000); assert(bodies.length-n<=1,'steady playback: heartbeats only'); assert.equal(scShadowTickTimer.interval,80);
+rate=1.05; n=bodies.length; run(1000); assert(bodies.length-n>=3,'a jog push is posted as it happens'); assert(Math.abs(ahead())<=16,'push '+ahead());
+rate=1; run(3000);
+rate=0.95; n=bodies.length; run(2000); assert(bodies.length-n>=2,'a jog brake is followed');
+assert(ahead()>=0&&ahead()<60,'brake '+ahead()); // of 100 ms; these positions have no audio-block lag (17 ms of it)
+rate=1; run(3000); assert(Math.abs(ahead())<60); assert.equal(bodies[bodies.length-1][0].jumps,0,'a nudge is not a jump');
+""")
 
 
 if __name__ == "__main__":

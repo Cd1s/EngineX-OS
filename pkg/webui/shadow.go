@@ -121,12 +121,13 @@ type peerLocalFile struct {
 }
 
 // Tolerances of samePeerPicture: a playing deck's position may run this far off
-// the line the QML extrapolates before the long poll is woken. The sender samples
-// at 40 ms (its positions are ~10-17 ms noisy at high pitch) and our HTTP fallback
-// is niced on CPU3: re-anchoring on that noise woke the QML ~once a second without
-// making the picture any truer. A paused deck must not move at all.
+// the line the QML extrapolates before the long poll is woken. The sender posts a
+// filtered line (a few ms of noise) and reports a slip of 15 ms at once (jog
+// nudge, its audio clock against the nominal pitch); the QML keeps its scroll
+// within 12 ms and glides over anything larger, so more than that must reach it.
+// A paused deck must not move at all.
 const (
-	shadowPlayingDriftMS = 25
+	shadowPlayingDriftMS = 12
 	shadowPausedDriftMS  = 0.5
 )
 

@@ -44,17 +44,17 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 		t.Fatalf("liveness or anchor: %+v", p)
 	}
 	// Small drifts accumulate against the anchored line, not the previous sample.
-	steady.PositionMS = 2018 // +18 ms at 1 s: sampling noise
+	steady.PositionMS = 2009 // +9 ms at 1 s: sampling noise
 	if take(steady, time.Second) != v {
-		t.Fatal("18 ms drift bumped")
+		t.Fatal("9 ms drift bumped")
 	}
-	steady.PositionMS = 2536 // +36 ms at 1.5 s: each step was only 18 ms
+	steady.PositionMS = 2518 // +18 ms at 1.5 s: each step was only 9 ms (a jog nudge, clock drift)
 	if v2 := take(steady, 1500*time.Millisecond); v2 == v {
 		t.Fatal("accumulated drift never woke the QML")
 	} else {
 		v = v2
 	}
-	if p := sh.peerDecks[2]; p.anchorPos != 2536 || p.anchorAt != t0.Add(1500*time.Millisecond) {
+	if p := sh.peerDecks[2]; p.anchorPos != 2518 || p.anchorAt != t0.Add(1500*time.Millisecond) {
 		t.Fatalf("re-anchored: %+v", p)
 	}
 	for name, edit := range map[string]func(*deckState){
@@ -68,7 +68,7 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 		"track":  func(d *deckState) { d.Key = "k2" },
 	} {
 		d := steady
-		d.PositionMS = 2536 + 500 // on the line at 2 s
+		d.PositionMS = 2518 + 500 // on the line at 2 s
 		edit(&d)
 		if take(d, 2*time.Second) == v {
 			t.Fatalf("%s did not bump", name)
