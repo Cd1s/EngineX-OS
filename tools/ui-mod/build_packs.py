@@ -1420,8 +1420,10 @@ SERVICES_MAIN = """
 		at.pll = 0
 		if (scShadowBent && scShadowBent.at === at) return dbg("bending")
 		const age = at.env !== undefined ? now - at.envT0 : 0
-		if (age >= 2000) {
-			const gap = target - at.env - at.envRate * (now - at.envT0 + 18)
+		// A gap past 40 ms (a play start: the source's first line is 80-120 ms off the
+		// one it settles on) is no noise: bent after 1 s, not left for 2 s more.
+		const gap = age >= 1000 ? target - at.env - at.envRate * (now - at.envT0 + 18) : 0
+		if (age >= 2000 || Math.abs(gap) > 40) {
 			at.fine = at.fine === undefined || Math.abs(gap - at.fine) > 15 ? gap : at.fine + (gap - at.fine) * Math.min(1, (now - at.fineAt) / 8000)
 			at.fineAt = now
 			if (Math.abs(at.fine) > (age < 10000 ? 12 : 6) && Math.abs(at.fine) <= lim) {
@@ -1454,7 +1456,8 @@ SERVICES_MAIN = """
 		}
 	}
 	// Engine's pitch bend (the PITCH BEND buttons) runs a deck 7 % fast or slow
-	// while held (measured on a JP07: 27 ms in 400 ms). No seek, which flushes the
+	// while held (measured on a JP07: 27 ms in 400 ms; 7 % of its own speed: at
+	// -50 % a 1.36 s bend moved it 51 ms, not 95). No seek, which flushes the
 	// decoder and snaps the waveform, and no Speed change: the BPM shown stays the
 	// source's. One deck at a time, 80 % of the gap, 1.5 s at most; the line is
 	// measured anew after it.
@@ -1466,7 +1469,7 @@ SERVICES_MAIN = """
 		if (!p) return
 		p.state = true
 		scShadowBent = {p: p, at: at}
-		scShadowBendTimer.interval = Math.min(1500, Math.abs(ms) * 0.8 / 0.07)
+		scShadowBendTimer.interval = Math.min(1500, Math.abs(ms) * 0.8 / (0.07 * (at.rate > 0 ? at.rate : 1)))
 		scShadowBendTimer.restart()
 	}
 	function scShadowBendEnd() {
@@ -4642,6 +4645,22 @@ def edits(dev: bool):
             "                                button.scStemsLatchedAt = now\n"
             "                            }\n"
             "                        }\n",
+        )]
+        # #157 (jog only; ZOOM / Browse and DeckAction.toggleGridEdit stay stock): Shift+Vinyl
+        # does not enter BeatGrid Edit while the deck plays (Engine pauses there, jumps to
+        # 00:00 and locks Play), and Jog Touch stays off during BeatGrid Edit.
+        scaled["ControlSurfaceModules/ControlSurfaceModules/Vinyl.qml"] = [(
+            "        if (shiftActionIsGridEdit && (globalConfig.shift || deckConfig.gridEditActive)) {\n",
+            "        if (shiftActionIsGridEdit && ((globalConfig.shift && !deckConfig.playing) || deckConfig.gridEditActive)) {\n",
+        )]
+        scaled["ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml"] = [(
+            "        enabled: {\n"
+            "            deckConfig.inDJMode &&\n"
+            "                !deckConfig.loopInEdit &&\n",
+            "        enabled: {\n"
+            "            deckConfig.inDJMode &&\n"
+            "                !deckConfig.gridEditActive &&\n"
+            "                !deckConfig.loopInEdit &&\n",
         )]
         # Keep the stock two-item BeatJump layout. The forward target lives
         # inside the size field, so it cannot widen AutoLoop / BeatJump / LEAD.
