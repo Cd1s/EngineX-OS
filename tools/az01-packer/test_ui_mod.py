@@ -15,6 +15,18 @@ SRC = BUILD_PACKS.read_text()
 
 
 class UiModSourceTest(unittest.TestCase):
+    def test_pitch_pickup_entries_and_controller_wiring(self):
+        self.assertIn('property string scPitchPickup: "pioneer"', bp.SERVICES_MAIN)
+        self.assertIn('v.pitchPickup', bp.SERVICES_MAIN)
+        self.assertIn('v.pitch_pickup', bp.SERVICES_MAIN)
+        self.assertIn('key === "pitch_pickup"', bp.SERVICES_MAIN)
+        self.assertIn('ids: ["pioneer", "direct", "stock"]', bp.PLAYBACK_ENTRIES)
+        self.assertIn('values: ["Pioneer (Single-Pass)", "Direct (Instant)", "Stock"]', bp.PLAYBACK_ENTRIES)
+        self.assertIn('pitchPickup=', bp.PLAYBACK_ENTRIES)
+        rows = [line.split("\t") for line in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
+        for name in ("Pitch Fader Pickup", "Pioneer (Single-Pass)", "Direct (Instant)", "Stock"):
+            self.assertTrue(any(len(row) == 3 and row[0] == name for row in rows), name)
+
     def test_translator_cache_replaces_shadow_lookups(self):
         self.assertIn("function scTr(path)", bp.SERVICES_MAIN)
         a = bp.SERVICES_MAIN.index("function scPress(")
@@ -111,6 +123,24 @@ class UiModBuildTest(unittest.TestCase):
             tl = Path(tmp) / "packs" / "en" / "Skins" / "Embedded" / "Views" / "BrowseView" / "Components" / "TrackList.qml"
             self.assertTrue(tl.is_file(), f"{tl} not found")
             self.assertIn("root.scTracklistWaveform", tl.read_text())
+            for lang in ("en", "zh-Hans", "zh-Hant"):
+                pack = Path(tmp) / "packs" / lang
+                value_output = (pack / "airAssignments/InputAssignment/ValueOutput.qml").read_text()
+                self.assertIn('property real lastPhysicalValue: -1.0', value_output)
+                self.assertIn('target.path.indexOf("/Speed") !== -1', value_output)
+                self.assertIn('if (speedSoft) updateTimer.stop()', value_output)
+                self.assertIn('scPitchPickupMode === "direct"', value_output)
+                self.assertIn('Math.abs(value - 0.5) <= 0.004', value_output)
+                self.assertIn('Math.abs(t.value - 0.5) <= 0.025', value_output)
+                self.assertIn('Math.abs(value - t.value) <= 0.008', value_output)
+                self.assertIn('t.setValue(value, 0x10000000 | privateData.takeoverType, 0)', value_output)
+                self.assertIn('t.setValue(value, 1, 0)', value_output)
+                slider = (pack / "ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml").read_text()
+                self.assertIn('globalConfig.scPitchPickup', slider)
+                config = (pack / "ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml").read_text()
+                self.assertIn('j.pitchPickup || j.pitch_pickup', config)
+                playback = (pack / "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/PlaybackTabContent.qml").read_text()
+                self.assertTrue('pitchPickup=' in playback, "playback pickup control missing")
 
 
 if __name__ == "__main__":

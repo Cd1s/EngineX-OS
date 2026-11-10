@@ -204,6 +204,7 @@
            L("`Master Soft Clipper`（主输出软限幅）、`Auto-Gain`（0 dB 自动增益）、`Echo Out`（推杆回音）、`Stems EQ Mode`（分轨 EQ 映射）、`Color FX Style`（先锋风格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
              "`Master Soft Clipper`（主輸出軟限幅）、`Auto-Gain`（0 dB 自動增益）、`Echo Out`（推桿回音）、`Stems EQ Mode`（分軌 EQ 映射）、`Color FX Style`（先鋒風格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
              "`Master Soft Clipper`, `Auto-Gain` (0 dB), `Echo Out`, `Stems EQ Mode` (stem-to-EQ mapping), `Color FX Style` (Pioneer-style `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`, #88)")],
+          [L("变速推子接管", "變速推桿接管", "Pitch Fader Pickup"), L("先锋：经过当前值接管，接近零时中心解锁；直接：即时接管；原厂：原有行为。", "先鋒：經過目前值接管，接近零時中心解鎖；直接：即時接管；原廠：原有行為。", "Pioneer: pick up on crossing and unlock at center near zero; Direct: instant pickup; Stock: original behavior.")],
           ["`Cues/Loops`", "`Beat Jump Pad Bank`、`Swap Loop / Beat Jump`"],
           [L("`Safety` 演出防呆", "`Safety` 演出防呆", "`Safety` (gig safety)"), L("`Sync Guard Tolerance`（BPM 同步防呆范围：`Off` / `10%` / `15%` / `20%`）", "`Sync Guard Tolerance`（BPM 同步防呆範圍：`Off` / `10%` / `15%` / `20%`）", "`Sync Guard Tolerance` (BPM range the sync guard accepts: `Off` / `10%` / `15%` / `20%`)")],
           [L("`Library` 曲库", "`Library` 曲庫", "`Library`"),

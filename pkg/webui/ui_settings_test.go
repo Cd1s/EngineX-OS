@@ -73,6 +73,37 @@ func splitLines(b []byte) []string {
 	return out
 }
 
+func TestUISettingsPitchPickup(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+	if got := New(cfg, nil).loadUI().PitchPickup; got != "pioneer" {
+		t.Fatalf("default: %q", got)
+	}
+	for _, mode := range []string{"direct", "stock", "pioneer"} {
+		if code, v := uiPost(t, srv.URL, "pitchPickup="+mode); code != 200 || v.PitchPickup != mode {
+			t.Fatalf("%s: %d %+v", mode, code, v)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if present := strings.Contains(string(data), "pitch_pickup="); present != (mode != "pioneer") || (present && !slices.Contains(splitLines(data), "pitch_pickup="+mode)) {
+			t.Fatalf("%s: settings.conf %q", mode, data)
+		}
+		if got := New(cfg, nil).loadUI().PitchPickup; got != mode {
+			t.Fatalf("reload %s: %s", mode, got)
+		}
+	}
+	if code, _ := uiPost(t, srv.URL, "pitchPickup=invalid"); code != 400 {
+		t.Fatalf("invalid: %d", code)
+	}
+	if got := New(cfg, nil).loadUI().PitchPickup; got != "pioneer" {
+		t.Fatalf("invalid update changed mode: %s", got)
+	}
+}
+
 func TestUISettingsRejectBadValues(t *testing.T) {
 	dir := t.TempDir()
 	srv := httptest.NewServer(New(Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}, nil))

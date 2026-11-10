@@ -70,6 +70,7 @@ SERVICES_MAIN = """
 	property string scQuality: "flac"
 	property string scNeteaseMode: "official"
 	property string scJog: "static"
+	property string scPitchPickup: "pioneer"
 	property bool scMasterLimiter: false // #58, applied by engine_ui_hook.c
 	property bool scAutoGain: false // #64, applied by engine_ui_hook.c
 	// #55: once a drive is in, Engine's own analysis queue takes every unanalysed
@@ -952,6 +953,8 @@ SERVICES_MAIN = """
 			else if (v.beat_jump_pads !== undefined) scBeatJumpPads = v.beat_jump_pads === "1" || v.beat_jump_pads === 1 || v.beat_jump_pads === true
 			if (v.pioneerFx !== undefined) scPioneerFx = v.pioneerFx || "off"
 			else if (v.pioneer_fx !== undefined) scPioneerFx = v.pioneer_fx || "off"
+			if (v.pitchPickup !== undefined) scPitchPickup = v.pitchPickup || "pioneer"
+			else if (v.pitch_pickup !== undefined) scPitchPickup = v.pitch_pickup || "pioneer"
 		}
 		if (scStemsEqMode && !scStemsEqApplied) {
 			scStemsEqApplied = true
@@ -985,6 +988,7 @@ SERVICES_MAIN = """
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
+			else if (key === "pitch_pickup") root.scPitchPickup = val || "pioneer"
 		}
 	}
 	function scSyncBroadcastMeta() {
@@ -1557,6 +1561,13 @@ SERVICES_ENTRIES = QUALITY_ENTRY + """
 
 # User Profile -> Playback: audio DSP and playback.
 PLAYBACK_ENTRIES = """
+		EntryBase.ListEntry {
+			text: "Pitch Fader Pickup"
+			readonly property var ids: ["pioneer", "direct", "stock"]
+			values: ["Pioneer (Single-Pass)", "Direct (Instant)", "Stock"]
+			currentValue: values[Math.max(0, ids.indexOf(root.scPitchPickup))]
+			onSelected: function(index) { root.scCall("pitchPickup=" + ids[index]) }
+		},
 		EntryBase.ListEntry {
 			text: "Master Soft Clipper"
 			values: ["Off", "On"]
@@ -2735,6 +2746,7 @@ def edits(dev: bool):
             '    objectName: "Global Assignment Config"\n'
             '    property real scPadBrightness: 1\n'
             '    property bool scSwapLoopOrder: false\n'
+            '    property string scPitchPickup: "pioneer"\n'
             '    Timer {\n'
             '        interval: 10000; running: true; repeat: true; triggeredOnStart: true\n'
             '        onTriggered: {\n'
@@ -2746,12 +2758,43 @@ def edits(dev: bool):
             '                    const n = parseInt(j.ledBrightness)\n'
             '                    if (n >= 20 && n <= 100) scGlobalConfig.scPadBrightness = n / 100\n'
             '                    scGlobalConfig.scSwapLoopOrder = !!j.swapLoopOrder\n'
+            '                    const mode = j.pitchPickup || j.pitch_pickup || "pioneer"\n'
+            '                    if (["pioneer", "direct", "stock"].indexOf(mode) !== -1) scGlobalConfig.scPitchPickup = mode\n'
             '                } catch (e) {}\n'
             '            }\n'
             '            x.open("GET", "http://127.0.0.1:8080/v1/sc5000/ui")\n'
             '            x.send()\n'
             '        }\n'
             '    }\n')]
+        scaled["ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"] = [(
+            '            output: ValueOutput {\n',
+            '            output: ValueOutput {\n'
+            '                scPitchPickupMode: typeof globalConfig !== "undefined" && globalConfig ? globalConfig.scPitchPickup : "pioneer"\n')]
+        scaled["airAssignments/InputAssignment/ValueOutput.qml"] = [
+            ('\tproperty QtObject target;\n',
+             '\tproperty QtObject target;\n\tproperty string scPitchPickupMode: "pioneer"\n'),
+            ('\t\tproperty int targetSoftId: 0;\n',
+             '\t\tproperty int targetSoftId: 0;\n\t\tproperty real lastPhysicalValue: -1.0\n'),
+            ('\t\tif(updateTimer.interval && privateData.takeoverTypeIsSame() && !device.isInitializing) {\n',
+             '\t\tconst speedSoft = target && target.path && target.path.indexOf("/Speed") !== -1 && target.prop && target.prop.translator && target.prop.translator.showSoft\n'
+             '\t\tif (speedSoft) updateTimer.stop()\n'
+             '\t\tif(updateTimer.interval && privateData.takeoverTypeIsSame() && !device.isInitializing && !speedSoft) {\n'),
+            ('\t\t\t\t\t\tprivateData.previousTarget = t;\n',
+             '\t\t\t\t\t\tprivateData.previousTarget = t;\n\t\t\t\t\t\tprivateData.lastPhysicalValue = -1.0\n'),
+            ('\t\t\t\t\t\tif(useSoftTakeover) {\n',
+             '\t\t\t\t\t\tconst speed = target && target.path && target.path.indexOf("/Speed") !== -1\n'
+             '\t\t\t\t\t\tconst last = privateData.lastPhysicalValue\n'
+             '\t\t\t\t\t\tconst zero = speed && scPitchPickupMode === "pioneer" && Math.abs(value - 0.5) <= 0.004 && last >= 0.0 && Math.abs(last - 0.5) > 0.004 && Math.abs(t.value - 0.5) <= 0.025\n'
+             '\t\t\t\t\t\tconst crossed = speed && scPitchPickupMode === "pioneer" && t.showSoft && last >= 0.0 && ((last <= t.value && value >= t.value) || (last >= t.value && value <= t.value) || Math.abs(value - t.value) <= 0.008)\n'
+             '\t\t\t\t\t\tif (zero) value = 0.5\n'
+             '\t\t\t\t\t\tif (speed && (scPitchPickupMode === "direct" || zero || crossed)) {\n'
+             '\t\t\t\t\t\t\tt.setValue(value, 0x10000000 | privateData.takeoverType, 0)\n'
+             '\t\t\t\t\t\t\tt.setValue(value, 1, 0)\n'
+             '\t\t\t\t\t\t} else if(useSoftTakeover) {\n'),
+            ('\t\t\t\t\t\t\tconst HARDEXTERNAL = 1\n\t\t\t\t\t\t\tt.setValue(value, HARDEXTERNAL, 0)\n\t\t\t\t\t\t}\n',
+             '\t\t\t\t\t\t\tconst HARDEXTERNAL = 1\n\t\t\t\t\t\t\tt.setValue(value, HARDEXTERNAL, 0)\n\t\t\t\t\t\t}\n'
+             '\t\t\t\t\t\tif (speed) privateData.lastPhysicalValue = value\n'),
+        ]
         pad_brt = '    scBrightness: typeof globalConfig !== "undefined" && globalConfig && globalConfig.scPadBrightness ? globalConfig.scPadBrightness : 1\n'
         # #135: Swap Loop / Beat Jump: the Auto Loop knob beat-jumps unshifted and resizes the loop with Shift.
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/AutoLoopKnob.qml"] = [(

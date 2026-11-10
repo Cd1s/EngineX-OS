@@ -64,6 +64,7 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 
 ### 6. Smart Sync & Gigabit Ethernet
 - **Smart Sync**: pull down the Control Center and switch the Sync mode between **Bar / Beat / Tempo** with one tap. With Sync on, when the BPM gap between two tracks is wider than the current pitch range, the deck steps Pitch Range up until it fits (up to `±100%`);
+- **Pitch fader pickup (#181)**: `User Profile → Playback → Pitch Fader Pickup` and the web console offer Pioneer (single-pass, default), Direct (instant), and Stock. Pioneer picks up when the fader crosses the current value and unlocks at center when the current pitch is near zero; Direct changes pitch immediately.
 - **Gigabit Ethernet**: the wired port runs at **1 Gbps (1000 Mbps) full duplex** instead of the stock `100 Mbps` limit, with 8 MiB TCP buffers for large transfers;
 - **Wi-Fi**: the deck's built-in Wi-Fi module is limited by the board's 25 MHz SDR12 SDIO bus to about `9–10 MB/s` in practice. Use the Gigabit port to copy large libraries.
 
