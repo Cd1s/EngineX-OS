@@ -74,6 +74,8 @@ class DataBundleTest(unittest.TestCase):
 
         self.assertTrue((src / 'boot-activate.sh').exists())
         self.assertTrue((src / 'boot-activate.sh').stat().st_mode & 0o100)
+        self.assertIn('Environment="QT_LOGGING_CONF=/data/logging.ini"',
+                      (src / 'boot-activate.sh').read_text())
         self.assertIn('EnvironmentFile=-/data/sc5000-custom/ui-scale.env',
                       (src / 'boot-activate.sh').read_text())
         self.assertIn('enginex-stream-sync.service',
