@@ -75,7 +75,9 @@ REMOTE_BUILD_HOST=Oracle-Batam-arm remote-build --name sc5000-release-<短说明
    rm -rf "$OUT"
    sh tools/az01-packer/build-release.sh <VERSION> /root/build/sc5000-lab/fw-5.3.0 none /root/build/sc5000-lab/sbin/fsck.hfsplus "$OUT"
    sh tools/az01-packer/build-installer.sh <VERSION> "$OUT"
-   (cd "$OUT" && sha256sum *.img *-Data-Bundle.tar.gz EngineX-Installer-<VERSION>-* > SHA256SUMS.txt)'
+   # only the 8 first-gen images: build-release.sh also writes 8 second-gen *-Update.img that are not published
+   (cd "$OUT" && sha256sum $(for p in SC5000 SC5000M PRIMEGO SC6000 SC6000M PRIME4 PRIME2 MIXSTREAMPRO; do echo "$p-<VERSION>-EngineX-OS-"*-Update.img; done) \
+      *-Data-Bundle.tar.gz EngineX-Installer-<VERSION>-* > SHA256SUMS.txt)'
 ```
 
 `build-release.sh` 抽 qrc 时用 `qemu-arm -L <rootfs>` 跑 Engine 的静态初始化，Batam 装了不带 binfmt 的 `qemu-user`（`--no-install-recommends`）。不要装 `qemu-user-binfmt`：注册了 `qemu-arm` 的 binfmt 会盖过原生执行，门禁会退回软模拟。
@@ -134,13 +136,14 @@ bash tools/az01-packer/release-gate.sh \
 在 `Oracle-Batam-arm` 上直接上传全部 21 个文件（那边 `gh` 已登录 `Cd1s`，不用把 1.3 GB 拉回本机）：
 
 ```sh
+# 资产清单以 SHA256SUMS.txt 为准（20 个）：不要用 *.img，会把不发布的 8 个二代 *-Update.img 一起传上去
 # 新版本
 gh release create v<VERSION> --repo Cd1s/EngineX-OS --title "EngineX OS <VERSION>" \
   --notes-file notes.md --target <提交> --latest \
-  *.img *-Data-Bundle.tar.gz EngineX-Installer-<VERSION>-* SHA256SUMS.txt
+  $(awk '{print $2}' SHA256SUMS.txt) SHA256SUMS.txt
 # 同一版本修复重发
 gh release upload v<VERSION> --repo Cd1s/EngineX-OS \
-  *.img *-Data-Bundle.tar.gz EngineX-Installer-<VERSION>-* SHA256SUMS.txt --clobber
+  $(awk '{print $2}' SHA256SUMS.txt) SHA256SUMS.txt --clobber
 ```
 
 - Release Notes 必须包含完整的 **20 个产物 SHA-256 对照表**（8 款一代 `.img`、8 款二代 `Data-Bundle.tar.gz`、4 平台 `EngineX-Installer`），每次重发都要换成新值。
