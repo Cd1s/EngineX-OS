@@ -112,7 +112,7 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("(p.playing ? 180 : 5)", m)
         self.assertIn("o.currentBpm = s.currentBpm", m)
         self.assertIn("const wantSync = !!e.sync && (!e.link || !root.scPlayer)", m)
-        self.assertIn("function scShadowSpeed(d, pitch)", m)
+        self.assertIn("function scShadowSpeed(d, pitch, want)", m)
         self.assertIn("at.sd * 0.85 + drift * 0.15", m)
         self.assertNotIn("at.postPlay", m)  # the gap after Play is closed by scShadowBend, not a second seek
         self.assertIn("e.seq === at.lastSeq", m)
@@ -809,7 +809,8 @@ assert.strictEqual(scShadowOwn,own);assert.strictEqual(scShadowPostRequest,post)
 assert.equal(created,1);
 // 4 s at 25 Hz, 2 decks: each tick used to read SpeedState, TrackUri and SyncMode
 // (600 JS strings); only changes and the slow refresh re-read them now.
-assert(strings < 120, 'string reads ' + strings);
+// SpeedRange adds one read per deck, and one more whenever its index moves.
+assert(strings <= 120, 'string reads ' + strings);
 assert.equal(scShadowPrev[1].net, 'file:///a.mp3');
 // 4 s of unchanged paused decks: one full post, then pings only (no JSON).
 assert.equal(full, 1); assert(pings >= 7 && pings <= 9, 'pings ' + pings);
@@ -1609,6 +1610,58 @@ assert.equal(eng.plays[0], false); assert.ok(eng.pos < 299300); // and lined up 
 // Continue off: as before, to the very end.
 eng.autoplay = false; scShadowSeek(2, scShadowAt[2], 400000); assert.equal(eng.pos, 300000);
 """)
+
+
+class ShadowRangeTest(unittest.TestCase):
+    """Engine mode: the shadow deck takes the source's pitch range and key lock (maintainer report 11-10)."""
+
+    def test_shadow_deck_takes_the_sources_range_and_key_lock(self):
+        ShadowDisplayTest.js(self, r"""
+scShadowDisplayOnly = false; scFourDeckRole = '13';
+globalThis.scShadowBent = null;
+const props = new Map();
+globalThis.scTr = path => {
+    let p = props.get(path);
+    if (p) return p;
+    p = {state: path.endsWith('/SongLoaded'), entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '', value: path.endsWith('/Speed') ? 0.5 : 0,
+        get string() { return path.endsWith('/SpeedRange') ? this.entries[this.index] : path.endsWith('/SyncMode') ? 'Off' : '' },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/SampleRate') ? 44100 : 0 }};
+    if (path.endsWith('/SampleRate')) p.value = 44100;
+    props.set(path, p);
+    return p;
+};
+let seq = 0;
+const apply = more => { now += 2000; scShadowApplyAll([Object.assign({deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: false, link: '{l}',
+    positionMs: 0, at: now, pitch: 0.01, bpm: 138, currentBpm: 138.0138, jumps: 0, seq: ++seq}, more)], false) };
+const range = scTr('/Engine/Deck2/SpeedRange'), speed = scTr('/Engine/Deck2/Speed'), lock = scTr('/Engine/Deck2/Track/KeyLock');
+apply({range: 100, keylock: true}); // loads
+apply({range: 100, keylock: true});
+assert.equal(range.string, '100', "the source's range");
+assert.ok(Math.abs(speed.value - (0.5 + 0.01 / 200)) < 1e-9, 'fader at +0.01 % of 100: ' + speed.value);
+assert.equal(lock.state, true);
+apply({range: 8, keylock: false});
+assert.equal(range.string, '8', 'the source went back to 8');
+assert.ok(Math.abs(speed.value - (0.5 + 0.01 / 16)) < 1e-9);
+assert.equal(lock.state, false);
+lock.state = true;
+apply({}); // a CDJ or an older sender: no range, no key lock sent
+assert.equal(range.string, '8');
+assert.equal(lock.state, true, 'left alone');
+apply({range: 8, pitch: 11.1, currentBpm: 153.318}); // synced past its own range: widened, never stuck at the end stop
+assert.equal(range.string, '20');
+// The sender reads both with the Sync state (5 Hz) and posts on a change.
+const own = {'/SpeedRange': {string: '50'}, '/Track/KeyLock': {state: true}};
+scShadowDeckProperties = {};
+globalThis.scTr = path => { for (const k in own) if (path === '/Engine/Deck1' + k) return own[k]; return null };
+const g = scShadowProperties(1);
+assert.equal(parseFloat(g.range.string), 50);
+assert.equal(g.keylock.state, true);
+""")
+        src = bp.SERVICES_MAIN
+        self.assertIn("s.range = p && p.rangeIndex === s.rangeIndex ? p.range : parseFloat(g.range.string) || 0", src)
+        self.assertIn("o.range = s.range; o.keylock = s.keylock", src)
+        self.assertIn("s.range !== p.range || s.keylock !== p.keylock) edge = true", src)
+        self.assertIn("sent.range !== o.range || sent.keylock !== o.keylock", src)
 
 
 if __name__ == "__main__":
