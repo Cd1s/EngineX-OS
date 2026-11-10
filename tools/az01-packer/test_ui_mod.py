@@ -1211,5 +1211,141 @@ assert.equal(scShadowData(2).rate,1.031028);
         self.assertIn('property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBinding }', layer)
 
 
+# Keep this workstream's regression methods together at the end to avoid
+# overlapping the existing UI and shadow tests during integration.
+class DeckHeaderLayoutTest(unittest.TestCase):
+    js = ShadowDisplayTest.js
+
+    def test_countdown_has_a_bounded_slot_and_elides_only_its_name(self):
+        cap = bp.cue_capsule("", "1", 22, 16)
+        self.assertIn("Layout.maximumWidth: 96", cap)
+        self.assertIn("elide: Text.ElideRight", cap)
+        self.assertIn("Reserve the Cue slot even without a cue", cap)
+
+    def test_performance_header_preserves_sync_row_and_stock_bpm_formatter(self):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on the build host)")
+        with tempfile.TemporaryDirectory(prefix="ui-header-test-") as tmp:
+            packs = Path(tmp) / "packs"
+            result = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(packs)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            composite = "Skins/EngineOS/UI/CompositeControls/"
+            for lang in ("en", "zh-Hans", "zh-Hant"):
+                with self.subTest(lang=lang):
+                    base = packs / lang
+                    bpm = (base / "Skins/Embedded/Items/Bpm.qml").read_text()
+                    self.assertIn("property int decimalPlaces: 2", bpm)
+                    self.assertIn("bpmValue.toFixed(bpm.decimalPlaces)", bpm)
+                    self.assertIn('padEnd(bpm.decimalPlaces, "0")', bpm)
+                    info = (base / composite / "Deck/DeckItem/BpmInfo.qml").read_text()
+                    self.assertIn("EmbeddedItems.Bpm {", info)
+                    self.assertIn("decimalPlaces: 2", info)
+                    self.assertIn("onBpmClicked()", info)
+                    self.assertIn("fractionalBottomMargin: implicitHeight - fractionHeight - bpmInfo.fractionTextTopPadding", info)
+                    self.assertIn("scBpm.fractionHeight + bpmInfo.fractionTextTopPadding", info)
+                    self.assertNotIn("bpmInfoView.bpmFractionalText", info)
+                    performance = (base / composite / "DeckPerformanceData/DeckPerformanceDataContent.qml").read_text()
+                    self.assertIn("id: autoLoop\n        Layout.rightMargin: 4", performance)
+                    for name, text in (
+                        ("Performance", performance),
+                        ("GroupedMini", (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()),
+                        ("SplitMini", (base / composite / "DeckTrackData/SplitMiniDeckTrackDataContent.qml").read_text()),
+                    ):
+                        self.assertEqual(text.count('objectName: "EngineX_CueCountdown"'), 1)
+                        cue = text.index('objectName: "EngineX_CueCountdown"')
+                        self.assertLess(text.index("AutoLoop {"), text.index("BeatJump {"))
+                        self.assertLess(text.index("BeatJump {"), text.index("JP07SyncIndicator {"))
+                        self.assertLess(text.index("JP07SyncIndicator {"), cue)
+                        self.assertLess(cue, text.index("SpeedInfo {"))
+                        if name == "SplitMini":
+                            self.assertIn("Layout.minimumWidth: 160", text)
+                    # The actual time controls (elapsed/remaining and flip touch
+                    # target) remain byte-for-byte stock in all four variants.
+                    for name in ("GroupedMain", "SplitMain", "GroupedMini", "SplitMini"):
+                        rel = composite + f"DeckTrackData/{name}DeckTrackDataContent.qml"
+                        stock = (qrc / rel).read_text()
+                        text = (base / rel).read_text() if (base / rel).exists() else stock
+                        pattern = r"(?m)^( +)DeckInfoTimeInfo \{.*?^\1\}"
+                        self.assertEqual(re.search(pattern, text, re.S).group(), re.search(pattern, stock, re.S).group())
+                    # Conserving the mini row's total fixed width preserves the
+                    # stock flexible sync bar, including when Cue is visible.
+                    mini = (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
+                    def preferred(kind, text):
+                        block = re.search(kind + r" \{(.*?)^                \}", text, re.S | re.M).group(1)
+                        return int(re.search(r"Layout.preferredWidth: (\d+)", block).group(1))
+                    stock = (qrc / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
+                    cue_width = int(re.search(r"Layout.preferredWidth: (\d+)", bp.cue_capsule("", "1", 22, 16)).group(1))
+                    self.assertEqual(preferred("AutoLoop", stock) + preferred("BeatJump", stock) + 6 * 16,
+                                     preferred("AutoLoop", mini) + preferred("BeatJump", mini) + cue_width + 7 * 4)
+                    jump = (base / composite / "Deck/DeckItem/BeatJump.qml").read_text()
+                    forward = jump.index('objectName: "Deck_BeatJump_Forward"')
+                    self.assertLess(jump.index('objectName: "Deck_BeatJump_Text"'), forward)
+                    self.assertLess(forward, jump.index("id: beatJumpTextAnimation"))
+                    for action in ("JumpBack", "JumpForward", "BeatJumpIndex"):
+                        self.assertIn("/Track/BeatJump/" + action, jump)
+                    self.assertNotIn("anchors.margins: -6", jump)
+                    self.assertIn("rightPadding: 14", jump)
+                    self.assertIn("EngineXEmbedded.Bpm {", performance)
+                    self.assertIn("s.currentBpm ||", performance)
+                    self.assertNotIn(".toFixed(1)", bp.SHADOW_LAYER)
+            if shutil.which("node"):
+                # Execute the stock formatter expression with its new default,
+                # including trailing zeroes and an exact fractional tempo.
+                expression = re.search(r"(bpmValue\.toFixed\(bpm\.decimalPlaces\)\.split\(\"\.\"\))", bpm).group(1)
+                script = 'const bpm={decimalPlaces:2}; const values=[128,174.25]; console.log(JSON.stringify(values.map(bpmValue=>' + expression + ')));'
+                output = subprocess.check_output(["node", "-e", script], text=True)
+                self.assertEqual(json.loads(output), [["128", "00"], ["174", "25"]])
+
+    @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
+    def test_shadow_preserves_exact_tempo_and_applies_tempo_only_changes(self):
+        value = re.search(r"bpmValue: \{(.*?)\n\s+\}", bp.SHADOW_LAYER, re.S).group(1)
+        self.js(r"""
+const entry={deck:2,key:'tempo',bpm:128,pitch:1.7,currentBpm:130.17};
+scShadowApplyDisplay([entry]);
+const first=scShadowData(2);
+assert.equal(first.currentBpm,130.17);
+const scDisplay={sample:first,meta:null};
+const value=()=>{ """ + value + r""" };
+assert.equal(value().toFixed(2),'130.17');
+assert.equal((128*1.017).toFixed(2),'130.18'); // rounded pitch is insufficient
+now+=500;scShadowApplyDisplay([entry]);
+assert.strictEqual(scShadowData(2),first); // no repaint for a heartbeat
+scShadowApplyDisplay([{...entry,currentBpm:130.18}]);
+assert.notStrictEqual(scShadowData(2),first);
+scDisplay.sample=scShadowData(2);
+assert.equal(value().toFixed(2),'130.18');
+// Sources without a native current tempo retain the pitch-derived fallback.
+scShadowApplyDisplay([{...entry,currentBpm:undefined}]);
+scDisplay.sample=scShadowData(2);
+assert.equal(value().toFixed(2),'130.18');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
+    def test_sender_posts_exact_tempo_changes_at_the_same_rounded_pitch(self):
+        self.js(r"""
+let current=130.17,bodies=[],pings=0;
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(this.url.endsWith('/alive'))pings++;else bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+globalThis.scTr=path=>({
+    value:path.endsWith('/SampleRate')?48000:0,
+    get unnormalized(){return path.endsWith('/OriginalBPM')?128:path.endsWith('/CurrentBPM')?current:0},
+    state:path.endsWith('/SongLoaded'),
+    string:path.endsWith('/TrackUri')?'file:///tempo.mp3':path.endsWith('/SpeedState')?'1.70%':'',color:'#ffffff'});
+scShadowTick();assert.equal(bodies.length,1);
+assert.equal(bodies[0][0].currentBpm,130.17);assert.equal(bodies[0][0].pitch,1.7);
+current=130.18;now+=520;scShadowTick();
+assert.equal(bodies.length,2,'tempo-only change must not wait for the five-second full post');
+assert.equal(bodies[1][0].currentBpm,130.18);assert.equal(bodies[1][0].pitch,1.7);
+now+=520;scShadowTick();assert.equal(bodies.length,2);assert.equal(pings,1);
+""")
+
+
 if __name__ == "__main__":
     unittest.main()
