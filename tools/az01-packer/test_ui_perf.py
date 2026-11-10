@@ -54,7 +54,7 @@ class HotPathTest(unittest.TestCase):
         script = r'''
 const assert = require('node:assert/strict');
 const root = globalThis;
-var scShadowDisplayOnly = false, scShadowEngineMask = 30, scFourDeckRole = "", scPlayer = false, scShadowAt = {};
+var scShadowDisplayOnly = false, scShadowEngineMask = 30, scFourDeckRole = "", scPlayer = false, scShadowAt = {}, scShadowDisplay = {};
 let lookups = 0, made = 0, applied = 0;
 const properties = {};
 const unavailable = new Set();

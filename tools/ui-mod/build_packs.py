@@ -300,7 +300,7 @@ SERVICES_MAIN = """
 	// The board (device tree), not Config.device.isPlayer: the 4-deck layout turns a
 	// player into a non-player inside Engine (#49).
 	property bool scPlayer: false
-	function scDeckLocked(deck) { const isLine = !!(scShadowDisplay[deck] && scShadowDisplay[deck].lineIn); return scFourDeckRole !== "" && (isLine || scFourDeckRole.indexOf(String(deck)) < 0) && (scPlayer || (((scShadowEngineMask >> deck) & 1) === 0 ? !!scShadowData(deck) : !!(scShadowAt[deck] && scShadowAt[deck].path))) }
+	function scDeckLocked(deck) { const isLine = !!(scShadowDisplay[deck] && scShadowDisplay[deck].lineIn); return scFourDeckRole !== "" && (isLine || scFourDeckRole.indexOf(String(deck)) < 0) && (scPlayer || !!scShadowData(deck) || (((scShadowEngineMask >> deck) & 1) === 1 && !!(scShadowAt[deck] && scShadowAt[deck].path))) }
 	// Swipe left loads the role's first deck, swipe right its second (0: stock).
 	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
 	property bool scFourDeckOn: false // the saved switch; Engine applies it on restart
@@ -318,7 +318,8 @@ SERVICES_MAIN = """
 	// When stream-sync last confirmed the shadow state (an unchanged version counts):
 	// a plain object, so no binding re-evaluates on every long-poll reply.
 	readonly property var scShadowLive: ({seen: 0})
-	function scShadowVisible(d) { return d >= 1 && d <= 4 && ((scShadowEngineMask >> d) & 1) === 0 && scDeckLocked(d) }
+	// The display renderer draws deck d: a display slot, or an Engine slot it covers while the track is on its way (scShadowCovers).
+	function scShadowVisible(d) { return d >= 1 && d <= 4 && (((scShadowEngineMask >> d) & 1) === 0 || !!scShadowDisplay[d]) && scDeckLocked(d) }
 	function scShadowDeckFor(item) {
 		// Stock skins put the deck on different wrappers (deckIndex / deckData / deckView).
 		for (let p = item; p; p = p.parent) {
@@ -521,7 +522,8 @@ SERVICES_MAIN = """
 			s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
 			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
-			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail) return false
+			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail || s.progress !== (Number(e.progress) || 0) || s.error !== (e.error || "") ||
+			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0)) return false
 		if (Array.isArray(e.cues)) {
 			const a = s.liveCues, b = e.cues
 			if (!Array.isArray(a) || a.length !== b.length) return false
@@ -559,6 +561,7 @@ SERVICES_MAIN = """
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master, sync: !!e.sync,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				jumps: Number(e.jumps) || 0,
+				progress: Number(e.progress) || 0, error: e.error || "", engine: !!e.engine, copying: !!e.copying, durationMs: Number(e.durationMs) || 0,
 				meta: old && old.key === key ? old.meta : null,
 				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
 			if (!next) next = Object.assign({}, scShadowDisplay)
@@ -909,7 +912,7 @@ SERVICES_MAIN = """
 	property var scPressQueue: []
 	function scPress(path) {
 		const remote = /^[/]Engine[/]Deck([1-4])[/]/.exec(path)
-		if (remote && scShadowVisible(Number(remote[1]))) return
+		if (remote && ((scShadowEngineMask >> Number(remote[1])) & 1) === 0 && scShadowVisible(Number(remote[1]))) return
 		scPressQueue = scPressQueue.concat([{path: path, step: 0}])
 		scPressTimer.restart()
 	}
@@ -920,7 +923,7 @@ SERVICES_MAIN = """
 			const next = []
 			for (const e of root.scPressQueue) {
 				const remote = /^[/]Engine[/]Deck([1-4])[/]/.exec(e.path)
-				if (remote && root.scShadowVisible(Number(remote[1]))) continue
+				if (remote && ((root.scShadowEngineMask >> Number(remote[1])) & 1) === 0 && root.scShadowVisible(Number(remote[1]))) continue
 				const t = root.scTr(e.path)
 				if (!t) continue
 				t.state = e.step === 1
@@ -1207,6 +1210,29 @@ SERVICES_MAIN = """
 		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer + scLineQuery)
 		x.send()
 	}
+	// The Engine slots whose track is still on its way: stream-sync copies it, or
+	// Engine loads it. Until Engine holds it (at.ready) the display renderer covers
+	// the slot with the source's title, cover and the progress, as a stock deck
+	// shows a track before its waveform; never "No Track Loaded" in between.
+	function scShadowCovers(decks) {
+		const out = []
+		for (const e of decks) {
+			const d = Number(e.deck), at = scShadowAt[d]
+			if (e.displayOnly === true || e.lineIn || scFourDeckRole.indexOf(String(d)) >= 0 || !(e.path || e.loading)) continue
+			if (e.path && at && at.ready && at.path === e.path) continue
+			out.push({deck: d, key: e.key || "", title: e.title, artist: e.artist, bpm: e.bpm, pitch: e.pitch, durationMs: e.durationMs,
+				loading: true, engine: true, copying: !e.path, progress: e.progress, error: e.error})
+		}
+		return out
+	}
+	// What a waveform lane says while it has nothing to draw: 0 nothing, 1 the copy
+	// runs, 2 Engine loads the copy, 3 the source still computes the detail waveform,
+	// 4-6 the copy failed (stream-sync tries again by itself): no file, no answer in time, other.
+	function scShadowBusy(s, meta, detailed) {
+		if (!s || s.stale || s.metadataOnly) return 0
+		if (s.engine) return !s.copying ? 2 : s.error === "" ? 1 : s.error === "unavailable" ? 4 : s.error === "timeout" ? 5 : 6
+		return s.loading || !meta || (meta.detailPending && !detailed) ? 3 : 0
+	}
 	function scShadowApplyAll(decks, displayOnly) {
 		scShadowDisplayOnly = displayOnly !== false
 		if (scShadowDisplayOnly) {
@@ -1230,8 +1256,8 @@ SERVICES_MAIN = """
 		scShadowEngineMask = mask
 		scShadowLineMask = lineMask
 		root.scShadowCdjMaster = master
-		scShadowApplyDisplay(decks.filter(e => e.displayOnly === true)) // the slots that are Engine's are cleared there
 		for (const e of decks) if (e.displayOnly !== true) root.scShadowApply(e)
+		scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks))) // the slots Engine holds are cleared there
 		const now = Date.now()
 		for (const d of [1, 2, 3, 4]) {
 			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
@@ -3411,6 +3437,7 @@ SHADOW_LAYER = r"""
         readonly property int tilePixels: metaTilePixels(meta)
         readonly property bool tiled: wave && totalPixels > 0 && tiles.length > 0 && tiles.length <= 32
         readonly property bool detailed: !!meta && !!meta.detail && (!!meta.waveformUrl || tiled)
+        readonly property int busyState: live && wave ? root.scShadowBusy(sample, meta, detailed) : 0
         // While the detail is still coming, the scrolling lane shows only grid + playhead; a stretched overview there looks like the whole song (user report 11-10).
         readonly property string imageUrl: !meta ? "" : (overview ? meta.overviewUrl || meta.waveformUrl : detailed ? meta.waveformUrl || meta.overviewUrl : meta.detailPending ? "" : meta.overviewUrl || meta.waveformUrl) || ""
         readonly property bool rgb: graphical && (wave && typeof owner.waveformStyleProperty !== "undefined" && owner.waveformStyleProperty.translator ? owner.waveformStyleProperty.translator.index === 1 : root.scWave === "rgb")
@@ -3519,7 +3546,7 @@ SHADOW_LAYER = r"""
                 sourceComponent: Component { Item {
         Image {
             visible: scDisplay.graphical && source !== ""
-            source: scDisplay.graphical && !scDisplay.tiled ? scDisplay.waveAsset(scDisplay.imageUrl) : ""
+            source: scDisplay.graphical && !scDisplay.tiled && !(scDisplay.wave && scDisplay.sample && scDisplay.sample.engine) ? scDisplay.waveAsset(scDisplay.imageUrl) : "" // a covered Engine slot has the overview only: not stretched over the scrolling lane
             sourceSize.width: scDisplay.overview || !scDisplay.detailed ? 1024 : 2048
             sourceSize.height: scDisplay.overview || !scDisplay.detailed ? 64 : 128
             asynchronous: true
@@ -3635,7 +3662,7 @@ SHADOW_LAYER = r"""
             }
         }
         Rectangle {
-            visible: scDisplay.graphical && !!scDisplay.sample
+            visible: scDisplay.graphical && !!scDisplay.sample && !scDisplay.sample.engine // a track on its way has no position yet
             x: Math.max(0, Math.min(scDisplay.width - width, scDisplay.playhead * scDisplay.width))
             width: 2; height: scDisplay.height; color: "white"
         }
@@ -3643,7 +3670,7 @@ SHADOW_LAYER = r"""
             visible: !!scDisplay.sample
             anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 2
             color: "#dddddd"; font.pixelSize: 10
-            text: !scDisplay.sample ? "" : (scDisplay.stale ? "OFFLINE · " : "") + (scDisplay.sample.metadataOnly ? "REMOTE" : !scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed && !(scDisplay.meta.detailPending && !scDisplay.overview) ? "OVERVIEW" : "")
+            text: !scDisplay.sample ? "" : (scDisplay.stale ? "OFFLINE · " : "") + (scDisplay.sample.metadataOnly ? "REMOTE" : scDisplay.sample.engine || scDisplay.busyState > 0 ? "" : !scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed && !(scDisplay.meta.detailPending && !scDisplay.overview) ? "OVERVIEW" : "")
         }
             } }
         }
@@ -3713,7 +3740,10 @@ SHADOW_LAYER = r"""
                         const cue = scDisplay.cueInfo && root.scCueCountdown ? "   " + scDisplay.cueInfo.label + " " + scDisplay.cueInfo.text : ""
                         const pitch = Math.round(s.pitch * 100) / 100 || 0 // as the source's header: ±8  +0.01%
                         const speed = s.range > 0 ? "   \u00b1" + s.range + "  " + (pitch > 0 ? "+" : "") + pitch.toFixed(2) + "%" : ""
-                        return (scShadowBpm.deckLoaded ? " BPM" : "") + speed + "   " + (m && m.keyName || "") + cue
+                        // A track on its way: its length, as the stock header shows at once.
+                        const sec = s.loading && s.durationMs > 0 ? Math.floor(s.durationMs / 1000) : 0
+                        const length = sec > 0 ? "   " + Math.floor(sec / 60) + ":" + (sec % 60 < 10 ? "0" : "") + sec % 60 : ""
+                        return (scShadowBpm.deckLoaded ? " BPM" : "") + speed + "   " + (m && m.keyName || "") + length + cue
                     }
                 }
                 Text { textFormat: Text.PlainText;
@@ -3725,17 +3755,69 @@ SHADOW_LAYER = r"""
         }
             } }
         }
-        // Covers remote Stems, needle-drop, grid editing and transport touch targets.
+@BUSY@        // Covers remote Stems, needle-drop, grid editing and transport touch targets.
         MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; onWheel: function(wheel) { wheel.accepted = true } }
     }
 """
 
+# Waveform lanes only. The stock download indicator (Deck/DownloadProgress.qml):
+# its ring, its colours and font, one line beside the ring instead of below (a
+# lane is 60-100 px high). The text is one text: line without comparisons, so the
+# language packs translate it.
+SHADOW_BUSY = r"""
+        Loader {
+            id: scBusy
+            active: scDisplay.busyState > 0
+            // Beside the stock playhead line (drawn over the lane), on its wider side.
+            readonly property real line: scDisplay.playhead * scDisplay.width
+            readonly property real room: Math.max(line, scDisplay.width - line) - 24
+            x: line > scDisplay.width / 2 ? 12 : line + 12
+            anchors.verticalCenter: parent.verticalCenter
+            sourceComponent: Component { Row {
+                objectName: "EngineX_Shadow_Busy"
+                spacing: 8
+                transformOrigin: Item.Left
+                scale: Math.min(1, scDisplay.height / 40, scBusy.room / width)
+@RING@                Text { textFormat: Text.PlainText
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: Style.font02Color; font: Style.fontH1
+                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || " ") + (scDisplay.busyState > 3 ? " " + "Retrying…" : " ")
+                }
+            } }
+        }
+"""
 
-def shadow_layer(text: str, kind: str) -> str:
-    """Keep visual items inside the stock stacking context, outside Row/ColumnLayouts."""
+# A known share fills the ring; without one (no Content-Length, Engine loading) a
+# quarter turns. A failed copy shows the text alone.
+SHADOW_RING = r"""
+                Item {
+                    width: 32; height: 32
+                    visible: scDisplay.busyState < 4
+                    readonly property real share: scDisplay.sample ? scDisplay.sample.progress : 0
+                    ScStock.ProgressRing {
+                        anchors.fill: parent; visible: parent.share > 0
+                        progress: parent.share
+                        backgroundColor: Style.surface03Color; ringColor: Style.font02Color; strokeWidth: 2
+                    }
+                    ScStock.ProgressRing {
+                        id: scTurning
+                        anchors.fill: parent; visible: !(parent.share > 0)
+                        progress: 0.25
+                        backgroundColor: Style.surface03Color; ringColor: Style.font02Color; strokeWidth: 2
+                        RotationAnimator on rotation { running: scTurning.visible; from: 0; to: 360; duration: 1000; loops: Animation.Infinite }
+                    }
+                }
+"""
+
+
+def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
+    """Keep visual items inside the stock stacking context, outside Row/ColumnLayouts.
+
+    ring: this QRC ships the stock ProgressRing (5.3.0+)."""
     # Stock roots request QtQuick 2.0/2.1; Matrix4x4 and Binding.restoreMode
     # need the newer revisions available in both supported Engine Qt builds.
-    text = re.sub(r"(?m)^import QtQuick(?: \d+\.\d+)?\s*$", "import QtQuick 2.15\nimport Embedded as EngineXEmbedded", text)
+    ring = ring and kind == "waveform"
+    text = re.sub(r"(?m)^import QtQuick(?: \d+\.\d+)?\s*$", "import QtQuick 2.15\nimport Embedded as EngineXEmbedded" + ("\nimport EngineOS.UI.Controls 1.0 as ScStock" if ring else ""), text)
     text = re.sub(r"(?m)^import QtQuick.Layouts(?: \d+\.\d+)?[ \t]*$", "import QtQuick.Layouts 1.15", text)
     if not re.search(r"(?m)^import QtQuick.Layouts(?: \d+\.\d+)?[ \t]*$", text):
         text = "import QtQuick.Layouts 1.15\n" + text
@@ -3769,7 +3851,8 @@ def shadow_layer(text: str, kind: str) -> str:
     for prop, native, default in (("saturation", "saturationRgbWave", 1.612), ("brightAmp", "brightAmpFactorRgbWave", 0.473), ("brightGain", "brightGainRgbWave", 2.405), ("brightFloor", "brightFloorRgbWave", 0.197)):
         value = f'(typeof owner.{native} !== "undefined" ? owner.{native} : {default})' if kind == "waveform" else str(default)
         palette.append(f"readonly property real {prop}: {value}")
-    layer = SHADOW_LAYER.replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette))
+    busy = SHADOW_BUSY.lstrip("\n").replace("@RING@", SHADOW_RING.lstrip("\n") if ring else "") if kind == "waveform" else ""
+    layer = SHADOW_LAYER.replace("@BUSY@", busy).replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette))
     return text[:end] + layer + text[end:]
 
 
@@ -5235,7 +5318,7 @@ def main():
         text = base.get(rel)
         if text is None:
             text = (a.qrc / rel).read_text(encoding="utf-8")
-        base[rel] = shadow_layer(text, kind)
+        base[rel] = shadow_layer(text, kind, (a.qrc / "Skins/EngineOS/UI/Controls/ProgressRing.qml").is_file())
     # A qrc path this base does not ship renders as a blank icon (5.3.0 has no UIKit.1/).
     for rel, text in base.items():
         for ref in re.findall(r'"qrc:/([^"$%{}+]+\.(?:png|svg|jpg|qml))"', text.replace("%20", " ")):
