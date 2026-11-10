@@ -277,6 +277,29 @@ globalThis.XMLHttpRequest = class {
         res = subprocess.run(["node", "-e", setup + "\n".join(functions) + "\n" + body], capture_output=True, text=True)
         self.assertEqual(res.returncode, 0, res.stderr)
 
+    def test_shadow_preserves_exact_tempo_and_applies_tempo_only_changes(self):
+        value = re.search(r"bpmValue: \{(.*?)\n\s+\}", bp.SHADOW_LAYER, re.S).group(1)
+        self.js(r"""
+const entry={deck:2,key:'tempo',bpm:128,pitch:1.7,currentBpm:130.17};
+scShadowApplyDisplay([entry]);
+const first=scShadowData(2);
+assert.equal(first.currentBpm,130.17);
+const scDisplay={sample:first,meta:null};
+const value=()=>{ """ + value + r""" };
+assert.equal(value().toFixed(2),'130.17');
+assert.equal((128*1.017).toFixed(2),'130.18'); // rounded pitch is insufficient
+now+=500;scShadowApplyDisplay([entry]);
+assert.strictEqual(scShadowData(2),first); // no repaint for a heartbeat
+scShadowApplyDisplay([{...entry,currentBpm:130.18}]);
+assert.notStrictEqual(scShadowData(2),first);
+scDisplay.sample=scShadowData(2);
+assert.equal(value().toFixed(2),'130.18');
+// Sources without a native current tempo retain the pitch-derived fallback.
+scShadowApplyDisplay([{...entry,currentBpm:undefined}]);
+scDisplay.sample=scShadowData(2);
+assert.equal(value().toFixed(2),'130.18');
+""")
+
     def test_same_track_line_state_changes_are_applied(self):
         self.js(r"""
 scPlayer = false; scFourDeckRole = '12';
