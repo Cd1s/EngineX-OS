@@ -57,6 +57,8 @@ type Config struct {
 	GitHubURL, VersionFile                                                string // tests; defaults are api.github.com and versionFile
 	// UIDir holds the deck UI settings; empty means the on-device default.
 	UIDir string
+	// FXSelectorReadyFile overrides the tmpfs heartbeat path in sandbox tests.
+	FXSelectorReadyFile string
 	// RelayURL is the cloud login service; it passes credentials and never audio.
 	// Empty keeps phone logins on the LAN, where the phone must reach this deck.
 	RelayURL string
@@ -83,6 +85,7 @@ type Server struct {
 	mux           *http.ServeMux
 	tidal         *tidalGateway
 	uiMu          sync.Mutex
+	fxMu          sync.Mutex // transient FX commands never hold the settings lock
 	stemsMu       sync.Mutex // streaming-stems.json
 	prolinkExport *prolink.Exporter
 	closed        chan struct{}

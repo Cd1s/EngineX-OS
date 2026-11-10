@@ -15,6 +15,22 @@ SRC = BUILD_PACKS.read_text()
 
 
 class UiModSourceTest(unittest.TestCase):
+    def test_px_selector_maps_before_selecting_stock_carrier(self):
+        for name in ("Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"):
+            self.assertIn(name + " (PX)", bp.FX_CONTROLLER)
+        qml = bp.FX_CONTROLLER
+        selection = qml.split("function scFxAccept(index) {", 1)[1].split("property var scFxMix", 1)[0]
+        self.assertLess(selection.index('root.scCall("fxUnit="'), selection.index('djFxView.selectEffect(mode ?'))
+        self.assertLess(selection.index("function(reply)"), selection.index('djFxView.selectEffect(mode ?'))
+        self.assertIn('scFxStock.indexOf("Flanger")', qml)
+        self.assertIn('index - scFxStock.length + 1 : 0', qml)
+        self.assertIn('Planck.createProperty(scFxBus + "Plus", false, 3)', qml)
+        self.assertIn('ActionTranslatorStateChangeNotifier', qml)
+        self.assertIn('scFxReady.translator.state = false', qml)
+        self.assertIn('return scFxCanUse() ? px : fxConfig.channel[modelData].pEffectIndex.translator', bp.FX_JOG_TARGET)
+        self.assertIn('visible: !root.scFxMasterBypassed', bp.PLAYBACK_ENTRIES)
+        self.assertIn('scFxSelectorAvailable = scFxMasterBypassed && (Config.audio.fx.hasDJFx || Config.audio.fx.hasNHFx)', SRC)
+
     def test_translator_cache_replaces_shadow_lookups(self):
         self.assertIn("function scTr(path)", bp.SERVICES_MAIN)
         a = bp.SERVICES_MAIN.index("function scPress(")
