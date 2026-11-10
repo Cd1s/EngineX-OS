@@ -207,6 +207,7 @@ for irq in 42 43 44 45 46 51 52 53 54 55 65 144 145 146; do mkdir -p "$SC5000_PR
 mkdir -p "$SC5000_PROC_ROOT/100/task/"{100,101,102} "$SC5000_PROC_ROOT/200"
 ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
 printf 'EMain\n' > "$SC5000_PROC_ROOT/100/comm"
+printf '/usr/Engine/Engine\n' > "$SC5000_PROC_ROOT/100/cmdline"
 printf 'irq/42-i2s\n' > "$SC5000_PROC_ROOT/200/comm"
 mkdir -p "$SC5000_PROC_ROOT/100/task/"{103,104,105,106,107,108,110}
 for tid in 100 101 102 103 104 105 106 107 108 110; do
@@ -233,6 +234,7 @@ done
 # OfflineAnalyzer can inherit the GUI's single-CPU mask; include its child too.
 mkdir -p "$SC5000_PROC_ROOT/300/task"
 ln -s /usr/Engine/OfflineAnalyzer "$SC5000_PROC_ROOT/300/exe"
+printf '/usr/Engine/OfflineAnalyzer\n' > "$SC5000_PROC_ROOT/300/cmdline"
 cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/300/task/300"
 cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/300/task/301"
 for entry in '201 144-ffa3000' '202 145-ff54000' '203 99-eth0' '204 99-other' '205 146-ffb2000' '206 54-panfrost'; do
@@ -336,6 +338,19 @@ has 'taskset <-pc> <0,3> <109>' "$MOCK_ROOT/log"
 unlink "$TMP/bin/sleep"
 ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
 ok 'late helpers leave the GUI core and the sweeper stops with Engine'
+
+# The sweep runs beside playback every 30 s: no process per Engine thread.
+for tool in cat sed awk; do
+    real=$(command -v "$tool")
+    printf '#!/bin/sh\nprintf "%%s\\n" "%s $*" >> "$MOCK_ROOT/forks"\nexec %s "$@"\n' "$tool" "$real" > "$TMP/bin/$tool"
+    chmod +x "$TMP/bin/$tool"
+done
+: > "$MOCK_ROOT/forks"; : > "$MOCK_ROOT/log"
+sh "$PERF" > "$MOCK_ROOT/output" 2>&1
+rm "$TMP/bin/cat" "$TMP/bin/sed" "$TMP/bin/awk"
+lacks '/task/' "$MOCK_ROOT/forks"
+has 'taskset <-pc> <2> <103>' "$MOCK_ROOT/log"
+ok 'the Engine thread sweep reads /proc with shell builtins'
 
 # Hot at Engine start: the GPU idles at its lowest clock.
 mkdir -p "$SC5000_SYS_ROOT/class/thermal/thermal_zone0"
