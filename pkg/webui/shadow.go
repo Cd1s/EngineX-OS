@@ -58,6 +58,8 @@ type deckState struct {
 	Name         string  `json:"name,omitempty"`  // the file's name, which the copy keeps
 	Title        string  `json:"title,omitempty"` // a streaming track's real title (QML or stm.db): the copy is named after it
 	Artist       string  `json:"artist,omitempty"`
+	ID           string  `json:"id,omitempty"`           // Engine mode, what the source has loaded: its Key (a copy), its Net (this player's own file), a CDJ's slot and track id. The QML loads again when it changes
+	DurationMS   float64 `json:"durationMs,omitempty"`   // the track's length on the source: tells the QML whether Engine holds this track or another
 	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
 	Stale        bool    `json:"stale,omitempty"`        // frozen display sample; not an eject/goodbye
 	MetadataOnly bool    `json:"metadataOnly,omitempty"` // CDJ state has no peer display asset endpoint
@@ -66,15 +68,27 @@ type deckState struct {
 	Playing      bool    `json:"playing"`
 	PositionMS   float64 `json:"positionMs"`
 	Pitch        float64 `json:"pitch"` // percent
-	Master       bool    `json:"master,omitempty"`
-	Sync         bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
-	BPM          float64 `json:"bpm,omitempty"`        // the track's
-	CurrentBPM   float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
-	Beat         float64 `json:"beat,omitempty"`       // Engine's BeatNumber: beats into the bar, 0..4
+	// Rate is how fast PositionMS runs on the receiver's clock, track ms per ms,
+	// measured (peerDeck.skew). Absent: 1 + Pitch/100.
+	Rate float64 `json:"rate,omitempty"`
+	// Range is the source deck's pitch range in percent (Engine's SpeedRange) and
+	// KeyLock its key lock: the shadow Engine deck is set to both. Absent from a
+	// CDJ and an older sender: the shadow deck keeps its own.
+	Range      float64 `json:"range,omitempty"`
+	KeyLock    *bool   `json:"keylock,omitempty"`
+	Master     bool    `json:"master,omitempty"`
+	Sync       bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
+	BPM        float64 `json:"bpm,omitempty"`        // the track's
+	CurrentBPM float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
+	Beat       float64 `json:"beat,omitempty"`       // Engine's BeatNumber: beats into the bar, 0..4
 	// At is when PositionMS was read, Unix ms on this machine's clock: the QML's
 	// GUI thread and our niced HTTP handler both lag by tens of ms, so the
 	// position is extrapolated from the sample time, not from arrival.
 	At int64 `json:"at,omitempty"`
+	// Sent is when this update left for the peer, Unix ms on the sender's clock,
+	// with PositionMS carried to it: the receiver adds what the trip took over
+	// the quickest one (peerLate).
+	Sent int64 `json:"sent,omitempty"`
 	// Jumps counts the sender's position jumps (hot cue, beat jump, loop, CUE
 	// while playing): a count, not a flag, so a lost or merged update still shows it.
 	Jumps int `json:"jumps,omitempty"`
@@ -113,7 +127,27 @@ type peerDeck struct {
 	// from until the next bump. Updates on this line do not bump (see takePeer).
 	anchorPos float64
 	anchorAt  time.Time
-	local     string // this deck's own copy of the track, see localPeerTrack
+	// skew is how far the deck runs off its pitch on this machine's clock, as a
+	// fraction: the peer's audio clock against our system clock (-165 ppm on two
+	// SC5000) and its pitch, which is rounded to 0.01 %. Measured from ref, the
+	// present line once it has settled, and kept across tracks and pitches.
+	skew   float64
+	refPos float64
+	refAt  time.Time
+	local  string // this deck's own copy of the track, see localPeerTrack
+}
+
+// speed is how fast the deck's position runs on this machine's clock.
+func (p peerDeck) speed() float64 { return (1 + p.Pitch/100) * (1 + p.skew) }
+
+// carried is the deck's position d ago moved on to now, and the Rate to carry
+// it further with once that is measured.
+func (p peerDeck) carried(d time.Duration) (pos, rate float64) {
+	pos = p.PositionMS + float64(d.Microseconds())/1000*p.speed()
+	if p.skew != 0 {
+		rate = math.Round(p.speed()*1e6) / 1e6
+	}
+	return pos, rate
 }
 
 type peerLocalFile struct {
@@ -122,23 +156,40 @@ type peerLocalFile struct {
 }
 
 // Tolerances of samePeerPicture: a playing deck's position may run this far off
-// the line the QML extrapolates before the long poll is woken. The sender samples
-// at 40 ms (its positions are ~10-17 ms noisy at high pitch) and our HTTP fallback
-// is niced on CPU3: re-anchoring on that noise woke the QML ~once a second without
-// making the picture any truer. A paused deck must not move at all.
+// the line the QML extrapolates before the long poll is woken. The sender posts a
+// filtered line (a few ms of noise) and reports a slip of 15 ms at once (jog
+// nudge, its audio clock against the nominal pitch); the QML steers its scroll
+// to the line it has, so more than that must reach it.
+// A paused deck must not move at all.
 const (
-	shadowPlayingDriftMS = 25
+	shadowPlayingDriftMS = 12
 	shadowPausedDriftMS  = 0.5
 )
 
+// A deck's speed is measured over at least shadowSkewSpan of one line, from
+// updates that came within shadowSkewLateMS of the quickest trip (each is a few
+// ms of noise: 30 s gives ~50 ppm, and the span grows with the line). The line
+// counts from shadowSkewSettle on: the sender's first post of a line is up to
+// 12 ms behind, its next one (5 s) is not. The speed in use stays until the
+// line it gives misses an update by shadowSkewOffMS, which is beyond the noise.
+// A result beyond shadowSkewMax is a nudge inside the tolerance, not a clock.
+const (
+	shadowSkewSettle = 6 * time.Second
+	shadowSkewSpan   = 30 * time.Second
+	shadowSkewLateMS = 2
+	shadowSkewOffMS  = 2
+	shadowSkewMax    = 500e-6
+)
+
 // samePeerPicture is true when d shows what old already shows: the same track,
-// state and markers, and a playhead on old's anchored line. Seq, At, Beat,
-// CurrentBPM and Dbg do not count: the display QML does not use them.
+// state, tempo and markers, and a playhead on old's anchored line.
+// Seq, At, Beat and Dbg do not count: the display QML does not use them.
 func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.Loading != d.Loading || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
 		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.Sync != d.Sync || o.BPM != d.BPM ||
+		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
 		return false
@@ -146,7 +197,7 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	if !o.Playing {
 		return math.Abs(old.anchorPos-d.PositionMS) <= shadowPausedDriftMS
 	}
-	expect := old.anchorPos + float64(now.Sub(old.anchorAt).Microseconds())/1000*(1+o.Pitch/100)
+	expect := old.anchorPos + float64(now.Sub(old.anchorAt).Microseconds())/1000*old.speed()
 	return math.Abs(expect-d.PositionMS) <= shadowPlayingDriftMS
 }
 
@@ -199,6 +250,7 @@ type shadowState struct {
 	unresolved          [5]string              // per deck: the last TrackNetworkPath logged as having no file
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
 	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
+	peerClock           map[string]peerClock   // per peer (as peerSeq)
 	dbg                 shadowDebug
 	metaOnlyPoll        bool // the newest compose had a CDJ deck, including cached display assets: 120 ms polls
 	display             shadowDisplayCache
@@ -207,7 +259,7 @@ type shadowState struct {
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, peerTaken: map[string]time.Time{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -351,7 +403,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		}
 		postAt = max(postAt, d.At) // after clamping: one future timestamp must not freeze ownPostAt
 		d.Path, d.Name = "", ""
-		d.Key, d.Ext, d.Loading = "", "", false
+		d.Key, d.Ext, d.Loading, d.ID = "", "", false, ""
 		np := d.Net
 		f := resolveNetPathFile(np, s.shadow.dataRoot, s.shadow.mediaRoot, true)
 		if netPathFile(np, s.shadow.dataRoot, s.shadow.mediaRoot) == "" {
@@ -482,7 +534,7 @@ func (sh *shadowState) ownForPeer(now time.Time) []deckState {
 				until := min(now.UnixMilli(), sh.ownAt.UnixMilli()+2000)
 				d.PositionMS += float64(max(int64(0), until-d.At)) * (1 + d.Pitch/100)
 			}
-			d.At = 0
+			d.At, d.Sent = 0, now.UnixMilli()
 			out = append(out, d)
 		}
 	}
@@ -515,6 +567,31 @@ func (s *Server) shadowPush() {
 	}
 }
 
+// peerClock is the smallest (arrival - Sent) a peer's updates have shown, ms:
+// its clock's offset from ours plus the quickest trip.
+type peerClock struct {
+	off float64
+	at  time.Time
+}
+
+// peerLate is how many ms longer than the peer's quickest update this one took
+// to get here (the network, or either suite waiting for the CPU): a playing
+// deck has moved on by that much, and anchoring it at arrival showed the wait
+// as a slip of the picture. The quickest trip may rise 1 ms/s, which follows
+// two clocks drifting apart or one being slewed; over 300 ms late is a stepped
+// clock and starts over. Called with sh.mu held.
+func (sh *shadowState) peerLate(id string, sent int64, now time.Time) float64 {
+	off := float64(now.UnixMilli() - sent)
+	c, ok := sh.peerClock[id]
+	c.off += now.Sub(c.at).Seconds()
+	if !ok || off < c.off || off > c.off+300 {
+		c.off = off
+	}
+	c.at = now
+	sh.peerClock[id] = c
+	return off - c.off
+}
+
 // takePeer stores a peer's decks unless an update with a newer Seq came first,
 // and wakes the long polls. Called with sh.mu held.
 func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
@@ -531,13 +608,18 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 	// A peer silent for over 2 s may have restarted with a clock behind its old Seq.
 	if t, ok := sh.peerTaken[id]; !ok || now.Sub(t) > 2*time.Second {
 		delete(sh.peerSeq, id)
+		delete(sh.peerClock, id)
 	}
 	// A clock stepped back by more than 10 s (NTP) restarts the order.
 	if last := sh.peerSeq[id]; seq != 0 && seq <= last && seq > last-int64(10*time.Second) {
 		sh.dbg.event("peer-stale", map[string]any{"ip": ip, "seq": seq, "last": last})
 		return
 	}
-	sh.dbg.event("peer", map[string]any{"ip": ip, "seq": seq, "decks": slimDecks(decks)})
+	late := 0.0
+	if len(decks) > 0 && decks[0].Sent != 0 {
+		late = sh.peerLate(id, decks[0].Sent, now)
+	}
+	sh.dbg.event("peer", map[string]any{"ip": ip, "seq": seq, "late": late, "decks": slimDecks(decks)})
 	sh.peerSeq[id] = seq
 	changed := false
 	for slot, v := range sh.peerDecks {
@@ -570,9 +652,33 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		if slot == 0 {
 			continue
 		} // all slots belong to other tracks; never overwrite a sibling
+		if d.Playing && !d.Stale {
+			d.PositionMS += late * (1 + d.Pitch/100)
+		}
+		d.Sent, d.Rate = 0, 0
 		p := peerDeck{deckState: d, ip: ip, at: now, anchorPos: d.PositionMS, anchorAt: now}
-		if old, ok := sh.peerDecks[slot]; ok && (old.ip == ip || old.Link != "" && old.Link == d.Link) && samePeerPicture(old, d, now) {
-			p.anchorPos, p.anchorAt = old.anchorPos, old.anchorAt
+		old, ok := sh.peerDecks[slot]
+		if ok = ok && (old.ip == ip || old.Link != "" && old.Link == d.Link); ok {
+			p.skew = old.skew
+		}
+		if ok && samePeerPicture(old, d, now) {
+			p.anchorPos, p.anchorAt, p.refPos, p.refAt = old.anchorPos, old.anchorAt, old.refPos, old.refAt
+			// The line's own slope, once it is long enough to tell: anchored anew
+			// with the new speed, which reaches the QML as a few ms to steer over.
+			if d.Playing && late <= shadowSkewLateMS {
+				if p.refAt.IsZero() {
+					if now.Sub(p.anchorAt) >= shadowSkewSettle {
+						p.refPos, p.refAt = d.PositionMS, now
+					}
+				} else if span := now.Sub(p.refAt); span >= shadowSkewSpan {
+					run := float64(span.Microseconds()) / 1000 * (1 + d.Pitch/100)
+					skew := (d.PositionMS-p.refPos)/run - 1
+					if math.Abs(skew) <= shadowSkewMax && math.Abs(skew-p.skew)*run >= shadowSkewOffMS {
+						p.skew, p.anchorPos, p.anchorAt = skew, d.PositionMS, now
+						changed = true
+					}
+				}
+			}
 		} else {
 			changed = true
 		}
@@ -749,7 +855,11 @@ func displayFileName(artist, title, ext string) string {
 	if r := []rune(title); len(r) > 120 {
 		title = string(r[:120])
 	}
-	return strings.TrimRight(title, ". ") + ext
+	title = strings.TrimRight(title, ". ")
+	if strings.EqualFold(filepath.Ext(title), ext) {
+		return title // a tagless file is titled by its name: no "x.mp3.mp3"
+	}
+	return title + ext
 }
 
 // engineLibrary is the "Engine Library" folder whose m.db lists f: the
@@ -1060,13 +1170,17 @@ func (s *Server) shadowLegacy(role string, now time.Time, cdj bool, lines ...[]i
 			d.Master = false
 		}
 		if d.Playing {
-			d.PositionMS += float64(now.Sub(p.at).Milliseconds()) * (1 + d.Pitch/100)
+			d.PositionMS, d.Rate = p.carried(now.Sub(p.at))
 		}
 		d.Path = resolveNetPathFile(d.Net, sh.dataRoot, sh.mediaRoot, false)
+		// A file of this player's own is named by its path. Not by the peer's key
+		// then: that appears once the peer's Engine has cached the file, mid-track.
+		d.ID = d.Net
 		if d.Path == "" && d.Key != "" {
 			// Not by address: a player on eth0 and wlan0 is heard from both, and the
 			// track was copied and loaded (and analysed) twice.
 			key := "peer:" + d.Key
+			d.ID = d.Key
 			wanted[key] = now
 			d.Path = sh.files[key]
 			if d.Path == "" {
@@ -1098,7 +1212,7 @@ func (s *Server) shadowLegacy(role string, now time.Time, cdj bool, lines ...[]i
 	}
 	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
 		cue := dev.PlayState1 == cdjCuePlay
-		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM}
+		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS)}
 		if len(consoleLines) > 0 {
 			d.LineIn = true
 		}
@@ -1112,11 +1226,12 @@ func (s *Server) shadowLegacy(role string, now time.Time, cdj bool, lines ...[]i
 		d.At = now.UnixMilli()
 		if f := exported[dev.TrackID]; f != "" && dev.SourcePlayer == export.Number {
 			d.Path = f // the CDJ plays from this deck's own drive (#63): no copy
+			d.ID = fmt.Sprintf("cdj:own:%d", dev.TrackID)
 		} else if dev.TrackID != 0 {
 			if host := sourceHost(export, devices, dev.SourcePlayer); host != nil {
 				key := fmt.Sprintf("cdj:%s:%d:%d", host, dev.SourceSlot, dev.TrackID)
 				wanted[key] = now
-				d.Path = sh.files[key]
+				d.Path, d.ID = sh.files[key], key
 				if d.Path == "" {
 					s.shadowFetchCDJ(key, host, dev.SourceSlot, dev.TrackID)
 				}

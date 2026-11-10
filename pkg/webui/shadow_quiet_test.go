@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,7 +20,7 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 	sh := newShadowState()
 	t0 := time.Now()
 	cue := 1234.5
-	base := deckState{Deck: 2, Key: "k", Title: "T", Playing: true, PositionMS: 1000, Pitch: 0, BPM: 120, CuePos: &cue, Cues: []shadowCue{{I: 1, P: 4800, N: "A", C: "#fff"}}, Link: "L"}
+	base := deckState{Deck: 2, Key: "k", Title: "T", Playing: true, PositionMS: 1000, Pitch: 0, BPM: 120, CurrentBPM: 120, CuePos: &cue, Cues: []shadowCue{{I: 1, P: 4800, N: "A", C: "#fff"}}, Link: "L"}
 	seq := int64(1)
 	take := func(d deckState, at time.Duration) uint64 {
 		t.Helper()
@@ -33,7 +34,7 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 		t.Fatal("a new deck must bump")
 	}
 	steady := base
-	steady.PositionMS, steady.Beat, steady.CurrentBPM, steady.Dbg = 1500, 2.5, 120.01, "x"
+	steady.PositionMS, steady.Beat, steady.CurrentBPM, steady.Dbg = 1500, 2.5, 120, "x"
 	steady.Cues = []shadowCue{{I: 1, P: 4800, N: "A", C: "#fff"}} // a new slice, same cues
 	c2 := cue
 	steady.CuePos = &c2
@@ -44,22 +45,23 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 		t.Fatalf("liveness or anchor: %+v", p)
 	}
 	// Small drifts accumulate against the anchored line, not the previous sample.
-	steady.PositionMS = 2018 // +18 ms at 1 s: sampling noise
+	steady.PositionMS = 2009 // +9 ms at 1 s: sampling noise
 	if take(steady, time.Second) != v {
-		t.Fatal("18 ms drift bumped")
+		t.Fatal("9 ms drift bumped")
 	}
-	steady.PositionMS = 2536 // +36 ms at 1.5 s: each step was only 18 ms
+	steady.PositionMS = 2518 // +18 ms at 1.5 s: each step was only 9 ms (a jog nudge, clock drift)
 	if v2 := take(steady, 1500*time.Millisecond); v2 == v {
 		t.Fatal("accumulated drift never woke the QML")
 	} else {
 		v = v2
 	}
-	if p := sh.peerDecks[2]; p.anchorPos != 2536 || p.anchorAt != t0.Add(1500*time.Millisecond) {
+	if p := sh.peerDecks[2]; p.anchorPos != 2518 || p.anchorAt != t0.Add(1500*time.Millisecond) {
 		t.Fatalf("re-anchored: %+v", p)
 	}
 	for name, edit := range map[string]func(*deckState){
 		"pause":  func(d *deckState) { d.Playing = false },
 		"pitch":  func(d *deckState) { d.Pitch = 0.5 },
+		"tempo":  func(d *deckState) { d.CurrentBPM = 120.01 },
 		"title":  func(d *deckState) { d.Title = "U" },
 		"cue":    func(d *deckState) { d.Cues = []shadowCue{{I: 1, P: 4801, N: "A", C: "#fff"}} },
 		"cuePos": func(d *deckState) { x := 1.0; d.CuePos = &x },
@@ -68,7 +70,7 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 		"track":  func(d *deckState) { d.Key = "k2" },
 	} {
 		d := steady
-		d.PositionMS = 2536 + 500 // on the line at 2 s
+		d.PositionMS = 2518 + 500 // on the line at 2 s
 		edit(&d)
 		if take(d, 2*time.Second) == v {
 			t.Fatalf("%s did not bump", name)
@@ -160,6 +162,7 @@ func TestShadowStateHeaderSkipsHeartbeats(t *testing.T) {
 	defer func() { fourDeckRolePath = oldRole }()
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
 	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowMode=cdj")
+	wantTempo := 130.17
 	header := func() string {
 		t.Helper()
 		r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
@@ -167,20 +170,38 @@ func TestShadowStateHeaderSkipsHeartbeats(t *testing.T) {
 			t.Fatal(err)
 		}
 		var v struct{ Decks []deckState }
-		json.NewDecoder(r.Body).Decode(&v)
+		if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+			t.Fatal(err)
+		}
 		r.Body.Close()
+		if len(v.Decks) != 1 || v.Decks[0].CurrentBPM != wantTempo {
+			t.Fatalf("exact tempo: %+v, want %v", v.Decks, wantTempo)
+		}
 		return r.Header.Get("X-Shadow-State")
 	}
 	now := time.Now()
 	s.shadow.mu.Lock()
-	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Playing: true, PositionMS: 1000, Seq: 1}}, now)
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", BPM: 128, Pitch: 1.7, CurrentBPM: 130.17, Playing: true, PositionMS: 1000, Seq: 1}}, now)
 	s.shadow.mu.Unlock()
 	h1 := header()
 	s.shadow.mu.Lock()
-	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Playing: true, PositionMS: 1300, Seq: 2}}, now.Add(300*time.Millisecond))
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", BPM: 128, Pitch: 1.7, CurrentBPM: 130.17, Playing: true, PositionMS: 1300, Seq: 2}}, now.Add(300*time.Millisecond))
 	s.shadow.mu.Unlock()
 	if h2 := header(); h2 != h1 || h1 == "" {
 		t.Fatalf("heartbeat changed the header: %q -> %q", h1, h2)
+	}
+	// A tempo-only update must wake the display even when rounded pitch is
+	// unchanged. Reconstructing it from 128 BPM and 1.7% would show 130.18.
+	wantTempo = 130.18
+	s.shadow.mu.Lock()
+	d := s.shadow.peerDecks[2].deckState
+	d.CurrentBPM, d.Seq = wantTempo, 3
+	s.shadow.takePeer("192.0.2.7", []deckState{d}, now.Add(300*time.Millisecond))
+	s.shadow.mu.Unlock()
+	if h := header(); h == h1 {
+		t.Fatal("exact tempo change kept the header")
+	} else {
+		h1 = h
 	}
 	s.shadow.mu.Lock()
 	p := s.shadow.peerDecks[2]
@@ -317,5 +338,160 @@ func TestShadowLongPollHoldsQuietAnswers(t *testing.T) {
 	}
 	if d := s.shadow.pollWait(true, time.Now()); d != 120*time.Millisecond {
 		t.Fatalf("legacy poll wait %v", d)
+	}
+}
+
+// An update that took longer than the peer's quickest one carries a playing deck
+// on by the extra time; a clock that is simply ahead, or an old sender, does not.
+func TestTakePeerCarriesALateUpdateOn(t *testing.T) {
+	sh := newShadowState()
+	t0 := time.Now()
+	take := func(seq int64, pos float64, sent, arrived time.Duration, old bool) float64 {
+		t.Helper()
+		d := deckState{Deck: 2, Key: "k", Playing: true, PositionMS: pos, Pitch: 50, Seq: seq}
+		if !old {
+			d.Sent = t0.Add(5*time.Second + sent).UnixMilli() // the peer's clock is 5 s ahead
+		}
+		sh.takePeer("192.0.2.7", []deckState{d}, t0.Add(arrived))
+		if sh.peerDecks[2].Sent != 0 {
+			t.Fatal("Sent reached the picture")
+		}
+		return sh.peerDecks[2].PositionMS
+	}
+	if got := take(1, 1000, 0, 2*time.Millisecond, false); got != 1000 {
+		t.Fatalf("first update moved to %v", got)
+	}
+	// Sent on time, 100 ms late at +50 %: 150 ms on (less the 1 ms/s allowance).
+	if got := take(2, 1750, 500*time.Millisecond, 602*time.Millisecond, false); got < 1898 || got > 1900 {
+		t.Fatalf("late update at %v, want ~1900", got)
+	}
+	if got := take(3, 2500, time.Second, 1002*time.Millisecond, false); got != 2500 {
+		t.Fatalf("quick update moved to %v", got)
+	}
+	if got := take(4, 3250, 0, 1700*time.Millisecond, true); got != 3250 {
+		t.Fatalf("an old sender's update moved to %v", got)
+	}
+	// The peer's clock stepped 2 s: not a 2 s trip.
+	if got := take(5, 4000, -time.Second, 1900*time.Millisecond, false); got != 4000 {
+		t.Fatalf("stepped clock moved the deck to %v", got)
+	}
+}
+
+// Two players' clocks: the peer's audio runs -165 ppm against our system clock
+// and its pitch is rounded. Carried on at the pitch alone the picture is 100 ms
+// off after ten minutes, or steps 12 ms every minute.
+func TestTakePeerMeasuresTheDecksSpeed(t *testing.T) {
+	sh := newShadowState()
+	t0 := time.Now()
+	const pitch, skew = 3.12, -165e-6
+	speed := (1 + pitch/100) * (1 + skew)
+	noise := []float64{0, 0.8, -0.6, 0.3, -0.9, 0.5} // ms: the sender's line
+	nudge := 0.0
+	truth := func(at time.Duration) float64 { return 1000 + nudge + float64(at.Microseconds())/1000*speed }
+	var seq int64
+	var p peerDeck
+	at := time.Duration(0)
+	// The peer's QML posts its line every 5 s; its suite carries that on at the
+	// pitch with every ping (500 ms).
+	run := func(until time.Duration, off float64, late time.Duration) {
+		t.Helper()
+		for ; at <= until; at += 500 * time.Millisecond {
+			seq++
+			post := at.Truncate(5 * time.Second)
+			pos := truth(post) + noise[int(post/(5*time.Second))%len(noise)] + float64((at-post).Milliseconds())*(1+pitch/100)
+			d := deckState{Deck: 2, Key: "k", Playing: true, Pitch: pitch, PositionMS: pos + off, Seq: seq, Sent: t0.Add(at).UnixMilli()}
+			sh.takePeer("192.0.2.7", []deckState{d}, t0.Add(at+late))
+			p = sh.peerDecks[2]
+		}
+	}
+	near := func(what string, got, want, tol float64) {
+		t.Helper()
+		if math.Abs(got-want) > tol {
+			t.Fatalf("%s: %v, want %v +-%v", what, got, want, tol)
+		}
+	}
+	run(35500*time.Millisecond, 0, 0)
+	if p.skew != 0 {
+		t.Fatalf("measured over less than 30 s: %v", p.skew)
+	}
+	// 20 ms late and 8 ms off: carried on, not measured from.
+	run(39*time.Second, 8, 20*time.Millisecond)
+	if p.skew != 0 {
+		t.Fatalf("measured from late updates: %v", p.skew)
+	}
+	run(40*time.Second, 0, 0)
+	near("skew after 40 s", p.skew, skew, 60e-6)
+	v := sh.ver
+	run(5*time.Minute, 0, 0)
+	near("skew after 5 min", p.skew, skew, 15e-6)
+	pos, rate := p.carried(0)
+	near("line after 5 min", pos, truth(at-500*time.Millisecond), 2)
+	near("rate", rate, speed, 15e-6*speed+1e-6)
+	if sh.ver-v > 4 {
+		t.Fatalf("%d bumps in 5 min of steady play", sh.ver-v)
+	}
+	// A jog nudge: a new line, measured anew; the speed found so far stays.
+	nudge, v = 40, sh.ver
+	was := p.skew
+	run(at, 0, 0)
+	if sh.ver == v || p.skew != was || !p.refAt.IsZero() {
+		t.Fatalf("nudge: ver %d -> %d, skew %v -> %v, ref %v", v, sh.ver, was, p.skew, p.refAt)
+	}
+	run(10*time.Minute, 0, 0)
+	near("skew after 10 min", p.skew, skew, 15e-6)
+	last := at - 500*time.Millisecond
+	near("anchored line after 10 min", p.anchorPos+float64(t0.Add(last).Sub(p.anchorAt).Microseconds())/1000*p.speed(), truth(last), 3)
+	// Another track at another pitch starts with the clock's part of it.
+	sh.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "k2", Playing: true, Seq: seq + 1, Sent: t0.Add(at).UnixMilli()}}, t0.Add(at))
+	if _, rate := sh.peerDecks[2].carried(0); math.Abs(rate-(1+skew)) > 16e-6 {
+		t.Fatalf("next track's rate %v", rate)
+	}
+}
+
+// The source's pitch range and key lock travel from its QML post to the peer's
+// shadow reply; a deck that sent neither (a CDJ, an older sender) has neither.
+func TestShadowCarriesRangeAndKeyLock(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	oldRole := fourDeckRolePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = oldRole }()
+	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
+	uiPost(t, srv.URL, "fourDeckWaveform=1")
+	w := httptest.NewRecorder()
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"range":100,"keylock":false,"at":%d}]`, time.Now().UnixMilli()))))
+	if w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	s.shadow.mu.Lock()
+	out := s.shadow.ownForPeer(time.Now())
+	on := true
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Range: 8, Seq: 1}, {Deck: 4, Key: "b", Seq: 1}}, time.Now())
+	ver := s.shadow.ver
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Range: 100, Seq: 2}, {Deck: 4, Key: "b", Seq: 2}}, time.Now())
+	ver2 := s.shadow.ver
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Range: 100, KeyLock: &on, Seq: 3}, {Deck: 4, Key: "b", Seq: 3}}, time.Now())
+	ver3 := s.shadow.ver
+	s.shadow.mu.Unlock()
+	if ver2 == ver || ver3 == ver2 {
+		t.Fatalf("a new range or key lock must wake the QML: ver %d %d %d", ver, ver2, ver3)
+	}
+	if len(out) != 1 || out[0].Range != 100 || out[0].KeyLock == nil || *out[0].KeyLock {
+		t.Fatalf("own deck for the peer: %+v", out)
+	}
+	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	var v struct{ Decks []deckState }
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil || len(v.Decks) != 2 {
+		t.Fatalf("%v %+v", err, v.Decks)
+	}
+	for _, d := range v.Decks {
+		if d.Deck == 2 && (d.Range != 100 || d.KeyLock == nil || !*d.KeyLock) || d.Deck == 4 && (d.Range != 0 || d.KeyLock != nil) {
+			t.Fatalf("shadow reply: %+v", d)
+		}
 	}
 }

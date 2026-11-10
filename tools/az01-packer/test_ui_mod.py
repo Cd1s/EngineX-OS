@@ -112,9 +112,9 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("(p.playing ? 180 : 5)", m)
         self.assertIn("o.currentBpm = s.currentBpm", m)
         self.assertIn("const wantSync = !!e.sync && (!e.link || !root.scPlayer)", m)
-        self.assertIn("function scShadowSpeed(d, pitch)", m)
+        self.assertIn("function scShadowSpeed(d, pitch, want)", m)
         self.assertIn("at.sd * 0.85 + drift * 0.15", m)
-        self.assertIn("at.postPlay = now + 380", m)
+        self.assertNotIn("at.postPlay", m)  # the gap after Play is closed by scShadowBend, not a second seek
         self.assertIn("e.seq === at.lastSeq", m)
         self.assertIn('x.open("POST", "http://127.0.0.1:8080/v1/sc5000/debug/shadow")', m)
         self.assertIn("root.scShadowDebug = !!r.debug", m)
@@ -131,11 +131,13 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("/RequestMaster", m)
         self.assertIn("e.loading", m)
 
-    def test_zoom_is_ten_geometric_levels(self):
-        self.assertIn("function scZoom(dir)", bp.ZOOM_STEP)  # tests/test_rootfs_overlay.sh greps this
-        self.assertIn("Planck.getProperty(\"/Engine/Master/WaveformZoom\")", bp.ZOOM_STEP)
-        self.assertIn("Math.pow(hi / lo, 1 / 9)", bp.ZOOM_STEP)
-        self.assertIn("interval: 16", bp.ZOOM_STEP)
+    def test_zoom_and_browse_encoder_are_stock(self):
+        # The maintainer wants the stock ZOOM / Browse knob: 0.5 s per detent, hold = Grid Edit,
+        # Shift+hold = Cue Edit, double press = Instant Double, also while playing (#147, #157 undone).
+        for gone in ("/GUI/Scripted/Zoom", "scZoom(", "BrowseEncoder.qml", "DeckAction.qml", "Vinyl.qml",
+                     "JogWheel.qml", "!deckConfig.gridEditActive && deckConfig.playing"):
+            self.assertNotIn(gone, SRC)
+        self.assertIn("Planck.getProperty(\"/Engine/Master/WaveformZoom\")", bp.ZOOM_PROP)  # the shadow lane reads it
 
     def test_swipe_left_has_one_stems(self):
         self.assertEqual(SRC.count("!leftActions.some(action => /stem/i.test("), 2)
@@ -152,8 +154,6 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("interval: 40\n\t\trepeat: true", bp.SERVICES_MAIN)
         self.assertIn("scJogLastTick", bp.SERVICES_MAIN)
         self.assertNotIn("< 0.015) return", bp.SERVICES_MAIN)
-        # #157: holding the Browse encoder must not toggle Grid Edit
-        self.assertIn("BrowseEncoder.qml", SRC)
 
     def test_cue_countdown_151(self):
         self.assertIn("function scNextCueInfo(d, tick)", bp.SERVICES_MAIN)
@@ -201,9 +201,6 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn('"/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode"', bp.SERVICES_MAIN)
         self.assertIn("Config.audio.hasStemsLevel || module.pflShiftAction == Action.ToggleChannelStripMode", SRC)
         self.assertIn("scStemsLatchedAt", SRC)
-        # #157: holding Browse/Zoom encoder while playing must not enter BeatGrid Edit
-        self.assertIn("if (!deckConfig.songLoaded || (!deckConfig.gridEditActive && deckConfig.playing))", SRC)
-        self.assertIn("!deckConfig.gridEditActive &&\\n", SRC)
         # #160: 4-Deck Waveform and 3+4 role available across players and all-in-one consoles
         self.assertIn('"34"', bp.FOUR_DECK_ENTRIES)
         self.assertIn('"3+4"', bp.FOUR_DECK_ENTRIES)
@@ -224,11 +221,13 @@ class ShadowDisplayTest(unittest.TestCase):
     """Run the actual QML JS functions with a fake clock and an Engine that rejects all access."""
 
     def js(self, body):
-        names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowPosition",
+        names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
                  "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
-                 "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying")
+                 "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
+                 "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
+                 "scShadowLine", "scShadowBend", "scShadowBendEnd")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
@@ -412,6 +411,8 @@ scShadowSpeed(2, 12);
 scShadowCues(2, {}, {cues: []}, now);
 scShadowBeat(2, {}, {bpm: 120, beat: 3}, 0, now);
 scShadowSeek(2, {}, 1000);
+scShadowLoad(2, {}, {path: '/must-not-load.wav'}, now);
+assert.equal(scShadowHolds(2, {}, {path: '/must-not-load.wav'}, now), false);
 scShadowLink(2, 'peer');
 scShadowLinkEdge(2, 'peer', 'play', '{"state":true}');
 scPress('/Engine/Deck2/RequestMaster');
@@ -658,7 +659,8 @@ JSON.parse=realParse;
             if body.startswith("{"):
                 body = layer[m.start(1):layer.index("\n        }", m.start(1)) + 10].strip()
             parts.append("scope." + handler + " = function() " + (body if body.startswith("{") else "{ " + body + " }"))
-        return "with (scope) {\n" + "\n".join(parts) + "\n}\n"
+        keys = "for (const [k, v] of Object.entries({scrollKey: '', scrollJumps: 0})) if (!(k in scope)) scope[k] = v\n"
+        return keys + "with (scope) {\n" + "\n".join(parts) + "\n}\n"
 
     def test_detail_arriving_while_paused_draws_the_tiles_under_the_playhead(self):
         # QML runs onMetaChanged before the bindings that derive from meta (duration,
@@ -727,8 +729,10 @@ assert.equal(half(true,0),true); assert.equal(half(true,1),false); assert.equal(
     def test_shadow_layer_scroll_settle_and_grid_pool_behaviour(self):
         self.js(r"""
 const starts=[];
-const scroll={running:false,from:0,to:0,duration:0,stop(){this.running=false},start(){this.running=true;starts.push({from:this.from,to:this.to,duration:this.duration})}};
 const scMoving={x:0};
+// Qt: stop() writes the value on screen back to x; a run shows its first value one frame (17 ms) on.
+const scroll={running:false,from:0,to:0,duration:0,at:0,stop(){if(this.running)scMoving.x=this.from+(this.to-this.from)*Math.max(0,Math.min(1,(now-this.at-17)/this.duration));this.running=false},
+  start(){this.running=true;this.at=now;starts.push({from:this.from,to:this.to,duration:this.duration})}};
 const beats=[]; for(let i=0;i<660;i++) beats.push({ms:i*300,number:i}); // ~53 beats per window: not a power of two
 const meta={key:'A',durationMs:200000,waveformDurationMs:200000,beats,cues:[],loops:[],detail:true,waveformWidth:20480,tileWidth:2048,waveformTiles:Array(10).fill('/t.png')};
 let metaValue=null;
@@ -745,13 +749,14 @@ const sample=(pos,playing,extra)=>Object.assign({key:'A',meta,positionMs:pos,at:
 scope.sample=sample(10000,true); scope.refreshSample();
 assert.strictEqual(scope.meta,meta);
 assert.equal(starts.length,1); // one render-thread scroll to the end of the track
-assert.equal(starts[0].from,scope.contentX(10000)); assert.equal(starts[0].to,scope.contentX(200000)); assert.equal(starts[0].duration,190000);
+assert.equal(starts[0].from,scope.contentX(10017)); assert.equal(starts[0].to,scope.contentX(200000)); assert.equal(starts[0].duration,189983); // shown one frame on
 // Grid pool: power of two above the window's beats; tiles under the window only.
 assert(scope.grid.length>0 && scope.gridSlots>=scope.grid.length && (scope.gridSlots&(scope.gridSlots-1))===0 && scope.gridSlots>=32);
 assert.equal(scope.tileLo,0); assert.equal(scope.tileHi,Math.floor((6000+12000)/20000));
-now+=200; scope.refreshPosition(); assert.equal(starts.length,1); // on its line: keeps running
-scope.sample=sample(10000+200+20,true); scope.refreshSample(); assert.equal(starts.length,2); // 20 ms off: restarted
-scope.sample=sample(10220,true,{pitch:8}); scope.refreshSample(); assert.equal(starts.length,3); // new speed: restarted
+now+=200; scope.refreshPosition(); assert.equal(starts.length,1); // same line: left to the 200 ms clock
+scope.sample=sample(10000+200+20,true,{jumps:1}); scope.refreshSample(); assert.equal(starts.length,2); // 20 ms off after a jump: restarted
+scope.sample=sample(10220,true,{jumps:1,pitch:8}); scope.refreshSample(); assert.equal(starts.length,2); // new speed, no jump: the clock takes it up
+now+=200; scope.refreshPosition(true); assert.equal(starts.length,3); assert(scope.scrollSpeed>1.08&&scope.scrollSpeed<1.13); // 1.08 and the 16 ms it fell behind
 // CUE released back on its spot: a 1 ms settle to x, never a bare x write the write-back would undo.
 scope.sample=sample(10000,false); scope.refreshSample();
 const settle=starts[starts.length-1];
@@ -779,6 +784,8 @@ assert.strictEqual(scope.cueInfo,ci); assert.equal(asked,1);
         # No GUI-thread position animation; the content scrolls with one XAnimator.
         self.assertNotIn("NumberAnimation", layer)
         self.assertIn("XAnimator { id: scroll; target: scMoving", layer)
+        self.assertNotIn("glide", layer.lower()) # the 200 ms clock steers the one scroll
+        self.assertIn("onTriggered: { scDisplay.refreshPosition(true); scDisplay.refreshDetails() }", layer)
         moving = layer[layer.index("id: scMoving"):layer.index("} // scMoving")]
         self.assertNotRegex(moving, r"(?m)^\s*x:\s*-?\s*scDisplay\.(start|position)")
         # Markers, loops and tiles sit in track coordinates: their x never depends on time.
@@ -849,7 +856,8 @@ assert.strictEqual(scShadowOwn,own);assert.strictEqual(scShadowPostRequest,post)
 assert.equal(created,1);
 // 4 s at 25 Hz, 2 decks: each tick used to read SpeedState, TrackUri and SyncMode
 // (600 JS strings); only changes and the slow refresh re-read them now.
-assert(strings < 120, 'string reads ' + strings);
+// SpeedRange adds one read per deck, and one more whenever its index moves.
+assert(strings <= 120, 'string reads ' + strings);
 assert.equal(scShadowPrev[1].net, 'file:///a.mp3');
 // 4 s of unchanged paused decks: one full post, then pings only (no JSON).
 assert.equal(full, 1); assert(pings >= 7 && pings <= 9, 'pings ' + pings);
@@ -1099,6 +1107,608 @@ for(const board of ['JP20','JP22','JP24','JC11S','JP21X']) {
             main_text = main.read_text()
             self.assertIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer\n\t\t\tanchors.fill: parent\n", main_text)
             self.assertNotIn("parent: Overlay.overlay ? Overlay.overlay : uiContainer\n\t\t\twidth: planckQuickView.defaultScreenSize.width", main_text)
+
+
+class ShadowNudgeTest(unittest.TestCase):
+    """#5/#7: a jog nudge and the peer's clock drift move the shadow lane without jumps."""
+    js = ShadowDisplayTest.js
+    layer_js = ShadowDisplayTest.layer_js
+
+    RECEIVER = r"""
+const starts=[];
+const scMoving={x:0};
+// Qt: stop() writes the value on screen back to x; a run shows its first value one frame
+// (17 ms) on. `fast` is the Animator's clock against the wall clock.
+let fast=1;
+const scroll={running:false,from:0,to:0,duration:0,at:0,stop(){if(this.running)scMoving.x=this.from+(this.to-this.from)*Math.min(1,((now-this.at)*fast-17)/this.duration);this.running=false},
+  start(){this.running=true;this.at=now;starts.push({from:this.from,to:this.to,duration:this.duration})}};
+const meta={key:'A',durationMs:2000000,waveformDurationMs:2000000,beats:[],cues:[],loops:[],detail:true,waveformWidth:20480,tileWidth:2048,waveformTiles:Array(10).fill('/t.png')};
+const scope={live:true,visible:true,wave:true,overview:false,graphical:true,deck:2,sample:null,cues:scShadowEmptyArray,loops:scShadowEmptyArray,
+  position:0,stale:false,cueInfo:null,grid:scShadowEmptyArray,gridAnchor:-Infinity,gridSlots:0,tileLo:0,tileHi:31,scrollSpeed:0,width:1000,
+  scroll,scMoving,root:globalThis,meta,duration:2000000,waveformDuration:2000000,span:8000,playhead:0.5,totalPixels:20480,tilePixels:2048,
+  get start(){return this.position-this.span*this.playhead}};
+const sample=(pos,extra)=>Object.assign({key:'A',meta,positionMs:pos,at:now,playing:true,pitch:0,jumps:0,stale:false},extra||{});
+const near=(a,b,d)=>assert(Math.abs(a-b)<=(d||0.001),a+' != '+b);
+// Track ms under the playhead on screen, without disturbing the run.
+const shown=()=>{const r=scroll.running,x=scMoving.x;scroll.stop();const ms=(scope.playhead-scMoving.x/scope.width)*scope.span;scroll.running=r;scMoving.x=x;return ms};
+"""
+
+    def test_receiver_steers_over_a_slip_and_jumps_only_on_a_jump(self):
+        self.js(self.RECEIVER + self.layer_js() + r"""
+scope.sample=sample(10000); scope.refreshSample(); assert.equal(starts.length,1); near(starts[0].from,scope.contentX(10017));
+// 20 ms off (the peer's clock, a jog nudge): the sample alone restarts nothing.
+now+=100; scope.sample=sample(10100+20); scope.refreshSample(); assert.equal(starts.length,1);
+// The clock goes on from what is shown, at the speed that closes the 20 ms in 0.4 s.
+now+=100; near(shown(),10200); scope.refreshPosition(true); assert.equal(starts.length,2);
+near(scope.scrollSpeed,1.05); near(starts[1].from,scope.contentX(10200+17*1.05)); near(starts[1].duration,Math.round((2000000-10200-17*1.05)/1.05));
+now+=200; near(shown(),10200+200*1.05); scope.refreshPosition(true); near(scope.scrollSpeed,1.025); // 10 ms left
+// A brake: back the same way, never backwards.
+scope.sample=sample(10420-30); scope.refreshSample(); now+=200; scope.refreshPosition(true); near(scope.scrollSpeed,1-(30-5)/400);
+scope.sample=sample(shown()-299); scope.refreshSample(); now+=200; scope.refreshPosition(true); assert(scope.scrollSpeed>=0.25&&scope.scrollSpeed<0.3);
+// More than 300 ms off, a jump (seek, hot cue, loop) or another track: a fresh line at once.
+let n=starts.length;
+scope.sample=sample(50000); scope.refreshSample(); assert.equal(starts.length,n); now+=200; scope.refreshPosition(true);
+assert.equal(starts.length,n+1); near(starts[n].from,scope.contentX(50200+17)); assert.equal(scope.scrollSpeed,1);
+scope.sample=sample(50220,{jumps:1}); scope.refreshSample(); assert.equal(starts.length,n+2); near(starts[n+1].from,scope.contentX(50220+17));
+scope.sample=sample(50240,{jumps:1,key:'B'}); scope.refreshSample(); assert.equal(starts.length,n+3); near(starts[n+2].from,scope.contentX(50240+17));
+// Paused: settles on the spot.
+scope.sample=sample(50260,{jumps:1,key:'B',playing:false}); scope.refreshSample();
+assert.equal(scope.scrollSpeed,0); assert.equal(starts[n+3].from,scope.contentX(50260)); assert.equal(starts[n+3].duration,1);
+""")
+
+    SENDER = r"""
+let bodies=[], pos=0, rate=1;
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(!this.url.endsWith('/alive'))bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+globalThis.scTr=path=>({
+    get value(){return path.endsWith('/SampleRate')?48000:0},
+    get unnormalized(){return path.endsWith('/TrackPosition')?pos:path.endsWith('BPM')?120:0},
+    get state(){return path.endsWith('/SongLoaded')||path.endsWith('/PlayState')},
+    get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':''}, color:'#ffffff', stateChanged:{connect(){}}});
+const run=ms=>{const end=now+ms;while(now<end){const dt=scShadowTickTimer.interval;now+=dt;pos+=dt*48*rate;scShadowTick();}};
+// Where the peer shows the deck (the last full post carried on at pitch 0) minus where it is.
+const ahead=()=>{const b=bodies[bodies.length-1][0];return b.positionMs+(now-b.at)-pos/48};
+"""
+
+    def test_sender_follows_a_jog_nudge(self):
+        # The peer carries the posted line on at the pitch: a nudge must reach it while it
+        # happens (it arrived in 25 ms jumps, a brake only after 180 ms).
+        self.js(self.SENDER + r"""
+run(6000); let n=bodies.length;
+run(3000); assert(bodies.length-n<=1,'steady playback: heartbeats only'); assert.equal(scShadowTickTimer.interval,80);
+rate=1.05; n=bodies.length; run(1000); assert(bodies.length-n>=3,'a jog push is posted as it happens'); assert(Math.abs(ahead())<=16,'push '+ahead());
+rate=1; run(3000);
+rate=0.95; n=bodies.length; run(2000); assert(bodies.length-n>=2,'a jog brake is followed');
+assert(ahead()>=0&&ahead()<60,'brake '+ahead()); // of 100 ms; these positions have no audio-block lag (17 ms of it)
+rate=1; run(3000); assert(Math.abs(ahead())<60); assert.equal(bodies[bodies.length-1][0].jumps,0,'a nudge is not a jump');
+""")
+
+    def test_sender_line_moves_without_steps(self):
+        # The line closes in on a slower deck a little per tick: every post is one slip of
+        # 15 ms, and a position that arrives one tick late does not move the line at all.
+        self.js(self.SENDER + r"""
+const shifts=from=>bodies.slice(from).map((b,i,a)=>i?b[0].positionMs-a[i-1][0].positionMs-(b[0].at-a[i-1][0].at):0);
+run(6000); let n=bodies.length;
+rate=0.95; run(2000); rate=1; run(2000);
+assert(bodies.length-n>=4); assert(shifts(n).every(s=>Math.abs(s)<22),'brake '+shifts(n));
+run(6000); n=bodies.length; const late=pos; now+=80; scShadowTick(); pos=late+80*48; run(3000);
+assert(bodies.length-n<=1,'a late position is not a slip'); assert(shifts(n).every(s=>Math.abs(s)<2),'late '+shifts(n));
+""")
+
+    def test_receiver_holds_the_line_on_a_fast_animation_clock(self):
+        # The players' panel runs at 59.34 Hz and Qt steps Animators by 1/59 s a frame:
+        # 0.57 % fast, 3.4 s in ten minutes of an unsteered scroll.
+        self.js(self.RECEIVER + self.layer_js() + r"""
+fast=1.0057;
+const t0=now, model=()=>10000+(now-t0)*1.0312;
+scope.sample=sample(10000,{pitch:3.12}); scope.refreshSample();
+let worst=0;
+for(let i=1;i<=3000;i++){ // ten minutes of the 200 ms clock
+    now+=200; scShadowLive.seen=now; // unchanged replies keep the sample alive
+    if(i%25===0){scope.sample=sample(model(),{pitch:3.12}); scope.refreshSample();} // a full reply every 5 s
+    scope.refreshPosition(true);
+    if(i===1500){scope.span=4000; scope.restartScroll(); near(shown(),model(),0.01);} // zoom: on the line at once
+    worst=Math.max(worst,Math.abs(shown()-model()));
+}
+assert(worst<3,'worst '+worst); near(shown(),model(),3); // minute 10 as minute 1
+assert.equal(starts.length,3002);
+""")
+
+
+    def test_receiver_carries_the_position_on_at_the_measured_rate(self):
+        # stream-sync measures how fast the other player's deck really runs (its audio
+        # clock is -165 ppm on ours, its pitch is rounded): `rate` in the reply.
+        self.js(r"""
+const deck=(pos,extra)=>Object.assign({deck:2,key:'A',playing:true,positionMs:pos,at:now,pitch:3.12},extra||{});
+scShadowApplyDisplay([deck(1000)]);
+let s=scShadowData(2); assert.equal(s.rate,0); assert.equal(scShadowRate(s),1.0312); // none yet: by the pitch
+now+=60000; scShadowLive.seen=now;
+// The line is 10 ms behind the pitch after a minute: the same sample takes the rate.
+scShadowApplyDisplay([deck(1000+60000*1.0312-10,{rate:1.031028})]);
+assert.strictEqual(scShadowData(2),s); assert.equal(s.rate,1.031028); assert.equal(scShadowRate(s),1.031028);
+const at=now, pos=s.positionMs;
+now+=600000; scShadowLive.seen=now;
+assert(Math.abs(scShadowPosition(s,now)-(pos+600000*1.031028))<1e-6); // ten minutes on: by the rate, 103 ms short of the pitch
+// A reply on that line is the same picture; one on the pitch's line is not.
+scShadowApplyDisplay([deck(pos+600000*1.031028+3,{rate:1.031028})]); assert.strictEqual(scShadowData(2),s);
+scShadowApplyDisplay([deck(pos+600000*1.031028+50,{rate:1.031028})]); assert.notStrictEqual(scShadowData(2),s);
+assert.equal(scShadowData(2).rate,1.031028);
+""")
+
+    def test_shadow_lane_takes_the_stock_main_colours_and_grid(self):
+        # User report 11-10: the lane looked translucent. The stock height*Color set
+        # is the Fade one (#73ffffff, #9908f302, #800759d5 on a player).
+        layer = bp.shadow_layer("import QtQuick 2.0\nItem {\n    id: w\n}\n", "waveform")
+        for band in ("Low", "Mid", "High"):
+            self.assertIn(f'{band.lower()}Color: (!rgb && typeof owner.color{band}Color !== "undefined" ? owner.color{band}Color : typeof owner.height{band}Color', layer)
+        self.assertNotIn("owner.colorLowColor", bp.shadow_layer("import QtQuick 2.0\nItem {\n    id: w\n}\n", "overview"))
+        self.assertIn('color: wave ? "black" : "#101114"', layer)
+        # Stock grid: edge ticks on every beat; only a bar has the line and its number.
+        self.assertNotIn("0.55 : 0.22", layer)
+        self.assertIn('Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: "#b7b7b7" }', layer)
+        self.assertIn('text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""', layer)
+
+    def test_shadow_layer_restores_the_stock_visible_binding_not_a_value(self):
+        # 11-10, Engine mode: no waveform on the shadow decks. Binding read the
+        # effective visible (false, view off screen) and wrote it back on exit.
+        layer = bp.shadow_layer("import QtQuick 2.0\nItem {\n    id: w\n}\n", "waveform")
+        self.assertIn('property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBinding }', layer)
+
+
+# Keep this workstream's regression methods together at the end to avoid
+# overlapping the existing UI and shadow tests during integration.
+class DeckHeaderLayoutTest(unittest.TestCase):
+    js = ShadowDisplayTest.js
+
+    def test_countdown_has_a_bounded_slot_and_elides_only_its_name(self):
+        cap = bp.cue_capsule("", "1", 22, 16)
+        self.assertIn("Layout.maximumWidth: 96", cap)
+        self.assertIn("elide: Text.ElideRight", cap)
+        self.assertIn("Reserve the Cue slot even without a cue", cap)
+
+    def test_performance_header_preserves_sync_row_and_stock_bpm_formatter(self):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on Oracle-Batam-arm)")
+        with tempfile.TemporaryDirectory(prefix="ui-header-test-") as tmp:
+            packs = Path(tmp) / "packs"
+            result = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(packs)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            composite = "Skins/EngineOS/UI/CompositeControls/"
+            for lang in ("en", "zh-Hans", "zh-Hant"):
+                with self.subTest(lang=lang):
+                    base = packs / lang
+                    bpm = (base / "Skins/Embedded/Items/Bpm.qml").read_text()
+                    self.assertIn("property int decimalPlaces: 1", bpm)  # stock default for stock users
+                    self.assertIn('property string fractionSeparator: ""', bpm)
+                    self.assertIn("bpmValue.toFixed(bpm.decimalPlaces)", bpm)
+                    self.assertIn('padEnd(bpm.decimalPlaces, "0")', bpm)
+                    info = (base / composite / "Deck/DeckItem/BpmInfo.qml").read_text()
+                    # Number format only: stock's Row and its own text for "-" / unanalysed stay.
+                    self.assertNotIn("EmbeddedItems.Bpm {", info)
+                    self.assertIn("unnormalized.toFixed(2)", info)
+                    self.assertIn("scAnalyzed.translator.state", info)
+                    self.assertIn("bpmInfo.scBpm2 ? bpmInfo.scBpm2[0] : bpmInfoView && bpmInfoView.bpmText", info)
+                    self.assertIn(': bpmInfoView && bpmInfoView.bpmFractionalText', info)
+                    self.assertIn("topPadding: bpmInfo.fractionTextTopPadding", info)
+                    self.assertIn("onBpmClicked()", info)
+                    performance = (base / composite / "DeckPerformanceData/DeckPerformanceDataContent.qml").read_text()
+                    self.assertIn("id: autoLoop\n        Layout.rightMargin: 4", performance)
+                    for name, text in (
+                        ("Performance", performance),
+                        ("GroupedMini", (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()),
+                        ("SplitMini", (base / composite / "DeckTrackData/SplitMiniDeckTrackDataContent.qml").read_text()),
+                    ):
+                        self.assertEqual(text.count('objectName: "EngineX_CueCountdown"'), 1)
+                        cue = text.index('objectName: "EngineX_CueCountdown"')
+                        self.assertLess(text.index("AutoLoop {"), text.index("BeatJump {"))
+                        self.assertLess(text.index("BeatJump {"), text.index("JP07SyncIndicator {"))
+                        self.assertLess(text.index("JP07SyncIndicator {"), cue)
+                        self.assertLess(cue, text.index("SpeedInfo {"))
+                        if name == "SplitMini":
+                            self.assertIn("Layout.minimumWidth: 160", text)
+                    # The actual time controls (elapsed/remaining and flip touch
+                    # target) remain byte-for-byte stock in all four variants.
+                    for name in ("GroupedMain", "SplitMain", "GroupedMini", "SplitMini"):
+                        rel = composite + f"DeckTrackData/{name}DeckTrackDataContent.qml"
+                        stock = (qrc / rel).read_text()
+                        text = (base / rel).read_text() if (base / rel).exists() else stock
+                        pattern = r"(?m)^( +)DeckInfoTimeInfo \{.*?^\1\}"
+                        self.assertEqual(re.search(pattern, text, re.S).group(), re.search(pattern, stock, re.S).group())
+                    # Conserving the mini row's total fixed width preserves the
+                    # stock flexible sync bar, including when Cue is visible.
+                    mini = (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
+                    def preferred(kind, text):
+                        block = re.search(kind + r" \{(.*?)^                \}", text, re.S | re.M).group(1)
+                        return int(re.search(r"Layout.preferredWidth: (\d+)", block).group(1))
+                    stock = (qrc / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
+                    cue_width = int(re.search(r"Layout.preferredWidth: (\d+)", bp.cue_capsule("", "1", 22, 16)).group(1))
+                    self.assertEqual(preferred("AutoLoop", stock) + preferred("BeatJump", stock) + 6 * 16,
+                                     preferred("AutoLoop", mini) + preferred("BeatJump", mini) + cue_width + 7 * 4)
+                    jump = (base / composite / "Deck/DeckItem/BeatJump.qml").read_text()
+                    forward = jump.index('objectName: "Deck_BeatJump_Forward"')
+                    self.assertLess(jump.index('objectName: "Deck_BeatJump_Text"'), forward)
+                    self.assertLess(forward, jump.index("id: beatJumpTextAnimation"))
+                    for action in ("JumpBack", "JumpForward", "BeatJumpIndex"):
+                        self.assertIn("/Track/BeatJump/" + action, jump)
+                    self.assertNotIn("anchors.margins: -6", jump)
+                    self.assertIn("rightPadding: 14", jump)
+                    self.assertIn("EngineXEmbedded.Bpm {", performance)
+                    self.assertIn("s.currentBpm ||", performance)
+                    self.assertNotIn(".toFixed(1)", bp.SHADOW_LAYER)
+            if shutil.which("node"):
+                # Execute the stock formatter expression with its new default,
+                # including trailing zeroes and an exact fractional tempo.
+                expression = re.search(r"(bpmValue\.toFixed\(bpm\.decimalPlaces\)\.split\(\"\.\"\))", bpm).group(1)
+                script = 'const bpm={decimalPlaces:2}; const values=[128,174.25]; console.log(JSON.stringify(values.map(bpmValue=>' + expression + ')));'
+                output = subprocess.check_output(["node", "-e", script], text=True)
+                self.assertEqual(json.loads(output), [["128", "00"], ["174", "25"]])
+
+    @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
+    def test_shadow_preserves_exact_tempo_and_applies_tempo_only_changes(self):
+        value = re.search(r"bpmValue: \{(.*?)\n\s+\}", bp.SHADOW_LAYER, re.S).group(1)
+        self.js(r"""
+const entry={deck:2,key:'tempo',bpm:128,pitch:1.7,currentBpm:130.17};
+scShadowApplyDisplay([entry]);
+const first=scShadowData(2);
+assert.equal(first.currentBpm,130.17);
+const scDisplay={sample:first,meta:null};
+const value=()=>{ """ + value + r""" };
+assert.equal(value().toFixed(2),'130.17');
+assert.equal((128*1.017).toFixed(2),'130.18'); // rounded pitch is insufficient
+now+=500;scShadowApplyDisplay([entry]);
+assert.strictEqual(scShadowData(2),first); // no repaint for a heartbeat
+scShadowApplyDisplay([{...entry,currentBpm:130.18}]);
+assert.notStrictEqual(scShadowData(2),first);
+scDisplay.sample=scShadowData(2);
+assert.equal(value().toFixed(2),'130.18');
+// Sources without a native current tempo retain the pitch-derived fallback.
+scShadowApplyDisplay([{...entry,currentBpm:undefined}]);
+scDisplay.sample=scShadowData(2);
+assert.equal(value().toFixed(2),'130.18');
+""")
+
+    @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
+    def test_sender_posts_exact_tempo_changes_at_the_same_rounded_pitch(self):
+        self.js(r"""
+let current=130.17,bodies=[],pings=0;
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(this.url.endsWith('/alive'))pings++;else bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+globalThis.scTr=path=>({
+    value:path.endsWith('/SampleRate')?48000:0,
+    get unnormalized(){return path.endsWith('/OriginalBPM')?128:path.endsWith('/CurrentBPM')?current:0},
+    state:path.endsWith('/SongLoaded'),
+    string:path.endsWith('/TrackUri')?'file:///tempo.mp3':path.endsWith('/SpeedState')?'1.70%':'',color:'#ffffff'});
+scShadowTick();assert.equal(bodies.length,1);
+assert.equal(bodies[0][0].currentBpm,130.17);assert.equal(bodies[0][0].pitch,1.7);
+current=130.18;now+=520;scShadowTick();
+assert.equal(bodies.length,2,'tempo-only change must not wait for the five-second full post');
+assert.equal(bodies[1][0].currentBpm,130.18);assert.equal(bodies[1][0].pitch,1.7);
+now+=520;scShadowTick();assert.equal(bodies.length,2);assert.equal(pings,1);
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the follower behavioral checks")
+class ShadowFollowerBendTest(unittest.TestCase):
+    """Engine mode: the shadow deck plays at the source's exact tempo and closes a gap with PITCH BEND, not a seek."""
+
+    def test_gap_below_the_seek_limit_is_bent_closed_at_the_exact_tempo(self):
+        ShadowDisplayTest.js(self, r"""
+const T0 = now, props = new Map();
+let ahead = 80, seeks = 0;
+globalThis.scShadowBent = null;
+globalThis.scShadowBendTimer = {interval: 0, running: false, restart() { this.running = true }, stop() { this.running = false }};
+globalThis.scTr = path => {
+    let p = props.get(path);
+    if (p) return p;
+    const deck2 = path.startsWith('/Engine/Deck2/');
+    p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '8' : path.endsWith('/SyncMode') ? 'Off' : '',
+        entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '',
+        _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? 0.5 : 0,
+        get value() { return this._v }, set value(v) { this._v = v; if (path.endsWith('/SetSongPosition')) seeks++ },
+        // Engine moves TrackPosition in audio blocks of 46 ms
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? (Math.floor((now - T0) / 46) * 46 + 5000 + ahead) * 44.1 : 0 }};
+    props.set(path, p);
+    return p;
+};
+let seq = 0;
+const apply = () => scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}', sync: true,
+    positionMs: now - T0 + 5000, at: now, pitch: 0.01, bpm: 138, currentBpm: 138.0089, jumps: 0, seq: ++seq}], false);
+const run = ms => { for (let t = 0; t < ms; t += 40) { now += 40; scShadowLine(now); if (t % 520 === 0) apply() } };
+const back = scTr('/Engine/Deck2/Track/NudgeBackward'), fwd = scTr('/Engine/Deck2/Track/NudgeForward');
+apply();
+assert.ok(scTr('/Client/Librarian/AddToDatabaseAndLoadToDeck2').url.endsWith('/a.flac'));
+run(1960);
+assert.equal(back.state, false, 'no bend before the line is measured');
+run(2600);
+assert.equal(back.state, true, '80 ms ahead: bend back');
+assert.equal(fwd.state, false);
+assert.equal(seeks, 0, 'no seek for a gap below the limit');
+assert.ok(Math.abs(scShadowBendTimer.interval - 80 * 0.8 / 0.07) < 40, 'bend time ' + scShadowBendTimer.interval);
+assert.ok(Math.abs(scTr('/Engine/Deck2/Speed').value - (0.5 + (138.0089 / 138 - 1) * 100 / 16)) < 1e-9, 'fader at the exact tempo ratio');
+assert.equal(scTr('/Engine/Deck2/SyncMode').string, 'Off', 'a linked shadow deck is never synced by us');
+ahead = 4; // what the bend left
+scShadowBendEnd();
+assert.equal(back.state, false);
+run(4000);
+assert.equal(back.state || fwd.state, false, 'within 6 ms: left alone');
+assert.equal(seeks, 0);
+ahead = -40; run(2600);
+assert.equal(fwd.state, true, '40 ms behind: bend forward');
+scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: false, link: '{l}', positionMs: now - T0 + 5000, at: now, pitch: 0.01, bpm: 138, currentBpm: 138.0089, jumps: 0, seq: ++seq}], false);
+assert.equal(fwd.state, false, 'a pause releases the bend');
+""")
+
+
+class ShadowIdentityTest(unittest.TestCase):
+    """Engine mode: the shadow deck holds the source's track, or is loaded again (maintainer report 11-10)."""
+    js = ShadowDisplayTest.js
+
+    # An Engine deck 2 that loads what it is told once settle() runs, as Engine does a little later.
+    ENGINE = r"""
+scShadowDisplayOnly = false; scShadowEngineMask = 30; scFourDeckRole = '13';
+globalThis.scShadowBent = null; // no bend runs here: the fake deck's line is never sampled
+const lib = {
+    '/media/USB/Contents/a.flac': {title: 'A', lenMs: 300000, bpm: 128},
+    '/media/USB/Contents/b.flac': {title: 'B', lenMs: 200000, bpm: 140},
+    '/media/USB/Contents/next.flac': {title: 'Next', lenMs: 456800, bpm: 149.3},
+    '/data/enginex/shadow-v3/peer-1/same.flac': {title: 'Same', lenMs: 240000, bpm: 120},
+    '/data/enginex/shadow-v3/peer-2/same.flac': {title: 'Same', lenMs: 250000, bpm: 120},
+};
+const eng = {held: '', loading: false, playing: false, pos: 0, pending: [], asked: [], plays: [], seeks: [], autoplay: false, lock: false, fail: 0, slow: 0, named: true};
+const track = () => lib[eng.held] || {title: '', lenMs: 0, bpm: 0};
+const netName = f => f.startsWith('/media/') ? 'net://uuid/' + f.split('/')[2] + ' (USB 1)/' + f.split('/').slice(3).join('/') : 'net://uuid/(Unknown)/' + f.split('/').slice(2).join('/');
+const ask = url => {
+    const f = decodeURI(url.replace('file://', ''));
+    eng.asked.push(f);
+    if (eng.lock && eng.playing) return; // Lock Playing Deck
+    if (eng.fail > 0) { eng.fail--; return; }
+    eng.loading = true; eng.pending.push(f);
+};
+// Engine finishes its loads; the newest by default, `order` picks another one (two loads racing).
+const settle = order => {
+    if (eng.slow > 0) { eng.slow--; return; }
+    if (!eng.pending.length) return;
+    eng.held = eng.pending[order === undefined ? eng.pending.length - 1 : order];
+    eng.pending = []; eng.loading = false; eng.playing = false; eng.pos = 0;
+};
+const sr = 44100;
+globalThis.scTr = path => {
+    const tail = path.replace('/Engine/Deck2', '');
+    if (path === '/Client/Librarian/AddToDatabaseAndLoadToDeck2') return {set url(v) { ask(v); }};
+    if (path === '/Client/Preferences/Profile/Application/AutoPlay') return {state: eng.autoplay};
+    if (!path.startsWith('/Engine/Deck2/')) return null;
+    const t = track();
+    return {
+        get state() { return tail === '/Track/SongLoaded' ? !!eng.held : tail === '/Track/SongLoading' ? eng.loading : tail === '/PlayState' ? eng.playing : false; },
+        set state(v) { if (tail === '/Play') { eng.playing = !!v; eng.plays.push(!!v); } },
+        get string() { return tail === '/Track/TrackNetworkPath' ? (eng.held && eng.named ? netName(eng.held) : '') : tail === '/Track/SongName' ? t.title : tail === '/SyncMode' ? 'Off' : tail === '/SpeedRange' ? '8' : ''; },
+        get value() { return tail === '/Track/SampleRate' ? (eng.held ? sr : 0) : tail === '/Speed' ? 0.5 : 0; },
+        set value(v) { if (tail === '/Track/SetSongPosition') { eng.pos = v * t.lenMs; eng.seeks.push(v); } },
+        get unnormalized() { return tail === '/Track/TrackLength' ? t.lenMs * sr / 1000 : tail === '/Track/TrackPosition' ? eng.pos * sr / 1000 : tail === '/OriginalBPM' ? t.bpm : 0; },
+    };
+};
+const src = (path, extra) => Object.assign({deck: 2, path, id: path, title: lib[path].title, durationMs: lib[path].lenMs, bpm: lib[path].bpm, playing: false, positionMs: 0, pitch: 0, at: now, jumps: 0}, extra || {});
+// The source's state, applied every 180 ms as the long poll does.
+const run = (ms, e) => { for (const end = now + ms; now < end;) { now += 180; scShadowApply(Object.assign({}, e, {at: now})); } };
+const A = '/media/USB/Contents/a.flac', B = '/media/USB/Contents/b.flac', NEXT = '/media/USB/Contents/next.flac';
+"""
+
+    def test_quick_a_b_a_ends_on_a_whatever_order_engine_loads_in(self):
+        self.js(self.ENGINE + r"""
+scShadowApply(src(A)); now += 60; scShadowApply(src(B)); now += 60; scShadowApply(src(A));
+assert.deepEqual(eng.asked, [A, B, A]);
+settle(1); // Engine finished B last
+assert.equal(eng.held, B);
+run(2000, src(A, {playing: true, positionMs: 5000}));
+assert.equal(eng.asked.length, 3); assert.deepEqual(eng.plays, []); assert.deepEqual(eng.seeks, []); // B is never steered as A
+assert.equal(scShadowAt[2].ready, false);
+run(1500, src(A, {playing: true, positionMs: 5000})); // 3 s after the last load: asked again
+assert.deepEqual(eng.asked, [A, B, A, A]); assert.equal(scShadowAt[2].why, 'length');
+settle();
+run(1500, src(A, {playing: true, positionMs: 5000}));
+assert.equal(eng.held, A); assert.equal(eng.playing, true); assert.equal(scShadowAt[2].ready, true);
+assert.equal(eng.asked.length, 4);
+run(5000, src(A, {playing: true, positionMs: 5000})); // and stays: no further loads
+assert.equal(eng.asked.length, 4); assert.equal(scShadowAt[2].tries, 0);
+""")
+
+    def test_same_path_or_same_name_is_told_apart_by_the_source_id(self):
+        self.js(self.ENGINE + r"""
+// One path, the source loaded another file there (a new key): a new load.
+scShadowApply(src(A, {id: 'key-1'})); settle(); run(1500, src(A, {id: 'key-1'}));
+assert.equal(scShadowAt[2].ready, true); assert.equal(eng.asked.length, 1);
+run(400, src(A, {id: 'key-2'}));
+assert.deepEqual(eng.asked, [A, A]); assert.equal(scShadowAt[2].id, 'key-2');
+settle(); run(1500, src(A, {id: 'key-2'})); assert.equal(scShadowAt[2].ready, true); assert.equal(eng.asked.length, 2);
+// No id from an older Go: the path alone, as before.
+run(400, Object.assign(src(B), {id: undefined})); assert.equal(eng.asked[2], B); assert.equal(scShadowAt[2].id, B);
+// Two copies named same.flac: Engine holding the first is not the second.
+const S1 = '/data/enginex/shadow-v3/peer-1/same.flac', S2 = '/data/enginex/shadow-v3/peer-2/same.flac';
+settle(); run(400, src(S1, {id: 'k1'})); settle(); run(1500, src(S1, {id: 'k1'})); assert.equal(scShadowAt[2].ready, true);
+const n = eng.asked.length;
+eng.fail = 1; // Engine drops the load of the second and keeps the first
+run(1400, src(S2, {id: 'k2'}));
+assert.equal(eng.asked.length, n + 1); assert.equal(eng.held, S1); assert.equal(scShadowAt[2].ready, false);
+assert.equal(scShadowWrong(2, src(S2, {id: 'k2'})), 'length');
+run(2000, src(S2, {id: 'k2'})); settle(); run(1500, src(S2, {id: 'k2'}));
+assert.equal(eng.held, S2); assert.equal(scShadowAt[2].ready, true);
+// The data directory under its old name is the same file.
+eng.held = S2; assert.equal(scShadowWrong(2, src(S2)), '');
+assert.equal(scShadowWrong(2, Object.assign(src(S2), {path: '/data/sc5000-custom/shadow-v3/peer-2/same.flac'})), '');
+""")
+
+    def test_engine_load_failure_is_asked_again_with_backoff_and_never_steered(self):
+        self.js(self.ENGINE + r"""
+eng.fail = 3;
+const e = src(A, {playing: true, positionMs: 9000});
+scShadowApply(e); const t0 = now;
+const times = [];
+let seen = 1;
+for (let i = 0; i < 400 && eng.fail > 0; i++) { run(180, e); if (eng.asked.length > seen) { seen = eng.asked.length; times.push(Math.round((now - t0) / 1000)); } }
+assert.deepEqual(times, [3, 9]); // 3 s, then 6 s later
+assert.deepEqual(eng.plays, []); assert.deepEqual(eng.seeks, []); assert.equal(scShadowAt[2].why, 'empty');
+run(13000, e); assert.equal(eng.asked.length, 4); // 12 s later: this one loads
+settle(); run(1500, e);
+assert.equal(eng.held, A); assert.equal(eng.playing, true); assert.equal(scShadowAt[2].tries, 0);
+// Engine is slow, not failing: no second request while it is loading.
+eng.slow = 1e9; const n = eng.asked.length;
+run(400, src(B)); run(20000, src(B));
+assert.equal(eng.asked.length, n + 1); assert.equal(eng.loading, true);
+eng.slow = 0; settle(); run(400, src(B)); assert.equal(scShadowAt[2].ready, true); assert.equal(eng.asked.length, n + 1);
+""")
+
+    def test_lock_playing_deck_stops_the_deck_and_loads_again(self):
+        self.js(self.ENGINE + r"""
+eng.lock = true;
+scShadowApply(src(A)); settle(); run(1500, src(A, {playing: true, positionMs: 1000}));
+assert.equal(eng.playing, true);
+// The source changes track while the shadow deck plays: Engine refuses, the deck is stopped first.
+const e = src(B, {playing: true, positionMs: 0});
+scShadowApply(e);
+assert.equal(eng.playing, false); assert.deepEqual(eng.asked, [A, B]); assert.equal(eng.pending.length, 1);
+// A deck that was still playing when asked (the stop took a frame) is asked again after 1.5 s.
+eng.pending = []; eng.loading = false; eng.held = A;
+run(1300, e); assert.equal(eng.asked.length, 2); assert.equal(eng.playing, false); // A stays stopped meanwhile
+run(400, e); assert.deepEqual(eng.asked, [A, B, B]);
+settle(); run(1500, e); assert.equal(eng.held, B); assert.equal(eng.playing, true);
+""")
+
+    def test_track_swapped_by_continue_is_found_stopped_and_loaded_again(self):
+        self.js(self.ENGINE + r"""
+const e = src(A, {playing: true, positionMs: 100000});
+scShadowApply(e); settle(); run(1500, e);
+assert.equal(scShadowAt[2].ready, true); assert.equal(eng.playing, true);
+// 11-10 on the right player: Engine's Continue loaded and played the next track.
+eng.held = NEXT; eng.pos = 0; eng.playing = true; eng.plays.length = 0; eng.seeks.length = 0;
+run(180, e);
+assert.equal(eng.playing, false); assert.deepEqual(eng.plays, [false]); assert.deepEqual(eng.seeks, []); // stopped, never steered
+assert.deepEqual(eng.asked, [A, A]); assert.equal(scShadowAt[2].why, 'length');
+settle(); run(1500, e);
+assert.equal(eng.held, A); assert.equal(eng.playing, true); assert.equal(scShadowAt[2].ready, true);
+// Another file of the same length and tempo: Engine's name for it and the title tell.
+lib['/media/USB/Contents/same-length.flac'] = {title: 'Other', lenMs: 300000, bpm: 128};
+eng.held = '/media/USB/Contents/same-length.flac'; eng.playing = true;
+run(1200, e); assert.equal(scShadowAt[2].why, 'file'); assert.equal(eng.asked.length, 3);
+settle(); run(1500, e); assert.equal(eng.held, A);
+// Engine gives no path: the length tells.
+eng.named = false; eng.held = NEXT; eng.playing = true;
+run(180, e); assert.equal(scShadowAt[2].why, 'length'); assert.equal(eng.asked.length, 4);
+settle(); run(1500, e); assert.equal(eng.held, A);
+// A swap while paused, same length: found within a second by title and BPM.
+lib['/media/USB/Contents/twin.flac'] = {title: 'Twin', lenMs: 300000, bpm: 99};
+eng.held = '/media/USB/Contents/twin.flac';
+run(1200, e); assert.equal(scShadowAt[2].why, 'title'); assert.equal(eng.asked.length, 5);
+""")
+
+    def test_title_or_bpm_alone_and_a_named_file_do_not_load_again(self):
+        self.js(self.ENGINE + r"""
+scShadowApply(src(A)); settle(); run(1500, src(A));
+assert.equal(scShadowWrong(2, src(A)), '');
+// Engine names our file: nothing else is asked, whatever the source reports.
+assert.equal(scShadowWrong(2, src(A, {title: 'rekordbox title', bpm: 64, durationMs: 111})), '');
+eng.named = false; // no path from Engine
+assert.equal(scShadowWrong(2, src(A, {title: 'Other title'})), ''); // a CDJ's rekordbox title
+assert.equal(scShadowWrong(2, src(A, {bpm: 64})), ''); // half tempo
+assert.equal(scShadowWrong(2, src(A, {bpm: 150})), ''); // another analysis
+assert.equal(scShadowWrong(2, src(A, {title: 'Other', bpm: 150})), 'title');
+assert.equal(scShadowWrong(2, src(A, {durationMs: 296000})), 'length');
+assert.equal(scShadowWrong(2, src(A, {durationMs: 301500})), '');
+assert.equal(scShadowWrong(2, src(A, {durationMs: 0, title: '', bpm: 0})), ''); // an older peer: nothing to compare
+eng.held = ''; assert.equal(scShadowWrong(2, src(A)), 'empty');
+// Checked once a second, by one number in between.
+eng.held = A; eng.named = true;
+let strings = 0; const tr = scTr;
+globalThis.scTr = p => { const o = tr(p); if (p.endsWith('/TrackNetworkPath')) strings++; return o; };
+run(18000, src(A)); assert.ok(strings >= 17 && strings <= 19, strings); assert.equal(eng.asked.length, 1);
+""")
+
+    def test_continue_on_parks_the_shadow_deck_short_of_its_end(self):
+        self.js(self.ENGINE + r"""
+const e = src(A, {playing: true, positionMs: 100000});
+scShadowApply(e); settle(); run(1500, e);
+eng.autoplay = true; eng.seeks.length = 0;
+// The source plays out: the shadow deck stops 700 ms before its end and stays loaded.
+const end = src(A, {playing: true, positionMs: 299900});
+run(1000, end);
+assert.equal(eng.playing, false); assert.equal(eng.held, A); assert.equal(eng.asked.length, 1);
+assert.ok(eng.seeks.length >= 1); for (const v of eng.seeks) assert.ok(v <= 299300 / 300000 + 1e-9, v);
+assert.ok(Math.abs(eng.pos - 299300) < 1);
+const n = eng.seeks.length; run(3000, end); assert.equal(eng.seeks.length, n); assert.equal(eng.playing, false); // parked, not seeking on
+// The source jumps back: the deck follows again.
+run(1500, src(A, {playing: true, positionMs: 50000, jumps: 1}));
+assert.equal(eng.playing, true); assert.ok(eng.pos < 60000);
+// A seek asked past the end is held back too.
+scShadowSeek(2, scShadowAt[2], 400000); assert.ok(Math.abs(eng.pos - 299300) < 1);
+// The shadow deck itself ran to the gap ahead of the source: stopped before Continue fires.
+eng.pos = 299400; eng.playing = true; eng.plays.length = 0; run(180, src(A, {playing: true, positionMs: 298000}));
+assert.equal(eng.plays[0], false); assert.ok(eng.pos < 299300); // and lined up with the source again
+// Continue off: as before, to the very end.
+eng.autoplay = false; scShadowSeek(2, scShadowAt[2], 400000); assert.equal(eng.pos, 300000);
+""")
+
+
+class ShadowRangeTest(unittest.TestCase):
+    """Engine mode: the shadow deck takes the source's pitch range and key lock (maintainer report 11-10)."""
+
+    def test_shadow_deck_takes_the_sources_range_and_key_lock(self):
+        ShadowDisplayTest.js(self, r"""
+scShadowDisplayOnly = false; scShadowEngineMask = 30; scFourDeckRole = '13';
+globalThis.scShadowBent = null;
+const props = new Map();
+globalThis.scTr = path => {
+    let p = props.get(path);
+    if (p) return p;
+    p = {state: path.endsWith('/SongLoaded'), entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '', value: path.endsWith('/Speed') ? 0.5 : 0,
+        get string() { return path.endsWith('/SpeedRange') ? this.entries[this.index] : path.endsWith('/SyncMode') ? 'Off' : '' },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/SampleRate') ? 44100 : 0 }};
+    if (path.endsWith('/SampleRate')) p.value = 44100;
+    props.set(path, p);
+    return p;
+};
+let seq = 0;
+const apply = more => { now += 2000; scShadowApplyAll([Object.assign({deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: false, link: '{l}',
+    positionMs: 0, at: now, pitch: 0.01, bpm: 138, currentBpm: 138.0138, jumps: 0, seq: ++seq}, more)], false) };
+const range = scTr('/Engine/Deck2/SpeedRange'), speed = scTr('/Engine/Deck2/Speed'), lock = scTr('/Engine/Deck2/Track/KeyLock');
+apply({range: 100, keylock: true}); // loads
+apply({range: 100, keylock: true});
+assert.equal(range.string, '100', "the source's range");
+assert.ok(Math.abs(speed.value - (0.5 + 0.01 / 200)) < 1e-9, 'fader at +0.01 % of 100: ' + speed.value);
+assert.equal(lock.state, true);
+apply({range: 8, keylock: false});
+assert.equal(range.string, '8', 'the source went back to 8');
+assert.ok(Math.abs(speed.value - (0.5 + 0.01 / 16)) < 1e-9);
+assert.equal(lock.state, false);
+lock.state = true;
+apply({}); // a CDJ or an older sender: no range, no key lock sent
+assert.equal(range.string, '8');
+assert.equal(lock.state, true, 'left alone');
+apply({range: 8, pitch: 11.1, currentBpm: 153.318}); // synced past its own range: widened, never stuck at the end stop
+assert.equal(range.string, '20');
+// The sender reads both with the Sync state (5 Hz) and posts on a change.
+const own = {'/SpeedRange': {string: '50'}, '/Track/KeyLock': {state: true}};
+scShadowDeckProperties = {};
+globalThis.scTr = path => { for (const k in own) if (path === '/Engine/Deck1' + k) return own[k]; return null };
+const g = scShadowProperties(1);
+assert.equal(parseFloat(g.range.string), 50);
+assert.equal(g.keylock.state, true);
+""")
+        src = bp.SERVICES_MAIN
+        self.assertIn("s.range = p && p.rangeIndex === s.rangeIndex ? p.range : parseFloat(g.range.string) || 0", src)
+        self.assertIn("o.range = s.range; o.keylock = s.keylock", src)
+        self.assertIn("s.range !== p.range || s.keylock !== p.keylock) edge = true", src)
+        self.assertIn("sent.range !== o.range || sent.keylock !== o.keylock", src)
 
 
 if __name__ == "__main__":
