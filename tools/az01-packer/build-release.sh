@@ -21,14 +21,14 @@ BASE=$(cd "$FW" && ls *-Update.img | sed -n 's/^SC5000-\([0-9.]*\)-Update\.img$/
 [ -n "$BASE" ] && [ "$(echo "$BASE" | wc -l)" = 1 ] || { echo "need exactly one SC5000-<base>-Update.img in $FW" >&2; exit 2; }
 
 # 1. One static ARMv7 binary for all five tools, and the UI packs.
-GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$WORK/sc5000-suite" ./cmd/sc5000-suite
+GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1" -o "$WORK/sc5000-suite" ./cmd/sc5000-suite
 # QML comes straight from the base image's Engine, so a new base needs no hand-made qrc tree.
 if [ -z "${QRC:-}" ]; then
     arm-linux-gnueabihf-gcc -O2 -shared -fPIC -o "$WORK/qrc_dump.so" tools/ui-mod/qrc_dump.c -ldl
     python3 -I tools/ui-mod/extract_qrc.py --image "$FW/SC5000-$BASE-Update.img" --preload "$WORK/qrc_dump.so" --out "$WORK/qrc" >/dev/null
     QRC=$WORK/qrc
 fi
-python3 tools/ui-mod/build_packs.py --qrc "$QRC" --out "$WORK/packs" >/dev/null
+python3 tools/ui-mod/build_packs.py --release --qrc "$QRC" --out "$WORK/packs" >/dev/null
 STAGE=$WORK/overlay
 cp -a rootfs-overlay "$STAGE"
 rm -f "$STAGE/README.md"
@@ -44,7 +44,7 @@ chmod 0644 "$STAGE/usr/share/sc5000-custom/"*
 mkdir -p "$WORK/hooks32" "$WORK/hooks64"
 OUT=$WORK/hooks32/libengine-ui-hook.so sh tools/ui-mod/build.sh
 OUT=$WORK/hooks32/libedisksd-hook.so sh tools/edisksd-hook/build.sh
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$WORK/sc5000-suite-arm64" ./cmd/sc5000-suite
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1" -o "$WORK/sc5000-suite-arm64" ./cmd/sc5000-suite
 CROSS64=aarch64-linux-gnu-; [ "$(uname -m)" != aarch64 ] || CROSS64=
 CROSS=$CROSS64 OUT=$WORK/hooks64/libengine-ui-hook.so sh tools/ui-mod/build.sh
 CROSS=$CROSS64 OUT=$WORK/hooks64/libedisksd-hook.so sh tools/edisksd-hook/build.sh

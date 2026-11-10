@@ -2,8 +2,10 @@
 """Build the UI packs engine_ui_hook.c loads into Engine (see README.md)."""
 import argparse
 import json
+import os
 import re
 import shutil
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -299,6 +301,50 @@ SERVICES_MAIN = """
 	// The board (device tree), not Config.device.isPlayer: the 4-deck layout turns a
 	// player into a non-player inside Engine (#49).
 	property bool scPlayer: false
+	readonly property string scBoard: typeof Config !== "undefined" && Config && Config.device ? String(Config.device.name || "") : ""
+	readonly property bool scIsPlayerBoard: scPlayer || ["JP07", "JP08", "JP13", "JP14"].indexOf(scBoard) >= 0
+	readonly property bool scHasMixer: !scIsPlayerBoard
+	readonly property bool scCanFourDeck: scIsPlayerBoard || ["JC11", "JC11S", "JP21", "JP24"].indexOf(scBoard) >= 0
+	readonly property bool scHasAutoLoopKnob: typeof Config !== "undefined" && Config && Config.device && Config.device.hasAutoLoopKnob !== undefined ? !!Config.device.hasAutoLoopKnob : ["NH08", "NH08S", "NH10"].indexOf(scBoard) < 0
+	readonly property bool scIsMixstream: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.audio.fx.hasNHFx !== undefined ? !!Config.audio.fx.hasNHFx : ["NH08", "NH08S", "NH10"].indexOf(scBoard) >= 0
+	readonly property bool scHasStemsEq: scHasMixer && (typeof Config !== "undefined" && Config && Config.audio ? !!Config.audio.hasStemsLevel : false)
+	readonly property bool scIsAZ04: ["JP24", "RMZ2"].indexOf(scBoard) >= 0
+	readonly property var scTransitionFxView: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views ? (PlanckGUI.views.transitionFx || null) : null
+	readonly property bool scHasStockTransitionTile: typeof Config !== "undefined" && Config && Config.audio && Config.audio.fx && Config.device
+		? (!!Config.audio.fx.hasTransitionFx && !Config.device.hasHardwareFaderFxButtons && !!scTransitionFxView)
+		: false
+	Connections {
+		target: root.scTransitionFxView
+		ignoreUnknownSignals: true
+		function onEnabledChanged() {
+			if (!root.scUiLoaded || !root.scHasMixer || !root.scTransitionFxView) return
+			const on = !!root.scTransitionFxView.enabled
+			if (on !== root.scUpfaderEcho) {
+				root.scUpfaderEcho = on
+				root.scCall("upfaderEcho=" + (on ? "1" : "0"))
+			}
+		}
+	}
+	function scSetTransitionFx(vfx, on, upfaderOnly) {
+		if (!vfx) return
+		if (!on) {
+			vfx.enabled = false
+			return
+		}
+		const opts = vfx.triggerSourceOptions
+		if (opts && opts.length > 0) {
+			const idx = upfaderOnly ? 1 : 2
+			const val = opts[idx] !== undefined ? opts[idx] : opts[opts.length - 1]
+			if (val !== undefined) vfx.setTriggerSource(String(val))
+		}
+		vfx.enabled = true
+	}
+	readonly property string scPackBuildTag: @BUILD_TAG@
+	property string scBuildTag: ""
+	function scAboutBuildTag() {
+		if (scBuildTag && scPackBuildTag && scBuildTag !== scPackBuildTag) return scBuildTag + " / ui " + scPackBuildTag
+		return scBuildTag || scPackBuildTag
+	}
 	function scDeckLocked(deck) { const isLine = !!(scShadowDisplay[deck] && scShadowDisplay[deck].lineIn); return scFourDeckRole !== "" && (isLine || scFourDeckRole.indexOf(String(deck)) < 0) && (scPlayer || (scShadowDisplayOnly ? !!scShadowData(deck) : !!(scShadowAt[deck] && scShadowAt[deck].path))) }
 	// Swipe left loads the role's first deck, swipe right its second (0: stock).
 	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
@@ -1952,6 +1998,7 @@ SERVICES_MAIN = """
 		}
 		scEnsureTidal()
 		if (v.version) scVersion = v.version
+		if (v.buildTag !== undefined) scBuildTag = String(v.buildTag || "")
 		scLang = v.language
 		scWave = v.waveform
 		scQuality = v.quality || "flac"
@@ -1975,7 +2022,12 @@ SERVICES_MAIN = """
 		if (!scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
 		scScope = v.scope
 		scBroadcastOn = !!v.broadcastEnabled
+		const prevUpfaderEcho = scUpfaderEcho
 		scUpfaderEcho = !!v.upfaderEcho
+		if (scHasMixer && scTransitionFxView && (!scUiLoaded || scUpfaderEcho !== prevUpfaderEcho)) {
+			if (!!scTransitionFxView.enabled !== scUpfaderEcho)
+				scTransitionFxView.enabled = scUpfaderEcho
+		}
 		if (typeof v === "string") scParseSettingsConf(v)
 		else if (v) {
 			if (v.cueCountdown !== undefined) scCueCountdown = !!v.cueCountdown
@@ -1999,7 +2051,7 @@ SERVICES_MAIN = """
 			if (v.pioneerFx !== undefined) scPioneerFx = v.pioneerFx || "off"
 			else if (v.pioneer_fx !== undefined) scPioneerFx = v.pioneer_fx || "off"
 		}
-		if (scStemsEqMode && !scStemsEqApplied) {
+		if (scHasStemsEq && scStemsEqMode && !scStemsEqApplied) {
 			scStemsEqApplied = true
 			for (let ch = 1; ch <= 4; ch++) {
 				const m = root.scTr("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode")
@@ -2086,6 +2138,7 @@ SERVICES_MAIN = """
 				options: Prompt.Ok
 			})
 		}
+		scWave = id
 		scCall("waveform=" + id)
 	}
 	function scSetSource(id, on) {
@@ -2618,12 +2671,14 @@ PLAYBACK_ENTRIES = """
 		},
 		EntryBase.ListEntry {
 			text: "Echo Out"
+			visible: root.scHasMixer
 			values: ["Off", "On"]
 			currentValue: values[root.scUpfaderEcho ? 1 : 0]
 			onSelected: function(index) { root.scCall("upfaderEcho=" + index) }
 		},
 		EntryBase.ListEntry {
 			text: "Stems EQ Mode"
+			visible: root.scHasStemsEq
 			values: ["Off", "On"]
 			currentValue: values[root.scStemsEqMode ? 1 : 0]
 			onSelected: function(index) { root.scCall("stemsEqMode=" + index) }
@@ -2641,12 +2696,14 @@ PLAYBACK_ENTRIES = """
 BEAT_JUMP_ENTRIES = """
 		EntryBase.ListEntry {
 			text: "Beat Jump Pad Bank"
+			visible: root.scIsMixstream
 			values: ["Off", "On"]
 			currentValue: values[root.scBeatJumpPads ? 1 : 0]
 			onSelected: function(index) { root.scCall("beatJumpPads=" + index) }
 		},
 		EntryBase.ListEntry {
 			text: "Swap Loop / Beat Jump"
+			visible: root.scHasAutoLoopKnob
 			values: ["Off", "On"]
 			currentValue: values[root.scSwapLoopOrder ? 1 : 0]
 			onSelected: function(index) { root.scCall("swapLoopOrder=" + index) }
@@ -2729,6 +2786,7 @@ LED_ENTRY = """
 FOUR_DECK_ENTRIES = """
 		EntryBase.ListEntry {
 			text: "4-Deck Waveform"
+			visible: root.scCanFourDeck
 			values: ["Off", "On"]
 			currentValue: root.scFourDeckOn ? "On" : "Off"
 			onSelected: function(index) { if ((index === 1) !== root.scFourDeckOn) root.scRestartCall("fourDeckWaveform=" + index) }
@@ -2736,7 +2794,7 @@ FOUR_DECK_ENTRIES = """
 		EntryBase.ListEntry {
 			text: "4-Deck Role"
 			entryWidth: 104
-			visible: root.scFourDeckOn
+			visible: root.scCanFourDeck && root.scFourDeckOn
 			readonly property var ids: ["auto", "13", "24", "12", "34", "1", "2"]
 			values: ["Auto", "1+3", "2+4", "1+2", "3+4", "1", "2"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scFourDeckRoleSetting))]
@@ -2744,7 +2802,7 @@ FOUR_DECK_ENTRIES = """
 		},
 		EntryBase.ListEntry {
 			text: "Legacy Shadow Engine (restart Engine manually to clear old slots)"
-			visible: root.scFourDeckOn
+			visible: root.scCanFourDeck && root.scFourDeckOn
 			values: ["Off", "On"]
 			currentValue: values[root.scShadowLegacyEngine ? 1 : 0]
 			onSelected: function(index) { if ((index === 1) !== root.scShadowLegacyEngine) root.scCall("shadowLegacyEngine=" + index) }
@@ -2756,7 +2814,6 @@ VIEW_ENTRIES = """
 		@HEADLINE@ {
 			text: "ENGINEX VIEW PRESET"
 		},
-		WaveformStyle { },
 """ + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES
 
 # #78: a deck in a booth can be switched off without reaching for the recessed rear
@@ -2782,10 +2839,97 @@ LANGUAGE_ENTRY = """
 		},
 """
 
+# Control Center: the CDJ-3000 "WAVEFORM COLOR" control, in a stock-size tile
+# (#45): a title over three joined segments, each with a colour swatch and a
+# name; the selected one is filled cyan. A tap switches at once, no RGB prompt.
+WAVE_TILE = """
+		Rectangle {
+			id: scWaveTile
+			objectName: "ControlCenter_WaveformStyle"
+			readonly property var ids: ["denon", "rgb", "3band"]
+			readonly property string current: ids.indexOf(root.scWave) >= 0 ? root.scWave : "denon"
+			width: 256
+			height: 104
+			radius: 16
+			color: Style.surface03Color
+			Text {
+				x: 14
+				y: 8
+				text: "Waveform Style"
+				font: Style.fontH4
+				color: Style.font01Color
+			}
+			Row {
+				x: 12
+				y: 36
+				Repeater {
+					model: ["DENON", "RGB", "3BAND"]
+					Rectangle {
+						id: seg
+						readonly property string waveId: scWaveTile.ids[index]
+						readonly property bool selected: scWaveTile.current === waveId
+						objectName: "ControlCenter_WaveformStyle_" + waveId
+						width: (scWaveTile.width - 24) / 3
+						height: 56
+						color: selected ? "#00c3e3" : segTap.pressed ? "#6a6a6a" : "#4a4a4a"
+						border {
+							width: 1
+							color: "#a8a8a8"
+						}
+						Rectangle {
+							id: swatch
+							anchors.horizontalCenter: parent.horizontalCenter
+							y: 10
+							width: 50
+							height: 12
+							color: "#00c853"
+							border {
+								width: 1
+								color: "#202020"
+							}
+							gradient: seg.waveId === "rgb" ? rainbow : null
+							Gradient {
+								id: rainbow
+								orientation: Gradient.Horizontal
+								GradientStop { position: 0.0; color: "#ff2020" }
+								GradientStop { position: 0.2; color: "#ffd000" }
+								GradientStop { position: 0.4; color: "#20e040" }
+								GradientStop { position: 0.6; color: "#00d8ff" }
+								GradientStop { position: 0.8; color: "#3050ff" }
+								GradientStop { position: 1.0; color: "#e040ff" }
+							}
+							Row {
+								visible: seg.waveId === "3band"
+								x: 1
+								y: 1
+								Rectangle { width: 14; height: 10; color: "@HIGH@" }
+								Rectangle { width: 14; height: 10; color: "@MID@" }
+								Rectangle { width: 20; height: 10; color: "@LOW@" }
+							}
+						}
+						Text {
+							anchors.horizontalCenter: parent.horizontalCenter
+							y: 28
+							text: modelData
+							font: Style.fontH5
+							color: "#ffffff"
+						}
+						MouseArea {
+							id: segTap
+							anchors.fill: parent
+							onClicked: if (!seg.selected) { root.scWave = seg.waveId; root.scCall("waveform=" + seg.waveId) }
+						}
+					}
+				}
+			}
+		}
+"""
+
 UPFADER_ECHO_TILE = """
 			Rectangle {
 				id: scUpfaderEchoTile
 				objectName: "ControlCenter_UpfaderEcho"
+				visible: root.scHasMixer && !root.scHasStockTransitionTile && !(typeof Config !== "undefined" && Config && Config.device && Config.device.hasHardwareFaderFxButtons)
 				width: 256
 				height: 104
 				radius: 16
@@ -2823,14 +2967,10 @@ UPFADER_ECHO_TILE = """
 								anchors.fill: parent
 								onClicked: {
 									const vfx = PlanckGUI.views.transitionFx
-									if (vfx) {
-										if (index === 0) vfx.enabled = false
-										else {
-											vfx.enabled = true
-											vfx.setTriggerSource(index === 2 ? 1 : 2)
-										}
-									}
-									root.scCall("upfaderEcho=" + (index === 0 ? "0" : "1"))
+									const on = index !== 0
+									root.scUpfaderEcho = on
+									root.scSetTransitionFx(vfx, on, index === 2)
+									root.scCall("upfaderEcho=" + (on ? "1" : "0"))
 								}
 							}
 						}
@@ -3656,7 +3796,7 @@ def edits(dev: bool):
         # Engine offers streamed rows only Prepare; add Stems (see scStemStream).
         v + "BrowseView/Components/Components/SwipeLeftItem.qml": [
             ("	readonly property list<string> actionLabels: leftActions.map( action => action.display.label )\n",
-             "	readonly property bool scStem: String(row.modelData && row.modelData.uri || \"\").startsWith(\"streaming://TIDAL/Track/\") && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || \"\")))\n"
+             '	readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
              "	readonly property list<string> actionLabels: leftActions.map( action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : action.display.label ).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
             ("leftActions.map( action => action.display.commitMessage )", "leftActions.map( action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : action.display.commitMessage ).concat(scStem ? [root.scT(\"Stems\")] : [])"),
             ("leftActions.map( action => action.display.color )", "leftActions.map( action => action.display.color ).concat(scStem ? [Style.systemBlue01Color] : [])"),
@@ -3670,7 +3810,7 @@ def edits(dev: bool):
             ("	onUpdateAvailableChanged: {\n", "	onUpdateAvailableChanged: {\n		return\n")],
         prefs + "Entries/Version.qml": [(
             "	text: `Engine OS ${versionString} <font color=\\\"${grey}\\\">(${gitHashString})</font>`",
-            "	text: `EngineX OS ${root.scVersion || versionString} <font color=\\\"${grey}\\\">(github.com/${root.scUpdateRepo})</font>${root.scAccessCode ? `<br><small>${root.scT(\"Web Console\")} ${root.scConsoleUrl}<br>${root.scT(\"Access Code\")} ${root.scAccessCode}${root.scLanStems ? `<br>${root.scLanStems}` : \"\"}</small>` : \"\"}`")],
+            "	text: `EngineX OS ${root.scVersion || versionString}${root.scAboutBuildTag() ? ` · ${root.scAboutBuildTag()}` : \"\"} <font color=\\\"${grey}\\\">(github.com/${root.scUpdateRepo})</font>${root.scAccessCode ? `<br><small>${root.scT(\"Web Console\")} ${root.scConsoleUrl}<br>${root.scT(\"Access Code\")} ${root.scAccessCode}${root.scLanStems ? `<br>${root.scLanStems}` : \"\"}</small>` : \"\"}`")],
         prefs + "Entries/Analytics.qml": [(
             "\t\tchecked = pAnalyticsEnabled.translator.state\n\t\tPlanck.quit(QuitReasons.AnalyticsChange, false)",
             "\t\tpAnalyticsEnabled.translator.state = !pAnalyticsEnabled.translator.state")],
@@ -3692,7 +3832,8 @@ def edits(dev: bool):
             '		text: "Sync Time"\n',
             '		text: "Sync Time"\n		enabled: !root.scDeckList().some(d => { const p = Planck.getProperty("/Engine/Deck" + d + "/PlayState"); return !!(p && p.translator && p.translator.state) })\n')],
         v + "BrowseView/Components/Craylist.qml": [
-            ("Config.device.hasStemsProEmbeddedRendering && !isCurrentDeviceNetworkDrive" if v53() else "Config.device.hasStemsProEmbeddedRendering", "true"),
+            ("Config.device.hasStemsProEmbeddedRendering && !isCurrentDeviceNetworkDrive" if v53() else "Config.device.hasStemsProEmbeddedRendering",
+             '(typeof root !== "undefined" && root && root.scIsAZ04 ? (' + ("Config.device.hasStemsProEmbeddedRendering && !isCurrentDeviceNetworkDrive" if v53() else "Config.device.hasStemsProEmbeddedRendering") + ') : true)'),
             (
                 "				var trackInfo = info.payload[key]\n				tracks.push(trackInfo.uniqueID)\n			}\n			Planck.librarianController.stemsQueueManager.startRenderTracks(",
                 "				var trackInfo = info.payload[key]\n				if (!root.scStemStream(trackInfo.uniqueID)) tracks.push(trackInfo.uniqueID)\n			}\n			if (tracks.length) Planck.librarianController.stemsQueueManager.startRenderTracks(")],
@@ -3706,11 +3847,11 @@ def edits(dev: bool):
             ("invisibleActiveAreaWidthAtEnd: isInGridEditor ? 0 : isRightDeck ? 25 : 15", "invisibleActiveAreaWidthAtEnd: 0"),
         ],
         prefs + "Entries/WaveformStyle.qml": WAVEFORM_ENTRY,
-        # Same gate as above: show the Stems List switch and the per-track stems icon.
-        prefs + "Entries/StemsList.qml": [("active: Planck.hasStemsPreRenderedPlayback()", "active: true")],
+        # Same gate as above: show the Stems List switch and the per-track stems icon on armhf; keep AZ04 stock.
+        prefs + "Entries/StemsList.qml": [("active: Planck.hasStemsPreRenderedPlayback()", 'active: Planck.hasStemsPreRenderedPlayback() || !(typeof root !== "undefined" && root && root.scIsAZ04)')],
         v + "BrowseView/Components/Components/StemsIcon.qml": [(
             "visible: (Planck.hasStemsPreRenderedPlayback() || (!!row.modelData.isDemoTrack && Config.device.hasDemoContentPreRenderedStems) ) && row.modelData.stems !== 0",
-            "visible: row.modelData.stems !== 0")],
+            'visible: (typeof root !== "undefined" && root && root.scIsAZ04 ? (Planck.hasStemsPreRenderedPlayback() || (!!row.modelData.isDemoTrack && Config.device.hasDemoContentPreRenderedStems)) : true) && row.modelData.stems !== 0')],
         prefs + "Entries/Base/ListEntry.qml": [
             ("function isSelected(text) {", "function isSelected(value) {"),
             ("return entry.currentValue === text\n", "return entry.currentValue === value\n"),
@@ -3720,9 +3861,6 @@ def edits(dev: bool):
             ("if(isSelected(text) && entry.defaultIndex", "if(isSelected(modelData) && entry.defaultIndex"),
         ],
         # 5.3.0 moved it up from TabContents/, so its imports lost the "../".
-        prefs + ("" if v53() else "TabContents/") + "DisplayTabContent.qml": [
-            ("        WaveformStyle {},\n" if v53() else ",\n\t\tWaveformStyle { }", ""),
-        ],
         prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
             ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY if v53() else "") + "		PlayerNumber { },\n"),
@@ -3746,15 +3884,15 @@ def edits(dev: bool):
             ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }",
              """EntryBase.ListEntry {
 \t\t\t\ttext: "Fader Echo"
+\t\t\t\tvisible: root.scHasMixer
 \t\t\t\treadonly property var vfx: PlanckGUI.views.transitionFx
 \t\t\t\tvalues: ["Off", "All Faders", "Upfader Only"]
-\t\t\t\tcurrentValue: !vfx || !vfx.enabled ? (root.scUpfaderEcho ? "Upfader Only" : "Off") : (vfx.triggerSource === 1 ? "Upfader Only" : "All Faders")
+\t\t\t\tcurrentValue: vfx ? (!vfx.enabled ? "Off" : (vfx.triggerSource === 1 ? "Upfader Only" : "All Faders")) : (root.scUpfaderEcho ? "Upfader Only" : "Off")
 \t\t\t\tonSelected: function(index) {
-\t\t\t\t\tif (vfx) {
-\t\t\t\t\t\tif (index === 0) vfx.enabled = false
-\t\t\t\t\t\telse { vfx.enabled = true; vfx.setTriggerSource(index === 2 ? 1 : 2) }
-\t\t\t\t\t}
-\t\t\t\t\troot.scCall("upfaderEcho=" + (index === 0 ? "0" : "1"))
+\t\t\t\t\tconst on = index !== 0
+\t\t\t\t\troot.scUpfaderEcho = on
+\t\t\t\t\troot.scSetTransitionFx(vfx, on, index === 2)
+\t\t\t\t\troot.scCall("upfaderEcho=" + (on ? "1" : "0"))
 \t\t\t\t}
 \t\t\t},
 \t\t\t""" + ("CrossfaderCalibration {}" if v53() else "CrossfaderCalibration { }")),
@@ -3770,7 +3908,7 @@ def edits(dev: bool):
         ],
         v + "ControlCenter/Tabs/ControlCenterTab.qml": [
             ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),
-            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
+            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
         ],
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],
@@ -4118,7 +4256,7 @@ def edits(dev: bool):
             if side == "left":
                 out[ROOT + f"Views/BrowseView/Components/Components/Swipe{side.title()}Item.qml"] = [
                     (f"    readonly property list<string> actionLabels: {a}.map(action => action.display.label)\n",
-                     "    readonly property bool scStem: !!(row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || \"\").startsWith(\"streaming://TIDAL/Track/\") || (row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || \"\")))\n"
+                     '    readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && !!(row.isStreamingTrack || row.streamingProviderName || String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") || (row.modelData && row.modelData.trackId > 0)) && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
                      f"    readonly property int scDeck: root.scSwipeDeck({right})\n"
                      "    function scLabel(s) { return scDeck > 0 ? String(s).replace(/\\d+/, scDeck) : s }\n"
                      f"    readonly property list<string> actionLabels: {a}.map(action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : scLabel(action.display.label)).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
@@ -4208,18 +4346,16 @@ def edits(dev: bool):
             prefs + "Entries/MasterLimiter.qml": [
                 ("active: Config.ui.preferences.hasMasterLimiter\n",
                  "active: Config.ui.preferences.hasMasterLimiter || Config.audio.hasLimiter\n")],
-            # #104: Fader Echo / TransitionFx 3-state cycling: Off -> All Faders -> Upfader Only -> Off
-            v + "ControlCenter/Tabs/ControlCenter/Entries/TransitionFxEnable.qml": [
-                ('text: "Fader Echo"\n        icon.source: "qrc:/Skins/UIKit/Icons/Faderecho.png"\n        checked: view.enabled\n        onClicked: view.enabled = !view.enabled',
-                 'text: !view.enabled ? root.scT("Fader Echo") : (view.triggerSource === 1 ? root.scT("Fader Echo: Up") : root.scT("Fader Echo: All"))\n        icon.source: "qrc:/Skins/UIKit/Icons/Faderecho.png"\n        checked: view.enabled\n        onClicked: { if (!view.enabled) { view.setTriggerSource(2); view.enabled = true } else if (view.triggerSource === 2) { view.setTriggerSource(1) } else { view.enabled = false } }'),
-            ],
+            # Stock TransitionFxEnable stays untouched in Control Center (active when
+            # hasTransitionFx && !hasHardwareFaderFxButtons); UPFADER_ECHO_TILE hides itself there,
+            # while Settings -> Mixer keeps Off / All Faders / Upfader Only synced with it.
             v + "StatusBar/Buttons/TransitionFxButton.qml": [
-                ('    checked: active\n    onClicked: transitionFx.enabled = !transitionFx.enabled',
-                 '    checked: active\n    onClicked: { if (!transitionFx.enabled) { transitionFx.setTriggerSource(2); transitionFx.enabled = true } else if (transitionFx.triggerSource === 2) { transitionFx.setTriggerSource(1) } else { transitionFx.enabled = false } }'),
+                ("    visible: Config.audio.fx.hasTransitionFx && transitionFx && !Config.ui.hasTransitionFxSelectionPopup\n",
+                 '    visible: Config.audio.fx.hasTransitionFx && transitionFx && !Config.ui.hasTransitionFxSelectionPopup && (typeof root === "undefined" || !root || root.scHasMixer)\n'),
             ],
             prefs + "Entries/TransitionFxSection.qml": [
                 ('        TransitionFxSelectEffect {\n            view: transitionFx.view\n        }',
-                 '        TransitionFxSelectEffect {\n            view: transitionFx.view\n        }\n        ListEntry {\n            text: "Trigger Source"\n            readonly property var vfx: transitionFx.view\n            values: ["Off", "All Faders", "Upfader Only"]\n            currentValue: !vfx || !vfx.enabled ? "Off" : (vfx.triggerSource === 1 ? "Upfader Only" : "All Faders")\n            onSelected: function(index) {\n                if (!vfx) return\n                if (index === 0) vfx.enabled = false\n                else { vfx.enabled = true; vfx.setTriggerSource(index === 2 ? 1 : 2) }\n            }\n        }'),
+                 '        TransitionFxSelectEffect {\n            view: transitionFx.view\n        }\n        ListEntry {\n            text: "Trigger Source"\n            visible: typeof root !== "undefined" && root && root.scHasMixer\n            readonly property var vfx: transitionFx.view\n            values: ["Off", "All Faders", "Upfader Only"]\n            currentValue: vfx ? (!vfx.enabled ? "Off" : (vfx.triggerSource === 1 ? "Upfader Only" : "All Faders")) : (root.scUpfaderEcho ? "Upfader Only" : "Off")\n            onSelected: function(index) {\n                const on = index !== 0\n                root.scUpfaderEcho = on\n                root.scSetTransitionFx(vfx, on, index === 2)\n                root.scCall("upfaderEcho=" + (on ? "1" : "0"))\n            }\n        }'),
             ],
         }.items():
             assert not isinstance(out.get(rel), str), rel
@@ -4896,8 +5032,56 @@ def encoded_dicts(rows):
     return result
 
 
-def render_language(text, lang, dicts):
-    return text.replace("@DICTS@", json.dumps(dicts, ensure_ascii=False)).replace("@LANG@", lang)
+def detect_build_tag(explicit=None, release=False):
+    if release or os.environ.get("ENGINEX_RELEASE") == "1":
+        return ""
+    if explicit is not None:
+        return explicit.strip()
+    if os.environ.get("ENGINEX_BUILD_TAG"):
+        return os.environ["ENGINEX_BUILD_TAG"].strip()
+    try:
+        sha = subprocess.check_output(
+            ["git", "-C", str(HERE), "rev-parse", "--short=7", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except Exception:
+        return ""
+    if not sha:
+        return ""
+    track = os.environ.get("ENGINEX_BUILD_TRACK", "").strip()
+    if not track:
+        try:
+            branch = subprocess.check_output(
+                ["git", "-C", str(HERE), "rev-parse", "--abbrev-ref", "HEAD"],
+                stderr=subprocess.DEVNULL, text=True,
+            ).strip()
+        except Exception:
+            branch = ""
+        if "sandbox" in branch:
+            track = "sbx"
+        elif "shadow" in branch:
+            track = "dev"
+        else:
+            try:
+                log = subprocess.check_output(
+                    ["git", "-C", str(HERE), "log", "-n", "30", "--format=%s%n%D", "HEAD"],
+                    stderr=subprocess.DEVNULL, text=True,
+                )
+            except Exception:
+                log = ""
+            sbx_at = log.find("sandbox-main")
+            dev_at = log.find("shadow-grid")
+            if sbx_at >= 0 and (dev_at < 0 or sbx_at < dev_at):
+                track = "sbx"
+            else:
+                track = "dev"
+    return f"{track} {sha}"
+
+
+def render_language(text, lang, dicts, build_tag=""):
+    return (text.replace("@DICTS@", json.dumps(dicts, ensure_ascii=False))
+            .replace("@LANG@", lang)
+            .replace("@BUILD_TAG@", json.dumps(build_tag)))
 
 
 def translated_qml(qrc: Path):
@@ -4957,10 +5141,19 @@ def copy_icons(out: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--qrc", type=Path, required=True)
-    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--qrc", type=Path)
+    ap.add_argument("--out", type=Path)
     ap.add_argument("--dev", action="store_true", help="add the eval harness (never ship this)")
+    ap.add_argument("--build-tag", default=None, help="override build tag (e.g. 'sbx 085a437')")
+    ap.add_argument("--release", action="store_true", help="omit dev/sandbox commit tag from UI")
+    ap.add_argument("--print-build-tag", action="store_true", help="print computed build tag and exit")
     a = ap.parse_args()
+    build_tag = detect_build_tag(a.build_tag, a.release)
+    if a.print_build_tag:
+        print(build_tag)
+        return
+    if not a.qrc or not a.out:
+        ap.error("--qrc and --out are required")
     global ROOT
     ROOT = next((r for r in ("Skins/EmbeddedCommon/", "Skins/Embedded/") if (a.qrc / r / "EmbeddedMain.qml").is_file()), None)
     if not ROOT:
@@ -4997,7 +5190,7 @@ def main():
             if changed != source:
                 files[rel] = changed
         for rel, text in files.items():
-            text = render_language(text, lang, dicts)
+            text = render_language(text, lang, dicts, build_tag)
             target = a.out / lang / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")

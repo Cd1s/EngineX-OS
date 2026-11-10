@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,6 +20,92 @@ import (
 
 	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
+
+// Build metadata injected at link time via -ldflags:
+//
+//	-X github.com/Cd1s/EngineX-OS/pkg/webui.BuildTag=...
+//	-X github.com/Cd1s/EngineX-OS/pkg/webui.BuildTrack=...
+//	-X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1
+var (
+	BuildTag     string
+	BuildTrack   = "dev"
+	ReleaseBuild string
+)
+
+func currentBuildTag() string {
+	if ReleaseBuild == "1" {
+		return ""
+	}
+	if tag := strings.TrimSpace(BuildTag); tag != "" {
+		return tag
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	var rev string
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" && s.Value != "" {
+			rev = s.Value
+			if len(rev) > 7 {
+				rev = rev[:7]
+			}
+			break
+		}
+	}
+	if rev == "" {
+		return ""
+	}
+	track := strings.TrimSpace(os.Getenv("ENGINEX_BUILD_TRACK"))
+	if track == "" {
+		track = strings.TrimSpace(BuildTrack)
+	}
+	if track == "" {
+		track = "dev"
+	}
+	return track + " " + rev
+}
+
+// uiCapabilities describes hardware-gated EngineX features derived from the
+// device-tree board prefix (never Engine's Config.device.isPlayer).
+type uiCapabilities struct {
+	Mixer         bool `json:"mixer"`
+	FourDeck      bool `json:"fourDeck"`
+	AutoLoopKnob  bool `json:"autoLoopKnob"`
+	BeatJumpPads  bool `json:"beatJumpPads"`
+	TrackSkipKeys bool `json:"trackSkipKeys"`
+	StemsEq       bool `json:"stemsEq"`
+	LineInAux     bool `json:"lineInAux"`
+	Gen2          bool `json:"gen2"`
+	RemoteStems   bool `json:"remoteStems"`
+}
+
+func boardCapabilities(board string) uiCapabilities {
+	if board == "" {
+		return uiCapabilities{
+			Mixer:         true,
+			FourDeck:      true,
+			AutoLoopKnob:  true,
+			TrackSkipKeys: true,
+			StemsEq:       true,
+			RemoteStems:   true,
+		}
+	}
+	isPlayer := playerBoards[board]
+	isMixstream := mixstreamBoards[board]
+	isAZ04 := az04Boards[board]
+	return uiCapabilities{
+		Mixer:         !isPlayer,
+		FourDeck:      fourDeckBoards[board],
+		AutoLoopKnob:  !isMixstream,
+		BeatJumpPads:  isMixstream,
+		TrackSkipKeys: !noTrackSkipKeyBoards[board],
+		StemsEq:       !isPlayer && board != "PRIME4G2",
+		LineInAux:     board == "SCLIVE4",
+		Gen2:          dataBundleBoards[board],
+		RemoteStems:   !isAZ04,
+	}
+}
 
 const defaultUIDir = "/data/sc5000-custom/ui"
 
@@ -109,8 +196,11 @@ type uiSettings struct {
 
 	// Status only, never saved: the export runs (ON waits for a Rekordbox USB), and
 	// the board is a standalone player without channel faders (#52).
-	ProlinkExportActive bool `json:"prolinkExportActive"`
-	Player              bool `json:"player"`
+	ProlinkExportActive bool           `json:"prolinkExportActive"`
+	Player              bool           `json:"player"`
+	Board               string         `json:"board,omitempty"`
+	BuildTag            string         `json:"buildTag,omitempty"`
+	Capabilities        uiCapabilities `json:"capabilities"`
 	// The role engine-ui-guard applied at Engine's last start (auto resolved).
 	FourDeckRoleActive string `json:"fourDeckRoleActive,omitempty"`
 }
@@ -529,7 +619,11 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	relay := s.relayStatusView()
 	v.RelayURL, v.DeemixPasswordSet = relay.RelayURL, relay.PasswordSet
 	v.ProlinkExportActive = s.prolinkExport != nil && s.prolinkExport.Status().Enabled
-	v.Player = playerBoards[imagePrefix(deviceCompatible())]
+	board := imagePrefix(deviceCompatible())
+	v.Board = board
+	v.BuildTag = currentBuildTag()
+	v.Player = playerBoards[board]
+	v.Capabilities = boardCapabilities(board)
 	v.FourDeckRoleActive = s.activeRole(v)
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
 		body, err := json.Marshal(struct {
