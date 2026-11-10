@@ -1248,7 +1248,14 @@ SERVICES_MAIN = """
 	function scShadowApplyAll(decks, displayOnly) {
 		scShadowDisplayOnly = displayOnly !== false
 		const head = {}
-		if (!scShadowDisplayOnly) for (const e of decks) if (e.path && scFourDeckRole.indexOf(String(e.deck)) < 0) head[e.deck] = {master: !!e.lead, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || ""}
+		if (!scShadowDisplayOnly) for (const d of [1, 2, 3, 4]) {
+			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
+			const e = decks.find(x => x.deck === d)
+			if (e && e.path) head[d] = {master: !!e.lead, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || ""}
+			// The last track is still on the deck (the next one's copy on its way, the peer gone): its
+			// header stays until it is unloaded. Without it the header read the copy's file name and key.
+			else if (scShadowHead[d] && (scShadowAt[d] || {}).path) head[d] = scShadowHead[d]
+		}
 		if (JSON.stringify(head) !== JSON.stringify(scShadowHead)) scShadowHead = head
 		let peerLead = 0, peerPlaying = false
 		for (const e of decks) { if (e.shadowMaster && !e.stale) peerLead = e.shadowMaster; if (e.playing && !e.cue && !e.stale) peerPlaying = true }
@@ -1302,6 +1309,7 @@ SERVICES_MAIN = """
 		const u2 = root.scTr("/Engine/Deck" + d + "/Track/Unload")
 		if (u2) u2.state = true
 		delete scShadowAt[d]
+		if (scShadowHead[d]) { const head = Object.assign({}, scShadowHead); delete head[d]; scShadowHead = head }
 	}
 	function scShadowApply(e) {
 		if (scShadowDisplayOnly) return

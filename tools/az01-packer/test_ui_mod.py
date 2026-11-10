@@ -2057,3 +2057,32 @@ assert.deepEqual(scShadowHead[4], {master: false, sync: false, title: '', artist
 """)
         for anchor in ('scaled[bj + "Deck/DeckItem/ArtistSong.qml"]', 'scaled[bj + "KeyEditor/KeyInfo.qml"]', "root.scShadowHeadOf(microDeck.deckIndex).title"):
             self.assertIn(anchor, SRC)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowHeadStaysWithLastTrackTest(unittest.TestCase):
+    """Engine mode: the source loaded another track and, until the last one was unloaded 0.4-0.5 s later, the
+    shadow header read the copy's file name and analysed key ("Young Thug - … Throw Sum Mo.mp3", 8B; hw19-before-R2)."""
+
+    def test_the_header_keeps_the_sources_texts_until_the_last_track_is_unloaded(self):
+        ShadowDisplayTest.js(self, r"""
+const tr = {};
+globalThis.scTr = path => tr[path] || (tr[path] = {state: path.endsWith('/SongLoaded'), string: 'Off', value: 0});
+Object.assign(globalThis, {scShadowApply() {}, scPlayer: true});
+const a = {deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '6B'};
+scShadowApplyAll([a], false);
+scShadowAt[2] = {path: a.path, id: a.id}; // loaded
+const next = {deck: 2, path: '', id: 'j', loading: true, title: 'B', artist: 'Two', keyName: '-'};
+scShadowApplyAll([next], false);
+assert.equal(scShadowHead[2].title, 'A', 'the last track is still on the deck: its title, not the file name');
+assert.equal(scShadowHead[2].keyName, '6B');
+now += 400; scShadowApplyAll([next], false); // unloaded 350 ms after the change
+assert.equal(scShadowAt[2], undefined);
+assert.equal(scShadowHead[2], undefined, 'an empty deck has no source texts');
+scShadowApplyAll([Object.assign({}, next, {path: '/c/Two - B.mp3', loading: false})], false);
+assert.equal(scShadowHead[2].title, 'B');
+// The peer went away: the same, until the deck is emptied.
+scShadowAt[2] = {path: '/c/Two - B.mp3', id: 'j'};
+scShadowApplyAll([], false); assert.equal(scShadowHead[2].title, 'B');
+now += 400; scShadowApplyAll([], false); assert.equal(scShadowHead[2], undefined);
+""")
