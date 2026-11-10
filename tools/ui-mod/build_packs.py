@@ -3189,7 +3189,12 @@ SHADOW_LAYER = r"""
         readonly property real duration: metaDuration(meta)
         readonly property real waveformDuration: metaWaveDuration(meta)
         readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
-        readonly property real playhead: overview ? position / duration : 0.5
+        // The lane keeps the stock playhead setting (WaveFormItem.zeroPosition, fed
+        // from /Client/Preferences/PlayheadPosition): same line as the local lanes.
+        readonly property real playhead: "@KIND@" === "overview" ? position / duration : wave && owner.zeroPosition > 0 && owner.zeroPosition < 1 ? owner.zeroPosition : 0.5
+        onPlayheadChanged: if (wave) { gridAnchor = -Infinity; restartScroll(); refreshDetails() }
+        // Stock overview style: Praline (default) grows from the bottom edge, Butterfly (1) is mirrored.
+        readonly property bool half: "@KIND@" === "overview" && (root.scTr("/Client/Preferences/Profile/Application/TrackOverviewStyle") || {}).index !== 1
         readonly property real start: overview ? 0 : position - span * playhead
         readonly property var tiles: meta && meta.detail && Array.isArray(meta.waveformTiles) ? meta.waveformTiles : []
         readonly property int totalPixels: metaTotalPixels(meta)
@@ -3203,11 +3208,12 @@ SHADOW_LAYER = r"""
         property string paletteQuery: ""
         property string pastPaletteQuery: ""
         function refreshPalette() {
-            const suffix = "&saturation=" + saturation + "&brightAmp=" + brightAmp + "&brightGain=" + brightGain + "&brightFloor=" + brightFloor
+            const suffix = "&saturation=" + saturation + "&brightAmp=" + brightAmp + "&brightGain=" + brightGain + "&brightFloor=" + brightFloor + (half ? "&half=1" : "")
             paletteQuery = "rgb=" + (rgb ? "1" : "0") + "&low=" + String(lowColor).slice(1) + "&mid=" + String(midColor).slice(1) + "&high=" + String(highColor).slice(1) + suffix
             pastPaletteQuery = rgb ? paletteQuery + "&dim=0.6" : "rgb=0&low=" + String(pastLowColor).slice(1) + "&mid=" + String(pastMidColor).slice(1) + "&high=" + String(pastHighColor).slice(1) + suffix
         }
         onRgbChanged: paletteUpdate.restart()
+        onHalfChanged: paletteUpdate.restart()
         onLowColorChanged: paletteUpdate.restart()
         onMidColorChanged: paletteUpdate.restart()
         onHighColorChanged: paletteUpdate.restart()
@@ -3397,6 +3403,20 @@ SHADOW_LAYER = r"""
             active: scDisplay.live && scDisplay.graphical
             anchors.fill: parent
             sourceComponent: Component { Item {
+        // The stock overview's minute marks (every 10 minutes above 50).
+        Repeater {
+            id: scMinutes
+            readonly property int step: scDisplay.duration > 3000000 ? 10 : 1
+            readonly property int count: "@KIND@" === "overview" && scDisplay.meta ? Math.ceil(scDisplay.duration / (60000 * step)) : 0
+            model: count > scDisplay.width / 4 ? 0 : count
+            delegate: Rectangle {
+                required property int index
+                x: Math.max(0, Math.min(index * 60000 * scMinutes.step / scDisplay.duration * scDisplay.width - width, scDisplay.width - width))
+                y: scDisplay.height - height - 1
+                width: 2; height: 6
+                color: scMinutes.step > 1 ? Style.active01Color : Style.icon02Color
+            }
+        }
         Rectangle {
             visible: scDisplay.graphical && !!scDisplay.sample
             x: Math.max(0, Math.min(scDisplay.width - width, scDisplay.playhead * scDisplay.width))

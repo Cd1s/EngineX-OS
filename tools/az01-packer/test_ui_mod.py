@@ -658,6 +658,25 @@ assert.equal(url(false,true,m),'/w.png'); assert.equal(url(true,false,Object.ass
 assert.equal(url(false,false,null),'');
 """)
 
+    def test_shadow_follows_the_stock_playhead_and_overview_style(self):
+        # 11-10: playhead setting left of centre, shadow lanes stayed centred; the
+        # shadow overview was mirrored and had no minute marks beside the local one.
+        layer = bp.SHADOW_LAYER
+        expr = re.search(r"(?m)^        readonly property real playhead: (.*)$", layer).group(1).replace('"@KIND@" === "overview"', "overview")
+        self.js("const at=(overview,wave,owner,position,duration)=>{with({overview,wave,owner,position,duration}){return " + expr + "}};\n" + r"""
+assert.equal(at(false,true,{zeroPosition:0.2001}),0.2001);   // the lane: the local WaveFormItem's playhead
+assert.equal(at(false,true,{}),0.5); assert.equal(at(false,true,{zeroPosition:0}),0.5);
+assert.equal(at(true,false,{zeroPosition:0.2001},30000,120000),0.25); // the overview: the track position
+""")
+        self.assertIn("onPlayheadChanged: if (wave) { gridAnchor = -Infinity; restartScroll(); refreshDetails() }", layer)
+        half = re.search(r"(?m)^        readonly property bool half: (.*)$", layer).group(1).replace('"@KIND@" === "overview"', "overview")
+        self.js("const half=(overview,index)=>{with({overview,root:{scTr:p=>(assert.equal(p,'/Client/Preferences/Profile/Application/TrackOverviewStyle'),index===null?null:{index})}}){return " + half + "}};\n" + r"""
+assert.equal(half(true,0),true); assert.equal(half(true,1),false); assert.equal(half(true,null),true); assert.equal(half(false,0),false);
+""")
+        self.assertIn('(half ? "&half=1" : "")', layer)
+        self.assertIn("onHalfChanged: paletteUpdate.restart()", layer)
+        self.assertIn("Style.icon02Color", layer)
+
     def test_shadow_layer_scroll_settle_and_grid_pool_behaviour(self):
         self.js(r"""
 const starts=[];
