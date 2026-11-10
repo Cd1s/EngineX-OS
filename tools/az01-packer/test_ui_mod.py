@@ -2020,3 +2020,35 @@ assert.deepEqual(scShadowHead, {});
 """)
         self.assertIn('head("deckIndex", "master")', SRC)
         self.assertIn('head("deckIndex", "sync")', SRC)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowHeadSourceTextTest(unittest.TestCase):
+    """Engine mode: the peer named the copy by its file ("Throw Sum Mo.mp3") and showed the key it analysed (8B)
+    while the source's header read its library's title and no key ("-")."""
+
+    def test_the_source_posts_its_key_and_the_shadow_header_takes_title_artist_and_key(self):
+        ShadowDisplayTest.js(self, r"""
+const bodies = [];
+globalThis.XMLHttpRequest = class {
+    open(method, url) { this.url = url; this.readyState = 1 }
+    send(body) { if (body) bodies.push(JSON.parse(body)[0]); this.readyState = 4; this.status = 200; if (this.onreadystatechange) this.onreadystatechange() }
+};
+globalThis.scShadowPoll = () => {};
+const deck = {key: ''};
+globalThis.scTr = path => ({value: path.endsWith('/SampleRate') ? 44100 : 0, state: path.endsWith('/SongLoaded'), color: '#ffffff', index: 0,
+    get unnormalized() { return path.endsWith('/Deck1/Track/TrackLength') ? 200 * 44100 : 0 },
+    get string() { return !path.startsWith('/Engine/Deck1/') ? '' : path.endsWith('/TrackUri') ? 'file:///a.mp3' : path.endsWith('/SongName') ? 'A' : path.endsWith('/ArtistName') ? 'One' : path.endsWith('/Track/CurrentKey') ? deck.key : '' }});
+const run = ms => { for (let t = 0; t < ms; t += 40) { now += 40; scShadowTick() } };
+run(3000);
+assert.equal(bodies[bodies.length - 1].keyName, '-', 'a track without a key is told as the header writes it');
+deck.key = '8B'; run(2600); // analysed, or shifted: told at the next text read
+assert.equal(bodies[bodies.length - 1].keyName, '8B');
+// The peer: its header takes the three texts from the source, not from the copy.
+Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
+scShadowApplyAll([{deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '-'}, {deck: 4, path: '/c/b.mp3', id: 'j'}], false);
+assert.deepEqual(scShadowHead[2], {master: false, sync: false, title: 'A', artist: 'One', keyName: '-'});
+assert.deepEqual(scShadowHead[4], {master: false, sync: false, title: '', artist: '', keyName: ''}); // a CDJ or an older sender: stock texts
+""")
+        for anchor in ('scaled[bj + "Deck/DeckItem/ArtistSong.qml"]', 'scaled[bj + "KeyEditor/KeyInfo.qml"]', "root.scShadowHeadOf(microDeck.deckIndex).title"):
+            self.assertIn(anchor, SRC)

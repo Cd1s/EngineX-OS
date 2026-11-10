@@ -976,7 +976,7 @@ SERVICES_MAIN = """
 			["cueLED", "/Track/CueLEDState"], ["master", "/DeckIsMaster"], ["sync", "/SyncMode"],
 			["beat", "/BeatNumber"], ["cuePosition", "/Track/CuePosition"], ["title", "/Track/SongName"],
 			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"],
-			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"]])
+			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"], ["currentKey", "/Track/CurrentKey"]])
 			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
 		p.cues = []
 		for (let i = 1; i <= 8; i++) {
@@ -1153,6 +1153,7 @@ SERVICES_MAIN = """
 				o.artist = s.net ? g.artist.string || "" : ""
 				const last = now - cc.wasAt < 1000 && o.title === cc.was && o.artist === cc.wasBy
 				if (last) o.title = o.artist = ""
+				o.keyName = o.title ? g.currentKey.string || "-" : "" // with the title, as this deck's header writes it ("-": no key)
 				const sr = g.rate.value, len = g.length.unnormalized
 				o.durationMs = s.net && !last && sr > 0 && len > 0 ? Math.round(len / sr * 1000) : 0 // the peer tells its shadow deck's track by it
 				scShadowTextAt[d] = !s.net || o.title ? now : 0 // Engine fills SongName after the load: retry until it does
@@ -1168,7 +1169,7 @@ SERVICES_MAIN = """
 				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
-				sent.title !== o.title || sent.artist !== o.artist || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev) edge = true
+				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev) edge = true
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -1181,7 +1182,7 @@ SERVICES_MAIN = """
 		for (let n = 0; n < own.length; n++) {
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
-			sent.master = o.master; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.durationMs = o.durationMs
+			sent.master = o.master; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
 			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
 		}
 		scShadowSent.length = own.length
@@ -1239,14 +1240,15 @@ SERVICES_MAIN = """
 		x.send()
 	}
 	// Engine mode: what the source deck's header shows and its copy here cannot know. The copy stays
-	// out of Sync and the master selection (Engine Link carries both), so the stock header items
-	// (BpmInfo, JP07SyncIndicator) read the source's state here. Display only.
+	// out of Sync and the master selection (Engine Link carries both), and it is a bare file: Engine
+	// here names it by its file name and analyses a key the source's library may not have. So the
+	// stock header items (BpmInfo, JP07SyncIndicator, ArtistSong, KeyInfo) read the source's here. Display only.
 	property var scShadowHead: ({})
 	function scShadowHeadOf(d) { return scShadowHead[d] || scShadowEmptyObject }
 	function scShadowApplyAll(decks, displayOnly) {
 		scShadowDisplayOnly = displayOnly !== false
 		const head = {}
-		if (!scShadowDisplayOnly) for (const e of decks) if (e.path && scFourDeckRole.indexOf(String(e.deck)) < 0) head[e.deck] = {master: !!e.master, sync: !!e.sync}
+		if (!scShadowDisplayOnly) for (const e of decks) if (e.path && scFourDeckRole.indexOf(String(e.deck)) < 0) head[e.deck] = {master: !!e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || ""}
 		if (JSON.stringify(head) !== JSON.stringify(scShadowHead)) scShadowHead = head
 		let peerLead = 0, peerPlaying = false
 		for (const e of decks) { if (e.shadowMaster && !e.stale) peerLead = e.shadowMaster; if (e.playing && !e.cue && !e.stale) peerPlaying = true }
@@ -4834,6 +4836,22 @@ def edits(dev: bool):
         # The shadow header mirrors the source deck's Sync (green BPM) and LEAD; the copy itself is in neither.
         def head(deck, field):
             return f'!!(typeof root !== "undefined" && root && root.scShadowHeadOf && root.scShadowHeadOf({deck}).{field})'
+        # Title, artist and key are the source's (its library's), not what Engine here reads from the copy.
+        heads = 'readonly property var scHead: typeof root !== "undefined" && root && root.scShadowHeadOf ? root.scShadowHeadOf(deckIndex) : null\n'
+        scaled[bj + "Deck/DeckItem/ArtistSong.qml"] = [
+            ("    readonly property string songTextString: deckLoaded ? displayText.display : deckLabel\n"
+             '    readonly property string artistTextString: deckLoaded ? artistName : "No Track Loaded"\n',
+             "    " + heads +
+             "    readonly property string songTextString: deckLoaded ? (scHead && scHead.title) || displayText.display : deckLabel\n"
+             '    readonly property string artistTextString: deckLoaded ? (scHead && scHead.title ? scHead.artist : artistName) : "No Track Loaded"\n'),
+            ("    readonly property bool onlyFileName: view.onlyFileName\n",
+             "    readonly property bool onlyFileName: view.onlyFileName && !(scHead && scHead.title)\n"),
+        ]
+        scaled[bj + "KeyEditor/KeyInfo.qml"] = [
+            ('    readonly property string currentKey: keyEditorController ? keyEditorController.getViewModel().currentKey : ""\n',
+             "    " + heads +
+             '    readonly property string currentKey: scHead && scHead.keyName ? (scHead.keyName === "-" ? "" : scHead.keyName)\n'
+             '        : keyEditorController ? keyEditorController.getViewModel().currentKey : ""\n')]
         scaled[ROOT + "Views/MainView/Components/JP07SyncIndicator.qml"] = [
             ("    property bool isMaster: pDeckIsMaster.translator && pDeckIsMaster.translator.state\n",
              "    property bool isMaster: (pDeckIsMaster.translator && pDeckIsMaster.translator.state) || " + head("deckIndex", "master") + "\n")]
@@ -4914,7 +4932,7 @@ def edits(dev: bool):
         ]
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml"] = [(
             "                text: microDeck.loadedDeckSongName\n",
-            f"                text: ({role} ? microDeck.deckIndex + \" · \" : \"\") + microDeck.loadedDeckSongName\n"),
+            f"                text: ({role} ? microDeck.deckIndex + \" · \" : \"\") + ({role} && root.scShadowHeadOf(microDeck.deckIndex).title || microDeck.loadedDeckSongName)\n"),
             ("                id: albumArt\n",
              "                id: albumArt\n" + art_retry("                ", "microDeck.deckIndex", "microDeck.loadedDeckAlbumArtPath", "albumArt")),
             ("                source: microDeck.loadedDeckAlbumArtPath\n",

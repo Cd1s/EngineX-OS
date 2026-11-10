@@ -532,3 +532,43 @@ func TestShadowCarriesShadowMaster(t *testing.T) {
 		t.Fatalf("shadow reply: %v %+v", err, v.Decks)
 	}
 }
+
+// The key the source's header writes travels from its QML post to the peer's
+// shadow reply, and a change of it wakes the peer's QML.
+func TestShadowCarriesKeyName(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	oldRole := fourDeckRolePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = oldRole }()
+	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
+	uiPost(t, srv.URL, "fourDeckWaveform=1")
+	w := httptest.NewRecorder()
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"keyName":"-","at":%d}]`, time.Now().UnixMilli()))))
+	if w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	s.shadow.mu.Lock()
+	out := s.shadow.ownForPeer(time.Now())
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", KeyName: "-", Seq: 1}}, time.Now())
+	ver := s.shadow.ver
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", KeyName: "8B", Seq: 2}}, time.Now())
+	ver2 := s.shadow.ver
+	s.shadow.mu.Unlock()
+	if len(out) != 1 || out[0].KeyName != "-" {
+		t.Fatalf("own deck for the peer: %+v", out)
+	}
+	if ver2 == ver {
+		t.Fatalf("a new key must wake the QML: ver %d %d", ver, ver2)
+	}
+	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	var v struct{ Decks []deckState }
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil || len(v.Decks) != 1 || v.Decks[0].KeyName != "8B" {
+		t.Fatalf("shadow reply: %v %+v", err, v.Decks)
+	}
+}
