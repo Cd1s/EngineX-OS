@@ -1,0 +1,131 @@
+{
+  "dateUTC": "2026-11-10",
+  "baseCommit": "329b55dae4db8167659360811c96cd29031975e2",
+  "windowSeconds": 12,
+  "stockArgs": [
+    "-d0",
+    "-loggerOptions",
+    "Type, Message, Thread, Category, SplitLongLines"
+  ],
+  "environment": {
+    "QT_LOGGING_CONF": "/data/logging.ini"
+  },
+  "file": "/data/logging.ini",
+  "content": "[Rules]\n*.debug=true\nqt.*.debug=false\n",
+  "captures": {
+    "armhf-conf": {
+      "lines": 243,
+      "bytes": 39173,
+      "sha256": "de2f91e447756ef48c8ad1c8f0a65c2a9a89002b429ae92771b841a16775dd5f"
+    },
+    "armhf-categories": {
+      "lines": 124,
+      "bytes": 19419,
+      "sha256": "b5555474476cb4cf260d73678e166cae01878872d42d51dca0f6947cff26bc23"
+    },
+    "armhf-categories-ini": {
+      "lines": 134,
+      "bytes": 21079,
+      "sha256": "6ee33232b33f2f3cc8a58527c32c34d23c5ca92abd71ac5d59b84d7478fdf736"
+    },
+    "armhf-quiet-baseline": {
+      "lines": 116,
+      "bytes": 18091,
+      "sha256": "c8dc9c939783c5fcec7533c6a8477dff7352c968dbb8dbf25e75a0ff6497032c"
+    },
+    "armhf-verbose": {
+      "lines": 1704,
+      "bytes": 265921,
+      "sha256": "560f0085d5cc6b415a4b0846f20647be778b4d12a82a35b528a513435b62a690"
+    },
+    "armhf-verbose-off": {
+      "lines": 125,
+      "bytes": 19585,
+      "sha256": "5172d84616bcfb4186b4ab142eab6692edb8cdcc53c2b6ccfd6283b0f0b4f0f5"
+    },
+    "integration-off-before": {
+      "lines": 125,
+      "bytes": 19585,
+      "sha256": "b0a14f3e3fcdf7f680345f81074cf17aac066a115d8d64fa6c9a2d8d923b315a"
+    },
+    "integration-on": {
+      "lines": 2021,
+      "bytes": 318717,
+      "sha256": "2d75c27a5510c87a662d29e4ca9a65044eaa011a6aee45e68a59d8add8c4d6e5"
+    },
+    "integration-off-after": {
+      "lines": 114,
+      "bytes": 17759,
+      "sha256": "79b22bc078a38cde33dd83e84027f65d180151d53343330e7362a40bd60909d7"
+    },
+    "az04-verified-baseline": {
+      "lines": 23,
+      "bytes": 1112,
+      "sha256": "53f552aa26347ea94336c79dce20424799bbf47749004da713be93065ccb4041"
+    },
+    "az04-verified-verbose": {
+      "lines": 167,
+      "bytes": 9448,
+      "sha256": "c92c378c56c9ac912a01e6a87a3754cbafb1419999b0e092ae9d0642df9c7725"
+    },
+    "az04-verified-off": {
+      "lines": 23,
+      "bytes": 1112,
+      "sha256": "53f552aa26347ea94336c79dce20424799bbf47749004da713be93065ccb4041"
+    }
+  },
+  "httpRestartPIDs": [
+    68,
+    196,
+    322
+  ],
+  "hotFileEventsUTC": [
+    "02:12:45 create logging.ini",
+    "02:12:53 remove logging.ini"
+  ],
+  "hotTrace": [
+    "53    02:12:37.959171 openat(AT_FDCWD, \"/data/logging.ini\", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)",
+    "53    02:12:38.856454 inotify_add_watch(32, \"/usr/Engine//Content\", IN_ATTRIB|IN_MOVED_FROM|IN_MOVED_TO|IN_CREATE|IN_DELETE|IN_DELETE_SELF) = 1",
+    "53    02:12:38.875886 inotify_add_watch(42, \"/tmp/home/Music\", IN_MODIFY|IN_ATTRIB|IN_MOVED_FROM|IN_MOVED_TO|IN_DELETE_SELF|IN_MOVE_SELF) = -1 ENOENT (No such file or directory)",
+    "84    02:12:38.906258 openat(AT_FDCWD, \"/data/logging.ini\", O_RDONLY|O_LARGEFILE|O_CLOEXEC <unfinished ...>",
+    "83    02:12:38.906290 openat(AT_FDCWD, \"/data/logging.ini\", O_RDONLY|O_LARGEFILE|O_CLOEXEC <unfinished ...>",
+    "165   02:13:03.000673 openat(AT_FDCWD, \"/data/logging.ini\", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)",
+    "166   02:13:03.089324 openat(AT_FDCWD, \"/data/logging.ini\", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)"
+  ],
+  "az04QuitReason": "TestApp",
+  "az04CraftEvidence": "ev_5664b7d1fbac67cc91323563fbc4a2c68dec9ff3cda423faf7d21d20c228587a",
+  "limits": [
+    "AZ04 capture covers startup before TestApp exit; no continuous playback or hot-reload claim.",
+    "Main logger Category column truncates names to 24 characters.",
+    "Raw messages are excluded; only counts, digests and category names are retained."
+  ],
+  "newMainCategories": [
+    "air.deviceidentifier",
+    "air.deviceidentifier.mid",
+    "air.devicemanager.midi",
+    "air.discoverer",
+    "air.file.caching",
+    "air.fileformats.aac",
+    "air.fileformats.ffmpeg",
+    "air.planck.analytics",
+    "air.planck.controller.fi",
+    "air.planck.crashreport",
+    "air.planck.database.abst",
+    "air.planck.database.coll",
+    "air.planck.engine.playst",
+    "air.planck.engine.sync",
+    "air.planck.grpcserver",
+    "air.planck.gui",
+    "air.planck.librarian",
+    "air.planck.onelibrary",
+    "air.planck.profiles",
+    "air.planck.sentry",
+    "air.planck.stems",
+    "air.planck.streaming",
+    "air.planck.updater",
+    "air.quick",
+    "air.thread",
+    "air.vfs.fileenging",
+    "soundswitch.frontend"
+  ]
+}
