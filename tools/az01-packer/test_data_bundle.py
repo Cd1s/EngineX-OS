@@ -73,12 +73,30 @@ class DataBundleTest(unittest.TestCase):
             self.assertTrue((src / 'bin' / applet).stat().st_mode & 0o100)
         self.assertTrue((src / 'boot-activate.sh').exists())
         self.assertTrue((src / 'boot-activate.sh').stat().st_mode & 0o100)
-        self.assertIn('EnvironmentFile=-/data/sc5000-custom/ui-scale.env',
-                      (src / 'boot-activate.sh').read_text())
-        self.assertIn('enginex-stream-sync.service',
-                      (src / 'boot-activate.sh').read_text())
-        self.assertIn('Wants=enginex-stream-sync.service',
-                      (src / 'boot-activate.sh').read_text())
+        boot = (src / 'boot-activate.sh').read_text()
+        self.assertIn('EnvironmentFile=-/data/sc5000-custom/ui-scale.env', boot)
+        self.assertIn('Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M', boot)
+        self.assertIn('Environment=QML_DISABLE_DISK_CACHE=1', boot)
+        self.assertIn('ExecStartPre=-/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home', boot)
+        self.assertIn('ExecStartPost=-/bin/sh /run/sc5000/perf-tune.sh', boot)
+        self.assertIn('enginex-stream-sync.service', boot)
+        self.assertIn('Wants=enginex-stream-sync.service', boot)
+        self.assertEqual(boot.count('CPUAffinity=3'), 3)
+        for token in (
+            'scaling_governor',
+            'scaling_min_freq',
+            '1200000',
+            'up_threshold:50',
+            'sampling_down_factor:10',
+            'ignore_nice_load:1',
+            'ffb20000:0 ffa30000:1 ehci_hcd:2 ff540000:2 eth0:2',
+            'smp_affinity_list',
+            'smp_affinity',
+            'taskset -pc',
+            'chrt -f -p 99',
+        ):
+            self.assertIn(token, boot)
+        self.assertIn('/run/sc5000/perf-tune.sh', (src / 'uninstall.sh').read_text())
         self.assertTrue((src / '99-sc5000-custom.conf').exists())
         self.assertTrue((src / 'host-install-userdata.py').exists())
         self.assertTrue((src / 'host-install-fastboot.sh').exists())
@@ -386,6 +404,82 @@ class DataBundleTest(unittest.TestCase):
         data = self.migrate({})
         self.assertTrue((data / 'enginex/bundle').is_dir())
         self.assertTrue((data / 'sc5000-custom/version.txt').exists())
+
+    def test_boot_activate_perf_tune_runtime(self):
+        src = self.extract(self.build())
+        boot = (src / 'boot-activate.sh').read_text()
+        start = boot.index("cat <<'EOF' > /run/sc5000/perf-tune.sh\n") + len("cat <<'EOF' > /run/sc5000/perf-tune.sh\n")
+        end = boot.index("\nEOF\n", start)
+        perf_script = self.tmp / 'perf-tune.sh'
+        perf_script.write_text(boot[start:end] + '\n')
+        perf_script.chmod(0o755)
+        self.assertEqual(subprocess.run(['sh', '-n', str(src / 'boot-activate.sh')], capture_output=True).returncode, 0)
+        self.assertEqual(subprocess.run(['sh', '-n', str(perf_script)], capture_output=True).returncode, 0)
+
+        sys_root = self.tmp / 'sys'
+        proc_root = self.tmp / 'proc'
+        for cpu in range(4):
+            d = sys_root / f'devices/system/cpu/cpu{cpu}/cpufreq'
+            d.mkdir(parents=True)
+            (d / 'scaling_governor').write_text('interactive\n')
+            (d / 'scaling_min_freq').write_text('408000\n')
+        ondemand = sys_root / 'devices/system/cpu/cpufreq/ondemand'
+        ondemand.mkdir(parents=True)
+        for k in ('up_threshold', 'sampling_down_factor', 'ignore_nice_load'):
+            (ondemand / k).write_text('0\n')
+        (proc_root / 'interrupts').parent.mkdir(parents=True, exist_ok=True)
+        (proc_root / 'interrupts').write_text(
+            '           CPU0       CPU1       CPU2       CPU3\n'
+            ' 41:          0          0          0          1     GIC-0  41 Level     ffb20000.i2s\n'
+            ' 42:          0          1          0          0     GIC-0  42 Level     ffa30000.gpu\n'
+            ' 43:          0          1          0          0     GIC-0  43 Level     ehci_hcd:usb1\n'
+            ' 44:          0          1          0          0     GIC-0  44 Level     ff540000.usb\n'
+            ' 45:          0          1          0          0     GIC-0  45 Level     eth0\n'
+        )
+        for irq in (41, 42, 43, 44):
+            d = proc_root / f'irq/{irq}'
+            d.mkdir(parents=True)
+            (d / 'smp_affinity_list').write_text('1\n')
+        d45 = proc_root / 'irq/45'
+        d45.mkdir(parents=True)
+        (d45 / 'smp_affinity').write_text('2\n')
+        for pid, comm in ((101, 'irq/41-ffb20000'), (102, 'irq/42-ffa30000'), (103, 'irq/45-eth0')):
+            p = proc_root / str(pid)
+            p.mkdir()
+            (p / 'comm').write_text(f'{comm}\n')
+
+        bindir = self.tmp / 'bin'
+        bindir.mkdir()
+        log = self.tmp / 'calls.log'
+        for tool in ('taskset', 'chrt'):
+            wrapper = bindir / tool
+            wrapper.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{log}"\n')
+            wrapper.chmod(0o755)
+        env = {
+            'PATH': f'{bindir}:{os.environ.get("PATH", "/usr/bin:/bin")}',
+            'SC5000_SYS_ROOT': str(sys_root),
+            'SC5000_PROC_ROOT': str(proc_root),
+        }
+        r = subprocess.run(['sh', str(perf_script)], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for cpu in range(4):
+            d = sys_root / f'devices/system/cpu/cpu{cpu}/cpufreq'
+            self.assertEqual((d / 'scaling_governor').read_text().strip(), 'ondemand')
+            self.assertEqual((d / 'scaling_min_freq').read_text().strip(), '1200000')
+        self.assertEqual((ondemand / 'up_threshold').read_text().strip(), '50')
+        self.assertEqual((ondemand / 'sampling_down_factor').read_text().strip(), '10')
+        self.assertEqual((ondemand / 'ignore_nice_load').read_text().strip(), '1')
+        self.assertEqual((proc_root / 'irq/41/smp_affinity_list').read_text().strip(), '0')
+        self.assertEqual((proc_root / 'irq/42/smp_affinity_list').read_text().strip(), '1')
+        self.assertEqual((proc_root / 'irq/43/smp_affinity_list').read_text().strip(), '2')
+        self.assertEqual((proc_root / 'irq/44/smp_affinity_list').read_text().strip(), '2')
+        self.assertEqual((proc_root / 'irq/45/smp_affinity').read_text().strip(), '4')
+        calls = log.read_text().splitlines()
+        self.assertIn('taskset -pc 0 101', calls)
+        self.assertIn('chrt -f -p 99 101', calls)
+        self.assertIn('taskset -pc 1 102', calls)
+        self.assertIn('taskset -pc 2 103', calls)
+        self.assertFalse([c for c in calls if c.startswith('chrt ') and not c.endswith('101')])
 
 
 if __name__ == '__main__':

@@ -48,13 +48,19 @@ mkdir -p /run/systemd/system/engine.service.d
 
 # No KillMode=process: engine.service is Type=forking with the Scripts/engine shell as main PID, so it would
 # leave the hook-less /usr/Engine/Engine running and nobody to run poweroff (#116). The daemons have their own units.
+# HOME + MESA_SHADER_CACHE_MAX_SIZE keep Mesa shader cache in RAM instead of failing on the read-only root (#177).
+# ExecStartPost re-applies IRQ/cpufreq tuning after stock runengine -> setup-prerequisites.sh finishes (#177).
 cat <<EOF > /run/systemd/system/engine.service.d/99-sc5000.conf
 [Unit]
 Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service
 
 [Service]
 Environment="LD_PRELOAD=$lib_hook"
+Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M
+Environment=QML_DISABLE_DISK_CACHE=1
 EnvironmentFile=-/data/sc5000-custom/ui-scale.env
+ExecStartPre=-/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home
+ExecStartPost=-/bin/sh /run/sc5000/perf-tune.sh
 EOF
 
 # Converts a rekordbox stick inside the mount, before Engine sees it (as on the 1st-gen images).
@@ -93,6 +99,7 @@ After=network.target enginex-sc5000-deemixd.service
 
 [Service]
 Type=simple
+CPUAffinity=3
 ExecStart=$bin_dir/stream-sync --listen :8080 --cpu 3
 Restart=always
 RestartSec=3
@@ -112,6 +119,7 @@ After=network.target
 
 [Service]
 Type=simple
+CPUAffinity=3
 ExecStart=$bin_dir/rb-bridge --prolink
 Restart=always
 RestartSec=3
@@ -131,6 +139,7 @@ After=network.target
 
 [Service]
 Type=simple
+CPUAffinity=3
 ExecStart=$bin_dir/sc5000-deemixd -state-dir $dest/state
 Restart=always
 RestartSec=3
@@ -195,6 +204,60 @@ convert_mounted() {
         fi
     done
 }
+
+# Best-effort cpufreq floor & IRQ isolation matching sc5000-perf-tune / sc5000-debloat --apply-runtime (#177).
+# Kept in /run/sc5000/perf-tune.sh so engine.service ExecStartPost can re-apply it after stock setup-prerequisites.sh.
+mkdir -p /run/sc5000
+cat <<'EOF' > /run/sc5000/perf-tune.sh
+#!/bin/sh
+set -u
+sys=${SC5000_SYS_ROOT:-/sys}
+proc=${SC5000_PROC_ROOT:-/proc}
+for cpu in 0 1 2 3; do
+    dir=$sys/devices/system/cpu/cpu$cpu/cpufreq
+    [ -d "$dir" ] || continue
+    if [ -w "$dir/scaling_governor" ]; then
+        printf 'ondemand\n' > "$dir/scaling_governor" 2>/dev/null || :
+    fi
+    if [ -w "$dir/scaling_min_freq" ]; then
+        printf '1200000\n' > "$dir/scaling_min_freq" 2>/dev/null || :
+    fi
+done
+for knob in up_threshold:50 sampling_down_factor:10 ignore_nice_load:1; do
+    path=$sys/devices/system/cpu/cpufreq/ondemand/${knob%:*}
+    if [ -w "$path" ]; then
+        printf '%s\n' "${knob#*:}" > "$path" 2>/dev/null || :
+    fi
+done
+if [ -r "$proc/interrupts" ]; then
+    for spec in ffb20000:0 ffa30000:1 ehci_hcd:2 ff540000:2 eth0:2; do
+        name=${spec%:*}; cpu=${spec#*:}
+        for irq in $(awk -v name="$name" 'index($0,name) && $1 ~ /^[0-9]+:$/ {sub(":", "", $1); print $1}' "$proc/interrupts" 2>/dev/null); do
+            if [ -w "$proc/irq/$irq/smp_affinity_list" ]; then
+                printf '%s\n' "$cpu" > "$proc/irq/$irq/smp_affinity_list" 2>/dev/null || :
+            elif [ -w "$proc/irq/$irq/smp_affinity" ]; then
+                printf '%x\n' "$((1 << cpu))" > "$proc/irq/$irq/smp_affinity" 2>/dev/null || :
+            fi
+            for comm in "$proc"/[0-9]*/comm; do
+                [ -r "$comm" ] || continue
+                thread=$(cat "$comm" 2>/dev/null) || continue
+                case "$thread" in irq/"$irq"-*)
+                    pid=${comm%/comm}; pid=${pid##*/}
+                    if command -v taskset >/dev/null 2>&1; then
+                        taskset -pc "$cpu" "$pid" >/dev/null 2>&1 || :
+                    fi
+                    if [ "$name" = ffb20000 ] && command -v chrt >/dev/null 2>&1; then
+                        chrt -f -p 99 "$pid" >/dev/null 2>&1 || :
+                    fi
+                    ;; esac
+            done
+        done
+    done
+fi
+exit 0
+EOF
+chmod 755 /run/sc5000/perf-tune.sh
+/bin/sh /run/sc5000/perf-tune.sh || :
 
 # In a chroot systemctl only prints "Running in chroot, ignoring" and exits 0, so require systemd as PID 1.
 if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
@@ -347,7 +410,8 @@ rm -f /run/systemd/system/enginex-stream-sync.service \
       /run/systemd/system/enginex-rb-bridge.service \
       /run/systemd/system/enginex-sc5000-deemixd.service \
       /run/systemd/system/engine.service.d/99-sc5000.conf \
-      /run/systemd/system/edisksd.service.d/99-sc5000.conf
+      /run/systemd/system/edisksd.service.d/99-sc5000.conf \
+      /run/sc5000/perf-tune.sh
 echo "EngineX OS $version removed from $dest"
 '''
 
