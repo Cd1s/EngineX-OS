@@ -322,6 +322,31 @@ func TestShadowWaveformWAVPCMWidthsAndExtensible(t *testing.T) {
 	}
 }
 
+type shadowTestProgress struct {
+	shadowTestTicker
+	read []int64
+}
+
+func (p *shadowTestProgress) Progress(n int64) { p.read = append(p.read, n) }
+
+// A ticker that asks for it hears the bytes read so far: they only grow, and
+// end at the file's size.
+func TestShadowWaveformReportsBytesRead(t *testing.T) {
+	data := shadowTestTone(48000, 48000, 100, 0.5)
+	p := &shadowTestProgress{shadowTestTicker: func() error { return nil }}
+	if _, err := shadowWaveformReader(bytes.NewReader(data), [3]float64{}, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.read) < 2 || p.read[len(p.read)-1] != int64(len(data)) {
+		t.Fatalf("%d reports, the last %v, file is %d bytes", len(p.read), p.read[max(0, len(p.read)-1):], len(data))
+	}
+	for i := 1; i < len(p.read); i++ {
+		if p.read[i] < p.read[i-1] || p.read[i]-p.read[i-1] > shadowEnvelopeChunk {
+			t.Fatalf("report %d: %d after %d", i, p.read[i], p.read[i-1])
+		}
+	}
+}
+
 func TestShadowWaveformCancellationAndSampleQuantum(t *testing.T) {
 	cancel := errors.New("cancel shadow envelope")
 	var e *shadowEnvelopeBuilder

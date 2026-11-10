@@ -56,9 +56,17 @@ func ShadowWaveformFile(path string, peaks [3]float64, ticker Ticker) (*ShadowEn
 // A non-seekable reader also prevents go-mp3 from scanning/indexing the whole
 // file in NewDecoder. Limit I/O quanta when skipping tags and FLAC metadata.
 type shadowEnvelopeReader struct {
-	r      io.Reader
-	ticker Ticker
-	err    error
+	r        io.Reader
+	ticker   Ticker
+	err      error
+	read     int64
+	progress func(read int64)
+}
+
+// ShadowProgress is a Ticker that also hears how many bytes of the file have
+// been read: the caller's progress display.
+type ShadowProgress interface {
+	Progress(read int64)
 }
 
 func (r *shadowEnvelopeReader) Read(p []byte) (int, error) {
@@ -81,11 +89,17 @@ func (r *shadowEnvelopeReader) Read(p []byte) (int, error) {
 	if err != nil && err != io.EOF {
 		r.err = err
 	}
+	if r.read += int64(n); r.progress != nil {
+		r.progress(r.read)
+	}
 	return n, err
 }
 
 func shadowWaveformReader(r io.Reader, peaks [3]float64, ticker Ticker) (out *ShadowEnvelope, err error) {
 	src := &shadowEnvelopeReader{r: r, ticker: ticker}
+	if p, ok := ticker.(ShadowProgress); ok {
+		src.progress = p.Progress
+	}
 	// The decoders are third-party parsers. Malformed bitstreams must fail this
 	// display-only operation rather than take down the serving process.
 	defer func() {

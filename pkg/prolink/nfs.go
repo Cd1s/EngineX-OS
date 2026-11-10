@@ -287,6 +287,9 @@ func (c *NFSClient) FetchTo(ctx context.Context, export, path string, w io.Write
 	if file.Size > max {
 		return file, fmt.Errorf("prolink: %s is %d bytes, over the %d limit", path, file.Size, max)
 	}
+	if p, ok := w.(*fetchProgress); ok {
+		p.total = int64(file.Size)
+	}
 	np, err := c.port(ctx, rpcNFS, 2)
 	if err != nil {
 		return file, err

@@ -924,7 +924,7 @@ func TestShadowAudioFetchCountersDetectCalls(t *testing.T) {
 	assertNoShadowAudioFetch(t, s)
 	done := make(chan struct{})
 	s.shadow.mu.Lock()
-	s.shadowFetch("counter", func(context.Context) (string, error) { close(done); return "", errors.New("counter test") })
+	s.shadowFetch("counter", func(context.Context, *shadowCopy) (string, error) { close(done); return "", errors.New("counter test") })
 	// Mark busy to exercise the CDJ entry without starting an NFS request.
 	s.shadow.busy["cdj-counter"] = true
 	s.shadowFetchCDJ("cdj-counter", nil, 3, 1)

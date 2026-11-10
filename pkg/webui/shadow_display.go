@@ -46,6 +46,9 @@ type shadowDisplayAsset struct {
 	Detail        bool   `json:"detail"`
 	DetailPending bool   `json:"detailPending"`
 	DetailSource  string `json:"detailSource,omitempty"`
+	// DetailProgress, while DetailPending: how much of the file the source's
+	// worker has read, 0..1. Absent from an older source, or before it starts.
+	DetailProgress float64 `json:"detailProgress,omitempty"`
 }
 
 type shadowDisplayEntry struct {
@@ -216,11 +219,15 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 			}
 		}
 		d.Path, d.Ext, d.Net = "", "", ""
+		d.Progress, d.Error = 0, ""
 		d.At = now.UnixMilli()
 		if p.Key != "" {
 			e := s.ensureShadowDisplay(p, now)
 			d.Loading = e == nil
 			d.DisplayDetail = e != nil && e.asset != nil && !e.asset.DetailPending
+			if e != nil && e.asset != nil && e.asset.DetailPending {
+				d.Progress = e.asset.DetailProgress // as of the last re-read, every 2 s
+			}
 		}
 		out = append(out, d)
 	}
@@ -427,6 +434,9 @@ func filterCDJDisplayCues(asset *shadowDisplayAsset, cues []rekordbox.Cue, posit
 func (s *Server) ensureShadowDisplay(p peerDeck, now time.Time) *shadowDisplayEntry {
 	c := &s.shadow.display
 	id := displayPeerID(p)
+	if p.head {
+		id += ":head" // never taken for the full data after a change of mode
+	}
 	c.mu.Lock()
 	e := c.claim(id, now)
 	if e == nil {
@@ -466,12 +476,15 @@ func (s *Server) fetchShadowDisplay(p peerDeck, id string, slot *shadowDisplayEn
 	var err error
 	if p.local != "" {
 		var own *shadowDisplayAsset
-		if own, err = s.sourceDisplayAsset(ctx, p.local, p.Key); err == nil {
+		if own, err = s.sourceDisplayAsset(ctx, p.local, p.Key, !p.head); err == nil {
 			copyAsset := *own // the source cache's asset stays immutable
 			a = &copyAsset
 		}
 	} else {
 		u := fmt.Sprintf("http://%s/peer/decks/%d/display?key=%s", net.JoinHostPort(p.ip, strconv.Itoa(port)), p.Deck, url.QueryEscape(p.Key))
+		if p.head {
+			u += "&detail=0"
+		}
 		req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
 		// A peer must not redirect this read-only request to arbitrary URLs.
 		client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -495,6 +508,9 @@ func (s *Server) fetchShadowDisplay(p peerDeck, id string, slot *shadowDisplayEn
 	}
 	if err == nil {
 		err = validateDisplayAsset(a, p.Key)
+	}
+	if err == nil && !(a.DetailProgress > 0 && a.DetailProgress <= 1) {
+		a.DetailProgress = 0
 	}
 	if err == nil && a.Waveform != nil {
 		w := downsampleDisplayWave(*a.Waveform, 65536)
@@ -784,7 +800,7 @@ func (s *Server) peerDisplayGet(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 750*time.Millisecond)
 	defer cancel()
-	a, err := s.sourceDisplayAsset(ctx, path, r.URL.Query().Get("key"))
+	a, err := s.sourceDisplayAsset(ctx, path, r.URL.Query().Get("key"), r.URL.Query().Get("detail") != "0")
 	if err != nil {
 		http.Error(w, "display data not ready", http.StatusNotFound)
 		return
@@ -930,7 +946,9 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 	if pfx := imagePrefix(deviceCompatible()); pfx == "" || playerBoards[pfx] {
 		lines = nil
 	}
-	if role == "" || v.ShadowLegacyEngine || (strings.Contains(role, strconv.Itoa(deck)) && !slices.Contains(lines, deck)) {
+	// Engine mode reads the same data for the cover it shows while a shadow deck
+	// loads: the source's cover, key and overview.
+	if role == "" || (strings.Contains(role, strconv.Itoa(deck)) && !slices.Contains(lines, deck)) {
 		return nil, deckState{}
 	}
 	s.shadow.mu.Lock()
@@ -940,6 +958,9 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 	}
 	s.shadow.mu.Unlock()
 	p, ok := placeDisplayPeers(peers, role, time.Now())[deck]
+	if !ok && v.ShadowLegacyEngine {
+		return nil, deckState{} // a CDJ's track has no cover here
+	}
 	if !ok {
 		// Compose and HTTP use the same placement, including peer priority and
 		// exact current track keys. An old CDJ URL cannot read a different song.
@@ -960,6 +981,7 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 	}
 	d := p.deckState
 	d.Deck, d.Key = deck, key
+	p.head = v.ShadowLegacyEngine
 	return s.ensureShadowDisplay(p, time.Now()), d
 }
 

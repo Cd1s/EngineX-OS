@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -61,6 +62,8 @@ type deckState struct {
 	ID           string  `json:"id,omitempty"`           // Engine mode, what the source has loaded: its Key (a copy), its Net (this player's own file), a CDJ's slot and track id. The QML loads again when it changes
 	DurationMS   float64 `json:"durationMs,omitempty"`   // the track's length on the source: tells the QML whether Engine holds this track or another
 	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
+	Progress     float64 `json:"progress,omitempty"`     // while loading, 0..1: how much of the copy (Engine mode) or of the source's detail waveform is done. Absent: not known, the QML shows a ring that turns
+	Error        string  `json:"error,omitempty"`        // Engine mode: why the copy failed (shadowCopy.err); it is tried again
 	Stale        bool    `json:"stale,omitempty"`        // frozen display sample; not an eject/goodbye
 	MetadataOnly bool    `json:"metadataOnly,omitempty"` // CDJ state has no peer display asset endpoint
 	LineIn       bool    `json:"lineIn,omitempty"`       // all-in-one console: shadow source mapped to Line In channel
@@ -129,6 +132,7 @@ type peerDeck struct {
 	refPos float64
 	refAt  time.Time
 	local  string // this deck's own copy of the track, see localPeerTrack
+	head   bool   // Engine mode: only the head of the display data (cover, key); the source computes no detail waveform for it
 }
 
 // speed is how fast the deck's position runs on this machine's clock.
@@ -232,6 +236,9 @@ type shadowState struct {
 	conn          *net.UDPConn             // the beacon socket while shadowLoop runs
 	files         map[string]string        // track key -> local copy
 	busy          map[string]bool
+	copies        map[string]*shadowCopy // track key -> the copy on its way, or how it failed
+	copyRetry     time.Duration          // after a copy's first failure; doubles up to 15 times this
+	copyTimeout   time.Duration
 	used          map[string]time.Time // when a shadow deck last wanted a copy
 	polled        time.Time
 	running       bool
@@ -252,7 +259,7 @@ type shadowState struct {
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, copies: map[string]*shadowCopy{}, copyRetry: time.Second, copyTimeout: 2 * time.Minute, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -1043,7 +1050,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	// display cache (stale, loading, the placed slot and key) goes in a digest.
 	h := fnv.New64a()
 	for _, d := range out {
-		fmt.Fprintf(h, "%d|%s|%t|%t|%t|%t;", d.Deck, d.Key, d.Loading, d.Stale, d.MetadataOnly, d.DisplayDetail)
+		fmt.Fprintf(h, "%d|%s|%t|%t|%t|%t|%.2f;", d.Deck, d.Key, d.Loading, d.Stale, d.MetadataOnly, d.DisplayDetail, d.Progress)
 	}
 	// CDJ continuous positions do not advance the EngineX peer version. Those
 	// responses, like legacy responses, must always reach QML.
@@ -1143,6 +1150,7 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		if d.Playing {
 			d.PositionMS, d.Rate = p.carried(now.Sub(p.at))
 		}
+		d.Progress, d.Error = 0, "" // ours to say, not the peer's
 		d.Path = resolveNetPathFile(d.Net, sh.dataRoot, sh.mediaRoot, false)
 		// A file of this player's own is named by its path. Not by the peer's key
 		// then: that appears once the peer's Engine has cached the file, mid-track.
@@ -1156,6 +1164,7 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 			d.Path = sh.files[key]
 			if d.Path == "" {
 				s.shadowFetchPeer(key, p)
+				d.Progress, d.Error = sh.copyShown(key)
 			}
 		}
 		// Audio still on its way: the QML shows the deck as loading. No track on
@@ -1164,7 +1173,9 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		if p.Net == "" && p.Key == "" {
 			d.Path, d.Loading = "", false
 		}
-		d.Key, d.Ext, d.Net = "", "", ""
+		// The key of the source's display data: the QML covers the deck with the
+		// source's cover and key until Engine holds the track.
+		d.Key, d.Ext, d.Net = displayTrackKey(p), "", ""
 		d.At = now.UnixMilli()
 		out = append(out, d)
 	}
@@ -1180,7 +1191,7 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 	}
 	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
 		cue := dev.PlayState1 == cdjCuePlay
-		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS)}
+		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS), Title: dev.Title, Artist: dev.Artist}
 		if len(consoleLines) > 0 {
 			d.LineIn = true
 		}
@@ -1202,6 +1213,8 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 				d.Path, d.ID = sh.files[key], key
 				if d.Path == "" {
 					s.shadowFetchCDJ(key, host, dev.SourceSlot, dev.TrackID)
+					d.Loading = true
+					d.Progress, d.Error = sh.copyShown(key)
 				}
 			}
 		}
@@ -1286,9 +1299,12 @@ func sourceHost(st prolink.ExportStatus, devices []prolink.Device, n byte) net.I
 // shadowFetch* run with sh.mu held; the copy itself runs unlocked.
 func (s *Server) shadowFetchCDJ(key string, host net.IP, slot byte, id uint32) {
 	s.shadow.fetchCDJCalls.Add(1)
-	s.shadowFetch(key, func(ctx context.Context) (string, error) {
+	s.shadowFetch(key, func(ctx context.Context, cp *shadowCopy) (string, error) {
 		c := &prolink.NFSClient{IP: host}
-		local, err := prolink.FetchTrack(ctx, c, slot, id, s.shadowDir())
+		local, err := prolink.FetchTrack(ctx, c, slot, id, s.shadowDir(), func(done, total int64) {
+			cp.total.Store(total)
+			cp.done.Store(done)
+		})
 		if err != nil {
 			return "", err
 		}
@@ -1325,7 +1341,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		dir = filepath.Join(dir, "Contents")
 	}
 	local := filepath.Join(dir, name)
-	s.shadowFetch(key, func(ctx context.Context) (string, error) {
+	s.shadowFetch(key, func(ctx context.Context, cp *shadowCopy) (string, error) {
 		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -1333,8 +1349,9 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
-			return "", fmt.Errorf("peer audio: %s", resp.Status)
+			return "", fmt.Errorf("peer audio: %s: %w", resp.Status, errShadowUnavailable)
 		}
+		cp.total.Store(max(0, resp.ContentLength)) // -1: the peer did not say
 		if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
 			return "", err
 		}
@@ -1343,7 +1360,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 			return "", err
 		}
 		defer os.Remove(f.Name())
-		_, err = io.Copy(f, io.LimitReader(resp.Body, 1<<30))
+		_, err = io.Copy(io.MultiWriter(f, countWriter{&cp.done}), io.LimitReader(resp.Body, 1<<30))
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
@@ -1359,24 +1376,88 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 	})
 }
 
-func (s *Server) shadowFetch(key string, fetch func(context.Context) (string, error)) {
+// shadowCopy is one track's copy on its way to this player: how far it is, and
+// after a failure why it failed and when it is tried again.
+type shadowCopy struct {
+	done, total atomic.Int64 // bytes; total 0: the source did not say
+	fails       int
+	retry       time.Time // no new attempt before this
+	err         string    // the last failure, by kind: never the error's text, which can hold addresses
+}
+
+var errShadowUnavailable = errors.New("the source does not have the track")
+
+type countWriter struct{ n *atomic.Int64 }
+
+func (w countWriter) Write(p []byte) (int, error) {
+	w.n.Add(int64(len(p)))
+	return len(p), nil
+}
+
+// copyShown is what the QML shows of a copy (sh.mu held): how far it is, 0 while
+// the length is not known, or the failure it is retried after. The failure stays
+// until bytes of the next attempt arrive, so the line does not blink.
+func (sh *shadowState) copyShown(key string) (float64, string) {
+	c := sh.copies[key]
+	if c == nil {
+		return 0, ""
+	}
+	done, total := c.done.Load(), c.total.Load()
+	if done <= 0 {
+		return 0, c.err
+	}
+	if total <= 0 {
+		return 0, ""
+	}
+	return min(1, max(0.01, math.Round(float64(done)/float64(total)*100)/100)), ""
+}
+
+func (s *Server) shadowFetch(key string, fetch func(context.Context, *shadowCopy) (string, error)) {
 	s.shadow.fetchCalls.Add(1)
 	sh := s.shadow
-	if sh.busy[key] {
+	c := sh.copies[key]
+	// A copy that failed is not asked for again on every compose (8 a second).
+	if sh.busy[key] || (c != nil && time.Now().Before(c.retry)) {
 		return
 	}
+	if c == nil {
+		c = &shadowCopy{}
+		sh.copies[key] = c
+	}
+	c.done.Store(0)
+	c.total.Store(0)
 	sh.busy[key] = true
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), sh.copyTimeout)
 		defer cancel()
-		path, err := fetch(ctx)
+		path, err := fetch(ctx, c)
 		sh.mu.Lock()
 		defer sh.mu.Unlock()
 		delete(sh.busy, key)
+		for k := range sh.copies {
+			if k != key && !sh.busy[k] && time.Since(sh.used[k]) > 2*time.Minute {
+				delete(sh.copies, k)
+			}
+		}
 		if err != nil {
+			var timeout net.Error
+			switch {
+			case errors.Is(err, errShadowUnavailable):
+				c.err = "unavailable"
+			case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
+				c.err = "timeout"
+			case c.done.Load() > 0:
+				c.err = "interrupted"
+			default:
+				c.err = "failed"
+			}
+			c.fails++
+			c.retry = time.Now().Add(min(sh.copyRetry<<min(c.fails-1, 4), 15*sh.copyRetry))
+			c.done.Store(0)
 			fmt.Fprintf(os.Stderr, "stream-sync: shadow deck copy %s: %v\n", key, err)
 			return
 		}
+		delete(sh.copies, key)
 		sh.files[key] = path
 		// Keep copies a shadow deck wanted in the last 2 minutes: deleting the
 		// previous track at once failed Engine's load when the CDJ switched fast.
