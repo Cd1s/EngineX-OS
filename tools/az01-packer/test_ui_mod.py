@@ -391,6 +391,57 @@ assert.strictEqual(vfx.enabled, false);
             'v + "TouchFx/TouchFxViewLowerBar.qml"',
         ):
             self.assertIn(target, SRC)
+        if shutil.which("node"):
+            old_root = bp.ROOT
+            try:
+                bp.ROOT = "Skins/Embedded/"
+                deck_color_patch = bp.edits(False)[bp.ROOT + "Views/MainView/DeckInfo/DeckColor/DeckColor.qml"][0][1]
+            finally:
+                bp.ROOT = old_root
+            js = re.sub(r"readonly property \w+ (\w+):", r"const \1 =", deck_color_patch)
+            script = r"""
+const assert = require('assert');
+const WHITE = {r: 1, g: 1, b: 1, a: 1, hex: '#ffffff'};
+const BLACK = {r: 0, g: 0, b: 0, a: 1, hex: '#000000'};
+const TRANSPARENT = {r: 0, g: 0, b: 0, a: 0, hex: 'transparent'};
+const CONSOLE_BLUE = {r: 0.14, g: 0.27, b: 0.40, a: 1, hex: '#234567'};
+const LAYER_PINK = {r: 0.67, g: 0.80, b: 0.94, a: 1, hex: '#abcdef'};
+const OWN_GREEN = {r: 0, g: 0.9, b: 0.4, a: 1, hex: '#00e666'};
+function evalDeckColor(board, isPlayerBoard, role, deckIndex, ownColor, prefs) {
+    const Config = {device: {name: board}};
+    const root = {scIsPlayerBoard: isPlayerBoard, scFourDeckRole: role};
+    const deckView = {deckData: {deckColor: ownColor}};
+    const Planck = {
+        getProperty(p) {
+            if (p === '/Client/Preferences/Player') return {translator: {string: '1'}};
+            const k = p.replace('/Client/Preferences/Profile/Application/PlayerColor', '');
+            return prefs[k] ? {translator: {color: prefs[k]}} : null;
+        }
+    };
+""" + js + r"""
+    return playerColor;
+}
+const prefs = {'1': CONSOLE_BLUE, '1A': LAYER_PINK, '3': BLACK};
+for (const blank of [WHITE, BLACK, TRANSPARENT]) {
+    // 1. All-in-one consoles (2-deck or 4-deck) must never take PlayerColor1A/1B:
+    for (const board of ['JC11', 'JP11', 'JC16', 'NH08', 'JP21', 'JP24']) {
+        for (const role of ['', '12', '13']) {
+            assert.strictEqual(evalDeckColor(board, false, role, 1, blank, prefs), CONSOLE_BLUE);
+            assert.strictEqual(evalDeckColor(board, false, role, 3, blank, prefs), CONSOLE_BLUE);
+        }
+    }
+    // 2. Player board with 4-deck off (2-deck mode) must also keep pre-48109aa fallback:
+    assert.strictEqual(evalDeckColor('JP07', true, '', 1, blank, prefs), CONSOLE_BLUE);
+    assert.strictEqual(evalDeckColor('JP07', true, '', 3, blank, prefs), CONSOLE_BLUE);
+    // 3. Player board with 4-deck enabled uses Layer preference:
+    assert.strictEqual(evalDeckColor('JP07', true, '13', 1, blank, prefs), LAYER_PINK);
+}
+// Non-blank own color is preserved everywhere:
+assert.strictEqual(evalDeckColor('JC11', false, '12', 1, OWN_GREEN, prefs), OWN_GREEN);
+assert.strictEqual(evalDeckColor('JP07', true, '13', 1, OWN_GREEN, prefs), OWN_GREEN);
+"""
+            res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
 
     def test_display_only_shadow_header_matches_stock_deck_header(self):
         layer = bp.SHADOW_LAYER
