@@ -88,10 +88,14 @@ Item {
         onTriggered: {
             try {
                 if (probe.phase === 1) {
+                    let stockFaderEcho = 0
                     walk(probe.Window.window.contentItem, new Set(), function (o) {
                         if (o.objectName === "ControlCenter_WaveformStyle" || o.objectName === "ControlCenter_UpfaderEcho")
                             console.warn("SCPROBE tile|" + o.objectName + "|" + (o.visible ? 1 : 0) + "|")
+                        if (o.objectName === "Preferences_Entry" && o.icon && String(o.icon.source || "").indexOf("Faderecho.png") >= 0 && o.visible && (!o.parent || o.parent.visible))
+                            stockFaderEcho = 1
                     })
+                    console.warn("SCPROBE tile|ControlCenter_StockFaderEcho|" + stockFaderEcho + "|")
                     console.warn("SCPROBE done|")
                     running = false
                     return
