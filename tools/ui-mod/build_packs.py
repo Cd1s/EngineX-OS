@@ -566,7 +566,7 @@ SERVICES_MAIN = """
 		if (s.key !== key || s.name !== (e.name || "") || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.keyName !== (e.keyName || "") ||
 			s.playing !== !!e.playing || s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
-			s.lead !== (e.lead !== undefined ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
+			s.lead !== (e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
 			s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
 			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail || s.progress !== (Number(e.progress) || 0) || s.error !== (e.error || "") ||
 			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "")) return false
@@ -606,7 +606,7 @@ SERVICES_MAIN = """
 				playing: !!e.playing, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
 				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master,
-				lead: e.lead !== undefined ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
+				lead: e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				jumps: Number(e.jumps) || 0,
 				progress: Number(e.progress) || 0, error: e.error || "", engine: !!e.engine, copying: !!e.copying, durationMs: Number(e.durationMs) || 0,
@@ -3814,6 +3814,7 @@ SHADOW_LAYER = r"""
             } }
         }
         Loader {
+            id: scHeaderLoader
             active: scDisplay.live && !scDisplay.graphical
             anchors.fill: parent
             sourceComponent: Component { Item {
@@ -3826,7 +3827,16 @@ SHADOW_LAYER = r"""
                 readonly property bool hasBottomRow: !scDisplay.performance && !groupedMain && !splitMain
                 readonly property bool loaded: !!scDisplay.sample
                 readonly property bool isSync: !!(scDisplay.sample && scDisplay.sample.sync)
-                readonly property bool isLead: !!(scDisplay.sample && (scDisplay.sample.lead !== undefined ? scDisplay.sample.lead : scDisplay.sample.master))
+                readonly property bool isLead: !!(scDisplay.sample && (scDisplay.sample.lead !== undefined && scDisplay.sample.lead !== null ? scDisplay.sample.lead : scDisplay.sample.master))
+                function tryFlipTime(x, y) {
+                    if (!loaded || scDisplay.performance || !timeView || !scTimeSlot.visible || !(scTimeSlot.width > 0)) return false
+                    const p = scDisplay.mapToItem(scTimeSlot, x, y)
+                    if (p.x >= 0 && p.x <= scTimeSlot.width && p.y >= -12 && p.y <= scTimeSlot.height + 12) {
+                        timeView.flip()
+                        return true
+                    }
+                    return false
+                }
                 readonly property bool keyLock: !!(scDisplay.sample && scDisplay.sample.keylock)
                 readonly property real pitchVal: scDisplay.sample ? Math.round((Number(scDisplay.sample.pitch) || 0) * 100) / 100 : 0
                 readonly property string rangeStr: scDisplay.sample && scDisplay.sample.range > 0 ? String(scDisplay.sample.range) : "8"
@@ -3946,6 +3956,8 @@ SHADOW_LAYER = r"""
                                 Layout.bottomMargin: 3
                                 Layout.topMargin: 3
                                 Item {
+                                    id: scTimeSlot
+                                    objectName: "Deck_TimeInfo"
                                     Layout.fillHeight: true
                                     Layout.rightMargin: scHeader.splitMain ? 40 : 16
                                     implicitWidth: scTimeText.implicitWidth
@@ -3959,12 +3971,6 @@ SHADOW_LAYER = r"""
                                         font: scHeader.splitMain ? Style.fontDisplay : scHeader.splitMini ? Style.fontTitle : Style.fontH0
                                         color: scHeader.timeText !== "" ? Style.font02Color : Style.font01Color
                                         text: scHeader.timeText
-                                    }
-                                    MouseArea {
-                                        anchors.centerIn: parent
-                                        width: parent.width
-                                        height: parent.height + 24
-                                        onPressed: if (scHeader.timeView) scHeader.timeView.flip()
                                     }
                                 }
                                 Rectangle { width: 1; height: scHeader.splitMain || scHeader.splitMini ? 56 : scHeader.groupedMain ? 32 : 20; Layout.alignment: Qt.AlignVCenter; color: Style.surface03Color }
@@ -4191,8 +4197,9 @@ SHADOW_LAYER = r"""
                 }
             } }
         }
-@BUSY@        // Covers remote Stems, needle-drop, grid editing and transport touch targets.
-        MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; onWheel: function(wheel) { wheel.accepted = true } }
+@BUSY@        // Covers remote Stems, needle-drop, grid editing and transport touch targets;
+        // only presses inside the shadow header's time display flip Elapsed/Remaining.
+        MouseArea { objectName: "EngineX_ShadowBlocker"; anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; function handlePress(x, y) { return !scDisplay.graphical && typeof scHeaderLoader !== "undefined" && scHeaderLoader.item ? scHeaderLoader.item.tryFlipTime(x, y) : false } onPressed: function(mouse) { handlePress(mouse.x, mouse.y) }; onWheel: function(wheel) { wheel.accepted = true } }
     }
 """
 
@@ -4299,7 +4306,7 @@ def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
     icons = "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons"
     raw_layer = SHADOW_LAYER
     if kind in ("waveform", "overview"):
-        h_start = raw_layer.index("        Loader {\n            active: scDisplay.live && !scDisplay.graphical\n")
+        h_start = raw_layer.index("        Loader {\n            id: scHeaderLoader\n            active: scDisplay.live && !scDisplay.graphical\n")
         h_end = raw_layer.index("@BUSY@")
         raw_layer = raw_layer[:h_start] + raw_layer[h_end:]
     layer = raw_layer.replace("@BUSY@", busy).replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette)).replace("@ICONS@", icons)
