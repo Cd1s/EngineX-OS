@@ -330,12 +330,15 @@ SERVICES_MAIN = """
 		return 0
 	}
 	function scShadowData(d) { return scShadowDisplay[d] || null }
+	// How fast a shadow deck's position runs on this player's clock: the rate stream-sync
+	// measured (the other player's audio clock, its pitch beyond 0.01 %), else by the pitch.
+	function scShadowRate(s) { return s.rate > 0 ? s.rate : Math.max(0, 1 + s.pitch / 100) }
 	function scShadowPosition(s, now) {
 		if (!s) return 0
 		// Unchanged replies keep a sample alive: carry it on until 3 s after the last one.
 		const alive = Math.max(s.at, scShadowLive.seen) + scShadowExpiryMs
 		const elapsed = s.stale ? 0 : Math.max(0, Math.min(now, alive) - s.at)
-		const pos = Math.max(0, s.positionMs + (s.playing ? elapsed * Math.max(0, 1 + s.pitch / 100) : 0))
+		const pos = Math.max(0, s.positionMs + (s.playing ? elapsed * scShadowRate(s) : 0))
 		return s.meta && s.meta.durationMs > 0 ? Math.min(s.meta.durationMs, pos) : pos
 	}
 	// Binary searches keep the source grid and #151 independent of Engine's empty slots.
@@ -517,7 +520,8 @@ SERVICES_MAIN = """
 		if (s.key !== key || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.playing !== !!e.playing ||
 			s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
-			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail) return false
+			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
+			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail) return false
 		if (Array.isArray(e.cues)) {
 			const a = s.liveCues, b = e.cues
 			if (!Array.isArray(a) || a.length !== b.length) return false
@@ -544,16 +548,17 @@ SERVICES_MAIN = """
 				// Same picture: a paused deck at the same spot, or a playing one within
 				// 12 ms of its line (the scroll keeps running within 12 ms too).
 				// Refresh the anchor in place well before the 3 s expiry.
-				const drift = old.playing ? old.positionMs + (at - old.at) * Math.max(0, 1 + old.pitch / 100) - pos : old.positionMs - pos
+				const drift = old.playing ? old.positionMs + (at - old.at) * scShadowRate(old) - pos : old.positionMs - pos
 				if (Math.abs(drift) <= (old.playing ? 12 : 0)) {
-					old.positionMs = pos; old.at = at; old.beat = Number(e.beat) || 0
+					old.positionMs = pos; old.at = at; old.rate = Number(e.rate) || 0; old.beat = Number(e.beat) || 0
 					continue
 				}
 			}
 			const sample = {key: key, title: e.title || "", artist: e.artist || "", playing: !!e.playing, stale: !!e.stale,
-				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0, lineIn: isLine,
+				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master, sync: !!e.sync,
-				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
+				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
+				jumps: Number(e.jumps) || 0,
 				meta: old && old.key === key ? old.meta : null,
 				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
 			if (!next) next = Object.assign({}, scShadowDisplay)
@@ -954,7 +959,8 @@ SERVICES_MAIN = """
 			["loaded", "/Track/SongLoaded"], ["uri", "/Track/TrackUri"], ["net", "/Track/TrackNetworkPath"],
 			["cueLED", "/Track/CueLEDState"], ["master", "/DeckIsMaster"], ["sync", "/SyncMode"],
 			["beat", "/BeatNumber"], ["cuePosition", "/Track/CuePosition"], ["title", "/Track/SongName"],
-			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"]])
+			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"],
+			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"]])
 			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
 		p.cues = []
 		for (let i = 1; i <= 8; i++) {
@@ -971,6 +977,7 @@ SERVICES_MAIN = """
 	function scShadowTick() {
 		const now = Date.now()
 		if (now - scShadowPollAt > 3000) scShadowPoll()
+		scShadowLine(now)
 		if (scShadowRoleDirty) {
 			scShadowRoleDirty = false
 			scShadowMineRole = scFourDeckRole
@@ -1001,12 +1008,17 @@ SERVICES_MAIN = """
 			s.cue = !s.ps && !!g.cueLED.state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
 			s.playing = s.ps || s.cue
 			s.master = !!g.master.state
-			if (p && now - p.syncAt < 200) { s.sync = p.sync; s.syncAt = p.syncAt }
-			else { s.sync = (g.sync.string || "Off") !== "Off"; s.syncAt = now }
+			if (p && now - p.syncAt < 200) { s.sync = p.sync; s.syncAt = p.syncAt; s.range = p.range; s.rangeIndex = p.rangeIndex; s.keylock = p.keylock }
+			else {
+				s.sync = (g.sync.string || "Off") !== "Off"; s.syncAt = now; s.keylock = !!g.keylock.state
+				// .string allocates: the range is read again only when its index moved.
+				s.rangeIndex = g.range.index
+				s.range = p && p.rangeIndex === s.rangeIndex ? p.range : parseFloat(g.range.string) || 0
+			}
 			if (p) {
 				const expect = p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0)
 				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
-				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync) edge = true
+				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
 				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
 			}
 			if (s.cue) busy = true
@@ -1014,12 +1026,23 @@ SERVICES_MAIN = """
 			// Engine moves TrackPosition in audio blocks: at 25 Hz a playing deck's raw
 			// position is up to ~35 ms of track time behind (high pitch). With the speed
 			// known, the upper envelope of position - speed * time is the newest block:
-			// post that line (noise of a few ms), decaying 2 ms/s to follow pitch rounding.
-			const speed = 1 + s.pitch / 100
-			if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.jumps === s.jumps && isFinite(p.env))
-				s.env = Math.max(s.posMs - speed * now, p.env - 0.002 * (now - p.at))
-			else s.env = s.posMs - speed * now
+			// post that line (noise of a few ms), decaying 0.5 ms/s to follow pitch rounding.
+			const speed = 1 + s.pitch / 100, raw = s.posMs - speed * now
+			if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.jumps === s.jumps && isFinite(p.env)) {
+				// A jog brake: the positions average ~17 ms of wall time behind the line
+				// (25 at most in steady play). Further behind, the deck is slower than its
+				// pitch: the line closes a fifth of the excess per tick. No step, so a late
+				// position from a busy GUI thread costs a few ms, not a slip.
+				s.avg = p.avg + (raw - p.avg) * 0.2
+				const slow = p.env - s.avg - 25 * speed
+				s.env = Math.max(raw, p.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - p.at)))
+			} else s.env = s.avg = raw
 			s.lineMs = s.ps ? s.env + speed * now : s.posMs
+			// A jog nudge moves the line off the one the peer carries on: post it at once,
+			// not at the next heartbeat (25 Hz for 2 s, so the peer follows the nudge).
+			const sent = scShadowSent[n]
+			if (s.ps && sent && sent.playing && sent.deck === d && sent.net === s.net && sent.pitch === s.pitch && sent.jumps === s.jumps &&
+				Math.abs(s.lineMs - sent.positionMs - (now - sent.at) * speed) > 15) edge = true
 			scShadowPrev[d] = s
 			scShadowSampleSpare[d] = p || {}
 		}
@@ -1094,10 +1117,13 @@ SERVICES_MAIN = """
 			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
+			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
 			// Titles arrive after the load: re-read on a new track and every 2 s.
 			if (fresh) {
 				o.title = s.net ? g.title.string || g.trackName.string || "" : ""
 				o.artist = s.net ? g.artist.string || "" : ""
+				const sr = g.rate.value, len = g.length.unnormalized
+				o.durationMs = s.net && sr > 0 && len > 0 ? Math.round(len / sr * 1000) : 0 // the peer tells its shadow deck's track by it
 				scShadowTextAt[d] = !s.net || o.title ? now : 0 // Engine fills SongName after the load: retry until it does
 			}
 			o.dbg = ""
@@ -1111,7 +1137,7 @@ SERVICES_MAIN = """
 				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
-				sent.title !== o.title || sent.artist !== o.artist || sent.link !== o.link || sent.bpm !== o.bpm || sent.cuesRev !== cc.rev) edge = true
+				sent.title !== o.title || sent.artist !== o.artist || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev) edge = true
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -1124,8 +1150,8 @@ SERVICES_MAIN = """
 		for (let n = 0; n < own.length; n++) {
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
-			sent.master = o.master; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist
-			sent.link = o.link; sent.bpm = o.bpm; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
+			sent.master = o.master; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.durationMs = o.durationMs
+			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
@@ -1249,16 +1275,20 @@ SERVICES_MAIN = """
 		if (scFourDeckRole.indexOf(String(d)) >= 0 || !e.path) return
 		const g = p => root.scTr("/Engine/Deck" + d + p)
 		const now = Date.now()
-		const at = scShadowAt[d] || {path: ""}
-		if (at.path !== e.path) {
-			root.scTr("/Client/Librarian/AddToDatabaseAndLoadToDeck" + d).url = "file://" + encodeURI(e.path)
-			scShadowAt[d] = {path: e.path, loadUntil: now + 1200, seekAt: 0, seeks: 0, loads: (at.loads || 0) + 1, jumps: e.jumps}
-			if (root.scShadowDebug) root.scShadowDbg({deck: d, act: "load", path: e.path, loads: scShadowAt[d].loads})
+		let at = scShadowAt[d] || {path: ""}
+		// The source's key (e.id) says which track this is, not the path alone: the
+		// same path can be another file, and a track loaded again is a new load.
+		const id = e.id || e.path
+		if (at.path !== e.path || at.id !== id) {
+			at = scShadowAt[d] = {path: e.path, id: id, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps}
+			root.scShadowLoad(d, at, e, now)
 			return
 		}
-		if (now < at.loadUntil || !g("/Track/SongLoaded").state) return
+		if (!root.scShadowHolds(d, at, e, now)) return
 		at.ready = true
+		if (root.scShadowEnd(d, at, e, now)) return
 		at.link = e.link || ""
+		at.rate = scShadowRate(e)
 		// no scShadowLink(): a RemoteState/Register subscription made Engine spam "service has disappeared" and block the Librarian when the other player went off; our UDP push already carries the edges
 		scShadowCues(d, at, e, now)
 		// Updates sent before an Engine Link edge arrive after it: skip them, or
@@ -1283,7 +1313,7 @@ SERVICES_MAIN = """
 		const seek = ms => root.scShadowSeek(d, at, ms)
 		// e.at is when Go extrapolated e.positionMs; this runs later on a busy GUI
 		// thread, so carry the target to now before comparing.
-		const target = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * (1 + e.pitch / 100) : 0)
+		const target = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0)
 		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
 		const drift = target - posMs // > 0: behind
 		at.drift = drift
@@ -1294,19 +1324,23 @@ SERVICES_MAIN = """
 		const wantSync = !!e.sync && (!e.link || !root.scPlayer)
 		const dbg = act => { if (root.scShadowDebug) root.scShadowDbg({deck: d, act: act, posMs: Math.round(posMs), target: Math.round(target), drift: Math.round(drift), sd: Math.round(at.sd || 0), pitch: e.pitch, pll: at.pll || 0, range: g("/SpeedRange").string, sync: !!e.sync, synced: synced, bpm: e.bpm, currentBpm: e.currentBpm, beat: e.beat, jumps: e.jumps, seeks: at.seeks || 0, master: !!g("/DeckIsMaster").state, link: !!e.link}) }
 		if (!e.playing) at.pll = 0
-		if (!(wantSync && synced)) scShadowSpeed(d, e.pitch)
+		// e.pitch is rounded to 0.01 %: at 138 BPM that alone slipped 4 ms a minute.
+		// The fader goes to the source's tempo ratio, so the BPM shown is the source's.
+		const exact = e.bpm > 0 && e.currentBpm > 0 ? (e.currentBpm / e.bpm - 1) * 100 : NaN
+		if (!(wantSync && synced)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
+		const pKey = g("/Track/KeyLock")
+		if (typeof e.keylock === "boolean" && pKey && !!pKey.state !== e.keylock) pKey.state = e.keylock
 		// Play, CUE held, pause, CUE released: on the first update that shows it.
 		// at.cmd only stops rewriting the same state while Engine follows (a frame
 		// or two); a change of the source's state always goes through.
 		if (e.playing !== local) {
+			if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
 			if (at.cmd !== e.playing || now >= at.cmdUntil) {
 				if (e.playing) {
 					if (Math.abs(drift) > 25) seek(target)
 					g("/Play").state = true
-					at.postPlay = now + 380
 				} else {
 					g("/Play").state = false
-					at.postPlay = 0
 					// CUE released: back on the cue point. After a preview the sender's
 					// TrackPosition may not have jumped back yet; the preview started there.
 					const back = wasPreview && at.pausedAt !== undefined ? at.pausedAt : e.positionMs
@@ -1381,37 +1415,196 @@ SERVICES_MAIN = """
 		// Never steer /Engine/DeckN/Speed with a synthetic PLL: changing Speed alters
 		// the displayed CurrentBPM on screen ("BPM moving back and forth") and forces
 		// Engine's Elastique time-stretcher to re-tune every few seconds (3-5 s stutter).
-		// Both SC5000 decks run on 20 ppm crystals at the exact unrounded e.pitch; one
-		// post-play alignment check 380 ms after Play closes decoder spin-up latency.
+		// Both SC5000 decks run on 20 ppm crystals at the exact unrounded tempo ratio.
+		// What is left (a seek lands tens of ms off, the source was nudged or pulled
+		// in by its Sync, the two clocks) was never closed below lim: 105 ms ahead on
+		// one player, 38 ms behind on the other, under a green phase meter. It is
+		// closed the way a DJ does, with Engine's PITCH BEND (scShadowBend), measured
+		// on the deck's newest audio block (scShadowLine) as the source's line is:
+		// the raw TrackPosition is up to 46 ms old, 20 ms on average.
 		if (wantSync && synced) return dbg("sync")
 		if (now - at.seekAt < 300) return dbg("settle")
 		at.sd = at.sd === undefined ? drift : at.sd * 0.85 + drift * 0.15
-		if (at.postPlay && now >= at.postPlay) {
-			at.postPlay = 0
-			if (Math.abs(drift) > 35 && Math.abs(drift) <= lim) {
-				seek(target)
-				at.seeks = (at.seeks || 0) + 1
-				at.sd = 0
-				return dbg("align")
-			}
-		}
 		at.pll = 0
+		if (scShadowBent && scShadowBent.at === at) return dbg("bending")
+		const fine = at.env !== undefined && now - at.envT0 >= 2000 ? target - at.env - at.envRate * (now - at.envT0) : 0
+		at.fine = fine
+		if (Math.abs(fine) > 6 && Math.abs(fine) <= lim) {
+			scShadowBend(d, at, fine)
+			return dbg("bend")
+		}
 		dbg("steady")
 	}
-	// The shadow deck's fader at pitch percent: the SpeedRange (8 % by default) is
-	// widened first, or +11.1 % (a synced 126 BPM track at 140) stuck at +8 %.
-	function scShadowSpeed(d, pitch) {
+	// The shadow deck's own line, as the sender's (scShadowTick): the newest audio
+	// block of a playing deck is the upper envelope of position - rate * time. In
+	// at.env at the rate frozen in at.envRate since at.envT0; the 0.5 ms/s decay
+	// follows a rate that is a little lower, and a deck that fell behind (its raw
+	// positions average more than 25 ms under the line) is closed in a fifth a tick.
+	function scShadowLine(now) {
+		if (scShadowDisplayOnly) return
+		for (const d in scShadowAt) {
+			const at = scShadowAt[d]
+			if (!at.ready) continue
+			const l = at.line || (at.line = {pos: root.scTr("/Engine/Deck" + d + "/Track/TrackPosition"), play: root.scTr("/Engine/Deck" + d + "/PlayState"), sr: root.scTr("/Engine/Deck" + d + "/Track/SampleRate")})
+			if (!l.play.state || !(at.rate > 0) || !(l.sr.value > 0)) { at.env = undefined; continue }
+			const fresh = at.env === undefined || Math.abs(at.rate - at.envRate) > 2e-4
+			if (fresh) { at.envT0 = now; at.envRate = at.rate }
+			const raw = l.pos.unnormalized / l.sr.value * 1000 - at.envRate * (now - at.envT0)
+			at.avg = fresh ? raw : at.avg + (raw - at.avg) * 0.2
+			const slow = at.env - at.avg - 25 * at.envRate
+			at.env = fresh ? raw : Math.max(raw, at.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - at.envAt)))
+			at.envAt = now
+		}
+	}
+	// Engine's pitch bend (the PITCH BEND buttons) runs a deck 7 % fast or slow
+	// while held (measured on a JP07: 27 ms in 400 ms). No seek, which flushes the
+	// decoder and snaps the waveform, and no Speed change: the BPM shown stays the
+	// source's. One deck at a time, 80 % of the gap, 1.5 s at most; the line is
+	// measured anew after it.
+	property var scShadowBent: null
+	Timer { id: scShadowBendTimer; onTriggered: root.scShadowBendEnd() }
+	function scShadowBend(d, at, ms) {
+		if (scShadowBent) return
+		const p = root.scTr("/Engine/Deck" + d + "/Track/Nudge" + (ms > 0 ? "Forward" : "Backward"))
+		if (!p) return
+		p.state = true
+		scShadowBent = {p: p, at: at}
+		scShadowBendTimer.interval = Math.min(1500, Math.abs(ms) * 0.8 / 0.07)
+		scShadowBendTimer.restart()
+	}
+	function scShadowBendEnd() {
+		const b = scShadowBent
+		if (!b) return
+		scShadowBent = null
+		scShadowBendTimer.stop()
+		b.p.state = false
+		b.at.env = undefined
+	}
+	// Asks Engine for the source's track on shadow deck d. Engine answers nothing,
+	// so scShadowHolds reads back what the deck holds and asks again.
+	function scShadowLoad(d, at, e, now) {
+		if (((scShadowEngineMask >> d) & 1) === 0) return
+		// Lock Playing Deck refuses a load onto a playing deck, and no other track
+		// may play under the source's name: stop first, and ask again soon.
+		const ps = root.scTr("/Engine/Deck" + d + "/PlayState"), play = root.scTr("/Engine/Deck" + d + "/Play")
+		const playing = !!(ps && ps.state)
+		if (playing && play) play.state = false
+		root.scTr("/Client/Librarian/AddToDatabaseAndLoadToDeck" + d).url = "file://" + encodeURI(e.path)
+		at.loads = (at.loads || 0) + 1
+		at.tries = (at.tries || 0) + 1
+		at.askedAt = now
+		at.loadUntil = now + 1200
+		at.retryAt = now + (playing ? 1500 : Math.min(30000, 3000 << Math.min(at.tries - 1, 4)))
+		at.held = false
+		at.ready = false
+		if (root.scShadowDebug) root.scShadowDbg({deck: d, act: "load", path: e.path, id: at.id, loads: at.loads, tries: at.tries, why: at.why || ""})
+	}
+	// Why Engine's track on shadow deck d is not the source's (e), "" when it is.
+	// Engine changes a deck's track without us: Continue loads the next one when a
+	// deck plays out, a load can be refused or fail, two quick loads can finish in
+	// the other order. The file Engine names decides; when Engine names none or
+	// another, the track's length does, then title and BPM together. A title or
+	// BPM alone does not: Engine's analysis of a copy, a CDJ's rekordbox title and
+	// half or double tempo differ on the same audio.
+	function scShadowWrong(d, e) {
+		const g = p => root.scTr("/Engine/Deck" + d + p) || scShadowEmptyObject
+		if (!g("/Track/SongLoaded").state) return "empty"
+		const nfc = v => v.normalize ? v.normalize("NFC") : v
+		// Engine names the file by volume ("net://<id>/<volume>/<path>"): compare below the mount point.
+		const parts = String(e.path).split("/").filter(v => v !== "")
+		const tail = nfc("/" + parts.slice(Math.max(Math.min(2, parts.length - 1), parts.length - 3)).join("/"))
+		const name = g("/Track/TrackNetworkPath").string || g("/Track/TrackUri").string || ""
+		let plain = name
+		try { plain = decodeURIComponent(name) } catch (err) {}
+		const file = name === "" ? 0 : nfc(name).endsWith(tail) || nfc(plain).endsWith(tail) ? 1 : -1
+		if (file > 0) return ""
+		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
+		const length = e.durationMs > 0 && sr > 0 && len > 0 ? (Math.abs(len / sr * 1000 - e.durationMs) <= 2000 ? 1 : -1) : 0
+		const heldTitle = g("/Track/SongName").string || g("/Track/TrackName").string || ""
+		const title = e.title && heldTitle ? (e.title === heldTitle ? 1 : -1) : 0
+		const ob = g("/OriginalBPM").unnormalized
+		const ratio = e.bpm > 0 && ob > 0 ? e.bpm / ob : 0
+		const bpm = ratio > 0 ? ([1, 2, 0.5].some(k => Math.abs(ratio / k - 1) <= 0.03) ? 1 : -1) : 0
+		if (length < 0) return "length"
+		// Another name: the same audio only when the length agrees and the title does not differ.
+		if (file < 0 && !(length > 0 && title >= 0)) return "file"
+		if (title < 0 && bpm < 0) return "title"
+		return ""
+	}
+	// True once Engine holds the source's track on shadow deck d; only then is the
+	// deck steered. Checked again when the track's length changes and every second
+	// (strings), so a track Engine swapped in later is found and loaded again.
+	function scShadowHolds(d, at, e, now) {
+		if (((scShadowEngineMask >> d) & 1) === 0 || now < at.loadUntil) return false
+		const len = (root.scTr("/Engine/Deck" + d + "/Track/TrackLength") || scShadowEmptyObject).unnormalized
+		if (at.held && len === at.len && now - at.heldAt < 1000) return true
+		// Engine is still loading (a long file, a slow drive): asking again would start it over.
+		if ((root.scTr("/Engine/Deck" + d + "/Track/SongLoading") || scShadowEmptyObject).state && now - at.askedAt < 60000) {
+			at.ready = false
+			return false
+		}
+		const why = root.scShadowWrong(d, e)
+		if (why === "") {
+			at.held = true; at.heldAt = now; at.len = len; at.tries = 0; at.why = ""
+			return true
+		}
+		const ps = root.scTr("/Engine/Deck" + d + "/PlayState"), play = root.scTr("/Engine/Deck" + d + "/Play")
+		if (why !== "empty" && ps && ps.state && play) play.state = false
+		// It was ours until now (Engine swapped it): load at once. Else Engine may
+		// still be loading: ask again after 3, 6, 12, 24, then every 30 s.
+		if (at.held || now >= at.retryAt) {
+			at.why = why
+			root.scShadowLoad(d, at, e, now)
+		}
+		at.ready = false
+		return false
+	}
+	// Continue (Engine's AutoPlay) loads and plays the next track when a deck plays
+	// out, on a shadow deck too; a seek to the source's end position then ended
+	// that one as well, and so on through the list. With Continue on, a shadow
+	// deck stops 700 ms short of its end. True while it is parked there.
+	function scShadowEndGap() {
+		const p = root.scTr("/Client/Preferences/Profile/Application/AutoPlay")
+		return p && p.state ? 700 : 0
+	}
+	function scShadowEnd(d, at, e, now) {
+		const gap = root.scShadowEndGap()
+		if (!gap) return false
+		const g = p => root.scTr("/Engine/Deck" + d + p) || scShadowEmptyObject
+		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
+		if (!(sr > 0 && len > 0)) return false
+		const endMs = len / sr * 1000 - gap
+		const target = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0)
+		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
+		const local = !!g("/PlayState").state
+		if (target < endMs && !(local && posMs >= endMs)) return false
+		if (local) g("/Play").state = false
+		if (target < endMs) return false // ran ahead of the source: stopped, and scShadowApply lines it up again
+		if (Math.abs(posMs - endMs) > 50 && now - at.seekAt >= 200) root.scShadowSeek(d, at, endMs)
+		return true
+	}
+	// The shadow deck's fader at pitch percent, in the source's SpeedRange (want:
+	// one of Engine's own entries) so the header reads the same. No range sent (a
+	// CDJ) or a pitch beyond it: the range (8 % by default) is widened first, or
+	// +11.1 % (a synced 126 BPM track at 140) stuck at +8 %.
+	function scShadowSpeed(d, pitch, want) {
 		if (((scShadowEngineMask >> d) & 1) === 0) return
 		const pRange = root.scTr("/Engine/Deck" + d + "/SpeedRange"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
 		if (!pRange || !pSpeed) return
 		let range = parseFloat(pRange.string) || 8
-		if (Math.abs(pitch) > range - 0.2 && pRange.entries) {
-			const i = pRange.entries.findIndex(v => parseFloat(v) >= Math.abs(pitch) + 0.2)
-			pRange.index = i < 0 ? pRange.entries.length - 1 : i
-			range = parseFloat(pRange.string) || range
+		if (pRange.entries) {
+			let i = want > 0 && Math.abs(pitch) <= want ? pRange.entries.findIndex(v => parseFloat(v) === want) : -1
+			if (i < 0 && Math.abs(pitch) > range - 0.2) {
+				i = pRange.entries.findIndex(v => parseFloat(v) >= Math.abs(pitch) + 0.2)
+				if (i < 0) i = pRange.entries.length - 1
+			}
+			if (i >= 0 && parseFloat(pRange.entries[i]) !== range) {
+				pRange.index = i
+				range = parseFloat(pRange.string) || range
+			}
 		}
 		const speed = Math.max(0, Math.min(1, 0.5 + pitch / (2 * range)))
-		if (Math.abs(pSpeed.value - speed) * 2 * range > 0.03) pSpeed.value = speed
+		if (Math.abs(pSpeed.value - speed) * 2 * range > 0.002) pSpeed.value = speed
 	}
 	// Debug telemetry (debug_telemetry=1 or /tmp/sc5000-debug, told by GET /shadow):
 	// the receiver's decisions, posted in batches to Go's ring and log.
@@ -1484,8 +1677,10 @@ SERVICES_MAIN = """
 		const g = p => root.scTr("/Engine/Deck" + d + p)
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!(sr > 0 && len > 0)) return
-		g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, ms / (len / sr * 1000)))
+		const lenMs = len / sr * 1000
+		g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, Math.min(ms, lenMs - root.scShadowEndGap()) / lenMs))
 		at.seekAt = Date.now()
+		at.env = undefined
 	}
 	// Engine Link already mirrors the other Engine's properties here, within a
 	// few ms of that Engine changing them (measured: our own update arrives
@@ -3047,35 +3242,9 @@ def window():
     return "planckQuickView" if v53() else "MainWindow"
 
 
-ZOOM_STEP = """
-	// 10 waveform zoom steps, geometric (about x1.4 per step, like a pinch) from 1 s to the
-	// limit however far #77 raised it: stock steps 0.5 s per detent, 60 detents out to 30 s.
-	// A linear step jumped 1 s -> 4 s at once and redrew 4x the vertices in one frame.
-	// Detents that arrive within one frame collapse into one write.
-	property int scZoomPending: 0
+# Read by the display-only shadow lane; the Browse encoder zooms the stock way.
+ZOOM_PROP = """
 	readonly property QObjProperty scZoomProp: Planck.getProperty("/Engine/Master/WaveformZoom")
-	Timer {
-		id: scZoomTimer
-		interval: 16
-		onTriggered: {
-			const t = root.scZoomProp && root.scZoomProp.translator
-			const n = root.scZoomPending
-			root.scZoomPending = 0
-			if (!t || !t.editable || !n) return
-			const lo = Math.max(1, t.minimum !== undefined ? t.minimum : 1), hi = t.maximum !== undefined ? t.maximum : 30
-			const ratio = Math.pow(hi / lo, 1 / 9) // lo..hi in 10 levels
-			const cur = Math.max(lo, Math.min(hi, t.unnormalized))
-			const level = Math.round(Math.log(cur / lo) / Math.log(ratio)) + n
-			t.unnormalized = Math.max(lo, Math.min(hi, lo * Math.pow(ratio, Math.max(0, Math.min(9, level)))))
-		}
-	}
-	function scZoom(dir) {
-		scZoomPending += dir
-		if (!scZoomTimer.running) scZoomTimer.start()
-	}
-	readonly property var scZoomProps: [Planck.createProperty("ZoomIn", true, 3), Planck.createProperty("ZoomOut", true, 3)]
-	ActionTranslatorStateChangeNotifier { prop: scZoomProps && Planck.getProperty("/GUI/Scripted/ZoomIn"); enabled: true; onChanged: root.scZoom(1) }
-	ActionTranslatorStateChangeNotifier { prop: scZoomProps && Planck.getProperty("/GUI/Scripted/ZoomOut"); enabled: true; onChanged: root.scZoom(-1) }
 """
 
 
@@ -3127,12 +3296,17 @@ SHADOW_LAYER = r"""
             refreshPosition()
             refreshDetails() // track/performance: cueInfo follows a jump or a cue edit at once
         }
-        // The waveform scrolls on the render thread: one XAnimator per speed change,
-        // no per-frame property writes or bindings on the GUI thread. The overview
-        // moves < 4 px/s and follows the 200 ms clock without animation.
-        property real scrollFrom: 0
-        property real scrollAt: 0
-        property real scrollSpeed: 0
+        // The waveform scrolls on the render thread: an XAnimator, no per-frame property
+        // writes or bindings on the GUI thread. The overview moves < 4 px/s and follows
+        // the 200 ms clock without animation.
+        // An Animator's clock counts frames at the display mode's whole refresh rate: 59
+        // for the players' 59.34 Hz panel, so it runs 0.57 % fast (5.7 ms a second, 3.4 s
+        // in ten minutes) and loses every dropped frame. The 200 ms clock steers it:
+        // stop() writes the frame on screen back to x, the next run goes on from there
+        // and closes what it is off the line within 0.4 s. Only a jump jumps.
+        property real scrollSpeed: 0 // of the running scroll, track ms per animation ms
+        property string scrollKey: ""
+        property int scrollJumps: 0
         function contentX(ms) { return -(ms - span * playhead) / span * width }
         // Read from meta itself in the refresh functions: inside onMetaChanged the
         // bindings below (duration, totalPixels, ...) still hold the previous meta,
@@ -3142,7 +3316,7 @@ SHADOW_LAYER = r"""
         function metaWaveDuration(m) { return m && m.waveformDurationMs > 0 ? m.waveformDurationMs : metaDuration(m) }
         function metaTotalPixels(m) { return m && m.waveformWidth > 0 && m.waveformWidth <= 65536 ? m.waveformWidth : 0 }
         function metaTilePixels(m) { return m && m.tileWidth > 0 ? Math.min(2048, m.tileWidth) : 2048 }
-        function refreshPosition() {
+        function refreshPosition(tick) {
             const now = Date.now(), s = sample
             const pos = s ? root.scShadowPosition(s, now) : 0
             if (pos !== position) position = pos
@@ -3150,22 +3324,31 @@ SHADOW_LAYER = r"""
             if (st !== stale) stale = st
             if (!wave) return
             const end = metaDuration(meta)
-            const speed = live && visible && s && s.playing && !st && pos < end ? Math.max(0, 1 + s.pitch / 100) : 0
+            const speed = live && visible && s && s.playing && !st && pos < end ? root.scShadowRate(s) : 0
             if (speed > 0) {
-                // Keep the running scroll unless it is off by more than 12 ms of track.
-                if (scroll.running && speed === scrollSpeed && Math.abs(scrollFrom + (now - scrollAt) * speed - pos) <= 12) return
-                scroll.stop()
-                scrollFrom = pos; scrollAt = now; scrollSpeed = speed
-                scroll.from = contentX(pos)
+                let from = pos, v = speed
+                if (scroll.running && scrollSpeed > 0 && s.key === scrollKey && s.jumps === scrollJumps) {
+                    if (!tick) return // a new sample on the same line: the clock steers there
+                    scroll.stop()
+                    const shown = (playhead - scMoving.x / width) * span
+                    // Same track, no jump (seek, hot cue, loop) and within 300 ms: on from
+                    // what is shown, at the speed that is on the line 0.4 s later.
+                    if (Math.abs(pos - shown) <= 300) {
+                        from = shown
+                        v = Math.max(speed / 4, speed + (pos - shown) / 400)
+                    }
+                } else scroll.stop()
+                from += v * 17 // a run shows its first value one frame after the last one's
+                scrollSpeed = v; scrollKey = s.key; scrollJumps = s.jumps
+                scroll.from = contentX(from)
                 scroll.to = contentX(end)
-                scroll.duration = Math.max(1, Math.round((end - pos) / speed))
+                scroll.duration = Math.max(1, Math.round((end - from) / v))
                 scroll.start()
             } else {
                 const x = contentX(pos)
                 if (scrollSpeed > 0 || scroll.running) {
-                    // A stopped Animator writes its own value back at the next sync,
-                    // after any x set here: settle with a 1 ms run to x instead, so the
-                    // write-back and the scene both end at x (CUE released on its spot).
+                    // A stopped Animator has written its own value back: settle with a
+                    // 1 ms run to x, so the scene ends at x too (CUE released on its spot).
                     scroll.stop()
                     scroll.from = x; scroll.to = x; scroll.duration = 1
                     scroll.start()
@@ -3174,7 +3357,7 @@ SHADOW_LAYER = r"""
             }
         }
         // Forget the running line (zoom, size, visibility); refreshPosition restarts or settles.
-        function restartScroll() { scrollAt = -Infinity; refreshPosition() }
+        function restartScroll() { scrollSpeed = 0; refreshPosition() }
         function refreshDetails() {
             if (!graphical) {
                 const ci = live ? root.scNextCueInfo(deck, 0) : null
@@ -3212,7 +3395,7 @@ SHADOW_LAYER = r"""
         onSpanChanged: { gridAnchor = -Infinity; restartScroll(); refreshDetails() }
         // The stale cut-off and the grid window still need a clock between replies.
         // A resting or stale sample does not move: its refreshes come with the sample.
-        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(); scDisplay.refreshDetails() } }
+        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(true); scDisplay.refreshDetails() } }
         readonly property real duration: metaDuration(meta)
         readonly property real waveformDuration: metaWaveDuration(meta)
         readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
@@ -3310,9 +3493,11 @@ SHADOW_LAYER = r"""
         }
         clip: true
         visible: active && inheritedVisible && owner.width > 0 && owner.height > 0
-        color: "#101114"
-        // Stock roots can hide an empty Engine slot. Restore their original bindings on exit.
-        Binding { target: scDisplay.owner; property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
+        color: wave ? "black" : "#101114" // the stock lanes are black: on grey the stock fade over the left edge shows as a band
+        // Stock roots can hide an empty Engine slot. Restore their original bindings on exit;
+        // never a value: read while the view was off screen, visible is false, and writing
+        // that back hid the stock lane for good (Engine mode showed no waveform).
+        Binding { target: scDisplay.owner; property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBinding }
         Binding { target: scDisplay.owner; property: "enabled"; value: false; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
         // The stock view under this one is fully covered: opacity 0 keeps its layout
         // but drops it from the scene graph (-2 % render thread at rest).
@@ -3389,15 +3574,20 @@ SHADOW_LAYER = r"""
         // which was the main JS garbage of a playing shadow deck.
         Repeater {
             model: scDisplay.gridSlots
-            delegate: Rectangle {
+            // The stock grid: a short grey tick at both edges on every beat; a bar
+            // has red ticks, a line between them and its number at the bottom left.
+            delegate: Item {
+                id: scBeat
                 required property int index
                 readonly property var beat: index < scDisplay.grid.length ? scDisplay.grid[index] : null
+                readonly property bool bar: beat !== null && beat.number % 4 === 0
                 visible: beat !== null
-                x: beat ? scDisplay.screenX(beat.ms) : 0
-                height: scDisplay.height
-                width: beat && beat.number % 4 === 0 ? 2 : 1
-                color: "white"
-                opacity: beat && beat.number % 4 === 0 ? 0.55 : 0.22
+                x: beat ? scDisplay.screenX(beat.ms) - 2 : 0
+                width: 4; height: scDisplay.height
+                Rectangle { width: 4; height: 8; color: scBeat.bar ? "#ff4d4d" : "#636363" }
+                Rectangle { y: scBeat.height - 8; width: 4; height: 8; color: scBeat.bar ? "#ff4d4d" : "#636363" }
+                Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: "#b7b7b7" }
+                Text { textFormat: Text.PlainText; visible: scBeat.bar; anchors.right: scBeat.left; anchors.rightMargin: 5; anchors.bottom: scBeat.bottom; anchors.bottomMargin: 3; text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""; color: "white"; font.pixelSize: 15 }
             }
         }
         Repeater {
@@ -3489,15 +3679,41 @@ SHADOW_LAYER = r"""
             }
             Item {
                 width: parent.width; height: 16
+                Item {
+                    id: scShadowBpmSlot
+                    width: scShadowBpm.displayWidth
+                    height: parent.height
+                    EngineXEmbedded.Bpm {
+                        id: scShadowBpm
+                        deckIndex: scDisplay.deck
+                        deckLoaded: bpmValue > 0
+                        songAnalyzed: true
+                        decimalPlaces: 2
+                        bpmValue: {
+                            const s = scDisplay.sample, m = scDisplay.meta
+                            return s ? s.currentBpm || (s.bpm || (m && m.bpm) || 0) * (1 + (s.pitch || 0) / 100) : 0
+                        }
+                        fractionSeparator: "."
+                        emptyIntegral: ""
+                        animateWhenUnanalysed: false
+                        font: Qt.font({pixelSize: 12})
+                        fractionFont: font
+                        color: "#dddddd"
+                        fractionColor: color
+                        fractionalBottomMargin: 0
+                    }
+                }
                 Text { textFormat: Text.PlainText;
-                    width: Math.max(0, parent.width - scBadges.width - 4)
+                    x: scShadowBpmSlot.width
+                    width: Math.max(0, parent.width - x - scBadges.width - 4)
                     elide: Text.ElideRight; color: "#dddddd"; font.pixelSize: 12
                     text: {
                         const s = scDisplay.sample, m = scDisplay.meta
                         if (!s) return ""
-                        const bpm = s.bpm || (m && m.bpm) || 0
                         const cue = scDisplay.cueInfo && root.scCueCountdown ? "   " + scDisplay.cueInfo.label + " " + scDisplay.cueInfo.text : ""
-                        return (bpm > 0 ? (bpm * (1 + s.pitch / 100)).toFixed(1) + " BPM" : "") + "   " + (m && m.keyName || "") + cue
+                        const pitch = Math.round(s.pitch * 100) / 100 || 0 // as the source's header: ±8  +0.01%
+                        const speed = s.range > 0 ? "   \u00b1" + s.range + "  " + (pitch > 0 ? "+" : "") + pitch.toFixed(2) + "%" : ""
+                        return (scShadowBpm.deckLoaded ? " BPM" : "") + speed + "   " + (m && m.keyName || "") + cue
                     }
                 }
                 Text { textFormat: Text.PlainText;
@@ -3519,7 +3735,7 @@ def shadow_layer(text: str, kind: str) -> str:
     """Keep visual items inside the stock stacking context, outside Row/ColumnLayouts."""
     # Stock roots request QtQuick 2.0/2.1; Matrix4x4 and Binding.restoreMode
     # need the newer revisions available in both supported Engine Qt builds.
-    text = re.sub(r"(?m)^import QtQuick(?: \d+\.\d+)?\s*$", "import QtQuick 2.15", text)
+    text = re.sub(r"(?m)^import QtQuick(?: \d+\.\d+)?\s*$", "import QtQuick 2.15\nimport Embedded as EngineXEmbedded", text)
     text = re.sub(r"(?m)^import QtQuick.Layouts(?: \d+\.\d+)?[ \t]*$", "import QtQuick.Layouts 1.15", text)
     if not re.search(r"(?m)^import QtQuick.Layouts(?: \d+\.\d+)?[ \t]*$", text):
         text = "import QtQuick.Layouts 1.15\n" + text
@@ -3541,7 +3757,9 @@ def shadow_layer(text: str, kind: str) -> str:
         stock = f"waveform{band}{'Fade' if kind == 'waveform' else ''}Color"
         colors = BAND_FADE if kind == "waveform" else BAND_COLORS
         fallback = f'(rgb ? "{RGB_COLORS[band]}" : {three_band(stock, band, colors)})'
-        value = f'(typeof owner.height{band}Color !== "undefined" ? owner.height{band}Color : {fallback})' if kind == "waveform" else fallback
+        # 3-band lanes take the stock main colours. height*Color is the Fade set there
+        # (45-60 % alpha): drawn alone, the whole lane looked greyed out and translucent.
+        value = f'(!rgb && typeof owner.color{band}Color !== "undefined" ? owner.color{band}Color : typeof owner.height{band}Color !== "undefined" ? owner.height{band}Color : {fallback})' if kind == "waveform" else fallback
         if kind not in ("waveform", "overview"):
             value = '"#000000"'
         palette.append(f"readonly property color {prop}: {value}")
@@ -3572,23 +3790,26 @@ def shadow_targets(qrc: Path):
 
 
 def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False, lead_sep: bool = True) -> str:
-    """#151: stock-style flat `| ▊ DROP  16.3` countdown (Separator + 3 px cue-colour bar + Style.fontH1 text,
-    no box, like AutoLoop / BeatJump / SpeedInfo); hidden (no space) without a cue ahead.
-    h, px are kept for the call sites; the flat row needs neither."""
-    q = f"""Row {{
-    id: cueCap
-    objectName: "EngineX_CueCountdown"
-    readonly property var info: typeof root !== "undefined" && root && root.scCueCountdown && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTickFor({deck_expr})) : null
-    visible: info !== null && root.scCueCountdown
+    """Bound the countdown after LEAD; only its cue name may elide."""
+    q = f"""Item {{
+    // Reserve the Cue slot even without a cue: LEAD never changes width.
     Layout.alignment: Qt.AlignVCenter
-    Layout.leftMargin: 4
-    Layout.rightMargin: 4
-    Layout.preferredHeight: {22 if compact else 30}
-    spacing: 4
-{'    Rectangle { width: 1; height: 18; anchors.verticalCenter: parent.verticalCenter; color: Style.surface03Color }' if lead_sep else ''}
-    Rectangle {{ width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: cueCap.info ? cueCap.info.color : "transparent" }}
-    Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: Style.font01Color; visible: text !== ""; text: cueCap.info ? cueCap.info.label : "" }}
-    Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
+    Layout.preferredHeight: 22
+    Layout.minimumWidth: 96
+    Layout.preferredWidth: 96
+    Layout.maximumWidth: 96
+    RowLayout {{
+        id: cueCap
+        objectName: "EngineX_CueCountdown"
+        anchors.fill: parent
+        readonly property var info: typeof root !== "undefined" && root && root.scCueCountdown && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTickFor({deck_expr})) : null
+        visible: info !== null && root.scCueCountdown
+        spacing: 4
+{'        Rectangle { width: 1; height: 18; Layout.alignment: Qt.AlignVCenter; color: Style.surface03Color }' if lead_sep else ''}
+        Rectangle {{ width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: cueCap.info ? cueCap.info.color : "transparent" }}
+        Text {{ Layout.fillWidth: true; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== ""; text: cueCap.info ? cueCap.info.label : "" }}
+        Text {{ font: Style.fontH3; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
+    }}
 }}
 """
     return "".join(ind + l + "\n" if l else "\n" for l in q.splitlines())
@@ -3647,13 +3868,8 @@ def edits(dev: bool):
         # Nothing here can repair a drive; one that does not mount stays off the list.
         ROOT + "Items/MessageBoxes/UnsupportedStorageDeviceDetectedMessageBox.qml": [(
             "function onUnsupportedStorageDeviceDetected(name) {\n", "function onUnsupportedStorageDeviceDetected(name) {\n			return\n")],
-        # Browse encoder in the performance views: 10 zoom steps instead of stock's 60 (see ZOOM_STEP).
-        **({ROOT + f"StateNodes/States/{n}.qml": [
-            ('"/Engine/Master/DecrementWaveformZoom"', '"/GUI/Scripted/ZoomOut"'),
-            ('"/Engine/Master/IncrementWaveformZoom"', '"/GUI/Scripted/ZoomIn"')]
-           for n in ("PerformanceViewState", "PerformanceViewLibraryViewState", "PerformanceViewRemoteHostScreenState", "PerformanceViewStreamingState", "PerformanceViewNoLibraryState")} if v53() else {}),
         ROOT + "EmbeddedMain.qml": [
-            (f"	Connections {{\n		target: {window()}\n", services + main + ZOOM_STEP + "\n	Rectangle { anchors.fill: parent; z: -1000; color: \"#000000\" } // UI Scale: no window colour round the edges\n" + f"\n	Connections {{\n		target: {window()}\n"),
+            (f"	Connections {{\n		target: {window()}\n", services + main + ZOOM_PROP + "\n	Rectangle { anchors.fill: parent; z: -1000; color: \"#000000\" } // UI Scale: no window colour round the edges\n" + f"\n	Connections {{\n		target: {window()}\n"),
             # The overlay (Control Center, popups) fills uiContainer's unscaled box: scale it
             # the same way about the same centre, or its top bar sits above the screen.
             ("		Overlay.overlay.anchors.fill = uiContainer\n",
@@ -4129,11 +4345,6 @@ def edits(dev: bool):
         # There (SC5000/SC6000 boards with isPlayer off, i.e. 4-deck; Config.device.name
         # is the board, "JP07", and isJP is undefined) it shows the deck's own
         # master; every other device keeps stock.
-        # #157: holding the Browse encoder (how users zoom) fires the stock hold = Grid Edit
-        # (ActionWithGridCueEdit): the jog then moves the beatgrid phase and push/Play go to the grid-edit
-        # path, so playback looks stuck at 00:00. Plain push action only; Grid Edit stays on the touch UI.
-        out["ControlSurfaceModules/ControlSurfaceModules/BrowseEncoder.qml"] = [(
-            "if (module.hasInstantDouble) {", "if (false) {")]
         out["ControlSurfaceModules/ControlSurfaceModules/Sync.qml"] = [(
             "            readonly property string isMasterPath: Config.network.hasSyncing\n",
             "            readonly property string isMasterPath: Config.network.hasSyncing &&\n"
@@ -4447,38 +4658,12 @@ def edits(dev: bool):
             "                            }\n"
             "                        }\n",
         )]
-        # #157: holding the Browse/Zoom encoder (or Slip/Vinyl) while a deck is playing must not
-        # enter BeatGrid Edit (which in C++ Engine pauses playback, jumps to 00:00, and locks Play),
-        # and Jog Touch must stay disabled while BeatGrid Edit is active (matching Motorized.qml).
-        scaled["ControlSurfaceModules/ControlSurfaceModules/DeckAction.qml"] = [(
-            "    function toggleGridEdit() {\n"
-            "        if (!deckConfig.songLoaded) {\n"
-            "            return\n"
-            "        }\n",
-            "    function toggleGridEdit() {\n"
-            "        if (!deckConfig.songLoaded || (!deckConfig.gridEditActive && deckConfig.playing)) {\n"
-            "            return\n"
-            "        }\n",
-        )]
-        scaled["ControlSurfaceModules/ControlSurfaceModules/Vinyl.qml"] = [(
-            "        if (shiftActionIsGridEdit && (globalConfig.shift || deckConfig.gridEditActive)) {\n",
-            "        if (shiftActionIsGridEdit && ((globalConfig.shift && !deckConfig.playing) || deckConfig.gridEditActive)) {\n",
-        )]
-        scaled["ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml"] = [(
-            "        enabled: {\n"
-            "            deckConfig.inDJMode &&\n"
-            "                !deckConfig.loopInEdit &&\n",
-            "        enabled: {\n"
-            "            deckConfig.inDJMode &&\n"
-            "                !deckConfig.gridEditActive &&\n"
-            "                !deckConfig.loopInEdit &&\n",
-        )]
-        # #135: touch Beat Jump on the deck screen: icon = jump back, size text = next size
-        # (cycles through 16/32/64 phrase jumps), » = jump forward. BeatJump gets its deck
-        # from deckIndex; the five users pass theirs (default 1).
+        # Keep the stock two-item BeatJump layout. The forward target lives
+        # inside the size field, so it cannot widen AutoLoop / BeatJump / LEAD.
         bj = "Skins/EngineOS/UI/CompositeControls/"
-        def bj_tap(action, call="p.translator.state = true"):
-            return ('        MouseArea {\n            anchors.fill: parent\n            anchors.margins: -6\n'
+        def bj_tap(action, call="p.translator.state = true", right_margin=0):
+            return ('        MouseArea {\n            anchors.fill: parent\n'
+                    f'            anchors.rightMargin: {right_margin}\n            anchors.topMargin: -6\n            anchors.bottomMargin: -6\n'
                     f'            onClicked: {{ const p = Planck.getProperty("/Engine/Deck" + beatJump.deckIndex + "/Track/BeatJump/{action}"); if (p && p.translator) {call} }}\n'
                     '        }\n')
         scaled[bj + "Deck/DeckItem/BeatJump.qml"] = [
@@ -4487,37 +4672,127 @@ def edits(dev: bool):
             ("        SequentialAnimation {\n            id: beatJumpImageAnimation\n",
              bj_tap("JumpBack") + "\n        SequentialAnimation {\n            id: beatJumpImageAnimation\n"),
             ("        SequentialAnimation {\n            id: beatJumpTextAnimation\n",
-             bj_tap("BeatJumpIndex", "p.translator.incValue(0, 1, 0, true)") + "\n        SequentialAnimation {\n            id: beatJumpTextAnimation\n"),
-            ("                to: Style.font01Color\n                duration: Style.colorAnimationDuration\n            }\n        }\n    }\n",
-             "                to: Style.font01Color\n                duration: Style.colorAnimationDuration\n            }\n        }\n    }\n\n"
-             '    Text {\n        objectName: "Deck_BeatJump_Forward"\n        verticalAlignment: Text.AlignVCenter\n'
-             '        font: beatJumpText.font\n        color: Style.font01Color\n        text: "\\u00bb"\n\n'
-             + bj_tap("JumpForward") + "    }\n"),
+             bj_tap("BeatJumpIndex", "p.translator.incValue(0, 1, 0, true)", 14) +
+             '        Text {\n            objectName: "Deck_BeatJump_Forward"\n'
+             '            anchors.right: parent.right\n            height: parent.height\n            width: 14\n'
+             '            verticalAlignment: Text.AlignVCenter\n            horizontalAlignment: Text.AlignRight\n'
+             '            font: beatJumpText.font\n            color: Style.font01Color\n            text: "\\u00bb"\n'
+             + bj_tap("JumpForward") + "        }\n\n        SequentialAnimation {\n            id: beatJumpTextAnimation\n"),
         ]
-        scaled[bj + "Deck/DeckSharedItems/DeckSharedItems.qml"] = [
-            ("            view: deckSharedItems.deckView.beatJumpView\n",
-             "            view: deckSharedItems.deckView.beatJumpView\n            deckIndex: deckSharedItems.deckData.deckIndex\n")]
-        scaled[bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"] = [
-            ("        view: deckPerformanceDataContent.deckView.beatJumpView\n",
-             "        view: deckPerformanceDataContent.deckView.beatJumpView\n        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n"),
-            # #151: the ▲▼ soft-takeover arrows give way to the countdown, right of the sync bar
-            ("        visible: !deckPerformanceDataContent.isRemoteDeck\n        speedOffsetIsUp: deckPerformanceDataContent.deckView.speedOffsetIsUp\n        speedOffsetIsDown: deckPerformanceDataContent.deckView.speedOffsetIsDown\n    }\n",
-             "        visible: false\n        speedOffsetIsUp: deckPerformanceDataContent.deckView.speedOffsetIsUp\n        speedOffsetIsDown: deckPerformanceDataContent.deckView.speedOffsetIsDown\n    }\n\n" + cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 26, 18, compact=True))]
-        scaled[bj + "DeckPerformanceData/PortraitDeckPerformanceDataContent.qml"] = [
-            ("                view: deckPerformanceDataContent.deckView.beatJumpView\n",
-             "                view: deckPerformanceDataContent.deckView.beatJumpView\n                deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n")]
-        scaled[bj + "DeckOverview/DeckOverview.qml"] = [
-            ("                    view: control.deckView.beatJumpView\n",
-             "                    view: control.deckView.beatJumpView\n                    deckIndex: control.deckView.deckData.deckIndex\n")]
-        scaled[bj + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"] = [
-            ("                    view: deckTrackDataContent.deckView.beatJumpView\n",
-             "                    view: deckTrackDataContent.deckView.beatJumpView\n                    deckIndex: deckTrackDataContent.deckIndex\n"),
-            # #151: the countdown takes the ▲▼ slot between the sync bar's Separator and SpeedInfo
-            ("                SoftTakeoverIndicators {\n                    speedOffsetIsUp: deckTrackDataContent.deckView.speedOffsetIsUp\n                    speedOffsetIsDown: deckTrackDataContent.deckView.speedOffsetIsDown\n                }\n",
-             "                SoftTakeoverIndicators {\n                    visible: false\n                    speedOffsetIsUp: deckTrackDataContent.deckView.speedOffsetIsUp\n                    speedOffsetIsDown: deckTrackDataContent.deckView.speedOffsetIsDown\n                }\n\n" + cue_capsule("                ", "deckTrackDataContent.deckIndex", 24, 16, compact=True, lead_sep=False))]
+        for rel, owner, indent in (
+            ("Deck/DeckSharedItems/DeckSharedItems.qml", "deckSharedItems", "            "),
+            ("DeckPerformanceData/DeckPerformanceDataContent.qml", "deckPerformanceDataContent", "        "),
+            ("DeckPerformanceData/PortraitDeckPerformanceDataContent.qml", "deckPerformanceDataContent", "                "),
+            ("DeckOverview/DeckOverview.qml", "control", "                    "),
+            ("DeckTrackData/GroupedMiniDeckTrackDataContent.qml", "deckTrackDataContent", "                    "),
+        ):
+            line = indent + "view: " + owner + ".deckView.beatJumpView\n"
+            scaled[bj + rel] = [(line, line + indent + "deckIndex: " + owner + ".deckView.deckData.deckIndex\n")]
+        # Same compact order in both deck counts: Loop / BeatJump / LEAD /
+        # Cue / soft takeover / speed. Never spend the time display's width.
+        performance = bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"
+        scaled[performance] += [
+            ("    SoftTakeoverIndicators {\n", cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n    SoftTakeoverIndicators {\n"),
+            ("        id: autoLoop\n", "        id: autoLoop\n        Layout.rightMargin: 4\n"),
+        ]
+        # Both controls have spacing:6; patch() deliberately requires a unique
+        # anchor, so apply it together with the control-specific view line.
+        for control, width in (("autoLoop", 52), ("beatJump", 64)):
+            view = "autoLoopView" if control == "autoLoop" else "beatJumpView"
+            anchor = ("        view: deckPerformanceDataContent.deckView." + view + "\n" +
+                      ("        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n" if control == "beatJump" else ""))
+            scaled[performance].append((anchor + "        spacing: 6\n", anchor + "        spacing: 4\n"))
+        # 56 px from Loop/Jump + 24 px sync margins + 16 px takeover margin
+        # pays for the entire 96 px Cue. The stock sync width is unchanged.
+        scaled[performance] += [
+            ("        Layout.leftMargin: 24\n        Layout.rightMargin: 24\n", "        Layout.leftMargin: 12\n        Layout.rightMargin: 12\n"),
+            ("                Layout.leftMargin: 24\n", "                Layout.leftMargin: 8\n"),
+        ]
+        for control, width in (("autoLoop", 52), ("beatJump", 64)):
+            scaled[performance] += [
+                (f"                target: {control}\n                Layout.preferredWidth: 88\n                iconWidth: 20\n                iconHeight: 12\n                textFont: Style.fontH1\n",
+                 f"                target: {control}\n                Layout.preferredWidth: {width}\n                iconWidth: 16\n                iconHeight: 10\n                textFont: Style.fontH3\n"),
+                (f"                target: {control}\n                Layout.preferredWidth: 116\n                textFont: Style.fontTitle\n                iconWidth: 26\n                iconHeight: 16\n",
+                 f"                target: {control}\n                Layout.preferredWidth: {width}\n                textFont: Style.fontH3\n                iconWidth: 16\n                iconHeight: 10\n"),
+            ]
+        mini = bj + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"
+        scaled[mini] += [
+            ("                SoftTakeoverIndicators {\n", cue_capsule("                ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n                SoftTakeoverIndicators {\n"),
+            ("                spacing: 16\n                visible: deckTrackDataContent.songLoaded\n", "                spacing: 4\n                visible: deckTrackDataContent.songLoaded\n"),
+            ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n", "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 52\n"),
+            ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n", "                    textFont: Style.fontH3\n                    Layout.preferredWidth: 64\n"),
+        ]
+        # Original mini row: 72 + 72 + 6*16 = 240. Compact row:
+        # 52 + 64 + 96 + 7*4 = 240. Thus LEAD keeps exactly its stock width.
+        # Use control-specific beginnings to keep all anchors unique.
+        scaled[mini] += [
+            ("                    view: deckTrackDataContent.deckView.autoLoopView\n                    spacing: 6\n                    iconWidth: 20\n                    iconHeight: 12\n                    textFont: Style.fontH1\n",
+             "                    view: deckTrackDataContent.deckView.autoLoopView\n                    spacing: 4\n                    iconWidth: 16\n                    iconHeight: 10\n                    textFont: Style.fontH3\n"),
+            ("                    deckIndex: deckTrackDataContent.deckView.deckData.deckIndex\n                    spacing: 6\n                    iconWidth: 20\n                    iconHeight: 12\n",
+             "                    deckIndex: deckTrackDataContent.deckView.deckData.deckIndex\n                    spacing: 4\n                    iconWidth: 16\n                    iconHeight: 10\n"),
+        ]
+        split_controls = """        AutoLoop {
+            Layout.preferredWidth: 52
+            Layout.rightMargin: 4
+            view: deckTrackDataContent.deckView.autoLoopView
+            spacing: 4
+            iconWidth: 16
+            iconHeight: 10
+            textFont: Style.fontH3
+        }
+        BeatJump {
+            Layout.preferredWidth: 64
+            view: deckTrackDataContent.deckView.beatJumpView
+            deckIndex: deckTrackDataContent.deckIndex
+            spacing: 4
+            iconWidth: 16
+            iconHeight: 10
+            textFont: Style.fontH3
+            visible: Config.audio.deck.hasBeatJump
+        }
+"""
+        split_speed = """        SpeedInfo {
+            Layout.leftMargin: 4
+            speedState: deckTrackDataContent.deckData.speedState
+            speedRange: deckTrackDataContent.deckData.speedRange
+            speedRangeTextWidth: 32
+            speedStateTextWidth: 70
+            columnSpacing: 4
+            flat: true
+        }
+"""
         scaled[bj + "DeckTrackData/SplitMiniDeckTrackDataContent.qml"] = [
-            ("        JP07SyncIndicator {\n",
-             cue_capsule("        ", "deckTrackDataContent.deckIndex", 26, 16, compact=True) + "\n        JP07SyncIndicator {\n")]
+            ("        JP07SyncIndicator {\n", split_controls + "\n        JP07SyncIndicator {\n"),
+            ("            Layout.maximumWidth: 160\n", "            Layout.minimumWidth: 160\n            Layout.maximumWidth: 160\n"),
+            ("        DeckInfoTimeInfo {\n", cue_capsule("        ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n" + split_speed + "\n        DeckInfoTimeInfo {\n"),
+        ]
+        for item, text_id in (("AutoLoop", "autoLoopText"), ("BeatJump", "beatJumpText")):
+            scaled.setdefault(bj + "Deck/DeckItem/" + item + ".qml", []).append((
+                f"        id: {text_id}\n", f"        id: {text_id}\n        fontSizeMode: Text.HorizontalFit\n        minimumPixelSize: 14\n" +
+                ("        rightPadding: 14\n" if item == "BeatJump" else "")))
+        # The shadow header feeds the stock formatter its own tempo; stock users keep stock defaults.
+        scaled[ROOT + "Items/Bpm.qml"] = [
+            ("    property alias fractionColor: fractionText.color\n",
+             "    property alias fractionColor: fractionText.color\n    readonly property real displayWidth: implicitWidth + fractionText.implicitWidth\n"),
+            ("    readonly property bool currentBPMSplitValid:",
+             "    property real bpmValue: pCurrentBPM && pCurrentBPM.translator ? pCurrentBPM.translator.unnormalized : 0\n\n    readonly property bool currentBPMSplitValid:"),
+            ("if (songAnalyzed && pCurrentBPM && pCurrentBPM.translator)", "if (songAnalyzed)"),
+            ("pCurrentBPM.translator.unnormalized.toFixed(bpm.decimalPlaces)", "bpmValue.toFixed(bpm.decimalPlaces)"),
+        ]
+        # Two decimals, and nothing else: the stock Row, colours and tap stay, and whatever stock
+        # shows without an analysed tempo ("-", an unanalysed track) is stock's own text.
+        scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
+            ("    property bool tappable: true\n",
+             "    Layout.minimumWidth: implicitWidth\n    property bool tappable: true\n"
+             '    readonly property var scBpm: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/CurrentBPM".arg(deckIndex)) : null\n'
+             '    readonly property var scAnalyzed: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/Track/SongAnalyzed".arg(deckIndex)) : null\n'
+             "    readonly property var scBpm2: bpmInfoView && bpmInfoView.bpmFractionalText && scAnalyzed && scAnalyzed.translator && scAnalyzed.translator.state\n"
+             "        && scBpm && scBpm.translator && scBpm.translator.unnormalized > 0 ? scBpm.translator.unnormalized.toFixed(2).split(\".\") : null\n"),
+            ("                text: bpmInfoView && bpmInfoView.bpmText\n",
+             "                text: bpmInfo.scBpm2 ? bpmInfo.scBpm2[0] : bpmInfoView && bpmInfoView.bpmText\n"),
+            ("                text: bpmInfoView && bpmInfoView.bpmFractionalText\n",
+             '                text: bpmInfo.scBpm2 ? "." + bpmInfo.scBpm2[1] : bpmInfoView && bpmInfoView.bpmFractionalText\n'),
+        ]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml"] =[("    enabled: deckConfig.inDJMode\n", "    enabled: deckConfig.inDJMode\n" + pad_brt)]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/QuadPadRGBLed.qml"] = [("    idx: note\n", "    idx: note\n" + pad_brt)]
         scaled["airAssignments/OutputAssignment/ColorOutputAssignment.qml"] = [

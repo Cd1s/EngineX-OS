@@ -561,9 +561,9 @@ has 'SC5000_UI_HEALTHY_AFTER:-15' "$GUARD"
 unset SC5000_UI_DIR
 ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode, failed FactoryReset restarts Engine'
 
-has '"/GUI/Scripted/ZoomIn"' "$ROOT/tools/ui-mod/build_packs.py"
-has 'function scZoom(dir)' "$ROOT/tools/ui-mod/build_packs.py"
-ok 'browse encoder waveform zoom uses 10 steps'
+lacks '"/GUI/Scripted/ZoomIn"' "$ROOT/tools/ui-mod/build_packs.py"
+lacks 'BrowseEncoder.qml' "$ROOT/tools/ui-mod/build_packs.py"
+ok 'browse encoder: stock zoom steps and stock hold actions'
 
 # #148: About shows the LAN stems renderer.
 has 'scLanStems' "$ROOT/tools/ui-mod/build_packs.py"

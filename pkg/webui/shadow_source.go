@@ -159,7 +159,10 @@ func (s *Server) shadowSourceWorker() {
 		var envelope *analyzer.ShadowEnvelope
 		err := ticker.Tick()
 		if err == nil {
-			envelope, err = analyzer.ShadowWaveformFile(job.path, job.asset.Peaks, ticker)
+			// PCM full scale for every band. Stretched to trackData's own band peaks
+			// (0.63/0.36/0.19 on a real track) the three bands stacked past the lane
+			// edge on 60 % of the bins: a lane filled top to bottom, no transients.
+			envelope, err = analyzer.ShadowWaveformFile(job.path, [3]float64{1, 1, 1}, ticker)
 		}
 		copyAsset := *job.asset
 		copyAsset.DetailPending = false
