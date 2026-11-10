@@ -263,9 +263,9 @@
         { k: "h", id: "settings", x: L("4. 系统设置（Settings）", "4. 系統設定（Settings）", "4. Settings"), nav: L("4. 系统设置", "4. 系統設定", "4. Settings") },
         { k: "table", head: [L("分组", "分組", "Group"), L("内容", "內容", "Contents")], rows: [
           [L("`Device` 设备", "`Device` 裝置", "`Device`"),
-           L("`Language`（三语，免重启实时切换）、`Pad LED Brightness`（按键与打击垫灯亮度 `100%`–`20%`）、`Power (Turn Off)`",
-             "`Language`（三語，免重啟即時切換）、`Pad LED Brightness`（按鍵與打擊墊燈亮度 `100%`–`20%`）、`Power (Turn Off)`",
-             "`Language` (three languages, switches live without a restart), `Pad LED Brightness` (`100%`–`20%`), `Power (Turn Off)`")],
+           L("`Language`（三语，免重启实时切换）、`Pad LED Brightness`（打击垫亮度 `100%`–`20%`：RGB 灯即打击垫、模式键、Layer、转盘灯环、屏幕上的 pad 跟随亮度；`SYNC`、`KEYLOCK`、`SLIP` 等单色键因硬件只有亮/暗两档，保持原厂亮度）、`Power (Turn Off)`",
+             "`Language`（三語，免重啟即時切換）、`Pad LED Brightness`（打擊墊亮度 `100%`–`20%`：RGB 燈即打擊墊、模式鍵、Layer、轉盤燈環、螢幕上的 pad 跟隨亮度；`SYNC`、`KEYLOCK`、`SLIP` 等單色鍵因硬體只有亮/暗兩檔，保持原廠亮度）、`Power (Turn Off)`",
+             "`Language` (three languages, switches live without a restart), `Pad LED Brightness` (`100%`–`20%`: RGB LEDs — pads, mode keys, Layer, platter ring and on-screen pads — follow brightness; single-colour keys such as `SYNC`, `KEYLOCK` and `SLIP` only have bright/dim hardware states and keep stock brightness), `Power (Turn Off)`")],
           [L("`Services` 服务与网络", "`Services` 服務與網路", "`Services` (services & network)"),
            L("7 个流媒体开关、`Streaming Quality`、`NetEase Download`、流媒体歌单排序（按 BPM / 调性 / 评级 / 歌名 / 歌手）、**`Live Stream`（直播与内录）**、`Pro DJ Link Library`、`Pro DJ Link Export to CDJ (Beta)`",
              "7 個串流開關、`Streaming Quality`、`NetEase Download`、串流歌單排序（依 BPM / 調性 / 評級 / 歌名 / 歌手）、**`Live Stream`（直播與內錄）**、`Pro DJ Link Library`、`Pro DJ Link Export to CDJ (Beta)`",
