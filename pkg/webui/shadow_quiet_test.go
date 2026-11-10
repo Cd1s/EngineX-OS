@@ -609,3 +609,47 @@ func TestShadowReplyTellsLead(t *testing.T) {
 		}
 	}
 }
+
+// The source's loop, key shift, Stems icon and slip line reach the shadow deck's
+// header, and a change of any of them wakes the QML.
+func TestShadowReplyTellsDeckDisplayState(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	oldRole := fourDeckRolePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = oldRole }()
+	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
+	steps := []deckState{
+		{Deck: 2, Key: "a"},
+		{Deck: 2, Key: "a", Loop: true},
+		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2},
+		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2, Stems: true},
+		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2, Stems: true, Slip: 44100},
+		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2, Stems: true, Slip: 55125},
+	}
+	s.shadow.mu.Lock()
+	for i, d := range steps {
+		ver := s.shadow.ver
+		d.Seq = int64(i + 1)
+		s.shadow.takePeer("192.0.2.7", []deckState{d}, time.Now())
+		if i > 0 && s.shadow.ver == ver {
+			s.shadow.mu.Unlock()
+			t.Fatalf("step %d did not wake the QML: %+v", i, d)
+		}
+	}
+	s.shadow.mu.Unlock()
+	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	var v struct{ Decks []deckState }
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil || len(v.Decks) != 1 {
+		t.Fatalf("%v %+v", err, v.Decks)
+	}
+	if d := v.Decks[0]; !d.Loop || d.KeyOffset != -2 || !d.Stems || d.Slip != 55125 {
+		t.Fatalf("shadow reply: %+v", d)
+	}
+}
