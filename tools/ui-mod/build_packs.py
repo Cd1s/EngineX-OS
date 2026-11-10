@@ -305,7 +305,7 @@ SERVICES_MAIN = """
 	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
 	property bool scFourDeckOn: false // the saved switch; Engine applies it on restart
 	property string scFourDeckRoleSetting: "auto"
-	property bool scShadowLegacyEngine: false // saved preference; switching requires a manual Engine restart
+	property bool scShadowLegacyEngine: true // saved preference (default on: stock components draw the shadow deck); switching requires a manual Engine restart
 	property bool scShadowDisplayOnly: true // the /shadow response is authoritative; missing means the safe default
 	property var scShadowDisplay: ({})
 	property var scShadowDisplayRequests: ({})
@@ -1853,7 +1853,7 @@ SERVICES_MAIN = """
 		scFourDeckRole = v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
 		scFourDeckOn = !!v.fourDeckWaveform
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
-		scShadowLegacyEngine = v.shadowLegacyEngine === true
+		scShadowLegacyEngine = v.shadowLegacyEngine !== false
 		scKeepPlayhead(v.playhead || 0)
 		if (!scSameItems(scSources, v.sources)) scSources = v.sources
 		if (!scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
@@ -2635,7 +2635,7 @@ FOUR_DECK_ENTRIES = """
 			onSelected: function(index) { if (ids[index] !== root.scFourDeckRoleSetting) root.scRestartCall("fourDeckRole=" + ids[index]) }
 		},
 		EntryBase.ListEntry {
-			text: "Legacy Shadow Engine (restart Engine manually to clear old slots)"
+			text: "Shadow Decks Drawn by Engine (restart Engine manually after switching)"
 			visible: root.scFourDeckOn
 			values: ["Off", "On"]
 			currentValue: values[root.scShadowLegacyEngine ? 1 : 0]

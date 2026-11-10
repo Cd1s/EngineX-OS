@@ -78,7 +78,7 @@ func TestCDJDisplayCachedANLZWithoutAudio(t *testing.T) {
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = oldRole }()
 	os.WriteFile(fourDeckRolePath, []byte("24"), 0600)
-	uiPost(t, srv.URL, "fourDeckWaveform=1&prolinkShare=1")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&prolinkShare=1&shadowLegacyEngine=0")
 	prolinkMu.Lock()
 	postedDevices[s] = map[string]prolink.Device{deviceKey(dev): dev}
 	prolinkMu.Unlock()
@@ -279,6 +279,34 @@ func TestShadowWaveformPixels(t *testing.T) {
 	}
 }
 
+// displayOnly selects the display-only renderer; by default Engine loads the
+// shadow track and draws it with its own components.
+func displayOnly(t *testing.T, s *Server) {
+	t.Helper()
+	if err := os.MkdirAll(s.uiDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.uiDir(), "settings.conf"), []byte("shadow_legacy_engine=0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestShadowEngineDrawnIsDefault(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	if !s.loadUI().ShadowLegacyEngine {
+		t.Fatal("Engine-drawn shadow decks are not the default")
+	}
+	if _, v := uiPost(t, srv.URL, "shadowLegacyEngine=0"); v.ShadowLegacyEngine || s.loadUI().ShadowLegacyEngine {
+		t.Fatal("display-only choice not saved")
+	}
+	if _, v := uiPost(t, srv.URL, "shadowLegacyEngine=1"); !v.ShadowLegacyEngine || !s.loadUI().ShadowLegacyEngine {
+		t.Fatal("Engine-drawn choice not saved")
+	}
+}
+
 func TestDisplayOnlyDoesNotFetchOrExposeAudio(t *testing.T) {
 	var assetRequests, audioRequests atomic.Int32
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -293,6 +321,7 @@ func TestDisplayOnlyDoesNotFetchOrExposeAudio(t *testing.T) {
 	}))
 	defer peer.Close()
 	s := New(Config{UIDir: filepath.Join(t.TempDir(), "ui"), StateDir: t.TempDir()}, nil)
+	displayOnly(t, s)
 	u, _ := url.Parse(peer.URL)
 	s.shadow.peerPort, _ = strconv.Atoi(u.Port())
 	now := time.Now()
@@ -335,7 +364,7 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = oldRole }()
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
-	uiPost(t, srv.URL, "fourDeckWaveform=1")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=0")
 	p := peerDeck{deckState: deckState{Deck: 2, Key: "track-a", Cues: []shadowCue{{I: 1, P: 22050, N: "live", C: "#ff0000"}}}, ip: "127.0.0.1", at: time.Now()}
 	s.shadow.peerDecks[2] = p
 	a := testDisplayAsset()
@@ -354,7 +383,7 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&state)
 	resp.Body.Close()
 	if !state.DisplayOnly {
-		t.Fatal("new mode not default")
+		t.Fatal("display mode not selected")
 	}
 	if resp.Header.Get("X-Shadow-State") == "" {
 		t.Fatal("EngineX-only display response lost version caching")
@@ -494,7 +523,7 @@ func TestDisplayTilesAndSourceIdentity(t *testing.T) {
 	os.WriteFile(fourDeckRolePath, []byte("12"), 0600)
 	srv := httptest.NewServer(s)
 	defer srv.Close()
-	uiPost(t, srv.URL, "fourDeckWaveform=1")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=0")
 	key := displayTrackKey(p)
 	q := "?deck=3&key=" + key
 	for tile, wantWidth := range []int{2048, 2048, 3} {
@@ -578,6 +607,7 @@ func TestPeerTwoDeckConflictKeepsEachSourceDeck(t *testing.T) {
 
 func TestShadowJitterFreezesThenExpiresOrConfirmsEject(t *testing.T) {
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	displayOnly(t, s)
 	now := time.Now()
 	s.shadow.peerDecks[2] = peerDeck{deckState: deckState{Deck: 2, Key: "track-a", Playing: true, PositionMS: 1000}, at: now}
 	// Preseed an asset so this unit test performs no network operation.
@@ -1033,7 +1063,7 @@ func consoleLineHTTPServer(t *testing.T) (*Server, string) {
 	s := displayCDJServer(t, cache, dev)
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
-	if code, _ := uiPost(t, srv.URL, "fourDeckWaveform=1&prolinkShare=1"); code != http.StatusOK {
+	if code, _ := uiPost(t, srv.URL, "fourDeckWaveform=1&prolinkShare=1&shadowLegacyEngine=0"); code != http.StatusOK {
 		t.Fatalf("enable shadow: %d", code)
 	}
 	return s, srv.URL
@@ -1165,6 +1195,7 @@ func TestDisplayPeerTrackOnOwnDrive(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := New(Config{UIDir: filepath.Join(t.TempDir(), "ui"), StateDir: t.TempDir()}, nil)
+	displayOnly(t, s)
 	s.shadow.dataRoot, s.shadow.mediaRoot = t.TempDir(), filepath.Dir(root)
 	now := time.Now()
 	peer := peerDeck{deckState: deckState{Deck: 1, Net: "net://uuid/" + filepath.Base(root) + " (USB 3)/Contents/song.flac", Title: "From the peer"}, ip: "127.0.0.1", at: now}

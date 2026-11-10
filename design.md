@@ -187,8 +187,11 @@ must be measured by PM rather than invented from these component changes.
 | shadowFetchPeer/CDJ, shadow-v3 copies, savePerf, EXPF replay | Bypassed in default receive path; retained behind explicit legacy mode. |
 | scShadowApply/Speed/Seek/Cues/Beat/Link/Empty | Early return in display mode. No native deck control or per-frame analyzer work. |
 
-Persistent rollback setting: `shadowLegacyEngine` / `shadow_legacy_engine=1`,
-default false. The settings row explains that switching requires a planned
+Persistent setting: `shadowLegacyEngine`. Since 2026-11-10 it defaults to true
+(Engine loads the shadow copy and its stock components draw it; the maintainer
+requires the shadow deck to be the same components as a local deck, not a
+replica) and `shadow_legacy_engine=0` selects this display-only renderer.
+The settings row explains that switching requires a planned
 Engine restart to clear any slots from the former legacy mode. Existing audio
 caches are retained; discovery no longer deletes old cache directories. PM can
 roll back the build or enable legacy and restart during deployment. No live

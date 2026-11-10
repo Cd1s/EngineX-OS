@@ -82,7 +82,7 @@ type uiSettings struct {
 	LoggedIn           []string `json:"loggedIn"`
 	FourDeckWaveform   bool     `json:"fourDeckWaveform"`
 	FourDeckRole       string   `json:"fourDeckRole"`
-	ShadowLegacyEngine bool     `json:"shadowLegacyEngine"` // opt-in rollback; change at a planned Engine restart
+	ShadowLegacyEngine bool     `json:"shadowLegacyEngine"` // default: Engine loads the shadow track and draws it itself; false = display-only renderer. Change at a planned Engine restart
 	ProlinkWaveform    bool     `json:"prolinkWaveform"`
 	BroadcastEnabled   bool     `json:"broadcastEnabled"`
 	UpfaderEcho        bool     `json:"upfaderEcho"`
@@ -185,7 +185,7 @@ var uiServicesBeforeKnown = []string{"tidal", "netease", "spotify", "deezer", "s
 func (s *Server) loadUI() uiSettings {
 	known, saved := uiServicesBeforeKnown, false
 	v := uiSettings{
-		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ProlinkWaveform: true,
+		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowLegacyEngine: true, ProlinkWaveform: true,
 		TracklistWaveform: true, CueCountdown: true,
 		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 	}
@@ -368,8 +368,8 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.FourDeckWaveform {
 		text += "four_deck_waveform=1\n"
 	}
-	if v.ShadowLegacyEngine {
-		text += "shadow_legacy_engine=1\n"
+	if !v.ShadowLegacyEngine {
+		text += "shadow_legacy_engine=0\n"
 	}
 	if v.FourDeckRole != "auto" {
 		text += "four_deck_role=" + v.FourDeckRole + "\n"
