@@ -79,9 +79,9 @@ type deckState struct {
 	// Range is the source deck's pitch range in percent (Engine's SpeedRange) and
 	// KeyLock its key lock: the shadow Engine deck is set to both. Absent from a
 	// CDJ and an older sender: the shadow deck keeps its own.
-	Range      float64 `json:"range,omitempty"`
-	KeyLock    *bool   `json:"keylock,omitempty"`
-	Master     bool    `json:"master,omitempty"`
+	Range   float64 `json:"range,omitempty"`
+	KeyLock *bool   `json:"keylock,omitempty"`
+	Master  bool    `json:"master,omitempty"`
 	// Lead is the deck's own DeckIsMaster, what its header shows as LEAD, for the
 	// shadow header only. Master also marks the player that holds the network
 	// master with no master deck, and is cleared for a standalone player's copy.
