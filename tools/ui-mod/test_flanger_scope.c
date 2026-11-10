@@ -33,6 +33,62 @@ static void stock(void *self, float *const *in, float *const *out, uint32_t fram
 }
 
 static void transition_original(void *handler, const void *event) { (void)handler; (void)event; }
+static void *rate_handler;
+static const void *rate_event;
+static unsigned rate_calls;
+static void rate_original(void *handler, const void *event) {
+    assert(handler == rate_handler && event == rate_event);
+    ++rate_calls;
+}
+static void rate_destroy(void *owner) { assert(owner); }
+static void test_px_rate_events(void) {
+    int owner[2], effect[2];
+    unsigned char handler[24] = {0}, event[40] = {0}, saved[40];
+    const char *name = "Flanger";
+    unsigned length = 7, index = 2;
+    uint32_t address = (uint32_t)(uintptr_t)&owner[0];
+    memcpy(handler + 12, &address, 4);
+    memcpy(event + 8, &name, 4); memcpy(event + 12, &length, 4);
+    memcpy(event + 36, &index, 4);
+    memset(px_rates, 0, sizeof px_rates);
+    memset(sc_pfx_routes, 0, sizeof sc_pfx_routes);
+    px_rate_original = (void *)rate_original;
+    rate_handler = handler; rate_event = event; rate_calls = 0;
+    fx_selector_supported = 1;
+    hook_px_rate(handler, event); /* Arrives before the binding handshake. */
+    assert(px_rate_value(&owner[0]) == 0.2f);
+    for (unsigned u = 0; u < 2; ++u) {
+        sc_pfx_select(u, u + 1); assert(sc_pfx_bind(u, &owner[u], &effect[u]));
+        sc_pfx_control(&owner[u], 0, 0.7f); sc_pfx_control(&owner[u], 1, 0.4f);
+        sc_pfx_control(&owner[u], 2, 0.6f);
+    }
+    for (index = 0; index <= 10; ++index) {
+        memcpy(event + 36, &index, 4); memcpy(saved, event, sizeof saved);
+        hook_px_rate(handler, event);
+        assert(!memcmp(event, saved, sizeof event));
+        assert(sc_pfx_float(sc_pfx_routes[0].time) == (float)index / 10.0f);
+        assert(sc_pfx_float(sc_pfx_routes[1].time) == 0.6f);
+        assert(sc_pfx_float(sc_pfx_routes[0].parameter) == 0.4f);
+        assert(sc_pfx_float(sc_pfx_routes[0].mix) == 0.7f);
+    }
+    index = UINT32_MAX; memcpy(event + 36, &index, 4);
+    hook_px_rate(handler, event);
+    assert(sc_pfx_float(sc_pfx_routes[0].time) == 1.0f);
+    name = "Reverb"; length = 6; index = 0;
+    memcpy(event + 8, &name, 4); memcpy(event + 12, &length, 4);
+    memcpy(event + 36, &index, 4);
+    hook_px_rate(handler, event); /* Stock names are forwarded without a PX write. */
+    assert(sc_pfx_float(sc_pfx_routes[0].time) == 1.0f);
+    fx_selector_supported = 0;
+    name = "Flanger"; length = 7;
+    memcpy(event + 8, &name, 4); memcpy(event + 12, &length, 4);
+    hook_px_rate(handler, event);
+    assert(sc_pfx_float(sc_pfx_routes[0].time) == 1.0f && rate_calls == 15);
+    px_destructor_original = (void *)rate_destroy;
+    hook_px_destroy(&owner[0]);
+    assert(px_rate_value(&owner[0]) == 0.5f && !sc_pfx_routes[0].bound);
+    puts("test_px_rate_events PASS (11 indices, prebind, isolation, passthrough, destruction)");
+}
 static void test_px_off_on_reset(void) {
     int owner, effect;
     unsigned char handler[24] = {0}, event[64] = {0};
@@ -137,6 +193,7 @@ int main(void) {
     test_double_reset_dry();
     test_px_product_scope();
     test_px_off_on_reset();
+    test_px_rate_events();
     test_px_master_bypass();
     puts("test_flanger_scope PASS; test_px_null_owner PASS");
     return 0;

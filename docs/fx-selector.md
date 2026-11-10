@@ -16,7 +16,9 @@ Selector delay banks use explicit DIRTY/PREPARING/READY/LIVE ownership. The ordi
 
 The custom DSP owns Wet/Dry. After recording the physical Mix value, its stock carrier processor receives unity Mix, avoiding a second wet/dry blend. Returning to stock restores the recorded Mix on the original DSP thread, including when selecting the already active stock Flanger produces no Type event. DSP state is fixed storage per unit/instance, with nonblocking atomic ownership, two banks and a 256-frame wet crossfade. Settled Wet=0 preserves every input sample bit. The audio path allocates nothing, locks nothing and calls no libm functions.
 
-The independent Rate event is **not captured yet**. Parameter currently maps time, character and feedback together. The UI's Time/Rate control retains its native display but does not independently change the PX delay. This limitation is intentional and must be communicated to testers.
+Time/Rate independently controls PX timing; Parameter controls character and feedback. The native Flanger Rate event carries an unsigned index (0–10), which maps to `index / 10` across the existing PX timing range. On JC11, the original assignment uses the BEAT −/+ buttons (notes 9/10, `DecrementBeats`/`IncrementBeats`); the Time/Parameter encoder remains CC 2. No MIDI assignment is replaced. The Rate dispatcher is installed alongside the existing JC11-only selector hooks after checking its original instructions. Every event is forwarded unchanged to the native target, including stock effects and values outside the PX mapping. A bounded owner cache retains Rate events received before the binding handshake and is cleared on owner destruction; without an observed Rate event, PX starts at the middle timing position.
+
+**PX Time/Rate uses relative positions, not beat synchronization.** The original beat labels on the screen/OLED remain unchanged and indicate the selected relative position for PX; they do not describe the PX delay in beats. For example, the existing echo delay spans 4800–43200 samples (50–450 ms at 96 kHz), while Slip Roll and Space retain their own existing timing ranges. Accurate BPM synchronization, matching displayed beat values to actual PX durations and revising the delay buffers, is a follow-up for 5.3.0.5.
 
 A timeout can still race a command already being processed: expiry and removal prevent unread stale requests, but do not prove cancellation after the worker has begun applying a reused route. A complete two-phase commit is deferred. Also, the native destructor hook clears cached handlers, but its serialization with a concurrent native Mix restoration still needs hardware/thread evidence; the NULL-owner guard alone does not establish lifetime safety.
 
@@ -28,7 +30,7 @@ All addresses below are virtual offsets relative to the Engine PIE base.
 | --- | --- |
 | MIX dispatcher / target | `0xe6a0e8` / `0xe9437c`; float at event `+0x0c` |
 | Parameter dispatcher / target | `0xe6a140` / `0xe942c4`; float at `+0x20`, effect name at `+8` |
-| Rate dispatcher / target | `0xe6a114` / `0xe94320`; unsigned index at `+0x24`; observed statically, not hooked |
+| Rate dispatcher / target | `0xe6a114` / `0xe94320`; unsigned index at `+0x24`, effect name at `+8`; native target writes parameter slot 3; hooked only for the verified JC11 scope |
 | Change / Switch targets | `0xe8f36c` / `0xe8f1f4` |
 | Handler ABI | bound object `+0x0c`, member function `+0x10`, adjustment `+0x14` |
 | Owner | ChannelDJFx vptr `0x2b21eec`, EffectCollection pointer at `+0x28` |
@@ -56,7 +58,7 @@ All compilation, testing and sandbox work for this task runs on the build host t
 1. Install the PM's matching test image (suite, UI pack and hook from this branch) and reboot. Use a JC11 PRIME 4; AZ04 PRIME 4 G2 is outside this feature.
 2. Rotate through the full original list and all five `(PX)` entries. Confirm the selected name persists on the main FX panel; test touch selection and fast physical rotation/presses.
 3. Assign FX1 only to channel 1 and FX2 only to channel 2. Choose different PX effects simultaneously and confirm each affects only its assigned channel.
-4. Sweep Wet/Dry from zero to full, including a sudden 0.8→0 jump. Verify a smooth fade to sample-exact dry sound at settled zero. The consumed binding handshake should not cause a brief volume duck. Echo modes use dry/wet interpolation: at full Wet, their initial delay interval contains little output until the first echo arrives. Change Parameter and confirm time/character/feedback change. Independent Time/Rate support is pending.
+4. Sweep Wet/Dry from zero to full, including a sudden 0.8→0 jump. Verify a smooth fade to sample-exact dry sound at settled zero. The consumed binding handshake should not cause a brief volume duck. Echo modes use dry/wet interpolation: at full Wet, their initial delay interval contains little output until the first echo arrives. Hold Parameter fixed and step BEAT −/+ through the full range: PX timing must change independently on the selected FX unit. Then hold Rate fixed and change Parameter: only character/feedback should change. Repeat for all five PX effects on both units. The retained native beat labels are relative PX positions, not beat-synchronized durations.
 5. Switch quickly among the five PX modes and listen for clicks, clipping or dropouts. Select every stock effect, including stock Flanger, and verify native sound and the previous Wet/Dry position return.
 6. Reassign units/channels, toggle FX off/on, reopen views and reboot. Report incorrect labels, cross-unit changes, missing controls or audio glitches with the selected modes/knob positions.
 
