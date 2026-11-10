@@ -357,6 +357,21 @@ assert.strictEqual(vfx.enabled, false);
         self.assertIn(r'"\t\t\tparent: Overlay.overlay ? Overlay.overlay : uiContainer\n"', SRC)
         self.assertIn(r'"\t\t\tanchors.fill: parent\n"', SRC)
 
+    def test_led_brightness_rgb_and_single_color_passthrough(self):
+        self.assertIn('text: "Pad LED Brightness"', bp.LED_ENTRY)
+        self.assertIn('readonly property var ids: [100, 80, 60, 40, 20]', bp.LED_ENTRY)
+        self.assertIn('root.scCall("ledBrightness=" + ids[index])', bp.LED_ENTRY)
+        rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
+        self.assertIn(["Pad LED Brightness", "打击垫亮度", "打擊墊亮度"], rows)
+        self.assertIn(r'property real scBrightness: typeof globalConfig !== \"undefined\" && globalConfig && globalConfig.scPadBrightness ? globalConfig.scPadBrightness : 1', SRC)
+        hook = (REPO / "tools/ui-mod/engine_ui_hook.c").read_text()
+        self.assertNotIn("note_slots", hook)
+        self.assertNotIn("led_scaled_note", hook)
+        self.assertNotIn("scale_led_pwm", hook)
+        self.assertIn("static const unsigned p127[4] = {64, 28, 12, 4}, p16[4] = {12, 8, 5, 2};", hook)
+        self.assertIn("if (m <= 3) {\n        target = 1;", hook)
+        self.assertIn("if (target < 2) target = 2;", hook)
+
 @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
 class ShadowDisplayTest(unittest.TestCase):
     """Run the actual QML JS functions with a fake clock and an Engine that rejects all access."""

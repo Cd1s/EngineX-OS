@@ -4812,7 +4812,7 @@ def edits(dev: bool):
             ("	property bool debug: false;\n",
              "	property bool debug: false;\n"
              "	// EngineX: dimming now happens after gamma in the C hook (snd_seq_event_output_direct); QML sends the stock colour.\n"
-             "	property real scBrightness: 1\n"
+             "	property real scBrightness: typeof globalConfig !== \"undefined\" && globalConfig && globalConfig.scPadBrightness ? globalConfig.scPadBrightness : 1\n"
              "	onScBrightnessChanged: if (enabled) device.sendColor(channel, idx, privatePart.scScaled())\n"),
             ("				device.sendColor(channel, idx, outputColor);\n", "				device.sendColor(channel, idx, scScaled());\n"),
             ("		id: privatePart\n",
