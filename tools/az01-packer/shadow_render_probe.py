@@ -51,10 +51,13 @@ def main():
     qml = """import QtQuick 2.15
 import QtQuick.Window 2.15
 import QtQuick.Layouts 1.15
+import Embedded as EngineXEmbedded
 Item {
  id: root
  width: 1200; height: 700; z: 30000
  property var transformed: root
+ property var robotoRegularFontLoader: ({name: "Roboto"})
+ property var robotoLightFontLoader: ({name: "Roboto Light"})
  property string scFourDeckRole: "13"
  property string scWave: "3band"
  property bool scPlayer: true
