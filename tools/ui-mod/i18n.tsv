@@ -356,3 +356,9 @@ All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)	全部 
 All Engine Mode	全部 Engine 模式	全部 Engine 模式
 All CDJ Mode	全部 CDJ 模式	全部 CDJ 模式
 All Engine Mode: no CDJ waveform on Line In	全部 Engine 模式下 Line In 不显示 CDJ 波形	全部 Engine 模式下 Line In 不顯示 CDJ 波形
+Downloading	正在下载	正在下載
+Loading	正在加载	正在載入
+Waiting for source analysis	等待源碟机分析波形	等待來源播放機分析波形
+Failed to open file within appropriate time.	未能在规定时间内打开文件。	未能在規定時間內開啟檔案。
+Could not load via network.	无法通过网络加载。	無法透過網路載入。
+Retrying…	正在重试…	正在重試…

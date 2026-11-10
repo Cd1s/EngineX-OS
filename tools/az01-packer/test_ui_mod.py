@@ -223,7 +223,7 @@ class ShadowDisplayTest(unittest.TestCase):
     def js(self, body):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
-                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
+                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
@@ -351,8 +351,13 @@ assert.equal(scShadowVisible(2), false);
 assert.deepEqual(legacy, []);
 scShadowApplyAll([{deck: 2, path: '/old.wav'}], false);
 assert.equal(scShadowDisplayOnly, false);
-assert.equal(scShadowVisible(2), false);
 assert.equal(legacy[0], 2);
+// Engine has not loaded it yet: the slot is covered, not empty.
+assert.equal(scShadowData(2).engine, true); assert.equal(scShadowData(2).copying, false);
+assert.equal(scShadowVisible(2), true);
+scShadowAt[2] = {path: '/old.wav', ready: true};
+scShadowApplyAll([{deck: 2, path: '/old.wav'}], false);
+assert.equal(scShadowVisible(2), false);
 assert.deepEqual(scShadowDisplay, {});
 """)
 
@@ -368,9 +373,12 @@ scShadowApplyAll([{deck: 2, path: '/peer.flac', playing: true}, cdj(4)], false);
 assert.equal(scShadowDisplayOnly, false);
 assert.equal(scShadowEngineMask, 30 & ~(1 << 4));
 assert.deepEqual(writes, ['/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer.flac']);
-assert.equal(scShadowData(2), null); assert.equal(scShadowVisible(2), false); assert.equal(scDeckLocked(2), true);
+assert.equal(scShadowData(2).engine, true); assert.equal(scShadowVisible(2), true); assert.equal(scDeckLocked(2), true); // covered while Engine loads
 assert.equal(scShadowData(4).title, 'CDJ'); assert.equal(scShadowVisible(4), true);
 assert.equal(requests.length, 1); assert(requests[0].url.endsWith('deck=4&key=cdj%3Ax'));
+scShadowAt[2].ready = true; // Engine holds the peer's track: the cover leaves
+scShadowApplyAll([{deck: 2, path: '/peer.flac', playing: true}, cdj(4)], false);
+assert.equal(scShadowData(2), null); assert.equal(scShadowVisible(2), false); assert.equal(scDeckLocked(2), true);
 // The display slot is never Engine's: no load, speed, seek or press reaches Deck 4.
 scShadowApply({deck: 4, path: '/must-not-load.wav'}); scShadowSpeed(4, 12); scShadowSeek(4, {}, 1000);
 scShadowCues(4, {}, {cues: []}, now); scShadowBeat(4, {}, {bpm: 120, beat: 3}, 0, now); scShadowLinkEdge(4, 'peer', 'play', '{"state":true}');
@@ -394,6 +402,9 @@ assert.equal(writes.length, 3); // unloaded once, then left alone
 // And back: Engine loads the peer's track again, the display leaves the slot.
 scShadowApplyAll([{deck: 2, path: '/peer2.flac'}, cdj(4)], false);
 assert.equal(writes[3], '/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer2.flac');
+assert.equal(scShadowData(2).engine, true); assert.equal(scShadowData(2).title, ''); // the cover of this load, nothing of the CDJ's picture
+scShadowAt[2].ready = true;
+scShadowApplyAll([{deck: 2, path: '/peer2.flac'}, cdj(4)], false);
 assert.equal(scShadowData(2), null); assert.equal(scShadowVisible(2), false);
 assert.equal(scShadowData(4).title, 'CDJ'); assert.equal(scShadowVisible(4), true);
 // Forced Engine mode on a console: a CDJ on a Line In deck is flagged for the on-screen hint.
@@ -1028,7 +1039,7 @@ class UiModBuildTest(unittest.TestCase):
                     with tarfile.open(out.with_suffix(".tar.gz")) as pack:
                         for lang in ("en", "zh-Hans", "zh-Hant"):
                             main = pack.extractfile(f"packs/{lang}/Skins/Embedded/EmbeddedMain.qml").read().decode()
-                            self.assertIn("scShadowApplyDisplay(decks.filter(e => e.displayOnly === true))", main)
+                            self.assertIn("scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks)))", main)
                             self.assertIn("s.metadataOnly", main)
                             self.assertIn("/v1/sc5000/shadow/display?deck=", main)
                             self.assertIn("scDeckLocked", main)
@@ -1504,6 +1515,114 @@ const src = (path, extra) => Object.assign({deck: 2, path, id: path, title: lib[
 const run = (ms, e) => { for (const end = now + ms; now < end;) { now += 180; scShadowApply(Object.assign({}, e, {at: now})); } };
 const A = '/media/USB/Contents/a.flac', B = '/media/USB/Contents/b.flac', NEXT = '/media/USB/Contents/next.flac';
 """
+
+    # Maintainer report 11-10: while the copy ran the shadow deck said "No Track Loaded" and looked stuck.
+    COPY = r"""
+const copying = (id, extra) => Object.assign({deck: 2, path: '', id, key: 'key-' + id, loading: true, title: 'T ' + id, artist: 'Art', bpm: 128, durationMs: 300000, pitch: 0}, extra || {});
+const all = e => scShadowApplyAll([Object.assign({}, e, {at: now})], false);
+const busy = () => { const s = scShadowData(2); return scShadowBusy(s, s && s.meta, false); };
+"""
+
+    def test_copy_then_engine_load_is_covered_until_engine_holds_the_track(self):
+        self.js(self.ENGINE + self.COPY + r"""
+all(copying('a'));
+let s = scShadowData(2);
+assert.equal(scShadowVisible(2), true); assert.equal(scDeckLocked(2), true);
+assert.equal(s.title, 'T a'); assert.equal(s.artist, 'Art'); assert.equal(s.bpm, 128); assert.equal(s.durationMs, 300000);
+assert.equal(busy(), 1); assert.equal(s.progress, 0); // no Content-Length yet: the turning ring
+assert.equal(requests.length, 1); assert(requests[0].url.endsWith('deck=2&key=key-a')); // cover and key of the source's track
+requests[0].finish(200, {key: 'key-a', artworkUrl: '/art', keyName: '8A', overviewUrl: '/o.png'});
+assert.equal(scShadowData(2).meta.keyName, '8A');
+all(copying('a', {progress: 0.42}));
+assert.equal(scShadowData(2).progress, 0.42); assert.equal(scShadowData(2).meta.keyName, '8A'); assert.equal(busy(), 1);
+assert.equal(eng.asked.length, 0); assert.equal(requests.length, 1);
+globalThis.scPressTimer = {restart() {}};
+scPress('/Engine/Deck2/Sync'); assert.equal(scPressQueue.length, 1); // a covered Engine slot is still Engine's
+// The copy is there: Engine loads it. The cover stays, the deck is never shown empty.
+const e = src(A, {key: 'key-a', title: 'T a'});
+all(e);
+assert.deepEqual(eng.asked, [A]);
+s = scShadowData(2);
+assert.equal(scShadowVisible(2), true); assert.equal(busy(), 2); assert.equal(s.progress, 0); assert.equal(s.title, 'T a'); assert.equal(s.meta.keyName, '8A');
+for (let i = 0; i < 10; i++) { now += 180; all(e); assert.equal(scShadowVisible(2), true); } // Engine takes its time
+settle(); now += 180; all(e);
+assert.equal(scShadowAt[2].ready, true);
+assert.equal(scShadowData(2), null); assert.equal(scShadowVisible(2), false); // Engine's own deck view from here
+for (let i = 0; i < 20; i++) { now += 180; all(e); assert.equal(scShadowVisible(2), false); } // and no cover flashes while it holds
+// The source loads another track: covered at once, over the old track, with nothing of the old one.
+all(copying('b', {progress: 0.07}));
+s = scShadowData(2);
+assert.equal(scShadowVisible(2), true); assert.equal(s.title, 'T b'); assert.equal(s.progress, 0.07); assert.equal(s.meta, null); assert.equal(busy(), 1);
+assert(requests[requests.length - 1].url.endsWith('key=key-b'));
+// Engine swapped the held track for another (Continue): asked again, covered again.
+all(src(A, {key: 'key-a'})); settle(); now += 1400; all(src(A, {key: 'key-a'}));
+assert.equal(scShadowVisible(2), false);
+eng.held = B; now += 1200; all(src(A, {key: 'key-a'}));
+assert.equal(scShadowAt[2].ready, false); assert.equal(scShadowVisible(2), true); assert.equal(busy(), 2);
+""")
+
+    def test_copy_failure_names_the_reason_and_progress_starts_again(self):
+        self.js(self.ENGINE + self.COPY + r"""
+all(copying('a', {progress: 0.6}));
+assert.equal(busy(), 1);
+all(copying('a', {error: 'unavailable'})); assert.equal(busy(), 4); assert.equal(scShadowData(2).progress, 0);
+all(copying('a', {error: 'timeout'})); assert.equal(busy(), 5);
+all(copying('a', {error: 'interrupted'})); assert.equal(busy(), 6);
+all(copying('a', {error: 'failed'})); assert.equal(busy(), 6);
+assert.equal(scShadowVisible(2), true); assert.equal(scShadowData(2).title, 'T a'); // the head stays through the failures
+all(copying('a', {progress: 0.2})); // the next attempt delivers
+assert.equal(busy(), 1); assert.equal(scShadowData(2).error, ''); assert.equal(scShadowData(2).progress, 0.2);
+// Another track never shows the last one's progress or failure.
+all(copying('a', {error: 'timeout'})); all(copying('b'));
+assert.equal(busy(), 1); assert.equal(scShadowData(2).error, ''); assert.equal(scShadowData(2).progress, 0); assert.equal(scShadowData(2).key, 'key-b');
+// The source ejects: no cover over an empty slot.
+scShadowApplyAll([], false);
+assert.equal(scShadowData(2), null);
+""")
+
+    def test_busy_state_of_a_display_slot_and_of_no_slot(self):
+        self.js(r"""
+assert.equal(scShadowBusy(null, null, false), 0);
+const pending = {detailPending: true}, done = {detail: true}, plain = {overviewUrl: '/o.png'};
+assert.equal(scShadowBusy({loading: false}, null, false), 3);    // no display data yet
+assert.equal(scShadowBusy({loading: false}, pending, false), 3); // the detail waveform is being computed
+assert.equal(scShadowBusy({loading: false}, done, true), 0);
+assert.equal(scShadowBusy({loading: false}, plain, false), 0);   // a source with an overview only
+assert.equal(scShadowBusy({loading: true}, plain, false), 3);
+assert.equal(scShadowBusy({stale: true}, null, false), 0); assert.equal(scShadowBusy({metadataOnly: true}, null, false), 0);
+// Display mode hands the source's share of the detail waveform to the lane, and forgets it with the track.
+scShadowApplyAll([{deck: 2, key: 'A', title: 'A', progress: 0.4}]);
+assert.equal(scShadowData(2).progress, 0.4); assert.equal(scShadowData(2).engine, false);
+const first = scShadowData(2);
+scShadowApplyAll([{deck: 2, key: 'A', title: 'A', progress: 0.4}]);
+assert.equal(scShadowData(2), first); // nothing new: no binding runs
+scShadowApplyAll([{deck: 2, key: 'A', title: 'A', progress: 0.7}]);
+assert.equal(scShadowData(2).progress, 0.7);
+scShadowApplyAll([{deck: 2, key: 'B', title: 'B'}]);
+assert.equal(scShadowData(2).progress, 0); assert.equal(scShadowData(2).meta, null);
+""")
+
+    def test_busy_indicator_is_the_stock_ring_on_waveform_lanes_and_translated(self):
+        stock = "import QtQuick 2.0\nimport EngineOS.UI.Style 1.0\nItem {\n    id: w\n}\n"
+        ringed = bp.shadow_layer(stock, "waveform", True)
+        self.assertIn("import EngineOS.UI.Controls 1.0 as ScStock\n", ringed)
+        self.assertEqual(ringed.count("ScStock.ProgressRing {"), 2)
+        for stock_style in ("backgroundColor: Style.surface03Color; ringColor: Style.font02Color; strokeWidth: 2", "color: Style.font02Color; font: Style.fontH1"):
+            self.assertIn(stock_style, ringed)  # Deck/DownloadProgress.qml
+        self.assertIn("visible: scDisplay.busyState < 4", ringed)  # a failed copy: the text alone
+        plain = bp.shadow_layer(stock, "waveform")  # a QRC without the stock ring (5.0.4)
+        self.assertNotIn("ScStock", plain)
+        self.assertIn('objectName: "EngineX_Shadow_Busy"', plain)
+        for kind in ("overview", "track", "performance"):
+            other = bp.shadow_layer(stock, kind, True)
+            self.assertNotIn("ScStock", other)
+            self.assertNotIn("EngineX_Shadow_Busy", other)
+            self.assertNotIn("@BUSY@", other)
+        table = {en: t["zh-Hans"] for en, t in bp.load_dict().items()}
+        text = next(l for l in bp.translate(ringed, table, set(), live=True).split("\n") if "busyState - 1" in l)
+        for hans in ("正在下载", "正在加载", "等待源碟机分析波形", "文件不可用。", "未能在规定时间内打开文件。", "无法通过网络加载。", "正在重试…"):
+            self.assertIn('Math.scI18n.t("%s")' % hans, text)
+        self.assertNotRegex(text, "Downloading|Retrying")
 
     def test_quick_a_b_a_ends_on_a_whatever_order_engine_loads_in(self):
         self.js(self.ENGINE + r"""
