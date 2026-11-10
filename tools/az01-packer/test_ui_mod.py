@@ -1762,7 +1762,7 @@ assert.equal(scShadowData(2).progress, 0); assert.equal(scShadowData(2).meta, nu
         table = {en: t["zh-Hans"] for en, t in bp.load_dict().items()}
         text = next(l for l in bp.translate(ringed, table, set(), live=True).split("\n") if "busyState - 1" in l)
         for hans in ("正在下载", "正在加载", "等待源碟机分析波形", "文件不可用。", "未能在规定时间内打开文件。", "无法通过网络加载。", "正在重试…",
-                     "流媒体曲目：CDJ 上没有可拷贝的文件。", "rekordbox Link 曲目：CDJ 上没有可拷贝的文件。", "CD 或第二个 USB：CDJ 上没有可拷贝的文件。"):
+                     "流媒体：CDJ 无文件可拷贝。", "rekordbox Link：CDJ 无文件可拷贝。", "CD 或第二 USB：CDJ 无文件可拷贝。"):
             self.assertIn('Math.scI18n.t("%s")' % hans, text)
         self.assertNotRegex(text, "Downloading|Retrying|no file to copy")
         # The reasons stream-sync gives (cdjFallback) each have a line.

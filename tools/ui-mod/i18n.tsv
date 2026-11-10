@@ -338,7 +338,7 @@ Player	播放器	播放機
 Line In	线路输入	線路輸入
 Engine	Engine	Engine
 Shadow Deck Mode	影子轨模式	影子軌模式
-Auto: Engine loads every track it can copy and shows it exactly like a local deck; a CDJ track with no file to copy (streaming, rekordbox Link) shows its rekordbox waveform	自动：对端曲目能拷到时由本机加载，与本机显示一模一样；CDJ 曲目拷不到时（流媒体、rekordbox Link）显示 CDJ 波形	自動：對端曲目能複製到時由本機載入，與本機顯示一模一樣；CDJ 曲目複製不到時（串流、rekordbox Link）顯示 CDJ 波形
+Auto: copyable tracks load locally like a local deck; uncopyable CDJ tracks show CDJ waveforms	自动：对端曲目可拷贝时由本机加载（同本机显示）；无法拷贝时显示 CDJ 波形	自動：對端曲目可複製時由本機載入（同本機顯示）；無法複製時顯示 CDJ 波形
 All Engine Mode: Engine loads every source and shows it exactly like a local deck	全部 Engine 模式：所有对端曲目均由本机加载，与本机显示一模一样	全部 Engine 模式：所有對端曲目均由本機載入，與本機顯示一模一樣
 All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)	全部 CDJ 模式：不加载对端音频，一律显示 CDJ 式波形	全部 CDJ 模式：不載入對端音訊，一律顯示 CDJ 式波形
 All Engine Mode	全部 Engine 模式	全部 Engine 模式
@@ -346,13 +346,13 @@ All CDJ Mode	全部 CDJ 模式	全部 CDJ 模式
 All Engine Mode: no CDJ waveform on Line In	全部 Engine 模式下 Line In 不显示 CDJ 波形	全部 Engine 模式下 Line In 不顯示 CDJ 波形
 Downloading	正在下载	正在下載
 Loading	正在加载	正在載入
-Waiting for source analysis	等待源碟机分析波形	等待來源播放機分析波形
+Waiting for source analysis	等待源碟机分析波形	等待來源碟機分析波形
 Failed to open file within appropriate time.	未能在规定时间内打开文件。	未能在規定時間內開啟檔案。
 Could not load via network.	无法通过网络加载。	無法透過網路載入。
 Retrying…	正在重试…	正在重試…
-Streaming track: no file to copy from the CDJ.	流媒体曲目：CDJ 上没有可拷贝的文件。	串流曲目：CDJ 上沒有可複製的檔案。
-rekordbox Link track: no file to copy from the CDJ.	rekordbox Link 曲目：CDJ 上没有可拷贝的文件。	rekordbox Link 曲目：CDJ 上沒有可複製的檔案。
-CD or second USB: no file to copy from the CDJ.	CD 或第二个 USB：CDJ 上没有可拷贝的文件。	CD 或第二個 USB：CDJ 上沒有可複製的檔案。
+Streaming: no file to copy from CDJ.	流媒体：CDJ 无文件可拷贝。	串流：CDJ 無檔案可複製。
+rekordbox Link: no file to copy from CDJ.	rekordbox Link：CDJ 无文件可拷贝。	rekordbox Link：CDJ 無檔案可複製。
+CD or 2nd USB: no file to copy from CDJ.	CD 或第二 USB：CDJ 无文件可拷贝。	CD 或第二 USB：CDJ 無檔案可複製。
 Restart Engine to apply? Playback will stop.	需要重启 Engine，播放会中断。	需要重新啟動 Engine，播放會中斷。
 PERFORMANCE LAYOUT	演出布局	演出配置
 DECK BEHAVIOR	碟机行为	碟機行為
