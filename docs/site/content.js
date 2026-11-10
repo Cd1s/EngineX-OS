@@ -71,6 +71,9 @@
         ] },
         { k: "h", id: "whatsnew-5304", x: L("5.3.0.4 新功能（开发中）", "5.3.0.4 新功能（開發中）", "New in 5.3.0.4 (in development)"), nav: L("5.3.0.4 新功能", "5.3.0.4 新功能", "New in 5.3.0.4") },
         { k: "note", tone: "new", x: L("以下功能属于 5.3.0.4，尚未发布；正式发布后删除本提示。", "以下功能屬於 5.3.0.4，尚未發佈；正式發佈後刪除本提示。", "The items below belong to 5.3.0.4 and are not released yet; remove this note on release.") },
+        { k: "note", tone: "new", x: L("**SC LIVE 4 AUX（#171，待实机验证）**：原厂 `混音台菜单 → 通道 → 输入` 可把 AUX 送入通道 3 或 4，使用通道 CUE、推子、EQ 和 Sweep FX；仅在 AUX 模式屏蔽 AUX 直通，MIC2 保持原厂路由；两路共享 AUX，同时推起会叠加。Mixer Menu（Beta）迁移部分偏好设置并允许向线路输入通道载歌；JP21 隐藏未验证的 Bluetooth/Computer。",
+          "**SC LIVE 4 AUX（#171，待實機驗證）**：原廠 `混音台選單 → 通道 → 輸入` 可把 AUX 送入通道 3 或 4，使用通道 CUE、推桿、EQ 與 Sweep FX；僅在 AUX 模式封鎖 AUX 直通，MIC2 保持原廠路由；兩路共用 AUX，同時推起會疊加。Mixer Menu（Beta）搬移部分偏好設定並允許向線路輸入通道載歌；JP21 隱藏未驗證的 Bluetooth/Computer。",
+          "**SC LIVE 4 AUX (#171, hardware validation pending)**: the native `Mixer Menu → Channels → Input` selector routes AUX through channel 3 or 4 for CUE, fader, EQ and Sweep FX control; Line-In suppresses the direct AUX feed only in AUX mode; MIC2 keeps its stock route. Both channels share AUX and can sum. Mixer Menu (Beta) relocates some Preferences and allows loading tracks on Line-In channels; JP21 hides unverified Bluetooth/Computer choices.") },
         { k: "ul", x: [
           L("**四轨联动完整卸载与流媒体真实歌名（#49）**：对端碟机关机、重启或退歌时发送 UDP 告别包，本机在 350 ms 防抖后自动卸载影子轨（`Unload` + `UnSync`，自动交回 `MASTER`），清掉残留波形和曲目；移除可能死锁的 `RemoteState` 订阅，对端关机不再阻塞本机切换流媒体音源；流媒体曲目在影子碟机上显示真实的 `歌手 - 歌名`，不再显示内部数字缓存文件名。",
             "**四軌聯動完整卸載與串流真實歌名（#49）**：對端播放機關機、重啟或退歌時發送 UDP 告別封包，本機在 350 ms 防抖後自動卸載影子軌（`Unload` + `UnSync`，自動交回 `MASTER`），清掉殘留波形與曲目；移除可能死鎖的 `RemoteState` 訂閱，對端關機不再阻塞本機切換串流音源；串流曲目在影子播放機上顯示真實的 `歌手 - 歌名`，不再顯示內部數字快取檔名。",

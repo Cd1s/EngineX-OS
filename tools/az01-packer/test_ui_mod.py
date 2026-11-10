@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import subprocess
 import tempfile
 import unittest
@@ -111,6 +112,26 @@ class UiModBuildTest(unittest.TestCase):
             tl = Path(tmp) / "packs" / "en" / "Skins" / "Embedded" / "Views" / "BrowseView" / "Components" / "TrackList.qml"
             self.assertTrue(tl.is_file(), f"{tl} not found")
             self.assertIn("root.scTracklistWaveform", tl.read_text())
+            for lang in ("en", "zh-Hans", "zh-Hant"):
+                selector = (Path(tmp) / "packs" / lang / "Skins/Embedded/Views/MixerMenu/Pages/ChannelsPageItems/InputSelect.qml").read_text()
+                indexes = re.search(r"readonly property var scInputIndexes: (\{.*?\n    \})", selector, re.S)
+                self.assertIsNotNone(indexes)
+                # Run the JavaScript from the generated QML: JP21's visible
+                # option 1 must map to native index 3; other boards stay whole.
+                script = "const assert=require('node:assert/strict'); const Config={device:{name:'JP21'}};\n"
+                script += "function indexes(controller) " + indexes.group(1) + "\n"
+                script += """
+const four={inputs:['Engine','Bluetooth','Computer','Line In']};
+assert.deepEqual(indexes(four),[0,3]);
+assert.equal(four.inputs[indexes(four)[1]],'Line In');
+assert.deepEqual(indexes({inputs:['Engine','Bluetooth','Computer']}),[0]);
+for(const board of ['JP20','JP22','JP24','JC11S','JP21X']) {
+    Config.device.name=board;
+    assert.deepEqual(indexes(four),[0,1,2,3]);
+}
+"""
+                mapping = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+                self.assertEqual(mapping.returncode, 0, mapping.stderr)
 
 
 if __name__ == "__main__":
