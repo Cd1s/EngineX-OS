@@ -1443,9 +1443,12 @@ SERVICES_MAIN = """
 			if (!at.ready) continue
 			const l = at.line || (at.line = {pos: root.scTr("/Engine/Deck" + d + "/Track/TrackPosition"), play: root.scTr("/Engine/Deck" + d + "/PlayState"), sr: root.scTr("/Engine/Deck" + d + "/Track/SampleRate")})
 			if (!l.play.state || !(at.rate > 0) || !(l.sr.value > 0)) { at.env = undefined; continue }
-			const fresh = at.env === undefined || Math.abs(at.rate - at.envRate) > 2e-4
+			// 60 ms off the line is no block of audio (22 ms at most) but a seek that
+			// landed after the line began: averaged in, a start at 41 s read 800 ms.
+			const pos = l.pos.unnormalized / l.sr.value * 1000
+			const fresh = at.env === undefined || Math.abs(at.rate - at.envRate) > 2e-4 || Math.abs(pos - at.envRate * (now - at.envT0) - at.env) > 60
 			if (fresh) { at.envT0 = now; at.envRate = at.rate; at.envN = 1; at.fine = undefined }
-			const raw = l.pos.unnormalized / l.sr.value * 1000 - at.envRate * (now - at.envT0)
+			const raw = pos - at.envRate * (now - at.envT0)
 			at.env = fresh ? raw : at.env + (raw - at.env) * Math.max(1 / ++at.envN, (now - at.envAt) / 5000)
 			at.envAt = now
 		}
