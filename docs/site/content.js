@@ -454,7 +454,7 @@
         { k: "h", id: "smartsync", x: L("Smart Sync（智能同步与自动扩程）", "Smart Sync（智慧同步與自動擴程）", "Smart Sync (sync mode & automatic range widening)"), nav: L("Smart Sync（智能同步）", "Smart Sync（智慧同步）", "Smart Sync") },
         { k: "ol", x: [
           L("**快速切换同步方式**：下拉控制中心，在 `BAR`（按小节）、`BEAT`（按拍子）、`TEMPO`（仅速度）之间一键切换。", "**快速切換同步方式**：下拉控制中心，在 `BAR`（按小節）、`BEAT`（按拍子）、`TEMPO`（僅速度）之間一鍵切換。", "**Switch the sync mode fast**: pull down the Control Center and switch between `BAR`, `BEAT` and `TEMPO` (speed only) in one tap."),
-          L("**自动扩程**：两首曲目 BPM 跨度超过当前 Pitch Range（如默认 `±8%`）时，按下机身 `SYNC` 键会自动把 Pitch Range 拓宽到 `±16%` 或 `±50%`，不再有「BPM 差太大同步不上」的问题。", "**自動擴程**：兩首曲目 BPM 跨度超過目前 Pitch Range（如預設 `±8%`）時，按下機身 `SYNC` 鍵會自動把 Pitch Range 拓寬到 `±16%` 或 `±50%`，不再有「BPM 差太大同步不上」的問題。", "**Automatic range widening**: when the BPM gap between two tracks exceeds the current Pitch Range (for example the default `±8%`), pressing `SYNC` on the unit widens the Pitch Range to `±16%` or `±50%` by itself, so a large BPM gap no longer blocks sync."),
+          L("**自动扩程**：两首曲目 BPM 跨度超过当前变速范围（`Pitch Range`，如默认 `±8%`）时，按下机身 `SYNC` 键会自动把变速范围拓宽到 `±16%` 或 `±50%`，不再有「BPM 差太大同步不上」的问题。", "**自動擴程**：兩首曲目 BPM 跨度超過目前變速範圍（`Pitch Range`，如預設 `±8%`）時，按下機身 `SYNC` 鍵會自動把變速範圍拓寬到 `±16%` 或 `±50%`，不再有「BPM 差太大同步不上」的問題。", "**Automatic range widening**: when the BPM gap between two tracks exceeds the current Pitch Range (for example the default `±8%`), pressing `SYNC` on the unit widens the Pitch Range to `±16%` or `±50%` by itself, so a large BPM gap no longer blocks sync."),
         ] },
         { k: "h", id: "controls", x: L("实用操控", "實用操控", "Handy controls"), nav: L("实用操控", "實用操控", "Handy controls") },
         { k: "ul", x: [
