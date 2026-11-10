@@ -1071,6 +1071,7 @@ class DeckHeaderLayoutTest(unittest.TestCase):
                     self.assertIn("scBpm.fractionHeight + bpmInfo.fractionTextTopPadding", info)
                     self.assertNotIn("bpmInfoView.bpmFractionalText", info)
                     performance = (base / composite / "DeckPerformanceData/DeckPerformanceDataContent.qml").read_text()
+                    self.assertIn("id: autoLoop\n        Layout.rightMargin: 4", performance)
                     for name, text in (
                         ("Performance", performance),
                         ("GroupedMini", (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()),

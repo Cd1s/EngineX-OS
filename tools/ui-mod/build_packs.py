@@ -4489,6 +4489,7 @@ def edits(dev: bool):
         performance = bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"
         scaled[performance] += [
             ("    SoftTakeoverIndicators {\n", cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n    SoftTakeoverIndicators {\n"),
+            ("        id: autoLoop\n", "        id: autoLoop\n        Layout.rightMargin: 4\n"),
         ]
         # Both controls have spacing:6; patch() deliberately requires a unique
         # anchor, so apply it together with the control-specific view line.
@@ -4497,11 +4498,11 @@ def edits(dev: bool):
             anchor = ("        view: deckPerformanceDataContent.deckView." + view + "\n" +
                       ("        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n" if control == "beatJump" else ""))
             scaled[performance].append((anchor + "        spacing: 6\n", anchor + "        spacing: 4\n"))
-        # 60 px from Loop/Jump + 24 px sync margins + 12 px takeover margin
+        # 56 px from Loop/Jump + 24 px sync margins + 16 px takeover margin
         # pays for the entire 96 px Cue. The stock sync width is unchanged.
         scaled[performance] += [
             ("        Layout.leftMargin: 24\n        Layout.rightMargin: 24\n", "        Layout.leftMargin: 12\n        Layout.rightMargin: 12\n"),
-            ("                Layout.leftMargin: 24\n", "                Layout.leftMargin: 12\n"),
+            ("                Layout.leftMargin: 24\n", "                Layout.leftMargin: 8\n"),
         ]
         for control, width in (("autoLoop", 52), ("beatJump", 64)):
             scaled[performance] += [
@@ -4528,6 +4529,7 @@ def edits(dev: bool):
         ]
         split_controls = """        AutoLoop {
             Layout.preferredWidth: 52
+            Layout.rightMargin: 4
             view: deckTrackDataContent.deckView.autoLoopView
             spacing: 4
             iconWidth: 16
