@@ -3548,7 +3548,8 @@ SHADOW_LAYER = r"""
         Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(true); scDisplay.refreshDetails() } }
         readonly property real duration: metaDuration(meta)
         readonly property real waveformDuration: metaWaveDuration(meta)
-        readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
+        readonly property real pitchRate: wave && sample ? Math.max(0.05, 1 + (Number(sample.pitch) || 0) / 100) : 1
+        readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000) * pitchRate
         // The lane keeps the stock playhead setting (WaveFormItem.zeroPosition, fed
         // from /Client/Preferences/PlayheadPosition): same line as the local lanes.
         readonly property real playhead: "@KIND@" === "overview" ? position / duration : wave && owner.zeroPosition > 0 && owner.zeroPosition < 1 ? owner.zeroPosition : 0.5
@@ -3645,7 +3646,7 @@ SHADOW_LAYER = r"""
         clip: true
         visible: active && inheritedVisible && owner.width > 0 && owner.height > 0
         color: wave ? "black" : "#101114" // the stock lanes are black: on grey the stock fade over the left edge shows as a band
-        Binding { target: scDisplay; property: "color"; value: "transparent"; when: !scDisplay.graphical; restoreMode: Binding.RestoreBindingOrValue }
+        Binding { target: scDisplay; property: "color"; value: scDisplay.overview ? Style.surface01Color : "transparent"; when: !scDisplay.wave; restoreMode: Binding.RestoreBindingOrValue }
         // Stock roots can hide an empty Engine slot. Restore their original bindings on exit;
         // never a value: read while the view was off screen, visible is false, and writing
         // that back hid the stock lane for good (Engine mode showed no waveform).
@@ -3670,8 +3671,8 @@ SHADOW_LAYER = r"""
                 width: scDisplay.width; height: scDisplay.height
                 sourceComponent: Component { Item {
         Image {
-            visible: scDisplay.graphical && source !== ""
-            source: scDisplay.graphical && !scDisplay.tiled && !(scDisplay.wave && scDisplay.sample && scDisplay.sample.engine) ? scDisplay.waveAsset(scDisplay.imageUrl) : "" // a covered Engine slot has the overview only: not stretched over the scrolling lane
+            visible: scDisplay.wave && source !== ""
+            source: scDisplay.wave && !scDisplay.tiled && !(scDisplay.sample && scDisplay.sample.engine) ? scDisplay.waveAsset(scDisplay.imageUrl) : "" // a covered Engine slot has the overview only: not stretched over the scrolling lane
             sourceSize.width: scDisplay.overview || !scDisplay.detailed ? 1024 : 2048
             sourceSize.height: scDisplay.overview || !scDisplay.detailed ? 64 : 128
             asynchronous: true
@@ -3706,19 +3707,45 @@ SHADOW_LAYER = r"""
             }
         }
         // Native overview: elapsed RGB is 60%; band mode uses the stock Past colors.
-        // This texture stays static; only the clipping width follows the playhead.
+        // Clipped into non-overlapping left (past) and right (remaining) strips over the
+        // 30 px height above timeBar, with the stock 2.2x / 1.3x bottom-anchored scale (6c0e5ac).
         Item {
+            id: scOverviewStrip
             visible: scDisplay.overview
             clip: true
-            width: Math.max(0, Math.min(scDisplay.width, scDisplay.playhead * scDisplay.width))
-            height: scDisplay.height
-            Image {
-                source: scDisplay.overview ? scDisplay.waveAsset(scDisplay.imageUrl, true) : ""
-                sourceSize.width: 1024; sourceSize.height: 64
-                width: scDisplay.width; height: scDisplay.height
-                asynchronous: true; cache: false; smooth: true
-                fillMode: Image.Stretch
-                opacity: scDisplay.stale ? 0.55 : 1
+            width: scDisplay.width
+            height: Math.max(2, scDisplay.height - 2)
+            readonly property real splitX: Math.max(0, Math.min(scDisplay.width, scDisplay.playhead * scDisplay.width))
+            readonly property real yStretch: scDisplay.half ? (scDisplay.rgb ? @RGB_SCALE@ : @BANDS_SCALE@) : 1
+            Item {
+                width: scOverviewStrip.splitX
+                height: scOverviewStrip.height
+                clip: true
+                Image {
+                    source: scDisplay.overview ? scDisplay.waveAsset(scDisplay.imageUrl, true) : ""
+                    sourceSize.width: 1024; sourceSize.height: 64
+                    width: scDisplay.width; height: scOverviewStrip.height
+                    asynchronous: true; cache: false; smooth: true
+                    fillMode: Image.Stretch
+                    opacity: scDisplay.stale ? 0.55 : 1
+                    transform: Scale { origin.y: scOverviewStrip.height; yScale: scOverviewStrip.yStretch }
+                }
+            }
+            Item {
+                anchors.right: parent.right
+                width: Math.max(0, scDisplay.width - scOverviewStrip.splitX)
+                height: scOverviewStrip.height
+                clip: true
+                Image {
+                    anchors.right: parent.right
+                    source: scDisplay.overview ? scDisplay.waveAsset(scDisplay.imageUrl, false) : ""
+                    sourceSize.width: 1024; sourceSize.height: 64
+                    width: scDisplay.width; height: scOverviewStrip.height
+                    asynchronous: true; cache: false; smooth: true
+                    fillMode: Image.Stretch
+                    opacity: scDisplay.stale ? 0.55 : 1
+                    transform: Scale { origin.y: scOverviewStrip.height; yScale: scOverviewStrip.yStretch }
+                }
             }
         }
         // A fixed pool of grid lines: a new grid window (every half span of play)
@@ -3726,20 +3753,22 @@ SHADOW_LAYER = r"""
         // which was the main JS garbage of a playing shadow deck.
         Repeater {
             model: scDisplay.gridSlots
-            // The stock grid: a short grey tick at both edges on every beat; a bar
-            // has red ticks, a line between them and its number at the bottom left.
+            // The stock grid: a short grey tick at both edges on every beat (underneath
+            // the waveform, z: -1); a bar has red ticks, a line between them and its
+            // outlined number at the bottom left (on top of the waveform, z: 1).
             delegate: Item {
                 id: scBeat
                 required property int index
                 readonly property var beat: index < scDisplay.grid.length ? scDisplay.grid[index] : null
                 readonly property bool bar: beat !== null && beat.number % 4 === 0
                 visible: beat !== null
+                z: bar ? 1 : -1
                 x: beat ? scDisplay.screenX(beat.ms) - 2 : 0
                 width: 4; height: scDisplay.height
-                Rectangle { width: 4; height: 8; color: scBeat.bar ? "#ff4d4d" : "#636363" }
-                Rectangle { y: scBeat.height - 8; width: 4; height: 8; color: scBeat.bar ? "#ff4d4d" : "#636363" }
-                Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: "#b7b7b7" }
-                Text { textFormat: Text.PlainText; visible: scBeat.bar; anchors.right: scBeat.left; anchors.rightMargin: 5; anchors.bottom: scBeat.bottom; anchors.bottomMargin: 3; text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""; color: "white"; font.pixelSize: 15 }
+                Rectangle { width: 4; height: 8; color: scBeat.bar ? Style.error01Color : Style.gridlinesColor }
+                Rectangle { y: scBeat.height - 8; width: 4; height: 8; color: scBeat.bar ? Style.error01Color : Style.gridlinesColor }
+                Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: Style.icon01Color }
+                Text { textFormat: Text.PlainText; visible: scBeat.bar; anchors.right: scBeat.left; anchors.rightMargin: 5; anchors.bottom: scBeat.bottom; anchors.bottomMargin: 3; text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""; color: Style.font02Color; style: Text.Outline; styleColor: Style.surface01Color; font.pixelSize: 15; font.weight: Font.Medium }
             }
         }
         Repeater {
@@ -3758,11 +3787,66 @@ SHADOW_LAYER = r"""
         Repeater {
             model: scDisplay.cues
             delegate: Item {
+                id: scCueItem
                 required property var modelData
+                readonly property bool isMainCue: modelData.i === 0
+                readonly property color cueColor: isMainCue ? Style.icon02Color : (modelData.c || "#26a6ff")
+                readonly property string cueLabel: isMainCue ? "" : (modelData.n || "")
                 x: scDisplay.screenX(modelData.ms)
-                width: 2; height: scDisplay.height
-                Rectangle { anchors.fill: parent; color: modelData.c || "#26a6ff" }
-                Text { textFormat: Text.PlainText; visible: scDisplay.wave; x: 3; text: modelData.n || String(modelData.i); color: modelData.c || "#26a6ff"; font.pixelSize: 11 }
+                width: 0
+                height: scDisplay.overview ? Math.max(2, scDisplay.height - 2) : scDisplay.height
+                z: 4
+                EngineXEmbedded.ColoredImage {
+                    id: scCueUpper
+                    objectName: "HotCueTriangle"
+                    visible: scDisplay.wave
+                    anchors.top: parent.top
+                    anchors.horizontalCenter: parent.left
+                    source: scDisplay.wave ? Qt.resolvedUrl("./img/cue.png") : ""
+                    color: scCueItem.cueColor
+                }
+                Text {
+                    objectName: "HotCueLabel"
+                    visible: scDisplay.wave && text.length > 0
+                    anchors.right: scCueUpper.left
+                    anchors.top: parent.top
+                    textFormat: Text.PlainText
+                    text: scCueItem.cueLabel
+                    color: Style.font02Color
+                    font.pixelSize: 17
+                    Rectangle {
+                        z: -1
+                        anchors.fill: parent
+                        color: Style.surface01Color
+                    }
+                }
+                EngineXEmbedded.ColoredImage {
+                    objectName: "HotCueTriangle"
+                    visible: scDisplay.wave
+                    rotation: 180
+                    anchors.bottom: parent.bottom
+                    anchors.horizontalCenter: parent.left
+                    source: scDisplay.wave ? Qt.resolvedUrl("./img/cue.png") : ""
+                    color: scCueItem.cueColor
+                }
+                Rectangle {
+                    visible: scDisplay.overview
+                    anchors.horizontalCenter: parent.left
+                    anchors.horizontalCenterOffset: 0.5
+                    width: 3
+                    height: Math.max(0, parent.height - 2)
+                    color: scCueItem.cueColor
+                    antialiasing: true
+                }
+                EngineXEmbedded.ColoredImage {
+                    visible: scDisplay.overview
+                    anchors.bottom: parent.bottom
+                    anchors.horizontalCenter: parent.left
+                    source: scDisplay.overview ? Qt.resolvedUrl("./img/icon_cue.png") : ""
+                    color: scCueItem.cueColor
+                    scale: scDisplay.owner && scDisplay.owner.markerScale ? scDisplay.owner.markerScale : 0.75
+                    transformOrigin: Item.Bottom
+                }
             }
         }
                 } }
@@ -3781,10 +3865,22 @@ SHADOW_LAYER = r"""
             delegate: Rectangle {
                 required property int index
                 x: Math.max(0, Math.min(index * 60000 * scMinutes.step / scDisplay.duration * scDisplay.width - width, scDisplay.width - width))
-                y: scDisplay.height - height - 1
+                y: scDisplay.height - height - 3
                 width: 2; height: 6
                 color: scMinutes.step > 1 ? Style.active01Color : Style.icon02Color
             }
+        }
+        Rectangle {
+            objectName: "Deck_WaveformOverview_TimeBar"
+            visible: scDisplay.overview && !!scDisplay.sample && !scDisplay.sample.engine
+            readonly property var tv: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views && PlanckGUI.views.timeInfoViewController && scDisplay.deck > 0 ? PlanckGUI.views.timeInfoViewController.timeInfoViews[scDisplay.deck - 1] : null
+            readonly property bool showElapsed: !!(tv && tv.flipped)
+            readonly property real nowX: Math.max(0, Math.min(scDisplay.playhead * scDisplay.width - 2, scDisplay.width - 4))
+            x: showElapsed ? 0 : Math.min(scDisplay.width, nowX + 5)
+            y: scDisplay.height - 2
+            width: Math.max(0, showElapsed ? nowX - 1 : scDisplay.width - x)
+            height: 2
+            color: Style.icon02Color
         }
         // Stock TrackEndFlashWarning: red flash on the overview when remaining time <= TrackEndWarningTime.
         Rectangle {
@@ -3802,8 +3898,13 @@ SHADOW_LAYER = r"""
         }
         Rectangle {
             visible: scDisplay.graphical && !!scDisplay.sample && !scDisplay.sample.engine // a track on its way has no position yet
-            x: Math.max(0, Math.min(scDisplay.width - width, scDisplay.playhead * scDisplay.width))
-            width: 2; height: scDisplay.height; color: "white"
+            x: Math.max(0, Math.min(scDisplay.width - width, Math.round(scDisplay.playhead * scDisplay.width - width / 2)))
+            width: scDisplay.wave ? 6 : 4; height: scDisplay.height; color: scDisplay.wave ? Style.surface01Color : Style.icon02Color
+            Rectangle {
+                visible: scDisplay.wave
+                x: 1; width: 4; height: parent.height
+                color: Style.icon02Color
+            }
         }
         Text { textFormat: Text.PlainText;
             visible: !!scDisplay.sample
@@ -4296,7 +4397,7 @@ def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
         if kind not in ("waveform", "overview"):
             value = '"#000000"'
         palette.append(f"readonly property color {prop}: {value}")
-        past = three_band(f"waveform{band}PastColor", band, BAND_PAST) if kind == "overview" else '"#000000"'
+        past = three_band(f"waveform{band}PastColor", band, BAND_PAST) if kind in ("waveform", "overview") else '"#000000"'
         palette.append(f"readonly property color past{band}Color: {past}")
     # The stock overview RGB QSB hardcodes these same WaveFormItem defaults.
     for prop, native, default in (("saturation", "saturationRgbWave", 1.612), ("brightAmp", "brightAmpFactorRgbWave", 0.473), ("brightGain", "brightGainRgbWave", 2.405), ("brightFloor", "brightFloorRgbWave", 0.197)):
@@ -4309,7 +4410,7 @@ def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
         h_start = raw_layer.index("        Loader {\n            id: scHeaderLoader\n            active: scDisplay.live && !scDisplay.graphical\n")
         h_end = raw_layer.index("@BUSY@")
         raw_layer = raw_layer[:h_start] + raw_layer[h_end:]
-    layer = raw_layer.replace("@BUSY@", busy).replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette)).replace("@ICONS@", icons)
+    layer = raw_layer.replace("@BUSY@", busy).replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette)).replace("@ICONS@", icons).replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS))
     return text[:end] + layer + text[end:]
 
 
@@ -5381,8 +5482,6 @@ def edits(dev: bool):
              "                const labels = beatGridEditor ? beatGridEditor.deckLabels() : []\n"
              "                const deck = l => { const m = viewController.getDeckTabViewModel(l); return m ? m.deckNumber : 0 }\n"
              f"                return {role} ? labels.slice().sort((a, b) => deck(a) - deck(b)) : labels\n"),
-            ("                    activeDeck: microDeckLoader.viewModel.activeDeck\n",
-             f"                    activeDeck: {role} ? !root.scDeckLocked(microDeckLoader.viewModel.deckNumber) : microDeckLoader.viewModel.activeDeck\n"),
             ("                    greyOut: !microDeckLoader.viewModel.activeDeck && !deckTabs.isTouchable\n",
              f"                    greyOut: {role} ? root.scDeckLocked(microDeckLoader.viewModel.deckNumber) : !microDeckLoader.viewModel.activeDeck && !deckTabs.isTouchable\n"),
         ]
