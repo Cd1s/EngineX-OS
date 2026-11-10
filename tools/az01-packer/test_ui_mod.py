@@ -114,7 +114,7 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("const wantSync = !!e.sync && (!e.link || !root.scPlayer)", m)
         self.assertIn("function scShadowSpeed(d, pitch)", m)
         self.assertIn("at.sd * 0.85 + drift * 0.15", m)
-        self.assertIn("at.postPlay = now + 380", m)
+        self.assertNotIn("at.postPlay", m)  # the gap after Play is closed by scShadowBend, not a second seek
         self.assertIn("e.seq === at.lastSeq", m)
         self.assertIn('x.open("POST", "http://127.0.0.1:8080/v1/sc5000/debug/shadow")', m)
         self.assertIn("root.scShadowDebug = !!r.debug", m)
@@ -228,7 +228,8 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
                  "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
-                 "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying")
+                 "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
+                 "scShadowLine", "scShadowBend", "scShadowBendEnd")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
@@ -1344,6 +1345,58 @@ current=130.18;now+=520;scShadowTick();
 assert.equal(bodies.length,2,'tempo-only change must not wait for the five-second full post');
 assert.equal(bodies[1][0].currentBpm,130.18);assert.equal(bodies[1][0].pitch,1.7);
 now+=520;scShadowTick();assert.equal(bodies.length,2);assert.equal(pings,1);
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the follower behavioral checks")
+class ShadowFollowerBendTest(unittest.TestCase):
+    """Engine mode: the shadow deck plays at the source's exact tempo and closes a gap with PITCH BEND, not a seek."""
+
+    def test_gap_below_the_seek_limit_is_bent_closed_at_the_exact_tempo(self):
+        ShadowDisplayTest.js(self, r"""
+const T0 = now, props = new Map();
+let ahead = 80, seeks = 0;
+globalThis.scShadowBent = null;
+globalThis.scShadowBendTimer = {interval: 0, running: false, restart() { this.running = true }, stop() { this.running = false }};
+globalThis.scTr = path => {
+    let p = props.get(path);
+    if (p) return p;
+    const deck2 = path.startsWith('/Engine/Deck2/');
+    p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '8' : 'Off',
+        entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '',
+        _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? 0.5 : 0,
+        get value() { return this._v }, set value(v) { this._v = v; if (path.endsWith('/SetSongPosition')) seeks++ },
+        // Engine moves TrackPosition in audio blocks of 46 ms
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? (Math.floor((now - T0) / 46) * 46 + 5000 + ahead) * 44.1 : 0 }};
+    props.set(path, p);
+    return p;
+};
+let seq = 0;
+const apply = () => scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}', sync: true,
+    positionMs: now - T0 + 5000, at: now, pitch: 0.01, bpm: 138, currentBpm: 138.0089, jumps: 0, seq: ++seq}], false);
+const run = ms => { for (let t = 0; t < ms; t += 40) { now += 40; scShadowLine(now); if (t % 520 === 0) apply() } };
+const back = scTr('/Engine/Deck2/Track/NudgeBackward'), fwd = scTr('/Engine/Deck2/Track/NudgeForward');
+apply();
+assert.ok(scTr('/Client/Librarian/AddToDatabaseAndLoadToDeck2').url.endsWith('/a.flac'));
+run(1960);
+assert.equal(back.state, false, 'no bend before the line is measured');
+run(2600);
+assert.equal(back.state, true, '80 ms ahead: bend back');
+assert.equal(fwd.state, false);
+assert.equal(seeks, 0, 'no seek for a gap below the limit');
+assert.ok(Math.abs(scShadowBendTimer.interval - 80 * 0.8 / 0.07) < 40, 'bend time ' + scShadowBendTimer.interval);
+assert.ok(Math.abs(scTr('/Engine/Deck2/Speed').value - (0.5 + (138.0089 / 138 - 1) * 100 / 16)) < 1e-9, 'fader at the exact tempo ratio');
+assert.equal(scTr('/Engine/Deck2/SyncMode').string, 'Off', 'a linked shadow deck is never synced by us');
+ahead = 4; // what the bend left
+scShadowBendEnd();
+assert.equal(back.state, false);
+run(4000);
+assert.equal(back.state || fwd.state, false, 'within 6 ms: left alone');
+assert.equal(seeks, 0);
+ahead = -40; run(2600);
+assert.equal(fwd.state, true, '40 ms behind: bend forward');
+scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: false, link: '{l}', positionMs: now - T0 + 5000, at: now, pitch: 0.01, bpm: 138, currentBpm: 138.0089, jumps: 0, seq: ++seq}], false);
+assert.equal(fwd.state, false, 'a pause releases the bend');
 """)
 
 

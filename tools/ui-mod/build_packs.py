@@ -974,6 +974,7 @@ SERVICES_MAIN = """
 	function scShadowTick() {
 		const now = Date.now()
 		if (now - scShadowPollAt > 3000) scShadowPoll()
+		scShadowLine(now)
 		if (scShadowRoleDirty) {
 			scShadowRoleDirty = false
 			scShadowMineRole = scFourDeckRole
@@ -1260,6 +1261,7 @@ SERVICES_MAIN = """
 		if (now < at.loadUntil || !g("/Track/SongLoaded").state) return
 		at.ready = true
 		at.link = e.link || ""
+		at.rate = scShadowRate(e)
 		// no scShadowLink(): a RemoteState/Register subscription made Engine spam "service has disappeared" and block the Librarian when the other player went off; our UDP push already carries the edges
 		scShadowCues(d, at, e, now)
 		// Updates sent before an Engine Link edge arrive after it: skip them, or
@@ -1295,19 +1297,21 @@ SERVICES_MAIN = """
 		const wantSync = !!e.sync && (!e.link || !root.scPlayer)
 		const dbg = act => { if (root.scShadowDebug) root.scShadowDbg({deck: d, act: act, posMs: Math.round(posMs), target: Math.round(target), drift: Math.round(drift), sd: Math.round(at.sd || 0), pitch: e.pitch, pll: at.pll || 0, range: g("/SpeedRange").string, sync: !!e.sync, synced: synced, bpm: e.bpm, currentBpm: e.currentBpm, beat: e.beat, jumps: e.jumps, seeks: at.seeks || 0, master: !!g("/DeckIsMaster").state, link: !!e.link}) }
 		if (!e.playing) at.pll = 0
-		if (!(wantSync && synced)) scShadowSpeed(d, e.pitch)
+		// e.pitch is rounded to 0.01 %: at 138 BPM that alone slipped 4 ms a minute.
+		// The fader goes to the source's tempo ratio, so the BPM shown is the source's.
+		const exact = e.bpm > 0 && e.currentBpm > 0 ? (e.currentBpm / e.bpm - 1) * 100 : NaN
+		if (!(wantSync && synced)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch)
 		// Play, CUE held, pause, CUE released: on the first update that shows it.
 		// at.cmd only stops rewriting the same state while Engine follows (a frame
 		// or two); a change of the source's state always goes through.
 		if (e.playing !== local) {
+			if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
 			if (at.cmd !== e.playing || now >= at.cmdUntil) {
 				if (e.playing) {
 					if (Math.abs(drift) > 25) seek(target)
 					g("/Play").state = true
-					at.postPlay = now + 380
 				} else {
 					g("/Play").state = false
-					at.postPlay = 0
 					// CUE released: back on the cue point. After a preview the sender's
 					// TrackPosition may not have jumped back yet; the preview started there.
 					const back = wasPreview && at.pausedAt !== undefined ? at.pausedAt : e.positionMs
@@ -1382,22 +1386,70 @@ SERVICES_MAIN = """
 		// Never steer /Engine/DeckN/Speed with a synthetic PLL: changing Speed alters
 		// the displayed CurrentBPM on screen ("BPM moving back and forth") and forces
 		// Engine's Elastique time-stretcher to re-tune every few seconds (3-5 s stutter).
-		// Both SC5000 decks run on 20 ppm crystals at the exact unrounded e.pitch; one
-		// post-play alignment check 380 ms after Play closes decoder spin-up latency.
+		// Both SC5000 decks run on 20 ppm crystals at the exact unrounded tempo ratio.
+		// What is left (a seek lands tens of ms off, the source was nudged or pulled
+		// in by its Sync, the two clocks) was never closed below lim: 105 ms ahead on
+		// one player, 38 ms behind on the other, under a green phase meter. It is
+		// closed the way a DJ does, with Engine's PITCH BEND (scShadowBend), measured
+		// on the deck's newest audio block (scShadowLine) as the source's line is:
+		// the raw TrackPosition is up to 46 ms old, 20 ms on average.
 		if (wantSync && synced) return dbg("sync")
 		if (now - at.seekAt < 300) return dbg("settle")
 		at.sd = at.sd === undefined ? drift : at.sd * 0.85 + drift * 0.15
-		if (at.postPlay && now >= at.postPlay) {
-			at.postPlay = 0
-			if (Math.abs(drift) > 35 && Math.abs(drift) <= lim) {
-				seek(target)
-				at.seeks = (at.seeks || 0) + 1
-				at.sd = 0
-				return dbg("align")
-			}
-		}
 		at.pll = 0
+		if (scShadowBent && scShadowBent.at === at) return dbg("bending")
+		const fine = at.env !== undefined && now - at.envT0 >= 2000 ? target - at.env - at.envRate * (now - at.envT0) : 0
+		at.fine = fine
+		if (Math.abs(fine) > 6 && Math.abs(fine) <= lim) {
+			scShadowBend(d, at, fine)
+			return dbg("bend")
+		}
 		dbg("steady")
+	}
+	// The shadow deck's own line, as the sender's (scShadowTick): the newest audio
+	// block of a playing deck is the upper envelope of position - rate * time. In
+	// at.env at the rate frozen in at.envRate since at.envT0; the 0.5 ms/s decay
+	// follows a rate that is a little lower, and a deck that fell behind (its raw
+	// positions average more than 25 ms under the line) is closed in a fifth a tick.
+	function scShadowLine(now) {
+		if (scShadowDisplayOnly) return
+		for (const d in scShadowAt) {
+			const at = scShadowAt[d]
+			if (!at.ready) continue
+			const l = at.line || (at.line = {pos: root.scTr("/Engine/Deck" + d + "/Track/TrackPosition"), play: root.scTr("/Engine/Deck" + d + "/PlayState"), sr: root.scTr("/Engine/Deck" + d + "/Track/SampleRate")})
+			if (!l.play.state || !(at.rate > 0) || !(l.sr.value > 0)) { at.env = undefined; continue }
+			const fresh = at.env === undefined || Math.abs(at.rate - at.envRate) > 2e-4
+			if (fresh) { at.envT0 = now; at.envRate = at.rate }
+			const raw = l.pos.unnormalized / l.sr.value * 1000 - at.envRate * (now - at.envT0)
+			at.avg = fresh ? raw : at.avg + (raw - at.avg) * 0.2
+			const slow = at.env - at.avg - 25 * at.envRate
+			at.env = fresh ? raw : Math.max(raw, at.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - at.envAt)))
+			at.envAt = now
+		}
+	}
+	// Engine's pitch bend (the PITCH BEND buttons) runs a deck 7 % fast or slow
+	// while held (measured on a JP07: 27 ms in 400 ms). No seek, which flushes the
+	// decoder and snaps the waveform, and no Speed change: the BPM shown stays the
+	// source's. One deck at a time, 80 % of the gap, 1.5 s at most; the line is
+	// measured anew after it.
+	property var scShadowBent: null
+	Timer { id: scShadowBendTimer; onTriggered: root.scShadowBendEnd() }
+	function scShadowBend(d, at, ms) {
+		if (scShadowBent) return
+		const p = root.scTr("/Engine/Deck" + d + "/Track/Nudge" + (ms > 0 ? "Forward" : "Backward"))
+		if (!p) return
+		p.state = true
+		scShadowBent = {p: p, at: at}
+		scShadowBendTimer.interval = Math.min(1500, Math.abs(ms) * 0.8 / 0.07)
+		scShadowBendTimer.restart()
+	}
+	function scShadowBendEnd() {
+		const b = scShadowBent
+		if (!b) return
+		scShadowBent = null
+		scShadowBendTimer.stop()
+		b.p.state = false
+		b.at.env = undefined
 	}
 	// The shadow deck's fader at pitch percent: the SpeedRange (8 % by default) is
 	// widened first, or +11.1 % (a synced 126 BPM track at 140) stuck at +8 %.
@@ -1412,7 +1464,7 @@ SERVICES_MAIN = """
 			range = parseFloat(pRange.string) || range
 		}
 		const speed = Math.max(0, Math.min(1, 0.5 + pitch / (2 * range)))
-		if (Math.abs(pSpeed.value - speed) * 2 * range > 0.03) pSpeed.value = speed
+		if (Math.abs(pSpeed.value - speed) * 2 * range > 0.002) pSpeed.value = speed
 	}
 	// Debug telemetry (debug_telemetry=1 or /tmp/sc5000-debug, told by GET /shadow):
 	// the receiver's decisions, posted in batches to Go's ring and log.
@@ -1487,6 +1539,7 @@ SERVICES_MAIN = """
 		if (!(sr > 0 && len > 0)) return
 		g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, ms / (len / sr * 1000)))
 		at.seekAt = Date.now()
+		at.env = undefined
 	}
 	// Engine Link already mirrors the other Engine's properties here, within a
 	// few ms of that Engine changing them (measured: our own update arrives
