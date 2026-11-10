@@ -1405,26 +1405,34 @@ SERVICES_MAIN = """
 		// in by its Sync, the two clocks) was never closed below lim: 105 ms ahead on
 		// one player, 38 ms behind on the other, under a green phase meter. It is
 		// closed the way a DJ does, with Engine's PITCH BEND (scShadowBend), measured
-		// on the deck's newest audio block (scShadowLine) as the source's line is:
-		// the raw TrackPosition is up to 46 ms old, 20 ms on average.
+		// against the deck's own line (scShadowLine). The source posts its newest
+		// audio block, 18 ms of wall time ahead of the mean of its raw positions
+		// (measured), and that line still moves +-6 ms: the gap is averaged over
+		// 8 s (a step past 15 ms at once) and, while that average is under 10 s old,
+		// only bent past 12 ms. At 6 ms on a 2 s old line the deck was bent 55 times
+		// in six minutes, to and fro.
 		if (wantSync && synced) return dbg("sync")
 		if (now - at.seekAt < 300) return dbg("settle")
 		at.sd = at.sd === undefined ? drift : at.sd * 0.85 + drift * 0.15
 		at.pll = 0
 		if (scShadowBent && scShadowBent.at === at) return dbg("bending")
-		const fine = at.env !== undefined && now - at.envT0 >= 2000 ? target - at.env - at.envRate * (now - at.envT0) : 0
-		at.fine = fine
-		if (Math.abs(fine) > 6 && Math.abs(fine) <= lim) {
-			scShadowBend(d, at, fine)
-			return dbg("bend")
+		const age = at.env !== undefined ? now - at.envT0 : 0
+		if (age >= 2000) {
+			const gap = target - at.env - at.envRate * (now - at.envT0 + 18)
+			at.fine = at.fine === undefined || Math.abs(gap - at.fine) > 15 ? gap : at.fine + (gap - at.fine) * Math.min(1, (now - at.fineAt) / 8000)
+			at.fineAt = now
+			if (Math.abs(at.fine) > (age < 10000 ? 12 : 6) && Math.abs(at.fine) <= lim) {
+				scShadowBend(d, at, at.fine)
+				return dbg("bend")
+			}
 		}
 		dbg("steady")
 	}
-	// The shadow deck's own line, as the sender's (scShadowTick): the newest audio
-	// block of a playing deck is the upper envelope of position - rate * time. In
-	// at.env at the rate frozen in at.envRate since at.envT0; the 0.5 ms/s decay
-	// follows a rate that is a little lower, and a deck that fell behind (its raw
-	// positions average more than 25 ms under the line) is closed in a fifth a tick.
+	// The shadow deck's own line: the mean of position - rate * time over 5 s, in
+	// at.env at the rate frozen in at.envRate since at.envT0. Not the upper envelope
+	// the sender posts: that rides on the one raw position in sixty that reads
+	// 13 ms ahead, so for seconds after every new line (a bend, a seek) it read
+	// 4-10 ms low and the deck was bent forward, then back when the next one came.
 	function scShadowLine(now) {
 		if (scShadowDisplayOnly) return
 		for (const d in scShadowAt) {
@@ -1433,11 +1441,9 @@ SERVICES_MAIN = """
 			const l = at.line || (at.line = {pos: root.scTr("/Engine/Deck" + d + "/Track/TrackPosition"), play: root.scTr("/Engine/Deck" + d + "/PlayState"), sr: root.scTr("/Engine/Deck" + d + "/Track/SampleRate")})
 			if (!l.play.state || !(at.rate > 0) || !(l.sr.value > 0)) { at.env = undefined; continue }
 			const fresh = at.env === undefined || Math.abs(at.rate - at.envRate) > 2e-4
-			if (fresh) { at.envT0 = now; at.envRate = at.rate }
+			if (fresh) { at.envT0 = now; at.envRate = at.rate; at.envN = 1; at.fine = undefined }
 			const raw = l.pos.unnormalized / l.sr.value * 1000 - at.envRate * (now - at.envT0)
-			at.avg = fresh ? raw : at.avg + (raw - at.avg) * 0.2
-			const slow = at.env - at.avg - 25 * at.envRate
-			at.env = fresh ? raw : Math.max(raw, at.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - at.envAt)))
+			at.env = fresh ? raw : at.env + (raw - at.env) * Math.max(1 / ++at.envN, (now - at.envAt) / 5000)
 			at.envAt = now
 		}
 	}
