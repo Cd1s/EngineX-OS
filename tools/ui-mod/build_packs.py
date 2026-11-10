@@ -530,7 +530,7 @@ SERVICES_MAIN = """
 		if (!p) {
 			p = []
 			for (let d = 1; d <= 4; d++) p.push({play: scTr("/Engine/Deck" + d + "/PlayState"), cmd: scTr("/Engine/Deck" + d + "/Play"), length: scTr("/Engine/Deck" + d + "/Track/TrackLength")})
-			if (!p.every(x => x.play && x.cmd && x.length)) return false // never collect blind: Engine is still building its decks
+			if (!p[0].play || !p[0].cmd || !p[0].length) return false // wait for deck 1 to build
 			scGcProps = p
 		}
 		let playing = false, sig = 0
@@ -538,7 +538,7 @@ SERVICES_MAIN = """
 			// Playing also means a held CUE preview: PlayState stays false while it
 			// sounds and scrolls (scShadowTick's sample, own decks), or the Play command.
 			const x = p[d - 1], s = scShadowDisplay[d], own = scShadowPrev[d]
-			if (x.play.state || x.cmd.state || (own && own.playing) || (s && s.playing && !s.stale)) playing = true
+			if ((x.play && x.play.state) || (x.cmd && x.cmd.state) || (own && own.playing) || (s && s.playing && !s.stale)) playing = true
 			sig = sig * 31 + (x.length ? x.length.unnormalized || 0 : 0)
 		}
 		if (sig !== g.loadSig || scGcLoadSeq !== g.loadSeq) { g.loadSig = sig; g.loadSeq = scGcLoadSeq; g.loadAt = now }
@@ -985,6 +985,7 @@ SERVICES_MAIN = """
 	readonly property var scShadowEmptyArray: []
 	readonly property var scShadowEmptyObject: ({})
 	readonly property var scShadowDecks: [1, 2, 3, 4]
+	readonly property var scChannelLinePaths: ["/Engine/Mixer/Channel1/Line", "/Engine/Mixer/Channel2/Line", "/Engine/Mixer/Channel3/Line", "/Engine/Mixer/Channel4/Line"]
 	property string scShadowMineRole: "?"
 	property var scShadowMine: []
 	property var scShadowSampleSpare: ({})
@@ -1059,7 +1060,7 @@ SERVICES_MAIN = """
 			s.cue = !s.ps && !!g.cueLED.state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
 			s.playing = s.ps || s.cue
 			s.master = !!g.master.state
-			if (p && now - p.syncAt < 200) { s.sync = p.sync; s.syncAt = p.syncAt; s.range = p.range; s.rangeIndex = p.rangeIndex; s.keylock = p.keylock }
+			if (p && now - p.syncAt < 1000) { s.sync = p.sync; s.syncAt = p.syncAt; s.range = p.range; s.rangeIndex = p.rangeIndex; s.keylock = p.keylock }
 			else {
 				s.sync = (g.sync.string || "Off") !== "Off"; s.syncAt = now; s.keylock = !!g.keylock.state
 				// .string allocates: the range is read again only when its index moved.
@@ -1232,7 +1233,7 @@ SERVICES_MAIN = """
 						const r = JSON.parse(x.responseText)
 						root.scShadowDebug = !!r.debug
 						root.scShadowApplyAll(r.decks || root.scShadowEmptyArray, r.displayOnly !== false)
-						wait = !r.role ? 500 : r.ver === undefined ? 120 : 60
+						wait = (!r.role || !(Array.isArray(r.decks) && r.decks.some(d => d.playing && !d.stale))) ? 500 : (r.ver === undefined ? 120 : 60)
 						if (r.ver !== undefined) root.scShadowVer = r.ver
 					}
 				} catch (err) { console.warn("EngineX shadow decks: " + err) }
@@ -1250,7 +1251,7 @@ SERVICES_MAIN = """
 		if (typeof root !== "undefined" && root && root.scTr) {
 			for (let d = 1; d <= 4; d++) {
 				try {
-					const p = root.scTr("/Engine/Mixer/Channel" + d + "/Line")
+					const p = root.scTr(root.scChannelLinePaths[d - 1])
 					if (p && p.state) scLines.push(d)
 				} catch (e) {}
 			}
@@ -1326,7 +1327,8 @@ SERVICES_MAIN = """
 	function scShadowEmpty(d, now) {
 		// A display slot is Engine's business only while our own load is still on it.
 		if (scShadowDisplayOnly || (((scShadowEngineMask >> d) & 1) === 0 && !(scShadowAt[d] && scShadowAt[d].path))) return
-		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
+		const at = scShadowAt[d]
+		if (!at) return
 		// On an all-in-one console (#160), leave Decks 3/4 alone unless a shadow peer loaded them.
 		if (!root.scPlayer && !at.path) return
 		const pPlay = root.scTr("/Engine/Deck" + d + "/Play")
