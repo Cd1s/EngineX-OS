@@ -462,6 +462,34 @@ func TestDisplayLibraryReadOnlyFilesAndStreaming(t *testing.T) {
 	}
 }
 
+func TestDisplayAssetStockRoundedOverview(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		duration, span float64
+		detail, bad    bool
+	}{
+		{"stock m4a", 392788.7528344671, 392000, false, false},
+		{"stock mp3", 260493.0612244898, 260000, false, false},
+		{"exact", 392788.7528344671, 392788.7528344671, false, false},
+		{"unrelated overview", 392788.7528344671, 392100, false, true},
+		{"previous second", 392788.7528344671, 391000, false, true},
+		{"rounded detail", 392788.7528344671, 392000, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testDisplayAsset()
+			a.DurationMS = tc.duration
+			a.Overview.SamplesPerBin = tc.span * a.SampleRate / 1000 / float64(len(a.Overview.Bands)/3)
+			if tc.detail {
+				w := a.Overview
+				a.Waveform = &w
+			}
+			if err := validateDisplayAsset(a, a.Key); (err != nil) != tc.bad {
+				t.Fatalf("rounded source overview: %v", err)
+			}
+		})
+	}
+}
+
 func TestDisplayAssetRejectsInvalidData(t *testing.T) {
 	for _, change := range []func(*shadowDisplayAsset){
 		func(a *shadowDisplayAsset) { a.Key = "wrong" },
