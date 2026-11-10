@@ -3089,35 +3089,9 @@ def window():
     return "planckQuickView" if v53() else "MainWindow"
 
 
-ZOOM_STEP = """
-	// 10 waveform zoom steps, geometric (about x1.4 per step, like a pinch) from 1 s to the
-	// limit however far #77 raised it: stock steps 0.5 s per detent, 60 detents out to 30 s.
-	// A linear step jumped 1 s -> 4 s at once and redrew 4x the vertices in one frame.
-	// Detents that arrive within one frame collapse into one write.
-	property int scZoomPending: 0
+# Read by the display-only shadow lane; the Browse encoder zooms the stock way.
+ZOOM_PROP = """
 	readonly property QObjProperty scZoomProp: Planck.getProperty("/Engine/Master/WaveformZoom")
-	Timer {
-		id: scZoomTimer
-		interval: 16
-		onTriggered: {
-			const t = root.scZoomProp && root.scZoomProp.translator
-			const n = root.scZoomPending
-			root.scZoomPending = 0
-			if (!t || !t.editable || !n) return
-			const lo = Math.max(1, t.minimum !== undefined ? t.minimum : 1), hi = t.maximum !== undefined ? t.maximum : 30
-			const ratio = Math.pow(hi / lo, 1 / 9) // lo..hi in 10 levels
-			const cur = Math.max(lo, Math.min(hi, t.unnormalized))
-			const level = Math.round(Math.log(cur / lo) / Math.log(ratio)) + n
-			t.unnormalized = Math.max(lo, Math.min(hi, lo * Math.pow(ratio, Math.max(0, Math.min(9, level)))))
-		}
-	}
-	function scZoom(dir) {
-		scZoomPending += dir
-		if (!scZoomTimer.running) scZoomTimer.start()
-	}
-	readonly property var scZoomProps: [Planck.createProperty("ZoomIn", true, 3), Planck.createProperty("ZoomOut", true, 3)]
-	ActionTranslatorStateChangeNotifier { prop: scZoomProps && Planck.getProperty("/GUI/Scripted/ZoomIn"); enabled: true; onChanged: root.scZoom(1) }
-	ActionTranslatorStateChangeNotifier { prop: scZoomProps && Planck.getProperty("/GUI/Scripted/ZoomOut"); enabled: true; onChanged: root.scZoom(-1) }
 """
 
 
@@ -3739,13 +3713,8 @@ def edits(dev: bool):
         # Nothing here can repair a drive; one that does not mount stays off the list.
         ROOT + "Items/MessageBoxes/UnsupportedStorageDeviceDetectedMessageBox.qml": [(
             "function onUnsupportedStorageDeviceDetected(name) {\n", "function onUnsupportedStorageDeviceDetected(name) {\n			return\n")],
-        # Browse encoder in the performance views: 10 zoom steps instead of stock's 60 (see ZOOM_STEP).
-        **({ROOT + f"StateNodes/States/{n}.qml": [
-            ('"/Engine/Master/DecrementWaveformZoom"', '"/GUI/Scripted/ZoomOut"'),
-            ('"/Engine/Master/IncrementWaveformZoom"', '"/GUI/Scripted/ZoomIn"')]
-           for n in ("PerformanceViewState", "PerformanceViewLibraryViewState", "PerformanceViewRemoteHostScreenState", "PerformanceViewStreamingState", "PerformanceViewNoLibraryState")} if v53() else {}),
         ROOT + "EmbeddedMain.qml": [
-            (f"	Connections {{\n		target: {window()}\n", services + main + ZOOM_STEP + "\n	Rectangle { anchors.fill: parent; z: -1000; color: \"#000000\" } // UI Scale: no window colour round the edges\n" + f"\n	Connections {{\n		target: {window()}\n"),
+            (f"	Connections {{\n		target: {window()}\n", services + main + ZOOM_PROP + "\n	Rectangle { anchors.fill: parent; z: -1000; color: \"#000000\" } // UI Scale: no window colour round the edges\n" + f"\n	Connections {{\n		target: {window()}\n"),
             # The overlay (Control Center, popups) fills uiContainer's unscaled box: scale it
             # the same way about the same centre, or its top bar sits above the screen.
             ("		Overlay.overlay.anchors.fill = uiContainer\n",
@@ -4221,11 +4190,6 @@ def edits(dev: bool):
         # There (SC5000/SC6000 boards with isPlayer off, i.e. 4-deck; Config.device.name
         # is the board, "JP07", and isJP is undefined) it shows the deck's own
         # master; every other device keeps stock.
-        # #157: holding the Browse encoder (how users zoom) fires the stock hold = Grid Edit
-        # (ActionWithGridCueEdit): the jog then moves the beatgrid phase and push/Play go to the grid-edit
-        # path, so playback looks stuck at 00:00. Plain push action only; Grid Edit stays on the touch UI.
-        out["ControlSurfaceModules/ControlSurfaceModules/BrowseEncoder.qml"] = [(
-            "if (module.hasInstantDouble) {", "if (false) {")]
         out["ControlSurfaceModules/ControlSurfaceModules/Sync.qml"] = [(
             "            readonly property string isMasterPath: Config.network.hasSyncing\n",
             "            readonly property string isMasterPath: Config.network.hasSyncing &&\n"
@@ -4538,32 +4502,6 @@ def edits(dev: bool):
             "                                button.scStemsLatchedAt = now\n"
             "                            }\n"
             "                        }\n",
-        )]
-        # #157: holding the Browse/Zoom encoder (or Slip/Vinyl) while a deck is playing must not
-        # enter BeatGrid Edit (which in C++ Engine pauses playback, jumps to 00:00, and locks Play),
-        # and Jog Touch must stay disabled while BeatGrid Edit is active (matching Motorized.qml).
-        scaled["ControlSurfaceModules/ControlSurfaceModules/DeckAction.qml"] = [(
-            "    function toggleGridEdit() {\n"
-            "        if (!deckConfig.songLoaded) {\n"
-            "            return\n"
-            "        }\n",
-            "    function toggleGridEdit() {\n"
-            "        if (!deckConfig.songLoaded || (!deckConfig.gridEditActive && deckConfig.playing)) {\n"
-            "            return\n"
-            "        }\n",
-        )]
-        scaled["ControlSurfaceModules/ControlSurfaceModules/Vinyl.qml"] = [(
-            "        if (shiftActionIsGridEdit && (globalConfig.shift || deckConfig.gridEditActive)) {\n",
-            "        if (shiftActionIsGridEdit && ((globalConfig.shift && !deckConfig.playing) || deckConfig.gridEditActive)) {\n",
-        )]
-        scaled["ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml"] = [(
-            "        enabled: {\n"
-            "            deckConfig.inDJMode &&\n"
-            "                !deckConfig.loopInEdit &&\n",
-            "        enabled: {\n"
-            "            deckConfig.inDJMode &&\n"
-            "                !deckConfig.gridEditActive &&\n"
-            "                !deckConfig.loopInEdit &&\n",
         )]
         # Keep the stock two-item BeatJump layout. The forward target lives
         # inside the size field, so it cannot widen AutoLoop / BeatJump / LEAD.
