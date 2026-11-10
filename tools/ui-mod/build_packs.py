@@ -2021,6 +2021,117 @@ SERVICES_MAIN = """
 		const loaded = root.scTr("/Engine/Deck" + deck + "/Track/SongLoaded")
 		return !!loaded && loaded.state && String(url).indexOf("http://127.0.0.1:8080/v1/sc5000/art?") !== 0
 	}
+	property int scMidiTargetDeck: 3
+	property int scMidiLastAckSeq: 0
+	property real scMidiLastApplyMs: 0
+	property real scMidiSendAt: 0
+	property bool scMidiActive: false
+	property var scMidiXhr: null
+	function scMidiReadDeck(d) {
+		const b = "/Engine/Deck" + d + "/"
+		const tLoaded = root.scTr(b + "Track/SongLoaded"), tPlay = root.scTr(b + "PlayState")
+		const tPos = root.scTr(b + "Track/TrackPosition"), tLen = root.scTr(b + "Track/TrackLength"), tSr = root.scTr(b + "Track/SampleRate")
+		const tSpd = root.scTr(b + "Speed"), tRng = root.scTr(b + "SpeedRange"), tKey = root.scTr(b + "Track/KeyLock")
+		const tSync = root.scTr(b + "Sync"), tLoop = root.scTr(b + "Track/LoopEnableState"), tBrw = root.scTr("/GUI/ShowBrowseView")
+		const lenS = tLen ? (tLen.unnormalized || 0) : 0, posS = tPos ? (tPos.unnormalized || 0) : 0, sr = (tSr && tSr.value > 0) ? tSr.value : 44100
+		return {
+			songLoaded: !!(tLoaded && tLoaded.state), playing: !!(tPlay && tPlay.state),
+			posNorm: lenS > 0 ? (posS / lenS) : 0.0, durationSec: lenS > 0 ? (lenS / sr) : 0.0,
+			speed: tSpd ? tSpd.value : 0.5, speedRangeIndex: tRng ? tRng.index : 0,
+			speedRangeCount: (tRng && tRng.entries) ? tRng.entries.length : 4,
+			keylock: !!(tKey && tKey.state), sync: !!(tSync && tSync.state),
+			loopEnabled: !!(tLoop && tLoop.state), browseOpen: !!(tBrw && tBrw.state)
+		}
+	}
+	function scMidiApplyOps(r) {
+		if (!r || !r.seq) return
+		const d = r.targetDeck || 3, b = "/Engine/Deck" + d + "/", v = r.values || ({})
+		if (v.vinylMode !== undefined) { const t = root.scTr(b + "ExternalScratchWheelScratchEnable"); if (t) t.state = !!v.vinylMode }
+		if (v.jogTouch !== undefined) { const t = root.scTr(b + "ExternalScratchWheelTouch"); if (t) t.value = v.jogTouch ? 1.0 : 0.0 }
+		if (v.jogMoveTicks !== undefined && v.jogMoveTicks !== 0) {
+			const t = root.scTr(b + "ExternalScratchWheelMove")
+			if (t) {
+				if (v.jogMoveTicks > 0) t.incValue(v.jogMoveTicks, 0.0, 0.0, false, true, 0.0)
+				else t.decValue(-v.jogMoveTicks, 0.0, 0.0, false, true, 0.0)
+			}
+		} else if (v.setPosNorm !== undefined) { const t = root.scTr(b + "Track/SetSongPosition"); if (t) t.value = v.setPosNorm }
+		if (v.nudgeFwd !== undefined) { const t = root.scTr(b + "Track/NudgeForward"); if (t) t.value = v.nudgeFwd }
+		if (v.nudgeBwd !== undefined) { const t = root.scTr(b + "Track/NudgeBackward"); if (t) t.value = v.nudgeBwd }
+		if (v.speed !== undefined) { const t = root.scTr(b + "Speed"); if (t) t.setValue(v.speed, 1, 0) }
+		if (v.speedOffsetUp !== undefined) { const t = root.scTr(b + "SpeedOffsetUp"); if (t) t.state = !!v.speedOffsetUp }
+		if (v.speedOffsetDown !== undefined) { const t = root.scTr(b + "SpeedOffsetDown"); if (t) t.state = !!v.speedOffsetDown }
+		if (v.speedNeutral !== undefined) { const t = root.scTr(b + "SpeedNeutral"); if (t) t.state = !!v.speedNeutral }
+		if (v.play !== undefined) { const t = root.scTr(b + "Play"); if (t) t.state = !!v.play }
+		if (v.cueHold !== undefined) { const t = root.scTr(b + "Track/CueAction"); if (t) t.value = v.cueHold ? 1.0 : 0.0 }
+		if (v.vinylMode !== undefined) { const t = root.scTr(b + "ExternalScratchWheelScratchEnable"); if (t) t.state = !!v.vinylMode }
+		const acts = r.actions || []
+		for (let i = 0; i < acts.length; i++) {
+			const a = acts[i].action
+			if (a === "toggle_play") { const tp = root.scTr(b + "Play"), tps = root.scTr(b + "PlayState"); if (tp) tp.state = !(tps ? tps.state : tp.state) }
+			else if (a === "track_next") { const t = root.scTr(b + "Track/NextTrack"); if (t) t.state = true }
+			else if (a === "track_prev") { const t = root.scTr(b + "Track/PreviousTrack"); if (t) t.state = true }
+			else if (a === "seek_forward") { const t = root.scTr(b + "Track/SeekForward"); if (t) t.state = true }
+			else if (a === "seek_backward") { const t = root.scTr(b + "Track/SeekBackward"); if (t) t.state = true }
+			else if (a === "loop_in") { const t = root.scTr(b + "Track/LoopIn"); if (t) t.state = true }
+			else if (a === "loop_out") { const t = root.scTr(b + "Track/LoopOut"); if (t) t.state = true }
+			else if (a === "reloop_exit") { const t = root.scTr(b + "Track/Reloop"); if (t) t.state = true }
+			else if (a === "loop_halve") { const t = root.scTr(b + "Track/LoopHalveDouble"); if (t) t.decValue(0.1, 0.0, 1.0, false, false) }
+			else if (a === "loop_double") { const t = root.scTr(b + "Track/LoopHalveDouble"); if (t) t.incValue(0.1, 0.0, 1.0, false, false) }
+			else if (a === "cycle_tempo_range") { const t = root.scTr(b + "SpeedRange"); if (t) { const c = t.entries ? t.entries.length : 4; t.index = (t.index + 1) % c } }
+			else if (a === "toggle_keylock") { const t = root.scTr(b + "Track/KeyLock"); if (t) t.state = !t.state }
+			else if (a === "toggle_sync") { const ts = root.scTr(b + "Sync"), tu = root.scTr(b + "UnSync"); if (ts && !ts.state) ts.state = true; else if (tu) tu.state = true }
+			else if (a === "load_selected_track") { const t = root.scTr("/Client/Librarian/LoadToDeck" + d); if (t) t.state = true }
+			else if (a === "toggle_browse_view") { const t = root.scTr("/GUI/ShowBrowseView"); if (t) t.state = !t.state }
+			else if (a === "browse_scroll") {
+				const st = acts[i].steps || 0, t = root.scTr(st > 0 ? "/Qml/ControlFocus/Increment" : "/Qml/ControlFocus/Decrement")
+				for (let s = 0; s < Math.min(8, Math.abs(st)); s++) if (t) t.state = true
+			}
+		}
+		scMidiLastAckSeq = r.seq
+	}
+	Timer {
+		id: scMidiPollTimer
+		interval: 1500; running: true; repeat: true
+		onTriggered: {
+			if (!root.scUiLoaded) return
+			let x = root.scMidiXhr
+			if (!x) {
+				x = new XMLHttpRequest()
+				root.scMidiXhr = x
+				x.onreadystatechange = function() {
+					if (x.readyState !== 4) return
+					if (x.status === 200) {
+						try {
+							const r = JSON.parse(x.responseText)
+							root.scMidiActive = !!r.enabled
+							Math.scMidiBridgeActive = !!r.enabled
+							if (r.targetDeck) root.scMidiTargetDeck = r.targetDeck
+							if (r.enabled && r.seq) {
+								root.scMidiApplyOps(r)
+								root.scMidiLastApplyMs = Math.max(0.5, (Date.now() - root.scMidiSendAt) * 0.5)
+							}
+							scMidiPollTimer.interval = r.enabled ? 16 : 1000
+							return
+						} catch (e) {}
+					}
+					root.scMidiActive = false
+					Math.scMidiBridgeActive = false
+					scMidiPollTimer.interval = 2000
+				}
+			}
+			if (x.readyState > 0 && x.readyState < 4) return
+			const body = { action: "poll", deckState: root.scMidiReadDeck(root.scMidiTargetDeck || 3) }
+			if (root.scMidiLastAckSeq > 0) {
+				body.ackSeq = root.scMidiLastAckSeq
+				body.ackApplyMs = root.scMidiLastApplyMs
+				root.scMidiLastAckSeq = 0
+			}
+			root.scMidiSendAt = Date.now()
+			x.open("POST", "http://127.0.0.1:17838/action")
+			x.setRequestHeader("Content-Type", "application/json")
+			x.send(JSON.stringify(body))
+		}
+	}
 	function scPlainTitle(song) { return (song || "").replace(/\\s\\[\\d+ BPM(?: [0-9]{1,2}[AB])?\\]$/, "") }
 	// Engine's messages name its one streaming client; say which service is showing.
 	function scBrand(s) {

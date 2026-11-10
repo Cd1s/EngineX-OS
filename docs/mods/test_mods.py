@@ -43,7 +43,7 @@ class ModTests(unittest.TestCase):
     def test_registry_and_archive_members(self):
         registry = json.loads((BASE / "registry.json").read_text())
         self.assertEqual(registry["updatedAt"], "2026-11-08")
-        self.assertEqual(len(registry["mods"]), 5)
+        self.assertEqual(len(registry["mods"]), 6)
         for mod in registry["mods"]:
             blob = (BASE / "packages" / Path(mod["downloadUrl"]).name).read_bytes()
             self.assertEqual(len(blob), mod["size"])
@@ -176,6 +176,140 @@ class ModTests(unittest.TestCase):
             self.assertEqual(live, {club.SERVICES[0], club.SERVICES[1]})
             self.assertFalse(app.path.exists())
             self.assertTrue(all(unit in club.SERVICES for _, unit in calls))
+
+    def test_midi_mapper_preset_validation_and_custom_presets(self):
+        midi = feature("midi-controller-mapper")
+        app = midi.Feature(self.state / "midi-state")
+        try:
+            st = app.status()
+            self.assertEqual(st["presetId"], "pioneer-cdj-400")
+            self.assertEqual(st["targetDeck"], 3)
+            self.assertFalse(st["ledFeedbackSupported"])
+            self.assertIn("transmit-only", st["ledFeedbackNote"])
+            custom = json.loads((BASE / "src/midi-controller-mapper/presets/pioneer-cdj-400.json").read_text())
+            custom["id"] = "custom-cdj"
+            custom["name"] = "Custom CDJ"
+            app.action({"action": "save_preset", "preset": custom})
+            st2 = app.action({"action": "configure", "presetId": "custom-cdj", "targetDeck": 4})
+            self.assertEqual(st2["presetId"], "custom-cdj")
+            self.assertEqual(st2["targetDeck"], 4)
+            for bad in (
+                {"id": "bad"},
+                {**custom, "id": "../escape"},
+                {**custom, "jog": {"encoding": "unknown_mode"}},
+                {**custom, "controls": {"x": {"type": "note", "number": 200, "action": "toggle_play"}}},
+                {**custom, "controls": {"x": {"type": "note", "number": 1, "action": "launch_missiles"}}},
+            ):
+                with self.assertRaises(ValueError):
+                    midi.validate_preset(bad)
+        finally:
+            app.close()
+
+    def test_midi_mapper_cdj400_controls_and_velocity_integration(self):
+        midi = feature("midi-controller-mapper")
+        app = midi.Feature(self.state / "midi-controls")
+        try:
+            app.action({"action": "enable"})
+            app.update_deck_state({"songLoaded": True, "playing": False, "posNorm": 0.25, "durationSec": 180.0, "speed": 0.5})
+            # Transport & buttons: Play(90 00), Cue Hold/Release(90 01), Loop In/Out/Reloop(90 06/07/08),
+            # Halve/Double(90 16/17), Range(90 10), KeyLock(90 11), JogMode(90 12), Sync(90 13),
+            # Next/Prev(90 04/05), Search(90 02/03), Load(90 32), Back(90 33), Browse(B0 4F)
+            app.process_midi_message([0x90, 0x01, 0x7F], now=10.0)
+            b1 = app.poll_bridge(now=10.01)
+            self.assertTrue(b1["values"]["cueHold"])
+            app.process_midi_message([0x90, 0x01, 0x00], now=10.02)
+            b2 = app.poll_bridge(now=10.03)
+            self.assertFalse(b2["values"]["cueHold"])
+
+            for note, expected in (
+                (0x00, "toggle_play"),
+                (0x02, "seek_forward"),
+                (0x03, "seek_backward"),
+                (0x04, "track_next"),
+                (0x05, "track_prev"),
+                (0x06, "loop_in"),
+                (0x07, "loop_out"),
+                (0x08, "reloop_exit"),
+                (0x10, "cycle_tempo_range"),
+                (0x11, "toggle_keylock"),
+                (0x13, "toggle_sync"),
+                (0x16, "loop_halve"),
+                (0x17, "loop_double"),
+                (0x32, "load_selected_track"),
+                (0x33, "toggle_browse_view"),
+            ):
+                app.process_midi_message([0x90, note, 0x7F], now=11.0)
+            app.process_midi_message([0xB0, 0x4F, 67], now=11.01)  # +3 browse steps
+            batch = app.poll_bridge(now=11.02)
+            actions = [a["action"] for a in batch["actions"]]
+            self.assertIn("toggle_play", actions)
+            self.assertIn("loop_halve", actions)
+            self.assertIn("loop_double", actions)
+            self.assertIn("load_selected_track", actions)
+            self.assertIn("browse_scroll", actions)
+
+            # Continuous velocity jog integration: 90 20 7F touch + B0 10 (64+63=127 full fwd) over dt=0.5s -> 64=stop
+            app.process_midi_message([0x90, 0x20, 0x7F], now=20.0)
+            app.process_midi_message([0xB0, 0x10, 127], now=20.0)
+            delta_sec = app.integrate_jog_step(dt_override=0.5, now=20.5)
+            self.assertAlmostEqual(delta_sec, 0.9, places=3)  # (63/63) * 0.5s * 1.8 = 0.9s
+            app.process_midi_message([0xB0, 0x10, 64], now=20.5)  # 64 = stop
+            self.assertEqual(app.jog_velocity, 0)
+            self.assertEqual(app.integrate_jog_step(dt_override=0.5, now=21.0), 0.0)
+            jog_batch = app.poll_bridge(ack_seq=batch["seq"], ack_apply_ms=1.5, now=21.01)
+            self.assertGreater(jog_batch["values"]["jogMoveTicks"], 20000.0)
+            self.assertGreater(jog_batch["values"]["setPosNorm"], 0.25)
+
+            # Outer-ring pitch bend (B0 30)
+            app.process_midi_message([0xB0, 0x30, 96], now=22.0)
+            pb_batch = app.poll_bridge(now=22.01)
+            self.assertGreater(pb_batch["values"]["nudgeFwd"], 0.3)
+            self.assertEqual(pb_batch["values"]["nudgeBwd"], 0.0)
+            app.process_midi_message([0xB0, 0x30, 64], now=22.02)
+            pb_stop = app.poll_bridge(now=22.03)
+            self.assertEqual(pb_stop["values"]["nudgeFwd"], 0.0)
+        finally:
+            app.close()
+
+    def test_midi_mapper_soft_takeover_and_safety_autodisable(self):
+        midi = feature("midi-controller-mapper")
+        app = midi.Feature(self.state / "midi-safety")
+        try:
+            app.action({"action": "enable"})
+            app.update_deck_state({"speed": 0.70})
+            # Fader at 32/127 (~0.252) is below 0.70 -> soft_locked=False, speedOffsetUp=True (▲)
+            app.process_midi_message([0xB0, 0x1D, 32], now=30.0)
+            b_wait = app.poll_bridge(now=30.01)
+            self.assertNotIn("speed", b_wait["values"])
+            self.assertTrue(b_wait["values"]["speedOffsetUp"])
+            self.assertFalse(b_wait["values"]["speedOffsetDown"])
+
+            # Sweep fader across 0.70 (90/127 = 0.7087) -> picks up and locks!
+            app.process_midi_message([0xB0, 0x1D, 90], now=30.05)
+            b_lock = app.poll_bridge(now=30.06)
+            self.assertAlmostEqual(b_lock["values"]["speed"], 90 / 127.0, places=4)
+            self.assertFalse(b_lock["values"]["speedOffsetUp"])
+            self.assertFalse(b_lock["values"]["speedOffsetDown"])
+
+            # External deck speed change after grace window re-arms soft takeover with ▼
+            app.last_written_speed_at = 0.0
+            app.update_deck_state({"speed": 0.40})
+            self.assertFalse(app.soft_locked)
+            self.assertTrue(app.speed_offset_down)
+
+            # USB hot-unplug auto-disables
+            app.simulate_disconnect()
+            self.assertFalse(app.status()["enabled"])
+            self.assertIn("disconnected", app.status()["error"].lower())
+
+            # Malformed MIDI auto-disables after threshold
+            app.action({"action": "enable"})
+            for _ in range(16):
+                app.process_midi_message([0x10, 0x00], now=40.0)
+            self.assertFalse(app.status()["enabled"])
+            self.assertIn("malformed", app.status()["error"].lower())
+        finally:
+            app.close()
 
 
 if __name__ == "__main__":
