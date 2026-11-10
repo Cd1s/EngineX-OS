@@ -748,6 +748,13 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         0xe320f000, // strbne r2, [r0, #0x239]
         0xe320f000, // #77: mov r2, #30
         0xe320f000, // #77: str r2, [r0, #maximumZoomSecs]
+        0xe320f000, // #166 (5.3.0+): ldrb r2, [r0, #0x12e] (hasNHFx)
+        0xe320f000, // cmp r2, #0
+        0xe320f000, // movne r2, #1
+        0xe320f000, // strbne r2, [r0, #0xe1] (hasBeatJump)
+        0xe320f000, // strbne r2, [r0, #0x19c] (hasNoiseSweep)
+        0xe320f000, // strbne r2, [r0, #0x19d] (hasFilterRoll)
+        0xe320f000, // strbne r2, [r0, #0x4cd] (hasSweepFxSelectionPopup)
         0xe59f2004, // replay the two displaced literal loads
         0xe59f3004,
         0xe59ff004,
@@ -760,6 +767,14 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     if (build->config_zoom == 0x52c) {
         // #152: unlock native 3-band Stems Level EQ (ChannelStrip) on all 5.3.0 models.
         code[5] = 0xe5c02054;
+        // Keep hasNHFx: Mixstream's Main FX switches still need Nh effects.
+        // Only its channel Sweep FX collection changes; every non-NH config
+        // retains these bytes, including models with Beat Jump disabled.
+        // Both return tails execute eors before the next conditional branch,
+        // so no incoming CPSR flags are consumed after this cmp.
+        const uint32_t mixstream[] = {0xe5d0212e, 0xe3520000, 0x13a02001,
+                                     0x15c020e1, 0x15c0219c, 0x15c0219d, 0x15c024cd};
+        memcpy(code + 16, mixstream, sizeof mixstream);
     }
     if (build->config_zoom) {
         // #77: the players' 30 s zoom-out limit on every model (same SoC; Engine
@@ -905,6 +920,9 @@ static const struct engine_edit edits_530[] = {
         "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x03\x80\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
     {0x8be39cu, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
     {0x1537148u, "\xe4\x20\x9f\xe5\xdc\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
+    // #166 ChannelSweepFx: hasNHFx == 0 already takes the full collection.
+    // Force that same native Filter/Dub Echo/Noise/Filter Roll/Wash path on NH.
+    {0xd1aaf4u, "\xbb\x03\x00\x0a", "\xbb\x03\x00\xea", 4, EDIT_STEMS},
     {0x1efc6bcu, "aac", "mp3", 4, EDIT_ONE},
     // Config.audio.hasLimiter (root +0x24), as the 5.0.4 +0x24 patch.
     {0x153DDB0u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
@@ -934,6 +952,8 @@ static const struct engine_edit edits_sclive[] = {
         "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x47\x9c\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
     {0x8bbaa4u, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
     {0x159f4a8u, "\xe4\x20\x9f\xe5\xdc\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
+    // Same ChannelSweepFx constructor and hasNHFx gate in the gen-2 Engine.
+    {0xd27e14u, "\xbb\x03\x00\x0a", "\xbb\x03\x00\xea", 4, EDIT_STEMS},
     {0x1f69520u, "aac", "mp3", 4, EDIT_ONE},
     {0x15b6fb0u, "\x24\x30\xc4\xe5", "\x00\xf0\x20\xe3", 4, EDIT_ONE},
     {0x89cd64u, "\x38\x33\x1b\xe5\x00\x00\x54\xe3", (const char *)stems_feature_jump, 8, EDIT_ONE},

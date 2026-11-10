@@ -87,6 +87,7 @@
 - **控制中心新磁貼**：第 3 行新增 4 個磁貼 `波形樣式`、`轉盤燈光`、`推桿回音`、`智慧同步`，點一下循環切換；`Live Stream` 移到 `設定 → 服務`；
 - **先鋒風格 Beat FX 與 Sound Color FX（#88）**：`個人偏好（User Profile）→ 播放 → Color FX 樣式` 可選 `Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo`、`Space`，在 Engine 音訊回呼中即時模擬（預設關閉）；
 - **介面縮放（110%–75%）、曲目列表波形開關與打擊墊亮度（#153、#117、#85）**：`設定 → 裝置 → 介面縮放` 可把 Engine 整個介面在 110% 到 75% 之間無黑邊縮放，控制中心與彈窗仍然鋪滿螢幕；`個人偏好（User Profile）→ 曲庫 → 曲目列表波形` 關閉後可隱藏列表裡的縮略波形，讓歌名與藝人完整展開；`打擊墊亮度` 可把打擊墊與按鍵燈光從 100% 調到 20%；
+- **Mixstream Pro / Pro+ / Pro Go（#166）**：實體 FILTER 旋鈕控制原廠 Filter / Dub Echo / Noise / Filter Roll / Wash，點擊各軌 Pads 列的 `SWEEP FX` 開啟原廠選擇輪盤。恢復觸控 Beat Jump；於 `個人偏好 → Cues/Loops → Beat Jump Pad Bank` 開啟各軌 Pads 列的後跳、前跳、減半、加倍。各軌 `EQ / STEMS` 按鈕切換該通道三段 EQ 旋鈕的 Stems EQ。歌單左滑可觸發本機分軌或區域網路卸載（RK3288 本機分析較慢）。
 - **實體三段 EQ 旋鈕 Stems 分軌控制與快捷鍵（#152）**：透過 `個人偏好 → 播放 → Stems EQ Mode` 或按各通道 **Shift + Cue (PFL)**，即可將該通道的實體 `HIGH / MID / LOW` 三段 EQ 旋鈕切換為 **Stems Level**（`Vocal 人聲`、`Melody + Bass 旋律+貝斯`、`Drums 鼓組`），內建原廠軟接管（Soft Takeover）防跳變與螢幕提示；修復 PRIME 2 / PRIME 4 快速雙擊 `Hot Cue` 時 Stems 模式閃退回 Hot Cue 的問題；
 - **播放中按住瀏覽/縮放旋鈕轉動轉盤防誤入網格編輯（#157）**：曲目播放中按住 Browse/Zoom 旋鈕（或 Slip/Vinyl）不再誤觸進入 BeatGrid Edit（此前會導致瞬間跳回 `00:00` 且 Play 鍵鎖死），網格編輯啟用時停用轉盤觸控；
 - **PRIME 4 / PRIME 4+ 與 SC5000 / SC6000 區域網路跨機型四軌連動（#160）**：一體機與獨立播放機均開放 `四軌波形顯示` 與 `四軌角色`（`自動`、`1+3`、`2+4`、`1+2`、`3+4`、`1`、`2`），支援 PRIME 4 / PRIME 4+ 本機負責 1+2 軌、同時將區域網路內 SC5000 / SC6000 的即時波形、熱標與對拍映射至 3+4 影子軌；
