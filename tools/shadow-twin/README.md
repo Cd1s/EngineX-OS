@@ -16,7 +16,7 @@
 | OpenGL QPA | `eglfs` (`eglfs_kms`, `"headless": "1280x800"`, `/dev/dri/card0`, `llvmpipe`) | Same |
 
 ### Network Link (`veth` + `tc netem`)
-- Physical SC5000 inter-deck RTT measured read-only (`deck L 'ping -c 50 192.168.1.238'`):
+- Physical SC5000 inter-deck RTT, measured read-only with `ping -c 50` between two decks on the same LAN:
   `min/avg/max/mdev = 1.815 / 4.201 / 23.819 / 3.412 ms` (0% loss).
 - Each side of the `veth` pair applies `tc qdisc replace dev eth0 root netem delay 2.0ms 1.1ms distribution paretonormal`, producing a ~4 ms RTT with a realistic pareto-normal tail across Engine Link (TCP/UDP) and `stream-sync` (`/peer/decks`, `/peer/file`, `/peer/display`).
 
