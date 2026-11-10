@@ -1100,10 +1100,7 @@ scope.sample=sample(10967,{jumps:1,key:'B',playing:false}); scope.refreshSample(
 assert.equal(scope.scrollSpeed,0); assert.equal(glides.length,6); assert.equal(glides[5].to,0); assert.equal(glides[5].duration,1);
 """)
 
-    def test_sender_follows_a_jog_nudge(self):
-        # The peer carries the posted line on at the pitch: a nudge must reach it while it
-        # happens (it arrived in 25 ms jumps, a brake only after 180 ms).
-        self.js(r"""
+    SENDER = r"""
 let bodies=[], pos=0, rate=1;
 globalThis.XMLHttpRequest=class {
     constructor(){this.readyState=0;}
@@ -1120,6 +1117,12 @@ globalThis.scTr=path=>({
 const run=ms=>{const end=now+ms;while(now<end){const dt=scShadowTickTimer.interval;now+=dt;pos+=dt*48*rate;scShadowTick();}};
 // Where the peer shows the deck (the last full post carried on at pitch 0) minus where it is.
 const ahead=()=>{const b=bodies[bodies.length-1][0];return b.positionMs+(now-b.at)-pos/48};
+"""
+
+    def test_sender_follows_a_jog_nudge(self):
+        # The peer carries the posted line on at the pitch: a nudge must reach it while it
+        # happens (it arrived in 25 ms jumps, a brake only after 180 ms).
+        self.js(self.SENDER + r"""
 run(6000); let n=bodies.length;
 run(3000); assert(bodies.length-n<=1,'steady playback: heartbeats only'); assert.equal(scShadowTickTimer.interval,80);
 rate=1.05; n=bodies.length; run(1000); assert(bodies.length-n>=3,'a jog push is posted as it happens'); assert(Math.abs(ahead())<=16,'push '+ahead());
@@ -1127,6 +1130,18 @@ rate=1; run(3000);
 rate=0.95; n=bodies.length; run(2000); assert(bodies.length-n>=2,'a jog brake is followed');
 assert(ahead()>=0&&ahead()<60,'brake '+ahead()); // of 100 ms; these positions have no audio-block lag (17 ms of it)
 rate=1; run(3000); assert(Math.abs(ahead())<60); assert.equal(bodies[bodies.length-1][0].jumps,0,'a nudge is not a jump');
+""")
+
+    def test_sender_line_moves_without_steps(self):
+        # The line closes in on a slower deck a little per tick: every post is one slip of
+        # 15 ms, and a position that arrives one tick late does not move the line at all.
+        self.js(self.SENDER + r"""
+const shifts=from=>bodies.slice(from).map((b,i,a)=>i?b[0].positionMs-a[i-1][0].positionMs-(b[0].at-a[i-1][0].at):0);
+run(6000); let n=bodies.length;
+rate=0.95; run(2000); rate=1; run(2000);
+assert(bodies.length-n>=4); assert(shifts(n).every(s=>Math.abs(s)<22),'brake '+shifts(n));
+run(6000); n=bodies.length; const late=pos; now+=80; scShadowTick(); pos=late+80*48; run(3000);
+assert(bodies.length-n<=1,'a late position is not a slip'); assert(shifts(n).every(s=>Math.abs(s)<2),'late '+shifts(n));
 """)
 
 
