@@ -59,7 +59,7 @@ type deckState struct {
 	Name         string  `json:"name,omitempty"`  // the file's name, which the copy keeps
 	Title        string  `json:"title,omitempty"` // a streaming track's real title (QML or stm.db): the copy is named after it
 	Artist       string  `json:"artist,omitempty"`
-	KeyName      string  `json:"keyName,omitempty"`      // the key as the source's header writes it ("-": none); the shadow header shows it
+	KeyName      string  `json:"keyName,omitempty"`      // the key as the source's header writes it ("-": none); the shadow header shows it, not the copy's own analysis
 	ID           string  `json:"id,omitempty"`           // Engine mode, what the source has loaded: its Key (a copy), its Net (this player's own file), a CDJ's slot and track id. The QML loads again when it changes
 	DurationMS   float64 `json:"durationMs,omitempty"`   // the track's length on the source: tells the QML whether Engine holds this track or another
 	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
@@ -85,11 +85,15 @@ type deckState struct {
 	// Lead is the deck's own DeckIsMaster, what its header shows as LEAD, for the
 	// shadow header only. Master also marks the player that holds the network
 	// master with no master deck, and is cleared for a standalone player's copy.
-	Lead       bool    `json:"lead,omitempty"`
-	Sync       bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
-	BPM        float64 `json:"bpm,omitempty"`        // the track's
-	CurrentBPM float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
-	Beat       float64 `json:"beat,omitempty"`       // Engine's BeatNumber: beats into the bar, 0..4
+	Lead bool `json:"lead,omitempty"`
+	// ShadowMaster is the sender's shadow deck (a copy of the receiver's deck of
+	// that number) that Engine Link left holding master: the receiver's QML takes
+	// master back to a real deck. On every deck the sender posts; 0: none.
+	ShadowMaster int     `json:"shadowMaster,omitempty"`
+	Sync         bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
+	BPM          float64 `json:"bpm,omitempty"`        // the track's
+	CurrentBPM   float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
+	Beat         float64 `json:"beat,omitempty"`       // Engine's BeatNumber: beats into the bar, 0..4
 	// At is when PositionMS was read, Unix ms on this machine's clock: the QML's
 	// GUI thread and our niced HTTP handler both lag by tens of ms, so the
 	// position is extrapolated from the sample time, not from arrival.
@@ -198,7 +202,7 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
-		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.Lead != d.Lead || o.Sync != d.Sync || o.BPM != d.BPM ||
+		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.Lead != d.Lead || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
 		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
@@ -1260,7 +1264,15 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 			d.PositionMS, d.Rate = p.carried(now.Sub(p.at))
 		}
 		d.Progress, d.Error = 0, "" // ours to say, not the peer's
-		d.Path = resolveNetPathFile(d.Net, sh.dataRoot, sh.mediaRoot, false)
+		// A file of this player's own for a track the peer loaded from this player's
+		// drive: both then read one library. Not for a track on the peer's own drive
+		// (the net path names the peer itself): the same path here is another
+		// library's track with its own analysis, whose waveform peaks drew the low
+		// band at half the source's height. That one is copied with the source's.
+		d.Path = ""
+		if host, _, _ := strings.Cut(strings.TrimPrefix(d.Net, "net://"), "/"); d.Link == "" || !strings.EqualFold(host, strings.Trim(d.Link, "{}")) {
+			d.Path = resolveNetPathFile(d.Net, sh.dataRoot, sh.mediaRoot, false)
+		}
 		// A file of this player's own is named by its path. Not by the peer's key
 		// then: that appears once the peer's Engine has cached the file, mid-track.
 		d.ID = d.Net

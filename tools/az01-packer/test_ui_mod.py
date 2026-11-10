@@ -134,8 +134,8 @@ class UiModSourceTest(unittest.TestCase):
     def test_zoom_and_browse_encoder_are_stock(self):
         # The maintainer wants the stock ZOOM / Browse knob: 0.5 s per detent, hold = Grid Edit,
         # Shift+hold = Cue Edit, double press = Instant Double, also while playing (#147, #157 undone).
-        for gone in ("/GUI/Scripted/Zoom", "scZoom(", "BrowseEncoder.qml", "DeckAction.qml", "Vinyl.qml",
-                     "JogWheel.qml", "!deckConfig.gridEditActive && deckConfig.playing"):
+        for gone in ("/GUI/Scripted/Zoom", "scZoom(", "BrowseEncoder.qml", "DeckAction.qml",
+                     "!deckConfig.gridEditActive && deckConfig.playing"):
             self.assertNotIn(gone, SRC)
         self.assertIn("Planck.getProperty(\"/Engine/Master/WaveformZoom\")", bp.ZOOM_PROP)  # the shadow lane reads it
 
@@ -424,7 +424,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
-                 "scShadowLine", "scShadowBend", "scShadowBendEnd")
+                 "scShadowLine", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
@@ -444,7 +444,7 @@ Object.assign(globalThis, {
     scFourDeckRole: '13', scPlayer: true, scShadowDisplayOnly: true, scShadowEngineMask: 0, scShadowLineMask: 0,
     scShadowExpiryMs: 3000, scShadowAt: {}, scShadowDisplay: {}, scShadowEmptyArray: [],
     scShadowDisplayRequests: {}, scShadowDisplayText: {}, scShadowGridCache: {}, scShadowLiveCueCache: {},
-    scShadowCdjMaster: false, scPressQueue: [], scShadowEmptyObject: {},
+    scShadowCdjMaster: false, scPressQueue: [], scShadowEmptyObject: {}, scShadowHead: {},
     scShadowMineRole: "?", scShadowMine: [], scShadowSampleSpare: {}, scShadowDeckProperties: {}, scShadowOwn: [],
     scShadowPostRequest: null, scShadowPollRequest: null, scShadowResponseVersion: "", scShadowPostPending: false,
     scShadowLinkId: '', scShadowLinkAt: -Infinity, scShadowTextAt: {},
@@ -453,6 +453,7 @@ Object.assign(globalThis, {
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
+    scShadowLead: 0, scShadowPeerLead: 0, scShadowPeerPlaying: false, scShadowMasterAt: 0,
     scShadowGen: 0, scShadowVer: 0, scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {},
     scTr() { throw Error('Engine access forbidden'); },
     Planck: { getProperty() { throw Error('Engine access forbidden'); } }
@@ -1625,8 +1626,8 @@ globalThis.scTr = path => {
         entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '',
         _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? 0.5 : 0,
         get value() { return this._v }, set value(v) { this._v = v; if (path.endsWith('/SetSongPosition')) seeks++ },
-        // Engine moves TrackPosition in audio blocks of 46 ms
-        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? (Math.floor((now - T0) / 46) * 46 + 5000 + ahead) * 44.1 : 0 }};
+        // Engine moves TrackPosition in audio blocks: 18 ms old on average
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? (Math.floor((now - T0) / 36) * 36 + 5000 + ahead) * 44.1 : 0 }};
     props.set(path, p);
     return p;
 };
@@ -1652,7 +1653,7 @@ assert.equal(back.state, false);
 run(4000);
 assert.equal(back.state || fwd.state, false, 'within 6 ms: left alone');
 assert.equal(seeks, 0);
-ahead = -40; run(2600);
+ahead = -40; run(5200);
 assert.equal(fwd.state, true, '40 ms behind: bend forward');
 scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: false, link: '{l}', positionMs: now - T0 + 5000, at: now, pitch: 0.01, bpm: 138, currentBpm: 138.0089, jumps: 0, seq: ++seq}], false);
 assert.equal(fwd.state, false, 'a pause releases the bend');
@@ -2054,3 +2055,393 @@ assert.equal(g.keylock.state, true);
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the follower behavioral checks")
+class ShadowFollowerNoiseTest(unittest.TestCase):
+    """Engine mode: raw positions as two SC5000 gave them (rec10-a) must not bend an aligned shadow deck."""
+
+    def test_aligned_deck_is_left_alone_and_a_real_gap_is_closed(self):
+        ShadowDisplayTest.js(self, r"""
+const T0 = now, props = new Map();
+let ahead = 0, tick = 0, bends = 0;
+globalThis.scShadowBent = null;
+// A bend moves the deck by 7 % of the time it is held.
+globalThis.scShadowBendTimer = {interval: 0, running: false, stop() { this.running = false },
+    restart() { this.running = true; bends++; ahead += this.interval * 0.07 * (scTr('/Engine/Deck2/Track/NudgeForward').state ? 1 : -1) }};
+// Raw positions read 9 ms either side of their mean, one in sixty 22 ms ahead.
+const jitter = () => tick % 61 === 60 ? 22 : tick % 7 < 3 ? 9 : -9;
+globalThis.scTr = path => {
+    let p = props.get(path);
+    if (p) return p;
+    const deck2 = path.startsWith('/Engine/Deck2/');
+    p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '8' : path.endsWith('/SyncMode') ? 'Off' : '',
+        entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '',
+        _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? 0.5 : 0,
+        get value() { return this._v }, set value(v) { this._v = v },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? (now - T0 + 5000 + ahead + jitter()) * 44.1 : 0 }};
+    props.set(path, p);
+    return p;
+};
+let seq = 0;
+// The source's line: its newest block, 18 ms ahead of the mean of its raw positions, +-6 ms.
+const apply = () => scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}',
+    positionMs: now - T0 + 5000 + 18 + 3 * Math.sin(seq / 9) + 3 * Math.sin(seq / 1.5), at: now, pitch: 0, bpm: 131, currentBpm: 131, jumps: 0, seq: ++seq}], false);
+const run = ms => { for (let t = 0; t < ms; t += 200) { now += 200; tick++; if (scShadowBendTimer.running) scShadowBendEnd(); scShadowLine(now); if (t % 600 === 0) apply() } };
+apply();
+run(60000);
+assert.equal(bends, 0, 'an aligned deck was bent ' + bends + ' times in a minute');
+assert.ok(Math.abs(scShadowAt[2].fine) < 4, 'gap read ' + scShadowAt[2].fine);
+ahead = -10; run(30000);
+assert.ok(bends === 1 || bends === 2, '10 ms behind: bent ' + bends + ' times');
+assert.ok(Math.abs(ahead) < 6, 'bent to ' + ahead);
+const closed = bends;
+run(60000);
+assert.equal(bends, closed, 'bent again once closed: ' + ahead);
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowTrackChangeTest(unittest.TestCase):
+    """Engine mode: the source's previous track leaves the shadow deck while the next one is copied."""
+
+    def test_previous_track_is_unloaded_while_the_next_is_copied(self):
+        ShadowDisplayTest.js(self, r"""
+const props = {};
+const P = p => props[p] || (props[p] = {state: false, string: 'Off'});
+globalThis.scTr = P;
+globalThis.scShadowApply = e => {};
+const unloaded = () => P('/Engine/Deck2/Unload').state && P('/Engine/Deck2/Track/Unload').state;
+scShadowAt[2] = {path: '/copies/a.mp3', id: 'A', link: 'peer'};
+P('/Engine/Deck2/Play').state = true;
+P('/Engine/Deck2/Track/SongLoaded').state = true;
+for (let i = 0; i < 3; i++) { scShadowApplyAll([{deck: 2, path: '/copies/a.mp3', id: 'A'}], false); now += 500; }
+assert.ok(P('/Engine/Deck2/Play').state && !unloaded() && scShadowAt[2], 'the track the source still holds was touched');
+// The source loaded B: stream-sync is still copying it.
+const copying = [{deck: 2, path: '', loading: true, id: 'B'}];
+scShadowApplyAll(copying, false);
+assert.equal(P('/Engine/Deck2/Play').state, false);
+now += 400; scShadowApplyAll(copying, false);
+assert.ok(unloaded(), 'the previous track stayed on the deck');
+assert.equal(scShadowAt[2], undefined);
+P('/Engine/Deck2/Unload').state = P('/Engine/Deck2/Track/Unload').state = false;
+for (let i = 0; i < 3; i++) { now += 400; scShadowApplyAll(copying, false); }
+assert.ok(!unloaded(), 'unloaded again while the copy goes on');
+// The same track asked again while its copy is not there yet (a first load): nothing to unload.
+scShadowAt[4] = {path: '/copies/c.mp3', id: 'C', link: 'peer'};
+for (let i = 0; i < 3; i++) { now += 400; scShadowApplyAll(copying.concat([{deck: 4, path: '', loading: true, id: 'C'}]), false); }
+assert.ok(!P('/Engine/Deck4/Unload').state && scShadowAt[4]);
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowFollowerLineTest(unittest.TestCase):
+    """Engine mode: the deck's own line must not average in a position from before a seek landed."""
+
+    def test_a_seek_that_lands_after_the_line_began_starts_the_line_again(self):
+        ShadowDisplayTest.js(self, r"""
+const T0 = now, props = new Map();
+let ahead = 0, tick = 0, bends = 0, most = 0;
+globalThis.scShadowBent = null;
+globalThis.scShadowBendTimer = {interval: 0, running: false, stop() { this.running = false },
+    restart() { this.running = true; bends++; ahead += this.interval * 0.07 * (scTr('/Engine/Deck2/Track/NudgeForward').state ? 1 : -1); most = Math.max(most, ahead) }};
+const jitter = () => tick % 7 < 3 ? 9 : -9;
+globalThis.scTr = path => {
+    let p = props.get(path);
+    if (p) return p;
+    const deck2 = path.startsWith('/Engine/Deck2/');
+    p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '8' : path.endsWith('/SyncMode') ? 'Off' : '',
+        entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '',
+        _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? 0.5 : 0,
+        get value() { return this._v }, set value(v) { this._v = v },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? (now - T0 + 50000 + ahead + jitter()) * 44.1 : 0 }};
+    props.set(path, p);
+    return p;
+};
+let seq = 0;
+const apply = () => scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}',
+    positionMs: now - T0 + 50000 + 18, at: now, pitch: 0, bpm: 131, currentBpm: 131, jumps: 0, seq: ++seq}], false);
+const step = () => { now += 200; tick++; if (scShadowBendTimer.running) scShadowBendEnd(); scShadowLine(now) };
+const run = ms => { for (let t = 0; t < ms; t += 200) { step(); if (t % 600 === 0) apply() } };
+apply();
+run(3000);
+// A seek of ours: Engine still reads the old position (41 s back) on the next tick,
+// then lands 55 ms behind the source.
+scShadowSeek(2, scShadowAt[2], now - T0 + 50000);
+ahead = -41000; step();
+ahead = -55; run(30000);
+assert.ok(most <= 15, 'bent ' + most + ' ms past the source');
+assert.ok(Math.abs(ahead) < 12 && bends >= 1 && bends <= 3, 'ended ' + ahead + ' ms off after ' + bends + ' bends');
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the follower behavioral checks")
+class ShadowFollowerStartTest(unittest.TestCase):
+    """Engine mode: a play start lands ~110 ms off (rec12-a); at -50 % a bend moves the deck half as far."""
+
+    def test_start_gap_is_bent_after_a_second_and_a_bend_counts_the_decks_speed(self):
+        ShadowDisplayTest.js(self, r"""
+for (const rate of [1, 0.5]) {
+    const T0 = now, props = new Map();
+    let ahead = 110 * rate, tick = 0, bends = 0, first = 0, closed = 0, ready = 0;
+    globalThis.scShadowBent = null;
+    delete scShadowAt[2];
+    globalThis.scShadowBendTimer = {interval: 0, running: false, stop() { this.running = false },
+        restart() { this.running = true; bends++; first = first || now - T0; ahead += this.interval * 0.07 * rate * (scTr('/Engine/Deck2/Track/NudgeForward').state ? 1 : -1) }};
+    const jitter = () => tick % 7 < 3 ? 9 * rate : -9 * rate;
+    globalThis.scTr = path => {
+        let p = props.get(path);
+        if (p) return p;
+        const deck2 = path.startsWith('/Engine/Deck2/');
+        p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '100' : path.endsWith('/SyncMode') ? 'Off' : '',
+            entries: ['4', '8', '10', '20', '50', '100'], index: 5, url: '',
+            _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? rate / 2 : 0,
+            get value() { return this._v }, set value(v) { this._v = v },
+            get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? ((now - T0) * rate + 50000 + ahead + jitter()) * 44.1 : 0 }};
+        props.set(path, p);
+        return p;
+    };
+    let seq = 0;
+    const apply = () => scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}', range: 100,
+        positionMs: (now - T0) * rate + 50000 + 18 * rate, at: now, pitch: (rate - 1) * 100, rate: rate, bpm: 140, currentBpm: 140 * rate, jumps: 0, seq: ++seq}], false);
+    apply();
+    for (let t = 0; t < 12000; t += 200) {
+        now += 200; tick++;
+        if (scShadowBendTimer.running) scShadowBendEnd();
+        scShadowLine(now);
+        if (t % 600 === 0) apply();
+        ready = ready || (scShadowAt[2] && scShadowAt[2].ready ? now - T0 : 0);
+        if (!closed && Math.abs(ahead) < 10 * rate) closed = now - T0;
+    }
+    assert.ok(first > 0 && first - ready <= 1400, 'rate ' + rate + ': first bend ' + (first - ready) + ' ms after the deck was ready');
+    assert.ok(closed > 0 && closed <= 9000 && Math.abs(ahead) < 10 * rate, 'rate ' + rate + ': ' + ahead + ' ms off, closed after ' + closed + ' ms, ' + bends + ' bends');
+}
+""")
+
+
+class JogGridEditGuardTest(unittest.TestCase):
+    def test_jog_guards_stay_while_zoom_is_stock(self):
+        # #157's jog half is not a ZOOM / Browse change: Shift+Vinyl while playing and Jog Touch in Grid Edit.
+        self.assertIn("(globalConfig.shift && !deckConfig.playing) || deckConfig.gridEditActive", SRC)
+        self.assertIn("!deckConfig.gridEditActive &&\\n", SRC)
+        self.assertNotIn("BrowseEncoder.qml", SRC)
+
+
+class ShadowMasterBackTest(unittest.TestCase):
+    """Engine Link: the master pauses, its copy on the peer plays on for the trip and is left master (i8b, 42aa60a)."""
+
+    def test_a_copy_that_holds_master_gives_it_to_a_real_deck(self):
+        ShadowDisplayTest.js(self, r"""
+const pressed = [];
+globalThis.scPress = path => pressed.push(path);
+const play = {2: false};
+globalThis.scShadowProperties = d => ({play: {state: !!play[d]}});
+const run = (lead, peerLead, peerPlaying, prev) => {
+    pressed.length = 0; now += 1000;
+    Object.assign(globalThis, {scShadowLead: lead, scShadowPeerLead: peerLead, scShadowPeerPlaying: peerPlaying, scShadowPrev: prev});
+    scShadowMasterBack([1, 3], now);
+    return pressed.join();
+};
+const deck = (ps, loaded, master) => ({ps: ps, loaded: loaded !== false, master: !!master});
+// The peer's copy of deck 1 holds master: deck 1 takes it back, stopped (as on stock) or playing.
+assert.equal(run(0, 1, false, {1: deck(false), 3: deck(false)}), '/Engine/Deck1/RequestMaster');
+assert.equal(run(0, 1, true, {1: deck(true), 3: deck(false)}), '/Engine/Deck1/RequestMaster');
+// Deck 1 stopped: the deck that plays takes it, ours or (its own QML) the peer's.
+assert.equal(run(0, 1, false, {1: deck(false), 3: deck(true)}), '/Engine/Deck3/RequestMaster');
+assert.equal(run(0, 1, true, {1: deck(false), 3: deck(false)}), '');
+// Nothing to take it with, nothing to do, or already done.
+assert.equal(run(0, 1, false, {1: deck(false, false), 3: deck(false)}), '');
+assert.equal(run(0, 0, false, {1: deck(true), 3: deck(false)}), '');
+assert.equal(run(0, 1, false, {1: deck(false, true, true), 3: deck(false)}), '');
+// Our copy (deck 2) holds master: our playing deck takes it once the copy stopped; else the peer does.
+assert.equal(run(2, 0, false, {1: deck(true), 3: deck(false)}), '/Engine/Deck1/RequestMaster');
+assert.equal(run(2, 0, false, {1: deck(false), 3: deck(false)}), '');
+play[2] = true;
+assert.equal(run(2, 0, true, {1: deck(true), 3: deck(false)}), '');
+// One press per 800 ms.
+play[2] = false;
+Object.assign(globalThis, {scShadowLead: 0, scShadowPeerLead: 1, scShadowPeerPlaying: false, scShadowPrev: {1: deck(false), 3: deck(false)}});
+pressed.length = 0; now += 1000;
+scShadowMasterBack([1, 3], now); now += 400; scShadowMasterBack([1, 3], now); now += 400; scShadowMasterBack([1, 3], now);
+assert.equal(pressed.length, 2);
+// The reply names the copy and whether a real deck of the peer plays; a stale one says nothing.
+globalThis.scShadowApplyDisplay = () => {};
+scShadowApplyAll([{deck: 2, shadowMaster: 1, playing: true}, {deck: 4, shadowMaster: 1}], true);
+assert.deepEqual([scShadowPeerLead, scShadowPeerPlaying], [1, true]);
+scShadowApplyAll([{deck: 2, shadowMaster: 1, playing: true, stale: true}], true);
+assert.deepEqual([scShadowPeerLead, scShadowPeerPlaying], [0, false]);
+""")
+        # The copy is told to the peer with every deck, and a change posts at once.
+        self.assertIn("o.shadowMaster = scShadowLead", SRC)
+        self.assertIn("if (lead !== scShadowLead) { scShadowLead = lead; edge = true }", SRC)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the follower behavioral checks")
+class ShadowFollowerWallTimeTest(unittest.TestCase):
+    """Engine mode: the bend thresholds are wall time. At -50 % a copy 8 ms of its own time (16 ms on screen) off was left for 10 s (rec14-a)."""
+
+    def test_bend_thresholds_count_the_decks_speed(self):
+        ShadowDisplayTest.js(self, r"""
+const bendsIn9s = rate => {
+    const T0 = now, props = new Map();
+    let ahead = 8, tick = 0, bends = 0;
+    globalThis.scShadowBent = null;
+    delete scShadowAt[2];
+    globalThis.scShadowBendTimer = {interval: 0, running: false, stop() { this.running = false }, restart() { this.running = true; bends++ }};
+    const jitter = () => tick % 7 < 3 ? 4 * rate : -3 * rate;
+    globalThis.scTr = path => {
+        let p = props.get(path);
+        if (p) return p;
+        const deck2 = path.startsWith('/Engine/Deck2/');
+        p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '100' : path.endsWith('/SyncMode') ? 'Off' : '',
+            entries: ['4', '8', '10', '20', '50', '100'], index: 5, url: '',
+            _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? rate / 2 : 0,
+            get value() { return this._v }, set value(v) { this._v = v },
+            get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? ((now - T0) * rate + 50000 + ahead + jitter()) * 44.1 : 0 }};
+        props.set(path, p);
+        return p;
+    };
+    let seq = 0;
+    const apply = () => scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}', range: 100,
+        positionMs: (now - T0) * rate + 50000 + 18 * rate, at: now, pitch: (rate - 1) * 100, rate: rate, bpm: 140, currentBpm: 140 * rate, jumps: 0, seq: ++seq}], false);
+    apply();
+    for (let t = 0; t < 9000; t += 200) {
+        now += 200; tick++;
+        scShadowLine(now);
+        if (t % 600 === 0) apply();
+    }
+    return bends;
+};
+assert.equal(bendsIn9s(1), 0, '8 ms at full speed is under the young line\'s 12 ms');
+assert.ok(bendsIn9s(0.5) >= 1, '8 ms of a deck at half speed is 16 ms of wall time: bent');
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowSenderReplacedTrackTest(unittest.TestCase):
+    """A track loaded over another: Engine names the new file ~0.2 s before its title, artist and length (o5-R2).
+    The peer names its copy by the first title it is told: it got the last track's (c5-b)."""
+
+    def test_last_tracks_title_is_not_posted_for_the_new_file(self):
+        ShadowDisplayTest.js(self, r"""
+const bodies = [];
+globalThis.XMLHttpRequest = class {
+    open(method, url) { this.url = url; this.readyState = 1 }
+    send(body) { if (body) bodies.push(JSON.parse(body)[0]); this.readyState = 4; this.status = 200; if (this.onreadystatechange) this.onreadystatechange() }
+};
+globalThis.scShadowPoll = () => {};
+const deck = {uri: 'file:///a.mp3', title: 'A', artist: 'One', len: 219};
+globalThis.scTr = path => ({value: path.endsWith('/SampleRate') ? 44100 : 0, state: path.endsWith('/SongLoaded'), color: '#ffffff', index: 0,
+    get unnormalized() { return path.endsWith('/Deck1/Track/TrackLength') ? deck.len * 44100 : 0 },
+    get string() { return !path.startsWith('/Engine/Deck1/') ? '' : path.endsWith('/TrackUri') ? deck.uri : path.endsWith('/SongName') ? deck.title : path.endsWith('/ArtistName') ? deck.artist : '' }});
+const run = ms => { for (let t = 0; t < ms; t += 40) { now += 40; scShadowTick() } };
+run(3000);
+assert.deepEqual([bodies[0].title, bodies[0].artist, bodies[0].durationMs], ['A', 'One', 219000]);
+bodies.length = 0;
+deck.uri = 'file:///b.mp3'; run(120); // sampled inside the gap (the uri is cached for up to 500 ms)
+scShadowPrev[1].netAt = 0; run(80);
+assert.ok(bodies.length >= 1, 'the new file was not posted');
+for (const b of bodies) assert.deepEqual([b.net, b.title, b.artist, b.durationMs || 0], ['file:///b.mp3', '', '', 0]);
+Object.assign(deck, {title: 'B', artist: 'Two', len: 171}); run(600);
+const b = bodies[bodies.length - 1];
+assert.deepEqual([b.title, b.artist, b.durationMs], ['B', 'Two', 171000]);
+// The same title again on another file (a duplicate): told once the second has passed.
+bodies.length = 0; deck.uri = 'file:///b2.mp3'; scShadowPrev[1].netAt = 0; run(2600);
+assert.equal(bodies[0].title, ''); assert.equal(bodies[bodies.length - 1].title, 'B');
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowSenderLateTickTest(unittest.TestCase):
+    """A tick after a GUI stall can read the position of before the stall (zs15-b: 340 ms behind after a 426 ms stall).
+    It was posted as a jump back, then a jump forward: the peer's copy was seeked 200 ms back (rec15-d)."""
+
+    def test_a_stale_position_after_a_stall_is_not_a_jump(self):
+        ShadowDisplayTest.js(self, r"""
+globalThis.XMLHttpRequest = class { open() { this.readyState = 1 } send() { this.readyState = 4; this.status = 200 } };
+globalThis.scShadowPoll = () => {};
+const T0 = now;
+let stale = 0, moved = 0;
+globalThis.scTr = path => ({value: path.endsWith('/SampleRate') ? 44100 : 0, color: '#ffffff', index: 0,
+    state: path.startsWith('/Engine/Deck1/') && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')),
+    get unnormalized() { return path.endsWith('/Deck1/Track/TrackPosition') ? (now - T0 - stale + moved) * 44.1 : path.endsWith('/Deck1/Track/TrackLength') ? 400 * 44100 : 0 },
+    get string() { return path === '/Engine/Deck1/Track/TrackUri' ? 'file:///a.mp3' : '' }});
+const run = ms => { for (let t = 0; t < ms; t += 80) { now += 80; scShadowTick() } };
+run(2000);
+const jumps = scShadowPrev[1].jumps, line = () => scShadowPrev[1].lineMs - (now - T0);
+const before = line();
+now += 426; stale = 340; scShadowTick(); // the timer runs before the queued position update
+assert.equal(scShadowPrev[1].jumps, jumps, 'a stale position was posted as a jump');
+assert.ok(Math.abs(line() - before) < 2, 'the line moved by ' + (line() - before));
+stale = 0; run(400);
+assert.equal(scShadowPrev[1].jumps, jumps);
+assert.ok(Math.abs(line() - before) < 2);
+// A jump made during a stall is told by the next tick.
+now += 426; moved = -5000; scShadowTick(); run(80);
+assert.equal(scShadowPrev[1].jumps, jumps + 1);
+assert.ok(Math.abs(line() - before + 5000) < 40);
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowHeadSyncLeadTest(unittest.TestCase):
+    """Engine mode: the copy is in neither Sync nor the master selection, so its stock header said "not synced"
+    while the source's BPM was green, and drew the phase meter while the source showed LEAD (g10-e-z3-L)."""
+
+    def test_the_shadow_header_gets_the_sources_sync_and_master(self):
+        ShadowDisplayTest.js(self, r"""
+Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
+const deck = (d, o) => Object.assign({deck: d, path: '/c/a.mp3', id: 'k'}, o);
+const decks = [deck(2, {sync: true}), deck(4, {lead: true, master: true}), deck(1, {lead: true}), {deck: 3, sync: true}];
+scShadowApplyAll(decks, false);
+// Role 13: decks 1 and 3 are this player's own, their headers stay Engine's.
+const flags = () => Object.keys(scShadowHead).map(d => d + (scShadowHead[d].master ? 'M' : '') + (scShadowHead[d].sync ? 'S' : '')).join();
+assert.equal(flags(), '2S,4M');
+// `master` alone: the player holds the network master, no deck of it shows LEAD (R2 after a restart).
+decks[1] = deck(4, {master: true}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4');
+decks[1] = deck(4, {lead: true}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4M'); // stream-sync clears `master` for the copy
+const same = scShadowHead;
+scShadowApplyAll(decks, false);
+assert.strictEqual(scShadowHead, same, 'an unchanged state must not re-evaluate the header bindings');
+decks[1].path = ''; // the source ejected
+scShadowApplyAll(decks, false);
+assert.equal(flags(), '2S');
+scShadowApplyAll([], true); // display mode draws its own header
+assert.deepEqual(scShadowHead, {});
+""")
+        self.assertIn('head("deckIndex", "master")', SRC)
+        self.assertIn("o.lead = s.master;", SRC)  # the source posts its own DeckIsMaster, what its header shows
+        self.assertIn("sent.lead !== o.lead", SRC)  # and posts at once when only that changes
+        self.assertIn('head("deckIndex", "sync")', SRC)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowHeadSourceTextTest(unittest.TestCase):
+    """Engine mode: the peer named the copy by its file ("Throw Sum Mo.mp3") and showed the key it analysed (8B)
+    while the source's header read its library's title and no key ("-")."""
+
+    def test_the_source_posts_its_key_and_the_shadow_header_takes_title_artist_and_key(self):
+        ShadowDisplayTest.js(self, r"""
+const bodies = [];
+globalThis.XMLHttpRequest = class {
+    open(method, url) { this.url = url; this.readyState = 1 }
+    send(body) { if (body) bodies.push(JSON.parse(body)[0]); this.readyState = 4; this.status = 200; if (this.onreadystatechange) this.onreadystatechange() }
+};
+globalThis.scShadowPoll = () => {};
+const deck = {key: ''};
+globalThis.scTr = path => ({value: path.endsWith('/SampleRate') ? 44100 : 0, state: path.endsWith('/SongLoaded'), color: '#ffffff', index: 0,
+    get unnormalized() { return path.endsWith('/Deck1/Track/TrackLength') ? 200 * 44100 : 0 },
+    get string() { return !path.startsWith('/Engine/Deck1/') ? '' : path.endsWith('/TrackUri') ? 'file:///a.mp3' : path.endsWith('/SongName') ? 'A' : path.endsWith('/ArtistName') ? 'One' : path.endsWith('/Track/CurrentKey') ? deck.key : '' }});
+const run = ms => { for (let t = 0; t < ms; t += 40) { now += 40; scShadowTick() } };
+run(3000);
+assert.equal(bodies[bodies.length - 1].keyName, '-', 'a track without a key is told as the header writes it');
+deck.key = '8B'; run(2600); // analysed, or shifted: told at the next text read
+assert.equal(bodies[bodies.length - 1].keyName, '8B');
+// The peer: its header takes the three texts from the source, not from the copy.
+Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
+scShadowApplyAll([{deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '-'}, {deck: 4, path: '/c/b.mp3', id: 'j'}], false);
+assert.deepEqual(scShadowHead[2], {master: false, sync: false, title: 'A', artist: 'One', keyName: '-'});
+assert.deepEqual(scShadowHead[4], {master: false, sync: false, title: '', artist: '', keyName: ''}); // a CDJ or an older sender: stock texts
+""")
+        for anchor in ('scaled[bj + "Deck/DeckItem/ArtistSong.qml"]', 'scaled[bj + "KeyEditor/KeyInfo.qml"]', "root.scShadowHeadOf(microDeck.deckIndex).title"):
+            self.assertIn(anchor, SRC)

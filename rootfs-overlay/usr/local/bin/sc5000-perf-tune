@@ -162,20 +162,28 @@ engine_threads() {
     engine_path=
     for p in "$PROC"/[0-9]*; do
         analyzer=
+        # Builtins only below: a cat/sed/awk per thread made every 30 s sweep ~560
+        # forks over 3.5 s on the helpers' cores, and waveform frames 50-125 ms late.
+        cmdline=; read -r cmdline 2>/dev/null <"$p/cmdline"
+        [ -n "$cmdline" ] || continue # a kernel thread
         case $(readlink "$p/exe" 2>/dev/null) in
             */Engine/Engine) engine_path=$p ;;
             */OfflineAnalyzer) analyzer=1 ;;
             *) continue ;;
         esac
         for task in "$p"/task/[0-9]*; do
-            name=$(cat "$task/comm" 2>/dev/null) || continue
+            read -r name 2>/dev/null <"$task/comm" || continue
             # An audio thread can be named before Engine promotes it to RT.
             case $name in AudioOut|AudioRenderer*|AudioWatcher) continue ;; esac
-            cpus=$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' "$task/status" 2>/dev/null)
-            stat=$(cat "$task/stat" 2>/dev/null) || continue
+            read -r stat 2>/dev/null <"$task/stat" || continue
             # policy is field 41: 39th after the ") " that ends comm (comm may hold spaces)
-            policy=$(printf '%s\n' "${stat##*) }" | awk '{print $39}')
+            set -- ${stat##*) }
+            policy=${39}
             [ "$policy" = 0 ] || [ "$policy" = 3 ] || [ "$policy" = 5 ] || continue
+            cpus=
+            while read -r key value; do
+                [ "$key" = Cpus_allowed_list: ] && { cpus=$value; break; }
+            done 2>/dev/null <"$task/status"
             if [ -n "$analyzer" ]; then want=0,3
             elif [ "${task##*/}" = "${p##*/}" ]; then want=1
             elif [ "$name" = SceneGraph ]; then want=2
