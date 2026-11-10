@@ -1886,3 +1886,44 @@ assert.deepEqual([scShadowPeerLead, scShadowPeerPlaying], [0, false]);
         # The copy is told to the peer with every deck, and a change posts at once.
         self.assertIn("o.shadowMaster = scShadowLead", SRC)
         self.assertIn("if (lead !== scShadowLead) { scShadowLead = lead; edge = true }", SRC)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the follower behavioral checks")
+class ShadowFollowerWallTimeTest(unittest.TestCase):
+    """Engine mode: the bend thresholds are wall time. At -50 % a copy 8 ms of its own time (16 ms on screen) off was left for 10 s (rec14-a)."""
+
+    def test_bend_thresholds_count_the_decks_speed(self):
+        ShadowDisplayTest.js(self, r"""
+const bendsIn9s = rate => {
+    const T0 = now, props = new Map();
+    let ahead = 8, tick = 0, bends = 0;
+    globalThis.scShadowBent = null;
+    delete scShadowAt[2];
+    globalThis.scShadowBendTimer = {interval: 0, running: false, stop() { this.running = false }, restart() { this.running = true; bends++ }};
+    const jitter = () => tick % 7 < 3 ? 4 * rate : -3 * rate;
+    globalThis.scTr = path => {
+        let p = props.get(path);
+        if (p) return p;
+        const deck2 = path.startsWith('/Engine/Deck2/');
+        p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '100' : path.endsWith('/SyncMode') ? 'Off' : '',
+            entries: ['4', '8', '10', '20', '50', '100'], index: 5, url: '',
+            _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? rate / 2 : 0,
+            get value() { return this._v }, set value(v) { this._v = v },
+            get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? ((now - T0) * rate + 50000 + ahead + jitter()) * 44.1 : 0 }};
+        props.set(path, p);
+        return p;
+    };
+    let seq = 0;
+    const apply = () => scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}', range: 100,
+        positionMs: (now - T0) * rate + 50000 + 18 * rate, at: now, pitch: (rate - 1) * 100, rate: rate, bpm: 140, currentBpm: 140 * rate, jumps: 0, seq: ++seq}], false);
+    apply();
+    for (let t = 0; t < 9000; t += 200) {
+        now += 200; tick++;
+        scShadowLine(now);
+        if (t % 600 === 0) apply();
+    }
+    return bends;
+};
+assert.equal(bendsIn9s(1), 0, '8 ms at full speed is under the young line\'s 12 ms');
+assert.ok(bendsIn9s(0.5) >= 1, '8 ms of a deck at half speed is 16 ms of wall time: bent');
+""")

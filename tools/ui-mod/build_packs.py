@@ -1452,7 +1452,9 @@ SERVICES_MAIN = """
 		if (age >= 2000 || Math.abs(gap) > 40) {
 			at.fine = at.fine === undefined || Math.abs(gap - at.fine) > 15 ? gap : at.fine + (gap - at.fine) * Math.min(1, (now - at.fineAt) / 8000)
 			at.fineAt = now
-			if (Math.abs(at.fine) > (age < 10000 ? 12 : 6) && Math.abs(at.fine) <= lim) {
+			// 12 and 6 ms on screen and in the air: of the deck's own time at its rate
+			// (at -50 % the copy stood 13, then 23 ms off the grid for 10 s, rec14-a).
+			if (Math.abs(at.fine) > (age < 10000 ? 12 : 6) * at.rate && Math.abs(at.fine) <= lim) {
 				scShadowBend(d, at, at.fine)
 				return dbg("bend")
 			}
