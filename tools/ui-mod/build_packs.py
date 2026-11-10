@@ -1029,7 +1029,9 @@ SERVICES_MAIN = """
 			["cueLED", "/Track/CueLEDState"], ["master", "/DeckIsMaster"], ["sync", "/SyncMode"],
 			["beat", "/BeatNumber"], ["cuePosition", "/Track/CuePosition"], ["title", "/Track/SongName"],
 			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"],
-			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"], ["currentKey", "/Track/CurrentKey"]])
+			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"], ["currentKey", "/Track/CurrentKey"],
+			["loop", "/Track/LoopEnableState"], ["keyOffset", "/Track/KeyOffset"], ["stemmed", "/Track/Stemmed"],
+			["slip", "/Track/SlipModeActive"], ["slipPosition", "/Track/SlipModePosition"]])
 			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
 		p.cues = []
 		for (let i = 1; i <= 8; i++) {
@@ -1090,7 +1092,7 @@ SERVICES_MAIN = """
 				// update and read the position of before the stall (zs15-b: 340 ms behind,
 				// counted as a jump back and a jump forward, each a seek on the peer).
 				// Nothing is known then: the deck is where its speed puts it.
-				if (run > 150 && s.ps && p.ps && s.net === p.net) s.posMs = expect
+				if (now - p.at > 150 && s.ps && p.ps && s.net === p.net) s.posMs = expect
 				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
 				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
@@ -1193,12 +1195,16 @@ SERVICES_MAIN = """
 			// A track loaded over another: Engine names the file ~0.2 s before its title,
 			// artist and length (o5-R2). Still the last track's within 1 s: not filled yet.
 			if (o.net && s.net && o.net !== s.net) { cc.was = o.title; cc.wasBy = o.artist; cc.wasAt = now }
-			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000)
+			const shift = g.keyOffset.unnormalized || 0 // a key shift: the key's name with it
+			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000) || o.keyOffset !== shift
 			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
 			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.lead = s.master; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
+			// What this deck's header and overview show beside the track; the peer's shadow deck shows them, its copy takes none.
+			o.loop = !!g.loop.state; o.keyOffset = shift; o.stems = !!g.stemmed.state
+			o.slip = g.slip.state ? Math.max(1, g.slipPosition.unnormalized || 0) : 0 // slip active: its timeline, in samples
 			o.shadowMaster = scShadowLead
 			// Titles arrive after the load: re-read on a new track and every 2 s.
 			if (fresh) {
@@ -1222,7 +1228,8 @@ SERVICES_MAIN = """
 				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
-				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev) edge = true
+				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev ||
+				sent.loop !== o.loop || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -1236,7 +1243,7 @@ SERVICES_MAIN = """
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
-			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
+			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.loop = o.loop; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
@@ -1324,7 +1331,15 @@ SERVICES_MAIN = """
 	function scShadowApplyAll(decks, displayOnly) {
 		scShadowDisplayOnly = displayOnly !== false
 		const head = {}
-		if (!scShadowDisplayOnly) for (const e of decks) if (e.path && scFourDeckRole.indexOf(String(e.deck)) < 0) head[e.deck] = {master: !!e.lead, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || ""}
+		if (!scShadowDisplayOnly) for (const d of [1, 2, 3, 4]) {
+			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
+			const e = decks.find(x => x.deck === d)
+			if (e && e.path) head[d] = {master: typeof e.lead === "boolean" ? e.lead : e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
+				loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0}
+			// The last track is still on the deck (the next one's copy on its way, the peer gone): its
+			// header stays until it is unloaded. Without it the header read the copy's file name and key.
+			else if (scShadowHead[d] && (scShadowAt[d] || {}).path) head[d] = scShadowHead[d]
+		}
 		if (JSON.stringify(head) !== JSON.stringify(scShadowHead)) scShadowHead = head
 		let peerLead = 0, peerPlaying = false
 		for (const e of decks) { if (e.shadowMaster && !e.stale) peerLead = e.shadowMaster; if (e.playing && !e.cue && !e.stale) peerPlaying = true }
@@ -1392,6 +1407,7 @@ SERVICES_MAIN = """
 		const u2 = root.scTr("/Engine/Deck" + d + "/Track/Unload")
 		if (u2) u2.state = true
 		delete scShadowAt[d]
+		if (scShadowHead[d]) { const head = Object.assign({}, scShadowHead); delete head[d]; scShadowHead = head }
 	}
 	function scShadowApply(e) {
 		const d = e.deck
@@ -4453,6 +4469,12 @@ def edits(dev: bool):
     # so needle drop and markers keep their x. The container clips what the
     # stretch pushes past the top. transform must sit outside the anchors group.
     deck_overview = list(overview) + [
+        # A shadow deck draws its source's slip line: the source's slip timeline in samples, 0 while slip is not active.
+        ("    readonly property bool isSlipModeActive: !isRemoteDeck && pSlipActive && pSlipActive.translator\n        ? pSlipActive.translator.value\n        : false\n",
+         '    readonly property int scSlip: typeof root !== "undefined" && root && root.scShadowHeadOf ? root.scShadowHeadOf(deckIndex).slip || 0 : 0\n'
+         "    readonly property bool isSlipModeActive: scSlip > 0 || (!isRemoteDeck && pSlipActive && pSlipActive.translator\n        ? pSlipActive.translator.value\n        : false)\n"),
+        ("    readonly property int slipModePosition: isSlipModeActive && pSlipModePosition",
+         "    readonly property int slipModePosition: scSlip > 0 ? scSlip : isSlipModeActive && pSlipModePosition"),
         ("				bottomMargin: 7\n", "				bottomMargin: 0\n"),
         ("		objectName: \"Deck_WaveformOverview_ViewContainer\"\n",
          "		objectName: \"Deck_WaveformOverview_ViewContainer\"\n		clip: true\n"),
@@ -5307,6 +5329,8 @@ def edits(dev: bool):
         ):
             line = indent + "view: " + owner + ".deckView.beatJumpView\n"
             scaled[bj + rel] = [(line, line + indent + "deckIndex: " + owner + ".deckView.deckData.deckIndex\n")]
+            line = indent + "view: " + owner + ".deckView.autoLoopView\n"  # AutoLoop: the deck whose source's loop it shows
+            scaled[bj + rel].append((line, indent + "deckIndex: " + owner + ".deckView.deckData.deckIndex\n" + line))
         # Same compact order in both deck counts: Loop / BeatJump / LEAD /
         # Cue / soft takeover / speed. Never spend the time display's width.
         performance = bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"
@@ -5353,6 +5377,7 @@ def edits(dev: bool):
         split_controls = """        AutoLoop {
             Layout.preferredWidth: 52
             Layout.rightMargin: 4
+            deckIndex: deckTrackDataContent.deckIndex
             view: deckTrackDataContent.deckView.autoLoopView
             spacing: 4
             iconWidth: 16
@@ -5401,8 +5426,8 @@ def edits(dev: bool):
         # Two decimals, and nothing else: the stock Row, colours and tap stay, and whatever stock
         # shows without an analysed tempo ("-", an unanalysed track) is stock's own text.
         # The shadow header mirrors the source deck's Sync (green BPM) and LEAD; the copy itself is in neither.
-        def head(deck, field):
-            return f'!!(typeof root !== "undefined" && root && root.scShadowHeadOf && root.scShadowHeadOf({deck}).{field})'
+        def head(deck, field, fallback="false"):
+            return f'(typeof root !== "undefined" && root && root.scShadowHeadOf && typeof root.scShadowHeadOf({deck}).{field} === "boolean" ? root.scShadowHeadOf({deck}).{field} : ({fallback}))'
         # Title, artist and key are the source's (its library's), not what Engine here reads from the copy.
         heads = 'readonly property var scHead: typeof root !== "undefined" && root && root.scShadowHeadOf ? root.scShadowHeadOf(deckIndex) : null\n'
         scaled[bj + "Deck/DeckItem/ArtistSong.qml"] = [
@@ -5413,18 +5438,30 @@ def edits(dev: bool):
              '    readonly property string artistTextString: deckLoaded ? (scHead && scHead.title ? scHead.artist : artistName) : "No Track Loaded"\n'),
             ("    readonly property bool onlyFileName: view.onlyFileName\n",
              "    readonly property bool onlyFileName: view.onlyFileName && !(scHead && scHead.title)\n"),
+            ("    readonly property bool isStemmed: view.stemmed\n",
+             "    readonly property bool isStemmed: scHead && scHead.title ? scHead.stems : view.stemmed\n"),
         ]
         scaled[bj + "KeyEditor/KeyInfo.qml"] = [
             ('    readonly property string currentKey: keyEditorController ? keyEditorController.getViewModel().currentKey : ""\n',
              "    " + heads +
              '    readonly property string currentKey: scHead && scHead.keyName ? (scHead.keyName === "-" ? "" : scHead.keyName)\n'
-             '        : keyEditorController ? keyEditorController.getViewModel().currentKey : ""\n')]
+             '        : keyEditorController ? keyEditorController.getViewModel().currentKey : ""\n'),
+            ("    readonly property int offset: keyEditorController ? keyEditorController.getViewModel().keyOffset : 0\n",
+             "    readonly property int offset: scHead && scHead.title ? scHead.keyOffset : keyEditorController ? keyEditorController.getViewModel().keyOffset : 0\n")]
+        # The source's loop lights the shadow header's loop icon and size; the copy itself does not loop.
+        scaled.setdefault(bj + "Deck/DeckItem/AutoLoop.qml", []).extend([
+            ("    required property AutoLoopViewInterface view\n",
+             "    required property AutoLoopViewInterface view\n    property int deckIndex: 0\n"
+             "    readonly property bool scLoop: view.loopEnableState || " + head("deckIndex", "loop") + "\n"),
+            ("        color: view.loopEnableState ? Style.active01Color : Style.icon01Color\n", "        color: scLoop ? Style.active01Color : Style.icon01Color\n"),
+            ("        color: view.loopEnableState ? Style.active01Color : Style.font01Color\n", "        color: scLoop ? Style.active01Color : Style.font01Color\n"),
+        ])
         scaled[ROOT + "Views/MainView/Components/JP07SyncIndicator.qml"] = [
             ("    property bool isMaster: pDeckIsMaster.translator && pDeckIsMaster.translator.state\n",
-             "    property bool isMaster: (pDeckIsMaster.translator && pDeckIsMaster.translator.state) || " + head("deckIndex", "master") + "\n")]
+             "    property bool isMaster: " + head("deckIndex", "master", "pDeckIsMaster.translator && pDeckIsMaster.translator.state") + "\n")]
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
             ("    readonly property bool syncEnabled: deckController && deckController.syncInfoViewController.syncEnabled\n",
-             "    readonly property bool syncEnabled: (deckController && deckController.syncInfoViewController.syncEnabled) || " + head("deckIndex", "sync") + "\n"),
+             "    readonly property bool syncEnabled: " + head("deckIndex", "sync", "deckController && deckController.syncInfoViewController.syncEnabled") + "\n"),
             ("    property bool tappable: true\n",
              "    Layout.minimumWidth: implicitWidth\n    property bool tappable: true\n"
              '    readonly property var scBpm: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/CurrentBPM".arg(deckIndex)) : null\n'

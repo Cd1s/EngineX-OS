@@ -2605,11 +2605,64 @@ assert.equal(scShadowPrev[1].jumps, jumps + 1);
 assert.ok(Math.abs(line() - before + 5000) < 40);
 """)
 
+    def normal_tick(self, pitch, moved):
+        ShadowDisplayTest.js(self, r"""
+globalThis.XMLHttpRequest = class { open() { this.readyState = 1 } send() { this.readyState = 4; this.status = 200 } };
+globalThis.scShadowPoll = () => {};
+const T0 = now, pitch = PITCH, speed = 1 + pitch / 100;
+let moved = 0;
+globalThis.scTr = path => ({value: path.endsWith('/SampleRate') ? 44100 : 0, color: '#ffffff', index: 0,
+    state: path.startsWith('/Engine/Deck1/') && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')),
+    get unnormalized() { return path.endsWith('/Deck1/Track/TrackPosition') ? (10000 + (now - T0) * speed + moved) * 44.1 : path.endsWith('/TrackLength') ? 400 * 44100 : path.endsWith('/OriginalBPM') ? 120 : path.endsWith('/CurrentBPM') ? 120 * speed : 0 },
+    get string() { return path === '/Engine/Deck1/Track/TrackUri' ? 'file:///a.mp3' : path.endsWith('/SpeedState') ? '+' + pitch + '%' : '' }});
+for (let i = 0; i < 80; i++) { now += scShadowTickTimer.interval; scShadowTick() }
+assert.equal(scShadowTickTimer.interval, 80);
+assert.equal(scShadowPrev[1].pitch, pitch);
+const jumps = scShadowPrev[1].jumps;
+moved = MOVED; now += 80; scShadowTick();
+assert.ok(Math.abs(scShadowPrev[1].posMs - (10000 + (now - T0) * speed + moved)) < 0.001,
+    'a normal 80 ms tick must use the sampled position');
+assert.equal(scShadowPrev[1].jumps, jumps + (Math.abs(moved) > 180 ? 1 : 0));
+""".replace('PITCH', str(pitch)).replace('MOVED', str(moved)))
+
+    def test_normal_80ms_at_pitch_100(self):
+        self.normal_tick(100, -40)
+
+    def test_normal_80ms_at_pitch_zero(self):
+        self.normal_tick(0, -20)
+
+    def test_jump_back_5s_at_pitch_100(self):
+        self.normal_tick(100, -5000)
+
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
 class ShadowHeadSyncLeadTest(unittest.TestCase):
     """Engine mode: the copy is in neither Sync nor the master selection, so its stock header said "not synced"
     while the source's BPM was green, and drew the phase meter while the source showed LEAD (g10-e-z3-L)."""
+
+    def test_final_bindings_use_explicit_false_and_fall_back_only_when_missing(self):
+        bp.ROOT = 'Skins/Embedded/'
+        patches = bp.edits(False)
+        for path, marker in (
+            ('Skins/Embedded/Views/MainView/Components/JP07SyncIndicator.qml', 'property bool isMaster:'),
+            ('Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/BpmInfo.qml', 'property bool syncEnabled:'),
+        ):
+            replacement = next(new for old, new in patches[path] if marker in new)
+            expression = replacement.split(':', 1)[1].strip()
+            ShadowDisplayTest.js(self, r"""
+globalThis.deckIndex = 2;
+globalThis.pDeckIsMaster = {translator: {state: true}};
+globalThis.deckController = {syncInfoViewController: {syncEnabled: true}};
+let source = {master: false, sync: false};
+globalThis.scShadowHeadOf = () => source;
+const result = () => !!(EXPRESSION);
+assert.equal(result(), false, 'source false overrides local true');
+pDeckIsMaster.translator.state = deckController.syncInfoViewController.syncEnabled = false;
+source = {master: true, sync: true}; assert.equal(result(), true);
+source = {}; assert.equal(result(), false, 'missing field keeps the stock local binding');
+pDeckIsMaster.translator.state = deckController.syncInfoViewController.syncEnabled = true;
+assert.equal(result(), true);
+""".replace('EXPRESSION', expression))
 
     def test_the_shadow_header_gets_the_sources_sync_and_master(self):
         ShadowDisplayTest.js(self, r"""
@@ -2621,8 +2674,9 @@ scShadowApplyAll(decks, false);
 const flags = () => Object.keys(scShadowHead).map(d => d + (scShadowHead[d].master ? 'M' : '') + (scShadowHead[d].sync ? 'S' : '')).join();
 assert.equal(flags(), '2S,4M');
 // `master` alone: the player holds the network master, no deck of it shows LEAD (R2 after a restart).
-decks[1] = deck(4, {master: true}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4');
+decks[1] = deck(4, {master: true, lead: false}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4');
 decks[1] = deck(4, {lead: true}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4M'); // stream-sync clears `master` for the copy
+decks[1] = deck(4, {master: true}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4M'); // an older sender omitted LEAD
 const same = scShadowHead;
 scShadowApplyAll(decks, false);
 assert.strictEqual(scShadowHead, same, 'an unchanged state must not re-evaluate the header bindings');
@@ -2632,10 +2686,10 @@ assert.equal(flags(), '2S');
 scShadowApplyAll([], true); // display mode draws its own header
 assert.deepEqual(scShadowHead, {});
 """)
-        self.assertIn('head("deckIndex", "master")', SRC)
+        self.assertIn('head("deckIndex", "master",', SRC)
         self.assertIn("o.lead = s.master;", SRC)  # the source posts its own DeckIsMaster, what its header shows
         self.assertIn("sent.lead !== o.lead", SRC)  # and posts at once when only that changes
-        self.assertIn('head("deckIndex", "sync")', SRC)
+        self.assertIn('head("deckIndex", "sync",', SRC)
 
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
@@ -2663,8 +2717,83 @@ assert.equal(bodies[bodies.length - 1].keyName, '8B');
 // The peer: its header takes the three texts from the source, not from the copy.
 Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
 scShadowApplyAll([{deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '-'}, {deck: 4, path: '/c/b.mp3', id: 'j'}], false);
-assert.deepEqual(scShadowHead[2], {master: false, sync: false, title: 'A', artist: 'One', keyName: '-'});
-assert.deepEqual(scShadowHead[4], {master: false, sync: false, title: '', artist: '', keyName: ''}); // a CDJ or an older sender: stock texts
+assert.deepEqual(scShadowHead[2], {master: undefined, sync: false, title: 'A', artist: 'One', keyName: '-', loop: false, keyOffset: 0, stems: false, slip: 0});
+assert.deepEqual(scShadowHead[4], {master: undefined, sync: false, title: '', artist: '', keyName: '', loop: false, keyOffset: 0, stems: false, slip: 0}); // a CDJ or an older sender: stock texts
 """)
         for anchor in ('scaled[bj + "Deck/DeckItem/ArtistSong.qml"]', 'scaled[bj + "KeyEditor/KeyInfo.qml"]', "root.scShadowHeadOf(microDeck.deckIndex).title"):
+            self.assertIn(anchor, SRC)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowHeadStaysWithLastTrackTest(unittest.TestCase):
+    """Engine mode: the source loaded another track and, until the last one was unloaded 0.4-0.5 s later, the
+    shadow header read the copy's file name and analysed key ("Young Thug - … Throw Sum Mo.mp3", 8B; hw19-before-R2)."""
+
+    def test_the_header_keeps_the_sources_texts_until_the_last_track_is_unloaded(self):
+        ShadowDisplayTest.js(self, r"""
+const tr = {};
+globalThis.scTr = path => tr[path] || (tr[path] = {state: path.endsWith('/SongLoaded'), string: 'Off', value: 0});
+Object.assign(globalThis, {scShadowApply() {}, scPlayer: true});
+const a = {deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '6B'};
+scShadowApplyAll([a], false);
+scShadowAt[2] = {path: a.path, id: a.id}; // loaded
+const next = {deck: 2, path: '', id: 'j', loading: true, title: 'B', artist: 'Two', keyName: '-'};
+scShadowApplyAll([next], false);
+assert.equal(scShadowHead[2].title, 'A', 'the last track is still on the deck: its title, not the file name');
+assert.equal(scShadowHead[2].keyName, '6B');
+now += 400; scShadowApplyAll([next], false); // unloaded 350 ms after the change
+assert.equal(scShadowAt[2], undefined);
+assert.equal(scShadowHead[2], undefined, 'an empty deck has no source texts');
+scShadowApplyAll([Object.assign({}, next, {path: '/c/Two - B.mp3', loading: false})], false);
+assert.equal(scShadowHead[2].title, 'B');
+// The peer went away: the same, until the deck is emptied.
+scShadowAt[2] = {path: '/c/Two - B.mp3', id: 'j'};
+scShadowApplyAll([], false); assert.equal(scShadowHead[2].title, 'B');
+now += 400; scShadowApplyAll([], false); assert.equal(scShadowHead[2], undefined);
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowHeadDeckStateTest(unittest.TestCase):
+    """Engine mode: the source's header lit its loop, showed a key shift (+1) and the Stems icon, and its overview
+    drew the slip line; the shadow deck of it showed none of them (the copy takes no loop, shift or slip)."""
+
+    def test_the_source_posts_loop_key_shift_stems_and_slip_and_the_shadow_deck_shows_them(self):
+        ShadowDisplayTest.js(self, r"""
+const bodies = [];
+globalThis.XMLHttpRequest = class {
+    open(method, url) { this.url = url; this.readyState = 1 }
+    send(body) { if (body) bodies.push(JSON.parse(body)[0]); this.readyState = 4; this.status = 200; if (this.onreadystatechange) this.onreadystatechange() }
+};
+globalThis.scShadowPoll = () => {};
+const deck = {key: '6B', loop: false, shift: 0, stems: false, slip: false, slipAt: 0};
+const states = {'/SongLoaded': () => true, '/Track/LoopEnableState': () => deck.loop, '/Track/Stemmed': () => deck.stems, '/Track/SlipModeActive': () => deck.slip};
+globalThis.scTr = path => ({value: path.endsWith('/SampleRate') ? 44100 : 0, color: '#ffffff', index: 0,
+    get state() { const f = path.startsWith('/Engine/Deck1/') && Object.keys(states).find(k => path.endsWith(k)); return f ? states[f]() : false },
+    get unnormalized() { return !path.startsWith('/Engine/Deck1/') ? 0 : path.endsWith('/TrackLength') ? 200 * 44100 : path.endsWith('/KeyOffset') ? deck.shift : path.endsWith('/SlipModePosition') ? deck.slipAt : 0 },
+    get string() { return !path.startsWith('/Engine/Deck1/') ? '' : path.endsWith('/TrackUri') ? 'file:///a.mp3' : path.endsWith('/SongName') ? 'A' : path.endsWith('/ArtistName') ? 'One' : path.endsWith('/Track/CurrentKey') ? deck.key : '' }});
+const run = ms => { for (let t = 0; t < ms; t += 40) { now += 40; scShadowTick() } };
+const last = () => bodies[bodies.length - 1];
+run(3000);
+assert.deepEqual([last().loop, last().keyOffset, last().stems, last().slip], [false, 0, false, 0]);
+// Each of them is told at the next heartbeat (0.5 s), not at the 5 s full post; a shift tells the key's new name with it.
+let n = bodies.length;
+deck.loop = true; run(520); assert.ok(bodies.length > n && last().loop, 'a loop is told within 0.5 s');
+n = bodies.length; deck.shift = 1; deck.key = '1B'; run(520);
+assert.ok(bodies.length > n, 'a key shift is told within 0.5 s'); assert.deepEqual([last().keyOffset, last().keyName], [1, '1B']);
+n = bodies.length; deck.stems = true; run(520); assert.ok(bodies.length > n && last().stems);
+n = bodies.length; deck.slip = true; deck.slipAt = 441000; run(520); assert.ok(bodies.length > n, 'slip is told within 0.5 s'); assert.equal(last().slip, 441000);
+// The slip timeline runs on: told at every heartbeat while slip is active, then its end.
+n = bodies.length; for (let i = 0; i < 50; i++) { deck.slipAt += 1764; run(40) }
+assert.ok(bodies.length - n === 4, 'slip posts in 2 s: ' + (bodies.length - n));
+assert.equal(last().slip > 441000, true);
+n = bodies.length; deck.slip = false; run(520); assert.ok(bodies.length > n, 'the end of slip is told within 0.5 s'); assert.equal(last().slip, 0);
+n = bodies.length; run(1000); assert.equal(bodies.length, n, 'nothing changed: no full post');
+// The peer: its header and overview read them from the source's post.
+Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
+scShadowApplyAll([{deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '1B', loop: true, keyOffset: 1, stems: true, slip: 441000}], false);
+assert.deepEqual(scShadowHead[2], {master: undefined, sync: false, title: 'A', artist: 'One', keyName: '1B', loop: true, keyOffset: 1, stems: true, slip: 441000});
+""")
+        for anchor in ('scaled.setdefault(bj + "Deck/DeckItem/AutoLoop.qml", [])', "scHead.title ? scHead.stems : view.stemmed", "scHead.title ? scHead.keyOffset :",
+                       "root.scShadowHeadOf(deckIndex).slip || 0", "scSlip > 0 ? scSlip : isSlipModeActive"):
             self.assertIn(anchor, SRC)

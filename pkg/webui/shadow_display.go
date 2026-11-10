@@ -261,7 +261,7 @@ func (s *Server) shadowDisplayCDJs(free []int, lineIn bool, now time.Time, only 
 		if only != nil && !ok {
 			continue
 		}
-		d := deckState{Deck: deck, DisplayOnly: true, LineIn: lineIn, Fallback: why, Title: dev.Title, Artist: dev.Artist, DurationMS: float64(dev.DurationMS), MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Lead: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
+		d := deckState{Deck: deck, DisplayOnly: true, LineIn: lineIn, Fallback: why, Title: dev.Title, Artist: dev.Artist, DurationMS: float64(dev.DurationMS), MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: new(dev.Master), Lead: new(dev.Master), Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
 		if dev.TrackID != 0 {
 			host := net.ParseIP(dev.Address)
 			if dev.SourcePlayer != dev.Number {
