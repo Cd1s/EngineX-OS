@@ -14,6 +14,25 @@ Item {
     property var knob: null
     property var capturedOne: []
     property var capturedTwo: []
+    property int rateStep: -1
+    property bool rateDone: false
+    readonly property var nativeRates: [1 / 16, 1 / 8, 1 / 4, 1 / 2, 3 / 4, 1, 2, 4, 8, 16, 32]
+    Timer {
+        interval: 100; repeat: true; running: probe.rateStep >= 0 && !probe.rateDone
+        onTriggered: {
+            const step = probe.rateStep++
+            const path = "/Engine/Mixer/DJFxUnit1/"
+            // These are the targets of JC11's original BEAT -/+ assignments.
+            if (step < 10) Planck.getProperty(path + "DecrementBeats").translator.state = true
+            else {
+                const index = step - 10
+                const parameter = root.scFxControllers[0].djFxView.variantParameters[0]
+                probe.check(parameter.value === probe.nativeRates[index], "native-Rate-index-" + index)
+                if (index < 10) Planck.getProperty(path + "IncrementBeats").translator.state = true
+                else probe.rateDone = true
+            }
+        }
+    }
     function capture(unit, value) {
         if (!(value > 0 && value < 0.00001)) return
         const f = new Float32Array([value])
@@ -124,6 +143,7 @@ Item {
                     probe.check(Planck.getProperty("/Engine/Mixer/DJFxUnit1/Type").translator.string === "Flanger", "unit1-carrier")
                     probe.check(a.scFxSelected === a.scFxStock.length, "unit1-px-label")
                     probe.checkedOne = true
+                    probe.rateStep = 0
                 }
                 if (!probe.exists("/tmp/fx-native-stage1")) return
                 b.scFxAccept(b.scFxStock.length + 1)
@@ -141,7 +161,7 @@ Item {
                 probe.phase = 8; return
             }
             if (probe.phase === 8) {
-                if (a.scFxBusy || !probe.exists("/tmp/fx-native-done")) return
+                if (a.scFxBusy || !probe.exists("/tmp/fx-native-done") || !probe.rateDone) return
                 probe.check(a.scFxSelected === -1 && Planck.getProperty("/Engine/Mixer/DJFxUnit1/Type").translator.string === "Flanger", "stock-flanger-selectable")
                 console.warn("FXPROBE done|" + (probe.failed ? "FAIL" : "PASS"))
                 if (probe.knob) probe.knob.destroy()
