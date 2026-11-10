@@ -1013,14 +1013,16 @@ SERVICES_MAIN = """
 			// Engine moves TrackPosition in audio blocks: at 25 Hz a playing deck's raw
 			// position is up to ~35 ms of track time behind (high pitch). With the speed
 			// known, the upper envelope of position - speed * time is the newest block:
-			// post that line (noise of a few ms), decaying 2 ms/s to follow pitch rounding.
+			// post that line (noise of a few ms), decaying 0.5 ms/s to follow pitch rounding.
 			const speed = 1 + s.pitch / 100, raw = s.posMs - speed * now
 			if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.jumps === s.jumps && isFinite(p.env)) {
+				// A jog brake: the positions average ~17 ms of wall time behind the line
+				// (25 at most in steady play). Further behind, the deck is slower than its
+				// pitch: the line closes a fifth of the excess per tick. No step, so a late
+				// position from a busy GUI thread costs a few ms, not a slip.
 				s.avg = p.avg + (raw - p.avg) * 0.2
-				s.env = Math.max(raw, p.env - 0.002 * (now - p.at))
-				// A jog brake: the positions run ~17 ms behind the line on average (30 at
-				// most); 42 ms means the deck is slower than its pitch, and the line follows.
-				if (s.env - s.avg > 42) s.env = Math.max(raw, s.avg + 17)
+				const slow = p.env - s.avg - 25 * speed
+				s.env = Math.max(raw, p.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - p.at)))
 			} else s.env = s.avg = raw
 			s.lineMs = s.ps ? s.env + speed * now : s.posMs
 			// A jog nudge moves the line off the one the peer carries on: post it at once,
