@@ -1191,6 +1191,19 @@ scShadowApplyDisplay([deck(pos+600000*1.031028+50,{rate:1.031028})]); assert.not
 assert.equal(scShadowData(2).rate,1.031028);
 """)
 
+    def test_shadow_lane_takes_the_stock_main_colours_and_grid(self):
+        # User report 11-10: the lane looked translucent. The stock height*Color set
+        # is the Fade one (#73ffffff, #9908f302, #800759d5 on a player).
+        layer = bp.shadow_layer("import QtQuick 2.0\nItem {\n    id: w\n}\n", "waveform")
+        for band in ("Low", "Mid", "High"):
+            self.assertIn(f'{band.lower()}Color: (!rgb && typeof owner.color{band}Color !== "undefined" ? owner.color{band}Color : typeof owner.height{band}Color', layer)
+        self.assertNotIn("owner.colorLowColor", bp.shadow_layer("import QtQuick 2.0\nItem {\n    id: w\n}\n", "overview"))
+        self.assertIn('color: wave ? "black" : "#101114"', layer)
+        # Stock grid: edge ticks on every beat; only a bar has the line and its number.
+        self.assertNotIn("0.55 : 0.22", layer)
+        self.assertIn('Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: "#b7b7b7" }', layer)
+        self.assertIn('text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""', layer)
+
 
 if __name__ == "__main__":
     unittest.main()
