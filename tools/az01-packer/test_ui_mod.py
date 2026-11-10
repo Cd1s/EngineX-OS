@@ -588,6 +588,35 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
             res_f4 = subprocess.run(["node", "-e", f4_js], capture_output=True, text=True)
             self.assertEqual(res_f4.returncode, 0, res_f4.stderr)
 
+    def test_display_only_shadow_lane_and_overview_match_stock(self):
+        layer = bp.SHADOW_LAYER
+        for item in (
+            'readonly property real pitchRate: wave && sample ? Math.max(0.05, 1 + (Number(sample.pitch) || 0) / 100) : 1',
+            'readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000) * pitchRate',
+            'id: scOverviewStrip',
+            'yStretch: scDisplay.half ? (scDisplay.rgb ? @RGB_SCALE@ : @BANDS_SCALE@) : 1',
+            'transform: Scale { origin.y: scOverviewStrip.height; yScale: scOverviewStrip.yStretch }',
+            'objectName: "Deck_WaveformOverview_TimeBar"',
+            'z: bar ? 1 : -1',
+            'color: scBeat.bar ? Style.error01Color : Style.gridlinesColor',
+            'color: Style.icon01Color',
+            'color: Style.font02Color; style: Text.Outline; styleColor: Style.surface01Color; font.pixelSize: 15; font.weight: Font.Medium',
+            'objectName: "HotCueTriangle"',
+            'objectName: "HotCueLabel"',
+            'Qt.resolvedUrl("./img/cue.png")',
+            'Qt.resolvedUrl("./img/icon_cue.png")',
+        ):
+            self.assertIn(item, layer)
+        # Item 15: DeckTabs keeps stock activeDeck and uses greyOut for locked shadow decks
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            tabs_patches = bp.edits(False)["Skins/EngineOS/UI/CompositeControls/Decks/DeckTabs.qml"]
+        finally:
+            bp.ROOT = old_root
+        self.assertFalse(any("activeDeck:" in old for old, _ in tabs_patches))
+        self.assertTrue(any("greyOut:" in old and "root.scDeckLocked" in new for old, new in tabs_patches))
+
 @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
 class ShadowDisplayTest(unittest.TestCase):
     """Run the actual QML JS functions with a fake clock and an Engine that rejects all access."""
@@ -1682,7 +1711,7 @@ assert.equal(scShadowData(2).rate,1.031028);
         self.assertIn('color: wave ? "black" : "#101114"', layer)
         # Stock grid: edge ticks on every beat; only a bar has the line and its number.
         self.assertNotIn("0.55 : 0.22", layer)
-        self.assertIn('Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: "#b7b7b7" }', layer)
+        self.assertIn('Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: Style.icon01Color }', layer)
         self.assertIn('text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""', layer)
 
     def test_shadow_layer_restores_the_stock_visible_binding_not_a_value(self):
