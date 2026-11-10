@@ -820,7 +820,8 @@ func writeEntities(ctx context.Context, tx *sql.Tx, list int64, tracks []uint32,
 		seen[sourceID] = true
 		id, ok := mapping[sourceID]
 		if !ok || id == 0 {
-			return fmt.Errorf("missing Engine mapping for track %d", sourceID)
+			log.Printf("rb-bridge: track %d in playlist %d has no mapped Engine track, skipping entry", sourceID, list)
+			continue
 		}
 		r, e := tx.ExecContext(ctx, `INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId,membershipReference) VALUES(?,?,?,0,0)`, list, id, databaseUUID)
 		if e != nil {

@@ -204,7 +204,12 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 				}
 			}
 			hash := sha256.Sum256(b[:end])
-			l.Tracks = append(l.Tracks, Track{ID: le.Uint32(b[72:]), Path: ss[20], AnalysisPath: ss[14], Title: ss[17], Comment: ss[16], Artist: artists[le.Uint32(b[68:])], Album: albums[le.Uint32(b[64:])], Genre: genres[le.Uint32(b[60:])], Label: labels[le.Uint32(b[40:])], Composer: artists[le.Uint32(b[12:])], Remixer: artists[le.Uint32(b[44:])], Key: l.Keys[le.Uint32(b[32:])], ArtworkPath: l.Artwork[le.Uint32(b[28:])], SampleRate: int(le.Uint32(b[8:])), FileSize: int64(le.Uint32(b[16:])), Bitrate: int(le.Uint32(b[48:])), BPM: float64(le.Uint32(b[56:])) / 100, Year: int(le.Uint16(b[80:])), BitDepth: int(le.Uint16(b[82:])), Duration: float64(le.Uint16(b[84:])), Rating: int(b[89]), RecordHash: hex.EncodeToString(hash[:])})
+			bpmRaw := le.Uint32(b[56:])
+			var bpm float64
+			if bpmRaw != 0 && bpmRaw != 0xffffffff && bpmRaw <= 100000 {
+				bpm = float64(bpmRaw) / 100
+			}
+			l.Tracks = append(l.Tracks, Track{ID: le.Uint32(b[72:]), Path: ss[20], AnalysisPath: ss[14], Title: ss[17], Comment: ss[16], Artist: artists[le.Uint32(b[68:])], Album: albums[le.Uint32(b[64:])], Genre: genres[le.Uint32(b[60:])], Label: labels[le.Uint32(b[40:])], Composer: artists[le.Uint32(b[12:])], Remixer: artists[le.Uint32(b[44:])], Key: l.Keys[le.Uint32(b[32:])], ArtworkPath: l.Artwork[le.Uint32(b[28:])], SampleRate: int(le.Uint32(b[8:])), FileSize: int64(le.Uint32(b[16:])), Bitrate: int(le.Uint32(b[48:])), BPM: bpm, Year: int(le.Uint16(b[80:])), BitDepth: int(le.Uint16(b[82:])), Duration: float64(le.Uint16(b[84:])), Rating: int(b[89]), RecordHash: hex.EncodeToString(hash[:])})
 		case 7:
 			if len(b) < 21 {
 				return nil, fmt.Errorf("pdb: short playlist")
@@ -225,12 +230,18 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 	for i := range l.Tracks { // include lookup metadata in the incremental fingerprint
 		l.Tracks[i].RecordHash += ":" + RecordHash(l.Tracks[i])
 	}
+	knownTracks := make(map[uint32]bool, len(l.Tracks))
+	for _, tr := range l.Tracks {
+		knownTracks[tr.ID] = true
+	}
 	for i := range l.Playlists {
 		es := entries[l.Playlists[i].ID]
 		delete(entries, l.Playlists[i].ID)
 		sort.SliceStable(es, func(i, j int) bool { return es[i].index < es[j].index })
 		for _, e := range es {
-			l.Playlists[i].Tracks = append(l.Playlists[i].Tracks, e.track)
+			if knownTracks[e.track] {
+				l.Playlists[i].Tracks = append(l.Playlists[i].Tracks, e.track)
+			}
 		}
 	}
 	// Rekordbox leaves entries of deleted playlists behind; ignore them.
