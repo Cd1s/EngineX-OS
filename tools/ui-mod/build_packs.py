@@ -1132,6 +1132,9 @@ SERVICES_MAIN = """
 				if (changed) cc.rev++
 			}
 			const o = own[n] || (own[n] = {})
+			// A track loaded over another: Engine names the file ~0.2 s before its title,
+			// artist and length (o5-R2). Still the last track's within 1 s: not filled yet.
+			if (o.net && s.net && o.net !== s.net) { cc.was = o.title; cc.wasBy = o.artist; cc.wasAt = now }
 			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000)
 			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
 			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
@@ -1143,8 +1146,10 @@ SERVICES_MAIN = """
 			if (fresh) {
 				o.title = s.net ? g.title.string || g.trackName.string || "" : ""
 				o.artist = s.net ? g.artist.string || "" : ""
+				const last = now - cc.wasAt < 1000 && o.title === cc.was && o.artist === cc.wasBy
+				if (last) o.title = o.artist = ""
 				const sr = g.rate.value, len = g.length.unnormalized
-				o.durationMs = s.net && sr > 0 && len > 0 ? Math.round(len / sr * 1000) : 0 // the peer tells its shadow deck's track by it
+				o.durationMs = s.net && !last && sr > 0 && len > 0 ? Math.round(len / sr * 1000) : 0 // the peer tells its shadow deck's track by it
 				scShadowTextAt[d] = !s.net || o.title ? now : 0 // Engine fills SongName after the load: retry until it does
 			}
 			o.dbg = ""

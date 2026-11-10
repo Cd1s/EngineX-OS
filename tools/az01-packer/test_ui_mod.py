@@ -1927,3 +1927,37 @@ const bendsIn9s = rate => {
 assert.equal(bendsIn9s(1), 0, '8 ms at full speed is under the young line\'s 12 ms');
 assert.ok(bendsIn9s(0.5) >= 1, '8 ms of a deck at half speed is 16 ms of wall time: bent');
 """)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowSenderReplacedTrackTest(unittest.TestCase):
+    """A track loaded over another: Engine names the new file ~0.2 s before its title, artist and length (o5-R2).
+    The peer names its copy by the first title it is told: it got the last track's (c5-b)."""
+
+    def test_last_tracks_title_is_not_posted_for_the_new_file(self):
+        ShadowDisplayTest.js(self, r"""
+const bodies = [];
+globalThis.XMLHttpRequest = class {
+    open(method, url) { this.url = url; this.readyState = 1 }
+    send(body) { if (body) bodies.push(JSON.parse(body)[0]); this.readyState = 4; this.status = 200; if (this.onreadystatechange) this.onreadystatechange() }
+};
+globalThis.scShadowPoll = () => {};
+const deck = {uri: 'file:///a.mp3', title: 'A', artist: 'One', len: 219};
+globalThis.scTr = path => ({value: path.endsWith('/SampleRate') ? 44100 : 0, state: path.endsWith('/SongLoaded'), color: '#ffffff', index: 0,
+    get unnormalized() { return path.endsWith('/Deck1/Track/TrackLength') ? deck.len * 44100 : 0 },
+    get string() { return !path.startsWith('/Engine/Deck1/') ? '' : path.endsWith('/TrackUri') ? deck.uri : path.endsWith('/SongName') ? deck.title : path.endsWith('/ArtistName') ? deck.artist : '' }});
+const run = ms => { for (let t = 0; t < ms; t += 40) { now += 40; scShadowTick() } };
+run(3000);
+assert.deepEqual([bodies[0].title, bodies[0].artist, bodies[0].durationMs], ['A', 'One', 219000]);
+bodies.length = 0;
+deck.uri = 'file:///b.mp3'; run(120); // sampled inside the gap (the uri is cached for up to 500 ms)
+scShadowPrev[1].netAt = 0; run(80);
+assert.ok(bodies.length >= 1, 'the new file was not posted');
+for (const b of bodies) assert.deepEqual([b.net, b.title, b.artist, b.durationMs || 0], ['file:///b.mp3', '', '', 0]);
+Object.assign(deck, {title: 'B', artist: 'Two', len: 171}); run(600);
+const b = bodies[bodies.length - 1];
+assert.deepEqual([b.title, b.artist, b.durationMs], ['B', 'Two', 171000]);
+// The same title again on another file (a duplicate): told once the second has passed.
+bodies.length = 0; deck.uri = 'file:///b2.mp3'; scShadowPrev[1].netAt = 0; run(2600);
+assert.equal(bodies[0].title, ''); assert.equal(bodies[bodies.length - 1].title, 'B');
+""")
