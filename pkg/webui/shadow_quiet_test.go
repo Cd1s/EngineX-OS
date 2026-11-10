@@ -319,3 +319,39 @@ func TestShadowLongPollHoldsQuietAnswers(t *testing.T) {
 		t.Fatalf("legacy poll wait %v", d)
 	}
 }
+
+// An update that took longer than the peer's quickest one carries a playing deck
+// on by the extra time; a clock that is simply ahead, or an old sender, does not.
+func TestTakePeerCarriesALateUpdateOn(t *testing.T) {
+	sh := newShadowState()
+	t0 := time.Now()
+	take := func(seq int64, pos float64, sent, arrived time.Duration, old bool) float64 {
+		t.Helper()
+		d := deckState{Deck: 2, Key: "k", Playing: true, PositionMS: pos, Pitch: 50, Seq: seq}
+		if !old {
+			d.Sent = t0.Add(5*time.Second + sent).UnixMilli() // the peer's clock is 5 s ahead
+		}
+		sh.takePeer("192.0.2.7", []deckState{d}, t0.Add(arrived))
+		if sh.peerDecks[2].Sent != 0 {
+			t.Fatal("Sent reached the picture")
+		}
+		return sh.peerDecks[2].PositionMS
+	}
+	if got := take(1, 1000, 0, 2*time.Millisecond, false); got != 1000 {
+		t.Fatalf("first update moved to %v", got)
+	}
+	// Sent on time, 100 ms late at +50 %: 150 ms on (less the 1 ms/s allowance).
+	if got := take(2, 1750, 500*time.Millisecond, 602*time.Millisecond, false); got < 1898 || got > 1900 {
+		t.Fatalf("late update at %v, want ~1900", got)
+	}
+	if got := take(3, 2500, time.Second, 1002*time.Millisecond, false); got != 2500 {
+		t.Fatalf("quick update moved to %v", got)
+	}
+	if got := take(4, 3250, 0, 1700*time.Millisecond, true); got != 3250 {
+		t.Fatalf("an old sender's update moved to %v", got)
+	}
+	// The peer's clock stepped 2 s: not a 2 s trip.
+	if got := take(5, 4000, -time.Second, 1900*time.Millisecond, false); got != 4000 {
+		t.Fatalf("stepped clock moved the deck to %v", got)
+	}
+}

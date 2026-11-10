@@ -74,6 +74,10 @@ type deckState struct {
 	// GUI thread and our niced HTTP handler both lag by tens of ms, so the
 	// position is extrapolated from the sample time, not from arrival.
 	At int64 `json:"at,omitempty"`
+	// Sent is when this update left for the peer, Unix ms on the sender's clock,
+	// with PositionMS carried to it: the receiver adds what the trip took over
+	// the quickest one (peerLate).
+	Sent int64 `json:"sent,omitempty"`
 	// Jumps counts the sender's position jumps (hot cue, beat jump, loop, CUE
 	// while playing): a count, not a flag, so a lost or merged update still shows it.
 	Jumps int `json:"jumps,omitempty"`
@@ -199,6 +203,7 @@ type shadowState struct {
 	unresolved          [5]string              // per deck: the last TrackNetworkPath logged as having no file
 	streamFiles         map[string]streamTrack // streaming uri -> Engine's download (zero = none)
 	peerTaken           map[string]time.Time   // when takePeer last accepted an update per peer (as peerSeq)
+	peerClock           map[string]peerClock   // per peer (as peerSeq)
 	dbg                 shadowDebug
 	metaOnlyPoll        bool // the newest compose had a CDJ deck, including cached display assets: 120 ms polls
 	display             shadowDisplayCache
@@ -207,7 +212,7 @@ type shadowState struct {
 }
 
 func newShadowState() *shadowState {
-	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, peerTaken: map[string]time.Time{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
+	return &shadowState{precise: map[byte]precisePos{}, cdj: map[byte]cdjSeen{}, peers: map[string]time.Time{}, peerDecks: map[int]peerDeck{}, peerSeq: map[string]int64{}, notify: make(chan struct{}), files: map[string]string{}, busy: map[string]bool{}, used: map[string]time.Time{}, streamFiles: map[string]streamTrack{}, peerTaken: map[string]time.Time{}, peerClock: map[string]peerClock{}, dataRoot: shadowDataRoot, mediaRoot: shadowMediaRoot, beacon: shadowBeaconOn}
 }
 
 // shadow-v3: copies under the old "shadow" were analysed by Engine itself,
@@ -482,7 +487,7 @@ func (sh *shadowState) ownForPeer(now time.Time) []deckState {
 				until := min(now.UnixMilli(), sh.ownAt.UnixMilli()+2000)
 				d.PositionMS += float64(max(int64(0), until-d.At)) * (1 + d.Pitch/100)
 			}
-			d.At = 0
+			d.At, d.Sent = 0, now.UnixMilli()
 			out = append(out, d)
 		}
 	}
@@ -515,6 +520,31 @@ func (s *Server) shadowPush() {
 	}
 }
 
+// peerClock is the smallest (arrival - Sent) a peer's updates have shown, ms:
+// its clock's offset from ours plus the quickest trip.
+type peerClock struct {
+	off float64
+	at  time.Time
+}
+
+// peerLate is how many ms longer than the peer's quickest update this one took
+// to get here (the network, or either suite waiting for the CPU): a playing
+// deck has moved on by that much, and anchoring it at arrival showed the wait
+// as a slip of the picture. The quickest trip may rise 1 ms/s, which follows
+// two clocks drifting apart or one being slewed; over 300 ms late is a stepped
+// clock and starts over. Called with sh.mu held.
+func (sh *shadowState) peerLate(id string, sent int64, now time.Time) float64 {
+	off := float64(now.UnixMilli() - sent)
+	c, ok := sh.peerClock[id]
+	c.off += now.Sub(c.at).Seconds()
+	if !ok || off < c.off || off > c.off+300 {
+		c.off = off
+	}
+	c.at = now
+	sh.peerClock[id] = c
+	return off - c.off
+}
+
 // takePeer stores a peer's decks unless an update with a newer Seq came first,
 // and wakes the long polls. Called with sh.mu held.
 func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
@@ -531,13 +561,18 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 	// A peer silent for over 2 s may have restarted with a clock behind its old Seq.
 	if t, ok := sh.peerTaken[id]; !ok || now.Sub(t) > 2*time.Second {
 		delete(sh.peerSeq, id)
+		delete(sh.peerClock, id)
 	}
 	// A clock stepped back by more than 10 s (NTP) restarts the order.
 	if last := sh.peerSeq[id]; seq != 0 && seq <= last && seq > last-int64(10*time.Second) {
 		sh.dbg.event("peer-stale", map[string]any{"ip": ip, "seq": seq, "last": last})
 		return
 	}
-	sh.dbg.event("peer", map[string]any{"ip": ip, "seq": seq, "decks": slimDecks(decks)})
+	late := 0.0
+	if len(decks) > 0 && decks[0].Sent != 0 {
+		late = sh.peerLate(id, decks[0].Sent, now)
+	}
+	sh.dbg.event("peer", map[string]any{"ip": ip, "seq": seq, "late": late, "decks": slimDecks(decks)})
 	sh.peerSeq[id] = seq
 	changed := false
 	for slot, v := range sh.peerDecks {
@@ -570,6 +605,10 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		if slot == 0 {
 			continue
 		} // all slots belong to other tracks; never overwrite a sibling
+		if d.Playing && !d.Stale {
+			d.PositionMS += late * (1 + d.Pitch/100)
+		}
+		d.Sent = 0
 		p := peerDeck{deckState: d, ip: ip, at: now, anchorPos: d.PositionMS, anchorAt: now}
 		if old, ok := sh.peerDecks[slot]; ok && (old.ip == ip || old.Link != "" && old.Link == d.Link) && samePeerPicture(old, d, now) {
 			p.anchorPos, p.anchorAt = old.anchorPos, old.anchorAt
