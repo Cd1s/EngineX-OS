@@ -77,8 +77,9 @@ type deckState struct {
 	Range   float64 `json:"range,omitempty"`
 	KeyLock *bool   `json:"keylock,omitempty"`
 	Master  bool    `json:"master,omitempty"`
-	// Lead, in the shadow reply only: the source deck is the tempo master, also where
-	// Master is cleared (Engine Link shares it). The shadow header's LEAD reads it.
+	// Lead is the deck's own DeckIsMaster, what its header shows as LEAD, for the
+	// shadow header only. Master also marks the player that holds the network
+	// master with no master deck, and is cleared for a standalone player's copy.
 	Lead bool `json:"lead,omitempty"`
 	// ShadowMaster is the sender's shadow deck (a copy of the receiver's deck of
 	// that number) that Engine Link left holding master: the receiver's QML takes
@@ -195,7 +196,7 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
-		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
+		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.Lead != d.Lead || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
 		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
@@ -1152,7 +1153,6 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		d := p.deckState
 		d.Deck = deck
 		d.LineIn = false
-		d.Lead = d.Master
 		// Two standalone players share master natively over Engine Link; an
 		// all-in-one console linked to an SC5000/SC6000 (#160) does not, so keep
 		// the peer's master flag when this unit is not a standalone player.

@@ -2004,12 +2004,14 @@ class ShadowHeadSyncLeadTest(unittest.TestCase):
         ShadowDisplayTest.js(self, r"""
 Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
 const deck = (d, o) => Object.assign({deck: d, path: '/c/a.mp3', id: 'k'}, o);
-const decks = [deck(2, {sync: true}), deck(4, {lead: true}), deck(1, {master: true}), {deck: 3, sync: true}];
+const decks = [deck(2, {sync: true}), deck(4, {lead: true, master: true}), deck(1, {lead: true}), {deck: 3, sync: true}];
 scShadowApplyAll(decks, false);
 // Role 13: decks 1 and 3 are this player's own, their headers stay Engine's.
 const flags = () => Object.keys(scShadowHead).map(d => d + (scShadowHead[d].master ? 'M' : '') + (scShadowHead[d].sync ? 'S' : '')).join();
-assert.equal(flags(), '2S,4M'); // lead: Engine Link shares master, stream-sync clears `master` for the copy
-decks[1] = deck(4, {master: true}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4M'); // a console's peer keeps `master`
+assert.equal(flags(), '2S,4M');
+// `master` alone: the player holds the network master, no deck of it shows LEAD (R2 after a restart).
+decks[1] = deck(4, {master: true}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4');
+decks[1] = deck(4, {lead: true}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4M'); // stream-sync clears `master` for the copy
 const same = scShadowHead;
 scShadowApplyAll(decks, false);
 assert.strictEqual(scShadowHead, same, 'an unchanged state must not re-evaluate the header bindings');
@@ -2020,6 +2022,8 @@ scShadowApplyAll([], true); // display mode draws its own header
 assert.deepEqual(scShadowHead, {});
 """)
         self.assertIn('head("deckIndex", "master")', SRC)
+        self.assertIn("o.lead = s.master;", SRC)  # the source posts its own DeckIsMaster, what its header shows
+        self.assertIn("sent.lead !== o.lead", SRC)  # and posts at once when only that changes
         self.assertIn('head("deckIndex", "sync")', SRC)
 
 
