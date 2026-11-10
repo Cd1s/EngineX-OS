@@ -1162,7 +1162,15 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		if d.Playing {
 			d.PositionMS, d.Rate = p.carried(now.Sub(p.at))
 		}
-		d.Path = resolveNetPathFile(d.Net, sh.dataRoot, sh.mediaRoot, false)
+		// A file of this player's own for a track the peer loaded from this player's
+		// drive: both then read one library. Not for a track on the peer's own drive
+		// (the net path names the peer itself): the same path here is another
+		// library's track with its own analysis, whose waveform peaks drew the low
+		// band at half the source's height. That one is copied with the source's.
+		d.Path = ""
+		if host, _, _ := strings.Cut(strings.TrimPrefix(d.Net, "net://"), "/"); d.Link == "" || !strings.EqualFold(host, strings.Trim(d.Link, "{}")) {
+			d.Path = resolveNetPathFile(d.Net, sh.dataRoot, sh.mediaRoot, false)
+		}
 		// A file of this player's own is named by its path. Not by the peer's key
 		// then: that appears once the peer's Engine has cached the file, mid-track.
 		d.ID = d.Net

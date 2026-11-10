@@ -197,3 +197,40 @@ func TestShadowLegacyOwnFileIdentityIsStable(t *testing.T) {
 		t.Fatalf("nothing loaded: %+v", empty)
 	}
 }
+
+// The same path on both players' drives is two libraries' track, each with its
+// own analysis (waveform peaks, grid): the shadow deck takes this player's file
+// when the peer loaded the track from this player's drive, not from its own.
+func TestShadowLegacyOwnFileOnlyFromOwnDrive(t *testing.T) {
+	s := New(Config{UIDir: filepath.Join(t.TempDir(), "ui"), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	s.shadow.dataRoot, s.shadow.mediaRoot = t.TempDir(), t.TempDir()
+	local := filepath.Join(s.shadow.mediaRoot, "USB", "Contents", "track.flac")
+	if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.shadow.mu.Lock()
+	s.shadow.files["peer:k1"] = "/copy/track.flac"
+	s.shadow.mu.Unlock()
+	compose := func(d deckState) deckState {
+		t.Helper()
+		d.Deck = 1
+		s.shadow.mu.Lock()
+		s.shadow.peerDecks[1] = peerDeck{deckState: d, ip: "192.0.2.7", at: time.Now()}
+		s.shadow.mu.Unlock()
+		out := s.shadowComposeLegacy("24", time.Now())
+		if len(out) != 1 {
+			t.Fatalf("compose: %+v", out)
+		}
+		return out[0]
+	}
+	if d := compose(deckState{Net: "net://bbbb-peer/SD (SD)/Contents/track.flac", Key: "k1", Ext: ".flac", Link: "{BBBB-peer}"}); d.Path != "/copy/track.flac" || d.ID != "k1" {
+		t.Fatalf("the peer's own drive: %+v", d)
+	}
+	if d := compose(deckState{Net: "net://aaaa-own/USB (USB 1)/Contents/track.flac", Key: "k1", Ext: ".flac", Link: "{bbbb-peer}"}); d.Path != local || d.ID == "k1" {
+		t.Fatalf("this player's drive: %+v", d)
+	}
+}
