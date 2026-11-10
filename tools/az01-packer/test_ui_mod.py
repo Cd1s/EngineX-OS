@@ -960,6 +960,8 @@ class UiModBuildTest(unittest.TestCase):
                     self.assertIn("EmbeddedItems.Bpm {", info)
                     self.assertIn("decimalPlaces: 2", info)
                     self.assertIn("onBpmClicked()", info)
+                    self.assertIn("fractionalBottomMargin: implicitHeight - fractionHeight - bpmInfo.fractionTextTopPadding", info)
+                    self.assertIn("scBpm.fractionHeight + bpmInfo.fractionTextTopPadding", info)
                     self.assertNotIn("bpmInfoView.bpmFractionalText", info)
                     performance = (base / composite / "DeckPerformanceData/DeckPerformanceDataContent.qml").read_text()
                     for name, text in (

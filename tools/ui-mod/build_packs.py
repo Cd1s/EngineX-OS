@@ -4545,6 +4545,7 @@ def edits(dev: bool):
         }
 """
         split_speed = """        SpeedInfo {
+            Layout.leftMargin: 4
             speedState: deckTrackDataContent.deckData.speedState
             speedRange: deckTrackDataContent.deckData.speedRange
             speedRangeTextWidth: 32
@@ -4566,7 +4567,7 @@ def edits(dev: bool):
             ("    property int decimalPlaces: 1\n", "    property int decimalPlaces: 2\n"),
             ('    property string fractionSeparator: ""\n', '    property string fractionSeparator: "."\n'),
             ("    property alias fractionColor: fractionText.color\n",
-             "    property alias fractionColor: fractionText.color\n    readonly property real displayWidth: implicitWidth + fractionText.implicitWidth\n"),
+             "    property alias fractionColor: fractionText.color\n    readonly property real displayWidth: implicitWidth + fractionText.implicitWidth\n    readonly property real fractionHeight: fractionText.implicitHeight\n"),
             ("    readonly property bool currentBPMSplitValid:",
              "    property real bpmValue: pCurrentBPM && pCurrentBPM.translator ? pCurrentBPM.translator.unnormalized : 0\n\n    readonly property bool currentBPMSplitValid:"),
             ("if (songAnalyzed && pCurrentBPM && pCurrentBPM.translator)", "if (songAnalyzed)"),
@@ -4587,7 +4588,7 @@ def edits(dev: bool):
              "                text: bpmInfoView && bpmInfoView.bpmFractionalText\n            }\n        }\n",
              "        Item {\n            Layout.alignment: bpmInfo.layoutAlignment\n" +
              "            implicitWidth: scBpm.displayWidth\n" +
-             "            implicitHeight: Math.max(scBpm.implicitHeight, scBpm.childrenRect.height)\n" +
+             "            implicitHeight: Math.max(scBpm.implicitHeight, scBpm.fractionHeight + bpmInfo.fractionTextTopPadding)\n" +
              "            EmbeddedItems.Bpm {\n                id: scBpm\n" +
              "                deckIndex: bpmInfo.deckIndex\n" +
              '                readonly property var pLoaded: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deckIndex)) : null\n' +
@@ -4597,7 +4598,7 @@ def edits(dev: bool):
              "                font: bpmInfo.font\n                fractionFont: bpmInfo.fractionTextFont\n" +
              "                color: bpmInfo.syncEnabled ? bpmInfo.syncColor : Style.font02Color\n" +
              "                fractionColor: bpmInfo.syncEnabled ? bpmInfo.syncColor : bpmInfo.fractionTextColor\n" +
-             "                fractionalBottomMargin: -bpmInfo.fractionTextTopPadding\n" +
+             "                fractionalBottomMargin: implicitHeight - fractionHeight - bpmInfo.fractionTextTopPadding\n" +
              "            }\n        }\n"),
         ]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml"] =[("    enabled: deckConfig.inDJMode\n", "    enabled: deckConfig.inDJMode\n" + pad_brt)]
