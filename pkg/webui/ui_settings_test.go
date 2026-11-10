@@ -726,3 +726,128 @@ func TestUIStatusDigestFollowsTheBody(t *testing.T) {
 		t.Fatal("a changed setting kept the digest")
 	}
 }
+
+func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
+	oldCompat := deviceCompatiblePath
+	defer func() { deviceCompatiblePath = oldCompat }()
+
+	cases := []struct {
+		name      string
+		compat    string
+		wantBoard string
+		player    bool
+		caps      uiCapabilities
+	}{
+		{
+			name:      "JP07 SC5000",
+			compat:    "inmusic,jp07\x00rockchip,rk3288\x00",
+			wantBoard: "SC5000",
+			player:    true,
+			caps: uiCapabilities{
+				Mixer: false, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
+				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: false, RemoteStems: true,
+			},
+		},
+		{
+			name:      "JC11 PRIME 4",
+			compat:    "inmusic,jc11\x00rockchip,rk3288\x00",
+			wantBoard: "PRIME4",
+			player:    false,
+			caps: uiCapabilities{
+				Mixer: true, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
+				TrackSkipKeys: true, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true,
+			},
+		},
+		{
+			name:      "JP11 PRIME GO",
+			compat:    "inmusic,jp11\x00",
+			wantBoard: "PRIMEGO",
+			player:    false,
+			caps: uiCapabilities{
+				Mixer: true, FourDeck: false, AutoLoopKnob: true, BeatJumpPads: false,
+				TrackSkipKeys: false, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true,
+			},
+		},
+		{
+			name:      "NH08 Mixstream Pro",
+			compat:    "inmusic,nh08\x00",
+			wantBoard: "MIXSTREAMPRO",
+			player:    false,
+			caps: uiCapabilities{
+				Mixer: true, FourDeck: false, AutoLoopKnob: false, BeatJumpPads: true,
+				TrackSkipKeys: false, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true,
+			},
+		},
+		{
+			name:      "JP21 SC LIVE 4",
+			compat:    "inmusic,jp21\x00",
+			wantBoard: "SCLIVE4",
+			player:    false,
+			caps: uiCapabilities{
+				Mixer: true, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
+				TrackSkipKeys: true, StemsEq: true, LineInAux: true, Gen2: true, RemoteStems: true,
+			},
+		},
+		{
+			name:      "JP24 PRIME 4 G2",
+			compat:    "inmusic,jp24\x00",
+			wantBoard: "PRIME4G2",
+			player:    false,
+			caps: uiCapabilities{
+				Mixer: true, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
+				TrackSkipKeys: true, StemsEq: false, LineInAux: false, Gen2: true, RemoteStems: false,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cf := filepath.Join(t.TempDir(), "compatible")
+			if err := os.WriteFile(cf, []byte(tc.compat), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			deviceCompatiblePath = cf
+			srv := httptest.NewServer(New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
+			defer srv.Close()
+			// Backend accepts and keeps settings compatible regardless of board.
+			code, v := uiPost(t, srv.URL, "upfaderEcho=1&stemsEqMode=1&beatJumpPads=1&fourDeckWaveform=1")
+			if code != 200 || !v.UpfaderEcho || !v.StemsEqMode || !v.BeatJumpPads || !v.FourDeckWaveform {
+				t.Fatalf("compat POST failed: code=%d %+v", code, v)
+			}
+			if v.Board != tc.wantBoard || v.Player != tc.player || v.Capabilities != tc.caps {
+				t.Fatalf("got board=%q player=%v caps=%+v; want board=%q player=%v caps=%+v",
+					v.Board, v.Player, v.Capabilities, tc.wantBoard, tc.player, tc.caps)
+			}
+		})
+	}
+	b, err := assets.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexHTML := string(b)
+	if !strings.Contains(indexHTML, "caps.mixer!==undefined?!caps.mixer:!!v.player") {
+		t.Fatal("web console missing mixer capability gate for upfaderEcho")
+	}
+	if !strings.Contains(indexHTML, "v.buildTag") {
+		t.Fatal("web console missing buildTag display")
+	}
+}
+
+func TestBuildTagStatusAndReleaseSuppression(t *testing.T) {
+	oldTag, oldTrack, oldRel := BuildTag, BuildTrack, ReleaseBuild
+	defer func() { BuildTag, BuildTrack, ReleaseBuild = oldTag, oldTrack, oldRel }()
+
+	srv := httptest.NewServer(New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
+	defer srv.Close()
+
+	BuildTag = "sbx 085a437"
+	ReleaseBuild = ""
+	if _, v := uiPost(t, srv.URL, ""); v.BuildTag != "sbx 085a437" {
+		t.Fatalf("expected sbx buildTag, got %q", v.BuildTag)
+	}
+
+	ReleaseBuild = "1"
+	if _, v := uiPost(t, srv.URL, ""); v.BuildTag != "" {
+		t.Fatalf("release build must suppress buildTag, got %q", v.BuildTag)
+	}
+}

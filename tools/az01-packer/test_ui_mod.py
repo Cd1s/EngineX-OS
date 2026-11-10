@@ -153,8 +153,10 @@ class UiModSourceTest(unittest.TestCase):
         self.assertNotIn("scJog", SRC)
         self.assertNotIn("JOG_ENTRY", SRC)
         self.assertNotIn("JOG_TILE", SRC)
-        self.assertNotIn("WAVE_TILE", SRC)
-        self.assertIn("WaveformStyle {},", SRC)  # removed from DisplayTabContent, kept in VIEW_ENTRIES
+        self.assertIn("WAVE_TILE", SRC)  # Control Center Waveform Style tile restored
+        self.assertNotIn("WaveformStyle { }", bp.VIEW_ENTRIES)  # View preset does not duplicate Display -> WaveformStyle
+        self.assertNotIn("DisplayTabContent.qml", SRC)  # stock Preferences -> Display WaveformStyle {} stays untouched
+        self.assertIn('root.scWave = seg.waveId; root.scCall("waveform=" + seg.waveId)', bp.WAVE_TILE)
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")]
         keys = [r[0] for r in rows]
         self.assertEqual(len(keys), len(set(keys)), "duplicate keys in i18n.tsv")
@@ -164,6 +166,86 @@ class UiModSourceTest(unittest.TestCase):
             self.assertIn(added, keys)
         # ENGINEX VIEW PRESET must be on its own text: line so translate() matches it.
         self.assertRegex(bp.VIEW_ENTRIES, r'(?m)^\s*text:\s*"ENGINEX VIEW PRESET"\s*$')
+
+    def test_board_capabilities_jp07_vs_jc11_and_build_tag(self):
+        # Task B: board-level capability gating must NOT depend on Config.device.isPlayer
+        for expr in (
+            'visible: root.scHasMixer',
+            'visible: root.scHasStemsEq',
+            'visible: root.scIsMixstream',
+            'visible: root.scHasAutoLoopKnob',
+            'visible: root.scCanFourDeck',
+        ):
+            self.assertIn(expr, SRC)
+        self.assertIn('root.scHasMixer', bp.UPFADER_ECHO_TILE)
+        self.assertIn('root.scHasMixer', bp.PLAYBACK_ENTRIES)
+        self.assertIn('root.scHasStemsEq', bp.PLAYBACK_ENTRIES)
+        self.assertIn('root.scIsMixstream', bp.BEAT_JUMP_ENTRIES)
+        self.assertIn('root.scHasAutoLoopKnob', bp.BEAT_JUMP_ENTRIES)
+        self.assertIn('root.scCanFourDeck', bp.FOUR_DECK_ENTRIES)
+        # Never rely on Config.device.isPlayer for our custom visibility gates.
+        self.assertNotIn("Config.device.isPlayer", bp.UPFADER_ECHO_TILE + bp.PLAYBACK_ENTRIES + bp.BEAT_JUMP_ENTRIES + bp.FOUR_DECK_ENTRIES)
+        # Stock TransitionFxEnable is suppressed because ControlCenter_UpfaderEcho replaces it on consoles.
+        self.assertIn('"active: false\\n"', SRC)
+        self.assertIn("Config.device.hasAutoLoopKnob !== undefined", SRC)
+        self.assertIn("Config.audio.fx.hasNHFx !== undefined", SRC)
+
+        if shutil.which("node"):
+            code = r"""
+const assert = require('assert');
+function evalCaps(board, scPlayer, cfg) {
+    const scBoard = String(board || "");
+    const scIsPlayerBoard = !!scPlayer || ["JP07", "JP08", "JP13", "JP14"].indexOf(scBoard) >= 0;
+    const scHasMixer = !scIsPlayerBoard;
+    const scCanFourDeck = scIsPlayerBoard || ["JC11", "JC11S", "JP21", "JP24"].indexOf(scBoard) >= 0;
+    const scHasAutoLoopKnob = cfg.device ? !!cfg.device.hasAutoLoopKnob : ["NH08", "NH08S", "NH10"].indexOf(scBoard) < 0;
+    const scIsMixstream = cfg.audio && cfg.audio.fx ? !!cfg.audio.fx.hasNHFx : ["NH08", "NH08S", "NH10"].indexOf(scBoard) >= 0;
+    const scHasStemsEq = scHasMixer && (cfg.audio ? !!cfg.audio.hasStemsLevel : false);
+    const scIsAZ04 = ["JP24", "RMZ2"].indexOf(scBoard) >= 0;
+    return { scIsPlayerBoard, scHasMixer, scCanFourDeck, scHasAutoLoopKnob, scIsMixstream, scHasStemsEq, scIsAZ04 };
+}
+// JP07 (SC5000) with 4-deck hook clearing Config.device.isPlayer to false:
+const jp07 = evalCaps("JP07", true, { device: { isPlayer: false, hasAutoLoopKnob: true }, audio: { hasStemsLevel: true, fx: { hasNHFx: false } } });
+assert.deepStrictEqual(jp07, { scIsPlayerBoard: true, scHasMixer: false, scCanFourDeck: true, scHasAutoLoopKnob: true, scIsMixstream: false, scHasStemsEq: false, scIsAZ04: false });
+// JC11 (PRIME 4):
+const jc11 = evalCaps("JC11", false, { device: { isPlayer: false, hasAutoLoopKnob: true }, audio: { hasStemsLevel: true, fx: { hasNHFx: false } } });
+assert.deepStrictEqual(jc11, { scIsPlayerBoard: false, scHasMixer: true, scCanFourDeck: true, scHasAutoLoopKnob: true, scIsMixstream: false, scHasStemsEq: true, scIsAZ04: false });
+// NH08 (Mixstream Pro, 2 decks, no AutoLoop knob, hasNHFx):
+const nh08 = evalCaps("NH08", false, { device: { isPlayer: false, hasAutoLoopKnob: false }, audio: { hasStemsLevel: true, fx: { hasNHFx: true } } });
+assert.deepStrictEqual(nh08, { scIsPlayerBoard: false, scHasMixer: true, scCanFourDeck: false, scHasAutoLoopKnob: false, scIsMixstream: true, scHasStemsEq: true, scIsAZ04: false });
+// JP11 (PRIME GO, 2 decks, has mixer & AutoLoop knob, no 4-deck):
+const jp11 = evalCaps("JP11", false, { device: { isPlayer: false, hasAutoLoopKnob: true }, audio: { hasStemsLevel: true, fx: { hasNHFx: false } } });
+assert.deepStrictEqual(jp11, { scIsPlayerBoard: false, scHasMixer: true, scCanFourDeck: false, scHasAutoLoopKnob: true, scIsMixstream: false, scHasStemsEq: true, scIsAZ04: false });
+// JP24 (PRIME 4 G2, AZ04):
+const jp24 = evalCaps("JP24", false, { device: { isPlayer: false, hasAutoLoopKnob: true }, audio: { hasStemsLevel: false, fx: { hasNHFx: false } } });
+assert.deepStrictEqual(jp24, { scIsPlayerBoard: false, scHasMixer: true, scCanFourDeck: true, scHasAutoLoopKnob: true, scIsMixstream: false, scHasStemsEq: false, scIsAZ04: true });
+"""
+            res = subprocess.run(["node", "-e", code], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+
+        # Task C: build_packs.py --print-build-tag / --build-tag / --release
+        self.assertIn("scAboutBuildTag", SRC)
+        self.assertIn("scPackBuildTag", SRC)
+        qrc = LAB / "5.3.0" / "qrc"
+        if qrc.is_dir():
+            with tempfile.TemporaryDirectory(prefix="ui-tag-test-") as tmp:
+                dev_out = Path(tmp) / "dev"
+                r1 = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(dev_out), "--build-tag", "sbx 085a437"],
+                                    capture_output=True, text=True)
+                self.assertEqual(r1.returncode, 0, r1.stderr)
+                em_dev = (dev_out / "en/Skins/Embedded/EmbeddedMain.qml").read_text()
+                self.assertIn('readonly property string scPackBuildTag: "sbx 085a437"', em_dev)
+                # Stock Preferences -> Display DisplayTabContent.qml is NOT overridden in pack (keeps stock WaveformStyle {})
+                disp = (dev_out / "en/Skins/Embedded/Views/ControlCenter/Tabs/Preferences/DisplayTabContent.qml")
+                self.assertFalse(disp.exists())
+                self.assertIn("WaveformStyle {}", (qrc / "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/DisplayTabContent.qml").read_text())
+
+                rel_out = Path(tmp) / "rel"
+                r2 = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(rel_out), "--release"],
+                                    capture_output=True, text=True)
+                self.assertEqual(r2.returncode, 0, r2.stderr)
+                em_rel = (rel_out / "en/Skins/Embedded/EmbeddedMain.qml").read_text()
+                self.assertIn('readonly property string scPackBuildTag: ""', em_rel)
 
     def test_cue_countdown_151(self):
         self.assertIn("function scNextCueInfo(d, tick)", bp.SERVICES_MAIN)

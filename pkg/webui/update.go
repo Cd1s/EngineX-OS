@@ -399,8 +399,27 @@ var imagePrefixes = map[string]string{
 var dataBundleBoards = map[string]bool{"SCLIVE4": true, "SCLIVE2": true, "PRIME4PLUS": true, "PRIMEGOPLUS": true,
 	"MIXSTREAMPROPLUS": true, "MIXSTREAMPROGO": true, "PRIME4G2": true, "SYSTEMONE": true}
 
-// playerBoards are the standalone players: no channel faders, so no Upfader Echo (#52).
+// playerBoards are the standalone players: no channel faders, no built-in mixer (#52).
 var playerBoards = map[string]bool{"SC5000": true, "SC5000M": true, "SC6000": true, "SC6000M": true}
+
+// fourDeckBoards support 4-deck layout and shadow decks: the 4 standalone 2-layer
+// players (#49) plus the 4 native 4-deck all-in-one consoles (#160).
+var fourDeckBoards = map[string]bool{
+	"SC5000": true, "SC5000M": true, "SC6000": true, "SC6000M": true,
+	"PRIME4": true, "PRIME4PLUS": true, "SCLIVE4": true, "PRIME4G2": true,
+}
+
+// mixstreamBoards are the compact 4-pad Numark Mixstream consoles (hasNHFx, no AutoLoop knob; #166).
+var mixstreamBoards = map[string]bool{"MIXSTREAMPRO": true, "MIXSTREAMPROPLUS": true, "MIXSTREAMPROGO": true}
+
+// noTrackSkipKeyBoards lack physical Previous/Next Track keys (#146).
+var noTrackSkipKeyBoards = map[string]bool{
+	"PRIMEGO": true, "PRIMEGOPLUS": true,
+	"MIXSTREAMPRO": true, "MIXSTREAMPROPLUS": true, "MIXSTREAMPROGO": true,
+}
+
+// az04Boards run the 64-bit AZ04 Engine (Stems stays stock).
+var az04Boards = map[string]bool{"PRIME4G2": true, "SYSTEMONE": true}
 
 func imagePrefix(compatible []string) string {
 	for _, c := range compatible {
