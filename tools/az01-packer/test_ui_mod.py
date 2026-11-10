@@ -1330,7 +1330,7 @@ for(const board of ['JP20','JP22','JP24','JC11S','JP21X']) {
                 "assert.equal(trMap['/Engine/Deck3/ExternalScratchWheelScratchEnable'].state,true);\n"
                 "assert.equal(trMap['/Engine/Deck3/ExternalScratchWheelTouch'].value,1.0);\n"
                 "assert.equal(trMap['/Engine/Deck3/ExternalScratchWheelMove'].incCalls[0][0],9600);\n"
-                "assert.deepEqual(trMap['/Engine/Deck3/Speed'].setCalls[0],[0.62,7005,0]);\n"
+                "assert.deepEqual(trMap['/Engine/Deck3/Speed'].setCalls[0],[0.62,1,0]);\n"
                 "assert.equal(trMap['/Engine/Deck3/SpeedOffsetUp'].state,true);\n"
                 "assert.equal(trMap['/Engine/Deck3/Track/CueAction'].value,1.0);\n"
                 "assert.equal(trMap['/Engine/Deck3/Play'].state,true);\n"
