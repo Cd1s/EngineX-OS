@@ -566,7 +566,7 @@ SERVICES_MAIN = """
 		if (s.key !== key || s.name !== (e.name || "") || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.keyName !== (e.keyName || "") ||
 			s.playing !== !!e.playing || s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
-			s.lead !== (e.lead !== undefined ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
+			s.lead !== (e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
 			s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
 			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail || s.progress !== (Number(e.progress) || 0) || s.error !== (e.error || "") ||
 			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "")) return false
@@ -606,7 +606,7 @@ SERVICES_MAIN = """
 				playing: !!e.playing, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
 				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master,
-				lead: e.lead !== undefined ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
+				lead: e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				jumps: Number(e.jumps) || 0,
 				progress: Number(e.progress) || 0, error: e.error || "", engine: !!e.engine, copying: !!e.copying, durationMs: Number(e.durationMs) || 0,
@@ -1951,7 +1951,7 @@ SERVICES_MAIN = """
 		return p && p.translator ? p.translator.color : "transparent"
 	}
 	readonly property bool scPlayerColorsSynced: {
-		if (!Config.device.isPlayer && root.scIsPlayerBoard) {
+		if (!Config.device.isPlayer && root.scIsPlayerBoard && root.scFourDeckRole !== "") {
 			const pp = Planck.getProperty("/Client/Preferences/Player")
 			const pn = (pp && pp.translator && parseInt(pp.translator.string)) || 1
 			const role = root.scFourDeckRole || (pn === 2 ? "24" : "13")
@@ -3814,6 +3814,7 @@ SHADOW_LAYER = r"""
             } }
         }
         Loader {
+            id: scHeaderLoader
             active: scDisplay.live && !scDisplay.graphical
             anchors.fill: parent
             sourceComponent: Component { Item {
@@ -3826,7 +3827,16 @@ SHADOW_LAYER = r"""
                 readonly property bool hasBottomRow: !scDisplay.performance && !groupedMain && !splitMain
                 readonly property bool loaded: !!scDisplay.sample
                 readonly property bool isSync: !!(scDisplay.sample && scDisplay.sample.sync)
-                readonly property bool isLead: !!(scDisplay.sample && (scDisplay.sample.lead !== undefined ? scDisplay.sample.lead : scDisplay.sample.master))
+                readonly property bool isLead: !!(scDisplay.sample && (scDisplay.sample.lead !== undefined && scDisplay.sample.lead !== null ? scDisplay.sample.lead : scDisplay.sample.master))
+                function tryFlipTime(x, y) {
+                    if (!loaded || scDisplay.performance || !timeView || !scTimeSlot.visible || !(scTimeSlot.width > 0)) return false
+                    const p = scDisplay.mapToItem(scTimeSlot, x, y)
+                    if (p.x >= 0 && p.x <= scTimeSlot.width && p.y >= -12 && p.y <= scTimeSlot.height + 12) {
+                        timeView.flip()
+                        return true
+                    }
+                    return false
+                }
                 readonly property bool keyLock: !!(scDisplay.sample && scDisplay.sample.keylock)
                 readonly property real pitchVal: scDisplay.sample ? Math.round((Number(scDisplay.sample.pitch) || 0) * 100) / 100 : 0
                 readonly property string rangeStr: scDisplay.sample && scDisplay.sample.range > 0 ? String(scDisplay.sample.range) : "8"
@@ -3922,7 +3932,7 @@ SHADOW_LAYER = r"""
                                     elide: Text.ElideRight
                                     font: scHeader.splitMain ? Style.fontDisplay : scHeader.groupedMain ? Style.fontH1 : Style.fontH0
                                     color: Style.font02Color
-                                    text: scHeader.loaded ? (scTitleDisplay.display || scHeader.rawTitle) : scHeader.deckLabel
+                                    text: scHeader.loaded ? (scTitleDisplay.hideTitleArtist ? "" : (scTitleDisplay.display || scHeader.rawTitle)) : scHeader.deckLabel
                                     textFormat: Text.PlainText
                                     verticalAlignment: Text.AlignVCenter
                                 }
@@ -3930,11 +3940,11 @@ SHADOW_LAYER = r"""
                                     objectName: "Deck_Artist"
                                     Layout.fillWidth: true
                                     Layout.alignment: Qt.AlignVCenter
-                                    visible: !scHeader.loaded || (!scHeader.hasBottomRow && !scTitleDisplay.hideTitleArtist && scHeader.artistName.length > 0)
+                                    visible: !scHeader.loaded || (!scHeader.hasBottomRow && !scTitleDisplay.hideTitleArtist && !scTitleDisplay.shouldShowFilename && scHeader.artistName.length > 0)
                                     elide: Text.ElideRight
                                     font: scHeader.splitMain ? Style.fontH1 : Style.fontH3
                                     color: Style.font01Color
-                                    text: scHeader.loaded ? (scTitleDisplay.hideTitleArtist ? "" : scHeader.artistName) : "No Track Loaded"
+                                    text: scHeader.loaded ? (scTitleDisplay.hideTitleArtist || scTitleDisplay.shouldShowFilename ? "" : scHeader.artistName) : "No Track Loaded"
                                     textFormat: Text.PlainText
                                     verticalAlignment: Text.AlignVCenter
                                 }
@@ -3946,6 +3956,8 @@ SHADOW_LAYER = r"""
                                 Layout.bottomMargin: 3
                                 Layout.topMargin: 3
                                 Item {
+                                    id: scTimeSlot
+                                    objectName: "Deck_TimeInfo"
                                     Layout.fillHeight: true
                                     Layout.rightMargin: scHeader.splitMain ? 40 : 16
                                     implicitWidth: scTimeText.implicitWidth
@@ -3959,12 +3971,6 @@ SHADOW_LAYER = r"""
                                         font: scHeader.splitMain ? Style.fontDisplay : scHeader.splitMini ? Style.fontTitle : Style.fontH0
                                         color: scHeader.timeText !== "" ? Style.font02Color : Style.font01Color
                                         text: scHeader.timeText
-                                    }
-                                    MouseArea {
-                                        anchors.centerIn: parent
-                                        width: parent.width
-                                        height: parent.height + 24
-                                        onPressed: if (scHeader.timeView) scHeader.timeView.flip()
                                     }
                                 }
                                 Rectangle { width: 1; height: scHeader.splitMain || scHeader.splitMini ? 56 : scHeader.groupedMain ? 32 : 20; Layout.alignment: Qt.AlignVCenter; color: Style.surface03Color }
@@ -4191,8 +4197,9 @@ SHADOW_LAYER = r"""
                 }
             } }
         }
-@BUSY@        // Covers remote Stems, needle-drop, grid editing and transport touch targets.
-        MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; onWheel: function(wheel) { wheel.accepted = true } }
+@BUSY@        // Covers remote Stems, needle-drop, grid editing and transport touch targets;
+        // only presses inside the shadow header's time display flip Elapsed/Remaining.
+        MouseArea { objectName: "EngineX_ShadowBlocker"; anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; function handlePress(x, y) { return !scDisplay.graphical && typeof scHeaderLoader !== "undefined" && scHeaderLoader.item ? scHeaderLoader.item.tryFlipTime(x, y) : false } onPressed: function(mouse) { handlePress(mouse.x, mouse.y) }; onWheel: function(wheel) { wheel.accepted = true } }
     }
 """
 
@@ -4299,7 +4306,7 @@ def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
     icons = "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons"
     raw_layer = SHADOW_LAYER
     if kind in ("waveform", "overview"):
-        h_start = raw_layer.index("        Loader {\n            active: scDisplay.live && !scDisplay.graphical\n")
+        h_start = raw_layer.index("        Loader {\n            id: scHeaderLoader\n            active: scDisplay.live && !scDisplay.graphical\n")
         h_end = raw_layer.index("@BUSY@")
         raw_layer = raw_layer[:h_start] + raw_layer[h_end:]
     layer = raw_layer.replace("@BUSY@", busy).replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette)).replace("@ICONS@", icons)
@@ -5425,6 +5432,7 @@ def edits(dev: bool):
         scaled[v + "MainView/DeckInfo/DeckColor/DeckColor.qml"] = [(
             '    readonly property color playerColor: deckView ? deckView.deckData.deckColor : "transparent"\n',
             '    readonly property color scOwnColor: deckView ? deckView.deckData.deckColor : "transparent"\n'
+            '    readonly property bool scPlayerFourDeck: typeof root !== "undefined" && !!root && !!root.scFourDeckRole && (!!root.scIsPlayerBoard || ["JP07", "JP08", "JP13", "JP14"].indexOf(Config.device.name) >= 0)\n'
             '    function scPref(n) { const p = Planck.getProperty("/Client/Preferences/Profile/Application/PlayerColor" + n); return p && p.translator ? p.translator.color : "transparent" }\n'
             '    function scLayerPref(n) {\n'
             '        const pp = Planck.getProperty("/Client/Preferences/Player")\n'
@@ -5438,7 +5446,7 @@ def edits(dev: bool):
             '    }\n'
             '    function scBlank(c) { return c.a === 0 || (c.r === c.g && c.g === c.b && (c.r === 0 || c.r === 1)) }\n'
             '    readonly property color playerColor: !deckView || !scBlank(scOwnColor) ? scOwnColor\n'
-            '        : !scBlank(scLayerPref(deckIndex)) ? scLayerPref(deckIndex)\n'
+            '        : scPlayerFourDeck && !scBlank(scLayerPref(deckIndex)) ? scLayerPref(deckIndex)\n'
             '        : !scBlank(scPref(deckIndex)) ? scPref(deckIndex)\n'
             '        : deckIndex > 2 && !scBlank(scPref(deckIndex - 2)) ? scPref(deckIndex - 2) : scOwnColor\n')]
         # #49: 4-deck mode clears Config.device.isPlayer in C++ so Engine builds the 4-deck
@@ -5486,7 +5494,15 @@ def edits(dev: bool):
         )]
         scaled[prefs + "Entries/private/DualLayerColorSelect.qml"] = [(
             '        visible: Planck.getProperty("/GUI/Decks/Deck/Layer").translator.numEntries === 2\n',
-            '        visible: (Planck.getProperty("/GUI/Decks/Deck/Layer").translator || Planck.getProperty("/GUI/Decks/DeckLeft/Layer").translator).numEntries === 2\n',
+            '        readonly property var scLayerTr: {\n'
+            '            const p = Planck.getProperty("/GUI/Decks/Deck/Layer")\n'
+            '            if (p && p.translator) return p.translator\n'
+            '            const role = typeof root !== "undefined" && root && root.scFourDeckRole ? root.scFourDeckRole : ""\n'
+            '            if (!role) return null\n'
+            '            const fb = Planck.getProperty(role === "24" || role === "2" ? "/GUI/Decks/DeckRight/Layer" : "/GUI/Decks/DeckLeft/Layer")\n'
+            '            return fb && fb.translator ? fb.translator : null\n'
+            '        }\n'
+            '        visible: !!scLayerTr && scLayerTr.numEntries === 2\n',
         )]
         scaled[ROOT + "StateNodes/States/PerformanceViewState.qml"] = [
             (
@@ -5551,9 +5567,16 @@ def edits(dev: bool):
                 '                        Planck.getProperty("/GUI/Decks/Deck/Layer").translator.numEntries - 1 >= index\n'
                 '                            ? Planck.getProperty("/GUI/Decks/Deck/Layer").translator.entries[deckLayerIndex]\n'
                 '                            : "-"\n',
-                '                        readonly property var scLayerTr: Planck.getProperty("/GUI/Decks/Deck/Layer").translator || Planck.getProperty("/GUI/Decks/DeckLeft/Layer").translator\n'
+                '                        readonly property var scLayerTr: {\n'
+                '                            const p = Planck.getProperty("/GUI/Decks/Deck/Layer")\n'
+                '                            if (p && p.translator) return p.translator\n'
+                '                            const role = typeof root !== "undefined" && root && root.scFourDeckRole ? root.scFourDeckRole : ""\n'
+                '                            if (!role) return null\n'
+                '                            const fb = Planck.getProperty(role === "24" || role === "2" ? "/GUI/Decks/DeckRight/Layer" : "/GUI/Decks/DeckLeft/Layer")\n'
+                '                            return fb && fb.translator ? fb.translator : null\n'
+                '                        }\n'
                 "                        deckLayer: enabled && scLayerTr && scLayerTr.numEntries - 1 >= index\n"
-                '                            ? (deckLayerIndex === 0 ? "A" : "B")\n'
+                '                            ? (typeof root !== "undefined" && root && root.scFourDeckRole ? (deckLayerIndex === 0 ? "A" : "B") : scLayerTr.entries[deckLayerIndex])\n'
                 '                            : "-"\n',
             ),
             (
