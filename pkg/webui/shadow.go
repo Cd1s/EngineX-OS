@@ -76,11 +76,11 @@ type deckState struct {
 	// CDJ and an older sender: the shadow deck keeps its own.
 	Range   float64 `json:"range,omitempty"`
 	KeyLock *bool   `json:"keylock,omitempty"`
-	Master  bool    `json:"master,omitempty"`
+	Master  *bool   `json:"master,omitempty"`
 	// Lead is the deck's own DeckIsMaster, what its header shows as LEAD, for the
 	// shadow header only. Master also marks the player that holds the network
 	// master with no master deck, and is cleared for a standalone player's copy.
-	Lead bool `json:"lead,omitempty"`
+	Lead *bool `json:"lead,omitempty"`
 	// Loop, KeyOffset, Stems and Slip are what the source's header and overview show
 	// beside the track: an active loop, the key shift in semitones, the Stems icon,
 	// and the slip timeline's position in samples while slip is active (0: it is
@@ -197,6 +197,10 @@ const (
 	shadowSkewMax    = 500e-6
 )
 
+func sameOptionalBool(a, b *bool) bool {
+	return (a == nil) == (b == nil) && (a == nil || *a == *b)
+}
+
 // samePeerPicture is true when d shows what old already shows: the same track,
 // state, tempo and markers, and a playhead on old's anchored line.
 // Seq, At, Beat and Dbg do not count: the display QML does not use them.
@@ -204,7 +208,7 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
-		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.Lead != d.Lead || o.Loop != d.Loop || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
+		o.Playing != d.Playing || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) || o.Loop != d.Loop || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
 		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
@@ -469,11 +473,12 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	// master. Taking master asks a CDJ that still holds it to hand it over.
 	ex := prolink.ExportDeck{At: time.Now()}
 	for _, d := range own {
-		if d.Master || (d.Playing && !ex.Playing && !ex.Master) {
+		master := d.Master != nil && *d.Master
+		if master || (d.Playing && !ex.Playing && !ex.Master) {
 			ex.BPM, ex.Pitch, ex.Beat = d.BPM, d.Pitch, d.Beat
 		}
 		ex.Playing = ex.Playing || d.Playing
-		ex.Master = ex.Master || d.Master
+		ex.Master = ex.Master || master
 	}
 	s.shadow.mu.Lock()
 	if postAt != 0 && postAt < s.shadow.ownPostAt {
@@ -1161,11 +1166,14 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		d := p.deckState
 		d.Deck = deck
 		d.LineIn = false
+		if d.Lead == nil {
+			d.Lead = d.Master // only older senders omit the deck's own LEAD state
+		}
 		// Two standalone players share master natively over Engine Link; an
 		// all-in-one console linked to an SC5000/SC6000 (#160) does not, so keep
 		// the peer's master flag when this unit is not a standalone player.
 		if pfx := imagePrefix(deviceCompatible()); pfx == "" || playerBoards[pfx] {
-			d.Master = false
+			d.Master = new(false)
 		}
 		if d.Playing {
 			d.PositionMS, d.Rate = p.carried(now.Sub(p.at))
@@ -1215,7 +1223,7 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 	}
 	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
 		cue := dev.PlayState1 == cdjCuePlay
-		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS)}
+		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: new(dev.Master), Lead: new(dev.Master), Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS)}
 		if len(consoleLines) > 0 {
 			d.LineIn = true
 		}
