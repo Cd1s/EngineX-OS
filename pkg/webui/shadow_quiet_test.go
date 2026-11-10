@@ -447,3 +447,51 @@ func TestTakePeerMeasuresTheDecksSpeed(t *testing.T) {
 		t.Fatalf("next track's rate %v", rate)
 	}
 }
+
+// The source's pitch range and key lock travel from its QML post to the peer's
+// shadow reply; a deck that sent neither (a CDJ, an older sender) has neither.
+func TestShadowCarriesRangeAndKeyLock(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	oldRole := fourDeckRolePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = oldRole }()
+	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
+	uiPost(t, srv.URL, "fourDeckWaveform=1")
+	w := httptest.NewRecorder()
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"range":100,"keylock":false,"at":%d}]`, time.Now().UnixMilli()))))
+	if w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	s.shadow.mu.Lock()
+	out := s.shadow.ownForPeer(time.Now())
+	on := true
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Range: 8, Seq: 1}, {Deck: 4, Key: "b", Seq: 1}}, time.Now())
+	ver := s.shadow.ver
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Range: 100, Seq: 2}, {Deck: 4, Key: "b", Seq: 2}}, time.Now())
+	ver2 := s.shadow.ver
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Range: 100, KeyLock: &on, Seq: 3}, {Deck: 4, Key: "b", Seq: 3}}, time.Now())
+	ver3 := s.shadow.ver
+	s.shadow.mu.Unlock()
+	if ver2 == ver || ver3 == ver2 {
+		t.Fatalf("a new range or key lock must wake the QML: ver %d %d %d", ver, ver2, ver3)
+	}
+	if len(out) != 1 || out[0].Range != 100 || out[0].KeyLock == nil || *out[0].KeyLock {
+		t.Fatalf("own deck for the peer: %+v", out)
+	}
+	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	var v struct{ Decks []deckState }
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil || len(v.Decks) != 2 {
+		t.Fatalf("%v %+v", err, v.Decks)
+	}
+	for _, d := range v.Decks {
+		if d.Deck == 2 && (d.Range != 100 || d.KeyLock == nil || !*d.KeyLock) || d.Deck == 4 && (d.Range != 0 || d.KeyLock != nil) {
+			t.Fatalf("shadow reply: %+v", d)
+		}
+	}
+}

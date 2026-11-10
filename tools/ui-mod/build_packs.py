@@ -517,7 +517,7 @@ SERVICES_MAIN = """
 		if (s.key !== key || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.playing !== !!e.playing ||
 			s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
-			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) ||
+			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
 			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail) return false
 		if (Array.isArray(e.cues)) {
 			const a = s.liveCues, b = e.cues
@@ -554,7 +554,7 @@ SERVICES_MAIN = """
 			const sample = {key: key, title: e.title || "", artist: e.artist || "", playing: !!e.playing, stale: !!e.stale,
 				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master, sync: !!e.sync,
-				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
+				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				jumps: Number(e.jumps) || 0,
 				meta: old && old.key === key ? old.meta : null,
 				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
@@ -955,7 +955,8 @@ SERVICES_MAIN = """
 			["loaded", "/Track/SongLoaded"], ["uri", "/Track/TrackUri"], ["net", "/Track/TrackNetworkPath"],
 			["cueLED", "/Track/CueLEDState"], ["master", "/DeckIsMaster"], ["sync", "/SyncMode"],
 			["beat", "/BeatNumber"], ["cuePosition", "/Track/CuePosition"], ["title", "/Track/SongName"],
-			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"]])
+			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"],
+			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"]])
 			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
 		p.cues = []
 		for (let i = 1; i <= 8; i++) {
@@ -1003,12 +1004,17 @@ SERVICES_MAIN = """
 			s.cue = !s.ps && !!g.cueLED.state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
 			s.playing = s.ps || s.cue
 			s.master = !!g.master.state
-			if (p && now - p.syncAt < 200) { s.sync = p.sync; s.syncAt = p.syncAt }
-			else { s.sync = (g.sync.string || "Off") !== "Off"; s.syncAt = now }
+			if (p && now - p.syncAt < 200) { s.sync = p.sync; s.syncAt = p.syncAt; s.range = p.range; s.rangeIndex = p.rangeIndex; s.keylock = p.keylock }
+			else {
+				s.sync = (g.sync.string || "Off") !== "Off"; s.syncAt = now; s.keylock = !!g.keylock.state
+				// .string allocates: the range is read again only when its index moved.
+				s.rangeIndex = g.range.index
+				s.range = p && p.rangeIndex === s.rangeIndex ? p.range : parseFloat(g.range.string) || 0
+			}
 			if (p) {
 				const expect = p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0)
 				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
-				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync) edge = true
+				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
 				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
 			}
 			if (s.cue) busy = true
@@ -1107,6 +1113,7 @@ SERVICES_MAIN = """
 			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
+			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
 			// Titles arrive after the load: re-read on a new track and every 2 s.
 			if (fresh) {
 				o.title = s.net ? g.title.string || g.trackName.string || "" : ""
@@ -1126,7 +1133,7 @@ SERVICES_MAIN = """
 				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
-				sent.title !== o.title || sent.artist !== o.artist || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.cuesRev !== cc.rev) edge = true
+				sent.title !== o.title || sent.artist !== o.artist || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev) edge = true
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -1140,7 +1147,7 @@ SERVICES_MAIN = """
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.durationMs = o.durationMs
-			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
+			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
@@ -1303,7 +1310,9 @@ SERVICES_MAIN = """
 		// e.pitch is rounded to 0.01 %: at 138 BPM that alone slipped 4 ms a minute.
 		// The fader goes to the source's tempo ratio, so the BPM shown is the source's.
 		const exact = e.bpm > 0 && e.currentBpm > 0 ? (e.currentBpm / e.bpm - 1) * 100 : NaN
-		if (!(wantSync && synced)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch)
+		if (!(wantSync && synced)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
+		const pKey = g("/Track/KeyLock")
+		if (typeof e.keylock === "boolean" && pKey && !!pKey.state !== e.keylock) pKey.state = e.keylock
 		// Play, CUE held, pause, CUE released: on the first update that shows it.
 		// at.cmd only stops rewriting the same state while Engine follows (a frame
 		// or two); a change of the source's state always goes through.
@@ -1557,17 +1566,25 @@ SERVICES_MAIN = """
 		if (Math.abs(posMs - endMs) > 50 && now - at.seekAt >= 200) root.scShadowSeek(d, at, endMs)
 		return true
 	}
-	// The shadow deck's fader at pitch percent: the SpeedRange (8 % by default) is
-	// widened first, or +11.1 % (a synced 126 BPM track at 140) stuck at +8 %.
-	function scShadowSpeed(d, pitch) {
+	// The shadow deck's fader at pitch percent, in the source's SpeedRange (want:
+	// one of Engine's own entries) so the header reads the same. No range sent (a
+	// CDJ) or a pitch beyond it: the range (8 % by default) is widened first, or
+	// +11.1 % (a synced 126 BPM track at 140) stuck at +8 %.
+	function scShadowSpeed(d, pitch, want) {
 		if (scShadowDisplayOnly) return
 		const pRange = root.scTr("/Engine/Deck" + d + "/SpeedRange"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
 		if (!pRange || !pSpeed) return
 		let range = parseFloat(pRange.string) || 8
-		if (Math.abs(pitch) > range - 0.2 && pRange.entries) {
-			const i = pRange.entries.findIndex(v => parseFloat(v) >= Math.abs(pitch) + 0.2)
-			pRange.index = i < 0 ? pRange.entries.length - 1 : i
-			range = parseFloat(pRange.string) || range
+		if (pRange.entries) {
+			let i = want > 0 && Math.abs(pitch) <= want ? pRange.entries.findIndex(v => parseFloat(v) === want) : -1
+			if (i < 0 && Math.abs(pitch) > range - 0.2) {
+				i = pRange.entries.findIndex(v => parseFloat(v) >= Math.abs(pitch) + 0.2)
+				if (i < 0) i = pRange.entries.length - 1
+			}
+			if (i >= 0 && parseFloat(pRange.entries[i]) !== range) {
+				pRange.index = i
+				range = parseFloat(pRange.string) || range
+			}
 		}
 		const speed = Math.max(0, Math.min(1, 0.5 + pitch / (2 * range)))
 		if (Math.abs(pSpeed.value - speed) * 2 * range > 0.002) pSpeed.value = speed
@@ -3448,7 +3465,9 @@ SHADOW_LAYER = r"""
                         const s = scDisplay.sample, m = scDisplay.meta
                         if (!s) return ""
                         const cue = scDisplay.cueInfo && root.scCueCountdown ? "   " + scDisplay.cueInfo.label + " " + scDisplay.cueInfo.text : ""
-                        return (scShadowBpm.deckLoaded ? " BPM" : "") + "   " + (m && m.keyName || "") + cue
+                        const pitch = Math.round(s.pitch * 100) / 100 || 0 // as the source's header: ±8  +0.01%
+                        const speed = s.range > 0 ? "   \u00b1" + s.range + "  " + (pitch > 0 ? "+" : "") + pitch.toFixed(2) + "%" : ""
+                        return (scShadowBpm.deckLoaded ? " BPM" : "") + speed + "   " + (m && m.keyName || "") + cue
                     }
                 }
                 Text { textFormat: Text.PlainText;
