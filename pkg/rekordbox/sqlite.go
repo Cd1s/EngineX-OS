@@ -194,6 +194,7 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		if t.Album == "" {
 			t.Album = r.get("album")
 		}
+		normalizeParsedAudioMetadata(&t)
 		t.RecordHash = RecordHash(t)
 		l.Tracks = append(l.Tracks, t)
 	}
@@ -223,11 +224,17 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		}
 		grouped[id] = append(grouped[id], entry{r.num("sequenceNo", "track_no", "seq", "entry_index", "position"), r.num("content_id", "track_id")})
 	}
+	knownTracks := make(map[uint32]bool, len(l.Tracks))
+	for _, tr := range l.Tracks {
+		knownTracks[tr.ID] = true
+	}
 	for i, p := range l.Playlists {
 		xs := grouped[p.ID]
 		sort.SliceStable(xs, func(i, j int) bool { return xs[i].seq < xs[j].seq })
 		for _, x := range xs {
-			l.Playlists[i].Tracks = append(l.Playlists[i].Tracks, x.id)
+			if knownTracks[x.id] {
+				l.Playlists[i].Tracks = append(l.Playlists[i].Tracks, x.id)
+			}
 		}
 	}
 	return l, nil

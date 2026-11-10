@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -127,5 +128,191 @@ func TestAnalysisIgnoresTrailingPadding(t *testing.T) {
 	b := append(testfixture.DAT(), make([]byte, 512)...)
 	if a, e := ParseAnalysis(b); e != nil || len(a.Beats) == 0 {
 		t.Fatalf("padded ANLZ rejected: %v", e)
+	}
+}
+
+func TestPDBAudioMetadataNormalization(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		bpm, rate uint32
+		wantBPM   float64
+		wantRate  int
+	}{
+		{"zero", 0, 48000, 0, 48000},
+		{"unanalyzed", 0xffffffff, 48000, 0, 48000},
+		{"above_limit", 100001, 48000, 0, 48000},
+		{"at_limit", 100000, 48000, 1000, 48000},
+		{"analyzed", 12800, 48000, 128, 48000},
+		{"invalid_sample_rate", 12800, 768001, 128, 0},
+		{"sample_rate_overflow", 12800, 0xffffffff, 128, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := testfixture.PDB()
+			const track = 2*testfixture.PageSize + 40
+			le.PutUint32(b[track+56:], tc.bpm)
+			le.PutUint32(b[track+8:], tc.rate)
+			l, err := ParsePDB(bytes.NewReader(b), int64(len(b)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := l.Tracks[0]; got.BPM != tc.wantBPM || got.SampleRate != tc.wantRate {
+				t.Fatalf("got BPM %v/sample rate %d, want %v/%d", got.BPM, got.SampleRate, tc.wantBPM, tc.wantRate)
+			}
+		})
+	}
+}
+
+func TestSQLiteAudioMetadataNormalization(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		bpm, length           string
+		rate                  int64
+		wantBPM, wantDuration float64
+		wantRate              int
+	}{
+		{"zero", "0", "180", 48000, 0, 180, 48000},
+		{"unanalyzed", "4294967295", "180", 48000, 0, 180, 48000},
+		{"above_limit", "100001", "180", 48000, 0, 180, 48000},
+		{"at_limit", "100000", "180", 48000, 1000, 180, 48000},
+		{"analyzed", "12800", "180", 48000, 128, 180, 48000},
+		{"nonfinite_bpm", "Inf", "180", 48000, 0, 180, 48000},
+		{"invalid_duration", "12800", "10000001", 48000, 128, 0, 48000},
+		{"nonfinite_duration", "12800", "NaN", 48000, 128, 0, 48000},
+		{"invalid_sample_rate", "12800", "180", 768001, 128, 180, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "exportLibrary.db")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { db.Close() })
+			if _, err := db.Exec(`CREATE TABLE content(id INTEGER, path TEXT, bpmx100 TEXT, length TEXT, samplingRate INTEGER)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO content VALUES(1,'/Music/test.wav',?,?,?)`, tc.bpm, tc.length, tc.rate); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			l, err := ReadSQLite(context.Background(), path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := l.Tracks[0]; got.BPM != tc.wantBPM || got.Duration != tc.wantDuration || got.SampleRate != tc.wantRate {
+				t.Fatalf("unexpected normalized metadata: %+v", got)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsInvalidAudioMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*Track)
+	}{
+		{"bpm", func(t *Track) { t.BPM = 1001 }},
+		{"nan_bpm", func(t *Track) { t.BPM = math.NaN() }},
+		{"infinite_bpm", func(t *Track) { t.BPM = math.Inf(1) }},
+		{"negative_bpm", func(t *Track) { t.BPM = -1 }},
+		{"duration", func(t *Track) { t.Duration = 1e7 + 1 }},
+		{"nan_duration", func(t *Track) { t.Duration = math.NaN() }},
+		{"negative_duration", func(t *Track) { t.Duration = -1 }},
+		{"sample_rate", func(t *Track) { t.SampleRate = 768001 }},
+		{"negative_sample_rate", func(t *Track) { t.SampleRate = -1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			track := Track{ID: 1, Path: "/Music/test.wav", BPM: 120, Duration: 180, SampleRate: 48000}
+			tc.set(&track)
+			l := Library{Tracks: []Track{track}}
+			if err := l.Validate(); err == nil || !strings.Contains(err.Error(), "invalid audio metadata") {
+				t.Fatalf("expected strict metadata error, got %v", err)
+			}
+			got := l.Tracks[0]
+			if math.Float64bits(got.BPM) != math.Float64bits(track.BPM) || math.Float64bits(got.Duration) != math.Float64bits(track.Duration) || got.SampleRate != track.SampleRate {
+				t.Fatal("Validate changed invalid audio metadata")
+			}
+		})
+	}
+}
+
+func TestPDBOrphanPlaylistEntries(t *testing.T) {
+	b := testfixture.PDB()
+	const ps = testfixture.PageSize
+	// Table 4 (type 8, playlist entries) is at page 6 (index 6*ps)
+	p := b[6*ps : 7*ps]
+	// Add an entry pointing to non-existent track 999
+	entryBytes := make([]byte, 12)
+	le.PutUint32(entryBytes, 99)      // order
+	le.PutUint32(entryBytes[4:], 999) // non-existent track
+	le.PutUint32(entryBytes[8:], 12)  // playlist 12
+	off := 40 + int(le.Uint16(p[30:]))
+	copy(p[off:], entryBytes)
+	le.PutUint16(p[30:], uint16(off+len(entryBytes)-40))
+	count := int(le.Uint16(p[24:]))
+	base := ps - (count/16)*36
+	le.PutUint16(p[base-6-2*(count%16):], uint16(off-40))
+	flags := le.Uint16(p[base-4:])
+	le.PutUint16(p[base-4:], flags|1<<uint(count%16))
+	le.PutUint16(p[24:], uint16(count+1))
+
+	l, err := ParsePDB(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		t.Fatalf("ParsePDB rejected orphan playlist entry: %v", err)
+	}
+	for _, p := range l.Playlists {
+		for _, tid := range p.Tracks {
+			if tid == 999 {
+				t.Fatalf("orphan track 999 was not filtered from playlist %d", p.ID)
+			}
+		}
+	}
+}
+
+func TestValidateResilientDuplicateSiblingPlaylists(t *testing.T) {
+	l := &Library{
+		Tracks: []Track{
+			{ID: 1, Path: "/Contents/test.mp3", BPM: 120.0, Duration: 180},
+		},
+		Playlists: []Playlist{
+			{ID: 1, ParentID: 0, Name: "Favorites", Tracks: []uint32{1}},
+			{ID: 2, ParentID: 0, Name: "Favorites", Tracks: []uint32{1}},
+		},
+	}
+	if err := l.Validate(); err != nil {
+		t.Fatalf("Validate failed on duplicate sibling playlists: %v", err)
+	}
+	if l.Playlists[0].Name == l.Playlists[1].Name {
+		t.Fatalf("duplicate sibling playlist was not disambiguated: %q vs %q", l.Playlists[0].Name, l.Playlists[1].Name)
+	}
+}
+
+func TestValidateResilientDanglingParent(t *testing.T) {
+	l := &Library{
+		Tracks: []Track{
+			{ID: 1, Path: "/Contents/test.mp3", BPM: 120.0, Duration: 180},
+		},
+		Playlists: []Playlist{
+			{ID: 10, ParentID: 999, Name: "Subtree Parent", Folder: true},
+			{ID: 20, ParentID: 10, Name: "Nested Folder", Folder: true},
+			{ID: 30, ParentID: 20, Name: "Leaf Playlist", Tracks: []uint32{1}},
+		},
+	}
+	if err := l.Validate(); err != nil {
+		t.Fatalf("Validate failed on dangling parent: %v", err)
+	}
+	byID := map[uint32]Playlist{}
+	for _, p := range l.Playlists {
+		byID[p.ID] = p
+	}
+	if byID[10].ParentID != 0 {
+		t.Fatalf("expected root of orphan subtree (10) to be reset to 0, got %d", byID[10].ParentID)
+	}
+	if byID[20].ParentID != 10 {
+		t.Fatalf("expected nested folder (20) to retain parent 10, got %d", byID[20].ParentID)
+	}
+	if byID[30].ParentID != 20 {
+		t.Fatalf("expected leaf playlist (30) to retain parent 20, got %d", byID[30].ParentID)
 	}
 }
