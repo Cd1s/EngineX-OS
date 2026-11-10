@@ -185,14 +185,22 @@ must be measured by PM rather than invented from these component changes.
 | CDJ shadow | New mode is metadata-only for CDJs; no full-audio fetch or synthetic Engine sync/master. Legacy preserves the former CDJ compatibility path. |
 | Debug | Bounded opt-in telemetry includes display cache/fetch and source-envelope status. |
 | shadowFetchPeer/CDJ, shadow-v3 copies, savePerf, EXPF replay | Bypassed in default receive path; retained behind explicit legacy mode. |
-| scShadowApply/Speed/Seek/Cues/Beat/Link/Empty | Early return in display mode. No native deck control or per-frame analyzer work. |
+| scShadowApply/Speed/Seek/Cues/Beat/Link/Empty | Early return for a display slot, decided per deck (`scShadowEngineMask`). No native deck control or per-frame analyzer work there. |
 
-Persistent setting: `shadowLegacyEngine`. Since 2026-11-10 it defaults to true
-(Engine loads the shadow copy and its stock components draw it; the maintainer
-requires the shadow deck to be the same components as a local deck, not a
-replica) and `shadow_legacy_engine=0` selects this display-only renderer.
-The settings row explains that switching requires a planned
-Engine restart to clear any slots from the former legacy mode. Existing audio
+Persistent setting: `shadowMode` (`shadow_mode=auto|engine|cdj` in
+settings.conf). The path is chosen per shadow slot. `auto` decides by the
+slot's source: an EngineX peer's track is loaded by Engine and its stock
+components draw it (the maintainer requires the shadow deck to be the same
+components as a local deck, not a replica), a Pro DJ Link CDJ goes to this
+display-only renderer with `displayOnly` on its deck in the `/v1/sc5000/shadow`
+answer. One slot of each kind works side by side; when a slot's source changes,
+the QML unloads Engine's copy (350 ms debounce) or clears the display slot.
+`engine` and `cdj` force every source down one path. `auto` is the default on
+every model and is not written to the file; on a console a CDJ on a Line In
+channel stays on the display path in it. The older `shadow_legacy_engine=1|0`
+is read as `engine` / `cdj` and saved as the new key.
+Switching asks for an Engine restart, which clears slots loaded under the
+former mode. Existing audio
 caches are retained; discovery no longer deletes old cache directories. PM can
 roll back the build or enable legacy and restart during deployment. No live
 restart, unload, setting/database change or flash is performed by this task.

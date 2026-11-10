@@ -216,6 +216,7 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 			}
 		}
 		d.Path, d.Ext, d.Net = "", "", ""
+		d.DisplayOnly = true
 		d.At = now.UnixMilli()
 		if p.Key != "" {
 			e := s.ensureShadowDisplay(p, now)
@@ -224,9 +225,6 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 		}
 		out = append(out, d)
 	}
-	// Only cached rekordbox analysis is used here, never shadowFetchCDJ/audio.
-	devices := s.mergedDevices()
-	var lineFree []int
 	if len(consoleLines) > 0 {
 		free = nil
 		for _, deck := range consoleLines {
@@ -234,13 +232,25 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 				free = append(free, deck)
 			}
 		}
+	}
+	out = append(out, s.shadowDisplayCDJs(free, len(consoleLines) > 0, now)...)
+	slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
+	return out
+}
+
+// shadowDisplayCDJs puts the CDJs on the free decks for the display renderer
+// (lineIn: the decks are the console's Line In channels). Only cached
+// rekordbox analysis is used here, never shadowFetchCDJ/audio.
+func (s *Server) shadowDisplayCDJs(free []int, lineIn bool, now time.Time) []deckState {
+	sh := s.shadow
+	devices := s.mergedDevices()
+	var lineFree []int
+	if lineIn {
 		lineFree = free
 	}
+	var out []deckState
 	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
-		d := deckState{Deck: deck, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
-		if len(consoleLines) > 0 {
-			d.LineIn = true
-		}
+		d := deckState{Deck: deck, DisplayOnly: true, LineIn: lineIn, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
 		if dev.TrackID != 0 {
 			host := net.ParseIP(dev.Address)
 			if dev.SourcePlayer != dev.Number {
@@ -264,7 +274,6 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 		}
 		out = append(out, d)
 	}
-	slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
 	return out
 }
 
@@ -929,7 +938,7 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 	if pfx := imagePrefix(deviceCompatible()); pfx == "" || playerBoards[pfx] {
 		lines = nil
 	}
-	if role == "" || v.ShadowLegacyEngine || (strings.Contains(role, strconv.Itoa(deck)) && !slices.Contains(lines, deck)) {
+	if role == "" || v.ShadowMode == "engine" || (strings.Contains(role, strconv.Itoa(deck)) && !slices.Contains(lines, deck)) {
 		return nil, deckState{}
 	}
 	s.shadow.mu.Lock()
@@ -939,11 +948,11 @@ func (s *Server) currentShadowDisplay(r *http.Request) (*shadowDisplayEntry, dec
 	}
 	s.shadow.mu.Unlock()
 	p, ok := placeDisplayPeers(peers, role, time.Now())[deck]
-	if !ok {
+	if !ok || v.ShadowMode != "cdj" { // by source: Engine draws the peers, only CDJ decks have assets
 		// Compose and HTTP use the same placement, including peer priority and
 		// exact current track keys. An old CDJ URL cannot read a different song.
-		for _, d := range s.shadowComposeDisplay(role, time.Now(), lines) {
-			if d.Deck == deck && d.Key == key && !d.MetadataOnly {
+		for _, d := range s.shadowCompose(role, time.Now(), lines) {
+			if d.Deck == deck && d.Key == key && d.DisplayOnly && !d.MetadataOnly {
 				c := &s.shadow.display
 				c.mu.Lock()
 				e := c.entries[key]

@@ -78,7 +78,7 @@ func TestCDJDisplayCachedANLZWithoutAudio(t *testing.T) {
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = oldRole }()
 	os.WriteFile(fourDeckRolePath, []byte("24"), 0600)
-	uiPost(t, srv.URL, "fourDeckWaveform=1&prolinkShare=1&shadowLegacyEngine=0")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&prolinkShare=1&shadowMode=cdj")
 	prolinkMu.Lock()
 	postedDevices[s] = map[string]prolink.Device{deviceKey(dev): dev}
 	prolinkMu.Unlock()
@@ -279,31 +279,190 @@ func TestShadowWaveformPixels(t *testing.T) {
 	}
 }
 
-// displayOnly selects the display-only renderer; by default Engine loads the
-// shadow track and draws it with its own components.
+// displayOnly selects the display-only renderer for every source (CDJ mode).
 func displayOnly(t *testing.T, s *Server) {
 	t.Helper()
 	if err := os.MkdirAll(s.uiDir(), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(s.uiDir(), "settings.conf"), []byte("shadow_legacy_engine=0\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(s.uiDir(), "settings.conf"), []byte("shadow_mode=cdj\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestShadowEngineDrawnIsDefault(t *testing.T) {
-	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
-	defer s.Close()
+func TestShadowModeSetting(t *testing.T) {
+	old := deviceCompatiblePath
+	deviceCompatiblePath = filepath.Join(t.TempDir(), "compatible")
+	defer func() { deviceCompatiblePath = old }()
+	// One setting for every model: a player, a console and an unknown board.
+	for _, board := range []string{"inmusic,jp07", "inmusic,jc11", "vendor,unknown"} {
+		t.Run(board, func(t *testing.T) {
+			if err := os.WriteFile(deviceCompatiblePath, []byte(board+"\x00"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+			defer s.Close()
+			srv := httptest.NewServer(s)
+			defer srv.Close()
+			file := filepath.Join(s.uiDir(), "settings.conf")
+			conf := func() string {
+				b, _ := os.ReadFile(file)
+				return string(b)
+			}
+			// Never set: auto, and saving something else does not write it.
+			if got := s.loadUI().ShadowMode; got != "auto" {
+				t.Fatalf("default mode = %q", got)
+			}
+			if _, v := uiPost(t, srv.URL, "fourDeckWaveform=1"); v.ShadowMode != "auto" || strings.Contains(conf(), "shadow_") {
+				t.Fatalf("default: %q %q", v.ShadowMode, conf())
+			}
+			for _, mode := range []string{"engine", "cdj", "auto"} {
+				if _, v := uiPost(t, srv.URL, "shadowMode="+mode); v.ShadowMode != mode {
+					t.Fatalf("choice %s not applied", mode)
+				}
+				// It survives other saves and a reload from the file.
+				if _, v := uiPost(t, srv.URL, "fourDeckWaveform=1"); v.ShadowMode != mode || s.loadUI().ShadowMode != mode || strings.Contains(conf(), "shadow_mode="+mode+"\n") == (mode == "auto") {
+					t.Fatalf("choice %s not kept: %q", mode, conf())
+				}
+			}
+			if code, _ := uiPost(t, srv.URL, "shadowMode=on"); code != 400 {
+				t.Fatalf("invalid mode accepted: %d", code)
+			}
+			// The old key is read as the matching forced mode and only the new key is written.
+			for old, mode := range map[string]string{"1": "engine", "0": "cdj"} {
+				os.WriteFile(file, []byte("shadow_legacy_engine="+old+"\n"), 0600)
+				if got := s.loadUI().ShadowMode; got != mode {
+					t.Fatalf("shadow_legacy_engine=%s read as %q", old, got)
+				}
+				if _, v := uiPost(t, srv.URL, "fourDeckWaveform=1"); v.ShadowMode != mode || !strings.Contains(conf(), "shadow_mode="+mode+"\n") || strings.Contains(conf(), "shadow_legacy_engine") {
+					t.Fatalf("old key %s not migrated: %q", old, conf())
+				}
+			}
+			for _, text := range []string{"shadow_mode=auto\nshadow_legacy_engine=1\n", "shadow_legacy_engine=1\nshadow_mode=auto\n"} {
+				os.WriteFile(file, []byte(text), 0600)
+				if got := s.loadUI().ShadowMode; got != "auto" {
+					t.Fatalf("new key must win over the old one in %q, got %q", text, got)
+				}
+			}
+		})
+	}
+}
+
+// Mixed network: the EngineX peer's slot goes through Engine while the CDJ's
+// slot goes to the display renderer, in one answer. When the source of a slot
+// changes, the slot changes path with it.
+func TestShadowPathBySource(t *testing.T) {
+	cache, dev := cachedDisplayCDJ(t)
+	oldRole, oldCompatible := fourDeckRolePath, deviceCompatiblePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	deviceCompatiblePath = filepath.Join(t.TempDir(), "compatible")
+	defer func() { fourDeckRolePath, deviceCompatiblePath = oldRole, oldCompatible }()
+	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
+	os.WriteFile(deviceCompatiblePath, []byte("inmusic,jp07\x00"), 0600)
+	s := displayCDJServer(t, cache, dev)
 	srv := httptest.NewServer(s)
 	defer srv.Close()
-	if !s.loadUI().ShadowLegacyEngine {
-		t.Fatal("Engine-drawn shadow decks are not the default")
+	if _, v := uiPost(t, srv.URL, "fourDeckWaveform=1"); v.ShadowMode != "auto" {
+		t.Fatalf("default: %q", v.ShadowMode)
 	}
-	if _, v := uiPost(t, srv.URL, "shadowLegacyEngine=0"); v.ShadowLegacyEngine || s.loadUI().ShadowLegacyEngine {
-		t.Fatal("display-only choice not saved")
+	audio := filepath.Join(t.TempDir(), "peer.flac")
+	os.WriteFile(audio, []byte("fLaC"), 0600)
+	s.shadow.mu.Lock()
+	s.shadow.files["peer:track-a"] = audio
+	s.shadow.mu.Unlock()
+	var pd peerDeck
+	peer := func(on bool) {
+		s.shadow.mu.Lock()
+		s.shadow.peerDecks = map[int]peerDeck{}
+		if on {
+			pd = peerDeck{deckState: deckState{Deck: 2, Key: "track-a", DisplayOnly: true, Playing: true}, ip: "192.0.2.1", at: time.Now()}
+			s.shadow.peerDecks[2] = pd
+		}
+		s.shadow.mu.Unlock()
+		dev.LastSeen = time.Now()
+		prolinkMu.Lock()
+		postedDevices[s][deviceKey(dev)] = dev
+		prolinkMu.Unlock()
 	}
-	if _, v := uiPost(t, srv.URL, "shadowLegacyEngine=1"); !v.ShadowLegacyEngine || !s.loadUI().ShadowLegacyEngine {
-		t.Fatal("Engine-drawn choice not saved")
+	poll := func() (bool, []deckState) {
+		t.Helper()
+		resp, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var v struct {
+			DisplayOnly bool
+			Decks       []deckState
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+			t.Fatal(err)
+		}
+		if resp.Header.Get("X-Shadow-State") != "" {
+			t.Fatal("an answer with Engine-loaded decks must always be applied")
+		}
+		return v.DisplayOnly, v.Decks
+	}
+	asset := func(d deckState, key string) int {
+		t.Helper()
+		resp, err := http.Get(srv.URL + "/v1/sc5000/shadow/display?deck=" + strconv.Itoa(d.Deck) + "&key=" + url.QueryEscape(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	mixed := func(step string) {
+		t.Helper()
+		peer(true)
+		all, decks := poll()
+		if all || len(decks) != 2 {
+			t.Fatalf("%s: displayOnly=%v %+v", step, all, decks)
+		}
+		// Deck 2: the EngineX track, loaded by Engine. A displayOnly sent by the peer is not ours.
+		if e := decks[0]; e.Deck != 2 || e.DisplayOnly || e.Path != audio || e.Key != "" || e.Loading {
+			t.Fatalf("%s: EngineX slot: %+v", step, e)
+		}
+		// Deck 4: the CDJ, drawn from its cached analysis; its audio is never copied.
+		c := decks[1]
+		if c.Deck != 4 || !c.DisplayOnly || c.Path != "" || c.MetadataOnly || !strings.HasPrefix(c.Key, "cdj:") {
+			t.Fatalf("%s: CDJ slot: %+v", step, c)
+		}
+		if code := asset(c, c.Key); code != 200 {
+			t.Fatalf("%s: CDJ display asset: %d", step, code)
+		}
+		if code := asset(decks[0], displayTrackKey(pd)); code != 404 {
+			t.Fatalf("%s: Engine-loaded slot served a display asset: %d", step, code)
+		}
+	}
+	mixed("mixed")
+	// The EngineX player leaves: its slot is free, the CDJ takes it on the display path.
+	peer(false)
+	all, decks := poll()
+	if all || len(decks) != 1 || decks[0].Deck != 2 || !decks[0].DisplayOnly || decks[0].Path != "" || !strings.HasPrefix(decks[0].Key, "cdj:") {
+		t.Fatalf("EngineX to CDJ: displayOnly=%v %+v", all, decks)
+	}
+	if code := asset(decks[0], decks[0].Key); code != 200 {
+		t.Fatalf("CDJ display asset after the switch: %d", code)
+	}
+	// And back: the slot returns to the Engine path, the CDJ to the other deck.
+	mixed("CDJ to EngineX")
+	if n := s.shadow.fetchCDJCalls.Load(); n != 0 {
+		t.Fatalf("CDJ audio fetched %d times", n)
+	}
+	// The forced modes keep sending every source down one path.
+	uiPost(t, srv.URL, "shadowMode=cdj")
+	peer(true)
+	for _, d := range s.shadowCompose("13", time.Now()) {
+		if !d.DisplayOnly || d.Path != "" {
+			t.Fatalf("CDJ mode: %+v", d)
+		}
+	}
+	uiPost(t, srv.URL, "shadowMode=engine")
+	for _, d := range s.shadowCompose("13", time.Now()) {
+		if d.DisplayOnly {
+			t.Fatalf("Engine mode: %+v", d)
+		}
 	}
 }
 
@@ -364,7 +523,7 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = oldRole }()
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
-	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=0")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowMode=cdj")
 	p := peerDeck{deckState: deckState{Deck: 2, Key: "track-a", Cues: []shadowCue{{I: 1, P: 22050, N: "live", C: "#ff0000"}}}, ip: "127.0.0.1", at: time.Now()}
 	s.shadow.peerDecks[2] = p
 	a := testDisplayAsset()
@@ -432,7 +591,7 @@ func TestDisplayEndpointsCheckRoleKeyAndExpiry(t *testing.T) {
 	if resp.StatusCode != 404 {
 		t.Fatal("explicit goodbye kept the display")
 	}
-	if _, v := uiPost(t, srv.URL, "shadowLegacyEngine=1"); !v.ShadowLegacyEngine {
+	if _, v := uiPost(t, srv.URL, "shadowMode=engine"); v.ShadowMode != "engine" {
 		t.Fatal("rollback setting lost")
 	}
 	resp = get("/v1/sc5000/shadow")
@@ -523,7 +682,7 @@ func TestDisplayTilesAndSourceIdentity(t *testing.T) {
 	os.WriteFile(fourDeckRolePath, []byte("12"), 0600)
 	srv := httptest.NewServer(s)
 	defer srv.Close()
-	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=0")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowMode=cdj")
 	key := displayTrackKey(p)
 	q := "?deck=3&key=" + key
 	for tile, wantWidth := range []int{2048, 2048, 3} {
@@ -1063,7 +1222,7 @@ func consoleLineHTTPServer(t *testing.T) (*Server, string) {
 	s := displayCDJServer(t, cache, dev)
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
-	if code, _ := uiPost(t, srv.URL, "fourDeckWaveform=1&prolinkShare=1&shadowLegacyEngine=0"); code != http.StatusOK {
+	if code, _ := uiPost(t, srv.URL, "fourDeckWaveform=1&prolinkShare=1&shadowMode=cdj"); code != http.StatusOK {
 		t.Fatalf("enable shadow: %d", code)
 	}
 	return s, srv.URL
@@ -1101,6 +1260,60 @@ func TestConsoleLineCDJAssetsAllChannels(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Auto mode on a console: the CDJ on a Line In channel keeps its waveform on the
+// display path, on any channel, while the SC player on Deck 3 is loaded by Engine.
+func TestConsoleLineCDJInAutoMode(t *testing.T) {
+	s, base := consoleLineHTTPServer(t)
+	if _, v := uiPost(t, base, "shadowMode=auto"); v.ShadowMode != "auto" {
+		t.Fatalf("mode: %q", v.ShadowMode)
+	}
+	audio := filepath.Join(t.TempDir(), "sc.flac")
+	os.WriteFile(audio, []byte("fLaC"), 0600)
+	for channel := 1; channel <= 4; channel++ {
+		t.Run(strconv.Itoa(channel), func(t *testing.T) {
+			s.shadow.mu.Lock()
+			s.shadow.files["peer:sc-track"] = audio
+			s.shadow.peerDecks = map[int]peerDeck{3: {deckState: deckState{Deck: 3, Key: "sc-track"}, ip: "192.0.2.1", at: time.Now()}}
+			s.shadow.mu.Unlock()
+			_, decks := shadowGetJSON(t, base+"/v1/sc5000/shadow?line="+strconv.Itoa(channel))
+			var sc, cdj *deckState
+			for i := range decks {
+				if decks[i].DisplayOnly {
+					cdj = &decks[i]
+				} else {
+					sc = &decks[i]
+				}
+			}
+			if sc == nil || sc.Deck != 3 || sc.Path != audio || sc.LineIn {
+				t.Fatalf("SC player slot: %+v", decks)
+			}
+			if channel == 3 { // the SC player keeps its slot
+				if cdj != nil {
+					t.Fatalf("CDJ displaced the SC player: %+v", decks)
+				}
+				return
+			}
+			if len(decks) != 2 || cdj == nil || cdj.Deck != channel || !cdj.LineIn || cdj.MetadataOnly || cdj.Path != "" {
+				t.Fatalf("Line channel %d: %+v", channel, decks)
+			}
+			q := "?deck=" + strconv.Itoa(channel) + "&key=" + url.QueryEscape(cdj.Key)
+			for _, route := range []string{"display", "waveform.png"} {
+				resp, err := http.Get(base + "/v1/sc5000/shadow/" + route + q)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Errorf("channel %d %s: %d", channel, route, resp.StatusCode)
+				}
+			}
+		})
+	}
+	if n := s.shadow.fetchCDJCalls.Load(); n != 0 {
+		t.Fatalf("CDJ audio fetched %d times", n)
 	}
 }
 
