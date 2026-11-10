@@ -227,7 +227,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
-                 "scShadowLine", "scShadowBend", "scShadowBendEnd")
+                 "scShadowLine", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
@@ -256,6 +256,7 @@ Object.assign(globalThis, {
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
+    scShadowLead: 0, scShadowPeerLead: 0, scShadowPeerPlaying: false, scShadowMasterAt: 0,
     scShadowGen: 0, scShadowVer: 0, scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {},
     scTr() { throw Error('Engine access forbidden'); },
     Planck: { getProperty() { throw Error('Engine access forbidden'); } }
@@ -1836,3 +1837,52 @@ class JogGridEditGuardTest(unittest.TestCase):
         self.assertIn("(globalConfig.shift && !deckConfig.playing) || deckConfig.gridEditActive", SRC)
         self.assertIn("!deckConfig.gridEditActive &&\\n", SRC)
         self.assertNotIn("BrowseEncoder.qml", SRC)
+
+
+class ShadowMasterBackTest(unittest.TestCase):
+    """Engine Link: the master pauses, its copy on the peer plays on for the trip and is left master (i8b, 42aa60a)."""
+
+    def test_a_copy_that_holds_master_gives_it_to_a_real_deck(self):
+        ShadowDisplayTest.js(self, r"""
+const pressed = [];
+globalThis.scPress = path => pressed.push(path);
+const play = {2: false};
+globalThis.scShadowProperties = d => ({play: {state: !!play[d]}});
+const run = (lead, peerLead, peerPlaying, prev) => {
+    pressed.length = 0; now += 1000;
+    Object.assign(globalThis, {scShadowLead: lead, scShadowPeerLead: peerLead, scShadowPeerPlaying: peerPlaying, scShadowPrev: prev});
+    scShadowMasterBack([1, 3], now);
+    return pressed.join();
+};
+const deck = (ps, loaded, master) => ({ps: ps, loaded: loaded !== false, master: !!master});
+// The peer's copy of deck 1 holds master: deck 1 takes it back, stopped (as on stock) or playing.
+assert.equal(run(0, 1, false, {1: deck(false), 3: deck(false)}), '/Engine/Deck1/RequestMaster');
+assert.equal(run(0, 1, true, {1: deck(true), 3: deck(false)}), '/Engine/Deck1/RequestMaster');
+// Deck 1 stopped: the deck that plays takes it, ours or (its own QML) the peer's.
+assert.equal(run(0, 1, false, {1: deck(false), 3: deck(true)}), '/Engine/Deck3/RequestMaster');
+assert.equal(run(0, 1, true, {1: deck(false), 3: deck(false)}), '');
+// Nothing to take it with, nothing to do, or already done.
+assert.equal(run(0, 1, false, {1: deck(false, false), 3: deck(false)}), '');
+assert.equal(run(0, 0, false, {1: deck(true), 3: deck(false)}), '');
+assert.equal(run(0, 1, false, {1: deck(false, true, true), 3: deck(false)}), '');
+// Our copy (deck 2) holds master: our playing deck takes it once the copy stopped; else the peer does.
+assert.equal(run(2, 0, false, {1: deck(true), 3: deck(false)}), '/Engine/Deck1/RequestMaster');
+assert.equal(run(2, 0, false, {1: deck(false), 3: deck(false)}), '');
+play[2] = true;
+assert.equal(run(2, 0, true, {1: deck(true), 3: deck(false)}), '');
+// One press per 800 ms.
+play[2] = false;
+Object.assign(globalThis, {scShadowLead: 0, scShadowPeerLead: 1, scShadowPeerPlaying: false, scShadowPrev: {1: deck(false), 3: deck(false)}});
+pressed.length = 0; now += 1000;
+scShadowMasterBack([1, 3], now); now += 400; scShadowMasterBack([1, 3], now); now += 400; scShadowMasterBack([1, 3], now);
+assert.equal(pressed.length, 2);
+// The reply names the copy and whether a real deck of the peer plays; a stale one says nothing.
+globalThis.scShadowApplyDisplay = () => {};
+scShadowApplyAll([{deck: 2, shadowMaster: 1, playing: true}, {deck: 4, shadowMaster: 1}], true);
+assert.deepEqual([scShadowPeerLead, scShadowPeerPlaying], [1, true]);
+scShadowApplyAll([{deck: 2, shadowMaster: 1, playing: true, stale: true}], true);
+assert.deepEqual([scShadowPeerLead, scShadowPeerPlaying], [0, false]);
+""")
+        # The copy is told to the peer with every deck, and a change posts at once.
+        self.assertIn("o.shadowMaster = scShadowLead", SRC)
+        self.assertIn("if (lead !== scShadowLead) { scShadowLead = lead; edge = true }", SRC)

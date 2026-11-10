@@ -900,6 +900,24 @@ SERVICES_MAIN = """
 		onTriggered: if (root.scFourDeckRole !== "") root.scShadowPoll()
 	}
 	property bool scShadowCdjMaster: false // a CDJ on a shadow deck holds master
+	// Engine Link hands master to a deck that still plays when the master stops, and
+	// a copy plays on for the update's trip: it is left holding master. A copy is
+	// never master: a real deck is, as on stock (where a stopped master keeps it).
+	property int scShadowLead: 0 // our copy that holds master, told to the peer (shadowMaster)
+	property int scShadowPeerLead: 0 // our deck whose copy on the peer holds master
+	property bool scShadowPeerPlaying: false
+	property real scShadowMasterAt: 0
+	// The real deck that plays takes master, the copy's own first; none plays: the copy's.
+	function scShadowMasterBack(mine, now) {
+		if (now < scShadowMasterAt || (!scShadowLead && mine.indexOf(scShadowPeerLead) < 0)) return
+		let playing = 0
+		for (let n = 0; n < mine.length; n++) if (scShadowPrev[mine[n]].ps) { playing = mine[n]; break }
+		const n = scShadowPeerLead, p = scShadowPrev[n]
+		const want = scShadowLead ? (scShadowProperties(scShadowLead).play.state ? 0 : playing) : p.ps ? n : playing || (scShadowPeerPlaying || !p.loaded ? 0 : n)
+		if (!want || scShadowPrev[want].master) return
+		scPress("/Engine/Deck" + want + "/RequestMaster")
+		scShadowMasterAt = now + 800
+	}
 	// Engine's buttons (RequestMaster, Sync, UnSync) act on false -> true and only
 	// see the value between event-loop turns: release, press, release, 120 ms
 	// apart. /Engine/DeckN/Play is not one of them: it is the play state itself
@@ -1044,6 +1062,10 @@ SERVICES_MAIN = """
 			scShadowPrev[d] = s
 			scShadowSampleSpare[d] = p || {}
 		}
+		let lead = 0
+		for (let d = 1; d <= 4 && root.scPlayer && !scShadowDisplayOnly; d++) if (mine.indexOf(d) < 0 && (scShadowAt[d] || scShadowEmptyObject).link && scShadowProperties(d).master.state) lead = d
+		if (lead !== scShadowLead) { scShadowLead = lead; edge = true }
+		scShadowMasterBack(mine, now)
 		// Every edge (play, CUE, jump, pitch, master, sync, track) posts at once. The
 		// heartbeat only proves liveness (Go marks a peer stale after 2 s) and corrects
 		// the peer's extrapolation, which runs on the exact pitch: 500 ms keeps 1.5 s of
@@ -1116,6 +1138,7 @@ SERVICES_MAIN = """
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
+			o.shadowMaster = scShadowLead
 			// Titles arrive after the load: re-read on a new track and every 2 s.
 			if (fresh) {
 				o.title = s.net ? g.title.string || g.trackName.string || "" : ""
@@ -1207,6 +1230,9 @@ SERVICES_MAIN = """
 	}
 	function scShadowApplyAll(decks, displayOnly) {
 		scShadowDisplayOnly = displayOnly !== false
+		let peerLead = 0, peerPlaying = false
+		for (const e of decks) { if (e.shadowMaster && !e.stale) peerLead = e.shadowMaster; if (e.playing && !e.cue && !e.stale) peerPlaying = true }
+		scShadowPeerLead = peerLead; scShadowPeerPlaying = peerPlaying
 		if (scShadowDisplayOnly) {
 			// No Planck reads/writes or legacy helpers here, even when path is empty.
 			scShadowCdjMaster = false // display flags must never suppress the real network master
