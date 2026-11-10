@@ -155,22 +155,29 @@ func TestNeteaseModeDefaultsToOfficialAndPersists(t *testing.T) {
 	}
 }
 
-func TestPlayheadAndJogModePersist(t *testing.T) {
+func TestPlayheadPersistAndLegacyJogIgnored(t *testing.T) {
 	dir := t.TempDir()
+	// Legacy settings.conf with jog= must load without error and ignore the removed key.
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("lang=zh-Hans\njog=rainbow\nplayhead=0.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	ui := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil)
+	if got := ui.loadUI(); got.Language != "zh-Hans" || got.Playhead != 0.25 {
+		t.Fatalf("legacy settings load: %+v", got)
+	}
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
-	if code, v := uiPost(t, srv.URL, "playhead=0.42&jog=rainbow"); code != 200 || v.Playhead != 0.42 || v.Jog != "rainbow" {
+	if code, v := uiPost(t, srv.URL, "playhead=0.42"); code != 200 || v.Playhead != 0.42 {
 		t.Fatalf("%d %+v", code, v)
 	}
 	again := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil)
-	if got := again.loadUI(); got.Playhead != 0.42 || got.Jog != "rainbow" {
+	if got := again.loadUI(); got.Playhead != 0.42 {
 		t.Fatalf("%+v", got)
 	}
-	if code, v := uiPost(t, srv.URL, "jog=bpm"); code != 200 || v.Jog != "bpm" {
-		t.Fatalf("%d %+v", code, v)
+	if b, _ := os.ReadFile(filepath.Join(dir, "settings.conf")); strings.Contains(string(b), "jog=") {
+		t.Fatalf("saved settings.conf must omit removed jog key: %q", b)
 	}
-	for _, q := range []string{"playhead=2", "playhead=x", "jog=strobe"} {
+	for _, q := range []string{"playhead=2", "playhead=x"} {
 		if code, _ := uiPost(t, srv.URL, q); code != 400 {
 			t.Fatalf("%s: %d", q, code)
 		}
@@ -714,7 +721,7 @@ func TestUIStatusDigestFollowsTheBody(t *testing.T) {
 	if fmt.Sprintf("%x", fnvSum(strings.TrimSuffix(b1, "\n"))) != d1 {
 		t.Fatalf("digest %q is not the body's", d1)
 	}
-	uiPost(t, srv.URL, "jog=rainbow")
+	uiPost(t, srv.URL, "waveform=rgb")
 	if d3, _ := get(); d3 == d1 {
 		t.Fatal("a changed setting kept the digest")
 	}

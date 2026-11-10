@@ -27,7 +27,6 @@ var (
 	uiWaveforms    = []string{"denon", "rgb", "3band"}
 	uiServices     = []string{"tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
 	uiQualities    = []string{qualityFLAC, quality320k}
-	uiJogModes     = []string{"static", "rainbow", "fast", "bpm"}
 	uiNeteaseModes = []string{neteaseOfficial, neteaseDeemix}
 	// TIDAL logs in through Engine's own flow against TIDAL's servers.
 	loginServices = []string{"netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
@@ -54,7 +53,6 @@ const (
 type uiSettings struct {
 	Version     string  `json:"version,omitempty"`
 	Quality     string  `json:"quality"`
-	Jog         string  `json:"jog"`
 	NeteaseMode string  `json:"neteaseMode"`
 	Playhead    float64 `json:"playhead"`
 	// AutoAnalyze retains the user's preference (#55). The UI pack currently
@@ -185,7 +183,7 @@ var uiServicesBeforeKnown = []string{"tidal", "netease", "spotify", "deezer", "s
 func (s *Server) loadUI() uiSettings {
 	known, saved := uiServicesBeforeKnown, false
 	v := uiSettings{
-		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ProlinkWaveform: true,
+		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ProlinkWaveform: true,
 		TracklistWaveform: true, CueCountdown: true,
 		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 	}
@@ -215,10 +213,6 @@ func (s *Server) loadUI() uiSettings {
 		case "quality":
 			if slices.Contains(uiQualities, val) {
 				v.Quality = val
-			}
-		case "jog":
-			if slices.Contains(uiJogModes, val) {
-				v.Jog = val
 			}
 		case "netease_mode":
 			if slices.Contains(uiNeteaseModes, val) {
@@ -364,7 +358,7 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\njog=" + v.Jog + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
+	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
 	if v.FourDeckWaveform {
 		text += "four_deck_waveform=1\n"
 	}
@@ -598,7 +592,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) {
+	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -758,9 +752,6 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("quality") {
 		v.Quality = q.Get("quality")
-	}
-	if q.Has("jog") {
-		v.Jog = q.Get("jog")
 	}
 	if q.Has("fourDeckRole") {
 		v.FourDeckRole = q.Get("fourDeckRole")

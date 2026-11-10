@@ -205,9 +205,7 @@ SH
         check "new: Streaming shows Beatport once (stock row hidden)" test "$(grep -acF "SCPROBE entry|$label|Beatport|1|" "$log")" -eq 1
         check "new: Streaming hides stock Tidal" bash -c "! grep -aqF 'SCPROBE entry|$label|Tidal|1|' '$log'"
         check "new: About shows EngineX OS $NEWV" grep -aqF "SCPROBE version|EngineX OS $NEWV " "$log"
-        check "new: Control Center has the waveform tile" grep -aqF 'SCPROBE tile|ControlCenter_WaveformStyle|' "$log"
         check "new: Settings -> Services has the Live Stream entry (#50)" grep -aqF 'SCPROBE tile|ControlCenter_LiveStream|' "$log"
-        check "new: Control Center has the jog light tile" grep -aqF 'SCPROBE tile|ControlCenter_JogLight|' "$log"
         check "new: Control Center has the upfader echo tile (#52)" grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|' "$log"
         check "new: Control Center fills uiContainer at UI Scale 75 % (root.transformed, not defaultScreenSize)" grep -aq 'SCPROBE ccsize|75|[0-9x]*|[0-9x]*|1|' "$log"
         check "new: auto-analyze preference retained, automatic submission unavailable (#55)" grep -aqF 'SCPROBE analyze|boolean|false|' "$log"

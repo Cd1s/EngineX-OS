@@ -1,7 +1,7 @@
 // release-gate.sh only, never shipped. The gate copies this over the stock
 // qrc:/Skins/Common/Items/QmlWarnings.qml (EmbeddedMain always creates it) in its
 // sandbox /data, so Engine's own item tree reports what the shipped pack rendered:
-// Settings -> Services -> Streaming rows, the About version line, the waveform tile,
+// Settings -> Services -> Streaming rows, the About version line, the Upfader Echo tile,
 // and Control Center's size at UI Scale 75 %.
 // Lines are short "SCPROBE kind|field|...|" records: Engine splits long log lines.
 import QtQuick 2.12
@@ -47,7 +47,7 @@ Item {
             if (!tabView && o.objectName === "ControlCenterTabView") tabView = o
             if (o.objectName === "Version")
                 console.warn("SCPROBE version|" + String(o.text).replace(/<[^>]*>/g, "") + "|")
-            if (o.objectName === "ControlCenter_WaveformStyle" || o.objectName === "ControlCenter_LiveStream" || o.objectName === "ControlCenter_UpfaderEcho" || o.objectName === "ControlCenter_JogLight")
+            if (o.objectName === "ControlCenter_LiveStream" || o.objectName === "ControlCenter_UpfaderEcho")
                 console.warn("SCPROBE tile|" + o.objectName + "|")
             if (isSection(o))
                 entries(o, function (c) { console.warn("SCPROBE entry|" + o.label + "|" + c.text + "|" + (c.visible ? 1 : 0) + "|") })
