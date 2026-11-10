@@ -24,6 +24,16 @@ def fake_elf(machine, tag):
 class DataBundleTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
+        self.host_commands = self.tmp / 'host-commands.log'
+        self.host_commands.touch()
+        shim_bin = self.tmp / 'safe-bin'
+        shim_bin.mkdir()
+        for name in ('systemctl', 'pkill', 'killall', 'reboot', 'mount', 'umount', 'ip'):
+            shim = shim_bin / name
+            shim.write_text('#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$HOST_COMMAND_LOG"\nexit 0\n')
+            shim.chmod(0o755)
+        self.env = {'PATH': f"{shim_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                    'HOST_COMMAND_LOG': str(self.host_commands)}
         self.suite = self.tmp / 'sc5000-suite'
         self.suite_bytes = fake_elf(bdb.EM_ARM, b'suite')
         self.suite.write_bytes(self.suite_bytes)
@@ -33,7 +43,10 @@ class DataBundleTest(unittest.TestCase):
         self.ui = self.ui_tar({'packs/a/Main.qml': b'Item {}', 'icons/x.svg': b'<svg/>'})
 
     def tearDown(self):
-        subprocess.run(['rm', '-rf', str(self.tmp)], check=True)
+        try:
+            self.assertEqual(self.host_commands.read_text(), '', 'test called a host command')
+        finally:
+            shutil.rmtree(self.tmp)
 
     def ui_tar(self, files, name='packs.tar.gz'):
         path = self.tmp / name
@@ -74,6 +87,8 @@ class DataBundleTest(unittest.TestCase):
 
         self.assertTrue((src / 'boot-activate.sh').exists())
         self.assertTrue((src / 'boot-activate.sh').stat().st_mode & 0o100)
+        self.assertIn('Environment="QT_LOGGING_CONF=/data/logging.ini"',
+                      (src / 'boot-activate.sh').read_text())
         self.assertIn('EnvironmentFile=-/data/sc5000-custom/ui-scale.env',
                       (src / 'boot-activate.sh').read_text())
         self.assertIn('enginex-stream-sync.service',
@@ -121,7 +136,7 @@ class DataBundleTest(unittest.TestCase):
             self.assertIn(prefix, bdb.MODEL_NAMES)
         dest = self.tmp / 'data/enginex'
         alsa = self.tmp / 'data/system/var/overlay/lib/alsa/conf.d'
-        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa)}
+        env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(alsa)}
         # install.sh <img>, run from a copy of the bundle's own install.sh
         src = self.extract(r)
         run = lambda p: subprocess.run(['sh', str(src / 'install.sh'), str(p)], env=env, capture_output=True, text=True)
@@ -226,11 +241,20 @@ class DataBundleTest(unittest.TestCase):
                 self.build(**kw)
 
     def sh(self, script, dest, alsa_dest=None, check=True):
-        env = {'PATH': os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin:/sbin'), 'SC5000_CUSTOM': str(dest)}
+        env = {**self.env, 'SC5000_CUSTOM': str(dest)}
         if alsa_dest:
             env['SC5000_ALSA_OVERLAY'] = str(alsa_dest)
         return subprocess.run(['sh', str(script)], env=env,
                               capture_output=True, text=True, check=check)
+
+    def test_install_uninstall_does_not_call_host_commands(self):
+        src = self.extract(self.build())
+        dest = self.tmp / 'custom'
+        alsa = self.tmp / 'alsa'
+        self.sh(src / 'install.sh', dest, alsa_dest=alsa)
+        self.sh(dest / 'bundle/uninstall.sh', dest, alsa_dest=alsa)
+        self.assertFalse((dest / 'bundle').exists())
+        self.assertEqual(self.host_commands.read_text(), '')
 
     def test_install_then_uninstall_keeps_user_data(self):
         src = self.extract(self.build())
@@ -262,9 +286,10 @@ class DataBundleTest(unittest.TestCase):
     def test_uninstall_keeps_packs_installed_by_someone_else(self):
         src = self.extract(self.build())
         dest = self.tmp / 'custom'
-        self.sh(src / 'install.sh', dest)
+        alsa = self.tmp / 'alsa'
+        self.sh(src / 'install.sh', dest, alsa_dest=alsa)
         (dest / 'ui/.pack-id').write_text('image\n')  # the image's prepare unit took over
-        self.sh(dest / 'bundle/uninstall.sh', dest)
+        self.sh(dest / 'bundle/uninstall.sh', dest, alsa_dest=alsa)
         self.assertTrue((dest / 'ui/packs/a/Main.qml').exists())
         self.assertFalse((dest / 'bundle').exists())
 
@@ -272,7 +297,7 @@ class DataBundleTest(unittest.TestCase):
         src = self.extract(self.build())
         (src / 'bin/sc5000-suite').write_bytes(b'\x7fELF tampered')
         dest = self.tmp / 'custom'
-        r = self.sh(src / 'install.sh', dest, check=False)
+        r = self.sh(src / 'install.sh', dest, alsa_dest=self.tmp / 'alsa', check=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('SHA256SUMS mismatch', r.stderr)
         self.assertFalse(dest.exists())
@@ -372,7 +397,7 @@ class DataBundleTest(unittest.TestCase):
         sums.write_text(''.join(
             (hashlib.sha256(script.read_bytes()).hexdigest() + '  install.sh\n') if l.endswith(' install.sh') or l.endswith('  install.sh') else l + '\n'
             for l in sums.read_text().splitlines()))
-        env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin')}
+        env = self.env
         r = subprocess.run(['sh', str(script)], env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         return data

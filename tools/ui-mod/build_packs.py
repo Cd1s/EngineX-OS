@@ -530,7 +530,7 @@ SERVICES_MAIN = """
 		if (!p) {
 			p = []
 			for (let d = 1; d <= 4; d++) p.push({play: scTr("/Engine/Deck" + d + "/PlayState"), cmd: scTr("/Engine/Deck" + d + "/Play"), length: scTr("/Engine/Deck" + d + "/Track/TrackLength")})
-			if (!p.every(x => x.play && x.cmd && x.length)) return false // never collect blind: Engine is still building its decks
+			if (!p[0].play || !p[0].cmd || !p[0].length) return false // wait for deck 1 to build
 			scGcProps = p
 		}
 		let playing = false, sig = 0
@@ -538,7 +538,7 @@ SERVICES_MAIN = """
 			// Playing also means a held CUE preview: PlayState stays false while it
 			// sounds and scrolls (scShadowTick's sample, own decks), or the Play command.
 			const x = p[d - 1], s = scShadowDisplay[d], own = scShadowPrev[d]
-			if (x.play.state || x.cmd.state || (own && own.playing) || (s && s.playing && !s.stale)) playing = true
+			if ((x.play && x.play.state) || (x.cmd && x.cmd.state) || (own && own.playing) || (s && s.playing && !s.stale)) playing = true
 			sig = sig * 31 + (x.length ? x.length.unnormalized || 0 : 0)
 		}
 		if (sig !== g.loadSig || scGcLoadSeq !== g.loadSeq) { g.loadSig = sig; g.loadSeq = scGcLoadSeq; g.loadAt = now }
@@ -566,7 +566,7 @@ SERVICES_MAIN = """
 		if (s.key !== key || s.name !== (e.name || "") || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.keyName !== (e.keyName || "") ||
 			s.playing !== !!e.playing || s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
-			s.lead !== (e.lead !== undefined ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
+			s.lead !== (e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
 			s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
 			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail || s.progress !== (Number(e.progress) || 0) || s.error !== (e.error || "") ||
 			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "")) return false
@@ -606,7 +606,7 @@ SERVICES_MAIN = """
 				playing: !!e.playing, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
 				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master,
-				lead: e.lead !== undefined ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
+				lead: e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				jumps: Number(e.jumps) || 0,
 				progress: Number(e.progress) || 0, error: e.error || "", engine: !!e.engine, copying: !!e.copying, durationMs: Number(e.durationMs) || 0,
@@ -2013,7 +2013,7 @@ SERVICES_MAIN = """
 		return p && p.translator ? p.translator.color : "transparent"
 	}
 	readonly property bool scPlayerColorsSynced: {
-		if (!Config.device.isPlayer && root.scIsPlayerBoard) {
+		if (!Config.device.isPlayer && root.scIsPlayerBoard && root.scFourDeckRole !== "") {
 			const pp = Planck.getProperty("/Client/Preferences/Player")
 			const pn = (pp && pp.translator && parseInt(pp.translator.string)) || 1
 			const role = root.scFourDeckRole || (pn === 2 ? "24" : "13")
@@ -2082,6 +2082,174 @@ SERVICES_MAIN = """
 		if (path !== "" && path !== "image://streaming/") return false
 		const loaded = root.scTr("/Engine/Deck" + deck + "/Track/SongLoaded")
 		return !!loaded && loaded.state && String(url).indexOf("http://127.0.0.1:8080/v1/sc5000/art?") !== 0
+	}
+	property int scMidiTargetDeck: 3
+	property int scMidiLastAckSeq: 0
+	property real scMidiLastApplyMs: 0
+	property real scMidiSendAt: 0
+	property bool scMidiActive: false
+	property int scMidiFailCount: 0
+	property var scMidiXhr: null
+	function scMidiInitBridge() {
+		if (!Math.scMidiBridge || !Math.scMidiBridge.installed) {
+			Math.scMidiBridge = {
+				installed: true,
+				enabled: false,
+				connected: false,
+				helperOnline: false,
+				lastError: "",
+				wake: function() {
+					root.scMidiFailCount = 0
+					Math.scMidiBridge.enabled = true
+					scMidiPollTimer.interval = 16
+					scMidiPollTimer.restart()
+				},
+				stop: function() {
+					root.scMidiActive = false
+					Math.scMidiBridge.enabled = false
+					scMidiPollTimer.stop()
+				}
+			}
+		}
+		const probe = new XMLHttpRequest()
+		probe.onreadystatechange = function() {
+			if (probe.readyState !== 4) return
+			if (probe.status === 200) {
+				try {
+					const st = JSON.parse(probe.responseText)
+					Math.scMidiBridge.helperOnline = true
+					Math.scMidiBridge.connected = !!st.connected
+					Math.scMidiBridge.enabled = !!st.enabled
+					Math.scMidiBridge.lastError = st.error ? String(st.error) : ""
+					if (st.targetDeck) root.scMidiTargetDeck = st.targetDeck
+					if (st.enabled) Math.scMidiBridge.wake()
+					return
+				} catch (e) {}
+			}
+			Math.scMidiBridge.helperOnline = false
+		}
+		probe.open("GET", "http://127.0.0.1:17838/status")
+		probe.send("")
+	}
+	function scMidiReadDeck(d) {
+		const b = "/Engine/Deck" + d + "/"
+		const tLoaded = root.scTr(b + "Track/SongLoaded"), tPlay = root.scTr(b + "PlayState")
+		const tPos = root.scTr(b + "Track/TrackPosition"), tLen = root.scTr(b + "Track/TrackLength"), tSr = root.scTr(b + "Track/SampleRate")
+		const tSpd = root.scTr(b + "Speed"), tRng = root.scTr(b + "SpeedRange"), tKey = root.scTr(b + "Track/KeyLock")
+		const tSync = root.scTr(b + "Sync"), tLoop = root.scTr(b + "Track/LoopEnableState"), tBrw = root.scTr("/GUI/ShowBrowseView")
+		const lenS = tLen ? (tLen.unnormalized || 0) : 0, posS = tPos ? (tPos.unnormalized || 0) : 0, sr = (tSr && tSr.value > 0) ? tSr.value : 44100
+		return {
+			songLoaded: !!(tLoaded && tLoaded.state), playing: !!(tPlay && tPlay.state),
+			posNorm: lenS > 0 ? (posS / lenS) : 0.0, durationSec: lenS > 0 ? (lenS / sr) : 0.0,
+			speed: tSpd ? tSpd.value : 0.5, speedRangeIndex: tRng ? tRng.index : 0,
+			speedRangeCount: (tRng && tRng.entries) ? tRng.entries.length : 4,
+			keylock: !!(tKey && tKey.state), sync: !!(tSync && tSync.state),
+			loopEnabled: !!(tLoop && tLoop.state), browseOpen: !!(tBrw && tBrw.state)
+		}
+	}
+	function scMidiApplyOps(r) {
+		if (!r || !r.seq) return
+		const d = r.targetDeck || 3, b = "/Engine/Deck" + d + "/", v = r.values || ({})
+		if (v.vinylMode !== undefined) { const t = root.scTr(b + "ExternalScratchWheelScratchEnable"); if (t) t.state = !!v.vinylMode }
+		if (v.jogTouch !== undefined) { const t = root.scTr(b + "ExternalScratchWheelTouch"); if (t) t.value = v.jogTouch ? 1.0 : 0.0 }
+		if (v.jogMoveTicks !== undefined && v.jogMoveTicks !== 0) {
+			const t = root.scTr(b + "ExternalScratchWheelMove")
+			if (t) {
+				if (v.jogMoveTicks > 0) t.incValue(v.jogMoveTicks, 0.0, 0.0, false, true, 0.0)
+				else t.decValue(-v.jogMoveTicks, 0.0, 0.0, false, true, 0.0)
+			} else if (v.setPosNorm !== undefined) { const tp = root.scTr(b + "Track/SetSongPosition"); if (tp) tp.value = v.setPosNorm }
+		} else if (v.setPosNorm !== undefined) { const t = root.scTr(b + "Track/SetSongPosition"); if (t) t.value = v.setPosNorm }
+		if (v.nudgeFwd !== undefined) { const t = root.scTr(b + "Track/NudgeForward"); if (t) t.value = v.nudgeFwd }
+		if (v.nudgeBwd !== undefined) { const t = root.scTr(b + "Track/NudgeBackward"); if (t) t.value = v.nudgeBwd }
+		if (v.speed !== undefined) { const t = root.scTr(b + "Speed"); if (t) t.setValue(v.speed, 1, 0) }
+		if (v.speedOffsetUp !== undefined) { const t = root.scTr(b + "SpeedOffsetUp"); if (t) t.state = !!v.speedOffsetUp }
+		if (v.speedOffsetDown !== undefined) { const t = root.scTr(b + "SpeedOffsetDown"); if (t) t.state = !!v.speedOffsetDown }
+		if (v.speedNeutral !== undefined) { const t = root.scTr(b + "SpeedNeutral"); if (t) t.state = !!v.speedNeutral }
+		if (v.play !== undefined) { const t = root.scTr(b + "Play"); if (t) t.state = !!v.play }
+		if (v.cueHold !== undefined) { const t = root.scTr(b + "Track/CueAction"); if (t) t.value = v.cueHold ? 1.0 : 0.0 }
+		const acts = r.actions || []
+		for (let i = 0; i < acts.length; i++) {
+			const a = acts[i].action
+			if (a === "toggle_play") { const tp = root.scTr(b + "Play"), tps = root.scTr(b + "PlayState"); if (tp) tp.state = !(tps ? tps.state : tp.state) }
+			else if (a === "track_next") { const t = root.scTr(b + "Track/NextTrack"); if (t) t.state = true }
+			else if (a === "track_prev") { const t = root.scTr(b + "Track/PreviousTrack"); if (t) t.state = true }
+			else if (a === "seek_forward") { const t = root.scTr(b + "Track/SeekForward"); if (t) t.state = true }
+			else if (a === "seek_backward") { const t = root.scTr(b + "Track/SeekBackward"); if (t) t.state = true }
+			else if (a === "loop_in") { const t = root.scTr(b + "Track/LoopIn"); if (t) t.state = true }
+			else if (a === "loop_out") { const t = root.scTr(b + "Track/LoopOut"); if (t) t.state = true }
+			else if (a === "reloop_exit") { const t = root.scTr(b + "Track/Reloop"); if (t) t.state = true }
+			else if (a === "loop_halve") { const t = root.scTr(b + "Track/LoopHalveDouble"); if (t) t.decValue(0.1, 0.0, 1.0, false, false) }
+			else if (a === "loop_double") { const t = root.scTr(b + "Track/LoopHalveDouble"); if (t) t.incValue(0.1, 0.0, 1.0, false, false) }
+			else if (a === "cycle_tempo_range") { const t = root.scTr(b + "SpeedRange"); if (t) { const c = t.entries ? t.entries.length : 4; t.index = (t.index + 1) % c } }
+			else if (a === "toggle_keylock") { const t = root.scTr(b + "Track/KeyLock"); if (t) t.state = !t.state }
+			else if (a === "toggle_sync") { const ts = root.scTr(b + "Sync"), tu = root.scTr(b + "UnSync"); if (ts && !ts.state) ts.state = true; else if (tu) tu.state = true }
+			else if (a === "load_selected_track") { const t = root.scTr("/Client/Librarian/LoadToDeck" + d); if (t) t.state = true }
+			else if (a === "toggle_browse_view") { const t = root.scTr("/GUI/ShowBrowseView"); if (t) t.state = !t.state }
+			else if (a === "browse_scroll") {
+				const st = acts[i].steps || 0, t = root.scTr(st > 0 ? "/Qml/ControlFocus/Increment" : "/Qml/ControlFocus/Decrement")
+				for (let s = 0; s < Math.min(8, Math.abs(st)); s++) if (t) t.state = true
+			}
+		}
+		scMidiLastAckSeq = r.seq
+	}
+	Timer {
+		id: scMidiPollTimer
+		interval: 16; running: false; repeat: true
+		onTriggered: {
+			if (!root.scUiLoaded) return
+			let x = root.scMidiXhr
+			if (!x) {
+				x = new XMLHttpRequest()
+				root.scMidiXhr = x
+				x.onreadystatechange = function() {
+					if (x.readyState !== 4) return
+					if (x.status === 200) {
+						try {
+							const r = JSON.parse(x.responseText)
+							root.scMidiFailCount = 0
+							root.scMidiActive = !!r.enabled
+							if (Math.scMidiBridge) {
+								Math.scMidiBridge.helperOnline = true
+								Math.scMidiBridge.enabled = !!r.enabled
+							}
+							if (r.targetDeck) root.scMidiTargetDeck = r.targetDeck
+							if (r.seq) {
+								root.scMidiApplyOps(r)
+								root.scMidiLastApplyMs = Math.max(0.5, (Date.now() - root.scMidiSendAt) * 0.5)
+							}
+							if (!r.enabled) {
+								scMidiPollTimer.stop()
+							} else {
+								scMidiPollTimer.interval = 16
+							}
+							return
+						} catch (e) {}
+					}
+					root.scMidiActive = false
+					root.scMidiFailCount = (root.scMidiFailCount || 0) + 1
+					if (Math.scMidiBridge) {
+						Math.scMidiBridge.helperOnline = false
+						Math.scMidiBridge.lastError = "MIDI Mapper helper unreachable"
+					}
+					if (root.scMidiFailCount >= 3) {
+						scMidiPollTimer.stop()
+					} else {
+						scMidiPollTimer.interval = 2000
+					}
+				}
+			}
+			if (x.readyState > 0 && x.readyState < 4) return
+			const body = { action: "poll", deckState: root.scMidiReadDeck(root.scMidiTargetDeck || 3) }
+			if (root.scMidiLastAckSeq > 0) {
+				body.ackSeq = root.scMidiLastAckSeq
+				body.ackApplyMs = root.scMidiLastApplyMs
+				root.scMidiLastAckSeq = 0
+			}
+			root.scMidiSendAt = Date.now()
+			x.open("POST", "http://127.0.0.1:17838/action")
+			x.setRequestHeader("Content-Type", "application/json")
+			x.send(JSON.stringify(body))
+		}
 	}
 	function scPlainTitle(song) { return (song || "").replace(/\\s\\[\\d+ BPM(?: [0-9]{1,2}[AB])?\\]$/, "") }
 	// Engine's messages name its one streaming client; say which service is showing.
@@ -2202,7 +2370,9 @@ SERVICES_MAIN = """
 			const lbj = root.scTr("/Client/Preferences/Profile/Application/LinkBeatJumpLoopSize")
 			if (lbj && !lbj.state) lbj.state = true
 		}
+		const wasUiLoaded = scUiLoaded
 		scUiLoaded = true
+		if (!wasUiLoaded) scMidiInitBridge()
 		scProbeCueClocks()
 	}
 	function scSameItems(a, b) {
@@ -3706,6 +3876,7 @@ SHADOW_LAYER = r"""
             } }
         }
         Loader {
+            id: scHeaderLoader
             active: scDisplay.live && !scDisplay.graphical
             anchors.fill: parent
             sourceComponent: Component { Item {
@@ -3718,7 +3889,16 @@ SHADOW_LAYER = r"""
                 readonly property bool hasBottomRow: !scDisplay.performance && !groupedMain && !splitMain
                 readonly property bool loaded: !!scDisplay.sample
                 readonly property bool isSync: !!(scDisplay.sample && scDisplay.sample.sync)
-                readonly property bool isLead: !!(scDisplay.sample && (scDisplay.sample.lead !== undefined ? scDisplay.sample.lead : scDisplay.sample.master))
+                readonly property bool isLead: !!(scDisplay.sample && (scDisplay.sample.lead !== undefined && scDisplay.sample.lead !== null ? scDisplay.sample.lead : scDisplay.sample.master))
+                function tryFlipTime(x, y) {
+                    if (!loaded || scDisplay.performance || !timeView || !scTimeSlot.visible || !(scTimeSlot.width > 0)) return false
+                    const p = scDisplay.mapToItem(scTimeSlot, x, y)
+                    if (p.x >= 0 && p.x <= scTimeSlot.width && p.y >= -12 && p.y <= scTimeSlot.height + 12) {
+                        timeView.flip()
+                        return true
+                    }
+                    return false
+                }
                 readonly property bool keyLock: !!(scDisplay.sample && scDisplay.sample.keylock)
                 readonly property real pitchVal: scDisplay.sample ? Math.round((Number(scDisplay.sample.pitch) || 0) * 100) / 100 : 0
                 readonly property string rangeStr: scDisplay.sample && scDisplay.sample.range > 0 ? String(scDisplay.sample.range) : "8"
@@ -3814,7 +3994,7 @@ SHADOW_LAYER = r"""
                                     elide: Text.ElideRight
                                     font: scHeader.splitMain ? Style.fontDisplay : scHeader.groupedMain ? Style.fontH1 : Style.fontH0
                                     color: Style.font02Color
-                                    text: scHeader.loaded ? (scTitleDisplay.display || scHeader.rawTitle) : scHeader.deckLabel
+                                    text: scHeader.loaded ? (scTitleDisplay.hideTitleArtist ? "" : (scTitleDisplay.display || scHeader.rawTitle)) : scHeader.deckLabel
                                     textFormat: Text.PlainText
                                     verticalAlignment: Text.AlignVCenter
                                 }
@@ -3822,11 +4002,11 @@ SHADOW_LAYER = r"""
                                     objectName: "Deck_Artist"
                                     Layout.fillWidth: true
                                     Layout.alignment: Qt.AlignVCenter
-                                    visible: !scHeader.loaded || (!scHeader.hasBottomRow && !scTitleDisplay.hideTitleArtist && scHeader.artistName.length > 0)
+                                    visible: !scHeader.loaded || (!scHeader.hasBottomRow && !scTitleDisplay.hideTitleArtist && !scTitleDisplay.shouldShowFilename && scHeader.artistName.length > 0)
                                     elide: Text.ElideRight
                                     font: scHeader.splitMain ? Style.fontH1 : Style.fontH3
                                     color: Style.font01Color
-                                    text: scHeader.loaded ? (scTitleDisplay.hideTitleArtist ? "" : scHeader.artistName) : "No Track Loaded"
+                                    text: scHeader.loaded ? (scTitleDisplay.hideTitleArtist || scTitleDisplay.shouldShowFilename ? "" : scHeader.artistName) : "No Track Loaded"
                                     textFormat: Text.PlainText
                                     verticalAlignment: Text.AlignVCenter
                                 }
@@ -3838,6 +4018,8 @@ SHADOW_LAYER = r"""
                                 Layout.bottomMargin: 3
                                 Layout.topMargin: 3
                                 Item {
+                                    id: scTimeSlot
+                                    objectName: "Deck_TimeInfo"
                                     Layout.fillHeight: true
                                     Layout.rightMargin: scHeader.splitMain ? 40 : 16
                                     implicitWidth: scTimeText.implicitWidth
@@ -3851,12 +4033,6 @@ SHADOW_LAYER = r"""
                                         font: scHeader.splitMain ? Style.fontDisplay : scHeader.splitMini ? Style.fontTitle : Style.fontH0
                                         color: scHeader.timeText !== "" ? Style.font02Color : Style.font01Color
                                         text: scHeader.timeText
-                                    }
-                                    MouseArea {
-                                        anchors.centerIn: parent
-                                        width: parent.width
-                                        height: parent.height + 24
-                                        onPressed: if (scHeader.timeView) scHeader.timeView.flip()
                                     }
                                 }
                                 Rectangle { width: 1; height: scHeader.splitMain || scHeader.splitMini ? 56 : scHeader.groupedMain ? 32 : 20; Layout.alignment: Qt.AlignVCenter; color: Style.surface03Color }
@@ -4083,8 +4259,9 @@ SHADOW_LAYER = r"""
                 }
             } }
         }
-@BUSY@        // Covers remote Stems, needle-drop, grid editing and transport touch targets.
-        MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; onWheel: function(wheel) { wheel.accepted = true } }
+@BUSY@        // Covers remote Stems, needle-drop, grid editing and transport touch targets;
+        // only presses inside the shadow header's time display flip Elapsed/Remaining.
+        MouseArea { objectName: "EngineX_ShadowBlocker"; anchors.fill: parent; acceptedButtons: Qt.AllButtons; preventStealing: true; function handlePress(x, y) { return !scDisplay.graphical && typeof scHeaderLoader !== "undefined" && scHeaderLoader.item ? scHeaderLoader.item.tryFlipTime(x, y) : false } onPressed: function(mouse) { handlePress(mouse.x, mouse.y) }; onWheel: function(wheel) { wheel.accepted = true } }
     }
 """
 
@@ -4191,7 +4368,7 @@ def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
     icons = "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons"
     raw_layer = SHADOW_LAYER
     if kind in ("waveform", "overview"):
-        h_start = raw_layer.index("        Loader {\n            active: scDisplay.live && !scDisplay.graphical\n")
+        h_start = raw_layer.index("        Loader {\n            id: scHeaderLoader\n            active: scDisplay.live && !scDisplay.graphical\n")
         h_end = raw_layer.index("@BUSY@")
         raw_layer = raw_layer[:h_start] + raw_layer[h_end:]
     layer = raw_layer.replace("@BUSY@", busy).replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette)).replace("@ICONS@", icons)
@@ -5357,6 +5534,7 @@ def edits(dev: bool):
         scaled[v + "MainView/DeckInfo/DeckColor/DeckColor.qml"] = [(
             '    readonly property color playerColor: deckView ? deckView.deckData.deckColor : "transparent"\n',
             '    readonly property color scOwnColor: deckView ? deckView.deckData.deckColor : "transparent"\n'
+            '    readonly property bool scPlayerFourDeck: typeof root !== "undefined" && !!root && !!root.scFourDeckRole && (!!root.scIsPlayerBoard || ["JP07", "JP08", "JP13", "JP14"].indexOf(Config.device.name) >= 0)\n'
             '    function scPref(n) { const p = Planck.getProperty("/Client/Preferences/Profile/Application/PlayerColor" + n); return p && p.translator ? p.translator.color : "transparent" }\n'
             '    function scLayerPref(n) {\n'
             '        const pp = Planck.getProperty("/Client/Preferences/Player")\n'
@@ -5370,7 +5548,7 @@ def edits(dev: bool):
             '    }\n'
             '    function scBlank(c) { return c.a === 0 || (c.r === c.g && c.g === c.b && (c.r === 0 || c.r === 1)) }\n'
             '    readonly property color playerColor: !deckView || !scBlank(scOwnColor) ? scOwnColor\n'
-            '        : !scBlank(scLayerPref(deckIndex)) ? scLayerPref(deckIndex)\n'
+            '        : scPlayerFourDeck && !scBlank(scLayerPref(deckIndex)) ? scLayerPref(deckIndex)\n'
             '        : !scBlank(scPref(deckIndex)) ? scPref(deckIndex)\n'
             '        : deckIndex > 2 && !scBlank(scPref(deckIndex - 2)) ? scPref(deckIndex - 2) : scOwnColor\n')]
         # #49: 4-deck mode clears Config.device.isPlayer in C++ so Engine builds the 4-deck
@@ -5418,7 +5596,15 @@ def edits(dev: bool):
         )]
         scaled[prefs + "Entries/private/DualLayerColorSelect.qml"] = [(
             '        visible: Planck.getProperty("/GUI/Decks/Deck/Layer").translator.numEntries === 2\n',
-            '        visible: (Planck.getProperty("/GUI/Decks/Deck/Layer").translator || Planck.getProperty("/GUI/Decks/DeckLeft/Layer").translator).numEntries === 2\n',
+            '        readonly property var scLayerTr: {\n'
+            '            const p = Planck.getProperty("/GUI/Decks/Deck/Layer")\n'
+            '            if (p && p.translator) return p.translator\n'
+            '            const role = typeof root !== "undefined" && root && root.scFourDeckRole ? root.scFourDeckRole : ""\n'
+            '            if (!role) return null\n'
+            '            const fb = Planck.getProperty(role === "24" || role === "2" ? "/GUI/Decks/DeckRight/Layer" : "/GUI/Decks/DeckLeft/Layer")\n'
+            '            return fb && fb.translator ? fb.translator : null\n'
+            '        }\n'
+            '        visible: !!scLayerTr && scLayerTr.numEntries === 2\n',
         )]
         scaled[ROOT + "StateNodes/States/PerformanceViewState.qml"] = [
             (
@@ -5483,9 +5669,16 @@ def edits(dev: bool):
                 '                        Planck.getProperty("/GUI/Decks/Deck/Layer").translator.numEntries - 1 >= index\n'
                 '                            ? Planck.getProperty("/GUI/Decks/Deck/Layer").translator.entries[deckLayerIndex]\n'
                 '                            : "-"\n',
-                '                        readonly property var scLayerTr: Planck.getProperty("/GUI/Decks/Deck/Layer").translator || Planck.getProperty("/GUI/Decks/DeckLeft/Layer").translator\n'
+                '                        readonly property var scLayerTr: {\n'
+                '                            const p = Planck.getProperty("/GUI/Decks/Deck/Layer")\n'
+                '                            if (p && p.translator) return p.translator\n'
+                '                            const role = typeof root !== "undefined" && root && root.scFourDeckRole ? root.scFourDeckRole : ""\n'
+                '                            if (!role) return null\n'
+                '                            const fb = Planck.getProperty(role === "24" || role === "2" ? "/GUI/Decks/DeckRight/Layer" : "/GUI/Decks/DeckLeft/Layer")\n'
+                '                            return fb && fb.translator ? fb.translator : null\n'
+                '                        }\n'
                 "                        deckLayer: enabled && scLayerTr && scLayerTr.numEntries - 1 >= index\n"
-                '                            ? (deckLayerIndex === 0 ? "A" : "B")\n'
+                '                            ? (typeof root !== "undefined" && root && root.scFourDeckRole ? (deckLayerIndex === 0 ? "A" : "B") : scLayerTr.entries[deckLayerIndex])\n'
                 '                            : "-"\n',
             ),
             (

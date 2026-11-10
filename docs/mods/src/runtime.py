@@ -27,7 +27,8 @@ def media_file(value):
 
 MOD = sys.argv[1] if len(sys.argv) > 1 else ""
 PORTS = {"dmx-studio": 17834, "jog-logo-studio": 17835,
-         "sampler-pad-studio": 17836, "minimal-club-mode": 17837}
+         "sampler-pad-studio": 17836, "minimal-club-mode": 17837,
+         "midi-controller-mapper": 17838}
 if MOD not in PORTS:
     raise SystemExit("unknown Mod")
 STATE = Path(os.environ.get("ENGINEX_MOD_STATE", "/data/enginex/mods-state")).resolve() / MOD
@@ -38,6 +39,9 @@ from feature import Feature  # noqa: E402
 
 
 class Handler(BaseHTTPRequestHandler):
+    disable_nagle_algorithm = True
+    wbufsize = -1
+
     def log_message(self, *args):
         pass  # Paths and device names may contain private information.
 

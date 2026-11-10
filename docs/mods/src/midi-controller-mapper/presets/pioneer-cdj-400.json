@@ -1,0 +1,157 @@
+{
+  "id": "pioneer-cdj-400",
+  "name": "Pioneer CDJ-400",
+  "vendor": "Pioneer DJ",
+  "model": "CDJ-400",
+  "version": "1.0.0",
+  "description": "Pioneer CDJ-400 standard USB MIDI mode (PC MODE) preset for EngineX OS 4-deck internal Deck 3/4 control (verified against Pioneer CDJ-400 manual DRB1452 p.20).",
+  "match": {
+    "alsaClientPatterns": [
+      "CDJ-400",
+      "Pioneer CDJ-400"
+    ],
+    "usbIds": [
+      "08e4:0143"
+    ]
+  },
+  "midiChannel": "any",
+  "rateLimitHz": 60,
+  "stormLimitPerSec": 2400,
+  "malformedLimit": 16,
+  "jog": {
+    "modeDefault": "vinyl",
+    "touchNote": 32,
+    "scratchCc": 16,
+    "pitchBendCc": 48,
+    "encoding": "cdj_continuous_velocity",
+    "centerValue": 64,
+    "maxOffset": 63,
+    "scratchSensitivitySecPerSec": 1.8,
+    "pitchBendMaxAmount": 0.65
+  },
+  "tempoSlider": {
+    "cc": 29,
+    "msbCc": 29,
+    "lsbCc": null,
+    "invert": false,
+    "softTakeover": true,
+    "pickupThreshold": 0.025,
+    "neutralDeadband": 0.004
+  },
+  "controls": {
+    "playPause": {
+      "type": "note",
+      "number": 0,
+      "action": "toggle_play",
+      "label": "Play / Pause (Note 0 / 0x00)"
+    },
+    "cue": {
+      "type": "note",
+      "number": 1,
+      "action": "hold_cue",
+      "label": "Cue (Note 1 / 0x01)"
+    },
+    "searchFwd": {
+      "type": "note",
+      "number": 2,
+      "action": "seek_forward",
+      "label": "Search >> (Note 2 / 0x02)"
+    },
+    "searchRev": {
+      "type": "note",
+      "number": 3,
+      "action": "seek_backward",
+      "label": "Search << (Note 3 / 0x03)"
+    },
+    "trackSearchNext": {
+      "type": "note",
+      "number": 4,
+      "action": "track_next",
+      "label": "Track Search >>| (Note 4 / 0x04)"
+    },
+    "trackSearchPrev": {
+      "type": "note",
+      "number": 5,
+      "action": "track_prev",
+      "label": "Track Search |<< (Note 5 / 0x05)"
+    },
+    "loopIn": {
+      "type": "note",
+      "number": 6,
+      "action": "loop_in",
+      "label": "Loop In / Realtime Cue (Note 6 / 0x06)"
+    },
+    "loopOut": {
+      "type": "note",
+      "number": 7,
+      "action": "loop_out",
+      "label": "Loop Out / Out Adjust (Note 7 / 0x07)"
+    },
+    "reloopExit": {
+      "type": "note",
+      "number": 8,
+      "action": "reloop_exit",
+      "label": "Reloop / Exit (Note 8 / 0x08)"
+    },
+    "tempoRange": {
+      "type": "note",
+      "number": 16,
+      "action": "cycle_tempo_range",
+      "label": "Tempo Range ±6/10/16/100% (Note 16 / 0x10)"
+    },
+    "masterTempo": {
+      "type": "note",
+      "number": 17,
+      "action": "toggle_keylock",
+      "label": "Master Tempo / Key Lock (Note 17 / 0x11)"
+    },
+    "jogMode": {
+      "type": "note",
+      "number": 18,
+      "action": "toggle_vinyl_mode",
+      "label": "Jog Mode Vinyl/CDJ (Note 18 / 0x12)"
+    },
+    "loopDivide": {
+      "type": "note",
+      "number": 22,
+      "action": "loop_halve",
+      "label": "Beat Loop Divide 1/2X (Note 22 / 0x16)"
+    },
+    "loopDouble": {
+      "type": "note",
+      "number": 23,
+      "action": "loop_double",
+      "label": "Beat Loop Double 2X (Note 23 / 0x17)"
+    },
+    "sync": {
+      "type": "note",
+      "number": 34,
+      "action": "toggle_sync",
+      "label": "Hold / Beat Sync (Note 34 / 0x22)"
+    },
+    "backButton": {
+      "type": "note",
+      "number": 50,
+      "action": "toggle_browse_view",
+      "label": "Back / Toggle Browse View (Note 50 / 0x32)"
+    },
+    "browsePush": {
+      "type": "note",
+      "number": 51,
+      "action": "load_selected_track",
+      "label": "Encoder Push / Load Track (Note 51 / 0x33)"
+    },
+    "browseEncoder": {
+      "type": "cc",
+      "number": 79,
+      "encoding": "relative_center_64",
+      "action": "browse_scroll",
+      "label": "Rotary Selector Browse (CC 79 / 0x4F)"
+    }
+  },
+  "ledFeedback": {
+    "supported": false,
+    "note": "Pioneer CDJ-400 in standard USB MIDI mode (PC MODE) is transmit-only for button/LED states and does not illuminate hardware LEDs in response to incoming external MIDI Note/CC messages. Deck playback status, vinyl mode, and soft-takeover ▲▼ indicators are rendered directly on the SC5000 display.",
+    "mappings": []
+  }
+}
