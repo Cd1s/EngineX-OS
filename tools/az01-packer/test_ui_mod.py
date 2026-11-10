@@ -247,7 +247,7 @@ Object.assign(globalThis, {
     scFourDeckRole: '13', scPlayer: true, scShadowDisplayOnly: true,
     scShadowExpiryMs: 3000, scShadowAt: {}, scShadowDisplay: {}, scShadowEmptyArray: [],
     scShadowDisplayRequests: {}, scShadowDisplayText: {}, scShadowGridCache: {}, scShadowLiveCueCache: {},
-    scShadowCdjMaster: false, scPressQueue: [], scShadowEmptyObject: {},
+    scShadowCdjMaster: false, scPressQueue: [], scShadowEmptyObject: {}, scShadowHead: {},
     scShadowMineRole: "?", scShadowMine: [], scShadowSampleSpare: {}, scShadowDeckProperties: {}, scShadowOwn: [],
     scShadowPostRequest: null, scShadowPollRequest: null, scShadowResponseVersion: "", scShadowPostPending: false,
     scShadowLinkId: '', scShadowLinkAt: -Infinity, scShadowTextAt: {},
@@ -1993,3 +1993,30 @@ now += 426; moved = -5000; scShadowTick(); run(80);
 assert.equal(scShadowPrev[1].jumps, jumps + 1);
 assert.ok(Math.abs(line() - before + 5000) < 40);
 """)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowHeadSyncLeadTest(unittest.TestCase):
+    """Engine mode: the copy is in neither Sync nor the master selection, so its stock header said "not synced"
+    while the source's BPM was green, and drew the phase meter while the source showed LEAD (g10-e-z3-L)."""
+
+    def test_the_shadow_header_gets_the_sources_sync_and_master(self):
+        ShadowDisplayTest.js(self, r"""
+Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
+const deck = (d, o) => Object.assign({deck: d, path: '/c/a.mp3', id: 'k'}, o);
+const decks = [deck(2, {sync: true}), deck(4, {master: true}), deck(1, {master: true}), {deck: 3, sync: true}];
+scShadowApplyAll(decks, false);
+// Role 13: decks 1 and 3 are this player's own, their headers stay Engine's.
+const flags = () => Object.keys(scShadowHead).map(d => d + (scShadowHead[d].master ? 'M' : '') + (scShadowHead[d].sync ? 'S' : '')).join();
+assert.equal(flags(), '2S,4M');
+const same = scShadowHead;
+scShadowApplyAll(decks, false);
+assert.strictEqual(scShadowHead, same, 'an unchanged state must not re-evaluate the header bindings');
+decks[1].path = ''; // the source ejected
+scShadowApplyAll(decks, false);
+assert.equal(flags(), '2S');
+scShadowApplyAll([], true); // display mode draws its own header
+assert.deepEqual(scShadowHead, {});
+""")
+        self.assertIn('head("deckIndex", "master")', SRC)
+        self.assertIn('head("deckIndex", "sync")', SRC)

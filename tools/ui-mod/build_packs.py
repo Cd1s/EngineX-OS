@@ -1238,8 +1238,16 @@ SERVICES_MAIN = """
 		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer + scLineQuery)
 		x.send()
 	}
+	// Engine mode: what the source deck's header shows and its copy here cannot know. The copy stays
+	// out of Sync and the master selection (Engine Link carries both), so the stock header items
+	// (BpmInfo, JP07SyncIndicator) read the source's state here. Display only.
+	property var scShadowHead: ({})
+	function scShadowHeadOf(d) { return scShadowHead[d] || scShadowEmptyObject }
 	function scShadowApplyAll(decks, displayOnly) {
 		scShadowDisplayOnly = displayOnly !== false
+		const head = {}
+		if (!scShadowDisplayOnly) for (const e of decks) if (e.path && scFourDeckRole.indexOf(String(e.deck)) < 0) head[e.deck] = {master: !!e.master, sync: !!e.sync}
+		if (JSON.stringify(head) !== JSON.stringify(scShadowHead)) scShadowHead = head
 		let peerLead = 0, peerPlaying = false
 		for (const e of decks) { if (e.shadowMaster && !e.stale) peerLead = e.shadowMaster; if (e.playing && !e.cue && !e.stale) peerPlaying = true }
 		scShadowPeerLead = peerLead; scShadowPeerPlaying = peerPlaying
@@ -4823,7 +4831,15 @@ def edits(dev: bool):
         ]
         # Two decimals, and nothing else: the stock Row, colours and tap stay, and whatever stock
         # shows without an analysed tempo ("-", an unanalysed track) is stock's own text.
+        # The shadow header mirrors the source deck's Sync (green BPM) and LEAD; the copy itself is in neither.
+        def head(deck, field):
+            return f'!!(typeof root !== "undefined" && root && root.scShadowHeadOf && root.scShadowHeadOf({deck}).{field})'
+        scaled[ROOT + "Views/MainView/Components/JP07SyncIndicator.qml"] = [
+            ("    property bool isMaster: pDeckIsMaster.translator && pDeckIsMaster.translator.state\n",
+             "    property bool isMaster: (pDeckIsMaster.translator && pDeckIsMaster.translator.state) || " + head("deckIndex", "master") + "\n")]
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
+            ("    readonly property bool syncEnabled: deckController && deckController.syncInfoViewController.syncEnabled\n",
+             "    readonly property bool syncEnabled: (deckController && deckController.syncInfoViewController.syncEnabled) || " + head("deckIndex", "sync") + "\n"),
             ("    property bool tappable: true\n",
              "    Layout.minimumWidth: implicitWidth\n    property bool tappable: true\n"
              '    readonly property var scBpm: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/CurrentBPM".arg(deckIndex)) : null\n'
