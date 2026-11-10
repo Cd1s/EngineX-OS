@@ -49,6 +49,10 @@ CROSS64=aarch64-linux-gnu-; [ "$(uname -m)" != aarch64 ] || CROSS64=
 CROSS=$CROSS64 OUT=$WORK/hooks64/libengine-ui-hook.so sh tools/ui-mod/build.sh
 CROSS=$CROSS64 OUT=$WORK/hooks64/libedisksd-hook.so sh tools/edisksd-hook/build.sh
 
+# 1c. EngineX boot splash (#118). The firmware splash partition shows before Linux starts, and every
+# update rewrites it, so an image carrying the stock one puts the stock picture back on the deck.
+python3 -I tools/splash/splash_tool.py encode --input docs/assets/boot-splash-enginex.png --output "$WORK/splash.bin" >/dev/null
+
 # 2. One image per official group, copied to every model name of the group.
 mkdir -p "$OUT"
 build() { # <official image prefix> <model prefix> <release name>...
@@ -56,7 +60,7 @@ build() { # <official image prefix> <model prefix> <release name>...
     python3 tools/az01-packer/az01_packer.py patch-rootfs "$FW/$base-$BASE-Update.img" \
         ${KEYARG:+--ssh-public-key "$KEYARG"} --overlay "$STAGE" --set-version "$VERSION" --output "$WORK/$base.ext2" >/dev/null
     python3 tools/az01-packer/az01_packer.py repack "$FW/$base-$BASE-Update.img" \
-        --rootfs "$WORK/$base.ext2" --output "$WORK/$base.img" >/dev/null
+        --rootfs "$WORK/$base.ext2" --splash "$WORK/splash.bin" --output "$WORK/$base.img" >/dev/null
     rm -f "$WORK/$base.ext2"
     while [ "$#" -ge 2 ]; do
         cmp -s "$FW/$base-$BASE-Update.img" "$FW/$1-$BASE-Update.img" ||
