@@ -530,7 +530,7 @@ SERVICES_MAIN = """
 		if (!p) {
 			p = []
 			for (let d = 1; d <= 4; d++) p.push({play: scTr("/Engine/Deck" + d + "/PlayState"), cmd: scTr("/Engine/Deck" + d + "/Play"), length: scTr("/Engine/Deck" + d + "/Track/TrackLength")})
-			if (!p.every(x => x.play && x.cmd && x.length)) return false // never collect blind: Engine is still building its decks
+			if (!p[0].play || !p[0].cmd || !p[0].length) return false // wait for deck 1 to build
 			scGcProps = p
 		}
 		let playing = false, sig = 0
@@ -538,7 +538,7 @@ SERVICES_MAIN = """
 			// Playing also means a held CUE preview: PlayState stays false while it
 			// sounds and scrolls (scShadowTick's sample, own decks), or the Play command.
 			const x = p[d - 1], s = scShadowDisplay[d], own = scShadowPrev[d]
-			if (x.play.state || x.cmd.state || (own && own.playing) || (s && s.playing && !s.stale)) playing = true
+			if ((x.play && x.play.state) || (x.cmd && x.cmd.state) || (own && own.playing) || (s && s.playing && !s.stale)) playing = true
 			sig = sig * 31 + (x.length ? x.length.unnormalized || 0 : 0)
 		}
 		if (sig !== g.loadSig || scGcLoadSeq !== g.loadSeq) { g.loadSig = sig; g.loadSeq = scGcLoadSeq; g.loadAt = now }
