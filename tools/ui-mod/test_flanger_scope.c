@@ -89,6 +89,45 @@ static void test_px_rate_events(void) {
     assert(px_rate_value(&owner[0]) == 0.5f && !sc_pfx_routes[0].bound);
     puts("test_px_rate_events PASS (11 indices, prebind, isolation, passthrough, destruction)");
 }
+static double render_px_rate(unsigned index) {
+    int owner, effect;
+    unsigned char handler[24] = {0}, event[40] = {0};
+    const char *name = "Flanger";
+    unsigned length = 7;
+    uint32_t address = (uint32_t)(uintptr_t)&owner;
+    memcpy(handler + 12, &address, 4);
+    memcpy(event + 8, &name, 4); memcpy(event + 12, &length, 4);
+    memcpy(event + 36, &index, 4);
+    memset(px_rates, 0, sizeof px_rates);
+    memset(sc_pfx_routes, 0, sizeof sc_pfx_routes);
+    sc_pfx_select(0, SC_PFX_SPIRAL); assert(sc_pfx_bind(0, &owner, &effect));
+    sc_pfx_control(&owner, 0, 0.7f); sc_pfx_control(&owner, 1, 0.4f);
+    rate_handler = handler; rate_event = event;
+    fx_selector_supported = 1;
+    hook_px_rate(handler, event);
+    struct sc_pfx_route *r = &sc_pfx_routes[0];
+    sc_pfx_activate(r);
+    double energy = 0;
+    for (unsigned block = 0; block < 750; ++block) {
+        float l[128], right[128]; float *in[] = {l, right};
+        for (unsigned i = 0; i < 128; ++i)
+            l[i] = right[i] = (float)((int)((block * 128 + i) % 1009) - 504) / 4096.0f;
+        r->input_a = in;
+        sc_pfx_instance_prepare(&r->dsp);
+        hook_flanger(&effect, in, (float *const *)2, 128);
+        for (unsigned i = 0; i < 128; ++i) energy += (double)l[i] * l[i];
+    }
+    fx_selector_supported = 0;
+    return energy;
+}
+static void test_px_rate_render(void) {
+    /* Fresh state and identical Parameter/input: a warmed delay must not make
+     * an ignored Rate event appear to modulate the production process hook. */
+    double a = render_px_rate(1), b = render_px_rate(9), again = render_px_rate(1);
+    double difference = a - b;
+    assert(a == again && difference * difference > 0.000001);
+    puts("test_px_rate_render PASS (fresh-state production event-to-audio path)");
+}
 static void test_px_off_on_reset(void) {
     int owner, effect;
     unsigned char handler[24] = {0}, event[64] = {0};
@@ -194,6 +233,7 @@ int main(void) {
     test_px_product_scope();
     test_px_off_on_reset();
     test_px_rate_events();
+    test_px_rate_render();
     test_px_master_bypass();
     puts("test_flanger_scope PASS; test_px_null_owner PASS");
     return 0;
