@@ -1939,6 +1939,33 @@ SERVICES_MAIN = """
 		if (root.scFourDeckRole !== "") return root.scFourDeckRole.split("").map(c => parseInt(c)).filter(d => d >= 1 && d <= 4)
 		return (root.decks && root.decks.length ? root.decks : [1, 2]).map(d => parseInt(d))
 	}
+	// #49: when isPlayer is cleared for the 4-deck layout, Engine binds /Engine/Deck1..4/Color
+	// to PlayerColor1..4 (which default to white #ffffff on 1/2 and black #000000 on 3/4 on JP07)
+	// instead of PlayerColor{N}{A,B}. Mirror the player's Layer A/B colours into the 4 deck slots.
+	function scPlayerColorOf(tag) {
+		const p = Planck.getProperty("/Client/Preferences/Profile/Application/PlayerColor" + tag)
+		return p && p.translator ? p.translator.color : "transparent"
+	}
+	readonly property bool scPlayerColorsSynced: {
+		if (!Config.device.isPlayer && root.scIsPlayerBoard) {
+			const pp = Planck.getProperty("/Client/Preferences/Player")
+			const pn = (pp && pp.translator && parseInt(pp.translator.string)) || 1
+			const role = root.scFourDeckRole || (pn === 2 ? "24" : "13")
+			const tags = {1: "1A", 2: "2A", 3: "1B", 4: "2B"}
+			const dA = parseInt(role[0])
+			const dB = role.length > 1 ? parseInt(role[1]) : 0
+			if (dA >= 1 && dA <= 4) tags[dA] = pn + "A"
+			if (dB >= 1 && dB <= 4) tags[dB] = pn + "B"
+			for (let d = 1; d <= 4; d++) {
+				const c = scPlayerColorOf(tags[d])
+				const dp = Planck.getProperty("/Client/Preferences/Profile/Application/PlayerColor" + d)
+				if (dp && dp.translator && dp.translator.color !== c) dp.translator.color = c
+				const dc = Planck.getProperty("/Engine/Deck" + d + "/Color")
+				if (dc && dc.translator && dc.translator.color !== c) dc.translator.color = c
+			}
+		}
+		return true
+	}
 	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
 	property var scLoggedIn: []
 	property string scScope: ""
@@ -4898,16 +4925,167 @@ def edits(dev: bool):
             art_source("        ", "albumArt.deckIndex", "albumArt.albumArtPath", "albumArt.deckView && albumArt.deckView.artistSongView ? albumArt.deckView.artistSongView.songName : \"\"", "scArtImage", add_id=True))]
         # In the 4-deck layout the deck colour came out white (measured on a 1+3 deck with
         # blue PlayerColor1/2), which has no gradient and draws a black strip, and an unset
-        # PlayerColor3/4 is black: use the deck's PlayerColor preference, then that of the
-        # deck on the same side (1 or 2). White and black count as unset.
+        # PlayerColor3/4 is black: use the deck's PlayerColor preference, then the player's
+        # Layer A/B preference (PlayerColor1A/2A/1B/2B), then that of the deck on the same
+        # side (1 or 2). White and black count as unset.
         scaled[v + "MainView/DeckInfo/DeckColor/DeckColor.qml"] = [(
             '    readonly property color playerColor: deckView ? deckView.deckData.deckColor : "transparent"\n',
             '    readonly property color scOwnColor: deckView ? deckView.deckData.deckColor : "transparent"\n'
             '    function scPref(n) { const p = Planck.getProperty("/Client/Preferences/Profile/Application/PlayerColor" + n); return p && p.translator ? p.translator.color : "transparent" }\n'
+            '    function scLayerPref(n) {\n'
+            '        const pp = Planck.getProperty("/Client/Preferences/Player")\n'
+            '        const pn = (pp && pp.translator && parseInt(pp.translator.string)) || 1\n'
+            '        const role = typeof root !== "undefined" && root && root.scFourDeckRole ? root.scFourDeckRole : (pn === 2 ? "24" : "13")\n'
+            '        const tags = {1: "1A", 2: "2A", 3: "1B", 4: "2B"}\n'
+            '        const dA = parseInt(role[0]), dB = role.length > 1 ? parseInt(role[1]) : 0\n'
+            '        if (dA >= 1 && dA <= 4) tags[dA] = pn + "A"\n'
+            '        if (dB >= 1 && dB <= 4) tags[dB] = pn + "B"\n'
+            '        return scPref(tags[n] || n)\n'
+            '    }\n'
             '    function scBlank(c) { return c.a === 0 || (c.r === c.g && c.g === c.b && (c.r === 0 || c.r === 1)) }\n'
             '    readonly property color playerColor: !deckView || !scBlank(scOwnColor) ? scOwnColor\n'
+            '        : !scBlank(scLayerPref(deckIndex)) ? scLayerPref(deckIndex)\n'
             '        : !scBlank(scPref(deckIndex)) ? scPref(deckIndex)\n'
             '        : deckIndex > 2 && !scBlank(scPref(deckIndex - 2)) ? scPref(deckIndex - 2) : scOwnColor\n')]
+        # #49: 4-deck mode clears Config.device.isPlayer in C++ so Engine builds the 4-deck
+        # layout, but player boards (JP07/JP08/JP13/JP14) must keep stock player UI behaviour:
+        # direct browse-encoder load to this unit's active layer deck, PlayerColorSelect,
+        # Player #, Layer B switch, RemoteDeckPicker, EngineConnect, and TouchFX Mute.
+        is_player = '(Config.device.isPlayer || (typeof root !== "undefined" && root && root.scIsPlayerBoard) || ["JP07", "JP08", "JP13", "JP14"].indexOf(Config.device.name) >= 0)'
+        scaled[ROOT + "main.qml"] = [
+            (
+                "    readonly property int activeDeck: parseInt(root.activeDecks[0])\n",
+                '    readonly property int activeDeck: root.scFourDeckRole !== ""\n'
+                '        ? parseInt(root.scFourDeckRole[activeDeckLayer === "B" ? root.scFourDeckRole.length - 1 : 0])\n'
+                "        : parseInt(root.activeDecks[0])\n",
+            ),
+            (
+                "    readonly property int passiveDeck: root.passiveDecks.length > 0 ? parseInt(root.passiveDecks[0]) : -1\n",
+                '    readonly property int passiveDeck: root.scFourDeckRole !== ""\n'
+                '        ? (root.scFourDeckRole.length > 1 ? parseInt(root.scFourDeckRole[activeDeckLayer === "B" ? 0 : root.scFourDeckRole.length - 1]) : -1)\n'
+                "        : (root.passiveDecks.length > 0 ? parseInt(root.passiveDecks[0]) : -1)\n",
+            ),
+            (
+                '    readonly property QObjProperty pActiveDeckLayer: Planck.getProperty("/GUI/Decks/Deck/Layer")\n'
+                "    readonly property string activeDeckLayer: pActiveDeckLayer && pActiveDeckLayer.translator\n"
+                "        ? pActiveDeckLayer.translator.string\n"
+                '        : "A"\n'
+                '    readonly property int activeLayerIndex: activeDeckLayer === "A" ? 1 : 2\n'
+                '    readonly property QObjProperty pDeckColor: Planck.getProperty("/Engine/Deck%1/Color".arg(activeLayerIndex))\n',
+                '    readonly property QObjProperty pActiveDeckLayer: Planck.getProperty(\n'
+                '        root.scFourDeckRole === "24" || root.scFourDeckRole === "2"\n'
+                '            ? "/GUI/Decks/DeckRight/Layer"\n'
+                '            : root.scFourDeckRole !== ""\n'
+                '              ? "/GUI/Decks/DeckLeft/Layer"\n'
+                '              : "/GUI/Decks/Deck/Layer"\n'
+                '    )\n'
+                "    readonly property string activeDeckLayer: pActiveDeckLayer && pActiveDeckLayer.translator\n"
+                '        ? (pActiveDeckLayer.translator.index === 1 ? "B" : "A")\n'
+                '        : "A"\n'
+                '    readonly property int activeLayerIndex: activeDeckLayer === "A" ? 1 : 2\n'
+                '    readonly property QObjProperty pDeckColor: Planck.getProperty("/Engine/Deck%1/Color".arg(root.scFourDeckRole !== "" ? activeDeck : activeLayerIndex))\n',
+            ),
+        ]
+        scaled[prefs + "Entries/DeckColorSelect.qml"] = [(
+            '    readonly property string colorSelectEntry: Config.device.isPlayer ? "PlayerColorSelect" : "ConsoleColorSelect"\n',
+            f'    readonly property string colorSelectEntry: {is_player} ? "PlayerColorSelect" : "ConsoleColorSelect"\n',
+        )]
+        scaled[prefs + "Entries/private/DualLayerColorSelect.qml"] = [(
+            '        visible: Planck.getProperty("/GUI/Decks/Deck/Layer").translator.numEntries === 2\n',
+            '        visible: (Planck.getProperty("/GUI/Decks/Deck/Layer").translator || Planck.getProperty("/GUI/Decks/DeckLeft/Layer").translator).numEntries === 2\n',
+        )]
+        scaled[ROOT + "StateNodes/States/PerformanceViewState.qml"] = [
+            (
+                "    readonly property bool isPlayer: Config.device.isPlayer\n",
+                f"    readonly property bool isPlayer: {is_player}\n",
+            ),
+            (
+                '                ? "/Client/Librarian/LoadToDeck%1".arg(root.activeDecks[0])\n',
+                '                ? "/Client/Librarian/LoadToDeck%1".arg(root.activeDeck)\n',
+            ),
+        ]
+        scaled[ROOT + "StateNodes/States/PerformanceViewStreamingState.qml"] = [
+            (
+                "    readonly property bool isPlayer: Config.device.isPlayer\n",
+                f"    readonly property bool isPlayer: {is_player}\n",
+            ),
+            (
+                '              ? "/Client/Librarian/LoadToDeck%1".arg(root.activeDecks[0])\n',
+                '              ? "/Client/Librarian/LoadToDeck%1".arg(root.activeDeck)\n',
+            ),
+        ]
+        scaled[ROOT + "StateNodes/ControlFocusNode.qml"] = [(
+            "    property bool loadToDeckDirectly: Config.device.isPlayer\n",
+            f"    property bool loadToDeckDirectly: {is_player}\n",
+        )]
+        scaled[prefs + "Entries/PlayerNumber.qml"] = [(
+            "    active: Config.device.isPlayer\n",
+            f"    active: {is_player}\n",
+        )]
+        scaled[prefs + "Entries/ShowLayerB.qml"] = [
+            (
+                "    active: Config.device.isPlayer && Config.audio.deck.hasLayers\n",
+                f"    readonly property bool scIsPlayer: {is_player}\n"
+                "    active: scIsPlayer && Config.audio.deck.hasLayers\n",
+            ),
+            (
+                '        text: Config.device.isPlayer ? "Layer B" : "Deck 3/4"\n',
+                '        text: scIsPlayer ? "Layer B" : "Deck 3/4"\n',
+            ),
+        ]
+        scaled[v + "EmbeddedView.qml"].extend([
+            (
+                "        active: Config.device.isPlayer\n        sourceComponent: RemoteDeckPicker {}\n",
+                f"        active: {is_player}\n        sourceComponent: RemoteDeckPicker {{}}\n",
+            ),
+            (
+                "        active: Config.device.isPlayer\n        sourceComponent: EngineConnect {}\n",
+                f"        active: {is_player}\n        sourceComponent: EngineConnect {{}}\n",
+            ),
+            (
+                "            warningMessage: Config.device.isPlayer\n",
+                f"            warningMessage: {is_player}\n",
+            ),
+        ])
+        scaled[v + "EngineConnect/EngineConnect.qml"] = [
+            (
+                "                readonly property int numberOfAvailableDecks: Config.audio.numberOfDecks\n",
+                f"                readonly property int numberOfAvailableDecks: {is_player} ? 2 : Config.audio.numberOfDecks\n",
+            ),
+            (
+                '                        deckLayer: enabled &&\n'
+                '                        Planck.getProperty("/GUI/Decks/Deck/Layer").translator.numEntries - 1 >= index\n'
+                '                            ? Planck.getProperty("/GUI/Decks/Deck/Layer").translator.entries[deckLayerIndex]\n'
+                '                            : "-"\n',
+                '                        readonly property var scLayerTr: Planck.getProperty("/GUI/Decks/Deck/Layer").translator || Planck.getProperty("/GUI/Decks/DeckLeft/Layer").translator\n'
+                "                        deckLayer: enabled && scLayerTr && scLayerTr.numEntries - 1 >= index\n"
+                '                            ? (deckLayerIndex === 0 ? "A" : "B")\n'
+                '                            : "-"\n',
+            ),
+            (
+                '                        readonly property QObjProperty pDeckColor: Planck.getProperty(\n'
+                '                            "/Engine/Deck%1/Color".arg(deckLayer === "A" ? 1 : 2)\n'
+                '                        )\n',
+                '                        readonly property int scColorDeck: typeof root !== "undefined" && root && root.scFourDeckRole\n'
+                '                            ? parseInt(root.scFourDeckRole[deckLayer === "A" ? 0 : root.scFourDeckRole.length - 1])\n'
+                '                            : (deckLayer === "A" ? 1 : 2)\n'
+                '                        readonly property QObjProperty pDeckColor: Planck.getProperty(\n'
+                '                            "/Engine/Deck%1/Color".arg(scColorDeck)\n'
+                '                        )\n',
+            ),
+        ]
+        scaled[v + "TouchFx/TouchFxViewLowerBar.qml"] = [(
+            "            visible: Config.device.isPlayer && PlanckGUI.views.touchFxView.hasMute\n",
+            f"            visible: {is_player} && PlanckGUI.views.touchFxView.hasMute\n",
+        )]
+        scaled[ROOT + "Items/Base/DialogHeader.qml"] = [(
+            "        if (Config.device.isPlayer) {\n",
+            f"        if ({is_player}) {{\n",
+        )]
+        scaled[v + "DriveSelect/CloudStorageSelect.qml"] = [(
+            "                showPlayerNumber: Config.device.isPlayer\n",
+            f"                showPlayerNumber: {is_player}\n",
+        )]
     for rel, fixes in scaled.items():
         assert not isinstance(out.get(rel), str), rel
         out.setdefault(rel, []).extend(fixes)
