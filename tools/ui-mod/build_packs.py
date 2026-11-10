@@ -4677,44 +4677,28 @@ def edits(dev: bool):
             scaled.setdefault(bj + "Deck/DeckItem/" + item + ".qml", []).append((
                 f"        id: {text_id}\n", f"        id: {text_id}\n        fontSizeMode: Text.HorizontalFit\n        minimumPixelSize: 14\n" +
                 ("        rightPadding: 14\n" if item == "BeatJump" else "")))
-        # Share the stock formatter between performance controls and shadow data.
+        # The shadow header feeds the stock formatter its own tempo; stock users keep stock defaults.
         scaled[ROOT + "Items/Bpm.qml"] = [
-            ("    property int decimalPlaces: 1\n", "    property int decimalPlaces: 2\n"),
-            ('    property string fractionSeparator: ""\n', '    property string fractionSeparator: "."\n'),
             ("    property alias fractionColor: fractionText.color\n",
-             "    property alias fractionColor: fractionText.color\n    readonly property real displayWidth: implicitWidth + fractionText.implicitWidth\n    readonly property real fractionHeight: fractionText.implicitHeight\n"),
+             "    property alias fractionColor: fractionText.color\n    readonly property real displayWidth: implicitWidth + fractionText.implicitWidth\n"),
             ("    readonly property bool currentBPMSplitValid:",
              "    property real bpmValue: pCurrentBPM && pCurrentBPM.translator ? pCurrentBPM.translator.unnormalized : 0\n\n    readonly property bool currentBPMSplitValid:"),
             ("if (songAnalyzed && pCurrentBPM && pCurrentBPM.translator)", "if (songAnalyzed)"),
             ("pCurrentBPM.translator.unnormalized.toFixed(bpm.decimalPlaces)", "bpmValue.toFixed(bpm.decimalPlaces)"),
         ]
+        # Two decimals, and nothing else: the stock Row, colours and tap stay, and whatever stock
+        # shows without an analysed tempo ("-", an unanalysed track) is stock's own text.
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
-            ("import Planck\n", "import Planck\nimport Embedded as EmbeddedItems\n"),
-            ("    property bool tappable: true\n", "    Layout.minimumWidth: implicitWidth\n    property bool tappable: true\n"),
-            ("        Row {\n" + "            Layout.alignment: bpmInfo.layoutAlignment\n" +
-             '            Text {\n                objectName: "Deck_Bpm"\n\n' +
-             "                color: bpmInfo.syncEnabled ? bpmInfo.syncColor : Style.font02Color\n" +
-             "                font: bpmInfo.font\n" +
-             "                text: bpmInfoView && bpmInfoView.bpmText\n            }\n\n" +
-             '            Text {\n                objectName: "Deck_Bpm_FractionalText"\n\n' +
-             "                topPadding: bpmInfo.fractionTextTopPadding\n" +
-             "                color: bpmInfo.syncEnabled ? bpmInfo.syncColor : fractionTextColor\n" +
-             "                font: bpmInfo.fractionTextFont\n" +
-             "                text: bpmInfoView && bpmInfoView.bpmFractionalText\n            }\n        }\n",
-             "        Item {\n            Layout.alignment: bpmInfo.layoutAlignment\n" +
-             "            implicitWidth: scBpm.displayWidth\n" +
-             "            implicitHeight: Math.max(scBpm.implicitHeight, scBpm.fractionHeight + bpmInfo.fractionTextTopPadding)\n" +
-             "            EmbeddedItems.Bpm {\n                id: scBpm\n" +
-             "                deckIndex: bpmInfo.deckIndex\n" +
-             '                readonly property var pLoaded: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deckIndex)) : null\n' +
-             "                deckLoaded: !!(pLoaded && pLoaded.translator && pLoaded.translator.state)\n" +
-             "                decimalPlaces: 2\n                fractionSeparator: \".\"\n" +
-             "                animateWhenUnanalysed: false\n" +
-             "                font: bpmInfo.font\n                fractionFont: bpmInfo.fractionTextFont\n" +
-             "                color: bpmInfo.syncEnabled ? bpmInfo.syncColor : Style.font02Color\n" +
-             "                fractionColor: bpmInfo.syncEnabled ? bpmInfo.syncColor : bpmInfo.fractionTextColor\n" +
-             "                fractionalBottomMargin: implicitHeight - fractionHeight - bpmInfo.fractionTextTopPadding\n" +
-             "            }\n        }\n"),
+            ("    property bool tappable: true\n",
+             "    Layout.minimumWidth: implicitWidth\n    property bool tappable: true\n"
+             '    readonly property var scBpm: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/CurrentBPM".arg(deckIndex)) : null\n'
+             '    readonly property var scAnalyzed: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/Track/SongAnalyzed".arg(deckIndex)) : null\n'
+             "    readonly property var scBpm2: bpmInfoView && bpmInfoView.bpmFractionalText && scAnalyzed && scAnalyzed.translator && scAnalyzed.translator.state\n"
+             "        && scBpm && scBpm.translator && scBpm.translator.unnormalized > 0 ? scBpm.translator.unnormalized.toFixed(2).split(\".\") : null\n"),
+            ("                text: bpmInfoView && bpmInfoView.bpmText\n",
+             "                text: bpmInfo.scBpm2 ? bpmInfo.scBpm2[0] : bpmInfoView && bpmInfoView.bpmText\n"),
+            ("                text: bpmInfoView && bpmInfoView.bpmFractionalText\n",
+             '                text: bpmInfo.scBpm2 ? "." + bpmInfo.scBpm2[1] : bpmInfoView && bpmInfoView.bpmFractionalText\n'),
         ]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml"] =[("    enabled: deckConfig.inDJMode\n", "    enabled: deckConfig.inDJMode\n" + pad_brt)]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/QuadPadRGBLed.qml"] = [("    idx: note\n", "    idx: note\n" + pad_brt)]

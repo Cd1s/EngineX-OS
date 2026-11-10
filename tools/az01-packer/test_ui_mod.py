@@ -1237,16 +1237,19 @@ class DeckHeaderLayoutTest(unittest.TestCase):
                 with self.subTest(lang=lang):
                     base = packs / lang
                     bpm = (base / "Skins/Embedded/Items/Bpm.qml").read_text()
-                    self.assertIn("property int decimalPlaces: 2", bpm)
+                    self.assertIn("property int decimalPlaces: 1", bpm)  # stock default for stock users
+                    self.assertIn('property string fractionSeparator: ""', bpm)
                     self.assertIn("bpmValue.toFixed(bpm.decimalPlaces)", bpm)
                     self.assertIn('padEnd(bpm.decimalPlaces, "0")', bpm)
                     info = (base / composite / "Deck/DeckItem/BpmInfo.qml").read_text()
-                    self.assertIn("EmbeddedItems.Bpm {", info)
-                    self.assertIn("decimalPlaces: 2", info)
+                    # Number format only: stock's Row and its own text for "-" / unanalysed stay.
+                    self.assertNotIn("EmbeddedItems.Bpm {", info)
+                    self.assertIn("unnormalized.toFixed(2)", info)
+                    self.assertIn("scAnalyzed.translator.state", info)
+                    self.assertIn("bpmInfo.scBpm2 ? bpmInfo.scBpm2[0] : bpmInfoView && bpmInfoView.bpmText", info)
+                    self.assertIn(': bpmInfoView && bpmInfoView.bpmFractionalText', info)
+                    self.assertIn("topPadding: bpmInfo.fractionTextTopPadding", info)
                     self.assertIn("onBpmClicked()", info)
-                    self.assertIn("fractionalBottomMargin: implicitHeight - fractionHeight - bpmInfo.fractionTextTopPadding", info)
-                    self.assertIn("scBpm.fractionHeight + bpmInfo.fractionTextTopPadding", info)
-                    self.assertNotIn("bpmInfoView.bpmFractionalText", info)
                     performance = (base / composite / "DeckPerformanceData/DeckPerformanceDataContent.qml").read_text()
                     self.assertIn("id: autoLoop\n        Layout.rightMargin: 4", performance)
                     for name, text in (
