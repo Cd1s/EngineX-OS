@@ -574,7 +574,8 @@ func TestShadowCarriesKeyName(t *testing.T) {
 }
 
 // Two standalone players share master over Engine Link, so the shadow reply
-// clears Master (the copy must not take it); the header's LEAD still needs it.
+// clears Master (the copy must not take it). The header's LEAD has its own flag,
+// the source deck's DeckIsMaster, and a change of it wakes the QML.
 func TestShadowReplyTellsLead(t *testing.T) {
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(s)
@@ -585,8 +586,14 @@ func TestShadowReplyTellsLead(t *testing.T) {
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
 	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
 	s.shadow.mu.Lock()
-	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Master: true, Seq: 1}, {Deck: 4, Key: "b", Seq: 1}}, time.Now())
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Master: true, Seq: 1}, {Deck: 4, Key: "b", Master: true, Seq: 1}}, time.Now())
+	ver := s.shadow.ver
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Master: true, Lead: true, Seq: 2}, {Deck: 4, Key: "b", Master: true, Seq: 2}}, time.Now())
+	woke := s.shadow.ver != ver
 	s.shadow.mu.Unlock()
+	if !woke {
+		t.Fatal("LEAD on the source must wake the QML")
+	}
 	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
 	if err != nil {
 		t.Fatal(err)
