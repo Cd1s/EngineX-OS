@@ -212,7 +212,7 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 		d.Stale = p.Stale || now.Sub(p.at) >= 2*time.Second
 		if d.Playing {
 			if !p.Stale {
-				d.PositionMS += float64(min(int64(2000), max(int64(0), now.Sub(p.at).Milliseconds()))) * (1 + d.Pitch/100)
+				d.PositionMS, d.Rate = p.carried(min(2*time.Second, max(0, now.Sub(p.at))))
 			}
 		}
 		d.Path, d.Ext, d.Net = "", "", ""
