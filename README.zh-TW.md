@@ -53,17 +53,16 @@
 - 相容全格式儲存裝置：Windows 的 `FAT32` / `exFAT` / `NTFS` 與 Mac 的 `HFS+` / `APFS` 插上直讀；
 - 自動修復未正常退碟造成的資料庫損毀，並移除「未安全退出」警告彈窗。
 
-### 4. 完整中文介面、先鋒風格 3-Band 波形與轉盤燈效
-- **三語介面**：設定、選單與提示全面支援 **繁體中文 / 简体中文 / English**；
-- **3 種波形配色**：在原廠綠波形基礎上，新增高對比度 **RGB 波形** 與先鋒風格 **3-Band（三頻段藍/橙/白）波形**；
-- **轉盤彩燈模式**：支援固定顏色、流光漸變、頻閃，以及**跟隨目前播放 BPM 拍點同步變色**。
+### 4. 完整中文介面與先鋒風格 3-Band 波形
+- **三語介面**：設定、選單與提示全面支援 **繁體中文 / 简体中文 / English**（全系 16 款）；
+- **3 種波形配色**：在原廠綠波形基礎上，新增高對比度 **RGB 波形** 與先鋒風格 **3-Band（三頻段藍/橙/白）波形**，可於控制中心 `Waveform Style` 磁貼或 `個人偏好 → Display` 一鍵切換並雙向同步（全系 16 款）。
 
 ### 5. 切效果器零爆音，長時間演出更穩定
 - 消除原廠韌體在開關或切換效果器（FX）時偶發的「咔嗒」爆音，雙軌同時開效果器也有平滑淡入過渡；
 - 預設關閉原廠背景匿名統計回報與無用磁碟快取，把全部算力與記憶體留給音訊播放與螢幕觸控。
 
 ### 6. 智慧同步與 Gigabit 有線網路
-- **智慧同步（Smart Sync）**：下拉控制中心一鍵切換 **Bar / Beat / Tempo** 同步模式；開啟 Sync 後，兩首曲目 BPM 差距超出目前變速範圍時，自動把 Pitch Range 升檔到足夠為止（最高 `±100%`）；
+- **智慧同步（Smart Sync）**：下拉控制中心一鍵切換 **Bar / Beat / Tempo** 同步模式；開啟 Sync 後，兩首曲目 BPM 差距超出目前變速範圍時，自動把變速範圍（Pitch Range）升檔到足夠為止（最高 `±100%`）；
 - **Gigabit 有線網路**：有線網路孔從原廠限制的 `100 Mbps` 解鎖至 **1 Gbps（1000 Mbps）全雙工滿速**，並配 8 MiB TCP 大視窗緩衝；
 - **Wi-Fi**：播放機內建 Wi-Fi 模組受限於主機板 SDIO 25 MHz SDR12 匯流排頻寬，實測極限約 `9～10 MB/s`，大容量曲庫傳輸建議使用 Gigabit 有線網路孔。
 
@@ -79,7 +78,7 @@
 - **串流快取隔離與 Deemix 智慧共享**：Spotify、Beatport、SoundCloud 與網易雲官方模式各自使用獨立下載通道與專屬快取命名空間；網易雲「Deemix 優先」時與 Deezer 共享無損快取，互相點播同一首不重複下載；
 - **SoundCloud Go+ 與高清智慧路由**：長混音 / DJ Set（超過 10 分鐘）一律直連 SoundCloud 官方串流；非 Set 普通單曲與 Go+ 專享曲目：已綁定 Go+ 優先官方高音質串流，未綁定時自動在已登入的其他串流（Deezer / 網易雲 / Beatport）比對無損 / 320k 音訊，避免 30 秒試聽限制；
 - **品牌統一與免網域公網連線**：面向使用者的組件統一為 `enginex-relay`（原 `sc5000-relay`）、`enginex-stemsd`（原 `sc5000-stemsd`）、`enginex-suite`，執行目錄為 `/data/enginex`（保留 `/data/sc5000-custom` 相容符號連結）；支援 Cloudflare Quick Tunnel 免網域一鍵公網穿透，手機掃碼即可遠端登入串流；中繼主控台新增 `已連線播放機叢集（Multi-Deck Hub）` 卡片，彙整同一後端下所有播放機的上線狀態、機位角色（`13` / `24`）、韌體版本與串流登入狀態，可用播放機存取碼或主密碼登入；各播放機 `設定 → 關於` 頁會即時顯示 Stems 算力節點狀態；
-- **Mixstream Pro / Pro+ / Pro Go（#164、#166）**：實體 FILTER 旋鈕控制原廠 Filter / Dub Echo / Noise / Filter Roll / Wash，點擊各軌 Pads 列的 `SWEEP FX` 開啟原廠選擇輪盤；恢復觸控 Beat Jump，於 `個人偏好 → Cues/Loops` 開啟 `Beat Jump Pad Bank` 即可後跳、前跳、減半、加倍；各軌 `EQ / STEMS` 按鈕切換通道三段旋鈕 Stems EQ；安裝器支援嚴格 EAAS 協定探索二代機並消除連接埠衝突，相容 fastboot 35+，完善 Windows WSL 2 + usbipd-win 刷機指引，已在 NH08S 實機完整刷入驗證；識別 Mixstream Pro Go（`15e4:2059`）USB 裝置；
+- **Mixstream Pro / Pro+ / Pro Go（#164、#166）**：實體 FILTER 旋鈕控制原廠 Filter / Dub Echo / Noise / Filter Roll / Wash，點擊各軌 Pads 列的 `SWEEP FX` 開啟原廠選擇輪盤；恢復觸控 Beat Jump，於 `版面 → View` 開啟 `Beat Jump Pad Bank` 即可後跳、前跳、減半、加倍；各軌 `EQ / STEMS` 按鈕切換通道三段旋鈕 Stems EQ；安裝器支援嚴格 EAAS 協定探索二代機並消除連接埠衝突，相容 fastboot 35+，完善 Windows WSL 2 + usbipd-win 刷機指引，已在 NH08S 實機完整刷入驗證；識別 Mixstream Pro Go（`15e4:2059`）USB 裝置；
 - **一代機電腦線刷與免 debugfs 解包**：修復 SC5000 / SC6000 / PRIME 4 等一代機在韌體更新模式下 fastboot product 缺失時的 USB ID 識別，恢復電腦線刷支援；打包工具在 macOS 與 Windows 上無 debugfs 時也能正常解包映像；
 - **PRIME 4 硬體 FX 選擇器（#168）與 PRIME 4+ 啟用校驗（#169）**：重整 JC11 硬體效果選擇器，修復切效果器重設與 Wet/Dry 淡入淡出爆音；強化 PRIME 4+（JC11S）啟用檔案與資料目錄校驗；修復 Beatport 無損升級在冷快取下的命中，並在 `stream-sync` 佔用連接埠時讓 `deemixd` 優雅退出。
 - **SC LIVE 4 AUX（#171，新功能，待實機驗證）**：在原廠 `混音台選單 → 通道 → 輸入` 中把 AUX 送入通道 3 或 4，使用通道 CUE、推桿、EQ 與 Sweep FX；僅在 AUX 模式且任一通道選擇線路輸入時封鎖 AUX 直通，MIC2 保持原廠路由。兩路共用一個 AUX 來源，同時推起會疊加。Mixer Menu（Beta）會搬移部分偏好設定，並允許向線路輸入通道載歌；JP21 隱藏未驗證的 Bluetooth/Computer 選項。詳見[路由說明與實機檢查](docs/issue171-sclive4-aux.md)；
@@ -92,14 +91,14 @@
 - **Tailscale / Headscale 遠端存取（#130）**：Web 控制台的 `遠端存取（Tailscale / Headscale）` 卡片按需下載精簡版 Tailscale 用戶端（約 4.3 MB，下載後校驗 SHA-256），以登入連結或一次性 Auth key 登入，只把你勾選的服務（SSH / SFTP、Web 控制台）開放給你自己的 tailnet。不需要公網 IP，也不用改路由器，自架 Headscale 伺服器同樣可用。預設關閉。播放機核心沒有 TUN 裝置，所以以使用者空間模式執行。已用 Headscale 端對端測通；實機播放時的 CPU 與記憶體占用尚未實測；
 - **串流歌單排序（#98）**：所有串流服務都能開啟 Engine 內建的排序選單，依 BPM、調性、評等、歌名或歌手遞增 / 遞減排列；
 - **串流曲目可錄音（#84）**：載入串流曲目時，Engine 的錄音功能不再拒絕錄製。錄音請僅供個人使用，並遵守串流服務的條款；
-- **曲目列表顯示 BPM（#80）**：開啟 `個人偏好（User Profile）→ 曲庫 → 雙欄瀏覽` 後，曲目列表第二欄旁會顯示 BPM；
-- **推桿回音與智慧同步（#104）**：`推桿回音` 磁貼在 `關` / `全部推桿` / `僅豎推` 之間循環，使用 Engine 內建的轉場效果。開啟 Sync 時，智慧同步也會嘗試半速 / 倍速（0.25×–4×）匹配，Pitch Range 只擴大到最接近的匹配所需的範圍；
-- **控制中心新磁貼**：第 3 行新增 4 個磁貼 `波形樣式`、`轉盤燈光`、`推桿回音`、`智慧同步`，點一下循環切換；`Live Stream` 移到 `設定 → 服務`；
+- **曲目列表顯示 BPM（#80）**：開啟 `版面 → View → 雙欄瀏覽` 後，曲目列表第二欄旁會顯示 BPM；
+- **推桿回音與智慧同步（#104）**：在帶混音台的一體機（`PRIME 4 / 4+ / 4 G2`、`PRIME 2`、`PRIME GO / GO+`、`SC LIVE 4 / 2`、`Mixstream Pro / Pro+ / Pro Go`、`SYSTEM ONE`）上，控制中心保留原廠 `Fader Echo` 磁貼（不重複新增自訂磁貼），並與 `設定 → 混音器 → Fader Echo`（`Off` / `All Faders` / `Upfader Only`）與 `個人偏好 → Playback → Echo Out` 雙向同步（獨立播放機 `SC5000 / SC5000M / SC6000 / SC6000M` 自動隱藏）。開啟 Sync 時，智慧同步（全系 16 款）也會嘗試半速 / 倍速（0.25×–4×）匹配並依需求自動升檔變速範圍（Pitch Range）；
+- **控制中心演出磁貼排佈**：包含 `Waveform Style` 與 `Smart Sync`（全系 16 款），帶 Transition FX 的一體機保留原廠 `Fader Echo` 磁貼；`Live Stream` 移至 `設定 → 服務`；`Waveform Style` 於控制中心與 `個人偏好 → Display` 雙向同步，不在 `版面 → View` 重複顯示；
 - **先鋒風格 Beat FX 與 Sound Color FX（#88）**：JC11 PRIME 4（Engine 5.3.0）可於列表末尾選擇 `Spiral (PX)`、`Pitch Echo (PX)`、`Slip Roll (PX)`、`Dub Echo (PX)`、`Space (PX)`，按 FX 單元及其分配通道生效。Parameter 可調時間、音色與回授，Wet/Dry 可調乾濕比，原廠效果繼續可選；獨立 Time/Rate 旋鈕暫未接入。AZ04 保留原本的 `Color FX Style` 設定；PRIME 4 實機驗證待完成； JP07 SC5000 沒有原生 FX 選擇器，保留全域 `Color FX Style` 選單、master 效果及儲存的設定。
-- **介面縮放（110%–75%）、曲目列表波形開關與打擊墊亮度（#153、#117、#85）**：`設定 → 裝置 → 介面縮放` 可把 Engine 整個介面在 110% 到 75% 之間無黑邊縮放，控制中心與彈窗仍然鋪滿螢幕；`個人偏好（User Profile）→ 曲庫 → 曲目列表波形` 關閉後可隱藏列表裡的縮略波形，讓歌名與藝人完整展開；`打擊墊亮度` 可把打擊墊與按鍵燈光從 100% 調到 20%；
-- **實體三段 EQ 旋鈕 Stems 分軌控制與快捷鍵（#152）**：透過 `個人偏好 → 播放 → Stems EQ Mode` 或按各通道 **Shift + Cue (PFL)**，即可將該通道的實體 `HIGH / MID / LOW` 三段 EQ 旋鈕切換為 **Stems Level**（`Vocal 人聲`、`Melody + Bass 旋律+貝斯`、`Drums 鼓組`），內建原廠軟接管（Soft Takeover）防跳變與螢幕提示；修復 PRIME 2 / PRIME 4 快速雙擊 `Hot Cue` 時 Stems 模式閃退回 Hot Cue 的問題；
+- **介面縮放（110%–75%）、曲目列表波形開關與打擊墊亮度（#153、#117、#85）**：`版面 → View → 介面縮放` 可把 Engine 整個介面在 110% 到 75% 之間無黑邊縮放，控制中心與彈窗仍然鋪滿螢幕；`個人偏好（User Profile）→ 曲庫 → 曲目列表波形` 關閉後可隱藏列表裡的縮略波形，讓歌名與藝人完整展開；`設定 → 裝置 → 打擊墊亮度` 可把打擊墊與按鍵燈光從 100% 調到 20%（全系 16 款）；
+- **實體三段 EQ 旋鈕 Stems 分軌控制與快捷鍵（#152）**：在帶混音台及 Stems EQ 的一體機（`PRIME 4 / 4+`、`PRIME 2`、`PRIME GO / GO+`、`SC LIVE 4 / 2`、`Mixstream Pro / Pro+ / Pro Go`、`SYSTEM ONE`；獨立播放機與 `PRIME 4 G2` 自動隱藏）上，透過 `個人偏好 → 播放 → Stems EQ Mode` 或按各通道 **Shift + Cue (PFL)**，即可將實體 `HIGH / MID / LOW` 旋鈕切換為 **Stems Level**（`Vocal 人聲`、`Melody + Bass 旋律+貝斯`、`Drums 鼓組`），內建原廠軟接管（Soft Takeover）；修復 PRIME 2 / PRIME 4 快速雙擊 `Hot Cue` 時 Stems 模式閃退回 Hot Cue 的問題；
 - **播放中按住瀏覽/縮放旋鈕轉動轉盤防誤入網格編輯（#157）**：曲目播放中按住 Browse/Zoom 旋鈕（或 Slip/Vinyl）不再誤觸進入 BeatGrid Edit（此前會導致瞬間跳回 `00:00` 且 Play 鍵鎖死），網格編輯啟用時停用轉盤觸控；
-- **PRIME 4 / PRIME 4+ 與 SC5000 / SC6000 區域網路跨機型四軌連動（#160）**：一體機與獨立播放機均開放 `四軌波形顯示` 與 `四軌角色`（`自動`、`1+3`、`2+4`、`1+2`、`3+4`、`1`、`2`），支援 PRIME 4 / PRIME 4+ 本機負責 1+2 軌、同時將區域網路內 SC5000 / SC6000 的即時波形、熱標與對拍映射至 3+4 影子軌；
+- **PRIME 4 / PRIME 4+ 與 SC5000 / SC6000 區域網路跨機型四軌連動（#160）**：僅於 4 軌機型（`SC5000 / SC5000M / SC6000 / SC6000M`、`PRIME 4 / PRIME 4+ / PRIME 4 G2`、`SC LIVE 4`；2 軌一體機自動隱藏）開放 `四軌波形顯示`、`四軌角色`（`自動`、`1+3`、`2+4`、`1+2`、`3+4`、`1`、`2`）與 `影子軌模式`；`互換循環 / 節拍跳躍` 對帶 Auto Loop 旋鈕的全系機型開放（`Mixstream Pro` 系列自動隱藏），`Beat Jump 打擊墊組` 僅對 `Mixstream Pro / Pro+ / Pro Go` 顯示；
 - **影子軌模式（待實機驗證）**：四軌佈局下，只要拿得到檔案，影子軌都由 Engine 靜音載入，用和本機軌道相同的原廠元件繪製：EngineX 播放機的曲目從對端複製，CDJ / Pro DJ Link 裝置的曲目從 CDJ 的 USB 隨身碟或 SD 卡複製。複製不到檔案的 CDJ 曲目（串流、rekordbox Link、CD、複製失敗或逾時）顯示 rekordbox 波形，並用一行文字說明原因。`控制中心 → 版面 → ENGINEX 視圖預設 → 影子軌模式`：`自動`（所有機型預設；一體機 Line In 顯示 CDJ-3000 波形照舊）、`全部 Engine 模式`（所有來源都由 Engine 載入）、`全部 CDJ 模式`（都不載入曲目，即先前的顯示式影子軌）。
 - **CDJ 顯示式影子波形**：影子軌顯示 CDJ 曲目已快取的 rekordbox 波形、拍線與 Cue，不下載音訊；沒有分析資料時只顯示中繼資料。PRIME 4 / PRIME 4+ / PRIME 4 G2、SC LIVE 4 開啟 `4-Deck Waveform` 後，3、4 軌顯示影子波形，保留本機 1、2 軌；沒有對端的軌道仍可本機使用。
   自訂 rb-bridge `--media-cache` 時，WebUI 服務環境中的 `SC5000_PROLINK_MEDIA_CACHE` 必須指向同一目錄；兩者預設共用目錄。關閉 `prolink_share` 也會停止讀取顯示快取。
@@ -124,8 +123,8 @@
 - **Wi-Fi 傳歌**：在電腦上把 MP3 / FLAC / WAV / AIFF / M4A / AAC / OGG / OPUS 檔案拖進碟機網頁控制台（`http://<碟機 IP>:8080`），直接存到你選的內建硬碟、SD 卡或隨身碟的 `Wi-Fi Drop/<歌單>/` 下。曲庫所在磁碟上的 FLAC / MP3 會自動分析並加入同名歌單；不會覆蓋既有檔案，始終保留 256 MiB 空間；
 - **OmniSource 統一瀏覽**：隨身碟 / SD 卡裡的歌單和曲目直接顯示在串流瀏覽器中，和串流歌單放在一起，一次搜尋兩邊都找得到；隨身碟曲目直接從碟上讀取播放，音質不打折（`設定 → OmniSource`，預設關閉）；
 - **先鋒 CDJ / Pro DJ Link（測試版）**：透過區域網路 / Wi-Fi 讀取 CDJ 上 rekordbox 隨身碟的曲庫（`Pro DJ Link 曲庫`），也能把本機曲庫分享給 CDJ（實驗功能）。SC5000 與 CDJ 之間始終只有一個 Master：MASTER 可以雙向交接；本機當 Master 時會送出 BPM 與拍點，供 CDJ 的 BEAT SYNC 對拍。以上預設全部關閉；
-- **更乾淨的聲音**：`0dB 防破音軟限幅` 以平滑曲線把主輸出壓在 -0.1 dBFS 以下，零延遲，-1.5 dBFS 以下的訊號原樣不動；Flanger 不再讓音量下沉（自動補償到原曲電平，最多 +6 dB）；`推桿切歌自動回音` 在拉下推桿時留下回音尾巴；`自動增益（0 dB 正規化）` 把音量偏小的歌平滑地提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下的靜音不提升），之後一定經過軟限幅，不會爆音（預設關閉）。共 21 個即時 DSP 掛點，不增加任何延遲；
-- **SC5000 / SC6000 原生四軌版面**：在獨立播放機上解鎖 Engine 內建的四軌介面，音效卡仍只用 2 路。每台播放機負責自己角色的兩軌（`自動`、`1+3`、`2+4`、`1+2`、`1`、`2`，在 `設定 → 裝置 → 四軌角色` 或網頁控制台切換），其餘各軌是不出聲的**影子軌道**，跟隨另一台 EngineX 碟機或 CDJ 的曲目、播放 / CUE、位置、速度、Master 與同步；
+- **更乾淨的聲音**：`0dB 防破音軟限幅` 以平滑曲線把主輸出壓在 -0.1 dBFS 以下，零延遲，-1.5 dBFS 以下的訊號原樣不動；Flanger 不再讓音量下沉（自動補償到原曲電平，最多 +6 dB）；`推桿切歌自動回音`（僅帶混音台的一體機顯示，獨立播放機隱藏）在拉下推桿時留下回音尾巴；`自動增益（0 dB 正規化）` 把音量偏小的歌平滑地提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下的靜音不提升），之後一定經過軟限幅，不會爆音（預設關閉）。共 21 個即時 DSP 掛點，不增加任何延遲；
+- **SC5000 / SC6000 原生四軌版面**：在獨立播放機上解鎖 Engine 內建的四軌介面，音效卡仍只用 2 路。每台播放機負責自己角色的兩軌（`自動`、`1+3`、`2+4`、`1+2`、`1`、`2`，在 `版面 → View → 四軌角色` 切換），其餘各軌是不出聲的**影子軌道**，跟隨另一台 EngineX 碟機或 CDJ 的曲目、播放 / CUE、位置、速度、Master 與同步；
 - 向 Shoutcast / Icecast 伺服器 **直播推流**；
 - **曲庫**：`自動分析插入的裝置` 暫不可用，僅保留偏好設定；rekordbox 匯出的隨身碟（包含 6.8.5）即使有個別檔案損壞也能正常匯入，那幾首在載入時再分析；選取其他串流服務時，不再跳出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示；
 - **Spotify 改用你自己的應用**：Spotify 限制每個應用的使用者數和請求量，所以不再內建共用的應用。到 `developer.spotify.com/dashboard` 免費建立一個應用，把網頁控制台裡顯示的 Redirect URI 加進去，再把它的 Client ID 填回控制台（`#70`）；
@@ -181,7 +180,7 @@
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/zh-TW/06b-preferences-device.png" width="100%" alt="裝置設定"><br>
 <b>裝置設定選單</b><br>
-<sub>直接切換語言、介面縮放、Pad 燈亮度、4 軌波形與轉盤燈效</sub>
+<sub>直接切換語言、Pad 燈亮度與電源開關</sub>
 </td>
 </tr>
 <tr>
@@ -214,7 +213,7 @@
 | **音訊核心被背景搶佔率** | 下載或匯入時偶發佔用 `5% – 25%` | **`0.0%`**：所有下載與分軌任務隔離在獨立副核心，不碰音訊核心 | **96 kHz 聲音播放全程零斷音** |
 | **先鋒 Rekordbox 隨身碟讀取速度** | 首次轉換約 `8 分鐘`，重掃 `15–24 秒` | **首次插碟 `< 2 秒`**，再次插碟 **`0.03 秒`** | 插上隨身碟即插即打，無需等待 |
 | **4 分鐘歌曲 Stems 分軌耗時** | SC5000 原廠鎖死不可用 | 連電腦 / 雲端約 **`35 秒`**；播放機本機分軌比播放速度快 **`1.4 倍`** | 演出中途臨時拆人聲也能快速完成 |
-| **大 BPM 差距同步** | BPM 差距超出變速範圍時 Sync 對不上，需要手動調大 Pitch Range | **智慧同步**自動升檔 Pitch Range（最高 `±100%`），控制中心一鍵切 Bar / Beat / Tempo | 速度相差很大的兩首歌也能直接同步 |
+| **大 BPM 差距同步** | BPM 差距超出變速範圍時 Sync 對不上，需要手動調大變速範圍 | **智慧同步**自動升檔變速範圍（最高 `±100%`），控制中心一鍵切 Bar / Beat / Tempo | 速度相差很大的兩首歌也能直接同步 |
 | **網路傳輸速度** | 有線網路孔限制在 `100 Mbps` | 有線網路孔 **`1 Gbps`（1000 Mbps）全雙工**，8 MiB TCP 緩衝；Wi-Fi 實測約 `9～10 MB/s`（SDIO 25 MHz SDR12 匯流排） | 大曲庫走 Gigabit 有線網路孔傳輸 |
 
 ---

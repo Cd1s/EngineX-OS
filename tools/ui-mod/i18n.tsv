@@ -1,6 +1,6 @@
 # English	简体中文	繁體中文 — exact UI strings; tracks, artists and playlists never pass through here.
 24 Hour Clock	24 小时制	24 小時制
-4-Deck Waveform	四路波形显示	四路波形顯示
+4-Deck Waveform	四轨波形显示	四軌波形顯示
 About / Update	关于 / 更新	關於 / 更新
 Account	账号	帳號
 Added	添加日期	新增日期
@@ -37,7 +37,7 @@ Computer Mode	电脑模式	電腦模式
 Confirm	确认	確認
 Connect New Sources	连接新来源	連接新來源
 Connection	连接	連線
-Continue	继续	繼續
+Continue	连续播放	連續播放
 Cue Solo Mode	Cue 独听模式	Cue 獨聽模式
 Current	当前	目前
 Database is up to date.	数据库已是最新。	資料庫已是最新。
@@ -130,16 +130,16 @@ On Air Mode	On Air 模式	On Air 模式
 Open	打开	開啟
 Other	其他	其他
 Output Equalizer	输出均衡器	輸出等化器
-Pad Lock	Pad 锁定	Pad 鎖定
+Pad Lock	打击垫锁定	打擊墊鎖定
 Pairing Failed	配对失败	配對失敗
 Password	密码	密碼
 Paused	已暂停	已暫停
 Paused Hot Cue Behavior	暂停时 Hot Cue 行为	暫停時 Hot Cue 行為
 Paused Saved Loop Behavior	暂停时 Saved Loop 行为	暫停時 Saved Loop 行為
-Performance Pads	演奏 Pad	演奏 Pad
-Pitch Bend Behavior	弯音行为	彎音行為
-Pitch Control Type	音高控制类型	音高控制類型
-Pitch Range	音高范围	音高範圍
+Performance Pads	演奏打击垫	演奏打擊墊
+Pitch Bend Behavior	变速微调行为	變速微調行為
+Pitch Control Type	变速键功能	變速鍵功能
+Pitch Range	变速范围	變速範圍
 Platter Touch Sensitivity	转盘触摸灵敏度	轉盤觸控靈敏度
 Player #	碟机编号 #	碟機編號 #
 Playhead Position	播放头位置	播放頭位置
@@ -147,7 +147,6 @@ Playlists	歌单	歌單
 Please check your internet connection.	请检查网络连接。	請檢查網路連線。
 Please wait...	请稍候…	請稍候…
 Preview Volume	预览音量	預覽音量
-Pro DJ Link Waveform	Pro DJ Link 波形	Pro DJ Link 波形
 Quantize	量化	量化
 RESET	重置	重設
 Read-only	只读	唯讀
@@ -241,7 +240,6 @@ Playback	播放	播放
 Safety	安全	安全
 Performance	演奏	演奏
 Cues/Loops	Cue / Loop	Cue / Loop
-Cues & Loops	Cue / Loop	Cue / Loop
 Deck Colors	碟机颜色	碟機顏色
 Theme	主题	主題
 Advanced	高级	進階
@@ -261,23 +259,18 @@ NetEase Cloud Music	网易云音乐	網易雲音樂
 Streaming Quality	流媒体音质	串流音質
 NetEase Download	网易云下载方式	網易雲下載方式
 Official	官方直下	官方直下
-Deemix First	Deemix优先	Deemix優先
+Deemix First	Deemix 优先	Deemix 優先
 Scan with your phone camera.	用手机相机扫码	用手機相機掃碼
 Low	低	低
 High	高	高
 Max	最高	最高
-Auto-Analyze Drives	自动分析插入的设备	自動分析插入的裝置
 Auto-Analyze Drives (Unavailable)	自动分析插入的设备（暂不可用）	自動分析插入的裝置（暫不可用）
-Jog Light Mode	转盘灯效	轉盤燈效
 OmniSource (Drives in Streaming)	OmniSource（在流媒体中显示 U 盘/SD）	OmniSource（在串流中顯示 USB/SD）
 Master Soft Clipper	0dB 防破音软限幅	0dB 防破音軟限幅
 Auto-Gain (0 dB Normalize)	自动增益（0 dB 归一化）	自動增益（0 dB 正規化）
 Pro DJ Link Library	Pro DJ Link 曲库	Pro DJ Link 曲庫
-Static	固定颜色	固定顏色
-Psy Rainbow	迷幻流光	迷幻流光
-Psy Fast	迷幻频闪	迷幻頻閃
-Lossless	无损 (Lossless)	無損 (Lossless)
-Psy BPM Sync	迷幻BPM同步	迷幻BPM同步
+Pro DJ Link Export to CDJ (Beta)	Pro DJ Link 导出至 CDJ（测试版）	Pro DJ Link 匯出至 CDJ（測試版）
+Lossless	无损	無損
 Stems	分轨 Stems	分軌 Stems
 Checking GitHub…	正在检查 GitHub…	正在檢查 GitHub…
 Updating…	正在更新…	正在更新…
@@ -314,12 +307,11 @@ Web Console	网页控制台	網頁控制台
 Access Code	访问码	存取碼
 Trigger Source	触发来源	觸發來源
 Fader Echo	推子回音	推桿回音
+Fader Echo: Up	推子回音：仅竖推	推桿回音：僅豎推
+Fader Echo: All	推子回音：全部	推桿回音：全部
 All Faders	全部推子	全部推桿
 Upfader Only	仅竖推	僅豎推
 Upfader	竖推	豎推
-Jog Light	转盘灯光	轉盤燈光
-Rainbow	彩虹	彩虹
-Fast	快速	快速
 All	全部	全部
 Pad LED Brightness	打击垫亮度	打擊墊亮度
 Dual-Column Browser	双栏浏览	雙欄瀏覽
@@ -338,21 +330,17 @@ Stems LAN renderer online:	局域网分轨主机在线：	區域網路分軌主�
 Stems LAN renderer offline:	局域网分轨主机离线：	區域網路分軌主機離線：
 Stem	分轨 Stems	分軌 Stems
 Cue Countdown	热标拍数倒数	熱標拍數倒數
-Mixer Menu	混音台菜单	混音台選單
-Mixer Settings	混音台设置	混音台設定
+Mixer Menu	混音台菜单	混音器選單
+Mixer Settings	混音台设置	混音器設定
 Channels	通道	通道
 Input	输入	輸入
 Player	播放器	播放機
 Line In	线路输入	線路輸入
-Line-In	线路输入	線路輸入
-LINE IN	线路输入	線路輸入
-LINE-IN	线路输入	線路輸入
 Engine	Engine	Engine
-AUX	AUX	AUX
 Shadow Deck Mode	影子轨模式	影子軌模式
-Auto: every source is shown exactly like a local deck; a CDJ track that cannot be copied (streaming, rekordbox Link) shows its rekordbox waveform	自动：所有来源都与本机显示完全一致；拷不到文件的 CDJ 曲目（流媒体、rekordbox Link）显示 rekordbox 波形	自動：所有來源都與本機顯示完全一致；拷不到檔案的 CDJ 曲目（串流、rekordbox Link）顯示 rekordbox 波形
-All Engine Mode: Engine loads every source and shows it exactly like a local deck	全部 Engine 模式：所有来源都由 Engine 加载，与本机显示完全一致	全部 Engine 模式：所有來源都由 Engine 載入，與本機顯示完全一致
-All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)	全部 CDJ 模式：所有来源都不加载曲目，按 CDJ / Pro DJ Link 方式显示	全部 CDJ 模式：所有來源都不載入曲目，依 CDJ / Pro DJ Link 方式顯示
+Auto: Engine loads every track it can copy and shows it exactly like a local deck; a CDJ track with no file to copy (streaming, rekordbox Link) shows its rekordbox waveform	自动：对端曲目能拷到时由本机加载，与本机显示一模一样；CDJ 曲目拷不到时（流媒体、rekordbox Link）显示 CDJ 波形	自動：對端曲目能複製到時由本機載入，與本機顯示一模一樣；CDJ 曲目複製不到時（串流、rekordbox Link）顯示 CDJ 波形
+All Engine Mode: Engine loads every source and shows it exactly like a local deck	全部 Engine 模式：所有对端曲目均由本机加载，与本机显示一模一样	全部 Engine 模式：所有對端曲目均由本機載入，與本機顯示一模一樣
+All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)	全部 CDJ 模式：不加载对端音频，一律显示 CDJ 式波形	全部 CDJ 模式：不載入對端音訊，一律顯示 CDJ 式波形
 All Engine Mode	全部 Engine 模式	全部 Engine 模式
 All CDJ Mode	全部 CDJ 模式	全部 CDJ 模式
 All Engine Mode: no CDJ waveform on Line In	全部 Engine 模式下 Line In 不显示 CDJ 波形	全部 Engine 模式下 Line In 不顯示 CDJ 波形
@@ -365,3 +353,56 @@ Retrying…	正在重试…	正在重試…
 Streaming track: no file to copy from the CDJ.	流媒体曲目：CDJ 上没有可拷贝的文件。	串流曲目：CDJ 上沒有可複製的檔案。
 rekordbox Link track: no file to copy from the CDJ.	rekordbox Link 曲目：CDJ 上没有可拷贝的文件。	rekordbox Link 曲目：CDJ 上沒有可複製的檔案。
 CD or second USB: no file to copy from the CDJ.	CD 或第二个 USB：CDJ 上没有可拷贝的文件。	CD 或第二個 USB：CDJ 上沒有可複製的檔案。
+Restart Engine to apply? Playback will stop.	需要重启 Engine，播放会中断。	需要重新啟動 Engine，播放會中斷。
+PERFORMANCE LAYOUT	演出布局	演出配置
+DECK BEHAVIOR	碟机行为	碟機行為
+Deck Type	碟机视图	碟機視圖
+Deck Layout	碟机排列	碟機排列
+Performance Library	同屏曲库	同屏曲庫
+Main FX	主效果栏	主效果欄
+Enable for Dual Deck	启用双层播放	啟用雙層播放
+Deck Swap	左右层互换	左右層互換
+X Fader	交叉推子	交叉推桿
+X Fader Contour	交叉推子曲线	交叉推桿曲線
+Stop Time	停盘时间	停盤時間
+FAST	快	快
+SLOW	慢	慢
+Split Cue	分离监听	分離監聽
+Software FX	软件效果	軟體效果
+Open Recording	打开录音	開啟錄音
+Mic	麦克风	麥克風
+Mic / Aux	麦克风 / Aux	麥克風 / Aux
+Cue/Loop Quantization	Cue/Loop 量化精度	Cue/Loop 量化精度
+Link Beat Jump / Loop Size Controls	联动节拍跳跃与 Loop 长度	連動節拍跳躍與 Loop 長度
+Smart Loops	智能 Loop	智慧 Loop
+Move Cue to Loop In	Cue 移至 Loop 起点	Cue 移至 Loop 起點
+Hot Cue Countdown	热标拍数倒数	熱標拍數倒數
+Collection Browse Behavior	曲库浏览方式	曲庫瀏覽方式
+Track Overview Style	曲目概览样式	曲目概覽樣式
+Stems List	Stems 分轨列表	Stems 分軌列表
+Contour	交叉推子曲线	交叉推桿曲線
+X-Fader Cut In Length Left	交叉推子左侧切入行程	交叉推桿左側切入行程
+X-Fader Cut In Length Right	交叉推子右侧切入行程	交叉推桿右側切入行程
+EQ Type	均衡器类型	等化器類型
+ISO EQ Low Xover	ISO 低频分频点	ISO 低頻分頻點
+ISO EQ High Xover	ISO 高频分频点	ISO 高頻分頻點
+Filter Resonance	滤波器谐振	濾波器諧振
+Filter Extreme Type	滤波极值行为	濾波極值行為
+Aux EQ	Aux 均衡器	Aux 等化器
+Smart Headphone Cue	智能耳机监听	智慧耳機監聽
+Split Cue Output	分离监听输出	分離監聽輸出
+Sum Main Out to Mono	主输出合并单声道	主輸出合併單聲道
+BPM Effects	节拍效果 (BPM FX)	節拍效果 (BPM FX)
+Effect Select Behavior	效果切换行为	效果切換行為
+Mirror Favorite FX Banks	镜像常用效果组	鏡像常用效果組
+Sweep Effects	滤波效果 (Sweep FX)	濾波效果 (Sweep FX)
+FX Noise Volume	Noise 效果音量	Noise 效果音量
+Fader Effects	推子效果 (Fader FX)	推桿效果 (Fader FX)
+Disarm After Trigger	触发后自动解除	觸發後自動解除
+Reset Effects to Default Settings	恢复效果默认设置	恢復效果預設設定
+SWEEP FX	滤波效果	濾波效果
+EQ / STEMS	EQ / 分轨	EQ / 分軌
+Jump −	跳拍 −	跳拍 −
+Jump +	跳拍 +	跳拍 +
+Sweep FX	滤波效果	濾波效果
+Resonance	谐振	諧振
