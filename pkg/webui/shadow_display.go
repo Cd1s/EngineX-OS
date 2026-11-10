@@ -237,7 +237,7 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 		lineFree = free
 	}
 	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
-		d := deckState{Deck: deck, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
+		d := deckState{Deck: deck, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: new(dev.Master), Lead: new(dev.Master), Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
 		if len(consoleLines) > 0 {
 			d.LineIn = true
 		}

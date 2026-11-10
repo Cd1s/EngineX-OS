@@ -66,7 +66,7 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 		"cue":    func(d *deckState) { d.Cues = []shadowCue{{I: 1, P: 4801, N: "A", C: "#fff"}} },
 		"cuePos": func(d *deckState) { x := 1.0; d.CuePos = &x },
 		"jump":   func(d *deckState) { d.Jumps++ },
-		"master": func(d *deckState) { d.Master = true },
+		"master": func(d *deckState) { d.Master = new(true) },
 		"track":  func(d *deckState) { d.Key = "k2" },
 	} {
 		d := steady
@@ -576,6 +576,44 @@ func TestShadowCarriesKeyName(t *testing.T) {
 // Two standalone players share master over Engine Link, so the shadow reply
 // clears Master (the copy must not take it). The header's LEAD has its own flag,
 // the source deck's DeckIsMaster, and a change of it wakes the QML.
+func TestShadowMasterLeadJSONRoundTrip(t *testing.T) {
+	for _, input := range []string{
+		`{"deck":2,"master":true,"lead":false}`,
+		`{"deck":2,"master":false,"lead":true}`,
+		`{"deck":2}`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			var first, second deckState
+			if err := json.Unmarshal([]byte(input), &first); err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(first)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want, got map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(input), &want); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(encoded, &got); err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"master", "lead"} {
+				if string(got[field]) != string(want[field]) {
+					t.Fatalf("%s: want %s, got %s in %s", field, want[field], got[field], encoded)
+				}
+			}
+			if err := json.Unmarshal(encoded, &second); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			if !samePeerPicture(peerDeck{deckState: first, at: now}, second, now) {
+				t.Fatal("the same decoded values must not wake the QML again")
+			}
+		})
+	}
+}
+
 func TestShadowReplyTellsLead(t *testing.T) {
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(s)
@@ -586,9 +624,9 @@ func TestShadowReplyTellsLead(t *testing.T) {
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
 	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
 	s.shadow.mu.Lock()
-	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Master: true, Seq: 1}, {Deck: 4, Key: "b", Master: true, Seq: 1}}, time.Now())
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Master: new(true), Lead: new(false), Seq: 1}, {Deck: 4, Key: "b", Master: new(true), Lead: new(false), Seq: 1}}, time.Now())
 	ver := s.shadow.ver
-	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Master: true, Lead: true, Seq: 2}, {Deck: 4, Key: "b", Master: true, Seq: 2}}, time.Now())
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Master: new(true), Lead: new(true), Seq: 2}, {Deck: 4, Key: "b", Master: new(true), Lead: new(false), Seq: 2}}, time.Now())
 	woke := s.shadow.ver != ver
 	s.shadow.mu.Unlock()
 	if !woke {
@@ -604,7 +642,7 @@ func TestShadowReplyTellsLead(t *testing.T) {
 		t.Fatalf("%v %+v", err, v.Decks)
 	}
 	for _, d := range v.Decks {
-		if d.Master || d.Lead != (d.Deck == 2) {
+		if d.Master == nil || *d.Master || (d.Lead != nil && *d.Lead) != (d.Deck == 2) {
 			t.Fatalf("shadow reply: %+v", d)
 		}
 	}

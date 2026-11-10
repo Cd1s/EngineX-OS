@@ -2029,6 +2029,30 @@ class ShadowHeadSyncLeadTest(unittest.TestCase):
     """Engine mode: the copy is in neither Sync nor the master selection, so its stock header said "not synced"
     while the source's BPM was green, and drew the phase meter while the source showed LEAD (g10-e-z3-L)."""
 
+    def test_final_bindings_use_explicit_false_and_fall_back_only_when_missing(self):
+        bp.ROOT = 'Skins/Embedded/'
+        patches = bp.edits(False)
+        for path, marker in (
+            ('Skins/Embedded/Views/MainView/Components/JP07SyncIndicator.qml', 'property bool isMaster:'),
+            ('Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/BpmInfo.qml', 'property bool syncEnabled:'),
+        ):
+            replacement = next(new for old, new in patches[path] if marker in new)
+            expression = replacement.split(':', 1)[1].strip()
+            ShadowDisplayTest.js(self, r"""
+globalThis.deckIndex = 2;
+globalThis.pDeckIsMaster = {translator: {state: true}};
+globalThis.deckController = {syncInfoViewController: {syncEnabled: true}};
+let source = {master: false, sync: false};
+globalThis.scShadowHeadOf = () => source;
+const result = () => !!(EXPRESSION);
+assert.equal(result(), false, 'source false overrides local true');
+pDeckIsMaster.translator.state = deckController.syncInfoViewController.syncEnabled = false;
+source = {master: true, sync: true}; assert.equal(result(), true);
+source = {}; assert.equal(result(), false, 'missing field keeps the stock local binding');
+pDeckIsMaster.translator.state = deckController.syncInfoViewController.syncEnabled = true;
+assert.equal(result(), true);
+""".replace('EXPRESSION', expression))
+
     def test_the_shadow_header_gets_the_sources_sync_and_master(self):
         ShadowDisplayTest.js(self, r"""
 Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
@@ -2039,8 +2063,9 @@ scShadowApplyAll(decks, false);
 const flags = () => Object.keys(scShadowHead).map(d => d + (scShadowHead[d].master ? 'M' : '') + (scShadowHead[d].sync ? 'S' : '')).join();
 assert.equal(flags(), '2S,4M');
 // `master` alone: the player holds the network master, no deck of it shows LEAD (R2 after a restart).
-decks[1] = deck(4, {master: true}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4');
+decks[1] = deck(4, {master: true, lead: false}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4');
 decks[1] = deck(4, {lead: true}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4M'); // stream-sync clears `master` for the copy
+decks[1] = deck(4, {master: true}); scShadowApplyAll(decks, false); assert.equal(flags(), '2S,4M'); // an older sender omitted LEAD
 const same = scShadowHead;
 scShadowApplyAll(decks, false);
 assert.strictEqual(scShadowHead, same, 'an unchanged state must not re-evaluate the header bindings');
@@ -2050,10 +2075,10 @@ assert.equal(flags(), '2S');
 scShadowApplyAll([], true); // display mode draws its own header
 assert.deepEqual(scShadowHead, {});
 """)
-        self.assertIn('head("deckIndex", "master")', SRC)
+        self.assertIn('head("deckIndex", "master",', SRC)
         self.assertIn("o.lead = s.master;", SRC)  # the source posts its own DeckIsMaster, what its header shows
         self.assertIn("sent.lead !== o.lead", SRC)  # and posts at once when only that changes
-        self.assertIn('head("deckIndex", "sync")', SRC)
+        self.assertIn('head("deckIndex", "sync",', SRC)
 
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
@@ -2081,8 +2106,8 @@ assert.equal(bodies[bodies.length - 1].keyName, '8B');
 // The peer: its header takes the three texts from the source, not from the copy.
 Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
 scShadowApplyAll([{deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '-'}, {deck: 4, path: '/c/b.mp3', id: 'j'}], false);
-assert.deepEqual(scShadowHead[2], {master: false, sync: false, title: 'A', artist: 'One', keyName: '-', loop: false, keyOffset: 0, stems: false, slip: 0});
-assert.deepEqual(scShadowHead[4], {master: false, sync: false, title: '', artist: '', keyName: '', loop: false, keyOffset: 0, stems: false, slip: 0}); // a CDJ or an older sender: stock texts
+assert.deepEqual(scShadowHead[2], {master: undefined, sync: false, title: 'A', artist: 'One', keyName: '-', loop: false, keyOffset: 0, stems: false, slip: 0});
+assert.deepEqual(scShadowHead[4], {master: undefined, sync: false, title: '', artist: '', keyName: '', loop: false, keyOffset: 0, stems: false, slip: 0}); // a CDJ or an older sender: stock texts
 """)
         for anchor in ('scaled[bj + "Deck/DeckItem/ArtistSong.qml"]', 'scaled[bj + "KeyEditor/KeyInfo.qml"]', "root.scShadowHeadOf(microDeck.deckIndex).title"):
             self.assertIn(anchor, SRC)
@@ -2156,7 +2181,7 @@ n = bodies.length; run(1000); assert.equal(bodies.length, n, 'nothing changed: n
 // The peer: its header and overview read them from the source's post.
 Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
 scShadowApplyAll([{deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '1B', loop: true, keyOffset: 1, stems: true, slip: 441000}], false);
-assert.deepEqual(scShadowHead[2], {master: false, sync: false, title: 'A', artist: 'One', keyName: '1B', loop: true, keyOffset: 1, stems: true, slip: 441000});
+assert.deepEqual(scShadowHead[2], {master: undefined, sync: false, title: 'A', artist: 'One', keyName: '1B', loop: true, keyOffset: 1, stems: true, slip: 441000});
 """)
         for anchor in ('scaled.setdefault(bj + "Deck/DeckItem/AutoLoop.qml", [])', "scHead.title ? scHead.stems : view.stemmed", "scHead.title ? scHead.keyOffset :",
                        "root.scShadowHeadOf(deckIndex).slip || 0", "scSlip > 0 ? scSlip : isSlipModeActive"):

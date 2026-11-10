@@ -329,7 +329,7 @@ func TestShadowDeckFromCDJ(t *testing.T) {
 		t.Fatalf("post device: %v %v", resp, err)
 	}
 	_, decks := shadowGetJSON(t, srv.URL+"/v1/sc5000/shadow")
-	if len(decks) != 1 || decks[0].Deck != 3 || !decks[0].Playing || decks[0].Pitch != -1.5 || decks[0].PositionMS < 5000 || decks[0].Path != "" || !decks[0].Master || !decks[0].Sync {
+	if len(decks) != 1 || decks[0].Deck != 3 || !decks[0].Playing || decks[0].Pitch != -1.5 || decks[0].PositionMS < 5000 || decks[0].Path != "" || (decks[0].Master == nil || !*decks[0].Master) || !decks[0].Sync {
 		t.Fatalf("shadow: %+v", decks)
 	}
 	// A CDJ-3000's absolute position (0x0b) wins over the beat-based one.

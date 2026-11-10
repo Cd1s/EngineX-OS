@@ -1258,7 +1258,7 @@ SERVICES_MAIN = """
 		if (!scShadowDisplayOnly) for (const d of [1, 2, 3, 4]) {
 			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
 			const e = decks.find(x => x.deck === d)
-			if (e && e.path) head[d] = {master: !!e.lead, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
+			if (e && e.path) head[d] = {master: typeof e.lead === "boolean" ? e.lead : e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
 				loop: !!e.loop, keyOffset: e.keyOffset || 0, stems: !!e.stems, slip: e.slip || 0}
 			// The last track is still on the deck (the next one's copy on its way, the peer gone): its
 			// header stays until it is unloaded. Without it the header read the copy's file name and key.
@@ -4859,8 +4859,8 @@ def edits(dev: bool):
         # Two decimals, and nothing else: the stock Row, colours and tap stay, and whatever stock
         # shows without an analysed tempo ("-", an unanalysed track) is stock's own text.
         # The shadow header mirrors the source deck's Sync (green BPM) and LEAD; the copy itself is in neither.
-        def head(deck, field):
-            return f'!!(typeof root !== "undefined" && root && root.scShadowHeadOf && root.scShadowHeadOf({deck}).{field})'
+        def head(deck, field, fallback="false"):
+            return f'(typeof root !== "undefined" && root && root.scShadowHeadOf && typeof root.scShadowHeadOf({deck}).{field} === "boolean" ? root.scShadowHeadOf({deck}).{field} : ({fallback}))'
         # Title, artist and key are the source's (its library's), not what Engine here reads from the copy.
         heads = 'readonly property var scHead: typeof root !== "undefined" && root && root.scShadowHeadOf ? root.scShadowHeadOf(deckIndex) : null\n'
         scaled[bj + "Deck/DeckItem/ArtistSong.qml"] = [
@@ -4891,10 +4891,10 @@ def edits(dev: bool):
         ])
         scaled[ROOT + "Views/MainView/Components/JP07SyncIndicator.qml"] = [
             ("    property bool isMaster: pDeckIsMaster.translator && pDeckIsMaster.translator.state\n",
-             "    property bool isMaster: (pDeckIsMaster.translator && pDeckIsMaster.translator.state) || " + head("deckIndex", "master") + "\n")]
+             "    property bool isMaster: " + head("deckIndex", "master", "pDeckIsMaster.translator && pDeckIsMaster.translator.state") + "\n")]
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
             ("    readonly property bool syncEnabled: deckController && deckController.syncInfoViewController.syncEnabled\n",
-             "    readonly property bool syncEnabled: (deckController && deckController.syncInfoViewController.syncEnabled) || " + head("deckIndex", "sync") + "\n"),
+             "    readonly property bool syncEnabled: " + head("deckIndex", "sync", "deckController && deckController.syncInfoViewController.syncEnabled") + "\n"),
             ("    property bool tappable: true\n",
              "    Layout.minimumWidth: implicitWidth\n    property bool tappable: true\n"
              '    readonly property var scBpm: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/CurrentBPM".arg(deckIndex)) : null\n'
