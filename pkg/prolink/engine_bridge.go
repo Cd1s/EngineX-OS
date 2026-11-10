@@ -947,10 +947,6 @@ func streamMeta(s streamFile, m engineMeta) rekordbox.Track {
 // waveforms), replacing any left by an evicted track that had its id, and
 // returns the path export.pdb points to.
 func writeANLZ(root string, id uint32, trackPath string, bpm float64, length int) (string, error) {
-	library := rekordbox.Library{Tracks: []rekordbox.Track{{ID: id, Path: trackPath, BPM: bpm, Duration: float64(length)}}}
-	if err := library.Validate(); err != nil {
-		return "", fmt.Errorf("validate export analysis: %w", err)
-	}
 	anlzRel := fmt.Sprintf("PIONEER/USBANLZ/P%03d", id)
 	dir := filepath.Join(root, anlzRel)
 	if err := os.MkdirAll(dir, 0755); err != nil {
