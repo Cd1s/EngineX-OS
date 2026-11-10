@@ -900,3 +900,17 @@ func TestTakePeerCollisionAcrossAddresses(t *testing.T) {
 		t.Fatalf("eject used slot instead of original deck: %+v", sh.peerDecks)
 	}
 }
+
+// Engine titles a file without tags by its name, extension included: the copy
+// was named "1449340582.mp3.mp3" and the shadow deck's header showed that.
+func TestDisplayFileNameKeepsAnExtensionTheTitleHas(t *testing.T) {
+	for _, c := range []struct{ artist, title, ext, want string }{
+		{"", "1449340582.mp3", ".mp3", "1449340582.mp3"},
+		{"A", "b.MP3", ".mp3", "A - b.MP3"},
+		{"", "b.flac", ".mp3", "b.flac.mp3"},
+	} {
+		if got := displayFileName(c.artist, c.title, c.ext); got != c.want {
+			t.Errorf("displayFileName(%q, %q, %q) = %q, want %q", c.artist, c.title, c.ext, got, c.want)
+		}
+	}
+}

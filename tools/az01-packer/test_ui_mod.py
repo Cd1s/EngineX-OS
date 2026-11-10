@@ -1204,6 +1204,12 @@ assert.equal(scShadowData(2).rate,1.031028);
         self.assertIn('Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: "#b7b7b7" }', layer)
         self.assertIn('text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""', layer)
 
+    def test_shadow_layer_restores_the_stock_visible_binding_not_a_value(self):
+        # 11-10, Engine mode: no waveform on the shadow decks. Binding read the
+        # effective visible (false, view off screen) and wrote it back on exit.
+        layer = bp.shadow_layer("import QtQuick 2.0\nItem {\n    id: w\n}\n", "waveform")
+        self.assertIn('property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBinding }', layer)
+
 
 if __name__ == "__main__":
     unittest.main()
