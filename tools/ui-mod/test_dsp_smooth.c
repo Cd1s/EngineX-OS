@@ -955,6 +955,82 @@ static void test_pioneer_fx(void)
     }
 }
 
+static void test_hifi_shelf_filter(void)
+{
+    /* #172: High-frequency shelf compensation (RBJ biquad high-shelf) */
+    struct sc_hifi_shelf shelf;
+    memset(&shelf, 0, sizeof(shelf));
+
+    float in_l[128], in_r[128], copy_l[128], copy_r[128];
+    for (int i = 0; i < 128; i++) {
+        in_l[i] = 0.3f;
+        in_r[i] = -0.3f;
+    }
+    memcpy(copy_l, in_l, sizeof(copy_l));
+    memcpy(copy_r, in_r, sizeof(copy_r));
+
+    /* 1. Disabled: bit-exact pass-through */
+    sc_hifi_shelf_planar(&shelf, in_l, in_r, 128, 0);
+    CHECK(!memcmp(in_l, copy_l, sizeof(in_l)));
+    CHECK(!memcmp(in_r, copy_r, sizeof(in_r)));
+    CHECK(shelf.z1_l == 0.0f && shelf.z2_l == 0.0f && shelf.z1_r == 0.0f && shelf.z2_r == 0.0f);
+
+    /* 2. Enabled: low frequency (DC) should have unity gain in steady state */
+    for (int b = 0; b < 10; b++) {
+        for (int i = 0; i < 128; i++) {
+            in_l[i] = 0.5f;
+            in_r[i] = 0.5f;
+        }
+        sc_hifi_shelf_planar(&shelf, in_l, in_r, 128, 1);
+    }
+    CHECK(fabsf(in_l[127] - 0.5f) < 1e-4f);
+    CHECK(fabsf(in_r[127] - 0.5f) < 1e-4f);
+
+    /* 2b. Enabled: 1 kHz tone should have gain very close to 1.00 (within 0.02) */
+    memset(&shelf, 0, sizeof(shelf));
+    float peak_1k = 0.0f;
+    for (int b = 0; b < 20; b++) {
+        for (int i = 0; i < 128; i++) {
+            float t = (float)(b * 128 + i) / 48000.0f;
+            in_l[i] = 0.4f * sinf(2.0f * (float)M_PI * 1000.0f * t);
+            in_r[i] = in_l[i];
+        }
+        sc_hifi_shelf_planar(&shelf, in_l, in_r, 128, 1);
+        if (b >= 15) {
+            for (int i = 0; i < 128; i++) {
+                float a = fabsf(in_l[i]);
+                if (a > peak_1k) peak_1k = a;
+            }
+        }
+    }
+    float gain_1k = peak_1k / 0.4f;
+    CHECK(fabsf(gain_1k - 1.00f) < 0.02f);
+
+    /* 3. Enabled: high frequency (Nyquist alternation +0.4, -0.4) gain significantly > 1.40 (+3.8 dB) */
+    memset(&shelf, 0, sizeof(shelf));
+    for (int b = 0; b < 10; b++) {
+        for (int i = 0; i < 128; i++) {
+            in_l[i] = (i % 2 == 0) ? 0.4f : -0.4f;
+            in_r[i] = (i % 2 == 0) ? 0.4f : -0.4f;
+        }
+        sc_hifi_shelf_planar(&shelf, in_l, in_r, 128, 1);
+    }
+    float hf_peak = fabsf(in_l[127]);
+    float hf_gain = hf_peak / 0.4f;
+    CHECK(hf_gain > 1.40f);
+    CHECK(hf_peak > 0.58f && hf_peak < 0.65f);
+
+    /* 4. Subnormal and non-finite sanitization */
+    union { uint32_t u; float f; } huge_pos = { .u = 0x7f7fffffu };
+    union { uint32_t u; float f; } huge_neg = { .u = 0xff7fffffu };
+    float bad_l[16] = {NAN, INFINITY, -INFINITY, 1.0e-25f, -1.0e-25f, huge_pos.f, huge_neg.f, 0.1f};
+    float bad_r[16] = {0};
+    sc_hifi_shelf_planar(&shelf, bad_l, bad_r, 16, 1);
+    for (int i = 0; i < 16; i++) {
+        CHECK(isfinite(bad_l[i]) && isfinite(bad_r[i]));
+    }
+}
+
 int main(void)
 {
     test_finite();
@@ -972,6 +1048,7 @@ int main(void)
     test_echo_out();
     test_pioneer_fx();
     test_slip_roll_seam();
+    test_hifi_shelf_filter();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return EXIT_FAILURE;

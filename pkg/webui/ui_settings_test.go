@@ -681,3 +681,65 @@ func TestUISettingsQoLFXAndStreamingSort(t *testing.T) {
 		}
 	}
 }
+
+func TestUISettingsAudioProfile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+
+	// 1. Verify defaults
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || v.AudioProfile != "stock" {
+		t.Fatalf("unexpected defaults: code=%d %+v", code, v)
+	}
+
+	// 2. Update to valid non-defaults
+	if code, v := uiPost(t, srv.URL, "audioProfile=flat"); code != 200 || v.AudioProfile != "flat" {
+		t.Fatalf("update failed: code=%d %+v", code, v)
+	}
+
+	// Verify persistence in settings.conf
+	confBytes, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := splitLines(confBytes)
+	for _, expected := range []string{"audio_profile=flat"} {
+		if !slices.Contains(lines, expected) {
+			t.Errorf("settings.conf missing %q in:\n%s", expected, string(confBytes))
+		}
+	}
+
+	// 3. Reload in new server instance
+	srv2 := httptest.NewServer(New(cfg, nil))
+	defer srv2.Close()
+	if code, v := uiPost(t, srv2.URL, ""); code != 200 || v.AudioProfile != "flat" {
+		t.Fatalf("reloaded settings mismatch: code=%d %+v", code, v)
+	}
+
+	// 4. Test boundary values and rejections
+	badQueries := []string{
+		"audioProfile=invalid",
+		"audioProfile=boost",
+		"audioProfile=flatt",
+	}
+	for _, bad := range badQueries {
+		if code, _ := uiPost(t, srv.URL, bad); code != 400 {
+			t.Errorf("expected 400 for %s, got %d", bad, code)
+		}
+	}
+
+	// 5. Reset back to defaults and verify omissions in settings.conf
+	if code, v := uiPost(t, srv.URL, "audioProfile=stock"); code != 200 || v.AudioProfile != "stock" {
+		t.Fatalf("reset failed: code=%d %+v", code, v)
+	}
+	confBytes, _ = os.ReadFile(filepath.Join(dir, "settings.conf"))
+	lines = splitLines(confBytes)
+	for _, unexpected := range []string{"audio_profile=flat"} {
+		for _, line := range lines {
+			if strings.HasPrefix(line, unexpected) {
+				t.Errorf("settings.conf should not contain default %q, but has %q", unexpected, line)
+			}
+		}
+	}
+}

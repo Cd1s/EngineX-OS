@@ -710,6 +710,7 @@ SERVICES_MAIN = """
 	}
 	property bool scBeatJumpPads: false
 	property string scPioneerFx: "off"
+	property string scAudioProfile: "stock"
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
 	property bool scUpdating: false
@@ -952,6 +953,8 @@ SERVICES_MAIN = """
 			else if (v.beat_jump_pads !== undefined) scBeatJumpPads = v.beat_jump_pads === "1" || v.beat_jump_pads === 1 || v.beat_jump_pads === true
 			if (v.pioneerFx !== undefined) scPioneerFx = v.pioneerFx || "off"
 			else if (v.pioneer_fx !== undefined) scPioneerFx = v.pioneer_fx || "off"
+			if (v.audioProfile !== undefined) scAudioProfile = v.audioProfile || "stock"
+			else if (v.audio_profile !== undefined) scAudioProfile = v.audio_profile || "stock"
 		}
 		if (scStemsEqMode && !scStemsEqApplied) {
 			scStemsEqApplied = true
@@ -985,6 +988,7 @@ SERVICES_MAIN = """
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
+			else if (key === "audio_profile") root.scAudioProfile = val || "stock"
 		}
 	}
 	function scSyncBroadcastMeta() {
@@ -1587,6 +1591,13 @@ PLAYBACK_ENTRIES = """
 			values: ["Off", "Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scPioneerFx))]
 			onSelected: function(index) { root.scCall("pioneerFx=" + ids[index]) }
+		},
+		EntryBase.ListEntry {
+			text: "Audio Profile (HF Roll-Off)"
+			readonly property var ids: ["stock", "flat"]
+			values: ["Stock", "Flat Hi-Fi (+3.5 dB HF)"]
+			currentValue: values[Math.max(0, ids.indexOf(root.scAudioProfile))]
+			onSelected: function(index) { root.scCall("audioProfile=" + ids[index]) }
 		},
 """
 

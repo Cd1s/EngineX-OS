@@ -201,9 +201,9 @@
         { k: "h", id: "profile", x: L("2. 个人偏好（User Profile）", "2. 個人偏好（User Profile）", "2. User Profile"), nav: L("2. 个人偏好", "2. 個人偏好", "2. User Profile") },
         { k: "table", head: [L("分组", "分組", "Group"), L("开关", "開關", "Settings")], rows: [
           [L("`Playback` 播放与音频 DSP", "`Playback` 播放與音訊 DSP", "`Playback` (playback & audio DSP)"),
-           L("`Master Soft Clipper`（主输出软限幅）、`Auto-Gain`（0 dB 自动增益）、`Echo Out`（推杆回音）、`Stems EQ Mode`（分轨 EQ 映射）、`Color FX Style`（先锋风格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
-             "`Master Soft Clipper`（主輸出軟限幅）、`Auto-Gain`（0 dB 自動增益）、`Echo Out`（推桿回音）、`Stems EQ Mode`（分軌 EQ 映射）、`Color FX Style`（先鋒風格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
-             "`Master Soft Clipper`, `Auto-Gain` (0 dB), `Echo Out`, `Stems EQ Mode` (stem-to-EQ mapping), `Color FX Style` (Pioneer-style `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`, #88)")],
+           L("`Master Soft Clipper`（主输出软限幅）、`Audio Profile (HF Roll-Off)`（高频滚降补偿）、`Auto-Gain`（0 dB 自动增益）、`Echo Out`（推杆回音）、`Stems EQ Mode`（分轨 EQ 映射）、`Color FX Style`（先锋风格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
+             "`Master Soft Clipper`（主輸出軟限幅）、`Audio Profile (HF Roll-Off)`（高頻滾降補償）、`Auto-Gain`（0 dB 自動增益）、`Echo Out`（推桿回音）、`Stems EQ Mode`（分軌 EQ 映射）、`Color FX Style`（先鋒風格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
+             "`Master Soft Clipper`, `Audio Profile (HF Roll-Off)`, `Auto-Gain` (0 dB), `Echo Out`, `Stems EQ Mode` (stem-to-EQ mapping), `Color FX Style` (Pioneer-style `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`, #88)")],
           ["`Cues/Loops`", "`Beat Jump Pad Bank`、`Swap Loop / Beat Jump`"],
           [L("`Safety` 演出防呆", "`Safety` 演出防呆", "`Safety` (gig safety)"), L("`Sync Guard Tolerance`（BPM 同步防呆范围：`Off` / `10%` / `15%` / `20%`）", "`Sync Guard Tolerance`（BPM 同步防呆範圍：`Off` / `10%` / `15%` / `20%`）", "`Sync Guard Tolerance` (BPM range the sync guard accepts: `Off` / `10%` / `15%` / `20%`)")],
           [L("`Library` 曲库", "`Library` 曲庫", "`Library`"),
@@ -409,6 +409,9 @@
         { k: "ul", x: [
           L("**先锋风格 Beat FX 与 Sound Color FX（#88）**：在 Engine 音频回调里实时模拟 **`Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo`、`Space`** 五种经典效果，以及 **`Stems EQ Mode`**（分轨 EQ 映射），可在 `个人偏好 → Playback → Color FX Style` 切换（默认关闭）。", "**先鋒風格 Beat FX 與 Sound Color FX（#88）**：於 Engine 音訊回呼中即時模擬 **`Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo`、`Space`** 五種經典效果，以及 **`Stems EQ Mode`**（分軌 EQ 映射），可於 `個人偏好 → Playback → Color FX Style` 切換（預設關閉）。", "**Pioneer-style Beat FX & Sound Color FX (#88)**: real-time audio-callback emulation of **`Spiral`, `Pitch Echo`, `Slip Roll`, `Dub Echo` and `Space`**, plus **`Stems EQ Mode`**, selectable under `User Profile → Playback → Color FX Style` (off by default)."),
           L("**切效果器零爆音**：开关 / 切换 FX 时的“咔嗒”消除，双轨同时开效果器也平滑淡入。", "**切效果器零爆音**：開關 / 切換 FX 時的「喀嗒」消除，雙軌同時開效果器也平滑淡入。", "**Click-free FX**: the click when toggling or switching FX is gone, even with FX on both decks."),
+          L("**Flat Hi-Fi 高频滚降补偿（#172）**：修复 zplane élastique Pro v3 引起的 16–20 kHz 滚降，二阶 RBJ 高频搁架双二阶滤波器平滑补偿 +3.8 dB，自动串联软限幅防爆音（`Audio Profile` 可选 `Stock` / `Flat Hi-Fi`）。",
+            "**Flat Hi-Fi 高頻滾降補償（#172）**：修復 zplane élastique Pro v3 引起的 16–20 kHz 滾降，二階 RBJ 高頻擱架雙二階濾波器平滑補償 +3.8 dB，自動串聯軟限幅防爆音（`Audio Profile` 可選 `Stock` / `Flat Hi-Fi`）。",
+            "**Flat Hi-Fi HF roll-off compensation (#172)**: restores the 16–20 kHz roll-off from zplane élastique Pro v3 with a smooth +3.8 dB 2nd-order RBJ biquad high-shelf filter, automatically chained with the soft limiter (`Audio Profile`: `Stock` / `Flat Hi-Fi`)."),
           L("**0dB 防破音软限幅**：平滑曲线把主输出压在 -0.1 dBFS 以下，零延迟，-1.5 dBFS 以下原样不动。", "**0dB 防破音軟限幅**：平滑曲線把主輸出壓在 -0.1 dBFS 以下，零延遲，-1.5 dBFS 以下原樣不動。", "**0 dB soft limiter**: a smooth curve keeps the main output below -0.1 dBFS with zero latency and leaves signals under -1.5 dBFS untouched."),
           L("**自动增益（0 dB 归一化）**：把偏小的歌平滑提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下静音不提升），之后总经过软限幅（默认关闭）。", "**自動增益（0 dB 正規化）**：把偏小的歌平滑提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下靜音不提升），之後總經過軟限幅（預設關閉）。", "**Auto-Gain (0 dB normalise)**: lifts quiet songs smoothly towards 0 dBFS (up to +9 dB, silence below -42 dBFS is not boosted) and always passes through the soft limiter (off by default)."),
           L("Flanger 不再让音量下沉（自动补偿，最多 +6 dB）。", "Flanger 不再讓音量下沉（自動補償，最多 +6 dB）。", "Flanger no longer sinks the level (auto-compensated, up to +6 dB)."),

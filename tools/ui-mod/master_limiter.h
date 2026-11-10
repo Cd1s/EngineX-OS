@@ -110,10 +110,54 @@ static inline void sc_gain_planar(struct sc_gain *s, float *l, float *r, unsigne
         return; /* unity: leave the block untouched */
     for (unsigned i = 0; i < frames; i++) {
         float g = g0 + (g1 - g0) * (float)(i + 1) / (float)frames;
-        l[i] *= g;
-        if (r)
-            r[i] *= g;
-    }
+		l[i] *= g;
+		if (r)
+			r[i] *= g;
+	}
+}
+
+/* #172 SC5000/SC6000 16-20 kHz high-frequency roll-off shelf compensation (+3.8 dB RBJ biquad) */
+struct sc_hifi_shelf {
+	float z1_l, z2_l, z1_r, z2_r;
+};
+
+static inline float sc_hifi_clean(float x)
+{
+	return (x <= 3.0e38f && x >= -3.0e38f) ? ((x > -1.0e-20f && x < 1.0e-20f) ? 0.0f : x) : 0.0f;
+}
+
+static inline void sc_hifi_shelf_planar(struct sc_hifi_shelf *s, float *l, float *r, unsigned frames, int enabled)
+{
+	if (!s || !l || frames == 0)
+		return;
+	if (!enabled) {
+		s->z1_l = s->z2_l = s->z1_r = s->z2_r = 0.0f;
+		return;
+	}
+	float z1_l = sc_hifi_clean(s->z1_l);
+	float z2_l = sc_hifi_clean(s->z2_l);
+	float z1_r = sc_hifi_clean(s->z1_r);
+	float z2_r = sc_hifi_clean(s->z2_r);
+	const float b0 = 1.173069f, b1 = 0.494294f, b2 = 0.238292f, a1 = 0.656773f, a2 = 0.248882f;
+	for (unsigned i = 0; i < frames; i++) {
+		float in_l = sc_hifi_clean(l[i]);
+		float out_l = sc_hifi_clean(b0 * in_l + z1_l);
+		z1_l = sc_hifi_clean(b1 * in_l - a1 * out_l + z2_l);
+		z2_l = sc_hifi_clean(b2 * in_l - a2 * out_l);
+		l[i] = out_l;
+
+		if (r) {
+			float in_r = sc_hifi_clean(r[i]);
+			float out_r = sc_hifi_clean(b0 * in_r + z1_r);
+			z1_r = sc_hifi_clean(b1 * in_r - a1 * out_r + z2_r);
+			z2_r = sc_hifi_clean(b2 * in_r - a2 * out_r);
+			r[i] = out_r;
+		}
+	}
+	s->z1_l = z1_l;
+	s->z2_l = z2_l;
+	s->z1_r = z1_r;
+	s->z2_r = z2_r;
 }
 
 #endif

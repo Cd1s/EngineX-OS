@@ -139,11 +139,12 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
 static int pioneer_fx_mode;           // #88 Pioneer FX emulations
+static int hifi_enabled;              // #172 audio_profile=flat: HF shelf compensation
 
 static void *lim_poll(void *arg) {
     (void)arg;
     for (;;) {
-        int on = 0, gain = 0, echo = 0, pioneer_fx = 0;
+        int on = 0, gain = 0, echo = 0, pioneer_fx = 0, hifi = 0;
         FILE *f = fopen(UI_ROOT "/settings.conf", "r");
         if (f) {
             char line[64];
@@ -151,6 +152,7 @@ static void *lim_poll(void *arg) {
                 if (!strncmp(line, "master_limiter=1", 16)) on = 1;
                 else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
                 else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
+                else if (!strncmp(line, "audio_profile=flat", 18)) hifi = 1;
                 else if (!strncmp(line, "pioneer_fx=", 11)) {
                     char val[64];
                     size_t len = strcspn(line + 11, "\r\n");
@@ -166,6 +168,7 @@ static void *lim_poll(void *arg) {
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
         __atomic_store_n(&echo_enabled, echo, __ATOMIC_RELAXED);
         __atomic_store_n(&pioneer_fx_mode, pioneer_fx, __ATOMIC_RELAXED);
+        __atomic_store_n(&hifi_enabled, hifi, __ATOMIC_RELAXED);
         sleep(1);
     }
     return NULL;
@@ -381,6 +384,7 @@ static struct sc_gain master_gain[8];
 static struct sc_echo master_echo[MASTER_ECHO_PAIRS];
 #define MASTER_PFX_PAIRS 4
 static struct sc_pioneer_fx master_pfx[MASTER_PFX_PAIRS];
+static struct sc_hifi_shelf master_hifi[8];
 // #49: in the 4-deck layout a player's 4-channel device (two stereo pairs) leaves
 // decks 3 and 4 without output buffers, and Engine skips rendering them ("Mixer
 // skipped ... unassigned output buffer"): their playheads stand still. All four
@@ -424,9 +428,18 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
             }
         }
     }
+    // #172 Audio Profile: 16-20 kHz high-frequency roll-off shelf compensation (+3.5 dB)
+    int hifi = __atomic_load_n(&hifi_enabled, __ATOMIC_RELAXED);
+    if (out && frames > 0) {
+        for (int ch = 0; ch < out_channels && ch < 16; ch += 2) {
+            float *r = ch + 1 < out_channels ? out[ch + 1] : NULL;
+            sc_hifi_shelf_planar(&master_hifi[ch / 2], out[ch], r, (unsigned)frames, hifi);
+        }
+    }
     int gain = __atomic_load_n(&gain_enabled, __ATOMIC_RELAXED);
-    // Auto-Gain (#64) always runs into the limiter, so a boost never clips.
-    if ((gain || __atomic_load_n(&lim_enabled, __ATOMIC_RELAXED)) && out && frames > 0)
+    int lim = __atomic_load_n(&lim_enabled, __ATOMIC_RELAXED);
+    // Auto-Gain (#64) and Hi-Fi shelf (#172) always run into the limiter, so a boost never clips.
+    if ((hifi || gain || lim) && out && frames > 0)
         for (int ch = 0; ch < out_channels && ch < 16; ch += 2) {
             float *r = ch + 1 < out_channels ? out[ch + 1] : NULL;
             if (gain) sc_gain_planar(&master_gain[ch / 2], out[ch], r, (unsigned)frames);

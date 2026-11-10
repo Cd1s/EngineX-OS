@@ -8,6 +8,7 @@ Album	专辑	專輯
 Are you sure you want to log out of your Engine DJ Profile?	确定要退出 Engine DJ 账号吗？	確定要登出 Engine DJ 帳號嗎？
 Assign Input to	输入分配到	輸入分配到
 Attenuation	衰减	衰減
+Audio Profile (HF Roll-Off)	音频特性（高频滚降补偿）	音訊特性（高頻滾降補償）
 Auto Connect	自动连接	自動連線
 Bass	低音	低音
 Battery Charging	电池充电中	電池充電中
@@ -67,6 +68,7 @@ Encoder Behavior	旋钮行为	旋鈕行為
 Engine Lighting	Engine 灯光	Engine 燈光
 Factory Reset	恢复出厂设置	恢復原廠設定
 Failed to load track	曲目加载失败	曲目載入失敗
+Flat Hi-Fi (+3.5 dB HF)	Flat Hi-Fi (+3.5 dB 高频)	Flat Hi-Fi (+3.5 dB 高頻)
 Features	功能	功能
 Fetching more content..	正在加载更多内容…	正在載入更多內容…
 Fetching more tracks...	正在加载更多曲目…	正在載入更多曲目…
