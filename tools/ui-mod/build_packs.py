@@ -5523,6 +5523,12 @@ def edits(dev: bool):
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml"] = [(
             "        source: albumArt.albumArtPath\n",
             art_source("        ", "albumArt.deckIndex", "albumArt.albumArtPath", "albumArt.deckView && albumArt.deckView.artistSongView ? albumArt.deckView.artistSongView.songName : \"\"", "scArtImage", add_id=True))]
+        scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/ArtistSong.qml"] = [
+            ("        providerName: artistSong.trackSource\n",
+             "        providerName: artistSong.trackSource\n        respectHideTitleArtist: true\n"),
+            ("            visible: artistSong.artistVisible && !artistSong.onlyFileName && artistSong.artistTextString.length > 0\n",
+             "            visible: artistSong.artistVisible && !artistSong.onlyFileName && !displayText.hideTitleArtist && artistSong.artistTextString.length > 0\n"),
+        ]
         # In the 4-deck layout the deck colour came out white (measured on a 1+3 deck with
         # blue PlayerColor1/2), which has no gradient and draws a black strip, and an unset
         # PlayerColor3/4 is black: use the deck's PlayerColor preference, then the player's
