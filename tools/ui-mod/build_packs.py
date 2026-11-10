@@ -525,12 +525,12 @@ SERVICES_MAIN = """
 		}
 		return true
 	}
-	function scShadowApplyDisplay(decks, engineMask) { // engineMask: slots that are Engine's, cleared here
+	function scShadowApplyDisplay(decks) {
 		const now = Date.now()
 		let next = null // copied on the first real change only
 		for (let d = 1; d <= 4; d++) {
 			let e = null
-			if (((engineMask >> d) & 1) === 0) for (let i = 0; i < decks.length; i++) if (Number(decks[i].deck) === d) { e = decks[i]; break }
+			for (let i = 0; i < decks.length; i++) if (Number(decks[i].deck) === d) { e = decks[i]; break }
 			const old = scShadowData(d)
 			const isLine = !!(e && e.lineIn)
 			if (!e || scFourDeckRole === "" || (!isLine && scFourDeckRole.indexOf(String(d)) >= 0) || !(e.key || e.loading)) {
@@ -1204,7 +1204,7 @@ SERVICES_MAIN = """
 		scShadowEngineMask = mask
 		scShadowLineMask = lineMask
 		root.scShadowCdjMaster = master
-		scShadowApplyDisplay(decks, mask)
+		scShadowApplyDisplay(decks.filter(e => e.displayOnly === true)) // the slots that are Engine's are cleared there
 		for (const e of decks) if (e.displayOnly !== true) root.scShadowApply(e)
 		const now = Date.now()
 		for (const d of [1, 2, 3, 4]) {
@@ -2650,13 +2650,23 @@ FOUR_DECK_ENTRIES = """
 			onSelected: function(index) { if (ids[index] !== root.scFourDeckRoleSetting) root.scRestartCall("fourDeckRole=" + ids[index]) }
 		},
 		EntryBase.ListEntry {
+			id: scShadowModeEntry
 			readonly property var ids: ["auto", "engine", "cdj"]
 			readonly property int at: Math.max(0, ids.indexOf(root.scShadowMode))
-			text: ["Shadow Deck Mode: by source (EngineX deck: exactly like a local deck; CDJ: rekordbox waveform)", "Shadow Deck Mode: Engine loads every source, shown exactly like a local deck", "Shadow Deck Mode: no track is loaded for any source (CDJ / Pro DJ Link view)"][at]
+			text: "Shadow Deck Mode"
 			visible: root.scFourDeckOn
+			entryWidth: 176 // "All Engine Mode" does not fit the stock 136
 			values: ["Auto", "All Engine Mode", "All CDJ Mode"]
 			currentValue: values[at]
 			onSelected: function(index) { if (index !== at) root.scRestartCall("shadowMode=" + ids[index]) }
+		},
+		@HEADLINE@ { // one sentence on the selected mode; too long for the row itself
+			visible: root.scFourDeckOn
+			leftPadding: 24; rightPadding: 24
+			wrapMode: Text.WordWrap
+			Layout.preferredHeight: implicitHeight
+			color: "#9a9a9a"
+			text: ["Auto: an EngineX deck is shown exactly like a local deck, a CDJ with its rekordbox waveform", "All Engine Mode: Engine loads every source and shows it exactly like a local deck", "All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)"][scShadowModeEntry.at]
 		},
 """
 

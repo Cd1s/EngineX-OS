@@ -1020,7 +1020,7 @@ class UiModBuildTest(unittest.TestCase):
                     with tarfile.open(out.with_suffix(".tar.gz")) as pack:
                         for lang in ("en", "zh-Hans", "zh-Hant"):
                             main = pack.extractfile(f"packs/{lang}/Skins/Embedded/EmbeddedMain.qml").read().decode()
-                            self.assertIn("function scShadowApplyDisplay(decks, engineMask)", main)
+                            self.assertIn("scShadowApplyDisplay(decks.filter(e => e.displayOnly === true))", main)
                             self.assertIn("s.metadataOnly", main)
                             self.assertIn("/v1/sc5000/shadow/display?deck=", main)
                             self.assertIn("scDeckLocked", main)
