@@ -96,9 +96,6 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <h2><span class="ic">◐</span><span data-i18n="deck"></span></h2>
   <div class="setting"><div class="txt"><b data-i18n="quality"></b><span class="sub" data-i18n="qualitySub"></span></div><div class="seg" data-seg="quality"><button data-v="flac">FLAC</button><button data-v="320k">320 kbps</button></div></div>
   <div class="setting"><div class="txt"><b data-i18n="deckLang"></b><span class="sub" data-i18n="deckLangSub"></span></div><div class="seg" data-seg="lang"><button data-v="en">English</button><button data-v="zh-Hans">简体中文</button><button data-v="zh-Hant">繁體中文</button></div></div>
-  <div class="setting"><div class="txt"><b data-i18n="waveform"></b><span class="sub" data-i18n="waveformSub"></span></div><div class="seg" data-seg="waveform"><button data-v="denon" data-i18n="wDenon"></button><button data-v="rgb">RGB</button><button data-v="3band">3-Band</button></div></div>
-  <div class="setting"><div class="txt"><b data-i18n="tFourDeck"></b><span class="sub" data-i18n="sFourDeck"></span></div><label class="sw"><input type="checkbox" data-toggle="fourDeckWaveform"><span></span></label></div>
-  <div class="setting" id="fourDeckRoleRow"><div class="txt"><b data-i18n="tRole"></b><span class="sub" data-i18n="sRole"></span></div><div class="seg" data-seg="fourDeckRole"><button data-v="auto" data-i18n="rAuto"></button><button data-v="13">1+3</button><button data-v="24">2+4</button><button data-v="12">1+2</button><button data-v="1">1</button><button data-v="2">2</button></div></div>
   <div class="setting"><div class="txt"><b data-i18n="tEcho"></b><span class="sub" data-i18n="sEcho"></span></div><label class="sw"><input type="checkbox" data-toggle="upfaderEcho"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tLimiter"></b><span class="sub" data-i18n="sLimiter"></span></div><label class="sw"><input type="checkbox" data-toggle="masterLimiter"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tGain"></b><span class="sub" data-i18n="sGain"></span></div><label class="sw"><input type="checkbox" data-toggle="autoGain"><span></span></label></div>
@@ -145,8 +142,7 @@ relocate:['Relocate Missing Tracks (#74)','丢失曲目自动重定位 (#74)','�
 relScan:['Scan missing tracks','扫描丢失曲目','掃描遺失曲目'],relApply:['Relocate','一键修复路径','一鍵修復路徑'],relConfirm:['Rewrite the paths of {0} tracks? m.db is backed up first.','改写 {0} 首曲目的路径？会先备份 m.db。','改寫 {0} 首曲目的路徑？會先備份 m.db。'],
 relSummary:['{0}: {1} missing, {2} can be fixed, {3} not found','{0}：丢失 {1} 首，可修复 {2} 首，未找到 {3} 首','{0}：遺失 {1} 首，可修復 {2} 首，未找到 {3} 首'],relDone:['{0}: {1} paths fixed, backup {2}','{0}：已修复 {1} 首路径，备份 {2}','{0}：已修復 {1} 首路徑，備份 {2}'],relNothing:['No missing tracks','没有丢失的曲目','沒有遺失的曲目'],relTier:['Match {0} (1 = most certain)','匹配等级 {0}（1 最可靠）','比對等級 {0}（1 最可靠）'],
 deck:['Deck display & audio','碟机显示与音频','碟機顯示與音訊'],quality:['Streaming quality','流媒体音质','串流音質'],qualitySub:['Applies right away','立即生效','立即生效'],deckLang:['Deck language','碟机界面语言','碟機介面語言'],deckLangSub:['Restarts Engine: playback stops','需重启 Engine，播放会中断','需重新啟動 Engine，播放會中斷'],
-waveform:['Waveform style','波形样式','波形樣式'],waveformSub:['Applies right away','立即生效','立即生效'],wDenon:['Denon stock','Denon 原厂','Denon 原廠'],
-tFourDeck:['Native 4-deck layout','原厂 4 碟布局','原廠 4 碟佈局'],sFourDeck:['Adds Layout → 4 Decks. The hardware plays decks 1 and 3 (LAYER), decks 3 and 4 are silent. Restarts Engine','在 Layout 里加入 4 Decks。实体按键控制 1、3 号台（LAYER 切换），3、4 号台不出声。切换会重启 Engine','在 Layout 裡加入 4 Decks。實體按鍵控制 1、3 號台（LAYER 切換），3、4 號台不出聲。切換會重啟 Engine'],tRole:['4-deck role','4 碟分工','4 碟分工'],sRole:['Which decks this player plays: RCA A + RCA B. Auto: Player # 1/3 takes 1+3, Player # 2/4 takes 2+4. The others only show','本机负责哪几台（RCA A + RCA B）。自动：播放器编号 1/3 用 1+3，编号 2/4 用 2+4。其他台只显示不出声','本機負責哪幾台（RCA A + RCA B）。自動：播放器編號 1/3 用 1+3，編號 2/4 用 2+4。其他台只顯示不出聲'],rAuto:['Auto','自动','自動'],tEcho:['Upfader Echo Out','拉杆切歌自动回音','推桿切歌自動回音'],sEcho:['A one-beat echo tail when a fader is pulled down fast','快速拉下推子时自动留一拍回音尾巴','快速拉下推桿時自動留一拍回音尾巴'],
+tEcho:['Upfader Echo Out','拉杆切歌自动回音','推桿切歌自動回音'],sEcho:['A one-beat echo tail when a fader is pulled down fast','快速拉下推子时自动留一拍回音尾巴','快速拉下推桿時自動留一拍回音尾巴'],
 tLimiter:['Master soft clipper','0dB 防破音软限幅','0dB 防破音軟限幅'],sLimiter:['Stops clipping at the master output; applies right away','防止主输出削波，立即生效','防止主輸出削波，立即生效'],
 tGain:['Auto-Gain 0 dB','自动增益 0 dB 归一化','自動增益 0 dB 歸一化'],sGain:['Brings every track to 0 dB peak, with the soft limiter','把每首歌峰值拉到 0 dB，含软限幅','把每首歌峰值拉到 0 dB，含軟限幅'],
 tOmni:['OmniSource','OmniSource 全源同屏混排','OmniSource 全源同屏混排'],sOmni:['Show USB / SD drives next to streaming in one browser and search','在流媒体浏览和搜索里同时显示 U 盘 / SD 卡','在串流瀏覽和搜尋裡同時顯示隨身碟 / SD 卡'],
@@ -271,23 +267,21 @@ async function jobs(){
   v.overview.forEach((p,i)=>{c.fillStyle='rgb('+p.LowValue+','+p.MidValue+','+p.HighValue+')';const h=Math.max(p.LowValue,p.MidValue,p.HighValue)*70/255;c.fillRect(i,(70-h)/2,1,h)});
  }
 }
-const toggleKeys=['fourDeckWaveform','upfaderEcho','masterLimiter','autoGain','omniSource','autoAnalyze','prolinkShare','prolinkExport'];
+const toggleKeys=['upfaderEcho','masterLimiter','autoGain','omniSource','autoAnalyze','prolinkShare','prolinkExport'];
 function showUI(v){lastUI=v;
  if(v.version){$('version').textContent='v'+v.version;$('version').hidden=false}
  for(const e of document.querySelectorAll('[data-toggle]'))e.checked=!!v[e.dataset.toggle];
  const tg=k=>document.querySelector('[data-toggle="'+k+'"]');
  tg('upfaderEcho').closest('.setting').hidden=!!v.player; // #52: players have no channel faders
- tg('fourDeckWaveform').closest('.setting').hidden=!v.player; // #49: all-in-ones have 4 decks already
  why(tg('prolinkExport'),v.prolinkExport&&!v.prolinkExportActive?t('waitRbUsb'):'');
- const segs={quality:v.quality,lang:v.language,waveform:v.waveform,fourDeckRole:v.fourDeckRole};
- $('fourDeckRoleRow').hidden=!(v.player&&v.fourDeckWaveform);
+ const segs={quality:v.quality,lang:v.language};
  for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.classList.toggle('on',b.dataset.v===segs[g.dataset.seg]);
  const lname={en:'English','zh-Hans':'简体中文','zh-Hant':'繁體中文'}[v.language]||v.language;
- $('uiState').textContent=t('current')+': '+lname+' · '+v.waveform+' · '+v.quality+(v.safeMode?' · '+t('safeMode'):'')}
+ $('uiState').textContent=t('current')+': '+lname+' · '+v.quality+(v.safeMode?' · '+t('safeMode'):'')}
 // A refused switch says why under its own label, not only in the toast.
 function why(e,m){const txt=e.closest('.setting').querySelector('.txt');let w=txt.querySelector('.why');if(!m){if(w)w.remove();return}if(!w){w=document.createElement('span');w.className='sub why';txt.append(w)}w.textContent=/rekordbox usb export/i.test(m)?t('needRbUsb'):m}
-for(const e of document.querySelectorAll('[data-toggle]'))e.onchange=async()=>{const restart=e.dataset.toggle==='fourDeckWaveform';if(restart&&!confirm(t('restartAsk'))){e.checked=!e.checked;return}e.disabled=true;try{why(e);showUI(await post('ui?'+e.dataset.toggle+'='+(e.checked?1:0)+(restart?'&restart=1':'')))}catch(err){e.checked=!e.checked;why(e,err.message)}finally{e.disabled=false}};
-for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.onclick=()=>action(async()=>{let q=g.dataset.seg+'='+b.dataset.v;if(g.dataset.seg==='lang'||g.dataset.seg==='fourDeckRole'){if(!confirm(t('restartAsk')))return;q+='&restart=1'}showUI(await post('ui?'+q))});
+for(const e of document.querySelectorAll('[data-toggle]'))e.onchange=async()=>{e.disabled=true;try{why(e);showUI(await post('ui?'+e.dataset.toggle+'='+(e.checked?1:0)))}catch(err){e.checked=!e.checked;why(e,err.message)}finally{e.disabled=false}};
+for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.onclick=()=>action(async()=>{let q=g.dataset.seg+'='+b.dataset.v;if(g.dataset.seg==='lang'){if(!confirm(t('restartAsk')))return;q+='&restart=1'}showUI(await post('ui?'+q))});
 const kinds={internal:'kInternal',hd:'kHd',sd:'kSd',usb:'kUsb',drive:'kDrive'},gb=n=>(n/2**30).toFixed(1);
 function renderDrives(){const sel=$('dropDrive'),keep=sel.value;sel.replaceChildren();for(const d of lastDrives){const o=document.createElement('option');o.value=d.name;o.textContent=t(kinds[d.kind]||'kDrive')+' · '+d.name+' · '+t('free',gb(d.free));sel.append(o)}if(!lastDrives.length){const o=document.createElement('option');o.textContent=t('noDrive');o.disabled=true;o.selected=true;sel.append(o)}if(lastDrives.some(d=>d.name===keep))sel.value=keep;showStore()}
 function showStore(){const d=lastDrives.find(v=>v.name===$('dropDrive').value),bar=$('dropStore');if(!d||!d.total){bar.hidden=true;$('dropStoreText').textContent='';return}const used=1-d.free/d.total;bar.hidden=false;bar.classList.toggle('full',used>.9);bar.firstChild.style.width=Math.round(used*100)+'%';$('dropStoreText').textContent=t('ofTotal',gb(d.free),gb(d.total))}

@@ -53,10 +53,9 @@
 - 兼容全格式存储设备：Windows 的 `FAT32` / `exFAT` / `NTFS` 与 Mac 的 `HFS+` / `APFS` 插上直读；
 - 自动修复异常拔盘造成的数据库损坏，并去除了“未安全弹出”报错弹窗。
 
-### 4. 完整中文界面、先锋风格 3-Band 波形与转盘灯效
+### 4. 完整中文界面与先锋风格 3-Band 波形
 - **三语界面**：设置、菜单与提示全面支持 **简体中文 / 繁體中文 / English**；
-- **3 种波形配色**：在原厂绿波形基础上，新增高对比度 **RGB 波形** 与先锋风格 **3-Band（三频段蓝/橙/白）波形**；
-- **转盘彩灯模式**：支持固定颜色、流光渐变、频闪，以及**跟随当前播放 BPM 拍点同步变色**。
+- **3 种波形配色**：在原厂绿波形基础上，新增高对比度 **RGB 波形** 与先锋风格 **3-Band（三频段蓝/橙/白）波形**（位于 `布局 → View`）。
 
 ### 5. 切效果器零爆音，长时间演出更稳定
 - 消除原厂固件在开关或切换效果器（FX）时偶发的“咔嗒”爆音，双轨同时开效果器也有平滑淡入过渡；
@@ -79,7 +78,7 @@
 - **流媒体缓存隔离与 Deemix 智能共享**：Spotify、Beatport、SoundCloud 与网易云官方模式各用独立下载通道与缓存命名空间；网易云「Deemix 优先」时与 Deezer 共享无损缓存，互相点播同一首不重复下载；
 - **SoundCloud Go+ 与高清智能路由**：长混音 / DJ Set（超过 10 分钟）始终直连 SoundCloud 官方流；非 Set 普通单曲与 Go+ 专享曲目：已绑定 Go+ 优先官方高音质流，未绑定时自动在已登录的其他流媒体（Deezer / 网易云 / Beatport）匹配无损 / 320k 音频，避免 30 秒试听限制；
 - **品牌统一与免域名公网连接**：面向用户的组件统一为 `enginex-relay`（原 `sc5000-relay`）、`enginex-stemsd`（原 `sc5000-stemsd`）、`enginex-suite`，运行目录为 `/data/enginex`（保留 `/data/sc5000-custom` 兼容软链接）；支持 Cloudflare Quick Tunnel 免域名一键公网穿透，手机扫码即可远程登录流媒体；中继控制台新增 `已连接碟机集群（Multi-Deck Hub）` 卡片，汇总同一后端下所有碟机的在线状态、机位角色（`13` / `24`）、固件版本和流媒体登录状态，可用碟机访问码或主密码登录；各碟机 `设置 → 关于` 页会实时显示 Stems 算力节点状态；
-- **Mixstream Pro / Pro+ / Pro Go（#164、#166）**：实体 FILTER 旋钮控制原厂 Filter / Dub Echo / Noise / Filter Roll / Wash，点击各轨 Pads 栏的 `SWEEP FX` 打开原厂选择轮盘；恢复触屏 Beat Jump，在 `个人偏好 → Cues/Loops` 开启 `Beat Jump Pad Bank` 即可后跳、前跳、减半、加倍；各轨 `EQ / STEMS` 按钮切换通道三段旋钮 Stems EQ；安装器支持严格 EAAS 协议发现二代机并消除端口冲突，兼容 fastboot 35+，完善 Windows WSL 2 + usbipd-win 刷机指引，已在 NH08S 实机完整刷入验证；识别 Mixstream Pro Go（`15e4:2059`）USB 设备；
+- **Mixstream Pro / Pro+ / Pro Go（#164、#166）**：实体 FILTER 旋钮控制原厂 Filter / Dub Echo / Noise / Filter Roll / Wash，点击各轨 Pads 栏的 `SWEEP FX` 打开原厂选择轮盘；恢复触屏 Beat Jump，在 `布局 → View` 开启 `Beat Jump Pad Bank` 即可后跳、前跳、减半、加倍；各轨 `EQ / STEMS` 按钮切换通道三段旋钮 Stems EQ；安装器支持严格 EAAS 协议发现二代机并消除端口冲突，兼容 fastboot 35+，完善 Windows WSL 2 + usbipd-win 刷机指引，已在 NH08S 实机完整刷入验证；识别 Mixstream Pro Go（`15e4:2059`）USB 设备；
 - **一代机电脑线刷与免 debugfs 解包**：修复 SC5000 / SC6000 / PRIME 4 等一代机在固件更新模式下 fastboot product 缺失时的 USB ID 识别，恢复电脑线刷支持；打包工具在 macOS 与 Windows 上无 debugfs 时也能正常解包镜像；
 - **PRIME 4 硬件 FX 选择器（#168）与 PRIME 4+ 激活校验（#169）**：重整 JC11 硬件效果选择器，修复切效果器重置与 Wet/Dry 淡入淡出爆音；强化 PRIME 4+（JC11S）激活文件与数据目录校验；修复 Beatport 无损升级在冷缓存下的命中，并在 `stream-sync` 占用端口时让 `deemixd` 优雅退出。
 - **SC LIVE 4 AUX（#171，新功能，待实机验证）**：在原厂 `混音台菜单 → 通道 → 输入` 中把 AUX 送入通道 3 或 4，使用通道 CUE、推子、EQ 和 Sweep FX；仅在 AUX 模式且任一通道选择线路输入时屏蔽 AUX 直通，MIC2 保持原厂路由。两路共享一个 AUX 源，同时推起会叠加。Mixer Menu（Beta）会迁移部分偏好设置，并允许向线路输入通道载歌；JP21 隐藏未验证的 Bluetooth/Computer 选项。详见[路由说明与实机检查](docs/issue171-sclive4-aux.md)；
@@ -92,11 +91,11 @@
 - **Tailscale / Headscale 远程访问（#130）**：Web 控制台的 `远程访问（Tailscale / Headscale）` 卡片按需下载精简版 Tailscale 客户端（约 4.3 MB，下载后校验 SHA-256），用登录链接或一次性 Auth key 登录，只把你勾选的服务（SSH / SFTP、Web 控制台）开放给你自己的 tailnet。不需要公网 IP，也不用改路由器，自建 Headscale 服务器同样可用。默认关闭。碟机内核没有 TUN 设备，所以以用户态模式运行。已用 Headscale 端到端测通；实机播放时的 CPU 和内存占用还没有实测；
 - **流媒体歌单排序（#98）**：所有流媒体服务都能打开 Engine 自带的排序菜单，按 BPM、调性、评级、歌名或歌手升序 / 降序排列；
 - **流媒体曲目可录音（#84）**：加载流媒体曲目时，Engine 的录音功能不再拒绝录制。录音请仅供个人使用，并遵守流媒体服务的条款；
-- **曲目列表显示 BPM（#80）**：`个人偏好（User Profile）→ 曲库 → 双栏浏览` 打开后，曲目列表的第二列旁边会显示 BPM；
+- **曲目列表显示 BPM（#80）**：`布局 → View → 双栏浏览` 打开后，曲目列表的第二列旁边会显示 BPM；
 - **推子回音与智能同步（#104）**：`推子回音` 磁贴在 `关` / `全部推子` / `仅竖推` 之间循环，用的是 Engine 自带的过渡效果。开启 Sync 时，智能同步还会尝试半速 / 倍速（0.25×–4×）匹配，Pitch Range 只扩大到最接近的匹配所需的范围；
-- **控制中心新磁贴**：第 3 行新增 4 个磁贴 `波形样式`、`转盘灯光`、`推子回音`、`智能同步`，点一下循环切换；`Live Stream` 移到 `设置 → 服务`；
+- **控制中心新磁贴**：第 3 行新增 `推子回音`、`智能同步` 两个演出磁贴，点一下循环切换；`Live Stream` 移到 `设置 → 服务`，`波形样式` 收拢至 `布局 → View`；
 - **先锋风格 Beat FX 与 Sound Color FX（#88）**：JC11 PRIME 4（Engine 5.3.0）可在列表末尾选择 `Spiral (PX)`、`Pitch Echo (PX)`、`Slip Roll (PX)`、`Dub Echo (PX)`、`Space (PX)`，按 FX 单元及其分配通道生效。Parameter 可调时间、音色与反馈，Wet/Dry 可调干湿比，原厂效果继续可选；独立 Time/Rate 旋钮暂未接入。AZ04 保留原来的 `Color FX Style` 设置；PRIME 4 实机验证待完成； JP07 SC5000 没有原生 FX 选择器，保留全局 `Color FX Style` 菜单、master 效果和保存的设置。
-- **界面缩放（110%–75%）、曲目列表波形开关与打击垫亮度（#153、#117、#85）**：`设置 → 设备 → 界面缩放` 可把 Engine 整个界面在 110% 到 75% 之间无黑边缩放，控制中心和弹窗仍然铺满屏幕；`个人偏好（User Profile）→ 曲库 → 曲目列表波形` 关闭后可隐藏列表里的缩略波形，让歌名与艺人完整展开；`打击垫亮度` 可把打击垫和按键灯光从 100% 调到 20%；
+- **界面缩放（110%–75%）、曲目列表波形开关与打击垫亮度（#153、#117、#85）**：`布局 → View → 界面缩放` 可把 Engine 整个界面在 110% 到 75% 之间无黑边缩放，控制中心和弹窗仍然铺满屏幕；`个人偏好（User Profile）→ 曲库 → 曲目列表波形` 关闭后可隐藏列表里的缩略波形，让歌名与艺人完整展开；`设置 → 设备 → 打击垫亮度` 可把打击垫和按键灯光从 100% 调到 20%；
 - **实体三段 EQ 旋钮 Stems 分轨控制与快捷键（#152）**：通过 `个人偏好 → 播放 → Stems EQ Mode` 或按各通道 **Shift + Cue (PFL)**，即可将该通道的实体 `HIGH / MID / LOW` 三段 EQ 旋钮切换为 **Stems Level**（`Vocal 人声`、`Melody + Bass 旋律+贝斯`、`Drums 鼓组`），内置原厂软接管（Soft Takeover）防跳变与屏幕提示；修复 PRIME 2 / PRIME 4 快速双击 `Hot Cue` 时 Stems 模式闪退回 Hot Cue 的问题；
 - **播放中按住浏览/缩放旋钮转动转盘防误入网格编辑（#157）**：曲目播放中按住 Browse/Zoom 旋钮（或 Slip/Vinyl）不再误触进入 BeatGrid Edit（此前会导致瞬间跳回 `00:00` 且 Play 键锁死），网格编辑激活时禁用转盘触摸；
 - **PRIME 4 / PRIME 4+ 与 SC5000 / SC6000 局域网跨机型四轨联动（#160）**：一体机与独立播放机均开放 `四轨波形显示` 与 `四轨角色`（`自动`、`1+3`、`2+4`、`1+2`、`3+4`、`1`、`2`），支持 PRIME 4 / PRIME 4+ 本机负责 1+2 轨、同时将局域网内 SC5000 / SC6000 的实时波形、热标与对拍映射至 3+4 影子轨；
@@ -124,7 +123,7 @@
 - **OmniSource 统一浏览**：U 盘 / SD 卡里的歌单和曲目直接显示在流媒体浏览器里，和流媒体歌单放在一起，一次搜索两边都能找到；U 盘曲目直接从盘上读取播放，音质不打折（`设置 → OmniSource`，默认关闭）；
 - **先锋 CDJ / Pro DJ Link（测试版）**：通过局域网 / Wi-Fi 读取 CDJ 上 rekordbox U 盘的曲库（`Pro DJ Link 曲库`），也能把本机曲库共享给 CDJ（实验功能）。SC5000 与 CDJ 之间始终只有一个 Master：MASTER 可以双向交接；本机当 Master 时会发出 BPM 和拍点，供 CDJ 的 BEAT SYNC 对拍。以上默认全部关闭；
 - **更干净的声音**：`0dB 防破音软限幅` 用平滑曲线把主输出压在 -0.1 dBFS 以下，零延迟，-1.5 dBFS 以下的信号原样不动；Flanger 不再让音量下沉（自动补偿到原曲电平，最多 +6 dB）；`拉杆切歌自动回音` 在拉下推子时留下回音尾巴；`自动增益（0 dB 归一化）` 把音量偏小的歌平滑地提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下的静音不提升），之后总会经过软限幅，不会爆音（默认关闭）。共 21 个实时 DSP 挂点，不增加任何延迟；
-- **SC5000 / SC6000 原生四轨布局**：在独立播放机上解锁 Engine 自带的四轨界面，声卡仍只用 2 路。每台播放机负责自己角色的两轨（`自动`、`1+3`、`2+4`、`1+2`、`1`、`2`，在 `设置 → 设备 → 四轨角色` 或网页控制台切换），其余各轨是不出声的**影子轨道**，跟随另一台 EngineX 碟机或 CDJ 的曲目、播放 / CUE、位置、速度、Master 和同步；
+- **SC5000 / SC6000 原生四轨布局**：在独立播放机上解锁 Engine 自带的四轨界面，声卡仍只用 2 路。每台播放机负责自己角色的两轨（`自动`、`1+3`、`2+4`、`1+2`、`1`、`2`，在 `布局 → View → 四轨角色` 切换），其余各轨是不出声的**影子轨道**，跟随另一台 EngineX 碟机或 CDJ 的曲目、播放 / CUE、位置、速度、Master 和同步；
 - 向 Shoutcast / Icecast 服务器 **直播推流**；
 - **曲库**：`自动分析插入的设备` 暂不可用，仅保留偏好设置；rekordbox 导出的 U 盘（包括 6.8.5）即使有个别文件损坏也能正常导入，那几首在加载时再分析；选中其他流媒体服务时，不再弹出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示；
 - **Spotify 改用你自己的应用**：Spotify 限制每个应用的用户数和请求量，所以不再内置共用的应用。到 `developer.spotify.com/dashboard` 免费创建一个应用，把网页控制台里显示的 Redirect URI 加进去，再把它的 Client ID 填回控制台（`#70`）；
@@ -180,7 +179,7 @@
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/zh-CN/06b-preferences-device.png" width="100%" alt="设备设置"><br>
 <b>设备设置菜单</b><br>
-<sub>直接切换语言、界面缩放、Pad 灯亮度、4 轨波形与转盘灯效</sub>
+<sub>直接切换语言、Pad 灯亮度与电源开关</sub>
 </td>
 </tr>
 <tr>

@@ -149,11 +149,21 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("module.loopInactiveShiftTurnAction === Action.BeatJump || ", SRC)
         self.assertIn("LinkBeatJumpLoopSize", bp.SERVICES_MAIN)
 
-    def test_jog_timer_slower(self):
-        # smooth gradient: 25 fps in every mode, hue advanced by elapsed time
-        self.assertIn("interval: 40\n\t\trepeat: true", bp.SERVICES_MAIN)
-        self.assertIn("scJogLastTick", bp.SERVICES_MAIN)
-        self.assertNotIn("< 0.015) return", bp.SERVICES_MAIN)
+    def test_jog_light_removed_and_view_deduped(self):
+        self.assertNotIn("scJog", SRC)
+        self.assertNotIn("JOG_ENTRY", SRC)
+        self.assertNotIn("JOG_TILE", SRC)
+        self.assertNotIn("WAVE_TILE", SRC)
+        self.assertIn("WaveformStyle {},", SRC)  # removed from DisplayTabContent, kept in VIEW_ENTRIES
+        rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")]
+        keys = [r[0] for r in rows]
+        self.assertEqual(len(keys), len(set(keys)), "duplicate keys in i18n.tsv")
+        for removed in ("Jog Light Mode", "Jog Light", "Psy Rainbow", "Psy Fast", "Psy BPM Sync", "Static", "Rainbow", "Fast"):
+            self.assertNotIn(removed, keys)
+        for added in ("ENGINEX VIEW PRESET", "Legacy Shadow Engine (restart Engine manually to clear old slots)", "Pro DJ Link Export to CDJ (Beta)", "Fader Echo: Up", "Fader Echo: All", "Restart Engine to apply? Playback will stop."):
+            self.assertIn(added, keys)
+        # ENGINEX VIEW PRESET must be on its own text: line so translate() matches it.
+        self.assertRegex(bp.VIEW_ENTRIES, r'(?m)^\s*text:\s*"ENGINEX VIEW PRESET"\s*$')
 
     def test_cue_countdown_151(self):
         self.assertIn("function scNextCueInfo(d, tick)", bp.SERVICES_MAIN)
@@ -170,7 +180,7 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn('["scCueCountdown", "cueCountdown"]', SRC)
         self.assertIn('root.scCall("cueCountdown=" + index)', bp.CUE_COUNTDOWN_ENTRY)
         self.assertIn(bp.CUE_COUNTDOWN_ENTRY, bp.VIEW_ENTRIES)
-        for dup in (bp.UI_SCALE_ENTRY, bp.JOG_ENTRY, bp.FOUR_DECK_ENTRIES, bp.DUAL_COLUMN_ENTRY, bp.BEAT_JUMP_ENTRIES):
+        for dup in (bp.UI_SCALE_ENTRY, bp.FOUR_DECK_ENTRIES, bp.DUAL_COLUMN_ENTRY, bp.BEAT_JUMP_ENTRIES):
             self.assertIn(dup, bp.VIEW_ENTRIES)
             self.assertNotIn(dup, bp.LIBRARY_ENTRIES)
         self.assertNotIn("LANGUAGE_ENTRY + UI_SCALE_ENTRY", SRC)
@@ -181,7 +191,6 @@ class UiModSourceTest(unittest.TestCase):
     def test_deck_list_follows_four_deck_role(self):
         self.assertIn('root.scFourDeckRole.split("").map(c => parseInt(c))', bp.SERVICES_MAIN)
         self.assertEqual(SRC.count("root.decks && root.decks.length ? root.decks : [1, 2]"), 1)  # only inside scDeckList
-        self.assertIn("function scJogResetDecks()", bp.SERVICES_MAIN)
 
     def test_i18n_has_stem(self):
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
@@ -194,6 +203,8 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("tracklistWaveform=", bp.LIBRARY_ENTRIES)
         self.assertIn('"110", "105", "100"', bp.UI_SCALE_ENTRY)
         self.assertIn('"110%", "105%", "100%"', bp.UI_SCALE_ENTRY)
+        self.assertIn("entryWidth: narrow ? 104 : 88", bp.UI_SCALE_ENTRY)
+        self.assertIn("entryWidth: 104", bp.FOUR_DECK_ENTRIES)
         self.assertIn("root.scTracklistWaveform", SRC)
 
     def test_stems_eq_and_grid_edit_guard_and_four_deck_roles(self):

@@ -53,9 +53,8 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 - Works with any drive format: Windows `FAT32` / `exFAT` / `NTFS` and Mac `HFS+` / `APFS`;
 - Automatically repairs corrupted databases from unmounted drives and removes the "improper eject" warning popup.
 
-### 4. Pioneer-Style 3-Band Waveforms, 3 Languages & BPM Jog Lights
-- **3 Waveform Styles**: Switch between stock Denon green, high-contrast **RGB**, and Pioneer-style **3-Band (Blue / Orange / White)** waveforms;
-- **Jog Wheel Lighting**: Static color, rainbow cycle, fast strobe, or **BPM-synced beat pulse**;
+### 4. Pioneer-Style 3-Band Waveforms & 3 Languages
+- **3 Waveform Styles**: Switch between stock Denon green, high-contrast **RGB**, and Pioneer-style **3-Band (Blue / Orange / White)** waveforms (under `Layout → View`);
 - **3 Languages**: Switch between **English, Simplified Chinese (简体中文), and Traditional Chinese (繁體中文)**.
 
 ### 5. Click-Free FX Switching & Smoother Long Sets
@@ -92,11 +91,11 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 - **Remote access with Tailscale / Headscale (#130)**: the web console's `Remote access (Tailscale / Headscale)` card downloads a trimmed Tailscale client only when you ask for it (about 4.3 MB, checksum verified), signs in with a login link or a one-time auth key, and shares only what you tick (SSH / SFTP, the web console) with your own tailnet. No public IP or router changes needed, and your own Headscale server works too. Off by default. It runs in userspace mode because the deck kernel has no TUN device. Tested end to end with Headscale; CPU and memory use on a real deck during playback are not measured yet;
 - **Sort streaming playlists (#98)**: Engine's own sort menu now opens for every streaming service: BPM, key, rating, title or artist, ascending or descending;
 - **Record with streaming tracks (#84)**: Engine's recorder no longer refuses to record while a streaming track is loaded. Keep recordings for your own use and follow your streaming service's terms;
-- **BPM in the track list (#80)**: `User Profile → Library → Dual-Column Browser` shows each track's BPM next to the second column;
+- **BPM in the track list (#80)**: `Layout → View → Dual-Column Browser` shows each track's BPM next to the second column;
 - **Fader Echo and Smart Sync (#104)**: the `Fader Echo` tile cycles `Off` / `All Faders` / `Upfader Only`, using Engine's own transition FX. With Sync on, Smart Sync also tries half and double time (0.25×–4×) and widens Pitch Range only as far as the closest match needs;
-- **New Control Center tiles**: a third row of four tiles, `Waveform Style`, `Jog Light`, `Fader Echo` and `Smart Sync`; each tap cycles the value. `Live Stream` moved to `Settings → Services`;
+- **New Control Center tiles**: a third row of performance tiles, `Fader Echo` and `Smart Sync`; each tap cycles the value. `Live Stream` moved to `Settings → Services`, and `Waveform Style` is kept under `Layout → View`;
 - **Pioneer-style Beat FX & Sound Color FX (#88)**: on JC11 PRIME 4 with Engine 5.3.0, choose `Spiral (PX)`, `Pitch Echo (PX)`, `Slip Roll (PX)`, `Dub Echo (PX)` or `Space (PX)` at the end of the FX selector. The controls apply to that FX unit and its assigned channels: Parameter adjusts time/character/feedback, and Wet/Dry adjusts the blend. Original FX remain available; the separate Time/Rate knob is not wired yet. JP07 SC5000 has no native FX selector and retains its global `Color FX Style` menu, master effects and saved setting. AZ04 keeps the legacy `Color FX Style` setting; PRIME 4 hardware verification is pending;
-- **UI scale (110%–75%), tracklist waveform toggle and pad LEDs (#153, #117, #85)**: `Settings → Device → UI Scale` scales Engine's whole interface from 110% down to 75%, with the Control Center and pop-ups still filling the screen; `User Profile → Library → Tracklist Waveform` hides the mini waveform in the track list so track titles expand across the full row; `Pad LED Brightness` sets the pads and buttons from 100% down to 20%;
+- **UI scale (110%–75%), tracklist waveform toggle and pad LEDs (#153, #117, #85)**: `Layout → View → UI Scale` scales Engine's whole interface from 110% down to 75%, with the Control Center and pop-ups still filling the screen; `User Profile → Library → Tracklist Waveform` hides the mini waveform in the track list so track titles expand across the full row; `Settings → Device → Pad LED Brightness` sets the pads and buttons from 100% down to 20%;
 - **Physical 3-band Stems EQ Mode & hardware shortcuts (#152)**: `User Profile → Playback → Stems EQ Mode` or **Shift + Cue (PFL)** on any mixer channel switches that channel's physical `HIGH / MID / LOW` EQ knobs to **Stems Level** (`Vocal`, `Melody + Bass`, `Drums`) with native soft takeover and on-screen status indicator; rapid double-pressing `Hot Cue` on PRIME 2 / PRIME 4 latches `STEMS` pad mode cleanly without bouncing back to `CUES`;
 - **Browse/Zoom encoder & jog wheel playback guard (#157)**: holding the Browse/Zoom encoder (or Slip/Vinyl) while a deck is playing no longer enters BeatGrid Edit (which previously jumped to `00:00` and locked the Play button), and Jog Touch stays disabled while BeatGrid Edit is active;
 - **PRIME 4 / PRIME 4+ / SC5000 / SC6000 cross-unit 4-deck LAN linking (#160)**: `4-Deck Waveform` and `4-Deck Role` (`Auto`, `1+3`, `2+4`, `1+2`, `3+4`, `1`, `2`) are available on both standalone players and 4-deck all-in-one consoles, so a PRIME 4 / PRIME 4+ can play Decks 1+2 locally while Decks 3+4 mirror linked SC5000 / SC6000 players over LAN;
@@ -124,7 +123,7 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 - **OmniSource**: the playlists and tracks on your USB / SD drives appear right inside the streaming browser, next to your streaming playlists, and one search finds both. Drive tracks play straight from the drive at full quality (`Settings → OmniSource`, off by default);
 - **Pioneer CDJ / Pro DJ Link (Beta)**: read a CDJ's rekordbox USB library over LAN / Wi-Fi (`Pro DJ Link Library`) and share the deck's own library with CDJs (experimental). There is one tempo master across the SC5000 and the CDJs: MASTER is handed over either way, and as master the deck sends its BPM and beats for the CDJs' BEAT SYNC. All off by default;
 - **Cleaner sound**: `Master Soft Clipper` keeps the master output under -0.1 dBFS with a smooth curve and zero latency, untouched below -1.5 dBFS; the Flanger no longer dips the volume (level matched to the dry track, up to +6 dB); `Upfader Echo Out` leaves an echo tail when you pull a fader down; `Auto-Gain (0 dB Normalize)` brings quiet tracks up toward 0 dBFS (at most +9 dB, slow and smooth, never lifts silence below -42 dBFS) and always ends in the soft limiter, so it cannot clip (off by default). 21 real-time DSP hooks in total, with no added latency;
-- **Native 4-deck layout on SC5000 / SC6000**: Engine's own 4-deck view on a standalone player, with the sound card left at 2 channels. Each player plays the two decks of its role (`Auto`, `1+3`, `2+4`, `1+2`, `1`, `2`, set in `Settings → Device → 4-Deck Role` or the web console). The other decks are silent **shadow decks** that follow a second EngineX player or a CDJ: track, play / CUE, position, pitch, master and sync;
+- **Native 4-deck layout on SC5000 / SC6000**: Engine's own 4-deck view on a standalone player, with the sound card left at 2 channels. Each player plays the two decks of its role (`Auto`, `1+3`, `2+4`, `1+2`, `1`, `2`, set in `Layout → View → 4-Deck Role`). The other decks are silent **shadow decks** that follow a second EngineX player or a CDJ: track, play / CUE, position, pitch, master and sync;
 - **Live Stream** to Shoutcast / Icecast servers;
 - **Library**: `Auto-Analyze Drives` is temporarily unavailable; the preference is retained; a rekordbox export (6.8.5 included) still imports when a few of its files are damaged, and those tracks are analysed when loaded; Engine 5.3.0's "Connect to your Engine DJ Profile to use Tidal" popup no longer appears while another service is selected;
 - **Spotify with your own app**: Spotify limits how many users and requests one app may have, so there is no shared built-in app any more. Create a free app at `developer.spotify.com/dashboard`, add the Redirect URI shown in the web console, and paste its Client ID there (`#70`);
@@ -180,7 +179,7 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/en/06b-preferences-device.png" width="100%" alt="Device Settings"><br>
 <b>Device Settings Menu</b><br>
-<sub>Language, UI scale, pad LED brightness, 4-deck waveform and jog lights</sub>
+<sub>Language, pad LED brightness and power control</sub>
 </td>
 </tr>
 <tr>

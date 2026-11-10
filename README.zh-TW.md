@@ -53,10 +53,9 @@
 - 相容全格式儲存裝置：Windows 的 `FAT32` / `exFAT` / `NTFS` 與 Mac 的 `HFS+` / `APFS` 插上直讀；
 - 自動修復未正常退碟造成的資料庫損毀，並移除「未安全退出」警告彈窗。
 
-### 4. 完整中文介面、先鋒風格 3-Band 波形與轉盤燈效
+### 4. 完整中文介面與先鋒風格 3-Band 波形
 - **三語介面**：設定、選單與提示全面支援 **繁體中文 / 简体中文 / English**；
-- **3 種波形配色**：在原廠綠波形基礎上，新增高對比度 **RGB 波形** 與先鋒風格 **3-Band（三頻段藍/橙/白）波形**；
-- **轉盤彩燈模式**：支援固定顏色、流光漸變、頻閃，以及**跟隨目前播放 BPM 拍點同步變色**。
+- **3 種波形配色**：在原廠綠波形基礎上，新增高對比度 **RGB 波形** 與先鋒風格 **3-Band（三頻段藍/橙/白）波形**（位於 `版面 → View`）。
 
 ### 5. 切效果器零爆音，長時間演出更穩定
 - 消除原廠韌體在開關或切換效果器（FX）時偶發的「咔嗒」爆音，雙軌同時開效果器也有平滑淡入過渡；
@@ -79,7 +78,7 @@
 - **串流快取隔離與 Deemix 智慧共享**：Spotify、Beatport、SoundCloud 與網易雲官方模式各自使用獨立下載通道與專屬快取命名空間；網易雲「Deemix 優先」時與 Deezer 共享無損快取，互相點播同一首不重複下載；
 - **SoundCloud Go+ 與高清智慧路由**：長混音 / DJ Set（超過 10 分鐘）一律直連 SoundCloud 官方串流；非 Set 普通單曲與 Go+ 專享曲目：已綁定 Go+ 優先官方高音質串流，未綁定時自動在已登入的其他串流（Deezer / 網易雲 / Beatport）比對無損 / 320k 音訊，避免 30 秒試聽限制；
 - **品牌統一與免網域公網連線**：面向使用者的組件統一為 `enginex-relay`（原 `sc5000-relay`）、`enginex-stemsd`（原 `sc5000-stemsd`）、`enginex-suite`，執行目錄為 `/data/enginex`（保留 `/data/sc5000-custom` 相容符號連結）；支援 Cloudflare Quick Tunnel 免網域一鍵公網穿透，手機掃碼即可遠端登入串流；中繼主控台新增 `已連線播放機叢集（Multi-Deck Hub）` 卡片，彙整同一後端下所有播放機的上線狀態、機位角色（`13` / `24`）、韌體版本與串流登入狀態，可用播放機存取碼或主密碼登入；各播放機 `設定 → 關於` 頁會即時顯示 Stems 算力節點狀態；
-- **Mixstream Pro / Pro+ / Pro Go（#164、#166）**：實體 FILTER 旋鈕控制原廠 Filter / Dub Echo / Noise / Filter Roll / Wash，點擊各軌 Pads 列的 `SWEEP FX` 開啟原廠選擇輪盤；恢復觸控 Beat Jump，於 `個人偏好 → Cues/Loops` 開啟 `Beat Jump Pad Bank` 即可後跳、前跳、減半、加倍；各軌 `EQ / STEMS` 按鈕切換通道三段旋鈕 Stems EQ；安裝器支援嚴格 EAAS 協定探索二代機並消除連接埠衝突，相容 fastboot 35+，完善 Windows WSL 2 + usbipd-win 刷機指引，已在 NH08S 實機完整刷入驗證；識別 Mixstream Pro Go（`15e4:2059`）USB 裝置；
+- **Mixstream Pro / Pro+ / Pro Go（#164、#166）**：實體 FILTER 旋鈕控制原廠 Filter / Dub Echo / Noise / Filter Roll / Wash，點擊各軌 Pads 列的 `SWEEP FX` 開啟原廠選擇輪盤；恢復觸控 Beat Jump，於 `版面 → View` 開啟 `Beat Jump Pad Bank` 即可後跳、前跳、減半、加倍；各軌 `EQ / STEMS` 按鈕切換通道三段旋鈕 Stems EQ；安裝器支援嚴格 EAAS 協定探索二代機並消除連接埠衝突，相容 fastboot 35+，完善 Windows WSL 2 + usbipd-win 刷機指引，已在 NH08S 實機完整刷入驗證；識別 Mixstream Pro Go（`15e4:2059`）USB 裝置；
 - **一代機電腦線刷與免 debugfs 解包**：修復 SC5000 / SC6000 / PRIME 4 等一代機在韌體更新模式下 fastboot product 缺失時的 USB ID 識別，恢復電腦線刷支援；打包工具在 macOS 與 Windows 上無 debugfs 時也能正常解包映像；
 - **PRIME 4 硬體 FX 選擇器（#168）與 PRIME 4+ 啟用校驗（#169）**：重整 JC11 硬體效果選擇器，修復切效果器重設與 Wet/Dry 淡入淡出爆音；強化 PRIME 4+（JC11S）啟用檔案與資料目錄校驗；修復 Beatport 無損升級在冷快取下的命中，並在 `stream-sync` 佔用連接埠時讓 `deemixd` 優雅退出。
 - **SC LIVE 4 AUX（#171，新功能，待實機驗證）**：在原廠 `混音台選單 → 通道 → 輸入` 中把 AUX 送入通道 3 或 4，使用通道 CUE、推桿、EQ 與 Sweep FX；僅在 AUX 模式且任一通道選擇線路輸入時封鎖 AUX 直通，MIC2 保持原廠路由。兩路共用一個 AUX 來源，同時推起會疊加。Mixer Menu（Beta）會搬移部分偏好設定，並允許向線路輸入通道載歌；JP21 隱藏未驗證的 Bluetooth/Computer 選項。詳見[路由說明與實機檢查](docs/issue171-sclive4-aux.md)；
@@ -92,11 +91,11 @@
 - **Tailscale / Headscale 遠端存取（#130）**：Web 控制台的 `遠端存取（Tailscale / Headscale）` 卡片按需下載精簡版 Tailscale 用戶端（約 4.3 MB，下載後校驗 SHA-256），以登入連結或一次性 Auth key 登入，只把你勾選的服務（SSH / SFTP、Web 控制台）開放給你自己的 tailnet。不需要公網 IP，也不用改路由器，自架 Headscale 伺服器同樣可用。預設關閉。播放機核心沒有 TUN 裝置，所以以使用者空間模式執行。已用 Headscale 端對端測通；實機播放時的 CPU 與記憶體占用尚未實測；
 - **串流歌單排序（#98）**：所有串流服務都能開啟 Engine 內建的排序選單，依 BPM、調性、評等、歌名或歌手遞增 / 遞減排列；
 - **串流曲目可錄音（#84）**：載入串流曲目時，Engine 的錄音功能不再拒絕錄製。錄音請僅供個人使用，並遵守串流服務的條款；
-- **曲目列表顯示 BPM（#80）**：開啟 `個人偏好（User Profile）→ 曲庫 → 雙欄瀏覽` 後，曲目列表第二欄旁會顯示 BPM；
+- **曲目列表顯示 BPM（#80）**：開啟 `版面 → View → 雙欄瀏覽` 後，曲目列表第二欄旁會顯示 BPM；
 - **推桿回音與智慧同步（#104）**：`推桿回音` 磁貼在 `關` / `全部推桿` / `僅豎推` 之間循環，使用 Engine 內建的轉場效果。開啟 Sync 時，智慧同步也會嘗試半速 / 倍速（0.25×–4×）匹配，Pitch Range 只擴大到最接近的匹配所需的範圍；
-- **控制中心新磁貼**：第 3 行新增 4 個磁貼 `波形樣式`、`轉盤燈光`、`推桿回音`、`智慧同步`，點一下循環切換；`Live Stream` 移到 `設定 → 服務`；
+- **控制中心新磁貼**：第 3 行新增 `推桿回音`、`智慧同步` 兩個演出磁貼，點一下循環切換；`Live Stream` 移到 `設定 → 服務`，`波形樣式` 收攏至 `版面 → View`；
 - **先鋒風格 Beat FX 與 Sound Color FX（#88）**：JC11 PRIME 4（Engine 5.3.0）可於列表末尾選擇 `Spiral (PX)`、`Pitch Echo (PX)`、`Slip Roll (PX)`、`Dub Echo (PX)`、`Space (PX)`，按 FX 單元及其分配通道生效。Parameter 可調時間、音色與回授，Wet/Dry 可調乾濕比，原廠效果繼續可選；獨立 Time/Rate 旋鈕暫未接入。AZ04 保留原本的 `Color FX Style` 設定；PRIME 4 實機驗證待完成； JP07 SC5000 沒有原生 FX 選擇器，保留全域 `Color FX Style` 選單、master 效果及儲存的設定。
-- **介面縮放（110%–75%）、曲目列表波形開關與打擊墊亮度（#153、#117、#85）**：`設定 → 裝置 → 介面縮放` 可把 Engine 整個介面在 110% 到 75% 之間無黑邊縮放，控制中心與彈窗仍然鋪滿螢幕；`個人偏好（User Profile）→ 曲庫 → 曲目列表波形` 關閉後可隱藏列表裡的縮略波形，讓歌名與藝人完整展開；`打擊墊亮度` 可把打擊墊與按鍵燈光從 100% 調到 20%；
+- **介面縮放（110%–75%）、曲目列表波形開關與打擊墊亮度（#153、#117、#85）**：`版面 → View → 介面縮放` 可把 Engine 整個介面在 110% 到 75% 之間無黑邊縮放，控制中心與彈窗仍然鋪滿螢幕；`個人偏好（User Profile）→ 曲庫 → 曲目列表波形` 關閉後可隱藏列表裡的縮略波形，讓歌名與藝人完整展開；`設定 → 裝置 → 打擊墊亮度` 可把打擊墊與按鍵燈光從 100% 調到 20%；
 - **實體三段 EQ 旋鈕 Stems 分軌控制與快捷鍵（#152）**：透過 `個人偏好 → 播放 → Stems EQ Mode` 或按各通道 **Shift + Cue (PFL)**，即可將該通道的實體 `HIGH / MID / LOW` 三段 EQ 旋鈕切換為 **Stems Level**（`Vocal 人聲`、`Melody + Bass 旋律+貝斯`、`Drums 鼓組`），內建原廠軟接管（Soft Takeover）防跳變與螢幕提示；修復 PRIME 2 / PRIME 4 快速雙擊 `Hot Cue` 時 Stems 模式閃退回 Hot Cue 的問題；
 - **播放中按住瀏覽/縮放旋鈕轉動轉盤防誤入網格編輯（#157）**：曲目播放中按住 Browse/Zoom 旋鈕（或 Slip/Vinyl）不再誤觸進入 BeatGrid Edit（此前會導致瞬間跳回 `00:00` 且 Play 鍵鎖死），網格編輯啟用時停用轉盤觸控；
 - **PRIME 4 / PRIME 4+ 與 SC5000 / SC6000 區域網路跨機型四軌連動（#160）**：一體機與獨立播放機均開放 `四軌波形顯示` 與 `四軌角色`（`自動`、`1+3`、`2+4`、`1+2`、`3+4`、`1`、`2`），支援 PRIME 4 / PRIME 4+ 本機負責 1+2 軌、同時將區域網路內 SC5000 / SC6000 的即時波形、熱標與對拍映射至 3+4 影子軌；
@@ -124,7 +123,7 @@
 - **OmniSource 統一瀏覽**：隨身碟 / SD 卡裡的歌單和曲目直接顯示在串流瀏覽器中，和串流歌單放在一起，一次搜尋兩邊都找得到；隨身碟曲目直接從碟上讀取播放，音質不打折（`設定 → OmniSource`，預設關閉）；
 - **先鋒 CDJ / Pro DJ Link（測試版）**：透過區域網路 / Wi-Fi 讀取 CDJ 上 rekordbox 隨身碟的曲庫（`Pro DJ Link 曲庫`），也能把本機曲庫分享給 CDJ（實驗功能）。SC5000 與 CDJ 之間始終只有一個 Master：MASTER 可以雙向交接；本機當 Master 時會送出 BPM 與拍點，供 CDJ 的 BEAT SYNC 對拍。以上預設全部關閉；
 - **更乾淨的聲音**：`0dB 防破音軟限幅` 以平滑曲線把主輸出壓在 -0.1 dBFS 以下，零延遲，-1.5 dBFS 以下的訊號原樣不動；Flanger 不再讓音量下沉（自動補償到原曲電平，最多 +6 dB）；`推桿切歌自動回音` 在拉下推桿時留下回音尾巴；`自動增益（0 dB 正規化）` 把音量偏小的歌平滑地提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下的靜音不提升），之後一定經過軟限幅，不會爆音（預設關閉）。共 21 個即時 DSP 掛點，不增加任何延遲；
-- **SC5000 / SC6000 原生四軌版面**：在獨立播放機上解鎖 Engine 內建的四軌介面，音效卡仍只用 2 路。每台播放機負責自己角色的兩軌（`自動`、`1+3`、`2+4`、`1+2`、`1`、`2`，在 `設定 → 裝置 → 四軌角色` 或網頁控制台切換），其餘各軌是不出聲的**影子軌道**，跟隨另一台 EngineX 碟機或 CDJ 的曲目、播放 / CUE、位置、速度、Master 與同步；
+- **SC5000 / SC6000 原生四軌版面**：在獨立播放機上解鎖 Engine 內建的四軌介面，音效卡仍只用 2 路。每台播放機負責自己角色的兩軌（`自動`、`1+3`、`2+4`、`1+2`、`1`、`2`，在 `版面 → View → 四軌角色` 切換），其餘各軌是不出聲的**影子軌道**，跟隨另一台 EngineX 碟機或 CDJ 的曲目、播放 / CUE、位置、速度、Master 與同步；
 - 向 Shoutcast / Icecast 伺服器 **直播推流**；
 - **曲庫**：`自動分析插入的裝置` 暫不可用，僅保留偏好設定；rekordbox 匯出的隨身碟（包含 6.8.5）即使有個別檔案損壞也能正常匯入，那幾首在載入時再分析；選取其他串流服務時，不再跳出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示；
 - **Spotify 改用你自己的應用**：Spotify 限制每個應用的使用者數和請求量，所以不再內建共用的應用。到 `developer.spotify.com/dashboard` 免費建立一個應用，把網頁控制台裡顯示的 Redirect URI 加進去，再把它的 Client ID 填回控制台（`#70`）；
@@ -180,7 +179,7 @@
 <td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/zh-TW/06b-preferences-device.png" width="100%" alt="裝置設定"><br>
 <b>裝置設定選單</b><br>
-<sub>直接切換語言、介面縮放、Pad 燈亮度、4 軌波形與轉盤燈效</sub>
+<sub>直接切換語言、Pad 燈亮度與電源開關</sub>
 </td>
 </tr>
 <tr>

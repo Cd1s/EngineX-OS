@@ -283,7 +283,6 @@ SERVICES_MAIN = """
 	property string scWave: "denon"
 	property string scQuality: "flac"
 	property string scNeteaseMode: "official"
-	property string scJog: "static"
 	property bool scMasterLimiter: false // #58, applied by engine_ui_hook.c
 	property bool scAutoGain: false // #64, applied by engine_ui_hook.c
 	// #55: retain the saved preference, but fail closed until a bounded native
@@ -608,7 +607,7 @@ SERVICES_MAIN = """
 		return s
 	}
 	// EngineX settings a view keeps too: [snapshot key = root property, /v1/sc5000/ui query].
-	readonly property var scViewPrefs: [["scWave", "waveform"], ["scJog", "jog"], ["scUIScale", "uiScale"],
+	readonly property var scViewPrefs: [["scWave", "waveform"], ["scUIScale", "uiScale"],
 		["scTracklistWaveform", "tracklistWaveform"], ["scDualColumn", "browserDualColumn"], ["scCueCountdown", "cueCountdown"], ["scBeatJumpPads", "beatJumpPads"], ["scSwapLoopOrder", "swapLoopOrder"]]
 	function scViewApply(s) {
 		const m = scViewControls()
@@ -699,7 +698,6 @@ SERVICES_MAIN = """
 	property real scViewCheckAt: 0
 	function scViewMark() { scViewDirty = true }
 	onScWaveChanged: scViewDirty = true
-	onScJogChanged: scViewDirty = true
 	onScUIScaleChanged: scViewDirty = true
 	onScTracklistWaveformChanged: scViewDirty = true
 	onScDualColumnChanged: scViewDirty = true
@@ -1703,7 +1701,7 @@ SERVICES_MAIN = """
 	function scRestartCall(query) {
 		const prompt = PlanckGUI.views.prompts.post({
 			type: Prompt.Warning,
-			message: "需要重启 Engine，播放会中断。\nRestart Engine to apply? Playback will stop.",
+			message: root.scT("Restart Engine to apply? Playback will stop."),
 			options: Prompt.Cancel | Prompt.Ok
 		})
 		prompt.finished.connect(function(r) { if (r === Prompt.AcceptRole) scCall(query + "&restart=1") })
@@ -1830,86 +1828,10 @@ SERVICES_MAIN = """
 			scCall("playhead=" + p.translator.value)
 		}
 	}
-	// Jog light modes write only the decks' live colours. The profile's colours stay
-	// as chosen and are not written ten times a second to flash.
-	property real scJogHue: 0
-	property var scJogSaved: null
-	property var scJogDecks: []
-	readonly property var scJogWantedDecks: root.scDeckList()
-	onScJogWantedDecksChanged: if (scJogSaved) scJogResetDecks()
-	property var scJogTargets: ({})
 	// On a 4-deck unit this deck's own pair (12 / 24) wins; root.decks is undefined in Engine 5.3.0.
 	function scDeckList() {
 		if (root.scFourDeckRole !== "") return root.scFourDeckRole.split("").map(c => parseInt(c)).filter(d => d >= 1 && d <= 4)
 		return (root.decks && root.decks.length ? root.decks : [1, 2]).map(d => parseInt(d))
-	}
-	function scDeckColor(deck) { const p = Planck.getProperty("/Engine/Deck" + deck + "/Color"); return p ? p.translator : null }
-	function scSetDeckJogColor(deck, col) {
-		let target = scJogTargets[deck]
-		if (!target) {
-			target = {color: root.scTr("/Engine/Deck" + deck + "/Color"), jog: root.scTr("/Engine/Deck" + deck + "/JogColor")}
-			if (target.color && target.jog) scJogTargets[deck] = target
-		}
-		if (target.color) target.color.color = col
-		if (target.jog && target.jog.color !== undefined) target.jog.color = col
-	}
-	// scFourDeckRole arrives over XHR after startup: put the colours back on the decks that were
-	// animated, then snapshot the decks of the current role.
-	function scJogResetDecks() {
-		if (root.scJogSaved) root.scJogDecks.forEach((d, i) => { if (root.scJogSaved[i]) root.scSetDeckJogColor(d, root.scJogSaved[i]) })
-		const decks = root.scJogWantedDecks
-		root.scJogDecks = decks
-		root.scJogSaved = decks.map(d => { const c = root.scDeckColor(d); return c ? String(c.color) : "" })
-	}
-	// BPM sync: the tempo of the deck that is playing, the active one first; 0 when
-	// nothing plays. Rounded so the pitch fader does not restart the timer constantly.
-	function scPlayingBPM() {
-		const decks = root.scBpmDecks
-		for (const d of decks) {
-			const play = Planck.getProperty("/Engine/Deck" + d + "/PlayState")
-			let bpm = Planck.getProperty("/Engine/Deck" + d + "/Track/CurrentBPM")
-			if (!bpm || !bpm.translator) bpm = Planck.getProperty("/Engine/Deck" + d + "/CurrentBPM")
-			const isPlaying = play && play.translator && play.translator.state
-			const bpmVal = bpm && bpm.translator ? (bpm.translator.unnormalized || bpm.translator.value || 0) : 0
-			if (isPlaying && bpmVal > 40)
-				return Math.round(bpmVal * 10) / 10
-		}
-		return 0
-	}
-	property real scJogBPM: 0
-	readonly property var scBpmDecks: (root.activeDecks || []).map(d => parseInt(d)).concat(root.scJogWantedDecks)
-	property real scJogLastTick: 0
-	Timer {
-		interval: 500; repeat: true
-		running: root.scJog === "bpm"
-		onTriggered: root.scJogBPM = root.scPlayingBPM()
-		onRunningChanged: root.scJogBPM = running ? root.scPlayingBPM() : 0
-	}
-	Timer {
-		// 25 fps in every mode; the hue advances by elapsed time so the gradient is continuous.
-		// rainbow: 8 s per turn, fast: 2.4 s, bpm: one turn per four beats.
-		interval: 40
-		repeat: true
-		running: root.scJog === "rainbow" || root.scJog === "fast" || root.scJog === "bpm"
-		onRunningChanged: {
-			root.scJogLastTick = 0
-			if (running) {
-				root.scJogSaved = null
-				root.scJogResetDecks()
-			} else if (root.scJogSaved) {
-				root.scJogDecks.forEach((d, i) => { if (root.scJogSaved[i]) root.scSetDeckJogColor(d, root.scJogSaved[i]) })
-				root.scJogSaved = null
-			}
-		}
-		onTriggered: {
-			const now = Date.now()
-			const dt = Math.min(200, Math.max(16, now - (root.scJogLastTick || now)))
-			root.scJogLastTick = now
-			const turn = root.scJog === "fast" ? dt / 2400 : root.scJog === "bpm" ? (root.scJogBPM > 0 ? dt * (root.scJogBPM / 60000) / 4 : dt / 6000) : dt / 8000
-			root.scJogHue = (root.scJogHue + turn) % 1
-			for (let i = 0; i < root.scJogDecks.length; i++)
-				root.scSetDeckJogColor(root.scJogDecks[i], Qt.hsva((root.scJogHue + i * 0.35) % 1, 1, 1, 1))
-		}
 	}
 	property var scSources: ["tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"]
 	property var scLoggedIn: []
@@ -2020,7 +1942,6 @@ SERVICES_MAIN = """
 		scUpdateRepo = v.githubRepo || scUpdateRepo
 		if (v.accessCode) { scAccessCode = v.accessCode; scConsoleUrl = v.consoleUrl || "" }
 		scLanStems = v.lanStems ? (v.lanStems.online ? scT("Stems LAN renderer online:") : scT("Stems LAN renderer offline:")) + " " + (v.lanStems.hostname || v.lanStems.endpoint || "") : ""
-		scJog = v.jog || "static"
 		scMasterLimiter = !!v.masterLimiter
 		scAutoGain = !!v.autoGain
 		scAutoAnalyze = !!v.autoAnalyze
@@ -2640,16 +2561,6 @@ QUALITY_ENTRY = """
 		},
 """
 
-JOG_ENTRY = """
-		EntryBase.ListEntry {
-			text: "Jog Light Mode"
-			readonly property var ids: ["static", "rainbow", "fast", "bpm"]
-			values: ["Static", "Psy Rainbow", "Psy Fast", "Psy BPM Sync"]
-			currentValue: values[Math.max(0, ids.indexOf(root.scJog))]
-			onSelected: function(index) { root.scCall("jog=" + ids[index]) }
-		},
-"""
-
 # Settings -> Services: streaming, live stream and Pro DJ Link. The gate probe looks
 # for objectName ControlCenter_LiveStream (it was a Control Center tile up to #50).
 SERVICES_ENTRIES = QUALITY_ENTRY + """
@@ -2780,6 +2691,7 @@ CUE_COUNTDOWN_ENTRY = """
 UI_SCALE_ENTRY = """
 		EntryBase.ListEntry {
 			text: "UI Scale"
+			entryWidth: narrow ? 104 : 88
 			readonly property var ids: ["110", "105", "100", "95", "90", "85", "80", "75"]
 			values: ["110%", "105%", "100%", "95%", "90%", "85%", "80%", "75%"]
 			currentValue: values[Math.max(0, ids.indexOf(String(root.scUIScale)))]
@@ -2806,6 +2718,7 @@ FOUR_DECK_ENTRIES = """
 		},
 		EntryBase.ListEntry {
 			text: "4-Deck Role"
+			entryWidth: 104
 			visible: root.scFourDeckOn
 			readonly property var ids: ["auto", "13", "24", "12", "34", "1", "2"]
 			values: ["Auto", "1+3", "2+4", "1+2", "3+4", "1", "2"]
@@ -2823,9 +2736,11 @@ FOUR_DECK_ENTRIES = """
 
 # #99 Layout Manager: what a View 1..5 keeps besides the stock layout (scViewSnapshot).
 VIEW_ENTRIES = """
-		@HEADLINE@ { text: "ENGINEX VIEW PRESET" },
+		@HEADLINE@ {
+			text: "ENGINEX VIEW PRESET"
+		},
 		WaveformStyle { },
-""" + JOG_ENTRY + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES
+""" + CUE_COUNTDOWN_ENTRY + UI_SCALE_ENTRY + DUAL_COLUMN_ENTRY + BEAT_JUMP_ENTRIES + FOUR_DECK_ENTRIES
 
 # #78: a deck in a booth can be switched off without reaching for the recessed rear
 # button. Engine's own quit path: the "Turn Off" confirmation, recording and library
@@ -2848,140 +2763,6 @@ LANGUAGE_ENTRY = """
 				if (ids[index] !== root.scLang) root.scCall("lang=" + ids[index])
 			}
 		},
-"""
-
-# Control Center: the CDJ-3000 "WAVEFORM COLOR" control, in a stock-size tile
-# (#45): a title over three joined segments, each with a colour swatch and a
-# name; the selected one is filled cyan. A tap switches at once, no RGB prompt.
-WAVE_TILE = """
-		Rectangle {
-			id: scWaveTile
-			objectName: "ControlCenter_WaveformStyle"
-			readonly property var ids: ["denon", "rgb", "3band"]
-			readonly property string current: ids.indexOf(root.scWave) >= 0 ? root.scWave : "denon"
-			width: 256
-			height: 104
-			radius: 16
-			color: Style.surface03Color
-			Text {
-				x: 14
-				y: 8
-				text: "Waveform Style"
-				font: Style.fontH4
-				color: Style.font01Color
-			}
-			Row {
-				x: 12
-				y: 36
-				Repeater {
-					model: ["DENON", "RGB", "3BAND"]
-					Rectangle {
-						id: seg
-						readonly property string waveId: scWaveTile.ids[index]
-						readonly property bool selected: scWaveTile.current === waveId
-						objectName: "ControlCenter_WaveformStyle_" + waveId
-						width: (scWaveTile.width - 24) / 3
-						height: 56
-						color: selected ? "#00c3e3" : segTap.pressed ? "#6a6a6a" : "#4a4a4a"
-						border {
-							width: 1
-							color: "#a8a8a8"
-						}
-						Rectangle {
-							id: swatch
-							anchors.horizontalCenter: parent.horizontalCenter
-							y: 10
-							width: 50
-							height: 12
-							color: "#00c853"
-							border {
-								width: 1
-								color: "#202020"
-							}
-							gradient: seg.waveId === "rgb" ? rainbow : null
-							Gradient {
-								id: rainbow
-								orientation: Gradient.Horizontal
-								GradientStop { position: 0.0; color: "#ff2020" }
-								GradientStop { position: 0.2; color: "#ffd000" }
-								GradientStop { position: 0.4; color: "#20e040" }
-								GradientStop { position: 0.6; color: "#00d8ff" }
-								GradientStop { position: 0.8; color: "#3050ff" }
-								GradientStop { position: 1.0; color: "#e040ff" }
-							}
-							Row {
-								visible: seg.waveId === "3band"
-								x: 1
-								y: 1
-								Rectangle { width: 14; height: 10; color: "@HIGH@" }
-								Rectangle { width: 14; height: 10; color: "@MID@" }
-								Rectangle { width: 20; height: 10; color: "@LOW@" }
-							}
-						}
-						Text {
-							anchors.horizontalCenter: parent.horizontalCenter
-							y: 28
-							text: modelData
-							font: Style.fontH5
-							color: "#ffffff"
-						}
-						MouseArea {
-							id: segTap
-							anchors.fill: parent
-							onClicked: if (!seg.selected) root.scCall("waveform=" + seg.waveId)
-						}
-					}
-				}
-			}
-		}
-"""
-
-# Live Stream moved to Settings -> Services; the Control Center keeps performance tiles.
-JOG_TILE = """
-		Rectangle {
-			id: scJogTile
-			objectName: "ControlCenter_JogLight"
-			readonly property var ids: ["static", "rainbow", "fast", "bpm"]
-			width: 256
-			height: 104
-			radius: 16
-			color: Style.surface03Color
-			Text {
-				x: 14
-				y: 8
-				text: "Jog Light"
-				font: Style.fontH4
-				color: Style.font01Color
-			}
-			Row {
-				x: 12
-				y: 36
-				Repeater {
-					model: ["Static", "Rainbow", "Fast", "BPM"]
-					Rectangle {
-						readonly property bool selected: root.scJog === scJogTile.ids[index]
-						width: (scJogTile.width - 24) / 4
-						height: 56
-						color: selected ? "#00c3e3" : jogTap.pressed ? "#6a6a6a" : "#4a4a4a"
-						border {
-							width: 1
-							color: "#a8a8a8"
-						}
-						Text {
-							anchors.centerIn: parent
-							text: root.scT(modelData).toUpperCase()
-							font: Style.fontH5
-							color: "#ffffff"
-						}
-						MouseArea {
-							id: jogTap
-							anchors.fill: parent
-							onClicked: if (!parent.selected) root.scCall("jog=" + scJogTile.ids[index])
-						}
-					}
-				}
-			}
-		}
 """
 
 UPFADER_ECHO_TILE = """
@@ -3115,7 +2896,7 @@ SMART_SYNC_MAIN = """
 """
 
 # Control Center (5.3.0 only): Engine's own Sync Mode preference (Bar / Beat /
-# Tempo) as a tile in the WAVE_TILE style, next to SMART_SYNC_MAIN.
+# Tempo) as a Control Center tile, next to SMART_SYNC_MAIN.
 SYNC_TILE = """
 		Rectangle {
 			id: scSyncTile
@@ -3920,6 +3701,9 @@ def edits(dev: bool):
             ("if(isSelected(text) && entry.defaultIndex", "if(isSelected(modelData) && entry.defaultIndex"),
         ],
         # 5.3.0 moved it up from TabContents/, so its imports lost the "../".
+        prefs + ("" if v53() else "TabContents/") + "DisplayTabContent.qml": [
+            ("        WaveformStyle {},\n" if v53() else ",\n\t\tWaveformStyle { }", ""),
+        ],
         prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
             (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
             ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY if v53() else "") + "		PlayerNumber { },\n"),
@@ -3967,7 +3751,7 @@ def edits(dev: bool):
         ],
         v + "ControlCenter/Tabs/ControlCenterTab.qml": [
             ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),
-            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + WAVE_TILE.replace("@LOW@", BAND_COLORS["Low"]).replace("@MID@", BAND_COLORS["Mid"]).replace("@HIGH@", BAND_COLORS["High"]) + JOG_TILE + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
+            ("		DayModeEnable { }\n", "		DayModeEnable { }\n" + UPFADER_ECHO_TILE + (SYNC_TILE if v53() else "")),
         ],
         v + "ControlCenter/ControlCenterTabView.qml": [("text: tabView.hideTabButtonLabel ? \"\" : modelData", "text: tabView.hideTabButtonLabel ? \"\" : root.scT(modelData)")],
         prefs + "PreferencesTabView.qml": [("					text: modelData\n", "					text: root.scT(modelData)\n")],
@@ -4408,7 +4192,7 @@ def edits(dev: bool):
             # #104: Fader Echo / TransitionFx 3-state cycling: Off -> All Faders -> Upfader Only -> Off
             v + "ControlCenter/Tabs/ControlCenter/Entries/TransitionFxEnable.qml": [
                 ('text: "Fader Echo"\n        icon.source: "qrc:/Skins/UIKit/Icons/Faderecho.png"\n        checked: view.enabled\n        onClicked: view.enabled = !view.enabled',
-                 'text: !view.enabled ? "Fader Echo" : (view.triggerSource === 1 ? "Fader Echo: Up" : "Fader Echo: All")\n        icon.source: "qrc:/Skins/UIKit/Icons/Faderecho.png"\n        checked: view.enabled\n        onClicked: { if (!view.enabled) { view.setTriggerSource(2); view.enabled = true } else if (view.triggerSource === 2) { view.setTriggerSource(1) } else { view.enabled = false } }'),
+                 'text: !view.enabled ? root.scT("Fader Echo") : (view.triggerSource === 1 ? root.scT("Fader Echo: Up") : root.scT("Fader Echo: All"))\n        icon.source: "qrc:/Skins/UIKit/Icons/Faderecho.png"\n        checked: view.enabled\n        onClicked: { if (!view.enabled) { view.setTriggerSource(2); view.enabled = true } else if (view.triggerSource === 2) { view.setTriggerSource(1) } else { view.enabled = false } }'),
             ],
             v + "StatusBar/Buttons/TransitionFxButton.qml": [
                 ('    checked: active\n    onClicked: transitionFx.enabled = !transitionFx.enabled',
