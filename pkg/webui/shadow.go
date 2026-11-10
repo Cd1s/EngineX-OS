@@ -68,6 +68,7 @@ type deckState struct {
 	MetadataOnly bool    `json:"metadataOnly,omitempty"` // CDJ state has no peer display asset endpoint
 	LineIn       bool    `json:"lineIn,omitempty"`       // all-in-one console: shadow source mapped to Line In channel
 	DisplayOnly  bool    `json:"displayOnly,omitempty"`  // this slot goes to the display renderer; Engine must not load it
+	Fallback     string  `json:"fallback,omitempty"`     // auto mode, a CDJ on the display renderer: why Engine cannot have its file (cdjFallback); the QML says so on the lane
 	Playing      bool    `json:"playing"`
 	PositionMS   float64 `json:"positionMs"`
 	Pitch        float64 `json:"pitch"` // percent
@@ -205,9 +206,10 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	return math.Abs(expect-d.PositionMS) <= shadowPlayingDriftMS
 }
 
-// precisePos is a CDJ-3000's playhead from its absolute position packet (0x0b,
-// every 30 ms) and when it arrived; the status packet's playhead only moves on
-// beats, and following that made the shadow deck jump (#49).
+// precisePos is a CDJ-3000's playhead from its absolute position packets (0x0b,
+// every 30 ms): where its line (observe) was when the last one arrived; the
+// status packet's playhead only moves on beats, and following that made the
+// shadow deck jump (#49).
 type precisePos struct {
 	ms float64
 	at time.Time
@@ -221,6 +223,24 @@ type cdjSeen struct {
 	at      time.Time
 	moving  bool
 	jumps   int
+	// The playhead line (see observe): where the deck is at at, as its quickest
+	// packets say, and the rate it runs at.
+	line, rate float64
+	late       float64 // the least a packet was behind the line, of the n since the line last moved
+	n          int
+	pitch      float64 // from the status packet (0x0a), exact
+	fine       bool
+}
+
+// exact is the CDJ's pitch in percent. Position packets round it to 0.01 %,
+// which alone slips 3 ms a minute and, taking turns with the status packet's
+// exact value, moved the shadow deck's fader back and forth; so the status
+// packet's value counts while the rounded one agrees with it.
+func (c cdjSeen) exact(pitch float64) float64 {
+	if c.fine && math.Abs(c.pitch-pitch) <= 0.0051 {
+		return c.pitch
+	}
+	return pitch
 }
 
 type shadowState struct {
@@ -228,6 +248,7 @@ type shadowState struct {
 	fetchCDJCalls atomic.Uint64
 	mu            sync.Mutex
 	precise       map[byte]precisePos
+	cdjPortmap    int              // tests: the players' portmap port; 0 is UDP 111
 	cdj           map[byte]cdjSeen // per CDJ player number: its last edges and jumps
 	own           []deckState
 	ownMaster     bool
@@ -976,8 +997,9 @@ const cdjCuePlay = 7
 // observe keeps the absolute positions of Pro DJ Link players and wakes the
 // long polls on a CDJ's edge (play, CUE held or released, track, a jump), so
 // the shadow deck gets it at once instead of on the next 120 ms refresh.
-func (sh *shadowState) observe(d prolink.Device) {
-	now := time.Now()
+func (sh *shadowState) observe(d prolink.Device) { sh.observeAt(d, time.Now()) }
+
+func (sh *shadowState) observeAt(d prolink.Device, now time.Time) {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	c := sh.cdj[d.Number]
@@ -985,7 +1007,6 @@ func (sh *shadowState) observe(d prolink.Device) {
 	switch {
 	case d.PacketType == 0x0b && d.PrecisePosition:
 		ms := float64(d.PlayPositionMS)
-		sh.precise[d.Number] = precisePos{ms, now}
 		// A jump: hot cue, CUE back to the cue point, beat jump, loop. The packets
 		// come every 30 ms, so a playing deck is off its line by arrival jitter only.
 		jump := false
@@ -1000,12 +1021,31 @@ func (sh *shadowState) observe(d prolink.Device) {
 			c.jumps++
 			edge = true
 		}
-		c.moving = !jump && !c.at.IsZero() && ms > c.ms
+		// The time base is when a packet arrives, and a packet is only ever late
+		// (the network, this process waiting for the CPU): anchored at each arrival,
+		// the shadow deck steered after that wait. So the line runs at the pitch from
+		// the quickest packet; eight late ones in a row (240 ms: the deck was slowed
+		// by hand) move it back by the least of them.
+		rate := 1 + c.exact(d.Pitch)/100
+		expect := c.line + float64(now.Sub(c.at).Microseconds())/1000*c.rate
+		late := expect - ms
+		moving := !jump && !c.at.IsZero() && ms > c.ms
+		if !moving || !c.moving || math.Abs(rate-c.rate) > 2e-6 || late <= 0 {
+			c.line, c.n = ms, 0
+		} else if c.line, c.n = expect, c.n+1; c.n == 1 || late < c.late {
+			c.late = late
+		}
+		if c.n >= 8 {
+			c.line, c.n = c.line-c.late, 0
+		}
+		c.rate, c.moving = rate, moving
 		c.ms, c.at = ms, now
+		sh.precise[d.Number] = precisePos{c.line, now}
 	case d.PacketType == 0x0a:
 		playing := d.Playing || d.PlayState1 == cdjCuePlay
 		edge = playing != c.playing || d.TrackID != c.track
 		c.playing, c.track = playing, d.TrackID
+		c.pitch, c.fine = d.Pitch, true
 	}
 	sh.cdj[d.Number] = c
 	if edge {
@@ -1073,10 +1113,12 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug, "displayOnly": v.ShadowMode == "cdj"})
 }
 
-// shadowCompose picks the path per shadow slot. In auto mode the source
-// decides: an EngineX peer's track is loaded by Engine and drawn by the stock
-// components, a Pro DJ Link CDJ goes to the display renderer (displayOnly on
-// its deck). The two forced modes send every source down one path.
+// shadowCompose picks the path per shadow slot. In auto mode every source goes
+// through Engine, drawn by the stock components, when this player can have the
+// file: an EngineX peer's track, and a CDJ's from a USB stick or SD card on the
+// link. A CDJ whose file it cannot have (cdjFallback) goes to the display
+// renderer (displayOnly on its deck) and says why. The two forced modes send
+// every source down one path.
 func (s *Server) shadowCompose(role string, now time.Time, lines ...[]int) []deckState {
 	s.uiMu.Lock()
 	mode := s.loadUI().ShadowMode
@@ -1087,21 +1129,54 @@ func (s *Server) shadowCompose(role string, now time.Time, lines ...[]int) []dec
 	case "engine":
 		return s.shadowComposeLegacy(role, now, lines...)
 	}
-	out, free, lineIn := s.shadowLegacy(role, now, false, lines...)
-	out = append(out, s.shadowDisplayCDJs(free, lineIn, now)...)
-	slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
+	out, free, lineIn, display := s.shadowLegacy(role, now, false, lines...)
+	if len(display) > 0 {
+		out = append(out, s.shadowDisplayCDJs(free, lineIn, now, display)...)
+		slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
+	}
 	return out
 }
 
 func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int) []deckState {
-	out, _, _ := s.shadowLegacy(role, now, true, lines...)
+	out, _, _, _ := s.shadowLegacy(role, now, true, lines...)
 	return out
 }
 
-// shadowLegacy is the Engine path. Without cdj it stops after the EngineX
-// peers and returns the decks left for CDJs (lineIn: they are the console's
-// Line In channels).
-func (s *Server) shadowLegacy(role string, now time.Time, cdj bool, lines ...[]int) (out []deckState, free []int, lineIn bool) {
+// CDJ status packet, the slot a track was loaded from (Deep Symmetry's
+// analysis): 1 CD, 2 SD, 3 USB, 4 rekordbox on a computer, 7 the second USB of
+// an all-in-one, the others seen are streaming services.
+const (
+	cdjSlotCD     = 1
+	cdjSlotLink   = 4
+	cdjSlotSecond = 7
+)
+
+// cdjFallback tells why auto mode cannot put a CDJ's track through Engine, ""
+// when it can. Only a file a player serves over NFS (SD, USB) can be copied:
+// a streamed track, one rekordbox sends from a computer and a CD have none.
+// failed is the kind of the copy's last failure (shadowCopy.err) while no
+// attempt has succeeded: the copy is still tried again, and Engine takes the
+// deck once one does.
+func cdjFallback(dev prolink.Device, host net.IP, failed string) string {
+	_, err := prolink.SlotExport(dev.SourceSlot)
+	switch {
+	case dev.SourceSlot == cdjSlotLink:
+		return "link"
+	case dev.SourceSlot == cdjSlotCD || dev.SourceSlot == cdjSlotSecond:
+		return "media"
+	case err != nil:
+		return "streaming"
+	case host == nil || failed != "" && failed != "timeout":
+		return "network"
+	}
+	return failed
+}
+
+// shadowLegacy is the Engine path. With all (Engine mode) every CDJ takes it.
+// Without (auto mode), display names the CDJ decks left to the display renderer
+// and why (cdjFallback; no reason on a console's Line In channel, lineIn, where
+// only that renderer draws), out of the decks free for CDJs.
+func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]int) (out []deckState, free []int, lineIn bool, display map[int]string) {
 	devices := s.mergedDevices()
 	// The exporter's lock is taken before ours, never under it: closing the
 	// exporter waits for its observer, which takes ours.
@@ -1218,12 +1293,15 @@ func (s *Server) shadowLegacy(role string, now time.Time, cdj bool, lines ...[]i
 		}
 		lineFree = free
 	}
-	if !cdj {
-		return out, free, len(consoleLines) > 0
-	}
+	lineIn = len(consoleLines) > 0
+	display = map[int]string{}
 	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
+		if lineIn && !all {
+			display[deck] = ""
+			continue
+		}
 		cue := dev.PlayState1 == cdjCuePlay
-		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS), Title: dev.Title, Artist: dev.Artist}
+		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: sh.cdj[dev.Number].exact(dev.Pitch), Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS), Title: dev.Title, Artist: dev.Artist}
 		if len(consoleLines) > 0 {
 			d.LineIn = true
 		}
@@ -1239,7 +1317,12 @@ func (s *Server) shadowLegacy(role string, now time.Time, cdj bool, lines ...[]i
 			d.Path = f // the CDJ plays from this deck's own drive (#63): no copy
 			d.ID = fmt.Sprintf("cdj:own:%d", dev.TrackID)
 		} else if dev.TrackID != 0 {
-			if host := sourceHost(export, devices, dev.SourcePlayer); host != nil {
+			host := sourceHost(export, devices, dev.SourcePlayer)
+			why := ""
+			if !all {
+				why = cdjFallback(dev, host, "")
+			}
+			if host != nil && why == "" {
 				key := fmt.Sprintf("cdj:%s:%d:%d", host, dev.SourceSlot, dev.TrackID)
 				wanted[key] = now
 				d.Path, d.ID = sh.files[key], key
@@ -1247,13 +1330,20 @@ func (s *Server) shadowLegacy(role string, now time.Time, cdj bool, lines ...[]i
 					s.shadowFetchCDJ(key, host, dev.SourceSlot, dev.TrackID)
 					d.Loading = true
 					d.Progress, d.Error = sh.copyShown(key)
+					if c := sh.copies[key]; !all && c != nil && c.fails > 0 {
+						why = cdjFallback(dev, host, c.err)
+					}
 				}
+			}
+			if why != "" {
+				display[deck] = why
+				continue
 			}
 		}
 		out = append(out, d)
 	}
 	slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
-	return out, nil, false
+	return out, free, lineIn, display
 }
 
 // cdjDecks puts the CDJs on the free shadow decks: on their own player number
@@ -1332,7 +1422,7 @@ func sourceHost(st prolink.ExportStatus, devices []prolink.Device, n byte) net.I
 func (s *Server) shadowFetchCDJ(key string, host net.IP, slot byte, id uint32) {
 	s.shadow.fetchCDJCalls.Add(1)
 	s.shadowFetch(key, func(ctx context.Context, cp *shadowCopy) (string, error) {
-		c := &prolink.NFSClient{IP: host}
+		c := &prolink.NFSClient{IP: host, Portmap: s.shadow.cdjPortmap}
 		local, err := prolink.FetchTrack(ctx, c, slot, id, s.shadowDir(), func(done, total int64) {
 			cp.total.Store(total)
 			cp.done.Store(done)
@@ -1476,7 +1566,7 @@ func (s *Server) shadowFetch(key string, fetch func(context.Context, *shadowCopy
 			switch {
 			case errors.Is(err, errShadowUnavailable):
 				c.err = "unavailable"
-			case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
+			case ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()): // ctx: a read cut off by the deadline fails with another error
 				c.err = "timeout"
 			case c.done.Load() > 0:
 				c.err = "interrupted"

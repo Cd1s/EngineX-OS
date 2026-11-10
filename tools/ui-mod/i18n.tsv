@@ -350,7 +350,7 @@ LINE-IN	线路输入	線路輸入
 Engine	Engine	Engine
 AUX	AUX	AUX
 Shadow Deck Mode	影子轨模式	影子軌模式
-Auto: an EngineX deck is shown exactly like a local deck, a CDJ with its rekordbox waveform	自动：EngineX 碟机与本机显示完全一致，CDJ 显示 rekordbox 波形	自動：EngineX 播放機與本機顯示完全一致，CDJ 顯示 rekordbox 波形
+Auto: every source is shown exactly like a local deck; a CDJ track that cannot be copied (streaming, rekordbox Link) shows its rekordbox waveform	自动：所有来源都与本机显示完全一致；拷不到文件的 CDJ 曲目（流媒体、rekordbox Link）显示 rekordbox 波形	自動：所有來源都與本機顯示完全一致；拷不到檔案的 CDJ 曲目（串流、rekordbox Link）顯示 rekordbox 波形
 All Engine Mode: Engine loads every source and shows it exactly like a local deck	全部 Engine 模式：所有来源都由 Engine 加载，与本机显示完全一致	全部 Engine 模式：所有來源都由 Engine 載入，與本機顯示完全一致
 All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)	全部 CDJ 模式：所有来源都不加载曲目，按 CDJ / Pro DJ Link 方式显示	全部 CDJ 模式：所有來源都不載入曲目，依 CDJ / Pro DJ Link 方式顯示
 All Engine Mode	全部 Engine 模式	全部 Engine 模式
@@ -362,3 +362,6 @@ Waiting for source analysis	等待源碟机分析波形	等待來源播放機分
 Failed to open file within appropriate time.	未能在规定时间内打开文件。	未能在規定時間內開啟檔案。
 Could not load via network.	无法通过网络加载。	無法透過網路載入。
 Retrying…	正在重试…	正在重試…
+Streaming track: no file to copy from the CDJ.	流媒体曲目：CDJ 上没有可拷贝的文件。	串流曲目：CDJ 上沒有可複製的檔案。
+rekordbox Link track: no file to copy from the CDJ.	rekordbox Link 曲目：CDJ 上没有可拷贝的文件。	rekordbox Link 曲目：CDJ 上沒有可複製的檔案。
+CD or second USB: no file to copy from the CDJ.	CD 或第二个 USB：CDJ 上没有可拷贝的文件。	CD 或第二個 USB：CDJ 上沒有可複製的檔案。

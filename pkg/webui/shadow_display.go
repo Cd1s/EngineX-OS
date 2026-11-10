@@ -240,7 +240,7 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 			}
 		}
 	}
-	out = append(out, s.shadowDisplayCDJs(free, len(consoleLines) > 0, now)...)
+	out = append(out, s.shadowDisplayCDJs(free, len(consoleLines) > 0, now, nil)...)
 	slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
 	return out
 }
@@ -248,7 +248,7 @@ func (s *Server) shadowComposeDisplay(role string, now time.Time, lines ...[]int
 // shadowDisplayCDJs puts the CDJs on the free decks for the display renderer
 // (lineIn: the decks are the console's Line In channels). Only cached
 // rekordbox analysis is used here, never shadowFetchCDJ/audio.
-func (s *Server) shadowDisplayCDJs(free []int, lineIn bool, now time.Time) []deckState {
+func (s *Server) shadowDisplayCDJs(free []int, lineIn bool, now time.Time, only map[int]string) []deckState {
 	sh := s.shadow
 	devices := s.mergedDevices()
 	var lineFree []int
@@ -257,7 +257,11 @@ func (s *Server) shadowDisplayCDJs(free []int, lineIn bool, now time.Time) []dec
 	}
 	var out []deckState
 	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
-		d := deckState{Deck: deck, DisplayOnly: true, LineIn: lineIn, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
+		why, ok := only[deck]
+		if only != nil && !ok {
+			continue
+		}
+		d := deckState{Deck: deck, DisplayOnly: true, LineIn: lineIn, Fallback: why, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
 		if dev.TrackID != 0 {
 			host := net.ParseIP(dev.Address)
 			if dev.SourcePlayer != dev.Number {

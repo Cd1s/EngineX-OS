@@ -1609,7 +1609,7 @@ assert.equal(scShadowData(2).progress, 0); assert.equal(scShadowData(2).meta, nu
         self.assertEqual(ringed.count("ScStock.ProgressRing {"), 2)
         for stock_style in ("backgroundColor: Style.surface03Color; ringColor: Style.font02Color; strokeWidth: 2", "color: Style.font02Color; font: Style.fontH1"):
             self.assertIn(stock_style, ringed)  # Deck/DownloadProgress.qml
-        self.assertIn("visible: scDisplay.busyState < 4", ringed)  # a failed copy: the text alone
+        self.assertIn("visible: scDisplay.busyState > 0 && scDisplay.busyState < 4", ringed)  # a failed copy, a fallback's reason: the text alone
         plain = bp.shadow_layer(stock, "waveform")  # a QRC without the stock ring (5.0.4)
         self.assertNotIn("ScStock", plain)
         self.assertIn('objectName: "EngineX_Shadow_Busy"', plain)
@@ -1620,9 +1620,34 @@ assert.equal(scShadowData(2).progress, 0); assert.equal(scShadowData(2).meta, nu
             self.assertNotIn("@BUSY@", other)
         table = {en: t["zh-Hans"] for en, t in bp.load_dict().items()}
         text = next(l for l in bp.translate(ringed, table, set(), live=True).split("\n") if "busyState - 1" in l)
-        for hans in ("正在下载", "正在加载", "等待源碟机分析波形", "文件不可用。", "未能在规定时间内打开文件。", "无法通过网络加载。", "正在重试…"):
+        for hans in ("正在下载", "正在加载", "等待源碟机分析波形", "文件不可用。", "未能在规定时间内打开文件。", "无法通过网络加载。", "正在重试…",
+                     "流媒体曲目：CDJ 上没有可拷贝的文件。", "rekordbox Link 曲目：CDJ 上没有可拷贝的文件。", "CD 或第二个 USB：CDJ 上没有可拷贝的文件。"):
             self.assertIn('Math.scI18n.t("%s")' % hans, text)
-        self.assertNotRegex(text, "Downloading|Retrying")
+        self.assertNotRegex(text, "Downloading|Retrying|no file to copy")
+        # The reasons stream-sync gives (cdjFallback) each have a line.
+        for why in ("streaming", "link", "media", "network", "timeout"):
+            self.assertRegex(text, r"[{ ]%s: " % why)
+
+    def test_cdj_without_a_file_goes_to_the_display_renderer_with_the_reason(self):
+        self.js(self.ENGINE + self.COPY + r"""
+// Auto mode, a CDJ playing from a stick: Engine's deck while the copy runs.
+all(copying('a', {key: ''}));
+assert.equal(busy(), 1); assert.equal(scShadowData(2).engine, true); assert.equal(scShadowData(2).fallback, '');
+assert.equal((scShadowEngineMask >> 2) & 1, 1);
+// The copy failed: stream-sync hands the deck to the display renderer and says why.
+const cdj = (why, key) => ({deck: 2, displayOnly: true, key: key || 'cdj:a', title: 'T a', fallback: why});
+all(cdj('network'));
+const s = scShadowData(2);
+assert.equal(s.fallback, 'network'); assert.equal(s.engine, false); assert.equal((scShadowEngineMask >> 2) & 1, 0);
+all(cdj('network')); assert.equal(scShadowData(2), s); // nothing new: no binding runs
+all(cdj('timeout')); assert.notEqual(scShadowData(2), s); assert.equal(scShadowData(2).fallback, 'timeout');
+// A streamed track never is Engine's.
+all(cdj('streaming', 'cdj:b'));
+assert.equal(scShadowData(2).fallback, 'streaming'); assert.equal(scShadowData(2).key, 'cdj:b'); assert.equal(eng.asked.length, 0);
+// A later attempt delivered: Engine loads the copy, the reason is gone.
+all(src(A, {key: ''}));
+assert.equal((scShadowEngineMask >> 2) & 1, 1); assert.deepEqual(eng.asked, [A]); assert.equal(scShadowData(2).fallback, '');
+""")
 
     def test_quick_a_b_a_ends_on_a_whatever_order_engine_loads_in(self):
         self.js(self.ENGINE + r"""

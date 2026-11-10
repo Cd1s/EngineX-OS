@@ -360,6 +360,8 @@ func TestShadowPathBySource(t *testing.T) {
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
 	os.WriteFile(deviceCompatiblePath, []byte("inmusic,jp07\x00"), 0600)
 	s := displayCDJServer(t, cache, dev)
+	// The CDJ's stick cannot be read: its player does not answer.
+	s.shadow.cdjPortmap, s.shadow.copyTimeout, s.shadow.copyRetry = closedUDPPort(t), 100*time.Millisecond, time.Hour
 	srv := httptest.NewServer(s)
 	defer srv.Close()
 	if _, v := uiPost(t, srv.URL, "fourDeckWaveform=1"); v.ShadowMode != "auto" {
@@ -424,9 +426,9 @@ func TestShadowPathBySource(t *testing.T) {
 		if e := decks[0]; e.Deck != 2 || e.DisplayOnly || e.Path != audio || e.Key != displayTrackKey(pd) || e.Loading {
 			t.Fatalf("%s: EngineX slot: %+v", step, e)
 		}
-		// Deck 4: the CDJ, drawn from its cached analysis; its audio is never copied.
+		// Deck 4: the CDJ whose audio cannot be copied, drawn from its cached analysis.
 		c := decks[1]
-		if c.Deck != 4 || !c.DisplayOnly || c.Path != "" || c.MetadataOnly || !strings.HasPrefix(c.Key, "cdj:") {
+		if c.Deck != 4 || !c.DisplayOnly || c.Fallback != "timeout" || c.Path != "" || c.MetadataOnly || !strings.HasPrefix(c.Key, "cdj:") {
 			t.Fatalf("%s: CDJ slot: %+v", step, c)
 		}
 		if code := asset(c, c.Key); code != 200 {
@@ -436,11 +438,24 @@ func TestShadowPathBySource(t *testing.T) {
 			t.Fatalf("%s: the EngineX slot served the CDJ's display asset: %d", step, code)
 		}
 	}
+	// The CDJ's first copy is Engine's to wait for; it fails, and the display renderer has the deck.
+	peer(true)
+	if _, decks := poll(); len(decks) != 2 || decks[1].DisplayOnly || !decks[1].Loading || decks[1].Fallback != "" {
+		t.Fatalf("before the copy failed: %+v", decks)
+	}
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, decks := poll(); len(decks) == 2 && decks[1].DisplayOnly {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the CDJ never fell back to the display path")
+		}
+	}
 	mixed("mixed")
 	// The EngineX player leaves: its slot is free, the CDJ takes it on the display path.
 	peer(false)
 	all, decks := poll()
-	if all || len(decks) != 1 || decks[0].Deck != 2 || !decks[0].DisplayOnly || decks[0].Path != "" || !strings.HasPrefix(decks[0].Key, "cdj:") {
+	if all || len(decks) != 1 || decks[0].Deck != 2 || !decks[0].DisplayOnly || decks[0].Fallback != "timeout" || decks[0].Path != "" || !strings.HasPrefix(decks[0].Key, "cdj:") {
 		t.Fatalf("EngineX to CDJ: displayOnly=%v %+v", all, decks)
 	}
 	if code := asset(decks[0], decks[0].Key); code != 200 {
@@ -448,9 +463,6 @@ func TestShadowPathBySource(t *testing.T) {
 	}
 	// And back: the slot returns to the Engine path, the CDJ to the other deck.
 	mixed("CDJ to EngineX")
-	if n := s.shadow.fetchCDJCalls.Load(); n != 0 {
-		t.Fatalf("CDJ audio fetched %d times", n)
-	}
 	// The forced modes keep sending every source down one path.
 	uiPost(t, srv.URL, "shadowMode=cdj")
 	peer(true)
@@ -1297,7 +1309,8 @@ func TestConsoleLineCDJInAutoMode(t *testing.T) {
 				}
 				return
 			}
-			if len(decks) != 2 || cdj == nil || cdj.Deck != channel || !cdj.LineIn || cdj.MetadataOnly || cdj.Path != "" {
+			// The Line In channel is the display renderer's, whatever the CDJ plays from: no reason, no copy.
+			if len(decks) != 2 || cdj == nil || cdj.Deck != channel || !cdj.LineIn || cdj.MetadataOnly || cdj.Path != "" || cdj.Fallback != "" || s.shadow.fetchCDJCalls.Load() != 0 {
 				t.Fatalf("Line channel %d: %+v", channel, decks)
 			}
 			q := "?deck=" + strconv.Itoa(channel) + "&key=" + url.QueryEscape(cdj.Key)
