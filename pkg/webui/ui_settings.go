@@ -83,7 +83,7 @@ type uiSettings struct {
 	LoggedIn         []string `json:"loggedIn"`
 	FourDeckWaveform bool     `json:"fourDeckWaveform"`
 	FourDeckRole     string   `json:"fourDeckRole"`
-	ShadowMode       string   `json:"shadowMode"` // which path draws a shadow deck: auto = by source (EngineX peer: Engine loads it and stock components draw it; CDJ: display renderer), engine = Engine loads every source, cdj = display renderer for every source
+	ShadowMode       string   `json:"shadowMode"` // which path draws a shadow deck: auto = Engine loads every source whose file this player can have and stock components draw it (EngineX peer; CDJ playing from USB or SD), a CDJ without such a file goes to the display renderer, engine = Engine loads every source, cdj = display renderer for every source
 	ProlinkWaveform  bool     `json:"prolinkWaveform"`
 	BroadcastEnabled bool     `json:"broadcastEnabled"`
 	UpfaderEcho      bool     `json:"upfaderEcho"`

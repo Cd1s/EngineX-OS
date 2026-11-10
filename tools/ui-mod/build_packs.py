@@ -523,7 +523,7 @@ SERVICES_MAIN = """
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
 			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
 			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail || s.progress !== (Number(e.progress) || 0) || s.error !== (e.error || "") ||
-			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0)) return false
+			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "")) return false
 		if (Array.isArray(e.cues)) {
 			const a = s.liveCues, b = e.cues
 			if (!Array.isArray(a) || a.length !== b.length) return false
@@ -562,6 +562,7 @@ SERVICES_MAIN = """
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				jumps: Number(e.jumps) || 0,
 				progress: Number(e.progress) || 0, error: e.error || "", engine: !!e.engine, copying: !!e.copying, durationMs: Number(e.durationMs) || 0,
+				fallback: e.fallback || "",
 				meta: old && old.key === key ? old.meta : null,
 				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
 			if (!next) next = Object.assign({}, scShadowDisplay)
@@ -1243,8 +1244,9 @@ SERVICES_MAIN = """
 			scShadowApplyDisplay(decks)
 			return
 		}
-		// Per slot, by its source: a deck with displayOnly (a CDJ) goes to the display
-		// renderer, the others (EngineX peers) through Engine. Both work side by side.
+		// Per slot: a deck with displayOnly (a CDJ whose file Engine cannot have, or on
+		// a Line In channel) goes to the display renderer, the others (EngineX peers,
+		// CDJs playing from a stick) through Engine. Both work side by side.
 		let mask = 30, lineMask = 0, master = false
 		for (const e of decks) {
 			if (e.displayOnly === true) mask &= ~(1 << e.deck)
@@ -2887,7 +2889,7 @@ FOUR_DECK_ENTRIES = """
 			wrapMode: Text.WordWrap
 			Layout.preferredHeight: implicitHeight
 			color: "#9a9a9a"
-			text: ["Auto: an EngineX deck is shown exactly like a local deck, a CDJ with its rekordbox waveform", "All Engine Mode: Engine loads every source and shows it exactly like a local deck", "All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)"][scShadowModeEntry.at]
+			text: ["Auto: every source is shown exactly like a local deck; a CDJ track that cannot be copied (streaming, rekordbox Link) shows its rekordbox waveform", "All Engine Mode: Engine loads every source and shows it exactly like a local deck", "All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)"][scShadowModeEntry.at]
 		},
 """
 
@@ -3767,7 +3769,14 @@ SHADOW_LAYER = r"""
 SHADOW_BUSY = r"""
         Loader {
             id: scBusy
-            active: scDisplay.busyState > 0
+            // Auto mode, a CDJ this renderer draws because Engine cannot have its file
+            // (sample.fallback, cdjFallback in stream-sync): the same line says why, for
+            // 8 s per track, and for as long as the lane has no waveform to draw.
+            readonly property string why: scDisplay.busyState === 0 && scDisplay.live && scDisplay.sample && !scDisplay.sample.stale && scDisplay.sample.fallback || ""
+            readonly property string whyKey: why === "" ? "" : why + scDisplay.sample.key
+            property string told: ""
+            Timer { interval: 8000; running: scDisplay.visible && scBusy.whyKey !== "" && scBusy.whyKey !== scBusy.told; readonly property string key: scBusy.whyKey; onKeyChanged: if (running) restart(); onTriggered: scBusy.told = scBusy.whyKey }
+            active: scDisplay.busyState > 0 || why !== "" && (told !== whyKey || scDisplay.sample.metadataOnly)
             // Beside the stock playhead line (drawn over the lane), on its wider side.
             readonly property real line: scDisplay.playhead * scDisplay.width
             readonly property real room: Math.max(line, scDisplay.width - line) - 24
@@ -3781,7 +3790,8 @@ SHADOW_BUSY = r"""
 @RING@                Text { textFormat: Text.PlainText
                     anchors.verticalCenter: parent.verticalCenter
                     color: Style.font02Color; font: Style.fontH1
-                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || " ") + (scDisplay.busyState > 3 ? " " + "Retrying…" : " ")
+                    readonly property int retried: scDisplay.busyState > 3 || ["network", "timeout"].indexOf(scBusy.why) >= 0 ? 1 : 0
+                    text: (["Downloading", "Loading", "Waiting for source analysis", "File unavailable.", "Failed to open file within appropriate time.", "Could not load via network."][scDisplay.busyState - 1] || {streaming: "Streaming track: no file to copy from the CDJ.", link: "rekordbox Link track: no file to copy from the CDJ.", media: "CD or second USB: no file to copy from the CDJ.", network: "Could not load via network.", timeout: "Failed to open file within appropriate time."}[scBusy.why] || " ") + [" ", " " + "Retrying…"][retried]
                 }
             } }
         }
@@ -3792,7 +3802,7 @@ SHADOW_BUSY = r"""
 SHADOW_RING = r"""
                 Item {
                     width: 32; height: 32
-                    visible: scDisplay.busyState < 4
+                    visible: scDisplay.busyState > 0 && scDisplay.busyState < 4
                     readonly property real share: scDisplay.sample ? scDisplay.sample.progress : 0
                     ScStock.ProgressRing {
                         anchors.fill: parent; visible: parent.share > 0
