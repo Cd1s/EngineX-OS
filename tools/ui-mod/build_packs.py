@@ -1223,8 +1223,11 @@ SERVICES_MAIN = """
 		for (const d of [1, 2, 3, 4]) {
 			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
 			const e = decks.find(x => x.deck === d)
-			if (e && (e.path || e.loading)) { // loading: Go is still copying the track, wait for it
-				if (scShadowAt[d]) scShadowAt[d].emptyAt = 0
+			const at = scShadowAt[d]
+			// loading: Go is still copying the track, wait for it. Not with the source's
+			// previous track on the deck: that one goes now, as when the source ejects.
+			if (e && (e.path || e.loading) && !(!e.path && e.id && at && at.path && at.id !== e.id)) {
+				if (at) at.emptyAt = 0
 				continue
 			}
 			root.scShadowEmpty(d, now)

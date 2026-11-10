@@ -1710,3 +1710,36 @@ const closed = bends;
 run(60000);
 assert.equal(bends, closed, 'bent again once closed: ' + ahead);
 """)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowTrackChangeTest(unittest.TestCase):
+    """Engine mode: the source's previous track leaves the shadow deck while the next one is copied."""
+
+    def test_previous_track_is_unloaded_while_the_next_is_copied(self):
+        ShadowDisplayTest.js(self, r"""
+const props = {};
+const P = p => props[p] || (props[p] = {state: false, string: 'Off'});
+globalThis.scTr = P;
+globalThis.scShadowApply = e => {};
+const unloaded = () => P('/Engine/Deck2/Unload').state && P('/Engine/Deck2/Track/Unload').state;
+scShadowAt[2] = {path: '/copies/a.mp3', id: 'A', link: 'peer'};
+P('/Engine/Deck2/Play').state = true;
+P('/Engine/Deck2/Track/SongLoaded').state = true;
+for (let i = 0; i < 3; i++) { scShadowApplyAll([{deck: 2, path: '/copies/a.mp3', id: 'A'}], false); now += 500; }
+assert.ok(P('/Engine/Deck2/Play').state && !unloaded() && scShadowAt[2], 'the track the source still holds was touched');
+// The source loaded B: stream-sync is still copying it.
+const copying = [{deck: 2, path: '', loading: true, id: 'B'}];
+scShadowApplyAll(copying, false);
+assert.equal(P('/Engine/Deck2/Play').state, false);
+now += 400; scShadowApplyAll(copying, false);
+assert.ok(unloaded(), 'the previous track stayed on the deck');
+assert.equal(scShadowAt[2], undefined);
+P('/Engine/Deck2/Unload').state = P('/Engine/Deck2/Track/Unload').state = false;
+for (let i = 0; i < 3; i++) { now += 400; scShadowApplyAll(copying, false); }
+assert.ok(!unloaded(), 'unloaded again while the copy goes on');
+// The same track asked again while its copy is not there yet (a first load): nothing to unload.
+scShadowAt[4] = {path: '/copies/c.mp3', id: 'C', link: 'peer'};
+for (let i = 0; i < 3; i++) { now += 400; scShadowApplyAll(copying.concat([{deck: 4, path: '', loading: true, id: 'C'}]), false); }
+assert.ok(!P('/Engine/Deck4/Unload').state && scShadowAt[4]);
+""")
