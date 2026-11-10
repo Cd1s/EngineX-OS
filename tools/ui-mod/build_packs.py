@@ -328,12 +328,14 @@ SERVICES_MAIN = """
 		return 0
 	}
 	function scShadowData(d) { return scShadowDisplay[d] || null }
+	// How fast a shadow deck's position runs: the rate its player measured, else by the shown pitch.
+	function scShadowRate(s) { return s.rate > 0 ? s.rate : Math.max(0, 1 + s.pitch / 100) }
 	function scShadowPosition(s, now) {
 		if (!s) return 0
 		// Unchanged replies keep a sample alive: carry it on until 3 s after the last one.
 		const alive = Math.max(s.at, scShadowLive.seen) + scShadowExpiryMs
 		const elapsed = s.stale ? 0 : Math.max(0, Math.min(now, alive) - s.at)
-		const pos = Math.max(0, s.positionMs + (s.playing ? elapsed * Math.max(0, 1 + s.pitch / 100) : 0))
+		const pos = Math.max(0, s.positionMs + (s.playing ? elapsed * scShadowRate(s) : 0))
 		return s.meta && s.meta.durationMs > 0 ? Math.min(s.meta.durationMs, pos) : pos
 	}
 	// Binary searches keep the source grid and #151 independent of Engine's empty slots.
@@ -3112,26 +3114,17 @@ SHADOW_LAYER = r"""
             refreshPosition()
             refreshDetails() // track/performance: cueInfo follows a jump or a cue edit at once
         }
-        // The waveform scrolls on the render thread: one XAnimator per speed change,
-        // no per-frame property writes or bindings on the GUI thread. The overview
-        // moves < 4 px/s and follows the 200 ms clock without animation.
-        property real scrollFrom: 0
-        property real scrollAt: 0
-        property real scrollSpeed: 0
+        // The waveform scrolls on the render thread: an XAnimator, no per-frame property
+        // writes or bindings on the GUI thread. The overview moves < 4 px/s and follows
+        // the 200 ms clock without animation.
+        // An Animator's clock counts frames at the display mode's whole refresh rate: 59
+        // for the players' 59.34 Hz panel, so it runs 0.57 % fast (5.7 ms a second, 3.4 s
+        // in ten minutes) and loses every dropped frame. The 200 ms clock steers it:
+        // stop() writes the frame on screen back to x, the next run goes on from there
+        // and closes what it is off the line within 0.4 s. Only a jump jumps.
+        property real scrollSpeed: 0 // of the running scroll, track ms per animation ms
         property string scrollKey: ""
         property int scrollJumps: 0
-        // A slipped line (the peer's clock, a jog nudge) glides back on scGlide, also
-        // on the render thread: ms of track on top of the scroll, which keeps running.
-        property real glideFrom: 0
-        property real glideTo: 0
-        property real glideAt: 0
-        property real glideMs: 1
-        function glideRun(from, to, ms) {
-            glideFrom = from; glideTo = to; glideMs = ms
-            glide.stop()
-            glide.from = -from / span * width; glide.to = -to / span * width; glide.duration = ms
-            glide.start()
-        }
         function contentX(ms) { return -(ms - span * playhead) / span * width }
         // Read from meta itself in the refresh functions: inside onMetaChanged the
         // bindings below (duration, totalPixels, ...) still hold the previous meta,
@@ -3141,7 +3134,7 @@ SHADOW_LAYER = r"""
         function metaWaveDuration(m) { return m && m.waveformDurationMs > 0 ? m.waveformDurationMs : metaDuration(m) }
         function metaTotalPixels(m) { return m && m.waveformWidth > 0 && m.waveformWidth <= 65536 ? m.waveformWidth : 0 }
         function metaTilePixels(m) { return m && m.tileWidth > 0 ? Math.min(2048, m.tileWidth) : 2048 }
-        function refreshPosition() {
+        function refreshPosition(tick) {
             const now = Date.now(), s = sample
             const pos = s ? root.scShadowPosition(s, now) : 0
             if (pos !== position) position = pos
@@ -3149,44 +3142,40 @@ SHADOW_LAYER = r"""
             if (st !== stale) stale = st
             if (!wave) return
             const end = metaDuration(meta)
-            const speed = live && visible && s && s.playing && !st && pos < end ? Math.max(0, 1 + s.pitch / 100) : 0
+            const speed = live && visible && s && s.playing && !st && pos < end ? root.scShadowRate(s) : 0
             if (speed > 0) {
-                if (scroll.running && speed === scrollSpeed) {
-                    // Keep the running scroll unless it is off by more than 12 ms of track.
-                    const off = pos - (scrollFrom + (now - scrollAt) * speed + glideTo)
-                    if (Math.abs(off) <= 12) return
-                    // Same track, no jump: catch up over the time since the last slip (0.1-0.5 s),
-                    // so a run of slips moves at the speed they describe. Only a jump jumps.
-                    if (Math.abs(off) <= 300 && s.key === scrollKey && s.jumps === scrollJumps) {
-                        const since = now - glideAt
-                        glideAt = now
-                        glideRun(glideFrom + (glideTo - glideFrom) * Math.min(1, since / glideMs), glideTo + off, Math.max(100, Math.min(500, since)))
-                        return
+                let from = pos, v = speed
+                if (scroll.running && scrollSpeed > 0 && s.key === scrollKey && s.jumps === scrollJumps) {
+                    if (!tick) return // a new sample on the same line: the clock steers there
+                    scroll.stop()
+                    const shown = (playhead - scMoving.x / width) * span
+                    // Same track, no jump (seek, hot cue, loop) and within 300 ms: on from
+                    // what is shown, at the speed that is on the line 0.4 s later.
+                    if (Math.abs(pos - shown) <= 300) {
+                        from = shown
+                        v = Math.max(speed / 4, speed + (pos - shown) / 400)
                     }
-                }
-                scroll.stop()
-                scrollFrom = pos; scrollAt = now; scrollSpeed = speed; scrollKey = s.key; scrollJumps = s.jumps
-                scroll.from = contentX(pos)
+                } else scroll.stop()
+                from += v * 17 // a run shows its first value one frame after the last one's
+                scrollSpeed = v; scrollKey = s.key; scrollJumps = s.jumps
+                scroll.from = contentX(from)
                 scroll.to = contentX(end)
-                scroll.duration = Math.max(1, Math.round((end - pos) / speed))
+                scroll.duration = Math.max(1, Math.round((end - from) / v))
                 scroll.start()
-                if (glideTo !== 0 || glide.running) glideRun(0, 0, 1)
             } else {
                 const x = contentX(pos)
                 if (scrollSpeed > 0 || scroll.running) {
-                    // A stopped Animator writes its own value back at the next sync,
-                    // after any x set here: settle with a 1 ms run to x instead, so the
-                    // write-back and the scene both end at x (CUE released on its spot).
+                    // A stopped Animator has written its own value back: settle with a
+                    // 1 ms run to x, so the scene ends at x too (CUE released on its spot).
                     scroll.stop()
                     scroll.from = x; scroll.to = x; scroll.duration = 1
                     scroll.start()
                 } else if (scMoving.x !== x) scMoving.x = x
                 scrollSpeed = 0
-                if (glideTo !== 0 || glide.running) glideRun(0, 0, 1)
             }
         }
         // Forget the running line (zoom, size, visibility); refreshPosition restarts or settles.
-        function restartScroll() { scrollAt = -Infinity; refreshPosition() }
+        function restartScroll() { scrollSpeed = 0; refreshPosition() }
         function refreshDetails() {
             if (!graphical) {
                 const ci = live ? root.scNextCueInfo(deck, 0) : null
@@ -3224,7 +3213,7 @@ SHADOW_LAYER = r"""
         onSpanChanged: { gridAnchor = -Infinity; restartScroll(); refreshDetails() }
         // The stale cut-off and the grid window still need a clock between replies.
         // A resting or stale sample does not move: its refreshes come with the sample.
-        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(); scDisplay.refreshDetails() } }
+        Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(true); scDisplay.refreshDetails() } }
         readonly property real duration: metaDuration(meta)
         readonly property real waveformDuration: metaWaveDuration(meta)
         readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
@@ -3338,11 +3327,9 @@ SHADOW_LAYER = r"""
             width: scDisplay.width; height: scDisplay.height
             // x: written by refreshPosition / XAnimator only (track coordinates inside).
             XAnimator { id: scroll; target: scMoving; easing.type: Easing.Linear }
-            XAnimator { id: glide; target: scGlide; easing.type: Easing.Linear }
             // Hidden stock lanes (most instances) build none of this: fewer objects and
             // bindings for every V4 collection to mark.
             Loader {
-                id: scGlide // x: written by the glide XAnimator only
                 active: scDisplay.live && scDisplay.graphical
                 width: scDisplay.width; height: scDisplay.height
                 sourceComponent: Component { Item {
