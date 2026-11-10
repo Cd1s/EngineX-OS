@@ -511,6 +511,42 @@ assert.strictEqual(rStock.deckLayer, 'B');
             'Planck.getKeyIndex(rawKey)',
         ):
             self.assertIn(item, layer)
+        if shutil.which("node"):
+            title_expr = re.search(r'objectName: "Deck_Title".*?text: ([^\n]+)', layer, re.S).group(1)
+            artist_vis_expr = re.search(r'objectName: "Deck_Artist".*?visible: ([^\n]+)', layer, re.S).group(1)
+            artist_expr = re.search(r'objectName: "Deck_Artist".*?text: ([^\n]+)', layer, re.S).group(1)
+            tdt_patch = bp.legacy_qml_fixes()[bp.ROOT + "Items/Utils/TrackDisplayText.qml"]
+            tdt_display_expr = tdt_patch[1][1].split("display: ", 1)[1].strip()
+            js = f"""
+const assert = require('assert');
+function evalHeaderText(loaded, hideTitleArtist, showFilename, rawTitle, fileName, artistName, hasBottomRow = false) {{
+    const canShowFilename = true;
+    const shouldShowFilename = showFilename;
+    const title = rawTitle, filename = fileName;
+    const display = {tdt_display_expr};
+    const scTitleDisplay = {{ hideTitleArtist, shouldShowFilename, display }};
+    const scHeader = {{ loaded, rawTitle, fileName, artistName, hasBottomRow, deckLabel: 'Deck 2' }};
+    return {{
+        titleText: {title_expr},
+        artistVisible: {artist_vis_expr},
+        artistText: {artist_expr},
+    }};
+}}
+// 4 combinations of Hide Title/Artist (off/on) x Display File Name (off/on):
+assert.deepStrictEqual(evalHeaderText(true, false, false, 'My Song', '01_my_song.flac', 'DJ Test'),
+    {{ titleText: 'My Song', artistVisible: true, artistText: 'DJ Test' }});
+assert.deepStrictEqual(evalHeaderText(true, false, true, 'My Song', '01_my_song.flac', 'DJ Test'),
+    {{ titleText: '01_my_song.flac', artistVisible: false, artistText: '' }});
+assert.deepStrictEqual(evalHeaderText(true, true, false, 'My Song', '01_my_song.flac', 'DJ Test'),
+    {{ titleText: '', artistVisible: false, artistText: '' }});
+assert.deepStrictEqual(evalHeaderText(true, true, true, 'My Song', '01_my_song.flac', 'DJ Test'),
+    {{ titleText: '', artistVisible: false, artistText: '' }});
+// Unloaded fallback:
+assert.deepStrictEqual(evalHeaderText(false, true, true, '', '', ''),
+    {{ titleText: 'Deck 2', artistVisible: true, artistText: 'No Track Loaded' }});
+"""
+            res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
 class ShadowDisplayTest(unittest.TestCase):

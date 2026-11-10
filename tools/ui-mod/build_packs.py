@@ -3922,7 +3922,7 @@ SHADOW_LAYER = r"""
                                     elide: Text.ElideRight
                                     font: scHeader.splitMain ? Style.fontDisplay : scHeader.groupedMain ? Style.fontH1 : Style.fontH0
                                     color: Style.font02Color
-                                    text: scHeader.loaded ? (scTitleDisplay.display || scHeader.rawTitle) : scHeader.deckLabel
+                                    text: scHeader.loaded ? (scTitleDisplay.hideTitleArtist ? "" : (scTitleDisplay.display || scHeader.rawTitle)) : scHeader.deckLabel
                                     textFormat: Text.PlainText
                                     verticalAlignment: Text.AlignVCenter
                                 }
@@ -3930,11 +3930,11 @@ SHADOW_LAYER = r"""
                                     objectName: "Deck_Artist"
                                     Layout.fillWidth: true
                                     Layout.alignment: Qt.AlignVCenter
-                                    visible: !scHeader.loaded || (!scHeader.hasBottomRow && !scTitleDisplay.hideTitleArtist && scHeader.artistName.length > 0)
+                                    visible: !scHeader.loaded || (!scHeader.hasBottomRow && !scTitleDisplay.hideTitleArtist && !scTitleDisplay.shouldShowFilename && scHeader.artistName.length > 0)
                                     elide: Text.ElideRight
                                     font: scHeader.splitMain ? Style.fontH1 : Style.fontH3
                                     color: Style.font01Color
-                                    text: scHeader.loaded ? (scTitleDisplay.hideTitleArtist ? "" : scHeader.artistName) : "No Track Loaded"
+                                    text: scHeader.loaded ? (scTitleDisplay.hideTitleArtist || scTitleDisplay.shouldShowFilename ? "" : scHeader.artistName) : "No Track Loaded"
                                     textFormat: Text.PlainText
                                     verticalAlignment: Text.AlignVCenter
                                 }
