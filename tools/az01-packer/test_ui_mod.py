@@ -165,6 +165,8 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("Style.surface03Color", cap)
         self.assertNotIn("border", cap)
         self.assertEqual(cap.count("{"), cap.count("}"))
+        self.assertIn("Layout.maximumWidth: 96", cap)
+        self.assertIn("elide: Text.ElideRight", cap)
 
     def test_cue_countdown_toggle_only_in_view(self):
         self.assertIn('["scCueCountdown", "cueCountdown"]', SRC)
@@ -937,6 +939,78 @@ assert.equal(runs,7);
 
 
 class UiModBuildTest(unittest.TestCase):
+    def test_performance_header_preserves_sync_row_and_stock_bpm_formatter(self):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on Oracle-Batam-arm)")
+        with tempfile.TemporaryDirectory(prefix="ui-header-test-") as tmp:
+            packs = Path(tmp) / "packs"
+            result = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(packs)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            composite = "Skins/EngineOS/UI/CompositeControls/"
+            for lang in ("en", "zh-Hans", "zh-Hant"):
+                with self.subTest(lang=lang):
+                    base = packs / lang
+                    bpm = (base / "Skins/Embedded/Items/Bpm.qml").read_text()
+                    self.assertIn("property int decimalPlaces: 2", bpm)
+                    self.assertIn("bpmValue.toFixed(bpm.decimalPlaces)", bpm)
+                    self.assertIn('padEnd(bpm.decimalPlaces, "0")', bpm)
+                    info = (base / composite / "Deck/DeckItem/BpmInfo.qml").read_text()
+                    self.assertIn("EmbeddedItems.Bpm {", info)
+                    self.assertIn("decimalPlaces: 2", info)
+                    self.assertIn("onBpmClicked()", info)
+                    self.assertNotIn("bpmInfoView.bpmFractionalText", info)
+                    performance = (base / composite / "DeckPerformanceData/DeckPerformanceDataContent.qml").read_text()
+                    for name, text in (
+                        ("Performance", performance),
+                        ("GroupedMini", (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()),
+                        ("SplitMini", (base / composite / "DeckTrackData/SplitMiniDeckTrackDataContent.qml").read_text()),
+                    ):
+                        self.assertEqual(text.count('objectName: "EngineX_CueCountdown"'), 1)
+                        cue = text.index('objectName: "EngineX_CueCountdown"')
+                        self.assertLess(text.index("AutoLoop {"), text.index("BeatJump {"))
+                        self.assertLess(text.index("BeatJump {"), text.index("JP07SyncIndicator {"))
+                        self.assertLess(text.index("JP07SyncIndicator {"), cue)
+                        self.assertLess(cue, text.index("SpeedInfo {"))
+                        if name == "SplitMini":
+                            self.assertIn("Layout.minimumWidth: 160", text)
+                    # The actual time controls (elapsed/remaining and flip touch
+                    # target) remain byte-for-byte stock in all four variants.
+                    for name in ("GroupedMain", "SplitMain", "GroupedMini", "SplitMini"):
+                        rel = composite + f"DeckTrackData/{name}DeckTrackDataContent.qml"
+                        stock = (qrc / rel).read_text()
+                        text = (base / rel).read_text() if (base / rel).exists() else stock
+                        pattern = r"(?m)^( +)DeckInfoTimeInfo \{.*?^\1\}"
+                        self.assertEqual(re.search(pattern, text, re.S).group(), re.search(pattern, stock, re.S).group())
+                    # Conserving the mini row's total fixed width preserves the
+                    # stock flexible sync bar, including when Cue is visible.
+                    mini = (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
+                    def preferred(kind, text):
+                        block = re.search(kind + r" \{(.*?)^                \}", text, re.S | re.M).group(1)
+                        return int(re.search(r"Layout.preferredWidth: (\d+)", block).group(1))
+                    stock = (qrc / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
+                    cue_width = int(re.search(r"Layout.preferredWidth: (\d+)", bp.cue_capsule("", "1", 22, 16)).group(1))
+                    self.assertEqual(preferred("AutoLoop", stock) + preferred("BeatJump", stock) + 6 * 16,
+                                     preferred("AutoLoop", mini) + preferred("BeatJump", mini) + cue_width + 7 * 4)
+                    jump = (base / composite / "Deck/DeckItem/BeatJump.qml").read_text()
+                    forward = jump.index('objectName: "Deck_BeatJump_Forward"')
+                    self.assertLess(jump.index('objectName: "Deck_BeatJump_Text"'), forward)
+                    self.assertLess(forward, jump.index("id: beatJumpTextAnimation"))
+                    for action in ("JumpBack", "JumpForward", "BeatJumpIndex"):
+                        self.assertIn("/Track/BeatJump/" + action, jump)
+                    self.assertNotIn("anchors.margins: -6", jump)
+                    self.assertIn("EngineXEmbedded.Bpm {", performance)
+                    self.assertIn("s.currentBpm ||", performance)
+                    self.assertNotIn(".toFixed(1)", bp.SHADOW_LAYER)
+            if shutil.which("node"):
+                # Execute the stock formatter expression with its new default,
+                # including trailing zeroes and an exact fractional tempo.
+                expression = re.search(r"(bpmValue\.toFixed\(bpm\.decimalPlaces\)\.split\(\"\.\"\))", bpm).group(1)
+                script = 'const bpm={decimalPlaces:2}; const values=[128,174.25]; console.log(JSON.stringify(values.map(bpmValue=>' + expression + ')));'
+                output = subprocess.check_output(["node", "-e", script], text=True)
+                self.assertEqual(json.loads(output), [["128", "00"], ["174", "25"]])
+
     def test_jc11_jc11s_packs_contain_shadow_display(self):
         # Each supported console gets a separately built archive. The patcher
         # is board independent; stock 5.3.0 QML is the shared input for these
