@@ -953,6 +953,24 @@ SERVICES_MAIN = """
 		onTriggered: if (root.scFourDeckRole !== "") root.scShadowPoll()
 	}
 	property bool scShadowCdjMaster: false // a CDJ on a shadow deck holds master
+	// Engine Link hands master to a deck that still plays when the master stops, and
+	// a copy plays on for the update's trip: it is left holding master. A copy is
+	// never master: a real deck is, as on stock (where a stopped master keeps it).
+	property int scShadowLead: 0 // our copy that holds master, told to the peer (shadowMaster)
+	property int scShadowPeerLead: 0 // our deck whose copy on the peer holds master
+	property bool scShadowPeerPlaying: false
+	property real scShadowMasterAt: 0
+	// The real deck that plays takes master, the copy's own first; none plays: the copy's.
+	function scShadowMasterBack(mine, now) {
+		if (now < scShadowMasterAt || (!scShadowLead && mine.indexOf(scShadowPeerLead) < 0)) return
+		let playing = 0
+		for (let n = 0; n < mine.length; n++) if (scShadowPrev[mine[n]].ps) { playing = mine[n]; break }
+		const n = scShadowPeerLead, p = scShadowPrev[n]
+		const want = scShadowLead ? (scShadowProperties(scShadowLead).play.state ? 0 : playing) : p.ps ? n : playing || (scShadowPeerPlaying || !p.loaded ? 0 : n)
+		if (!want || scShadowPrev[want].master) return
+		scPress("/Engine/Deck" + want + "/RequestMaster")
+		scShadowMasterAt = now + 800
+	}
 	// Engine's buttons (RequestMaster, Sync, UnSync) act on false -> true and only
 	// see the value between event-loop turns: release, press, release, 120 ms
 	// apart. /Engine/DeckN/Play is not one of them: it is the play state itself
@@ -1067,7 +1085,12 @@ SERVICES_MAIN = """
 				s.range = p && p.rangeIndex === s.rangeIndex ? p.range : parseFloat(g.range.string) || 0
 			}
 			if (p) {
-				const expect = p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0)
+				const run = p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0, expect = p.posMs + run
+				// A late tick (GC, a busy GUI thread) can run before Engine's queued position
+				// update and read the position of before the stall (zs15-b: 340 ms behind,
+				// counted as a jump back and a jump forward, each a seek on the peer).
+				// Nothing is known then: the deck is where its speed puts it.
+				if (run > 150 && s.ps && p.ps && s.net === p.net) s.posMs = expect
 				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
 				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
@@ -1097,6 +1120,10 @@ SERVICES_MAIN = """
 			scShadowPrev[d] = s
 			scShadowSampleSpare[d] = p || {}
 		}
+		let lead = 0
+		for (let d = 1; d <= 4 && root.scPlayer && !scShadowDisplayOnly; d++) if (mine.indexOf(d) < 0 && (scShadowAt[d] || scShadowEmptyObject).link && scShadowProperties(d).master.state) lead = d
+		if (lead !== scShadowLead) { scShadowLead = lead; edge = true }
+		scShadowMasterBack(mine, now)
 		// Every edge (play, CUE, jump, pitch, master, sync, track) posts at once. The
 		// heartbeat only proves liveness (Go marks a peer stale after 2 s) and corrects
 		// the peer's extrapolation, which runs on the exact pitch: 500 ms keeps 1.5 s of
@@ -1163,19 +1190,25 @@ SERVICES_MAIN = """
 				if (changed) cc.rev++
 			}
 			const o = own[n] || (own[n] = {})
+			// A track loaded over another: Engine names the file ~0.2 s before its title,
+			// artist and length (o5-R2). Still the last track's within 1 s: not filled yet.
+			if (o.net && s.net && o.net !== s.net) { cc.was = o.title; cc.wasBy = o.artist; cc.wasAt = now }
 			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000)
 			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
 			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.lead = s.master; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
+			o.shadowMaster = scShadowLead
 			// Titles arrive after the load: re-read on a new track and every 2 s.
 			if (fresh) {
 				o.title = s.net ? g.title.string || g.trackName.string || "" : ""
 				o.artist = s.net ? g.artist.string || "" : ""
-				o.keyName = s.net && o.title ? g.currentKey.string || "-" : ""
+				const last = now - cc.wasAt < 1000 && o.title === cc.was && o.artist === cc.wasBy
+				if (last) o.title = o.artist = ""
+				o.keyName = o.title ? g.currentKey.string || "-" : "" // with the title, as this deck's header writes it ("-": no key)
 				const sr = g.rate.value, len = g.length.unnormalized
-				o.durationMs = s.net && sr > 0 && len > 0 ? Math.round(len / sr * 1000) : 0 // the peer tells its shadow deck's track by it
+				o.durationMs = s.net && !last && sr > 0 && len > 0 ? Math.round(len / sr * 1000) : 0 // the peer tells its shadow deck's track by it
 				scShadowTextAt[d] = !s.net || o.title ? now : 0 // Engine fills SongName after the load: retry until it does
 			}
 			o.dbg = ""
@@ -1282,8 +1315,20 @@ SERVICES_MAIN = """
 		if (s.engine) return !s.copying ? 2 : s.error === "" ? 1 : s.error === "unavailable" ? 4 : s.error === "timeout" ? 5 : 6
 		return s.loading || !meta || (meta.detailPending && !detailed) ? 3 : 0
 	}
+	// Engine mode: what the source deck's header shows and its copy here cannot know. The copy stays
+	// out of Sync and the master selection (Engine Link carries both), and it is a bare file: Engine
+	// here names it by its file name and analyses a key the source's library may not have. So the
+	// stock header items (BpmInfo, JP07SyncIndicator, ArtistSong, KeyInfo) read the source's here. Display only.
+	property var scShadowHead: ({})
+	function scShadowHeadOf(d) { return scShadowHead[d] || scShadowEmptyObject }
 	function scShadowApplyAll(decks, displayOnly) {
 		scShadowDisplayOnly = displayOnly !== false
+		const head = {}
+		if (!scShadowDisplayOnly) for (const e of decks) if (e.path && scFourDeckRole.indexOf(String(e.deck)) < 0) head[e.deck] = {master: !!e.lead, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || ""}
+		if (JSON.stringify(head) !== JSON.stringify(scShadowHead)) scShadowHead = head
+		let peerLead = 0, peerPlaying = false
+		for (const e of decks) { if (e.shadowMaster && !e.stale) peerLead = e.shadowMaster; if (e.playing && !e.cue && !e.stale) peerPlaying = true }
+		scShadowPeerLead = peerLead; scShadowPeerPlaying = peerPlaying
 		if (scShadowDisplayOnly) {
 			// No Planck reads/writes or legacy helpers here, even when path is empty.
 			scShadowCdjMaster = false // display flags must never suppress the real network master
@@ -1312,9 +1357,12 @@ SERVICES_MAIN = """
 		for (const d of [1, 2, 3, 4]) {
 			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
 			const e = decks.find(x => x.deck === d)
+			const at = scShadowAt[d]
 			// A slot whose source became a CDJ falls through: scShadowEmpty unloads what Engine still holds.
-			if (e && e.displayOnly !== true && (e.path || e.loading)) { // loading: Go is still copying the track, wait for it
-				if (scShadowAt[d]) scShadowAt[d].emptyAt = 0
+			// loading: Go is still copying the track, wait for it. Not with the source's
+			// previous track on the deck: that one goes now, as when the source ejects.
+			if (e && e.displayOnly !== true && (e.path || e.loading) && !(!e.path && e.id && at && at.path && at.id !== e.id)) {
+				if (at) at.emptyAt = 0
 				continue
 			}
 			root.scShadowEmpty(d, now)
@@ -1496,26 +1544,38 @@ SERVICES_MAIN = """
 		// in by its Sync, the two clocks) was never closed below lim: 105 ms ahead on
 		// one player, 38 ms behind on the other, under a green phase meter. It is
 		// closed the way a DJ does, with Engine's PITCH BEND (scShadowBend), measured
-		// on the deck's newest audio block (scShadowLine) as the source's line is:
-		// the raw TrackPosition is up to 46 ms old, 20 ms on average.
+		// against the deck's own line (scShadowLine). The source posts its newest
+		// audio block, 18 ms of wall time ahead of the mean of its raw positions
+		// (measured), and that line still moves +-6 ms: the gap is averaged over
+		// 8 s (a step past 15 ms at once) and, while that average is under 10 s old,
+		// only bent past 12 ms. At 6 ms on a 2 s old line the deck was bent 55 times
+		// in six minutes, to and fro.
 		if (wantSync && synced) return dbg("sync")
 		if (now - at.seekAt < 300) return dbg("settle")
 		at.sd = at.sd === undefined ? drift : at.sd * 0.85 + drift * 0.15
 		at.pll = 0
 		if (scShadowBent && scShadowBent.at === at) return dbg("bending")
-		const fine = at.env !== undefined && now - at.envT0 >= 2000 ? target - at.env - at.envRate * (now - at.envT0) : 0
-		at.fine = fine
-		if (Math.abs(fine) > 6 && Math.abs(fine) <= lim) {
-			scShadowBend(d, at, fine)
-			return dbg("bend")
+		const age = at.env !== undefined ? now - at.envT0 : 0
+		// A gap past 40 ms (a play start: the source's first line is 80-120 ms off the
+		// one it settles on) is no noise: bent after 1 s, not left for 2 s more.
+		const gap = age >= 1000 ? target - at.env - at.envRate * (now - at.envT0 + 18) : 0
+		if (age >= 2000 || Math.abs(gap) > 40) {
+			at.fine = at.fine === undefined || Math.abs(gap - at.fine) > 15 ? gap : at.fine + (gap - at.fine) * Math.min(1, (now - at.fineAt) / 8000)
+			at.fineAt = now
+			// 12 and 6 ms on screen and in the air: of the deck's own time at its rate
+			// (at -50 % the copy stood 13, then 23 ms off the grid for 10 s, rec14-a).
+			if (Math.abs(at.fine) > (age < 10000 ? 12 : 6) * at.rate && Math.abs(at.fine) <= lim) {
+				scShadowBend(d, at, at.fine)
+				return dbg("bend")
+			}
 		}
 		dbg("steady")
 	}
-	// The shadow deck's own line, as the sender's (scShadowTick): the newest audio
-	// block of a playing deck is the upper envelope of position - rate * time. In
-	// at.env at the rate frozen in at.envRate since at.envT0; the 0.5 ms/s decay
-	// follows a rate that is a little lower, and a deck that fell behind (its raw
-	// positions average more than 25 ms under the line) is closed in a fifth a tick.
+	// The shadow deck's own line: the mean of position - rate * time over 5 s, in
+	// at.env at the rate frozen in at.envRate since at.envT0. Not the upper envelope
+	// the sender posts: that rides on the one raw position in sixty that reads
+	// 13 ms ahead, so for seconds after every new line (a bend, a seek) it read
+	// 4-10 ms low and the deck was bent forward, then back when the next one came.
 	function scShadowLine(now) {
 		if (scShadowDisplayOnly) return
 		for (const d in scShadowAt) {
@@ -1523,17 +1583,19 @@ SERVICES_MAIN = """
 			if (!at.ready) continue
 			const l = at.line || (at.line = {pos: root.scTr("/Engine/Deck" + d + "/Track/TrackPosition"), play: root.scTr("/Engine/Deck" + d + "/PlayState"), sr: root.scTr("/Engine/Deck" + d + "/Track/SampleRate")})
 			if (!l.play.state || !(at.rate > 0) || !(l.sr.value > 0)) { at.env = undefined; continue }
-			const fresh = at.env === undefined || Math.abs(at.rate - at.envRate) > 2e-4
-			if (fresh) { at.envT0 = now; at.envRate = at.rate }
-			const raw = l.pos.unnormalized / l.sr.value * 1000 - at.envRate * (now - at.envT0)
-			at.avg = fresh ? raw : at.avg + (raw - at.avg) * 0.2
-			const slow = at.env - at.avg - 25 * at.envRate
-			at.env = fresh ? raw : Math.max(raw, at.env - (slow > 0 ? slow * 0.2 : 0.0005 * (now - at.envAt)))
+			// 60 ms off the line is no block of audio (22 ms at most) but a seek that
+			// landed after the line began: averaged in, a start at 41 s read 800 ms.
+			const pos = l.pos.unnormalized / l.sr.value * 1000
+			const fresh = at.env === undefined || Math.abs(at.rate - at.envRate) > 2e-4 || Math.abs(pos - at.envRate * (now - at.envT0) - at.env) > 60
+			if (fresh) { at.envT0 = now; at.envRate = at.rate; at.envN = 1; at.fine = undefined }
+			const raw = pos - at.envRate * (now - at.envT0)
+			at.env = fresh ? raw : at.env + (raw - at.env) * Math.max(1 / ++at.envN, (now - at.envAt) / 5000)
 			at.envAt = now
 		}
 	}
 	// Engine's pitch bend (the PITCH BEND buttons) runs a deck 7 % fast or slow
-	// while held (measured on a JP07: 27 ms in 400 ms). No seek, which flushes the
+	// while held (measured on a JP07: 27 ms in 400 ms; 7 % of its own speed: at
+	// -50 % a 1.36 s bend moved it 51 ms, not 95). No seek, which flushes the
 	// decoder and snaps the waveform, and no Speed change: the BPM shown stays the
 	// source's. One deck at a time, 80 % of the gap, 1.5 s at most; the line is
 	// measured anew after it.
@@ -1545,7 +1607,7 @@ SERVICES_MAIN = """
 		if (!p) return
 		p.state = true
 		scShadowBent = {p: p, at: at}
-		scShadowBendTimer.interval = Math.min(1500, Math.abs(ms) * 0.8 / 0.07)
+		scShadowBendTimer.interval = Math.min(1500, Math.abs(ms) * 0.8 / (0.07 * (at.rate > 0 ? at.rate : 1)))
 		scShadowBendTimer.restart()
 	}
 	function scShadowBendEnd() {
@@ -5022,6 +5084,22 @@ def edits(dev: bool):
             "                            }\n"
             "                        }\n",
         )]
+        # #157 (jog only; ZOOM / Browse and DeckAction.toggleGridEdit stay stock): Shift+Vinyl
+        # does not enter BeatGrid Edit while the deck plays (Engine pauses there, jumps to
+        # 00:00 and locks Play), and Jog Touch stays off during BeatGrid Edit.
+        scaled["ControlSurfaceModules/ControlSurfaceModules/Vinyl.qml"] = [(
+            "        if (shiftActionIsGridEdit && (globalConfig.shift || deckConfig.gridEditActive)) {\n",
+            "        if (shiftActionIsGridEdit && ((globalConfig.shift && !deckConfig.playing) || deckConfig.gridEditActive)) {\n",
+        )]
+        scaled["ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml"] = [(
+            "        enabled: {\n"
+            "            deckConfig.inDJMode &&\n"
+            "                !deckConfig.loopInEdit &&\n",
+            "        enabled: {\n"
+            "            deckConfig.inDJMode &&\n"
+            "                !deckConfig.gridEditActive &&\n"
+            "                !deckConfig.loopInEdit &&\n",
+        )]
         # Keep the stock two-item BeatJump layout. The forward target lives
         # inside the size field, so it cannot widen AutoLoop / BeatJump / LEAD.
         bj = "Skins/EngineOS/UI/CompositeControls/"
@@ -5145,7 +5223,31 @@ def edits(dev: bool):
         ]
         # Two decimals, and nothing else: the stock Row, colours and tap stay, and whatever stock
         # shows without an analysed tempo ("-", an unanalysed track) is stock's own text.
+        # The shadow header mirrors the source deck's Sync (green BPM) and LEAD; the copy itself is in neither.
+        def head(deck, field):
+            return f'!!(typeof root !== "undefined" && root && root.scShadowHeadOf && root.scShadowHeadOf({deck}).{field})'
+        # Title, artist and key are the source's (its library's), not what Engine here reads from the copy.
+        heads = 'readonly property var scHead: typeof root !== "undefined" && root && root.scShadowHeadOf ? root.scShadowHeadOf(deckIndex) : null\n'
+        scaled[bj + "Deck/DeckItem/ArtistSong.qml"] = [
+            ("    readonly property string songTextString: deckLoaded ? displayText.display : deckLabel\n"
+             '    readonly property string artistTextString: deckLoaded ? artistName : "No Track Loaded"\n',
+             "    " + heads +
+             "    readonly property string songTextString: deckLoaded ? (scHead && scHead.title) || displayText.display : deckLabel\n"
+             '    readonly property string artistTextString: deckLoaded ? (scHead && scHead.title ? scHead.artist : artistName) : "No Track Loaded"\n'),
+            ("    readonly property bool onlyFileName: view.onlyFileName\n",
+             "    readonly property bool onlyFileName: view.onlyFileName && !(scHead && scHead.title)\n"),
+        ]
+        scaled[bj + "KeyEditor/KeyInfo.qml"] = [
+            ('    readonly property string currentKey: keyEditorController ? keyEditorController.getViewModel().currentKey : ""\n',
+             "    " + heads +
+             '    readonly property string currentKey: scHead && scHead.keyName ? (scHead.keyName === "-" ? "" : scHead.keyName)\n'
+             '        : keyEditorController ? keyEditorController.getViewModel().currentKey : ""\n')]
+        scaled[ROOT + "Views/MainView/Components/JP07SyncIndicator.qml"] = [
+            ("    property bool isMaster: pDeckIsMaster.translator && pDeckIsMaster.translator.state\n",
+             "    property bool isMaster: (pDeckIsMaster.translator && pDeckIsMaster.translator.state) || " + head("deckIndex", "master") + "\n")]
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
+            ("    readonly property bool syncEnabled: deckController && deckController.syncInfoViewController.syncEnabled\n",
+             "    readonly property bool syncEnabled: (deckController && deckController.syncInfoViewController.syncEnabled) || " + head("deckIndex", "sync") + "\n"),
             ("    property bool tappable: true\n",
              "    Layout.minimumWidth: implicitWidth\n    property bool tappable: true\n"
              '    readonly property var scBpm: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/CurrentBPM".arg(deckIndex)) : null\n'
@@ -5220,7 +5322,7 @@ def edits(dev: bool):
         ]
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml"] = [(
             "                text: microDeck.loadedDeckSongName\n",
-            f"                text: ({role} ? microDeck.deckIndex + \" · \" : \"\") + microDeck.loadedDeckSongName\n"),
+            f"                text: ({role} ? microDeck.deckIndex + \" · \" : \"\") + ({role} && root.scShadowHeadOf(microDeck.deckIndex).title || microDeck.loadedDeckSongName)\n"),
             ("                id: albumArt\n",
              "                id: albumArt\n" + art_retry("                ", "microDeck.deckIndex", "microDeck.loadedDeckAlbumArtPath", "albumArt")),
             ("                source: microDeck.loadedDeckAlbumArtPath\n",
