@@ -497,11 +497,11 @@ func TestDisplayOnlyDoesNotFetchOrExposeAudio(t *testing.T) {
 	u, _ := url.Parse(peer.URL)
 	s.shadow.peerPort, _ = strconv.Atoi(u.Port())
 	now := time.Now()
-	p := peerDeck{deckState: deckState{Deck: 2, Key: "track-a", Path: "/data/song.flac", Net: "net://uuid/USB/song.flac", Playing: true, PositionMS: 500, Pitch: 2, Master: true, Sync: true}, ip: "127.0.0.1", at: now}
+	p := peerDeck{deckState: deckState{Deck: 2, Key: "track-a", Path: "/data/song.flac", Net: "net://uuid/USB/song.flac", Playing: true, PositionMS: 500, Pitch: 2, Master: new(true), Sync: true}, ip: "127.0.0.1", at: now}
 	s.shadow.peerDecks[2] = p
 	for deadline := time.Now().Add(3 * time.Second); ; {
 		d := s.shadowCompose("13", now)
-		if len(d) != 1 || d[0].Path != "" || d[0].Net != "" || d[0].Key != displayTrackKey(p) || !d[0].Master || !d[0].Sync {
+		if len(d) != 1 || d[0].Path != "" || d[0].Net != "" || d[0].Key != displayTrackKey(p) || (d[0].Master == nil || !*d[0].Master) || !d[0].Sync {
 			t.Fatalf("display state: %+v", d)
 		}
 		if !d[0].Loading {

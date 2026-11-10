@@ -81,11 +81,19 @@ type deckState struct {
 	// CDJ and an older sender: the shadow deck keeps its own.
 	Range   float64 `json:"range,omitempty"`
 	KeyLock *bool   `json:"keylock,omitempty"`
-	Master  bool    `json:"master,omitempty"`
+	Master  *bool   `json:"master,omitempty"`
 	// Lead is the deck's own DeckIsMaster, what its header shows as LEAD, for the
 	// shadow header only. Master also marks the player that holds the network
 	// master with no master deck, and is cleared for a standalone player's copy.
-	Lead bool `json:"lead,omitempty"`
+	Lead *bool `json:"lead,omitempty"`
+	// Loop, KeyOffset, Stems and Slip are what the source's header and overview show
+	// beside the track: an active loop, the key shift in semitones, the Stems icon,
+	// and the slip timeline's position in samples while slip is active (0: it is
+	// not). For the shadow deck's display only: the copy takes none of them.
+	Loop      bool  `json:"loop,omitempty"`
+	KeyOffset int   `json:"keyOffset,omitempty"`
+	Stems     bool  `json:"stems,omitempty"`
+	Slip      int64 `json:"slip,omitempty"`
 	// ShadowMaster is the sender's shadow deck (a copy of the receiver's deck of
 	// that number) that Engine Link left holding master: the receiver's QML takes
 	// master back to a real deck. On every deck the sender posts; 0: none.
@@ -195,6 +203,10 @@ const (
 	shadowSkewMax    = 500e-6
 )
 
+func sameOptionalBool(a, b *bool) bool {
+	return (a == nil) == (b == nil) && (a == nil || *a == *b)
+}
+
 // samePeerPicture is true when d shows what old already shows: the same track,
 // state, tempo and markers, and a playhead on old's anchored line.
 // Seq, At, Beat and Dbg do not count: the display QML does not use them.
@@ -202,7 +214,7 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
-		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.Lead != d.Lead || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
+		o.Playing != d.Playing || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) || o.Loop != d.Loop || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
 		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
@@ -490,15 +502,19 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	// master. Taking master asks a CDJ that still holds it to hand it over.
 	ex := prolink.ExportDeck{At: time.Now()}
 	for _, d := range own {
-		if d.Master || (d.Playing && !ex.Playing && !ex.Master) {
+		master := d.Master != nil && *d.Master
+		if master || (d.Playing && !ex.Playing && !ex.Master) {
 			ex.BPM, ex.Pitch, ex.Beat = d.BPM, d.Pitch, d.Beat
 		}
 		ex.Playing = ex.Playing || d.Playing
-		ex.Master = ex.Master || d.Master
+		ex.Master = ex.Master || master
 	}
 	s.shadow.mu.Lock()
-	if postAt != 0 && postAt < s.shadow.ownPostAt {
-		// The QML's XHRs race on separate connections: an older post lost.
+	nowMS = time.Now().UnixMilli()
+	if postAt > nowMS || (postAt != 0 && postAt < s.shadow.ownPostAt && s.shadow.ownPostAt <= nowMS) {
+		// Reject older samples, including a pre-rollback handler that finished
+		// late. A previous baseline now in the future belongs to the old clock:
+		// the first current-clock post replaces it instead of waiting to catch up.
 		s.shadow.mu.Unlock()
 		respond(w, map[string]any{"ok": true})
 		return
@@ -1254,11 +1270,14 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 		d := p.deckState
 		d.Deck = deck
 		d.LineIn, d.DisplayOnly = false, false
+		if d.Lead == nil {
+			d.Lead = d.Master // only older senders omit the deck's own LEAD state
+		}
 		// Two standalone players share master natively over Engine Link; an
 		// all-in-one console linked to an SC5000/SC6000 (#160) does not, so keep
 		// the peer's master flag when this unit is not a standalone player.
 		if pfx := imagePrefix(deviceCompatible()); pfx == "" || playerBoards[pfx] {
-			d.Master = false
+			d.Master = new(false)
 		}
 		if d.Playing {
 			d.PositionMS, d.Rate = p.carried(now.Sub(p.at))
@@ -1318,7 +1337,7 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 			continue
 		}
 		cue := dev.PlayState1 == cdjCuePlay
-		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: sh.cdj[dev.Number].exact(dev.Pitch), Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS), Title: dev.Title, Artist: dev.Artist}
+		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: sh.cdj[dev.Number].exact(dev.Pitch), Master: new(dev.Master), Lead: new(dev.Master), Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS), Title: dev.Title, Artist: dev.Artist}
 		if len(consoleLines) > 0 {
 			d.LineIn = true
 		}
@@ -1458,6 +1477,20 @@ func (s *Server) shadowFetchCDJ(key string, host net.IP, slot byte, id uint32) {
 	})
 }
 
+func copyShadowAudio(dst io.Writer, resp *http.Response, limit int64) error {
+	if resp.ContentLength > limit {
+		return fmt.Errorf("peer audio exceeds %d byte limit", limit)
+	}
+	n, err := io.Copy(dst, io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return fmt.Errorf("copy peer audio: %w", err)
+	}
+	if n > limit {
+		return fmt.Errorf("peer audio exceeds %d byte limit", limit)
+	}
+	return nil
+}
+
 func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 	port := s.shadow.peerPort
 	if port == 0 {
@@ -1499,7 +1532,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 			return "", err
 		}
 		defer os.Remove(f.Name())
-		_, err = io.Copy(io.MultiWriter(f, countWriter{&cp.done}), io.LimitReader(resp.Body, 1<<30))
+		err = copyShadowAudio(io.MultiWriter(f, countWriter{&cp.done}), resp, 1<<30)
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
@@ -1566,6 +1599,7 @@ func (s *Server) shadowFetch(key string, fetch func(context.Context, *shadowCopy
 	c.done.Store(0)
 	c.total.Store(0)
 	sh.busy[key] = true
+	s.shadowCleanCopies(key)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), sh.copyTimeout)
 		defer cancel()
@@ -1598,20 +1632,25 @@ func (s *Server) shadowFetch(key string, fetch func(context.Context, *shadowCopy
 		}
 		delete(sh.copies, key)
 		sh.files[key] = path
-		// Keep copies a shadow deck wanted in the last 2 minutes: deleting the
-		// previous track at once failed Engine's load when the CDJ switched fast.
-		for k, f := range sh.files {
-			if k != key && time.Since(sh.used[k]) > 2*time.Minute {
-				os.Remove(f)
-				os.Remove(f + ".perf")
-				for dir := filepath.Dir(f); dir != s.shadowDir() && strings.HasPrefix(dir, s.shadowDir()); dir = filepath.Dir(dir) {
-					os.Remove(dir) // the copy's own directories, once empty
-				}
-				delete(sh.files, k)
-				delete(sh.used, k)
-			}
-		}
+		s.shadowCleanCopies(key)
 	}()
+}
+
+// Called with sh.mu held, before a download too: ENOSPC must not prevent cleanup.
+func (s *Server) shadowCleanCopies(keep string) {
+	sh := s.shadow
+	// Keep copies wanted in the last 2 minutes and those still being fetched.
+	for k, f := range sh.files {
+		if k != keep && !sh.busy[k] && time.Since(sh.used[k]) > 2*time.Minute {
+			os.Remove(f)
+			os.Remove(f + ".perf")
+			for dir := filepath.Dir(f); dir != s.shadowDir() && strings.HasPrefix(dir, s.shadowDir()); dir = filepath.Dir(dir) {
+				os.Remove(dir) // the copy's own directories, once empty
+			}
+			delete(sh.files, k)
+			delete(sh.used, k)
+		}
+	}
 }
 
 // shadowWake starts the beacon and peer polling while a shadow deck is in use;

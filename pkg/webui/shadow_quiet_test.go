@@ -66,7 +66,7 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 		"cue":    func(d *deckState) { d.Cues = []shadowCue{{I: 1, P: 4801, N: "A", C: "#fff"}} },
 		"cuePos": func(d *deckState) { x := 1.0; d.CuePos = &x },
 		"jump":   func(d *deckState) { d.Jumps++ },
-		"master": func(d *deckState) { d.Master = true },
+		"master": func(d *deckState) { d.Master = new(true) },
 		"track":  func(d *deckState) { d.Key = "k2" },
 	} {
 		d := steady
@@ -518,10 +518,10 @@ func TestShadowDisplayCarriesKeyNameAndLead(t *testing.T) {
 	ver1 := s.shadow.ver
 	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", KeyName: "9B", Seq: 2}}, time.Now())
 	ver2 := s.shadow.ver
-	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", KeyName: "9B", Lead: true, Seq: 3}}, time.Now())
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", KeyName: "9B", Lead: new(true), Seq: 3}}, time.Now())
 	ver3 := s.shadow.ver
 	s.shadow.mu.Unlock()
-	if len(out) != 1 || out[0].KeyName != "8B" || !out[0].Lead {
+	if len(out) != 1 || out[0].KeyName != "8B" || out[0].Lead == nil || !*out[0].Lead {
 		t.Fatalf("own deck for peer: %+v", out)
 	}
 	if ver2 == ver1 || ver3 == ver2 {
@@ -533,7 +533,7 @@ func TestShadowDisplayCarriesKeyNameAndLead(t *testing.T) {
 	}
 	defer r.Body.Close()
 	var v struct{ Decks []deckState }
-	if err := json.NewDecoder(r.Body).Decode(&v); err != nil || len(v.Decks) != 1 || v.Decks[0].KeyName != "9B" || !v.Decks[0].Lead {
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil || len(v.Decks) != 1 || v.Decks[0].KeyName != "9B" || v.Decks[0].Lead == nil || !*v.Decks[0].Lead {
 		t.Fatalf("shadow reply: %v %+v", err, v.Decks)
 	}
 }
@@ -618,6 +618,44 @@ func TestShadowCarriesKeyName(t *testing.T) {
 // Two standalone players share master over Engine Link, so the shadow reply
 // clears Master (the copy must not take it). The header's LEAD has its own flag,
 // the source deck's DeckIsMaster, and a change of it wakes the QML.
+func TestShadowMasterLeadJSONRoundTrip(t *testing.T) {
+	for _, input := range []string{
+		`{"deck":2,"master":true,"lead":false}`,
+		`{"deck":2,"master":false,"lead":true}`,
+		`{"deck":2}`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			var first, second deckState
+			if err := json.Unmarshal([]byte(input), &first); err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(first)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want, got map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(input), &want); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(encoded, &got); err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"master", "lead"} {
+				if string(got[field]) != string(want[field]) {
+					t.Fatalf("%s: want %s, got %s in %s", field, want[field], got[field], encoded)
+				}
+			}
+			if err := json.Unmarshal(encoded, &second); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			if !samePeerPicture(peerDeck{deckState: first, at: now}, second, now) {
+				t.Fatal("the same decoded values must not wake the QML again")
+			}
+		})
+	}
+}
+
 func TestShadowReplyTellsLead(t *testing.T) {
 	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
 	srv := httptest.NewServer(s)
@@ -628,9 +666,9 @@ func TestShadowReplyTellsLead(t *testing.T) {
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
 	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
 	s.shadow.mu.Lock()
-	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Master: true, Seq: 1}, {Deck: 4, Key: "b", Master: true, Seq: 1}}, time.Now())
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Master: new(true), Lead: new(false), Seq: 1}, {Deck: 4, Key: "b", Master: new(true), Lead: new(false), Seq: 1}}, time.Now())
 	ver := s.shadow.ver
-	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Master: true, Lead: true, Seq: 2}, {Deck: 4, Key: "b", Master: true, Seq: 2}}, time.Now())
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Master: new(true), Lead: new(true), Seq: 2}, {Deck: 4, Key: "b", Master: new(true), Lead: new(false), Seq: 2}}, time.Now())
 	woke := s.shadow.ver != ver
 	s.shadow.mu.Unlock()
 	if !woke {
@@ -646,8 +684,52 @@ func TestShadowReplyTellsLead(t *testing.T) {
 		t.Fatalf("%v %+v", err, v.Decks)
 	}
 	for _, d := range v.Decks {
-		if d.Master || d.Lead != (d.Deck == 2) {
+		if d.Master == nil || *d.Master || (d.Lead != nil && *d.Lead) != (d.Deck == 2) {
 			t.Fatalf("shadow reply: %+v", d)
 		}
+	}
+}
+
+// The source's loop, key shift, Stems icon and slip line reach the shadow deck's
+// header, and a change of any of them wakes the QML.
+func TestShadowReplyTellsDeckDisplayState(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	oldRole := fourDeckRolePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = oldRole }()
+	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
+	steps := []deckState{
+		{Deck: 2, Key: "a"},
+		{Deck: 2, Key: "a", Loop: true},
+		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2},
+		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2, Stems: true},
+		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2, Stems: true, Slip: 44100},
+		{Deck: 2, Key: "a", Loop: true, KeyOffset: -2, Stems: true, Slip: 55125},
+	}
+	s.shadow.mu.Lock()
+	for i, d := range steps {
+		ver := s.shadow.ver
+		d.Seq = int64(i + 1)
+		s.shadow.takePeer("192.0.2.7", []deckState{d}, time.Now())
+		if i > 0 && s.shadow.ver == ver {
+			s.shadow.mu.Unlock()
+			t.Fatalf("step %d did not wake the QML: %+v", i, d)
+		}
+	}
+	s.shadow.mu.Unlock()
+	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	var v struct{ Decks []deckState }
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil || len(v.Decks) != 1 {
+		t.Fatalf("%v %+v", err, v.Decks)
+	}
+	if d := v.Decks[0]; !d.Loop || d.KeyOffset != -2 || !d.Stems || d.Slip != 55125 {
+		t.Fatalf("shadow reply: %+v", d)
 	}
 }

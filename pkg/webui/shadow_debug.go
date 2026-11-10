@@ -117,7 +117,7 @@ func (s *Server) shadowDebugGet(w http.ResponseWriter, r *http.Request) {
 		decks = append(decks, peer{p.deckState, p.ip, now.Sub(p.at).Milliseconds()})
 	}
 	slices.SortFunc(decks, func(a, b peer) int { return a.Deck - b.Deck })
-	out := map[string]any{"enabled": sh.dbg.on.Load(), "ver": sh.ver, "own": sh.own, "ownAgeMs": now.Sub(sh.ownAt).Milliseconds(),
+	out := map[string]any{"enabled": sh.dbg.on.Load(), "ver": sh.ver, "own": slices.Clone(sh.own), "ownAgeMs": now.Sub(sh.ownAt).Milliseconds(),
 		"peers": peers, "peerDecks": decks, "peerSeq": maps.Clone(sh.peerSeq), "files": maps.Clone(sh.files), "running": sh.running}
 	sh.mu.Unlock()
 	sh.display.mu.Lock()
