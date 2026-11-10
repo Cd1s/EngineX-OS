@@ -1039,7 +1039,7 @@ SERVICES_MAIN = """
 				// update and read the position of before the stall (zs15-b: 340 ms behind,
 				// counted as a jump back and a jump forward, each a seek on the peer).
 				// Nothing is known then: the deck is where its speed puts it.
-				if (run > 150 && s.ps && p.ps && s.net === p.net) s.posMs = expect
+				if (now - p.at > 150 && s.ps && p.ps && s.net === p.net) s.posMs = expect
 				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
 				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused

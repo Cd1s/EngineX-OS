@@ -1994,6 +1994,35 @@ assert.equal(scShadowPrev[1].jumps, jumps + 1);
 assert.ok(Math.abs(line() - before + 5000) < 40);
 """)
 
+    def normal_tick(self, pitch, moved):
+        ShadowDisplayTest.js(self, r"""
+globalThis.XMLHttpRequest = class { open() { this.readyState = 1 } send() { this.readyState = 4; this.status = 200 } };
+globalThis.scShadowPoll = () => {};
+const T0 = now, pitch = PITCH, speed = 1 + pitch / 100;
+let moved = 0;
+globalThis.scTr = path => ({value: path.endsWith('/SampleRate') ? 44100 : 0, color: '#ffffff', index: 0,
+    state: path.startsWith('/Engine/Deck1/') && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')),
+    get unnormalized() { return path.endsWith('/Deck1/Track/TrackPosition') ? (10000 + (now - T0) * speed + moved) * 44.1 : path.endsWith('/TrackLength') ? 400 * 44100 : path.endsWith('/OriginalBPM') ? 120 : path.endsWith('/CurrentBPM') ? 120 * speed : 0 },
+    get string() { return path === '/Engine/Deck1/Track/TrackUri' ? 'file:///a.mp3' : path.endsWith('/SpeedState') ? '+' + pitch + '%' : '' }});
+for (let i = 0; i < 80; i++) { now += scShadowTickTimer.interval; scShadowTick() }
+assert.equal(scShadowTickTimer.interval, 80);
+assert.equal(scShadowPrev[1].pitch, pitch);
+const jumps = scShadowPrev[1].jumps;
+moved = MOVED; now += 80; scShadowTick();
+assert.ok(Math.abs(scShadowPrev[1].posMs - (10000 + (now - T0) * speed + moved)) < 0.001,
+    'a normal 80 ms tick must use the sampled position');
+assert.equal(scShadowPrev[1].jumps, jumps + (Math.abs(moved) > 180 ? 1 : 0));
+""".replace('PITCH', str(pitch)).replace('MOVED', str(moved)))
+
+    def test_normal_80ms_at_pitch_100(self):
+        self.normal_tick(100, -40)
+
+    def test_normal_80ms_at_pitch_zero(self):
+        self.normal_tick(0, -20)
+
+    def test_jump_back_5s_at_pitch_100(self):
+        self.normal_tick(100, -5000)
+
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
 class ShadowHeadSyncLeadTest(unittest.TestCase):
