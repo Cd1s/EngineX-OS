@@ -93,6 +93,17 @@ chmod +x "$TMP/bin/mock"
 for tool in blkid findmnt mountpoint mount umount fsck.hfsplus modprobe taskset rb-bridge engine-guardian notify chown chrt; do
     ln -s mock "$TMP/bin/$tool"
 done
+cat > "$TMP/bin/blocked-host-command" <<'MOCK'
+#!/bin/sh
+printf '%s\n' "$0 $*" >> "$HOST_COMMAND_LOG"
+exit 1
+MOCK
+chmod +x "$TMP/bin/blocked-host-command"
+for tool in systemctl pkill killall reboot ip; do
+    ln -s blocked-host-command "$TMP/bin/$tool"
+done
+export HOST_COMMAND_LOG=$TMP/host-commands.log
+: > "$HOST_COMMAND_LOG"
 export PATH="$TMP/bin:$PATH"
 count=0
 fail() { printf 'FAIL: %s\n' "$*" >&2; tail -n 8 "$MOCK_ROOT/log" >&2; exit 1; }
@@ -421,6 +432,7 @@ ok 'stock connman online check, read-only HFS+, rootfs brcmfmac options'
 
 GUARD=$ROOT/rootfs-overlay/etc/sc5000/engine-ui-guard
 export SC5000_UI_DIR=$TMP/ui-guard SC5000_STREAMING_ACCOUNTS=$TMP/StreamingAccounts.json
+export SC5000_ENGINE_DATA_DIR=$TMP/engine-data
 # #56: every start leaves Engine a TIDAL account entry (valid JSON, other accounts
 # kept) unless TIDAL itself is the selected service.
 tidal_entry() { python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); d=json.loads(a["TIDAL"]); assert d["providerType"] == "TIDAL" and d.get("accessToken") == "enginex" and d.get("refreshToken") == "enginex"; print(len(a))' "$SC5000_STREAMING_ACCOUNTS"; }
@@ -439,7 +451,6 @@ for _ in 1 2 3; do SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre; don
 for result in signal core-dump exit-code; do SERVICE_RESULT=$result sh "$GUARD" stop; sh "$GUARD" pre; done
 [[ -e $SC5000_UI_DIR/safe-mode ]] || fail 'three crashed starts must enter safe-mode'
 # #140: a corrupt Qt QML cache must not survive a crash, safe-mode or a hung/hard-powered-off start (boot-token left).
-export SC5000_ENGINE_DATA_DIR=$TMP/engine-data
 SERVICE_RESULT=signal sh "$GUARD" stop; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
 [[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a crashed start must clear the QML disk cache'
 rm -f "$SC5000_UI_DIR"/*; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
@@ -460,7 +471,6 @@ if command -v timeout >/dev/null; then
     start=$SECONDS; SC5000_ENGINE_GUARDIAN=$TMP/slow-guardian sh "$GUARD" pre
     (( SECONDS - start < 20 )) || fail 'guard pre must time out a hung engine-guardian'
 fi
-unset SC5000_ENGINE_DATA_DIR
 # #7: a crashed start's timer must not reset the streak of the starts after it.
 rm -f "$SC5000_UI_DIR"/*
 export SC5000_UI_HEALTHY_AFTER=1 SC5000_UI_ALIVE_CMD=true
@@ -577,4 +587,6 @@ has '/Track/${modelData.n}' "$ROOT/tools/ui-mod/build_packs.py"
 ok 'on-screen track skip buttons only on models without physical keys'
 
 python3 -m unittest discover -s "$ROOT/sim/qengine" -p test_smoke.py >/dev/null
+[[ ! -s $HOST_COMMAND_LOG ]] || fail "unexpected host command: $(cat "$HOST_COMMAND_LOG")"
+ok 'host systemctl, pkill, killall, reboot and ip were never called'
 printf 'PASS: %d tests (mocked storage and hardware; no privileged operations)\n' "$count"
