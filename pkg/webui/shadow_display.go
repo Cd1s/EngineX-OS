@@ -261,7 +261,7 @@ func (s *Server) shadowDisplayCDJs(free []int, lineIn bool, now time.Time, only 
 		if only != nil && !ok {
 			continue
 		}
-		d := deckState{Deck: deck, DisplayOnly: true, LineIn: lineIn, Fallback: why, Title: dev.Title, Artist: dev.Artist, MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
+		d := deckState{Deck: deck, DisplayOnly: true, LineIn: lineIn, Fallback: why, Title: dev.Title, Artist: dev.Artist, DurationMS: float64(dev.DurationMS), MetadataOnly: true, Playing: dev.Playing, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Lead: dev.Master, Sync: dev.Sync, BPM: dev.BPM, At: now.UnixMilli()}
 		if dev.TrackID != 0 {
 			host := net.ParseIP(dev.Address)
 			if dev.SourcePlayer != dev.Number {
@@ -272,7 +272,19 @@ func (s *Server) shadowDisplayCDJs(free []int, lineIn bool, now time.Time, only 
 				version = s.prolinkExport.DisplayMediaCache().MediaIdentity(dev, host)
 			}
 			d.Key = fmt.Sprintf("cdj:%s:%d:%d:%d:%s", host, dev.SourcePlayer, dev.SourceSlot, dev.TrackID, version)
-			d.MetadataOnly = s.ensureCDJDisplay(dev, host, d.Key, version, now) == nil
+			slot := s.ensureCDJDisplay(dev, host, d.Key, version, now)
+			d.MetadataOnly = slot == nil
+			if slot != nil && slot.asset != nil {
+				if d.DurationMS == 0 && slot.asset.DurationMS > 0 {
+					d.DurationMS = slot.asset.DurationMS
+				}
+				if d.KeyName == "" && slot.asset.KeyName != "" {
+					d.KeyName = slot.asset.KeyName
+				}
+				if d.BPM == 0 && slot.asset.BPM > 0 {
+					d.BPM = slot.asset.BPM
+				}
+			}
 		}
 		at := dev.LastSeen
 		sh.mu.Lock()

@@ -495,3 +495,46 @@ func TestShadowCarriesRangeAndKeyLock(t *testing.T) {
 		}
 	}
 }
+
+// The display-only shadow reply carries KeyName and Lead from the source deck,
+// and wakes the QML when either changes.
+func TestShadowDisplayCarriesKeyNameAndLead(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	oldRole := fourDeckRolePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = oldRole }()
+	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=0")
+	w := httptest.NewRecorder()
+	s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(fmt.Sprintf(`[{"deck":1,"keyName":"8B","lead":true,"at":%d}]`, time.Now().UnixMilli()))))
+	if w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	s.shadow.mu.Lock()
+	out := s.shadow.ownForPeer(time.Now())
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", KeyName: "-", Seq: 1}}, time.Now())
+	ver1 := s.shadow.ver
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", KeyName: "9B", Seq: 2}}, time.Now())
+	ver2 := s.shadow.ver
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", KeyName: "9B", Lead: true, Seq: 3}}, time.Now())
+	ver3 := s.shadow.ver
+	s.shadow.mu.Unlock()
+	if len(out) != 1 || out[0].KeyName != "8B" || !out[0].Lead {
+		t.Fatalf("own deck for peer: %+v", out)
+	}
+	if ver2 == ver1 || ver3 == ver2 {
+		t.Fatalf("keyName or lead change must bump ver: %d %d %d", ver1, ver2, ver3)
+	}
+	r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	var v struct{ Decks []deckState }
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil || len(v.Decks) != 1 || v.Decks[0].KeyName != "9B" || !v.Decks[0].Lead {
+		t.Fatalf("shadow reply: %v %+v", err, v.Decks)
+	}
+}
+

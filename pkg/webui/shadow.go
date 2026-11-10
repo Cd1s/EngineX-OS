@@ -59,6 +59,7 @@ type deckState struct {
 	Name         string  `json:"name,omitempty"`  // the file's name, which the copy keeps
 	Title        string  `json:"title,omitempty"` // a streaming track's real title (QML or stm.db): the copy is named after it
 	Artist       string  `json:"artist,omitempty"`
+	KeyName      string  `json:"keyName,omitempty"`      // the key as the source's header writes it ("-": none); the shadow header shows it
 	ID           string  `json:"id,omitempty"`           // Engine mode, what the source has loaded: its Key (a copy), its Net (this player's own file), a CDJ's slot and track id. The QML loads again when it changes
 	DurationMS   float64 `json:"durationMs,omitempty"`   // the track's length on the source: tells the QML whether Engine holds this track or another
 	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
@@ -81,6 +82,10 @@ type deckState struct {
 	Range      float64 `json:"range,omitempty"`
 	KeyLock    *bool   `json:"keylock,omitempty"`
 	Master     bool    `json:"master,omitempty"`
+	// Lead is the deck's own DeckIsMaster, what its header shows as LEAD, for the
+	// shadow header only. Master also marks the player that holds the network
+	// master with no master deck, and is cleared for a standalone player's copy.
+	Lead       bool    `json:"lead,omitempty"`
 	Sync       bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
 	BPM        float64 `json:"bpm,omitempty"`        // the track's
 	CurrentBPM float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
@@ -192,8 +197,8 @@ const (
 func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
-		o.Title != d.Title || o.Artist != d.Artist || o.Loading != d.Loading || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
-		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.Sync != d.Sync || o.BPM != d.BPM ||
+		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
+		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.Lead != d.Lead || o.Sync != d.Sync || o.BPM != d.BPM ||
 		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
