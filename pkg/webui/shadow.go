@@ -174,13 +174,14 @@ const (
 )
 
 // samePeerPicture is true when d shows what old already shows: the same track,
-// state and markers, and a playhead on old's anchored line. Seq, At, Beat,
-// CurrentBPM and Dbg do not count: the display QML does not use them.
+// state, tempo and markers, and a playhead on old's anchored line.
+// Seq, At, Beat and Dbg do not count: the display QML does not use them.
 func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.Loading != d.Loading || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
 		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.Sync != d.Sync || o.BPM != d.BPM ||
+		o.CurrentBPM != d.CurrentBPM ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
 		return false

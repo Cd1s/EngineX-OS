@@ -20,7 +20,7 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 	sh := newShadowState()
 	t0 := time.Now()
 	cue := 1234.5
-	base := deckState{Deck: 2, Key: "k", Title: "T", Playing: true, PositionMS: 1000, Pitch: 0, BPM: 120, CuePos: &cue, Cues: []shadowCue{{I: 1, P: 4800, N: "A", C: "#fff"}}, Link: "L"}
+	base := deckState{Deck: 2, Key: "k", Title: "T", Playing: true, PositionMS: 1000, Pitch: 0, BPM: 120, CurrentBPM: 120, CuePos: &cue, Cues: []shadowCue{{I: 1, P: 4800, N: "A", C: "#fff"}}, Link: "L"}
 	seq := int64(1)
 	take := func(d deckState, at time.Duration) uint64 {
 		t.Helper()
@@ -34,7 +34,7 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 		t.Fatal("a new deck must bump")
 	}
 	steady := base
-	steady.PositionMS, steady.Beat, steady.CurrentBPM, steady.Dbg = 1500, 2.5, 120.01, "x"
+	steady.PositionMS, steady.Beat, steady.CurrentBPM, steady.Dbg = 1500, 2.5, 120, "x"
 	steady.Cues = []shadowCue{{I: 1, P: 4800, N: "A", C: "#fff"}} // a new slice, same cues
 	c2 := cue
 	steady.CuePos = &c2
@@ -61,6 +61,7 @@ func TestTakePeerBumpsOnlyWhenThePictureChanges(t *testing.T) {
 	for name, edit := range map[string]func(*deckState){
 		"pause":  func(d *deckState) { d.Playing = false },
 		"pitch":  func(d *deckState) { d.Pitch = 0.5 },
+		"tempo":  func(d *deckState) { d.CurrentBPM = 120.01 },
 		"title":  func(d *deckState) { d.Title = "U" },
 		"cue":    func(d *deckState) { d.Cues = []shadowCue{{I: 1, P: 4801, N: "A", C: "#fff"}} },
 		"cuePos": func(d *deckState) { x := 1.0; d.CuePos = &x },
@@ -161,6 +162,7 @@ func TestShadowStateHeaderSkipsHeartbeats(t *testing.T) {
 	defer func() { fourDeckRolePath = oldRole }()
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
 	uiPost(t, srv.URL, "fourDeckWaveform=1")
+	wantTempo := 130.17
 	header := func() string {
 		t.Helper()
 		r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
@@ -168,20 +170,38 @@ func TestShadowStateHeaderSkipsHeartbeats(t *testing.T) {
 			t.Fatal(err)
 		}
 		var v struct{ Decks []deckState }
-		json.NewDecoder(r.Body).Decode(&v)
+		if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+			t.Fatal(err)
+		}
 		r.Body.Close()
+		if len(v.Decks) != 1 || v.Decks[0].CurrentBPM != wantTempo {
+			t.Fatalf("exact tempo: %+v, want %v", v.Decks, wantTempo)
+		}
 		return r.Header.Get("X-Shadow-State")
 	}
 	now := time.Now()
 	s.shadow.mu.Lock()
-	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Playing: true, PositionMS: 1000, Seq: 1}}, now)
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", BPM: 128, Pitch: 1.7, CurrentBPM: 130.17, Playing: true, PositionMS: 1000, Seq: 1}}, now)
 	s.shadow.mu.Unlock()
 	h1 := header()
 	s.shadow.mu.Lock()
-	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Playing: true, PositionMS: 1300, Seq: 2}}, now.Add(300*time.Millisecond))
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", BPM: 128, Pitch: 1.7, CurrentBPM: 130.17, Playing: true, PositionMS: 1300, Seq: 2}}, now.Add(300*time.Millisecond))
 	s.shadow.mu.Unlock()
 	if h2 := header(); h2 != h1 || h1 == "" {
 		t.Fatalf("heartbeat changed the header: %q -> %q", h1, h2)
+	}
+	// A tempo-only update must wake the display even when rounded pitch is
+	// unchanged. Reconstructing it from 128 BPM and 1.7% would show 130.18.
+	wantTempo = 130.18
+	s.shadow.mu.Lock()
+	d := s.shadow.peerDecks[2].deckState
+	d.CurrentBPM, d.Seq = wantTempo, 3
+	s.shadow.takePeer("192.0.2.7", []deckState{d}, now.Add(300*time.Millisecond))
+	s.shadow.mu.Unlock()
+	if h := header(); h == h1 {
+		t.Fatal("exact tempo change kept the header")
+	} else {
+		h1 = h
 	}
 	s.shadow.mu.Lock()
 	p := s.shadow.peerDecks[2]

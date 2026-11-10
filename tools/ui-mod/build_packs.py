@@ -518,7 +518,8 @@ SERVICES_MAIN = """
 		if (s.key !== key || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.playing !== !!e.playing ||
 			s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
-			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail) return false
+			s.sync !== !!e.sync || s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) ||
+			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail) return false
 		if (Array.isArray(e.cues)) {
 			const a = s.liveCues, b = e.cues
 			if (!Array.isArray(a) || a.length !== b.length) return false
@@ -554,7 +555,7 @@ SERVICES_MAIN = """
 			const sample = {key: key, title: e.title || "", artist: e.artist || "", playing: !!e.playing, stale: !!e.stale,
 				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master, sync: !!e.sync,
-				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
+				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				jumps: Number(e.jumps) || 0,
 				meta: old && old.key === key ? old.meta : null,
 				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
@@ -1124,7 +1125,7 @@ SERVICES_MAIN = """
 				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
-				sent.title !== o.title || sent.artist !== o.artist || sent.link !== o.link || sent.bpm !== o.bpm || sent.cuesRev !== cc.rev) edge = true
+				sent.title !== o.title || sent.artist !== o.artist || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.cuesRev !== cc.rev) edge = true
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -1138,7 +1139,7 @@ SERVICES_MAIN = """
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist
-			sent.link = o.link; sent.bpm = o.bpm; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
+			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
@@ -3498,15 +3499,39 @@ SHADOW_LAYER = r"""
             }
             Item {
                 width: parent.width; height: 16
+                Item {
+                    id: scShadowBpmSlot
+                    width: scShadowBpm.displayWidth
+                    height: parent.height
+                    EngineXEmbedded.Bpm {
+                        id: scShadowBpm
+                        deckIndex: scDisplay.deck
+                        deckLoaded: bpmValue > 0
+                        songAnalyzed: true
+                        decimalPlaces: 2
+                        bpmValue: {
+                            const s = scDisplay.sample, m = scDisplay.meta
+                            return s ? s.currentBpm || (s.bpm || (m && m.bpm) || 0) * (1 + (s.pitch || 0) / 100) : 0
+                        }
+                        fractionSeparator: "."
+                        emptyIntegral: ""
+                        animateWhenUnanalysed: false
+                        font: Qt.font({pixelSize: 12})
+                        fractionFont: font
+                        color: "#dddddd"
+                        fractionColor: color
+                        fractionalBottomMargin: 0
+                    }
+                }
                 Text { textFormat: Text.PlainText;
-                    width: Math.max(0, parent.width - scBadges.width - 4)
+                    x: scShadowBpmSlot.width
+                    width: Math.max(0, parent.width - x - scBadges.width - 4)
                     elide: Text.ElideRight; color: "#dddddd"; font.pixelSize: 12
                     text: {
                         const s = scDisplay.sample, m = scDisplay.meta
                         if (!s) return ""
-                        const bpm = s.bpm || (m && m.bpm) || 0
                         const cue = scDisplay.cueInfo && root.scCueCountdown ? "   " + scDisplay.cueInfo.label + " " + scDisplay.cueInfo.text : ""
-                        return (bpm > 0 ? (bpm * (1 + s.pitch / 100)).toFixed(1) + " BPM" : "") + "   " + (m && m.keyName || "") + cue
+                        return (scShadowBpm.deckLoaded ? " BPM" : "") + "   " + (m && m.keyName || "") + cue
                     }
                 }
                 Text { textFormat: Text.PlainText;
@@ -3528,7 +3553,7 @@ def shadow_layer(text: str, kind: str) -> str:
     """Keep visual items inside the stock stacking context, outside Row/ColumnLayouts."""
     # Stock roots request QtQuick 2.0/2.1; Matrix4x4 and Binding.restoreMode
     # need the newer revisions available in both supported Engine Qt builds.
-    text = re.sub(r"(?m)^import QtQuick(?: \d+\.\d+)?\s*$", "import QtQuick 2.15", text)
+    text = re.sub(r"(?m)^import QtQuick(?: \d+\.\d+)?\s*$", "import QtQuick 2.15\nimport Embedded as EngineXEmbedded", text)
     text = re.sub(r"(?m)^import QtQuick.Layouts(?: \d+\.\d+)?[ \t]*$", "import QtQuick.Layouts 1.15", text)
     if not re.search(r"(?m)^import QtQuick.Layouts(?: \d+\.\d+)?[ \t]*$", text):
         text = "import QtQuick.Layouts 1.15\n" + text
@@ -3583,23 +3608,26 @@ def shadow_targets(qrc: Path):
 
 
 def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False, lead_sep: bool = True) -> str:
-    """#151: stock-style flat `| ▊ DROP  16.3` countdown (Separator + 3 px cue-colour bar + Style.fontH1 text,
-    no box, like AutoLoop / BeatJump / SpeedInfo); hidden (no space) without a cue ahead.
-    h, px are kept for the call sites; the flat row needs neither."""
-    q = f"""Row {{
-    id: cueCap
-    objectName: "EngineX_CueCountdown"
-    readonly property var info: typeof root !== "undefined" && root && root.scCueCountdown && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTickFor({deck_expr})) : null
-    visible: info !== null && root.scCueCountdown
+    """Bound the countdown after LEAD; only its cue name may elide."""
+    q = f"""Item {{
+    // Reserve the Cue slot even without a cue: LEAD never changes width.
     Layout.alignment: Qt.AlignVCenter
-    Layout.leftMargin: 4
-    Layout.rightMargin: 4
-    Layout.preferredHeight: {22 if compact else 30}
-    spacing: 4
-{'    Rectangle { width: 1; height: 18; anchors.verticalCenter: parent.verticalCenter; color: Style.surface03Color }' if lead_sep else ''}
-    Rectangle {{ width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: cueCap.info ? cueCap.info.color : "transparent" }}
-    Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: Style.font01Color; visible: text !== ""; text: cueCap.info ? cueCap.info.label : "" }}
-    Text {{ anchors.verticalCenter: parent.verticalCenter; font: Style.fontH1; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
+    Layout.preferredHeight: 22
+    Layout.minimumWidth: 96
+    Layout.preferredWidth: 96
+    Layout.maximumWidth: 96
+    RowLayout {{
+        id: cueCap
+        objectName: "EngineX_CueCountdown"
+        anchors.fill: parent
+        readonly property var info: typeof root !== "undefined" && root && root.scCueCountdown && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTickFor({deck_expr})) : null
+        visible: info !== null && root.scCueCountdown
+        spacing: 4
+{'        Rectangle { width: 1; height: 18; Layout.alignment: Qt.AlignVCenter; color: Style.surface03Color }' if lead_sep else ''}
+        Rectangle {{ width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: cueCap.info ? cueCap.info.color : "transparent" }}
+        Text {{ Layout.fillWidth: true; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== ""; text: cueCap.info ? cueCap.info.label : "" }}
+        Text {{ font: Style.fontH3; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
+    }}
 }}
 """
     return "".join(ind + l + "\n" if l else "\n" for l in q.splitlines())
@@ -4484,12 +4512,12 @@ def edits(dev: bool):
             "                !deckConfig.gridEditActive &&\n"
             "                !deckConfig.loopInEdit &&\n",
         )]
-        # #135: touch Beat Jump on the deck screen: icon = jump back, size text = next size
-        # (cycles through 16/32/64 phrase jumps), » = jump forward. BeatJump gets its deck
-        # from deckIndex; the five users pass theirs (default 1).
+        # Keep the stock two-item BeatJump layout. The forward target lives
+        # inside the size field, so it cannot widen AutoLoop / BeatJump / LEAD.
         bj = "Skins/EngineOS/UI/CompositeControls/"
-        def bj_tap(action, call="p.translator.state = true"):
-            return ('        MouseArea {\n            anchors.fill: parent\n            anchors.margins: -6\n'
+        def bj_tap(action, call="p.translator.state = true", right_margin=0):
+            return ('        MouseArea {\n            anchors.fill: parent\n'
+                    f'            anchors.rightMargin: {right_margin}\n            anchors.topMargin: -6\n            anchors.bottomMargin: -6\n'
                     f'            onClicked: {{ const p = Planck.getProperty("/Engine/Deck" + beatJump.deckIndex + "/Track/BeatJump/{action}"); if (p && p.translator) {call} }}\n'
                     '        }\n')
         scaled[bj + "Deck/DeckItem/BeatJump.qml"] = [
@@ -4498,37 +4526,143 @@ def edits(dev: bool):
             ("        SequentialAnimation {\n            id: beatJumpImageAnimation\n",
              bj_tap("JumpBack") + "\n        SequentialAnimation {\n            id: beatJumpImageAnimation\n"),
             ("        SequentialAnimation {\n            id: beatJumpTextAnimation\n",
-             bj_tap("BeatJumpIndex", "p.translator.incValue(0, 1, 0, true)") + "\n        SequentialAnimation {\n            id: beatJumpTextAnimation\n"),
-            ("                to: Style.font01Color\n                duration: Style.colorAnimationDuration\n            }\n        }\n    }\n",
-             "                to: Style.font01Color\n                duration: Style.colorAnimationDuration\n            }\n        }\n    }\n\n"
-             '    Text {\n        objectName: "Deck_BeatJump_Forward"\n        verticalAlignment: Text.AlignVCenter\n'
-             '        font: beatJumpText.font\n        color: Style.font01Color\n        text: "\\u00bb"\n\n'
-             + bj_tap("JumpForward") + "    }\n"),
+             bj_tap("BeatJumpIndex", "p.translator.incValue(0, 1, 0, true)", 14) +
+             '        Text {\n            objectName: "Deck_BeatJump_Forward"\n'
+             '            anchors.right: parent.right\n            height: parent.height\n            width: 14\n'
+             '            verticalAlignment: Text.AlignVCenter\n            horizontalAlignment: Text.AlignRight\n'
+             '            font: beatJumpText.font\n            color: Style.font01Color\n            text: "\\u00bb"\n'
+             + bj_tap("JumpForward") + "        }\n\n        SequentialAnimation {\n            id: beatJumpTextAnimation\n"),
         ]
-        scaled[bj + "Deck/DeckSharedItems/DeckSharedItems.qml"] = [
-            ("            view: deckSharedItems.deckView.beatJumpView\n",
-             "            view: deckSharedItems.deckView.beatJumpView\n            deckIndex: deckSharedItems.deckData.deckIndex\n")]
-        scaled[bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"] = [
-            ("        view: deckPerformanceDataContent.deckView.beatJumpView\n",
-             "        view: deckPerformanceDataContent.deckView.beatJumpView\n        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n"),
-            # #151: the ▲▼ soft-takeover arrows give way to the countdown, right of the sync bar
-            ("        visible: !deckPerformanceDataContent.isRemoteDeck\n        speedOffsetIsUp: deckPerformanceDataContent.deckView.speedOffsetIsUp\n        speedOffsetIsDown: deckPerformanceDataContent.deckView.speedOffsetIsDown\n    }\n",
-             "        visible: false\n        speedOffsetIsUp: deckPerformanceDataContent.deckView.speedOffsetIsUp\n        speedOffsetIsDown: deckPerformanceDataContent.deckView.speedOffsetIsDown\n    }\n\n" + cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 26, 18, compact=True))]
-        scaled[bj + "DeckPerformanceData/PortraitDeckPerformanceDataContent.qml"] = [
-            ("                view: deckPerformanceDataContent.deckView.beatJumpView\n",
-             "                view: deckPerformanceDataContent.deckView.beatJumpView\n                deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n")]
-        scaled[bj + "DeckOverview/DeckOverview.qml"] = [
-            ("                    view: control.deckView.beatJumpView\n",
-             "                    view: control.deckView.beatJumpView\n                    deckIndex: control.deckView.deckData.deckIndex\n")]
-        scaled[bj + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"] = [
-            ("                    view: deckTrackDataContent.deckView.beatJumpView\n",
-             "                    view: deckTrackDataContent.deckView.beatJumpView\n                    deckIndex: deckTrackDataContent.deckIndex\n"),
-            # #151: the countdown takes the ▲▼ slot between the sync bar's Separator and SpeedInfo
-            ("                SoftTakeoverIndicators {\n                    speedOffsetIsUp: deckTrackDataContent.deckView.speedOffsetIsUp\n                    speedOffsetIsDown: deckTrackDataContent.deckView.speedOffsetIsDown\n                }\n",
-             "                SoftTakeoverIndicators {\n                    visible: false\n                    speedOffsetIsUp: deckTrackDataContent.deckView.speedOffsetIsUp\n                    speedOffsetIsDown: deckTrackDataContent.deckView.speedOffsetIsDown\n                }\n\n" + cue_capsule("                ", "deckTrackDataContent.deckIndex", 24, 16, compact=True, lead_sep=False))]
+        for rel, owner, indent in (
+            ("Deck/DeckSharedItems/DeckSharedItems.qml", "deckSharedItems", "            "),
+            ("DeckPerformanceData/DeckPerformanceDataContent.qml", "deckPerformanceDataContent", "        "),
+            ("DeckPerformanceData/PortraitDeckPerformanceDataContent.qml", "deckPerformanceDataContent", "                "),
+            ("DeckOverview/DeckOverview.qml", "control", "                    "),
+            ("DeckTrackData/GroupedMiniDeckTrackDataContent.qml", "deckTrackDataContent", "                    "),
+        ):
+            line = indent + "view: " + owner + ".deckView.beatJumpView\n"
+            scaled[bj + rel] = [(line, line + indent + "deckIndex: " + owner + ".deckView.deckData.deckIndex\n")]
+        # Same compact order in both deck counts: Loop / BeatJump / LEAD /
+        # Cue / soft takeover / speed. Never spend the time display's width.
+        performance = bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"
+        scaled[performance] += [
+            ("    SoftTakeoverIndicators {\n", cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n    SoftTakeoverIndicators {\n"),
+            ("        id: autoLoop\n", "        id: autoLoop\n        Layout.rightMargin: 4\n"),
+        ]
+        # Both controls have spacing:6; patch() deliberately requires a unique
+        # anchor, so apply it together with the control-specific view line.
+        for control, width in (("autoLoop", 52), ("beatJump", 64)):
+            view = "autoLoopView" if control == "autoLoop" else "beatJumpView"
+            anchor = ("        view: deckPerformanceDataContent.deckView." + view + "\n" +
+                      ("        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n" if control == "beatJump" else ""))
+            scaled[performance].append((anchor + "        spacing: 6\n", anchor + "        spacing: 4\n"))
+        # 56 px from Loop/Jump + 24 px sync margins + 16 px takeover margin
+        # pays for the entire 96 px Cue. The stock sync width is unchanged.
+        scaled[performance] += [
+            ("        Layout.leftMargin: 24\n        Layout.rightMargin: 24\n", "        Layout.leftMargin: 12\n        Layout.rightMargin: 12\n"),
+            ("                Layout.leftMargin: 24\n", "                Layout.leftMargin: 8\n"),
+        ]
+        for control, width in (("autoLoop", 52), ("beatJump", 64)):
+            scaled[performance] += [
+                (f"                target: {control}\n                Layout.preferredWidth: 88\n                iconWidth: 20\n                iconHeight: 12\n                textFont: Style.fontH1\n",
+                 f"                target: {control}\n                Layout.preferredWidth: {width}\n                iconWidth: 16\n                iconHeight: 10\n                textFont: Style.fontH3\n"),
+                (f"                target: {control}\n                Layout.preferredWidth: 116\n                textFont: Style.fontTitle\n                iconWidth: 26\n                iconHeight: 16\n",
+                 f"                target: {control}\n                Layout.preferredWidth: {width}\n                textFont: Style.fontH3\n                iconWidth: 16\n                iconHeight: 10\n"),
+            ]
+        mini = bj + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"
+        scaled[mini] += [
+            ("                SoftTakeoverIndicators {\n", cue_capsule("                ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n                SoftTakeoverIndicators {\n"),
+            ("                spacing: 16\n                visible: deckTrackDataContent.songLoaded\n", "                spacing: 4\n                visible: deckTrackDataContent.songLoaded\n"),
+            ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n", "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 52\n"),
+            ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n", "                    textFont: Style.fontH3\n                    Layout.preferredWidth: 64\n"),
+        ]
+        # Original mini row: 72 + 72 + 6*16 = 240. Compact row:
+        # 52 + 64 + 96 + 7*4 = 240. Thus LEAD keeps exactly its stock width.
+        # Use control-specific beginnings to keep all anchors unique.
+        scaled[mini] += [
+            ("                    view: deckTrackDataContent.deckView.autoLoopView\n                    spacing: 6\n                    iconWidth: 20\n                    iconHeight: 12\n                    textFont: Style.fontH1\n",
+             "                    view: deckTrackDataContent.deckView.autoLoopView\n                    spacing: 4\n                    iconWidth: 16\n                    iconHeight: 10\n                    textFont: Style.fontH3\n"),
+            ("                    deckIndex: deckTrackDataContent.deckView.deckData.deckIndex\n                    spacing: 6\n                    iconWidth: 20\n                    iconHeight: 12\n",
+             "                    deckIndex: deckTrackDataContent.deckView.deckData.deckIndex\n                    spacing: 4\n                    iconWidth: 16\n                    iconHeight: 10\n"),
+        ]
+        split_controls = """        AutoLoop {
+            Layout.preferredWidth: 52
+            Layout.rightMargin: 4
+            view: deckTrackDataContent.deckView.autoLoopView
+            spacing: 4
+            iconWidth: 16
+            iconHeight: 10
+            textFont: Style.fontH3
+        }
+        BeatJump {
+            Layout.preferredWidth: 64
+            view: deckTrackDataContent.deckView.beatJumpView
+            deckIndex: deckTrackDataContent.deckIndex
+            spacing: 4
+            iconWidth: 16
+            iconHeight: 10
+            textFont: Style.fontH3
+            visible: Config.audio.deck.hasBeatJump
+        }
+"""
+        split_speed = """        SpeedInfo {
+            Layout.leftMargin: 4
+            speedState: deckTrackDataContent.deckData.speedState
+            speedRange: deckTrackDataContent.deckData.speedRange
+            speedRangeTextWidth: 32
+            speedStateTextWidth: 70
+            columnSpacing: 4
+            flat: true
+        }
+"""
         scaled[bj + "DeckTrackData/SplitMiniDeckTrackDataContent.qml"] = [
-            ("        JP07SyncIndicator {\n",
-             cue_capsule("        ", "deckTrackDataContent.deckIndex", 26, 16, compact=True) + "\n        JP07SyncIndicator {\n")]
+            ("        JP07SyncIndicator {\n", split_controls + "\n        JP07SyncIndicator {\n"),
+            ("            Layout.maximumWidth: 160\n", "            Layout.minimumWidth: 160\n            Layout.maximumWidth: 160\n"),
+            ("        DeckInfoTimeInfo {\n", cue_capsule("        ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n" + split_speed + "\n        DeckInfoTimeInfo {\n"),
+        ]
+        for item, text_id in (("AutoLoop", "autoLoopText"), ("BeatJump", "beatJumpText")):
+            scaled.setdefault(bj + "Deck/DeckItem/" + item + ".qml", []).append((
+                f"        id: {text_id}\n", f"        id: {text_id}\n        fontSizeMode: Text.HorizontalFit\n        minimumPixelSize: 14\n" +
+                ("        rightPadding: 14\n" if item == "BeatJump" else "")))
+        # Share the stock formatter between performance controls and shadow data.
+        scaled[ROOT + "Items/Bpm.qml"] = [
+            ("    property int decimalPlaces: 1\n", "    property int decimalPlaces: 2\n"),
+            ('    property string fractionSeparator: ""\n', '    property string fractionSeparator: "."\n'),
+            ("    property alias fractionColor: fractionText.color\n",
+             "    property alias fractionColor: fractionText.color\n    readonly property real displayWidth: implicitWidth + fractionText.implicitWidth\n    readonly property real fractionHeight: fractionText.implicitHeight\n"),
+            ("    readonly property bool currentBPMSplitValid:",
+             "    property real bpmValue: pCurrentBPM && pCurrentBPM.translator ? pCurrentBPM.translator.unnormalized : 0\n\n    readonly property bool currentBPMSplitValid:"),
+            ("if (songAnalyzed && pCurrentBPM && pCurrentBPM.translator)", "if (songAnalyzed)"),
+            ("pCurrentBPM.translator.unnormalized.toFixed(bpm.decimalPlaces)", "bpmValue.toFixed(bpm.decimalPlaces)"),
+        ]
+        scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
+            ("import Planck\n", "import Planck\nimport Embedded as EmbeddedItems\n"),
+            ("    property bool tappable: true\n", "    Layout.minimumWidth: implicitWidth\n    property bool tappable: true\n"),
+            ("        Row {\n" + "            Layout.alignment: bpmInfo.layoutAlignment\n" +
+             '            Text {\n                objectName: "Deck_Bpm"\n\n' +
+             "                color: bpmInfo.syncEnabled ? bpmInfo.syncColor : Style.font02Color\n" +
+             "                font: bpmInfo.font\n" +
+             "                text: bpmInfoView && bpmInfoView.bpmText\n            }\n\n" +
+             '            Text {\n                objectName: "Deck_Bpm_FractionalText"\n\n' +
+             "                topPadding: bpmInfo.fractionTextTopPadding\n" +
+             "                color: bpmInfo.syncEnabled ? bpmInfo.syncColor : fractionTextColor\n" +
+             "                font: bpmInfo.fractionTextFont\n" +
+             "                text: bpmInfoView && bpmInfoView.bpmFractionalText\n            }\n        }\n",
+             "        Item {\n            Layout.alignment: bpmInfo.layoutAlignment\n" +
+             "            implicitWidth: scBpm.displayWidth\n" +
+             "            implicitHeight: Math.max(scBpm.implicitHeight, scBpm.fractionHeight + bpmInfo.fractionTextTopPadding)\n" +
+             "            EmbeddedItems.Bpm {\n                id: scBpm\n" +
+             "                deckIndex: bpmInfo.deckIndex\n" +
+             '                readonly property var pLoaded: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/Track/SongLoaded".arg(deckIndex)) : null\n' +
+             "                deckLoaded: !!(pLoaded && pLoaded.translator && pLoaded.translator.state)\n" +
+             "                decimalPlaces: 2\n                fractionSeparator: \".\"\n" +
+             "                animateWhenUnanalysed: false\n" +
+             "                font: bpmInfo.font\n                fractionFont: bpmInfo.fractionTextFont\n" +
+             "                color: bpmInfo.syncEnabled ? bpmInfo.syncColor : Style.font02Color\n" +
+             "                fractionColor: bpmInfo.syncEnabled ? bpmInfo.syncColor : bpmInfo.fractionTextColor\n" +
+             "                fractionalBottomMargin: implicitHeight - fractionHeight - bpmInfo.fractionTextTopPadding\n" +
+             "            }\n        }\n"),
+        ]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/ActionPadRGBLed.qml"] =[("    enabled: deckConfig.inDJMode\n", "    enabled: deckConfig.inDJMode\n" + pad_brt)]
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/QuadPadRGBLed.qml"] = [("    idx: note\n", "    idx: note\n" + pad_brt)]
         scaled["airAssignments/OutputAssignment/ColorOutputAssignment.qml"] = [
