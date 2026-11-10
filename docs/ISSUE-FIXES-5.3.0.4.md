@@ -1,8 +1,8 @@
 # EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11，预 RC）
 
 - **日期**：`2026-11-11`
-- **状态**：预 RC（实机线 `agent/shadow-grid-halfwave-20261110` 合并至 `7be625c`，沙箱线 `agent/sandbox-main-20261110` 合并至 `3a2d5d1`，实机线未最终合入）
-- **版本范围**：`v5.3.0.3`（tag `cd789f8` / 构建提交 `b941ea4`）→ `v5.3.0.4`（预 RC 构建提交：`24bb83b`，实机线未最终合入）
+- **状态**：预 RC（实机线 `agent/shadow-grid-halfwave-20261110` 合并至 `7be625c`，沙箱线 `agent/sandbox-main-20261110` 合并至 `2031ae2`，实机线未最终合入）
+- **版本范围**：`v5.3.0.3`（tag `cd789f8` / 构建提交 `b941ea4`）→ `v5.3.0.4`（预 RC 构建提交：`6e1b4be`，实机线未最终合入）
 - **回滚点**：`v5.3.0.3`（tag `cd789f8`，构建提交 `b941ea4`；同版本更早构建 `37e83ea`、`9616419`）
 - **覆盖机型与产物（共 20 个发布资产 + `SHA256SUMS.txt`）**：
   - **8 款一代机完整固件（`*-Update.img`）**：`SC5000`（JP07）、`SC5000M`（JP08）、`PRIME GO`（JP11）、`SC6000`（JP13）、`SC6000M`（JP14）、`PRIME 4`（JC11）、`PRIME 2`（JC16）、`Mixstream Pro`（NH08）
@@ -58,15 +58,15 @@
 
 ## 3. 全套测试与三组发版门禁结果（预 RC，实机线未最终合入）
 
-- **全量自动化测试（`Oracle-Batam-arm` 原生 ARM64/armhf，基于提交 `24bb83b`）**：
+- **全量自动化测试（`Oracle-Batam-arm` 原生 ARM64/armhf，基于提交 `6e1b4be`）**：
   - Go 静态检查与竞态单测：`gofmt -l .`（0 差异）、`go vet ./...`（PASS）、`go test -race ./...`（22 个有测试的 Go 包全部 PASS）；
   - 系统 overlay 测试：`bash tests/test_rootfs_overlay.sh` → `PASS: 20 tests (mocked storage and hardware; no privileged operations)`；
   - 二代机沙箱验收：
     - `JC11S_ROOTFS=/var/tmp/integ5304-jc11s/rootfs bash tools/az01-packer/test_sclive4_bootstrap.sh`（官方 `PRIME4PLUS-5.3.0-Update.img` SHA-256 `bf5489d1...`）→ `=== All SCLIVE4 verification checks PASSED ===` 及 `=== All PRIME4PLUS verification checks PASSED ===`（`JC11S stock mkfs (blank/existing) and fscrypt first boot: PASS`，20 处补丁，UI 包加载）；
     - `AZ04=1 bash tools/az01-packer/test_sclive4_bootstrap.sh` → `=== All PRIME4G2 verification checks PASSED ===`（18 处补丁，UI 包加载）；
   - Python 打包器与分轨单测：
-    - `python3 -m unittest discover -s tools/az01-packer` → `Ran 204 tests in 75.105s / OK (skipped=1)`（含 `test_ui_mod.py` 全部 100 项 PASS）；
-    - `python3 -m unittest discover -s tools/stems` → `Ran 9 tests in 3.261s / OK`；
+    - `python3 -m unittest discover -s tools/az01-packer` → `Ran 206 tests in 60.060s / OK (skipped=1)`（含 `test_ui_mod.py` 全部 102 项 PASS，覆盖 `PatchDict` 防覆盖检查与 `ArtistSong.qml` 双线替换合并）；
+    - `python3 -m unittest discover -s tools/stems` → `Ran 9 tests in 2.371s / OK`；
   - C 运行时与 DSP / FX 选择器单测：
     - `bash tools/ui-mod/test_fx_selector.sh` → `test_pioneer_selector`（plain/asan/tsan PASS）、`test_dsp_smooth`（plain/asan/tsan PASS）、`test_flanger_scope armhf PASS`、`test_master_golden`（AZ04/armhf fast/off PASS）；
     - `bash tools/az01-packer/test_fx_selector_sandbox.sh`（`test_fx_selector_native.c`）→ `FXNATIVE offline-driver|PASS`、`FXCONFIG legacy-master-bypass-and-migration|PASS`；
@@ -84,44 +84,44 @@
 
 ## 4. 预 RC 构建产物与 SHA-256 校验表（预 RC，实机线未最终合入）
 
-- **构建提交**：`24bb83b`（分支 `agent/integration-5304-20261111`，预 RC，实机线未最终合入；`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）
-- **产物目录**：`/var/tmp/sc5000-rc5304-pre-24bb83b`
+- **构建提交**：`6e1b4be`（分支 `agent/integration-5304-20261111`，预 RC，实机线未最终合入；`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）
+- **产物目录**：`/var/tmp/sc5000-rc5304-pre-6e1b4be`（上一版预 RC `/var/tmp/sc5000-rc5304-pre-24bb83b` 同步保留供实机验收）
 - **回滚点**：`v5.3.0.3`（tag `cd789f8`，构建提交 `b941ea4`）
 
 ### 一代机型完整固件（`*-Update.img`）
 
 | 镜像组 | 机型 | 板号 | 文件名 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `e16d57a9eecefb8152c1291f704d8134d55ae8c626bfec75c9177e610ab32e90` |
-| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `e16d57a9eecefb8152c1291f704d8134d55ae8c626bfec75c9177e610ab32e90` |
-| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `e16d57a9eecefb8152c1291f704d8134d55ae8c626bfec75c9177e610ab32e90` |
-| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `92f2d6fdd959207cc598256ca286c6aa95b0000df5f152efcbe95017e3d5f88b` |
-| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `92f2d6fdd959207cc598256ca286c6aa95b0000df5f152efcbe95017e3d5f88b` |
-| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `9be8c620940f3334ed2bf9e1ce7518d24faf0c5248a7d4f62ccadb7321e806e8` |
-| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `9be8c620940f3334ed2bf9e1ce7518d24faf0c5248a7d4f62ccadb7321e806e8` |
-| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `9be8c620940f3334ed2bf9e1ce7518d24faf0c5248a7d4f62ccadb7321e806e8` |
+| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `b7580fb31f0c1b7cb24cfd728e174ec43fdb328600de99b17bc14eef81d992b6` |
+| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `b7580fb31f0c1b7cb24cfd728e174ec43fdb328600de99b17bc14eef81d992b6` |
+| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `b7580fb31f0c1b7cb24cfd728e174ec43fdb328600de99b17bc14eef81d992b6` |
+| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `2b1d05aae7395bc3ded0253d6620b9a3be1b4f583a7a74c2dcd979a68f99d52b` |
+| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `2b1d05aae7395bc3ded0253d6620b9a3be1b4f583a7a74c2dcd979a68f99d52b` |
+| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `fc03739b48c6e1eb4c7726c5dc01b94fe96116767c616d5c9d99baa08d559d7d` |
+| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `fc03739b48c6e1eb4c7726c5dc01b94fe96116767c616d5c9d99baa08d559d7d` |
+| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `fc03739b48c6e1eb4c7726c5dc01b94fe96116767c616d5c9d99baa08d559d7d` |
 
 ### 二代机型 `/data` 数据包（`*-Data-Bundle.tar.gz`，Beta）
 
 | 架构组 | 机型 | 板号 | 文件名 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `10abc99644e909497a56972c5eb2659658e28ee10629d1033a8d4ecd569a2788` |
-| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `288f55afcf40f13bc207ff694528ee4a13db3470d13ffa60053ee12007c6066d` |
-| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `c702587cffbf8b49a5fb72bdd56e9de35ae02b40b55fe0081893824537168958` |
-| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `f8aeb53f670746e91d4d4344bccc565cd65e9798f99e625d209630f86d692825` |
-| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `507a1912287e06b73fe6d22b2401ccad1ddfba213154c94a17972157aed16e2c` |
-| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `bd7b52e3e00faa80ea3923c3673cafd2126b7f20877bb65cfda62f3faa88af44` |
-| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `2b785f276b0e2b835f344095647a89fe4939f062baae59f12d0fe4e3330b1969` |
-| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `d857e8d1f0b41e9291590cd4b9c773c02b8a0195dadd941b329a5e050ad31610` |
+| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `0fa1e9668168a61e990ad9e84a1f82b1b9da8ea20b1ea790bf96a90c0753e93f` |
+| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `69ad7989ee1995f3eea4e08bd7a401085b82680f44282e62132d068fd9662c9d` |
+| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `82b9d28e06af8df11551390631c7bdd9cd6a3269b111d1dec60e553a2c7ba6d0` |
+| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `624615a9db8e8cfaa46a59461198f8e58d9392cb4b187809f32b87557c267a4f` |
+| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `28e89857d5d438f051fa4448b217fc0cb38cee25f33588d1444517ac40a9288c` |
+| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `643c689944f8b83fb6246c35dca917186c532a8a136170175acdb0aefcd9cef2` |
+| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `28d3542accbfbaeb029064a4fab1e0b4c214621f6dabaff16eec9811507dce6c` |
+| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `05ceb7a24e99ab1ebcd096baebb29e97547816e7e7780ffa4574f51ba47a1c27` |
 
 ### 跨平台一键安装器（`EngineX-Installer`）
 
 | 平台 | 文件名 | SHA-256 |
 | --- | --- | --- |
-| Windows 10/11 x64 | `EngineX-Installer-5.3.0.4-windows-amd64.zip` | `18e47a077ae1262a97332f231b40d1ea58a31193a7f18b7b427b5c1f1068b84a` |
-| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.4-macos-arm64.zip` | `a257d082a024eba802d31f5200403c52acc4ca2bb84a29940b553a2514998634` |
-| macOS Intel | `EngineX-Installer-5.3.0.4-macos-amd64.zip` | `086a1e8eb55a0c4bee311274ad1f2e9a1c27570135b7d046cbd62c29b06d7064` |
-| Linux x86_64 | `EngineX-Installer-5.3.0.4-linux-amd64.tar.gz` | `ce65f32f1e6e5b1d68fd2721e4ac6575dcda084927599269e16f18cd202b95b4` |
+| Windows 10/11 x64 | `EngineX-Installer-5.3.0.4-windows-amd64.zip` | `381dda97841f834c2fbd4b80c4c5d3d36b53034fc3e6c5989b6598c577387541` |
+| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.4-macos-arm64.zip` | `f4a8946d384bf3c1c0a130a92ecebf0904ea6124b35761a659251b067da2ef62` |
+| macOS Intel | `EngineX-Installer-5.3.0.4-macos-amd64.zip` | `a5c861d5de874972422451982855cb0d0c690bc460a75ef081a9a69f43be720a` |
+| Linux x86_64 | `EngineX-Installer-5.3.0.4-linux-amd64.tar.gz` | `0c9fbf1bc70611a64327cc7039cfd9dfdc85df637f8edb7435490d2d5cf40376` |
 
 ---
 
