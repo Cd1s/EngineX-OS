@@ -79,7 +79,8 @@ func TestShadowLegacyFileFollowsSourceKey(t *testing.T) {
 		if len(out) != 1 || out[0].Deck != 1 {
 			t.Fatalf("compose: %+v", out)
 		}
-		if out[0].Key != "" || out[0].Net != "" || out[0].Title != "Same" || out[0].DurationMS != 1000 {
+		// Key is the display data's (the cover while loading), never the source's own.
+		if len(out[0].Key) != 16 || out[0].Ext != "" || out[0].Net != "" || out[0].Title != "Same" || out[0].DurationMS != 1000 {
 			t.Fatalf("what the QML compares: %+v", out[0])
 		}
 		return out[0]

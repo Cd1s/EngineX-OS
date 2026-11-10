@@ -217,6 +217,16 @@ func TestFetchTrackCopiesOneTrack(t *testing.T) {
 	if _, err := prolink.FetchTrack(t.Context(), c, 3, 999, dir); err == nil {
 		t.Fatal("unknown track fetched")
 	}
+	// A copy tells how far it is: every report carries the file's size, the last one all of it.
+	var done, total int64
+	if _, err := prolink.FetchTrack(t.Context(), c, 3, 2, t.TempDir(), func(d, n int64) {
+		if d <= done || n != int64(len(want)) {
+			t.Errorf("progress %d of %d after %d, file is %d", d, n, done, len(want))
+		}
+		done, total = d, n
+	}); err != nil || done != int64(len(want)) || total != done {
+		t.Fatalf("progress ended at %d of %d, file is %d: %v", done, total, len(want), err)
+	}
 }
 
 func TestMediaCacheSameTrackIDDiscSwap(t *testing.T) {

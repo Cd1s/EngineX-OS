@@ -57,13 +57,13 @@ func TestSourceEnvelopeCompletesWithoutChangingSavedGrid(t *testing.T) {
 	defer s.Close()
 	s.shadow.mediaRoot = filepath.Dir(root)
 	s.shadow.own = []deckState{{Deck: 1, Key: "source-a", Path: path}}
-	a, err := s.sourceDisplayAsset(context.Background(), path, "source-a")
+	a, err := s.sourceDisplayAsset(context.Background(), path, "source-a", true)
 	if err != nil || !a.DetailPending || a.Detail {
 		t.Fatalf("initial overview: %v %+v", err, a)
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		a, err = s.sourceDisplayAsset(context.Background(), path, "source-a")
+		a, err = s.sourceDisplayAsset(context.Background(), path, "source-a", true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -150,7 +150,7 @@ func TestSourceEnvelopeKeepsPCMScale(t *testing.T) {
 	s.shadow.own = []deckState{{Deck: 1, Key: "source-a", Path: path}}
 	var a *shadowDisplayAsset
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		if a, err = s.sourceDisplayAsset(context.Background(), path, "source-a"); err != nil {
+		if a, err = s.sourceDisplayAsset(context.Background(), path, "source-a", true); err != nil {
 			t.Fatal(err)
 		}
 		if !a.DetailPending {

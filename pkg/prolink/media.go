@@ -482,7 +482,8 @@ func (r mediaReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // copy already in dir is reused.
 // shortcut: the copy is keyed by host, slot and track id, so a different stick
 // in the same slot with the same id reuses a stale copy until dir is cleared.
-func FetchTrack(ctx context.Context, c *NFSClient, slot byte, id uint32, dir string) (string, error) {
+// progress, when given, hears the bytes copied so far and the file's size.
+func FetchTrack(ctx context.Context, c *NFSClient, slot byte, id uint32, dir string, progress ...func(done, total int64)) (string, error) {
 	export, t, err := fetchTrackRow(ctx, c, slot, id)
 	if err != nil {
 		return "", err
@@ -509,7 +510,11 @@ func FetchTrack(ctx context.Context, c *NFSClient, slot byte, id uint32, dir str
 		return "", err
 	}
 	defer os.Remove(f.Name())
-	_, err = c.FetchTo(ctx, export, "/"+filepath.ToSlash(rel), f, maxAudio)
+	var w io.Writer = f
+	if len(progress) > 0 && progress[0] != nil {
+		w = &fetchProgress{w: f, report: progress[0]}
+	}
+	_, err = c.FetchTo(ctx, export, "/"+filepath.ToSlash(rel), w, maxAudio)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
@@ -517,6 +522,20 @@ func FetchTrack(ctx context.Context, c *NFSClient, slot byte, id uint32, dir str
 		return "", err
 	}
 	return local, os.Rename(f.Name(), local)
+}
+
+// fetchProgress is FetchTrack's writer: FetchTo tells it the file's size.
+type fetchProgress struct {
+	w           io.Writer
+	report      func(done, total int64)
+	done, total int64
+}
+
+func (p *fetchProgress) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	p.done += int64(n)
+	p.report(p.done, p.total)
+	return n, err
 }
 
 // fetchTrackRow reads track id's row from the export.pdb on a player's slot.
