@@ -588,6 +588,68 @@ assert.strictEqual(evalIsLead({{ master: false }}), false);
             res_f4 = subprocess.run(["node", "-e", f4_js], capture_output=True, text=True)
             self.assertEqual(res_f4.returncode, 0, res_f4.stderr)
 
+    def test_display_only_shadow_lane_and_overview_match_stock(self):
+        layer = bp.SHADOW_LAYER
+        for item in (
+            'readonly property real pitchRate: wave && sample ? Math.max(0.05, 1 + (Number(sample.pitch) || 0) / 100) : 1',
+            'readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000) * pitchRate',
+            'id: scOverviewStrip',
+            'yStretch: scDisplay.half ? (scDisplay.rgb ? @RGB_SCALE@ : @BANDS_SCALE@) : 1',
+            'transform: Scale { origin.y: scOverviewStrip.height; yScale: scOverviewStrip.yStretch }',
+            'objectName: "Deck_WaveformOverview_TimeBar"',
+            'z: bar ? 1 : -1',
+            'color: scBeat.bar ? Style.error01Color : Style.gridlinesColor',
+            'color: Style.icon01Color',
+            'color: Style.font02Color; style: Text.Outline; styleColor: Style.surface01Color; font.pixelSize: 15; font.weight: Font.Medium',
+            'id: scSavedLoop',
+            'id: scActiveLoop',
+            'objectName: "Deck_Waveform_ActiveLoop"',
+            'scActiveLoop.loopOn ? Style.loopActiveColor : Style.loopInactiveColor',
+            'objectName: "HotCueTriangle"',
+            'objectName: "HotCueLabel"',
+            'Qt.resolvedUrl("./img/cue.png")',
+            'Qt.resolvedUrl("./img/icon_cue.png")',
+            'Qt.resolvedUrl("./img/loopin.png")',
+            'Qt.resolvedUrl("./img/loopout.png")',
+            'objectName: "Deck_Shadow_SlipNowLine"',
+        ):
+            self.assertIn(item, layer)
+        # Item 15: DeckTabs keeps stock activeDeck and uses greyOut for locked shadow decks
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            tabs_patches = bp.edits(False)["Skins/EngineOS/UI/CompositeControls/Decks/DeckTabs.qml"]
+        finally:
+            bp.ROOT = old_root
+        self.assertFalse(any("activeDeck:" in old for old, _ in tabs_patches))
+        self.assertTrue(any("greyOut:" in old and "root.scDeckLocked" in new for old, new in tabs_patches))
+        if shutil.which("node"):
+            ShadowDisplayTest.js(self, r"""
+// Item 12: active/inactive loop and slip ghost position survive Go's deckState.Cues round-trip
+scFourDeckRole = '13';
+scShadowApplyDisplay([{deck: 2, key: 'k1', positionMs: 22500, at: now, cues: [{i: 1, p: 44100, n: 'DROP', c: '#ff8800'}, {i: -1, p: 22500, n: '24375', c: ''}, {i: -3, p: 21000, n: '', c: ''}]}]);
+let s = scShadowData(2);
+assert.equal(s.loopOn, true);
+assert.equal(s.loopInMs, 22500);
+assert.equal(s.loopOutMs, 24375);
+assert.equal(s.slip, true);
+assert.equal(s.slipMs, 21000);
+// Inactive loop (i: -2) updates loopOn to false while keeping loop bounds
+scShadowApplyDisplay([{deck: 2, key: 'k1', positionMs: 22500, at: now, cues: [{i: 1, p: 44100, n: 'DROP', c: '#ff8800'}, {i: -2, p: 22500, n: '24375', c: ''}]}]);
+s = scShadowData(2);
+assert.equal(s.loopOn, false);
+assert.equal(s.loopInMs, 22500);
+assert.equal(s.loopOutMs, 24375);
+assert.equal(s.slip, false);
+// Auto/Engine mode: scShadowLeadMask tracks d.Lead even when Go cleared d.Master
+globalThis.scShadowApply = () => {};
+globalThis.scShadowEmpty = () => {};
+scShadowApplyAll([{deck: 2, path: '/a.wav', master: false, lead: true}], false);
+assert.equal((scShadowLeadMask >> 2) & 1, 1);
+scShadowApplyAll([{deck: 2, path: '/a.wav', master: false, lead: false}], false);
+assert.equal((scShadowLeadMask >> 2) & 1, 0);
+""")
+
 @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
 class ShadowDisplayTest(unittest.TestCase):
     """Run the actual QML JS functions with a fake clock and an Engine that rejects all access."""
@@ -595,7 +657,7 @@ class ShadowDisplayTest(unittest.TestCase):
     def js(self, body):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
-                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
+                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowLoopSlip", "scShadowSameSample", "scShadowApplyDisplay", "scShadowCovers", "scShadowBusy", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
@@ -616,7 +678,7 @@ let now = 10000;
 Date.now = () => now;
 globalThis.root = globalThis;
 Object.assign(globalThis, {
-    scFourDeckRole: '13', scPlayer: true, scShadowDisplayOnly: true, scShadowEngineMask: 0, scShadowLineMask: 0,
+    scFourDeckRole: '13', scPlayer: true, scShadowDisplayOnly: true, scShadowEngineMask: 0, scShadowLineMask: 0, scShadowLeadMask: 0,
     scShadowExpiryMs: 3000, scShadowAt: {}, scShadowDisplay: {}, scShadowEmptyArray: [],
     scShadowDisplayRequests: {}, scShadowDisplayText: {}, scShadowGridCache: {}, scShadowLiveCueCache: {},
     scShadowCdjMaster: false, scPressQueue: [], scShadowEmptyObject: {},
@@ -1657,7 +1719,7 @@ assert.equal(scShadowData(2).rate,1.031028);
         self.assertIn('color: wave ? "black" : "#101114"', layer)
         # Stock grid: edge ticks on every beat; only a bar has the line and its number.
         self.assertNotIn("0.55 : 0.22", layer)
-        self.assertIn('Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: "#b7b7b7" }', layer)
+        self.assertIn('Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: Style.icon01Color }', layer)
         self.assertIn('text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""', layer)
 
     def test_shadow_layer_restores_the_stock_visible_binding_not_a_value(self):

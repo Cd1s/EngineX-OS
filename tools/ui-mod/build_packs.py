@@ -354,6 +354,7 @@ SERVICES_MAIN = """
 	property int scShadowLineMask: 0 // Engine mode on a console: bit N = a CDJ is on Deck N's Line In, where only the display renderer draws its waveform
 	property bool scShadowDisplayOnly: true // the /shadow response is authoritative; missing means the safe default. What a deck without its own displayOnly follows
 	property int scShadowEngineMask: 0 // per slot: bit N = Deck N goes through Engine (load, seek, speed); clear = the display renderer draws it and Engine is left alone
+	property int scShadowLeadMask: 0 // Engine mode: bit N = source of shadow Deck N is LEAD (d.Lead), even when Go cleared d.Master on standalone players
 	property var scShadowDisplay: ({})
 	property var scShadowDisplayRequests: ({})
 	property var scShadowGridCache: ({})
@@ -562,14 +563,26 @@ SERVICES_MAIN = """
 	// True when e shows exactly what s shows: the peer's 500 ms heartbeats and
 	// steady playback then only move the extrapolation anchor (read imperatively
 	// by the displays) instead of re-running every shadow binding per reply.
+	function scShadowLoopSlip(e) {
+		let loopOn = !!e.loopOn, loopInMs = Number(e.loopInMs) || 0, loopOutMs = Number(e.loopOutMs) || 0, slip = !!e.slip, slipMs = Number(e.slipMs) || 0
+		if (Array.isArray(e.cues)) for (let i = 0; i < e.cues.length; i++) {
+			const c = e.cues[i]
+			if (!c) continue
+			if ((c.i === -1 || c.i === -2) && !(loopOutMs > loopInMs)) { loopOn = c.i === -1; loopInMs = Number(c.p) || 0; loopOutMs = Number(c.n) || 0 }
+			else if (c.i === -3 && !slip) { slip = true; slipMs = Number(c.p) || 0 }
+		}
+		return {loopOn: loopOn, loopInMs: loopInMs, loopOutMs: loopOutMs, slip: slip, slipMs: slipMs}
+	}
 	function scShadowSameSample(s, key, e) {
+		const ls = scShadowLoopSlip(e)
 		if (s.key !== key || s.name !== (e.name || "") || s.title !== (e.title || "") || s.artist !== (e.artist || "") || s.keyName !== (e.keyName || "") ||
 			s.playing !== !!e.playing || s.stale !== !!e.stale || s.metadataOnly !== !!e.metadataOnly || s.lineIn !== !!e.lineIn || s.pitch !== (Number(e.pitch) || 0) ||
 			s.cuePos !== (typeof e.cuePos === "number" ? e.cuePos : undefined) || s.master !== !!e.master ||
 			s.lead !== (e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master) || s.sync !== !!e.sync || s.keylock !== !!e.keylock ||
 			s.bpm !== (Number(e.bpm) || 0) || s.currentBpm !== (Number(e.currentBpm) || 0) || s.range !== (Number(e.range) || 0) ||
 			s.loading !== !!e.loading || s.displayDetail !== !!e.displayDetail || s.progress !== (Number(e.progress) || 0) || s.error !== (e.error || "") ||
-			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "")) return false
+			s.engine !== !!e.engine || s.copying !== !!e.copying || s.durationMs !== (Number(e.durationMs) || 0) || s.fallback !== (e.fallback || "") ||
+			s.loopOn !== ls.loopOn || s.loopInMs !== ls.loopInMs || s.loopOutMs !== ls.loopOutMs || s.slip !== ls.slip) return false
 		if (Array.isArray(e.cues)) {
 			const a = s.liveCues, b = e.cues
 			if (!Array.isArray(a) || a.length !== b.length) return false
@@ -591,6 +604,7 @@ SERVICES_MAIN = """
 				continue
 			}
 			const key = String(e.key || ""), pos = Number(e.positionMs) || 0, at = Number(e.at) || now
+			const ls = scShadowLoopSlip(e)
 			const same = !!old && scShadowSameSample(old, key, e)
 			if (same) {
 				// Same picture: a paused deck at the same spot, or a playing one within
@@ -598,7 +612,7 @@ SERVICES_MAIN = """
 				// Refresh the anchor in place well before the 3 s expiry.
 				const drift = old.playing ? old.positionMs + (at - old.at) * scShadowRate(old) - pos : old.positionMs - pos
 				if (Math.abs(drift) <= (old.playing ? 12 : 0)) {
-					old.positionMs = pos; old.at = at; old.rate = Number(e.rate) || 0; old.beat = Number(e.beat) || 0
+					old.positionMs = pos; old.at = at; old.rate = Number(e.rate) || 0; old.beat = Number(e.beat) || 0; old.slipMs = ls.slipMs
 					continue
 				}
 			}
@@ -609,6 +623,7 @@ SERVICES_MAIN = """
 				lead: e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master, sync: !!e.sync, keylock: !!e.keylock,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, currentBpm: Number(e.currentBpm) || 0, range: Number(e.range) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				jumps: Number(e.jumps) || 0,
+				loopOn: ls.loopOn, loopInMs: ls.loopInMs, loopOutMs: ls.loopOutMs, slip: ls.slip, slipMs: ls.slipMs,
 				progress: Number(e.progress) || 0, error: e.error || "", engine: !!e.engine, copying: !!e.copying, durationMs: Number(e.durationMs) || 0,
 				fallback: e.fallback || "",
 				meta: old && old.key === key ? old.meta : null,
@@ -1011,7 +1026,9 @@ SERVICES_MAIN = """
 			["cueLED", "/Track/CueLEDState"], ["master", "/DeckIsMaster"], ["sync", "/SyncMode"],
 			["beat", "/BeatNumber"], ["cuePosition", "/Track/CuePosition"], ["title", "/Track/SongName"],
 			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"],
-			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"], ["currentKey", "/Track/CurrentKey"]])
+			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"], ["currentKey", "/Track/CurrentKey"],
+			["loopOn", "/Track/LoopEnableState"], ["loopIn", "/Track/CurrentLoopInPosition"],
+			["loopOut", "/Track/CurrentLoopOutPosition"], ["slip", "/Track/SlipModeActive"], ["slipPos", "/Track/SlipModePosition"]])
 			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
 		p.cues = []
 		for (let i = 1; i <= 8; i++) {
@@ -1052,6 +1069,11 @@ SERVICES_MAIN = """
 			}
 			s.ps = !!g.play.state
 			s.posMs = sr > 0 ? g.position.unnormalized / sr * 1000 : 0
+			s.loopOn = !!g.loopOn.state
+			s.loopInMs = sr > 0 && g.loopIn.value > 0 ? Math.round(g.loopIn.value / sr * 1000) : 0
+			s.loopOutMs = sr > 0 && g.loopOut.value > g.loopIn.value ? Math.round(g.loopOut.value / sr * 1000) : 0
+			s.slip = !!g.slip.state
+			s.slipMs = s.slip && sr > 0 ? g.slipPos.unnormalized / sr * 1000 : 0
 			s.bpm = ob; s.currentBpm = cb; s.at = now; s.jumps = p ? p.jumps : 0
 			s.loaded = !!g.loaded.state
 			if (p && p.loaded === s.loaded && now - p.netAt < 500) { s.net = p.net; s.netAt = p.netAt }
@@ -1070,6 +1092,7 @@ SERVICES_MAIN = """
 				const expect = p.posMs + (p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0)
 				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
+				if (s.loopOn !== p.loopOn || s.loopInMs !== p.loopInMs || s.loopOutMs !== p.loopOutMs || s.slip !== p.slip) edge = true
 				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
 			}
 			if (s.cue) busy = true
@@ -1164,11 +1187,18 @@ SERVICES_MAIN = """
 			}
 			const o = own[n] || (own[n] = {})
 			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000)
-			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
+			let outCues = s.net ? cc.cues : null
+			if (outCues && (s.loopOutMs > s.loopInMs || s.slip)) {
+				outCues = outCues.slice()
+				if (s.loopOutMs > s.loopInMs) outCues.push({i: s.loopOn ? -1 : -2, p: s.loopInMs, n: String(s.loopOutMs), c: ""})
+				if (s.slip) outCues.push({i: -3, p: Math.round(s.slipMs), n: "", c: ""})
+			}
+			o.deck = d; o.net = s.net; o.cues = outCues; o.cuePos = s.net ? g.cuePosition.value : undefined
 			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.lead = s.master; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
+			o.loopOn = s.loopOn; o.loopInMs = s.loopInMs; o.loopOutMs = s.loopOutMs; o.slip = s.slip; o.slipMs = s.slipMs
 			// Titles arrive after the load: re-read on a new track and every 2 s.
 			if (fresh) {
 				o.title = s.net ? g.title.string || g.trackName.string || "" : ""
@@ -1189,7 +1219,7 @@ SERVICES_MAIN = """
 				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
-				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev) edge = true
+				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.loopOn !== o.loopOn || sent.loopInMs !== o.loopInMs || sent.loopOutMs !== o.loopOutMs || sent.slip !== o.slip || sent.cuesRev !== cc.rev) edge = true
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -1203,7 +1233,7 @@ SERVICES_MAIN = """
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
-			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
+			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.loopOn = o.loopOn; sent.loopInMs = o.loopInMs; sent.loopOutMs = o.loopOutMs; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
@@ -1289,22 +1319,25 @@ SERVICES_MAIN = """
 			scShadowCdjMaster = false // display flags must never suppress the real network master
 			scShadowLineMask = 0
 			scShadowEngineMask = 0
+			scShadowLeadMask = 0
 			scShadowApplyDisplay(decks)
 			return
 		}
 		// Per slot: a deck with displayOnly (a CDJ whose file Engine cannot have, or on
 		// a Line In channel) goes to the display renderer, the others (EngineX peers,
 		// CDJs playing from a stick) through Engine. Both work side by side.
-		let mask = 30, lineMask = 0, master = false
+		let mask = 30, lineMask = 0, leadMask = 0, master = false
 		for (const e of decks) {
 			if (e.displayOnly === true) mask &= ~(1 << e.deck)
 			else {
 				if (e.lineIn) lineMask |= 1 << e.deck
+				if (e.lead !== undefined && e.lead !== null ? !!e.lead : !!e.master) leadMask |= 1 << e.deck
 				if (e.master) master = true // display flags must never suppress the real network master
 			}
 		}
 		scShadowEngineMask = mask
 		scShadowLineMask = lineMask
+		scShadowLeadMask = leadMask
 		root.scShadowCdjMaster = master
 		for (const e of decks) if (e.displayOnly !== true) root.scShadowApply(e)
 		scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks))) // the slots Engine holds are cleared there
@@ -3430,6 +3463,7 @@ SHADOW_LAYER = r"""
         property var cues: root.scShadowEmptyArray
         property var loops: root.scShadowEmptyArray
         property real position: 0
+        property real slipPos: -1
         property bool stale: false
         property var cueInfo: null
         property var grid: root.scShadowEmptyArray
@@ -3472,6 +3506,8 @@ SHADOW_LAYER = r"""
             if (pos !== position) position = pos
             const st = !!s && (s.stale || now - Math.max(s.at, root.scShadowLive.seen) >= root.scShadowExpiryMs)
             if (st !== stale) stale = st
+            const sp = s && s.slip ? Math.max(0, (Number(s.slipMs) || 0) + (s.playing && !st ? Math.max(0, Math.min(now, Math.max(s.at, root.scShadowLive.seen) + root.scShadowExpiryMs) - s.at) * root.scShadowRate(s) : 0)) : -1
+            if (typeof slipPos !== "undefined" && sp !== slipPos) slipPos = sp
             if (!wave) return
             const end = metaDuration(meta)
             const speed = live && visible && s && s.playing && !st && pos < end ? root.scShadowRate(s) : 0
@@ -3548,7 +3584,8 @@ SHADOW_LAYER = r"""
         Timer { interval: 200; repeat: true; running: scDisplay.live && scDisplay.visible && scDisplay.sample !== null && scDisplay.sample.playing && !scDisplay.sample.stale; onTriggered: { scDisplay.refreshPosition(true); scDisplay.refreshDetails() } }
         readonly property real duration: metaDuration(meta)
         readonly property real waveformDuration: metaWaveDuration(meta)
-        readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000)
+        readonly property real pitchRate: wave && sample ? Math.max(0.05, 1 + (Number(sample.pitch) || 0) / 100) : 1
+        readonly property real span: overview ? duration : Math.max(1000, (root.scZoomProp && root.scZoomProp.translator ? root.scZoomProp.translator.unnormalized : 8) * 1000) * pitchRate
         // The lane keeps the stock playhead setting (WaveFormItem.zeroPosition, fed
         // from /Client/Preferences/PlayheadPosition): same line as the local lanes.
         readonly property real playhead: "@KIND@" === "overview" ? position / duration : wave && owner.zeroPosition > 0 && owner.zeroPosition < 1 ? owner.zeroPosition : 0.5
@@ -3645,7 +3682,7 @@ SHADOW_LAYER = r"""
         clip: true
         visible: active && inheritedVisible && owner.width > 0 && owner.height > 0
         color: wave ? "black" : "#101114" // the stock lanes are black: on grey the stock fade over the left edge shows as a band
-        Binding { target: scDisplay; property: "color"; value: "transparent"; when: !scDisplay.graphical; restoreMode: Binding.RestoreBindingOrValue }
+        Binding { target: scDisplay; property: "color"; value: scDisplay.overview ? Style.surface01Color : "transparent"; when: !scDisplay.wave; restoreMode: Binding.RestoreBindingOrValue }
         // Stock roots can hide an empty Engine slot. Restore their original bindings on exit;
         // never a value: read while the view was off screen, visible is false, and writing
         // that back hid the stock lane for good (Engine mode showed no waveform).
@@ -3670,8 +3707,8 @@ SHADOW_LAYER = r"""
                 width: scDisplay.width; height: scDisplay.height
                 sourceComponent: Component { Item {
         Image {
-            visible: scDisplay.graphical && source !== ""
-            source: scDisplay.graphical && !scDisplay.tiled && !(scDisplay.wave && scDisplay.sample && scDisplay.sample.engine) ? scDisplay.waveAsset(scDisplay.imageUrl) : "" // a covered Engine slot has the overview only: not stretched over the scrolling lane
+            visible: scDisplay.wave && source !== ""
+            source: scDisplay.wave && !scDisplay.tiled && !(scDisplay.sample && scDisplay.sample.engine) ? scDisplay.waveAsset(scDisplay.imageUrl) : "" // a covered Engine slot has the overview only: not stretched over the scrolling lane
             sourceSize.width: scDisplay.overview || !scDisplay.detailed ? 1024 : 2048
             sourceSize.height: scDisplay.overview || !scDisplay.detailed ? 64 : 128
             asynchronous: true
@@ -3706,19 +3743,45 @@ SHADOW_LAYER = r"""
             }
         }
         // Native overview: elapsed RGB is 60%; band mode uses the stock Past colors.
-        // This texture stays static; only the clipping width follows the playhead.
+        // Clipped into non-overlapping left (past) and right (remaining) strips over the
+        // 30 px height above timeBar, with the stock 2.2x / 1.3x bottom-anchored scale (6c0e5ac).
         Item {
+            id: scOverviewStrip
             visible: scDisplay.overview
             clip: true
-            width: Math.max(0, Math.min(scDisplay.width, scDisplay.playhead * scDisplay.width))
-            height: scDisplay.height
-            Image {
-                source: scDisplay.overview ? scDisplay.waveAsset(scDisplay.imageUrl, true) : ""
-                sourceSize.width: 1024; sourceSize.height: 64
-                width: scDisplay.width; height: scDisplay.height
-                asynchronous: true; cache: false; smooth: true
-                fillMode: Image.Stretch
-                opacity: scDisplay.stale ? 0.55 : 1
+            width: scDisplay.width
+            height: Math.max(2, scDisplay.height - 2)
+            readonly property real splitX: Math.max(0, Math.min(scDisplay.width, scDisplay.playhead * scDisplay.width))
+            readonly property real yStretch: scDisplay.half ? (scDisplay.rgb ? @RGB_SCALE@ : @BANDS_SCALE@) : 1
+            Item {
+                width: scOverviewStrip.splitX
+                height: scOverviewStrip.height
+                clip: true
+                Image {
+                    source: scDisplay.overview ? scDisplay.waveAsset(scDisplay.imageUrl, true) : ""
+                    sourceSize.width: 1024; sourceSize.height: 64
+                    width: scDisplay.width; height: scOverviewStrip.height
+                    asynchronous: true; cache: false; smooth: true
+                    fillMode: Image.Stretch
+                    opacity: scDisplay.stale ? 0.55 : 1
+                    transform: Scale { origin.y: scOverviewStrip.height; yScale: scOverviewStrip.yStretch }
+                }
+            }
+            Item {
+                anchors.right: parent.right
+                width: Math.max(0, scDisplay.width - scOverviewStrip.splitX)
+                height: scOverviewStrip.height
+                clip: true
+                Image {
+                    anchors.right: parent.right
+                    source: scDisplay.overview ? scDisplay.waveAsset(scDisplay.imageUrl, false) : ""
+                    sourceSize.width: 1024; sourceSize.height: 64
+                    width: scDisplay.width; height: scOverviewStrip.height
+                    asynchronous: true; cache: false; smooth: true
+                    fillMode: Image.Stretch
+                    opacity: scDisplay.stale ? 0.55 : 1
+                    transform: Scale { origin.y: scOverviewStrip.height; yScale: scOverviewStrip.yStretch }
+                }
             }
         }
         // A fixed pool of grid lines: a new grid window (every half span of play)
@@ -3726,43 +3789,155 @@ SHADOW_LAYER = r"""
         // which was the main JS garbage of a playing shadow deck.
         Repeater {
             model: scDisplay.gridSlots
-            // The stock grid: a short grey tick at both edges on every beat; a bar
-            // has red ticks, a line between them and its number at the bottom left.
+            // The stock grid: a short grey tick at both edges on every beat (underneath
+            // the waveform, z: -1); a bar has red ticks, a line between them and its
+            // outlined number at the bottom left (on top of the waveform, z: 1).
             delegate: Item {
                 id: scBeat
                 required property int index
                 readonly property var beat: index < scDisplay.grid.length ? scDisplay.grid[index] : null
                 readonly property bool bar: beat !== null && beat.number % 4 === 0
                 visible: beat !== null
+                z: bar ? 1 : -1
                 x: beat ? scDisplay.screenX(beat.ms) - 2 : 0
                 width: 4; height: scDisplay.height
-                Rectangle { width: 4; height: 8; color: scBeat.bar ? "#ff4d4d" : "#636363" }
-                Rectangle { y: scBeat.height - 8; width: 4; height: 8; color: scBeat.bar ? "#ff4d4d" : "#636363" }
-                Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: "#b7b7b7" }
-                Text { textFormat: Text.PlainText; visible: scBeat.bar; anchors.right: scBeat.left; anchors.rightMargin: 5; anchors.bottom: scBeat.bottom; anchors.bottomMargin: 3; text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""; color: "white"; font.pixelSize: 15 }
+                Rectangle { width: 4; height: 8; color: scBeat.bar ? Style.error01Color : Style.gridlinesColor }
+                Rectangle { y: scBeat.height - 8; width: 4; height: 8; color: scBeat.bar ? Style.error01Color : Style.gridlinesColor }
+                Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: Style.icon01Color }
+                Text { textFormat: Text.PlainText; visible: scBeat.bar; anchors.right: scBeat.left; anchors.rightMargin: 5; anchors.bottom: scBeat.bottom; anchors.bottomMargin: 3; text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""; color: Style.font02Color; style: Text.Outline; styleColor: Style.surface01Color; font.pixelSize: 15; font.weight: Font.Medium }
             }
         }
         Repeater {
             model: scDisplay.loops
-            delegate: Rectangle {
+            delegate: Item {
+                id: scSavedLoop
                 required property var modelData
                 readonly property real clipLeft: scDisplay.screenX(modelData.startMs)
                 readonly property real clipRight: scDisplay.screenX(modelData.endMs)
+                readonly property color loopCol: modelData.c || "#26a6ff"
                 visible: clipRight > clipLeft
-                x: clipLeft; width: Math.max(0, clipRight - clipLeft); height: scDisplay.height
-                color: modelData.c || "#26a6ff"
-                opacity: 0.18
-                Text { textFormat: Text.PlainText; text: modelData.n || ""; color: "white"; font.pixelSize: 10; elide: Text.ElideRight; width: parent.width }
+                z: 2
+                x: clipLeft
+                width: Math.max(0, clipRight - clipLeft)
+                height: scDisplay.overview ? Math.max(2, scDisplay.height - 2) : 28
+                Rectangle {
+                    anchors.fill: parent
+                    color: scDisplay.overview ? scSavedLoop.loopCol : Qt.darker(scSavedLoop.loopCol, 1.25)
+                    opacity: scDisplay.overview ? 0.5 : 0.8
+                }
+                Rectangle { visible: scDisplay.wave; width: 2; height: parent.height; color: scSavedLoop.loopCol }
+                Rectangle { visible: scDisplay.wave; anchors.right: parent.right; width: 2; height: parent.height; color: scSavedLoop.loopCol }
+                Text {
+                    visible: scDisplay.wave && text.length > 0
+                    x: 4; y: 2
+                    textFormat: Text.PlainText
+                    text: modelData.n || ""
+                    color: Style.font02Color
+                    font.pixelSize: 17
+                    elide: Text.ElideRight
+                    width: Math.max(0, parent.width - 8)
+                    Rectangle { z: -1; anchors.fill: parent; anchors.margins: -2; color: Style.loopLabelBackgroundColor }
+                }
+            }
+        }
+        Item {
+            id: scActiveLoop
+            objectName: "Deck_Waveform_ActiveLoop"
+            readonly property real inMs: scDisplay.sample ? Number(scDisplay.sample.loopInMs) || 0 : 0
+            readonly property real outMs: scDisplay.sample ? Number(scDisplay.sample.loopOutMs) || 0 : 0
+            readonly property bool loopOn: !!(scDisplay.sample && scDisplay.sample.loopOn)
+            readonly property real clipLeft: scDisplay.screenX(inMs)
+            readonly property real clipRight: scDisplay.screenX(outMs)
+            visible: outMs > inMs && clipRight > clipLeft
+            z: 3
+            x: clipLeft
+            width: Math.max(0, clipRight - clipLeft)
+            height: scDisplay.overview ? Math.max(2, scDisplay.height - 2) : scDisplay.height
+            Rectangle {
+                anchors.fill: parent
+                color: scDisplay.overview ? Style.icon02Color : (scActiveLoop.loopOn ? Style.loopActiveColor : Style.loopInactiveColor)
+                opacity: scDisplay.overview ? (scActiveLoop.loopOn ? 0.35 : 0.2) : 1
+            }
+            Rectangle { visible: scDisplay.wave; width: 2; height: parent.height; color: Style.icon02Color }
+            Rectangle { visible: scDisplay.wave; anchors.right: parent.right; width: 2; height: parent.height; color: Style.icon02Color }
+            EngineXEmbedded.ColoredImage {
+                visible: scDisplay.wave
+                x: 2; anchors.bottom: parent.bottom
+                width: 16; height: src.width > 0 ? (src.height / src.width) * width : 12
+                source: scDisplay.wave ? Qt.resolvedUrl("./img/loopin.png") : ""
+                color: Style.icon02Color
+            }
+            EngineXEmbedded.ColoredImage {
+                visible: scDisplay.wave
+                anchors.right: parent.right; anchors.rightMargin: 2; anchors.bottom: parent.bottom
+                width: 16; height: src.width > 0 ? (src.height / src.width) * width : 12
+                source: scDisplay.wave ? Qt.resolvedUrl("./img/loopout.png") : ""
+                color: Style.icon02Color
             }
         }
         Repeater {
             model: scDisplay.cues
             delegate: Item {
+                id: scCueItem
                 required property var modelData
+                readonly property bool isMainCue: modelData.i === 0
+                readonly property color cueColor: isMainCue ? Style.icon02Color : (modelData.c || "#26a6ff")
+                readonly property string cueLabel: isMainCue ? "" : (modelData.n || "")
                 x: scDisplay.screenX(modelData.ms)
-                width: 2; height: scDisplay.height
-                Rectangle { anchors.fill: parent; color: modelData.c || "#26a6ff" }
-                Text { textFormat: Text.PlainText; visible: scDisplay.wave; x: 3; text: modelData.n || String(modelData.i); color: modelData.c || "#26a6ff"; font.pixelSize: 11 }
+                width: 0
+                height: scDisplay.overview ? Math.max(2, scDisplay.height - 2) : scDisplay.height
+                z: 4
+                EngineXEmbedded.ColoredImage {
+                    id: scCueUpper
+                    objectName: "HotCueTriangle"
+                    visible: scDisplay.wave
+                    anchors.top: parent.top
+                    anchors.horizontalCenter: parent.left
+                    source: scDisplay.wave ? Qt.resolvedUrl("./img/cue.png") : ""
+                    color: scCueItem.cueColor
+                }
+                Text {
+                    objectName: "HotCueLabel"
+                    visible: scDisplay.wave && text.length > 0
+                    anchors.right: scCueUpper.left
+                    anchors.top: parent.top
+                    textFormat: Text.PlainText
+                    text: scCueItem.cueLabel
+                    color: Style.font02Color
+                    font.pixelSize: 17
+                    Rectangle {
+                        z: -1
+                        anchors.fill: parent
+                        color: Style.surface01Color
+                    }
+                }
+                EngineXEmbedded.ColoredImage {
+                    objectName: "HotCueTriangle"
+                    visible: scDisplay.wave
+                    rotation: 180
+                    anchors.bottom: parent.bottom
+                    anchors.horizontalCenter: parent.left
+                    source: scDisplay.wave ? Qt.resolvedUrl("./img/cue.png") : ""
+                    color: scCueItem.cueColor
+                }
+                Rectangle {
+                    visible: scDisplay.overview
+                    anchors.horizontalCenter: parent.left
+                    anchors.horizontalCenterOffset: 0.5
+                    width: 3
+                    height: Math.max(0, parent.height - 2)
+                    color: scCueItem.cueColor
+                    antialiasing: true
+                }
+                EngineXEmbedded.ColoredImage {
+                    visible: scDisplay.overview
+                    anchors.bottom: parent.bottom
+                    anchors.horizontalCenter: parent.left
+                    source: scDisplay.overview ? Qt.resolvedUrl("./img/icon_cue.png") : ""
+                    color: scCueItem.cueColor
+                    scale: scDisplay.owner && scDisplay.owner.markerScale ? scDisplay.owner.markerScale : 0.75
+                    transformOrigin: Item.Bottom
+                }
             }
         }
                 } }
@@ -3781,10 +3956,22 @@ SHADOW_LAYER = r"""
             delegate: Rectangle {
                 required property int index
                 x: Math.max(0, Math.min(index * 60000 * scMinutes.step / scDisplay.duration * scDisplay.width - width, scDisplay.width - width))
-                y: scDisplay.height - height - 1
+                y: scDisplay.height - height - 3
                 width: 2; height: 6
                 color: scMinutes.step > 1 ? Style.active01Color : Style.icon02Color
             }
+        }
+        Rectangle {
+            objectName: "Deck_WaveformOverview_TimeBar"
+            visible: scDisplay.overview && !!scDisplay.sample && !scDisplay.sample.engine
+            readonly property var tv: typeof PlanckGUI !== "undefined" && PlanckGUI && PlanckGUI.views && PlanckGUI.views.timeInfoViewController && scDisplay.deck > 0 ? PlanckGUI.views.timeInfoViewController.timeInfoViews[scDisplay.deck - 1] : null
+            readonly property bool showElapsed: !!(tv && tv.flipped)
+            readonly property real nowX: Math.max(0, Math.min(scDisplay.playhead * scDisplay.width - 2, scDisplay.width - 4))
+            x: showElapsed ? 0 : Math.min(scDisplay.width, nowX + 5)
+            y: scDisplay.height - 2
+            width: Math.max(0, showElapsed ? nowX - 1 : scDisplay.width - x)
+            height: 2
+            color: Style.icon02Color
         }
         // Stock TrackEndFlashWarning: red flash on the overview when remaining time <= TrackEndWarningTime.
         Rectangle {
@@ -3801,9 +3988,21 @@ SHADOW_LAYER = r"""
             Behavior on opacity { OpacityAnimator { duration: 280 } }
         }
         Rectangle {
+            objectName: "Deck_Shadow_SlipNowLine"
+            visible: scDisplay.graphical && !!scDisplay.sample && !scDisplay.sample.engine && scDisplay.slipPos >= 0
+            x: scDisplay.overview ? Math.max(0, Math.min(scDisplay.width - width, scDisplay.slipPos / scDisplay.duration * scDisplay.width - 2)) : scDisplay.screenX(scDisplay.slipPos - scDisplay.start) - 2
+            width: 4; height: scDisplay.height
+            color: Style.active01Color
+        }
+        Rectangle {
             visible: scDisplay.graphical && !!scDisplay.sample && !scDisplay.sample.engine // a track on its way has no position yet
-            x: Math.max(0, Math.min(scDisplay.width - width, scDisplay.playhead * scDisplay.width))
-            width: 2; height: scDisplay.height; color: "white"
+            x: Math.max(0, Math.min(scDisplay.width - width, Math.round(scDisplay.playhead * scDisplay.width - width / 2)))
+            width: scDisplay.wave ? 6 : 4; height: scDisplay.height; color: scDisplay.wave ? Style.surface01Color : Style.icon02Color
+            Rectangle {
+                visible: scDisplay.wave
+                x: 1; width: 4; height: parent.height
+                color: Style.icon02Color
+            }
         }
         Text { textFormat: Text.PlainText;
             visible: !!scDisplay.sample
@@ -4296,7 +4495,7 @@ def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
         if kind not in ("waveform", "overview"):
             value = '"#000000"'
         palette.append(f"readonly property color {prop}: {value}")
-        past = three_band(f"waveform{band}PastColor", band, BAND_PAST) if kind == "overview" else '"#000000"'
+        past = three_band(f"waveform{band}PastColor", band, BAND_PAST) if kind in ("waveform", "overview") else '"#000000"'
         palette.append(f"readonly property color past{band}Color: {past}")
     # The stock overview RGB QSB hardcodes these same WaveFormItem defaults.
     for prop, native, default in (("saturation", "saturationRgbWave", 1.612), ("brightAmp", "brightAmpFactorRgbWave", 0.473), ("brightGain", "brightGainRgbWave", 2.405), ("brightFloor", "brightFloorRgbWave", 0.197)):
@@ -4309,7 +4508,7 @@ def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
         h_start = raw_layer.index("        Loader {\n            id: scHeaderLoader\n            active: scDisplay.live && !scDisplay.graphical\n")
         h_end = raw_layer.index("@BUSY@")
         raw_layer = raw_layer[:h_start] + raw_layer[h_end:]
-    layer = raw_layer.replace("@BUSY@", busy).replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette)).replace("@ICONS@", icons)
+    layer = raw_layer.replace("@BUSY@", busy).replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette)).replace("@ICONS@", icons).replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS))
     return text[:end] + layer + text[end:]
 
 
@@ -5311,6 +5510,10 @@ def edits(dev: bool):
             scaled.setdefault(bj + "Deck/DeckItem/" + item + ".qml", []).append((
                 f"        id: {text_id}\n", f"        id: {text_id}\n        fontSizeMode: Text.HorizontalFit\n        minimumPixelSize: 14\n" +
                 ("        rightPadding: 14\n" if item == "BeatJump" else "")))
+        scaled[ROOT + "Views/MainView/Components/JP07SyncIndicator.qml"] = [
+            ("    property bool isMaster: pDeckIsMaster.translator && pDeckIsMaster.translator.state\n",
+             '    property bool isMaster: (typeof root !== "undefined" && root && root.scDeckLocked && root.scDeckLocked(deckIndex) && ((root.scShadowEngineMask >> deckIndex) & 1) !== 0 && ((root.scShadowLeadMask >> deckIndex) & 1) !== 0) || (pDeckIsMaster.translator && pDeckIsMaster.translator.state)\n'),
+        ]
         # The shadow header feeds the stock formatter its own tempo; stock users keep stock defaults.
         scaled[ROOT + "Items/Bpm.qml"] = [
             ("    property alias fractionColor: fractionText.color\n",
@@ -5381,8 +5584,6 @@ def edits(dev: bool):
              "                const labels = beatGridEditor ? beatGridEditor.deckLabels() : []\n"
              "                const deck = l => { const m = viewController.getDeckTabViewModel(l); return m ? m.deckNumber : 0 }\n"
              f"                return {role} ? labels.slice().sort((a, b) => deck(a) - deck(b)) : labels\n"),
-            ("                    activeDeck: microDeckLoader.viewModel.activeDeck\n",
-             f"                    activeDeck: {role} ? !root.scDeckLocked(microDeckLoader.viewModel.deckNumber) : microDeckLoader.viewModel.activeDeck\n"),
             ("                    greyOut: !microDeckLoader.viewModel.activeDeck && !deckTabs.isTouchable\n",
              f"                    greyOut: {role} ? root.scDeckLocked(microDeckLoader.viewModel.deckNumber) : !microDeckLoader.viewModel.activeDeck && !deckTabs.isTouchable\n"),
         ]
