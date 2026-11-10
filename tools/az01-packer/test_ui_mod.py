@@ -224,7 +224,7 @@ class ShadowDisplayTest(unittest.TestCase):
     """Run the actual QML JS functions with a fake clock and an Engine that rejects all access."""
 
     def js(self, body):
-        names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowPosition",
+        names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
                  "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
@@ -599,7 +599,7 @@ JSON.parse=realParse;
         layer = bp.SHADOW_LAYER
         parts = []
         for name in ("contentX", "metaDuration", "metaWaveDuration", "metaTotalPixels", "metaTilePixels",
-                     "glideRun", "refreshSample", "refreshPosition", "restartScroll", "refreshDetails"):
+                     "refreshSample", "refreshPosition", "restartScroll", "refreshDetails"):
             m = re.search(r"(?m)^        function " + name + r"\(", layer)
             self.assertIsNotNone(m, name)
             line_end = layer.index("\n", m.start())
@@ -611,10 +611,8 @@ JSON.parse=realParse;
             if body.startswith("{"):
                 body = layer[m.start(1):layer.index("\n        }", m.start(1)) + 10].strip()
             parts.append("scope." + handler + " = function() " + (body if body.startswith("{") else "{ " + body + " }"))
-        glide = ("for (const [k, v] of Object.entries({scrollKey: '', scrollJumps: 0, glideFrom: 0, glideTo: 0, glideAt: 0, glideMs: 1, glide: {running: false, runs: [], "
-                 "stop() { this.running = false }, start() { this.running = true; this.runs.push({from: this.from, to: this.to, duration: this.duration}) }}})) "
-                 "if (!(k in scope)) scope[k] = v\n")
-        return glide + "with (scope) {\n" + "\n".join(parts) + "\n}\n"
+        keys = "for (const [k, v] of Object.entries({scrollKey: '', scrollJumps: 0})) if (!(k in scope)) scope[k] = v\n"
+        return keys + "with (scope) {\n" + "\n".join(parts) + "\n}\n"
 
     def test_detail_arriving_while_paused_draws_the_tiles_under_the_playhead(self):
         # QML runs onMetaChanged before the bindings that derive from meta (duration,
@@ -683,8 +681,10 @@ assert.equal(half(true,0),true); assert.equal(half(true,1),false); assert.equal(
     def test_shadow_layer_scroll_settle_and_grid_pool_behaviour(self):
         self.js(r"""
 const starts=[];
-const scroll={running:false,from:0,to:0,duration:0,stop(){this.running=false},start(){this.running=true;starts.push({from:this.from,to:this.to,duration:this.duration})}};
 const scMoving={x:0};
+// Qt: stop() writes the value on screen back to x; a run shows its first value one frame (17 ms) on.
+const scroll={running:false,from:0,to:0,duration:0,at:0,stop(){if(this.running)scMoving.x=this.from+(this.to-this.from)*Math.max(0,Math.min(1,(now-this.at-17)/this.duration));this.running=false},
+  start(){this.running=true;this.at=now;starts.push({from:this.from,to:this.to,duration:this.duration})}};
 const beats=[]; for(let i=0;i<660;i++) beats.push({ms:i*300,number:i}); // ~53 beats per window: not a power of two
 const meta={key:'A',durationMs:200000,waveformDurationMs:200000,beats,cues:[],loops:[],detail:true,waveformWidth:20480,tileWidth:2048,waveformTiles:Array(10).fill('/t.png')};
 let metaValue=null;
@@ -701,13 +701,14 @@ const sample=(pos,playing,extra)=>Object.assign({key:'A',meta,positionMs:pos,at:
 scope.sample=sample(10000,true); scope.refreshSample();
 assert.strictEqual(scope.meta,meta);
 assert.equal(starts.length,1); // one render-thread scroll to the end of the track
-assert.equal(starts[0].from,scope.contentX(10000)); assert.equal(starts[0].to,scope.contentX(200000)); assert.equal(starts[0].duration,190000);
+assert.equal(starts[0].from,scope.contentX(10017)); assert.equal(starts[0].to,scope.contentX(200000)); assert.equal(starts[0].duration,189983); // shown one frame on
 // Grid pool: power of two above the window's beats; tiles under the window only.
 assert(scope.grid.length>0 && scope.gridSlots>=scope.grid.length && (scope.gridSlots&(scope.gridSlots-1))===0 && scope.gridSlots>=32);
 assert.equal(scope.tileLo,0); assert.equal(scope.tileHi,Math.floor((6000+12000)/20000));
-now+=200; scope.refreshPosition(); assert.equal(starts.length,1); // on its line: keeps running
+now+=200; scope.refreshPosition(); assert.equal(starts.length,1); // same line: left to the 200 ms clock
 scope.sample=sample(10000+200+20,true,{jumps:1}); scope.refreshSample(); assert.equal(starts.length,2); // 20 ms off after a jump: restarted
-scope.sample=sample(10220,true,{pitch:8}); scope.refreshSample(); assert.equal(starts.length,3); // new speed: restarted
+scope.sample=sample(10220,true,{jumps:1,pitch:8}); scope.refreshSample(); assert.equal(starts.length,2); // new speed, no jump: the clock takes it up
+now+=200; scope.refreshPosition(true); assert.equal(starts.length,3); assert(scope.scrollSpeed>1.08&&scope.scrollSpeed<1.13); // 1.08 and the 16 ms it fell behind
 // CUE released back on its spot: a 1 ms settle to x, never a bare x write the write-back would undo.
 scope.sample=sample(10000,false); scope.refreshSample();
 const settle=starts[starts.length-1];
@@ -735,7 +736,8 @@ assert.strictEqual(scope.cueInfo,ci); assert.equal(asked,1);
         # No GUI-thread position animation; the content scrolls with one XAnimator.
         self.assertNotIn("NumberAnimation", layer)
         self.assertIn("XAnimator { id: scroll; target: scMoving", layer)
-        self.assertIn("XAnimator { id: glide; target: scGlide", layer)
+        self.assertNotIn("glide", layer.lower()) # the 200 ms clock steers the one scroll
+        self.assertIn("onTriggered: { scDisplay.refreshPosition(true); scDisplay.refreshDetails() }", layer)
         moving = layer[layer.index("id: scMoving"):layer.index("} // scMoving")]
         self.assertNotRegex(moving, r"(?m)^\s*x:\s*-?\s*scDisplay\.(start|position)")
         # Markers, loops and tiles sit in track coordinates: their x never depends on time.
@@ -1063,41 +1065,46 @@ class ShadowNudgeTest(unittest.TestCase):
     js = ShadowDisplayTest.js
     layer_js = ShadowDisplayTest.layer_js
 
-    def test_receiver_glides_over_a_slip_and_jumps_only_on_a_jump(self):
-        self.js(r"""
+    RECEIVER = r"""
 const starts=[];
-const scroll={running:false,from:0,to:0,duration:0,stop(){this.running=false},start(){this.running=true;starts.push({from:this.from,to:this.to,duration:this.duration})}};
 const scMoving={x:0};
-const meta={key:'A',durationMs:200000,waveformDurationMs:200000,beats:[],cues:[],loops:[],detail:true,waveformWidth:20480,tileWidth:2048,waveformTiles:Array(10).fill('/t.png')};
+// Qt: stop() writes the value on screen back to x; a run shows its first value one frame
+// (17 ms) on. `fast` is the Animator's clock against the wall clock.
+let fast=1;
+const scroll={running:false,from:0,to:0,duration:0,at:0,stop(){if(this.running)scMoving.x=this.from+(this.to-this.from)*Math.min(1,((now-this.at)*fast-17)/this.duration);this.running=false},
+  start(){this.running=true;this.at=now;starts.push({from:this.from,to:this.to,duration:this.duration})}};
+const meta={key:'A',durationMs:2000000,waveformDurationMs:2000000,beats:[],cues:[],loops:[],detail:true,waveformWidth:20480,tileWidth:2048,waveformTiles:Array(10).fill('/t.png')};
 const scope={live:true,visible:true,wave:true,overview:false,graphical:true,deck:2,sample:null,cues:scShadowEmptyArray,loops:scShadowEmptyArray,
-  position:0,stale:false,cueInfo:null,grid:scShadowEmptyArray,gridAnchor:-Infinity,gridSlots:0,tileLo:0,tileHi:31,scrollFrom:0,scrollAt:0,scrollSpeed:0,width:1000,
-  scroll,scMoving,root:globalThis,meta,duration:200000,waveformDuration:200000,span:8000,playhead:0.5,totalPixels:20480,tilePixels:2048,
+  position:0,stale:false,cueInfo:null,grid:scShadowEmptyArray,gridAnchor:-Infinity,gridSlots:0,tileLo:0,tileHi:31,scrollSpeed:0,width:1000,
+  scroll,scMoving,root:globalThis,meta,duration:2000000,waveformDuration:2000000,span:8000,playhead:0.5,totalPixels:20480,tilePixels:2048,
   get start(){return this.position-this.span*this.playhead}};
-""" + self.layer_js() + r"""
 const sample=(pos,extra)=>Object.assign({key:'A',meta,positionMs:pos,at:now,playing:true,pitch:0,jumps:0,stale:false},extra||{});
-const glides=scope.glide.runs;
-scope.sample=sample(10000); scope.refreshSample(); assert.equal(starts.length,1); assert.equal(glides.length,0);
-now+=200; scope.sample=sample(10200+12); scope.refreshSample(); assert.equal(starts.length,1); assert.equal(glides.length,0); // within 12 ms: nothing moves
-// 20 ms off (the peer's clock, a jog nudge): the scroll keeps running and the content glides there.
-scope.sample=sample(10200+20); scope.refreshSample(); assert.equal(starts.length,1);
-assert.equal(glides.length,1); assert.equal(glides[0].from,0); assert.equal(glides[0].to,-20/8000*1000); assert.equal(glides[0].duration,500);
-now+=100; scope.refreshPosition(); assert.equal(starts.length,1); assert.equal(glides.length,1); // on the glided line
-// 16 ms more 100 ms later: on from where the first glide is, in the time the slip took.
-scope.sample=sample(10300+20+16); scope.refreshSample(); assert.equal(starts.length,1);
-assert.equal(glides.length,2); assert.equal(glides[1].from,-4/8000*1000); assert.equal(glides[1].to,-36/8000*1000); assert.equal(glides[1].duration,100);
-// A brake glides back the same way.
-now+=300; scope.sample=sample(10600+36-30); scope.refreshSample(); assert.equal(starts.length,1);
-assert.equal(glides.length,3); assert.equal(glides[2].from,-36/8000*1000); assert.equal(glides[2].to,-6/8000*1000); assert.equal(glides[2].duration,300);
-// A jump (seek, hot cue, loop), another track or more than 300 ms: a fresh line, the glide back at 0.
-scope.sample=sample(10600+6+20,{jumps:1}); scope.refreshSample(); assert.equal(starts.length,2);
-assert.equal(starts[1].from,scope.contentX(10626)); assert.equal(glides.length,4); assert.equal(glides[3].to,0); assert.equal(glides[3].duration,1); assert.equal(scope.glideTo,0);
-scope.glide.running=false;
-scope.sample=sample(10626+301,{jumps:1}); scope.refreshSample(); assert.equal(starts.length,3); assert.equal(glides.length,4);
-scope.sample=sample(10927+20,{jumps:1,key:'B'}); scope.refreshSample(); assert.equal(starts.length,4); assert.equal(glides.length,4);
-// Paused while a glide runs: both settle.
-scope.sample=sample(10947+20,{jumps:1,key:'B'}); scope.refreshSample(); assert.equal(glides.length,5);
-scope.sample=sample(10967,{jumps:1,key:'B',playing:false}); scope.refreshSample();
-assert.equal(scope.scrollSpeed,0); assert.equal(glides.length,6); assert.equal(glides[5].to,0); assert.equal(glides[5].duration,1);
+const near=(a,b,d)=>assert(Math.abs(a-b)<=(d||0.001),a+' != '+b);
+// Track ms under the playhead on screen, without disturbing the run.
+const shown=()=>{const r=scroll.running,x=scMoving.x;scroll.stop();const ms=(scope.playhead-scMoving.x/scope.width)*scope.span;scroll.running=r;scMoving.x=x;return ms};
+"""
+
+    def test_receiver_steers_over_a_slip_and_jumps_only_on_a_jump(self):
+        self.js(self.RECEIVER + self.layer_js() + r"""
+scope.sample=sample(10000); scope.refreshSample(); assert.equal(starts.length,1); near(starts[0].from,scope.contentX(10017));
+// 20 ms off (the peer's clock, a jog nudge): the sample alone restarts nothing.
+now+=100; scope.sample=sample(10100+20); scope.refreshSample(); assert.equal(starts.length,1);
+// The clock goes on from what is shown, at the speed that closes the 20 ms in 0.4 s.
+now+=100; near(shown(),10200); scope.refreshPosition(true); assert.equal(starts.length,2);
+near(scope.scrollSpeed,1.05); near(starts[1].from,scope.contentX(10200+17*1.05)); near(starts[1].duration,Math.round((2000000-10200-17*1.05)/1.05));
+now+=200; near(shown(),10200+200*1.05); scope.refreshPosition(true); near(scope.scrollSpeed,1.025); // 10 ms left
+// A brake: back the same way, never backwards.
+scope.sample=sample(10420-30); scope.refreshSample(); now+=200; scope.refreshPosition(true); near(scope.scrollSpeed,1-(30-5)/400);
+scope.sample=sample(shown()-299); scope.refreshSample(); now+=200; scope.refreshPosition(true); assert(scope.scrollSpeed>=0.25&&scope.scrollSpeed<0.3);
+// More than 300 ms off, a jump (seek, hot cue, loop) or another track: a fresh line at once.
+let n=starts.length;
+scope.sample=sample(50000); scope.refreshSample(); assert.equal(starts.length,n); now+=200; scope.refreshPosition(true);
+assert.equal(starts.length,n+1); near(starts[n].from,scope.contentX(50200+17)); assert.equal(scope.scrollSpeed,1);
+scope.sample=sample(50220,{jumps:1}); scope.refreshSample(); assert.equal(starts.length,n+2); near(starts[n+1].from,scope.contentX(50220+17));
+scope.sample=sample(50240,{jumps:1,key:'B'}); scope.refreshSample(); assert.equal(starts.length,n+3); near(starts[n+2].from,scope.contentX(50240+17));
+// Paused: settles on the spot.
+scope.sample=sample(50260,{jumps:1,key:'B',playing:false}); scope.refreshSample();
+assert.equal(scope.scrollSpeed,0); assert.equal(starts[n+3].from,scope.contentX(50260)); assert.equal(starts[n+3].duration,1);
 """)
 
     SENDER = r"""
@@ -1142,6 +1149,25 @@ rate=0.95; run(2000); rate=1; run(2000);
 assert(bodies.length-n>=4); assert(shifts(n).every(s=>Math.abs(s)<22),'brake '+shifts(n));
 run(6000); n=bodies.length; const late=pos; now+=80; scShadowTick(); pos=late+80*48; run(3000);
 assert(bodies.length-n<=1,'a late position is not a slip'); assert(shifts(n).every(s=>Math.abs(s)<2),'late '+shifts(n));
+""")
+
+    def test_receiver_holds_the_line_on_a_fast_animation_clock(self):
+        # The players' panel runs at 59.34 Hz and Qt steps Animators by 1/59 s a frame:
+        # 0.57 % fast, 3.4 s in ten minutes of an unsteered scroll.
+        self.js(self.RECEIVER + self.layer_js() + r"""
+fast=1.0057;
+const t0=now, model=()=>10000+(now-t0)*1.0312;
+scope.sample=sample(10000,{pitch:3.12}); scope.refreshSample();
+let worst=0;
+for(let i=1;i<=3000;i++){ // ten minutes of the 200 ms clock
+    now+=200; scShadowLive.seen=now; // unchanged replies keep the sample alive
+    if(i%25===0){scope.sample=sample(model(),{pitch:3.12}); scope.refreshSample();} // a full reply every 5 s
+    scope.refreshPosition(true);
+    if(i===1500){scope.span=4000; scope.restartScroll(); near(shown(),model(),0.01);} // zoom: on the line at once
+    worst=Math.max(worst,Math.abs(shown()-model()));
+}
+assert(worst<3,'worst '+worst); near(shown(),model(),3); // minute 10 as minute 1
+assert.equal(starts.length,3002);
 """)
 
 
