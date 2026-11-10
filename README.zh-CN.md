@@ -100,6 +100,7 @@
 - **实体三段 EQ 旋钮 Stems 分轨控制与快捷键（#152）**：通过 `个人偏好 → 播放 → Stems EQ Mode` 或按各通道 **Shift + Cue (PFL)**，即可将该通道的实体 `HIGH / MID / LOW` 三段 EQ 旋钮切换为 **Stems Level**（`Vocal 人声`、`Melody + Bass 旋律+贝斯`、`Drums 鼓组`），内置原厂软接管（Soft Takeover）防跳变与屏幕提示；修复 PRIME 2 / PRIME 4 快速双击 `Hot Cue` 时 Stems 模式闪退回 Hot Cue 的问题；
 - **播放中按住浏览/缩放旋钮转动转盘防误入网格编辑（#157）**：曲目播放中按住 Browse/Zoom 旋钮（或 Slip/Vinyl）不再误触进入 BeatGrid Edit（此前会导致瞬间跳回 `00:00` 且 Play 键锁死），网格编辑激活时禁用转盘触摸；
 - **PRIME 4 / PRIME 4+ 与 SC5000 / SC6000 局域网跨机型四轨联动（#160）**：一体机与独立播放机均开放 `四轨波形显示` 与 `四轨角色`（`自动`、`1+3`、`2+4`、`1+2`、`3+4`、`1`、`2`），支持 PRIME 4 / PRIME 4+ 本机负责 1+2 轨、同时将局域网内 SC5000 / SC6000 的实时波形、热标与对拍映射至 3+4 影子轨；
+- **影子轨按来源选择显示方式（待实机验证）**：四轨布局下，来源是 EngineX 碟机的影子轨由 Engine 静音加载，用和本机轨道相同的原厂组件绘制；来源是 CDJ / Pro DJ Link 设备的影子轨显示 rekordbox 波形，不下载音频；两种可以同时出现。`设置 → 设备 → 影子轨模式`：`自动`（按来源，所有机型默认；一体机 Line In 显示 CDJ-3000 波形照旧）、`全部 Engine 模式`（所有来源都由 Engine 加载）、`全部 CDJ 模式`（都不加载曲目，即之前的显示式影子轨）。
 - **CDJ 显示式影子波形**：影子轨显示 CDJ 曲目已缓存的 rekordbox 波形、拍线与 Cue，不下载音频；没有分析数据时只显示元数据。PRIME 4 / PRIME 4+ / PRIME 4 G2、SC LIVE 4 开启 `4-Deck Waveform` 后，3、4 轨显示影子波形，保留本机 1、2 轨；没有对端的轨道仍可本机使用。
   自定义 rb-bridge `--media-cache` 时，WebUI 服务环境中的 `SC5000_PROLINK_MEDIA_CACHE` 必须指向同一目录；两者默认共用目录。关闭 `prolink_share` 也会停止读取显示缓存。
 - **修复流媒体下载后卡加载与“已从 Engine DJ 账号断开”报错（#159）**：为本地流媒体网关注入非 SSO 令牌并跳过 150 秒 Engine DJ Profile 等待，彻底解决流媒体曲目已下载落盘却无法加载上轨的问题；

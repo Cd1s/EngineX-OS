@@ -300,13 +300,15 @@ SERVICES_MAIN = """
 	// The board (device tree), not Config.device.isPlayer: the 4-deck layout turns a
 	// player into a non-player inside Engine (#49).
 	property bool scPlayer: false
-	function scDeckLocked(deck) { const isLine = !!(scShadowDisplay[deck] && scShadowDisplay[deck].lineIn); return scFourDeckRole !== "" && (isLine || scFourDeckRole.indexOf(String(deck)) < 0) && (scPlayer || (scShadowDisplayOnly ? !!scShadowData(deck) : !!(scShadowAt[deck] && scShadowAt[deck].path))) }
+	function scDeckLocked(deck) { const isLine = !!(scShadowDisplay[deck] && scShadowDisplay[deck].lineIn); return scFourDeckRole !== "" && (isLine || scFourDeckRole.indexOf(String(deck)) < 0) && (scPlayer || (((scShadowEngineMask >> deck) & 1) === 0 ? !!scShadowData(deck) : !!(scShadowAt[deck] && scShadowAt[deck].path))) }
 	// Swipe left loads the role's first deck, swipe right its second (0: stock).
 	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
 	property bool scFourDeckOn: false // the saved switch; Engine applies it on restart
 	property string scFourDeckRoleSetting: "auto"
-	property bool scShadowLegacyEngine: true // saved preference (default on: stock components draw the shadow deck); switching requires a manual Engine restart
-	property bool scShadowDisplayOnly: true // the /shadow response is authoritative; missing means the safe default
+	property string scShadowMode: "auto" // from /v1/sc5000/ui: auto (each slot by its source), engine or cdj (every source down one path)
+	property int scShadowLineMask: 0 // Engine mode on a console: bit N = a CDJ is on Deck N's Line In, where only the display renderer draws its waveform
+	property bool scShadowDisplayOnly: true // the /shadow response is authoritative; missing means the safe default. What a deck without its own displayOnly follows
+	property int scShadowEngineMask: 0 // per slot: bit N = Deck N goes through Engine (load, seek, speed); clear = the display renderer draws it and Engine is left alone
 	property var scShadowDisplay: ({})
 	property var scShadowDisplayRequests: ({})
 	property var scShadowGridCache: ({})
@@ -316,7 +318,7 @@ SERVICES_MAIN = """
 	// When stream-sync last confirmed the shadow state (an unchanged version counts):
 	// a plain object, so no binding re-evaluates on every long-poll reply.
 	readonly property var scShadowLive: ({seen: 0})
-	function scShadowVisible(d) { return d >= 1 && d <= 4 && scShadowDisplayOnly && scDeckLocked(d) }
+	function scShadowVisible(d) { return d >= 1 && d <= 4 && ((scShadowEngineMask >> d) & 1) === 0 && scDeckLocked(d) }
 	function scShadowDeckFor(item) {
 		// Stock skins put the deck on different wrappers (deckIndex / deckData / deckView).
 		for (let p = item; p; p = p.parent) {
@@ -451,11 +453,11 @@ SERVICES_MAIN = """
 	}
 	Timer {
 		interval: 200; repeat: true
-		running: root.scFourDeckRole !== "" && root.scShadowDisplayOnly && root.scShadowAnyPlaying(root.scShadowDisplay)
+		running: root.scFourDeckRole !== "" && root.scShadowEngineMask !== 30 && root.scShadowAnyPlaying(root.scShadowDisplay)
 		onTriggered: root.scShadowFrame = (root.scShadowFrame + 1) & 0xffff
 	}
 	Timer {
-		interval: 500; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowDisplayOnly
+		interval: 500; repeat: true; running: root.scFourDeckRole !== "" && root.scShadowEngineMask !== 30
 		onTriggered: {
 			for (let d = 1; d <= 4; d++) {
 				const s = root.scShadowData(d)
@@ -523,12 +525,12 @@ SERVICES_MAIN = """
 		}
 		return true
 	}
-	function scShadowApplyDisplay(decks) {
+	function scShadowApplyDisplay(decks, engineMask) { // engineMask: slots that are Engine's, cleared here
 		const now = Date.now()
 		let next = null // copied on the first real change only
 		for (let d = 1; d <= 4; d++) {
 			let e = null
-			for (let i = 0; i < decks.length; i++) if (Number(decks[i].deck) === d) { e = decks[i]; break }
+			if (((engineMask >> d) & 1) === 0) for (let i = 0; i < decks.length; i++) if (Number(decks[i].deck) === d) { e = decks[i]; break }
 			const old = scShadowData(d)
 			const isLine = !!(e && e.lineIn)
 			if (!e || scFourDeckRole === "" || (!isLine && scFourDeckRole.indexOf(String(d)) >= 0) || !(e.key || e.loading)) {
@@ -1184,20 +1186,32 @@ SERVICES_MAIN = """
 		if (scShadowDisplayOnly) {
 			// No Planck reads/writes or legacy helpers here, even when path is empty.
 			scShadowCdjMaster = false // display flags must never suppress the real network master
+			scShadowLineMask = 0
+			scShadowEngineMask = 0
 			scShadowApplyDisplay(decks)
 			return
 		}
-		scShadowDisplay = ({})
-		scShadowDisplayRequests = ({})
-		scShadowGridCache = ({})
-		scShadowLiveCueCache = ({})
-		root.scShadowCdjMaster = decks.some(e => e.master)
-		for (const e of decks) root.scShadowApply(e)
+		// Per slot, by its source: a deck with displayOnly (a CDJ) goes to the display
+		// renderer, the others (EngineX peers) through Engine. Both work side by side.
+		let mask = 30, lineMask = 0, master = false
+		for (const e of decks) {
+			if (e.displayOnly === true) mask &= ~(1 << e.deck)
+			else {
+				if (e.lineIn) lineMask |= 1 << e.deck
+				if (e.master) master = true // display flags must never suppress the real network master
+			}
+		}
+		scShadowEngineMask = mask
+		scShadowLineMask = lineMask
+		root.scShadowCdjMaster = master
+		scShadowApplyDisplay(decks, mask)
+		for (const e of decks) if (e.displayOnly !== true) root.scShadowApply(e)
 		const now = Date.now()
 		for (const d of [1, 2, 3, 4]) {
 			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
 			const e = decks.find(x => x.deck === d)
-			if (e && (e.path || e.loading)) { // loading: Go is still copying the track, wait for it
+			// A slot whose source became a CDJ falls through: scShadowEmpty unloads what Engine still holds.
+			if (e && e.displayOnly !== true && (e.path || e.loading)) { // loading: Go is still copying the track, wait for it
 				if (scShadowAt[d]) scShadowAt[d].emptyAt = 0
 				continue
 			}
@@ -1208,7 +1222,8 @@ SERVICES_MAIN = """
 	// shadow deck and, after 350 ms (one dropped update must not eject), unload it
 	// so no stale track or waveform stays, handing master back to our own deck.
 	function scShadowEmpty(d, now) {
-		if (scShadowDisplayOnly) return
+		// A display slot is Engine's business only while our own load is still on it.
+		if (scShadowDisplayOnly || (((scShadowEngineMask >> d) & 1) === 0 && !(scShadowAt[d] && scShadowAt[d].path))) return
 		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
 		// On an all-in-one console (#160), leave Decks 3/4 alone unless a shadow peer loaded them.
 		if (!root.scPlayer && !at.path) return
@@ -1229,8 +1244,8 @@ SERVICES_MAIN = """
 		delete scShadowAt[d]
 	}
 	function scShadowApply(e) {
-		if (scShadowDisplayOnly) return
 		const d = e.deck
+		if (((scShadowEngineMask >> d) & 1) === 0) return
 		if (scFourDeckRole.indexOf(String(d)) >= 0 || !e.path) return
 		const g = p => root.scTr("/Engine/Deck" + d + p)
 		const now = Date.now()
@@ -1386,7 +1401,7 @@ SERVICES_MAIN = """
 	// The shadow deck's fader at pitch percent: the SpeedRange (8 % by default) is
 	// widened first, or +11.1 % (a synced 126 BPM track at 140) stuck at +8 %.
 	function scShadowSpeed(d, pitch) {
-		if (scShadowDisplayOnly) return
+		if (((scShadowEngineMask >> d) & 1) === 0) return
 		const pRange = root.scTr("/Engine/Deck" + d + "/SpeedRange"), pSpeed = root.scTr("/Engine/Deck" + d + "/Speed")
 		if (!pRange || !pSpeed) return
 		let range = parseFloat(pRange.string) || 8
@@ -1420,7 +1435,7 @@ SERVICES_MAIN = """
 	// the pads, and stores them itself. Nothing else may write its m.db (it
 	// holds it with an exclusive lock and its own page cache; a write broke it).
 	function scShadowCues(d, at, e, now) {
-		if (scShadowDisplayOnly) return
+		if (((scShadowEngineMask >> d) & 1) === 0) return
 		if (!Array.isArray(e.cues)) return // a CDJ: no cues sent
 		const sig = JSON.stringify(e.cues) + "/" + e.cuePos
 		if (sig === at.cueSig && (at.cuePasses || 0) >= 2) return
@@ -1450,7 +1465,7 @@ SERVICES_MAIN = """
 	// press per check: Forward moves BeatNumber back by one (measured on a
 	// JP07). Part of a beat has no control short of the on-screen grid editor.
 	function scShadowBeat(d, at, e, drift, now) {
-		if (scShadowDisplayOnly) return
+		if (((scShadowEngineMask >> d) & 1) === 0) return
 		if ((at.beatTries || 0) >= 4 || !(e.bpm > 0) || e.beat === undefined || Math.abs(drift) > 15 || now < (at.beatAt || 0)) return
 		const local = (root.scTr("/Engine/Deck" + d + "/BeatNumber") || {}).unnormalized
 		if (local === undefined) return
@@ -1465,7 +1480,7 @@ SERVICES_MAIN = """
 		at.beatAt = now + 600
 	}
 	function scShadowSeek(d, at, ms) {
-		if (scShadowDisplayOnly) return
+		if (((scShadowEngineMask >> d) & 1) === 0) return
 		const g = p => root.scTr("/Engine/Deck" + d + p)
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!(sr > 0 && len > 0)) return
@@ -1479,7 +1494,7 @@ SERVICES_MAIN = """
 	// Register takes one path per event-loop turn: one path per update.
 	property var scShadowLinks: ({})
 	function scShadowLink(d, uuid) {
-		if (scShadowDisplayOnly) return
+		if (((scShadowEngineMask >> d) & 1) === 0) return
 		const k = uuid + d, n = scShadowLinks[k] || 0
 		const paths = ["/Engine/Deck" + d + "/PlayState", "/Engine/Deck" + d + "/Track/CueLEDState"]
 		if (n >= paths.length) return
@@ -1493,7 +1508,7 @@ SERVICES_MAIN = """
 		p.translator.stringChanged.connect(() => root.scShadowLinkEdge(d, uuid, kind, p.translator.string))
 	}
 	function scShadowLinkEdge(d, uuid, kind, json) {
-		if (scShadowDisplayOnly) return
+		if (((scShadowEngineMask >> d) & 1) === 0) return
 		const at = scShadowAt[d]
 		if (!at || !at.ready || at.link !== uuid) return
 		let on
@@ -1853,7 +1868,7 @@ SERVICES_MAIN = """
 		scFourDeckRole = v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
 		scFourDeckOn = !!v.fourDeckWaveform
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
-		scShadowLegacyEngine = v.shadowLegacyEngine !== false
+		scShadowMode = v.shadowMode || "auto"
 		scKeepPlayhead(v.playhead || 0)
 		if (!scSameItems(scSources, v.sources)) scSources = v.sources
 		if (!scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
@@ -2635,11 +2650,13 @@ FOUR_DECK_ENTRIES = """
 			onSelected: function(index) { if (ids[index] !== root.scFourDeckRoleSetting) root.scRestartCall("fourDeckRole=" + ids[index]) }
 		},
 		EntryBase.ListEntry {
-			text: "Shadow Decks Drawn by Engine (restart Engine manually after switching)"
+			readonly property var ids: ["auto", "engine", "cdj"]
+			readonly property int at: Math.max(0, ids.indexOf(root.scShadowMode))
+			text: ["Shadow Deck Mode: by source (EngineX deck: exactly like a local deck; CDJ: rekordbox waveform)", "Shadow Deck Mode: Engine loads every source, shown exactly like a local deck", "Shadow Deck Mode: no track is loaded for any source (CDJ / Pro DJ Link view)"][at]
 			visible: root.scFourDeckOn
-			values: ["Off", "On"]
-			currentValue: values[root.scShadowLegacyEngine ? 1 : 0]
-			onSelected: function(index) { if ((index === 1) !== root.scShadowLegacyEngine) root.scCall("shadowLegacyEngine=" + index) }
+			values: ["Auto", "All Engine Mode", "All CDJ Mode"]
+			currentValue: values[at]
+			onSelected: function(index) { if (index !== at) root.scRestartCall("shadowMode=" + ids[index]) }
 		},
 """
 
@@ -4564,7 +4581,20 @@ def edits(dev: bool):
             '                visible: lockedDeckHint.active && !(typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(waveform.deckIndex))\n')]
         scaled[ROOT + "Views/Common/Waveform/WaveformLineInHint.qml"] = [(
             "    visible: deckIndex >= 1 && pLine.translator && pLine.translator.state\n",
-            '    visible: deckIndex >= 1 && pLine.translator && pLine.translator.state && !(typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(deckIndex) && root.scShadowData(deckIndex).lineIn)\n')]
+            '    visible: deckIndex >= 1 && pLine.translator && pLine.translator.state && !(typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(deckIndex) && root.scShadowData(deckIndex).lineIn)\n'),
+            # Forced Engine mode on a console: say why the CDJ on this Line In has no waveform.
+            ("    AIRMouseEventBlocker {}\n",
+             "    AIRMouseEventBlocker {}\n"
+             "    Text {\n"
+             "        anchors.centerIn: parent\n"
+             "        width: parent.width - 24\n"
+             "        horizontalAlignment: Text.AlignHCenter\n"
+             "        wrapMode: Text.WordWrap\n"
+             '        visible: typeof root !== "undefined" && !!root && ((root.scShadowLineMask >> deckIndex) & 1) === 1\n'
+             '        color: "#9a9a9a"\n'
+             "        font.pixelSize: 16\n"
+             '        text: "All Engine Mode: no CDJ waveform on Line In"\n'
+             "    }\n")]
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml"] = [(
             "        source: albumArt.albumArtPath\n",
             art_source("        ", "albumArt.deckIndex", "albumArt.albumArtPath", "albumArt.deckView && albumArt.deckView.artistSongView ? albumArt.deckView.artistSongView.songName : \"\"", "scArtImage", add_id=True))]

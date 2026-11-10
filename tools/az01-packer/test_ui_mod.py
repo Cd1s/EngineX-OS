@@ -245,7 +245,7 @@ let now = 10000;
 Date.now = () => now;
 globalThis.root = globalThis;
 Object.assign(globalThis, {
-    scFourDeckRole: '13', scPlayer: true, scShadowDisplayOnly: true,
+    scFourDeckRole: '13', scPlayer: true, scShadowDisplayOnly: true, scShadowEngineMask: 0, scShadowLineMask: 0,
     scShadowExpiryMs: 3000, scShadowAt: {}, scShadowDisplay: {}, scShadowEmptyArray: [],
     scShadowDisplayRequests: {}, scShadowDisplayText: {}, scShadowGridCache: {}, scShadowLiveCueCache: {},
     scShadowCdjMaster: false, scPressQueue: [], scShadowEmptyObject: {},
@@ -355,6 +355,53 @@ assert.equal(scShadowDisplayOnly, false);
 assert.equal(scShadowVisible(2), false);
 assert.equal(legacy[0], 2);
 assert.deepEqual(scShadowDisplay, {});
+""")
+
+    def test_mixed_slots_and_source_switch(self):
+        # Deck 2 = EngineX peer (Engine loads it), Deck 4 = CDJ (display renderer), from one
+        # answer; then Deck 2's source becomes the CDJ and goes back.
+        self.js(r"""
+const writes = [], lookups = [], props = {};
+globalThis.scTr = p => { lookups.push(p); return props[p] || (props[p] = {string: 'Off', set state(v) { writes.push(p + '=' + v); }, get state() { return undefined; }, set url(v) { writes.push(p + '=' + v); }}); };
+globalThis.scPressTimer = {restart() {}};
+const cdj = d => ({deck: d, displayOnly: true, key: 'cdj:x', title: 'CDJ', playing: true, at: now, positionMs: 500});
+scShadowApplyAll([{deck: 2, path: '/peer.flac', playing: true}, cdj(4)], false);
+assert.equal(scShadowDisplayOnly, false);
+assert.equal(scShadowEngineMask, 30 & ~(1 << 4));
+assert.deepEqual(writes, ['/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer.flac']);
+assert.equal(scShadowData(2), null); assert.equal(scShadowVisible(2), false); assert.equal(scDeckLocked(2), true);
+assert.equal(scShadowData(4).title, 'CDJ'); assert.equal(scShadowVisible(4), true);
+assert.equal(requests.length, 1); assert(requests[0].url.endsWith('deck=4&key=cdj%3Ax'));
+// The display slot is never Engine's: no load, speed, seek or press reaches Deck 4.
+scShadowApply({deck: 4, path: '/must-not-load.wav'}); scShadowSpeed(4, 12); scShadowSeek(4, {}, 1000);
+scShadowCues(4, {}, {cues: []}, now); scShadowBeat(4, {}, {bpm: 120, beat: 3}, 0, now); scShadowLinkEdge(4, 'peer', 'play', '{"state":true}');
+scPress('/Engine/Deck4/Sync');
+assert.deepEqual(scPressQueue, []);
+assert.equal(lookups.some(p => p.indexOf('Deck4') >= 0), false);
+scPress('/Engine/Deck2/Sync'); // the Engine slot still takes presses
+assert.equal(scPressQueue.length, 1);
+// Deck 2's source becomes the CDJ: the display takes the slot at once, Engine's copy is unloaded after the debounce.
+scShadowApplyAll([cdj(2)], false);
+assert.equal(scShadowEngineMask, 30 & ~(1 << 2));
+assert.equal(scShadowData(2).title, 'CDJ'); assert.equal(scShadowVisible(2), true); assert.equal(scShadowData(4), null);
+assert.equal(writes.length, 1);
+now += 400;
+scShadowApplyAll([cdj(2)], false);
+assert.deepEqual(writes.slice(1), ['/Engine/Deck2/Unload=true', '/Engine/Deck2/Track/Unload=true']);
+assert.equal(scShadowAt[2], undefined);
+now += 400;
+scShadowApplyAll([cdj(2)], false);
+assert.equal(writes.length, 3); // unloaded once, then left alone
+// And back: Engine loads the peer's track again, the display leaves the slot.
+scShadowApplyAll([{deck: 2, path: '/peer2.flac'}, cdj(4)], false);
+assert.equal(writes[3], '/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer2.flac');
+assert.equal(scShadowData(2), null); assert.equal(scShadowVisible(2), false);
+assert.equal(scShadowData(4).title, 'CDJ'); assert.equal(scShadowVisible(4), true);
+// Forced Engine mode on a console: a CDJ on a Line In deck is flagged for the on-screen hint.
+scShadowApplyAll([{deck: 2, path: '/peer2.flac'}, {deck: 4, path: '/cdj.flac', lineIn: true}], false);
+assert.equal(scShadowEngineMask, 30); assert.equal(scShadowLineMask, 1 << 4); assert.equal(scShadowData(4), null);
+scShadowApplyAll([cdj(4)], true);
+assert.equal(scShadowEngineMask, 0); assert.equal(scShadowLineMask, 0);
 """)
 
     def test_legacy_helpers_and_remote_presses_are_inert_in_display_mode(self):
@@ -762,7 +809,7 @@ assert.strictEqual(scope.cueInfo,ci); assert.equal(asked,1);
 let applied=0, header='1:false:13:false:false';
 globalThis.scShadowPollTimer={interval:0,restart(){}};
 XMLHttpRequest.prototype.getResponseHeader=()=>header;
-globalThis.scShadowApplyAll=(decks,displayOnly)=>{applied++;scShadowDisplayOnly=displayOnly;};
+globalThis.scShadowApplyAll=(decks,displayOnly)=>{applied++;scShadowDisplayOnly=displayOnly;scShadowEngineMask=displayOnly?0:30;};
 scShadowPoll();requests[0].finish(200,{role:'13',displayOnly:false,decks:[],ver:1});
 scShadowPoll();requests[0].finish(200,{role:'13',displayOnly:false,decks:[],ver:1});
 assert.equal(applied,2);assert.equal(requests.length,1);
@@ -973,7 +1020,7 @@ class UiModBuildTest(unittest.TestCase):
                     with tarfile.open(out.with_suffix(".tar.gz")) as pack:
                         for lang in ("en", "zh-Hans", "zh-Hant"):
                             main = pack.extractfile(f"packs/{lang}/Skins/Embedded/EmbeddedMain.qml").read().decode()
-                            self.assertIn("function scShadowApplyDisplay(decks)", main)
+                            self.assertIn("function scShadowApplyDisplay(decks, engineMask)", main)
                             self.assertIn("s.metadataOnly", main)
                             self.assertIn("/v1/sc5000/shadow/display?deck=", main)
                             self.assertIn("scDeckLocked", main)

@@ -38,6 +38,7 @@ var (
 	// UI Scale presets: the QML mod scales the loaded UI live (EmbeddedMain uiLoader).
 	uiUIScales       = []int{110, 105, 100, 95, 90, 85, 80, 75}
 	uiPioneerFxModes = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
+	uiShadowModes    = []string{"auto", "engine", "cdj"}
 )
 
 const (
@@ -71,21 +72,21 @@ type uiSettings struct {
 	OmniSource bool `json:"omniSource"`
 	// ProlinkShare lets rb-bridge read the Rekordbox library of Pioneer
 	// players on the LAN (#59). Off by default.
-	ProlinkShare       bool     `json:"prolinkShare"`
-	ProlinkExport      bool     `json:"prolinkExport"` // experimental Denon -> CDJ export; default OFF
-	Language           string   `json:"language"`
-	Waveform           string   `json:"waveform"`
-	Sources            []string `json:"sources"`
-	Scope              string   `json:"scope"`
-	GitHubRepo         string   `json:"githubRepo"`
-	SafeMode           bool     `json:"safeMode"`
-	LoggedIn           []string `json:"loggedIn"`
-	FourDeckWaveform   bool     `json:"fourDeckWaveform"`
-	FourDeckRole       string   `json:"fourDeckRole"`
-	ShadowLegacyEngine bool     `json:"shadowLegacyEngine"` // default: Engine loads the shadow track and draws it itself; false = display-only renderer. Change at a planned Engine restart
-	ProlinkWaveform    bool     `json:"prolinkWaveform"`
-	BroadcastEnabled   bool     `json:"broadcastEnabled"`
-	UpfaderEcho        bool     `json:"upfaderEcho"`
+	ProlinkShare     bool     `json:"prolinkShare"`
+	ProlinkExport    bool     `json:"prolinkExport"` // experimental Denon -> CDJ export; default OFF
+	Language         string   `json:"language"`
+	Waveform         string   `json:"waveform"`
+	Sources          []string `json:"sources"`
+	Scope            string   `json:"scope"`
+	GitHubRepo       string   `json:"githubRepo"`
+	SafeMode         bool     `json:"safeMode"`
+	LoggedIn         []string `json:"loggedIn"`
+	FourDeckWaveform bool     `json:"fourDeckWaveform"`
+	FourDeckRole     string   `json:"fourDeckRole"`
+	ShadowMode       string   `json:"shadowMode"` // which path draws a shadow deck: auto = by source (EngineX peer: Engine loads it and stock components draw it; CDJ: display renderer), engine = Engine loads every source, cdj = display renderer for every source
+	ProlinkWaveform  bool     `json:"prolinkWaveform"`
+	BroadcastEnabled bool     `json:"broadcastEnabled"`
+	UpfaderEcho      bool     `json:"upfaderEcho"`
 	// DebugTelemetry logs every shadow deck update and decision (shadow_debug.go).
 	// Development only: off by default, and nothing in the image turns it on.
 	DebugTelemetry bool `json:"debugTelemetry"`
@@ -183,9 +184,9 @@ var uiServicesBeforeKnown = []string{"tidal", "netease", "spotify", "deezer", "s
 
 // loadUI must be called with uiMu held. Bad or missing values get defaults.
 func (s *Server) loadUI() uiSettings {
-	known, saved := uiServicesBeforeKnown, false
+	known, saved, shadowModeSet := uiServicesBeforeKnown, false, false
 	v := uiSettings{
-		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowLegacyEngine: true, ProlinkWaveform: true,
+		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowMode: "auto", ProlinkWaveform: true,
 		TracklistWaveform: true, CueCountdown: true,
 		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
 	}
@@ -256,8 +257,14 @@ func (s *Server) loadUI() uiSettings {
 			} else if val == "0" || strings.EqualFold(val, "false") {
 				v.FourDeckWaveform = false
 			}
-		case "shadow_legacy_engine":
-			v.ShadowLegacyEngine = val == "1" || strings.EqualFold(val, "true")
+		case "shadow_mode":
+			if slices.Contains(uiShadowModes, val) {
+				v.ShadowMode, shadowModeSet = val, true
+			}
+		case "shadow_legacy_engine": // the key before shadow_mode; read, never written
+			if b, ok := parseBoolParam(val); ok && !shadowModeSet {
+				v.ShadowMode = map[bool]string{false: "cdj", true: "engine"}[b]
+			}
 		case "prolink_waveform":
 			if val == "0" || strings.EqualFold(val, "false") {
 				v.ProlinkWaveform = false
@@ -368,8 +375,8 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.FourDeckWaveform {
 		text += "four_deck_waveform=1\n"
 	}
-	if !v.ShadowLegacyEngine {
-		text += "shadow_legacy_engine=0\n"
+	if v.ShadowMode != "auto" {
+		text += "shadow_mode=" + v.ShadowMode + "\n"
 	}
 	if v.FourDeckRole != "auto" {
 		text += "four_deck_role=" + v.FourDeckRole + "\n"
@@ -598,19 +605,13 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) {
+	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
 	}
-	if q.Has("shadowLegacyEngine") {
-		b, ok := parseBoolParam(q.Get("shadowLegacyEngine"))
-		if !ok {
-			s.uiMu.Unlock()
-			fail(w, 400, errors.New("invalid setting"))
-			return
-		}
-		v.ShadowLegacyEngine = b
+	if q.Has("shadowMode") {
+		v.ShadowMode = q.Get("shadowMode")
 	}
 	if q.Has("fourDeckWaveform") {
 		b, ok := parseBoolParam(q.Get("fourDeckWaveform"))

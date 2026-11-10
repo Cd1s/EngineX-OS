@@ -159,7 +159,7 @@ func TestShadowStateHeaderSkipsHeartbeats(t *testing.T) {
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = oldRole }()
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
-	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=0")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowMode=cdj")
 	header := func() string {
 		t.Helper()
 		r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
@@ -223,7 +223,7 @@ func TestShadowStateHeaderCarriesDisplayDetail(t *testing.T) {
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = oldRole }()
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
-	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=0")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowMode=cdj")
 	get := func() (string, []deckState) {
 		t.Helper()
 		r, err := http.Get(srv.URL + "/v1/sc5000/shadow")
@@ -266,7 +266,7 @@ func TestShadowLongPollHoldsQuietAnswers(t *testing.T) {
 	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
 	defer func() { fourDeckRolePath = oldRole }()
 	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
-	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=0")
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowMode=cdj")
 	poll := func() (string, time.Duration) {
 		t.Helper()
 		s.shadow.mu.Lock()

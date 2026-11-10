@@ -62,6 +62,7 @@ type deckState struct {
 	Stale        bool    `json:"stale,omitempty"`        // frozen display sample; not an eject/goodbye
 	MetadataOnly bool    `json:"metadataOnly,omitempty"` // CDJ state has no peer display asset endpoint
 	LineIn       bool    `json:"lineIn,omitempty"`       // all-in-one console: shadow source mapped to Line In channel
+	DisplayOnly  bool    `json:"displayOnly,omitempty"`  // this slot goes to the display renderer; Engine must not load it
 	Playing      bool    `json:"playing"`
 	PositionMS   float64 `json:"positionMs"`
 	Pitch        float64 `json:"pitch"` // percent
@@ -926,7 +927,7 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 		s.shadow.mu.Unlock()
 		s.shadowWake()
 		if seen, err := strconv.ParseUint(r.URL.Query().Get("ver"), 10, 64); err == nil {
-			s.shadow.wait(r.Context(), seen, s.shadow.pollWait(v.ShadowLegacyEngine, time.Now()))
+			s.shadow.wait(r.Context(), seen, s.shadow.pollWait(v.ShadowMode != "cdj", time.Now()))
 		}
 		s.shadow.mu.Lock()
 		ver = s.shadow.ver
@@ -946,25 +947,44 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(h, "%d|%s|%t|%t|%t|%t;", d.Deck, d.Key, d.Loading, d.Stale, d.MetadataOnly, d.DisplayDetail)
 	}
 	// CDJ continuous positions do not advance the EngineX peer version. Those
-	// responses, like legacy responses, must always reach QML.
-	if !v.ShadowLegacyEngine && !metaOnly {
+	// responses, like responses with an Engine-loaded deck, must always reach QML.
+	if v.ShadowMode == "cdj" && !metaOnly {
 		w.Header().Set("X-Shadow-State", fmt.Sprintf("%d:%t:%s:%t:%t:%x", ver, true, role, stale, debug, h.Sum64()))
 
 	}
-	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug, "displayOnly": !v.ShadowLegacyEngine})
+	// displayOnly is what a deck without its own flag follows (an empty slot too).
+	respond(w, map[string]any{"role": role, "decks": out, "ver": ver, "debug": debug, "displayOnly": v.ShadowMode == "cdj"})
 }
 
+// shadowCompose picks the path per shadow slot. In auto mode the source
+// decides: an EngineX peer's track is loaded by Engine and drawn by the stock
+// components, a Pro DJ Link CDJ goes to the display renderer (displayOnly on
+// its deck). The two forced modes send every source down one path.
 func (s *Server) shadowCompose(role string, now time.Time, lines ...[]int) []deckState {
 	s.uiMu.Lock()
-	legacy := s.loadUI().ShadowLegacyEngine
+	mode := s.loadUI().ShadowMode
 	s.uiMu.Unlock()
-	if !legacy {
+	switch mode {
+	case "cdj":
 		return s.shadowComposeDisplay(role, now, lines...)
+	case "engine":
+		return s.shadowComposeLegacy(role, now, lines...)
 	}
-	return s.shadowComposeLegacy(role, now, lines...)
+	out, free, lineIn := s.shadowLegacy(role, now, false, lines...)
+	out = append(out, s.shadowDisplayCDJs(free, lineIn, now)...)
+	slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
+	return out
 }
 
 func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int) []deckState {
+	out, _, _ := s.shadowLegacy(role, now, true, lines...)
+	return out
+}
+
+// shadowLegacy is the Engine path. Without cdj it stops after the EngineX
+// peers and returns the decks left for CDJs (lineIn: they are the console's
+// Line In channels).
+func (s *Server) shadowLegacy(role string, now time.Time, cdj bool, lines ...[]int) (out []deckState, free []int, lineIn bool) {
 	devices := s.mergedDevices()
 	// The exporter's lock is taken before ours, never under it: closing the
 	// exporter waits for its observer, which takes ours.
@@ -985,8 +1005,7 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	wanted := sh.used
-	var out []deckState
-	var free []int // shadow decks the other EngineX player does not fill
+	// free: shadow decks the other EngineX player does not fill
 	var shadowDecks []int
 	usedPeer := map[int]bool{}
 	placed := map[int]peerDeck{}
@@ -1033,7 +1052,7 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		}
 		d := p.deckState
 		d.Deck = deck
-		d.LineIn = false
+		d.LineIn, d.DisplayOnly = false, false
 		// Two standalone players share master natively over Engine Link; an
 		// all-in-one console linked to an SC5000/SC6000 (#160) does not, so keep
 		// the peer's master flag when this unit is not a standalone player.
@@ -1074,6 +1093,9 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		}
 		lineFree = free
 	}
+	if !cdj {
+		return out, free, len(consoleLines) > 0
+	}
 	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
 		cue := dev.PlayState1 == cdjCuePlay
 		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM}
@@ -1103,7 +1125,7 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		out = append(out, d)
 	}
 	slices.SortFunc(out, func(a, b deckState) int { return a.Deck - b.Deck })
-	return out
+	return out, nil, false
 }
 
 // cdjDecks puts the CDJs on the free shadow decks: on their own player number

@@ -349,3 +349,9 @@ LINE IN	线路输入	線路輸入
 LINE-IN	线路输入	線路輸入
 Engine	Engine	Engine
 AUX	AUX	AUX
+Shadow Deck Mode: by source (EngineX deck: exactly like a local deck; CDJ: rekordbox waveform)	影子轨模式：按来源自动选择（EngineX 碟机与本机显示完全一致，CDJ 显示 rekordbox 波形）	影子軌模式：依來源自動選擇（EngineX 播放機與本機顯示完全一致，CDJ 顯示 rekordbox 波形）
+Shadow Deck Mode: Engine loads every source, shown exactly like a local deck	影子轨模式：所有来源都由 Engine 加载，与本机显示完全一致	影子軌模式：所有來源都由 Engine 載入，與本機顯示完全一致
+Shadow Deck Mode: no track is loaded for any source (CDJ / Pro DJ Link view)	影子轨模式：所有来源都不加载曲目，按 CDJ / Pro DJ Link 方式显示	影子軌模式：所有來源都不載入曲目，依 CDJ / Pro DJ Link 方式顯示
+All Engine Mode	全部 Engine 模式	全部 Engine 模式
+All CDJ Mode	全部 CDJ 模式	全部 CDJ 模式
+All Engine Mode: no CDJ waveform on Line In	全部 Engine 模式下 Line In 不显示 CDJ 波形	全部 Engine 模式下 Line In 不顯示 CDJ 波形

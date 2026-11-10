@@ -59,6 +59,7 @@ Item {
  property string scWave: "3band"
  property bool scPlayer: true
  property bool scShadowDisplayOnly: true
+ property int scShadowEngineMask: 0
  property bool scCueCountdown: true
  function scNextCueInfo(deck, tick) { return scShadowNextCue(deck) }
  property int scShadowExpiryMs: 3000
