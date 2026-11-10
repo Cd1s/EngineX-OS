@@ -1053,14 +1053,16 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Unlock()
 	role := s.activeRole(v)
 	debug := s.shadow.dbg.set(v.DebugTelemetry || fileExists(shadowDebugFlag))
+	query := r.URL.Query()
+	seen, seenErr := strconv.ParseUint(query.Get("ver"), 10, 64)
 	out := []deckState{}
 	var ver uint64
 	if role != "" {
 		s.shadow.mu.Lock()
-		s.shadow.lines = parseLineChannels(r.URL.Query().Get("line"))
+		s.shadow.lines = parseLineChannels(query.Get("line"))
 		s.shadow.mu.Unlock()
 		s.shadowWake()
-		if seen, err := strconv.ParseUint(r.URL.Query().Get("ver"), 10, 64); err == nil {
+		if seenErr == nil {
 			s.shadow.wait(r.Context(), seen, s.shadow.pollWait(v.ShadowLegacyEngine, time.Now()))
 		}
 		s.shadow.mu.Lock()
@@ -1073,6 +1075,21 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 	s.shadow.mu.Lock()
 	s.shadow.metaOnlyPoll = metaOnly
 	s.shadow.mu.Unlock()
+	// The peer version alone says nothing about copy readiness, retries, or
+	// extrapolation. Skip only empty Engine slots after the client applied one.
+	if role != "" && v.ShadowLegacyEngine && !debug && !metaOnly && !slices.ContainsFunc(out, func(d deckState) bool {
+		return d.Link == "" || d.Path != "" || d.ID != "" || d.Loading || d.Playing ||
+			d.ShadowMaster != 0 || d.Master != nil && *d.Master || d.LineIn
+	}) {
+		if seenErr == nil && seen > 0 && ver == seen && query.Get("idle") == "1" {
+			w.Header().Set("X-Shadow-Unchanged", "1")
+			respond(w, struct {
+				Unchanged bool `json:"unchanged"`
+			}{true})
+			return
+		}
+		w.Header().Set("X-Shadow-Idle", "1")
+	}
 	stale := slices.ContainsFunc(out, func(d deckState) bool { return d.Stale })
 	// The version covers peer updates; what compose derives from time and the
 	// display cache (stale, loading, the placed slot and key) goes in a digest.

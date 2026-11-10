@@ -223,7 +223,7 @@ class ShadowDisplayTest(unittest.TestCase):
     def js(self, body):
         names = ("scDeckLocked", "scShadowVisible", "scShadowDeckFor", "scShadowData", "scShadowRate", "scShadowPosition",
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
-                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
+                 "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowPollIdle", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
@@ -257,7 +257,7 @@ Object.assign(globalThis, {
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
     scShadowLead: 0, scShadowPeerLead: 0, scShadowPeerPlaying: false, scShadowMasterAt: 0,
-    scShadowGen: 0, scShadowVer: 0, scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {},
+    scShadowGen: 0, scShadowVer: 0, scShadowIdle: false, scShadowLinePaths: [], scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {},
     scTr() { throw Error('Engine access forbidden'); },
     Planck: { getProperty() { throw Error('Engine access forbidden'); } }
 });
@@ -778,6 +778,28 @@ header='1:true:13:false:false';
 scShadowPoll();requests[0].finish(200,{role:'13',displayOnly:true,decks:[],ver:1});
 scShadowPoll();requests[0].finish(200,{role:'13',displayOnly:true,decks:[],ver:1});
 assert.equal(applied,3); // display-only can skip identical snapshots
+""")
+
+    def test_idle_response_never_changes_mode_or_skips_an_active_snapshot(self):
+        self.js(r"""
+let headers={}, applied=[], emptied=[];
+globalThis.scShadowPollTimer={interval:0,restart(){}};
+XMLHttpRequest.prototype.getResponseHeader=k=>headers[k];
+globalThis.scShadowApplyAll=(decks,displayOnly)=>{applied.push(decks);scShadowDisplayOnly=displayOnly;};
+globalThis.scShadowEmpty=d=>emptied.push(d);
+const reply=(h,r)=>{headers=h;scShadowPoll();requests[0].finish(200,r);};
+reply({'X-Shadow-Idle':'1'},{role:'13',displayOnly:false,decks:[],ver:7});
+assert.equal(applied.length,1);
+reply({'X-Shadow-Unchanged':'1'},null); // the body must not be needed
+assert.match(requests[0].url,/idle=1/);
+reply({}, {unchanged:true,displayOnly:true}); // header stripped; even a mode field is ignored
+assert.equal(scShadowDisplayOnly,false);
+assert.deepEqual(emptied,[2,4,2,4]); // delayed unload keeps ticking
+reply({}, {role:'13',displayOnly:false,decks:[{deck:2,path:'/copy',seq:2}],ver:7});
+assert.equal(applied.length,2);
+assert.equal(applied[1][0].seq,2);
+assert.equal(scShadowIdle,false);
+assert.equal(scShadowPollTimer.interval,60);
 """)
 
     def test_cdj_metadata_only_does_not_request_unavailable_assets(self):
