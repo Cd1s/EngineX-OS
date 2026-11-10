@@ -956,7 +956,7 @@ SERVICES_MAIN = """
 			["loaded", "/Track/SongLoaded"], ["uri", "/Track/TrackUri"], ["net", "/Track/TrackNetworkPath"],
 			["cueLED", "/Track/CueLEDState"], ["master", "/DeckIsMaster"], ["sync", "/SyncMode"],
 			["beat", "/BeatNumber"], ["cuePosition", "/Track/CuePosition"], ["title", "/Track/SongName"],
-			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"]])
+			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"]])
 			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
 		p.cues = []
 		for (let i = 1; i <= 8; i++) {
@@ -1111,6 +1111,8 @@ SERVICES_MAIN = """
 			if (fresh) {
 				o.title = s.net ? g.title.string || g.trackName.string || "" : ""
 				o.artist = s.net ? g.artist.string || "" : ""
+				const sr = g.rate.value, len = g.length.unnormalized
+				o.durationMs = s.net && sr > 0 && len > 0 ? Math.round(len / sr * 1000) : 0 // the peer tells its shadow deck's track by it
 				scShadowTextAt[d] = !s.net || o.title ? now : 0 // Engine fills SongName after the load: retry until it does
 			}
 			o.dbg = ""
@@ -1124,7 +1126,7 @@ SERVICES_MAIN = """
 				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
-				sent.title !== o.title || sent.artist !== o.artist || sent.link !== o.link || sent.bpm !== o.bpm || sent.cuesRev !== cc.rev) edge = true
+				sent.title !== o.title || sent.artist !== o.artist || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.cuesRev !== cc.rev) edge = true
 		}
 		scShadowPostAt = now; scShadowPostPending = false
 		// Nothing the peer shows changed: ping instead of serialising the decks again
@@ -1137,7 +1139,7 @@ SERVICES_MAIN = """
 		for (let n = 0; n < own.length; n++) {
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
-			sent.master = o.master; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist
+			sent.master = o.master; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.durationMs = o.durationMs
 			sent.link = o.link; sent.bpm = o.bpm; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
 		}
 		scShadowSent.length = own.length
@@ -1249,15 +1251,18 @@ SERVICES_MAIN = """
 		if (scFourDeckRole.indexOf(String(d)) >= 0 || !e.path) return
 		const g = p => root.scTr("/Engine/Deck" + d + p)
 		const now = Date.now()
-		const at = scShadowAt[d] || {path: ""}
-		if (at.path !== e.path) {
-			root.scTr("/Client/Librarian/AddToDatabaseAndLoadToDeck" + d).url = "file://" + encodeURI(e.path)
-			scShadowAt[d] = {path: e.path, loadUntil: now + 1200, seekAt: 0, seeks: 0, loads: (at.loads || 0) + 1, jumps: e.jumps}
-			if (root.scShadowDebug) root.scShadowDbg({deck: d, act: "load", path: e.path, loads: scShadowAt[d].loads})
+		let at = scShadowAt[d] || {path: ""}
+		// The source's key (e.id) says which track this is, not the path alone: the
+		// same path can be another file, and a track loaded again is a new load.
+		const id = e.id || e.path
+		if (at.path !== e.path || at.id !== id) {
+			at = scShadowAt[d] = {path: e.path, id: id, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps}
+			root.scShadowLoad(d, at, e, now)
 			return
 		}
-		if (now < at.loadUntil || !g("/Track/SongLoaded").state) return
+		if (!root.scShadowHolds(d, at, e, now)) return
 		at.ready = true
+		if (root.scShadowEnd(d, at, e, now)) return
 		at.link = e.link || ""
 		// no scShadowLink(): a RemoteState/Register subscription made Engine spam "service has disappeared" and block the Librarian when the other player went off; our UDP push already carries the edges
 		scShadowCues(d, at, e, now)
@@ -1398,6 +1403,109 @@ SERVICES_MAIN = """
 		at.pll = 0
 		dbg("steady")
 	}
+	// Asks Engine for the source's track on shadow deck d. Engine answers nothing,
+	// so scShadowHolds reads back what the deck holds and asks again.
+	function scShadowLoad(d, at, e, now) {
+		if (scShadowDisplayOnly) return
+		// Lock Playing Deck refuses a load onto a playing deck, and no other track
+		// may play under the source's name: stop first, and ask again soon.
+		const ps = root.scTr("/Engine/Deck" + d + "/PlayState"), play = root.scTr("/Engine/Deck" + d + "/Play")
+		const playing = !!(ps && ps.state)
+		if (playing && play) play.state = false
+		root.scTr("/Client/Librarian/AddToDatabaseAndLoadToDeck" + d).url = "file://" + encodeURI(e.path)
+		at.loads = (at.loads || 0) + 1
+		at.tries = (at.tries || 0) + 1
+		at.askedAt = now
+		at.loadUntil = now + 1200
+		at.retryAt = now + (playing ? 1500 : Math.min(30000, 3000 << Math.min(at.tries - 1, 4)))
+		at.held = false
+		at.ready = false
+		if (root.scShadowDebug) root.scShadowDbg({deck: d, act: "load", path: e.path, id: at.id, loads: at.loads, tries: at.tries, why: at.why || ""})
+	}
+	// Why Engine's track on shadow deck d is not the source's (e), "" when it is.
+	// Engine changes a deck's track without us: Continue loads the next one when a
+	// deck plays out, a load can be refused or fail, two quick loads can finish in
+	// the other order. The file Engine names decides; when Engine names none or
+	// another, the track's length does, then title and BPM together. A title or
+	// BPM alone does not: Engine's analysis of a copy, a CDJ's rekordbox title and
+	// half or double tempo differ on the same audio.
+	function scShadowWrong(d, e) {
+		const g = p => root.scTr("/Engine/Deck" + d + p) || scShadowEmptyObject
+		if (!g("/Track/SongLoaded").state) return "empty"
+		const nfc = v => v.normalize ? v.normalize("NFC") : v
+		// Engine names the file by volume ("net://<id>/<volume>/<path>"): compare below the mount point.
+		const parts = String(e.path).split("/").filter(v => v !== "")
+		const tail = nfc("/" + parts.slice(Math.max(Math.min(2, parts.length - 1), parts.length - 3)).join("/"))
+		const name = g("/Track/TrackNetworkPath").string || g("/Track/TrackUri").string || ""
+		let plain = name
+		try { plain = decodeURIComponent(name) } catch (err) {}
+		const file = name === "" ? 0 : nfc(name).endsWith(tail) || nfc(plain).endsWith(tail) ? 1 : -1
+		if (file > 0) return ""
+		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
+		const length = e.durationMs > 0 && sr > 0 && len > 0 ? (Math.abs(len / sr * 1000 - e.durationMs) <= 2000 ? 1 : -1) : 0
+		const heldTitle = g("/Track/SongName").string || g("/Track/TrackName").string || ""
+		const title = e.title && heldTitle ? (e.title === heldTitle ? 1 : -1) : 0
+		const ob = g("/OriginalBPM").unnormalized
+		const ratio = e.bpm > 0 && ob > 0 ? e.bpm / ob : 0
+		const bpm = ratio > 0 ? ([1, 2, 0.5].some(k => Math.abs(ratio / k - 1) <= 0.03) ? 1 : -1) : 0
+		if (length < 0) return "length"
+		// Another name: the same audio only when the length agrees and the title does not differ.
+		if (file < 0 && !(length > 0 && title >= 0)) return "file"
+		if (title < 0 && bpm < 0) return "title"
+		return ""
+	}
+	// True once Engine holds the source's track on shadow deck d; only then is the
+	// deck steered. Checked again when the track's length changes and every second
+	// (strings), so a track Engine swapped in later is found and loaded again.
+	function scShadowHolds(d, at, e, now) {
+		if (scShadowDisplayOnly || now < at.loadUntil) return false
+		const len = (root.scTr("/Engine/Deck" + d + "/Track/TrackLength") || scShadowEmptyObject).unnormalized
+		if (at.held && len === at.len && now - at.heldAt < 1000) return true
+		// Engine is still loading (a long file, a slow drive): asking again would start it over.
+		if ((root.scTr("/Engine/Deck" + d + "/Track/SongLoading") || scShadowEmptyObject).state && now - at.askedAt < 60000) {
+			at.ready = false
+			return false
+		}
+		const why = root.scShadowWrong(d, e)
+		if (why === "") {
+			at.held = true; at.heldAt = now; at.len = len; at.tries = 0; at.why = ""
+			return true
+		}
+		const ps = root.scTr("/Engine/Deck" + d + "/PlayState"), play = root.scTr("/Engine/Deck" + d + "/Play")
+		if (why !== "empty" && ps && ps.state && play) play.state = false
+		// It was ours until now (Engine swapped it): load at once. Else Engine may
+		// still be loading: ask again after 3, 6, 12, 24, then every 30 s.
+		if (at.held || now >= at.retryAt) {
+			at.why = why
+			root.scShadowLoad(d, at, e, now)
+		}
+		at.ready = false
+		return false
+	}
+	// Continue (Engine's AutoPlay) loads and plays the next track when a deck plays
+	// out, on a shadow deck too; a seek to the source's end position then ended
+	// that one as well, and so on through the list. With Continue on, a shadow
+	// deck stops 700 ms short of its end. True while it is parked there.
+	function scShadowEndGap() {
+		const p = root.scTr("/Client/Preferences/Profile/Application/AutoPlay")
+		return p && p.state ? 700 : 0
+	}
+	function scShadowEnd(d, at, e, now) {
+		const gap = root.scShadowEndGap()
+		if (!gap) return false
+		const g = p => root.scTr("/Engine/Deck" + d + p) || scShadowEmptyObject
+		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
+		if (!(sr > 0 && len > 0)) return false
+		const endMs = len / sr * 1000 - gap
+		const target = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0)
+		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
+		const local = !!g("/PlayState").state
+		if (target < endMs && !(local && posMs >= endMs)) return false
+		if (local) g("/Play").state = false
+		if (target < endMs) return false // ran ahead of the source: stopped, and scShadowApply lines it up again
+		if (Math.abs(posMs - endMs) > 50 && now - at.seekAt >= 200) root.scShadowSeek(d, at, endMs)
+		return true
+	}
 	// The shadow deck's fader at pitch percent: the SpeedRange (8 % by default) is
 	// widened first, or +11.1 % (a synced 126 BPM track at 140) stuck at +8 %.
 	function scShadowSpeed(d, pitch) {
@@ -1484,7 +1592,8 @@ SERVICES_MAIN = """
 		const g = p => root.scTr("/Engine/Deck" + d + p)
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!(sr > 0 && len > 0)) return
-		g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, ms / (len / sr * 1000)))
+		const lenMs = len / sr * 1000
+		g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, Math.min(ms, lenMs - root.scShadowEndGap()) / lenMs))
 		at.seekAt = Date.now()
 	}
 	// Engine Link already mirrors the other Engine's properties here, within a

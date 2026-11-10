@@ -228,6 +228,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowBeatIndex", "scShadowBeatAt", "scShadowGrid", "scShadowNextCue", "scShadowCuesFor", "scShadowAsset",
                  "scShadowProperties", "scShadowTick", "scShadowPost", "scShadowPoll", "scShadowDisplayFetch", "scShadowSameSample", "scShadowApplyDisplay", "scShadowApplyAll", "scNextCueInfo", "scNextCueCompute", "scCueTickFor",
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
+                 "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying")
         functions = []
         for name in names:
@@ -365,6 +366,8 @@ scShadowSpeed(2, 12);
 scShadowCues(2, {}, {cues: []}, now);
 scShadowBeat(2, {}, {bpm: 120, beat: 3}, 0, now);
 scShadowSeek(2, {}, 1000);
+scShadowLoad(2, {}, {path: '/must-not-load.wav'}, now);
+assert.equal(scShadowHolds(2, {}, {path: '/must-not-load.wav'}, now), false);
 scShadowLink(2, 'peer');
 scShadowLinkEdge(2, 'peer', 'play', '{"state":true}');
 scPress('/Engine/Deck2/RequestMaster');
@@ -1203,6 +1206,213 @@ assert.equal(scShadowData(2).rate,1.031028);
         self.assertNotIn("0.55 : 0.22", layer)
         self.assertIn('Rectangle { visible: scBeat.bar; x: 1; y: 8; width: 2; height: scBeat.height - 16; color: "#b7b7b7" }', layer)
         self.assertIn('text: scBeat.bar ? scBeat.beat.number / 4 + 1 : ""', layer)
+
+
+class ShadowIdentityTest(unittest.TestCase):
+    """Engine mode: the shadow deck holds the source's track, or is loaded again (maintainer report 11-10)."""
+    js = ShadowDisplayTest.js
+
+    # An Engine deck 2 that loads what it is told once settle() runs, as Engine does a little later.
+    ENGINE = r"""
+scShadowDisplayOnly = false; scFourDeckRole = '13';
+const lib = {
+    '/media/USB/Contents/a.flac': {title: 'A', lenMs: 300000, bpm: 128},
+    '/media/USB/Contents/b.flac': {title: 'B', lenMs: 200000, bpm: 140},
+    '/media/USB/Contents/next.flac': {title: 'Next', lenMs: 456800, bpm: 149.3},
+    '/data/enginex/shadow-v3/peer-1/same.flac': {title: 'Same', lenMs: 240000, bpm: 120},
+    '/data/enginex/shadow-v3/peer-2/same.flac': {title: 'Same', lenMs: 250000, bpm: 120},
+};
+const eng = {held: '', loading: false, playing: false, pos: 0, pending: [], asked: [], plays: [], seeks: [], autoplay: false, lock: false, fail: 0, slow: 0, named: true};
+const track = () => lib[eng.held] || {title: '', lenMs: 0, bpm: 0};
+const netName = f => f.startsWith('/media/') ? 'net://uuid/' + f.split('/')[2] + ' (USB 1)/' + f.split('/').slice(3).join('/') : 'net://uuid/(Unknown)/' + f.split('/').slice(2).join('/');
+const ask = url => {
+    const f = decodeURI(url.replace('file://', ''));
+    eng.asked.push(f);
+    if (eng.lock && eng.playing) return; // Lock Playing Deck
+    if (eng.fail > 0) { eng.fail--; return; }
+    eng.loading = true; eng.pending.push(f);
+};
+// Engine finishes its loads; the newest by default, `order` picks another one (two loads racing).
+const settle = order => {
+    if (eng.slow > 0) { eng.slow--; return; }
+    if (!eng.pending.length) return;
+    eng.held = eng.pending[order === undefined ? eng.pending.length - 1 : order];
+    eng.pending = []; eng.loading = false; eng.playing = false; eng.pos = 0;
+};
+const sr = 44100;
+globalThis.scTr = path => {
+    const tail = path.replace('/Engine/Deck2', '');
+    if (path === '/Client/Librarian/AddToDatabaseAndLoadToDeck2') return {set url(v) { ask(v); }};
+    if (path === '/Client/Preferences/Profile/Application/AutoPlay') return {state: eng.autoplay};
+    if (!path.startsWith('/Engine/Deck2/')) return null;
+    const t = track();
+    return {
+        get state() { return tail === '/Track/SongLoaded' ? !!eng.held : tail === '/Track/SongLoading' ? eng.loading : tail === '/PlayState' ? eng.playing : false; },
+        set state(v) { if (tail === '/Play') { eng.playing = !!v; eng.plays.push(!!v); } },
+        get string() { return tail === '/Track/TrackNetworkPath' ? (eng.held && eng.named ? netName(eng.held) : '') : tail === '/Track/SongName' ? t.title : tail === '/SyncMode' ? 'Off' : tail === '/SpeedRange' ? '8' : ''; },
+        get value() { return tail === '/Track/SampleRate' ? (eng.held ? sr : 0) : tail === '/Speed' ? 0.5 : 0; },
+        set value(v) { if (tail === '/Track/SetSongPosition') { eng.pos = v * t.lenMs; eng.seeks.push(v); } },
+        get unnormalized() { return tail === '/Track/TrackLength' ? t.lenMs * sr / 1000 : tail === '/Track/TrackPosition' ? eng.pos * sr / 1000 : tail === '/OriginalBPM' ? t.bpm : 0; },
+    };
+};
+const src = (path, extra) => Object.assign({deck: 2, path, id: path, title: lib[path].title, durationMs: lib[path].lenMs, bpm: lib[path].bpm, playing: false, positionMs: 0, pitch: 0, at: now, jumps: 0}, extra || {});
+// The source's state, applied every 180 ms as the long poll does.
+const run = (ms, e) => { for (const end = now + ms; now < end;) { now += 180; scShadowApply(Object.assign({}, e, {at: now})); } };
+const A = '/media/USB/Contents/a.flac', B = '/media/USB/Contents/b.flac', NEXT = '/media/USB/Contents/next.flac';
+"""
+
+    def test_quick_a_b_a_ends_on_a_whatever_order_engine_loads_in(self):
+        self.js(self.ENGINE + r"""
+scShadowApply(src(A)); now += 60; scShadowApply(src(B)); now += 60; scShadowApply(src(A));
+assert.deepEqual(eng.asked, [A, B, A]);
+settle(1); // Engine finished B last
+assert.equal(eng.held, B);
+run(2000, src(A, {playing: true, positionMs: 5000}));
+assert.equal(eng.asked.length, 3); assert.deepEqual(eng.plays, []); assert.deepEqual(eng.seeks, []); // B is never steered as A
+assert.equal(scShadowAt[2].ready, false);
+run(1500, src(A, {playing: true, positionMs: 5000})); // 3 s after the last load: asked again
+assert.deepEqual(eng.asked, [A, B, A, A]); assert.equal(scShadowAt[2].why, 'length');
+settle();
+run(1500, src(A, {playing: true, positionMs: 5000}));
+assert.equal(eng.held, A); assert.equal(eng.playing, true); assert.equal(scShadowAt[2].ready, true);
+assert.equal(eng.asked.length, 4);
+run(5000, src(A, {playing: true, positionMs: 5000})); // and stays: no further loads
+assert.equal(eng.asked.length, 4); assert.equal(scShadowAt[2].tries, 0);
+""")
+
+    def test_same_path_or_same_name_is_told_apart_by_the_source_id(self):
+        self.js(self.ENGINE + r"""
+// One path, the source loaded another file there (a new key): a new load.
+scShadowApply(src(A, {id: 'key-1'})); settle(); run(1500, src(A, {id: 'key-1'}));
+assert.equal(scShadowAt[2].ready, true); assert.equal(eng.asked.length, 1);
+run(400, src(A, {id: 'key-2'}));
+assert.deepEqual(eng.asked, [A, A]); assert.equal(scShadowAt[2].id, 'key-2');
+settle(); run(1500, src(A, {id: 'key-2'})); assert.equal(scShadowAt[2].ready, true); assert.equal(eng.asked.length, 2);
+// No id from an older Go: the path alone, as before.
+run(400, Object.assign(src(B), {id: undefined})); assert.equal(eng.asked[2], B); assert.equal(scShadowAt[2].id, B);
+// Two copies named same.flac: Engine holding the first is not the second.
+const S1 = '/data/enginex/shadow-v3/peer-1/same.flac', S2 = '/data/enginex/shadow-v3/peer-2/same.flac';
+settle(); run(400, src(S1, {id: 'k1'})); settle(); run(1500, src(S1, {id: 'k1'})); assert.equal(scShadowAt[2].ready, true);
+const n = eng.asked.length;
+eng.fail = 1; // Engine drops the load of the second and keeps the first
+run(1400, src(S2, {id: 'k2'}));
+assert.equal(eng.asked.length, n + 1); assert.equal(eng.held, S1); assert.equal(scShadowAt[2].ready, false);
+assert.equal(scShadowWrong(2, src(S2, {id: 'k2'})), 'length');
+run(2000, src(S2, {id: 'k2'})); settle(); run(1500, src(S2, {id: 'k2'}));
+assert.equal(eng.held, S2); assert.equal(scShadowAt[2].ready, true);
+// The data directory under its old name is the same file.
+eng.held = S2; assert.equal(scShadowWrong(2, src(S2)), '');
+assert.equal(scShadowWrong(2, Object.assign(src(S2), {path: '/data/sc5000-custom/shadow-v3/peer-2/same.flac'})), '');
+""")
+
+    def test_engine_load_failure_is_asked_again_with_backoff_and_never_steered(self):
+        self.js(self.ENGINE + r"""
+eng.fail = 3;
+const e = src(A, {playing: true, positionMs: 9000});
+scShadowApply(e); const t0 = now;
+const times = [];
+let seen = 1;
+for (let i = 0; i < 400 && eng.fail > 0; i++) { run(180, e); if (eng.asked.length > seen) { seen = eng.asked.length; times.push(Math.round((now - t0) / 1000)); } }
+assert.deepEqual(times, [3, 9]); // 3 s, then 6 s later
+assert.deepEqual(eng.plays, []); assert.deepEqual(eng.seeks, []); assert.equal(scShadowAt[2].why, 'empty');
+run(13000, e); assert.equal(eng.asked.length, 4); // 12 s later: this one loads
+settle(); run(1500, e);
+assert.equal(eng.held, A); assert.equal(eng.playing, true); assert.equal(scShadowAt[2].tries, 0);
+// Engine is slow, not failing: no second request while it is loading.
+eng.slow = 1e9; const n = eng.asked.length;
+run(400, src(B)); run(20000, src(B));
+assert.equal(eng.asked.length, n + 1); assert.equal(eng.loading, true);
+eng.slow = 0; settle(); run(400, src(B)); assert.equal(scShadowAt[2].ready, true); assert.equal(eng.asked.length, n + 1);
+""")
+
+    def test_lock_playing_deck_stops_the_deck_and_loads_again(self):
+        self.js(self.ENGINE + r"""
+eng.lock = true;
+scShadowApply(src(A)); settle(); run(1500, src(A, {playing: true, positionMs: 1000}));
+assert.equal(eng.playing, true);
+// The source changes track while the shadow deck plays: Engine refuses, the deck is stopped first.
+const e = src(B, {playing: true, positionMs: 0});
+scShadowApply(e);
+assert.equal(eng.playing, false); assert.deepEqual(eng.asked, [A, B]); assert.equal(eng.pending.length, 1);
+// A deck that was still playing when asked (the stop took a frame) is asked again after 1.5 s.
+eng.pending = []; eng.loading = false; eng.held = A;
+run(1300, e); assert.equal(eng.asked.length, 2); assert.equal(eng.playing, false); // A stays stopped meanwhile
+run(400, e); assert.deepEqual(eng.asked, [A, B, B]);
+settle(); run(1500, e); assert.equal(eng.held, B); assert.equal(eng.playing, true);
+""")
+
+    def test_track_swapped_by_continue_is_found_stopped_and_loaded_again(self):
+        self.js(self.ENGINE + r"""
+const e = src(A, {playing: true, positionMs: 100000});
+scShadowApply(e); settle(); run(1500, e);
+assert.equal(scShadowAt[2].ready, true); assert.equal(eng.playing, true);
+// 11-10 on the right player: Engine's Continue loaded and played the next track.
+eng.held = NEXT; eng.pos = 0; eng.playing = true; eng.plays.length = 0; eng.seeks.length = 0;
+run(180, e);
+assert.equal(eng.playing, false); assert.deepEqual(eng.plays, [false]); assert.deepEqual(eng.seeks, []); // stopped, never steered
+assert.deepEqual(eng.asked, [A, A]); assert.equal(scShadowAt[2].why, 'length');
+settle(); run(1500, e);
+assert.equal(eng.held, A); assert.equal(eng.playing, true); assert.equal(scShadowAt[2].ready, true);
+// Another file of the same length and tempo: Engine's name for it and the title tell.
+lib['/media/USB/Contents/same-length.flac'] = {title: 'Other', lenMs: 300000, bpm: 128};
+eng.held = '/media/USB/Contents/same-length.flac'; eng.playing = true;
+run(1200, e); assert.equal(scShadowAt[2].why, 'file'); assert.equal(eng.asked.length, 3);
+settle(); run(1500, e); assert.equal(eng.held, A);
+// Engine gives no path: the length tells.
+eng.named = false; eng.held = NEXT; eng.playing = true;
+run(180, e); assert.equal(scShadowAt[2].why, 'length'); assert.equal(eng.asked.length, 4);
+settle(); run(1500, e); assert.equal(eng.held, A);
+// A swap while paused, same length: found within a second by title and BPM.
+lib['/media/USB/Contents/twin.flac'] = {title: 'Twin', lenMs: 300000, bpm: 99};
+eng.held = '/media/USB/Contents/twin.flac';
+run(1200, e); assert.equal(scShadowAt[2].why, 'title'); assert.equal(eng.asked.length, 5);
+""")
+
+    def test_title_or_bpm_alone_and_a_named_file_do_not_load_again(self):
+        self.js(self.ENGINE + r"""
+scShadowApply(src(A)); settle(); run(1500, src(A));
+assert.equal(scShadowWrong(2, src(A)), '');
+// Engine names our file: nothing else is asked, whatever the source reports.
+assert.equal(scShadowWrong(2, src(A, {title: 'rekordbox title', bpm: 64, durationMs: 111})), '');
+eng.named = false; // no path from Engine
+assert.equal(scShadowWrong(2, src(A, {title: 'Other title'})), ''); // a CDJ's rekordbox title
+assert.equal(scShadowWrong(2, src(A, {bpm: 64})), ''); // half tempo
+assert.equal(scShadowWrong(2, src(A, {bpm: 150})), ''); // another analysis
+assert.equal(scShadowWrong(2, src(A, {title: 'Other', bpm: 150})), 'title');
+assert.equal(scShadowWrong(2, src(A, {durationMs: 296000})), 'length');
+assert.equal(scShadowWrong(2, src(A, {durationMs: 301500})), '');
+assert.equal(scShadowWrong(2, src(A, {durationMs: 0, title: '', bpm: 0})), ''); // an older peer: nothing to compare
+eng.held = ''; assert.equal(scShadowWrong(2, src(A)), 'empty');
+// Checked once a second, by one number in between.
+eng.held = A; eng.named = true;
+let strings = 0; const tr = scTr;
+globalThis.scTr = p => { const o = tr(p); if (p.endsWith('/TrackNetworkPath')) strings++; return o; };
+run(18000, src(A)); assert.ok(strings >= 17 && strings <= 19, strings); assert.equal(eng.asked.length, 1);
+""")
+
+    def test_continue_on_parks_the_shadow_deck_short_of_its_end(self):
+        self.js(self.ENGINE + r"""
+const e = src(A, {playing: true, positionMs: 100000});
+scShadowApply(e); settle(); run(1500, e);
+eng.autoplay = true; eng.seeks.length = 0;
+// The source plays out: the shadow deck stops 700 ms before its end and stays loaded.
+const end = src(A, {playing: true, positionMs: 299900});
+run(1000, end);
+assert.equal(eng.playing, false); assert.equal(eng.held, A); assert.equal(eng.asked.length, 1);
+assert.ok(eng.seeks.length >= 1); for (const v of eng.seeks) assert.ok(v <= 299300 / 300000 + 1e-9, v);
+assert.ok(Math.abs(eng.pos - 299300) < 1);
+const n = eng.seeks.length; run(3000, end); assert.equal(eng.seeks.length, n); assert.equal(eng.playing, false); // parked, not seeking on
+// The source jumps back: the deck follows again.
+run(1500, src(A, {playing: true, positionMs: 50000, jumps: 1}));
+assert.equal(eng.playing, true); assert.ok(eng.pos < 60000);
+// A seek asked past the end is held back too.
+scShadowSeek(2, scShadowAt[2], 400000); assert.ok(Math.abs(eng.pos - 299300) < 1);
+// The shadow deck itself ran to the gap ahead of the source: stopped before Continue fires.
+eng.pos = 299400; eng.playing = true; eng.plays.length = 0; run(180, src(A, {playing: true, positionMs: 298000}));
+assert.equal(eng.plays[0], false); assert.ok(eng.pos < 299300); // and lined up with the source again
+// Continue off: as before, to the very end.
+eng.autoplay = false; scShadowSeek(2, scShadowAt[2], 400000); assert.equal(eng.pos, 300000);
+""")
 
 
 if __name__ == "__main__":
