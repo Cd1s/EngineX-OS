@@ -1248,7 +1248,7 @@ SERVICES_MAIN = """
 	function scShadowApplyAll(decks, displayOnly) {
 		scShadowDisplayOnly = displayOnly !== false
 		const head = {}
-		if (!scShadowDisplayOnly) for (const e of decks) if (e.path && scFourDeckRole.indexOf(String(e.deck)) < 0) head[e.deck] = {master: !!e.master, sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || ""}
+		if (!scShadowDisplayOnly) for (const e of decks) if (e.path && scFourDeckRole.indexOf(String(e.deck)) < 0) head[e.deck] = {master: !!(e.master || e.lead), sync: !!e.sync, title: e.title || "", artist: e.artist || "", keyName: e.keyName || ""}
 		if (JSON.stringify(head) !== JSON.stringify(scShadowHead)) scShadowHead = head
 		let peerLead = 0, peerPlaying = false
 		for (const e of decks) { if (e.shadowMaster && !e.stale) peerLead = e.shadowMaster; if (e.playing && !e.cue && !e.stale) peerPlaying = true }

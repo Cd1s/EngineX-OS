@@ -77,6 +77,9 @@ type deckState struct {
 	Range   float64 `json:"range,omitempty"`
 	KeyLock *bool   `json:"keylock,omitempty"`
 	Master  bool    `json:"master,omitempty"`
+	// Lead, in the shadow reply only: the source deck is the tempo master, also where
+	// Master is cleared (Engine Link shares it). The shadow header's LEAD reads it.
+	Lead bool `json:"lead,omitempty"`
 	// ShadowMaster is the sender's shadow deck (a copy of the receiver's deck of
 	// that number) that Engine Link left holding master: the receiver's QML takes
 	// master back to a real deck. On every deck the sender posts; 0: none.
@@ -1149,6 +1152,7 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		d := p.deckState
 		d.Deck = deck
 		d.LineIn = false
+		d.Lead = d.Master
 		// Two standalone players share master natively over Engine Link; an
 		// all-in-one console linked to an SC5000/SC6000 (#160) does not, so keep
 		// the peer's master flag when this unit is not a standalone player.
