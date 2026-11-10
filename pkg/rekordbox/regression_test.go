@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -130,17 +131,109 @@ func TestAnalysisIgnoresTrailingPadding(t *testing.T) {
 	}
 }
 
-func TestPDBUnanalyzedBPMOverflow(t *testing.T) {
-	b := testfixture.PDB()
-	const ps = testfixture.PageSize
-	// Mutate track 1 tempo to 0xFFFFFFFF (unanalyzed/raw in Rekordbox 5)
-	le.PutUint32(b[2*ps+40+56:], 0xffffffff)
-	l, err := ParsePDB(bytes.NewReader(b), int64(len(b)))
-	if err != nil {
-		t.Fatalf("ParsePDB failed on 0xFFFFFFFF BPM: %v", err)
+func TestPDBAudioMetadataNormalization(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		bpm, rate uint32
+		wantBPM   float64
+		wantRate  int
+	}{
+		{"zero", 0, 48000, 0, 48000},
+		{"unanalyzed", 0xffffffff, 48000, 0, 48000},
+		{"above_limit", 100001, 48000, 0, 48000},
+		{"at_limit", 100000, 48000, 1000, 48000},
+		{"analyzed", 12800, 48000, 128, 48000},
+		{"invalid_sample_rate", 12800, 768001, 128, 0},
+		{"sample_rate_overflow", 12800, 0xffffffff, 128, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := testfixture.PDB()
+			const track = 2*testfixture.PageSize + 40
+			le.PutUint32(b[track+56:], tc.bpm)
+			le.PutUint32(b[track+8:], tc.rate)
+			l, err := ParsePDB(bytes.NewReader(b), int64(len(b)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := l.Tracks[0]; got.BPM != tc.wantBPM || got.SampleRate != tc.wantRate {
+				t.Fatalf("got BPM %v/sample rate %d, want %v/%d", got.BPM, got.SampleRate, tc.wantBPM, tc.wantRate)
+			}
+		})
 	}
-	if l.Tracks[0].BPM != 0 {
-		t.Fatalf("expected 0 BPM for unanalyzed track, got %f", l.Tracks[0].BPM)
+}
+
+func TestSQLiteAudioMetadataNormalization(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		bpm, length           string
+		rate                  int64
+		wantBPM, wantDuration float64
+		wantRate              int
+	}{
+		{"zero", "0", "180", 48000, 0, 180, 48000},
+		{"unanalyzed", "4294967295", "180", 48000, 0, 180, 48000},
+		{"above_limit", "100001", "180", 48000, 0, 180, 48000},
+		{"at_limit", "100000", "180", 48000, 1000, 180, 48000},
+		{"analyzed", "12800", "180", 48000, 128, 180, 48000},
+		{"nonfinite_bpm", "Inf", "180", 48000, 0, 180, 48000},
+		{"invalid_duration", "12800", "10000001", 48000, 128, 0, 48000},
+		{"nonfinite_duration", "12800", "NaN", 48000, 128, 0, 48000},
+		{"invalid_sample_rate", "12800", "180", 768001, 128, 180, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "exportLibrary.db")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { db.Close() })
+			if _, err := db.Exec(`CREATE TABLE content(id INTEGER, path TEXT, bpmx100 TEXT, length TEXT, samplingRate INTEGER)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO content VALUES(1,'/Music/test.wav',?,?,?)`, tc.bpm, tc.length, tc.rate); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			l, err := ReadSQLite(context.Background(), path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := l.Tracks[0]; got.BPM != tc.wantBPM || got.Duration != tc.wantDuration || got.SampleRate != tc.wantRate {
+				t.Fatalf("unexpected normalized metadata: %+v", got)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsInvalidAudioMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*Track)
+	}{
+		{"bpm", func(t *Track) { t.BPM = 1001 }},
+		{"nan_bpm", func(t *Track) { t.BPM = math.NaN() }},
+		{"infinite_bpm", func(t *Track) { t.BPM = math.Inf(1) }},
+		{"negative_bpm", func(t *Track) { t.BPM = -1 }},
+		{"duration", func(t *Track) { t.Duration = 1e7 + 1 }},
+		{"nan_duration", func(t *Track) { t.Duration = math.NaN() }},
+		{"negative_duration", func(t *Track) { t.Duration = -1 }},
+		{"sample_rate", func(t *Track) { t.SampleRate = 768001 }},
+		{"negative_sample_rate", func(t *Track) { t.SampleRate = -1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			track := Track{ID: 1, Path: "/Music/test.wav", BPM: 120, Duration: 180, SampleRate: 48000}
+			tc.set(&track)
+			l := Library{Tracks: []Track{track}}
+			if err := l.Validate(); err == nil || !strings.Contains(err.Error(), "invalid audio metadata") {
+				t.Fatalf("expected strict metadata error, got %v", err)
+			}
+			got := l.Tracks[0]
+			if math.Float64bits(got.BPM) != math.Float64bits(track.BPM) || math.Float64bits(got.Duration) != math.Float64bits(track.Duration) || got.SampleRate != track.SampleRate {
+				t.Fatal("Validate changed invalid audio metadata")
+			}
+		})
 	}
 }
 

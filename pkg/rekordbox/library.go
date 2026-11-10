@@ -71,14 +71,8 @@ func (l *Library) Validate() error {
 		if t.Path == "" {
 			return fmt.Errorf("rekordbox: track %d has no path", t.ID)
 		}
-		if math.IsNaN(t.BPM) || math.IsInf(t.BPM, 0) || t.BPM < 0 || t.BPM > 1000 {
-			t.BPM = 0
-		}
-		if math.IsNaN(t.Duration) || math.IsInf(t.Duration, 0) || t.Duration < 0 || t.Duration > 1e7 {
-			t.Duration = 0
-		}
-		if t.SampleRate < 0 || t.SampleRate > 768000 {
-			t.SampleRate = 0
+		if math.IsNaN(t.BPM) || math.IsInf(t.BPM, 0) || t.BPM < 0 || t.BPM > 1000 || math.IsNaN(t.Duration) || math.IsInf(t.Duration, 0) || t.Duration < 0 || t.Duration > 1e7 || t.SampleRate < 0 || t.SampleRate > 768000 {
+			return fmt.Errorf("rekordbox: invalid audio metadata for track %d", t.ID)
 		}
 		if t.RecordHash == "" {
 			t.RecordHash = RecordHash(*t)
