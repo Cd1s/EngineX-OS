@@ -846,7 +846,11 @@ func displayFileName(artist, title, ext string) string {
 	if r := []rune(title); len(r) > 120 {
 		title = string(r[:120])
 	}
-	return strings.TrimRight(title, ". ") + ext
+	title = strings.TrimRight(title, ". ")
+	if strings.EqualFold(filepath.Ext(title), ext) {
+		return title // a tagless file is titled by its name: no "x.mp3.mp3"
+	}
+	return title + ext
 }
 
 // engineLibrary is the "Engine Library" folder whose m.db lists f: the

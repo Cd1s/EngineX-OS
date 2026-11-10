@@ -3313,8 +3313,10 @@ SHADOW_LAYER = r"""
         clip: true
         visible: active && inheritedVisible && owner.width > 0 && owner.height > 0
         color: wave ? "black" : "#101114" // the stock lanes are black: on grey the stock fade over the left edge shows as a band
-        // Stock roots can hide an empty Engine slot. Restore their original bindings on exit.
-        Binding { target: scDisplay.owner; property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
+        // Stock roots can hide an empty Engine slot. Restore their original bindings on exit;
+        // never a value: read while the view was off screen, visible is false, and writing
+        // that back hid the stock lane for good (Engine mode showed no waveform).
+        Binding { target: scDisplay.owner; property: "visible"; value: true; when: scDisplay.active; restoreMode: Binding.RestoreBinding }
         Binding { target: scDisplay.owner; property: "enabled"; value: false; when: scDisplay.active; restoreMode: Binding.RestoreBindingOrValue }
         // The stock view under this one is fully covered: opacity 0 keeps its layout
         // but drops it from the scene graph (-2 % render thread at rest).
