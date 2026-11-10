@@ -7,8 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
@@ -22,6 +25,8 @@ type shadowSourceEntry struct {
 	queued    bool
 	working   bool
 	at        time.Time
+	// The worker's place in the file, for the receiver's progress ring.
+	read, size atomic.Int64
 }
 
 type shadowSourceCache struct {
@@ -30,7 +35,10 @@ type shadowSourceCache struct {
 	running bool
 }
 
-func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string) (*shadowDisplayAsset, error) {
+// sourceDisplayAsset is the display data of one of this player's tracks. With
+// detail it queues the detail waveform; without (Engine mode's cover) it is
+// read from the library as it is, and neither queued nor kept.
+func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string, detail bool) (*shadowDisplayAsset, error) {
 	c := &s.shadow.sourceDisplay
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -39,7 +47,19 @@ func (s *Server) sourceDisplayAsset(ctx context.Context, path, key string) (*sha
 	}
 	if e := c.entries[key]; e != nil && e.path == path {
 		e.at = time.Now()
+		if size := e.size.Load(); e.asset.DetailPending && size > 0 {
+			a := *e.asset // the cached asset stays immutable
+			a.DetailProgress = min(1, math.Round(float64(e.read.Load())/float64(size)*100)/100)
+			return &a, nil
+		}
 		return e.asset, nil
+	}
+	if !detail {
+		a, err := libraryDisplay(ctx, path, s.shadow.dataRoot, s.shadow.mediaRoot)
+		if err == nil {
+			a.Key, a.Version = key, 1
+		}
+		return a, err
 	}
 	if len(c.entries) >= 4 {
 		oldest := ""
@@ -94,10 +114,14 @@ func (s *Server) shadowSourceLoaded(key string) bool {
 
 type shadowSourceTicker struct {
 	s        *Server
+	job      *shadowSourceEntry
 	key      string
 	window   time.Time
 	deadline time.Time
 }
+
+// Progress is analyzer.ShadowProgress: the bytes of the file read so far.
+func (t *shadowSourceTicker) Progress(read int64) { t.job.read.Store(read) }
 
 func (t *shadowSourceTicker) Tick() error {
 	if time.Now().After(t.deadline) {
@@ -155,7 +179,10 @@ func (s *Server) shadowSourceWorker() {
 		job.queued = false
 		job.working = true
 		c.mu.Unlock()
-		ticker := &shadowSourceTicker{s: s, key: job.key, window: time.Now(), deadline: time.Now().Add(10 * time.Minute)}
+		ticker := &shadowSourceTicker{s: s, job: job, key: job.key, window: time.Now(), deadline: time.Now().Add(10 * time.Minute)}
+		if st, err := os.Stat(job.path); err == nil {
+			job.size.Store(st.Size())
+		}
 		var envelope *analyzer.ShadowEnvelope
 		err := ticker.Tick()
 		if err == nil {
