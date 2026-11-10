@@ -395,10 +395,17 @@ assert.strictEqual(vfx.enabled, false);
             old_root = bp.ROOT
             try:
                 bp.ROOT = "Skins/Embedded/"
-                deck_color_patch = bp.edits(False)[bp.ROOT + "Views/MainView/DeckInfo/DeckColor/DeckColor.qml"][0][1]
+                edits_map = bp.edits(False)
+                deck_color_patch = edits_map[bp.ROOT + "Views/MainView/DeckInfo/DeckColor/DeckColor.qml"][0][1]
+                dual_layer_patch = edits_map[bp.ROOT + "Views/ControlCenter/Tabs/Preferences/Entries/private/DualLayerColorSelect.qml"][0][1]
+                engine_conn_patch = edits_map[bp.ROOT + "Views/EngineConnect/EngineConnect.qml"][1][1]
             finally:
                 bp.ROOT = old_root
             js = re.sub(r"readonly property \w+ (\w+):", r"const \1 =", deck_color_patch)
+            dual_js = re.sub(r"readonly property var scLayerTr:", "const scLayerTr = (() =>", dual_layer_patch)
+            dual_js = dual_js.replace("        visible:", "        )();\n        const visible =")
+            conn_js = re.sub(r"readonly property var scLayerTr:", "const scLayerTr = (() =>", engine_conn_patch)
+            conn_js = conn_js.replace("                        deckLayer:", "                        )();\n                        const deckLayer =")
             script = r"""
 const assert = require('assert');
 const WHITE = {r: 1, g: 1, b: 1, a: 1, hex: '#ffffff'};
@@ -439,6 +446,47 @@ for (const blank of [WHITE, BLACK, TRANSPARENT]) {
 // Non-blank own color is preserved everywhere:
 assert.strictEqual(evalDeckColor('JC11', false, '12', 1, OWN_GREEN, prefs), OWN_GREEN);
 assert.strictEqual(evalDeckColor('JP07', true, '13', 1, OWN_GREEN, prefs), OWN_GREEN);
+
+function evalLayerFallback(role, propMap, index = 0, deckLayerIndex = 0) {
+    const root = {scFourDeckRole: role};
+    const enabled = true;
+    const asked = [];
+    const Planck = { getProperty(p) { asked.push(p); return p in propMap ? propMap[p] : null; } };
+    let visible, deckLayer;
+    { """ + dual_js.replace("const visible =", "visible =") + r""" }
+    { """ + conn_js.replace("const deckLayer =", "deckLayer =") + r""" }
+    return {visible, deckLayer, asked};
+}
+// Branch 1: primary property is null, fallback exists on Left (role 13) or Right (role 24):
+let r1 = evalLayerFallback('13', {'/GUI/Decks/Deck/Layer': null, '/GUI/Decks/DeckLeft/Layer': {translator: {numEntries: 2, entries: ['1', '3']}}}, 1, 1);
+assert.strictEqual(r1.visible, true);
+assert.strictEqual(r1.deckLayer, 'B');
+assert.ok(r1.asked.includes('/GUI/Decks/DeckLeft/Layer'));
+let r2 = evalLayerFallback('24', {'/GUI/Decks/Deck/Layer': null, '/GUI/Decks/DeckRight/Layer': {translator: {numEntries: 2, entries: ['2', '4']}}}, 0, 0);
+assert.strictEqual(r2.visible, true);
+assert.strictEqual(r2.deckLayer, 'A');
+assert.ok(r2.asked.includes('/GUI/Decks/DeckRight/Layer'));
+// Branch 2: primary property exists but translator is null:
+let r3 = evalLayerFallback('13', {'/GUI/Decks/Deck/Layer': {translator: null}, '/GUI/Decks/DeckLeft/Layer': {translator: {numEntries: 2, entries: ['1', '3']}}}, 0, 0);
+assert.strictEqual(r3.visible, true);
+assert.strictEqual(r3.deckLayer, 'A');
+// Branch 3: both primary and fallback are null / translator null (or 2-deck with missing property):
+for (const map of [
+    {},
+    {'/GUI/Decks/Deck/Layer': null, '/GUI/Decks/DeckLeft/Layer': null},
+    {'/GUI/Decks/Deck/Layer': {translator: null}, '/GUI/Decks/DeckLeft/Layer': {translator: null}},
+]) {
+    let rNone = evalLayerFallback('13', map, 0, 0);
+    assert.strictEqual(rNone.visible, false);
+    assert.strictEqual(rNone.deckLayer, '-');
+    let rTwoDeck = evalLayerFallback('', map, 0, 0);
+    assert.strictEqual(rTwoDeck.visible, false);
+    assert.strictEqual(rTwoDeck.deckLayer, '-');
+}
+// Stock 2-deck path with primary translator present:
+let rStock = evalLayerFallback('', {'/GUI/Decks/Deck/Layer': {translator: {numEntries: 2, entries: ['A', 'B']}}}, 1, 1);
+assert.strictEqual(rStock.visible, true);
+assert.strictEqual(rStock.deckLayer, 'B');
 """
             res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, res.stderr)
