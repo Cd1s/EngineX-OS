@@ -54,7 +54,7 @@ Rectangle {
             } else if (val.running) {
                 root.message = "LIVE · " + (val.connectedDevice || "MIDI Controller") + " → Deck " + val.targetDeck + " (" + (val.vinylMode ? "VINYL SCRATCH" : "CDJ PITCH BEND") + ")"
             } else if (val.enabled) {
-                root.message = "Waiting for USB MIDI controller (" + (val.presetName || "CDJ-400") + ")..."
+                root.message = val.matchHint || ("Waiting for USB MIDI controller (" + (val.presetName || "CDJ-400") + ")...")
             } else {
                 root.message = "Mapper disabled · Zero background polling · Hardware layers untouched."
             }
@@ -137,8 +137,9 @@ Rectangle {
                     }
                     Label {
                         text: "Preset: " + ((root.state && root.state.presetName) ? root.state.presetName : "Pioneer CDJ-400") +
-                              "  |  MIDI Port: " + ((root.state && root.state.connectedDevice) ? root.state.connectedDevice : "Auto-detect (ALSA Seq)")
-                        color: "#d4e2f4"; font.pixelSize: 13
+                              "  |  MIDI Port: " + ((root.state && root.state.connectedDevice) ? root.state.connectedDevice : ((root.state && root.state.enabled && root.state.matchHint) ? root.state.matchHint : "Auto-detect (preset match)"))
+                        color: (root.state && root.state.enabled && !root.state.connectedDevice) ? "#f5c56b" : "#d4e2f4"; font.pixelSize: 13
+                        elide: Text.ElideRight; Layout.fillWidth: true
                     }
                     Label {
                         text: "Drives internal Deck 3/4 directly via StateMap without switching the SC5000 hardware layer or stealing the active deck."

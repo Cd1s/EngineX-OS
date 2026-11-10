@@ -219,6 +219,8 @@ class ModTests(unittest.TestCase):
                 {**custom, "stormLimitPerSec": 10**12},
                 {**custom, "match": {"alsaClientPatterns": "CDJ"}},
                 {**custom, "match": {"alsaClientPatterns": [123]}},
+                {**custom, "match": {"usbIds": "08e4:0143"}},
+                {**custom, "match": {"usbIds": ["not-a-usb-id"]}},
                 {**custom, "controls": {"x": {"type": "note", "number": 200, "action": "toggle_play"}}},
                 {**custom, "controls": {"x": {"type": "note", "number": True, "action": "toggle_play"}}},
                 {**custom, "controls": {"x": {"type": "note", "number": 1, "action": "launch_missiles"}}},
@@ -344,6 +346,54 @@ class ModTests(unittest.TestCase):
             self.assertFalse(app.soft_locked)
             self.assertNotIn("speed", b_still_locked_out["values"])
             self.assertTrue(b_still_locked_out["values"]["speedOffsetDown"])
+
+            # N1: 'auto' must NOT fall back to devices[0] when only unrelated ALSA ports exist
+            fake_asound = types.SimpleNamespace(
+                snd_seq_connect_from=lambda seq, in_p, cid, pid: 0,
+                snd_seq_disconnect_from=lambda seq, in_p, cid, pid: 0,
+            )
+            with patch.object(app, "asound", fake_asound), patch.object(
+                app, "seq_handle", midi.ctypes.c_void_p(1)
+            ), patch.object(
+                app,
+                "list_alsa_devices",
+                return_value=[
+                    {
+                        "id": "128:0",
+                        "client": 128,
+                        "port": 0,
+                        "clientName": "SandboxTwist",
+                        "portName": "SandboxTwist Port 0",
+                        "usbId": "",
+                        "label": "SandboxTwist [128:0]",
+                    }
+                ],
+            ):
+                self.assertFalse(app._try_connect_device())
+                self.assertFalse(app.connected)
+                self.assertIn("SandboxTwist", app.status()["matchHint"])
+            # Matching by usbIds ('08e4:0143') connects even if clientName is generic
+            with patch.object(app, "asound", fake_asound), patch.object(
+                app, "seq_handle", midi.ctypes.c_void_p(1)
+            ), patch.object(
+                app,
+                "list_alsa_devices",
+                return_value=[
+                    {
+                        "id": "24:0",
+                        "client": 24,
+                        "port": 0,
+                        "clientName": "USB Audio MIDI",
+                        "portName": "MIDI 1",
+                        "usbId": "08e4:0143",
+                        "label": "USB Audio MIDI [24:0]",
+                    }
+                ],
+            ):
+                self.assertTrue(app._try_connect_device())
+                self.assertTrue(app.connected)
+                self.assertEqual(app.connected_client, 24)
+                self.assertEqual(app.status()["matchHint"], "")
 
             # Unrelated ALSA client exit must NOT disable the Mod
             app.connected = True
