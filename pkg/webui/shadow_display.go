@@ -732,6 +732,35 @@ func renderShadowWaveStyle(w enginedb.DisplayWave, width, height int, style shad
 			column(x, min(full, int(math.Ceil(amp*0.9*float64(full)))), pixel)
 			continue
 		}
+		if style.Half {
+			// Stock Praline overview at yScale 1, fitted on a 3-band screenshot
+			// (median 0.3 %, p95 1.3 % of the view height): low at the bottom, mid
+			// on it, high on top; each layer's share of the height depends on its
+			// own band only. Edge rows are blended by coverage.
+			share := [3]float64{
+				0.300 * float64(peak[0]) / 255,
+				0.0030 + 0.1837*math.Pow(min(1, float64(peak[1])/113.5), 1.72),
+				0.0129 + 0.1220*math.Pow(min(1, float64(peak[2])/51), 2.85),
+			}
+			from := 0.0
+			for band, s := range share {
+				to := min(float64(height), from+s*float64(height))
+				for r := int(from); float64(r) < to; r++ {
+					c, p := palette[band], img.NRGBAAt(x, height-1-r)
+					cover := (min(to, float64(r+1)) - max(from, float64(r))) * float64(c.A) / 255
+					if cover <= 0 {
+						continue
+					}
+					a := float64(p.A) / 255
+					mix := func(old, new uint8) uint8 {
+						return uint8(math.Round((float64(old)*a + float64(new)*cover) / (a + cover)))
+					}
+					img.SetNRGBA(x, height-1-r, color.NRGBA{mix(p.R, c.R), mix(p.G, c.G), mix(p.B, c.B), uint8(math.Round(min(1, a+cover) * 255))})
+				}
+				from = to
+			}
+			continue
+		}
 		// Layer the cumulative band amplitudes: lows outside, highs at center.
 		for band := range peak {
 			amp := 0

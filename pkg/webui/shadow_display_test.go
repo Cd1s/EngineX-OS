@@ -1116,6 +1116,7 @@ func TestOverviewHalfWaveGrowsFromTheBottomEdge(t *testing.T) {
 	for _, half := range []bool{false, true} {
 		if half {
 			q.Set("half", "1")
+			wave.Bands = []byte{255, 114, 51} // layer tops at 19.2, 31.1 and 39.8 rows
 		}
 		style, err := parseShadowWaveStyle(q)
 		if err != nil || style.Half != half {
@@ -1130,9 +1131,14 @@ func TestOverviewHalfWaveGrowsFromTheBottomEdge(t *testing.T) {
 			t.Fatal(err)
 		}
 		drawn := func(y int) bool { _, _, _, a := img.At(0, y).RGBA(); return a != 0 }
-		if half { // the local Praline overview: 29 rows up from the bottom edge
-			if !drawn(63) || !drawn(35) || drawn(34) || drawn(0) {
-				t.Fatal("half wave must grow from the bottom edge")
+		if half { // the local Praline overview: low, mid, high stacked from the bottom edge
+			at := func(row int) color.NRGBA { return color.NRGBAModel.Convert(img.At(0, 63-row)).(color.NRGBA) }
+			low, mid, high := color.NRGBA{0, 0, 255, 255}, color.NRGBA{0, 255, 0, 255}, color.NRGBA{255, 0, 0, 255}
+			if at(0) != low || at(18) != low || at(20) != mid || at(30) != mid || at(32) != high || at(38) != high {
+				t.Fatalf("stock stacking: %v %v %v %v %v %v", at(0), at(18), at(20), at(30), at(32), at(38))
+			}
+			if edge := at(39); edge.R != 255 || edge.A < 150 || edge.A > 250 || drawn(23) || drawn(0) {
+				t.Fatalf("top edge must be blended by coverage and stop at 39.8 rows: %v", edge)
 			}
 		} else if !drawn(32) || !drawn(31) || drawn(63) || drawn(0) || drawn(16) != drawn(47) {
 			t.Fatal("default stays mirrored around the centre")
