@@ -955,6 +955,70 @@ static void test_pioneer_fx(void)
     }
 }
 
+static void test_fx_knob_to_ms_and_time_mode(void)
+{
+    /* #162: Verify sc_pfx_knob_to_ms mapping and clamping */
+    CHECK(fabsf(sc_pfx_knob_to_ms(0.0f) - 1.0f) < 1e-4f);
+    CHECK(fabsf(sc_pfx_knob_to_ms(-0.5f) - 1.0f) < 1e-4f);
+    CHECK(fabsf(sc_pfx_knob_to_ms(0.5f) - 200.0f) < 1e-4f);
+    CHECK(fabsf(sc_pfx_knob_to_ms(1.0f) - 900.0f) < 1e-4f);
+    CHECK(fabsf(sc_pfx_knob_to_ms(1.5f) - 900.0f) < 1e-4f);
+    CHECK(fabsf(sc_pfx_knob_to_ms(0.25f) - 50.75f) < 1e-4f);
+    CHECK(fabsf(sc_pfx_knob_to_ms(0.75f) - 375.0f) < 1e-4f);
+
+    /* Verify strict monotonic increase */
+    float prev_ms = 0.0f;
+    for (int step = 0; step <= 100; step++) {
+        float t = (float)step / 100.0f;
+        float ms = sc_pfx_knob_to_ms(t);
+        CHECK(ms >= prev_ms);
+        prev_ms = ms;
+    }
+
+    /* Verify time_mode_ms in sc_pioneer_fx */
+    struct sc_pioneer_fx fx;
+    memset(&fx, 0, sizeof(fx));
+    fx.time_mode_ms = 1;
+    fx.time_ms = 125.0f;
+    fx.controlled = 0;
+
+    float block_l[128], block_r[128];
+    for (int i = 0; i < 128; i++) {
+        block_l[i] = 0.2f;
+        block_r[i] = -0.2f;
+    }
+    sc_pioneer_fx_planar(&fx, block_l, block_r, 128, SC_PFX_SPIRAL);
+    for (int i = 0; i < 128; i++) {
+        CHECK(isfinite(block_l[i]) && isfinite(block_r[i]));
+    }
+    /* target delay = 125.0f * 48.0f = 6000.0f; delay_smooth should have converged towards it */
+    CHECK(fx.delay_smooth > 100.0f && fx.delay_smooth <= 6000.0f);
+
+    /* Controlled knob mode: default center 0.5f directly uses fx.time_ms (200 ms -> 9600 frames) */
+    fx.controlled = 1;
+    fx.time = 0.5f;
+    fx.time_ms = 200.0f;
+    for (int b = 0; b < 20; b++) {
+        for (int i = 0; i < 128; i++) {
+            block_l[i] = 0.1f;
+            block_r[i] = 0.1f;
+        }
+        sc_pioneer_fx_planar(&fx, block_l, block_r, 128, SC_PFX_DUB_ECHO);
+    }
+    CHECK(fabsf(fx.delay_smooth - 9600.0f) < 50.0f);
+
+    /* Controlled knob mode: moved knob (> 0.01 deviation) uses sc_pfx_knob_to_ms (0.75f -> 375 ms -> 18000 frames) */
+    fx.time = 0.75f;
+    for (int b = 0; b < 30; b++) {
+        for (int i = 0; i < 128; i++) {
+            block_l[i] = 0.1f;
+            block_r[i] = 0.1f;
+        }
+        sc_pioneer_fx_planar(&fx, block_l, block_r, 128, SC_PFX_DUB_ECHO);
+    }
+    CHECK(fabsf(fx.delay_smooth - 18000.0f) < 50.0f);
+}
+
 int main(void)
 {
     test_finite();
@@ -972,6 +1036,7 @@ int main(void)
     test_echo_out();
     test_pioneer_fx();
     test_slip_roll_seam();
+    test_fx_knob_to_ms_and_time_mode();
     if (failures) {
         fprintf(stderr, "%d check(s) failed\n", failures);
         return EXIT_FAILURE;

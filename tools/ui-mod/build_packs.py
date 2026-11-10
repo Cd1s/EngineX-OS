@@ -710,6 +710,8 @@ SERVICES_MAIN = """
 	}
 	property bool scBeatJumpPads: false
 	property string scPioneerFx: "off"
+	property string scFxTimeMode: "beats"
+	property int scFxTimeMs: 500
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
 	property bool scUpdating: false
@@ -952,6 +954,10 @@ SERVICES_MAIN = """
 			else if (v.beat_jump_pads !== undefined) scBeatJumpPads = v.beat_jump_pads === "1" || v.beat_jump_pads === 1 || v.beat_jump_pads === true
 			if (v.pioneerFx !== undefined) scPioneerFx = v.pioneerFx || "off"
 			else if (v.pioneer_fx !== undefined) scPioneerFx = v.pioneer_fx || "off"
+			if (v.fxTimeMode !== undefined) scFxTimeMode = v.fxTimeMode || "beats"
+			else if (v.fx_time_mode !== undefined) scFxTimeMode = v.fx_time_mode || "beats"
+			if (v.fxTimeMs !== undefined) { const n = parseInt(v.fxTimeMs) || 500; scFxTimeMs = (n >= 1 && n <= 900) ? n : 500 }
+			else if (v.fx_time_ms !== undefined) { const n = parseInt(v.fx_time_ms) || 500; scFxTimeMs = (n >= 1 && n <= 900) ? n : 500 }
 		}
 		if (scStemsEqMode && !scStemsEqApplied) {
 			scStemsEqApplied = true
@@ -985,6 +991,8 @@ SERVICES_MAIN = """
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
+			else if (key === "fx_time_mode") root.scFxTimeMode = val || "beats"
+			else if (key === "fx_time_ms") { const n = parseInt(val) || 500; root.scFxTimeMs = (n >= 1 && n <= 900) ? n : 500 }
 		}
 	}
 	function scSyncBroadcastMeta() {
@@ -1587,6 +1595,13 @@ PLAYBACK_ENTRIES = """
 			values: ["Off", "Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scPioneerFx))]
 			onSelected: function(index) { root.scCall("pioneerFx=" + ids[index]) }
+		},
+		EntryBase.ListEntry {
+			text: "Beat FX Time Mode"
+			readonly property var ids: ["beats", "ms"]
+			values: ["Beats", "Milliseconds (ms)"]
+			currentValue: values[Math.max(0, ids.indexOf(root.scFxTimeMode))]
+			onSelected: function(index) { root.scCall("fxTimeMode=" + ids[index]) }
 		},
 """
 
@@ -2670,6 +2685,69 @@ def edits(dev: bool):
                     ("    textSwipeInvalid: ((readyToCommit", "    textSwipeInvalid: scDeck > 0 ? \"\" : ((readyToCommit"),
                 ]
     if v53():
+        out[ROOT + "Views/MainView/Fx/DJFxSpinner.qml"] = [
+            (
+                "            LabelWithLED {\n"
+                "                id: header\n"
+                "                parameter: spinner.parameter\n"
+                "            }\n",
+                "            LabelWithLED {\n"
+                "                id: header\n"
+                "                parameter: spinner.parameter\n"
+                "                MouseArea {\n"
+                "                    anchors.fill: parent\n"
+                '                    enabled: spinner.label === "Beats"\n'
+                "                    onClicked: {\n"
+                '                        if (typeof root !== "undefined" && root && root.scCall) {\n'
+                '                            root.scCall("fxTimeMode=" + (root.scFxTimeMode === "ms" ? "beats" : "ms"))\n'
+                "                        }\n"
+                "                    }\n"
+                "                }\n"
+                "            }\n",
+            ),
+            (
+                '                text: parameter ? parameter.valueText : ""\n',
+                '                text: (spinner.label === "Beats" && typeof root !== "undefined" && root && root.scFxTimeMode === "ms") ? (root.scFxTimeMs + " ms") : (parameter ? parameter.valueText : "")\n',
+            ),
+            (
+                '                objectName: "DJFx_Beats_Decrease_Button"\n'
+                "                onClicked: parameter.decValue()\n",
+                '                objectName: "DJFx_Beats_Decrease_Button"\n'
+                "                onClicked: {\n"
+                '                    if (spinner.label === "Beats" && typeof root !== "undefined" && root && root.scFxTimeMode === "ms") {\n'
+                "                        const steps = [1, 5, 10, 20, 40, 70, 95, 125, 160, 200, 250, 333, 500, 600, 750, 900]\n"
+                "                        let cur = root.scFxTimeMs || 500\n"
+                "                        if (cur > 900) cur = 900\n"
+                "                        let nextMs = steps[0]\n"
+                "                        for (let i = steps.length - 1; i >= 0; i--) {\n"
+                "                            if (steps[i] < cur) { nextMs = steps[i]; break }\n"
+                "                        }\n"
+                '                        root.scCall("fxTimeMs=" + nextMs)\n'
+                "                    } else if (parameter) {\n"
+                "                        parameter.decValue()\n"
+                "                    }\n"
+                "                }\n",
+            ),
+            (
+                '                objectName: "DJFx_Beats_Increase_Button"\n'
+                "                onClicked: parameter.incValue()\n",
+                '                objectName: "DJFx_Beats_Increase_Button"\n'
+                "                onClicked: {\n"
+                '                    if (spinner.label === "Beats" && typeof root !== "undefined" && root && root.scFxTimeMode === "ms") {\n'
+                "                        const steps = [1, 5, 10, 20, 40, 70, 95, 125, 160, 200, 250, 333, 500, 600, 750, 900]\n"
+                "                        let cur = root.scFxTimeMs || 500\n"
+                "                        let nextMs = steps[steps.length - 1]\n"
+                "                        for (let i = 0; i < steps.length; i++) {\n"
+                "                            if (steps[i] > cur) { nextMs = steps[i]; break }\n"
+                "                        }\n"
+                "                        if (nextMs > 900) nextMs = 900\n"
+                '                        root.scCall("fxTimeMs=" + nextMs)\n'
+                "                    } else if (parameter) {\n"
+                "                        parameter.incValue()\n"
+                "                    }\n"
+                "                }\n",
+            ),
+        ]
         # Stock settings a board flag hides although Engine registers the property on every
         # board measured (JP07, JP11, JP13, JC11, NH08 in the #77 sandbox dump). Each gate
         # keeps its flag and adds the property check, so a board without it stays stock.

@@ -201,9 +201,9 @@
         { k: "h", id: "profile", x: L("2. 个人偏好（User Profile）", "2. 個人偏好（User Profile）", "2. User Profile"), nav: L("2. 个人偏好", "2. 個人偏好", "2. User Profile") },
         { k: "table", head: [L("分组", "分組", "Group"), L("开关", "開關", "Settings")], rows: [
           [L("`Playback` 播放与音频 DSP", "`Playback` 播放與音訊 DSP", "`Playback` (playback & audio DSP)"),
-           L("`Master Soft Clipper`（主输出软限幅）、`Auto-Gain`（0 dB 自动增益）、`Echo Out`（推杆回音）、`Stems EQ Mode`（分轨 EQ 映射）、`Color FX Style`（先锋风格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
-             "`Master Soft Clipper`（主輸出軟限幅）、`Auto-Gain`（0 dB 自動增益）、`Echo Out`（推桿回音）、`Stems EQ Mode`（分軌 EQ 映射）、`Color FX Style`（先鋒風格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
-             "`Master Soft Clipper`, `Auto-Gain` (0 dB), `Echo Out`, `Stems EQ Mode` (stem-to-EQ mapping), `Color FX Style` (Pioneer-style `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`, #88)")],
+           L("`Master Soft Clipper`（主输出软限幅）、`Beat FX Time Mode`（毫秒/拍数切换）、`Auto-Gain`（0 dB 自动增益）、`Echo Out`（推杆回音）、`Stems EQ Mode`（分轨 EQ 映射）、`Color FX Style`（先锋风格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
+             "`Master Soft Clipper`（主輸出軟限幅）、`Beat FX Time Mode`（毫秒/拍數切換）、`Auto-Gain`（0 dB 自動增益）、`Echo Out`（推桿回音）、`Stems EQ Mode`（分軌 EQ 映射）、`Color FX Style`（先鋒風格 `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`，#88）",
+             "`Master Soft Clipper`, `Beat FX Time Mode`, `Auto-Gain` (0 dB), `Echo Out`, `Stems EQ Mode` (stem-to-EQ mapping), `Color FX Style` (Pioneer-style `Spiral` / `Pitch Echo` / `Slip Roll` / `Dub Echo` / `Space`, #88)")],
           ["`Cues/Loops`", "`Beat Jump Pad Bank`、`Swap Loop / Beat Jump`"],
           [L("`Safety` 演出防呆", "`Safety` 演出防呆", "`Safety` (gig safety)"), L("`Sync Guard Tolerance`（BPM 同步防呆范围：`Off` / `10%` / `15%` / `20%`）", "`Sync Guard Tolerance`（BPM 同步防呆範圍：`Off` / `10%` / `15%` / `20%`）", "`Sync Guard Tolerance` (BPM range the sync guard accepts: `Off` / `10%` / `15%` / `20%`)")],
           [L("`Library` 曲库", "`Library` 曲庫", "`Library`"),
@@ -408,6 +408,9 @@
         { k: "h", id: "dsp", x: L("DSP 音质增强与先锋风格 FX", "DSP 音質增強與先鋒風格 FX", "DSP quality & Pioneer-style FX"), nav: L("DSP 音质增强", "DSP 音質增強", "DSP quality") },
         { k: "ul", x: [
           L("**先锋风格 Beat FX 与 Sound Color FX（#88）**：在 Engine 音频回调里实时模拟 **`Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo`、`Space`** 五种经典效果，以及 **`Stems EQ Mode`**（分轨 EQ 映射），可在 `个人偏好 → Playback → Color FX Style` 切换（默认关闭）。", "**先鋒風格 Beat FX 與 Sound Color FX（#88）**：於 Engine 音訊回呼中即時模擬 **`Spiral`、`Pitch Echo`、`Slip Roll`、`Dub Echo`、`Space`** 五種經典效果，以及 **`Stems EQ Mode`**（分軌 EQ 映射），可於 `個人偏好 → Playback → Color FX Style` 切換（預設關閉）。", "**Pioneer-style Beat FX & Sound Color FX (#88)**: real-time audio-callback emulation of **`Spiral`, `Pitch Echo`, `Slip Roll`, `Dub Echo` and `Space`**, plus **`Stems EQ Mode`**, selectable under `User Profile → Playback → Color FX Style` (off by default)."),
+          L("**Beat FX 毫秒与拍数时间切换（#162）**：点击屏幕 Beat FX 旋钮上的 Beats 标签可在节拍与自由毫秒之间切换，作用于 Pioneer Beat FX DSP（1–900 ms，Slip Roll 11–250 ms），+/- 按钮按预设阶梯（1..900 ms）平滑调节扫频。",
+            "**Beat FX 毫秒與拍數時間切換（#162）**：點擊螢幕 Beat FX 旋鈕上的 Beats 標籤可在節拍與自由毫秒之間切換，作用於 Pioneer Beat FX DSP（1–900 ms，Slip Roll 11–250 ms），+/- 按鈕依預設階梯（1..900 ms）平滑調節掃頻。",
+            "**Beat FX millisecond & beat time switching (#162)**: tap the Beats label on the on-screen Beat FX spinner to switch between quantized beats and free milliseconds for Pioneer Beat FX DSP (1–900 ms, Slip Roll 11–250 ms), stepping smoothly through preset intervals without sweep clicks."),
           L("**切效果器零爆音**：开关 / 切换 FX 时的“咔嗒”消除，双轨同时开效果器也平滑淡入。", "**切效果器零爆音**：開關 / 切換 FX 時的「喀嗒」消除，雙軌同時開效果器也平滑淡入。", "**Click-free FX**: the click when toggling or switching FX is gone, even with FX on both decks."),
           L("**0dB 防破音软限幅**：平滑曲线把主输出压在 -0.1 dBFS 以下，零延迟，-1.5 dBFS 以下原样不动。", "**0dB 防破音軟限幅**：平滑曲線把主輸出壓在 -0.1 dBFS 以下，零延遲，-1.5 dBFS 以下原樣不動。", "**0 dB soft limiter**: a smooth curve keeps the main output below -0.1 dBFS with zero latency and leaves signals under -1.5 dBFS untouched."),
           L("**自动增益（0 dB 归一化）**：把偏小的歌平滑提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下静音不提升），之后总经过软限幅（默认关闭）。", "**自動增益（0 dB 正規化）**：把偏小的歌平滑提到接近 0 dBFS（最多 +9 dB，-42 dBFS 以下靜音不提升），之後總經過軟限幅（預設關閉）。", "**Auto-Gain (0 dB normalise)**: lifts quiet songs smoothly towards 0 dBFS (up to +9 dB, silence below -42 dBFS is not boosted) and always passes through the soft limiter (off by default)."),

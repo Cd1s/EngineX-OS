@@ -38,6 +38,7 @@ var (
 	// UI Scale presets: the QML mod scales the loaded UI live (EmbeddedMain uiLoader).
 	uiUIScales       = []int{110, 105, 100, 95, 90, 85, 80, 75}
 	uiPioneerFxModes = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
+	uiFxTimeModes    = []string{"beats", "ms"}
 )
 
 const (
@@ -99,6 +100,8 @@ type uiSettings struct {
 	StemsEqMode  bool   `json:"stemsEqMode"`
 	BeatJumpPads bool   `json:"beatJumpPads"`
 	PioneerFx    string `json:"pioneerFx"`
+	FxTimeMode   string `json:"fxTimeMode"`
+	FxTimeMs     int    `json:"fxTimeMs"`
 
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
@@ -182,6 +185,7 @@ func (s *Server) loadUI() uiSettings {
 		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, Jog: "static", NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ProlinkWaveform: true,
 		TracklistWaveform: true,
 		StreamSortRole:    "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
+		FxTimeMode: "beats", FxTimeMs: 500,
 	}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
@@ -300,6 +304,14 @@ func (s *Server) loadUI() uiSettings {
 			if slices.Contains(uiPioneerFxModes, val) {
 				v.PioneerFx = val
 			}
+		case "fx_time_mode":
+			if slices.Contains(uiFxTimeModes, val) {
+				v.FxTimeMode = val
+			}
+		case "fx_time_ms":
+			if n, err := strconv.Atoi(val); err == nil && n >= 1 && n <= 900 {
+				v.FxTimeMs = n
+			}
 		}
 	}
 	if saved { // services added since the file was written start enabled; ones turned off stay off
@@ -416,6 +428,12 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.PioneerFx != "" && v.PioneerFx != "off" {
 		text += "pioneer_fx=" + v.PioneerFx + "\n"
 	}
+	if v.FxTimeMode == "ms" {
+		text += "fx_time_mode=ms\n"
+	}
+	if v.FxTimeMs != 500 && v.FxTimeMs >= 1 && v.FxTimeMs <= 900 {
+		text += "fx_time_ms=" + strconv.Itoa(v.FxTimeMs) + "\n"
+	}
 	if v.GitHubRepo != defaultGitHubRepo {
 		text += "github_repo=" + v.GitHubRepo + "\n"
 	}
@@ -516,7 +534,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) {
+	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("jog", q.Get("jog"), uiJogModes) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -632,6 +650,18 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("pioneerFx") {
 		v.PioneerFx = q.Get("pioneerFx")
+	}
+	if q.Has("fxTimeMode") {
+		v.FxTimeMode = q.Get("fxTimeMode")
+	}
+	if q.Has("fxTimeMs") {
+		n, err := strconv.Atoi(q.Get("fxTimeMs"))
+		if err != nil || n < 1 || n > 900 {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.FxTimeMs = n
 	}
 	var (
 		hasBroadcast bool

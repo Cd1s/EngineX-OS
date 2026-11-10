@@ -139,11 +139,18 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
 static int pioneer_fx_mode;           // #88 Pioneer FX emulations
+static int pfx_time_mode_ms;          // #162 fx_time_mode=ms
+static uint32_t pfx_time_ms_bits;     // #162 fx_time_ms=<val> as float bits
+
+static inline uint32_t sc_f32_to_bits(float f) { uint32_t u; memcpy(&u, &f, sizeof u); return u; }
+static inline float sc_bits_to_f32(uint32_t u) { float f; memcpy(&f, &u, sizeof f); return f; }
 
 static void *lim_poll(void *arg) {
     (void)arg;
     for (;;) {
         int on = 0, gain = 0, echo = 0, pioneer_fx = 0;
+        int fx_time_mode = 0;
+        float fx_time_ms_val = 500.0f;
         FILE *f = fopen(UI_ROOT "/settings.conf", "r");
         if (f) {
             char line[64];
@@ -151,6 +158,13 @@ static void *lim_poll(void *arg) {
                 if (!strncmp(line, "master_limiter=1", 16)) on = 1;
                 else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
                 else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
+                else if (!strncmp(line, "fx_time_mode=", 13)) {
+                    if (!strncmp(line + 13, "ms", 2)) fx_time_mode = 1;
+                }
+                else if (!strncmp(line, "fx_time_ms=", 11)) {
+                    float n = (float)atof(line + 11);
+                    if (n >= 1.0f && n <= 900.0f) fx_time_ms_val = n;
+                }
                 else if (!strncmp(line, "pioneer_fx=", 11)) {
                     char val[64];
                     size_t len = strcspn(line + 11, "\r\n");
@@ -166,6 +180,8 @@ static void *lim_poll(void *arg) {
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
         __atomic_store_n(&echo_enabled, echo, __ATOMIC_RELAXED);
         __atomic_store_n(&pioneer_fx_mode, pioneer_fx, __ATOMIC_RELAXED);
+        __atomic_store_n(&pfx_time_mode_ms, fx_time_mode, __ATOMIC_RELAXED);
+        __atomic_store_n(&pfx_time_ms_bits, sc_f32_to_bits(fx_time_ms_val), __ATOMIC_RELAXED);
         sleep(1);
     }
     return NULL;
@@ -416,8 +432,13 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
     }
     // #88 Pioneer FX emulations (Spiral / Pitch Echo / Slip Roll / Dub Echo / Space)
     int pfx = __atomic_load_n(&pioneer_fx_mode, __ATOMIC_RELAXED);
+    int t_mode = __atomic_load_n(&pfx_time_mode_ms, __ATOMIC_RELAXED);
+    float t_ms = sc_bits_to_f32(__atomic_load_n(&pfx_time_ms_bits, __ATOMIC_RELAXED));
+    if (!(t_ms >= 1.0f && t_ms <= 900.0f)) t_ms = 500.0f;
     if (out && frames > 0) { // also when OFF: lets the effect reset its state
         for (int ch = 0; ch < out_channels && ch / 2 < MASTER_PFX_PAIRS; ch += 2) {
+            master_pfx[ch / 2].time_mode_ms = t_mode;
+            master_pfx[ch / 2].time_ms = t_ms;
             if (out[ch]) {
                 float *r = ch + 1 < out_channels ? out[ch + 1] : NULL;
                 sc_pioneer_fx_planar(&master_pfx[ch / 2], out[ch], r, (unsigned)frames, pfx);
