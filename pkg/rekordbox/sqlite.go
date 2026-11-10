@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -181,9 +180,6 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		if r.get("bpmx100") != "" || bpm > 1000 {
 			bpm /= 100
 		}
-		if bpm < 0 || bpm > 1000 || math.IsNaN(bpm) || math.IsInf(bpm, 0) {
-			bpm = 0
-		}
 		key := r.get("key_name")
 		if key == "" {
 			key = lookups["key"][r.num("key_id")]
@@ -198,6 +194,7 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		if t.Album == "" {
 			t.Album = r.get("album")
 		}
+		normalizeParsedAudioMetadata(&t)
 		t.RecordHash = RecordHash(t)
 		l.Tracks = append(l.Tracks, t)
 	}

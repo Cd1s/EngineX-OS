@@ -63,7 +63,7 @@ func TestBridgeSchemaHealerAndDeletionInterop(t *testing.T) {
 	}
 }
 
-func TestWriteEntitiesSkipsUnmappedTrack(t *testing.T) {
+func TestWriteEntitiesPreservesEntityChain(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -81,32 +81,35 @@ func TestWriteEntitiesSkipsUnmappedTrack(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	// Track 1 is mapped, Track 2 is unmapped (e.g. absent from disk), Track 3 is mapped
+	// All tracks are mapped; repeated membership keeps first occurrence order.
 	mapping := map[uint32]int64{1: 101, 3: 103}
-	tracks := []uint32{1, 2, 3}
+	tracks := []uint32{1, 3, 1}
 	if err := writeEntities(context.Background(), tx, 1, tracks, mapping, "test-uuid"); err != nil {
-		t.Fatalf("writeEntities failed on unmapped track: %v", err)
+		t.Fatalf("writeEntities failed: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 
-	rows, err := db.Query(`SELECT trackId, nextEntityId FROM PlaylistEntity WHERE listId=1 ORDER BY id`)
+	rows, err := db.Query(`SELECT id, trackId, nextEntityId FROM PlaylistEntity WHERE listId=1 ORDER BY id`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
 
 	type ent struct {
-		trackID, nextEntityID int64
+		id, trackID, nextEntityID int64
 	}
 	var ents []ent
 	for rows.Next() {
 		var e ent
-		if err := rows.Scan(&e.trackID, &e.nextEntityID); err != nil {
+		if err := rows.Scan(&e.id, &e.trackID, &e.nextEntityID); err != nil {
 			t.Fatal(err)
 		}
 		ents = append(ents, e)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 
 	if len(ents) != 2 {
@@ -116,7 +119,7 @@ func TestWriteEntitiesSkipsUnmappedTrack(t *testing.T) {
 		t.Fatalf("unexpected tracks in playlist: %+v", ents)
 	}
 	// Entity 1 should chain to Entity 2
-	if ents[0].nextEntityID == 0 || ents[1].nextEntityID != 0 {
+	if ents[0].nextEntityID != ents[1].id || ents[1].nextEntityID != 0 {
 		t.Fatalf("entity chain broken: %+v", ents)
 	}
 }
