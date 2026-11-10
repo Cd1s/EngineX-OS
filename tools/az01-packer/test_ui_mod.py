@@ -1171,5 +1171,26 @@ assert.equal(starts.length,3002);
 """)
 
 
+    def test_receiver_carries_the_position_on_at_the_measured_rate(self):
+        # stream-sync measures how fast the other player's deck really runs (its audio
+        # clock is -165 ppm on ours, its pitch is rounded): `rate` in the reply.
+        self.js(r"""
+const deck=(pos,extra)=>Object.assign({deck:2,key:'A',playing:true,positionMs:pos,at:now,pitch:3.12},extra||{});
+scShadowApplyDisplay([deck(1000)]);
+let s=scShadowData(2); assert.equal(s.rate,0); assert.equal(scShadowRate(s),1.0312); // none yet: by the pitch
+now+=60000; scShadowLive.seen=now;
+// The line is 10 ms behind the pitch after a minute: the same sample takes the rate.
+scShadowApplyDisplay([deck(1000+60000*1.0312-10,{rate:1.031028})]);
+assert.strictEqual(scShadowData(2),s); assert.equal(s.rate,1.031028); assert.equal(scShadowRate(s),1.031028);
+const at=now, pos=s.positionMs;
+now+=600000; scShadowLive.seen=now;
+assert(Math.abs(scShadowPosition(s,now)-(pos+600000*1.031028))<1e-6); // ten minutes on: by the rate, 103 ms short of the pitch
+// A reply on that line is the same picture; one on the pitch's line is not.
+scShadowApplyDisplay([deck(pos+600000*1.031028+3,{rate:1.031028})]); assert.strictEqual(scShadowData(2),s);
+scShadowApplyDisplay([deck(pos+600000*1.031028+50,{rate:1.031028})]); assert.notStrictEqual(scShadowData(2),s);
+assert.equal(scShadowData(2).rate,1.031028);
+""")
+
+
 if __name__ == "__main__":
     unittest.main()

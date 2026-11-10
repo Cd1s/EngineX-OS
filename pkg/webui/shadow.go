@@ -65,11 +65,14 @@ type deckState struct {
 	Playing      bool    `json:"playing"`
 	PositionMS   float64 `json:"positionMs"`
 	Pitch        float64 `json:"pitch"` // percent
-	Master       bool    `json:"master,omitempty"`
-	Sync         bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
-	BPM          float64 `json:"bpm,omitempty"`        // the track's
-	CurrentBPM   float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
-	Beat         float64 `json:"beat,omitempty"`       // Engine's BeatNumber: beats into the bar, 0..4
+	// Rate is how fast PositionMS runs on the receiver's clock, track ms per ms,
+	// measured (peerDeck.skew). Absent: 1 + Pitch/100.
+	Rate       float64 `json:"rate,omitempty"`
+	Master     bool    `json:"master,omitempty"`
+	Sync       bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
+	BPM        float64 `json:"bpm,omitempty"`        // the track's
+	CurrentBPM float64 `json:"currentBpm,omitempty"` // an EngineX deck's played tempo (Pitch is derived from it)
+	Beat       float64 `json:"beat,omitempty"`       // Engine's BeatNumber: beats into the bar, 0..4
 	// At is when PositionMS was read, Unix ms on this machine's clock: the QML's
 	// GUI thread and our niced HTTP handler both lag by tens of ms, so the
 	// position is extrapolated from the sample time, not from arrival.
@@ -116,7 +119,27 @@ type peerDeck struct {
 	// from until the next bump. Updates on this line do not bump (see takePeer).
 	anchorPos float64
 	anchorAt  time.Time
-	local     string // this deck's own copy of the track, see localPeerTrack
+	// skew is how far the deck runs off its pitch on this machine's clock, as a
+	// fraction: the peer's audio clock against our system clock (-165 ppm on two
+	// SC5000) and its pitch, which is rounded to 0.01 %. Measured from ref, the
+	// present line once it has settled, and kept across tracks and pitches.
+	skew   float64
+	refPos float64
+	refAt  time.Time
+	local  string // this deck's own copy of the track, see localPeerTrack
+}
+
+// speed is how fast the deck's position runs on this machine's clock.
+func (p peerDeck) speed() float64 { return (1 + p.Pitch/100) * (1 + p.skew) }
+
+// carried is the deck's position d ago moved on to now, and the Rate to carry
+// it further with once that is measured.
+func (p peerDeck) carried(d time.Duration) (pos, rate float64) {
+	pos = p.PositionMS + float64(d.Microseconds())/1000*p.speed()
+	if p.skew != 0 {
+		rate = math.Round(p.speed()*1e6) / 1e6
+	}
+	return pos, rate
 }
 
 type peerLocalFile struct {
@@ -127,12 +150,27 @@ type peerLocalFile struct {
 // Tolerances of samePeerPicture: a playing deck's position may run this far off
 // the line the QML extrapolates before the long poll is woken. The sender posts a
 // filtered line (a few ms of noise) and reports a slip of 15 ms at once (jog
-// nudge, its audio clock against the nominal pitch); the QML keeps its scroll
-// within 12 ms and glides over anything larger, so more than that must reach it.
+// nudge, its audio clock against the nominal pitch); the QML steers its scroll
+// to the line it has, so more than that must reach it.
 // A paused deck must not move at all.
 const (
 	shadowPlayingDriftMS = 12
 	shadowPausedDriftMS  = 0.5
+)
+
+// A deck's speed is measured over at least shadowSkewSpan of one line, from
+// updates that came within shadowSkewLateMS of the quickest trip (each is a few
+// ms of noise: 30 s gives ~50 ppm, and the span grows with the line). The line
+// counts from shadowSkewSettle on: the sender's first post of a line is up to
+// 12 ms behind, its next one (5 s) is not. The speed in use stays until the
+// line it gives misses an update by shadowSkewOffMS, which is beyond the noise.
+// A result beyond shadowSkewMax is a nudge inside the tolerance, not a clock.
+const (
+	shadowSkewSettle = 6 * time.Second
+	shadowSkewSpan   = 30 * time.Second
+	shadowSkewLateMS = 2
+	shadowSkewOffMS  = 2
+	shadowSkewMax    = 500e-6
 )
 
 // samePeerPicture is true when d shows what old already shows: the same track,
@@ -150,7 +188,7 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	if !o.Playing {
 		return math.Abs(old.anchorPos-d.PositionMS) <= shadowPausedDriftMS
 	}
-	expect := old.anchorPos + float64(now.Sub(old.anchorAt).Microseconds())/1000*(1+o.Pitch/100)
+	expect := old.anchorPos + float64(now.Sub(old.anchorAt).Microseconds())/1000*old.speed()
 	return math.Abs(expect-d.PositionMS) <= shadowPlayingDriftMS
 }
 
@@ -608,10 +646,30 @@ func (sh *shadowState) takePeer(ip string, decks []deckState, now time.Time) {
 		if d.Playing && !d.Stale {
 			d.PositionMS += late * (1 + d.Pitch/100)
 		}
-		d.Sent = 0
+		d.Sent, d.Rate = 0, 0
 		p := peerDeck{deckState: d, ip: ip, at: now, anchorPos: d.PositionMS, anchorAt: now}
-		if old, ok := sh.peerDecks[slot]; ok && (old.ip == ip || old.Link != "" && old.Link == d.Link) && samePeerPicture(old, d, now) {
-			p.anchorPos, p.anchorAt = old.anchorPos, old.anchorAt
+		old, ok := sh.peerDecks[slot]
+		if ok = ok && (old.ip == ip || old.Link != "" && old.Link == d.Link); ok {
+			p.skew = old.skew
+		}
+		if ok && samePeerPicture(old, d, now) {
+			p.anchorPos, p.anchorAt, p.refPos, p.refAt = old.anchorPos, old.anchorAt, old.refPos, old.refAt
+			// The line's own slope, once it is long enough to tell: anchored anew
+			// with the new speed, which reaches the QML as a few ms to steer over.
+			if d.Playing && late <= shadowSkewLateMS {
+				if p.refAt.IsZero() {
+					if now.Sub(p.anchorAt) >= shadowSkewSettle {
+						p.refPos, p.refAt = d.PositionMS, now
+					}
+				} else if span := now.Sub(p.refAt); span >= shadowSkewSpan {
+					run := float64(span.Microseconds()) / 1000 * (1 + d.Pitch/100)
+					skew := (d.PositionMS-p.refPos)/run - 1
+					if math.Abs(skew) <= shadowSkewMax && math.Abs(skew-p.skew)*run >= shadowSkewOffMS {
+						p.skew, p.anchorPos, p.anchorAt = skew, d.PositionMS, now
+						changed = true
+					}
+				}
+			}
 		} else {
 			changed = true
 		}
@@ -1081,7 +1139,7 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 			d.Master = false
 		}
 		if d.Playing {
-			d.PositionMS += float64(now.Sub(p.at).Milliseconds()) * (1 + d.Pitch/100)
+			d.PositionMS, d.Rate = p.carried(now.Sub(p.at))
 		}
 		d.Path = resolveNetPathFile(d.Net, sh.dataRoot, sh.mediaRoot, false)
 		if d.Path == "" && d.Key != "" {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -353,5 +354,76 @@ func TestTakePeerCarriesALateUpdateOn(t *testing.T) {
 	// The peer's clock stepped 2 s: not a 2 s trip.
 	if got := take(5, 4000, -time.Second, 1900*time.Millisecond, false); got != 4000 {
 		t.Fatalf("stepped clock moved the deck to %v", got)
+	}
+}
+
+// Two players' clocks: the peer's audio runs -165 ppm against our system clock
+// and its pitch is rounded. Carried on at the pitch alone the picture is 100 ms
+// off after ten minutes, or steps 12 ms every minute.
+func TestTakePeerMeasuresTheDecksSpeed(t *testing.T) {
+	sh := newShadowState()
+	t0 := time.Now()
+	const pitch, skew = 3.12, -165e-6
+	speed := (1 + pitch/100) * (1 + skew)
+	noise := []float64{0, 0.8, -0.6, 0.3, -0.9, 0.5} // ms: the sender's line
+	nudge := 0.0
+	truth := func(at time.Duration) float64 { return 1000 + nudge + float64(at.Microseconds())/1000*speed }
+	var seq int64
+	var p peerDeck
+	at := time.Duration(0)
+	// The peer's QML posts its line every 5 s; its suite carries that on at the
+	// pitch with every ping (500 ms).
+	run := func(until time.Duration, off float64, late time.Duration) {
+		t.Helper()
+		for ; at <= until; at += 500 * time.Millisecond {
+			seq++
+			post := at.Truncate(5 * time.Second)
+			pos := truth(post) + noise[int(post/(5*time.Second))%len(noise)] + float64((at-post).Milliseconds())*(1+pitch/100)
+			d := deckState{Deck: 2, Key: "k", Playing: true, Pitch: pitch, PositionMS: pos + off, Seq: seq, Sent: t0.Add(at).UnixMilli()}
+			sh.takePeer("192.0.2.7", []deckState{d}, t0.Add(at+late))
+			p = sh.peerDecks[2]
+		}
+	}
+	near := func(what string, got, want, tol float64) {
+		t.Helper()
+		if math.Abs(got-want) > tol {
+			t.Fatalf("%s: %v, want %v +-%v", what, got, want, tol)
+		}
+	}
+	run(35500*time.Millisecond, 0, 0)
+	if p.skew != 0 {
+		t.Fatalf("measured over less than 30 s: %v", p.skew)
+	}
+	// 20 ms late and 8 ms off: carried on, not measured from.
+	run(39*time.Second, 8, 20*time.Millisecond)
+	if p.skew != 0 {
+		t.Fatalf("measured from late updates: %v", p.skew)
+	}
+	run(40*time.Second, 0, 0)
+	near("skew after 40 s", p.skew, skew, 60e-6)
+	v := sh.ver
+	run(5*time.Minute, 0, 0)
+	near("skew after 5 min", p.skew, skew, 15e-6)
+	pos, rate := p.carried(0)
+	near("line after 5 min", pos, truth(at-500*time.Millisecond), 2)
+	near("rate", rate, speed, 15e-6*speed+1e-6)
+	if sh.ver-v > 4 {
+		t.Fatalf("%d bumps in 5 min of steady play", sh.ver-v)
+	}
+	// A jog nudge: a new line, measured anew; the speed found so far stays.
+	nudge, v = 40, sh.ver
+	was := p.skew
+	run(at, 0, 0)
+	if sh.ver == v || p.skew != was || !p.refAt.IsZero() {
+		t.Fatalf("nudge: ver %d -> %d, skew %v -> %v, ref %v", v, sh.ver, was, p.skew, p.refAt)
+	}
+	run(10*time.Minute, 0, 0)
+	near("skew after 10 min", p.skew, skew, 15e-6)
+	last := at - 500*time.Millisecond
+	near("anchored line after 10 min", p.anchorPos+float64(t0.Add(last).Sub(p.anchorAt).Microseconds())/1000*p.speed(), truth(last), 3)
+	// Another track at another pitch starts with the clock's part of it.
+	sh.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "k2", Playing: true, Seq: seq + 1, Sent: t0.Add(at).UnixMilli()}}, t0.Add(at))
+	if _, rate := sh.peerDecks[2].carried(0); math.Abs(rate-(1+skew)) > 16e-6 {
+		t.Fatalf("next track's rate %v", rate)
 	}
 }

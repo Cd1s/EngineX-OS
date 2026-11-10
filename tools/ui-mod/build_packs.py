@@ -328,7 +328,8 @@ SERVICES_MAIN = """
 		return 0
 	}
 	function scShadowData(d) { return scShadowDisplay[d] || null }
-	// How fast a shadow deck's position runs: the rate its player measured, else by the shown pitch.
+	// How fast a shadow deck's position runs on this player's clock: the rate stream-sync
+	// measured (the other player's audio clock, its pitch beyond 0.01 %), else by the pitch.
 	function scShadowRate(s) { return s.rate > 0 ? s.rate : Math.max(0, 1 + s.pitch / 100) }
 	function scShadowPosition(s, now) {
 		if (!s) return 0
@@ -544,14 +545,14 @@ SERVICES_MAIN = """
 				// Same picture: a paused deck at the same spot, or a playing one within
 				// 12 ms of its line (the scroll keeps running within 12 ms too).
 				// Refresh the anchor in place well before the 3 s expiry.
-				const drift = old.playing ? old.positionMs + (at - old.at) * Math.max(0, 1 + old.pitch / 100) - pos : old.positionMs - pos
+				const drift = old.playing ? old.positionMs + (at - old.at) * scShadowRate(old) - pos : old.positionMs - pos
 				if (Math.abs(drift) <= (old.playing ? 12 : 0)) {
-					old.positionMs = pos; old.at = at; old.beat = Number(e.beat) || 0
+					old.positionMs = pos; old.at = at; old.rate = Number(e.rate) || 0; old.beat = Number(e.beat) || 0
 					continue
 				}
 			}
 			const sample = {key: key, title: e.title || "", artist: e.artist || "", playing: !!e.playing, stale: !!e.stale,
-				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0, lineIn: isLine,
+				metadataOnly: !!e.metadataOnly, positionMs: pos, at: at, pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
 				cuePos: typeof e.cuePos === "number" ? e.cuePos : undefined, master: !!e.master, sync: !!e.sync,
 				beat: Number(e.beat) || 0, bpm: Number(e.bpm) || 0, loading: !!e.loading, displayDetail: !!e.displayDetail,
 				jumps: Number(e.jumps) || 0,
@@ -1282,7 +1283,7 @@ SERVICES_MAIN = """
 		const seek = ms => root.scShadowSeek(d, at, ms)
 		// e.at is when Go extrapolated e.positionMs; this runs later on a busy GUI
 		// thread, so carry the target to now before comparing.
-		const target = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * (1 + e.pitch / 100) : 0)
+		const target = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0)
 		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
 		const drift = target - posMs // > 0: behind
 		at.drift = drift
