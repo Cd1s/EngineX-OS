@@ -112,6 +112,13 @@ def validate_preset(data):
             pats = match["alsaClientPatterns"]
             if not isinstance(pats, list) or not all(isinstance(p, str) and p.strip() for p in pats):
                 raise ValueError("preset 'match.alsaClientPatterns' must be a list of non-empty strings")
+        if "usbIds" in match and match["usbIds"] is not None:
+            uids = match["usbIds"]
+            if not isinstance(uids, list) or not all(
+                isinstance(u, str) and bool(re.fullmatch(r"[0-9a-fA-F]{4}:[0-9a-fA-F]{4}", u.strip()))
+                for u in uids
+            ):
+                raise ValueError("preset 'match.usbIds' must be a list of 'vvvv:pppp' hex strings")
     if "malformedLimit" in data and data["malformedLimit"] is not None:
         _strict_int(data["malformedLimit"], "malformedLimit", 1, 1000)
     if "stormLimitPerSec" in data and data["stormLimitPerSec"] is not None:
@@ -253,6 +260,7 @@ class Feature:
 
         # Safety & telemetry counters
         self.error = ""
+        self.match_hint = ""
         self.connected = False
         self.connected_client = -1
         self.connected_port = -1
@@ -337,6 +345,59 @@ class Feature:
     def _init_alsa(self):
         try:
             asound = ctypes.CDLL("libasound.so.2")
+            asound.snd_seq_open.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+            asound.snd_seq_open.restype = ctypes.c_int
+            asound.snd_seq_set_client_name.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+            asound.snd_seq_set_client_name.restype = ctypes.c_int
+            asound.snd_seq_create_simple_port.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint, ctypes.c_uint]
+            asound.snd_seq_create_simple_port.restype = ctypes.c_int
+            asound.snd_seq_connect_from.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+            asound.snd_seq_connect_from.restype = ctypes.c_int
+            asound.snd_seq_disconnect_from.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+            asound.snd_seq_disconnect_from.restype = ctypes.c_int
+            asound.snd_seq_close.argtypes = [ctypes.c_void_p]
+            asound.snd_seq_close.restype = ctypes.c_int
+            asound.snd_seq_client_id.argtypes = [ctypes.c_void_p]
+            asound.snd_seq_client_id.restype = ctypes.c_int
+            asound.snd_seq_client_info_set_client.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            asound.snd_seq_client_info_set_client.restype = None
+            asound.snd_seq_client_info_get_client.argtypes = [ctypes.c_void_p]
+            asound.snd_seq_client_info_get_client.restype = ctypes.c_int
+            asound.snd_seq_client_info_get_name.argtypes = [ctypes.c_void_p]
+            asound.snd_seq_client_info_get_name.restype = ctypes.c_char_p
+            if hasattr(asound, "snd_seq_client_info_get_card"):
+                asound.snd_seq_client_info_get_card.argtypes = [ctypes.c_void_p]
+                asound.snd_seq_client_info_get_card.restype = ctypes.c_int
+            asound.snd_seq_query_next_client.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            asound.snd_seq_query_next_client.restype = ctypes.c_int
+            asound.snd_seq_port_info_set_client.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            asound.snd_seq_port_info_set_client.restype = None
+            asound.snd_seq_port_info_set_port.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            asound.snd_seq_port_info_set_port.restype = None
+            asound.snd_seq_port_info_get_port.argtypes = [ctypes.c_void_p]
+            asound.snd_seq_port_info_get_port.restype = ctypes.c_int
+            asound.snd_seq_port_info_get_capability.argtypes = [ctypes.c_void_p]
+            asound.snd_seq_port_info_get_capability.restype = ctypes.c_uint
+            asound.snd_seq_port_info_get_name.argtypes = [ctypes.c_void_p]
+            asound.snd_seq_port_info_get_name.restype = ctypes.c_char_p
+            asound.snd_seq_query_next_port.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            asound.snd_seq_query_next_port.restype = ctypes.c_int
+            asound.snd_seq_poll_descriptors_count.argtypes = [ctypes.c_void_p, ctypes.c_short]
+            asound.snd_seq_poll_descriptors_count.restype = ctypes.c_int
+            asound.snd_seq_poll_descriptors.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_short]
+            asound.snd_seq_poll_descriptors.restype = ctypes.c_int
+            asound.snd_seq_event_input.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+            asound.snd_seq_event_input.restype = ctypes.c_int
+            asound.snd_midi_event_new.argtypes = [ctypes.c_size_t, ctypes.POINTER(ctypes.c_void_p)]
+            asound.snd_midi_event_new.restype = ctypes.c_int
+            asound.snd_midi_event_no_status.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            asound.snd_midi_event_no_status.restype = None
+            asound.snd_midi_event_reset_decode.argtypes = [ctypes.c_void_p]
+            asound.snd_midi_event_reset_decode.restype = None
+            asound.snd_midi_event_decode.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p]
+            asound.snd_midi_event_decode.restype = ctypes.c_long
+            asound.snd_midi_event_free.argtypes = [ctypes.c_void_p]
+            asound.snd_midi_event_free.restype = None
             seq = ctypes.c_void_p()
             if asound.snd_seq_open(ctypes.byref(seq), b"default", SND_SEQ_OPEN_DUPLEX, SND_SEQ_NONBLOCK) < 0:
                 return
@@ -365,56 +426,75 @@ class Feature:
         except Exception:
             self.asound = None
 
-    def list_alsa_devices(self):
-        if not self.asound or not self.seq_handle.value:
-            return []
+    def _read_alsa_card_usbid(self, card):
+        if card is None or card < 0:
+            return ""
         try:
-            asound = self.asound
-            seq = self.seq_handle
-            my_client = asound.snd_seq_client_id(seq)
-            cinfo = ctypes.create_string_buffer(256)
-            pinfo = ctypes.create_string_buffer(256)
-            asound.snd_seq_client_info_set_client(cinfo, -1)
-            asound.snd_seq_client_info_get_name.restype = ctypes.c_char_p
-            asound.snd_seq_port_info_get_name.restype = ctypes.c_char_p
-
-            devices = []
-            while asound.snd_seq_query_next_client(seq, cinfo) >= 0:
-                cid = asound.snd_seq_client_info_get_client(cinfo)
-                if cid in (0, 14, my_client):
-                    continue
-                cname = (asound.snd_seq_client_info_get_name(cinfo) or b"").decode("utf-8", "replace").strip()
-                if cname.startswith("Midi::Out::") or cname.startswith("EngineX-"):
-                    continue
-                asound.snd_seq_port_info_set_client(pinfo, cid)
-                asound.snd_seq_port_info_set_port(pinfo, -1)
-                while asound.snd_seq_query_next_port(seq, pinfo) >= 0:
-                    pid = asound.snd_seq_port_info_get_port(pinfo)
-                    caps = asound.snd_seq_port_info_get_capability(pinfo)
-                    if (caps & SND_SEQ_PORT_CAP_READ) and (caps & SND_SEQ_PORT_CAP_SUBS_READ):
-                        pname = (asound.snd_seq_port_info_get_name(pinfo) or b"").decode("utf-8", "replace").strip()
-                        devices.append(
-                            {
-                                "id": f"{cid}:{pid}",
-                                "client": cid,
-                                "port": pid,
-                                "clientName": cname,
-                                "portName": pname,
-                                "label": f"{cname} [{cid}:{pid}]",
-                            }
-                        )
-            return devices
+            usbid_file = Path(f"/proc/asound/card{int(card)}/usbid")
+            if usbid_file.is_file():
+                return usbid_file.read_text(encoding="utf-8", errors="ignore").strip().lower()
         except Exception:
-            return []
+            pass
+        return ""
+
+    def list_alsa_devices(self):
+        with self.lock:
+            if not self.asound or not self.seq_handle.value:
+                return []
+            try:
+                asound = self.asound
+                seq = self.seq_handle
+                my_client = asound.snd_seq_client_id(seq)
+                cinfo = ctypes.create_string_buffer(256)
+                pinfo = ctypes.create_string_buffer(256)
+                asound.snd_seq_client_info_set_client(cinfo, -1)
+
+                devices = []
+                while asound.snd_seq_query_next_client(seq, cinfo) >= 0:
+                    cid = asound.snd_seq_client_info_get_client(cinfo)
+                    if cid in (0, 14, my_client):
+                        continue
+                    cname = (asound.snd_seq_client_info_get_name(cinfo) or b"").decode("utf-8", "replace").strip()
+                    if cname.startswith("Midi::Out::") or cname.startswith("EngineX-"):
+                        continue
+                    card = -1
+                    if hasattr(asound, "snd_seq_client_info_get_card"):
+                        try:
+                            card = int(asound.snd_seq_client_info_get_card(cinfo))
+                        except Exception:
+                            card = -1
+                    usb_id = self._read_alsa_card_usbid(card)
+                    asound.snd_seq_port_info_set_client(pinfo, cid)
+                    asound.snd_seq_port_info_set_port(pinfo, -1)
+                    while asound.snd_seq_query_next_port(seq, pinfo) >= 0:
+                        pid = asound.snd_seq_port_info_get_port(pinfo)
+                        caps = asound.snd_seq_port_info_get_capability(pinfo)
+                        if (caps & SND_SEQ_PORT_CAP_READ) and (caps & SND_SEQ_PORT_CAP_SUBS_READ):
+                            pname = (asound.snd_seq_port_info_get_name(pinfo) or b"").decode("utf-8", "replace").strip()
+                            devices.append(
+                                {
+                                    "id": f"{cid}:{pid}",
+                                    "client": cid,
+                                    "port": pid,
+                                    "clientName": cname,
+                                    "portName": pname,
+                                    "usbId": usb_id,
+                                    "label": f"{cname} [{cid}:{pid}]",
+                                }
+                            )
+                return devices
+            except Exception:
+                return []
 
     def _try_connect_device(self):
         with self.lock:
             try:
-                if not self.asound or not self.seq_handle.value:
-                    return False
                 devices = self.list_alsa_devices()
+                preset = self.current_preset()
+                preset_name = preset.get("name", self.preset_id or "MIDI Controller")
                 if not devices:
-                    self.connected = False
+                    self._disconnect_alsa_locked()
+                    self.match_hint = f"Waiting for USB MIDI controller matching preset '{preset_name}'..."
                     return False
                 chosen = None
                 if self.selected_device and self.selected_device != "auto":
@@ -422,25 +502,46 @@ class Feature:
                         if d["id"] == self.selected_device or d["clientName"] == self.selected_device:
                             chosen = d
                             break
-                if chosen is None:
-                    match_cfg = self.current_preset().get("match", {})
+                else:
+                    match_cfg = preset.get("match", {})
                     raw_patterns = match_cfg.get("alsaClientPatterns", []) if isinstance(match_cfg, dict) else []
                     patterns = [
                         p.strip().lower()
                         for p in (raw_patterns if isinstance(raw_patterns, list) else [])
                         if isinstance(p, str) and p.strip()
                     ]
+                    raw_usb_ids = match_cfg.get("usbIds", []) if isinstance(match_cfg, dict) else []
+                    usb_ids = {
+                        u.strip().lower()
+                        for u in (raw_usb_ids if isinstance(raw_usb_ids, list) else [])
+                        if isinstance(u, str) and u.strip()
+                    }
                     for d in devices:
-                        cname_l = d["clientName"].lower()
-                        if any(pat in cname_l for pat in patterns):
+                        cname_l = str(d.get("clientName", "")).lower()
+                        pname_l = str(d.get("portName", "")).lower()
+                        dev_usb = str(d.get("usbId", "") or "").strip().lower()
+                        if (dev_usb and dev_usb in usb_ids) or any(
+                            pat in cname_l or pat in pname_l for pat in patterns
+                        ):
                             chosen = d
                             break
-                    if chosen is None and self.selected_device == "auto":
-                        chosen = devices[0]
                 if chosen is None:
+                    self._disconnect_alsa_locked()
+                    unmatched = ", ".join(d.get("label", d.get("clientName", "?")) for d in devices[:3])
+                    if self.selected_device and self.selected_device != "auto":
+                        self.match_hint = (
+                            f"Selected MIDI port '{self.selected_device}' not found (available: {unmatched})."
+                        )
+                    else:
+                        self.match_hint = (
+                            f"No MIDI controller matched preset '{preset_name}' (ignored unmatched port: {unmatched})."
+                        )
+                    return False
+                if not self.asound or not self.seq_handle.value:
                     self.connected = False
                     return False
                 if self.connected and self.connected_client == chosen["client"] and self.connected_port == chosen["port"]:
+                    self.match_hint = ""
                     return True
                 self._disconnect_alsa_locked()
                 rc = self.asound.snd_seq_connect_from(
@@ -453,6 +554,7 @@ class Feature:
                 self.connected_client = chosen["client"]
                 self.connected_port = chosen["port"]
                 self.connected_name = chosen["label"]
+                self.match_hint = ""
                 self.error = ""
                 return True
             except Exception as exc:
@@ -532,30 +634,29 @@ class Feature:
                 if self.stop_event.is_set():
                     break
                 now = time.monotonic()
-                while True:
-                    rc = asound.snd_seq_event_input(seq, ctypes.byref(ev_ptr))
-                    if rc < 0 or not ev_ptr.value:
-                        break
-                    raw = ctypes.string_at(ev_ptr.value, 28)
-                    ev_type = raw[0]
-                    if ev_type in (SND_SEQ_EVENT_CLIENT_EXIT, SND_SEQ_EVENT_PORT_EXIT):
-                        addr_client = raw[16]
-                        addr_port = raw[17] if ev_type == SND_SEQ_EVENT_PORT_EXIT else None
-                        with self.lock:
+                with self.lock:
+                    while not self.stop_event.is_set() and self.seq_handle.value:
+                        rc = asound.snd_seq_event_input(seq, ctypes.byref(ev_ptr))
+                        if rc < 0 or not ev_ptr.value:
+                            break
+                        raw = ctypes.string_at(ev_ptr.value, 28)
+                        ev_type = raw[0]
+                        if ev_type in (SND_SEQ_EVENT_CLIENT_EXIT, SND_SEQ_EVENT_PORT_EXIT):
+                            addr_client = raw[16]
+                            addr_port = raw[17] if ev_type == SND_SEQ_EVENT_PORT_EXIT else None
                             if self.connected and addr_client == self.connected_client:
                                 self.simulate_disconnect(addr_client, addr_port)
-                        continue
-                    if not self.enabled:
-                        continue
-                    if self.midi_dev.value:
-                        asound.snd_midi_event_reset_decode(self.midi_dev)
-                        nbytes = asound.snd_midi_event_decode(self.midi_dev, midi_buf, 32, ev_ptr)
-                        if nbytes > 0:
-                            msg = [int(midi_buf[i]) for i in range(nbytes)]
-                            self.process_midi_message(msg, now=now)
-                        elif ev_type not in (60, 62, 63, 65, 66, 67):
-                            self.record_malformed("unrecognized ALSA event payload", now=now)
-                with self.lock:
+                            continue
+                        if not self.enabled:
+                            continue
+                        if self.midi_dev.value:
+                            asound.snd_midi_event_reset_decode(self.midi_dev)
+                            nbytes = asound.snd_midi_event_decode(self.midi_dev, midi_buf, 32, ev_ptr)
+                            if nbytes > 0:
+                                msg = [int(midi_buf[i]) for i in range(nbytes)]
+                                self.process_midi_message(msg, now=now)
+                            elif ev_type not in (60, 62, 63, 65, 66, 67):
+                                self.record_malformed("unrecognized ALSA event payload", now=now)
                     if self.enabled and self.jog_velocity != 0:
                         self.integrate_jog_step(now=time.monotonic())
         except Exception as exc:
@@ -1012,6 +1113,7 @@ class Feature:
                 "connected": self.connected,
                 "connectedDevice": self.connected_name,
                 "selectedDevice": self.selected_device,
+                "matchHint": self.match_hint if (self.enabled and not self.connected) else "",
                 "alsaAvailable": alsa_avail,
                 "threadAlive": thread_alive,
                 "threadError": self.thread_error,
