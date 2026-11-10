@@ -7,6 +7,220 @@ import shutil
 import tarfile
 from pathlib import Path
 
+FX_CONTROLLER = r'''
+    property var scFxControllers: []
+    Repeater {
+        model: root.scFxSelectorAvailable ? 6 : 0
+        delegate: Item {
+            id: scCtrl
+            width: 0; height: 0; visible: false
+
+    // Scripted actions cross QQmlEngine/context boundaries through Planck.
+    readonly property int scFxUnit: index + 1
+    property var djFxView: null
+    readonly property string scFxPath: Config.audio.fx.sendEffectSlots > 0
+        ? "/Engine/Mixer/DJFxUnit" + scFxUnit + "/"
+        : "/Engine/Mixer/Channel" + (scFxUnit - 2) + "/DJFx/"
+    readonly property var scFxType: Planck.getProperty(scFxPath + "Type")
+    readonly property string scFxTypeName: scFxType && scFxType.translator ? scFxType.translator.string : ""
+    onScFxTypeNameChanged: {
+        if (scFxSelected >= 0 && !scFxBusy && scFxTypeName !== "Flanger") {
+            scFxSelected = -1; scFxIndex = djFxView ? djFxView.selectionIndex : -1
+            root.scCall("fxUnit=" + scFxUnit + "&fxMode=0")
+        }
+    }
+    Connections {
+        target: scCtrl.djFxView
+        function onSelectionIndexChanged() {
+            if (scCtrl.scFxSelected < 0 && !scCtrl.scFxBusy && !scCtrl.scFxBrowsing) scCtrl.scFxIndex = scCtrl.djFxView.selectionIndex
+        }
+    }
+    readonly property string scFxBus: "EngineXFx" + scFxUnit
+    readonly property var scFxProps: [
+        Planck.createProperty(scFxBus + "Plus", false, 3),
+        Planck.createProperty(scFxBus + "Minus", false, 3),
+        Planck.createProperty(scFxBus + "Accept", false, 3),
+        Planck.createProperty(scFxBus + "Ready", false, 1)]
+    readonly property var scFxReady: scFxProps && Planck.getProperty("/GUI/Scripted/" + scFxBus + "Ready")
+    readonly property var scFxStock: djFxView ? Array.from(djFxView.effectsNames) : []
+    readonly property bool scFxEnabled: !!root.scFxSelectorAvailable && scFxStock.indexOf("Flanger") >= 0
+    readonly property var scFxNames: scFxEnabled ? scFxStock.concat([
+        "Spiral (PX)", "Pitch Echo (PX)", "Slip Roll (PX)", "Dub Echo (PX)", "Space (PX)"]) : scFxStock
+    property int scFxIndex: -1
+    property int scFxSelected: -1
+    property int scFxRequest: 0
+    property bool scFxBusy: false
+    property bool scFxBrowsing: false
+    property int scFxQueued: -1
+    Timer {
+        interval: 2000; running: scCtrl.scFxBusy
+        onTriggered: {
+            ++scCtrl.scFxRequest
+            scCtrl.scFxBusy = false; scCtrl.scFxQueued = -1
+            scCtrl.scFxIndex = scCtrl.scFxSelected
+        }
+    }
+    function scFxSetReady() {
+        if (scFxReady && scFxReady.translator) scFxReady.translator.state = scFxEnabled
+    }
+    onScFxEnabledChanged: scFxSetReady()
+    Component.onCompleted: {
+        const next = root.scFxControllers.slice(); next[index] = scCtrl
+        root.scFxControllers = next
+        scFxSetReady()
+    }
+    Component.onDestruction: {
+        if (scFxHandshakePhase && scFxMix && scFxMix.translator) scFxMix.translator.value = scFxSavedWet
+        if (scFxReady && scFxReady.translator) scFxReady.translator.state = false
+    }
+    function scFxTurn(delta) {
+        if (!scFxEnabled || !djFxView) return
+        let at = scFxIndex >= 0 ? scFxIndex : (scFxSelected >= 0 ? scFxSelected : djFxView.selectionIndex)
+        const next = Math.max(0, Math.min(scFxNames.length - 1, at + delta))
+        if (next === at) return
+        scFxIndex = next
+        if (Config.device.hasDJFxContinuousKnobs) scFxAccept(scFxIndex)
+        else { scFxBrowsing = true; djFxView.selecting() }
+    }
+    function scFxAccept(index) {
+        if (!djFxView || index < 0 || index >= scFxNames.length) return
+        if (!scFxEnabled) { djFxView.selectEffect(index); return }
+        if (scFxBusy) { scFxQueued = index; return }
+        const mode = index >= scFxStock.length ? index - scFxStock.length + 1 : 0
+        const request = ++scFxRequest
+        scFxIndex = index
+        scFxBusy = true
+        // The hook acknowledgement is a barrier: mapping ALWAYS precedes Type.
+        root.scCall("fxUnit=" + scFxUnit + "&fxMode=" + mode, function(reply) {
+            if (request !== scFxRequest || !djFxView) return
+            scFxSelected = mode ? index : -1
+            scFxBrowsing = false
+            if (!mode || reply.fxBind) djFxView.selectEffect(mode ? scFxStock.indexOf("Flanger") : index)
+            if (mode && reply.fxBind) {
+                scFxMix = Planck.getProperty(scFxPath + "Mix")
+                if (!scFxMix || !scFxMix.translator) { scFxBusy = false; return }
+                scFxSavedWet = scFxMix.translator.value
+                scFxChallengeB = reply.fxChallengeB
+                scFxMix.translator.value = reply.fxChallengeA
+                scFxHandshakePhase = 1
+                scFxHandshake.start()
+            } else scFxFinish()
+            djFxView.abortSelecting()
+        })
+    }
+    property var scFxMix: null
+    property real scFxSavedWet: 0
+    property real scFxChallengeB: 0
+    property int scFxHandshakePhase: 0
+    Connections {
+        target: scCtrl.scFxMix ? scCtrl.scFxMix.translator : null
+        function onValueChanged() {
+            const value = target.value
+            if (scCtrl.scFxHandshakePhase && (value === 0 || value > 0.0001)) scCtrl.scFxSavedWet = value
+        }
+    }
+    Timer {
+        id: scFxHandshake
+        interval: 40; repeat: true
+        onTriggered: {
+            if (!scCtrl.scFxMix || !scCtrl.scFxMix.translator) { stop(); scCtrl.scFxFinish(); return }
+            if (scCtrl.scFxHandshakePhase === 1) {
+                scCtrl.scFxMix.translator.value = scCtrl.scFxChallengeB
+                scCtrl.scFxHandshakePhase = 2
+            } else {
+                scCtrl.scFxMix.translator.value = scCtrl.scFxSavedWet
+                stop(); scCtrl.scFxFinish()
+            }
+        }
+    }
+    function scFxFinish() {
+        scFxHandshakePhase = 0
+        scFxBusy = false
+        if (scFxQueued >= 0) { const next = scFxQueued; scFxQueued = -1; scFxAccept(next) }
+    }
+    ActionTranslatorStateChangeNotifier {
+        prop: scCtrl.scFxProps && Planck.getProperty("/GUI/Scripted/" + scCtrl.scFxBus + "Plus")
+        enabled: scCtrl.scFxEnabled
+        onChanged: scCtrl.scFxTurn(1)
+    }
+    ActionTranslatorStateChangeNotifier {
+        prop: scCtrl.scFxProps && Planck.getProperty("/GUI/Scripted/" + scCtrl.scFxBus + "Minus")
+        enabled: scCtrl.scFxEnabled
+        onChanged: scCtrl.scFxTurn(-1)
+    }
+    ActionTranslatorStateChangeNotifier {
+        prop: scCtrl.scFxProps && Planck.getProperty("/GUI/Scripted/" + scCtrl.scFxBus + "Accept")
+        enabled: scCtrl.scFxEnabled
+        onChanged: {
+            if (!scCtrl.djFxView) return
+            if (!scCtrl.djFxView.selectionPopoutVisible) {
+                if (scCtrl.scFxIndex < 0) scCtrl.scFxIndex = scCtrl.scFxSelected >= 0 ? scCtrl.scFxSelected : scCtrl.djFxView.selectionIndex
+                scCtrl.scFxBrowsing = true
+                scCtrl.djFxView.selecting()
+            } else if (scCtrl.scFxIndex >= 0) scCtrl.scFxAccept(scCtrl.scFxIndex)
+        }
+    }
+
+        }
+    }
+'''
+
+FX_SELECTOR = r'''
+    readonly property int scFxUnit: Config.audio.fx.sendEffectSlots > 0 ? (indicator === "2" ? 2 : 1) : 3
+    readonly property var scFxController: root.scFxControllers[scFxUnit - 1] || null
+    readonly property var scFxNames: scFxController ? scFxController.scFxNames : (djFxView ? Array.from(djFxView.effectsNames) : [])
+    readonly property int scFxIndex: scFxController ? scFxController.scFxIndex : -1
+    readonly property int scFxSelected: scFxController ? scFxController.scFxSelected : -1
+    function scFxRegister() { if (scFxController && djFxView) scFxController.djFxView = djFxView }
+    onScFxControllerChanged: scFxRegister()
+    onDjFxViewChanged: scFxRegister()
+    Component.onCompleted: scFxRegister()
+    function scFxAccept(index) {
+        if (scFxController && scFxController.scFxEnabled) scFxController.scFxAccept(index)
+        else if (djFxView) djFxView.selectEffect(index)
+    }
+    function scFxAbort() {
+        if (scFxController) {
+            scFxController.scFxBrowsing = false
+            scFxController.scFxIndex = scFxController.scFxSelected
+        }
+        if (djFxView) djFxView.abortSelecting()
+    }
+'''
+
+FX_KNOB = r'''
+            readonly property int scFxUnit: fxConfig.hasSendStyleEffects ? Number(modelData) : 3 + Math.max(0, Number(String(modelData).replace("Channel", "")) - 1)
+            readonly property string scFxBus: "/GUI/Scripted/EngineXFx" + scFxUnit
+            readonly property var scFxReady: Planck.getProperty(scFxBus + "Ready")
+            property bool scFxPushOwned: false
+            function scFxCanUse() {
+                const ready = scFxReady && scFxReady.translator
+                return ready && ready.state && Planck.getProperty(scFxBus + "Plus").translator &&
+                    Planck.getProperty(scFxBus + "Minus").translator && Planck.getProperty(scFxBus + "Accept").translator
+            }
+            function scFxAction(suffix) { Planck.getProperty(scFxBus + suffix).translator.state = true }
+            function scFxMove(direction, amount) {
+                if (!(amount > 0)) return // MIDI zero means no movement.
+                // JogOutput normalizes one detent to 1/63; preserve its decoded
+                // magnitude rather than changing continuous encoder behaviour.
+                const steps = Math.max(1, Math.min(63, Math.round(amount * 63)))
+                for (let n = 0; n < steps; ++n) scFxAction(direction > 0 ? "Plus" : "Minus")
+            }
+'''
+
+FX_JOG_TARGET = r'''
+                target: QtObject {
+                    property QtObject px: QtObject {
+                        readonly property bool editable: true
+                        function incValue(amount) { scFxMove(1, amount) }
+                        function decValue(amount) { scFxMove(-1, amount) }
+                    }
+                    function get(channel, value) {
+                        return scFxCanUse() ? px : fxConfig.channel[modelData].pEffectIndex.translator
+                    }
+                }
+'''
+
 HERE = Path(__file__).resolve().parent
 # The deck skin: Skins/EmbeddedCommon up to 5.0.4, Skins/Embedded from 5.3.0 (set in main).
 ROOT = "Skins/EmbeddedCommon/"
@@ -710,6 +924,8 @@ SERVICES_MAIN = """
 	}
 	property bool scBeatJumpPads: false
 	property string scPioneerFx: "off"
+	property bool scFxSelectorAvailable: false
+	property bool scFxMasterBypassed: false
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
 	property bool scUpdating: false
@@ -900,12 +1116,17 @@ SERVICES_MAIN = """
 		x.open(query ? "POST" : "GET", "http://127.0.0.1:8080/v1/sc5000/ui" + (query ? "?" + query : ""))
 		x.onreadystatechange = function() {
 			if (x.readyState !== 4 || x.status !== 200) return
-			scApply(JSON.parse(x.responseText))
-			if (done) done()
+			const reply = JSON.parse(x.responseText)
+			if (!reply.fxSelectorReady) scApply(reply)
+			if (done) done(reply)
 		}
 		x.send()
 	}
 	function scApply(v) {
+		if (v.fxSelectorAvailable !== undefined) {
+			scFxMasterBypassed = !!v.fxSelectorAvailable
+			scFxSelectorAvailable = scFxMasterBypassed && (Config.audio.fx.hasDJFx || Config.audio.fx.hasNHFx)
+		}
 		scEnsureTidal()
 		if (v.version) scVersion = v.version
 		scLang = v.language
@@ -1583,6 +1804,7 @@ PLAYBACK_ENTRIES = """
 		},
 		EntryBase.ListEntry {
 			text: "Color FX Style"
+			visible: !root.scFxMasterBypassed
 			readonly property var ids: ["off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"]
 			values: ["Off", "Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scPioneerFx))]
@@ -2139,7 +2361,7 @@ def edits(dev: bool):
          "			visible: waveformOverview.songLoaded && !waveformOverview.isRemoteDeck\n"),
     ]
     main = DEV_HARNESS if dev else ""
-    services = SERVICES_MAIN.replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons").replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS)) + (SMART_SYNC_MAIN if v53() else "")
+    services = (SERVICES_MAIN + FX_CONTROLLER).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons").replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS)) + (SMART_SYNC_MAIN if v53() else "")
     out = {
         # The flag is still cleared, which is what pressing "Ok" would do.
         ROOT + "Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml": [(
@@ -2944,6 +3166,29 @@ def edits(dev: bool):
     for rel, fixes in legacy_qml_fixes().items():
         assert not isinstance(out.get(rel), str), rel  # a whole-file replacement already owns it
         out.setdefault(rel, []).extend(fixes)
+    if v53():
+        out[ROOT + "Views/MainView/Fx/DJFx.qml"] = [
+            ("import Planck 1.0", "import Planck 1.0\nimport Common"),
+            ("    property string indicator\n", "    property string indicator\n" + FX_SELECTOR),
+            ("model: djFxView ? djFxView.effectsNames : {}", "model: djFx.scFxNames"),
+            ("index: djFxView ? djFxView.selectionIndex : 0", "index: djFx.scFxIndex >= 0 ? djFx.scFxIndex : (djFxView ? djFxView.selectionIndex : 0)"),
+            ("onAccepted: result => djFxView.selectEffect(result)", "onAccepted: result => djFx.scFxAccept(result)"),
+            ("onRejected: djFxView.abortSelecting()", "onRejected: djFx.scFxAbort()"),
+            ("parameter: djFxView ? djFxView.selectParameter : null", "parameter: djFxView ? djFxView.selectParameter : null\n            text: djFx.scFxSelected >= 0 ? djFx.scFxNames[djFx.scFxSelected] : (parameter ? parameter.valueText : \"\")"),
+        ]
+        out["ControlSurfaceModules/ControlSurfaceModules/private/DJFxSelectKnob.qml"] = [
+            ("        Item {\n", "        Item {\n" + FX_KNOB),
+            ("                            fxConfig.channel[modelData].pSelectPressed.translator.state = value > 0", """                            if (value > 0) scFxPushOwned = !!scFxCanUse()
+                            if (scFxPushOwned) {
+                                if (value > 0) scFxAction("Accept")
+                                else scFxPushOwned = false
+                            } else fxConfig.channel[modelData].pSelectPressed.translator.state = value > 0"""),
+            ("                    if (fxConfig.channel[modelData].selecting) {", """                    if (scFxCanUse()) { scFxAction(value > 0.5 ? "Minus" : "Plus"); return }
+                    if (fxConfig.channel[modelData].selecting) {"""),
+            ("""                target: PropertyTarget {
+                    prop: fxConfig.channel[modelData].pEffectIndex
+                }""", FX_JOG_TARGET.strip("\n")),
+        ]
     return out
 
 
