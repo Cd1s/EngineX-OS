@@ -818,6 +818,29 @@ scShadowPostRequest.status=409; scShadowPostRequest.onreadystatechange(); // str
 now+=520;scShadowTick(); assert.equal(full, 3);
 """)
 
+    def test_sender_posts_exact_tempo_changes_at_the_same_rounded_pitch(self):
+        self.js(r"""
+let current=130.17,bodies=[],pings=0;
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(this.url.endsWith('/alive'))pings++;else bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+globalThis.scTr=path=>({
+    value:path.endsWith('/SampleRate')?48000:0,
+    get unnormalized(){return path.endsWith('/OriginalBPM')?128:path.endsWith('/CurrentBPM')?current:0},
+    state:path.endsWith('/SongLoaded'),
+    string:path.endsWith('/TrackUri')?'file:///tempo.mp3':path.endsWith('/SpeedState')?'1.70%':'',color:'#ffffff'});
+scShadowTick();assert.equal(bodies.length,1);
+assert.equal(bodies[0][0].currentBpm,130.17);assert.equal(bodies[0][0].pitch,1.7);
+current=130.18;now+=520;scShadowTick();
+assert.equal(bodies.length,2,'tempo-only change must not wait for the five-second full post');
+assert.equal(bodies[1][0].currentBpm,130.18);assert.equal(bodies[1][0].pitch,1.7);
+now+=520;scShadowTick();assert.equal(bodies.length,2);assert.equal(pings,1);
+""")
+
     def test_sender_posts_changes_and_pings_steady_playback(self):
         self.js(r"""
 let bodies=[], pings=0, pos=0, playing=false, cueName='A';
