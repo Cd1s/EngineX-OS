@@ -4556,6 +4556,15 @@ def art_source(ind, deck, path, metadata, image, add_id=False):
         f"{ind}source: {GUARD} ? root.scDeckArtUrl({deck}, {path}, {image}.scArtTick, {metadata}) : {path}\n")
 
 
+class PatchDict(dict):
+    def __setitem__(self, k, v):
+        if k in self:
+            old = self[k]
+            if not (isinstance(old, list) and isinstance(v, list) and v[:len(old)] == old):
+                raise ValueError(f"duplicate patch key: {k}")
+        super().__setitem__(k, v)
+
+
 def edits(dev: bool):
     v = ROOT + "Views/"
     prefs = v + "ControlCenter/Tabs/Preferences/"
@@ -4585,7 +4594,7 @@ def edits(dev: bool):
     ]
     main = DEV_HARNESS if dev else ""
     services = (SERVICES_MAIN + FX_CONTROLLER).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons").replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS)) + (SMART_SYNC_MAIN if v53() else "")
-    out = {
+    out = PatchDict({
         # The flag is still cleared, which is what pressing "Ok" would do.
         ROOT + "Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml": [(
             "      let messageObject = {", "      Planck.librarianController.deviceEjectedImproperly = false\n      return\n      let messageObject = {")],
@@ -4626,17 +4635,6 @@ def edits(dev: bool):
             ("\t\t\tid: overlay\n", "\t\t\tid: overlay\n\t\t\tanchors.fill: parent\n"),
         ],
         v + "Common/Waveform/Waveform.qml": wave,
-        # Engine offers streamed rows only Prepare; add Stems (see scStemStream).
-        v + "BrowseView/Components/Components/SwipeLeftItem.qml": [
-            ("	readonly property list<string> actionLabels: leftActions.map( action => action.display.label )\n",
-             '	readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
-             "	readonly property list<string> actionLabels: leftActions.map( action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : action.display.label ).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
-            ("leftActions.map( action => action.display.commitMessage )", "leftActions.map( action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : action.display.commitMessage ).concat(scStem ? [root.scT(\"Stems\")] : [])"),
-            ("leftActions.map( action => action.display.color )", "leftActions.map( action => action.display.color ).concat(scStem ? [Style.systemBlue01Color] : [])"),
-            ("				  leftActions[actionIndex].trigger(row.index)\n",
-             "				  if (actionIndex < leftActions.length) leftActions[actionIndex].trigger(row.index)\n"
-             "				  else root.scStemStream(row.modelData.trackId)\n"),
-        ],
         # EngineX: Denon firmware would replace the whole mod, so its prompt never
         # shows; the Update page checks the GitHub repository instead.
         ROOT + "Items/MessageBoxes/FirmwareUpdateAvailableMessageBox.qml": [
@@ -4992,7 +4990,19 @@ def edits(dev: bool):
             "        text: parent.displayData\n",
             '        text: root.scDualColumn && (row.modelData.bpm || "") !== "" ? ((row.modelData.bpm || "") + (parent.displayData ? " · " + parent.displayData : "")) : parent.displayData\n',
         )],
-    }
+    })
+    if not v53():
+        # Engine offers streamed rows only Prepare; add Stems (see scStemStream).
+        out[v + "BrowseView/Components/Components/SwipeLeftItem.qml"] = [
+            ("	readonly property list<string> actionLabels: leftActions.map( action => action.display.label )\n",
+             '	readonly property bool scStem: !(typeof root !== "undefined" && root && root.scIsAZ04) && String(row.modelData && row.modelData.uri || "").startsWith("streaming://TIDAL/Track/") && !leftActions.some(action => /stem/i.test(String(action.display && action.display.label || "")))\n'
+             "	readonly property list<string> actionLabels: leftActions.map( action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : action.display.label ).concat(scStem ? [root.scT(\"Stems\")] : [])\n"),
+            ("leftActions.map( action => action.display.commitMessage )", "leftActions.map( action => /^stems?$/i.test(String(action.display && action.display.label || \"\")) ? root.scT(\"Stems\") : action.display.commitMessage ).concat(scStem ? [root.scT(\"Stems\")] : [])"),
+            ("leftActions.map( action => action.display.color )", "leftActions.map( action => action.display.color ).concat(scStem ? [Style.systemBlue01Color] : [])"),
+            ("				  leftActions[actionIndex].trigger(row.index)\n",
+             "				  if (actionIndex < leftActions.length) leftActions[actionIndex].trigger(row.index)\n"
+             "				  else root.scStemStream(row.modelData.trackId)\n"),
+        ]
     if v53():
         # The stock "Stems Support" row downloads Denon's stems-child-process; EngineX OS ships
         # and mounts its own, and an Install there could replace that mount.
@@ -5202,7 +5212,7 @@ def edits(dev: bool):
     ui = 'typeof root !== "undefined" && root && root.transformed'
     UW, UH = f"({ui} ? root.transformed.width : {W})", f"({ui} ? root.transformed.height : {H})"
     size = [(f"width: {W}\n", f"width: {UW}\n"), (f"height: {H}\n", f"height: {UH}\n")]
-    scaled = {
+    scaled = PatchDict({
         v + "ControlCenter/ControlCenter.qml": size + [(f"height: {H} +", f"height: {UH} +")],
         v + "ControlCenter/ControlCenterTabView.qml": [(f"{H} - height", f"{UH} - height")],
         v + "StatusBar/AbstractStatusBar.qml": [(f"dragPosition * {H}", f"dragPosition * {UH}")],
@@ -5212,7 +5222,7 @@ def edits(dev: bool):
         prefs + "Entries/private/ColorWheelDialog.qml": size,
         # Settings -> Device -> Pad LED Brightness also dims the on-screen pads.
         ROOT + "Items/Pads/Pads.qml": [("id: pads\n", "id: pads\n    opacity: typeof root !== \"undefined\" && root && root.scLedBrightness ? Math.max(0.2, Math.min(1, root.scLedBrightness / 100)) : 1\n")],
-    }
+    })
     if v53():
         scaled[v + "MainView/Fx/DJFxSelectCarousel.qml"] = size
         # Keep the stock carousel, entries, controls and native popup selection.
@@ -5535,12 +5545,16 @@ def edits(dev: bool):
             ("    readonly property string songTextString: deckLoaded ? displayText.display : deckLabel\n"
              '    readonly property string artistTextString: deckLoaded ? artistName : "No Track Loaded"\n',
              "    " + heads +
-             "    readonly property string songTextString: deckLoaded ? (scHead && scHead.title) || displayText.display : deckLabel\n"
-             '    readonly property string artistTextString: deckLoaded ? (scHead && scHead.title ? scHead.artist : artistName) : "No Track Loaded"\n'),
+             '    readonly property string songTextString: deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title) || displayText.display) : deckLabel\n'
+             '    readonly property string artistTextString: deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title ? scHead.artist : artistName)) : "No Track Loaded"\n'),
             ("    readonly property bool onlyFileName: view.onlyFileName\n",
              "    readonly property bool onlyFileName: view.onlyFileName && !(scHead && scHead.title)\n"),
             ("    readonly property bool isStemmed: view.stemmed\n",
              "    readonly property bool isStemmed: scHead && scHead.title ? scHead.stems : view.stemmed\n"),
+            ("        providerName: artistSong.trackSource\n",
+             "        providerName: artistSong.trackSource\n        respectHideTitleArtist: true\n"),
+            ("            visible: artistSong.artistVisible && !artistSong.onlyFileName && artistSong.artistTextString.length > 0\n",
+             "            visible: artistSong.artistVisible && !artistSong.onlyFileName && !displayText.hideTitleArtist && artistSong.artistTextString.length > 0\n"),
         ]
         scaled[bj + "KeyEditor/KeyInfo.qml"] = [
             ('    readonly property string currentKey: keyEditorController ? keyEditorController.getViewModel().currentKey : ""\n',
@@ -5662,12 +5676,6 @@ def edits(dev: bool):
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml"] = [(
             "        source: albumArt.albumArtPath\n",
             art_source("        ", "albumArt.deckIndex", "albumArt.albumArtPath", "albumArt.deckView && albumArt.deckView.artistSongView ? albumArt.deckView.artistSongView.songName : \"\"", "scArtImage", add_id=True))]
-        scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/ArtistSong.qml"] = [
-            ("        providerName: artistSong.trackSource\n",
-             "        providerName: artistSong.trackSource\n        respectHideTitleArtist: true\n"),
-            ("            visible: artistSong.artistVisible && !artistSong.onlyFileName && artistSong.artistTextString.length > 0\n",
-             "            visible: artistSong.artistVisible && !artistSong.onlyFileName && !displayText.hideTitleArtist && artistSong.artistTextString.length > 0\n"),
-        ]
         # In the 4-deck layout the deck colour came out white (measured on a 1+3 deck with
         # blue PlayerColor1/2), which has no gradient and draws a black strip, and an unset
         # PlayerColor3/4 is black: use the deck's PlayerColor preference, then the player's
@@ -5891,7 +5899,7 @@ def legacy_qml_fixes():
         f"				const item = {window()}.activeFocusItem\n"
         "				if(item && item.inputMethodHints !== undefined) return\n"
     )
-    return {
+    return PatchDict({
         # CF008: Back/Forward on the Source screen fired an action nothing handles
         # there; /GUI/CloseDialogs is what SourceScreen.qml listens to. Arrow keys
         # and Enter/Escape drive it like the encoder.
@@ -6072,7 +6080,7 @@ def legacy_qml_fixes():
             ("			right: parent.right\n			margins: parent.margins\n		}\n\n		spacing: -15\n",
              "			right: scSkipKeys.visible ? scSkipKeys.left : parent.right\n			margins: parent.margins\n		}\n\n		spacing: -15\n"),
         ],
-    }
+    })
 
 
 # Only these properties hold display text. Ids such as StateMap names never match.
