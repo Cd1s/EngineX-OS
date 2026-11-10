@@ -1743,3 +1743,44 @@ scShadowAt[4] = {path: '/copies/c.mp3', id: 'C', link: 'peer'};
 for (let i = 0; i < 3; i++) { now += 400; scShadowApplyAll(copying.concat([{deck: 4, path: '', loading: true, id: 'C'}]), false); }
 assert.ok(!P('/Engine/Deck4/Unload').state && scShadowAt[4]);
 """)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowFollowerLineTest(unittest.TestCase):
+    """Engine mode: the deck's own line must not average in a position from before a seek landed."""
+
+    def test_a_seek_that_lands_after_the_line_began_starts_the_line_again(self):
+        ShadowDisplayTest.js(self, r"""
+const T0 = now, props = new Map();
+let ahead = 0, tick = 0, bends = 0, most = 0;
+globalThis.scShadowBent = null;
+globalThis.scShadowBendTimer = {interval: 0, running: false, stop() { this.running = false },
+    restart() { this.running = true; bends++; ahead += this.interval * 0.07 * (scTr('/Engine/Deck2/Track/NudgeForward').state ? 1 : -1); most = Math.max(most, ahead) }};
+const jitter = () => tick % 7 < 3 ? 9 : -9;
+globalThis.scTr = path => {
+    let p = props.get(path);
+    if (p) return p;
+    const deck2 = path.startsWith('/Engine/Deck2/');
+    p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '8' : path.endsWith('/SyncMode') ? 'Off' : '',
+        entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '',
+        _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? 0.5 : 0,
+        get value() { return this._v }, set value(v) { this._v = v },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? (now - T0 + 50000 + ahead + jitter()) * 44.1 : 0 }};
+    props.set(path, p);
+    return p;
+};
+let seq = 0;
+const apply = () => scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}',
+    positionMs: now - T0 + 50000 + 18, at: now, pitch: 0, bpm: 131, currentBpm: 131, jumps: 0, seq: ++seq}], false);
+const step = () => { now += 200; tick++; if (scShadowBendTimer.running) scShadowBendEnd(); scShadowLine(now) };
+const run = ms => { for (let t = 0; t < ms; t += 200) { step(); if (t % 600 === 0) apply() } };
+apply();
+run(3000);
+// A seek of ours: Engine still reads the old position (41 s back) on the next tick,
+// then lands 55 ms behind the source.
+scShadowSeek(2, scShadowAt[2], now - T0 + 50000);
+ahead = -41000; step();
+ahead = -55; run(30000);
+assert.ok(most <= 15, 'bent ' + most + ' ms past the source');
+assert.ok(Math.abs(ahead) < 12 && bends >= 1 && bends <= 3, 'ended ' + ahead + ' ms off after ' + bends + ' bends');
+""")
