@@ -1370,8 +1370,8 @@ globalThis.scTr = path => {
         entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '',
         _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? 0.5 : 0,
         get value() { return this._v }, set value(v) { this._v = v; if (path.endsWith('/SetSongPosition')) seeks++ },
-        // Engine moves TrackPosition in audio blocks of 46 ms
-        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? (Math.floor((now - T0) / 46) * 46 + 5000 + ahead) * 44.1 : 0 }};
+        // Engine moves TrackPosition in audio blocks: 18 ms old on average
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? (Math.floor((now - T0) / 36) * 36 + 5000 + ahead) * 44.1 : 0 }};
     props.set(path, p);
     return p;
 };
@@ -1397,7 +1397,7 @@ assert.equal(back.state, false);
 run(4000);
 assert.equal(back.state || fwd.state, false, 'within 6 ms: left alone');
 assert.equal(seeks, 0);
-ahead = -40; run(2600);
+ahead = -40; run(5200);
 assert.equal(fwd.state, true, '40 ms behind: bend forward');
 scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: false, link: '{l}', positionMs: now - T0 + 5000, at: now, pitch: 0.01, bpm: 138, currentBpm: 138.0089, jumps: 0, seq: ++seq}], false);
 assert.equal(fwd.state, false, 'a pause releases the bend');
@@ -1666,3 +1666,47 @@ assert.equal(g.keylock.state, true);
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the follower behavioral checks")
+class ShadowFollowerNoiseTest(unittest.TestCase):
+    """Engine mode: raw positions as two SC5000 gave them (rec10-a) must not bend an aligned shadow deck."""
+
+    def test_aligned_deck_is_left_alone_and_a_real_gap_is_closed(self):
+        ShadowDisplayTest.js(self, r"""
+const T0 = now, props = new Map();
+let ahead = 0, tick = 0, bends = 0;
+globalThis.scShadowBent = null;
+// A bend moves the deck by 7 % of the time it is held.
+globalThis.scShadowBendTimer = {interval: 0, running: false, stop() { this.running = false },
+    restart() { this.running = true; bends++; ahead += this.interval * 0.07 * (scTr('/Engine/Deck2/Track/NudgeForward').state ? 1 : -1) }};
+// Raw positions read 9 ms either side of their mean, one in sixty 22 ms ahead.
+const jitter = () => tick % 61 === 60 ? 22 : tick % 7 < 3 ? 9 : -9;
+globalThis.scTr = path => {
+    let p = props.get(path);
+    if (p) return p;
+    const deck2 = path.startsWith('/Engine/Deck2/');
+    p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '8' : path.endsWith('/SyncMode') ? 'Off' : '',
+        entries: ['4', '8', '10', '20', '50', '100'], index: 1, url: '',
+        _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? 0.5 : 0,
+        get value() { return this._v }, set value(v) { this._v = v },
+        get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? (now - T0 + 5000 + ahead + jitter()) * 44.1 : 0 }};
+    props.set(path, p);
+    return p;
+};
+let seq = 0;
+// The source's line: its newest block, 18 ms ahead of the mean of its raw positions, +-6 ms.
+const apply = () => scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}',
+    positionMs: now - T0 + 5000 + 18 + 3 * Math.sin(seq / 9) + 3 * Math.sin(seq / 1.5), at: now, pitch: 0, bpm: 131, currentBpm: 131, jumps: 0, seq: ++seq}], false);
+const run = ms => { for (let t = 0; t < ms; t += 200) { now += 200; tick++; if (scShadowBendTimer.running) scShadowBendEnd(); scShadowLine(now); if (t % 600 === 0) apply() } };
+apply();
+run(60000);
+assert.equal(bends, 0, 'an aligned deck was bent ' + bends + ' times in a minute');
+assert.ok(Math.abs(scShadowAt[2].fine) < 4, 'gap read ' + scShadowAt[2].fine);
+ahead = -10; run(30000);
+assert.ok(bends === 1 || bends === 2, '10 ms behind: bent ' + bends + ' times');
+assert.ok(Math.abs(ahead) < 6, 'bent to ' + ahead);
+const closed = bends;
+run(60000);
+assert.equal(bends, closed, 'bent again once closed: ' + ahead);
+""")
