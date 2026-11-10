@@ -58,6 +58,8 @@ type deckState struct {
 	Name         string  `json:"name,omitempty"`  // the file's name, which the copy keeps
 	Title        string  `json:"title,omitempty"` // a streaming track's real title (QML or stm.db): the copy is named after it
 	Artist       string  `json:"artist,omitempty"`
+	ID           string  `json:"id,omitempty"`           // Engine mode, what the source has loaded: its Key (a copy), its Net (this player's own file), a CDJ's slot and track id. The QML loads again when it changes
+	DurationMS   float64 `json:"durationMs,omitempty"`   // the track's length on the source: tells the QML whether Engine holds this track or another
 	Loading      bool    `json:"loading,omitempty"`      // shadow deck: the peer has a track whose audio is still being fetched
 	Stale        bool    `json:"stale,omitempty"`        // frozen display sample; not an eject/goodbye
 	MetadataOnly bool    `json:"metadataOnly,omitempty"` // CDJ state has no peer display asset endpoint
@@ -395,7 +397,7 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		}
 		postAt = max(postAt, d.At) // after clamping: one future timestamp must not freeze ownPostAt
 		d.Path, d.Name = "", ""
-		d.Key, d.Ext, d.Loading = "", "", false
+		d.Key, d.Ext, d.Loading, d.ID = "", "", false, ""
 		np := d.Net
 		f := resolveNetPathFile(np, s.shadow.dataRoot, s.shadow.mediaRoot, true)
 		if netPathFile(np, s.shadow.dataRoot, s.shadow.mediaRoot) == "" {
@@ -1147,10 +1149,14 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 			d.PositionMS, d.Rate = p.carried(now.Sub(p.at))
 		}
 		d.Path = resolveNetPathFile(d.Net, sh.dataRoot, sh.mediaRoot, false)
+		// A file of this player's own is named by its path. Not by the peer's key
+		// then: that appears once the peer's Engine has cached the file, mid-track.
+		d.ID = d.Net
 		if d.Path == "" && d.Key != "" {
 			// Not by address: a player on eth0 and wlan0 is heard from both, and the
 			// track was copied and loaded (and analysed) twice.
 			key := "peer:" + d.Key
+			d.ID = d.Key
 			wanted[key] = now
 			d.Path = sh.files[key]
 			if d.Path == "" {
@@ -1179,7 +1185,7 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 	}
 	for deck, dev := range cdjDecks(devices, free, now, lineFree) {
 		cue := dev.PlayState1 == cdjCuePlay
-		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM}
+		d := deckState{Deck: deck, Playing: dev.Playing || cue, Cue: cue, Jumps: sh.cdj[dev.Number].jumps, PositionMS: float64(dev.PlayPositionMS), Pitch: dev.Pitch, Master: dev.Master, Sync: dev.Sync, BPM: dev.BPM, DurationMS: float64(dev.DurationMS)}
 		if len(consoleLines) > 0 {
 			d.LineIn = true
 		}
@@ -1193,11 +1199,12 @@ func (s *Server) shadowComposeLegacy(role string, now time.Time, lines ...[]int)
 		d.At = now.UnixMilli()
 		if f := exported[dev.TrackID]; f != "" && dev.SourcePlayer == export.Number {
 			d.Path = f // the CDJ plays from this deck's own drive (#63): no copy
+			d.ID = fmt.Sprintf("cdj:own:%d", dev.TrackID)
 		} else if dev.TrackID != 0 {
 			if host := sourceHost(export, devices, dev.SourcePlayer); host != nil {
 				key := fmt.Sprintf("cdj:%s:%d:%d", host, dev.SourceSlot, dev.TrackID)
 				wanted[key] = now
-				d.Path = sh.files[key]
+				d.Path, d.ID = sh.files[key], key
 				if d.Path == "" {
 					s.shadowFetchCDJ(key, host, dev.SourceSlot, dev.TrackID)
 				}
