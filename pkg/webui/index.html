@@ -106,6 +106,7 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="setting"><div class="txt"><b data-i18n="tAnalyze"></b><span class="sub" data-i18n="sAnalyze"></span></div><label class="sw"><input type="checkbox" data-toggle="autoAnalyze"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tShare"></b><span class="sub" data-i18n="sShare"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkShare"><span></span></label></div>
   <div class="setting"><div class="txt"><b><span data-i18n="tExport"></span><span class="tag" data-i18n="beta"></span></b><span class="sub" data-i18n="sExport"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkExport"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="verboseLog"></b><span class="sub" data-i18n="verboseLogSub"></span></div><label class="sw"><input type="checkbox" data-toggle="verboseLog"><span></span></label><a class="btn" href="/api/logs" download="enginex-logs.txt" data-i18n="downloadLogs"></a></div>
   <small id="uiState"></small>
  </section>
  <section class="card">
@@ -134,6 +135,7 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
 const $=id=>document.getElementById(id);let current='',loginSession='',lastWave='',sessions=[],qrTimer=null,qrChecking=false,lastUI=null,lastDrives=[],redrawList=null,lastJobs=null;
 // Every visible string: [English, 简体中文, 繁體中文].
 const T={
+verboseLog:['Verbose logging','详细日志','詳細日誌'],verboseLogSub:['Off by default. Engine will restart; playback will stop.','默认关闭。Engine 会重启，播放会中断。','預設關閉。Engine 會重新啟動，播放會中斷。'],downloadLogs:['Download logs','下载日志','下載日誌'],
 queueIdle:['Background queue','后台工作队列','背景工作佇列'],streaming:['Streaming & accounts','流媒体与账号','串流與帳號'],pNetease:['NetEase','网易云','網易雲'],
 guest:['Guest mode','访客临时加歌','訪客臨時加歌'],guestSub:['Guest logins stay in memory for 8 hours; downloads go to [Guest / 临时加歌]. Hot cues are kept.','访客凭据只保存在内存，8 小时后失效；下载进入 [Guest / 临时加歌]，原有 Hot Cue 保留。','訪客憑證只保存在記憶體，8 小時後失效；下載進入 [Guest / 临时加歌]，原有 Hot Cue 保留。'],
 deezerUser:['Deezer public user ID (optional)','Deezer 公开用户 ID（可选）','Deezer 公開使用者 ID（可選）'],account:['Account','账号','帳號'],browse:['Browse playlists','浏览歌单','瀏覽歌單'],relogin:['Log in again','重新登录','重新登入'],logout:['End session','结束账号会话','結束帳號工作階段'],
@@ -286,7 +288,7 @@ function showUI(v){lastUI=v;
  $('uiState').textContent=t('current')+': '+lname+' · '+v.waveform+' · '+v.quality+(v.safeMode?' · '+t('safeMode'):'')}
 // A refused switch says why under its own label, not only in the toast.
 function why(e,m){const txt=e.closest('.setting').querySelector('.txt');let w=txt.querySelector('.why');if(!m){if(w)w.remove();return}if(!w){w=document.createElement('span');w.className='sub why';txt.append(w)}w.textContent=/rekordbox usb export/i.test(m)?t('needRbUsb'):m}
-for(const e of document.querySelectorAll('[data-toggle]'))e.onchange=async()=>{const restart=e.dataset.toggle==='fourDeckWaveform';if(restart&&!confirm(t('restartAsk'))){e.checked=!e.checked;return}e.disabled=true;try{why(e);showUI(await post('ui?'+e.dataset.toggle+'='+(e.checked?1:0)+(restart?'&restart=1':'')))}catch(err){e.checked=!e.checked;why(e,err.message)}finally{e.disabled=false}};
+for(const e of document.querySelectorAll('[data-toggle]'))e.onchange=async()=>{const restart=['fourDeckWaveform','verboseLog'].includes(e.dataset.toggle);if(restart&&!confirm(t('restartAsk'))){e.checked=!e.checked;return}e.disabled=true;try{why(e);showUI(await post('ui?'+e.dataset.toggle+'='+(e.checked?1:0)+(restart?'&restart=1':'')))}catch(err){e.checked=!e.checked;why(e,err.message)}finally{e.disabled=false}};
 for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.onclick=()=>action(async()=>{let q=g.dataset.seg+'='+b.dataset.v;if(g.dataset.seg==='lang'||g.dataset.seg==='fourDeckRole'){if(!confirm(t('restartAsk')))return;q+='&restart=1'}showUI(await post('ui?'+q))});
 const kinds={internal:'kInternal',hd:'kHd',sd:'kSd',usb:'kUsb',drive:'kDrive'},gb=n=>(n/2**30).toFixed(1);
 function renderDrives(){const sel=$('dropDrive'),keep=sel.value;sel.replaceChildren();for(const d of lastDrives){const o=document.createElement('option');o.value=d.name;o.textContent=t(kinds[d.kind]||'kDrive')+' · '+d.name+' · '+t('free',gb(d.free));sel.append(o)}if(!lastDrives.length){const o=document.createElement('option');o.textContent=t('noDrive');o.disabled=true;o.selected=true;sel.append(o)}if(lastDrives.some(d=>d.name===keep))sel.value=keep;showStore()}

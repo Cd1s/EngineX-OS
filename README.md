@@ -69,6 +69,7 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 
 
 ### 7. New in 5.3.0.4
+- **Verbose logging and log download**: in the web console’s deck settings, enable **Verbose logging** for troubleshooting (off by default). Engine restarts and playback stops when you switch it. **Download logs** saves a redacted text attachment from the last 30 minutes (up to 5,000 entries / 2 MiB); no SSH needed. Turn verbose logging off after reproducing the issue.
 - **4-deck link: clean unload and real streaming titles (#49)**: when the other player powers off, reboots or ejects its track, it sends a goodbye packet; after a 350 ms debounce this deck unloads its shadow deck (`Unload` + `UnSync`, handing `MASTER` back automatically) and clears the leftover waveform and track. The `RemoteState` subscription that could deadlock is gone, so a partner powering off never blocks you from switching streaming sources. Streaming tracks now show the real `Artist - Title` on the shadow deck instead of an internal numeric cache file name;
 - **Smoother UI under load**: a cached `scTr` QML property translator and a 500 ms throttle on `QuickCue` remove the brief stutter when pressing `MASTER` / `SYNC` and cut the CPU use of Engine's `EMain` GUI thread;
 - **One Stems button in the track-list swipe menu**: local tracks that already carry Engine's own `Stem` action are de-duplicated into a single localized `Stems` button (`分轨 Stems` / `分軌 Stems`), so swiping left on a local, streaming or LAN track looks and works the same;

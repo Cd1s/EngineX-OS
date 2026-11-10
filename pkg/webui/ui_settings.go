@@ -89,6 +89,7 @@ type uiSettings struct {
 	// DebugTelemetry logs every shadow deck update and decision (shadow_debug.go).
 	// Development only: off by default, and nothing in the image turns it on.
 	DebugTelemetry bool `json:"debugTelemetry"`
+	VerboseLog     bool `json:"verboseLog"`
 
 	StreamSortRole    string `json:"streamSortRole,omitempty"`
 	StreamSortOrder   string `json:"streamSortOrder,omitempty"`
@@ -270,6 +271,8 @@ func (s *Server) loadUI() uiSettings {
 			} else if val == "0" || strings.EqualFold(val, "false") {
 				v.UpfaderEcho = false
 			}
+		case "verbose_log":
+			v.VerboseLog = val == "1" || strings.EqualFold(val, "true")
 		case "debug_telemetry":
 			v.DebugTelemetry = val == "1" || strings.EqualFold(val, "true")
 		case "stream_sort_role":
@@ -382,6 +385,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.AutoAnalyze {
 		text += "auto_analyze=1\n"
+	}
+	if v.VerboseLog {
+		text += "verbose_log=1\n"
 	}
 	if v.DebugTelemetry {
 		text += "debug_telemetry=1\n"
@@ -602,6 +608,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
+	}
+	if q.Has("verboseLog") {
+		b, ok := parseBoolParam(q.Get("verboseLog"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.VerboseLog = b
 	}
 	if q.Has("shadowLegacyEngine") {
 		b, ok := parseBoolParam(q.Get("shadowLegacyEngine"))
@@ -855,7 +870,18 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	previousVerbose := s.loadUI().VerboseLog
+	if q.Has("verboseLog") {
+		if err := writeVerboseLog(v.VerboseLog); err != nil {
+			s.uiMu.Unlock()
+			fail(w, 500, errors.New("could not save logging configuration"))
+			return
+		}
+	}
 	err := s.saveUI(v, q.Has("prolinkExport"))
+	if err != nil && q.Has("verboseLog") {
+		_ = writeVerboseLog(previousVerbose)
+	}
 	s.uiMu.Unlock()
 	if err != nil {
 		fail(w, 500, err)
