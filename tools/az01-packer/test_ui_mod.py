@@ -2276,10 +2276,6 @@ assert.equal(g.keylock.state, true);
         self.assertIn("sent.range !== o.range || sent.keylock !== o.keylock", src)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 @unittest.skipUnless(shutil.which("node"), "node needed for the follower behavioral checks")
 class ShadowFollowerNoiseTest(unittest.TestCase):
     """Engine mode: raw positions as two SC5000 gave them (rec10-a) must not bend an aligned shadow deck."""
@@ -2797,3 +2793,8 @@ assert.deepEqual(scShadowHead[2], {master: undefined, sync: false, title: 'A', a
         for anchor in ('scaled.setdefault(bj + "Deck/DeckItem/AutoLoop.qml", [])', "scHead.title ? scHead.stems : view.stemmed", "scHead.title ? scHead.keyOffset :",
                        "root.scShadowHeadOf(deckIndex).slip || 0", "scSlip > 0 ? scSlip : isSlipModeActive"):
             self.assertIn(anchor, SRC)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
