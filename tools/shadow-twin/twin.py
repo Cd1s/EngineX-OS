@@ -394,12 +394,13 @@ def write_instance_configs(side: str, mode: str, src_dir: Path, ver_info: dict) 
         if not dst.exists() or wav.stat().st_mtime > dst.stat().st_mtime or wav.stat().st_size != dst.stat().st_size:
             shutil.copy2(wav, dst)
 
-    legacy = "1" if mode == "engine" else "0"
+    # The forced modes keep the key every line reads; auto is the shadow_mode default.
+    shadow = "shadow_mode=auto\n" if mode == "auto" else f"shadow_legacy_engine={'1' if mode == 'engine' else '0'}\n"
     settings = (
         f"lang=en\n"
         f"four_deck_waveform=1\n"
         f"four_deck_role={cfg['role']}\n"
-        f"shadow_legacy_engine={legacy}\n"
+        f"{shadow}"
         f"debug_telemetry=1\n"
     )
     (ui_dir / "settings.conf").write_text(settings)
@@ -790,7 +791,10 @@ def both(fn, sides=SIDES):
 
 def current_mode() -> str:
     conf = WORK / "A/data/enginex/ui/settings.conf"
-    return "engine" if (conf.is_file() and "shadow_legacy_engine=1" in conf.read_text()) else "display"
+    text = conf.read_text() if conf.is_file() else ""
+    if "shadow_mode=auto" in text:
+        return "auto"
+    return "engine" if "shadow_legacy_engine=1" in text else "display"
 
 
 def instance_version(side: str) -> dict:
@@ -1042,7 +1046,7 @@ def cmd_load(args) -> None:
                     if not loaded:
                         ok = False
         if ok:
-            if current_mode() == "engine":
+            if current_mode() != "display":
                 time.sleep(2.5)
             break
         time.sleep(0.5)
@@ -1640,7 +1644,7 @@ def main() -> None:
     p_up.add_argument("--ref", default=None, help=f"Git branch or commit to build (default: {DEFAULT_REF})")
     p_up.add_argument("--fetch", action="store_true", help="Fetch origin before building")
     p_up.add_argument("--local", action="store_true", help="Build from current working tree instead of git ref worktree")
-    p_up.add_argument("--mode", choices=("display", "engine"), default="display", help="Shadow mode: display (shadow_legacy_engine=0) or engine (=1)")
+    p_up.add_argument("--mode", choices=("display", "engine", "auto"), default="display", help="Shadow mode: display (shadow_legacy_engine=0), engine (=1) or auto (shadow_mode=auto)")
     p_up.add_argument("--delay-ms", type=float, default=2.0, help="One-way veth netem delay in ms (default 2.0 -> ~4.2 ms RTT)")
     p_up.add_argument("--jitter-ms", type=float, default=1.1, help="One-way veth netem jitter in ms (default 1.1)")
     p_up.add_argument("--build-hook", action="store_true", help="Also force recompile libengine-ui-hook.so")
@@ -1661,7 +1665,7 @@ def main() -> None:
         default=DEFAULT_REF,
         help=f"Branch or commit to build (default: {DEFAULT_REF}; e.g. agent/shadow-grid-halfwave-20261110 or 8f5bbdb)",
     )
-    p_upd.add_argument("--mode", choices=("display", "engine"), default=None, help="Optionally set shadow mode (display or engine)")
+    p_upd.add_argument("--mode", choices=("display", "engine", "auto"), default=None, help="Optionally set shadow mode (display or engine)")
     p_upd.add_argument("--no-fetch", action="store_true", help="Skip git fetch origin")
     p_upd.add_argument("--local", action="store_true", help="Build from local repo working tree")
     p_upd.set_defaults(func=cmd_update)
@@ -1672,7 +1676,7 @@ def main() -> None:
     p_dep.add_argument("--suite", action="store_true", help="Rebuild sc5000-suite")
     p_dep.add_argument("--packs", action="store_true", help="Rebuild UI packs")
     p_dep.add_argument("--hook", action="store_true", help="Rebuild libengine-ui-hook.so")
-    p_dep.add_argument("--mode", choices=("display", "engine"), default=None, help="Optionally switch shadow mode")
+    p_dep.add_argument("--mode", choices=("display", "engine", "auto"), default=None, help="Optionally switch shadow mode")
     p_dep.set_defaults(func=cmd_deploy)
 
     p_load = sub.add_parser("load", help="Load and analyze test tracks on A (Deck 1) and B (Deck 2)")

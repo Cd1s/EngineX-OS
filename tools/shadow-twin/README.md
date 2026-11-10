@@ -62,9 +62,11 @@ tools/shadow-twin/shadow-twin.sh status --fetch
 ## 3. Single-Command Operations
 
 ```bash
-# 1. Start both instances (display mode: shadow_legacy_engine=0, or engine mode: =1)
+# 1. Start both instances (display mode: shadow_legacy_engine=0, engine mode: =1,
+#    auto: shadow_mode=auto, the default of Shadow Deck Mode)
 tools/shadow-twin/shadow-twin.sh up --mode display
 tools/shadow-twin/shadow-twin.sh up --mode engine
+tools/shadow-twin/shadow-twin.sh up --mode auto
 
 # 2. Hot-redeploy after editing Go or QML/C code (~26s for both instances)
 tools/shadow-twin/shadow-twin.sh deploy --local
