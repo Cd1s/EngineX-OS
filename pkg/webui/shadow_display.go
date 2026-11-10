@@ -615,7 +615,8 @@ func downsampleDisplayWave(w enginedb.DisplayWave, limit int) enginedb.DisplayWa
 	}
 	b := make([]byte, limit*3)
 	for x := 0; x < limit; x++ {
-		for i := x * n / limit; i < (x+1)*n/limit; i++ {
+		// int64: x*n passes 2^31 on the 32-bit players once a track has more bins than the limit.
+		for i, end := int(int64(x)*int64(n)/int64(limit)), int(int64(x+1)*int64(n)/int64(limit)); i < end; i++ {
 			for c := 0; c < 3; c++ {
 				b[x*3+c] = max(b[x*3+c], w.Bands[i*3+c])
 			}
