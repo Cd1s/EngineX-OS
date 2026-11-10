@@ -174,7 +174,7 @@ func TestShadowLegacyCopyProgress(t *testing.T) {
 	half := map[string]chan struct{}{"A": make(chan struct{}), "B": make(chan struct{}), "N": make(chan struct{})}
 	peer := &loadingPeer{audio: map[string][]loadingAnswer{
 		"A": {{body: "AUDIO-AAAAAAAAAAAAAA", half: half["A"]}},
-		"B": {{body: "", half: half["B"]}}, // not a byte before it is released
+		"B": {{body: "B", half: half["B"]}}, // not a byte before it is released (an empty body would be a finished copy)
 		"N": {{body: "AUDIO-NNNNNNNNNNNNNN", half: half["N"], noLength: true}},
 	}}
 	s, source, deck := loadingServer(t, peer)

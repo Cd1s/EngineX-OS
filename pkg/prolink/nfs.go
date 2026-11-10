@@ -153,6 +153,11 @@ func (c *NFSClient) call(ctx context.Context, port int, prog, vers, proc uint32,
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		// The read deadline below ends with ctx: the timer that cancels ctx may
+		// not have run yet, and three such reads would be "no reply".
+		if d, ok := ctx.Deadline(); ok && !time.Now().Before(d) {
+			return nil, context.DeadlineExceeded
+		}
 		if _, err := conn.Write(msg.Bytes()); err != nil {
 			return nil, err
 		}
