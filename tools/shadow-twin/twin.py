@@ -1644,7 +1644,7 @@ def main() -> None:
     p_up.add_argument("--ref", default=None, help=f"Git branch or commit to build (default: {DEFAULT_REF})")
     p_up.add_argument("--fetch", action="store_true", help="Fetch origin before building")
     p_up.add_argument("--local", action="store_true", help="Build from current working tree instead of git ref worktree")
-    p_up.add_argument("--mode", choices=("display", "engine", "auto"), default="display", help="Shadow mode: display (shadow_legacy_engine=0), engine (=1) or auto (shadow_mode=auto)")
+    p_up.add_argument("--mode", choices=("display", "engine", "auto"), default="auto", help="Shadow mode: display (shadow_legacy_engine=0), engine (=1) or auto (shadow_mode=auto)")
     p_up.add_argument("--delay-ms", type=float, default=2.0, help="One-way veth netem delay in ms (default 2.0 -> ~4.2 ms RTT)")
     p_up.add_argument("--jitter-ms", type=float, default=1.1, help="One-way veth netem jitter in ms (default 1.1)")
     p_up.add_argument("--build-hook", action="store_true", help="Also force recompile libengine-ui-hook.so")
