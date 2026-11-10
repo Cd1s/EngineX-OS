@@ -2052,8 +2052,8 @@ assert.equal(bodies[bodies.length - 1].keyName, '8B');
 // The peer: its header takes the three texts from the source, not from the copy.
 Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
 scShadowApplyAll([{deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '-'}, {deck: 4, path: '/c/b.mp3', id: 'j'}], false);
-assert.deepEqual(scShadowHead[2], {master: false, sync: false, title: 'A', artist: 'One', keyName: '-'});
-assert.deepEqual(scShadowHead[4], {master: false, sync: false, title: '', artist: '', keyName: ''}); // a CDJ or an older sender: stock texts
+assert.deepEqual(scShadowHead[2], {master: false, sync: false, title: 'A', artist: 'One', keyName: '-', loop: false, keyOffset: 0, stems: false, slip: 0});
+assert.deepEqual(scShadowHead[4], {master: false, sync: false, title: '', artist: '', keyName: '', loop: false, keyOffset: 0, stems: false, slip: 0}); // a CDJ or an older sender: stock texts
 """)
         for anchor in ('scaled[bj + "Deck/DeckItem/ArtistSong.qml"]', 'scaled[bj + "KeyEditor/KeyInfo.qml"]', "root.scShadowHeadOf(microDeck.deckIndex).title"):
             self.assertIn(anchor, SRC)
@@ -2086,3 +2086,49 @@ scShadowAt[2] = {path: '/c/Two - B.mp3', id: 'j'};
 scShadowApplyAll([], false); assert.equal(scShadowHead[2].title, 'B');
 now += 400; scShadowApplyAll([], false); assert.equal(scShadowHead[2], undefined);
 """)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowHeadDeckStateTest(unittest.TestCase):
+    """Engine mode: the source's header lit its loop, showed a key shift (+1) and the Stems icon, and its overview
+    drew the slip line; the shadow deck of it showed none of them (the copy takes no loop, shift or slip)."""
+
+    def test_the_source_posts_loop_key_shift_stems_and_slip_and_the_shadow_deck_shows_them(self):
+        ShadowDisplayTest.js(self, r"""
+const bodies = [];
+globalThis.XMLHttpRequest = class {
+    open(method, url) { this.url = url; this.readyState = 1 }
+    send(body) { if (body) bodies.push(JSON.parse(body)[0]); this.readyState = 4; this.status = 200; if (this.onreadystatechange) this.onreadystatechange() }
+};
+globalThis.scShadowPoll = () => {};
+const deck = {key: '6B', loop: false, shift: 0, stems: false, slip: false, slipAt: 0};
+const states = {'/SongLoaded': () => true, '/Track/LoopEnableState': () => deck.loop, '/Track/Stemmed': () => deck.stems, '/Track/SlipModeActive': () => deck.slip};
+globalThis.scTr = path => ({value: path.endsWith('/SampleRate') ? 44100 : 0, color: '#ffffff', index: 0,
+    get state() { const f = path.startsWith('/Engine/Deck1/') && Object.keys(states).find(k => path.endsWith(k)); return f ? states[f]() : false },
+    get unnormalized() { return !path.startsWith('/Engine/Deck1/') ? 0 : path.endsWith('/TrackLength') ? 200 * 44100 : path.endsWith('/KeyOffset') ? deck.shift : path.endsWith('/SlipModePosition') ? deck.slipAt : 0 },
+    get string() { return !path.startsWith('/Engine/Deck1/') ? '' : path.endsWith('/TrackUri') ? 'file:///a.mp3' : path.endsWith('/SongName') ? 'A' : path.endsWith('/ArtistName') ? 'One' : path.endsWith('/Track/CurrentKey') ? deck.key : '' }});
+const run = ms => { for (let t = 0; t < ms; t += 40) { now += 40; scShadowTick() } };
+const last = () => bodies[bodies.length - 1];
+run(3000);
+assert.deepEqual([last().loop, last().keyOffset, last().stems, last().slip], [false, 0, false, 0]);
+// Each of them is told at the next heartbeat (0.5 s), not at the 5 s full post; a shift tells the key's new name with it.
+let n = bodies.length;
+deck.loop = true; run(520); assert.ok(bodies.length > n && last().loop, 'a loop is told within 0.5 s');
+n = bodies.length; deck.shift = 1; deck.key = '1B'; run(520);
+assert.ok(bodies.length > n, 'a key shift is told within 0.5 s'); assert.deepEqual([last().keyOffset, last().keyName], [1, '1B']);
+n = bodies.length; deck.stems = true; run(520); assert.ok(bodies.length > n && last().stems);
+n = bodies.length; deck.slip = true; deck.slipAt = 441000; run(520); assert.ok(bodies.length > n, 'slip is told within 0.5 s'); assert.equal(last().slip, 441000);
+// The slip timeline runs on: told at every heartbeat while slip is active, then its end.
+n = bodies.length; for (let i = 0; i < 50; i++) { deck.slipAt += 1764; run(40) }
+assert.ok(bodies.length - n === 4, 'slip posts in 2 s: ' + (bodies.length - n));
+assert.equal(last().slip > 441000, true);
+n = bodies.length; deck.slip = false; run(520); assert.ok(bodies.length > n, 'the end of slip is told within 0.5 s'); assert.equal(last().slip, 0);
+n = bodies.length; run(1000); assert.equal(bodies.length, n, 'nothing changed: no full post');
+// The peer: its header and overview read them from the source's post.
+Object.assign(globalThis, {scShadowApply() {}, scShadowEmpty() {}});
+scShadowApplyAll([{deck: 2, path: '/c/One - A.mp3', id: 'k', title: 'A', artist: 'One', keyName: '1B', loop: true, keyOffset: 1, stems: true, slip: 441000}], false);
+assert.deepEqual(scShadowHead[2], {master: false, sync: false, title: 'A', artist: 'One', keyName: '1B', loop: true, keyOffset: 1, stems: true, slip: 441000});
+""")
+        for anchor in ('scaled.setdefault(bj + "Deck/DeckItem/AutoLoop.qml", [])', "scHead.title ? scHead.stems : view.stemmed", "scHead.title ? scHead.keyOffset :",
+                       "root.scShadowHeadOf(deckIndex).slip || 0", "scSlip > 0 ? scSlip : isSlipModeActive"):
+            self.assertIn(anchor, SRC)
