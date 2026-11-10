@@ -69,7 +69,12 @@ type deckState struct {
 	Pitch        float64 `json:"pitch"` // percent
 	// Rate is how fast PositionMS runs on the receiver's clock, track ms per ms,
 	// measured (peerDeck.skew). Absent: 1 + Pitch/100.
-	Rate       float64 `json:"rate,omitempty"`
+	Rate float64 `json:"rate,omitempty"`
+	// Range is the source deck's pitch range in percent (Engine's SpeedRange) and
+	// KeyLock its key lock: the shadow Engine deck is set to both. Absent from a
+	// CDJ and an older sender: the shadow deck keeps its own.
+	Range      float64 `json:"range,omitempty"`
+	KeyLock    *bool   `json:"keylock,omitempty"`
 	Master     bool    `json:"master,omitempty"`
 	Sync       bool    `json:"sync,omitempty"`       // Sync on: a CDJ's BEAT SYNC becomes Engine's Sync on the shadow deck
 	BPM        float64 `json:"bpm,omitempty"`        // the track's
@@ -183,7 +188,7 @@ func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
 		o.Title != d.Title || o.Artist != d.Artist || o.Loading != d.Loading || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
 		o.Playing != d.Playing || o.Pitch != d.Pitch || o.Master != d.Master || o.Sync != d.Sync || o.BPM != d.BPM ||
-		o.CurrentBPM != d.CurrentBPM ||
+		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
 		(o.CuePos != nil && *o.CuePos != *d.CuePos) || (o.Cues == nil) != (d.Cues == nil) || !slices.Equal(o.Cues, d.Cues) {
 		return false
