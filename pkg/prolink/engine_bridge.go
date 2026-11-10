@@ -1567,6 +1567,10 @@ func buildTrackRow(t rekordbox.Track, artistID, keyID uint32) []byte {
 }
 
 func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte, error) {
+	library := rekordbox.Library{Tracks: tracks, Playlists: playlists}
+	if err := library.Validate(); err != nil {
+		return nil, fmt.Errorf("validate export library: %w", err)
+	}
 	artistMap := make(map[string]uint32)
 	var artistRows [][]byte
 	var artistNames []string
