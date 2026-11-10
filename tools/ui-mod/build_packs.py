@@ -2611,7 +2611,7 @@ UI_SCALE_ENTRY = """
 
 LED_ENTRY = """
 		EntryBase.ListEntry {
-			text: "Pad LED Brightness"
+			text: "LED Brightness"
 			readonly property var ids: [100, 80, 60, 40, 20]
 			values: ["100%", "80%", "60%", "40%", "20%"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scLedBrightness))]
@@ -4226,7 +4226,7 @@ def edits(dev: bool):
         v + "StorageMode/StorageModeOverlay.qml": size,
         ROOT + "Items/Pads/PadModeSelectDialogue.qml": size,
         prefs + "Entries/private/ColorWheelDialog.qml": size,
-        # Settings -> Device -> Pad LED Brightness also dims the on-screen pads.
+        # Settings -> Device -> LED Brightness also dims the on-screen pads.
         ROOT + "Items/Pads/Pads.qml": [("id: pads\n", "id: pads\n    opacity: typeof root !== \"undefined\" && root && root.scLedBrightness ? Math.max(0.2, Math.min(1, root.scLedBrightness / 100)) : 1\n")],
     }
     if v53():
@@ -4331,9 +4331,9 @@ def edits(dev: bool):
             visible: !pads.scBeatJumpBank
 '''),
         ])
-        # Pad LED Brightness on the hardware pads. The controller QML runs in its own engine
+        # LED Brightness on the hardware LEDs. The controller QML runs in its own engine
         # (no `root`), so its one GlobalAssignmentConfig reads ledBrightness from stream-sync
-        # and the pad LEDs scale what ColorOutputAssignment sends.
+        # and ColorOutputAssignment binds scBrightness while the C hook scales SysEx/NoteOn.
         scaled["ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml"] = [(
             '    objectName: "Global Assignment Config"\n',
             '    id: scGlobalConfig\n'
@@ -4477,7 +4477,7 @@ def edits(dev: bool):
             ("	property bool debug: false;\n",
              "	property bool debug: false;\n"
              "	// EngineX: dimming now happens after gamma in the C hook (snd_seq_event_output_direct); QML sends the stock colour.\n"
-             "	property real scBrightness: 1\n"
+             "	property real scBrightness: typeof globalConfig !== \"undefined\" && globalConfig && globalConfig.scPadBrightness ? globalConfig.scPadBrightness : 1\n"
              "	onScBrightnessChanged: if (enabled) device.sendColor(channel, idx, privatePart.scScaled())\n"),
             ("				device.sendColor(channel, idx, outputColor);\n", "				device.sendColor(channel, idx, scScaled());\n"),
             ("		id: privatePart\n",

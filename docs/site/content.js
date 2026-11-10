@@ -262,9 +262,9 @@
         { k: "h", id: "settings", x: L("4. 系统设置（Settings）", "4. 系統設定（Settings）", "4. Settings"), nav: L("4. 系统设置", "4. 系統設定", "4. Settings") },
         { k: "table", head: [L("分组", "分組", "Group"), L("内容", "內容", "Contents")], rows: [
           [L("`Device` 设备", "`Device` 裝置", "`Device`"),
-           L("`Language`（三语，免重启实时切换）、`UI Scale`（`110%`–`75%` 全屏无黑边实时缩放）、`Pad LED Brightness`（按键与打击垫灯亮度 `100%`–`20%`）、`4-Deck Waveform & Role`、`Jog Light Mode`、`Power (Turn Off)`",
-             "`Language`（三語，免重啟即時切換）、`UI Scale`（`110%`–`75%` 全螢幕無黑邊即時縮放）、`Pad LED Brightness`（按鍵與打擊墊燈亮度 `100%`–`20%`）、`4-Deck Waveform & Role`、`Jog Light Mode`、`Power (Turn Off)`",
-             "`Language` (three languages, switches live without a restart), `UI Scale` (`110%`–`75%` full-screen live scaling, no black borders), `Pad LED Brightness` (`100%`–`20%`), `4-Deck Waveform & Role`, `Jog Light Mode`, `Power (Turn Off)`")],
+           L("`Language`（三语，免重启实时切换）、`UI Scale`（`110%`–`75%` 全屏无黑边实时缩放）、`LED Brightness`（按键与打击垫亮度 `100%`–`20%`）、`4-Deck Waveform & Role`、`Jog Light Mode`、`Power (Turn Off)`",
+             "`Language`（三語，免重啟即時切換）、`UI Scale`（`110%`–`75%` 全螢幕無黑邊即時縮放）、`LED Brightness`（按鍵與打擊墊亮度 `100%`–`20%`）、`4-Deck Waveform & Role`、`Jog Light Mode`、`Power (Turn Off)`",
+             "`Language` (three languages, switches live without a restart), `UI Scale` (`110%`–`75%` full-screen live scaling, no black borders), `LED Brightness` (buttons, pads and platter ring `100%`–`20%`), `4-Deck Waveform & Role`, `Jog Light Mode`, `Power (Turn Off)`")],
           [L("`Services` 服务与网络", "`Services` 服務與網路", "`Services` (services & network)"),
            L("7 个流媒体开关、`Streaming Quality`、`NetEase Download`、流媒体歌单排序（按 BPM / 调性 / 评级 / 歌名 / 歌手）、**`Live Stream`（直播与内录）**、`Pro DJ Link Library`、`Pro DJ Link Export to CDJ (Beta)`",
              "7 個串流開關、`Streaming Quality`、`NetEase Download`、串流歌單排序（依 BPM / 調性 / 評級 / 歌名 / 歌手）、**`Live Stream`（直播與內錄）**、`Pro DJ Link Library`、`Pro DJ Link Export to CDJ (Beta)`",

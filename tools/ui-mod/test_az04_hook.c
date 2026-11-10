@@ -227,7 +227,7 @@ static void test_offline_analyzer(const char *filename) {
     puts("AZ04 OfflineAnalyzer: process() prologue matches the .perf replay hook: PASS");
 }
 
-// Pad LED Brightness: SysEx RGB / NoteOn are scaled after gamma and replayed when the level changes.
+// LED Brightness: SysEx RGB / NoteOn are scaled after gamma and replayed when the level changes.
 static uchar sent[32][SEQ_EV_SIZE], sent_sx[32][16];
 static int nsent;
 static int fake_direct(void *h, void *ev) {
@@ -253,45 +253,55 @@ static void test_led(void) {
     uchar note[SEQ_EV_SIZE] = {SEQ_NOTEON, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 100};
     snd_seq_event_output_direct((void *)1, note);
     assert(sent[1][18] == 100);
-    led_replay(20); // resends both, dimmed, from the raw cache
-    assert(nsent == 4 && sent_sx[2][11] == 3 && sent_sx[2][12] == 0 && sent_sx[2][13] == 2 && sent[3][18] == 1 && msg[11] == 127);
-    // a dim hot cue (gamma'd 30/10/0) stays visible and keeps its hue; an unlit pad (1/2/0) turns off when dimmed
-    uchar out[16], cue[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, 30, 10, 0, 0xF7}, off[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, 1, 2, 0, 0xF7};
+    uchar note_hi[SEQ_EV_SIZE] = {SEQ_NOTEON, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x6f, 127};
+    snd_seq_event_output_direct((void *)1, note_hi);
+    assert(sent[2][18] == 127);
+    led_replay(20); // resends all cached LEDs (including notes >= 100), dimmed, from the raw cache
+    assert(nsent == 6 && sent_sx[3][11] == 4 && sent_sx[3][12] == 0 && sent_sx[3][13] == 2 && sent[4][18] == 1 && sent[5][18] == 1 && msg[11] == 127);
+    // a dim hot cue (gamma'd 30/10/0) and unselected mode key / dim pad (1/2/0) stay visible (never 0) and keep hue; off (0/0/0) stays 0
+    uchar out[16], cue[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, 30, 10, 0, 0xF7};
+    uchar dim_pad[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, 1, 2, 0, 0xF7};
+    uchar off_pad[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, 0, 0, 0, 0xF7};
     led_scaled_sysex(cue, 15, 11, 20, out);
+    assert(out[11] == 2 && out[12] == 1 && out[13] == 0);
+    led_scaled_sysex(dim_pad, 15, 11, 20, out);
     assert(out[11] == 1 && out[12] == 1 && out[13] == 0);
-    led_scaled_sysex(off, 15, 11, 20, out);
-    assert(out[11] == 0 && out[12] == 0 && out[13] == 0);
-    led_scaled_sysex(off, 15, 11, 80, out);
+    led_scaled_sysex(dim_pad, 15, 11, 80, out);
+    assert(out[11] == 1 && out[12] == 1 && out[13] == 0);
+    led_scaled_sysex(off_pad, 15, 11, 20, out);
     assert(out[11] == 0 && out[12] == 0 && out[13] == 0);
     led_scaled_sysex(cue, 15, 11, 50, out);
-    assert(out[11] == 5 && out[12] == 2);
-    // monotonic: no brightness step may be brighter than the one above it, for every m (the unpressed hot cue is m=16)
+    assert(out[11] == 6 && out[12] == 2);
+    // monotonic: no brightness step may be brighter than the one above it, and no lit LED may drop to 0
     for (unsigned m = 1; m <= 127; m++) {
         uchar px[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, (uchar)m, 0, 0, 0xF7};
         unsigned prev = m;
         for (int pct = 100; pct >= 20; pct -= 20) {
             led_scaled_sysex(px, 15, 11, pct, out);
-            assert(out[11] <= prev);
+            assert(out[11] >= 1 && out[11] <= prev);
             prev = out[11];
         }
     }
     uchar c16[15] = {0xF0, 0, 0x02, 0x0B, 0, 0, 0x03, 0, 0x05, 0, 0, 16, 0, 0, 0xF7};
-    led_scaled_sysex(c16, 15, 11, 80, out); assert(out[11] == 11);
-    led_scaled_sysex(c16, 15, 11, 60, out); assert(out[11] == 7);
-    led_scaled_sysex(c16, 15, 11, 40, out); assert(out[11] == 4);
-    led_scaled_sysex(c16, 15, 11, 20, out); assert(out[11] == 1);
+    led_scaled_sysex(c16, 15, 11, 80, out); assert(out[11] == 12);
+    led_scaled_sysex(c16, 15, 11, 60, out); assert(out[11] == 8);
+    led_scaled_sysex(c16, 15, 11, 40, out); assert(out[11] == 5);
+    led_scaled_sysex(c16, 15, 11, 20, out); assert(out[11] == 2);
     led_scaled_sysex(cue, 15, 11, 100, out);
     assert(out[11] == 30 && out[12] == 10);
-    // single-colour keys: dim state below 75%, but the deck index (0x38) and all-pixels (0x3d) data pass through
-    assert(led_scaled_note(5, 100, 20) == 1 && led_scaled_note(5, 100, 50) == 1 && led_scaled_note(5, 100, 75) == 56 && led_scaled_note(5, 1, 20) == 1);
-    assert(led_scaled_note(19, 127, 20) == 127 && led_scaled_note(1, 127, 20) == 1 && led_scaled_note(2, 127, 60) == 1);
-    assert(led_scaled_note(0x38, 3, 20) == 3 && led_scaled_note(0x3d, 127, 20) == 127);
+    // single-colour keys (including Vinyl 19): dim state (1) at <= 80% brightness; JP21 6-bit RGB (2..63) scales per 2-bit channel; control notes pass through
+    assert(led_scaled_note(5, 100, 20) == 1 && led_scaled_note(5, 100, 80) == 1 && led_scaled_note(5, 100, 100) == 100 && led_scaled_note(5, 1, 20) == 1 && led_scaled_note(5, 0, 20) == 0);
+    assert(led_scaled_note(19, 127, 80) == 1 && led_scaled_note(19, 127, 20) == 1 && led_scaled_note(1, 127, 20) == 1 && led_scaled_note(2, 127, 60) == 1);
+    assert(led_scaled_note(15, 0x3c, 100) == 0x3c && led_scaled_note(15, 0x3c, 80) == 0x28 && led_scaled_note(15, 0x3c, 20) == 0x14 && led_scaled_note(15, 0x10, 20) == 0x10);
+    assert(led_scaled_note(0x38, 3, 20) == 3 && led_scaled_note(0x3d, 127, 20) == 127 && led_scaled_note(117, 127, 20) == 127 && led_scaled_note(127, 127, 20) == 127);
     note[18] = 1; // dim state: passes through and is forgotten
     snd_seq_event_output_direct((void *)1, note);
+    note_hi[0] = SEQ_NOTEOFF;
+    snd_seq_event_output_direct((void *)1, note_hi);
     led_replay(100);
-    assert(nsent == 6 && sent_sx[5][11] == 127);
+    assert(nsent == 9 && sent_sx[8][11] == 127);
     hook_test_engine = 0;
-    puts("pad LED brightness: scale after gamma, replay from cache: PASS");
+    puts("LED brightness: scale after gamma, replay from cache: PASS");
 }
 
 int main(int argc, char **argv) {
