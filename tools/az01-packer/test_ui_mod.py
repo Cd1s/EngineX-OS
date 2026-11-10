@@ -134,8 +134,8 @@ class UiModSourceTest(unittest.TestCase):
     def test_zoom_and_browse_encoder_are_stock(self):
         # The maintainer wants the stock ZOOM / Browse knob: 0.5 s per detent, hold = Grid Edit,
         # Shift+hold = Cue Edit, double press = Instant Double, also while playing (#147, #157 undone).
-        for gone in ("/GUI/Scripted/Zoom", "scZoom(", "BrowseEncoder.qml", "DeckAction.qml", "Vinyl.qml",
-                     "JogWheel.qml", "!deckConfig.gridEditActive && deckConfig.playing"):
+        for gone in ("/GUI/Scripted/Zoom", "scZoom(", "BrowseEncoder.qml", "DeckAction.qml",
+                     "!deckConfig.gridEditActive && deckConfig.playing"):
             self.assertNotIn(gone, SRC)
         self.assertIn("Planck.getProperty(\"/Engine/Master/WaveformZoom\")", bp.ZOOM_PROP)  # the shadow lane reads it
 
@@ -1784,3 +1784,55 @@ ahead = -55; run(30000);
 assert.ok(most <= 15, 'bent ' + most + ' ms past the source');
 assert.ok(Math.abs(ahead) < 12 && bends >= 1 && bends <= 3, 'ended ' + ahead + ' ms off after ' + bends + ' bends');
 """)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the follower behavioral checks")
+class ShadowFollowerStartTest(unittest.TestCase):
+    """Engine mode: a play start lands ~110 ms off (rec12-a); at -50 % a bend moves the deck half as far."""
+
+    def test_start_gap_is_bent_after_a_second_and_a_bend_counts_the_decks_speed(self):
+        ShadowDisplayTest.js(self, r"""
+for (const rate of [1, 0.5]) {
+    const T0 = now, props = new Map();
+    let ahead = 110 * rate, tick = 0, bends = 0, first = 0, closed = 0, ready = 0;
+    globalThis.scShadowBent = null;
+    delete scShadowAt[2];
+    globalThis.scShadowBendTimer = {interval: 0, running: false, stop() { this.running = false },
+        restart() { this.running = true; bends++; first = first || now - T0; ahead += this.interval * 0.07 * rate * (scTr('/Engine/Deck2/Track/NudgeForward').state ? 1 : -1) }};
+    const jitter = () => tick % 7 < 3 ? 9 * rate : -9 * rate;
+    globalThis.scTr = path => {
+        let p = props.get(path);
+        if (p) return p;
+        const deck2 = path.startsWith('/Engine/Deck2/');
+        p = {state: deck2 && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')), string: path.endsWith('/SpeedRange') ? '100' : path.endsWith('/SyncMode') ? 'Off' : '',
+            entries: ['4', '8', '10', '20', '50', '100'], index: 5, url: '',
+            _v: path.endsWith('/SampleRate') ? 44100 : path.endsWith('/Speed') ? rate / 2 : 0,
+            get value() { return this._v }, set value(v) { this._v = v },
+            get unnormalized() { return path.endsWith('/TrackLength') ? 44100 * 400 : path.endsWith('/TrackPosition') ? ((now - T0) * rate + 50000 + ahead + jitter()) * 44.1 : 0 }};
+        props.set(path, p);
+        return p;
+    };
+    let seq = 0;
+    const apply = () => scShadowApplyAll([{deck: 2, path: '/data/enginex/shadow-v3/peer-1/a.flac', playing: true, link: '{l}', range: 100,
+        positionMs: (now - T0) * rate + 50000 + 18 * rate, at: now, pitch: (rate - 1) * 100, rate: rate, bpm: 140, currentBpm: 140 * rate, jumps: 0, seq: ++seq}], false);
+    apply();
+    for (let t = 0; t < 12000; t += 200) {
+        now += 200; tick++;
+        if (scShadowBendTimer.running) scShadowBendEnd();
+        scShadowLine(now);
+        if (t % 600 === 0) apply();
+        ready = ready || (scShadowAt[2] && scShadowAt[2].ready ? now - T0 : 0);
+        if (!closed && Math.abs(ahead) < 10 * rate) closed = now - T0;
+    }
+    assert.ok(first > 0 && first - ready <= 1400, 'rate ' + rate + ': first bend ' + (first - ready) + ' ms after the deck was ready');
+    assert.ok(closed > 0 && closed <= 9000 && Math.abs(ahead) < 10 * rate, 'rate ' + rate + ': ' + ahead + ' ms off, closed after ' + closed + ' ms, ' + bends + ' bends');
+}
+""")
+
+
+class JogGridEditGuardTest(unittest.TestCase):
+    def test_jog_guards_stay_while_zoom_is_stock(self):
+        # #157's jog half is not a ZOOM / Browse change: Shift+Vinyl while playing and Jog Touch in Grid Edit.
+        self.assertIn("(globalConfig.shift && !deckConfig.playing) || deckConfig.gridEditActive", SRC)
+        self.assertIn("!deckConfig.gridEditActive &&\\n", SRC)
+        self.assertNotIn("BrowseEncoder.qml", SRC)
