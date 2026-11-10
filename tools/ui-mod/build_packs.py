@@ -4562,7 +4562,8 @@ def edits(dev: bool):
         ]
         for item, text_id in (("AutoLoop", "autoLoopText"), ("BeatJump", "beatJumpText")):
             scaled.setdefault(bj + "Deck/DeckItem/" + item + ".qml", []).append((
-                f"        id: {text_id}\n", f"        id: {text_id}\n        fontSizeMode: Text.HorizontalFit\n        minimumPixelSize: 14\n"))
+                f"        id: {text_id}\n", f"        id: {text_id}\n        fontSizeMode: Text.HorizontalFit\n        minimumPixelSize: 14\n" +
+                ("        rightPadding: 14\n" if item == "BeatJump" else "")))
         # Share the stock formatter between performance controls and shadow data.
         scaled[ROOT + "Items/Bpm.qml"] = [
             ("    property int decimalPlaces: 1\n", "    property int decimalPlaces: 2\n"),
