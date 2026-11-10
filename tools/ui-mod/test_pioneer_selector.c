@@ -51,8 +51,10 @@ static void test_modes(void) {
                 for (unsigned w = 0; w < 3; ++w)
                     render(mode, values[t], values[p], values[w]);
         double a = render(mode, 0.1f, 0.2f, 1);
-        double b = render(mode, 0.9f, 0.8f, 1);
+        double b = render(mode, 0.9f, 0.2f, 1);
+        double c = render(mode, 0.1f, 0.8f, 1);
         CHECK(fabs(a - b) > 0.001);
+        CHECK(fabs(a - c) > 0.001);
     }
     /* Literal bypass includes signed zeros and invalid source samples. */
     memset(&fx[0], 0, sizeof fx[0]);

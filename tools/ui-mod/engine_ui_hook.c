@@ -479,8 +479,40 @@ static void *dsp_originals[DSP_HOOK_COUNT];
 #if !defined(__aarch64__)
 static uintptr_t px_engine_base;
 static void *px_destructor_original;
+static void *px_rate_original;
+/* Rate can arrive before the Mix binding handshake. Keep the last Flanger
+ * value per live owner, including while a stock effect is selected. */
+static struct { void *owner; unsigned value; } px_rates[SC_PFX_UNITS];
+static float px_rate_value(void *owner) {
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+        if (__atomic_load_n(&px_rates[i].owner, __ATOMIC_ACQUIRE) == owner)
+            return sc_pfx_float(__atomic_load_n(&px_rates[i].value, __ATOMIC_ACQUIRE));
+    return 0.5f; /* No native Rate event yet: neutral PX timing. */
+}
+static void px_rate_remember(void *owner, float value) {
+    if (!owner) return;
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+        if (__atomic_load_n(&px_rates[i].owner, __ATOMIC_ACQUIRE) == owner) {
+            __atomic_store_n(&px_rates[i].value, sc_pfx_bits(value), __ATOMIC_RELEASE);
+            return;
+        }
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i) {
+        void *empty = NULL;
+        /* Reserve before publishing the owner so a reader never sees an
+         * uninitialized value. Native control events share the DSP thread. */
+        if (__atomic_compare_exchange_n(&px_rates[i].owner, &empty, (void *)1, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&px_rates[i].value, sc_pfx_bits(value), __ATOMIC_RELAXED);
+            __atomic_store_n(&px_rates[i].owner, owner, __ATOMIC_RELEASE);
+            return;
+        }
+    }
+}
 static void hook_px_destroy(void *self) {
     sc_pfx_forget_owner(self);
+    for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+        if (__atomic_load_n(&px_rates[i].owner, __ATOMIC_ACQUIRE) == self)
+            __atomic_store_n(&px_rates[i].owner, NULL, __ATOMIC_RELEASE);
     ((void (*)(void *))px_destructor_original)(self);
 }
 
@@ -557,6 +589,26 @@ static void *dsp_bound_owner(void *handler) {
     return (void *)((uintptr_t)owner + (adjustment >> 1));
 }
 
+#if !defined(__aarch64__)
+static void hook_px_rate(void *handler, const void *event) {
+    /* Preserve every native event, including stock effects and their full
+     * Rate range. This dispatcher is installed only in the verified PX scope. */
+    ((dsp_event_fn)px_rate_original)(handler, event);
+    if (!fx_selector_supported || !event) return;
+    const char *name; uint32_t length, index;
+    memcpy(&name, (const char *)event + 8, 4);
+    memcpy(&length, (const char *)event + 12, 4);
+    memcpy(&index, (const char *)event + 0x24, 4);
+    if (length != 7 || !name || memcmp(name, "Flanger", 7) || index > 10) return;
+    void *owner = dsp_bound_owner(handler);
+    /* The stock Flanger has 11 ascending beat choices. PX uses their relative
+     * positions across its existing timing range, without tempo sync. */
+    float value = (float)index / 10.0f;
+    px_rate_remember(owner, value);
+    sc_pfx_control(owner, 2, value);
+}
+#endif
+
 static void dsp_transition(unsigned slot, uint32_t kind, void *handler, const void *event) {
 #if !defined(__aarch64__)
     if (fx_selector_supported && (slot == DSP_SWITCH || slot == DSP_CHANGE)) {
@@ -608,6 +660,7 @@ static void dsp_finite_event(unsigned slot, size_t offset, int is_double,
                     __atomic_store_n(&r->native_owner, owner, __ATOMIC_RELEASE);
                     __atomic_store_n(&r->input_a, (char *)owner + 0x30 + 0xf8, __ATOMIC_RELEASE);
                     __atomic_store_n(&r->input_b, (char *)owner + 0x160 + 0xf8, __ATOMIC_RELEASE);
+                    __atomic_store_n(&r->time, sc_pfx_bits(px_rate_value(owner)), __ATOMIC_RELEASE);
                     sc_pfx_bind(i, owner, carrier);
                 }
                 return;
@@ -735,8 +788,8 @@ static void hook_flanger(void *self, float *const *input, float *const *output, 
                 }
                 float mix = sc_pfx_float(__atomic_load_n(&r->mix, __ATOMIC_ACQUIRE));
                 float param = sc_pfx_float(__atomic_load_n(&r->parameter, __ATOMIC_ACQUIRE));
-                // Rate vector is not captured yet: Parameter also maps time.
-                (void)sc_pfx_process(&r->dsp, input[0], input[1], frames, (int)mode, param, param, mix);
+                float time = sc_pfx_float(__atomic_load_n(&r->time, __ATOMIC_ACQUIRE));
+                (void)sc_pfx_process(&r->dsp, input[0], input[1], frames, (int)mode, time, param, mix);
                 sc_pfx_leave(r);
                 /* No READY bank after rapid resets: reset Wet is zero. The
                  * Mix=1 processor must receive untouched dry input, never a
@@ -923,6 +976,8 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     static const uint32_t prefix[] = {0xe59f1ad0, 0xe59f2ad0};
     uintptr_t entry = base + 0xe99000;
     if (memcmp((void *)entry, prefix, 8)) return 0;
+    uintptr_t rate = base + 0xe6a114;
+    if (memcmp((void *)rate, dsp_event_prefix, 8)) return 0;
     /* Fail back to legacy master/menu if the device cannot publish readiness. */
     if (!px_write_ready("/run/enginex-fx-selector.ready")) return 0;
     // Both displaced instructions are PC-relative loads. Preserve their values
@@ -932,6 +987,10 @@ static int install_px_scope(uintptr_t base, size_t page, const char *version) {
     memcpy(&literals[1], (void *)(base + 0xe99adc), 4);
     uint32_t code[] = {0xe59f1004, 0xe59f2004, 0xe59ff004, literals[0], literals[1], (uint32_t)(entry + 8)};
     px_destructor_original = rx_code(code, sizeof code, page);
+    uint32_t rate_code[] = {dsp_event_prefix[0], dsp_event_prefix[1], 0xe51ff004, (uint32_t)(rate + 8)};
+    px_rate_original = rx_code(rate_code, sizeof rate_code, page);
+    uint32_t rate_jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_px_rate};
+    patch_bytes(rate, rate_jump, sizeof rate_jump, page);
     uint32_t jump[] = {0xe51ff004, (uint32_t)(uintptr_t)hook_px_destroy};
     patch_bytes(entry, jump, sizeof jump, page);
     px_engine_base = base;
