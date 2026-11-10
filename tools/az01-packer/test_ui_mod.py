@@ -1961,3 +1961,35 @@ assert.deepEqual([b.title, b.artist, b.durationMs], ['B', 'Two', 171000]);
 bodies.length = 0; deck.uri = 'file:///b2.mp3'; scShadowPrev[1].netAt = 0; run(2600);
 assert.equal(bodies[0].title, ''); assert.equal(bodies[bodies.length - 1].title, 'B');
 """)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowSenderLateTickTest(unittest.TestCase):
+    """A tick after a GUI stall can read the position of before the stall (zs15-b: 340 ms behind after a 426 ms stall).
+    It was posted as a jump back, then a jump forward: the peer's copy was seeked 200 ms back (rec15-d)."""
+
+    def test_a_stale_position_after_a_stall_is_not_a_jump(self):
+        ShadowDisplayTest.js(self, r"""
+globalThis.XMLHttpRequest = class { open() { this.readyState = 1 } send() { this.readyState = 4; this.status = 200 } };
+globalThis.scShadowPoll = () => {};
+const T0 = now;
+let stale = 0, moved = 0;
+globalThis.scTr = path => ({value: path.endsWith('/SampleRate') ? 44100 : 0, color: '#ffffff', index: 0,
+    state: path.startsWith('/Engine/Deck1/') && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')),
+    get unnormalized() { return path.endsWith('/Deck1/Track/TrackPosition') ? (now - T0 - stale + moved) * 44.1 : path.endsWith('/Deck1/Track/TrackLength') ? 400 * 44100 : 0 },
+    get string() { return path === '/Engine/Deck1/Track/TrackUri' ? 'file:///a.mp3' : '' }});
+const run = ms => { for (let t = 0; t < ms; t += 80) { now += 80; scShadowTick() } };
+run(2000);
+const jumps = scShadowPrev[1].jumps, line = () => scShadowPrev[1].lineMs - (now - T0);
+const before = line();
+now += 426; stale = 340; scShadowTick(); // the timer runs before the queued position update
+assert.equal(scShadowPrev[1].jumps, jumps, 'a stale position was posted as a jump');
+assert.ok(Math.abs(line() - before) < 2, 'the line moved by ' + (line() - before));
+stale = 0; run(400);
+assert.equal(scShadowPrev[1].jumps, jumps);
+assert.ok(Math.abs(line() - before) < 2);
+// A jump made during a stall is told by the next tick.
+now += 426; moved = -5000; scShadowTick(); run(80);
+assert.equal(scShadowPrev[1].jumps, jumps + 1);
+assert.ok(Math.abs(line() - before + 5000) < 40);
+""")
