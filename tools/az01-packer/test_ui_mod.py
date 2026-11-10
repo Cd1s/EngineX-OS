@@ -547,6 +547,46 @@ assert.deepStrictEqual(evalHeaderText(false, true, true, '', '', ''),
 """
             res = subprocess.run(["node", "-e", js], capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, res.stderr)
+            # F4 & F5: blocker MouseArea stays above scHeaderLoader, forwards only time-slot presses to timeView.flip(),
+            # and isLead respects explicit lead=false when master=true.
+            self.assertLess(layer.index("id: scHeaderLoader"), layer.index('objectName: "EngineX_ShadowBlocker"'))
+            flip_fn = re.search(r"function tryFlipTime\(x, y\) \{.*?\n                \}", layer, re.S).group(0)
+            lead_expr = re.search(r"readonly property bool isLead: ([^\n]+)", layer).group(1)
+            f4_js = f"""
+const assert = require('assert');
+let flips = 0;
+const timeView = {{ flip() {{ flips++ }} }};
+const scTimeSlot = {{ visible: true, x: 323, y: 3, width: 58, height: 27 }};
+let loaded = true;
+const scDisplay = {{
+    performance: false,
+    graphical: false,
+    sample: null,
+    mapToItem(item, x, y) {{ return {{ x: x - item.x, y: y - item.y }} }}
+}};
+{flip_fn}
+// Press inside time slot (including +12px vertical touch padding): flips once
+assert.strictEqual(tryFlipTime(350, 16), true);
+assert.strictEqual(flips, 1);
+assert.strictEqual(tryFlipTime(350, -5), true);
+assert.strictEqual(flips, 2);
+// Press outside time slot (e.g., on AutoLoop at x=80, y=45 or BeatJump at x=140, y=45): blocked, does not flip
+assert.strictEqual(tryFlipTime(80, 45), false);
+assert.strictEqual(tryFlipTime(140, 45), false);
+assert.strictEqual(flips, 2);
+// Unloaded deck: does not flip
+loaded = false;
+assert.strictEqual(tryFlipTime(350, 16), false);
+assert.strictEqual(flips, 2);
+// F5: lead=false with master=true must evaluate isLead to false; missing lead falls back to master
+function evalIsLead(sample) {{ scDisplay.sample = sample; return {lead_expr}; }}
+assert.strictEqual(evalIsLead({{ master: true, lead: false }}), false);
+assert.strictEqual(evalIsLead({{ master: true, lead: true }}), true);
+assert.strictEqual(evalIsLead({{ master: true }}), true);
+assert.strictEqual(evalIsLead({{ master: false }}), false);
+"""
+            res_f4 = subprocess.run(["node", "-e", f4_js], capture_output=True, text=True)
+            self.assertEqual(res_f4.returncode, 0, res_f4.stderr)
 
 @unittest.skipUnless(shutil.which("node"), "node needed for the display-state behavioral checks")
 class ShadowDisplayTest(unittest.TestCase):
