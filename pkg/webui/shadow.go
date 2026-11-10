@@ -481,8 +481,11 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 		ex.Master = ex.Master || master
 	}
 	s.shadow.mu.Lock()
-	if postAt != 0 && postAt < s.shadow.ownPostAt {
-		// The QML's XHRs race on separate connections: an older post lost.
+	nowMS = time.Now().UnixMilli()
+	if postAt > nowMS || (postAt != 0 && postAt < s.shadow.ownPostAt && s.shadow.ownPostAt <= nowMS) {
+		// Reject older samples, including a pre-rollback handler that finished
+		// late. A previous baseline now in the future belongs to the old clock:
+		// the first current-clock post replaces it instead of waiting to catch up.
 		s.shadow.mu.Unlock()
 		respond(w, map[string]any{"ok": true})
 		return
@@ -1346,6 +1349,20 @@ func (s *Server) shadowFetchCDJ(key string, host net.IP, slot byte, id uint32) {
 	})
 }
 
+func copyShadowAudio(dst io.Writer, resp *http.Response, limit int64) error {
+	if resp.ContentLength > limit {
+		return fmt.Errorf("peer audio exceeds %d byte limit", limit)
+	}
+	n, err := io.Copy(dst, io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return fmt.Errorf("copy peer audio: %w", err)
+	}
+	if n > limit {
+		return fmt.Errorf("peer audio exceeds %d byte limit", limit)
+	}
+	return nil
+}
+
 func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 	port := s.shadow.peerPort
 	if port == 0 {
@@ -1386,7 +1403,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 			return "", err
 		}
 		defer os.Remove(f.Name())
-		_, err = io.Copy(f, io.LimitReader(resp.Body, 1<<30))
+		err = copyShadowAudio(f, resp, 1<<30)
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}
@@ -1409,6 +1426,7 @@ func (s *Server) shadowFetch(key string, fetch func(context.Context) (string, er
 		return
 	}
 	sh.busy[key] = true
+	s.shadowCleanCopies(key)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
@@ -1421,20 +1439,25 @@ func (s *Server) shadowFetch(key string, fetch func(context.Context) (string, er
 			return
 		}
 		sh.files[key] = path
-		// Keep copies a shadow deck wanted in the last 2 minutes: deleting the
-		// previous track at once failed Engine's load when the CDJ switched fast.
-		for k, f := range sh.files {
-			if k != key && time.Since(sh.used[k]) > 2*time.Minute {
-				os.Remove(f)
-				os.Remove(f + ".perf")
-				for dir := filepath.Dir(f); dir != s.shadowDir() && strings.HasPrefix(dir, s.shadowDir()); dir = filepath.Dir(dir) {
-					os.Remove(dir) // the copy's own directories, once empty
-				}
-				delete(sh.files, k)
-				delete(sh.used, k)
-			}
-		}
+		s.shadowCleanCopies(key)
 	}()
+}
+
+// Called with sh.mu held, before a download too: ENOSPC must not prevent cleanup.
+func (s *Server) shadowCleanCopies(keep string) {
+	sh := s.shadow
+	// Keep copies wanted in the last 2 minutes and those still being fetched.
+	for k, f := range sh.files {
+		if k != keep && !sh.busy[k] && time.Since(sh.used[k]) > 2*time.Minute {
+			os.Remove(f)
+			os.Remove(f + ".perf")
+			for dir := filepath.Dir(f); dir != s.shadowDir() && strings.HasPrefix(dir, s.shadowDir()); dir = filepath.Dir(dir) {
+				os.Remove(dir) // the copy's own directories, once empty
+			}
+			delete(sh.files, k)
+			delete(sh.used, k)
+		}
+	}
 }
 
 // shadowWake starts the beacon and peer polling while a shadow deck is in use;
