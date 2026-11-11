@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -24,7 +25,7 @@ const (
 )
 
 // Only downloads this pipeline named are ever evicted: Save's and Deemix's <id>.
-var evictable = regexp.MustCompile(`^(netease-|soundcloud-|beatport-)?\d+\.(flac|mp3|mp4)$`)
+var evictable = regexp.MustCompile(`^((netease-|soundcloud-|beatport-)?\d+\.(flac|mp3|mp4)|spotify-[A-Za-z0-9]+\.(ogg|flac|mp3))$`)
 
 var defaultMedia = func() *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
@@ -53,6 +54,10 @@ func (c *Client) accept(path string) (*Download, error) {
 
 // Cached returns an earlier Save under name, so a restart does not fetch it again.
 func (c *Client) Cached(name string) *Download {
+	if strings.HasPrefix(name, "spotify-") {
+		return c.cachedOgg(name)
+	}
+
 	for _, ext := range []string{".flac", ".mp3"} {
 		if dl, err := c.accept(filepath.Join(c.DownloadDir, name+ext)); err == nil {
 			return dl
@@ -62,9 +67,18 @@ func (c *Client) Cached(name string) *Download {
 	if isMP4(path) {
 		return &Download{Path: path, Quality: Quality{Label: "[AAC]", Format: "mp4"}}
 	}
+
+	return c.cachedOgg(name)
+}
+
+func (c *Client) cachedOgg(name string) *Download {
 	oggPath := filepath.Join(c.DownloadDir, name+".ogg")
 	if st, err := os.Stat(oggPath); err == nil && st.Mode().IsRegular() && st.Size() > 0 {
-		return &Download{Path: oggPath, Quality: Quality{Format: "OGG_320", Lossless: false}}
+		if q, err := Inspect(oggPath); err == nil {
+			return &Download{Path: oggPath, Quality: q}
+		}
+		// Keep synthetic/offline cache entries usable; decoding still validates audio.
+		return &Download{Path: oggPath, Quality: Quality{Label: "[320k]", Format: "ogg", SampleRate: 44100, Lossless: false}}
 	}
 	return nil
 }

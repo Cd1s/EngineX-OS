@@ -360,7 +360,7 @@ func TestSpotifyConnectBlobRoundTrip(t *testing.T) {
 	priv, _ := rand.Int(rand.Reader, spotifyDHPrime)
 	clientPub := new(big.Int).Exp(big.NewInt(2), priv, spotifyDHPrime).FillBytes(make([]byte, 96))
 	shared := new(big.Int).Exp(new(big.Int).SetBytes(pub), priv, spotifyDHPrime)
-	base := sha1.Sum(shared.FillBytes(make([]byte, 96)))
+	base := sha1.Sum(shared.Bytes())
 	mac := func(key []byte, msg string) []byte {
 		h := hmac.New(sha1.New, key)
 		h.Write([]byte(msg))

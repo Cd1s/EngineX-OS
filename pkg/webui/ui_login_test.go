@@ -153,7 +153,7 @@ func TestSpotifyPhoneClientIDAndAccessToken(t *testing.T) {
 
 // #104: the deck's Spotify login shows its QR code with no Client ID set, using the built-in one.
 func TestSpotifyLoginWorksWithoutAnOwnerClientID(t *testing.T) {
-	ui := New(Config{AccessToken: "test-console-code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	ui := New(Config{AccessToken: "test-console-code", UIDir: t.TempDir(), StateDir: t.TempDir(), SpotifyAccountsURL: "https://offline.example.invalid"}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	resp, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
@@ -332,7 +332,7 @@ func TestRelayLoginCollectsBothServices(t *testing.T) {
 	defer relay.Close()
 	state := t.TempDir()
 	tokenPath := filepath.Join(state, "spotify-token.json")
-	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: state, SpotifyTokenPath: tokenPath, RelayURL: relay.URL, SpotifyClientID: testSpotifyClientID}, nil)
+	ui := New(Config{AccessToken: "code", UIDir: t.TempDir(), StateDir: state, SpotifyTokenPath: tokenPath, RelayURL: relay.URL, SpotifyClientID: testSpotifyClientID, SpotifyBaseURL: "https://offline.example.invalid"}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	poll := func(provider string) string {
@@ -414,7 +414,7 @@ func TestRelayRefusesToFollowRedirects(t *testing.T) {
 func TestRelayOutageStillShowsItsQRCode(t *testing.T) {
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "down", 503) }))
 	defer relay.Close()
-	ui := New(Config{AccessToken: "code", SpotifyClientID: testSpotifyClientID, UIDir: t.TempDir(), StateDir: t.TempDir(), RelayURL: relay.URL}, nil)
+	ui := New(Config{AccessToken: "code", SpotifyClientID: testSpotifyClientID, SpotifyAccountsURL: "https://offline.example.invalid", UIDir: t.TempDir(), StateDir: t.TempDir(), RelayURL: relay.URL}, nil)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 	r, err := http.Post(srv.URL+"/v1/sc5000/login?provider=spotify", "", nil)
@@ -913,7 +913,7 @@ func (c countingCatalog) Search(ctx context.Context, q string) ([]providers.Trac
 
 func TestSpotifyConnectEndpoints(t *testing.T) {
 	state := t.TempDir()
-	ui := New(Config{AccessToken: "console", UIDir: t.TempDir(), StateDir: state}, nil)
+	ui := New(Config{AccessToken: "console", UIDir: t.TempDir(), StateDir: state, SpotifyBaseURL: "https://offline.example.invalid"}, nil)
 	defer ui.Close()
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
@@ -939,7 +939,13 @@ func TestSpotifyConnectEndpoints(t *testing.T) {
 	if err := json.Unmarshal(body, &info); err != nil {
 		t.Fatalf("unmarshal info: %v", err)
 	}
-	if info.Status != 101 || info.StatusString != "OK" || info.DeviceID != "enginex-os-spotify-connect" || info.RemoteName != "EngineX OS" {
+	if info.Status != 101 || info.StatusString != "OK" || info.DeviceID != func() string {
+		id, err := providers.LoadSpotifyDeviceID(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}() || info.RemoteName != "EngineX OS" {
 		t.Fatalf("unexpected info response: %+v", info)
 	}
 

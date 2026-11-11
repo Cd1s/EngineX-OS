@@ -77,6 +77,7 @@
 - **OmniSource 歌單隔離（#105）**：開啟 OmniSource（跨源搜尋）後，搜尋列仍可同時檢索各串流與全部隨身碟曲庫，但各串流自己的歌單頁不再混入 `[USB: ...]` 項目與其他平台的歌單；
 - **SoundCloud 按讚歌單回退（#150）**：使用者 OAuth `refresh_token` 過期、SoundCloud 回傳 `HTTP 400` 時，自動回退到 App Token 與公開個人頁介面，繼續載入 `Liked Tracks & Sets`；
 - **Spotify Connect 區域網路探索（#150）**：內建 Avahi `_spotify-connect._tcp` mDNS 廣播，`stream-sync` 另帶純 Go 的 `_spotify-connect._tcp.local.` mDNS 廣播器（有線 `eth0` + 無線 `wlan0` 雙網卡也能被發現），並使用標準 768-bit Diffie-Hellman 公鑰，手機 Spotify App 可在區域網路中直接發現 `EngineX OS`；同時修復 OAuth 登入後曲目下載回傳 `410` 的問題；
+- **Spotify 原生音訊與零設定登入（#210，5.3.0.4）**：Spotify Premium 音訊改用純 Go `go-librespot` 協定堆疊與 AES 解密，優先 320 kbps Ogg Vorbis（其次 160/96 kbps），絕不退回 Deemix。在 Spotify Connect 選擇 **`EngineX OS`**，或掃描直達官方裝置授權頁的 QR Code，無需建立 Developer App；純 Go `.ogg` 分析產生 BPM、調性與波形並匯入 Engine 曲庫。
 - **串流快取隔離與 Deemix 智慧共享**：Spotify、Beatport、SoundCloud 與網易雲「官方直下」模式各自使用獨立下載通道與專屬快取命名空間；網易雲「Deemix 優先」時與 Deezer 共享無損快取，互相點播同一首不重複下載；
 - **SoundCloud Go+ 與高清智慧路由**：長混音 / DJ Set（超過 10 分鐘）一律直連 SoundCloud 官方串流；非 Set 普通單曲與 Go+ 專享曲目：已綁定 Go+ 優先官方高音質串流，未綁定時自動在已登入的其他串流（Deezer / 網易雲 / Beatport）比對無損 / 320k 音訊，避免 30 秒試聽限制；
 - **品牌統一與免網域公網連線**：面向使用者的組件統一為 `enginex-relay`（原 `sc5000-relay`）、`enginex-stemsd`（原 `sc5000-stemsd`）、`enginex-suite`，執行目錄為 `/data/enginex`（保留 `/data/sc5000-custom` 相容符號連結）；支援 Cloudflare Quick Tunnel 免網域一鍵公網穿透，手機掃碼即可遠端登入串流；中繼主控台新增 `已連線播放機叢集（Multi-Deck Hub）` 卡片，彙整同一後端下所有播放機的上線狀態、機位角色（`13` / `24`）、韌體版本與串流登入狀態，可用播放機存取碼或主密碼登入；各播放機 `設定 → 關於 / 更新` 頁會即時顯示 Stems 算力節點狀態；
@@ -142,7 +143,7 @@
 - **SC5000 / SC6000 原生四軌版面**：在獨立播放機上解鎖 Engine 內建的四軌介面，音效卡仍只用 2 路。每台播放機負責自己角色的兩軌（`自動`、`1+3`、`2+4`、`1+2`、`3+4`、`1`、`2`，在 `版面 → ENGINEX 視圖預設 → 四軌角色` 切換），其餘各軌是不出聲的**影子軌道**，跟隨另一台 EngineX 碟機或 CDJ 的曲目、播放 / CUE、位置、速度、Master 與同步；
 - 向 Shoutcast / Icecast 伺服器 **直播推流**；
 - **曲庫**：rekordbox 匯出的隨身碟（包含 6.8.5）即使有個別檔案損壞也能正常匯入，那幾首在載入時再分析；選取其他串流服務時，不再跳出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示；
-- **Spotify 改用你自己的應用**：Spotify 限制每個應用的使用者數和請求量，所以不再內建共用的應用。到 `developer.spotify.com/dashboard` 免費建立一個應用，把網頁控制台裡顯示的 Redirect URI 加進去，再把它的 Client ID 填回控制台（`#70`）；
+- **Spotify 登入（#210）**：Connect 區域網路配對與官方裝置授權 QR Code 使用內建桌面用戶端，無需自建 Client ID；裝置授權無法使用時保留 PKCE、貼上與公開歌單連結方式。舊 Web API token 需要重新 Connect 配對或掃碼授權一次，才能解密原生音訊。
 - **串流與影子軌道更穩**：在播放機上開著的串流歌單，背景服務重啟後照樣能載入，不再出現「Track not found」（`#73`）；影子軌道顯示真實歌名，沒有標籤的檔案也一樣，另一台從串流瀏覽器載入的歌也能跟隨；載入歌曲時打擊墊保持在 HOT CUE（`#71`）。
 
 > **先鋒連線說明**：與先鋒 CDJ-3000 的連線互通（曲庫分享、3-Band 波形、60fps 播放頭與 Master / Beat Sync 對拍）是以維護者自研的 [**OpenProLink**](https://github.com/Cd1s/OpenProLink)（內建虛擬 CDJ-3000 模擬器，以及先鋒全系 CDJ / XDJ 碟機與 DJM 混音台的協定擷取工具 `prolink-probe`）與實機 Denon SC5000 聯調驗證。手邊暫時沒有先鋒 CDJ-3000 實體真機，接先鋒真機的表現還需要大家實測。歡迎擁有先鋒 CDJ-3000、CDJ-2000NXS2、XDJ-AZ / XZ 或先鋒混音台（DJM-A9 / DJM-V10 / DJM-900NXS2）真機的玩家前往 [Cd1s/OpenProLink](https://github.com/Cd1s/OpenProLink) 或本倉庫提交真機實測回報與設備 / 混音台協定封包資訊，共同完善跨品牌曲庫、混音台效果器速度同步（Beat FX Sync）、量化（Quantize）與 On-Air 連動！
@@ -353,7 +354,7 @@ powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1
 | 平台 | 怎麼登入 |
 | --- | --- |
 | 網易雲音樂 | 用網易雲音樂 App 掃播放機螢幕上的 QR Code 並確認。QR Code 過期後點一下就會換新的。 |
-| Spotify | **方式 A（推薦）**：手機或電腦開啟 Spotify App 播放任意歌曲，點右下角「連接裝置」喇叭圖示，選擇 **`EngineX OS`** 約 1 秒自動完成帳號綁定。**方式 B**：點 Spotify 右側的「掃碼登入」用手機掃碼。直接從 Spotify 拉取 320kbps Ogg Vorbis 原生音訊播放。 |
+| Spotify | **音訊需要 Premium。** 同一區域網路內在 Spotify Connect 選擇 **`EngineX OS`**，或掃碟機 QR Code 直接開啟 Spotify 官方裝置授權確認頁。正常流程無需自建 Client ID，也無需貼上回環網址。原生 AES 解密的 Ogg Vorbis 優先 320 kbps，其次 160/96 kbps；純 Go 分析 BPM、調性與波形並匯入 Engine 曲庫。絕不退回 Deemix。 |
 | Deezer | 貼上你的 **ARL**（頁面教學示範怎樣在電腦上從 deezer.com 複製）。同一次登入為 Deezer 曲目開啟 Deemix 無損 FLAC 下載；網易雲只有選了「Deemix 優先」才會用到它。Spotify、Beatport、Apple Music 都只從自己的音源播放，不會跨平台備援；SoundCloud 僅在沒有 Go+ 時，才為 Go+ 專享曲目與非 Set 單曲改用已登入的 Deezer / 網易雲 / Beatport（見 SoundCloud 一行）。只填個人頁面連結則只顯示公開歌單、不能下載。 |
 | SoundCloud | 填使用者名稱或主頁連結即可，不用密碼、不用 Artist Pro、也不用申請 API。私人歌單在「進階」裡貼上 soundcloud.com 的 `oauth_token`。每首歌依它能提供的最高音質播放：允許下載的用上傳者原檔，其次 256kbps AAC、160kbps AAC、128kbps MP3。Go+ 專享曲目與非 Set 單曲：已綁定 Go+ 帳號直連官方高音質串流；沒有 Go+ 時改用已登入的 Deezer / 網易雲 / Beatport 比對無損 / 320k 並快取為 `soundcloud-<id>.*`；超過 10 分鐘的 DJ Set 一律直連 SoundCloud。 |
 | Apple Music | 已解鎖 Engine 5.3.0 內建的 Apple Music 音源，直接從 Apple Music 播放，EngineX 不再去 Deezer 或網易雲找替身。手機上仍可貼上歌單連結，或填 `media-user-token` 瀏覽自己的資料庫。 |

@@ -68,6 +68,7 @@ var phoneText = map[string][3]string{
 	"bpFailed":      {"Could not log in to Beatport", "无法登录 Beatport", "無法登入 Beatport"},
 	"bpFailedHint":  {"Check the email and password, or the token.", "请检查账号密码或 Token。", "請檢查帳號密碼或 Token。"},
 	"spStep1":       {"Step 1: log in to Spotify and tap <b>Agree</b>.", "第 1 步：登录 Spotify，点<b>同意</b>。", "第 1 步：登入 Spotify，點<b>同意</b>。"},
+	"spDeviceHint":  {"Confirm this device on Spotify. The deck will sign in automatically.", "在 Spotify 确认此设备，播放器随后会自动登录。", "在 Spotify 確認此裝置，播放器隨後會自動登入。"},
 	"spOpen":        {"Open Spotify login", "打开 Spotify 登录", "開啟 Spotify 登入"},
 	"spStep2":       {"Step 2: Spotify then opens a page starting with <b>127.0.0.1</b> that cannot load. That is expected. Copy the whole address from the address bar, come back to this tab, and paste it here.", "第 2 步：之后会打开一个以 <b>127.0.0.1</b> 开头、显示无法访问的页面，这是正常的。复制地址栏里的完整地址，回到这个页面粘贴到下面。", "第 2 步：之後會開啟一個以 <b>127.0.0.1</b> 開頭、顯示無法連線的頁面，這是正常的。複製網址列裡的完整網址，回到這個頁面貼到下面。"},
 	"spPaste":       {"Paste & Connect", "粘贴并连接", "貼上並連接"},
@@ -221,4 +222,8 @@ func spotifyPhonePage(lang int, action, authorize string) string {
 		`<p>` + tr(lang, "spStep2") + `</p><form method="post" action="` + html.EscapeString(action) + `"><input name="callback" placeholder="` + tr(lang, "spPastePh") + `" required autocomplete="off" autocapitalize="off" spellcheck="false"><button>` + tr(lang, "spPaste") + `</button></form>` +
 		`<p>` + tr(lang, "spLinks") + `</p><form method="post" action="` + html.EscapeString(action) + `"><textarea name="links" rows="3" placeholder="https://open.spotify.com/playlist/…" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea><button>` + tr(lang, "connect") + `</button></form>` +
 		`<details><summary>` + tr(lang, "howTo") + `</summary><p>` + tr(lang, "spHelp") + `</p></details>`
+}
+
+func spotifyDevicePhonePage(lang int, verificationURL, code string) string {
+	return phoneHeading(lang, "spotify") + `<p>` + tr(lang, "spDeviceHint") + `</p><p><b>` + html.EscapeString(code) + `</b></p><a class="button" href="` + html.EscapeString(verificationURL) + `">` + tr(lang, "spOpen") + `</a>`
 }

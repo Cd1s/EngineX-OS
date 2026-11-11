@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,13 +54,13 @@ func TestFromSpotifyDownloadsAndCaches(t *testing.T) {
 	ctx := context.Background()
 	track := providers.Track{ID: "sptrack1", Provider: "spotify"}
 
-	// 1. First fetch: should call DownloadAudio and return OGG_320
+	// 1. First fetch: should call DownloadAudio and return Ogg Vorbis
 	dl, err := j.fromSpotify(ctx, "session1", track, false)
 	if err != nil {
 		t.Fatalf("fromSpotify download: %v", err)
 	}
-	if dl.Quality.Format != "OGG_320" {
-		t.Fatalf("expected format OGG_320, got %q", dl.Quality.Format)
+	if dl.Quality.Format != "ogg" {
+		t.Fatalf("expected format ogg, got %q", dl.Quality.Format)
 	}
 	content, err := os.ReadFile(dl.Path)
 	if err != nil || string(content) != string(spAudio) {
@@ -68,14 +69,14 @@ func TestFromSpotifyDownloadsAndCaches(t *testing.T) {
 
 	// 2. Cached verification: Cached should find .ogg
 	cached := deemix.Cached("spotify-" + track.ID)
-	if cached == nil || cached.Path != dl.Path || cached.Quality.Format != "OGG_320" {
+	if cached == nil || cached.Path != dl.Path || cached.Quality.Lossless {
 		t.Fatalf("deemix.Cached failed on ogg: %+v", cached)
 	}
 
 	// 3. Second fetch: shut down server, should hit cache without error
 	srv.Close()
 	dl2, err := j.fromSpotify(ctx, "session1", track, false)
-	if err != nil || dl2.Path != dl.Path {
+	if err != nil || dl2.Path != dl.Path || dl2.Quality.Format != "ogg" || dl2.Quality.SampleRate != 44100 {
 		t.Fatalf("fromSpotify cache hit failed: %v, %+v", err, dl2)
 	}
 }
@@ -124,7 +125,7 @@ func TestNeteaseDeemixSharesTheDeezerFile(t *testing.T) {
 }
 
 // Spotify never takes a Deezer file: a saved index entry for it is ignored, and the
-// Deemix fallback saves its own spotify-<id> file.
+// failed native downloads never use Deemix, even with an exact ISRC match.
 func TestSpotifyKeepsItsOwnFiles(t *testing.T) {
 	j, dir, deezer := cacheTestJobs(t)
 	sp := providers.Track{ID: "abc", Provider: "spotify", ISRC: deezer.ISRC, Title: "Song", Artist: "A", DurationMS: 200000}
@@ -137,7 +138,7 @@ func TestSpotifyKeepsItsOwnFiles(t *testing.T) {
 	spotify := &providers.Spotify{BaseURL: srv.URL, Token: providers.Token{AccessToken: "t"}}
 	j.spotify = func() *providers.Spotify { return spotify }
 	_, dl, err := j.acquire(context.Background(), "s", sp, false, nil)
-	if err != nil || filepath.Base(dl.Path) != "spotify-abc.flac" {
+	if err == nil || dl != nil {
 		t.Fatalf("%+v %v", dl, err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "123.flac")); err != nil {
@@ -226,4 +227,38 @@ func TestSoundCloudGoPlusRouting(t *testing.T) {
 	if err != nil || filepath.Base(dl.Path) != "soundcloud-5.mp3" {
 		t.Fatalf("%+v %v", dl, err)
 	}
+}
+
+// #210: even a resolvable ISRC and reachable Deemix must never supply Spotify.
+func TestSpotifyDownloadFailureNeverCallsDeemix(t *testing.T) {
+	var bridgeCalls atomic.Int32
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bridgeCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bridge.Close()
+	var catalogCalls atomic.Int32
+	catalog := forbiddenSpotifyCatalog{calls: &catalogCalls}
+	audio := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusForbidden) }))
+	defer audio.Close()
+	j := NewJobs(Pipeline{Catalog: catalog, Deemix: &deemixclient.Client{BaseURL: bridge.URL, DownloadDir: t.TempDir()}})
+	defer j.Close()
+	sp := &providers.Spotify{BaseURL: audio.URL, Token: providers.Token{AccessToken: "fixture"}}
+	j.spotify = func() *providers.Spotify { return sp }
+	track := providers.Track{Provider: "spotify", ID: "fixture", ISRC: "FIXTURE", Title: "Track", Artist: "Artist"}
+	got, dl, err := j.acquire(context.Background(), "s", track, false, nil)
+	if err == nil || dl != nil || got.ID != track.ID || bridgeCalls.Load() != 0 || catalogCalls.Load() != 0 {
+		t.Fatalf("Spotify failure crossed services: err=%v, bridge=%d, catalog=%d", err, bridgeCalls.Load(), catalogCalls.Load())
+	}
+}
+
+type forbiddenSpotifyCatalog struct{ calls *atomic.Int32 }
+
+func (c forbiddenSpotifyCatalog) ByISRC(context.Context, string) (providers.Track, error) {
+	c.calls.Add(1)
+	return providers.Track{ID: "match", Provider: "deezer"}, nil
+}
+func (c forbiddenSpotifyCatalog) Search(context.Context, string) ([]providers.Track, error) {
+	c.calls.Add(1)
+	return []providers.Track{{ID: "match", Provider: "deezer"}}, nil
 }

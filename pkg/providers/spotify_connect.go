@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -9,6 +10,7 @@ import (
 	"crypto/sha1"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -22,6 +24,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	authpb "github.com/devgianlu/go-librespot/proto/spotify"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 // SpotifyConnectInfo represents the Zeroconf getInfo response payload.
@@ -36,6 +41,8 @@ type SpotifyConnectInfo struct {
 	DeviceType     string `json:"deviceType"`
 	LibraryVersion string `json:"libraryVersion"`
 	AccountReq     string `json:"accountReq"`
+	TokenType      string `json:"tokenType"`
+	Scope          string `json:"scope"`
 }
 
 // SpotifyConnectUser represents the Zeroconf addUser request payload.
@@ -86,8 +93,12 @@ func (k *SpotifyConnectKey) DecryptBlob(clientKey, blob string) ([]byte, error) 
 	if err != nil || err2 != nil || len(ck) == 0 || len(ck) > 96 || len(raw) < 16+20 {
 		return nil, errors.New("spotify connect: malformed blob")
 	}
-	shared := new(big.Int).Exp(new(big.Int).SetBytes(ck), k.priv, spotifyDHPrime)
-	base := sha1.Sum(shared.FillBytes(make([]byte, 96)))
+	remote := new(big.Int).SetBytes(ck)
+	if remote.Cmp(big.NewInt(1)) <= 0 || remote.Cmp(new(big.Int).Sub(spotifyDHPrime, big.NewInt(1))) >= 0 {
+		return nil, errors.New("spotify connect: invalid client key")
+	}
+	shared := new(big.Int).Exp(remote, k.priv, spotifyDHPrime)
+	base := sha1.Sum(shared.Bytes())
 	mac := func(key []byte, msg string) []byte {
 		h := hmac.New(sha1.New, key)
 		h.Write([]byte(msg))
@@ -120,6 +131,12 @@ var spotifyIV = []byte{
 func (p *Spotify) DownloadAudio(ctx context.Context, trackID, dstDir string) (string, error) {
 	if p == nil {
 		return "", errors.New("spotify: please log in via Spotify Connect or QR code on the deck first")
+	}
+	if !spotifyTrackIDRe.MatchString(trackID) {
+		return "", errors.New("spotify: invalid track ID")
+	}
+	if p.StreamURL == "" && (p.BaseURL == "" || strings.HasPrefix(p.BaseURL, "https://api.spotify.com")) {
+		return p.downloadNativeAudio(ctx, trackID, dstDir)
 	}
 	p.mu.Lock()
 	expired := p.Token.RefreshToken != "" && !p.Token.Expiry.IsZero() && time.Now().Add(30*time.Second).After(p.Token.Expiry)
@@ -192,18 +209,23 @@ func (p *Spotify) DownloadAudio(ctx context.Context, trackID, dstDir string) (st
 		stream.XORKeyStream(body, body)
 	}
 
-	// If decrypted (or unencrypted) data does not start with "OggS", has length >= 0xab (171),
-	// and buf[0xa7:0xab] == "OggS", strip the first 0xa7 (167) bytes private header.
-	if len(body) >= 0xab && string(body[:4]) != "OggS" && string(body[0xa7:0xab]) == "OggS" {
-		body = body[0xa7:]
-	}
+	return writeSpotifyAudio(ctx, body, trackID, dstDir)
+}
 
+func writeSpotifyAudio(ctx context.Context, body []byte, trackID, dstDir string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	body = stripSpotifyOggHeader(body)
+	if len(body) < 4 || string(body[:4]) != "OggS" {
+		return "", errors.New("spotify: decrypted audio is not Ogg Vorbis")
+	}
 	if err := os.MkdirAll(dstDir, 0o755); err != nil {
 		return "", err
 	}
 
 	finalPath := filepath.Join(dstDir, "spotify-"+trackID+".ogg")
-	tmp, err := os.CreateTemp(dstDir, ".tmp-spotify-*")
+	tmp, err := os.CreateTemp(dstDir, ".part-spotify-*")
 	if err != nil {
 		return "", err
 	}
@@ -222,9 +244,81 @@ func (p *Spotify) DownloadAudio(ctx context.Context, trackID, dstDir string) (st
 		return "", err
 	}
 
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if err := os.Rename(tmpName, finalPath); err != nil {
 		return "", err
 	}
 	tmpName = ""
 	return finalPath, nil
+}
+
+// Validate the inner record before handing it to upstream's permissive parser.
+func validateSpotifyInnerBlob(deviceID, username string, blob []byte) error {
+	raw, err := decodeSpotifyInnerBlob(blob)
+	if err != nil {
+		return err
+	}
+	secret := sha1.Sum([]byte(deviceID))
+	base := pbkdf2.Key(secret[:], []byte(username), 256, 20, sha1.New)
+	digest := sha1.Sum(base)
+	key := make([]byte, 24)
+	copy(key, digest[:])
+	binary.BigEndian.PutUint32(key[20:], 20)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return err
+	}
+	for i := 0; i < len(raw); i += 16 {
+		block.Decrypt(raw[i:i+16], raw[i:i+16])
+	}
+	for i := len(raw) - 1; i >= 16; i-- {
+		raw[i] ^= raw[i-16]
+	}
+	r := bytes.NewReader(raw)
+	bad := errors.New("spotify: malformed login blob")
+	if _, err = r.ReadByte(); err != nil {
+		return bad
+	}
+	n, err := binary.ReadUvarint(r)
+	if err != nil || n > uint64(r.Len()) {
+		return bad
+	}
+	r.Seek(int64(n), io.SeekCurrent)
+	if _, err = r.ReadByte(); err != nil {
+		return bad
+	}
+	typ, err := binary.ReadUvarint(r)
+	if err != nil || typ > uint64(authpb.AuthenticationType_AUTHENTICATION_FACEBOOK_TOKEN) {
+		return bad
+	}
+	if _, err = r.ReadByte(); err != nil {
+		return bad
+	}
+	n, err = binary.ReadUvarint(r)
+	if err != nil || n == 0 || n > uint64(r.Len()) {
+		return bad
+	}
+	return nil
+}
+
+// Spotify's seek/replaygain packet is a separate Ogg page, not Vorbis audio.
+func stripSpotifyOggHeader(body []byte) []byte {
+	if len(body) >= 28 && string(body[:4]) == "OggS" {
+		header := 27 + int(body[26])
+		if len(body) >= header {
+			payload := 0
+			for _, n := range body[27:header] {
+				payload += int(n)
+			}
+			page := header + payload
+			if payload > 0 && len(body) >= page+4 && body[header] == 0x81 && string(body[page:page+4]) == "OggS" {
+				return body[page:]
+			}
+		}
+	} else if len(body) >= 0xab && string(body[0xa7:0xab]) == "OggS" {
+		return body[0xa7:]
+	}
+	return body
 }

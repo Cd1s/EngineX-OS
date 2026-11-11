@@ -186,7 +186,9 @@ func (j *Jobs) File(t providers.Track) string {
 func (j *Jobs) reusable(t providers.Track, path string) bool {
 	base := filepath.Base(path)
 	switch t.Provider {
-	case "spotify", "beatport", "soundcloud":
+	case "spotify":
+		return strings.HasPrefix(base, "spotify-") && strings.EqualFold(filepath.Ext(base), ".ogg")
+	case "beatport", "soundcloud":
 		return strings.HasPrefix(base, t.Provider+"-")
 	case "netease":
 		j.mu.Lock()
@@ -351,26 +353,7 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 		return t, dl, err
 	case "spotify":
 		dl, err := j.fromSpotify(ctx, session, t, guest)
-		if err == nil {
-			return t, dl, nil
-		}
-		// Spotify's Web API token cannot fetch audio (/audio/ answers 410): a
-		// logged-in owner gets the same recording, by ISRC, from the deck's Deemix.
-		// It is saved as spotify-<id>, never as the shared Deezer file.
-		j.mu.Lock()
-		lookup := j.spotify
-		j.mu.Unlock()
-		if lookup != nil && j.p.Deemix != nil && j.p.Catalog != nil {
-			if sp := lookup(); sp != nil && sp.HasToken() {
-				if matched, rerr := deemixclient.Resolve(ctx, j.p.Catalog, t); rerr == nil {
-					if dl, derr := j.p.Deemix.DownloadAs(ctx, matched, "spotify-"+t.ID, progress); derr == nil {
-						j.p.Deemix.Trim(dl.Path)
-						return t, dl, nil
-					}
-				}
-			}
-		}
-		return t, nil, err
+		return t, dl, err
 	case "deezer":
 		matched, err := deemixclient.Resolve(ctx, j.p.Catalog, t)
 		if err != nil {
@@ -436,7 +419,12 @@ func (j *Jobs) fromNeteaseMode(ctx context.Context, session string, t providers.
 // fromSpotify fetches track t via the owner's logged-in Spotify provider.
 func (j *Jobs) fromSpotify(ctx context.Context, session string, t providers.Track, guest bool) (*deemixclient.Download, error) {
 	if j.p.Deemix != nil {
-		if cached := j.p.Deemix.Cached("spotify-" + t.ID); cached != nil {
+		if cached := j.p.Deemix.Cached("spotify-" + t.ID); cached != nil && strings.EqualFold(filepath.Ext(cached.Path), ".ogg") {
+			if q, err := deemixclient.Inspect(cached.Path); err == nil {
+				cached.Quality = q
+			} else {
+				cached.Quality = deemixclient.Quality{Label: "[320k]", Format: "ogg", SampleRate: 44100, Lossless: false}
+			}
 			return cached, nil
 		}
 	}
@@ -458,7 +446,11 @@ func (j *Jobs) fromSpotify(ctx context.Context, session string, t providers.Trac
 		return nil, err
 	}
 	j.p.Deemix.Trim(path)
-	return &deemixclient.Download{Path: path, Quality: deemixclient.Quality{Format: "OGG_320"}}, nil
+	q, err := deemixclient.Inspect(path)
+	if err != nil {
+		q = deemixclient.Quality{Label: "[320k]", Format: "ogg", SampleRate: 44100, Lossless: false}
+	}
+	return &deemixclient.Download{Path: path, Quality: q}, nil
 }
 
 // isSoundCloudSet tells a DJ set, podcast or radio show (played from SoundCloud,

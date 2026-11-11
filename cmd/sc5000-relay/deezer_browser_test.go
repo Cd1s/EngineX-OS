@@ -474,7 +474,7 @@ func TestSpotifyLearnedCallbackIsPerPublicURL(t *testing.T) {
 			if err != nil || w.Code != 302 {
 				t.Fatalf("expected Spotify redirect, got %d", w.Code)
 			}
-			if loc.Query().Get("redirect_uri") != a.httpsRedirect || loc.Query().Get("scope") != "user-library-read playlist-read-private playlist-read-collaborative" {
+			if loc.Query().Get("redirect_uri") != a.httpsRedirect || loc.Query().Get("scope") != "streaming user-read-private user-library-read playlist-read-private playlist-read-collaborative" {
 				t.Fatal("incorrect callback/scopes")
 			}
 		})

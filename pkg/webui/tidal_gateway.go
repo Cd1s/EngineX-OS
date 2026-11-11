@@ -453,8 +453,8 @@ func (g *tidalGateway) sourcesFor(scope string) []*Session {
 	s := g.s
 	// Restoring a login can refresh tokens over the network (ready), so it runs
 	// outside s.mu; only the session map is touched under the lock.
-	s.mu.Lock()
 	s.prune()
+	s.mu.Lock()
 	var restore []string
 	for _, name := range loginServices {
 		if scope != "" && name != scope {
@@ -513,7 +513,7 @@ func (g *tidalGateway) sourcesFor(scope string) []*Session {
 func ready(p providers.Provider) bool {
 	switch v := p.(type) {
 	case *providers.Spotify:
-		return v.HasToken() || v.HasLinks()
+		return v.HasToken() || v.HasStoredCredentials() || v.HasLinks()
 	case *providers.Netease:
 		return v.LoggedIn()
 	case *providers.Deezer:
@@ -530,9 +530,9 @@ func ready(p providers.Provider) bool {
 	return false
 }
 func (g *tidalGateway) sessionByID(id string) *Session {
+	g.s.prune()
 	g.s.mu.Lock()
 	defer g.s.mu.Unlock()
-	g.s.prune()
 	return g.s.sessions[id]
 }
 

@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
@@ -98,8 +99,9 @@ type Server struct {
 	updateCache updateStatus
 
 	// Owner logins ended in the console; the deck must not restore them.
-	ownerDeleted map[string]bool
-	logins       map[string]*loginFlow
+	spotifyOwnerClosing bool
+	ownerDeleted        map[string]bool
+	logins              map[string]*loginFlow
 
 	soundCloudAuth *providers.SoundCloudAuth
 	// beatport is the owner's account, shared because each refresh rotates its token.
@@ -109,8 +111,10 @@ type Server struct {
 	automixMu sync.Mutex
 	automix   *AutomixManager
 
-	authMu    sync.Mutex
-	authFails map[string]*authStrike // wrong access codes per client network
+	addUserBusy    atomic.Bool
+	addUserRetryAt atomic.Int64
+	authMu         sync.Mutex
+	authFails      map[string]*authStrike // wrong access codes per client network
 }
 
 func New(cfg Config, jobs *Jobs) *Server {
@@ -338,6 +342,17 @@ func (s *Server) tryExport() {
 // Close releases optional network exports, including active dbserver clients.
 func (s *Server) Close() {
 	s.closeOnce.Do(func() { close(s.closed) })
+	s.mu.Lock()
+	var closers []interface{ Close() }
+	for _, v := range s.sessions {
+		if p, ok := v.p.(interface{ Close() }); ok {
+			closers = append(closers, p)
+		}
+	}
+	s.mu.Unlock()
+	for _, p := range closers {
+		p.Close()
+	}
 	if s.tidal != nil {
 		s.tidal.saveTracks() // the IDs Engine still lists, for the next run (#73)
 	}
@@ -626,11 +641,16 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 		}
 		return p, nil
 	case "spotify":
-		p := &providers.Spotify{ClientID: s.spotifyClientID(), HTTP: s.cfg.HTTP, BaseURL: s.cfg.SpotifyBaseURL, AccountsURL: s.cfg.SpotifyAccountsURL}
+		deviceID, err := providers.LoadSpotifyDeviceID(s.cfg.StateDir)
+		if err != nil {
+			return nil, err
+		}
+		p := &providers.Spotify{DeviceID: deviceID, ClientID: s.spotifyClientID(), HTTP: s.cfg.HTTP, BaseURL: s.cfg.SpotifyBaseURL, AccountsURL: s.cfg.SpotifyAccountsURL}
 		if !guest {
 			p.TokenPath = s.cfg.SpotifyTokenPath
 			if s.cfg.StateDir != "" {
 				p.LinksPath = filepath.Join(s.cfg.StateDir, "spotify-links.json")
+				p.CredsPath = filepath.Join(s.cfg.StateDir, "spotify-librespot.json")
 			}
 			if p.TokenPath == "" && s.cfg.StateDir != "" {
 				p.TokenPath = filepath.Join(s.cfg.StateDir, "spotify-token.json")
@@ -639,9 +659,9 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 				if err := p.LoadToken(); err != nil && !os.IsNotExist(err) {
 					return nil, err
 				}
-				// A token minted by another app (the old built-in ID) is not used:
-				// each owner logs in again with their own Client ID.
-				if id := s.spotifyClientID(); p.ClientID != id {
+				// Built-in device/desktop grants remain valid when an old custom app
+				// ID is still saved. Other app changes still require a fresh login.
+				if id := s.spotifyClientID(); p.ClientID != id && p.ClientID != providers.SpotifyBuiltinClientID {
 					p.Token, p.ClientID = providers.Token{}, id
 				}
 			}
@@ -651,9 +671,14 @@ func (s *Server) makeProvider(name string, guest bool, user string) (providers.P
 	return nil, errors.New("unsupported provider")
 }
 func (s *Server) prune() {
+	s.mu.Lock()
 	now := time.Now()
+	var closers []interface{ Close() }
 	for id, v := range s.sessions {
 		if v.Guest && now.After(v.expires) {
+			if p, ok := v.p.(interface{ Close() }); ok {
+				closers = append(closers, p)
+			}
 			delete(s.sessions, id)
 		}
 	}
@@ -662,11 +687,15 @@ func (s *Server) prune() {
 			delete(s.pending, k)
 		}
 	}
+	s.mu.Unlock()
+	for _, p := range closers {
+		p.Close()
+	}
 }
 func (s *Server) session(r *http.Request) (*Session, error) {
+	s.prune()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.prune()
 	v := s.sessions[r.PathValue("id")]
 	if v == nil {
 		return nil, errors.New("session expired or missing")
@@ -674,9 +703,9 @@ func (s *Server) session(r *http.Request) (*Session, error) {
 	return v, nil
 }
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
+	s.prune()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.prune()
 	out := make([]Session, 0, len(s.sessions))
 	for _, v := range s.sessions {
 		out = append(out, *v)
@@ -696,11 +725,15 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, errors.New("unsupported provider"))
 		return
 	}
+	s.prune()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.prune()
 	if len(s.sessions) >= 16 {
 		fail(w, 429, errors.New("too many sessions"))
+		return
+	}
+	if !v.Guest && v.Provider == "spotify" && s.spotifyOwnerClosing {
+		fail(w, 503, errors.New("spotify: logout in progress"))
 		return
 	}
 	// One owner per service prevents concurrent credential replacement; guests
@@ -721,7 +754,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	session := &Session{ID: providers.RandomID(), Provider: v.Provider, Guest: v.Guest, p: p, tracks: map[string]providers.Track{}, expires: time.Now().Add(8 * time.Hour), Ready: v.Provider == "deezer"}
 	if sp, ok := p.(*providers.Spotify); ok {
-		session.Ready = sp.HasToken()
+		session.Ready = ready(sp)
 	}
 	if np, ok := p.(*providers.Netease); ok {
 		session.Ready = np.LoggedIn()
@@ -734,15 +767,37 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	id := r.PathValue("id")
-	if v := s.sessions[id]; v != nil && !v.Guest {
-		s.ownerDeleted[v.Provider] = true
+	session := s.sessions[id]
+	if session != nil && !session.Guest {
+		s.ownerDeleted[session.Provider] = true
+		if session.Provider == "spotify" {
+			s.spotifyOwnerClosing = true
+		}
 	}
 	delete(s.sessions, id)
-	for state, v := range s.pending {
-		if v.session == id {
+	for provider, flow := range s.logins {
+		if flow.session == id {
+			delete(s.logins, provider)
+		}
+	}
+	for state, p := range s.pending {
+		if p.session == id {
 			delete(s.pending, state)
+		}
+	}
+	s.mu.Unlock()
+	if session != nil && !session.Guest && session.Provider == "spotify" {
+		defer func() { s.mu.Lock(); s.spotifyOwnerClosing = false; s.mu.Unlock() }()
+	}
+	if session != nil {
+		if p, ok := session.p.(interface{ Logout() error }); ok && !session.Guest {
+			if err := p.Logout(); err != nil {
+				fail(w, 500, err)
+				return
+			}
+		} else if p, ok := session.p.(interface{ Close() }); ok {
+			p.Close()
 		}
 	}
 	respond(w, map[string]bool{"ok": true})
@@ -775,8 +830,8 @@ func (s *Server) beginLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		state := providers.RandomID()
 		auth, verifier := p.BeginPKCE(state, redirect)
-		s.mu.Lock()
 		s.prune()
+		s.mu.Lock()
 		for k, pending := range s.pending {
 			if pending.session == v.ID {
 				delete(s.pending, k)
@@ -841,8 +896,8 @@ func (s *Server) qr(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
-	s.mu.Lock()
 	s.prune()
+	s.mu.Lock()
 	p, ok := s.pending[state]
 	delete(s.pending, state)
 	v := s.sessions[p.session]
@@ -917,8 +972,8 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 	if !input(w, r, &in) {
 		return
 	}
-	s.mu.Lock()
 	s.prune()
+	s.mu.Lock()
 	v := s.sessions[in.SessionID]
 	var t providers.Track
 	guest := false

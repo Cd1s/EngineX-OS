@@ -126,7 +126,7 @@ func TestConsoleStatusLoopbackOnly(t *testing.T) {
 // and every page renders in every language.
 func TestPhonePagesDefaultToEnglishAndSwitchLanguage(t *testing.T) {
 	for _, provider := range []string{"deezer", "soundcloud", "beatport", "spotify", "applemusic"} {
-		_, srv, target := standalone(t, Config{SpotifyClientID: testSpotifyClientID}, provider)
+		_, srv, target := standalone(t, Config{SpotifyClientID: testSpotifyClientID, SpotifyAccountsURL: "https://offline.example.invalid"}, provider)
 		if target.Query().Get("lang") != "en" {
 			t.Fatalf("%s QR code %s", provider, target)
 		}

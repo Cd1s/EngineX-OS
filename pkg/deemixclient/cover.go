@@ -76,11 +76,20 @@ func capCover(data []byte, mime string) ([]byte, string, error) {
 // EmbedCover fetches artwork and writes it into a downloaded FLAC or MP3, unless the
 // file already has a picture. The file is replaced in one step.
 func (c *Client) EmbedCover(ctx context.Context, path, address string) error {
+	// Artwork for Ogg streams lives in Engine's artwork store. Rewriting tags
+	// here would require remuxing pages and updating their CRCs/granule positions.
+	if strings.EqualFold(filepath.Ext(path), ".ogg") {
+		return nil
+	}
 	// By content: a file's name may not say what it holds.
-	isFLAC, err := startsWithFLAC(path)
+	magic, err := coverAudioMagic(path)
 	if err != nil {
 		return err
 	}
+	if magic == "OggS" {
+		return nil
+	}
+	isFLAC := magic == "fLaC"
 	isMP3 := !isFLAC && strings.HasSuffix(strings.ToLower(path), ".mp3")
 	if !isFLAC && !isMP3 {
 		return nil
@@ -98,17 +107,17 @@ func (c *Client) EmbedCover(ctx context.Context, path, address string) error {
 	return replaceFile(path, func(in io.Reader, out io.Writer) error { return insertAPIC(in, out, cover, mime) })
 }
 
-func startsWithFLAC(path string) (bool, error) {
+func coverAudioMagic(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	defer f.Close()
 	var head [4]byte
 	if _, err := io.ReadFull(f, head[:]); err != nil {
-		return false, nil
+		return "", nil
 	}
-	return string(head[:]) == "fLaC", nil
+	return string(head[:]), nil
 }
 
 func (c *Client) fetchCover(ctx context.Context, address string) ([]byte, string, error) {
