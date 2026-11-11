@@ -148,22 +148,20 @@ class UiModSourceTest(unittest.TestCase):
         # Preferences -> Device -> Stems Support stays hidden on 5.3.0 packs.
         self.assertIn('out[prefs + "Entries/StemsDownload.qml"] = [("active: manager && manager.canModifyInstall", "active: false")]', SRC)
         hook = (REPO / "tools/ui-mod/engine_ui_hook.c").read_text(encoding="utf-8")
-        # Gen1 only: prepare_config sets hasStemsProcessorFactoryInstalled (config_field[3] + 1),
-        # while 5.3.0-sclive4 and AZ04 keep stock behaviour.
-        self.assertTrue('strcmp(build->name, "5.3.0-sclive4") != 0' in hook, "missing gen1 factory stems guard")
-        self.assertTrue("build->config_field[3] + 1" in hook, "missing hasStemsProcessorFactoryInstalled field")
+        # Gen1 5.3.0 only: prepare_config sets Config.hasStemsProcessorFactoryInstalled ([r0, #0x2a7] = 1)
+        # so first-boot NewFeaturePopup never offers a Download button, with zero extra edit sites
+        # and 5.0.4 / 5.3.0-sclive4 / AZ04 left untouched.
+        cfg_fn = hook.split("prepare_config(uintptr_t base, size_t page) {", 1)[1].split("\n}\n", 1)[0]
+        self.assertTrue('if (!strcmp(build->name, "5.3.0"))' in cfg_fn and "0xe5c022a7" in cfg_fn,
+                        "missing gen1 5.3.0 Config[0x2a7]=1 in prepare_config")
         edits_504 = hook.split("edits_504[] = {", 1)[1].split("};", 1)[0]
         edits_530 = hook.split("edits_530[] = {", 1)[1].split("};", 1)[0]
         edits_sclive = hook.split("edits_sclive[] = {", 1)[1].split("};", 1)[0]
         edits_az04 = hook.split("edits_az04[] = {", 1)[1].split("};", 1)[0]
-        for off in ("0x4e28ccu", "0x86520cu"):
-            self.assertTrue(off in edits_504, f"missing {off} in edits_504")
-        for off in ("0x5070ecu", "0x8c5e84u"):
-            self.assertTrue(off in edits_530, f"missing {off} in edits_530")
-        for non_gen1 in (edits_sclive, edits_az04):
-            self.assertTrue("\\x05\\x80\\xa0\\xe1" not in non_gen1, "non-gen1 edit table touched")
-            self.assertTrue("0x5070ecu" not in non_gen1, "non-gen1 edit table touched")
-            self.assertTrue("0x8c5e84u" not in non_gen1, "non-gen1 edit table touched")
+        for block in (edits_504, edits_530, edits_sclive, edits_az04):
+            self.assertTrue("0x5070ecu" not in block and "0x8c5e84u" not in block
+                            and "0x4e28ccu" not in block and "0x86520cu" not in block,
+                            "edit tables must add no extra Stems popup sites")
 
     def test_auto_loop_knob_and_link(self):
         self.assertIn("interval: 10000; running: true", SRC)
