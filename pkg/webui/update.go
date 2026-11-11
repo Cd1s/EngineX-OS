@@ -139,9 +139,6 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		return
 	}
 	customDir := s.customDir()
-	uiDir := s.uiDir()
-	_ = os.Remove(filepath.Join(uiDir, "safe-mode"))
-	_ = os.Remove(filepath.Join(uiDir, "boot-count"))
 	// Trigger stock Denon full-screen graphical updater (/usr/bin/planck-remote-screen --update)
 	// via /usr/Engine/Scripts/engine's native UpdateFromUrl quit handler.
 	if isDeckDataDir(customDir) {
@@ -246,8 +243,6 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		_ = os.WriteFile(staged+".url", []byte(downloadURL+"\n"), 0o644)
 	}
 	s.setUpdateProgress(0.97, "", false)
-	_ = os.Remove(filepath.Join(uiDir, "safe-mode"))
-	_ = os.Remove(filepath.Join(uiDir, "boot-count"))
 	cmd := exec.Command("/usr/sbin/az01-update", "--file", staged)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))

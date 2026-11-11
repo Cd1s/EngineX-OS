@@ -71,7 +71,7 @@ func TestDebloatScriptCompleteOfflineAndIdempotent(t *testing.T) {
 		t.Fatalf("cleanup: %q %v", target, err)
 	}
 	conf := read(t, root, "etc/systemd/system/engine.service.d/override.conf")
-	for _, line := range []string{"LimitCORE=0", "ExecStopPost=\n", "exec /usr/Engine/Scripts/cleanup-JP07.sh'", "ExecStopPost=-/etc/sc5000/engine-ui-guard stop", "Environment=HOME=/tmp/sc5000-engine-home", "Environment=QML_DISABLE_DISK_CACHE=1", "ExecStartPre=/usr/local/bin/sc5000-debloat --apply-runtime"} {
+	for _, line := range []string{"LimitCORE=0", "ExecStopPost=\n", "exec /usr/Engine/Scripts/cleanup-JP07.sh'", "ExecStopPost=-/etc/sc5000/engine-ui-guard stop", "Environment=HOME=/tmp/sc5000-engine-home", "Environment=QML_DISABLE_DISK_CACHE=1", "ExecStartPre=/etc/sc5000/engine-ui-guard runtime"} {
 		if !strings.Contains(conf, line) {
 			t.Fatal(conf)
 		}
@@ -138,7 +138,9 @@ func TestOverlayUnitsAndRuntimePolicy(t *testing.T) {
 		t.Fatal("vendor affinity would win")
 	}
 	guardian := read(t, root, "etc/systemd/system/engine-guardian.service")
-	for _, text := range []string{"CPUAffinity=3", "CPUSchedulingPolicy=idle", "IOSchedulingClass=idle", "LimitCORE=0"} {
+	// The retired database watch is now the boot watchdog. It must get a fair
+	// CPU slice even while ordinary background work saturates the service core.
+	for _, text := range []string{"CPUAffinity=3", "CPUSchedulingPolicy=other", "Nice=10", "IOSchedulingClass=best-effort", "LimitCORE=0", "ExecStart=/etc/sc5000/engine-ui-guard watch"} {
 		if !strings.Contains(guardian, text) {
 			t.Fatal(text)
 		}
@@ -147,9 +149,11 @@ func TestOverlayUnitsAndRuntimePolicy(t *testing.T) {
 	if err != nil || target != "../sc5000-debloat.service" {
 		t.Fatalf("sc5000-debloat %q %v", target, err)
 	}
-	// Writing a database Engine has open corrupts it; repairs run from edisksd-hook.
-	if _, err := os.Lstat(filepath.Join(root, "etc/systemd/system/multi-user.target.wants/engine-guardian.service")); !os.IsNotExist(err) {
-		t.Fatalf("engine-guardian must not run alongside Engine: %v", err)
+	// Database repair must still never run alongside Engine. Only the shell
+	// boot watchdog is enabled, and its reporting branch has no heal operation.
+	target, err = os.Readlink(filepath.Join(root, "etc/systemd/system/multi-user.target.wants/engine-guardian.service"))
+	if err != nil || target != "../engine-guardian.service" || strings.Contains(guardian, "--heal-mount") || strings.Contains(guardian, "--watch") {
+		t.Fatalf("boot guardian must not enable database repair: %q %v", target, err)
 	}
 	if out, err := exec.Command("bash", "-n", filepath.Join(root, "usr/local/bin/sc5000-debloat")).CombinedOutput(); err != nil {
 		t.Fatalf("%s %v", out, err)
