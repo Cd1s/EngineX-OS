@@ -598,3 +598,7 @@ Ensure you are connected to Wi-Fi to receive the latest updates and features	请
 Failed to connect to Wi-Fi network.	连接 Wi-Fi 网络失败。	連線至 Wi-Fi 網路失敗。
 Password was not accepted.	密码不正确。	密碼不正確。
 Lost connection to Wi-Fi network.	Wi-Fi 网络连接已断开。	Wi-Fi 網路連線已中斷。
+Paired Player	双碟机配对	雙碟機配對
+Paired Player: this player's active layer and the other player's active deck, one lane each	双碟机配对：本机当前 Layer 与另一台碟机的当前轨各占一条波形	雙碟機配對：本機目前 Layer 與另一台碟機的目前軌各佔一條波形
+Paired Player needs 4-Deck Role Auto, 1+3, 2+4, 1 or 2	双碟机配对需要四轨角色为自动、1+3、2+4、1 或 2	雙碟機配對需要四軌角色為自動、1+3、2+4、1 或 2
+No paired player	未连接配对碟机	未連接配對碟機

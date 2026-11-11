@@ -693,7 +693,8 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
-                 "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack")
+                 "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack",
+                 "scLayerPath", "scPairedLanes", "scPairedFollow")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
@@ -722,6 +723,7 @@ Object.assign(globalThis, {
     scGcLoadSeq: 0, scGcRuns: 0, scGcLastMs: 0, scGcProps: null,
     scGcState: {armed: true, quietSince: 0, lastRun: -Infinity, loadSig: 0, loadSeq: 0, loadAt: 0, followAt: 0},
     scShadowPrev: {}, scShadowCueCache: {}, scShadowPostAt: 0, scShadowPollAt: now, scShadowDebug: false,
+    scShadowActiveDeck: 0, scPairedOn: false, scPairedEmpty: 0,
     scShadowLead: 0, scShadowPeerLead: 0, scShadowPeerPlaying: false, scShadowMasterAt: 0,
     scShadowGen: 0, scShadowVer: 0, scShadowIdle: false, scShadowLinePaths: [], scShadowFrame: 17, scCueInfoCache: {}, scCueInfoMemo: {},
     scTr() { throw Error('Engine access forbidden'); },
@@ -1394,6 +1396,119 @@ pos+=48*200; tick(40); assert.equal(bodies.length,4); // a 200 ms slip: full pos
 assert(Math.abs(bodies[3][0].positionMs-pos/48)<1e-6);
 cueName='DROP'; tick(2600); assert.equal(bodies.length,5); assert.equal(bodies[4][0].cues[0].n,'DROP'); // a renamed cue
 """)
+
+    def test_paired_lanes_follow_both_layers_201(self):
+        # #201: lane 1 is this unit's active layer, lane 2 the other player's active deck.
+        self.js(r"""
+const L = (role, layer, decks) => scPairedLanes(role, layer, decks);
+const peer = (a, b, active) => [{deck:a, key:'x', active: active === a}, {deck:b, active: active === b}];
+// Role 1+3 (odd player): own side Left, the other player's 2/4 on the Right.
+assert.deepEqual(L('13', 0, peer(2, 4, 2)), {lane1:1, lane2:2, side:'/GUI/Decks/DeckRight/Layer', layer:0, missing:false});
+assert.deepEqual(L('13', 1, peer(2, 4, 2)), {lane1:3, lane2:2, side:'/GUI/Decks/DeckRight/Layer', layer:0, missing:false});
+assert.deepEqual(L('13', 0, peer(2, 4, 4)), {lane1:1, lane2:4, side:'/GUI/Decks/DeckRight/Layer', layer:1, missing:false});
+assert.deepEqual(L('13', 1, peer(2, 4, 4)), {lane1:3, lane2:4, side:'/GUI/Decks/DeckRight/Layer', layer:1, missing:false});
+// Role 2+4 (even player): the mirror image.
+assert.deepEqual(L('24', 0, peer(1, 3, 1)), {lane1:2, lane2:1, side:'/GUI/Decks/DeckLeft/Layer', layer:0, missing:false});
+assert.deepEqual(L('24', 1, peer(1, 3, 3)), {lane1:4, lane2:3, side:'/GUI/Decks/DeckLeft/Layer', layer:1, missing:false});
+// The other player's active layer is empty: lane 2 still follows it.
+assert.equal(L('13', 0, [{deck:2, key:'x'}, {deck:4, active:true}]).lane2, 4);
+// No active flag (a CDJ, an older EngineX): the deck with a track, else Layer A.
+assert.equal(L('13', 0, [{deck:2}, {deck:4, key:'cdj:1'}]).lane2, 4);
+assert.equal(L('24', 0, [{deck:1}, {deck:3}]).lane2, 1);
+// Our own decks in the reply never count as the other player's.
+assert.equal(L('13', 0, [{deck:1, active:true}, {deck:3, key:'x'}]).missing, true);
+// No other player: lane 2 is the side's Layer A deck, marked missing.
+assert.deepEqual(L('13', 1, []), {lane1:3, lane2:2, side:'/GUI/Decks/DeckRight/Layer', layer:0, missing:true});
+assert.deepEqual(L('24', 0, []), {lane1:2, lane2:1, side:'/GUI/Decks/DeckLeft/Layer', layer:0, missing:true});
+// Single-deck roles pair the same way; 1+2 and 3+4 have no pair (they keep the 4-deck view).
+assert.equal(L('1', 1, peer(2, 4, 4)).lane1, 1); assert.equal(L('1', 0, peer(2, 4, 4)).lane2, 4);
+assert.equal(L('2', 0, peer(1, 3, 3)).lane1, 2); assert.equal(L('2', 0, peer(1, 3, 3)).lane2, 3);
+assert.equal(L('12', 0, peer(3, 4, 3)), null); assert.equal(L('34', 0, peer(1, 2, 1)), null); assert.equal(L('', 0, []), null);
+""")
+
+    def test_paired_follow_moves_only_the_other_side_201(self):
+        self.js(r"""
+const layers = {'/GUI/Decks/DeckLeft/Layer': {index: 1}, '/GUI/Decks/DeckRight/Layer': {index: 0}};
+const writes = [];
+for (const [path, t] of Object.entries(layers)) { let i = t.index; Object.defineProperty(t, 'index', {get(){return i}, set(v){writes.push(path + '=' + v); i = v}}) }
+// Off (the 4-deck view, every existing test): no Engine access at all on the display path.
+scShadowApplyAll([{deck:2, key:'x', active:true}], true);
+globalThis.scTr = p => layers[p] || null;
+scPairedOn = true; scFourDeckRole = '13';
+scShadowApplyAll([{deck:2, key:'x'}, {deck:4, active:true}], true);
+assert.deepEqual(writes, ['/GUI/Decks/DeckRight/Layer=1']); // the other player went to Layer B
+assert.equal(layers['/GUI/Decks/DeckLeft/Layer'].index, 1); // our own Layer B untouched
+scShadowApplyAll([{deck:2, key:'x'}, {deck:4, active:true}], true);
+assert.equal(writes.length, 1); // unchanged: no write
+assert.equal(scPairedEmpty, 0);
+scShadowApplyAll([], true); // the other player is gone
+assert.equal(scPairedEmpty, 2); assert.equal(layers['/GUI/Decks/DeckRight/Layer'].index, 0);
+scShadowApplyAll([{deck:2, active:true}, {deck:4}], true);
+assert.equal(scPairedEmpty, 0);
+// A 2+4 player moves the Left side, never its own Right one.
+writes.length = 0; scFourDeckRole = '24';
+scShadowApplyAll([{deck:1, active:true}, {deck:3, key:'y'}], true);
+assert.deepEqual(writes, ['/GUI/Decks/DeckLeft/Layer=0']);
+scShadowApplyAll([{deck:1}, {deck:3, key:'y', active:true}], true);
+assert.deepEqual(writes, ['/GUI/Decks/DeckLeft/Layer=0', '/GUI/Decks/DeckLeft/Layer=1']);
+assert(!writes.some(w => w.startsWith('/GUI/Decks/DeckRight')), writes.join());
+""")
+
+    def test_sender_posts_its_active_layer_at_once_201(self):
+        self.js(r"""
+let bodies=[], pings=0, layer=0;
+globalThis.XMLHttpRequest=class {
+    constructor(){this.readyState=0;}
+    open(m,url){this.url=url;this.readyState=1;}
+    send(body){if(this.url.endsWith('/alive'))pings++;else bodies.push(JSON.parse(body));this.readyState=4;this.status=200;}
+};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='13';
+globalThis.scTr=path=>path==='/GUI/Decks/DeckLeft/Layer'?{get index(){return layer}}:({
+    get value(){return path.endsWith('/SampleRate')?48000:0}, get unnormalized(){return 0},
+    get state(){return path.endsWith('/SongLoaded')}, get string(){return path.endsWith('/TrackUri')?'file:///a.mp3':''}, color:'#ffffff'});
+const tick=ms=>{for(let t=0;t<ms;t+=40){now+=40;scShadowTick();}};
+tick(1000); assert.equal(bodies.length,1);
+assert.deepEqual(bodies[0].map(o=>[o.deck,o.active]), [[1,true],[3,false]]);
+layer=1; tick(40); assert.equal(bodies.length,2,'a Layer press posts at once');
+assert.deepEqual(bodies[1].map(o=>[o.deck,o.active]), [[1,false],[3,true]]);
+tick(2000); assert.equal(bodies.length,2,'no layer change: pings only');
+layer=0; tick(40); assert.equal(bodies.length,3); assert.equal(bodies[2][0].active,true);
+""")
+
+    def test_paired_player_entry_and_lane_order_201(self):
+        self.assertIn('text: "Paired Player"', bp.FOUR_DECK_ENTRIES)
+        self.assertIn("visible: root.scIsPlayerBoard", bp.FOUR_DECK_ENTRIES)
+        self.assertIn('root.scRestartCall("pairedView=1")', bp.FOUR_DECK_ENTRIES)
+        self.assertIn('root.scCall("pairedView=" + index)', bp.FOUR_DECK_ENTRIES)
+        self.assertIn("scPairedSetting = !!v.fourDeckWaveform && !!v.pairedView", bp.SERVICES_MAIN)
+        self.assertIn("if (scPairedOn) scPairedFollow(decks)", bp.SERVICES_MAIN)
+        # Both hint lines go through translate(): no comparison on their text line.
+        hint = next(l for l in bp.FOUR_DECK_ENTRIES.splitlines() if "Paired Player needs" in l)
+        self.assertNotIn("==", hint)
+        table = {"Paired Player needs 4-Deck Role Auto, 1+3, 2+4, 1 or 2": "X", "Paired Player: this player's active layer and the other player's active deck, one lane each": "Y"}
+        self.assertIn('["Y", "X"]', bp.translate(hint, table, set()))
+        rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        for en in ("Paired Player", "No paired player", "Paired Player: this player's active layer and the other player's active deck, one lane each",
+                   "Paired Player needs 4-Deck Role Auto, 1+3, 2+4, 1 or 2"):
+            self.assertIn(en, rows)
+            self.assertEqual(len(rows[en]), 2)
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            patches = bp.edits(False)["Skins/EngineOS/UI/CompositeControls/PerformanceView/MainViewResponsiveWaveforms.qml"]
+        finally:
+            bp.ROOT = old_root
+        # Swapped only by Paired Player on a 2+4 player; the stock swap and the 4-deck view stay stock.
+        self.assertEqual(sum(new.count("responsiveWaveform.scDecksSwapped") for _, new in patches), 4)
+        self.assertIn("deckControl.decksSwapped || (typeof root !== \"undefined\" && !!root && !!root.scPairedSwap)", patches[0][1])
+        self.assertIn('readonly property bool scPairedSwap: scPairedOn && (scFourDeckRole === "24" || scFourDeckRole === "2")', bp.SERVICES_MAIN)
+        self.assertIn("readonly property bool scPairedOn: scPairedSetting && scIsPlayerBoard &&", bp.SERVICES_MAIN)
+        # The lane label rides on every waveform lane, shown only for lane 2 without a paired player.
+        layer = bp.shadow_layer("import QtQuick 2.0\nItem {\n    id: lane\n    property int deckIndex: 1\n}\n", "waveform")
+        self.assertIn('objectName: "EngineX_PairedEmpty"', layer)
+        self.assertIn("root.scPairedEmpty > 0 && root.scPairedEmpty === scDisplay.deck", layer)
+        self.assertNotIn("EngineX_PairedEmpty", bp.shadow_layer("import QtQuick 2.0\nItem {\n    id: lane\n}\n", "overview"))
 
     def test_view_autosave_snapshots_only_after_a_change(self):
         fns = []
