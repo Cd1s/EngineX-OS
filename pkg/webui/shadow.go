@@ -95,6 +95,9 @@ type deckState struct {
 	KeyOffset int   `json:"keyOffset,omitempty"`
 	Stems     bool  `json:"stems,omitempty"`
 	Slip      int64 `json:"slip,omitempty"`
+	// Active: this deck is on the sender's active layer (its Layer A/B), what the
+	// paired 2-deck view (#201) shows of that player. An empty deck says it too.
+	Active bool `json:"active,omitempty"`
 	// ShadowMaster is the sender's shadow deck (a copy of the receiver's deck of
 	// that number) that Engine Link left holding master: the receiver's QML takes
 	// master back to a real deck. On every deck the sender posts; 0: none.
@@ -214,7 +217,7 @@ func sameOptionalBool(a, b *bool) bool {
 func samePeerPicture(old peerDeck, d deckState, now time.Time) bool {
 	o := old.deckState
 	if o.Deck != d.Deck || o.Path != d.Path || o.Net != d.Net || o.Key != d.Key || o.Ext != d.Ext || o.Name != d.Name ||
-		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
+		o.Title != d.Title || o.Artist != d.Artist || o.KeyName != d.KeyName || o.Loading != d.Loading || o.Active != d.Active || o.Stale != d.Stale || o.MetadataOnly != d.MetadataOnly ||
 		o.Playing != d.Playing || o.Pitch != d.Pitch || !sameOptionalBool(o.Master, d.Master) || !sameOptionalBool(o.Lead, d.Lead) || o.Loop != d.Loop || o.KeyOffset != d.KeyOffset || o.Stems != d.Stems || o.Slip != d.Slip || o.ShadowMaster != d.ShadowMaster || o.Sync != d.Sync || o.BPM != d.BPM ||
 		o.CurrentBPM != d.CurrentBPM || o.Range != d.Range || (o.KeyLock == nil) != (d.KeyLock == nil) || (o.KeyLock != nil && *o.KeyLock != *d.KeyLock) ||
 		o.Jumps != d.Jumps || o.Cue != d.Cue || o.Link != d.Link || (o.CuePos == nil) != (d.CuePos == nil) ||
