@@ -2087,6 +2087,18 @@ now+=80;apply({sync:true,positionMs:pos+80});
 assert.equal(seeks.length,2,'normal drift after the transition stays on the bend path');
 """)
 
+    def test_sync_phase_between_20_and_40ms_does_not_wait_for_a_bend(self):
+        self.js(self.ENGINE + r"""
+now+=80;apply({sync:true,positionMs:pos+30});
+assert.equal(seeks.length,1,'a 30 ms Sync step must meet the 20 ms alignment target');
+now+=200;pos+=200;apply({sync:true,positionMs:pos+20});
+assert.equal(seeks.length,1,'small drift still uses the bend path');
+now+=200;pos+=200;apply({sync:true,positionMs:pos+30});
+assert.equal(seeks.length,2,'a later 30 ms source phase pull must also snap');
+for(let i=0;i<20;i++){now+=80;pos+=80;apply({sync:true})}
+assert.equal(seeks.length,2,'steady carried source positions must not add seeks');
+""")
+
     def test_synced_gui_stall_is_ignored_but_a_real_phase_jump_survives_it(self):
         self.js(r"""
 globalThis.XMLHttpRequest=class{open(){this.readyState=1}send(){this.readyState=4;this.status=200}};

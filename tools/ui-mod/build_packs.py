@@ -1522,7 +1522,7 @@ SERVICES_MAIN = """
 		// Watch its posted line for one second, without confusing our own raw
 		// decoder position with another source change. Heartbeats stay on line.
 		const phaseStep = now < (at.phaseUntil || 0) &&
-			Math.abs(target - at.phaseLine - (now - at.phaseAt) * at.phaseRate) > 40 * at.rate
+			Math.abs(target - at.phaseLine - (now - at.phaseAt) * at.phaseRate) > 20 * at.rate
 		if (syncEdge || tempoStep || phaseStep) {
 			if (syncEdge || tempoStep) at.phaseUntil = now + 1000
 			at.phaseLine = target; at.phaseAt = now; at.phaseRate = at.rate
@@ -1605,7 +1605,7 @@ SERVICES_MAIN = """
 		// A Sync edge or tempo step is a new phase/rate, not clock drift. Apply
 		// it on this update, with the speed already set above. Keep small audio
 		// block noise on the existing bend path and never snap on a heartbeat.
-		const snap = (!wantSync || at.nativeSync) && (syncEdge || tempoStep || phaseStep) && Math.abs(drift) > 40 * at.rate
+		const snap = (!wantSync || at.nativeSync) && (syncEdge || tempoStep || phaseStep) && Math.abs(drift) > 20 * at.rate
 		if (!jump) at.jumps = e.jumps
 		at.over = Math.abs(drift) > lim ? (at.over || 0) + 1 : 0
 		if (snap || (jump && now - at.seekAt >= 80) || (at.over >= 3 && now - at.seekAt >= 1000)) {
