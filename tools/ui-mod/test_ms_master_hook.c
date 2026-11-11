@@ -160,6 +160,22 @@ static void test_hidden_means_off(void) {
         assert(l == dry && r == dry);
     }
     __atomic_store_n(&fx_selector_master_bypass, 0, __ATOMIC_RELEASE);
+
+    // 4. Standalone players hide Color FX Style (no PX effects on SC5000/SC6000): a stored style behaves as Off.
+    for (unsigned p = 0; p < sizeof players / sizeof *players; ++p) {
+        write_file(board_path, players[p]);
+        write_file(conf_path, "pioneer_fx=space\nfx_time_mode=ms\nfx_time_ms=250\n");
+        usleep(180000);
+        assert(__atomic_load_n(&pioneer_fx_mode, __ATOMIC_RELAXED) == 0);
+        memset(master_pfx, 0, sizeof master_pfx);
+        memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
+        for (unsigned n = 0; n < 512; ++n) {
+            float dry = 0.2f * sinf((float)n * 0.07f), l, r;
+            const float *in[] = {&dry, &dry}; float *out[] = {&l, &r};
+            hook_master_output(NULL, NULL, 2, in, 2, out, 1);
+            assert(l == dry && r == dry);
+        }
+    }
     unlink(board_path);
     unlink(conf_path);
     rmdir(dir);

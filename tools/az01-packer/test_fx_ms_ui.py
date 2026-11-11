@@ -205,7 +205,7 @@ for (const board of ['JP07', 'JP08', 'JP13', 'JP14']) {{
     assert.equal(visible['Auto-Gain (0 dB Normalize)'](), true, board);
     assert.equal(visible['Echo Out'](), false, board + ' Echo Out hidden');
     assert.equal(visible['Stems EQ Mode'](), false, board + ' Stems EQ hidden');
-    assert.equal(visible['Color FX Style'](), true, board + ' Color FX Style shown');
+    assert.equal(visible['Color FX Style'](), false, board + ' Color FX Style hidden (no PX effects on standalone players)');
     assert.equal(visible['PX Delay Time Mode'](), false, board + ' PX Delay Time Mode hidden when Color FX Off');
     assert.equal(visible['PX Delay Time (ms)'](), false, board + ' PX Delay Time (ms) hidden when Color FX Off');
     // Hidden entries keep stored values and behave as Off:
@@ -224,15 +224,12 @@ for (const board of ['JP07', 'JP08', 'JP13', 'JP14']) {{
         assert.equal(scFxTimeMode, 'ms');
         assert.equal(scFxTimeMs, 250);
     }}
-    // Delay-based styles reveal PX Delay Time Mode and (when mode === 'ms') PX Delay Time (ms):
+    // A delay style stored before this rule does not bring the PX Delay rows back on a player:
     for (const style of ['spiral', 'pitch_echo', 'dub_echo']) {{
         scPioneerFx = style;
-        assert.equal(visible['PX Delay Time Mode'](), true, board + ' ' + style);
-        assert.equal(visible['PX Delay Time (ms)'](), true, board + ' ' + style + ' ms');
+        assert.equal(visible['PX Delay Time Mode'](), false, board + ' ' + style);
+        assert.equal(visible['PX Delay Time (ms)'](), false, board + ' ' + style + ' ms');
     }}
-    scFxTimeMode = 'beats';
-    assert.equal(visible['PX Delay Time Mode'](), true);
-    assert.equal(visible['PX Delay Time (ms)'](), false);
 }}
 
 // Late player detection after settings.conf parsed stems_eq_mode=1 resets ChannelStrip/Mode to Off:

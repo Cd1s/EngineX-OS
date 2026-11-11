@@ -2321,7 +2321,7 @@ SERVICES_MAIN = """
 	property int scFxTimeMs: 500
 	property bool scFxSelectorAvailable: false
 	property bool scFxMasterBypassed: false
-	readonly property bool scHasPxDelay: scFxSelectorAvailable || (!scFxMasterBypassed && ["spiral", "pitch_echo", "dub_echo"].indexOf(scPioneerFx) >= 0)
+	readonly property bool scHasPxDelay: scFxSelectorAvailable || (!scFxMasterBypassed && !scIsPlayerBoard && ["spiral", "pitch_echo", "dub_echo"].indexOf(scPioneerFx) >= 0)
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
 	property bool scUpdating: false
@@ -3529,7 +3529,8 @@ PLAYBACK_ENTRIES = """
 		},
 		EntryBase.ListEntry {
 			text: "Color FX Style"
-			visible: !root.scFxMasterBypassed
+			// No PX effects on standalone players; the hook keeps a stored style Off there.
+			visible: !root.scFxMasterBypassed && !root.scIsPlayerBoard
 			readonly property var ids: ["off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"]
 			values: ["Off", "Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scPioneerFx))]
