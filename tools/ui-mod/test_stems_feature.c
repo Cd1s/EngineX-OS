@@ -520,6 +520,8 @@ static void test_config(void) {
         if (build->config_zoom == 0x52c) config[0x12e] = model & 1; // #166: NH and non-NH
         memcpy(expected, config, sizeof expected);
         for (size_t i = 0; i < 5; i++) expected[fields[i]] = i == 4 ? 0 : 1;
+        if (!strcmp(build->name, "5.3.0"))
+            expected[0x2a7] = 1; // gen1 5.3.0 only: hasStemsProcessorFactoryInstalled
         if (build->config_zoom == 0x52c) expected[0x54] = 1; // #152: Config.audio.hasStemsLevel
         if (build->config_zoom == 0x52c && config[0x12e])
             expected[0xe1] = expected[0x19c] = expected[0x19d] = expected[0x4cd] = 1; // #166; retain hasNHFx
@@ -549,7 +551,7 @@ static void test_config(void) {
             invoke_config(config, (void *)(uintptr_t)config_jump[1], out);
             assert(config[0x239] == 0 && *(uint32_t *)(config + 0x90) == (player ? 4u : 2u));
             assert(*(uint32_t *)(config + build->config_zoom) == 30); // #77, also in 4-deck mode
-            assert(config[fields[0]] == 1 && config[fields[4]] == 0);
+            assert(config[fields[0]] == 1 && config[fields[3] + 1] == 1 && config[fields[4]] == 0);
             assert(out[0] == (uintptr_t)config && out[1] == 123 && out[2] == 456);
         }
         // Only a player's 4-channel device gets the scratch outputs for decks 3/4.
@@ -1004,6 +1006,9 @@ static void test_patch_files(const char *filename) {
         image[e->offset] ^= 0xff;
         assert(edit_state((uintptr_t)image, e) == 0);
     }
+    if (!strcmp(build->name, "5.0.4")) assert(build->edit_count == 16);
+    if (!strcmp(build->name, "5.3.0")) assert(build->edit_count == 20);
+    if (!strcmp(build->name, "5.3.0-sclive4")) assert(build->edit_count == 23);
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         size_t bytes;
         const void *expected = dsp_expected(i, &bytes);

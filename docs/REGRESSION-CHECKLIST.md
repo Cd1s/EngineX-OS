@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (30 Rows)
+## Regression Table (31 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -40,6 +40,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 28 | **CDJ-style pitch fader soft-takeover unlock (`#181`, default `OFF` = stock Engine behaviour)**: when `cdjPitchPickup` is `OFF` (default), pitch fader soft takeover and `HARDEXTERNAL` state remain 100% stock | `#181` (`[PENDING — branch in progress for 5.3.0.4]`) | **`[PENDING — branch in progress for 5.3.0.4]`** — Unit test + QML JS test asserting default `OFF` leaves stock soft-takeover untouched and `ON` unlocks CDJ-style pickup | Pending merge into `5.3.0.4` |
 | 29 | **PX Beat FX millisecond mode (`#162`, default `OFF` = byte-identical DSP output)**: when PX ms mode is `OFF` (default), the 96 kHz `hook_master_output` / PX delay-bank DSP output is byte-for-byte identical to the existing golden hashes, optional delay buffers stay unallocated until enabled, and `10–4000 ms` delay controls stay synced across `Time/Rate`, `Time (ms)` readout, and `−/+` | `#162`, `9fa0cff` (merged in `605e527`) | `tools/ui-mod/test_px_off_golden.c` (AZ04 & armhf `fast`/`off`), `test_master_golden.c` (AZ04 & armhf `fast`/`off`), `test_fx_ms.c` (plain/ASan/TSan), `test_ms_lazy.c` (plain/ASan/TSan), `test_ms_master_hook.c` (AZ04 & armhf), `tools/az01-packer/test_fx_ms_ui.py`, `pkg/webui/ui_settings_test.go` | `tools/ui-mod/test_fx_selector.sh` & `tools/az01-packer/test_fx_selector_sandbox.sh` |
 | 30 | **Shadow deck `Sync` phase-alignment snap**: enabling `Sync` snaps the shadow deck onto the beat/bar grid without residual phase offset | `#49` (`[PENDING — branch agent/shadow-sync-snap-20261111 in progress for 5.3.0.4]`) | **`[PENDING — branch in progress for 5.3.0.4]`** — Unit test in `tools/az01-packer/test_ui_mod.py` + dual-deck / `shadow-twin` sync alignment check | Pending merge into `5.3.0.4` |
+| 31 | **First-generation `5.3.0` decks never offer a first-boot Stems `Download` button and keep the `Stems Support` row hidden**: gen1 `5.3.0` `prepare_config` sets `Config.hasStemsProcessorFactoryInstalled = true` (`0x2a7`, matching stock factory-Stems models so `NewFeaturePopup` shows only `Dismiss` without `Download`), `Entries/StemsDownload.qml` stays `active: false`, and `5.0.4` / `5.3.0-sclive4` / `AZ04` keep stock edit tables untouched | `5.3.0.4` (`agent/gen1-stems-prompt-20261111`) | `tools/ui-mod/test_stems_feature.c` (`5.0.4`, `5.3.0`, `5.3.0-sclive4`), `tools/ui-mod/test_az04_hook.c`, `tools/az01-packer/test_ui_mod.py::UiModSourceTest::test_gen1_stems_first_boot_suppressed_and_row_hidden` | Blank-`/data` first-boot sandbox + `stems-probe` / end-to-end separation; Release gate `new` stage (`EXPECT_APPLIED=19`) |
 
 ---
 
