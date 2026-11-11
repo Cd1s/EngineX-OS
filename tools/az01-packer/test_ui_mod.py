@@ -3058,8 +3058,7 @@ assert.ok(!presses.some(p=>p.endsWith('/RequestMaster')),'a copy must not reques
 const assert = require('node:assert/strict');
 let fakeNow = 1000;
 Date.now = () => fakeNow;
-let scTimeZoneBootAt = fakeNow;
-const scTimeZoneBootWindowMs = 30000;
+let scTimeZoneBootWindowOpen = true;
 let scLastGoodTimeZone = '';
 let scPendingTimeZone = '';
 let scRestoringTimeZone = false;
@@ -3120,8 +3119,8 @@ Planck.timeDateController.setSystemTimeZone('Asia/Shanghai');
 assert.equal(scLastGoodTimeZone, 'Asia/Shanghai');
 assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=Asia%2FShanghai');
 
-// 3. Unsolicited boot-window UTC (shortly after boot, picker NOT used) is treated as fallback and restores Asia/Shanghai.
-fakeNow = 5000;
+// 3. Unsolicited boot-window UTC (picker NOT used) stays guarded even if NTP jumps wall-clock Date.now() +12 days!
+fakeNow += 12 * 86400 * 1000;
 const postsBeforeFallback = posts.length;
 Planck.timeDateController.setSystemTimeZone('UTC');
 assert.equal(scLastGoodTimeZone, 'Asia/Shanghai');
@@ -3137,6 +3136,14 @@ assert.equal(scTimeZonePickerUsed, true);
 assert.equal(scLastGoodTimeZone, 'UTC');
 assert.equal(currentDisplayTz, 'UTC');
 assert.equal(currentIsUtc, true);
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=UTC');
+
+// 5. Once the 30s monotonic Timer expires (scTimeZoneBootWindowOpen = false), UTC is saved even without picker.
+scTimeZonePickerUsed = false;
+Planck.timeDateController.setSystemTimeZone('Asia/Shanghai');
+scTimeZoneBootWindowOpen = false;
+Planck.timeDateController.setSystemTimeZone('UTC');
+assert.equal(scLastGoodTimeZone, 'UTC');
 assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=UTC');
 """
         r = subprocess.run(["node", "-e", script], capture_output=True, text=True)

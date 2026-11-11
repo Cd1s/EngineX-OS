@@ -44,6 +44,140 @@ bin_dir="$bundle_dir/bin"
 lib_hook="$bundle_dir/lib/libengine-ui-hook.so"
 lib_edisksd_hook="$bundle_dir/lib/libedisksd-hook.so"
 
+check_gen2_tz_newer() {
+    tz_file="$dest/state/timezone"
+    [ -f "$tz_file" ] || return 1
+    cfg_root=${SC5000_CONFIG_DIR:-"$(dirname "$dest")/.config"}
+    for d in "$cfg_root"/*.user.settings; do
+        [ -d "$d" ] || continue
+        conf="$d/AIR Music Technology/Engine.conf"
+        if [ ! -f "$conf" ] || [ "$tz_file" -nt "$conf" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+restore_gen2_timezone() {
+    force_newer=${1:-0}
+    tz_file="$dest/state/timezone"
+    [ ! -L "$dest/state" ] && [ ! -L "$tz_file" ] && [ -f "$tz_file" ] || return 0
+    tz=$(awk '{gsub(/\r/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); gsub(/ /, "_"); print; exit}' "$tz_file")
+    zdir=${SC5000_ZONEINFO_DIR:-/usr/share/zoneinfo}
+    if [ "$tz" = UTC ]; then
+        [ -f "$zdir/UTC" ] || return 0
+    else
+        case $tz in
+            ''|/*|*/|*//*|*..*|*[![:alnum:]_+/-]*) return 0 ;;
+            */*) ;;
+            *) return 0 ;;
+        esac
+        [ "${#tz}" -le 63 ] || return 0
+        old_ifs=$IFS; IFS=/
+        for seg in $tz; do
+            IFS=$old_ifs
+            [ -n "$seg" ] && [ "$seg" != "." ] && [ "${#seg}" -le 32 ] || return 0
+        done
+        IFS=$old_ifs
+        [ -f "$zdir/$tz" ] || return 0
+    fi
+    cfg_root=${SC5000_CONFIG_DIR:-"$(dirname "$dest")/.config"}
+    [ ! -L "$cfg_root" ] || return 0
+    read_conf_tz() {
+        [ -f "$1" ] || return 0
+        awk '
+            /^\[TimeDateSettings\][[:space:]]*$/ { in_sec = 1; next }
+            /^\[.*\]/ { in_sec = 0; next }
+            in_sec && /^TZEnvVar[[:space:]]*=/ {
+                sub(/^TZEnvVar[[:space:]]*=[[:space:]]*/, "")
+                sub(/[[:space:]]*$/, "")
+                print
+                exit
+            }
+        ' "$1"
+    }
+    should_write_conf() {
+        conf=$1
+        [ -f "$conf" ] || return 0
+        [ "$force_newer" != 1 ] || return 0
+        cur=$(read_conf_tz "$conf")
+        case $cur in
+            ''|Universal) return 0 ;;
+            UTC|Etc/UTC) [ ! "$conf" -nt "$tz_file" ] && return 0 ;;
+        esac
+        [ "$tz_file" -nt "$conf" ]
+    }
+    write_conf() {
+        air_dir="$1/AIR Music Technology"
+        conf="$air_dir/Engine.conf"
+        [ ! -L "$1" ] && [ ! -L "$air_dir" ] && [ ! -L "$conf" ] || return 0
+        should_write_conf "$conf" || return 0
+        mkdir -p "$air_dir"
+        tmp="$conf.tmp.$$"
+        if [ -f "$conf" ]; then
+            awk -v tz="$tz" '
+                BEGIN { in_sec = 0; seen_sec = 0; wrote = 0 }
+                /^\[TimeDateSettings\][[:space:]]*$/ { in_sec = 1; seen_sec = 1; print; next }
+                /^\[.*\]/ {
+                    if (in_sec && !wrote) { print "TZEnvVar=" tz; wrote = 1 }
+                    in_sec = 0; print; next
+                }
+                in_sec && /^TZEnvVar[[:space:]]*=/ {
+                    if (!wrote) { print "TZEnvVar=" tz; wrote = 1 }
+                    next
+                }
+                { print }
+                END {
+                    if (!seen_sec) {
+                        if (NR > 0) print ""
+                        print "[TimeDateSettings]"
+                        print "TZEnvVar=" tz
+                    } else if (!wrote) {
+                        print "TZEnvVar=" tz
+                    }
+                }
+            ' "$conf" > "$tmp"
+        else
+            printf '[TimeDateSettings]\nTZEnvVar=%s\n' "$tz" > "$tmp"
+        fi
+        if cmp -s "$tmp" "$conf" 2>/dev/null; then
+            rm -f "$tmp"
+        else
+            chmod 644 "$tmp"
+            mv "$tmp" "$conf"
+        fi
+    }
+    found=0
+    for d in "$cfg_root"/*.user.settings; do
+        [ -d "$d" ] || continue
+        found=1
+        write_conf "$d"
+    done
+    if [ "$found" = 0 ]; then
+        pfile=${SC5000_PRODUCT_CODE_FILE:-/sys/firmware/devicetree/base/inmusic,product-code}
+        if [ -f "$pfile" ]; then
+            prod=$(tr -d '\000\r\n ' < "$pfile" | tr '[:upper:]' '[:lower:]')
+            case $prod in
+                ''|*[!a-z0-9_-]*) ;;
+                *) write_conf "$cfg_root/$prod.user.settings" ;;
+            esac
+        fi
+    fi
+}
+
+# Invoked by engine.service's ExecStartPre=- after the unhooked Engine stops and before
+# the hooked Engine starts, so Engine.conf is updated without stopping our own cgroup.
+if [ "${1:-}" = "--restore-tz" ]; then
+    force_newer=0
+    tz_marker=${SC5000_TZ_NEWER_MARKER:-/run/sc5000-tz-newer}
+    if [ -e "$tz_marker" ]; then
+        force_newer=1
+        rm -f "$tz_marker" 2>/dev/null || :
+    fi
+    restore_gen2_timezone "$force_newer" || :
+    exit 0
+fi
+
 mkdir -p /run/systemd/system/engine.service.d
 
 # No KillMode=process: engine.service is Type=forking with the Scripts/engine shell as main PID, so it would
@@ -59,6 +193,7 @@ Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M
 Environment=QML_DISABLE_DISK_CACHE=1
 EnvironmentFile=-/data/sc5000-custom/ui-scale.env
 ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home
+ExecStartPre=-$bundle_dir/boot-activate.sh --restore-tz
 EOF
 
 # Converts a rekordbox stick inside the mount, before Engine sees it (as on the 1st-gen images).
@@ -123,128 +258,6 @@ if [ -f "$ts_file" ] && [ ! -L "$ts_file" ]; then
         fi
     fi
 fi
-
-# Capture whether state/timezone predates or postdates Engine.conf BEFORE stopping the
-# initial unhooked Engine, then write Engine.conf only AFTER Engine has stopped so the
-# old Engine's QSettings destructor cannot overwrite the restored value.
-check_gen2_tz_newer() {
-    tz_file="$dest/state/timezone"
-    [ -f "$tz_file" ] || return 1
-    cfg_root=${SC5000_CONFIG_DIR:-"$(dirname "$dest")/.config"}
-    for d in "$cfg_root"/*.user.settings; do
-        [ -d "$d" ] || continue
-        conf="$d/AIR Music Technology/Engine.conf"
-        if [ ! -f "$conf" ] || [ "$tz_file" -nt "$conf" ]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-restore_gen2_timezone() {
-    force_newer=${1:-0}
-    tz_file="$dest/state/timezone"
-    [ ! -L "$dest/state" ] && [ ! -L "$tz_file" ] && [ -f "$tz_file" ] || return 0
-    tz=$(awk '{gsub(/\r/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); gsub(/ /, "_"); print; exit}' "$tz_file")
-    zdir=${SC5000_ZONEINFO_DIR:-/usr/share/zoneinfo}
-    if [ "$tz" = UTC ]; then
-        [ -f "$zdir/UTC" ] || return 0
-    else
-        case $tz in
-            ''|/*|*/|*//*|*..*|*[![:alnum:]_+/-]*) return 0 ;;
-            */*) ;;
-            *) return 0 ;;
-        esac
-        [ "${#tz}" -le 63 ] || return 0
-        old_ifs=$IFS; IFS=/
-        for seg in $tz; do
-            IFS=$old_ifs
-            [ -n "$seg" ] && [ "$seg" != "." ] && [ "${#seg}" -le 32 ] || return 0
-        done
-        IFS=$old_ifs
-        [ -f "$zdir/$tz" ] || return 0
-    fi
-    cfg_root=${SC5000_CONFIG_DIR:-"$(dirname "$dest")/.config"}
-    [ ! -L "$cfg_root" ] || return 0
-    read_conf_tz() {
-        [ -f "$1" ] || return 0
-        awk '
-            /^\[TimeDateSettings\][[:space:]]*$/ { in_sec = 1; next }
-            /^\[.*\]/ { in_sec = 0; next }
-            in_sec && /^TZEnvVar[[:space:]]*=/ {
-                sub(/^TZEnvVar[[:space:]]*=[[:space:]]*/, "")
-                sub(/[[:space:]]*$/, "")
-                print
-                exit
-            }
-        ' "$1"
-    }
-    should_write_conf() {
-        conf=$1
-        [ -f "$conf" ] || return 0
-        cur=$(read_conf_tz "$conf")
-        case $cur in
-            ''|UTC|Universal|Etc/UTC) return 0 ;;
-        esac
-        [ "$force_newer" = 1 ] || [ "$tz_file" -nt "$conf" ]
-    }
-    write_conf() {
-        air_dir="$1/AIR Music Technology"
-        conf="$air_dir/Engine.conf"
-        [ ! -L "$1" ] && [ ! -L "$air_dir" ] && [ ! -L "$conf" ] || return 0
-        should_write_conf "$conf" || return 0
-        mkdir -p "$air_dir"
-        tmp="$conf.tmp.$$"
-        if [ -f "$conf" ]; then
-            awk -v tz="$tz" '
-                BEGIN { in_sec = 0; seen_sec = 0; wrote = 0 }
-                /^\[TimeDateSettings\][[:space:]]*$/ { in_sec = 1; seen_sec = 1; print; next }
-                /^\[.*\]/ {
-                    if (in_sec && !wrote) { print "TZEnvVar=" tz; wrote = 1 }
-                    in_sec = 0; print; next
-                }
-                in_sec && /^TZEnvVar[[:space:]]*=/ {
-                    if (!wrote) { print "TZEnvVar=" tz; wrote = 1 }
-                    next
-                }
-                { print }
-                END {
-                    if (!seen_sec) {
-                        if (NR > 0) print ""
-                        print "[TimeDateSettings]"
-                        print "TZEnvVar=" tz
-                    } else if (!wrote) {
-                        print "TZEnvVar=" tz
-                    }
-                }
-            ' "$conf" > "$tmp"
-        else
-            printf '[TimeDateSettings]\nTZEnvVar=%s\n' "$tz" > "$tmp"
-        fi
-        if cmp -s "$tmp" "$conf" 2>/dev/null; then
-            rm -f "$tmp"
-        else
-            chmod 644 "$tmp"
-            mv "$tmp" "$conf"
-        fi
-    }
-    found=0
-    for d in "$cfg_root"/*.user.settings; do
-        [ -d "$d" ] || continue
-        found=1
-        write_conf "$d"
-    done
-    if [ "$found" = 0 ]; then
-        pfile=${SC5000_PRODUCT_CODE_FILE:-/sys/firmware/devicetree/base/inmusic,product-code}
-        if [ -f "$pfile" ]; then
-            prod=$(tr -d '\000\r\n ' < "$pfile" | tr '[:upper:]' '[:lower:]')
-            case $prod in
-                ''|*[!a-z0-9_-]*) ;;
-                *) write_conf "$cfg_root/$prod.user.settings" ;;
-            esac
-        fi
-    fi
-}
 
 if [ -f "$bundle_dir/version.txt" ]; then
     mkdir -p /run/sc5000
@@ -375,11 +388,10 @@ if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/
     [ "$edisksd_changed" = 0 ] || systemctl restart edisksd.service || :
     [ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :
     convert_mounted
-    gen2_tz_newer=0
-    check_gen2_tz_newer && gen2_tz_newer=1 || :
-    systemctl stop engine.service || :
-    restore_gen2_timezone "$gen2_tz_newer" || :
-    systemctl start --no-block engine.service || systemctl restart engine.service || :
+    if check_gen2_tz_newer; then
+        : > "${SC5000_TZ_NEWER_MARKER:-/run/sc5000-tz-newer}" 2>/dev/null || :
+    fi
+    systemctl restart --no-block engine.service || systemctl restart engine.service || :
 else
     restore_gen2_timezone 0 || :
     convert_mounted
@@ -516,7 +528,7 @@ if [ -z "${SC5000_CUSTOM:-}" ]; then
             systemctl stop "enginex-$applet.service" 2>/dev/null || :
             rm -f "/run/systemd/system/enginex-$applet.service"
         done
-        rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf
+        rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/sc5000-tz-newer
         systemctl daemon-reload 2>/dev/null || :
         systemctl restart --no-block edisksd.service systemd-timesyncd.service 2>/dev/null || :
     fi
@@ -526,7 +538,7 @@ if [ -z "${SC5000_CUSTOM:-}" ]; then
           /run/systemd/system/enginex-sc5000-deemixd.service \
           /run/systemd/system/engine.service.d/99-sc5000.conf \
           /run/systemd/system/edisksd.service.d/99-sc5000.conf \
-          /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf
+          /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/sc5000-tz-newer
 fi
 echo "EngineX OS $version removed from $dest"
 '''

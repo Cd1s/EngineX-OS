@@ -599,7 +599,8 @@ should_restore_tz() {
     [ -f "$conf" ] || return 0
     cur=$(read_engine_tz "$conf")
     case $cur in
-        ''|UTC|Universal|Etc/UTC) return 0 ;;
+        ''|Universal) return 0 ;;
+        UTC|Etc/UTC) [ ! "$conf" -nt "$tz_file" ] && return 0 ;;
     esac
     [ "$tz_file" -nt "$conf" ]
 }
@@ -765,7 +766,7 @@ ExecStart=/usr/libexec/sc5000-custom-prepare
 Description=Drop stale Engine 4.3.4 /etc overlay entries
 DefaultDependencies=no
 RequiresMountsFor=/data
-Before=etc.mount var.mount var-lib.mount
+Before=etc.mount
 [Service]
 Type=oneshot
 ExecStart=/usr/libexec/sc5000-custom-etc-reset
