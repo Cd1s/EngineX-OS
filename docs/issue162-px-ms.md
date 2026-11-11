@@ -40,8 +40,8 @@ the range are rejected. Removing a key cannot retain a stale enabled mode.
 Time changes crossfade between read taps for 20 ms; milliseconds/default
 switches crossfade with the existing PX output. Leaving a timed master style
 keeps its sounding algorithm until the fade completes. Switching directly
-between different legacy master Color FX styles retains their existing reset
-behavior and is outside this click guarantee; the native PX selector keeps
+between different legacy master Color FX styles still changes algorithms
+without a crossfade and is outside this click guarantee; the native PX selector keeps
 its existing effect-bank crossfades. Only after milliseconds mode is enabled does the polling worker prepare
 buffer pages before publishing them to audio. Default OFF leaves the optional
 ring pages untouched. The audio thread performs no allocation, locking or

@@ -251,7 +251,7 @@ Item {
                 probe.phase = 96; return
             }
             if (probe.phase === 96) {
-                if (a.scFxBusy) return
+                if (a.scFxBusy || root.scFxMsSending || root.scFxMsWanted !== -1) return
                 probe.check(root.scFxTimeMs === 250, "ms-saved-time-survives-selection")
                 console.warn("FXPROBE done|" + (probe.failed ? "FAIL" : "PASS"))
                 if (probe.knob) probe.knob.destroy()
