@@ -7,6 +7,8 @@ import (
 	"math"
 	"os"
 	"strings"
+
+	"github.com/Cd1s/EngineX-OS/internal/audioheader"
 )
 
 type AudioInfo struct {
@@ -14,6 +16,8 @@ type AudioInfo struct {
 	Samples                                 uint64
 	Duration                                float64
 	Format                                  string
+	StartOffsetSamples                      int    `json:",omitempty"`
+	OffsetClass                             string `json:",omitempty"`
 }
 
 // AudioHeader visits only container headers. Large FLAC pictures and WAV data
@@ -46,6 +50,20 @@ func AudioHeader(path string) (AudioInfo, error) {
 		lower := strings.ToLower(path)
 		if strings.HasSuffix(lower, ".wav") || strings.HasSuffix(lower, ".wave") || strings.HasSuffix(lower, ".flac") || strings.HasSuffix(lower, ".aif") || strings.HasSuffix(lower, ".aiff") || strings.HasSuffix(lower, ".aifc") {
 			return AudioInfo{}, fmt.Errorf("invalid WAV/FLAC/AIFF magic")
+		}
+		if strings.HasSuffix(lower, ".mp3") {
+			mp3, err := audioheader.ReadMP3(f, st.Size())
+			if err != nil {
+				return AudioInfo{}, err
+			}
+			return AudioInfo{
+				SampleRate:         mp3.SampleRate,
+				Channels:           mp3.Channels,
+				Bitrate:            mp3.Bitrate,
+				Format:             "mp3",
+				StartOffsetSamples: mp3.StartOffsetSamples,
+				OffsetClass:        mp3.OffsetClass,
+			}, nil
 		}
 		return AudioInfo{}, nil // exported metadata remains authoritative for other codecs
 	}

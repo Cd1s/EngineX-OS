@@ -187,8 +187,9 @@ func Reconcile(r *compat.Resolver, l *rekordbox.Library) {
 }
 
 const (
-	stampName = ".rb-bridge-stamp"
-	stateName = ".rb-bridge-state.db"
+	stampName    = ".rb-bridge-stamp"
+	stampVersion = "v2" // v2 checks per-track MP3 start-offset classes (#178)
+	stateName    = ".rb-bridge-state.db"
 	// Past this, a first import cannot finish while the mount waits: reading every
 	// file took 8 minutes for 6000 tracks on a USB stick.
 	fastImportTracks = 500
@@ -228,12 +229,13 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		if err != nil {
 			return Convert(ctx, mount, opts)
 		}
-		stamp = fmt.Sprintf("%s %d %d", rel, st.Size(), st.ModTime().UnixNano()) + stagedStamp(mount)
+		stamp = fmt.Sprintf("%s %s %d %d", stampVersion, rel, st.Size(), st.ModTime().UnixNano()) + stagedStamp(mount)
 	} else {
-		stamp = strings.TrimSpace(stagedStamp(mount))
-		if stamp == "" {
+		staged := strings.TrimSpace(stagedStamp(mount))
+		if staged == "" {
 			return Convert(ctx, mount, opts)
 		}
+		stamp = stampVersion + " " + staged
 	}
 	dir := filepath.Join(mount, "Engine Library", "Database2")
 	if !full && !opts.SmartMatch && importedStamp(dir) == stamp {

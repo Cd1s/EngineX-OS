@@ -211,3 +211,91 @@ func TestTrackDataPeaksUpgrade(t *testing.T) {
 		t.Fatal("rewrote existing peaks")
 	}
 }
+
+// #178: Rekordbox plays Xing/Info frames as audio and ignores LAME gapless delay,
+// while Engine drops the Xing/Info frame and skips LAME start_pad + 529.
+func TestEncodePerformanceMP3StartOffsetAndClamping(t *testing.T) {
+	if _, err := enginedb.EncodePerformance(rekordbox.Track{StartOffsetSamples: 2257}, nil); err == nil {
+		t.Fatal("accepted start offset without real sample rate")
+	}
+	for _, sr := range []int{44100, 48000} {
+		firstBeatMS := uint32(50)
+		if sr == 48000 {
+			firstBeatMS = 46
+		}
+		for _, tc := range []struct {
+			name   string
+			offset int
+		}{
+			{"lame", 2257},
+			{"xing", 1152},
+			{"headerless", 0},
+		} {
+			a := &rekordbox.Analysis{
+				Beats: []rekordbox.Beat{
+					{Number: 4, BPM: 120, TimeMS: firstBeatMS},
+					{Number: 1, BPM: 120, TimeMS: firstBeatMS + 500},
+					{Number: 2, BPM: 120, TimeMS: firstBeatMS + 1000},
+				},
+				Cues: []rekordbox.Cue{
+					{HotCue: 1, TimeMS: 20, Name: "EarlyHot"},
+					{HotCue: 2, TimeMS: 550, Name: "BeatHot"},
+					{HotCue: 3, TimeMS: 550, EndMS: 1550, Loop: true, Name: "HotLoop"},
+					{HotCue: 0, TimeMS: 10, Name: "EarlyMain"},
+					{HotCue: 0, TimeMS: 20, EndMS: 520, Loop: true, Name: "EarlyMemLoop"},
+				},
+				Waveforms: []rekordbox.Waveform{{Tag: "PWV7", EntryBytes: 3, Data: []byte{100, 80, 60}}},
+			}
+			p, err := enginedb.EncodePerformance(rekordbox.Track{SampleRate: sr, Duration: 8, StartOffsetSamples: tc.offset}, a)
+			if err != nil {
+				t.Fatalf("sr=%d %s: %v", sr, tc.name, err)
+			}
+			beats, err := enginedb.QUncompress(p.Beats, 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantB0 := float64(firstBeatMS)*float64(sr)/1000 - float64(tc.offset)
+			wantStep := 0.5 * float64(sr)
+			for g := 0; g < 2; g++ {
+				base := 17 + g*(8+3*24) + 8
+				b0 := math.Float64frombits(binary.LittleEndian.Uint64(beats[base:]))
+				b1 := math.Float64frombits(binary.LittleEndian.Uint64(beats[base+24:]))
+				b2 := math.Float64frombits(binary.LittleEndian.Uint64(beats[base+48:]))
+				if math.Abs(b0-wantB0) > 1e-6 || math.Abs((b1-b0)-wantStep) > 1e-6 || math.Abs((b2-b1)-wantStep) > 1e-6 {
+					t.Fatalf("sr=%d %s grid %d: got (%v, %v, %v), want b0=%v step=%v", sr, tc.name, g, b0, b1, b2, wantB0, wantStep)
+				}
+			}
+			// Negative first anchor (e.g. 50ms*44.1 - 2257 = -52 samples) must pass Engine display validation.
+			if _, err := enginedb.ParseDisplayPerformance(p.TrackData, p.Overview, p.Beats, p.QuickCues, p.Loops); err != nil {
+				t.Fatalf("sr=%d %s display validation rejected shifted performance: %v", sr, tc.name, err)
+			}
+
+			q, err := enginedb.QUncompress(p.QuickCues, 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := bytes.NewReader(q[8:])
+			var hotPos [8]float64
+			for i := 0; i < 8; i++ {
+				n, _ := r.ReadByte()
+				_, _ = r.Seek(int64(n), 1)
+				_ = binary.Read(r, binary.BigEndian, &hotPos[i])
+				_, _ = r.Seek(4, 1)
+			}
+			var mainCue, defaultCue float64
+			_ = binary.Read(r, binary.BigEndian, &mainCue)
+			_, _ = r.ReadByte()
+			_ = binary.Read(r, binary.BigEndian, &defaultCue)
+
+			wantEarlyHot := max(0.0, 20.0*float64(sr)/1000-float64(tc.offset))
+			wantBeatHot := 550.0*float64(sr)/1000 - float64(tc.offset)
+			wantMain := max(0.0, 10.0*float64(sr)/1000-float64(tc.offset))
+			if math.Abs(hotPos[0]-wantEarlyHot) > 1e-6 || math.Abs(hotPos[1]-wantBeatHot) > 1e-6 || hotPos[3] != -1 {
+				t.Fatalf("sr=%d %s hot cues: %v", sr, tc.name, hotPos)
+			}
+			if math.Abs(mainCue-wantMain) > 1e-6 || defaultCue != mainCue {
+				t.Fatalf("sr=%d %s main cue: %v / %v, want %v", sr, tc.name, mainCue, defaultCue, wantMain)
+			}
+		}
+	}
+}
