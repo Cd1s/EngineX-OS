@@ -8,7 +8,7 @@
   - **8 款一代机完整固件（`*-Update.img`）**：`SC5000`（JP07）、`SC5000M`（JP08）、`PRIME GO`（JP11）、`SC6000`（JP13）、`SC6000M`（JP14）、`PRIME 4`（JC11）、`PRIME 2`（JC16）、`Mixstream Pro`（NH08）
   - **8 款二代机 `/data` 数据包（`*-Data-Bundle.tar.gz`，Beta）**：`SC LIVE 4`（JP21）、`SC LIVE 2`（JP20）、`PRIME 4+`（JC11S）、`PRIME GO+`（JP11S）、`Mixstream Pro+`（NH08S）、`Mixstream Pro Go`（NH10）、`PRIME 4 G2`（JP24，64-bit AZ04）、`Rane SYSTEM ONE`（RMZ2，64-bit AZ04）
   - **4 平台桌面一键安装器（`EngineX-Installer-5.3.0.4-*`）**：Windows 10/11 x64（`.zip`）、macOS Apple Silicon M1–M4（`.zip`）、macOS Intel（`.zip`）、Linux x86_64（`.tar.gz`）
-- **在线文档与着陆页**：`docs/index.html` + `docs/site/{content.js,mods.js,app.js,style.css}`（简中 / 繁中 / English 三语文档站，移除发布功能的 `tone: "new"` 标记，递增静态缓存参数至 `?v=16`；涉及新菜单项与顶栏/PX 控件的三语截图待沙箱空闲后基于最终构建重拍）
+- **在线文档与着陆页**：`docs/index.html` + `docs/site/{content.js,mods.js,app.js,style.css}`（简中 / 繁中 / English 三语文档站，移除发布功能的 `tone: "new"` 标记，递增静态缓存参数至 `?v=18`，并基于 `44e3e0a` 通过 `eglfs` + `virtio-gpu` 重拍全套三语控制中心/布局/配置/设置、双机 4 轨影子同屏、PRIME 4 原生 PX 毫秒控件、`:8080` Web 控制台及 `EngineX-Installer` 终端实测截图）
 
 ---
 

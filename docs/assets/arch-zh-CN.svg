@@ -109,7 +109,7 @@
     <rect width="386" height="200" rx="14" class="card"/>
     <rect x="22" y="0" width="56" height="4" rx="2" class="g"/>
     <text x="22" y="38" font-size="12" font-weight="700" letter-spacing="1.5" class="faint">家用电脑 · 同一局域网</text>
-    <text x="22" y="66" font-size="18" font-weight="700" class="t">sc5000-stemsd <tspan font-size="13" font-weight="400" class="m mono">:17890</tspan></text>
+    <text x="22" y="66" font-size="18" font-weight="700" class="t">enginex-stemsd <tspan font-size="13" font-weight="400" class="m mono">:17890</tspan></text>
     <text x="22" y="94" font-size="13.5" class="m">worker.py · hpss 或 htdemucs</text>
     <text x="22" y="116" font-size="13.5" class="m">CUDA · Apple MPS · CPU</text>
     <rect x="22" y="134" width="214" height="24" rx="12" class="chip"/>
@@ -124,7 +124,7 @@
     <rect width="386" height="200" rx="14" class="card"/>
     <rect x="22" y="0" width="56" height="4" rx="2" class="b"/>
     <text x="22" y="38" font-size="12" font-weight="700" letter-spacing="1.5" class="faint">云端 · 互联网</text>
-    <text x="22" y="66" font-size="18" font-weight="700" class="t">sc5000-relay <tspan font-size="13" font-weight="400" class="m">→ sc5000-stemsd</tspan></text>
+    <text x="22" y="66" font-size="18" font-weight="700" class="t">enginex-relay <tspan font-size="13" font-weight="400" class="m">→ enginex-stemsd</tspan></text>
     <text x="22" y="94" font-size="13.5" class="m">HTTPS · 控制台密码</text>
     <text x="22" y="116" font-size="13.5" class="m">登录 · OAuth 回调 · Stems</text>
     <rect x="22" y="134" width="190" height="24" rx="12" class="chip"/>
