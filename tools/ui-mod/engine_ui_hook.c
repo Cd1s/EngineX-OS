@@ -2679,9 +2679,12 @@ static const char *volatile_path(int dirfd, const char *path, char out[PATH_MAX]
     return out;
 }
 
+static const char *stems_processor_path(const char *path);
+
 static int redirected_open(int dirfd, const char *path, int flags, mode_t mode) {
     static void *cache;
     int (*real)(int, const char *, int, ...) = next_symbol(&cache, "openat");
+    if (is_engine()) path = stems_processor_path(path);
     char mapped[PATH_MAX];
     const char *target = volatile_path(dirfd, path, mapped);
     if (!target) return -1;
@@ -2721,16 +2724,23 @@ static int raw_access(const char *path, int mode) {
     return real ? real(path, mode) : -1;
 }
 
+#ifndef STEMS_BUNDLE_PROCESSOR
+#define STEMS_BUNDLE_PROCESSOR "/data/sc5000-custom/bundle/stems-processor"
+#endif
+#ifndef STEMS_BUNDLE_BIN_PROCESSOR
+#define STEMS_BUNDLE_BIN_PROCESSOR "/data/sc5000-custom/bundle/bin/stems-processor"
+#endif
+
 static const char *stems_processor_path(const char *path) {
     // AZ04 looks in the official add-on mount and /usr/Engine; redirect only while the stock binary is absent.
     if (path && (!strcmp(path, "/usr/local/bin/stems-processor") ||
                  !strcmp(path, "/usr/Engine/stems-processor") ||
                  !strcmp(path, "/secure-media/stems-processor/bin/stems-processor"))) {
         if (raw_access(path, X_OK) != 0) {
-            if (raw_access("/data/sc5000-custom/bundle/stems-processor", X_OK) == 0)
-                return "/data/sc5000-custom/bundle/stems-processor";
-            if (raw_access("/data/sc5000-custom/bundle/bin/stems-processor", X_OK) == 0)
-                return "/data/sc5000-custom/bundle/bin/stems-processor";
+            if (raw_access(STEMS_BUNDLE_PROCESSOR, X_OK) == 0)
+                return STEMS_BUNDLE_PROCESSOR;
+            if (raw_access(STEMS_BUNDLE_BIN_PROCESSOR, X_OK) == 0)
+                return STEMS_BUNDLE_BIN_PROCESSOR;
         }
     }
     return path;
@@ -2741,6 +2751,14 @@ int access(const char *path, int mode) {
     if (!real) { errno = ENOSYS; return -1; }
     if (is_engine()) path = stems_processor_path(path);
     return real(path, mode);
+}
+
+static void *statx_cache;
+int statx(int dirfd, const char *path, int flags, unsigned int mask, struct statx *buf) {
+    int (*real)(int, const char *, int, unsigned int, struct statx *) = next_symbol(&statx_cache, "statx");
+    if (!real) { errno = ENOSYS; return -1; }
+    if (is_engine()) path = stems_processor_path(path);
+    return real(dirfd, path, flags, mask, buf);
 }
 
 int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions,

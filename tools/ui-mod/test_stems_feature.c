@@ -5,6 +5,9 @@ int hook_test_engine;
 #define OA_LOADER_MS 0
 #define OA_SHADOW "/tmp/test-oa-replay/shadow-v3"
 #define OA_ENGINE_COPIES "/tmp/test-oa-replay/copies/"
+static char stems_bundle_file[4096], stems_bin_file[4096];
+#define STEMS_BUNDLE_PROCESSOR stems_bundle_file
+#define STEMS_BUNDLE_BIN_PROCESSOR stems_bin_file
 #include "engine_ui_hook.c"
 #include <assert.h>
 #include <sqlite3.h>
@@ -1171,24 +1174,49 @@ static void test_shadow_replay(void) {
 }
 
 static void test_stems_processor_fallback(void) {
+    char dir[] = "/tmp/stems-fallback-XXXXXX", bin[PATH_MAX];
+    assert(mkdtemp(dir));
+    assert(snprintf(stems_bundle_file, sizeof stems_bundle_file, "%s/stems-processor", dir) > 0);
+    assert(snprintf(bin, sizeof bin, "%s/bin", dir) > 0);
+    assert(!mkdir(bin, 0700));
+    assert(snprintf(stems_bin_file, sizeof stems_bin_file, "%s/bin/stems-processor", dir) > 0);
+    const char *stock = "/usr/local/bin/stems-processor";
+    assert(raw_access(stock, F_OK) != 0); // Run on the build host, never a deck.
     hook_test_engine = 1;
-    if (access("/usr/local/bin/stems-processor", X_OK) != 0) {
-        assert(!strcmp(stems_processor_path("/usr/local/bin/stems-processor"), "/usr/local/bin/stems-processor"));
-        system("mkdir -p /data/sc5000-custom/bundle 2>/dev/null");
-        const char *bundle_file = "/data/sc5000-custom/bundle/stems-processor";
-        FILE *f = fopen(bundle_file, "w");
-        if (f) {
-            fputs("#!/bin/sh\nexit 0\n", f);
-            fclose(f);
-            chmod(bundle_file, 0755);
-            assert(!strcmp(stems_processor_path("/usr/local/bin/stems-processor"), bundle_file));
-            assert(access("/usr/local/bin/stems-processor", X_OK) == 0);
-            unlink(bundle_file);
-        }
+    assert(!strcmp(stems_processor_path(stock), stock));
+    struct statx stx;
+    assert(statx(AT_FDCWD, stock, 0, 0xfffu, &stx) == -1);
+    assert(open(stock, O_RDONLY) == -1);
+    const char *paths[] = {stems_bundle_file, stems_bin_file};
+    for (unsigned i = 0; i < sizeof paths / sizeof *paths; i++) {
+        FILE *f = fopen(paths[i], "w");
+        assert(f && fputs("#!/bin/sh\nexit 0\n", f) >= 0 && !fclose(f));
+        assert(!chmod(paths[i], 0644));
+        assert(!strcmp(stems_processor_path(stock), stock));
+        assert(statx(AT_FDCWD, stock, 0, 0xfffu, &stx) == -1);
+        assert(open(stock, O_RDONLY) == -1);
+        assert(!chmod(paths[i], 0755));
+        // Other processes must still see the missing original path.
+        hook_test_engine = 0;
+        assert(access(stock, X_OK) == -1);
+        assert(statx(AT_FDCWD, stock, 0, 0xfffu, &stx) == -1);
+        assert(open(stock, O_RDONLY) == -1);
+        hook_test_engine = 1;
+        assert(!strcmp(stems_processor_path(stock), paths[i]));
+        assert(access(stock, X_OK) == 0);
+        memset(&stx, 0, sizeof stx);
+        assert(statx(AT_FDCWD, stock, AT_NO_AUTOMOUNT, 0xfffu, &stx) == 0);
+        assert(S_ISREG(stx.stx_mode) && stx.stx_size > 0);
+        int fd = open(stock, O_RDONLY);
+        assert(fd >= 0);
+        char bytes[2];
+        assert(read(fd, bytes, sizeof bytes) == sizeof bytes && !memcmp(bytes, "#!", sizeof bytes));
+        assert(!close(fd) && !unlink(paths[i]));
     }
     assert(!strcmp(stems_processor_path("/bin/sh"), "/bin/sh"));
     hook_test_engine = 0;
-    puts("stems-processor fallback: redirects to /data/sc5000-custom/bundle/stems-processor when absent: PASS");
+    assert(!rmdir(bin) && !rmdir(dir));
+    puts("stems-processor fallback: isolated access/statx/open, missing/non-executable and non-Engine paths: PASS");
 }
 
 static void test_alsa_boot_hook(void) {
