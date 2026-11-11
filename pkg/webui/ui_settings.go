@@ -125,6 +125,7 @@ var (
 	uiUIScales       = []int{110, 105, 100, 95, 90, 85, 80, 75}
 	uiPioneerFxModes = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
 	uiShadowModes    = []string{"auto", "engine", "cdj"}
+	uiFxTimeModes    = []string{"beats", "ms"}
 )
 
 const (
@@ -192,6 +193,8 @@ type uiSettings struct {
 	BeatJumpPads        bool   `json:"beatJumpPads"`
 	PioneerFx           string `json:"pioneerFx"`
 	FXSelectorAvailable bool   `json:"fxSelectorAvailable"`
+	FxTimeMode          string `json:"fxTimeMode"`
+	FxTimeMs            int    `json:"fxTimeMs"`
 
 	RelayURL          string `json:"relayUrl"`
 	DeemixPasswordSet bool   `json:"deemixPasswordSet"`
@@ -271,6 +274,20 @@ func (s *Server) uiDir() string {
 // a service added later (Beatport) stayed hidden on every upgraded deck.
 var uiServicesBeforeKnown = []string{"tidal", "netease", "spotify", "deezer", "soundcloud"}
 
+// Only unsigned decimal integers are accepted by the UI and DSP readers.
+func uiFxTimeInteger(text string) (int64, error) {
+	if len(text) > 10 {
+		return 0, errors.New("invalid milliseconds")
+	}
+	for _, c := range text {
+		if c < '0' || c > '9' {
+			return 0, errors.New("invalid milliseconds")
+		}
+	}
+	n, err := strconv.ParseUint(text, 10, 32)
+	return int64(n), err
+}
+
 // loadUI must be called with uiMu held. Bad or missing values get defaults.
 func (s *Server) loadUI() uiSettings {
 	known, saved, shadowModeSet := uiServicesBeforeKnown, false, false
@@ -278,6 +295,7 @@ func (s *Server) loadUI() uiSettings {
 		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowMode: "auto", ProlinkWaveform: true,
 		TracklistWaveform: true, CueCountdown: true,
 		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
+		FxTimeMode: "beats", FxTimeMs: 500,
 	}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
 	for _, line := range strings.Split(string(b), "\n") {
@@ -406,6 +424,16 @@ func (s *Server) loadUI() uiSettings {
 			if slices.Contains(uiPioneerFxModes, val) {
 				v.PioneerFx = val
 			}
+		case "fx_time_mode":
+			v.FxTimeMode = "beats"
+			if val == "ms" {
+				v.FxTimeMode = "ms"
+			}
+		case "fx_time_ms":
+			v.FxTimeMs = 500
+			if n, err := uiFxTimeInteger(val); err == nil {
+				v.FxTimeMs = int(max(10, min(4000, n)))
+			}
 		}
 	}
 	if saved { // services added since the file was written start enabled; ones turned off stay off
@@ -533,6 +561,12 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if !s.fxSelectorAvailable() && v.PioneerFx != "" && v.PioneerFx != "off" {
 		text += "pioneer_fx=" + v.PioneerFx + "\n"
+	}
+	if v.FxTimeMode == "ms" {
+		text += "fx_time_mode=ms\n"
+	}
+	if v.FxTimeMs != 500 && v.FxTimeMs >= 10 && v.FxTimeMs <= 4000 {
+		text += "fx_time_ms=" + strconv.Itoa(v.FxTimeMs) + "\n"
 	}
 	if v.GitHubRepo != defaultGitHubRepo {
 		text += "github_repo=" + v.GitHubRepo + "\n"
@@ -699,7 +733,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) {
+	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -836,6 +870,18 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("pioneerFx") {
 		v.PioneerFx = q.Get("pioneerFx")
+	}
+	if q.Has("fxTimeMode") {
+		v.FxTimeMode = q.Get("fxTimeMode")
+	}
+	if q.Has("fxTimeMs") {
+		n, err := uiFxTimeInteger(q.Get("fxTimeMs"))
+		if err != nil || n < 10 || n > 4000 {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.FxTimeMs = int(n)
 	}
 	var (
 		hasBroadcast bool
