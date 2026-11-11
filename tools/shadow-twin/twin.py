@@ -35,30 +35,48 @@ DEFAULT_REF = "origin/agent/sandbox-main-20261110"
 HW_REF = "origin/agent/shadow-grid-halfwave-20261110"
 
 SIDES = ("A", "B")
-SIDE_CFG = {
-    "A": {
-        "netns": "shadow-twin-a",
-        "ip": "192.168.100.1",
-        "peer_ip": "192.168.100.2",
-        "role": "13",
-        "deck": 1,
-        "shadow_deck": 2,
-        "player": "1",
-        "track": "track-a.wav",
-        "machine_id": "11111111111111111111111111111111",
-    },
-    "B": {
-        "netns": "shadow-twin-b",
-        "ip": "192.168.100.2",
-        "peer_ip": "192.168.100.1",
-        "role": "24",
-        "deck": 2,
-        "shadow_deck": 1,
-        "player": "2",
-        "track": "track-b.wav",
-        "machine_id": "22222222222222222222222222222222",
-    },
-}
+
+
+def _make_side_cfg() -> dict[str, dict]:
+    try:
+        resolved = WORK.resolve()
+    except Exception:
+        resolved = WORK
+    if resolved == Path("/var/tmp/shadow-twin"):
+        netns_a = "shadow-twin-a"
+        netns_b = "shadow-twin-b"
+    else:
+        import hashlib
+        h = hashlib.sha256(str(resolved).encode()).hexdigest()[:8]
+        netns_a = f"st-{h}-a"
+        netns_b = f"st-{h}-b"
+    return {
+        "A": {
+            "netns": netns_a,
+            "ip": "192.168.100.1",
+            "peer_ip": "192.168.100.2",
+            "role": "13",
+            "deck": 1,
+            "shadow_deck": 2,
+            "player": "1",
+            "track": "track-a.wav",
+            "machine_id": "11111111111111111111111111111111",
+        },
+        "B": {
+            "netns": netns_b,
+            "ip": "192.168.100.2",
+            "peer_ip": "192.168.100.1",
+            "role": "24",
+            "deck": 2,
+            "shadow_deck": 1,
+            "player": "2",
+            "track": "track-b.wav",
+            "machine_id": "22222222222222222222222222222222",
+        },
+    }
+
+
+SIDE_CFG = _make_side_cfg()
 
 BOOTSTRAP_JS = r"""
 (function() {
@@ -209,10 +227,10 @@ def prepare_build_source(
 
     if local:
         branch = git_out("rev-parse --abbrev-ref HEAD", REPO, check=False) or "local"
-        full_sha = git_out("rev-parse HEAD", REPO)
+        full_sha = git_out("rev-parse HEAD", REPO, check=False) or "0000000000000000000000000000000000000000"
         short_sha = full_sha[:7]
         dirty = bool(git_out("status --porcelain --untracked-files=no", REPO, check=False))
-        subj = git_out("log -1 --format=%s HEAD", REPO)
+        subj = git_out("log -1 --format=%s HEAD", REPO, check=False) or "local build"
         line_name, line_slug = classify_line(branch, full_sha)
         info = {
             "line": f"{line_name}{'-dirty' if dirty else ''}",
@@ -298,11 +316,19 @@ def ensure_base_artifacts(
 
     ext2 = WORK / "base/image/rootfs.ext2"
     if not ext2.is_file():
-        print("==> Unpacking official SC5000 5.3.0 rootfs.ext2...", flush=True)
-        shutil.rmtree(WORK / "base/image", ignore_errors=True)
-        sh(f'python3 "{src_dir}/tools/az01-packer/az01_packer.py" unpack "{FW_IMG}" --output "{WORK}/base/image" > "{WORK}/base/unpack.json"')
-        for p in (WORK / "base/image").glob("*.payload"):
-            p.unlink(missing_ok=True)
+        default_ext2 = Path("/var/tmp/shadow-twin/base/image/rootfs.ext2")
+        if default_ext2.is_file():
+            (WORK / "base/image").mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(default_ext2, ext2)
+            except OSError:
+                pass
+        if not ext2.is_file():
+            print("==> Unpacking official SC5000 5.3.0 rootfs.ext2...", flush=True)
+            shutil.rmtree(WORK / "base/image", ignore_errors=True)
+            sh(f'python3 "{src_dir}/tools/az01-packer/az01_packer.py" unpack "{FW_IMG}" --output "{WORK}/base/image" > "{WORK}/base/unpack.json"')
+            for p in (WORK / "base/image").glob("*.payload"):
+                p.unlink(missing_ok=True)
 
     ro_mnt = WORK / "base/ro"
     if subprocess.run(["mountpoint", "-q", str(ro_mnt)]).returncode != 0:
@@ -310,6 +336,13 @@ def ensure_base_artifacts(
 
     fixture_so = WORK / "bin/alsa-null-fixture.so"
     fixture_c = HERE / "alsa_null_fixture.c"
+    if not fixture_so.is_file():
+        default_fixture = Path("/var/tmp/shadow-twin/bin/alsa-null-fixture.so")
+        if default_fixture.is_file() and default_fixture.stat().st_mtime >= fixture_c.stat().st_mtime:
+            try:
+                shutil.copy2(default_fixture, fixture_so)
+            except Exception:
+                pass
     if not fixture_so.is_file() or fixture_c.stat().st_mtime > fixture_so.stat().st_mtime:
         print("==> Compiling ALSA null + monotonic clock + vsync fixture...", flush=True)
         sh(f'arm-linux-gnueabihf-gcc -O2 -shared -fPIC -Wall -Wextra "{fixture_c}" -o "{fixture_so}" -ldl')
@@ -320,11 +353,25 @@ def ensure_base_artifacts(
         sh(f'cd "{src_dir}" && sh tools/ui-mod/build.sh')
 
     suite_bin = WORK / "bin/sc5000-suite"
+    if not suite_bin.is_file():
+        default_suite = Path("/var/tmp/shadow-twin/bin/sc5000-suite")
+        if default_suite.is_file() and not commit_changed:
+            try:
+                shutil.copy2(default_suite, suite_bin)
+            except Exception:
+                pass
     if build_suite or commit_changed or not suite_bin.is_file():
         print(f"==> Building sc5000-suite (armhf) ({ver_info['line']} @ {ver_info['commit']})...", flush=True)
         sh(f'cd "{src_dir}" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -o "{suite_bin}" ./cmd/sc5000-suite')
 
     packs_dir = WORK / "packs"
+    if not (packs_dir / "en").is_dir():
+        default_packs = Path("/var/tmp/shadow-twin/packs")
+        if (default_packs / "en").is_dir() and not commit_changed:
+            try:
+                shutil.copytree(default_packs, packs_dir, dirs_exist_ok=True)
+            except Exception:
+                pass
     if build_packs or commit_changed or not (packs_dir / "en").is_dir():
         print(f"==> Building UI packs (--dev) ({ver_info['line']} @ {ver_info['commit']})...", flush=True)
         shutil.rmtree(packs_dir, ignore_errors=True)
@@ -361,7 +408,7 @@ def setup_network(delay_ms: float = 2.0, jitter_ms: float = 1.1) -> None:
         sh(f"ip netns add {ns}")
         sh(f"ip -n {ns} link set lo up")
 
-    sh("ip link add eth0 netns shadow-twin-a type veth peer name eth0 netns shadow-twin-b")
+    sh(f"ip link add eth0 netns {SIDE_CFG['A']['netns']} type veth peer name eth0 netns {SIDE_CFG['B']['netns']}")
     for side, cfg in SIDE_CFG.items():
         ns = cfg["netns"]
         ip = cfg["ip"]
@@ -597,7 +644,15 @@ def ns_chroot_cmd(side: str, inner_cmd: str) -> list[str]:
 
 def start_services(side: str, src_dir: Path | None = None) -> None:
     sdir = WORK / side
-    # Stop any existing Engine or stream-sync in this namespace first
+    # Stop any existing Engine or stream-sync in this side first
+    for pidfile in ("engine.pid", "sync.pid"):
+        pf = sdir / pidfile
+        if pf.is_file():
+            try:
+                pid = int(pf.read_text().strip())
+                subprocess.run(["kill", "-TERM", str(pid)], check=False)
+            except Exception:
+                pass
     subprocess.run(
         ns_chroot_cmd(
             side,
@@ -607,6 +662,15 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
         check=False,
     )
     time.sleep(0.3)
+    for pidfile in ("engine.pid", "sync.pid"):
+        pf = sdir / pidfile
+        if pf.is_file():
+            try:
+                pid = int(pf.read_text().strip())
+                subprocess.run(["kill", "-KILL", str(pid)], check=False)
+            except Exception:
+                pass
+            pf.unlink(missing_ok=True)
     subprocess.run(
         ns_chroot_cmd(
             side,
@@ -652,11 +716,12 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
 
     # Start stream-sync (--deemixd="" avoids spawning deemixd; --disable-guard avoids SCHED_IDLE starvation under software GL)
     sync_log = open(sdir / "logs/stream-sync.log", "w")
-    subprocess.Popen(
+    proc_sync = subprocess.Popen(
         ns_chroot_cmd(side, "exec /tmp/stream-sync --deemixd='' --disable-guard --listen :8080"),
         stdout=sync_log,
         stderr=subprocess.STDOUT,
     )
+    (sdir / "sync.pid").write_text(str(proc_sync.pid))
 
     cfg = SIDE_CFG[side]
     for _ in range(50):
@@ -687,11 +752,12 @@ def start_services(side: str, src_dir: Path | None = None) -> None:
         "MALLOC_ARENA_MAX=1 "
         "/usr/Engine/Engine -d0"
     )
-    subprocess.Popen(
+    proc_eng = subprocess.Popen(
         ns_chroot_cmd(side, eng_cmd),
         stdout=eng_log,
         stderr=subprocess.STDOUT,
     )
+    (sdir / "engine.pid").write_text(str(proc_eng.pid))
 
 
 def clean_log_rows(lines: list[str]) -> list[str]:
@@ -835,7 +901,7 @@ def cmd_up(args) -> None:
         build_packs=True,
         build_hook=args.build_hook,
     )
-    print("==> Configuring veth pair + tc netem between shadow-twin-a and shadow-twin-b...", flush=True)
+    print(f"==> Configuring veth pair + tc netem between {SIDE_CFG['A']['netns']} and {SIDE_CFG['B']['netns']}...", flush=True)
     setup_network(delay_ms=args.delay_ms, jitter_ms=args.jitter_ms)
 
     mode = args.mode
@@ -849,6 +915,12 @@ def cmd_up(args) -> None:
         start_namespace_holder(s, src_dir)
 
     both(lambda s: start_services(s, src_dir))
+    if getattr(args, "minimal", False):
+        print(
+            f"==> Twin sandbox UP (minimal) [line={ver_info['line']} commit={ver_info['commit']} mode={mode}]",
+            flush=True,
+        )
+        return
     info = both(wait_engine_ready)
     print(
         f"==> Twin sandbox UP in {time.time() - t0:.1f}s "
@@ -862,7 +934,7 @@ def cmd_down(args, quiet: bool = False) -> None:
         print("==> Stopping shadow-twin sandbox...", flush=True)
     for s in SIDES:
         sdir = WORK / s
-        for pidfile in ("sup.pid", "init.pid"):
+        for pidfile in ("sup.pid", "init.pid", "engine.pid", "sync.pid"):
             pf = sdir / pidfile
             if pf.is_file():
                 try:
@@ -873,7 +945,7 @@ def cmd_down(args, quiet: bool = False) -> None:
     time.sleep(0.3)
     for s in SIDES:
         sdir = WORK / s
-        for pidfile in ("sup.pid", "init.pid"):
+        for pidfile in ("sup.pid", "init.pid", "engine.pid", "sync.pid"):
             pf = sdir / pidfile
             if pf.is_file():
                 try:
@@ -884,7 +956,11 @@ def cmd_down(args, quiet: bool = False) -> None:
                 pf.unlink(missing_ok=True)
         sh(f"ip netns del {SIDE_CFG[s]['netns']} 2>/dev/null || true", check=False)
 
-    sh("pkill -KILL -f 'ns-holder\\.sh|shadow-twin-sync' 2>/dev/null || true", check=False)
+    try:
+        work_esc = re.escape(str(WORK.resolve()).rstrip("/")) + "/"
+    except Exception:
+        work_esc = re.escape(str(WORK).rstrip("/")) + "/"
+    sh(f"pkill -KILL -f '{work_esc}.*(ns-holder\\.sh|shadow-twin-sync|/root)' 2>/dev/null || true", check=False)
 
     if getattr(args, "clean", False) or getattr(args, "purge", False):
         ro_mnt = WORK / "base/ro"
@@ -968,6 +1044,13 @@ def cmd_deploy(args) -> None:
     for s in SIDES:
         write_instance_configs(s, mode, src_dir, ver_info)
     both(lambda s: start_services(s, src_dir))
+    if getattr(args, "minimal", False):
+        print(
+            f"==> Redeployed (minimal) [line={ver_info['line']} commit={ver_info['commit']} mode={mode}] "
+            f"in {time.time() - t0:.1f}s",
+            flush=True,
+        )
+        return
     info = both(wait_engine_ready)
     print(
         f"==> Redeployed [line={ver_info['line']} commit={ver_info['commit']} mode={mode}] "
@@ -1557,7 +1640,7 @@ def cmd_perf(args) -> None:
 
 def cmd_ping(args) -> None:
     r = sh(
-        f"ip netns exec shadow-twin-a ping -c {args.count} -i 0.02 192.168.100.2",
+        f"ip netns exec {SIDE_CFG['A']['netns']} ping -c {args.count} -i 0.02 192.168.100.2",
         capture=True,
     )
     print(r.stdout, end="", flush=True)
@@ -1648,6 +1731,7 @@ def main() -> None:
     p_up.add_argument("--delay-ms", type=float, default=2.0, help="One-way veth netem delay in ms (default 2.0 -> ~4.2 ms RTT)")
     p_up.add_argument("--jitter-ms", type=float, default=1.1, help="One-way veth netem jitter in ms (default 1.1)")
     p_up.add_argument("--build-hook", action="store_true", help="Also force recompile libengine-ui-hook.so")
+    p_up.add_argument("--minimal", action="store_true", help="Start holders and services without waiting for full QML bootstrap")
     p_up.set_defaults(func=cmd_up)
 
     p_down = sub.add_parser("down", help="Stop sandbox and unmount namespaces")
@@ -1677,6 +1761,7 @@ def main() -> None:
     p_dep.add_argument("--packs", action="store_true", help="Rebuild UI packs")
     p_dep.add_argument("--hook", action="store_true", help="Rebuild libengine-ui-hook.so")
     p_dep.add_argument("--mode", choices=("display", "engine", "auto"), default=None, help="Optionally switch shadow mode")
+    p_dep.add_argument("--minimal", action="store_true", help="Redeploy and restart services without waiting for full QML bootstrap")
     p_dep.set_defaults(func=cmd_deploy)
 
     p_load = sub.add_parser("load", help="Load and analyze test tracks on A (Deck 1) and B (Deck 2)")
