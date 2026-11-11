@@ -119,6 +119,9 @@ fixture() {
     export SC5000_THREAD_DELAYS= # no delayed Engine thread passes outliving a case
     export SC5000_RUN_ROOT=$MOCK_ROOT/run SC5000_MEDIA_ROOT=$MOCK_ROOT/media
     export SC5000_INTERNAL_CACHE=$MOCK_ROOT/internal
+    export SC5000_UI_DIR=$MOCK_ROOT/ui SC5000_PRIMARY_UI_DIR=$MOCK_ROOT/ui SC5000_LEGACY_UI_DIR=$MOCK_ROOT/legacy-ui
+    export SC5000_ASSIGNMENT_DIR=$MOCK_ROOT/assignments SC5000_ASSIGNMENT_PATCHED=$MOCK_ROOT/patched
+    export SC5000_STATE_DIR=$MOCK_ROOT/state SC5000_PLANCK_STATE=$MOCK_ROOT/planck.json
     export SC5000_ENGINE_GUARDIAN=$TMP/bin/engine-guardian
     export SC5000_RB_BRIDGE=$TMP/bin/rb-bridge SC5000_STORAGE_NOTIFY=$TMP/bin/notify
     : > "$MOCK_ROOT/log"
@@ -495,14 +498,22 @@ SERVICE_RESULT=signal sh "$GUARD" stop; sh "$GUARD" pre
 sleep 1.5
 [[ $(cat "$SC5000_UI_DIR/boot-count") == 2 ]] || fail 'stale timer reset the crash streak'
 sh "$GUARD" post; sleep 1.5
-[[ ! -e $SC5000_UI_DIR/boot-count ]] || fail 'a start that survives the window must clear boot-count'
-[[ -e $SC5000_UI_DIR/running-sentinel && ! -e $SC5000_UI_DIR/boot-token ]] || fail 'healthy start before power cut must keep running-sentinel after clearing boot-token'
+[[ -e $SC5000_UI_DIR/boot-count ]] || fail 'uptime alone must not clear a boot without UI readiness'
+token=$(cat "$SC5000_UI_DIR/boot-token")
+sh "$GUARD" ready "$token"
+SC5000_BOOT_POLL_INTERVAL=.1 sh "$GUARD" watch > "$TMP/ui-watch.log" 2>&1 & ui_watch=$!
+sleep .3
+kill "$ui_watch"; wait "$ui_watch" || :
+[[ ! -e $SC5000_UI_DIR/boot-count ]] || fail 'only the current UI-ready attempt may clear boot-count'
+# #140 (b82197b): a power cut after a UI-ready start leaves running-sentinel; the second boot
+# purges the possibly truncated QML cache and is no crash.
+[[ -e $SC5000_UI_DIR/running-sentinel ]] || fail 'healthy start before power cut must keep running-sentinel'
 mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; printf truncated > "$SC5000_ENGINE_DATA_DIR/.cache/qml/powercut.qmlc"
 sh "$GUARD" pre
 [[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 && -e $SC5000_UI_DIR/running-sentinel ]] ||
     fail 'second boot after healthy power cut must purge .cache/qml without entering safe-mode'
 has '--phase boot2' "$ROOT/tools/az01-packer/release-gate.sh"
-has 'SC5000_UI_ALIVE_CMD=' "$ROOT/tools/az01-packer/release-gate.sh"
+has 'boot2: main UI acknowledged the current boot attempt' "$ROOT/tools/az01-packer/release-gate.sh"
 unset SC5000_UI_HEALTHY_AFTER SC5000_UI_ALIVE_CMD
 # Quit reasons the stock script exits 0 after: the guard must restart Engine unless
 # the system is already rebooting (FactoryReset when az01-update --erase-data worked).
@@ -590,7 +601,9 @@ for conf in "$ROOT/rootfs-overlay/etc/systemd/system/engine.service.d/override.c
     has 'Environment=HOME=/tmp/sc5000-engine-home' "$conf"
     has "command -v connmanctl >/dev/null || exit 0" "$conf"
 done
-has 'SC5000_UI_HEALTHY_AFTER:-15' "$GUARD"
+has 'SC5000_BOOT_TIMEOUT:-180' "$GUARD"
+has 'SC5000_BOOT_CRASH_LIMIT:-3' "$GUARD"
+has 'SC5000_BOOT_CRASH_WINDOW:-300' "$GUARD"
 unset SC5000_UI_DIR
 ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode, failed FactoryReset restarts Engine'
 

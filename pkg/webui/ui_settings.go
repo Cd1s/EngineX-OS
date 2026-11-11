@@ -107,7 +107,7 @@ func boardCapabilities(board string) uiCapabilities {
 	}
 }
 
-const defaultUIDir = "/data/sc5000-custom/ui"
+const defaultUIDir = "/data/enginex/ui"
 
 var (
 	uiLanguages    = []string{"en", "zh-Hans", "zh-Hant"}
@@ -266,6 +266,11 @@ func writeUIScaleEnv(pct int) error {
 func (s *Server) uiDir() string {
 	if s.cfg.UIDir != "" {
 		return s.cfg.UIDir
+	}
+	if _, err := os.Stat(defaultUIDir); os.IsNotExist(err) {
+		if _, legacyErr := os.Stat("/data/sc5000-custom/ui"); legacyErr == nil {
+			return "/data/sc5000-custom/ui"
+		}
 	}
 	return defaultUIDir
 }
@@ -445,8 +450,7 @@ func (s *Server) loadUI() uiSettings {
 		}
 		v.Sources, _ = parseUISources(strings.Join(v.Sources, ",")) // fixed order
 	}
-	_, err := os.Stat(filepath.Join(s.uiDir(), "safe-mode"))
-	v.SafeMode = err == nil
+	v.SafeMode = bootMarker(s.uiDir(), "safe-mode")
 	return v
 }
 
@@ -1032,8 +1036,6 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if q.Get("restart") == "1" {
-		os.Remove(filepath.Join(s.uiDir(), "safe-mode"))
-		os.Remove(filepath.Join(s.uiDir(), "boot-count"))
 		if err := s.restartEngine(); err != nil {
 			log.Printf("stream-sync: restart Engine: %v", err)
 			fail(w, 500, errors.New("settings saved, but Engine did not restart"))

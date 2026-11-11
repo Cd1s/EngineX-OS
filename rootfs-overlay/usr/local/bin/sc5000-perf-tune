@@ -2,6 +2,10 @@
 # Best effort and repeatable: unavailable/read-only knobs never block playback.
 # POSIX sh: the stock Engine OS rootfs has BusyBox ash and no bash.
 set -u
+boot_ui=${SC5000_UI_DIR:-${SC5000_PRIMARY_UI_DIR:-/data/enginex/ui}}
+legacy_ui=${SC5000_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
+[ -d "$boot_ui" ] || [ ! -d "$legacy_ui" ] || boot_ui=$legacy_ui
+[ ! -e "$boot_ui/safe-mode" ] || exit 0
 SYS=${SC5000_SYS_ROOT:-/sys}
 PROC=${SC5000_PROC_ROOT:-/proc}
 AUDIO_IRQ=${SC5000_AUDIO_IRQ_PATTERN:-ffb20000|snd|alsa|i2s|spdif|audio}

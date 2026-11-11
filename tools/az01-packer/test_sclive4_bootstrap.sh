@@ -177,8 +177,16 @@ for i in \$(seq 1 30); do
 done
 
 test -f '$TARGET/run/sc5000-alsa-reexec.once'
-grep -q 'LD_PRELOAD=/data/enginex/bundle/lib/libengine-ui-hook.so' \
+grep -q 'SC5000_UI_HOOK=/data/enginex/bundle/lib/libengine-ui-hook.so' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+grep -q 'UnsetEnvironment=LD_PRELOAD' '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+grep -q 'engine-ui-guard launch /usr/Engine/Engine' '$TARGET/usr/Engine/Scripts/engine'
+grep -q 'engine-ui-guard service /usr/Engine/Scripts/runengine' '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+# Repeated activation in one boot must not truncate its own bound input.
+before=\$(sha256sum '$TARGET/usr/Engine/Scripts/engine' | cut -d' ' -f1)
+chroot '$TARGET' /bin/sh /data/enginex/bundle/boot-activate.sh >/dev/null 2>&1
+test -s '$TARGET/usr/Engine/Scripts/engine'
+test \"\$before\" = \"\$(sha256sum '$TARGET/usr/Engine/Scripts/engine' | cut -d' ' -f1)\"
 grep -q 'Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'Environment=QML_DISABLE_DISK_CACHE=1' \
@@ -197,7 +205,7 @@ test -f '$TARGET/run/systemd/system/enginex-rb-bridge.service'
 grep -q 'LD_PRELOAD=/data/enginex/bundle/lib/libedisksd-hook.so' '$TARGET/run/systemd/system/edisksd.service.d/99-sc5000.conf'
 test -f '$TARGET/run/systemd/system/enginex-sc5000-deemixd.service'
 # #116: KillMode=process left the hook-less Engine running after the restart.
-! grep -q KillMode '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+if grep -q KillMode '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'; then exit 1; fi
 # --ssh-key: the read-only stock authorized_keys is replaced by a bind mount, and sshd starts.
 for i in \$(seq 1 50); do
     chroot '$TARGET' pgrep -x sshd >/dev/null 2>&1 && break
@@ -294,7 +302,7 @@ for i in \$(seq 1 20); do
     chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1 || break
     sleep 0.1
 done
-! chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1
+if chroot '$TARGET' pgrep -x sc5000-suite >/dev/null 2>&1; then exit 1; fi
 "
 echo "  Method B on-device install & uninstall: PASS"
 
