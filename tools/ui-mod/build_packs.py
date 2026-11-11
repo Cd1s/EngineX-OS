@@ -4158,7 +4158,7 @@ SHADOW_LAYER = r"""
                                     Layout.rightMargin: 16
                                     spacing: 0
                                     AutoLoop {
-                                        Layout.preferredWidth: 42
+                                        Layout.preferredWidth: 52
                                         Layout.rightMargin: 4
                                         view: scHeader.dv ? scHeader.dv.autoLoopView : null
                                         spacing: 4
@@ -4167,7 +4167,7 @@ SHADOW_LAYER = r"""
                                         textFont: Style.fontH3
                                     }
                                     BeatJump {
-                                        Layout.preferredWidth: 54
+                                        Layout.preferredWidth: 64
                                         view: scHeader.dv ? scHeader.dv.beatJumpView : null
                                         deckIndex: scDisplay.deck
                                         spacing: 4
@@ -4210,7 +4210,9 @@ SHADOW_LAYER = r"""
                                         Layout.leftMargin: 4
                                         speedState: scHeader.pitchVal
                                         speedRange: scHeader.rangeStr
+                                        speedRangeTextWidth: 0
                                         speedRangeTextHorizontalAlignment: Text.AlignLeft
+                                        speedStateTextWidth: 0
                                         speedStateTextHorizontalAlignment: Text.AlignRight
                                         columnSpacing: 4
                                         flat: true
@@ -4315,7 +4317,7 @@ SHADOW_LAYER = r"""
                             visible: scHeader.loaded && scHeader.hasBottomRow
                             AutoLoop {
                                 Layout.alignment: Qt.AlignLeft
-                                Layout.preferredWidth: 42
+                                Layout.preferredWidth: 52
                                 view: scHeader.dv ? scHeader.dv.autoLoopView : null
                                 spacing: 4
                                 iconWidth: 16
@@ -4329,7 +4331,7 @@ SHADOW_LAYER = r"""
                                 iconWidth: 16
                                 iconHeight: 10
                                 textFont: Style.fontH3
-                                Layout.preferredWidth: 54
+                                Layout.preferredWidth: 64
                                 Layout.alignment: Qt.AlignLeft
                                 visible: Config.audio.deck.hasBeatJump
                             }
@@ -4349,7 +4351,7 @@ SHADOW_LAYER = r"""
                                 Layout.alignment: Qt.AlignVCenter
                                 Layout.preferredHeight: 22
                                 Layout.fillWidth: true
-                                Layout.minimumWidth: 56
+                                Layout.minimumWidth: 50
                                 Layout.preferredWidth: 112
                                 Layout.leftMargin: 2
                                 Layout.rightMargin: 2
@@ -4361,7 +4363,7 @@ SHADOW_LAYER = r"""
                                     visible: info !== null && root.scCueCountdown
                                     spacing: 4
                                     Rectangle { width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: parent.info ? parent.info.color : "transparent" }
-                                    Text { width: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(scCueCountText1.implicitWidth) - 12)); anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(scCueCountText1.implicitWidth) >= 28; text: parent.info ? parent.info.label : "" }
+                                    Text { width: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(scCueCountText1.implicitWidth) - 12)); anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(scCueCountText1.implicitWidth) >= 24; text: parent.info ? parent.info.label : "" }
                                     Text { id: scCueCountText1; anchors.verticalCenter: parent.verticalCenter; font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
                                 }
                             }
@@ -4376,8 +4378,10 @@ SHADOW_LAYER = r"""
                                 speedState: scHeader.pitchVal
                                 speedRange: scHeader.rangeStr
                                 speedRangeTextFont: Style.fontH1
+                                speedRangeTextWidth: 0
                                 speedRangeTextHorizontalAlignment: Text.AlignLeft
                                 speedStateTextFont: Style.fontH1
+                                speedStateTextWidth: 0
                                 speedStateTextHorizontalAlignment: Text.AlignRight
                                 textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter
                                 columnSpacing: 4
@@ -4392,7 +4396,7 @@ SHADOW_LAYER = r"""
                     spacing: 0
                     AutoLoop {
                         Layout.fillHeight: true
-                        Layout.preferredWidth: 42
+                        Layout.preferredWidth: 52
                         Layout.rightMargin: 4
                         view: scHeader.dv ? scHeader.dv.autoLoopView : null
                         spacing: 4
@@ -4402,7 +4406,7 @@ SHADOW_LAYER = r"""
                     }
                     BeatJump {
                         Layout.fillHeight: true
-                        Layout.preferredWidth: 54
+                        Layout.preferredWidth: 64
                         view: scHeader.dv ? scHeader.dv.beatJumpView : null
                         deckIndex: scDisplay.deck
                         spacing: 4
@@ -4443,7 +4447,7 @@ SHADOW_LAYER = r"""
                             visible: info !== null && root.scCueCountdown
                             spacing: 4
                             Rectangle { width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: parent.info ? parent.info.color : "transparent" }
-                            Text { width: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(scCueCountText2.implicitWidth) - 12)); anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(scCueCountText2.implicitWidth) >= 28; text: parent.info ? parent.info.label : "" }
+                            Text { width: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(scCueCountText2.implicitWidth) - 12)); anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(scCueCountText2.implicitWidth) >= 24; text: parent.info ? parent.info.label : "" }
                             Text { id: scCueCountText2; anchors.verticalCenter: parent.verticalCenter; font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
                         }
                     }
@@ -4464,9 +4468,11 @@ SHADOW_LAYER = r"""
                         speedState: scHeader.pitchVal
                         speedRange: scHeader.rangeStr
                         speedRangeTextFont: scHeader.perfSplitMain ? Style.fontTitle : Style.fontH1
+                        speedRangeTextWidth: 0
                         speedRangeTextColor: scHeader.perfSplitMain ? Style.font02Color : Style.font01Color
                         speedRangeTextHorizontalAlignment: Text.AlignLeft
                         speedStateTextFont: scHeader.perfSplitMain ? Style.fontTitle : Style.fontH1
+                        speedStateTextWidth: 0
                         speedStateTextColor: Style.font02Color
                         speedStateTextHorizontalAlignment: Text.AlignRight
                         textLayoutAlignment: Qt.AlignCenter
@@ -4613,7 +4619,7 @@ def shadow_targets(qrc: Path):
 
 def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False, lead_sep: bool = True, fill_width: bool = False) -> str:
     """Bound the countdown after LEAD; only its cue name may elide."""
-    sizing = ("    Layout.fillWidth: true\n    Layout.minimumWidth: 56\n    Layout.preferredWidth: 112"
+    sizing = ("    Layout.fillWidth: true\n    Layout.minimumWidth: 50\n    Layout.preferredWidth: 112"
               if fill_width else
               "    Layout.minimumWidth: 112\n    Layout.preferredWidth: 112\n    Layout.maximumWidth: 112")
     q = f"""Item {{
@@ -4633,7 +4639,7 @@ def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False
         spacing: 4
 {'        Rectangle { width: 1; height: 18; anchors.verticalCenter: parent.verticalCenter; color: Style.surface03Color }' if lead_sep else ''}
         Rectangle {{ width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: cueCap.info ? cueCap.info.color : "transparent" }}
-        Text {{ width: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(cueCountText.implicitWidth) - 12)); anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(cueCountText.implicitWidth) >= 28; text: cueCap.info ? cueCap.info.label : "" }}
+        Text {{ width: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(cueCountText.implicitWidth) - 12)); anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(cueCountText.implicitWidth) >= 24; text: cueCap.info ? cueCap.info.label : "" }}
         Text {{ id: cueCountText; anchors.verticalCenter: parent.verticalCenter; font: Style.fontH3; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
     }}
 }}
@@ -5569,15 +5575,15 @@ def edits(dev: bool):
                       ("        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n" if control == "beatJump" else ""))
             scaled[performance].append((anchor + "        spacing: 6\n", anchor + "        spacing: 4\n"))
         # Size the right speed group (▲▼, range, pitch %) from the displayed text's
-        # implicitWidth, keep the sync slot at a constant width (135 px in 4-deck
-        # grouped), and let the Cue capsule take the remaining flexible width in
-        # 4-deck grouped while keeping a bounded width in 2-deck Main / SplitMain / SplitMini.
+        # implicitWidth (while preserving stock minimum widths for unpatched views),
+        # keep the sync slot at a constant width (135 px in 4-deck grouped), and let
+        # the Cue capsule take the remaining flexible width in 4-deck grouped while
+        # keeping a bounded width in 2-deck Main / SplitMain / SplitMini.
         scaled[bj + "Deck/DeckItem/SpeedInfo.qml"] = [
-            ("    columnSpacing: 16\n", "    columnSpacing: 4\n"),
             ("        Layout.minimumWidth: speedRangeTextWidth\n",
-             "        Layout.minimumWidth: Math.ceil(implicitWidth)\n        Layout.maximumWidth: Math.ceil(implicitWidth)\n"),
+             "        Layout.minimumWidth: Math.max(speedRangeTextWidth, Math.ceil(implicitWidth))\n        Layout.maximumWidth: Math.max(speedRangeTextWidth, Math.ceil(implicitWidth))\n"),
             ("        Layout.minimumWidth: speedStateTextWidth\n        Layout.maximumWidth: speedStateTextWidth\n",
-             "        Layout.minimumWidth: Math.ceil(implicitWidth)\n        Layout.maximumWidth: Math.ceil(implicitWidth)\n"),
+             "        Layout.minimumWidth: Math.max(speedStateTextWidth, Math.ceil(implicitWidth))\n        Layout.maximumWidth: Math.max(speedStateTextWidth, Math.ceil(implicitWidth))\n"),
         ]
         scaled[performance] += [
             ("        Layout.fillWidth: true\n        Layout.preferredHeight: 24\n        Layout.maximumWidth: 200\n        Layout.leftMargin: 24\n        Layout.rightMargin: 24\n",
@@ -5587,11 +5593,11 @@ def edits(dev: bool):
             ("                target: softTakeoverIndicators\n                Layout.rightMargin: 32\n",
              "                target: softTakeoverIndicators\n                Layout.rightMargin: 8\n"),
             ("        speedRangeTextFont: Style.fontH1\n        speedRangeTextWidth: 80\n        speedRangeTextHorizontalAlignment: Text.AlignHCenter\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextWidth: 80\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 0\n",
-             "        speedRangeTextFont: Style.fontH1\n        speedRangeTextHorizontalAlignment: Text.AlignLeft\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 4\n"),
+             "        speedRangeTextFont: Style.fontH1\n        speedRangeTextWidth: 0\n        speedRangeTextHorizontalAlignment: Text.AlignLeft\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextWidth: 0\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 4\n"),
             ("                speedRangeTextFont: Style.fontTitle\n                speedRangeTextWidth: 144\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                speedStateTextWidth: 144\n",
-             "                speedRangeTextFont: Style.fontTitle\n                speedRangeTextHorizontalAlignment: Text.AlignLeft\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                columnSpacing: 12\n"),
+             "                speedRangeTextFont: Style.fontTitle\n                speedRangeTextWidth: 0\n                speedRangeTextHorizontalAlignment: Text.AlignLeft\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                speedStateTextWidth: 0\n                columnSpacing: 12\n"),
         ]
-        for control, width in (("autoLoop", 42), ("beatJump", 54)):
+        for control, width in (("autoLoop", 52), ("beatJump", 64)):
             scaled[performance] += [
                 (f"                target: {control}\n                Layout.preferredWidth: 88\n                iconWidth: 20\n                iconHeight: 12\n                textFont: Style.fontH1\n",
                  f"                target: {control}\n                Layout.preferredWidth: {width}\n                iconWidth: 16\n                iconHeight: 10\n                textFont: Style.fontH3\n"),
@@ -5602,12 +5608,12 @@ def edits(dev: bool):
         scaled[mini] += [
             ("                SoftTakeoverIndicators {\n", cue_capsule("                ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False, fill_width=True) + "\n                SoftTakeoverIndicators {\n                    flow: Flow.LeftToRight\n                    spacing: -4\n"),
             ("                spacing: 16\n                visible: deckTrackDataContent.songLoaded\n", "                spacing: 4\n                visible: deckTrackDataContent.songLoaded\n"),
-            ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n", "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 42\n"),
-            ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n", "                    textFont: Style.fontH3\n                    Layout.preferredWidth: 54\n"),
+            ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n", "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 52\n"),
+            ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n", "                    textFont: Style.fontH3\n                    Layout.preferredWidth: 64\n"),
             ("                    Layout.preferredHeight: 24\n                    Layout.fillWidth: true\n                    Layout.maximumWidth: 200\n",
              "                    Layout.preferredHeight: 24\n                    Layout.fillWidth: false\n                    Layout.minimumWidth: 135\n                    Layout.preferredWidth: 135\n                    Layout.maximumWidth: 135\n"),
             ("                    speedRangeTextFont: Style.fontH1\n                    speedStateTextFont: Style.fontH1\n                    speedRangeTextHorizontalAlignment: Text.AlignRight\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    flat: true\n",
-             "                    speedRangeTextFont: Style.fontH1\n                    speedRangeTextHorizontalAlignment: Text.AlignLeft\n                    speedStateTextFont: Style.fontH1\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    columnSpacing: 4\n                    flat: true\n"),
+             "                    speedRangeTextFont: Style.fontH1\n                    speedRangeTextWidth: 0\n                    speedRangeTextHorizontalAlignment: Text.AlignLeft\n                    speedStateTextFont: Style.fontH1\n                    speedStateTextWidth: 0\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    columnSpacing: 4\n                    flat: true\n"),
         ]
         # Use control-specific beginnings to keep all anchors unique.
         scaled[mini] += [
@@ -5617,7 +5623,7 @@ def edits(dev: bool):
              "                    deckIndex: deckTrackDataContent.deckView.deckData.deckIndex\n                    spacing: 4\n                    iconWidth: 16\n                    iconHeight: 10\n"),
         ]
         split_controls = """        AutoLoop {
-            Layout.preferredWidth: 42
+            Layout.preferredWidth: 52
             Layout.rightMargin: 4
             deckIndex: deckTrackDataContent.deckIndex
             view: deckTrackDataContent.deckView.autoLoopView
@@ -5627,7 +5633,7 @@ def edits(dev: bool):
             textFont: Style.fontH3
         }
         BeatJump {
-            Layout.preferredWidth: 54
+            Layout.preferredWidth: 64
             view: deckTrackDataContent.deckView.beatJumpView
             deckIndex: deckTrackDataContent.deckIndex
             spacing: 4
@@ -5641,7 +5647,9 @@ def edits(dev: bool):
             Layout.leftMargin: 4
             speedState: deckTrackDataContent.deckData.speedState
             speedRange: deckTrackDataContent.deckData.speedRange
+            speedRangeTextWidth: 0
             speedRangeTextHorizontalAlignment: Text.AlignLeft
+            speedStateTextWidth: 0
             speedStateTextHorizontalAlignment: Text.AlignRight
             columnSpacing: 4
             flat: true
@@ -5655,7 +5663,7 @@ def edits(dev: bool):
         ]
         for item, text_id in (("AutoLoop", "autoLoopText"), ("BeatJump", "beatJumpText")):
             scaled.setdefault(bj + "Deck/DeckItem/" + item + ".qml", []).append((
-                f"        id: {text_id}\n", f"        id: {text_id}\n        fontSizeMode: Text.HorizontalFit\n        minimumPixelSize: 14\n" +
+                f"        id: {text_id}\n", f"        id: {text_id}\n        Layout.fillWidth: true\n        Layout.minimumWidth: 0\n        fontSizeMode: Text.HorizontalFit\n        minimumPixelSize: 14\n" +
                 ("        rightPadding: 14\n" if item == "BeatJump" else "")))
         # The shadow header feeds the stock formatter its own tempo; stock users keep stock defaults.
         scaled[ROOT + "Items/Bpm.qml"] = [
