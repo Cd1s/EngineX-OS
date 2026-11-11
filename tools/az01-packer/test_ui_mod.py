@@ -66,17 +66,13 @@ class UiModSourceTest(unittest.TestCase):
             self.assertNotIn("onScDriveCountChanged", qml)
         self.assertIn("readonly property bool scAutoAnalyzeAvailable: false", bp.SERVICES_MAIN)
 
-    def test_auto_analyze_preserves_preference_and_labels_unavailability(self):
+    def test_auto_analyze_preserves_preference_and_removes_dead_row(self):
         self.assertIn("property bool scAutoAnalyze: false", bp.SERVICES_MAIN)
         self.assertIn("scAutoAnalyze = !!v.autoAnalyze", bp.SERVICES_MAIN)
-        self.assertIn('values: ["Off", "On"]', bp.LIBRARY_ENTRIES)
-        self.assertIn('currentValue: values[root.scAutoAnalyze ? 1 : 0]', bp.LIBRARY_ENTRIES)
-        self.assertIn('root.scCall("autoAnalyze=" + index)', bp.LIBRARY_ENTRIES)
-        label = "Auto-Analyze Drives (Unavailable)"
-        self.assertIn('text: "' + label + '"', bp.LIBRARY_ENTRIES)
-        translations = bp.load_dict()[label]
-        self.assertIn("暂不可用", translations["zh-Hans"])
-        self.assertIn("暫不可用", translations["zh-Hant"])
+        self.assertNotIn("Auto-Analyze", bp.LIBRARY_ENTRIES)
+        self.assertNotIn("scAutoAnalyze", bp.LIBRARY_ENTRIES)
+        self.assertNotIn("autoAnalyze=", bp.LIBRARY_ENTRIES)
+        self.assertNotIn("Auto-Analyze Drives (Unavailable)", bp.load_dict())
 
     def test_auto_analyze_gate_requires_fail_closed_capability(self):
         probe = (BUILD_PACKS.parent.parent / "az01-packer/gate-ui-probe.qml").read_text()
@@ -201,7 +197,12 @@ class UiModSourceTest(unittest.TestCase):
     def test_auto_loop_knob_and_link(self):
         self.assertIn("interval: 10000; running: true", SRC)
         self.assertIn("module.loopInactiveShiftTurnAction === Action.BeatJump || ", SRC)
-        self.assertIn("LinkBeatJumpLoopSize", bp.SERVICES_MAIN)
+        self.assertNotIn("LinkBeatJumpLoopSize", bp.SERVICES_MAIN)
+        self.assertNotIn("/Client/Preferences/Profile/Application/LinkBeatJumpLoopSize", SRC)
+        self.assertIn(
+            'prefs + "Entries/LinkBeatJumpLoopSize.qml": [("active: Config.audio.deck.beatJump.canLinkToAutoLoop", "active: true")]',
+            SRC,
+        )
 
     def test_jog_light_removed_and_view_deduped(self):
         self.assertNotIn("scJog", SRC)
@@ -340,6 +341,11 @@ assert.strictEqual(vfx.enabled, false);
                 tfe_txt = tfe.read_text()
                 self.assertIn("active: Config.audio.fx.hasTransitionFx && !Config.device.hasHardwareFaderFxButtons && view", tfe_txt)
                 self.assertNotIn("active: false", tfe_txt)
+                lbj = (dev_out / "en/Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/LinkBeatJumpLoopSize.qml")
+                self.assertTrue(lbj.exists())
+                lbj_txt = lbj.read_text()
+                self.assertIn("active: true", lbj_txt)
+                self.assertNotIn("canLinkToAutoLoop", lbj_txt)
                 self.assertIn("WaveformStyle {}", (qrc / "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/DisplayTabContent.qml").read_text())
 
                 rel_out = Path(tmp) / "rel"

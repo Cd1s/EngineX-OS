@@ -207,6 +207,31 @@ func TestAutoAnalyzeTogglePersists(t *testing.T) {
 	}
 }
 
+func TestAutoAnalyzeRowRemovedFromWebConsoleAndStoredValueRetained(t *testing.T) {
+	hb, err := assets.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexHTML := string(hb)
+	if strings.Contains(indexHTML, "autoAnalyze") || strings.Contains(indexHTML, "tAnalyze") || strings.Contains(indexHTML, "sAnalyze") {
+		t.Fatal("dead autoAnalyze row must not appear in the web console")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("lang=en\nauto_analyze=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ui := New(Config{AccessToken: "c", UIDir: dir, StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+	if code, v := uiPost(t, srv.URL, "masterLimiter=1"); code != 200 || !v.MasterLimiter || !v.AutoAnalyze {
+		t.Fatalf("%d %+v", code, v)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil || !strings.Contains(string(b), "\nauto_analyze=1\n") {
+		t.Fatalf("stored auto_analyze value was not retained: %q (%v)", b, err)
+	}
+}
+
 // #58: the limiter toggle defaults off, persists as the key engine_ui_hook.c
 // polls, and only takes 0 or 1.
 func TestMasterLimiterToggle(t *testing.T) {

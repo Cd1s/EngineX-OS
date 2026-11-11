@@ -1007,7 +1007,29 @@ static void test_patch_files(const char *filename) {
         assert(edit_state((uintptr_t)image, e) == 0);
     }
     if (!strcmp(build->name, "5.0.4")) assert(build->edit_count == 16);
-    if (!strcmp(build->name, "5.3.0")) assert(build->edit_count == 20);
+    if (!strcmp(build->name, "5.3.0")) {
+        assert(build->edit_count == 21);
+        // #49: consoles (isConsole +0x23a != 0) skip 0x193f6cc; players have
+        // isConsole == 0, and when four_deck_waveform=1 clears isPlayer (+0x239),
+        // 0x193f6d8 must still branch unconditionally to Layer A / Layer B (0x193fc18).
+        uint32_t is_console_load, console_beq, is_player_load;
+        memcpy(&is_console_load, image + 0x193f500, 4);
+        memcpy(&console_beq, image + 0x193f534, 4);
+        memcpy(&is_player_load, image + 0x193f6cc, 4);
+        assert(is_console_load == 0xe5d0323a && console_beq == 0x0a000064 && is_player_load == 0xe5d03239);
+        int sampler_patched = 0;
+        for (size_t i = 0; i < build->edit_count; i++) {
+            const struct engine_edit *e = &build->edits[i];
+            if (e->offset == 0x193f6d8u) {
+                uint32_t branch;
+                assert(e->size == 4 && e->group == EDIT_ONE);
+                memcpy(&branch, e->replacement, 4);
+                assert(branch == 0xea00014e); // unconditional b 0x193fc18
+                sampler_patched = 1;
+            }
+        }
+        assert(sampler_patched);
+    }
     if (!strcmp(build->name, "5.3.0-sclive4")) assert(build->edit_count == 23);
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         size_t bytes;
