@@ -851,3 +851,105 @@ func TestBuildTagStatusAndReleaseSuppression(t *testing.T) {
 		t.Fatalf("release build must suppress buildTag, got %q", v.BuildTag)
 	}
 }
+
+func TestUISettingsFxTimeMode(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+
+	// 1. Verify defaults
+	if code, v := uiPost(t, srv.URL, ""); code != 200 || v.FxTimeMode != "beats" || v.FxTimeMs != 500 {
+		t.Fatalf("unexpected defaults: code=%d %+v", code, v)
+	}
+
+	// 2. Update to valid non-defaults
+	if code, v := uiPost(t, srv.URL, "fxTimeMode=ms&fxTimeMs=250"); code != 200 || v.FxTimeMode != "ms" || v.FxTimeMs != 250 {
+		t.Fatalf("update failed: code=%d %+v", code, v)
+	}
+
+	// Verify persistence in settings.conf
+	confBytes, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := splitLines(confBytes)
+	for _, expected := range []string{"fx_time_mode=ms", "fx_time_ms=250"} {
+		if !slices.Contains(lines, expected) {
+			t.Errorf("settings.conf missing %q in:\n%s", expected, string(confBytes))
+		}
+	}
+
+	// 3. Reload in new server instance
+	srv2 := httptest.NewServer(New(cfg, nil))
+	defer srv2.Close()
+	if code, v := uiPost(t, srv2.URL, ""); code != 200 || v.FxTimeMode != "ms" || v.FxTimeMs != 250 {
+		t.Fatalf("reloaded settings mismatch: code=%d %+v", code, v)
+	}
+
+	// 4. Test boundary values and rejections
+	badQueries := []string{
+		"fxTimeMode=invalid",
+		"fxTimeMode=seconds",
+		"fxTimeMs=0",
+		"fxTimeMs=-1",
+		"fxTimeMs=4001",
+		"fxTimeMs=99999",
+		"fxTimeMs=notanumber",
+	}
+	for _, bad := range badQueries {
+		if code, _ := uiPost(t, srv.URL, bad); code != 400 {
+			t.Errorf("expected 400 for %s, got %d", bad, code)
+		}
+	}
+
+	// 5. Test valid boundary limits 10 and 4000
+	if code, v := uiPost(t, srv.URL, "fxTimeMs=10"); code != 200 || v.FxTimeMs != 10 {
+		t.Errorf("expected 200 for fxTimeMs=10, got %d %+v", code, v)
+	}
+	if code, v := uiPost(t, srv.URL, "fxTimeMs=4000"); code != 200 || v.FxTimeMs != 4000 {
+		t.Errorf("expected 200 for fxTimeMs=4000, got %d %+v", code, v)
+	}
+
+	// 6. Reset back to defaults and verify omissions in settings.conf
+	if code, v := uiPost(t, srv.URL, "fxTimeMode=beats&fxTimeMs=500"); code != 200 || v.FxTimeMode != "beats" || v.FxTimeMs != 500 {
+		t.Fatalf("reset failed: code=%d %+v", code, v)
+	}
+	confBytes, _ = os.ReadFile(filepath.Join(dir, "settings.conf"))
+	lines = splitLines(confBytes)
+	for _, unexpected := range []string{"fx_time_mode=ms", "fx_time_ms="} {
+		for _, line := range lines {
+			if strings.HasPrefix(line, unexpected) {
+				t.Errorf("settings.conf should not contain default %q, but has %q", unexpected, line)
+			}
+		}
+	}
+}
+
+func TestUISettingsFxTimeFileReplacement(t *testing.T) {
+	dir := t.TempDir()
+	s := New(Config{UIDir: dir, StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	for _, tc := range []struct {
+		text, mode string
+		ms         int
+	}{
+		{"fx_time_mode=ms\nfx_time_ms=4000\n", "ms", 4000},
+		{"", "beats", 500},
+		{"fx_time_mode=msjunk\nfx_time_ms=125ms\n", "beats", 500},
+		{"fx_time_mode=ms\nfx_time_ms=4294967295\n", "ms", 4000},
+		{"fx_time_ms=0\n", "beats", 10},
+		{"fx_time_mode=ms\nfx_time_ms=125\nfx_time_mode=msjunk\nfx_time_ms=125ms\n", "beats", 500},
+		{"fx_time_mode=ms\nfx_time_ms=4294967296\n", "ms", 500},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte(tc.text), 0600); err != nil {
+			t.Fatal(err)
+		}
+		s.uiMu.Lock()
+		v := s.loadUI()
+		s.uiMu.Unlock()
+		if v.FxTimeMode != tc.mode || v.FxTimeMs != tc.ms {
+			t.Fatalf("%q: got %s/%d", tc.text, v.FxTimeMode, v.FxTimeMs)
+		}
+	}
+}

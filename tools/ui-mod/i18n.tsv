@@ -406,3 +406,8 @@ Jump −	跳拍 −	跳拍 −
 Jump +	跳拍 +	跳拍 +
 Sweep FX	滤波效果	濾波效果
 Resonance	谐振	諧振
+PX Delay Time Mode	PX 延时时间模式	PX 延遲時間模式
+PX Delay Time (ms)	PX 延时时间（ms）	PX 延遲時間（ms）
+Default (Off)	默认（关闭）	預設（關閉）
+Milliseconds (ms)	毫秒（ms）	毫秒（ms）
+Time (ms)	时间（ms）	時間（ms）

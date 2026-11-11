@@ -120,6 +120,17 @@ static double render_px_rate(unsigned index) {
     fx_selector_supported = 0;
     return energy;
 }
+static void test_px_ms_render(void) {
+    pfx_time_ms = 10;
+    double a = render_px_rate(1), b = render_px_rate(9);
+    pfx_time_ms = 4000;
+    double longer = render_px_rate(1), again = render_px_rate(9);
+    printf("ms energies %.17g %.17g %.17g %.17g\n", a, b, longer, again);
+    fflush(stdout);
+    assert(a == b && longer == again && a != longer);
+    pfx_time_ms = 0;
+    puts("test_px_ms_render PASS (fixed ms independent of native Rate; 10/4000 ms)");
+}
 static void test_px_rate_render(void) {
     /* Fresh state and identical Parameter/input: a warmed delay must not make
      * an ignored Rate event appear to modulate the production process hook. */
@@ -234,6 +245,7 @@ int main(void) {
     test_px_off_on_reset();
     test_px_rate_events();
     test_px_rate_render();
+    test_px_ms_render();
     test_px_master_bypass();
     puts("test_flanger_scope PASS; test_px_null_owner PASS");
     return 0;

@@ -11,6 +11,30 @@ from pathlib import Path
 
 FX_CONTROLLER = r'''
     property var scFxControllers: []
+    function scFxMsController(parameter) {
+        if (scFxTimeMode !== "ms" || !parameter) return null
+        for (let i = 0; i < scFxControllers.length; ++i) {
+            const c = scFxControllers[i]
+            if (!c || !c.djFxView || c.scFxBusy) continue
+            const mode = c.scFxSelected - c.scFxStock.length + 1
+            if ((mode === 1 || mode === 2 || mode === 4) && c.djFxView.variantParameters[0] === parameter) return c
+        }
+        return null
+    }
+    function scFxMsStep(parameter, delta) {
+        if (!scFxMsController(parameter)) return false
+        const ms = Math.max(10, Math.min(4000, scFxTimeMs + delta * 10))
+        scCall("fxTimeMs=" + ms)
+        return true
+    }
+    function scFxMsKnob(parameter) {
+        if (!scFxMsController(parameter)) return
+        // The verified native Rate dispatcher has exactly eleven positions.
+        const rates = [1/16, 1/8, 1/4, 1/2, 3/4, 1, 2, 4, 8, 16, 32]
+        const milliseconds = [10, 18, 33, 60, 110, 200, 364, 663, 1207, 2197, 4000]
+        const index = rates.indexOf(parameter.value)
+        if (index >= 0) scCall("fxTimeMs=" + milliseconds[index])
+    }
     Repeater {
         model: root.scFxSelectorAvailable ? 6 : 0
         delegate: Item {
@@ -48,6 +72,11 @@ FX_CONTROLLER = r'''
     readonly property bool scFxEnabled: !!root.scFxSelectorAvailable && scFxStock.indexOf("Flanger") >= 0
     readonly property var scFxNames: scFxEnabled ? scFxStock.concat([
         "Spiral (PX)", "Pitch Echo (PX)", "Slip Roll (PX)", "Dub Echo (PX)", "Space (PX)"]) : scFxStock
+    readonly property var scFxTimeParameter: djFxView && djFxView.variantParameters.length ? djFxView.variantParameters[0] : null
+    Connections {
+        target: scCtrl.scFxTimeParameter
+        function onValueChanged() { root.scFxMsKnob(scCtrl.scFxTimeParameter) }
+    }
     property int scFxIndex: -1
     property int scFxSelected: -1
     property int scFxRequest: 0
@@ -1940,6 +1969,8 @@ SERVICES_MAIN = """
 	property bool scBeatJumpPads: false
 	property bool scMixstreamSweepOpen: false
 	property string scPioneerFx: "off"
+	property string scFxTimeMode: "beats"
+	property int scFxTimeMs: 500
 	property bool scFxSelectorAvailable: false
 	property bool scFxMasterBypassed: false
 	// Offers this model's release image to EngineX's online updater.
@@ -2384,6 +2415,8 @@ SERVICES_MAIN = """
 			else if (v.stems_eq_mode !== undefined) scStemsEqMode = v.stems_eq_mode === "1" || v.stems_eq_mode === 1 || v.stems_eq_mode === true
 			if (v.beatJumpPads !== undefined) scBeatJumpPads = !!v.beatJumpPads
 			else if (v.beat_jump_pads !== undefined) scBeatJumpPads = v.beat_jump_pads === "1" || v.beat_jump_pads === 1 || v.beat_jump_pads === true
+			scFxMsApply(v.fxTimeMode !== undefined ? v.fxTimeMode : v.fx_time_mode,
+			            v.fxTimeMs !== undefined ? v.fxTimeMs : v.fx_time_ms)
 			if (v.pioneerFx !== undefined) scPioneerFx = v.pioneerFx || "off"
 			else if (v.pioneer_fx !== undefined) scPioneerFx = v.pioneer_fx || "off"
 		}
@@ -2413,10 +2446,21 @@ SERVICES_MAIN = """
 		for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
 		return true
 	}
+	function scFxMsApply(mode, value) {
+		scFxTimeMode = mode === "ms" ? "ms" : "beats"
+		scFxTimeMs = scFxMsInteger(value)
+	}
+	function scFxMsInteger(value) {
+		const text = String(value)
+		if (!/^[0-9]+$/.test(text) || text.length > 10) return 500
+		const n = Number(text)
+		return n <= 4294967295 ? Math.max(10, Math.min(4000, n)) : 500
+	}
 	function scParseSettingsConf(text) {
+		let fxMode = "beats", fxMs = 500
 		scCueCountdown = true // default on: only an explicit cue_countdown=0 turns it off
 		scTracklistWaveform = true
-		for (const line of (text || "").split("\n")) {
+		for (const line of (text || "").split("\\n")) {
 			const eq = line.indexOf("=")
 			if (eq < 0) continue
 			const key = line.slice(0, eq).trim()
@@ -2430,8 +2474,11 @@ SERVICES_MAIN = """
 			else if (key === "ui_scale") root.scUIScale = parseInt(val) || 100
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
+			else if (key === "fx_time_mode") fxMode = val === "ms" ? "ms" : "beats"
+			else if (key === "fx_time_ms") fxMs = scFxMsInteger(val)
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
 		}
+		scFxMsApply(fxMode, fxMs)
 	}
 	function scSyncBroadcastMeta() {
 		if (!scBroadcastOn) return
@@ -3028,6 +3075,20 @@ PLAYBACK_ENTRIES = """
 			values: ["Off", "Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"]
 			currentValue: values[Math.max(0, ids.indexOf(root.scPioneerFx))]
 			onSelected: function(index) { root.scCall("pioneerFx=" + ids[index]) }
+		},
+		EntryBase.ListEntry {
+			text: "PX Delay Time Mode"
+			values: ["Default (Off)", "Milliseconds (ms)"]
+			currentValue: values[root.scFxTimeMode === "ms" ? 1 : 0]
+			onSelected: function(index) { root.scCall("fxTimeMode=" + (index === 1 ? "ms" : "beats")) }
+		},
+		EntryBase.ListEntry {
+			text: "PX Delay Time (ms)"
+			visible: root.scFxTimeMode === "ms"
+			readonly property var times: [10, 18, 33, 60, 110, 200, 364, 500, 663, 1207, 2197, 4000]
+			values: times.map(n => String(n))
+			currentValue: String(root.scFxTimeMs)
+			onSelected: function(index) { root.scCall("fxTimeMs=" + times[index]) }
 		},
 """
 
@@ -5878,6 +5939,18 @@ def edits(dev: bool):
         assert not isinstance(out.get(rel), str), rel  # a whole-file replacement already owns it
         out.setdefault(rel, []).extend(fixes)
     if v53():
+        out.setdefault(ROOT + "Views/MainView/Fx/DJFxSpinner.qml", []).extend([
+            ('                objectName: "DJFx_Beats_Decrease_Button"', '                objectName: "DJFx_Beats_Decrease_Button"\n                text: spinner.scMsActive ? "−" : ""'),
+            ('                objectName: "DJFx_Beats_Increase_Button"', '                objectName: "DJFx_Beats_Increase_Button"\n                text: spinner.scMsActive ? "+" : ""'),
+            ('                    source: Qt.resolvedUrl("img/minus.png")', '                    source: spinner.scMsActive ? "" : Qt.resolvedUrl("img/minus.png")'),
+            ('                    source: Qt.resolvedUrl("img/plus.png")', '                    source: spinner.scMsActive ? "" : Qt.resolvedUrl("img/plus.png")'),
+            ('    property bool isTouchable: parameter && parameter.isTouchable', '    property bool isTouchable: scMsActive || (parameter && parameter.isTouchable)'),
+            ('            LabelWithLED {\n                id: header\n                parameter: spinner.parameter', '            LabelWithLED {\n                id: header\n                parameter: spinner.parameter\n                text: spinner.scMsActive ? "Time (ms)" : (parameter ? parameter.label : "")'),
+            ('    property bool active: false', '    readonly property bool scMsActive: typeof root !== "undefined" && root.scFxMsController && !!root.scFxMsController(parameter)\n    property bool active: false'),
+            ('                text: parameter ? parameter.valueText : ""', '                text: spinner.scMsActive ? (root.scFxTimeMs + " ms") : (parameter ? parameter.valueText : "")'),
+            ('                onClicked: parameter.decValue()', '                onClicked: { if (!spinner.scMsActive || !root.scFxMsStep(parameter, -1)) parameter.decValue() }'),
+            ('                onClicked: parameter.incValue()', '                onClicked: { if (!spinner.scMsActive || !root.scFxMsStep(parameter, 1)) parameter.incValue() }'),
+        ])
         out[ROOT + "Views/MainView/Fx/DJFx.qml"] = [
             ("import Planck 1.0", "import Planck 1.0\nimport Common"),
             ("    property string indicator\n", "    property string indicator\n" + FX_SELECTOR),

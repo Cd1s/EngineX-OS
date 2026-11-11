@@ -35,6 +35,7 @@
 #include "master_limiter.h"
 #include "echo_out.h"
 #include "pioneer_master.h"
+#include "pioneer_ms.h"
 #if !defined(__aarch64__)
 #include "pioneer_fx.h"
 #include "fx_selector.h"
@@ -142,6 +143,8 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 // off the audio thread; the limiter itself runs in hook_master_output.
 static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
+static unsigned pfx_time_ms;          // #162: zero OFF, otherwise 10..4000
+static struct sc_pfx_ms master_ms[4];
 static int pioneer_fx_mode;           // #88 Pioneer FX emulations
 
 // Pad LED Brightness: Engine sends every controller LED through snd_seq_event_output_direct
@@ -333,17 +336,23 @@ static void *lim_poll(void *arg) {
     (void)arg;
     for (;;) {
         fx_selector_poll();
-        static struct timespec last_mtim;
-        static off_t last_size = -1;
+        static struct stat previous;
+        static int had_settings;
         struct stat st;
-        // Re-parse only when settings.conf changed; 80 ms poll makes brightness taps instant.
-        if (stat(UI_ROOT "/settings.conf", &st) == 0 && last_size == st.st_size &&
-            last_mtim.tv_sec == st.st_mtim.tv_sec && last_mtim.tv_nsec == st.st_mtim.tv_nsec) {
+        int have_settings = stat(UI_ROOT "/settings.conf", &st) == 0;
+        // Preserve the 80 ms control poll; replacements count even with preserved mtime.
+        if (have_settings && had_settings && previous.st_dev == st.st_dev &&
+            previous.st_ino == st.st_ino && previous.st_size == st.st_size &&
+            previous.st_mtim.tv_sec == st.st_mtim.tv_sec && previous.st_mtim.tv_nsec == st.st_mtim.tv_nsec &&
+            previous.st_ctim.tv_sec == st.st_ctim.tv_sec && previous.st_ctim.tv_nsec == st.st_ctim.tv_nsec) {
             usleep(80000);
             continue;
         }
-        if (stat(UI_ROOT "/settings.conf", &st) == 0) { last_size = st.st_size; last_mtim = st.st_mtim; }
+        had_settings = have_settings;
+        if (have_settings) previous = st;
         int on = 0, gain = 0, echo = 0, pioneer_fx = 0, led = 100;
+        struct sc_ms_config timing = {500, 0};
+        for (unsigned pair = 0; pair < 4; ++pair) sc_ms_prepare(&master_ms[pair]);
         FILE *f = fopen(UI_ROOT "/settings.conf", "r");
         if (f) {
             char line[64];
@@ -355,6 +364,7 @@ static void *lim_poll(void *arg) {
                     int n = atoi(line + 15);
                     if (n >= 10 && n <= 100) led = n;
                 }
+                else if (!strncmp(line, "fx_time_", 8)) sc_ms_setting(&timing, line);
                 else if (!strncmp(line, "pioneer_fx=", 11)) {
                     char val[64];
                     size_t len = strcspn(line + 11, "\r\n");
@@ -370,6 +380,7 @@ static void *lim_poll(void *arg) {
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
         __atomic_store_n(&echo_enabled, echo, __ATOMIC_RELAXED);
         __atomic_store_n(&pioneer_fx_mode, pioneer_fx, __ATOMIC_RELAXED);
+        __atomic_store_n(&pfx_time_ms, timing.enabled ? timing.ms : 0, __ATOMIC_RELEASE);
         if (led != __atomic_load_n(&led_pct, __ATOMIC_RELAXED)) led_replay(led);
         usleep(80000);
     }
@@ -790,6 +801,8 @@ static void hook_flanger(void *self, float *const *input, float *const *output, 
                 float mix = sc_pfx_float(__atomic_load_n(&r->mix, __ATOMIC_ACQUIRE));
                 float param = sc_pfx_float(__atomic_load_n(&r->parameter, __ATOMIC_ACQUIRE));
                 float time = sc_pfx_float(__atomic_load_n(&r->time, __ATOMIC_ACQUIRE));
+                unsigned ms = __atomic_load_n(&pfx_time_ms, __ATOMIC_ACQUIRE);
+                if (ms || r->dsp.time_ms) r->dsp.time_ms = ms;
                 (void)sc_pfx_process(&r->dsp, input[0], input[1], frames, (int)mode, time, param, mix);
                 sc_pfx_leave(r);
                 /* No READY bank after rapid resets: reset Wet is zero. The
@@ -857,7 +870,20 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
         for (int ch = 0; ch < out_channels && ch / 2 < MASTER_PFX_PAIRS; ch += 2) {
             if (out[ch]) {
                 float *r = ch + 1 < out_channels ? out[ch + 1] : NULL;
-                sc_master_pioneer_fx_planar(&master_pfx[ch / 2], out[ch], r, (unsigned)frames, pfx);
+                unsigned ms = __atomic_load_n(&pfx_time_ms, __ATOMIC_ACQUIRE);
+                struct sc_pfx_ms *timing = &master_ms[ch / 2];
+                if ((ms && sc_ms_effect(pfx)) || (__atomic_load_n(&timing->ready, __ATOMIC_ACQUIRE) == 2 && timing->blend > 0.0f)) {
+                    for (int i = 0; i < frames; ++i) {
+                        float dl = out[ch][i], dr = r ? r[i] : 0.0f;
+                        float right = dr;
+                        sc_master_pioneer_fx_planar(&master_pfx[ch / 2], &out[ch][i], r ? &r[i] : NULL, 1, pfx);
+                        if (r) right = r[i];
+                        sc_ms_mix(timing, dl, dr, &out[ch][i], &right, pfx, ms, 0.5f, 1);
+                        if (r) r[i] = right;
+                    }
+                } else {
+                    sc_master_pioneer_fx_planar(&master_pfx[ch / 2], out[ch], r, (unsigned)frames, pfx);
+                }
             }
         }
     }
