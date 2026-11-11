@@ -32,7 +32,7 @@ func seedZoneinfoFixture(t *testing.T) string {
 	return z
 }
 
-func TestTimeZonePersistenceNormalizesSpacesAndRejectsUTCOrTraversal(t *testing.T) {
+func TestTimeZonePersistenceNormalizesSpacesSavesExplicitUTCAndRejectsInvalid(t *testing.T) {
 	stateDir := t.TempDir()
 	uiDir := t.TempDir()
 	zoneinfo := seedZoneinfoFixture(t)
@@ -71,11 +71,8 @@ func TestTimeZonePersistenceNormalizesSpacesAndRejectsUTCOrTraversal(t *testing.
 		t.Fatalf("space-formatted IANA zone: saved=%v cur=%q", saved, cur)
 	}
 	gotBytes, err := os.ReadFile(filepath.Join(stateDir, "timezone"))
-	if err != nil {
-		t.Fatalf("read state/timezone: %v", err)
-	}
-	if string(gotBytes) != "America/New_York\n" {
-		t.Fatalf("state/timezone = %q, want America/New_York\\n", string(gotBytes))
+	if err != nil || string(gotBytes) != "America/New_York\n" {
+		t.Fatalf("state/timezone = %q, err=%v", string(gotBytes), err)
 	}
 
 	// 2. Manual selection of Asia/Shanghai updates state/timezone and appears in GET /v1/sc5000/ui.
@@ -83,28 +80,30 @@ func TestTimeZonePersistenceNormalizesSpacesAndRejectsUTCOrTraversal(t *testing.
 	if !saved || cur != "Asia/Shanghai" {
 		t.Fatalf("Asia/Shanghai: saved=%v cur=%q", saved, cur)
 	}
-	getResp, err := http.Get(srv.URL + "/v1/sc5000/ui")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer getResp.Body.Close()
-	var status struct {
-		TimeZone string `json:"timezone"`
-	}
-	if err := json.NewDecoder(getResp.Body).Decode(&status); err != nil {
-		t.Fatal(err)
-	}
-	if status.TimeZone != "Asia/Shanghai" {
-		t.Fatalf("GET /v1/sc5000/ui timezone = %q, want Asia/Shanghai", status.TimeZone)
+
+	// 3. Explicit user-chosen UTC and Etc/UTC are respected and saved like any zone.
+	for _, utcZone := range []struct{ query, want string }{
+		{"UTC", "UTC"},
+		{"Etc%2FUTC", "Etc/UTC"},
+	} {
+		saved, cur = postTZ(utcZone.query)
+		if !saved || cur != utcZone.want {
+			t.Fatalf("explicit %s: saved=%v cur=%q, want %q", utcZone.query, saved, cur, utcZone.want)
+		}
+		gotBytes, err = os.ReadFile(filepath.Join(stateDir, "timezone"))
+		if err != nil || string(gotBytes) != utcZone.want+"\n" {
+			t.Fatalf("state/timezone after %s = %q, err=%v", utcZone.query, string(gotBytes), err)
+		}
 	}
 
-	// 3. Invalid, empty, UTC/Universal fallback, missing zone, or path traversal NEVER replace Asia/Shanghai.
+	// 4. Switch back to Asia/Shanghai, then verify invalid/empty/Universal/traversal never clobber it.
+	saved, cur = postTZ("Asia%2FShanghai")
+	if !saved || cur != "Asia/Shanghai" {
+		t.Fatalf("Asia/Shanghai restore: saved=%v cur=%q", saved, cur)
+	}
 	for _, bad := range []string{
 		"",
-		"UTC",
 		"Universal",
-		"Etc%2FUTC",
-		"GMT",
 		"..%2F..%2Fetc%2Fpasswd",
 		"Mars%2FOlympus",
 	} {

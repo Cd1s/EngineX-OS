@@ -164,10 +164,17 @@ HOSTS
     [ ! -e "$DATA/system/etc/overlay/systemd/timesyncd.conf" ]
     [ ! -e "$DATA/system/etc/overlay/systemd/timesyncd.conf.d" ]
     cmp -s "$REPO/rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf" "$R/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf"
+    # Verify etc-reset did NOT create or seed /var/lib/systemd/timesync/clock
+    [ ! -e "$DATA/system/var/overlay/lib/systemd/timesync/clock" ]
+
+    # Verify sc5000-timesync-seed skips missing lib_dir without creating it, then seeds /var/lib/systemd/timesync/clock
+    SC5000_TIMESYNC_LIB_DIR=/tmp/nonexistent-var-lib chroot "$R" /bin/sh -s < "$REPO/rootfs-overlay/usr/libexec/sc5000-timesync-seed"
+    [ ! -e "$R/tmp/nonexistent-var-lib" ]
+    chroot "$R" /bin/sh -s < "$REPO/rootfs-overlay/usr/libexec/sc5000-timesync-seed"
 
     FLOOR_MTIME=$(stat -c %Y "$DATA/system/var/overlay/lib/systemd/timesync/clock")
     [ "$FLOOR_MTIME" -eq "$BUILD_EPOCH" ] || {
-        echo "FAIL: sc5000-custom-etc-reset seeded clock mtime=$FLOOR_MTIME, expected BUILD_EPOCH=$BUILD_EPOCH" >&2
+        echo "FAIL: sc5000-timesync-seed seeded clock mtime=$FLOOR_MTIME, expected BUILD_EPOCH=$BUILD_EPOCH" >&2
         exit 1
     }
 
@@ -345,13 +352,27 @@ HOSTS
     wait "$SS_PID" 2>/dev/null || :
     SS_PID=
 
-    if ! grep -aq 'TSPROBE BOOT2_PASS|tz=Asia/Shanghai|utc=false|offset=-480|' "$W/engine-boot2.log"; then
+    if ! grep -aq 'TSPROBE BOOT2_FALLBACK_GUARDED|tz=Asia/Shanghai|utc=false|offset=-480|' "$W/engine-boot2.log"; then
         tail -n 60 "$W/engine-boot2.log" >&2
-        echo "FAIL: chosen timezone Asia/Shanghai did not survive offline boot / failed auto-detect / UTC clobber" >&2
+        echo "FAIL: Asia/Shanghai did not survive offline boot / failed auto-detect / boot-window UTC fallback" >&2
         exit 1
     fi
-    [ "$(cat "$DATA/enginex/state/timezone")" = "Asia/Shanghai" ]
-    echo "PASS 2b: sc5000-custom-prepare wrote TZEnvVar=Asia/Shanghai to Engine.conf before Engine started; Engine booted offline in Asia/Shanghai (offset=-480) and survived failed detectTimeZone() + UTC fallback"
+    if ! grep -aq 'TSPROBE BOOT2_PASS|tz=UTC|utc=true|offset=0|' "$W/engine-boot2.log"; then
+        tail -n 60 "$W/engine-boot2.log" >&2
+        echo "FAIL: user-chosen UTC via picker was not respected" >&2
+        exit 1
+    fi
+    [ "$(cat "$DATA/enginex/state/timezone")" = "UTC" ]
+
+    # Also prove restore_timezone does NOT overwrite a newer non-UTC TZEnvVar written by Engine on clean shutdown
+    printf '[TimeDateSettings]\nTZEnvVar=Europe/London\n' > "$QCONF"
+    touch -d '+10 seconds' "$QCONF" 2>/dev/null || sleep 1 && touch "$QCONF"
+    chroot "$R" /bin/sh -s < "$W/prepare.sh"
+    grep -Fqx "TZEnvVar=Europe/London" "$QCONF"
+
+    # Re-seed Asia/Shanghai with newer mtime for Phase 3 Gen2 test
+    printf 'Asia/Shanghai\n' > "$DATA/enginex/state/timezone"
+    echo "PASS 2b: boot prepare restored TZEnvVar=Asia/Shanghai; offline boot guarded against unsolicited boot UTC fallback, respected explicit picker-chosen UTC (/data/enginex/state/timezone=UTC), and preserved newer Engine.conf TZEnvVar=Europe/London"
 
     # --- Phase 3: Gen2 /data bundle mechanism (/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf + clock floor + Engine.conf restore) ---
     rm -f "$R/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf"
@@ -467,7 +488,7 @@ bdb = importlib.util.module_from_spec(bspec); bspec.loader.exec_module(bdb)
 ntp = (repo / "rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf").read_text()
 ba = bdb.BOOT_ACTIVATE.replace("@MIGRATE_IF_DEFAULT@", bdb.MIGRATE_IF_DEFAULT).replace("@TIMESYNCD_DROPIN@", ntp)
 # Stop before daemon startup at the bottom of boot-activate.sh; we start timesyncd under vclock_shim below.
-ba = ba.split("# Sticks mounted before this ran")[0]
+ba = ba.split("# Sticks mounted before this ran")[0] + "\nrestore_gen2_timezone 0 || :\n"
 (w / "gen2-boot-activate.sh").write_text(ba)
 PY
 
@@ -789,7 +810,7 @@ Item {
     visible: false
     property int step: 0
     Timer {
-        interval: 800; running: true; repeat: true
+        interval: 600; running: true; repeat: true
         onTriggered: {
             if (step === 0) {
                 step = 1
@@ -800,7 +821,7 @@ Item {
                     console.warn("TSPROBE ERROR|boot2 lost timezone: " + bootTz + "|")
                     return
                 }
-                // Trigger failed network auto-detect AND hostile UTC fallback attempt
+                // 1) Trigger failed network auto-detect AND unsolicited boot-window UTC fallback (picker NOT used)
                 const autoset = Planck.getProperty("/Client/Preferences/TimeZoneAutoset")
                 if (autoset && autoset.translator) {
                     autoset.translator.state = false
@@ -809,6 +830,15 @@ Item {
                 Planck.timeDateController.setSystemTimeZone("UTC")
             } else if (step === 1) {
                 step = 2
+                const tz = Planck.timeDateController.getSystemTimeZone()
+                const isUtc = Planck.timeDateController.isSystemTimeZoneUTC()
+                const off = new Date(1805112000000).getTimezoneOffset()
+                console.warn("TSPROBE BOOT2_FALLBACK_GUARDED|tz=" + tz + "|utc=" + isUtc + "|offset=" + off + "|")
+                // 2) Now open the Time Zone picker (/GUI/ShowTimeZoneView) and explicitly choose UTC!
+                const showPicker = Planck.getProperty("/GUI/ShowTimeZoneView")
+                if (showPicker && showPicker.translator) showPicker.translator.state = true
+                Planck.timeDateController.setSystemTimeZone("UTC")
+                if (showPicker && showPicker.translator) showPicker.translator.state = false
             } else if (step === 2) {
                 step = 3
                 const tz = Planck.timeDateController.getSystemTimeZone()

@@ -697,71 +697,106 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 2)
         self.assertFalse(output.exists())
 
-    def test_clock_floor_and_timezone_restore_in_etc_reset_and_prepare(self):
+    def test_timesync_seed_dropin_and_non_clobbering_timezone_restore(self):
         import os
-        az.inject(self.fs, None)
+        overlay = Path(__file__).resolve().parents[2] / 'rootfs-overlay'
+        az.inject(self.fs, None, overlay=overlay)
+
+        # 1. sc5000-custom-etc-reset stays out of sysinit.target.wants and orders before var/var-lib mounts.
         etc_reset_unit = self.fs.read('/usr/lib/systemd/system/sc5000-custom-etc-reset.service')
-        self.assertIn(b'Before=etc.mount systemd-timesyncd.service sysinit.target shutdown.target', etc_reset_unit)
-        self.assertIn('sc5000-custom-etc-reset.service',
-                      self.fs.entries('/usr/lib/systemd/system/sysinit.target.wants'))
+        self.assertIn(b'Before=etc.mount var.mount var-lib.mount\n', etc_reset_unit)
+        self.assertNotIn(b'sysinit.target', etc_reset_unit)
+        with self.assertRaises(az.SafetyError):
+            self.fs.entries('/usr/lib/systemd/system/sysinit.target.wants')
+
+        # 2. systemd-timesyncd drop-in runs separate seed script with -+ and finite TimeoutStartSec.
+        seed_dropin = self.fs.read('/usr/lib/systemd/system/systemd-timesyncd.service.d/10-enginex-seed.conf')
+        self.assertIn(b'TimeoutStartSec=15s\n', seed_dropin)
+        self.assertIn(b'ExecStartPre=-+/usr/libexec/sc5000-timesync-seed\n', seed_dropin)
+        seed_script = overlay / 'usr/libexec/sc5000-timesync-seed'
+        self.assertTrue(os.access(seed_script, os.X_OK))
 
         ts = self.root / 'timestamp'
         ts.write_text('20261030114129\n')
         build_epoch = 1793360489
         os.utime(ts, (build_epoch, build_epoch))
 
-        zdir = self.root / 'zoneinfo'
-        (zdir / 'Asia').mkdir(parents=True)
-        (zdir / 'Asia/Shanghai').write_bytes(b'TZif2')
-        (zdir / 'Etc').mkdir(parents=True)
-        (zdir / 'Etc/UTC').write_bytes(b'TZif2')
-
-        pcode = self.root / 'product-code'
-        pcode.write_bytes(b'JP07\x00')
-
-        data = self.root / 'data-ts'
-        (data / 'enginex/state').mkdir(parents=True)
-        (data / 'enginex/state/timezone').write_text('Asia/Shanghai\n')
-        seed = self.root / 'seed-ts'
-        seed.mkdir()
-
-        env = dict(os.environ,
-                   SC5000_TIMESTAMP_FILE=str(ts),
-                   SC5000_TIMESYNC_LIB_DIR=str(data / 'system/var/overlay/lib'),
-                   SC5000_TZ_STATE_FILE=str(data / 'enginex/state/timezone'),
-                   SC5000_CONFIG_DIR=str(data / '.config'),
-                   SC5000_ZONEINFO_DIR=str(zdir),
-                   SC5000_PRODUCT_CODE_FILE=str(pcode))
-
-        # 1. sc5000-custom-etc-reset seeds missing clock to build_epoch and never regresses newer clock.
-        reset_script = az.etc_reset('5.3.0.4-test', ()).replace(b'/data', str(data).encode())
-        r = subprocess.run(['sh', '-s'], input=reset_script, env=env, capture_output=True)
+        # Missing lib_dir: seed script skips without creating lib_dir and exits 0.
+        missing_lib = self.root / 'missing-var-lib'
+        r = subprocess.run(['sh', str(seed_script)],
+                           env=dict(os.environ, SC5000_TIMESTAMP_FILE=str(ts), SC5000_TIMESYNC_LIB_DIR=str(missing_lib)),
+                           capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        clock = data / 'system/var/overlay/lib/systemd/timesync/clock'
+        self.assertFalse(missing_lib.exists())
+
+        # Existing lib_dir: seeds missing/older clock to build_epoch, preserves newer clock, and never fails on symlink.
+        lib_dir = self.root / 'var-lib'
+        lib_dir.mkdir()
+        seed_env = dict(os.environ, SC5000_TIMESTAMP_FILE=str(ts), SC5000_TIMESYNC_LIB_DIR=str(lib_dir))
+        r = subprocess.run(['sh', str(seed_script)], env=seed_env, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        clock = lib_dir / 'systemd/timesync/clock'
         self.assertEqual(int(clock.stat().st_mtime), build_epoch)
 
         newer = build_epoch + 86400
         os.utime(clock, (newer, newer))
-        r = subprocess.run(['sh', '-s'], input=reset_script, env=env, capture_output=True)
+        r = subprocess.run(['sh', str(seed_script)], env=seed_env, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(int(clock.stat().st_mtime), newer)
 
-        # Backdated clock (< /etc/timestamp) is lifted back to build_epoch even on same epoch.
         os.utime(clock, (build_epoch - 3600, build_epoch - 3600))
-        r = subprocess.run(['sh', '-s'], input=reset_script, env=env, capture_output=True)
+        r = subprocess.run(['sh', str(seed_script)], env=seed_env, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(int(clock.stat().st_mtime), build_epoch)
 
-        # 2. sc5000-custom-prepare writes [TimeDateSettings] TZEnvVar into Engine.conf and rejects UTC.
+        clock.unlink()
+        sentinel = self.root / 'clock-sentinel'
+        sentinel.write_text('keep')
+        os.utime(sentinel, (build_epoch - 7200, build_epoch - 7200))
+        clock.symlink_to(sentinel)
+        r = subprocess.run(['sh', str(seed_script)], env=seed_env, capture_output=True)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(int(sentinel.stat().st_mtime), build_epoch - 7200)
+
+        # 3. restore_timezone in PREPARE respects newer Engine.conf TZEnvVar and saves explicit UTC when state is newer.
+        zdir = self.root / 'zoneinfo'
+        for rel in ('Asia/Shanghai', 'Europe/London', 'Etc/UTC', 'UTC'):
+            (zdir / rel).parent.mkdir(parents=True, exist_ok=True)
+            (zdir / rel).write_bytes(b'TZif2')
+
+        pcode = self.root / 'product-code'
+        pcode.write_bytes(b'JP07\x00')
+        data = self.root / 'data-ts'
+        tz_state = data / 'enginex/state/timezone'
+        tz_state.parent.mkdir(parents=True)
+        tz_state.write_text('Asia/Shanghai\n')
+        os.utime(tz_state, (1000, 1000))
+        seed = self.root / 'seed-ts'
+        seed.mkdir()
+
+        env = dict(os.environ,
+                   SC5000_TZ_STATE_FILE=str(tz_state),
+                   SC5000_CONFIG_DIR=str(data / '.config'),
+                   SC5000_ZONEINFO_DIR=str(zdir),
+                   SC5000_PRODUCT_CODE_FILE=str(pcode))
         prep_script = az.PREPARE.replace(b'/data', str(data).encode()).replace(
             b'/usr/share/sc5000-custom', str(seed).encode())
+
+        # Missing Engine.conf -> restores Asia/Shanghai.
         r = subprocess.run(['sh', '-s'], input=prep_script, env=env, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         conf = data / '.config/jp07.user.settings/AIR Music Technology/Engine.conf'
         self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=Asia/Shanghai\n')
 
-        # Existing settings in Engine.conf stay intact and UTC state never overwrites Asia/Shanghai.
+        # Newer Engine.conf with TZEnvVar=Europe/London (clean shutdown) MUST NOT be overwritten!
         conf.write_text('[General]\nPlayer=1\n\n[TimeDateSettings]\n24HourFormat=true\nTZEnvVar=Europe/London\n')
+        os.utime(conf, (2000, 2000))
+        r = subprocess.run(['sh', '-s'], input=prep_script, env=env, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('TZEnvVar=Europe/London\n', conf.read_text())
+
+        # Newer state/timezone (e.g. user changed zone to Asia/Shanghai or UTC, followed by SIGKILL) DOES restore!
+        os.utime(tz_state, (3000, 3000))
         r = subprocess.run(['sh', '-s'], input=prep_script, env=env, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         text = conf.read_text()
@@ -769,11 +804,13 @@ class FilesystemTests(unittest.TestCase):
         self.assertIn('24HourFormat=true\n', text)
         self.assertIn('TZEnvVar=Asia/Shanghai\n', text)
 
-        (data / 'enginex/state/timezone').write_text('Etc/UTC\n')
+        # User explicitly chose UTC (state/timezone newer than Engine.conf) -> restores TZEnvVar=UTC!
+        tz_state.write_text('UTC\n')
+        os.utime(conf, (3000, 3000))
+        os.utime(tz_state, (4000, 4000))
         r = subprocess.run(['sh', '-s'], input=prep_script, env=env, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn('TZEnvVar=Asia/Shanghai\n', conf.read_text())
-
+        self.assertIn('TZEnvVar=UTC\n', conf.read_text())
 
 if __name__ == '__main__':
     unittest.main()

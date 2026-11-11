@@ -2300,19 +2300,53 @@ SERVICES_MAIN = """
 	}
 	// Capture manual and auto-detected IANA time zones via stock Planck.timeDateController
 	// signals and persist them through stream-sync (/data/enginex/state/timezone) without
-	// interposing setenv/unsetenv in Engine. UTC/Universal fallbacks never replace a good zone.
+	// interposing setenv/unsetenv in Engine. Treat UTC as an unsolicited fallback only
+	// shortly after boot and only while the time-zone picker has not been used; a UTC
+	// chosen in the picker (or after the boot window) is saved like any zone.
+	readonly property real scTimeZoneBootAt: Date.now()
+	readonly property int scTimeZoneBootWindowMs: 30000
 	property string scLastGoodTimeZone: ""
 	property string scPendingTimeZone: ""
 	property bool scRestoringTimeZone: false
+	property bool scTimeZonePickerUsed: false
+	property bool scTimeZonePickerHooked: false
+	function scHookTimeZonePicker() {
+		if (scTimeZonePickerHooked || typeof Planck === "undefined" || !Planck) return
+		const p = Planck.getProperty("/GUI/ShowTimeZoneView")
+		if (!p || !p.translator) return
+		scTimeZonePickerHooked = true
+		if (p.translator.state) scTimeZonePickerUsed = true
+		if (p.translator.stateChanged) {
+			p.translator.stateChanged.connect(function() {
+				if (p.translator.state) root.scTimeZonePickerUsed = true
+			})
+		}
+	}
+	function scCheckTimeZonePicker() {
+		scHookTimeZonePicker()
+		if (scTimeZonePickerUsed || typeof Planck === "undefined" || !Planck) return scTimeZonePickerUsed
+		const p = Planck.getProperty("/GUI/ShowTimeZoneView")
+		if (p && p.translator && p.translator.state) scTimeZonePickerUsed = true
+		return scTimeZonePickerUsed
+	}
 	function scIsBadTimeZone(tz) {
-		if (!tz || tz.indexOf("/") <= 0 || tz.length > 63) return true
+		if (!tz || tz.length < 3 || tz.length > 63) return true
+		if (tz === "UTC") return false
+		if (tz.indexOf("/") <= 0) return true
 		const parts = tz.split("/")
 		for (let i = 0; i < parts.length; i++) {
-			const s = parts[i], u = s.toUpperCase()
+			const s = parts[i]
 			if (!s || s === "." || s === ".." || s.length > 32) return true
-			if (u === "UTC" || u === "GMT" || u === "UCT" || u === "GMT0" || u === "ZULU" || u === "UNIVERSAL") return true
 		}
 		return false
+	}
+	function scNormalizeTimeZone(raw, utc) {
+		const s = String(raw || "").trim().replace(/ /g, "_")
+		if (utc) return s === "Etc/UTC" ? "Etc/UTC" : "UTC"
+		return s
+	}
+	function scIsFallbackUtc(tz) {
+		return tz === "UTC" || tz === "Etc/UTC" || tz === "Universal"
 	}
 	function scPostTimeZone(tz) {
 		if (scIsBadTimeZone(tz)) return
@@ -2325,12 +2359,14 @@ SERVICES_MAIN = """
 		x.send()
 	}
 	function scOnTimeZoneChanged() {
-		if (typeof Planck === "undefined" || !Planck || !Planck.timeDateController) return
+		if (scRestoringTimeZone || typeof Planck === "undefined" || !Planck || !Planck.timeDateController) return
+		scCheckTimeZonePicker()
 		const c = Planck.timeDateController
 		const utc = !!c.isSystemTimeZoneUTC()
-		const tz = String(c.getSystemTimeZone() || "").trim().replace(/ /g, "_")
-		if (utc || scIsBadTimeZone(tz)) {
-			if (!scRestoringTimeZone && scLastGoodTimeZone !== "") {
+		const tz = scNormalizeTimeZone(c.getSystemTimeZone(), utc)
+		if (scIsBadTimeZone(tz)) return
+		if (utc && !scTimeZonePickerUsed && (Date.now() - scTimeZoneBootAt < scTimeZoneBootWindowMs)) {
+			if (!scRestoringTimeZone && scLastGoodTimeZone !== "" && !scIsFallbackUtc(scLastGoodTimeZone)) {
 				scRestoringTimeZone = true
 				c.setSystemTimeZone(scLastGoodTimeZone)
 				scRestoringTimeZone = false
@@ -2344,6 +2380,7 @@ SERVICES_MAIN = """
 	Connections {
 		target: typeof Planck !== "undefined" && Planck ? Planck.timeDateController : null
 		ignoreUnknownSignals: true
+		function onTimeZoneSelect() { root.scTimeZonePickerUsed = true }
 		function onSystemTimeZoneSetSucceeded() { root.scOnTimeZoneChanged() }
 	}
 	function scCall(query, done) {
@@ -2466,16 +2503,18 @@ SERVICES_MAIN = """
 		scUiLoaded = true
 		if (!wasUiLoaded) {
 			scMidiInitBridge()
+			scHookTimeZonePicker()
 			if (typeof Planck !== "undefined" && Planck && Planck.timeDateController) {
 				const c = Planck.timeDateController
-				const curTz = String(c.getSystemTimeZone() || "").trim().replace(/ /g, "_")
-				if (!c.isSystemTimeZoneUTC() && !scIsBadTimeZone(curTz)) {
+				const curUtc = !!c.isSystemTimeZoneUTC()
+				const curTz = scNormalizeTimeZone(c.getSystemTimeZone(), curUtc)
+				if (!curUtc && !scIsBadTimeZone(curTz)) {
 					scLastGoodTimeZone = curTz
 					if (!v || v.timezone !== curTz) {
 						scPendingTimeZone = curTz
 						scPostTimeZone(curTz)
 					}
-				} else if (scLastGoodTimeZone !== "") {
+				} else if (curUtc && !scTimeZonePickerUsed && scLastGoodTimeZone !== "" && !scIsFallbackUtc(scLastGoodTimeZone)) {
 					scRestoringTimeZone = true
 					c.setSystemTimeZone(scLastGoodTimeZone)
 					scRestoringTimeZone = false

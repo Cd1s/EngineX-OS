@@ -438,15 +438,26 @@ class DataBundleTest(unittest.TestCase):
         self.assertTrue((data / 'enginex/bundle').is_dir())
         self.assertTrue((data / 'sc5000-custom/version.txt').exists())
 
-    def test_boot_activate_seeds_clock_floor_and_restores_timezone(self):
+    def test_boot_activate_skips_missing_lib_stops_engine_before_tz_write_and_respects_newer_conf(self):
         r = self.build()
         src = self.extract(r)
+        ba_text = (src / 'boot-activate.sh').read_text()
+
+        # Verify stop -> write -> start ordering in systemd branch so old Engine destructor cannot overwrite Engine.conf
+        stop_pos = ba_text.index('systemctl stop engine.service')
+        write_pos = ba_text.index('restore_gen2_timezone "$gen2_tz_newer"')
+        start_pos = ba_text.index('systemctl start --no-block engine.service')
+        self.assertLess(stop_pos, write_pos)
+        self.assertLess(write_pos, start_pos)
+
         root = self.tmp / 'gen2-boot'
         dest = root / 'enginex'
         (dest / 'bundle').mkdir(parents=True)
         shutil.copy2(src / 'boot-activate.sh', dest / 'bundle/boot-activate.sh')
         (dest / 'state').mkdir(parents=True)
-        (dest / 'state/timezone').write_text('America/New York\n')
+        tz_state = dest / 'state/timezone'
+        tz_state.write_text('America/New York\n')
+        os.utime(tz_state, (1000, 1000))
 
         ts = self.tmp / 'timestamp'
         ts.write_text('20261030114129\n')
@@ -454,33 +465,51 @@ class DataBundleTest(unittest.TestCase):
         os.utime(ts, (build_epoch, build_epoch))
 
         zdir = self.tmp / 'zoneinfo'
-        (zdir / 'America').mkdir(parents=True)
-        (zdir / 'America/New_York').write_bytes(b'TZif2')
+        for rel in ('America/New_York', 'Europe/London', 'UTC'):
+            (zdir / rel).parent.mkdir(parents=True, exist_ok=True)
+            (zdir / rel).write_bytes(b'TZif2')
 
         pcode = self.tmp / 'product-code'
         pcode.write_text('JP21\n')
 
-        # Run the clock-floor + restore_gen2_timezone portion in an isolated /run sandbox
         run_dir = self.tmp / 'run'
         (run_dir / 'systemd/system').mkdir(parents=True)
-        script = (src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/')
+        script = ba_text.replace('/run/', str(run_dir) + '/')
+        lib_dir = root / 'system/var/overlay/lib'
         env = dict(self.env,
                    SC5000_CUSTOM=str(dest),
                    SC5000_TIMESTAMP_FILE=str(ts),
-                   SC5000_TIMESYNC_LIB_DIR=str(root / 'system/var/overlay/lib'),
+                   SC5000_TIMESYNC_LIB_DIR=str(lib_dir),
                    SC5000_CONFIG_DIR=str(root / '.config'),
                    SC5000_ZONEINFO_DIR=str(zdir),
                    SC5000_PRODUCT_CODE_FILE=str(pcode))
+
+        # 1. Missing lib_dir must NOT be created by boot-activate.sh; Engine.conf gets America/New_York.
         res = subprocess.run(['sh', '-s'], input=script.encode(), env=env, capture_output=True)
         self.assertEqual(res.returncode, 0, res.stderr)
-        # Clear logged safe-bin pkill call from non-systemd fallback branch
         self.host_commands.write_text('')
-
-        clock = root / 'system/var/overlay/lib/systemd/timesync/clock'
-        self.assertEqual(int(clock.stat().st_mtime), build_epoch)
+        self.assertFalse(lib_dir.exists())
         conf = root / '.config/jp21.user.settings/AIR Music Technology/Engine.conf'
         self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=America/New_York\n')
 
+        # 2. Existing lib_dir gets clock seeded to build_epoch; newer Engine.conf (Europe/London) is preserved.
+        lib_dir.mkdir(parents=True)
+        conf.write_text('[TimeDateSettings]\nTZEnvVar=Europe/London\n')
+        os.utime(conf, (2000, 2000))
+        res = subprocess.run(['sh', '-s'], input=script.encode(), env=env, capture_output=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.host_commands.write_text('')
+        clock = lib_dir / 'systemd/timesync/clock'
+        self.assertEqual(int(clock.stat().st_mtime), build_epoch)
+        self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=Europe/London\n')
+
+        # 3. Newer state/timezone (user chose UTC) updates Engine.conf to UTC.
+        tz_state.write_text('UTC\n')
+        os.utime(tz_state, (3000, 3000))
+        res = subprocess.run(['sh', '-s'], input=script.encode(), env=env, capture_output=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.host_commands.write_text('')
+        self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=UTC\n')
 
 if __name__ == '__main__':
     unittest.main()
