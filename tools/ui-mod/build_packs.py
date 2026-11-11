@@ -4422,11 +4422,11 @@ SHADOW_LAYER = r"""
                     EngineXEmbedded.JP07SyncIndicator {
                         Layout.fillWidth: false
                         Layout.preferredHeight: 24
-                        Layout.minimumWidth: 196
-                        Layout.preferredWidth: 196
-                        Layout.maximumWidth: 196
-                        Layout.leftMargin: 12
-                        Layout.rightMargin: 12
+                        Layout.minimumWidth: 164
+                        Layout.preferredWidth: 164
+                        Layout.maximumWidth: 164
+                        Layout.leftMargin: 6
+                        Layout.rightMargin: 6
                         Layout.alignment: Qt.AlignCenter
                         leadTextFont: scHeader.perfSplitMain ? Style.fontTitle : Style.fontH3
                         deckIndex: scDisplay.deck
@@ -5533,7 +5533,7 @@ def edits(dev: bool):
                     '        }\n')
         scaled[bj + "Deck/DeckItem/BeatJump.qml"] = [
             ("    required property BeatJumpViewInterface view\n",
-             "    required property BeatJumpViewInterface view\n    property int deckIndex: 1\n"),
+             "    required property BeatJumpViewInterface view\n    property int deckIndex: 1\n    Layout.fillWidth: false\n"),
             ("        SequentialAnimation {\n            id: beatJumpImageAnimation\n",
              bj_tap("JumpBack") + "\n        SequentialAnimation {\n            id: beatJumpImageAnimation\n"),
             ("        SequentialAnimation {\n            id: beatJumpTextAnimation\n",
@@ -5593,7 +5593,7 @@ def edits(dev: bool):
         ]
         scaled[performance] += [
             ("        Layout.fillWidth: true\n        Layout.preferredHeight: 24\n        Layout.maximumWidth: 200\n        Layout.leftMargin: 24\n        Layout.rightMargin: 24\n",
-             "        Layout.fillWidth: false\n        Layout.preferredHeight: 24\n        Layout.minimumWidth: 196\n        Layout.preferredWidth: 196\n        Layout.maximumWidth: 196\n        Layout.leftMargin: 12\n        Layout.rightMargin: 12\n"),
+             "        Layout.fillWidth: false\n        Layout.preferredHeight: 24\n        Layout.minimumWidth: 164\n        Layout.preferredWidth: 164\n        Layout.maximumWidth: 164\n        Layout.leftMargin: 6\n        Layout.rightMargin: 6\n"),
             ("                Layout.leftMargin: 24\n                Layout.rightMargin: 12\n",
              "                Layout.leftMargin: 4\n                Layout.rightMargin: 4\n"),
             ("                target: softTakeoverIndicators\n                Layout.rightMargin: 32\n",
@@ -5712,7 +5712,7 @@ def edits(dev: bool):
         # The source's loop lights the shadow header's loop icon and size; the copy itself does not loop.
         scaled.setdefault(bj + "Deck/DeckItem/AutoLoop.qml", []).extend([
             ("    required property AutoLoopViewInterface view\n",
-             "    required property AutoLoopViewInterface view\n    property int deckIndex: 0\n"
+             "    required property AutoLoopViewInterface view\n    property int deckIndex: 0\n    Layout.fillWidth: false\n"
              "    readonly property bool scLoop: view.loopEnableState || " + head("deckIndex", "loop") + "\n"),
             ("        color: view.loopEnableState ? Style.active01Color : Style.icon01Color\n", "        color: scLoop ? Style.active01Color : Style.icon01Color\n"),
             ("        color: view.loopEnableState ? Style.active01Color : Style.font01Color\n", "        color: scLoop ? Style.active01Color : Style.font01Color\n"),
