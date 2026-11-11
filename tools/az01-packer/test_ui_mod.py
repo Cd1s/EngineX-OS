@@ -694,7 +694,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
                  "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack",
-                 "scLayerPath", "scPairedLanes", "scPairedFollow")
+                 "scLayerPath", "scPairedLanes", "scPairedFollow", "scShadowHeldBy", "scShadowEngineHeld")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
@@ -881,6 +881,47 @@ scShadowApplyAll([{deck: 2, path: '/peer2.flac'}, {deck: 4, path: '/cdj.flac', l
 assert.equal(scShadowEngineMask, 30); assert.equal(scShadowLineMask, 1 << 4); assert.equal(scShadowData(4), null);
 scShadowApplyAll([cdj(4)], true);
 assert.equal(scShadowEngineMask, 0); assert.equal(scShadowLineMask, 0);
+""")
+
+    def test_shadow_deck_mode_switches_live_201(self):
+        # Maintainer request (#201): Shadow Deck Mode no longer restarts Engine. stream-sync
+        # reads the mode per request; the QML follows. Switched to All CDJ Mode while Engine
+        # holds a shadow track it loaded, that track is stopped and unloaded (once), the
+        # display renderer takes the slot, and nothing else touches Engine afterwards.
+        e = bp.FOUR_DECK_ENTRIES
+        start = e.index("id: scShadowModeEntry")
+        entry = e[start:e.index("\n\t\t},", start)]
+        self.assertIn('root.scCall("shadowMode=" + ids[index])', entry)
+        self.assertNotIn("scRestartCall", entry)
+        # An unchanged display reply is applied again while Engine still holds a shadow track.
+        self.assertIn("version === root.scShadowResponseVersion && !root.scShadowEngineHeld()", bp.SERVICES_MAIN)
+        self.js(r"""
+const writes = [], lookups = [], props = {};
+globalThis.scTr = p => { lookups.push(p); return props[p] || (props[p] = {string: 'Off', set state(v) { writes.push(p + '=' + v); }, get state() { return p === '/Engine/Deck2/Play' || p === '/Engine/Deck2/Track/SongLoaded' ? true : undefined; }, set url(v) { writes.push(p + '=' + v); }}); };
+globalThis.scPressTimer = {restart() {}};
+// Auto / All Engine Mode: Engine holds the peer's track on Deck 2.
+scShadowApplyAll([{deck: 2, path: '/peer.flac', playing: true}], false);
+assert.deepEqual(writes, ['/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer.flac']);
+scShadowAt[2].ready = true;
+assert.equal(scShadowEngineHeld(), true); assert.equal(scShadowHeldBy(1), false); // this unit's own deck is never a shadow
+// Live switch to All CDJ Mode: the slot is stopped at once, the display draws it.
+scShadowApplyAll([{deck: 2, key: 'cdj:x', title: 'CDJ', playing: true, at: now, positionMs: 500}], true);
+assert.equal(scShadowDisplayOnly, true); assert.equal(scShadowEngineMask, 0);
+assert.deepEqual(writes.slice(1), ['/Engine/Deck2/Play=false']);
+assert.equal(scShadowData(2).title, 'CDJ');
+// The next (unchanged) reply after the debounce unloads it.
+now += 400;
+scShadowApplyAll([{deck: 2, key: 'cdj:x', title: 'CDJ', playing: true, at: now, positionMs: 500}], true);
+assert.deepEqual(writes.slice(2).filter(w => w.indexOf('Unload') >= 0), ['/Engine/Deck2/Unload=true', '/Engine/Deck2/Track/Unload=true']);
+assert.equal(scShadowAt[2], undefined); assert.equal(scShadowEngineHeld(), false);
+// From then on All CDJ Mode stays display-only: no Engine reads or writes.
+const n = writes.length, m = lookups.length;
+now += 400;
+scShadowApplyAll([{deck: 2, key: 'cdj:x', title: 'CDJ', playing: true, at: now, positionMs: 500}], true);
+assert.equal(writes.length, n); assert.equal(lookups.length, m);
+// And back to Auto: Engine loads the peer's track again.
+scShadowApplyAll([{deck: 2, path: '/peer.flac', playing: true}], false);
+assert.equal(writes[n], '/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer.flac');
 """)
 
     def test_legacy_helpers_and_remote_presses_are_inert_in_display_mode(self):
