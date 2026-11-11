@@ -24,6 +24,10 @@ Thanks for helping. EngineX OS runs on decks that people play live on, so the ba
 - **Vendor units**: never put a hard `Requires=`, `BindsTo=` or `Requisite=` on a unit the vendor ships, because a new base may drop it (5.3.0 dropped `etc.mount`, and the 5.0.4.2 → 5.3.0.1 online update lost the UI packs and SSH). Use `RequiresMountsFor=` for mounts and `Wants=` + `After=` for everything else.
 - **No regressions**: every fix ships with a test that fails on the old code. Before changing a mechanism, look up the issues it already fixed (`git log -S`, the issue numbers in tests and `docs/ISSUE-FIXES-*.md`) and keep their tests green. A fix to a shared mechanism (MASTER/sync election, hook sites, header layout, patch dicts) also tests the neighbouring behaviours. Never delete or weaken an existing test to make a change pass. Every new real-deck bug adds a line to [`docs/REGRESSION-CHECKLIST.md`](./docs/REGRESSION-CHECKLIST.md).
 
+### Mods
+
+The decks have no Python, no compiler and no package manager (#208). An EngineX Mod is QML (`mod.json` → `qmlFiles`) plus an optional busybox `sh` lifecycle script (`start.sh`) and an optional static helper binary for both deck CPU families: 32-bit armhf (`GOOS=linux GOARCH=arm GOARM=7`, all gen-1 and armhf gen-2 models) and 64-bit arm64 (`GOOS=linux GOARCH=arm64`, PRIME 4 G2 / SYSTEM ONE), selected at runtime via `uname -m`. Go with `CGO_ENABLED=0` is recommended so the binary has no runtime library dependencies on the deck. Start from [`docs/mods/src/helper-template/`](./docs/mods/src/helper-template/) (`README.md`, `main.go`, `start.sh`).
+
 ### Tests & Experimental Inspection
 
 Run builds and tests on **`Oracle-Batam-arm`** (`REMOTE_BUILD_HOST=Oracle-Batam-arm remote-build ...`, aarch64 with native 32-bit `armhf` execution). For experimental component inspection and ABI/resource analysis, use **`craft-anything`** (`craft-anything-cli` / `craft-anything` skill) with **`deepseek-v4.1-flash`** (`deepseek4.1 flash`) on `Oracle-Batam-arm`:

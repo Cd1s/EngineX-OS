@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (36 Rows)
+## Regression Table (37 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -46,6 +46,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 34 | **Rekordbox MP3 start-offset alignment (`#178`)**: `rb-bridge` and CDJ shadow copy subtract FFmpeg's Xing/Info frame skip (`1152` / `576` samples) plus `LAME`/`Lavf`/`Lavc` `encoder_delay + 529` samples from PQTZ grids, Hot Cues, main/Memory Cues and Loops using the file's real MPEG header sample rate (cues clamp at `0`, BPM unchanged, WAV/FLAC/AIFF/headerless/VBRI untouched), and re-convert affected MP3s once on already-imported sticks | `#178`, `caee928` | `internal/audioheader::TestReadMP3RealFixtures`, `TestReadMP3SyntheticVersionsEncodersAndEdgeCases`; `pkg/compat::TestMP3AudioHeader`; `pkg/enginedb::TestEncodePerformanceMP3StartOffsetAndClamping`; `pkg/bridge::TestIssue178MP3OffsetClassesAndExistingLibraryResync` | Real-deck check pending: load a converted Rekordbox USB with one tagged LAME MP3 and one WAV on SC5000 and compare grid lines to audio transients |
 | 35 | **EngineX never overrides stock Cues & Loops preferences**: EngineX never writes `/Client/Preferences/Profile/Application/LinkBeatJumpLoopSize` (or other stock `Profile → Cues/Loops` preferences), while unlocking `Entries/LinkBeatJumpLoopSize.qml` (`active: true`) so the user's own `On` / `Off` choice controls it | `#135`, `4a907ee` (`5.3.0.4`) | `tools/az01-packer/test_ui_mod.py::UiModSourceTest::test_auto_loop_knob_and_link`, `test_board_capabilities_jp07_vs_jc11_and_build_tag` | Release workflow Step 2 (`python3 -m unittest discover -s tools/az01-packer`) |
 | 36 | **Standalone player (`SC5000 / SC6000`) `Settings → Mixer → Sampler Output` retains stock `Layer A / Layer B` selection in both 2-deck and 4-deck modes**: when `four_deck_waveform=1` (`#49`) clears `Config.device.isPlayer` (`+0x239`) while `isConsole` (`+0x23a`) remains `0`, `0x193f6d8` still branches to `0x193fc18` so `/Client/Preferences/SamplerOutput` never gets an empty `StringMapTranslator`, while consoles (`isConsole == 1`) keep their stock channel/`Main` choices | `#49`, `4a907ee` (`5.3.0.4`) | `tools/ui-mod/test_stems_feature.c` (`0x193f6d8` `SamplerOutput` player branch assertion); `tests/test_rootfs_overlay.sh` (hook binary sync check) | Real-deck SC5000 check (`Settings → Mixer → Sampler Output` selectable between `Layer A` and `Layer B` with `4-Deck Waveform` on and off) |
+| 37 | **Official Mods start on every deck without Python** | `#208`, `#134` | `pkg/mods/mods_test.go::TestInstallArchiveUpgradesNewerVersionInPlace`, `TestOfficialModPackagesInstallAndValidate`, `docs/mods/test_mods.py` (no Python in any package), Go tests under `docs/mods/src/...`, `tools/mods/test_mods_chroot.sh` (`start.sh start → health → stop` in a chroot of the real gen-1 5.3.0, gen-2 armhf and AZ04 arm64 rootfs, no Python) | Real-deck: install DMX Studio 1.1.0 over 1.0.0 and enable it |
 
 ---
 
