@@ -144,6 +144,25 @@ class UiModSourceTest(unittest.TestCase):
         self.assertEqual(SRC.count("/^stems?$/i.test("), 4)
         self.assertIn("/stem/i.test(String(leftActions[actionIndex]", SRC)
 
+    def test_gen1_stems_first_boot_suppressed_and_row_hidden(self):
+        # Preferences -> Device -> Stems Support stays hidden on 5.3.0 packs.
+        self.assertIn('out[prefs + "Entries/StemsDownload.qml"] = [("active: manager && manager.canModifyInstall", "active: false")]', SRC)
+        hook = (REPO / "tools/ui-mod/engine_ui_hook.c").read_text(encoding="utf-8")
+        # Gen1 5.3.0 only: prepare_config sets Config.hasStemsProcessorFactoryInstalled ([r0, #0x2a7] = 1)
+        # so first-boot NewFeaturePopup never offers a Download button, with zero extra edit sites
+        # and 5.0.4 / 5.3.0-sclive4 / AZ04 left untouched.
+        cfg_fn = hook.split("prepare_config(uintptr_t base, size_t page) {", 1)[1].split("\n}\n", 1)[0]
+        self.assertTrue('if (!strcmp(build->name, "5.3.0"))' in cfg_fn and "0xe5c022a7" in cfg_fn,
+                        "missing gen1 5.3.0 Config[0x2a7]=1 in prepare_config")
+        edits_504 = hook.split("edits_504[] = {", 1)[1].split("};", 1)[0]
+        edits_530 = hook.split("edits_530[] = {", 1)[1].split("};", 1)[0]
+        edits_sclive = hook.split("edits_sclive[] = {", 1)[1].split("};", 1)[0]
+        edits_az04 = hook.split("edits_az04[] = {", 1)[1].split("};", 1)[0]
+        for block in (edits_504, edits_530, edits_sclive, edits_az04):
+            self.assertTrue("0x5070ecu" not in block and "0x8c5e84u" not in block
+                            and "0x4e28ccu" not in block and "0x86520cu" not in block,
+                            "edit tables must add no extra Stems popup sites")
+
     def test_auto_loop_knob_and_link(self):
         self.assertIn("interval: 10000; running: true", SRC)
         self.assertIn("module.loopInactiveShiftTurnAction === Action.BeatJump || ", SRC)
@@ -1560,6 +1579,12 @@ for(const board of ['JP20','JP22','JP24','JC11S','JP21X']) {
             splash_text = splash.read_text()
             self.assertIn("anchors.fill: parent\n\t\t\tsource:", splash_text)
             self.assertIn("id: overlay\n\t\t\tanchors.fill: parent\n", splash_text)
+
+            stems_row = Path(tmp) / "packs" / "en" / "Skins" / "Embedded" / "Views" / "ControlCenter" / "Tabs" / "Preferences" / "Entries" / "StemsDownload.qml"
+            self.assertTrue(stems_row.is_file(), f"{stems_row} not found")
+            stems_row_text = stems_row.read_text()
+            self.assertIn("active: false", stems_row_text)
+            self.assertNotIn("manager.canModifyInstall", stems_row_text)
 
             main = Path(tmp) / "packs" / "en" / "Skins" / "Embedded" / "EmbeddedMain.qml"
             self.assertTrue(main.is_file(), f"{main} not found")

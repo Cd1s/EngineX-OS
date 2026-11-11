@@ -1478,6 +1478,7 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         0xe5c0224c, // hasBluetooth
         0xe5c0224e, // hasBluetoothSendToAssignment
         0xe5c02276, // remote Stems processor support
+        0xe320f000, // gen1 5.3.0 only: hasStemsProcessorFactoryInstalled ([r0, #0x2a7] = 1)
         0xe320f000, // #152 (5.3.0+): Config.audio.hasStemsLevel ([r0, #0x54] = 1)
         0xe3a02000, // mov r2, #0
         0xe5c02289, // disableHfsPlus
@@ -1503,11 +1504,13 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         *(const uint32_t *)(base + build->config_r3),
         (uint32_t)(base + build->config_site + 8),
     };
-    const unsigned at[] = {1, 2, 3, 4, 7};
+    const unsigned at[] = {1, 2, 3, 4, 8};
     for (unsigned i = 0; i < 5; i++) code[at[i]] = (code[at[i]] & ~0xfffu) | build->config_field[i];
+    if (!strcmp(build->name, "5.3.0"))
+        code[5] = 0xe5c022a7;
     if (build->config_zoom == 0x52c) {
         // #152: unlock native 3-band Stems Level EQ (ChannelStrip) on all 5.3.0 models.
-        code[5] = 0xe5c02054;
+        code[6] = 0xe5c02054;
         // Keep hasNHFx: Mixstream's Main FX switches still need Nh effects.
         // Only its channel Sweep FX collection changes; every non-NH config
         // retains these bytes, including models with Beat Jump disabled.
@@ -1515,17 +1518,17 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         // so no incoming CPSR flags are consumed after this cmp.
         const uint32_t mixstream[] = {0xe5d0212e, 0xe3520000, 0x13a02001,
                                      0x15c020e1, 0x15c0219c, 0x15c0219d, 0x15c024cd};
-        memcpy(code + 16, mixstream, sizeof mixstream);
+        memcpy(code + 17, mixstream, sizeof mixstream);
     }
     if (build->config_zoom) {
         // #77: the players' 30 s zoom-out limit on every model (same SoC; Engine
         // sets 10 s on the all-in-ones). No flags touched; never above 30 in 32-bit.
-        code[14] = 0xe3a0201e;
-        code[15] = 0xe5802000 | build->config_zoom;
+        code[15] = 0xe3a0201e;
+        code[16] = 0xe5802000 | build->config_zoom;
     }
     if (!strcmp(build->name, "5.3.0") && four_deck_layout() > 0) {
         const uint32_t unlock[] = {0xe5d02239, 0xe3520000, 0x13a02004, 0x15802090, 0x13a02000, 0x15c02239};
-        memcpy(code + 8, unlock, sizeof unlock);
+        memcpy(code + 9, unlock, sizeof unlock);
         four_deck_pad_on = player_board();
         four_deck_role();
         fprintf(stderr, "engine-ui-hook: 4-deck layout unlocked (#49)\n");
@@ -1534,7 +1537,7 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         // hasMixerMenu is UI +9, root +0x4d1 (QVariant registration
         // 0x15a612c), rather than the older report's root +0x4c9.
         const uint32_t aux[] = {0xe3a02001, 0xe5c02026, 0xe5c024d1, 0xe3a02000};
-        memcpy(code + 8, aux, sizeof aux);
+        memcpy(code + 9, aux, sizeof aux);
     }
     config_jump[0] = 0xe51ff004;
     config_jump[1] = (uint32_t)(uintptr_t)rx_code(code, sizeof code, page);
