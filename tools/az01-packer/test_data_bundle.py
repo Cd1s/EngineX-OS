@@ -438,17 +438,16 @@ class DataBundleTest(unittest.TestCase):
         self.assertTrue((data / 'enginex/bundle').is_dir())
         self.assertTrue((data / 'sc5000-custom/version.txt').exists())
 
-    def test_boot_activate_skips_missing_lib_stops_engine_before_tz_write_and_respects_newer_conf(self):
+    def test_boot_activate_skips_missing_lib_uses_execstartpre_restore_tz_and_respects_newer_conf(self):
         r = self.build()
         src = self.extract(r)
         ba_text = (src / 'boot-activate.sh').read_text()
 
-        # Verify stop -> write -> start ordering in systemd branch so old Engine destructor cannot overwrite Engine.conf
-        stop_pos = ba_text.index('systemctl stop engine.service')
-        write_pos = ba_text.index('restore_gen2_timezone "$gen2_tz_newer"')
-        start_pos = ba_text.index('systemctl start --no-block engine.service')
-        self.assertLess(stop_pos, write_pos)
-        self.assertLess(write_pos, start_pos)
+        # Never call 'systemctl stop engine.service' from boot-activate.sh (which runs in engine.service's cgroup);
+        # restore Engine.conf via engine.service drop-in ExecStartPre=-.../boot-activate.sh --restore-tz + restart --no-block!
+        self.assertNotIn('systemctl stop engine.service', ba_text)
+        self.assertIn('ExecStartPre=-$bundle_dir/boot-activate.sh --restore-tz', ba_text)
+        self.assertIn('systemctl restart --no-block engine.service', ba_text)
 
         root = self.tmp / 'gen2-boot'
         dest = root / 'enginex'
@@ -474,7 +473,10 @@ class DataBundleTest(unittest.TestCase):
 
         run_dir = self.tmp / 'run'
         (run_dir / 'systemd/system').mkdir(parents=True)
-        script = ba_text.replace('/run/', str(run_dir) + '/')
+        ba_relocated = self.tmp / 'boot-activate-reloc.sh'
+        ba_relocated.write_text(ba_text.replace('/run/', str(run_dir) + '/'))
+        ba_relocated.chmod(0o755)
+        marker = run_dir / 'sc5000-tz-newer'
         lib_dir = root / 'system/var/overlay/lib'
         env = dict(self.env,
                    SC5000_CUSTOM=str(dest),
@@ -482,13 +484,19 @@ class DataBundleTest(unittest.TestCase):
                    SC5000_TIMESYNC_LIB_DIR=str(lib_dir),
                    SC5000_CONFIG_DIR=str(root / '.config'),
                    SC5000_ZONEINFO_DIR=str(zdir),
-                   SC5000_PRODUCT_CODE_FILE=str(pcode))
+                   SC5000_PRODUCT_CODE_FILE=str(pcode),
+                   SC5000_TZ_NEWER_MARKER=str(marker))
 
-        # 1. Missing lib_dir must NOT be created by boot-activate.sh; Engine.conf gets America/New_York.
-        res = subprocess.run(['sh', '-s'], input=script.encode(), env=env, capture_output=True)
+        # 1. Missing lib_dir must NOT be created; ExecStartPre (--restore-tz) writes America/New_York.
+        res = subprocess.run(['sh', str(ba_relocated)], env=env, capture_output=True)
         self.assertEqual(res.returncode, 0, res.stderr)
+        cmds = self.host_commands.read_text()
+        self.assertNotIn('stop engine.service', cmds)
         self.host_commands.write_text('')
         self.assertFalse(lib_dir.exists())
+
+        res = subprocess.run(['sh', str(ba_relocated), '--restore-tz'], env=env, capture_output=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
         conf = root / '.config/jp21.user.settings/AIR Music Technology/Engine.conf'
         self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=America/New_York\n')
 
@@ -496,20 +504,29 @@ class DataBundleTest(unittest.TestCase):
         lib_dir.mkdir(parents=True)
         conf.write_text('[TimeDateSettings]\nTZEnvVar=Europe/London\n')
         os.utime(conf, (2000, 2000))
-        res = subprocess.run(['sh', '-s'], input=script.encode(), env=env, capture_output=True)
+        res = subprocess.run(['sh', str(ba_relocated)], env=env, capture_output=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.host_commands.write_text('')
+        res = subprocess.run(['sh', str(ba_relocated), '--restore-tz'], env=env, capture_output=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
         clock = lib_dir / 'systemd/timesync/clock'
         self.assertEqual(int(clock.stat().st_mtime), build_epoch)
         self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=Europe/London\n')
 
-        # 3. Newer state/timezone (user chose UTC) updates Engine.conf to UTC.
+        # 3. Newer state/timezone (user chose UTC) sets marker before stop; even if old Engine destructor
+        #    bumps Engine.conf mtime during stop, --restore-tz consumes marker and writes UTC!
         tz_state.write_text('UTC\n')
         os.utime(tz_state, (3000, 3000))
-        res = subprocess.run(['sh', '-s'], input=script.encode(), env=env, capture_output=True)
+        res = subprocess.run(['sh', str(ba_relocated)], env=env, capture_output=True)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.host_commands.write_text('')
+        # Simulate unhooked Engine destructor writing stale Europe/London at t=4000 during restart teardown
+        conf.write_text('[TimeDateSettings]\nTZEnvVar=Europe/London\n')
+        os.utime(conf, (4000, 4000))
+        res = subprocess.run(['sh', str(ba_relocated), '--restore-tz'], env=env, capture_output=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=UTC\n')
+        self.assertFalse(marker.exists())
 
 if __name__ == '__main__':
     unittest.main()

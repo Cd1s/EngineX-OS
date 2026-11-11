@@ -704,7 +704,8 @@ class FilesystemTests(unittest.TestCase):
 
         # 1. sc5000-custom-etc-reset stays out of sysinit.target.wants and orders before var/var-lib mounts.
         etc_reset_unit = self.fs.read('/usr/lib/systemd/system/sc5000-custom-etc-reset.service')
-        self.assertIn(b'Before=etc.mount var.mount var-lib.mount\n', etc_reset_unit)
+        self.assertIn(b'Before=etc.mount\n', etc_reset_unit)
+        self.assertNotIn(b'var.mount', etc_reset_unit)
         self.assertNotIn(b'sysinit.target', etc_reset_unit)
         with self.assertRaises(az.SafetyError):
             self.fs.entries('/usr/lib/systemd/system/sysinit.target.wants')

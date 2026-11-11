@@ -75,11 +75,33 @@ func TestTimeZonePersistenceNormalizesSpacesSavesExplicitUTCAndRejectsInvalid(t 
 		t.Fatalf("state/timezone = %q, err=%v", string(gotBytes), err)
 	}
 
+	assertGETTimeZone := func(want string) {
+		t.Helper()
+		getResp, err := http.Get(srv.URL + "/v1/sc5000/ui")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer getResp.Body.Close()
+		if getResp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /v1/sc5000/ui status = %d", getResp.StatusCode)
+		}
+		var status struct {
+			TimeZone string `json:"timezone"`
+		}
+		if err := json.NewDecoder(getResp.Body).Decode(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status.TimeZone != want {
+			t.Fatalf("GET /v1/sc5000/ui timezone = %q, want %q", status.TimeZone, want)
+		}
+	}
+
 	// 2. Manual selection of Asia/Shanghai updates state/timezone and appears in GET /v1/sc5000/ui.
 	saved, cur = postTZ("Asia%2FShanghai")
 	if !saved || cur != "Asia/Shanghai" {
 		t.Fatalf("Asia/Shanghai: saved=%v cur=%q", saved, cur)
 	}
+	assertGETTimeZone("Asia/Shanghai")
 
 	// 3. Explicit user-chosen UTC and Etc/UTC are respected and saved like any zone.
 	for _, utcZone := range []struct{ query, want string }{
@@ -94,6 +116,7 @@ func TestTimeZonePersistenceNormalizesSpacesSavesExplicitUTCAndRejectsInvalid(t 
 		if err != nil || string(gotBytes) != utcZone.want+"\n" {
 			t.Fatalf("state/timezone after %s = %q, err=%v", utcZone.query, string(gotBytes), err)
 		}
+		assertGETTimeZone(utcZone.want)
 	}
 
 	// 4. Switch back to Asia/Shanghai, then verify invalid/empty/Universal/traversal never clobber it.

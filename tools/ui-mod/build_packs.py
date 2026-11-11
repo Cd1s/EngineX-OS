@@ -2303,8 +2303,11 @@ SERVICES_MAIN = """
 	// interposing setenv/unsetenv in Engine. Treat UTC as an unsolicited fallback only
 	// shortly after boot and only while the time-zone picker has not been used; a UTC
 	// chosen in the picker (or after the boot window) is saved like any zone.
-	readonly property real scTimeZoneBootAt: Date.now()
-	readonly property int scTimeZoneBootWindowMs: 30000
+	property bool scTimeZoneBootWindowOpen: true
+	Timer {
+		interval: 30000; running: true; repeat: false
+		onTriggered: root.scTimeZoneBootWindowOpen = false
+	}
 	property string scLastGoodTimeZone: ""
 	property string scPendingTimeZone: ""
 	property bool scRestoringTimeZone: false
@@ -2365,7 +2368,7 @@ SERVICES_MAIN = """
 		const utc = !!c.isSystemTimeZoneUTC()
 		const tz = scNormalizeTimeZone(c.getSystemTimeZone(), utc)
 		if (scIsBadTimeZone(tz)) return
-		if (utc && !scTimeZonePickerUsed && (Date.now() - scTimeZoneBootAt < scTimeZoneBootWindowMs)) {
+		if (utc && !scTimeZonePickerUsed && scTimeZoneBootWindowOpen) {
 			if (!scRestoringTimeZone && scLastGoodTimeZone !== "" && !scIsFallbackUtc(scLastGoodTimeZone)) {
 				scRestoringTimeZone = true
 				c.setSystemTimeZone(scLastGoodTimeZone)
