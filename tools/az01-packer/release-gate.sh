@@ -171,9 +171,11 @@ SH
             # tools/edisksd-hook/test_edisksd_hook.c --mounts (step 2).
             # shellcheck disable=SC2046
             in_root LD_BIND_NOW=1 LD_PRELOAD=/etc/sc5000/libedisksd-hook.so $(unit_exec edisksd.service) > "$W/new-edisksd.log" 2>&1 &
-            # shellcheck disable=SC2046
-            check "new: engine-guardian --watch (retired) exits 0" in_root $(unit_exec engine-guardian.service)
+            check "new: engine-guardian --watch (retired database watch) exits 0" in_root /usr/local/bin/engine-guardian --watch
         fi
+        # The repurposed engine-guardian.service is the boot watch (UI-ready deadline, reports).
+        # shellcheck disable=SC2046
+        in_root $(unit_exec engine-guardian.service) > "$W/$name-boot-guardian.log" 2>&1 & pid[boot-guardian]=$!
         # shellcheck disable=SC2046
         check "$name: sc5000-storage-mount --discover" in_root $(unit_exec sc5000-storage-discover.service)
     fi
@@ -206,6 +208,9 @@ SH
     elif [ "$name" = boot2 ]; then
         want=$(find "$ui/packs/$LANG_PACK" -type f ! -name QmlWarnings.qml | wc -l)
     fi
+    # The shipped guard chooses the preload for every new-release Engine attempt.
+    [ "$name" = old ] || engine_env=(HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M QML_DISABLE_DISK_CACHE=1
+        QT_QPA_PLATFORM=offscreen MALLOC_ARENA_MAX=1 LD_LIBRARY_PATH=/usr/qt/lib)
     in_root /etc/sc5000/engine-ui-guard pre >> "$W/$name-boot.log" 2>&1 || :
     if [ "$name" = new ]; then
         # #56: without a TIDAL account Engine 5.3.0 opens the Engine DJ Profile login
@@ -219,10 +224,14 @@ SH
             bash -c "test ! -e '$ui/safe-mode' && test \"\$(cat '$ui/boot-count')\" = 1"
         check "boot2: running-sentinel re-armed for second boot (#140)" test -e "$ui/running-sentinel"
     fi
-    in_root "${engine_env[@]}" /usr/Engine/Scripts/engine "$PRODUCT" > "$W/$name-engine.log" 2>&1 & pid[engine]=$!
+    if [ "$name" = old ]; then
+        in_root "${engine_env[@]}" /usr/Engine/Scripts/engine "$PRODUCT" > "$W/$name-engine.log" 2>&1 & pid[engine]=$!
+    else
+        in_root "${engine_env[@]}" /etc/sc5000/engine-ui-guard service /usr/Engine/Scripts/engine "$PRODUCT" > "$W/$name-engine.log" 2>&1 & pid[engine]=$!
+    fi
     check "$name: stream-sync listens on :8080" wait_for 120 curl -sf -o /dev/null http://127.0.0.1:8080/v1/sc5000/ui
     check "$name: UI hook loaded the $LANG_PACK pack" wait_for "$ENGINE_START" grep -aq "packs/$LANG_PACK: [0-9]* files" "$W/$name-engine.log"
-    in_root SC5000_UI_ALIVE_CMD="/usr/local/sbin/pkill -0 -f ^/usr/Engine/Engine" /etc/sc5000/engine-ui-guard post >> "$W/$name-boot.log" 2>&1 || :
+    in_root /etc/sc5000/engine-ui-guard post >> "$W/$name-boot.log" 2>&1 || :
 
     # Engine removes a stale /tmp/update-file-url while it starts: a deck owner can only
     # press Update once it is up, so the gate waits the same way before ?apply=1.
@@ -238,6 +247,8 @@ SH
         check "new: UI hook replaced all $want pack files + the gate probe (got ${files:-0})" test "${files:-0}" -ge $((want + 1)) -a "$want" -gt 0
         # What Engine rendered, not what the hook counted: a stale .qmlc showed the stock UI
         # while the hook still logged every file.
+        check "new: main UI acknowledged the current boot attempt without fallback (#140)" \
+            wait_for "$ENGINE_START" bash -c 'test -s "$1/boot-ready" && cmp -s "$1/boot-token" "$1/boot-ready" && test ! -e "$1/safe-mode"' sh "$ui"
         check "new: render probe ran without errors" bash -c "! grep -aq 'SCPROBE error|' '$log'"
         check "new: boot splash unlocked and dismissed (#140)" grep -aqF 'SCPROBE splash|0|1|' "$log"
         label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2) || :
@@ -293,7 +304,8 @@ SH
         check "new: rb-bridge converts a Rekordbox export" in_root /usr/local/bin/rb-bridge --mount-path /tmp/usb
         check "new: Engine Library written with tracks" python3 -I -c 'import sqlite3,sys; sys.exit(0 if sqlite3.connect(sys.argv[1]).execute("select count(*) from Track").fetchone()[0] > 0 else 1)' "$R/tmp/usb/Engine Library/Database2/m.db"
         check "new: fsck.hfsplus runs" bash -c "chroot '$R' /usr/sbin/fsck.hfsplus 2>&1 | grep -qi usage"
-        check "new: healthy timer cleared boot-token while Engine stayed up (#140)" test ! -e "$ui/boot-token"
+        check "new: UI-ready cleared the crash count while Engine stayed up (#140)" \
+            bash -c 'test ! -e "$1/boot-count" && cmp -s "$1/boot-token" "$1/boot-ready"' sh "$ui"
         check "new: running-sentinel armed before power cut (#140)" test -e "$ui/running-sentinel"
         cp "$R/tmp/gate-shim.log" "$W/new-shim.log" 2>/dev/null || :
         : > "$W/new-powercut.ready"
@@ -302,6 +314,8 @@ SH
     elif [ "$name" = boot2 ]; then
         local log=$W/boot2-engine.log files label
         check "boot2: render probe reported (Settings -> Services, About)" wait_for "$ENGINE_START" grep -aq 'SCPROBE done|' "$log"
+        check "boot2: main UI acknowledged the current boot attempt without fallback (#140)" \
+            wait_for "$ENGINE_START" bash -c 'test -s "$1/boot-ready" && cmp -s "$1/boot-token" "$1/boot-ready" && test ! -e "$1/safe-mode"' sh "$ui"
         files=$(sed -n "s|.*packs/$LANG_PACK: \([0-9]*\) files.*|\1|p" "$log" | awk '{s += $1} END {print s + 0}')
         check "boot2: UI hook replaced all $want pack files + the gate probe (got ${files:-0})" test "${files:-0}" -ge $((want + 1)) -a "$want" -gt 0
         check "boot2: render probe ran without errors" bash -c "! grep -aq 'SCPROBE error|' '$log'"
@@ -317,7 +331,8 @@ SH
         check "boot2: no QML load errors" bash -c "! grep -aE 'Type [A-Za-z_][A-Za-z0-9_]* unavailable|PropertyChanges does not support creating|state-specific objects|is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component' '$log'"
         check "boot2: no Engine crash" bash -c "! grep -aE 'Crash with|Unknown exit code' '$log'"
         for v in "${!pid[@]}"; do check "boot2: $v still running after ${BOOT2_SECONDS}s" kill -0 "${pid[$v]}"; done
-        check "boot2: healthy timer cleared boot-token after 15s (#140)" test ! -e "$ui/boot-token"
+        check "boot2: UI-ready cleared the crash count (#140)" \
+            bash -c 'test ! -e "$1/boot-count" && cmp -s "$1/boot-token" "$1/boot-ready"' sh "$ui"
         curl -sf http://127.0.0.1:8080/v1/sc5000/ui > "$W/boot2-ui.json" || :
         check "boot2: GET /v1/sc5000/ui reports $NEWV and persisted upfaderEcho" \
             json "$W/boot2-ui.json" "j.get('version') == '$NEWV' and j.get('upfaderEcho') is True"

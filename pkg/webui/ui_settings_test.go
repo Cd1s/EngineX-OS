@@ -41,15 +41,15 @@ func TestUISettingsPersistAndRestart(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "safe-mode"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Two earlier quick restarts: this deliberate one must not become the third.
+	// Settings restarts must preserve safety state; only /api/boot-reset clears it.
 	if err := os.WriteFile(filepath.Join(dir, "boot-count"), []byte("2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if code, v := uiPost(t, srv.URL, "lang=zh-Hant&restart=1"); code != 200 || v.Language != "zh-Hant" || v.SafeMode || restarts != 1 {
+	if code, v := uiPost(t, srv.URL, "lang=zh-Hant&restart=1"); code != 200 || v.Language != "zh-Hant" || !v.SafeMode || restarts != 1 {
 		t.Fatalf("%d %+v restarts=%d", code, v, restarts)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "boot-count")); !os.IsNotExist(err) {
-		t.Fatalf("boot-count survived the restart: %v", err)
+	if data, err := os.ReadFile(filepath.Join(dir, "boot-count")); err != nil || string(data) != "2\n" {
+		t.Fatalf("settings restart changed boot-count: %q %v", data, err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
 	if err != nil || !slices.Contains(splitLines(data), "lang=zh-Hant") {

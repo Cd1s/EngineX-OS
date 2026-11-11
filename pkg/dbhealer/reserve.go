@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,15 +63,61 @@ func NormalizeReserve(path string) (bool, error) {
 		os.Remove(tmp)
 		return false, err
 	}
-	if err = os.Rename(path, path+".pre-reserve"); err != nil {
+	// Never move the live name out of the way: the CLI deadline can end this
+	// process between any two syscalls. Publish a durable backup first, then
+	// atomically replace the still-present original with the rebuilt database.
+	if err = backupReserve(path); err != nil {
 		os.Remove(tmp)
 		return false, err
 	}
 	if err = os.Rename(tmp, path); err != nil {
-		os.Rename(path+".pre-reserve", path)
 		return false, err
 	}
 	return true, nil
+}
+
+func backupReserve(path string) error {
+	tmp := path + ".pre-reserve.tmp"
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	defer os.Remove(tmp)
+	// Internal ext4 needs no second full copy. Removable filesystems may not
+	// support hard links, so copy without ever renaming the source there.
+	if err := os.Link(path, tmp); err != nil {
+		src, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer src.Close()
+		info, err := src.Stat()
+		if err != nil {
+			return err
+		}
+		dst, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(dst, src)
+		if err == nil {
+			err = dst.Sync()
+		}
+		if closeErr := dst.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tmp, path+".pre-reserve"); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func syncFile(path string) error {

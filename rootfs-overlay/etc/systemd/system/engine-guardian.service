@@ -1,15 +1,17 @@
 [Unit]
-Description=SC5000 library guardian
-After=engine.service sc5000-debloat.service
+Description=EngineX boot safety and diagnostic report export
+After=sc5000-custom-prepare.service
+Before=engine.service
 
 [Service]
-ExecStart=/usr/local/bin/engine-guardian --watch
+ExecStart=/etc/sc5000/engine-ui-guard watch
 Restart=on-failure
-RestartSec=30
-Nice=19
-CPUSchedulingPolicy=idle
+RestartSec=1
+Nice=10
+CPUSchedulingPolicy=other
 CPUAffinity=3
-IOSchedulingClass=idle
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 LimitCORE=0
 
 [Install]

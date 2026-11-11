@@ -182,6 +182,13 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /m/{provider}", s.phonePost)
 	s.mux.HandleFunc("GET /api/ui", s.uiStatus)
 	s.mux.HandleFunc("GET /api/logs", s.downloadLogs)
+	s.mux.HandleFunc("GET /boot-status", s.bootStatus)
+	s.mux.HandleFunc("POST /api/boot-reset", s.bootReset)
+	s.mux.HandleFunc("GET /api/boot-reset", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Allow", "POST")
+		fail(w, http.StatusMethodNotAllowed, errors.New("POST required"))
+	})
+	s.mux.HandleFunc("GET /api/boot-report", s.downloadBootReport)
 	s.mux.HandleFunc("GET /api/update", s.update)
 	s.mux.HandleFunc("POST /api/ui", s.uiUpdate)
 	s.mux.HandleFunc("GET /api/console-qr", s.consoleQR)
@@ -540,7 +547,7 @@ func input(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-const consoleLoginPage = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Stream Sync</title><style>body{background:#111;color:#eee;font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px}main{max-width:460px;margin:12vh auto}h1{font-size:28px}label{display:block;font-weight:600}input,button{box-sizing:border-box;width:100%;padding:14px;margin-top:10px;border-radius:6px;font:inherit}input{background:#222;color:#fff;border:1px solid #555}button{background:#287e60;color:white;border:0;font-weight:600;cursor:pointer}p{color:#bbb}</style><main><h1>Stream Sync</h1><form method="post" action="/login"><label for="token" id="label">Console Access Code</label><input id="token" name="token" type="text" placeholder="XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" required><button id="submit">Sign in</button></form><p id="hint">The Console Access Code is shown on the deck screen under Settings → About.</p></main><script>const l=(navigator.language||'en').toLowerCase();const t=l.startsWith('zh')?(l.includes('hant')||/-(tw|hk|mo)/.test(l)?['控制台存取碼','登入','控制台存取碼顯示在碟機螢幕的「設定 → 關於」中。']:['控制台访问码','登录','控制台访问码显示在碟机屏幕的「设置 → 关于」中。']):null;if(t){document.documentElement.lang=l;document.getElementById('label').textContent=t[0];document.getElementById('submit').textContent=t[1];document.getElementById('hint').textContent=t[2]}</script></html>`
+const consoleLoginPage = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Stream Sync</title><style>body{background:#111;color:#eee;font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px}main{max-width:460px;margin:12vh auto}h1{font-size:28px}label{display:block;font-weight:600}input,button{box-sizing:border-box;width:100%;padding:14px;margin-top:10px;border-radius:6px;font:inherit}input{background:#222;color:#fff;border:1px solid #555}button{background:#287e60;color:white;border:0;font-weight:600;cursor:pointer}p{color:#bbb}</style><main><h1>Stream Sync</h1><form method="post" action="/login"><label for="token" id="label">Console Access Code</label><input id="token" name="token" type="text" placeholder="XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" required><button id="submit">Sign in</button></form><p id="bootFallback" hidden></p><p id="hint">The Console Access Code is shown on the deck screen under Settings → About.</p></main><script>const l=(navigator.language||'en').toLowerCase();const t=l.startsWith('zh')?(l.includes('hant')||/-(tw|hk|mo)/.test(l)?['控制台存取碼','登入','控制台存取碼顯示在碟機螢幕的「設定 → 關於」中。']:['控制台访问码','登录','控制台访问码显示在碟机屏幕的「设置 → 关于」中。']):null;if(t){document.documentElement.lang=l;document.getElementById('label').textContent=t[0];document.getElementById('submit').textContent=t[1];document.getElementById('hint').textContent=t[2]}` + bootLoginNoticeScript + `</script></html>`
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
@@ -959,3 +966,15 @@ func (s *Server) waveform(w http.ResponseWriter, r *http.Request) {
 func ShutdownContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
 }
+
+// Public notice uses only the fixed booleans from /boot-status.
+const bootLoginNoticeScript = `
+const bootNotices=[
+['EngineX fell back to stock Engine. A boot report was saved to your USB drive.','EngineX 已回退至原厂 Engine，启动报告已保存到 U 盘。','EngineX 已退回原廠 Engine，啟動報告已儲存至隨身碟。'],
+['EngineX fell back to stock Engine. A boot report was saved locally; a writable USB/SD drive is unavailable. Insert one to export the report.','EngineX 已回退至原厂 Engine。启动报告已保存在本机；当前没有可写的 U 盘或 SD 卡，插入后将自动导出。','EngineX 已退回原廠 Engine。啟動報告已儲存在本機；目前沒有可寫入的隨身碟或 SD 卡，插入後將自動匯出。'],
+['EngineX fell back to stock Engine. The boot report is currently unavailable.','EngineX 已回退至原厂 Engine，启动报告暂不可用。','EngineX 已退回原廠 Engine，啟動報告暫時無法使用。']];
+const bootNoCodeHints=['No access code is needed to collect the report from your USB/SD drive.','从 U 盘或 SD 卡拷取报告无需访问码。','從隨身碟或 SD 卡取得報告不需存取碼。'];
+const bootNormalHint=document.getElementById('hint').textContent;
+async function showBootNotice(){try{const r=await fetch('/boot-status',{cache:'no-store'});if(!r.ok)return;const v=await r.json();const e=document.getElementById('bootFallback');e.hidden=!v.fallback;const i=l.startsWith('zh')?(l.includes('hant')||/-(tw|hk|mo)/.test(l)?2:1):0;e.textContent=bootNotices[v.driveAvailable?0:v.reportSaved?1:2][i];document.getElementById('hint').textContent=v.fallback?bootNoCodeHints[i]:bootNormalHint}catch{}}
+showBootNotice();setInterval(showBootNotice,5000);
+`

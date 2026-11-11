@@ -29,7 +29,7 @@ from az01_packer import MIGRATE  # one migration snippet for the image and the b
 MIGRATE_IF_DEFAULT = 'if [ -z "${SC5000_CUSTOM:-}" ]; then\n' + MIGRATE + '\nfi'
 
 VERSION_RE = re.compile(r'^\d+(\.\d+){2,4}$')  # same range as az01_packer.py
-APPLETS = ('stream-sync', 'rb-bridge', 'sc5000-deemixd', 'stems-processor')
+APPLETS = ('stream-sync', 'rb-bridge', 'sc5000-deemixd', 'stems-processor', 'engine-guardian')
 
 WRAPPER = '#!/bin/sh\nexec "$(dirname "$0")/sc5000-suite" {} "$@"\n'
 
@@ -184,16 +184,60 @@ mkdir -p /run/systemd/system/engine.service.d
 # leave the hook-less /usr/Engine/Engine running and nobody to run poweroff (#116). The daemons have their own units.
 cat <<EOF > /run/systemd/system/engine.service.d/99-sc5000.conf
 [Unit]
-Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service
+Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service
 
 [Service]
-Environment="LD_PRELOAD=$lib_hook"
+UnsetEnvironment=LD_PRELOAD
+Environment="SC5000_UI_HOOK=$lib_hook"
+Environment="SC5000_ENGINE_GUARDIAN=$bin_dir/engine-guardian"
+ExecStart=
+ExecStart=$bin_dir/engine-ui-guard service /usr/Engine/Scripts/runengine
 Environment="QT_LOGGING_CONF=/data/logging.ini"
 Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M
 Environment=QML_DISABLE_DISK_CACHE=1
 EnvironmentFile=-/data/sc5000-custom/ui-scale.env
 ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home
 ExecStartPre=-$bundle_dir/boot-activate.sh --restore-tz
+ExecStartPre=-$bin_dir/engine-ui-guard pre
+ExecStartPost=-$bin_dir/engine-ui-guard post
+ExecStopPost=-$bin_dir/engine-ui-guard stop
+EOF
+
+# The bootstrap library is dlopened locally by ALSA without a preload, so its
+# Engine patch constructor stays inert. Keep that minimal activator for network
+# diagnostics on subsequent fallback boots; inject nothing into stock Engine.
+# Wrap the actual Engine invocation, including retries inside the vendor loop.
+if [ -x "$bin_dir/engine-ui-guard" ] && [ -f /usr/Engine/Scripts/engine ]; then
+    script_stage=$(mktemp /run/sc5000-engine-script.XXXXXX)
+    sed -E "s|^([[:space:]]*)/usr/Engine/Engine([[:space:]])|\\1$bin_dir/engine-ui-guard launch /usr/Engine/Engine\\2|" \
+        /usr/Engine/Scripts/engine > "$script_stage"
+    chmod 755 "$script_stage"
+    if grep -Fq "$bin_dir/engine-ui-guard launch /usr/Engine/Engine" "$script_stage"; then
+        if cmp -s "$script_stage" /usr/Engine/Scripts/engine; then
+            rm -f "$script_stage"
+        else
+            mv "$script_stage" /run/sc5000-engine-script
+            mount --bind /run/sc5000-engine-script /usr/Engine/Scripts/engine
+        fi
+    else
+        rm -f "$script_stage"
+        "$bin_dir/engine-ui-guard" fallback previous-fallback
+    fi
+fi
+
+cat <<EOF > /run/systemd/system/engine-guardian.service
+[Unit]
+Description=EngineX boot safety and diagnostic report export
+Before=engine.service
+
+[Service]
+ExecStart=$bin_dir/engine-ui-guard watch
+Environment="SC5000_ENGINE_GUARDIAN=$bin_dir/engine-guardian"
+Restart=on-failure
+RestartSec=1
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 EOF
 
 # Converts a rekordbox stick inside the mount, before Engine sees it (as on the 1st-gen images).
@@ -342,7 +386,7 @@ fi
 # Seed /data/StreamingAccounts.json with a stored-credential TIDAL entry (#56, #159)
 # so Engine 5.3.0 logs in to the local gateway at boot instead of waiting for Profile SSO.
 accounts=/data/StreamingAccounts.json
-if [ -d /data ] && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
+if [ ! -e "$dest/ui/safe-mode" ] && [ -d /data ] && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
     export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\",\"accessToken\":\"enginex\",\"refreshToken\":\"enginex\"}"'
     if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
         awk '{
@@ -364,7 +408,7 @@ if [ -d /data ] && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null
 fi
 
 # #160: record the 4-deck satellite link role on Gen2/AZ04 consoles when four_deck_waveform=1.
-if grep -qx 'four_deck_waveform=1' "$dest/ui/settings.conf" 2>/dev/null; then
+if [ ! -e "$dest/ui/safe-mode" ] && grep -qx 'four_deck_waveform=1' "$dest/ui/settings.conf" 2>/dev/null; then
     role=$(sed -n 's/^four_deck_role=//p' "$dest/ui/settings.conf" 2>/dev/null | tail -n 1)
     case $role in 12|13|24|34|1|2) ;; *) role=12 ;; esac
     mkdir -p /run/sc5000-assignments && echo "$role" > /run/sc5000-assignments/role
@@ -372,6 +416,7 @@ fi
 
 # Sticks mounted before this ran never went through the edisksd hook.
 convert_mounted() {
+    [ ! -e "$dest/ui/safe-mode" ] || return 0
     [ -x "$bin_dir/rb-bridge" ] || return 0
     for m in /media/*; do
         if [ -d "$m/PIONEER" ] || [ -d "$m/.PIONEER" ]; then
@@ -382,7 +427,7 @@ convert_mounted() {
 
 # In a chroot systemctl only prints "Running in chroot, ignoring" and exits 0, so require systemd as PID 1.
 if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
-    systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service || :
+    systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service || :
     [ -z "$ssh_key" ] || systemctl start --no-block sshd.service || :
     # Blocking, so edisksd is up again before convert_mounted looks at /media.
     [ "$edisksd_changed" = 0 ] || systemctl restart edisksd.service || :
@@ -391,7 +436,11 @@ if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/
     if check_gen2_tz_newer; then
         : > "${SC5000_TZ_NEWER_MARKER:-/run/sc5000-tz-newer}" 2>/dev/null || :
     fi
-    systemctl restart --no-block engine.service || systemctl restart engine.service || :
+    if [ ! -e "$dest/ui/safe-mode" ]; then
+        systemctl restart --no-block engine.service || systemctl restart engine.service || :
+    else
+        "$bin_dir/engine-ui-guard" pre
+    fi
 else
     restore_gen2_timezone 0 || :
     convert_mounted
@@ -477,8 +526,11 @@ for name in packs icons; do
 done
 mkdir -p "$alsa_dest"
 cp 99-sc5000-custom.conf "$alsa_dest/99-sc5000-custom.conf"
-# Same markers as sc5000-custom-prepare: new packs get a fresh try after safe mode.
-rm -f "$dest/ui/safe-mode" "$dest/ui/mods-quarantined" "$dest/ui/boot-count" "$dest/ui/boot-token" "$dest/ui/last-crash"
+# Same-version repairs preserve fallback. A newly installed version gets one try.
+if [ "$(cat "$dest/ui/.pack-version" 2>/dev/null)" != "$(cat version.txt)" ]; then
+    rm -f "$dest/ui/safe-mode" "$dest/ui/mods-quarantined" "$dest/ui/boot-count" "$dest/ui/boot-token" "$dest/ui/boot-ready" \
+        "$dest/ui/last-crash" "$dest/ui/boot-failures" "$dest/ui/boot-window" "$dest/ui/boot-progress" "$dest/ui/boot-stage" "$dest/ui/boot-report-latest"
+fi
 if [ -z "${SC5000_CUSTOM:-}" ]; then
     rm -rf "/data/AppDataUser/AIR Music Technology/Engine/.cache/qml"
 fi
@@ -521,6 +573,10 @@ fi
 rm -f "$dest/gen2-unlocked"
 rm -f "$alsa_dest/99-sc5000-custom.conf"
 rmdir "$alsa_dest" 2>/dev/null || :
+if [ -z "${SC5000_CUSTOM:-}" ] && [ -e /run/sc5000-engine-script ]; then
+    ! mountpoint -q /usr/Engine/Scripts/engine || umount /usr/Engine/Scripts/engine || :
+    rm -f /run/sc5000-engine-script
+fi
 rm -rf "$dest/bundle"
 if [ -z "${SC5000_CUSTOM:-}" ]; then
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active basic.target >/dev/null 2>&1; then
@@ -528,12 +584,15 @@ if [ -z "${SC5000_CUSTOM:-}" ]; then
             systemctl stop "enginex-$applet.service" 2>/dev/null || :
             rm -f "/run/systemd/system/enginex-$applet.service"
         done
+        systemctl stop engine-guardian.service 2>/dev/null || :
+        rm -f /run/systemd/system/engine-guardian.service
         rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf /run/sc5000-tz-newer
         systemctl daemon-reload 2>/dev/null || :
         systemctl restart --no-block edisksd.service systemd-timesyncd.service 2>/dev/null || :
     fi
     pkill -x sc5000-suite 2>/dev/null || :
     rm -f /run/systemd/system/enginex-stream-sync.service \
+          /run/systemd/system/engine-guardian.service \
           /run/systemd/system/enginex-rb-bridge.service \
           /run/systemd/system/enginex-sc5000-deemixd.service \
           /run/systemd/system/engine.service.d/99-sc5000.conf \
@@ -699,6 +758,8 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
         files[name] = (data, 0o755)
     for applet in APPLETS:
         files[f'bin/{applet}'] = (WRAPPER.format(applet).encode(), 0o755)
+    files['bin/engine-ui-guard'] = ((Path(__file__).resolve().parents[2] /
+                                  'rootfs-overlay/etc/sc5000/engine-ui-guard').read_bytes(), 0o755)
     files['ui-packs.tar'] = (ui_packs_tar(ui_packs), 0o644)
     files['version.txt'] = (f'{version}\n'.encode(), 0o644)
     ntp_dropin = (Path(__file__).resolve().parents[2] / 'rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf').read_text()
