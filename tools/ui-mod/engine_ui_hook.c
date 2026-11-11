@@ -1443,6 +1443,7 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         0xe5c0224c, // hasBluetooth
         0xe5c0224e, // hasBluetoothSendToAssignment
         0xe5c02276, // remote Stems processor support
+        0xe320f000, // gen1 only: hasStemsProcessorFactoryInstalled (config_field[3] + 1)
         0xe320f000, // #152 (5.3.0+): Config.audio.hasStemsLevel ([r0, #0x54] = 1)
         0xe3a02000, // mov r2, #0
         0xe5c02289, // disableHfsPlus
@@ -1468,11 +1469,13 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         *(const uint32_t *)(base + build->config_r3),
         (uint32_t)(base + build->config_site + 8),
     };
-    const unsigned at[] = {1, 2, 3, 4, 7};
+    const unsigned at[] = {1, 2, 3, 4, 8};
     for (unsigned i = 0; i < 5; i++) code[at[i]] = (code[at[i]] & ~0xfffu) | build->config_field[i];
+    if (strcmp(build->name, "5.3.0-sclive4") != 0)
+        code[5] = 0xe5c02000u | (build->config_field[3] + 1u);
     if (build->config_zoom == 0x52c) {
         // #152: unlock native 3-band Stems Level EQ (ChannelStrip) on all 5.3.0 models.
-        code[5] = 0xe5c02054;
+        code[6] = 0xe5c02054;
         // Keep hasNHFx: Mixstream's Main FX switches still need Nh effects.
         // Only its channel Sweep FX collection changes; every non-NH config
         // retains these bytes, including models with Beat Jump disabled.
@@ -1480,17 +1483,17 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         // so no incoming CPSR flags are consumed after this cmp.
         const uint32_t mixstream[] = {0xe5d0212e, 0xe3520000, 0x13a02001,
                                      0x15c020e1, 0x15c0219c, 0x15c0219d, 0x15c024cd};
-        memcpy(code + 16, mixstream, sizeof mixstream);
+        memcpy(code + 17, mixstream, sizeof mixstream);
     }
     if (build->config_zoom) {
         // #77: the players' 30 s zoom-out limit on every model (same SoC; Engine
         // sets 10 s on the all-in-ones). No flags touched; never above 30 in 32-bit.
-        code[14] = 0xe3a0201e;
-        code[15] = 0xe5802000 | build->config_zoom;
+        code[15] = 0xe3a0201e;
+        code[16] = 0xe5802000 | build->config_zoom;
     }
     if (!strcmp(build->name, "5.3.0") && four_deck_layout() > 0) {
         const uint32_t unlock[] = {0xe5d02239, 0xe3520000, 0x13a02004, 0x15802090, 0x13a02000, 0x15c02239};
-        memcpy(code + 8, unlock, sizeof unlock);
+        memcpy(code + 9, unlock, sizeof unlock);
         four_deck_pad_on = player_board();
         four_deck_role();
         fprintf(stderr, "engine-ui-hook: 4-deck layout unlocked (#49)\n");
@@ -1499,7 +1502,7 @@ A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
         // hasMixerMenu is UI +9, root +0x4d1 (QVariant registration
         // 0x15a612c), rather than the older report's root +0x4c9.
         const uint32_t aux[] = {0xe3a02001, 0xe5c02026, 0xe5c024d1, 0xe3a02000};
-        memcpy(code + 8, aux, sizeof aux);
+        memcpy(code + 9, aux, sizeof aux);
     }
     config_jump[0] = 0xe51ff004;
     config_jump[1] = (uint32_t)(uintptr_t)rx_code(code, sizeof code, page);
@@ -1593,6 +1596,10 @@ static const struct engine_edit edits_504[] = {
     {0x85e5f8u, "\x90\xc7\x9f\xe5",
         "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
     {0xf6303cu, "\xe0\x20\x9f\xe5\xd8\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
+    // Gen1 bundles /usr/local/bin/stems-processor: skip first-boot NewFeaturePopup
+    // and treat the existing processor as factory-installed (canModifyInstall == false).
+    {0x4e28ccu, "\x22\x00\x00\x0a", "\x22\x00\x00\xea", 4, EDIT_STEMS},
+    {0x86520cu, "\x00\x80\xa0\xe1", "\x05\x80\xa0\xe1", 4, EDIT_STEMS},
     // TIDAL's client names a downloaded file after its codec and knows FLAC and AAC,
     // so an MP3 from the gateway would be saved with no extension and fail to load.
     // Its one "aac" string is both what it compares the codec with and the extension
@@ -1633,6 +1640,10 @@ static const struct engine_edit edits_530[] = {
         "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x03\x80\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
     {0x8be39cu, "\x8c\xc7\x9f\xe5", "\x1e\xff\x2f\xe1", 4, EDIT_STEMS},
     {0x1537148u, "\xe4\x20\x9f\xe5\xdc\x30\x9f\xe5", (const char *)config_jump, 8, EDIT_STEMS},
+    // Gen1 bundles /usr/local/bin/stems-processor: skip first-boot NewFeaturePopup
+    // and treat the existing processor as factory-installed (canModifyInstall == false).
+    {0x5070ecu, "\x21\x00\x00\x0a", "\x21\x00\x00\xea", 4, EDIT_STEMS},
+    {0x8c5e84u, "\x00\x80\xa0\xe1", "\x05\x80\xa0\xe1", 4, EDIT_STEMS},
     // #166 ChannelSweepFx: hasNHFx == 0 already takes the full collection.
     // Force that same native Filter/Dub Echo/Noise/Filter Roll/Wash path on NH.
     {0xd1aaf4u, "\xbb\x03\x00\x0a", "\xbb\x03\x00\xea", 4, EDIT_STEMS},
