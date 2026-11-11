@@ -134,7 +134,7 @@ class UiModSourceTest(unittest.TestCase):
     def test_zoom_and_browse_encoder_are_stock(self):
         # The maintainer wants the stock ZOOM / Browse knob: 0.5 s per detent, hold = Grid Edit,
         # Shift+hold = Cue Edit, double press = Instant Double, also while playing (#147, #157 undone).
-        for gone in ("/GUI/Scripted/Zoom", "scZoom(", "BrowseEncoder.qml", "DeckAction.qml",
+        for gone in ("/GUI/Scripted/Zoom", "scZoom(", "BrowseEncoder.qml", "DeckAction.qml", "Vinyl.qml", "JogWheel.qml",
                      "!deckConfig.gridEditActive && deckConfig.playing"):
             self.assertNotIn(gone, SRC)
         self.assertIn("Planck.getProperty(\"/Engine/Master/WaveformZoom\")", bp.ZOOM_PROP)  # the shadow lane reads it
@@ -2625,12 +2625,64 @@ for (const rate of [1, 0.5]) {
 """)
 
 
-class JogGridEditGuardTest(unittest.TestCase):
-    def test_jog_guards_stay_while_zoom_is_stock(self):
-        # #157's jog half is not a ZOOM / Browse change: Shift+Vinyl while playing and Jog Touch in Grid Edit.
-        self.assertIn("(globalConfig.shift && !deckConfig.playing) || deckConfig.gridEditActive", SRC)
-        self.assertIn("!deckConfig.gridEditActive &&\\n", SRC)
-        self.assertNotIn("BrowseEncoder.qml", SRC)
+class StockJogControlsTest(unittest.TestCase):
+    def test_jog_and_vinyl_keep_stock_grid_edit_behavior(self):
+        # #157 stays closed with stock behavior, including during playback.
+        old_root = bp.ROOT
+        try:
+            for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+                bp.ROOT = root
+                for dev in (False, True):
+                    with self.subTest(root=root, dev=dev):
+                        edits = bp.edits(dev)
+                        for name in ("Vinyl", "JogWheel", "BrowseEncoder", "DeckAction"):
+                            self.assertFalse(f"ControlSurfaceModules/ControlSurfaceModules/{name}.qml" in edits, name)
+        finally:
+            bp.ROOT = old_root
+
+
+class MasterLedStockTest(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "node needed for the MASTER LED behavior checks")
+    def test_own_master_path_keeps_stock_dim_level_and_manual_request(self):
+        rel = "ControlSurfaceModules/ControlSurfaceModules/Sync.qml"
+        qrc = LAB / "5.3.0/qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found")
+        stock = (qrc / rel).read_text()
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            text = stock
+            for old, new in bp.edits(False)[rel]:
+                text = bp.patch(text, old, new, rel)
+        finally:
+            bp.ROOT = old_root
+        # Only the status path differs: the LED body and manual MASTER path stay stock.
+        self.assertEqual(text.split('objectName: "Master Deck LED"', 1)[1],
+                         stock.split('objectName: "Master Deck LED"', 1)[1])
+        self.assertEqual(text.split("            ValueNoteAssignment {", 1)[1].split("            OutputAssignment {", 1)[0],
+                         stock.split("            ValueNoteAssignment {", 1)[1].split("            OutputAssignment {", 1)[0])
+        path = text.split("readonly property string isMasterPath:", 1)[1].split("ValueNoteAssignment {", 1)[0].strip()
+        led = text.split('objectName: "Master Deck LED"', 1)[1].split("readonly property int ledValue: {", 1)[1].split("\n                }", 1)[0]
+        script = "const assert = require('node:assert/strict'), vm = require('node:vm');\n"
+        script += "const path = " + json.dumps(path) + ", led = " + json.dumps(led) + ";\n"
+        script += r"""
+const players = ['JP07', 'JP08', 'JP13', 'JP14'];
+for (const board of [...players, 'JP11', 'JC11', 'JC16', 'NH08', 'NH08S', 'NH10', 'JP21', 'JC11S', 'JP24', 'JP20', 'JP11S', 'RMZ2']) {
+    for (const isPlayer of [false, true]) for (const hasSyncing of [false, true]) {
+        const Config = {device: {name: board, isPlayer}, network: {hasSyncing}};
+        const deckConfig = {activeDeckPath: '/Engine/Deck3/', inDJMode: true};
+        const own = !hasSyncing || (!isPlayer && players.includes(board));
+        assert.equal(vm.runInNewContext(path, {Config, deckConfig}), own ? '/Engine/Deck3/DeckIsMaster' : '/Engine/Sync/Network/MasterStatus');
+        for (const masterStatus of [false, true]) for (const inDJMode of [false, true]) {
+            deckConfig.inDJMode = inDJMode;
+            assert.equal(vm.runInNewContext(led, {Config, deckConfig, masterStatus}), inDJMode ? (masterStatus ? 127 : 1) : 0, board);
+        }
+    }
+}
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class ShadowMasterBackTest(unittest.TestCase):
