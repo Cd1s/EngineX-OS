@@ -4194,5 +4194,138 @@ assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=UTC');
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class StemsHqHintAndInstallerTest(unittest.TestCase):
+    def test_stems_hq_status_line_and_translations(self):
+        rows = bp.load_dict()
+        offline_en = "On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network."
+        online_prefix = "High-quality stems:"
+        self.assertIn(offline_en, rows)
+        self.assertIn(online_prefix, rows)
+        self.assertIn("EngineX Stems", rows[offline_en]["zh-Hans"])
+        self.assertIn("EngineX Stems", rows[offline_en]["zh-Hant"])
+        self.assertEqual(rows[online_prefix]["zh-Hans"], "高音质分轨：")
+        self.assertEqual(rows[online_prefix]["zh-Hant"], "高音質分軌：")
+        self.assertIn('LibraryTabContent.qml"].append', SRC)
+        self.assertIn("root.scLanStemsLine(root.scLanStemsInfo, root.scLang)", SRC)
+        fn = re.search(r"function scLanStemsLine\([^)]*\)\s*\{[\s\S]*?\n\t\}", bp.SERVICES_MAIN).group(0)
+        script = f"""
+const assert = require('assert');
+const rows = {json.dumps(rows, ensure_ascii=False)};
+let scLang = 'en';
+function scT(s) {{
+    if (scLang === 'en') return s;
+    return (rows[s] && rows[s][scLang]) || s;
+}}
+{fn}
+assert.equal(scLanStemsLine(null, 'en'), {json.dumps(offline_en)});
+assert.equal(scLanStemsLine({{online: false, hostname: 'studio-mac', backend: 'htdemucs'}}, 'en'), {json.dumps(offline_en)});
+assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, 'en'), 'High-quality stems: studio-mac (htdemucs)');
+assert.equal(scLanStemsLine({{online: true, endpoint: 'http://192.168.1.9:17890'}}, 'en'), 'High-quality stems: http://192.168.1.9:17890 (htdemucs)');
+scLang = 'zh-Hans';
+assert.equal(scLanStemsLine(null, scLang), rows[{json.dumps(offline_en)}]['zh-Hans']);
+assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'htdemucs'}}, scLang), '高音质分轨：studio-mac (htdemucs)');
+scLang = 'zh-Hant';
+assert.equal(scLanStemsLine(null, scLang), rows[{json.dumps(offline_en)}]['zh-Hant']);
+assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hpss'}}, scLang), '高音質分軌：studio-mac (hpss)');
+"""
+        r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_home_worker_scripts_default_to_demucs_and_keep_hpss(self):
+        import os
+        sh_txt = (REPO / "tools/stems/run-home-worker.sh").read_text(encoding="utf-8")
+        ps_txt = (REPO / "tools/stems/run-home-worker.ps1").read_text(encoding="utf-8")
+        self.assertIn("ENGINEX_STEMS_BACKEND:-demucs", sh_txt)
+        self.assertIn("else { 'demucs' }", ps_txt)
+        self.assertIn("ValidateSet('auto', 'hpss', 'demucs', 'htdemucs')", ps_txt)
+        with tempfile.TemporaryDirectory(prefix="home-worker-test-") as tmp:
+            tdir = Path(tmp)
+            stems_dir = tdir / "stems"
+            stems_dir.mkdir()
+            for name in ("run-home-worker.sh", "worker.py"):
+                dst = stems_dir / name
+                dst.write_text((REPO / "tools/stems" / name).read_text(encoding="utf-8"), encoding="utf-8")
+                dst.chmod(0o755)
+            log_file = tdir / "calls.log"
+            # Mock venv python3 + enginex-stemsd so no network/pip is touched.
+            venv_bin = tdir / "home/venv/bin"
+            venv_bin.mkdir(parents=True)
+            py_mock = venv_bin / "python3"
+            py_mock.write_text(
+                f"#!/bin/sh\necho \"py:$*\" >> {str(log_file)!r}\n"
+                "case \"$*\" in\n"
+                "  *\"import demucs\"*) exit 1 ;;\n"
+                "  *\"--print-backend\"*)\n"
+                "    case \"$*\" in *\"--backend hpss\"*) echo hpss ;; *) echo htdemucs ;; esac\n"
+                "    exit 0 ;;\n"
+                "esac\nexit 0\n",
+                encoding="utf-8",
+            )
+            py_mock.chmod(0o755)
+            stemsd_mock = stems_dir / "enginex-stemsd"
+            stemsd_mock.write_text(f"#!/bin/sh\necho \"stemsd:$*\" >> {str(log_file)!r}\nexit 0\n", encoding="utf-8")
+            stemsd_mock.chmod(0o755)
+            env = {**os.environ, "ENGINEX_STEMS_HOME": str(tdir / "home")}
+            env.pop("ENGINEX_STEMS_BACKEND", None)
+            env.pop("ENGINEX_STEMSD", None)
+            env.pop("SC5000_STEMSD", None)
+            r_default = subprocess.run(["/bin/sh", str(stems_dir / "run-home-worker.sh")], env=env, capture_output=True, text=True)
+            self.assertEqual(r_default.returncode, 0, r_default.stderr)
+            calls_default = log_file.read_text(encoding="utf-8")
+            self.assertIn("pip install -q demucs", calls_default)
+            self.assertIn('get_model("htdemucs")', calls_default)
+            self.assertIn("-backend demucs", calls_default)
+
+            log_file.write_text("", encoding="utf-8")
+            r_hpss = subprocess.run(["/bin/sh", str(stems_dir / "run-home-worker.sh"), "hpss"], env=env, capture_output=True, text=True)
+            self.assertEqual(r_hpss.returncode, 0, r_hpss.stderr)
+            calls_hpss = log_file.read_text(encoding="utf-8")
+            self.assertNotIn("pip install -q demucs", calls_hpss)
+            self.assertIn("-backend hpss", calls_hpss)
+
+    def test_build_installer_bundles_stems_service_and_trilingual_readme(self):
+        import os, zipfile
+        readme = (REPO / "tools/stems/README.md").read_text(encoding="utf-8")
+        for marker in ("## English", "## 简体中文", "## 繁體中文", "run-home-worker.sh", "run-home-worker.ps1"):
+            self.assertIn(marker, readme)
+        with tempfile.TemporaryDirectory(prefix="installer-pkg-test-") as tmp:
+            tdir = Path(tmp)
+            fake_bin = tdir / "bin"
+            out_dir = tdir / "out"
+            fake_bin.mkdir()
+            out_dir.mkdir()
+            fake_go = fake_bin / "go"
+            fake_go.write_text(
+                '#!/bin/sh\nout=""\nwhile [ $# -gt 0 ]; do\n'
+                '  if [ "$1" = "-o" ]; then out="$2"; shift 2; else shift; fi\n'
+                'done\nprintf "#!/bin/sh\\nexit 0\\n" > "$out"\nchmod 755 "$out"\n',
+                encoding="utf-8",
+            )
+            fake_go.chmod(0o755)
+            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"}
+            r = subprocess.run(
+                ["/bin/sh", str(REPO / "tools/az01-packer/build-installer.sh"), "5.3.0.4", str(out_dir)],
+                env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            import tarfile, zipfile
+            with tarfile.open(out_dir / "EngineX-Installer-5.3.0.4-linux-amd64.tar.gz", "r:gz") as tf:
+                names = {m.name.lstrip("./") for m in tf.getmembers()}
+                for req in ("enginex-installer", "install-enginex.sh", "stems/enginex-stemsd",
+                            "stems/worker.py", "stems/run-home-worker.sh", "stems/run-home-worker.ps1", "stems/README.md"):
+                    self.assertIn(req, names)
+            for zname, stems_bin in (
+                ("EngineX-Installer-5.3.0.4-macos-arm64.zip", "stems/enginex-stemsd"),
+                ("EngineX-Installer-5.3.0.4-macos-amd64.zip", "stems/enginex-stemsd"),
+                ("EngineX-Installer-5.3.0.4-windows-amd64.zip", "stems/enginex-stemsd.exe"),
+            ):
+                with zipfile.ZipFile(out_dir / zname) as zf:
+                    znames = set(zf.namelist())
+                    for req in (stems_bin, "stems/worker.py", "stems/run-home-worker.sh", "stems/run-home-worker.ps1", "stems/README.md"):
+                        self.assertIn(req, znames)
+                    sh_mode = (zf.getinfo("stems/run-home-worker.sh").external_attr >> 16) & 0o777
+                    self.assertEqual(sh_mode & 0o111, 0o111)
+
+
 if __name__ == "__main__":
     unittest.main()

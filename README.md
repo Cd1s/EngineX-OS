@@ -336,14 +336,14 @@ Download the bundle for your model and check its SHA-256 against `SHA256SUMS.txt
 - Tap **Update** on the screen and confirm — the deck will automatically launch the full-screen updater, download the new image, and reboot.
 - **Second-generation models** (SC LIVE 4 / 2, PRIME 4+, PRIME GO+, Mixstream Pro+ / Pro Go, PRIME 4 G2, SYSTEM ONE): once the `/data` bundle is installed, later releases (for example `5.3.0.4`) are found and installed the same way from **Settings → About / Update**. The deck downloads that release's `Data-Bundle.tar.gz`, checks `SHA256SUMS`, swaps the files in one step and restarts the EngineX services; the system partition is never touched (#86).
 
-### Optional: Use Your Computer to Speed Up Stems
-If your Mac or PC is on the same Wi-Fi as your deck, run one command on your computer and the deck will automatically find it and use your computer's GPU/CPU for fast AI Stems separation (no IP address or password setup needed):
+### Optional: High-Quality Neural Stems with Your Computer
+On-deck separation uses a fast basic spectral split. For high-quality neural Stems (`htdemucs` on GPU / Apple MPS / CPU), unzip `EngineX-Installer` on a Mac or PC on the same Wi-Fi / LAN as your deck and run one command (also available under `tools/stems/` in a source checkout; append `hpss` for lightweight spectral mode). Your deck discovers the computer automatically (UDP 17891 / mDNS, no IP address or password setup) and shows `High-quality stems: <host> (htdemucs)` in **Profile → Library** and **Settings → About / Update**:
 ```sh
-# macOS / Linux
-tools/stems/run-home-worker.sh
+# macOS / Linux (from unzipped EngineX-Installer; or tools/stems/run-home-worker.sh)
+./stems/run-home-worker.sh
 
-# Windows (PowerShell)
-powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs
+# Windows PowerShell (from unzipped EngineX-Installer; or tools\stems\run-home-worker.ps1)
+powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1
 ```
 
 ### Streaming Login: the Deck Alone Is Enough

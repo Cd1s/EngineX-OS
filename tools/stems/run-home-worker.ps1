@@ -3,14 +3,13 @@
 # again once it is switched off. Allow enginex-stemsd.exe on private networks
 # when Windows Firewall asks.
 #
-#   powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1          # auto
-#   powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs   # NVIDIA CUDA or CPU
-#   powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 hpss
+#   powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1          # default: install demucs (htdemucs, NVIDIA CUDA or CPU)
+#   powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 hpss     # fast spectral split, numpy + scipy only
 #
 # Needs Python 3 (python.org or the py launcher) and enginex-stemsd.exe (in
-# PATH, next to this script, or $env:SC5000_STEMSD). Packages go into
+# PATH, next to this script, or $env:ENGINEX_STEMSD). Packages go into
 # %USERPROFILE%\.enginex-stems\venv.
-param([ValidateSet('auto', 'hpss', 'demucs', 'htdemucs')][string]$Backend = $(if ($env:ENGINEX_STEMS_BACKEND) { $env:ENGINEX_STEMS_BACKEND } else { 'auto' }))
+param([ValidateSet('auto', 'hpss', 'demucs', 'htdemucs')][string]$Backend = $(if ($env:ENGINEX_STEMS_BACKEND) { $env:ENGINEX_STEMS_BACKEND } else { 'demucs' }))
 # Not 'Stop': Windows PowerShell 5.1 would turn a probe's stderr (2>$null) into an error. Failures throw.
 $ErrorActionPreference = 'Continue'
 $here = $PSScriptRoot
@@ -18,7 +17,7 @@ $home_ = if ($env:ENGINEX_STEMS_HOME) { $env:ENGINEX_STEMS_HOME } else { Join-Pa
 $venv = Join-Path $home_ 'venv'
 $py = Join-Path $venv 'Scripts\python.exe'
 
-$bin = $env:SC5000_STEMSD
+$bin = if ($env:ENGINEX_STEMSD) { $env:ENGINEX_STEMSD } else { $env:SC5000_STEMSD }
 if (-not $bin) { $bin = (Get-Command enginex-stemsd.exe -ErrorAction SilentlyContinue).Source }
 if (-not $bin) { $bin = Join-Path $here 'enginex-stemsd.exe' }
 if (-not (Test-Path $bin)) {
