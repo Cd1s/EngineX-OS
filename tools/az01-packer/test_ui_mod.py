@@ -3143,5 +3143,25 @@ assert.ok(!presses.some(p=>p.endsWith('/RequestMaster')),'a copy must not reques
 """)
 
 
+class I18nTranslateRegressionTest(unittest.TestCase):
+    def test_empty_quote_does_not_desync_shadow_badge_literals_and_labeltext_translates(self):
+        rows = bp.load_dict()
+        for lang, expected in (
+            ("zh-Hans", ("离线 · ", "仅曲目信息", "等待源碟机分析波形", "概览波形", "关闭")),
+            ("zh-Hant", ("離線 · ", "僅曲目資訊", "等待來源碟機分析波形", "概覽波形", "關閉")),
+        ):
+            table = {en: t[lang] for en, t in rows.items()}
+            badge = (
+                '            text: !scDisplay.sample ? "" : (scDisplay.stale ? "OFFLINE · " : "") + '
+                '(scDisplay.sample.metadataOnly ? "REMOTE" : scDisplay.sample.engine || scDisplay.busyState > 0 ? "" : '
+                '!scDisplay.meta ? "Waiting for source analysis" : !scDisplay.detailed ? "OVERVIEW" : "")'
+            )
+            translated = bp.translate(badge, table, set(), live=True)
+            for item in expected[:4]:
+                self.assertIn(item, translated)
+            btn = bp.translate('            labelText: "Dismiss"', table, set(), live=True)
+            self.assertIn(expected[4], btn)
+
+
 if __name__ == "__main__":
     unittest.main()
