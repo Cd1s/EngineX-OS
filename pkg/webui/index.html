@@ -99,6 +99,7 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="setting"><div class="txt"><b data-i18n="tEcho"></b><span class="sub" data-i18n="sEcho"></span></div><label class="sw"><input type="checkbox" data-toggle="upfaderEcho"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tLimiter"></b><span class="sub" data-i18n="sLimiter"></span></div><label class="sw"><input type="checkbox" data-toggle="masterLimiter"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tGain"></b><span class="sub" data-i18n="sGain"></span></div><label class="sw"><input type="checkbox" data-toggle="autoGain"><span></span></label></div>
+  <div class="setting"><div class="txt"><b data-i18n="tFxTimeMode"></b><span class="sub" data-i18n="sFxTimeMode"></span></div><div class="seg" data-seg="fxTimeMode"><button data-v="beats" data-i18n="fxBeats"></button><button data-v="ms">ms</button></div></div>
   <div class="setting"><div class="txt"><b data-i18n="tOmni"></b><span class="sub" data-i18n="sOmni"></span></div><label class="sw"><input type="checkbox" data-toggle="omniSource"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tAnalyze"></b><span class="sub" data-i18n="sAnalyze"></span></div><label class="sw"><input type="checkbox" data-toggle="autoAnalyze"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tShare"></b><span class="sub" data-i18n="sShare"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkShare"><span></span></label></div>
@@ -147,6 +148,7 @@ deck:['Deck display & audio','碟机显示与音频','碟機顯示與音訊'],qu
 tEcho:['Upfader Echo Out','推子切歌自动回音','推桿切歌自動回音'],sEcho:['A one-beat echo tail when a fader is pulled down fast','快速拉下推子时自动留一拍回音尾巴','快速拉下推桿時自動留一拍回音尾巴'],
 tLimiter:['Master soft clipper','0dB 防破音软限幅','0dB 防破音軟限幅'],sLimiter:['Stops clipping at the master output; applies right away','防止主输出削波，立即生效','防止主輸出削波，立即生效'],
 tGain:['Auto-Gain 0 dB','自动增益 0 dB 归一化','自動增益 0 dB 正規化'],sGain:['Brings every track to 0 dB peak, with the soft limiter','把每首歌峰值拉到 0 dB，含软限幅','把每首歌峰值拉到 0 dB，含軟限幅'],
+tFxTimeMode:['PX delay time mode','PX 延时时间模式','PX 延遲時間模式'],sFxTimeMode:['PX only: default timing or 10–4000 ms; stock FX stay in beats','仅 PX：默认时间或 10–4000 ms；原厂效果保持节拍模式','僅 PX：預設時間或 10–4000 ms；原廠效果保持節拍模式'],fxBeats:['Default (Off)','默认（关闭）','預設（關閉）'],
 tOmni:['OmniSource','OmniSource 全源同屏混排','OmniSource 全源同屏混排'],sOmni:['Show USB / SD drives next to streaming in one browser and search','在流媒体浏览和搜索里同时显示 U 盘 / SD 卡','在串流瀏覽和搜尋裡同時顯示隨身碟 / SD 卡'],
 tAnalyze:['Auto-analyze drives (unavailable)','插盘后台自动分析（暂不可用）','插碟背景自動分析（暫不可用）'],sAnalyze:['Preference retained; automatic analysis is temporarily unavailable','保留偏好设置；后台自动分析暂不可用','保留偏好設定；背景自動分析暫不可用'],
 tShare:['Pro DJ Link library','Pro DJ Link 曲库','Pro DJ Link 曲庫'],sShare:['Read the USB drives of CDJs on the network','读取局域网内 CDJ 的 U 盘','讀取區域網路內 CDJ 的隨身碟'],
@@ -277,7 +279,7 @@ function showUI(v){lastUI=v;
  const caps=v.capabilities||{};
  tg('upfaderEcho').closest('.setting').hidden=caps.mixer!==undefined?!caps.mixer:!!v.player; // #52: players have no channel faders
  why(tg('prolinkExport'),v.prolinkExport&&!v.prolinkExportActive?t('waitRbUsb'):'');
- const segs={quality:v.quality,lang:v.language};
+ const segs={quality:v.quality,lang:v.language,fxTimeMode:v.fxTimeMode||'beats'};
  for(const g of document.querySelectorAll('[data-seg]'))for(const b of g.querySelectorAll('button'))b.classList.toggle('on',b.dataset.v===segs[g.dataset.seg]);
  const lname={en:'English','zh-Hans':'简体中文','zh-Hant':'繁體中文'}[v.language]||v.language;
  $('uiState').textContent=t('current')+': '+lname+' · '+v.quality+(v.safeMode?' · '+t('safeMode'):'')}
