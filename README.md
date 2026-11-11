@@ -188,6 +188,18 @@ Bring the Rekordbox USB stick you exported for CDJs and plug it straight into yo
 </tr>
 <tr>
 <td width="50%" align="center" valign="top">
+<img src="./docs/assets/screenshots/en/08-control-center.png" width="100%" alt="Control Center"><br>
+<b>Control Center</b><br>
+<sub>Quantize, Smart Scratch, Waveform Style and Smart Sync on one pull-down page</sub>
+</td>
+<td width="50%" align="center" valign="top">
+<img src="./docs/assets/screenshots/en/11-layout-manager.png" width="100%" alt="Layout Views 1–5"><br>
+<b>Layout Tab (Views 1–5 & EngineX View Preset)</b><br>
+<sub>Five saved layout views, Cue Countdown, UI Scale, Paired Player, 4-Deck Role and Shadow Deck Mode</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center" valign="top">
 <img src="./docs/assets/screenshots/en/05-streaming-playlists-bpm-swipe.png" width="100%" alt="Streaming Playlists with BPM & Key"><br>
 <b>BPM & Key Preview + Swipe Left for Stems</b><br>
 <sub>See track BPM and key before loading, and swipe left to split Stems</sub>

@@ -2155,3 +2155,31 @@ func TestIsDeckUIRecognisesTheLoginPage(t *testing.T) {
 		srv.Close()
 	}
 }
+
+func TestLangSingleLanguageOutput(t *testing.T) {
+	cases := []struct {
+		lang       string
+		wantSub    string
+		forbidSubs []string
+	}{
+		{"en", "Settings -> About / Update -> Firmware Update Mode -> Options", []string{"局域网", "區域網路", "正在"}},
+		{"zh-CN", "设置 → 关于 / 更新 → 固件更新模式 → 选项", []string{"Looking for decks", "區域網路", "隨身碟"}},
+		{"zh-TW", "設定 → 關於 / 更新 → 韌體更新模式 → 選項", []string{"Looking for decks", "局域网", "U 盘"}},
+	}
+	for _, tc := range cases {
+		var buf bytes.Buffer
+		o := &options{Lang: tc.lang, Out: &buf}
+		o.guide()
+		o.say("正在局域网中寻找碟机…", "Looking for decks on the LAN...")
+		o.say("USB Fastboot 识别到 Denon DJ PRIME 4 (jc11) · 镜像组："+imageGroup("jc11"), "Fastboot found Denon DJ PRIME 4 (jc11) · image group: "+imageGroup("jc11"))
+		got := buf.String()
+		if !strings.Contains(got, tc.wantSub) || !strings.Contains(got, "PRIME 4 / PRIME 2 / Mixstream Pro") {
+			t.Errorf("lang=%s missing expected text:\n%s", tc.lang, got)
+		}
+		for _, bad := range tc.forbidSubs {
+			if strings.Contains(got, bad) {
+				t.Errorf("lang=%s unexpectedly contained %q:\n%s", tc.lang, bad, got)
+			}
+		}
+	}
+}

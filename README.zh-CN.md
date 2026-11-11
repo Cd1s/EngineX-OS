@@ -92,7 +92,7 @@
 - **开机与关机画面全屏铺满（#175）**：开启界面缩放（UI Scale，非 100% 如 75%）时，开机启动画面与关机遮罩现补齐全屏锚定，在所有缩放比例下均完整铺满屏幕，消除黑边（覆盖 SC LIVE 4 等全系机型）；
 - **影子轨细波形显示修复**：暂停状态下刚加载的影子轨不再出现空白（解决切细波形时的渲染时序问题）；细波形切片尚未下载完成时，滚动波形泳道不再将整首歌的概览图拉伸挤入小波形，而是保持干净的拍线与指针显示，就绪后平滑渲染；
 - **Mod 插件中心局域网修复（#202）、可执行权限保留（#170）与 `dmx-studio` Mod（#134）**：Web 控制台 Mod 插件中心请求改走带访问码认证与同源校验的 `/api/mods` 与 `/api/mods/upload`，修复局域网浏览器访问报 `403`（#202）；安装 `.tar.gz` Mod 时保留文件可执行权限位（`0111`，过滤 setuid/setgid/sticky 位，#170）；独立多域 DMX512 从核心剥离为按需开源 Mod `dmx-studio`（未启用时 0 内存与 0 后台进程，#134）；
-- **SC5000 / SC6000 开启四轨后保持原厂播放器行为、图层颜色与 `MASTER` 灯暗亮值（#49）**：在独立播放器（`SC5000 / SC5000M / SC6000 / SC6000M`）上开启 `布局 → ENGINEX 视图预设 → 四轨波形显示`（`4-Deck Waveform`）后，完整保持原厂播放器行为——各轨颜色按 `设置 → 设备 → 碟机编号 #`（`Player #`）与 `图层（Layer A / B）` 自动映射 `配置 → 碟机颜色`（`Profile → Deck Colors`，保留 `Layer A / B` 双层选色盘），在曲库按 `Browse` 浏览旋钮直接加载到本机当前层（`Layer A` 或 `Layer B`），并恢复 `设置 → 设备 → 碟机编号 #`（`Player #`）、`布局 → 碟机行为 → 图层 B`（`Layout → DECK BEHAVIOR → Layer B`，关闭时右侧提示 `启用双层播放`）、`设置 → 混音台 → 采样器输出`（`Settings → Mixer → Sampler Output`：`Layer A / 图层 B`）、远程碟机选择、`Engine Connect` 与 `触控效果 (Touch FX)` 的 `Mute` 静音按钮；四轨独立播放器的 `MASTER` 按键灯按本轨主控状态点亮，全系非主控 `MASTER` 灯亮度保持原厂暗亮值，转盘操控保持原厂行为；
+- **SC5000 / SC6000 开启四轨后保持原厂播放器行为、图层颜色与 `MASTER` 灯暗亮值（#49）**：在独立播放器（`SC5000 / SC5000M / SC6000 / SC6000M`）上开启 `布局 → ENGINEX 视图预设 → 四轨波形显示`（`4-Deck Waveform`）后，完整保持原厂播放器行为——各轨颜色按 `设置 → 设备 → 碟机编号 #`（`Player #`）与 `Layer A / B` 自动映射 `配置 → 碟机颜色`（`Profile → Deck Colors`，保留 `Layer A / B` 双层选色盘），在曲库按 `Browse` 浏览旋钮直接加载到本机当前层（`Layer A` 或 `Layer B`），并恢复 `设置 → 设备 → 碟机编号 #`（`Player #`）、`布局 → 碟机行为 → Layer B`（`Layout → DECK BEHAVIOR → Layer B`，关闭时右侧提示 `启用双层播放`）、`设置 → 混音台 → 采样器输出`（`Settings → Mixer → Sampler Output`：`Layer A / Layer B`）、远程碟机选择、`Engine Connect` 与 `触控效果 (Touch FX)` 的 `Mute` 静音按钮；四轨独立播放器的 `MASTER` 按键灯按本轨主控状态点亮，全系非主控 `MASTER` 灯亮度保持原厂暗亮值，转盘操控保持原厂行为；
 - **`全部 CDJ 模式` 与 CDJ 回退时影子轨头部及波形层对齐原厂样式（#49）**：当 `布局 → ENGINEX 视图预设 → 影子轨模式`（`Shadow Deck Mode`）设为 `全部 CDJ 模式`（`All CDJ Mode`），或在 `自动`（`Auto`）模式下遇到无法拷贝音频的 CDJ 曲目回退至显示模式（以及一体机 `Line In` 通道显示 CDJ 波形）时，影子轨头部与波形层全面对齐原厂样式：专辑封面（`布局 → 演出布局 → 显示专辑封面`）、滚动歌名与歌手（`设置 → 设备 → 隐藏歌名/歌手` 与 `配置 → 显示 → 曲目标题`）、剩余 / 已播时间（点击可切换）、跟随原厂显示设置的调性与调性色及锁调 `Key Lock` 图标（先锋称 `Master Tempo`）、开启 `同步`（`Sync`，先锋称 `Beat Sync`）时变绿的大号 `BPM`、`变速范围`（`Pitch Range`，先锋称 `Tempo Range`）与变速百分比（`pitch`）、软接管箭头 `▲▼`、`主控 (LEAD)` 指示（先锋称 `MASTER`）、`循环 (Loop)` 与 `节拍跳跃 (Beat Jump)`、`热标拍数倒数`（`Hot Cue Countdown`）以及按 `配置 → 显示 → 曲目结束提醒`（`Track End Warning`）设置时间触发的曲末红闪；波形泳道与概览条对齐原厂变速跨度、2.2× / 1.3× 底边锚定高度、时间进度条（`TimeBar`）、上下热标三角（`HotCueTriangle`）与标签、描边小节号及原厂底栏激活态；
 - **通用 USB MIDI 控制器映射器 Mod（`midi-controller-mapper`，#137，待实机验证）**：将外部 USB MIDI 控制器（首发内置 **Pioneer CDJ-400** `PC MODE` 预设，支持自定义 JSON 预设）直接映射到四轨模式下的内部 `Deck 3` 或 `Deck 4`，无需切换硬件 Layer。未启用时桥接完全停止（零后台轮询）；启用后 helper 以最低调度优先级 `os.nice(19)` 按需 60 Hz 同步（5.3.0 沙箱自测桥接延迟 `p50 ≈ 1.6 ms`），支持 CDJ-400 连续速度转盘积分（`Bn 10`，`64=停止`）、带屏幕 `▲` / `▼`（`SpeedOffsetUp` / `SpeedOffsetDown` / `SpeedNeutral`）指示的变速推子软接管，以及 USB 热拔插 / MIDI 风暴自动停用保护（注：CDJ-400 标准 USB MIDI 模式不接收外部 Note/CC LED 回传，状态与 `▲▼` 指示直接显示在碟机屏幕上）；
 - **官方 Mod 1.1.0 静态 Go 辅助程序与就地覆盖升级（#208、#134）**：此前官方 Mod（`dmx-studio`、`jog-logo-studio`、`sampler-pad-studio`、`minimal-club-mode`、`midi-controller-mapper`）使用 Python 辅助程序，因全系 16 款碟机均无 Python 而无法启动（Mixstream Pro+ NH08S 实机报告）。现全部改为双架构静态 Go 二进制（一代与二代 armhf 用 `bin/enginex-mod-helper-armv7`，PRIME 4 G2 / SYSTEM ONE 用 `bin/enginex-mod-helper-arm64`），由 busybox `sh` `start.sh` 按 `uname -m` 选择，保持原有本地 HTTP 接口与 `Panel.qml` 不变；其中 `dmx-studio` 的 uDMX 改为直连 Linux `usbfs`（免 `libusb`），FTDI/OpenDMX 保持 #208 真机实测参数（`termios2` 250000 8N2、120 µs break / 12 µs MAB、约 38 Hz，对音频零干扰）。在 `:8080` Web 控制台直接上传 `1.1.0` `.tar.gz` 即可就地覆盖旧版 `1.0.0` 并保留启用状态与设置。Mod 开发者注意：碟机无 Python、无编译器、无包管理器，请参考模板 [`docs/mods/src/helper-template/`](docs/mods/src/helper-template/) 使用 `CGO_ENABLED=0` 编译 `GOARCH=arm GOARM=7` 与 `arm64` 静态二进制；
@@ -184,6 +184,18 @@
 <img src="./docs/assets/screenshots/zh-CN/04-streaming-qr-login.png" width="100%" alt="手机扫码登录"><br>
 <b>屏幕二维码扫码登录</b><br>
 <sub>手机扫一扫直接同步个人歌单，免输密码</sub>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center" valign="top">
+<img src="./docs/assets/screenshots/zh-CN/08-control-center.png" width="100%" alt="控制中心"><br>
+<b>下拉控制中心</b><br>
+<sub>量化、智能搓碟、波形样式与智能同步一屏直达</sub>
+</td>
+<td width="50%" align="center" valign="top">
+<img src="./docs/assets/screenshots/zh-CN/11-layout-manager.png" width="100%" alt="布局视图 1–5"><br>
+<b>布局页（视图 1–5 与 EngineX 视图预设）</b><br>
+<sub>5 组预设视图、热标拍数倒数、界面缩放、双碟机配对、四轨角色与影子轨模式</sub>
 </td>
 </tr>
 <tr>
