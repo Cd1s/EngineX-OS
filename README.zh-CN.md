@@ -77,6 +77,7 @@
 - **OmniSource 歌单隔离（#105）**：开启 OmniSource（跨源搜索）后，搜索栏仍可同时检索各流媒体和全部 U 盘曲库，但各流媒体自己的歌单页不再混入 `[USB: ...]` 条目和其他平台的歌单；
 - **SoundCloud 点赞歌单回退（#150）**：用户 OAuth `refresh_token` 过期、SoundCloud 返回 `HTTP 400` 时，自动回退到 App Token 和公开主页接口，继续加载 `Liked Tracks & Sets`；
 - **Spotify Connect 局域网发现（#150）**：内置 Avahi `_spotify-connect._tcp` mDNS 广播，`stream-sync` 另带纯 Go 的 `_spotify-connect._tcp.local.` mDNS 广播器（有线 `eth0` + 无线 `wlan0` 双网卡也能被发现），并使用标准 768-bit Diffie-Hellman 公钥，手机 Spotify App 可在局域网里直接发现 `EngineX OS`；同时修复 OAuth 登录后曲目下载返回 `410` 的问题；
+- **Spotify 原生音频与零配置登录（#210，5.3.0.4）**：Spotify Premium 音频改用纯 Go `go-librespot` 协议栈与 AES 解密，优先 320 kbps Ogg Vorbis（其次 160/96 kbps），绝不回退到 Deemix。在 Spotify Connect 选择 **`EngineX OS`**，或扫描直达官方设备授权页的二维码，无需创建 Developer App；纯 Go `.ogg` 分析生成 BPM、调性与波形并导入 Engine 曲库。
 - **流媒体缓存隔离与 Deemix 智能共享**：Spotify、Beatport、SoundCloud 与网易云「官方直下」模式各用独立下载通道与缓存命名空间；网易云「Deemix 优先」时与 Deezer 共享无损缓存，互相点播同一首不重复下载；
 - **SoundCloud Go+ 与高清智能路由**：长混音 / DJ Set（超过 10 分钟）始终直连 SoundCloud 官方流；非 Set 普通单曲与 Go+ 专享曲目：已绑定 Go+ 优先官方高音质流，未绑定时自动在已登录的其他流媒体（Deezer / 网易云 / Beatport）匹配无损 / 320k 音频，避免 30 秒试听限制；
 - **品牌统一与免域名公网连接**：面向用户的组件统一为 `enginex-relay`（原 `sc5000-relay`）、`enginex-stemsd`（原 `sc5000-stemsd`）、`enginex-suite`，运行目录为 `/data/enginex`（保留 `/data/sc5000-custom` 兼容软链接）；支持 Cloudflare Quick Tunnel 免域名一键公网穿透，手机扫码即可远程登录流媒体；中继控制台新增 `已连接碟机集群（Multi-Deck Hub）` 卡片，汇总同一后端下所有碟机的在线状态、机位角色（`13` / `24`）、固件版本和流媒体登录状态，可用碟机访问码或主密码登录；各碟机 `设置 → 关于 / 更新` 页会实时显示 Stems 算力节点状态；
@@ -142,7 +143,7 @@
 - **SC5000 / SC6000 原生四轨布局**：在独立播放机上解锁 Engine 自带的四轨界面，声卡仍只用 2 路。每台播放机负责自己角色的两轨（`自动`、`1+3`、`2+4`、`1+2`、`3+4`、`1`、`2`，在 `布局 → ENGINEX 视图预设 → 四轨角色` 切换），其余各轨是不出声的**影子轨道**，跟随另一台 EngineX 碟机或 CDJ 的曲目、播放 / CUE、位置、速度、Master 和同步；
 - 向 Shoutcast / Icecast 服务器 **直播推流**；
 - **曲库**：rekordbox 导出的 U 盘（包括 6.8.5）即使有个别文件损坏也能正常导入，那几首在加载时再分析；选中其他流媒体服务时，不再弹出 Engine 5.3.0 的「Connect to your Engine DJ Profile to use Tidal」提示；
-- **Spotify 改用你自己的应用**：Spotify 限制每个应用的用户数和请求量，所以不再内置共用的应用。到 `developer.spotify.com/dashboard` 免费创建一个应用，把网页控制台里显示的 Redirect URI 加进去，再把它的 Client ID 填回控制台（`#70`）；
+- **Spotify 登录（#210）**：Connect 局域网配对与官方设备授权二维码使用内置桌面客户端，无需自建 Client ID；设备授权不可用时保留 PKCE、粘贴与公开歌单链接方式。旧 Web API token 需要重新 Connect 配对或扫码授权一次，才能解密原生音频。
 - **流媒体与影子轨道更稳**：在碟机上开着的流媒体歌单，后台服务重启后照样能加载，不再报「Track not found」（`#73`）；影子轨道显示真实歌名，没有标签的文件也一样，另一台从流媒体浏览器加载的歌也能跟随；加载歌曲时打击垫保持在 HOT CUE（`#71`）。
 
 > **先锋联机说明**：与先锋 CDJ-3000 的联机互通（曲库共享、3-Band 波形、60fps 播放头与 Master / Beat Sync 对拍）是用维护者自研的 [**OpenProLink**](https://github.com/Cd1s/OpenProLink)（内置虚拟 CDJ-3000 模拟器，以及先锋全系 CDJ / XDJ 碟机与 DJM 混音台的协议采集工具 `prolink-probe`）与实机 Denon SC5000 联调验证的。手头暂时没有先锋 CDJ-3000 实体真机，接先锋真机的表现还需要大家实测。欢迎拥有先锋 CDJ-3000、CDJ-2000NXS2、XDJ-AZ / XZ 或先锋混音台（DJM-A9 / DJM-V10 / DJM-900NXS2）真机的玩家前往 [Cd1s/OpenProLink](https://github.com/Cd1s/OpenProLink) 或本仓库提交真机实测反馈与设备 / 混音台协议包信息，共同完善跨品牌曲库、混音台效果器速度同步（Beat FX Sync）、量化（Quantize）与 On-Air 联动！
@@ -353,7 +354,7 @@ powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1
 | 平台 | 怎么登录 |
 | --- | --- |
 | 网易云音乐 | 用网易云音乐 App 扫碟机屏幕上的二维码并确认。二维码过期后点一下就会换新的。 |
-| Spotify | **方式 A（推荐）**：手机或电脑打开 Spotify App 播放任意歌曲，点右下角「连接设备」音箱图标，选择 **`EngineX OS`** 约 1 秒自动完成账号绑定。**方式 B**：点 Spotify 右侧的「扫码登录」用手机扫码。直接从 Spotify 拉取 320kbps Ogg Vorbis 原生音频播放。 |
+| Spotify | **音频需要 Premium。** 同一局域网内在 Spotify Connect 选择 **`EngineX OS`**，或扫碟机二维码直接打开 Spotify 官方设备授权确认页。正常流程无需自建 Client ID，也无需粘贴回环网址。原生 AES 解密的 Ogg Vorbis 优先 320 kbps，其次 160/96 kbps；纯 Go 分析 BPM、调性与波形并导入 Engine 曲库。绝不回退到 Deemix。 |
 | Deezer | 粘贴你的 **ARL**（页面教程演示怎样在电脑上从 deezer.com 复制）。同一次登录为 Deezer 曲目打开 Deemix 无损 FLAC 下载；网易云只有选了「Deemix 优先」才会用到它。Spotify、Beatport、Apple Music 都只从自己的音源播放，不会跨平台兜底；SoundCloud 仅在没有 Go+ 时，才为 Go+ 专享曲目和非 Set 单曲改用已登录的 Deezer / 网易云 / Beatport（见 SoundCloud 一行）。只填资料页链接则只显示公开歌单、不能下载。 |
 | SoundCloud | 填用户名或主页链接即可，不用密码、不用 Artist Pro、也不用申请 API。私密歌单在「高级」里粘贴 soundcloud.com 的 `oauth_token`。每首歌按它能提供的最高音质播放：允许下载的用上传者原档，其次 256kbps AAC、160kbps AAC、128kbps MP3。Go+ 专享曲目和非 Set 单曲：已绑定 Go+ 账号直连官方高音质流；没有 Go+ 时改用已登录的 Deezer / 网易云 / Beatport 匹配无损 / 320k 并缓存为 `soundcloud-<id>.*`；超过 10 分钟的 DJ Set 始终直连 SoundCloud。 |
 | Apple Music | 已解锁 Engine 5.3.0 自带的 Apple Music 音源，直接从 Apple Music 播放，EngineX 不再去 Deezer 或网易云找替身。手机上仍可粘贴歌单链接，或填 `media-user-token` 浏览自己的资料库。 |

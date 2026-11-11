@@ -17,6 +17,8 @@ import (
 )
 
 type Token struct {
+	Scope        string    `json:"scope,omitempty"`
+	Username     string    `json:"username,omitempty"`
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token,omitempty"`
 	TokenType    string    `json:"token_type,omitempty"`
@@ -27,6 +29,13 @@ type Token struct {
 }
 type Spotify struct {
 	BaseURL, AccountsURL, ClientID, TokenPath string
+	CredsPath, DeviceID                       string
+	nativeMu                                  sync.Mutex
+	native                                    spotifyNative
+	nativeClosed                              bool
+	nativeFactory                             func(context.Context) (spotifyNative, error)
+	mediaOnce                                 sync.Once
+	mediaHTTP                                 *http.Client
 	StreamURL                                 string
 	LinksPath, EmbedURL                       string // public playlist links (spotify_links.go)
 	AudioKey                                  []byte
@@ -112,6 +121,9 @@ func (s *Spotify) LoadToken() error {
 	return nil
 }
 
+// SetClientID serializes app changes with OAuth token refresh.
+func (s *Spotify) SetClientID(id string) { s.mu.Lock(); s.ClientID = id; s.mu.Unlock() }
+
 // HasToken reports whether a login token is present, safe against concurrent refresh.
 func (s *Spotify) HasToken() bool {
 	s.mu.Lock()
@@ -121,6 +133,11 @@ func (s *Spotify) HasToken() bool {
 
 // SetToken installs and saves a token obtained elsewhere, such as the cloud relay.
 func (s *Spotify) SetToken(t Token) error {
+	s.nativeMu.Lock()
+	defer s.nativeMu.Unlock()
+	if s.nativeClosed {
+		return errors.New("spotify: session closed")
+	}
 	if t.AccessToken == "" {
 		return errors.New("spotify: token missing access token")
 	}
@@ -151,6 +168,12 @@ func (s *Spotify) tokenRequest(ctx context.Context, v url.Values) error {
 	if t.RefreshToken == "" {
 		t.RefreshToken = s.Token.RefreshToken
 	}
+	if t.Scope == "" {
+		t.Scope = s.Token.Scope
+	}
+	if t.Username == "" {
+		t.Username = s.Token.Username
+	}
 	if t.ExpiresIn <= 0 {
 		t.ExpiresIn = 3600
 	}
@@ -161,8 +184,19 @@ func (s *Spotify) tokenRequest(ctx context.Context, v url.Values) error {
 }
 func (s *Spotify) authorization(ctx context.Context) (http.Header, error) {
 	s.mu.Lock()
+	expired := !s.Token.Expiry.IsZero() && time.Now().Add(30*time.Second).After(s.Token.Expiry)
+	useNative := s.HasStoredCredentials() && (s.Token.AccessToken == "" || expired || s.Token.RefreshToken == "")
+	if useNative {
+		s.mu.Unlock()
+		var token string
+		err := s.withNative(ctx, func(n spotifyNative) (err error) { token, err = n.Bearer(ctx); return err })
+		if err != nil {
+			return nil, err
+		}
+		return http.Header{"Authorization": {"Bearer " + token}}, nil
+	}
 	defer s.mu.Unlock()
-	if !s.Token.Expiry.IsZero() && time.Now().Add(30*time.Second).After(s.Token.Expiry) {
+	if expired {
 		if s.Token.RefreshToken == "" || s.ClientID == "" {
 			return nil, errors.New("spotify: expired token; login required")
 		}
@@ -179,15 +213,27 @@ func (s *Spotify) authorization(ctx context.Context) (http.Header, error) {
 // BeginPKCE returns an authorization URL and a private verifier. The caller
 // binds state, verifier, redirect URI and expiry to the initiating session.
 func (s *Spotify) BeginPKCE(state, redirect string) (authURL, verifier string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	verifier = RandomID()
 	hash := sha256.Sum256([]byte(verifier))
-	authURL = endpoint(s.accounts(), "/authorize", url.Values{"client_id": {s.ClientID}, "response_type": {"code"}, "redirect_uri": {redirect}, "scope": {"user-library-read playlist-read-private playlist-read-collaborative"}, "state": {state}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}})
+	authURL = endpoint(s.accounts(), "/authorize", url.Values{"client_id": {s.ClientID}, "response_type": {"code"}, "redirect_uri": {redirect}, "scope": {spotifyOAuthScopes}, "state": {state}, "code_challenge_method": {"S256"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(hash[:])}})
 	return
 }
 func (s *Spotify) CompletePKCE(ctx context.Context, code, verifier, redirect string) error {
+	s.nativeMu.Lock()
+	if s.nativeClosed {
+		s.nativeMu.Unlock()
+		return errors.New("spotify: session closed")
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.tokenRequest(ctx, url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {verifier}, "redirect_uri": {redirect}})
+	err := s.tokenRequest(ctx, url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {verifier}, "redirect_uri": {redirect}})
+	s.mu.Unlock()
+	s.nativeMu.Unlock()
+	if err != nil {
+		return err
+	}
+	return s.ExchangeOAuthCredentials(ctx)
 }
 func (s *Spotify) get(ctx context.Context, path string, out any) error {
 	h, err := s.authorization(ctx)
@@ -207,10 +253,13 @@ const SpotifyLikedID = "liked"
 
 func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 	linked := s.linkedPlaylists()
-	if !s.HasToken() {
+	if !s.HasToken() && !s.HasStoredCredentials() {
 		return linked, nil
 	}
 	all, err := s.apiPlaylists(ctx)
+	if s.nativeLibraryFallback(err) {
+		all, err = s.nativePlaylists(ctx)
+	}
 	if err != nil && len(linked) > 0 {
 		return linked, nil
 	}
@@ -307,10 +356,18 @@ func (s *Spotify) Tracks(ctx context.Context, id string) ([]Track, error) {
 	if t, ok := s.linkedTracks(id); ok {
 		return t, nil
 	}
+	var tracks []Track
+	var err error
 	if id == SpotifyLikedID {
-		return s.likedTracks(ctx)
+		tracks, err = s.likedTracks(ctx)
+	} else {
+		tracks, err = s.trackPages(ctx, "/playlists/"+url.PathEscape(id)+"/items", 100, true)
 	}
-	return s.trackPages(ctx, "/playlists/"+url.PathEscape(id)+"/items", 100, true)
+	if s.nativeLibraryFallback(err) {
+		return s.nativeTracks(ctx, id)
+	}
+	return tracks, err
+
 }
 
 func (s *Spotify) Search(ctx context.Context, query string) ([]Track, error) {

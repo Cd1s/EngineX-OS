@@ -134,7 +134,9 @@ func (s *Server) relayCollect(session *Session, v relaySession) error {
 		if v.SpotifyToken == nil {
 			return errRelayIncomplete
 		}
-		return p.SetToken(*v.SpotifyToken)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return p.AcceptToken(ctx, *v.SpotifyToken)
 	case *providers.Deezer:
 		if v.Deezer == nil || !providers.IsDeezerUserID(v.Deezer.UserID) {
 			return errRelayIncomplete

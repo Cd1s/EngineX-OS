@@ -310,3 +310,57 @@ func TestLibraryImportRejectsInvalidAnalysisBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestOggDecodeAnalyzeAndLibraryImport(t *testing.T) {
+	path, root, db := testlibrary.Create(t)
+	library, err := OpenLibrary(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer library.Close()
+	file := filepath.Join(root, "spotify-4uLU6hMCjMI75M1A2tKUQC.ogg")
+	if err := os.WriteFile(file, oggStereo(t), 0600); err != nil {
+		t.Fatal(err)
+	}
+	audio, result, err := AnalyzeFile(file, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if audio.Format != "ogg" || result.SampleRate != 16000 || result.TotalSamples != 128000 || result.Duration != 8 ||
+		result.BPM <= 0 || result.Key.EngineID < 1 || result.Key.EngineID > 24 || len(result.Waveform) == 0 || len(result.Overview) != OverviewEntries {
+		t.Fatalf("incomplete Ogg analysis: %+v", result)
+	}
+	for _, format := range []string{"ogg", ""} {
+		// Test explicit format on insert and extension inference on reimport.
+		id, err := library.Import(context.Background(), Import{Path: file, Title: "Ogg stereo", Playlist: "Ogg", Format: format, Result: result})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var storedPath, storedType string
+		var analyzed bool
+		var bpm float64
+		var key int
+		if err := db.QueryRow("SELECT path,fileType,isAnalyzed,bpmAnalyzed,key FROM Track WHERE id=?", id).Scan(&storedPath, &storedType, &analyzed, &bpm, &key); err != nil {
+			t.Fatal(err)
+		}
+		if storedType != "ogg" || storedPath != "../"+filepath.Base(file) || !analyzed || bpm != result.BPM || key != result.Key.EngineID {
+			t.Fatalf("Ogg metadata: %q %q analyzed=%v bpm=%g key=%d", storedPath, storedType, analyzed, bpm, key)
+		}
+		var track, overview, beats []byte
+		if err := db.QueryRow("SELECT trackData,overviewWaveFormData,beatData FROM PerformanceData WHERE trackId=?", id).Scan(&track, &overview, &beats); err != nil {
+			t.Fatal(err)
+		}
+		tr := uncompress(t, track)
+		if binary.BigEndian.Uint64(tr[8:16]) != 128000 || len(uncompress(t, overview)) != 3099 || len(uncompress(t, beats)) < 25 {
+			t.Fatal("missing or incorrect Ogg performance data")
+		}
+	}
+	var count int
+	if err := db.QueryRow("SELECT count(*) FROM PlaylistEntity").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("duplicate membership: %d %v", count, err)
+	}
+	var integrity string
+	if err := db.QueryRow("PRAGMA integrity_check").Scan(&integrity); err != nil || integrity != "ok" {
+		t.Fatalf("integrity: %q %v", integrity, err)
+	}
+}

@@ -28,15 +28,23 @@ func TestColdFetchDiscoversFinishedProviderFileWithoutNetwork(t *testing.T) {
 	if err := testaudio.FLAC(&audio, testaudio.Song(1)); err != nil {
 		t.Fatal(err)
 	}
+	oggAudio, err := os.ReadFile("testdata/spotify-native-44100.ogg")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, provider := range []string{"deezer", "netease", "spotify", "beatport"} {
 		t.Run(provider, func(t *testing.T) {
 			dir := t.TempDir()
 			name := provider + "-42.flac"
+			payload := audio.Bytes()
 			if provider == "deezer" {
 				name = "42.flac"
+			} else if provider == "spotify" {
+				name = "spotify-42.ogg"
+				payload = oggAudio
 			}
 			path := filepath.Join(dir, name)
-			if err := os.WriteFile(path, audio.Bytes(), 0600); err != nil {
+			if err := os.WriteFile(path, payload, 0600); err != nil {
 				t.Fatal(err)
 			}
 			j := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{BaseURL: srv.URL, DownloadDir: dir}})
@@ -58,15 +66,22 @@ func TestColdFileDiscoveryKeepsProviderIsolationAndFinalNames(t *testing.T) {
 	if err := testaudio.FLAC(&audio, testaudio.Song(1)); err != nil {
 		t.Fatal(err)
 	}
+	oggAudio, err := os.ReadFile("testdata/spotify-native-44100.ogg")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"42.flac", ".part-99.flac", ".deemix-99-test.part", "spotify-13.flac"} {
 		if err := os.WriteFile(filepath.Join(dir, name), audio.Bytes(), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(dir, "spotify-14.ogg"), oggAudio, 0600); err != nil {
+		t.Fatal(err)
+	}
 	j := NewJobs(Pipeline{Catalog: noCatalog{}, Deemix: &deemixclient.Client{DownloadDir: dir}})
 	defer j.Close()
 	j.neteaseDirect = func() bool { return true }
-	for _, tr := range []providers.Track{{ID: "42", Provider: "netease"}, {ID: "42", Provider: "spotify"}, {ID: "42", Provider: "beatport"}, {ID: "42", Provider: "soundcloud"}, {ID: "99", Provider: "deezer"}, {ID: "13", Provider: "deezer"}, {ID: "../42", Provider: "netease"}, {ID: "18446744073709551616", Provider: "deezer"}} {
+	for _, tr := range []providers.Track{{ID: "42", Provider: "netease"}, {ID: "42", Provider: "spotify"}, {ID: "42", Provider: "beatport"}, {ID: "42", Provider: "soundcloud"}, {ID: "99", Provider: "deezer"}, {ID: "13", Provider: "deezer"}, {ID: "14", Provider: "deezer"}, {ID: "13", Provider: "spotify"}, {ID: "../42", Provider: "netease"}, {ID: "18446744073709551616", Provider: "deezer"}} {
 		if path := j.File(tr); path != "" {
 			t.Fatalf("%s:%s crossed cache boundary: %q", tr.Provider, tr.ID, path)
 		}

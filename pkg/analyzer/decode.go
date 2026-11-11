@@ -19,7 +19,7 @@ type Audio struct {
 	SampleRate    int
 	Channels      int
 	BitsPerSample int
-	// Format 为 "wav"、"flac" 或 "mp3"。
+	// Format is "wav", "flac", "mp3", or "ogg".
 	Format  string
 	Samples []float32
 }
@@ -32,7 +32,7 @@ func (a *Audio) Duration() float64 {
 	return float64(len(a.Samples)) / float64(a.SampleRate)
 }
 
-// DecodeFile 按文件头（而不是扩展名）识别 WAV/FLAC/MP3 并解码。
+// DecodeFile detects WAV, FLAC, MP3, or Ogg Vorbis by header and decodes it.
 func DecodeFile(path string) (*Audio, error) {
 	return decodeFile(path, nil)
 }
@@ -71,6 +71,8 @@ func decodeFile(path string, ticker Ticker) (*Audio, error) {
 		return DecodeWAV(br)
 	case len(head) >= 4 && string(head[0:4]) == "fLaC":
 		return DecodeFLAC(br)
+	case len(head) >= 4 && string(head[0:4]) == "OggS":
+		return decodeOggVorbis(br, ticker, MaxDecodedSamples)
 	case len(head) >= 3 && string(head[0:3]) == "ID3",
 		len(head) >= 2 && head[0] == 0xFF && head[1]&0xE0 == 0xE0:
 		return DecodeMP3(br)

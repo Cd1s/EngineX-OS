@@ -20,7 +20,7 @@ import (
 // defaultPassword is the console password the test servers are set up with.
 const defaultPassword = "test-relay-password"
 
-// testSpotifyClientID stands in for an operator's own Spotify app; there is no built-in one.
+// testSpotifyClientID stands in for an operator's explicitly configured app.
 const testSpotifyClientID = "0123456789abcdef0123456789abcdef"
 
 func newTestServer(t *testing.T) *server {
@@ -668,5 +668,28 @@ exec sleep 30
 	w := do(h, "GET", "/api/config", "", map[string]string{"X-Deemix-Password": defaultPassword})
 	if w.Code != 200 || !strings.Contains(w.Body.String(), wantURL) {
 		t.Fatalf("GET /api/config missing tunnel URL: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestSpotifyBuiltinRelayFallbackRequestsStreaming(t *testing.T) {
+	cfg, err := loadConfig(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientID := cfg.get().SpotifyClientID
+	if clientID != "65b708073fc0480ea92a077233ca87bd" {
+		t.Fatal("relay has no desktop fallback")
+	}
+	a := newSpotifyAuth(filepath.Join(t.TempDir(), "learned.json"), "https://relay.example.invalid/oauth/spotify/callback")
+	u, err := url.Parse(a.authorizeURL(clientID, spotifyLoopbackURI, "state", "verifier"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := " " + u.Query().Get("scope") + " "
+	if !strings.Contains(scope, " streaming ") || !strings.Contains(scope, " user-read-private ") || u.Query().Get("redirect_uri") != spotifyDesktopURI || a.useHTTPS(context.Background(), clientID) {
+		t.Fatal("desktop fallback used wrong scopes or redirect")
+	}
+	if spotifyClientRedirect(testSpotifyClientID, spotifyLoopbackURI) != spotifyLoopbackURI {
+		t.Fatal("custom app redirect changed")
 	}
 }

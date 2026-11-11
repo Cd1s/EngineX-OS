@@ -23,6 +23,8 @@ var tokenRe = regexp.MustCompile(`^[A-Za-z0-9._~-]{16,256}$`)
 func validToken(t string) bool { return tokenRe.MatchString(t) }
 
 type spotifyToken struct {
+	Scope        string    `json:"scope,omitempty"`
+	Username     string    `json:"username,omitempty"`
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
 	TokenType    string    `json:"token_type"`

@@ -46,12 +46,15 @@ type loginFlow struct {
 	expires  time.Time
 	// spotifyState is the last authorization the phone page offered, for a pasted
 	// address that lost its state.
-	spotifyState string
+	spotifyState  string
+	spotifyDevice *providers.SpotifyDeviceAuth
+	UserCode      string `json:"userCode,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 
 // DefaultSpotifyClientID is the public Spotify Desktop client ID, so the deck's
 // QR login works with nothing set. An owner's own ID (spotifyClientPath) wins.
-const DefaultSpotifyClientID = "65b708073fc0480ea92a077233ca87bd"
+var DefaultSpotifyClientID = providers.SpotifyBuiltinClientID
 
 var spotifyClientIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
@@ -307,9 +310,12 @@ func lanHost() string {
 
 // ownerSession returns the single owner session of a service, creating it if needed.
 func (s *Server) ownerSession(provider string) (*Session, error) {
+	s.prune()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.prune()
+	if provider == "spotify" && s.spotifyOwnerClosing {
+		return nil, errors.New("spotify: logout in progress")
+	}
 	delete(s.ownerDeleted, provider)
 	for _, v := range s.sessions {
 		if !v.Guest && v.Provider == provider {
@@ -340,7 +346,20 @@ func (s *Server) loginStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	flow := &loginFlow{Provider: provider, Status: "waiting", token: providers.RandomID(), session: session.ID, expires: time.Now().Add(loginLifetime)}
-	if n, ok := session.p.(*providers.Netease); ok {
+	if sp, ok := session.p.(*providers.Spotify); ok && sp.DeviceAuthorizationEnabled() {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		device, err := sp.BeginDeviceAuth(ctx)
+		cancel()
+		if err == nil {
+			flow.spotifyDevice = device
+			flow.Target = device.VerificationURL
+			flow.UserCode = device.UserCode
+			flow.expires = device.Expires
+		}
+	}
+	if flow.Target != "" {
+		// The QR opens Spotify's official confirmation directly.
+	} else if n, ok := session.p.(*providers.Netease); ok {
 		q, err := n.BeginQR(r.Context())
 		if err != nil {
 			fail(w, 502, err)
@@ -387,10 +406,25 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 	session := s.sessions[flow.session]
 	status, key, token, viaRelay := flow.Status, flow.key, flow.token, flow.viaRelay
 	expired := time.Now().After(flow.expires)
+	device := flow.spotifyDevice
+	initialStatus := status
+	var loginError string
 	s.mu.Unlock()
 	switch {
 	case session == nil || expired:
 		status = "expired"
+	case device != nil && status != "done" && status != "linked":
+		done, err := session.p.(*providers.Spotify).PollDeviceAuthorization(r.Context(), device)
+		if err != nil {
+			loginError = err.Error()
+		}
+		if errors.Is(err, providers.ErrSpotifyDeviceAuthExpired) {
+			status = "expired"
+		} else if errors.Is(err, providers.ErrSpotifyAuthentication) {
+			status = "error"
+		} else if done {
+			status = "done"
+		}
 	case key != "":
 		code, err := session.p.(*providers.Netease).PollQR(r.Context(), key)
 		if err != nil {
@@ -416,13 +450,19 @@ func (s *Server) loginStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Lock()
+	if flow.Status != initialStatus && (flow.Status == "linked" || flow.Status == "done") {
+		status = flow.Status
+		loginError = ""
+	}
 	flow.Status = status
+	flow.Error = loginError
 	if status == "done" && session != nil {
 		session.Ready = true
 		flow.token = ""
 	}
+	snapshot := *flow
 	s.mu.Unlock()
-	respond(w, flow)
+	respond(w, &snapshot)
 }
 
 func (s *Server) loginQR(w http.ResponseWriter, r *http.Request) {
@@ -486,12 +526,19 @@ func (s *Server) phoneGet(w http.ResponseWriter, r *http.Request) {
 			fail(w, 500, errors.New("invalid login session"))
 			return
 		}
-		sp.ClientID = s.spotifyClientID()
+		s.mu.Lock()
+		device := flow.spotifyDevice
+		s.mu.Unlock()
+		if device != nil {
+			phonePage(w, r, spotifyDevicePhonePage(lang, device.VerificationURL, device.UserCode))
+			return
+		}
+		sp.SetClientID(s.spotifyClientID())
 		state := providers.RandomID()
 		redirect := s.spotifyRedirect()
 		auth, verifier := sp.BeginPKCE(state, redirect)
-		s.mu.Lock()
 		s.prune()
+		s.mu.Lock()
 		s.pending[state] = pending{session.ID, verifier, redirect, time.Now().Add(loginLifetime)}
 		flow.spotifyState = state
 		s.mu.Unlock()
@@ -700,7 +747,7 @@ func (s *Server) phonePost(w http.ResponseWriter, r *http.Request) {
 				refuse("spRefused", "")
 				return
 			}
-			if err := p.SetToken(providers.Token{AccessToken: accessToken, ClientID: s.spotifyClientID()}); err != nil {
+			if err := p.AcceptToken(r.Context(), providers.Token{AccessToken: accessToken, Username: profile.ID, ClientID: s.spotifyClientID()}); err != nil {
 				fail(w, 500, errors.New("could not save Spotify token"))
 				return
 			}
@@ -774,7 +821,12 @@ func (s *Server) spotifyClientPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) spotifyConnectGet(w http.ResponseWriter, r *http.Request) {
-	respond(w, providers.SpotifyConnectInfo{Status: 101, StatusString: "OK", Version: "2.9.0", DeviceID: "enginex-os-spotify-connect", RemoteName: "EngineX OS", PublicKey: providers.SpotifyConnectKeyPair().PublicKey(), DeviceType: "SPEAKER", LibraryVersion: "0.1.0", AccountReq: "PREMIUM"})
+	deviceID, err := providers.LoadSpotifyDeviceID(s.cfg.StateDir)
+	if err != nil {
+		fail(w, 500, err)
+		return
+	}
+	respond(w, providers.SpotifyConnectInfo{Status: 101, StatusString: "OK", Version: "2.9.0", DeviceID: deviceID, RemoteName: "EngineX OS", PublicKey: providers.SpotifyConnectKeyPair().PublicKey(), DeviceType: "SPEAKER", LibraryVersion: "0.1.0", AccountReq: "PREMIUM", TokenType: "default", Scope: "streaming,client-authorization-universal"})
 }
 
 // spotifyConnectAvahi announces the Zeroconf endpoint, so Spotify apps on the LAN
@@ -808,7 +860,11 @@ func ensureSpotifyConnectService(dir string) error {
 
 func (s *Server) spotifyConnectPost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 65536)
-	body, _ := io.ReadAll(r.Body)
+	body, bodyErr := io.ReadAll(r.Body)
+	if bodyErr != nil {
+		spotifyConnectDenied(w, 403)
+		return
+	}
 	var (
 		action      string
 		userName    string
@@ -847,17 +903,60 @@ func (s *Server) spotifyConnectPost(w http.ResponseWriter, r *http.Request) {
 		action = r.URL.Query().Get("action")
 	}
 
-	// A phone's addUser carries its credentials as an encrypted blob. Check it is
-	// really for this deck's key; it holds librespot-style login data, not a Web API
-	// token, so nothing here can use it yet and it is not stored.
-	if action == "addUser" && accessToken == "" && blob != "" && clientKey != "" {
-		if _, err := providers.SpotifyConnectKeyPair().DecryptBlob(clientKey, blob); err != nil {
-			log.Printf("stream-sync: spotify connect addUser from %s (%s): %v", r.RemoteAddr, userName, err)
+	if action == "addUser" || accessToken != "" {
+		if !s.addUserBusy.CompareAndSwap(false, true) {
+			spotifyConnectDenied(w, 403)
+			return
+		}
+		defer s.addUserBusy.Store(false)
+		if time.Now().UnixNano() < s.addUserRetryAt.Load() {
+			spotifyConnectDenied(w, 403)
+			return
+		}
+		if accessToken != "" && s.loginFlow("spotify") == nil {
+			fail(w, http.StatusForbidden, errors.New("no spotify login in progress"))
+			return
+		}
+		if !s.spotifyPairingAllowed() {
+			spotifyConnectDenied(w, 403)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		r = r.WithContext(ctx)
+	}
+	// Authenticate and persist LAN credentials even without an open QR modal.
+	if action == "addUser" && accessToken == "" {
+		inner, err := providers.SpotifyConnectKeyPair().DecryptBlob(clientKey, blob)
+		if err == nil && userName == "" {
+			err = errors.New("spotify: missing username")
+		}
+		if err == nil {
+			session, sessErr := s.ownerSession("spotify")
+			if sessErr != nil {
+				spotifyConnectDenied(w, 403)
+				return
+			}
+			err = session.p.(*providers.Spotify).ConnectZeroconf(r.Context(), userName, inner)
+			if err == nil {
+				s.mu.Lock()
+				session.Ready = true
+				if flow := s.logins["spotify"]; flow != nil {
+					flow.Status = "linked"
+				}
+				s.mu.Unlock()
+			}
+		}
+		if errors.Is(err, providers.ErrSpotifyPairingBusy) {
+			spotifyConnectDenied(w, 403)
+			return
+		}
+		if err != nil {
+			s.addUserRetryAt.Store(time.Now().Add(2 * time.Second).UnixNano())
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"status":402,"statusString":"ERROR-INVALID-BLOB","spotifyError":402}`))
 			return
 		}
-		log.Printf("stream-sync: spotify connect addUser from %s (%s): blob accepted, not stored", r.RemoteAddr, userName)
 	}
 
 	// The endpoint is unauthenticated: only a pending Spotify login on the deck may
@@ -870,11 +969,12 @@ func (s *Server) spotifyConnectPost(w http.ResponseWriter, r *http.Request) {
 		}
 		session, err := s.ownerSession("spotify")
 		if err != nil {
-			fail(w, 500, err)
+			spotifyConnectDenied(w, 403)
 			return
 		}
 		if sp, ok := session.p.(*providers.Spotify); ok {
-			if err := sp.SetToken(providers.Token{AccessToken: tok, ClientID: s.spotifyClientID()}); err != nil {
+			if err := sp.AcceptToken(r.Context(), providers.Token{AccessToken: tok, Username: userName, ClientID: s.spotifyClientID()}); err != nil {
+				s.addUserRetryAt.Store(time.Now().Add(2 * time.Second).UnixNano())
 				fail(w, 500, err)
 				return
 			}
@@ -889,4 +989,42 @@ func (s *Server) spotifyConnectPost(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":101,"statusString":"OK","spotifyError":0}`))
+}
+
+func spotifyConnectDenied(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(providers.SpotifyConnectResponse{Status: status, StatusString: "ERROR-SPOTIFY-ERROR", SpotifyError: status})
+}
+func (s *Server) spotifyPairingAllowed() bool {
+	s.mu.Lock()
+	if s.spotifyOwnerClosing {
+		s.mu.Unlock()
+		return false
+	}
+	flow := s.logins["spotify"]
+	opened := flow != nil && time.Now().Before(flow.expires) && (flow.Status == "waiting" || flow.Status == "scanned")
+	var existing *providers.Spotify
+	for _, v := range s.sessions {
+		if !v.Guest && v.Provider == "spotify" {
+			existing, _ = v.p.(*providers.Spotify)
+			break
+		}
+	}
+	s.mu.Unlock()
+	if opened {
+		return true
+	}
+	if existing != nil && (existing.HasToken() || existing.HasStoredCredentials()) {
+		return false
+	}
+	p, err := s.makeProvider("spotify", false, "")
+	if err != nil {
+		return false
+	}
+	if c, ok := p.(interface{ Close() }); ok {
+		defer c.Close()
+	}
+	sp, ok := p.(*providers.Spotify)
+	return ok && !sp.HasToken() && !sp.HasStoredCredentials()
 }

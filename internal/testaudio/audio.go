@@ -64,3 +64,37 @@ func FLAC(w io.Writer, samples []int32) error {
 	}
 	return enc.Close()
 }
+
+// SpotifyOggMetadataPage builds a CRC-valid Ogg seek/replaygain page whose first
+// packet is 0x81. A 139-byte payload gives Spotify's common 167-byte prefix.
+func SpotifyOggMetadataPage(payload int) []byte {
+	if payload < 1 || payload > 65024 {
+		panic("invalid Spotify test metadata length")
+	}
+	segments := payload/255 + 1
+	page := make([]byte, 27+segments+payload)
+	copy(page, "OggS")
+	page[5] = 2
+	binary.LittleEndian.PutUint32(page[14:], 1)
+	page[26] = byte(segments)
+	left := payload
+	for i := 0; i < segments; i++ {
+		size := min(left, 255)
+		page[27+i] = byte(size)
+		left -= size
+	}
+	page[27+segments] = 0x81
+	var crc uint32
+	for _, b := range page {
+		crc ^= uint32(b) << 24
+		for bit := 0; bit < 8; bit++ {
+			if crc&0x80000000 != 0 {
+				crc = (crc << 1) ^ 0x04c11db7
+			} else {
+				crc <<= 1
+			}
+		}
+	}
+	binary.LittleEndian.PutUint32(page[22:], crc)
+	return page
+}

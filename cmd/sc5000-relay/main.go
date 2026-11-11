@@ -19,9 +19,9 @@ import (
 	"time"
 )
 
-// defaultSpotifyClientID is empty: the deck sends its owner's own Spotify Client ID,
-// and a relay operator may set one in the config. There is no built-in app.
-const defaultSpotifyClientID = ""
+// defaultSpotifyClientID is the public Spotify Desktop identity; an explicitly
+// configured operator app still takes precedence.
+const defaultSpotifyClientID = "65b708073fc0480ea92a077233ca87bd"
 
 type server struct {
 	publicMu  sync.RWMutex

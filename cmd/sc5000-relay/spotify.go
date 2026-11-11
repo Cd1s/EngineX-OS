@@ -22,7 +22,8 @@ import (
 const (
 	spotifyAccounts      = "https://accounts.spotify.com"
 	spotifyLoopbackURI   = "http://127.0.0.1:8080/oauth/spotify/callback"
-	spotifyScopes        = "user-library-read playlist-read-private playlist-read-collaborative"
+	spotifyDesktopURI    = "http://127.0.0.1:4381/login"
+	spotifyScopes        = "streaming user-read-private user-library-read playlist-read-private playlist-read-collaborative"
 	spotifyProbeControl  = "https://redirect-probe.invalid/sc5000/callback"
 	spotifyProbeCacheTTL = 30 * time.Minute
 )
@@ -83,7 +84,15 @@ func (a *spotifyAuth) learnedKey(clientID string) string {
 	return clientID + " " + a.httpsRedirect
 }
 
+func spotifyClientRedirect(clientID, redirect string) string {
+	if clientID == defaultSpotifyClientID && redirect == spotifyLoopbackURI {
+		return spotifyDesktopURI
+	}
+	return redirect
+}
+
 func (a *spotifyAuth) authorizeURL(clientID, redirect, state, verifier string) string {
+	redirect = spotifyClientRedirect(clientID, redirect)
 	sum := sha256.Sum256([]byte(verifier))
 	q := url.Values{
 		"client_id":             {clientID},
@@ -118,6 +127,9 @@ func (a *spotifyAuth) rejects(ctx context.Context, clientID, redirect string) (b
 // useHTTPS reports whether the automatic HTTPS callback should be offered as
 // the primary flow for clientID.
 func (a *spotifyAuth) useHTTPS(ctx context.Context, clientID string) bool {
+	if clientID == defaultSpotifyClientID {
+		return false
+	}
 	a.mu.Lock()
 	if a.learned[a.learnedKey(clientID)] {
 		a.mu.Unlock()
@@ -159,6 +171,7 @@ func (a *spotifyAuth) learnHTTPS(clientID string) {
 }
 
 func (a *spotifyAuth) exchange(ctx context.Context, clientID, code, verifier, redirect string) (*spotifyToken, error) {
+	redirect = spotifyClientRedirect(clientID, redirect)
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
@@ -174,6 +187,8 @@ func (a *spotifyAuth) exchange(ctx context.Context, clientID, code, verifier, re
 	}
 	defer resp.Body.Close()
 	var out struct {
+		Scope            string `json:"scope"`
+		Username         string `json:"username"`
 		AccessToken      string `json:"access_token"`
 		RefreshToken     string `json:"refresh_token"`
 		TokenType        string `json:"token_type"`
@@ -191,6 +206,7 @@ func (a *spotifyAuth) exchange(ctx context.Context, clientID, code, verifier, re
 		out.TokenType = "Bearer"
 	}
 	return &spotifyToken{
+		Scope: out.Scope, Username: out.Username,
 		AccessToken:  out.AccessToken,
 		RefreshToken: out.RefreshToken,
 		TokenType:    out.TokenType,
