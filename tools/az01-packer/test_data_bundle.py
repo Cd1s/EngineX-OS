@@ -89,6 +89,12 @@ class DataBundleTest(unittest.TestCase):
         self.assertTrue((src / 'boot-activate.sh').stat().st_mode & 0o100)
         self.assertIn('Environment="QT_LOGGING_CONF=/data/logging.ini"',
                       (src / 'boot-activate.sh').read_text())
+        self.assertIn('Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M',
+                      (src / 'boot-activate.sh').read_text())
+        self.assertIn('Environment=QML_DISABLE_DISK_CACHE=1',
+                      (src / 'boot-activate.sh').read_text())
+        self.assertIn('ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home',
+                      (src / 'boot-activate.sh').read_text())
         self.assertIn('EnvironmentFile=-/data/sc5000-custom/ui-scale.env',
                       (src / 'boot-activate.sh').read_text())
         self.assertIn('enginex-stream-sync.service',

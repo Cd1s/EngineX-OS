@@ -179,6 +179,12 @@ done
 test -f '$TARGET/run/sc5000-alsa-reexec.once'
 grep -q 'LD_PRELOAD=/data/enginex/bundle/lib/libengine-ui-hook.so' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+grep -q 'Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M' \
+    '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+grep -q 'Environment=QML_DISABLE_DISK_CACHE=1' \
+    '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
+grep -q 'ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home' \
+    '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'EnvironmentFile=-/data/sc5000-custom/ui-scale.env' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'Wants=enginex-stream-sync.service' \
