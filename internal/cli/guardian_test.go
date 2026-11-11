@@ -4,11 +4,27 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestGuardianCommandDeadlineWithoutTimeoutUtility(t *testing.T) {
+	if os.Getenv("ENGINEX_GUARDIAN_DEADLINE_TEST") == "1" {
+		guardianBootReport = func(string, string) error { select {} }
+		os.Exit(Guardian([]string{"--boot-report", "--timeout", "50ms"}, os.Stdout, os.Stderr))
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestGuardianCommandDeadlineWithoutTimeoutUtility$")
+	cmd.Env = append(os.Environ(), "ENGINEX_GUARDIAN_DEADLINE_TEST=1")
+	err := cmd.Run()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 124 {
+		t.Fatalf("blocked CLI did not enforce its own deadline: %v", err)
+	}
+}
 
 func mountFixture(t *testing.T) string {
 	t.Helper()
@@ -115,5 +131,101 @@ func TestStatusWinsOverReserve(t *testing.T) {
 	after, _ := os.ReadFile(path)
 	if !bytes.Equal(before, after) {
 		t.Fatal("status changed DB")
+	}
+}
+
+func TestGuardianBootReportDoesNotHealOrWatch(t *testing.T) {
+	mount := mountFixture(t)
+	path := filepath.Join(mount, "Engine Library", "Database2", "m.db")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := guardianBootReport
+	t.Cleanup(func() { guardianBootReport = saved })
+	calls := 0
+	ui := t.TempDir()
+	guardianBootReport = func(gotUI, gotMedia string) error {
+		calls++
+		if gotUI != ui || gotMedia != mount {
+			t.Fatalf("wrong report paths")
+		}
+		return nil
+	}
+	var out, errOut bytes.Buffer
+	if code := Guardian([]string{"--boot-report", "--ui-dir", ui, "--mount-root", mount}, &out, &errOut); code != 0 || calls != 1 || out.Len() != 0 {
+		t.Fatalf("report code=%d calls=%d", code, calls)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("report changed database")
+	}
+	for _, args := range [][]string{
+		{"--boot-report", "--heal-mount", mount},
+		{"--boot-report", "--status"},
+		{"--boot-report", "--normalize-reserve"},
+		{"--boot-report", "--data-only"},
+	} {
+		if code := Guardian(args, &out, &errOut); code != 2 || calls != 1 {
+			t.Fatalf("database option accepted: %v code=%d", args, code)
+		}
+	}
+	if code := Guardian([]string{"--watch", "--boot-report"}, &out, &errOut); code != 0 || calls != 1 {
+		t.Fatal("retired watch collected report")
+	}
+	guardianBootReport = func(string, string) error { return fmt.Errorf("secret details should never appear") }
+	errOut.Reset()
+	if code := Guardian([]string{"--boot-report", "--ui-dir", ui, "--mount-root", mount}, &out, &errOut); code != 1 || strings.Contains(errOut.String(), "secret details") {
+		t.Fatalf("report failure %d %q", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(ui, "boot-progress")); !os.IsNotExist(err) {
+		t.Fatal("report emitted work progress")
+	}
+}
+
+func TestGuardianBootProgressOnlyAfterCompletedWork(t *testing.T) {
+	mount := mountFixture(t)
+	ui := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ui, "boot-token"), []byte("attempt-one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	run := func(args ...string) int { return Guardian(append(args, "--ui-dir", ui), &out, &errOut) }
+	if code := run("--status", "--heal-mount", mount); code != 0 {
+		t.Fatal(code)
+	}
+	if _, err := os.Stat(filepath.Join(ui, "boot-progress")); !os.IsNotExist(err) {
+		t.Fatal("status emitted progress")
+	}
+	if code := run("--heal-mount", mount); code != 0 {
+		t.Fatal(code)
+	}
+	first, err := os.ReadFile(filepath.Join(ui, "boot-progress"))
+	if err != nil || !strings.HasPrefix(string(first), "attempt-one database ") {
+		t.Fatalf("missing completed-work record: %q %v", first, err)
+	}
+	if code := run("--normalize-reserve", "--heal-mount", mount); code != 0 {
+		t.Fatal(code)
+	}
+	next, err := os.ReadFile(filepath.Join(ui, "boot-progress"))
+	if err != nil || bytes.Equal(first, next) {
+		t.Fatal("normalize did not advance progress")
+	}
+	if code := run("--heal-mount", t.TempDir()); code == 0 {
+		t.Fatal("bad mount unexpectedly healed")
+	}
+	unchanged, err := os.ReadFile(filepath.Join(ui, "boot-progress"))
+	if err != nil || !bytes.Equal(next, unchanged) {
+		t.Fatal("failed work emitted progress")
+	}
+	if err := os.WriteFile(filepath.Join(ui, "safe-mode"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run("--normalize-reserve", "--heal-mount", mount); code != 0 {
+		t.Fatal(code)
+	}
+	unchanged, err = os.ReadFile(filepath.Join(ui, "boot-progress"))
+	if err != nil || !bytes.Equal(next, unchanged) {
+		t.Fatal("fallback work emitted progress")
 	}
 }

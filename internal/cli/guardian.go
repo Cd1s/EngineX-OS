@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/dbhealer"
+	"github.com/Cd1s/EngineX-OS/pkg/webui"
 )
+
+var guardianBootReport = webui.WriteBootReport
 
 type guardianResult struct {
 	dbhealer.Report
@@ -32,6 +35,9 @@ func Guardian(args []string, out, errOut io.Writer) int {
 	dataOnly := fs.Bool("data-only", false, "repair table data but leave Engine's views, triggers and indexes untouched")
 	sessions := fs.Int("max-sessions", dbhealer.DefaultMaxSessions, "maximum history sessions; 0 uses 50")
 	reserve := fs.Bool("normalize-reserve", false, "only rebuild libraries whose page reserve byte is not 0 (breaks ATTACH in Engine 5.3.0); Engine must not be running")
+	bootReport := fs.Bool("boot-report", false, "save and export a sanitized boot report without touching libraries")
+	uiDir := fs.String("ui-dir", "/data/enginex/ui", "boot safety state directory")
+	deadline := fs.Duration("timeout", 0, "maximum command runtime; 0 disables the deadline")
 	watch := fs.Bool("watch", false, "retired; exits at once")
 	fs.Duration("interval", 0, "retired")
 	fs.Duration("quiet-for", 0, "retired")
@@ -40,6 +46,28 @@ func Guardian(args []string, out, errOut io.Writer) int {
 	}
 	if *watch {
 		fmt.Fprintln(errOut, "engine-guardian: --watch is retired; the mount hook repairs each volume before Engine opens it")
+		return 0
+	}
+	if *deadline < 0 {
+		fmt.Fprintln(errOut, "timeout must not be negative")
+		return 2
+	}
+	if *deadline > 0 {
+		// Vendor images need not ship a timeout executable or BusyBox applet.
+		// This CLI-only deadline also bounds a locked repair before Engine starts.
+		timer := time.AfterFunc(*deadline, func() { os.Exit(124) })
+		defer timer.Stop()
+	}
+	if *bootReport {
+		if fs.NArg() != 0 || *mount != "" || *status || *dataOnly || *reserve {
+			fmt.Fprintln(errOut, "--boot-report cannot be combined with database operations")
+			return 2
+		}
+		if err := guardianBootReport(*uiDir, *root); err != nil {
+			// No captured output or private paths reach stderr. Fallback must continue.
+			fmt.Fprintln(errOut, "engine-guardian: boot report could not be saved or exported")
+			return 1
+		}
 		return 0
 	}
 	if fs.NArg() != 0 || *sessions < 0 || (*mount == "" && !*status) {
@@ -66,6 +94,12 @@ func Guardian(args []string, out, errOut io.Writer) int {
 			r, err = dbhealer.HealMountDataOnly(m, *sessions)
 		default:
 			r, err = dbhealer.HealMount(m, *sessions)
+		}
+		if err == nil && !*status {
+			if progressErr := webui.RecordBootDatabaseProgress(*uiDir); progressErr != nil {
+				// Progress reporting must never change the database operation's result.
+				fmt.Fprintln(errOut, "engine-guardian: boot progress could not be recorded")
+			}
 		}
 		res := guardianResult{Report: r}
 		if err != nil {

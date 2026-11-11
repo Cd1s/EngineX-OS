@@ -9,6 +9,57 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+BOOT_READY = r'''
+                    id: scBootSplash
+                    Timer {
+                        id: scBootReadyTimer
+                        property bool sent: false
+                        property var request: null
+                        property double requestAt: 0
+                        interval: 1000; repeat: true
+                        running: !scBootSplash.active && planckQuickView.isMainScreen && !sent
+                        onTriggered: {
+                            if (request) {
+                                if (Date.now() - requestAt > 5000) {
+                                    const old = request; request = null; old.abort()
+                                }
+                                return
+                            }
+                            const x = new XMLHttpRequest()
+                            request = x; requestAt = Date.now()
+                            x.onreadystatechange = function() {
+                                if (x.readyState !== XMLHttpRequest.DONE || request !== x) return
+                                request = null
+                                if (x.status !== 200 || scBootSplash.active) return
+                                let token = ""
+                                try { token = JSON.parse(x.responseText).token || "" } catch (e) { return }
+                                if (!token) return
+                                const ack = new XMLHttpRequest()
+                                request = ack; requestAt = Date.now()
+                                ack.onreadystatechange = function() {
+                                    if (ack.readyState !== XMLHttpRequest.DONE || request !== ack) return
+                                    request = null
+                                    if (ack.status === 200 || ack.status === 204) sent = true
+                                }
+                                ack.open("POST", "http://127.0.0.1:8080/v1/sc5000/boot/ready", true)
+                                ack.setRequestHeader("Content-Type", "application/json")
+                                ack.send(JSON.stringify({token: token}))
+                            }
+                            x.open("GET", "http://127.0.0.1:8080/v1/sc5000/boot", true)
+                            x.send()
+                        }
+                    }
+'''
+
+def verify_boot_ready_loader(text):
+    """Fail a new vendor base before emitting a duplicate QML id."""
+    blocks = [m.group(1) for m in re.finditer(
+        r'\bSplashScreen\s*\{(.*?)\n[ \t]*\}', text, re.S)
+        if 'objectName: "SplashScreenLoader"' in m.group(1)]
+    if len(blocks) != 1 or re.search(r'(?m)^\s*id\s*:', blocks[0]):
+        raise ValueError("boot-ready: stock splash loader is missing or already declares an id")
+
+
 FX_CONTROLLER = r'''
     property var scFxControllers: []
     property bool scFxMsSending: false
@@ -5141,6 +5192,9 @@ def edits(dev: bool):
         ROOT + "Items/MessageBoxes/UnsupportedStorageDeviceDetectedMessageBox.qml": [(
             "function onUnsupportedStorageDeviceDetected(name) {\n", "function onUnsupportedStorageDeviceDetected(name) {\n			return\n")],
         ROOT + "EmbeddedMain.qml": [
+            # The actual main view has finished loading and the stock splash has
+            # disappeared. Do not equate resource registration with UI readiness.
+            ('objectName: "SplashScreenLoader"', 'objectName: "SplashScreenLoader"' + BOOT_READY),
             (f"	Connections {{\n		target: {window()}\n", services + main + ZOOM_PROP + "\n	Rectangle { anchors.fill: parent; z: -1000; color: \"#000000\" } // UI Scale: no window colour round the edges\n" + f"\n	Connections {{\n		target: {window()}\n"),
             # The overlay (Control Center, popups) fills uiContainer's unscaled box: scale it
             # the same way about the same centre, or its top bar sits above the screen.
@@ -5489,7 +5543,7 @@ def edits(dev: bool):
                 "        if (!isStreamingProviderWithSort) return\n"
                 "        try {\n"
                 "            var scReq = new XMLHttpRequest()\n"
-                '            scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", false)\n'
+                '            scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", true)\n'
                 '            scReq.setRequestHeader("Content-Type", "application/json")\n'
                 "            scReq.send(JSON.stringify({\n"
                 '                "streamSortRole": sortRole === "playOrder" ? "default" : sortRole,\n'
@@ -5567,7 +5621,7 @@ def edits(dev: bool):
             "                        if (cc && cc.isCurrentCollectionStreaming) {\n"
             "                            try {\n"
             "                                var scReq = new XMLHttpRequest()\n"
-            '                                scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", false)\n'
+            '                                scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", true)\n'
             '                                scReq.setRequestHeader("Content-Type", "application/json")\n'
             "                                scReq.send(JSON.stringify({\n"
             '                                    "streamSortRole": modelData.role === "playOrder" ? "default" : modelData.role\n'
@@ -5591,7 +5645,7 @@ def edits(dev: bool):
             "                var willBeAsc = !sortViewModel.isAscending\n"
             "                try {\n"
             "                    var scReq = new XMLHttpRequest()\n"
-            '                    scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", false)\n'
+            '                    scReq.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui", true)\n'
             '                    scReq.setRequestHeader("Content-Type", "application/json")\n'
             "                    scReq.send(JSON.stringify({\n"
             '                        "streamSortOrder": willBeAsc ? "asc" : "desc"\n'
@@ -6808,6 +6862,8 @@ def main():
             base[rel] = change
             continue
         text = (a.qrc / rel).read_text(encoding="utf-8")
+        if rel == ROOT + "EmbeddedMain.qml" and v53():
+            verify_boot_ready_loader(text)
         for old, new in change:
             text = patch(text, old, new, rel)
         base[rel] = text

@@ -21,6 +21,9 @@ scripts=$base/usr/Engine/Scripts
 if [ "$runtime" = 0 ]; then
 if [ -f "$scripts/engine" ]; then
     sed -i -E 's@(az01-ethernet-speed[[:space:]]+)100([[:space:];]|$)@\11000\2@g' "$scripts/engine"
+    # Each retry inside the vendor loop gets a fresh ready token and can select
+    # stock Engine. Keep the vendor's exit codes and quit-reason dispatch intact.
+    sed -i -E 's@^([[:space:]]*)/usr/Engine/Engine([[:space:]])@\1/etc/sc5000/engine-ui-guard launch /usr/Engine/Engine\2@' "$scripts/engine"
 fi
 if [ -f "$scripts/setup-prerequisites.sh" ]; then
     sed -i -E \
@@ -61,7 +64,7 @@ Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M
 # the UI hook stamps each replaced qrc file with its content hash so that cache stays fresh.
 Environment=QML_DISABLE_DISK_CACHE=1
 ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home
-ExecStartPre=/usr/local/bin/sc5000-debloat --apply-runtime
+ExecStartPre=/etc/sc5000/engine-ui-guard runtime
 CONF
 cat > "$base/etc/systemd/journald.conf.d/sc5000.conf" <<'CONF'
 [Journal]
@@ -115,6 +118,14 @@ DefaultMountOptions=force
 CONF
 fi # offline/staging patches
 if [ "$runtime" = 1 ]; then
+    boot_ui=${SC5000_UI_DIR:-${SC5000_PRIMARY_UI_DIR:-/data/enginex/ui}}
+    legacy_ui=${SC5000_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
+    [ -d "$boot_ui" ] || [ ! -d "$legacy_ui" ] || boot_ui=$legacy_ui
+    if [ -e "$boot_ui/safe-mode" ]; then
+        # This independent unit keeps Wi-Fi reachable without tuning stock Engine.
+        if command -v rfkill >/dev/null 2>&1; then rfkill unblock wifi || :; fi
+        exit 0
+    fi
     # The kernel boots with rfkill.default_state=0, which blocks both radios.
     if command -v rfkill >/dev/null 2>&1; then rfkill unblock bluetooth wifi || :; fi
     if command -v az01-ethernet-speed >/dev/null 2>&1; then

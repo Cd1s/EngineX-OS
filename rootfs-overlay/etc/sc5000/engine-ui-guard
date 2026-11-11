@@ -1,53 +1,214 @@
 #!/bin/sh
-# After three Engine starts in a row that each follow a crash, the UI hook stops
-# applying packs (safe-mode) and the deck comes back with the stock UI. A clean
-# stop, or a start that stays up 15 seconds, leaves safe-mode again.
-UI=${SC5000_UI_DIR:-/data/enginex/ui}
-[ -d "$UI" ] || [ ! -d /data/sc5000-custom/ui ] || UI=/data/sc5000-custom/ui
+# The existing safe-mode marker now means a persistent, hook-free stock boot.
+# Only a rendered main view may acknowledge an attempt; uptime is not health.
+primary_ui=${SC5000_PRIMARY_UI_DIR:-/data/enginex/ui}
+legacy_ui=${SC5000_LEGACY_UI_DIR:-/data/sc5000-custom/ui}
+UI=${SC5000_UI_DIR:-$primary_ui}
+[ -d "$UI" ] || [ ! -d "$legacy_ui" ] || UI=$legacy_ui
+guardian=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
+limit=${SC5000_BOOT_TIMEOUT:-180}
+window=${SC5000_BOOT_CRASH_WINDOW:-300}
+failures=${SC5000_BOOT_CRASH_LIMIT:-3}
+case $limit in ''|*[!0-9]*|0) limit=180 ;; esac
+case $window in ''|*[!0-9]*|0) window=300 ;; esac
+case $failures in ''|*[!0-9]*|0) failures=3 ;; esac
+[ "${#limit}" -le 5 ] && [ "$limit" -le 86400 ] || limit=180
+[ "${#window}" -le 5 ] && [ "$window" -le 86400 ] || window=300
+[ "${#failures}" -le 3 ] && [ "$failures" -le 100 ] || failures=3
+poll=${SC5000_BOOT_POLL_INTERVAL:-1}
+case $poll in .1|0.1|.5|0.5|1|2|5) ;; *) poll=1 ;; esac
+record() {
+    mkdir -p "$UI" || return 1
+    (umask 077; printf '%s\n' "$2" > "$UI/.$1.$$" && mv -f "$UI/.$1.$$" "$UI/$1")
+}
+uptime_seconds() { cut -d. -f1 "${SC5000_BOOT_UPTIME:-/proc/uptime}"; }
+quarantine() {
+    rm -rf "$UI/mods-overlay"
+    : > "$UI/mods-quarantined"
+    if [ "$UI" != "$primary_ui" ] && [ -d "$primary_ui" ]; then
+        rm -rf "$primary_ui/mods-overlay"
+        : > "$primary_ui/mods-quarantined"
+    fi
+    # A fallback during this boot must also undo our earlier assignment binds.
+    assign=${SC5000_ASSIGNMENT_DIR:-/usr/Engine/AssignmentFiles/PresetAssignmentFiles}
+    patched=${SC5000_ASSIGNMENT_PATCHED:-/run/sc5000-assignments}
+    for f in "$assign"/JP0[78]/*Assignments.qml "$assign"/JP1[34]/*Assignments.qml; do
+        [ -f "$patched/${f##*/}" ] || continue
+        ! mountpoint -q "$f" || umount "$f" || :
+    done
+}
+fallback() {
+    case $1 in ui-ready-timeout|crash-loop|previous-fallback) ;; *) return 2 ;; esac
+    if [ ! -e "$UI/safe-mode" ]; then
+        record boot-stage "$1"
+        record safe-mode "$1" || return 1
+        rm -f "$UI/boot-report-latest"
+    fi
+    quarantine
+}
+begin_attempt() {
+    rm -f "${SC5000_QUIT_REASON_FILE:-/tmp/engine-quit-reason}"
+    # /proc's boot UUID also distinguishes a stale acknowledgement after a reboot.
+    token=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)-$$-$(uptime_seconds)
+    rm -f "$UI/boot-ready"
+    record boot-started "$(uptime_seconds)"
+    record boot-stage engine-start
+    record boot-token "$token"
+}
 case ${1:-} in
+runtime)
+    [ ! -e "$UI/safe-mode" ] || exit 0
+    exec "${SC5000_DEBLOAT:-/usr/local/bin/sc5000-debloat}" --apply-runtime
+    ;;
+service)
+    shift
+    [ "$#" -gt 0 ] || exit 2
+    unset LD_PRELOAD
+    if [ ! -e "$UI/safe-mode" ]; then
+        # Arm recovery before loading anything into the vendor launcher. Its
+        # updater children still need the hook on a normal EngineX start.
+        begin_attempt
+        export LD_PRELOAD=${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so}
+    fi
+    exec "$@"
+    ;;
+launch)
+    shift
+    [ "$#" -gt 0 ] || exit 2
+    unset LD_PRELOAD
+    # The stock engine script can retry without restarting engine.service.
+    # Count failures at that boundary too, retaining its exit-code/quit contract.
+    [ ! -e "$UI/last-crash" ] || "$0" pre
+    if [ -e "$UI/safe-mode" ]; then
+        quarantine
+        exec "$@"
+    fi
+    begin_attempt
+    LD_PRELOAD=${SC5000_UI_HOOK:-/etc/sc5000/libengine-ui-hook.so} "$@" &
+    child=$!
+    trap 'kill -TERM "$child" 2>/dev/null; wait "$child" 2>/dev/null; exit 143' TERM INT HUP
+    wait "$child"; result=$?
+    trap - TERM INT HUP
+    reason=$(cat "${SC5000_QUIT_REASON_FILE:-/tmp/engine-quit-reason}" 2>/dev/null)
+    intentional=
+    case $reason in Poweroff|Reboot|UpdateFromLoader|UpdateFromFile|UpdateFromUrl|TestApp|ControllerMode|UpdateFirmware|FactoryReset|AnalyticsChange) intentional=1 ;; esac
+    if [ "$result" -ne 0 ] && [ "$result" -ne 7 ] && [ -z "$intentional" ]; then
+        : > "$UI/last-crash"
+    elif [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$token" ]; then
+        # An intentional update/USB-mode handoff can take minutes outside Engine.
+        # Disarm this attempt rather than interrupting that vendor operation.
+        rm -f "$UI/boot-token" "$UI/boot-ready" "$UI/boot-progress"
+    fi
+    exit "$result"
+    ;;
+ready)
+    [ ! -e "$UI/safe-mode" ] && [ -n "${2:-}" ] && [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$2" ] || exit 1
+    record boot-ready "$2"
+    ;;
+progress)
+    case ${2:-} in prepare|database|media-check|media-convert|media-heal|engine-start|stream-sync) ;; *) exit 2 ;; esac
+    case ${3:-} in ''|*[!0-9]*) exit 2 ;; esac
+    token=$(cat "$UI/boot-token" 2>/dev/null)
+    [ -z "$token" ] || record boot-progress "$token $2 $3"
+    ;;
+fallback)
+    fallback "${2:-ui-ready-timeout}"
+    ;;
+watch)
+    # This replaces the retired database watch in the existing guardian unit.
+    # It never opens a library. Progress means completed work, not a heartbeat.
+    seen= progress= since=$(uptime_seconds) exported=0
+    trap 'exit 0' TERM INT HUP
+    while :; do
+        now=$(uptime_seconds)
+        if [ -e "$UI/safe-mode" ]; then
+            if [ "$now" -ge "$exported" ]; then
+                exported=$((now + 5))
+                if [ -x "$guardian" ]; then
+                    "$guardian" --timeout 15s --boot-report --ui-dir "$UI" --mount-root "${SC5000_BOOT_MEDIA_ROOT:-/media}" >/dev/null 2>&1 || :
+                fi
+            fi
+        else
+            token=$(cat "$UI/boot-token" 2>/dev/null)
+            ready=$(cat "$UI/boot-ready" 2>/dev/null)
+            if [ -n "$token" ] && [ "$token" = "$ready" ]; then
+                rm -f "$UI/boot-count"
+                [ "$(cat "$UI/boot-stage" 2>/dev/null)" = ui-ready ] || record boot-stage ui-ready
+            elif [ -n "$token" ]; then
+                if [ "$token" != "$seen" ]; then
+                    seen=$token; progress=; since=$now
+                fi
+                current=$(cat "$UI/boot-progress" 2>/dev/null)
+                case $current in
+                    "$token "*)
+                        if [ "$current" != "$progress" ]; then progress=$current; since=$now; fi ;;
+                esac
+                if [ $((now - since)) -ge "$limit" ] &&
+                    [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$token" ] &&
+                    [ "$(cat "$UI/boot-ready" 2>/dev/null)" != "$token" ]; then
+                    if fallback ui-ready-timeout; then
+                        # Do not wait for report generation or restart a unit during shutdown.
+                        if [ "$(systemctl is-system-running 2>/dev/null)" != stopping ]; then
+                            systemctl reset-failed engine.service >/dev/null 2>&1 || :
+                            systemctl restart --no-block engine.service >/dev/null 2>&1 || :
+                        fi
+                    fi
+                fi
+            fi
+        fi
+        sleep "$poll"
+    done
+    ;;
 pre)
     mkdir -p "$UI"
     # Only a start that follows a crash (the stop hook left last-crash) counts towards
-    # safe-mode; a clean start leaves safe-mode. A quarantined mod stays quarantined.
+    # safe-mode; a clean start resets the streak, never a persistent fallback.
     # A boot-token still here means the last start never reached its healthy timer and
     # no stop hook ran (hang or hard power-off, #140): count it as a crash too.
-    crashed=; { [ -e "$UI/last-crash" ] || [ -e "$UI/boot-token" ]; } && crashed=1
+    crashed=
+    pending=$(cat "$UI/boot-token" 2>/dev/null)
+    { [ -e "$UI/last-crash" ] || { [ -n "$pending" ] && [ "$(cat "$UI/boot-ready" 2>/dev/null)" != "$pending" ]; }; } && crashed=1
+    now=$(date +%s)
+    started=$(cat "$UI/boot-window" 2>/dev/null)
+    case $started in ''|*[!0-9]*) started=$now ;; esac
+    [ "${#started}" -le 12 ] || started=$now
+    count=$(cat "$UI/boot-failures" 2>/dev/null)
+    case $count in ''|*[!0-9]*) count=0 ;; esac
+    [ "${#count}" -le 6 ] || count=0
+    if [ "$now" -lt "$started" ] || [ $((now - started)) -gt "$window" ]; then count=0; started=$now; fi
     if [ -n "$crashed" ]; then
         rm -f "$UI/last-crash"
-        n=$(cat "$UI/boot-count" 2>/dev/null)
-        case $n in ''|*[!0-9]*) n=1 ;; esac
-        n=$((n + 1))
+        count=$((count + 1))
+        record boot-failures "$count"
+        record boot-window "$started"
+        n=$((count + 1))
     else
         n=1
-        rm -f "$UI/safe-mode"
     fi
     # running-sentinel survives only if no stop hook ran (power cut, even after a healthy
     # start): no crash to count, but the cache may be truncated.
     dirty=$crashed; [ ! -e "$UI/running-sentinel" ] || dirty=1
-    rm -f "$UI/boot-token"
+    rm -f "$UI/boot-token" "$UI/boot-ready"
     : > "$UI/running-sentinel"
     echo "$n" > "$UI/boot-count"
     # #140: a .qmlc truncated by a power cut would trap the deck at the splash screen;
     # Qt rebuilds the cache, so drop it after any crash and in safe-mode.
-    if [ -n "$dirty" ] || [ "$n" -ge 3 ] || [ -e "$UI/safe-mode" ]; then
+    if [ -n "$dirty" ] || [ "$count" -ge "$failures" ] || [ -e "$UI/safe-mode" ]; then
         rm -rf "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}/.cache/qml"
     fi
-    if [ "$n" -ge 3 ] || [ -e "$UI/safe-mode" ]; then
-        : > "$UI/safe-mode"
-        rm -rf "$UI/mods-overlay"
-        : > "$UI/mods-quarantined"
-        if [ "$UI" != /data/enginex/ui ] && [ -d /data/enginex/ui ]; then
-            rm -rf /data/enginex/ui/mods-overlay
-            : > /data/enginex/ui/mods-quarantined
-        fi
+    if [ "$count" -ge "$failures" ]; then fallback crash-loop; fi
+    if [ -e "$UI/safe-mode" ]; then
+        quarantine
+        # No EngineX database/account/assignment changes on a stock fallback.
+        exit 0
     else
         overlay=$UI/mods-overlay
-        if [ ! -d "$overlay" ] && [ -d /data/enginex/ui/mods-overlay ]; then
-            overlay=/data/enginex/ui/mods-overlay
+        if [ ! -d "$overlay" ] && [ -d "$primary_ui/mods-overlay" ]; then
+            overlay=$primary_ui/mods-overlay
         fi
-        if [ ! -e "$UI/mods-quarantined" ] && [ ! -e /data/enginex/ui/mods-quarantined ] && [ -d "$overlay" ]; then
+        if [ ! -e "$UI/mods-quarantined" ] && [ ! -e "$primary_ui/mods-quarantined" ] && [ -d "$overlay" ]; then
             seen_targets=" "
-            for target in "$UI/active" /data/enginex/ui/active; do
+            for target in "$UI/active" "$primary_ui/active"; do
                 [ -d "$target" ] || continue
                 case $seen_targets in *" $target "*) continue ;; esac
                 seen_targets="$seen_targets$target "
@@ -66,7 +227,7 @@ pre)
     guardian=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
     # A huge or locked m.db must not hold the splash screen forever.
     t=; ! command -v timeout >/dev/null 2>&1 || t="timeout 10"
-    [ ! -x "$guardian" ] || $t "$guardian" --heal-mount "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve > /dev/null 2>&1 || :
+    [ ! -x "$guardian" ] || $t "$guardian" --heal-mount "${SC5000_ENGINE_DATA_DIR:-/data/AppDataUser/AIR Music Technology/Engine}" --normalize-reserve --timeout 10s > /dev/null 2>&1 || :
     # Engine 5.3.0 sends a TIDAL client with no saved account (or a tokenless SSO
     # account) to the Engine DJ Profile login (#56, #159), and every EngineX service
     # runs on that client. With stored accessToken/refreshToken credentials Engine
@@ -200,24 +361,20 @@ AWK
     done
     ;;
 post)
+    [ ! -e "$UI/safe-mode" ] || exit 0
     # Engine's setup script has just set the GPU to performance. This also covers
     # boot, when a start request would merge with an already running tune job.
-    /usr/local/bin/sc5000-perf-tune >/dev/null 2>&1
-    # Only the timer of the latest start may clear the count, so a timer that
-    # outlived its start cannot reset a later crash streak (#7).
-    token=$$-$(cat "$UI/boot-count" 2>/dev/null)
-    echo "$token" > "$UI/boot-token"
-    ( sleep "${SC5000_UI_HEALTHY_AFTER:-15}"
-      # An Engine that is gone by now keeps its token: the next pre counts it as a crash.
-      [ "$(cat "$UI/boot-token" 2>/dev/null)" = "$token" ] && ${SC5000_UI_ALIVE_CMD:-systemctl is-active --quiet engine.service} && rm -f "$UI/boot-count" "$UI/boot-token" "$UI/last-crash" "$UI/safe-mode"
-    ) </dev/null >/dev/null 2>&1 &
+    "${SC5000_PERF_TUNE:-/usr/local/bin/sc5000-perf-tune}" >/dev/null 2>&1
+    # Legacy launchers and the release gate call post after spawning Engine.
+    # New launchers create this before exec, including internal crash retries.
+    if [ ! -e "$UI/safe-mode" ] && [ ! -s "$UI/boot-token" ]; then begin_attempt; fi
     ;;
 stop)
     rm -f "$UI/running-sentinel"
     # systemd sets SERVICE_RESULT=success for a requested stop/restart; a crash
     # (exit-code, signal, core-dump, timeout) keeps counting towards safe-mode.
     if [ "${SERVICE_RESULT:-success}" = success ]; then
-        rm -f "$UI/boot-count" "$UI/boot-token" "$UI/last-crash" "$UI/safe-mode"
+        rm -f "$UI/boot-count" "$UI/boot-token" "$UI/boot-ready" "$UI/last-crash" "$UI/boot-failures" "$UI/boot-window"
     else
         mkdir -p "$UI"
         [ -s "$UI/boot-count" ] || echo 1 > "$UI/boot-count"

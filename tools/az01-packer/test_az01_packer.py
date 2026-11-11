@@ -14,7 +14,9 @@ import unittest.mock
 
 import az01_packer as az
 
-TEST_TMPDIR = '/root/build/sc5000-lab' if Path('/root/build/sc5000-lab').is_dir() else None
+# Firmware fixtures are read-only shared inputs. Keep disposable image writes
+# in the caller's sandbox (or the ordinary system temporary directory).
+TEST_TMPDIR = os.environ.get('ENGINEX_TEST_TMPDIR')
 
 
 def string(value):
@@ -288,8 +290,12 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual((ui/'packs/en/Main.qml').read_text(), 'rebuilt')
         self.assertFalse(qml.exists())
         for name in ('safe-mode', 'mods-quarantined', 'boot-count', 'boot-token', 'last-crash'):
-            self.assertFalse((ui/name).exists(), name)
+            self.assertTrue((ui/name).exists(), name)
         self.assertEqual((data/'enginex/version.txt').read_text(), '5.0.4.1\n')
+        version.write_text('5.0.4.2\n')
+        subprocess.run(['sh', '-s'], input=script, check=True, capture_output=True)
+        for name in ('safe-mode', 'mods-quarantined', 'boot-count', 'boot-token', 'last-crash'):
+            self.assertFalse((ui/name).exists(), name)
 
     def test_prepare_atomic_failure_retry_identity_and_symlink_guard(self):
         # Relocate every guest state/seed path into this lab fixture. Only host

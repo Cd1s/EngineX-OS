@@ -5,10 +5,41 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestReserveDeadlineCannotRemoveLiveDatabase(t *testing.T) {
+	if path := os.Getenv("ENGINEX_RESERVE_BACKUP_TEST"); path != "" {
+		if err := backupReserve(path); err != nil {
+			os.Exit(1)
+		}
+		// The guardian deadline can fire after the backup and before publication.
+		os.Exit(124)
+	}
+	path := reserve12Library(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestReserveDeadlineCannotRemoveLiveDatabase$")
+	cmd.Env = append(os.Environ(), "ENGINEX_RESERVE_BACKUP_TEST="+path)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("deadline fixture did not exit")
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 124 {
+		t.Fatalf("backup checkpoint failed: %v", err)
+	}
+	for _, name := range []string{path, path + ".pre-reserve"} {
+		if body, err := os.ReadFile(name); err != nil || !bytes.Equal(body, before) {
+			t.Fatalf("interrupted publication lost original data at %s: %v", name, err)
+		}
+	}
+	if fixed, err := NormalizeReserve(path); err != nil || !fixed {
+		t.Fatalf("retry after interrupted publication: %v %v", fixed, err)
+	}
+}
 
 // reserve12Library is a stock-schema library whose pages reserve 12 bytes, like the
 // `.recover`ed m.db that broke every ATTACH on a deck. The header is patched while

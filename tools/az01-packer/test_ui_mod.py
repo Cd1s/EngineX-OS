@@ -19,6 +19,25 @@ SRC = BUILD_PACKS.read_text()
 
 
 class UiModSourceTest(unittest.TestCase):
+    def test_boot_ready_waits_for_main_splash_and_never_blocks_gui(self):
+        self.assertIn('!scBootSplash.active && planckQuickView.isMainScreen', bp.BOOT_READY)
+        self.assertNotIn('scBootReadyTimer.parent', bp.BOOT_READY)
+        self.assertIn('/v1/sc5000/boot/ready', bp.BOOT_READY)
+        self.assertIn('JSON.stringify({token: token})', bp.BOOT_READY)
+        self.assertIn('request !== x', bp.BOOT_READY)
+        self.assertIn('old.abort()', bp.BOOT_READY)
+        self.assertNotRegex(SRC, r'\.open\([^\n]*, false\)')
+
+    def test_boot_ready_rejects_a_stock_loader_id_collision(self):
+        bp.verify_boot_ready_loader('SplashScreen {\n objectName: "SplashScreenLoader"\n active: true\n}\n')
+        for source in (
+            'SplashScreen {\n id: stockSplash\n objectName: "SplashScreenLoader"\n}\n',
+            'SplashScreen {\n objectName: "SplashScreenLoader"\n id: stockSplash\n}\n',
+            'Item {\n objectName: "other"\n}\n',
+        ):
+            with self.assertRaisesRegex(ValueError, "stock splash loader"):
+                bp.verify_boot_ready_loader(source)
+
     def test_px_selector_maps_before_selecting_stock_carrier(self):
         for name in ("Spiral", "Pitch Echo", "Slip Roll", "Dub Echo", "Space"):
             self.assertIn(name + " (PX)", bp.FX_CONTROLLER)
@@ -76,7 +95,8 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("SCPROBE splash|0|1|", gate)
         self.assertIn("SC5000_GATE_LIBRARY=$W/drive", gate)
         self.assertIn("/media/az01-internal", gate)
-        self.assertIn("SC5000_UI_ALIVE_CMD=", gate)
+        self.assertIn("boot2: main UI acknowledged the current boot attempt without fallback (#140)", gate)
+        self.assertNotIn("SC5000_UI_ALIVE_CMD=", gate)  # uptime is not health (#140 boot safety)
         self.assertIn("--bounding-set=-sys_time", gate)
         self.assertIn("kill -KILL", gate)
         self.assertIn("--phase boot2", gate)
