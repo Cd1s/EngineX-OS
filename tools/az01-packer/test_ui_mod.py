@@ -108,10 +108,10 @@ class UiModSourceTest(unittest.TestCase):
     def test_shadow_exact_pitch_pll_and_debug(self):
         m = bp.SERVICES_MAIN
         self.assertIn('cb = g.current.unnormalized || 0', m)
-        self.assertIn("Math.abs(exact - shown) < 0.15 ? exact : shown", m)
+        self.assertIn("Math.abs(exact - shown) < 0.15 || (shown === 100 && exact > 100) ? exact : shown", m)
         self.assertIn("(p.playing ? 180 : 5)", m)
         self.assertIn("o.currentBpm = s.currentBpm", m)
-        self.assertIn("const wantSync = !!e.sync && (!e.link || !root.scPlayer)", m)
+        self.assertIn("const wantSync = !!e.sync && (!e.link || !root.scPlayer || at.nativeSync)", m)
         self.assertIn("function scShadowSpeed(d, pitch, want)", m)
         self.assertIn("at.sd * 0.85 + drift * 0.15", m)
         self.assertNotIn("at.postPlay", m)  # the gap after Play is closed by scShadowBend, not a second seek
@@ -120,7 +120,7 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("root.scShadowDebug = !!r.debug", m)
         self.assertIn("LoadOverlay/LoadOverlayDecks.qml", SRC)
         # Standalone EngineX peers share Sync/master; consoles (#160) still need shadow control
-        self.assertIn("if ((!e.link || !root.scPlayer) && wantSync !== synced", m)
+        self.assertIn("if ((!e.link || !root.scPlayer || at.nativeSync) && wantSync !== synced", m)
         self.assertIn('if ((!at.link || !root.scPlayer) && (root.scTr("/Engine/Deck" + d + "/DeckIsMaster")', m)
 
     def test_shadow_unload_and_no_register_subscription(self):
@@ -1750,7 +1750,12 @@ class DeckHeaderLayoutTest(unittest.TestCase):
 
     def test_countdown_has_a_bounded_slot_and_elides_only_its_name(self):
         cap = bp.cue_capsule("", "1", 22, 16)
-        self.assertIn("Layout.maximumWidth: 96", cap)
+        self.assertIn("Layout.maximumWidth: 112", cap)
+        self.assertIn("Layout.leftMargin: 6", cap)
+        self.assertIn("Layout.rightMargin: 6", cap)
+        self.assertIn("clip: true", cap)
+        self.assertIn("Layout.minimumWidth: 0", cap)
+        self.assertIn("parent.width - cueCountText.implicitWidth - 11", cap)
         self.assertIn("elide: Text.ElideRight", cap)
         self.assertIn("Reserve the Cue slot even without a cue", cap)
 
@@ -1804,16 +1809,23 @@ class DeckHeaderLayoutTest(unittest.TestCase):
                         text = (base / rel).read_text() if (base / rel).exists() else stock
                         pattern = r"(?m)^( +)DeckInfoTimeInfo \{.*?^\1\}"
                         self.assertEqual(re.search(pattern, text, re.S).group(), re.search(pattern, stock, re.S).group())
-                    # Conserving the mini row's total fixed width preserves the
-                    # stock flexible sync bar, including when Cue is visible.
+                    # Compacting SpeedInfo (34 + 4 + 62 = 100 px vs stock 56 + 16 + 84 = 156 px)
+                    # frees 56 px: 28 px widens Cue + margins (112 + 6 + 6 = 124 px) and 28 px
+                    # expands the sync/LEAD slot (minimumWidth 135 px).
                     mini = (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
                     def preferred(kind, text):
                         block = re.search(kind + r" \{(.*?)^                \}", text, re.S | re.M).group(1)
                         return int(re.search(r"Layout.preferredWidth: (\d+)", block).group(1))
                     stock = (qrc / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
-                    cue_width = int(re.search(r"Layout.preferredWidth: (\d+)", bp.cue_capsule("", "1", 22, 16)).group(1))
-                    self.assertEqual(preferred("AutoLoop", stock) + preferred("BeatJump", stock) + 6 * 16,
-                                     preferred("AutoLoop", mini) + preferred("BeatJump", mini) + cue_width + 7 * 4)
+                    cap = bp.cue_capsule("", "1", 22, 16)
+                    cue_width = int(re.search(r"Layout.preferredWidth: (\d+)", cap).group(1))
+                    cue_margins = sum(int(m) for m in re.findall(r"Layout\.(?:left|right)Margin: (\d+)", cap))
+                    self.assertIn("Layout.minimumWidth: 135", mini)
+                    self.assertIn("speedRangeTextWidth: 34", mini)
+                    self.assertIn("speedRangeTextHorizontalAlignment: Text.AlignLeft", mini)
+                    self.assertIn("speedStateTextWidth: 62", mini)
+                    self.assertEqual((preferred("AutoLoop", stock) + preferred("BeatJump", stock) + 156 + 6 * 16) - 28,
+                                     preferred("AutoLoop", mini) + preferred("BeatJump", mini) + cue_width + cue_margins + 100 + 7 * 4)
                     jump = (base / composite / "Deck/DeckItem/BeatJump.qml").read_text()
                     forward = jump.index('objectName: "Deck_BeatJump_Forward"')
                     self.assertLess(jump.index('objectName: "Deck_BeatJump_Text"'), forward)
@@ -2946,6 +2958,91 @@ assert.equal(onlyFileName(), true);
 """)
 
 
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowNativeOverRangeTest(unittest.TestCase):
+    def test_sender_uses_native_tempo_when_the_speed_display_is_clipped(self):
+        ShadowDisplayTest.js(self, r"""
+globalThis.XMLHttpRequest = class { open(){this.readyState=1} send(){this.readyState=4;this.status=200} };
+globalThis.scShadowPoll = () => {};
+const T0=now, ratio=144.2/71.00345611572266;
+let shown='+100.0%';
+globalThis.scTr = path => ({
+ value:path.endsWith('/SampleRate')?44100:0, color:'#fff', index:0,
+ state:path.startsWith('/Engine/Deck1/') && (path.endsWith('/SongLoaded') || path.endsWith('/PlayState')),
+ get unnormalized(){return path.endsWith('/Deck1/Track/TrackPosition') ? (10000+(now-T0)*ratio)*44.1 :
+   path.endsWith('/TrackLength') ? 400*44100 : path.endsWith('/OriginalBPM') ? 71.00345611572266 : path.endsWith('/CurrentBPM') ? 144.2 : 0},
+ get string(){return path.endsWith('/SpeedState')?shown:path.endsWith('/SyncMode')?'BeatOrBarSync':path.endsWith('/TrackUri')?'file:///a.mp3':''}
+});
+for(let i=0;i<40;i++){now+=80;scShadowTick();}
+assert.equal(scShadowPrev[1].pitch,103.09);
+assert.equal(scShadowPrev[1].jumps,0,'the true tempo must not become a jump on every tick');
+shown='+0.0%';now+=1001;scShadowTick();
+assert.equal(scShadowPrev[1].pitch,0,'mismatched BPMs during a load must still fall back to the unclipped display');
+""")
+
+    def test_peer_copy_uses_native_sync_and_releases_it_without_a_clipped_write(self):
+        ShadowDisplayTest.js(self, r"""
+Object.assign(globalThis,{scPlayer:true,scFourDeckRole:'13',scShadowDisplayOnly:false,scShadowEngineMask:30});
+const props=new Map(), presses=[], speeds=[];
+globalThis.scShadowBent=null;
+let sync='Off';
+globalThis.scTr = path => {
+ if(props.has(path))return props.get(path);
+ const p={
+  state:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),
+  entries:['4','8','10','20','50','100'],index:5,value:path.endsWith('/SampleRate')?44100:0,url:'',
+  get string(){return path.endsWith('/SyncMode')?sync:path.endsWith('/SpeedRange')?'100':''},
+  get unnormalized(){return path.endsWith('/TrackLength')?44100*400:path.endsWith('/TrackPosition')?5000*44.1:0}
+ };props.set(path,p);return p;
+};
+globalThis.scShadowHolds=()=>true;
+globalThis.scShadowCues=()=>{};
+globalThis.scShadowEnd=()=>false;
+globalThis.scShadowBeat=()=>{};
+globalThis.scShadowSpeed=(d,p,r)=>speeds.push([d,p,r]);
+globalThis.scPress=p=>{presses.push(p);if(p.endsWith('/UnSync'))sync='Off';else if(p.endsWith('/Sync'))sync='BeatOrBarSync'};
+scShadowAt[2]={path:'/a',id:'a',ready:true,seekAt:now};
+let seq=0;
+const apply=(extra={})=>{
+ now+=1000;
+ scShadowApply(Object.assign({deck:2,path:'/a',id:'a',link:'peer',sync:true,playing:true,
+  positionMs:5000,at:now,pitch:103.09,bpm:71.003456,currentBpm:144.2,range:100,seq:++seq},extra));
+};
+apply();
+assert.equal(presses.pop(),'/Engine/Deck2/Sync');
+assert.equal(speeds.length,0,'a clipped fader must never replace native Sync');
+assert.equal(scShadowAt[2].nativeSync,true);
+apply();
+assert.equal(speeds.length,0);
+assert.equal(presses.length,0,'do not keep pressing an acknowledged Sync');
+// Beat Sync can select another beat: the copy must retain its position loop.
+for(let i=0;i<3;i++)apply({positionMs:6000});
+assert.equal(scShadowAt[2].seeks,1,'native Sync must not leave a one-beat song-position error');
+apply({sync:false});
+assert.equal(presses.pop(),'/Engine/Deck2/UnSync');
+apply({sync:false});
+assert.equal(speeds.length,0,'UnSync retains its native rate until the source moves the fader');
+apply({sync:false,pitch:20,currentBpm:85.2041472});
+assert.equal(scShadowAt[2].nativeSync,false);
+assert.equal(speeds.length,1,'normal fader control resumes inside the range');
+assert.ok(Math.abs(speeds[0][1]-20)<0.001);
+
+// Ordinary linked Sync stays on the existing fader/position path.
+presses.length=0;speeds.length=0;
+apply({pitch:3,currentBpm:73.13355968});
+assert.equal(presses.length,0);
+assert.equal(speeds.length,1);
+// A replacement track retains ownership so its Sync can be released.
+scShadowAt[2].nativeSync=true;
+apply({path:'/b',id:'b',sync:false});
+assert.equal(scShadowAt[2].nativeSync,true);
+// Eject releases the owned native Sync too.
+sync='TempoSync';scShadowAt[2].link='peer';scShadowAt[2].emptyAt=now-1000;
+scShadowEmpty(2,now);
+assert.ok(presses.includes('/Engine/Deck2/UnSync'));
+assert.ok(!presses.some(p=>p.endsWith('/RequestMaster')),'a copy must not request MASTER');
+""")
+
+
 if __name__ == "__main__":
     unittest.main()
-
