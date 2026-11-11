@@ -924,6 +924,32 @@ scShadowApplyAll([{deck: 2, path: '/peer.flac', playing: true}], false);
 assert.equal(writes[n], '/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer.flac');
 """)
 
+    def test_live_cdj_switch_drops_cover_meta_and_unsyncs_201(self):
+        # Review of 27e31e9: after a live switch to All CDJ Mode the slot leaves the cover of
+        # an Engine load (header-only meta, detail: false). The display must start over (no
+        # inherited meta, request or cached reply text), else the lane keeps the stretched
+        # overview for good. And the UnSync of the slot being unloaded must reach Engine
+        # although the display now draws that slot.
+        self.js(r"""
+const writes = [], props = {};
+globalThis.scTr = p => props[p] || (props[p] = {string: p === '/Engine/Deck2/SyncMode' ? 'On' : 'Off', set state(v) { writes.push(p + '=' + v); }, get state() { return p === '/Engine/Deck2/Play' || p === '/Engine/Deck2/Track/SongLoaded' ? true : undefined; }, set url(v) { writes.push(p + '=' + v); }});
+globalThis.scPressTimer = {restart() {}};
+const coverMeta = {detail: false, header: true};
+scShadowDisplay = {2: {key: 'peer:a', engine: true, meta: coverMeta, title: 'A'}};
+const coverRequest = scShadowDisplayRequests[2] = {key: 'peer:a', busy: false, started: 0, next: 0, tries: 1};
+scShadowDisplayText[2] = {key: 'peer:a', text: '{"detail":false}'};
+scShadowAt[2] = {path: '/peer.flac', id: 'peer:a', ready: true};
+scShadowApplyAll([{deck: 2, key: 'peer:a', title: 'A', playing: true, at: now, positionMs: 500}], true);
+assert.equal(scShadowData(2).engine, false);
+assert.equal(scShadowData(2).meta, null); // not the cover's header-only meta
+assert.equal(scShadowDisplayText[2], undefined);
+assert.notStrictEqual(scShadowDisplayRequests[2], coverRequest); // a fresh fetch, not the cover's
+now += 400; // the unload after the debounce: its UnSync goes through although the display draws the slot
+scShadowApplyAll([{deck: 2, key: 'peer:a', title: 'A', playing: true, at: now, positionMs: 500}], true);
+assert(writes.indexOf('/Engine/Deck2/Unload=true') >= 0, JSON.stringify(writes));
+assert(scPressQueue.some(e => e.path === '/Engine/Deck2/UnSync'), JSON.stringify(scPressQueue));
+""")
+
     def test_legacy_helpers_and_remote_presses_are_inert_in_display_mode(self):
         self.js(r"""
 scShadowApply({deck: 2, path: '/must-not-load.wav'});
@@ -1516,6 +1542,34 @@ assert.deepEqual(bodies[1].map(o=>[o.deck,o.active]), [[1,false],[3,true]]);
 tick(2000); assert.equal(bodies.length,2,'no layer change: pings only');
 layer=0; tick(40); assert.equal(bodies.length,3); assert.equal(bodies[2][0].active,true);
 """)
+
+    def test_entering_paired_player_forces_the_next_shadow_apply_201(self):
+        # Review of 27e31e9: Linked View 4 Decks -> Paired Player (live) must show lane 2 /
+        # "No paired player" at once, also when the peer is unchanged in All CDJ Mode or
+        # the poll is idle: the next /shadow answer goes through scShadowApplyAll.
+        line = next(l for l in bp.SERVICES_MAIN.splitlines() if l.lstrip().startswith("onScPairedOnChanged:"))
+        body = line.split(":", 1)[1]
+        self.assertIn('/v1/sc5000/shadow?ver=" + scShadowVer + (scShadowIdle ? "&idle=1" : "")', Path(bp.__file__).read_text(encoding="utf-8"))
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        script = f"""
+const assert = require('assert');
+function run(on) {{
+  const o = {{ scPairedOn: on, scPairedDirty: false, scPairedEmpty: 3, scShadowIdle: true, scShadowResponseVersion: '7:true:13:false:false:ab', scShadowVer: 7 }};
+  with (o) {body}
+  return o;
+}}
+const on = run(true);
+assert.equal(on.scShadowIdle, false); assert.equal(on.scShadowResponseVersion, ''); assert.equal(on.scShadowVer, 0); assert.equal(on.scPairedDirty, true);
+const off = run(false);
+assert.equal(off.scPairedEmpty, 0); assert.equal(off.scShadowIdle, true); assert.equal(off.scShadowVer, 7);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        # "Paired Player" does not fit the stock 136 entry width.
+        e = bp.FOUR_DECK_ENTRIES
+        start = e.index("id: scLinkedViewEntry")
+        self.assertIn("entryWidth: 176", e[start:e.index("\n\t\t},", start)])
 
     def test_linked_view_selector_returns_to_stock_201(self):
         # Maintainer report: with Paired Player on there was no visible way back to the
