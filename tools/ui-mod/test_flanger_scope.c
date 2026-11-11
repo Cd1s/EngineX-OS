@@ -114,6 +114,7 @@ static double render_px_rate(unsigned index) {
             l[i] = right[i] = (float)((int)((block * 128 + i) % 1009) - 504) / 4096.0f;
         r->input_a = in;
         sc_pfx_instance_prepare(&r->dsp);
+        if (pfx_time_ms) sc_ms_prepare(&r->dsp.ms);
         hook_flanger(&effect, in, (float *const *)2, 128);
         for (unsigned i = 0; i < 128; ++i) energy += (double)l[i] * l[i];
     }

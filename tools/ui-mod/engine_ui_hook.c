@@ -352,11 +352,12 @@ static void *lim_poll(void *arg) {
         if (have_settings) previous = st;
         int on = 0, gain = 0, echo = 0, pioneer_fx = 0, led = 100;
         struct sc_ms_config timing = {500, 0};
-        for (unsigned pair = 0; pair < 4; ++pair) sc_ms_prepare(&master_ms[pair]);
         FILE *f = fopen(UI_ROOT "/settings.conf", "r");
         if (f) {
-            char line[64];
-            while (fgets(line, sizeof line, f))
+            char *line = NULL;
+            size_t capacity = 0;
+            while (getline(&line, &capacity, f) >= 0) {
+                if (sc_ms_setting(&timing, line)) continue;
                 if (!strncmp(line, "master_limiter=1", 16)) on = 1;
                 else if (!strncmp(line, "auto_gain=1", 11)) gain = 1;
                 else if (!strncmp(line, "upfader_echo=1", 14)) echo = 1;
@@ -364,7 +365,6 @@ static void *lim_poll(void *arg) {
                     int n = atoi(line + 15);
                     if (n >= 10 && n <= 100) led = n;
                 }
-                else if (!strncmp(line, "fx_time_", 8)) sc_ms_setting(&timing, line);
                 else if (!strncmp(line, "pioneer_fx=", 11)) {
                     char val[64];
                     size_t len = strcspn(line + 11, "\r\n");
@@ -374,7 +374,16 @@ static void *lim_poll(void *arg) {
                         pioneer_fx = sc_master_pioneer_fx_parse(val);
                     }
                 }
+            }
+            free(line);
             fclose(f);
+        }
+        if (timing.enabled) {
+            for (unsigned pair = 0; pair < 4; ++pair) sc_ms_prepare(&master_ms[pair]);
+#if !defined(__aarch64__)
+            if (fx_selector_supported) for (unsigned i = 0; i < SC_PFX_UNITS; ++i)
+                sc_ms_prepare(&sc_pfx_routes[i].dsp.ms);
+#endif
         }
         __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);

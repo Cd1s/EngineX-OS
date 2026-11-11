@@ -939,6 +939,8 @@ func TestUISettingsFxTimeFileReplacement(t *testing.T) {
 		{"fx_time_mode=msjunk\nfx_time_ms=125ms\n", "beats", 500},
 		{"fx_time_mode=ms\nfx_time_ms=4294967295\n", "ms", 4000},
 		{"fx_time_ms=0\n", "beats", 10},
+		{"  fx_time_mode=ms  \r\n\tfx_time_ms=250 \r\n", "ms", 250},
+		{"fx_time_ms= 250\n", "beats", 500},
 		{"fx_time_mode=ms\nfx_time_ms=125\nfx_time_mode=msjunk\nfx_time_ms=125ms\n", "beats", 500},
 		{"fx_time_mode=ms\nfx_time_ms=4294967296\n", "ms", 500},
 	} {

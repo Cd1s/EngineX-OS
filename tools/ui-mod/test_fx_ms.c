@@ -26,6 +26,9 @@ static void test_config(void) {
     config_line(&c, "fx_time_ms=0"); assert(c.ms == 10);
     config_line(&c, "fx_time_ms=ms"); assert(c.ms == 500);
     config_line(&c, "fx_time_mode=msjunk"); assert(!c.enabled);
+    config_line(&c, "  fx_time_mode=ms  \r\n"); assert(c.enabled);
+    config_line(&c, "\tfx_time_ms=250 \r\n"); assert(c.ms == 250);
+    config_line(&c, "fx_time_ms= 250"); assert(c.ms == 500);
     puts("config strict integers, overflow, reset, clamp PASS");
 }
 static void test_impulses(void) {
