@@ -18,7 +18,7 @@ retain their separate roles. The stock header gains no tap action. Read-only nat
 labelled −/+ only in PX milliseconds mode; settings refreshes apply a complete
 snapshot without briefly switching the mode OFF.
 
-![Native PX milliseconds control rendered in the sandbox](site/assets/shots/shot-px-delay-ms.png)
+![Native PX milliseconds control rendered in the sandbox](assets/screenshots/en/18-px-delay-ms.png)
 
 Stock Beat FX continue to use their stock beat controls and displays. Slip Roll
 and Space retain their existing timing. Stock milliseconds support is outside
