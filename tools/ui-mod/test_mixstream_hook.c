@@ -78,6 +78,7 @@ static void test_engine(const char *filename) {
             config[0xe1] = (uchar)(seed & 1);
             memcpy(expected, config, sizeof config);
             for (unsigned i = 0; i < 5; i++) expected[build->config_field[i]] = i == 4 ? 0 : 1;
+            if (!strcmp(build->name, "5.3.0")) expected[0x2a7] = 1; // gen1 5.3.0 only: hasStemsProcessorFactoryInstalled
             expected[0x54] = 1; // existing #152
             uint32_t zoom = 30; memcpy(expected + build->config_zoom, &zoom, sizeof zoom);
             if (nh) expected[0xe1] = expected[0x19c] = expected[0x19d] = expected[0x4cd] = 1;
