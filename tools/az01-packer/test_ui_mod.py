@@ -1749,15 +1749,102 @@ class DeckHeaderLayoutTest(unittest.TestCase):
     js = ShadowDisplayTest.js
 
     def test_countdown_has_a_bounded_slot_and_elides_only_its_name(self):
-        cap = bp.cue_capsule("", "1", 22, 16)
-        self.assertIn("Layout.maximumWidth: 112", cap)
-        self.assertIn("Layout.leftMargin: 6", cap)
-        self.assertIn("Layout.rightMargin: 6", cap)
-        self.assertIn("clip: true", cap)
-        self.assertIn("Layout.minimumWidth: 0", cap)
-        self.assertIn("parent.width - cueCountText.implicitWidth - 11", cap)
-        self.assertIn("elide: Text.ElideRight", cap)
-        self.assertIn("Reserve the Cue slot even without a cue", cap)
+        bounded = bp.cue_capsule("", "1", 22, 16)
+        self.assertNotIn("fillWidth", bounded)
+        self.assertIn("Layout.minimumWidth: 112", bounded)
+        self.assertIn("Layout.preferredWidth: 112", bounded)
+        self.assertIn("Layout.maximumWidth: 112", bounded)
+        flex = bp.cue_capsule("", "1", 22, 16, fill_width=True)
+        self.assertIn("Layout.fillWidth: true", flex)
+        self.assertIn("Layout.minimumWidth: 50", flex)
+        self.assertNotIn("Layout.maximumWidth", flex)
+        for cap in (bounded, flex):
+            self.assertIn("Layout.leftMargin: 3", cap)
+            self.assertIn("Layout.rightMargin: 2", cap)
+            self.assertIn("clip: true", cap)
+            self.assertIn("parent.width - Math.ceil(cueCountText.implicitWidth) - 11", cap)
+            self.assertIn("elide: Text.ElideRight", cap)
+            self.assertIn("Reserve the Cue slot even without a cue", cap)
+
+    def test_split_mini_and_main_keep_bounded_cue_and_stock_title_layout(self):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on the build host)")
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        composite = "Skins/EngineOS/UI/CompositeControls/"
+        split_rel = composite + "DeckTrackData/SplitMiniDeckTrackDataContent.qml"
+        stock_split = (qrc / split_rel).read_text()
+        patched_split = stock_split
+        for old, new in edits[split_rel]:
+            patched_split = bp.patch(patched_split, old, new, split_rel)
+        # ArtistSong block in SplitMini must remain byte-for-byte stock.
+        artist_pat = r"(?m)^    ArtistSong \{.*?^    \}"
+        self.assertEqual(re.search(artist_pat, patched_split, re.S).group(),
+                         re.search(artist_pat, stock_split, re.S).group())
+        # Nothing after ArtistSong in SplitMini may set fillWidth: true (which would steal title width).
+        after_artist = patched_split[re.search(artist_pat, patched_split, re.S).end():]
+        self.assertNotIn("Layout.fillWidth: true", after_artist)
+        self.assertIn("Layout.preferredWidth: 112\n            Layout.maximumWidth: 112", after_artist)
+        # 2-deck Main / SplitMain (DeckPerformanceDataContent) cue capsule is also bounded (no fillWidth).
+        perf_rel = composite + "DeckPerformanceData/DeckPerformanceDataContent.qml"
+        perf_cue = next(new for _, new in edits[perf_rel] if "EngineX_CueCountdown" in new)
+        self.assertIn("Layout.preferredWidth: 112\n        Layout.maximumWidth: 112", perf_cue)
+        self.assertNotIn("Layout.fillWidth: true", perf_cue.split("Item {\n        id: spacer2")[0])
+        # Only the 4-deck grouped header sets fillWidth: true on cue_capsule.
+        mini_rel = composite + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"
+        mini_cue = next(new for _, new in edits[mini_rel] if "EngineX_CueCountdown" in new)
+        self.assertIn("Layout.fillWidth: true", mini_cue)
+
+    def test_autoloop_beatjump_and_speedinfo_preserve_safe_widths(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        # SpeedInfo measures worst-case strings ("±100" and "-100.00%") via TextMetrics
+        # rather than live implicitWidth, and keeps stock minimum widths via Math.max.
+        speed_patches = edits["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/SpeedInfo.qml"]
+        self.assertFalse(any("columnSpacing" in old for old, _ in speed_patches))
+        self.assertTrue(any('text: "\\u00b1100"' in new and 'text: "-100.00%"' in new for _, new in speed_patches))
+        self.assertTrue(any("Math.max(speedRangeTextWidth, Math.ceil(scRangeWorstMetrics.width))" in new for _, new in speed_patches))
+        self.assertTrue(any("Math.max(speedStateTextWidth, Math.ceil(scStateWorstMetrics.width))" in new for _, new in speed_patches))
+        self.assertFalse(any("implicitWidth" in new for _, new in speed_patches))
+        for item in ("AutoLoop", "BeatJump"):
+            item_patches = edits[f"Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/{item}.qml"]
+            # Stock component roots must not set Layout.fillWidth: false globally;
+            # fillWidth: false is scoped to our compact call sites, and inner text
+            # fillWidth/minimumWidth:0 only activates at compact preferredWidth <= 64.
+            self.assertFalse(any("Layout.fillWidth: false" in new for _, new in item_patches), item)
+            self.assertTrue(any("parent.Layout.preferredWidth > 0 && parent.Layout.preferredWidth <= 64" in new and "fontSizeMode: Text.HorizontalFit" in new for _, new in item_patches), item)
+        for m in re.finditer(r"speed(?:Range|State)TextWidth:\s*(\d+)", bp.SHADOW_LAYER):
+            self.assertEqual(int(m.group(1)), 0)
+        for m in re.finditer(r"AutoLoop\s*\{([^}]*?)\}", bp.SHADOW_LAYER, re.S):
+            self.assertIn("Layout.fillWidth: false", m.group(1))
+            self.assertGreaterEqual(int(re.search(r"Layout\.preferredWidth:\s*(\d+)", m.group(1)).group(1)), 52)
+        for m in re.finditer(r"BeatJump\s*\{([^}]*?)\}", bp.SHADOW_LAYER, re.S):
+            self.assertIn("Layout.fillWidth: false", m.group(1))
+            self.assertGreaterEqual(int(re.search(r"Layout\.preferredWidth:\s*(\d+)", m.group(1)).group(1)), 64)
+        for rel in (
+            "Skins/EngineOS/UI/CompositeControls/DeckTrackData/GroupedMiniDeckTrackDataContent.qml",
+            "Skins/EngineOS/UI/CompositeControls/DeckPerformanceData/DeckPerformanceDataContent.qml",
+            "Skins/EngineOS/UI/CompositeControls/DeckTrackData/SplitMiniDeckTrackDataContent.qml",
+        ):
+            joined = "\n".join(new for _, new in edits[rel])
+            self.assertIn("speedRangeTextWidth: 0", joined, rel)
+            self.assertIn("speedStateTextWidth: 0", joined, rel)
+            self.assertGreaterEqual(joined.count("Layout.fillWidth: false"), 3, rel)
+            for m in re.finditer(r"speed(?:Range|State)TextWidth:\s*(\d+)", joined):
+                self.assertEqual(int(m.group(1)), 0, rel)
+            for m in re.finditer(r"(?:AutoLoop|target:\s*autoLoop)\b[^}]*?Layout\.preferredWidth:\s*(\d+)", joined, re.S):
+                self.assertGreaterEqual(int(m.group(1)), 52, rel)
+            for m in re.finditer(r"(?:BeatJump|target:\s*beatJump)\b[^}]*?Layout\.preferredWidth:\s*(\d+)", joined, re.S):
+                self.assertGreaterEqual(int(m.group(1)), 64, rel)
 
     def test_performance_header_preserves_sync_row_and_stock_bpm_formatter(self):
         qrc = LAB / "5.3.0" / "qrc"
@@ -1787,7 +1874,8 @@ class DeckHeaderLayoutTest(unittest.TestCase):
                     self.assertIn("topPadding: bpmInfo.fractionTextTopPadding", info)
                     self.assertIn("onBpmClicked()", info)
                     performance = (base / composite / "DeckPerformanceData/DeckPerformanceDataContent.qml").read_text()
-                    self.assertIn("id: autoLoop\n        Layout.rightMargin: 4", performance)
+                    self.assertIn("id: autoLoop\n        Layout.fillWidth: false\n        Layout.rightMargin: 4", performance)
+                    self.assertIn("id: beatJump\n        Layout.fillWidth: false", performance)
                     for name, text in (
                         ("Performance", performance),
                         ("GroupedMini", (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()),
@@ -1809,23 +1897,30 @@ class DeckHeaderLayoutTest(unittest.TestCase):
                         text = (base / rel).read_text() if (base / rel).exists() else stock
                         pattern = r"(?m)^( +)DeckInfoTimeInfo \{.*?^\1\}"
                         self.assertEqual(re.search(pattern, text, re.S).group(), re.search(pattern, stock, re.S).group())
-                    # Compacting SpeedInfo (34 + 4 + 62 = 100 px vs stock 56 + 16 + 84 = 156 px)
-                    # frees 56 px: 28 px widens Cue + margins (112 + 6 + 6 = 124 px) and 28 px
-                    # expands the sync/LEAD slot (minimumWidth 135 px).
+                    # SpeedInfo preserves stock minimum widths via Math.max(speed*TextWidth, Math.ceil(implicitWidth))
+                    # while compact rows set speed*TextWidth: 0, JP07SyncIndicator keeps a fixed 135 px width,
+                    # and AutoLoop/BeatJump keep 52/64 px.
                     mini = (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
-                    def preferred(kind, text):
-                        block = re.search(kind + r" \{(.*?)^                \}", text, re.S | re.M).group(1)
-                        return int(re.search(r"Layout.preferredWidth: (\d+)", block).group(1))
-                    stock = (qrc / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
-                    cap = bp.cue_capsule("", "1", 22, 16)
-                    cue_width = int(re.search(r"Layout.preferredWidth: (\d+)", cap).group(1))
-                    cue_margins = sum(int(m) for m in re.findall(r"Layout\.(?:left|right)Margin: (\d+)", cap))
-                    self.assertIn("Layout.minimumWidth: 135", mini)
-                    self.assertIn("speedRangeTextWidth: 34", mini)
+                    speed = (base / composite / "Deck/DeckItem/SpeedInfo.qml").read_text()
+                    self.assertIn("Layout.fillWidth: false\n                    Layout.minimumWidth: 135\n                    Layout.preferredWidth: 135\n                    Layout.maximumWidth: 135", mini)
                     self.assertIn("speedRangeTextHorizontalAlignment: Text.AlignLeft", mini)
-                    self.assertIn("speedStateTextWidth: 62", mini)
-                    self.assertEqual((preferred("AutoLoop", stock) + preferred("BeatJump", stock) + 156 + 6 * 16) - 28,
-                                     preferred("AutoLoop", mini) + preferred("BeatJump", mini) + cue_width + cue_margins + 100 + 7 * 4)
+                    self.assertIn("speedRangeTextWidth: 0", mini)
+                    self.assertIn("speedStateTextWidth: 0", mini)
+                    self.assertIn("speedRangeTextWidth: 0", performance)
+                    self.assertIn("speedStateTextWidth: 0", performance)
+                    self.assertIn("columnSpacing: 16", speed)
+                    self.assertIn('TextMetrics { id: scRangeWorstMetrics; font: speedRangeText.font; text: "\\u00b1100" }', speed)
+                    self.assertIn('TextMetrics { id: scStateWorstMetrics; font: speedStateText.font; text: "-100.00%" }', speed)
+                    self.assertIn("speedRangeTextWidth > 0 ? speedRangeTextWidth : Math.max(speedRangeTextWidth, Math.ceil(scRangeWorstMetrics.width))", speed)
+                    self.assertIn("speedStateTextWidth > 0 ? speedStateTextWidth : Math.max(speedStateTextWidth, Math.ceil(scStateWorstMetrics.width))", speed)
+                    # Unpatched stock layouts (DeckOverview, DeckSharedItems, GroupedMainDeckLayout,
+                    # StackedMainDeckLayout, StackedMiniDeckLayout) stay untouched vs 1de13b7.
+                    for unpatched in (
+                        "Deck/DeckLayout/GroupedMainDeckLayout.qml",
+                        "Deck/DeckLayout/StackedMainDeckLayout.qml",
+                        "Deck/DeckLayout/StackedMiniDeckLayout.qml",
+                    ):
+                        self.assertFalse((base / composite / unpatched).exists(), unpatched)
                     jump = (base / composite / "Deck/DeckItem/BeatJump.qml").read_text()
                     forward = jump.index('objectName: "Deck_BeatJump_Forward"')
                     self.assertLess(jump.index('objectName: "Deck_BeatJump_Text"'), forward)
