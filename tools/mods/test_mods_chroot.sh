@@ -27,7 +27,7 @@ for pkg in "$PKGS"/*.tar.gz; do
     if unshare -m -n -p -f --kill-child sh -s "$ROOTFS" "$WORK/$id" "$id" "$personality" >"$out" 2>&1 <<'EOS'
 set -eu
 ROOTFS=$1 PKG=$2 ID=$3 PERS=$4
-R=$(mktemp -d /var/tmp/mods-root.XXXXXX)
+R=$PKG.root && mkdir "$R" # inside the caller's work dir, removed with it
 mount --make-rprivate /
 mount --bind "$ROOTFS" "$R"
 mount -o remount,bind,ro "$R"
