@@ -39,7 +39,7 @@
       case "ul": case "ol": return `<${b.k} class="blk">${b.x.map((i) => `<li>${T(i)}</li>`).join("")}</${b.k}>`;
       case "note": return `<div class="note blk ${b.tone || ""}"><span class="note-t">${NOTE_T[b.tone] || "NOTE"}</span>${T(b.x)}</div>`;
       case "shot": {
-        const src = b.src || `assets/screenshots/${SHOT_DIR[lang]}/${b.name.replace(/^zh:/, "")}`;
+        const src = b.src ? (typeof b.src === "string" ? b.src : b.src[lang]) : `assets/screenshots/${SHOT_DIR[lang]}/${b.name.replace(/^zh:/, "")}`;
         return `<figure class="shot blk"><img loading="lazy" src="${esc(src)}" alt="${esc(T(b.cap).replace(/<[^>]+>/g, ""))}"><figcaption>${T(b.cap)}</figcaption></figure>`;
       }
       case "table": return `<div class="tbl blk"><table><thead><tr>${b.head.map((h) => `<th>${T(h)}</th>`).join("")}</tr></thead><tbody>${b.rows.map((r) => `<tr>${r.map((c) => `<td>${T(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
@@ -68,7 +68,7 @@
         <p class="h-lead">${T(H.title)}</p>
         <p class="h-sub">${T(H.sub)}</p>
         <div class="ctas"><a class="btn pri" href="#start">${T(H.cta.docs)}</a><a class="btn" href="#start-downloads">${T(H.cta.dl)}</a><a class="btn" href="#mods">${T(H.cta.mods)}</a><a class="btn ghost" href="${GH}" target="_blank" rel="noopener">${T(H.cta.gh)}</a></div>
-        <figure class="h-visual"><img src="${H.shot.src}" alt="EngineX OS ${D.version}" width="1280" height="800"><figcaption>${T(H.shot.cap)}</figcaption></figure>
+        <figure class="h-visual"><img src="${esc(H.shot.name ? `assets/screenshots/${SHOT_DIR[lang]}/${H.shot.name.replace(/^zh:/, "")}` : (typeof H.shot.src === "string" ? H.shot.src : H.shot.src[lang]))}" alt="EngineX OS ${D.version}" width="1280" height="800"><figcaption>${T(H.shot.cap)}</figcaption></figure>
       </section>
       <div class="h-stats">${H.stats.map(([n, l, d]) => `<div><b>${n}</b><span>${T(l)}</span><small>${T(d)}</small></div>`).join("")}</div>
       <section class="h-sec">${head(H.featT, H.featP)}<div class="h-grid">${cards(H.features)}</div></section>

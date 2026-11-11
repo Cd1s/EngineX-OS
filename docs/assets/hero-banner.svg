@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 420" width="1280" height="420" role="img" aria-labelledby="title desc">
   <title id="title">EngineX OS 5.3.0.4</title>
-  <desc id="desc">Custom OS for Engine DJ 5.3.0 standalone players: 96 kHz zero-XRUN real-time audio, 33.8x Stems worker compute, 5 streaming platforms, Rekordbox direct bridge under 2 seconds.</desc>
+  <desc id="desc">Custom OS for 16 Engine DJ 5.3.0+ standalone units: 96 kHz zero-XRUN real-time audio, 33.8x Stems worker compute, 7 streaming platforms, Rekordbox direct bridge under 2 seconds.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0a0e13"/>
@@ -46,12 +46,12 @@
 
   <!-- wordmark -->
   <g font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
-    <rect x="48" y="44" width="292" height="28" rx="14" fill="#00e676" fill-opacity="0.1" stroke="#00e676" stroke-opacity="0.45"/>
+    <rect x="48" y="44" width="308" height="28" rx="14" fill="#00e676" fill-opacity="0.1" stroke="#00e676" stroke-opacity="0.45"/>
     <circle cx="66" cy="58" r="4" fill="#00e676" filter="url(#glow)"/>
-    <text x="80" y="63" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" letter-spacing="1.5" fill="#9ff5c6">ENGINE OS 5.3.0 · CUSTOM</text>
+    <text x="80" y="63" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" letter-spacing="1.5" fill="#9ff5c6">ENGINE OS 5.3.0+ · 16 MODELS</text>
     <text x="46" y="150" font-size="78" font-weight="800" letter-spacing="-2" fill="#f2f6fa">Engine<tspan fill="url(#x)" filter="url(#glow)">X</tspan><tspan fill="#f2f6fa" font-weight="300"> OS</tspan></text>
-    <text x="50" y="192" font-size="21" fill="#a9b6c4">Custom firmware layer for Engine DJ 5.3.0 standalone players</text>
-    <text x="50" y="224" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" letter-spacing="1" fill="#6f7d8c">SC5000 · SC6000 · PRIME 4 · and more Engine 5.3.0 hardware</text>
+    <text x="50" y="192" font-size="21" fill="#a9b6c4">Custom system for 16 Denon DJ, Numark and Rane standalone units</text>
+    <text x="50" y="224" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" letter-spacing="1" fill="#6f7d8c">SC5000 · SC6000 · PRIME · SC LIVE · Mixstream · SYSTEM ONE</text>
   </g>
 
   <!-- jog wheel motif: stems as four arcs -->
@@ -95,9 +95,9 @@
     <g transform="translate(648 280)">
       <rect width="284" height="112" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>
       <rect x="18" y="0" width="56" height="3" rx="1.5" fill="#00e676"/>
-      <text x="20" y="48" font-size="32" font-weight="800" fill="#00e676">5 <tspan font-size="18" font-weight="600" fill="#e9f0f6">platforms</tspan></text>
-      <text x="20" y="76" font-size="13.5" fill="#a9b6c4">NetEase · Spotify · Deezer</text>
-      <text x="20" y="96" font-size="12" fill="#6f7d8c">SoundCloud · TIDAL</text>
+      <text x="20" y="48" font-size="32" font-weight="800" fill="#00e676">7 <tspan font-size="18" font-weight="600" fill="#e9f0f6">platforms</tspan></text>
+      <text x="20" y="76" font-size="13" fill="#a9b6c4">TIDAL · Spotify · Apple Music</text>
+      <text x="20" y="96" font-size="12" fill="#6f7d8c">NetEase · Deezer · SoundCloud · Beatport</text>
     </g>
     <g transform="translate(948 280)">
       <rect width="284" height="112" rx="14" fill="url(#card)" stroke="#ffffff" stroke-opacity="0.08"/>

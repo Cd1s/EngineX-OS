@@ -80,7 +80,7 @@ func init() {
 // options are the flags plus the seams the tests point at real local things.
 type options struct {
 	Bundle, Backup, Key, Password string
-	Repo, API                     string
+	Repo, API, Lang               string
 	Yes                           bool
 	Uninstall                     bool
 	HTTP                          *http.Client
@@ -163,10 +163,126 @@ func (o *options) hint(key, zh, en string) {
 
 var sayMu sync.Mutex
 
+var zhTWReplacer = strings.NewReplacer(
+	"局域网", "區域網路",
+	"网络", "網路",
+	"以太网", "乙太網路",
+	"防火墙", "防火牆",
+	"端口", "連接埠",
+	"识别到", "識別到",
+	"识别", "識別",
+	"型号", "型號",
+	"机型", "機型",
+	"一代机", "一代機",
+	"二代机", "二代機",
+	"碟机", "播放機",
+	"设备", "裝置",
+	"电脑", "電腦",
+	"U 盘", "隨身碟",
+	"数据分区", "資料分割區",
+	"分区", "分割區",
+	"数据包", "資料包",
+	"数据", "資料",
+	"镜像组", "映像組",
+	"镜像", "映像",
+	"固件更新模式", "韌體更新模式",
+	"原厂系统", "原廠系統",
+	"原厂", "原廠",
+	"恢复出厂设置", "恢復原廠設定",
+	"恢复出厂", "恢復原廠",
+	"设置", "設定",
+	"曲库", "曲庫",
+	"音乐", "音樂",
+	"在线更新", "線上更新",
+	"在线安装", "線上安裝",
+	"已安装", "已安裝",
+	"安装", "安裝",
+	"下载", "下載",
+	"已有", "既有",
+	"校验通过", "校驗通過",
+	"校验", "校驗",
+	"没有提供", "未提供",
+	"包内", "套件內",
+	"一致", "一致",
+	"发现", "發現",
+	"寻找", "搜尋",
+	"正在向碟机写入", "正在向播放機寫入",
+	"正在通过", "正在透過",
+	"通过", "透過",
+	"传输", "傳輸",
+	"几分钟", "數分鐘",
+	"请勿断开连接或关闭电源", "請勿中斷連線或關閉電源",
+	"连接", "連線",
+	"正在重启", "正在重新啟動",
+	"重启", "重新啟動",
+	"启动后自动激活", "啟動後自動啟用",
+	"开机后自动激活", "開機後自動啟用",
+	"激活", "啟用",
+	"已自动开启", "已自動開啟",
+	"升级解锁", "升級解鎖",
+	"解锁", "解鎖",
+	"刷写", "刷寫",
+	"刷入", "刷入",
+	"写入", "寫入",
+	"卸载", "解除安裝",
+	"即将", "即將",
+	"内置存储", "內建儲存",
+	"全部清空", "全部清除",
+	"不受影响", "不受影響",
+	"外接", "外接",
+	"输入", "輸入",
+	"继续", "繼續",
+	"跳过", "略過",
+	"收到来自", "收到來自",
+	"广播", "廣播",
+	"确认", "確認",
+	"检查", "檢查",
+	"页面", "頁面",
+	"保留日志并报告", "保留日誌並回報",
+	"(/data bundle)", "（/data 資料包）",
+	"（/data 数据包）", "（/data 資料包）",
+	"按电源键关机再开机（或拔插电源）", "按電源鍵關機再開機（或拔插電源）",
+	"以后可直接在", "之後可直接在",
+	"屏幕上", "螢幕上",
+	"丢失", "遺失",
+	"备份", "備份",
+	"损坏", "損壞",
+	"应答", "回應",
+	"开着", "開啟",
+	"放行", "放行",
+	"重试", "重試",
+	"未解锁状态", "未解鎖狀態",
+	"点击", "點擊",
+	"运行本工具", "執行本工具",
+	"程序正在自动等待", "程式正在自動等待",
+)
+
+func (o *options) normLang() string {
+	switch strings.ToLower(strings.TrimSpace(o.Lang)) {
+	case "en":
+		return "en"
+	case "zh-cn", "zh-hans", "zh":
+		return "zh-CN"
+	case "zh-tw", "zh-hant":
+		return "zh-TW"
+	default:
+		return ""
+	}
+}
+
 func (o *options) say(zh, en string) {
 	sayMu.Lock()
 	defer sayMu.Unlock()
-	fmt.Fprintf(o.Out, "%s\n  %s\n", zh, en)
+	switch o.normLang() {
+	case "en":
+		fmt.Fprintln(o.Out, en)
+	case "zh-CN":
+		fmt.Fprintln(o.Out, zh)
+	case "zh-TW":
+		fmt.Fprintln(o.Out, zhTWReplacer.Replace(zh))
+	default:
+		fmt.Fprintf(o.Out, "%s\n  %s\n", zh, en)
+	}
 }
 
 // firstGenGuide is shown at start-up and when no deck is found: the first-generation decks
@@ -189,7 +305,48 @@ const firstGenGuide = `=========================================================
   Keep the deck powered on and on the same Wi-Fi / LAN as this computer; it is found and installed automatically.
 ==================================================================`
 
-func (o *options) guide() { fmt.Fprintln(o.Out, firstGenGuide) }
+const (
+	firstGenGuideEN = `==================================================================
+ EngineX-Installer · Auto-discovery & flasher for all 16 models
+ [1st-gen: SC5000/M · SC6000/M · PRIME GO · PRIME 4 · PRIME 2 · Mixstream Pro]
+  • USB stick: copy *-Update.img to FAT32/exFAT root -> Settings -> About / Update -> Update
+  • USB cable: Settings -> About / Update -> Firmware Update Mode -> Options -> PC, then connect USB-B
+ [2nd-gen: SC LIVE 2/4 · PRIME 4+ · PRIME GO+ · Mixstream Pro+/Go · PRIME 4 G2 · SYSTEM ONE]
+  • Mode A (LAN/Wi-Fi): keep the deck powered on in the same network (StageLinQ / SSH)
+  • Mode B/C (USB): enter Firmware Update Mode and connect USB (fastboot / 1cc5:2027)
+==================================================================`
+	firstGenGuideZHCN = `==================================================================
+ EngineX-Installer · 全系 16 款机型自动发现与刷写终端工具
+ [一代机：SC5000/M · SC6000/M · PRIME GO · PRIME 4 · PRIME 2 · Mixstream Pro]
+  • U 盘升级：将对应 *-Update.img 拷入 FAT32/exFAT 根目录 → 设置 → 关于 / 更新 → 更新
+  • USB 线刷：设置 → 关于 / 更新 → 固件更新模式 → 选项 → 电脑，再接 USB-B 线运行本工具
+ [二代机：SC LIVE 2/4 · PRIME 4+ · PRIME GO+ · Mixstream Pro+/Go · PRIME 4 G2 · SYSTEM ONE]
+  • 模式 A（局域网 / Wi-Fi）：碟机正常开机并接入同一网络（StageLinQ / SSH 自动部署）
+  • 模式 B/C（USB 线刷）：进入固件更新模式并连接 USB（fastboot / 1cc5:2027）
+==================================================================`
+	firstGenGuideZHTW = `==================================================================
+ EngineX-Installer · 全系 16 款機型自動探索與刷寫終端工具
+ [一代機：SC5000/M · SC6000/M · PRIME GO · PRIME 4 · PRIME 2 · Mixstream Pro]
+  • 隨身碟升級：將對應 *-Update.img 拷入 FAT32/exFAT 根目錄 → 設定 → 關於 / 更新 → 更新
+  • USB 線刷：設定 → 關於 / 更新 → 韌體更新模式 → 選項 → 電腦，再接 USB-B 線執行本工具
+ [二代機：SC LIVE 2/4 · PRIME 4+ · PRIME GO+ · Mixstream Pro+/Go · PRIME 4 G2 · SYSTEM ONE]
+  • 模式 A（區域網路 / Wi-Fi）：播放機正常開機並接入同一網路（StageLinQ / SSH 自動部署）
+  • 模式 B/C（USB 線刷）：進入韌體更新模式並連接 USB（fastboot / 1cc5:2027）
+==================================================================`
+)
+
+func (o *options) guide() {
+	switch o.normLang() {
+	case "en":
+		fmt.Fprintln(o.Out, firstGenGuideEN)
+	case "zh-CN":
+		fmt.Fprintln(o.Out, firstGenGuideZHCN)
+	case "zh-TW":
+		fmt.Fprintln(o.Out, firstGenGuideZHTW)
+	default:
+		fmt.Fprintln(o.Out, firstGenGuide)
+	}
+}
 
 // ---- boards -----------------------------------------------------------------
 
@@ -245,6 +402,22 @@ func lookupBoard(code string) (m model, gen2, ok bool) {
 	}
 	m, ok = gen1Boards[c]
 	return m, false, ok
+}
+
+func imageGroup(code string) string {
+	switch boardCode(code) {
+	case "jp07", "jp08", "jp11":
+		return "SC5000 / SC5000M / PRIME GO"
+	case "jp13", "jp14":
+		return "SC6000 / SC6000M"
+	case "jc11", "jc16", "nh08":
+		return "PRIME 4 / PRIME 2 / Mixstream Pro"
+	default:
+		if m, ok := gen2Boards[boardCode(code)]; ok {
+			return m.Prefix + " (/data bundle)"
+		}
+		return boardCode(code)
+	}
 }
 
 // ---- discovery --------------------------------------------------------------
@@ -629,6 +802,7 @@ func fetchImage(ctx context.Context, o *options, prefix string) (string, error) 
 			return "", errors.New("release image has no SHA-256 digest")
 		}
 		path := filepath.Join(o.WorkDir, filepath.Base(a.Name))
+		o.say("下载 "+a.Name+" ("+rel.Tag+")", "Downloading "+a.Name+" ("+rel.Tag+")")
 		if err := downloadLimit(ctx, o, a.URL, digest, path, 2<<30); err != nil {
 			return "", err
 		}
@@ -688,6 +862,9 @@ func downloadLimit(ctx context.Context, o *options, url, wantSHA, dest string, l
 		o.say("Release 没有提供 SHA-256，只校验包内 SHA256SUMS。", "The release gives no SHA-256; only the bundle's own SHA256SUMS is checked.")
 	} else if got != wantSHA {
 		return fmt.Errorf("download SHA-256 mismatch: got %s, release says %s", got, wantSHA)
+	} else {
+		o.say(fmt.Sprintf("SHA-256 校验通过：%s…%s", got[:12], got[len(got)-8:]),
+			fmt.Sprintf("SHA-256 verified: %s...%s", got[:12], got[len(got)-8:]))
 	}
 	return os.Rename(part, dest)
 }
@@ -712,7 +889,13 @@ func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, 
 			}
 		}
 	}
-	return readBundle(path)
+	b, err := readBundle(path)
+	if err != nil {
+		return nil, err
+	}
+	o.say(fmt.Sprintf("包内 SHA256SUMS 校验通过：EngineX OS %s (%s)", b.Version, filepath.Base(path)),
+		fmt.Sprintf("Bundle SHA256SUMS verified: EngineX OS %s (%s)", b.Version, filepath.Base(path)))
+	return b, nil
 }
 
 func mtime(p string) time.Time {
@@ -863,8 +1046,9 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		}
 		return nil
 	}
-	o.say(fmt.Sprintf("发现 %s，型号 %s (%s)，在线安装，保留所有音乐和曲库。", label, m.Name, code),
-		"Found "+label+", "+m.Name+"; installing online, your music and library stay.")
+	zhGroup := strings.ReplaceAll(imageGroup(code), " (/data bundle)", "（/data 数据包）")
+	o.say(fmt.Sprintf("发现 %s，型号 %s (%s) · 镜像组：%s，在线安装，保留所有音乐和曲库。", label, m.Name, code, zhGroup),
+		fmt.Sprintf("Found %s, %s (%s) · image group: %s; installing online, your music and library stay.", label, m.Name, code, imageGroup(code)))
 	b, err := obtainBundle(ctx, o, m.Prefix)
 	if err != nil {
 		return err
@@ -1535,7 +1719,8 @@ func modeB(ctx context.Context, o *options) error {
 	case !ok:
 		return fmt.Errorf("未知型号 %q，不刷写 / unknown board, nothing flashed", board)
 	}
-	o.say("USB Fastboot 识别到 "+m.Name+" ("+board+")", "Fastboot found "+m.Name)
+	o.say(fmt.Sprintf("USB Fastboot 识别到 %s (%s) · 镜像组：%s", m.Name, board, imageGroup(board)),
+		fmt.Sprintf("Fastboot found %s (%s) · image group: %s", m.Name, board, imageGroup(board)))
 	if !gen2 {
 		return modeBGen1(ctx, o, m)
 	}
@@ -1583,8 +1768,8 @@ func modeB(ctx context.Context, o *options) error {
 		return fmt.Errorf("fastboot reboot: %w\n%s", err, out)
 	}
 	if boardCode(board) == "jc11s" {
-		o.say("USB 写入完成；重启后的激活尚未验证。请在 Settings → About 确认显示 EngineX OS，并检查 EngineX 页面。若仍为原厂 5.3.0，请保留日志并报告 #169；不要重复清空 data 或恢复出厂。",
-			"USB write complete; activation after reboot is not verified. Confirm EngineX OS in Settings → About and open the EngineX page. If it still shows stock 5.3.0, keep this log and report #169; do not repeatedly erase data or factory-reset.")
+		o.say("USB 写入完成；重启后的激活尚未验证。请在 Settings → About / Update 确认显示 EngineX OS，并检查 EngineX 页面。若仍为原厂 5.3.0，请保留日志并报告 #169；不要重复清空 data 或恢复出厂。",
+			"USB write complete; activation after reboot is not verified. Confirm EngineX OS in Settings → About / Update and open the EngineX page. If it still shows stock 5.3.0, keep this log and report #169; do not repeatedly erase data or factory-reset.")
 		return nil
 	}
 	o.say(fmt.Sprintf("完成：EngineX OS %s 已刷入 %s，碟机正在重启，首次启动后自动激活。", b.Version, m.Name),
@@ -1835,6 +2020,7 @@ func main() {
 	flag.StringVar(&o.Key, "key", "", "mode A: SSH private key (default ~/.ssh/id_*; password denon is also tried)")
 	flag.StringVar(&o.Password, "password", "", "mode A: SSH password for root")
 	flag.StringVar(&o.Repo, "repo", "Cd1s/EngineX-OS", "GitHub repository to download from")
+	flag.StringVar(&o.Lang, "lang", "", "output language: en, zh-CN, or zh-TW (default: bilingual)")
 	flag.BoolVar(&o.Yes, "yes", false, "do not ask before flashing")
 	flag.BoolVar(&o.Uninstall, "uninstall", false, "remove the EngineX data bundle from a 2nd-generation deck over SSH and return to stock")
 	flag.Parse()
