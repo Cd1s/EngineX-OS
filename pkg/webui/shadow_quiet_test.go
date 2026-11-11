@@ -821,10 +821,15 @@ func TestShadowLongPollFollowsALiveModeSwitch(t *testing.T) {
 	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Playing: true, PositionMS: 1000, Seq: 1}}, time.Now())
 	ver := s.shadow.ver
 	s.shadow.mu.Unlock()
+	posted := make(chan struct{})
 	go func() {
+		defer close(posted)
 		time.Sleep(100 * time.Millisecond)
 		uiPost(t, srv.URL, "shadowMode=engine")
 	}()
+	// The poll answers while the POST handler is still reading fourDeckRolePath:
+	// let it finish before the deferred restores above run.
+	defer func() { <-posted }()
 	start := time.Now()
 	r, err := http.Get(fmt.Sprintf("%s/v1/sc5000/shadow?ver=%d", srv.URL, ver))
 	if err != nil {
