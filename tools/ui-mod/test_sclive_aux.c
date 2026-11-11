@@ -226,6 +226,7 @@ static void test_image(const char *path, int sclive) {
         __builtin___clear_cache((char *)image, (char *)image + len);
         uchar config[0x600] = {0}, expected[0x600] = {0};
         for (unsigned i = 0; i < 5; i++) expected[build->config_field[i]] = i == 4 ? 0 : 1;
+        if (!strcmp(build->name, "5.3.0")) expected[0x2a7] = 1; // gen1 5.3.0 only: hasStemsProcessorFactoryInstalled
         expected[0x54] = 1;
         uint32_t zoom = 30; memcpy(expected + build->config_zoom, &zoom, 4);
         if (enabled) expected[0x26] = expected[0x4d1] = 1;
