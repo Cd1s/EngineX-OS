@@ -59,6 +59,8 @@ type Config struct {
 	UIDir string
 	// FXSelectorReadyFile overrides the tmpfs heartbeat path in sandbox tests.
 	FXSelectorReadyFile string
+	// ZoneinfoDir overrides /usr/share/zoneinfo in tests.
+	ZoneinfoDir string
 	// RelayURL is the cloud login service; it passes credentials and never audio.
 	// Empty keeps phone logins on the LAN, where the phone must reach this deck.
 	RelayURL string
