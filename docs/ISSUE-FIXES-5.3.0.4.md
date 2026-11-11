@@ -38,7 +38,7 @@
 | **流媒体缓存隔离、Beatport 冷缓存与性能调优** | `pkg/providers/`<br>`pkg/deemixclient/`<br>`pkg/webui/`<br>`rootfs-overlay/usr/local/bin/sc5000-perf-tune`<br>`tools/ui-mod/build_packs.py` | **原因**：① 跨平台同名曲目缓存需按音源隔离，Beatport 冷缓存下无损升级需保持命中；② 搜索并发过高或后台自动批量分析会争抢线程，QML 2 轨启动时 `scGcCheck` 在 Deck 1 未就绪前访问空属性，且 `sc5000-perf-tune` 30 秒轮询每个线程 fork 子进程带来偶发帧延迟。<br>**修法**：① 独立各平台下载缓存命名空间（网易云「Deemix 优先」与 Deezer 共享无损缓存），修复 Beatport 冷缓存无损升级，并在 `stream-sync` 已监听 6595 时让 `deemixd` 以状态码 `0` 退出；② 限制并发搜索工作线程、挂起不安全的自动批量盘分析、修复 `scGcCheck` 等待 Deck 1 构建完成并加空属性保护、将 `sc5000-perf-tune` 改为纯 shell 零 fork 扫描。 | `go test -race ./...`、`test_rootfs_overlay.sh`、`test_ui_mod.py` |
 
 > **范围说明**：
-> - **正在为 `5.3.0.4` 开发/收尾待合入（Pending）**：`#181`（CDJ 风格变速推子软接管解锁，默认关闭 = 原厂行为）、`#162`（PX Beat FX 毫秒模式，默认关闭 = 逐字节一致 DSP 输出）、影子轨 `Sync` 相位对齐（`shadow-sync-snap`）、双机手动 `MASTER` 互切修复与顶栏第 2 行紧凑布局终版（`header-row2-compact`）。
+> - **正在为 `5.3.0.4` 开发/收尾待合入（Pending）**：`#181`（CDJ 风格变速推子软接管解锁，默认关闭 = 原厂行为）、`#162`（PX Beat FX 毫秒模式，默认关闭 = 逐字节一致 DSP 输出）、影子轨 `Sync` 相位对齐（`shadow-sync-snap`）与双机手动 `MASTER` 互切修复。
 > - **推迟至 `5.3.0.5`（不在 `5.3.0.4`）**：`#178`（仅做后台核验，不进 `5.3.0.4`）、`#172`（高频滚降补偿）、`#195`、`#168` 按拍精确同步（beat-exact sync）、原厂内置 Beat FX 毫秒模式，以及 `"No source drive"`（`StreamingNoSourceAvailableDialog`）提示深入排查；`#179` 因不合规（未经同意转移数据）已拒绝，不列入。
 
 ---
