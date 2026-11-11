@@ -36,8 +36,8 @@
       description: L("俱乐部演出纯净模式：隐藏演出时用不到的菜单与提示，只留波形、曲库和关键控制。", "俱樂部演出純淨模式：隱藏演出時用不到的選單與提示，只留波形、曲庫與關鍵控制。", "Club performance mode: hides menus and prompts you do not need on stage, leaving waveforms, the library and key controls."),
       models: ALL16, packages: [pkg("minimal-club-mode", "1.0.0")] },
     { id: "midi-controller-mapper", name: "Generic MIDI Controller Mapper", version: "1.0.0", author: "EngineX OS", category: "midi", issues: [137],
-      description: L("外部 USB MIDI 控制器映射器（首发支持 Pioneer CDJ-400）：低优先级 (nice 19) ALSA Sequencer helper 与 60 Hz QML 桥接，将外部控制器直接映射到四轨模式下的内部 Deck 3/4，含连续速度转盘积分器 (64=停止)、带 ▲▼ 指示的 Pitch 软接管及热拔插自动停用保护。",
-        "外部 USB MIDI 控制器映射器（首發支援 Pioneer CDJ-400）：低優先級 (nice 19) ALSA Sequencer helper 與 60 Hz QML 橋接，將外部控制器直接映射至四軌模式下的內部 Deck 3/4，含連續速度轉盤積分器 (64=停止)、帶 ▲▼ 指示的 Pitch 軟接管及熱拔插自動停用保護。",
+      description: L("外部 USB MIDI 控制器映射器（首发支持 Pioneer CDJ-400）：低优先级 (nice 19) ALSA Sequencer helper 与 60 Hz QML 桥接，将外部控制器直接映射到四轨模式下的内部 Deck 3/4，含连续速度转盘积分器 (64=停止)、带 ▲▼ 指示的变速推子软接管及热拔插自动停用保护。",
+        "外部 USB MIDI 控制器映射器（首發支援 Pioneer CDJ-400）：低優先級 (nice 19) ALSA Sequencer helper 與 60 Hz QML 橋接，將外部控制器直接映射至四軌模式下的內部 Deck 3/4，含連續速度轉盤積分器 (64=停止)、帶 ▲▼ 指示的變速推桿軟接管及熱拔插自動停用保護。",
         "External USB MIDI controller mapper (Pioneer CDJ-400 first): low-priority (nice 19) ALSA Sequencer helper and 60 Hz QML bridge mapping external controllers directly to internal Deck 3/4 in 4-deck mode, with continuous velocity jog time-integration (64=stop), tempo soft takeover with ▲▼ indicators, and hot-unplug auto-disable."),
       models: ALL16, packages: [pkg("midi-controller-mapper", "1.0.0")] },
   ].map((m) => ({ ...m, official: true }));
