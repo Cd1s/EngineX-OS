@@ -266,6 +266,10 @@ SH
         fi
         check "new: Control Center fills uiContainer at UI Scale 75 % (root.transformed, not defaultScreenSize)" grep -aq 'SCPROBE ccsize|75|[0-9x]*|[0-9x]*|1|' "$log"
         check "new: auto-analyze preference retained, automatic submission unavailable (#55)" grep -aqF 'SCPROBE analyze|boolean|false|' "$log"
+        case $PRODUCT in
+        JP07|JP08|JP13|JP14) check "new: player $PRODUCT has no recorder (#206 sites not applied)" grep -aqF 'SCPROBE recstream|none|0|' "$log" ;;
+        *) check "new: recording active + streaming selection: loads, no record block/abort (#206)" grep -aqF 'SCPROBE recstream|1|1|1|0|0|' "$log" ;;
+        esac
         note "new: render probe: $(grep -ao 'SCPROBE [a-z]*|.*|' "$log" | grep -v 'SCPROBE done' | tr '\n' ' ')"
         check "new: Engine build matched (Engine $BASE)" grep -aq "engine-ui-hook: Engine $BASE" "$log"
         check "new: $EXPECT_APPLIED Engine patches applied (TidalAPI gateway, Stems, getConfig...)" \
@@ -471,7 +475,9 @@ COMPAT=inmusic,$(echo "$PRODUCT" | tr 'A-Z' 'a-z')
 export W REPO OLDV NEWV NEXTV PREFIX PRODUCT COMPAT QEMU_INTERP NEW_IMG
 export LANG_PACK=${GATE_LANG:-zh-Hans} ENGINE_START=${GATE_ENGINE_START:-300} ENGINE_SECONDS=${GATE_ENGINE_SECONDS:-90}
 export BOOT2_SECONDS=${GATE_BOOT2_SECONDS:-30}
-export UPDATE_TIMEOUT=${GATE_UPDATE_TIMEOUT:-900} EXPECT_APPLIED=${GATE_EXPECT_APPLIED:-19} EXPECT_DSP=${GATE_EXPECT_DSP:-21}
+# #206: all-in-ones also get the 8 recording-with-streaming sites; players (no recorder) do not.
+case $PRODUCT in JP07|JP08|JP13|JP14) applied=19 ;; *) applied=27 ;; esac
+export UPDATE_TIMEOUT=${GATE_UPDATE_TIMEOUT:-900} EXPECT_APPLIED=${GATE_EXPECT_APPLIED:-$applied} EXPECT_DSP=${GATE_EXPECT_DSP:-21}
 mkdir -p "$W/bin" "$W/tls" "$W/mock/assets"
 : > "$W/results.txt"
 echo "gate: $OLD_NAME -> $NEW_NAME (next $NEXTV), work $W"

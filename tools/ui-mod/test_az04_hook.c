@@ -369,6 +369,58 @@ static void test_stems_processor_fallback(void) {
     puts("stems-processor fallback: isolated access/statx/open, missing/non-executable and non-Engine paths: PASS");
 }
 
+
+// #206: the 8 AArch64 sites apply together on the all-in-one AZ04 decks, never on a
+// player board code, and none of them on a 1-site mismatch.
+static void test_rec_stream(const char *filename) {
+    size_t len, page = (size_t)sysconf(_SC_PAGESIZE);
+    size_t first = build->edit_count, count = 0;
+    for (size_t i = 0; i < build->edit_count; i++)
+        if (build->edits[i].group == EDIT_REC_STREAM) { if (first > i) first = i; count++; }
+    assert(count == 8 && first + 8 == build->edit_count && build->edit_count == 26);
+    // nop / mov w22,#0 x2 / mov w0,#0 / mov w27,#0 / b <loop tail> / b <menu> / nop
+    const uint32_t want[8] = {0xd503201f, 0x52800016, 0x52800016, 0x52800000, 0x5280001b, 0, 0, 0xd503201f};
+    const uint32_t target[8] = {0, 0, 0, 0, 0, 0x97afa0, 0x97fa00, 0};
+    for (size_t k = 0; k < 8; k++) {
+        const struct engine_edit *e = &build->edits[first + k];
+        uint32_t ins; memcpy(&ins, e->replacement, 4);
+        if (want[k]) assert(ins == want[k]);
+        else assert((ins >> 26) == 0x05 && e->offset + ((int64_t)((int32_t)(ins << 6) >> 6) << 2) == target[k]);
+    }
+    char code_path[] = "/tmp/product-code-XXXXXX";
+    int cfd = mkstemp(code_path); assert(cfd >= 0); close(cfd);
+    const char *saved = product_code_path;
+    product_code_path = code_path;
+    const struct { const char *board; int corrupt, patched; } cases[] = {
+        {"JC20", 0, 1}, {"JP07", 0, 0}, {"JC20", 1, 0}};
+    for (size_t c = 0; c < sizeof cases / sizeof *cases; c++) {
+        FILE *f = fopen(code_path, "w");
+        assert(f && fputs(cases[c].board, f) >= 0 && !fclose(f));
+        uchar *image = map_image(filename, &len);
+        ElfW(Ehdr) *header = (void *)image;
+        struct dl_phdr_info info = {.dlpi_addr = (uintptr_t)image,
+            .dlpi_phdr = (void *)(image + header->e_phoff), .dlpi_phnum = header->e_phnum};
+        uintptr_t found = 0;
+        engine_base(&info, sizeof info, &found);
+        assert(found == (uintptr_t)image);
+        // The adjacent PlaylistDeck/PlayState read (ldrb w0, [x22, #450]) stays stock.
+        uint32_t pdeck; memcpy(&pdeck, image + build->edits[first + 4].offset - 8, 4);
+        assert(pdeck == 0x39470ac0);
+        if (cases[c].corrupt) image[build->edits[first + 7].offset] ^= 0xff;
+        apply_engine_edits((uintptr_t)image, page);
+        apply_engine_edits((uintptr_t)image, page); // idempotent
+        for (size_t k = 0; k < 8; k++) {
+            int st = edit_state((uintptr_t)image, &build->edits[first + k]);
+            if (cases[c].corrupt && k == 7) assert(st == 0);
+            else assert(st == (cases[c].patched ? 2 : 1));
+        }
+        munmap(image, len);
+    }
+    product_code_path = saved;
+    unlink(code_path);
+    puts("#206 AZ04 recording with streaming tracks: 8 sites stock->patched, untouched on a player code, none on a 1-site mismatch: PASS");
+}
+
 int main(int argc, char **argv) {
     assert(sizeof engine_builds / sizeof *engine_builds == 1);
     test_thread_policy();
@@ -376,7 +428,7 @@ int main(int argc, char **argv) {
     test_collision();
     test_led();
     test_stems_processor_fallback();
-    for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); }
+    for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_rec_stream(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); }
     const char *oa = getenv("AZ04_OFFLINE_ANALYZER");
     if (oa) test_offline_analyzer(oa);
     return 0;

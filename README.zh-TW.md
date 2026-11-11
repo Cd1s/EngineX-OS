@@ -103,7 +103,7 @@
 ### 8. 5.3.0.3 新功能
 - **Tailscale / Headscale 遠端存取（#130）**：Web 控制台的 `遠端存取（Tailscale / Headscale）` 卡片按需下載精簡版 Tailscale 用戶端（約 4.3 MB，下載後校驗 SHA-256），以登入連結或一次性 Auth key 登入，只把你勾選的服務（SSH / SFTP、Web 控制台）開放給你自己的 tailnet。不需要公網 IP，也不用改路由器，自架 Headscale 伺服器同樣可用。預設關閉。播放機核心沒有 TUN 裝置，所以以使用者空間模式執行。已用 Headscale 端對端測通；實機播放時的 CPU 與記憶體占用尚未實測；
 - **串流歌單排序（#98）**：所有串流服務都能開啟 Engine 內建的排序選單，依 BPM、調性、評等、歌名或歌手遞增 / 遞減排列；
-- **串流曲目可錄音（#84）**：載入串流曲目時，Engine 的錄音功能不再拒絕錄製。錄音請僅供個人使用，並遵守串流服務的條款；
+- **串流曲目可錄音（#84、#206）**：具錄音功能的一體機（`PRIME 4 / 4+ / 4 G2`, `PRIME 2`, `PRIME GO / GO+`, `SC LIVE 4 / 2`, `Mixstream Pro / Pro+ / Pro Go`, `SYSTEM ONE`）在已載入串流曲目時可以開始錄音，錄音過程中也能繼續載入串流曲目（獨立播放器沒有錄音功能）。串流服務的條款可能不允許保留其曲目的錄音，請僅供個人使用；
 - **曲目列表顯示 BPM（#80）**：開啟 `版面 → View → 雙欄瀏覽` 後，曲目列表第二欄旁會顯示 BPM；
 - **推桿回音與智慧同步（#104）**：在帶混音台的一體機（`PRIME 4 / 4+ / 4 G2`、`PRIME 2`、`PRIME GO / GO+`、`SC LIVE 4 / 2`、`Mixstream Pro / Pro+ / Pro Go`、`SYSTEM ONE`）上，控制中心保留原廠 `Fader Echo` 磁貼（不重複新增自訂磁貼），並與 `設定 → 混音器 → Fader Echo`（`Off` / `All Faders` / `Upfader Only`）與 `個人偏好 → Playback → Echo Out` 雙向同步（獨立播放機 `SC5000 / SC5000M / SC6000 / SC6000M` 自動隱藏）。開啟 Sync 時，智慧同步（全系 16 款）也會嘗試半速 / 倍速（0.25×–4×）匹配並依需求自動升檔變速範圍（Pitch Range）；
 - **控制中心演出磁貼排佈**：包含 `Waveform Style` 與 `Smart Sync`（全系 16 款），帶 Transition FX 的一體機保留原廠 `Fader Echo` 磁貼；`Live Stream` 移至 `設定 → 服務`；`Waveform Style` 於控制中心與 `個人偏好 → Display` 雙向同步，不在 `版面 → View` 重複顯示；

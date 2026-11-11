@@ -100,6 +100,10 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("--bounding-set=-sys_time", gate)
         self.assertIn("kill -KILL", gate)
         self.assertIn("--phase boot2", gate)
+        # #206: the gate proves streaming loads under an active recorder on all-in-ones.
+        self.assertIn("SCPROBE recstream|", probe)
+        self.assertIn("SCPROBE recstream|1|1|1|0|0|", gate)
+        self.assertIn("case $PRODUCT in JP07|JP08|JP13|JP14) applied=19 ;; *) applied=27 ;; esac", gate)
         self.assertIn("powercut-truncated.qmlc", gate)
 
     def test_shadow_layer_uses_stock_owner_outside_layouts(self):
