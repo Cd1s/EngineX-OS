@@ -1070,7 +1070,8 @@ SERVICES_MAIN = """
 			else {
 				const shown = parseFloat(g.shown.string) || 0
 				const exact = ob > 0 && cb > 0 ? Math.round(((cb / ob - 1) * 100) * 100) / 100 : NaN
-				s.pitch = Math.abs(exact - shown) < 0.15 ? exact : shown; s.pitchAt = now
+				// SpeedState is capped at +/-100 even when native Sync runs faster.
+				s.pitch = Math.abs(exact - shown) < 0.15 || (shown === 100 && exact > 100) ? exact : shown; s.pitchAt = now
 			}
 			s.ps = !!g.play.state
 			s.posMs = sr > 0 ? g.position.unnormalized / sr * 1000 : 0
@@ -1413,7 +1414,7 @@ SERVICES_MAIN = """
 		if (!at.emptyAt) at.emptyAt = now
 		if (now - at.emptyAt < 350 || !(at.path || (root.scTr("/Engine/Deck" + d + "/Track/SongLoaded") || {}).state)) return
 		// Standalone players share Sync/master through Engine Link; consoles (#160) need presses.
-		if ((!at.link || !root.scPlayer) && (root.scTr("/Engine/Deck" + d + "/SyncMode") || {}).string !== "Off") scPress("/Engine/Deck" + d + "/UnSync")
+		if ((!at.link || !root.scPlayer || at.nativeSync) && (root.scTr("/Engine/Deck" + d + "/SyncMode") || {}).string !== "Off") scPress("/Engine/Deck" + d + "/UnSync")
 		if ((!at.link || !root.scPlayer) && (root.scTr("/Engine/Deck" + d + "/DeckIsMaster") || {}).state) {
 			const m0 = scFourDeckRole.split("")[0]
 			if (m0) scPress("/Engine/Deck" + m0 + "/RequestMaster")
@@ -1436,7 +1437,7 @@ SERVICES_MAIN = """
 		// same path can be another file, and a track loaded again is a new load.
 		const id = e.id || e.path
 		if (at.path !== e.path || at.id !== id) {
-			at = scShadowAt[d] = {path: e.path, id: id, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps}
+			at = scShadowAt[d] = {path: e.path, id: id, tries: 0, seekAt: 0, seeks: 0, loads: at.loads || 0, jumps: e.jumps, nativeSync: !!at.nativeSync}
 			root.scShadowLoad(d, at, e, now)
 			return
 		}
@@ -1452,7 +1453,7 @@ SERVICES_MAIN = """
 		if (now - (at.linkAt || 0) < 300 && (e.playing && !e.cue) !== at.linkPS) return
 		if (e.cue && at.linkCueOff && now - at.linkCueOff < 300) return
 		const local = !!g("/PlayState").state
-		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check) return
+		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync) return
 		at.lastSeq = e.seq
 		const wasPreview = at.preview
 		at.preview = !!e.cue
@@ -1477,13 +1478,19 @@ SERVICES_MAIN = """
 		const synced = !!pSync && pSync.string !== "" && pSync.string !== "Off"
 		// CDJs and consoles (#160) need Engine Sync here. A standalone peer's synced deck
 		// sends its exact rate (CurrentBPM), which the fader and the loop below follow.
-		const wantSync = !!e.sync && (!e.link || !root.scPlayer)
+		// The fader's native input is bounded to 0..1 (at most +100%).
+		// Native Sync has its own rate modifier: use it for a linked source past
+		// that stop. Keep ownership until its Sync is released, including a new
+		// track. UnSync retains the native rate until the source moves its fader.
+		if (e.link && root.scPlayer && e.sync && e.pitch > 100) at.nativeSync = true
+		const wantSync = !!e.sync && (!e.link || !root.scPlayer || at.nativeSync)
+		if (at.nativeSync && !e.sync && !synced && e.pitch <= 100) at.nativeSync = false
 		const dbg = act => { if (root.scShadowDebug) root.scShadowDbg({deck: d, act: act, posMs: Math.round(posMs), target: Math.round(target), drift: Math.round(drift), sd: Math.round(at.sd || 0), pitch: e.pitch, pll: at.pll || 0, range: g("/SpeedRange").string, sync: !!e.sync, synced: synced, bpm: e.bpm, currentBpm: e.currentBpm, beat: e.beat, jumps: e.jumps, seeks: at.seeks || 0, master: !!g("/DeckIsMaster").state, link: !!e.link}) }
 		if (!e.playing) at.pll = 0
 		// e.pitch is rounded to 0.01 %: at 138 BPM that alone slipped 4 ms a minute.
 		// The fader goes to the source's tempo ratio, so the BPM shown is the source's.
 		const exact = e.bpm > 0 && e.currentBpm > 0 ? (e.currentBpm / e.bpm - 1) * 100 : NaN
-		if (!(wantSync && synced)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
+		if (!(wantSync && synced) && !(at.nativeSync && e.pitch > 100)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
 		const pKey = g("/Track/KeyLock")
 		if (typeof e.keylock === "boolean" && pKey && !!pKey.state !== e.keylock) pKey.state = e.keylock
 		// Play, CUE held, pause, CUE released: on the first update that shows it.
@@ -1524,7 +1531,7 @@ SERVICES_MAIN = """
 		// holds its tempo and phase to the master, so no fader and few seeks here.
 		// Standalone players with an EngineX peer (e.link) share Engine Link sync natively,
 		// and pressing Sync/UnSync on a shadow deck fought the stock SYNC and MASTER buttons.
-		if ((!e.link || !root.scPlayer) && wantSync !== synced && now >= (at.syncAt || 0)) {
+		if ((!e.link || !root.scPlayer || at.nativeSync) && wantSync !== synced && now >= (at.syncAt || 0)) {
 			scPress("/Engine/Deck" + d + (wantSync ? "/Sync" : "/UnSync"))
 			at.syncAt = now + 800
 		}
@@ -1550,7 +1557,9 @@ SERVICES_MAIN = """
 		// it is only for a source jump and a gap past lim on three updates in a row.
 		// at.wide: two such seeks within 10 s did not land (Quantize snaps to a
 		// beat). Steady drift below that is closed by the fader instead (at.pll).
-		const lim = wantSync && synced ? 2000 : at.wide ? 800 : 300
+		// A linked copy still follows the source's song position: native beat Sync
+		// can choose another beat. Seeking drops it to native tempo Sync.
+		const lim = wantSync && synced && !at.nativeSync ? 2000 : at.wide ? 800 : 300
 		const jump = e.jumps !== at.jumps && Math.abs(drift) > 60
 		if (!jump) at.jumps = e.jumps
 		at.over = Math.abs(drift) > lim ? (at.over || 0) + 1 : 0
@@ -1582,7 +1591,7 @@ SERVICES_MAIN = """
 		// 8 s (a step past 15 ms at once) and, while that average is under 10 s old,
 		// only bent past 12 ms. At 6 ms on a 2 s old line the deck was bent 55 times
 		// in six minutes, to and fro.
-		if (wantSync && synced) return dbg("sync")
+		if (wantSync && synced && !at.nativeSync) return dbg("sync")
 		if (now - at.seekAt < 300) return dbg("settle")
 		at.sd = at.sd === undefined ? drift : at.sd * 0.85 + drift * 0.15
 		at.pll = 0
