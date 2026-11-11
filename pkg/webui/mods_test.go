@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -314,5 +315,200 @@ func TestMods_WebUI_InvalidRequests(t *testing.T) {
 	srv.handleMods(rec3, req3)
 	if rec3.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 Bad Request for empty object, got %d", rec3.Code)
+	}
+}
+
+func TestModsWebConsoleLANEndpoints(t *testing.T) {
+	base := t.TempDir()
+	token := "TEST-CODE"
+	srv := New(Config{
+		AccessToken: token,
+		StateDir:    filepath.Join(base, "state"),
+		UIDir:       filepath.Join(base, "ui"),
+	}, nil)
+
+	makeArchive := func(id string) []byte {
+		var archive bytes.Buffer
+		gz := gzip.NewWriter(&archive)
+		tw := tar.NewWriter(gz)
+		manifest := []byte(fmt.Sprintf(`{"id":%q,"name":"LAN Test","version":"1.0.0","author":"Tester","description":"Testing","qmlFiles":{"view.qml":"Views/Test.qml"}}`, id))
+		tw.WriteHeader(&tar.Header{Name: "manifest.json", Mode: 0644, Size: int64(len(manifest))})
+		tw.Write(manifest)
+		qml := []byte("import QtQuick 2.12\nItem {}\n")
+		tw.WriteHeader(&tar.Header{Name: "view.qml", Mode: 0644, Size: int64(len(qml))})
+		tw.Write(qml)
+		tw.Close()
+		gz.Close()
+		return archive.Bytes()
+	}
+
+	arc1 := makeArchive("lan-test-1")
+	arc2 := makeArchive("lan-test-2")
+	lanAddr := "192.168.1.150:49210"
+
+	// 1. Unauthenticated request to /api/mods from LAN returns 401
+	{
+		req := httptest.NewRequest(http.MethodGet, "/api/mods", nil)
+		req.RemoteAddr = lanAddr
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for unauthenticated /api/mods from LAN, got %d", rec.Code)
+		}
+	}
+
+	// 2. Unauthenticated upload to /api/mods/upload from LAN returns 401
+	{
+		req := httptest.NewRequest(http.MethodPost, "/api/mods/upload", bytes.NewReader(arc1))
+		req.Header.Set("Content-Type", "application/gzip")
+		req.RemoteAddr = lanAddr
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for unauthenticated /api/mods/upload from LAN, got %d", rec.Code)
+		}
+	}
+
+	// 3. /v1/sc5000/mods and /v1/sc5000/mods/upload from LAN return 403 (streaming gateway loopback check)
+	{
+		req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/mods", nil)
+		req.RemoteAddr = lanAddr
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for /v1/sc5000/mods from LAN, got %d", rec.Code)
+		}
+
+		reqUp := httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods/upload", bytes.NewReader(arc1))
+		reqUp.Header.Set("Content-Type", "application/gzip")
+		reqUp.RemoteAddr = lanAddr
+		recUp := httptest.NewRecorder()
+		srv.ServeHTTP(recUp, reqUp)
+		if recUp.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for /v1/sc5000/mods/upload from LAN, got %d", recUp.Code)
+		}
+	}
+
+	// 3b. /v1/sc5000/mods and /v1/sc5000/mods/upload from loopback succeed via srv.ServeHTTP without console login
+	{
+		reqUp := httptest.NewRequest(http.MethodPost, "/v1/sc5000/mods/upload", bytes.NewReader(arc1))
+		reqUp.Header.Set("Content-Type", "application/gzip")
+		reqUp.RemoteAddr = "127.0.0.1:45678"
+		recUp := httptest.NewRecorder()
+		srv.ServeHTTP(recUp, reqUp)
+		if recUp.Code != http.StatusOK {
+			t.Fatalf("expected 200 for loopback /v1/sc5000/mods/upload, got %d: %s", recUp.Code, recUp.Body.String())
+		}
+		var upRes map[string]any
+		if err := json.Unmarshal(recUp.Body.Bytes(), &upRes); err != nil || upRes["id"] != "lan-test-1" {
+			t.Fatalf("expected mod id lan-test-1 in loopback upload response, got: %s", recUp.Body.String())
+		}
+
+		reqList := httptest.NewRequest(http.MethodGet, "/v1/sc5000/mods", nil)
+		reqList.RemoteAddr = "127.0.0.1:45678"
+		recList := httptest.NewRecorder()
+		srv.ServeHTTP(recList, reqList)
+		if recList.Code != http.StatusOK {
+			t.Fatalf("expected 200 for loopback /v1/sc5000/mods, got %d: %s", recList.Code, recList.Body.String())
+		}
+		var listRes modsListResponse
+		if err := json.Unmarshal(recList.Body.Bytes(), &listRes); err != nil {
+			t.Fatalf("failed to decode loopback /v1/sc5000/mods response: %v", err)
+		}
+		found := false
+		for _, m := range listRes.Mods {
+			if m.ID == "lan-test-1" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected lan-test-1 in loopback mods list, got: %s", recList.Body.String())
+		}
+	}
+
+	// 4. Authenticated request from LAN via cookie stream_sync: GET /api/mods succeeds (200)
+	{
+		req := httptest.NewRequest(http.MethodGet, "/api/mods", nil)
+		req.RemoteAddr = lanAddr
+		req.AddCookie(&http.Cookie{Name: "stream_sync", Value: token})
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for authenticated /api/mods, got %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// 5. Cross-origin POST /api/mods/upload returns 403
+	{
+		req := httptest.NewRequest(http.MethodPost, "/api/mods/upload", bytes.NewReader(arc2))
+		req.RemoteAddr = lanAddr
+		req.Host = "192.168.1.1:8080"
+		req.Header.Set("Origin", "http://evil.example.com")
+		req.Header.Set("Content-Type", "application/gzip")
+		req.AddCookie(&http.Cookie{Name: "stream_sync", Value: token})
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for cross-origin upload, got %d", rec.Code)
+		}
+	}
+
+	// 6. Authenticated same-origin POST /api/mods/upload succeeds (200) and returns mod metadata
+	{
+		req := httptest.NewRequest(http.MethodPost, "/api/mods/upload", bytes.NewReader(arc2))
+		req.RemoteAddr = lanAddr
+		req.Host = "192.168.1.1:8080"
+		req.Header.Set("Origin", "http://192.168.1.1:8080")
+		req.Header.Set("Content-Type", "application/gzip")
+		req.AddCookie(&http.Cookie{Name: "stream_sync", Value: token})
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for authenticated LAN upload, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var upRes map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &upRes); err != nil || upRes["id"] != "lan-test-2" {
+			t.Fatalf("expected mod id lan-test-2 in LAN upload response, got: %s", rec.Body.String())
+		}
+	}
+
+	// 7. Authenticated POST /api/mods to enable succeeds (200) and updates state
+	{
+		req := httptest.NewRequest(http.MethodPost, "/api/mods", bytes.NewBufferString(`{"id":"lan-test-2","enabled":true}`))
+		req.RemoteAddr = lanAddr
+		req.Host = "192.168.1.1:8080"
+		req.Header.Set("Origin", "http://192.168.1.1:8080")
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: "stream_sync", Value: token})
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for authenticated LAN mod enable, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		// Verify GET /api/mods lists lan-test-2 as enabled
+		reqGet := httptest.NewRequest(http.MethodGet, "/api/mods", nil)
+		reqGet.RemoteAddr = lanAddr
+		reqGet.AddCookie(&http.Cookie{Name: "stream_sync", Value: token})
+		recGet := httptest.NewRecorder()
+		srv.ServeHTTP(recGet, reqGet)
+		if recGet.Code != http.StatusOK {
+			t.Fatalf("expected 200 for GET /api/mods, got %d: %s", recGet.Code, recGet.Body.String())
+		}
+		var apiList modsListResponse
+		if err := json.Unmarshal(recGet.Body.Bytes(), &apiList); err != nil {
+			t.Fatalf("failed to decode /api/mods response: %v", err)
+		}
+		foundLan2 := false
+		for _, m := range apiList.Mods {
+			if m.ID == "lan-test-2" && m.Enabled {
+				foundLan2 = true
+				break
+			}
+		}
+		if !foundLan2 {
+			t.Fatalf("expected enabled lan-test-2 in /api/mods list, got: %s", recGet.Body.String())
+		}
 	}
 }
