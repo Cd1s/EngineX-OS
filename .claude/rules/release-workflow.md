@@ -2,6 +2,18 @@
 
 任何人或 AI agent 发布 EngineX OS（包括新版本，以及同一版本的修复重发）都按这份清单做，不跳步。`<VERSION>` 指 `5.0.4.x` 这样的版本号，`<OLD>` 指上一个版本号。
 
+## 日常开发循环（不是发版）
+
+平时开发一律走这个循环：单测 → 沙箱截图（改了 UI 时）→ quick-gate → `deck-lock acquire` + `deck-push` 到已加锁的开发碟机 → smoke PASS → 提交。下面第 3–9 节的整包构建（28 个产物）和三组门禁只用于发版候选。
+
+1. 单测：第 2 节里与改动有关的部分。
+2. 沙箱截图：`tools/dev/ui-sheet` 在 twin 沙箱（`tools/shadow-twin`）里渲染改动前后的界面，拼成一张对比图并按 UI 包摘要登记。没有对比图的 UI 包，`deck-push ... ui` 会拒绝推送。
+3. `tools/dev/quick-gate --group SC5000`：只构建一个镜像组，跑门禁的快速子集，即静态审计、新版开机、渲染节点探针、hook 补丁数、无 QML 错误，几分钟跑完。
+4. `tools/dev/deck-push lock <deck> --purpose "..."` 加锁，然后 `tools/dev/deck-push <deck> ui|hook|edisksd|go:<daemon>|all`。它只构建这一个组件，先把要替换的文件备份到编译机（带索引），再从 `/run` bind-mount 新文件（重启即回滚，`--rollback` 不用重启），只重启受影响的服务，最后自动做 smoke 检查。
+5. smoke PASS 后提交，再 `deck-push <deck> --rollback`、`deck-push unlock <deck>`。
+
+碟机地址只写在 git 忽略的 `tools/dev/decks.ini` 里（模板 `tools/dev/decks.ini.example`），不进仓库。别人持有某台碟机的锁时 `deck-push` 会拒绝，不要绕过。用法见 `tools/dev/README.md`。
+
 ## 0. 先确定发哪种
 
 - **同一版本修复重发**（维护者默认做法：版本号固定，例如一直是 5.0.4.1）：不改版本号，跳过第 1 步，第 5 步用 `--clobber` 覆盖同一个 Release，再把 tag 移到新提交。
@@ -181,7 +193,7 @@ gh release view v<VERSION> --repo Cd1s/EngineX-OS --json assets -q '.assets[] | 
 
 ## 8. 实机（可选）
 
-- 实机只做热部署和只读核对；部署前先备份被替换的文件。
+- 实机只做热部署和只读核对；热部署一律用 `tools/dev/deck-push`（先加锁，自动备份，`/run` bind-mount，重启即回滚），不再用临时脚本。
 - 实机验收时必须跑完 [`docs/REGRESSION-CHECKLIST.md`](../../docs/REGRESSION-CHECKLIST.md) 中的实机必检项（包括标有 `[NO AUTOMATED TEST]` 的跨机手动 `MASTER` 互切、原厂 `LOAD` 流媒体播放、按键灯目测等），并将结果写入 `docs/ISSUE-FIXES-<VERSION>.md`。
 - 测碟机端在线更新时，要把实机两个 `version.txt`（`/data/sc5000-custom/version.txt` 和 `/etc/sc5000/version.txt`）临时改成比 `<VERSION>` 旧的版本才会出现更新提示；`/etc` 那份用 bind mount 临时文件，重启即恢复。
 
