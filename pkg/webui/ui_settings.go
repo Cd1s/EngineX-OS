@@ -208,6 +208,7 @@ type uiSettings struct {
 	Capabilities        uiCapabilities `json:"capabilities"`
 	// The role engine-ui-guard applied at Engine's last start (auto resolved).
 	FourDeckRoleActive string `json:"fourDeckRoleActive,omitempty"`
+	TimeZone           string `json:"timezone,omitempty"`
 }
 
 // uiFourDeckRoles are the decks a player plays in the 4-deck layout (#49/#160), RCA A then B.
@@ -672,6 +673,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.Player = playerBoards[board]
 	v.Capabilities = boardCapabilities(board)
 	v.FourDeckRoleActive = s.activeRole(v)
+	v.TimeZone = s.savedTimeZone()
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
 		body, err := json.Marshal(struct {
 			uiSettings
@@ -712,6 +714,10 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if q.Has("fxUnit") || q.Has("fxMode") {
 		s.fxSelectorUpdate(w, r, q)
+		return
+	}
+	if q.Has("timezone") && len(q) == 1 {
+		s.timezoneUpdate(w, q.Get("timezone"))
 		return
 	}
 	if r.Body != nil && strings.Contains(r.Header.Get("Content-Type"), "application/json") {

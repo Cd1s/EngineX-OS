@@ -1,0 +1,23 @@
+#!/bin/sh
+# Seed systemd-timesyncd's persistent clock file from /etc/timestamp when missing
+# or older. Never creates /var/lib (or its bind source) and never exits nonzero.
+ts=${SC5000_TIMESTAMP_FILE:-/etc/timestamp}
+[ -f "$ts" ] && [ ! -L "$ts" ] || exit 0
+lib_dir=${SC5000_TIMESYNC_LIB_DIR:-/var/lib}
+[ -d "$lib_dir" ] && [ ! -L "$lib_dir" ] || exit 0
+for chk in "$lib_dir/systemd" "$lib_dir/systemd/timesync" "$lib_dir/systemd/timesync/clock"; do
+    [ ! -L "$chk" ] || exit 0
+done
+mkdir -p "$lib_dir/systemd/timesync" 2>/dev/null || exit 0
+clock="$lib_dir/systemd/timesync/clock"
+if [ ! -e "$clock" ] || [ "$clock" -ot "$ts" ]; then
+    (
+        umask 022
+        : >> "$clock" &&
+        touch -r "$ts" "$clock" &&
+        chmod 644 "$clock"
+    ) 2>/dev/null || exit 0
+    chown systemd-timesync:systemd-timesync "$lib_dir/systemd/timesync" "$clock" 2>/dev/null ||
+        chown 994:992 "$lib_dir/systemd/timesync" "$clock" 2>/dev/null || :
+fi
+exit 0

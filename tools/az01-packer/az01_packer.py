@@ -555,8 +555,133 @@ install_ui() {
     printf '%s\n' "$id" > "$ui/.pack-id"
     printf '%s\n' "$version" > "${SC5000_VERSION_FILE:-/data/enginex/version.txt}"
 }
+
+# Restore the last saved time zone into Engine.conf before Engine starts, without
+# overwriting a newer non-UTC TZEnvVar that Engine flushed on a clean shutdown.
+valid_tz() {
+    zdir=${SC5000_ZONEINFO_DIR:-/usr/share/zoneinfo}
+    if [ "$1" = UTC ]; then
+        [ -f "$zdir/UTC" ]
+        return $?
+    fi
+    case $1 in
+        ''|/*|*/|*//*|*..*|*[![:alnum:]_+/-]*) return 1 ;;
+        */*) ;;
+        *) return 1 ;;
+    esac
+    [ "${#1}" -le 63 ] || return 1
+    old_ifs=$IFS; IFS=/
+    for seg in $1; do
+        IFS=$old_ifs
+        [ -n "$seg" ] && [ "$seg" != "." ] && [ "${#seg}" -le 32 ] || return 1
+    done
+    IFS=$old_ifs
+    [ -f "$zdir/$1" ]
+}
+
+read_engine_tz() {
+    [ -f "$1" ] || return 0
+    awk '
+        /^\\[TimeDateSettings\\][[:space:]]*$/ { in_sec = 1; next }
+        /^\\[.*\\]/ { in_sec = 0; next }
+        in_sec && /^TZEnvVar[[:space:]]*=/ {
+            sub(/^TZEnvVar[[:space:]]*=[[:space:]]*/, "")
+            sub(/[[:space:]]*$/, "")
+            print
+            exit
+        }
+    ' "$1"
+}
+
+should_restore_tz() {
+    conf=$1
+    tz_file=$2
+    [ -f "$conf" ] || return 0
+    cur=$(read_engine_tz "$conf")
+    case $cur in
+        ''|Universal) return 0 ;;
+        UTC|Etc/UTC) [ ! "$conf" -nt "$tz_file" ] && return 0 ;;
+    esac
+    [ "$tz_file" -nt "$conf" ]
+}
+
+write_engine_tz() {
+    conf_dir=$1
+    tz=$2
+    tz_file=$3
+    air_dir="$conf_dir/AIR Music Technology"
+    conf="$air_dir/Engine.conf"
+    for chk in "$conf_dir" "$air_dir" "$conf"; do
+        [ ! -L "$chk" ] || { echo "Refusing Engine.conf symlink: $chk" >&2; return 1; }
+    done
+    should_restore_tz "$conf" "$tz_file" || return 0
+    (
+        umask 022
+        mkdir -p "$air_dir"
+        tmp="$conf.tmp.$$"
+        if [ -f "$conf" ]; then
+            awk -v tz="$tz" '
+                BEGIN { in_sec = 0; seen_sec = 0; wrote = 0 }
+                /^\\[TimeDateSettings\\][[:space:]]*$/ { in_sec = 1; seen_sec = 1; print; next }
+                /^\\[.*\\]/ {
+                    if (in_sec && !wrote) { print "TZEnvVar=" tz; wrote = 1 }
+                    in_sec = 0; print; next
+                }
+                in_sec && /^TZEnvVar[[:space:]]*=/ {
+                    if (!wrote) { print "TZEnvVar=" tz; wrote = 1 }
+                    next
+                }
+                { print }
+                END {
+                    if (!seen_sec) {
+                        if (NR > 0) print ""
+                        print "[TimeDateSettings]"
+                        print "TZEnvVar=" tz
+                    } else if (!wrote) {
+                        print "TZEnvVar=" tz
+                    }
+                }
+            ' "$conf" > "$tmp"
+        else
+            printf '[TimeDateSettings]\\nTZEnvVar=%s\\n' "$tz" > "$tmp"
+        fi
+        if cmp -s "$tmp" "$conf" 2>/dev/null; then
+            rm -f "$tmp"
+        else
+            chmod 644 "$tmp"
+            mv "$tmp" "$conf"
+        fi
+    )
+}
+
+restore_timezone() {
+    tz_file=${SC5000_TZ_STATE_FILE:-/data/enginex/state/timezone}
+    [ ! -L /data/enginex/state ] && [ ! -L "$tz_file" ] || { echo "Refusing timezone symlink: $tz_file" >&2; return 1; }
+    [ -f "$tz_file" ] || return 0
+    tz=$(awk '{gsub(/\\r/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); gsub(/ /, "_"); print; exit}' "$tz_file")
+    valid_tz "$tz" || return 0
+    cfg_root=${SC5000_CONFIG_DIR:-/data/.config}
+    [ ! -L "$cfg_root" ] || { echo "Refusing .config symlink: $cfg_root" >&2; return 1; }
+    found=0
+    for d in "$cfg_root"/*.user.settings; do
+        [ -d "$d" ] || continue
+        found=1
+        write_engine_tz "$d" "$tz" "$tz_file"
+    done
+    if [ "$found" = 0 ]; then
+        pfile=${SC5000_PRODUCT_CODE_FILE:-/sys/firmware/devicetree/base/inmusic,product-code}
+        if [ -f "$pfile" ]; then
+            prod=$(tr -d '\\000\\r\\n ' < "$pfile" | tr '[:upper:]' '[:lower:]')
+            case $prod in
+                ''|*[!a-z0-9_-]*) ;;
+                *) write_engine_tz "$cfg_root/$prod.user.settings" "$tz" "$tz_file" ;;
+            esac
+        fi
+    fi
+}
 [ ! -d /etc/sc5000 ] || [ -e /etc/enginex ] || ln -s sc5000 /etc/enginex 2>/dev/null || :
 install_ui || echo "sc5000-custom-prepare: UI packs not installed" >&2
+restore_timezone || echo "sc5000-custom-prepare: timezone not restored" >&2
 '''
 # Public half of the key public images up to 5.0.4.1 shipped (#46). Not a secret.
 RETIRED_RELEASE_KEY = b'AAAAC3NzaC1lZDI1NTE5AAAAIC6p0NjBPb0vPCGB3XloshlMtXoYgVc6ig+JQAYnVUSz'
@@ -579,7 +704,7 @@ if [ -f "$marker" ] && [ "$(cat "$marker")" = "$epoch" ]; then
     exit 0
 fi
 if [ -d "$upper" ]; then
-    for name in hosts resolv.conf connman dnsmasq.d edisksd@MANAGED@; do
+    for name in hosts resolv.conf connman dnsmasq.d edisksd systemd/timesyncd.conf systemd/timesyncd.conf.d@MANAGED@; do
         rm -rf -- "$upper/$name"
     done
 fi

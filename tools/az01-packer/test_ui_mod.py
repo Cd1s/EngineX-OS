@@ -3887,5 +3887,112 @@ for(const delta of [4000,-2000,-455]){
 """)
 
 
+class TimeZonePersistenceTest(unittest.TestCase):
+    def test_timezone_capture_normalizes_spaces_guards_boot_fallback_and_saves_picker_utc(self):
+        self.assertIn("function onSystemTimeZoneSetSucceeded() { root.scOnTimeZoneChanged() }", bp.SERVICES_MAIN)
+        self.assertIn("function onTimeZoneSelect() { root.scTimeZonePickerUsed = true }", bp.SERVICES_MAIN)
+        self.assertIn("http://127.0.0.1:8080/v1/sc5000/ui?timezone=", bp.SERVICES_MAIN)
+        import shutil, subprocess
+        if not shutil.which("node"):
+            return
+        start = bp.SERVICES_MAIN.index("function scHookTimeZonePicker()")
+        end = bp.SERVICES_MAIN.index("\tConnections {\n\t\ttarget: typeof Planck")
+        js_funcs = bp.SERVICES_MAIN[start:end]
+        script = f"""
+const assert = require('node:assert/strict');
+let fakeNow = 1000;
+Date.now = () => fakeNow;
+let scTimeZoneBootWindowOpen = true;
+let scLastGoodTimeZone = '';
+let scPendingTimeZone = '';
+let scRestoringTimeZone = false;
+let scTimeZonePickerUsed = false;
+let scTimeZonePickerHooked = false;
+let pickerVisible = false;
+const posts = [];
+globalThis.root = {{
+    get scPendingTimeZone() {{ return scPendingTimeZone; }},
+    set scPendingTimeZone(v) {{ scPendingTimeZone = v; }},
+    get scTimeZonePickerUsed() {{ return scTimeZonePickerUsed; }},
+    set scTimeZonePickerUsed(v) {{ scTimeZonePickerUsed = v; }},
+}};
+globalThis.XMLHttpRequest = class {{
+    open(method, url) {{ this.method = method; this.url = url; }}
+    send() {{
+        posts.push(this.url);
+        this.readyState = 4;
+        this.status = 200;
+        if (this.onreadystatechange) this.onreadystatechange();
+    }}
+}};
+let currentDisplayTz = 'Universal';
+let currentIsUtc = true;
+const pickerListeners = [];
+globalThis.Planck = {{
+    getProperty: (path) => {{
+        if (path !== '/GUI/ShowTimeZoneView') return null;
+        return {{
+            translator: {{
+                get state() {{ return pickerVisible; }},
+                set state(v) {{
+                    pickerVisible = !!v;
+                    for (const fn of pickerListeners) fn();
+                }},
+                stateChanged: {{ connect: (fn) => pickerListeners.push(fn) }},
+            }},
+        }};
+    }},
+    timeDateController: {{
+        isSystemTimeZoneUTC: () => currentIsUtc,
+        getSystemTimeZone: () => currentDisplayTz,
+        setSystemTimeZone: (tz) => {{
+            currentDisplayTz = tz.replace(/_/g, ' ');
+            currentIsUtc = (tz === 'UTC' || tz === 'Etc/UTC' || tz === 'Universal');
+            scOnTimeZoneChanged();
+        }},
+    }},
+}};
+{js_funcs}
+// 1. Auto-detected zone with space display formatting ("America/New York") normalizes to "America/New_York".
+Planck.timeDateController.setSystemTimeZone('America/New_York');
+assert.equal(scLastGoodTimeZone, 'America/New_York');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=America%2FNew_York');
+
+// 2. Manual selection of Asia/Shanghai posts Asia/Shanghai.
+Planck.timeDateController.setSystemTimeZone('Asia/Shanghai');
+assert.equal(scLastGoodTimeZone, 'Asia/Shanghai');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=Asia%2FShanghai');
+
+// 3. Unsolicited boot-window UTC (picker NOT used) stays guarded even if NTP jumps wall-clock Date.now() +12 days!
+fakeNow += 12 * 86400 * 1000;
+const postsBeforeFallback = posts.length;
+Planck.timeDateController.setSystemTimeZone('UTC');
+assert.equal(scLastGoodTimeZone, 'Asia/Shanghai');
+assert.equal(currentDisplayTz, 'Asia/Shanghai');
+assert.equal(currentIsUtc, false);
+assert.equal(posts.length, postsBeforeFallback);
+
+// 4. User opens the Time Zone picker (/GUI/ShowTimeZoneView = true) and chooses UTC: saved like any zone!
+Planck.getProperty('/GUI/ShowTimeZoneView').translator.state = true;
+Planck.timeDateController.setSystemTimeZone('UTC');
+Planck.getProperty('/GUI/ShowTimeZoneView').translator.state = false;
+assert.equal(scTimeZonePickerUsed, true);
+assert.equal(scLastGoodTimeZone, 'UTC');
+assert.equal(currentDisplayTz, 'UTC');
+assert.equal(currentIsUtc, true);
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=UTC');
+
+// 5. Once the 30s monotonic Timer expires (scTimeZoneBootWindowOpen = false), UTC is saved even without picker.
+scTimeZonePickerUsed = false;
+Planck.timeDateController.setSystemTimeZone('Asia/Shanghai');
+scTimeZoneBootWindowOpen = false;
+Planck.timeDateController.setSystemTimeZone('UTC');
+assert.equal(scLastGoodTimeZone, 'UTC');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=UTC');
+"""
+        r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
