@@ -143,9 +143,13 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 // off the audio thread; the limiter itself runs in hook_master_output.
 static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
+static int echo_player_bypass;        // standalone players hide Echo Out; stored value behaves as Off
 static unsigned pfx_time_ms;          // #162: zero OFF, otherwise 10..4000
 static struct sc_pfx_ms master_ms[4];
 static int pioneer_fx_mode;           // #88 Pioneer FX emulations
+static const char *four_deck_settings = UI_ROOT "/settings.conf";
+static const char *product_code_path = "/sys/firmware/devicetree/base/inmusic,product-code";
+static int player_board(void);
 
 // Pad LED Brightness: Engine sends every controller LED through snd_seq_event_output_direct
 // (RGB LEDs as 14/15-byte SysEx, single-colour keys as NoteOn). Scale the RGB SysEx PWM bytes
@@ -339,7 +343,7 @@ static void *lim_poll(void *arg) {
         static struct stat previous;
         static int had_settings;
         struct stat st;
-        int have_settings = stat(UI_ROOT "/settings.conf", &st) == 0;
+        int have_settings = stat(four_deck_settings, &st) == 0;
         // Preserve the 80 ms control poll; replacements count even with preserved mtime.
         if (have_settings && had_settings && previous.st_dev == st.st_dev &&
             previous.st_ino == st.st_ino && previous.st_size == st.st_size &&
@@ -352,7 +356,7 @@ static void *lim_poll(void *arg) {
         if (have_settings) previous = st;
         int on = 0, gain = 0, echo = 0, pioneer_fx = 0, led = 100;
         struct sc_ms_config timing = {500, 0};
-        FILE *f = fopen(UI_ROOT "/settings.conf", "r");
+        FILE *f = fopen(four_deck_settings, "r");
         if (f) {
             char *line = NULL;
             size_t capacity = 0;
@@ -385,9 +389,11 @@ static void *lim_poll(void *arg) {
                 sc_ms_prepare(&sc_pfx_routes[i].dsp.ms);
 #endif
         }
+        int player_bypass = player_board();
+        __atomic_store_n(&echo_player_bypass, player_bypass, __ATOMIC_RELAXED);
         __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
-        __atomic_store_n(&echo_enabled, echo, __ATOMIC_RELAXED);
+        __atomic_store_n(&echo_enabled, player_bypass ? 0 : echo, __ATOMIC_RELAXED);
         __atomic_store_n(&pioneer_fx_mode, pioneer_fx, __ATOMIC_RELAXED);
         __atomic_store_n(&pfx_time_ms, timing.enabled ? timing.ms : 0, __ATOMIC_RELEASE);
         if (led != __atomic_load_n(&led_pct, __ATOMIC_RELAXED)) led_replay(led);
@@ -868,7 +874,7 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
     }
     // #104 Echo Out rings the master output out after music stops; before the limiter.
     if (out && frames > 0) {
-        int echo = __atomic_load_n(&echo_enabled, __ATOMIC_RELAXED);
+        int echo = __atomic_load_n(&echo_player_bypass, __ATOMIC_RELAXED) ? 0 : __atomic_load_n(&echo_enabled, __ATOMIC_RELAXED);
         for (int ch = 0; ch < out_channels && ch / 2 < MASTER_ECHO_PAIRS; ch += 2)
             if (out[ch]) sc_echo_planar(&master_echo[ch / 2], out[ch], ch + 1 < out_channels ? out[ch + 1] : NULL, (unsigned)frames, echo);
     }
@@ -1183,8 +1189,6 @@ static int install_dsp_hooks(uintptr_t base, size_t page) {
 // with 4 decks (5.3.0 0x1c44110); 4 decks alone crash a player's layout controller.
 // The sound card keeps its 2 deck outputs (PlanckClient caps decks at 12, not at
 // outputs), and engine-ui-guard names the hardware's deck group for this layout.
-static const char *four_deck_settings = UI_ROOT "/settings.conf";
-static const char *product_code_path = "/sys/firmware/devicetree/base/inmusic,product-code";
 
 // #171, only b946c3b8 / JP21. This Engine passes pairs of float pointers in
 // MixerBuffers, rather than the AudioBuffer stack objects in the older analysis.
@@ -1863,6 +1867,7 @@ __attribute__((constructor)) static void edit_engine(void) {
 #if !defined(__aarch64__)
         fx_selector_supported = install_px_scope(base, page, build->name);
 #endif
+        __atomic_store_n(&echo_player_bypass, player_board(), __ATOMIC_RELAXED);
         lim_start_poll();
     }
 }

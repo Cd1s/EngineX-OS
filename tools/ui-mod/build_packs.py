@@ -1996,8 +1996,17 @@ SERVICES_MAIN = """
 	property int scUIScale: 100
 	property bool scStemsEqMode: false
 	property bool scStemsEqApplied: false
+	onScHasStemsEqChanged: {
+		if (!scHasStemsEq && scStemsEqApplied) {
+			scStemsEqApplied = false
+			for (let ch = 1; ch <= 4; ch++) {
+				const m = root.scTr("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode")
+				if (m) m.index = 0
+			}
+		}
+	}
 	onScStemsEqModeChanged: {
-		if (!scUiLoaded && !scStemsEqMode) return
+		if (!scHasStemsEq || (!scUiLoaded && !scStemsEqMode)) return
 		scStemsEqApplied = true
 		for (let ch = 1; ch <= 4; ch++) {
 			const m = root.scTr("/Engine/Mixer/Channel" + ch + "/ChannelStrip/Mode")
@@ -2011,6 +2020,7 @@ SERVICES_MAIN = """
 	property int scFxTimeMs: 500
 	property bool scFxSelectorAvailable: false
 	property bool scFxMasterBypassed: false
+	readonly property bool scHasPxDelay: scFxSelectorAvailable || (!scFxMasterBypassed && ["spiral", "pitch_echo", "dub_echo"].indexOf(scPioneerFx) >= 0)
 	// Offers this model's release image to EngineX's online updater.
 	property ListModel scUpdateModel: ListModel {}
 	property bool scUpdating: false
@@ -3117,13 +3127,14 @@ PLAYBACK_ENTRIES = """
 		},
 		EntryBase.ListEntry {
 			text: "PX Delay Time Mode"
+			visible: root.scHasPxDelay
 			values: ["Default (Off)", "Milliseconds (ms)"]
 			currentValue: values[root.scFxTimeMode === "ms" ? 1 : 0]
 			onSelected: function(index) { root.scCall("fxTimeMode=" + (index === 1 ? "ms" : "beats")) }
 		},
 		EntryBase.ListEntry {
 			text: "PX Delay Time (ms)"
-			visible: root.scFxTimeMode === "ms"
+			visible: root.scHasPxDelay && root.scFxTimeMode === "ms"
 			readonly property var times: [10, 18, 33, 60, 110, 200, 364, 500, 663, 1207, 2197, 4000]
 			values: times.map(n => String(n))
 			currentValue: String(root.scFxTimeMs)

@@ -4,6 +4,7 @@ int hook_test_engine;
 #include "engine_ui_hook.c"
 #include <assert.h>
 #include <math.h>
+#include <sys/mount.h>
 static uint32_t copy_input(void *h, void *c, int ic, const float *const *in,
                            int oc, float *const *out, int frames) {
     (void)h; (void)c; assert(ic == oc);
@@ -57,6 +58,113 @@ static void test_style_drains(void) {
         }
     }
 }
+static void write_file(const char *path, const char *text) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    assert(f);
+    assert(fputs(text, f) >= 0);
+    assert(!fclose(f));
+    assert(!rename(tmp, path));
+}
+static float run_echo_tail(void) {
+    memset(master_echo, 0, sizeof master_echo);
+    for (unsigned n = 0; n < 57600; ++n) {
+        float loud = 0.25f, l, r;
+        const float *in[] = {&loud, &loud}; float *out[] = {&l, &r};
+        hook_master_output(NULL, NULL, 2, in, 2, out, 1);
+    }
+    float peak = 0;
+    for (unsigned n = 0; n < 1024; ++n) {
+        float silent = 0, l, r;
+        const float *in[] = {&silent, &silent}; float *out[] = {&l, &r};
+        hook_master_output(NULL, NULL, 2, in, 2, out, 1);
+        if (fabsf(l) > peak) peak = fabsf(l);
+    }
+    return peak;
+}
+static void test_hidden_means_off(void) {
+    char dir[] = "/tmp/fx-declutter-XXXXXX";
+    assert(mkdtemp(dir));
+    char board_path[PATH_MAX], conf_path[PATH_MAX];
+    snprintf(board_path, sizeof board_path, "%s/product-code", dir);
+    product_code_path = board_path;
+    if (unshare(CLONE_NEWNS) == 0 && mount("none", "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0) {
+        mkdir("/data", 0755);
+        assert(mount("tmpfs", "/data", "tmpfs", 0, NULL) == 0);
+        mkdir("/data/sc5000-custom", 0755);
+        mkdir(UI_ROOT, 0755);
+        snprintf(conf_path, sizeof conf_path, "%s/settings.conf", UI_ROOT);
+    } else {
+        snprintf(conf_path, sizeof conf_path, "%s/settings.conf", dir);
+        four_deck_settings = conf_path;
+    }
+    write_file(board_path, "JP07\n");
+    write_file(conf_path, "upfader_echo=1\npioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");
+    lim_start_poll();
+    usleep(180000);
+
+    // 1. Standalone players keep upfader_echo=1 stored in settings.conf, but hidden Echo Out behaves as Off.
+    static const char *const players[] = {"JP07\n", "JP08\n", "JP13\n", "JP14\n"};
+    for (unsigned p = 0; p < sizeof players / sizeof *players; ++p) {
+        write_file(board_path, players[p]);
+        write_file(conf_path, "upfader_echo=1\npioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");
+        usleep(180000);
+        FILE *f = fopen(conf_path, "r"); assert(f);
+        char saved[256] = {0}; assert(fread(saved, 1, sizeof saved - 1, f) > 0); fclose(f);
+        assert(strstr(saved, "upfader_echo=1") && strstr(saved, "fx_time_mode=ms") && strstr(saved, "fx_time_ms=250"));
+        assert(run_echo_tail() == 0.0f);
+    }
+
+    // Same stored upfader_echo=1 on a mixer console (JC16) rings out as expected.
+    write_file(board_path, "JC16\n");
+    write_file(conf_path, "upfader_echo=1\npioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");
+    usleep(180000);
+    assert(run_echo_tail() > 0.05f);
+
+    // 2. Hidden PX Delay Time Mode / (ms) when Color FX Style is Off or Space behaves as Off while keeping 250 ms stored.
+    write_file(conf_path, "pioneer_fx=off\nfx_time_mode=ms\nfx_time_ms=250\n");
+    usleep(180000);
+    assert(__atomic_load_n(&pfx_time_ms, __ATOMIC_ACQUIRE) == 250);
+    memset(master_pfx, 0, sizeof master_pfx);
+    memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
+    for (unsigned n = 0; n < 512; ++n) {
+        float dry = 0.3f * sinf((float)n * 0.1f), l, r;
+        const float *in[] = {&dry, &dry}; float *out[] = {&l, &r};
+        hook_master_output(NULL, NULL, 2, in, 2, out, 1);
+        assert(l == dry && r == dry);
+    }
+
+    write_file(conf_path, "pioneer_fx=space\nfx_time_mode=ms\nfx_time_ms=250\n");
+    usleep(180000);
+    struct sc_master_pioneer_fx ref_space = {0};
+    memset(master_pfx, 0, sizeof master_pfx);
+    for (unsigned n = 0; n < 512; ++n) {
+        float dry = 0.2f * sinf((float)n * 0.07f), l, r, rl = dry, rr = dry;
+        const float *in[] = {&dry, &dry}; float *out[] = {&l, &r};
+        hook_master_output(NULL, NULL, 2, in, 2, out, 1);
+        sc_master_pioneer_fx_planar(&ref_space, &rl, &rr, 1, SC_MASTER_PFX_SPACE);
+        assert(memcmp(&l, &rl, 4) == 0 && memcmp(&r, &rr, 4) == 0);
+    }
+
+    // 3. Hidden Color FX Style on JC11 PRIME 4 (fx_selector_master_bypass=1) behaves as Off even with spiral + ms stored.
+    write_file(conf_path, "pioneer_fx=spiral\nfx_time_mode=ms\nfx_time_ms=250\n");
+    usleep(180000);
+    __atomic_store_n(&fx_selector_master_bypass, 1, __ATOMIC_RELEASE);
+    memset(master_pfx, 0, sizeof master_pfx);
+    memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
+    for (unsigned n = 0; n < 512; ++n) {
+        float dry = 0.25f * cosf((float)n * 0.05f), l, r;
+        const float *in[] = {&dry, &dry}; float *out[] = {&l, &r};
+        hook_master_output(NULL, NULL, 2, in, 2, out, 1);
+        assert(l == dry && r == dry);
+    }
+    __atomic_store_n(&fx_selector_master_bypass, 0, __ATOMIC_RELEASE);
+    unlink(board_path);
+    unlink(conf_path);
+    rmdir(dir);
+    puts("master hidden-means-off PASS");
+}
 int main(void) {
     dsp_originals[DSP_MASTER] = (void *)copy_input;
     pioneer_fx_mode = 4;
@@ -86,6 +194,7 @@ int main(void) {
     }
     test_clicks();
     test_style_drains();
+    test_hidden_means_off();
     puts("test_ms_master_hook PASS");
     return 0;
 }
