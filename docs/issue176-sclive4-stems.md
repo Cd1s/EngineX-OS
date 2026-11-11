@@ -41,6 +41,18 @@ bundle paths at compile time with buffers populated under `mkdtemp`; they
 remove their files and directories and never write the host's `/data` bundle.
 Both committed hook copies must match a fresh source build.
 
+A sandbox using a freshly extracted official SCLIVE4 5.3.0 image, with all
+container record SHA-256 values checked, installed the actual 5.3.0.4 data
+bundle onto a temporary `/data` while the rootfs stayed read-only. An armhf
+probe named `Engine` returned `statx=-1 (ENOENT)`, `access=-1`, `open=-1`
+without preload, and `statx=0`, `access=0`, `open>=0` with the committed hook.
+The same probe named `NotEngine` still returned failure with preload. No
+processor file was added to `/usr/local/bin`.
+
+The SCLIVE4, separate PRIME4PLUS and AZ04 bootstrap sandboxes passed. This
+validates processor discovery and bundle activation in a sandbox; it does not
+exercise the Stems service or prove a completed render.
+
 Physical SC LIVE 4 confirmation is required: Generate Stems must start a render
 instead of opening Settings, finish successfully, and leave pre-rendered Stems
 playback working. This does not claim an end-to-end render on physical hardware.
