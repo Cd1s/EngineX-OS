@@ -67,6 +67,21 @@ class UiModSourceTest(unittest.TestCase):
         self.assertIn("SCPROBE analyze|boolean|false|", gate)
         self.assertNotIn("SCPROBE analyze|boolean|1|", gate)
 
+    def test_release_gate_runs_second_boot_after_power_cut_and_checks_splash(self):
+        probe = (BUILD_PACKS.parent.parent / "az01-packer/gate-ui-probe.qml").read_text()
+        gate = (BUILD_PACKS.parent.parent / "az01-packer/release-gate.sh").read_text()
+        self.assertIn("splashScreenController", probe)
+        self.assertIn("SplashScreenLoader", probe)
+        self.assertIn("SCPROBE splash|", probe)
+        self.assertIn("SCPROBE splash|0|1|", gate)
+        self.assertIn("SC5000_GATE_LIBRARY=$W/drive", gate)
+        self.assertIn("/media/az01-internal", gate)
+        self.assertIn("SC5000_UI_ALIVE_CMD=", gate)
+        self.assertIn("--bounding-set=-sys_time", gate)
+        self.assertIn("kill -KILL", gate)
+        self.assertIn("--phase boot2", gate)
+        self.assertIn("powercut-truncated.qmlc", gate)
+
     def test_shadow_layer_uses_stock_owner_outside_layouts(self):
         for source, owner in (("RowLayout {\n    id: deckInfo\n}\n", "deckInfo"),
                               ("Item {\n    width: 800\n}\n", "scStockShadowHost")):
