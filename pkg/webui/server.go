@@ -85,6 +85,7 @@ type Server struct {
 	mux           *http.ServeMux
 	tidal         *tidalGateway
 	uiMu          sync.Mutex
+	uiNotify      chan struct{} // closed and replaced when settings are saved; guarded by uiMu
 	logsMu        sync.Mutex
 	fxMu          sync.Mutex // transient FX commands never hold the settings lock
 	stemsMu       sync.Mutex // streaming-stems.json
@@ -157,6 +158,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	}
 	s.prolinkExport = prolink.NewExporter(exportCfg)
 	s.closed = make(chan struct{})
+	s.uiNotify = make(chan struct{})
 	if cfg.StateDir == "/data/sc5000-custom/state" { // on the deck, not in tests
 		go serveSpotifyConnectMDNS(s.closed)
 	}

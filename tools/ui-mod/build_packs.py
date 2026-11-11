@@ -2009,6 +2009,8 @@ SERVICES_MAIN = """
 	property string scPioneerFx: "off"
 	property string scFxTimeMode: "beats"
 	property int scFxTimeMs: 500
+	property string scPitchPickup: "stock" // #181: "cdj" parks the pitch fader until it crosses the pitch
+	property bool scPitchPickupAvailable: false // stream-sync's board list (pitchPickupBoards) decides
 	property bool scFxSelectorAvailable: false
 	property bool scFxMasterBypassed: false
 	// Offers this model's release image to EngineX's online updater.
@@ -2457,6 +2459,9 @@ SERVICES_MAIN = """
 			            v.fxTimeMs !== undefined ? v.fxTimeMs : v.fx_time_ms)
 			if (v.pioneerFx !== undefined) scPioneerFx = v.pioneerFx || "off"
 			else if (v.pioneer_fx !== undefined) scPioneerFx = v.pioneer_fx || "off"
+			scPitchPickupAvailable = !!(v.capabilities && v.capabilities.pitchPickup)
+			if (v.pitchPickup !== undefined) scPitchPickup = v.pitchPickup === "cdj" ? "cdj" : "stock"
+			else if (v.pitch_pickup !== undefined) scPitchPickup = v.pitch_pickup === "cdj" ? "cdj" : "stock"
 		}
 		if (scHasStemsEq && scStemsEqMode && !scStemsEqApplied) {
 			scStemsEqApplied = true
@@ -2516,6 +2521,7 @@ SERVICES_MAIN = """
 			else if (key === "fx_time_mode" && line.trim().indexOf("fx_time_mode=") === 0) fxMode = line.trim().slice(13) === "ms" ? "ms" : "beats"
 			else if (key === "fx_time_ms" && line.trim().indexOf("fx_time_ms=") === 0) fxMs = scFxMsInteger(line.trim().slice(11))
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
+			else if (key === "pitch_pickup") root.scPitchPickup = val === "cdj" ? "cdj" : "stock"
 		}
 		scFxMsApply(fxMode, fxMs)
 	}
@@ -3129,7 +3135,104 @@ PLAYBACK_ENTRIES = """
 			currentValue: String(root.scFxTimeMs)
 			onSelected: function(index) { root.scCall("fxTimeMs=" + times[index]) }
 		},
+		EntryBase.ListEntry {
+			text: "Pitch Fader Pickup"
+			visible: root.scPitchPickupAvailable
+			readonly property var ids: ["stock", "cdj"]
+			values: ["Stock", "CDJ"]
+			currentValue: values[Math.max(0, ids.indexOf(root.scPitchPickup))]
+			onSelected: function(index) { root.scCall("pitchPickup=" + ids[index]) }
+		},
 """
+
+# #181: CDJ-style pitch fader pickup, added to stock ValueOutput.qml. It asks at every sample
+# whether the mode is on: the answer is no (the default, every stock statement as it was) unless
+# the target is a deck's pitch and GlobalAssignmentConfig has been told "cdj" by stream-sync,
+# which says so only on the boards of its pitchPickupBoards list. No other controller file is
+# patched for this: SpeedSlider.qml stays stock.
+#
+# What the Engine 5.3.0 Speed translator does on its own (measured on the real binary):
+# the fader owns the pitch while lastTakeOverType() is its id and softValue equals value;
+# after its soft value moved away it needs two consecutive samples around the pitch;
+# but the first sample after anyone else wrote the pitch (Sync, Pitch Range, the screen)
+# takes over at once when it lies within 0.05 of the fader travel, so the pitch jumps there.
+PITCH_PICKUP = """
+	// EngineX #181: CDJ-style pitch fader pickup. Only for a deck's pitch fader, and only while
+	// the controller's GlobalAssignmentConfig has read pitchPickup "cdj"; off in every other case.
+	function scCdjPickup() {
+		if(typeof globalConfig === "undefined" || !globalConfig || globalConfig.scCdjPickup !== true) return false
+		const p = target ? target.path : undefined
+		return typeof p === "string" && p.indexOf("/Engine/Deck") === 0 && p.slice(-6) === "/Speed" && p.indexOf("/", 12) === p.length - 6
+	}
+	// What the previous sample of this fader saw: its target, that target's value and the sample.
+	property var scSeenTarget: null
+	property real scSeenAt: 0
+	property real scSeenSoft: 0
+	// The fader owns the pitch only while it wrote it last and still sits on it. Otherwise it
+	// is parked: samples only move the soft value (stock's parked route, which drives the
+	// pickup arrows) until one reaches the pitch or two consecutive ones lie around it.
+	// Two samples are consecutive only if nothing happened between them: the pitch did not
+	// move (Sync, Pitch Range, the screen) and no sample came in on another route (other
+	// layer, Sync on). Anything else makes this sample the new starting point.
+	function scPickup(t, value) {
+		const mine = privateData.takeoverType, pitch = t.value, last = t.softValue, eps = 1e-6
+		let take = (t.lastTakeOverType() === mine && Math.abs(last - pitch) < eps) || Math.abs(value - pitch) < eps
+		if(!take && scSeenTarget === t && Math.abs(scSeenAt - pitch) < eps && Math.abs(scSeenSoft - last) < eps
+				&& (last - pitch) * (value - pitch) <= 0) {
+			// The fader passed through the pitch: take over there, so nothing jumps.
+			t.setValue(pitch, mine, 0)
+			take = true
+		}
+		if(take) t.setValue(value, mine, 0)
+		else t.setSoftValue(value)
+		scSeenTarget = t
+		scSeenAt = take ? value : pitch
+		scSeenSoft = value
+		// Stock only notes the samples its timer delivers. This one may have come straight in, and
+		// a fader that then returns to an older, exactly repeatable value (the centre detent)
+		// would be taken for "no change" and dropped.
+		updateTimer.oldValue = value
+	}
+"""
+
+# The controller QML runs in its own engine (no `root`), so its one GlobalAssignmentConfig
+# takes what it needs from stream-sync: pad LED brightness (#85), Swap Loop / Beat Jump (#135)
+# and Pitch Fader Pickup (#181). One request stays open at stream-sync until one of them is
+# saved or about a minute passes, so a change arrives at once, there is about one request a
+# minute, and nothing runs here in between: no repeating timer, no binding. scAgain is a
+# one-shot pause before the next request: 1 s after an answer that was held, doubling up to
+# 30 s after an error or an answer that came straight back, so no server can make this spin.
+CONTROLLER_SETTINGS = (
+    '    property string scSeen: ""\n'
+    '    property int scWait: 1000\n'
+    '    property double scAskedAt: 0\n'
+    '    function scAsk() {\n'
+    '        const x = new XMLHttpRequest()\n'
+    '        scAskedAt = Date.now()\n'
+    '        x.onreadystatechange = function() {\n'
+    '            if (x.readyState !== XMLHttpRequest.DONE) return\n'
+    '            let ok = false\n'
+    '            if (x.status === 200) {\n'
+    '                try {\n'
+    '                    const j = JSON.parse(x.responseText)\n'
+    '                    const n = parseInt(j.ledBrightness)\n'
+    '                    if (n >= 20 && n <= 100) scGlobalConfig.scPadBrightness = n / 100\n'
+    '                    scGlobalConfig.scSwapLoopOrder = !!j.swapLoopOrder\n'
+    '                    scGlobalConfig.scCdjPickup = j.pitchPickup === "cdj"\n'
+    '                    ok = typeof j.seen === "string" && j.seen !== ""\n'
+    '                    if (ok) scGlobalConfig.scSeen = j.seen\n'
+    '                } catch (e) {}\n'
+    '            }\n'
+    '            const held = ok && Date.now() - scGlobalConfig.scAskedAt >= 1000\n'
+    '            scGlobalConfig.scWait = held ? 1000 : Math.min(30000, scGlobalConfig.scWait * 2)\n'
+    '            scAgain.interval = scGlobalConfig.scWait\n'
+    '            scAgain.start()\n'
+    '        }\n'
+    '        x.open("GET", "http://127.0.0.1:8080/v1/sc5000/controller?seen=" + scSeen)\n'
+    '        x.send()\n'
+    '    }\n'
+    '    Timer { id: scAgain; interval: 1000; onTriggered: scGlobalConfig.scAsk() }\n'
+    '    Component.onCompleted: scAsk()\n')
 
 BEAT_JUMP_ENTRIES = """
 		EntryBase.ListEntry {
@@ -5553,23 +5656,14 @@ def edits(dev: bool):
             '    objectName: "Global Assignment Config"\n'
             '    property real scPadBrightness: 1\n'
             '    property bool scSwapLoopOrder: false\n'
-            '    Timer {\n'
-            '        interval: 10000; running: true; repeat: true; triggeredOnStart: true\n'
-            '        onTriggered: {\n'
-            '            const x = new XMLHttpRequest()\n'
-            '            x.onreadystatechange = function() {\n'
-            '                if (x.readyState !== XMLHttpRequest.DONE || x.status !== 200) return\n'
-            '                try {\n'
-            '                    const j = JSON.parse(x.responseText)\n'
-            '                    const n = parseInt(j.ledBrightness)\n'
-            '                    if (n >= 20 && n <= 100) scGlobalConfig.scPadBrightness = n / 100\n'
-            '                    scGlobalConfig.scSwapLoopOrder = !!j.swapLoopOrder\n'
-            '                } catch (e) {}\n'
-            '            }\n'
-            '            x.open("GET", "http://127.0.0.1:8080/v1/sc5000/ui")\n'
-            '            x.send()\n'
-            '        }\n'
-            '    }\n')]
+            '    property bool scCdjPickup: false\n'
+            + CONTROLLER_SETTINGS)]
+        scaled["airAssignments/InputAssignment/ValueOutput.qml"] = [
+            ('\tproperty bool sendSoftWhenDisabled: false;\n', '\tproperty bool sendSoftWhenDisabled: false;\n' + PITCH_PICKUP),
+            ('\t\t\t\t\t\t\t\tt.setValue(value, privateData.takeoverType, 0)\n',
+             '\t\t\t\t\t\t\t\tif(scCdjPickup()) scPickup(t, value)\n'
+             '\t\t\t\t\t\t\t\telse t.setValue(value, privateData.takeoverType, 0)\n'),
+        ]
         pad_brt = '    scBrightness: typeof globalConfig !== "undefined" && globalConfig && globalConfig.scPadBrightness ? globalConfig.scPadBrightness : 1\n'
         # #135: Swap Loop / Beat Jump: the Auto Loop knob beat-jumps unshifted and resizes the loop with Shift.
         scaled["ControlSurfaceModules/ControlSurfaceModules/private/AutoLoopKnob.qml"] = [(

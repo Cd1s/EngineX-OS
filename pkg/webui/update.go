@@ -418,6 +418,15 @@ var noTrackSkipKeyBoards = map[string]bool{
 	"MIXSTREAMPRO": true, "MIXSTREAMPROPLUS": true, "MIXSTREAMPROGO": true,
 }
 
+// pitchPickupBoards may switch Pitch Fader Pickup to CDJ (#181): the boards whose pitch
+// fader has a centre detent, where returning to exactly 0 is what stock pickup trips over.
+// This is the only list: every other board hides the setting and always runs stock.
+// Add a board only with a source for its detent.
+var pitchPickupBoards = map[string]bool{
+	"PRIME4": true, // JC11, named in the #181 report
+	"PRIME2": true, // JC16, named in the #181 report
+}
+
 // az04Boards run the 64-bit AZ04 Engine (Stems stays stock).
 var az04Boards = map[string]bool{"PRIME4G2": true, "SYSTEMONE": true}
 

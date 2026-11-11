@@ -1,9 +1,11 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/deemixclient"
 )
@@ -73,6 +76,193 @@ func splitLines(b []byte) []string {
 		}
 	}
 	return out
+}
+
+// useBoard makes the server see the given device-tree compatible string for one test.
+func useBoard(t *testing.T, compat string) {
+	t.Helper()
+	old := deviceCompatiblePath
+	t.Cleanup(func() { deviceCompatiblePath = old })
+	cf := filepath.Join(t.TempDir(), "compatible")
+	if err := os.WriteFile(cf, []byte(compat+"\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deviceCompatiblePath = cf
+}
+
+// #181: Pitch Fader Pickup is stock unless the DJ picks CDJ, and only CDJ is written.
+func TestUISettingsPitchPickup(t *testing.T) {
+	useBoard(t, "inmusic,jc16") // PRIME 2: on the list
+	dir := t.TempDir()
+	cfg := Config{AccessToken: "code", UIDir: dir, StateDir: t.TempDir()}
+	srv := httptest.NewServer(New(cfg, nil))
+	defer srv.Close()
+	conf := filepath.Join(dir, "settings.conf")
+	reload := func() string { return New(cfg, nil).loadUI().PitchPickup }
+	if got := reload(); got != "stock" {
+		t.Fatalf("default: %q", got)
+	}
+	for _, mode := range []string{"cdj", "stock", "cdj"} {
+		if code, v := uiPost(t, srv.URL, "pitchPickup="+mode); code != 200 || v.PitchPickup != mode || !v.Capabilities.PitchPickup {
+			t.Fatalf("%s: %d %q %v", mode, code, v.PitchPickup, v.Capabilities.PitchPickup)
+		}
+		data, err := os.ReadFile(conf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if has := slices.Contains(splitLines(data), "pitch_pickup=cdj"); has != (mode == "cdj") || (mode == "stock" && strings.Contains(string(data), "pitch_pickup")) {
+			t.Fatalf("%s: settings.conf %q", mode, data)
+		}
+		if got := reload(); got != mode {
+			t.Fatalf("reload %s: %q", mode, got)
+		}
+	}
+	// Another setting keeps it, a bad value changes nothing.
+	if code, v := uiPost(t, srv.URL, "swapLoopOrder=1"); code != 200 || v.PitchPickup != "cdj" {
+		t.Fatalf("other setting: %d %q", code, v.PitchPickup)
+	}
+	for _, bad := range []string{"pioneer", "direct", "CDJ", ""} {
+		if code, _ := uiPost(t, srv.URL, "pitchPickup="+bad); code != 400 {
+			t.Fatalf("%q: %d", bad, code)
+		}
+	}
+	if got := reload(); got != "cdj" {
+		t.Fatalf("bad value changed the mode: %q", got)
+	}
+	// A value this build does not know reads as stock.
+	if err := os.WriteFile(conf, []byte("lang=en\npitch_pickup=pioneer\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := reload(); got != "stock" {
+		t.Fatalf("unknown saved value: %q", got)
+	}
+}
+
+// #181: only the listed boards offer the setting. Everywhere else it is hidden and the
+// deck runs stock, whatever settings.conf says, and the saved line is left alone.
+func TestPitchPickupBoardAllowlist(t *testing.T) {
+	if want := map[string]bool{"PRIME4": true, "PRIME2": true}; !maps.Equal(pitchPickupBoards, want) {
+		t.Fatalf("allowlist changed: %v. Add a board only with a source for its centre detent, and update this test with it.", pitchPickupBoards)
+	}
+	get := func(t *testing.T, base, path string, into any) {
+		t.Helper()
+		resp, err := http.Get(base + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if err := json.NewDecoder(resp.Body).Decode(into); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for compat, listed := range map[string]bool{
+		"inmusic,jc11": true, "inmusic,jc16": true,
+		"inmusic,jp07": false, "inmusic,jp08": false, "inmusic,jp13": false, "inmusic,jp14": false,
+		"inmusic,jp11": false, "inmusic,nh08": false, "inmusic,jp21": false, "inmusic,jp24": false,
+		"vendor,unknown": false,
+	} {
+		t.Run(compat, func(t *testing.T) {
+			useBoard(t, compat)
+			if got := boardCapabilities(imagePrefix(deviceCompatible())).PitchPickup; got != listed {
+				t.Fatalf("offered: %v", got)
+			}
+			dir := t.TempDir()
+			conf := filepath.Join(dir, "settings.conf")
+			if err := os.WriteFile(conf, []byte("lang=en\npitch_pickup=cdj\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
+			defer srv.Close()
+			want := "stock"
+			if listed {
+				want = "cdj"
+			}
+			var ui uiSettings
+			get(t, srv.URL, "/v1/sc5000/ui", &ui)
+			var ctl controllerSettings
+			get(t, srv.URL, "/v1/sc5000/controller", &ctl)
+			if ui.PitchPickup != want || ui.Capabilities.PitchPickup != listed || ctl.PitchPickup != want {
+				t.Fatalf("saved cdj: UI %q offered %v, controller %q; want %q", ui.PitchPickup, ui.Capabilities.PitchPickup, ctl.PitchPickup, want)
+			}
+			code, v := uiPost(t, srv.URL, "pitchPickup=cdj")
+			if listed && (code != 200 || v.PitchPickup != "cdj") || !listed && code != 400 {
+				t.Fatalf("select cdj: %d %q", code, v.PitchPickup)
+			}
+			// Saving something else neither turns it on nor drops the saved line.
+			if code, v := uiPost(t, srv.URL, "swapLoopOrder=1"); code != 200 || v.PitchPickup != want {
+				t.Fatalf("other setting: %d %q", code, v.PitchPickup)
+			}
+			if data, _ := os.ReadFile(conf); !slices.Contains(splitLines(data), "pitch_pickup=cdj") {
+				t.Fatalf("saved line lost: %q", data)
+			}
+			if code, v := uiPost(t, srv.URL, "pitchPickup=stock"); code != 200 || v.PitchPickup != "stock" {
+				t.Fatalf("select stock: %d %q", code, v.PitchPickup)
+			}
+		})
+	}
+}
+
+// The controller engine's request is held while nothing changes and answered when a
+// setting it uses is saved (#181: the mode applies at once, #85 and #135 with it).
+func TestControllerSettingsAreHeldUntilTheyChange(t *testing.T) {
+	useBoard(t, "inmusic,jc11")
+	defer func(old time.Duration) { controllerHold = old }(controllerHold)
+	controllerHold = 400 * time.Millisecond
+	srv := httptest.NewServer(New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil))
+	defer srv.Close()
+	ask := func(seen string) (controllerSettings, time.Duration) {
+		t.Helper()
+		start := time.Now()
+		resp, err := http.Get(srv.URL + "/v1/sc5000/controller?seen=" + seen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var c controllerSettings
+		if err := json.NewDecoder(resp.Body).Decode(&c); err != nil {
+			t.Fatal(err)
+		}
+		return c, time.Since(start)
+	}
+	first, took := ask("")
+	if first.Seen == "" || first.PitchPickup != "stock" || first.LedBrightness != 100 || first.SwapLoopOrder || took > 200*time.Millisecond {
+		t.Fatalf("first answer: %+v after %v", first, took)
+	}
+	// Nothing changes: held for the whole hold, then the same answer.
+	if same, took := ask(first.Seen); same != first || took < controllerHold {
+		t.Fatalf("unchanged: %+v after %v", same, took)
+	}
+	// A setting it does not use is saved: still held.
+	go func() { time.Sleep(50 * time.Millisecond); uiPost(t, srv.URL, "waveform=rgb") }()
+	if same, took := ask(first.Seen); same != first || took < controllerHold {
+		t.Fatalf("unrelated save: %+v after %v", same, took)
+	}
+	// Each setting it uses wakes it at once.
+	seen := first.Seen
+	for _, step := range []struct {
+		query string
+		ok    func(controllerSettings) bool
+	}{
+		{"pitchPickup=cdj", func(c controllerSettings) bool { return c.PitchPickup == "cdj" }},
+		{"ledBrightness=60", func(c controllerSettings) bool { return c.LedBrightness == 60 && c.PitchPickup == "cdj" }},
+		{"swapLoopOrder=1", func(c controllerSettings) bool { return c.SwapLoopOrder }},
+		{"pitchPickup=stock", func(c controllerSettings) bool { return c.PitchPickup == "stock" }},
+	} {
+		controllerHold = 5 * time.Second
+		go func() { time.Sleep(100 * time.Millisecond); uiPost(t, srv.URL, step.query) }()
+		c, took := ask(seen)
+		if !step.ok(c) || c.Seen == seen || took < 90*time.Millisecond || took > time.Second {
+			t.Fatalf("%s: %+v after %v", step.query, c, took)
+		}
+		seen = c.Seen
+	}
+	// A client that goes away frees its request.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/v1/sc5000/controller?seen="+seen, nil)
+	if _, err := http.DefaultClient.Do(req); err == nil {
+		t.Fatal("a held request must not answer before a change")
+	}
 }
 
 func TestUISettingsRejectBadValues(t *testing.T) {
@@ -755,7 +945,7 @@ func TestBoardCapabilitiesAndSettingsCompatJP07vsJC11(t *testing.T) {
 			player:    false,
 			caps: uiCapabilities{
 				Mixer: true, FourDeck: true, AutoLoopKnob: true, BeatJumpPads: false,
-				TrackSkipKeys: true, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true,
+				TrackSkipKeys: true, StemsEq: true, LineInAux: false, Gen2: false, RemoteStems: true, PitchPickup: true,
 			},
 		},
 		{

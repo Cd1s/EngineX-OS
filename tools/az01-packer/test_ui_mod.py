@@ -164,7 +164,9 @@ class UiModSourceTest(unittest.TestCase):
                             "edit tables must add no extra Stems popup sites")
 
     def test_auto_loop_knob_and_link(self):
-        self.assertIn("interval: 10000; running: true", SRC)
+        self.assertIn('x.open("GET", "http://127.0.0.1:8080/v1/sc5000/controller?seen=" + scSeen)', bp.CONTROLLER_SETTINGS)
+        self.assertIn("scGlobalConfig.scSwapLoopOrder = !!j.swapLoopOrder", bp.CONTROLLER_SETTINGS)
+        self.assertIn("Component.onCompleted: scAsk()", bp.CONTROLLER_SETTINGS)
         self.assertIn("module.loopInactiveShiftTurnAction === Action.BeatJump || ", SRC)
         self.assertIn("LinkBeatJumpLoopSize", bp.SERVICES_MAIN)
 
@@ -3166,6 +3168,551 @@ scShadowEmpty(2,now);
 assert.ok(presses.includes('/Engine/Deck2/UnSync'));
 assert.ok(!presses.some(p=>p.endsWith('/RequestMaster')),'a copy must not request MASTER');
 """)
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the pitch pickup behavioral checks")
+class PitchPickupTest(unittest.TestCase):
+    """#181: run the built ValueOutput.qml against a model of Engine's Speed translator.
+
+    The model follows what the real 5.3.0 binary did in the sandbox: the fader writes the
+    pitch while it wrote it last and its soft value sits on it; with a soft value that
+    moved away it needs two samples around the pitch; and the first sample after anyone
+    else wrote the pitch takes over when within 0.05 of the fader travel (0.04 did, 0.06
+    did not), which is the jump CDJ mode removes."""
+
+    HARNESS = r"""
+const assert = require('assert'), fs = require('fs');
+const files = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const f32 = Math.fround;
+
+function block(src, at) { // the {...} that opens at or after `at`
+    let i = src.indexOf('{', at), depth = 0;
+    for (const from = i; ; i++) {
+        if (src[i] === '{') depth++;
+        else if (src[i] === '}' && --depth === 0) return src.slice(from, i + 1);
+    }
+}
+function fn(src, name) {
+    const m = new RegExp('function ' + name + '\\(([^)]*)\\)').exec(src);
+    assert(m, 'function ' + name);
+    return '(function(' + m[1] + ') ' + block(src, m.index) + ')';
+}
+// One ValueOutput.qml object: its properties and functions, with names resolved as QML does.
+function output(src) {
+    const self = {device: {isInitializing: false}, _deviceSoftId_: 1, console: {log() {}}, target: null};
+    for (const m of src.matchAll(/^\tproperty (?:bool|real|var|int) (\w+): ([^;\n]+);?$/gm)) self[m[1]] = eval(m[2]);
+    const timer = {interval: 0, channel: 0, value: 0, oldValue: 0, assignmentEnabled: false, running: false, start() { this.running = true }};
+    const pd = {targetSoftId: 0, previousTarget: undefined};
+    self.updateTimer = timer; self.privateData = pd;
+    const type = /readonly property int takeoverType: (.+)\n/.exec(src)[1];
+    with (self) {
+        with (pd) {
+            Object.defineProperty(pd, 'takeoverType', {get: eval('(function() { return ' + type + ' })')});
+            for (const name of ['lastTakeoverType', 'takeoverTypeIsSame']) pd[name] = eval(fn(src, name));
+        }
+        with (timer) {
+            timer.deferValueChange = eval(fn(src, 'deferValueChange'));
+            timer.triggered = eval('(function() ' + block(src, src.indexOf('onTriggered:')) + ')');
+        }
+        for (const name of ['setValue', 'sendValueChange', 'scPickup', 'scCdjPickup']) if (src.includes('function ' + name + '(')) self[name] = eval(fn(src, name));
+    }
+    return self;
+}
+// Engine 5.3.0's Speed translator as measured on the real binary.
+function speed(v) {
+    return {
+        value: f32(v), softValue: f32(v), source: 0, editable: true, calls: [], path: [f32(v)],
+        lastTakeOverType() { return this.source },
+        setSoftValue(v) { this.calls.push('soft ' + v); this.softValue = f32(v) },
+        setValue(v, id, flags) {
+            this.calls.push('set ' + v + ' ' + id + ' ' + flags);
+            const at = f32(v), pitch = this.value, last = this.softValue;
+            let take = true;
+            if (id & 0x10000000) id &= ~0x10000000; // start-up: hard and soft value
+            else if (id === 1) take = true; // HARDEXTERNAL: no pickup
+            else if (this.source !== id) take = Math.abs(at - pitch) <= 0.05; // first sample after another writer
+            else take = (last - pitch) * (at - pitch) <= 0; // the owner, or two samples around the pitch
+            this.source = id; this.softValue = at;
+            if (take) this.value = at;
+            this.path.push(this.value);
+        },
+        write(v) { this.value = f32(v); this.source = 0; this.path.push(this.value) }, // Sync, Pitch Range, the screen
+    };
+}
+// A deck's pitch fader as stock SpeedSlider.qml builds it. `globalConfig` is the name the
+// controller engine gives its GlobalAssignmentConfig; without it the mode is off.
+function deck(file, cdj, path) {
+    const t = speed(0.5), out = output(files[file]);
+    out.target = {path: path || '/Engine/Deck1/Speed', prop: {translator: t}, get() { return t }};
+    out.useSoftTakeover = true; out.sendSoftWhenDisabled = true;
+    if (cdj) { assert.strictEqual(out.scCdjPickup(), false, 'CDJ pickup must default to off'); out.globalConfig = {scCdjPickup: true} }
+    return {
+        out, t,
+        move(...vs) { for (const v of vs) out.setValue(0, v, true) },   // this deck's layer is active
+        away(...vs) { for (const v of vs) out.setValue(0, v, false) },  // the other layer is active
+        tick() { const k = out.updateTimer; if (!k.running) return false; k.running = false; k.triggered(); return true },
+        own(v) { out.device.isInitializing = true; this.move(v); out.device.isInitializing = false; is(this, v) },
+    };
+}
+const cdj = () => deck('patched', true), stock = () => deck('stock', false);
+function is(d, v) { assert(Math.abs(d.t.value - v) < 1e-6, 'pitch ' + d.t.value + ', expected ' + v) }
+// Every value the pitch took, in order: proves nothing jumped in between.
+function path(d, vs) { assert.deepStrictEqual(d.t.path, vs.map(f32)) }
+function parked(d, v) { assert(Math.abs(d.t.softValue - v) < 1e-6 && d.t.calls.at(-1) === 'soft ' + v, 'the pickup arrows must follow the fader: ' + d.t.calls.at(-1)) }
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            raise unittest.SkipTest(f"{qrc} not found (run on the build host)")
+        cls.tmp = tempfile.TemporaryDirectory(prefix="ui-pitch-pickup-")
+        cls.out = Path(cls.tmp.name) / "packs"
+        res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(cls.out)], capture_output=True, text=True)
+        assert res.returncode == 0, res.stderr
+        cls.rel = "airAssignments/InputAssignment/ValueOutput.qml"
+        cls.stock = (qrc / cls.rel).read_text()
+        cls.patched = (cls.out / "en" / cls.rel).read_text()
+        (Path(cls.tmp.name) / "files.json").write_text(json.dumps({"stock": cls.stock, "patched": cls.patched}))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def js(self, body, harness=None):
+        script = Path(self.tmp.name) / "case.js"
+        script.write_text((self.HARNESS if harness is None else harness) + body)
+        res = subprocess.run(["node", str(script), str(Path(self.tmp.name) / "files.json")], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_crossing_up_takes_over_in_one_pass(self):
+        self.js(r"""
+const d = cdj(); d.own(0.56); d.t.write(0.70);
+d.move(0.60); parked(d, 0.60); d.move(0.65, 0.69); parked(d, 0.69); is(d, 0.70);
+d.move(0.72); is(d, 0.72);
+d.move(0.75, 0.60); is(d, 0.60);
+path(d, [0.5, 0.56, 0.70, 0.70, 0.72, 0.75, 0.60]); // 0.70 twice: taken over at the pitch itself
+// A fast pass with two samples far apart, wider than stock's own window.
+const f = cdj(); f.own(0.56); f.t.write(0.70); f.move(0.60, 0.80); is(f, 0.80);
+path(f, [0.5, 0.56, 0.70, 0.70, 0.80]);
+""")
+
+    def test_crossing_down_takes_over_in_one_pass(self):
+        self.js(r"""
+const d = cdj(); d.own(0.80); d.t.write(0.30);
+d.move(0.60, 0.31); parked(d, 0.31); is(d, 0.30);
+d.move(0.29); is(d, 0.29);
+d.move(0.20); is(d, 0.20);
+path(d, [0.5, 0.80, 0.30, 0.30, 0.29, 0.20]);
+const f = cdj(); f.own(0.80); f.t.write(0.30); f.move(0.60, 0.10); is(f, 0.10);
+path(f, [0.5, 0.80, 0.30, 0.30, 0.10]);
+""")
+
+    def test_no_takeover_before_a_crossing(self):
+        self.js(r"""
+// The first touch after the pitch changed elsewhere: stock snaps to the fader inside its
+// window, from either side. CDJ stays parked however close the fader is.
+for (const first of [0.66, 0.68, 0.69, 0.699, 0.701, 0.72, 0.74]) {
+    const d = cdj(); d.own(0.56); d.t.write(0.70); d.move(first); is(d, 0.70); parked(d, first);
+    const s = stock(); s.own(0.56); s.t.write(0.70); s.move(first); is(s, first);
+}
+// Approaching without passing never takes over, not even one step away.
+const d = cdj(); d.own(0.56); d.t.write(0.70);
+for (let v = 0.57; v < 0.6999; v += 0.0013) { d.move(v); is(d, 0.70) }
+d.move(0.69994); is(d, 0.70); d.move(0.60); is(d, 0.70);
+path(d, [0.5, 0.56, 0.70]);
+// The fader is found beyond the pitch on its first sample: it has to come back through it.
+const e = cdj(); e.own(0.56); e.t.write(0.70);
+e.move(0.80, 0.90); is(e, 0.70); e.move(0.69); is(e, 0.69);
+""")
+
+    def test_jitter_near_the_target(self):
+        self.js(r"""
+const d = cdj(); d.own(0.56); d.t.write(0.70);
+d.move(0.6990, 0.6991, 0.6990, 0.6992, 0.6991, 0.6992); is(d, 0.70); // noise on one side
+d.move(0.69995); is(d, 0.70);
+d.move(0.70005); is(d, 0.70005); // noise around the pitch: one takeover, one fader step
+d.move(0.69995, 0.70005, 0.6999); is(d, 0.6999);
+path(d, [0.5, 0.56, 0.70, 0.70, 0.70005, 0.69995, 0.70005, 0.6999]);
+// Reaching the pitch exactly takes over without moving it.
+const e = cdj(); e.own(0.56); e.t.write(0.70); e.move(0.60);
+e.move(e.t.value); is(e, 0.70); e.move(0.71); is(e, 0.71);
+path(e, [0.5, 0.56, 0.70, 0.70, 0.71]);
+""")
+
+    def test_moving_target_is_not_a_crossing(self):
+        self.js(r"""
+const d = cdj(); d.own(0.56); d.t.write(0.70); d.move(0.561); is(d, 0.70);
+d.t.write(0.40); // the pitch moved across the resting fader
+d.move(0.562); is(d, 0.40); parked(d, 0.562);
+d.move(0.563); is(d, 0.40);
+d.t.write(0.5635); // and now to between the last sample and the next
+d.move(0.564); is(d, 0.5635); // the last sample is void, this one only starts over
+d.move(0.5645); is(d, 0.5635);
+d.move(0.563); is(d, 0.563); // a real pass
+path(d, [0.5, 0.56, 0.70, 0.40, 0.5635, 0.5635, 0.563]);
+// Stock takes the same fader noise for a pickup and the tempo jumps.
+const s = stock(); s.own(0.56); s.t.write(0.70); s.move(0.561); s.t.write(0.60); s.move(0.562); is(s, 0.562);
+""")
+
+    def test_layer_switch(self):
+        self.js(r"""
+const a = cdj(), b = cdj();
+let active = b;
+const fader = (...vs) => { for (const v of vs) { a.out.setValue(0, v, active === a); b.out.setValue(0, v, active === b) } };
+b.own(0.40); a.away(0.40); // start-up on layer B
+active = a; fader(0.45); is(a, 0.5); parked(a, 0.45);
+fader(0.56); is(a, 0.56); // passed deck A's pitch
+is(b, 0.40);
+active = b; fader(0.561); is(b, 0.40); parked(b, 0.561);
+fader(0.50, 0.41); is(b, 0.40); fader(0.39); is(b, 0.39);
+is(a, 0.56);
+active = a; fader(0.391); is(a, 0.56); parked(a, 0.391);
+fader(0.50); is(a, 0.56); fader(0.57); is(a, 0.57);
+is(b, 0.39);
+// Back and forth without touching the fader: it still sits on deck A's pitch.
+active = b; active = a; fader(0.571); is(a, 0.571);
+path(a, [0.5, 0.5, 0.56, 0.56, 0.57, 0.571]);
+path(b, [0.5, 0.40, 0.40, 0.39]);
+// The fader passed deck A's pitch while layer B was active: no takeover from that.
+active = b; fader(0.60, 0.50); active = a; fader(0.501, 0.52); is(a, 0.571); fader(0.58); is(a, 0.58);
+""")
+
+    def test_range_change(self):
+        self.js(r"""
+// Pitch Range 8 -> 20 keeps the percentage, so Engine moves the pitch value under the fader.
+const d = cdj(); d.own(0.58); d.t.write(0.532);
+d.move(0.581, 0.59); is(d, 0.532); parked(d, 0.59);
+d.move(0.54); is(d, 0.532); d.move(0.53); is(d, 0.53);
+path(d, [0.5, 0.58, 0.532, 0.532, 0.53]);
+const s = stock(); s.own(0.58); s.t.write(0.532); s.move(0.581); is(s, 0.581); // stock: +0.64 % becomes +1.62 % at once
+""")
+
+    def test_sync_off_and_track_load(self):
+        self.js(r"""
+const d = cdj(); d.own(0.56);
+d.t.write(0.695); d.t.editable = false; // Sync on: Engine drives the pitch and locks it
+d.move(0.57, 0.60); is(d, 0.695);
+d.t.write(0.69); d.t.editable = true; // the master moved, then Sync off: the tempo stays
+d.move(0.66); is(d, 0.69); parked(d, 0.66);
+d.move(0.68, 0.685); is(d, 0.69); d.move(0.70); is(d, 0.70);
+path(d, [0.5, 0.56, 0.695, 0.69, 0.69, 0.70]);
+const s = stock(); s.own(0.56); s.t.write(0.695); s.t.editable = false; s.move(0.57, 0.60);
+s.t.write(0.69); s.t.editable = true; s.move(0.66); is(s, 0.66); // stock: the synced tempo is lost on the first touch
+// Sync moved the tempo away and back while the fader moved too: the sample from before is void.
+const g = cdj(); g.own(0.56); g.t.write(0.70); g.move(0.60);
+g.t.editable = false; g.t.write(0.65); g.move(0.66); g.t.write(0.70); g.t.editable = true;
+g.move(0.72); is(g, 0.70); g.move(0.69); is(g, 0.69);
+// A load keeps the tempo and the fader still sits on it: it goes on working.
+const e = cdj(); e.own(0.56); e.move(0.561); is(e, 0.561);
+// A load that resets the tempo parks it.
+e.t.write(0.5); e.move(0.562, 0.57); is(e, 0.5); e.move(0.49); is(e, 0.49);
+""")
+
+    # The #181 report: "having to go up and down numerous times over the zero to unlock it".
+    # The next four cases put stock and CDJ side by side on that, with the measured translator.
+    # d(v) is a fader with a centre detent: every position within 0.03 of the centre reads 0.5.
+
+    def test_reported_case_fast_crossing(self):
+        self.js(r"""
+// Tempo set elsewhere to 0 % with the fader at +4 %; one fast sweep whose samples jump over 0.
+for (const make of [stock, cdj]) {
+    const d = make(); d.own(0.75); d.t.write(0.5);
+    d.move(0.74, 0.30); is(d, 0.30); // both: one pass
+}
+// The sweep's first sample lands near 0: stock takes over there, before the fader is at 0.
+const s = stock(); s.own(0.75); s.t.write(0.5); s.move(0.52); is(s, 0.52); s.move(0.30); is(s, 0.30);
+const c = cdj(); c.own(0.75); c.t.write(0.5); c.move(0.52); is(c, 0.5); c.move(0.30); is(c, 0.30);
+path(c, [0.5, 0.75, 0.5, 0.5, 0.30]);
+// The only sample of the sweep is already past 0 and far: neither mode can know it passed.
+for (const make of [stock, cdj]) {
+    const d = make(); d.own(0.75); d.t.write(0.5);
+    d.move(0.30); is(d, 0.5); d.move(0.60); is(d, 0.60); // back through 0: taken
+}
+""")
+
+    def test_reported_case_centre_detent(self):
+        self.js(r"""
+const d = v => Math.abs(v - 0.5) < 0.03 ? 0.5 : v;
+// Tempo reset to 0 %, fader away from 0, ONE sweep through 0 that ends beyond it, both directions.
+for (const make of [stock, cdj]) for (const [from, sweep] of [[0.75, [0.70, 0.60, 0.54, 0.52, 0.50, 0.48, 0.46, 0.40]], [0.25, [0.30, 0.40, 0.46, 0.48, 0.50, 0.52, 0.54, 0.60]]]) {
+    const f = make(); f.own(from); f.t.write(0.5);
+    let reached = false;
+    for (const v of sweep) { f.move(d(v)); if (d(v) === 0.5) reached = true; is(f, reached ? d(v) : 0.5) }
+    is(f, sweep.at(-1));
+}
+// The same sweep stopping IN the detent: the fader owns 0 % there and the next move follows.
+for (const make of [stock, cdj]) {
+    const f = make(); f.own(0.75); f.t.write(0.5);
+    for (const v of [0.70, 0.60, 0.54, 0.52, 0.51, 0.50]) f.move(d(v));
+    is(f, 0.5); f.move(d(0.56)); is(f, 0.56);
+}
+// The fader rests in the detent and the tempo was set elsewhere to just above it (+0.96 %).
+// Stock: the first sample out of the detent is inside its window, the tempo drops to the fader.
+const s = stock(); s.own(0.5); s.t.write(0.56); s.move(d(0.531)); is(s, 0.531); s.move(0.58); is(s, 0.58);
+// CDJ: nothing until the fader passes the tempo, then it has it. One pass as well.
+const c = cdj(); c.own(0.5); c.t.write(0.56); c.move(d(0.531), 0.55); is(c, 0.56); c.move(0.58); is(c, 0.58);
+path(c, [0.5, 0.5, 0.56, 0.56, 0.58]);
+// Leaving the detent the other way: stock still snaps (the tempo jumps down by 1.4 %),
+// CDJ waits for the fader to come back up through the tempo.
+const s2 = stock(); s2.own(0.5); s2.t.write(0.51); s2.move(d(0.469)); is(s2, 0.469);
+const c2 = cdj(); c2.own(0.5); c2.t.write(0.51); c2.move(d(0.469)); is(c2, 0.51); c2.move(d(0.49)); is(c2, 0.51); c2.move(d(0.531)); is(c2, 0.531);
+""")
+
+    def test_reported_case_detent_that_does_not_read_exactly_zero(self):
+        self.js(r"""
+// A detent whose reading is a hair off the value a tempo reset writes (0.5): neither mode sees
+// the fader reach 0 when it stops in the detent. It has to go past and come back. This is the
+// one "up and down over the zero" this model produces, and it depends on the unit's fader.
+const d = v => Math.abs(v - 0.5) < 0.03 ? 0.5003 : v;
+for (const make of [stock, cdj]) {
+    const f = make(); f.own(0.75); f.t.write(0.5);
+    for (const v of [0.70, 0.60, 0.54, 0.52, 0.50]) f.move(d(v));
+    is(f, 0.5); assert(f.t.softValue !== f.t.value, 'the fader sits in the detent but does not own the tempo');
+    f.move(d(0.46)); is(f, 0.46); // past the detent: taken
+    f.move(d(0.50)); assert(Math.abs(f.t.value - 0.5003) < 1e-6);
+}
+""")
+
+    def test_reported_case_return_to_the_detent_is_not_dropped(self):
+        self.js(r"""
+// The fader rested in the detent (the stock timer delivered 0.5), the tempo was set elsewhere,
+// and the fader flicks out and back inside one timer interval.
+function flick(make) {
+    const f = make(); f.out.updateTimer.interval = 12; f.own(0.75);
+    f.move(0.5); f.tick(); is(f, 0.5); // resting in the detent
+    f.t.write(0.519);
+    f.move(0.53); f.move(0.5); f.tick();
+    return f;
+}
+// Stock: the first sample went straight in and took over, the return equals the last value the
+// timer delivered and is dropped: the fader is at 0, the tempo is not. It needs another move.
+const s = flick(stock); is(s, 0.53); assert.strictEqual(s.out.updateTimer.oldValue, 0.5);
+// CDJ: the return passes the tempo and is delivered: fader at 0, tempo at 0.
+const c = flick(cdj); is(c, 0.5);
+// And after a takeover, a quick return to the detent arrives too.
+const g = cdj(); g.out.updateTimer.interval = 12; g.own(0.75); g.move(0.5); g.tick(); g.t.write(0.56);
+g.move(0.53, 0.58); is(g, 0.58); g.move(0.5); g.tick(); is(g, 0.5);
+""")
+
+    def test_deferred_samples_still_cross(self):
+        self.js(r"""
+const d = cdj(); d.out.updateTimer.interval = 12; d.own(0.56);
+d.away(0.45, 0.40); assert(d.tick()); is(d, 0.56);
+d.move(0.41); d.tick(); is(d, 0.56);
+d.move(0.50, 0.55, 0.58); assert(d.tick()); is(d, 0.58); // only 0.58 arrives: 0.41 -> 0.58 passed 0.56
+assert(!d.tick());
+""")
+
+    def test_off_is_stock(self):
+        # The file: only the added block and the one branch differ from stock.
+        added = bp.PITCH_PICKUP
+        self.assertEqual(self.patched.count(added), 1)
+        branch = "if(scCdjPickup()) scPickup(t, value)\n\t\t\t\t\t\t\t\telse t.setValue(value, privateData.takeoverType, 0)\n"
+        self.assertEqual(self.patched.count(branch), 1)
+        self.assertEqual(self.patched.replace(added, "").replace(branch, "t.setValue(value, privateData.takeoverType, 0)\n"), self.stock)
+        for lang in ("zh-Hans", "zh-Hant"):
+            self.assertEqual((self.out / lang / self.rel).read_text(), self.patched)
+        # The behaviour: the same fader, timer and Engine events give the same calls.
+        self.js(r"""
+function run(file, config, seed, interval, path) {
+    const d = deck(file, false, path); d.out.updateTimer.interval = interval;
+    if (config !== undefined) d.out.globalConfig = config;
+    let x = seed;
+    const rnd = n => (x = (x * 1103515245 + 12345) & 0x7fffffff) % n;
+    for (let i = 0; i < 400; i++) {
+        const v = rnd(65) / 64;
+        switch (rnd(12)) {
+        case 0: d.t.write(v); break;
+        case 1: d.t.editable = !d.t.editable; break;
+        case 2: d.out.device.isInitializing = rnd(8) === 0; break;
+        case 3: d.out.centerValue = rnd(2) === 0; break;
+        case 4: case 5: d.away(v); break;
+        case 6: d.tick(); break;
+        default: d.move(v);
+        }
+    }
+    const k = d.out.updateTimer;
+    return JSON.stringify([d.t.calls, d.t.path, d.t.softValue, d.t.source, k.running, k.value, k.oldValue, k.assignmentEnabled]);
+}
+assert.strictEqual(output(files.stock).scCdjPickup, undefined);
+const on = {scCdjPickup: true};
+let differs = 0;
+for (const interval of [0, 12]) for (let seed = 1; seed <= 150; seed++) {
+    const want = run('stock', undefined, seed, interval), at = 'seed ' + seed + ' interval ' + interval;
+    // Off: no globalConfig in reach, none yet, the setting not read yet, Stock selected.
+    for (const config of [undefined, null, {}, {scCdjPickup: false}]) assert.strictEqual(run('patched', config, seed, interval), want, at);
+    if (run('patched', on, seed, interval) !== want) differs++;
+    // On, but not a deck's pitch: every other soft-takeover control stays stock.
+    const other = '/Engine/Deck1/SpeedRange';
+    assert.strictEqual(run('patched', on, seed, interval, other), run('stock', undefined, seed, interval, other), at);
+}
+assert(differs > 250, 'the comparison must be able to see CDJ mode: ' + differs);
+""")
+
+    def test_only_the_pitch_fader_gets_the_mode_and_follows_the_setting(self):
+        self.js(r"""
+const out = output(files.patched);
+const mode = (config, path) => {
+    if (config === undefined) delete out.globalConfig; else out.globalConfig = config;
+    out.target = path === null ? null : {path};
+    return out.scCdjPickup();
+};
+for (const config of [undefined, null, {}, {scCdjPickup: false}, {scCdjPickup: 'cdj'}, {scCdjPickup: 1}]) assert.strictEqual(mode(config, '/Engine/Deck1/Speed'), false);
+for (const deck of [1, 2, 3, 4]) assert.strictEqual(mode({scCdjPickup: true}, '/Engine/Deck' + deck + '/Speed'), true);
+for (const path of [null, undefined, 7, '', '/Engine/Deck1/SpeedRange', '/Engine/Deck1/Track/Speed', '/Engine/Master/Speed',
+                    '/Engine/Deck1/Speed/Offset', '/GUI/Engine/Deck1/Speed', '/Engine/Deck1/SweepFx'])
+    assert.strictEqual(mode({scCdjPickup: true}, path), false, String(path));
+""")
+        slider = "ControlSurfaceModules/ControlSurfaceModules/SpeedSlider.qml"
+        for lang in ("en", "zh-Hans", "zh-Hant"):
+            # A pack holds only the files that differ from stock: the Engine keeps its own SpeedSlider.qml.
+            self.assertFalse((self.out / lang / slider).exists(), f"{lang}: SpeedSlider.qml must stay byte-identical to stock")
+        old_root = bp.ROOT
+        try:
+            for root in ("Skins/Embedded/", "Skins/EmbeddedCommon/"):
+                bp.ROOT = root
+                for dev in (False, True):
+                    self.assertNotIn(slider, bp.edits(dev))
+        finally:
+            bp.ROOT = old_root
+        stock = LAB / "5.3.0" / "qrc"
+        touched = sorted(f.relative_to(self.out / "en").as_posix() for f in (self.out / "en").rglob("*.qml") if "scCdjPickup" in f.read_text())
+        self.assertEqual(touched, ["ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml", self.rel])
+        self.assertNotIn("scCdjPickup", (stock / slider).read_text())
+
+    def test_controller_settings_arrive_at_once_and_cost_nothing_while_idle(self):
+        rel = "ControlSurfaceModules/ControlSurfaceModules/GlobalAssignmentConfig.qml"
+        config = (self.out / "en" / rel).read_text()
+        stock = (LAB / "5.3.0" / "qrc" / rel).read_text()
+        for lang in ("zh-Hans", "zh-Hant"):
+            self.assertEqual((self.out / lang / rel).read_text(), config)
+        added = "    id: scGlobalConfig\n    property real scPadBrightness: 1\n    property bool scSwapLoopOrder: false\n    property bool scCdjPickup: false\n" + bp.CONTROLLER_SETTINGS
+        self.assertEqual(config.replace("    id: scGlobalConfig\n", "", 1).replace(added.split("\n", 1)[1], "", 1), stock)
+        # Nothing here may run by itself: one one-shot timer, no repeating one, no polling interval.
+        self.assertEqual(bp.CONTROLLER_SETTINGS.count("Timer {"), 1)
+        for gone in ("repeat: true", "running: true", "triggeredOnStart", "interval: 10000", "/v1/sc5000/ui"):
+            self.assertNotIn(gone, bp.CONTROLLER_SETTINGS)
+        self.assertIn("    Timer { id: scAgain; interval: 1000; onTriggered: scGlobalConfig.scAsk() }\n", config)
+        self.js("const config = %s;\n" % json.dumps(config) + r"""
+const self = {};
+for (const m of config.matchAll(/^    property (?:string|int|double|real|bool) (sc\w+): (.+)$/gm)) self[m[1]] = eval(m[2]);
+assert.deepStrictEqual(self, {scPadBrightness: 1, scSwapLoopOrder: false, scCdjPickup: false, scSeen: '', scWait: 1000, scAskedAt: 0});
+let now = 1e6, open = 0;
+const asked = [], scGlobalConfig = self;
+Date.now = () => now;
+const scAgain = {interval: 1000, running: false, start() { assert(!this.running && !open); this.running = true }};
+class XMLHttpRequest {
+    open(method, url) { assert.strictEqual(method, 'GET'); this.url = url }
+    send() { assert.strictEqual(open++, 0, 'one request at a time'); assert(!scAgain.running); asked.push({at: now, url: this.url, x: this}) }
+    answer(status, body) { open--; this.status = status; this.responseText = typeof body === 'string' ? body : JSON.stringify(body); this.readyState = 4; this.onreadystatechange() }
+}
+XMLHttpRequest.DONE = 4;
+with (self) { self.scAsk = eval(fn(config, 'scAsk')) }
+// The one-shot pause runs out: the next request goes out.
+function again() { assert(scAgain.running); scAgain.running = false; now += scAgain.interval; self.scAsk() }
+const last = () => asked.at(-1);
+const state = () => [self.scPadBrightness, self.scSwapLoopOrder, self.scCdjPickup, self.scSeen];
+const base = 'http://127.0.0.1:8080/v1/sc5000/controller?seen=';
+
+self.scAsk(); // Component.onCompleted
+assert.strictEqual(last().url, base);
+// stream-sync answers the first request at once: everything it carries is applied.
+now += 5; last().x.answer(200, {ledBrightness: 60, swapLoopOrder: true, pitchPickup: 'cdj', seen: 'a1'});
+assert.deepStrictEqual(state(), [0.6, true, true, 'a1']);
+assert.strictEqual(scAgain.interval, 2000); // it came straight back: wait longer than the minimum
+again(); assert.strictEqual(last().url, base + 'a1');
+// Nothing changes: the request stays open and nothing else is running.
+now += 55000; assert(!scAgain.running && open === 1);
+last().x.answer(200, {ledBrightness: 60, swapLoopOrder: true, pitchPickup: 'cdj', seen: 'a1'});
+assert.deepStrictEqual(state(), [0.6, true, true, 'a1']); assert.strictEqual(scAgain.interval, 1000);
+again();
+// The DJ picks Stock 20 s into the hold: applied by the answer itself, no wait.
+now += 20000; last().x.answer(200, {ledBrightness: 100, swapLoopOrder: false, pitchPickup: 'stock', seen: 'b2'});
+assert.deepStrictEqual(state(), [1, false, false, 'b2']); assert.strictEqual(scAgain.interval, 1000);
+again(); assert.strictEqual(last().url, base + 'b2');
+// A brightness outside 20..100 is ignored, as before (#85).
+now += 3000; last().x.answer(200, {ledBrightness: 5, swapLoopOrder: false, pitchPickup: 'cdj', seen: 'c3'});
+assert.deepStrictEqual(state(), [1, false, true, 'c3']);
+// stream-sync is down, restarting or broken: what is set stays, the pauses double up to 30 s.
+const waits = [];
+for (const [status, body] of [[0, ''], [503, 'busy'], [200, 'not json'], [200, {pitchPickup: 'stock'}], [404, ''], [0, ''], [0, ''], [0, '']]) {
+    again(); now += 2; last().x.answer(status, body); waits.push(scAgain.interval);
+}
+assert.deepStrictEqual(waits, [2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000]);
+assert.deepStrictEqual(state(), [1, false, false, 'c3']); // the one valid JSON without a digest still set the mode it named
+// A server that answers at once for ever, even with a new digest each time, cannot make it spin.
+const from = asked.length, t0 = now;
+while (now - t0 < 600000) { again(); now += 1; last().x.answer(200, {ledBrightness: 100, swapLoopOrder: false, pitchPickup: 'cdj', seen: 's' + now}) }
+assert(asked.length - from <= 26, 'requests in 10 minutes: ' + (asked.length - from)); // the old poll: 60
+// Back to normal after one held answer.
+again(); now += 55000; last().x.answer(200, {ledBrightness: 100, swapLoopOrder: false, pitchPickup: 'cdj', seen: 'z'});
+assert.strictEqual(scAgain.interval, 1000);
+// Never two requests less than a second apart.
+for (let i = 1; i < asked.length; i++) assert(asked[i].at - asked[i - 1].at >= 1000, i + ': ' + (asked[i].at - asked[i - 1].at));
+// Idle for an hour: about one request a minute (the old poll made 360).
+const idle = asked.length, t1 = now;
+while (now - t1 < 3600000) { again(); now += 55000; last().x.answer(200, {ledBrightness: 100, swapLoopOrder: false, pitchPickup: 'cdj', seen: 'z'}) }
+assert(asked.length - idle >= 60 && asked.length - idle <= 66, 'requests in an idle hour: ' + (asked.length - idle));
+""")
+
+    def test_setting_is_translated_at_run_time_and_saved(self):
+        entry = bp.PLAYBACK_ENTRIES[bp.PLAYBACK_ENTRIES.index('text: "Pitch Fader Pickup"'):]
+        entry = entry[:entry.index("},")]
+        ids = re.search(r"readonly property var ids: (\[.*\])", entry).group(1)
+        values = re.search(r"\n\s*values: (\[.*\])", entry).group(1)
+        current = re.search(r"currentValue: (.*)", entry).group(1)
+        visible = re.search(r"\n\s*visible: (.*)", entry).group(1)
+        selected = re.search(r"onSelected: (function.*)", entry).group(1)
+        apply = re.search(r"\n(\t*scPitchPickupAvailable = .*\n\t*if \(v\.pitchPickup !== undefined\).*\n.*v\.pitch_pickup.*)\n", bp.SERVICES_MAIN).group(1)
+        self.assertIn("property bool scPitchPickupAvailable: false", bp.SERVICES_MAIN)
+        want = {"en": "Pitch Fader Pickup", "zh-Hans": "变速推子接管", "zh-Hant": "變速推桿接管"}
+        prefs = "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/"
+        for lang, title in want.items():
+            tab = (self.out / lang / prefs / "PlaybackTabContent.qml").read_text()
+            text = re.search(r"\n\s*text: (.*" + re.escape(title) + r".*)\n", tab).group(1)
+            self.assertIn(f"values: {values}", tab)  # the untranslated values: selection compares them
+            row = (self.out / lang / prefs / "Entries/Base/ListEntry.qml").read_text()
+            self.assertIn("text: root.scT(modelData)", row)
+            self.assertIn("down: pressed || isSelected(modelData)", row)
+            main = (self.out / lang / "Skins/Embedded/EmbeddedMain.qml").read_text()
+            dicts = re.search(r"readonly property var scDicts: \((.*)\)\n", main).group(1)
+            consts = {"text": text, "current": current, "selected": selected, "apply": apply, "title": title, "visible": visible}
+            self.js("const dicts = %s, ids = %s, values = %s;\n" % (dicts, ids, values)
+                    + "".join("const %s = %s;\n" % (k, json.dumps(v, ensure_ascii=False)) for k, v in consts.items()) + r"""
+// Every pack carries all three dictionaries: the deck's language can change without a rebuild.
+const calls = [];
+for (const live of ['en', 'zh-Hans', 'zh-Hant']) {
+    const scDict = JSON.parse(dicts[live]);
+    const root = {scPitchPickup: 'stock', scT(s) { return scDict[s] || s }, scCall(q) { calls.push(q) }};
+    Math.scI18n = {t: s => root.scT(s)};
+    const expect = {en: ['Pitch Fader Pickup', 'Stock', 'CDJ'], 'zh-Hans': ['变速推子接管', '原厂', 'CDJ'], 'zh-Hant': ['變速推桿接管', '原廠', 'CDJ']}[live];
+    assert.deepStrictEqual([eval(text)].concat(values.map(root.scT)), expect);
+    assert.strictEqual(eval(current), 'Stock'); // the default
+    root.scPitchPickup = 'cdj'; assert.strictEqual(eval(current), 'CDJ');
+    root.scPitchPickup = 'gone'; assert.strictEqual(eval(current), 'Stock');
+    eval('(' + selected + ')')(1); eval('(' + selected + ')')(0);
+}
+assert.deepStrictEqual(calls.slice(0, 2), ['pitchPickup=cdj', 'pitchPickup=stock']);
+// Before EmbeddedMain shares its translator the pack's own language shows.
+delete Math.scI18n;
+assert.strictEqual(eval(text), title);
+// What stream-sync answers is what the entry shows.
+let scPitchPickup = 'stock', scPitchPickupAvailable = false;
+const load = v => { eval(apply); return scPitchPickup };
+assert.strictEqual(load({}), 'stock');
+assert.strictEqual(load({pitchPickup: 'cdj'}), 'cdj');
+assert.strictEqual(load({pitchPickup: 'stock'}), 'stock');
+assert.strictEqual(load({pitch_pickup: 'cdj'}), 'cdj');
+assert.strictEqual(load({pitchPickup: 'direct'}), 'stock');
+// The entry is there only on the boards stream-sync lists (its capabilities.pitchPickup).
+const shown = v => { load(v); const root = {scPitchPickupAvailable}; return eval(visible) };
+assert.strictEqual(shown({}), false);
+assert.strictEqual(shown({capabilities: {}}), false);
+assert.strictEqual(shown({capabilities: {mixer: true, pitchPickup: false}}), false);
+assert.strictEqual(shown({capabilities: {pitchPickup: true}}), true);
+assert.strictEqual(shown({player: true, capabilities: {mixer: false}}), false);
+""", harness="const assert = require('assert');\n")
 
 
 if __name__ == "__main__":

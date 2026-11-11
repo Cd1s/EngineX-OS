@@ -77,6 +77,7 @@ type uiCapabilities struct {
 	StemsEq       bool `json:"stemsEq"`
 	LineInAux     bool `json:"lineInAux"`
 	Gen2          bool `json:"gen2"`
+	PitchPickup   bool `json:"pitchPickup"` // Pitch Fader Pickup is offered (#181)
 	RemoteStems   bool `json:"remoteStems"`
 }
 
@@ -103,6 +104,7 @@ func boardCapabilities(board string) uiCapabilities {
 		StemsEq:       !isPlayer && board != "PRIME4G2",
 		LineInAux:     board == "SCLIVE4",
 		Gen2:          dataBundleBoards[board],
+		PitchPickup:   pitchPickupBoards[board],
 		RemoteStems:   !isAZ04,
 	}
 }
@@ -126,6 +128,8 @@ var (
 	uiPioneerFxModes = []string{"off", "spiral", "pitch_echo", "slip_roll", "dub_echo", "space"}
 	uiShadowModes    = []string{"auto", "engine", "cdj"}
 	uiFxTimeModes    = []string{"beats", "ms"}
+	// #181: how the pitch fader takes the tempo back. stock is Engine's own pickup.
+	uiPitchPickups = []string{"stock", "cdj"}
 )
 
 const (
@@ -192,6 +196,7 @@ type uiSettings struct {
 	StemsEqMode         bool   `json:"stemsEqMode"`
 	BeatJumpPads        bool   `json:"beatJumpPads"`
 	PioneerFx           string `json:"pioneerFx"`
+	PitchPickup         string `json:"pitchPickup"` // stock or cdj (#181)
 	FXSelectorAvailable bool   `json:"fxSelectorAvailable"`
 	FxTimeMode          string `json:"fxTimeMode"`
 	FxTimeMs            int    `json:"fxTimeMs"`
@@ -294,7 +299,7 @@ func (s *Server) loadUI() uiSettings {
 	v := uiSettings{
 		Language: "en", Waveform: "denon", Sources: slices.Clone(uiServices), Scope: "deezer", Quality: qualityFLAC, NeteaseMode: neteaseOfficial, GitHubRepo: defaultGitHubRepo, FourDeckWaveform: false, FourDeckRole: "auto", ShadowMode: "auto", ProlinkWaveform: true,
 		TracklistWaveform: true, CueCountdown: true,
-		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", UIScale: 100,
+		StreamSortRole: "default", StreamSortOrder: "asc", LedBrightness: 100, PioneerFx: "off", PitchPickup: "stock", UIScale: 100,
 		FxTimeMode: "beats", FxTimeMs: 500,
 	}
 	b, _ := os.ReadFile(filepath.Join(s.uiDir(), "settings.conf"))
@@ -423,6 +428,10 @@ func (s *Server) loadUI() uiSettings {
 		case "pioneer_fx":
 			if slices.Contains(uiPioneerFxModes, val) {
 				v.PioneerFx = val
+			}
+		case "pitch_pickup":
+			if slices.Contains(uiPitchPickups, val) {
+				v.PitchPickup = val
 			}
 		case "fx_time_mode":
 			v.FxTimeMode = "beats"
@@ -568,6 +577,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.FxTimeMs != 500 && v.FxTimeMs >= 10 && v.FxTimeMs <= 4000 {
 		text += "fx_time_ms=" + strconv.Itoa(v.FxTimeMs) + "\n"
 	}
+	if v.PitchPickup == "cdj" {
+		text += "pitch_pickup=cdj\n"
+	}
 	if v.GitHubRepo != defaultGitHubRepo {
 		text += "github_repo=" + v.GitHubRepo + "\n"
 	}
@@ -591,6 +603,7 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if err = os.Rename(tmp.Name(), filepath.Join(dir, "settings.conf")); err != nil {
 		return err
 	}
+	s.uiChanged()
 	return writeUIScaleEnv(v.UIScale)
 }
 
@@ -671,6 +684,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.BuildTag = currentBuildTag()
 	v.Player = playerBoards[board]
 	v.Capabilities = boardCapabilities(board)
+	v.PitchPickup = effectivePitchPickup(v.PitchPickup, board)
 	v.FourDeckRoleActive = s.activeRole(v)
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
 		body, err := json.Marshal(struct {
@@ -733,7 +747,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
-	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) {
+	if bad("lang", q.Get("lang"), uiLanguages) || bad("waveform", q.Get("waveform"), uiWaveforms) || bad("scope", q.Get("scope"), uiServices) || bad("quality", q.Get("quality"), uiQualities) || bad("neteaseMode", q.Get("neteaseMode"), uiNeteaseModes) || bad("fourDeckRole", q.Get("fourDeckRole"), uiFourDeckRoles) || bad("streamSortRole", q.Get("streamSortRole"), uiStreamSortRoles) || bad("streamSortOrder", q.Get("streamSortOrder"), uiStreamSortOrders) || bad("pioneerFx", q.Get("pioneerFx"), uiPioneerFxModes) || bad("shadowMode", q.Get("shadowMode"), uiShadowModes) || bad("fxTimeMode", q.Get("fxTimeMode"), uiFxTimeModes) || bad("pitchPickup", q.Get("pitchPickup"), uiPitchPickups) {
 		s.uiMu.Unlock()
 		fail(w, 400, errors.New("invalid setting"))
 		return
@@ -870,6 +884,14 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if q.Has("pioneerFx") {
 		v.PioneerFx = q.Get("pioneerFx")
+	}
+	if q.Has("pitchPickup") {
+		if q.Get("pitchPickup") == "cdj" && !pitchPickupBoards[imagePrefix(deviceCompatible())] {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.PitchPickup = q.Get("pitchPickup")
 	}
 	if q.Has("fxTimeMode") {
 		v.FxTimeMode = q.Get("fxTimeMode")
