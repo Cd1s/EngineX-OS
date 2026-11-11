@@ -103,7 +103,10 @@ echo "  Data bundle: $BUNDLE"
 # 2. Method A: Host-side userdata ext4 injection
 echo "[2/5] Testing Method A (host-install-userdata.py ext4 injection)..."
 IMG="$TMP/userdata.img"
-dd if=/dev/zero of="$IMG" bs=1M count=64 status=none
+# install.sh stages the new bundle on /data next to the installed one before swapping them
+# (steps 5 and 5b), so /data holds two copies for a moment. 64 MiB ran out when the suite
+# grew from 17 MB to 23 MB; a real /data is far larger. Sparse, so the size costs no disk.
+truncate -s 256M "$IMG"
 mkfs.ext4 -F -q -O encrypt -L az01-data "$IMG"
 debugfs -w -R "mkdir /Music" "$IMG" >/dev/null 2>&1
 debugfs -w -R "write /etc/hosts /Music/user_track.flac" "$IMG" >/dev/null 2>&1
