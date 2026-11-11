@@ -1815,6 +1815,10 @@ class DeckHeaderLayoutTest(unittest.TestCase):
         self.assertTrue(any("Math.max(speedRangeTextWidth, Math.ceil(scRangeWorstMetrics.width))" in new for _, new in speed_patches))
         self.assertTrue(any("Math.max(speedStateTextWidth, Math.ceil(scStateWorstMetrics.width))" in new for _, new in speed_patches))
         self.assertFalse(any("implicitWidth" in new for _, new in speed_patches))
+        for item in ("AutoLoop", "BeatJump"):
+            item_patches = edits[f"Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/{item}.qml"]
+            self.assertTrue(any("Layout.fillWidth: false" in new for _, new in item_patches), item)
+            self.assertTrue(any("Layout.fillWidth: true" in new and "fontSizeMode: Text.HorizontalFit" in new for _, new in item_patches), item)
         for m in re.finditer(r"speed(?:Range|State)TextWidth:\s*(\d+)", bp.SHADOW_LAYER):
             self.assertEqual(int(m.group(1)), 0)
         for m in re.finditer(r"AutoLoop\s*\{[^}]*?Layout\.preferredWidth:\s*(\d+)", bp.SHADOW_LAYER, re.S):
