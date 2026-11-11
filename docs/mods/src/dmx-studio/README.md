@@ -1,13 +1,20 @@
-# DMX Studio 1.0.0
+# DMX Studio 1.1.0
 
 Official, source-included Mod for EngineX OS. MIT licensed. Community requests:
-[#134](https://github.com/Cd1s/EngineX-OS/issues/134) and
-[#137](https://github.com/Cd1s/EngineX-OS/issues/137).
+[#134](https://github.com/Cd1s/EngineX-OS/issues/134),
+[#137](https://github.com/Cd1s/EngineX-OS/issues/137), and
+[#208](https://github.com/Cd1s/EngineX-OS/issues/208).
 
 ## Runtime
 
-Requires Linux, Python **3.9 or newer**, QtQuick 2.12 / Controls 2.5 / Layouts
-1.12, and a compatible USB or network interface. No dependencies are installed.
+The decks have no Python, compiler, or package manager (#208). Requires Linux,
+busybox `sh`, QtQuick 2.12 / Controls 2.5 / Layouts 1.12, and a compatible USB
+or network interface. The bundled helper is a static Go binary
+(`bin/enginex-mod-helper-armv7` for `linux/arm` `GOARM=7` on all gen-1 and
+gen-2 armhf decks, and `bin/enginex-mod-helper-arm64` for PRIME 4 G2 / SYSTEM
+ONE), selected in `start.sh` via `uname -m`. No dependencies are installed.
+Uploading 1.1.0 in the web console replaces an installed 1.0.0 in place (keeps
+its enabled state and settings).
 The loader invokes `sh start.sh start` / `sh start.sh stop`. Start detaches a
 `nohup` helper and checks readiness; stop verifies the saved PID's command line
 before sending SIGTERM. Manual foreground use: `sh start.sh serve`.
@@ -31,11 +38,13 @@ are 0-based; sACN wire universes retain the internal value):
 ```
 
 FTDI/OpenDMX uses an existing Linux tty driver and Linux termios2 at 250000 baud,
-8N2, break + mark-after-break. uDMX selects VID/PID `16c0:05dc` by USB bus/address,
-requires an **already installed** system libusb-1.0 and device permissions. At most
-8 outputs and 128 fixtures are accepted; USB devices cannot be assigned twice.
-Both network protocols send 512-channel frames, nominally at 30 Hz. Timing is
-best effort in a non-realtime Python process and must be measured on each target.
+8N2, 120 µs break + 12 µs mark-after-break, sending a 513-byte frame (~38 Hz,
+no audio impact, validated on a Mixstream Pro+ NH08S in #208). uDMX selects
+VID/PID `16c0:05dc` by USB bus/address via Linux `usbfs` directly (no `libusb`
+needed; requires device permissions). At most 8 outputs and 128 fixtures are
+accepted; USB devices cannot be assigned twice. Both network protocols send
+512-channel frames, nominally at 30 Hz. Timing is best effort in a non-realtime
+static Go helper process and must be measured on each target.
 
 Patch example:
 
@@ -49,7 +58,7 @@ Patch example:
 
 Fixtures are generic templates, **not verified vendor personalities**. The
 `profiles` status field lists the actual channel order. Check and adapt
-`feature.py:PROFILES` to the fixture manual before output; do not guess mode,
+`feature.go:Profiles` to the fixture manual before output; do not guess mode,
 strobe, smoke, gobo or beam channel semantics. Patch overlap and channel overflow
 are rejected. Stop output before changing routes or patch.
 
@@ -76,6 +85,7 @@ Only local Host headers / QML origins are accepted. No shell evaluation.
 Packet layout references (independent implementation, no upstream code copied):
 [Art-Net implementation](https://github.com/OpenLightingProject/ola/blob/master/plugins/artnet/ArtNetNode.cpp),
 [ETC E1.31 layout](https://github.com/ETCLabs/sACN/blob/main/src/sacn/private/pdu.h).
-Hardware, USB timing, sustained load while audio is playing, actual fixtures and
-all 16 model variants remain **unverified on hardware**. Do not infer hardware
-validation from manifest validation or registry model targeting.
+FTDI/OpenDMX output was validated on a Mixstream Pro+ NH08S in #208 (~38 Hz, no
+audio impact); uDMX, Art-Net/sACN fixtures and all remaining model variants
+remain **unverified on hardware**. Do not infer full hardware validation from
+manifest validation or registry model targeting.
