@@ -44,6 +44,9 @@ chmod 0644 "$STAGE/usr/share/sc5000-custom/"*
 mkdir -p "$WORK/hooks32" "$WORK/hooks64"
 OUT=$WORK/hooks32/libengine-ui-hook.so sh tools/ui-mod/build.sh
 OUT=$WORK/hooks32/libedisksd-hook.so sh tools/edisksd-hook/build.sh
+install -m 0755 "$WORK/hooks32/libengine-ui-hook.so" "$STAGE/etc/sc5000/libengine-ui-hook.so"
+install -m 0755 "$WORK/hooks32/libengine-ui-hook.so" "$STAGE/usr/local/lib/sc5000/libengine-ui-hook.so"
+install -m 0755 "$WORK/hooks32/libedisksd-hook.so" "$STAGE/etc/sc5000/libedisksd-hook.so"
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1" -o "$WORK/sc5000-suite-arm64" ./cmd/sc5000-suite
 CROSS64=aarch64-linux-gnu-; [ "$(uname -m)" != aarch64 ] || CROSS64=
 CROSS=$CROSS64 OUT=$WORK/hooks64/libengine-ui-hook.so sh tools/ui-mod/build.sh

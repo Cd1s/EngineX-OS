@@ -602,6 +602,18 @@ has 'NH08S' "$ROOT/tools/ui-mod/build_packs.py"
 has '/Track/${modelData.n}' "$ROOT/tools/ui-mod/build_packs.py"
 ok 'on-screen track skip buttons only on models without physical keys'
 
+cmp -s "$ROOT/rootfs-overlay/etc/sc5000/libengine-ui-hook.so" "$ROOT/rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so" ||
+    fail 'both libengine-ui-hook.so copies in rootfs-overlay must match'
+if command -v arm-linux-gnueabihf-gcc >/dev/null 2>&1 && command -v arm-linux-gnueabihf-strip >/dev/null 2>&1 && command -v arm-linux-gnueabihf-readelf >/dev/null 2>&1; then
+    OUT=$TMP/libengine-ui-hook.so sh "$ROOT/tools/ui-mod/build.sh"
+    cmp -s "$TMP/libengine-ui-hook.so" "$ROOT/rootfs-overlay/etc/sc5000/libengine-ui-hook.so" ||
+        fail 'rootfs-overlay libengine-ui-hook.so is out of sync with tools/ui-mod/engine_ui_hook.c'
+    OUT=$TMP/libedisksd-hook.so sh "$ROOT/tools/edisksd-hook/build.sh"
+    cmp -s "$TMP/libedisksd-hook.so" "$ROOT/rootfs-overlay/etc/sc5000/libedisksd-hook.so" ||
+        fail 'rootfs-overlay libedisksd-hook.so is out of sync with tools/edisksd-hook/edisksd_hook.c'
+    ok 'committed 32-bit hooks in rootfs-overlay match fresh source builds byte-for-byte'
+fi
+
 python3 -m unittest discover -s "$ROOT/sim/qengine" -p test_smoke.py >/dev/null
 [[ ! -s $HOST_COMMAND_LOG ]] || fail "unexpected host command: $(cat "$HOST_COMMAND_LOG")"
 ok 'host systemctl, pkill, killall, reboot and ip were never called'
