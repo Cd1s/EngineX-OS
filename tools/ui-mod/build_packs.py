@@ -1101,15 +1101,16 @@ SERVICES_MAIN = """
 				const phaseMs = 40 * Math.max(1, 1 + s.pitch / 100)
 				const jumpMs = s.sync && p.playing ? phaseMs : (p.playing ? 180 : 5)
 				const delta = s.posMs - expect
+				const phaseFresh = s.posMs - p.phasePos > (now - p.at) * (1 + s.pitch / 100) * 0.25
 				s.phase = undefined
 				s.phasePos = undefined
 				if (s.playing === p.playing && s.net === p.net && Math.abs(delta) > jumpMs) {
 					// A short GUI stall can also leave one stale audio block. Carry
 					// the old line until a small Sync step persists on the next tick;
 					// its queued recovery then never becomes a backward/forward seek.
-					if (s.sync && p.playing && Math.abs(delta) <= 180 &&
+					if (s.sync && p.playing && (Math.abs(delta) <= 180 || (isFinite(p.phase) && !phaseFresh)) &&
 						(!isFinite(p.phase) || Math.abs(delta - p.phase) > phaseMs ||
-							s.posMs - p.phasePos <= (now - p.at) * (1 + s.pitch / 100) * 0.25)) {
+							!phaseFresh)) {
 						s.phase = delta; s.phasePos = s.posMs; s.posMs = expect
 					} else s.jumps++
 				}
