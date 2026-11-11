@@ -17,13 +17,13 @@ Python 3 标准库实现容器解析；文件系统操作需要 `debugfs`、`e2f
 整套发布镜像用 `build-release.sh` 生成（在编译机上、仓库根目录执行）：它把五个工具编成一个 ARMv7 静态 `sc5000-suite.xz`（rb-bridge、stream-sync、engine-guardian、stems-processor、sc5000-deemixd），把 UI 包打成 `ui-packs.tar.xz`，与 `rootfs-overlay` 和 `fsck.hfsplus` 组成 overlay。每组底包只打一次，然后按 `<型号前缀>-<版本>-EngineX-OS-<品牌型号>-Update.img` 复制成各型号的文件名（Engine 在 U 盘上按 `<前缀>-<数字和点>-…Update.img` 找包）。最后逐个 `info` 校验，并生成 `SHA256SUMS.txt`。
 
 ```bash
-sh tools/az01-packer/build-release.sh 5.3.0.3 /root/build/sc5000-lab/fw-5.3.0 \
-  /path/to/one_key.pub /path/to/fsck.hfsplus /root/build/sc5000-lab/release-5.3.0.3
+sh tools/az01-packer/build-release.sh 5.3.0.4 /root/build/sc5000-lab/fw-5.3.0 \
+  /path/to/one_key.pub /path/to/fsck.hfsplus /root/build/sc5000-lab/release-5.3.0.4
 ```
 
 镜像首次启动（以及每次换版本）时，`sc5000-custom-prepare` 会把 `ui-packs.tar.xz` 解到 `/data/sc5000-custom/ui/{packs,icons}`，清除 safe-mode 和启动计数，并写入 `.pack-version` 和 `/data/sc5000-custom/version.txt`。`engine.service` 排在它之后启动。版本号和 UI 包归档（`.pack-id` 记录其 sha256）都没变时不会覆盖手工部署的 UI 包；同版本号重打包的镜像会重新安装。
 
-`patch-rootfs --set-version 5.3.0.3` 写入 `/etc/sc5000/version.txt`（碟机「检查更新」读取它，与 Release tag 比较）。`/etc` 刷新 epoch 由版本号和 overlay 中 `/etc` 文件内容的哈希组成：升级后首次启动会删除 `/data/system/etc/overlay` 上层里这些文件的旧副本（如现场部署过的 guard、hook、drop-in），避免旧文件遮住新镜像。overlay 带有 `usr/local/bin/sc5000-debloat` 时，打包会对镜像离线执行它（`--root`），网口千兆、IRQ 亲和、禁用自动擦除和遥测屏蔽在出厂镜像里就生效。
+`patch-rootfs --set-version 5.3.0.4` 写入 `/etc/sc5000/version.txt`（碟机「检查更新」读取它，与 Release tag 比较）。`/etc` 刷新 epoch 由版本号和 overlay 中 `/etc` 文件内容的哈希组成：升级后首次启动会删除 `/data/system/etc/overlay` 上层里这些文件的旧副本（如现场部署过的 guard、hook、drop-in），避免旧文件遮住新镜像。overlay 带有 `usr/local/bin/sc5000-debloat` 时，打包会对镜像离线执行它（`--root`），网口千兆、IRQ 亲和、禁用自动擦除和遥测屏蔽在出厂镜像里就生效。
 
 辅助研究入口：`inspect_fit.py <4.3.4.img> [--extract-rootfs <外部新文件>]` 仅解析、校验和提取旧 FIT；`probe_performance.py <Database2/m.db>` 用只读 SQLite URI 解析随包 Demo 的 PerformanceData，输出字段/未知尾部与 blob 哈希，不修改数据库。
 
