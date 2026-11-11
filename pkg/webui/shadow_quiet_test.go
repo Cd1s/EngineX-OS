@@ -733,3 +733,71 @@ func TestShadowReplyTellsDeckDisplayState(t *testing.T) {
 		t.Fatalf("shadow reply: %+v", d)
 	}
 }
+
+func TestShadowIdleReplyKeepsActiveSnapshots(t *testing.T) {
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	oldRole := fourDeckRolePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = oldRole }()
+	if err := os.WriteFile(fourDeckRolePath, []byte("13"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowLegacyEngine=1")
+	sh := s.shadow
+	put := func(d deckState) uint64 {
+		sh.mu.Lock()
+		defer sh.mu.Unlock()
+		sh.takePeer("192.0.2.7", []deckState{d}, time.Now())
+		return sh.ver
+	}
+	get := func(query string) *httptest.ResponseRecorder {
+		t.Helper()
+		w := httptest.NewRecorder()
+		s.shadowGet(w, httptest.NewRequest("GET", "/v1/sc5000/shadow"+query, nil))
+		return w
+	}
+	decks := func(w *httptest.ResponseRecorder) []deckState {
+		t.Helper()
+		var v struct {
+			DisplayOnly *bool       `json:"displayOnly"`
+			Decks       []deckState `json:"decks"`
+		}
+		if err := json.NewDecoder(w.Body).Decode(&v); err != nil || v.DisplayOnly == nil || *v.DisplayOnly || w.Header().Get("X-Shadow-Unchanged") != "" {
+			t.Fatalf("expected a full Engine response: %+v, %v", v, err)
+		}
+		return v.Decks
+	}
+
+	d := deckState{Deck: 2, Link: "peer", Seq: 1}
+	ver := put(d)
+	query := fmt.Sprintf("?ver=%d", ver)
+	if w := get(query); len(decks(w)) != 1 || w.Header().Get("X-Shadow-Idle") != "1" {
+		t.Fatal("an old client must receive a complete empty snapshot")
+	}
+	if w := get(query + "&idle=1"); strings.TrimSpace(w.Body.String()) != `{"unchanged":true}` || w.Header().Get("X-Shadow-Unchanged") != "1" {
+		t.Fatalf("short response must contain only the unchanged marker: %s", w.Body.String())
+	}
+	d.Key, d.Seq = "a", 2
+	sh.mu.Lock()
+	sh.busy["peer:a"] = true
+	sh.mu.Unlock()
+	ver = put(d)
+	query = fmt.Sprintf("?ver=%d&idle=1", ver)
+	if v := decks(get(query)); len(v) != 1 || !v[0].Loading {
+		t.Fatalf("copy loading must reach QML: %+v", v)
+	}
+	sh.mu.Lock()
+	sh.files["peer:a"] = "/copy.mp3"
+	sh.mu.Unlock()
+	if v := decks(get(query)); len(v) != 1 || v[0].Path != "/copy.mp3" || v[0].Loading {
+		t.Fatalf("copy readiness without a version change must reach QML: %+v", v)
+	}
+	d.Playing, d.Seq = true, 3
+	ver = put(d)
+	query = fmt.Sprintf("?ver=%d&idle=1", ver)
+	if v := decks(get(query)); len(v) != 1 || !v[0].Playing || v[0].Seq != 3 {
+		t.Fatalf("active play and drift state must reach QML: %+v", v)
+	}
+}

@@ -457,6 +457,7 @@ static const struct engine_build *build;
 
 static uint32_t stems_feature_jump[2];
 static uint32_t config_jump[2];
+static uint32_t shadow_sync_play_jump[2];
 
 static void *rx_code(const void *code, size_t size, size_t page) {
     void *stub = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1397,6 +1398,43 @@ static void four_deck_role(void) {
         if (!strcmp(role, roles[i].name)) four_deck_route[0] = roles[i].a, four_deck_route[1] = roles[i].b;
 }
 
+// engineSync's play event makes a deck eligible for MASTER. Keep the native
+// stop branch for our silent slots, without changing their audio transport.
+static unsigned shadow_sync_play(unsigned play, const uint32_t *event, const uint32_t *controller) {
+    if (!play) return 0;
+    unsigned deck = event[4]; // DeckID at event+4, zero-based deck at DeckID+12
+    if (deck >= 4 || (int)deck == four_deck_route[0] || (int)deck == four_deck_route[1]) return play;
+    const uint32_t *host = (const uint32_t *)(uintptr_t)(event[3] & ~3u);
+    // Match the same host as the stock controller. A remote player with the
+    // same slot must still be eligible. Both strings carry pointer and length.
+    if (host && host[0] && controller[18] && host[1] && host[1] <= 64 && host[1] == controller[19] &&
+        !memcmp((const void *)(uintptr_t)host[0], (const void *)(uintptr_t)controller[18], host[1])) return 0;
+    return play;
+}
+
+A32_ONLY static void *shadow_sync_play_code(uintptr_t resume, size_t page) {
+    // ContinuousEvent type 0. r3 is the event; r1 points to the controller.
+    // The native prologue pushed fp only. Saving five words aligns the C call.
+    // r2 is the resulting play flag; the native CMP sets flags before the branch.
+    uint32_t code[] = {
+        0xe5d02020, 0xe5910000, // displaced LDRB r2,[r0,#32]; LDR r0,[r1]
+        0xe92d500b,             // push {r0,r1,r3,ip,lr}
+        0xe1a01003, 0xe1a03000, 0xe1a00002, 0xe1a02003, // args: play, event, controller
+        0xe59fc010, 0xe12fff3c, // call shadow_sync_play
+        0xe1a02000, 0xe8bd500b, 0xe51ff004,
+        (uint32_t)resume, (uint32_t)(uintptr_t)shadow_sync_play,
+    };
+    return rx_code(code, sizeof code, page);
+}
+
+A32_ONLY static void prepare_shadow_sync_play(uintptr_t base, size_t page) {
+    static const uint32_t expected[] = {0xe5d02020, 0xe5910000, 0xe2831004, 0xe3520000};
+    uintptr_t site = base + 0x16fbc38u;
+    if (!four_deck_pad_on || strcmp(build->name, "5.3.0") || memcmp((const void *)site, expected, sizeof expected)) return;
+    shadow_sync_play_jump[0] = 0xe51ff004;
+    shadow_sync_play_jump[1] = (uint32_t)(uintptr_t)shadow_sync_play_code(site + 8, page);
+}
+
 A32_ONLY static void prepare_config(uintptr_t base, size_t page) {
     // getConfig's common return path runs after every model's constructor.
     uint32_t code[] = {
@@ -1589,6 +1627,7 @@ static const struct engine_edit edits_504[] = {
 // property map (config fields), sqlite3_api_routines, and masked-context matches,
 // each checked against the 5.0.4 disassembly.
 static const struct engine_edit edits_530[] = {
+    {0x16fbc38u, "\x20\x20\xd0\xe5\x00\x00\x91\xe5", (const char *)shadow_sync_play_jump, 8, EDIT_ONE},
     {0x8bf744u, "\xbc\x26\x9f\xe5\xbc\x36\x9f\xe5\xf4\x42\x6d\xe1\xf8\xa1\xcd\xe1\xf8\x60\xcd\xe1\xf0\x81\xcd\xe1\x20\xe0\x8d\xe5\x20\xb0\x8d\xe2\xe4\xd0\x4d\xe2\x02\x20\x8f\xe0\x3c\x10\x91\xe5\x00\x01\x0b\xe5\x94\x46\x9f\xe5\x03\x30\x92\xe7\x00\x00\x51\xe3\x04\x40\x8f",
         // As 5.0.4, with the BL re-encoded for QString::fromUtf8(QByteArrayView)@plt at 0x15f768.
         "\x10\x40\x2d\xe9\x00\x40\xa0\xe1\x1e\x10\xa0\xe3\x0c\x20\x8f\xe2\x03\x80\xe2\xeb\x04\x00\xa0\xe1\x10\x80\xbd\xe8\x00\xf0\x20\xe3\x2f\x75\x73\x72\x2f\x6c\x6f\x63\x61\x6c\x2f\x62\x69\x6e\x2f\x73\x74\x65\x6d\x73\x2d\x70\x72\x6f\x63\x65\x73\x73\x6f\x72\x00", 63, EDIT_STEMS},
@@ -1743,6 +1782,7 @@ __attribute__((constructor)) static void edit_engine(void) {
 #if !defined(__aarch64__)
     prepare_aux(base, page);
     prepare_config(base, page);
+    prepare_shadow_sync_play(base, page);
     uint32_t expected_feature[2] = {build->feature_displaced ? build->feature_displaced : 0xe51b3340, 0xe3540000};
     if (build->feature_true && !memcmp((const void *)(base + build->feature_site), expected_feature, 8))
         prepare_stems_feature(base, page);
@@ -1758,6 +1798,7 @@ __attribute__((constructor)) static void edit_engine(void) {
         if (e->group != EDIT_ONE && !ready[e->group]) continue;
         // An unprepared trampoline is all zero: never write it.
         if (e->replacement == (const char *)stems_feature_jump && !stems_feature_jump[1]) continue;
+        if (e->replacement == (const char *)shadow_sync_play_jump && !shadow_sync_play_jump[1]) continue;
         char *at = (char *)(base + e->offset);
         if (edit_state(base, e) != 1) continue;
         uintptr_t first = (uintptr_t)at - (uintptr_t)at % page;
