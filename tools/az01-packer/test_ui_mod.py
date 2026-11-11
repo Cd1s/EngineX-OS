@@ -628,7 +628,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
-                 "scShadowLine", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack")
+                 "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
@@ -1969,6 +1969,134 @@ assert.equal(scShadowOwn[0].currentBpm,131.84);
 assert.equal(scShadowOwn[0].sync,true,'the tempo step must not be posted with the previous Sync state');
 """)
 
+    def test_sender_publishes_native_phase_ramps_even_when_every_gui_tick_is_late(self):
+        self.js(r"""
+globalThis.XMLHttpRequest=class{open(){this.readyState=1}send(){this.readyState=4;this.status=200}};
+globalThis.scShadowPoll=()=>{};scFourDeckRole='1';
+let pos=10000,rate=1,synced=false;
+globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,color:'#fff',index:0,
+ state:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),
+ get unnormalized(){return path.endsWith('/TrackPosition')?pos*48:path.endsWith('/TrackLength')?48000*400:
+  path.endsWith('/OriginalBPM')?128:path.endsWith('/CurrentBPM')?128*rate:0},
+ get string(){return path.endsWith('/SyncMode')?(synced?'BeatOrBarSync':'Off'):
+  path.endsWith('/TrackUri')?'file:///a.wav':path.endsWith('/SpeedState')?((rate-1)*100).toFixed(2)+'%':''}});
+const tick=(dt,phase=0)=>{now+=dt;pos+=dt*rate+phase;scShadowTick()};
+const published=()=>{const s=scShadowOwn[0];return s.positionMs+(now-s.at)*(1+s.pitch/100)};
+for(const direction of [-1,1]){
+ synced=false;rate=1;for(let i=0;i<40;i++)tick(80);
+ synced=true;rate=1.03;
+ for(let i=0;i<9;i++){
+  tick(175,direction*25);
+  assert.ok(Math.abs(published()-pos)<1,'late tick concealed the native phase ramp');
+ }
+ for(let i=0;i<12;i++){
+  tick(175);
+  assert.ok(Math.abs(published()-pos)<2,'the drift envelope kept a tail after native Sync settled');
+ }
+}
+// At the measured maximum pull, one sample remains ambiguous. Two samples
+// must establish motion instead of accumulating a synthetic late-tick deficit.
+for(const direction of [-1,1]){
+ synced=false;rate=1;for(let i=0;i<40;i++)tick(80);
+ synced=true;rate=1.03;
+ for(let i=0;i<9;i++){
+  tick(175,direction*0.27*175*rate);
+  const oneSample=0.27*175*rate+Math.abs(rate-1)*175+1;
+  assert.ok(Math.abs(published()-pos)<oneSample,'maximum native pull was concealed: '+(published()-pos));
+ }
+ tick(80);tick(80);
+ assert.ok(Math.abs(published()-pos)<2,'maximum phase pull left a nominal-line tail');
+}
+""")
+
+    def test_sync_transition_still_carries_short_stale_reads(self):
+        self.js(r"""
+globalThis.XMLHttpRequest=class{open(){this.readyState=1}send(){this.readyState=4;this.status=200}};
+globalThis.scShadowPoll=()=>{};scFourDeckRole='1';
+const T0=now;let stale=0,synced=false;
+globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,color:'#fff',index:0,
+ state:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),
+ get unnormalized(){return path.endsWith('/TrackPosition')?(10000+now-T0-stale)*48:
+  path.endsWith('/TrackLength')?48000*400:path.endsWith('/OriginalBPM')||path.endsWith('/CurrentBPM')?128:0},
+ get string(){return path.endsWith('/SyncMode')?(synced?'BeatOrBarSync':'Off'):path.endsWith('/TrackUri')?'file:///a.wav':''}});
+for(let i=0;i<40;i++){now+=80;scShadowTick()}
+synced=true;now+=240;scShadowTick();now+=80;scShadowTick();
+const jumps=scShadowPrev[1].jumps;
+// A single delayed but advancing block must not bypass phase confirmation
+// merely because the transition publisher uses raw positions.
+now+=130;stale=60;scShadowTick();
+let sent=scShadowOwn[0];
+assert.ok(Math.abs(sent.positionMs+now-sent.at-(10000+now-T0))<2,'unconfirmed stale phase reached the peer');
+stale=0;now+=80;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps);
+now+=426;stale=340;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps);
+assert.ok(Math.abs(scShadowOwn[0].positionMs-(10000+now-T0))<2,'stale read moved the source line');
+stale=0;now+=80;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps,'fresh recovery caused a seek');
+// An advancing queued stream is still 180 ms old; do not turn its delayed
+// delivery into a pair of backwards/forwards Sync seeks.
+now+=426;stale=180;scShadowTick();
+now+=175;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps,'advancing stale positions became a phase step');
+stale=0;now+=80;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps,'advancing stale recovery became a jump');
+// One late callback is not evidence of a platter held for its entire duration.
+now+=700;stale=400;scShadowTick();
+assert.ok(!scShadowPrev[1].phaseHold,'one long stale callback became a platter hold');
+stale=0;now+=80;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps,'a single long GUI stall caused a seek pair');
+// A smaller advancing backlog fits inside one long callback's pull bound.
+// Its constant deficit still needs a normal callback to disambiguate it.
+synced=false;now+=240;scShadowTick();synced=true;now+=240;scShadowTick();
+now+=80;scShadowTick();const smallBacklog=scShadowPrev[1].jumps;
+now+=426;stale=150;scShadowTick();now+=175;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,smallBacklog,'a constant advancing backlog became a native ramp');
+sent=scShadowOwn[0];
+assert.ok(Math.abs(sent.positionMs+now-sent.at-(10000+now-T0))<2,'an advancing backlog reached the peer');
+stale=0;now+=80;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,smallBacklog,'queued-stream recovery caused a jump');
+""")
+
+    def test_noop_sync_keeps_a_biased_block_line_and_a_late_hold_survives_the_deadline(self):
+        self.js(r"""
+globalThis.XMLHttpRequest=class{open(){this.readyState=1}send(){this.readyState=4;this.status=200}};
+globalThis.scShadowPoll=()=>{};scFourDeckRole='1';
+const T0=now;let pos=10000,synced=false,jitter=0;
+globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,color:'#fff',index:0,
+ state:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),
+ get unnormalized(){return path.endsWith('/TrackPosition')?(pos+jitter)*48:path.endsWith('/TrackLength')?48000*400:
+  path.endsWith('/OriginalBPM')||path.endsWith('/CurrentBPM')?128:0},
+ get string(){return path.endsWith('/SyncMode')?(synced?'BeatOrBarSync':'Off'):path.endsWith('/TrackUri')?'file:///a.wav':''}});
+const tick=(dt=80,move=dt)=>{now+=dt;pos+=move;scShadowTick()};
+for(let i=0;i<70;i++){jitter=[0,-12,-28,-4,-18,-30,-8][i%7];tick()}
+assert.ok(scShadowPrev[1].env-scShadowPrev[1].avg>10,'the fixture needs a measured block bias');
+synced=true;const jumps=scShadowPrev[1].jumps;
+for(let i=0;i<12;i++){
+ jitter=[0,-12,-28,-4,-18,-30,-8][i%7];tick(175);
+ const s=scShadowOwn[0],line=s.positionMs+now-s.at;
+ assert.ok(Math.abs(line-pos)<=35,'no-op Sync published an excessive block excursion');
+}
+assert.equal(scShadowPrev[1].jumps,jumps,'no-op Sync jitter became a discontinuity');
+for(let i=0;i<8;i++){
+ jitter=[0,-12,-28,-4,-18,-30,-8][i%7];tick(175);
+ const s=scShadowOwn[0],line=s.positionMs+now-s.at;
+ assert.ok(Math.abs(line-pos)<=35,'leaving transition mode created a new phase step');
+}
+assert.equal(scShadowPrev[1].jumps,jumps,'transition expiry invented a discontinuity');
+// Arm a new transition, then freeze the raw block beyond its two-second deadline.
+synced=false;tick(240);synced=true;tick(240);jitter=0;
+const held=pos,was=scShadowPrev[1].jumps;
+for(let i=0;i<20;i++){
+ tick(175,0);
+ if(i>=4)assert.ok(scShadowPrev[1].phaseHold,'the hold was lost on a late GUI turn');
+}
+assert.equal(scShadowPrev[1].jumps,was+1,'the held block must be published once');
+assert.ok(Math.abs(scShadowOwn[0].positionMs-held)<=1);
+for(let i=0;i<8;i++)tick(175);
+assert.equal(scShadowPrev[1].jumps,was+1,'release generated another discontinuity');
+""")
+
     def test_sender_publishes_sync_phase_steps_without_filtering_them(self):
         self.js(r"""
 globalThis.XMLHttpRequest = class { open(){this.readyState=1} send(){this.readyState=4;this.status=200} };
@@ -2161,6 +2289,203 @@ assert.ok(Math.abs(scShadowOwn[0].positionMs-held)<500,'the source line kept pla
 const released=scShadowPrev[1].jumps;
 for(let i=0;i<10;i++)tick(80);
 assert.equal(scShadowPrev[1].jumps,released,'releasing the platter repeated the seek');
+// Slow GUI turns must not clear the hold when the publication window ends.
+for(let i=0;i<40;i++)tick(80);
+const heldLate=pos,lateJumps=scShadowPrev[1].jumps;
+for(let i=0;i<22;i++)tick(0,175);
+assert.ok(scShadowPrev[1].jumps<=lateJumps+1);
+assert.ok(Math.abs(scShadowOwn[0].positionMs-heldLate)<500,'late ticks lost the platter hold');
+""")
+
+
+@unittest.skipUnless(shutil.which("node"), "node needed for the landing behavioral checks")
+class ShadowLandingTest(unittest.TestCase):
+    """A playing seek freezes the decoder and can expose the old line first."""
+    js = ShadowDisplayTest.js
+    ENGINE = r"""
+Object.assign(globalThis,{scShadowDisplayOnly:false,scShadowEngineMask:30,scShadowBent:null});
+const T0=now, props=new Map(), seeks=[], presses=[];
+let shift=0, synced=false, rate=1, seq=0, tick=0, pending=null, base=10000;
+let losses=[90,90], oldFor=120, noise=true, ignored=false, readingOffset=0;
+const jitter=()=>readingOffset+(noise?rate*[0,-12,-28,-4,-18,-30,-8][tick%7]:0);
+function playback(){
+ if(!pending)return base+(now-T0)*rate;
+ if(ignored||now<pending.t+oldFor)return pending.old+(now-pending.t)*rate;
+ return pending.target+Math.max(0,now-pending.t-pending.loss)*rate;
+}
+globalThis.scShadowBendTimer={stop(){},restart(){}};
+globalThis.scShadowHolds=()=>true;globalThis.scShadowEnd=()=>false;
+globalThis.scShadowCues=()=>{};globalThis.scShadowBeat=()=>{};
+globalThis.scShadowSpeed=()=>{};globalThis.scPress=p=>presses.push(p);
+globalThis.scTr=path=>{
+ if(props.has(path))return props.get(path);
+ const p={state:path.endsWith('/PlayState')||path.endsWith('/SongLoaded'),
+ string:path.endsWith('/SpeedRange')?'100':path.endsWith('/SyncMode')?'Off':'',
+ get unnormalized(){return path.endsWith('/TrackPosition')?(playback()+jitter())*48:
+  path.endsWith('/TrackLength')?48000*400:0},
+ get value(){return path.endsWith('/SampleRate')?48000:this.v||0},
+ set value(v){this.v=v;if(path.endsWith('/SetSongPosition')){
+  const old=playback(),loss=losses[Math.min(seeks.length,losses.length-1)];
+  pending={t:now,target:v*400000,old:old,loss:loss};seeks.push(pending);
+ }}};props.set(path,p);return p;
+};
+scShadowAt[2]={path:'/a',id:'a',ready:true,seekAt:0,jumps:0};
+const apply=(extra={})=>scShadowApply(Object.assign({deck:2,path:'/a',id:'a',link:'peer',playing:true,
+ sync:synced,positionMs:10000+(now-T0)*rate+shift,at:now,pitch:(rate-1)*100,
+ bpm:128,currentBpm:128*rate,jumps:0,seq:++seq},extra));
+const step=(dt=80,extra={})=>{now+=dt;tick++;scShadowLine(now);scShadowLandingTick(now);apply(extra)};
+apply();for(let i=0;i<50;i++)step();
+const engage=(delta=-120)=>{shift+=delta;synced=true;step()};
+"""
+
+    def test_delayed_landing_is_measured_and_corrected_once_on_unchanged_sequences(self):
+        self.js(self.ENGINE + r"""
+engage();const unchanged=seq;
+for(let i=0;i<14;i++)step(80,{seq:unchanged});
+assert.equal(seeks.length,2,'one confirmed landing permits one compensated seek');
+assert.ok(Math.abs(scShadowAt[2].seekLoss-90)<=20,'seek loss must come from the issued command within block uncertainty');
+assert.ok(Math.abs(playback()-(10000+now-T0+shift))<16,'landing correction left a long bend tail');
+assert.ok(!scShadowAt[2].landing,'the second landing must be verified and closed');
+assert.ok(!presses.some(p=>p.endsWith('/RequestMaster')));
+""")
+
+    def test_source_motion_is_coalesced_and_never_learned_as_seek_loss(self):
+        self.js(self.ENGINE + r"""
+engage();step();shift+=60;step();
+for(let i=0;i<12;i++)step();
+assert.equal(seeks.length,2,'source updates replenished the seek budget');
+assert.ok(Math.abs(scShadowAt[2].seekLoss-90)<=20,'source phase movement contaminated learned loss');
+assert.ok(Math.abs(playback()-(10000+now-T0+shift))<16,'the correction did not use the latest source target');
+""")
+
+    def test_a_different_second_landing_loss_cannot_start_a_retry_loop(self):
+        self.js(self.ENGINE + r"""
+losses=[90,144];engage();
+for(let i=0;i<38;i++){if(i===12)shift+=45;step()}
+assert.equal(seeks.length,2,'changed native latency or source movement started a third seek');
+assert.equal(scShadowAt[2].transitionSeeks,2);
+""")
+
+    def test_a_temporarily_aligned_landing_keeps_its_one_compensation_budget(self):
+        self.js(self.ENGINE + r"""
+engage();step();shift-=90;
+for(let i=0;i<8;i++)step();
+assert.equal(seeks.length,1,'a coincident source phase change needs no correction');
+assert.ok(scShadowAt[2].landing && scShadowAt[2].landing.learned,'a transient alignment discarded transition tracking');
+shift+=60;
+for(let i=0;i<14;i++)step(80,{jumps:2});
+assert.equal(seeks.length,2,'later source phase must use the existing compensation');
+assert.ok(Math.abs(playback()-(10000+now-T0+shift))<20);
+for(let i=0;i<32;i++)step(80,{jumps:2});
+assert.equal(seeks.length,2,'a coalesced jump was replayed after the transition expired');
+""")
+
+    def test_landing_loss_uses_track_time_at_half_and_double_speed(self):
+        for speed in (0.5, 2):
+            with self.subTest(speed=speed):
+                engine = self.ENGINE.replace("synced=false, rate=1,", "synced=false, rate=" + str(speed) + ",")
+                self.js(engine + r"""
+engage(-120*rate);for(let i=0;i<16;i++)step();
+assert.equal(seeks.length,2);
+assert.ok(Math.abs(scShadowAt[2].seekLoss/rate-90)<=20);
+assert.ok(Math.abs(playback()-(10000+(now-T0)*rate+shift))<20*rate);
+""")
+
+    def test_cold_raw_baseline_cannot_learn_an_ignored_seek_from_newer_old_reads(self):
+        self.js(self.ENGINE + r"""
+noise=false;ignored=true;readingOffset=-35;scShadowAt[2].env=undefined;
+engage(120);readingOffset=0;
+for(let i=0;i<22;i++)step();
+assert.equal(seeks.length,1,'newer reads of an old line escaped the cold baseline band');
+assert.ok(!scShadowAt[2].landing,'unobservable ignored seek did not expire');
+""")
+
+    def test_a_separate_large_source_jump_is_immediate_after_the_sync_budget_is_spent(self):
+        self.js(self.ENGINE + r"""
+engage();for(let i=0;i<16;i++)step();
+assert.equal(seeks.length,2);
+const before=seeks.length;shift+=1000;step(80,{jumps:1});
+assert.equal(seeks.length,before+1,'the Sync correction budget delayed a separate cue/jump');
+assert.ok(!scShadowAt[2].landing,'a separate discontinuity must keep its original one-seek path');
+for(let i=0;i<12;i++)step(80,{jumps:1});
+assert.equal(seeks.length,before+1,'a cue jump caused an extra decoder flush');
+""")
+
+    def test_repeated_cues_and_loop_wraps_each_keep_one_seek(self):
+        self.js(self.ENGINE + r"""
+engage();for(let i=0;i<16;i++)step();
+let count=seeks.length,jumps=0;
+for(const delta of [1000,-750,1200,-5000,-5000,-5000]){
+ shift+=delta;step(80,{jumps:++jumps});
+ assert.equal(seeks.length,++count,'a transport discontinuity was deferred');
+ for(let i=0;i<9;i++)step(80,{jumps:jumps});
+ assert.equal(seeks.length,count,'a cue/loop wrap replenished compensation');
+ assert.ok(!scShadowAt[2].landing);
+}
+""")
+
+    def test_unsynced_tempo_and_jump_keep_the_original_transport_path(self):
+        self.js(self.ENGINE + r"""
+rate=1.03;shift=-300;step();
+assert.equal(seeks.length,1);
+assert.ok(!scShadowAt[2].landing,'a tempo-only change armed Sync compensation');
+shift+=1000;step(80,{jumps:1});
+assert.equal(seeks.length,2,'an unsynced jump was held by the transition budget');
+assert.ok(!scShadowAt[2].landing);
+""")
+
+    def test_observer_records_the_clamped_command_instead_of_an_unwritten_target(self):
+        self.js(self.ENGINE + r"""
+const at=scShadowAt[2];at.phaseHardUntil=now+4000;at.phaseStableAt=now;
+scShadowLandingSeek(2,at,399980,playback(),now,200);
+assert.equal(at.landing.target,400000,'loss was measured against an unclamped target');
+scShadowLandingSeek(2,at,-200,playback(),now,0);
+assert.equal(at.landing.target,0);
+""")
+
+    def test_old_advancing_reads_and_overlap_never_prove_a_landing(self):
+        self.js(self.ENGINE + r"""
+oldFor=450;engage();
+for(let i=0;i<4;i++)step();
+assert.equal(seeks.length,1,'old advancing reads caused a corrective seek');
+for(let i=0;i<12;i++)step();
+assert.equal(seeks.length,2,'a distinct backward landing was not recovered');
+// A forward displacement equal to the native seek loss overlaps the old line.
+now+=4500;pending=null;base=10000;shift=0;synced=false;noise=false;apply();
+for(let i=0;i<30;i++)step();
+const before=seeks.length;ignored=true;engage(90);
+for(let i=0;i<20;i++)step();
+assert.equal(seeks.length,before+1,'an ignored/ambiguous seek was learned and retried');
+assert.ok(!scShadowAt[2].landing,'ambiguous landing must expire');
+""")
+
+    def test_noop_sync_with_block_jitter_does_not_flush_the_decoder(self):
+        self.js(self.ENGINE + r"""
+engage(0);for(let i=0;i<35;i++){shift=[-12,18,-10,14,-2][i%5];step()}
+assert.equal(seeks.length,0,'a metadata-only Sync plus block jitter caused a seek');
+""")
+
+    def test_landing_cancels_on_pause_rate_role_source_loss_or_native_ownership(self):
+        for condition in ("pause", "rate", "role", "loss", "native", "cdj", "seek", "unload", "console", "display", "track"):
+            with self.subTest(condition=condition):
+                self.js(self.ENGINE + r"""
+engage();assert.ok(scShadowAt[2].landing);
+const before=seeks.length;
+""" + {
+                    "pause": "step(80,{playing:false});",
+                    "rate": "rate=1.03;step();",
+                    "role": "scFourDeckRole='12';step();",
+                    "loss": "now+=1600;scShadowLandingTick(now);",
+                    "native": "rate=2.03;step();",
+                    "cdj": "step(80,{link:''});",
+                    "seek": "scShadowSeek(2,scShadowAt[2],30000);",
+                    "unload": "scTr('/Engine/Deck2/Track/SongLoaded').state=false;step();",
+                    "console": "scPlayer=false;step();",
+                    "display": "scShadowDisplayOnly=true;step();",
+                    "track": "globalThis.scShadowLoad=()=>{};step(80,{id:'replacement'});",
+                }[condition] + r"""
+assert.ok(!scShadowAt[2].landing,'invalid ownership/lifecycle kept an observer');
+assert.ok(seeks.length<=before+1,'cancellation issued an extra correction');
 """)
 
 
