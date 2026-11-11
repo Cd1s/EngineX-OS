@@ -1946,6 +1946,138 @@ assert.equal(fwd.state, false, 'a pause releases the bend');
 """)
 
 
+@unittest.skipUnless(shutil.which("node"), "node needed for the shadow-deck behavioral checks")
+class ShadowSyncSnapTest(unittest.TestCase):
+    """Sync changes the source's phase and rate; neither is ordinary clock drift."""
+    js = ShadowDisplayTest.js
+
+    def test_sender_publishes_sync_phase_steps_without_filtering_them(self):
+        self.js(r"""
+globalThis.XMLHttpRequest = class { open(){this.readyState=1} send(){this.readyState=4;this.status=200} };
+globalThis.scShadowPoll = () => {};
+scFourDeckRole = '1';
+let pos = 10000, rate = 1, synced = false;
+globalThis.scTr = path => ({value:path.endsWith('/SampleRate')?48000:0, color:'#fff', index:0,
+ state:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),
+ get unnormalized(){return path.endsWith('/TrackPosition')?pos*48:path.endsWith('/TrackLength')?48000*400:
+   path.endsWith('/OriginalBPM')?128:path.endsWith('/CurrentBPM')?128*rate:0},
+ get string(){return path.endsWith('/TrackUri')?'file:///a.wav':path.endsWith('/SpeedState')?((rate-1)*100).toFixed(2)+'%':
+   path.endsWith('/SyncMode')?(synced?'BeatOrBarSync':'Off'):''}
+});
+const tick = (dt=80) => {now+=dt;pos+=dt*rate;scShadowTick()};
+for(let i=0;i<70;i++)tick();
+// The phase goes backwards by less than the old 180 ms jump threshold.
+synced=true;pos-=120;
+tick(240); // outside the existing Sync string cache; GUI-stall protection still applies
+tick();
+assert.ok(Math.abs(scShadowOwn[0].positionMs-pos)<1,'Sync phase was left in the upper-envelope drift filter');
+assert.equal(scShadowOwn[0].sync,true);
+const jumps=scShadowPrev[1].jumps;
+pos-=100;tick();
+assert.equal(scShadowPrev[1].jumps,jumps+1,'a phase step while synced must be a jump');
+assert.ok(Math.abs(scShadowOwn[0].positionMs-pos)<1);
+// Normal audio-block jitter at high rates must not count as phase jumps.
+rate=2.0309;tick();
+const stable=scShadowPrev[1].jumps;
+for(let i=0;i<40;i++){const jitter=i%2?25:-25;pos+=jitter;tick();pos-=jitter;}
+assert.equal(scShadowPrev[1].jumps,stable,'audio blocks became repeated seeks at over-range Sync');
+""")
+
+    ENGINE = r"""
+Object.assign(globalThis,{scShadowDisplayOnly:false,scShadowEngineMask:30,scShadowBent:null});
+const props=new Map(), seeks=[], speeds=[], presses=[];
+let pos=10000, rate=1;
+globalThis.scShadowBendTimer={stop(){},restart(){}};
+globalThis.scShadowHolds=()=>true;
+globalThis.scShadowEnd=()=>false;
+globalThis.scShadowCues=()=>{};
+globalThis.scShadowBeat=()=>{};
+globalThis.scShadowSpeed=(d,p)=>speeds.push(p);
+globalThis.scPress=p=>presses.push(p);
+globalThis.scTr=path=>{
+ if(props.has(path))return props.get(path);
+ const p={state:path.endsWith('/PlayState')||path.endsWith('/SongLoaded'),value:path.endsWith('/SampleRate')?48000:0,
+  string:path.endsWith('/SpeedRange')?'100':path.endsWith('/SyncMode')?'Off':'',
+  get unnormalized(){return path.endsWith('/TrackPosition')?pos*48:path.endsWith('/TrackLength')?48000*400:0}};
+ props.set(path,p);return p;
+};
+globalThis.scShadowSeek=(d,at,ms)=>{seeks.push(ms);pos=ms;at.seekAt=now;at.env=undefined};
+scShadowAt[2]={path:'/a',id:'a',ready:true,seekAt:0,jumps:0};
+let seq=0;
+const apply=(extra={})=>scShadowApply(Object.assign({deck:2,path:'/a',id:'a',link:'peer',playing:true,
+ sync:false,positionMs:pos,at:now,pitch:(rate-1)*100,bpm:128,currentBpm:128*rate,jumps:0,seq:++seq},extra));
+apply();
+"""
+
+    def test_sync_engagement_seeks_and_releases_an_active_bend_on_the_first_update(self):
+        self.js(self.ENGINE + r"""
+for(const delta of [-120,120,-500,500]){
+ apply({sync:false});
+ const at=scShadowAt[2], bend={state:true};
+ scShadowBent={at,p:bend};at.env=pos;at.envT0=now-4000;at.envRate=rate;at.fine=120;
+ now+=80;pos+=80*rate;
+ const target=pos+delta, before=seeks.length;
+ apply({sync:true,positionMs:target});
+ assert.equal(seeks.length,before+1,'Sync '+delta+' ms was bent instead of sought');
+ assert.equal(pos,target);assert.equal(bend.state,false);assert.equal(scShadowBent,null);
+ for(let i=0;i<10;i++){now+=80;pos+=80*rate;apply({sync:true})}
+ assert.equal(seeks.length,before+1,'Sync heartbeat caused an extra seek');
+}
+assert.ok(!presses.some(p=>p.endsWith('/RequestMaster')||p.endsWith('/Sync')),'ordinary linked copies retain their ownership rules');
+""")
+
+    def test_tempo_steps_and_source_jumps_snap_but_small_drift_does_not_seek(self):
+        self.js(self.ENGINE + r"""
+now+=80;rate=1.03;
+apply({positionMs:pos-110});
+assert.equal(seeks.length,1,'tempo step must apply its phase with its rate');
+assert.ok(Math.abs(speeds.at(-1)-3)<1e-9);
+now+=80;apply({sync:true});
+const before=seeks.length;
+now+=80;apply({sync:true,positionMs:pos+90,jumps:1});
+assert.equal(seeks.length,before+1,'a sub-180 ms source phase jump must seek');
+const stable=seeks.length;
+for(let i=0;i<100;i++){now+=80;pos+=80*rate;apply({sync:true,positionMs:pos+(i%2?20:-20),jumps:1})}
+assert.equal(seeks.length,stable,'steady audio-block drift must not cause seeks');
+""")
+
+    def test_small_sync_drift_and_native_cdj_sync_keep_their_existing_paths(self):
+        self.js(self.ENGINE + r"""
+now+=80;apply({sync:true,positionMs:pos+20});
+assert.equal(seeks.length,0,'Sync with small drift must not flush the decoder');
+now+=80;rate=1.03;apply({sync:true,positionMs:pos-20});
+assert.equal(seeks.length,0,'a tempo change with small drift only changes rate');
+now+=80;apply({sync:false,link:''});
+now+=80;apply({sync:true,link:'',positionMs:pos+120});
+assert.ok(presses.includes('/Engine/Deck2/Sync'),'CDJ sources still use native Sync');
+assert.equal(seeks.length,0,'native beat Sync must retain its existing phase control');
+""")
+
+    def test_synced_gui_stall_is_ignored_but_a_real_phase_jump_survives_it(self):
+        self.js(r"""
+globalThis.XMLHttpRequest=class{open(){this.readyState=1}send(){this.readyState=4;this.status=200}};
+globalThis.scShadowPoll=()=>{};
+scFourDeckRole='1';
+const T0=now;let stale=0,moved=0;
+globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,color:'#fff',index:0,
+ state:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),
+ get unnormalized(){return path.endsWith('/TrackPosition')?(10000+now-T0-stale+moved)*48:
+  path.endsWith('/TrackLength')?48000*400:path.endsWith('/OriginalBPM')||path.endsWith('/CurrentBPM')?128:0},
+ get string(){return path.endsWith('/SyncMode')?'BeatOrBarSync':path.endsWith('/TrackUri')?'file:///a.wav':''}});
+for(let i=0;i<70;i++){now+=80;scShadowTick()}
+const jumps=scShadowPrev[1].jumps;
+now+=426;stale=340;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps,'GUI stall became a Sync phase jump');
+stale=0;now+=80;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps,'GUI recovery became a Sync phase jump');
+now+=426;moved=-100;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps);
+now+=80;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps+1,'a real small phase step during the stall was lost');
+assert.ok(Math.abs(scShadowOwn[0].positionMs-(10000+now-T0+moved))<1);
+""")
+
+
 class ShadowIdentityTest(unittest.TestCase):
     """Engine mode: the shadow deck holds the source's track, or is loaded again (maintainer report 11-10)."""
     js = ShadowDisplayTest.js

@@ -1096,7 +1096,10 @@ SERVICES_MAIN = """
 				// counted as a jump back and a jump forward, each a seek on the peer).
 				// Nothing is known then: the deck is where its speed puts it.
 				if (now - p.at > 150 && s.ps && p.ps && s.net === p.net) s.posMs = expect
-				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > (p.playing ? 180 : 5)) s.jumps++
+				// Sync phase steps can be smaller than 180 ms. Audio-block jitter is
+				// measured in wall time, so allow it to grow with the deck's rate.
+				const jumpMs = s.sync && p.playing ? 60 * Math.max(1, 1 + s.pitch / 100) : (p.playing ? 180 : 5)
+				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > jumpMs) s.jumps++
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
 				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
 			}
@@ -1107,7 +1110,7 @@ SERVICES_MAIN = """
 			// known, the upper envelope of position - speed * time is the newest block:
 			// post that line (noise of a few ms), decaying 0.5 ms/s to follow pitch rounding.
 			const speed = 1 + s.pitch / 100, raw = s.posMs - speed * now
-			if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.jumps === s.jumps && isFinite(p.env)) {
+			if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.sync === s.sync && p.jumps === s.jumps && isFinite(p.env)) {
 				// A jog brake: the positions average ~17 ms of wall time behind the line
 				// (25 at most in steady play). Further behind, the deck is slower than its
 				// pitch: the line closes a fifth of the excess per tick. No step, so a late
@@ -1467,6 +1470,10 @@ SERVICES_MAIN = """
 		at.master = !!e.master
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!(sr > 0 && len > 0)) return
+		const syncEdge = !!e.sync && at.sourceSync === false
+		const tempoStep = at.sourceRate !== undefined && Math.abs(at.rate - at.sourceRate) > 2e-4
+		at.sourceSync = !!e.sync
+		at.sourceRate = at.rate
 		const seek = ms => root.scShadowSeek(d, at, ms)
 		// e.at is when Go extrapolated e.positionMs; this runs later on a busy GUI
 		// thread, so carry the target to now before comparing.
@@ -1490,6 +1497,11 @@ SERVICES_MAIN = """
 		// e.pitch is rounded to 0.01 %: at 138 BPM that alone slipped 4 ms a minute.
 		// The fader goes to the source's tempo ratio, so the BPM shown is the source's.
 		const exact = e.bpm > 0 && e.currentBpm > 0 ? (e.currentBpm / e.bpm - 1) * 100 : NaN
+		if (syncEdge || tempoStep) {
+			if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
+			at.env = undefined
+			at.fine = undefined
+		}
 		if (!(wantSync && synced) && !(at.nativeSync && e.pitch > 100)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
 		const pKey = g("/Track/KeyLock")
 		if (typeof e.keylock === "boolean" && pKey && !!pKey.state !== e.keylock) pKey.state = e.keylock
@@ -1554,27 +1566,32 @@ SERVICES_MAIN = """
 		}
 		at.target = null
 		// Playing: a seek flushes Engine's decoder and waveform (the visible snap), so
-		// it is only for a source jump and a gap past lim on three updates in a row.
+		// it is for source discontinuities, or a persistent gap past lim.
 		// at.wide: two such seeks within 10 s did not land (Quantize snaps to a
 		// beat). Steady drift below that is closed by the fader instead (at.pll).
 		// A linked copy still follows the source's song position: native beat Sync
 		// can choose another beat. Seeking drops it to native tempo Sync.
 		const lim = wantSync && synced && !at.nativeSync ? 2000 : at.wide ? 800 : 300
 		const jump = e.jumps !== at.jumps && Math.abs(drift) > 60
+		// A Sync edge or tempo step is a new phase/rate, not clock drift. Apply
+		// it on this update, with the speed already set above. Keep small audio
+		// block noise on the existing bend path and never snap on a heartbeat.
+		const snap = (!wantSync || at.nativeSync) && (syncEdge || tempoStep) && Math.abs(drift) > 40 * at.rate
 		if (!jump) at.jumps = e.jumps
 		at.over = Math.abs(drift) > lim ? (at.over || 0) + 1 : 0
-		if ((jump && now - at.seekAt >= 80) || (at.over >= 3 && now - at.seekAt >= 1000)) {
-			if (!jump) {
+		if (snap || (jump && now - at.seekAt >= 80) || (at.over >= 3 && now - at.seekAt >= 1000)) {
+			if (!jump && !snap) {
 				at.wide = at.wide || now - (at.lastSteady || 0) < 10000
 				at.lastSteady = now
 			}
+			if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
 			seek(target)
 			at.jumps = e.jumps
 			at.over = 0
 			at.seeks = (at.seeks || 0) + 1
 			at.pll = 0
 			at.sd = undefined
-			dbg(jump ? "jump" : "seek")
+			dbg(snap ? "snap" : jump ? "jump" : "seek")
 			return
 		}
 		// Never steer /Engine/DeckN/Speed with a synthetic PLL: changing Speed alters
