@@ -12,6 +12,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -25,13 +26,17 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
 
+func defaultBackend() string {
+	return cmp.Or(os.Getenv("ENGINEX_STEMS_BACKEND"), "htdemucs")
+}
+
 // Main runs the daemon; both cmd/enginex-stemsd and the sc5000-stemsd alias call it.
 func Main() {
 	listen := flag.String("listen", "127.0.0.1:6596", "listen address")
 	token := flag.String("token-file", defaultToken(), `internal credential file; "" serves LAN callers without one`)
 	worker := flag.String("worker", "/opt/sc5000-stems/worker.py", "protocol worker")
 	python := flag.String("python", "/usr/bin/python3", "Python interpreter for the worker")
-	backend := flag.String("backend", cmp.Or(os.Getenv("ENGINEX_STEMS_BACKEND"), "hpss"), "separator: hpss, demucs or auto")
+	backend := flag.String("backend", defaultBackend(), "separator: htdemucs, demucs, auto or hpss")
 	sessions := flag.Int("sessions", 1, "concurrent Stems sessions")
 	announce := flag.Bool("lan-announce", true, "answer LAN discovery probes on UDP 17891 (never when listening on loopback)")
 	flag.Parse()
@@ -101,17 +106,29 @@ func Main() {
 // resolveWorker asks worker.py which separator backend resolves to, once:
 // importing torch per session only to pick one would cost seconds.
 func resolveWorker(python, worker, backend string) (string, []string) {
+	return resolveWorkerWithLog(python, worker, backend, os.Stderr)
+}
+
+func resolveWorkerWithLog(python, worker, backend string, log io.Writer) (string, []string) {
 	probe, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	got, e := exec.CommandContext(probe, python, worker, "--backend", backend, "--print-backend").Output()
 	name := strings.TrimSpace(string(got))
-	args := []string{python, "-u", worker, "--backend", name}
-	if e != nil || (name != "hpss" && name != "htdemucs") {
-		// An older worker.py has no --backend: it only does hpss, so run it as before.
-		fmt.Fprintf(os.Stderr, "warning: worker backend %q: %v; assuming hpss\n", backend, cmp.Or(e, fmt.Errorf("answered %q", name)))
-		return "hpss", args[:3]
+	if e == nil && (name == "hpss" || name == "htdemucs") {
+		if backend != "hpss" && name == "hpss" {
+			fmt.Fprintln(log, "enginex-stemsd: neural backend (htdemucs) Python dependencies unavailable; falling back to hpss")
+		}
+		return name, []string{python, "-u", worker, "--backend", name}
 	}
-	return name, args
+	if backend != "hpss" {
+		if gotFallback, e2 := exec.CommandContext(probe, python, worker, "--backend", "hpss", "--print-backend").Output(); e2 == nil && strings.TrimSpace(string(gotFallback)) == "hpss" {
+			fmt.Fprintln(log, "enginex-stemsd: neural backend (htdemucs) Python dependencies unavailable; falling back to hpss")
+			return "hpss", []string{python, "-u", worker, "--backend", "hpss"}
+		}
+	}
+	// An older worker.py has no --backend: it only does hpss, so run it as before.
+	fmt.Fprintf(log, "warning: worker backend %q: %v; assuming hpss\n", backend, cmp.Or(e, fmt.Errorf("answered %q", name)))
+	return "hpss", []string{python, "-u", worker}
 }
 
 // defaultToken prefers the EngineX token paths and falls back to the legacy one.

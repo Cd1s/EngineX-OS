@@ -327,6 +327,8 @@ Space	Space	Space
 ENGINEX VIEW PRESET	ENGINEX 视图预设	ENGINEX 視圖預設
 Stems LAN renderer online:	局域网分轨主机在线：	區域網路分軌主機在線：
 Stems LAN renderer offline:	局域网分轨主机离线：	區域網路分軌主機離線：
+On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network.	本机分轨（基础音质）。如需高音质分轨，请在同一局域网的电脑上运行 EngineX Stems 服务。	本機分軌（基礎音質）。如需高音質分軌，請在同一區域網路的電腦上執行 EngineX Stems 服務。
+High-quality stems:	高音质分轨：	高音質分軌：
 Stem	分轨 Stems	分軌 Stems
 Cue Countdown	热标拍数倒数	熱標拍數倒數
 Mixer Menu	混音台菜单	混音器選單
