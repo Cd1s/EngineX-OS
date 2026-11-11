@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-// #67: every string on /ui comes from the three-language table T, and the page
+// #67: every string on /ui comes from the four-language table T, and the page
 // has no hard-coded Chinese outside it (the language switch names excepted).
-func TestConsoleIsFullyTrilingual(t *testing.T) {
+func TestConsoleIsFullyTranslated(t *testing.T) {
 	b, err := assets.ReadFile("index.html")
 	if err != nil {
 		t.Fatal(err)
@@ -23,7 +23,7 @@ func TestConsoleIsFullyTrilingual(t *testing.T) {
 	}
 	table := page[start:end]
 	entries := map[string]int{}
-	for _, m := range regexp.MustCompile(`(\w+):\[('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*')\]`).FindAllStringSubmatch(table, -1) {
+	for _, m := range regexp.MustCompile(`(\w+):\[('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*'),('(?:[^'\\]|\\.)*')\]`).FindAllStringSubmatch(table, -1) {
 		n := 0
 		for _, s := range m[2:] {
 			if len(s) > 2 {
@@ -45,8 +45,8 @@ func TestConsoleIsFullyTrilingual(t *testing.T) {
 		t.Fatalf("found only %d keys; did the markup change?", len(used))
 	}
 	for key := range used {
-		if entries[key] != 3 {
-			t.Errorf("%s: %d of 3 languages", key, entries[key])
+		if entries[key] != 4 {
+			t.Errorf("%s: %d of 4 languages", key, entries[key])
 		}
 	}
 	rest := page[:start] + page[end:]
