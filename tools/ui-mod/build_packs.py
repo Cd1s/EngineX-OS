@@ -4313,7 +4313,7 @@ SHADOW_LAYER = r"""
                                         speedState: scHeader.pitchVal
                                         speedRange: scHeader.rangeStr
                                         speedRangeTextWidth: 0
-                                        speedRangeTextHorizontalAlignment: Text.AlignLeft
+                                        speedRangeTextHorizontalAlignment: Text.AlignRight
                                         speedStateTextWidth: 0
                                         speedStateTextHorizontalAlignment: Text.AlignRight
                                         columnSpacing: 8
@@ -4485,7 +4485,7 @@ SHADOW_LAYER = r"""
                                 speedRange: scHeader.rangeStr
                                 speedRangeTextFont: Style.fontH1
                                 speedRangeTextWidth: 0
-                                speedRangeTextHorizontalAlignment: Text.AlignLeft
+                                speedRangeTextHorizontalAlignment: Text.AlignRight
                                 speedStateTextFont: Style.fontH1
                                 speedStateTextWidth: 0
                                 speedStateTextHorizontalAlignment: Text.AlignRight
@@ -4563,7 +4563,7 @@ SHADOW_LAYER = r"""
                     SoftTakeoverIndicators {
                         Layout.alignment: Qt.AlignCenter
                         Layout.leftMargin: 4
-                        Layout.rightMargin: scHeader.perfSplitMain ? 8 : 4
+                        Layout.rightMargin: scHeader.perfSplitMain ? 6 : 4
                         iconWidth: scHeader.perfSplitMain ? 24 : 16
                         iconHeight: scHeader.perfSplitMain ? 16 : 12
                         flow: Flow.LeftToRight
@@ -4578,7 +4578,7 @@ SHADOW_LAYER = r"""
                         speedRangeTextFont: scHeader.perfSplitMain ? Style.fontTitle : Style.fontH1
                         speedRangeTextWidth: 0
                         speedRangeTextColor: scHeader.perfSplitMain ? Style.font02Color : Style.font01Color
-                        speedRangeTextHorizontalAlignment: Text.AlignLeft
+                        speedRangeTextHorizontalAlignment: Text.AlignRight
                         speedStateTextFont: scHeader.perfSplitMain ? Style.fontTitle : Style.fontH1
                         speedStateTextWidth: 0
                         speedStateTextColor: Style.font02Color
@@ -5704,11 +5704,11 @@ def edits(dev: bool):
             ("                Layout.leftMargin: 24\n                Layout.rightMargin: 12\n",
              "                Layout.leftMargin: 4\n                Layout.rightMargin: 4\n"),
             ("                target: softTakeoverIndicators\n                Layout.rightMargin: 32\n",
-             "                target: softTakeoverIndicators\n                Layout.rightMargin: 8\n"),
+             "                target: softTakeoverIndicators\n                Layout.rightMargin: 6\n"),
             ("        speedRangeTextFont: Style.fontH1\n        speedRangeTextWidth: 80\n        speedRangeTextHorizontalAlignment: Text.AlignHCenter\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextWidth: 80\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 0\n",
-             "        speedRangeTextFont: Style.fontH1\n        speedRangeTextWidth: 0\n        speedRangeTextHorizontalAlignment: Text.AlignLeft\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextWidth: 0\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 8\n"),
+             "        speedRangeTextFont: Style.fontH1\n        speedRangeTextWidth: 0\n        speedRangeTextHorizontalAlignment: Text.AlignRight\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextWidth: 0\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 8\n"),
             ("                speedRangeTextFont: Style.fontTitle\n                speedRangeTextWidth: 144\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                speedStateTextWidth: 144\n",
-             "                speedRangeTextFont: Style.fontTitle\n                speedRangeTextWidth: 0\n                speedRangeTextHorizontalAlignment: Text.AlignLeft\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                speedStateTextWidth: 0\n                columnSpacing: 12\n"),
+             "                speedRangeTextFont: Style.fontTitle\n                speedRangeTextWidth: 0\n                speedRangeTextHorizontalAlignment: Text.AlignRight\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                speedStateTextWidth: 0\n                columnSpacing: 12\n"),
         ]
         for control, width in (("autoLoop", 52), ("beatJump", 64)):
             scaled[performance] += [
@@ -5726,7 +5726,7 @@ def edits(dev: bool):
             ("                    Layout.preferredHeight: 24\n                    Layout.fillWidth: true\n                    Layout.maximumWidth: 200\n",
              "                    Layout.preferredHeight: 24\n                    Layout.fillWidth: false\n                    Layout.minimumWidth: 135\n                    Layout.preferredWidth: 135\n                    Layout.maximumWidth: 135\n"),
             ("                    speedRangeTextFont: Style.fontH1\n                    speedStateTextFont: Style.fontH1\n                    speedRangeTextHorizontalAlignment: Text.AlignRight\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    flat: true\n",
-             "                    speedRangeTextFont: Style.fontH1\n                    speedRangeTextWidth: 0\n                    speedRangeTextHorizontalAlignment: Text.AlignLeft\n                    speedStateTextFont: Style.fontH1\n                    speedStateTextWidth: 0\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    columnSpacing: 8\n                    flat: true\n"),
+             "                    speedRangeTextFont: Style.fontH1\n                    speedRangeTextWidth: 0\n                    speedRangeTextHorizontalAlignment: Text.AlignRight\n                    speedStateTextFont: Style.fontH1\n                    speedStateTextWidth: 0\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    columnSpacing: 8\n                    flat: true\n"),
         ]
         # Use control-specific beginnings to keep all anchors unique.
         scaled[mini] += [
@@ -5763,7 +5763,7 @@ def edits(dev: bool):
             speedState: deckTrackDataContent.deckData.speedState
             speedRange: deckTrackDataContent.deckData.speedRange
             speedRangeTextWidth: 0
-            speedRangeTextHorizontalAlignment: Text.AlignLeft
+            speedRangeTextHorizontalAlignment: Text.AlignRight
             speedStateTextWidth: 0
             speedStateTextHorizontalAlignment: Text.AlignRight
             columnSpacing: 8
