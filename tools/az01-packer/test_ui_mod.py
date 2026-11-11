@@ -219,7 +219,8 @@ class UiModSourceTest(unittest.TestCase):
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")]
         keys = [r[0] for r in rows]
         self.assertEqual(len(keys), len(set(keys)), "duplicate keys in i18n.tsv")
-        for removed in ("Jog Light Mode", "Jog Light", "Psy Rainbow", "Psy Fast", "Psy BPM Sync", "Static", "Rainbow", "Fast"):
+        # "Static" (Display -> Time Format) and "Fast" (Mic -> Talkover Resume) are stock Engine translator options.
+        for removed in ("Jog Light Mode", "Jog Light", "Psy Rainbow", "Psy Fast", "Psy BPM Sync", "Rainbow"):
             self.assertNotIn(removed, keys)
         for added in ("ENGINEX VIEW PRESET", "Shadow Deck Mode", "Pro DJ Link Export to CDJ (Beta)", "Fader Echo: Up", "Fader Echo: All", "Restart Engine to apply? Playback will stop."):
             self.assertIn(added, keys)
@@ -3809,6 +3810,84 @@ assert.ok(!presses.some(p=>p.endsWith('/RequestMaster')),'a copy must not reques
 
 
 class I18nTranslateRegressionTest(unittest.TestCase):
+    # Official English terms intentionally kept identical in zh-Hans / zh-Hant, with reasons.
+    KEEP_ENGLISH = {
+        "Layer A": "official SC5000/SC6000 hardware deck layer name",
+        "Layer B": "official SC5000/SC6000 hardware deck layer name",
+        "Denon": "official hardware brand name in Waveform Style",
+        "RGB": "standard DJ RGB waveform color acronym",
+        "Cue / Loop": "standard DJ Cue / Loop tab name",
+        "Engine": "official Engine OS input/brand name",
+        "ENGINE CONNECT": "official Denon DJ network protocol name",
+        "Spiral": "official Pioneer DJ Color/Beat FX proper name",
+        "Pitch Echo": "official Pioneer DJ Color FX proper name",
+        "Slip Roll": "official Pioneer DJ Beat FX proper name",
+        "Dub Echo": "official Pioneer DJ / Denon Sweep FX proper name",
+        "Space": "official Pioneer DJ Color FX proper name",
+        "Open Key": "official key notation system proper name",
+        "Camelot": "official Camelot wheel key notation proper name",
+        "Ableton Link": "official network sync protocol/product name",
+        "Wi-Fi": "universal wireless standard name",
+        "Spotify": "official streaming service brand name",
+        "320kbps": "universal audio bitrate notation",
+        "English": "self-named English language option",
+    }
+
+    DISPLAY_TAB_STRINGS = (
+        "Display",
+        "Reset Played Tracks", "Reset",
+        "Track Title", "Filename", "Metadata",
+        "Time Format", "Static", "Dynamic",
+        "Track End Warning", "Off",
+        "On Air Mode",
+        "Sync Indicator", "Beat Phase", "Beat Keeper",
+        "Waveform Style", "Denon", "RGB", "3-Band", "Tri-Band",
+        "RGB Waveform Creation",
+        "RGB Waveforms and Track Overviews will be built when loading to deck.",
+        "Track Overview Style", "Half", "Full",
+    )
+
+    MIXER_TAB_STRINGS = (
+        "Mixer",
+        "Sampler Output", "Layer A", "Layer B", "Ch 1", "Ch 2", "Ch 3", "Ch 4", "Main",
+        "Playlist Deck Crossfade Time", "Off",
+        "Master Limiter",
+        "VU Meter Mode", "Channel",
+        "EQ Type", "Isolate", "Normal",
+        "ISO EQ High Xover", "ISO EQ Low Xover",
+        "Headphone Gain",
+        "Smart Headphone Cue",
+        "Cue Solo Mode",
+        "Split Cue Output", "Invert",
+        "Sum Main Out to Mono",
+        "Output Equalizer", "Open",
+        "X-Fader Cut In Length Left", "X-Fader Cut In Length Right",
+        "Fader Echo", "All Faders", "Upfader Only",
+        "Calibrate Crossfader", "Calibrate",
+    )
+
+    OTHER_SETTINGS_REQUIRED = (
+        # Layout
+        "Classic", "Wave", "Art", "Single", "Dual (Stacked)", "Dual (Grouped)",
+        "2 Decks", "4 Decks", "2 Waveforms", "4 Waveforms", "Horizontal", "Vertical",
+        "Regular", "Swapped",
+        # Profile / Playback / Cues & Loops / Safety / Library
+        "Save to my drive", "Saved", "Load drive profile to device?",
+        "Instant", "Motor Torque", "Cue Position", "Track Start", "Censor",
+        "Acapella/Instrumental FX", "Primary", "Min",
+        "Bar", "Beat", "Tempo", "Toggle", "Shift Disable",
+        "Pitch Bend", "Range", "Fixed", "Progressive", "Strict", "Fuzzy",
+        "Momentary", "Trigger", "Reloop", "Disable", "Enable",
+        "Long Press", "Sharps", "Flats", "Match", "Compatible",
+        # Device / Fx / Mic / Services
+        "Smart", "15m", "30m", "60m", "MPCe LED Bloom",
+        "Kill", "Bleed", "Fader Echo Beats", "Fader Echo Feedback", "Default", "Recall",
+        "Fast", "Mic Attenuation", "Mic 1 Attenuation", "Mic 2 Attenuation",
+        "Gate Threshold", "Talkover Threshold", "Mic 1 EQ", "Mic 2 EQ", "EQ",
+        "Mic Effects", "Mic FX", "Mic FX Amount", "Mic FX Select",
+        "Ableton Link Offset",
+    )
+
     def test_empty_quote_does_not_desync_shadow_badge_literals_and_labeltext_translates(self):
         rows = bp.load_dict()
         for lang, expected in (
@@ -3826,6 +3905,82 @@ class I18nTranslateRegressionTest(unittest.TestCase):
                 self.assertIn(item, translated)
             btn = bp.translate('            labelText: "Dismiss"', table, set(), live=True)
             self.assertIn(expected[4], btn)
+
+    def test_layer_stays_english_and_player_uses_deck_term(self):
+        rows = bp.load_dict()
+        for layer_key in ("Layer A", "Layer B"):
+            self.assertIn(layer_key, rows)
+            self.assertEqual(rows[layer_key]["zh-Hans"], layer_key)
+            self.assertEqual(rows[layer_key]["zh-Hant"], layer_key)
+        for en, t in rows.items():
+            for lang in ("zh-Hans", "zh-Hant"):
+                self.assertNotIn("图层", t[lang], f"{en} ({lang}) must never translate deck Layer as 图层")
+                self.assertNotIn("圖層", t[lang], f"{en} ({lang}) must never translate deck Layer as 圖層")
+                if "player" in en.lower():
+                    self.assertNotIn("播放器", t[lang], f"{en} ({lang}) must use 碟机, not 播放器")
+                    self.assertNotIn("播放機", t[lang], f"{en} ({lang}) must use 碟機, not 播放機")
+        self.assertEqual(rows["Player"], {"zh-Hans": "碟机", "zh-Hant": "碟機"})
+        self.assertEqual(rows["Player #"], {"zh-Hans": "碟机编号 #", "zh-Hant": "碟機編號 #"})
+        self.assertEqual(rows["PLAYER "], {"zh-Hans": "碟机 ", "zh-Hant": "碟機 "})
+
+    def test_display_and_mixer_tabs_and_settings_options_complete(self):
+        rows = bp.load_dict()
+        # Dynamically include stock 5.3.0 QML literals from DisplayTabContent and MixerTabContent when available.
+        extra_qml = set()
+        qrc = LAB / "5.3.0" / "qrc"
+        if qrc.is_dir():
+            prefs_dir = qrc / "Skins/Embedded/Views/ControlCenter/Tabs/Preferences"
+            for tab_qml in ("DisplayTabContent.qml", "MixerTabContent.qml"):
+                tab_text = (prefs_dir / tab_qml).read_text(encoding="utf-8")
+                for comp in re.findall(r"\b([A-Z][A-Za-z0-9_]*)\s*\{\}", tab_text):
+                    entry_file = prefs_dir / "Entries" / f"{comp}.qml"
+                    if entry_file.is_file():
+                        src = entry_file.read_text(encoding="utf-8")
+                        for m in re.finditer(r'\b(?:text|buttonText|title|message)\s*:\s*"([^"\\\n]+)"', src):
+                            extra_qml.add(m.group(1))
+
+        checked = set(self.DISPLAY_TAB_STRINGS) | set(self.MIXER_TAB_STRINGS) | set(self.OTHER_SETTINGS_REQUIRED) | extra_qml
+        for s in sorted(checked):
+            if s in self.KEEP_ENGLISH and s not in rows:
+                self.assertTrue(bool(self.KEEP_ENGLISH[s].strip()), f"{s}: empty keep-English reason")
+                continue
+            self.assertIn(s, rows, f"missing translation in tools/ui-mod/i18n.tsv: {s!r}")
+            for lang in ("zh-Hans", "zh-Hant"):
+                val = rows[s][lang]
+                self.assertTrue(bool(val.strip()), f"{s} ({lang}) is blank")
+                if val == s:
+                    self.assertIn(
+                        s, self.KEEP_ENGLISH,
+                        f"{s!r} ({lang}) stays English without an explicit KEEP_ENGLISH reason",
+                    )
+                    self.assertTrue(bool(self.KEEP_ENGLISH[s].strip()))
+
+    def test_option_value_paths_translate_spinbox_slider_and_open_button(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            patch_table = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        prefs = "Skins/Embedded/Views/ControlCenter/Tabs/Preferences/"
+        list_patches = dict(patch_table[prefs + "Entries/Base/ListEntry.qml"])
+        self.assertIn("text: root.scT(modelData)\n", "".join(list_patches.values()))
+        self.assertIn("text: root.scT(control.textFromValue(control.value, control.locale))\n", "".join(list_patches.values()))
+        self.assertIn("down: pressed || isSelected(modelData)", "".join(list_patches.values()))
+
+        slider_patches = dict(patch_table[prefs + "Entries/Base/PrefsSliderEntry.qml"])
+        self.assertIn("text: root.scT(entry.sliderValueText)\n", "".join(slider_patches.values()))
+
+        eq_patches = dict(patch_table[prefs + "Entries/OutputEQ.qml"])
+        self.assertIn('buttonText: root.scT("Open")', "".join(eq_patches.values()))
+
+        uikit_list = dict(patch_table["Skins/UIKit/Elements/Settings/Entries/ListEntry.qml"])
+        self.assertIn("Math.scI18n.t(modelData)", "".join(uikit_list.values()))
+        self.assertIn("Math.scI18n.t(control.textFromValue(control.value, control.locale))", "".join(uikit_list.values()))
+
+        radio = dict(patch_table["Skins/UIKit/Elements/RadioSlider.qml"])
+        self.assertIn("Math.scI18n.t(modelData)", "".join(radio.values()))
+        self.assertIn("control.currentValue === modelData", "".join(radio.values()))
 
 
 class ShadowSyncAlignmentGuardTest(unittest.TestCase):

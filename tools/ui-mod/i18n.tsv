@@ -333,7 +333,7 @@ Mixer Menu	混音台菜单	混音器選單
 Mixer Settings	混音台设置	混音器設定
 Channels	通道	通道
 Input	输入	輸入
-Player	播放器	播放機
+Player	碟机	碟機
 Line In	线路输入	線路輸入
 Engine	Engine	Engine
 Shadow Deck Mode	影子轨模式	影子軌模式
@@ -415,7 +415,8 @@ OFFLINE · 	离线 · 	離線 ·
 REMOTE	仅曲目信息	僅曲目資訊
 OVERVIEW	概览波形	概覽波形
 Loading…	正在加载…	正在載入…
-Layer B	图层 B	圖層 B
+Layer A	Layer A	Layer A
+Layer B	Layer B	Layer B
 Deck 3/4	碟机 3/4	碟機 3/4
 DECK 	碟机 	碟機 
 PLAYER 	碟机 	碟機 
@@ -458,3 +459,140 @@ Clear Stem Render Queue?	清空 Stems 分轨队列？	清空 Stems 分軌佇列�
 Clearing the render will clear queued stem tracks and stop any rendering in progress.	清空后将移除排队中的曲目并停止当前正在进行的 Stems 分轨。	清空後將移除排隊中的曲目並停止目前進行中的 Stems 分軌。
 Please connect to the internet to sync the time.	请连接网络以同步时间。	請連線至網路以同步時間。
 Failed to set Time Zone.	设置时区失败。	設定時區失敗。
+# Control Center, Layout, Profile, Settings & Mixer Menu complete options
+Deck 1	碟机 1	碟機 1
+Deck 2	碟机 2	碟機 2
+Deck 3	碟机 3	碟機 3
+Deck 4	碟机 4	碟機 4
+Channel 1	通道 1	通道 1
+Channel 2	通道 2	通道 2
+Channel 3	通道 3	通道 3
+Channel 4	通道 4	通道 4
+Ch 1	通道 1	通道 1
+Ch 2	通道 2	通道 2
+Ch 3	通道 3	通道 3
+Ch 4	通道 4	通道 4
+Classic	经典	經典
+Wave	波形模式	波形模式
+Art	封面模式	封面模式
+Single	单层	單層
+Dual (Stacked)	双层（上下）	雙層（上下）
+Dual (Grouped)	双层（并排）	雙層（並排）
+Dual	双轨	雙軌
+Quad	四轨	四軌
+2 Decks	2 轨	2 軌
+4 Decks	4 轨	4 軌
+2 Waveforms	2 条波形	2 條波形
+4 Waveforms	4 条波形	4 條波形
+Horizontal	横向	橫向
+Vertical	纵向	縱向
+Regular	正常	正常
+Swapped	互换	互換
+Save to my drive	保存到 U 盘	儲存至隨身碟
+Saved	已保存	已儲存
+Load drive profile to device?	将 U 盘中的配置加载到本机？	將隨身碟中的設定檔載入至本機？
+Normal	标准	標準
+Instant	立即	立即
+Motor Torque	转盘扭矩	轉盤扭力
+Cue Position	Cue 点	Cue 點
+Track Start	曲目开头	曲目開頭
+Censor	消音倒放	消音倒放
+Acapella/Instrumental FX	人声/伴奏分轨效果	人聲/伴奏分軌效果
+Primary	主按钮	主按鈕
+Min	最低	最低
+Bar	小节	小節
+Beat	节拍	節拍
+Tempo	速度	速度
+Toggle	直接切换	直接切換
+Shift Disable	Shift 关闭	Shift 關閉
+Pitch Bend	变速微调	變速微調
+Range	变速范围	變速範圍
+Fixed	固定	固定
+Progressive	渐进	漸進
+Strict	严格	嚴格
+Fuzzy	宽松	寬鬆
+Momentary	按住播放	按住播放
+Trigger	触发	觸發
+Reloop	重新循环	重新循環
+Disable	停用	停用
+Enable	仅激活	僅啟用
+Filename	文件名	檔案名稱
+Metadata	内嵌标签	內嵌標籤
+Static	静态	靜態
+Dynamic	动态	動態
+Beat Phase	节拍相位	節拍相位
+Beat Keeper	四拍指示	四拍指示
+3-Band	三频段	三頻段
+Tri-Band	三频段	三頻段
+Half	半幅	半幅
+Full	全幅	全幅
+Long Press	长按	長按
+Sharps	升号 (♯)	升記號 (♯)
+Flats	降号 (♭)	降記號 (♭)
+Match	完全相同	完全相同
+Compatible	兼容调性	相容調性
+Smart	智能	智慧
+15m	15 分钟	15 分鐘
+30m	30 分钟	30 分鐘
+60m	60 分钟	60 分鐘
+MPCe LED Bloom	MPCe 打击垫光晕	MPCe 打擊墊光暈
+Remove Stems Support	移除 Stems 分轨组件	移除 Stems 分軌組件
+Download Stems Support	下载 Stems 分轨组件	下載 Stems 分軌組件
+Remove	移除	移除
+Download	下载	下載
+Main	主输出	主輸出
+Channel	通道	通道
+Playlist Deck Crossfade Time	歌单混音过渡时间	歌單混音過渡時間
+Isolate	隔离 (ISO)	隔離 (ISO)
+Invert	左右反转	左右反轉
+Kill	完全静音	完全靜音
+Bleed	保留直通	保留直通
+Fader Echo Beats	推子回音拍数	推桿回音拍數
+Fader Echo Feedback	推子回音反馈	推桿回音回授
+Default	恢复默认	恢復預設
+Recall	保持设置	保留設定
+Fast	快	快
+Mic Attenuation	麦克风衰减	麥克風衰減
+Mic 1 Attenuation	麦克风 1 衰减	麥克風 1 衰減
+Mic 2 Attenuation	麦克风 2 衰减	麥克風 2 衰減
+Gate Threshold	噪声门阈值	噪音門閾值
+Mic 1 Gate Threshold	麦克风 1 噪声门阈值	麥克風 1 噪音門閾值
+Mic 2 Gate Threshold	麦克风 2 噪声门阈值	麥克風 2 噪音門閾值
+Talkover Threshold	Talkover 触发阈值	Talkover 觸發閾值
+Mic 1 Talkover Threshold	麦克风 1 Talkover 阈值	麥克風 1 Talkover 閾值
+Mic 2 Talkover Threshold	麦克风 2 Talkover 阈值	麥克風 2 Talkover 閾值
+Mic 1 EQ	麦克风 1 均衡器	麥克風 1 等化器
+Mic 2 EQ	麦克风 2 均衡器	麥克風 2 等化器
+EQ	均衡器 (EQ)	等化器 (EQ)
+Mic Effects	麦克风效果组	麥克風效果組
+Mic FX	麦克风效果	麥克風效果
+Mic FX Amount	麦克风效果量	麥克風效果量
+Mic FX Select	麦克风效果选择	麥克風效果選擇
+Echo Feedback	Echo 反馈	Echo 回授
+Echo Speed	Echo 速度	Echo 速度
+Speakers	主音箱	主喇叭
+Booth	监听音箱	監聽喇叭
+Headphones	耳机	耳機
+Zone	副区	副區
+Thru	直通	直通
+Left	左	左
+Right	右	右
+Pre-Fader	推子前	推桿前
+Post-Fader	推子后	推桿後
+Ableton Link Offset	Ableton Link 延迟补偿	Ableton Link 延遲補償
+Connected	已连接	已連線
+Not Connected	未连接	未連線
+No Internet Connection	无互联网连接	無網際網路連線
+No internet connection	无互联网连接	無網際網路連線
+Strength	信号强度	訊號強度
+IP Version 4 Address	IPv4 地址	IPv4 位址
+Login Credentials	登录凭据	登入憑證
+Forget	忘记	忘記
+Preferred Networks	首选网络	慣用網路
+Available Networks	可用网络	可用網路
+Searching for wireless networks	正在搜索无线网络	正在搜尋無線網路
+Wi-Fi is currently disabled.<br />To see available networks, first enable Wi-Fi.	Wi-Fi 当前已关闭。<br />请先开启 Wi-Fi 以查看可用网络。	Wi-Fi 目前已關閉。<br />請先開啟 Wi-Fi 以查看可用網路。
+Ensure you are connected to Wi-Fi to receive the latest updates and features	请连接 Wi-Fi 以获取最新更新与功能	請連線至 Wi-Fi 以取得最新更新與功能
+Failed to connect to Wi-Fi network.	连接 Wi-Fi 网络失败。	連線至 Wi-Fi 網路失敗。
+Password was not accepted.	密码不正确。	密碼不正確。
+Lost connection to Wi-Fi network.	Wi-Fi 网络连接已断开。	Wi-Fi 網路連線已中斷。
