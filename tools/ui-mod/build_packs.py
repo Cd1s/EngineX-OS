@@ -1051,6 +1051,7 @@ SERVICES_MAIN = """
 		const now = Date.now()
 		if (now - scShadowPollAt > 3000) scShadowPoll()
 		scShadowLine(now)
+		scShadowLandingTick(now)
 		if (scShadowRoleDirty) {
 			scShadowRoleDirty = false
 			scShadowMineRole = scFourDeckRole
@@ -1075,6 +1076,7 @@ SERVICES_MAIN = """
 			}
 			s.ps = !!g.play.state
 			s.posMs = sr > 0 ? g.position.unnormalized / sr * 1000 : 0
+			s.rawPos = s.posMs
 			s.bpm = ob; s.currentBpm = cb; s.at = now; s.jumps = p ? p.jumps : 0
 			s.loaded = !!g.loaded.state
 			if (p && p.loaded === s.loaded && now - p.netAt < 500) { s.net = p.net; s.netAt = p.netAt }
@@ -1089,34 +1091,58 @@ SERVICES_MAIN = """
 				s.rangeIndex = g.range.index
 				s.range = p && p.rangeIndex === s.rangeIndex ? p.range : parseFloat(g.range.string) || 0
 			}
+			const syncChange = p && s.sync && (!p.sync || Math.abs(s.pitch - p.pitch) > 0.02)
+			s.syncUntil = !s.sync ? 0 : syncChange ? now + 2000 : p ? p.syncUntil || 0 : 0
+			const syncMoving = s.ps && now < s.syncUntil
+			const freshRaw = p && s.rawPos - p.rawPos > (now - p.at) * (1 + s.pitch / 100) * 0.5
+			s.rawStillAt = freshRaw || !p || s.ps !== p.ps || s.net !== p.net ? undefined :
+				isFinite(p.rawStillAt) ? p.rawStillAt : now
+			if (syncChange) {
+				// Keep the measured audio-block bias, not the old phase line.
+				const bias = isFinite(p.env) && isFinite(p.avg) ? p.env - p.avg : 0
+				s.syncBias = Math.max(0, Math.min(35 * (1 + s.pitch / 100), bias))
+			} else s.syncBias = p ? p.syncBias || 0 : 0
 			if (p) {
 				const run = p.playing ? (now - p.at) * (1 + p.pitch / 100) : 0, expect = p.posMs + run
 				// A late tick (GC, a busy GUI thread) can run before Engine's queued position
 				// update and read the position of before the stall (zs15-b: 340 ms behind,
 				// counted as a jump back and a jump forward, each a seek on the peer).
 				// Nothing is known then: the deck is where its speed puts it.
-				if (now - p.at > 150 && s.ps && p.ps && s.net === p.net) s.posMs = expect
+				// A delayed stream can keep advancing. Once it fell outside the
+				// measured native Sync pull (up to ~27%, plus one audio block),
+				// keep carrying it until it catches up or a normal tick resumes.
+				const block = 35 * (1 + s.pitch / 100)
+				s.lateGuard = syncMoving && now - p.at > 150 && s.rawPos <
+					(p.lateGuard ? expect - block : p.rawPos + run - block - run * 0.3)
+				if (now - p.at > 150 && s.ps && p.ps && s.net === p.net && !p.phaseHold &&
+					!(syncMoving && freshRaw && !s.lateGuard)) s.posMs = expect
 				// Sync phase steps can be smaller than 180 ms. Audio-block jitter is
 				// measured in wall time, so allow it to grow with the deck's rate.
 				const phaseMs = 40 * Math.max(1, 1 + s.pitch / 100)
 				const jumpMs = s.sync && p.playing ? phaseMs : (p.playing ? 180 : 5)
 				const delta = s.posMs - expect
 				const phaseFresh = s.posMs - p.phasePos > (now - p.at) * (1 + s.pitch / 100) * 0.25
+				const movingPhase = syncMoving && freshRaw && !s.lateGuard && isFinite(p.phase) &&
+					delta * p.phase > 0 && Math.abs(delta - p.phase) > phaseMs
+				// A large constant deficit under consecutive late callbacks can
+				// still be an advancing queued stream. A ramp changes that deficit;
+				// a standalone step waits for the next normal callback, as before.
+				const latePhase = syncMoving && now - p.at > 150 && Math.abs(delta) > phaseMs + block && !movingPhase
 				s.phase = undefined
 				s.phasePos = s.posMs
 				// A held platter is not an indefinitely stale GUI read. After
 				// 500 ms use its real position once, then keep the normal jog line
 				// until playback advances again; never seek on every held tick.
-				s.phaseHold = s.sync && s.ps && p.ps && s.net === p.net && !phaseFresh &&
-					(p.phaseHold || (isFinite(p.phase) && now - p.phaseAt >= 500))
+				s.phaseHold = s.sync && s.ps && p.ps && s.net === p.net && !freshRaw &&
+					(p.phaseHold || now - s.rawStillAt >= 500)
+				if (s.phaseHold) s.posMs = s.rawPos
 				if (s.phaseHold) { if (!p.phaseHold) s.jumps++ }
 				else if (s.playing === p.playing && s.net === p.net && Math.abs(delta) > jumpMs) {
 					// A short GUI stall can also leave one stale audio block. Carry
 					// the old line until a small Sync step persists on the next tick;
 					// its queued recovery then never becomes a backward/forward seek.
 					if (s.sync && p.playing && (Math.abs(delta) <= 180 || (isFinite(p.phase) && !phaseFresh)) &&
-						(!isFinite(p.phase) || Math.abs(delta - p.phase) > phaseMs ||
-							!phaseFresh)) {
+						!movingPhase && (latePhase || !isFinite(p.phase) || Math.abs(delta - p.phase) > phaseMs || !phaseFresh)) {
 						s.phase = delta; s.phaseAt = isFinite(p.phase) ? p.phaseAt : now; s.posMs = expect
 					} else s.jumps++
 				}
@@ -1131,6 +1157,15 @@ SERVICES_MAIN = """
 			// post that line (noise of a few ms), decaying 0.5 ms/s to follow pitch rounding.
 			const speed = 1 + s.pitch / 100, raw = s.posMs - speed * now
 			if (s.phaseHold) s.env = s.avg = raw
+			else if (syncMoving) {
+				// Native Sync pulls phase by changing the transport's instantaneous
+				// speed for up to ~1.6 s. The nominal-pitch envelope would conceal
+				// that ramp. Publish fresh progress directly during this transition;
+				// stale reads still carry the preceding line and cannot seek backwards.
+				const accepted = freshRaw && !s.lateGuard && !isFinite(s.phase)
+				const pos = !accepted && p && p.ps && s.net === p.net ? p.posMs + (now - p.at) * (1 + p.pitch / 100) : s.rawPos
+				s.avg = pos - speed * now; s.env = s.avg + s.syncBias
+			}
 			else if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.sync === s.sync && p.jumps === s.jumps && isFinite(p.env)) {
 				// A jog brake: the positions average ~17 ms of wall time behind the line
 				// (25 at most in steady play). Further behind, the deck is slower than its
@@ -1431,6 +1466,7 @@ SERVICES_MAIN = """
 		// A display slot is Engine's business only while our own load is still on it.
 		if (scShadowDisplayOnly || (((scShadowEngineMask >> d) & 1) === 0 && !(scShadowAt[d] && scShadowAt[d].path))) return
 		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
+		at.landing = undefined
 		// On an all-in-one console (#160), leave Decks 3/4 alone unless a shadow peer loaded them.
 		if (!root.scPlayer && !at.path) return
 		const pPlay = root.scTr("/Engine/Deck" + d + "/Play")
@@ -1477,6 +1513,11 @@ SERVICES_MAIN = """
 		if (now - (at.linkAt || 0) < 300 && (e.playing && !e.cue) !== at.linkPS) return
 		if (e.cue && at.linkCueOff && now - at.linkCueOff < 300) return
 		const local = !!g("/PlayState").state
+		// Heartbeats can keep the same sequence. The landing observer still
+		// needs their liveness and carried source line on every delivery.
+		at.sourceTarget = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * at.rate : 0)
+		at.sourceAt = now; at.sourcePlaying = !!e.playing && !e.stale
+		if (!at.sourcePlaying || !e.sync || !e.link || !root.scPlayer || at.nativeSync || (e.sync && e.pitch > 100)) at.landing = undefined
 		if (e.seq && e.seq === at.lastSeq && e.playing === local && !at.wantMaster && !at.check && !at.nativeSync) return
 		at.lastSeq = e.seq
 		const wasPreview = at.preview
@@ -1501,6 +1542,9 @@ SERVICES_MAIN = """
 		const target = e.positionMs + (e.playing && e.at ? Math.max(0, now - e.at) * scShadowRate(e) : 0)
 		const posMs = g("/Track/TrackPosition").unnormalized / sr * 1000
 		const drift = target - posMs // > 0: behind
+		const meanReady = at.env !== undefined && now - at.envT0 >= 300
+		const ownLine = meanReady ? at.env + at.envRate * (now - at.envT0 + 18) : posMs
+		const phaseDrift = target - ownLine
 		at.drift = drift
 		const pSync = g("/SyncMode")
 		const synced = !!pSync && pSync.string !== "" && pSync.string !== "Off"
@@ -1512,6 +1556,7 @@ SERVICES_MAIN = """
 		// track. UnSync retains the native rate until the source moves its fader.
 		if (e.link && root.scPlayer && e.sync && e.pitch > 100) at.nativeSync = true
 		const wantSync = !!e.sync && (!e.link || !root.scPlayer || at.nativeSync)
+		const phaseFollower = !!e.link && root.scPlayer && !at.nativeSync && !!e.sync
 		if (at.nativeSync && !e.sync && !synced && e.pitch <= 100) at.nativeSync = false
 		const dbg = act => { if (root.scShadowDebug) root.scShadowDbg({deck: d, act: act, posMs: Math.round(posMs), target: Math.round(target), drift: Math.round(drift), sd: Math.round(at.sd || 0), pitch: e.pitch, pll: at.pll || 0, range: g("/SpeedRange").string, sync: !!e.sync, synced: synced, bpm: e.bpm, currentBpm: e.currentBpm, beat: e.beat, jumps: e.jumps, seeks: at.seeks || 0, master: !!g("/DeckIsMaster").state, link: !!e.link}) }
 		if (!e.playing) at.pll = 0
@@ -1519,16 +1564,31 @@ SERVICES_MAIN = """
 		// The fader goes to the source's tempo ratio, so the BPM shown is the source's.
 		const exact = e.bpm > 0 && e.currentBpm > 0 ? (e.currentBpm / e.bpm - 1) * 100 : NaN
 		// Native Sync can pull the source's phase in after its tempo changed.
-		// Watch its posted line for one second, without confusing our own raw
+		// Watch its posted line through a bounded transition, without confusing our own raw
 		// decoder position with another source change. Heartbeats stay on line.
-		const phaseStep = now < (at.phaseUntil || 0) &&
-			Math.abs(target - at.phaseLine - (now - at.phaseAt) * at.phaseRate) > 20 * at.rate
+		const sourceDelta = target - at.phaseLine - (now - at.phaseAt) * at.phaseRate
+		const phaseStep = now < (at.phaseUntil || 0) && Math.abs(sourceDelta) > 20 * at.rate
+		// A separate large cue/jump remains an immediate transport command,
+		// including after this transition spent its compensation budget.
+		const newJump = e.jumps !== at.jumps && Math.abs(sourceDelta) > 180 * Math.max(1, at.rate)
 		if (syncEdge || tempoStep || phaseStep) {
-			if (syncEdge || tempoStep) at.phaseUntil = now + 1000
+			if (syncEdge || tempoStep) {
+				if (phaseFollower && (syncEdge || now >= (at.phaseHardUntil || 0))) {
+					at.phaseHardUntil = now + 4000; at.transitionSeeks = 0
+				}
+				at.phaseUntil = phaseFollower ? Math.min(at.phaseHardUntil, now + 1000) : now + 1000
+				if (at.landing && Math.abs(at.landing.rate - at.rate) > 2e-4) at.landing = undefined
+			} else if (phaseFollower) at.phaseUntil = Math.min(at.phaseHardUntil, Math.max(at.phaseUntil, now + 500))
+			at.phaseStableAt = now
 			at.phaseLine = target; at.phaseAt = now; at.phaseRate = at.rate
 			if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
-			at.env = undefined
 			at.fine = undefined
+		}
+		if (newJump) {
+			// Cues and loop wraps keep their original one-seek transport path.
+			// They do not replenish or inherit Sync's compensation budget.
+			at.landing = undefined; at.phaseHardUntil = 0; at.phaseUntil = 0; at.transitionSeeks = 0
+			at.phaseLine = target; at.phaseAt = now; at.phaseRate = at.rate
 		}
 		if (!(wantSync && synced) && !(at.nativeSync && e.pitch > 100)) scShadowSpeed(d, Math.abs(exact - e.pitch) < 0.02 ? exact : e.pitch, e.range)
 		const pKey = g("/Track/KeyLock")
@@ -1537,6 +1597,7 @@ SERVICES_MAIN = """
 		// at.cmd only stops rewriting the same state while Engine follows (a frame
 		// or two); a change of the source's state always goes through.
 		if (e.playing !== local) {
+			at.landing = undefined
 			if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
 			if (at.cmd !== e.playing || now >= at.cmdUntil) {
 				if (e.playing) {
@@ -1576,6 +1637,7 @@ SERVICES_MAIN = """
 			at.syncAt = now + 800
 		}
 		if (!e.playing) {
+			at.landing = undefined; at.phaseUntil = 0
 			// Paused: seek once per source position (the cue point moved, jog
 			// search) and check the landing once. It is off by a decoder frame, or
 			// a beat with Quantize, and seeking again every tick replayed it.
@@ -1605,16 +1667,26 @@ SERVICES_MAIN = """
 		// A Sync edge or tempo step is a new phase/rate, not clock drift. Apply
 		// it on this update, with the speed already set above. Keep small audio
 		// block noise on the existing bend path and never snap on a heartbeat.
-		const snap = (!wantSync || at.nativeSync) && (syncEdge || tempoStep || phaseStep) && Math.abs(drift) > 20 * at.rate
+		const snap = (!wantSync || at.nativeSync) && (syncEdge || tempoStep || phaseStep) &&
+			Math.abs(phaseFollower && meanReady ? phaseDrift : drift) > (phaseFollower && meanReady ? 35 : 20) * at.rate
 		if (!jump) at.jumps = e.jumps
 		at.over = Math.abs(drift) > lim ? (at.over || 0) + 1 : 0
 		if (snap || (jump && now - at.seekAt >= 80) || (at.over >= 3 && now - at.seekAt >= 1000)) {
+			// Coalesce new source positions while a native seek is outstanding.
+			// A seek freezes the playing transport before it resumes; another
+			// request would repeat that loss, not correct its landing.
+			const observe = phaseFollower && !!at.line && now < (at.phaseHardUntil || 0)
+			if (observe && (at.landing || (at.transitionSeeks || 0) >= 2)) {
+				at.jumps = e.jumps; at.over = 0
+				return dbg(at.landing ? "landing" : "transition")
+			}
 			if (!jump && !snap) {
 				at.wide = at.wide || now - (at.lastSteady || 0) < 10000
 				at.lastSteady = now
 			}
 			if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
-			seek(target)
+			if (observe && (snap || jump)) root.scShadowLandingSeek(d, at, target, ownLine, now, 0, meanReady)
+			else seek(target)
 			at.jumps = e.jumps
 			at.over = 0
 			at.seeks = (at.seeks || 0) + 1
@@ -1638,6 +1710,7 @@ SERVICES_MAIN = """
 		// only bent past 12 ms. At 6 ms on a 2 s old line the deck was bent 55 times
 		// in six minutes, to and fro.
 		if (wantSync && synced && !at.nativeSync) return dbg("sync")
+		if (at.landing) return dbg("landing")
 		if (now - at.seekAt < 300) return dbg("settle")
 		at.sd = at.sd === undefined ? drift : at.sd * 0.85 + drift * 0.15
 		at.pll = 0
@@ -1658,6 +1731,69 @@ SERVICES_MAIN = """
 		}
 		dbg("steady")
 	}
+	// Seek loss is measured against the issued command, never against a source
+	// that may still be pulling phase. Only one compensated correction is allowed.
+	function scShadowLandingSeek(d, at, target, oldLine, now, loss, oldWarm) {
+		const requested = target + loss
+		const issued = root.scShadowSeek(d, at, requested)
+		if (!isFinite(issued)) return
+		at.transitionSeeks = (at.transitionSeeks || 0) + 1
+		at.landing = {at: at.seekAt, target: issued, rate: at.rate, old: oldLine, uncertain: !oldWarm,
+			lastAt: now, lastPos: oldLine, first: 0, values: [], learned: false}
+	}
+	function scShadowLandingTick(now) {
+		for (const d in scShadowAt) {
+			const at = scShadowAt[d], b = at.landing, l = at.line
+			if (!b || !l) continue
+			if (scShadowDisplayOnly || !root.scPlayer || !at.sourcePlaying || !at.link || at.nativeSync ||
+				!l.play.state || (l.loaded && !l.loaded.state) || !(b.rate > 0) || !(l.sr.value > 0) ||
+				((scShadowEngineMask >> d) & 1) === 0 || scFourDeckRole.indexOf(String(d)) >= 0 ||
+				now - at.sourceAt > 1500 || (!b.learned && now - b.at > 1500) || now >= at.phaseHardUntil ||
+				Math.abs(at.rate - b.rate) > 2e-4 || (scShadowBent && scShadowBent.at === at)) {
+				at.landing = undefined; continue
+			}
+			const pos = l.pos.unnormalized / l.sr.value * 1000, dt = now - b.lastAt
+			const progress = pos - b.lastPos
+			b.lastAt = now; b.lastPos = pos
+			if (now - b.at < 60 || dt <= 0 || progress <= dt * b.rate * 0.25 || Math.abs(pos - b.target) < 3 * b.rate) continue
+			const sample = pos - (now - b.at) * b.rate
+			// An old advancing line is not proof of landing. Reject its whole
+			// audio-block uncertainty band, including the occasional high read.
+			if (sample >= b.old - (b.uncertain ? 50 : 40) * b.rate && sample <= b.old + (b.uncertain ? 50 : 20) * b.rate) continue
+			if (!b.first) b.first = now
+			b.values.push(sample); if (b.values.length > 4) b.values.shift()
+			if (b.values.length < 3 || now - b.first < 80) continue
+			const sorted = b.values.slice().sort((a, c) => a - c)
+			// Several samples must describe one new playback line; a seek's
+			// discontinuity or a still-frozen decoder is not a loss estimate.
+			if (sorted[sorted.length - 1] - sorted[0] > 40 * b.rate) continue
+			// Use the follower's mean-line convention (+18 ms of audio-block
+			// lag), rather than learning ordinary raw-read lag as seek loss.
+			// The middle pair rejects one stale low or ahead-of-line sample.
+			const mid = Math.floor(sorted.length / 2)
+			const line = (sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2) + 18 * b.rate
+			const loss = b.target - line
+			if (!(loss >= 0 && loss <= 500 * b.rate)) { at.landing = undefined; continue }
+			if (!b.learned) {
+				b.learned = true; at.env = undefined; at.fine = undefined
+				at.seekLoss = loss; at.seekLossAt = now
+				if (root.scShadowDebug) root.scShadowDbg({deck: Number(d), act: "landed", lossMs: loss / b.rate, samples: b.values.length})
+			}
+			if (now - at.phaseStableAt < 350) continue
+			const source = at.sourceTarget + (now - at.sourceAt) * at.rate
+			const observed = line + (now - b.at) * b.rate
+			if (at.transitionSeeks >= 2) {
+				at.landing = undefined; continue
+			}
+			// A first landing can temporarily coincide with the moving source.
+			// Keep observing through this transition: a later phase update uses
+			// the same correction budget and cannot become a second bare seek.
+			if (Math.abs(source - observed) <= 20 * at.rate) continue
+			root.scShadowLandingSeek(Number(d), at, source, observed, now, loss, true)
+			at.seeks = (at.seeks || 0) + 1
+			if (root.scShadowDebug) root.scShadowDbg({deck: Number(d), act: "trim", lossMs: loss / at.rate, target: source + loss})
+		}
+	}
 	// The shadow deck's own line: the mean of position - rate * time over 5 s, in
 	// at.env at the rate frozen in at.envRate since at.envT0. Not the upper envelope
 	// the sender posts: that rides on the one raw position in sixty that reads
@@ -1668,7 +1804,7 @@ SERVICES_MAIN = """
 		for (const d in scShadowAt) {
 			const at = scShadowAt[d]
 			if (!at.ready) continue
-			const l = at.line || (at.line = {pos: root.scTr("/Engine/Deck" + d + "/Track/TrackPosition"), play: root.scTr("/Engine/Deck" + d + "/PlayState"), sr: root.scTr("/Engine/Deck" + d + "/Track/SampleRate")})
+			const l = at.line || (at.line = {pos: root.scTr("/Engine/Deck" + d + "/Track/TrackPosition"), play: root.scTr("/Engine/Deck" + d + "/PlayState"), sr: root.scTr("/Engine/Deck" + d + "/Track/SampleRate"), loaded: root.scTr("/Engine/Deck" + d + "/Track/SongLoaded")})
 			if (!l.play.state || !(at.rate > 0) || !(l.sr.value > 0)) { at.env = undefined; continue }
 			// 60 ms off the line is no block of audio (22 ms at most) but a seek that
 			// landed after the line began: averaged in, a start at 41 s read 800 ms.
@@ -1898,14 +2034,17 @@ SERVICES_MAIN = """
 		at.beatAt = now + 600
 	}
 	function scShadowSeek(d, at, ms) {
+		at.landing = undefined
 		if (((scShadowEngineMask >> d) & 1) === 0) return
 		const g = p => root.scTr("/Engine/Deck" + d + p)
 		const sr = g("/Track/SampleRate").value, len = g("/Track/TrackLength").unnormalized
 		if (!(sr > 0 && len > 0)) return
 		const lenMs = len / sr * 1000
-		g("/Track/SetSongPosition").value = Math.max(0, Math.min(1, Math.min(ms, lenMs - root.scShadowEndGap()) / lenMs))
+		const target = Math.max(0, Math.min(ms, lenMs - root.scShadowEndGap()))
+		g("/Track/SetSongPosition").value = target / lenMs
 		at.seekAt = Date.now()
 		at.env = undefined
+		return target
 	}
 	// Engine Link already mirrors the other Engine's properties here, within a
 	// few ms of that Engine changing them (measured: our own update arrives
