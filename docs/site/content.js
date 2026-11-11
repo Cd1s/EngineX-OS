@@ -572,6 +572,9 @@
       nav: L("灯光扩展 Mod", "燈光擴充 Mod", "Lighting Mod"),
       blocks: [
         { k: "p", x: L("额外灯光功能请安装 Mod 社区的 **dmx-studio** Mod。", "額外燈光功能請安裝 Mod 社群的 **dmx-studio** Mod。", "For additional lighting features, install the **dmx-studio** Mod from the Mod Hub.") },
+        { k: "note", tone: "new", x: L("**DMX Studio 跟随 MASTER 碟机节拍（#209，5.3.0.5 计划）**：面板勾选 `Follow MASTER deck beat`（默认开）后，每秒 10 次把 MASTER 碟机的 `BeatNumber`、`CurrentBPM` 与 `TrackPosition` 连同读取时间发给辅助程序；辅助程序只在内存里保存这个节拍时钟（不写 `show.json`），在两次更新之间外推，换 MASTER、搓碟或跳点造成的相位差按一半速度平滑追上而不跳变；MASTER 暂停时灯效保持，没有碟机在播放或 2 秒无更新时回到手动 BPM。",
+          "**DMX Studio 跟隨 MASTER 播放機節拍（#209，5.3.0.5 規劃）**：面板勾選 `Follow MASTER deck beat`（預設開）後，每秒 10 次把 MASTER 播放機的 `BeatNumber`、`CurrentBPM` 與 `TrackPosition` 連同讀取時間送給輔助程式；輔助程式只在記憶體中保存這個節拍時鐘（不寫 `show.json`），在兩次更新之間外推，換 MASTER、搓碟或跳點造成的相位差以一半速度平滑追上而不跳變；MASTER 暫停時燈效保持，沒有播放機在播放或 2 秒無更新時回到手動 BPM。",
+          "**DMX Studio follows the MASTER deck's beat (#209, planned for 5.3.0.5)**: with `Follow MASTER deck beat` on (the default) the panel sends the MASTER deck's `BeatNumber`, `CurrentBPM` and `TrackPosition` with their read time ten times a second; the helper keeps this beat clock in memory only (never writes `show.json`), extrapolates between updates, and slews phase differences from a MASTER change, nudge or seek in at half the tempo instead of jumping. A paused MASTER holds the look; with no deck playing or no update for 2 s the manual BPM takes over.") },
       ],
     },
 
