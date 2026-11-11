@@ -411,3 +411,48 @@ PX Delay Time (ms)	PX 延时时间（ms）	PX 延遲時間（ms）
 Default (Off)	默认（关闭）	預設（關閉）
 Milliseconds (ms)	毫秒（ms）	毫秒（ms）
 Time (ms)	时间（ms）	時間（ms）
+OFFLINE · 	离线 · 	離線 · 
+REMOTE	仅曲目信息	僅曲目資訊
+OVERVIEW	概览波形	概覽波形
+Loading…	正在加载…	正在載入…
+Layer B	图层 B	圖層 B
+Deck 3/4	碟机 3/4	碟機 3/4
+DECK 	碟机 	碟機 
+PLAYER 	碟机 	碟機 
+ENGINE CONNECT	ENGINE CONNECT	ENGINE CONNECT
+CHANNEL ASSIGNMENT	通道分配	通道分配
+None	无	無
+MUTE	静音	靜音
+LATCH	锁定	鎖定
+Extreme Type	滤波极值行为	濾波極值行為
+Volume	音量	音量
+Crossfader	交叉推子	交叉推桿
+Microphone	麦克风	麥克風
+Output	输出	輸出
+Computer	电脑	電腦
+Crossfader Assign	交叉推子分配	交叉推桿分配
+FX Assign	效果器分配	效果器分配
+X-Fader Contour	交叉推子曲线	交叉推桿曲線
+Fader Start Left	左侧推子启动	左側推桿啟動
+Fader Start Right	右侧推子启动	右側推桿啟動
+General	常规	一般
+Routing	输出路由	輸出路由
+Main VU Meter	主输出电平表	主輸出電平表
+Main Output Boost	主输出增益	主輸出增益
+Send to Zone Out	发送至副区输出	傳送至副區輸出
+Anti-Feedback	啸叫抑制	回授抑制
+Feedback Suppressor	啸叫抑制	回授抑制
+Talkover Level	Talkover 衰减量	Talkover 衰減量
+Talkover Resume	Talkover 恢复速度	Talkover 恢復速度
+Send to	发送至	傳送至
+Send to Speakers	发送至主音箱	傳送至主喇叭
+Send to Booth	发送至监听音箱	傳送至監聽喇叭
+Send to Booth & Speakers	发送至监听与主音箱	傳送至監聽與主喇叭
+Send to Headphones	发送至耳机	傳送至耳機
+Send to Zone	发送至副区	傳送至副區
+View %1	视图 %1	視圖 %1
+Dismiss	关闭	關閉
+Authorize	授权	授權
+Start your journey	开始使用	開始使用
+Clear Stem Render Queue?	清空 Stems 分轨队列？	清空 Stems 分軌佇列？
+Clearing the render will clear queued stem tracks and stop any rendering in progress.	清空后将移除排队中的曲目并停止当前正在进行的 Stems 分轨。	清空後將移除排隊中的曲目並停止目前進行中的 Stems 分軌。

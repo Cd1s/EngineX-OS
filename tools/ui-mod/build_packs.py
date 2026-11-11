@@ -4138,7 +4138,7 @@ SHADOW_LAYER = r"""
                 readonly property real pitchVal: scDisplay.sample ? Math.round((Number(scDisplay.sample.pitch) || 0) * 100) / 100 : 0
                 readonly property string rangeStr: scDisplay.sample && scDisplay.sample.range > 0 ? String(scDisplay.sample.range) : "8"
                 readonly property string deckLabel: "Deck " + scDisplay.deck
-                readonly property string rawTitle: scDisplay.sample ? scDisplay.sample.title || (scDisplay.meta && scDisplay.meta.title) || scDisplay.sample.name || (scDisplay.sample.loading ? "Loading…" : "") : ""
+                readonly property string rawTitle: scDisplay.sample ? scDisplay.sample.title || (scDisplay.meta && scDisplay.meta.title) || scDisplay.sample.name || (scDisplay.sample.loading ? (Math.scI18n ? Math.scI18n.t("Loading…") : "Loading…") : "") : ""
                 readonly property string fileName: scDisplay.sample ? scDisplay.sample.name || rawTitle : ""
                 readonly property string artistName: scDisplay.sample ? scDisplay.sample.artist || (scDisplay.meta && scDisplay.meta.artist) || "" : ""
                 readonly property string artUrl: (scDisplay.meta && scDisplay.meta.artworkUrl ? root.scShadowAsset(scDisplay.meta.artworkUrl) : "") || (dv && dv.artistSongView ? dv.artistSongView.albumArtPath : "")
@@ -6350,10 +6350,10 @@ def legacy_qml_fixes():
 
 
 # Only these properties hold display text. Ids such as StateMap names never match.
-TEXT_LINE = re.compile(r'^(\s*(?:[\w.]*\.)?(?:text|label|title|message|headline|info|display|description|missingContentHint|buttonText|value)\s*:)(.*)$')
+TEXT_LINE = re.compile(r'^(\s*(?:[\w.]*\.)?(?:text|label|labelText|title|message|headline|info|display|description|missingContentHint|buttonText|value)\s*:)(.*)$')
 BARE_LITERAL = re.compile(r'^(\s*)"([^"\\]+)"(\s*)$')
 # Template literals match whole, ${...} included (`Version: ${version}`).
-LITERAL = re.compile(r'"([^"\\\n]+)"|`([^`\\\n]+)`')
+LITERAL = re.compile(r'"([^"\\\n]*)"|`([^`\\\n]*)`')
 
 
 def load_dict():
