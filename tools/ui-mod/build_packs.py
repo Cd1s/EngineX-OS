@@ -4182,8 +4182,8 @@ SHADOW_LAYER = r"""
                                         Layout.minimumWidth: 160
                                         Layout.preferredWidth: 160
                                         Layout.maximumWidth: 160
-                                        Layout.leftMargin: 16
-                                        Layout.rightMargin: 16
+                                        Layout.leftMargin: 4
+                                        Layout.rightMargin: 4
                                         deckIndex: scDisplay.deck
                                         isMaster: scHeader.isLead
                                     }
@@ -4214,7 +4214,7 @@ SHADOW_LAYER = r"""
                                         speedRangeTextHorizontalAlignment: Text.AlignLeft
                                         speedStateTextWidth: 0
                                         speedStateTextHorizontalAlignment: Text.AlignRight
-                                        columnSpacing: 4
+                                        columnSpacing: 8
                                         flat: true
                                     }
                                 }
@@ -4241,7 +4241,7 @@ SHADOW_LAYER = r"""
                                     id: scKeyItem
                                     objectName: "KeyInfo"
                                     Layout.fillHeight: true
-                                    readonly property int horizontalSpacing: scHeader.splitMain || scHeader.splitMini ? 36 : 18
+                                    readonly property int horizontalSpacing: scHeader.splitMain ? 36 : 18
                                     readonly property int internalSpacing: 5
                                     Layout.preferredWidth: horizontalSpacing * 2 + scKeyText.width + scKeyIcon.width + 4
                                     RowLayout {
@@ -4386,7 +4386,7 @@ SHADOW_LAYER = r"""
                                 speedStateTextWidth: 0
                                 speedStateTextHorizontalAlignment: Text.AlignRight
                                 textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter
-                                columnSpacing: 4
+                                columnSpacing: 8
                                 flat: true
                             }
                         }
@@ -4479,7 +4479,7 @@ SHADOW_LAYER = r"""
                         speedStateTextHorizontalAlignment: Text.AlignRight
                         textLayoutAlignment: Qt.AlignCenter
                         separatorHeight: scHeader.perfSplitMain ? 32 : 0
-                        columnSpacing: scHeader.perfSplitMain ? 12 : 4
+                        columnSpacing: scHeader.perfSplitMain ? 12 : 8
                         flat: true
                     }
                 }
@@ -5599,7 +5599,7 @@ def edits(dev: bool):
             ("                target: softTakeoverIndicators\n                Layout.rightMargin: 32\n",
              "                target: softTakeoverIndicators\n                Layout.rightMargin: 8\n"),
             ("        speedRangeTextFont: Style.fontH1\n        speedRangeTextWidth: 80\n        speedRangeTextHorizontalAlignment: Text.AlignHCenter\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextWidth: 80\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 0\n",
-             "        speedRangeTextFont: Style.fontH1\n        speedRangeTextWidth: 0\n        speedRangeTextHorizontalAlignment: Text.AlignLeft\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextWidth: 0\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 4\n"),
+             "        speedRangeTextFont: Style.fontH1\n        speedRangeTextWidth: 0\n        speedRangeTextHorizontalAlignment: Text.AlignLeft\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextWidth: 0\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 8\n"),
             ("                speedRangeTextFont: Style.fontTitle\n                speedRangeTextWidth: 144\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                speedStateTextWidth: 144\n",
              "                speedRangeTextFont: Style.fontTitle\n                speedRangeTextWidth: 0\n                speedRangeTextHorizontalAlignment: Text.AlignLeft\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                speedStateTextWidth: 0\n                columnSpacing: 12\n"),
         ]
@@ -5619,7 +5619,7 @@ def edits(dev: bool):
             ("                    Layout.preferredHeight: 24\n                    Layout.fillWidth: true\n                    Layout.maximumWidth: 200\n",
              "                    Layout.preferredHeight: 24\n                    Layout.fillWidth: false\n                    Layout.minimumWidth: 135\n                    Layout.preferredWidth: 135\n                    Layout.maximumWidth: 135\n"),
             ("                    speedRangeTextFont: Style.fontH1\n                    speedStateTextFont: Style.fontH1\n                    speedRangeTextHorizontalAlignment: Text.AlignRight\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    flat: true\n",
-             "                    speedRangeTextFont: Style.fontH1\n                    speedRangeTextWidth: 0\n                    speedRangeTextHorizontalAlignment: Text.AlignLeft\n                    speedStateTextFont: Style.fontH1\n                    speedStateTextWidth: 0\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    columnSpacing: 4\n                    flat: true\n"),
+             "                    speedRangeTextFont: Style.fontH1\n                    speedRangeTextWidth: 0\n                    speedRangeTextHorizontalAlignment: Text.AlignLeft\n                    speedStateTextFont: Style.fontH1\n                    speedStateTextWidth: 0\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    columnSpacing: 8\n                    flat: true\n"),
         ]
         # Use control-specific beginnings to keep all anchors unique.
         scaled[mini] += [
@@ -5657,15 +5657,16 @@ def edits(dev: bool):
             speedRangeTextHorizontalAlignment: Text.AlignLeft
             speedStateTextWidth: 0
             speedStateTextHorizontalAlignment: Text.AlignRight
-            columnSpacing: 4
+            columnSpacing: 8
             flat: true
         }
 """
         scaled[bj + "DeckTrackData/SplitMiniDeckTrackDataContent.qml"] = [
             ("        JP07SyncIndicator {\n", split_controls + "\n        JP07SyncIndicator {\n"),
             ("            Layout.fillWidth: true\n            Layout.preferredHeight: 24\n            Layout.maximumWidth: 160\n            Layout.leftMargin: 24\n            Layout.rightMargin: 40\n",
-             "            Layout.fillWidth: false\n            Layout.preferredHeight: 24\n            Layout.minimumWidth: 160\n            Layout.preferredWidth: 160\n            Layout.maximumWidth: 160\n            Layout.leftMargin: 16\n            Layout.rightMargin: 16\n"),
+             "            Layout.fillWidth: false\n            Layout.preferredHeight: 24\n            Layout.minimumWidth: 160\n            Layout.preferredWidth: 160\n            Layout.maximumWidth: 160\n            Layout.leftMargin: 4\n            Layout.rightMargin: 4\n"),
             ("        DeckInfoTimeInfo {\n", cue_capsule("        ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False, fill_width=False) + "\n" + split_speed + "\n        DeckInfoTimeInfo {\n"),
+            ("            horizontalSpacing: 36\n", "            horizontalSpacing: 18\n"),
         ]
         for item, text_id in (("AutoLoop", "autoLoopText"), ("BeatJump", "beatJumpText")):
             scaled.setdefault(bj + "Deck/DeckItem/" + item + ".qml", []).append((
