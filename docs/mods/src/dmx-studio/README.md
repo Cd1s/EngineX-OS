@@ -62,8 +62,18 @@ Fixtures are generic templates, **not verified vendor personalities**. The
 strobe, smoke, gobo or beam channel semantics. Patch overlap and channel overflow
 are rejected. Stop output before changing routes or patch.
 
-Circle, 8-Figure and Pan-Tilt Sweep use a manually entered BPM and beats/cycle
-(`speed`, default 4). There is no automatic deck beat-clock binding. Pan/tilt
+Circle, 8-Figure and Pan-Tilt Sweep move `speed` beats per cycle (default 4).
+With **Follow MASTER deck beat** on (the default), the panel reads the MASTER
+deck's Engine `BeatNumber`, `CurrentBPM` and `TrackPosition` ten times a second
+and posts them with their read time as `{"action":"clock","deck":1..4,
+"playing":bool,"beat":n,"bpm":n,"position":n,"at":unixMs}` (#209). The helper
+keeps this clock in memory only (it never writes `show.json`), extrapolates
+between updates, takes phase errors below half a frame of slewing at once and
+slews larger ones (a nudge, a seek, a MASTER handoff to an unsynced deck) in at
+half the tempo instead of jumping. A paused MASTER holds the look; with no deck
+playing (`"deck":0`) or no update for 2 s, the manually entered BPM takes over
+from the current phase. A playing non-MASTER deck is followed when the MASTER
+is paused. The clock state is in `/status` as `clock`. Pan/tilt
 center and width/height can be set through `/action` configuration. RGB and
 intensity apply to the generic fixtures. The 2D canvas is a diagnostic preview,
 not a calibrated beam simulation; the monitor shows all 512 values per universe.
