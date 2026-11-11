@@ -4020,6 +4020,7 @@ SHADOW_LAYER = r"""
                 readonly property bool splitMain: hostState === "Split_Main" || (!!dv && dv.deckGroupMode === 1 && dv.deckSizeMode === 0)
                 readonly property bool splitMini: hostState === "Split_Mini" || (!!dv && dv.deckGroupMode === 1 && dv.deckSizeMode === 1)
                 readonly property bool groupedMain: !splitMain && !splitMini && (hostState === "Grouped_Main" || (!!dv && dv.deckGroupMode === 0 && dv.deckSizeMode === 0))
+                readonly property bool perfSplitMain: scDisplay.performance && ((scDisplay.owner && scDisplay.owner.state === "Split_Main") || splitMain)
                 readonly property bool hasBottomRow: !scDisplay.performance && !groupedMain && !splitMain && !splitMini
                 readonly property bool loaded: !!scDisplay.sample
                 readonly property bool isSync: !!(scDisplay.sample && scDisplay.sample.sync)
@@ -4181,7 +4182,7 @@ SHADOW_LAYER = r"""
                                         Layout.minimumWidth: 160
                                         Layout.preferredWidth: 160
                                         Layout.maximumWidth: 160
-                                        Layout.leftMargin: 24
+                                        Layout.leftMargin: 16
                                         Layout.rightMargin: 16
                                         deckIndex: scDisplay.deck
                                         isMaster: scHeader.isLead
@@ -4189,21 +4190,20 @@ SHADOW_LAYER = r"""
                                     Item {
                                         Layout.alignment: Qt.AlignVCenter
                                         Layout.preferredHeight: 22
-                                        Layout.fillWidth: true
-                                        Layout.minimumWidth: 56
+                                        Layout.minimumWidth: 112
                                         Layout.preferredWidth: 112
+                                        Layout.maximumWidth: 112
                                         Layout.leftMargin: 2
                                         Layout.rightMargin: 2
                                         clip: true
-                                        RowLayout {
+                                        Row {
                                             anchors.fill: parent
                                             readonly property var info: scDisplay.cueInfo
                                             visible: info !== null && root.scCueCountdown
                                             spacing: 4
-                                            Rectangle { width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: parent.info ? parent.info.color : "transparent" }
-                                            Text { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.maximumWidth: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(scCueCountTextSplit.implicitWidth) - 12)); elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(scCueCountTextSplit.implicitWidth) >= 28; text: parent.info ? parent.info.label : "" }
-                                            Text { id: scCueCountTextSplit; Layout.minimumWidth: Math.ceil(implicitWidth); Layout.maximumWidth: Math.ceil(implicitWidth); font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
-                                            Item { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0 }
+                                            Rectangle { width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: parent.info ? parent.info.color : "transparent" }
+                                            Text { width: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(scCueCountTextSplit.implicitWidth) - 12)); anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(scCueCountTextSplit.implicitWidth) >= 28; text: parent.info ? parent.info.label : "" }
+                                            Text { id: scCueCountTextSplit; anchors.verticalCenter: parent.verticalCenter; font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
                                         }
                                     }
                                     SpeedInfo {
@@ -4354,16 +4354,15 @@ SHADOW_LAYER = r"""
                                 Layout.leftMargin: 2
                                 Layout.rightMargin: 2
                                 clip: true
-                                RowLayout {
+                                Row {
                                     objectName: "EngineX_ShadowCueCountdown"
                                     anchors.fill: parent
                                     readonly property var info: scDisplay.cueInfo
                                     visible: info !== null && root.scCueCountdown
                                     spacing: 4
-                                    Rectangle { width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: parent.info ? parent.info.color : "transparent" }
-                                    Text { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.maximumWidth: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(scCueCountText1.implicitWidth) - 12)); elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(scCueCountText1.implicitWidth) >= 28; text: parent.info ? parent.info.label : "" }
-                                    Text { id: scCueCountText1; Layout.minimumWidth: Math.ceil(implicitWidth); Layout.maximumWidth: Math.ceil(implicitWidth); font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
-                                    Item { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0 }
+                                    Rectangle { width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: parent.info ? parent.info.color : "transparent" }
+                                    Text { width: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(scCueCountText1.implicitWidth) - 12)); anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(scCueCountText1.implicitWidth) >= 28; text: parent.info ? parent.info.label : "" }
+                                    Text { id: scCueCountText1; anchors.verticalCenter: parent.verticalCenter; font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
                                 }
                             }
                             SoftTakeoverIndicators {
@@ -4412,7 +4411,8 @@ SHADOW_LAYER = r"""
                         textFont: Style.fontH3
                         visible: Config.audio.deck.hasBeatJump
                     }
-                    Rectangle { Layout.fillHeight: true; Layout.topMargin: 2; Layout.bottomMargin: 2; width: 1; color: Style.surface03Color }
+                    Rectangle { Layout.fillHeight: true; Layout.topMargin: 2; Layout.bottomMargin: 2; width: 1; color: Style.surface03Color; visible: !scHeader.perfSplitMain }
+                    Item { Layout.fillWidth: true; visible: scHeader.perfSplitMain }
                     EngineXEmbedded.JP07SyncIndicator {
                         Layout.fillWidth: false
                         Layout.preferredHeight: 24
@@ -4422,35 +4422,38 @@ SHADOW_LAYER = r"""
                         Layout.leftMargin: 12
                         Layout.rightMargin: 12
                         Layout.alignment: Qt.AlignCenter
+                        leadTextFont: scHeader.perfSplitMain ? Style.fontTitle : Style.fontH3
                         deckIndex: scDisplay.deck
                         isMaster: scHeader.isLead
                     }
-                    Rectangle { Layout.fillHeight: true; Layout.topMargin: 2; Layout.bottomMargin: 2; width: 1; color: Style.surface03Color }
+                    Rectangle { Layout.fillHeight: true; Layout.topMargin: 2; Layout.bottomMargin: 2; width: 1; color: Style.surface03Color; visible: !scHeader.perfSplitMain }
                     Item {
                         Layout.alignment: Qt.AlignVCenter
                         Layout.preferredHeight: 22
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: 56
+                        Layout.minimumWidth: 112
                         Layout.preferredWidth: 112
+                        Layout.maximumWidth: 112
                         Layout.leftMargin: 2
                         Layout.rightMargin: 2
                         clip: true
-                        RowLayout {
+                        Row {
                             objectName: "EngineX_ShadowCueCountdown"
                             anchors.fill: parent
                             readonly property var info: scDisplay.cueInfo
                             visible: info !== null && root.scCueCountdown
                             spacing: 4
-                            Rectangle { width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: parent.info ? parent.info.color : "transparent" }
-                            Text { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.maximumWidth: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(scCueCountText2.implicitWidth) - 12)); elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(scCueCountText2.implicitWidth) >= 28; text: parent.info ? parent.info.label : "" }
-                            Text { id: scCueCountText2; Layout.minimumWidth: Math.ceil(implicitWidth); Layout.maximumWidth: Math.ceil(implicitWidth); font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
-                            Item { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0 }
+                            Rectangle { width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: parent.info ? parent.info.color : "transparent" }
+                            Text { width: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(scCueCountText2.implicitWidth) - 12)); anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(scCueCountText2.implicitWidth) >= 28; text: parent.info ? parent.info.label : "" }
+                            Text { id: scCueCountText2; anchors.verticalCenter: parent.verticalCenter; font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
                         }
                     }
+                    Item { Layout.fillWidth: true }
                     SoftTakeoverIndicators {
                         Layout.alignment: Qt.AlignCenter
                         Layout.leftMargin: 4
-                        Layout.rightMargin: 4
+                        Layout.rightMargin: scHeader.perfSplitMain ? 8 : 4
+                        iconWidth: scHeader.perfSplitMain ? 24 : 16
+                        iconHeight: scHeader.perfSplitMain ? 16 : 12
                         flow: Flow.LeftToRight
                         spacing: -4
                         speedOffsetIsUp: false
@@ -4460,12 +4463,15 @@ SHADOW_LAYER = r"""
                         Layout.fillHeight: true
                         speedState: scHeader.pitchVal
                         speedRange: scHeader.rangeStr
-                        speedRangeTextFont: Style.fontH1
+                        speedRangeTextFont: scHeader.perfSplitMain ? Style.fontTitle : Style.fontH1
+                        speedRangeTextColor: scHeader.perfSplitMain ? Style.font02Color : Style.font01Color
                         speedRangeTextHorizontalAlignment: Text.AlignLeft
-                        speedStateTextFont: Style.fontH1
+                        speedStateTextFont: scHeader.perfSplitMain ? Style.fontTitle : Style.fontH1
+                        speedStateTextColor: Style.font02Color
                         speedStateTextHorizontalAlignment: Text.AlignRight
                         textLayoutAlignment: Qt.AlignCenter
-                        columnSpacing: 4
+                        separatorHeight: scHeader.perfSplitMain ? 32 : 0
+                        columnSpacing: scHeader.perfSplitMain ? 12 : 4
                         flat: true
                     }
                 }
@@ -4605,30 +4611,30 @@ def shadow_targets(qrc: Path):
     return {rel: kind for rel, kind in targets.items() if (qrc / rel).is_file()}
 
 
-def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False, lead_sep: bool = True) -> str:
+def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False, lead_sep: bool = True, fill_width: bool = False) -> str:
     """Bound the countdown after LEAD; only its cue name may elide."""
+    sizing = ("    Layout.fillWidth: true\n    Layout.minimumWidth: 56\n    Layout.preferredWidth: 112"
+              if fill_width else
+              "    Layout.minimumWidth: 112\n    Layout.preferredWidth: 112\n    Layout.maximumWidth: 112")
     q = f"""Item {{
     // Reserve the Cue slot even without a cue: LEAD never changes width.
     Layout.alignment: Qt.AlignVCenter
     Layout.preferredHeight: 22
-    Layout.fillWidth: true
-    Layout.minimumWidth: 56
-    Layout.preferredWidth: 112
+{sizing}
     Layout.leftMargin: 2
     Layout.rightMargin: 2
     clip: true
-    RowLayout {{
+    Row {{
         id: cueCap
         objectName: "EngineX_CueCountdown"
         anchors.fill: parent
         readonly property var info: typeof root !== "undefined" && root && root.scCueCountdown && root.scNextCueInfo ? root.scNextCueInfo({deck_expr}, root.scCueTickFor({deck_expr})) : null
         visible: info !== null && root.scCueCountdown
         spacing: 4
-{'        Rectangle { width: 1; height: 18; Layout.alignment: Qt.AlignVCenter; color: Style.surface03Color }' if lead_sep else ''}
-        Rectangle {{ width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: cueCap.info ? cueCap.info.color : "transparent" }}
-        Text {{ Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.maximumWidth: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(cueCountText.implicitWidth) - 12)); elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(cueCountText.implicitWidth) >= 28; text: cueCap.info ? cueCap.info.label : "" }}
-        Text {{ id: cueCountText; Layout.minimumWidth: Math.ceil(implicitWidth); Layout.maximumWidth: Math.ceil(implicitWidth); font: Style.fontH3; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
-        Item {{ Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0 }}
+{'        Rectangle { width: 1; height: 18; anchors.verticalCenter: parent.verticalCenter; color: Style.surface03Color }' if lead_sep else ''}
+        Rectangle {{ width: 3; height: 14; radius: 1; anchors.verticalCenter: parent.verticalCenter; color: cueCap.info ? cueCap.info.color : "transparent" }}
+        Text {{ width: Math.max(0, Math.min(Math.ceil(implicitWidth) + 2, parent.width - Math.ceil(cueCountText.implicitWidth) - 12)); anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - Math.ceil(cueCountText.implicitWidth) >= 28; text: cueCap.info ? cueCap.info.label : "" }}
+        Text {{ id: cueCountText; anchors.verticalCenter: parent.verticalCenter; font: Style.fontH3; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
     }}
 }}
 """
@@ -5549,7 +5555,10 @@ def edits(dev: bool):
         ]
         performance = bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"
         scaled[performance] += [
-            ("    Item {\n        id: spacer2\n", cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n    Item {\n        id: spacer2\n"),
+            ("    Separator {\n        visible: !spacer2.visible && softTakeoverIndicators.visible\n    }\n    Item {\n        id: spacer2\n        Layout.fillWidth: true\n        visible: false\n",
+             "    Separator {\n        visible: !spacer1.visible && softTakeoverIndicators.visible\n    }\n" +
+             cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 22, 16, compact=True, lead_sep=False, fill_width=False) +
+             "\n    Item {\n        id: spacer2\n        Layout.fillWidth: true\n        visible: true\n"),
             ("        id: autoLoop\n", "        id: autoLoop\n        Layout.rightMargin: 4\n"),
         ]
         # Both controls have spacing:6; patch() deliberately requires a unique
@@ -5561,7 +5570,8 @@ def edits(dev: bool):
             scaled[performance].append((anchor + "        spacing: 6\n", anchor + "        spacing: 4\n"))
         # Size the right speed group (▲▼, range, pitch %) from the displayed text's
         # implicitWidth, keep the sync slot at a constant width (135 px in 4-deck
-        # grouped), and let the Cue capsule take the remaining flexible width.
+        # grouped), and let the Cue capsule take the remaining flexible width in
+        # 4-deck grouped while keeping a bounded width in 2-deck Main / SplitMain / SplitMini.
         scaled[bj + "Deck/DeckItem/SpeedInfo.qml"] = [
             ("    columnSpacing: 16\n", "    columnSpacing: 4\n"),
             ("        Layout.minimumWidth: speedRangeTextWidth\n",
@@ -5579,7 +5589,7 @@ def edits(dev: bool):
             ("        speedRangeTextFont: Style.fontH1\n        speedRangeTextWidth: 80\n        speedRangeTextHorizontalAlignment: Text.AlignHCenter\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextWidth: 80\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 0\n",
              "        speedRangeTextFont: Style.fontH1\n        speedRangeTextHorizontalAlignment: Text.AlignLeft\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 4\n"),
             ("                speedRangeTextFont: Style.fontTitle\n                speedRangeTextWidth: 144\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                speedStateTextWidth: 144\n",
-             "                speedRangeTextFont: Style.fontTitle\n                speedRangeTextHorizontalAlignment: Text.AlignLeft\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n"),
+             "                speedRangeTextFont: Style.fontTitle\n                speedRangeTextHorizontalAlignment: Text.AlignLeft\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                columnSpacing: 12\n"),
         ]
         for control, width in (("autoLoop", 42), ("beatJump", 54)):
             scaled[performance] += [
@@ -5590,7 +5600,7 @@ def edits(dev: bool):
             ]
         mini = bj + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"
         scaled[mini] += [
-            ("                SoftTakeoverIndicators {\n", cue_capsule("                ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n                SoftTakeoverIndicators {\n                    flow: Flow.LeftToRight\n                    spacing: -4\n"),
+            ("                SoftTakeoverIndicators {\n", cue_capsule("                ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False, fill_width=True) + "\n                SoftTakeoverIndicators {\n                    flow: Flow.LeftToRight\n                    spacing: -4\n"),
             ("                spacing: 16\n                visible: deckTrackDataContent.songLoaded\n", "                spacing: 4\n                visible: deckTrackDataContent.songLoaded\n"),
             ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n", "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 42\n"),
             ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n", "                    textFont: Style.fontH3\n                    Layout.preferredWidth: 54\n"),
@@ -5639,9 +5649,9 @@ def edits(dev: bool):
 """
         scaled[bj + "DeckTrackData/SplitMiniDeckTrackDataContent.qml"] = [
             ("        JP07SyncIndicator {\n", split_controls + "\n        JP07SyncIndicator {\n"),
-            ("            Layout.fillWidth: true\n            Layout.preferredHeight: 24\n            Layout.maximumWidth: 160\n",
-             "            Layout.fillWidth: false\n            Layout.preferredHeight: 24\n            Layout.minimumWidth: 160\n            Layout.preferredWidth: 160\n            Layout.maximumWidth: 160\n"),
-            ("        DeckInfoTimeInfo {\n", cue_capsule("        ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n" + split_speed + "\n        DeckInfoTimeInfo {\n"),
+            ("            Layout.fillWidth: true\n            Layout.preferredHeight: 24\n            Layout.maximumWidth: 160\n            Layout.leftMargin: 24\n            Layout.rightMargin: 40\n",
+             "            Layout.fillWidth: false\n            Layout.preferredHeight: 24\n            Layout.minimumWidth: 160\n            Layout.preferredWidth: 160\n            Layout.maximumWidth: 160\n            Layout.leftMargin: 16\n            Layout.rightMargin: 16\n"),
+            ("        DeckInfoTimeInfo {\n", cue_capsule("        ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False, fill_width=False) + "\n" + split_speed + "\n        DeckInfoTimeInfo {\n"),
         ]
         for item, text_id in (("AutoLoop", "autoLoopText"), ("BeatJump", "beatJumpText")):
             scaled.setdefault(bj + "Deck/DeckItem/" + item + ".qml", []).append((

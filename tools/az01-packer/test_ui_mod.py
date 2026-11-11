@@ -1749,17 +1749,56 @@ class DeckHeaderLayoutTest(unittest.TestCase):
     js = ShadowDisplayTest.js
 
     def test_countdown_has_a_bounded_slot_and_elides_only_its_name(self):
-        cap = bp.cue_capsule("", "1", 22, 16)
-        self.assertIn("Layout.fillWidth: true", cap)
-        self.assertIn("Layout.minimumWidth: 56", cap)
-        self.assertNotIn("\n    Layout.maximumWidth:", cap)
-        self.assertIn("Layout.leftMargin: 2", cap)
-        self.assertIn("Layout.rightMargin: 2", cap)
-        self.assertIn("clip: true", cap)
-        self.assertIn("Layout.minimumWidth: 0", cap)
-        self.assertIn("parent.width - Math.ceil(cueCountText.implicitWidth) - 12", cap)
-        self.assertIn("elide: Text.ElideRight", cap)
-        self.assertIn("Reserve the Cue slot even without a cue", cap)
+        bounded = bp.cue_capsule("", "1", 22, 16)
+        self.assertNotIn("fillWidth", bounded)
+        self.assertIn("Layout.minimumWidth: 112", bounded)
+        self.assertIn("Layout.preferredWidth: 112", bounded)
+        self.assertIn("Layout.maximumWidth: 112", bounded)
+        flex = bp.cue_capsule("", "1", 22, 16, fill_width=True)
+        self.assertIn("Layout.fillWidth: true", flex)
+        self.assertIn("Layout.minimumWidth: 56", flex)
+        self.assertNotIn("Layout.maximumWidth", flex)
+        for cap in (bounded, flex):
+            self.assertIn("Layout.leftMargin: 2", cap)
+            self.assertIn("Layout.rightMargin: 2", cap)
+            self.assertIn("clip: true", cap)
+            self.assertIn("parent.width - Math.ceil(cueCountText.implicitWidth) - 12", cap)
+            self.assertIn("elide: Text.ElideRight", cap)
+            self.assertIn("Reserve the Cue slot even without a cue", cap)
+
+    def test_split_mini_and_main_keep_bounded_cue_and_stock_title_layout(self):
+        qrc = LAB / "5.3.0" / "qrc"
+        if not qrc.is_dir():
+            self.skipTest(f"{qrc} not found (run on Oracle-Batam-arm)")
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        composite = "Skins/EngineOS/UI/CompositeControls/"
+        split_rel = composite + "DeckTrackData/SplitMiniDeckTrackDataContent.qml"
+        stock_split = (qrc / split_rel).read_text()
+        patched_split = stock_split
+        for old, new in edits[split_rel]:
+            patched_split = bp.patch(patched_split, old, new, split_rel)
+        # ArtistSong block in SplitMini must remain byte-for-byte stock.
+        artist_pat = r"(?m)^    ArtistSong \{.*?^    \}"
+        self.assertEqual(re.search(artist_pat, patched_split, re.S).group(),
+                         re.search(artist_pat, stock_split, re.S).group())
+        # Nothing after ArtistSong in SplitMini may set fillWidth: true (which would steal title width).
+        after_artist = patched_split[re.search(artist_pat, patched_split, re.S).end():]
+        self.assertNotIn("Layout.fillWidth: true", after_artist)
+        self.assertIn("Layout.preferredWidth: 112\n            Layout.maximumWidth: 112", after_artist)
+        # 2-deck Main / SplitMain (DeckPerformanceDataContent) cue capsule is also bounded (no fillWidth).
+        perf_rel = composite + "DeckPerformanceData/DeckPerformanceDataContent.qml"
+        perf_cue = next(new for _, new in edits[perf_rel] if "EngineX_CueCountdown" in new)
+        self.assertIn("Layout.preferredWidth: 112\n        Layout.maximumWidth: 112", perf_cue)
+        self.assertNotIn("Layout.fillWidth: true", perf_cue.split("Item {\n        id: spacer2")[0])
+        # Only the 4-deck grouped header sets fillWidth: true on cue_capsule.
+        mini_rel = composite + "DeckTrackData/GroupedMiniDeckTrackDataContent.qml"
+        mini_cue = next(new for _, new in edits[mini_rel] if "EngineX_CueCountdown" in new)
+        self.assertIn("Layout.fillWidth: true", mini_cue)
 
     def test_right_speed_group_uses_implicit_width_never_fixed_widths(self):
         old_root = bp.ROOT
