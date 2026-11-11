@@ -237,6 +237,7 @@ type fingerprint struct {
 	Size, MTime  int64
 	Analysis     []analysisFileExport
 	Artwork      *analysisFileExport
+	MP3Offset    string `json:",omitempty"`
 }
 type analysisFileExport struct {
 	Path        string
@@ -293,9 +294,9 @@ func sourceFiles(res *compat.Resolver, t rekordbox.Track) ([]analysisFile, *anal
 }
 
 // readSources reads a track's ANLZ files and, unless skipAudio, its audio header.
-func readSources(res *compat.Resolver, files []analysisFile, full string, skipAudio bool) (*rekordbox.Analysis, compat.AudioInfo, error) {
+func readSources(res *compat.Resolver, p preparedTrack, full string, skipAudio bool) (*rekordbox.Analysis, compat.AudioInfo, error) {
 	a := &rekordbox.Analysis{}
-	for _, f := range files {
+	for _, f := range p.files {
 		aa, e := rekordbox.ReadAnalysis(res.FullPath(f.rel))
 		if e != nil {
 			return nil, compat.AudioInfo{}, e
@@ -304,6 +305,12 @@ func readSources(res *compat.Resolver, files []analysisFile, full string, skipAu
 	}
 	if skipAudio {
 		return a, compat.AudioInfo{}, nil
+	}
+	if p.audio != nil {
+		return a, *p.audio, nil
+	}
+	if p.audioErr != nil {
+		return nil, compat.AudioInfo{}, fmt.Errorf("audio header: %w", p.audioErr)
 	}
 	audio, e := compat.AudioHeader(full)
 	if e != nil {
@@ -353,7 +360,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 	var prepared []preparedTrack
 	if opts.Fast {
 		prepared = prepareFast(res, l)
-	} else if prepared, err = prepareTracks(ctx, res, l); err != nil {
+	} else if prepared, err = prepareTracks(ctx, res, l, opts.Deadline); err != nil {
 		return result, err
 	}
 	dir := opts.DatabaseDir
@@ -465,9 +472,20 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			continue
 		}
 		if previous == hash {
+			if preparedTrack.uninspected && existing {
+				result.Deferred++
+			}
 			if t.BPM == 0 {
 				effectiveTracks[i].BPM = storedBPM
 			}
+			result.Unchanged++
+			continue
+		}
+		if preparedTrack.uninspected && existing && previous != "" && !strings.HasPrefix(previous, "fast:") {
+			if t.BPM == 0 {
+				effectiveTracks[i].BPM = storedBPM
+			}
+			result.Deferred++
 			result.Unchanged++
 			continue
 		}
@@ -476,7 +494,8 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			log.Printf("rb-bridge: track %d (%s) imported without cues: %v", t.ID, rel, e)
 			degraded, fast, art = true, true, nil
 		}
-		a, audio, e := readSources(res, files, full, fast)
+		preparedTrack.files = files
+		a, audio, e := readSources(res, preparedTrack, full, fast)
 		if e == nil {
 			e = preparedTrack.broken
 		}
@@ -485,15 +504,23 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			a, audio = &rekordbox.Analysis{}, compat.AudioInfo{}
 		}
 		if audio.SampleRate > 0 {
+			if t.SampleRate > 0 && t.SampleRate != audio.SampleRate {
+				log.Printf("rb-bridge: track %d (%s): export sample rate %d Hz differs from file header %d Hz; using file header", t.ID, rel, t.SampleRate, audio.SampleRate)
+			}
 			t.SampleRate = audio.SampleRate
-			t.SampleCount = audio.Samples
+			if audio.Samples > 0 {
+				t.SampleCount = audio.Samples
+			}
 			if audio.Duration > 0 {
 				t.Duration = audio.Duration
 			}
-			t.BitDepth = audio.BitDepth
-			if audio.Bitrate > 0 {
+			if audio.BitDepth > 0 {
+				t.BitDepth = audio.BitDepth
+			}
+			if audio.Bitrate > 0 && (audio.Format != "mp3" || t.Bitrate == 0) {
 				t.Bitrate = audio.Bitrate
 			}
+			t.StartOffsetSamples = audio.StartOffsetSamples
 		}
 		if len(a.Beats) > 0 && a.Beats[0].BPM >= 499.5 {
 			a.Beats = nil
