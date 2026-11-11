@@ -1,4 +1,4 @@
-# EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11，RC（待维护者确认发布））
+# EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11，已发布）
 
 - **日期**：`2026-11-12`
 - **状态**：最终 RC 已合入全部计划项（含 `issue176-sclive4-stems` `77c4c9f`、`issue177-sclive4-perf` `66ff35b`、`realdeck-5304-fixes` `ebb985e` / `322839d`、防回归核验表 `REGRESSION-CHECKLIST.md`、紧凑顶栏第 2 行 `header-row2-compact` `207dc55` / `3460bb1`、`#162` `9fa0cff`、一代首次启动 Stems 弹窗抑制 `gen1-stems-prompt` `1cfc6bb`、`#202 / #203` `3649be7`、翻译补全 `323cb15` / `f48150f` / `240b22d` / `i18n-settings-full` `34ed7d4`、播放与效果设置收口 `fx-settings-declutter` `c2d9d74`、`MASTER` 灯恢复原厂暗亮值 `1` 及原厂转盘行为 `led-157-stock` `7f753c2`、影子 `Sync` 相位对齐 `shadow-sync-snap` `4ce7bef`、中国大陆与全球 NTP 同步及断电时区持久化 `time-sync-cn` `d0de27c`、`#140` 断电二次启动与启动屏门禁 `b82197b`、双机沙箱进程作用域隔离 `twin-scoped-kill` `73a060c`、启动安全网 `boot-safety-net` `f047653`、`#178` Rekordbox MP3 编码延迟偏移修正 `caee928`、独立播放机 `Sampler Output` / 原厂 `LinkBeatJumpLoopSize` 解锁 / 移除失效 `Auto-Analyze` 行 `ui-link-autoanalyze` `4a907ee`、`#208` 官方 Mod 静态 Go 运行时 `mods-go-runtime` `71ca3df`、三语菜单路径与文档对齐 `docs-audit-5304` `a31caee`、`#206` 一体机流媒体曲目双向录音 `issue206-stream-record` `f468406`、电脑端 LAN Stems 默认 `htdemucs` / 机上 HQ 提示 / 安装包内置 worker `stems-hq-hint` `aa895e5` 与 `#201` 独立碟机双碟机配对 2 轨视图 `issue201-paired-2deck` `136ad1b`；按维护者决定，三组 `release-gate.sh` 门禁已在 `035ae0d` 上全部 `139 PASS, 0 FAIL` 通过，最终 RC 免重复跑门禁，直接上实机验收后发布）
@@ -145,50 +145,52 @@
 
 ---
 
-## 4. RC 构建产物与 SHA-256 校验表（RC（待维护者确认发布））
+## 4. 发布产物与 SHA-256 校验表（已发布 v5.3.0.4）
 
-- **构建提交**：`5038e5b`（分支 `agent/integration-5304-20261111`，RC（待维护者确认发布）；`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）
-- **产物目录**：`/var/tmp/sc5000-rc5304-5038e5b`（前两版预 RC 目录 `/var/tmp/sc5000-rc5304-pre-24bb83b`、`/var/tmp/sc5000-rc5304-pre-6e1b4be` 按要求保留）
-- **回滚点**：`v5.3.0.3`（tag `cd789f8`，构建提交 `b941ea4`）
+- **构建提交**：`61e4ed5`（分支 `agent/integration-5304-20261111`；`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）。之后进入发布提交的只有测试文件与文档，镜像内容不变。
+- **产物目录**：编译机上的 `/var/tmp/sc5000-release-5.3.0.4`，`SHA256SUMS.txt` 20 行，`sha256sum -c` 全部 OK。
+- **回滚点**：`v5.3.0.3`（tag `c2395e2`）。
 
 ### 一代机型完整固件（`*-Update.img`）
 
 | 镜像组 | 机型 | 板号 | 文件名 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `5af20f62b4a735dbe68c46a77aebd795dbeefa44c060eb3522cdf51eaedc49d4` |
-| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `5af20f62b4a735dbe68c46a77aebd795dbeefa44c060eb3522cdf51eaedc49d4` |
-| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `5af20f62b4a735dbe68c46a77aebd795dbeefa44c060eb3522cdf51eaedc49d4` |
-| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `6fe0c88162a189e441598a04e6691ca3e0dcfbddd1fb62f251794719fe5b51b6` |
-| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `6fe0c88162a189e441598a04e6691ca3e0dcfbddd1fb62f251794719fe5b51b6` |
-| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `ac67eefeb6353b926182882670d3d4f43fd11f5aa6f24c95f38a448c7df635e9` |
-| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `ac67eefeb6353b926182882670d3d4f43fd11f5aa6f24c95f38a448c7df635e9` |
-| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `ac67eefeb6353b926182882670d3d4f43fd11f5aa6f24c95f38a448c7df635e9` |
+| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `166a5bf557462849f45c8f5ec5755dfcf644e06c39df783e7d02d04be1b6dd81` |
+| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `166a5bf557462849f45c8f5ec5755dfcf644e06c39df783e7d02d04be1b6dd81` |
+| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `166a5bf557462849f45c8f5ec5755dfcf644e06c39df783e7d02d04be1b6dd81` |
+| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `1abe142eafbaa0ed6725d760c16016da72add833919acbf847c89585fe9bad21` |
+| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `1abe142eafbaa0ed6725d760c16016da72add833919acbf847c89585fe9bad21` |
+| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `b63c3b584e428c0ba729acf72b63f80b7581614af958f2bf8bcd10e2b238fe63` |
+| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `b63c3b584e428c0ba729acf72b63f80b7581614af958f2bf8bcd10e2b238fe63` |
+| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `b63c3b584e428c0ba729acf72b63f80b7581614af958f2bf8bcd10e2b238fe63` |
 
 ### 二代机型 `/data` 数据包（`*-Data-Bundle.tar.gz`，Beta）
 
 | 架构组 | 机型 | 板号 | 文件名 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `7799e20ec38e87de666e38a72aa3de4e6c2ea9aef23f015e65eedb2b61902d61` |
-| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `8d8e36356596e97f75307ded9a284adb741f051f1acbea0d4daefb0ff04cfcb4` |
-| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `652b28895e6857627413326ee3cbaf5b45614ef060aeba6d0f8684396b8dc6cd` |
-| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `684df38190d41b62d8a23dae2ae4ef070e0456cf98020c03480d2c0775783da1` |
-| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `d5aae5100833bb6e27d0d01a921d65b37b4fdf91d3783f786db31ac076a85232` |
-| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `681b9964b3185618ac246d1cd65aa613ea8705051187f7c9ba2a1948080e0748` |
-| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `3ee7aeba1b0adb90b919db4ea36fbb6a99572a4ff429196c089dda5cf64de540` |
-| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `b5af5a1fc18ffc218c163b52029a28ff004c90c8c107a25937b6c5f1807403b7` |
+| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `84d56b78f913476eccbf47a0bd12e1cb61329cfd5d6e3f096acdcb0c61c4e1f2` |
+| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `21d1680eeb6d8171f284fef3c77170661b3b5fd02d9806d91f8ef6271221d713` |
+| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `84e8c0b5da4db4d8e3f59ffd923eccdbe2584297db974da5d2f6d69e03af0c47` |
+| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `3673e1703e5780ab3a52f843c749713651cdae9abe0b2aa99a8fff4f0fba46f0` |
+| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `87182b5c695cbd58a6af6ff6d3291c4bf78eb46ed43c8e47732ae2b89bbe7417` |
+| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `26e11a68fcc68cfbab9f6c4e53f4703e9e4a2dd70dbf0facef02758298ca2dc2` |
+| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `1bc52632cebc757dc178b14fb0d47cca52011157caaed39781e4564d75abf480` |
+| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `f2050e6fd0ef1f49c6d312e8a721a098e518fc3fc4cdf6b8ef147bcb1abac4f2` |
 
 ### 跨平台一键安装器（`EngineX-Installer`）
 
 | 平台 | 文件名 | SHA-256 |
 | --- | --- | --- |
-| Windows 10/11 x64 | `EngineX-Installer-5.3.0.4-windows-amd64.zip` | `0e4d80cd4cb7ea009d2034d1a06c2ed428b7e5f3e9ca9f504baef3d2fd143a23` |
-| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.4-macos-arm64.zip` | `76bace82c0781d4f45cbe40c30ff619803f9fd1b693f791abe1adfce1754d34b` |
-| macOS Intel | `EngineX-Installer-5.3.0.4-macos-amd64.zip` | `ac10b18807cc6f201cb053cd0a0a83da5fc515cd3d19381cce8084bb0a1325c9` |
-| Linux x86_64 | `EngineX-Installer-5.3.0.4-linux-amd64.tar.gz` | `36a510a1f74eaa6a32e22ade6e8736dce563f49bd8bdf09cea4c94300b96e2b4` |
+| Windows 10/11 x64 | `EngineX-Installer-5.3.0.4-windows-amd64.zip` | `33be1e408c7224f4b38edd9aa439ca06fe2e0124304e3cb7b0cbaf3d2172cbb7` |
+| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.4-macos-arm64.zip` | `4d327dccacc54a2bae744387e1bd44987a962b48e8c415d358807d59c9d102d4` |
+| macOS Intel | `EngineX-Installer-5.3.0.4-macos-amd64.zip` | `3117bb1d62420648216635ac002dcde46fcfad933d70e48c5a1fc58485982609` |
+| Linux x86_64 | `EngineX-Installer-5.3.0.4-linux-amd64.tar.gz` | `742a0938e311ebbb21fc8ef9b8e399993fd23633b961b222bb6a1f65fe18384f` |
 
 ---
 
 ## 5. 实机影响与升级说明
+
+- **发布前实机安装（2026-11-12）**：维护者的两台 SC5000（JP07）在空闲时先备份，再在线安装本次公开 JP07 镜像（`166a5bf5…`）。只读检查两台均通过：`version.txt` 为 `5.3.0.4`、Engine 运行、进入演出界面、无安全模式标记、stream-sync 与 SSH 正常、根分区只读；未发送任何按键或触屏操作。联机视图、Shift + Layer、影子轨模式即时切换等交互项由维护者上机确认。
 
 - **一代机（8 款 `.img`）**：已刷 `5.3.0.3`、`5.3.0.2`、`5.3.0.1.x` 或 `5.0.4.2` 的设备在正式发布后可于 `设置 → 关于 / 更新` 直接收到 `5.3.0.4` 在线升级推送；首次安装可将对应 `.img` 放入 FAT32/exFAT U 盘根目录免电脑直刷，或进入 `Computer Update Mode` 用 `EngineX-Installer-5.3.0.4` 线刷。
 - **二代机（8 款 `Data-Bundle`）**：已安装 `5.3.0.2` / `5.3.0.3` 数据包的二代机可在屏幕 `设置 → 关于 / 更新` 一键在线升级至 `5.3.0.4`；首次安装可使用 `EngineX-Installer-5.3.0.4`（Windows 二代机推荐按文档使用 `WSL 2 + usbipd-win` 以 root 运行 Linux 版安装器）。
