@@ -3587,5 +3587,144 @@ assert.ok(!presses.some(p=>p.endsWith('/RequestMaster')),'a copy must not reques
 """)
 
 
+class ShadowSyncAlignmentGuardTest(unittest.TestCase):
+    """Sync alignment review (11-11): neighbours of the native-pull follower that must hold."""
+    js = ShadowDisplayTest.js
+    SENDER = r"""
+globalThis.XMLHttpRequest=class{open(){this.readyState=1}send(){this.readyState=4;this.status=200}};
+globalThis.scShadowPoll=()=>{};scFourDeckRole='1';
+let pos=10000,nominal=10000,rate=1,synced=false,k=0,stale=0,pull=0,pullSpeed=0.2;
+// TrackPosition moves in audio blocks: a read is 0-23 ms of deck time old.
+const lag=()=>[0,9,21,4,15,23,11][k%7];
+globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,color:'#fff',index:0,
+ state:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),
+ get unnormalized(){return path.endsWith('/TrackPosition')?(pos-lag()-stale)*48:path.endsWith('/TrackLength')?48000*400:
+  path.endsWith('/OriginalBPM')?128:path.endsWith('/CurrentBPM')?128*rate:0},
+ get string(){return path.endsWith('/SyncMode')?(synced?'BeatOrBarSync':'Off'):
+  path.endsWith('/TrackUri')?'file:///a.wav':path.endsWith('/SpeedState')?((rate-1)*100).toFixed(2)+'%':''}});
+// Engine's pull: the deck runs pullSpeed faster or slower until the phase is in.
+const tick=(dt=40)=>{now+=dt;k++;const run=dt*rate;nominal+=run;pos+=run;
+ if(pull){const m=Math.sign(pull)*Math.min(Math.abs(pull),run*pullSpeed);pos+=m;pull-=m}
+ scShadowTick()};
+const published=()=>{const s=scShadowOwn[0];return s.positionMs+(now-s.at)*(1+s.pitch/100)};
+const jumps=()=>scShadowPrev[1].jumps;
+const steady=()=>{synced=false;rate=1;for(let i=0;i<40;i++)tick()};
+const engage=(ms,speed=0.2)=>{synced=true;rate=1.03;pull=ms;pullSpeed=speed;nominal=pos;tick()};
+"""
+    ENGINE = r"""
+Object.assign(globalThis,{scShadowDisplayOnly:false,scShadowEngineMask:30,scShadowBent:null});
+const T0=now, props=new Map(), seeks=[], presses=[];
+let shift=0, synced=false, rate=1, seq=0, tick=0, pending=null, jumpCount=0;
+let losses=[90], noise=true;
+const jitter=()=>noise?-rate*[0,12,28,4,18,30,8][tick%7]:0;
+// A playing seek: the old line for a moment, then the target, held back by the loss.
+function playback(){
+ if(!pending)return 10000+(now-T0)*rate;
+ if(now<pending.t+40)return pending.old+(now-pending.t)*rate;
+ return pending.target+Math.max(0,now-pending.t-pending.loss)*rate;
+}
+globalThis.scShadowBendTimer={stop(){},restart(){}};
+globalThis.scShadowHolds=()=>true;globalThis.scShadowEnd=()=>false;
+globalThis.scShadowCues=()=>{};globalThis.scShadowBeat=()=>{};
+const speeds=[];globalThis.scShadowSpeed=(d,pitch)=>speeds.push(pitch);globalThis.scPress=p=>presses.push(p);
+globalThis.scTr=path=>{
+ if(props.has(path))return props.get(path);
+ const p={state:path.endsWith('/PlayState')||path.endsWith('/SongLoaded'),
+ string:path.endsWith('/SpeedRange')?'100':path.endsWith('/SyncMode')?'Off':'',
+ get unnormalized(){return path.endsWith('/TrackPosition')?(playback()+jitter())*48:
+  path.endsWith('/TrackLength')?48000*400:0},
+ get value(){return path.endsWith('/SampleRate')?48000:this.v||0},
+ set value(v){this.v=v;if(path.endsWith('/SetSongPosition')){
+  pending={t:now,target:v*400000,old:playback(),loss:losses[Math.min(seeks.length,losses.length-1)]};seeks.push(pending);
+ }}};props.set(path,p);return p;
+};
+scShadowAt[2]={path:'/a',id:'a',ready:true,seekAt:0,jumps:0};
+const source=()=>10000+(now-T0)*rate+shift;
+const apply=(extra={})=>scShadowApply(Object.assign({deck:2,path:'/a',id:'a',link:'peer',playing:true,
+ sync:synced,positionMs:source(),at:now,pitch:(rate-1)*100,bpm:128,currentBpm:128*rate,jumps:jumpCount,seq:++seq},extra));
+const step=(dt=80,extra={})=>{now+=dt;tick++;scShadowLive.seen=now;scShadowLine(now);scShadowLandingTick(now);apply(extra)};
+apply();for(let i=0;i<50;i++)step();
+"""
+
+    def test_the_shadow_js_avoids_names_qml_reserves(self):
+        # Engine's QML engine still reserves the ES3 future words: "native" as a name
+        # failed EmbeddedMain.qml to load (twin, 11-11), which Node accepts.
+        reserved = "abstract|boolean|byte|char|double|final|float|goto|int|long|native|short|synchronized|throws|transient|volatile"
+        hits = re.findall(r"(?:\b(?:const|let|var)\s+|,\s*)(" + reserved + r")\s*=", bp.SERVICES_MAIN)
+        self.assertEqual(hits, [])
+
+    def test_a_noop_sync_posts_its_tempo_without_a_jump(self):
+        self.js(self.SENDER + r"""
+steady();const before=jumps();engage(0);
+assert.equal(scShadowOwn[0].sync,true,'Sync was not posted with its tempo step');
+assert.equal(scShadowOwn[0].currentBpm,128*1.03);
+for(let i=0;i<80;i++){tick();assert.ok(Math.abs(published()-pos)<25,'line moved without a pull')}
+assert.equal(jumps(),before,'a Sync without a pull became a jump');
+// A small pull (under 20 ms) moves the line without a seek on the peer.
+steady();const small=jumps();engage(12);
+for(let i=0;i<80;i++)tick();
+assert.equal(jumps(),small,'a 12 ms pull became a jump');
+assert.ok(Math.abs(published()-pos)<12,'the small pull was not taken into the line');
+""")
+
+    def test_a_hot_cue_during_the_pull_is_its_own_single_jump(self):
+        self.js(self.SENDER + r"""
+steady();const before=jumps();engage(150);
+for(let i=0;i<6;i++)tick();
+pos+=8000;pull=0;tick();
+assert.equal(jumps(),before+1,'the hot cue was not a jump');
+assert.ok(Math.abs(published()-pos)<25,'the hot cue line was not posted');
+for(let i=0;i<60;i++)tick();
+assert.equal(jumps(),before+1,'the hot cue was followed by a second jump');
+""")
+
+    ENGINE = r"""
+Object.assign(globalThis,{scShadowDisplayOnly:false,scShadowEngineMask:30,scShadowBent:null});
+const T0=now, props=new Map(), seeks=[], presses=[];
+let shift=0, synced=false, rate=1, seq=0, tick=0, pending=null, jumpCount=0;
+let losses=[90], noise=true;
+const jitter=()=>noise?-rate*[0,12,28,4,18,30,8][tick%7]:0;
+// A playing seek: the old line for a moment, then the target, held back by the loss.
+function playback(){
+ if(!pending)return 10000+(now-T0)*rate;
+ if(now<pending.t+40)return pending.old+(now-pending.t)*rate;
+ return pending.target+Math.max(0,now-pending.t-pending.loss)*rate;
+}
+globalThis.scShadowBendTimer={stop(){},restart(){}};
+globalThis.scShadowHolds=()=>true;globalThis.scShadowEnd=()=>false;
+globalThis.scShadowCues=()=>{};globalThis.scShadowBeat=()=>{};
+const speeds=[];globalThis.scShadowSpeed=(d,pitch)=>speeds.push(pitch);globalThis.scPress=p=>presses.push(p);
+globalThis.scTr=path=>{
+ if(props.has(path))return props.get(path);
+ const p={state:path.endsWith('/PlayState')||path.endsWith('/SongLoaded'),
+ string:path.endsWith('/SpeedRange')?'100':path.endsWith('/SyncMode')?'Off':'',
+ get unnormalized(){return path.endsWith('/TrackPosition')?(playback()+jitter())*48:
+  path.endsWith('/TrackLength')?48000*400:0},
+ get value(){return path.endsWith('/SampleRate')?48000:this.v||0},
+ set value(v){this.v=v;if(path.endsWith('/SetSongPosition')){
+  pending={t:now,target:v*400000,old:playback(),loss:losses[Math.min(seeks.length,losses.length-1)]};seeks.push(pending);
+ }}};props.set(path,p);return p;
+};
+scShadowAt[2]={path:'/a',id:'a',ready:true,seekAt:0,jumps:0};
+const source=()=>10000+(now-T0)*rate+shift;
+const apply=(extra={})=>scShadowApply(Object.assign({deck:2,path:'/a',id:'a',link:'peer',playing:true,
+ sync:synced,positionMs:source(),at:now,pitch:(rate-1)*100,bpm:128,currentBpm:128*rate,jumps:jumpCount,seq:++seq},extra));
+const step=(dt=80,extra={})=>{now+=dt;tick++;scShadowLive.seen=now;scShadowLine(now);scShadowLandingTick(now);apply(extra)};
+apply();for(let i=0;i<50;i++)step();
+"""
+
+    def test_cues_and_loop_wraps_stay_single_seeks_without_a_trim(self):
+        self.js(self.ENGINE + r"""
+synced=true;for(let i=0;i<60;i++)step(); // long after the Sync edge
+losses=[150];
+for(const delta of [4000,-2000,-455]){
+ const before=seeks.length;
+ shift+=delta;jumpCount++;step();
+ for(let i=0;i<20;i++)step();
+ assert.equal(seeks.length,before+1,'a cue or loop wrap of '+delta+' ms was not exactly one seek');
+}
+""")
+
+
 if __name__ == "__main__":
     unittest.main()
