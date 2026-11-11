@@ -55,7 +55,10 @@ Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemi
 [Service]
 Environment="LD_PRELOAD=$lib_hook"
 Environment="QT_LOGGING_CONF=/data/logging.ini"
+Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M
+Environment=QML_DISABLE_DISK_CACHE=1
 EnvironmentFile=-/data/sc5000-custom/ui-scale.env
+ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home
 EOF
 
 # Converts a rekordbox stick inside the mount, before Engine sees it (as on the 1st-gen images).
