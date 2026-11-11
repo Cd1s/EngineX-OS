@@ -2217,8 +2217,18 @@ SERVICES_MAIN = """
 	// #79: only GET /v1/sc5000/ui (loopback) carries these; shown in Settings -> About.
 	property string scConsoleUrl: ""
 	property string scAccessCode: ""
-	// #148: home sc5000-stemsd last seen by stems-processor; "" = never checked.
+	// #148: home enginex-stemsd / remote Stems status from stems-lan.json.
+	property var scLanStemsInfo: null
 	property string scLanStems: ""
+	function scLanStemsLine(st, lang) {
+		void lang
+		const host = st && st.online ? String(st.hostname || st.endpoint || "") : ""
+		if (host) {
+			const backend = String(st.backend || "htdemucs")
+			return scT("High-quality stems:") + (scLang === "en" ? " " : "") + host + " (" + backend + ")"
+		}
+		return scT("On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network.")
+	}
 	property string scUpdateText: ""
 	property bool scBroadcastOn: false
 	property bool scUpfaderEcho: false
@@ -2744,7 +2754,8 @@ SERVICES_MAIN = """
 		scNeteaseMode = v.neteaseMode || "official"
 		scUpdateRepo = v.githubRepo || scUpdateRepo
 		if (v.accessCode) { scAccessCode = v.accessCode; scConsoleUrl = v.consoleUrl || "" }
-		scLanStems = v.lanStems ? (v.lanStems.online ? scT("Stems LAN renderer online:") : scT("Stems LAN renderer offline:")) + " " + (v.lanStems.hostname || v.lanStems.endpoint || "") : ""
+		if (v.accessCode || v.lanStems !== undefined) root.scLanStemsInfo = v.lanStems || null
+		scLanStems = root.scLanStemsLine ? root.scLanStemsLine(root.scLanStemsInfo, scLang) : ""
 		scMasterLimiter = !!v.masterLimiter
 		scAutoGain = !!v.autoGain
 		scAutoAnalyze = !!v.autoAnalyze
@@ -5220,7 +5231,9 @@ def edits(dev: bool):
             ("	onUpdateAvailableChanged: {\n", "	onUpdateAvailableChanged: {\n		return\n")],
         prefs + "Entries/Version.qml": [(
             "	text: `Engine OS ${versionString} <font color=\\\"${grey}\\\">(${gitHashString})</font>`",
-            "	text: `EngineX OS ${root.scVersion || versionString}${root.scAboutBuildTag() ? ` · ${root.scAboutBuildTag()}` : \"\"} <font color=\\\"${grey}\\\">(github.com/${root.scUpdateRepo})</font>${root.scAccessCode ? `<br><small>${root.scT(\"Web Console\")} ${root.scConsoleUrl}<br>${root.scT(\"Access Code\")} ${root.scAccessCode}${root.scLanStems ? `<br>${root.scLanStems}` : \"\"}</small>` : \"\"}`")],
+            "	wrapMode: Text.WordWrap\n"
+            "	Layout.preferredHeight: implicitHeight\n"
+            "	text: `EngineX OS ${root.scVersion || versionString}${root.scAboutBuildTag() ? ` · ${root.scAboutBuildTag()}` : \"\"} <font color=\\\"${grey}\\\">(github.com/${root.scUpdateRepo})</font>${root.scAccessCode ? `<br><small>${root.scT(\"Web Console\")} ${root.scConsoleUrl}<br>${root.scT(\"Access Code\")} ${root.scAccessCode}${!root.scIsAZ04 && root.scLanStems ? `<br>${String(root.scLanStems).replace(/&/g, \"&amp;\").replace(/</g, \"&lt;\").replace(/>/g, \"&gt;\")}` : \"\"}</small>` : \"\"}`")],
         prefs + "Entries/Analytics.qml": [(
             "\t\tchecked = pAnalyticsEnabled.translator.state\n\t\tPlanck.quit(QuitReasons.AnalyticsChange, false)",
             "\t\tpAnalyticsEnabled.translator.state = !pAnalyticsEnabled.translator.state")],
@@ -5584,6 +5597,19 @@ def edits(dev: bool):
              "				  if (actionIndex < leftActions.length) leftActions[actionIndex].trigger(row.index)\n"
              "				  else root.scStemStream(row.modelData.trackId)\n"),
         ]
+    out[prefs + ("" if v53() else "TabContents/") + "LibraryTabContent.qml"].append((
+        "StemsList {}," if v53() else "StemsList { },",
+        ("StemsList {}," if v53() else "StemsList { },") + """
+\t\tText {
+\t\t\tvisible: !(typeof root !== "undefined" && root && root.scIsAZ04)
+\t\t\tLayout.fillWidth: true
+\t\t\tleftPadding: 24; rightPadding: 24
+\t\t\twrapMode: Text.WordWrap
+\t\t\tcolor: "#9a9a9a"
+\t\t\tfont.pixelSize: 16
+\t\t\ttext: root.scLanStemsLine(root.scLanStemsInfo, root.scLang)
+\t\t},""",
+    ))
     if v53():
         # The stock "Stems Support" row downloads Denon's stems-child-process; EngineX OS ships
         # and mounts its own, and an Install there could replace that mount.

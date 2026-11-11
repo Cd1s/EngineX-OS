@@ -4,10 +4,9 @@
 # for EngineX OS decks. Decks on the same LAN find it automatically (UDP 17891),
 # and --with-tunnel starts a zero-config https://*.trycloudflare.com public relay.
 #
-#   tools/stems/run-home-worker.sh                        # auto: htdemucs if installed, else hpss
-#   tools/stems/run-home-worker.sh demucs                 # install demucs (torch) and use it
+#   tools/stems/run-home-worker.sh                        # default: install demucs (htdemucs) and use it
 #   tools/stems/run-home-worker.sh hpss                   # fast spectral split, numpy + scipy only
-#   tools/stems/run-home-worker.sh --with-tunnel [demucs] # also launch domain-free Cloudflare Quick Tunnel
+#   tools/stems/run-home-worker.sh --with-tunnel [hpss]   # also launch domain-free Cloudflare Quick Tunnel
 #
 # Needs python3 and the enginex-stemsd binary (in PATH, next to this script, or
 # ENGINEX_STEMSD=/path; SC5000_STEMSD is also accepted for compatibility).
@@ -29,7 +28,7 @@ for arg in "$@"; do
       ;;
   esac
 done
-backend=${backend:-${ENGINEX_STEMS_BACKEND:-auto}}
+backend=${backend:-${ENGINEX_STEMS_BACKEND:-demucs}}
 
 bin=${ENGINEX_STEMSD:-${SC5000_STEMSD:-$(command -v enginex-stemsd || command -v sc5000-stemsd || echo "$here/enginex-stemsd")}}
 if [ ! -x "$bin" ] && [ -x "$here/sc5000-stemsd" ]; then
