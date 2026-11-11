@@ -7,11 +7,11 @@
   const LS_LOCAL = "enginex-mods-local", LS_REV = "enginex-mods-reviews", LS_CACHE = "enginex-mods-gh:";
   const CACHE_MS = 10 * 60 * 1000; // 未登录 GitHub API 每小时 60 次，列表与评论缓存 10 分钟
   const MAX_PKG = 50 * 1024 * 1024, MAX_KEEP = 1536 * 1024; // 上传上限；超过 1.5 MB 的包不存 localStorage
-  const ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/; // 与 pkg/mods.idPattern 相同
+  const ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/; // Mod ID 格式约束
   const CATS = ["all", "official", "network", "lighting", "audio", "midi", "ui", "community"];
 
   const L = (s, t, e) => ({ s, t, e });
-  const ALL16 = L("全部 16 款（一代 armhf / 二代 armhf / AZ04 arm64）", "全部 16 款（一代 armhf / 二代 armhf / AZ04 arm64）", "All 16 models (gen-1 armhf / gen-2 armhf / AZ04 arm64)");
+  const ALL16 = L("全部 16 款机型（一代与二代全系）", "全部 16 款機型（一代與二代全系）", "All 16 models (all 1st- and 2nd-gen units)");
   const pkg = (id, v, arch) => ({ label: arch || "", url: `mods/packages/${id}-${v}${arch ? "-" + arch : ""}.tar.gz` });
   // 离线 / registry.json 加载失败时的兜底；registry 里同 id 的字段会覆盖这里
   const OFFICIAL = [
@@ -36,15 +36,15 @@
       description: L("俱乐部演出纯净模式：隐藏演出时用不到的菜单与提示，只留波形、曲库和关键控制。", "俱樂部演出純淨模式：隱藏演出時用不到的選單與提示，只留波形、曲庫與關鍵控制。", "Club performance mode: hides menus and prompts you do not need on stage, leaving waveforms, the library and key controls."),
       models: ALL16, packages: [pkg("minimal-club-mode", "1.1.0")] },
     { id: "midi-controller-mapper", name: "Generic MIDI Controller Mapper", version: "1.1.0", author: "EngineX OS", category: "midi", issues: [137],
-      description: L("外部 USB MIDI 控制器映射器（首发支持 Pioneer CDJ-400）：低优先级 (nice 19) ALSA Sequencer helper 与 60 Hz QML 桥接，将外部控制器直接映射到四轨模式下的内部 Deck 3/4，含连续速度转盘积分器 (64=停止)、带 ▲▼ 指示的变速推子软接管及热拔插自动停用保护。",
-        "外部 USB MIDI 控制器映射器（首發支援 Pioneer CDJ-400）：低優先級 (nice 19) ALSA Sequencer helper 與 60 Hz QML 橋接，將外部控制器直接映射至四軌模式下的內部 Deck 3/4，含連續速度轉盤積分器 (64=停止)、帶 ▲▼ 指示的變速推桿軟接管及熱拔插自動停用保護。",
-        "External USB MIDI controller mapper (Pioneer CDJ-400 first): low-priority (nice 19) ALSA Sequencer helper and 60 Hz QML bridge mapping external controllers directly to internal Deck 3/4 in 4-deck mode, with continuous velocity jog time-integration (64=stop), tempo soft takeover with ▲▼ indicators, and hot-unplug auto-disable."),
+      description: L("外部 USB MIDI 控制器映射器（首发支持 Pioneer CDJ-400）：在四轨模式下免切换硬件 Layer 直接操控内部 Deck 3/4，内置连续速度转盘控制、带屏幕 ▲▼ 指示的变速推子软接管及拔线自动停用保护。",
+        "外部 USB MIDI 控制器映射器（首發支援 Pioneer CDJ-400）：在四軌模式下免切換硬體 Layer 直接操控內部 Deck 3/4，內建連續速度轉盤控制、帶螢幕 ▲▼ 指示的變速推桿軟接管及拔線自動停用保護。",
+        "External USB MIDI controller mapper (Pioneer CDJ-400 preset included): controls internal Deck 3/4 directly in 4-deck mode without switching hardware layers, with smooth velocity jog control, tempo soft takeover with on-screen ▲▼ arrows, and unplug auto-stop."),
       models: ALL16, packages: [pkg("midi-controller-mapper", "1.1.0")] },
   ].map((m) => ({ ...m, official: true }));
 
   const UI = {
     s: { title: "Mod 社区", lead: "开源 Mod 的下载、上传与评价。所有包都公开源码，碟机安装前会再校验一次。", upload: "+ 上传开源 Mod",
-      archT: "两层架构", arch1T: "内置于系统", arch1: "原厂能力（含原厂 Engine Lighting 解锁）、流媒体、Stems、DSP 防护直接装在 EngineX OS 里，不需要额外安装。",
+      archT: "两层架构", arch1T: "内置于系统", arch1: "流媒体直连、4 轨 Stems、四轨同屏波形与 21 项音频防护直接装在 EngineX OS 里，原厂 Engine 灯光保持原样（默认关闭）。",
       arch2T: "开源 Mod 按需安装", arch2: "Tailscale 远程访问、专业多域 DMX 控灯台等大型插件做成 Mod，需要时再装；未启用时 0 内存占用。",
       cats: { all: "全部", official: "官方", network: "网络与远程", lighting: "舞台灯光", audio: "音频与采样", midi: "MIDI 控制器", ui: "界面与转盘", community: "社区上传", other: "其它" },
       search: "搜索 Mod…", sort: { hot: "最热", rating: "最高评分", new: "最新上传" }, none: "没有匹配的 Mod", loading: "正在加载社区 Mod…", ghFail: "GitHub 暂时无法访问，只显示官方与本机 Mod",
@@ -56,9 +56,9 @@
       fId: "Mod ID", fName: "名称", fVer: "版本", fAuthor: "作者", fCat: "分类", fDesc: "描述", fFiles: "QML / 脚本 / 资源文件", fTarget: "替换的原厂 qrc 路径", fScript: "启动脚本", fAsset: "资源",
       pack: "打包并校验", ok: "校验通过", bad: "校验未通过", warn: "提醒", size: "大小",
       keep: "加入本机预览 & 下载 .tar.gz", submit: "提交到 GitHub 开源 Mod 仓库", submitHint: "会打开预填好的 Issue；请把刚下载的 `.tar.gz` 拖进 Issue 作为附件，社区才能下载。",
-      safety: "浏览器只检查包结构、`mod.json` 与路径；碟机安装时 `pkg/mods` 还会完整校验一次（含 QML 语法）。Mod 在碟机上运行，只安装你信任的作者发布的包。", del: "移除本机预览" },
+      safety: "浏览器只检查包结构、清单与路径；碟机安装时还会完整校验一次。Mod 在碟机上运行，只安装你信任的作者发布的包。", del: "移除本机预览" },
     t: { title: "Mod 社群", lead: "開源 Mod 的下載、上傳與評價。所有套件都公開原始碼，碟機安裝前會再校驗一次。", upload: "+ 上傳開源 Mod",
-      archT: "兩層架構", arch1T: "內建於系統", arch1: "原廠能力（含原廠 Engine Lighting 解鎖）、串流、Stems、DSP 防護直接裝在 EngineX OS 裡，不需要額外安裝。",
+      archT: "兩層架構", arch1T: "內建於系統", arch1: "串流直連、4 軌 Stems、四軌同屏波形與 21 項音訊防護直接裝在 EngineX OS 裡，原廠 Engine 燈光維持原樣（預設關閉）。",
       arch2T: "開源 Mod 按需安裝", arch2: "Tailscale 遠端存取、專業多域 DMX 控燈台等大型外掛做成 Mod，需要時再裝；未啟用時 0 記憶體占用。",
       cats: { all: "全部", official: "官方", network: "網路與遠端", lighting: "舞台燈光", audio: "音訊與取樣", midi: "MIDI 控制器", ui: "介面與轉盤", community: "社群上傳", other: "其他" },
       search: "搜尋 Mod…", sort: { hot: "最熱門", rating: "最高評分", new: "最新上傳" }, none: "沒有符合的 Mod", loading: "正在載入社群 Mod…", ghFail: "GitHub 暫時無法存取，只顯示官方與本機 Mod",
@@ -70,9 +70,9 @@
       fId: "Mod ID", fName: "名稱", fVer: "版本", fAuthor: "作者", fCat: "分類", fDesc: "描述", fFiles: "QML / 腳本 / 資源檔案", fTarget: "替換的原廠 qrc 路徑", fScript: "啟動腳本", fAsset: "資源",
       pack: "打包並校驗", ok: "校驗通過", bad: "校驗未通過", warn: "提醒", size: "大小",
       keep: "加入本機預覽 & 下載 .tar.gz", submit: "提交到 GitHub 開源 Mod 倉庫", submitHint: "會開啟預填好的 Issue；請把剛下載的 `.tar.gz` 拖進 Issue 作為附件，社群才能下載。",
-      safety: "瀏覽器只檢查套件結構、`mod.json` 與路徑；碟機安裝時 `pkg/mods` 還會完整校驗一次（含 QML 語法）。Mod 在碟機上執行，只安裝你信任的作者發布的套件。", del: "移除本機預覽" },
+      safety: "瀏覽器只檢查套件結構、清單與路徑；碟機安裝時還會完整校驗一次。Mod 在碟機上執行，只安裝你信任的作者發布的套件。", del: "移除本機預覽" },
     e: { title: "Mod Hub", lead: "Download, publish and review open-source mods. Every package ships its source and is validated again on the deck before install.", upload: "+ Upload Mod",
-      archT: "Two layers", arch1T: "Built into the system", arch1: "Stock features (including the unlocked stock Engine Lighting), streaming, Stems and DSP guards ship inside EngineX OS with nothing extra to install.",
+      archT: "Two layers", arch1T: "Built into the system", arch1: "Streaming, 4-part Stems, 4-deck waveforms and 21 audio guards ship inside EngineX OS; stock Engine Lighting stays untouched (off by default).",
       arch2T: "Open-source mods on demand", arch2: "Large add-ons such as Tailscale remote access and the multi-universe DMX console are mods you install when you need them; disabled mods use 0 memory.",
       cats: { all: "All", official: "Official", network: "Network · Tailscale", lighting: "DMX & Lighting", audio: "Audio & Sampler", midi: "MIDI Controllers", ui: "UI & Jog", community: "Community", other: "Other" },
       search: "Search mods…", sort: { hot: "Most popular", rating: "Top rated", new: "Newest" }, none: "No mods match", loading: "Loading community mods…", ghFail: "GitHub is unreachable right now; showing official and local mods only",
@@ -84,7 +84,7 @@
       fId: "Mod ID", fName: "Name", fVer: "Version", fAuthor: "Author", fCat: "Category", fDesc: "Description", fFiles: "QML / script / asset files", fTarget: "Stock qrc path it replaces", fScript: "Start script", fAsset: "Asset",
       pack: "Package & validate", ok: "Validation passed", bad: "Validation failed", warn: "Notes", size: "Size",
       keep: "Add to local preview & download .tar.gz", submit: "Submit to the GitHub mod repo", submitHint: "Opens a pre-filled Issue; drag the `.tar.gz` you just downloaded into it as an attachment so others can download it.",
-      safety: "The browser checks the package layout, `mod.json` and paths; the deck's `pkg/mods` validates again on install (including QML syntax). Mods run on your deck: install only packages from authors you trust.", del: "Remove local preview" },
+      safety: "The browser checks the package layout, manifest and paths; the deck validates again on install. Mods run on your deck: install only packages from authors you trust.", del: "Remove local preview" },
   };
 
   const $ = (s, r = document) => r.querySelector(s);
