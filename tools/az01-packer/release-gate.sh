@@ -7,21 +7,27 @@
 # natively on an ARM host with 32-bit EL0, elsewhere through qemu-arm binfmt):
 #  1. static audit of the new rootfs: unit dependencies, Exec* commands, tool
 #     paths, shared libraries of every shipped ELF (rootfs_audit.py, ld.so --list);
-#  2. the previous release boots (prepare, stream-sync, Engine), finds the new
-#     release on a local TLS GitHub mock and runs the deck's online update:
+#  2. the previous release boots (prepare, stream-sync, Engine) with a populated
+#     internal Engine library (/media/az01-internal), finds the new release on a
+#     local TLS GitHub mock and runs the deck's online update:
 #     /v1/sc5000/update?apply=1 -> Engine quits with UpdateFromUrl -> the stock
 #     engine script -> az01-update downloads and verifies the new image;
-#  3. the new rootfs boots on the same /data: etc-reset, prepare, debloat,
+#  3. the new rootfs boots on the same /data (boot 1): etc-reset, prepare, debloat,
 #     perf-tune, sshd -t, a stock Engine run that leaves a stale QML cache, then
 #     stream-sync, deemixd, rb-bridge, guardian, storage, edisksd + hook, Engine +
-#     UI hook (patch/DSP/QML counts, and gate-ui-probe.qml reading the rendered
-#     Settings -> Services -> Streaming rows, About and Control Center), streaming
-#     gateway, Stems handshake, Rekordbox conversion, fsck.hfsplus, and the
-#     next online update again.
+#     UI hook (patch/DSP/QML counts, splash unlock/dismissal, and gate-ui-probe.qml
+#     reading Settings -> Services -> Streaming rows, About and Control Center),
+#     streaming gateway, Stems handshake, Rekordbox conversion, fsck.hfsplus, and
+#     an abrupt hard power cut (SIGKILL of the running namespace, no clean stop);
+#  4. second boot after power cut on the same /data and internal Engine library
+#     (boot 2, #140): verifies running-sentinel dirty QML cache purge without false
+#     safe-mode, persisted settings/SSH key/library, full boot splash dismissal +
+#     UI-ready render + hooks + daemons, and the next online update + clean stop.
 # Exit 0 only when every check passed. Evidence: <work dir>/results.txt and logs.
 # Destructive deck paths are shimmed and logged, never run: kexec, systemctl,
-# reboot, encrypt-fs.sh (fscrypt on /data), az01-update --erase-data. The
-# GUI updater planck-remote-screen has no display here; its shim runs
+# reboot, encrypt-fs.sh (fscrypt on /data), az01-update --erase-data. CAP_SYS_TIME
+# is dropped before entering the sandbox so nothing inside can touch the host clock.
+# The GUI updater planck-remote-screen has no display here; its shim runs
 # az01-update --net, which links the same libaz01-prog download/verify code.
 set -euo pipefail
 export LC_ALL=C
@@ -51,14 +57,20 @@ unit_exec() { # ExecStart of a unit as the image ships it (last one wins)
 # --- phase: one boot of one rootfs, PID 1 of its own pid + mount namespace ---
 phase() {
     local name=$1 R=$W/$1 v
+    [ "$name" != boot2 ] || R=$W/new
     mount --make-rprivate /
-    for d in tmp run dev sys; do mount -t tmpfs tmpfs "$R/$d"; done
+    for d in tmp run dev sys media; do mount -t tmpfs tmpfs "$R/$d"; done
+    if [ -d "$R/var/volatile" ]; then
+        mount -t tmpfs tmpfs "$R/var/volatile"
+        mkdir -p "$R/var/volatile/log" "$R/var/volatile/tmp" "$R/var/volatile/cache"
+    fi
     for n in null zero full urandom random; do touch "$R/dev/$n"; mount --bind "/dev/$n" "$R/dev/$n"; done
-    mkdir -p "$R/dev/pts" "$R/dev/shm" "$R/run/gate" "$R/sys/firmware/devicetree/base" "$R/sys/devices/system/cpu"
+    mkdir -p "$R/dev/pts" "$R/dev/shm" "$R/run/gate" "$R/sys/firmware/devicetree/base" "$R/sys/devices/system/cpu" "$R/media/az01-internal"
     printf '%s' "$PRODUCT" > "$R/sys/firmware/devicetree/base/inmusic,product-code"
     printf '%s\0rockchip,rk3288\0' "$COMPAT" > "$R/sys/firmware/devicetree/base/compatible"
     for f in online possible present; do echo 0-3 > "$R/sys/devices/system/cpu/$f"; done
     mount --bind "$W/data" "$R/data"
+    mount --bind "$W/drive" "$R/media/az01-internal"
     mount --bind "$W/hosts" "$R$(chroot "$R" /bin/readlink -f /etc/hosts)"
     local bundle; bundle=$R$(chroot "$R" /bin/readlink -f /etc/ssl/certs/ca-certificates.crt)
     cat "$bundle" "$W/tls/ca.pem" > "$W/$name-ca.crt"
@@ -84,9 +96,9 @@ SH
 rc=1
 for c in /proc/[0-9]*/cmdline; do
     pid=\${c#/proc/}; pid=\${pid%/cmdline}
-    cmd=\$(tr '\\0' ' ' < "\$c" 2>/dev/null) || continue
+    cmd=\$(tr '\0' ' ' < "\$c" 2>/dev/null) || continue
     [ -z "$QEMU_INTERP" ] || case \$cmd in "$QEMU_INTERP "*) cmd=\${cmd#* }; cmd=\${cmd#* } ;; esac
-    [ "\$pid" = \$\$ ] || ! printf '%s\\n' "\${cmd% }" | grep -Eq -- "\$3" || { kill "\$1" "\$pid" && rc=0; }
+    [ "\$pid" = \$\$ ] || ! printf '%s\n' "\${cmd% }" | grep -Eq -- "\$3" || { kill "\$1" "\$pid" && rc=0; }
 done
 exit \$rc
 SH
@@ -111,16 +123,25 @@ SH
     if [ "$name" = old ]; then
         printf 'lang=%s\n' "$LANG_PACK" > "$W/data/sc5000-custom/ui/settings.conf"
         check "old: version $OLDV installed" grep -qx "$OLDV" "$W/data/sc5000-custom/version.txt"
-    else
+    elif [ "$name" = new ]; then
         check "new: version.txt is $NEWV" grep -qx "$NEWV" "$W/data/sc5000-custom/version.txt"
         check "new: .pack-version is $NEWV" grep -qx "$NEWV" "$W/data/sc5000-custom/ui/.pack-version"
         check "new: SSH host key kept across the update" cmp -s "$W/old-hostkey.pub" "$W/data/sc5000-custom/ssh_host_ed25519_key.pub"
         check "new: no SSH key in a public image" test ! -s "$R/usr/share/sc5000-custom/authorized_keys"
+        check "new: internal drive Engine Library mounted at /media/az01-internal" test -s "$R/media/az01-internal/Engine Library/Database2/m.db"
         check "new: sc5000-debloat --apply-runtime" in_root /usr/local/bin/sc5000-debloat --apply-runtime
         check "new: sc5000-perf-tune" in_root SC5000_PROC_ROOT=/proc SC5000_SYS_ROOT=/sys /usr/local/bin/sc5000-perf-tune
         check "new: 8 MiB TCP buffers" grep -qx '4096 131072 8388608' "$R/proc/sys/net/ipv4/tcp_rmem"
         mkdir -p "$R/run/sshd"
         check "new: sshd -t" in_root /usr/sbin/sshd -t -f /usr/share/sc5000-custom/sshd_config
+    else
+        check "boot2: version.txt stays $NEWV" grep -qx "$NEWV" "$W/data/sc5000-custom/version.txt"
+        check "boot2: .pack-version stays $NEWV" grep -qx "$NEWV" "$W/data/sc5000-custom/ui/.pack-version"
+        check "boot2: SSH host key preserved across power cut" cmp -s "$W/old-hostkey.pub" "$W/data/sc5000-custom/ssh_host_ed25519_key.pub"
+        check "boot2: upfader_echo=1 persisted across power cut" grep -qx 'upfader_echo=1' "$W/data/sc5000-custom/ui/settings.conf"
+        check "boot2: internal drive Engine Library intact across power cut" python3 -I -c 'import sqlite3,sys; sys.exit(0 if sqlite3.connect(sys.argv[1]).execute("select count(*) from Track").fetchone()[0] == 8 else 1)' "$R/media/az01-internal/Engine Library/Database2/m.db"
+        check "boot2: sc5000-debloat --apply-runtime" in_root /usr/local/bin/sc5000-debloat --apply-runtime
+        check "boot2: sc5000-perf-tune" in_root SC5000_PROC_ROOT=/proc SC5000_SYS_ROOT=/sys /usr/local/bin/sc5000-perf-tune
     fi
     umount "$R/proc"
     mount -t proc proc "$R/proc"
@@ -139,15 +160,22 @@ SH
     declare -A pid
     # shellcheck disable=SC2046
     in_root $(unit_exec stream-sync.service) > "$W/$name-stream-sync.log" 2>&1 & pid[stream-sync]=$!
-    if [ "$name" = new ]; then
-        in_root $(unit_exec sc5000-deemixd.service) > "$W/new-deemixd.log" 2>&1 & pid[deemixd]=$!
-        in_root $(unit_exec rb-bridge.service) > "$W/new-rb-bridge.log" 2>&1 & pid[rb-bridge]=$!
-        # No udev here: edisksd quits after "Failed to get initial devices". Binding every
-        # symbol of the preloaded hook at start is the check; the mount path itself is
-        # tools/edisksd-hook/test_edisksd_hook.c --mounts (step 2).
-        in_root LD_BIND_NOW=1 LD_PRELOAD=/etc/sc5000/libedisksd-hook.so $(unit_exec edisksd.service) > "$W/new-edisksd.log" 2>&1 &
-        check "new: engine-guardian --watch (retired) exits 0" in_root $(unit_exec engine-guardian.service)
-        check "new: sc5000-storage-mount --discover" in_root $(unit_exec sc5000-storage-discover.service)
+    if [ "$name" != old ]; then
+        # shellcheck disable=SC2046
+        in_root $(unit_exec sc5000-deemixd.service) > "$W/$name-deemixd.log" 2>&1 & pid[deemixd]=$!
+        # shellcheck disable=SC2046
+        in_root $(unit_exec rb-bridge.service) > "$W/$name-rb-bridge.log" 2>&1 & pid[rb-bridge]=$!
+        if [ "$name" = new ]; then
+            # No udev here: edisksd quits after "Failed to get initial devices". Binding every
+            # symbol of the preloaded hook at start is the check; the mount path itself is
+            # tools/edisksd-hook/test_edisksd_hook.c --mounts (step 2).
+            # shellcheck disable=SC2046
+            in_root LD_BIND_NOW=1 LD_PRELOAD=/etc/sc5000/libedisksd-hook.so $(unit_exec edisksd.service) > "$W/new-edisksd.log" 2>&1 &
+            # shellcheck disable=SC2046
+            check "new: engine-guardian --watch (retired) exits 0" in_root $(unit_exec engine-guardian.service)
+        fi
+        # shellcheck disable=SC2046
+        check "$name: sc5000-storage-mount --discover" in_root $(unit_exec sc5000-storage-discover.service)
     fi
     # engine.service: ExecStartPre (guard), runengine's environment, the stock engine script.
     mkdir -p -m 0700 "$R/tmp/sc5000-engine-home"
@@ -172,33 +200,46 @@ SH
         note "new: stale QML cache seeded: $(find "$W/data" -name '*.qmlc' | wc -l) .qmlc files"
         rm -f "$ui/safe-mode" "$ui/boot-count" "$ui/boot-token" "$R/tmp/engine_runguard.lock"
         # The probe stands in for a stock file Engine always creates; it is not in the image.
-        want=$(find "$ui/packs/$LANG_PACK" -type f | wc -l)
+        want=$(find "$ui/packs/$LANG_PACK" -type f ! -name QmlWarnings.qml | wc -l)
         mkdir -p "$ui/packs/$LANG_PACK/Skins/Common/Items"
         cp "$REPO/tools/az01-packer/gate-ui-probe.qml" "$ui/packs/$LANG_PACK/Skins/Common/Items/QmlWarnings.qml"
+    elif [ "$name" = boot2 ]; then
+        want=$(find "$ui/packs/$LANG_PACK" -type f ! -name QmlWarnings.qml | wc -l)
     fi
     in_root /etc/sc5000/engine-ui-guard pre >> "$W/$name-boot.log" 2>&1 || :
-    # #56: without a TIDAL account Engine 5.3.0 opens the Engine DJ Profile login
-    # (device.enginedj.com) instead of logging in to the local gateway.
-    [ "$name" = old ] || check "new: engine-ui-guard pre left Engine a TIDAL account on a fresh /data (#56)" \
-        python3 -I -c 'import json,sys; a=json.load(open(sys.argv[1])); sys.exit(json.loads(a["TIDAL"])["providerType"] != "TIDAL")' "$W/data/StreamingAccounts.json"
+    if [ "$name" = new ]; then
+        # #56: without a TIDAL account Engine 5.3.0 opens the Engine DJ Profile login
+        # (device.enginedj.com) instead of logging in to the local gateway.
+        check "new: engine-ui-guard pre left Engine a TIDAL account on a fresh /data (#56)" \
+            python3 -I -c 'import json,sys; a=json.load(open(sys.argv[1])); sys.exit(json.loads(a["TIDAL"])["providerType"] != "TIDAL")' "$W/data/StreamingAccounts.json"
+    elif [ "$name" = boot2 ]; then
+        check "boot2: engine-ui-guard purged dirty QML cache after power cut (#140)" \
+            test ! -e "$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml/powercut-truncated.qmlc"
+        check "boot2: healthy boot before power cut did not trigger safe-mode (#140)" \
+            bash -c "test ! -e '$ui/safe-mode' && test \"\$(cat '$ui/boot-count')\" = 1"
+        check "boot2: running-sentinel re-armed for second boot (#140)" test -e "$ui/running-sentinel"
+    fi
     in_root "${engine_env[@]}" /usr/Engine/Scripts/engine "$PRODUCT" > "$W/$name-engine.log" 2>&1 & pid[engine]=$!
     check "$name: stream-sync listens on :8080" wait_for 120 curl -sf -o /dev/null http://127.0.0.1:8080/v1/sc5000/ui
     check "$name: UI hook loaded the $LANG_PACK pack" wait_for "$ENGINE_START" grep -aq "packs/$LANG_PACK: [0-9]* files" "$W/$name-engine.log"
-    in_root /etc/sc5000/engine-ui-guard post >> "$W/$name-boot.log" 2>&1 || :
+    in_root SC5000_UI_ALIVE_CMD="/usr/local/sbin/pkill -0 -f ^/usr/Engine/Engine" /etc/sc5000/engine-ui-guard post >> "$W/$name-boot.log" 2>&1 || :
 
     # Engine removes a stale /tmp/update-file-url while it starts: a deck owner can only
     # press Update once it is up, so the gate waits the same way before ?apply=1.
-    sleep "$ENGINE_SECONDS"
+    local run_seconds=$ENGINE_SECONDS
+    [ "$name" != boot2 ] || run_seconds=$BOOT2_SECONDS
+    sleep "$run_seconds"
     if [ "$name" = new ]; then
         local log=$W/new-engine.log files label
+        check "new: render probe reported (Settings -> Services, About)" wait_for "$ENGINE_START" grep -aq 'SCPROBE done|' "$log"
         files=$(sed -n "s|.*packs/$LANG_PACK: \([0-9]*\) files.*|\1|p" "$log" | awk '{s += $1} END {print s + 0}')
         # At least, not exactly: Engine 5.3.0 registers ControlSurfaceModules (Sync.qml) twice
         # at run time and the hook replaces it in both, one line each. What rendered is checked below.
         check "new: UI hook replaced all $want pack files + the gate probe (got ${files:-0})" test "${files:-0}" -ge $((want + 1)) -a "$want" -gt 0
         # What Engine rendered, not what the hook counted: a stale .qmlc showed the stock UI
         # while the hook still logged every file.
-        check "new: render probe reported (Settings -> Services, About)" wait_for "$ENGINE_START" grep -aq 'SCPROBE done|' "$log"
         check "new: render probe ran without errors" bash -c "! grep -aq 'SCPROBE error|' '$log'"
+        check "new: boot splash unlocked and dismissed (#140)" grep -aqF 'SCPROBE splash|0|1|' "$log"
         label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2) || :
         check "new: Settings -> Services -> Streaming shows the pack's Deezer row" test -n "$label"
         check "new: Streaming shows SoundCloud once (stock row hidden)" test "$(grep -acF "SCPROBE entry|$label|SoundCloud|1|" "$log")" -eq 1
@@ -252,6 +293,36 @@ SH
         check "new: rb-bridge converts a Rekordbox export" in_root /usr/local/bin/rb-bridge --mount-path /tmp/usb
         check "new: Engine Library written with tracks" python3 -I -c 'import sqlite3,sys; sys.exit(0 if sqlite3.connect(sys.argv[1]).execute("select count(*) from Track").fetchone()[0] > 0 else 1)' "$R/tmp/usb/Engine Library/Database2/m.db"
         check "new: fsck.hfsplus runs" bash -c "chroot '$R' /usr/sbin/fsck.hfsplus 2>&1 | grep -qi usage"
+        check "new: healthy timer cleared boot-token while Engine stayed up (#140)" test ! -e "$ui/boot-token"
+        check "new: running-sentinel armed before power cut (#140)" test -e "$ui/running-sentinel"
+        cp "$R/tmp/gate-shim.log" "$W/new-shim.log" 2>/dev/null || :
+        : > "$W/new-powercut.ready"
+        sleep 300
+        return
+    elif [ "$name" = boot2 ]; then
+        local log=$W/boot2-engine.log files label
+        check "boot2: render probe reported (Settings -> Services, About)" wait_for "$ENGINE_START" grep -aq 'SCPROBE done|' "$log"
+        files=$(sed -n "s|.*packs/$LANG_PACK: \([0-9]*\) files.*|\1|p" "$log" | awk '{s += $1} END {print s + 0}')
+        check "boot2: UI hook replaced all $want pack files + the gate probe (got ${files:-0})" test "${files:-0}" -ge $((want + 1)) -a "$want" -gt 0
+        check "boot2: render probe ran without errors" bash -c "! grep -aq 'SCPROBE error|' '$log'"
+        check "boot2: boot splash unlocked and dismissed (#140)" grep -aqF 'SCPROBE splash|0|1|' "$log"
+        label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2) || :
+        check "boot2: Settings -> Services -> Streaming shows the pack's Deezer row" test -n "$label"
+        check "boot2: About shows EngineX OS $NEWV" grep -aqF "SCPROBE version|EngineX OS $NEWV " "$log"
+        check "boot2: Engine build matched (Engine $BASE)" grep -aq "engine-ui-hook: Engine $BASE" "$log"
+        check "boot2: $EXPECT_APPLIED Engine patches applied" \
+            test "$(grep -ac 'engine-ui-hook: applied 0x' "$log")" -eq "$EXPECT_APPLIED"
+        check "boot2: $EXPECT_DSP DSP guards installed" grep -aq "engine-ui-hook: $EXPECT_DSP DSP guards/transitions installed" "$log"
+        check "boot2: SQLite hooks installed" grep -aq 'engine-ui-hook: SQLite open/open_v2 hooks installed' "$log"
+        check "boot2: no QML load errors" bash -c "! grep -aE 'Type [A-Za-z_][A-Za-z0-9_]* unavailable|PropertyChanges does not support creating|state-specific objects|is not a type|is not installed|Cannot assign to non-existent|Expected token|Syntax error|QQmlComponent: Component is not ready|failed to load component' '$log'"
+        check "boot2: no Engine crash" bash -c "! grep -aE 'Crash with|Unknown exit code' '$log'"
+        for v in "${!pid[@]}"; do check "boot2: $v still running after ${BOOT2_SECONDS}s" kill -0 "${pid[$v]}"; done
+        check "boot2: healthy timer cleared boot-token after 15s (#140)" test ! -e "$ui/boot-token"
+        curl -sf http://127.0.0.1:8080/v1/sc5000/ui > "$W/boot2-ui.json" || :
+        check "boot2: GET /v1/sc5000/ui reports $NEWV and persisted upfaderEcho" \
+            json "$W/boot2-ui.json" "j.get('version') == '$NEWV' and j.get('upfaderEcho') is True"
+        curl -sf http://127.0.0.1:6595/healthz > "$W/boot2-deemixd.json" || :
+        check "boot2: sc5000-deemixd /healthz" json "$W/boot2-deemixd.json" "j.get('ok') is True"
     fi
     # The online update, exactly as Settings -> Update does it.
     local cur=$OLDV tag=v$NEWV asset
@@ -285,16 +356,20 @@ SH
         rm -f "$W/mock/assets/gate-corrupt-Update.img"
         cp "$R/tmp/gate-az01.log" "$W/old-corrupt-az01.log"
         cp "$W/old-az01.log" "$R/tmp/gate-az01.log"
+    elif [ "$name" = boot2 ]; then
+        in_root SERVICE_RESULT=success /etc/sc5000/engine-ui-guard stop >> "$W/boot2-boot.log" 2>&1 || :
+        check "boot2: clean stop clears running-sentinel (#140)" test ! -e "$ui/running-sentinel"
     fi
     cp "$R/tmp/gate-shim.log" "$W/$name-shim.log" 2>/dev/null || :
     cp "$R/tmp/gate-az01.log" "$W/$name-az01.log" 2>/dev/null || :
-    [ "$name" = new ] || cp "$W/data/sc5000-custom/ssh_host_ed25519_key.pub" "$W/old-hostkey.pub"
+    [ "$name" != old ] || cp "$W/data/sc5000-custom/ssh_host_ed25519_key.pub" "$W/old-hostkey.pub"
     # The update ramdisk consumes the staged image; the next boot never sees it.
     rm -f "$W/data/az01-update.img" "$W/data/az01-update.img.url"
 }
 
-# --- inner: private mount + network namespace around both phases ---
+# --- inner: private mount + network namespace around all three phases ---
 inner() {
+    check "sandbox: CAP_SYS_TIME dropped" python3 -I -c 'import re; s=open("/proc/self/status").read(); m={k:int(v,16) for k,v in re.findall(r"^(Cap(?:Inh|Prm|Eff|Bnd)):\s*([0-9a-f]+)", s, re.M)}; assert len(m)==4 and all(((v>>25)&1)==0 for v in m.values())'
     mount --make-rprivate /
     ip link set lo up
     mkdir -p "$W/old" "$W/new" "$W/data"
@@ -336,7 +411,20 @@ inner() {
 
     unshare -m -p -f --kill-child "$SELF" --phase old || fail "old phase aborted"
     cp "$W/mock/release-new.json" "$W/mock/release.json"
-    unshare -m -p -f --kill-child "$SELF" --phase new || fail "new phase aborted"
+    unshare -m -p -f --kill-child "$SELF" --phase new &
+    local new_ns=$!
+    while kill -0 "$new_ns" 2>/dev/null && [ ! -e "$W/new-powercut.ready" ]; do sleep 1; done
+    if [ -e "$W/new-powercut.ready" ]; then
+        kill -KILL "$new_ns" 2>/dev/null || :
+        wait "$new_ns" 2>/dev/null || :
+        pass "powercut: hard SIGKILL of running new namespace (no clean stop)"
+    else
+        wait "$new_ns" || fail "new phase aborted before power cut"
+    fi
+    check "powercut: running-sentinel survived unclean power cut (#140)" test -e "$W/data/sc5000-custom/ui/running-sentinel"
+    mkdir -p "$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml"
+    printf 'truncated-qmlc' > "$W/data/AppDataUser/AIR Music Technology/Engine/.cache/qml/powercut-truncated.qmlc"
+    unshare -m -p -f --kill-child "$SELF" --phase boot2 || fail "boot2 phase aborted"
 }
 
 case ${1:-} in
@@ -354,7 +442,7 @@ if grep -qs '^enabled' /proc/sys/fs/binfmt_misc/qemu-arm; then
 else
     case $(uname -m) in aarch64|arm*) ;; *) echo "needs an ARM host or qemu-arm binfmt with the F flag" >&2; exit 2 ;; esac
 fi
-for t in python3 openssl curl unshare chroot ip readelf realpath systemd-analyze; do command -v $t >/dev/null || { echo "missing $t" >&2; exit 2; }; done
+for t in python3 openssl curl unshare chroot ip readelf realpath systemd-analyze setpriv; do command -v $t >/dev/null || { echo "missing $t" >&2; exit 2; }; done
 OLD_IMG=$(realpath "$1"); NEW_IMG=$(realpath "$2"); NEWV=$3
 W=$(realpath -m "${4:-$(mktemp -d /var/tmp/sc5000-gate.XXXXXX)}")
 [ ! -e "$W/results.txt" ] || { echo "$W was used before; give a new work dir" >&2; exit 2; }
@@ -367,6 +455,7 @@ NEXTV=${NEWV%.*}.$(( ${NEWV##*.} + 1 ))
 COMPAT=inmusic,$(echo "$PRODUCT" | tr 'A-Z' 'a-z')
 export W REPO OLDV NEWV NEXTV PREFIX PRODUCT COMPAT QEMU_INTERP NEW_IMG
 export LANG_PACK=${GATE_LANG:-zh-Hans} ENGINE_START=${GATE_ENGINE_START:-300} ENGINE_SECONDS=${GATE_ENGINE_SECONDS:-90}
+export BOOT2_SECONDS=${GATE_BOOT2_SECONDS:-30}
 export UPDATE_TIMEOUT=${GATE_UPDATE_TIMEOUT:-900} EXPECT_APPLIED=${GATE_EXPECT_APPLIED:-19} EXPECT_DSP=${GATE_EXPECT_DSP:-21}
 mkdir -p "$W/bin" "$W/tls" "$W/mock/assets"
 : > "$W/results.txt"
@@ -382,10 +471,11 @@ export BASE=$(cut -d. -f1-3 <<< "$NEWV")  # the official Engine the image is bui
 SUITE_CMDS=$(cd "$REPO" && grep -rhoE 'exec\.Command(Context)?\((ctx, )?"[^"]+"' --include='*.go' --exclude='*_test.go' --exclude-dir=enginex-installer cmd internal pkg | sed -E 's/.*"([^"]+)"$/\1/' | sort -u | tr '\n' ' ')
 export SUITE_CMDS
 
-# Host-side helpers: an armhf stems-probe and the Rekordbox fixture.
+# Host-side helpers: an armhf stems-probe, the Rekordbox fixture, and the internal Engine library.
 [ -r /etc/profile.d/buildtools.sh ] && . /etc/profile.d/buildtools.sh
 (cd "$REPO" && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -o "$W/bin/stems-probe" ./cmd/stems-probe)
 (cd "$REPO" && SC5000_GATE_EXPORT=$W/usb go test -count=1 -run '^TestGateExport$' ./internal/testfixture >/dev/null)
+(cd "$REPO" && SC5000_GATE_LIBRARY=$W/drive go test -count=1 -run '^TestGateLibrary$' ./internal/testlibrary >/dev/null)
 
 # A throwaway CA for the GitHub mock; only the sandboxes trust it.
 (cd "$W/tls" &&
@@ -406,6 +496,7 @@ cp "$W/mock/release-old.json" "$W/mock/release.json"
 NEXT_NAME=$PREFIX-$NEXTV-EngineX-OS-$MODEL-$PRODUCT-Update.img
 release "$W/mock/release-new.json" "v$NEXTV" "$NEXT_NAME" "$NEW_IMG"
 echo "$NEXT_NAME" > "$W/mock/asset-new"
+cp "$W/mock/asset-new" "$W/mock/asset-boot2"
 cat > "$W/mock/server.py" <<'PY'
 import http.server, os, ssl, sys
 root = sys.argv[1]
@@ -436,7 +527,10 @@ srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
 srv.serve_forever()
 PY
 
-unshare -m -n --kill-child "$SELF" --inner || fail "inner namespace aborted"
+clock0=$(python3 -I -c 'import time; print(f"{time.time():.3f} {time.monotonic():.3f}")')
+setpriv --inh-caps=-sys_time --bounding-set=-sys_time unshare -m -n --kill-child "$SELF" --inner || fail "inner namespace aborted"
+clock1=$(python3 -I -c 'import time; print(f"{time.time():.3f} {time.monotonic():.3f}")')
+check "sandbox: host CLOCK_REALTIME undisturbed (<= 2 s drift vs monotonic)" python3 -I -c 'import sys; w0,m0=map(float,sys.argv[1].split()); w1,m1=map(float,sys.argv[2].split()); sys.exit(0 if abs((w1-w0)-(m1-m0)) <= 2.0 else 1)' "$clock0" "$clock1"
 n=$(grep -c '^FAIL' "$W/results.txt" || :)
 echo "gate: $(grep -c '^PASS' "$W/results.txt") PASS, $n FAIL ($W/results.txt)"
 [ "$n" = 0 ]

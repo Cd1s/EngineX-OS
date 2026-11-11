@@ -1,8 +1,8 @@
 // release-gate.sh only, never shipped. The gate copies this over the stock
 // qrc:/Skins/Common/Items/QmlWarnings.qml (EmbeddedMain always creates it) in its
 // sandbox /data, so Engine's own item tree reports what the shipped pack rendered:
-// Settings -> Services -> Streaming rows, the About version line, the Upfader Echo tile,
-// and Control Center's size at UI Scale 75 %.
+// boot splash unlock/dismissal (#140), Settings -> Services -> Streaming rows,
+// the About version line, the Upfader Echo tile, and Control Center's size at UI Scale 75 %.
 // Lines are short "SCPROBE kind|field|...|" records: Engine splits long log lines.
 import QtQuick 2.12
 import QtQuick.Window 2.2
@@ -39,12 +39,18 @@ Item {
         })
         return found
     }
+    function splashUnlocked() {
+        const sc = PlanckGUI.views ? PlanckGUI.views.splashScreenController : null
+        return !!(sc && sc.viewModel && sc.viewModel.isUnlocked)
+    }
     function report() {
         let main = null // EmbeddedMain's root, which carries the pack's settings
         let tabView = null
+        let splashLoader = null
         walk(probe.Window.window.contentItem, new Set(), function (o) {
             if (!main && "scAutoAnalyze" in o) main = o
             if (!tabView && o.objectName === "ControlCenterTabView") tabView = o
+            if (!splashLoader && o.objectName === "SplashScreenLoader") splashLoader = o
             if (o.objectName === "Version")
                 console.warn("SCPROBE version|" + String(o.text).replace(/<[^>]*>/g, "") + "|")
             if (o.objectName === "ControlCenter_LiveStream")
@@ -52,6 +58,8 @@ Item {
             if (isSection(o))
                 entries(o, function (c) { console.warn("SCPROBE entry|" + o.label + "|" + c.text + "|" + (c.visible ? 1 : 0) + "|") })
         })
+        const spActive = splashLoader ? (splashLoader.active ? 1 : 0) : 1
+        console.warn("SCPROBE splash|" + spActive + "|" + (splashUnlocked() ? 1 : 0) + "|")
         // UI Scale < 100 %: Control Center must follow uiContainer (root.transformed), not
         // defaultScreenSize, or a bare band shows right and below. The Drawer is not in the
         // item tree; its popup item (the ancestor directly under the Overlay) has its size.
@@ -101,10 +109,13 @@ Item {
                     return
                 }
                 step++
+                // #140: wait for the boot splash controller to unlock before opening
+                // Control Center, without walking the item tree on every early tick.
+                if (!splashUnlocked() && step <= 40) return
                 if (!probe.section) {
                     PlanckGUI.views.controlCenter.openTab(ControlCenterTabNameSettings)
                     probe.section = streamingSection()
-                    if (!probe.section && step <= 20) return
+                    if (!probe.section && step <= 60) return
                     let view = probe.section
                     while (view && typeof view.selectTab !== "function") view = view.parent
                     const names = []
