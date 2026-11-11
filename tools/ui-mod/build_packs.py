@@ -5270,6 +5270,7 @@ def edits(dev: bool):
             ("					text: modelData\n", "					text: root.scT(modelData)\n"),
             ("down: pressed || isSelected(text)", "down: pressed || isSelected(modelData)"),
             ("if(isSelected(text) && entry.defaultIndex", "if(isSelected(modelData) && entry.defaultIndex"),
+            ("					text: control.textFromValue(control.value, control.locale)\n", "					text: root.scT(control.textFromValue(control.value, control.locale))\n"),
         ],
         # 5.3.0 moved it up from TabContents/, so its imports lost the "../".
         prefs + ("" if v53() else "TabContents/") + "DeviceTabContent.qml": [
@@ -5728,7 +5729,7 @@ def edits(dev: bool):
         ? (String(inputSelect.controller.title).match(/[34]/) || [""])[0] : ""
     readonly property var scAuxLine: scAuxChannel ? Planck.getProperty("/Engine/Mixer/Channel" + scAuxChannel + "/Line") : null
     readonly property bool scAuxLineActive: !!scAuxLine && !!scAuxLine.translator && scAuxLine.translator.state'''),
-            ('text: "Input"', 'text: Config.device.name === "JP21" ? root.scT("Input") : "Input"'),
+            ('text: "Input"', 'text: root.scT("Input")'),
             ("inputSelect.controller.selectInput(index)",
              '''const nativeIndex = inputSelect.scInputIndexes[index]
             inputSelect.controller.selectInput(nativeIndex)
@@ -5737,15 +5738,15 @@ def edits(dev: bool):
             if (scAuxLine && scAuxLine.translator && inputSelect.controller.inputs[nativeIndex] === "Engine")
                 scAuxLine.translator.state = false'''),
             ("labelText: inputSelect.controller.currentInput",
-             'labelText: Config.device.name === "JP21" ? root.scT(inputSelect.scAuxLineActive ? "Line In" : inputSelect.controller.currentInput) : inputSelect.controller.currentInput'),
+             'labelText: root.scT(inputSelect.scAuxLineActive ? "Line In" : inputSelect.controller.currentInput)'),
             ("i < inputSelect.controller.inputs.length", "i < inputSelect.scInputIndexes.length"),
             ("optionName: inputSelect.controller.inputs[i],",
-             'optionName: Config.device.name === "JP21" ? root.scT(inputSelect.controller.inputs[inputSelect.scInputIndexes[i]]) : inputSelect.controller.inputs[inputSelect.scInputIndexes[i]],'),
+             'optionName: root.scT(inputSelect.controller.inputs[inputSelect.scInputIndexes[i]]),'),
             ("optionIcon: inputSelect.controller.inputIcons[i],",
              "optionIcon: inputSelect.controller.inputIcons[inputSelect.scInputIndexes[i]],"),
         ]
         out[ROOT + "Views/MixerMenu/MixerMenu.qml"] = [
-            ("text: modelData.title", 'text: Config.device.name === "JP21" ? root.scT(modelData.title) : modelData.title'),
+            ("text: modelData.title", 'text: root.scT(modelData.title)'),
         ]
         # Stock settings a board flag hides although Engine registers the property on every
         # board measured (JP07, JP11, JP13, JC11, NH08 in the #77 sandbox dump). Each gate
@@ -5775,6 +5776,61 @@ def edits(dev: bool):
             prefs + "Entries/TransitionFxSection.qml": [
                 ('        TransitionFxSelectEffect {\n            view: transitionFx.view\n        }',
                  '        TransitionFxSelectEffect {\n            view: transitionFx.view\n        }\n        ListEntry {\n            text: "Trigger Source"\n            visible: typeof root !== "undefined" && root && root.scHasMixer\n            readonly property var vfx: transitionFx.view\n            values: ["Off", "All Faders", "Upfader Only"]\n            currentValue: vfx ? (!vfx.enabled ? "Off" : (vfx.triggerSource === 1 ? "Upfader Only" : "All Faders")) : (root.scUpfaderEcho ? "Upfader Only" : "Off")\n            onSelected: function(index) {\n                const on = index !== 0\n                root.scUpfaderEcho = on\n                root.scSetTransitionFx(vfx, on, index === 2)\n                root.scCall("upfaderEcho=" + (on ? "1" : "0"))\n            }\n        }'),
+            ],
+            prefs + "Entries/Base/PrefsSliderEntry.qml": [
+                ("            text: entry.sliderValueText\n", "            text: root.scT(entry.sliderValueText)\n"),
+            ],
+            prefs + "Entries/OutputEQ.qml": [
+                ('        buttonText: "Open"\n', '        buttonText: root.scT("Open")\n'),
+            ],
+            v + "MixerMenu/Pages/OutputPage/Items/MixerMenuOutputEQEntry.qml": [
+                ('        buttonText: "Open"\n', '        buttonText: root.scT("Open")\n'),
+            ],
+            v + "ControlCenter/Tabs/ControlCenter/Entries/Range/StringListTranslatorRangeSelector.qml": [
+                ("    text: `Deck ${deckIndex}`\n", '    text: root.scT("Deck " + deckIndex)\n'),
+            ],
+            prefs + "Entries/TransitionFxRate.qml": [
+                ("        text: `${effectName} ${rateParamName}`\n", "        text: root.scT(`${effectName} ${rateParamName}`)\n"),
+            ],
+            prefs + "Entries/TransitionFxSecondaryParam.qml": [
+                ("        text: `${effectName} ${secondaryParamName}`\n", "        text: root.scT(`${effectName} ${secondaryParamName}`)\n"),
+            ],
+            prefs + "Entries/MicAttenuationIndividual.qml": [
+                ("                text: `Mic ${index + 1} Attenuation`\n", "                text: root.scT(`Mic ${index + 1} Attenuation`)\n"),
+            ],
+            prefs + "Entries/MicAttenuationSoftware.qml": [
+                ("                text: `Mic${micNumber} Attenuation`\n", "                text: root.scT(`Mic${micNumber} Attenuation`)\n"),
+            ],
+            prefs + "Entries/MicThreshold.qml": [
+                ("    text: `${name}${type} Threshold`\n", "    text: root.scT(`${name}${type} Threshold`)\n"),
+            ],
+            prefs + "Entries/MicFxSecondaryParam.qml": [
+                ("        text: `${effectName} ${secondaryParamName}`\n", "        text: root.scT(`${effectName} ${secondaryParamName}`)\n"),
+            ],
+            prefs + "Entries/MicFxSpeed.qml": [
+                ("        text: `${effectName} Speed`\n", "        text: root.scT(`${effectName} Speed`)\n"),
+            ],
+            v + "MixerMenu/Pages/ChannelsPageItems/ChannelSectionHeader.qml": [
+                ("        text: header.controller.title\n", "        text: root.scT(header.controller.title)\n"),
+            ],
+            v + "MixerMenu/Pages/MicrophonePage/Items/MixerMenuMicFxSecondaryParam.qml": [
+                ("        label: `${entry.effectName} ${entry.secondaryParamName}`\n", "        label: root.scT(`${entry.effectName} ${entry.secondaryParamName}`)\n"),
+            ],
+            v + "MixerMenu/Pages/MicrophonePage/Items/MixerMenuMicFxSpeed.qml": [
+                ("        label: `${entry.effectName} Speed`\n", "        label: root.scT(`${entry.effectName} Speed`)\n"),
+            ],
+            "Skins/UIKit/Elements/Settings/Entries/ListEntry.qml": [
+                ("function isSelected(text) {", "function isSelected(value) {"),
+                ("return entry.currentValues === text\n", "return entry.currentValues === value\n"),
+                ("entry.currentValues.includes(text)", "entry.currentValues.includes(value)"),
+                ("                        text: modelData\n", "                        text: Math.scI18n ? Math.scI18n.t(modelData) : modelData\n"),
+                ("down: pressed || isSelected(text)", "down: pressed || isSelected(modelData)"),
+                ("if (isSelected(text) && entry.defaultIndex", "if (isSelected(modelData) && entry.defaultIndex"),
+                ("                text: control.textFromValue(control.value, control.locale)\n", "                text: Math.scI18n ? Math.scI18n.t(control.textFromValue(control.value, control.locale)) : control.textFromValue(control.value, control.locale)\n"),
+            ],
+            "Skins/UIKit/Elements/RadioSlider.qml": [
+                ("                    text: modelData\n", "                    text: Math.scI18n ? Math.scI18n.t(modelData) : modelData\n"),
+                ("                    color: control.currentValue === text ? control.activeTextColor : Style.font01Color\n", "                    color: control.currentValue === modelData ? control.activeTextColor : Style.font01Color\n"),
             ],
         }.items():
             assert not isinstance(out.get(rel), str), rel
@@ -6691,7 +6747,7 @@ def legacy_qml_fixes():
 
 
 # Only these properties hold display text. Ids such as StateMap names never match.
-TEXT_LINE = re.compile(r'^(\s*(?:[\w.]*\.)?(?:text|label|labelText|title|message|headline|info|display|description|missingContentHint|buttonText|value)\s*:)(.*)$')
+TEXT_LINE = re.compile(r'^(\s*(?:[\w.]*\.)?(?:text|label|labelText|title|message|messageText|headline|info|display|description|missingContentHint|noContentHint|hint|buttonText|value)\s*:)(.*)$')
 BARE_LITERAL = re.compile(r'^(\s*)"([^"\\]+)"(\s*)$')
 # Template literals match whole, ${...} included (`Version: ${version}`).
 LITERAL = re.compile(r'"([^"\\\n]*)"|`([^`\\\n]*)`')
