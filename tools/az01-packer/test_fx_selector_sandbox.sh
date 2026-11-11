@@ -80,6 +80,7 @@ timeout --kill-after=5s 40s chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin:/usr/
 engine_rc=$?
 set -e
 printf '%s\n' "$engine_rc" > "$W/engine-exit.txt"
+if [ -f "$R/tmp/fx-ms-spinner.png" ]; then cp "$R/tmp/fx-ms-spinner.png" "$W/fx-ms-spinner.png"; fi
 case "$engine_rc" in 0|124|137) ;; *) echo "Engine exited $engine_rc" >&2; exit 1 ;; esac
 grep -a -m 40 -E 'FXCONFIG|FXPROBE|FXNATIVE|engine-ui-hook: PX' "$W/engine.log" | cut -c1-200 | head -n 40
 if [ "$PRODUCT" = JC11 ] && [ "${FX_READY_READONLY:-0}" != 1 ]; then

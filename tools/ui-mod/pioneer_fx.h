@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include "pioneer_ms.h"
 
 enum sc_pioneer_fx_mode {
     SC_PFX_OFF = 0,
@@ -451,6 +452,8 @@ struct sc_pfx_instance {
     unsigned fade;
     float last_l, last_r, from_l, from_r;
     float wet, time, parameter;
+    unsigned time_ms;
+    struct sc_pfx_ms ms;
 };
 
 static inline float sc_pfx_unit(float x) {
@@ -459,6 +462,7 @@ static inline float sc_pfx_unit(float x) {
 
 /* Ordinary polling worker only. This also faults in every delay-buffer page. */
 static inline void sc_pfx_instance_prepare(struct sc_pfx_instance *s) {
+    sc_ms_prepare(&s->ms);
     for (unsigned i = 0; i < 2; ++i) {
         unsigned expected = SC_PFX_DIRTY;
         if (!__atomic_compare_exchange_n(&s->bank_state[i], &expected, SC_PFX_PREPARING,
@@ -473,6 +477,7 @@ static inline void sc_pfx_instance_reset(struct sc_pfx_instance *s) {
     for (unsigned i = 0; i < 2; ++i)
         if (__atomic_load_n(&s->bank_state[i], __ATOMIC_RELAXED) == SC_PFX_LIVE)
             __atomic_store_n(&s->bank_state[i], SC_PFX_DIRTY, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&s->ms.ready, __ATOMIC_ACQUIRE) == 2 && s->ms.blend > 0) s->ms.blend = 0;
     s->mode = SC_PFX_OFF; s->current = 0; s->fade = 0;
     s->last_l = s->last_r = s->from_l = s->from_r = 0;
     s->wet = s->time = s->parameter = 0;
@@ -511,6 +516,7 @@ static inline int sc_pfx_process(struct sc_pfx_instance *s, float *l, float *r,
         sc_pioneer_fx_planar(n, &nl, &nr, 1, mode);
         if (mode != SC_PFX_SLIP_ROLL) { nl -= dl; nr -= dr; }
         if (!mode) nl = nr = 0.0f;
+        sc_ms_mix(&s->ms, dl, dr, &nl, &nr, mode, s->time_ms, s->parameter, 0);
         if (s->fade) {
             int old_mode = __atomic_load_n(&s->bank_state[previous], __ATOMIC_RELAXED) == SC_PFX_LIVE ? o->active_mode : 0;
             if (old_mode) {
