@@ -2,6 +2,9 @@
 //   gcc -O2 -o test_az04_hook test_az04_hook.c -ldl -lpthread && ./test_az04_hook <AZ04 rootfs>/usr/Engine/Engine
 #define ENGINE_UI_HOOK_TEST
 int hook_test_engine;
+static char stems_bundle_file[4096], stems_bin_file[4096];
+#define STEMS_BUNDLE_PROCESSOR stems_bundle_file
+#define STEMS_BUNDLE_BIN_PROCESSOR stems_bin_file
 #include "engine_ui_hook.c"
 #include <assert.h>
 
@@ -320,12 +323,59 @@ static void test_led(void) {
     puts("pad LED brightness: scale after gamma, replay from cache: PASS");
 }
 
+static void test_stems_processor_fallback(void) {
+    char dir[] = "/tmp/stems-fallback-XXXXXX", bin[PATH_MAX];
+    assert(mkdtemp(dir));
+    assert(snprintf(stems_bundle_file, sizeof stems_bundle_file, "%s/stems-processor", dir) > 0);
+    assert(snprintf(bin, sizeof bin, "%s/bin", dir) > 0);
+    assert(!mkdir(bin, 0700));
+    assert(snprintf(stems_bin_file, sizeof stems_bin_file, "%s/bin/stems-processor", dir) > 0);
+    const char *stock = "/usr/local/bin/stems-processor";
+    assert(raw_access(stock, F_OK) != 0); // Run on the build host, never a deck.
+    hook_test_engine = 1;
+    assert(!strcmp(stems_processor_path(stock), stock));
+    struct statx stx;
+    assert(statx(AT_FDCWD, stock, 0, 0xfffu, &stx) == -1);
+    assert(open(stock, O_RDONLY) == -1);
+    const char *paths[] = {stems_bundle_file, stems_bin_file};
+    for (unsigned i = 0; i < sizeof paths / sizeof *paths; i++) {
+        FILE *f = fopen(paths[i], "w");
+        assert(f && fputs("#!/bin/sh\nexit 0\n", f) >= 0 && !fclose(f));
+        assert(!chmod(paths[i], 0644));
+        assert(!strcmp(stems_processor_path(stock), stock));
+        assert(statx(AT_FDCWD, stock, 0, 0xfffu, &stx) == -1);
+        assert(open(stock, O_RDONLY) == -1);
+        assert(!chmod(paths[i], 0755));
+        // Other processes must still see the missing original path.
+        hook_test_engine = 0;
+        assert(access(stock, X_OK) == -1);
+        assert(statx(AT_FDCWD, stock, 0, 0xfffu, &stx) == -1);
+        assert(open(stock, O_RDONLY) == -1);
+        hook_test_engine = 1;
+        assert(!strcmp(stems_processor_path(stock), paths[i]));
+        assert(access(stock, X_OK) == 0);
+        memset(&stx, 0, sizeof stx);
+        assert(statx(AT_FDCWD, stock, AT_NO_AUTOMOUNT, 0xfffu, &stx) == 0);
+        assert(S_ISREG(stx.stx_mode) && stx.stx_size > 0);
+        int fd = open(stock, O_RDONLY);
+        assert(fd >= 0);
+        char bytes[2];
+        assert(read(fd, bytes, sizeof bytes) == sizeof bytes && !memcmp(bytes, "#!", sizeof bytes));
+        assert(!close(fd) && !unlink(paths[i]));
+    }
+    assert(!strcmp(stems_processor_path("/bin/sh"), "/bin/sh"));
+    hook_test_engine = 0;
+    assert(!rmdir(bin) && !rmdir(dir));
+    puts("stems-processor fallback: isolated access/statx/open, missing/non-executable and non-Engine paths: PASS");
+}
+
 int main(int argc, char **argv) {
     assert(sizeof engine_builds / sizeof *engine_builds == 1);
     test_thread_policy();
     test_resources();
     test_collision();
     test_led();
+    test_stems_processor_fallback();
     for (int i = 1; i < argc; i++) { test_engine(argv[i]); test_sqlite(argv[i]); test_dsp(argv[i]); }
     const char *oa = getenv("AZ04_OFFLINE_ANALYZER");
     if (oa) test_offline_analyzer(oa);
