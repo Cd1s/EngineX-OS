@@ -1700,6 +1700,10 @@ static const struct engine_edit edits_530[] = {
     // #159 StreamingProviderInterface::connectedSSO() -> true, isDisconnectedFromProfile() -> false
     {0xbf59bcu, "\xc2\x05\xd0\xe5", "\x01\x00\xa0\xe3", 4, EDIT_ONE},
     {0xbf5a18u, "\x01\x00\x20\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    // #49 clears isPlayer (+0x239) when four_deck_waveform=1; SamplerOutput's
+    // non-console fallback (0x193f6cc, reached only when isConsole +0x23a == 0)
+    // still needs the Layer A / Layer B branch instead of an empty map.
+    {0x193f6d8u, "\x4e\x01\x00\x1a", "\x4e\x01\x00\xea", 4, EDIT_ONE},
 };
 
 static const struct engine_edit edits_sclive[] = {
