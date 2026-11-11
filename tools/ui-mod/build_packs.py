@@ -3647,8 +3647,9 @@ LED_ENTRY = """
 """
 
 FOUR_DECK_ENTRIES = """
-		EntryBase.ListEntry { // one mode switch: Stock is always one step back (#201 Paired Player = two standalone players, one deck of each)
-			text: "Waveform View"
+		EntryBase.ListEntry { // #201 Linked View: one selector, so Stock (the player's own layouts) is always one step back
+			id: scLinkedViewEntry
+			text: "Linked View"
 			visible: root.scCanFourDeck
 			readonly property int at: !root.scFourDeckOn ? 0 : root.scIsPlayerBoard && root.scPairedSetting ? 1 : values.length - 1
 			values: root.scIsPlayerBoard ? ["Stock", "Paired Player", "4 Decks"] : ["Stock", "4 Decks"]
@@ -3661,6 +3662,14 @@ FOUR_DECK_ENTRIES = """
 				else if (!root.scFourDeckOn) root.scRestartCall(paired ? "pairedView=1" : "fourDeckWaveform=1")
 				else root.scCall("pairedView=" + (paired ? 1 : 0))
 			}
+		},
+		@HEADLINE@ { // Stock on a player: its single / dual layer views are stock's own switches
+			visible: root.scIsPlayerBoard && scLinkedViewEntry.at === 0
+			leftPadding: 24; rightPadding: 24
+			wrapMode: Text.WordWrap
+			Layout.preferredHeight: implicitHeight
+			color: "#9a9a9a"
+			text: "Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout"
 		},
 		@HEADLINE@ {
 			visible: root.scIsPlayerBoard && root.scPairedSetting
