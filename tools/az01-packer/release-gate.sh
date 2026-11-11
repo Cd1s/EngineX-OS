@@ -24,6 +24,11 @@
 #     safe-mode, persisted settings/SSH key/library, full boot splash dismissal +
 #     UI-ready render + hooks + daemons, and the next online update + clean stop.
 # Exit 0 only when every check passed. Evidence: <work dir>/results.txt and logs.
+#
+# GATE_QUICK=1 (tools/dev/quick-gate) is the daily subset: no previous image ("-"), so
+# steps 2 and the online updates of step 3 are skipped, and so is the stale QML cache
+# seed; the static audit, the new boot, the UI hook counts and the render probe stay.
+# Release candidates always run the full gate.
 # Destructive deck paths are shimmed and logged, never run: kexec, systemctl,
 # reboot, encrypt-fs.sh (fscrypt on /data), az01-update --erase-data. CAP_SYS_TIME
 # is dropped before entering the sandbox so nothing inside can touch the host clock.
@@ -124,9 +129,11 @@ SH
         printf 'lang=%s\n' "$LANG_PACK" > "$W/data/sc5000-custom/ui/settings.conf"
         check "old: version $OLDV installed" grep -qx "$OLDV" "$W/data/sc5000-custom/version.txt"
     elif [ "$name" = new ]; then
+        # Quick mode boots the new image on an empty /data: set the pack language the old phase sets.
+        [ -z "$QUICK" ] || printf 'lang=%s\n' "$LANG_PACK" > "$W/data/sc5000-custom/ui/settings.conf"
         check "new: version.txt is $NEWV" grep -qx "$NEWV" "$W/data/sc5000-custom/version.txt"
         check "new: .pack-version is $NEWV" grep -qx "$NEWV" "$W/data/sc5000-custom/ui/.pack-version"
-        check "new: SSH host key kept across the update" cmp -s "$W/old-hostkey.pub" "$W/data/sc5000-custom/ssh_host_ed25519_key.pub"
+        [ -n "$QUICK" ] || check "new: SSH host key kept across the update" cmp -s "$W/old-hostkey.pub" "$W/data/sc5000-custom/ssh_host_ed25519_key.pub"
         check "new: no SSH key in a public image" test ! -s "$R/usr/share/sc5000-custom/authorized_keys"
         check "new: internal drive Engine Library mounted at /media/az01-internal" test -s "$R/media/az01-internal/Engine Library/Database2/m.db"
         check "new: sc5000-debloat --apply-runtime" in_root /usr/local/bin/sc5000-debloat --apply-runtime
@@ -188,18 +195,21 @@ SH
         # The 5.3.0.1 deck kept the stock UI (2026-11-05): Engine 5.3.0 once ran without the
         # pack, and its forced QML disk cache in /data outlived every later boot with it.
         # Seed that cache with one stock run (safe-mode), then boot as a deck would.
-        : > "$ui/safe-mode"
-        in_root "${engine_env[@]}" /usr/Engine/Engine -d0 > "$W/new-stock-engine.log" 2>&1 &
-        local stock=$! qmlc
-        qmlc=$(printf '%s' :/Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/StreamingServices.qml | sha1sum | cut -c1-40).qmlc
-        check "new: a stock Engine run cached StreamingServices.qml in /data (stale-cache seed)" \
-            wait_for "$ENGINE_START" bash -c "find '$W/data' -name '$qmlc' | grep -q ."
-        sleep 20  # let it finish writing the rest of the cache
-        in_root /usr/local/sbin/pkill -TERM -f '^/usr/Engine/Engine( |$)' || :
-        (sleep 60; in_root /usr/local/sbin/pkill -KILL -f '^/usr/Engine/Engine( |$)') & local reaper=$!
-        wait "$stock" 2>/dev/null || :
-        kill "$reaper" 2>/dev/null || :
-        note "new: stale QML cache seeded: $(find "$W/data" -name '*.qmlc' | wc -l) .qmlc files"
+        # Quick mode skips the seed; the render probe below still reads what Engine drew.
+        if [ -z "$QUICK" ]; then
+            : > "$ui/safe-mode"
+            in_root "${engine_env[@]}" /usr/Engine/Engine -d0 > "$W/new-stock-engine.log" 2>&1 &
+            local stock=$! qmlc
+            qmlc=$(printf '%s' :/Skins/Embedded/Views/ControlCenter/Tabs/Preferences/Entries/StreamingServices.qml | sha1sum | cut -c1-40).qmlc
+            check "new: a stock Engine run cached StreamingServices.qml in /data (stale-cache seed)" \
+                wait_for "$ENGINE_START" bash -c "find '$W/data' -name '$qmlc' | grep -q ."
+            sleep 20  # let it finish writing the rest of the cache
+            in_root /usr/local/sbin/pkill -TERM -f '^/usr/Engine/Engine( |$)' || :
+            (sleep 60; in_root /usr/local/sbin/pkill -KILL -f '^/usr/Engine/Engine( |$)') & local reaper=$!
+            wait "$stock" 2>/dev/null || :
+            kill "$reaper" 2>/dev/null || :
+            note "new: stale QML cache seeded: $(find "$W/data" -name '*.qmlc' | wc -l) .qmlc files"
+        fi
         rm -f "$ui/safe-mode" "$ui/boot-count" "$ui/boot-token" "$R/tmp/engine_runguard.lock"
         # The probe stands in for a stock file Engine always creates; it is not in the image.
         want=$(find "$ui/packs/$LANG_PACK" -type f ! -name QmlWarnings.qml | wc -l)
@@ -315,6 +325,7 @@ SH
             bash -c 'test ! -e "$1/boot-count" && cmp -s "$1/boot-token" "$1/boot-ready"' sh "$ui"
         check "new: running-sentinel armed before power cut (#140)" test -e "$ui/running-sentinel"
         cp "$R/tmp/gate-shim.log" "$W/new-shim.log" 2>/dev/null || :
+        [ -z "$QUICK" ] || return 0
         : > "$W/new-powercut.ready"
         sleep 300
         return
@@ -359,7 +370,8 @@ SH
         check "$name: the installed release $RELTAG is not offered again" json "$W/$name-update-installed.json" \
             "j.get('currentVersion') == '$NEWV' and j.get('latestVersion') == '$RELTAG' and j.get('updateAvailable') is False"
     fi
-    # The online update, exactly as Settings -> Update does it.
+    # The online update, exactly as Settings -> Update does it (not in quick mode).
+    [ -z "$QUICK" ] || return 0
     local cur=$OLDV tag=$RELTAG asset
     [ "$name" = old ] || { cur=$NEWV; tag=v$NEXTV; }
     asset=$(cat "$W/mock/asset-$name")
@@ -408,7 +420,7 @@ inner() {
     mount --make-rprivate /
     ip link set lo up
     mkdir -p "$W/old" "$W/new" "$W/data"
-    mount -o loop "$W/old-img/rootfs.ext2" "$W/old"
+    [ -n "$QUICK" ] || mount -o loop "$W/old-img/rootfs.ext2" "$W/old"
     mount -o loop "$W/new-img/rootfs.ext2" "$W/new"
     python3 -I "$W/mock/server.py" "$W/mock" "$W/tls/leaf.pem" "$W/tls/leaf.key" 2> "$W/mock.log" &
     # shellcheck disable=SC2064
@@ -445,6 +457,10 @@ inner() {
         check "image: sh -n ${f#"$R"}" chroot "$R" /bin/sh -n "${f#"$R"}"
     done
 
+    if [ -n "$QUICK" ]; then
+        unshare -m -p -f --kill-child "$SELF" --phase new || fail "new phase aborted"
+        return 0
+    fi
     unshare -m -p -f --kill-child "$SELF" --phase old || fail "old phase aborted"
     cp "$W/mock/release-new.json" "$W/mock/release.json"
     unshare -m -p -f --kill-child "$SELF" --phase new &
@@ -482,17 +498,22 @@ for t in python3 openssl curl unshare chroot ip readelf realpath systemd-analyze
 OLD_IMG=$(realpath "$1"); NEW_IMG=$(realpath "$2"); NEWV=$3
 W=$(realpath -m "${4:-$(mktemp -d /var/tmp/sc5000-gate.XXXXXX)}")
 [ ! -e "$W/results.txt" ] || { echo "$W was used before; give a new work dir" >&2; exit 2; }
+QUICK=; [ "${GATE_QUICK:-0}" = 0 ] || QUICK=1
 NEW_NAME=$(basename "$NEW_IMG"); OLD_NAME=$(basename "$OLD_IMG")
 [[ $NEW_NAME =~ ^([A-Z0-9]+)-$NEWV-EngineX-OS-(.*)-([A-Z]{2}[0-9]{2})-Update\.img$ ]] || { echo "unexpected new image name $NEW_NAME" >&2; exit 2; }
 PREFIX=${BASH_REMATCH[1]} MODEL=${BASH_REMATCH[2]} PRODUCT=${BASH_REMATCH[3]}
-[[ $OLD_NAME =~ ^$PREFIX-([0-9.]+)-EngineX-OS-.*-$PRODUCT-Update\.img$ ]] || { echo "old image must be the same model: $OLD_NAME" >&2; exit 2; }
-OLDV=${BASH_REMATCH[1]}
+if [ -n "$QUICK" ]; then
+    OLDV=none OLD_NAME=-
+else
+    [[ $OLD_NAME =~ ^$PREFIX-([0-9.]+)-EngineX-OS-.*-$PRODUCT-Update\.img$ ]] || { echo "old image must be the same model: $OLD_NAME" >&2; exit 2; }
+    OLDV=${BASH_REMATCH[1]}
+fi
 NEXTV=${NEWV%.*}.$(( ${NEWV##*.} + 1 ))
 COMPAT=inmusic,$(echo "$PRODUCT" | tr 'A-Z' 'a-z')
 # GATE_RELEASE_TAG: the tag of the release the new image is published under. A same-version
 # re-release (old and new image both <version>) is published as v<version>-rN.
 RELTAG=${GATE_RELEASE_TAG:-v$NEWV}
-export W REPO OLDV NEWV NEXTV RELTAG PREFIX PRODUCT COMPAT QEMU_INTERP NEW_IMG
+export W REPO OLDV NEWV NEXTV RELTAG PREFIX PRODUCT COMPAT QEMU_INTERP NEW_IMG QUICK
 export LANG_PACK=${GATE_LANG:-zh-Hans} ENGINE_START=${GATE_ENGINE_START:-300} ENGINE_SECONDS=${GATE_ENGINE_SECONDS:-90}
 export BOOT2_SECONDS=${GATE_BOOT2_SECONDS:-30}
 # #206: all-in-ones also get the 8 recording-with-streaming sites; players (no recorder) do not.
@@ -503,6 +524,7 @@ mkdir -p "$W/bin" "$W/tls" "$W/mock/assets"
 echo "gate: $OLD_NAME -> $NEW_NAME as $RELTAG (next $NEXTV), work $W"
 
 for side in old new; do
+    [ -z "$QUICK" ] || [ $side = new ] || continue
     img=$OLD_IMG; [ $side = old ] || img=$NEW_IMG
     python3 -I "$REPO/tools/az01-packer/az01_packer.py" unpack "$img" --output "$W/$side-img" > "$W/$side-unpack.json"
     check "$side image unpacks and verifies" json "$W/$side-unpack.json" "j.get('verified') is True"
