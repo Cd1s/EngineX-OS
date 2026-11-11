@@ -84,7 +84,9 @@ class ArgParsing(unittest.TestCase):
         self.assertEqual(dp.component_plan("go:rb-bridge"), (["suite"], ["rb-bridge.service"]))
         names, services = dp.component_plan("all")
         self.assertEqual(sorted(names), sorted(dp.ARTIFACTS))
-        self.assertEqual(len(services), 5)
+        self.assertEqual(sorted(services), sorted(["engine.service", "edisksd.service"] + [f"{d}.service" for d in dp.GO_DAEMONS]))
+        # stream-sync is After=sc5000-deemixd and supervises its own downloader when the port is free (#159).
+        self.assertLess(services.index("sc5000-deemixd.service"), services.index("stream-sync.service"))
 
     def test_owner(self):
         a = dp.parse_args(["deck-a", "ui"])
@@ -352,7 +354,9 @@ class FakeDeck(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        pid = (cls.deckdir / "unshare.pid").read_text().strip()
         subprocess.run(["bash", str(HERE / "fake-deck.sh"), "down", str(cls.deckdir)], check=False)
+        assert not Path(f"/proc/{pid}").exists(), f"fake deck {pid} still running after down"
         shutil.rmtree(cls.dir, ignore_errors=True)
 
     def run_dp(self, *args, owner="agent-a"):
@@ -481,7 +485,11 @@ class FakeDeck(unittest.TestCase):
     def test_reboot_rolls_back(self):
         rc, out = self.run_dp("fake", "hook", "--from", str(self.pre))
         self.assertEqual(rc, 0, out)
+        old = int((self.deckdir / "unshare.pid").read_text())
         subprocess.run(["bash", str(HERE / "fake-deck.sh"), "reboot", str(self.deckdir)], check=True, capture_output=True)
+        # The old boot is really gone (no namespace left behind), and a new one runs.
+        self.assertFalse(Path(f"/proc/{old}").exists())
+        self.assertNotEqual(int((self.deckdir / "unshare.pid").read_text()), old)
         self.assertEqual(self.deck_sh("sha256sum < /etc/sc5000/libengine-ui-hook.so").split()[0],
                          dp.digest(self.persist / "etc-sc5000/libengine-ui-hook.so"))
         rc, out = self.run_dp("smoke", "fake")
