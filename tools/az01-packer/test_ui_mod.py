@@ -1750,14 +1750,37 @@ class DeckHeaderLayoutTest(unittest.TestCase):
 
     def test_countdown_has_a_bounded_slot_and_elides_only_its_name(self):
         cap = bp.cue_capsule("", "1", 22, 16)
-        self.assertIn("Layout.maximumWidth: 112", cap)
-        self.assertIn("Layout.leftMargin: 6", cap)
-        self.assertIn("Layout.rightMargin: 6", cap)
+        self.assertIn("Layout.fillWidth: true", cap)
+        self.assertIn("Layout.minimumWidth: 56", cap)
+        self.assertNotIn("\n    Layout.maximumWidth:", cap)
+        self.assertIn("Layout.leftMargin: 2", cap)
+        self.assertIn("Layout.rightMargin: 2", cap)
         self.assertIn("clip: true", cap)
         self.assertIn("Layout.minimumWidth: 0", cap)
-        self.assertIn("parent.width - cueCountText.implicitWidth - 11", cap)
+        self.assertIn("parent.width - Math.ceil(cueCountText.implicitWidth) - 12", cap)
         self.assertIn("elide: Text.ElideRight", cap)
         self.assertIn("Reserve the Cue slot even without a cue", cap)
+
+    def test_right_speed_group_uses_implicit_width_never_fixed_widths(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            edits = bp.edits(False)
+        finally:
+            bp.ROOT = old_root
+        speed_patches = edits["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/SpeedInfo.qml"]
+        self.assertTrue(any("speedRangeTextWidth" in old and "implicitWidth" in new for old, new in speed_patches))
+        self.assertTrue(any("speedStateTextWidth" in old and "implicitWidth" in new for old, new in speed_patches))
+        self.assertNotIn("speedRangeTextWidth", bp.SHADOW_LAYER)
+        self.assertNotIn("speedStateTextWidth", bp.SHADOW_LAYER)
+        for rel in (
+            "Skins/EngineOS/UI/CompositeControls/DeckTrackData/GroupedMiniDeckTrackDataContent.qml",
+            "Skins/EngineOS/UI/CompositeControls/DeckPerformanceData/DeckPerformanceDataContent.qml",
+            "Skins/EngineOS/UI/CompositeControls/DeckTrackData/SplitMiniDeckTrackDataContent.qml",
+        ):
+            for _, new in edits[rel]:
+                self.assertNotIn("speedRangeTextWidth", new, rel)
+                self.assertNotIn("speedStateTextWidth", new, rel)
 
     def test_performance_header_preserves_sync_row_and_stock_bpm_formatter(self):
         qrc = LAB / "5.3.0" / "qrc"
@@ -1809,23 +1832,20 @@ class DeckHeaderLayoutTest(unittest.TestCase):
                         text = (base / rel).read_text() if (base / rel).exists() else stock
                         pattern = r"(?m)^( +)DeckInfoTimeInfo \{.*?^\1\}"
                         self.assertEqual(re.search(pattern, text, re.S).group(), re.search(pattern, stock, re.S).group())
-                    # Compacting SpeedInfo (34 + 4 + 62 = 100 px vs stock 56 + 16 + 84 = 156 px)
-                    # frees 56 px: 28 px widens Cue + margins (112 + 6 + 6 = 124 px) and 28 px
-                    # expands the sync/LEAD slot (minimumWidth 135 px).
+                    # SpeedInfo sizes range/state from implicitWidth (never fixed widths),
+                    # JP07SyncIndicator keeps a fixed 135 px width on the decks, and the
+                    # flexible Cue capsule (fillWidth) receives the remaining width.
                     mini = (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
-                    def preferred(kind, text):
-                        block = re.search(kind + r" \{(.*?)^                \}", text, re.S | re.M).group(1)
-                        return int(re.search(r"Layout.preferredWidth: (\d+)", block).group(1))
-                    stock = (qrc / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
-                    cap = bp.cue_capsule("", "1", 22, 16)
-                    cue_width = int(re.search(r"Layout.preferredWidth: (\d+)", cap).group(1))
-                    cue_margins = sum(int(m) for m in re.findall(r"Layout\.(?:left|right)Margin: (\d+)", cap))
-                    self.assertIn("Layout.minimumWidth: 135", mini)
-                    self.assertIn("speedRangeTextWidth: 34", mini)
+                    speed = (base / composite / "Deck/DeckItem/SpeedInfo.qml").read_text()
+                    self.assertIn("Layout.fillWidth: false\n                    Layout.minimumWidth: 135\n                    Layout.preferredWidth: 135\n                    Layout.maximumWidth: 135", mini)
                     self.assertIn("speedRangeTextHorizontalAlignment: Text.AlignLeft", mini)
-                    self.assertIn("speedStateTextWidth: 62", mini)
-                    self.assertEqual((preferred("AutoLoop", stock) + preferred("BeatJump", stock) + 156 + 6 * 16) - 28,
-                                     preferred("AutoLoop", mini) + preferred("BeatJump", mini) + cue_width + cue_margins + 100 + 7 * 4)
+                    self.assertNotIn("speedRangeTextWidth", mini)
+                    self.assertNotIn("speedStateTextWidth", mini)
+                    self.assertNotIn("speedRangeTextWidth", performance)
+                    self.assertNotIn("speedStateTextWidth", performance)
+                    self.assertNotIn("Layout.minimumWidth: speedRangeTextWidth", speed)
+                    self.assertNotIn("Layout.minimumWidth: speedStateTextWidth", speed)
+                    self.assertEqual(speed.count("Layout.minimumWidth: Math.ceil(implicitWidth)\n        Layout.maximumWidth: Math.ceil(implicitWidth)"), 2)
                     jump = (base / composite / "Deck/DeckItem/BeatJump.qml").read_text()
                     forward = jump.index('objectName: "Deck_BeatJump_Forward"')
                     self.assertLess(jump.index('objectName: "Deck_BeatJump_Text"'), forward)
