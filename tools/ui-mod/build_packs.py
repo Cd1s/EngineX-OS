@@ -5306,10 +5306,6 @@ def edits(dev: bool):
             "            readonly property string isMasterPath: Config.network.hasSyncing\n",
             "            readonly property string isMasterPath: Config.network.hasSyncing &&\n"
             "                    !(!Config.device.isPlayer && [\"JP07\", \"JP08\", \"JP13\", \"JP14\"].indexOf(Config.device.name) >= 0)\n",
-        ), (
-            # Stock dims a non-master LED (1), which reads as lit; here it is off.
-            "                        } else {\n                            1\n                        }\n",
-            "                        } else {\n                            !Config.device.isPlayer && [\"JP07\", \"JP08\", \"JP13\", \"JP14\"].indexOf(Config.device.name) >= 0 ? 0 : 1\n                        }\n",
         )]
         # #49: a swipe loads the role's own decks (1+3: left 1, right 3), not the stock
         # left/right layer deck. Only "Deck N" actions; Prepare List etc. stay stock.
@@ -5612,22 +5608,6 @@ def edits(dev: bool):
             "                                button.scStemsLatchedAt = now\n"
             "                            }\n"
             "                        }\n",
-        )]
-        # #157 (jog only; ZOOM / Browse and DeckAction.toggleGridEdit stay stock): Shift+Vinyl
-        # does not enter BeatGrid Edit while the deck plays (Engine pauses there, jumps to
-        # 00:00 and locks Play), and Jog Touch stays off during BeatGrid Edit.
-        scaled["ControlSurfaceModules/ControlSurfaceModules/Vinyl.qml"] = [(
-            "        if (shiftActionIsGridEdit && (globalConfig.shift || deckConfig.gridEditActive)) {\n",
-            "        if (shiftActionIsGridEdit && ((globalConfig.shift && !deckConfig.playing) || deckConfig.gridEditActive)) {\n",
-        )]
-        scaled["ControlSurfaceModules/ControlSurfaceModules/JogWheel.qml"] = [(
-            "        enabled: {\n"
-            "            deckConfig.inDJMode &&\n"
-            "                !deckConfig.loopInEdit &&\n",
-            "        enabled: {\n"
-            "            deckConfig.inDJMode &&\n"
-            "                !deckConfig.gridEditActive &&\n"
-            "                !deckConfig.loopInEdit &&\n",
         )]
         # Keep the stock two-item BeatJump layout. The forward target lives
         # inside the size field, so it cannot widen AutoLoop / BeatJump / LEAD.
