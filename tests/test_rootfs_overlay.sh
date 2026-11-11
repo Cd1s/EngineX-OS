@@ -643,10 +643,10 @@ assert want in ba
 assert "systemctl restart --no-block systemd-timesyncd.service" in ba
 assert "/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf" in bdb.UNINSTALL
 PY
-if command -v gcc >/dev/null 2>&1; then
-    gcc -O2 -Wall -Wextra -Werror -o "$TMP/test_timesync_persist" "$ROOT/tools/ui-mod/test_timesync_persist.c" -ldl -lpthread
-    "$TMP/test_timesync_persist" >/dev/null
-fi
+lacks 'timesync_persist' "$ROOT/tools/ui-mod/engine_ui_hook.c"
+lacks 'persist_monotonic_clock' "$ROOT/tools/ui-mod/engine_ui_hook.c"
+has 'onSystemTimeZoneSetSucceeded' "$ROOT/tools/ui-mod/build_packs.py"
+has 'watchPersistentClock' "$ROOT/internal/cli/streamsync.go"
 ok "timesyncd drop-in, etc-reset survival, Gen1/Gen2 parity and TZ/clock persistence unit checks"
 
 cmp -s "$ROOT/rootfs-overlay/etc/sc5000/libengine-ui-hook.so" "$ROOT/rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so" ||

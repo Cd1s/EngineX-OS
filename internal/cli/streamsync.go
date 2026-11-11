@@ -154,6 +154,7 @@ func StreamSync(args []string) error {
 	dl.RemoveStaleParts()
 	dl.Trim("")
 	go watchEngineTemp(ctx)
+	go watchPersistentClock(ctx)
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()
 	select {
