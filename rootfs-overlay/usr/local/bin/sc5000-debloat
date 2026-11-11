@@ -40,7 +40,7 @@ fi
 if [ -d "$scripts" ]; then
     ln -sfn cleanup-JP07.sh "$scripts/cleanup"
 fi
-mkdir -p "$base/etc/systemd/system/engine.service.d" "$base/etc/systemd/journald.conf.d" "$base/etc/connman"
+mkdir -p "$base/etc/systemd/system/engine.service.d" "$base/etc/systemd/journald.conf.d" "$base/etc/systemd/timesyncd.conf.d" "$base/etc/connman"
 cat > "$base/etc/systemd/system/engine.service.d/override.conf" <<'CONF'
 [Unit]
 # The image's UI packs and version.txt are installed by this unit (az01_packer PREPARE).
@@ -67,6 +67,13 @@ cat > "$base/etc/systemd/journald.conf.d/sc5000.conf" <<'CONF'
 [Journal]
 Storage=volatile
 RuntimeMaxUse=16M
+CONF
+cat > "$base/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf" <<'CONF'
+# Mainland-China PoPs (Aliyun, Tencent, Apple) first so CN cold boots sync immediately
+# without stalling on unreachable hosts, followed by global anycast/pool and Google last.
+[Time]
+FallbackNTP=
+FallbackNTP=ntp.aliyun.com ntp.tencent.com time.apple.com time.cloudflare.com pool.ntp.org time.google.com
 CONF
 # /etc/hosts matches exact names. The optional dnsmasq config also blocks
 # subdomains on images using dnsmasq. Streaming CDN domains remain available.

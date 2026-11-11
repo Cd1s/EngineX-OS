@@ -398,13 +398,14 @@ class FilesystemTests(unittest.TestCase):
         data = self.root/'data'
         upper = data/'system/etc/overlay'
         for name in ('hosts', 'resolv.conf', 'connman/main.conf', 'dnsmasq.d/x.conf',
-                     'edisksd/main.conf', 'keep.conf'):
+                     'edisksd/main.conf', 'systemd/timesyncd.conf', 'systemd/timesyncd.conf.d/old.conf', 'keep.conf'):
             (upper/name).parent.mkdir(parents=True, exist_ok=True)
             (upper/name).write_text('4.3.4')
         script = az.ETC_RESET.replace(b'/data', str(data).encode())
         passed = subprocess.run(['sh', '-s'], input=script, capture_output=True)
         self.assertEqual(passed.returncode, 0, passed.stderr)
-        self.assertEqual(sorted(p.name for p in upper.iterdir()), ['keep.conf'])
+        self.assertEqual(sorted(p.name for p in upper.iterdir()), ['keep.conf', 'systemd'])
+        self.assertEqual(list((upper/'systemd').iterdir()), [])
         (upper/'hosts').write_text('user edit after upgrade')
         passed = subprocess.run(['sh', '-s'], input=script, capture_output=True)
         self.assertEqual(passed.returncode, 0, passed.stderr)

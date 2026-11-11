@@ -579,7 +579,7 @@ if [ -f "$marker" ] && [ "$(cat "$marker")" = "$epoch" ]; then
     exit 0
 fi
 if [ -d "$upper" ]; then
-    for name in hosts resolv.conf connman dnsmasq.d edisksd@MANAGED@; do
+    for name in hosts resolv.conf connman dnsmasq.d edisksd systemd/timesyncd.conf systemd/timesyncd.conf.d@MANAGED@; do
         rm -rf -- "$upper/$name"
     done
 fi

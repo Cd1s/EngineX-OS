@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (30 Rows)
+## Regression Table (31 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -40,6 +40,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 28 | **CDJ-style pitch fader soft-takeover unlock (`#181`, default `OFF` = stock Engine behaviour)**: when `cdjPitchPickup` is `OFF` (default), pitch fader soft takeover and `HARDEXTERNAL` state remain 100% stock | `#181` (`[PENDING — branch in progress for 5.3.0.4]`) | **`[PENDING — branch in progress for 5.3.0.4]`** — Unit test + QML JS test asserting default `OFF` leaves stock soft-takeover untouched and `ON` unlocks CDJ-style pickup | Pending merge into `5.3.0.4` |
 | 29 | **PX Beat FX millisecond mode (`#162`, default `OFF` = byte-identical DSP output)**: when PX ms mode is `OFF` (default), the 96 kHz `hook_master_output` / PX delay-bank DSP output is byte-for-byte identical to the existing golden hashes | `#162` (`[PENDING — branch in progress for 5.3.0.4]`) | **`[PENDING — branch in progress for 5.3.0.4]`** — `tools/ui-mod/test_master_golden.c` & `test_pioneer_selector.c` asserting byte-identical DSP output when `OFF` and exact ms delay timing when `ON` | Pending merge into `5.3.0.4` |
 | 30 | **Shadow deck `Sync` phase-alignment snap**: enabling `Sync` snaps the shadow deck onto the beat/bar grid without residual phase offset | `#49` (`[PENDING — branch agent/shadow-sync-snap-20261111 in progress for 5.3.0.4]`) | **`[PENDING — branch in progress for 5.3.0.4]`** — Unit test in `tools/az01-packer/test_ui_mod.py` + dual-deck / `shadow-twin` sync alignment check | Pending merge into `5.3.0.4` |
+| 31 | **Mainland-China + global NTP sync, monotonic persistent clock across power loss, and Engine time zone survival across hard power-off and failed auto-detect** (`systemd-timesyncd` drop-in `10-enginex-ntp.conf` on Gen1 `/etc` surviving `etc-reset` and Gen2 `/run` via `boot-activate.sh`, `/var/lib/systemd/timesync/clock` monotonic persistence on `/data`, and immediate `[TimeDateSettings] TZEnvVar` persistence + UTC/empty overwrite guard) | `agent/time-sync-cn-20261111` (`5.3.0.4`) | `tests/test_rootfs_overlay.sh` (`ok 20`), `tools/ui-mod/test_timesync_persist.c`, `tools/az01-packer/test_az01_packer.py`, `test_data_bundle.py`, `tools/az01-packer/test_timesync_sandbox.sh` (`unshare -m -n -p` + chroot with Google NTP blackholed, local NTPv4 responder, simulated AC power cycle, and failed `detectTimeZone()`) | Release workflow Step 2 + `test_timesync_sandbox.sh` (`PASS 0`–`PASS 3`) |
 
 ---
 
