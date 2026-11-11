@@ -459,6 +459,54 @@ SERVICES_MAIN = """
 	function scSwipeDeck(right) { return scFourDeckRole === "" ? 0 : parseInt(scFourDeckRole[right ? scFourDeckRole.length - 1 : 0]) }
 	property bool scFourDeckOn: false // the saved switch; Engine applies it on restart
 	property string scFourDeckRoleSetting: "auto"
+	// #201 Paired Player: Engine's own 2-deck view of the 4-deck layout (Layout -> Decks
+	// "2 Decks", Waveforms "2 Waveforms") shows one deck per side, that side's Layer A/B
+	// (/GUI/Decks/DeckLeft|DeckRight/Layer). This unit's side follows its Layer button as
+	// in the 4-deck view; the other side follows the other player's active layer.
+	property bool scPairedSetting: false // the saved switch
+	readonly property bool scPairedOn: scPairedSetting && scIsPlayerBoard && scPairedLanes(scFourDeckRole, 0, scShadowEmptyArray) !== null
+	// Lane 1 (this unit) on top: a 2+4 player is the stock right side, drawn swapped.
+	readonly property bool scPairedSwap: scPairedOn && (scFourDeckRole === "24" || scFourDeckRole === "2")
+	property int scPairedEmpty: 0 // lane 2's deck while no other player is there: the lane says so
+	property bool scPairedDirty: false
+	onScPairedOnChanged: { scPairedDirty = true; if (!scPairedOn) scPairedEmpty = 0 }
+	property int scShadowActiveDeck: 0 // this unit's deck on its active layer, as last posted
+	function scLayerPath(role) { return role === "24" || role === "2" ? "/GUI/Decks/DeckRight/Layer" : "/GUI/Decks/DeckLeft/Layer" }
+	// role: this unit's 4-deck role; layer: its own side's Layer (0 A, 1 B); decks: the
+	// /shadow reply. Lane 1 is this unit's active deck; lane 2 the other player's deck
+	// on its active layer (active), else (a CDJ, an older EngineX) the first with a
+	// track, else that side's Layer A deck; missing: no other player at all. null: the
+	// role has no such pair (1+2, 3+4 keep the 4-deck view).
+	function scPairedLanes(role, layer, decks) {
+		const peer = {"13": [2, 4], "1": [2, 4], "24": [1, 3], "2": [1, 3]}[role]
+		if (!peer) return null
+		const lane1 = parseInt(role[layer === 1 ? role.length - 1 : 0])
+		let lane2 = 0, seen = false
+		for (const e of decks) if (peer.indexOf(e.deck) >= 0) { seen = true; if (e.active === true && !lane2) lane2 = e.deck }
+		if (!lane2) for (const e of decks) if (peer.indexOf(e.deck) >= 0 && (e.key || e.path || e.loading)) { lane2 = e.deck; break }
+		if (!lane2) lane2 = peer[0]
+		return {lane1: lane1, lane2: lane2, side: scLayerPath(peer[0] === 2 ? "24" : "13"), layer: lane2 === peer[1] ? 1 : 0, missing: !seen}
+	}
+	// Puts the other player's side on its active layer; Engine's 2-deck view follows.
+	function scPairedFollow(decks) {
+		const own = root.scTr(scLayerPath(scFourDeckRole))
+		const m = scPairedLanes(scFourDeckRole, own && own.index === 1 ? 1 : 0, decks)
+		if (!m) return
+		const side = root.scTr(m.side)
+		if (side && side.index !== m.layer) side.index = m.layer
+		const empty = m.missing ? m.lane2 : 0
+		if (empty !== scPairedEmpty) scPairedEmpty = empty
+	}
+	// Engine's own deck and waveform counts for the view: 2 + 2 paired, else 4 + 4.
+	function scPairedApplyLayout() {
+		const m = scViewControls()
+		if (!m || !m.deckCount || !m.waveformCount || !(m.deckCount.settingNames && m.deckCount.settingNames.length >= 2)) return false
+		const n = scPairedOn ? 0 : m.deckCount.settingNames.length - 1
+		if (m.deckCount.currentIndex !== n) m.deckCount.setCurrentIndex(n)
+		const w = scPairedOn ? 0 : m.waveformCount.settingNames.length - 1
+		if (m.waveformCount.currentIndex !== w) m.waveformCount.setCurrentIndex(w)
+		return true
+	}
 	property string scShadowMode: "auto" // from /v1/sc5000/ui: auto (each slot by its source), engine or cdj (every source down one path)
 	property int scShadowLineMask: 0 // Engine mode on a console: bit N = a CDJ is on Deck N's Line In, where only the display renderer draws its waveform
 	property bool scShadowDisplayOnly: true // the /shadow response is authoritative; missing means the safe default. What a deck without its own displayOnly follows
@@ -799,7 +847,7 @@ SERVICES_MAIN = """
 		return true
 	}
 	function scViewOf(n) {
-		return scViews[String(n)] || (scFourDeckRole !== "" ? {pads: false, deckCount: "4 Decks", waveformCount: "4 Waveforms"} : {pads: false})
+		return scViews[String(n)] || (scFourDeckRole !== "" ? {pads: false, deckCount: scPairedOn ? "2 Decks" : "4 Decks", waveformCount: scPairedOn ? "2 Waveforms" : "4 Waveforms"} : {pads: false})
 	}
 	function scViewStore() {
 		const x = new XMLHttpRequest()
@@ -851,6 +899,7 @@ SERVICES_MAIN = """
 				root.scViewReady = root.scViewApply(root.scViewOf(root.scViewActive))
 				return
 			}
+			if (root.scPairedDirty) root.scPairedDirty = !root.scPairedApplyLayout() // #201: after a saved view
 			root.scViewCheck(Date.now())
 		}
 	}
@@ -1296,6 +1345,10 @@ SERVICES_MAIN = """
 		let lead = 0
 		for (let d = 1; d <= 4 && root.scPlayer && !scShadowDisplayOnly; d++) if (mine.indexOf(d) < 0 && (scShadowAt[d] || scShadowEmptyObject).link && scShadowProperties(d).master.state) lead = d
 		if (lead !== scShadowLead) { scShadowLead = lead; edge = true }
+		// #201: a Layer press moves the other player's paired view at once.
+		const layer = root.scTr(scLayerPath(scShadowMineRole))
+		const active = mine.length ? mine[layer && layer.index === 1 ? mine.length - 1 : 0] : 0
+		if (active !== scShadowActiveDeck) { scShadowActiveDeck = active; edge = true }
 		scShadowMasterBack(mine, now)
 		// Every edge (play, CUE, jump, pitch, master, sync, track) posts at once. The
 		// heartbeat only proves liveness (Go marks a peer stale after 2 s) and corrects
@@ -1372,6 +1425,7 @@ SERVICES_MAIN = """
 			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.lead = s.master; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
+			o.active = d === scShadowActiveDeck // on this unit's active layer (#201)
 			o.range = s.range; o.keylock = s.keylock // the peer's shadow deck shows the same range and key lock
 			// What this deck's header and overview show beside the track; the peer's shadow deck shows them, its copy takes none.
 			o.loop = !!g.loop.state; o.keyOffset = shift; o.stems = !!g.stemmed.state
@@ -1399,7 +1453,7 @@ SERVICES_MAIN = """
 				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
 			}
 			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
-				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev ||
+				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev || sent.active !== o.active ||
 				sent.loop !== o.loop || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
 		scShadowPostAt = now; scShadowPostPending = false
@@ -1414,7 +1468,7 @@ SERVICES_MAIN = """
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
 			sent.master = o.master; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
-			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.loop = o.loop; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at
+			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.loop = o.loop; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at; sent.active = o.active
 		}
 		scShadowSent.length = own.length
 		scShadowFullAt = now; scShadowPostFull = false
@@ -1515,6 +1569,7 @@ SERVICES_MAIN = """
 	function scShadowHeadOf(d) { return scShadowHead[d] || scShadowEmptyObject }
 	function scShadowApplyAll(decks, displayOnly) {
 		scShadowDisplayOnly = displayOnly !== false
+		if (scPairedOn) scPairedFollow(decks) // a GUI layer, no deck: every path
 		const head = {}
 		if (!scShadowDisplayOnly) for (const d of [1, 2, 3, 4]) {
 			if (scFourDeckRole.indexOf(String(d)) >= 0) continue
@@ -2754,6 +2809,7 @@ SERVICES_MAIN = """
 		scPlayer = !!v.player
 		scFourDeckRole = v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
 		scFourDeckOn = !!v.fourDeckWaveform
+		scPairedSetting = !!v.fourDeckWaveform && !!v.pairedView
 		scFourDeckRoleSetting = v.fourDeckRole || "auto"
 		scShadowMode = v.shadowMode || "auto"
 		scKeepPlayhead(v.playhead || 0)
@@ -3585,6 +3641,23 @@ FOUR_DECK_ENTRIES = """
 			values: ["Off", "On"]
 			currentValue: root.scFourDeckOn ? "On" : "Off"
 			onSelected: function(index) { if ((index === 1) !== root.scFourDeckOn) root.scRestartCall("fourDeckWaveform=" + index) }
+		},
+		EntryBase.ListEntry { // #201: two standalone players, one deck of each
+			text: "Paired Player"
+			visible: root.scIsPlayerBoard
+			values: ["Off", "On"]
+			currentValue: root.scPairedSetting ? "On" : "Off"
+			// It runs in the 4-deck layout (an Engine restart to get there); between the two views, none.
+			onSelected: function(index) { if ((index === 1) !== root.scPairedSetting) { if (index === 1 && !root.scFourDeckOn) root.scRestartCall("pairedView=1"); else root.scCall("pairedView=" + index) } }
+		},
+		@HEADLINE@ {
+			visible: root.scIsPlayerBoard && root.scPairedSetting
+			leftPadding: 24; rightPadding: 24
+			wrapMode: Text.WordWrap
+			Layout.preferredHeight: implicitHeight
+			color: "#9a9a9a"
+			// translate() leaves lines with comparisons alone: pick by index.
+			text: ["Paired Player: this player's active layer and the other player's active deck, one lane each", "Paired Player needs 4-Deck Role Auto, 1+3, 2+4, 1 or 2"][root.scPairedOn || !root.scFourDeckRole ? 0 : 1]
 		},
 		EntryBase.ListEntry {
 			text: "4-Deck Role"
@@ -5012,6 +5085,31 @@ SHADOW_RING = r"""
 """
 
 
+# #201: lane 2 of the Paired Player view while no other player is there. The stock
+# lane stays (an empty deck); this only says why. Not reparented: the stock lane is a
+# plain item, and the label goes when the lane does.
+PAIRED_EMPTY_LABEL = """
+    Rectangle {
+        objectName: "EngineX_PairedEmpty"
+        visible: typeof root !== "undefined" && !!root && root.scPairedEmpty > 0 && root.scPairedEmpty === scDisplay.deck
+        anchors.centerIn: parent
+        z: 10
+        width: scPairedEmptyText.implicitWidth + 24
+        height: scPairedEmptyText.implicitHeight + 12
+        radius: 4
+        color: "#d0000000"
+        Text {
+            id: scPairedEmptyText
+            anchors.centerIn: parent
+            textFormat: Text.PlainText
+            color: "#dddddd"
+            font.pixelSize: 18
+            text: "No paired player"
+        }
+    }
+"""
+
+
 def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
     """Keep visual items inside the stock stacking context, outside Row/ColumnLayouts.
 
@@ -5061,6 +5159,8 @@ def shadow_layer(text: str, kind: str, ring: bool = False) -> str:
         h_end = raw_layer.index("@BUSY@")
         raw_layer = raw_layer[:h_start] + raw_layer[h_end:]
     layer = raw_layer.replace("@BUSY@", busy).replace("@KIND@", kind).replace("@OWNER@", owner_id).replace("@PALETTE@", "\n        ".join(palette)).replace("@ICONS@", icons).replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS))
+    if kind == "waveform":
+        layer += PAIRED_EMPTY_LABEL
     return text[:end] + layer + text[end:]
 
 
@@ -6270,6 +6370,21 @@ def edits(dev: bool):
              "        font.pixelSize: 16\n"
              '        text: "All Engine Mode: no CDJ waveform on Line In"\n'
              "    }\n")]
+        # #201 Paired Player: lane 1 (this player) on top. Engine's 2-deck view puts the
+        # left side (1/3) above the right (2/4); a 2+4 player draws it the stock swapped
+        # way (deck headers, waveforms, pads alike). Elsewhere: stock.
+        swapped = "            decksSwapped: responsiveWaveform.deckControl.decksSwapped\n"
+        scaled["Skins/EngineOS/UI/CompositeControls/PerformanceView/MainViewResponsiveWaveforms.qml"] = [
+            ("    readonly property int deckGroupMode: deckControl.deckGroupMode\n",
+             "    readonly property int deckGroupMode: deckControl.deckGroupMode\n"
+             '    readonly property bool scDecksSwapped: deckControl.decksSwapped || (typeof root !== "undefined" && !!root && !!root.scPairedSwap)\n'),
+            (swapped + "            deckViewsModel: responsiveWaveform.deckControl.topDeckViews",
+             swapped.replace("deckControl.decksSwapped", "scDecksSwapped") + "            deckViewsModel: responsiveWaveform.deckControl.topDeckViews"),
+            (swapped + "            playheadPosition:", swapped.replace("deckControl.decksSwapped", "scDecksSwapped") + "            playheadPosition:"),
+            (swapped + "            deckViewsModel: responsiveWaveform.deckControl.bottomDeckViews",
+             swapped.replace("deckControl.decksSwapped", "scDecksSwapped") + "            deckViewsModel: responsiveWaveform.deckControl.bottomDeckViews"),
+            ("    " + swapped, "    " + swapped.replace("deckControl.decksSwapped", "scDecksSwapped")),
+        ]
         scaled["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/AlbumArt.qml"] = [(
             "        source: albumArt.albumArtPath\n",
             art_source("        ", "albumArt.deckIndex", "albumArt.albumArtPath", "albumArt.deckView && albumArt.deckView.artistSongView ? albumArt.deckView.artistSongView.songName : \"\"", "scArtImage", add_id=True))]

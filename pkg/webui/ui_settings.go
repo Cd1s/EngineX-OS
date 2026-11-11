@@ -173,6 +173,11 @@ type uiSettings struct {
 	ProlinkWaveform  bool     `json:"prolinkWaveform"`
 	BroadcastEnabled bool     `json:"broadcastEnabled"`
 	UpfaderEcho      bool     `json:"upfaderEcho"`
+	// PairedView (#201): a standalone player in the 4-deck layout shows Engine's own
+	// 2-deck view instead, this unit's active layer and the other player's active
+	// deck (its layer followed). Needs FourDeckWaveform: setting it turns that on,
+	// turning that off clears it.
+	PairedView bool `json:"pairedView"`
 	// DebugTelemetry logs every shadow deck update and decision (shadow_debug.go).
 	// Development only: off by default, and nothing in the image turns it on.
 	DebugTelemetry bool `json:"debugTelemetry"`
@@ -360,6 +365,8 @@ func (s *Server) loadUI() uiSettings {
 			if slices.Contains(uiFourDeckRoles, val) {
 				v.FourDeckRole = val
 			}
+		case "paired_view":
+			v.PairedView = val == "1"
 		case "four_deck_waveform":
 			if val == "1" || strings.EqualFold(val, "true") {
 				v.FourDeckWaveform = true
@@ -494,6 +501,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	text := "lang=" + v.Language + "\nwaveform=" + v.Waveform + "\nsources=" + strings.Join(v.Sources, ",") + "\nknown=" + strings.Join(uiServices, ",") + "\nscope=" + v.Scope + "\nquality=" + v.Quality + "\nnetease_mode=" + v.NeteaseMode + "\nplayhead=" + strconv.FormatFloat(v.Playhead, 'f', -1, 64) + "\n"
 	if v.FourDeckWaveform {
 		text += "four_deck_waveform=1\n"
+		if v.PairedView {
+			text += "paired_view=1\n"
+		}
 	}
 	if v.ShadowMode != "auto" {
 		text += "shadow_mode=" + v.ShadowMode + "\n"
@@ -768,6 +778,21 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.FourDeckWaveform = b
+		if !b {
+			v.PairedView = false // the paired view is a view of the 4-deck layout
+		}
+	}
+	if q.Has("pairedView") {
+		b, ok := parseBoolParam(q.Get("pairedView"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.PairedView = b
+		if b {
+			v.FourDeckWaveform = true
+		}
 	}
 	if q.Has("prolinkWaveform") {
 		b, ok := parseBoolParam(q.Get("prolinkWaveform"))
