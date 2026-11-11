@@ -143,7 +143,7 @@ int snd_pcm_sw_params(void *pcm, void *params) {
 // off the audio thread; the limiter itself runs in hook_master_output.
 static int lim_enabled, gain_enabled; // gain_enabled: #64 auto_gain=1
 static int echo_enabled;              // #104 upfader_echo=1: Echo Out on the master bus
-static int echo_player_bypass;        // standalone players hide Echo Out; stored value behaves as Off
+static int echo_player_bypass;        // standalone players hide Echo Out and Color FX Style; stored values behave as Off
 static unsigned pfx_time_ms;          // #162: zero OFF, otherwise 10..4000
 static struct sc_pfx_ms master_ms[4];
 static int pioneer_fx_mode;           // #88 Pioneer FX emulations
@@ -394,7 +394,7 @@ static void *lim_poll(void *arg) {
         __atomic_store_n(&lim_enabled, on, __ATOMIC_RELAXED);
         __atomic_store_n(&gain_enabled, gain, __ATOMIC_RELAXED);
         __atomic_store_n(&echo_enabled, player_bypass ? 0 : echo, __ATOMIC_RELAXED);
-        __atomic_store_n(&pioneer_fx_mode, pioneer_fx, __ATOMIC_RELAXED);
+        __atomic_store_n(&pioneer_fx_mode, player_bypass ? 0 : pioneer_fx, __ATOMIC_RELAXED);
         __atomic_store_n(&pfx_time_ms, timing.enabled ? timing.ms : 0, __ATOMIC_RELEASE);
         if (led != __atomic_load_n(&led_pct, __ATOMIC_RELAXED)) led_replay(led);
         usleep(80000);
