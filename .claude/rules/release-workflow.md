@@ -104,6 +104,8 @@ REMOTE_BUILD_HOST=Oracle-Batam-arm remote-build --name sc5000-release-<短说明
 
 教训（5.3.0.1 重发）：Engine 5.3.0 强制打开 Qt 的 QML 磁盘缓存（`QML_FORCE_DISK_CACHE` 盖过我们的 `QML_DISABLE_DISK_CACHE`），缓存放在 `/data/AppDataUser/AIR Music Technology/Engine/.cache/qml`，只按源文件时间戳判断是否过期。实机曾经在没有 UI 包的情况下跑过一次 Engine，留下了原厂缓存；之后 hook 日志照样显示「48 files」，界面却一直是原厂的。门禁以前只数 hook 日志，没看渲染结果，所以没发现。现在 hook 按内容给替换的 qrc 文件打时间戳，门禁先种下原厂旧缓存，再读实际渲染出的节点。
 
+教训（5.3.0.4 候选）：`f6b87f8` 新增 `0x16fbc38` hook 站点排除静音影子槽参与 `MASTER` 选举后，只验了「影子副本不抢 MASTER」，没验早已修好的「两台真碟机之间手动切换 MASTER」，结果双机同时显示 `LEAD` 且按 `MASTER` 键无效。任何对共享机制（`MASTER`/Sync 选举、hook 站点、header 布局、patch 字典）的修改必须同时回归相邻既有行为，不得只测本次单点目标。
+
 - 自定义 unit **不得对官方单元用硬依赖**（`Requires=` / `BindsTo=` / `Requisite=`），因为新底包可能删掉它。挂载用 `RequiresMountsFor=<路径>`（只对底包真有的挂载单元生效），其余用 `Wants=` + `After=`。`rootfs_audit.py` 把违反的写法记为 FAIL。
 - **适配新官方底包时，以及每次发版（含同版本重发）**，都在第 4 步之后跑门禁。三个镜像组各跑一次，旧镜像用同一机型的**上一个已发布版本**：
 
@@ -130,6 +132,7 @@ bash tools/az01-packer/release-gate.sh \
 - 沙箱里不真正执行、而是由记录 shim 代替的命令：`kexec`、`systemctl`、`reboot`、`encrypt-fs.sh`（对 `/data` 做 fscrypt，失败时会触发 Factory Reset）、`az01-update --erase-data`。`planck-remote-screen` 在沙箱里没有显示，它的 shim 改调 `az01-update --net`，两者用的是同一个 libaz01-prog 下载与校验代码。沙箱里没有 eMMC，`Applying` 之后会报 `unsupported operation`，这是预期结果，记为 INFO。真实刷写和重启仍需按第 8 步在实机上抽查。
 - 另外两处是沙箱本身的限制，不是 bug：qemu-user 下 `/proc/PID/cmdline` 前面多出解释器路径，所以门禁在 `/usr/local/sbin` 放了一个去掉这个前缀的 `pkill`（原生运行时没有前缀，shim 原样匹配）；Engine 会把伪造的 ttyS0（IRQ 41）绑到 CPU 0，门禁用 tmpfs 盖住沙箱里的 `/proc/irq`，否则会改到宿主的 IRQ，宿主没有这个 IRQ 时 Engine 直接 abort；没有 udev 时 edisksd 会自行退出，所以门禁只验证 hook 能在 `LD_BIND_NOW=1` 下预加载，挂载流程由 `test_edisksd_hook.c --mounts` 覆盖。
 - 证据在工作目录：`results.txt`、`audit.txt`、`old-*.log` / `new-*.log`、`*-shim.log`。摘要写进 `docs/ISSUE-FIXES-*.md`。
+- **无回归检查（必做）**：三组门禁通过后、进入第 5 步发布前，必须逐项对照 [`docs/REGRESSION-CHECKLIST.md`](../../docs/REGRESSION-CHECKLIST.md) 核验全部自动化项与沙箱/实机项，并把结果写入 `docs/ISSUE-FIXES-<VERSION>.md`。任何新修复不得破坏旧修复或弱化既有单测；在实机上新发现的 bug 必须在同一轮向 `docs/REGRESSION-CHECKLIST.md` 追加一行。
 
 ## 5. Tag 与 GitHub Release
 
@@ -169,6 +172,7 @@ gh release view v<VERSION> --repo Cd1s/EngineX-OS --json assets -q '.assets[] | 
 ## 8. 实机（可选）
 
 - 实机只做热部署和只读核对；部署前先备份被替换的文件。
+- 实机验收时必须跑完 [`docs/REGRESSION-CHECKLIST.md`](../../docs/REGRESSION-CHECKLIST.md) 中的实机必检项（包括标有 `[NO AUTOMATED TEST]` 的跨机手动 `MASTER` 互切、原厂 `LOAD` 流媒体播放、按键灯目测等），并将结果写入 `docs/ISSUE-FIXES-<VERSION>.md`。
 - 测碟机端在线更新时，要把实机两个 `version.txt`（`/data/sc5000-custom/version.txt` 和 `/etc/sc5000/version.txt`）临时改成比 `<VERSION>` 旧的版本才会出现更新提示；`/etc` 那份用 bind mount 临时文件，重启即恢复。
 
 ## 9. 发版后与日常编译垃圾清理（必做，防磁盘与 tmpfs 爆满）

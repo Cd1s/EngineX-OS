@@ -22,6 +22,7 @@ Thanks for helping. EngineX OS runs on decks that people play live on, so the ba
 - **Destructive operations**: Factory Reset, `az01-update --erase-data` and boots with a blank `/data` are tested in a sandbox or VM (`unshare -m` + `qemu-arm` with the unpacked rootfs), never on a real deck.
 - **Engine databases**: while Engine has a library open, no other process may write `m.db` / `hm.db`.
 - **Vendor units**: never put a hard `Requires=`, `BindsTo=` or `Requisite=` on a unit the vendor ships, because a new base may drop it (5.3.0 dropped `etc.mount`, and the 5.0.4.2 → 5.3.0.1 online update lost the UI packs and SSH). Use `RequiresMountsFor=` for mounts and `Wants=` + `After=` for everything else.
+- **No regressions**: every fix ships with a test that fails on the old code. Before changing a mechanism, look up the issues it already fixed (`git log -S`, the issue numbers in tests and `docs/ISSUE-FIXES-*.md`) and keep their tests green. A fix to a shared mechanism (MASTER/sync election, hook sites, header layout, patch dicts) also tests the neighbouring behaviours. Never delete or weaken an existing test to make a change pass. Every new real-deck bug adds a line to [`docs/REGRESSION-CHECKLIST.md`](./docs/REGRESSION-CHECKLIST.md).
 
 ### Tests & Experimental Inspection
 
