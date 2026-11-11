@@ -1,7 +1,7 @@
 # EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11，RC（待维护者确认发布））
 
 - **日期**：`2026-11-11`
-- **状态**：滚动整合收尾中（已合入 `issue176-sclive4-stems` `77c4c9f`、`issue177-sclive4-perf` `66ff35b`、`realdeck-5304-fixes` `ebb985e` / `322839d`、防回归核验表 `REGRESSION-CHECKLIST.md` 与紧凑顶栏第 2 行 `header-row2-compact` `207dc55`；已批准并正合入 `#181` `b5c28eb` 与 `#162` `9fa0cff`；影子 `Sync` 对齐、时区/NTP 持久化、一代首次启动 Stems 弹窗与双机手动 `MASTER` 互切待合入/观察）
+- **状态**：滚动整合收尾中（已合入 `issue176-sclive4-stems` `77c4c9f`、`issue177-sclive4-perf` `66ff35b`、`realdeck-5304-fixes` `ebb985e` / `322839d`、防回归核验表 `REGRESSION-CHECKLIST.md`、紧凑顶栏第 2 行 `header-row2-compact` `207dc55` 与 `#162` `9fa0cff`；`#181` 正在应用异族复核修复并 rebase 待合入；影子 `Sync` 对齐、时区/NTP 持久化、一代首次启动 Stems 弹窗与双机手动 `MASTER` 互切待合入/观察）
 - **版本范围**：`v5.3.0.3`（tag `cd789f8` / 构建提交 `b941ea4`）→ `v5.3.0.4`（上一轮 RC 构建提交：`5038e5b`，当前滚动整合基准：`9bf4bd8`；最终构建提交、三组门禁与 20 个产物 SHA-256 待正式打包回填）
 - **回滚点**：`v5.3.0.3`（tag `cd789f8`，构建提交 `b941ea4`；同版本更早构建 `37e83ea`、`9616419`）
 - **覆盖机型与产物（共 20 个发布资产 + `SHA256SUMS.txt`）**：
@@ -43,7 +43,7 @@
 | **防回归核验表与共享机制守则** | `docs/REGRESSION-CHECKLIST.md`<br>`CLAUDE.md`<br>`CONTRIBUTING.md`<br>`.claude/rules/release-workflow.md` | **原因**：修改共享机制（`MASTER` / `Sync` 选举、`engine_ui_hook.c` 补丁点、顶栏布局、QML `PatchDict`）时若只测单点目标，容易引回旧 bug（如 `f6b87f8` 未回归跨机手动切 `MASTER`）或遗漏无自动化覆盖的实机步骤。<br>**修法**：建立逐行对照的 `docs/REGRESSION-CHECKLIST.md`（绑定历史修复提交、自动化单测入口与实机/录像证据），将「无回归检查」纳入发版门禁必做步骤，并显式标注 `[NO AUTOMATED TEST]` 的物理实机必检项（`f60af47`、`5f67410`、`9bf4bd8`）。 | 自动化套件与门禁对照通过；标有 `[NO AUTOMATED TEST]` 的物理实机项（双机手动 `MASTER` 四态互切、原厂 `LOAD` 实播、实体按键光学亮度）须在最终构建镜像上按表实机核验 |
 
 > **范围说明**：
-> - **正在为 `5.3.0.4` 收尾/待合入（Pending，尚未计入已完成功能）**：影子轨按下 `SYNC` 时的相位对齐（`shadow-sync-snap`）、NTP 时间同步与断电离线时区保持（`time-sync-cn`）、一代机空白 `/data` 首次启动 Stems 下载弹窗抑制（`gen1-stems-prompt`），以及双机手动 `MASTER` 互切（可能归入持续观察）。
+> - **正在为 `5.3.0.4` 收尾/待合入（Pending，尚未计入已完成功能）**：`#181`（CDJ 式变速推子接管，正在应用复核修复并 rebase）、影子轨按下 `SYNC` 时的相位对齐（`shadow-sync-snap`）、NTP 时间同步与断电离线时区保持（`time-sync-cn`）、一代机空白 `/data` 首次启动 Stems 下载弹窗抑制（`gen1-stems-prompt`），以及双机手动 `MASTER` 互切（可能归入持续观察）。
 > - **推迟至 `5.3.0.5`（不在 `5.3.0.4`）**：`#178`（仅做后台核验，不进 `5.3.0.4`）、`#172`（高频滚降补偿）、`#195`、`#168` 按拍精确同步（beat-exact sync）、原厂内置 Beat FX 毫秒模式，以及 `"No source drive"`（`StreamingNoSourceAvailableDialog`）提示深入排查；`#179` 因不合规（未经同意转移数据）已拒绝，不列入。
 
 ---
