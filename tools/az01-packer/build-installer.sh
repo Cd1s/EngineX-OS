@@ -16,13 +16,19 @@ for t in linux-amd64 macos-amd64 macos-arm64 windows-amd64; do
 	goos=$os
 	[ "$os" = macos ] && goos=darwin
 	exe=enginex-installer
-	[ "$os" = windows ] && exe=enginex-installer.exe
+	stemsd=enginex-stemsd
+	if [ "$os" = windows ]; then
+		exe=enginex-installer.exe
+		stemsd=enginex-stemsd.exe
+	fi
 	d=$W/$t
-	mkdir -p "$d"
+	mkdir -p "$d/stems"
 	CGO_ENABLED=0 GOOS=$goos GOARCH=$arch go build -trimpath -o "$d/$exe" ./cmd/enginex-installer
+	CGO_ENABLED=0 GOOS=$goos GOARCH=$arch go build -trimpath -o "$d/stems/$stemsd" ./cmd/enginex-stemsd
 	cp tools/az01-packer/az01_packer.py tools/az01-packer/host-install-userdata.py tools/az01-packer/host-install-fastboot.sh "$d/"
-	chmod 644 "$d/az01_packer.py"
-	chmod 755 "$d/$exe" "$d/host-install-userdata.py" "$d/host-install-fastboot.sh"
+	cp tools/stems/worker.py tools/stems/run-home-worker.sh tools/stems/run-home-worker.ps1 tools/stems/README.md "$d/stems/"
+	chmod 644 "$d/az01_packer.py" "$d/stems/worker.py" "$d/stems/run-home-worker.ps1" "$d/stems/README.md"
+	chmod 755 "$d/$exe" "$d/host-install-userdata.py" "$d/host-install-fastboot.sh" "$d/stems/$stemsd" "$d/stems/run-home-worker.sh"
 	case $os in
 	linux)
 		printf '#!/bin/sh\ncd "$(dirname "$0")"\nexec ./enginex-installer "$@"\n' >"$d/install-enginex.sh"
@@ -43,11 +49,15 @@ for t in linux-amd64 macos-amd64 macos-arm64 windows-amd64; do
 import os, sys, zipfile
 src, dst = sys.argv[1:]
 with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
-    for name in sorted(os.listdir(src)):
-        info = zipfile.ZipInfo.from_file(os.path.join(src, name), name)  # keeps the mode bits
-        info.compress_type = zipfile.ZIP_DEFLATED
-        with open(os.path.join(src, name), "rb") as f:
-            z.writestr(info, f.read())
+    for root, dirs, files in os.walk(src):
+        dirs.sort()
+        for name in sorted(files):
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, src).replace(os.sep, "/")
+            info = zipfile.ZipInfo.from_file(full, rel)  # keeps the mode bits
+            info.compress_type = zipfile.ZIP_DEFLATED
+            with open(full, "rb") as f:
+                z.writestr(info, f.read())
 EOF
 done
 ls -l "$OUT"/EngineX-Installer-"$V"-*

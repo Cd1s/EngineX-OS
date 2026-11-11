@@ -331,14 +331,14 @@ SSH 需要碟机的 root 访问权限。USB Fastboot 需要另行安装 `fastboo
 - 检测到新版本时直接点击屏幕上的 **「更新」** 按钮，确认后碟机将自动进入原厂刷机进度条界面完成下载与升级。
 - **二代机**（SC LIVE 4 / 2、PRIME 4+、PRIME GO+、Mixstream Pro+ / Pro Go、PRIME 4 G2、SYSTEM ONE）首次装好 `/data` 数据包后，之后的新版本（如 `5.3.0.4`）同样在 **设置 → 关于 / 更新** 里一键完成：碟机下载对应的 `Data-Bundle.tar.gz`，校验 `SHA256SUMS`，一次性替换文件并重启 EngineX 服务，不会改动系统分区（#86）。
 
-### 选配：用电脑为碟机加速 Stems 分轨
-当电脑与碟机处于同一 Wi-Fi / 局域网时，在电脑上运行以下命令，碟机即可自动发现电脑并调用电脑显卡进行高速 AI 分轨（无需在碟机上输入 IP 或密码）：
+### 选配：用电脑开启高音质神经网络 Stems 分轨
+碟机本机分轨为基础频谱模式。如需高音质神经网络分轨（默认自动安装并启用 `htdemucs`，支持显卡 / Apple MPS / CPU），在与碟机同一 Wi-Fi / 局域网的电脑上解压 `EngineX-Installer`，运行以下一条命令即可（源码仓库下对应 `tools/stems/`；末尾加 `hpss` 可改用轻量频谱模式）。碟机会通过局域网自动发现电脑（UDP 17891 / mDNS，无需输入 IP 或密码），并在 **配置 → 曲库** 与 **设置 → 关于 / 更新** 显示 `高音质分轨：<主机名> (htdemucs)`：
 ```sh
-# macOS / Linux
-tools/stems/run-home-worker.sh
+# macOS / Linux（在解压后的 EngineX-Installer 目录；源码下为 tools/stems/run-home-worker.sh）
+./stems/run-home-worker.sh
 
-# Windows (PowerShell)
-powershell -ExecutionPolicy Bypass -File tools\stems\run-home-worker.ps1 demucs
+# Windows PowerShell（在解压后的 EngineX-Installer 目录；源码下为 tools\stems\run-home-worker.ps1）
+powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1
 ```
 
 ### 流媒体登录：只有碟机也能用
