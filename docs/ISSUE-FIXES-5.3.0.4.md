@@ -8,7 +8,7 @@
   - **8 款一代机完整固件（`*-Update.img`）**：`SC5000`（JP07）、`SC5000M`（JP08）、`PRIME GO`（JP11）、`SC6000`（JP13）、`SC6000M`（JP14）、`PRIME 4`（JC11）、`PRIME 2`（JC16）、`Mixstream Pro`（NH08）
   - **8 款二代机 `/data` 数据包（`*-Data-Bundle.tar.gz`，Beta）**：`SC LIVE 4`（JP21）、`SC LIVE 2`（JP20）、`PRIME 4+`（JC11S）、`PRIME GO+`（JP11S）、`Mixstream Pro+`（NH08S）、`Mixstream Pro Go`（NH10）、`PRIME 4 G2`（JP24，64-bit AZ04）、`Rane SYSTEM ONE`（RMZ2，64-bit AZ04）
   - **4 平台桌面一键安装器（`EngineX-Installer-5.3.0.4-*`）**：Windows 10/11 x64（`.zip`）、macOS Apple Silicon M1–M4（`.zip`）、macOS Intel（`.zip`）、Linux x86_64（`.tar.gz`）
-- **在线文档与着陆页**：`docs/index.html` + `docs/site/{content.js,mods.js,app.js,style.css}`（简中 / 繁中 / English 三语文档站，移除发布功能的 `tone: "new"` 标记，递增静态缓存参数至 `?v=15`，并在编译机基于 `QT_QPA_PLATFORM=eglfs` 与 `chromium-headless-shell` 重拍 13 张三语与官网截图）
+- **在线文档与着陆页**：`docs/index.html` + `docs/site/{content.js,mods.js,app.js,style.css}`（简中 / 繁中 / English 三语文档站，移除发布功能的 `tone: "new"` 标记，递增静态缓存参数至 `?v=15`，并在原生 ARM64/armhf 构建环境基于 `QT_QPA_PLATFORM=eglfs` 与 `chromium-headless-shell` 重拍 13 张三语与官网截图）
 
 ---
 
@@ -35,18 +35,36 @@
 | **详细日志与脱敏下载** | `pkg/webui/logs.go`<br>`pkg/webui/ui_settings.go`<br>`pkg/webui/index.html`<br>`rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf` | **原因**：现场用户遇到问题时不便开启 SSH 抓日志，且全量 `*.debug=true` 会产生海量 Qt 内部渲染日志。<br>**修法**：为一代与二代 Engine 服务配置 `QT_LOGGING_CONF=/data/logging.ini`；Web 控制台新增 `详细日志` 开关（开启时原子写入 `*.debug=true` + `qt.*.debug=false` 并重启 Engine，关闭时删除文件）与 `下载日志` 按钮（导出最近 30 分钟、最多 5,000 条 / 2 MiB 的已脱敏纯文本日志，自动遮盖令牌、ARL、密码、Cookie、签名 URL 与本机访问码）。 | `go test -race ./pkg/webui/...`（`logs_test.go`）、`test_rootfs_overlay.sh`、armhf 与 AZ04 沙箱实测 |
 | **流媒体缓存隔离、Beatport 冷缓存与性能调优** | `pkg/providers/`<br>`pkg/deemixclient/`<br>`pkg/webui/`<br>`rootfs-overlay/usr/local/bin/sc5000-perf-tune`<br>`tools/ui-mod/build_packs.py` | **原因**：① 跨平台同名曲目缓存需按音源隔离，Beatport 冷缓存下无损升级需保持命中；② 搜索并发过高或后台自动批量分析会争抢线程，QML 2 轨启动时 `scGcCheck` 在 Deck 1 未就绪前访问空属性，且 `sc5000-perf-tune` 30 秒轮询每个线程 fork 子进程带来偶发帧延迟。<br>**修法**：① 独立各平台下载缓存命名空间（网易云「Deemix 优先」与 Deezer 共享无损缓存），修复 Beatport 冷缓存无损升级，并在 `stream-sync` 已监听 6595 时让 `deemixd` 以状态码 `0` 退出；② 限制并发搜索工作线程、挂起不安全的自动批量盘分析、修复 `scGcCheck` 等待 Deck 1 构建完成并加空属性保护、将 `sc5000-perf-tune` 改为纯 shell 零 fork 扫描。 | `go test -race ./...`、`test_rootfs_overlay.sh`、`test_ui_mod.py` |
 
-> **范围说明**：`#162`（Beat FX 毫秒模式切换）、`#172`（高频滚降补偿）、`#181`（CDJ 风格变速推子软接管解锁）以及 `#168` 的按拍精确同步推迟至 `5.3.0.5`，本次不列入新功能；`#179` 因不合规（未经同意转移数据）已拒绝，不列入。
+> **范围说明**：`#162`（Beat FX 毫秒模式切换）、`#172`（高频滚降补偿）、`#181`（CDJ 风格变速推子软接管解锁）、`#168` 的按拍精确同步，以及原厂 `Sync` 要求超过 `+100%` 变速时影子副本卡在 `+100%` 的跨倍速扩展推迟至 `5.3.0.5`，本次不列入新功能；`#179` 因不合规（未经同意转移数据）已拒绝，不列入。
 
 ---
 
 ## 2. 实机验收、沙箱录像与待实机验证项目清单
 
-- **双 SC5000 实机验收（基于 `24bb83b` 双机 A1–A11）**：
+- **正式 RC `5038e5b` 双 SC5000 实机冒烟（R1–R7 全部 PASS）**：
+  - **R1（镜像与内建 Hook 核验）**：两台 SC5000 刷入正式 RC 镜像（SHA-256 `5af20f62b4a735dbe68c46a77aebd795dbeefa44c060eb3522cdf51eaedc49d4`），根分区只读，无热挂载，镜像内两份 `libengine-ui-hook.so` SHA-256 均为 `daf0b82d78a0836901c13ff362bc2afdde14b3b20715c0079603832da147e5a3`；About 显示 `EngineX OS 5.3.0.4`，SSH、`Engine`、`stream-sync` 均正常（**PASS**）；
+  - **R2（双向四轨）**：`L1/L3` 与 `R2/R4` 源轨与对端副本全部载入并播放，原厂 `Engine` 波形滚动，曲目长度、标题及歌手一致（**PASS**）；
+  - **R3（常规 +3% Sync 漂移）**：四槽连续采样约 `99 s`，`LEAD` / `SYNC` 状态正确，绝对漂移 `p95 30.5–36.7 ms`（首尾中位差最大 `8.2 ms`，`0` 新增 seek，**PASS**）；
+  - **R4（MASTER 暂停与卸载）**：`L1/R2/L3/R4` 共 `10` 次（`6` 次暂停、`4` 次播放中卸载），影子副本抢 `MASTER` `0/10` 次、旧夺回 `0/10` 次（**PASS**）；
+  - **R5（`Hide Title/Artist`）**：本机和影子 header 开启时歌名与歌手均为空，关闭后恢复原值（**PASS**）；
+  - **R6（流媒体原厂 `LOAD`）**：使用原厂 `LOAD` 播放 Deezer 前进 `+9.95 s`、SoundCloud 前进 `+9.42 s`（**PASS**）；
+  - **R7（空闲后起播与 GC 间隔）**：起播 `86.8 ms`，空闲 GC 间隔 `232.3 s`（约 `232 s`，**PASS**）。
+- **前序双 SC5000 实机全项验收（基于 `24bb83b` 双机 A1–A11）**：
   - **A1–A6、A8–A10**：**PASS**（其中 A8 流媒体载入 `LN109299` 已查明为验收脚本绕过原厂 `LOAD` 直接调底层接口所致，按原厂加载路径复测 **PASS**）；
-  - **A11**：由 `f6b87f8` 修复（四轨模式下 `20/20` 补丁生效，排除本机静音影子槽参与 `MASTER` 选举）；
+  - **A11**：由 `f6b87f8` 修复（四轨模式下 `20/20` 补丁生效，排除本机静音影子槽参与 `MASTER` 选举，并由正式 RC `R4` `0/10` 冒烟确认）；
   - **A7（实体按键灯亮度与单色按键透传）**：待维护者目测确认。
-- **双机沙箱录像验收（`shadow-twin` S1–S8）**：**S1–S8 全部 PASS**。
-- **尚未在对应其他型号物理实机完成人工验收的项目**（均已在编译机通过单元/竞态测试、二进制 hook 校验、`shadow-twin` 双机仿真、eglfs KMS 渲染或三组 `release-gate.sh` 门禁）：
+- **已知限制（推迟至 `5.3.0.5`）**：
+  - 当 `Sync` 需要超过 `+100%` 变速时（如 `71 BPM` 同步到 `144.2 BPM`），影子副本速度卡在 `+100%` 上限（实际约 `142.0 BPM`），偏差 `p95 126 ms`（`126.4 ms`）。
+- **双机沙箱正式版录像验收（`shadow-twin` `fa697d4` / RC `5038e5b`，S1–S8 全部 PASS）**：
+  - **S1（`s1-four-deck-shadow-fa697d4.mp4`，`25.1s`）**：A 机 Deck 1 载入播放，B 机影子 Deck 1 波形、顶栏（歌名、BPM、调性、时间）与缩略条同原厂同步一致（**PASS**）；
+  - **S2（`s2-pitch-sync-bar-align-fa697d4.mp4`，`25.0s`）**：变速 `+3%` 后 `Sync`，`LEAD/SYNC` 指示正确，四条 lane 小节红线纵向逐像素对齐同步滚动（**PASS**）；
+  - **S3（`s3-auto-mode-engine-and-cdj-fa697d4.mp4`，`30.6s`）**：`Auto` 模式 Engine 路径顶栏 `LEAD` 同步显示，CDJ 来源走 `display-only` 原厂样式顶栏 + `REMOTE` 缩略条 + 槽内回退提示（**PASS**）；
+  - **S4（`s4-hotcue-overview-timeflip-fa697d4.mp4`，`25.4s`）**：原厂样式 Hot Cue 上下三角与黑底白字标签、缩略条底部 cue 图标，点击时间区双向切换 Elapsed/Remaining 且 `timeBar` 同步翻转（**PASS**）；
+  - **S5（`s5-hide-title-display-filename-fa697d4.mp4`，`25.6s`）**：开启 `Hide Title/Artist` 时全部 8 个本机与影子顶栏均隐藏标题与歌手为空，关闭后正常切换标题与文件名（**PASS**）；
+  - **S6（`s6-decktabs-layer-switch-fa697d4.mp4`，`25.4s`）**：曲库底部 `DeckTabs` 切换 Layer A/B 时仅当前操控层蓝/绿亮起，非当前本机层熄灭，阴影槽保持 `greyOut`（**PASS**）；
+  - **S7（`s7-track-end-warning-fa697d4.mp4`，`25.3s`）**：曲目剩余 `<= 30s` 时本机与阴影缩略条同步闪烁红光告警（**PASS**）；
+  - **S8（`s8-continuous-play-2min-nodrift-fa697d4.mp4`，`120.6s`）**：四轨连续播放满 120 秒，A/B 两机本机槽与对端影子槽白色播放头及小节红线全程紧锁零漂移（**PASS**）。
+- **尚未在对应其他型号物理实机完成人工验收的项目**（均已在原生 ARM64/armhf 环境通过单元/竞态测试、二进制 hook 校验、`shadow-twin` 双机仿真、eglfs KMS 渲染或三组 `release-gate.sh` 门禁）：
   1. **实体按键灯分级调光（A7 / #85）**：待维护者在真机上目测确认 RGB 彩灯调光与单色按键透传。
   2. **SC LIVE 4 AUX 路由至通道 3/4（#171）**：已在 JP21 沙箱（含 null PCM 与硬件 fixture）验证，待 SC LIVE 4 真机低音量核验通道 CUE、EQ、Sweep FX 与 MIC2。
   3. **PRIME 4 原生 FX 选择器 PX 效果与独立 Time/Rate（#168）**：已在 JC11 沙箱与原生 C 单测验证，待 PRIME 4（JC11）真机核验旋钮/按键手感与实时音频过渡。
@@ -62,7 +80,7 @@
 
 ## 3. 全套测试与三组发版门禁结果（RC（待维护者确认发布））
 
-- **全量自动化测试（编译机原生 ARM64/armhf，基于提交 `5038e5b`）**：
+- **全量自动化测试（原生 ARM64/armhf，基于提交 `5038e5b`）**：
   - Go 静态检查与竞态单测：`gofmt -l .`（0 差异）、`go vet ./...`（PASS）、`go test -race ./...`（22 个有测试的 Go 包全部 PASS）；
   - 系统 overlay 测试：`bash tests/test_rootfs_overlay.sh` → `PASS: 21 tests (mocked storage and hardware; no privileged operations)`（含仓库提交的两份 32-bit `libengine-ui-hook.so` 与 `libedisksd-hook.so` 同源码现编结果逐字节一致校验）；
   - 二代机沙箱验收：
