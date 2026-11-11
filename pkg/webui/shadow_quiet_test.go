@@ -801,3 +801,44 @@ func TestShadowIdleReplyKeepsActiveSnapshots(t *testing.T) {
 		t.Fatalf("active play and drift state must reach QML: %+v", v)
 	}
 }
+
+// #201: Shadow Deck Mode switches live. A long poll held in All CDJ Mode answers
+// as soon as the mode changes, and the answer (displayOnly, headers) is in the
+// new mode, not the one read before the wait.
+func TestShadowLongPollFollowsALiveModeSwitch(t *testing.T) {
+	old := shadowQuietPoll
+	shadowQuietPoll = 3 * time.Second
+	defer func() { shadowQuietPoll = old }()
+	s := New(Config{UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	oldRole := fourDeckRolePath
+	fourDeckRolePath = filepath.Join(t.TempDir(), "role")
+	defer func() { fourDeckRolePath = oldRole }()
+	os.WriteFile(fourDeckRolePath, []byte("13"), 0600)
+	uiPost(t, srv.URL, "fourDeckWaveform=1&shadowMode=cdj")
+	s.shadow.mu.Lock()
+	s.shadow.takePeer("192.0.2.7", []deckState{{Deck: 2, Key: "a", Playing: true, PositionMS: 1000, Seq: 1}}, time.Now())
+	ver := s.shadow.ver
+	s.shadow.mu.Unlock()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		uiPost(t, srv.URL, "shadowMode=engine")
+	}()
+	start := time.Now()
+	r, err := http.Get(fmt.Sprintf("%s/v1/sc5000/shadow?ver=%d", srv.URL, ver))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Body.Close()
+	took := time.Since(start)
+	var body struct {
+		DisplayOnly bool `json:"displayOnly"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if took > 1500*time.Millisecond || body.DisplayOnly || r.Header.Get("X-Shadow-State") != "" {
+		t.Fatalf("mode switch during a held poll: answered after %v, displayOnly=%v, X-Shadow-State=%q", took, body.DisplayOnly, r.Header.Get("X-Shadow-State"))
+	}
+}

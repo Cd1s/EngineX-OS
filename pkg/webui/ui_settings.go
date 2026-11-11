@@ -457,6 +457,9 @@ func (s *Server) loadUI() uiSettings {
 		}
 		v.Sources, _ = parseUISources(strings.Join(v.Sources, ",")) // fixed order
 	}
+	if !v.FourDeckWaveform {
+		v.PairedView = false // #201: the paired view is a view of the 4-deck layout; a stray key alone is not it
+	}
 	v.SafeMode = bootMarker(s.uiDir(), "safe-mode")
 	return v
 }
@@ -750,6 +753,7 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.uiMu.Lock()
 	v := s.loadUI()
+	prevShadowMode := v.ShadowMode
 	bad := func(field, val string, allowed []string) bool {
 		return q.Has(field) && !slices.Contains(allowed, val)
 	}
@@ -1053,6 +1057,13 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fail(w, 500, err)
 		return
+	}
+	if v.ShadowMode != prevShadowMode {
+		// Shadow Deck Mode switches live (#201): answer the held shadow long poll
+		// now, in the new mode, instead of after its wait.
+		s.shadow.mu.Lock()
+		s.shadow.bump()
+		s.shadow.mu.Unlock()
 	}
 	if hasBroadcast {
 		if err := s.SetBroadcastEnabled(bcastOn); err != nil {

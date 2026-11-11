@@ -694,7 +694,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
                  "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack",
-                 "scLayerPath", "scPairedLanes", "scPairedFollow")
+                 "scLayerPath", "scPairedLanes", "scPairedFollow", "scShadowHeldBy", "scShadowEngineHeld")
         functions = []
         for name in names:
             start = re.search(r"(?m)^\tfunction " + name + r"\([^\n]*\) \{", bp.SERVICES_MAIN)
@@ -881,6 +881,73 @@ scShadowApplyAll([{deck: 2, path: '/peer2.flac'}, {deck: 4, path: '/cdj.flac', l
 assert.equal(scShadowEngineMask, 30); assert.equal(scShadowLineMask, 1 << 4); assert.equal(scShadowData(4), null);
 scShadowApplyAll([cdj(4)], true);
 assert.equal(scShadowEngineMask, 0); assert.equal(scShadowLineMask, 0);
+""")
+
+    def test_shadow_deck_mode_switches_live_201(self):
+        # Maintainer request (#201): Shadow Deck Mode no longer restarts Engine. stream-sync
+        # reads the mode per request; the QML follows. Switched to All CDJ Mode while Engine
+        # holds a shadow track it loaded, that track is stopped and unloaded (once), the
+        # display renderer takes the slot, and nothing else touches Engine afterwards.
+        e = bp.FOUR_DECK_ENTRIES
+        start = e.index("id: scShadowModeEntry")
+        entry = e[start:e.index("\n\t\t},", start)]
+        self.assertIn('root.scCall("shadowMode=" + ids[index])', entry)
+        self.assertNotIn("scRestartCall", entry)
+        # An unchanged display reply is applied again while Engine still holds a shadow track.
+        self.assertIn("version === root.scShadowResponseVersion && !root.scShadowEngineHeld()", bp.SERVICES_MAIN)
+        self.js(r"""
+const writes = [], lookups = [], props = {};
+globalThis.scTr = p => { lookups.push(p); return props[p] || (props[p] = {string: 'Off', set state(v) { writes.push(p + '=' + v); }, get state() { return p === '/Engine/Deck2/Play' || p === '/Engine/Deck2/Track/SongLoaded' ? true : undefined; }, set url(v) { writes.push(p + '=' + v); }}); };
+globalThis.scPressTimer = {restart() {}};
+// Auto / All Engine Mode: Engine holds the peer's track on Deck 2.
+scShadowApplyAll([{deck: 2, path: '/peer.flac', playing: true}], false);
+assert.deepEqual(writes, ['/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer.flac']);
+scShadowAt[2].ready = true;
+assert.equal(scShadowEngineHeld(), true); assert.equal(scShadowHeldBy(1), false); // this unit's own deck is never a shadow
+// Live switch to All CDJ Mode: the slot is stopped at once, the display draws it.
+scShadowApplyAll([{deck: 2, key: 'cdj:x', title: 'CDJ', playing: true, at: now, positionMs: 500}], true);
+assert.equal(scShadowDisplayOnly, true); assert.equal(scShadowEngineMask, 0);
+assert.deepEqual(writes.slice(1), ['/Engine/Deck2/Play=false']);
+assert.equal(scShadowData(2).title, 'CDJ');
+// The next (unchanged) reply after the debounce unloads it.
+now += 400;
+scShadowApplyAll([{deck: 2, key: 'cdj:x', title: 'CDJ', playing: true, at: now, positionMs: 500}], true);
+assert.deepEqual(writes.slice(2).filter(w => w.indexOf('Unload') >= 0), ['/Engine/Deck2/Unload=true', '/Engine/Deck2/Track/Unload=true']);
+assert.equal(scShadowAt[2], undefined); assert.equal(scShadowEngineHeld(), false);
+// From then on All CDJ Mode stays display-only: no Engine reads or writes.
+const n = writes.length, m = lookups.length;
+now += 400;
+scShadowApplyAll([{deck: 2, key: 'cdj:x', title: 'CDJ', playing: true, at: now, positionMs: 500}], true);
+assert.equal(writes.length, n); assert.equal(lookups.length, m);
+// And back to Auto: Engine loads the peer's track again.
+scShadowApplyAll([{deck: 2, path: '/peer.flac', playing: true}], false);
+assert.equal(writes[n], '/Client/Librarian/AddToDatabaseAndLoadToDeck2=file:///peer.flac');
+""")
+
+    def test_live_cdj_switch_drops_cover_meta_and_unsyncs_201(self):
+        # Review of 27e31e9: after a live switch to All CDJ Mode the slot leaves the cover of
+        # an Engine load (header-only meta, detail: false). The display must start over (no
+        # inherited meta, request or cached reply text), else the lane keeps the stretched
+        # overview for good. And the UnSync of the slot being unloaded must reach Engine
+        # although the display now draws that slot.
+        self.js(r"""
+const writes = [], props = {};
+globalThis.scTr = p => props[p] || (props[p] = {string: p === '/Engine/Deck2/SyncMode' ? 'On' : 'Off', set state(v) { writes.push(p + '=' + v); }, get state() { return p === '/Engine/Deck2/Play' || p === '/Engine/Deck2/Track/SongLoaded' ? true : undefined; }, set url(v) { writes.push(p + '=' + v); }});
+globalThis.scPressTimer = {restart() {}};
+const coverMeta = {detail: false, header: true};
+scShadowDisplay = {2: {key: 'peer:a', engine: true, meta: coverMeta, title: 'A'}};
+const coverRequest = scShadowDisplayRequests[2] = {key: 'peer:a', busy: false, started: 0, next: 0, tries: 1};
+scShadowDisplayText[2] = {key: 'peer:a', text: '{"detail":false}'};
+scShadowAt[2] = {path: '/peer.flac', id: 'peer:a', ready: true};
+scShadowApplyAll([{deck: 2, key: 'peer:a', title: 'A', playing: true, at: now, positionMs: 500}], true);
+assert.equal(scShadowData(2).engine, false);
+assert.equal(scShadowData(2).meta, null); // not the cover's header-only meta
+assert.equal(scShadowDisplayText[2], undefined);
+assert.notStrictEqual(scShadowDisplayRequests[2], coverRequest); // a fresh fetch, not the cover's
+now += 400; // the unload after the debounce: its UnSync goes through although the display draws the slot
+scShadowApplyAll([{deck: 2, key: 'peer:a', title: 'A', playing: true, at: now, positionMs: 500}], true);
+assert(writes.indexOf('/Engine/Deck2/Unload=true') >= 0, JSON.stringify(writes));
+assert(scPressQueue.some(e => e.path === '/Engine/Deck2/UnSync'), JSON.stringify(scPressQueue));
 """)
 
     def test_legacy_helpers_and_remote_presses_are_inert_in_display_mode(self):
@@ -1476,11 +1543,103 @@ tick(2000); assert.equal(bodies.length,2,'no layer change: pings only');
 layer=0; tick(40); assert.equal(bodies.length,3); assert.equal(bodies[2][0].active,true);
 """)
 
+    def test_entering_paired_player_forces_the_next_shadow_apply_201(self):
+        # Review of 27e31e9: Linked View 4 Decks -> Paired Player (live) must show lane 2 /
+        # "No paired player" at once, also when the peer is unchanged in All CDJ Mode or
+        # the poll is idle: the next /shadow answer goes through scShadowApplyAll.
+        line = next(l for l in bp.SERVICES_MAIN.splitlines() if l.lstrip().startswith("onScPairedOnChanged:"))
+        body = line.split(":", 1)[1]
+        self.assertIn('/v1/sc5000/shadow?ver=" + scShadowVer + (scShadowIdle ? "&idle=1" : "")', Path(bp.__file__).read_text(encoding="utf-8"))
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        script = f"""
+const assert = require('assert');
+function run(on) {{
+  const o = {{ scPairedOn: on, scPairedDirty: false, scPairedEmpty: 3, scShadowIdle: true, scShadowResponseVersion: '7:true:13:false:false:ab', scShadowVer: 7 }};
+  with (o) {body}
+  return o;
+}}
+const on = run(true);
+assert.equal(on.scShadowIdle, false); assert.equal(on.scShadowResponseVersion, ''); assert.equal(on.scShadowVer, 0); assert.equal(on.scPairedDirty, true);
+const off = run(false);
+assert.equal(off.scPairedEmpty, 0); assert.equal(off.scShadowIdle, true); assert.equal(off.scShadowVer, 7);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        # "Paired Player" does not fit the stock 136 entry width.
+        e = bp.FOUR_DECK_ENTRIES
+        start = e.index("id: scLinkedViewEntry")
+        self.assertIn("entryWidth: 176", e[start:e.index("\n\t\t},", start)])
+
+    def test_linked_view_selector_returns_to_stock_201(self):
+        # Maintainer report: with Paired Player on there was no visible way back to the
+        # stock view (that was a second switch, 4-Deck Waveform). One selector now holds
+        # Stock / Paired Player / 4 Decks, and Stock always turns the 4-deck layout off.
+        e = bp.FOUR_DECK_ENTRIES
+        self.assertNotIn('text: "4-Deck Waveform"', e)
+        self.assertEqual(e.count('text: "Paired Player"'), 0)
+        self.assertEqual(e.count('text: "Linked View"'), 1)
+        self.assertNotIn("Waveform View", e)
+        # Under Stock a player gets one grey line on its own single / dual layer switches.
+        hint = re.search(r"@HEADLINE@ \{ // Stock on a player.*?\n\t\t\},", e, re.S).group(0)
+        self.assertIn("visible: root.scIsPlayerBoard && scLinkedViewEntry.at === 0", hint)
+        self.assertIn('text: "Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout"', hint)
+        at = re.search(r"readonly property int at: (.*)\n", e).group(1)
+        values = re.search(r"\n\t\t\tvalues: (root\.scIsPlayerBoard \?.*)\n", e).group(1)
+        body = re.search(r"onSelected: function\(index\) \{\n(.*?)\n\t\t\t\}", e, re.S).group(1)
+        rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        for en in ("Linked View", "Stock", "Paired Player", "4 Decks", "Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout"):
+            self.assertEqual(len(rows.get(en, [])), 2, en)
+        self.assertEqual(rows["Linked View"], ["联机视图", "聯機視圖"])
+        self.assertEqual(rows["Stock"], ["原厂", "原廠"])
+        # The hint names the stock menu with the stock labels of each language.
+        for i, (layout, perf, deck, single) in enumerate(zip(rows["Layout"], rows["PERFORMANCE LAYOUT"], rows["Deck Layout"], rows["Single"])):
+            line = rows["Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout"][i]
+            self.assertIn(f"{layout} > {perf} > {deck}", line)
+            self.assertTrue(line.startswith(single), line)
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        script = f"""
+const assert = require('assert');
+function run(player, fourDeck, paired, index) {{
+  const calls = [];
+  const root = {{ scIsPlayerBoard: player, scFourDeckOn: fourDeck, scPairedSetting: paired,
+    scRestartCall: q => calls.push('restart ' + q), scCall: q => calls.push('call ' + q) }};
+  const values = {values};
+  const at = {at};
+  if (index !== undefined) (function(index) {{
+{body}
+  }})(index);
+  return {{ shown: values[at], values, calls }};
+}}
+// Standalone player: three modes.
+assert.deepStrictEqual(run(true, false, false).values, ['Stock', 'Paired Player', '4 Decks']);
+assert.strictEqual(run(true, false, false).shown, 'Stock');
+assert.strictEqual(run(true, true, true).shown, 'Paired Player');
+assert.strictEqual(run(true, true, false).shown, '4 Decks');
+// The bug: from Paired Player (or 4 Decks) back to stock in one step, Engine restarts.
+assert.deepStrictEqual(run(true, true, true, 0).calls, ['restart fourDeckWaveform=0']);
+assert.deepStrictEqual(run(true, true, false, 0).calls, ['restart fourDeckWaveform=0']);
+// From stock into either mode is a restart; between the two 4-deck-layout modes it is not.
+assert.deepStrictEqual(run(true, false, false, 1).calls, ['restart pairedView=1']);
+assert.deepStrictEqual(run(true, false, false, 2).calls, ['restart fourDeckWaveform=1']);
+assert.deepStrictEqual(run(true, true, true, 2).calls, ['call pairedView=0']);
+assert.deepStrictEqual(run(true, true, false, 1).calls, ['call pairedView=1']);
+// Re-selecting the shown mode does nothing.
+assert.deepStrictEqual(run(true, true, true, 1).calls, []);
+assert.deepStrictEqual(run(true, false, false, 0).calls, []);
+// All-in-one with 4 decks: no Paired Player, a stale paired flag is ignored.
+assert.deepStrictEqual(run(false, true, true).values, ['Stock', '4 Decks']);
+assert.strictEqual(run(false, true, true).shown, '4 Decks');
+assert.deepStrictEqual(run(false, true, false, 0).calls, ['restart fourDeckWaveform=0']);
+assert.deepStrictEqual(run(false, false, false, 1).calls, ['restart fourDeckWaveform=1']);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
     def test_paired_player_entry_and_lane_order_201(self):
-        self.assertIn('text: "Paired Player"', bp.FOUR_DECK_ENTRIES)
+        self.assertIn('values: root.scIsPlayerBoard ? ["Stock", "Paired Player", "4 Decks"] : ["Stock", "4 Decks"]', bp.FOUR_DECK_ENTRIES)
         self.assertIn("visible: root.scIsPlayerBoard", bp.FOUR_DECK_ENTRIES)
-        self.assertIn('root.scRestartCall("pairedView=1")', bp.FOUR_DECK_ENTRIES)
-        self.assertIn('root.scCall("pairedView=" + index)', bp.FOUR_DECK_ENTRIES)
         self.assertIn("scPairedSetting = !!v.fourDeckWaveform && !!v.pairedView", bp.SERVICES_MAIN)
         self.assertIn("if (scPairedOn) scPairedFollow(decks)", bp.SERVICES_MAIN)
         # Both hint lines go through translate(): no comparison on their text line.

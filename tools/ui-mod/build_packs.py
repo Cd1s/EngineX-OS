@@ -469,7 +469,9 @@ SERVICES_MAIN = """
 	readonly property bool scPairedSwap: scPairedOn && (scFourDeckRole === "24" || scFourDeckRole === "2")
 	property int scPairedEmpty: 0 // lane 2's deck while no other player is there: the lane says so
 	property bool scPairedDirty: false
-	onScPairedOnChanged: { scPairedDirty = true; if (!scPairedOn) scPairedEmpty = 0 }
+	// Entering Paired Player (live from 4 Decks): the next /shadow answer goes through scShadowApplyAll even when
+	// the peer did not change (an idle or All CDJ Mode reply is otherwise skipped), so lane 2 and "No paired player" show at once.
+	onScPairedOnChanged: { scPairedDirty = true; if (!scPairedOn) scPairedEmpty = 0; else { scShadowIdle = false; scShadowResponseVersion = ""; scShadowVer = 0 } }
 	property int scShadowActiveDeck: 0 // this unit's deck on its active layer, as last posted
 	function scLayerPath(role) { return role === "24" || role === "2" ? "/GUI/Decks/DeckRight/Layer" : "/GUI/Decks/DeckLeft/Layer" }
 	// role: this unit's 4-deck role; layer: its own side's Layer (0 A, 1 B); decks: the
@@ -759,6 +761,10 @@ SERVICES_MAIN = """
 					continue
 				}
 			}
+			// From the cover of an Engine load (header only, detail: false) to the display renderer, as on a
+			// live switch to All CDJ Mode: start over, or the lane keeps the stretched overview for good.
+			const fromCover = !!old && old.engine && !e.engine
+			if (fromCover) { delete scShadowDisplayRequests[d]; delete scShadowDisplayText[d] }
 			const sample = {key: key, name: e.name || "", title: e.title || "", artist: e.artist || "", keyName: e.keyName || "",
 				playing: !!e.playing, stale: !!e.stale, metadataOnly: !!e.metadataOnly, positionMs: pos, at: at,
 				pitch: Number(e.pitch) || 0, rate: Number(e.rate) || 0, lineIn: isLine,
@@ -768,7 +774,7 @@ SERVICES_MAIN = """
 				jumps: Number(e.jumps) || 0,
 				progress: Number(e.progress) || 0, error: e.error || "", engine: !!e.engine, copying: !!e.copying, durationMs: Number(e.durationMs) || 0,
 				fallback: e.fallback || "",
-				meta: old && old.key === key ? old.meta : null,
+				meta: old && old.key === key && !fromCover ? old.meta : null,
 				liveCues: Array.isArray(e.cues) ? (same ? old.liveCues : e.cues) : old && old.key === key ? old.liveCues : null}
 			if (!next) next = Object.assign({}, scShadowDisplay)
 			next[d] = sample
@@ -1134,10 +1140,12 @@ SERVICES_MAIN = """
 	// apart. /Engine/DeckN/Play is not one of them: it is the play state itself
 	// (true plays, false pauses), so it is written, not pressed.
 	property var scPressQueue: []
-	function scPress(path) {
+	// unload: a press for a shadow slot Engine still holds while it is being unloaded (its source or Shadow
+	// Deck Mode moved it to the display renderer): it goes through although the display now draws the slot.
+	function scPress(path, unload) {
 		const remote = /^[/]Engine[/]Deck([1-4])[/]/.exec(path)
-		if (remote && ((scShadowEngineMask >> Number(remote[1])) & 1) === 0 && scShadowVisible(Number(remote[1]))) return
-		scPressQueue = scPressQueue.concat([{path: path, step: 0}])
+		if (!unload && remote && ((scShadowEngineMask >> Number(remote[1])) & 1) === 0 && scShadowVisible(Number(remote[1]))) return
+		scPressQueue = scPressQueue.concat([{path: path, step: 0, unload: !!unload}])
 		scPressTimer.restart()
 	}
 	Timer {
@@ -1147,11 +1155,11 @@ SERVICES_MAIN = """
 			const next = []
 			for (const e of root.scPressQueue) {
 				const remote = /^[/]Engine[/]Deck([1-4])[/]/.exec(e.path)
-				if (remote && ((root.scShadowEngineMask >> Number(remote[1])) & 1) === 0 && root.scShadowVisible(Number(remote[1]))) continue
+				if (!e.unload && remote && ((root.scShadowEngineMask >> Number(remote[1])) & 1) === 0 && root.scShadowVisible(Number(remote[1]))) continue
 				const t = root.scTr(e.path)
 				if (!t) continue
 				t.state = e.step === 1
-				if (e.step < 2) next.push({path: e.path, step: e.step + 1})
+				if (e.step < 2) next.push({path: e.path, step: e.step + 1, unload: e.unload})
 			}
 			root.scPressQueue = next
 			if (next.length) restart()
@@ -1496,7 +1504,7 @@ SERVICES_MAIN = """
 					if (x.status === 200) {
 						const version = x.getResponseHeader("X-Shadow-State") || ""
 						root.scShadowLive.seen = Date.now()
-						if (root.scShadowDisplayOnly && version && version === root.scShadowResponseVersion) {
+						if (root.scShadowDisplayOnly && version && version === root.scShadowResponseVersion && !root.scShadowEngineHeld()) {
 							scShadowPollTimer.interval = 60; scShadowPollTimer.restart(); return
 						}
 						const unchanged = x.getResponseHeader("X-Shadow-Unchanged") === "1"
@@ -1567,6 +1575,9 @@ SERVICES_MAIN = """
 	// stock header items (BpmInfo, JP07SyncIndicator, ArtistSong, KeyInfo) read the source's here. Display only.
 	property var scShadowHead: ({})
 	function scShadowHeadOf(d) { return scShadowHead[d] || scShadowEmptyObject }
+	// A shadow slot holding a track Engine loaded for it (not one of this unit's own decks).
+	function scShadowHeldBy(d) { return scFourDeckRole.indexOf(String(d)) < 0 && !!scShadowAt[d] && !!scShadowAt[d].path }
+	function scShadowEngineHeld() { return scShadowHeldBy(1) || scShadowHeldBy(2) || scShadowHeldBy(3) || scShadowHeldBy(4) }
 	function scShadowApplyAll(decks, displayOnly) {
 		scShadowDisplayOnly = displayOnly !== false
 		if (scPairedOn) scPairedFollow(decks) // a GUI layer, no deck: every path
@@ -1585,7 +1596,12 @@ SERVICES_MAIN = """
 		for (const e of decks) { if (e.shadowMaster && !e.stale) peerLead = e.shadowMaster; if (e.playing && !e.cue && !e.stale) peerPlaying = true }
 		scShadowPeerLead = peerLead; scShadowPeerPlaying = peerPlaying
 		if (scShadowDisplayOnly) {
-			// No Planck reads/writes or legacy helpers here, even when path is empty.
+			// No Planck reads/writes or legacy helpers here, even when path is empty. The one
+			// exception: Shadow Deck Mode switched live to All CDJ Mode while Engine still holds a
+			// shadow track it loaded: that track goes, as when its source turns into a CDJ.
+			// The poll keeps applying unchanged replies until it is gone (scShadowEngineHeld).
+			const now = Date.now()
+			for (const d of [1, 2, 3, 4]) if (scShadowHeldBy(d)) root.scShadowEmpty(d, now)
 			scShadowCdjMaster = false // display flags must never suppress the real network master
 			scShadowLineMask = 0
 			scShadowEngineMask = 0
@@ -1628,7 +1644,7 @@ SERVICES_MAIN = """
 	// so no stale track or waveform stays, handing master back to our own deck.
 	function scShadowEmpty(d, now) {
 		// A display slot is Engine's business only while our own load is still on it.
-		if (scShadowDisplayOnly || (((scShadowEngineMask >> d) & 1) === 0 && !(scShadowAt[d] && scShadowAt[d].path))) return
+		if ((scShadowDisplayOnly || ((scShadowEngineMask >> d) & 1) === 0) && !(scShadowAt[d] && scShadowAt[d].path)) return
 		const at = scShadowAt[d] || (scShadowAt[d] = {path: ""})
 		at.landing = undefined
 		// On an all-in-one console (#160), leave Decks 3/4 alone unless a shadow peer loaded them.
@@ -1638,7 +1654,7 @@ SERVICES_MAIN = """
 		if (!at.emptyAt) at.emptyAt = now
 		if (now - at.emptyAt < 350 || !(at.path || (root.scTr("/Engine/Deck" + d + "/Track/SongLoaded") || {}).state)) return
 		// Standalone players share Sync/master through Engine Link; consoles (#160) need presses.
-		if ((!at.link || !root.scPlayer || at.nativeSync) && (root.scTr("/Engine/Deck" + d + "/SyncMode") || {}).string !== "Off") scPress("/Engine/Deck" + d + "/UnSync")
+		if ((!at.link || !root.scPlayer || at.nativeSync) && (root.scTr("/Engine/Deck" + d + "/SyncMode") || {}).string !== "Off") scPress("/Engine/Deck" + d + "/UnSync", true)
 		if ((!at.link || !root.scPlayer) && (root.scTr("/Engine/Deck" + d + "/DeckIsMaster") || {}).state) {
 			const m0 = scFourDeckRole.split("")[0]
 			if (m0) scPress("/Engine/Deck" + m0 + "/RequestMaster")
@@ -3647,20 +3663,30 @@ LED_ENTRY = """
 """
 
 FOUR_DECK_ENTRIES = """
-		EntryBase.ListEntry {
-			text: "4-Deck Waveform"
+		EntryBase.ListEntry { // #201 Linked View: one selector, so Stock (the player's own layouts) is always one step back
+			id: scLinkedViewEntry
+			text: "Linked View"
+			entryWidth: 176 // "Paired Player" does not fit the stock 136
 			visible: root.scCanFourDeck
-			values: ["Off", "On"]
-			currentValue: root.scFourDeckOn ? "On" : "Off"
-			onSelected: function(index) { if ((index === 1) !== root.scFourDeckOn) root.scRestartCall("fourDeckWaveform=" + index) }
+			readonly property int at: !root.scFourDeckOn ? 0 : root.scIsPlayerBoard && root.scPairedSetting ? 1 : values.length - 1
+			values: root.scIsPlayerBoard ? ["Stock", "Paired Player", "4 Decks"] : ["Stock", "4 Decks"]
+			currentValue: values[at]
+			// Stock <-> the 4-deck layout is an Engine restart; Paired Player <-> 4 Decks (both in that layout) is not.
+			onSelected: function(index) {
+				if (index === at) return
+				var paired = root.scIsPlayerBoard && index === 1
+				if (index === 0) root.scRestartCall("fourDeckWaveform=0")
+				else if (!root.scFourDeckOn) root.scRestartCall(paired ? "pairedView=1" : "fourDeckWaveform=1")
+				else root.scCall("pairedView=" + (paired ? 1 : 0))
+			}
 		},
-		EntryBase.ListEntry { // #201: two standalone players, one deck of each
-			text: "Paired Player"
-			visible: root.scIsPlayerBoard
-			values: ["Off", "On"]
-			currentValue: root.scPairedSetting ? "On" : "Off"
-			// It runs in the 4-deck layout (an Engine restart to get there); between the two views, none.
-			onSelected: function(index) { if ((index === 1) !== root.scPairedSetting) { if (index === 1 && !root.scFourDeckOn) root.scRestartCall("pairedView=1"); else root.scCall("pairedView=" + index) } }
+		@HEADLINE@ { // Stock on a player: its single / dual layer views are stock's own switches
+			visible: root.scIsPlayerBoard && scLinkedViewEntry.at === 0
+			leftPadding: 24; rightPadding: 24
+			wrapMode: Text.WordWrap
+			Layout.preferredHeight: implicitHeight
+			color: "#9a9a9a"
+			text: "Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout"
 		},
 		@HEADLINE@ {
 			visible: root.scIsPlayerBoard && root.scPairedSetting
@@ -3689,7 +3715,8 @@ FOUR_DECK_ENTRIES = """
 			entryWidth: 176 // "All Engine Mode" does not fit the stock 136
 			values: ["Auto", "All Engine Mode", "All CDJ Mode"]
 			currentValue: values[at]
-			onSelected: function(index) { if (index !== at) root.scRestartCall("shadowMode=" + ids[index]) }
+			// Live (#201): stream-sync reads the mode per request and the QML follows each slot's path.
+			onSelected: function(index) { if (index !== at) root.scCall("shadowMode=" + ids[index]) }
 		},
 		@HEADLINE@ { // one sentence on the selected mode; too long for the row itself
 			visible: root.scCanFourDeck && root.scFourDeckOn
