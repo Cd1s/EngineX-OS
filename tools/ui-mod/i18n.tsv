@@ -1,607 +1,711 @@
-# English	简体中文	繁體中文 — exact UI strings; tracks, artists and playlists never pass through here.
-24 Hour Clock	24 小时制	24 小時制
-4-Deck Waveform	四轨波形显示	四軌波形顯示
-About / Update	关于 / 更新	關於 / 更新
-Account	账号	帳號
-Added	添加日期	新增日期
-Album	专辑	專輯
-Are you sure you want to log out of your Engine DJ Profile?	确定要退出 Engine DJ 账号吗？	確定要登出 Engine DJ 帳號嗎？
-Assign Input to	输入分配到	輸入分配到
-Attenuation	衰减	衰減
-Auto Connect	自动连接	自動連線
-Bass	低音	低音
-Battery Charging	电池充电中	電池充電中
-Battery Power	电池供电	電池供電
-Battery level is low	电池电量低	電池電量低
-Beat Grid Edit	节拍网格编辑	節拍網格編輯
-Bluetooth	蓝牙	藍牙
-Bluetooth Device Volume	蓝牙设备音量	藍牙裝置音量
-BPM Decimals	BPM 小数位数	BPM 小數位數
-BPM Filter Tolerance	BPM 筛选容差	BPM 篩選容差
-BPM Range	BPM 范围	BPM 範圍
-CANCEL	取消	取消
-CLEAR	清除	清除
-CLOSE	关闭	關閉
-Calibrate	校准	校準
-Calibrate Crossfader	校准交叉推子	校準交叉推桿
-Calibrating platter touch sensitivity	正在校准转盘触摸灵敏度	正在校準轉盤觸控靈敏度
-Cancel	取消	取消
-Change Storage Device	更换存储设备	更換儲存裝置
-Clear Database	清空数据库	清空資料庫
-Clear Prepare list?	清空准备列表？	清空準備清單？
-Clear Waveform/Cue/Loop data	清除波形/Cue/Loop 数据	清除波形/Cue/Loop 資料
-Close	关闭	關閉
-Cloud	云端	雲端
-Collection	曲库	曲庫
-Comment	备注	備註
-Computer Mode	电脑模式	電腦模式
-Confirm	确认	確認
-Connect New Sources	连接新来源	連接新來源
-Connection	连接	連線
-Continue	连续播放	連續播放
-Cue Solo Mode	Cue 独听模式	Cue 獨聽模式
-Current	当前	目前
-Database is up to date.	数据库已是最新。	資料庫已是最新。
-Database not found.	未找到数据库。	找不到資料庫。
-Date	日期	日期
-Day Mode	日间模式	日間模式
-Decks	碟机	碟機
-Decrease BPM	降低 BPM	降低 BPM
-Default Beat Jump Size	默认节拍跳跃长度	預設節拍跳躍長度
-Default Loop Size	默认 Loop 长度	預設 Loop 長度
-Default Scratch Mode	默认搓碟模式	預設刷碟模式
-Default Speed Range	默认变速范围	預設變速範圍
-Device	设备	裝置
-Device Storage	设备存储	裝置儲存
-Devices	设备	裝置
-Display Album Art	显示专辑封面	顯示專輯封面
-Done	完成	完成
-DONE	完成	完成
-Double BPM	BPM 翻倍	BPM 加倍
-Download in progress	正在下载	正在下載
-Download Interrupted	下载已中断	下載已中斷
-Eject	弹出	退出
-Eject anyway	仍然弹出	仍然退出
-Eject track	卸载曲目	卸載曲目
-Enabled	已启用	已啟用
-Encoder Behavior	旋钮行为	旋鈕行為
-Engine Lighting	Engine 灯光	Engine 燈光
-Factory Reset	恢复出厂设置	恢復原廠設定
-Failed to load track	曲目加载失败	曲目載入失敗
-Features	功能	功能
-Fetching more content..	正在加载更多内容…	正在載入更多內容…
-Fetching more tracks...	正在加载更多曲目…	正在載入更多曲目…
-Fetching...	正在加载…	正在載入…
-File Type	文件类型	檔案類型
-File unavailable.	文件不可用。	檔案無法使用。
-Files	文件	檔案
-Filters	筛选	篩選
-Firmware Update Mode	固件更新模式	韌體更新模式
-Folder	文件夹	資料夾
-Force	强制	強制
-General Settings	常规设置	一般設定
-Genre	流派	曲風
-Half BPM	BPM 减半	BPM 減半
-Headphone Gain	耳机增益	耳機增益
-Hide Played	隐藏已播放	隱藏已播放
-Hide Title/Artist	隐藏歌名/歌手	隱藏歌名/歌手
-History	历史记录	歷史紀錄
-Ignore	忽略	忽略
-Import	导入	匯入
-Increase BPM	提高 BPM	提高 BPM
-Info	信息	資訊
-Join	加入	加入
-Key	调性	調性
-Key Adjust	调性调整	調性調整
-Key Filter	调性筛选	調性篩選
-Key Notation	调性记法	調性記法
-Key Sync Mode	调性同步模式	調性同步模式
-LOG IN	登录	登入
-LOG OUT	退出登录	登出
-Label	厂牌	廠牌
-Large	大	大
-Legal	法律信息	法律資訊
-Lighting	灯光	燈光
-Live Stream	直播推流	直播推流
-Lock Playing Deck	锁定播放中的碟机	鎖定播放中的碟機
-Log In	登录	登入
-Logged Out	已退出登录	已登出
-Login Failed	登录失败	登入失敗
-Lost Connection	连接已断开	連線已中斷
-Maintain Play State on Load	加载时保持播放状态	載入時保持播放狀態
-Match to Deck	匹配到碟机	比對到碟機
-Mid	中	中
-Mixer	混音台	混音器
-Motorized Platter Start	电动转盘启动	電動轉盤啟動
-Name	名称	名稱
-Needle Lock	唱针锁定	唱針鎖定
-Network	网络	網路
-New features available	有新功能可用	有新功能可用
-No Files Found	未找到文件	找不到檔案
-No History Lists Found	未找到历史列表	找不到歷史清單
-No Playlists Found	未找到歌单	找不到歌單
-No Search Results	无搜索结果	沒有搜尋結果
-No Tracks Found	未找到曲目	找不到曲目
-No connection	无连接	沒有連線
-No network connection was detected.	未检测到网络连接。	未偵測到網路連線。
-Not Enough Disk Space	磁盘空间不足	磁碟空間不足
-Nudge Sensitivity	微调灵敏度	微調靈敏度
-Ok	确定	確定
-On Air Mode	On Air 模式	On Air 模式
-Open	打开	開啟
-Other	其他	其他
-Output Equalizer	输出均衡器	輸出等化器
-Pad Lock	打击垫锁定	打擊墊鎖定
-Pairing Failed	配对失败	配對失敗
-Password	密码	密碼
-Paused	已暂停	已暫停
-Paused Hot Cue Behavior	暂停时 Hot Cue 行为	暫停時 Hot Cue 行為
-Paused Saved Loop Behavior	暂停时 Saved Loop 行为	暫停時 Saved Loop 行為
-Performance Pads	演奏打击垫	演奏打擊墊
-Pitch Bend Behavior	变速微调行为	變速微調行為
-Pitch Control Type	变速键功能	變速鍵功能
-Pitch Range	变速范围	變速範圍
-Platter Touch Sensitivity	转盘触摸灵敏度	轉盤觸控靈敏度
-Player #	碟机编号 #	碟機編號 #
-Playhead Position	播放头位置	播放頭位置
-Playlists	歌单	歌單
-Please check your internet connection.	请检查网络连接。	請檢查網路連線。
-Please wait...	请稍候…	請稍候…
-Preview Volume	预览音量	預覽音量
-Quantize	量化	量化
-RESET	重置	重設
-Read-only	只读	唯讀
-Reboot	重启	重新開機
-Record	录音	錄音
-Recording	录音	錄音
-Recording Gain	录音增益	錄音增益
-Reload	重新加载	重新載入
-Remind Later	稍后提醒	稍後提醒
-Reset	重置	重設
-Reset Current View	重置当前视图	重設目前視圖
-Save View	保存视图	儲存視圖
-Reset Played Tracks	重置已播放曲目	重設已播放曲目
-Reset to Defaults	恢复默认	恢復預設
-Restart	重启	重新啟動
-RGB Waveform Creation	生成 RGB 波形	產生 RGB 波形
-RGB Waveforms and Track Overviews will be built when loading to deck.	RGB 波形和曲目概览会在加载到碟机时生成。	RGB 波形和曲目概覽會在載入碟機時產生。
-SELECT	选择	選擇
-Sampler Output	采样器输出	取樣器輸出
-Sampler Volume	采样器音量	取樣器音量
-Saved Loop Behavior	Saved Loop 行为	Saved Loop 行為
-Screen Saver Time	屏保时间	螢幕保護時間
-Search	搜索	搜尋
-Search All	搜索全部	搜尋全部
-Security	安全	安全性
-Select	选择	選擇
-Select Wi-Fi network	选择 Wi-Fi 网络	選擇 Wi-Fi 網路
-Select storage device	选择存储设备	選擇儲存裝置
-Select your Time Zone	选择时区	選擇時區
-Services	服务	服務
-Set Time Zone Manually	手动设置时区	手動設定時區
-Smart Scratch	智能搓碟	智慧刷碟
-Smart Sync	智能同步	智慧同步
-Source	来源	來源
-Standard	标准	標準
-Start	开始	開始
-Statistics	统计	統計
-Status	状态	狀態
-Streaming	流媒体	串流
-Sync	同步	同步
-Sync Button Action	Sync 按钮动作	Sync 按鈕動作
-Sync Indicator	同步指示	同步指示
-Sync Mode	同步模式	同步模式
-Sync Time	同步时间	同步時間
-System Date	系统日期	系統日期
-Time Format	时间格式	時間格式
-Time Zone	时区	時區
-Time/Date	时间/日期	時間/日期
-Touch deck to load playlist	触摸碟机以加载歌单	觸控碟機以載入歌單
-Track Download Failed	曲目下载失败	曲目下載失敗
-Track End Warning	曲目结束提醒	曲目結束提醒
-Track Not Available	曲目不可用	曲目無法使用
-Track Preview	曲目预览	曲目預覽
-Track Speed	曲目速度	曲目速度
-Track Start Position	曲目起始位置	曲目起始位置
-Track Title	曲目标题	曲目標題
-Tracklist Waveform	曲目列表波形	曲目列表波形
-Tracks	曲目	曲目
-Treble	高音	高音
-UI Scale	界面缩放	介面縮放
-Turntable Mode	唱盘模式	唱盤模式
-Update	更新	更新
-Update FW	更新固件	更新韌體
-Update Firmware	更新固件	更新韌體
-Update Now	立即更新	立即更新
-Echo Out	回声淡出	回聲淡出
-Now	立即	立即
-Username	用户名	使用者名稱
-VU Meter Mode	VU 表模式	VU 表模式
-Waveform Orientation	波形方向	波形方向
-Waveform Style	波形样式	波形樣式
-Waveforms	波形	波形
-Wi-Fi Login Error	Wi-Fi 登录错误	Wi-Fi 登入錯誤
-You're running the latest version	已是最新版本	已是最新版本
-Language	语言	語言
-My Playlists	我的歌单	我的歌單
-My Collection	我的收藏	我的收藏
-On	开	開
-Off	关	關
-Yes	是	是
-No	否	否
-Light	浅色	淺色
-Dark	深色	深色
-Control Center	控制中心	控制中心
-Layout	布局	版面
-Profile	配置	設定檔
-Settings	设置	設定
-Display	显示	顯示
-Library	曲库	曲庫
-Playback	播放	播放
-Safety	安全	安全
-Performance	演奏	演奏
-Cues/Loops	Cue / Loop	Cue / Loop
-Deck Colors	碟机颜色	碟機顏色
-Theme	主题	主題
-Advanced	高级	進階
-Fx	效果	效果
-Couldn't load the login code. Tap the code to retry.	没能获取登录二维码，点一下二维码重试。	沒能取得登入 QR Code，點一下 QR Code 重試。
-Confirm on your phone	请在手机上确认	請在手機上確認
-Scan in the NetEase Cloud Music app, not with the camera or WeChat	用网易云音乐 App 的「扫一扫」扫码，不要用相机或微信	用網易雲音樂 App 的「掃一掃」掃碼，不要用相機或微信
-Only one phone? Take a photo of this code, then in the app tap Scan and pick the photo from Album.	只有一部手机？先用相机拍下这个二维码，再在 App 的「扫一扫」里点「相册」选这张照片。	只有一部手機？先用相機拍下這個 QR 碼，再在 App 的「掃一掃」裡點「相簿」選這張照片。
-Scan with your phone camera. Phone and deck must be on the same network.	请用手机相机扫码。手机和碟机要连同一个 Wi-Fi。	請用手機相機掃碼。手機和碟機要連同一個 Wi-Fi。
-Not now	暂不登录	暫不登入
-Switch account	切换账号	切換帳號
-Scan to log in	扫码登录	掃碼登入
-Connecting to	正在连接	正在連接
-Waiting for confirmation	等待确认	等待確認
-WAITING FOR	正在等待	正在等待
-NetEase Cloud Music	网易云音乐	網易雲音樂
-Streaming Quality	流媒体音质	串流音質
-NetEase Download	网易云下载方式	網易雲下載方式
-Official	官方直下	官方直下
-Deemix First	Deemix 优先	Deemix 優先
-Scan with your phone camera.	用手机相机扫码	用手機相機掃碼
-Low	低	低
-High	高	高
-Max	最高	最高
-OmniSource (Drives in Streaming)	OmniSource（在流媒体中显示 U 盘/SD）	OmniSource（在串流中顯示 USB/SD）
-Master Soft Clipper	0dB 防破音软限幅	0dB 防破音軟限幅
-Auto-Gain (0 dB Normalize)	自动增益（0 dB 归一化）	自動增益（0 dB 正規化）
-Pro DJ Link Library	Pro DJ Link 曲库	Pro DJ Link 曲庫
-Pro DJ Link Export to CDJ (Beta)	Pro DJ Link 导出至 CDJ（测试版）	Pro DJ Link 匯出至 CDJ（測試版）
-Lossless	无损	無損
-Stems	分轨 Stems	分軌 Stems
-Checking GitHub…	正在检查 GitHub…	正在檢查 GitHub…
-Updating…	正在更新…	正在更新…
-GitHub unreachable	无法连接 GitHub	無法連線 GitHub
-New release available:	有新版本：	有新版本：
-Up to date	已是最新	已是最新
-no release found (no releases yet, or the repository is private)	未找到发布版本（仓库还没有发布，或是私有仓库）	未找到發佈版本（倉庫尚無發佈，或為私有倉庫）
+# English	简体中文	繁體中文	Español — exact UI strings; tracks, artists and playlists never pass through here.
+24 Hour Clock	24 小时制	24 小時制	Reloj de 24 horas
+4-Deck Waveform	四轨波形显示	四軌波形顯示	Forma de onda de 4 decks
+About / Update	关于 / 更新	關於 / 更新	Acerca de / Actualizar
+Account	账号	帳號	Cuenta
+Added	添加日期	新增日期	Añadido
+Album	专辑	專輯	Álbum
+Are you sure you want to log out of your Engine DJ Profile?	确定要退出 Engine DJ 账号吗？	確定要登出 Engine DJ 帳號嗎？	¿Seguro que deseas cerrar sesión de tu perfil Engine DJ?
+Assign Input to	输入分配到	輸入分配到	Asignar entrada a
+Attenuation	衰减	衰減	Atenuación
+Auto Connect	自动连接	自動連線	Conexión automática
+Bass	低音	低音	Graves
+Battery Charging	电池充电中	電池充電中	Cargando batería
+Battery Power	电池供电	電池供電	Alimentación por batería
+Battery level is low	电池电量低	電池電量低	Nivel de batería bajo
+Beat Grid Edit	节拍网格编辑	節拍網格編輯	Editar Beat Grid
+Bluetooth	蓝牙	藍牙	Bluetooth
+Bluetooth Device Volume	蓝牙设备音量	藍牙裝置音量	Volumen Bluetooth
+BPM Decimals	BPM 小数位数	BPM 小數位數	Decimales de BPM
+BPM Filter Tolerance	BPM 筛选容差	BPM 篩選容差	Tolerancia de filtro BPM
+BPM Range	BPM 范围	BPM 範圍	Rango de BPM
+CANCEL	取消	取消	CANCELAR
+CLEAR	清除	清除	BORRAR
+CLOSE	关闭	關閉	CERRAR
+Calibrate	校准	校準	Calibrar
+Calibrate Crossfader	校准交叉推子	校準交叉推桿	Calibrar crossfader
+Calibrating platter touch sensitivity	正在校准转盘触摸灵敏度	正在校準轉盤觸控靈敏度	Calibrando sensibilidad táctil del plato
+Cancel	取消	取消	Cancelar
+Change Storage Device	更换存储设备	更換儲存裝置	Cambiar dispositivo de almacenamiento
+Clear Database	清空数据库	清空資料庫	Borrar base de datos
+Clear Prepare list?	清空准备列表？	清空準備清單？	¿Borrar lista de preparación?
+Clear Waveform/Cue/Loop data	清除波形/Cue/Loop 数据	清除波形/Cue/Loop 資料	Borrar datos de forma de onda/Cue/Loop
+Close	关闭	關閉	Cerrar
+Cloud	云端	雲端	Nube
+Collection	曲库	曲庫	Colección
+Comment	备注	備註	Comentario
+Computer Mode	电脑模式	電腦模式	Modo ordenador
+Confirm	确认	確認	Confirmar
+Connect New Sources	连接新来源	連接新來源	Conectar nuevas fuentes
+Connection	连接	連線	Conexión
+Continue	连续播放	連續播放	Continuar
+Cue Solo Mode	Cue 独听模式	Cue 獨聽模式	Modo Cue Solo
+Current	当前	目前	Actual
+Database is up to date.	数据库已是最新。	資料庫已是最新。	La base de datos está actualizada.
+Database not found.	未找到数据库。	找不到資料庫。	Base de datos no encontrada.
+Date	日期	日期	Fecha
+Day Mode	日间模式	日間模式	Modo día
+Decks	碟机	碟機	Decks
+Decrease BPM	降低 BPM	降低 BPM	Disminuir BPM
+Default Beat Jump Size	默认节拍跳跃长度	預設節拍跳躍長度	Tamaño de Beat Jump predeterminado
+Default Loop Size	默认 Loop 长度	預設 Loop 長度	Tamaño de loop predeterminado
+Default Scratch Mode	默认搓碟模式	預設刷碟模式	Modo scratch predeterminado
+Default Speed Range	默认变速范围	預設變速範圍	Rango de velocidad predeterminado
+Device	设备	裝置	Dispositivo
+Device Storage	设备存储	裝置儲存	Almacenamiento del dispositivo
+Devices	设备	裝置	Dispositivos
+Display Album Art	显示专辑封面	顯示專輯封面	Mostrar carátula
+Done	完成	完成	Hecho
+DONE	完成	完成	HECHO
+Double BPM	BPM 翻倍	BPM 加倍	Doble de BPM
+Download in progress	正在下载	正在下載	Descarga en curso
+Download Interrupted	下载已中断	下載已中斷	Descarga interrumpida
+Eject	弹出	退出	Expulsar
+Eject anyway	仍然弹出	仍然退出	Expulsar de todos modos
+Eject track	卸载曲目	卸載曲目	Expulsar pista
+Enabled	已启用	已啟用	Habilitado
+Encoder Behavior	旋钮行为	旋鈕行為	Comportamiento del selector
+Engine Lighting	Engine 灯光	Engine 燈光	Iluminación Engine
+Factory Reset	恢复出厂设置	恢復原廠設定	Restablecer a fábrica
+Failed to load track	曲目加载失败	曲目載入失敗	Error al cargar la pista
+Features	功能	功能	Funciones
+Fetching more content..	正在加载更多内容…	正在載入更多內容…	Cargando más contenido…
+Fetching more tracks...	正在加载更多曲目…	正在載入更多曲目…	Cargando más pistas…
+Fetching...	正在加载…	正在載入…	Cargando…
+File Type	文件类型	檔案類型	Tipo de archivo
+File unavailable.	文件不可用。	檔案無法使用。	Archivo no disponible.
+Files	文件	檔案	Archivos
+Filters	筛选	篩選	Filtros
+Firmware Update Mode	固件更新模式	韌體更新模式	Modo de actualización de firmware
+Folder	文件夹	資料夾	Carpeta
+Force	强制	強制	Forzar
+General Settings	常规设置	一般設定	Ajustes generales
+Genre	流派	曲風	Género
+Half BPM	BPM 减半	BPM 減半	Mitad de BPM
+Headphone Gain	耳机增益	耳機增益	Ganancia de auriculares
+Hide Played	隐藏已播放	隱藏已播放	Ocultar reproducidas
+Hide Title/Artist	隐藏歌名/歌手	隱藏歌名/歌手	Ocultar título/artista
+History	历史记录	歷史紀錄	Historial
+Ignore	忽略	忽略	Ignorar
+Import	导入	匯入	Importar
+Increase BPM	提高 BPM	提高 BPM	Aumentar BPM
+Info	信息	資訊	Info
+Join	加入	加入	Conectar
+Key	调性	調性	Tonalidad
+Key Adjust	调性调整	調性調整	Ajuste de tonalidad
+Key Filter	调性筛选	調性篩選	Filtro de tonalidad
+Key Notation	调性记法	調性記法	Notación de tonalidad
+Key Sync Mode	调性同步模式	調性同步模式	Modo Key Sync
+LOG IN	登录	登入	INICIAR SESIÓN
+LOG OUT	退出登录	登出	CERRAR SESIÓN
+Label	厂牌	廠牌	Sello
+Large	大	大	Grande
+Legal	法律信息	法律資訊	Legal
+Lighting	灯光	燈光	Iluminación
+Live Stream	直播推流	直播推流	Transmisión en directo
+Lock Playing Deck	锁定播放中的碟机	鎖定播放中的碟機	Bloquear deck en reproducción
+Log In	登录	登入	Iniciar sesión
+Logged Out	已退出登录	已登出	Sesión cerrada
+Login Failed	登录失败	登入失敗	Error de inicio de sesión
+Lost Connection	连接已断开	連線已中斷	Conexión perdida
+Maintain Play State on Load	加载时保持播放状态	載入時保持播放狀態	Mantener estado de reproducción al cargar
+Match to Deck	匹配到碟机	比對到碟機	Igualar al deck
+Mid	中	中	Medios
+Mixer	混音台	混音器	Mezclador
+Motorized Platter Start	电动转盘启动	電動轉盤啟動	Arranque del plato motorizado
+Name	名称	名稱	Nombre
+Needle Lock	唱针锁定	唱針鎖定	Bloqueo de aguja
+Network	网络	網路	Red
+New features available	有新功能可用	有新功能可用	Nuevas funciones disponibles
+No Files Found	未找到文件	找不到檔案	No se encontraron archivos
+No History Lists Found	未找到历史列表	找不到歷史清單	No se encontraron listas de historial
+No Playlists Found	未找到歌单	找不到歌單	No se encontraron listas de reproducción
+No Search Results	无搜索结果	沒有搜尋結果	Sin resultados de búsqueda
+No Tracks Found	未找到曲目	找不到曲目	No se encontraron pistas
+No connection	无连接	沒有連線	Sin conexión
+No network connection was detected.	未检测到网络连接。	未偵測到網路連線。	No se detectó ninguna conexión de red.
+Not Enough Disk Space	磁盘空间不足	磁碟空間不足	Espacio insuficiente en disco
+Nudge Sensitivity	微调灵敏度	微調靈敏度	Sensibilidad de nudge
+Ok	确定	確定	Aceptar
+On Air Mode	On Air 模式	On Air 模式	Modo On Air
+Open	打开	開啟	Abrir
+Other	其他	其他	Otros
+Output Equalizer	输出均衡器	輸出等化器	Ecualizador de salida
+Pad Lock	打击垫锁定	打擊墊鎖定	Bloqueo de pads
+Pairing Failed	配对失败	配對失敗	Error de emparejamiento
+Password	密码	密碼	Contraseña
+Paused	已暂停	已暫停	En pausa
+Paused Hot Cue Behavior	暂停时 Hot Cue 行为	暫停時 Hot Cue 行為	Comportamiento de Hot Cue en pausa
+Paused Saved Loop Behavior	暂停时 Saved Loop 行为	暫停時 Saved Loop 行為	Comportamiento de Saved Loop en pausa
+Performance Pads	演奏打击垫	演奏打擊墊	Pads de actuación
+Pitch Bend Behavior	变速微调行为	變速微調行為	Comportamiento de Pitch Bend
+Pitch Control Type	变速键功能	變速鍵功能	Tipo de control de pitch
+Pitch Range	变速范围	變速範圍	Rango de pitch
+Platter Touch Sensitivity	转盘触摸灵敏度	轉盤觸控靈敏度	Sensibilidad táctil del plato
+Player #	碟机编号 #	碟機編號 #	Reproductor #
+Playhead Position	播放头位置	播放頭位置	Posición del cabezal
+Playlists	歌单	歌單	Listas de reproducción
+Please check your internet connection.	请检查网络连接。	請檢查網路連線。	Comprueba tu conexión a internet.
+Please wait...	请稍候…	請稍候…	Espera, por favor…
+Preview Volume	预览音量	預覽音量	Volumen de preescucha
+Quantize	量化	量化	Cuantización
+RESET	重置	重設	RESTABLECER
+Read-only	只读	唯讀	Solo lectura
+Reboot	重启	重新開機	Reiniciar
+Record	录音	錄音	Grabar
+Recording	录音	錄音	Grabación
+Recording Gain	录音增益	錄音增益	Ganancia de grabación
+Reload	重新加载	重新載入	Recargar
+Remind Later	稍后提醒	稍後提醒	Recordar más tarde
+Reset	重置	重設	Restablecer
+Reset Current View	重置当前视图	重設目前視圖	Restablecer vista actual
+Save View	保存视图	儲存視圖	Guardar vista
+Reset Played Tracks	重置已播放曲目	重設已播放曲目	Restablecer pistas reproducidas
+Reset to Defaults	恢复默认	恢復預設	Restablecer predeterminados
+Restart	重启	重新啟動	Reiniciar
+RGB Waveform Creation	生成 RGB 波形	產生 RGB 波形	Creación de forma de onda RGB
+RGB Waveforms and Track Overviews will be built when loading to deck.	RGB 波形和曲目概览会在加载到碟机时生成。	RGB 波形和曲目概覽會在載入碟機時產生。	Las formas de onda RGB y resúmenes de pista se generarán al cargar en el deck.
+SELECT	选择	選擇	SELECCIONAR
+Sampler Output	采样器输出	取樣器輸出	Salida del sampler
+Sampler Volume	采样器音量	取樣器音量	Volumen del sampler
+Saved Loop Behavior	Saved Loop 行为	Saved Loop 行為	Comportamiento de Saved Loop
+Screen Saver Time	屏保时间	螢幕保護時間	Tiempo del salvapantallas
+Search	搜索	搜尋	Buscar
+Search All	搜索全部	搜尋全部	Buscar todo
+Security	安全	安全性	Seguridad
+Select	选择	選擇	Seleccionar
+Select Wi-Fi network	选择 Wi-Fi 网络	選擇 Wi-Fi 網路	Seleccionar red Wi-Fi
+Select storage device	选择存储设备	選擇儲存裝置	Seleccionar dispositivo de almacenamiento
+Select your Time Zone	选择时区	選擇時區	Selecciona tu zona horaria
+Services	服务	服務	Servicios
+Set Time Zone Manually	手动设置时区	手動設定時區	Ajustar zona horaria manualmente
+Smart Scratch	智能搓碟	智慧刷碟	Smart Scratch
+Smart Sync	智能同步	智慧同步	Smart Sync
+Source	来源	來源	Fuente
+Standard	标准	標準	Estándar
+Start	开始	開始	Iniciar
+Statistics	统计	統計	Estadísticas
+Status	状态	狀態	Estado
+Streaming	流媒体	串流	Streaming
+Sync	同步	同步	Sync
+Sync Button Action	Sync 按钮动作	Sync 按鈕動作	Acción del botón Sync
+Sync Indicator	同步指示	同步指示	Indicador de sincronización
+Sync Mode	同步模式	同步模式	Modo de sincronización
+Sync Time	同步时间	同步時間	Sincronizar hora
+System Date	系统日期	系統日期	Fecha del sistema
+Time Format	时间格式	時間格式	Formato de hora
+Time Zone	时区	時區	Zona horaria
+Time/Date	时间/日期	時間/日期	Hora/Fecha
+Touch deck to load playlist	触摸碟机以加载歌单	觸控碟機以載入歌單	Toca el deck para cargar la lista de reproducción
+Track Download Failed	曲目下载失败	曲目下載失敗	Error al descargar la pista
+Track End Warning	曲目结束提醒	曲目結束提醒	Aviso de fin de pista
+Track Not Available	曲目不可用	曲目無法使用	Pista no disponible
+Track Preview	曲目预览	曲目預覽	Preescucha de pista
+Track Speed	曲目速度	曲目速度	Velocidad de pista
+Track Start Position	曲目起始位置	曲目起始位置	Posición de inicio de pista
+Track Title	曲目标题	曲目標題	Título de pista
+Tracklist Waveform	曲目列表波形	曲目列表波形	Forma de onda en lista de pistas
+Tracks	曲目	曲目	Pistas
+Treble	高音	高音	Agudos
+UI Scale	界面缩放	介面縮放	Escala de interfaz
+Turntable Mode	唱盘模式	唱盤模式	Modo tocadiscos
+Update	更新	更新	Actualizar
+Update FW	更新固件	更新韌體	Actualizar firmware
+Update Firmware	更新固件	更新韌體	Actualizar firmware
+Update Now	立即更新	立即更新	Actualizar ahora
+Echo Out	回声淡出	回聲淡出	Echo Out
+Now	立即	立即	Ahora
+Username	用户名	使用者名稱	Nombre de usuario
+VU Meter Mode	VU 表模式	VU 表模式	Modo vúmetro
+Waveform Orientation	波形方向	波形方向	Orientación de forma de onda
+Waveform Style	波形样式	波形樣式	Estilo de forma de onda
+Waveforms	波形	波形	Formas de onda
+Wi-Fi Login Error	Wi-Fi 登录错误	Wi-Fi 登入錯誤	Error de inicio de sesión Wi-Fi
+You're running the latest version	已是最新版本	已是最新版本	Tienes la versión más reciente
+Language	语言	語言	Idioma
+My Playlists	我的歌单	我的歌單	Mis listas de reproducción
+My Collection	我的收藏	我的收藏	Mi colección
+On	开	開	Activado
+Off	关	關	Desactivado
+Yes	是	是	Sí
+No	否	否	No
+Light	浅色	淺色	Claro
+Dark	深色	深色	Oscuro
+Control Center	控制中心	控制中心	Centro de control
+Layout	布局	版面	Disposición
+Profile	配置	設定檔	Perfil
+Settings	设置	設定	Ajustes
+Display	显示	顯示	Pantalla
+Library	曲库	曲庫	Biblioteca
+Playback	播放	播放	Reproducción
+Safety	安全	安全	Protección
+Performance	演奏	演奏	Actuación
+Cues/Loops	Cue / Loop	Cue / Loop	Cues / Loops
+Deck Colors	碟机颜色	碟機顏色	Colores de deck
+Theme	主题	主題	Tema
+Advanced	高级	進階	Avanzado
+Fx	效果	效果	FX
+Couldn't load the login code. Tap the code to retry.	没能获取登录二维码，点一下二维码重试。	沒能取得登入 QR Code，點一下 QR Code 重試。	No se pudo cargar el código de inicio de sesión. Toca el código para reintentar.
+Confirm on your phone	请在手机上确认	請在手機上確認	Confirma en tu teléfono
+Scan in the NetEase Cloud Music app, not with the camera or WeChat	用网易云音乐 App 的「扫一扫」扫码，不要用相机或微信	用網易雲音樂 App 的「掃一掃」掃碼，不要用相機或微信	Escanea desde la app de NetEase Cloud Music, no con la cámara o WeChat
+Only one phone? Take a photo of this code, then in the app tap Scan and pick the photo from Album.	只有一部手机？先用相机拍下这个二维码，再在 App 的「扫一扫」里点「相册」选这张照片。	只有一部手機？先用相機拍下這個 QR 碼，再在 App 的「掃一掃」裡點「相簿」選這張照片。	¿Solo un teléfono? Toma una foto a este código, luego en la app toca Escanear y elige la foto del Álbum.
+Scan with your phone camera. Phone and deck must be on the same network.	请用手机相机扫码。手机和碟机要连同一个 Wi-Fi。	請用手機相機掃碼。手機和碟機要連同一個 Wi-Fi。	Escanea con la cámara de tu teléfono. El teléfono y el deck deben estar en la misma red.
+Not now	暂不登录	暫不登入	Ahora no
+Switch account	切换账号	切換帳號	Cambiar de cuenta
+Scan to log in	扫码登录	掃碼登入	Escanear para iniciar sesión
+Connecting to	正在连接	正在連接	Conectando a
+Waiting for confirmation	等待确认	等待確認	Esperando confirmación
+WAITING FOR	正在等待	正在等待	ESPERANDO A
+NetEase Cloud Music	网易云音乐	網易雲音樂	NetEase Cloud Music
+Streaming Quality	流媒体音质	串流音質	Calidad de streaming
+NetEase Download	网易云下载方式	網易雲下載方式	Descarga de NetEase
+Official	官方直下	官方直下	Oficial
+Deemix First	Deemix 优先	Deemix 優先	Deemix primero
+Scan with your phone camera.	用手机相机扫码	用手機相機掃碼	Escanea con la cámara de tu teléfono.
+Low	低	低	Baja
+High	高	高	Alta
+Max	最高	最高	Máxima
+OmniSource (Drives in Streaming)	OmniSource（在流媒体中显示 U 盘/SD）	OmniSource（在串流中顯示 USB/SD）	OmniSource (unidades en streaming)
+Master Soft Clipper	0dB 防破音软限幅	0dB 防破音軟限幅	Soft Clipper master
+Auto-Gain (0 dB Normalize)	自动增益（0 dB 归一化）	自動增益（0 dB 正規化）	Ganancia automática (normalizar a 0 dB)
+Pro DJ Link Library	Pro DJ Link 曲库	Pro DJ Link 曲庫	Biblioteca Pro DJ Link
+Pro DJ Link Export to CDJ (Beta)	Pro DJ Link 导出至 CDJ（测试版）	Pro DJ Link 匯出至 CDJ（測試版）	Exportar por Pro DJ Link a CDJ (Beta)
+Lossless	无损	無損	Sin pérdidas
+Stems	分轨 Stems	分軌 Stems	Stems
+Checking GitHub…	正在检查 GitHub…	正在檢查 GitHub…	Comprobando GitHub…
+Updating…	正在更新…	正在更新…	Actualizando…
+GitHub unreachable	无法连接 GitHub	無法連線 GitHub	No se puede conectar con GitHub
+New release available:	有新版本：	有新版本：	Nueva versión disponible:
+Up to date	已是最新	已是最新	Actualizado
+no release found (no releases yet, or the repository is private)	未找到发布版本（仓库还没有发布，或是私有仓库）	未找到發佈版本（倉庫尚無發佈，或為私有倉庫）	no se encontró ninguna versión (aún no hay versiones o el repositorio es privado)
 # Preferences: Device and About / Update pages
-Send Anonymous Usage Statistics	发送匿名使用统计	傳送匿名使用統計
-Debug Information	调试信息	除錯資訊
-Save to Source	保存到来源	儲存到來源
-Other Available Updates	其他可用更新	其他可用更新
-No updates available	没有可用更新	沒有可用更新
-Screen Brightness	屏幕亮度	螢幕亮度
-Screen (Plugged In)	屏幕（接通电源）	螢幕（接上電源）
-Screen (Battery)	屏幕（电池）	螢幕（電池）
-Checking...	正在检查…	正在檢查…
-Options	选项	選項
-This will wipe all user settings and passwords from this device and restore it to its factory default configuration. The device will reboot during this process.	这将清除本设备上的所有用户设置和密码，并恢复出厂默认配置。设备会在此过程中重启。	這將清除本裝置上的所有使用者設定與密碼，並恢復原廠預設設定。裝置會在此過程中重新啟動。
-Version: ${version}	版本：${version}	版本：${version}
-Prepare	准备	準備
-The QR code expired.	二维码已过期。	QR Code 已過期。
-Tap for a new QR code	点这里换一个新二维码	點這裡換一個新 QR Code
-4-Deck Role	四轨角色	四軌角色
-Auto	自动	自動
-Turn Off	关机	關機
-Power	电源	電源
-Censor Button Behavior	Censor 键行为	Censor 鍵行為
-Silent Cue	静音 Cue	靜音 Cue
-Waveform Zoom	波形缩放	波形縮放
-Open Library	打开曲库	開啟曲庫
-Master Limiter	原厂主输出限幅 (dB)	原廠主輸出限幅 (dB)
-Web Console	网页控制台	網頁控制台
-Access Code	访问码	存取碼
-Trigger Source	触发来源	觸發來源
-Fader Echo	推子回音	推桿回音
-Fader Echo: Up	推子回音：仅竖推	推桿回音：僅豎推
-Fader Echo: All	推子回音：全部	推桿回音：全部
-All Faders	全部推子	全部推桿
-Upfader Only	仅竖推	僅豎推
-Upfader	竖推	豎推
-All	全部	全部
-Pad LED Brightness	打击垫亮度	打擊墊亮度
-Dual-Column Browser	双栏浏览	雙欄瀏覽
-Beat Jump Pad Bank	节拍跳跃打击垫	節拍跳躍打擊墊
-Swap Loop / Beat Jump	互换循环 / 节拍跳跃	互換循環 / 節拍跳躍
-Sync Guard Tolerance	同步保护容差	同步保護容差
-Stems EQ Mode	分轨 EQ 模式	分軌 EQ 模式
-Color FX Style	先锋风格效果 (Color FX)	先鋒風格效果 (Color FX)
-Spiral	Spiral	Spiral
-Pitch Echo	Pitch Echo	Pitch Echo
-Slip Roll	Slip Roll	Slip Roll
-Dub Echo	Dub Echo	Dub Echo
-Space	Space	Space
-ENGINEX VIEW PRESET	ENGINEX 视图预设	ENGINEX 視圖預設
-Stems LAN renderer online:	局域网分轨主机在线：	區域網路分軌主機在線：
-Stems LAN renderer offline:	局域网分轨主机离线：	區域網路分軌主機離線：
-On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network.	本机分轨（基础音质）。如需高音质分轨，请在同一局域网的电脑上运行 EngineX Stems 服务。	本機分軌（基礎音質）。如需高音質分軌，請在同一區域網路的電腦上執行 EngineX Stems 服務。
-High-quality stems:	高音质分轨：	高音質分軌：
-Stem	分轨 Stems	分軌 Stems
-Cue Countdown	热标拍数倒数	熱標拍數倒數
-Mixer Menu	混音台菜单	混音器選單
-Mixer Settings	混音台设置	混音器設定
-Channels	通道	通道
-Input	输入	輸入
-Player	碟机	碟機
-Line In	线路输入	線路輸入
-Engine	Engine	Engine
-Shadow Deck Mode	影子轨模式	影子軌模式
-Auto: copyable tracks load locally like a local deck; uncopyable CDJ tracks show CDJ waveforms	自动：对端曲目可拷贝时由本机加载（同本机显示）；无法拷贝时显示 CDJ 波形	自動：對端曲目可複製時由本機載入（同本機顯示）；無法複製時顯示 CDJ 波形
-All Engine Mode: Engine loads every source and shows it exactly like a local deck	全部 Engine 模式：所有对端曲目均由本机加载，与本机显示一模一样	全部 Engine 模式：所有對端曲目均由本機載入，與本機顯示一模一樣
-All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)	全部 CDJ 模式：不加载对端音频，一律显示 CDJ 式波形	全部 CDJ 模式：不載入對端音訊，一律顯示 CDJ 式波形
-All Engine Mode	全部 Engine 模式	全部 Engine 模式
-All CDJ Mode	全部 CDJ 模式	全部 CDJ 模式
-All Engine Mode: no CDJ waveform on Line In	全部 Engine 模式下 Line In 不显示 CDJ 波形	全部 Engine 模式下 Line In 不顯示 CDJ 波形
-Downloading	正在下载	正在下載
-Loading	正在加载	正在載入
-Waiting for source analysis	等待源碟机分析波形	等待來源碟機分析波形
-Failed to open file within appropriate time.	未能在规定时间内打开文件。	未能在規定時間內開啟檔案。
-Could not load via network.	无法通过网络加载。	無法透過網路載入。
-Retrying…	正在重试…	正在重試…
-Streaming: no file to copy from CDJ.	流媒体：CDJ 无文件可拷贝。	串流：CDJ 無檔案可複製。
-rekordbox Link: no file to copy from CDJ.	rekordbox Link：CDJ 无文件可拷贝。	rekordbox Link：CDJ 無檔案可複製。
-CD or 2nd USB: no file to copy from CDJ.	CD 或第二 USB：CDJ 无文件可拷贝。	CD 或第二 USB：CDJ 無檔案可複製。
-Restart Engine to apply? Playback will stop.	需要重启 Engine，播放会中断。	需要重新啟動 Engine，播放會中斷。
-PERFORMANCE LAYOUT	演出布局	演出配置
-DECK BEHAVIOR	碟机行为	碟機行為
-Deck Type	碟机视图	碟機視圖
-Deck Layout	碟机排列	碟機排列
-Performance Library	同屏曲库	同屏曲庫
-Main FX	主效果栏	主效果欄
-Enable for Dual Deck	启用双层播放	啟用雙層播放
-Deck Swap	左右层互换	左右層互換
-X Fader	交叉推子	交叉推桿
-X Fader Contour	交叉推子曲线	交叉推桿曲線
-Stop Time	停盘时间	停盤時間
-FAST	快	快
-SLOW	慢	慢
-Split Cue	分离监听	分離監聽
-Software FX	软件效果	軟體效果
-Open Recording	打开录音	開啟錄音
-Mic	麦克风	麥克風
-Mic / Aux	麦克风 / Aux	麥克風 / Aux
-Cue/Loop Quantization	Cue/Loop 量化精度	Cue/Loop 量化精度
-Link Beat Jump / Loop Size Controls	联动节拍跳跃与 Loop 长度	連動節拍跳躍與 Loop 長度
-Smart Loops	智能 Loop	智慧 Loop
-Move Cue to Loop In	Cue 移至 Loop 起点	Cue 移至 Loop 起點
-Hot Cue Countdown	热标拍数倒数	熱標拍數倒數
-Collection Browse Behavior	曲库浏览方式	曲庫瀏覽方式
-Track Overview Style	曲目概览样式	曲目概覽樣式
-Stems List	Stems 分轨列表	Stems 分軌列表
-Contour	交叉推子曲线	交叉推桿曲線
-X-Fader Cut In Length Left	交叉推子左侧切入行程	交叉推桿左側切入行程
-X-Fader Cut In Length Right	交叉推子右侧切入行程	交叉推桿右側切入行程
-EQ Type	均衡器类型	等化器類型
-ISO EQ Low Xover	ISO 低频分频点	ISO 低頻分頻點
-ISO EQ High Xover	ISO 高频分频点	ISO 高頻分頻點
-Filter Resonance	滤波器谐振	濾波器諧振
-Filter Extreme Type	滤波极值行为	濾波極值行為
-Aux EQ	Aux 均衡器	Aux 等化器
-Smart Headphone Cue	智能耳机监听	智慧耳機監聽
-Split Cue Output	分离监听输出	分離監聽輸出
-Sum Main Out to Mono	主输出合并单声道	主輸出合併單聲道
-BPM Effects	节拍效果 (BPM FX)	節拍效果 (BPM FX)
-Effect Select Behavior	效果切换行为	效果切換行為
-Mirror Favorite FX Banks	镜像常用效果组	鏡像常用效果組
-Sweep Effects	滤波效果 (Sweep FX)	濾波效果 (Sweep FX)
-FX Noise Volume	Noise 效果音量	Noise 效果音量
-Fader Effects	推子效果 (Fader FX)	推桿效果 (Fader FX)
-Disarm After Trigger	触发后自动解除	觸發後自動解除
-Reset Effects to Default Settings	恢复效果默认设置	恢復效果預設設定
-SWEEP FX	滤波效果	濾波效果
-EQ / STEMS	EQ / 分轨	EQ / 分軌
-Jump −	跳拍 −	跳拍 −
-Jump +	跳拍 +	跳拍 +
-Sweep FX	滤波效果	濾波效果
-Resonance	谐振	諧振
-PX Delay Time Mode	先锋效果延时模式 (PX)	先鋒效果延遲模式 (PX)
-PX Delay Time (ms)	先锋效果延时 (ms)	先鋒效果延遲 (ms)
-Spiral / Pitch Echo / Dub Echo only; stock Beat FX stay in beats	仅作用于 Spiral / Pitch Echo / Dub Echo；原厂效果仍按节拍同步	僅作用於 Spiral / Pitch Echo / Dub Echo；原廠效果仍依節拍同步
-Default (Off)	默认（关闭）	預設（關閉）
-Milliseconds (ms)	毫秒（ms）	毫秒（ms）
-Time (ms)	时间（ms）	時間（ms）
-OFFLINE · 	离线 · 	離線 · 
-REMOTE	仅曲目信息	僅曲目資訊
-OVERVIEW	概览波形	概覽波形
-Loading…	正在加载…	正在載入…
-Layer A	Layer A	Layer A
-Layer B	Layer B	Layer B
-Deck 3/4	碟机 3/4	碟機 3/4
-DECK 	碟机 	碟機 
-PLAYER 	碟机 	碟機 
-ENGINE CONNECT	ENGINE CONNECT	ENGINE CONNECT
-CHANNEL ASSIGNMENT	通道分配	通道分配
-None	无	無
-MUTE	静音	靜音
-LATCH	锁定	鎖定
-Extreme Type	滤波极值行为	濾波極值行為
-Volume	音量	音量
-Crossfader	交叉推子	交叉推桿
-Microphone	麦克风	麥克風
-Output	输出	輸出
-Computer	电脑	電腦
-Crossfader Assign	交叉推子分配	交叉推桿分配
-FX Assign	效果器分配	效果器分配
-X-Fader Contour	交叉推子曲线	交叉推桿曲線
-Fader Start Left	左侧推子启动	左側推桿啟動
-Fader Start Right	右侧推子启动	右側推桿啟動
-General	常规	一般
-Routing	输出路由	輸出路由
-Main VU Meter	主输出电平表	主輸出電平表
-Main Output Boost	主输出增益	主輸出增益
-Send to Zone Out	发送至副区输出	傳送至副區輸出
-Anti-Feedback	啸叫抑制	回授抑制
-Feedback Suppressor	啸叫抑制	回授抑制
-Talkover Level	Talkover 衰减量	Talkover 衰減量
-Talkover Resume	Talkover 恢复速度	Talkover 恢復速度
-Send to	发送至	傳送至
-Send to Speakers	发送至主音箱	傳送至主喇叭
-Send to Booth	发送至监听音箱	傳送至監聽喇叭
-Send to Booth & Speakers	发送至监听与主音箱	傳送至監聽與主喇叭
-Send to Headphones	发送至耳机	傳送至耳機
-Send to Zone	发送至副区	傳送至副區
-View %1	视图 %1	視圖 %1
-Dismiss	关闭	關閉
-Authorize	授权	授權
-Start your journey	开始使用	開始使用
-Clear Stem Render Queue?	清空 Stems 分轨队列？	清空 Stems 分軌佇列？
-Clearing the render will clear queued stem tracks and stop any rendering in progress.	清空后将移除排队中的曲目并停止当前正在进行的 Stems 分轨。	清空後將移除排隊中的曲目並停止目前進行中的 Stems 分軌。
-Please connect to the internet to sync the time.	请连接网络以同步时间。	請連線至網路以同步時間。
-Failed to set Time Zone.	设置时区失败。	設定時區失敗。
+Send Anonymous Usage Statistics	发送匿名使用统计	傳送匿名使用統計	Enviar estadísticas de uso anónimas
+Debug Information	调试信息	除錯資訊	Información de depuración
+Save to Source	保存到来源	儲存到來源	Guardar en fuente
+Other Available Updates	其他可用更新	其他可用更新	Otras actualizaciones disponibles
+No updates available	没有可用更新	沒有可用更新	No hay actualizaciones disponibles
+Screen Brightness	屏幕亮度	螢幕亮度	Brillo de pantalla
+Screen (Plugged In)	屏幕（接通电源）	螢幕（接上電源）	Pantalla (Conectado a la corriente)
+Screen (Battery)	屏幕（电池）	螢幕（電池）	Pantalla (Batería)
+Checking...	正在检查…	正在檢查…	Comprobando…
+Options	选项	選項	Opciones
+This will wipe all user settings and passwords from this device and restore it to its factory default configuration. The device will reboot during this process.	这将清除本设备上的所有用户设置和密码，并恢复出厂默认配置。设备会在此过程中重启。	這將清除本裝置上的所有使用者設定與密碼，並恢復原廠預設設定。裝置會在此過程中重新啟動。	Esto borrará todos los ajustes de usuario y contraseñas de este dispositivo y lo restaurará a su configuración predeterminada de fábrica. El dispositivo se reiniciará durante este proceso.
+Version: ${version}	版本：${version}	版本：${version}	Versión: ${version}
+Prepare	准备	準備	Preparar
+The QR code expired.	二维码已过期。	QR Code 已過期。	El código QR ha caducado.
+Tap for a new QR code	点这里换一个新二维码	點這裡換一個新 QR Code	Toca para obtener un nuevo código QR
+4-Deck Role	四轨角色	四軌角色	Rol de 4 decks
+Auto	自动	自動	Automático
+Turn Off	关机	關機	Apagar
+Power	电源	電源	Energía
+Censor Button Behavior	Censor 键行为	Censor 鍵行為	Comportamiento del botón Censor
+Silent Cue	静音 Cue	靜音 Cue	Silent Cue
+Waveform Zoom	波形缩放	波形縮放	Zoom de forma de onda
+Open Library	打开曲库	開啟曲庫	Abrir biblioteca
+Master Limiter	原厂主输出限幅 (dB)	原廠主輸出限幅 (dB)	Limitador master
+Web Console	网页控制台	網頁控制台	Consola web
+Access Code	访问码	存取碼	Código de acceso
+Trigger Source	触发来源	觸發來源	Fuente de disparo
+Fader Echo	推子回音	推桿回音	Fader Echo
+Fader Echo: Up	推子回音：仅竖推	推桿回音：僅豎推	Fader Echo: subir
+Fader Echo: All	推子回音：全部	推桿回音：全部	Fader Echo: todos
+All Faders	全部推子	全部推桿	Todos los faders
+Upfader Only	仅竖推	僅豎推	Solo upfaders
+Upfader	竖推	豎推	Upfader
+All	全部	全部	Todos
+Pad LED Brightness	打击垫亮度	打擊墊亮度	Brillo LED de pads
+Dual-Column Browser	双栏浏览	雙欄瀏覽	Navegador de dos columnas
+Beat Jump Pad Bank	节拍跳跃打击垫	節拍跳躍打擊墊	Banco de pads Beat Jump
+Swap Loop / Beat Jump	互换循环 / 节拍跳跃	互換循環 / 節拍跳躍	Intercambiar Loop / Beat Jump
+Sync Guard Tolerance	同步保护容差	同步保護容差	Tolerancia de Sync Guard
+Stems EQ Mode	分轨 EQ 模式	分軌 EQ 模式	Modo Stems EQ
+Color FX Style	先锋风格效果 (Color FX)	先鋒風格效果 (Color FX)	Estilo Color FX
+Spiral	Spiral	Spiral	Spiral
+Pitch Echo	Pitch Echo	Pitch Echo	Pitch Echo
+Slip Roll	Slip Roll	Slip Roll	Slip Roll
+Dub Echo	Dub Echo	Dub Echo	Dub Echo
+Space	Space	Space	Space
+ENGINEX VIEW PRESET	ENGINEX 视图预设	ENGINEX 視圖預設	PREAJUSTE DE VISTA ENGINEX
+Stems LAN renderer online:	局域网分轨主机在线：	區域網路分軌主機在線：	Renderizador LAN de Stems en línea:
+Stems LAN renderer offline:	局域网分轨主机离线：	區域網路分軌主機離線：	Renderizador LAN de Stems desconectado:
+On-deck stems (basic quality). For high-quality stems, run the EngineX Stems service on a computer on the same network.	本机分轨（基础音质）。如需高音质分轨，请在同一局域网的电脑上运行 EngineX Stems 服务。	本機分軌（基礎音質）。如需高音質分軌，請在同一區域網路的電腦上執行 EngineX Stems 服務。	Stems en el deck (calidad básica). Para stems de alta calidad, ejecuta el servicio EngineX Stems en un ordenador de la misma red.
+High-quality stems:	高音质分轨：	高音質分軌：	Stems de alta calidad:
+Stem	分轨 Stems	分軌 Stems	Stems
+Cue Countdown	热标拍数倒数	熱標拍數倒數	Cuenta atrás de Cue
+Mixer Menu	混音台菜单	混音器選單	Menú del mezclador
+Mixer Settings	混音台设置	混音器設定	Ajustes del mezclador
+Channels	通道	通道	Canales
+Input	输入	輸入	Entrada
+Player	碟机	碟機	Reproductor
+Line In	线路输入	線路輸入	Entrada de línea
+Engine	Engine	Engine	Engine
+Shadow Deck Mode	影子轨模式	影子軌模式	Modo Shadow Deck
+Auto: copyable tracks load locally like a local deck; uncopyable CDJ tracks show CDJ waveforms	自动：对端曲目可拷贝时由本机加载（同本机显示）；无法拷贝时显示 CDJ 波形	自動：對端曲目可複製時由本機載入（同本機顯示）；無法複製時顯示 CDJ 波形	Auto: las pistas que se pueden copiar se cargan como en un deck local; las de CDJ que no se pueden copiar muestran la forma de onda del CDJ
+All Engine Mode: Engine loads every source and shows it exactly like a local deck	全部 Engine 模式：所有对端曲目均由本机加载，与本机显示一模一样	全部 Engine 模式：所有對端曲目均由本機載入，與本機顯示一模一樣	Modo todo Engine: Engine carga todas las fuentes y las muestra igual que un deck local
+All CDJ Mode: no track is loaded for any source (CDJ / Pro DJ Link view)	全部 CDJ 模式：不加载对端音频，一律显示 CDJ 式波形	全部 CDJ 模式：不載入對端音訊，一律顯示 CDJ 式波形	Modo todo CDJ: no se carga ninguna pista de ninguna fuente (vista CDJ / Pro DJ Link)
+All Engine Mode	全部 Engine 模式	全部 Engine 模式	Modo todo Engine
+All CDJ Mode	全部 CDJ 模式	全部 CDJ 模式	Modo todo CDJ
+All Engine Mode: no CDJ waveform on Line In	全部 Engine 模式下 Line In 不显示 CDJ 波形	全部 Engine 模式下 Line In 不顯示 CDJ 波形	Modo todo Engine: sin forma de onda de CDJ en la entrada de línea
+Downloading	正在下载	正在下載	Descargando
+Loading	正在加载	正在載入	Cargando
+Waiting for source analysis	等待源碟机分析波形	等待來源碟機分析波形	Esperando el análisis de la fuente
+Failed to open file within appropriate time.	未能在规定时间内打开文件。	未能在規定時間內開啟檔案。	No se pudo abrir el archivo a tiempo.
+Could not load via network.	无法通过网络加载。	無法透過網路載入。	No se pudo cargar por la red.
+Retrying…	正在重试…	正在重試…	Reintentando…
+Streaming: no file to copy from CDJ.	流媒体：CDJ 无文件可拷贝。	串流：CDJ 無檔案可複製。	Streaming: no hay archivo que copiar del CDJ.
+rekordbox Link: no file to copy from CDJ.	rekordbox Link：CDJ 无文件可拷贝。	rekordbox Link：CDJ 無檔案可複製。	rekordbox Link: no hay archivo que copiar del CDJ.
+CD or 2nd USB: no file to copy from CDJ.	CD 或第二 USB：CDJ 无文件可拷贝。	CD 或第二 USB：CDJ 無檔案可複製。	CD o 2.º USB: no hay archivo que copiar del CDJ.
+Restart Engine to apply? Playback will stop.	需要重启 Engine，播放会中断。	需要重新啟動 Engine，播放會中斷。	¿Reiniciar Engine para aplicarlo? La reproducción se detendrá.
+PERFORMANCE LAYOUT	演出布局	演出配置	DISPOSICIÓN DE ACTUACIÓN
+DECK BEHAVIOR	碟机行为	碟機行為	COMPORTAMIENTO DEL DECK
+Deck Type	碟机视图	碟機視圖	Tipo de deck
+Deck Layout	碟机排列	碟機排列	Disposición de decks
+Performance Library	同屏曲库	同屏曲庫	Biblioteca de actuación
+Main FX	主效果栏	主效果欄	FX principales
+Enable for Dual Deck	启用双层播放	啟用雙層播放	Activar para doble deck
+Deck Swap	左右层互换	左右層互換	Intercambio de decks
+X Fader	交叉推子	交叉推桿	Crossfader
+X Fader Contour	交叉推子曲线	交叉推桿曲線	Curva del crossfader
+Stop Time	停盘时间	停盤時間	Tiempo de parada
+FAST	快	快	RÁPIDO
+SLOW	慢	慢	LENTO
+Split Cue	分离监听	分離監聽	Cue dividido
+Software FX	软件效果	軟體效果	FX de software
+Open Recording	打开录音	開啟錄音	Abrir grabación
+Mic	麦克风	麥克風	Mic
+Mic / Aux	麦克风 / Aux	麥克風 / Aux	Mic / Aux
+Cue/Loop Quantization	Cue/Loop 量化精度	Cue/Loop 量化精度	Cuantización de Cue/Loop
+Link Beat Jump / Loop Size Controls	联动节拍跳跃与 Loop 长度	連動節拍跳躍與 Loop 長度	Vincular controles de Beat Jump / tamaño de loop
+Smart Loops	智能 Loop	智慧 Loop	Loops inteligentes
+Move Cue to Loop In	Cue 移至 Loop 起点	Cue 移至 Loop 起點	Mover Cue al Loop In
+Hot Cue Countdown	热标拍数倒数	熱標拍數倒數	Cuenta atrás de Hot Cue
+Collection Browse Behavior	曲库浏览方式	曲庫瀏覽方式	Comportamiento al explorar la colección
+Track Overview Style	曲目概览样式	曲目概覽樣式	Estilo del resumen de pista
+Stems List	Stems 分轨列表	Stems 分軌列表	Lista de Stems
+Contour	交叉推子曲线	交叉推桿曲線	Curva
+X-Fader Cut In Length Left	交叉推子左侧切入行程	交叉推桿左側切入行程	Corte del crossfader izquierdo
+X-Fader Cut In Length Right	交叉推子右侧切入行程	交叉推桿右側切入行程	Corte del crossfader derecho
+EQ Type	均衡器类型	等化器類型	Tipo de EQ
+ISO EQ Low Xover	ISO 低频分频点	ISO 低頻分頻點	Corte bajo del EQ ISO
+ISO EQ High Xover	ISO 高频分频点	ISO 高頻分頻點	Corte alto del EQ ISO
+Filter Resonance	滤波器谐振	濾波器諧振	Resonancia del filtro
+Filter Extreme Type	滤波极值行为	濾波極值行為	Tipo de extremo del filtro
+Aux EQ	Aux 均衡器	Aux 等化器	EQ de Aux
+Smart Headphone Cue	智能耳机监听	智慧耳機監聽	Cue de auriculares inteligente
+Split Cue Output	分离监听输出	分離監聽輸出	Salida de Cue dividido
+Sum Main Out to Mono	主输出合并单声道	主輸出合併單聲道	Salida master en mono
+BPM Effects	节拍效果 (BPM FX)	節拍效果 (BPM FX)	Efectos BPM
+Effect Select Behavior	效果切换行为	效果切換行為	Comportamiento al elegir efecto
+Mirror Favorite FX Banks	镜像常用效果组	鏡像常用效果組	Reflejar bancos de FX favoritos
+Sweep Effects	滤波效果 (Sweep FX)	濾波效果 (Sweep FX)	Efectos de barrido
+FX Noise Volume	Noise 效果音量	Noise 效果音量	Volumen del ruido de FX
+Fader Effects	推子效果 (Fader FX)	推桿效果 (Fader FX)	Efectos de fader
+Disarm After Trigger	触发后自动解除	觸發後自動解除	Desarmar tras disparar
+Reset Effects to Default Settings	恢复效果默认设置	恢復效果預設設定	Restablecer efectos a valores predeterminados
+SWEEP FX	滤波效果	濾波效果	SWEEP FX
+EQ / STEMS	EQ / 分轨	EQ / 分軌	EQ / STEMS
+Jump −	跳拍 −	跳拍 −	Salto −
+Jump +	跳拍 +	跳拍 +	Salto +
+Sweep FX	滤波效果	濾波效果	FX de barrido
+Resonance	谐振	諧振	Resonancia
+PX Delay Time Mode	先锋效果延时模式 (PX)	先鋒效果延遲模式 (PX)	Modo de tiempo de delay PX
+PX Delay Time (ms)	先锋效果延时 (ms)	先鋒效果延遲 (ms)	Tiempo de delay PX (ms)
+Spiral / Pitch Echo / Dub Echo only; stock Beat FX stay in beats	仅作用于 Spiral / Pitch Echo / Dub Echo；原厂效果仍按节拍同步	僅作用於 Spiral / Pitch Echo / Dub Echo；原廠效果仍依節拍同步	Solo Spiral / Pitch Echo / Dub Echo; los Beat FX originales siguen en beats
+Default (Off)	默认（关闭）	預設（關閉）	Predeterminado (desactivado)
+Milliseconds (ms)	毫秒（ms）	毫秒（ms）	Milisegundos (ms)
+Time (ms)	时间（ms）	時間（ms）	Tiempo (ms)
+OFFLINE · 	离线 · 	離線 · 	SIN CONEXIÓN · 
+REMOTE	仅曲目信息	僅曲目資訊	REMOTO
+OVERVIEW	概览波形	概覽波形	RESUMEN
+Loading…	正在加载…	正在載入…	Cargando…
+Layer A	Layer A	Layer A	Layer A
+Layer B	Layer B	Layer B	Layer B
+Deck 3/4	碟机 3/4	碟機 3/4	Deck 3/4
+DECK 	碟机 	碟機 	DECK 
+PLAYER 	碟机 	碟機 	REPRODUCTOR
+ENGINE CONNECT	ENGINE CONNECT	ENGINE CONNECT	ENGINE CONNECT
+CHANNEL ASSIGNMENT	通道分配	通道分配	ASIGNACIÓN DE CANALES
+None	无	無	Ninguno
+MUTE	静音	靜音	MUTE
+LATCH	锁定	鎖定	LATCH
+Extreme Type	滤波极值行为	濾波極值行為	Tipo de extremo
+Volume	音量	音量	Volumen
+Crossfader	交叉推子	交叉推桿	Crossfader
+Microphone	麦克风	麥克風	Micrófono
+Output	输出	輸出	Salida
+Computer	电脑	電腦	Ordenador
+Crossfader Assign	交叉推子分配	交叉推桿分配	Asignación al crossfader
+FX Assign	效果器分配	效果器分配	Asignación de FX
+X-Fader Contour	交叉推子曲线	交叉推桿曲線	Curva del crossfader
+Fader Start Left	左侧推子启动	左側推桿啟動	Fader Start izquierdo
+Fader Start Right	右侧推子启动	右側推桿啟動	Fader Start derecho
+General	常规	一般	General
+Routing	输出路由	輸出路由	Enrutamiento
+Main VU Meter	主输出电平表	主輸出電平表	Vúmetro master
+Main Output Boost	主输出增益	主輸出增益	Refuerzo de la salida master
+Send to Zone Out	发送至副区输出	傳送至副區輸出	Enviar a salida de zona
+Anti-Feedback	啸叫抑制	回授抑制	Antirrealimentación
+Feedback Suppressor	啸叫抑制	回授抑制	Supresor de realimentación
+Talkover Level	Talkover 衰减量	Talkover 衰減量	Nivel de Talkover
+Talkover Resume	Talkover 恢复速度	Talkover 恢復速度	Recuperación de Talkover
+Send to	发送至	傳送至	Enviar a
+Send to Speakers	发送至主音箱	傳送至主喇叭	Enviar a altavoces
+Send to Booth	发送至监听音箱	傳送至監聽喇叭	Enviar a cabina
+Send to Booth & Speakers	发送至监听与主音箱	傳送至監聽與主喇叭	Enviar a cabina y altavoces
+Send to Headphones	发送至耳机	傳送至耳機	Enviar a auriculares
+Send to Zone	发送至副区	傳送至副區	Enviar a zona
+View %1	视图 %1	視圖 %1	Vista %1
+Dismiss	关闭	關閉	Descartar
+Authorize	授权	授權	Autorizar
+Start your journey	开始使用	開始使用	Empezar
+Clear Stem Render Queue?	清空 Stems 分轨队列？	清空 Stems 分軌佇列？	¿Vaciar la cola de renderizado de Stems?
+Clearing the render will clear queued stem tracks and stop any rendering in progress.	清空后将移除排队中的曲目并停止当前正在进行的 Stems 分轨。	清空後將移除排隊中的曲目並停止目前進行中的 Stems 分軌。	Vaciar la cola eliminará las pistas de Stems en espera y detendrá cualquier renderizado en curso.
+Please connect to the internet to sync the time.	请连接网络以同步时间。	請連線至網路以同步時間。	Conéctate a internet para sincronizar la hora.
+Failed to set Time Zone.	设置时区失败。	設定時區失敗。	No se pudo ajustar la zona horaria.
 # Control Center, Layout, Profile, Settings & Mixer Menu complete options
-Deck 1	碟机 1	碟機 1
-Deck 2	碟机 2	碟機 2
-Deck 3	碟机 3	碟機 3
-Deck 4	碟机 4	碟機 4
-Channel 1	通道 1	通道 1
-Channel 2	通道 2	通道 2
-Channel 3	通道 3	通道 3
-Channel 4	通道 4	通道 4
-Ch 1	通道 1	通道 1
-Ch 2	通道 2	通道 2
-Ch 3	通道 3	通道 3
-Ch 4	通道 4	通道 4
-Classic	经典	經典
-Wave	波形模式	波形模式
-Art	封面模式	封面模式
-Single	单层	單層
-Dual (Stacked)	双层（上下）	雙層（上下）
-Dual (Grouped)	双层（并排）	雙層（並排）
-Dual	双轨	雙軌
-Quad	四轨	四軌
-2 Decks	2 轨	2 軌
-4 Decks	4 轨	4 軌
-2 Waveforms	2 条波形	2 條波形
-4 Waveforms	4 条波形	4 條波形
-Horizontal	横向	橫向
-Vertical	纵向	縱向
-Regular	正常	正常
-Swapped	互换	互換
-Save to my drive	保存到 U 盘	儲存至隨身碟
-Saved	已保存	已儲存
-Load drive profile to device?	将 U 盘中的配置加载到本机？	將隨身碟中的設定檔載入至本機？
-Normal	标准	標準
-Instant	立即	立即
-Motor Torque	转盘扭矩	轉盤扭力
-Cue Position	Cue 点	Cue 點
-Track Start	曲目开头	曲目開頭
-Censor	消音倒放	消音倒放
-Acapella/Instrumental FX	人声/伴奏分轨效果	人聲/伴奏分軌效果
-Primary	主按钮	主按鈕
-Min	最低	最低
-Bar	小节	小節
-Beat	节拍	節拍
-Tempo	速度	速度
-Toggle	直接切换	直接切換
-Shift Disable	Shift 关闭	Shift 關閉
-Pitch Bend	变速微调	變速微調
-Range	变速范围	變速範圍
-Fixed	固定	固定
-Progressive	渐进	漸進
-Strict	严格	嚴格
-Fuzzy	宽松	寬鬆
-Momentary	按住播放	按住播放
-Trigger	触发	觸發
-Reloop	重新循环	重新循環
-Disable	停用	停用
-Enable	仅激活	僅啟用
-Filename	文件名	檔案名稱
-Metadata	内嵌标签	內嵌標籤
-Static	静态	靜態
-Dynamic	动态	動態
-Beat Phase	节拍相位	節拍相位
-Beat Keeper	四拍指示	四拍指示
-Half	半幅	半幅
-Full	全幅	全幅
-Long Press	长按	長按
-Sharps	升号 (♯)	升記號 (♯)
-Flats	降号 (♭)	降記號 (♭)
-Match	完全相同	完全相同
-Compatible	兼容调性	相容調性
-Smart	智能	智慧
-15m	15 分钟	15 分鐘
-30m	30 分钟	30 分鐘
-60m	60 分钟	60 分鐘
-MPCe LED Bloom	MPCe 打击垫光晕	MPCe 打擊墊光暈
-Remove Stems Support	移除 Stems 分轨组件	移除 Stems 分軌組件
-Download Stems Support	下载 Stems 分轨组件	下載 Stems 分軌組件
-Remove	移除	移除
-Download	下载	下載
-Main	主输出	主輸出
-Channel	通道	通道
-Playlist Deck Crossfade Time	歌单混音过渡时间	歌單混音過渡時間
-Isolate	隔离 (ISO)	隔離 (ISO)
-Invert	左右反转	左右反轉
-Kill	完全静音	完全靜音
-Bleed	保留直通	保留直通
-Fader Echo Beats	推子回音拍数	推桿回音拍數
-Fader Echo Feedback	推子回音反馈	推桿回音回授
-Default	恢复默认	恢復預設
-Recall	保持设置	保留設定
-Fast	快	快
-Mic Attenuation	麦克风衰减	麥克風衰減
-Mic 1 Attenuation	麦克风 1 衰减	麥克風 1 衰減
-Mic 2 Attenuation	麦克风 2 衰减	麥克風 2 衰減
-Gate Threshold	噪声门阈值	噪音門閾值
-Mic 1 Gate Threshold	麦克风 1 噪声门阈值	麥克風 1 噪音門閾值
-Mic 2 Gate Threshold	麦克风 2 噪声门阈值	麥克風 2 噪音門閾值
-Talkover Threshold	Talkover 触发阈值	Talkover 觸發閾值
-Mic 1 Talkover Threshold	麦克风 1 Talkover 阈值	麥克風 1 Talkover 閾值
-Mic 2 Talkover Threshold	麦克风 2 Talkover 阈值	麥克風 2 Talkover 閾值
-Mic 1 EQ	麦克风 1 均衡器	麥克風 1 等化器
-Mic 2 EQ	麦克风 2 均衡器	麥克風 2 等化器
-EQ	均衡器 (EQ)	等化器 (EQ)
-Mic Effects	麦克风效果组	麥克風效果組
-Mic FX	麦克风效果	麥克風效果
-Mic FX Amount	麦克风效果量	麥克風效果量
-Mic FX Select	麦克风效果选择	麥克風效果選擇
-Echo Feedback	Echo 反馈	Echo 回授
-Echo Speed	Echo 速度	Echo 速度
-Speakers	主音箱	主喇叭
-Booth	监听音箱	監聽喇叭
-Headphones	耳机	耳機
-Zone	副区	副區
-Thru	直通	直通
-Left	左	左
-Right	右	右
-Pre-Fader	推子前	推桿前
-Post-Fader	推子后	推桿後
-Ableton Link Offset	Ableton Link 延迟补偿	Ableton Link 延遲補償
-Connected	已连接	已連線
-Not Connected	未连接	未連線
-No Internet Connection	无互联网连接	無網際網路連線
-No internet connection	无互联网连接	無網際網路連線
-Strength	信号强度	訊號強度
-IP Version 4 Address	IPv4 地址	IPv4 位址
-Login Credentials	登录凭据	登入憑證
-Forget	忘记	忘記
-Preferred Networks	首选网络	慣用網路
-Available Networks	可用网络	可用網路
-Searching for wireless networks	正在搜索无线网络	正在搜尋無線網路
-Wi-Fi is currently disabled.<br />To see available networks, first enable Wi-Fi.	Wi-Fi 当前已关闭。<br />请先开启 Wi-Fi 以查看可用网络。	Wi-Fi 目前已關閉。<br />請先開啟 Wi-Fi 以查看可用網路。
-Ensure you are connected to Wi-Fi to receive the latest updates and features	请连接 Wi-Fi 以获取最新更新与功能	請連線至 Wi-Fi 以取得最新更新與功能
-Failed to connect to Wi-Fi network.	连接 Wi-Fi 网络失败。	連線至 Wi-Fi 網路失敗。
-Password was not accepted.	密码不正确。	密碼不正確。
-Lost connection to Wi-Fi network.	Wi-Fi 网络连接已断开。	Wi-Fi 網路連線已中斷。
-Paired Player	双碟机配对	雙碟機配對
-Paired Player: this player's active layer and the other player's active deck, one lane each	双碟机配对：本机当前 Layer 与另一台碟机的当前轨各占一条波形	雙碟機配對：本機目前 Layer 與另一台碟機的目前軌各佔一條波形
-Paired Player needs 4-Deck Role Auto, 1+3, 2+4, 1 or 2	双碟机配对需要四轨角色为自动、1+3、2+4、1 或 2	雙碟機配對需要四軌角色為自動、1+3、2+4、1 或 2
-No paired player	未连接配对碟机	未連接配對碟機
-Linked View	联机视图	聯機視圖
-Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout	单层 / 双层：Shift + Layer，或 布局 > 演出布局 > 碟机排列	單層 / 雙層：Shift + Layer，或 版面 > 演出配置 > 碟機排列
-Stock	原厂	原廠
-Preparing USB…	正在准备 USB…	正在準備 USB…
+Deck 1	碟机 1	碟機 1	Deck 1
+Deck 2	碟机 2	碟機 2	Deck 2
+Deck 3	碟机 3	碟機 3	Deck 3
+Deck 4	碟机 4	碟機 4	Deck 4
+Channel 1	通道 1	通道 1	Canal 1
+Channel 2	通道 2	通道 2	Canal 2
+Channel 3	通道 3	通道 3	Canal 3
+Channel 4	通道 4	通道 4	Canal 4
+Ch 1	通道 1	通道 1	Can 1
+Ch 2	通道 2	通道 2	Can 2
+Ch 3	通道 3	通道 3	Can 3
+Ch 4	通道 4	通道 4	Can 4
+Classic	经典	經典	Clásico
+Wave	波形模式	波形模式	Onda
+Art	封面模式	封面模式	Carátula
+Single	单层	單層	Simple
+Dual (Stacked)	双层（上下）	雙層（上下）	Doble (apilado)
+Dual (Grouped)	双层（并排）	雙層（並排）	Doble (agrupado)
+Dual	双轨	雙軌	Doble
+Quad	四轨	四軌	Cuádruple
+2 Decks	2 轨	2 軌	2 decks
+4 Decks	4 轨	4 軌	4 decks
+2 Waveforms	2 条波形	2 條波形	2 ondas
+4 Waveforms	4 条波形	4 條波形	4 ondas
+Horizontal	横向	橫向	Horizontal
+Vertical	纵向	縱向	Vertical
+Regular	正常	正常	Normal
+Swapped	互换	互換	Intercambiado
+Save to my drive	保存到 U 盘	儲存至隨身碟	Guardar en mi unidad
+Saved	已保存	已儲存	Guardado
+Load drive profile to device?	将 U 盘中的配置加载到本机？	將隨身碟中的設定檔載入至本機？	¿Cargar en el dispositivo el perfil de la unidad?
+Normal	标准	標準	Normal
+Instant	立即	立即	Instantáneo
+Motor Torque	转盘扭矩	轉盤扭力	Par del motor
+Cue Position	Cue 点	Cue 點	Posición de Cue
+Track Start	曲目开头	曲目開頭	Inicio de la pista
+Censor	消音倒放	消音倒放	Censor
+Acapella/Instrumental FX	人声/伴奏分轨效果	人聲/伴奏分軌效果	FX Acapella/Instrumental
+Primary	主按钮	主按鈕	Principal
+Min	最低	最低	Mín.
+Bar	小节	小節	Compás
+Beat	节拍	節拍	Beat
+Tempo	速度	速度	Tempo
+Toggle	直接切换	直接切換	Alternar
+Shift Disable	Shift 关闭	Shift 關閉	Desactivar con Shift
+Pitch Bend	变速微调	變速微調	Pitch Bend
+Range	变速范围	變速範圍	Rango
+Fixed	固定	固定	Fijo
+Progressive	渐进	漸進	Progresivo
+Strict	严格	嚴格	Estricto
+Fuzzy	宽松	寬鬆	Aproximado
+Momentary	按住播放	按住播放	Momentáneo
+Trigger	触发	觸發	Disparo
+Reloop	重新循环	重新循環	Reloop
+Disable	停用	停用	Desactivar
+Enable	仅激活	僅啟用	Activar
+Filename	文件名	檔案名稱	Nombre de archivo
+Metadata	内嵌标签	內嵌標籤	Metadatos
+Static	静态	靜態	Estático
+Dynamic	动态	動態	Dinámico
+Beat Phase	节拍相位	節拍相位	Fase del beat
+Beat Keeper	四拍指示	四拍指示	Beat Keeper
+Half	半幅	半幅	Mitad
+Full	全幅	全幅	Completo
+Long Press	长按	長按	Pulsación larga
+Sharps	升号 (♯)	升記號 (♯)	Sostenidos
+Flats	降号 (♭)	降記號 (♭)	Bemoles
+Match	完全相同	完全相同	Match
+Compatible	兼容调性	相容調性	Compatible
+Smart	智能	智慧	Inteligente
+15m	15 分钟	15 分鐘	15 min
+30m	30 分钟	30 分鐘	30 min
+60m	60 分钟	60 分鐘	60 min
+MPCe LED Bloom	MPCe 打击垫光晕	MPCe 打擊墊光暈	MPCe LED Bloom
+Remove Stems Support	移除 Stems 分轨组件	移除 Stems 分軌組件	Quitar soporte de Stems
+Download Stems Support	下载 Stems 分轨组件	下載 Stems 分軌組件	Descargar soporte de Stems
+Remove	移除	移除	Quitar
+Download	下载	下載	Descargar
+Main	主输出	主輸出	Master
+Channel	通道	通道	Canal
+Playlist Deck Crossfade Time	歌单混音过渡时间	歌單混音過渡時間	Tiempo de crossfade del Playlist Deck
+Isolate	隔离 (ISO)	隔離 (ISO)	Aislar
+Invert	左右反转	左右反轉	Invertir
+Kill	完全静音	完全靜音	Kill
+Bleed	保留直通	保留直通	Bleed
+Fader Echo Beats	推子回音拍数	推桿回音拍數	Beats de Fader Echo
+Fader Echo Feedback	推子回音反馈	推桿回音回授	Realimentación de Fader Echo
+Default	恢复默认	恢復預設	Predeterminado
+Recall	保持设置	保留設定	Recuperar
+Fast	快	快	Rápido
+Mic Attenuation	麦克风衰减	麥克風衰減	Atenuación del mic
+Mic 1 Attenuation	麦克风 1 衰减	麥克風 1 衰減	Atenuación del mic 1
+Mic 2 Attenuation	麦克风 2 衰减	麥克風 2 衰減	Atenuación del mic 2
+Gate Threshold	噪声门阈值	噪音門閾值	Umbral de puerta
+Mic 1 Gate Threshold	麦克风 1 噪声门阈值	麥克風 1 噪音門閾值	Umbral de puerta del mic 1
+Mic 2 Gate Threshold	麦克风 2 噪声门阈值	麥克風 2 噪音門閾值	Umbral de puerta del mic 2
+Talkover Threshold	Talkover 触发阈值	Talkover 觸發閾值	Umbral de Talkover
+Mic 1 Talkover Threshold	麦克风 1 Talkover 阈值	麥克風 1 Talkover 閾值	Umbral de Talkover del mic 1
+Mic 2 Talkover Threshold	麦克风 2 Talkover 阈值	麥克風 2 Talkover 閾值	Umbral de Talkover del mic 2
+Mic 1 EQ	麦克风 1 均衡器	麥克風 1 等化器	EQ del mic 1
+Mic 2 EQ	麦克风 2 均衡器	麥克風 2 等化器	EQ del mic 2
+EQ	均衡器 (EQ)	等化器 (EQ)	EQ
+Mic Effects	麦克风效果组	麥克風效果組	Efectos de micrófono
+Mic FX	麦克风效果	麥克風效果	FX de micrófono
+Mic FX Amount	麦克风效果量	麥克風效果量	Cantidad de FX de micrófono
+Mic FX Select	麦克风效果选择	麥克風效果選擇	Selección de FX de micrófono
+Echo Feedback	Echo 反馈	Echo 回授	Realimentación del eco
+Echo Speed	Echo 速度	Echo 速度	Velocidad del eco
+Speakers	主音箱	主喇叭	Altavoces
+Booth	监听音箱	監聽喇叭	Cabina
+Headphones	耳机	耳機	Auriculares
+Zone	副区	副區	Zona
+Thru	直通	直通	Thru
+Left	左	左	Izquierda
+Right	右	右	Derecha
+Pre-Fader	推子前	推桿前	Pre-fader
+Post-Fader	推子后	推桿後	Post-fader
+Ableton Link Offset	Ableton Link 延迟补偿	Ableton Link 延遲補償	Desfase de Ableton Link
+Connected	已连接	已連線	Conectado
+Not Connected	未连接	未連線	No conectado
+No Internet Connection	无互联网连接	無網際網路連線	Sin conexión a internet
+No internet connection	无互联网连接	無網際網路連線	Sin conexión a internet
+Strength	信号强度	訊號強度	Intensidad
+IP Version 4 Address	IPv4 地址	IPv4 位址	Dirección IPv4
+Login Credentials	登录凭据	登入憑證	Credenciales de inicio de sesión
+Forget	忘记	忘記	Olvidar
+Preferred Networks	首选网络	慣用網路	Redes preferidas
+Available Networks	可用网络	可用網路	Redes disponibles
+Searching for wireless networks	正在搜索无线网络	正在搜尋無線網路	Buscando redes inalámbricas
+Wi-Fi is currently disabled.<br />To see available networks, first enable Wi-Fi.	Wi-Fi 当前已关闭。<br />请先开启 Wi-Fi 以查看可用网络。	Wi-Fi 目前已關閉。<br />請先開啟 Wi-Fi 以查看可用網路。	El Wi-Fi está desactivado.<br />Para ver las redes disponibles, activa primero el Wi-Fi.
+Ensure you are connected to Wi-Fi to receive the latest updates and features	请连接 Wi-Fi 以获取最新更新与功能	請連線至 Wi-Fi 以取得最新更新與功能	Conéctate al Wi-Fi para recibir las últimas actualizaciones y funciones
+Failed to connect to Wi-Fi network.	连接 Wi-Fi 网络失败。	連線至 Wi-Fi 網路失敗。	No se pudo conectar a la red Wi-Fi.
+Password was not accepted.	密码不正确。	密碼不正確。	La contraseña no es correcta.
+Lost connection to Wi-Fi network.	Wi-Fi 网络连接已断开。	Wi-Fi 網路連線已中斷。	Se ha perdido la conexión con la red Wi-Fi.
+Paired Player	双碟机配对	雙碟機配對	Reproductor emparejado
+Paired Player: this player's active layer and the other player's active deck, one lane each	双碟机配对：本机当前 Layer 与另一台碟机的当前轨各占一条波形	雙碟機配對：本機目前 Layer 與另一台碟機的目前軌各佔一條波形	Reproductor emparejado: la capa activa de este reproductor y el deck activo del otro, una franja cada uno
+Paired Player needs 4-Deck Role Auto, 1+3, 2+4, 1 or 2	双碟机配对需要四轨角色为自动、1+3、2+4、1 或 2	雙碟機配對需要四軌角色為自動、1+3、2+4、1 或 2	Reproductor emparejado necesita Rol de 4 decks en Automático, 1+3, 2+4, 1 o 2
+No paired player	未连接配对碟机	未連接配對碟機	Sin reproductor emparejado
+Linked View	联机视图	聯機視圖	Vista vinculada
+Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout	单层 / 双层：Shift + Layer，或 布局 > 演出布局 > 碟机排列	單層 / 雙層：Shift + Layer，或 版面 > 演出配置 > 碟機排列	Simple / Doble: Shift + Layer, o Disposición > DISPOSICIÓN DE ACTUACIÓN > Disposición de decks
+Stock	原厂	原廠	Original
+Preparing USB…	正在准备 USB…	正在準備 USB…	Preparando el USB…
+# Stock Engine strings (message boxes, mixer, beatgrid editor, streaming, Engine OS deck widgets).
+No Track Loaded	未加载曲目	未載入曲目	No hay pista cargada
+Crossfader Calibration	交叉推子校准	交叉推桿校準	Calibración del crossfader
+Slowly and smoothly move the fader from right to left twice. Avoid applying excessive force at either endpoint.	将推子从右向左缓慢平稳地推动两次，两端不要过度用力。	將推桿從右向左緩慢平穩地推動兩次，兩端不要過度用力。	Mueve el fader despacio y con suavidad de derecha a izquierda dos veces. No hagas demasiada fuerza en los extremos.
+Log Out	退出登录	登出	Cerrar sesión
+Account in use	账号正在使用中	帳號使用中	Cuenta en uso
+Are you sure you want to discard the recording?	确定要丢弃这段录音吗？	確定要捨棄這段錄音嗎？	¿Seguro que quieres descartar la grabación?
+Artist	艺人	藝人	Artista
+Authorized	已授权	已授權	Autorizado
+Authorized For Offline Streaming	已授权离线流媒体	已授權離線串流	Autorizado para streaming sin conexión
+CONNECTION LOST. Reconnect to continue playing playlist.	连接已断开。重新连接后可继续播放歌单。	連線已中斷。重新連線後可繼續播放歌單。	CONEXIÓN PERDIDA. Vuelve a conectar para seguir reproduciendo la lista.
+CONT.	续播	續播	CONT.
+Checking for update	正在检查更新	正在檢查更新	Buscando actualizaciones
+Choose your Database	选择数据库	選擇資料庫	Elige tu base de datos
+Connect your Engine profile to your hardware.	将你的 Engine 账号与设备绑定。	將你的 Engine 帳號與裝置綁定。	Conecta tu perfil de Engine a tu equipo.
+Current Dropbox database will not be available during the download process.	下载期间当前的 Dropbox 数据库将不可用。	下載期間目前的 Dropbox 資料庫將無法使用。	La base de datos actual de Dropbox no estará disponible durante la descarga.
+Delete Anchor	删除锚点	刪除錨點	Borrar ancla
+Delete local content	删除本地内容	刪除本機內容	Borrar contenido local
+Destination	目标位置	目標位置	Destino
+Device Became Inactive	设备已变为非活动状态	裝置已變為非使用中	El dispositivo ha pasado a inactivo
+Device Type	设备类型	裝置類型	Tipo de dispositivo
+Downbeat Left	强拍左移	強拍左移	Downbeat a la izquierda
+Downbeat Right	强拍右移	強拍右移	Downbeat a la derecha
+Download completed	下载完成	下載完成	Descarga completada
+Engine DJ Profiles	Engine DJ 账号	Engine DJ 帳號	Perfiles de Engine DJ
+Engine Library unsupported	不支持此 Engine 曲库	不支援此 Engine 曲庫	Biblioteca de Engine no compatible
+Enter the password for '	输入密码：'	輸入密碼：'	Introduce la contraseña de '
+Fader FX	推子效果	推桿效果	FX de fader
+Firmware version mismatch	固件版本不一致	韌體版本不一致	Versiones de firmware distintas
+Follow Lead Deck	跟随主导碟机	跟隨主導碟機	Seguir al deck líder
+Incompatible Format	格式不兼容	格式不相容	Formato incompatible
+Insert Anchor	插入锚点	插入錨點	Insertar ancla
+LIBRARY	曲库	曲庫	BIBLIOTECA
+Loading to Sampler	正在加载到采样器	正在載入取樣器	Cargando en el sampler
+Loading..	加载中…	載入中…	Cargando…
+Local Drive	本地磁盘	本機磁碟	Unidad local
+Lock	锁定	鎖定	Bloquear
+Locked	已锁定	已鎖定	Bloqueado
+Login & Device Registration Successful	登录并注册设备成功	登入並註冊裝置成功	Inicio de sesión y registro del dispositivo correctos
+Login Successful	登录成功	登入成功	Inicio de sesión correcto
+Match Rules	Match 规则	Match 規則	Reglas de Match
+Maximizing Recording Volume	正在优化录音音量	正在最佳化錄音音量	Maximizando el volumen de grabación
+Media not ejected properly. This can corrupt the database. Eject before removing.	存储设备未正确弹出，可能损坏数据库。请先弹出再拔出。	儲存裝置未正確退出，可能損壞資料庫。請先退出再拔除。	El soporte no se expulsó correctamente. Esto puede dañar la base de datos. Expúlsalo antes de retirarlo.
+New UI	新界面	新介面	Nueva interfaz
+No Accounts Found	未找到账号	找不到帳號	No se encontraron cuentas
+No Update Available	没有可用更新	沒有可用更新	No hay actualizaciones
+No source drive available	没有可用的来源盘	沒有可用的來源磁碟	No hay unidad de origen disponible
+Note: Existing streaming/cloud logins will be removed and tracks loaded to deck will be ejected.	注意：现有的流媒体/云端登录将被移除，已加载到碟机的曲目将被退出。	注意：現有的串流/雲端登入將被移除，已載入碟機的曲目將被退出。	Nota: se eliminarán los inicios de sesión de streaming/nube y se expulsarán las pistas cargadas en los decks.
+OK	确定	確定	Aceptar
+Offline Device Limit Reached	已达到离线设备上限	已達離線裝置上限	Límite de dispositivos sin conexión alcanzado
+Offline Library Management	离线曲库管理	離線曲庫管理	Gestión de la biblioteca sin conexión
+Offline Track Total	离线曲目总数	離線曲目總數	Total de pistas sin conexión
+Or visit	或访问	或造訪	O visita
+Or visit 	或访问 	或造訪 	O visita
+PLAYER	碟机	碟機	REPRODUCTOR
+PLAYER %1	碟机 %1	碟機 %1	REPRODUCTOR %1
+POWER LOSS	断电	斷電	CORTE DE CORRIENTE
+Pause playback to enable	暂停播放后可用	暫停播放後可用	Pausa la reproducción para activarlo
+Playback was stopped due to 5 consecutive errors. Please check your connection.	连续 5 次出错，播放已停止。请检查网络连接。	連續 5 次出錯，播放已停止。請檢查網路連線。	La reproducción se detuvo tras 5 errores seguidos. Comprueba tu conexión.
+Players must be set to the same streaming quality to instant double.	碟机需设为相同的流媒体音质才能 Instant Double。	碟機需設為相同的串流音質才能 Instant Double。	Los reproductores deben tener la misma calidad de streaming para usar Instant Double.
+Playlist Bank could not be assigned.	无法分配 Playlist Bank。	無法指派 Playlist Bank。	No se pudo asignar el Playlist Bank.
+Playlist deck cannot be enabled as recording is in process.	正在录音，无法启用歌单碟机。	正在錄音，無法啟用歌單碟機。	El Playlist Deck no se puede activar mientras se está grabando.
+Please ensure your internal drive has been formatted to exFAT	请确认内置硬盘已格式化为 exFAT	請確認內建硬碟已格式化為 exFAT	Asegúrate de que la unidad interna esté formateada en exFAT
+Please reboot to activate.	请重启以启用。	請重新啟動以啟用。	Reinicia para activarlo.
+Please shutdown device	请关闭设备	請關閉裝置	Apaga el dispositivo
+Recording error	录音出错	錄音錯誤	Error de grabación
+Release	发行	發行	Lanzamiento
+Remove All Tracks	移除全部曲目	移除全部曲目	Quitar todas las pistas
+Remove Offline Tracks	移除离线曲目	移除離線曲目	Quitar pistas sin conexión
+Retry	重试	重試	Reintentar
+SAVE TO MY DRIVE	保存到我的盘	儲存到我的磁碟	GUARDAR EN MI UNIDAD
+SEARCH	搜索	搜尋	BUSCAR
+SEARCHING	搜索中	搜尋中	BUSCANDO
+UPDATING	更新中	更新中	ACTUALIZANDO
+Save as...	另存为…	另存為…	Guardar como…
+Select a Crate or Playlist in browse view and assign it to this playlist deck.	在浏览界面选择一个 Crate 或歌单，并分配给这个歌单碟机。	在瀏覽介面選擇一個 Crate 或歌單，並指派給這個歌單碟機。	Elige un Crate o una lista en el explorador y asígnalo a este Playlist Deck.
+Select device to collect saved recordings	选择保存录音的设备	選擇儲存錄音的裝置	Elige el dispositivo donde guardar las grabaciones
+Shift Left	左移	左移	Desplazar a la izquierda
+Shift Right	右移	右移	Desplazar a la derecha
+Skip profile login	跳过账号登录	略過帳號登入	Omitir inicio de sesión del perfil
+Storage Used	已用空间	已用空間	Almacenamiento usado
+Stream Limit Reached	已达到同时播放上限	已達同時播放上限	Límite de streams alcanzado
+Streaming quality mismatch	流媒体音质不一致	串流音質不一致	Calidad de streaming distinta
+Subscription level insufficient.	订阅等级不足。	訂閱等級不足。	Nivel de suscripción insuficiente.
+Tap Tempo	手动打拍测速	手動打拍測速	Tap Tempo
+The following peripherals did not come online during boot	以下外设在启动时未上线	以下周邊裝置在開機時未上線	Los siguientes periféricos no se conectaron durante el arranque
+The following track is too long and can not be downloaded.	以下曲目过长，无法下载。	以下曲目過長，無法下載。	La siguiente pista es demasiado larga y no se puede descargar.
+The pairing process may require a short wait time after approval.	批准后配对可能需要稍等片刻。	核准後配對可能需要稍等片刻。	El emparejamiento puede tardar un poco tras la aprobación.
+The track length for the selected quality is too long.	所选音质下曲目时长过长。	所選音質下曲目長度過長。	La pista es demasiado larga para la calidad seleccionada.
+This type of list or source is not supported for use with Playlist Bank.	Playlist Bank 不支持此类列表或来源。	Playlist Bank 不支援此類清單或來源。	Este tipo de lista u origen no se puede usar con Playlist Bank.
+To reduce search time, please select only fields in which you wish to search.	为缩短搜索时间，请只勾选需要搜索的字段。	為縮短搜尋時間，請只勾選需要搜尋的欄位。	Para buscar más rápido, elige solo los campos en los que quieras buscar.
+To start playback, press play on deck.	按碟机上的播放键开始播放。	按碟機上的播放鍵開始播放。	Para empezar, pulsa play en el deck.
+Touch and hold the Engine DJ logo to turn on	长按 Engine DJ 标志开机	長按 Engine DJ 標誌開機	Mantén pulsado el logo de Engine DJ para encender
+Track Too Long	曲目过长	曲目過長	Pista demasiado larga
+Tracks may be hidden by Match	部分曲目可能被 Match 隐藏	部分曲目可能被 Match 隱藏	Match puede estar ocultando pistas
+Update To Latest Database	更新到最新数据库	更新到最新資料庫	Actualizar a la última base de datos
+Using a web browser on your mobile device or computer, please go to:	请在手机或电脑的浏览器中打开：	請在手機或電腦的瀏覽器中開啟：	Desde el navegador de tu móvil u ordenador, ve a:
+Visit	访问	造訪	Visita
+WAITING FOR 	等待 	等待 	ESPERANDO A
+Warning	警告	警告	Aviso
+Welcome to Engine DJ	欢迎使用 Engine DJ	歡迎使用 Engine DJ	Te damos la bienvenida a Engine DJ
+Would you like to stop the current download to load this new track?	要停止当前下载并加载这首新曲目吗？	要停止目前下載並載入這首新曲目嗎？	¿Quieres detener la descarga actual para cargar esta pista nueva?
+Your recording was saved to the destination	录音已保存到目标位置	錄音已儲存到目標位置	Tu grabación se ha guardado en el destino
+and use the code below to activate this device.	并输入下面的代码激活这台设备。	並輸入下方的代碼啟用這台裝置。	e introduce el código de abajo para activar este dispositivo.
