@@ -101,6 +101,11 @@ class DataBundleTest(unittest.TestCase):
                       (src / 'boot-activate.sh').read_text())
         self.assertIn('Wants=enginex-stream-sync.service',
                       (src / 'boot-activate.sh').read_text())
+        overlay_ntp = (HERE.parents[1] / 'rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf').read_text()
+        self.assertIn('/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf', (src / 'boot-activate.sh').read_text())
+        self.assertIn(overlay_ntp, (src / 'boot-activate.sh').read_text())
+        self.assertIn('systemctl restart --no-block systemd-timesyncd.service', (src / 'boot-activate.sh').read_text())
+        self.assertIn('/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf', (src / 'uninstall.sh').read_text())
         self.assertTrue((src / '99-sc5000-custom.conf').exists())
         self.assertTrue((src / 'host-install-userdata.py').exists())
         self.assertTrue((src / 'host-install-fastboot.sh').exists())

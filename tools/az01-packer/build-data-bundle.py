@@ -79,6 +79,20 @@ EOF
     fi
 fi
 
+timesyncd_changed=0
+if [ -d /run/systemd ]; then
+    ntp_dropin=/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf
+    mkdir -p /run/systemd/timesyncd.conf.d
+    cat <<'EOF' > "$ntp_dropin.new"
+@TIMESYNCD_DROPIN@EOF
+    if cmp -s "$ntp_dropin.new" "$ntp_dropin"; then
+        rm -f "$ntp_dropin.new"
+    else
+        mv -f "$ntp_dropin.new" "$ntp_dropin"
+        timesyncd_changed=1
+    fi
+fi
+
 if [ -f "$bundle_dir/version.txt" ]; then
     mkdir -p /run/sc5000
     if [ ! -f /etc/sc5000/version.txt ] || ! cmp -s "$bundle_dir/version.txt" /etc/sc5000/version.txt; then
@@ -206,6 +220,7 @@ if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/
     [ -z "$ssh_key" ] || systemctl start --no-block sshd.service || :
     # Blocking, so edisksd is up again before convert_mounted looks at /media.
     [ "$edisksd_changed" = 0 ] || systemctl restart edisksd.service || :
+    [ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :
     convert_mounted
     systemctl restart --no-block engine.service || systemctl restart engine.service || :
 else
@@ -343,16 +358,17 @@ if [ -z "${SC5000_CUSTOM:-}" ]; then
             systemctl stop "enginex-$applet.service" 2>/dev/null || :
             rm -f "/run/systemd/system/enginex-$applet.service"
         done
-        rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf
+        rm -f /run/systemd/system/engine.service.d/99-sc5000.conf /run/systemd/system/edisksd.service.d/99-sc5000.conf /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf
         systemctl daemon-reload 2>/dev/null || :
-        systemctl restart --no-block edisksd.service 2>/dev/null || :
+        systemctl restart --no-block edisksd.service systemd-timesyncd.service 2>/dev/null || :
     fi
     pkill -x sc5000-suite 2>/dev/null || :
     rm -f /run/systemd/system/enginex-stream-sync.service \
           /run/systemd/system/enginex-rb-bridge.service \
           /run/systemd/system/enginex-sc5000-deemixd.service \
           /run/systemd/system/engine.service.d/99-sc5000.conf \
-          /run/systemd/system/edisksd.service.d/99-sc5000.conf
+          /run/systemd/system/edisksd.service.d/99-sc5000.conf \
+          /run/systemd/timesyncd.conf.d/10-enginex-ntp.conf
 fi
 echo "EngineX OS $version removed from $dest"
 '''
@@ -515,7 +531,8 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
         files[f'bin/{applet}'] = (WRAPPER.format(applet).encode(), 0o755)
     files['ui-packs.tar'] = (ui_packs_tar(ui_packs), 0o644)
     files['version.txt'] = (f'{version}\n'.encode(), 0o644)
-    files['boot-activate.sh'] = (BOOT_ACTIVATE.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)
+    ntp_dropin = (Path(__file__).resolve().parents[2] / 'rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf').read_text()
+    files['boot-activate.sh'] = (BOOT_ACTIVATE.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).replace('@TIMESYNCD_DROPIN@', ntp_dropin).encode(), 0o755)
     files['99-sc5000-custom.conf'] = (ALSA_CONF.encode(), 0o644)
     files['alsa-dir'] = (f'{alsa_dir(prefix)}\n'.encode(), 0o644)
     files['install.sh'] = (INSTALL.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)

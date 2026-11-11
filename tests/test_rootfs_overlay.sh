@@ -602,6 +602,53 @@ has 'NH08S' "$ROOT/tools/ui-mod/build_packs.py"
 has '/Track/${modelData.n}' "$ROOT/tools/ui-mod/build_packs.py"
 ok 'on-screen track skip buttons only on models without physical keys'
 
+# Time sync & timezone persistence: mainland-China + global NTP drop-in, etc-reset survival, Gen1 & Gen2 parity.
+NTP_CONF=$ROOT/rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf
+[[ -f $NTP_CONF ]] || fail "missing $NTP_CONF"
+has "[Time]" "$NTP_CONF"
+has "FallbackNTP=" "$NTP_CONF"
+has "FallbackNTP=ntp.aliyun.com ntp.tencent.com time.apple.com time.cloudflare.com pool.ntp.org time.google.com" "$NTP_CONF"
+cmp -s "$NTP_CONF" "$debloat_root/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf" ||
+    fail "sc5000-debloat --root timesyncd drop-in differs from rootfs-overlay"
+python3 -I - "$ROOT" "$TMP" <<'PY'
+import importlib.util, subprocess, sys
+from pathlib import Path
+repo, tmp = Path(sys.argv[1]), Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("az01_packer", repo / "tools/az01-packer/az01_packer.py")
+az = importlib.util.module_from_spec(spec); spec.loader.exec_module(az)
+etc_files = sorted(p.relative_to(repo / "rootfs-overlay/etc").as_posix()
+                   for p in (repo / "rootfs-overlay/etc").rglob("*") if p.is_file())
+assert "systemd/timesyncd.conf.d/10-enginex-ntp.conf" in etc_files
+data_dir = tmp / "etc-reset-ntp"
+upper = data_dir / "system/etc/overlay"
+lower = tmp / "lower-etc"
+(lower / "systemd/timesyncd.conf.d").mkdir(parents=True, exist_ok=True)
+want = (repo / "rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf").read_text()
+(lower / "systemd/timesyncd.conf.d/10-enginex-ntp.conf").write_text(want)
+for stale in ("systemd/timesyncd.conf", "systemd/timesyncd.conf.d/10-enginex-ntp.conf", "systemd/timesyncd.conf.d/99-stale.conf"):
+    (upper / stale).parent.mkdir(parents=True, exist_ok=True)
+    (upper / stale).write_text("[Time]\nFallbackNTP=time1.google.com\n")
+script = az.etc_reset("5.3.0.4-test", etc_files).replace(b"/data", str(data_dir).encode())
+r = subprocess.run(["sh", "-s"], input=script, capture_output=True)
+assert r.returncode == 0, r.stderr.decode()
+assert not (upper / "systemd/timesyncd.conf").exists()
+assert not (upper / "systemd/timesyncd.conf.d").exists()
+assert (lower / "systemd/timesyncd.conf.d/10-enginex-ntp.conf").read_text() == want
+
+bspec = importlib.util.spec_from_file_location("build_data_bundle", repo / "tools/az01-packer/build-data-bundle.py")
+bdb = importlib.util.module_from_spec(bspec); bspec.loader.exec_module(bdb)
+ba = bdb.BOOT_ACTIVATE.replace("@MIGRATE_IF_DEFAULT@", bdb.MIGRATE_IF_DEFAULT).replace("@TIMESYNCD_DROPIN@", want)
+assert "/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf" in ba
+assert want in ba
+assert "systemctl restart --no-block systemd-timesyncd.service" in ba
+assert "/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf" in bdb.UNINSTALL
+PY
+if command -v gcc >/dev/null 2>&1; then
+    gcc -O2 -Wall -Wextra -Werror -o "$TMP/test_timesync_persist" "$ROOT/tools/ui-mod/test_timesync_persist.c" -ldl -lpthread
+    "$TMP/test_timesync_persist" >/dev/null
+fi
+ok "timesyncd drop-in, etc-reset survival, Gen1/Gen2 parity and TZ/clock persistence unit checks"
+
 cmp -s "$ROOT/rootfs-overlay/etc/sc5000/libengine-ui-hook.so" "$ROOT/rootfs-overlay/usr/local/lib/sc5000/libengine-ui-hook.so" ||
     fail 'both libengine-ui-hook.so copies in rootfs-overlay must match'
 if command -v arm-linux-gnueabihf-gcc >/dev/null 2>&1 && command -v arm-linux-gnueabihf-strip >/dev/null 2>&1 && command -v arm-linux-gnueabihf-readelf >/dev/null 2>&1; then

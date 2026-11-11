@@ -329,10 +329,20 @@ static void fx_selector_poll(void) {
 #endif
 }
 
+static void persist_monotonic_clock(void);
+static void restore_persisted_timezone(void);
+static void note_qsettings_path(const char *path);
+
 static void *lim_poll(void *arg) {
     (void)arg;
     for (;;) {
         fx_selector_poll();
+        static time_t last_clock_check;
+        time_t wall_now = time(NULL);
+        if (wall_now > last_clock_check + 30 || wall_now < last_clock_check) {
+            last_clock_check = wall_now;
+            persist_monotonic_clock();
+        }
         static struct timespec last_mtim;
         static off_t last_size = -1;
         struct stat st;
@@ -1772,6 +1782,8 @@ __attribute__((constructor)) static void edit_engine(void) {
     if (!is_engine()) return;
     if (!g_hook_initialized) return;
     initialize_engine_cpus();
+    restore_persisted_timezone();
+    persist_monotonic_clock();
     uintptr_t base = 0;
     dl_iterate_phdr(engine_base, &base);
     if (!base) return;
@@ -2684,7 +2696,10 @@ static const char *stems_processor_path(const char *path);
 static int redirected_open(int dirfd, const char *path, int flags, mode_t mode) {
     static void *cache;
     int (*real)(int, const char *, int, ...) = next_symbol(&cache, "openat");
-    if (is_engine()) path = stems_processor_path(path);
+    if (is_engine()) {
+        note_qsettings_path(path);
+        path = stems_processor_path(path);
+    }
     char mapped[PATH_MAX];
     const char *target = volatile_path(dirfd, path, mapped);
     if (!target) return -1;
@@ -2749,7 +2764,10 @@ static const char *stems_processor_path(const char *path) {
 int access(const char *path, int mode) {
     int (*real)(const char *, int) = next_symbol(&access_cache, "access");
     if (!real) { errno = ENOSYS; return -1; }
-    if (is_engine()) path = stems_processor_path(path);
+    if (is_engine()) {
+        note_qsettings_path(path);
+        path = stems_processor_path(path);
+    }
     return real(path, mode);
 }
 
@@ -2757,9 +2775,14 @@ static void *statx_cache;
 int statx(int dirfd, const char *path, int flags, unsigned int mask, struct statx *buf) {
     int (*real)(int, const char *, int, unsigned int, struct statx *) = next_symbol(&statx_cache, "statx");
     if (!real) { errno = ENOSYS; return -1; }
-    if (is_engine()) path = stems_processor_path(path);
+    if (is_engine()) {
+        note_qsettings_path(path);
+        path = stems_processor_path(path);
+    }
     return real(dirfd, path, flags, mask, buf);
 }
+
+#include "timesync_persist.h"
 
 int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions,
                 const posix_spawnattr_t *attr, char *const argv[], char *const envp[]) {
