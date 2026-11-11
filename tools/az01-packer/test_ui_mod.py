@@ -3946,6 +3946,8 @@ class I18nTranslateRegressionTest(unittest.TestCase):
         "Spotify": "official streaming service brand name",
         "320kbps": "universal audio bitrate notation",
         "English": "self-named English language option",
+        "3-Band": "waveform style name; the maintainer keeps it English (never 三频段)",
+        "Tri-Band": "waveform style name; the maintainer keeps it English (never 三频段)",
     }
 
     DISPLAY_TAB_STRINGS = (
@@ -4035,6 +4037,8 @@ class I18nTranslateRegressionTest(unittest.TestCase):
                     self.assertNotIn("播放器", t[lang], f"{en} ({lang}) must use 碟机, not 播放器")
                     self.assertNotIn("播放機", t[lang], f"{en} ({lang}) must use 碟機, not 播放機")
         self.assertEqual(rows["Player"], {"zh-Hans": "碟机", "zh-Hant": "碟機"})
+        for band in ("3-Band", "Tri-Band"):  # waveform style stays English on the deck
+            self.assertNotIn(band, rows)
         self.assertEqual(rows["Player #"], {"zh-Hans": "碟机编号 #", "zh-Hant": "碟機編號 #"})
         self.assertEqual(rows["PLAYER "], {"zh-Hans": "碟机 ", "zh-Hant": "碟機 "})
 
