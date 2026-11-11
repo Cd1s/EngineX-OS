@@ -41,4 +41,8 @@ if [ "$now" = "$orig" ]; then echo "E2E PASS reboot restored the original hook (
 step smoke-after-reboot 0 dp smoke fake
 step unlock 0 dp unlock fake
 step backups 0 dp backups fake
+u=$(cat "$W/deck/unshare.pid")
+bash "$HERE/fake-deck.sh" down "$W/deck" > /dev/null
+if [ -e "/proc/$u" ]; then echo "E2E FAIL fake deck still running after down"; exit 1; fi
+echo "E2E PASS fake deck stopped"
 echo "E2E PASS all"

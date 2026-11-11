@@ -86,7 +86,10 @@ def component_plan(component):
             raise ValueError(f"go:{name}: not a suite daemon with a unit ({', '.join(GO_DAEMONS)})")
         return ["suite"], [f"{name}.service"]
     if component == "all":
-        return list(ARTIFACTS), ["engine.service", "edisksd.service"] + [f"{d}.service" for d in GO_DAEMONS]
+        # Unit order: stream-sync is After=sc5000-deemixd. Restarted first, stream-sync starts
+        # its own downloader on the free 127.0.0.1:6595 and the unit cannot bind it (#159).
+        return list(ARTIFACTS), ["engine.service", "edisksd.service", "sc5000-deemixd.service",
+                                 "stream-sync.service", "rb-bridge.service"]
     raise ValueError(f"unknown component {component!r} (ui, hook, edisksd, go:<daemon>, all)")
 
 

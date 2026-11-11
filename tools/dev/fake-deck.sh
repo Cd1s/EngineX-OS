@@ -87,10 +87,13 @@ INI
 }
 
 stop() {
-    local D=$1
+    local D=$1 u c
     [ -f "$D/unshare.pid" ] || return 0
-    kill "$(cat "$D/unshare.pid")" 2>/dev/null || :
-    for _ in $(seq 50); do kill -0 "$(cat "$D/unshare.pid")" 2>/dev/null || break; sleep 0.1; done
+    u=$(cat "$D/unshare.pid")
+    # unshare ignores SIGTERM while it waits; killing the namespace's init ends every process in it.
+    for c in $(pgrep -P "$u" || :); do kill -KILL "$c" 2>/dev/null || :; done
+    for _ in $(seq 50); do kill -0 "$u" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$u" 2>/dev/null; then echo "fake deck (unshare $u) did not stop" >&2; return 1; fi
     rm -f "$D/unshare.pid"
 }
 
