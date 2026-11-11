@@ -1098,8 +1098,19 @@ SERVICES_MAIN = """
 				if (now - p.at > 150 && s.ps && p.ps && s.net === p.net) s.posMs = expect
 				// Sync phase steps can be smaller than 180 ms. Audio-block jitter is
 				// measured in wall time, so allow it to grow with the deck's rate.
-				const jumpMs = s.sync && p.playing ? 60 * Math.max(1, 1 + s.pitch / 100) : (p.playing ? 180 : 5)
-				if (s.playing === p.playing && s.net === p.net && Math.abs(s.posMs - expect) > jumpMs) s.jumps++
+				const phaseMs = 40 * Math.max(1, 1 + s.pitch / 100)
+				const jumpMs = s.sync && p.playing ? phaseMs : (p.playing ? 180 : 5)
+				const delta = s.posMs - expect
+				s.phase = undefined
+				if (s.playing === p.playing && s.net === p.net && Math.abs(delta) > jumpMs) {
+					// A short GUI stall can also leave one stale audio block. Carry
+					// the old line until a small Sync step persists on the next tick;
+					// its queued recovery then never becomes a backward/forward seek.
+					if (s.sync && p.playing && Math.abs(delta) <= 180 &&
+						(!isFinite(p.phase) || Math.abs(delta - p.phase) > phaseMs)) {
+						s.phase = delta; s.posMs = expect
+					} else s.jumps++
+				}
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
 				if (!s.ps && s.posMs !== p.posMs) busy = true // scrub, seek or CUE preview while paused
 			}
@@ -1572,7 +1583,8 @@ SERVICES_MAIN = """
 		// A linked copy still follows the source's song position: native beat Sync
 		// can choose another beat. Seeking drops it to native tempo Sync.
 		const lim = wantSync && synced && !at.nativeSync ? 2000 : at.wide ? 800 : 300
-		const jump = e.jumps !== at.jumps && Math.abs(drift) > 60
+		const jumpMs = e.link && root.scPlayer && e.sync ? 20 * Math.max(1, at.rate) : 60
+		const jump = e.jumps !== at.jumps && Math.abs(drift) > jumpMs
 		// A Sync edge or tempo step is a new phase/rate, not clock drift. Apply
 		// it on this update, with the speed already set above. Keep small audio
 		// block noise on the existing bend path and never snap on a heartbeat.
