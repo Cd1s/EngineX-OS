@@ -80,6 +80,27 @@ Item {
         // #55: the preference survives, but automatic submission is unavailable.
         // A native property merely existing does not prove a safe queue adapter.
         console.warn("SCPROBE analyze|" + (main ? typeof main.scAutoAnalyze : "none") + "|" + (main ? main.scAutoAnalyzeAvailable : "none") + "|")
+        // #206: with the recorder active, a streaming selection still loads (no record
+        // message) and the recorder's streaming block/abort stay off. Restored afterwards.
+        const hasRec = !!(Config && Config.audio && Config.audio.hasRecorder)
+        const recActive = Planck.getProperty("/Engine/Mixer/Recorder/Active")
+        const recBlocked = Planck.getProperty("/Engine/Mixer/Recorder/BlockedByStreaming")
+        const recAbort = Planck.getProperty("/Engine/Mixer/Recorder/Abort")
+        const arb = Planck.librarianController ? Planck.librarianController.trackLoadArbitrator : null
+        if (hasRec && arb && recActive && recActive.translator && recBlocked && recBlocked.translator && recAbort && recAbort.translator) {
+            const was = recActive.translator.state
+            recActive.translator.state = true
+            arb.selectedTrackChanged(true, "Tidal")
+            const canLoad = arb.canLoad(3)
+            const msg = String(arb.canLoadMessage(1, canLoad)) + String(arb.swipeLeftMessage) + String(arb.swipeRightMessage)
+            const res = "SCPROBE recstream|" + (recActive.translator.state ? 1 : 0) + "|" + (canLoad ? 1 : 0) + "|" +
+                (/record/i.test(msg) ? 0 : 1) + "|" + (recBlocked.translator.state ? 1 : 0) + "|" + (recAbort.translator.state ? 1 : 0) + "|"
+            arb.selectedTrackChanged(false, "")
+            recActive.translator.state = was
+            console.warn(res)
+        } else {
+            console.warn("SCPROBE recstream|none|" + (hasRec ? 1 : 0) + "|" + (arb ? 1 : 0) + "|")
+        }
     }
 
     // A whole-tree walk takes 20-35 s under qemu: find the section once, then only poll it.
