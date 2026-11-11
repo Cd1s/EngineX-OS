@@ -53,12 +53,13 @@
     },
     {
       "id": "dmx-studio",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "category": "lighting",
       "issueNumber": 134,
       "issueNumbers": [
         134,
-        137
+        137,
+        209
       ],
       "author": "EngineX Official & @TribalDE & @Djpd66",
       "tags": [
@@ -81,9 +82,9 @@
         "e": "Multi-universe lighting, moving-head EFX, smoke controls and a 512-channel monitor."
       },
       "description": {
-        "s": "独立静态 helper（armhf + arm64，无需 Python）与 QML 控制台，提供 FTDI/OpenDMX、uDMX 16c0:05dc、Art-Net/sACN 多域输出。含通用 LED Par/Bar、Beam/Wash/Spot/3-in-1 灯库，BPM Circle/8-Figure/Pan-Tilt Sweep，烟雾量、间隔、时长、按住即喷和 2D 预览。需显式启动 helper；USB 驱动与实际灯具待实机验证，通用灯库须按灯具手册核对。",
-        "t": "獨立靜態 helper（armhf + arm64，無須 Python）與 QML 控制台，提供 FTDI/OpenDMX、uDMX 16c0:05dc、Art-Net/sACN 多域輸出。含通用 LED Par/Bar、Beam/Wash/Spot/3-in-1 燈庫，BPM Circle/8-Figure/Pan-Tilt Sweep，煙霧量、間隔、時長、按住即噴和 2D 預覽。須明確啟動 helper；USB 驅動與實際燈具待實機驗證，通用燈庫須依燈具手冊核對。",
-        "e": "Standalone static helper (armhf + arm64, no Python needed) and QML console for FTDI/OpenDMX, uDMX 16c0:05dc and multi-universe Art-Net/sACN. Generic LED Par/Bar and Beam/Wash/Spot/3-in-1 profiles, BPM Circle/8-Figure/Pan-Tilt Sweep, smoke level/interval/duration/momentary flash and 2D preview. Start the helper explicitly. USB hardware and fixture operation need hardware validation; check generic profiles against the fixture manual."
+        "s": "独立静态 helper（armhf + arm64，无需 Python）与 QML 控制台，提供 FTDI/OpenDMX、uDMX 16c0:05dc、Art-Net/sACN 多域输出。含通用 LED Par/Bar、Beam/Wash/Spot/3-in-1 灯库，跟随 MASTER 碟机节拍（或手动 BPM）的 Circle/8-Figure/Pan-Tilt Sweep，烟雾量、间隔、时长、按住即喷和 2D 预览。需显式启动 helper；USB 驱动与实际灯具待实机验证，通用灯库须按灯具手册核对。",
+        "t": "獨立靜態 helper（armhf + arm64，無須 Python）與 QML 控制台，提供 FTDI/OpenDMX、uDMX 16c0:05dc、Art-Net/sACN 多域輸出。含通用 LED Par/Bar、Beam/Wash/Spot/3-in-1 燈庫，跟隨 MASTER 播放機節拍（或手動 BPM）的 Circle/8-Figure/Pan-Tilt Sweep，煙霧量、間隔、時長、按住即噴和 2D 預覽。須明確啟動 helper；USB 驅動與實際燈具待實機驗證，通用燈庫須依燈具手冊核對。",
+        "e": "Standalone static helper (armhf + arm64, no Python needed) and QML console for FTDI/OpenDMX, uDMX 16c0:05dc and multi-universe Art-Net/sACN. Generic LED Par/Bar and Beam/Wash/Spot/3-in-1 profiles, Circle/8-Figure/Pan-Tilt Sweep following the MASTER deck's beat (or a manual BPM), smoke level/interval/duration/momentary flash and 2D preview. Start the helper explicitly. USB hardware and fixture operation need hardware validation; check generic profiles against the fixture manual."
       },
       "initialComments": [
         {
@@ -102,9 +103,9 @@
         }
       ],
       "official": true,
-      "downloadUrl": "mods/packages/dmx-studio-1.1.0.tar.gz",
-      "sha256": "4e4f6758874a1494032c41a2c7c35ee85f633bb84a9b2db5ea4c6bef0002b1f1",
-      "size": 3390302,
+      "downloadUrl": "mods/packages/dmx-studio-1.2.0.tar.gz",
+      "sha256": "6528c056f0d95150ae3bd75da7dcff8b9dc75d8f9988b59a93197704102d71f9",
+      "size": 3399885,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",
       "stars": 0,
@@ -120,7 +121,7 @@
     },
     {
       "id": "jog-logo-studio",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "category": "ui",
       "issueNumber": 137,
       "author": "EngineX Official & @Djpd66",
@@ -155,9 +156,9 @@
         }
       ],
       "official": true,
-      "downloadUrl": "mods/packages/jog-logo-studio-1.1.0.tar.gz",
-      "sha256": "fe11701478f882b5c13378d0286647fa0caa04b770685f01aa61998daa21d5de",
-      "size": 3384267,
+      "downloadUrl": "mods/packages/jog-logo-studio-1.2.0.tar.gz",
+      "sha256": "7c7e5644e244fcac9a5c55368211386a5f9803b56285d0870c07c701c480adc0",
+      "size": 3389306,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",
       "stars": 0,
@@ -173,7 +174,7 @@
     },
     {
       "id": "sampler-pad-studio",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "category": "audio",
       "issueNumber": 137,
       "issueNumbers": [
@@ -219,9 +220,9 @@
         }
       ],
       "official": true,
-      "downloadUrl": "mods/packages/sampler-pad-studio-1.1.0.tar.gz",
-      "sha256": "f00f5948c23056a6a9dc249a3dbf381a6b086e1a453d9bca805dce90c6525743",
-      "size": 3384906,
+      "downloadUrl": "mods/packages/sampler-pad-studio-1.2.0.tar.gz",
+      "sha256": "33460770f15a92b7e6d410981038f8671c6ff24aac801368639c236e0f14a5bd",
+      "size": 3389956,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",
       "stars": 0,
@@ -237,7 +238,7 @@
     },
     {
       "id": "minimal-club-mode",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "category": "system",
       "issueNumber": 136,
       "author": "EngineX Official",
@@ -273,9 +274,9 @@
         }
       ],
       "official": true,
-      "downloadUrl": "mods/packages/minimal-club-mode-1.1.0.tar.gz",
-      "sha256": "c6729e2cb40d6a090dd5eaa48016e1acfbd139aa17302cfdbb4db6091420d8dd",
-      "size": 3383647,
+      "downloadUrl": "mods/packages/minimal-club-mode-1.2.0.tar.gz",
+      "sha256": "c6a5d73e83a0ae242556f5a6c18e1c45d3eef75d00234624dbd53529ddb545ff",
+      "size": 3388750,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",
       "stars": 0,
@@ -291,7 +292,7 @@
     },
     {
       "id": "midi-controller-mapper",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "category": "midi",
       "issueNumber": 137,
       "author": "EngineX Official",
@@ -327,9 +328,9 @@
         }
       ],
       "official": true,
-      "downloadUrl": "mods/packages/midi-controller-mapper-1.1.0.tar.gz",
-      "sha256": "a44a9655e5a291afe00c2a0500885c7c9737bb64cccf8738b7ea83a83bbc995e",
-      "size": 3400914,
+      "downloadUrl": "mods/packages/midi-controller-mapper-1.2.0.tar.gz",
+      "sha256": "841527273e9a9853a0646dd8c51f1bc5523a42170c4a80b4cb09874f387e182d",
+      "size": 3407270,
       "models": "All 16 Models",
       "hardwareValidation": "not-tested",
       "stars": 0,

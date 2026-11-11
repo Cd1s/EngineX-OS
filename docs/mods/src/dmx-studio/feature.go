@@ -58,6 +58,7 @@ type Feature struct {
 	done       chan struct{}
 	start      time.Time
 	looping    bool
+	clock      beatClock
 }
 
 // New returns the DMX Studio feature with its 30 Hz render/output loop running.
@@ -77,7 +78,7 @@ func NewFeature(state string) (*Feature, error) {
 		"pan": 32768.0, "tilt": 32768.0, "width": 16000.0, "height": 16000.0,
 		"intensity": 0.0, "red": 255.0, "green": 255.0, "blue": 255.0,
 		"smokeLevel": 0.0, "smokeInterval": 30.0, "smokeDuration": 2.0, "smokeArmed": false},
-		frames: map[int][]byte{}, stop: make(chan struct{}), done: make(chan struct{}), start: time.Now()}
+		frames: map[int][]byte{}, stop: make(chan struct{}), done: make(chan struct{}), start: time.Now(), clock: newBeatClock()}
 	show := filepath.Join(state, "show.json")
 	if _, err := os.Stat(show); err == nil {
 		var saved map[string]any
@@ -302,7 +303,8 @@ func num(v any) float64 {
 // Render computes every universe's 512 channels at monotonic time now.
 func (f *Feature) Render(now float64) map[int][]byte {
 	c := f.Config
-	phase := now * c["bpm"].(float64) / 60 / c["speed"].(float64) * 2 * math.Pi
+	// Without a deck clock this is the old wall-clock phase: now * bpm / 60 beats.
+	phase := f.clock.beats(now, c["bpm"].(float64)) / c["speed"].(float64) * 2 * math.Pi
 	x, y := 0.0, 0.0
 	switch c["effect"] {
 	case "Circle":
@@ -445,7 +447,8 @@ func (f *Feature) statusLocked() map[string]any {
 	for k, v := range f.Config {
 		config[k] = v
 	}
-	return map[string]any{"config": config, "profiles": Profiles, "running": f.Running, "error": f.Error, "frames": frames}
+	return map[string]any{"config": config, "profiles": Profiles, "running": f.Running, "error": f.Error, "frames": frames,
+		"clock": f.clock.status(f.now(), f.Config["bpm"].(float64))}
 }
 
 func (f *Feature) Action(req map[string]any) (any, error) {
@@ -512,6 +515,9 @@ func (f *Feature) Action(req map[string]any) (any, error) {
 		}
 	case "stop":
 		f.Blackout()
+	case "clock":
+		// Fed several times a second by the panel: memory only, a small reply.
+		return f.clockAction(req, f.now(), wallMillis())
 	case "flash":
 		if held, _ := req["held"].(bool); held && f.Running {
 			f.FlashUntil = f.now() + 0.5
