@@ -1011,6 +1011,8 @@ SERVICES_MAIN = """
 	property var scShadowPostRequest: null
 	property var scShadowPollRequest: null
 	property string scShadowResponseVersion: ""
+	property bool scShadowIdle: false
+	readonly property var scShadowLinePaths: ["/Engine/Mixer/Channel1/Line", "/Engine/Mixer/Channel2/Line", "/Engine/Mixer/Channel3/Line", "/Engine/Mixer/Channel4/Line"]
 	property bool scShadowPostPending: false
 	property string scShadowLinkId: ""
 	property var scShadowSent: [] // per own deck: what the newest full post told the peer
@@ -1253,6 +1255,12 @@ SERVICES_MAIN = """
 	// One request at a time: Go holds it until the other player's state changes
 	// (at most a second; 120 ms while CDJ positions refresh), so an edge arrives
 	// here within a millisecond of its UDP.
+	function scShadowPollIdle() {
+		if (!scShadowIdle || scShadowDisplayOnly) return
+		// A track can still be unloading locally after the peer is empty.
+		const now = Date.now()
+		for (let d = 1; d <= 4; d++) if (scFourDeckRole.indexOf(String(d)) < 0) root.scShadowEmpty(d, now)
+	}
 	function scShadowPoll() {
 		let x = scShadowPollRequest
 		if (!x) {
@@ -1268,12 +1276,20 @@ SERVICES_MAIN = """
 						if (root.scShadowDisplayOnly && version && version === root.scShadowResponseVersion) {
 							scShadowPollTimer.interval = 60; scShadowPollTimer.restart(); return
 						}
-						root.scShadowResponseVersion = version
-						const r = JSON.parse(x.responseText)
-						root.scShadowDebug = !!r.debug
-						root.scShadowApplyAll(r.decks || root.scShadowEmptyArray, r.displayOnly !== false)
-						wait = !r.role ? 500 : r.ver === undefined ? 120 : 60
-						if (r.ver !== undefined) root.scShadowVer = r.ver
+						const unchanged = x.getResponseHeader("X-Shadow-Unchanged") === "1"
+						const r = unchanged ? null : JSON.parse(x.responseText)
+						if (unchanged || r.unchanged === true) {
+							root.scShadowPollIdle()
+							wait = 60
+						} else {
+							root.scShadowIdle = false
+							root.scShadowResponseVersion = version
+							root.scShadowDebug = !!r.debug
+							root.scShadowApplyAll(r.decks || root.scShadowEmptyArray, r.displayOnly !== false)
+							root.scShadowIdle = r.displayOnly === false && x.getResponseHeader("X-Shadow-Idle") === "1"
+							wait = !r.role ? 500 : r.ver === undefined ? 120 : 60
+							if (r.ver !== undefined) root.scShadowVer = r.ver
+						}
 					}
 				} catch (err) { console.warn("EngineX shadow decks: " + err) }
 				scShadowPollTimer.interval = wait
@@ -1286,17 +1302,17 @@ SERVICES_MAIN = """
 		}
 		++scShadowGen
 		scShadowPollAt = Date.now()
-		let scLines = []
+		let scLines = null
 		if (typeof root !== "undefined" && root && root.scTr) {
 			for (let d = 1; d <= 4; d++) {
 				try {
-					const p = root.scTr("/Engine/Mixer/Channel" + d + "/Line")
-					if (p && p.state) scLines.push(d)
+					const p = root.scTr(root.scShadowLinePaths[d - 1])
+					if (p && p.state) (scLines || (scLines = [])).push(d)
 				} catch (e) {}
 			}
 		}
-		const scLineQuery = scLines.length > 0 ? "&line=" + scLines.join(",") : ""
-		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer + scLineQuery)
+		const scLineQuery = scLines ? "&line=" + scLines.join(",") : ""
+		x.open("GET", "http://127.0.0.1:8080/v1/sc5000/shadow?ver=" + scShadowVer + (scShadowIdle ? "&idle=1" : "") + scLineQuery)
 		x.send()
 	}
 	// The Engine slots whose track is still on its way: stream-sync copies it, or

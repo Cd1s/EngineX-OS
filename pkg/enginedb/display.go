@@ -152,7 +152,14 @@ func parseDisplayBeats(blob []byte, rate, samples float64) ([]DisplayBeat, error
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) < 33 || raw[16] > 1 || displayFloat(raw, big) != rate || math.Abs(displayFloat(raw[8:], big)-samples) > 1 {
+	if len(raw) < 33 || raw[16] > 1 || displayFloat(raw, big) != rate {
+		return nil, fmt.Errorf("display: invalid beatData header")
+	}
+	// Stock beatData can store a duration truncated to whole seconds, while
+	// trackData keeps the decoded sample count. Keep the saved grid unchanged.
+	gridSamples := displayFloat(raw[8:], big)
+	if !displayFinite(gridSamples) || gridSamples < 0 ||
+		(math.Abs(gridSamples-samples) > 1 && gridSamples != math.Floor(samples/rate)*rate) {
 		return nil, fmt.Errorf("display: invalid beatData header")
 	}
 	type marker struct {
@@ -251,7 +258,9 @@ func parseDisplayCues(blob []byte, rate, samples float64) ([]DisplayCue, error) 
 		return nil, fmt.Errorf("display: missing main cue")
 	}
 	p := displayFloat(raw[off:], big)
-	if !displayFinite(p) || p < -1 || p > samples {
+	// The stock main CUE can precede sample zero. Its pre-roll position has no
+	// in-track marker, but must not discard the track's waveform and saved grid.
+	if !displayFinite(p) || p > samples {
 		return nil, fmt.Errorf("display: invalid main cue")
 	}
 	if p >= 0 {

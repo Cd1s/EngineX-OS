@@ -65,6 +65,99 @@ func TestDisplayAdjustedSparseGrid(t *testing.T) {
 	}
 }
 
+func TestDisplayStockRoundedBeatDuration(t *testing.T) {
+	p := displayFixture(t)
+	for _, tc := range []struct {
+		name    string
+		samples uint64
+		grid    float64
+		wantErr bool
+	}{
+		{"stock m4a", 17321984, 17287200, false},
+		{"stock mp3", 11487744, 11466000, false},
+		{"short track", 22050, 0, false},
+		{"exact", 176400, 176400, false},
+		{"unrelated length", 176400, 176300, true},
+		{"previous second", 176400, 132300, true},
+		{"future second", 176401, 220500, true},
+		{"nan", 176400, math.NaN(), true},
+		{"infinite", 176400, math.Inf(1), true},
+		{"negative", 176400, -1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			track, err := QUncompress(p.TrackData, 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beats, err := QUncompress(p.Beats, 8<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			big.PutUint64(track[8:], tc.samples)
+			big.PutUint64(beats[8:], math.Float64bits(tc.grid))
+			trackBlob, err := QCompress(track)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beatBlob, err := QCompress(beats)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, err := ParseDisplayPerformance(trackBlob, p.Overview, beatBlob, nil, nil)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("invalid beat duration accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d.DurationMS != float64(tc.samples)*1000/44100 || len(d.Beats) == 0 || d.Beats[0].MS != 0 ||
+				(tc.samples >= 44100 && (len(d.Beats) < 2 || d.Beats[1].MS != 500 || d.Beats[1].Number != 1)) {
+				t.Fatalf("source duration or grid changed: %+v", d)
+			}
+		})
+	}
+}
+
+func TestDisplayStockPrerollCue(t *testing.T) {
+	p := displayFixture(t)
+	for _, tc := range []struct {
+		name    string
+		cue     float64
+		wantErr bool
+	}{
+		{"stock preroll", -23423.4, false},
+		{"unset", -1, false},
+		{"nan", math.NaN(), true},
+		{"infinite", math.Inf(-1), true},
+		{"past end", 176401, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cues, err := QUncompress(p.QuickCues, 64<<10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			big.PutUint64(cues[len(cues)-17:], math.Float64bits(tc.cue))
+			blob, err := QCompress(cues)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d, err := ParseDisplayPerformance(p.TrackData, p.Overview, p.Beats, blob, p.Loops)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("invalid main CUE accepted")
+				}
+				return
+			}
+			if err != nil || len(d.Beats) != 3 || len(d.Overview.Bands) != 3072 || len(d.Cues) != 2 || d.Cues[0].N != "drop" || len(d.Loops) != 1 {
+				t.Fatalf("pre-roll discarded source data: %+v, %v", d, err)
+			}
+		})
+	}
+}
+
 func TestDisplayMalformedPerformance(t *testing.T) {
 	p := displayFixture(t)
 	unpack := func(b []byte) []byte {

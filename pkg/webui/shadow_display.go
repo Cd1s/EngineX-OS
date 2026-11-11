@@ -600,13 +600,16 @@ func validateDisplayAsset(a *shadowDisplayAsset, key string) error {
 	if len(a.Title) > 4096 || len(a.Artist) > 4096 || len(a.KeyName) > 64 || len(a.Beats) > 65536 || len(a.Cues) > 9 || len(a.Loops) > 8 {
 		return fmt.Errorf("display: oversized metadata")
 	}
-	for _, w := range []*enginedb.DisplayWave{&a.Overview, a.Waveform} {
+	for i, w := range []*enginedb.DisplayWave{&a.Overview, a.Waveform} {
 		if w != nil && (len(w.Bands) == 0 || len(w.Bands)%3 != 0 || len(w.Bands) > 6<<20 || !finite(w.SamplesPerBin) || w.SamplesPerBin <= 0) {
 			return fmt.Errorf("display: invalid bands")
 		}
 		if w != nil {
 			span := float64(len(w.Bands)/3) * w.SamplesPerBin / a.SampleRate * 1000
-			if !finite(span) || math.Abs(span-a.DurationMS) > 100 {
+			// Stock overview bins can cover the same whole-second duration as
+			// beatData. Detailed audio samples still use the decoded track length.
+			roundedOverview := i == 0 && math.Abs(span-math.Floor(a.DurationMS/1000)*1000) <= 1000/a.SampleRate
+			if !finite(span) || (math.Abs(span-a.DurationMS) > 100 && !roundedOverview) {
 				return fmt.Errorf("display: waveform span differs from track")
 			}
 		}
