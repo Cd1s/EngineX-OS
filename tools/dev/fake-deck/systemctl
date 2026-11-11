@@ -1,0 +1,46 @@
+#!/bin/sh
+# Fake systemctl inside tools/dev/fake-deck.sh: start, stop, restart, is-active
+# for the units deck-agent.sh may touch. Never the host's systemd.
+S=/run/fake-systemd
+mkdir -p "$S" /run/fake-journal
+exe() {
+    case $1 in
+    engine.service) echo /usr/Engine/EMain ;;
+    edisksd.service) echo /usr/local/lib/fake-deck/daemon ;;
+    stream-sync.service) echo /usr/local/bin/stream-sync --listen :8080 --cpu 3 ;;
+    sc5000-deemixd.service) echo /usr/local/bin/sc5000-deemixd -state-dir /data/sc5000-custom/state ;;
+    rb-bridge.service) echo /usr/local/bin/rb-bridge --prolink ;;
+    *) return 1 ;;
+    esac
+}
+alive() { [ -f "$S/$1.pid" ] && kill -0 "$(cat "$S/$1.pid")" 2>/dev/null; }
+start() {
+    cmd=$(exe "$1") || { echo "Unit $1 not found." >&2; return 5; }
+    alive "$1" && return 0
+    # shellcheck disable=SC2086
+    $cmd < /dev/null >> "/run/fake-journal/$1.out" 2>&1 &
+    echo $! > "$S/$1.pid"
+    echo "$(date +%s) start $1" >> "$S/log"
+}
+stop() {
+    alive "$1" || { rm -f "$S/$1.pid"; return 0; }
+    pid=$(cat "$S/$1.pid")
+    kill "$pid" 2>/dev/null
+    n=0
+    while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+    kill -9 "$pid" 2>/dev/null
+    rm -f "$S/$1.pid"
+}
+cmd=$1
+shift
+rc=0
+for u in "$@"; do
+    case $cmd in
+    start) start "$u" || rc=$? ;;
+    stop) stop "$u" ;;
+    restart) stop "$u"; start "$u" || rc=$? ;;
+    is-active) if alive "$u"; then echo active; else echo inactive; rc=3; fi ;;
+    *) echo "fake systemctl: $cmd not supported" >&2; exit 1 ;;
+    esac
+done
+exit "$rc"

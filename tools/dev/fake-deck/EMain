@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stand-in for Engine inside tools/dev/fake-deck.sh. Its process name is EMain like
+# Engine's, and it logs what the real UI hook logs. A pushed hook that contains
+# FAKE_APPLIED=<n> applies n edits; a pack file containing FAKE_QML_ERROR fails to load.
+log() { echo "$(date +%s) $*" >> /run/fake-journal/engine.service; }
+hook=/etc/sc5000/libengine-ui-hook.so
+n=$(grep -ao 'FAKE_APPLIED=[0-9]*' "$hook" 2>/dev/null | head -1 | cut -d= -f2)
+[ -n "$n" ] || n=19
+log "engine-ui-hook: Engine 5.3.0 (fake deck)"
+i=0
+while [ "$i" -lt "$n" ]; do log "engine-ui-hook: applied 0x$i (4 bytes)"; i=$((i + 1)); done
+ui=/data/sc5000-custom/ui/packs/en
+log "engine-ui-hook: $ui: $(find "$ui" -type f | wc -l) files"
+if grep -rqs FAKE_QML_ERROR "$ui"; then log "qrc:/Skins/Embedded/EmbeddedMain.qml:3:1: Expected token \`}'"; fi
+while :; do sleep 1; done

@@ -1,0 +1,7 @@
+#!/bin/sh
+# The deck's original suite inside tools/dev/fake-deck.sh: stream-sync answers
+# /v1/sc5000/ui with the deck's version; the other applets just stay up.
+case $1 in
+stream-sync) exec python3 -I /usr/local/lib/fake-deck/api.py ;;
+*) while :; do sleep 5; done ;;
+esac

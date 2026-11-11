@@ -1,0 +1,708 @@
+#!/usr/bin/env python3
+"""deck-push: the EngineX dev loop's deploy step, run on the build host.
+
+Builds one component with the repo's own build steps, backs up what the deck
+shows at the replaced paths (on the build host, with an index), bind-mounts the
+new files from /run on the deck (a reboot rolls back; --rollback does it without
+one), restarts only the affected service and prints a PASS/FAIL smoke check.
+
+  deck-push <deck> ui|hook|edisksd|go:<daemon>|all [--commit SHA] [--from DIR] [--dry-run]
+  deck-push <deck> --rollback
+  deck-push lock <deck> --purpose TEXT [--ttl 2h]
+  deck-push unlock <deck>
+  deck-push status [<deck>]
+  deck-push smoke <deck>
+  deck-push backups [<deck>]
+
+Every command that changes a deck needs the caller to hold that deck's lock.
+Owner: --owner, else $DECK_PUSH_OWNER, else $PASEO_AGENT_ID.
+Decks: tools/dev/decks.ini (git-ignored, see decks.ini.example) or $DECK_PUSH_CONFIG.
+"""
+import argparse
+import configparser
+import contextlib
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent
+AGENT = HERE / "deck-agent.sh"
+
+SUBCOMMANDS = ("lock", "unlock", "status", "smoke", "backups")
+GO_DAEMONS = ("stream-sync", "sc5000-deemixd", "rb-bridge")
+# name on the deck (deck-agent.sh target()) -> path in the build stage
+ARTIFACTS = {
+    "ui-packs": "ui/packs",
+    "ui-icons": "ui/icons",
+    "hook": "libengine-ui-hook.so",
+    "edisksd": "libedisksd-hook.so",
+    "suite": "sc5000-suite",
+}
+DEFAULTS = {
+    "state_dir": "/var/lib/enginex-dev",
+    "qrc": "/root/build/sc5000-lab/5.3.0/qrc",
+    "work_dir": "/var/tmp",
+    "expect_applied": "19",
+    "daemons": " ".join(GO_DAEMONS),
+    "api_url": "http://127.0.0.1:8080/v1/sc5000/ui",
+    "smoke_timeout": "180",
+    "settle": "15",
+}
+MAX_TTL = 12 * 3600
+EXIT_FAIL, EXIT_USAGE, EXIT_REFUSED, EXIT_ERROR = 1, 2, 3, 4
+
+
+class Refused(Exception):
+    """The deck is not ours to change right now (lock, sandbox rule, deck state)."""
+
+
+class Failed(Exception):
+    """A build or transport step failed."""
+
+
+def component_plan(component):
+    """(deck names, services to restart) for one component."""
+    if component == "ui":
+        return ["ui-packs", "ui-icons"], ["engine.service"]
+    if component == "hook":
+        return ["hook"], ["engine.service"]
+    if component == "edisksd":
+        return ["edisksd"], ["edisksd.service"]
+    if component.startswith("go:"):
+        name = component[3:]
+        if name not in GO_DAEMONS:
+            raise ValueError(f"go:{name}: not a suite daemon with a unit ({', '.join(GO_DAEMONS)})")
+        return ["suite"], [f"{name}.service"]
+    if component == "all":
+        return list(ARTIFACTS), ["engine.service", "edisksd.service"] + [f"{d}.service" for d in GO_DAEMONS]
+    raise ValueError(f"unknown component {component!r} (ui, hook, edisksd, go:<daemon>, all)")
+
+
+def parse_ttl(text):
+    m = re.fullmatch(r"(\d+)([smh]?)", text.strip())
+    if not m:
+        raise ValueError(f"bad ttl {text!r} (e.g. 90m, 2h)")
+    seconds = int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "": 60}[m.group(2)]
+    if not 0 < seconds <= MAX_TTL:
+        raise ValueError(f"ttl must be between 1 s and {MAX_TTL // 3600} h")
+    return seconds
+
+
+def valid_deck_name(name):
+    return bool(re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", name)) and name not in SUBCOMMANDS
+
+
+def parse_args(argv):
+    if argv and argv[0] in SUBCOMMANDS:
+        ap = argparse.ArgumentParser(prog=f"deck-push {argv[0]}")
+        if argv[0] in ("status", "backups"):
+            ap.add_argument("deck", nargs="?")
+        else:
+            ap.add_argument("deck")
+        ap.add_argument("--owner")
+        if argv[0] == "lock":
+            ap.add_argument("--purpose", required=True)
+            ap.add_argument("--ttl", default="1h")
+        a = ap.parse_args(argv[1:])
+        a.action = argv[0]
+        if a.action == "lock":
+            try:
+                a.ttl = parse_ttl(a.ttl)
+            except ValueError as e:
+                ap.error(str(e))
+            a.purpose = " ".join(a.purpose.split())
+            if not a.purpose or len(a.purpose) > 200:
+                ap.error("--purpose must be 1-200 characters")
+        return a
+    ap = argparse.ArgumentParser(prog="deck-push", description=__doc__.split("\n\n")[1],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("deck")
+    ap.add_argument("component", nargs="?", help="ui | hook | edisksd | go:<daemon> | all")
+    ap.add_argument("--commit", help="build this commit instead of the working tree")
+    ap.add_argument("--from", dest="prebuilt", type=Path, help="push artifacts built elsewhere (" + ", ".join(ARTIFACTS.values()) + ")")
+    ap.add_argument("--dry-run", action="store_true", help="build and show the plan; never contact the deck")
+    ap.add_argument("--rollback", action="store_true", help="unmount everything deck-push mounted and restart those services")
+    ap.add_argument("--no-sandbox", metavar="REASON", help="push UI without a tools/dev/ui-sheet record (the reason is logged)")
+    ap.add_argument("--owner")
+    ap.add_argument("--smoke-timeout", type=int)
+    a = ap.parse_args(argv)
+    a.action = "rollback" if a.rollback else "push"
+    if a.rollback and (a.component or a.commit or a.prebuilt or a.dry_run):
+        ap.error("--rollback takes no component, --commit, --from or --dry-run")
+    if not a.rollback:
+        if not a.component:
+            ap.error("give a component: ui, hook, edisksd, go:<daemon> or all (or --rollback)")
+        try:
+            component_plan(a.component)
+        except ValueError as e:
+            ap.error(str(e))
+    if a.commit and a.prebuilt:
+        ap.error("--commit and --from exclude each other")
+    if a.no_sandbox is not None and not a.no_sandbox.strip():
+        ap.error("--no-sandbox needs a reason")
+    return a
+
+
+def resolve_owner(a, env=None):
+    env = os.environ if env is None else env
+    owner = a.owner or env.get("DECK_PUSH_OWNER") or env.get("PASEO_AGENT_ID")
+    if not owner or not re.fullmatch(r"[A-Za-z0-9._@:-]{1,64}", owner):
+        raise Refused("no valid owner: pass --owner, or set DECK_PUSH_OWNER or PASEO_AGENT_ID")
+    return owner
+
+
+class Deck:
+    def __init__(self, name, sec):
+        self.name = name
+        self.ssh = sec.get("ssh", "").strip()
+        if not self.ssh:
+            raise ValueError(f"[{name}]: ssh = <destination> is required")
+        self.ssh_options = shlex.split(sec.get("ssh_options", ""))
+        self.expect_applied = int(sec.get("expect_applied"))
+        self.daemons = sec.get("daemons").split()
+        self.api_url = sec.get("api_url")
+        self.smoke_timeout = int(sec.get("smoke_timeout"))
+        self.settle = int(sec.get("settle"))
+
+    def agent(self, args, stdin=None, stdout=subprocess.PIPE, timeout=600):
+        """Run deck-agent.sh on the deck (the script travels as the argument of sh -c)."""
+        remote = "sh -c " + shlex.quote(AGENT.read_text()) + " deck-agent " + " ".join(shlex.quote(a) for a in args)
+        cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", *self.ssh_options, self.ssh, remote]
+        r = subprocess.run(cmd, stdin=stdin if stdin is not None else subprocess.DEVNULL, stdout=stdout,
+                           stderr=subprocess.PIPE, timeout=timeout)
+        if r.returncode != 0:
+            err = r.stderr.decode(errors="replace").strip().splitlines()
+            raise Failed(f"{self.name}: deck-agent {args[0]} failed ({r.returncode}): " + " | ".join(err[-5:]))
+        return r.stdout.decode(errors="replace") if stdout is subprocess.PIPE else ""
+
+
+class Config:
+    def __init__(self, path=None, env=None):
+        env = os.environ if env is None else env
+        self.path = Path(path or env.get("DECK_PUSH_CONFIG") or HERE / "decks.ini")
+        cp = configparser.ConfigParser(defaults=DEFAULTS, interpolation=None)
+        if self.path.is_file():
+            cp.read(self.path)
+        d = cp["DEFAULT"]
+        if cp.has_section("defaults"):
+            d = cp["defaults"]
+        self.state = Path(env.get("DECK_PUSH_STATE") or d.get("state_dir"))
+        self.qrc = Path(env.get("DECK_PUSH_QRC") or d.get("qrc"))
+        self.work_dir = Path(d.get("work_dir"))
+        self.decks = {}
+        for name in cp.sections():
+            if name == "defaults":
+                continue
+            if not valid_deck_name(name):
+                raise ValueError(f"{self.path}: bad deck name [{name}] (a-z, 0-9, - and _; not a subcommand)")
+            self.decks[name] = Deck(name, cp[name])
+
+    def deck(self, name):
+        if name not in self.decks:
+            known = ", ".join(sorted(self.decks)) or f"none; copy {HERE / 'decks.ini.example'} to {self.path}"
+            raise Refused(f"unknown deck {name!r} (known: {known})")
+        return self.decks[name]
+
+
+@contextlib.contextmanager
+def flocked(path, blocking=True):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise Refused(f"another deck-push is running on this deck ({path})") from None
+        yield
+
+
+def write_atomic(path, text):
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+class LockStore:
+    """One owner per deck, with purpose and expiry. An expired lock is free."""
+
+    def __init__(self, state):
+        self.dir = Path(state) / "locks"
+
+    def _file(self, deck):
+        return self.dir / f"{deck}.json"
+
+    def read(self, deck):
+        try:
+            return json.loads(self._file(deck).read_text())
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def holder(self, deck, now=None):
+        lock = self.read(deck)
+        if lock and lock["expires"] > (time.time() if now is None else now):
+            return lock
+        return None
+
+    def acquire(self, deck, owner, purpose, ttl, now=None):
+        now = time.time() if now is None else now
+        with flocked(self.dir / ".mutex"):
+            cur = self.holder(deck, now)
+            if cur and cur["owner"] != owner:
+                raise Refused(f"{deck} is locked by {cur['owner']} until {stamp(cur['expires'])}: {cur['purpose']}")
+            lock = {"deck": deck, "owner": owner, "purpose": purpose,
+                    "acquired": cur["acquired"] if cur else now, "expires": now + ttl}
+            write_atomic(self._file(deck), json.dumps(lock) + "\n")
+            return lock
+
+    def release(self, deck, owner, now=None):
+        with flocked(self.dir / ".mutex"):
+            cur = self.holder(deck, now)
+            if cur and cur["owner"] != owner:
+                raise Refused(f"{deck} is locked by {cur['owner']}, not {owner}")
+            self._file(deck).unlink(missing_ok=True)
+            return cur is not None
+
+    def require(self, deck, owner, now=None):
+        cur = self.holder(deck, now)
+        if not cur:
+            raise Refused(f"{deck} is not locked; run: deck-push lock {deck} --purpose '...'")
+        if cur["owner"] != owner:
+            raise Refused(f"{deck} is locked by {cur['owner']} until {stamp(cur['expires'])}: {cur['purpose']}")
+        return cur
+
+
+def stamp(t):
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def digest(path):
+    """sha256 of a file; for a directory the same as deck-agent.sh digest()."""
+    path = Path(path)
+    if path.is_file():
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    lines = []
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            p = Path(root, f)
+            if p.is_file() and not p.is_symlink():
+                rel = b"./" + os.fsencode(p.relative_to(path))
+                lines.append((rel, hashlib.sha256(p.read_bytes()).hexdigest()))
+    lines.sort()
+    return hashlib.sha256(b"".join(h.encode() + b"  " + rel + b"\n" for rel, h in lines)).hexdigest()
+
+
+def facts(text):
+    """deck-agent.sh output: '<key> <rest>' lines -> list of (key, rest)."""
+    out = []
+    for line in text.splitlines():
+        key, _, rest = line.partition(" ")
+        if key:
+            out.append((key, rest.strip()))
+    return out
+
+
+def fact(fs, key, default=None):
+    for k, v in fs:
+        if k == key:
+            return v
+    return default
+
+
+class Backups:
+    """Copies of what the deck showed before each push, indexed in index.jsonl."""
+
+    def __init__(self, state):
+        self.dir = Path(state) / "backups"
+
+    def new(self, deck, component, now=None):
+        now = time.time() if now is None else now
+        ts = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        d = self.dir / deck / f"{ts}-{component.replace(':', '-')}"
+        n = 1
+        while d.exists():
+            n += 1
+            d = self.dir / deck / f"{ts}-{component.replace(':', '-')}-{n}"
+        d.mkdir(parents=True)
+        return d
+
+    def record(self, entry):
+        with flocked(self.dir / ".index.lock"):
+            with open(self.dir / "index.jsonl", "a") as f:
+                f.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    def entries(self, deck=None):
+        try:
+            rows = [json.loads(line) for line in (self.dir / "index.jsonl").read_text().splitlines() if line.strip()]
+        except FileNotFoundError:
+            return []
+        return [r for r in rows if deck is None or r.get("deck") == deck]
+
+
+def check_backup(tar_path, targets):
+    """The backup tar must hold every target path the deck reported."""
+    with tarfile.open(tar_path) as t:
+        names = {m.name.rstrip("/") for m in t.getmembers()}
+    missing = [p for p in targets.values() if p.lstrip("/") not in names]
+    if missing:
+        raise Failed(f"backup {tar_path} lacks {', '.join(missing)}")
+    return len(names)
+
+
+def git(*args, cwd=REPO):
+    return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def prepare_source(commit, work):
+    """The tree to build: the working tree, or a clean export of --commit."""
+    if commit:
+        full = git("rev-parse", "--verify", f"{commit}^{{commit}}")
+        src = work / "src"
+        src.mkdir()
+        archive = subprocess.Popen(["git", "-C", str(REPO), "archive", "--format=tar", full], stdout=subprocess.PIPE)
+        subprocess.run(["tar", "-x", "-C", str(src)], stdin=archive.stdout, check=True)
+        if archive.wait() != 0:
+            raise Failed(f"git archive {full} failed")
+        return src, {"commit": full, "dirty": False}
+    return REPO, {"commit": git("rev-parse", "HEAD"),
+                  "dirty": bool(git("status", "--porcelain", "--untracked-files=no"))}
+
+
+def run_build(cmd, src, log, env=None):
+    """One of the repo's build steps, with the build host's toolchain profile."""
+    wrapped = ["sh", "-c", '[ ! -r /etc/profile.d/buildtools.sh ] || . /etc/profile.d/buildtools.sh; exec "$@"', "sh", *cmd]
+    with open(log, "a") as f:
+        f.write("$ " + " ".join(shlex.quote(c) for c in cmd) + "\n")
+        f.flush()
+        r = subprocess.run(wrapped, cwd=src, stdout=f, stderr=subprocess.STDOUT, env={**os.environ, **(env or {})})
+    if r.returncode != 0:
+        tail = Path(log).read_text(errors="replace").splitlines()[-15:]
+        raise Failed(f"build step failed: {' '.join(cmd)}\n  " + "\n  ".join(tail))
+
+
+def build(names, src, work, qrc, tag, prebuilt=None):
+    """Build (or copy from --from) what the names need into work/stage, with the
+    same steps as tools/az01-packer/build-release.sh (first generation, armhf)."""
+    stage = work / "stage"
+    stage.mkdir(exist_ok=True)
+    log = work / "build.log"
+    need = {ARTIFACTS[n] for n in names}
+    if prebuilt:
+        for rel in sorted(need):
+            s = Path(prebuilt) / rel
+            if not s.exists():
+                raise Failed(f"--from {prebuilt}: {rel} missing")
+            (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+            (shutil.copytree if s.is_dir() else shutil.copy2)(s, stage / rel)
+        return stage
+    if need & {"ui/packs", "ui/icons"}:
+        if not (Path(qrc) / "Skins").is_dir():
+            raise Failed(f"no extracted 5.3.0 qrc at {qrc}; set qrc in [defaults] or DECK_PUSH_QRC")
+        # The UI shows "dev <commit>" where release packs show nothing (build_packs.py --build-tag).
+        run_build(["python3", "tools/ui-mod/build_packs.py", "--build-tag", tag, "--qrc", str(qrc),
+                   "--out", str(work / "packs")], src, log)
+        (stage / "ui").mkdir()
+        with tarfile.open(work / "packs.tar.gz") as t:
+            t.extractall(stage / "ui", filter="data")
+    if "libengine-ui-hook.so" in need:
+        run_build(["sh", "tools/ui-mod/build.sh"], src, log, {"OUT": str(stage / "libengine-ui-hook.so")})
+    if "libedisksd-hook.so" in need:
+        run_build(["sh", "tools/edisksd-hook/build.sh"], src, log, {"OUT": str(stage / "libedisksd-hook.so")})
+    if "sc5000-suite" in need:
+        run_build(["go", "build", "-trimpath", "-ldflags=-s -w -X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1",
+                   "-o", str(stage / "sc5000-suite"), "./cmd/sc5000-suite"], src, log,
+                  {"GOOS": "linux", "GOARCH": "arm", "GOARM": "7", "CGO_ENABLED": "0"})
+    return stage
+
+
+def upload_tar(stage, names, services, manifest, out):
+    """plan + services + manifest.json + files, owned by root, for deck-agent.sh apply."""
+    def root(ti):
+        ti.uid = ti.gid = 0
+        ti.uname = ti.gname = "root"
+        ti.mode = 0o755 if ti.isdir() or ti.mode & 0o111 else 0o644
+        return ti
+
+    with tarfile.open(out, "w", format=tarfile.GNU_FORMAT) as t:
+        for name, text in (("plan", "".join(f"{n} files/{ARTIFACTS[n]}\n" for n in names)),
+                           ("services", "\n".join(services) + "\n"),
+                           ("manifest.json", json.dumps(manifest, sort_keys=True) + "\n")):
+            p = out.parent / f"upload-{name}"
+            p.write_text(text)
+            t.add(p, arcname=name, filter=root)
+        for n in names:
+            t.add(stage / ARTIFACTS[n], arcname=f"files/{ARTIFACTS[n]}", filter=root)
+    return out.stat().st_size
+
+
+def evaluate(fs, deck, expect):
+    """PASS/FAIL rows from deck-agent.sh smoke facts.
+    expect: digests {name: (sha, "mounted"|"unmounted")}, commit, restarted_after (deck clock) or None."""
+    rows = []
+
+    def row(ok, what, evidence):
+        rows.append((bool(ok), what, evidence))
+
+    pid, started = fact(fs, "emain", "-"), int(fact(fs, "emain_started", "0") or 0)
+    fresh = expect.get("restarted_after") is None or started + 2 >= expect["restarted_after"]
+    row(pid != "-" and fresh, "Engine up (EMain)",
+        f"pid {pid}, started {stamp(started) if started else '-'}" + ("" if fresh else ", not restarted by this push"))
+    applied = int(fact(fs, "applied", "0") or 0)
+    row(applied == deck.expect_applied and fact(fs, "engine_line"),
+        f"UI hook loaded, {deck.expect_applied} edits applied",
+        f"{applied} 'applied' lines; {fact(fs, 'engine_line', 'no build line')}; mapped: {fact(fs, 'hook_mapped', '-')}")
+    m = re.search(r"packs/([A-Za-z-]+): (\d+) files", fact(fs, "packs_line", ""))
+    row(m and int(m.group(2)) > 0, "UI pack loaded", m.group(0) if m else "no 'packs/<lang>: N files' line")
+    qml, crashes = int(fact(fs, "qml_errors", "0") or 0), int(fact(fs, "crashes", "0") or 0)
+    errs = [v for k, v in fs if k == "qml_error"]
+    row(pid != "-" and qml == 0 and crashes == 0, "no QML load errors or crashes in the journal",
+        f"{qml} QML errors, {crashes} crashes" + ("; " + " | ".join(errs) if errs else ""))
+    states = {v.split()[0]: (v.split() + ["-"])[1] for k, v in fs if k == "daemon"}
+    row(all(states.get(d) == "active" for d in deck.daemons), "our daemons alive",
+        ", ".join(f"{d} {states.get(d, '-')}" for d in deck.daemons))
+    row(fact(fs, "api_ok") == "1", "stream-sync API answers", deck.api_url)
+    api_v, txt_v = fact(fs, "api_version", ""), fact(fs, "version_txt", "")
+    row(api_v and api_v == txt_v, "version matches", f"API {api_v or '-'}, /etc/sc5000/version.txt {txt_v or '-'}")
+    if expect.get("commit"):
+        try:
+            got = json.loads(fact(fs, "manifest", "{}")).get("commit")
+        except ValueError:
+            got = None
+        row(got == expect["commit"], "deck runs the pushed commit", f"pushed {expect['commit'][:12]}, deck manifest {str(got)[:12]}")
+    seen = {v.split()[0]: v.split()[1:] for k, v in fs if k == "digest"}
+    for name, (sha, state) in sorted(expect.get("digests", {}).items()):
+        got = seen.get(name, ["-", "-"])
+        row(got == [sha, state], f"{name} digest", f"expected {sha[:16]} {state}, deck {got[0][:16]} {got[1]}")
+    return rows
+
+
+def ready(fs, deck, expect):
+    started = int(fact(fs, "emain_started", "0") or 0)
+    fresh = expect.get("restarted_after") is None or started + 2 >= expect["restarted_after"]
+    states = {v.split()[0]: (v.split() + ["-"])[1] for k, v in fs if k == "daemon"}
+    return (fact(fs, "emain", "-") != "-" and fresh and fact(fs, "api_ok") == "1"
+            and int(fact(fs, "applied", "0") or 0) >= deck.expect_applied and fact(fs, "packs_line")
+            and all(states.get(d) == "active" for d in deck.daemons))
+
+
+def smoke(deck, expect, timeout=None, out=sys.stdout):
+    """Poll the deck until it looks up (or time runs out), let it settle, then judge."""
+    timeout = deck.smoke_timeout if timeout is None else timeout
+    end = time.time() + timeout
+    args = ["smoke", deck.api_url, str(expect.get("restarted_after") or "-"), *deck.daemons]
+    while True:
+        fs = facts(deck.agent(args))
+        if ready(fs, deck, expect) or time.time() >= end:
+            break
+        time.sleep(3)
+    if ready(fs, deck, expect) and deck.settle:
+        time.sleep(deck.settle)
+        fs = facts(deck.agent(args))
+    rows = evaluate(fs, deck, expect)
+    print("smoke:", file=out)
+    for ok, what, evidence in rows:
+        print(f"  {'PASS' if ok else 'FAIL'} {what}: {evidence}", file=out)
+    ok = all(r[0] for r in rows)
+    print(f"RESULT {'PASS' if ok else 'FAIL'} {deck.name}", file=out)
+    return ok
+
+
+def cmd_push(a, cfg):
+    deck = cfg.deck(a.deck)
+    owner = resolve_owner(a)
+    names, services = component_plan(a.component)
+    locks = LockStore(cfg.state)
+    if not a.dry_run:
+        locks.require(deck.name, owner)
+    cfg.work_dir.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix=f"deck-push-{deck.name}.", dir=cfg.work_dir))
+    try:
+        if a.dry_run:
+            return push(a, cfg, deck, owner, names, services, work)
+        with flocked(cfg.state / "locks" / f"{deck.name}.op", blocking=False):
+            return push(a, cfg, deck, owner, names, services, work)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def push(a, cfg, deck, owner, names, services, work):
+    if a.prebuilt:
+        src, info = REPO, {"commit": git("rev-parse", "HEAD"), "dirty": True, "prebuilt": str(a.prebuilt.resolve())}
+    else:
+        src, info = prepare_source(a.commit, work)
+    tag = f"dev {info['commit'][:7]}" + ("+" if info["dirty"] else "")
+    print(f"deck-push: {deck.name} {a.component} from {info['commit'][:12]}{' (uncommitted changes)' if info['dirty'] else ''}, owner {owner}")
+    stage = build(names, src, work, cfg.qrc, tag, a.prebuilt)
+    digests = {n: digest(stage / ARTIFACTS[n]) for n in names}
+    for n in names:
+        print(f"build: {n} {digests[n][:16]}")
+    sandbox = None
+    if "ui-packs" in names:
+        sheet = cfg.state / "sheets" / f"{digests['ui-packs']}.json"
+        if sheet.is_file():
+            sandbox = json.loads(sheet.read_text()).get("sheet", str(sheet))
+        elif a.no_sandbox:
+            sandbox = "skipped: " + " ".join(a.no_sandbox.split())
+        else:
+            raise Refused(f"no sandbox before/after sheet for UI pack {digests['ui-packs'][:16]}: "
+                          "run tools/dev/ui-sheet first (or --no-sandbox REASON)")
+        print(f"sandbox: {sandbox}")
+    manifest = {"deck": deck.name, "component": a.component, "owner": owner, "pushed": stamp(time.time()),
+                "digests": digests, "services": services, "sandbox": sandbox, **info}
+    if a.dry_run:
+        holder = LockStore(cfg.state).holder(deck.name)
+        print(f"lock: {'held by ' + holder['owner'] if holder else 'free (a real push needs it)'}")
+        print(f"plan: back up {', '.join(names)}; bind-mount from /run/enginex-dev; restart {', '.join(services)}; smoke")
+        print("dry run: the deck was not contacted")
+        return 0
+    pre = facts(deck.agent(["preflight", *names]))
+    t0 = int(fact(pre, "now"))
+    targets = {v.split()[0]: v.split()[1] for k, v in pre if k == "target"}
+    shown = {v.split()[0]: v.split()[2] for k, v in pre if k == "target"}
+    devmounts = [v.split()[0] for k, v in pre if k == "devmount"]
+    if devmounts:
+        print(f"deck: already dev-mounted: {', '.join(devmounts)}")
+    size = upload_tar(stage, names, services, manifest, work / "upload.tar")
+    free = int(fact(pre, "run_free_kb", "0")) * 1024
+    if size * 2 > free:
+        raise Refused(f"/run on {deck.name} has {free // 1024} KiB free, the upload needs {size // 1024} KiB twice")
+    backups = Backups(cfg.state)
+    bdir = backups.new(deck.name, a.component)
+    with open(bdir / "targets.tar", "wb") as f:
+        deck.agent(["backup", *names], stdout=f)
+    count = check_backup(bdir / "targets.tar", targets)
+    entry = {"action": "push", "dir": str(bdir), "deck": deck.name, "component": a.component, "owner": owner,
+             "time": stamp(time.time()), "commit": info["commit"], "dirty": info["dirty"],
+             "replaced": {n: {"path": targets[n], "sha256": shown[n]} for n in names},
+             "pushed": digests, "dev_mounted_before": devmounts, "deck_version": fact(pre, "version")}
+    (bdir / "meta.json").write_text(json.dumps(entry, indent=1, sort_keys=True) + "\n")
+    backups.record(entry)
+    print(f"backup: {bdir} ({count} entries)")
+    with open(work / "upload.tar", "rb") as f:
+        for line in deck.agent(["apply"], stdin=f).splitlines():
+            print(f"deck: {line}")
+    expect = {"digests": {n: (digests[n], "mounted") for n in names}, "commit": info["commit"],
+              "restarted_after": t0 if "engine.service" in services else None}
+    ok = smoke(deck, expect, a.smoke_timeout)
+    if not ok:
+        print(f"undo: deck-push {deck.name} --rollback (or reboot the deck)")
+    return 0 if ok else EXIT_FAIL
+
+
+def cmd_rollback(a, cfg):
+    deck = cfg.deck(a.deck)
+    owner = resolve_owner(a)
+    LockStore(cfg.state).require(deck.name, owner)
+    with flocked(cfg.state / "locks" / f"{deck.name}.op", blocking=False):
+        pre = facts(deck.agent(["preflight"]))
+        t0 = int(fact(pre, "now"))
+        out = deck.agent(["rollback"])
+        restored, restarted = [], []
+        for k, v in facts(out):
+            print(f"deck: {k} {v}")
+            if k == "restored":
+                restored.append(v.split())
+            elif k == "restart":
+                restarted.append(v)
+        bad = [r[0] for r in restored if r[2] != r[3]]
+        for name, path, now, orig in restored:
+            print(f"  {'PASS' if now == orig else 'FAIL'} {name} back to its original: {path} {now[:16]} (before the first push {orig[:16]})")
+        Backups(cfg.state).record({"action": "rollback", "deck": deck.name, "owner": owner, "time": stamp(time.time()),
+                                   "restored": {r[0]: {"path": r[1], "sha256": r[2], "original": r[3]} for r in restored}})
+        if not restored:
+            return 0
+        ok = smoke(deck, {"restarted_after": t0 if "engine.service" in restarted else None})
+        return 0 if ok and not bad else EXIT_FAIL
+
+
+def cmd_lock(a, cfg):
+    deck = cfg.deck(a.deck)
+    lock = LockStore(cfg.state).acquire(deck.name, resolve_owner(a), a.purpose, a.ttl)
+    print(f"locked {deck.name} for {lock['owner']} until {stamp(lock['expires'])}: {lock['purpose']}")
+    return 0
+
+
+def cmd_unlock(a, cfg):
+    deck = cfg.deck(a.deck)
+    held = LockStore(cfg.state).release(deck.name, resolve_owner(a))
+    print(f"unlocked {deck.name}" if held else f"{deck.name} was not locked")
+    return 0
+
+
+def cmd_status(a, cfg):
+    locks = LockStore(cfg.state)
+    names = [cfg.deck(a.deck).name] if a.deck else sorted(cfg.decks)
+    now = time.time()
+    for n in names:
+        lock = locks.read(n)
+        if lock and lock["expires"] > now:
+            print(f"{n}: locked by {lock['owner']} until {stamp(lock['expires'])}: {lock['purpose']}")
+        elif lock:
+            print(f"{n}: free (lock of {lock['owner']} expired {stamp(lock['expires'])})")
+        else:
+            print(f"{n}: free")
+    if a.deck:
+        try:
+            pre = facts(cfg.deck(a.deck).agent(["preflight"]))
+        except (Failed, subprocess.TimeoutExpired) as e:
+            print(f"{a.deck}: deck not reachable: {e}")
+            return 0
+        print(f"{a.deck}: EngineX {fact(pre, 'version')}, EMain {fact(pre, 'emain')}")
+        for k, v in pre:
+            if k == "devmount":
+                print(f"{a.deck}: dev mount {v}")
+            elif k == "manifest":
+                m = json.loads(v)
+                print(f"{a.deck}: last push {m.get('component')} {m.get('commit', '')[:12]} by {m.get('owner')} at {m.get('pushed')}")
+    return 0
+
+
+def cmd_smoke(a, cfg):
+    deck = cfg.deck(a.deck)
+    pre = facts(deck.agent(["preflight"]))
+    expect = {}
+    if fact(pre, "manifest"):
+        m = json.loads(fact(pre, "manifest"))
+        expect = {"commit": m.get("commit"), "digests": {n: (d, "mounted") for n, d in m.get("digests", {}).items()}}
+    return 0 if smoke(deck, expect) else EXIT_FAIL
+
+
+def cmd_backups(a, cfg):
+    for e in Backups(cfg.state).entries(a.deck):
+        what = e.get("component") or ", ".join(e.get("restored", {}))
+        print(f"{e['time']} {e['deck']} {e['action']} {what} by {e['owner']} {e.get('dir', '')}")
+    return 0
+
+
+COMMANDS = {"push": cmd_push, "rollback": cmd_rollback, "lock": cmd_lock, "unlock": cmd_unlock,
+            "status": cmd_status, "smoke": cmd_smoke, "backups": cmd_backups}
+
+
+def main(argv=None):
+    a = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        cfg = Config()
+        return COMMANDS[a.action](a, cfg)
+    except Refused as e:
+        print(f"deck-push: refused: {e}", file=sys.stderr)
+        return EXIT_REFUSED
+    except ValueError as e:
+        print(f"deck-push: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    except (Failed, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+        print(f"deck-push: error: {e}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+if __name__ == "__main__":
+    sys.exit(main())

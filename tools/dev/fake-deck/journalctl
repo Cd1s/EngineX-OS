@@ -1,0 +1,13 @@
+#!/bin/sh
+# Fake journalctl inside tools/dev/fake-deck.sh: -u UNIT [--since @EPOCH]; other options ignored.
+u='' since=0
+while [ $# -gt 0 ]; do
+    case $1 in
+    -u) u=$2; shift ;;
+    --since) since=${2#@}; shift ;;
+    esac
+    shift
+done
+[ -n "$u" ] || exit 0
+awk -v s="$since" '$1 >= s { sub(/^[0-9]+ /, ""); print }' "/run/fake-journal/$u" 2>/dev/null
+exit 0
