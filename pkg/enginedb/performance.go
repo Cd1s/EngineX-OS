@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"slices"
 	"unicode/utf8"
@@ -92,6 +93,10 @@ func label(b *bytes.Buffer, s string) { // Engine uses an 8-bit UTF-8 byte lengt
 // over 1 ms from its exported time; a long run then uses the step between its end
 // times, because at 130 BPM that rounding alone can reach 18 ms over 1000 beats.
 func beatPositions(beats []rekordbox.Beat, sampleRate float64) []float64 {
+	return beatPositionsWithOffset(beats, sampleRate, 0)
+}
+
+func beatPositionsWithOffset(beats []rekordbox.Beat, sampleRate, offsetSamples float64) []float64 {
 	positions := make([]float64, len(beats))
 	for start := 0; start < len(beats); {
 		end := start + 1
@@ -109,7 +114,7 @@ func beatPositions(beats []rekordbox.Beat, sampleRate float64) []float64 {
 			}
 		}
 		for i := start; i < end; i++ {
-			positions[i] = (first + float64(i-start)*stepMS) * sampleRate / 1000
+			positions[i] = (first+float64(i-start)*stepMS)*sampleRate/1000 - offsetSamples
 		}
 		start = end
 	}
@@ -163,13 +168,21 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 	if a == nil {
 		a = &rekordbox.Analysis{}
 	}
+	if t.StartOffsetSamples < 0 {
+		return Performance{}, fmt.Errorf("invalid negative start offset %d", t.StartOffsetSamples)
+	}
 	sr := t.SampleRate
 	if sr == 0 {
+		if t.StartOffsetSamples != 0 {
+			return Performance{}, fmt.Errorf("missing sample rate for track %d with %d-sample start offset", t.ID, t.StartOffsetSamples)
+		}
+		log.Printf("rb-bridge: track %d (%s): missing sample rate, falling back to 44100 Hz", t.ID, t.Path)
 		sr = 44100
 	}
 	if sr < 1 || t.Duration < 0 || math.IsNaN(t.Duration) || math.IsInf(t.Duration, 0) {
 		return Performance{}, fmt.Errorf("invalid track duration/sample rate")
 	}
+	offset := float64(t.StartOffsetSamples)
 	sampleCount := t.SampleCount
 	if sampleCount == 0 {
 		sampleCount = uint64(math.Round(t.Duration * float64(sr)))
@@ -178,7 +191,9 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 		// Short exports may omit duration/sample count but still contain analysis.
 		sampleCount = 1024
 		if len(a.Beats) > 0 {
-			sampleCount = max(sampleCount, uint64(a.Beats[len(a.Beats)-1].TimeMS)*uint64(sr)/1000+1)
+			if last := float64(a.Beats[len(a.Beats)-1].TimeMS)*float64(sr)/1000 - offset; last >= 0 {
+				sampleCount = max(sampleCount, uint64(last)+1)
+			}
 		}
 		for _, w := range a.Waveforms {
 			if w.EntryBytes > 0 {
@@ -190,7 +205,9 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 	p := Performance{}
 	var e error
 	if len(a.Beats) > 0 {
-		positions := beatPositions(a.Beats, float64(sr))
+		// Engine beatData natively supports negative pre-zero sample_position anchors
+		// (see stock samples and ParseDisplayPerformance), keeping bar-1 BPM exact.
+		positions := beatPositionsWithOffset(a.Beats, float64(sr), offset)
 		var b bytes.Buffer
 		put(&b, big, float64(sr))
 		put(&b, big, samples)
@@ -313,7 +330,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 			return
 		}
 		label(&q, c.Name)
-		put(&q, big, float64(c.TimeMS)*float64(sr)/1000)
+		put(&q, big, max(0, float64(c.TimeMS)*float64(sr)/1000-offset))
 		color := cueColor(*c)
 		q.Write(color[:])
 	}
@@ -322,7 +339,7 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 	}
 	main := float64(-1)
 	if len(memory) > 0 {
-		main = float64(memory[0].TimeMS) * float64(sr) / 1000
+		main = max(0, float64(memory[0].TimeMS)*float64(sr)/1000-offset)
 	}
 	put(&q, big, main)
 	q.WriteByte(0)
@@ -343,8 +360,13 @@ func EncodePerformance(t rekordbox.Track, a *rekordbox.Analysis) (Performance, e
 			return
 		}
 		label(&loops, c.Name)
-		put(&loops, little, float64(c.TimeMS)*float64(sr)/1000)
-		put(&loops, little, float64(c.EndMS)*float64(sr)/1000)
+		start := max(0, float64(c.TimeMS)*float64(sr)/1000-offset)
+		end := max(0, float64(c.EndMS)*float64(sr)/1000-offset)
+		if c.EndMS > c.TimeMS && end <= start {
+			end = min(samples, start+max(1, float64(c.EndMS-c.TimeMS)*float64(sr)/1000))
+		}
+		put(&loops, little, start)
+		put(&loops, little, end)
 		loops.Write([]byte{1, 1})
 		color := cueColor(*c)
 		loops.Write(color[:])

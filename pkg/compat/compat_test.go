@@ -156,3 +156,35 @@ func TestAIFFHeaderAndFAT32TrailingSpaceDotResolution(t *testing.T) {
 		t.Fatalf("Resolve trailing dot/space = %q, %v", got, err)
 	}
 }
+
+func TestMP3AudioHeader(t *testing.T) {
+	src := "../../internal/audioheader/testdata"
+	for _, tc := range []struct {
+		file       string
+		sr         int
+		wantOffset int
+		wantClass  string
+	}{
+		{"01-lame-cbr-info-44100.mp3", 44100, 2257, "lame:2257"},
+		{"01-lame-cbr-info-48000.mp3", 48000, 2257, "lame:2257"},
+		{"04-xing-only-44100.mp3", 44100, 1152, "xing:1152"},
+		{"05-headerless-lame-44100.mp3", 44100, 0, ""},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			info, err := compat.AudioHeader(filepath.Join(src, tc.file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Format != "mp3" || info.SampleRate != tc.sr || info.Channels != 2 || info.StartOffsetSamples != tc.wantOffset || info.OffsetClass != tc.wantClass {
+				t.Fatalf("unexpected MP3 AudioInfo: %+v", info)
+			}
+		})
+	}
+	bad := filepath.Join(t.TempDir(), "broken.mp3")
+	if err := os.WriteFile(bad, []byte("not an mp3"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compat.AudioHeader(bad); err == nil {
+		t.Fatal("accepted invalid MP3")
+	}
+}

@@ -9,6 +9,39 @@ import (
 	"io"
 )
 
+func parseID3Header(h [10]byte) (int64, bool, error) {
+	if h[3] < 2 || h[3] > 4 {
+		return 0, false, errors.New("audio: unsupported ID3 version")
+	}
+	for _, b := range h[6:10] {
+		if b&128 != 0 {
+			return 0, false, errors.New("audio: invalid ID3 size")
+		}
+	}
+	n := int64(h[6])<<21 | int64(h[7])<<14 | int64(h[8])<<7 | int64(h[9])
+	if n > 16<<20 {
+		return 0, false, errors.New("audio: ID3 too large")
+	}
+	if h[5]&16 != 0 {
+		if h[3] != 4 {
+			return 0, false, errors.New("audio: invalid ID3 footer flag")
+		}
+		return n, true, nil
+	}
+	return n, false, nil
+}
+
+func checkID3Footer(r io.Reader, h [10]byte) error {
+	var footer [10]byte
+	if _, err := io.ReadFull(r, footer[:]); err != nil {
+		return err
+	}
+	if string(footer[:3]) != "3DI" || !bytes.Equal(footer[3:], h[3:]) {
+		return errors.New("audio: invalid ID3 footer")
+	}
+	return nil
+}
+
 func SkipID3(r *bufio.Reader) error {
 	prefix, err := r.Peek(3)
 	if err != nil {
@@ -21,32 +54,68 @@ func SkipID3(r *bufio.Reader) error {
 	if _, err = io.ReadFull(r, h[:]); err != nil {
 		return err
 	}
-	if h[3] < 2 || h[3] > 4 {
-		return errors.New("audio: unsupported ID3 version")
-	}
-	for _, b := range h[6:10] {
-		if b&128 != 0 {
-			return errors.New("audio: invalid ID3 size")
-		}
-	}
-	n := int64(h[6])<<21 | int64(h[7])<<14 | int64(h[8])<<7 | int64(h[9])
-	if n > 16<<20 {
-		return errors.New("audio: ID3 too large")
+	n, footer, err := parseID3Header(h)
+	if err != nil {
+		return err
 	}
 	if _, err = io.CopyN(io.Discard, r, n); err != nil {
 		return err
 	}
-	if h[5]&16 != 0 {
-		if h[3] != 4 {
-			return errors.New("audio: invalid ID3 footer flag")
-		}
-		var footer [10]byte
-		if _, err = io.ReadFull(r, footer[:]); err != nil {
-			return err
-		}
-		if string(footer[:3]) != "3DI" || !bytes.Equal(footer[3:], h[3:]) {
-			return errors.New("audio: invalid ID3 footer")
-		}
+	if footer {
+		return checkID3Footer(r, h)
 	}
 	return nil
+}
+
+// skipID3Seeker skips zero or more consecutive validated ID3v2 tags at the
+// start of r using Seek so large embedded pictures are never read into memory.
+func skipID3Seeker(r io.ReadSeeker, fileSize int64) (int64, error) {
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
+	var off int64
+	const maxTags = 8
+	for count := 0; ; count++ {
+		if fileSize-off < 3 {
+			break
+		}
+		var h [10]byte
+		readLen := int(min(int64(len(h)), fileSize-off))
+		if _, err := io.ReadFull(r, h[:readLen]); err != nil {
+			return 0, err
+		}
+		if string(h[:3]) != "ID3" {
+			if _, err := r.Seek(off, io.SeekStart); err != nil {
+				return 0, err
+			}
+			break
+		}
+		if count >= maxTags {
+			return 0, errors.New("audio: too many ID3 headers")
+		}
+		if readLen < 10 {
+			return 0, io.ErrUnexpectedEOF
+		}
+		n, footer, err := parseID3Header(h)
+		if err != nil {
+			return 0, err
+		}
+		off += 10 + n
+		if off > fileSize {
+			return 0, io.ErrUnexpectedEOF
+		}
+		if _, err = r.Seek(off, io.SeekStart); err != nil {
+			return 0, err
+		}
+		if footer {
+			if fileSize-off < 10 {
+				return 0, io.ErrUnexpectedEOF
+			}
+			if err = checkID3Footer(r, h); err != nil {
+				return 0, err
+			}
+			off += 10
+		}
+	}
+	return off, nil
 }

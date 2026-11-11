@@ -16,16 +16,19 @@ import (
 )
 
 type preparedTrack struct {
-	track     rekordbox.Track
-	rel, hash string
-	info      os.FileInfo
-	files     []analysisFile
-	art       *analysisFileExport
+	track       rekordbox.Track
+	rel, hash   string
+	info        os.FileInfo
+	files       []analysisFile
+	art         *analysisFileExport
+	audio       *compat.AudioInfo
+	audioErr    error
+	uninspected bool
 	// broken is why the track's analysis or artwork could not be found (#53).
 	broken error
 }
 
-func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Library) ([]preparedTrack, error) {
+func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, deadline time.Time) ([]preparedTrack, error) {
 	prepared := make([]preparedTrack, 0, len(l.Tracks))
 	paths := map[string]uint32{}
 	for _, t := range l.Tracks {
@@ -40,7 +43,8 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 			return nil, fmt.Errorf("tracks %d and %d resolve to the same audio path %q", other, t.ID, rel)
 		}
 		paths[rel] = t.ID
-		st, e := os.Stat(res.FullPath(rel))
+		full := res.FullPath(rel)
+		st, e := os.Stat(full)
 		if e != nil {
 			return nil, e
 		}
@@ -52,7 +56,26 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 		for _, f := range files {
 			fp.Analysis = append(fp.Analysis, analysisFileExport{f.rel, f.size, f.mtime})
 		}
-		prepared = append(prepared, preparedTrack{t, rel, digest(fp), st, files, art, broken})
+		var (
+			audio       *compat.AudioInfo
+			audioErr    error
+			uninspected bool
+		)
+		if strings.EqualFold(path.Ext(rel), ".mp3") {
+			if !deadline.IsZero() && time.Now().After(deadline) {
+				uninspected = true
+			} else if info, err := compat.AudioHeader(full); err == nil {
+				fp.MP3Offset = info.OffsetClass
+				audio = &info
+			} else {
+				audioErr = err
+			}
+		}
+		prepared = append(prepared, preparedTrack{
+			track: t, rel: rel, hash: digest(fp), info: st,
+			files: files, art: art, audio: audio, audioErr: audioErr,
+			uninspected: uninspected, broken: broken,
+		})
 	}
 	return prepared, nil
 }

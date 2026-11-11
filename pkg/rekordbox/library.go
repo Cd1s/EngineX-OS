@@ -11,29 +11,30 @@ import (
 )
 
 type Track struct {
-	ID           uint32
-	Path         string
-	AnalysisPath string
-	Title        string
-	Artist       string
-	Album        string
-	Genre        string
-	Label        string
-	Composer     string
-	Remixer      string
-	Comment      string
-	Key          string
-	ArtworkPath  string
-	BPM          float64
-	Duration     float64 // seconds
-	SampleCount  uint64  // exact container sample count, when available
-	SampleRate   int
-	BitDepth     int
-	Bitrate      int
-	Year         int
-	Rating       int
-	FileSize     int64
-	RecordHash   string
+	ID                 uint32
+	Path               string
+	AnalysisPath       string
+	Title              string
+	Artist             string
+	Album              string
+	Genre              string
+	Label              string
+	Composer           string
+	Remixer            string
+	Comment            string
+	Key                string
+	ArtworkPath        string
+	BPM                float64
+	Duration           float64 // seconds
+	SampleCount        uint64  // exact container sample count, when available
+	SampleRate         int
+	BitDepth           int
+	Bitrate            int
+	Year               int
+	Rating             int
+	FileSize           int64
+	RecordHash         string
+	StartOffsetSamples int `json:",omitempty"`
 }
 
 type Playlist struct {
@@ -71,7 +72,7 @@ func (l *Library) Validate() error {
 		if t.Path == "" {
 			return fmt.Errorf("rekordbox: track %d has no path", t.ID)
 		}
-		if math.IsNaN(t.BPM) || math.IsInf(t.BPM, 0) || t.BPM < 0 || t.BPM > 1000 || math.IsNaN(t.Duration) || math.IsInf(t.Duration, 0) || t.Duration < 0 || t.Duration > 1e7 || t.SampleRate < 0 || t.SampleRate > 768000 {
+		if math.IsNaN(t.BPM) || math.IsInf(t.BPM, 0) || t.BPM < 0 || t.BPM > 1000 || math.IsNaN(t.Duration) || math.IsInf(t.Duration, 0) || t.Duration < 0 || t.Duration > 1e7 || t.SampleRate < 0 || t.SampleRate > 768000 || t.StartOffsetSamples < 0 {
 			return fmt.Errorf("rekordbox: invalid audio metadata for track %d", t.ID)
 		}
 		if t.RecordHash == "" {
