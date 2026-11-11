@@ -29,6 +29,34 @@ static void test_clicks(void) {
         printf("master mode=%d switching max-step=%.6f (<0.08) PASS\n", mode, maximum);
     }
 }
+static void test_style_drains(void) {
+    const unsigned phases[] = {0, 233, 987, 1597, 4181};
+    const int targets[] = {0, 3, 5};
+    for (int mode = 1; mode <= 4; ++mode) {
+        if (!sc_ms_effect(mode)) continue;
+        for (unsigned t = 0; t < 3; ++t) {
+            float maximum = 0;
+            for (unsigned phase = 0; phase < sizeof phases / sizeof *phases; ++phase) {
+                memset(master_pfx, 0, sizeof master_pfx);
+                memset(master_ms, 0, sizeof master_ms); sc_ms_prepare(&master_ms[0]);
+                pfx_time_ms = 500;
+                unsigned change = 2 * 96000 + phases[phase];
+                float previous = 0;
+                for (unsigned n = 0; n < change + 400; ++n) {
+                    pioneer_fx_mode = n < change ? mode : targets[t];
+                    float dry = 0.2f * sinf((float)(n % 96000) * (2.0f * 3.14159265358979323846f * 997.0f / 96000.0f));
+                    float l, r; const float *in[] = {&dry, &dry}; float *out[] = {&l, &r};
+                    hook_master_output(NULL, NULL, 2, in, 2, out, 1);
+                    if (n >= change && fabsf(l - previous) > maximum) maximum = fabsf(l - previous);
+                    previous = l;
+                }
+            }
+            printf("master drain %d->%d max-step=%.6f (<0.08)\n", mode, targets[t], maximum);
+            fflush(stdout);
+            assert(maximum < 0.08f);
+        }
+    }
+}
 int main(void) {
     dsp_originals[DSP_MASTER] = (void *)copy_input;
     pioneer_fx_mode = 4;
@@ -57,6 +85,7 @@ int main(void) {
         assert(master_ms[0].blend == 0);
     }
     test_clicks();
+    test_style_drains();
     puts("test_ms_master_hook PASS");
     return 0;
 }

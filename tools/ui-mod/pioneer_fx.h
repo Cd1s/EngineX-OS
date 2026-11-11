@@ -462,7 +462,6 @@ static inline float sc_pfx_unit(float x) {
 
 /* Ordinary polling worker only. This also faults in every delay-buffer page. */
 static inline void sc_pfx_instance_prepare(struct sc_pfx_instance *s) {
-    sc_ms_prepare(&s->ms);
     for (unsigned i = 0; i < 2; ++i) {
         unsigned expected = SC_PFX_DIRTY;
         if (!__atomic_compare_exchange_n(&s->bank_state[i], &expected, SC_PFX_PREPARING,

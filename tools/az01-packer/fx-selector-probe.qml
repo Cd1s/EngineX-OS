@@ -20,6 +20,7 @@ Item {
     property var msSpinner: null
     property var msPlus: null
     property var msMinus: null
+    property var msHeader: null
     property Window msWindow: Window { width: 640; height: 120; color: "#141414"; visible: false }
     readonly property var nativeRates: [1 / 16, 1 / 8, 1 / 4, 1 / 2, 3 / 4, 1, 2, 4, 8, 16, 32]
     Timer {
@@ -188,10 +189,12 @@ Item {
             }
             if (probe.phase === 901) {
                 probe.walk(probe.msSpinner, function(o) {
+                    if (o.parameter === b.scFxTimeParameter && o.text !== undefined) probe.msHeader = o
                     if (o.objectName === "DJFx_Beats_Increase_Button") probe.msPlus = o
                     if (o.objectName === "DJFx_Beats_Decrease_Button") probe.msMinus = o
                 })
                 probe.check(!!probe.msPlus && !!probe.msMinus, "ms-native-buttons-found")
+                probe.check(probe.msHeader && probe.msHeader.text === root.scT("Time (ms)"), "ms-header-binding")
                 probe.check(probe.msPlus && probe.msPlus.text === "+" && probe.msMinus && probe.msMinus.text === "−", "ms-button-labels")
                 if (probe.msPlus) probe.msPlus.clicked()
                 probe.phase = 91; return
@@ -201,11 +204,17 @@ Item {
                 let shown = false
                 probe.walk(probe.msSpinner, function(o) { if (o.objectName === "DJFx_Value_Text") shown = o.text === "135 ms" })
                 probe.check(shown, "ms-plus-display-135")
-                probe.msMinus.clicked()
+                probe.msMinus.clicked(); probe.msMinus.clicked()
                 probe.phase = 92; return
             }
             if (probe.phase === 92) {
-                if (root.scFxTimeMs !== 125) return
+                if (root.scFxMsSending || root.scFxTimeMs !== 115) return
+                probe.check(true, "ms-fast-two-taps-counted")
+                probe.msPlus.clicked()
+                probe.phase = 922; return
+            }
+            if (probe.phase === 922) {
+                if (root.scFxMsSending || root.scFxTimeMs !== 125) return
                 const p = b.scFxTimeParameter
                 const index = probe.nativeRates.indexOf(p.value)
                 probe.msExpected = [10,18,33,60,110,200,364,663,1207,2197,4000][index < 10 ? index + 1 : index - 1]
@@ -228,10 +237,22 @@ Item {
             if (probe.phase === 94) {
                 if (root.scFxTimeMode !== "beats") return
                 probe.check(!probe.msSpinner.scMsActive, "ms-off-restores-stock-display")
+                probe.check(probe.msHeader && probe.msHeader.text === b.scFxTimeParameter.label, "ms-off-restores-header-binding")
                 const before = b.scFxTimeParameter.value
                 probe.check(probe.msSpinner.isTouchable === b.scFxTimeParameter.isTouchable, "ms-off-native-touchability")
                 if (before < 32) b.scFxTimeParameter.incValue(); else b.scFxTimeParameter.decValue()
                 probe.check(b.scFxTimeParameter.value !== before && root.scFxTimeMs === probe.msExpected, "ms-off-only-native-rate")
+                root.scCall("fxTimeMode=ms&fxTimeMs=250")
+                probe.phase = 95; return
+            }
+            if (probe.phase === 95) {
+                if (root.scFxTimeMode !== "ms" || root.scFxTimeMs !== 250) return
+                a.scFxAccept(a.scFxStock.length)
+                probe.phase = 96; return
+            }
+            if (probe.phase === 96) {
+                if (a.scFxBusy) return
+                probe.check(root.scFxTimeMs === 250, "ms-saved-time-survives-selection")
                 console.warn("FXPROBE done|" + (probe.failed ? "FAIL" : "PASS"))
                 if (probe.knob) probe.knob.destroy()
                 stop()

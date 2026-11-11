@@ -24,7 +24,7 @@ def function(source, name):
 class FxMsUI(unittest.TestCase):
     def test_strict_config_reset_controls_and_stock_scope(self):
         functions = "\n".join(function(bp.FX_CONTROLLER, n) for n in
-                              ("scFxMsController", "scFxMsStep", "scFxMsKnob"))
+                              ("scFxMsController", "scFxMsStep", "scFxMsKnob", "scFxMsSet", "scFxMsFlush", "scFxMsExpire"))
         functions += "\n" + function(bp.SERVICES_MAIN, "scFxMsInteger")
         functions += "\n" + function(bp.SERVICES_MAIN, "scFxMsApply")
         functions += "\n" + function(bp.SERVICES_MAIN, "scParseSettingsConf")
@@ -38,8 +38,14 @@ let scCueCountdown, scTracklistWaveform;
 const parameter = {value:1}, stock = {value:1};
 const c = {scFxBusy:false,scFxStock:['Flanger','Echo'],scFxSelected:2,
            djFxView:{variantParameters:[parameter]}};
-const scFxControllers = [c], calls=[];
-function scCall(q) { calls.push(q); scFxTimeMs=Number(q.split('=')[1]); }
+const scFxControllers = [c], calls=[], replies=[];
+Object.assign(root, {scFxMsSending:false, scFxMsWanted:-1, scFxMsSent:-1, scFxMsRequest:0, scFxMsTimeout:{restart(){},stop(){}}});
+let deferReplies=false;
+function scCall(q, done) {
+    calls.push(q);
+    const reply=()=>{ scFxTimeMs=Number(q.split('=')[1]); if(done)done({}); };
+    if(deferReplies)replies.push(reply); else reply();
+}
 '''
         script += functions + r'''
 for (const v of ['ms','125ms','1.5','-1','+10','4294967296','NaN','Infinity',''])
@@ -54,6 +60,21 @@ assert.deepEqual(modeChanges,[]); // Updating time must not destroy the touch bu
 assert.equal(scFxMsController(stock),null);
 assert.equal(scFxMsStep(parameter,1),true); assert.equal(scFxTimeMs,135);
 scFxMsStep(parameter,-1); assert.equal(scFxTimeMs,125);
+deferReplies=true;
+scFxMsStep(parameter,1); scFxMsStep(parameter,1);
+assert.equal(replies.length,1); replies.shift()();
+assert.equal(replies.length,1); replies.shift()();
+assert.equal(scFxTimeMs,145); assert.equal(scFxMsSending,false);
+scFxMsStep(parameter,1); scFxMsExpire();
+assert.equal(scFxMsSending,false);
+scFxMsStep(parameter,1); replies.shift()();
+assert.equal(scFxMsSending,true); // A late reply cannot clear the new request.
+replies.shift()(); assert.equal(scFxMsSending,false);
+deferReplies=false;
+scParseSettingsConf('  fx_time_mode=ms  \r\n\tfx_time_ms=250 \r\n');
+assert.equal(scFxTimeMode,'ms'); assert.equal(scFxTimeMs,250);
+scParseSettingsConf('fx_time_ms= 250\n'); assert.equal(scFxTimeMs,500);
+scParseSettingsConf('fx_time_mode=ms\nfx_time_ms=125\n');
 const rates=[1/16,1/8,1/4,1/2,3/4,1,2,4,8,16,32];
 const ms=[10,18,33,60,110,200,364,663,1207,2197,4000];
 for (let i=0;i<11;i++) { parameter.value=rates[i];scFxMsKnob(parameter);assert.equal(scFxTimeMs,ms[i]); }
@@ -68,7 +89,9 @@ assert.equal(scFxTimeMode,'beats'); assert.equal(scFxTimeMs,500);
 
     def test_spinner_patch_keeps_header_and_native_fallbacks(self):
         text = SOURCE.read_text()
-        self.assertIn('property bool isTouchable: scMsActive || (parameter && parameter.isTouchable)', text)
+        self.assertIn('restoreMode: Binding.RestoreBindingOrValue', text)
+        self.assertNotIn("('    property bool isTouchable:", text)
+        self.assertNotIn('text: spinner.scMsActive ? "Time (ms)"', text)
         self.assertIn('spinner.scMsActive ? (root.scFxTimeMs + " ms")', text)
         self.assertIn('!spinner.scMsActive || !root.scFxMsStep(parameter, -1)', text)
         self.assertIn('!spinner.scMsActive || !root.scFxMsStep(parameter, 1)', text)

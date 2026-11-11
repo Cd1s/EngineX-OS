@@ -12,6 +12,7 @@
 struct sc_pfx_ms {
     float l[SC_MS_RING], r[SC_MS_RING];
     unsigned pos, valid, fade;
+    int mode;
     float delay, next_delay, blend, head, head2, lp_l, lp_r, hp_l, hp_r;
     unsigned ready;
 };
@@ -34,13 +35,26 @@ static inline int sc_ms_integer(const char *text, unsigned *value) {
 }
 
 struct sc_ms_config { unsigned ms; int enabled; };
-static inline void sc_ms_setting(struct sc_ms_config *c, char *line) {
-    line[strcspn(line, "\r\n")] = 0;
-    if (!strncmp(line, "fx_time_mode=", 13)) c->enabled = !strcmp(line + 13, "ms");
-    else if (!strncmp(line, "fx_time_ms=", 11)) {
-        unsigned n;
-        c->ms = sc_ms_integer(line + 11, &n) ? sc_ms_clamp(n) : 500;
+static inline int sc_ms_setting(struct sc_ms_config *c, const char *line) {
+    line += strspn(line, " \t\r\n\v\f");
+    size_t len = strlen(line);
+    while (len && strchr(" \t\r\n\v\f", line[len - 1])) --len;
+    if (len >= 13 && !memcmp(line, "fx_time_mode=", 13)) {
+        c->enabled = len == 15 && !memcmp(line + 13, "ms", 2);
+        return 1;
     }
+    if (len >= 11 && !memcmp(line, "fx_time_ms=", 11)) {
+        char value[11];
+        unsigned n;
+        size_t digits = len - 11;
+        c->ms = 500;
+        if (digits > 0 && digits <= 10) {
+            memcpy(value, line + 11, digits); value[digits] = 0;
+            if (sc_ms_integer(value, &n)) c->ms = sc_ms_clamp(n);
+        }
+        return 1;
+    }
+    return 0;
 }
 
 /* Polling worker only: fault in the optional ring before publishing it. */
@@ -90,6 +104,8 @@ static inline void sc_ms_mix(struct sc_pfx_ms *s, float dl, float dr, float *l, 
                              int mode, unsigned ms, float param, int master) {
     int enabled = ms && sc_ms_effect(mode);
     if (__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE) != 2 || (!enabled && s->blend == 0.0f)) return;
+    if (enabled) s->mode = mode;
+    else mode = s->mode; /* Keep the sounding algorithm until its fade reaches zero. */
     dl = sc_ms_clean(dl); dr = sc_ms_clean(dr);
     *l = sc_ms_clean(*l); *r = sc_ms_clean(*r);
     if (s->blend == 0.0f) {

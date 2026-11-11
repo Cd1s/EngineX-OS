@@ -11,6 +11,35 @@ from pathlib import Path
 
 FX_CONTROLLER = r'''
     property var scFxControllers: []
+    property bool scFxMsSending: false
+    property int scFxMsRequest: 0
+    Timer { id: scFxMsTimeout; interval: 2000; onTriggered: root.scFxMsExpire() }
+    function scFxMsExpire() {
+        ++scFxMsRequest
+        scFxMsSending = false; scFxMsWanted = -1; scFxMsSent = -1
+    }
+    property int scFxMsWanted: -1
+    property int scFxMsSent: -1
+    function scFxMsFlush() {
+        if (scFxMsSending) return
+        if (scFxTimeMode !== "ms") { scFxMsWanted = -1; return }
+        if (scFxMsWanted < 10) return
+        const ms = scFxMsWanted
+        scFxMsWanted = -1; scFxMsSent = ms; scFxMsSending = true
+        const request = ++scFxMsRequest
+        scFxMsTimeout.restart()
+        scCall("fxTimeMs=" + ms, function() {
+            if (request !== scFxMsRequest) return
+            scFxMsTimeout.stop()
+            scFxMsSending = false; scFxMsSent = -1
+            if (scFxMsWanted === scFxTimeMs) scFxMsWanted = -1
+            scFxMsFlush()
+        })
+    }
+    function scFxMsSet(ms) {
+        scFxMsWanted = ms
+        scFxMsFlush()
+    }
     function scFxMsController(parameter) {
         if (scFxTimeMode !== "ms" || !parameter) return null
         for (let i = 0; i < scFxControllers.length; ++i) {
@@ -23,8 +52,8 @@ FX_CONTROLLER = r'''
     }
     function scFxMsStep(parameter, delta) {
         if (!scFxMsController(parameter)) return false
-        const ms = Math.max(10, Math.min(4000, scFxTimeMs + delta * 10))
-        scCall("fxTimeMs=" + ms)
+        const base = scFxMsWanted >= 10 ? scFxMsWanted : (scFxMsSending ? scFxMsSent : scFxTimeMs)
+        scFxMsSet(Math.max(10, Math.min(4000, base + delta * 10)))
         return true
     }
     function scFxMsKnob(parameter) {
@@ -33,7 +62,7 @@ FX_CONTROLLER = r'''
         const rates = [1/16, 1/8, 1/4, 1/2, 3/4, 1, 2, 4, 8, 16, 32]
         const milliseconds = [10, 18, 33, 60, 110, 200, 364, 663, 1207, 2197, 4000]
         const index = rates.indexOf(parameter.value)
-        if (index >= 0) scCall("fxTimeMs=" + milliseconds[index])
+        if (index >= 0) scFxMsSet(milliseconds[index])
     }
     Repeater {
         model: root.scFxSelectorAvailable ? 6 : 0
@@ -2449,6 +2478,7 @@ SERVICES_MAIN = """
 	function scFxMsApply(mode, value) {
 		scFxTimeMode = mode === "ms" ? "ms" : "beats"
 		scFxTimeMs = scFxMsInteger(value)
+		if (scFxTimeMode !== "ms") scFxMsWanted = -1
 	}
 	function scFxMsInteger(value) {
 		const text = String(value)
@@ -2474,8 +2504,8 @@ SERVICES_MAIN = """
 			else if (key === "ui_scale") root.scUIScale = parseInt(val) || 100
 			else if (key === "stems_eq_mode") root.scStemsEqMode = val === "1"
 			else if (key === "beat_jump_pads") root.scBeatJumpPads = val === "1"
-			else if (key === "fx_time_mode") fxMode = val === "ms" ? "ms" : "beats"
-			else if (key === "fx_time_ms") fxMs = scFxMsInteger(val)
+			else if (key === "fx_time_mode" && line.trim().indexOf("fx_time_mode=") === 0) fxMode = line.trim().slice(13) === "ms" ? "ms" : "beats"
+			else if (key === "fx_time_ms" && line.trim().indexOf("fx_time_ms=") === 0) fxMs = scFxMsInteger(line.trim().slice(11))
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
 		}
 		scFxMsApply(fxMode, fxMs)
@@ -5944,9 +5974,7 @@ def edits(dev: bool):
             ('                objectName: "DJFx_Beats_Increase_Button"', '                objectName: "DJFx_Beats_Increase_Button"\n                text: spinner.scMsActive ? "+" : ""'),
             ('                    source: Qt.resolvedUrl("img/minus.png")', '                    source: spinner.scMsActive ? "" : Qt.resolvedUrl("img/minus.png")'),
             ('                    source: Qt.resolvedUrl("img/plus.png")', '                    source: spinner.scMsActive ? "" : Qt.resolvedUrl("img/plus.png")'),
-            ('    property bool isTouchable: parameter && parameter.isTouchable', '    property bool isTouchable: scMsActive || (parameter && parameter.isTouchable)'),
-            ('            LabelWithLED {\n                id: header\n                parameter: spinner.parameter', '            LabelWithLED {\n                id: header\n                parameter: spinner.parameter\n                text: spinner.scMsActive ? "Time (ms)" : (parameter ? parameter.label : "")'),
-            ('    property bool active: false', '    readonly property bool scMsActive: typeof root !== "undefined" && root.scFxMsController && !!root.scFxMsController(parameter)\n    property bool active: false'),
+            ('    property bool active: false', '    readonly property bool scMsActive: typeof root !== "undefined" && root.scFxMsController && !!root.scFxMsController(parameter)\n    Binding { target: spinner; property: "isTouchable"; when: spinner.scMsActive; value: true; restoreMode: Binding.RestoreBindingOrValue }\n    Binding { target: header; property: "text"; when: spinner.scMsActive; value: spinner.scMsActive && root.scT ? root.scT("Time (ms)") : "Time (ms)"; restoreMode: Binding.RestoreBindingOrValue }\n    property bool active: false'),
             ('                text: parameter ? parameter.valueText : ""', '                text: spinner.scMsActive ? (root.scFxTimeMs + " ms") : (parameter ? parameter.valueText : "")'),
             ('                onClicked: parameter.decValue()', '                onClicked: { if (!spinner.scMsActive || !root.scFxMsStep(parameter, -1)) parameter.decValue() }'),
             ('                onClicked: parameter.incValue()', '                onClicked: { if (!spinner.scMsActive || !root.scFxMsStep(parameter, 1)) parameter.incValue() }'),

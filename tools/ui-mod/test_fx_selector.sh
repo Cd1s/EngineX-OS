@@ -4,7 +4,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 work=${OUT_DIR:-$repo/out/fx-tests}
 mkdir -p "$work"
-for test in test_pioneer_selector test_dsp_smooth test_fx_ms; do
+for test in test_pioneer_selector test_dsp_smooth test_fx_ms test_ms_lazy; do
     for sanitizer in plain asan tsan; do
         flags=(-std=c11 -O1 -g -Wall -Wextra -Werror -pthread)
         case "$sanitizer" in
