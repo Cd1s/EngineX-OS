@@ -663,3 +663,71 @@ func TestValidateMissingScriptRejected(t *testing.T) {
 		t.Fatal("missing script must be rejected")
 	}
 }
+
+// #208: official 1.0.0 helpers needed Python, which no deck has. Uploading 1.1.0
+// must replace the installed 1.0.0 in place, even when the old stop script fails.
+func TestInstallArchiveUpgradesNewerVersionInPlace(t *testing.T) {
+	base := t.TempDir()
+	mgr := NewManager("", filepath.Join(base, "ui"))
+	var actions []string
+	failOld := true
+	mgr.runScript = func(mod Mod, action string) error {
+		actions = append(actions, mod.ID+":"+mod.Version+":"+action)
+		if failOld && mod.Version == "1.0.0" {
+			return io.ErrUnexpectedEOF // python3: not found
+		}
+		return nil
+	}
+	pkg := func(version, script string) []byte {
+		return testArchive(t, map[string]string{"mod.json": `{"id":"dmx-studio","version":"` + version + `","script":"start.sh"}`, "start.sh": script}, "")
+	}
+	if _, err := mgr.InstallArchive(bytes.NewReader(pkg("1.0.0", "python3 runtime.py"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.SetModEnabled("dmx-studio", true); err == nil {
+		t.Fatal("the broken 1.0.0 start must fail")
+	}
+	failOld = false
+	if err := mgr.SetModEnabled("dmx-studio", true); err != nil { // a user who forced it on
+		t.Fatal(err)
+	}
+	failOld = true
+	for _, v := range []string{"1.0.0", "0.9.9", "beta"} {
+		if _, err := mgr.InstallArchive(bytes.NewReader(pkg(v, "x"))); err == nil || !strings.Contains(err.Error(), "already installed") {
+			t.Fatalf("%s over 1.0.0: %v", v, err)
+		}
+	}
+	actions = nil
+	mod, err := mgr.InstallArchive(bytes.NewReader(pkg("1.1.0", "exec bin/helper")))
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	if mod.Version != "1.1.0" || !mod.Enabled || !mod.Valid {
+		t.Fatalf("upgraded mod: %+v", mod)
+	}
+	if strings.Join(actions, ",") != "dmx-studio:1.0.0:stop,dmx-studio:1.1.0:start" {
+		t.Fatalf("upgrade actions: %v", actions)
+	}
+	script, _ := os.ReadFile(filepath.Join(base, "mods", "dmx-studio", "start.sh"))
+	if string(script) != "exec bin/helper" {
+		t.Fatalf("old files left: %q", script)
+	}
+	if list, _ := mgr.Discover(); len(list) != 1 {
+		t.Fatalf("mods after upgrade: %+v", list)
+	}
+	if _, err := os.Stat(filepath.Join(base, "mods", "dmx-studio.old")); !os.IsNotExist(err) {
+		t.Fatalf("backup left behind: %v", err)
+	}
+}
+
+func TestNewerModVersion(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{{"1.1.0", "1.0.0", true}, {"1.10.0", "1.9.9", true}, {"1.0.0.1", "1.0.0", true}, {"1.0.0", "1.0.0", false},
+		{"1.0", "1.0.0", false}, {"0.9", "1.0.0", false}, {"v1.2", "1.1", true}, {"x", "1.0", false}, {"1.1", "", false}} {
+		if got := newerModVersion(c.a, c.b); got != c.want {
+			t.Errorf("newerModVersion(%q, %q) = %v", c.a, c.b, got)
+		}
+	}
+}

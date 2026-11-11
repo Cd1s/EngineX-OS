@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -608,12 +609,19 @@ func (m *Manager) InstallArchive(r io.Reader) (*Mod, error) {
 	if err != nil {
 		return nil, err
 	}
+	dest := filepath.Join(root, manifest.ID)
 	for _, mod := range discovered {
-		if mod.ID == manifest.ID {
+		if mod.ID != manifest.ID {
+			continue
+		}
+		// A newer version of an internal mod replaces it in place, keeping its enabled
+		// state and its state directory: official 1.0.0 helpers needed a Python the
+		// decks never had (#208), and an upload of 1.1.0 must reach those decks.
+		if mod.Drive != "internal" || mod.Dir != dest || !newerModVersion(manifest.Version, mod.Version) {
 			return nil, errors.New("mod ID already installed")
 		}
+		return m.upgradeLocked(mod, dir, manifest.ID)
 	}
-	dest := filepath.Join(root, manifest.ID)
 	if _, err := os.Lstat(dest); err == nil {
 		return nil, errors.New("mod directory already exists")
 	} else if !os.IsNotExist(err) {
@@ -639,6 +647,87 @@ func (m *Manager) InstallArchive(r io.Reader) (*Mod, error) {
 		}
 	}
 	return nil, errors.New("installed mod could not be discovered")
+}
+
+// upgradeLocked swaps an installed internal mod for the staged newer version.
+func (m *Manager) upgradeLocked(old Mod, staged, id string) (*Mod, error) {
+	state := m.loadStateLocked()
+	enabled := state.Mods[id].Enabled
+	if enabled && old.Valid {
+		if err := m.lifecycle(old, "stop"); err != nil {
+			log.Printf("mods: upgrade %s: ignoring failed stop of the old version: %v", id, err) // a broken old script must not block its own fix
+		}
+	}
+	backup := old.Dir + ".old"
+	_ = os.RemoveAll(backup)
+	if err := os.Rename(old.Dir, backup); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(staged, old.Dir); err != nil {
+		_ = os.Rename(backup, old.Dir)
+		return nil, err
+	}
+	_ = os.RemoveAll(backup)
+	list, err := m.discoverLocked()
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if list[i].ID != id {
+			continue
+		}
+		if enabled && (!list[i].Valid || m.isSafeModeQuarantinedLocked(state) || m.lifecycle(list[i], "start") != nil) {
+			if list[i].Valid && !m.isSafeModeQuarantinedLocked(state) {
+				log.Printf("mods: upgrade %s: the new version did not start; left disabled", id)
+				ms := state.Mods[id]
+				ms.Enabled = false
+				state.Mods[id] = ms
+				if err := m.saveStateLocked(state); err != nil {
+					return nil, err
+				}
+				list[i].Enabled = false
+			}
+		}
+		if err := m.applyActiveOverlayLocked(""); err != nil {
+			return nil, err
+		}
+		return &list[i], nil
+	}
+	return nil, errors.New("upgraded mod could not be discovered")
+}
+
+// newerModVersion compares dotted numeric versions (1.10.0 > 1.9.2); anything
+// non-numeric is never newer.
+func newerModVersion(candidate, installed string) bool {
+	parse := func(v string) ([]int, bool) {
+		var out []int
+		for _, part := range strings.Split(strings.TrimPrefix(strings.TrimSpace(v), "v"), ".") {
+			n, err := strconv.Atoi(part)
+			if err != nil || n < 0 {
+				return nil, false
+			}
+			out = append(out, n)
+		}
+		return out, len(out) > 0
+	}
+	c, ok1 := parse(candidate)
+	i, ok2 := parse(installed)
+	if !ok1 || !ok2 {
+		return false
+	}
+	for k := 0; k < len(c) || k < len(i); k++ {
+		var a, b int
+		if k < len(c) {
+			a = c[k]
+		}
+		if k < len(i) {
+			b = i[k]
+		}
+		if a != b {
+			return a > b
+		}
+	}
+	return false
 }
 
 // UninstallMod removes an internal mod and its state.
