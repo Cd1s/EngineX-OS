@@ -1008,7 +1008,7 @@ static void test_patch_files(const char *filename) {
     }
     if (!strcmp(build->name, "5.0.4")) assert(build->edit_count == 16);
     if (!strcmp(build->name, "5.3.0")) {
-        assert(build->edit_count == 21);
+        assert(build->edit_count == 29);
         // #49: consoles (isConsole +0x23a != 0) skip 0x193f6cc; players have
         // isConsole == 0, and when four_deck_waveform=1 clears isPlayer (+0x239),
         // 0x193f6d8 must still branch unconditionally to Layer A / Layer B (0x193fc18).
@@ -1030,7 +1030,7 @@ static void test_patch_files(const char *filename) {
         }
         assert(sampler_patched);
     }
-    if (!strcmp(build->name, "5.3.0-sclive4")) assert(build->edit_count == 23);
+    if (!strcmp(build->name, "5.3.0-sclive4")) assert(build->edit_count == 31);
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         size_t bytes;
         const void *expected = dsp_expected(i, &bytes);
@@ -1266,6 +1266,83 @@ static void test_alsa_boot_hook(void) {
     puts("sc5000_alsa_boot_hook: no-op when initialized or reexec marker exists, resets dst: PASS");
 }
 
+
+// #206: map a fresh private copy of an Engine binary as the loader would see it.
+static char *rec_stream_image(const char *filename, size_t *len) {
+    FILE *f = fopen(filename, "rb"); assert(f);
+    assert(!fseek(f, 0, SEEK_END)); long size = ftell(f); assert(size > 0);
+    rewind(f);
+    size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    *len = ((size_t)size + page - 1) / page * page;
+    char *image = mmap(NULL, *len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(image != MAP_FAILED && fread(image, 1, (size_t)size, f) == (size_t)size);
+    fclose(f);
+    ElfW(Ehdr) *header = (void *)image;
+    struct dl_phdr_info info = {.dlpi_addr = (uintptr_t)image,
+        .dlpi_phdr = (void *)(image + header->e_phoff), .dlpi_phnum = header->e_phnum};
+    uintptr_t found = 0;
+    engine_base(&info, sizeof info, &found);
+    assert(found == (uintptr_t)image);
+    return image;
+}
+
+// #206: recording with streaming tracks. The 8 sites of a build are applied all
+// together on all-in-ones, never on the players (no recorder; Engine stays as before),
+// and none of them if any one site differs from stock.
+static void test_rec_stream(const char *filename) {
+    size_t len, page = (size_t)sysconf(_SC_PAGESIZE);
+    char *image = rec_stream_image(filename, &len);
+    if (!strcmp(build->name, "5.0.4")) { munmap(image, len); return; }
+    size_t first = build->edit_count, count = 0;
+    for (size_t i = 0; i < build->edit_count; i++)
+        if (build->edits[i].group == EDIT_REC_STREAM) { if (first > i) first = i; count++; }
+    assert(count == 8 && first + 8 == build->edit_count);
+    // Exact replacement instructions (A32): nop / mov rX, #0 / branch to the loop tail.
+    const uint32_t want[8] = {0xe320f000, 0xe3a07000, 0xe3a07000, 0xe3a03000, 0xe3a03000, 0, 0xe320f000, 0xe320f000};
+    for (size_t k = 0; k < 8; k++) {
+        const struct engine_edit *e = &build->edits[first + k];
+        assert(edit_state((uintptr_t)image, e) == 1); // stock bytes on the real binary
+        uint32_t ins; memcpy(&ins, e->replacement, 4);
+        if (k != 5) assert(ins == want[k]);
+    }
+    // Recorder guard: the conditional branch becomes unconditional, same target.
+    uint32_t cond, uncond;
+    memcpy(&cond, build->edits[first + 5].expected, 4); memcpy(&uncond, build->edits[first + 5].replacement, 4);
+    assert((cond & 0xf0000000) == 0x00000000 && (uncond & 0xf0000000) == 0xe0000000 && (cond & 0x0fffffff) == (uncond & 0x0fffffff));
+    // The adjacent PlaylistDeck/PlayState read (+0xf2) stays stock.
+    uint32_t pdeck; memcpy(&pdeck, image + build->edits[first + 4].offset - 4, 4);
+    assert(pdeck == 0xe5d720f2);
+    munmap(image, len);
+
+    char code_path[] = "/tmp/product-code-XXXXXX";
+    int cfd = mkstemp(code_path); assert(cfd >= 0); close(cfd);
+    const char *saved = product_code_path;
+    product_code_path = code_path;
+    const struct { const char *board; int corrupt, patched; } cases[] = {
+        {"JP07", 0, 0}, {"JP08", 0, 0}, {"JP13", 0, 0}, {"JP14", 0, 0},
+        {"JC11", 0, 1}, {"JC16", 0, 1}, {"NH08", 0, 1}, {"JP11", 0, 1}, {"JP21", 0, 1}, {"JC11", 1, 0}};
+    for (size_t c = 0; c < sizeof cases / sizeof *cases; c++) {
+        FILE *f = fopen(code_path, "w");
+        assert(f && fputs(cases[c].board, f) >= 0 && !fclose(f));
+        image = rec_stream_image(filename, &len);
+        if (cases[c].corrupt) image[build->edits[first + 7].offset] ^= 0xff;
+        apply_engine_edits((uintptr_t)image, page);
+        apply_engine_edits((uintptr_t)image, page); // idempotent
+        for (size_t k = 0; k < 8; k++) {
+            int st = edit_state((uintptr_t)image, &build->edits[first + k]);
+            if (cases[c].corrupt && k == 7) assert(st == 0);
+            else assert(st == (cases[c].patched ? 2 : 1));
+        }
+        // The rest of the table is unaffected by the board: the gateway edit still applies.
+        for (size_t i = 0; i < first; i++)
+            if (build->edits[i].group == EDIT_GATEWAY) assert(edit_state((uintptr_t)image, &build->edits[i]) == 2);
+        munmap(image, len);
+    }
+    product_code_path = saved;
+    unlink(code_path);
+    printf("#206 recording with streaming tracks (%s): 8 sites stock->patched on all-in-ones, untouched on JP07/JP08/JP13/JP14, none on a 1-site mismatch: PASS\n", build->name);
+}
+
 int main(int argc, char **argv) {
     for (size_t b = 0; b < sizeof engine_builds / sizeof *engine_builds; b++) {
         // Hooks and counters are process-global; each build starts pristine.
@@ -1293,6 +1370,6 @@ int main(int argc, char **argv) {
     test_shadow_replay();
     test_stems_processor_fallback();
     test_alsa_boot_hook();
-    for (int i = 1; i < argc; i++) test_patch_files(argv[i]);
+    for (int i = 1; i < argc; i++) { test_patch_files(argv[i]); test_rec_stream(argv[i]); }
     return 0;
 }

@@ -454,7 +454,7 @@ struct engine_edit {
     uint32_t size;
     int group; // all sites of a group are applied together or not at all
 };
-enum { EDIT_ONE, EDIT_STEMS, EDIT_GATEWAY, EDIT_AUX, EDIT_GROUP_COUNT };
+enum { EDIT_ONE, EDIT_STEMS, EDIT_GATEWAY, EDIT_AUX, EDIT_REC_STREAM, EDIT_GROUP_COUNT };
 
 // Everything that differs between Engine builds. The hook only patches a build
 // listed here (exact GNU BuildID), and every site is checked byte for byte first.
@@ -1611,6 +1611,21 @@ static const struct engine_edit edits_az04[] = {
     // #159 StreamingProviderInterface::connectedSSO() -> true, isDisconnectedFromProfile() -> false
     {0xc9cab4u, "\x00\x58\x64\x39", "\x20\x00\x80\x52", 4, EDIT_ONE},
     {0xc9cb0cu, "\xe0\x03\x01\x2a", "\x00\x00\x80\x52", 4, EDIT_ONE},
+    // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
+    // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
+    // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
+    {0x810d28u, "\x00\x00\x7b\xb2", "\x1f\x20\x03\xd5", 4, EDIT_REC_STREAM},
+    // TrackLoadArbitrator leftBlockMsg / rightBlockMsg / deckBlockMsg / allowedDecksBitmask: Recorder/Active (+0x1c1) -> 0
+    {0x8ab74cu, "\x76\x06\x47\x39", "\x16\x00\x80\x52", 4, EDIT_REC_STREAM},
+    {0x8aba7cu, "\x76\x06\x47\x39", "\x16\x00\x80\x52", 4, EDIT_REC_STREAM},
+    {0x8b67c4u, "\x80\x06\x47\x39", "\x00\x00\x80\x52", 4, EDIT_REC_STREAM},
+    {0x8b6a20u, "\xdb\x06\x47\x39", "\x1b\x00\x80\x52", 4, EDIT_REC_STREAM},
+    // Recorder streaming guard: skip BlockedByStreaming, DecksBlockedByStreaming, and /Engine/Mixer/Recorder/Abort
+    {0x97b444u, "\xe0\xda\x07\x36", "\xd7\xfe\xff\x17", 4, EDIT_REC_STREAM},
+    // Streaming PreLoadCheck: always allow /GUI/ShowLoadToDeckMenu during active recording
+    {0x97f53cu, "\x20\x26\x00\x36", "\x31\x01\x00\x14", 4, EDIT_REC_STREAM},
+    // TrackListModel: skip /Engine/Mixer/Recorder/Active load-disable override
+    {0xd7a2f8u, "\x60\x1f\x00\x37", "\x1f\x20\x03\xd5", 4, EDIT_REC_STREAM},
 };
 
 static const struct engine_build engine_builds[] = {
@@ -1704,6 +1719,21 @@ static const struct engine_edit edits_530[] = {
     // non-console fallback (0x193f6cc, reached only when isConsole +0x23a == 0)
     // still needs the Layer A / Layer B branch instead of an empty map.
     {0x193f6d8u, "\x4e\x01\x00\x1a", "\x4e\x01\x00\xea", 4, EDIT_ONE},
+    // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
+    // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
+    // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
+    {0x6b683cu, "\x20\x30\x83\xe3", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
+    // TrackLoadArbitrator leftBlockMsg / rightBlockMsg / deckBlockMsg / allowedDecksBitmask: Recorder/Active (+0xf1) -> 0
+    {0x752a38u, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM},
+    {0x752ee4u, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM},
+    {0x75dc44u, "\xf1\x30\xd6\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM},
+    {0x75dfbcu, "\xf1\x30\xd7\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM},
+    // Recorder streaming guard: skip BlockedByStreaming, DecksBlockedByStreaming, and /Engine/Mixer/Recorder/Abort
+    {0x8475e4u, "\xa3\xfe\xff\x0a", "\xa3\xfe\xff\xea", 4, EDIT_REC_STREAM},
+    // Streaming PreLoadCheck: always allow /GUI/ShowLoadToDeckMenu during active recording
+    {0x847fa0u, "\x9b\xff\xff\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
+    // TrackListModel: skip /Engine/Mixer/Recorder/Active load-disable override
+    {0xcd1d68u, "\x4b\x00\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
 };
 
 static const struct engine_edit edits_sclive[] = {
@@ -1734,6 +1764,21 @@ static const struct engine_edit edits_sclive[] = {
     // #159 StreamingProviderInterface::connectedSSO() -> true, isDisconnectedFromProfile() -> false
     {0xbf91d8u, "\xc2\x05\xd0\xe5", "\x01\x00\xa0\xe3", 4, EDIT_ONE},
     {0xbf9234u, "\x01\x00\x20\xe2", "\x00\x00\xa0\xe3", 4, EDIT_ONE},
+    // #206 Recording with streaming tracks (all-in-ones only; the group is never ready on
+    // the JP07/JP08/JP13/JP14 players, which have no recorder). All 8 sites or none.
+    // AbstractCollectionModel streamingFlags: skip BlocksRecording (0x20) bit
+    {0x6b2398u, "\x20\x30\x83\xe3", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
+    // TrackLoadArbitrator leftBlockMsg / rightBlockMsg / deckBlockMsg / allowedDecksBitmask: Recorder/Active (+0xf1) -> 0
+    {0x76b7bcu, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM},
+    {0x76bc68u, "\xf1\x70\xd4\x15", "\x00\x70\xa0\xe3", 4, EDIT_REC_STREAM},
+    {0x773f10u, "\xf1\x30\xd6\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM},
+    {0x774288u, "\xf1\x30\xd7\xe5", "\x00\x30\xa0\xe3", 4, EDIT_REC_STREAM},
+    // Recorder streaming guard: skip BlockedByStreaming, DecksBlockedByStreaming, and /Engine/Mixer/Recorder/Abort
+    {0x83b9e8u, "\xa3\xfe\xff\x0a", "\xa3\xfe\xff\xea", 4, EDIT_REC_STREAM},
+    // Streaming PreLoadCheck: always allow /GUI/ShowLoadToDeckMenu during active recording
+    {0x849eccu, "\x9b\xff\xff\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
+    // TrackListModel: skip /Engine/Mixer/Recorder/Active load-disable override
+    {0xcd6c40u, "\x4b\x00\x00\x1a", "\x00\xf0\x20\xe3", 4, EDIT_REC_STREAM},
 };
 
 static const struct engine_build engine_builds[] = {
@@ -1804,39 +1849,12 @@ static int edit_state(uintptr_t base, const struct engine_edit *e) {
 
 static void install_sqlite_hooks(uintptr_t base, size_t page);
 
-int g_hook_initialized = 0;
-
-__attribute__((constructor)) static void edit_engine(void) {
-#ifdef ENGINE_UI_HOOK_TEST
-    g_hook_initialized = 1;
-#else
-    const char *preload = getenv("LD_PRELOAD");
-    if (preload && strstr(preload, "libengine-ui-hook.so")) {
-        g_hook_initialized = 1;
-    }
-#endif
-    if (!is_engine()) return;
-    if (!g_hook_initialized) return;
-    initialize_engine_cpus();
-    uintptr_t base = 0;
-    dl_iterate_phdr(engine_base, &base);
-    if (!base) return;
-    long page_size = sysconf(_SC_PAGESIZE);
-    if (page_size <= 0) return;
-    uintptr_t page = (uintptr_t)page_size;
-    fprintf(stderr, "engine-ui-hook: Engine %s\n", build->name);
-#if !defined(__aarch64__)
-    prepare_aux(base, page);
-    prepare_config(base, page);
-    prepare_shadow_sync_play(base, page);
-    uint32_t expected_feature[2] = {build->feature_displaced ? build->feature_displaced : 0xe51b3340, 0xe3540000};
-    if (build->feature_true && !memcmp((const void *)(base + build->feature_site), expected_feature, 8))
-        prepare_stems_feature(base, page);
-#endif
+static void apply_engine_edits(uintptr_t base, size_t page) {
     // A group is applied only if every site of it is stock or already patched.
     int ready[EDIT_GROUP_COUNT];
     for (unsigned i = 0; i < EDIT_GROUP_COUNT; i++) ready[i] = 1;
     ready[EDIT_AUX] = aux_ready;
+    ready[EDIT_REC_STREAM] = !player_board();
     for (unsigned i = 0; i < build->edit_count; i++)
         if (!edit_state(base, &build->edits[i])) ready[build->edits[i].group] = 0;
     for (unsigned i = 0; i < build->edit_count; i++) {
@@ -1869,6 +1887,38 @@ __attribute__((constructor)) static void edit_engine(void) {
         __builtin___clear_cache(at, at + e->size);
         fprintf(stderr, "engine-ui-hook: applied 0x%x (%u bytes)\n", e->offset, e->size);
     }
+}
+
+int g_hook_initialized = 0;
+
+__attribute__((constructor)) static void edit_engine(void) {
+#ifdef ENGINE_UI_HOOK_TEST
+    g_hook_initialized = 1;
+#else
+    const char *preload = getenv("LD_PRELOAD");
+    if (preload && strstr(preload, "libengine-ui-hook.so")) {
+        g_hook_initialized = 1;
+    }
+#endif
+    if (!is_engine()) return;
+    if (!g_hook_initialized) return;
+    initialize_engine_cpus();
+    uintptr_t base = 0;
+    dl_iterate_phdr(engine_base, &base);
+    if (!base) return;
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) return;
+    uintptr_t page = (uintptr_t)page_size;
+    fprintf(stderr, "engine-ui-hook: Engine %s\n", build->name);
+#if !defined(__aarch64__)
+    prepare_aux(base, page);
+    prepare_config(base, page);
+    prepare_shadow_sync_play(base, page);
+    uint32_t expected_feature[2] = {build->feature_displaced ? build->feature_displaced : 0xe51b3340, 0xe3540000};
+    if (build->feature_true && !memcmp((const void *)(base + build->feature_site), expected_feature, 8))
+        prepare_stems_feature(base, page);
+#endif
+    apply_engine_edits(base, page);
     install_sqlite_hooks(base, page);
     if (install_dsp_hooks(base, page)) {
 #if !defined(__aarch64__)
