@@ -1,8 +1,8 @@
-# EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11，预 RC）
+# EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11，RC（待维护者确认发布））
 
 - **日期**：`2026-11-11`
-- **状态**：预 RC（实机线 `agent/shadow-grid-halfwave-20261110` 合并至 `7be625c`，沙箱线 `agent/sandbox-main-20261110` 合并至 `2031ae2`，实机线未最终合入）
-- **版本范围**：`v5.3.0.3`（tag `cd789f8` / 构建提交 `b941ea4`）→ `v5.3.0.4`（预 RC 构建提交：`6e1b4be`，实机线未最终合入）
+- **状态**：RC（待维护者确认发布；实机线 `agent/shadow-grid-halfwave-20261110` 合并至 `4386093`，沙箱线 `agent/sandbox-main-20261110` 合并至 `2031ae2`）
+- **版本范围**：`v5.3.0.3`（tag `cd789f8` / 构建提交 `b941ea4`）→ `v5.3.0.4`（RC 构建提交：`5038e5b`）
 - **回滚点**：`v5.3.0.3`（tag `cd789f8`，构建提交 `b941ea4`；同版本更早构建 `37e83ea`、`9616419`）
 - **覆盖机型与产物（共 20 个发布资产 + `SHA256SUMS.txt`）**：
   - **8 款一代机完整固件（`*-Update.img`）**：`SC5000`（JP07）、`SC5000M`（JP08）、`PRIME GO`（JP11）、`SC6000`（JP13）、`SC6000M`（JP14）、`PRIME 4`（JC11）、`PRIME 2`（JC16）、`Mixstream Pro`（NH08）
@@ -16,7 +16,7 @@
 
 | Issue / PR | 模块 | 原因与修法摘要 | 验证与回归测试 |
 | --- | --- | --- | --- |
-| **#49**（影子轨模式、Engine 模式头部/概览镜像、显示模式对齐原厂、独立播放器四轨颜色与行为保留） | `pkg/webui/shadow.go`<br>`pkg/webui/shadow_display.go`<br>`tools/ui-mod/build_packs.py` | **原因**：① 四轨模式下对端关机/退歌时残留波形，或 `RemoteState` 订阅死锁阻塞流媒体切源，流媒体曲目显示数字缓存文件名；② 影子轨缺乏统一加载策略，拷贝期间跳回 `No Track Loaded`，Engine 模式下影子轨头部读本地静音副本的空白标签/本地分析调性且缺源轨 `Sync`/`LEAD`/`Loop`/`KeyOffset`/`Stems`/`Slip` 状态；③ 显示模式（CDJ 或回退）头部与波形泳道同原厂存在视觉差异；④ 独立播放器（`SC5000 / SC6000`）开启四轨后原厂将其视作四通道一体机，丢失 `Player #`、`Layer A / B` 双层选色盘、`Enable for Dual Deck` 与 `Browse` 按压直载当前层行为。<br>**修法**：① 对端发送 UDP 告别包并在 350 ms 防抖后执行 `Unload` + `UnSync` + 交还 `MASTER`，移除 `RemoteState` 死锁订阅，从源机 `stm.db` 解析真实 `Artist - Title`；② 新增 `Shadow Deck Mode`（`auto` / `engine` / `cdj`）：默认 `Auto` 下只要对端 EngineX 或 CDJ 曲目可拷贝即由本机 Engine 静音加载（分析沿用源机或 rekordbox，对端自身硬盘曲目带源分析拷贝），无法拷贝的 CDJ 曲目自动回退显示 rekordbox 波形并提示原因，拷贝期间立即显示源曲目信息与原厂 `ProgressRing` 进度环（限制单曲音频拷贝上限 1 GiB，下载前清理过期缓存防 `ENOSPC`，并修复时钟回拨后 POST 恢复）；③ Engine 模式下影子轨头部镜像源轨真实 `Title`、`Artist`、`Key`、`KeyOffset`、`AutoLoop`、`Stems` 图标、`Sync` 绿 BPM 与仅在源轨显示时点亮的 `LEAD`（`*bool` 区分显式 `false` 与缺省），概览波形绘制源轨 `Slip` 滑行线，Follower 采用均值线弯音追赶（按轨道实际倍速折算时长，GUI 停滞 >150 ms 不误判跳变）；④ `All CDJ Mode` 与 CDJ 回退下头部与波形层全面对齐原厂（封面、遵循 `Hide Title/Artist` 与 `Display File Name` 的滚动标题、点击切换时间、跟随原厂设置的调性与调性色、`Key Lock`、同步绿 `BPM`、变速范围与百分比、`▲▼`、`LEAD`、`Auto Loop` / `Beat Jump`、`Hot Cue Countdown`、按 `Track End Warning` 触发的曲末红闪、变速跨度、2.2×/1.3× 底边锚定概览高度、`TimeBar`、`HotCueTriangle`、描边小节号及原厂 `DeckTabs` 激活态）；⑤ 独立播放器开启四轨后完整恢复 `Player #`、`Deck Color`（`Layer A / B` 双层选色盘）、`Enable for Dual Deck`、`Browse` 按压直载当前层、远程碟机选择、`Engine Connect` 与 `Touch FX Mute`。 | `go test -race ./pkg/webui/...`（含 `shadow_test.go`、`shadow_display_test.go`、`shadow_quiet_test.go`、`shadow_reliability_test.go`、`shadow_debug_test.go`）、`tools/az01-packer/test_ui_mod.py`（100 项 PASS）；Engine 模式经双 SC5000 实机验证，`Shadow Deck Mode` 三态与显示模式对齐在 `shadow-twin` / eglfs 验证 |
+| **#49**（影子轨模式、Engine 模式头部/概览镜像、静音影子槽 MASTER 选举排除、显示模式对齐原厂、独立播放器四轨颜色与行为保留） | `pkg/webui/shadow.go`<br>`pkg/webui/shadow_display.go`<br>`pkg/enginedb/display.go`<br>`tools/ui-mod/build_packs.py`<br>`tools/ui-mod/engine_ui_hook.c` | **原因**：① 四轨模式下对端关机/退歌时残留波形，或 `RemoteState` 订阅死锁阻塞流媒体切源，流媒体曲目显示数字缓存文件名；② 影子轨缺乏统一加载策略，拷贝期间跳回 `No Track Loaded`，Engine 模式下影子轨头部读本地静音副本的空白标签/本地分析调性且缺源轨 `Sync`/`LEAD`/`Loop`/`KeyOffset`/`Stems`/`Slip` 状态，本机静音影子槽在 `engineSync` 中可能误参与 `MASTER` 选举，且空 Engine 槽重复解析快照增加开销；③ 显示模式（CDJ 或回退）头部与波形泳道同原厂存在视觉差异，且原厂 `beatData` 概览整秒截断与负采样点 main cue 会被校验拦截；④ 独立播放器（`SC5000 / SC6000`）开启四轨后原厂将其视作四通道一体机，丢失 `Player #`、`Layer A / B` 双层选色盘、`Enable for Dual Deck` 与 `Browse` 按压直载当前层行为。<br>**修法**：① 对端发送 UDP 告别包并在 350 ms 防抖后执行 `Unload` + `UnSync` + 交还 `MASTER`，移除 `RemoteState` 死锁订阅，从源机 `stm.db` 解析真实 `Artist - Title`；② 新增 `Shadow Deck Mode`（`auto` / `engine` / `cdj`）：默认 `Auto` 下只要对端 EngineX 或 CDJ 曲目可拷贝即由本机 Engine 静音加载，无法拷贝的 CDJ 曲目自动回退显示 rekordbox 波形并提示原因，拷贝期间立即显示源曲目信息与原厂 `ProgressRing` 进度环（限制单曲音频拷贝上限 1 GiB，下载前清理过期缓存防 `ENOSPC`，并修复时钟回拨后 POST 恢复）；③ Engine 模式下影子轨头部镜像源轨真实 `Title`、`Artist`、`Key`、`KeyOffset`、`AutoLoop`、`Stems` 图标、`Sync` 绿 BPM 与仅在源轨显示时点亮的 `LEAD`（`ArtistSong.qml` 同时遵循 `Hide Title/Artist`），概览波形绘制源轨 `Slip` 滑行线，Follower 采用均值线弯音追赶，并在 5.3.0 hook 新增 `0x16fbc38` 站点排除本机静音影子槽参与 `MASTER` 选举（`f6b87f8`）及跳过空 Engine 槽重复快照（`4386093`）；④ 显示数据兼容原厂 `beatData` 概览整秒截断与早于 `0` 的 main cue（`fd9c8d5`），`All CDJ Mode` 与 CDJ 回退下头部与波形层全面对齐原厂；⑤ 独立播放器开启四轨后完整恢复 `Player #`、`Deck Color`（`Layer A / B` 双层选色盘）、`Enable for Dual Deck`、`Browse` 按压直载当前层、远程碟机选择、`Engine Connect` 与 `Touch FX Mute`。 | `go test -race ./pkg/webui/... ./pkg/enginedb/...`、`tools/az01-packer/test_ui_mod.py`（103 项 PASS）、`tools/ui-mod/test_shadow_master.c`（144 项原生用例 PASS）；双 SC5000 实机 A1–A11 与双机沙箱录像 S1–S8 验收通过 |
 | **#85**（RGB 与单色按键灯亮度分级调光） | `tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/build_packs.py` | **原因**：硬件控制器单色按键（`SYNC`、`KEYLOCK`、`SLIP` 等）仅支持亮/暗两档 MIDI `NoteOn` 状态，此前对 `NoteOn` 缩放会导致单色按键灯状态异常。<br>**修法**：`Settings → Device → Pad LED Brightness`（`100%`–`20%`）对 RGB 彩灯（打击垫、模式键、`Layer`、转盘灯环与屏幕虚拟打击垫）按视觉感知曲线分级调光，单色 `NoteOn` 按键原样透传保持原厂亮度。 | `test_ui_mod.py::test_led_brightness_rgb_and_single_color_passthrough`、`test_az04_hook.c` |
 | **#105**（OmniSource 歌单隔离） | `pkg/webui/tidal_gateway.go`<br>`pkg/providers/` | **原因**：开启 OmniSource 后各流媒体平台自身的歌单页混入了 `[USB: ...]` 本地盘与跨平台歌单。<br>**修法**：搜索栏继续跨流媒体与全部 U 盘聚合检索，各流媒体自身的歌单列表严格按当前平台隔离。 | `go test -race ./pkg/providers/... ./pkg/webui/...` |
 | **#118**（一代机镜像嵌入定制开机第一屏） | `tools/az01-packer/build-release.sh` | **原因**：`build-release.sh` 打包一代机 `.img` 时漏传 `--splash`，导致刷入后退回原厂开机第一屏。<br>**修法**：在 `build-release.sh` 中传入 `--splash "$REPO/docs/assets/boot-splash-enginex.png"`，并修正发布脚本资产通配符仅选择 20 个公开产物。 | `test_az01_packer.py`、镜像解包校验 |
@@ -39,89 +39,95 @@
 
 ---
 
-## 2. 未在物理实机验证的项目清单
+## 2. 实机验收、沙箱录像与待实机验证项目清单
 
-以下改动已在 `Oracle-Batam-arm` 通过单元/竞态测试、二进制 hook 校验、`shadow-twin` 双机仿真、eglfs KMS 渲染或三组 `release-gate.sh` 门禁，但截至本次预 RC 构建尚未在对应物理实机上完成人工验收：
-
-1. **沙箱线新增的 `Shadow Deck Mode`（`auto` / `engine` / `cdj`）、加载进度环（`ProgressRing`）、显示模式头部/波形层对齐原厂与 16 机型能力门控**：已在 `shadow-twin` 双机沙箱与 eglfs 下验证，待双 SC5000 实机最终联调确认。
-2. **SC LIVE 4 AUX 路由至通道 3/4（#171）**：已在 JP21 沙箱（含 null PCM 与硬件 fixture）验证，待 SC LIVE 4 真机低音量核验通道 CUE、EQ、Sweep FX 与 MIC2。
-3. **PRIME 4 原生 FX 选择器 PX 效果与独立 Time/Rate（#168）**：已在 JC11 沙箱与原生 C 单测验证，待 PRIME 4（JC11）真机核验旋钮/按键手感与实时音频过渡。
-4. **Mixstream Pro / Pro+ / Pro Go 实体 FILTER 旋钮 Sweep FX 与触控跳拍（#166）**：已在 NH08 沙箱验证，待 Mixstream 系列真机实测。
-5. **SC LIVE 4 等机型在非 100% `UI Scale` 下的开关机画面铺满（#175）**：已通过 eglfs 渲染验证，待 JP21 真机目视确认。
-6. **PRIME 4 等一体机 Line In 通道映射 CDJ-3000 波形**：已在沙箱验证，待一体机 + CDJ-3000 真机联调。
-7. **通用 USB MIDI 控制器映射器 Mod（`midi-controller-mapper`，#137）**：已在 5.3.0 沙箱完成端到端虚拟 ALSA MIDI 压测（延迟 `p50 ≈ 1.6 ms`），待外接真实 Pioneer CDJ-400（`PC MODE`）硬件验证。
-8. **Web 控制台详细日志开关与脱敏日志下载**：已在隔离 rootfs 沙箱验证 `QT_LOGGING_CONF` 与 `journalctl` 脱敏导出，待一代机与 AZ04 真机核验重启恢复。
-9. **旧版 rekordbox 5 Device Library `export.pdb` 兼容（#182 / PR #183）**：已通过样本库与边界回归单测，尚未用报告人的真实 U 盘在真机上插盘验证。
-10. **PRIME 4+（JC11S）激活校验（#169）与一代机 / SC LIVE 4 / Mixstream Pro Go 安装器 USB 线刷修复（#161、#164）**：NH08S 已由报告人真机刷入验证；JC11S 仍待报告人回传诊断报告，一代机与 JP21/NH10 更新后的安装器自动线刷流程待实机抽验。
+- **双 SC5000 实机验收（基于 `24bb83b` 双机 A1–A11）**：
+  - **A1–A6、A8–A10**：**PASS**（其中 A8 流媒体载入 `LN109299` 已查明为验收脚本绕过原厂 `LOAD` 直接调底层接口所致，按原厂加载路径复测 **PASS**）；
+  - **A11**：由 `f6b87f8` 修复（四轨模式下 `20/20` 补丁生效，排除本机静音影子槽参与 `MASTER` 选举）；
+  - **A7（实体按键灯亮度与单色按键透传）**：待维护者目测确认。
+- **双机沙箱录像验收（`shadow-twin` S1–S8）**：**S1–S8 全部 PASS**。
+- **尚未在对应其他型号物理实机完成人工验收的项目**（均已在 `Oracle-Batam-arm` 通过单元/竞态测试、二进制 hook 校验、`shadow-twin` 双机仿真、eglfs KMS 渲染或三组 `release-gate.sh` 门禁）：
+  1. **实体按键灯分级调光（A7 / #85）**：待维护者在真机上目测确认 RGB 彩灯调光与单色按键透传。
+  2. **SC LIVE 4 AUX 路由至通道 3/4（#171）**：已在 JP21 沙箱（含 null PCM 与硬件 fixture）验证，待 SC LIVE 4 真机低音量核验通道 CUE、EQ、Sweep FX 与 MIC2。
+  3. **PRIME 4 原生 FX 选择器 PX 效果与独立 Time/Rate（#168）**：已在 JC11 沙箱与原生 C 单测验证，待 PRIME 4（JC11）真机核验旋钮/按键手感与实时音频过渡。
+  4. **Mixstream Pro / Pro+ / Pro Go 实体 FILTER 旋钮 Sweep FX 与触控跳拍（#166）**：已在 NH08 沙箱验证，待 Mixstream 系列真机实测。
+  5. **SC LIVE 4 等机型在非 100% `UI Scale` 下的开关机画面铺满（#175）**：已通过 eglfs 渲染验证，待 JP21 真机目视确认。
+  6. **PRIME 4 等一体机 Line In 通道映射 CDJ-3000 波形**：已在沙箱验证，待一体机 + CDJ-3000 真机联调。
+  7. **通用 USB MIDI 控制器映射器 Mod（`midi-controller-mapper`，#137）**：已在 5.3.0 沙箱完成端到端虚拟 ALSA MIDI 压测（延迟 `p50 ≈ 1.6 ms`），待外接真实 Pioneer CDJ-400（`PC MODE`）硬件验证。
+  8. **Web 控制台详细日志开关与脱敏日志下载**：已在隔离 rootfs 沙箱验证 `QT_LOGGING_CONF` 与 `journalctl` 脱敏导出，待一代机与 AZ04 真机核验重启恢复。
+  9. **旧版 rekordbox 5 Device Library `export.pdb` 兼容（#182 / PR #183）**：已通过样本库与边界回归单测，尚未用报告人的真实 U 盘在真机上插盘验证。
+  10. **PRIME 4+（JC11S）激活校验（#169）与一代机 / SC LIVE 4 / Mixstream Pro Go 安装器 USB 线刷修复（#161、#164）**：NH08S 已由报告人真机刷入验证；JC11S 仍待报告人回传诊断报告，一代机与 JP21/NH10 更新后的安装器自动线刷流程待实机抽验。
 
 ---
 
-## 3. 全套测试与三组发版门禁结果（预 RC，实机线未最终合入）
+## 3. 全套测试与三组发版门禁结果（RC（待维护者确认发布））
 
-- **全量自动化测试（`Oracle-Batam-arm` 原生 ARM64/armhf，基于提交 `6e1b4be`）**：
+- **全量自动化测试（`Oracle-Batam-arm` 原生 ARM64/armhf，基于提交 `5038e5b`）**：
   - Go 静态检查与竞态单测：`gofmt -l .`（0 差异）、`go vet ./...`（PASS）、`go test -race ./...`（22 个有测试的 Go 包全部 PASS）；
-  - 系统 overlay 测试：`bash tests/test_rootfs_overlay.sh` → `PASS: 20 tests (mocked storage and hardware; no privileged operations)`；
+  - 系统 overlay 测试：`bash tests/test_rootfs_overlay.sh` → `PASS: 21 tests (mocked storage and hardware; no privileged operations)`（含仓库提交的两份 32-bit `libengine-ui-hook.so` 与 `libedisksd-hook.so` 同源码现编结果逐字节一致校验）；
   - 二代机沙箱验收：
     - `JC11S_ROOTFS=/var/tmp/integ5304-jc11s/rootfs bash tools/az01-packer/test_sclive4_bootstrap.sh`（官方 `PRIME4PLUS-5.3.0-Update.img` SHA-256 `bf5489d1...`）→ `=== All SCLIVE4 verification checks PASSED ===` 及 `=== All PRIME4PLUS verification checks PASSED ===`（`JC11S stock mkfs (blank/existing) and fscrypt first boot: PASS`，20 处补丁，UI 包加载）；
     - `AZ04=1 bash tools/az01-packer/test_sclive4_bootstrap.sh` → `=== All PRIME4G2 verification checks PASSED ===`（18 处补丁，UI 包加载）；
   - Python 打包器与分轨单测：
-    - `python3 -m unittest discover -s tools/az01-packer` → `Ran 206 tests in 60.060s / OK (skipped=1)`（含 `test_ui_mod.py` 全部 102 项 PASS，覆盖 `PatchDict` 防覆盖检查与 `ArtistSong.qml` 双线替换合并）；
-    - `python3 -m unittest discover -s tools/stems` → `Ran 9 tests in 2.371s / OK`；
-  - C 运行时与 DSP / FX 选择器单测：
-    - `bash tools/ui-mod/test_fx_selector.sh` → `test_pioneer_selector`（plain/asan/tsan PASS）、`test_dsp_smooth`（plain/asan/tsan PASS）、`test_flanger_scope armhf PASS`、`test_master_golden`（AZ04/armhf fast/off PASS）；
-    - `bash tools/az01-packer/test_fx_selector_sandbox.sh`（`test_fx_selector_native.c`）→ `FXNATIVE offline-driver|PASS`、`FXCONFIG legacy-master-bypass-and-migration|PASS`；
+    - `python3 -m unittest discover -s tools/az01-packer` → `Ran 207 tests in 57.757s / OK (skipped=1)`（含 `test_ui_mod.py` 全部 103 项 PASS，覆盖 `PatchDict` 防覆盖检查、`ArtistSong.qml` 双线替换合并与空 Engine 槽空闲轮询跳过）；
+    - `python3 -m unittest discover -s tools/stems` → `Ran 9 tests in 2.306s / OK`；
+  - C 运行时与 DSP / FX 选择器 / 影子轨 MASTER 单测：
+    - `tools/ui-mod/test_shadow_master.c`（armhf 原生，针对 5.3.0 `Engine`）→ `shadow MASTER: 144 native play/stop, host, slot and ABI cases; anchor/build/mode guards PASS`；
+    - `tools/ui-mod/test_pioneer_selector.c`（plain/asan/tsan PASS）、`tools/ui-mod/test_dsp_smooth.c`（plain/asan/tsan PASS）、`tools/ui-mod/test_flanger_scope.c`（armhf PASS）、`tools/ui-mod/test_master_golden.c`（AZ04/armhf fast/off PASS）；
+    - `tools/ui-mod/test_mixstream_hook.c`（armhf 原生，5.3.0 20 处补丁、5.3.0-sclive4 23 处补丁 PASS）、`tools/ui-mod/test_sclive_aux.c`（armhf 原生 PASS）、`tools/ui-mod/test_gen2_img.c`（PASS）；
     - `tools/ui-mod/test_stems_feature.c`（armhf 原生，针对 `5.0.4`、`5.3.0`、`5.3.0-sclive4` 三个 `Engine` 二进制）→ 全部 PASS；
     - `tools/ui-mod/test_az04_hook.c`（AArch64 原生，针对 AZ04 64 位 `Engine`）→ 全部 PASS；
     - `tools/edisksd-hook/test_edisksd_hook.c`（常规与 `unshare -m --mounts`）→ `edisksd-hook: all requested tests passed`。
-- **第 4 步镜像抽查（三组代表镜像）**：
-  - `SC5000`（JP07）、`SC6000`（JP13）、`PRIME4`（JC11）分别用 `az01_packer.py unpack` 解包均为 `"verified": true`，`rootfs.ext2` 内 `/etc/sc5000/version.txt` = `5.3.0.4`，`/etc/sc5000/libengine-ui-hook.so` SHA-256 = `be2607610d159c2e0e59ba2bb6bae2b165c0bef1776b8437c8c187d0c1a48574`，`60-ui-hook.conf` 含 `Environment=QT_LOGGING_CONF=/data/logging.ini`，同组机型 `.img` SHA-256 完全一致。
-- **第 4b 步三组发版门禁（`tools/az01-packer/release-gate.sh`，旧版基准：`/root/build/sc5000-lab/release-5.3.0.3/`，预 RC，实机线未最终合入）**：
-  - **SC5000 组（JP07）**：**93 PASS / 0 FAIL / 5 INFO**（退出码 0；静态审计 58 文件 0 FAIL / 14 WARN，`systemd-analyze verify` 17 单元 0 错误；5.3.0.3 → 5.3.0.4 在线升级与 1 字节篡改拒签通过；970 个原厂旧 `.qmlc` 缓存种入后新 UI 包替换 343+1 文件；19 处 Engine 补丁、21 个 DSP guard、SQLite hook、Stems、Rekordbox、下次 5.3.0.5 在线升级全部通过）；
+- **第 4 步镜像抽查与 hook 一致性核对（三组代表镜像）**：
+  - `SC5000`（JP07）、`SC6000`（JP13）、`PRIME4`（JC11）分别用 `az01_packer.py unpack` 解包均为 `"verified": true`，`rootfs.ext2` 内 `/etc/sc5000/version.txt` = `5.3.0.4`，`60-ui-hook.conf` 含 `Environment=QT_LOGGING_CONF=/data/logging.ini`，同组机型 `.img` SHA-256 完全一致；
+  - `build-release.sh` 在 `hooks32` 编译后将新编 32-bit `libengine-ui-hook.so` 与 `libedisksd-hook.so` 覆盖写入 `$STAGE`：解包 SC5000 组 `rootfs.ext2` 核对 `/etc/sc5000/libengine-ui-hook.so` 与 `/usr/local/lib/sc5000/libengine-ui-hook.so` 的 SHA-256 均为 `daf0b82d78a0836901c13ff362bc2afdde14b3b20715c0079603832da147e5a3`，与源码现编结果及仓库 `rootfs-overlay/` 提交的两份副本完全一致。
+- **第 4b 步三组发版门禁（`tools/az01-packer/release-gate.sh`，旧版基准：`/root/build/sc5000-lab/release-5.3.0.3/`，RC（待维护者确认发布））**：
+  - **SC5000 组（JP07）**：**93 PASS / 0 FAIL / 5 INFO**（退出码 0；静态审计 58 文件 0 FAIL / 14 WARN，`systemd-analyze verify` 17 单元 0 错误；5.3.0.3 → 5.3.0.4 在线升级与 1 字节篡改拒签通过；970 个原厂旧 `.qmlc` 缓存种入后新 UI 包替换 343+1 文件；默认二轨启动 19 处常驻 Engine 补丁（开启四轨时含 `0x16fbc38` 共 20 处）、21 个 DSP guard、SQLite hook、Stems、Rekordbox、下次 5.3.0.5 在线升级全部通过）；
   - **SC6000 组（JP13）**：**93 PASS / 0 FAIL / 5 INFO**（退出码 0）；
   - **PRIME 4 组（JC11）**：**93 PASS / 0 FAIL / 5 INFO**（退出码 0）。
 
 ---
 
-## 4. 预 RC 构建产物与 SHA-256 校验表（预 RC，实机线未最终合入）
+## 4. RC 构建产物与 SHA-256 校验表（RC（待维护者确认发布））
 
-- **构建提交**：`6e1b4be`（分支 `agent/integration-5304-20261111`，预 RC，实机线未最终合入；`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）
-- **产物目录**：`/var/tmp/sc5000-rc5304-pre-6e1b4be`（上一版预 RC `/var/tmp/sc5000-rc5304-pre-24bb83b` 同步保留供实机验收）
+- **构建提交**：`5038e5b`（分支 `agent/integration-5304-20261111`，RC（待维护者确认发布）；`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）
+- **产物目录**：`/var/tmp/sc5000-rc5304-5038e5b`（前两版预 RC 目录 `/var/tmp/sc5000-rc5304-pre-24bb83b`、`/var/tmp/sc5000-rc5304-pre-6e1b4be` 按要求保留）
 - **回滚点**：`v5.3.0.3`（tag `cd789f8`，构建提交 `b941ea4`）
 
 ### 一代机型完整固件（`*-Update.img`）
 
 | 镜像组 | 机型 | 板号 | 文件名 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `b7580fb31f0c1b7cb24cfd728e174ec43fdb328600de99b17bc14eef81d992b6` |
-| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `b7580fb31f0c1b7cb24cfd728e174ec43fdb328600de99b17bc14eef81d992b6` |
-| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `b7580fb31f0c1b7cb24cfd728e174ec43fdb328600de99b17bc14eef81d992b6` |
-| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `2b1d05aae7395bc3ded0253d6620b9a3be1b4f583a7a74c2dcd979a68f99d52b` |
-| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `2b1d05aae7395bc3ded0253d6620b9a3be1b4f583a7a74c2dcd979a68f99d52b` |
-| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `fc03739b48c6e1eb4c7726c5dc01b94fe96116767c616d5c9d99baa08d559d7d` |
-| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `fc03739b48c6e1eb4c7726c5dc01b94fe96116767c616d5c9d99baa08d559d7d` |
-| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `fc03739b48c6e1eb4c7726c5dc01b94fe96116767c616d5c9d99baa08d559d7d` |
+| SC5000 | Denon DJ SC5000 Prime | JP07 | `SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img` | `5af20f62b4a735dbe68c46a77aebd795dbeefa44c060eb3522cdf51eaedc49d4` |
+| SC5000 | Denon DJ SC5000M Prime | JP08 | `SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img` | `5af20f62b4a735dbe68c46a77aebd795dbeefa44c060eb3522cdf51eaedc49d4` |
+| SC5000 | Denon DJ PRIME GO | JP11 | `PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img` | `5af20f62b4a735dbe68c46a77aebd795dbeefa44c060eb3522cdf51eaedc49d4` |
+| SC6000 | Denon DJ SC6000 Prime | JP13 | `SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img` | `6fe0c88162a189e441598a04e6691ca3e0dcfbddd1fb62f251794719fe5b51b6` |
+| SC6000 | Denon DJ SC6000M Prime | JP14 | `SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img` | `6fe0c88162a189e441598a04e6691ca3e0dcfbddd1fb62f251794719fe5b51b6` |
+| PRIME 4 | Denon DJ PRIME 4 | JC11 | `PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img` | `ac67eefeb6353b926182882670d3d4f43fd11f5aa6f24c95f38a448c7df635e9` |
+| PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `ac67eefeb6353b926182882670d3d4f43fd11f5aa6f24c95f38a448c7df635e9` |
+| PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `ac67eefeb6353b926182882670d3d4f43fd11f5aa6f24c95f38a448c7df635e9` |
 
 ### 二代机型 `/data` 数据包（`*-Data-Bundle.tar.gz`，Beta）
 
 | 架构组 | 机型 | 板号 | 文件名 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `0fa1e9668168a61e990ad9e84a1f82b1b9da8ea20b1ea790bf96a90c0753e93f` |
-| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `69ad7989ee1995f3eea4e08bd7a401085b82680f44282e62132d068fd9662c9d` |
-| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `82b9d28e06af8df11551390631c7bdd9cd6a3269b111d1dec60e553a2c7ba6d0` |
-| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `624615a9db8e8cfaa46a59461198f8e58d9392cb4b187809f32b87557c267a4f` |
-| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `28e89857d5d438f051fa4448b217fc0cb38cee25f33588d1444517ac40a9288c` |
-| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `643c689944f8b83fb6246c35dca917186c532a8a136170175acdb0aefcd9cef2` |
-| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `28d3542accbfbaeb029064a4fab1e0b4c214621f6dabaff16eec9811507dce6c` |
-| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `05ceb7a24e99ab1ebcd096baebb29e97547816e7e7780ffa4574f51ba47a1c27` |
+| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `7799e20ec38e87de666e38a72aa3de4e6c2ea9aef23f015e65eedb2b61902d61` |
+| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `8d8e36356596e97f75307ded9a284adb741f051f1acbea0d4daefb0ff04cfcb4` |
+| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `652b28895e6857627413326ee3cbaf5b45614ef060aeba6d0f8684396b8dc6cd` |
+| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `684df38190d41b62d8a23dae2ae4ef070e0456cf98020c03480d2c0775783da1` |
+| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `d5aae5100833bb6e27d0d01a921d65b37b4fdf91d3783f786db31ac076a85232` |
+| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `681b9964b3185618ac246d1cd65aa613ea8705051187f7c9ba2a1948080e0748` |
+| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `3ee7aeba1b0adb90b919db4ea36fbb6a99572a4ff429196c089dda5cf64de540` |
+| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `b5af5a1fc18ffc218c163b52029a28ff004c90c8c107a25937b6c5f1807403b7` |
 
 ### 跨平台一键安装器（`EngineX-Installer`）
 
 | 平台 | 文件名 | SHA-256 |
 | --- | --- | --- |
-| Windows 10/11 x64 | `EngineX-Installer-5.3.0.4-windows-amd64.zip` | `381dda97841f834c2fbd4b80c4c5d3d36b53034fc3e6c5989b6598c577387541` |
-| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.4-macos-arm64.zip` | `f4a8946d384bf3c1c0a130a92ecebf0904ea6124b35761a659251b067da2ef62` |
-| macOS Intel | `EngineX-Installer-5.3.0.4-macos-amd64.zip` | `a5c861d5de874972422451982855cb0d0c690bc460a75ef081a9a69f43be720a` |
-| Linux x86_64 | `EngineX-Installer-5.3.0.4-linux-amd64.tar.gz` | `0c9fbf1bc70611a64327cc7039cfd9dfdc85df637f8edb7435490d2d5cf40376` |
+| Windows 10/11 x64 | `EngineX-Installer-5.3.0.4-windows-amd64.zip` | `0e4d80cd4cb7ea009d2034d1a06c2ed428b7e5f3e9ca9f504baef3d2fd143a23` |
+| macOS Apple Silicon (M1–M4) | `EngineX-Installer-5.3.0.4-macos-arm64.zip` | `76bace82c0781d4f45cbe40c30ff619803f9fd1b693f791abe1adfce1754d34b` |
+| macOS Intel | `EngineX-Installer-5.3.0.4-macos-amd64.zip` | `ac10b18807cc6f201cb053cd0a0a83da5fc515cd3d19381cce8084bb0a1325c9` |
+| Linux x86_64 | `EngineX-Installer-5.3.0.4-linux-amd64.tar.gz` | `36a510a1f74eaa6a32e22ade6e8736dce563f49bd8bdf09cea4c94300b96e2b4` |
 
 ---
 
