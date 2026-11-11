@@ -222,6 +222,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("POST /v1/sc5000/nas/test", s.handleNASTest)
 	s.mux.HandleFunc("GET /api/mods", s.handleMods)
 	s.mux.HandleFunc("POST /api/mods", s.handleMods)
+	s.mux.HandleFunc("POST /api/mods/upload", s.handleModsUpload)
 	s.mux.HandleFunc("GET /v1/sc5000/mods", s.handleMods)
 	s.mux.HandleFunc("POST /v1/sc5000/mods", s.handleMods)
 	s.mux.HandleFunc("POST /v1/sc5000/mods/upload", s.handleModsUpload)
