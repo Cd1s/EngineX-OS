@@ -1817,14 +1817,19 @@ class DeckHeaderLayoutTest(unittest.TestCase):
         self.assertFalse(any("implicitWidth" in new for _, new in speed_patches))
         for item in ("AutoLoop", "BeatJump"):
             item_patches = edits[f"Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/{item}.qml"]
-            self.assertTrue(any("Layout.fillWidth: false" in new for _, new in item_patches), item)
-            self.assertTrue(any("Layout.fillWidth: true" in new and "fontSizeMode: Text.HorizontalFit" in new for _, new in item_patches), item)
+            # Stock component roots must not set Layout.fillWidth: false globally;
+            # fillWidth: false is scoped to our compact call sites, and inner text
+            # fillWidth/minimumWidth:0 only activates at compact preferredWidth <= 64.
+            self.assertFalse(any("Layout.fillWidth: false" in new for _, new in item_patches), item)
+            self.assertTrue(any("parent.Layout.preferredWidth > 0 && parent.Layout.preferredWidth <= 64" in new and "fontSizeMode: Text.HorizontalFit" in new for _, new in item_patches), item)
         for m in re.finditer(r"speed(?:Range|State)TextWidth:\s*(\d+)", bp.SHADOW_LAYER):
             self.assertEqual(int(m.group(1)), 0)
-        for m in re.finditer(r"AutoLoop\s*\{[^}]*?Layout\.preferredWidth:\s*(\d+)", bp.SHADOW_LAYER, re.S):
-            self.assertGreaterEqual(int(m.group(1)), 52)
-        for m in re.finditer(r"BeatJump\s*\{[^}]*?Layout\.preferredWidth:\s*(\d+)", bp.SHADOW_LAYER, re.S):
-            self.assertGreaterEqual(int(m.group(1)), 64)
+        for m in re.finditer(r"AutoLoop\s*\{([^}]*?)\}", bp.SHADOW_LAYER, re.S):
+            self.assertIn("Layout.fillWidth: false", m.group(1))
+            self.assertGreaterEqual(int(re.search(r"Layout\.preferredWidth:\s*(\d+)", m.group(1)).group(1)), 52)
+        for m in re.finditer(r"BeatJump\s*\{([^}]*?)\}", bp.SHADOW_LAYER, re.S):
+            self.assertIn("Layout.fillWidth: false", m.group(1))
+            self.assertGreaterEqual(int(re.search(r"Layout\.preferredWidth:\s*(\d+)", m.group(1)).group(1)), 64)
         for rel in (
             "Skins/EngineOS/UI/CompositeControls/DeckTrackData/GroupedMiniDeckTrackDataContent.qml",
             "Skins/EngineOS/UI/CompositeControls/DeckPerformanceData/DeckPerformanceDataContent.qml",
@@ -1833,6 +1838,7 @@ class DeckHeaderLayoutTest(unittest.TestCase):
             joined = "\n".join(new for _, new in edits[rel])
             self.assertIn("speedRangeTextWidth: 0", joined, rel)
             self.assertIn("speedStateTextWidth: 0", joined, rel)
+            self.assertGreaterEqual(joined.count("Layout.fillWidth: false"), 3, rel)
             for m in re.finditer(r"speed(?:Range|State)TextWidth:\s*(\d+)", joined):
                 self.assertEqual(int(m.group(1)), 0, rel)
             for m in re.finditer(r"(?:AutoLoop|target:\s*autoLoop)\b[^}]*?Layout\.preferredWidth:\s*(\d+)", joined, re.S):
@@ -1868,7 +1874,8 @@ class DeckHeaderLayoutTest(unittest.TestCase):
                     self.assertIn("topPadding: bpmInfo.fractionTextTopPadding", info)
                     self.assertIn("onBpmClicked()", info)
                     performance = (base / composite / "DeckPerformanceData/DeckPerformanceDataContent.qml").read_text()
-                    self.assertIn("id: autoLoop\n        Layout.rightMargin: 4", performance)
+                    self.assertIn("id: autoLoop\n        Layout.fillWidth: false\n        Layout.rightMargin: 4", performance)
+                    self.assertIn("id: beatJump\n        Layout.fillWidth: false", performance)
                     for name, text in (
                         ("Performance", performance),
                         ("GroupedMini", (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()),
@@ -1904,8 +1911,16 @@ class DeckHeaderLayoutTest(unittest.TestCase):
                     self.assertIn("columnSpacing: 16", speed)
                     self.assertIn('TextMetrics { id: scRangeWorstMetrics; font: speedRangeText.font; text: "\\u00b1100" }', speed)
                     self.assertIn('TextMetrics { id: scStateWorstMetrics; font: speedStateText.font; text: "-100.00%" }', speed)
-                    self.assertIn("Math.max(speedRangeTextWidth, Math.ceil(scRangeWorstMetrics.width))", speed)
-                    self.assertIn("Math.max(speedStateTextWidth, Math.ceil(scStateWorstMetrics.width))", speed)
+                    self.assertIn("speedRangeTextWidth > 0 ? speedRangeTextWidth : Math.max(speedRangeTextWidth, Math.ceil(scRangeWorstMetrics.width))", speed)
+                    self.assertIn("speedStateTextWidth > 0 ? speedStateTextWidth : Math.max(speedStateTextWidth, Math.ceil(scStateWorstMetrics.width))", speed)
+                    # Unpatched stock layouts (DeckOverview, DeckSharedItems, GroupedMainDeckLayout,
+                    # StackedMainDeckLayout, StackedMiniDeckLayout) stay untouched vs 1de13b7.
+                    for unpatched in (
+                        "Deck/DeckLayout/GroupedMainDeckLayout.qml",
+                        "Deck/DeckLayout/StackedMainDeckLayout.qml",
+                        "Deck/DeckLayout/StackedMiniDeckLayout.qml",
+                    ):
+                        self.assertFalse((base / composite / unpatched).exists(), unpatched)
                     jump = (base / composite / "Deck/DeckItem/BeatJump.qml").read_text()
                     forward = jump.index('objectName: "Deck_BeatJump_Forward"')
                     self.assertLess(jump.index('objectName: "Deck_BeatJump_Text"'), forward)

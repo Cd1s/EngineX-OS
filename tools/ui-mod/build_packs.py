@@ -4158,6 +4158,7 @@ SHADOW_LAYER = r"""
                                     Layout.rightMargin: 16
                                     spacing: 0
                                     AutoLoop {
+                                        Layout.fillWidth: false
                                         Layout.preferredWidth: 52
                                         Layout.rightMargin: 4
                                         view: scHeader.dv ? scHeader.dv.autoLoopView : null
@@ -4167,6 +4168,7 @@ SHADOW_LAYER = r"""
                                         textFont: Style.fontH3
                                     }
                                     BeatJump {
+                                        Layout.fillWidth: false
                                         Layout.preferredWidth: 64
                                         view: scHeader.dv ? scHeader.dv.beatJumpView : null
                                         deckIndex: scDisplay.deck
@@ -4316,6 +4318,7 @@ SHADOW_LAYER = r"""
                             spacing: 2
                             visible: scHeader.loaded && scHeader.hasBottomRow
                             AutoLoop {
+                                Layout.fillWidth: false
                                 Layout.alignment: Qt.AlignLeft
                                 Layout.preferredWidth: 52
                                 view: scHeader.dv ? scHeader.dv.autoLoopView : null
@@ -4325,6 +4328,7 @@ SHADOW_LAYER = r"""
                                 textFont: Style.fontH3
                             }
                             BeatJump {
+                                Layout.fillWidth: false
                                 view: scHeader.dv ? scHeader.dv.beatJumpView : null
                                 deckIndex: scDisplay.deck
                                 spacing: 4
@@ -4397,6 +4401,7 @@ SHADOW_LAYER = r"""
                     anchors.fill: parent
                     spacing: 0
                     AutoLoop {
+                        Layout.fillWidth: false
                         Layout.fillHeight: true
                         Layout.preferredWidth: 52
                         Layout.rightMargin: 4
@@ -4407,6 +4412,7 @@ SHADOW_LAYER = r"""
                         textFont: Style.fontH3
                     }
                     BeatJump {
+                        Layout.fillWidth: false
                         Layout.fillHeight: true
                         Layout.preferredWidth: 64
                         view: scHeader.dv ? scHeader.dv.beatJumpView : null
@@ -5533,7 +5539,7 @@ def edits(dev: bool):
                     '        }\n')
         scaled[bj + "Deck/DeckItem/BeatJump.qml"] = [
             ("    required property BeatJumpViewInterface view\n",
-             "    required property BeatJumpViewInterface view\n    property int deckIndex: 1\n    Layout.fillWidth: false\n"),
+             "    required property BeatJumpViewInterface view\n    property int deckIndex: 1\n"),
             ("        SequentialAnimation {\n            id: beatJumpImageAnimation\n",
              bj_tap("JumpBack") + "\n        SequentialAnimation {\n            id: beatJumpImageAnimation\n"),
             ("        SequentialAnimation {\n            id: beatJumpTextAnimation\n",
@@ -5567,7 +5573,8 @@ def edits(dev: bool):
              "    Separator {\n        visible: !spacer1.visible && softTakeoverIndicators.visible\n    }\n" +
              cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 22, 16, compact=True, lead_sep=False, fill_width=False) +
              "\n    Item {\n        id: spacer2\n        Layout.fillWidth: true\n        visible: true\n"),
-            ("        id: autoLoop\n", "        id: autoLoop\n        Layout.rightMargin: 4\n"),
+            ("        id: autoLoop\n", "        id: autoLoop\n        Layout.fillWidth: false\n        Layout.rightMargin: 4\n"),
+            ("        id: beatJump\n", "        id: beatJump\n        Layout.fillWidth: false\n"),
         ]
         # Both controls have spacing:6; patch() deliberately requires a unique
         # anchor, so apply it together with the control-specific view line.
@@ -5577,19 +5584,19 @@ def edits(dev: bool):
                       ("        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n" if control == "beatJump" else ""))
             scaled[performance].append((anchor + "        spacing: 6\n", anchor + "        spacing: 4\n"))
         # Size the right speed group (▲▼, range, pitch %) from the worst-case strings
-        # ("±100" and "-100.00%") measured with TextMetrics in the active font so the
-        # columns and adjacent Cue capsule never jitter while the fader moves.
+        # ("±100" and "-100.00%") measured with TextMetrics in the active font when
+        # speed*TextWidth is 0, while keeping stock >0 widths 100% unchanged.
         scaled[bj + "Deck/DeckItem/SpeedInfo.qml"] = [
             ("    Text {\n        id: speedRangeText\n",
              '    TextMetrics { id: scRangeWorstMetrics; font: speedRangeText.font; text: "\\u00b1100" }\n'
              '    TextMetrics { id: scStateWorstMetrics; font: speedStateText.font; text: "-100.00%" }\n\n'
              "    Text {\n        id: speedRangeText\n"),
             ("        Layout.minimumWidth: speedRangeTextWidth\n",
-             "        Layout.minimumWidth: Math.max(speedRangeTextWidth, Math.ceil(scRangeWorstMetrics.width))\n"
-             "        Layout.maximumWidth: Math.max(speedRangeTextWidth, Math.ceil(scRangeWorstMetrics.width))\n"),
+             "        Layout.minimumWidth: speedRangeTextWidth > 0 ? speedRangeTextWidth : Math.max(speedRangeTextWidth, Math.ceil(scRangeWorstMetrics.width))\n"
+             "        Layout.maximumWidth: speedRangeTextWidth > 0 ? Number.POSITIVE_INFINITY : Math.max(speedRangeTextWidth, Math.ceil(scRangeWorstMetrics.width))\n"),
             ("        Layout.minimumWidth: speedStateTextWidth\n        Layout.maximumWidth: speedStateTextWidth\n",
-             "        Layout.minimumWidth: Math.max(speedStateTextWidth, Math.ceil(scStateWorstMetrics.width))\n"
-             "        Layout.maximumWidth: Math.max(speedStateTextWidth, Math.ceil(scStateWorstMetrics.width))\n"),
+             "        Layout.minimumWidth: speedStateTextWidth > 0 ? speedStateTextWidth : Math.max(speedStateTextWidth, Math.ceil(scStateWorstMetrics.width))\n"
+             "        Layout.maximumWidth: speedStateTextWidth > 0 ? speedStateTextWidth : Math.max(speedStateTextWidth, Math.ceil(scStateWorstMetrics.width))\n"),
         ]
         scaled[performance] += [
             ("        Layout.fillWidth: true\n        Layout.preferredHeight: 24\n        Layout.maximumWidth: 200\n        Layout.leftMargin: 24\n        Layout.rightMargin: 24\n",
@@ -5614,8 +5621,8 @@ def edits(dev: bool):
         scaled[mini] += [
             ("                SoftTakeoverIndicators {\n", cue_capsule("                ", "deckTrackDataContent.deckIndex", 22, 16, compact=True, lead_sep=False, fill_width=True) + "\n                SoftTakeoverIndicators {\n                    iconWidth: 14\n                    iconHeight: 10\n                    flow: Flow.LeftToRight\n                    spacing: -4\n"),
             ("                spacing: 16\n                visible: deckTrackDataContent.songLoaded\n", "                spacing: 2\n                visible: deckTrackDataContent.songLoaded\n"),
-            ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n", "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 52\n"),
-            ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n", "                    textFont: Style.fontH3\n                    Layout.preferredWidth: 64\n"),
+            ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n", "                    Layout.fillWidth: false\n                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 52\n"),
+            ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n", "                    Layout.fillWidth: false\n                    textFont: Style.fontH3\n                    Layout.preferredWidth: 64\n"),
             ("                    Layout.preferredHeight: 24\n                    Layout.fillWidth: true\n                    Layout.maximumWidth: 200\n",
              "                    Layout.preferredHeight: 24\n                    Layout.fillWidth: false\n                    Layout.minimumWidth: 135\n                    Layout.preferredWidth: 135\n                    Layout.maximumWidth: 135\n"),
             ("                    speedRangeTextFont: Style.fontH1\n                    speedStateTextFont: Style.fontH1\n                    speedRangeTextHorizontalAlignment: Text.AlignRight\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    flat: true\n",
@@ -5629,6 +5636,7 @@ def edits(dev: bool):
              "                    deckIndex: deckTrackDataContent.deckView.deckData.deckIndex\n                    spacing: 4\n                    iconWidth: 16\n                    iconHeight: 10\n"),
         ]
         split_controls = """        AutoLoop {
+            Layout.fillWidth: false
             Layout.preferredWidth: 52
             Layout.rightMargin: 4
             deckIndex: deckTrackDataContent.deckIndex
@@ -5639,6 +5647,7 @@ def edits(dev: bool):
             textFont: Style.fontH3
         }
         BeatJump {
+            Layout.fillWidth: false
             Layout.preferredWidth: 64
             view: deckTrackDataContent.deckView.beatJumpView
             deckIndex: deckTrackDataContent.deckIndex
@@ -5670,7 +5679,7 @@ def edits(dev: bool):
         ]
         for item, text_id in (("AutoLoop", "autoLoopText"), ("BeatJump", "beatJumpText")):
             scaled.setdefault(bj + "Deck/DeckItem/" + item + ".qml", []).append((
-                f"        id: {text_id}\n", f"        id: {text_id}\n        Layout.fillWidth: true\n        Layout.minimumWidth: 0\n        fontSizeMode: Text.HorizontalFit\n        minimumPixelSize: 14\n" +
+                f"        id: {text_id}\n", f"        id: {text_id}\n        Layout.fillWidth: parent.Layout.preferredWidth > 0 && parent.Layout.preferredWidth <= 64\n        Layout.minimumWidth: parent.Layout.preferredWidth > 0 && parent.Layout.preferredWidth <= 64 ? 0 : -1\n        fontSizeMode: Text.HorizontalFit\n        minimumPixelSize: 14\n" +
                 ("        rightPadding: 14\n" if item == "BeatJump" else "")))
         # The shadow header feeds the stock formatter its own tempo; stock users keep stock defaults.
         scaled[ROOT + "Items/Bpm.qml"] = [
@@ -5713,16 +5722,14 @@ def edits(dev: bool):
         # The source's loop lights the shadow header's loop icon and size; the copy itself does not loop.
         scaled.setdefault(bj + "Deck/DeckItem/AutoLoop.qml", []).extend([
             ("    required property AutoLoopViewInterface view\n",
-             "    required property AutoLoopViewInterface view\n    property int deckIndex: 0\n    Layout.fillWidth: false\n"
+             "    required property AutoLoopViewInterface view\n    property int deckIndex: 0\n"
              "    readonly property bool scLoop: view.loopEnableState || " + head("deckIndex", "loop") + "\n"),
             ("        color: view.loopEnableState ? Style.active01Color : Style.icon01Color\n", "        color: scLoop ? Style.active01Color : Style.icon01Color\n"),
             ("        color: view.loopEnableState ? Style.active01Color : Style.font01Color\n", "        color: scLoop ? Style.active01Color : Style.font01Color\n"),
         ])
         scaled[ROOT + "Views/MainView/Components/JP07SyncIndicator.qml"] = [
             ("    property bool isMaster: pDeckIsMaster.translator && pDeckIsMaster.translator.state\n",
-             "    property bool isMaster: " + head("deckIndex", "master", "pDeckIsMaster.translator && pDeckIsMaster.translator.state") + "\n"),
-            ("    property Component leadLabelComponent: RowLayout {\n        Layout.margins: 2\n        id: leadLabelContainer\n\n        Layout.fillWidth: true\n        Layout.fillHeight: true\n        spacing: 8\n",
-             "    property Component leadLabelComponent: RowLayout {\n        Layout.margins: 0\n        id: leadLabelContainer\n\n        Layout.fillWidth: true\n        Layout.fillHeight: true\n        spacing: 6\n")]
+             "    property bool isMaster: " + head("deckIndex", "master", "pDeckIsMaster.translator && pDeckIsMaster.translator.state") + "\n")]
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
             ("    readonly property bool syncEnabled: deckController && deckController.syncInfoViewController.syncEnabled\n",
              "    readonly property bool syncEnabled: " + head("deckIndex", "sync", "deckController && deckController.syncInfoViewController.syncEnabled") + "\n"),
