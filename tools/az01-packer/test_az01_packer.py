@@ -697,6 +697,83 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 2)
         self.assertFalse(output.exists())
 
+    def test_clock_floor_and_timezone_restore_in_etc_reset_and_prepare(self):
+        import os
+        az.inject(self.fs, None)
+        etc_reset_unit = self.fs.read('/usr/lib/systemd/system/sc5000-custom-etc-reset.service')
+        self.assertIn(b'Before=etc.mount systemd-timesyncd.service sysinit.target shutdown.target', etc_reset_unit)
+        self.assertIn('sc5000-custom-etc-reset.service',
+                      self.fs.entries('/usr/lib/systemd/system/sysinit.target.wants'))
+
+        ts = self.root / 'timestamp'
+        ts.write_text('20261030114129\n')
+        build_epoch = 1793360489
+        os.utime(ts, (build_epoch, build_epoch))
+
+        zdir = self.root / 'zoneinfo'
+        (zdir / 'Asia').mkdir(parents=True)
+        (zdir / 'Asia/Shanghai').write_bytes(b'TZif2')
+        (zdir / 'Etc').mkdir(parents=True)
+        (zdir / 'Etc/UTC').write_bytes(b'TZif2')
+
+        pcode = self.root / 'product-code'
+        pcode.write_bytes(b'JP07\x00')
+
+        data = self.root / 'data-ts'
+        (data / 'enginex/state').mkdir(parents=True)
+        (data / 'enginex/state/timezone').write_text('Asia/Shanghai\n')
+        seed = self.root / 'seed-ts'
+        seed.mkdir()
+
+        env = dict(os.environ,
+                   SC5000_TIMESTAMP_FILE=str(ts),
+                   SC5000_TIMESYNC_LIB_DIR=str(data / 'system/var/overlay/lib'),
+                   SC5000_TZ_STATE_FILE=str(data / 'enginex/state/timezone'),
+                   SC5000_CONFIG_DIR=str(data / '.config'),
+                   SC5000_ZONEINFO_DIR=str(zdir),
+                   SC5000_PRODUCT_CODE_FILE=str(pcode))
+
+        # 1. sc5000-custom-etc-reset seeds missing clock to build_epoch and never regresses newer clock.
+        reset_script = az.etc_reset('5.3.0.4-test', ()).replace(b'/data', str(data).encode())
+        r = subprocess.run(['sh', '-s'], input=reset_script, env=env, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        clock = data / 'system/var/overlay/lib/systemd/timesync/clock'
+        self.assertEqual(int(clock.stat().st_mtime), build_epoch)
+
+        newer = build_epoch + 86400
+        os.utime(clock, (newer, newer))
+        r = subprocess.run(['sh', '-s'], input=reset_script, env=env, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(int(clock.stat().st_mtime), newer)
+
+        # Backdated clock (< /etc/timestamp) is lifted back to build_epoch even on same epoch.
+        os.utime(clock, (build_epoch - 3600, build_epoch - 3600))
+        r = subprocess.run(['sh', '-s'], input=reset_script, env=env, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(int(clock.stat().st_mtime), build_epoch)
+
+        # 2. sc5000-custom-prepare writes [TimeDateSettings] TZEnvVar into Engine.conf and rejects UTC.
+        prep_script = az.PREPARE.replace(b'/data', str(data).encode()).replace(
+            b'/usr/share/sc5000-custom', str(seed).encode())
+        r = subprocess.run(['sh', '-s'], input=prep_script, env=env, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        conf = data / '.config/jp07.user.settings/AIR Music Technology/Engine.conf'
+        self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=Asia/Shanghai\n')
+
+        # Existing settings in Engine.conf stay intact and UTC state never overwrites Asia/Shanghai.
+        conf.write_text('[General]\nPlayer=1\n\n[TimeDateSettings]\n24HourFormat=true\nTZEnvVar=Europe/London\n')
+        r = subprocess.run(['sh', '-s'], input=prep_script, env=env, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = conf.read_text()
+        self.assertIn('Player=1\n', text)
+        self.assertIn('24HourFormat=true\n', text)
+        self.assertIn('TZEnvVar=Asia/Shanghai\n', text)
+
+        (data / 'enginex/state/timezone').write_text('Etc/UTC\n')
+        r = subprocess.run(['sh', '-s'], input=prep_script, env=env, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('TZEnvVar=Asia/Shanghai\n', conf.read_text())
+
 
 if __name__ == '__main__':
     unittest.main()

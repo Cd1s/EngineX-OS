@@ -438,6 +438,49 @@ class DataBundleTest(unittest.TestCase):
         self.assertTrue((data / 'enginex/bundle').is_dir())
         self.assertTrue((data / 'sc5000-custom/version.txt').exists())
 
+    def test_boot_activate_seeds_clock_floor_and_restores_timezone(self):
+        r = self.build()
+        src = self.extract(r)
+        root = self.tmp / 'gen2-boot'
+        dest = root / 'enginex'
+        (dest / 'bundle').mkdir(parents=True)
+        shutil.copy2(src / 'boot-activate.sh', dest / 'bundle/boot-activate.sh')
+        (dest / 'state').mkdir(parents=True)
+        (dest / 'state/timezone').write_text('America/New York\n')
+
+        ts = self.tmp / 'timestamp'
+        ts.write_text('20261030114129\n')
+        build_epoch = 1793360489
+        os.utime(ts, (build_epoch, build_epoch))
+
+        zdir = self.tmp / 'zoneinfo'
+        (zdir / 'America').mkdir(parents=True)
+        (zdir / 'America/New_York').write_bytes(b'TZif2')
+
+        pcode = self.tmp / 'product-code'
+        pcode.write_text('JP21\n')
+
+        # Run the clock-floor + restore_gen2_timezone portion in an isolated /run sandbox
+        run_dir = self.tmp / 'run'
+        (run_dir / 'systemd/system').mkdir(parents=True)
+        script = (src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/')
+        env = dict(self.env,
+                   SC5000_CUSTOM=str(dest),
+                   SC5000_TIMESTAMP_FILE=str(ts),
+                   SC5000_TIMESYNC_LIB_DIR=str(root / 'system/var/overlay/lib'),
+                   SC5000_CONFIG_DIR=str(root / '.config'),
+                   SC5000_ZONEINFO_DIR=str(zdir),
+                   SC5000_PRODUCT_CODE_FILE=str(pcode))
+        res = subprocess.run(['sh', '-s'], input=script.encode(), env=env, capture_output=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        # Clear logged safe-bin pkill call from non-systemd fallback branch
+        self.host_commands.write_text('')
+
+        clock = root / 'system/var/overlay/lib/systemd/timesync/clock'
+        self.assertEqual(int(clock.stat().st_mtime), build_epoch)
+        conf = root / '.config/jp21.user.settings/AIR Music Technology/Engine.conf'
+        self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=America/New_York\n')
+
 
 if __name__ == '__main__':
     unittest.main()

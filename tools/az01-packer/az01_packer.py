@@ -555,8 +555,125 @@ install_ui() {
     printf '%s\n' "$id" > "$ui/.pack-id"
     printf '%s\n' "$version" > "${SC5000_VERSION_FILE:-/data/enginex/version.txt}"
 }
+
+# Seed timesyncd's persistent clock floor from the image build timestamp when missing or older,
+# and restore the last saved IANA time zone into Engine.conf before Engine starts.
+seed_clock_floor() {
+    ts=${SC5000_TIMESTAMP_FILE:-/etc/timestamp}
+    [ -f "$ts" ] && [ ! -L "$ts" ] || return 0
+    lib_dir=${SC5000_TIMESYNC_LIB_DIR:-/data/system/var/overlay/lib}
+    for chk in /data /data/system /data/system/var /data/system/var/overlay "$lib_dir" "$lib_dir/systemd" "$lib_dir/systemd/timesync" "$lib_dir/systemd/timesync/clock"; do
+        [ ! -L "$chk" ] || { echo "Refusing timesync symlink: $chk" >&2; return 1; }
+    done
+    clock=$lib_dir/systemd/timesync/clock
+    if [ ! -e "$clock" ] || [ "$clock" -ot "$ts" ]; then
+        (
+            umask 022
+            mkdir -p "$lib_dir/systemd/timesync"
+            : >> "$clock"
+            touch -r "$ts" "$clock"
+            chmod 644 "$clock"
+            chown systemd-timesync:systemd-timesync "$lib_dir/systemd/timesync" "$clock" 2>/dev/null ||
+                chown 994:992 "$lib_dir/systemd/timesync" "$clock" 2>/dev/null || :
+        )
+    fi
+}
+
+valid_tz() {
+    case $1 in
+        ''|/*|*/|*//*|*..*|*[![:alnum:]_+/-]*) return 1 ;;
+        */*) ;;
+        *) return 1 ;;
+    esac
+    [ "${#1}" -le 63 ] || return 1
+    old_ifs=$IFS; IFS=/
+    for seg in $1; do
+        IFS=$old_ifs
+        [ -n "$seg" ] && [ "$seg" != "." ] && [ "${#seg}" -le 32 ] || return 1
+        case $(printf '%s' "$seg" | tr '[:lower:]' '[:upper:]') in
+            UTC|GMT|UCT|GMT0|ZULU|UNIVERSAL) return 1 ;;
+        esac
+    done
+    IFS=$old_ifs
+    [ -f "${SC5000_ZONEINFO_DIR:-/usr/share/zoneinfo}/$1" ]
+}
+
+write_engine_tz() {
+    conf_dir=$1
+    tz=$2
+    air_dir="$conf_dir/AIR Music Technology"
+    conf="$air_dir/Engine.conf"
+    for chk in "$conf_dir" "$air_dir" "$conf"; do
+        [ ! -L "$chk" ] || { echo "Refusing Engine.conf symlink: $chk" >&2; return 1; }
+    done
+    (
+        umask 022
+        mkdir -p "$air_dir"
+        tmp="$conf.tmp.$$"
+        if [ -f "$conf" ]; then
+            awk -v tz="$tz" '
+                BEGIN { in_sec = 0; seen_sec = 0; wrote = 0 }
+                /^\\[TimeDateSettings\\][[:space:]]*$/ { in_sec = 1; seen_sec = 1; print; next }
+                /^\\[.*\\]/ {
+                    if (in_sec && !wrote) { print "TZEnvVar=" tz; wrote = 1 }
+                    in_sec = 0; print; next
+                }
+                in_sec && /^TZEnvVar[[:space:]]*=/ {
+                    if (!wrote) { print "TZEnvVar=" tz; wrote = 1 }
+                    next
+                }
+                { print }
+                END {
+                    if (!seen_sec) {
+                        if (NR > 0) print ""
+                        print "[TimeDateSettings]"
+                        print "TZEnvVar=" tz
+                    } else if (!wrote) {
+                        print "TZEnvVar=" tz
+                    }
+                }
+            ' "$conf" > "$tmp"
+        else
+            printf '[TimeDateSettings]\\nTZEnvVar=%s\\n' "$tz" > "$tmp"
+        fi
+        if cmp -s "$tmp" "$conf" 2>/dev/null; then
+            rm -f "$tmp"
+        else
+            chmod 644 "$tmp"
+            mv "$tmp" "$conf"
+        fi
+    )
+}
+
+restore_timezone() {
+    tz_file=${SC5000_TZ_STATE_FILE:-/data/enginex/state/timezone}
+    [ ! -L /data/enginex/state ] && [ ! -L "$tz_file" ] || { echo "Refusing timezone symlink: $tz_file" >&2; return 1; }
+    [ -f "$tz_file" ] || return 0
+    tz=$(awk '{gsub(/\\r/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); gsub(/ /, "_"); print; exit}' "$tz_file")
+    valid_tz "$tz" || return 0
+    cfg_root=${SC5000_CONFIG_DIR:-/data/.config}
+    [ ! -L "$cfg_root" ] || { echo "Refusing .config symlink: $cfg_root" >&2; return 1; }
+    found=0
+    for d in "$cfg_root"/*.user.settings; do
+        [ -d "$d" ] || continue
+        found=1
+        write_engine_tz "$d" "$tz"
+    done
+    if [ "$found" = 0 ]; then
+        pfile=${SC5000_PRODUCT_CODE_FILE:-/sys/firmware/devicetree/base/inmusic,product-code}
+        if [ -f "$pfile" ]; then
+            prod=$(tr -d '\\000\\r\\n ' < "$pfile" | tr '[:upper:]' '[:lower:]')
+            case $prod in
+                ''|*[!a-z0-9_-]*) ;;
+                *) write_engine_tz "$cfg_root/$prod.user.settings" "$tz" ;;
+            esac
+        fi
+    fi
+}
 [ ! -d /etc/sc5000 ] || [ -e /etc/enginex ] || ln -s sc5000 /etc/enginex 2>/dev/null || :
 install_ui || echo "sc5000-custom-prepare: UI packs not installed" >&2
+seed_clock_floor || echo "sc5000-custom-prepare: clock floor not seeded" >&2
+restore_timezone || echo "sc5000-custom-prepare: timezone not restored" >&2
 '''
 # Public half of the key public images up to 5.0.4.1 shipped (#46). Not a secret.
 RETIRED_RELEASE_KEY = b'AAAAC3NzaC1lZDI1NTE5AAAAIC6p0NjBPb0vPCGB3XloshlMtXoYgVc6ig+JQAYnVUSz'
@@ -569,6 +686,25 @@ PREPARE = PREPARE.replace(b'@RETIRED@', RETIRED_RELEASE_KEY).replace(b'@MIGRATE@
 ETC_RESET_TEMPLATE = '''#!/bin/sh
 set -eu
 @MIGRATE@
+ts=${SC5000_TIMESTAMP_FILE:-/etc/timestamp}
+if [ -f "$ts" ] && [ ! -L "$ts" ]; then
+    lib_dir=${SC5000_TIMESYNC_LIB_DIR:-/data/system/var/overlay/lib}
+    for chk in /data /data/system /data/system/var /data/system/var/overlay "$lib_dir" "$lib_dir/systemd" "$lib_dir/systemd/timesync" "$lib_dir/systemd/timesync/clock"; do
+        [ ! -L "$chk" ] || { echo "Refusing timesync symlink: $chk" >&2; exit 1; }
+    done
+    clock=$lib_dir/systemd/timesync/clock
+    if [ ! -e "$clock" ] || [ "$clock" -ot "$ts" ]; then
+        (
+            umask 022
+            mkdir -p "$lib_dir/systemd/timesync"
+            : >> "$clock"
+            touch -r "$ts" "$clock"
+            chmod 644 "$clock"
+            chown systemd-timesync:systemd-timesync "$lib_dir/systemd/timesync" "$clock" 2>/dev/null ||
+                chown 994:992 "$lib_dir/systemd/timesync" "$clock" 2>/dev/null || :
+        )
+    fi
+fi
 epoch=@EPOCH@
 upper=/data/system/etc/overlay
 marker=/data/enginex/etc-overlay-epoch
@@ -641,7 +777,8 @@ ExecStart=/usr/libexec/sc5000-custom-prepare
 Description=Drop stale Engine 4.3.4 /etc overlay entries
 DefaultDependencies=no
 RequiresMountsFor=/data
-Before=etc.mount
+Before=etc.mount systemd-timesyncd.service sysinit.target shutdown.target
+Conflicts=shutdown.target
 [Service]
 Type=oneshot
 ExecStart=/usr/libexec/sc5000-custom-etc-reset
@@ -796,6 +933,8 @@ def inject(fs, key=None, services=(), overlay=None, version=None):
     fs.link('/usr/lib/systemd/system/multi-user.target.wants/sc5000-custom.target',
             '/usr/lib/systemd/system/sc5000-custom.target')
     fs.link('/usr/lib/systemd/system/etc.mount.wants/sc5000-custom-etc-reset.service',
+            '/usr/lib/systemd/system/sc5000-custom-etc-reset.service')
+    fs.link('/usr/lib/systemd/system/sysinit.target.wants/sc5000-custom-etc-reset.service',
             '/usr/lib/systemd/system/sc5000-custom-etc-reset.service')
     for name, data in service_data.items():
         fs.write('/usr/lib/systemd/system/'+name, data)

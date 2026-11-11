@@ -93,6 +93,114 @@ if [ -d /run/systemd ]; then
     fi
 fi
 
+ts_file=${SC5000_TIMESTAMP_FILE:-/etc/timestamp}
+if [ -f "$ts_file" ] && [ ! -L "$ts_file" ]; then
+    data_root=$(dirname "$dest")
+    if [ -n "${SC5000_TIMESYNC_LIB_DIR:-}" ]; then
+        lib_dir=$SC5000_TIMESYNC_LIB_DIR
+    elif [ -d "$data_root/system/var-lib" ]; then
+        lib_dir="$data_root/system/var-lib"
+    elif [ -d "$data_root/system/var/overlay" ] || [ -n "${SC5000_CUSTOM:-}" ]; then
+        lib_dir="$data_root/system/var/overlay/lib"
+    else
+        lib_dir=/var/lib
+    fi
+    if [ ! -L "$lib_dir" ] && [ ! -L "$lib_dir/systemd" ] && [ ! -L "$lib_dir/systemd/timesync" ] && [ ! -L "$lib_dir/systemd/timesync/clock" ]; then
+        clock="$lib_dir/systemd/timesync/clock"
+        if [ ! -e "$clock" ] || [ "$clock" -ot "$ts_file" ]; then
+            (
+                umask 022
+                mkdir -p "$lib_dir/systemd/timesync"
+                : >> "$clock"
+                touch -r "$ts_file" "$clock"
+                chmod 644 "$clock"
+                chown systemd-timesync:systemd-timesync "$lib_dir/systemd/timesync" "$clock" 2>/dev/null ||
+                    chown 994:992 "$lib_dir/systemd/timesync" "$clock" 2>/dev/null || :
+            ) && timesyncd_changed=1 || :
+        fi
+    fi
+fi
+
+restore_gen2_timezone() {
+    tz_file="$dest/state/timezone"
+    [ ! -L "$dest/state" ] && [ ! -L "$tz_file" ] && [ -f "$tz_file" ] || return 0
+    tz=$(awk '{gsub(/\r/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); gsub(/ /, "_"); print; exit}' "$tz_file")
+    case $tz in
+        ''|/*|*/|*//*|*..*|*[![:alnum:]_+/-]*) return 0 ;;
+        */*) ;;
+        *) return 0 ;;
+    esac
+    [ "${#tz}" -le 63 ] || return 0
+    old_ifs=$IFS; IFS=/
+    for seg in $tz; do
+        IFS=$old_ifs
+        [ -n "$seg" ] && [ "$seg" != "." ] && [ "${#seg}" -le 32 ] || return 0
+        case $(printf '%s' "$seg" | tr '[:lower:]' '[:upper:]') in
+            UTC|GMT|UCT|GMT0|ZULU|UNIVERSAL) return 0 ;;
+        esac
+    done
+    IFS=$old_ifs
+    [ -f "${SC5000_ZONEINFO_DIR:-/usr/share/zoneinfo}/$tz" ] || return 0
+    cfg_root=${SC5000_CONFIG_DIR:-"$(dirname "$dest")/.config"}
+    [ ! -L "$cfg_root" ] || return 0
+    write_conf() {
+        air_dir="$1/AIR Music Technology"
+        conf="$air_dir/Engine.conf"
+        [ ! -L "$1" ] && [ ! -L "$air_dir" ] && [ ! -L "$conf" ] || return 0
+        mkdir -p "$air_dir"
+        tmp="$conf.tmp.$$"
+        if [ -f "$conf" ]; then
+            awk -v tz="$tz" '
+                BEGIN { in_sec = 0; seen_sec = 0; wrote = 0 }
+                /^\[TimeDateSettings\][[:space:]]*$/ { in_sec = 1; seen_sec = 1; print; next }
+                /^\[.*\]/ {
+                    if (in_sec && !wrote) { print "TZEnvVar=" tz; wrote = 1 }
+                    in_sec = 0; print; next
+                }
+                in_sec && /^TZEnvVar[[:space:]]*=/ {
+                    if (!wrote) { print "TZEnvVar=" tz; wrote = 1 }
+                    next
+                }
+                { print }
+                END {
+                    if (!seen_sec) {
+                        if (NR > 0) print ""
+                        print "[TimeDateSettings]"
+                        print "TZEnvVar=" tz
+                    } else if (!wrote) {
+                        print "TZEnvVar=" tz
+                    }
+                }
+            ' "$conf" > "$tmp"
+        else
+            printf '[TimeDateSettings]\nTZEnvVar=%s\n' "$tz" > "$tmp"
+        fi
+        if cmp -s "$tmp" "$conf" 2>/dev/null; then
+            rm -f "$tmp"
+        else
+            chmod 644 "$tmp"
+            mv "$tmp" "$conf"
+        fi
+    }
+    found=0
+    for d in "$cfg_root"/*.user.settings; do
+        [ -d "$d" ] || continue
+        found=1
+        write_conf "$d"
+    done
+    if [ "$found" = 0 ]; then
+        pfile=${SC5000_PRODUCT_CODE_FILE:-/sys/firmware/devicetree/base/inmusic,product-code}
+        if [ -f "$pfile" ]; then
+            prod=$(tr -d '\000\r\n ' < "$pfile" | tr '[:upper:]' '[:lower:]')
+            case $prod in
+                ''|*[!a-z0-9_-]*) ;;
+                *) write_conf "$cfg_root/$prod.user.settings" ;;
+            esac
+        fi
+    fi
+}
+restore_gen2_timezone || :
+
 if [ -f "$bundle_dir/version.txt" ]; then
     mkdir -p /run/sc5000
     if [ ! -f /etc/sc5000/version.txt ] || ! cmp -s "$bundle_dir/version.txt" /etc/sc5000/version.txt; then

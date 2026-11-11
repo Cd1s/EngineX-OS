@@ -3044,5 +3044,71 @@ assert.ok(!presses.some(p=>p.endsWith('/RequestMaster')),'a copy must not reques
 """)
 
 
+    def test_timezone_capture_normalizes_spaces_and_prevents_utc_clobber(self):
+        self.assertIn("function onSystemTimeZoneSetSucceeded() { root.scOnTimeZoneChanged() }", bp.SERVICES_MAIN)
+        self.assertIn("http://127.0.0.1:8080/v1/sc5000/ui?timezone=", bp.SERVICES_MAIN)
+        import shutil, subprocess
+        if not shutil.which("node"):
+            return
+        start = bp.SERVICES_MAIN.index("function scIsBadTimeZone(tz)")
+        end = bp.SERVICES_MAIN.index("\tConnections {\n\t\ttarget: typeof Planck")
+        js_funcs = bp.SERVICES_MAIN[start:end]
+        script = f"""
+const assert = require('node:assert/strict');
+let scLastGoodTimeZone = '';
+let scPendingTimeZone = '';
+let scRestoringTimeZone = false;
+const posts = [];
+globalThis.root = {{
+    get scPendingTimeZone() {{ return scPendingTimeZone; }},
+    set scPendingTimeZone(v) {{ scPendingTimeZone = v; }},
+}};
+globalThis.XMLHttpRequest = class {{
+    open(method, url) {{ this.method = method; this.url = url; }}
+    send() {{
+        posts.push(this.url);
+        this.readyState = 4;
+        this.status = 200;
+        if (this.onreadystatechange) this.onreadystatechange();
+    }}
+}};
+let currentDisplayTz = 'Universal';
+let currentIsUtc = true;
+const setCalls = [];
+globalThis.Planck = {{
+    timeDateController: {{
+        isSystemTimeZoneUTC: () => currentIsUtc,
+        getSystemTimeZone: () => currentDisplayTz,
+        setSystemTimeZone: (tz) => {{
+            setCalls.push(tz);
+            currentDisplayTz = tz.replace(/_/g, ' ');
+            currentIsUtc = (tz === 'UTC' || tz === 'Universal');
+            scOnTimeZoneChanged();
+        }},
+    }},
+}};
+{js_funcs}
+// 1. Auto-detected zone with space display formatting ("America/New York") normalizes to "America/New_York".
+Planck.timeDateController.setSystemTimeZone('America/New_York');
+assert.equal(scLastGoodTimeZone, 'America/New_York');
+assert.equal(scPendingTimeZone, '');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=America%2FNew_York');
+
+// 2. Manual selection of Asia/Shanghai posts Asia/Shanghai.
+Planck.timeDateController.setSystemTimeZone('Asia/Shanghai');
+assert.equal(scLastGoodTimeZone, 'Asia/Shanghai');
+assert.equal(posts.at(-1), 'http://127.0.0.1:8080/v1/sc5000/ui?timezone=Asia%2FShanghai');
+
+// 3. Hostile/fallback UTC response never posts UTC and immediately restores Asia/Shanghai.
+const postsBefore = posts.length;
+Planck.timeDateController.setSystemTimeZone('UTC');
+assert.equal(scLastGoodTimeZone, 'Asia/Shanghai');
+assert.equal(currentDisplayTz, 'Asia/Shanghai');
+assert.equal(currentIsUtc, false);
+assert.ok(!posts.slice(postsBefore).some(u => u.includes('UTC')));
+"""
+        r = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
 if __name__ == "__main__":
     unittest.main()

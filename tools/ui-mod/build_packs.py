@@ -2298,6 +2298,54 @@ SERVICES_MAIN = """
 		const service = scServices.find(v => v.id === scScope)
 		return s && service && scScope !== "tidal" ? String(s).replace(/TIDAL/gi, service.name) : s
 	}
+	// Capture manual and auto-detected IANA time zones via stock Planck.timeDateController
+	// signals and persist them through stream-sync (/data/enginex/state/timezone) without
+	// interposing setenv/unsetenv in Engine. UTC/Universal fallbacks never replace a good zone.
+	property string scLastGoodTimeZone: ""
+	property string scPendingTimeZone: ""
+	property bool scRestoringTimeZone: false
+	function scIsBadTimeZone(tz) {
+		if (!tz || tz.indexOf("/") <= 0 || tz.length > 63) return true
+		const parts = tz.split("/")
+		for (let i = 0; i < parts.length; i++) {
+			const s = parts[i], u = s.toUpperCase()
+			if (!s || s === "." || s === ".." || s.length > 32) return true
+			if (u === "UTC" || u === "GMT" || u === "UCT" || u === "GMT0" || u === "ZULU" || u === "UNIVERSAL") return true
+		}
+		return false
+	}
+	function scPostTimeZone(tz) {
+		if (scIsBadTimeZone(tz)) return
+		const x = new XMLHttpRequest()
+		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui?timezone=" + encodeURIComponent(tz))
+		x.onreadystatechange = function() {
+			if (x.readyState !== 4) return
+			if (x.status === 200 && root.scPendingTimeZone === tz) root.scPendingTimeZone = ""
+		}
+		x.send()
+	}
+	function scOnTimeZoneChanged() {
+		if (typeof Planck === "undefined" || !Planck || !Planck.timeDateController) return
+		const c = Planck.timeDateController
+		const utc = !!c.isSystemTimeZoneUTC()
+		const tz = String(c.getSystemTimeZone() || "").trim().replace(/ /g, "_")
+		if (utc || scIsBadTimeZone(tz)) {
+			if (!scRestoringTimeZone && scLastGoodTimeZone !== "") {
+				scRestoringTimeZone = true
+				c.setSystemTimeZone(scLastGoodTimeZone)
+				scRestoringTimeZone = false
+			}
+			return
+		}
+		scLastGoodTimeZone = tz
+		scPendingTimeZone = tz
+		scPostTimeZone(tz)
+	}
+	Connections {
+		target: typeof Planck !== "undefined" && Planck ? Planck.timeDateController : null
+		ignoreUnknownSignals: true
+		function onSystemTimeZoneSetSucceeded() { root.scOnTimeZoneChanged() }
+	}
 	function scCall(query, done) {
 		if (!query && !done) {
 			if (!scUiPoll) {
@@ -2411,9 +2459,31 @@ SERVICES_MAIN = """
 			const lbj = root.scTr("/Client/Preferences/Profile/Application/LinkBeatJumpLoopSize")
 			if (lbj && !lbj.state) lbj.state = true
 		}
+		if (v && v.timezone && !scIsBadTimeZone(String(v.timezone))) {
+			if (scLastGoodTimeZone === "") scLastGoodTimeZone = String(v.timezone)
+		}
 		const wasUiLoaded = scUiLoaded
 		scUiLoaded = true
-		if (!wasUiLoaded) scMidiInitBridge()
+		if (!wasUiLoaded) {
+			scMidiInitBridge()
+			if (typeof Planck !== "undefined" && Planck && Planck.timeDateController) {
+				const c = Planck.timeDateController
+				const curTz = String(c.getSystemTimeZone() || "").trim().replace(/ /g, "_")
+				if (!c.isSystemTimeZoneUTC() && !scIsBadTimeZone(curTz)) {
+					scLastGoodTimeZone = curTz
+					if (!v || v.timezone !== curTz) {
+						scPendingTimeZone = curTz
+						scPostTimeZone(curTz)
+					}
+				} else if (scLastGoodTimeZone !== "") {
+					scRestoringTimeZone = true
+					c.setSystemTimeZone(scLastGoodTimeZone)
+					scRestoringTimeZone = false
+				}
+			}
+		} else if (scPendingTimeZone !== "") {
+			scPostTimeZone(scPendingTimeZone)
+		}
 		scProbeCueClocks()
 	}
 	function scSameItems(a, b) {
