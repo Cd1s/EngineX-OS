@@ -1,0 +1,9 @@
+# English	简体中文	繁體中文 — pending strings for in-flight 5.3.0.4 branches not yet on 284b67b (pkg/webui/index.html & pkg/webui/server.go in agent/boot-safety-net-20261111).
+Retry EngineX	重试 EngineX	重試 EngineX
+Download boot report	下载启动报告	下載啟動報告
+EngineX retry requested. Reload this page after Engine restarts.	已请求重试 EngineX，请待 Engine 重启后刷新页面。	已要求重試 EngineX，請待 Engine 重新啟動後重新整理頁面。
+EngineX fell back to stock Engine. A boot report was saved to your USB drive.	EngineX 已回退至原厂 Engine，启动报告已保存到 U 盘。	EngineX 已退回原廠 Engine，啟動報告已儲存至隨身碟。
+EngineX fell back to stock Engine. A boot report was saved locally; a writable USB/SD drive is unavailable. Insert one to export the report.	EngineX 已回退至原厂 Engine。启动报告已保存在本机；当前没有可写的 U 盘或 SD 卡，插入后将自动导出。	EngineX 已退回原廠 Engine。啟動報告已儲存在本機；目前沒有可寫入的隨身碟或 SD 卡，插入後將自動匯出。
+EngineX fell back to stock Engine. The boot report is currently unavailable.	EngineX 已回退至原厂 Engine，启动报告暂不可用。	EngineX 已退回原廠 Engine，啟動報告暫時無法使用。
+No access code is needed to collect the report from your USB/SD drive.	从 U 盘或 SD 卡拷取报告无需访问码。	從隨身碟或 SD 卡取得報告不需存取碼。
+Safe mode: stock Engine is active. Use Retry EngineX to try again; Mods stay quarantined.	安全模式：当前运行原厂 Engine，点“重试 EngineX”可再试；Mods 保持隔离。	安全模式：目前執行原廠 Engine，點「重試 EngineX」可再試；Mods 維持隔離。
