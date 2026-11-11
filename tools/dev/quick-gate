@@ -1,0 +1,55 @@
+#!/bin/bash
+# quick-gate: the daily subset of tools/az01-packer/release-gate.sh on one image group.
+# Build host only, as root, from the repository you want to test:
+#   tools/dev/quick-gate [--group SC5000|SC6000|PRIME4] [--image <new .img> --version <v>] [--keep]
+# Without --image it builds just that group's images from this working tree
+# (build-release.sh with ONLY_GROUP, version from rootfs-overlay/etc/sc5000/version.txt,
+# no SSH key). Then GATE_QUICK=1 release-gate.sh runs the static audit, boots the new
+# rootfs on an empty /data and checks the services, the UI hook counts, the render probe
+# (rendered nodes), QML errors and the APIs. No previous image, no online update and no
+# stale-cache seed: release candidates still run the full gate on all three groups.
+# Evidence stays in the printed work dir (results.txt, *.log); --keep also keeps the
+# built image and the unpacked rootfs.
+set -euo pipefail
+REPO=$(cd "$(dirname "$0")/../.." && pwd)
+LAB=${QUICK_GATE_LAB:-/root/build/sc5000-lab}
+GROUP=SC5000 IMG='' VERSION='' KEEP=''
+while [ $# -gt 0 ]; do
+    case $1 in
+    --group) GROUP=$2; shift ;;
+    --image) IMG=$(realpath "$2"); shift ;;
+    --version) VERSION=$2; shift ;;
+    --keep) KEEP=1 ;;
+    *) sed -n '2,14p' "$0" >&2; exit 2 ;;
+    esac
+    shift
+done
+case $GROUP in
+SC5000) MODEL=SC5000-@-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img ;;
+SC6000) MODEL=SC6000-@-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img ;;
+PRIME4) MODEL=PRIME4-@-EngineX-OS-Denon-PRIME-4-JC11-Update.img ;;
+*) echo "--group must be SC5000, SC6000 or PRIME4" >&2; exit 2 ;;
+esac
+[ "$(id -u)" = 0 ] || { echo "run as root on the build host" >&2; exit 2; }
+W=$(mktemp -d /var/tmp/quick-gate.XXXXXX)
+t0=$SECONDS
+cd "$REPO"
+if [ -z "$IMG" ]; then
+    VERSION=${VERSION:-$(cat rootfs-overlay/etc/sc5000/version.txt)}
+    echo "quick-gate: building $GROUP $VERSION from $(git rev-parse --short HEAD)$(git diff --quiet HEAD -- || echo ' + uncommitted changes') into $W/img"
+    # shellcheck disable=SC1091
+    [ ! -r /etc/profile.d/buildtools.sh ] || . /etc/profile.d/buildtools.sh
+    # The extracted 5.3.0 qrc skips build-release.sh's qemu extraction of the same files.
+    [ -n "${QRC:-}" ] || [ ! -d "$LAB/5.3.0/qrc" ] || export QRC=$LAB/5.3.0/qrc
+    ONLY_GROUP=$GROUP sh tools/az01-packer/build-release.sh "$VERSION" "$LAB/fw-5.3.0" none "$LAB/sbin/fsck.hfsplus" "$W/img" > "$W/build.log" 2>&1 ||
+        { tail -20 "$W/build.log"; rm -rf "$W/img"; echo "quick-gate: build failed, see $W/build.log"; exit 1; }
+    IMG=$W/img/${MODEL/@/$VERSION}
+    echo "quick-gate: built in $((SECONDS - t0)) s"
+fi
+[ -n "$VERSION" ] || { echo "--image needs --version" >&2; exit 2; }
+rc=0
+GATE_QUICK=1 GATE_ENGINE_SECONDS=${GATE_ENGINE_SECONDS:-30} \
+    bash tools/az01-packer/release-gate.sh - "$IMG" "$VERSION" "$W/gate" || rc=$?
+[ -n "$KEEP" ] || rm -rf "$W/img" "$W/gate/new-img" "$W/gate/old-img"
+echo "quick-gate: $GROUP $([ "$rc" = 0 ] && echo PASS || echo FAIL) in $((SECONDS - t0)) s, evidence $W/gate/results.txt"
+exit "$rc"

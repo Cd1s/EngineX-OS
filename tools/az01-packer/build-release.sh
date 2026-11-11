@@ -4,6 +4,8 @@
 #   sh tools/az01-packer/build-release.sh <version> <fw-dir> <public-key> <fsck.hfsplus> <out-dir>
 # Each official AZ01 group is patched once and copied under each model's name:
 # Engine finds an image on USB by <PREFIX>-<digits and dots>-...Update.img.
+# ONLY_GROUP=SC5000|SC6000|PRIME4 builds just that group's first-generation images and
+# skips the second-generation bundles (tools/dev/quick-gate; never for a release).
 set -eu
 VERSION=${1:?version, e.g. 5.0.4.1}
 FW=${2:?directory with the official <PREFIX>-<base>-Update.img files, one base version}
@@ -11,6 +13,8 @@ KEY=${3:?one SSH public key for a private build, or "none" for public releases (
 FSCK=${4:?static ARMv7 fsck.hfsplus}
 OUT=${5:?new output directory outside any git worktree}
 case $VERSION in *[!0-9.]*|'') echo "version must be digits and dots" >&2; exit 2 ;; esac
+case ${ONLY_GROUP:-} in ''|SC5000|SC6000|PRIME4) ;; *) echo "ONLY_GROUP must be SC5000, SC6000 or PRIME4" >&2; exit 2 ;; esac
+want() { [ -z "${ONLY_GROUP:-}" ] || [ "$ONLY_GROUP" = "$1" ]; }
 [ ! -e "$OUT" ] || { echo "$OUT exists; refusing to overwrite" >&2; exit 2; }
 ROOT=$(pwd)
 KEYARG=$KEY; [ "$KEY" != none ] || KEYARG=
@@ -47,10 +51,12 @@ OUT=$WORK/hooks32/libedisksd-hook.so sh tools/edisksd-hook/build.sh
 install -m 0755 "$WORK/hooks32/libengine-ui-hook.so" "$STAGE/etc/sc5000/libengine-ui-hook.so"
 install -m 0755 "$WORK/hooks32/libengine-ui-hook.so" "$STAGE/usr/local/lib/sc5000/libengine-ui-hook.so"
 install -m 0755 "$WORK/hooks32/libedisksd-hook.so" "$STAGE/etc/sc5000/libedisksd-hook.so"
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1" -o "$WORK/sc5000-suite-arm64" ./cmd/sc5000-suite
-CROSS64=aarch64-linux-gnu-; [ "$(uname -m)" != aarch64 ] || CROSS64=
-CROSS=$CROSS64 OUT=$WORK/hooks64/libengine-ui-hook.so sh tools/ui-mod/build.sh
-CROSS=$CROSS64 OUT=$WORK/hooks64/libedisksd-hook.so sh tools/edisksd-hook/build.sh
+if [ -z "${ONLY_GROUP:-}" ]; then
+    GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Cd1s/EngineX-OS/pkg/webui.ReleaseBuild=1" -o "$WORK/sc5000-suite-arm64" ./cmd/sc5000-suite
+    CROSS64=aarch64-linux-gnu-; [ "$(uname -m)" != aarch64 ] || CROSS64=
+    CROSS=$CROSS64 OUT=$WORK/hooks64/libengine-ui-hook.so sh tools/ui-mod/build.sh
+    CROSS=$CROSS64 OUT=$WORK/hooks64/libedisksd-hook.so sh tools/edisksd-hook/build.sh
+fi
 
 # 1c. EngineX boot splash (#118). The firmware splash partition shows before Linux starts, and every
 # update rewrites it, so an image carrying the stock one puts the stock picture back on the deck.
@@ -73,16 +79,12 @@ build() { # <official image prefix> <model prefix> <release name>...
     done
     rm -f "$WORK/$base.img"
 }
-build SC5000 SC5000 Denon-SC5000-Prime-JP07 SC5000M Denon-SC5000M-Prime-JP08 PRIMEGO Denon-PRIME-GO-JP11 &
-p1=$!
-build SC6000 SC6000 Denon-SC6000-Prime-JP13 SC6000M Denon-SC6000M-Prime-JP14 &
-p2=$!
-build PRIME4 PRIME4 Denon-PRIME-4-JC11 PRIME2 Denon-PRIME-2-JC16 MIXSTREAMPRO Numark-Mixstream-Pro-NH08 &
-p3=$!
+jobs_=
+if want SC5000; then build SC5000 SC5000 Denon-SC5000-Prime-JP07 SC5000M Denon-SC5000M-Prime-JP08 PRIMEGO Denon-PRIME-GO-JP11 & jobs_="$jobs_ $!"; fi
+if want SC6000; then build SC6000 SC6000 Denon-SC6000-Prime-JP13 SC6000M Denon-SC6000M-Prime-JP14 & jobs_="$jobs_ $!"; fi
+if want PRIME4; then build PRIME4 PRIME4 Denon-PRIME-4-JC11 PRIME2 Denon-PRIME-2-JC16 MIXSTREAMPRO Numark-Mixstream-Pro-NH08 & jobs_="$jobs_ $!"; fi
 # One wait per job: "wait a b c" only reports c, so set -e would miss a failed group.
-wait "$p1"
-wait "$p2"
-wait "$p3"
+for p in $jobs_; do wait "$p"; done
 
 # 3. Verify every 1st-gen AZ01 image as a container again, then copy 2nd-gen images and record checksums.
 mkdir "$OUT/verify"
@@ -91,17 +93,18 @@ for f in "$OUT/"*-Update.img; do
     python3 "$ROOT/tools/az01-packer/az01_packer.py" info "$f" > "$OUT/verify/${b%.img}.info.json"
 done
 
-for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
+[ -n "${ONLY_GROUP:-}" ] || for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
     python3 tools/az01-packer/build-data-bundle.py "$VERSION" --prefix "$m" --suite "$WORK/sc5000-suite" \
         --hook "$WORK/hooks32/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
     cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done
-for m in PRIME4G2 SYSTEMONE; do
+[ -n "${ONLY_GROUP:-}" ] || for m in PRIME4G2 SYSTEMONE; do
     python3 tools/az01-packer/build-data-bundle.py "$VERSION" --prefix "$m" --suite "$WORK/sc5000-suite-arm64" \
         --hook "$WORK/hooks64/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
     cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done
 
 cd "$OUT"
-sha256sum *-Update.img *-Data-Bundle.tar.gz > SHA256SUMS.txt
+if [ -n "${ONLY_GROUP:-}" ]; then sha256sum *-Update.img > SHA256SUMS.txt
+else sha256sum *-Update.img *-Data-Bundle.tar.gz > SHA256SUMS.txt; fi
 ls -l
