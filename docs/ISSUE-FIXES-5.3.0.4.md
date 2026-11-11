@@ -1,8 +1,8 @@
 # EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11，RC（待维护者确认发布））
 
 - **日期**：`2026-11-11`
-- **状态**：RC（待维护者确认发布；实机线 `agent/shadow-grid-halfwave-20261110` 合并至 `4386093`，沙箱线 `agent/sandbox-main-20261110` 合并至 `2031ae2`）
-- **版本范围**：`v5.3.0.3`（tag `cd789f8` / 构建提交 `b941ea4`）→ `v5.3.0.4`（RC 构建提交：`5038e5b`）
+- **状态**：滚动整合中（已合入 `issue176-sclive4-stems` `77c4c9f`、`issue177-sclive4-perf` `66ff35b`、`realdeck-5304-fixes` `ebb985e` / `322839d`；`#181`、`#162`、影子 `Sync` 对齐与双机手动 `MASTER` 互切待合入）
+- **版本范围**：`v5.3.0.3`（tag `cd789f8` / 构建提交 `b941ea4`）→ `v5.3.0.4`（上一轮 RC 构建提交：`5038e5b`，当前滚动整合基准：`d3fcc1f`）
 - **回滚点**：`v5.3.0.3`（tag `cd789f8`，构建提交 `b941ea4`；同版本更早构建 `37e83ea`、`9616419`）
 - **覆盖机型与产物（共 20 个发布资产 + `SHA256SUMS.txt`）**：
   - **8 款一代机完整固件（`*-Update.img`）**：`SC5000`（JP07）、`SC5000M`（JP08）、`PRIME GO`（JP11）、`SC6000`（JP13）、`SC6000M`（JP14）、`PRIME 4`（JC11）、`PRIME 2`（JC16）、`Mixstream Pro`（NH08）
@@ -16,7 +16,7 @@
 
 | Issue / PR | 模块 | 原因与修法摘要 | 验证与回归测试 |
 | --- | --- | --- | --- |
-| **#49**（影子轨模式、Engine 模式头部/概览镜像、静音影子槽 MASTER 选举排除、显示模式对齐原厂、独立播放器四轨颜色与行为保留） | `pkg/webui/shadow.go`<br>`pkg/webui/shadow_display.go`<br>`pkg/enginedb/display.go`<br>`tools/ui-mod/build_packs.py`<br>`tools/ui-mod/engine_ui_hook.c` | **原因**：① 四轨模式下对端关机/退歌时残留波形，或 `RemoteState` 订阅死锁阻塞流媒体切源，流媒体曲目显示数字缓存文件名；② 影子轨缺乏统一加载策略，拷贝期间跳回 `No Track Loaded`，Engine 模式下影子轨头部读本地静音副本的空白标签/本地分析调性且缺源轨 `Sync`/`LEAD`/`Loop`/`KeyOffset`/`Stems`/`Slip` 状态，本机静音影子槽在 `engineSync` 中可能误参与 `MASTER` 选举，且空 Engine 槽重复解析快照增加开销；③ 显示模式（CDJ 或回退）头部与波形泳道同原厂存在视觉差异，且原厂 `beatData` 概览整秒截断与负采样点 main cue 会被校验拦截；④ 独立播放器（`SC5000 / SC6000`）开启四轨后原厂将其视作四通道一体机，丢失 `Player #`、`Layer A / B` 双层选色盘、`Enable for Dual Deck` 与 `Browse` 按压直载当前层行为。<br>**修法**：① 对端发送 UDP 告别包并在 350 ms 防抖后执行 `Unload` + `UnSync` + 交还 `MASTER`，移除 `RemoteState` 死锁订阅，从源机 `stm.db` 解析真实 `Artist - Title`；② 新增 `Shadow Deck Mode`（`auto` / `engine` / `cdj`）：默认 `Auto` 下只要对端 EngineX 或 CDJ 曲目可拷贝即由本机 Engine 静音加载，无法拷贝的 CDJ 曲目自动回退显示 rekordbox 波形并提示原因，拷贝期间立即显示源曲目信息与原厂 `ProgressRing` 进度环（限制单曲音频拷贝上限 1 GiB，下载前清理过期缓存防 `ENOSPC`，并修复时钟回拨后 POST 恢复）；③ Engine 模式下影子轨头部镜像源轨真实 `Title`、`Artist`、`Key`、`KeyOffset`、`AutoLoop`、`Stems` 图标、`Sync` 绿 BPM 与仅在源轨显示时点亮的 `LEAD`（`ArtistSong.qml` 同时遵循 `Hide Title/Artist`），概览波形绘制源轨 `Slip` 滑行线，Follower 采用均值线弯音追赶，并在 5.3.0 hook 新增 `0x16fbc38` 站点排除本机静音影子槽参与 `MASTER` 选举（`f6b87f8`）及跳过空 Engine 槽重复快照（`4386093`）；④ 显示数据兼容原厂 `beatData` 概览整秒截断与早于 `0` 的 main cue（`fd9c8d5`），`All CDJ Mode` 与 CDJ 回退下头部与波形层全面对齐原厂；⑤ 独立播放器开启四轨后完整恢复 `Player #`、`Deck Color`（`Layer A / B` 双层选色盘）、`Enable for Dual Deck`、`Browse` 按压直载当前层、远程碟机选择、`Engine Connect` 与 `Touch FX Mute`。 | `go test -race ./pkg/webui/... ./pkg/enginedb/...`、`tools/az01-packer/test_ui_mod.py`（103 项 PASS）、`tools/ui-mod/test_shadow_master.c`（144 项原生用例 PASS）；双 SC5000 实机 A1–A11 与双机沙箱录像 S1–S8 验收通过 |
+| **#49**（影子轨模式、Engine 模式头部/概览镜像、静音影子槽 MASTER 选举排除、超 `+100%` 原生 Sync 跟随、显示模式对齐原厂、独立播放器四轨颜色与行为保留） | `pkg/webui/shadow.go`<br>`pkg/webui/shadow_display.go`<br>`pkg/enginedb/display.go`<br>`tools/ui-mod/build_packs.py`<br>`tools/ui-mod/engine_ui_hook.c` | **原因**：① 四轨模式下对端关机/退歌时残留波形，或 `RemoteState` 订阅死锁阻塞流媒体切源，流媒体曲目显示数字缓存文件名；② 影子轨缺乏统一加载策略，拷贝期间跳回 `No Track Loaded`，Engine 模式下影子轨头部读本地静音副本的空白标签/本地分析调性且缺源轨 `Sync`/`LEAD`/`Loop`/`KeyOffset`/`Stems`/`Slip` 状态，本机静音影子槽在 `engineSync` 中可能误参与 `MASTER` 选举，原厂 `Sync` 超过 `+100%` 变速时 `SpeedState` 显示截断在 `+100.0%` 导致影子副本限幅失步，且空 Engine 槽重复解析快照增加开销；③ 显示模式（CDJ 或回退）头部与波形泳道同原厂存在视觉差异，且原厂 `beatData` 概览整秒截断与负采样点 main cue 会被校验拦截；④ 独立播放器（`SC5000 / SC6000`）开启四轨后原厂将其视作四通道一体机，丢失 `Player #`、`Layer A / B` 双层选色盘、`Enable for Dual Deck` 与 `Browse` 按压直载当前层行为。<br>**修法**：① 对端发送 UDP 告别包并在 350 ms 防抖后执行 `Unload` + `UnSync` + 交还 `MASTER`，移除 `RemoteState` 死锁订阅，从源机 `stm.db` 解析真实 `Artist - Title`；② 新增 `Shadow Deck Mode`（`auto` / `engine` / `cdj`）：默认 `Auto` 下只要对端 EngineX 或 CDJ 曲目可拷贝即由本机 Engine 静音加载，无法拷贝的 CDJ 曲目自动回退显示 rekordbox 波形并提示原因，拷贝期间立即显示源曲目信息与原厂 `ProgressRing` 进度环（限制单曲音频拷贝上限 1 GiB，下载前清理过期缓存防 `ENOSPC`，并修复时钟回拨后 POST 恢复）；③ Engine 模式下影子轨头部镜像源轨真实 `Title`、`Artist`、`Key`、`KeyOffset`、`AutoLoop`、`Stems` 图标、`Sync` 绿 BPM 与仅在源轨显示时点亮的 `LEAD`（`ArtistSong.qml` 同时遵循 `Hide Title/Artist`），概览波形绘制源轨 `Slip` 滑行线，Follower 采用均值线弯音追赶，在 5.3.0 hook 新增 `0x16fbc38` 站点排除本机静音影子槽参与 `MASTER` 选举（`f6b87f8`），当源轨在 `Sync` 下超过 `+100%` 时按真实 BPM 比值上报并通过原厂 `Sync` 驱动影子副本突破推子上限且保持位置闭环（`322839d`），并跳过空 Engine 槽重复快照（`4386093`）；④ 显示数据兼容原厂 `beatData` 概览整秒截断与早于 `0` 的 main cue（`fd9c8d5`），`All CDJ Mode` 与 CDJ 回退下头部与波形层全面对齐原厂；⑤ 独立播放器开启四轨后完整恢复 `Player #`、`Deck Color`（`Layer A / B` 双层选色盘）、`Enable for Dual Deck`、`Browse` 按压直载当前层、远程碟机选择、`Engine Connect` 与 `Touch FX Mute`。 | `go test -race ./pkg/webui/... ./pkg/enginedb/...`、`tools/az01-packer/test_ui_mod.py`（含 `ShadowNativeOverRangeTest` 全部 PASS）、`tools/ui-mod/test_shadow_master.c`（144 项原生用例 PASS）；双 SC5000 实机 A1–A11、RC R1–R7、超 `+100%` `sync-over100-322839d.mp4` 与双机沙箱录像 S1–S8 验收通过 |
 | **#85**（RGB 与单色按键灯亮度分级调光） | `tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/build_packs.py` | **原因**：硬件控制器单色按键（`SYNC`、`KEYLOCK`、`SLIP` 等）仅支持亮/暗两档 MIDI `NoteOn` 状态，此前对 `NoteOn` 缩放会导致单色按键灯状态异常。<br>**修法**：`Settings → Device → Pad LED Brightness`（`100%`–`20%`）对 RGB 彩灯（打击垫、模式键、`Layer`、转盘灯环与屏幕虚拟打击垫）按视觉感知曲线分级调光，单色 `NoteOn` 按键原样透传保持原厂亮度。 | `test_ui_mod.py::test_led_brightness_rgb_and_single_color_passthrough`、`test_az04_hook.c` |
 | **#105**（OmniSource 歌单隔离） | `pkg/webui/tidal_gateway.go`<br>`pkg/providers/` | **原因**：开启 OmniSource 后各流媒体平台自身的歌单页混入了 `[USB: ...]` 本地盘与跨平台歌单。<br>**修法**：搜索栏继续跨流媒体与全部 U 盘聚合检索，各流媒体自身的歌单列表严格按当前平台隔离。 | `go test -race ./pkg/providers/... ./pkg/webui/...` |
 | **#118**（一代机镜像嵌入定制开机第一屏） | `tools/az01-packer/build-release.sh` | **原因**：`build-release.sh` 打包一代机 `.img` 时漏传 `--splash`，导致刷入后退回原厂开机第一屏。<br>**修法**：在 `build-release.sh` 中传入 `--splash "$REPO/docs/assets/boot-splash-enginex.png"`，并修正发布脚本资产通配符仅选择 20 个公开产物。 | `test_az01_packer.py`、镜像解包校验 |
@@ -31,11 +31,15 @@
 | **#170**（Mod 压缩包保留可执行权限位） | `pkg/mods/mods.go`<br>`pkg/mods/mods_test.go` | **原因**：Web 控制台解压安装 `.tar.gz` Mod 时统一用 `0644` 写入文件，导致自带 ELF 二进制或辅助脚本的 Mod 丢失可执行权限。<br>**修法**：解压时保留 tar header 中的可执行权限位（`mode & 0111`），同时严格剥离 `setuid`/`setgid`/`sticky` 位。 | `TestInstallPreservesExecutableBits`（`pkg/mods/mods_test.go`） |
 | **#171**（SC LIVE 4 AUX 路由至通道 3/4 并保留 MIC2） | `tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/build_packs.py`<br>`docs/issue171-sclive4-aux.md` | **原因**：SC LIVE 4（JP21）原厂 AUX 输入直通主输出，无独立通道 CUE、推子、EQ 与 Sweep FX 控制。<br>**修法**：通过原厂 `Mixer Menu → Channels → Input` 将 AUX 路由至通道 3 或 4，支持通道 CUE、推子、EQ 与 Sweep FX；仅在 AUX 模式且任一通道选 Line-In 时抑制 AUX 直通，MIC2 保持原厂路由；JP21 隐藏未验证的 Bluetooth/Computer 选项。 | `tools/az01-packer/sclive-aux-sandbox.sh`、`test_stems_feature.c`、`test_ui_mod.py` |
 | **#175**（UI Scale 缩放下开关机画面全屏铺满） | `tools/ui-mod/build_packs.py` | **原因**：开启 `UI Scale`（如 `75%`）扩大逻辑画布后，`SplashScreen` 与关机遮罩未锚定父容器全屏，在 SC LIVE 4 等机型上仅占屏幕左上约 3/4。<br>**修法**：为开机启动画面与关机遮罩补齐 `parent` 与 `anchors.fill: parent`，在 `75%`–`110%` 缩放下均完整铺满屏幕。 | `test_ui_mod.py`、eglfs 渲染核验 |
+| **#176**（SC LIVE 4 等二代机只读根分区下 `stems-processor` 安装检测重定向） | `tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/test_stems_feature.c`<br>`tools/ui-mod/test_az04_hook.c`<br>`docs/issue176-sclive4-stems.md` | **原因**：二代机（SC LIVE 4 等）根分区只读，`/usr/local/bin/stems-processor` 不在根分区而在 `/data/enginex/bundle/bin/stems-processor`；Engine `5.3.0-sclive4` 的 `StemsProcessorManager::checkProcessorInstalled()` / `isProcessorInstalled()` 调用 Qt 6.7.2 `QFile::exists()` 时走 `statx`，此前仅重定向了 `access`/`spawn`/`exec`，导致点 **Generate Stems** 误判未安装而跳回 Settings。<br>**修法**：在 `engine_ui_hook.c` 中将 `statx` 与 `open`/`open64`/`openat`/`openat64` 同步纳入 `stems-processor` 回退（仅在 `Engine` 进程内、原路径不可执行且数据包内 wrapper 可执行时重定向，原厂已安装的可执行文件优先，不影响其他进程与路径），并重编同步两份 32-bit `.so`（`77c4c9f`）。 | `test_stems_feature.c`、`test_az04_hook.c`（`stems-processor fallback: isolated access/statx/open` PASS）、`test_sclive4_bootstrap.sh`（SCLIVE4 / PRIME4PLUS / AZ04 PASS）；待报告人 SC LIVE 4 真机确认完整分轨渲染 |
+| **#177**（二代数据包 `engine.service` 对齐一代 `HOME` 与 Mesa 着色器缓存上限） | `tools/az01-packer/build-data-bundle.py`<br>`tools/az01-packer/test_data_bundle.py`<br>`tools/az01-packer/test_sclive4_bootstrap.sh` | **原因**：二代机 `boot-activate.sh` 生成的 `/run/systemd/system/engine.service.d/99-sc5000.conf` 未像一代机 `override.conf` 那样设置 `HOME=/tmp/sc5000-engine-home`（并预建 `0700` 目录）与 `MESA_SHADER_CACHE_MAX_SIZE=32M`。<br>**修法**：在 `boot-activate.sh` 中创建 `0700` `/tmp/sc5000-engine-home` 并在 `99-sc5000.conf` 注入 `Environment="HOME=/tmp/sc5000-engine-home"` 与 `Environment="MESA_SHADER_CACHE_MAX_SIZE=32M"`（`66ff35b`）。 | `test_data_bundle.py`、`test_sclive4_bootstrap.sh` |
 | **#182 / PR #183**（旧版 rekordbox 5 Device Library `export.pdb` U 盘兼容） | `pkg/rekordbox/pdb.go`<br>`pkg/rekordbox/library.go`<br>`pkg/rekordbox/sqlite.go`<br>`pkg/prolink/engine_bridge.go` | **原因**：旧版 rekordbox 5 Device Library 导出的 `export.pdb` 中存在未分析曲目 BPM（`0xFFFFFFFF`）、指向不存在曲目的孤立歌单条目、同名歌单及断链父目录，导致导入报错中断。<br>**修法**：在解析边界将未分析 BPM（`0xFFFFFFFF`）记为 `0`，忽略孤立的歌单条目，兼容同名歌单与断链父文件夹，并在共享 PDB writer 边界保持校验。 | `go test -race ./pkg/rekordbox/... ./pkg/enginedb/... ./pkg/prolink/...` |
 | **详细日志与脱敏下载** | `pkg/webui/logs.go`<br>`pkg/webui/ui_settings.go`<br>`pkg/webui/index.html`<br>`rootfs-overlay/etc/systemd/system/engine.service.d/60-ui-hook.conf` | **原因**：现场用户遇到问题时不便开启 SSH 抓日志，且全量 `*.debug=true` 会产生海量 Qt 内部渲染日志。<br>**修法**：为一代与二代 Engine 服务配置 `QT_LOGGING_CONF=/data/logging.ini`；Web 控制台新增 `详细日志` 开关（开启时原子写入 `*.debug=true` + `qt.*.debug=false` 并重启 Engine，关闭时删除文件）与 `下载日志` 按钮（导出最近 30 分钟、最多 5,000 条 / 2 MiB 的已脱敏纯文本日志，自动遮盖令牌、ARL、密码、Cookie、签名 URL 与本机访问码）。 | `go test -race ./pkg/webui/...`（`logs_test.go`）、`test_rootfs_overlay.sh`、armhf 与 AZ04 沙箱实测 |
 | **流媒体缓存隔离、Beatport 冷缓存与性能调优** | `pkg/providers/`<br>`pkg/deemixclient/`<br>`pkg/webui/`<br>`rootfs-overlay/usr/local/bin/sc5000-perf-tune`<br>`tools/ui-mod/build_packs.py` | **原因**：① 跨平台同名曲目缓存需按音源隔离，Beatport 冷缓存下无损升级需保持命中；② 搜索并发过高或后台自动批量分析会争抢线程，QML 2 轨启动时 `scGcCheck` 在 Deck 1 未就绪前访问空属性，且 `sc5000-perf-tune` 30 秒轮询每个线程 fork 子进程带来偶发帧延迟。<br>**修法**：① 独立各平台下载缓存命名空间（网易云「Deemix 优先」与 Deezer 共享无损缓存），修复 Beatport 冷缓存无损升级，并在 `stream-sync` 已监听 6595 时让 `deemixd` 以状态码 `0` 退出；② 限制并发搜索工作线程、挂起不安全的自动批量盘分析、修复 `scGcCheck` 等待 Deck 1 构建完成并加空属性保护、将 `sc5000-perf-tune` 改为纯 shell 零 fork 扫描。 | `go test -race ./...`、`test_rootfs_overlay.sh`、`test_ui_mod.py` |
 
-> **范围说明**：`#162`（Beat FX 毫秒模式切换）、`#172`（高频滚降补偿）、`#181`（CDJ 风格变速推子软接管解锁）、`#168` 的按拍精确同步，以及原厂 `Sync` 要求超过 `+100%` 变速时影子副本卡在 `+100%` 的跨倍速扩展推迟至 `5.3.0.5`，本次不列入新功能；`#179` 因不合规（未经同意转移数据）已拒绝，不列入。
+> **范围说明**：
+> - **正在为 `5.3.0.4` 开发/收尾待合入（Pending）**：`#181`（CDJ 风格变速推子软接管解锁，默认关闭 = 原厂行为）、`#162`（PX Beat FX 毫秒模式，默认关闭 = 逐字节一致 DSP 输出）、影子轨 `Sync` 相位对齐（`shadow-sync-snap`）、双机手动 `MASTER` 互切修复与顶栏第 2 行紧凑布局终版（`header-row2-compact`）。
+> - **推迟至 `5.3.0.5`（不在 `5.3.0.4`）**：`#178`（仅做后台核验，不进 `5.3.0.4`）、`#172`（高频滚降补偿）、`#195`、`#168` 按拍精确同步（beat-exact sync）、原厂内置 Beat FX 毫秒模式，以及 `"No source drive"`（`StreamingNoSourceAvailableDialog`）提示深入排查；`#179` 因不合规（未经同意转移数据）已拒绝，不列入。
 
 ---
 
@@ -53,8 +57,9 @@
   - **A1–A6、A8–A10**：**PASS**（其中 A8 流媒体载入 `LN109299` 已查明为验收脚本绕过原厂 `LOAD` 直接调底层接口所致，按原厂加载路径复测 **PASS**）；
   - **A11**：由 `f6b87f8` 修复（四轨模式下 `20/20` 补丁生效，排除本机静音影子槽参与 `MASTER` 选举，并由正式 RC `R4` `0/10` 冒烟确认）；
   - **A7（实体按键灯亮度与单色按键透传）**：待维护者目测确认。
-- **已知限制（推迟至 `5.3.0.5`）**：
-  - 当 `Sync` 需要超过 `+100%` 变速时（如 `71 BPM` 同步到 `144.2 BPM`），影子副本速度卡在 `+100%` 上限（实际约 `142.0 BPM`），偏差 `p95 126 ms`（`126.4 ms`）。
+- **超 `+100%` 变速 `Sync` 实机修复验收（`322839d`，已合入 `d3fcc1f`）**：
+  - 当源轨在原厂 `Sync` 下需要超过 `+100%` 变速时（`71 BPM` 曲目同步到 `144.2 BPM`，实际约 `+103.09%`），发送端在 `SpeedState` 截断于 `+100%` 且实际 BPM 比值更大时上报精确比值，影子副本通过原厂 `Sync` 突破推子上限并保持歌曲位置闭环（`98.87 s` 连续采样 `p95 61.7 ms` / 最大 `84.1 ms`，新增 seek `0` 次，副本抢 `MASTER` `0` 次，`sync-over100-322839d.mp4` **PASS**）。
+  - 保留已知边界（冷加入时源端已退出 `Sync` 但仍保留 `>+100%` 原生速率的旁支，源端重新点 `Sync` 即可同步）与推迟至 `5.3.0.5` 的项见上文「范围说明」。
 - **双机沙箱正式版录像验收（`shadow-twin` `fa697d4` / RC `5038e5b`，S1–S8 全部 PASS）**：
   - **S1（`s1-four-deck-shadow-fa697d4.mp4`，`25.1s`）**：A 机 Deck 1 载入播放，B 机影子 Deck 1 波形、顶栏（歌名、BPM、调性、时间）与缩略条同原厂同步一致（**PASS**）；
   - **S2（`s2-pitch-sync-bar-align-fa697d4.mp4`，`25.0s`）**：变速 `+3%` 后 `Sync`，`LEAD/SYNC` 指示正确，四条 lane 小节红线纵向逐像素对齐同步滚动（**PASS**）；
@@ -75,20 +80,21 @@
   8. **Web 控制台详细日志开关与脱敏日志下载**：已在隔离 rootfs 沙箱验证 `QT_LOGGING_CONF` 与 `journalctl` 脱敏导出，待一代机与 AZ04 真机核验重启恢复。
   9. **旧版 rekordbox 5 Device Library `export.pdb` 兼容（#182 / PR #183）**：已通过样本库与边界回归单测，尚未用报告人的真实 U 盘在真机上插盘验证。
   10. **PRIME 4+（JC11S）激活校验（#169）与一代机 / SC LIVE 4 / Mixstream Pro Go 安装器 USB 线刷修复（#161、#164）**：NH08S 已由报告人真机刷入验证；JC11S 仍待报告人回传诊断报告，一代机与 JP21/NH10 更新后的安装器自动线刷流程待实机抽验。
+  11. **SC LIVE 4 只读根分区 Stems 处理器检测（#176）**：已在 SCLIVE4 / PRIME4PLUS / AZ04 沙箱验证 `statx`/`open`/`access` 重定向，待报告人 SC LIVE 4 真机确认点 **Generate Stems** 启动并完成分轨。
 
 ---
 
-## 3. 全套测试与三组发版门禁结果（RC（待维护者确认发布））
+## 3. 全套测试与三组发版门禁结果
 
-- **全量自动化测试（原生 ARM64/armhf，基于提交 `5038e5b`）**：
+- **全量自动化测试（原生 ARM64/armhf，基于滚动整合提交 `d3fcc1f`）**：
   - Go 静态检查与竞态单测：`gofmt -l .`（0 差异）、`go vet ./...`（PASS）、`go test -race ./...`（22 个有测试的 Go 包全部 PASS）；
   - 系统 overlay 测试：`bash tests/test_rootfs_overlay.sh` → `PASS: 21 tests (mocked storage and hardware; no privileged operations)`（含仓库提交的两份 32-bit `libengine-ui-hook.so` 与 `libedisksd-hook.so` 同源码现编结果逐字节一致校验）；
   - 二代机沙箱验收：
     - `JC11S_ROOTFS=/var/tmp/integ5304-jc11s/rootfs bash tools/az01-packer/test_sclive4_bootstrap.sh`（官方 `PRIME4PLUS-5.3.0-Update.img` SHA-256 `bf5489d1...`）→ `=== All SCLIVE4 verification checks PASSED ===` 及 `=== All PRIME4PLUS verification checks PASSED ===`（`JC11S stock mkfs (blank/existing) and fscrypt first boot: PASS`，20 处补丁，UI 包加载）；
     - `AZ04=1 bash tools/az01-packer/test_sclive4_bootstrap.sh` → `=== All PRIME4G2 verification checks PASSED ===`（18 处补丁，UI 包加载）；
   - Python 打包器与分轨单测：
-    - `python3 -m unittest discover -s tools/az01-packer` → `Ran 207 tests in 57.757s / OK (skipped=1)`（含 `test_ui_mod.py` 全部 103 项 PASS，覆盖 `PatchDict` 防覆盖检查、`ArtistSong.qml` 双线替换合并与空 Engine 槽空闲轮询跳过）；
-    - `python3 -m unittest discover -s tools/stems` → `Ran 9 tests in 2.306s / OK`；
+    - `python3 -m unittest discover -s tools/az01-packer` → `Ran 209 tests in 95.962s / OK (skipped=1)`（含 `test_ui_mod.py` 全部 105 项 PASS，覆盖 `PatchDict` 防覆盖检查、`ArtistSong.qml` 双线替换合并、空 Engine 槽空闲轮询跳过与 `ShadowNativeOverRangeTest` 超 `+100%` `Sync`）；
+    - `python3 -m unittest discover -s tools/stems` → `Ran 9 tests in 3.264s / OK`；
   - C 运行时与 DSP / FX 选择器 / 影子轨 MASTER 单测：
     - `tools/ui-mod/test_shadow_master.c`（armhf 原生，针对 5.3.0 `Engine`）→ `shadow MASTER: 144 native play/stop, host, slot and ABI cases; anchor/build/mode guards PASS`；
     - `tools/ui-mod/test_pioneer_selector.c`（plain/asan/tsan PASS）、`tools/ui-mod/test_dsp_smooth.c`（plain/asan/tsan PASS）、`tools/ui-mod/test_flanger_scope.c`（armhf PASS）、`tools/ui-mod/test_master_golden.c`（AZ04/armhf fast/off PASS）；
