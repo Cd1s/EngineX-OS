@@ -111,7 +111,7 @@ func boardCapabilities(board string) uiCapabilities {
 const defaultUIDir = "/data/enginex/ui"
 
 var (
-	uiLanguages    = []string{"en", "zh-Hans", "zh-Hant"}
+	uiLanguages    = []string{"en", "zh-Hans", "zh-Hant", "es"}
 	uiWaveforms    = []string{"denon", "rgb", "3band"}
 	uiServices     = []string{"tidal", "netease", "spotify", "deezer", "soundcloud", "beatport", "applemusic"}
 	uiQualities    = []string{qualityFLAC, quality320k}

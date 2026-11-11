@@ -1989,7 +1989,7 @@ static void pack_dir(char *out, size_t size) {
             if (strncmp(line, "lang=", 5))
                 continue;
             line[strcspn(line, "\r\n")] = 0;
-            if (!strcmp(line + 5, "zh-Hans") || !strcmp(line + 5, "zh-Hant"))
+            if (!strcmp(line + 5, "zh-Hans") || !strcmp(line + 5, "zh-Hant") || !strcmp(line + 5, "es"))
                 strcpy(lang, line + 5);
         }
         fclose(f);

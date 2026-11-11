@@ -85,7 +85,7 @@ fi
 
 mkdir -p "$TMP/packs_raw" "$TMP/ui_bundle/packs"
 python3 "$REPO/tools/ui-mod/build_packs.py" --qrc "$QRC" --out "$TMP/packs_raw" >/dev/null
-cp -a "$TMP/packs_raw/en" "$TMP/packs_raw/zh-Hans" "$TMP/packs_raw/zh-Hant" "$TMP/ui_bundle/packs/"
+cp -a "$TMP/packs_raw/en" "$TMP/packs_raw/zh-Hans" "$TMP/packs_raw/zh-Hant" "$TMP/packs_raw/es" "$TMP/ui_bundle/packs/"
 cp -a "$TMP/packs_raw/icons" "$TMP/ui_bundle/"
 tar -C "$TMP/ui_bundle" -czf "$TMP/ui-packs.tar.gz" packs icons
 

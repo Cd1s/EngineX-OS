@@ -57,7 +57,7 @@ class PrimeGoSwipeStemsTest(unittest.TestCase):
                 # Still build all legacy languages to catch patch-table regressions.
                 if version == "5.0.4":
                     continue
-                for lang in ("en", "zh-Hans", "zh-Hant"):
+                for lang in bp.LANGUAGES:
                     for side, deck in (("left", 1), ("right", 2)):
                         with self.subTest(version=version, lang=lang, side=side):
                             qml = (out / lang / "Skins/Embedded/Views/BrowseView/Components/Components"
@@ -170,7 +170,7 @@ class TrackListArtworkPlaceholderAndReaderPriorityTest(unittest.TestCase):
                                             capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     with tarfile.open(out.with_suffix(".tar.gz")) as archive:
-                        for lang in ("en", "zh-Hans", "zh-Hant"):
+                        for lang in bp.LANGUAGES:
                             with self.subTest(lang=lang):
                                 path = f"packs/{lang}/Skins/{skin}/Views/BrowseView/Components/Components/AlbumArt.qml"
                                 source = archive.extractfile(path).read().decode()
@@ -736,16 +736,29 @@ assert.strictEqual(vfx.enabled, false);
         self.assertNotIn("LANGUAGE_ENTRY + UI_SCALE_ENTRY", SRC)
         self.assertNotIn('("CuesLoops", "PausedSavedLoopBehavior"', SRC)
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
-        self.assertIn(["Cue Countdown", "热标拍数倒数", "熱標拍數倒數"], rows)
+        self.assertIn(["Cue Countdown", "热标拍数倒数", "熱標拍數倒數", "Cuenta atrás de Cue"], rows)
 
     def test_deck_list_follows_four_deck_role(self):
         self.assertIn('root.scFourDeckRole.split("").map(c => parseInt(c))', bp.SERVICES_MAIN)
         self.assertEqual(SRC.count("root.decks && root.decks.length ? root.decks : [1, 2]"), 1)  # only inside scDeckList
 
+    def test_i18n_translations_keep_english_lookups(self):
+        # encoded_dicts maps every spelling back to its row, so a translation equal to another
+        # row's English text overwrites that row in the English dictionary: Stem -> "Stems"
+        # made the English UI show "Stem" for "Stems" (#211).
+        rows = bp.load_dict()
+        for en, t in rows.items():
+            for lang, value in t.items():
+                if value != en:
+                    self.assertNotIn(value, rows, f"{en!r} ({lang}) = {value!r} is another row's English text")
+                # QML concatenates some of these ("PLAYER " + number): keep their edge spaces.
+                self.assertEqual((value[:1].isspace(), value[-1:].isspace()), (en[:1].isspace(), en[-1:].isspace()),
+                                 f"{en!r} ({lang}) = {value!r} changes the leading/trailing space")
+
     def test_i18n_has_stem(self):
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
-        self.assertIn(["Stem", "分轨 Stems", "分軌 Stems"], rows)
-        self.assertIn(["Tracklist Waveform", "曲目列表波形", "曲目列表波形"], rows)
+        self.assertIn(["Stem", "分轨 Stems", "分軌 Stems", "Separar"], rows)
+        self.assertIn(["Tracklist Waveform", "曲目列表波形", "曲目列表波形", "Forma de onda en lista de pistas"], rows)
 
     def test_tracklist_waveform_and_ui_scale(self):
         self.assertIn('text: "Tracklist Waveform"', bp.LIBRARY_ENTRIES)
@@ -782,7 +795,7 @@ assert.strictEqual(vfx.enabled, false);
         self.assertIn('readonly property var ids: [100, 80, 60, 40, 20]', bp.LED_ENTRY)
         self.assertIn('root.scCall("ledBrightness=" + ids[index])', bp.LED_ENTRY)
         rows = [l.split("\t") for l in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
-        self.assertIn(["Pad LED Brightness", "打击垫亮度", "打擊墊亮度"], rows)
+        self.assertIn(["Pad LED Brightness", "打击垫亮度", "打擊墊亮度", "Brillo LED de pads"], rows)
         self.assertIn(r'property real scBrightness: typeof globalConfig !== \"undefined\" && globalConfig && globalConfig.scPadBrightness ? globalConfig.scPadBrightness : 1', SRC)
         hook = (REPO / "tools/ui-mod/engine_ui_hook.c").read_text()
         self.assertNotIn("note_slots", hook)
@@ -1944,9 +1957,9 @@ assert.equal(off.scPairedEmpty, 0); assert.equal(off.scShadowIdle, true); assert
         body = re.search(r"onSelected: function\(index\) \{\n(.*?)\n\t\t\t\}", e, re.S).group(1)
         rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
         for en in ("Linked View", "Stock", "Paired Player", "4 Decks", "Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout"):
-            self.assertEqual(len(rows.get(en, [])), 2, en)
-        self.assertEqual(rows["Linked View"], ["联机视图", "聯機視圖"])
-        self.assertEqual(rows["Stock"], ["原厂", "原廠"])
+            self.assertEqual(len(rows.get(en, [])), 3, en)
+        self.assertEqual(rows["Linked View"], ["联机视图", "聯機視圖", "Vista vinculada"])
+        self.assertEqual(rows["Stock"], ["原厂", "原廠", "Original"])
         # The hint names the stock menu with the stock labels of each language.
         for i, (layout, perf, deck, single) in enumerate(zip(rows["Layout"], rows["PERFORMANCE LAYOUT"], rows["Deck Layout"], rows["Single"])):
             line = rows["Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout"][i]
@@ -2006,7 +2019,7 @@ assert.deepStrictEqual(run(false, false, false, 1).calls, ['restart fourDeckWave
         for en in ("Paired Player", "No paired player", "Paired Player: this player's active layer and the other player's active deck, one lane each",
                    "Paired Player needs 4-Deck Role Auto, 1+3, 2+4, 1 or 2"):
             self.assertIn(en, rows)
-            self.assertEqual(len(rows[en]), 2)
+            self.assertEqual(len(rows[en]), 3)
         old_root = bp.ROOT
         try:
             bp.ROOT = "Skins/Embedded/"
@@ -2179,7 +2192,7 @@ class UiModBuildTest(unittest.TestCase):
                                          capture_output=True, text=True)
                     self.assertEqual(res.returncode, 0, f"{board}: {res.stderr}")
                     with tarfile.open(out.with_suffix(".tar.gz")) as pack:
-                        for lang in ("en", "zh-Hans", "zh-Hant"):
+                        for lang in bp.LANGUAGES:
                             main = pack.extractfile(f"packs/{lang}/Skins/Embedded/EmbeddedMain.qml").read().decode()
                             self.assertIn("scShadowApplyDisplay(decks.filter(e => e.displayOnly === true).concat(scShadowCovers(decks)))", main)
                             self.assertIn("s.metadataOnly", main)
@@ -2201,14 +2214,14 @@ class UiModBuildTest(unittest.TestCase):
             self.assertTrue(tl.is_file(), f"{tl} not found")
             self.assertIn("root.scTracklistWaveform", tl.read_text())
             # Exercise the actual generated packs too, not only the render helper.
-            for lang in ("en", "zh-Hans", "zh-Hant"):
+            for lang in bp.LANGUAGES:
                 main = Path(tmp) / "packs" / lang / "Skins/Embedded/EmbeddedMain.qml"
                 text = main.read_text()
                 dictionaries = json.loads(re.search(r"readonly property var scDicts: \((.+)\)", text).group(1))
                 self.assertTrue(all(isinstance(d, str) for d in dictionaries.values()))
                 entries = len(json.loads(dictionaries[lang]))
                 old_total = sum(len(json.loads(d)) for d in dictionaries.values())
-                self.assertEqual(entries * 3, old_total)
+                self.assertEqual(entries * len(bp.LANGUAGES), old_total)
                 micro = (Path(tmp) / "packs" / lang / "Skins/EngineOS/UI/CompositeControls/Deck/MicroDeck.qml").read_text()
                 states = re.findall(r"PropertyChanges \{\s+target: albumArt\s+visible: microDeck.albumArtVisible\s+(.*?)\n            \}", micro, re.S)
                 self.assertTrue(states)
@@ -2556,7 +2569,7 @@ class DeckHeaderLayoutTest(unittest.TestCase):
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             composite = "Skins/EngineOS/UI/CompositeControls/"
-            for lang in ("en", "zh-Hans", "zh-Hant"):
+            for lang in bp.LANGUAGES:
                 with self.subTest(lang=lang):
                     base = packs / lang
                     bpm = (base / "Skins/Embedded/Items/Bpm.qml").read_text()
@@ -2684,7 +2697,7 @@ assert.equal(value().toFixed(2),'130.18');
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             composite = "Skins/EngineOS/UI/CompositeControls/"
-            for lang in ("en", "zh-Hans", "zh-Hant"):
+            for lang in bp.LANGUAGES:
                 info_lang = (packs / lang / composite / "Deck/DeckItem/BpmInfo.qml").read_text()
                 bpm_lang = (packs / lang / "Skins/Embedded/Items/Bpm.qml").read_text()
                 self.assertIn("scDeckView.deckData", info_lang, lang)
@@ -4714,12 +4727,12 @@ class PatchTableIntegrityTest(unittest.TestCase):
             res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)],
                                  capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, res.stderr)
-            for lang in ("en", "zh-Hans", "zh-Hant"):
+            for lang in bp.LANGUAGES:
                 qml = (out / lang / "Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/ArtistSong.qml").read_text()
                 for expected in (
                     'readonly property var scHead: typeof root !== "undefined" && root && root.scShadowHeadOf ? root.scShadowHeadOf(deckIndex) : null',
                     'readonly property string songTextString: deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title) || displayText.display) : deckLabel',
-                    'readonly property string artistTextString: deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title ? scHead.artist : artistName)) : "No Track Loaded"',
+                    'readonly property string artistTextString: deckLoaded ? (displayText.hideTitleArtist ? "" : (scHead && scHead.title ? scHead.artist : artistName)) : (Math.scI18n ? Math.scI18n.t("No Track Loaded") : "No Track Loaded")',
                     'readonly property bool onlyFileName: view.onlyFileName && !(scHead && scHead.title)',
                     'readonly property bool isStemmed: scHead && scHead.title ? scHead.stems : view.stemmed',
                     'respectHideTitleArtist: true',
@@ -4961,11 +4974,11 @@ class I18nTranslateRegressionTest(unittest.TestCase):
                 if "player" in en.lower():
                     self.assertNotIn("播放器", t[lang], f"{en} ({lang}) must use 碟机, not 播放器")
                     self.assertNotIn("播放機", t[lang], f"{en} ({lang}) must use 碟機, not 播放機")
-        self.assertEqual(rows["Player"], {"zh-Hans": "碟机", "zh-Hant": "碟機"})
+        self.assertEqual(rows["Player"], {"zh-Hans": "碟机", "zh-Hant": "碟機", "es": "Reproductor"})
         for band in ("3-Band", "Tri-Band"):  # waveform style stays English on the deck
             self.assertNotIn(band, rows)
-        self.assertEqual(rows["Player #"], {"zh-Hans": "碟机编号 #", "zh-Hant": "碟機編號 #"})
-        self.assertEqual(rows["PLAYER "], {"zh-Hans": "碟机 ", "zh-Hant": "碟機 "})
+        self.assertEqual(rows["Player #"], {"zh-Hans": "碟机编号 #", "zh-Hant": "碟機編號 #", "es": "Reproductor #"})
+        self.assertEqual(rows["PLAYER "], {"zh-Hans": "碟机 ", "zh-Hant": "碟機 ", "es": "REPRODUCTOR "})
 
     def test_display_and_mixer_tabs_and_settings_options_complete(self):
         rows = bp.load_dict()
@@ -5620,7 +5633,7 @@ class OneLibraryNoChooseDbTest(unittest.TestCase):
                     capture_output=True, text=True,
                 )
                 self.assertEqual(res.returncode, 0, res.stderr)
-                for lang in ("en", "zh-Hans", "zh-Hant"):
+                for lang in bp.LANGUAGES:
                     p = out / lang / rel
                     self.assertTrue(p.is_file(), f"missing {rel} in {lang} pack")
                     qml = p.read_text(encoding="utf-8")
@@ -5639,7 +5652,7 @@ class OneLibraryNoChooseDbTest(unittest.TestCase):
                     patched = qml
                 with tarfile.open(out.with_suffix(".tar.gz"), "r:gz") as tf:
                     members = {m.name.lstrip("./") for m in tf.getmembers()}
-                    for lang in ("en", "zh-Hans", "zh-Hant"):
+                    for lang in bp.LANGUAGES:
                         self.assertIn(f"packs/{lang}/{rel}", members)
 
         if shutil.which("node"):
@@ -5879,7 +5892,7 @@ class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
                 out = Path(tmp) / "packs"
                 result = subprocess.run(["python3", "-I", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                for lang in ("en", "zh-Hans", "zh-Hant"):
+                for lang in bp.LANGUAGES:
                     with self.subTest(version=version, lang=lang):
                         switch = (out / lang / f"Skins/{skin}/Views/ControlCenter/Tabs/Preferences/Entries/SoundSwitch.qml").read_text()
                         self.assertIn('Planck.getProperty("/GUI/SoundSwitchViewEnabled")', switch)
@@ -6004,7 +6017,7 @@ for (const WaveformOverviewView of [{Praline: 0, Butterfly: 1}, {Praline: 1, But
 class UsbPreparingFeedbackTest(unittest.TestCase):
     def test_translations(self):
         rows = [line.split("\t") for line in (REPO / "tools/ui-mod/i18n.tsv").read_text().splitlines()]
-        self.assertIn(["Preparing USB…", "正在准备 USB…", "正在準備 USB…"], rows)
+        self.assertIn(["Preparing USB…", "正在准备 USB…", "正在準備 USB…", "Preparando el USB…"], rows)
 
     def check_feedback(self, main, sources, label="Preparing USB…"):
         for text in ('property bool scUsbPreparing: false', 'scUsbPreparing = !!v.usbPreparing',
@@ -6052,11 +6065,11 @@ class UsbPreparingFeedbackTest(unittest.TestCase):
                 packs = Path(tmp) / "packs"
                 res = subprocess.run(["python3", str(BUILD_PACKS), "--release", "--qrc", str(qrc), "--out", str(packs)], capture_output=True, text=True)
                 self.assertEqual(res.returncode, 0, res.stderr)
-                for lang in ("en", "zh-Hans", "zh-Hant"):
+                for lang in bp.LANGUAGES:
                     base = packs / lang / root
                     source = next(base.rglob('ConnectedSource.qml'))
                     self.check_feedback((base / 'EmbeddedMain.qml').read_text(), source.read_text(),
-                                        {'en': 'Preparing USB…', 'zh-Hans': '正在准备 USB…', 'zh-Hant': '正在準備 USB…'}[lang])
+                                        {'en': 'Preparing USB…', 'zh-Hans': '正在准备 USB…', 'zh-Hant': '正在準備 USB…', 'es': 'Preparando el USB…'}[lang])
         if not built:
             self.skipTest(f"{LAB} QRC fixtures not found")
 
@@ -6145,7 +6158,7 @@ class PrimeGoTidalQRTest(unittest.TestCase):
                 out = Path(tmp) / version
                 result = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(LAB / version / "qrc"), "--out", str(out)], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                for lang in ("en", "zh-Hans", "zh-Hant"):
+                for lang in bp.LANGUAGES:
                     with self.subTest(version=version, lang=lang):
                         qml = (out / lang / "Skins" / skin / "EmbeddedMain.qml").read_text()
                         functions = self.function(qml, "scOpen")
@@ -6219,7 +6232,7 @@ for (const available of [false,true]) {
             out = Path(tmp) / "packs"
             res = subprocess.run(["python3", str(BUILD_PACKS), "--qrc", str(LAB / "5.3.0/qrc"), "--out", str(out)], capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, res.stderr)
-            for lang in ("en", "zh-Hans", "zh-Hant"):
+            for lang in bp.LANGUAGES:
                 with self.subTest(lang=lang):
                     base = out / lang / "Skins/Embedded"
                     profile = (base / "Views/Profiles/ProfilesLogin.qml").read_text()

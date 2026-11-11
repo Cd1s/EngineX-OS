@@ -90,7 +90,7 @@
 
 | # | 所属菜单页 | 英文 / 简中 / 繁中 | 作用 | 默认 | 接口参数 | conf 键 | 备注 |
 |---|---|---|---|---|---|---|---|
-| 1 | `Settings → Device` | `Language` / 语言 / 語言 | 界面语言（`English` / `简体中文` / `繁體中文`） | `en` | `lang=en\|zh-Hans\|zh-Hant` | `lang` | 切换提示确认后重启 Engine |
+| 1 | `Settings → Device` | `Language` / 语言 / 語言 | 界面语言（`English` / `简体中文` / `繁體中文`） | `en` | `lang=en\|zh-Hans\|zh-Hant\|es` | `lang` | 切换提示确认后重启 Engine |
 | 2 | `Settings → Device` | `Pad LED Brightness` / 打击垫亮度 / 打擊墊亮度 | 调节 RGB 打击垫、模式键与转盘灯环亮度（`100%`–`20%`），单色键保持原厂亮度 | `100` | `ledBrightness=100\|80\|60\|40\|20` | `led_brightness` | #85 |
 | 3 | `Settings → Device` | `Power` → `Turn Off` / 电源 → 关机 / 電源 → 關機 | 调用原厂关机确认框与录音/曲库保护流程（#78） | — | — | — | 按钮，仅 5.3.0 |
 | 4 | `Settings → Services` | `Streaming Quality` / 流媒体音质 / 串流音質 | 下载音质 `Lossless` / `320kbps` | `flac` | `quality=flac\|320k` | `quality` | 下一次下载起生效 |

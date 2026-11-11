@@ -56,7 +56,7 @@ func readPage(t *testing.T, resp *http.Response, err error) string {
 	return string(b)
 }
 
-func TestEveryPhoneTextHasThreeLanguages(t *testing.T) {
+func TestEveryPhoneTextHasEveryLanguage(t *testing.T) {
 	for key, v := range phoneText {
 		for i, s := range v {
 			if strings.TrimSpace(s) == "" {
@@ -141,6 +141,9 @@ func TestPhonePagesDefaultToEnglishAndSwitchLanguage(t *testing.T) {
 		if tw := getPage(t, base+"&lang=zh-Hant"); !strings.Contains(tw, "連接 ") {
 			t.Fatalf("%s traditional page: %s", provider, tw)
 		}
+		if es := getPage(t, base+"&lang=es"); !strings.Contains(es, "Conectar ") || !strings.Contains(es, `<html lang="es">`) {
+			t.Fatalf("%s spanish page: %s", provider, es)
+		}
 	}
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("lang=zh-Hant\n"), 0o644)
@@ -150,6 +153,11 @@ func TestPhonePagesDefaultToEnglishAndSwitchLanguage(t *testing.T) {
 	postPage(t, srv.URL+"/v1/sc5000/login?provider=deezer", nil)
 	if !strings.Contains(ui.logins["deezer"].Target, "lang=zh-Hant") {
 		t.Fatalf("QR code ignores the deck's language: %s", ui.logins["deezer"].Target)
+	}
+	os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("lang=es\n"), 0o644)
+	postPage(t, srv.URL+"/v1/sc5000/login?provider=deezer", nil)
+	if !strings.Contains(ui.logins["deezer"].Target, "lang=es") {
+		t.Fatalf("QR code ignores Spanish: %s", ui.logins["deezer"].Target)
 	}
 }
 
