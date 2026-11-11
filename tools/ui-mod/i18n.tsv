@@ -139,6 +139,7 @@ Paused Saved Loop Behavior	暂停时 Saved Loop 行为	暫停時 Saved Loop 行�
 Performance Pads	演奏打击垫	演奏打擊墊
 Pitch Bend Behavior	变速微调行为	變速微調行為
 Pitch Control Type	变速键功能	變速鍵功能
+Pitch Fader Pickup	变速推子接管	變速推桿接管
 Pitch Range	变速范围	變速範圍
 Platter Touch Sensitivity	转盘触摸灵敏度	轉盤觸控靈敏度
 Player #	碟机编号 #	碟機編號 #
@@ -456,3 +457,5 @@ Authorize	授权	授權
 Start your journey	开始使用	開始使用
 Clear Stem Render Queue?	清空 Stems 分轨队列？	清空 Stems 分軌佇列？
 Clearing the render will clear queued stem tracks and stop any rendering in progress.	清空后将移除排队中的曲目并停止当前正在进行的 Stems 分轨。	清空後將移除排隊中的曲目並停止目前進行中的 Stems 分軌。
+Stock	原厂	原廠
+CDJ	CDJ	CDJ
