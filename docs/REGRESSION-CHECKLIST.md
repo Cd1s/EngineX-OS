@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (31 Rows)
+## Regression Table (32 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -42,6 +42,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 30 | **Shadow deck `Sync` phase-alignment snap**: enabling `Sync` snaps the shadow deck onto the beat/bar grid without residual phase offset | `#49` (`[PENDING — branch agent/shadow-sync-snap-20261111 in progress for 5.3.0.4]`) | **`[PENDING — branch in progress for 5.3.0.4]`** — Unit test in `tools/az01-packer/test_ui_mod.py` + dual-deck / `shadow-twin` sync alignment check | Pending merge into `5.3.0.4` |
 | 31 | **First-generation `5.3.0` decks never offer a first-boot Stems `Download` button and keep the `Stems Support` row hidden**: gen1 `5.3.0` `prepare_config` sets `Config.hasStemsProcessorFactoryInstalled = true` (`0x2a7`, matching stock factory-Stems models so `NewFeaturePopup` shows only `Dismiss` without `Download`), `Entries/StemsDownload.qml` stays `active: false`, and `5.0.4` / `5.3.0-sclive4` / `AZ04` keep stock edit tables untouched | `5.3.0.4` (`agent/gen1-stems-prompt-20261111`) | `tools/ui-mod/test_stems_feature.c` (`5.0.4`, `5.3.0`, `5.3.0-sclive4`), `tools/ui-mod/test_az04_hook.c`, `tools/az01-packer/test_ui_mod.py::UiModSourceTest::test_gen1_stems_first_boot_suppressed_and_row_hidden` | Blank-`/data` first-boot sandbox + `stems-probe` / end-to-end separation; Release gate `new` stage (`EXPECT_APPLIED=19`) |
 
+| 32 | **Second boot after unclean power cut on the same `/data` and internal Engine library (`#140`)**: after a first boot passes its 15 s healthy window and suffers an abrupt power cut (`SIGKILL` without `ExecStopPost`), `running-sentinel` purges any dirty `.cache/qml` on the second boot without falsely triggering `safe-mode`, `SplashScreenLoader` dismisses and `splashScreenController` unlocks (`SCPROBE splash|0|1|`), persisted `/data` settings/SSH keys and `/media/az01-internal` `Engine Library` survive, and all UI hooks/daemons reach ready; rolling back `5.3.0.3+ -> 5.3.0.2` without wiping `/data` is unsupported because `/data/sc5000-custom` is migrated to `/data/enginex` | `#140`, `18c105e` | `internal/testlibrary/gate_test.go::TestExportDrive`, `tools/az01-packer/test_ui_mod.py::UiModSourceTest::test_release_gate_runs_second_boot_after_power_cut_and_checks_splash`, `tests/test_rootfs_overlay.sh` (`engine-ui-guard` healthy power-cut recovery), `tools/az01-packer/release-gate.sh` (`--phase boot2` + `SCPROBE splash\|0\|1\|`); **`[NO AUTOMATED TEST]`** for physical `JC11` USB control surface / `bcm43438-bt` Bluetooth / `xmosdfu` pre-QML init (Real-deck step: on physical `PRIME 4` `JC11`, update to `5.3.0.4`, complete Boot 1, hard power-cycle AC, and verify Boot 2 clears the U-Boot `"engine dj 5.3.0"` splash into the performance view) | Release gate `new -> powercut -> boot2` stages across all 3 1st-gen groups (`JP07` / `JP13` / `JC11`) |
 ---
 
 ## Automated Test Gaps & Pending Branches (`[NO AUTOMATED TEST]` / `[PENDING]`)
@@ -52,3 +53,4 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 4. **Rows 28, 30 — Pending `5.3.0.4` branches (`[PENDING]`)**:
    - **Row 28**: `#181` CDJ pitch pickup (`OFF` default = stock).
    - **Row 30**: `agent/shadow-sync-snap-20261111` shadow `Sync` phase-alignment snap.
+5. **Row 32 — Physical PRIME 4 (`JC11`) pre-QML hardware initialization (`[NO AUTOMATED TEST]`)**: Multi-boot power-cut recovery on `/data` + `/media/az01-internal` and `SplashScreenLoader` dismissal are covered across `JP07`, `JP13`, and `JC11` in `release-gate.sh` (`offscreen`) and `eglfs_kms`, while physical `JC11` USB MIDI/HID control-surface + jog displays, `bcm43438-bt` UART Bluetooth (`bluetoothd`), and `xmos-update.service` (`xmosdfu` / `usb5537`) before QML frame 1 require physical `JC11` verification.

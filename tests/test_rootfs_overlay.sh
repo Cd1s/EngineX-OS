@@ -496,6 +496,13 @@ sleep 1.5
 [[ $(cat "$SC5000_UI_DIR/boot-count") == 2 ]] || fail 'stale timer reset the crash streak'
 sh "$GUARD" post; sleep 1.5
 [[ ! -e $SC5000_UI_DIR/boot-count ]] || fail 'a start that survives the window must clear boot-count'
+[[ -e $SC5000_UI_DIR/running-sentinel && ! -e $SC5000_UI_DIR/boot-token ]] || fail 'healthy start before power cut must keep running-sentinel after clearing boot-token'
+mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; printf truncated > "$SC5000_ENGINE_DATA_DIR/.cache/qml/powercut.qmlc"
+sh "$GUARD" pre
+[[ ! -e $SC5000_ENGINE_DATA_DIR/.cache/qml && ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 && -e $SC5000_UI_DIR/running-sentinel ]] ||
+    fail 'second boot after healthy power cut must purge .cache/qml without entering safe-mode'
+has '--phase boot2' "$ROOT/tools/az01-packer/release-gate.sh"
+has 'SC5000_UI_ALIVE_CMD=' "$ROOT/tools/az01-packer/release-gate.sh"
 unset SC5000_UI_HEALTHY_AFTER SC5000_UI_ALIVE_CMD
 # Quit reasons the stock script exits 0 after: the guard must restart Engine unless
 # the system is already rebooting (FactoryReset when az01-update --erase-data worked).
