@@ -49,6 +49,18 @@ archive through the installer shim, set `JC11S_RELEASE_BUNDLE` to its verified
 PRIME4PLUS data-bundle path when running Go tests. See
 `docs/issue169-prime4plus-investigation.md` for official-image and bundle digests.
 
+## Development loop
+
+Every change goes through the same loop. Full image builds (20 artifacts) and the three-group release gate are for release candidates only.
+
+1. **Unit tests** for what you touched (the commands above).
+2. **Sandbox screenshot** (UI changes): `tools/dev/ui-sheet` renders the views in the twin sandbox before and after your change and puts them on one sheet. `deck-push ... ui` refuses a UI pack that has no sheet.
+3. **Quick gate**: `tools/dev/quick-gate --group SC5000` builds one image group and runs the fast subset of the release gate in a few minutes: static audit, new-version boot, rendered UI probe, hook edit count, no QML errors.
+4. **Push to a locked dev deck**: `tools/dev/deck-push lock <deck> --purpose "..."`, then `tools/dev/deck-push <deck> ui|hook|edisksd|go:<daemon>|all`. It builds only that component and backs up what it replaces on the build host. It bind-mounts the new files from `/run`, so a reboot rolls back and `--rollback` does it without one. Then it restarts only the affected service and prints a smoke check.
+5. **Smoke PASS, then commit.** Afterwards run `deck-push <deck> --rollback` and `deck-push unlock <deck>`.
+
+Decks are listed in the git-ignored `tools/dev/decks.ini` (template: `tools/dev/decks.ini.example`). Never commit deck addresses. Details are in [`tools/dev/README.md`](./tools/dev/README.md).
+
 ## Releasing a new version
 
 Maintainers follow the checklist in [`.claude/rules/release-workflow.md`](./.claude/rules/release-workflow.md). In short, for version `<VERSION>`:

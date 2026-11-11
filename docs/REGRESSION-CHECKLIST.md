@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (30 Rows)
+## Regression Table (31 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -40,6 +40,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 28 | **CDJ-style pitch fader soft-takeover unlock (`#181`, default `OFF` = stock Engine behaviour)**: when `cdjPitchPickup` is `OFF` (default), pitch fader soft takeover and `HARDEXTERNAL` state remain 100% stock | `#181` (`[PENDING — branch in progress for 5.3.0.4]`) | **`[PENDING — branch in progress for 5.3.0.4]`** — Unit test + QML JS test asserting default `OFF` leaves stock soft-takeover untouched and `ON` unlocks CDJ-style pickup | Pending merge into `5.3.0.4` |
 | 29 | **PX Beat FX millisecond mode (`#162`, default `OFF` = byte-identical DSP output)**: when PX ms mode is `OFF` (default), the 96 kHz `hook_master_output` / PX delay-bank DSP output is byte-for-byte identical to the existing golden hashes, optional delay buffers stay unallocated until enabled, and `10–4000 ms` delay controls stay synced across `Time/Rate`, `Time (ms)` readout, and `−/+` | `#162`, `9fa0cff` (merged in `605e527`) | `tools/ui-mod/test_px_off_golden.c` (AZ04 & armhf `fast`/`off`), `test_master_golden.c` (AZ04 & armhf `fast`/`off`), `test_fx_ms.c` (plain/ASan/TSan), `test_ms_lazy.c` (plain/ASan/TSan), `test_ms_master_hook.c` (AZ04 & armhf), `tools/az01-packer/test_fx_ms_ui.py`, `pkg/webui/ui_settings_test.go` | `tools/ui-mod/test_fx_selector.sh` & `tools/az01-packer/test_fx_selector_sandbox.sh` |
 | 30 | **Shadow deck `Sync` phase-alignment snap**: enabling `Sync` snaps the shadow deck onto the beat/bar grid without residual phase offset | `#49` (`[PENDING — branch agent/shadow-sync-snap-20261111 in progress for 5.3.0.4]`) | **`[PENDING — branch in progress for 5.3.0.4]`** — Unit test in `tools/az01-packer/test_ui_mod.py` + dual-deck / `shadow-twin` sync alignment check | Pending merge into `5.3.0.4` |
+| 31 | **`tools/dev/deck-push` rollback leaves a dev deck exactly as it was**: every replaced file is a bind mount from `/run/enginex-dev`, the files underneath (`/data`, `/etc/sc5000`) are never written, `deck-push <deck> --rollback` unmounts them (lazily, because the restarted service still maps the pushed file) and restarts only the services the pushes restarted, every target's digest returns to the one recorded before the first push, and a reboot drops all mounts; a push or rollback is refused unless the caller holds the deck lock | deck-push (`agent/deck-push-20261111`) | `python3 -m unittest discover -s tools/dev` (`FakeDeck.test_push_backup_rollback`, `test_reboot_rolls_back`, `test_failing_smoke_then_rollback`, `test_refuses_without_lock_or_with_another_owner`, `test_go_restarts_only_its_daemon`) and `bash tools/dev/test_deck_push_e2e.sh` against `tools/dev/fake-deck.sh` | Real deck: first trial on a locked SC5000 (`push hook` → smoke `PASS` → `--rollback` → smoke `PASS` with every `back to its original` line `PASS`), scheduled with the deck owner |
 
 ---
 
