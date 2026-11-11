@@ -2074,6 +2074,15 @@ for(const dt of [80,130]){
  stale=0;now+=80;scShadowTick();
  assert.equal(scShadowPrev[1].jumps,jumps,'short GUI recovery became a jump');
 }
+// At the busy 40 ms cadence, several queued ticks may read exactly the
+// same old block. A phase confirmation must observe playback advancing.
+const frozen=10000+now-T0-60;
+for(let i=0;i<3;i++){
+ now+=40;stale=10000+now-T0-frozen;scShadowTick();
+ assert.equal(scShadowPrev[1].jumps,jumps,'a repeated old block confirmed a false jump');
+}
+stale=0;now+=40;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps,'queued block recovery became a jump');
 now+=426;stale=340;scShadowTick();
 assert.equal(scShadowPrev[1].jumps,jumps,'GUI stall became a Sync phase jump');
 stale=0;now+=80;scShadowTick();
