@@ -319,12 +319,12 @@ Beat Jump Pad Bank	节拍跳跃打击垫	節拍跳躍打擊墊
 Swap Loop / Beat Jump	互换循环 / 节拍跳跃	互換循環 / 節拍跳躍
 Sync Guard Tolerance	同步保护容差	同步保護容差
 Stems EQ Mode	分轨 EQ 模式	分軌 EQ 模式
-Color FX Style	Color FX 样式	Color FX 樣式
-Spiral	螺旋	螺旋
-Pitch Echo	变调回音	變調回音
-Slip Roll	滑动滚奏	滑動滾奏
-Dub Echo	Dub 回音	Dub 回音
-Space	空间	空間
+Color FX Style	先锋风格效果 (Color FX)	先鋒風格效果 (Color FX)
+Spiral	Spiral	Spiral
+Pitch Echo	Pitch Echo	Pitch Echo
+Slip Roll	Slip Roll	Slip Roll
+Dub Echo	Dub Echo	Dub Echo
+Space	Space	Space
 ENGINEX VIEW PRESET	ENGINEX 视图预设	ENGINEX 視圖預設
 Stems LAN renderer online:	局域网分轨主机在线：	區域網路分軌主機在線：
 Stems LAN renderer offline:	局域网分轨主机离线：	區域網路分軌主機離線：
@@ -406,8 +406,9 @@ Jump −	跳拍 −	跳拍 −
 Jump +	跳拍 +	跳拍 +
 Sweep FX	滤波效果	濾波效果
 Resonance	谐振	諧振
-PX Delay Time Mode	PX 延时时间模式	PX 延遲時間模式
-PX Delay Time (ms)	PX 延时时间（ms）	PX 延遲時間（ms）
+PX Delay Time Mode	先锋效果延时模式 (PX)	先鋒效果延遲模式 (PX)
+PX Delay Time (ms)	先锋效果延时 (ms)	先鋒效果延遲 (ms)
+Spiral / Pitch Echo / Dub Echo only; stock Beat FX stay in beats	仅作用于 Spiral / Pitch Echo / Dub Echo；原厂效果仍按节拍同步	僅作用於 Spiral / Pitch Echo / Dub Echo；原廠效果仍依節拍同步
 Default (Off)	默认（关闭）	預設（關閉）
 Milliseconds (ms)	毫秒（ms）	毫秒（ms）
 Time (ms)	时间（ms）	時間（ms）

@@ -3121,6 +3121,15 @@ PLAYBACK_ENTRIES = """
 			currentValue: values[root.scFxTimeMode === "ms" ? 1 : 0]
 			onSelected: function(index) { root.scCall("fxTimeMode=" + (index === 1 ? "ms" : "beats")) }
 		},
+		Text {
+			visible: !root.scFxMasterBypassed || root.scFxSelectorAvailable
+			Layout.fillWidth: true
+			leftPadding: 24; rightPadding: 24
+			wrapMode: Text.WordWrap
+			color: "#9a9a9a"
+			font.pixelSize: 16
+			text: "Spiral / Pitch Echo / Dub Echo only; stock Beat FX stay in beats"
+		},
 		EntryBase.ListEntry {
 			text: "PX Delay Time (ms)"
 			visible: root.scFxTimeMode === "ms"
@@ -4916,7 +4925,7 @@ def edits(dev: bool):
             ("		PlayerNumber { },\n", LANGUAGE_ENTRY + LED_ENTRY + (POWER_ENTRY if v53() else "") + "		PlayerNumber { },\n"),
         ],
         **{prefs + ("" if v53() else "TabContents/") + f"{name}TabContent.qml": [
-            (f'import "{"" if v53() else "../"}Entries"\n', f'import "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
+            (f'import "{"" if v53() else "../"}Entries"\n', f'import QtQuick.Layouts 1.12\nimport "{"" if v53() else "../"}Entries"\nimport "{"" if v53() else "../"}Entries/Base" as EntryBase\nimport Planck 1.0\n'),
             (f"{last} {{}}", f"{last} {{}}," + entries.rstrip().rstrip(",")),
         ] for name, last, entries in [
             ("Services", "SpotifyEnable" if v53() else "CloudServices", SERVICES_ENTRIES),
