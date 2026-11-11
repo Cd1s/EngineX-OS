@@ -1969,11 +1969,11 @@ for(let i=0;i<70;i++)tick();
 // The phase goes backwards by less than the old 180 ms jump threshold.
 synced=true;pos-=120;
 tick(240); // outside the existing Sync string cache; GUI-stall protection still applies
-tick();
+tick();tick(); // the next audio block confirms a small phase discontinuity
 assert.ok(Math.abs(scShadowOwn[0].positionMs-pos)<1,'Sync phase was left in the upper-envelope drift filter');
 assert.equal(scShadowOwn[0].sync,true);
 const jumps=scShadowPrev[1].jumps;
-pos-=100;tick();
+pos-=100;tick();tick();
 assert.equal(scShadowPrev[1].jumps,jumps+1,'a phase step while synced must be a jump');
 assert.ok(Math.abs(scShadowOwn[0].positionMs-pos)<1);
 // Normal audio-block jitter at high rates must not count as phase jumps.
@@ -2066,12 +2066,22 @@ globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,color:'#fff',
  get string(){return path.endsWith('/SyncMode')?'BeatOrBarSync':path.endsWith('/TrackUri')?'file:///a.wav':''}});
 for(let i=0;i<70;i++){now+=80;scShadowTick()}
 const jumps=scShadowPrev[1].jumps;
+// A queued position can lag even when the timer was held for less than
+// the original 150 ms late-tick guard. Recovery must not seek twice.
+for(const dt of [80,130]){
+ now+=dt;stale=80;scShadowTick();
+ assert.equal(scShadowPrev[1].jumps,jumps,'a short synced GUI stall became a jump');
+ stale=0;now+=80;scShadowTick();
+ assert.equal(scShadowPrev[1].jumps,jumps,'short GUI recovery became a jump');
+}
 now+=426;stale=340;scShadowTick();
 assert.equal(scShadowPrev[1].jumps,jumps,'GUI stall became a Sync phase jump');
 stale=0;now+=80;scShadowTick();
 assert.equal(scShadowPrev[1].jumps,jumps,'GUI recovery became a Sync phase jump');
 now+=426;moved=-100;scShadowTick();
 assert.equal(scShadowPrev[1].jumps,jumps);
+now+=80;scShadowTick();
+assert.equal(scShadowPrev[1].jumps,jumps,'one stale block remains ambiguous');
 now+=80;scShadowTick();
 assert.equal(scShadowPrev[1].jumps,jumps+1,'a real small phase step during the stall was lost');
 assert.ok(Math.abs(scShadowOwn[0].positionMs-(10000+now-T0+moved))<1);
