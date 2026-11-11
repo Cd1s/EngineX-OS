@@ -34,7 +34,7 @@
 | **#162 & FX 设置收口（`9fa0cff` / `c2d9d74`）**（PX 延时效果毫秒模式、按机型/效果显隐与隐藏即关闭） | `tools/ui-mod/pioneer_ms.h`<br>`tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/build_packs.py`<br>`tools/ui-mod/i18n.tsv`<br>`pkg/webui/ui_settings.go`<br>`pkg/webui/index.html` | **原因**：① JC11 PRIME 4 原生选择器与旧版全局 `Color FX Style` 中的三个延时类 PX 效果（`Spiral`、`Pitch Echo`、`Dub Echo`）缺少独立于 BPM 的毫秒级延时控制，且音频回调必须保持零分配、零锁与默认关闭时逐字节一致；② 无原生选择器机型在 `Color FX Style` 未选延时类效果时无需常显毫秒设置，且独立播放器隐藏的 `Echo Out` / `Stems EQ Mode` 若旧配置文件残留开启值可能生效。<br>**修法**：① 新增 `Profile → Playback → PX Delay Time Mode`（配置 → 播放 → 先锋效果延时模式 (PX)：`Default (Off)` / `Milliseconds (ms)`，默认 `Default (Off)`，`settings.conf` 键 `fx_time_mode=ms`、`fx_time_ms=10..4000`，默认 `500` ms，Web 控制台同步提供开关）及开启时展开的 `PX Delay Time (ms)` 档位列表；96 kHz 回调使用独立的 `393,216` 帧立体声环形缓冲（仅在开启毫秒模式后由轮询线程预触发内存页再发布给音频线程，默认关闭时不触碰可选缓冲且主输出/单单元 DSP 输出与基线逐字节一致），变速读头切换带 `20 ms` 交叉淡变；PRIME 4 原生 PX 选择器的 `Time/Rate`（11 档映射 `10–4000 ms`）、屏幕 `Time (ms)` 读数与触控 `−/+`（步进 `10 ms`）共用同一毫秒值，原厂 Beat FX 保持节拍（Beats）模式，`Slip Roll (PX)` 与 `Space (PX)` 保持原有时间行为（`9fa0cff`）；② `PX Delay Time Mode` 与说明字幕仅在 `scHasPxDelay`（5.3.0 PRIME 4 或 `Color FX Style` 选中 `Spiral` / `Pitch Echo` / `Dub Echo`）时显示，隐藏时保留已存值并按关闭处理；QML 对 `!scHasStemsEq` 机型强制 `Stems EQ Mode` 按关闭处理，`hook_master_output` 对独立播放器主板（`JP07/JP08/JP13/JP14`）强制 `Echo Out` 按关闭处理并保留配置文件原值；三语文档明确说明 `Color FX Style` 以固定混音深度直接作用于主输出（`c2d9d74`、`f48150f`）。 | `test_fx_ms.c`（plain/ASan/TSan）、`test_px_off_golden.c`（armhf/AArch64 8 秒 96 kHz 逐字节一致）、`test_ms_master_hook.c`（含独立播放器 `Echo Out` 隐藏即关闭校验）、`test_ms_lazy.c`、`test_flanger_scope.c`、`test_fx_ms_ui.py`（含 `test_playback_fx_visibility_and_hidden_means_off`）、`pkg/webui/ui_settings_test.go`、`test_fx_selector_sandbox.sh` 全部 PASS；手头无带 Beat FX 的物理实机，PRIME 4 实体旋钮/按键延迟、OLED 显示、实机听感、外部输入路由与多效果并发负载尚未在真机验证 |
 | **#168**（PRIME 4 原生硬件 FX 选择器 PX 效果与独立 Time/Rate） | `tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/fx_selector.h`<br>`tools/ui-mod/pioneer_fx.h`<br>`tools/ui-mod/build_packs.py` | **原因**：JC11 PRIME 4 原生硬件 FX 选择器需按单元与分配通道接入 5 个 PX 效果、消除切效/干湿爆音，并接入独立 `Time/Rate` 控制。<br>**修法**：在 JC11 原生 FX 选择器末尾加入 `Spiral (PX)`、`Pitch Echo (PX)`、`Slip Roll (PX)`、`Dub Echo (PX)`、`Space (PX)`，采用 `DIRTY/PREPARING/READY/LIVE` 延迟库状态机与干湿淡入防爆音；hook 原生 Flanger `Rate` 事件分发器（`0xe6a114`，索引 `0–10` 共 11 档，通过 `BEAT −/+` 或触控 Time/Rate 触发），映射为 `index / 10` 独立控制 PX 时间档位（**PX 采用相对档位，不按拍同步**；屏幕/OLED 拍数标签保持原厂显示，仅指示所选相对档位，不代表延迟拍数），`Parameter` 独立控制音色与反馈，`Wet/Dry` 控制干湿比。 | `tools/ui-mod/test_flanger_scope.c`、`tools/ui-mod/test_pioneer_selector.c`、`tools/az01-packer/test_fx_selector_native.c`、`tools/ui-mod/validate_fx_selector.sh`；PRIME 4 真机旋钮手感与实时音频过渡待实机验证 |
 | **#169**（PRIME 4+ JC11S 安装激活校验与只读诊断） | `cmd/enginex-installer/`<br>`tools/az01-packer/test_sclive4_bootstrap.sh`<br>`tools/diagnostics/` | **原因**：需确保 PRIME 4+（JC11S）数据包刷入后目标分区挂载点、激活脚本与 ALSA 目录完整无误，并提供免修改排障工具。<br>**修法**：强化安装器与 bootstrap 对 JC11S 数据目录及激活文件的校验（保留旧 `sc5000-custom` 兼容），新增跨平台一键只读诊断脚本与 Pro DJ Link 抓包工具。 | `JC11S_ROOTFS` `test_sclive4_bootstrap.sh`、`cmd/enginex-installer` 单测 |
-| **#170**（Mod 压缩包保留可执行权限位） | `pkg/mods/mods.go`<br>`pkg/mods/mods_test.go` | **原因**：Web 控制台解压安装 `.tar.gz` Mod 时统一用 `0644` 写入文件，导致自带 ELF 二进制或辅助脚本的 Mod 丢失可执行权限。<br>**修法**：解压时保留 tar header 中的可执行权限位（`mode & 0111`），同时严格剥离 `setuid`/`setgid`/`sticky` 位。 | `TestInstallPreservesExecutableBits`（`pkg/mods/mods_test.go`） |
+| **#170**（Mod 压缩包保留可执行权限位） | `pkg/mods/mods.go`<br>`pkg/mods/mods_test.go` | **原因**：Web 控制台解压安装 `.tar.gz` Mod 时统一用 `0644` 写入文件，导致自带 ELF 二进制或辅助脚本的 Mod 丢失可执行权限。<br>**修法**：解压时保留 tar header 中的可执行权限位（`mode & 0111`），同时严格剥离 `setuid`/`setgid`/`sticky` 位。 | `TestInstallArchiveKeepsExecBitsOnly`（`pkg/mods/mods_test.go`） |
 | **#171**（SC LIVE 4 AUX 路由至通道 3/4 并保留 MIC2） | `tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/build_packs.py`<br>`docs/issue171-sclive4-aux.md` | **原因**：SC LIVE 4（JP21）原厂 AUX 输入直通主输出，无独立通道 CUE、推子、EQ 与 Sweep FX 控制。<br>**修法**：通过原厂 `Mixer Menu → Channels → Input` 将 AUX 路由至通道 3 或 4，支持通道 CUE、推子、EQ 与 Sweep FX；仅在 AUX 模式且任一通道选 Line-In 时抑制 AUX 直通，MIC2 保持原厂路由；JP21 隐藏未验证的 Bluetooth/Computer 选项。 | `tools/az01-packer/sclive-aux-sandbox.sh`、`test_stems_feature.c`、`test_ui_mod.py` |
 | **#175**（UI Scale 缩放下开关机画面全屏铺满） | `tools/ui-mod/build_packs.py` | **原因**：开启 `UI Scale`（如 `75%`）扩大逻辑画布后，`SplashScreen` 与关机遮罩未锚定父容器全屏，在 SC LIVE 4 等机型上仅占屏幕左上约 3/4。<br>**修法**：为开机启动画面与关机遮罩补齐 `parent` 与 `anchors.fill: parent`，在 `75%`–`110%` 缩放下均完整铺满屏幕。 | `test_ui_mod.py`、eglfs 渲染核验 |
 | **#176**（SC LIVE 4 等二代机只读根分区下 `stems-processor` 安装检测重定向） | `tools/ui-mod/engine_ui_hook.c`<br>`tools/ui-mod/test_stems_feature.c`<br>`tools/ui-mod/test_az04_hook.c`<br>`docs/issue176-sclive4-stems.md` | **原因**：二代机（SC LIVE 4 等）根分区只读，`/usr/local/bin/stems-processor` 不在根分区而在 `/data/enginex/bundle/bin/stems-processor`；Engine `5.3.0-sclive4` 的 `StemsProcessorManager::checkProcessorInstalled()` / `isProcessorInstalled()` 调用 Qt 6.7.2 `QFile::exists()` 时走 `statx`，此前仅重定向了 `access`/`spawn`/`exec`，导致点 **Generate Stems** 误判未安装而跳回 Settings。<br>**修法**：在 `engine_ui_hook.c` 中将 `statx` 与 `open`/`open64`/`openat`/`openat64` 同步纳入 `stems-processor` 回退（仅在 `Engine` 进程内、原路径不可执行且数据包内 wrapper 可执行时重定向，原厂已安装的可执行文件优先，不影响其他进程与路径），并重编同步两份 32-bit `.so`（`77c4c9f`）。 | `test_stems_feature.c`、`test_az04_hook.c`（`stems-processor fallback: isolated access/statx/open` PASS）、`test_sclive4_bootstrap.sh`（SCLIVE4 / PRIME4PLUS / AZ04 PASS）；待报告人 SC LIVE 4 真机确认完整分轨渲染 |
@@ -106,29 +106,42 @@
 
 ## 3. 全套测试与三组发版门禁结果
 
-- **全量自动化测试（原生 ARM64/armhf，基于滚动整合提交 `d3fcc1f`）**：
-  - Go 静态检查与竞态单测：`gofmt -l .`（0 差异）、`go vet ./...`（PASS）、`go test -race ./...`（22 个有测试的 Go 包全部 PASS）；
-  - 系统 overlay 测试：`bash tests/test_rootfs_overlay.sh` → `PASS: 21 tests (mocked storage and hardware; no privileged operations)`（含仓库提交的两份 32-bit `libengine-ui-hook.so` 与 `libedisksd-hook.so` 同源码现编结果逐字节一致校验）；
-  - 二代机沙箱验收：
-    - `JC11S_ROOTFS=/var/tmp/integ5304-jc11s/rootfs bash tools/az01-packer/test_sclive4_bootstrap.sh`（官方 `PRIME4PLUS-5.3.0-Update.img` SHA-256 `bf5489d1...`）→ `=== All SCLIVE4 verification checks PASSED ===` 及 `=== All PRIME4PLUS verification checks PASSED ===`（`JC11S stock mkfs (blank/existing) and fscrypt first boot: PASS`，20 处补丁，UI 包加载）；
-    - `AZ04=1 bash tools/az01-packer/test_sclive4_bootstrap.sh` → `=== All PRIME4G2 verification checks PASSED ===`（18 处补丁，UI 包加载）；
-  - Python 打包器与分轨单测：
-    - `python3 -m unittest discover -s tools/az01-packer` → `Ran 209 tests in 95.962s / OK (skipped=1)`（含 `test_ui_mod.py` 全部 105 项 PASS，覆盖 `PatchDict` 防覆盖检查、`ArtistSong.qml` 双线替换合并、空 Engine 槽空闲轮询跳过与 `ShadowNativeOverRangeTest` 超 `+100%` `Sync`）；
-    - `python3 -m unittest discover -s tools/stems` → `Ran 9 tests in 3.264s / OK`；
-  - C 运行时与 DSP / FX 选择器 / 影子轨 MASTER 单测：
-    - `tools/ui-mod/test_shadow_master.c`（armhf 原生，针对 5.3.0 `Engine`）→ `shadow MASTER: 144 native play/stop, host, slot and ABI cases; anchor/build/mode guards PASS`；
-    - `tools/ui-mod/test_pioneer_selector.c`（plain/asan/tsan PASS）、`tools/ui-mod/test_dsp_smooth.c`（plain/asan/tsan PASS）、`tools/ui-mod/test_flanger_scope.c`（armhf PASS）、`tools/ui-mod/test_master_golden.c`（AZ04/armhf fast/off PASS）；
-    - `tools/ui-mod/test_mixstream_hook.c`（armhf 原生，5.3.0 20 处补丁、5.3.0-sclive4 23 处补丁 PASS）、`tools/ui-mod/test_sclive_aux.c`（armhf 原生 PASS）、`tools/ui-mod/test_gen2_img.c`（PASS）；
-    - `tools/ui-mod/test_stems_feature.c`（armhf 原生，针对 `5.0.4`、`5.3.0`、`5.3.0-sclive4` 三个 `Engine` 二进制）→ 全部 PASS；
-    - `tools/ui-mod/test_az04_hook.c`（AArch64 原生，针对 AZ04 64 位 `Engine`）→ 全部 PASS；
-    - `tools/edisksd-hook/test_edisksd_hook.c`（常规与 `unshare -m --mounts`）→ `edisksd-hook: all requested tests passed`。
-- **第 4 步镜像抽查与 hook 一致性核对（三组代表镜像）**：
-  - `SC5000`（JP07）、`SC6000`（JP13）、`PRIME4`（JC11）分别用 `az01_packer.py unpack` 解包均为 `"verified": true`，`rootfs.ext2` 内 `/etc/sc5000/version.txt` = `5.3.0.4`，`60-ui-hook.conf` 含 `Environment=QT_LOGGING_CONF=/data/logging.ini`，同组机型 `.img` SHA-256 完全一致；
-  - `build-release.sh` 在 `hooks32` 编译后将新编 32-bit `libengine-ui-hook.so` 与 `libedisksd-hook.so` 覆盖写入 `$STAGE`：解包 SC5000 组 `rootfs.ext2` 核对 `/etc/sc5000/libengine-ui-hook.so` 与 `/usr/local/lib/sc5000/libengine-ui-hook.so` 的 SHA-256 均为 `daf0b82d78a0836901c13ff362bc2afdde14b3b20715c0079603832da147e5a3`，与源码现编结果及仓库 `rootfs-overlay/` 提交的两份副本完全一致。
-- **第 4b 步三组发版门禁（`tools/az01-packer/release-gate.sh`，旧版基准：`/root/build/sc5000-lab/release-5.3.0.3/`，基于 RC `035ae0d`；最终 RC 按维护者决定免重复跑门禁）**：
-  - **SC5000 组（JP07）**：**139 PASS / 0 FAIL**（退出码 0，`/var/tmp/sc5000-gate-035ae0d-JP07/results.txt`；含静态审计 62 文件 0 FAIL / 14 WARN、`systemd-analyze verify` 17 单元 0 错误、`5.3.0.3 → 5.3.0.4` 在线升级与 1 字节篡改拒签、970 个原厂旧 `.qmlc` 缓存种入后新 UI 包替换 379+1 文件、UI-ready 确认与 `#140` 启动屏解锁 `SCPROBE splash|0|1|`、19 处常驻 Engine 补丁、21 个 DSP guard、SQLite hook、Stems、Rekordbox、硬断电 `SIGKILL` 后 `--phase boot2` 二次启动恢复、下次 `5.3.0.5` 在线升级与宿主机 `CLOCK_REALTIME` 零扰动）；
-  - **SC6000 组（JP13）**：**139 PASS / 0 FAIL**（退出码 0，`/var/tmp/sc5000-gate-035ae0d-JP13/results.txt`）；
-  - **PRIME 4 组（JC11）**：**139 PASS / 0 FAIL**（退出码 0，`/var/tmp/sc5000-gate-035ae0d-JC11/results.txt`）。
+以下是 2026-11-12 发版 QA 第二轮在最终构建提交上的结果。Go 套件在 x86 编译机上跑，其余在原生 ARM64/armhf 编译机上跑，构建与门禁都用全新目录。
+
+- **构建提交**：`61e4ed5`（分支 `agent/integration-5304-20261111`）。之后合入的 `b882eb0`、`1aa7a47` 只改测试文件，见本节末尾。
+- **第 2 步全量自动化测试（`61e4ed5`）**：
+  - `gofmt -l .`：输出为空；`go vet ./...`：PASS；
+  - `go test -race ./...`：在 `61e4ed5` 上 **FAIL**（`pkg/webui` 的 `TestShadowLongPollFollowsALiveModeSwitch` 自身有数据竞争）；合入 `b882eb0` 后 **PASS**（31 个有测试的包、1579 个测试通过、4 个因缺少可选夹具跳过、0 条竞争报告）；
+  - `bash tests/test_rootfs_overlay.sh` → `PASS: 22 tests (mocked storage and hardware; no privileged operations)`；
+  - `python3 -m unittest discover -s tools/az01-packer` → `Ran 266 tests / OK (skipped=1)`（跳过的是 `test_install_uses_bundle_alsa_dir`：编译机上存在 `/data`）；
+  - `python3 -m unittest discover -s tools/stems` → `Ran 9 tests / OK`；
+  - `tools/ui-mod/test_dsp_smooth.c`：普通、ASan/UBSan、TSan 三种构建均 PASS；
+  - `tools/ui-mod/test_stems_feature.c`（armhf 原生，`-Werror`）：`5.0.4`、`5.3.0`、`5.3.0-sclive4` 三个 `Engine` 均 PASS；
+  - `tools/edisksd-hook/test_edisksd_hook.c`：原生与 armhf 两种构建，常规用例与 `unshare -m` 下的 `--mounts` 均 PASS；
+  - `tools/ui-mod/test_az04_hook.c`（AArch64 原生，AZ04 64 位 `Engine`）：PASS；
+  - `tools/ui-mod/test_fx_selector.sh`：PASS（`test_pioneer_selector`、`test_dsp_smooth`、`test_fx_ms`、`test_ms_lazy` 各三种构建，`test_flanger_scope`、`test_ms_master_hook`、`test_master_golden`、`test_px_off_golden`）；
+  - `JC11S_ROOTFS=<官方 PRIME4PLUS-5.3.0 rootfs> bash tools/az01-packer/test_sclive4_bootstrap.sh`（官方镜像 SHA-256 `bf5489d1...`）→ `=== All SCLIVE4 verification checks PASSED ===` 与 `=== All PRIME4PLUS verification checks PASSED ===`（各 28 处补丁，UI 包加载）；
+  - `AZ04=1 bash tools/az01-packer/test_sclive4_bootstrap.sh` → `=== All PRIME4G2 verification checks PASSED ===`（26 处补丁，UI 包加载）。
+- **第 3 步构建**：`build-release.sh 5.3.0.4 <fw-5.3.0> none ...` 用时 300 秒，`build-installer.sh` 用时 8 秒，共 308 秒；`SHA256SUMS.txt` 正好 20 个发布名（8 个 `*-Update.img`、8 个 `*-Data-Bundle.tar.gz`、4 个 `EngineX-Installer`），`sha256sum -c` 通过。
+- **第 4 步镜像抽查（三组代表镜像）**：`SC5000`（JP07）、`SC6000`（JP13）、`PRIME4`（JC11）用 `az01_packer.py unpack` 解包均为 `"verified": true`；`rootfs.ext2` 内 `/etc/sc5000/version.txt` = `5.3.0.4`；`/usr/share/sc5000-custom/authorized_keys` 为空（公开镜像不含 SSH 公钥）；同组机型 `.img` 的 SHA-256 相同，三组之间互不相同。
+- **第 4b 步三组发版门禁（`tools/az01-packer/release-gate.sh`，旧版基准 `release-5.3.0.3`，其 SHA-256 与已发布的 `v5.3.0.3` 资产一致；三组并行）**：
+  - **SC5000 组（JP07）**：退出码 0，**140 PASS / 0 FAIL / 5 INFO**，324 秒；20 处 Engine 补丁，21 个 DSP guard；
+  - **SC6000 组（JP13）**：退出码 0，**140 PASS / 0 FAIL / 5 INFO**，323 秒；20 处 Engine 补丁，21 个 DSP guard；
+  - **PRIME 4 组（JC11）**：退出码 0，**140 PASS / 0 FAIL / 5 INFO**，358 秒；28 处 Engine 补丁，21 个 DSP guard；
+  - 三组共同：静态审计 62 文件 0 FAIL / 14 WARN（全部是可选工具或底包没有的单元）；`5.3.0.3 → 5.3.0.4` 在线升级走通，翻转一个字节的镜像在校验阶段被拒绝；种入原厂旧 `.qmlc` 缓存（JP07 / JP13 各 970 个，JC11 993 个）后 UI hook 替换全部 413 个包文件加门禁探针；硬断电后的 `boot2` 阶段补丁数与 DSP guard 数与首次启动相同；宿主机 `CLOCK_REALTIME` 未受扰动。
+- **回归核验表（`docs/REGRESSION-CHECKLIST.md`，42 行）**：
+  - **自动化项**：每行点名的测试都对到了本轮的运行结果，全部通过。除第 2 步的套件外另跑：`tools/ui-mod/test_shadow_master.c`（144 例）、`test_sclive_aux.c`、`test_mixstream_hook.c`、`tests/test_boot_safety.sh`、`docs/mods/test_mods.py`、`tools/az01-packer/test_timesync_sandbox.sh`、`tools/mods/test_mods_chroot.sh`（SC LIVE 4 armv7 与 AZ04 arm64，各 5 个官方 Mod）、`sclive-aux-sandbox.sh`、`mixstream-sandbox.sh`（NH08）、`test_fx_selector_sandbox.sh`（JC11）、`test_gen2_systemd_activate.sh`。其中第 42 行的 `TestShadowLongPollFollowsALiveModeSwitch` 与第 18、31 行的 `test_gen2_systemd_activate.sh` 在 `61e4ed5` 上失败，合入下面两处修复后通过。`test_data_bundle.py` 有 1 项因编译机存在 `/data` 跳过。
+  - **未跑的自动化范围**：`test_mods_chroot.sh` 没有跑一代 5.3.0 rootfs；`mixstream-sandbox.sh` 只跑了 NH08；可选的 `JC11S_RELEASE_BUNDLE` Go 回读测试未跑。
+  - **人工 / `[NO AUTOMATED TEST]` 项（本轮未执行，需实机）**：第 1 行（两台碟机之间手动 `MASTER` 互切）、第 6 行（经原厂 `LOAD` 加载流媒体并实际播放）、第 22 行（Pad LED 亮度实物目测）、第 32 行（实体 `PRIME 4` 硬断电后第二次开机）、第 40 行（没有点名自动化测试，只有实机检查），以及各行最后一列的实机验收与录像项。
+  - 同一轮把核验表里 8 行（第 4、5、10、11、16、27、39、41 行）已不存在的测试名改成了仓库里的现名。
+- **只改测试的修复（发版 QA 中发现）**：
+  - `1c5324d`：`test_sclive4_bootstrap.sh` 的 userdata 夹具从 64 MiB 改为稀疏 256 MiB。`sc5000-suite` 从 17 MB 涨到 23 MB 后，`install.sh` 暂存的第二份 bundle 装不下。该提交在 `61e4ed5` 之前，已包含在构建提交里。
+  - `b882eb0`：`TestShadowLongPollFollowsALiveModeSwitch` 等后台 POST 返回后再还原测试用的全局变量。旧测试 40 次内复现竞争，修复后 200 次 0 竞争。产品代码从不写这个变量。
+  - `1aa7a47`：`test_gen2_systemd_activate.sh` 重新隔离。`b9210d1`（#140）让 `boot-activate.sh` 改经 `engine-ui-guard` 启动 Engine 并写出 `engine-guardian.service`，旧测试的字符串替换全部落空，报 `hooked Engine never started`，并且未隔离的脚本会把单元文件写进编译机的 `/run/systemd/system`。新测试在任何替换对不上、或还剩未隔离的 `systemctl` 调用与单元路径时直接停止。
+- **这两处修复与产物的关系**：`61e4ed5..1aa7a47` 只改了 `pkg/webui/shadow_quiet_test.go` 和 `tools/az01-packer/test_gen2_systemd_activate.sh`，都不是构建输入。用 `1aa7a47` 在全新目录重建后逐文件对比：
+  - 三组一代镜像的 rootfs 文件树（路径、权限、属主、链接）相同，内容只有两处不同：`/etc/shadow`（打包器每次构建都为 root 生成一个新的随机不可达口令哈希）和 `ui-packs.tar.xz`（解开后 1238 个文件内容相同，只是包内文件时间戳不同）；
+  - 8 个二代数据包解开后各 1258 个文件内容相同（内嵌的 `ui-packs.tar` 按解开后的内容比较）；4 个安装器解开后各 10 个文件内容相同。
+  - 构建本身不是逐字节可复现的（随机口令哈希、归档内的时间戳），所以任意两次构建的 SHA-256 都不同；对外发布的是 `61e4ed5` 这一次构建的产物，第 4 节的 SHA-256 以它为准。
 
 ---
 
