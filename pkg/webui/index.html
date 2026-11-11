@@ -102,7 +102,6 @@ a{color:var(--accent)}label.chk{display:flex;align-items:center;gap:10px;cursor:
   <div class="setting"><div class="txt"><b data-i18n="tGain"></b><span class="sub" data-i18n="sGain"></span></div><label class="sw"><input type="checkbox" data-toggle="autoGain"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tFxTimeMode"></b><span class="sub" data-i18n="sFxTimeMode"></span></div><div class="seg" data-seg="fxTimeMode"><button data-v="beats" data-i18n="fxBeats"></button><button data-v="ms">ms</button></div></div>
   <div class="setting"><div class="txt"><b data-i18n="tOmni"></b><span class="sub" data-i18n="sOmni"></span></div><label class="sw"><input type="checkbox" data-toggle="omniSource"><span></span></label></div>
-  <div class="setting"><div class="txt"><b data-i18n="tAnalyze"></b><span class="sub" data-i18n="sAnalyze"></span></div><label class="sw"><input type="checkbox" data-toggle="autoAnalyze"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="tShare"></b><span class="sub" data-i18n="sShare"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkShare"><span></span></label></div>
   <div class="setting"><div class="txt"><b><span data-i18n="tExport"></span><span class="tag" data-i18n="beta"></span></b><span class="sub" data-i18n="sExport"></span></div><label class="sw"><input type="checkbox" data-toggle="prolinkExport"><span></span></label></div>
   <div class="setting"><div class="txt"><b data-i18n="verboseLog"></b><span class="sub" data-i18n="verboseLogSub"></span></div><label class="sw"><input type="checkbox" data-toggle="verboseLog"><span></span></label><a class="btn" href="/api/logs" download="enginex-logs.txt" data-i18n="downloadLogs"></a></div>
@@ -152,7 +151,6 @@ tLimiter:['Master soft clipper','0dB 防破音软限幅','0dB 防破音軟限幅
 tGain:['Auto-Gain 0 dB','自动增益 0 dB 归一化','自動增益 0 dB 正規化'],sGain:['Brings every track to 0 dB peak, with the soft limiter','把每首歌峰值拉到 0 dB，含软限幅','把每首歌峰值拉到 0 dB，含軟限幅'],
 tFxTimeMode:['PX delay time mode','先锋效果延时模式 (PX)','先鋒效果延遲模式 (PX)'],sFxTimeMode:['Spiral / Pitch Echo / Dub Echo only: default timing or 10–4000 ms; stock FX stay in beats','仅作用于 Spiral / Pitch Echo / Dub Echo（默认或 10–4000 ms）；原厂效果仍按节拍同步','僅作用於 Spiral / Pitch Echo / Dub Echo（預設或 10–4000 ms）；原廠效果仍依節拍同步'],fxBeats:['Default (Off)','默认（关闭）','預設（關閉）'],
 tOmni:['OmniSource','OmniSource 全源同屏混排','OmniSource 全源同屏混排'],sOmni:['Show USB / SD drives next to streaming in one browser and search','在流媒体浏览和搜索里同时显示 U 盘 / SD 卡','在串流瀏覽和搜尋裡同時顯示隨身碟 / SD 卡'],
-tAnalyze:['Auto-analyze drives (unavailable)','插盘后台自动分析（暂不可用）','插碟背景自動分析（暫不可用）'],sAnalyze:['Preference retained; automatic analysis is temporarily unavailable','保留偏好设置；后台自动分析暂不可用','保留偏好設定；背景自動分析暫不可用'],
 tShare:['Pro DJ Link library','Pro DJ Link 曲库','Pro DJ Link 曲庫'],sShare:['Read the USB drives of CDJs on the network','读取局域网内 CDJ 的 U 盘','讀取區域網路內 CDJ 的隨身碟'],
 waitRbUsb:['On: starts by itself once a rekordbox USB is plugged in','已开启：插入 rekordbox U 盘后自动开始共享','已開啟：插入 rekordbox 隨身碟後自動開始分享'],tExport:['Pro DJ Link export to CDJ','Pro DJ Link 共享本机 U 盘给 CDJ','Pro DJ Link 分享本機隨身碟給 CDJ'],sExport:['Let CDJs browse this deck’s USB drive. Not yet tested on a real CDJ','让 CDJ 浏览本机 U 盘；尚未在真 CDJ 上验证','讓 CDJ 瀏覽本機隨身碟；尚未在實機 CDJ 上驗證'],beta:['Beta','实验性','實驗性'],needRbUsb:['Plug in a USB drive with a rekordbox export first: this deck shares only rekordbox USB drives with CDJs.','请先插入带 rekordbox 导出的 U 盘：本机只能把 rekordbox U 盘共享给 CDJ。','請先插入帶 rekordbox 匯出的隨身碟：本機只能把 rekordbox 隨身碟分享給 CDJ。'],
 jobsTitle:['Downloads & analysis','下载与分析','下載與分析'],waveAria:['RGB waveform of the newest track','最新曲目的 RGB 波形','最新曲目的 RGB 波形'],
@@ -278,7 +276,7 @@ async function jobs(){
   v.overview.forEach((p,i)=>{c.fillStyle='rgb('+p.LowValue+','+p.MidValue+','+p.HighValue+')';const h=Math.max(p.LowValue,p.MidValue,p.HighValue)*70/255;c.fillRect(i,(70-h)/2,1,h)});
  }
 }
-const toggleKeys=['upfaderEcho','masterLimiter','autoGain','omniSource','autoAnalyze','prolinkShare','prolinkExport'];
+const toggleKeys=['upfaderEcho','masterLimiter','autoGain','omniSource','prolinkShare','prolinkExport'];
 function showUI(v){lastUI=v;
  if(v.version||v.buildTag){$('version').textContent=(v.version?'v'+v.version:'')+(v.buildTag?(v.version?' · ':'')+v.buildTag:'');$('version').hidden=false}
  for(const e of document.querySelectorAll('[data-toggle]'))e.checked=!!v[e.dataset.toggle];

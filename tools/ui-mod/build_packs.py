@@ -2802,11 +2802,6 @@ SERVICES_MAIN = """
 		const p = Planck.getProperty("/Client/Preferences/Profile/Application/WaveformStyle")
 		if (p.translator && (p.translator.index == 1) !== (v.waveform === "rgb"))
 			p.translator.index = v.waveform === "rgb" ? 1 : 0
-		// Unswapped, the Auto Loop knob resizes the loop: Beat Jump size follows it.
-		if (!scSwapLoopOrder) {
-			const lbj = root.scTr("/Client/Preferences/Profile/Application/LinkBeatJumpLoopSize")
-			if (lbj && !lbj.state) lbj.state = true
-		}
 		if (v && v.timezone && !scIsBadTimeZone(String(v.timezone))) {
 			if (scLastGoodTimeZone === "") scLastGoodTimeZone = String(v.timezone)
 		}
@@ -3545,12 +3540,6 @@ TRACKLIST_WAVEFORM_ENTRY = """
 """
 
 LIBRARY_ENTRIES = """
-		EntryBase.ListEntry {
-			text: "Auto-Analyze Drives (Unavailable)"
-			values: ["Off", "On"]
-			currentValue: values[root.scAutoAnalyze ? 1 : 0]
-			onSelected: function(index) { root.scCall("autoAnalyze=" + index) }
-		},
 		EntryBase.ListEntry {
 			text: "OmniSource (Drives in Streaming)"
 			values: ["Off", "On"]
@@ -5268,6 +5257,7 @@ def edits(dev: bool):
             ("invisibleActiveAreaWidthAtEnd: isInGridEditor ? 0 : isRightDeck ? 25 : 15", "invisibleActiveAreaWidthAtEnd: 0"),
         ],
         prefs + "Entries/WaveformStyle.qml": WAVEFORM_ENTRY,
+        prefs + "Entries/LinkBeatJumpLoopSize.qml": [("active: Config.audio.deck.beatJump.canLinkToAutoLoop", "active: true")],
         # Same gate as above: show the Stems List switch and the per-track stems icon on armhf; keep AZ04 stock.
         prefs + "Entries/StemsList.qml": [("active: Planck.hasStemsPreRenderedPlayback()", 'active: Planck.hasStemsPreRenderedPlayback() || !(typeof root !== "undefined" && root && root.scIsAZ04)')],
         v + "BrowseView/Components/Components/StemsIcon.qml": [(
