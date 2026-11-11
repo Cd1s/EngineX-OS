@@ -643,6 +643,12 @@ assert want in ba
 assert "systemctl restart --no-block systemd-timesyncd.service" in ba
 assert "/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf" in bdb.UNINSTALL
 PY
+SEED_CONF=$ROOT/rootfs-overlay/usr/lib/systemd/system/systemd-timesyncd.service.d/10-enginex-seed.conf
+SEED_BIN=$ROOT/rootfs-overlay/usr/libexec/sc5000-timesync-seed
+[[ -f $SEED_CONF ]] || fail "missing $SEED_CONF"
+[[ -x $SEED_BIN ]] || fail "missing executable $SEED_BIN"
+has "TimeoutStartSec=15s" "$SEED_CONF"
+has "ExecStartPre=-+/usr/libexec/sc5000-timesync-seed" "$SEED_CONF"
 lacks 'timesync_persist' "$ROOT/tools/ui-mod/engine_ui_hook.c"
 lacks 'persist_monotonic_clock' "$ROOT/tools/ui-mod/engine_ui_hook.c"
 has 'onSystemTimeZoneSetSucceeded' "$ROOT/tools/ui-mod/build_packs.py"

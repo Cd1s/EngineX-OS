@@ -40,7 +40,14 @@ func normalizeTimeZoneID(raw string) string {
 }
 
 func validIANATimeZone(tz, zoneinfoDir string) bool {
-	if len(tz) < 3 || len(tz) > 63 || !strings.Contains(tz, "/") {
+	if len(tz) < 3 || len(tz) > 63 {
+		return false
+	}
+	if tz == "UTC" {
+		info, err := os.Stat(filepath.Join(zoneinfoDir, "UTC"))
+		return err == nil && info.Mode().IsRegular()
+	}
+	if !strings.Contains(tz, "/") {
 		return false
 	}
 	parts := strings.Split(tz, "/")
@@ -49,10 +56,6 @@ func validIANATimeZone(tz, zoneinfoDir string) bool {
 	}
 	for _, seg := range parts {
 		if len(seg) == 0 || len(seg) > 32 || seg == "." || seg == ".." {
-			return false
-		}
-		switch strings.ToUpper(seg) {
-		case "UTC", "GMT", "UCT", "GMT0", "ZULU", "UNIVERSAL":
 			return false
 		}
 		for i := 0; i < len(seg); i++ {
@@ -105,8 +108,8 @@ func (s *Server) savedTimeZone() string {
 	return s.loadSavedTimeZoneLocked()
 }
 
-// Caller holds uiMu. Invalid or UTC/Universal values never replace a previously
-// saved good zone.
+// Caller holds uiMu. Invalid values never replace a previously saved zone;
+// explicit UTC / Etc/UTC chosen by the user is saved like any IANA zone.
 func (s *Server) saveTimeZoneLocked(raw string) (saved bool, current string, err error) {
 	tz := normalizeTimeZoneID(raw)
 	cur := s.loadSavedTimeZoneLocked()
