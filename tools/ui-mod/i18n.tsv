@@ -458,3 +458,7 @@ Clear Stem Render Queue?	清空 Stems 分轨队列？	清空 Stems 分軌佇列�
 Clearing the render will clear queued stem tracks and stop any rendering in progress.	清空后将移除排队中的曲目并停止当前正在进行的 Stems 分轨。	清空後將移除排隊中的曲目並停止目前進行中的 Stems 分軌。
 Please connect to the internet to sync the time.	请连接网络以同步时间。	請連線至網路以同步時間。
 Failed to set Time Zone.	设置时区失败。	設定時區失敗。
+Paired Player	双碟机配对	雙碟機配對
+Paired Player: this player's active layer and the other player's active deck, one lane each	双碟机配对：本机当前图层与另一台碟机的当前轨各占一条波形	雙碟機配對：本機目前圖層與另一台碟機的目前軌各佔一條波形
+Paired Player needs 4-Deck Role Auto, 1+3, 2+4, 1 or 2	双碟机配对需要四轨角色为自动、1+3、2+4、1 或 2	雙碟機配對需要四軌角色為自動、1+3、2+4、1 或 2
+No paired player	未连接配对碟机	未連接配對碟機
