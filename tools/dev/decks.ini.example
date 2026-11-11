@@ -1,0 +1,29 @@
+# Copy to tools/dev/decks.ini (git-ignored) or point DECK_PUSH_CONFIG at your copy.
+# Never commit deck addresses: use an alias from ~/.ssh/config on the build host.
+
+[defaults]
+# Locks, backups and sandbox sheet records. Shared by every agent on the build host;
+# keep it out of /var/tmp and /tmp, which the release cleanup empties.
+state_dir = /var/lib/enginex-dev
+# Engine 5.3.0 QML extracted from the official image (build_packs.py --qrc).
+qrc = /root/build/sc5000-lab/5.3.0/qrc
+# Each push builds in a fresh directory here and removes it afterwards.
+work_dir = /var/tmp
+
+# One section per deck; the section name is what you type: deck-push deck-a ui
+[deck-a]
+# ssh destination: a Host alias (with HostName, User root, IdentityFile, ProxyJump...)
+ssh = sc5000-deck-a
+# extra ssh(1) options, shell-quoted
+ssh_options = -o ServerAliveInterval=10
+# 'engine-ui-hook: applied 0x...' lines on this deck's Engine (first generation 5.3.0: 19)
+expect_applied = 19
+# EngineX daemons that must be active after every push
+daemons = stream-sync sc5000-deemixd rb-bridge
+api_url = http://127.0.0.1:8080/v1/sc5000/ui
+# seconds to wait for Engine after a restart, then seconds to let it settle
+smoke_timeout = 180
+settle = 15
+
+[deck-b]
+ssh = sc5000-deck-b

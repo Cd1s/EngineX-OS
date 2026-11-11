@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""ui-sheet: sandbox first for UI changes. Renders views in the twin sandbox
+(tools/shadow-twin) before and after your change and puts them side by side on
+one sheet, then records the sheet against the UI pack digest so that
+`deck-push <deck> ui` will accept exactly this pack. Build host, root:
+
+  tools/dev/ui-sheet [--base REF] [--views 4deck,control-center,settings-about] [--side A] [--dry-run]
+
+Before = REF (default HEAD, or HEAD~1 when the tree is clean); after = this
+working tree. The twin is one per host: this refuses while anyone else's runs.
+"""
+import argparse
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent
+TWIN = REPO / "tools/shadow-twin/shadow-twin.sh"
+_loader = importlib.machinery.SourceFileLoader("deck_push", str(HERE / "deck-push"))
+_spec = importlib.util.spec_from_loader("deck_push", _loader)
+dp = importlib.util.module_from_spec(_spec)
+_loader.exec_module(dp)
+
+DEFAULT_VIEWS = "4deck,control-center,settings-about"
+
+
+def twin_busy():
+    """The twin's namespaces or holders exist (any owner)."""
+    netns = subprocess.run(["ip", "netns", "list"], capture_output=True, text=True).stdout
+    holders = subprocess.run(["pgrep", "-f", r"ns-holder\.sh"], capture_output=True, text=True).stdout.split()
+    return "shadow-twin-" in netns or bool(holders)
+
+
+def ui_digest(cfg, work):
+    """The digest deck-push will compute for this working tree's UI pack."""
+    src, info = dp.prepare_source(None, work)
+    tag = f"dev {info['commit'][:7]}" + ("+" if info["dirty"] else "")
+    stage = dp.build(["ui-packs", "ui-icons"], src, work, cfg.qrc, tag)
+    return dp.digest(stage / dp.ARTIFACTS["ui-packs"]), info
+
+
+def compose(rows, out, title):
+    """rows: [(view, before.png, after.png)] -> one sheet with before | after per row."""
+    from PIL import Image, ImageDraw
+    ims = [(v, Image.open(b).convert("RGB"), Image.open(a).convert("RGB")) for v, b, a in rows]
+    w = max(b.width for _, b, _ in ims)
+    h = max(max(b.height, a.height) for _, b, a in ims)
+    label, gap = 28, 12
+    sheet = Image.new("RGB", (2 * w + 3 * gap, label + len(ims) * (h + label + gap) + gap), (16, 18, 22))
+    d = ImageDraw.Draw(sheet)
+    d.text((gap, 8), title, fill=(235, 245, 255))
+    y = label
+    for view, b, a in ims:
+        d.text((gap, y + 6), f"{view}: before", fill=(200, 200, 200))
+        d.text((2 * gap + w, y + 6), f"{view}: after", fill=(0, 195, 227))
+        sheet.paste(b, (gap, y + label))
+        sheet.paste(a, (2 * gap + w, y + label))
+        y += h + label + gap
+    sheet.save(out)
+    return out
+
+
+def twin(*args, env):
+    print("$ shadow-twin.sh " + " ".join(args), flush=True)
+    subprocess.run(["bash", str(TWIN), *args], env=env, check=True)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="ui-sheet", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--base", help="git ref rendered as 'before'")
+    ap.add_argument("--views", default=DEFAULT_VIEWS, help=f"twin view presets (default {DEFAULT_VIEWS})")
+    ap.add_argument("--side", default="A", choices=("A", "B"))
+    ap.add_argument("--dry-run", action="store_true", help="print the plan; do not start the twin")
+    a = ap.parse_args(argv)
+    sys.path.insert(0, str(REPO / "tools/shadow-twin"))
+    from twin import VIEW_PRESETS  # noqa: E402  (the twin's own list)
+    views = [v for v in a.views.split(",") if v]
+    bad = [v for v in views if v not in VIEW_PRESETS]
+    if bad or not views:
+        ap.error(f"unknown views {bad}; choose from {', '.join(VIEW_PRESETS)}")
+    dirty = bool(dp.git("status", "--porcelain", "--untracked-files=no"))
+    base = dp.git("rev-parse", "--short=12", a.base or ("HEAD" if dirty else "HEAD~1"))
+    cfg = dp.Config()
+    plan = [f"up --ref {base}"] + [f"shot before-{v} {a.side} --ui {v}" for v in views] + \
+        ["deploy --local --packs --hook --suite"] + [f"shot after-{v} {a.side} --ui {v}" for v in views] + ["down --clean"]
+    if a.dry_run:
+        print(f"ui-sheet: before {base}, after the working tree; views {', '.join(views)}")
+        for p in plan:
+            print(f"  shadow-twin.sh {p}")
+        print(f"  record {cfg.state}/sheets/<UI pack digest>.json")
+        return 0
+    if os.geteuid() != 0:
+        print("ui-sheet: run as root on the build host", file=sys.stderr)
+        return 2
+    if twin_busy():
+        print("ui-sheet: the twin sandbox is in use (shadow-twin netns or ns-holder.sh); wait for it or ask in dev-chat",
+              file=sys.stderr)
+        return 3
+    cfg.work_dir.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="ui-sheet.", dir=cfg.work_dir))
+    env = {**os.environ, "SHADOW_TWIN_WORK": str(work / "twin")}
+    try:
+        digest, info = ui_digest(cfg, work / "build")
+        twin("up", "--ref", base, env=env)
+        try:
+            for v in views:
+                twin("shot", f"before-{v}", a.side, "--ui", v, env=env)
+            twin("deploy", "--local", "--packs", "--hook", "--suite", env=env)
+            for v in views:
+                twin("shot", f"after-{v}", a.side, "--ui", v, env=env)
+        finally:
+            twin("down", "--clean", env=env)
+        out = work / "twin/out"
+        rows = [(v, out / f"before-{v}-{a.side}.png", out / f"after-{v}-{a.side}.png") for v in views]
+        sheets = cfg.state / "sheets"
+        sheets.mkdir(parents=True, exist_ok=True)
+        after = info["commit"][:12] + ("+" if info["dirty"] else "")
+        png = compose(rows, sheets / f"{digest}.png", f"UI before {base} | after {after}")
+        record = {"sheet": str(png), "ui_pack": digest, "base": base, "commit": info["commit"], "dirty": info["dirty"],
+                  "views": views, "time": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        (sheets / f"{digest}.json").write_text(json.dumps(record, indent=1) + "\n")
+        print(f"ui-sheet: {png}\nui-sheet: deck-push will accept UI pack {digest[:16]}")
+        return 0
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

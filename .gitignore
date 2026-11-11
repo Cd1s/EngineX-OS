@@ -41,3 +41,6 @@ __pycache__/
 # Local agent settings (machine-specific paths); .claude/rules is tracked
 .claude/settings*.json
 .codex/
+
+# deck-push: local deck addresses (tools/dev/decks.ini.example is the template)
+tools/dev/decks.ini

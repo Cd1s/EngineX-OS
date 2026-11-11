@@ -1,0 +1,3 @@
+#!/bin/sh
+# Any long-running daemon inside tools/dev/fake-deck.sh.
+while :; do sleep 5; done
