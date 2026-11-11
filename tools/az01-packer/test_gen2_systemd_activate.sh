@@ -115,23 +115,63 @@ touch -d '2026-11-10T00:00:00Z' "$QCONF"
 printf 'Asia/Shanghai\n' > "$DEST/state/timezone"
 touch -d '2026-11-11T00:00:00Z' "$DEST/state/timezone"
 
-# Build an isolated copy of the real boot-activate.sh targeting ONLY our transient $UNIT and $TMP paths
+# The hooked start goes through engine-ui-guard since #140. This stand-in does what the real
+# "service" mode does: the Engine counts as hooked only when the drop-in handed over the hook path.
+mkdir -p "$DEST/bundle/bin" "$TMP/units"
+cat > "$DEST/bundle/bin/engine-ui-guard" << EOF
+#!/bin/sh
+[ "\${1:-}" = service ] || exit 0
+shift
+[ "\${SC5000_UI_HOOK:-}" != "$DEST/bundle/lib/libengine-ui-hook.so" ] || export ENGINEX_TEST_HOOKED=1
+exec "\$@"
+EOF
+chmod 0755 "$DEST/bundle/bin/engine-ui-guard"
+
+# Build an isolated copy of the real boot-activate.sh targeting ONLY our transient $UNIT and $TMP paths.
+# Every substitution must match, and no other unit or systemctl call may remain: when boot-activate.sh
+# changes, the test stops here instead of running the real script against the build host's systemd.
 python3 -I - "$DEST/bundle/boot-activate.sh" "$TMP/isolated-boot-activate.sh" "$UNIT" "$DROPIN_DIR" "$TMP" << 'PY'
-import pathlib, sys
+import pathlib, re, sys
 src, dst, unit, dropin_dir, tmp = sys.argv[1:]
 s = pathlib.Path(src).read_text()
-# Redirect engine.service drop-in and restart calls strictly to our transient test unit, and skip real deck daemons
-s = s.replace("/run/systemd/system/engine.service.d", dropin_dir)
-s = s.replace("Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service\n", "")
-s = s.replace('Environment="LD_PRELOAD=$lib_hook"\n', 'Environment=ENGINEX_TEST_HOOKED=1\n')
-s = s.replace("ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home\n",
-              f"Environment=SC5000_CUSTOM={tmp}/data/enginex SC5000_CONFIG_DIR={tmp}/data/.config SC5000_ZONEINFO_DIR={tmp}/zoneinfo SC5000_PRODUCT_CODE_FILE={tmp}/product-code SC5000_TZ_NEWER_MARKER={tmp}/tz-newer\n")
-s = s.replace("$bundle_dir/boot-activate.sh --restore-tz", f"{dst} --restore-tz")
-s = s.replace("/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf", f"{tmp}/ntp.conf")
-s = s.replace("/run/systemd/timesyncd.conf.d", f"{tmp}/ntp.d")
-s = s.replace("systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service || :", ":")
-s = s.replace('[ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :', ":")
-s = s.replace("engine.service", unit)
+
+def sub(old, new):
+    global s
+    if old not in s:
+        sys.exit(f"FAIL: boot-activate.sh no longer contains {old!r}: update the isolation in this test")
+    s = s.replace(old, new)
+
+# The engine.service drop-in is the one real systemd path; every other unit file stays in the work dir.
+sub("/run/systemd/system/engine.service.d", "@DROPIN@")
+sub("/run/systemd/system/", f"{tmp}/units/")
+sub("@DROPIN@", dropin_dir)
+sub("Wants=enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service\n", "")
+sub("engine-ui-guard service /usr/Engine/Scripts/runengine",
+    f"engine-ui-guard service {tmp}/mock-runengine.sh {tmp} {tmp}/new-activator-wrapper.sh")
+sub("/usr/Engine/Scripts/engine", f"{tmp}/no-vendor-engine-script")
+sub("ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home\n",
+    f"Environment=SC5000_CUSTOM={tmp}/data/enginex SC5000_CONFIG_DIR={tmp}/data/.config SC5000_ZONEINFO_DIR={tmp}/zoneinfo SC5000_PRODUCT_CODE_FILE={tmp}/product-code SC5000_TZ_NEWER_MARKER={tmp}/tz-newer\n")
+sub("EnvironmentFile=-/data/sc5000-custom/ui-scale.env\n", "")
+sub("$bundle_dir/boot-activate.sh --restore-tz", f"{dst} --restore-tz")
+sub("/run/systemd/timesyncd.conf.d/10-enginex-ntp.conf", f"{tmp}/ntp.conf")
+sub("/run/systemd/timesyncd.conf.d", f"{tmp}/ntp.d")
+sub("/run/sc5000", f"{tmp}/run-sc5000")
+sub("accounts=/data/StreamingAccounts.json", f"accounts={tmp}/data/StreamingAccounts.json")
+sub("[ -d /data ]", f"[ -d {tmp}/data ]")
+sub("systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service || :", ":")
+sub('[ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :', ":")
+sub("pkill -x sc5000-suite 2>/dev/null || :", ":")
+sub("engine.service", unit)
+# What may still reach the host's systemd: the reload, the restart of our unit, and two
+# branches this fixture never enters (no SSH key and no edisksd hook in the bundle).
+allowed = ("systemctl daemon-reload", f"systemctl restart --no-block {unit}",
+           "systemctl start --no-block sshd.service", "systemctl restart edisksd.service")
+for line in s.splitlines():
+    if "systemctl " in line and not line.lstrip().startswith("#") and not any(a in line for a in allowed):
+        sys.exit(f"FAIL: boot-activate.sh has a systemctl call this test does not isolate: {line.strip()}")
+for path in re.findall(r"/run/systemd/system/[^\s\"']*", s):
+    if not path.startswith(dropin_dir):
+        sys.exit(f"FAIL: boot-activate.sh writes a unit this test does not isolate: {path}")
 pathlib.Path(dst).write_text(s)
 PY
 chmod 0755 "$TMP/isolated-boot-activate.sh"
