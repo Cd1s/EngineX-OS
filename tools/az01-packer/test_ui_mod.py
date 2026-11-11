@@ -1750,7 +1750,12 @@ class DeckHeaderLayoutTest(unittest.TestCase):
 
     def test_countdown_has_a_bounded_slot_and_elides_only_its_name(self):
         cap = bp.cue_capsule("", "1", 22, 16)
-        self.assertIn("Layout.maximumWidth: 96", cap)
+        self.assertIn("Layout.maximumWidth: 112", cap)
+        self.assertIn("Layout.leftMargin: 6", cap)
+        self.assertIn("Layout.rightMargin: 6", cap)
+        self.assertIn("clip: true", cap)
+        self.assertIn("Layout.minimumWidth: 0", cap)
+        self.assertIn("parent.width - cueCountText.implicitWidth - 11", cap)
         self.assertIn("elide: Text.ElideRight", cap)
         self.assertIn("Reserve the Cue slot even without a cue", cap)
 
@@ -1804,16 +1809,23 @@ class DeckHeaderLayoutTest(unittest.TestCase):
                         text = (base / rel).read_text() if (base / rel).exists() else stock
                         pattern = r"(?m)^( +)DeckInfoTimeInfo \{.*?^\1\}"
                         self.assertEqual(re.search(pattern, text, re.S).group(), re.search(pattern, stock, re.S).group())
-                    # Conserving the mini row's total fixed width preserves the
-                    # stock flexible sync bar, including when Cue is visible.
+                    # Compacting SpeedInfo (34 + 4 + 62 = 100 px vs stock 56 + 16 + 84 = 156 px)
+                    # frees 56 px: 28 px widens Cue + margins (112 + 6 + 6 = 124 px) and 28 px
+                    # expands the sync/LEAD slot (minimumWidth 135 px).
                     mini = (base / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
                     def preferred(kind, text):
                         block = re.search(kind + r" \{(.*?)^                \}", text, re.S | re.M).group(1)
                         return int(re.search(r"Layout.preferredWidth: (\d+)", block).group(1))
                     stock = (qrc / composite / "DeckTrackData/GroupedMiniDeckTrackDataContent.qml").read_text()
-                    cue_width = int(re.search(r"Layout.preferredWidth: (\d+)", bp.cue_capsule("", "1", 22, 16)).group(1))
-                    self.assertEqual(preferred("AutoLoop", stock) + preferred("BeatJump", stock) + 6 * 16,
-                                     preferred("AutoLoop", mini) + preferred("BeatJump", mini) + cue_width + 7 * 4)
+                    cap = bp.cue_capsule("", "1", 22, 16)
+                    cue_width = int(re.search(r"Layout.preferredWidth: (\d+)", cap).group(1))
+                    cue_margins = sum(int(m) for m in re.findall(r"Layout\.(?:left|right)Margin: (\d+)", cap))
+                    self.assertIn("Layout.minimumWidth: 135", mini)
+                    self.assertIn("speedRangeTextWidth: 34", mini)
+                    self.assertIn("speedRangeTextHorizontalAlignment: Text.AlignLeft", mini)
+                    self.assertIn("speedStateTextWidth: 62", mini)
+                    self.assertEqual((preferred("AutoLoop", stock) + preferred("BeatJump", stock) + 156 + 6 * 16) - 28,
+                                     preferred("AutoLoop", mini) + preferred("BeatJump", mini) + cue_width + cue_margins + 100 + 7 * 4)
                     jump = (base / composite / "Deck/DeckItem/BeatJump.qml").read_text()
                     forward = jump.index('objectName: "Deck_BeatJump_Forward"')
                     self.assertLess(jump.index('objectName: "Deck_BeatJump_Text"'), forward)
