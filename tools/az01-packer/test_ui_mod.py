@@ -1759,10 +1759,10 @@ class DeckHeaderLayoutTest(unittest.TestCase):
         self.assertIn("Layout.minimumWidth: 50", flex)
         self.assertNotIn("Layout.maximumWidth", flex)
         for cap in (bounded, flex):
-            self.assertIn("Layout.leftMargin: 2", cap)
+            self.assertIn("Layout.leftMargin: 3", cap)
             self.assertIn("Layout.rightMargin: 2", cap)
             self.assertIn("clip: true", cap)
-            self.assertIn("parent.width - Math.ceil(cueCountText.implicitWidth) - 12", cap)
+            self.assertIn("parent.width - Math.ceil(cueCountText.implicitWidth) - 11", cap)
             self.assertIn("elide: Text.ElideRight", cap)
             self.assertIn("Reserve the Cue slot even without a cue", cap)
 
@@ -1807,12 +1807,14 @@ class DeckHeaderLayoutTest(unittest.TestCase):
             edits = bp.edits(False)
         finally:
             bp.ROOT = old_root
-        # SpeedInfo keeps stock minimum widths via Math.max(speed*TextWidth, Math.ceil(implicitWidth))
-        # and does not alter stock columnSpacing: 16; compact rows explicitly pass 0.
+        # SpeedInfo measures worst-case strings ("±100" and "-100.00%") via TextMetrics
+        # rather than live implicitWidth, and keeps stock minimum widths via Math.max.
         speed_patches = edits["Skins/EngineOS/UI/CompositeControls/Deck/DeckItem/SpeedInfo.qml"]
         self.assertFalse(any("columnSpacing" in old for old, _ in speed_patches))
-        self.assertTrue(any("Math.max(speedRangeTextWidth, Math.ceil(implicitWidth))" in new for _, new in speed_patches))
-        self.assertTrue(any("Math.max(speedStateTextWidth, Math.ceil(implicitWidth))" in new for _, new in speed_patches))
+        self.assertTrue(any('text: "\\u00b1100"' in new and 'text: "-100.00%"' in new for _, new in speed_patches))
+        self.assertTrue(any("Math.max(speedRangeTextWidth, Math.ceil(scRangeWorstMetrics.width))" in new for _, new in speed_patches))
+        self.assertTrue(any("Math.max(speedStateTextWidth, Math.ceil(scStateWorstMetrics.width))" in new for _, new in speed_patches))
+        self.assertFalse(any("implicitWidth" in new for _, new in speed_patches))
         for m in re.finditer(r"speed(?:Range|State)TextWidth:\s*(\d+)", bp.SHADOW_LAYER):
             self.assertEqual(int(m.group(1)), 0)
         for m in re.finditer(r"AutoLoop\s*\{[^}]*?Layout\.preferredWidth:\s*(\d+)", bp.SHADOW_LAYER, re.S):
@@ -1896,8 +1898,10 @@ class DeckHeaderLayoutTest(unittest.TestCase):
                     self.assertIn("speedRangeTextWidth: 0", performance)
                     self.assertIn("speedStateTextWidth: 0", performance)
                     self.assertIn("columnSpacing: 16", speed)
-                    self.assertIn("Math.max(speedRangeTextWidth, Math.ceil(implicitWidth))", speed)
-                    self.assertIn("Math.max(speedStateTextWidth, Math.ceil(implicitWidth))", speed)
+                    self.assertIn('TextMetrics { id: scRangeWorstMetrics; font: speedRangeText.font; text: "\\u00b1100" }', speed)
+                    self.assertIn('TextMetrics { id: scStateWorstMetrics; font: speedStateText.font; text: "-100.00%" }', speed)
+                    self.assertIn("Math.max(speedRangeTextWidth, Math.ceil(scRangeWorstMetrics.width))", speed)
+                    self.assertIn("Math.max(speedStateTextWidth, Math.ceil(scStateWorstMetrics.width))", speed)
                     jump = (base / composite / "Deck/DeckItem/BeatJump.qml").read_text()
                     forward = jump.index('objectName: "Deck_BeatJump_Forward"')
                     self.assertLess(jump.index('objectName: "Deck_BeatJump_Text"'), forward)
