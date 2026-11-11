@@ -326,8 +326,8 @@ $('cfToggle').onclick=()=>action(async()=>{const b={enabled:!lastCf.enabled};con
 $('cfSaveToken').onclick=()=>action(async()=>{cfShow(await post('tunnel',{enabled:true,token:$('cfToken').value.trim()}));$('cfToken').value=''});
 $('cfCopy').onclick=()=>{if(lastCf.publicUrl&&navigator.clipboard)navigator.clipboard.writeText(lastCf.publicUrl).then(()=>notice(t('cfCopied'))).catch(()=>{})};
 
-// Mod Hub: GET/POST /v1/sc5000/mods, upload via POST /v1/sc5000/mods/upload.
-async function modReq(path,opts){const r=await fetch('/v1/sc5000/'+path,opts);let v={};try{v=await r.json()}catch(e){}if(!r.ok)throw Error(v.error||r.status);return v}
+// Mod Hub: GET/POST /api/mods, upload via POST /api/mods/upload.
+async function modReq(path,opts={}){const r=await fetch('/api/'+path,opts);let v={};try{v=await r.json()}catch(e){}if(!r.ok)throw Error(v.error||r.status);return v}
 const modPost=b=>modReq('mods',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
 let lastMods=null;
 function modBtn(label,fn,cls){const b=document.createElement('button');b.className='btn'+(cls?' '+cls:'');b.textContent=label;b.onclick=()=>action(async()=>{await fn();await showMods()});return b}

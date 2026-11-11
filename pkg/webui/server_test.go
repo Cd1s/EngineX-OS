@@ -246,6 +246,9 @@ func TestLANCannotDriveTheDeck(t *testing.T) {
 		{"POST", "/v1//sc5000/ui?restart=1", 403},
 		{"POST", "/api/ui", 401},
 		{"GET", "/api/update?apply=1", 401},
+		{"GET", "/api/mods", 401},
+		{"POST", "/api/mods", 401},
+		{"POST", "/api/mods/upload", 401},
 	} {
 		for _, addr := range []string{"192.168.1.23:50000", "[fe80::1]:50000"} {
 			w := httptest.NewRecorder()
