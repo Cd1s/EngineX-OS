@@ -1,9 +1,16 @@
-# Minimal Club Mode 1.0.0
+# Minimal Club Mode 1.1.0
 
 Official MIT-licensed, reversible optional-service pause for
-[#136](https://github.com/Cd1s/EngineX-OS/issues/136).
-Requires Linux, Python >=3.9, systemd/service-management permissions and QtQuick
-2.12 / Controls 2.5 / Layouts 1.12. No dependencies are installed.
+[#136](https://github.com/Cd1s/EngineX-OS/issues/136) (static Go helper in
+1.1.0 for [#208](https://github.com/Cd1s/EngineX-OS/issues/208)).
+The decks have no Python, compiler, or package manager: this Mod ships a static
+Go helper (`bin/enginex-mod-helper-armv7` for `linux/arm` `GOARM=7` on all
+gen-1 and gen-2 armhf decks, and `bin/enginex-mod-helper-arm64` for PRIME 4 G2
+/ SYSTEM ONE), picked by busybox `sh` `start.sh` via `uname -m`. Requires
+Linux, `systemctl` (present on the deck) with service-management permissions,
+and QtQuick 2.12 / Controls 2.5 / Layouts 1.12. No dependencies are installed.
+Uploading 1.1.0 in the web console replaces an installed 1.0.0 in place
+(keeping its enabled state and settings).
 
 Loader lifecycle: `sh start.sh start` / `stop`; manual foreground usage:
 `sh start.sh serve`. QML connects to `127.0.0.1:17837`; host component is

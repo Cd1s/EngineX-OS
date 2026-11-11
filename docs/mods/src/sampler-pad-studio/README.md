@@ -1,11 +1,18 @@
-# Sampler Pad Studio 1.0.0
+# Sampler Pad Studio 1.1.0
 
 Official MIT-licensed independent eight-slot file manager for
 [#120](https://github.com/Cd1s/EngineX-OS/issues/120) and
-[#137](https://github.com/Cd1s/EngineX-OS/issues/137).
-Requires Linux, Python >=3.9 and QtQuick 2.12 / Controls 2.5 / Layouts 1.12.
-WAV loop slicing uses Python's wave module; imports and compressed sources need
-an **already installed** ffmpeg. No dependency installation or audio-thread hooks.
+[#137](https://github.com/Cd1s/EngineX-OS/issues/137) (static Go helper in
+1.1.0 for [#208](https://github.com/Cd1s/EngineX-OS/issues/208)).
+The decks have no Python, compiler, or package manager: this Mod ships a static
+Go helper (`bin/enginex-mod-helper-armv7` for `linux/arm` `GOARM=7` on all
+gen-1 and gen-2 armhf decks, and `bin/enginex-mod-helper-arm64` for PRIME 4 G2
+/ SYSTEM ONE), picked by busybox `sh` `start.sh` via `uname -m`. Requires Linux
+and QtQuick 2.12 / Controls 2.5 / Layouts 1.12. Uncompressed PCM WAV loop
+slicing runs directly in the Go helper; imports and compressed sources need an
+**already installed** `ffmpeg` on the deck. No dependency installation or
+audio-thread hooks. Uploading 1.1.0 in the web console replaces an installed
+1.0.0 in place (keeping its enabled state and settings).
 
 Loader lifecycle: `sh start.sh start` / `stop`. Manual foreground execution:
 `sh start.sh serve`. QML uses `127.0.0.1:17836`; host overlay component:
