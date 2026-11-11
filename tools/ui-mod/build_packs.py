@@ -1082,7 +1082,7 @@ SERVICES_MAIN = """
 			s.cue = !s.ps && !!g.cueLED.state && !!p && s.net === p.net && (s.posMs > p.posMs + 0.5 || p.cue)
 			s.playing = s.ps || s.cue
 			s.master = !!g.master.state
-			if (p && now - p.syncAt < 200) { s.sync = p.sync; s.syncAt = p.syncAt; s.range = p.range; s.rangeIndex = p.rangeIndex; s.keylock = p.keylock }
+			if (p && p.bpm === ob && p.currentBpm === cb && now - p.syncAt < 200) { s.sync = p.sync; s.syncAt = p.syncAt; s.range = p.range; s.rangeIndex = p.rangeIndex; s.keylock = p.keylock }
 			else {
 				s.sync = (g.sync.string || "Off") !== "Off"; s.syncAt = now; s.keylock = !!g.keylock.state
 				// .string allocates: the range is read again only when its index moved.
@@ -1103,15 +1103,21 @@ SERVICES_MAIN = """
 				const delta = s.posMs - expect
 				const phaseFresh = s.posMs - p.phasePos > (now - p.at) * (1 + s.pitch / 100) * 0.25
 				s.phase = undefined
-				s.phasePos = undefined
-				if (s.playing === p.playing && s.net === p.net && Math.abs(delta) > jumpMs) {
+				s.phasePos = s.posMs
+				// A held platter is not an indefinitely stale GUI read. After
+				// 500 ms use its real position once, then keep the normal jog line
+				// until playback advances again; never seek on every held tick.
+				s.phaseHold = s.sync && s.ps && p.ps && s.net === p.net && !phaseFresh &&
+					(p.phaseHold || (isFinite(p.phase) && now - p.phaseAt >= 500))
+				if (s.phaseHold) { if (!p.phaseHold) s.jumps++ }
+				else if (s.playing === p.playing && s.net === p.net && Math.abs(delta) > jumpMs) {
 					// A short GUI stall can also leave one stale audio block. Carry
 					// the old line until a small Sync step persists on the next tick;
 					// its queued recovery then never becomes a backward/forward seek.
 					if (s.sync && p.playing && (Math.abs(delta) <= 180 || (isFinite(p.phase) && !phaseFresh)) &&
 						(!isFinite(p.phase) || Math.abs(delta - p.phase) > phaseMs ||
 							!phaseFresh)) {
-						s.phase = delta; s.phasePos = s.posMs; s.posMs = expect
+						s.phase = delta; s.phaseAt = isFinite(p.phase) ? p.phaseAt : now; s.posMs = expect
 					} else s.jumps++
 				}
 				if (s.jumps !== p.jumps || s.playing !== p.playing || s.net !== p.net || Math.abs(s.pitch - p.pitch) > 0.02 || s.master !== p.master || s.sync !== p.sync || s.range !== p.range || s.keylock !== p.keylock) edge = true
@@ -1124,7 +1130,8 @@ SERVICES_MAIN = """
 			// known, the upper envelope of position - speed * time is the newest block:
 			// post that line (noise of a few ms), decaying 0.5 ms/s to follow pitch rounding.
 			const speed = 1 + s.pitch / 100, raw = s.posMs - speed * now
-			if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.sync === s.sync && p.jumps === s.jumps && isFinite(p.env)) {
+			if (s.phaseHold) s.env = s.avg = raw
+			else if (s.ps && p && p.ps && p.net === s.net && p.pitch === s.pitch && p.sync === s.sync && p.jumps === s.jumps && isFinite(p.env)) {
 				// A jog brake: the positions average ~17 ms of wall time behind the line
 				// (25 at most in steady play). Further behind, the deck is slower than its
 				// pitch: the line closes a fifth of the excess per tick. No step, so a late
@@ -1511,7 +1518,14 @@ SERVICES_MAIN = """
 		// e.pitch is rounded to 0.01 %: at 138 BPM that alone slipped 4 ms a minute.
 		// The fader goes to the source's tempo ratio, so the BPM shown is the source's.
 		const exact = e.bpm > 0 && e.currentBpm > 0 ? (e.currentBpm / e.bpm - 1) * 100 : NaN
-		if (syncEdge || tempoStep) {
+		// Native Sync can pull the source's phase in after its tempo changed.
+		// Watch its posted line for one second, without confusing our own raw
+		// decoder position with another source change. Heartbeats stay on line.
+		const phaseStep = now < (at.phaseUntil || 0) &&
+			Math.abs(target - at.phaseLine - (now - at.phaseAt) * at.phaseRate) > 40 * at.rate
+		if (syncEdge || tempoStep || phaseStep) {
+			if (syncEdge || tempoStep) at.phaseUntil = now + 1000
+			at.phaseLine = target; at.phaseAt = now; at.phaseRate = at.rate
 			if (scShadowBent && scShadowBent.at === at) scShadowBendEnd()
 			at.env = undefined
 			at.fine = undefined
@@ -1591,7 +1605,7 @@ SERVICES_MAIN = """
 		// A Sync edge or tempo step is a new phase/rate, not clock drift. Apply
 		// it on this update, with the speed already set above. Keep small audio
 		// block noise on the existing bend path and never snap on a heartbeat.
-		const snap = (!wantSync || at.nativeSync) && (syncEdge || tempoStep) && Math.abs(drift) > 40 * at.rate
+		const snap = (!wantSync || at.nativeSync) && (syncEdge || tempoStep || phaseStep) && Math.abs(drift) > 40 * at.rate
 		if (!jump) at.jumps = e.jumps
 		at.over = Math.abs(drift) > lim ? (at.over || 0) + 1 : 0
 		if (snap || (jump && now - at.seekAt >= 80) || (at.over >= 3 && now - at.seekAt >= 1000)) {

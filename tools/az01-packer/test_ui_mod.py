@@ -1951,6 +1951,24 @@ class ShadowSyncSnapTest(unittest.TestCase):
     """Sync changes the source's phase and rate; neither is ordinary clock drift."""
     js = ShadowDisplayTest.js
 
+    def test_sender_posts_sync_with_its_tempo_step_inside_the_sync_cache_window(self):
+        self.js(r"""
+globalThis.XMLHttpRequest=class{open(){this.readyState=1}send(){this.readyState=4;this.status=200}};
+globalThis.scShadowPoll=()=>{};scFourDeckRole='1';
+let bpm=128,synced=false;
+globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,color:'#fff',index:0,
+ state:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),
+ get unnormalized(){return path.endsWith('/OriginalBPM')?128:path.endsWith('/CurrentBPM')?bpm:
+  path.endsWith('/TrackPosition')?10000*48:path.endsWith('/TrackLength')?48000*400:0},
+ get string(){return path.endsWith('/SyncMode')?(synced?'BeatOrBarSync':'Off'):
+  path.endsWith('/TrackUri')?'file:///a.wav':path.endsWith('/SpeedState')?((bpm/128-1)*100).toFixed(2)+'%':''}});
+scShadowTick();
+assert.equal(scShadowOwn[0].sync,false);
+now+=40;bpm=131.84;synced=true;scShadowTick();
+assert.equal(scShadowOwn[0].currentBpm,131.84);
+assert.equal(scShadowOwn[0].sync,true,'the tempo step must not be posted with the previous Sync state');
+""")
+
     def test_sender_publishes_sync_phase_steps_without_filtering_them(self):
         self.js(r"""
 globalThis.XMLHttpRequest = class { open(){this.readyState=1} send(){this.readyState=4;this.status=200} };
@@ -2053,6 +2071,22 @@ assert.ok(presses.includes('/Engine/Deck2/Sync'),'CDJ sources still use native S
 assert.equal(seeks.length,0,'native beat Sync must retain its existing phase control');
 """)
 
+    def test_phase_pull_after_sync_uses_the_new_source_line_without_repeated_heartbeat_seeks(self):
+        self.js(self.ENGINE + r"""
+now+=80;apply({sync:true});
+assert.equal(seeks.length,0);
+now+=200;pos+=200;
+apply({sync:true,positionMs:pos+100});
+assert.equal(seeks.length,1,'a phase pull after the Sync flag must not wait for a bend');
+now+=200;pos+=200;
+apply({sync:true,positionMs:pos-90});
+assert.equal(seeks.length,2,'the later phase change must follow in either direction');
+for(let i=0;i<25;i++){now+=80;pos+=80;apply({sync:true})}
+assert.equal(seeks.length,2,'carried source heartbeats must not re-seek');
+now+=80;apply({sync:true,positionMs:pos+80});
+assert.equal(seeks.length,2,'normal drift after the transition stays on the bend path');
+""")
+
     def test_synced_gui_stall_is_ignored_but_a_real_phase_jump_survives_it(self):
         self.js(r"""
 globalThis.XMLHttpRequest=class{open(){this.readyState=1}send(){this.readyState=4;this.status=200}};
@@ -2094,6 +2128,27 @@ assert.equal(scShadowPrev[1].jumps,jumps,'one stale block remains ambiguous');
 now+=80;scShadowTick();
 assert.equal(scShadowPrev[1].jumps,jumps+1,'a real small phase step during the stall was lost');
 assert.ok(Math.abs(scShadowOwn[0].positionMs-(10000+now-T0+moved))<1);
+""")
+
+    def test_synced_platter_hold_leaves_the_stall_guard_and_keeps_the_jog_line(self):
+        self.js(r"""
+globalThis.XMLHttpRequest=class{open(){this.readyState=1}send(){this.readyState=4;this.status=200}};
+globalThis.scShadowPoll=()=>{};scFourDeckRole='1';
+const T0=now;let pos=10000;
+globalThis.scTr=path=>({value:path.endsWith('/SampleRate')?48000:0,color:'#fff',index:0,
+ state:path.endsWith('/SongLoaded')||path.endsWith('/PlayState'),
+ get unnormalized(){return path.endsWith('/TrackPosition')?pos*48:path.endsWith('/TrackLength')?48000*400:
+  path.endsWith('/OriginalBPM')||path.endsWith('/CurrentBPM')?128:0},
+ get string(){return path.endsWith('/SyncMode')?'BeatOrBarSync':path.endsWith('/TrackUri')?'file:///a.wav':''}});
+const tick=(move,dt=80)=>{now+=dt;pos+=move;scShadowTick()};
+for(let i=0;i<70;i++)tick(80);
+const jumps=scShadowPrev[1].jumps,held=pos;
+for(let i=0;i<20;i++)tick(0);
+assert.ok(scShadowPrev[1].jumps<=jumps+1,'a held platter must not seek on every sample');
+assert.ok(Math.abs(scShadowOwn[0].positionMs-held)<500,'the source line kept playing during a platter hold');
+const released=scShadowPrev[1].jumps;
+for(let i=0;i<10;i++)tick(80);
+assert.equal(scShadowPrev[1].jumps,released,'releasing the platter repeated the seek');
 """)
 
 
