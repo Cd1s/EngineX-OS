@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -206,5 +207,33 @@ func TestBootResetCannotRaceReportPublication(t *testing.T) {
 	w := bootRequest(s, "POST", "/api/boot-reset", "", "192.0.2.9:7", "TEST-CODE")
 	if w.Code != 500 || *restarts != 0 || !bootMarker(dir, "safe-mode") || !bootMarker(dir, "boot-report-latest") {
 		t.Fatalf("reset raced report: %d", w.Code)
+	}
+}
+
+// The console polls /boot-status once per page; showUI runs after every setting
+// change and must not add another poller. The public login notice and the console
+// table show the same three-language wording.
+func TestBootNoticePollerOnceAndWordingShared(t *testing.T) {
+	b, err := assets.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(b)
+	if n := strings.Count(page, "setInterval(showBootStatus"); n != 1 {
+		t.Fatalf("boot status poller registered %d times", n)
+	}
+	start := strings.Index(page, "function showUI(")
+	end := strings.Index(page[start+1:], "\nfunction ")
+	if start < 0 || end < 0 {
+		t.Fatal("showUI not found")
+	}
+	if body := page[start : start+1+end]; strings.Contains(body, "showBootStatus") || strings.Contains(body, "bootRetry').onclick") {
+		t.Fatal("showUI re-registers the boot notice handlers")
+	}
+	for _, key := range []string{"bootFallbackSaved", "bootFallbackNoDrive", "bootFallbackNoReport"} {
+		m := regexp.MustCompile(key + `:(\['(?:[^'\\]|\\.)*','(?:[^'\\]|\\.)*','(?:[^'\\]|\\.)*'\])`).FindStringSubmatch(page)
+		if m == nil || !strings.Contains(bootLoginNoticeScript, m[1]) {
+			t.Errorf("%s: login notice wording differs from the console table", key)
+		}
 	}
 }
