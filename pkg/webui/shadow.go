@@ -1116,12 +1116,17 @@ func (s *Server) shadowGet(w http.ResponseWriter, r *http.Request) {
 		s.shadowWake()
 		if seenErr == nil {
 			s.shadow.wait(r.Context(), seen, s.shadow.pollWait(v.ShadowMode != "cdj", time.Now()))
+			// The wait can span a Shadow Deck Mode switch (#201): the answer, its
+			// headers and displayOnly all follow the settings as they are now.
+			s.uiMu.Lock()
+			v = s.loadUI()
+			s.uiMu.Unlock()
 		}
 		s.shadow.mu.Lock()
 		ver = s.shadow.ver
 		lines := slices.Clone(s.shadow.lines)
 		s.shadow.mu.Unlock()
-		out = s.shadowCompose(role, time.Now(), lines)
+		out = s.shadowComposeMode(v.ShadowMode, role, time.Now(), lines)
 	}
 	metaOnly := slices.ContainsFunc(out, func(d deckState) bool { return d.MetadataOnly || strings.HasPrefix(d.Key, "cdj:") })
 	s.shadow.mu.Lock()
@@ -1169,6 +1174,12 @@ func (s *Server) shadowCompose(role string, now time.Time, lines ...[]int) []dec
 	s.uiMu.Lock()
 	mode := s.loadUI().ShadowMode
 	s.uiMu.Unlock()
+	return s.shadowComposeMode(mode, role, now, lines...)
+}
+
+// shadowComposeMode is shadowCompose for a mode the caller already read, so one
+// answer never mixes two modes.
+func (s *Server) shadowComposeMode(mode, role string, now time.Time, lines ...[]int) []deckState {
 	switch mode {
 	case "cdj":
 		return s.shadowComposeDisplay(role, now, lines...)

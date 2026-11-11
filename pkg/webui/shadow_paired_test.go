@@ -1,6 +1,8 @@
 package webui
 
 import (
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -118,5 +120,34 @@ func TestShadowPeerActiveLayer(t *testing.T) {
 				t.Fatalf("peer on Layer A: active %v, want [2]", got)
 			}
 		})
+	}
+}
+
+// #201 Linked View: a paired_view=1 left in settings.conf without the 4-deck
+// layout (hand edit, older writer) is not the paired view, neither on GET nor
+// when Linked View then goes Stock -> 4 Decks: that is 4 Decks, not Paired Player.
+func TestOrphanPairedViewIsNotPairedPlayer(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.conf"), []byte("lang=en\npaired_view=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(Config{UIDir: dir, StateDir: t.TempDir()}, nil))
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/v1/sc5000/ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got uiSettings
+	json.NewDecoder(resp.Body).Decode(&got)
+	resp.Body.Close()
+	if got.PairedView || got.FourDeckWaveform {
+		t.Fatalf("GET with an orphan paired_view: paired=%v fourDeck=%v", got.PairedView, got.FourDeckWaveform)
+	}
+	if code, v := uiPost(t, srv.URL, "fourDeckWaveform=1"); code != 200 || v.PairedView || !v.FourDeckWaveform {
+		t.Fatalf("Stock -> 4 Decks from an orphan paired_view: %d paired=%v fourDeck=%v", code, v.PairedView, v.FourDeckWaveform)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if strings.Contains(string(b), "paired_view") {
+		t.Fatalf("4 Decks saved as %q", b)
 	}
 }
