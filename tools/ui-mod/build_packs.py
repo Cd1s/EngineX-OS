@@ -4016,10 +4016,11 @@ SHADOW_LAYER = r"""
                 id: scHeader
                 anchors.fill: parent
                 readonly property var dv: scDisplay.owner && scDisplay.owner.deckView ? scDisplay.owner.deckView : null
-                readonly property bool groupedMain: !!dv && dv.deckGroupMode === 0 && dv.deckSizeMode === 0
-                readonly property bool splitMain: !!dv && dv.deckGroupMode === 1 && dv.deckSizeMode === 0
-                readonly property bool splitMini: !!dv && dv.deckGroupMode === 1 && dv.deckSizeMode === 1
-                readonly property bool hasBottomRow: !scDisplay.performance && !groupedMain && !splitMain
+                readonly property string hostState: scDisplay.owner && scDisplay.owner.parent && scDisplay.owner.parent.parent && scDisplay.owner.parent.parent.state || ""
+                readonly property bool splitMain: hostState === "Split_Main" || (!!dv && dv.deckGroupMode === 1 && dv.deckSizeMode === 0)
+                readonly property bool splitMini: hostState === "Split_Mini" || (!!dv && dv.deckGroupMode === 1 && dv.deckSizeMode === 1)
+                readonly property bool groupedMain: !splitMain && !splitMini && (hostState === "Grouped_Main" || (!!dv && dv.deckGroupMode === 0 && dv.deckSizeMode === 0))
+                readonly property bool hasBottomRow: !scDisplay.performance && !groupedMain && !splitMain && !splitMini
                 readonly property bool loaded: !!scDisplay.sample
                 readonly property bool isSync: !!(scDisplay.sample && scDisplay.sample.sync)
                 readonly property bool isLead: !!(scDisplay.sample && (scDisplay.sample.lead !== undefined && scDisplay.sample.lead !== null ? scDisplay.sample.lead : scDisplay.sample.master))
@@ -4150,6 +4151,72 @@ SHADOW_LAYER = r"""
                                 visible: scHeader.loaded
                                 Layout.bottomMargin: 3
                                 Layout.topMargin: 3
+                                RowLayout {
+                                    visible: scHeader.splitMini
+                                    Layout.fillHeight: true
+                                    Layout.rightMargin: 16
+                                    spacing: 0
+                                    AutoLoop {
+                                        Layout.preferredWidth: 52
+                                        Layout.rightMargin: 4
+                                        view: scHeader.dv ? scHeader.dv.autoLoopView : null
+                                        spacing: 4
+                                        iconWidth: 16
+                                        iconHeight: 10
+                                        textFont: Style.fontH3
+                                    }
+                                    BeatJump {
+                                        Layout.preferredWidth: 64
+                                        view: scHeader.dv ? scHeader.dv.beatJumpView : null
+                                        deckIndex: scDisplay.deck
+                                        spacing: 4
+                                        iconWidth: 16
+                                        iconHeight: 10
+                                        textFont: Style.fontH3
+                                        visible: Config.audio.deck.hasBeatJump
+                                    }
+                                    EngineXEmbedded.JP07SyncIndicator {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 24
+                                        Layout.minimumWidth: 160
+                                        Layout.maximumWidth: 160
+                                        Layout.leftMargin: 24
+                                        Layout.rightMargin: 16
+                                        deckIndex: scDisplay.deck
+                                        isMaster: scHeader.isLead
+                                    }
+                                    Item {
+                                        Layout.alignment: Qt.AlignVCenter
+                                        Layout.preferredHeight: 22
+                                        Layout.minimumWidth: 112
+                                        Layout.preferredWidth: 112
+                                        Layout.maximumWidth: 112
+                                        Layout.leftMargin: 6
+                                        Layout.rightMargin: 6
+                                        clip: true
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            readonly property var info: scDisplay.cueInfo
+                                            visible: info !== null && root.scCueCountdown
+                                            spacing: 4
+                                            Rectangle { width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: parent.info ? parent.info.color : "transparent" }
+                                            Text { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.maximumWidth: Math.max(0, Math.min(implicitWidth, parent.width - scCueCountTextSplit.implicitWidth - 11)); elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - scCueCountTextSplit.implicitWidth >= 39; text: parent.info ? parent.info.label : "" }
+                                            Text { id: scCueCountTextSplit; Layout.minimumWidth: implicitWidth; Layout.maximumWidth: implicitWidth; font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
+                                            Item { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0 }
+                                        }
+                                    }
+                                    SpeedInfo {
+                                        Layout.leftMargin: 4
+                                        speedState: scHeader.pitchVal
+                                        speedRange: scHeader.rangeStr
+                                        speedRangeTextWidth: 34
+                                        speedRangeTextHorizontalAlignment: Text.AlignLeft
+                                        speedStateTextWidth: 62
+                                        speedStateTextHorizontalAlignment: Text.AlignRight
+                                        columnSpacing: 4
+                                        flat: true
+                                    }
+                                }
                                 Item {
                                     id: scTimeSlot
                                     objectName: "Deck_TimeInfo"
@@ -4271,6 +4338,7 @@ SHADOW_LAYER = r"""
                             EngineXEmbedded.JP07SyncIndicator {
                                 Layout.preferredHeight: 24
                                 Layout.fillWidth: true
+                                Layout.minimumWidth: 135
                                 Layout.maximumWidth: 200
                                 Layout.alignment: Qt.AlignCenter
                                 deckIndex: scDisplay.deck
@@ -4280,9 +4348,12 @@ SHADOW_LAYER = r"""
                             Item {
                                 Layout.alignment: Qt.AlignVCenter
                                 Layout.preferredHeight: 22
-                                Layout.minimumWidth: 96
-                                Layout.preferredWidth: 96
-                                Layout.maximumWidth: 96
+                                Layout.minimumWidth: 112
+                                Layout.preferredWidth: 112
+                                Layout.maximumWidth: 112
+                                Layout.leftMargin: 6
+                                Layout.rightMargin: 6
+                                clip: true
                                 RowLayout {
                                     objectName: "EngineX_ShadowCueCountdown"
                                     anchors.fill: parent
@@ -4290,8 +4361,9 @@ SHADOW_LAYER = r"""
                                     visible: info !== null && root.scCueCountdown
                                     spacing: 4
                                     Rectangle { width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: parent.info ? parent.info.color : "transparent" }
-                                    Text { Layout.fillWidth: true; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== ""; text: parent.info ? parent.info.label : "" }
-                                    Text { font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
+                                    Text { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.maximumWidth: Math.max(0, Math.min(implicitWidth, parent.width - scCueCountText1.implicitWidth - 11)); elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - scCueCountText1.implicitWidth >= 39; text: parent.info ? parent.info.label : "" }
+                                    Text { id: scCueCountText1; Layout.minimumWidth: implicitWidth; Layout.maximumWidth: implicitWidth; font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
+                                    Item { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0 }
                                 }
                             }
                             SoftTakeoverIndicators {
@@ -4303,10 +4375,13 @@ SHADOW_LAYER = r"""
                                 speedState: scHeader.pitchVal
                                 speedRange: scHeader.rangeStr
                                 speedRangeTextFont: Style.fontH1
+                                speedRangeTextWidth: 34
+                                speedRangeTextHorizontalAlignment: Text.AlignLeft
                                 speedStateTextFont: Style.fontH1
-                                speedRangeTextHorizontalAlignment: Text.AlignRight
+                                speedStateTextWidth: 62
                                 speedStateTextHorizontalAlignment: Text.AlignRight
                                 textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter
+                                columnSpacing: 4
                                 flat: true
                             }
                         }
@@ -4341,7 +4416,8 @@ SHADOW_LAYER = r"""
                     EngineXEmbedded.JP07SyncIndicator {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 24
-                        Layout.maximumWidth: 200
+                        Layout.minimumWidth: 180
+                        Layout.maximumWidth: 220
                         Layout.leftMargin: 12
                         Layout.rightMargin: 12
                         Layout.alignment: Qt.AlignCenter
@@ -4352,9 +4428,12 @@ SHADOW_LAYER = r"""
                     Item {
                         Layout.alignment: Qt.AlignVCenter
                         Layout.preferredHeight: 22
-                        Layout.minimumWidth: 96
-                        Layout.preferredWidth: 96
-                        Layout.maximumWidth: 96
+                        Layout.minimumWidth: 112
+                        Layout.preferredWidth: 112
+                        Layout.maximumWidth: 112
+                        Layout.leftMargin: 6
+                        Layout.rightMargin: 6
+                        clip: true
                         RowLayout {
                             objectName: "EngineX_ShadowCueCountdown"
                             anchors.fill: parent
@@ -4362,14 +4441,15 @@ SHADOW_LAYER = r"""
                             visible: info !== null && root.scCueCountdown
                             spacing: 4
                             Rectangle { width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: parent.info ? parent.info.color : "transparent" }
-                            Text { Layout.fillWidth: true; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== ""; text: parent.info ? parent.info.label : "" }
-                            Text { font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
+                            Text { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.maximumWidth: Math.max(0, Math.min(implicitWidth, parent.width - scCueCountText2.implicitWidth - 11)); elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - scCueCountText2.implicitWidth >= 39; text: parent.info ? parent.info.label : "" }
+                            Text { id: scCueCountText2; Layout.minimumWidth: implicitWidth; Layout.maximumWidth: implicitWidth; font: Style.fontH3; color: parent.info && parent.info.urgent ? "#ff9f1c" : Style.font02Color; text: parent.info ? parent.info.text : "" }
+                            Item { Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0 }
                         }
                     }
                     SoftTakeoverIndicators {
                         Layout.alignment: Qt.AlignCenter
-                        Layout.leftMargin: 8
-                        Layout.rightMargin: 12
+                        Layout.leftMargin: 4
+                        Layout.rightMargin: 4
                         flow: Flow.LeftToRight
                         spacing: -4
                         speedOffsetIsUp: false
@@ -4380,13 +4460,13 @@ SHADOW_LAYER = r"""
                         speedState: scHeader.pitchVal
                         speedRange: scHeader.rangeStr
                         speedRangeTextFont: Style.fontH1
-                        speedRangeTextWidth: 80
-                        speedRangeTextHorizontalAlignment: Text.AlignHCenter
+                        speedRangeTextWidth: 34
+                        speedRangeTextHorizontalAlignment: Text.AlignLeft
                         speedStateTextFont: Style.fontH1
-                        speedStateTextWidth: 80
+                        speedStateTextWidth: 62
                         speedStateTextHorizontalAlignment: Text.AlignRight
                         textLayoutAlignment: Qt.AlignCenter
-                        columnSpacing: 0
+                        columnSpacing: 4
                         flat: true
                     }
                 }
@@ -4532,9 +4612,12 @@ def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False
     // Reserve the Cue slot even without a cue: LEAD never changes width.
     Layout.alignment: Qt.AlignVCenter
     Layout.preferredHeight: 22
-    Layout.minimumWidth: 96
-    Layout.preferredWidth: 96
-    Layout.maximumWidth: 96
+    Layout.minimumWidth: 112
+    Layout.preferredWidth: 112
+    Layout.maximumWidth: 112
+    Layout.leftMargin: 6
+    Layout.rightMargin: 6
+    clip: true
     RowLayout {{
         id: cueCap
         objectName: "EngineX_CueCountdown"
@@ -4544,8 +4627,9 @@ def cue_capsule(ind: str, deck_expr: str, h: int, px: int, compact: bool = False
         spacing: 4
 {'        Rectangle { width: 1; height: 18; Layout.alignment: Qt.AlignVCenter; color: Style.surface03Color }' if lead_sep else ''}
         Rectangle {{ width: 3; height: 14; radius: 1; Layout.alignment: Qt.AlignVCenter; color: cueCap.info ? cueCap.info.color : "transparent" }}
-        Text {{ Layout.fillWidth: true; elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== ""; text: cueCap.info ? cueCap.info.label : "" }}
-        Text {{ font: Style.fontH3; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
+        Text {{ Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.maximumWidth: Math.max(0, Math.min(implicitWidth, parent.width - cueCountText.implicitWidth - 11)); elide: Text.ElideRight; font: Style.fontH3; color: Style.font01Color; visible: text !== "" && parent.width - cueCountText.implicitWidth >= 39; text: cueCap.info ? cueCap.info.label : "" }}
+        Text {{ id: cueCountText; Layout.minimumWidth: implicitWidth; Layout.maximumWidth: implicitWidth; font: Style.fontH3; color: cueCap.info && cueCap.info.urgent ? "#ff9f1c" : Style.font02Color; text: cueCap.info ? cueCap.info.text : "" }}
+        Item {{ Layout.fillWidth: true; Layout.minimumWidth: 0; Layout.preferredWidth: 0 }}
     }}
 }}
 """
@@ -5460,9 +5544,13 @@ def edits(dev: bool):
             scaled[bj + rel].append((line, indent + "deckIndex: " + owner + ".deckView.deckData.deckIndex\n" + line))
         # Same compact order in both deck counts: Loop / BeatJump / LEAD /
         # Cue / soft takeover / speed. Never spend the time display's width.
+        scaled[bj + "DeckPerformanceData/DeckPerformanceData.qml"] = [
+            ("        visible: control.deckView.deckData.songLoaded\n",
+             '        visible: control.deckView.deckData.songLoaded || (typeof root !== "undefined" && root && root.scShadowVisible && root.scShadowVisible(control.deckView.deckData.deckIndex))\n'),
+        ]
         performance = bj + "DeckPerformanceData/DeckPerformanceDataContent.qml"
         scaled[performance] += [
-            ("    SoftTakeoverIndicators {\n", cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n    SoftTakeoverIndicators {\n"),
+            ("    Item {\n        id: spacer2\n", cue_capsule("    ", "deckPerformanceDataContent.deckData.deckIndex", 22, 16, compact=True, lead_sep=False) + "\n    Item {\n        id: spacer2\n"),
             ("        id: autoLoop\n", "        id: autoLoop\n        Layout.rightMargin: 4\n"),
         ]
         # Both controls have spacing:6; patch() deliberately requires a unique
@@ -5472,11 +5560,19 @@ def edits(dev: bool):
             anchor = ("        view: deckPerformanceDataContent.deckView." + view + "\n" +
                       ("        deckIndex: deckPerformanceDataContent.deckView.deckData.deckIndex\n" if control == "beatJump" else ""))
             scaled[performance].append((anchor + "        spacing: 6\n", anchor + "        spacing: 4\n"))
-        # 56 px from Loop/Jump + 24 px sync margins + 16 px takeover margin
-        # pays for the entire 96 px Cue. The stock sync width is unchanged.
+        # Compact right-side SpeedInfo (34 + 4 + 62 = 100 px vs stock 160 px)
+        # places SoftTakeoverIndicators tightly beside ±8 and widens LEAD + Cue.
         scaled[performance] += [
-            ("        Layout.leftMargin: 24\n        Layout.rightMargin: 24\n", "        Layout.leftMargin: 12\n        Layout.rightMargin: 12\n"),
-            ("                Layout.leftMargin: 24\n", "                Layout.leftMargin: 8\n"),
+            ("        Layout.preferredHeight: 24\n        Layout.maximumWidth: 200\n        Layout.leftMargin: 24\n        Layout.rightMargin: 24\n",
+             "        Layout.preferredHeight: 24\n        Layout.minimumWidth: 180\n        Layout.maximumWidth: 220\n        Layout.leftMargin: 12\n        Layout.rightMargin: 12\n"),
+            ("                Layout.leftMargin: 24\n                Layout.rightMargin: 12\n",
+             "                Layout.leftMargin: 4\n                Layout.rightMargin: 4\n"),
+            ("                target: softTakeoverIndicators\n                Layout.rightMargin: 32\n",
+             "                target: softTakeoverIndicators\n                Layout.rightMargin: 8\n"),
+            ("        speedRangeTextFont: Style.fontH1\n        speedRangeTextWidth: 80\n        speedRangeTextHorizontalAlignment: Text.AlignHCenter\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextWidth: 80\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 0\n",
+             "        speedRangeTextFont: Style.fontH1\n        speedRangeTextWidth: 34\n        speedRangeTextHorizontalAlignment: Text.AlignLeft\n\n        speedStateTextFont: Style.fontH1\n        speedStateTextWidth: 62\n        speedStateTextHorizontalAlignment: Text.AlignRight\n\n        textLayoutAlignment: Qt.AlignCenter\n        columnSpacing: 4\n"),
+            ("                speedRangeTextFont: Style.fontTitle\n                speedRangeTextWidth: 144\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                speedStateTextWidth: 144\n",
+             "                speedRangeTextFont: Style.fontTitle\n                speedRangeTextWidth: 64\n                speedRangeTextHorizontalAlignment: Text.AlignLeft\n                speedRangeTextColor: Style.font02Color\n\n                speedStateTextFont: Style.fontTitle\n                speedStateTextWidth: 96\n"),
         ]
         for control, width in (("autoLoop", 52), ("beatJump", 64)):
             scaled[performance] += [
@@ -5491,9 +5587,14 @@ def edits(dev: bool):
             ("                spacing: 16\n                visible: deckTrackDataContent.songLoaded\n", "                spacing: 4\n                visible: deckTrackDataContent.songLoaded\n"),
             ("                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 72\n", "                    Layout.alignment: Qt.AlignLeft\n                    Layout.preferredWidth: 52\n"),
             ("                    textFont: Style.fontH1\n                    Layout.preferredWidth: 72\n", "                    textFont: Style.fontH3\n                    Layout.preferredWidth: 64\n"),
+            ("                    Layout.preferredHeight: 24\n                    Layout.fillWidth: true\n                    Layout.maximumWidth: 200\n",
+             "                    Layout.preferredHeight: 24\n                    Layout.fillWidth: true\n                    Layout.minimumWidth: 135\n                    Layout.maximumWidth: 200\n"),
+            ("                    speedRangeTextFont: Style.fontH1\n                    speedStateTextFont: Style.fontH1\n                    speedRangeTextHorizontalAlignment: Text.AlignRight\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    flat: true\n",
+             "                    speedRangeTextFont: Style.fontH1\n                    speedRangeTextWidth: 34\n                    speedRangeTextHorizontalAlignment: Text.AlignLeft\n                    speedStateTextFont: Style.fontH1\n                    speedStateTextWidth: 62\n                    speedStateTextHorizontalAlignment: Text.AlignRight\n                    textLayoutAlignment: Qt.AlignRight | Qt.AlignVCenter\n                    columnSpacing: 4\n                    flat: true\n"),
         ]
-        # Original mini row: 72 + 72 + 6*16 = 240. Compact row:
-        # 52 + 64 + 96 + 7*4 = 240. Thus LEAD keeps exactly its stock width.
+        # Compact SpeedInfo (34 + 4 + 62 = 100 px vs stock 56 + 16 + 84 = 156 px)
+        # frees 56 px: 28 px widens Cue + its margins (112 + 6 + 6 = 124 px) and
+        # 28 px expands the sync/LEAD slot from 107 px to 135 px.
         # Use control-specific beginnings to keep all anchors unique.
         scaled[mini] += [
             ("                    view: deckTrackDataContent.deckView.autoLoopView\n                    spacing: 6\n                    iconWidth: 20\n                    iconHeight: 12\n                    textFont: Style.fontH1\n",
@@ -5526,8 +5627,10 @@ def edits(dev: bool):
             Layout.leftMargin: 4
             speedState: deckTrackDataContent.deckData.speedState
             speedRange: deckTrackDataContent.deckData.speedRange
-            speedRangeTextWidth: 32
-            speedStateTextWidth: 70
+            speedRangeTextWidth: 34
+            speedRangeTextHorizontalAlignment: Text.AlignLeft
+            speedStateTextWidth: 62
+            speedStateTextHorizontalAlignment: Text.AlignRight
             columnSpacing: 4
             flat: true
         }
@@ -5589,7 +5692,9 @@ def edits(dev: bool):
         ])
         scaled[ROOT + "Views/MainView/Components/JP07SyncIndicator.qml"] = [
             ("    property bool isMaster: pDeckIsMaster.translator && pDeckIsMaster.translator.state\n",
-             "    property bool isMaster: " + head("deckIndex", "master", "pDeckIsMaster.translator && pDeckIsMaster.translator.state") + "\n")]
+             "    property bool isMaster: " + head("deckIndex", "master", "pDeckIsMaster.translator && pDeckIsMaster.translator.state") + "\n"),
+            ("    property Component leadLabelComponent: RowLayout {\n        Layout.margins: 2\n        id: leadLabelContainer\n\n        Layout.fillWidth: true\n        Layout.fillHeight: true\n        spacing: 8\n",
+             "    property Component leadLabelComponent: RowLayout {\n        Layout.margins: 0\n        id: leadLabelContainer\n\n        Layout.fillWidth: true\n        Layout.fillHeight: true\n        spacing: 6\n")]
         scaled[bj + "Deck/DeckItem/BpmInfo.qml"] = [
             ("    readonly property bool syncEnabled: deckController && deckController.syncInfoViewController.syncEnabled\n",
              "    readonly property bool syncEnabled: " + head("deckIndex", "sync", "deckController && deckController.syncInfoViewController.syncEnabled") + "\n"),
