@@ -970,10 +970,10 @@ func ShutdownContext() (context.Context, context.CancelFunc) {
 // Public notice uses only the fixed booleans from /boot-status.
 const bootLoginNoticeScript = `
 const bootNotices=[
-['EngineX fell back to stock Engine. A boot report was saved to your USB drive.','EngineX 已回退至原厂 Engine。启动报告已保存到您的 USB 驱动器。','EngineX 已退回原廠 Engine。啟動報告已儲存至您的 USB 磁碟。'],
-['EngineX fell back to stock Engine. A boot report was saved locally; a writable USB/SD drive is unavailable. Insert one to export the report.','EngineX 已回退至原厂 Engine。启动报告已保存在本机；目前没有可写入的 USB/SD 驱动器，插入后将导出报告。','EngineX 已退回原廠 Engine。啟動報告已儲存在本機；目前沒有可寫入的 USB/SD 磁碟，插入後將匯出報告。'],
-['EngineX fell back to stock Engine. The boot report is currently unavailable.','EngineX 已回退至原厂 Engine。启动报告暂时不可用。','EngineX 已退回原廠 Engine。啟動報告暫時無法使用。']];
-const bootNoCodeHints=['No access code is needed to collect the report from your USB/SD drive.','从 USB/SD 介质取出报告无需访问码。','從 USB/SD 媒體取出報告不需存取碼。'];
+['EngineX fell back to stock Engine. A boot report was saved to your USB drive.','EngineX 已回退至原厂 Engine，启动报告已保存到 U 盘。','EngineX 已退回原廠 Engine，啟動報告已儲存至隨身碟。'],
+['EngineX fell back to stock Engine. A boot report was saved locally; a writable USB/SD drive is unavailable. Insert one to export the report.','EngineX 已回退至原厂 Engine。启动报告已保存在本机；当前没有可写的 U 盘或 SD 卡，插入后将自动导出。','EngineX 已退回原廠 Engine。啟動報告已儲存在本機；目前沒有可寫入的隨身碟或 SD 卡，插入後將自動匯出。'],
+['EngineX fell back to stock Engine. The boot report is currently unavailable.','EngineX 已回退至原厂 Engine，启动报告暂不可用。','EngineX 已退回原廠 Engine，啟動報告暫時無法使用。']];
+const bootNoCodeHints=['No access code is needed to collect the report from your USB/SD drive.','从 U 盘或 SD 卡拷取报告无需访问码。','從隨身碟或 SD 卡取得報告不需存取碼。'];
 const bootNormalHint=document.getElementById('hint').textContent;
 async function showBootNotice(){try{const r=await fetch('/boot-status',{cache:'no-store'});if(!r.ok)return;const v=await r.json();const e=document.getElementById('bootFallback');e.hidden=!v.fallback;const i=l.startsWith('zh')?(l.includes('hant')||/-(tw|hk|mo)/.test(l)?2:1):0;e.textContent=bootNotices[v.driveAvailable?0:v.reportSaved?1:2][i];document.getElementById('hint').textContent=v.fallback?bootNoCodeHints[i]:bootNormalHint}catch{}}
 showBootNotice();setInterval(showBootNotice,5000);
