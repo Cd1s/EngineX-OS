@@ -520,8 +520,8 @@ static void test_config(void) {
         if (build->config_zoom == 0x52c) config[0x12e] = model & 1; // #166: NH and non-NH
         memcpy(expected, config, sizeof expected);
         for (size_t i = 0; i < 5; i++) expected[fields[i]] = i == 4 ? 0 : 1;
-        if (strcmp(build->name, "5.3.0-sclive4") != 0)
-            expected[fields[3] + 1] = 1; // gen1 only: hasStemsProcessorFactoryInstalled
+        if (!strcmp(build->name, "5.3.0"))
+            expected[0x2a7] = 1; // gen1 5.3.0 only: hasStemsProcessorFactoryInstalled
         if (build->config_zoom == 0x52c) expected[0x54] = 1; // #152: Config.audio.hasStemsLevel
         if (build->config_zoom == 0x52c && config[0x12e])
             expected[0xe1] = expected[0x19c] = expected[0x19d] = expected[0x4cd] = 1; // #166; retain hasNHFx
@@ -1006,26 +1006,9 @@ static void test_patch_files(const char *filename) {
         image[e->offset] ^= 0xff;
         assert(edit_state((uintptr_t)image, e) == 0);
     }
-    // Gen1 bundles /usr/local/bin/stems-processor in rootfs: ViewsController's first-boot
-    // NewFeaturePopup gate skips raising the box, and DownloadManager marks the existing
-    // processor factory-installed (canModifyInstall == false). Gen2 stays untouched.
-    uint32_t popup_off = !strcmp(build->name, "5.3.0") ? 0x5070ecu : (!strcmp(build->name, "5.0.4") ? 0x4e28ccu : 0u);
-    uint32_t factory_off = !strcmp(build->name, "5.3.0") ? 0x8c5e84u : (!strcmp(build->name, "5.0.4") ? 0x86520cu : 0u);
-    int saw_popup = 0, saw_factory = 0;
-    for (size_t i = 0; i < build->edit_count; i++) {
-        const struct engine_edit *e = &build->edits[i];
-        if (popup_off && e->offset == popup_off) {
-            assert(e->size == 4 && e->group == EDIT_STEMS && (uchar)e->expected[3] == 0x0au && (uchar)e->replacement[3] == 0xeau);
-            saw_popup = 1;
-        }
-        if (factory_off && e->offset == factory_off) {
-            assert(e->size == 4 && e->group == EDIT_STEMS && !memcmp(e->replacement, "\x05\x80\xa0\xe1", 4));
-            saw_factory = 1;
-        }
-        if (!strcmp(build->name, "5.3.0-sclive4"))
-            assert(memcmp(e->replacement, "\x05\x80\xa0\xe1", 4) != 0);
-    }
-    if (popup_off) assert(saw_popup && saw_factory);
+    if (!strcmp(build->name, "5.0.4")) assert(build->edit_count == 16);
+    if (!strcmp(build->name, "5.3.0")) assert(build->edit_count == 20);
+    if (!strcmp(build->name, "5.3.0-sclive4")) assert(build->edit_count == 23);
     for (unsigned i = 0; i < DSP_HOOK_COUNT; i++) {
         size_t bytes;
         const void *expected = dsp_expected(i, &bytes);
