@@ -26,7 +26,7 @@
     <rect x="64" y="256" width="732" height="76" rx="10" fill="#16202b" stroke="#39ff88" stroke-width="2"/>
     <circle cx="94" cy="294" r="8" fill="#39ff88"/>
     <text x="118" y="288" fill="#e8f1f8" font-size="18" font-weight="700">Denon DJ SC5000 Prime · JP07</text>
-    <text x="118" y="314" fill="#7f93a5" font-size="14">192.168.1.xx · Engine OS 5.3.0 → EngineX OS 5.0.4.2</text>
+    <text x="118" y="314" fill="#7f93a5" font-size="14">192.168.1.xx · Engine OS 5.3.0 → EngineX OS 5.3.0.4</text>
     <rect x="652" y="272" width="124" height="44" rx="8" fill="#39ff88"/>
     <text x="714" y="300" fill="#04150b" font-size="16" font-weight="700" text-anchor="middle">一键升级 Upgrade</text>
   </g>
