@@ -1476,11 +1476,63 @@ tick(2000); assert.equal(bodies.length,2,'no layer change: pings only');
 layer=0; tick(40); assert.equal(bodies.length,3); assert.equal(bodies[2][0].active,true);
 """)
 
+    def test_waveform_view_selector_returns_to_stock_201(self):
+        # Maintainer report: with Paired Player on there was no visible way back to the
+        # stock view (that was a second switch, 4-Deck Waveform). One selector now holds
+        # Stock / Paired Player / 4 Decks, and Stock always turns the 4-deck layout off.
+        e = bp.FOUR_DECK_ENTRIES
+        self.assertNotIn('text: "4-Deck Waveform"', e)
+        self.assertEqual(e.count('text: "Paired Player"'), 0)
+        self.assertEqual(e.count('text: "Waveform View"'), 1)
+        at = re.search(r"readonly property int at: (.*)\n", e).group(1)
+        values = re.search(r"\n\t\t\tvalues: (root\.scIsPlayerBoard \?.*)\n", e).group(1)
+        body = re.search(r"onSelected: function\(index\) \{\n(.*?)\n\t\t\t\}", e, re.S).group(1)
+        rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
+        for en in ("Waveform View", "Stock", "Paired Player", "4 Decks"):
+            self.assertEqual(len(rows.get(en, [])), 2, en)
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        script = f"""
+const assert = require('assert');
+function run(player, fourDeck, paired, index) {{
+  const calls = [];
+  const root = {{ scIsPlayerBoard: player, scFourDeckOn: fourDeck, scPairedSetting: paired,
+    scRestartCall: q => calls.push('restart ' + q), scCall: q => calls.push('call ' + q) }};
+  const values = {values};
+  const at = {at};
+  if (index !== undefined) (function(index) {{
+{body}
+  }})(index);
+  return {{ shown: values[at], values, calls }};
+}}
+// Standalone player: three modes.
+assert.deepStrictEqual(run(true, false, false).values, ['Stock', 'Paired Player', '4 Decks']);
+assert.strictEqual(run(true, false, false).shown, 'Stock');
+assert.strictEqual(run(true, true, true).shown, 'Paired Player');
+assert.strictEqual(run(true, true, false).shown, '4 Decks');
+// The bug: from Paired Player (or 4 Decks) back to stock in one step, Engine restarts.
+assert.deepStrictEqual(run(true, true, true, 0).calls, ['restart fourDeckWaveform=0']);
+assert.deepStrictEqual(run(true, true, false, 0).calls, ['restart fourDeckWaveform=0']);
+// From stock into either mode is a restart; between the two 4-deck-layout modes it is not.
+assert.deepStrictEqual(run(true, false, false, 1).calls, ['restart pairedView=1']);
+assert.deepStrictEqual(run(true, false, false, 2).calls, ['restart fourDeckWaveform=1']);
+assert.deepStrictEqual(run(true, true, true, 2).calls, ['call pairedView=0']);
+assert.deepStrictEqual(run(true, true, false, 1).calls, ['call pairedView=1']);
+// Re-selecting the shown mode does nothing.
+assert.deepStrictEqual(run(true, true, true, 1).calls, []);
+assert.deepStrictEqual(run(true, false, false, 0).calls, []);
+// All-in-one with 4 decks: no Paired Player, a stale paired flag is ignored.
+assert.deepStrictEqual(run(false, true, true).values, ['Stock', '4 Decks']);
+assert.strictEqual(run(false, true, true).shown, '4 Decks');
+assert.deepStrictEqual(run(false, true, false, 0).calls, ['restart fourDeckWaveform=0']);
+assert.deepStrictEqual(run(false, false, false, 1).calls, ['restart fourDeckWaveform=1']);
+"""
+        res = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+
     def test_paired_player_entry_and_lane_order_201(self):
-        self.assertIn('text: "Paired Player"', bp.FOUR_DECK_ENTRIES)
+        self.assertIn('values: root.scIsPlayerBoard ? ["Stock", "Paired Player", "4 Decks"] : ["Stock", "4 Decks"]', bp.FOUR_DECK_ENTRIES)
         self.assertIn("visible: root.scIsPlayerBoard", bp.FOUR_DECK_ENTRIES)
-        self.assertIn('root.scRestartCall("pairedView=1")', bp.FOUR_DECK_ENTRIES)
-        self.assertIn('root.scCall("pairedView=" + index)', bp.FOUR_DECK_ENTRIES)
         self.assertIn("scPairedSetting = !!v.fourDeckWaveform && !!v.pairedView", bp.SERVICES_MAIN)
         self.assertIn("if (scPairedOn) scPairedFollow(decks)", bp.SERVICES_MAIN)
         # Both hint lines go through translate(): no comparison on their text line.
