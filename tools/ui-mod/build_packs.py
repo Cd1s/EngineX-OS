@@ -3647,20 +3647,20 @@ LED_ENTRY = """
 """
 
 FOUR_DECK_ENTRIES = """
-		EntryBase.ListEntry {
-			text: "4-Deck Waveform"
+		EntryBase.ListEntry { // one mode switch: Stock is always one step back (#201 Paired Player = two standalone players, one deck of each)
+			text: "Waveform View"
 			visible: root.scCanFourDeck
-			values: ["Off", "On"]
-			currentValue: root.scFourDeckOn ? "On" : "Off"
-			onSelected: function(index) { if ((index === 1) !== root.scFourDeckOn) root.scRestartCall("fourDeckWaveform=" + index) }
-		},
-		EntryBase.ListEntry { // #201: two standalone players, one deck of each
-			text: "Paired Player"
-			visible: root.scIsPlayerBoard
-			values: ["Off", "On"]
-			currentValue: root.scPairedSetting ? "On" : "Off"
-			// It runs in the 4-deck layout (an Engine restart to get there); between the two views, none.
-			onSelected: function(index) { if ((index === 1) !== root.scPairedSetting) { if (index === 1 && !root.scFourDeckOn) root.scRestartCall("pairedView=1"); else root.scCall("pairedView=" + index) } }
+			readonly property int at: !root.scFourDeckOn ? 0 : root.scIsPlayerBoard && root.scPairedSetting ? 1 : values.length - 1
+			values: root.scIsPlayerBoard ? ["Stock", "Paired Player", "4 Decks"] : ["Stock", "4 Decks"]
+			currentValue: values[at]
+			// Stock <-> the 4-deck layout is an Engine restart; Paired Player <-> 4 Decks (both in that layout) is not.
+			onSelected: function(index) {
+				if (index === at) return
+				var paired = root.scIsPlayerBoard && index === 1
+				if (index === 0) root.scRestartCall("fourDeckWaveform=0")
+				else if (!root.scFourDeckOn) root.scRestartCall(paired ? "pairedView=1" : "fourDeckWaveform=1")
+				else root.scCall("pairedView=" + (paired ? 1 : 0))
+			}
 		},
 		@HEADLINE@ {
 			visible: root.scIsPlayerBoard && root.scPairedSetting
