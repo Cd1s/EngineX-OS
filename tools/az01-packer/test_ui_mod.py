@@ -1476,20 +1476,32 @@ tick(2000); assert.equal(bodies.length,2,'no layer change: pings only');
 layer=0; tick(40); assert.equal(bodies.length,3); assert.equal(bodies[2][0].active,true);
 """)
 
-    def test_waveform_view_selector_returns_to_stock_201(self):
+    def test_linked_view_selector_returns_to_stock_201(self):
         # Maintainer report: with Paired Player on there was no visible way back to the
         # stock view (that was a second switch, 4-Deck Waveform). One selector now holds
         # Stock / Paired Player / 4 Decks, and Stock always turns the 4-deck layout off.
         e = bp.FOUR_DECK_ENTRIES
         self.assertNotIn('text: "4-Deck Waveform"', e)
         self.assertEqual(e.count('text: "Paired Player"'), 0)
-        self.assertEqual(e.count('text: "Waveform View"'), 1)
+        self.assertEqual(e.count('text: "Linked View"'), 1)
+        self.assertNotIn("Waveform View", e)
+        # Under Stock a player gets one grey line on its own single / dual layer switches.
+        hint = re.search(r"@HEADLINE@ \{ // Stock on a player.*?\n\t\t\},", e, re.S).group(0)
+        self.assertIn("visible: root.scIsPlayerBoard && scLinkedViewEntry.at === 0", hint)
+        self.assertIn('text: "Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout"', hint)
         at = re.search(r"readonly property int at: (.*)\n", e).group(1)
         values = re.search(r"\n\t\t\tvalues: (root\.scIsPlayerBoard \?.*)\n", e).group(1)
         body = re.search(r"onSelected: function\(index\) \{\n(.*?)\n\t\t\t\}", e, re.S).group(1)
         rows = {l.split("\t")[0]: l.split("\t")[1:] for l in (REPO / "tools/ui-mod/i18n.tsv").read_text(encoding="utf-8").splitlines() if l and not l.startswith("#")}
-        for en in ("Waveform View", "Stock", "Paired Player", "4 Decks"):
+        for en in ("Linked View", "Stock", "Paired Player", "4 Decks", "Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout"):
             self.assertEqual(len(rows.get(en, [])), 2, en)
+        self.assertEqual(rows["Linked View"], ["联机视图", "聯機視圖"])
+        self.assertEqual(rows["Stock"], ["原厂", "原廠"])
+        # The hint names the stock menu with the stock labels of each language.
+        for i, (layout, perf, deck, single) in enumerate(zip(rows["Layout"], rows["PERFORMANCE LAYOUT"], rows["Deck Layout"], rows["Single"])):
+            line = rows["Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout"][i]
+            self.assertIn(f"{layout} > {perf} > {deck}", line)
+            self.assertTrue(line.startswith(single), line)
         if not shutil.which("node"):
             self.skipTest("node not installed")
         script = f"""
