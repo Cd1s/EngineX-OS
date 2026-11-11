@@ -39,6 +39,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/prolink"
 )
@@ -1485,6 +1486,13 @@ func (s *Server) shadowFetchCDJ(key string, host net.IP, slot byte, id uint32) {
 		}
 		var perf []byte
 		if t, a, err := prolink.FetchAnalysis(ctx, c, slot, id); err == nil {
+			if info, err := compat.AudioHeader(local); err == nil && info.SampleRate > 0 {
+				t.SampleRate = info.SampleRate
+				if info.Samples > 0 {
+					t.SampleCount = info.Samples
+				}
+				t.StartOffsetSamples = info.StartOffsetSamples
+			}
 			if p, err := enginedb.EncodePerformance(t, a); err == nil && p.Complete {
 				perf, _ = perfFromBlobs(t.BPM, p.TrackData, p.Beats, p.Overview)
 			}
