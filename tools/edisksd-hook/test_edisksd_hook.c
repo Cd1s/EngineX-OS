@@ -126,6 +126,11 @@ static void test_compat_symlink_root(const char *root) {
     join(test_library,dangling,"enginex/hfs-libraries");join(test_legacy_library,dangling,"sc5000-custom/hfs-libraries");errno=0;
     assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&errno==ELOOP);
     join(p,dangling,"enginex");assert(access(p,F_OK)==-1&&errno==ENOENT);
+    // r2 left-deck bug: an older build made hfs-libraries 0755 and every HFS+ stick failed EACCES (no playlists).
+    char loose[PATH_MAX];join(loose,root,"loose-data");join(p,loose,"enginex/hfs-libraries");assert(!make_dirs(p));assert(!chmod(p,0755));
+    join(test_library,loose,"enginex/hfs-libraries");test_legacy_library[0]=0;
+    assert(!seed_library(volume_path,"uuid-a",again,deadline_from(now_ms())));
+    assert(!lstat(p,&st)&&(st.st_mode&0777)==0700);
     // A real root directory that others can write is refused like a shared link target.
     char open_data[PATH_MAX];join(open_data,root,"open-data");join(p,open_data,"enginex");assert(!make_dirs(p));assert(!chmod(p,0777));
     join(test_library,open_data,"enginex/hfs-libraries");test_legacy_library[0]=0;errno=0;

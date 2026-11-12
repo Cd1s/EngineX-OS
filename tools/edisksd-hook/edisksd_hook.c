@@ -278,7 +278,10 @@ static int seed_library(const char *target,const char *identity,char library[PAT
     char native[PATH_MAX],root[PATH_MAX],stage[PATH_MAX],cache[PATH_MAX];struct stat st;
     if(path_join(native,sizeof native,target,"Engine Library")||safe_path(native,1)||
        lib_root(cache)||make_dirs(cache))return -1;
-    struct stat cache_stat;
+    struct stat cache_stat;int cache_fd;
+    // Older builds left this cache 0755; tighten our own real directory instead of refusing every HFS+ stick.
+    if(!lstat(cache,&cache_stat)&&S_ISDIR(cache_stat.st_mode)&&cache_stat.st_uid==geteuid()&&(cache_stat.st_mode&077)&&
+       (cache_fd=open(cache,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC))>=0){if(fchmod(cache_fd,0700))note("cannot tighten",cache,errno);close(cache_fd);}
     if(lstat(cache,&cache_stat)||cache_stat.st_uid!=geteuid()||(cache_stat.st_mode&077)){errno=EACCES;return -1;}
     if(path_join(root,sizeof root,cache,identity)||make_dirs(root))return -1;
     uint64_t signature=0;int src=-1,reuse=0;
