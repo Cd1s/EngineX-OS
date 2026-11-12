@@ -15,14 +15,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/stems"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
-var lanStemsProbe func(ctx context.Context, last *stems.LANState, timeout time.Duration) (stems.LANState, bool)
+var lanStemsProbe = stems.ProbeLAN
 
 type relayConfig struct {
 	RelayURL string `json:"relayUrl,omitempty"`
@@ -70,7 +69,11 @@ func (s *Server) relayStatusView() relayConfigStatus {
 	if st := s.probeRelayStems(relay, password, v.LANStems); st != nil {
 		v.LANStems = st
 	} else if relay == "" || password == "" || v.LANStems == nil || !v.LANStems.Online {
-		s.scheduleLANStemsProbe(v.LANStems)
+		lanSaved := v.LANStems
+		if lanSaved != nil && relay != "" && strings.TrimRight(strings.TrimSpace(lanSaved.Endpoint), "/") == strings.TrimRight(strings.TrimSpace(relay), "/") {
+			lanSaved = nil
+		}
+		s.scheduleLANStemsProbe(lanSaved)
 	}
 	return v
 }
@@ -98,9 +101,6 @@ func (s *Server) scheduleLANStemsProbe(saved *stems.LANState) {
 		return
 	}
 	probe := lanStemsProbe
-	if probe == nil && !testing.Testing() {
-		probe = stems.ProbeLAN
-	}
 	if probe == nil {
 		return
 	}
@@ -134,7 +134,7 @@ func (s *Server) scheduleLANStemsProbe(saved *stems.LANState) {
 			relayProbeMu.Unlock()
 		}()
 
-		ctx, cancel := context.WithTimeout(context.Background(), lanProbeTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*lanProbeTimeout)
 		defer cancel()
 		stop := make(chan struct{})
 		defer close(stop)
