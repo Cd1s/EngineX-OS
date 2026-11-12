@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/deezer"
+	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
 
 const (
@@ -412,9 +413,8 @@ func (d *daemon) credentials(ctx context.Context) (string, error) {
 	if err != nil || u.Host == "" || u.User != nil {
 		return "", errors.New("invalid deemixUrl")
 	}
-	ip := net.ParseIP(u.Hostname())
-	if u.Scheme != "https" && !(u.Scheme == "http" && ip != nil && ip.IsLoopback()) {
-		return "", errors.New("deemixUrl must use HTTPS")
+	if !stems.ValidEndpoint(relay) {
+		return "", errors.New("deemixUrl must use HTTPS or a private LAN address")
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/api/config"
 	u.RawPath = ""
