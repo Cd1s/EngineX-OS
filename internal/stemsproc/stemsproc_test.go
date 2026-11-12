@@ -161,3 +161,28 @@ func TestMuxReplaysPrefixUntilCommitted(t *testing.T) {
 		t.Fatal("still replayable past the window")
 	}
 }
+
+func TestRelayAuthOrStatusFailureFallsBackToLANAndLocal(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError} {
+		relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+		}))
+		defer relay.Close()
+
+		in := engineInput(2)
+		var out bytes.Buffer
+		askedLAN := false
+		find := func(context.Context) (string, bool) {
+			askedLAN = true
+			return "", false
+		}
+		client := stems.Client{Endpoint: relay.URL, Secret: "stale-password", Source: "deemix-config"}
+		if err := run(context.Background(), client, find, stems.LocalRender, strings.NewReader(in), &out); err != nil {
+			t.Fatalf("status %d aborted stems instead of falling back: %v", status, err)
+		}
+		if !askedLAN {
+			t.Fatalf("status %d skipped LAN fallback", status)
+		}
+		checkSession(t, in, out.Bytes())
+	}
+}

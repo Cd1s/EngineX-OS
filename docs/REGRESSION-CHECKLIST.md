@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (56 Rows)
+## Regression Table (57 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -66,6 +66,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 54 | **`docs/site/content.js` caption for `24-profile-cues-loops.png` distinguishes EngineX-unlocked `Link Beat Jump / Loop Size Controls` from unpatched stock `Smart Loops` (`BH2-A10-8`)** | `BH2-A10-8` | `tools/az01-packer/test_docs_audit.py::DocsAuditBH2A10Test::test_content_js_smart_loops_is_stock_bh2_a10_8`; `node --check docs/site/content.js` | Release workflow Step 2 (`python3 -m unittest discover -s tools/az01-packer`) |
 | 55 | **Installation manual (`docs/manual/02-installation-and-ota.md`) documents Linux `fastboot` / `android-tools` packages, USB `sudo`/`udev` access, StageLinQ/EAAS UDP `51337`/`11224` firewall rules, and current installer diagnostics (`BH2-A10-12`)** | `BH2-A10-12` | `tools/az01-packer/test_docs_audit.py::DocsAuditBH2A10Test::test_installation_manual_linux_fastboot_and_firewall_bh2_a10_12` | Release workflow Step 2 (`python3 -m unittest discover -s tools/az01-packer`) |
 | 56 | **Idle deck discovers a zero-config LAN Stems worker (`enginex-stemsd`) without blocking `/v1/sc5000/ui` or churning `X-UI-Digest` (`BH2-A9-1`)**: `relayStatusView` schedules a throttled background `stems.ProbeLAN` probe when no online cloud relay is active, writes `stems-lan.json` only on real online/offline/endpoint transitions, and waits cleanly on `Server.Close()` | `BH2-A9-1` | `pkg/webui::TestUIStatusDiscoversIdleLANStemsRenderer`, `internal/stems::TestProbeLANDiscoversIdleWorkerAndRechecksCachedEndpoint`; real-deck check: start `enginex-stemsd` on a PC on the same LAN/Wi-Fi while the deck sits idle and verify `Settings → About / Update` and `Profile → Library` show `High-quality stems: <host> (htdemucs)` within a few seconds | Release workflow Step 2 Go suites; real-deck LAN Stems idle pairing check |
+| 57 | **`stems-processor` falls back to LAN GPU worker and on-deck `LocalRender` on HTTP `401`/`403`/`404`/`5xx` relay responses while Engine's stdin is still replayable (`BH2-A9-3`)** | `BH2-A9-3` | `internal/stemsproc::TestRelayAuthOrStatusFailureFallsBackToLANAndLocal` | Release workflow Step 2 (`go test -race ./internal/stemsproc/...`) |
 
 ---
 
