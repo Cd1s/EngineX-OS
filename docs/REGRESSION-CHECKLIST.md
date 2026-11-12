@@ -89,6 +89,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 77 | **`enginedb.putArtwork` checks PNG `IHDR` dimensions (`<= 16M` pixels) via `png.DecodeConfig` before allocating pixel buffers (`BH2-A4-18`)** | `BH2-A4-18` | `pkg/enginedb::TestPutArtworkRejectsOversizedPNGDimensions` | Release workflow Step 2 (`go test -race ./pkg/enginedb/...`) |
 | 78 | **`browseCache.readDisk` serves disk-cached streaming playlists on RTC-less players booting offline before NTP sync (`now.Year() < 2025`) (`BH2-A8-17`)** | `BH2-A8-17` | `pkg/webui::TestBrowseDiskServesCachedPlaylistsBeforeNTPSync`, `TestBrowseDiskIsolationSecretsAndBounds` | Release workflow Step 2 (`go test -race ./pkg/webui/...`) |
 | 79 | **`deemixd.credentials` accepts private LAN / `.local` / `.lan` / Tailscale HTTP relay URLs via `stems.ValidEndpoint`, matching `webui` (`BH2-A8-20`)** | `BH2-A8-20` | `internal/deemixd::TestPrivateLANRelayAcceptedInCredentials` | Release workflow Step 2 (`go test -race ./internal/deemixd/...`) |
+| 80 | **Rekordbox 6/7 `OneLibraryAdapter.Read` filters soft-deleted rows (`rb_local_deleted != 0`) across tracks, playlists, playlist entries, and cues (`BH2-A4-6`)** | `BH2-A4-6` | `pkg/rekordbox::TestOneLibrarySkipsSoftDeletedRekordboxRows` | Release workflow Step 2 (`go test -race ./pkg/rekordbox/...`) |
 
 ---
 

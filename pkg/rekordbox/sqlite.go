@@ -265,6 +265,9 @@ func readSQLRows(ctx context.Context, db *sql.DB, table string) ([]sqlRecord, er
 				r[normCols[i]] = fmt.Sprint(v)
 			}
 		}
+		if v := r["rblocaldeleted"]; v != "" && v != "0" {
+			continue
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -289,11 +292,15 @@ func eachSQLRow(ctx context.Context, db *sql.DB, table string, wanted []string, 
 		return err
 	}
 	var cols, keys []string
+	var delCol string
 	for info.Next() {
 		var name string
 		if err = info.Scan(&name); err != nil {
 			info.Close()
 			return err
+		}
+		if normalized(name) == "rblocaldeleted" {
+			delCol = quote(name)
 		}
 		if want[normalized(name)] {
 			cols, keys = append(cols, quote(name)), append(keys, normalized(name))
@@ -304,7 +311,11 @@ func eachSQLRow(ctx context.Context, db *sql.DB, table string, wanted []string, 
 	if err != nil || len(cols) == 0 {
 		return err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT `+strings.Join(cols, ",")+` FROM `+quote(table))
+	where := ""
+	if delCol != "" {
+		where = ` WHERE COALESCE(` + delCol + `, 0) = 0`
+	}
+	rows, err := db.QueryContext(ctx, `SELECT `+strings.Join(cols, ",")+` FROM `+quote(table)+where)
 	if err != nil {
 		return err
 	}
