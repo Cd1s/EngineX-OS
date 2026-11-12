@@ -64,6 +64,15 @@ class DocsAuditBH2A10Test(unittest.TestCase):
         for frag in required_fragments:
             self.assertIn(frag, sec2, f"Section 2 missing 5.3.0.4 QML entry/menu {frag!r}")
 
+    def test_feature_inventory_echo_out_console_only_bh2_a10_4(self):
+        manual = (REPO_ROOT / "docs/manual/01-feature-inventory-and-ui-spec.md").read_text(encoding="utf-8")
+        active = section_between(manual, "## 1. 支持的 16 款机型", "## 5.")
+        self.assertNotIn("暂停切歌时释放 2.2 秒回声尾音", active)
+        self.assertNotIn("没有 `visible: !root.scPlayer`", active)
+        self.assertIn("visible: root.scHasMixer", active)
+        self.assertIn("Fader Echo", active)
+
+
 
 if __name__ == "__main__":
     unittest.main()
