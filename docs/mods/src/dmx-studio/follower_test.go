@@ -113,6 +113,7 @@ func TestSelectClockDeckPriority(t *testing.T) {
 func TestStreamSyncPollerWithoutDeckPanelAndFallback5304(t *testing.T) {
 	var mu sync.Mutex
 	mode5304 := false
+	clockHits5304 := 0
 	decks := []deckSnapshot{
 		{Deck: 1, Source: "local", SourceID: "local:1", Master: true, Lead: true, Playing: true, BPM: 120, CurrentBPM: 126, Beat: 1.5, PositionMS: 10000},
 	}
@@ -123,6 +124,7 @@ func TestStreamSyncPollerWithoutDeckPanelAndFallback5304(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/sc5000/clock":
 			if mode5304 {
+				clockHits5304++
 				// Simulate 5.3.0.4 tidalGateway catch-all emptyPage (no clockApi field).
 				_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
 				return
@@ -174,7 +176,7 @@ func TestStreamSyncPollerWithoutDeckPanelAndFallback5304(t *testing.T) {
 		t.Fatalf("poller wrote files to state dir: %v", entries)
 	}
 
-	// Switch MASTER to Deck 2 and test 5.3.0.4 /peer/decks fallback.
+	// Switch MASTER to Deck 2 and test 5.3.0.4 /peer/decks fallback + negative-cached probe.
 	mu.Lock()
 	mode5304 = true
 	mu.Unlock()
@@ -189,6 +191,14 @@ func TestStreamSyncPollerWithoutDeckPanelAndFallback5304(t *testing.T) {
 	}
 	if clk["deck"] != 2 || clk["bpm"] != 132.0 {
 		t.Fatalf("5.3.0.4 fallback did not switch to Deck 2: %+v", clk)
+	}
+	// Let several fallback polls run and confirm /v1/sc5000/clock was probed only once.
+	time.Sleep(600 * time.Millisecond)
+	mu.Lock()
+	hits := clockHits5304
+	mu.Unlock()
+	if hits != 1 {
+		t.Fatalf("5.3.0.4 mode hit /v1/sc5000/clock %d times, want 1 (must negative-cache)", hits)
 	}
 
 	// Non-persisting follow toggle turns off deck following without writing show.json.
@@ -335,5 +345,180 @@ func TestMIDIClockLoopLifecycle(t *testing.T) {
 	sink.mu.Unlock()
 	if !closed {
 		t.Fatal("disabling midiClock must close MIDI sink")
+	}
+
+	// Rapid toggle true -> false -> true under -race must leave MIDI clock running cleanly,
+	// and a stale deck (>clockStale) must drop from playing to stopped and emit midiStop.
+	if _, err := action(t, f, `{"action":"configure","config":{"midiClock":true}}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := action(t, f, `{"action":"configure","config":{"midiClock":false}}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := action(t, f, `{"action":"configure","config":{"midiClock":true}}`); err != nil {
+		t.Fatal(err)
+	}
+	sink.mu.Lock()
+	sink.events = nil
+	sink.mu.Unlock()
+	if _, err := action(t, f, `{"action":"clock","deck":1,"playing":true,"beat":0,"bpm":180}`); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		sink.mu.Lock()
+		n := len(sink.events)
+		sink.mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	sink.mu.Lock()
+	if len(sink.events) == 0 || sink.events[0] != midiStart {
+		ev := append([]midiEventKind{}, sink.events...)
+		sink.mu.Unlock()
+		t.Fatalf("expected midiStart after re-enable, got %v", ev)
+	}
+	sink.events = nil
+	sink.mu.Unlock()
+
+	f.mu.Lock()
+	f.clock.updated = f.now() - clockStale - 0.1
+	f.mu.Unlock()
+	sawStop := false
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) && !sawStop {
+		sink.mu.Lock()
+		for _, e := range sink.events {
+			if e == midiStop {
+				sawStop = true
+			}
+		}
+		sink.mu.Unlock()
+		if !sawStop {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if !sawStop {
+		sink.mu.Lock()
+		last := append([]midiEventKind{}, sink.events...)
+		sink.mu.Unlock()
+		t.Fatalf("stale deck must emit midiStop, events=%v", last)
+	}
+}
+
+func TestProlinkFallbackCueStateAndExternalClockPrecedence(t *testing.T) {
+	// parseHTTPBase edge cases.
+	for _, tc := range []struct {
+		in, wantAddr, wantPrefix string
+		wantErr                  bool
+	}{
+		{"http://127.0.0.1:8080", "127.0.0.1:8080", "", false},
+		{"http://127.0.0.1", "127.0.0.1:80", "", false},
+		{"http://[::1]:8080/sub/", "[::1]:8080", "/sub", false},
+		{"https://127.0.0.1:8080", "", "", true},
+		{"http:///path", "", "", true},
+	} {
+		addr, pref, err := parseHTTPBase(tc.in)
+		if (err != nil) != tc.wantErr || addr != tc.wantAddr || pref != tc.wantPrefix {
+			t.Fatalf("parseHTTPBase(%q) = (%q, %q, %v), want (%q, %q, err=%v)", tc.in, addr, pref, err, tc.wantAddr, tc.wantPrefix, tc.wantErr)
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339Nano)
+	oldStr := time.Now().Add(-3 * time.Second).UTC().Format(time.RFC3339Nano)
+	var mu sync.Mutex
+	errMode := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if errMode {
+			http.Error(w, "denied", http.StatusForbidden)
+			return
+		}
+		switch r.URL.Path {
+		case "/v1/sc5000/clock":
+			http.NotFound(w, r)
+		case "/peer/decks":
+			_ = json.NewEncoder(w).Encode(map[string]any{"decks": []any{}})
+		case "/v1/sc5000/prolink":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"devices": []any{
+					// EngineX self-echo ignored
+					map[string]any{"name": "EngineX-Link", "number": 1, "bpm": 128, "effective_bpm": 128, "playing": true, "master": true, "last_seen": nowStr},
+					// Stale CDJ ignored
+					map[string]any{"name": "CDJ-2000", "number": 2, "bpm": 130, "effective_bpm": 130, "playing": true, "master": true, "last_seen": oldStr},
+					// Paused at CUE (play_state_1 == 6): MUST stay playing=false!
+					map[string]any{"name": "CDJ-3000", "number": 3, "bpm": 124, "effective_bpm": 124, "beat_in_bar": 2, "beat_phase": 0.5, "play_state_1": 6, "playing": false, "master": true, "last_seen": nowStr},
+					// CUE held play (play_state_1 == 7): MUST count as playing!
+					map[string]any{"name": "CDJ-3000", "number": 4, "bpm": 128, "effective_bpm": 128, "beat_in_bar": 1, "beat_phase": 0.25, "play_state_1": 7, "playing": false, "master": false, "last_seen": nowStr},
+				},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	f, err := NewFeature(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.webUIURL = srv.URL
+
+	decks, fallback, err := f.fetchDeckSnapshotsMode()
+	if err != nil || !fallback {
+		t.Fatalf("expected fallback=true without error, got fallback=%v err=%v", fallback, err)
+	}
+	if len(decks) != 2 {
+		t.Fatalf("expected 2 valid CDJ decks (3 and 4), got %+v", decks)
+	}
+	for _, d := range decks {
+		if d.Deck == 3 && d.Playing {
+			t.Fatalf("CDJ play_state_1 == 6 (paused at cue) must NOT count as playing: %+v", d)
+		}
+		if d.Deck == 4 && (!d.Cue || !d.Playing) {
+			t.Fatalf("CDJ play_state_1 == 7 (CUE held) MUST count as playing: %+v", d)
+		}
+	}
+	// Playing deck 4 (CUE held) beats paused master deck 3.
+	picked := selectClockDeck(decks)
+	if picked == nil || picked.Deck != 4 {
+		t.Fatalf("want playing CUE-held deck 4 over paused cue deck 3, got %+v", picked)
+	}
+
+	// External clock action takes precedence over poller until clockStale expires.
+	if _, err := action(t, f, `{"action":"clock","deck":1,"playing":true,"beat":1.0,"bpm":140}`); err != nil {
+		t.Fatal(err)
+	}
+	if d := f.pollClockOnce(); d != 150*time.Millisecond {
+		t.Fatalf("expected pollClockOnce deferral (150ms) during external clock precedence, got %v", d)
+	}
+	f.mu.Lock()
+	if f.clock.bpm != 140 {
+		f.mu.Unlock()
+		t.Fatalf("poller overwrote external clock bpm=140 -> %v", f.clock.bpm)
+	}
+	f.lastExternalClock = f.now() - clockStale - 0.1
+	f.mu.Unlock()
+	time.Sleep(5 * time.Millisecond)
+	mu.Lock()
+	nowStr = time.Now().UTC().Format(time.RFC3339Nano)
+	mu.Unlock()
+	_ = f.pollClockOnce()
+	f.mu.Lock()
+	if f.clock.deck != 4 || f.clock.bpm != 128 {
+		f.mu.Unlock()
+		t.Fatalf("expected poller resume to CDJ deck 4 (128 BPM) after external clock expired, got deck=%d bpm=%v", f.clock.deck, f.clock.bpm)
+	}
+	f.clockAPIAbsentUntil = time.Time{}
+	f.mu.Unlock()
+
+	// HTTP error path returns error cleanly.
+	mu.Lock()
+	errMode = true
+	mu.Unlock()
+	var out any
+	if err := f.fetchJSON("/v1/sc5000/clock", &out); err == nil {
+		t.Fatal("expected HTTP 403 error from fetchJSON")
 	}
 }

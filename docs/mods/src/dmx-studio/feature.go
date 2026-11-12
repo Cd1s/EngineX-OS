@@ -44,31 +44,32 @@ type route struct {
 
 // Feature is the DMX console state; exported fields are for tests.
 type Feature struct {
-	state             string
-	Config            map[string]any
-	FlashUntil        float64
-	Running           bool
-	Error             string
-	sequence          byte
-	cid               []byte
-	Routes            []route
-	frames            map[int][]byte
-	mu                sync.Mutex
-	stop              chan struct{}
-	done              chan struct{}
-	clockDone         chan struct{}
-	start             time.Time
-	looping           bool
-	clock             beatClock
-	webUIURL          string
-	pollerActive      bool
-	lastExternalClock float64
-	midiMu            sync.Mutex
-	midiRunning       bool
-	midiStop          chan struct{}
-	midiDone          chan struct{}
-	midiErr           string
-	openMIDISink      func() (midiSink, error)
+	state               string
+	Config              map[string]any
+	FlashUntil          float64
+	Running             bool
+	Error               string
+	sequence            byte
+	cid                 []byte
+	Routes              []route
+	frames              map[int][]byte
+	mu                  sync.Mutex
+	stop                chan struct{}
+	done                chan struct{}
+	clockDone           chan struct{}
+	start               time.Time
+	looping             bool
+	clock               beatClock
+	webUIURL            string
+	pollerActive        bool
+	lastExternalClock   float64
+	clockAPIAbsentUntil time.Time
+	midiMu              sync.Mutex
+	midiRunning         bool
+	midiStop            chan struct{}
+	midiDone            chan struct{}
+	midiErr             string
+	openMIDISink        func() (midiSink, error)
 }
 
 // New returns the DMX Studio feature with its 30 Hz render/output loop running.

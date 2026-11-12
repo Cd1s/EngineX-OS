@@ -156,12 +156,6 @@ func (f *Feature) midiClockLoop(stopCh <-chan struct{}, doneCh chan<- struct{}) 
 		}
 
 		f.mu.Lock()
-		enabled, _ := f.Config["midiClock"].(bool)
-		if !enabled {
-			f.midiErr = ""
-			f.mu.Unlock()
-			return
-		}
 		now := f.now()
 		manual := f.Config["bpm"].(float64)
 		beats := f.clock.beats(now, manual)

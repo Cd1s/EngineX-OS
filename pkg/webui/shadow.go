@@ -662,11 +662,13 @@ func (s *Server) deckClockPost(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	nowMS := now.UnixMilli()
 	var postAt int64
+	var seen [5]bool
 	clean := decks[:0]
 	for _, d := range decks {
-		if d.Deck < 1 || d.Deck > 4 {
+		if d.Deck < 1 || d.Deck > 4 || seen[d.Deck] {
 			continue
 		}
+		seen[d.Deck] = true
 		if d.At > nowMS || d.At < nowMS-2000 {
 			d.At = nowMS
 		}
@@ -675,6 +677,7 @@ func (s *Server) deckClockPost(w http.ResponseWriter, r *http.Request) {
 	}
 	sh := s.shadow
 	sh.mu.Lock()
+	nowMS = time.Now().UnixMilli()
 	if postAt > nowMS || (postAt != 0 && postAt < sh.clockPostAt && sh.clockPostAt <= nowMS) {
 		sh.mu.Unlock()
 		respond(w, map[string]any{"ok": true})

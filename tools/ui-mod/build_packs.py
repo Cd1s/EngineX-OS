@@ -1094,10 +1094,7 @@ SERVICES_MAIN = """
 		return p
 	}
 	property var scShadowCueCache: ({})
-	// 25 Hz around every edge and a CUE preview, 12.5 Hz in steady playback (the
-	// sender posts the filtered line twice a second anyway), 5 Hz while all own
-	// decks rest. Each tick reads ~20 Engine properties, and every read allocates
-		// #209: lightweight local deck beat clock when 4-deck shadow mode is off.
+	// #209: lightweight local deck beat clock when 4-deck shadow mode is off.
 	// Active only while stream-sync reports deckClock=true; zero work otherwise.
 	property bool scDeckClock: false
 	property var scDeckClockRequest: null
@@ -1105,6 +1102,8 @@ SERVICES_MAIN = """
 	property var scDeckClockProbeAt: ({})
 	property var scDeckClockPrevPos: ({})
 	property var scDeckClockPrevCue: ({})
+	property var scDeckClockPrevLoaded: ({})
+	property var scDeckClockPrevLen: ({})
 	property var scDeckClockOut: []
 	property real scDeckClockPostAt: 0
 	property string scDeckClockSig: ""
@@ -1124,6 +1123,8 @@ SERVICES_MAIN = """
 		const prefix = "/Engine/Deck" + d
 		g = {
 			play: play,
+			loaded: root.scTr(prefix + "/Track/SongLoaded") || scShadowEmptyObject,
+			length: root.scTr(prefix + "/Track/TrackLength") || scShadowEmptyObject,
 			cueLED: root.scTr(prefix + "/Track/CueLEDState") || scShadowEmptyObject,
 			master: root.scTr(prefix + "/DeckIsMaster") || scShadowEmptyObject,
 			original: root.scTr(prefix + "/OriginalBPM") || scShadowEmptyObject,
@@ -1150,11 +1151,16 @@ SERVICES_MAIN = """
 			const g = scDeckClockDeckProps(d, now)
 			if (!g) continue
 			const ps = !!g.play.state
+			const loaded = !!g.loaded.state
+			const trackLen = loaded ? (g.length.unnormalized || 0) : 0
+			const sameTrack = loaded && scDeckClockPrevLoaded[d] === true && scDeckClockPrevLen[d] === trackLen
 			const sr = g.rate.value || 0
-			const posMs = sr > 0 ? (g.position.unnormalized || 0) / sr * 1000 : 0
+			const posMs = loaded && sr > 0 ? (g.position.unnormalized || 0) / sr * 1000 : 0
 			const prevPos = scDeckClockPrevPos[d]
 			const prevCue = !!scDeckClockPrevCue[d]
-			const cue = !ps && !!g.cueLED.state && prevPos !== undefined && (posMs > prevPos + 0.5 || prevCue)
+			const cue = !ps && sameTrack && !!g.cueLED.state && prevPos !== undefined && (posMs > prevPos + 0.5 || prevCue)
+			scDeckClockPrevLoaded[d] = loaded
+			scDeckClockPrevLen[d] = trackLen
 			scDeckClockPrevPos[d] = posMs
 			scDeckClockPrevCue[d] = cue
 			const playing = ps || cue
@@ -1178,6 +1184,9 @@ SERVICES_MAIN = """
 		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/clock")
 		x.send(JSON.stringify(out))
 	}
+	// 25 Hz around every edge and a CUE preview, 12.5 Hz in steady playback (the
+	// sender posts the filtered line twice a second anyway), 5 Hz while all own
+	// decks rest. Each tick reads ~20 Engine properties, and every read allocates
 	// on V4's heap: at 25 Hz this was a third of the idle allocation (GC trigger).
 	// Play and CUE presses wake it at once.
 	Timer {

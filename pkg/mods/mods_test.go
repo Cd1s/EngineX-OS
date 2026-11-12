@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testArchive(t *testing.T, files map[string]string, link string) []byte {
@@ -757,6 +758,33 @@ func TestIsModEnabledWithoutScanningMedia(t *testing.T) {
 	if !mgr.IsModEnabled("dmx-studio") {
 		t.Fatal("enabled mod must report true")
 	}
+	// Hold managerMu (as StartEnabled/Discover do during slow USB/NAS mounts or mod
+	// start scripts): IsModEnabled must still return at once without stalling.
+	mgr.mu.Lock()
+	done := make(chan bool, 1)
+	go func() {
+		done <- mgr.IsModEnabled("dmx-studio")
+	}()
+	select {
+	case got := <-done:
+		if !got {
+			mgr.mu.Unlock()
+			t.Fatal("IsModEnabled under held managerMu = false, want true")
+		}
+	case <-time.After(200 * time.Millisecond):
+		mgr.mu.Unlock()
+		t.Fatal("IsModEnabled blocked on managerMu")
+	}
+	mgr.mu.Unlock()
+
+	if err := os.WriteFile(filepath.Join(uiDir, "safe-mode"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if mgr.IsModEnabled("dmx-studio") {
+		t.Fatal("safe-mode marker must force IsModEnabled=false")
+	}
+	_ = os.Remove(filepath.Join(uiDir, "safe-mode"))
+
 	if err := mgr.QuarantineAll(); err != nil {
 		t.Fatal(err)
 	}
