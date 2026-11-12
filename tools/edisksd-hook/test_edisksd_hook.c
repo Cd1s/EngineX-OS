@@ -21,17 +21,19 @@ struct libmnt_context;
 static int test_real_mount(struct libmnt_context *c);
 #define REAL_MNT_CONTEXT_MOUNT() test_real_mount
 // Leaves 1.5 s of the 20 s budget for the private conversion.
-#define POST_RESERVE_MS INT64_C(18500)
+#include <stdint.h>
+static int64_t test_post_reserve=18500;
+#define POST_RESERVE_MS test_post_reserve
 #include "edisksd_hook.c"
 #include <assert.h>
-struct libmnt_context { const char *target,*source; int status,fail; };
+struct libmnt_context { const char *target,*source; int status,fail; const char *disk; };
 const char *mnt_context_get_target(struct libmnt_context *c){return c->target;}
 const char *mnt_context_get_source(struct libmnt_context *c){return c->source;}
 int mnt_context_get_status(struct libmnt_context *c){return c->status;}
 int mnt_context_set_syscall_status(struct libmnt_context *c,int status){c->status=status;return 0;}
 static char test_disk[PATH_MAX];static int test_disk_ro;
 static int test_real_mount(struct libmnt_context *c) {
-    if(mount(test_disk,c->target,NULL,MS_BIND,NULL))return -errno;
+    if(mount(c->disk?c->disk:test_disk,c->target,NULL,MS_BIND,NULL))return -errno;
     if(test_disk_ro&&mount(NULL,c->target,NULL,MS_BIND|MS_REMOUNT|MS_RDONLY,NULL))return -errno;
     c->status=1;return 0;
 }
@@ -253,11 +255,12 @@ static unsigned count_mounts(const char *target) {
     while(fgets(line,sizeof line,f)){char *p=strchr(line,' ');for(int i=0;p&&i<3;i++)p=strchr(p+1,' ');if(p&&!strncmp(p+1,target,len)&&(p[1+len]==' '||p[1+len]=='/'))n++;}
     fclose(f);return n;
 }
-static unsigned count_views(void) {
+static unsigned count_runtime(const char *prefix) {
     DIR *d=opendir(test_runtime);if(!d)return 0;unsigned n=0;struct dirent *e;
-    while((e=readdir(d)))if(!strncmp(e->d_name,"view-",5))n++;
+    while((e=readdir(d)))if(!strncmp(e->d_name,prefix,strlen(prefix)))n++;
     closedir(d);return n;
 }
+static unsigned count_views(void){return count_runtime("view-");}
 // #182: Engine hears of a mount from edisksd's mountinfo monitor while the hook
 // is still running, so a stick converted after the visible mount showed up as a
 // plain folder drive. The conversion must be complete before that mount exists.
@@ -368,12 +371,54 @@ static void test_library_is_walked_once(const char *root) {
     assert(!umount2(target,UMOUNT_NOFOLLOW));
     puts("REAL PRIVATE NAMESPACE #182: a stick without a rekordbox export is only looked at before the visible mount and its library walked once, a converted stick is not walked again: PASS");
 }
+struct insert { struct libmnt_context c; int rc; };
+static void *insert_thread(void *arg){struct insert *i=arg;i->rc=mnt_context_mount(&i->c);return NULL;}
+// #182 review: the budget starts before view_lock is taken. Two rekordbox sticks
+// inserted together (or present at boot) are converted one after the other, so
+// the second one's wait cut its window short; it ran out of time and was then
+// remembered as "too large" and skipped on every insert until a reboot.
+static void test_two_sticks_at_once(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char a[PATH_MAX],b[PATH_MAX],ta[PATH_MAX],tb[PATH_MAX],p[PATH_MAX],log[PATH_MAX],script[PATH_MAX*2];
+    join(a,root,"pair-a");join(p,a,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(b,root,"pair-b");join(p,b,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,b,"PIONEER/rekordbox/export.pdb");write_file(p,"the second stick");
+    join(ta,MEDIA_ROOT,"PAIR-A");assert(!make_dirs(ta));join(tb,MEDIA_ROOT,"PAIR-B");assert(!make_dirs(tb));
+    join(log,root,"pair-bridge.log");join(test_rb_bridge,root,"pair-bridge");
+    // Each conversion takes 2.5 s of a 4 s window.
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"$2\" >> '%s'\nsleep 2.5\nmkdir -p \"$2/Engine Library/Database2\" && echo converted > \"$2/Engine Library/Database2/m.db\"\n",log);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    int64_t saved_reserve=test_post_reserve;test_post_reserve=16000;test_disk_ro=0;
+    unsigned slow_before=count_runtime("slow-");
+    struct insert ia={.c={.target=ta,.source="/dev/sdp1",.disk=a}},ib={.c={.target=tb,.source="/dev/sdq1",.disk=b}};
+    pthread_t first,second;
+    assert(!pthread_create(&first,NULL,insert_thread,&ia));usleep(300000);
+    assert(!pthread_create(&second,NULL,insert_thread,&ib));
+    assert(!pthread_join(first,NULL)&&!pthread_join(second,NULL));
+    assert(!ia.rc&&ia.c.status==1&&!ib.rc&&ib.c.status==1); // both are mounted
+    join(p,ta,"Engine Library/Database2/m.db");expect_file(p,"converted\n");
+    join(p,tb,"Engine Library/Database2/m.db");assert(access(p,F_OK)==-1); // its window was cut short
+    assert(count_runtime("slow-")==slow_before); // which says nothing about its size
+    assert(!umount2(ta,UMOUNT_NOFOLLOW)&&!umount2(tb,UMOUNT_NOFOLLOW));
+    // Inserted again on its own, the second stick is converted.
+    ib.c.status=0;assert(!mnt_context_mount(&ib.c)&&ib.c.status==1);
+    join(p,tb,"Engine Library/Database2/m.db");expect_file(p,"converted\n");
+    assert(!umount2(tb,UMOUNT_NOFOLLOW));join(p,b,"Engine Library/Database2/m.db");assert(!unlink(p));unlink(log);
+    // A wait that used the whole window up: nothing is tried, nothing remembered,
+    // and the conversion is not run after the visible mount either.
+    test_post_reserve=HOOK_BUDGET_MS+1;
+    ib.c.status=0;assert(!mnt_context_mount(&ib.c)&&ib.c.status==1);
+    assert(count_mounts(tb)==1);assert(!umount2(tb,UMOUNT_NOFOLLOW));
+    assert(access(log,F_OK)==-1&&access(p,F_OK)==-1&&count_runtime("slow-")==slow_before);
+    test_post_reserve=saved_reserve;
+    puts("REAL PRIVATE NAMESPACE #182: two rekordbox sticks inserted together, the second one's cut-short or used-up window is not remembered as a too-large library and it converts on its next insert: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
