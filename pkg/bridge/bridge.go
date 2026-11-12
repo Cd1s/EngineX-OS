@@ -128,7 +128,12 @@ func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, erro
 	}
 }
 
+var readExportHook func()
+
 func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
+	if readExportHook != nil {
+		readExportHook()
+	}
 	r, e := compat.NewResolver(mount)
 	if e != nil {
 		return nil, e
@@ -202,25 +207,35 @@ func writable(mount string) bool {
 	return syscall.Statfs(mount, &st) != nil || st.Flags&unix_ST_RDONLY == 0 || ensureWritableEngineLibrary(mount)
 }
 
-func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb.Result, error) {
-	r, e := compat.NewResolver(mount)
-	if e != nil {
-		return enginedb.Result{}, e
-	}
-	_, e = r.Resolve("PIONEER")
+func checkConvertPreconditions(r *compat.Resolver, mount string) (bool, error) {
+	_, e := r.Resolve("PIONEER")
 	if errors.Is(e, os.ErrNotExist) {
 		if len(stagedExports(mount)) == 0 {
-			return enginedb.Result{Bypassed: true}, nil
+			return true, nil
 		}
 		e = nil // a pure Engine/empty drive can still receive staged CDJ libraries
 	}
 	// Read-only volumes (HFS+ on Engine OS 5.0.4: rw writes crash hfsplus.ko)
 	// cannot hold an Engine Library unless Engine Library itself is a writable mount.
 	if e == nil && !writable(mount) {
-		return enginedb.Result{Bypassed: true}, nil
+		return true, nil
 	}
+	return false, e
+}
+
+func convertLoaded(ctx context.Context, r *compat.Resolver, mount string, l *rekordbox.Library, stagedOnly bool, opts enginedb.Options) (enginedb.Result, error) {
+	opts.StagedOnly = stagedOnly
+	Reconcile(r, l)
+	return enginedb.Sync(ctx, mount, l, opts)
+}
+
+func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb.Result, error) {
+	r, e := compat.NewResolver(mount)
 	if e != nil {
 		return enginedb.Result{}, e
+	}
+	if bypassed, e := checkConvertPreconditions(r, mount); bypassed || e != nil {
+		return enginedb.Result{Bypassed: bypassed}, e
 	}
 	l, stagedOnly, e := readLibrary(ctx, mount)
 	if errors.Is(e, os.ErrNotExist) {
@@ -229,9 +244,7 @@ func Convert(ctx context.Context, mount string, opts enginedb.Options) (enginedb
 	if e != nil {
 		return enginedb.Result{}, e
 	}
-	opts.StagedOnly = stagedOnly
-	Reconcile(r, l)
-	return enginedb.Sync(ctx, mount, l, opts)
+	return convertLoaded(ctx, r, mount, l, stagedOnly, opts)
 }
 
 // Reconcile fits a real export to what a library can hold, so that one odd entry
@@ -280,11 +293,12 @@ const (
 	// Past this, a first import cannot finish while the mount waits: reading every
 	// file took 8 minutes for 6000 tracks on a USB stick.
 	fastImportTracks = 500
-	// The edisksd hook kills rb-bridge 20 s after the mount, which rolled back the
-	// whole import, playlists included (#48). Stop reading files after this; the
-	// rest of the tracks finish on later mounts.
-	mountReadBudget = 8 * time.Second
 )
+
+// The edisksd hook kills rb-bridge 20 s after the mount, which rolled back the
+// whole import, playlists included (#48). Stop reading files after this; the
+// rest of the tracks finish on later mounts.
+var mountReadBudget = 8 * time.Second
 
 // ConvertAtMount is Convert for when a volume is mounted, while Engine is waiting
 // for it. An export unchanged since the last import is skipped at once. A large
@@ -293,9 +307,6 @@ const (
 // Otherwise files are read for mountReadBudget at most, and the export counts as
 // imported only once no track was left without its cues.
 func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, full bool) (enginedb.Result, error) {
-	if !full && opts.Deadline.IsZero() {
-		opts.Deadline = time.Now().Add(mountReadBudget)
-	}
 	r, err := compat.NewResolver(mount)
 	if err != nil {
 		return enginedb.Result{}, err
@@ -314,7 +325,20 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	} else {
 		staged := strings.TrimSpace(stagedStamp(mount))
 		if staged == "" {
-			return Convert(ctx, mount, opts)
+			if bypassed, err := checkConvertPreconditions(r, mount); bypassed || err != nil {
+				return enginedb.Result{Bypassed: bypassed}, err
+			}
+			l, stagedOnly, err := readLibrary(ctx, mount)
+			if errors.Is(err, os.ErrNotExist) {
+				return enginedb.Result{Bypassed: true}, nil
+			}
+			if err != nil {
+				return enginedb.Result{}, err
+			}
+			if !full && opts.Deadline.IsZero() {
+				opts.Deadline = time.Now().Add(mountReadBudget)
+			}
+			return convertLoaded(ctx, r, mount, l, stagedOnly, opts)
 		}
 		stamp = stampVersion + " " + staged
 	}
@@ -335,6 +359,9 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 				cleanEmptyEngineLibrary(dir)
 			}
 			return result, err
+		}
+		if opts.Deadline.IsZero() {
+			opts.Deadline = time.Now().Add(mountReadBudget)
 		}
 		opts.StagedOnly = stagedOnly
 		if len(l.Tracks) > fastImportTracks {
@@ -361,8 +388,26 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 			}
 			return result, err
 		}
+		if bypassed, err := checkConvertPreconditions(r, mount); bypassed || err != nil {
+			return enginedb.Result{Bypassed: bypassed}, err
+		}
+		result, err = convertLoaded(ctx, r, mount, l, stagedOnly, opts)
+	} else {
+		if bypassed, err := checkConvertPreconditions(r, mount); bypassed || err != nil {
+			return enginedb.Result{Bypassed: bypassed}, err
+		}
+		l, stagedOnly, err := readLibrary(ctx, mount)
+		if errors.Is(err, os.ErrNotExist) {
+			return enginedb.Result{Bypassed: true}, nil
+		}
+		if err != nil {
+			return result, err
+		}
+		if !full && opts.Deadline.IsZero() {
+			opts.Deadline = time.Now().Add(mountReadBudget)
+		}
+		result, err = convertLoaded(ctx, r, mount, l, stagedOnly, opts)
 	}
-	result, err = Convert(ctx, mount, opts)
 	if err == nil && result.Deferred > 0 {
 		log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
 	} else if err == nil && !result.Bypassed {

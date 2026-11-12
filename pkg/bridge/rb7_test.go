@@ -226,3 +226,49 @@ func TestMacHiddenDotPioneerOneLibraryCuesAndIncrementalDelta(t *testing.T) {
 		t.Fatalf("updated cue label missing after incremental sync: %v", err)
 	}
 }
+
+func TestConvertAtMountReadsOnceAndStartsBudgetAfterRead(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Write(t, root, "MUSIC/one.wav", testfixture.WAV(true))
+	testfixture.Write(t, root, "MUSIC/two.wav", testfixture.WAV(true))
+	testfixture.Write(t, root, "MUSIC/three.wav", testfixture.WAV(true))
+	dbPath := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
+	copyEncryptedOneLibraryFixture(t, dbPath)
+
+	// First mount where library Read/Decrypt takes 2.6s while mountReadBudget is 2.5s:
+	// the 2.5s file-read budget must start AFTER readLibrary finishes, so 0 tracks are deferred
+	// (including under -race instrumentation overhead on modernc.org/sqlite).
+	reads := 0
+	bridge.WithReadExportHookForTest(t, 2500*time.Millisecond, func() {
+		reads++
+		time.Sleep(2600 * time.Millisecond)
+	})
+	res, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reads != 1 {
+		t.Fatalf("first ConvertAtMount called readExport %d times, want 1", reads)
+	}
+	if res.Deferred != 0 {
+		t.Fatalf("mountReadBudget started before readLibrary finished: %d tracks deferred", res.Deferred)
+	}
+
+	// Second mount on <=500 tracks with existing m.db (hasLibrary(dir) == true) and updated mtime:
+	// must read/decrypt exportLibrary.db once, not twice.
+	later := time.Now().Add(1 * time.Minute)
+	if err := os.Chtimes(dbPath, later, later); err != nil {
+		t.Fatal(err)
+	}
+	reads = 0
+	res, err = bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reads != 1 {
+		t.Fatalf("incremental ConvertAtMount with existing m.db called readExport %d times, want 1", reads)
+	}
+	if res.Deferred != 0 {
+		t.Fatalf("unexpected deferred tracks on incremental mount: %+v", res)
+	}
+}
