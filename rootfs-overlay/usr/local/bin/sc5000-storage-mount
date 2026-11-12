@@ -35,6 +35,16 @@ case $dev in
 esac
 name=${dev##*/}
 case $action in add|change) ;; remove) exit 0 ;; *) die "unsupported action: $action" ;; esac
+# A partitioned whole disk (sda with sda1...) is never mounted itself: its
+# partitions are. Waiting for it held the lock for the whole $WAIT on every
+# such USB stick or SATA disk at boot, and the partitions' own hotplug mounts
+# queued behind it (BH-GC2-5). A disk without partitions (a superfloppy stick)
+# is still waited for.
+case $name in sd[a-z])
+    for child in "$SYS/class/block/$name/$name"[0-9]*; do
+        [ ! -e "$child" ] || exit 0
+    done ;;
+esac
 # Never touch the internal eMMC: only SD-type MMC cards are removable media.
 case $name in mmcblk*)
     parent=${name%%p*}
