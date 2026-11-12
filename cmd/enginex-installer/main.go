@@ -1795,23 +1795,55 @@ func azUSB(ctx context.Context, o *options) string {
 
 // azModel: the board seen on the LAN (if an AZ04 deck without fastboot), else the --bundle file name, else the USB product name.
 func azModel(o *options, board, line string) (model, bool) {
-	// Only AZ04 decks without fastboot (rmz2 SYSTEM ONE, jp24 PRIME 4 G2) use 1cc5:2027 write-part.
-	// A fastboot deck (e.g. nh08s, jp21) discovered on the LAN must never be passed to modeAZ (#164).
-	if b := boardCode(board); b == "rmz2" || b == "jp24" {
-		if m, gen2, ok := lookupBoard(board); ok && gen2 {
-			return m, true
-		}
+	m, err := azResolve(o, board, line)
+	return m, err == nil
+}
+
+// errAZUnknown: nothing names the deck in Firmware Update Mode.
+var errAZUnknown = errors.New("unknown 1cc5:2027 model")
+
+// azResolve picks the model to flash in mode C. What the hardware reports (the AZ04 board seen on
+// the LAN, the USB product string) wins; a --bundle/--image filename only fills a missing identity
+// and must agree with every identity the hardware gives (BH-G2-2): the header check in obtainBundle
+// compares against this model, so a wrong pick here would let a wrong package through.
+func azResolve(o *options, board, line string) (model, error) {
+	type id struct {
+		m    model
+		from string
 	}
-	if o.Bundle != "" {
-		if m, ok := bundleModel(o.Bundle); ok {
-			return m, true
-		}
+	var ids []id
+	lanGen2 := false
+	if lm, gen2, ok := lookupBoard(board); ok && gen2 {
+		lanGen2 = true
+		ids = append(ids, id{lm, "LAN"})
 	}
 	l := strings.ToLower(line)
 	for _, n := range azNames {
 		if strings.Contains(l, n.name) {
-			return gen2Boards[n.board], true
+			ids = append(ids, id{gen2Boards[n.board], "USB"})
+			break
 		}
+	}
+	if o.Bundle != "" {
+		if bm, ok := bundleModel(o.Bundle); ok {
+			ids = append(ids, id{bm, filepath.Base(o.Bundle)})
+		}
+	}
+	for _, x := range ids[min(1, len(ids)):] {
+		if x.m.Prefix != ids[0].m.Prefix {
+			return model{}, fmt.Errorf("型号不一致：%s 是 %s，%s 却是 %s；没有刷写任何东西 / "+
+				"model mismatch: %s says %s but %s says %s; nothing flashed",
+				ids[0].from, ids[0].m.Name, x.from, x.m.Name, ids[0].from, ids[0].m.Name, x.from, x.m.Name)
+		}
+	}
+	// Only AZ04 decks without fastboot (rmz2 SYSTEM ONE, jp24 PRIME 4 G2) use 1cc5:2027 write-part.
+	// A fastboot deck (e.g. nh08s, jp21) discovered on the LAN must never be passed to modeAZ (#164).
+	if b := boardCode(board); lanGen2 && (b == "rmz2" || b == "jp24") {
+		return ids[0].m, nil
+	}
+	// A fastboot deck's LAN board alone does not pick mode C (#164); next to a USB name or a bundle it only has to agree.
+	if len(ids) > 0 && !(lanGen2 && len(ids) == 1) {
+		return ids[0].m, nil
 	}
 	// Last resort: exactly one 2nd-gen model's *-Update.img or Data-Bundle.tar.gz already in the work directory.
 	if o.Bundle == "" && board == "" {
@@ -1829,10 +1861,10 @@ func azModel(o *options, board, line string) (model, bool) {
 			}
 		}
 		if len(seen) == 1 {
-			return matched, true
+			return matched, nil
 		}
 	}
-	return model{}, false
+	return model{}, errAZUnknown
 }
 
 func bundleModel(path string) (model, bool) {
@@ -1846,8 +1878,11 @@ func bundleModel(path string) (model, bool) {
 }
 
 func modeAZ(ctx context.Context, o *options, board, line string) error {
-	m, ok := azModel(o, board, line)
-	if !ok {
+	m, err := azResolve(o, board, line)
+	if err != nil && !errors.Is(err, errAZUnknown) {
+		return err
+	}
+	if err != nil {
 		return fmt.Errorf("碟机处于 Firmware Update Mode（%s），但认不出型号：请用 --image 或 --bundle 指定该机型的 *-Update.img，没有刷写任何东西 / "+
 			"the deck is in Firmware Update Mode (%s) but its model is unknown: pass --image or --bundle <MODEL>-<VERSION>-EngineX-OS-*-Update.img; nothing flashed", line, line)
 	}
