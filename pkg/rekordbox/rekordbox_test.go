@@ -29,7 +29,7 @@ func TestDeviceSQLStrings(t *testing.T) {
 	// Rekordbox encodes mangled ISRC strings as kind 0x90 with 0x03 prefix + ASCII + NUL (often odd length).
 	isrcBody := append([]byte{0x03}, []byte("USRC17607839\x00\x00")...) // 15 bytes (odd)
 	isrcRaw := append([]byte{0x90, byte(4 + len(isrcBody)), 0, 0}, isrcBody...)
-	if got, e := readDeviceSQLString(isrcRaw, 0); e != nil || got != "USRC17607839" {
+	if got, e := readISRCString(isrcRaw, 0); e != nil || got != "USRC17607839" {
 		t.Fatalf("mangled ISRC 0x90 string = %q, %v", got, e)
 	}
 	// Odd-length non-0x03 0x90 strings trim the trailing odd byte instead of failing.
@@ -117,4 +117,42 @@ func FuzzAnalysis(f *testing.F) {
 func FuzzPDB(f *testing.F) {
 	f.Add(testfixture.PDB())
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = ParsePDB(bytes.NewReader(b), int64(len(b))) })
+}
+
+// r2 review: UTF-16LE text whose first byte is 0x03 (七 U+4E03, 〃 U+3003,
+// ă U+0103, Ѓ U+0403) was decoded as a mangled ISRC and came out garbled.
+func TestDeviceSQLStringsStartingWithByte03(t *testing.T) {
+	for _, s := range []string{"七里香", "七夕", "ă test", "〃", "Ѓ", "七"} {
+		b := EncodeDeviceSQLString(s)
+		if b[0] != strKindLongUTF16 || b[4] != 0x03 {
+			t.Fatalf("%q is not a UTF-16 string starting with byte 0x03: % x", s, b[:6])
+		}
+		if got, err := readDeviceSQLString(b, 0); err != nil || got != s {
+			t.Errorf("%q decoded as %q, %v", s, got, err)
+		}
+	}
+	pdb := testfixture.PDBNamed([5]string{"七里香.wav", "七夕.flac", "ă test.wav", "〃.wav", "five.wav"}, "七夕 set")
+	l, err := ParsePDB(bytes.NewReader(pdb), int64(len(pdb)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	titles := map[string]bool{}
+	for _, tr := range l.Tracks {
+		titles[tr.Title] = true
+		if tr.Title == "七里香.wav" && tr.Path != "/Music/"+testfixture.UnicodeName {
+			t.Errorf("path of 七里香: %q", tr.Path)
+		}
+	}
+	for _, want := range []string{"七里香.wav", "七夕.flac", "ă test.wav", "〃.wav"} {
+		if !titles[want] {
+			t.Errorf("title %q missing: %v", want, titles)
+		}
+	}
+	found := false
+	for _, p := range l.Playlists {
+		found = found || p.Name == "七夕 set"
+	}
+	if !found {
+		t.Errorf("playlist name garbled: %+v", l.Playlists)
+	}
 }
