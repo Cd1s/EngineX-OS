@@ -1,6 +1,9 @@
 [Unit]
 Description=SC5000 Deezer Download Queue (127.0.0.1:6595)
-After=local-fs.target network.target data.mount
+# Not before sc5000-custom-prepare: it renames /data/sc5000-custom to /data/enginex
+# and leaves a symlink, and the suite writes there (sc5000-suite-exec: bin/) (#103).
+Wants=sc5000-custom-prepare.service
+After=local-fs.target network.target data.mount sc5000-custom-prepare.service
 
 [Service]
 Type=simple
