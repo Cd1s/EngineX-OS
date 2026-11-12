@@ -476,7 +476,11 @@ static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
     if(path_join(lib,sizeof lib,target,"Engine Library")||safe_path(lib,1)) {note("unsafe library path rejected on",target,errno);return 0;}
     struct stat existing;
     int hfs_ro=HFS_READONLY(target);
-    if(!hfs_ro&&!lstat(lib,&existing)) { // an HFS+ view is validated by prepare_view
+    if(!pioneer&&mode==MOUNT_PRE)return 0; // nothing to convert: the visible mount does the rest
+    // The walk guards the tool run on the library below; after the private
+    // conversion (MOUNT_POST on a rekordbox stick) none follows, so it is skipped.
+    // An HFS+ view is validated by prepare_view.
+    if(!hfs_ro&&!(pioneer&&mode==MOUNT_POST)&&!lstat(lib,&existing)) {
         int fd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
         if(fd<0)return 0;
         int unsafe=copy_tree(fd,-1,deadline,0);close(fd);
@@ -530,6 +534,10 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
         // Nothing mounted here reaches edisksd's (and Engine's) namespace.
         if(unshare(CLONE_NEWNS)||mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL))_exit(0);
         if(real(ctx)||mnt_context_get_status(ctx)!=1)_exit(0);
+        // A stick without a rekordbox export costs one look at its root directory:
+        // no statvfs (a FAT32 free-space scan) and no library walk, both of which
+        // the visible mount would repeat on a cold cache inside the same budget.
+        if(!has_export(target)){umount2(target,UMOUNT_NOFOLLOW);_exit(0);}
         char marker[PATH_MAX];int known=0,r=0;
         if(!secure_runtime()&&!slow_marker(target,marker))known=!access(marker,F_OK);
         if(known){note("rekordbox library too large to convert at mount, skipped on",target,0);r=2;}

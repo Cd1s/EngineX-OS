@@ -320,12 +320,60 @@ static void test_first_insert_converted_before_visible(const char *root) {
     unsetenv("EDISKSD_TEST_PID");
     puts("REAL PRIVATE NAMESPACE #182: rekordbox sticks (FAT and read-only HFS+) are converted before the visible mount, plain sticks mounted once, failed conversion not repeated, too-large library skipped until re-exported: PASS");
 }
+static unsigned count_notes(const char *log,const char *what) {
+    static char buf[65536];int fd=open(log,O_RDONLY|O_CLOEXEC);assert(fd>=0);
+    ssize_t n=read(fd,buf,sizeof buf-1);assert(n>=0);close(fd);buf[n]=0;
+    unsigned found=0;for(char *p=buf;(p=strstr(p,what));p+=strlen(what))found++;
+    return found;
+}
+// The hook's notes (stderr of the mount and of its private pre-mount) go to a file.
+static int notes_to(const char *log) {
+    int saved=dup(2),fd=open(log,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,0600);assert(saved>=0&&fd>=0&&dup2(fd,2)==2);close(fd);return saved;
+}
+static void notes_done(int saved){assert(dup2(saved,2)==2);close(saved);}
+// #182 review: the private pre-mount made every stick pay twice. A stick without
+// a rekordbox export had its Engine Library walked there and again after the
+// visible mount (on a cold cache, inside one budget), and a converted stick was
+// walked once more for nothing. A link in the library makes each walk leave a note.
+static void test_library_is_walked_once(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],notes[PATH_MAX],saved_runtime[PATH_MAX],script[PATH_MAX*2];
+    const char *walked="unsafe library contents rejected";
+    join(disk,root,"once-native");join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/link");assert(!symlink("/",p));
+    join(target,MEDIA_ROOT,"ONCE");assert(!make_dirs(target));join(notes,root,"once-notes");
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
+    // A runtime directory that does not exist yet: the pre-mount of a plain stick
+    // looks at the stick's root directory and at nothing else.
+    snprintf(saved_runtime,sizeof saved_runtime,"%s",test_runtime);join(test_runtime,root,"once-runtime");
+    struct libmnt_context c={.target=target,.source="/dev/sdx1"};
+    int saved=notes_to(notes);
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    notes_done(saved);
+    assert(count_notes(notes,walked)==1);
+    assert(access(test_runtime,F_OK)==-1&&errno==ENOENT);
+    assert(count_mounts(target)==1);assert(!umount2(target,UMOUNT_NOFOLLOW));
+    snprintf(test_runtime,sizeof test_runtime,"%s",saved_runtime);
+    // A rekordbox stick: converted privately, then mounted without another walk.
+    join(disk,root,"once-rekordbox");join(p,disk,"PIONEER/rekordbox");assert(!make_dirs(p));
+    join(test_rb_bridge,root,"once-bridge");
+    snprintf(script,sizeof script,"#!/bin/sh\nmkdir -p \"$2/Engine Library/Database2\" && echo converted > \"$2/Engine Library/Database2/m.db\" && ln -s / \"$2/Engine Library/link\"\n");
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);c.status=0;
+    saved=notes_to(notes);
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    notes_done(saved);
+    join(p,target,"Engine Library/Database2/m.db");expect_file(p,"converted\n");
+    assert(count_notes(notes,walked)==0);
+    assert(!umount2(target,UMOUNT_NOFOLLOW));
+    puts("REAL PRIVATE NAMESPACE #182: a stick without a rekordbox export is only looked at before the visible mount and its library walked once, a converted stick is not walked again: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
