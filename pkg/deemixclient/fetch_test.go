@@ -132,3 +132,70 @@ func TestSpotifyCacheIgnoresLegacyCrossServiceFiles(t *testing.T) {
 		t.Fatal("Spotify interrupted part was not removed")
 	}
 }
+
+func TestCacheLRUModTimeMultiKeepAndActiveDeckProtectionOnMinFree(t *testing.T) {
+	dir := t.TempDir()
+	c := &Client{DownloadDir: dir, MaxCache: 250}
+
+	writeAge := func(name string, age time.Duration) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("OggS-synthetic-track-payload-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// 1. LRU: touching trackA via Cached() must refresh ModTime so Trim evicts trackB instead of trackA.
+	a := writeAge("spotify-trackA.ogg", 3*time.Hour)
+	b := writeAge("spotify-trackB.ogg", 2*time.Hour)
+	if dl := c.Cached("spotify-trackA"); dl == nil {
+		t.Fatal("Cached(spotify-trackA) missed")
+	}
+	stA, _ := os.Stat(a)
+	stB, _ := os.Stat(b)
+	if !stA.ModTime().After(stB.ModTime()) {
+		t.Fatalf("Cached() did not refresh ModTime (FIFO instead of LRU): a=%v b=%v", stA.ModTime(), stB.ModTime())
+	}
+	cur := writeAge("spotify-trackC.ogg", 0)
+	c.Trim(cur)
+	if _, err := os.Stat(b); !os.IsNotExist(err) {
+		t.Fatal("Trim did not evict least-recently-used trackB")
+	}
+	if _, err := os.Stat(a); err != nil {
+		t.Fatal("Trim evicted recently accessed trackA (FIFO bug)")
+	}
+
+	// 2. MinFree on /data must not wipe active deck tracks under MaxCache while evicting older non-active files.
+	dir2 := t.TempDir()
+	c2 := &Client{DownloadDir: dir2, MaxCache: 1 << 30, MinFree: 1 << 62}
+	stale := filepath.Join(dir2, "spotify-stale.ogg")
+	if err := os.WriteFile(stale, make([]byte, 100), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-5 * time.Hour)
+	_ = os.Chtimes(stale, oldTime, oldTime)
+
+	deck1 := filepath.Join(dir2, "spotify-deck1.ogg")
+	deck2 := filepath.Join(dir2, "spotify-deck2.ogg")
+	_ = os.WriteFile(deck1, []byte("OggS-deck1"), 0o600)
+	_ = os.WriteFile(deck2, []byte("OggS-deck2"), 0o600)
+	// Deck 1 loads deck1 via Cached; Deck 2 then saves/trims deck2.
+	if c2.Cached("spotify-deck1") == nil {
+		t.Fatal("Cached(spotify-deck1) missed")
+	}
+	c2.Trim(deck2)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("stale unpinned file not evicted under MinFree")
+	}
+	if _, err := os.Stat(deck1); err != nil {
+		t.Fatal("active Deck 1 track wiped by Deck 2 Trim under MinFree")
+	}
+	if _, err := os.Stat(deck2); err != nil {
+		t.Fatal("current Deck 2 track wiped by Trim")
+	}
+}

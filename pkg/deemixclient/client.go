@@ -13,10 +13,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
+
+const maxActiveDecks = 4
 
 type Client struct {
 	// Mode is "queue" (REST bridge) or "directory" (POST /api/download,
@@ -38,6 +41,10 @@ type Client struct {
 	MaxCache int64
 	// MinFree also evicts while the volume has less free space (needs MaxCache).
 	MinFree int64
+
+	mu     sync.Mutex
+	active []string
+	pinned map[string]int
 }
 type QueueStatus struct {
 	ID       string  `json:"id"`
@@ -137,7 +144,11 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 		return dl, nil
 	}
 	if c.Mode == "directory" {
-		return c.downloadDirectory(ctx, t, progress)
+		dl, err := c.downloadDirectory(ctx, t, progress)
+		if err == nil && dl != nil {
+			c.rememberActive(dl.Path)
+		}
+		return dl, err
 	}
 	if c.Mode != "" && c.Mode != "queue" {
 		return nil, errors.New("deemix: unsupported adapter mode")
@@ -178,6 +189,7 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 			if !quality.Lossless && !c.lossyAllowed() {
 				return nil, errors.New("deemix: MP3 fallback needs explicit --allow-320k")
 			}
+			c.rememberActive(p)
 			return &Download{Path: p, Quality: quality}, nil
 		}
 		timer := time.NewTimer(interval)
@@ -238,7 +250,9 @@ func (c *Client) LinkAs(src *Download, name string) (*Download, error) {
 			os.Remove(other)
 		}
 	}
-	c.Trim(dst)
+	c.rememberActive(src.Path)
+	c.rememberActive(dst)
+	c.Trim(dst, src.Path)
 	return &Download{Path: dst, Quality: src.Quality}, nil
 }
 
