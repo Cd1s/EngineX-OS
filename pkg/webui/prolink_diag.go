@@ -236,6 +236,13 @@ func (d prolinkDiag) checks() []diagCheck {
 	if d.Settings.ProlinkExport {
 		if d.Export.Enabled {
 			add("PASS", "Export running", fmt.Sprintf("player %d, media %s, NFS %s", d.Export.Number, d.Export.Root, d.ExportNFS))
+			if d.Export.Root != "" && prolink.GeneratedExport(d.Export.Root) {
+				if rep, err := prolink.CheckExportDir(d.Export.Root); err != nil {
+					add("FAIL", "Export wire check", err.Error())
+				} else {
+					add("PASS", "Export wire check", fmt.Sprintf("%d track(s), %d playlist(s), %d ANLZ triple(s) verified", len(rep.Tracks), rep.PlaylistsCount, rep.ANLZChecked))
+				}
+			}
 		} else {
 			add("FAIL", "Export running", "switched on but not running: insert a USB/SD with a Rekordbox export or an Engine library, or another program holds UDP 111 / TCP 12523")
 		}

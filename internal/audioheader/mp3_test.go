@@ -188,3 +188,55 @@ func TestReadMP3SyntheticVersionsEncodersAndEdgeCases(t *testing.T) {
 		}
 	}
 }
+
+func TestCountMP3AudioFramesSkipsID3AndXingInfo(t *testing.T) {
+	// Build 2 ID3v2 headers (including v2.4 footer) + 1 Info/LAME tag frame + 100 CBR/VBR-padded audio frames + ID3v1 TAG + trailing junk.
+	infoFrame, side := buildMPEGFrame(1, 0, 14, 0, 0) // MPEG-1 Layer III 320 kbps 44100 Hz
+	p := 4 + side
+	copy(infoFrame[p:p+4], "Info")
+	binary.BigEndian.PutUint32(infoFrame[p+4:p+8], 0x01) // FRAMES flag
+	binary.BigEndian.PutUint32(infoFrame[p+8:p+12], 100)
+	copy(infoFrame[p+12:p+21], "LAME3.100")
+	delayPad := uint32(576)<<12 | 576
+	infoFrame[p+12+21] = byte(delayPad >> 16)
+	infoFrame[p+12+22] = byte(delayPad >> 8)
+	infoFrame[p+12+23] = byte(delayPad)
+
+	var stream bytes.Buffer
+	stream.Write(makeID3v2(3, 0, bytes.Repeat([]byte("A"), 4096)))
+	stream.Write(makeID3v2(4, 16, bytes.Repeat([]byte("B"), 512)))
+	stream.Write(infoFrame)
+	for i := 0; i < 100; i++ {
+		pad := 0
+		if i%7 == 0 {
+			pad = 1
+		}
+		f, _ := buildMPEGFrame(1, 0, 14, pad, 0)
+		stream.Write(f)
+	}
+	id3v1 := make([]byte, 128)
+	copy(id3v1, "TAG")
+	stream.Write(id3v1)
+	stream.Write(bytes.Repeat([]byte{0x00}, 99))
+
+	data := stream.Bytes()
+	frames, spf, info, err := CountMP3AudioFrames(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("CountMP3AudioFrames: %v", err)
+	}
+	if frames != 100 || spf != 1152 {
+		t.Fatalf("frames=%d spf=%d, want 100, 1152", frames, spf)
+	}
+	if !info.HasXing || info.StartOffsetSamples != 2257 {
+		t.Fatalf("unexpected MP3Info: %+v", info)
+	}
+
+	// Real MP3 fixtures in testdata must also return non-zero audio frame counts,
+	// with Xing/LAME fixtures counting 1 fewer frame than total raw MPEG frames.
+	for _, name := range []string{"01-lame-cbr-info-44100.mp3", "04-xing-only-44100.mp3", "05-headerless-lame-44100.mp3"} {
+		fc, fspf, finfo, ferr := OpenMP3WithFrames(filepath.Join("testdata", name))
+		if ferr != nil || fc == 0 || fspf != 1152 || finfo.SampleRate != 44100 {
+			t.Fatalf("%s: frames=%d spf=%d info=%+v err=%v", name, fc, fspf, finfo, ferr)
+		}
+	}
+}

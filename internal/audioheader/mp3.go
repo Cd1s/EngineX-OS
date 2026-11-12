@@ -334,3 +334,106 @@ func finalizeMP3Info(info MP3Info, audio mpegHeader, vbrKbps, xingSkip, lameSkip
 	}
 	return info
 }
+
+// OpenMP3WithFrames inspects an MP3 file at path and counts its playable MPEG
+// audio frames (excluding leading ID3v2 tags, a leading Xing/Info header frame,
+// and trailing ID3v1/non-frame tags, matching Rekordbox ANLZ PVBR semantics).
+func OpenMP3WithFrames(path string) (frames uint32, samplesPerFrame uint32, info MP3Info, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, MP3Info{}, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return 0, 0, MP3Info{}, err
+	}
+	return CountMP3AudioFrames(f, st.Size())
+}
+
+// CountMP3AudioFrames parses MP3Info and counts playable MPEG audio frames in r
+// without loading the entire file into memory.
+func CountMP3AudioFrames(r io.ReadSeeker, size int64) (frames uint32, samplesPerFrame uint32, info MP3Info, err error) {
+	info, err = ReadMP3(r, size)
+	if err != nil {
+		return 0, 0, MP3Info{}, err
+	}
+	off, err := skipID3Seeker(r, size)
+	if err != nil {
+		return 0, 0, MP3Info{}, err
+	}
+	var hdr [4]byte
+	if info.HasXing && size-off >= 4 {
+		if _, err := r.Seek(off, io.SeekStart); err != nil {
+			return 0, 0, MP3Info{}, err
+		}
+		if _, err := io.ReadFull(r, hdr[:]); err != nil {
+			return 0, 0, MP3Info{}, err
+		}
+		if f0, ok := decodeMPEGHeader(binary.BigEndian.Uint32(hdr[:])); ok && off+int64(f0.frameSize) <= size {
+			off += int64(f0.frameSize)
+		}
+	}
+
+	// Find the first real audio frame within mp3ScanWindow (matching ReadMP3).
+	if _, err := r.Seek(off, io.SeekStart); err != nil {
+		return 0, 0, MP3Info{}, err
+	}
+	rem := size - off
+	if rem < 4 {
+		return 0, uint32(info.SamplesPerFrame), info, nil
+	}
+	winLen := int(min(rem, int64(mp3ScanWindow+mpaMaxFrameSize+4)))
+	win := make([]byte, winLen)
+	if _, err := io.ReadFull(r, win); err != nil {
+		return 0, 0, MP3Info{}, err
+	}
+	startRel := -1
+	var streamMask uint32
+	for i := 0; i+4 <= len(win) && i < mp3ScanWindow; i++ {
+		h1 := binary.BigEndian.Uint32(win[i : i+4])
+		f1, ok := decodeMPEGHeader(h1)
+		if !ok {
+			continue
+		}
+		next := i + f1.frameSize
+		if next+4 <= len(win) {
+			if i == 0 && off+int64(next)+128 == size && string(win[next:next+3]) == "TAG" {
+				startRel = i
+				streamMask = h1 & mp3Mask
+				break
+			}
+			h2 := binary.BigEndian.Uint32(win[next : next+4])
+			if _, ok2 := decodeMPEGHeader(h2); ok2 && (h1&mp3Mask) == (h2&mp3Mask) {
+				startRel = i
+				streamMask = h1 & mp3Mask
+				break
+			}
+		} else if i == 0 && off+int64(next) == size {
+			startRel = i
+			streamMask = h1 & mp3Mask
+			break
+		}
+	}
+	if startRel < 0 {
+		return 0, uint32(info.SamplesPerFrame), info, nil
+	}
+
+	pos := off + int64(startRel)
+	for pos+4 <= size {
+		if _, err := r.Seek(pos, io.SeekStart); err != nil {
+			return 0, 0, MP3Info{}, err
+		}
+		if _, err := io.ReadFull(r, hdr[:]); err != nil {
+			break
+		}
+		h := binary.BigEndian.Uint32(hdr[:])
+		f, ok := decodeMPEGHeader(h)
+		if !ok || (h&mp3Mask) != streamMask || pos+int64(f.frameSize) > size {
+			break
+		}
+		frames++
+		pos += int64(f.frameSize)
+	}
+	return frames, uint32(info.SamplesPerFrame), info, nil
+}

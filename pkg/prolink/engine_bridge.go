@@ -26,6 +26,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/Cd1s/EngineX-OS/internal/audioheader"
 	"github.com/Cd1s/EngineX-OS/pkg/compat"
 	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 	"github.com/Cd1s/EngineX-OS/pkg/rekordbox"
@@ -45,6 +46,7 @@ type engineExportJob struct {
 	path               string
 	length             int
 	artID              int64
+	bpm                float64
 }
 
 const engineExportBatch = 32
@@ -85,7 +87,7 @@ func SyncEngineToPioneerExport(root string) error {
 	pdbPath := filepath.Join(root, "PIONEER", "rekordbox", "export.pdb")
 	stampPath := filepath.Join(root, "PIONEER", "rekordbox", ".enginex-stamp")
 	sourceStamp := engineSourceStamp(mdbPath)
-	currentStamp := "analysis-v3|" + sourceStamp + "|" + streamStamp(streams)
+	currentStamp := "analysis-v4|" + sourceStamp + "|" + streamStamp(streams)
 	progressPath := filepath.Join(root, "PIONEER", "rekordbox", ".enginex-progress")
 	progress := engineExportProgress{IDs: make(map[uint32]uint32)}
 	if b, err := os.ReadFile(progressPath); err == nil {
@@ -190,6 +192,7 @@ func SyncEngineToPioneerExport(root string) error {
 		defer trackRows.Close()
 
 		seenEngineIDs := make(map[uint32]bool)
+		exportedArt := make(map[int64]string)
 		for trackRows.Next() {
 			var (
 				id          uint32
@@ -257,14 +260,15 @@ func SyncEngineToPioneerExport(root string) error {
 
 			analysisPath := engineAnalysisPath(newID)
 			var analysis *engineExportAnalysis
-			job := engineExportJob{id, newID, cleanPath, length, artID}
+			job := engineExportJob{id, newID, cleanPath, length, artID, effectiveBPM}
 			if id > progress.LastID {
 				if len(jobs) == 0 && processed < engineExportBatch && (processed == 0 || time.Since(started) < 750*time.Millisecond) {
 					analysis, err = readEngineAnalysis(db, root, id, cleanPath, length)
 					if err != nil {
 						return fmt.Errorf("engine analysis %d: %w", id, err)
 					}
-					if _, err := writeANLZ(root, newID, cleanPath, analysis.Analysis); err != nil {
+					analysis.bpm = effectiveBPM
+					if _, err := writeANLZ(root, newID, cleanPath, analysis.Analysis, analysis.extra()); err != nil {
 						return err
 					}
 					processed++
@@ -307,12 +311,16 @@ func SyncEngineToPioneerExport(root string) error {
 				}
 			}
 			if artID > 0 {
-				t.ArtworkPath = engineArtworkPath(artID)
-				if analysis != nil {
-					t.ArtworkPath, err = exportEngineArtwork(db, root, artID, artResolver)
-					if err != nil {
-						log.Printf("prolink: Engine track %d: omit unavailable artwork: %v", id, err)
+				if cachedArt, seenArt := exportedArt[artID]; seenArt {
+					t.ArtworkPath = cachedArt
+				} else {
+					artPath, artErr := exportEngineArtwork(db, root, artID, artResolver)
+					if artErr != nil {
+						log.Printf("prolink: Engine track %d: omit unavailable artwork: %v", id, artErr)
+						artPath = ""
 					}
+					exportedArt[artID] = artPath
+					t.ArtworkPath = artPath
 				}
 			}
 			newTracks = append(newTracks, t)
@@ -440,12 +448,13 @@ func SyncEngineToPioneerExport(root string) error {
 				id = maxTrackID
 				analysisPath := engineAnalysisPath(id)
 				if processed < engineExportBatch && (processed == 0 || time.Since(started) < 750*time.Millisecond) {
-					if _, err := writeANLZ(root, id, path, &rekordbox.Analysis{}); err != nil {
+					_, _, pvbr, isMP3 := inspectExportMP3(StreamFile(path))
+					if _, err := writeANLZ(root, id, path, &rekordbox.Analysis{}, anlzExtra{isMP3: isMP3, pvbrSamples: pvbr, bpm: m.BPM}); err != nil {
 						return err
 					}
 					processed++
 				} else {
-					jobs = append(jobs, engineExportJob{exportID: id, path: path})
+					jobs = append(jobs, engineExportJob{exportID: id, path: path, bpm: m.BPM})
 				}
 				m.ID, m.Path, m.AnalysisPath = id, path, analysisPath
 				newTracks = append(newTracks, m)
@@ -529,6 +538,9 @@ func SyncEngineToPioneerExport(root string) error {
 	pdbData, err := buildPDB(mergedTracks, mergedPlaylists)
 	if err != nil {
 		return fmt.Errorf("build export.pdb: %w", err)
+	}
+	if _, err := CheckPDBBytes(pdbData); err != nil {
+		return fmt.Errorf("strict check generated export.pdb: %w", err)
 	}
 
 	if _, err := compat.SafeOutputDir(root, "PIONEER/rekordbox"); err != nil {
@@ -641,18 +653,25 @@ func startEngineExportWorker(root, mdbPath, sourceStamp, stamp string, progress 
 				return
 			}
 			analysis := &rekordbox.Analysis{}
+			var extra anlzExtra
+			extra.bpm = job.bpm
 			if job.engineID != 0 {
 				data, err := readEngineAnalysis(db, root, job.engineID, job.path, job.length)
 				if err != nil {
 					log.Printf("prolink: background Engine track %d: %v", job.engineID, err)
 					return
 				}
+				data.bpm = job.bpm
 				analysis = data.Analysis
+				extra = data.extra()
+			} else {
+				_, _, pvbr, isMP3 := inspectExportMP3(StreamFile(job.path))
+				extra.isMP3, extra.pvbrSamples = isMP3, pvbr
 			}
 			if !current() {
 				return
 			}
-			if _, err := writeANLZ(root, job.exportID, job.path, analysis); err != nil {
+			if _, err := writeANLZ(root, job.exportID, job.path, analysis, extra); err != nil {
 				log.Printf("prolink: background ANLZ: %v", err)
 				return
 			}
@@ -866,13 +885,51 @@ func engineAudioMetadata(blob []byte) (float64, float64) {
 	return rate, samples / rate
 }
 
+type anlzExtra struct {
+	isMP3       bool
+	pvbrSamples uint32
+	bpm         float64
+	pwav        []byte
+	pwv2        []byte
+}
+
 type engineExportAnalysis struct {
 	*rekordbox.Analysis
 	rate, duration float64
+	bpm            float64
+	isMP3          bool
+	pvbrSamples    uint32
+	pwav, pwv2     []byte
+}
+
+func (a *engineExportAnalysis) extra() anlzExtra {
+	return anlzExtra{
+		isMP3:       a.isMP3,
+		pvbrSamples: a.pvbrSamples,
+		bpm:         a.bpm,
+		pwav:        a.pwav,
+		pwv2:        a.pwv2,
+	}
+}
+
+func inspectExportMP3(audioFullPath string) (startOffset int, mp3Rate int, pvbrSamples uint32, isMP3 bool) {
+	if audioFullPath == "" || !strings.EqualFold(filepath.Ext(audioFullPath), ".mp3") {
+		return 0, 0, 0, false
+	}
+	frames, spf, info, err := audioheader.OpenMP3WithFrames(audioFullPath)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return info.StartOffsetSamples, info.SampleRate, frames * spf, true
 }
 
 func readEngineAnalysis(db *sql.DB, root string, id uint32, path string, length int) (*engineExportAnalysis, error) {
 	a := &engineExportAnalysis{Analysis: &rekordbox.Analysis{}, duration: float64(length)}
+	audioFull := filepath.Join(root, path)
+	mp3StartOff, mp3SR, pvbrSamples, isMP3 := inspectExportMP3(audioFull)
+	a.isMP3 = isMP3
+	a.pvbrSamples = pvbrSamples
+
 	if !engineColumn(db, "PerformanceData", "beatData") {
 		return a, nil
 	}
@@ -889,11 +946,20 @@ func readEngineAnalysis(db *sql.DB, root string, id uint32, path string, length 
 	warn := func(field string, err error) {
 		log.Printf("prolink: Engine track %d: omit invalid %s: %v", id, field, err)
 	}
+	mp3OffsetFor := func(r float64) float64 {
+		if !isMP3 || mp3StartOff <= 0 || r <= 0 {
+			return 0
+		}
+		if mp3SR > 0 && math.Abs(r-float64(mp3SR)) > 1 {
+			return float64(mp3StartOff) * r / float64(mp3SR)
+		}
+		return float64(mp3StartOff)
+	}
 	if len(beat) > 0 {
 		raw, err := enginedb.QUncompress(beat, engineBlobLimit)
 		if err == nil {
 			var seconds float64
-			a.Beats, rate, seconds, err = engineBeats(raw)
+			a.Beats, rate, seconds, err = engineBeats(raw, mp3StartOff, mp3SR)
 			if err == nil {
 				duration = seconds
 			}
@@ -905,17 +971,20 @@ func readEngineAnalysis(db *sql.DB, root string, id uint32, path string, length 
 	// Cue positions are samples. When beatData is absent, use the actual audio
 	// header; guessing 44.1 kHz would silently move cues on 48/96 kHz files.
 	if rate == 0 {
-		if info, err := compat.AudioHeader(filepath.Join(root, path)); err == nil {
+		if mp3SR > 0 {
+			rate = float64(mp3SR)
+		} else if info, err := compat.AudioHeader(audioFull); err == nil {
 			rate = float64(info.SampleRate)
 			if info.Duration > 0 {
 				duration = info.Duration
 			}
 		}
 	}
+	offsetSamples := mp3OffsetFor(rate)
 	if len(quick) > 0 && rate > 0 {
 		raw, err := enginedb.QUncompress(quick, 64<<10)
 		if err == nil {
-			a.Cues, err = engineQuickCues(raw, rate)
+			a.Cues, err = engineQuickCues(raw, rate, offsetSamples)
 		}
 		if err != nil {
 			warn("quickCues", err)
@@ -927,7 +996,7 @@ func readEngineAnalysis(db *sql.DB, root string, id uint32, path string, length 
 		if len(loops) > 64<<10 {
 			err = fmt.Errorf("size limit")
 		} else {
-			cues, err = engineLoops(loops, rate, a.Cues)
+			cues, err = engineLoops(loops, rate, offsetSamples, a.Cues)
 		}
 		if err != nil {
 			warn("loops", err)
@@ -938,7 +1007,7 @@ func readEngineAnalysis(db *sql.DB, root string, id uint32, path string, length 
 	if len(overview) > 0 {
 		raw, err := enginedb.QUncompress(overview, 64<<10)
 		if err == nil {
-			a.Waveforms, err = engineWaveforms(raw, duration)
+			a.Waveforms, a.pwav, a.pwv2, err = engineWaveforms(raw, duration)
 		}
 		if err != nil {
 			warn("overview", err)
@@ -953,7 +1022,7 @@ type engineBeatMarker struct {
 	index  int64
 }
 
-func engineBeats(raw []byte) ([]rekordbox.Beat, float64, float64, error) {
+func engineBeats(raw []byte, mp3StartOff, mp3SR int) ([]rekordbox.Beat, float64, float64, error) {
 	bad := func() ([]rekordbox.Beat, float64, float64, error) {
 		return nil, 0, 0, fmt.Errorf("invalid Engine beatData")
 	}
@@ -963,6 +1032,14 @@ func engineBeats(raw []byte) ([]rekordbox.Beat, float64, float64, error) {
 	rate, samples := engineDouble(raw, binary.BigEndian), engineDouble(raw[8:], binary.BigEndian)
 	if !finiteEngine(rate) || rate < 8000 || rate > 384000 || !finiteEngine(samples) || samples <= 0 || samples/rate > 86400 || raw[16] > 1 {
 		return bad()
+	}
+	offsetSamples := 0.0
+	if mp3StartOff > 0 {
+		if mp3SR > 0 && math.Abs(rate-float64(mp3SR)) > 1 {
+			offsetSamples = float64(mp3StartOff) * rate / float64(mp3SR)
+		} else {
+			offsetSamples = float64(mp3StartOff)
+		}
 	}
 	var grids [2][]engineBeatMarker
 	off := 17
@@ -1003,7 +1080,7 @@ func engineBeats(raw []byte) ([]rekordbox.Beat, float64, float64, error) {
 	if !finiteEngine(firstStep) || !finiteEngine(lastStep) || firstStep < 60*rate/655.35 || lastStep < 60*rate/655.35 {
 		return bad()
 	}
-	startFloat := math.Ceil(float64(first.index) - first.sample/firstStep)
+	startFloat := math.Ceil(float64(first.index) - (first.sample+offsetSamples)/firstStep)
 	endFloat := math.Floor(float64(last.index) + (samples-last.sample)/lastStep)
 	if !finiteEngine(startFloat) || !finiteEngine(endFloat) || math.Abs(startFloat) > 2000000 || math.Abs(endFloat) > 2000000 || endFloat < startFloat || endFloat-startFloat > 100000 {
 		return bad()
@@ -1018,14 +1095,14 @@ func engineBeats(raw []byte) ([]rekordbox.Beat, float64, float64, error) {
 		left, right := grid[segment], grid[segment+1]
 		step := (right.sample - left.sample) / float64(right.index-left.index)
 		bpm := 60 * rate / step
-		sample := left.sample + float64(index-left.index)*step
-		if sample < 0 || sample > samples {
+		rbSample := left.sample + float64(index-left.index)*step + offsetSamples
+		if rbSample < 0 || rbSample > samples+offsetSamples {
 			continue
 		}
 		if !finiteEngine(bpm) || bpm <= 0 || bpm > 655.35 {
 			return bad()
 		}
-		ms := uint32(math.Round(sample * 1000 / rate))
+		ms := uint32(math.Round(rbSample * 1000 / rate))
 		if len(beats) > 0 && ms <= beats[len(beats)-1].TimeMS {
 			return bad()
 		}
@@ -1042,7 +1119,7 @@ func engineCueMS(sample, rate float64) (uint32, bool) {
 	return uint32(math.Round(ms)), true
 }
 
-func engineQuickCues(raw []byte, rate float64) ([]rekordbox.Cue, error) {
+func engineQuickCues(raw []byte, rate, offsetSamples float64) ([]rekordbox.Cue, error) {
 	bad := func() ([]rekordbox.Cue, error) { return nil, fmt.Errorf("invalid Engine quickCues") }
 	if len(raw) < 8 || binary.BigEndian.Uint64(raw) != 8 {
 		return bad()
@@ -1066,7 +1143,7 @@ func engineQuickCues(raw []byte, rate float64) ([]rekordbox.Cue, error) {
 		if sample == -1 {
 			continue
 		}
-		ms, ok := engineCueMS(sample, rate)
+		ms, ok := engineCueMS(sample+offsetSamples, rate)
 		if !ok {
 			return bad()
 		}
@@ -1079,7 +1156,7 @@ func engineQuickCues(raw []byte, rate float64) ([]rekordbox.Cue, error) {
 	// position, not a second memory-cue list, and must not create a spurious cue.
 	sample := engineDouble(raw[off:], binary.BigEndian)
 	if sample != -1 {
-		ms, ok := engineCueMS(sample, rate)
+		ms, ok := engineCueMS(sample+offsetSamples, rate)
 		if !ok {
 			return bad()
 		}
@@ -1088,7 +1165,7 @@ func engineQuickCues(raw []byte, rate float64) ([]rekordbox.Cue, error) {
 	return cues, nil
 }
 
-func engineLoops(raw []byte, rate float64, cues []rekordbox.Cue) ([]rekordbox.Cue, error) {
+func engineLoops(raw []byte, rate, offsetSamples float64, cues []rekordbox.Cue) ([]rekordbox.Cue, error) {
 	bad := func() ([]rekordbox.Cue, error) { return nil, fmt.Errorf("invalid Engine loops") }
 	if len(raw) < 8 || binary.LittleEndian.Uint64(raw) > 8 {
 		return bad()
@@ -1116,8 +1193,8 @@ func engineLoops(raw []byte, rate float64, cues []rekordbox.Cue) ([]rekordbox.Cu
 		if setStart == 0 || setEnd == 0 {
 			continue
 		}
-		ms, ok := engineCueMS(start, rate)
-		endMS, okEnd := engineCueMS(end, rate)
+		ms, ok := engineCueMS(start+offsetSamples, rate)
+		endMS, okEnd := engineCueMS(end+offsetSamples, rate)
 		if !ok || !okEnd || endMS <= ms {
 			return bad()
 		}
@@ -1144,21 +1221,23 @@ func engineLoops(raw []byte, rate float64, cues []rekordbox.Cue) ([]rekordbox.Cu
 // overviewWaveFormData is an overview, not full-resolution PCM. Resample its
 // measured low/mid/high bands onto the documented 150 entries/second timeline;
 // this preserves timing/variation but cannot recover detail absent in m.db.
-func engineWaveforms(raw []byte, duration float64) ([]rekordbox.Waveform, error) {
+func engineWaveforms(raw []byte, duration float64) ([]rekordbox.Waveform, []byte, []byte, error) {
 	if len(raw) < 24 {
-		return nil, fmt.Errorf("invalid Engine overview")
+		return nil, nil, nil, fmt.Errorf("invalid Engine overview")
 	}
 	n := binary.BigEndian.Uint64(raw[8:])
 	span := engineDouble(raw[16:], binary.BigEndian)
 	if n == 0 || n > 16384 || binary.BigEndian.Uint64(raw) != n || uint64(len(raw)) != 24+(n+1)*3 || !finiteEngine(span) || span <= 0 {
-		return nil, fmt.Errorf("invalid Engine overview bins")
+		return nil, nil, nil, fmt.Errorf("invalid Engine overview bins")
 	}
 	if !finiteEngine(duration) || duration <= 0 || duration > 3600 {
-		return nil, nil
+		return nil, nil, nil, nil
 	}
 	count := int(math.Ceil(duration * 150))
 	rgb := make([]byte, count*2)
 	bands := make([]byte, count*3)
+	colHeights := make([]byte, count)
+	colWhites := make([]byte, count)
 	for i := 0; i < count; i++ {
 		lo, hi := uint64(i)*n/uint64(count), uint64(i+1)*n/uint64(count)
 		if hi <= lo {
@@ -1177,12 +1256,53 @@ func engineWaveforms(raw []byte, duration float64) ([]rekordbox.Waveform, error)
 		r, g, b := min(1, float64(peak[0])*0.0066), min(1, float64(peak[1])*0.0035), min(1, float64(peak[2])*0.0016)
 		height := max(r, g, b)
 		var word uint16
+		h5 := byte(math.Round(height * 31))
+		colHeights[i] = h5
 		if height > 0 {
-			word = uint16(math.Round(r/height*7))<<13 | uint16(math.Round(g/height*7))<<10 | uint16(math.Round(b/height*7))<<7 | uint16(math.Round(height*31))<<2
+			word = uint16(math.Round(r/height*7))<<13 | uint16(math.Round(g/height*7))<<10 | uint16(math.Round(b/height*7))<<7 | uint16(h5)<<2
+			lowShare := min(1, r/height)
+			colWhites[i] = byte(max(0, min(7, 7-int(math.Floor(8*lowShare)))))
+		} else {
+			colWhites[i] = 7
 		}
 		binary.BigEndian.PutUint16(rgb[2*i:], word)
 	}
-	return []rekordbox.Waveform{{Tag: "PWV5", EntryBytes: 2, Data: rgb}, {Tag: "PWV7", EntryBytes: 3, Data: bands}}, nil
+	pwav := make([]byte, 400)
+	for k := 0; k < 400; k++ {
+		a, b := k*count/400, (k+1)*count/400
+		if b <= a {
+			b = a + 1
+		}
+		var maxH, sumW int
+		cnt := 0
+		for i := a; i < b && i < count; i++ {
+			if int(colHeights[i]) > maxH {
+				maxH = int(colHeights[i])
+			}
+			sumW += int(colWhites[i])
+			cnt++
+		}
+		w := byte(7)
+		if cnt > 0 {
+			w = byte(min(7, (sumW+cnt/2)/cnt))
+		}
+		pwav[k] = (w << 5) | byte(min(31, maxH))
+	}
+	pwv2 := make([]byte, 100)
+	for k := 0; k < 100; k++ {
+		a, b := k*count/100, (k+1)*count/100
+		if b <= a {
+			b = a + 1
+		}
+		var maxH int
+		for i := a; i < b && i < count; i++ {
+			if int(colHeights[i]) > maxH {
+				maxH = int(colHeights[i])
+			}
+		}
+		pwv2[k] = byte(min(15, (maxH+1)/2))
+	}
+	return []rekordbox.Waveform{{Tag: "PWV5", EntryBytes: 2, Data: rgb}, {Tag: "PWV7", EntryBytes: 3, Data: bands}}, pwav, pwv2, nil
 }
 
 func pqtzSection(beats []rekordbox.Beat) []byte {
@@ -1299,7 +1419,7 @@ func enginePioneerCueColor(c rekordbox.Cue) byte {
 
 // Emit separate memory/hot lists. PCOB supports older players, PCO2 carries
 // the UTF-16 labels and explicit colors used by NXS2/3000.
-func cueSections(cues []rekordbox.Cue, extended bool) [][]byte {
+func cueSections(cues []rekordbox.Cue, extended bool, bpm float64) [][]byte {
 	var sections [][]byte
 	for kind := uint32(0); kind < 2; kind++ {
 		var selected []rekordbox.Cue
@@ -1326,7 +1446,11 @@ func cueSections(cues []rekordbox.Cue, extended bool) [][]byte {
 		if extended {
 			countAt = 4
 		} else {
-			binary.BigEndian.PutUint16(payload[4:], 0xffff)
+			memCount := uint16(0xffff)
+			if kind == 0 && len(selected) > 0 {
+				memCount = uint16(len(selected) - 1)
+			}
+			binary.BigEndian.PutUint16(payload[4:], memCount)
 			binary.BigEndian.PutUint32(payload[8:], uint32(len(selected)))
 		}
 		binary.BigEndian.PutUint16(payload[countAt:], uint16(len(selected)))
@@ -1344,12 +1468,14 @@ func cueSections(cues []rekordbox.Cue, extended bool) [][]byte {
 				binary.BigEndian.PutUint32(p[8:], 56)
 				binary.BigEndian.PutUint32(p[12:], c.HotCue)
 				binary.BigEndian.PutUint32(p[20:], 0x100000)
-				first, last := uint16(i-1), uint16(i+1)
-				if i == 0 {
-					first = 0xffff
-				}
-				if i == len(selected)-1 {
-					last = 0xffff
+				first, last := uint16(0xffff), uint16(0xffff)
+				if kind == 0 {
+					if i > 0 {
+						first = uint16(i - 1)
+					}
+					if i < len(selected)-1 {
+						last = uint16(i + 1)
+					}
 				}
 				binary.BigEndian.PutUint16(p[24:], first)
 				binary.BigEndian.PutUint16(p[26:], last)
@@ -1375,6 +1501,14 @@ func cueSections(cues []rekordbox.Cue, extended bool) [][]byte {
 				binary.BigEndian.PutUint32(p[20:], c.TimeMS)
 				binary.BigEndian.PutUint32(p[24:], end)
 				p[29] = 1
+				if c.Loop && bpm > 0 && c.EndMS > c.TimeMS {
+					beats := (float64(c.EndMS-c.TimeMS) / 1000.0) * bpm / 60.0
+					rounded := math.Round(beats)
+					if rounded >= 1 && rounded <= 512 && math.Abs(beats-rounded) < 0.02 {
+						binary.BigEndian.PutUint16(p[36:], uint16(rounded))
+						binary.BigEndian.PutUint16(p[38:], 1)
+					}
+				}
 				binary.BigEndian.PutUint32(p[40:], uint32(2*len(label)))
 				for j, v := range label {
 					binary.BigEndian.PutUint16(p[44+2*j:], v)
@@ -1510,7 +1644,7 @@ func buildPlaylistEntryRow(order, trackID, playlistID uint32) []byte {
 	return b
 }
 
-func buildTrackRow(t rekordbox.Track, artistID, keyID uint32) []byte {
+func buildTrackRow(t rekordbox.Track, artistID, keyID, artID uint32) []byte {
 	b := make([]byte, 136)
 	sampleRate := t.SampleRate
 	if sampleRate < 0 {
@@ -1535,8 +1669,8 @@ func buildTrackRow(t rekordbox.Track, artistID, keyID uint32) []byte {
 
 	binary.LittleEndian.PutUint32(b[8:], uint32(sampleRate))
 	binary.LittleEndian.PutUint32(b[16:], uint32(fileSize))
-	if t.ArtworkPath != "" {
-		binary.LittleEndian.PutUint32(b[28:], t.ID)
+	if artID != 0 {
+		binary.LittleEndian.PutUint32(b[28:], artID)
 	}
 	binary.LittleEndian.PutUint32(b[32:], keyID)
 	binary.LittleEndian.PutUint32(b[48:], uint32(bitrate))
@@ -1547,10 +1681,13 @@ func buildTrackRow(t rekordbox.Track, artistID, keyID uint32) []byte {
 	binary.LittleEndian.PutUint16(b[82:], uint16(bitDepth))
 	binary.LittleEndian.PutUint16(b[84:], uint16(math.Round(t.Duration)))
 	b[89] = 3
+	binary.LittleEndian.PutUint16(b[90:], pdbFileTypeForPath(t.Path))
 
 	for i := 0; i < 21; i++ {
 		s := ""
 		switch i {
+		case 7:
+			s = "ON" // autoload_hot_cues: CDJs load Hot Cues A-H with the track only when "ON"
 		case 14:
 			s = t.AnalysisPath
 		case 16:
@@ -1614,6 +1751,22 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 		keyRows = append(keyRows, buildKeyRow(id, name))
 	}
 
+	artworkMap := make(map[string]uint32)
+	var artworkRows [][]byte
+	for _, t := range tracks {
+		if t.ArtworkPath == "" {
+			continue
+		}
+		if _, exists := artworkMap[t.ArtworkPath]; exists {
+			continue
+		}
+		id := uint32(len(artworkRows) + 1)
+		artworkMap[t.ArtworkPath] = id
+		row := make([]byte, 4)
+		binary.LittleEndian.PutUint32(row, id)
+		artworkRows = append(artworkRows, append(row, rekordbox.EncodeDeviceSQLString(t.ArtworkPath)...))
+	}
+
 	var trackRows [][]byte
 	for _, t := range tracks {
 		aName := t.Artist
@@ -1625,7 +1778,8 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 			aID = 1
 		}
 		kID := keyMap[t.Key]
-		trackRows = append(trackRows, buildTrackRow(t, aID, kID))
+		artID := artworkMap[t.ArtworkPath]
+		trackRows = append(trackRows, buildTrackRow(t, aID, kID, artID))
 	}
 
 	var playlistRows [][]byte
@@ -1641,15 +1795,6 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 		typ  uint32
 		rows [][]byte
 	}
-	var artworkRows [][]byte
-	for _, t := range tracks {
-		if t.ArtworkPath == "" {
-			continue
-		}
-		row := make([]byte, 4)
-		binary.LittleEndian.PutUint32(row, t.ID)
-		artworkRows = append(artworkRows, append(row, rekordbox.EncodeDeviceSQLString(t.ArtworkPath)...))
-	}
 	tables := []tableSpec{
 		{0, trackRows},
 		{2, artistRows},
@@ -1663,20 +1808,31 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 	const pageSize = 4096
 	pages := [][]byte{make([]byte, pageSize)}
 	type tablePageInfo struct {
-		first, last uint32
+		empty, first, last uint32
 	}
 	tablePages := make([]tablePageInfo, len(tables))
 
 	for ti, t := range tables {
+		// Every DeviceSQL table opens with an index page (0x64, 0x1fff, 0x1fff).
+		indexPageNum := uint32(len(pages))
+		idxPage := make([]byte, pageSize)
+		binary.LittleEndian.PutUint32(idxPage[4:], indexPageNum)
+		binary.LittleEndian.PutUint32(idxPage[8:], t.typ)
+		idxPage[27] = 0x64
+		binary.LittleEndian.PutUint16(idxPage[0x20:], 0x1fff)
+		binary.LittleEndian.PutUint16(idxPage[0x22:], 0x1fff)
+		pages = append(pages, idxPage)
+
 		var curPage []byte
-		var curPageNum, firstPageNum uint32
+		var curPageNum, firstDataPageNum uint32
 		var curRowCount int
 		var curOff int
 
 		startNewPage := func() {
 			curPageNum = uint32(len(pages))
-			if firstPageNum == 0 {
-				firstPageNum = curPageNum
+			if firstDataPageNum == 0 {
+				firstDataPageNum = curPageNum
+				binary.LittleEndian.PutUint32(idxPage[12:], firstDataPageNum)
 			}
 			curPage = make([]byte, pageSize)
 			binary.LittleEndian.PutUint32(curPage[4:], curPageNum)
@@ -1722,7 +1878,12 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 			binary.LittleEndian.PutUint16(curPage[30:], uint16(curOff-40))
 		}
 
-		tablePages[ti] = tablePageInfo{first: firstPageNum, last: curPageNum}
+		// Link the table's last data page to a dedicated blank empty_candidate page.
+		emptyPageNum := uint32(len(pages))
+		pages = append(pages, make([]byte, pageSize))
+		binary.LittleEndian.PutUint32(curPage[12:], emptyPageNum)
+
+		tablePages[ti] = tablePageInfo{empty: emptyPageNum, first: indexPageNum, last: curPageNum}
 	}
 
 	header := pages[0]
@@ -1734,7 +1895,7 @@ func buildPDB(tracks []rekordbox.Track, playlists []rekordbox.Playlist) ([]byte,
 	for i, tp := range tablePages {
 		h := header[28+i*16:]
 		binary.LittleEndian.PutUint32(h[0:], tables[i].typ)
-		binary.LittleEndian.PutUint32(h[4:], 0)
+		binary.LittleEndian.PutUint32(h[4:], tp.empty)
 		binary.LittleEndian.PutUint32(h[8:], tp.first)
 		binary.LittleEndian.PutUint32(h[12:], tp.last)
 	}
@@ -1945,19 +2106,53 @@ func streamMeta(s streamFile, m engineMeta) rekordbox.Track {
 	return t
 }
 
+func pvbrSection(pvbrSamples uint32) []byte {
+	payload := make([]byte, 1608)
+	binary.BigEndian.PutUint32(payload[1604:], pvbrSamples)
+	return section("PVBR", 16, payload)
+}
+
+func pqt2Section() []byte {
+	b := make([]byte, 56)
+	copy(b, "PQT2")
+	binary.BigEndian.PutUint32(b[4:], 56)
+	binary.BigEndian.PutUint32(b[8:], 56)
+	copy(b[16:20], []byte{0x01, 0x00, 0x00, 0x02})
+	return b
+}
+
+func previewWaveformSection(tag string, unknown uint32, data []byte) []byte {
+	payload := make([]byte, 8+len(data))
+	binary.BigEndian.PutUint32(payload[0:], uint32(len(data)))
+	binary.BigEndian.PutUint32(payload[4:], unknown)
+	copy(payload[8:], data)
+	return section(tag, 20, payload)
+}
+
 // writeANLZ writes the analysis files of a newly exported track (beat grid and
 // waveforms), replacing any left by an evicted track that had its id, and
 // returns the path export.pdb points to.
-func writeANLZ(root string, id uint32, trackPath string, a *rekordbox.Analysis) (string, error) {
+func writeANLZ(root string, id uint32, trackPath string, a *rekordbox.Analysis, extra anlzExtra) (string, error) {
 	anlzRel := fmt.Sprintf("PIONEER/USBANLZ/P%03d", id)
 	dir, err := compat.SafeOutputDir(root, anlzRel)
 	if err != nil {
 		return "", fmt.Errorf("mkdir anlz dir: %w", err)
 	}
-	dat := [][]byte{ppthSection(trackPath), pqtzSection(a.Beats)}
-	dat = append(dat, cueSections(a.Cues, false)...)
+	dat := [][]byte{ppthSection(trackPath)}
+	if extra.isMP3 {
+		dat = append(dat, pvbrSection(extra.pvbrSamples))
+	}
+	dat = append(dat, pqtzSection(a.Beats))
+	if len(extra.pwav) == 400 {
+		dat = append(dat, previewWaveformSection("PWAV", 0x00100000, extra.pwav))
+	}
+	if len(extra.pwv2) == 100 {
+		dat = append(dat, previewWaveformSection("PWV2", 0x00010000, extra.pwv2))
+	}
+	dat = append(dat, cueSections(a.Cues, false, extra.bpm)...)
 	ext := [][]byte{ppthSection(trackPath)}
-	ext = append(ext, cueSections(a.Cues, true)...)
+	ext = append(ext, cueSections(a.Cues, true, extra.bpm)...)
+	ext = append(ext, pqt2Section())
 	two := [][]byte{ppthSection(trackPath)}
 	for _, w := range a.Waveforms {
 		if w.Tag == "PWV5" {
@@ -1967,7 +2162,11 @@ func writeANLZ(root string, id uint32, trackPath string, a *rekordbox.Analysis) 
 			two = append(two, waveformSection(w))
 		}
 	}
-	for name, body := range map[string][]byte{"ANLZ0000.DAT": pmai(dat...), "ANLZ0000.EXT": pmai(ext...), "ANLZ0000.2EX": pmai(two...)} {
+	datBytes, extBytes, twoBytes := pmai(dat...), pmai(ext...), pmai(two...)
+	if err := CheckANLZFiles(datBytes, extBytes, twoBytes, trackPath, extra.isMP3); err != nil {
+		return "", fmt.Errorf("strict check generated ANLZ: %w", err)
+	}
+	for name, body := range map[string][]byte{"ANLZ0000.DAT": datBytes, "ANLZ0000.EXT": extBytes, "ANLZ0000.2EX": twoBytes} {
 		if err := writeEngineExportFile(filepath.Join(dir, name), body, 0644); err != nil {
 			return "", fmt.Errorf("write %s: %w", name, err)
 		}
