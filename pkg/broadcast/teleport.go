@@ -120,7 +120,15 @@ type LANStreamer struct {
 	running   bool
 	stopCh    chan struct{}
 	bytesSent atomic.Int64
+	lastTry   time.Time // of opening the socket
+	err       string    // why the socket is not open; "" once it is
 }
+
+// dialUDP opens the stream's socket; a test stands in for a network that is not up yet.
+var dialUDP = func(target *net.UDPAddr) (net.Conn, error) { return net.DialUDP("udp", nil, target) }
+
+// lanRetryEvery is how often Push tries again to open a socket that could not be opened.
+var lanRetryEvery = time.Second
 
 // NewLANStreamer creates a new LANStreamer with validated configuration.
 func NewLANStreamer(cfg LANConfig) (*LANStreamer, error) {
@@ -171,24 +179,45 @@ func (s *LANStreamer) Start() error {
 	if s.running {
 		return nil
 	}
+	s.running = true
 	if s.cfg.Mode == "off" || s.targetUDP == nil {
-		s.running = true
 		return nil
 	}
-
-	conn, err := net.DialUDP("udp", nil, s.targetUDP)
-	if err != nil {
-		return fmt.Errorf("dial udp %s: %w", s.targetUDP.String(), err)
-	}
-
-	s.conn = conn
-	s.running = true
 	s.stopCh = make(chan struct{})
-
 	if s.cfg.Mode == "teleport" {
 		go s.beaconLoop(s.stopCh)
 	}
+	return s.connectLocked()
+}
+
+// connectLocked opens the socket. While the network is down (a deck that boots with
+// Live Stream on, before its address arrives) this fails with "network is
+// unreachable"; the streamer stays started and Push tries again. BH2-A3-6: Start
+// gave up for good and the stream stayed dead until the settings were saved again.
+func (s *LANStreamer) connectLocked() error {
+	s.lastTry = time.Now()
+	conn, err := dialUDP(s.targetUDP)
+	if err != nil {
+		err = fmt.Errorf("dial udp %s: %w", s.targetUDP.String(), err)
+		s.err = err.Error()
+		return err
+	}
+	s.conn, s.err = conn, ""
 	return nil
+}
+
+// Connected reports whether the stream has a socket to send on.
+func (s *LANStreamer) Connected() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conn != nil
+}
+
+// Err is why the stream is not sending ("" while it is, or when it is off).
+func (s *LANStreamer) Err() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
 }
 
 // beaconLoop periodically broadcasts the discovery beacon.
@@ -251,8 +280,16 @@ func (s *LANStreamer) Push(pcm []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.running || s.conn == nil || len(pcm) == 0 {
+	if !s.running || len(pcm) == 0 {
 		return nil
+	}
+	if s.conn == nil {
+		if s.cfg.Mode == "off" || s.targetUDP == nil || time.Since(s.lastTry) < lanRetryEvery {
+			return nil
+		}
+		if err := s.connectLocked(); err != nil {
+			return err
+		}
 	}
 
 	// Calculate sample count (stereo 16-bit = 4 bytes per sample frame)
