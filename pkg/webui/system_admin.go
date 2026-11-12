@@ -22,6 +22,9 @@ import (
 type SystemRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 var defaultSystemRunner SystemRunner = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if err := guardHostCommand(name); err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	return cmd.CombinedOutput()
 }
@@ -281,6 +284,9 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 
 	cfg := s.loadSSHConfigLocked()
 	runner := getSystemRunner()
+	// Off a deck (a developer machine, a build host running tests) the settings
+	// are only saved: never a drop-in for that machine's sshd, never a command (r3).
+	deck := onDeck()
 
 	if setKey {
 		store := s.sshKeyStorePath()
@@ -290,12 +296,16 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Same as boot-activate.sh: copy, else bind-mount over the read-only /root.
-		_, _ = runner(r.Context(), "sh", "-c", `{ mkdir -p -m 700 /root/.ssh && cp "$1" /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys; } 2>/dev/null || mount --bind "$1" /root/.ssh/authorized_keys 2>/dev/null || :`, "sh", store)
+		if deck {
+			_, _ = runner(r.Context(), "sh", "-c", `{ mkdir -p -m 700 /root/.ssh && cp "$1" /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys; } 2>/dev/null || mount --bind "$1" /root/.ssh/authorized_keys 2>/dev/null || :`, "sh", store)
+		}
 		cfg.HasAuthorizedKey = true
 	}
 
 	if in.Port != nil {
 		cfg.Port = *in.Port
+	}
+	if in.Port != nil && deck {
 		// Apply port configuration drop-in if directory exists or via runner
 		portDropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -p %d\n", cfg.Port)
 		_ = os.MkdirAll(filepath.Dir(sshPortDropInPath), 0o755)
@@ -307,7 +317,7 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 		_, _ = runner(r.Context(), "systemctl", "daemon-reload") // the drop-in is ignored until reloaded
 	}
 
-	if setPassword {
+	if setPassword && deck {
 		// The password is a positional parameter, so the shell never expands it.
 		if _, err := runner(r.Context(), "sh", "-c", `printf 'root:%s\n' "$1" | chpasswd`, "sh", *in.Password); err != nil {
 			fail(w, http.StatusInternalServerError, errors.New("could not set root password"))
@@ -318,13 +328,15 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 
 	if in.Enabled != nil {
 		cfg.Enabled = *in.Enabled
+	}
+	if in.Enabled != nil && deck {
 		if cfg.Enabled {
 			_, _ = runner(r.Context(), "systemctl", "unmask", "sshd")
 			_, _ = runner(r.Context(), "systemctl", "restart", "sshd")
 		} else {
 			_, _ = runner(r.Context(), "systemctl", "stop", "sshd")
 		}
-	} else if in.Port != nil && cfg.Enabled {
+	} else if in.Port != nil && cfg.Enabled && deck {
 		_, _ = runner(r.Context(), "systemctl", "restart", "sshd")
 	}
 

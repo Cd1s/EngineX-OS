@@ -59,6 +59,7 @@ func (m *mockSystemRunner) hasCommand(prefix ...string) bool {
 }
 
 func TestSSHManagement(t *testing.T) {
+	asDeck(t, "inmusic,jp07") // the SSH settings act only on a deck (r3)
 	mockRunner := &mockSystemRunner{outputs: make(map[string][]byte)}
 	SetSystemRunner(mockRunner.Run)
 	defer SetSystemRunner(nil)
@@ -462,6 +463,7 @@ func TestAutomixStateMachine(t *testing.T) {
 }
 
 func TestSSHAuthorizedKeyAndReadOnlyEtc(t *testing.T) {
+	asDeck(t, "inmusic,jp21") // the SSH settings act only on a deck (r3)
 	mockRunner := &mockSystemRunner{outputs: make(map[string][]byte)}
 	SetSystemRunner(mockRunner.Run)
 	defer SetSystemRunner(nil)
