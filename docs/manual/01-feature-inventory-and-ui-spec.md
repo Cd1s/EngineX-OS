@@ -121,6 +121,7 @@
 ### 2.5 音源页与曲库
 
 - 音源页每个服务一行；右侧"扫码登录 / 切换账号"（`Scan to log in` / `Switch account`），TIDAL 行没有（走原厂登录）。登录二维码对话框只登录对应服务，**不会打开控制台**（#79）。
+- 原厂 `Connect New Sources` 中的内置 `Demo Tracks`（`/usr/Engine/Content/DemoDevice`）与 `Sampler Content`（`/usr/Engine/Content/SamplerDemoDevice`）保留原样可用；`ConnectedSource.qml` 关闭 `ListView` 的 `section.property` 分组头，避免顶部隐藏的原厂 `Tidal` 行（`height: 0`）与下方 `Demo` / `Cloud` 分组在 `QQuickListView::updatePolish()` 中反复翻转 `currentSection` 导致界面死锁。
 - 曲库：流媒体曲目左滑出现第三个动作 `Stems`（分轨）；`Stems` 歌单与曲目 Stems 图标在所有机型解锁；`Stems List` 开关强制可见。
 - 一代机 4 碟布局下左右滑加载的是本机角色负责的碟。
 
