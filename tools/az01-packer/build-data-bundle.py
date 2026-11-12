@@ -220,6 +220,29 @@ restore_gen2_timezone() {
     fi
 }
 
+# rekordbox sticks already mounted when the hook was not yet active (present at boot).
+convert_mounted() {
+    [ ! -e "$dest/ui/safe-mode" ] || return 0
+    [ -x "$bin_dir/rb-bridge" ] || return 0
+    for m in "${SC5000_MEDIA_ROOT:-/media}"/*; do
+        if [ -d "$m/PIONEER" ] || [ -d "$m/.PIONEER" ]; then
+            "$bin_dir/rb-bridge" --mount-path "$m" >/dev/null 2>&1 || :
+        fi
+    done
+}
+
+# ExecStartPre=- of the hooked Engine: the stock Engine this boot started with has stopped and the
+# hooked one has not started, so no Engine has the stick open while rb-bridge writes its library,
+# and the DJ cannot load a track in the stock UI that the restart then takes away (BH-F52-6).
+# Once per boot; a later restart finds the sticks converted by the hook at their mount.
+if [ "${1:-}" = "--convert-mounted" ]; then
+    mark=${SC5000_CONVERT_MARK:-/run/sc5000-boot-converted}
+    [ ! -e "$mark" ] || exit 0
+    : > "$mark" 2>/dev/null || :
+    convert_mounted
+    exit 0
+fi
+
 # Invoked by engine.service's ExecStartPre=- after the unhooked Engine stops and before
 # the hooked Engine starts, so Engine.conf is updated without stopping our own cgroup.
 if [ "${1:-}" = "--restore-tz" ]; then
@@ -258,6 +281,7 @@ EnvironmentFile=-/data/sc5000-custom/ui-scale.env
 ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home
 ExecStartPre=-$bundle_dir/boot-activate.sh --restore-tz
 ExecStartPre=-$bin_dir/engine-ui-guard pre
+ExecStartPre=-$bundle_dir/boot-activate.sh --convert-mounted
 ExecStartPost=-$bin_dir/engine-ui-guard post
 ExecStopPost=-$bin_dir/engine-ui-guard stop
 EOF
@@ -502,24 +526,14 @@ if [ ! -e "$dest/ui/safe-mode" ] && grep -qx 'four_deck_waveform=1' "$dest/ui/se
 fi
 
 # Sticks mounted before this ran never went through the edisksd hook.
-convert_mounted() {
-    [ ! -e "$dest/ui/safe-mode" ] || return 0
-    [ -x "$bin_dir/rb-bridge" ] || return 0
-    for m in /media/*; do
-        if [ -d "$m/PIONEER" ] || [ -d "$m/.PIONEER" ]; then
-            "$bin_dir/rb-bridge" --mount-path "$m" >/dev/null 2>&1 || :
-        fi
-    done
-}
-
 # In a chroot systemctl only prints "Running in chroot, ignoring" and exits 0, so require systemd as PID 1.
 if [ "$(cat "${SC5000_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
     systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service || :
     [ -z "$ssh_start" ] || systemctl start --no-block sshd.service || :
-    # Blocking, so edisksd is up again before convert_mounted looks at /media.
+    # Blocking, so edisksd is up again before the hooked start converts what is in /media.
     [ "$edisksd_changed" = 0 ] || systemctl restart edisksd.service || :
     [ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :
-    convert_mounted
+    # The sticks present at boot are converted by the hooked Engine's ExecStartPre (BH-F52-6).
     if check_gen2_tz_newer; then
         : > "${SC5000_TZ_NEWER_MARKER:-/run/sc5000-tz-newer}" 2>/dev/null || :
     fi

@@ -739,6 +739,48 @@ exec REAL "$@"
         comm.write_text('systemd\n')
         return comm
 
+    def test_boot_sticks_are_converted_between_stock_and_hooked_engine(self):
+        """BH-F52-6: boot-activate converted a rekordbox stick present at boot while the stock Engine
+        ran (and could have the stick open, or the DJ load from it), then restarted Engine under the
+        DJ. The conversion now runs once per boot from the hooked Engine's ExecStartPre."""
+        src = self.extract(self.build())
+        root = self.tmp / 'gen2-convert'
+        dest = root / 'enginex'
+        (dest / 'bundle/bin').mkdir(parents=True)
+        (dest / 'state').mkdir()
+        calls = self.tmp / 'rb-bridge.calls'
+        bridge = dest / 'bundle/bin/rb-bridge'
+        bridge.write_text(f'#!/bin/sh\necho "$*" >> {calls}\n')
+        bridge.chmod(0o755)
+        media = self.tmp / 'media'
+        (media / 'STICK/PIONEER').mkdir(parents=True)
+        (media / 'PLAIN').mkdir()
+        run_dir = self.tmp / 'run-convert'
+        ba = self.tmp / 'boot-activate-convert.sh'
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/'))
+        env = dict(self.env, SC5000_CUSTOM=str(dest), SC5000_MEDIA_ROOT=str(media),
+                   SC5000_CONVERT_MARK=str(run_dir / 'boot-converted'),
+                   SC5000_PID1_COMM=str(self.pid1_systemd()),
+                   SC5000_ROOT_SSH_DIR=str(root / 'root-ssh'),
+                   SC5000_STREAMING_ACCOUNTS=str(root / 'StreamingAccounts.json'),
+                   SC5000_CONFIG_DIR=str(root / '.config'),
+                   SC5000_TIMESYNC_LIB_DIR=str(root / 'timesync'),
+                   SC5000_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'),
+                   SC5000_TZ_NEWER_MARKER=str(run_dir / 'tz-newer'))
+        res = subprocess.run(['sh', str(ba)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn('restart --no-block engine.service', self.host_commands.read_text())
+        self.assertFalse(calls.exists(), 'converted while the stock Engine was still running')
+        self.host_commands.write_text('')
+        dropin = (run_dir / 'systemd/system/engine.service.d/99-sc5000.conf').read_text().splitlines()
+        pre = dropin.index(next(l for l in dropin if l.endswith('engine-ui-guard pre')))
+        self.assertTrue(dropin[pre + 1].startswith('ExecStartPre=-') and dropin[pre + 1].endswith('boot-activate.sh --convert-mounted'),
+                        dropin)
+        for _ in range(2):  # the hooked Engine's first start converts; a later restart does not repeat it
+            res = subprocess.run(['sh', str(ba), '--convert-mounted'], env=env, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(calls.read_text().splitlines(), [f'--mount-path {media}/STICK'])
+
     def test_boot_activate_follows_console_ssh_settings(self):
         """BH-GC2-9 / BH-GF4-15: boot-activate.sh started sshd whenever a key was stored, even
         after the console turned SSH off, never without a key (a root password set in the
