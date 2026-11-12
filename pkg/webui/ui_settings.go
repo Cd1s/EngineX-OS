@@ -78,6 +78,7 @@ type uiCapabilities struct {
 	LineInAux     bool `json:"lineInAux"`
 	Gen2          bool `json:"gen2"`
 	RemoteStems   bool `json:"remoteStems"`
+	JogWheel      bool `json:"jogWheel"`
 }
 
 func boardCapabilities(board string) uiCapabilities {
@@ -89,6 +90,7 @@ func boardCapabilities(board string) uiCapabilities {
 			TrackSkipKeys: true,
 			StemsEq:       true,
 			RemoteStems:   true,
+			JogWheel:      true,
 		}
 	}
 	isPlayer := playerBoards[board]
@@ -104,6 +106,7 @@ func boardCapabilities(board string) uiCapabilities {
 		LineInAux:     board == "SCLIVE4",
 		Gen2:          dataBundleBoards[board],
 		RemoteStems:   !isAZ04,
+		JogWheel:      !motorizedBoards[board],
 	}
 }
 
@@ -196,6 +199,8 @@ type uiSettings struct {
 	UIScale             int    `json:"uiScale"`
 	StemsEqMode         bool   `json:"stemsEqMode"`
 	BeatJumpPads        bool   `json:"beatJumpPads"`
+	JogInvertLeft       bool   `json:"jogInvertLeft"`
+	JogInvertRight      bool   `json:"jogInvertRight"`
 	PioneerFx           string `json:"pioneerFx"`
 	FXSelectorAvailable bool   `json:"fxSelectorAvailable"`
 	FxTimeMode          string `json:"fxTimeMode"`
@@ -433,6 +438,10 @@ func (s *Server) loadUI() uiSettings {
 			v.StemsEqMode = val == "1" || strings.EqualFold(val, "true")
 		case "beat_jump_pads":
 			v.BeatJumpPads = val == "1" || strings.EqualFold(val, "true")
+		case "jog_invert_left":
+			v.JogInvertLeft = val == "1" || strings.EqualFold(val, "true")
+		case "jog_invert_right":
+			v.JogInvertRight = val == "1" || strings.EqualFold(val, "true")
 		case "pioneer_fx":
 			if slices.Contains(uiPioneerFxModes, val) {
 				v.PioneerFx = val
@@ -577,6 +586,12 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	if v.BeatJumpPads {
 		text += "beat_jump_pads=1\n"
 	}
+	if v.JogInvertLeft {
+		text += "jog_invert_left=1\n"
+	}
+	if v.JogInvertRight {
+		text += "jog_invert_right=1\n"
+	}
 	if !s.fxSelectorAvailable() && v.PioneerFx != "" && v.PioneerFx != "off" {
 		text += "pioneer_fx=" + v.PioneerFx + "\n"
 	}
@@ -660,6 +675,16 @@ func (s *Server) scope() string {
 	return s.loadUI().Scope
 }
 
+func (s *Server) isLegacy504Pack() bool {
+	enDir := filepath.Join(s.uiDir(), "packs", "en")
+	if _, err := os.Stat(filepath.Join(enDir, "Skins", "EmbeddedCommon", "EmbeddedMain.qml")); err == nil {
+		if _, jerr := os.Stat(filepath.Join(enDir, "ControlSurfaceModules", "ControlSurfaceModules", "JogWheel.qml")); errors.Is(jerr, os.ErrNotExist) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	s.uiMu.Lock()
 	v := s.loadUI()
@@ -689,6 +714,9 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.BuildTag = currentBuildTag()
 	v.Player = playerBoards[board]
 	v.Capabilities = boardCapabilities(board)
+	if s.isLegacy504Pack() {
+		v.Capabilities.JogWheel = false
+	}
 	v.FourDeckRoleActive = s.activeRole(v)
 	v.TimeZone = s.savedTimeZone()
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
@@ -873,6 +901,24 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.BeatJumpPads = b
+	}
+	if q.Has("jogInvertLeft") {
+		b, ok := parseBoolParam(q.Get("jogInvertLeft"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.JogInvertLeft = b
+	}
+	if q.Has("jogInvertRight") {
+		b, ok := parseBoolParam(q.Get("jogInvertRight"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.JogInvertRight = b
 	}
 	if q.Has("syncGuardPct") {
 		n, err := strconv.Atoi(q.Get("syncGuardPct"))
