@@ -6432,6 +6432,81 @@ def edits(dev: bool):
         scaled[ROOT + "Items/MessageBoxes/TimeSyncDialog.qml"] = [
             ("        function onNetworkNotConnected() {\n", "        function onNetworkNotConnected() {\n            if (" + playing + ") return\n"),
         ]
+        # Never show "Choose your Database": pick Engine Library when m.db is
+        # registered for devicePath (rb-bridge converts at mount), otherwise fall
+        # back to stock OneLibrary reading and upgrade if m.db arrives on re-read.
+        scaled[ROOT + "Items/MessageBoxes/OneLibraryMessageBox.qml"] = [(
+            "    Connections {\n"
+            "        target: Planck.librarianController.librarySelectionController\n"
+            "        function onSelectionRequested(devicePath) {\n"
+            "            messageBox.pendingDevicePath = devicePath\n"
+            "\n"
+            "            const prompt = PlanckGUI.views.prompts.post({\n"
+            '                id: "OneLibrarySelection",\n'
+            '                title: "Choose your Database",\n'
+            '                message: "Placeholder text",\n'
+            "                options: [],\n"
+            "            })\n"
+            "            prompt.extras = messageBox.extrasComponent\n"
+            "            prompt.finished.connect(messageBox.onFinished)\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    Connections {\n"
+            "        target: Planck.librarianController.devicesController\n"
+            "        function onDeviceRemoved(path, databaseUuid) {\n"
+            "            if (path === messageBox.pendingDevicePath) {\n"
+            '                PlanckGUI.views.prompts.drop("OneLibrarySelection")\n'
+            "            }\n"
+            "        }\n"
+            "    }\n",
+            "    property var scOneLibraryFallbackPaths: ({})\n"
+            "\n"
+            "    function scHasEngineLibrary(devicePath) {\n"
+            "        if (!devicePath) {\n"
+            "            return false\n"
+            "        }\n"
+            "        const dc = Planck.librarianController ? Planck.librarianController.devicesController : null\n"
+            '        if (!dc || typeof dc.getDatabaseUuid !== "function") {\n'
+            "            return false\n"
+            "        }\n"
+            '        const uuid = String(dc.getDatabaseUuid(devicePath) || "").trim()\n'
+            '        return uuid.length > 0 && !/^0+$/.test(uuid.replace(/[{}-]/g, ""))\n'
+            "    }\n"
+            "\n"
+            "    Connections {\n"
+            "        target: Planck.librarianController.librarySelectionController\n"
+            "        function onSelectionRequested(devicePath) {\n"
+            "            messageBox.pendingDevicePath = devicePath\n"
+            "            const controller = Planck.librarianController.librarySelectionController\n"
+            "            if (messageBox.scHasEngineLibrary(devicePath)) {\n"
+            "                delete messageBox.scOneLibraryFallbackPaths[devicePath]\n"
+            "                controller.chooseEngineLibrary(devicePath)\n"
+            "            } else {\n"
+            "                messageBox.scOneLibraryFallbackPaths[devicePath] = true\n"
+            "                controller.chooseOneLibrary(devicePath)\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    Connections {\n"
+            "        target: Planck.librarianController.devicesController\n"
+            "        function onDeviceAdded(path) {\n"
+            "            if (path && messageBox.scOneLibraryFallbackPaths[path] && messageBox.scHasEngineLibrary(path)) {\n"
+            "                delete messageBox.scOneLibraryFallbackPaths[path]\n"
+            "                Planck.librarianController.librarySelectionController.chooseEngineLibrary(path)\n"
+            "            }\n"
+            "        }\n"
+            "        function onDeviceRemoved(path, databaseUuid) {\n"
+            "            if (path) {\n"
+            "                delete messageBox.scOneLibraryFallbackPaths[path]\n"
+            "            }\n"
+            "            if (path === messageBox.pendingDevicePath) {\n"
+            '                PlanckGUI.views.prompts.drop("OneLibrarySelection")\n'
+            "            }\n"
+            "        }\n"
+            "    }\n",
+        )]
         # 4-deck (#49): the library deck bar lists Deck 1-4 left to right (stock groups
         # by side: 1, 3, 2, 4), lights only this player's decks, and names the deck of a
         # loaded track. Elsewhere `root` is not EmbeddedMain or scFourDeckRole is "": stock.
