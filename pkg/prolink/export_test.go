@@ -1162,3 +1162,25 @@ func TestExportStatusWaitsForThePlayersFirmware(t *testing.T) {
 		t.Fatal("no status for a player that sends none")
 	}
 }
+
+// #217: players broadcast on the beat port (beats, and a CDJ-3000's absolute
+// positions), and a socket bound to the interface's own address gets no
+// broadcast. Checked on Linux in a network namespace: a datagram to
+// 10.99.0.255:50001 reached the socket on 0.0.0.0:50001 only, not the one on
+// 10.99.0.1:50001.
+func TestExportBeatPortTakesBroadcasts(t *testing.T) {
+	for _, c := range []struct {
+		cfg  ExportConfig
+		ip   net.IP
+		want string
+	}{
+		{ExportConfig{}, net.IPv4(192, 168, 1, 20), "0.0.0.0:50001"},
+		{ExportConfig{}, net.IPv4(169, 254, 20, 3), "0.0.0.0:50001"},
+		{ExportConfig{BeatAddr: "127.63.0.1:0"}, net.IPv4(192, 168, 1, 20), "127.63.0.1:0"},
+		{ExportConfig{}, net.IPv4(127, 63, 0, 1), "127.63.0.1:50001"}, // isolated loopback tests
+	} {
+		if got := beatAddress(c.cfg, c.ip); got != c.want {
+			t.Fatalf("beat port for %v: %s, want %s", c.ip, got, c.want)
+		}
+	}
+}

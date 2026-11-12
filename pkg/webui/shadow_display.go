@@ -286,15 +286,9 @@ func (s *Server) shadowDisplayCDJs(free []int, lineIn bool, now time.Time, only 
 				}
 			}
 		}
-		at := dev.LastSeen
 		sh.mu.Lock()
-		if p, ok := sh.precise[dev.Number]; ok && now.Sub(p.at) < time.Second {
-			d.PositionMS, at = p.ms, p.at
-		}
+		d.PositionMS, d.Playing = sh.cdjPlayhead(dev, d.Playing, d.Pitch, now)
 		sh.mu.Unlock()
-		if d.Playing {
-			d.PositionMS += float64(max(int64(0), now.Sub(at).Milliseconds())) * (1 + d.Pitch/100)
-		}
 		out = append(out, d)
 	}
 	return out
