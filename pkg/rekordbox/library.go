@@ -34,7 +34,8 @@ type Track struct {
 	Rating             int
 	FileSize           int64
 	RecordHash         string
-	StartOffsetSamples int `json:",omitempty"`
+	StartOffsetSamples int   `json:",omitempty"`
+	Cues               []Cue `json:",omitempty"`
 }
 
 type Playlist struct {
@@ -74,6 +75,11 @@ func (l *Library) Validate() error {
 		}
 		if math.IsNaN(t.BPM) || math.IsInf(t.BPM, 0) || t.BPM < 0 || t.BPM > 1000 || math.IsNaN(t.Duration) || math.IsInf(t.Duration, 0) || t.Duration < 0 || t.Duration > 1e7 || t.SampleRate < 0 || t.SampleRate > 768000 || t.StartOffsetSamples < 0 {
 			return fmt.Errorf("rekordbox: invalid audio metadata for track %d", t.ID)
+		}
+		for _, c := range t.Cues {
+			if c.HotCue > 8 || (c.Loop && c.EndMS < c.TimeMS) {
+				return fmt.Errorf("rekordbox: invalid cue metadata for track %d", t.ID)
+			}
 		}
 		if t.RecordHash == "" {
 			t.RecordHash = RecordHash(*t)

@@ -44,8 +44,11 @@ func readDeviceSQLString(buf []byte, off int) (string, error) {
 	case strKindLongASCII:
 		return string(body), nil
 	case strKindLongUTF16:
+		if len(body) > 0 && body[0] == 0x03 {
+			return strings.TrimRight(string(body[1:]), "\x00"), nil
+		}
 		if len(body)%2 != 0 {
-			return "", errShortString
+			body = body[:len(body)-1]
 		}
 		u := make([]uint16, len(body)/2)
 		for i := range u {

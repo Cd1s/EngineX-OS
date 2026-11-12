@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -13,6 +14,27 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// Public rekordbox 62-entry cue color-code palette (indices 1..62, documented by
+// Deep Symmetry / Beat Link CueList.findRekordboxColor).
+var rekordboxCuePalette = [62][3]byte{
+	{0x30, 0x5a, 0xff}, {0x50, 0x73, 0xff}, {0x50, 0x8c, 0xff}, {0x50, 0xa0, 0xff},
+	{0x50, 0xb4, 0xff}, {0x50, 0xb0, 0xf2}, {0x50, 0xae, 0xe8}, {0x45, 0xac, 0xdb},
+	{0x00, 0xe0, 0xff}, {0x19, 0xda, 0xf0}, {0x32, 0xd2, 0xe6}, {0x21, 0xb4, 0xb9},
+	{0x20, 0xaa, 0xa0}, {0x1f, 0xa3, 0x92}, {0x19, 0xa0, 0x8c}, {0x14, 0xa5, 0x84},
+	{0x14, 0xaa, 0x7d}, {0x10, 0xb1, 0x76}, {0x30, 0xd2, 0x6e}, {0x37, 0xde, 0x5a},
+	{0x3c, 0xeb, 0x50}, {0x28, 0xe2, 0x14}, {0x7d, 0xc1, 0x3d}, {0x8c, 0xc8, 0x32},
+	{0x9b, 0xd7, 0x23}, {0xa5, 0xe1, 0x16}, {0xa5, 0xdc, 0x0a}, {0xaa, 0xd2, 0x08},
+	{0xb4, 0xc8, 0x05}, {0xb4, 0xbe, 0x04}, {0xba, 0xb4, 0x04}, {0xc3, 0xaf, 0x04},
+	{0xe1, 0xaa, 0x00}, {0xff, 0xa0, 0x00}, {0xff, 0x96, 0x00}, {0xff, 0x8c, 0x00},
+	{0xff, 0x75, 0x00}, {0xe0, 0x64, 0x1b}, {0xe0, 0x46, 0x1e}, {0xe0, 0x30, 0x1e},
+	{0xe0, 0x28, 0x23}, {0xe6, 0x28, 0x28}, {0xff, 0x37, 0x6f}, {0xff, 0x2d, 0x6f},
+	{0xff, 0x12, 0x7b}, {0xf5, 0x1e, 0x8c}, {0xeb, 0x2d, 0xa0}, {0xe6, 0x37, 0xb4},
+	{0xde, 0x44, 0xcf}, {0xde, 0x44, 0x8d}, {0xe6, 0x30, 0xb4}, {0xe6, 0x19, 0xdc},
+	{0xe6, 0x00, 0xff}, {0xdc, 0x00, 0xff}, {0xcc, 0x00, 0xff}, {0xb4, 0x32, 0xff},
+	{0xb9, 0x3c, 0xff}, {0xc5, 0x42, 0xff}, {0xaa, 0x5a, 0xff}, {0xaa, 0x72, 0xff},
+	{0x82, 0x72, 0xff}, {0x64, 0x73, 0xff},
+}
 
 // SQLiteAdapter permits vendor-version-specific OneLibrary readers without
 // coupling the sync engine to a particular SQLite export schema or decryption.
@@ -26,7 +48,6 @@ func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Libra
 	if e != nil {
 		return nil, e
 	}
-	u := url.URL{Scheme: "file", Path: abs}
 	// mode=ro alone can still create/write a WAL shared-memory sidecar. Export
 	// files must be clean snapshots: immutable avoids all source locks/writes,
 	// and refusing journals prevents silently ignoring uncheckpointed changes.
@@ -39,6 +60,20 @@ func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Libra
 			return nil, fmt.Errorf("OneLibrary: requires checkpointed export; source sidecar %s is present", suffix)
 		}
 	}
+	openPath := abs
+	encrypted, e := isEncryptedSQLite(abs)
+	if e != nil {
+		return nil, e
+	}
+	if encrypted {
+		tmpPath, err := decryptSQLCipher4ToTemp(ctx, abs, []byte(oneLibraryPassphrase))
+		if err != nil {
+			return nil, fmt.Errorf("OneLibrary SQLCipher: %w", err)
+		}
+		defer os.Remove(tmpPath)
+		openPath = tmpPath
+	}
+	u := url.URL{Scheme: "file", Path: openPath}
 	db, e := sql.Open("sqlite", u.String()+"?mode=ro&immutable=1&_pragma=query_only(1)")
 	if e != nil {
 		return nil, e
@@ -50,7 +85,7 @@ func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Libra
 	}
 	l, e := adapter.Read(ctx, db)
 	if e != nil {
-		return nil, fmt.Errorf("OneLibrary SQLite (plaintext adapter required for encrypted exports): %w", e)
+		return nil, fmt.Errorf("OneLibrary SQLite: %w", e)
 	}
 	if e = l.Validate(); e != nil {
 		return nil, e
@@ -75,9 +110,121 @@ func (r sqlRecord) num(names ...string) uint32 {
 	v, _ := strconv.ParseUint(r.get(names...), 10, 32)
 	return uint32(v)
 }
+func (r sqlRecord) sint(names ...string) (int64, bool) {
+	s := r.get(names...)
+	if s == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
 func (r sqlRecord) decimal(names ...string) float64 {
 	v, _ := strconv.ParseFloat(r.get(names...), 64)
 	return v
+}
+
+func parseSQLiteBPM(r sqlRecord) float64 {
+	if rawStr := r.get("bpmx100"); rawStr != "" {
+		if iv, err := strconv.ParseInt(rawStr, 10, 64); err == nil {
+			if iv <= 0 || iv == 0x7fffffff || iv == 0xffffffff {
+				return 0
+			}
+			return float64(iv) / 100
+		}
+		fv := r.decimal("bpmx100")
+		if fv <= 0 || fv == 0x7fffffff || fv == 0xffffffff {
+			return 0
+		}
+		return fv / 100
+	}
+	if iv, ok := r.sint("bpm", "tempo"); ok && (iv <= 0 || iv == 0x7fffffff || iv == 0xffffffff) {
+		return 0
+	}
+	bpm := r.decimal("bpm", "tempo")
+	if bpm > 1000 {
+		bpm /= 100
+	}
+	return bpm
+}
+
+func isUnsetCueTime(v int64) bool {
+	return v < 0 || v == 0x7fffffff || v == 0xffffffff
+}
+
+func parseSQLiteCue(r sqlRecord) (Cue, bool) {
+	kind, ok := r.sint("kind")
+	if !ok || kind < 0 || kind > 8 {
+		return Cue{}, false
+	}
+	var timeMS, endMS uint32
+	var loop bool
+	if inUsec, hasUsec := r.sint("inUsec", "in_usec"); hasUsec {
+		if isUnsetCueTime(inUsec) {
+			return Cue{}, false
+		}
+		inMS := (inUsec + 500) / 1000
+		if inMS > math.MaxUint32 {
+			return Cue{}, false
+		}
+		timeMS = uint32(inMS)
+		if outUsec, hasOut := r.sint("outUsec", "out_usec"); hasOut && outUsec > 0 && !isUnsetCueTime(outUsec) && outUsec > inUsec {
+			outMS := (outUsec + 500) / 1000
+			if outMS <= math.MaxUint32 {
+				loop = true
+				endMS = uint32(outMS)
+				if endMS <= timeMS {
+					endMS = timeMS + 1
+				}
+			}
+		}
+	} else if inMsec, hasMsec := r.sint("inMsec", "in_msec"); hasMsec {
+		if isUnsetCueTime(inMsec) || inMsec > math.MaxUint32 {
+			return Cue{}, false
+		}
+		timeMS = uint32(inMsec)
+		if outMsec, hasOut := r.sint("outMsec", "out_msec"); hasOut && outMsec > 0 && !isUnsetCueTime(outMsec) && outMsec > inMsec && outMsec <= math.MaxUint32 {
+			loop = true
+			endMS = uint32(outMsec)
+		}
+	} else {
+		return Cue{}, false
+	}
+
+	activeVal, _ := r.sint("isActiveLoop", "is_active_loop", "active_loop")
+	numVal, _ := r.sint("beatLoopNumerator", "beat_loop_numerator")
+	denVal, _ := r.sint("beatLoopDenominator", "beat_loop_denominator")
+	var loopNum, loopDen uint16
+	if numVal > 0 && numVal <= math.MaxUint16 {
+		loopNum = uint16(numVal)
+	}
+	if denVal > 0 && denVal <= math.MaxUint16 {
+		loopDen = uint16(denVal)
+	}
+
+	c := Cue{
+		HotCue:          uint32(kind),
+		TimeMS:          timeMS,
+		EndMS:           endMS,
+		Loop:            loop,
+		Active:          loop && activeVal > 0,
+		Name:            r.get("cueComment", "cue_comment", "comment"),
+		LoopNumerator:   loopNum,
+		LoopDenominator: loopDen,
+		Extended:        true,
+	}
+	if colorIdx, hasColor := r.sint("colorTableIndex", "color_table_index"); hasColor && colorIdx > 0 {
+		if kind == 0 && colorIdx <= 8 {
+			c.ColorID = byte(colorIdx)
+		} else if colorIdx <= int64(len(rekordboxCuePalette)) {
+			rgb := rekordboxCuePalette[colorIdx-1]
+			c.ColorCode = byte(colorIdx)
+			c.Color = [4]byte{255, rgb[0], rgb[1], rgb[2]}
+		}
+	}
+	return c, true
 }
 
 func readSQLRows(ctx context.Context, db *sql.DB, table string) ([]sqlRecord, error) {
@@ -155,7 +302,7 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 		}
 		m := map[uint32]string{}
 		for _, r := range rs {
-			m[r.num("id", kind+"_id")] = r.get("name", "title", "path", "file_path")
+			m[r.num("id", kind+"_id")] = r.get("name", "scale_name", "title", "path", "file_path")
 		}
 		lookups[kind] = m
 	}
@@ -173,13 +320,16 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	}
 	for _, r := range tracks {
 		path := r.get("file_path", "path", "location")
-		if filename := r.get("file_name", "filename"); path == "" && filename != "" {
-			path = strings.TrimRight(r.get("folder_path"), "/") + "/" + filename
+		if filename := r.get("file_name", "file_name_l", "filename"); path == "" && filename != "" {
+			if folder := r.get("folder_path"); folder != "" {
+				if strings.HasSuffix(folder, "/"+filename) || strings.HasSuffix(folder, `\`+filename) {
+					path = folder
+				} else {
+					path = strings.TrimRight(folder, "/") + "/" + filename
+				}
+			}
 		}
-		bpm := r.decimal("bpmx100", "bpm", "tempo")
-		if r.get("bpmx100") != "" || bpm > 1000 {
-			bpm /= 100
-		}
+		bpm := parseSQLiteBPM(r)
 		key := r.get("key_name")
 		if key == "" {
 			key = lookups["key"][r.num("key_id")]
@@ -187,7 +337,22 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 				key = r.get("key")
 			}
 		}
-		t := Track{ID: r.num("id", "content_id", "track_id"), Path: path, AnalysisPath: r.get("analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path"), Title: r.get("title", "name"), Artist: lookups["artist"][r.num("artist_id_artist", "artist_id")], Composer: lookups["artist"][r.num("artist_id_composer", "composer_id")], Remixer: lookups["artist"][r.num("artist_id_remixer", "remixer_id")], Album: lookups["album"][r.num("album_id")], Genre: lookups["genre"][r.num("genre_id")], Label: lookups["label"][r.num("label_id")], Key: key, BPM: bpm, Duration: r.decimal("length", "duration"), SampleRate: int(r.num("samplingRate", "sample_rate")), BitDepth: int(r.num("bit_depth")), Bitrate: int(r.num("bit_rate", "bitrate")), FileSize: int64(r.decimal("file_size")), Year: int(r.num("release_year", "year")), Rating: int(r.num("rating")), Comment: r.get("djComment", "commnt", "comment"), ArtworkPath: l.Artwork[r.num("image_id", "artwork_id")]}
+		artworkPath := lookups["image"][r.num("image_id")]
+		if artworkPath == "" {
+			artworkPath = l.Artwork[r.num("image_id", "artwork_id")]
+		}
+		if artworkPath == "" {
+			artworkPath = r.get("image_path")
+		}
+		var fileSize int64
+		if sz, ok := r.sint("file_size"); ok && sz > 0 {
+			fileSize = sz
+		} else if fsz := r.decimal("file_size"); fsz > 0 {
+			fileSize = int64(fsz)
+		}
+		// OneLibrary content.length is stored in whole seconds (verified against
+		// libdjinterop content_table.cpp std::chrono::seconds{*length}).
+		t := Track{ID: r.num("id", "content_id", "track_id"), Path: path, AnalysisPath: r.get("analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path"), Title: r.get("title", "name"), Artist: lookups["artist"][r.num("artist_id_artist", "artist_id")], Composer: lookups["artist"][r.num("artist_id_composer", "composer_id")], Remixer: lookups["artist"][r.num("artist_id_remixer", "remixer_id")], Album: lookups["album"][r.num("album_id")], Genre: lookups["genre"][r.num("genre_id")], Label: lookups["label"][r.num("label_id")], Key: key, BPM: bpm, Duration: r.decimal("length", "duration"), SampleRate: int(r.num("samplingRate", "sample_rate")), BitDepth: int(r.num("bit_depth")), Bitrate: int(r.num("bit_rate", "bitrate")), FileSize: fileSize, Year: int(r.num("release_year", "year")), Rating: int(r.num("rating")), Comment: r.get("djComment", "commnt", "comment"), ArtworkPath: artworkPath}
 		if t.Artist == "" {
 			t.Artist = r.get("artist")
 		}
@@ -195,8 +360,51 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 			t.Album = r.get("album")
 		}
 		normalizeParsedAudioMetadata(&t)
-		t.RecordHash = RecordHash(t)
 		l.Tracks = append(l.Tracks, t)
+	}
+	cues, e := load("cue", "djmdCue")
+	if e != nil {
+		return nil, e
+	}
+	if len(cues) > 0 {
+		type indexedCue struct {
+			id  int64
+			seq int
+			cue Cue
+		}
+		byContent := map[uint32][]indexedCue{}
+		for idx, r := range cues {
+			cid := r.num("content_id")
+			if cid == 0 {
+				continue
+			}
+			c, ok := parseSQLiteCue(r)
+			if !ok {
+				continue
+			}
+			cueID, _ := r.sint("cue_id", "id")
+			byContent[cid] = append(byContent[cid], indexedCue{id: cueID, seq: idx, cue: c})
+		}
+		for i := range l.Tracks {
+			items := byContent[l.Tracks[i].ID]
+			if len(items) == 0 {
+				continue
+			}
+			sort.SliceStable(items, func(a, b int) bool {
+				if items[a].id != items[b].id {
+					return items[a].id < items[b].id
+				}
+				return items[a].seq < items[b].seq
+			})
+			var merged Analysis
+			for _, item := range items {
+				merged.mergeCue(item.cue)
+			}
+			l.Tracks[i].Cues = merged.Cues
+		}
+	}
+	for i := range l.Tracks {
+		l.Tracks[i].RecordHash = RecordHash(l.Tracks[i])
 	}
 	ps, e := load("playlist", "djmdPlaylist")
 	if e != nil {
