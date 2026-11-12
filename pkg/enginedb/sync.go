@@ -388,8 +388,10 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 	}
 	defer db.Close()
 	defer tx.Rollback()
+	q := newStmtCache(tx)
+	defer q.Close()
 	var databaseUUID string
-	if err = tx.QueryRowContext(ctx, `SELECT uuid FROM Information`).Scan(&databaseUUID); err != nil {
+	if err = q.QueryRowContext(ctx, `SELECT uuid FROM Information`).Scan(&databaseUUID); err != nil {
 		return result, err
 	}
 	mapping := map[uint32]int64{}
@@ -416,12 +418,12 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		var previous string
 		var storedBPM float64
 		if ownedID := owned[t.ID]; ownedID != 0 {
-			e := tx.QueryRowContext(ctx, `SELECT s.trackId,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId WHERE s.trackId=?`, ownedID).Scan(&id, &previous, &storedBPM)
+			e := q.QueryRowContext(ctx, `SELECT s.trackId,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId WHERE s.trackId=?`, ownedID).Scan(&id, &previous, &storedBPM)
 			if e != nil {
 				return result, e
 			}
 		} else {
-			e := tx.QueryRowContext(ctx, `SELECT s.trackId,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId WHERE s.path=?`, enginePath).Scan(&id, &previous, &storedBPM)
+			e := q.QueryRowContext(ctx, `SELECT s.trackId,s.fingerprint,COALESCE(t.bpmAnalyzed,0) FROM BridgeState s JOIN Track t ON t.id=s.trackId WHERE s.path=?`, enginePath).Scan(&id, &previous, &storedBPM)
 			if e != nil && !errors.Is(e, sql.ErrNoRows) {
 				return result, e
 			}
@@ -437,7 +439,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			// Engine (or its desktop app) already owns a track at this path:
 			// reference it from imported playlists, but never adopt or rewrite it.
 			var native int64
-			e := tx.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, enginePath).Scan(&native)
+			e := q.QueryRowContext(ctx, `SELECT id FROM Track WHERE path=?`, enginePath).Scan(&native)
 			if e == nil {
 				mapping[t.ID] = native
 				result.Unchanged++
@@ -459,10 +461,10 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			if previous != hash && (previous == "" || strings.HasPrefix(previous, "fast:")) {
 				effectiveTracks[i] = t
 				args := []any{int(t.Duration + 0.5), int(t.BPM + 0.5), t.Year, enginePath, path.Base(rel), t.Bitrate, t.BPM, st.Size(), t.Title, t.Artist, t.Album, t.Genre, t.Comment, t.Label, t.Composer, t.Remixer, EngineKey(t.Key), t.Rating, strings.TrimPrefix(strings.ToLower(path.Ext(rel)), "."), int64(t.ID), id}
-				if _, e := tx.ExecContext(ctx, `UPDATE Track SET length=?,bpm=?,year=?,path=?,filename=?,bitrate=?,bpmAnalyzed=?,fileBytes=?,title=?,artist=?,album=?,genre=?,comment=?,label=?,composer=?,remixer=?,key=?,rating=?,fileType=?,pdbImportKey=? WHERE id=?`, args...); e != nil {
+				if _, e := q.ExecContext(ctx, `UPDATE Track SET length=?,bpm=?,year=?,path=?,filename=?,bitrate=?,bpmAnalyzed=?,fileBytes=?,title=?,artist=?,album=?,genre=?,comment=?,label=?,composer=?,remixer=?,key=?,rating=?,fileType=?,pdbImportKey=? WHERE id=?`, args...); e != nil {
 					return result, e
 				}
-				if _, e := tx.ExecContext(ctx, `UPDATE BridgeState SET path=?,fingerprint=? WHERE trackId=?`, enginePath, hash, id); e != nil {
+				if _, e := q.ExecContext(ctx, `UPDATE BridgeState SET path=?,fingerprint=? WHERE trackId=?`, enginePath, hash, id); e != nil {
 					return result, e
 				}
 				result.Updated++
@@ -566,13 +568,13 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			}
 			var n int64
 			// An earlier build stored the hash as 40 hex characters of TEXT.
-			e = tx.QueryRowContext(ctx, `SELECT id FROM AlbumArt WHERE hash=? OR hash=? LIMIT 1`, sum, hex.EncodeToString(sum)).Scan(&n)
+			e = q.QueryRowContext(ctx, `SELECT id FROM AlbumArt WHERE hash=? OR hash=? LIMIT 1`, sum, hex.EncodeToString(sum)).Scan(&n)
 			if e == nil {
-				if _, e = tx.ExecContext(ctx, `UPDATE AlbumArt SET hash=? WHERE id=? AND typeof(hash)='text'`, sum, n); e != nil {
+				if _, e = q.ExecContext(ctx, `UPDATE AlbumArt SET hash=? WHERE id=? AND typeof(hash)='text'`, sum, n); e != nil {
 					return result, e
 				}
 			} else if errors.Is(e, sql.ErrNoRows) {
-				r, e := tx.ExecContext(ctx, `INSERT INTO AlbumArt(hash,albumArt) VALUES(?,?)`, sum, data)
+				r, e := q.ExecContext(ctx, `INSERT INTO AlbumArt(hash,albumArt) VALUES(?,?)`, sum, data)
 				if e != nil {
 					return result, e
 				}
@@ -588,7 +590,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		args := []any{int(t.Duration + 0.5), int(t.BPM + 0.5), t.Year, enginePath, path.Base(rel), t.Bitrate, t.BPM, artID, st.Size(), t.Title, t.Artist, t.Album, t.Genre, t.Comment, t.Label, t.Composer, t.Remixer, EngineKey(t.Key), t.Rating, strings.TrimPrefix(strings.ToLower(path.Ext(rel)), "."), perf.Complete, true, true, int64(t.ID)}
 		if id == 0 {
 			// A pre-existing native track at the same path is never adopted/overwritten.
-			r, e := tx.ExecContext(ctx, `INSERT INTO Track(length,bpm,year,path,filename,bitrate,bpmAnalyzed,albumArtId,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,fileType,isAnalyzed,isAvailable,isMetadataImported,pdbImportKey,dateCreated,dateAdded) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s'),strftime('%s'))`, args...)
+			r, e := q.ExecContext(ctx, `INSERT INTO Track(length,bpm,year,path,filename,bitrate,bpmAnalyzed,albumArtId,fileBytes,title,artist,album,genre,comment,label,composer,remixer,key,rating,fileType,isAnalyzed,isAvailable,isMetadataImported,pdbImportKey,dateCreated,dateAdded) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s'),strftime('%s'))`, args...)
 			if e != nil {
 				return result, fmt.Errorf("insert track %d: %w", t.ID, e)
 			}
@@ -599,7 +601,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			result.Added++
 		} else {
 			args = append(args, id)
-			_, e = tx.ExecContext(ctx, `UPDATE Track SET length=?,bpm=?,year=?,path=?,filename=?,bitrate=?,bpmAnalyzed=?,albumArtId=?,fileBytes=?,title=?,artist=?,album=?,genre=?,comment=?,label=?,composer=?,remixer=?,key=?,rating=?,fileType=?,isAnalyzed=?,isAvailable=?,isMetadataImported=?,pdbImportKey=? WHERE id=?`, args...)
+			_, e = q.ExecContext(ctx, `UPDATE Track SET length=?,bpm=?,year=?,path=?,filename=?,bitrate=?,bpmAnalyzed=?,albumArtId=?,fileBytes=?,title=?,artist=?,album=?,genre=?,comment=?,label=?,composer=?,remixer=?,key=?,rating=?,fileType=?,isAnalyzed=?,isAvailable=?,isMetadataImported=?,pdbImportKey=? WHERE id=?`, args...)
 			if e != nil {
 				return result, e
 			}
@@ -609,7 +611,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		// Track's factory trigger already inserted PerformanceData(trackId).
 		// Fast mode leaves it empty, which is what makes Engine analyse on load.
 		if !fast {
-			if _, e = tx.ExecContext(ctx, `UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?,thirdPartySourceId=1,activeOnLoadLoops=? WHERE trackId=?`, perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, id); e != nil {
+			if _, e = q.ExecContext(ctx, `UPDATE PerformanceData SET trackData=?,overviewWaveFormData=?,beatData=?,quickCues=?,loops=?,thirdPartySourceId=1,activeOnLoadLoops=? WHERE trackId=?`, perf.TrackData, perf.Overview, perf.Beats, perf.QuickCues, perf.Loops, perf.ActiveLoops, id); e != nil {
 				return result, e
 			}
 		}
@@ -619,14 +621,14 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 				Analysis *rekordbox.Analysis
 			}{original, a})
 			audioJSON, _ := json.Marshal(audio)
-			if _, e = tx.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, sourceJSON, audioJSON); e != nil {
+			if _, e = q.ExecContext(ctx, `INSERT INTO BridgeAnalysis(trackId,sourceJSON,audioJSON) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET sourceJSON=excluded.sourceJSON,audioJSON=excluded.audioJSON`, id, sourceJSON, audioJSON); e != nil {
 				return result, e
 			}
 		}
 		if existing {
-			_, e = tx.ExecContext(ctx, `UPDATE BridgeState SET path=?,fingerprint=? WHERE trackId=?`, enginePath, hash, id)
+			_, e = q.ExecContext(ctx, `UPDATE BridgeState SET path=?,fingerprint=? WHERE trackId=?`, enginePath, hash, id)
 		} else {
-			_, e = tx.ExecContext(ctx, `INSERT INTO BridgeState(path,trackId,fingerprint) VALUES(?,?,?)`, enginePath, id, hash)
+			_, e = q.ExecContext(ctx, `INSERT INTO BridgeState(path,trackId,fingerprint) VALUES(?,?,?)`, enginePath, id, hash)
 		}
 		if e != nil {
 			return result, e
@@ -640,7 +642,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		Recommendations []uint32
 	}{l.Playlists, opts, mapping, recommendations})
 	var oldHash string
-	err = tx.QueryRowContext(ctx, `SELECT value FROM BridgeLibrary WHERE key='playlists'`).Scan(&oldHash)
+	err = q.QueryRowContext(ctx, `SELECT value FROM BridgeLibrary WHERE key='playlists'`).Scan(&oldHash)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return result, err
 	}
@@ -656,33 +658,33 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			countQuery += ` OR b.sourceId=-1`
 		}
 	}
-	if err = tx.QueryRowContext(ctx, countQuery).Scan(&actualPlaylists, &validPlaylists); err != nil {
+	if err = q.QueryRowContext(ctx, countQuery).Scan(&actualPlaylists, &validPlaylists); err != nil {
 		return result, err
 	}
 	if oldHash != playlistHash || actualPlaylists != expectedPlaylists || validPlaylists != expectedPlaylists {
-		if err = writePlaylists(ctx, tx, l, opts, mapping, databaseUUID, recommendations); err != nil {
+		if err = writePlaylists(ctx, q, l, opts, mapping, databaseUUID, recommendations); err != nil {
 			return result, err
 		}
 		result.PlaylistsChanged = true
-		if _, err = tx.ExecContext(ctx, `INSERT INTO BridgeLibrary(key,value) VALUES('playlists',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, playlistHash); err != nil {
+		if _, err = q.ExecContext(ctx, `INSERT INTO BridgeLibrary(key,value) VALUES('playlists',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, playlistHash); err != nil {
 			return result, err
 		}
 	}
 	if result.Added+result.Updated > 0 || result.PlaylistsChanged {
-		if _, err = tx.ExecContext(ctx, `UPDATE Information SET lastRekordBoxLibraryImportReadCounter=COALESCE(lastRekordBoxLibraryImportReadCounter,0)+1`); err != nil {
+		if _, err = q.ExecContext(ctx, `UPDATE Information SET lastRekordBoxLibraryImportReadCounter=COALESCE(lastRekordBoxLibraryImportReadCounter,0)+1`); err != nil {
 			return result, err
 		}
 		metadata, _ := json.Marshal(struct {
 			Columns   [][]byte
 			Playlists []rekordbox.Playlist
 		}{l.Columns, l.Playlists})
-		if _, err = tx.ExecContext(ctx, `INSERT INTO BridgeLibrary(key,value) VALUES('source',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, metadata); err != nil {
+		if _, err = q.ExecContext(ctx, `INSERT INTO BridgeLibrary(key,value) VALUES('source',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, metadata); err != nil {
 			return result, err
 		}
 	}
 	// A staged move that no branch completed would commit an unloadable path (#4).
 	var pending int
-	if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM Track WHERE path LIKE '.rb-bridge-pending-%'`).Scan(&pending); err != nil {
+	if err = q.QueryRowContext(ctx, `SELECT count(*) FROM Track WHERE path LIKE '.rb-bridge-pending-%'`).Scan(&pending); err != nil {
 		return result, err
 	}
 	if pending > 0 {
@@ -699,11 +701,11 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 
 // uniqueTitle keeps Engine's UNIQUE(title,parentListId): a native playlist or
 // a repeated rekordbox name under one folder gets a " (rekordbox N)" suffix.
-func uniqueTitle(ctx context.Context, tx *sql.Tx, name string, parent int64) (string, error) {
+func uniqueTitle(ctx context.Context, q sqlExecer, name string, parent int64) (string, error) {
 	title := name
 	for n := 1; ; n++ {
 		var exists int
-		if e := tx.QueryRowContext(ctx, `SELECT count(*) FROM Playlist WHERE title=? AND parentListId=?`, title, parent).Scan(&exists); e != nil {
+		if e := q.QueryRowContext(ctx, `SELECT count(*) FROM Playlist WHERE title=? AND parentListId=?`, title, parent).Scan(&exists); e != nil {
 			return "", e
 		}
 		if exists == 0 {
@@ -717,7 +719,7 @@ func uniqueTitle(ctx context.Context, tx *sql.Tx, name string, parent int64) (st
 	}
 }
 
-func writePlaylists(ctx context.Context, tx *sql.Tx, l *rekordbox.Library, opts Options, mapping map[uint32]int64, databaseUUID string, recommendations []uint32) error {
+func writePlaylists(ctx context.Context, q *stmtCache, l *rekordbox.Library, opts Options, mapping map[uint32]int64, databaseUUID string, recommendations []uint32) error {
 	owned := `SELECT listId FROM BridgePlaylist`
 	predicate := ""
 	if opts.StagedOnly {
@@ -729,18 +731,18 @@ func writePlaylists(ctx context.Context, tx *sql.Tx, l *rekordbox.Library, opts 
 	}
 	// Refuse to cascade-delete an Engine-created child of a rebuilt folder.
 	var n int
-	if e := tx.QueryRowContext(ctx, `SELECT count(*) FROM Playlist WHERE parentListId IN (`+owned+`) AND id NOT IN (SELECT listId FROM BridgePlaylist)`).Scan(&n); e != nil {
+	if e := q.QueryRowContext(ctx, `SELECT count(*) FROM Playlist WHERE parentListId IN (`+owned+`) AND id NOT IN (SELECT listId FROM BridgePlaylist)`).Scan(&n); e != nil {
 		return e
 	}
 	if n > 0 {
 		return fmt.Errorf("imported folders contain native playlists; refusing destructive rebuild")
 	}
-	if _, e := tx.ExecContext(ctx, `DELETE FROM PlaylistEntity WHERE listId IN (`+owned+`)`); e != nil {
+	if _, e := q.ExecContext(ctx, `DELETE FROM PlaylistEntity WHERE listId IN (`+owned+`)`); e != nil {
 		return e
 	}
 	// Delete leaves first: factory parent-delete triggers only cascade one level
 	// when recursive_triggers is disabled, so explicitly remove the whole owned tree.
-	rows, e := tx.QueryContext(ctx, owned+` ORDER BY listId DESC`)
+	rows, e := q.QueryContext(ctx, owned+` ORDER BY listId DESC`)
 	if e != nil {
 		return e
 	}
@@ -759,14 +761,14 @@ func writePlaylists(ctx context.Context, tx *sql.Tx, l *rekordbox.Library, opts 
 		return e
 	}
 	for _, id := range ids {
-		if _, e = tx.ExecContext(ctx, `DELETE FROM Playlist WHERE id=?`, id); e != nil {
+		if _, e = q.ExecContext(ctx, `DELETE FROM Playlist WHERE id=?`, id); e != nil {
 			return e
 		}
 	}
-	if _, e = tx.ExecContext(ctx, `DELETE FROM BridgePlaylist`+predicate); e != nil {
+	if _, e = q.ExecContext(ctx, `DELETE FROM BridgePlaylist`+predicate); e != nil {
 		return e
 	}
-	if e = normalizePlaylistTails(ctx, tx); e != nil {
+	if e = normalizePlaylistTails(ctx, q.tx); e != nil {
 		return e
 	}
 	byParent := map[uint32][]rekordbox.Playlist{}
@@ -779,17 +781,17 @@ func writePlaylists(ctx context.Context, tx *sql.Tx, l *rekordbox.Library, opts 
 			// Engine can rebuild imported playlists under new ids, which orphans
 			// BridgePlaylist. Take such a list back rather than adding a duplicate.
 			var id int64
-			e := tx.QueryRowContext(ctx, `SELECT id FROM Playlist WHERE title=? AND parentListId=? AND isExplicitlyExported=1 AND id NOT IN (SELECT listId FROM BridgePlaylist)`, p.Name, parent).Scan(&id)
+			e := q.QueryRowContext(ctx, `SELECT id FROM Playlist WHERE title=? AND parentListId=? AND isExplicitlyExported=1 AND id NOT IN (SELECT listId FROM BridgePlaylist)`, p.Name, parent).Scan(&id)
 			if e == nil {
-				if _, e = tx.ExecContext(ctx, `DELETE FROM PlaylistEntity WHERE listId=?`, id); e != nil {
+				if _, e = q.ExecContext(ctx, `DELETE FROM PlaylistEntity WHERE listId=?`, id); e != nil {
 					return e
 				}
 			} else if errors.Is(e, sql.ErrNoRows) {
-				title, e := uniqueTitle(ctx, tx, p.Name, parent)
+				title, e := uniqueTitle(ctx, q, p.Name, parent)
 				if e != nil {
 					return e
 				}
-				r, e := tx.ExecContext(ctx, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES(?,?,1,0,1)`, title, parent)
+				r, e := q.ExecContext(ctx, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES(?,?,1,0,1)`, title, parent)
 				if e != nil {
 					return e
 				}
@@ -799,10 +801,10 @@ func writePlaylists(ctx context.Context, tx *sql.Tx, l *rekordbox.Library, opts 
 			} else {
 				return e
 			}
-			if _, e = tx.ExecContext(ctx, `INSERT INTO BridgePlaylist(sourceId,listId) VALUES(?,?)`, p.ID, id); e != nil {
+			if _, e = q.ExecContext(ctx, `INSERT INTO BridgePlaylist(sourceId,listId) VALUES(?,?)`, p.ID, id); e != nil {
 				return e
 			}
-			if e = writeEntities(ctx, tx, id, p.Tracks, mapping, databaseUUID); e != nil {
+			if e = writeEntities(ctx, q, id, p.Tracks, mapping, databaseUUID); e != nil {
 				return e
 			}
 			if e = insert(p.ID, id); e != nil {
@@ -817,13 +819,13 @@ func writePlaylists(ctx context.Context, tx *sql.Tx, l *rekordbox.Library, opts 
 	if opts.SmartMatch {
 		// Never collide with an original playlist of the same name.
 		var exists int
-		if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM Playlist WHERE parentListId=0 AND title='[Smart Match]'`).Scan(&exists); e != nil {
+		if e = q.QueryRowContext(ctx, `SELECT count(*) FROM Playlist WHERE parentListId=0 AND title='[Smart Match]'`).Scan(&exists); e != nil {
 			return e
 		}
 		if exists > 0 {
 			return fmt.Errorf("[Smart Match] already exists; source playlist is protected")
 		}
-		r, e := tx.ExecContext(ctx, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES('[Smart Match]',0,1,0,1)`)
+		r, e := q.ExecContext(ctx, `INSERT INTO Playlist(title,parentListId,isPersisted,nextListId,isExplicitlyExported) VALUES('[Smart Match]',0,1,0,1)`)
 		if e != nil {
 			return e
 		}
@@ -831,15 +833,15 @@ func writePlaylists(ctx context.Context, tx *sql.Tx, l *rekordbox.Library, opts 
 		if e != nil {
 			return e
 		}
-		if _, e = tx.ExecContext(ctx, `INSERT INTO BridgePlaylist(sourceId,listId) VALUES(-1,?)`, id); e != nil {
+		if _, e = q.ExecContext(ctx, `INSERT INTO BridgePlaylist(sourceId,listId) VALUES(-1,?)`, id); e != nil {
 			return e
 		}
-		return writeEntities(ctx, tx, id, recommendations, mapping, databaseUUID)
+		return writeEntities(ctx, q, id, recommendations, mapping, databaseUUID)
 	}
 	return nil
 }
 
-func writeEntities(ctx context.Context, tx *sql.Tx, list int64, tracks []uint32, mapping map[uint32]int64, databaseUUID string) error {
+func writeEntities(ctx context.Context, q sqlExecer, list int64, tracks []uint32, mapping map[uint32]int64, databaseUUID string) error {
 	// Engine membership is unique by track/list. Preserve first occurrence order.
 	seen := map[uint32]bool{}
 	var previous int64
@@ -852,7 +854,7 @@ func writeEntities(ctx context.Context, tx *sql.Tx, list int64, tracks []uint32,
 		if !ok || id == 0 {
 			return fmt.Errorf("missing Engine mapping for track %d", sourceID)
 		}
-		r, e := tx.ExecContext(ctx, `INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId,membershipReference) VALUES(?,?,?,0,0)`, list, id, databaseUUID)
+		r, e := q.ExecContext(ctx, `INSERT INTO PlaylistEntity(listId,trackId,databaseUuid,nextEntityId,membershipReference) VALUES(?,?,?,0,0)`, list, id, databaseUUID)
 		if e != nil {
 			return e
 		}
@@ -861,7 +863,7 @@ func writeEntities(ctx context.Context, tx *sql.Tx, list int64, tracks []uint32,
 			return e
 		}
 		if previous != 0 {
-			if _, e = tx.ExecContext(ctx, `UPDATE PlaylistEntity SET nextEntityId=? WHERE id=?`, entity, previous); e != nil {
+			if _, e = q.ExecContext(ctx, `UPDATE PlaylistEntity SET nextEntityId=? WHERE id=?`, entity, previous); e != nil {
 				return e
 			}
 		}
