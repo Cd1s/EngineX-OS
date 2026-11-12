@@ -4605,5 +4605,202 @@ assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hp
                     self.assertEqual(sh_mode & 0o111, 0o111)
 
 
+class OneLibraryNoChooseDbTest(unittest.TestCase):
+    STOCK_TAIL = (
+        "Item {\n"
+        "    id: messageBox\n"
+        '    objectName: "OneLibraryMessageBox"\n'
+        '    property string pendingDevicePath: ""\n'
+        "\n"
+        "    Connections {\n"
+        "        target: Planck.librarianController.librarySelectionController\n"
+        "        function onSelectionRequested(devicePath) {\n"
+        "            messageBox.pendingDevicePath = devicePath\n"
+        "\n"
+        "            const prompt = PlanckGUI.views.prompts.post({\n"
+        '                id: "OneLibrarySelection",\n'
+        '                title: "Choose your Database",\n'
+        '                message: "Placeholder text",\n'
+        "                options: [],\n"
+        "            })\n"
+        "            prompt.extras = messageBox.extrasComponent\n"
+        "            prompt.finished.connect(messageBox.onFinished)\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    Connections {\n"
+        "        target: Planck.librarianController.devicesController\n"
+        "        function onDeviceRemoved(path, databaseUuid) {\n"
+        "            if (path === messageBox.pendingDevicePath) {\n"
+        '                PlanckGUI.views.prompts.drop("OneLibrarySelection")\n'
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+
+    def test_patch_registered_for_530_only(self):
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/EmbeddedCommon/"
+            self.assertNotIn(
+                "Skins/EmbeddedCommon/Items/MessageBoxes/OneLibraryMessageBox.qml",
+                bp.edits(False),
+            )
+            bp.ROOT = "Skins/Embedded/"
+            for dev in (False, True):
+                out = bp.edits(dev)
+                self.assertIn(
+                    "Skins/Embedded/Items/MessageBoxes/OneLibraryMessageBox.qml",
+                    out,
+                )
+        finally:
+            bp.ROOT = old_root
+
+    def test_one_library_message_box_never_shows_prompt_and_selects_right_db(self):
+        import re, tarfile
+
+        rel = "Skins/Embedded/Items/MessageBoxes/OneLibraryMessageBox.qml"
+        old_root = bp.ROOT
+        try:
+            bp.ROOT = "Skins/Embedded/"
+            changes = bp.edits(False)[rel]
+        finally:
+            bp.ROOT = old_root
+
+        patched = self.STOCK_TAIL
+        for old, new in changes:
+            patched = bp.patch(patched, old, new, rel)
+        self.assertNotIn("prompts.post", patched)
+        self.assertNotIn("Choose your Database", patched)
+
+        qrc = LAB / "5.3.0" / "qrc"
+        if qrc.is_dir():
+            with tempfile.TemporaryDirectory(prefix="ui-no-choose-db-") as tmp:
+                out = Path(tmp) / "packs"
+                res = subprocess.run(
+                    ["python3", str(BUILD_PACKS), "--release", "--qrc", str(qrc), "--out", str(out)],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                for lang in ("en", "zh-Hans", "zh-Hant"):
+                    p = out / lang / rel
+                    self.assertTrue(p.is_file(), f"missing {rel} in {lang} pack")
+                    qml = p.read_text(encoding="utf-8")
+                    self.assertNotIn("prompts.post", qml, f"{lang} pack still posts Choose your Database prompt")
+                    self.assertNotIn("Choose your Database", qml, f"{lang} pack still has Choose your Database title")
+                    for expected in (
+                        "function scHasEngineLibrary(devicePath)",
+                        "controller.chooseEngineLibrary(devicePath)",
+                        "controller.chooseOneLibrary(devicePath)",
+                        "function onDeviceAdded(path)",
+                    ):
+                        self.assertIn(expected, qml)
+                    patched = qml
+                with tarfile.open(out.with_suffix(".tar.gz"), "r:gz") as tf:
+                    members = {m.name.lstrip("./") for m in tf.getmembers()}
+                    for lang in ("en", "zh-Hans", "zh-Hant"):
+                        self.assertIn(f"packs/{lang}/{rel}", members)
+
+        if shutil.which("node"):
+            has_fn = re.search(
+                r"function scHasEngineLibrary\(devicePath\)\s*\{.*?\n    \}",
+                patched, re.S,
+            )
+            sel_fn = re.search(
+                r"function onSelectionRequested\(devicePath\)\s*\{.*?\n        \}",
+                patched, re.S,
+            )
+            add_fn = re.search(
+                r"function onDeviceAdded\(path\)\s*\{.*?\n        \}",
+                patched, re.S,
+            )
+            rem_fn = re.search(
+                r"function onDeviceRemoved\(path, databaseUuid\)\s*\{.*?\n        \}",
+                patched, re.S,
+            )
+            self.assertIsNotNone(has_fn)
+            self.assertIsNotNone(sel_fn)
+            self.assertIsNotNone(add_fn)
+            self.assertIsNotNone(rem_fn)
+            js_code = f"""
+const assert = require("assert").strict;
+const uuids = {{}};
+const calls = [];
+const dropped = [];
+const Planck = {{
+    librarianController: {{
+        devicesController: {{
+            getDatabaseUuid(p) {{ return uuids[p] || ""; }},
+        }},
+        librarySelectionController: {{
+            chooseEngineLibrary(p) {{ calls.push(["engine", p]); }},
+            chooseOneLibrary(p) {{ calls.push(["one", p]); }},
+            cancel(p) {{ calls.push(["cancel", p]); }},
+        }},
+    }},
+}};
+const PlanckGUI = {{
+    views: {{
+        prompts: {{
+            post() {{ throw new Error("Choose your Database prompt must never be posted"); }},
+            drop(id) {{ dropped.push(id); }},
+        }},
+    }},
+}};
+const messageBox = {{
+    pendingDevicePath: "",
+    scOneLibraryFallbackPaths: {{}},
+    {has_fn.group(0).replace("function scHasEngineLibrary", "scHasEngineLibrary")},
+}};
+{sel_fn.group(0)}
+{add_fn.group(0)}
+{rem_fn.group(0)}
+
+// 1. Stick already converted by rb-bridge (Engine Library/Database2/m.db present).
+uuids["/media/RB_READY"] = "8d4f2c10-1234-4a5b-8c9d-0123456789ab";
+onSelectionRequested("/media/RB_READY");
+assert.deepEqual(calls, [["engine", "/media/RB_READY"]]);
+
+// 2. Large stick where only PIONEER/rekordbox/exportLibrary.db exists at mount time.
+calls.length = 0;
+uuids["/media/RB_BIG"] = "";
+onSelectionRequested("/media/RB_BIG");
+assert.deepEqual(calls, [["one", "/media/RB_BIG"]]);
+assert.equal(messageBox.scOneLibraryFallbackPaths["/media/RB_BIG"], true);
+
+// 2b. Null QUuid string also counts as absent Engine Library.
+calls.length = 0;
+uuids["/media/RB_NULL_UUID"] = "{{00000000-0000-0000-0000-000000000000}}";
+onSelectionRequested("/media/RB_NULL_UUID");
+assert.deepEqual(calls, [["one", "/media/RB_NULL_UUID"]]);
+
+// 3. Re-mount / re-read after background rb-bridge conversion finishes (#182):
+//    deviceRemoved clears fallback state, and next selectionRequested picks Engine Library.
+calls.length = 0;
+onDeviceRemoved("/media/RB_BIG", "");
+assert.equal(Boolean(messageBox.scOneLibraryFallbackPaths["/media/RB_BIG"]), false);
+uuids["/media/RB_BIG"] = "a1b2c3d4-1111-2222-3333-444455556666";
+onSelectionRequested("/media/RB_BIG");
+assert.deepEqual(calls, [["engine", "/media/RB_BIG"]]);
+
+// 4. In-place deviceAdded refresh after fallback without selectionRequested re-firing.
+calls.length = 0;
+uuids["/media/RB_INPLACE"] = "";
+onSelectionRequested("/media/RB_INPLACE");
+assert.deepEqual(calls, [["one", "/media/RB_INPLACE"]]);
+calls.length = 0;
+uuids["/media/RB_INPLACE"] = "f0e1d2c3-aaaa-bbbb-cccc-ddddeeeeffff";
+onDeviceAdded("/media/RB_INPLACE");
+assert.deepEqual(calls, [["engine", "/media/RB_INPLACE"]]);
+// Idempotent: later deviceAdded does not re-trigger once promoted.
+calls.length = 0;
+onDeviceAdded("/media/RB_INPLACE");
+assert.deepEqual(calls, []);
+"""
+            proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
