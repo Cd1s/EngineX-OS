@@ -659,6 +659,7 @@ class DataBundleTest(unittest.TestCase):
         engine_script = self.tmp / 'vendor-engine-script'
         stock_script = (
             '#!/bin/sh\n'
+            '/usr/bin/az01-ethernet-speed 100\n'
             'while [ 1 ]\n'
             'do\n'
             '\t/usr/Engine/Engine -d0 -loggerOptions "Type, Message, Thread, Category, SplitLongLines"\n'
@@ -695,6 +696,9 @@ class DataBundleTest(unittest.TestCase):
         self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/sbin/az01-update --file "$UPDATE_FILE"\n', rewritten)
         self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/bin/planck-remote-screen --update "$UPDATE_FILE"\n', rewritten)
         self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/sbin/az01-update --erase-data\n', rewritten)
+        # BH-GC2-6: Gigabit stays Gigabit, as on first-generation images.
+        self.assertIn('\n/usr/bin/az01-ethernet-speed 1000\n', rewritten)
+        self.assertNotIn('az01-ethernet-speed 100\n', rewritten)
 
         # 2. Removing gen2-locked lets boot-activate.sh mark gen2-unlocked; re-running on bound script is idempotent.
         (dest / 'gen2-locked').unlink()
