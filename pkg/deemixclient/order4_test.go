@@ -136,3 +136,44 @@ func TestSaveAndSavePartsRemoveStaleFormatExtensionsAndTolerateFATChmod(t *testi
 		t.Fatal("expected EIO from chmod to fail Save")
 	}
 }
+
+func TestMatchAcceptsISRCEditionSuffixesAndOriginalMix(t *testing.T) {
+	// Beatport "(Original Mix)" vs Deezer plain title with identical ISRC and duration.
+	bpOrig := providers.Track{Title: "Strobe (Original Mix)", Artist: "deadmau5", ISRC: "CAUL30900158", DurationMS: 637000, Provider: "beatport"}
+	dzPlain := providers.Track{ID: "100", Title: "Strobe", Artist: "deadmau5", ISRC: "CAUL30900158", DurationMS: 637500, Provider: "deezer"}
+	if got, err := Match(bpOrig, []providers.Track{dzPlain}); err != nil || got.ID != "100" {
+		t.Fatalf("ISRC Original Mix rejected: got=%+v err=%v", got, err)
+	}
+
+	// Non-ISRC fallback for "(Original Mix)" vs plain title.
+	bpNoISRC := bpOrig
+	bpNoISRC.ISRC = ""
+	dzNoISRC := dzPlain
+	dzNoISRC.ISRC = ""
+	if got, err := Match(bpNoISRC, []providers.Track{dzNoISRC}); err != nil || got.ID != "100" {
+		t.Fatalf("fallback Original Mix rejected: got=%+v err=%v", got, err)
+	}
+
+	// Remaster suffix on Spotify vs plain title on Deezer with identical ISRC.
+	spRemaster := providers.Track{Title: "Heroes (2017 Remaster)", Artist: "David Bowie", ISRC: "GBARL1700786", DurationMS: 371000, Provider: "spotify"}
+	dzHeroes := providers.Track{ID: "101", Title: "Heroes", Artist: "David Bowie", ISRC: "GBARL1700786", DurationMS: 371200, Provider: "deezer"}
+	if got, err := Match(spRemaster, []providers.Track{dzHeroes}); err != nil || got.ID != "101" {
+		t.Fatalf("ISRC Remaster rejected: got=%+v err=%v", got, err)
+	}
+
+	// Extended Mix on Beatport vs Deezer track whose title omits title_version, same ISRC & duration.
+	bpExt := providers.Track{Title: "Opus (Extended Mix)", Artist: "Eric Prydz", ISRC: "GB5KW1501234", DurationMS: 543000, Provider: "beatport"}
+	dzOpus := providers.Track{ID: "102", Title: "Opus", Artist: "Eric Prydz", ISRC: "GB5KW1501234", DurationMS: 543000, Provider: "deezer"}
+	if got, err := Match(bpExt, []providers.Track{dzOpus}); err != nil || got.ID != "102" {
+		t.Fatalf("ISRC Extended Mix vs plain Deezer title rejected: got=%+v err=%v", got, err)
+	}
+
+	// Conflicting explicit versions or alternate vocal/live recordings must still be rejected even if ISRC collides.
+	for _, badTitle := range []string{"Opus (Radio Edit)", "Opus (Original Mix)", "Opus (Instrumental)", "Opus (Live)", "Opus (Four Tet Remix)"} {
+		bad := dzOpus
+		bad.Title = badTitle
+		if got, err := Match(bpExt, []providers.Track{bad}); err == nil {
+			t.Fatalf("matched conflicting edition %q: %+v", badTitle, got)
+		}
+	}
+}
