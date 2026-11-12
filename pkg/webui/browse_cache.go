@@ -249,7 +249,8 @@ func (c *browseCache) readDisk(key string, now time.Time) *browseEntry {
 	}
 	b, err := os.ReadFile(path)
 	var v browseDiskEntry
-	if err != nil || json.Unmarshal(b, &v) != nil || now.Sub(v.At) >= browseStale || v.At.After(now) {
+	preNTP := now.Year() < 2025
+	if err != nil || json.Unmarshal(b, &v) != nil || (!preNTP && (now.Sub(v.At) >= browseStale || v.At.After(now))) {
 		return nil
 	}
 	data, err := json.Marshal(v.Data)
