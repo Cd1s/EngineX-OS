@@ -943,20 +943,178 @@ func TestReadPCMFromIdleFIFOWriter(t *testing.T) {
 	}
 	defer w.Close()
 	got := make(chan []byte, 1)
-	go func() { got <- readPCM(r) }()
+	rd := &pcmReader{f: r}
+	go func() { got <- rd.read() }()
 	select {
 	case pcm := <-got:
 		if pcm != nil {
 			t.Fatalf("idle writer: got %d bytes, want none", len(pcm))
 		}
 	case <-time.After(time.Second):
-		t.Fatal("readPCM blocked on an idle FIFO writer")
+		t.Fatal("read blocked on an idle FIFO writer")
 	}
 	frame := bytes.Repeat([]byte{1, 2, 3, 4}, 1152)
 	if _, err := w.Write(frame); err != nil {
 		t.Fatal(err)
 	}
-	if pcm := readPCM(r); !bytes.Equal(pcm, frame) {
+	if pcm := rd.read(); !bytes.Equal(pcm, frame) {
 		t.Fatalf("got %d bytes, want the written frame", len(pcm))
+	}
+}
+
+// testFrames returns n s16le stereo frames whose two channels differ (L = i, R = ^i),
+// so any byte shift shows up as a frame that breaks the pattern.
+func testFrames(start, n int) []byte {
+	out := make([]byte, 0, n*4)
+	for i := start; i < start+n; i++ {
+		out = binary.LittleEndian.AppendUint16(out, uint16(i))
+		out = binary.LittleEndian.AppendUint16(out, ^uint16(i))
+	}
+	return out
+}
+
+// BH-GF3-2: a read that ends inside a 4-byte frame must not hand out the partial
+// frame (the old reader did: the next chunk was shifted, swapping channels or
+// turning into full-scale noise). The rest of the frame arrives with the next read,
+// and a new writer after EOF starts on a frame boundary again.
+func TestPCMReaderKeepsFrameAlignment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.pcm")
+	if err := syscall.Mkfifo(path, 0o644); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	r, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	w, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := testFrames(0, 3000)
+	rd := &pcmReader{f: r}
+	var got []byte
+	for off, i := 0, 0; off < len(stream); i++ {
+		n := min([]int{4610, 3, 4605, 1, 2, 4097}[i%6], len(stream)-off)
+		if _, err := w.Write(stream[off : off+n]); err != nil {
+			t.Fatal(err)
+		}
+		off += n
+		for pcm := rd.read(); pcm != nil; pcm = rd.read() {
+			if len(pcm)%4 != 0 {
+				t.Fatalf("read returned %d bytes: not whole frames", len(pcm))
+			}
+			got = append(got, pcm...)
+		}
+	}
+	if !bytes.Equal(got, stream) {
+		t.Fatalf("got %d bytes, want the %d written, frame for frame", len(got), len(stream))
+	}
+	// A writer that dies mid-frame: its stray bytes never prefix the next writer's audio.
+	if _, err := w.Write([]byte{0xAA, 0xBB}); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	for i := 0; i < 3; i++ {
+		if pcm := rd.read(); pcm != nil {
+			t.Fatalf("stray partial frame returned: %x", pcm)
+		}
+	}
+	w, err = os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	next := testFrames(5000, 10)
+	if _, err := w.Write(next); err != nil {
+		t.Fatal(err)
+	}
+	if pcm := rd.read(); !bytes.Equal(pcm, next) {
+		t.Fatalf("after a new writer: got %x, want %x", pcm, next)
+	}
+}
+
+// A single empty tick while music plays must not splice 24 ms of zeros into the
+// stream (a click, and the stream drifts ahead); keep-alive silence only follows a
+// pause longer than silenceAfter.
+func TestSilenceGate(t *testing.T) {
+	var g silenceGate
+	t0 := time.Unix(1000, 0)
+	if pcm, ok := g.next(nil, t0); !ok || len(pcm) != 1152*4 || !bytes.Equal(pcm, make([]byte, 1152*4)) {
+		t.Fatal("nothing played yet: want keep-alive silence")
+	}
+	frame := testFrames(0, 1152)
+	if pcm, ok := g.next(frame, t0); !ok || !bytes.Equal(pcm, frame) {
+		t.Fatal("live PCM must pass through")
+	}
+	if _, ok := g.next(nil, t0.Add(24*time.Millisecond)); ok {
+		t.Fatal("a 24 ms gap must publish nothing")
+	}
+	if _, ok := g.next(nil, t0.Add(silenceAfter)); ok {
+		t.Fatal("a gap of silenceAfter must still publish nothing")
+	}
+	if pcm, ok := g.next(nil, t0.Add(silenceAfter+time.Millisecond)); !ok || !bytes.Equal(pcm, make([]byte, 1152*4)) {
+		t.Fatal("a longer pause: want keep-alive silence")
+	}
+}
+
+// End to end through the capture loop: a writer that pauses 60 ms between frames
+// (one or two empty ticks) never gets zeros published between its frames.
+func TestShortFeedGapIsNotFilledWithSilence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.pcm")
+	if err := syscall.Mkfifo(path, 0o644); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	b := New(newTestGuard())
+	defer b.Close()
+	if err := b.Configure(Config{Enabled: true, InputPath: path}); err != nil {
+		t.Fatal(err)
+	}
+	ch, cancel := b.Subscribe() // after Configure: a restart closes earlier subscribers
+	defer cancel()
+	w, err := os.OpenFile(path, os.O_WRONLY, 0) // waits for the capture loop to open it
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	go func() {
+		frame := bytes.Repeat([]byte{0x11, 0x22, 0x33, 0x44}, 1152)
+		for i := 0; i < 25; i++ {
+			if _, err := w.Write(frame); err != nil {
+				return
+			}
+			time.Sleep(60 * time.Millisecond)
+		}
+	}()
+	var chunks [][]byte
+	timeout := time.After(1700 * time.Millisecond)
+collect:
+	for {
+		select {
+		case pcm, ok := <-ch:
+			if !ok {
+				break collect
+			}
+			chunks = append(chunks, pcm)
+		case <-timeout:
+			break collect
+		}
+	}
+	first, last := -1, -1
+	for i, c := range chunks {
+		if !bytes.Equal(c, make([]byte, len(c))) {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first < 0 || last-first < 10 {
+		t.Fatalf("too little live PCM published: %d chunks, live %d..%d", len(chunks), first, last)
+	}
+	for i := first; i <= last; i++ {
+		if bytes.Equal(chunks[i], make([]byte, len(chunks[i]))) {
+			t.Fatalf("chunk %d of %d..%d is spliced silence", i, first, last)
+		}
 	}
 }

@@ -10,7 +10,23 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 
+/* POSIX lets an O_NONBLOCK pipe write above PIPE_BUF be partial at any byte (Linux
+ * happens to cut at page slots). Case 7 models the worst case: such a write stops 3
+ * bytes short, inside a frame. Writes up to PIPE_BUF stay atomic, as POSIX requires. */
+#include <unistd.h> /* the real write() is declared before the macro below */
+#include <limits.h>
+#ifndef PIPE_BUF
+#define PIPE_BUF 4096
+#endif
+static int posix_split;
+static ssize_t posix_pipe_write(int fd, const void *buf, size_t n);
+#define write posix_pipe_write
 #include "live_tap.h"
+#undef write
+static ssize_t posix_pipe_write(int fd, const void *buf, size_t n) {
+    if (posix_split && n > PIPE_BUF) n -= 3;
+    return write(fd, buf, n);
+}
 
 static struct sc_tap tap = {.fd = -1};
 static char path[64];
@@ -146,6 +162,38 @@ int main(void) {
     for (int i = 0; i < 20 && tap.on; i++) { sc_tap_push(&tap, more, more, 4800); sc_tap_drain_once(&tap, path); }
     assert(!tap.on && tap.fd < 0);
     puts("reader gone: EPIPE closed the tap, no SIGPIPE");
+
+    /* 7. BH-GF3-2: a write cut inside a frame would shift the rest of the stream by
+     * bytes (swapped channels, noise). Every write must be whole frames: each frame
+     * read must still be L, -L. */
+    unlink(path);
+    assert(!mkfifo(path, 0644));
+    struct sc_tap t7 = {.fd = -1};
+    int r7 = open(path, O_RDONLY | O_NONBLOCK);
+    assert(r7 >= 0 && sc_tap_connect(&t7, path));
+    t7.rate = 48000; /* skip the 1 s probe: write as a 48 kHz device */
+    posix_split = 1;
+    static unsigned char seen[1 << 20];
+    size_t seen_n = 0, k = 0;
+    float l7[4096], r7buf[4096];
+    for (int round = 0; round < 10 && t7.on; round++) {
+        for (int i = 0; i < 4096; i++, k++) { l7[i] = (float)(k % 1000 + 1) / 2000.0f; r7buf[i] = -l7[i]; }
+        sc_tap_push(&t7, l7, r7buf, 4096);
+        sc_tap_drain_once(&t7, path);
+        ssize_t n;
+        while ((n = read(r7, seen + seen_n, sizeof seen - seen_n)) > 0) seen_n += (size_t)n;
+    }
+    posix_split = 0;
+    size_t bad = 0;
+    for (size_t i = 0; i + 4 <= seen_n; i += 4) {
+        int16_t L, R;
+        memcpy(&L, seen + i, 2); memcpy(&R, seen + i + 2, 2);
+        if (L <= 0 || R != -L) bad++;
+    }
+    printf("whole-frame writes: %zu bytes read, %zu misaligned frames\n", seen_n, bad);
+    assert(seen_n % 4 == 0 && seen_n >= 4 * 30000 && bad == 0);
+    sc_tap_off(&t7);
+    close(r7);
 
     unlink(path);
     free(got);
