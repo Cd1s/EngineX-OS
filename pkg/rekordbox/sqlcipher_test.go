@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -397,5 +398,95 @@ func TestPDBMangledISRCUnusedSlotsAndSkippedRows(t *testing.T) {
 	}
 	if !foundQiLiXiang {
 		t.Fatal("track 1 missing after ParsePDB")
+	}
+}
+
+func TestCueImportStreamingMemoryBudget(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	_, err = db.Exec(`
+		CREATE TABLE artist(artist_id integer primary key, name varchar, nameForSearch varchar);
+		INSERT INTO artist VALUES(1,'Artist','ARTIST');
+		CREATE TABLE album(album_id integer primary key, name varchar, artist_id integer, image_id integer, isComplation integer, nameForSearch varchar);
+		INSERT INTO album VALUES(1,'Album',1,1,0,'ALBUM');
+		CREATE TABLE genre(genre_id integer primary key, name varchar);
+		INSERT INTO genre VALUES(1,'Techno');
+		CREATE TABLE label(label_id integer primary key, name varchar);
+		INSERT INTO label VALUES(1,'Label');
+		CREATE TABLE "key"(key_id integer primary key, name varchar);
+		INSERT INTO "key" VALUES(1,'8A');
+		CREATE TABLE image(image_id integer primary key, path varchar);
+		INSERT INTO image VALUES(1,'/PIONEER/Artwork/00001/a1.jpg');
+		CREATE TABLE content(content_id integer primary key, title varchar, titleForSearch varchar, subtitle varchar, bpmx100 integer, length integer, trackNo integer, discNo integer, artist_id_artist integer, artist_id_remixer integer, artist_id_originalArtist integer, artist_id_composer integer, artist_id_lyricist integer, album_id integer, genre_id integer, label_id integer, key_id integer, color_id integer, image_id integer, djComment varchar, rating integer, releaseYear integer, releaseDate varchar, dateCreated varchar, dateAdded varchar, path varchar, fileName varchar, fileSize integer, fileType integer, bitrate integer, bitDepth integer, samplingRate integer, isrc varchar, djPlayCount integer, isHotCueAutoLoadOn integer, isKuvoDeliverStatusOn integer, kuvoDeliveryComment varchar, masterDbId integer, masterContentId integer, analysisDataFilePath varchar, analysedBits integer, contentLink integer, hasModified integer, cueUpdateCount integer, analysisDataUpdateCount integer, informationUpdateCount integer);
+		CREATE TABLE cue(cue_id integer primary key, content_id integer, kind integer, colorTableIndex integer, cueComment varchar, isActiveLoop integer, beatLoopNumerator integer, beatLoopDenominator integer, inUsec integer, outUsec integer, in150FramePerSec integer, out150FramePerSec integer, inMpegFrameNumber integer, outMpegFrameNumber integer, inMpegAbs integer, outMpegAbs integer, inDecodingStartFramePosition integer, outDecodingStartFramePosition integer, inFileOffsetInBlock integer, OutFileOffsetInBlock integer, inNumberOfSampleInBlock integer, outNumberOfSampleInBlock integer);
+		CREATE TABLE playlist(playlist_id integer primary key, sequenceNo integer, name varchar, image_id integer, attribute integer, playlist_id_parent integer);
+		INSERT INTO playlist VALUES(1,1,'Set',NULL,0,0);
+		CREATE TABLE playlist_content(playlist_id integer, content_id integer, sequenceNo integer);
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cStmt, err := tx.Prepare(`INSERT INTO content VALUES(?,?,?,'',12800,240,1,1,1,NULL,NULL,NULL,NULL,1,1,1,1,1,1,'Comment',5,2025,'2025-01-01','2025-01-01','2025-01-01',?,?,10485760,11,1411,16,44100,'USRC17607839',0,1,0,'',1,?,'/PIONEER/USBANLZ/P001/ANLZ0000.DAT',105,0,0,0,0,0)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cueStmt, err := tx.Prepare(`INSERT INTO cue VALUES(?,?,?,?,'Cue',0,0,0,?,-1,0,-1,0,-1,0,-1,0,-1,0,-1,0,-1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcStmt, err := tx.Prepare(`INSERT INTO playlist_content VALUES(1,?,?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const nTracks = 2500
+	const cuesPerTrack = 8
+	cueID := 1
+	for i := 1; i <= nTracks; i++ {
+		title := "Track"
+		p := filepath.ToSlash(filepath.Join("/Contents", string(rune('a'+i%26)), "t.wav")) + string(rune('0'+i%10))
+		if _, err := cStmt.Exec(i, title, title, p, "t.wav", i); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pcStmt.Exec(i, i); err != nil {
+			t.Fatal(err)
+		}
+		for k := 1; k <= cuesPerTrack; k++ {
+			if _, err := cueStmt.Exec(cueID, i, k, k, k*1000000); err != nil {
+				t.Fatal(err)
+			}
+			cueID++
+		}
+	}
+	_ = cStmt.Close()
+	_ = cueStmt.Close()
+	_ = pcStmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime.GC()
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	lib, err := (OneLibraryAdapter{}).Read(context.Background(), db)
+	runtime.ReadMemStats(&m1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lib.Tracks) != nTracks || len(lib.Tracks[0].Cues) != cuesPerTrack {
+		t.Fatalf("got %d tracks, %d cues on track 0", len(lib.Tracks), len(lib.Tracks[0].Cues))
+	}
+	totalAlloc := m1.TotalAlloc - m0.TotalAlloc
+	const maxAllowedAlloc = 24 << 20 // 24 MiB ceiling (readSQLRows map[string]string allocated > 50 MiB)
+	if totalAlloc > maxAllowedAlloc {
+		t.Fatalf("OneLibraryAdapter.Read allocated %d MiB (%d bytes) > %d MiB ceiling", totalAlloc>>20, totalAlloc, maxAllowedAlloc>>20)
 	}
 }

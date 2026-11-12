@@ -93,57 +93,117 @@ func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Libra
 	return l, nil
 }
 
-type sqlRecord map[string]string
-
 func normalized(s string) string {
-	return strings.ToLower(strings.NewReplacer("_", "", "-", "", " ", "").Replace(s))
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '_' || c == '-' || c == ' ' {
+			continue
+		}
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
-func (r sqlRecord) get(names ...string) string {
-	for _, n := range names {
-		if v := r[normalized(n)]; v != "" {
-			return v
+
+func quoteIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+type tableSpec struct {
+	quoted string
+	byNorm map[string]string
+}
+
+func inspectTable(ctx context.Context, db *sql.DB, table string) (tableSpec, error) {
+	q := quoteIdent(table)
+	rows, err := db.QueryContext(ctx, `SELECT * FROM `+q+` LIMIT 0`)
+	if err != nil {
+		return tableSpec{}, err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return tableSpec{}, err
+	}
+	byNorm := make(map[string]string, len(cols))
+	for _, c := range cols {
+		k := normalized(c)
+		if _, exists := byNorm[k]; !exists {
+			byNorm[k] = quoteIdent(c)
 		}
 	}
-	return ""
-}
-func (r sqlRecord) num(names ...string) uint32 {
-	v, _ := strconv.ParseUint(r.get(names...), 10, 32)
-	return uint32(v)
-}
-func (r sqlRecord) sint(names ...string) (int64, bool) {
-	s := r.get(names...)
-	if s == "" {
-		return 0, false
-	}
-	v, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return v, true
-}
-func (r sqlRecord) decimal(names ...string) float64 {
-	v, _ := strconv.ParseFloat(r.get(names...), 64)
-	return v
+	return tableSpec{quoted: q, byNorm: byNorm}, rows.Err()
 }
 
-func parseSQLiteBPM(r sqlRecord) float64 {
-	if rawStr := r.get("bpmx100"); rawStr != "" {
-		if iv, err := strconv.ParseInt(rawStr, 10, 64); err == nil {
+func (t tableSpec) rawExpr(names ...string) (string, bool) {
+	var found []string
+	for _, n := range names {
+		if col, ok := t.byNorm[normalized(n)]; ok {
+			found = append(found, col)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return "NULL", false
+	case 1:
+		return found[0], true
+	default:
+		return "COALESCE(" + strings.Join(found, ", ") + ")", true
+	}
+}
+
+func (t tableSpec) valExpr(names ...string) string {
+	e, _ := t.rawExpr(names...)
+	return e
+}
+
+func (t tableSpec) textExpr(names ...string) string {
+	var found []string
+	for _, n := range names {
+		if col, ok := t.byNorm[normalized(n)]; ok {
+			found = append(found, "NULLIF("+col+", '')")
+		}
+	}
+	switch len(found) {
+	case 0:
+		return "''"
+	default:
+		return "COALESCE(" + strings.Join(found, ", ") + ", '')"
+	}
+}
+
+func nullToUint32(v sql.NullInt64) uint32 {
+	if !v.Valid || v.Int64 <= 0 || v.Int64 > math.MaxUint32 {
+		return 0
+	}
+	return uint32(v.Int64)
+}
+
+func parseSQLiteBPMValues(bpmx100, bpmFallback sql.NullString) float64 {
+	if bpmx100.Valid && bpmx100.String != "" {
+		if iv, err := strconv.ParseInt(bpmx100.String, 10, 64); err == nil {
 			if iv <= 0 || iv == 0x7fffffff || iv == 0xffffffff {
 				return 0
 			}
 			return float64(iv) / 100
 		}
-		fv := r.decimal("bpmx100")
+		fv, _ := strconv.ParseFloat(bpmx100.String, 64)
 		if fv <= 0 || fv == 0x7fffffff || fv == 0xffffffff {
 			return 0
 		}
 		return fv / 100
 	}
-	if iv, ok := r.sint("bpm", "tempo"); ok && (iv <= 0 || iv == 0x7fffffff || iv == 0xffffffff) {
+	if !bpmFallback.Valid || bpmFallback.String == "" {
 		return 0
 	}
-	bpm := r.decimal("bpm", "tempo")
+	if iv, err := strconv.ParseInt(bpmFallback.String, 10, 64); err == nil && (iv <= 0 || iv == 0x7fffffff || iv == 0xffffffff) {
+		return 0
+	}
+	bpm, _ := strconv.ParseFloat(bpmFallback.String, 64)
 	if bpm > 1000 {
 		bpm /= 100
 	}
@@ -154,24 +214,27 @@ func isUnsetCueTime(v int64) bool {
 	return v < 0 || v == 0x7fffffff || v == 0xffffffff
 }
 
-func parseSQLiteCue(r sqlRecord) (Cue, bool) {
-	kind, ok := r.sint("kind")
-	if !ok || kind < 0 || kind > 8 {
+func buildSQLiteCue(
+	kind, inUsec, outUsec, inMsec, outMsec, activeVal, numVal, denVal, colorIdx sql.NullInt64,
+	hasUsecCol, hasMsecCol bool,
+	comment string,
+) (Cue, bool) {
+	if !kind.Valid || kind.Int64 < 0 || kind.Int64 > 8 {
 		return Cue{}, false
 	}
 	var timeMS, endMS uint32
 	var loop bool
-	if inUsec, hasUsec := r.sint("inUsec", "in_usec"); hasUsec {
-		if isUnsetCueTime(inUsec) {
+	if hasUsecCol && inUsec.Valid {
+		if isUnsetCueTime(inUsec.Int64) {
 			return Cue{}, false
 		}
-		inMS := (inUsec + 500) / 1000
+		inMS := (inUsec.Int64 + 500) / 1000
 		if inMS > math.MaxUint32 {
 			return Cue{}, false
 		}
 		timeMS = uint32(inMS)
-		if outUsec, hasOut := r.sint("outUsec", "out_usec"); hasOut && outUsec > 0 && !isUnsetCueTime(outUsec) && outUsec > inUsec {
-			outMS := (outUsec + 500) / 1000
+		if outUsec.Valid && outUsec.Int64 > 0 && !isUnsetCueTime(outUsec.Int64) && outUsec.Int64 > inUsec.Int64 {
+			outMS := (outUsec.Int64 + 500) / 1000
 			if outMS <= math.MaxUint32 {
 				loop = true
 				endMS = uint32(outMS)
@@ -180,90 +243,64 @@ func parseSQLiteCue(r sqlRecord) (Cue, bool) {
 				}
 			}
 		}
-	} else if inMsec, hasMsec := r.sint("inMsec", "in_msec"); hasMsec {
-		if isUnsetCueTime(inMsec) || inMsec > math.MaxUint32 {
+	} else if hasMsecCol && inMsec.Valid {
+		if isUnsetCueTime(inMsec.Int64) || inMsec.Int64 > math.MaxUint32 {
 			return Cue{}, false
 		}
-		timeMS = uint32(inMsec)
-		if outMsec, hasOut := r.sint("outMsec", "out_msec"); hasOut && outMsec > 0 && !isUnsetCueTime(outMsec) && outMsec > inMsec && outMsec <= math.MaxUint32 {
+		timeMS = uint32(inMsec.Int64)
+		if outMsec.Valid && outMsec.Int64 > 0 && !isUnsetCueTime(outMsec.Int64) && outMsec.Int64 > inMsec.Int64 && outMsec.Int64 <= math.MaxUint32 {
 			loop = true
-			endMS = uint32(outMsec)
+			endMS = uint32(outMsec.Int64)
 		}
 	} else {
 		return Cue{}, false
 	}
 
-	activeVal, _ := r.sint("isActiveLoop", "is_active_loop", "active_loop")
-	numVal, _ := r.sint("beatLoopNumerator", "beat_loop_numerator")
-	denVal, _ := r.sint("beatLoopDenominator", "beat_loop_denominator")
 	var loopNum, loopDen uint16
-	if numVal > 0 && numVal <= math.MaxUint16 {
-		loopNum = uint16(numVal)
+	if numVal.Valid && numVal.Int64 > 0 && numVal.Int64 <= math.MaxUint16 {
+		loopNum = uint16(numVal.Int64)
 	}
-	if denVal > 0 && denVal <= math.MaxUint16 {
-		loopDen = uint16(denVal)
+	if denVal.Valid && denVal.Int64 > 0 && denVal.Int64 <= math.MaxUint16 {
+		loopDen = uint16(denVal.Int64)
 	}
 
 	c := Cue{
-		HotCue:          uint32(kind),
+		HotCue:          uint32(kind.Int64),
 		TimeMS:          timeMS,
 		EndMS:           endMS,
 		Loop:            loop,
-		Active:          loop && activeVal > 0,
-		Name:            r.get("cueComment", "cue_comment", "comment"),
+		Active:          loop && activeVal.Valid && activeVal.Int64 > 0,
+		Name:            comment,
 		LoopNumerator:   loopNum,
 		LoopDenominator: loopDen,
 		Extended:        true,
 	}
-	if colorIdx, hasColor := r.sint("colorTableIndex", "color_table_index"); hasColor && colorIdx > 0 {
-		if kind == 0 && colorIdx <= 8 {
-			c.ColorID = byte(colorIdx)
-		} else if colorIdx <= int64(len(rekordboxCuePalette)) {
-			rgb := rekordboxCuePalette[colorIdx-1]
-			c.ColorCode = byte(colorIdx)
+	if colorIdx.Valid && colorIdx.Int64 > 0 {
+		if kind.Int64 == 0 && colorIdx.Int64 <= 8 {
+			c.ColorID = byte(colorIdx.Int64)
+		} else if colorIdx.Int64 <= int64(len(rekordboxCuePalette)) {
+			rgb := rekordboxCuePalette[colorIdx.Int64-1]
+			c.ColorCode = byte(colorIdx.Int64)
 			c.Color = [4]byte{255, rgb[0], rgb[1], rgb[2]}
 		}
 	}
 	return c, true
 }
 
-func readSQLRows(ctx context.Context, db *sql.DB, table string) ([]sqlRecord, error) {
-	rows, e := db.QueryContext(ctx, `SELECT * FROM "`+strings.ReplaceAll(table, `"`, `""`)+`"`)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	cols, e := rows.Columns()
-	if e != nil {
-		return nil, e
-	}
-	normCols := make([]string, len(cols))
-	for i, c := range cols {
-		normCols[i] = normalized(c)
-	}
-	out := make([]sqlRecord, 0)
-	for rows.Next() {
-		values := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range ptrs {
-			ptrs[i] = &values[i]
-		}
-		if e = rows.Scan(ptrs...); e != nil {
-			return nil, e
-		}
-		r := sqlRecord{}
-		for i, v := range values {
-			switch v := v.(type) {
-			case nil:
-			case []byte:
-				r[normCols[i]] = string(v)
-			default:
-				r[normCols[i]] = fmt.Sprint(v)
+func mergeCueSlice(cues *[]Cue, c Cue) {
+	s := *cues
+	for i, old := range s {
+		if (c.HotCue != 0 && c.HotCue == old.HotCue) || (c.HotCue == 0 && old.HotCue == 0 && c.TimeMS == old.TimeMS && c.Loop == old.Loop && (!c.Loop || c.EndMS == old.EndMS)) {
+			if c.Extended || !old.Extended {
+				c.Active = c.Active || old.Active
+				s[i] = c
+			} else {
+				s[i].Active = old.Active || c.Active
 			}
+			return
 		}
-		out = append(out, r)
 	}
-	return out, rows.Err()
+	*cues = append(s, c)
 }
 
 func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error) {
@@ -285,24 +322,48 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	if e != nil {
 		return nil, e
 	}
-	load := func(names ...string) ([]sqlRecord, error) {
+
+	findTable := func(names ...string) (tableSpec, bool, error) {
 		for _, n := range names {
 			if t := tables[normalized(n)]; t != "" {
-				return readSQLRows(ctx, db, t)
+				spec, err := inspectTable(ctx, db, t)
+				return spec, true, err
 			}
 		}
-		return nil, nil
+		return tableSpec{}, false, nil
 	}
+
 	l := &Library{Artwork: map[uint32]string{}, Keys: map[uint32]string{}}
 	lookups := map[string]map[uint32]string{}
 	for _, kind := range []string{"artist", "album", "genre", "label", "key", "artwork", "image"} {
-		rs, e := load(kind, "djmd"+kind)
-		if e != nil {
-			return nil, e
+		spec, ok, err := findTable(kind, "djmd"+kind)
+		if err != nil {
+			return nil, err
 		}
 		m := map[uint32]string{}
-		for _, r := range rs {
-			m[r.num("id", kind+"_id")] = r.get("name", "scale_name", "title", "path", "file_path")
+		if ok {
+			q := fmt.Sprintf("SELECT %s, %s FROM %s",
+				spec.valExpr("id", kind+"_id"),
+				spec.textExpr("name", "scale_name", "title", "path", "file_path"),
+				spec.quoted)
+			r, err := db.QueryContext(ctx, q)
+			if err != nil {
+				return nil, err
+			}
+			var id sql.NullInt64
+			var val string
+			for r.Next() {
+				if err := r.Scan(&id, &val); err != nil {
+					r.Close()
+					return nil, err
+				}
+				m[nullToUint32(id)] = val
+			}
+			err = r.Err()
+			r.Close()
+			if err != nil {
+				return nil, err
+			}
 		}
 		lookups[kind] = m
 	}
@@ -311,137 +372,330 @@ func (OneLibraryAdapter) Read(ctx context.Context, db *sql.DB) (*Library, error)
 	if len(l.Artwork) == 0 {
 		l.Artwork = lookups["image"]
 	}
-	tracks, e := load("content", "djmdContent", "track", "tracks")
+
+	contentSpec, hasContent, e := findTable("content", "djmdContent", "track", "tracks")
 	if e != nil {
 		return nil, e
 	}
-	if tracks == nil {
+	if !hasContent {
 		return nil, fmt.Errorf("unsupported schema: missing content table")
 	}
-	for _, r := range tracks {
-		path := r.get("file_path", "path", "location")
-		if filename := r.get("file_name", "file_name_l", "filename"); path == "" && filename != "" {
-			if folder := r.get("folder_path"); folder != "" {
-				if strings.HasSuffix(folder, "/"+filename) || strings.HasSuffix(folder, `\`+filename) {
-					path = folder
-				} else {
-					path = strings.TrimRight(folder, "/") + "/" + filename
-				}
+
+	var trackCount int
+	_ = db.QueryRowContext(ctx, `SELECT count(*) FROM `+contentSpec.quoted).Scan(&trackCount)
+	if trackCount > 0 {
+		l.Tracks = make([]Track, 0, trackCount)
+	}
+
+	contentQuery := fmt.Sprintf("SELECT %s FROM %s", strings.Join([]string{
+		contentSpec.valExpr("id", "content_id", "track_id"),
+		contentSpec.textExpr("file_path", "path", "location"),
+		contentSpec.textExpr("file_name", "file_name_l", "filename"),
+		contentSpec.textExpr("folder_path"),
+		contentSpec.textExpr("analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path"),
+		contentSpec.textExpr("title", "name"),
+		contentSpec.valExpr("artist_id_artist", "artist_id"),
+		contentSpec.textExpr("artist"),
+		contentSpec.valExpr("artist_id_composer", "composer_id"),
+		contentSpec.valExpr("artist_id_remixer", "remixer_id"),
+		contentSpec.valExpr("album_id"),
+		contentSpec.textExpr("album"),
+		contentSpec.valExpr("genre_id"),
+		contentSpec.valExpr("label_id"),
+		contentSpec.valExpr("key_id"),
+		contentSpec.textExpr("key_name"),
+		contentSpec.textExpr("key"),
+		contentSpec.valExpr("bpmx100"),
+		contentSpec.valExpr("bpm", "tempo"),
+		contentSpec.valExpr("length", "duration"),
+		contentSpec.valExpr("samplingRate", "sample_rate"),
+		contentSpec.valExpr("bit_depth"),
+		contentSpec.valExpr("bit_rate", "bitrate"),
+		contentSpec.valExpr("file_size"),
+		contentSpec.valExpr("release_year", "year"),
+		contentSpec.valExpr("rating"),
+		contentSpec.textExpr("djComment", "commnt", "comment"),
+		contentSpec.valExpr("image_id"),
+		contentSpec.valExpr("artwork_id"),
+		contentSpec.textExpr("image_path"),
+	}, ", "), contentSpec.quoted)
+
+	cRows, e := db.QueryContext(ctx, contentQuery)
+	if e != nil {
+		return nil, e
+	}
+	var (
+		cID, artistID, composerID, remixerID, albumID, genreID, labelID, keyID sql.NullInt64
+		sampleRate, bitDepth, bitrate, year, rating                            sql.NullInt64
+		imageID, artworkID                                                     sql.NullInt64
+		bpmx100Str, bpmFallbackStr, lengthStr, fileSizeStr                     sql.NullString
+		rawPath, fileName, folderPath, analysisPath, title                     string
+		artistText, albumText, keyName, keyText, comment, imagePath            string
+	)
+	for cRows.Next() {
+		if e = cRows.Scan(
+			&cID, &rawPath, &fileName, &folderPath, &analysisPath, &title,
+			&artistID, &artistText, &composerID, &remixerID, &albumID, &albumText,
+			&genreID, &labelID, &keyID, &keyName, &keyText,
+			&bpmx100Str, &bpmFallbackStr, &lengthStr,
+			&sampleRate, &bitDepth, &bitrate, &fileSizeStr, &year, &rating,
+			&comment, &imageID, &artworkID, &imagePath,
+		); e != nil {
+			cRows.Close()
+			return nil, e
+		}
+		path := rawPath
+		if path == "" && fileName != "" && folderPath != "" {
+			if strings.HasSuffix(folderPath, "/"+fileName) || strings.HasSuffix(folderPath, `\`+fileName) {
+				path = folderPath
+			} else {
+				path = strings.TrimRight(folderPath, "/") + "/" + fileName
 			}
 		}
-		bpm := parseSQLiteBPM(r)
-		key := r.get("key_name")
+		key := keyName
 		if key == "" {
-			key = lookups["key"][r.num("key_id")]
+			key = lookups["key"][nullToUint32(keyID)]
 			if key == "" {
-				key = r.get("key")
+				key = keyText
 			}
 		}
-		artworkPath := lookups["image"][r.num("image_id")]
+		imgID := nullToUint32(imageID)
+		artworkPath := lookups["image"][imgID]
 		if artworkPath == "" {
-			artworkPath = l.Artwork[r.num("image_id", "artwork_id")]
+			if imgID != 0 {
+				artworkPath = l.Artwork[imgID]
+			} else {
+				artworkPath = l.Artwork[nullToUint32(artworkID)]
+			}
 		}
 		if artworkPath == "" {
-			artworkPath = r.get("image_path")
+			artworkPath = imagePath
 		}
-		var fileSize int64
-		if sz, ok := r.sint("file_size"); ok && sz > 0 {
-			fileSize = sz
-		} else if fsz := r.decimal("file_size"); fsz > 0 {
-			fileSize = int64(fsz)
+		var fsize int64
+		if fileSizeStr.Valid && fileSizeStr.String != "" {
+			if sz, err := strconv.ParseInt(fileSizeStr.String, 10, 64); err == nil && sz > 0 {
+				fsize = sz
+			} else if fsz, err := strconv.ParseFloat(fileSizeStr.String, 64); err == nil && fsz > 0 {
+				fsize = int64(fsz)
+			}
+		}
+		var duration float64
+		if lengthStr.Valid && lengthStr.String != "" {
+			duration, _ = strconv.ParseFloat(lengthStr.String, 64)
+		}
+		artist := lookups["artist"][nullToUint32(artistID)]
+		if artist == "" {
+			artist = artistText
+		}
+		album := lookups["album"][nullToUint32(albumID)]
+		if album == "" {
+			album = albumText
 		}
 		// OneLibrary content.length is stored in whole seconds (verified against
 		// libdjinterop content_table.cpp std::chrono::seconds{*length}).
-		t := Track{ID: r.num("id", "content_id", "track_id"), Path: path, AnalysisPath: r.get("analysisDataFilePath", "analysis_data_path", "analyze_path", "analysis_path"), Title: r.get("title", "name"), Artist: lookups["artist"][r.num("artist_id_artist", "artist_id")], Composer: lookups["artist"][r.num("artist_id_composer", "composer_id")], Remixer: lookups["artist"][r.num("artist_id_remixer", "remixer_id")], Album: lookups["album"][r.num("album_id")], Genre: lookups["genre"][r.num("genre_id")], Label: lookups["label"][r.num("label_id")], Key: key, BPM: bpm, Duration: r.decimal("length", "duration"), SampleRate: int(r.num("samplingRate", "sample_rate")), BitDepth: int(r.num("bit_depth")), Bitrate: int(r.num("bit_rate", "bitrate")), FileSize: fileSize, Year: int(r.num("release_year", "year")), Rating: int(r.num("rating")), Comment: r.get("djComment", "commnt", "comment"), ArtworkPath: artworkPath}
-		if t.Artist == "" {
-			t.Artist = r.get("artist")
-		}
-		if t.Album == "" {
-			t.Album = r.get("album")
+		t := Track{
+			ID:           nullToUint32(cID),
+			Path:         path,
+			AnalysisPath: analysisPath,
+			Title:        title,
+			Artist:       artist,
+			Composer:     lookups["artist"][nullToUint32(composerID)],
+			Remixer:      lookups["artist"][nullToUint32(remixerID)],
+			Album:        album,
+			Genre:        lookups["genre"][nullToUint32(genreID)],
+			Label:        lookups["label"][nullToUint32(labelID)],
+			Key:          key,
+			BPM:          parseSQLiteBPMValues(bpmx100Str, bpmFallbackStr),
+			Duration:     duration,
+			SampleRate:   int(nullToUint32(sampleRate)),
+			BitDepth:     int(nullToUint32(bitDepth)),
+			Bitrate:      int(nullToUint32(bitrate)),
+			FileSize:     fsize,
+			Year:         int(nullToUint32(year)),
+			Rating:       int(nullToUint32(rating)),
+			Comment:      comment,
+			ArtworkPath:  artworkPath,
 		}
 		normalizeParsedAudioMetadata(&t)
 		l.Tracks = append(l.Tracks, t)
 	}
-	cues, e := load("cue", "djmdCue")
+	e = cRows.Err()
+	cRows.Close()
 	if e != nil {
 		return nil, e
 	}
-	if len(cues) > 0 {
-		type indexedCue struct {
-			id  int64
-			seq int
-			cue Cue
-		}
-		byContent := map[uint32][]indexedCue{}
-		for idx, r := range cues {
-			cid := r.num("content_id")
-			if cid == 0 {
-				continue
+
+	cueSpec, hasCue, e := findTable("cue", "djmdCue")
+	if e != nil {
+		return nil, e
+	}
+	if hasCue && len(l.Tracks) > 0 {
+		trackIdxByID := make(map[uint32]int, len(l.Tracks))
+		for i, tr := range l.Tracks {
+			if tr.ID != 0 {
+				if _, dup := trackIdxByID[tr.ID]; !dup {
+					trackIdxByID[tr.ID] = i
+				}
 			}
-			c, ok := parseSQLiteCue(r)
+		}
+		inUsecExpr, hasUsecCol := cueSpec.rawExpr("inUsec", "in_usec")
+		inMsecExpr, hasMsecCol := cueSpec.rawExpr("inMsec", "in_msec")
+		cueOrder := ""
+		if idCol, ok := cueSpec.rawExpr("cue_id", "id"); ok {
+			cueOrder = " ORDER BY " + idCol
+		}
+		cueQuery := fmt.Sprintf("SELECT %s FROM %s%s", strings.Join([]string{
+			cueSpec.valExpr("content_id"),
+			cueSpec.valExpr("kind"),
+			inUsecExpr,
+			cueSpec.valExpr("outUsec", "out_usec"),
+			inMsecExpr,
+			cueSpec.valExpr("outMsec", "out_msec"),
+			cueSpec.valExpr("isActiveLoop", "is_active_loop", "active_loop"),
+			cueSpec.valExpr("beatLoopNumerator", "beat_loop_numerator"),
+			cueSpec.valExpr("beatLoopDenominator", "beat_loop_denominator"),
+			cueSpec.valExpr("colorTableIndex", "color_table_index"),
+			cueSpec.textExpr("cueComment", "cue_comment", "comment"),
+		}, ", "), cueSpec.quoted, cueOrder)
+
+		qRows, err := db.QueryContext(ctx, cueQuery)
+		if err != nil {
+			return nil, err
+		}
+		var (
+			cueContentID, cueKind, inUsec, outUsec, inMsec, outMsec sql.NullInt64
+			activeVal, numVal, denVal, colorIdx                     sql.NullInt64
+			cueComment                                              string
+		)
+		for qRows.Next() {
+			if err := qRows.Scan(
+				&cueContentID, &cueKind, &inUsec, &outUsec, &inMsec, &outMsec,
+				&activeVal, &numVal, &denVal, &colorIdx, &cueComment,
+			); err != nil {
+				qRows.Close()
+				return nil, err
+			}
+			ti, ok := trackIdxByID[nullToUint32(cueContentID)]
 			if !ok {
 				continue
 			}
-			cueID, _ := r.sint("cue_id", "id")
-			byContent[cid] = append(byContent[cid], indexedCue{id: cueID, seq: idx, cue: c})
-		}
-		for i := range l.Tracks {
-			items := byContent[l.Tracks[i].ID]
-			if len(items) == 0 {
+			c, ok := buildSQLiteCue(cueKind, inUsec, outUsec, inMsec, outMsec, activeVal, numVal, denVal, colorIdx, hasUsecCol, hasMsecCol, cueComment)
+			if !ok {
 				continue
 			}
-			sort.SliceStable(items, func(a, b int) bool {
-				if items[a].id != items[b].id {
-					return items[a].id < items[b].id
-				}
-				return items[a].seq < items[b].seq
-			})
-			var merged Analysis
-			for _, item := range items {
-				merged.mergeCue(item.cue)
-			}
-			l.Tracks[i].Cues = merged.Cues
+			mergeCueSlice(&l.Tracks[ti].Cues, c)
+		}
+		err = qRows.Err()
+		qRows.Close()
+		if err != nil {
+			return nil, err
 		}
 	}
+
 	for i := range l.Tracks {
 		l.Tracks[i].RecordHash = RecordHash(l.Tracks[i])
 	}
-	ps, e := load("playlist", "djmdPlaylist")
+
+	plSpec, hasPL, e := findTable("playlist", "djmdPlaylist")
 	if e != nil {
 		return nil, e
 	}
-	for _, r := range ps {
-		attr := r.num("attribute")
-		l.Playlists = append(l.Playlists, Playlist{ID: r.num("id", "playlist_id"), ParentID: r.num("playlist_id_parent", "parent_id"), SortOrder: r.num("sequenceNo", "seq", "sort_order"), Name: r.get("name", "title"), Folder: r.num("is_folder") != 0 || attr == 1, Intelligent: r.num("is_smart", "intelligent") != 0 || attr == 4, Rules: r.get("smart_list", "rules")})
-	}
-	es, e := load("playlist_content", "djmdSongPlaylist", "playlist_entry", "playlist_entries")
-	if e != nil {
-		return nil, e
-	}
-	// Sort by source sequence before materializing intelligent and ordinary lists.
-	byID := map[uint32]int{}
-	for i, p := range l.Playlists {
-		byID[p.ID] = i
-	}
-	type entry struct{ seq, id uint32 }
-	grouped := map[uint32][]entry{}
-	for _, r := range es {
-		id := r.num("playlist_id")
-		if _, ok := byID[id]; !ok { // orphan left by a deleted playlist
-			continue
+	if hasPL {
+		plQuery := fmt.Sprintf("SELECT %s FROM %s", strings.Join([]string{
+			plSpec.valExpr("id", "playlist_id"),
+			plSpec.valExpr("playlist_id_parent", "parent_id"),
+			plSpec.valExpr("sequenceNo", "seq", "sort_order"),
+			plSpec.textExpr("name", "title"),
+			plSpec.valExpr("attribute"),
+			plSpec.valExpr("is_folder"),
+			plSpec.valExpr("is_smart", "intelligent"),
+			plSpec.textExpr("smart_list", "rules"),
+		}, ", "), plSpec.quoted)
+		pRows, err := db.QueryContext(ctx, plQuery)
+		if err != nil {
+			return nil, err
 		}
-		grouped[id] = append(grouped[id], entry{r.num("sequenceNo", "track_no", "seq", "entry_index", "position"), r.num("content_id", "track_id")})
+		var pID, parentID, sortOrder, attr, isFolder, isSmart sql.NullInt64
+		var pName, rules string
+		for pRows.Next() {
+			if err := pRows.Scan(&pID, &parentID, &sortOrder, &pName, &attr, &isFolder, &isSmart, &rules); err != nil {
+				pRows.Close()
+				return nil, err
+			}
+			av := nullToUint32(attr)
+			l.Playlists = append(l.Playlists, Playlist{
+				ID:          nullToUint32(pID),
+				ParentID:    nullToUint32(parentID),
+				SortOrder:   nullToUint32(sortOrder),
+				Name:        pName,
+				Folder:      nullToUint32(isFolder) != 0 || av == 1,
+				Intelligent: nullToUint32(isSmart) != 0 || av == 4,
+				Rules:       rules,
+			})
+		}
+		err = pRows.Err()
+		pRows.Close()
+		if err != nil {
+			return nil, err
+		}
 	}
-	knownTracks := make(map[uint32]bool, len(l.Tracks))
-	for _, tr := range l.Tracks {
-		knownTracks[tr.ID] = true
+
+	pcSpec, hasPC, e := findTable("playlist_content", "djmdSongPlaylist", "playlist_entry", "playlist_entries")
+	if e != nil {
+		return nil, e
 	}
-	for i, p := range l.Playlists {
-		xs := grouped[p.ID]
-		sort.SliceStable(xs, func(i, j int) bool { return xs[i].seq < xs[j].seq })
-		for _, x := range xs {
-			if knownTracks[x.id] {
-				l.Playlists[i].Tracks = append(l.Playlists[i].Tracks, x.id)
+	if hasPC && len(l.Playlists) > 0 {
+		// Sort by source sequence before materializing intelligent and ordinary lists.
+		byID := make(map[uint32]int, len(l.Playlists))
+		for i, p := range l.Playlists {
+			byID[p.ID] = i
+		}
+		knownTracks := make(map[uint32]bool, len(l.Tracks))
+		for _, tr := range l.Tracks {
+			knownTracks[tr.ID] = true
+		}
+		type entry struct{ seq, id uint32 }
+		grouped := make(map[uint32][]entry, len(l.Playlists))
+
+		pcQuery := fmt.Sprintf("SELECT %s, %s, %s FROM %s",
+			pcSpec.valExpr("playlist_id"),
+			pcSpec.valExpr("sequenceNo", "track_no", "seq", "entry_index", "position"),
+			pcSpec.valExpr("content_id", "track_id"),
+			pcSpec.quoted)
+		eRows, err := db.QueryContext(ctx, pcQuery)
+		if err != nil {
+			return nil, err
+		}
+		var plID, seq, trackID sql.NullInt64
+		for eRows.Next() {
+			if err := eRows.Scan(&plID, &seq, &trackID); err != nil {
+				eRows.Close()
+				return nil, err
+			}
+			pid := nullToUint32(plID)
+			if _, ok := byID[pid]; !ok { // orphan left by a deleted playlist
+				continue
+			}
+			tid := nullToUint32(trackID)
+			if !knownTracks[tid] {
+				continue
+			}
+			grouped[pid] = append(grouped[pid], entry{nullToUint32(seq), tid})
+		}
+		err = eRows.Err()
+		eRows.Close()
+		if err != nil {
+			return nil, err
+		}
+		for i, p := range l.Playlists {
+			xs := grouped[p.ID]
+			sort.SliceStable(xs, func(i, j int) bool { return xs[i].seq < xs[j].seq })
+			if len(xs) > 0 {
+				tracks := make([]uint32, len(xs))
+				for j, x := range xs {
+					tracks[j] = x.id
+				}
+				l.Playlists[i].Tracks = tracks
 			}
 		}
 	}
