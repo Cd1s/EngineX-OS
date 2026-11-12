@@ -207,3 +207,23 @@ func TestDiscoverLANServerHandlesMTU1500MDNSResponse(t *testing.T) {
 		t.Fatalf("DiscoverLANServer >1024B mDNS = (%q, %+v, %v)", endpoint, got, err)
 	}
 }
+
+func TestLANHealthTrimsTrailingSlashEndpoint(t *testing.T) {
+	b := &Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"}
+	srv := httptest.NewServer(b)
+	defer srv.Close()
+
+	state := filepath.Join(t.TempDir(), LANStateName)
+	if err := os.WriteFile(state, []byte(`{"endpoint":"`+srv.URL+`/","online":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldDisc, oldMDNS := discoverTargets, mdnsTargets
+	discoverTargets = func() []*net.UDPAddr { return nil }
+	mdnsTargets = func() []*net.UDPAddr { return nil }
+	t.Cleanup(func() { discoverTargets, mdnsTargets = oldDisc, oldMDNS })
+
+	endpoint, ok := FindLAN(context.Background(), state, 300*time.Millisecond)
+	if !ok || endpoint != srv.URL {
+		t.Fatalf("FindLAN with trailing-slash cached endpoint = (%q, %v), want (%q, true)", endpoint, ok, srv.URL)
+	}
+}
