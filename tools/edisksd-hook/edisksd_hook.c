@@ -523,6 +523,68 @@ static int stand_in(int lib,const char *name,int isdir) {
     return close(fd);
 }
 #define NESTED "Engine Library/"
+// BH2-A1-4: Engine 5.3.0 and rb-bridge write covers as Engine Library/Artwork/<hash>.jpg
+// (pkg/enginedb/artwork.go). A read-only bind of the stick's Artwork refused them. The
+// stick's covers are mirrored into the cached library's own Artwork instead, which the
+// library bind shows writable: linked from another generation of this stick where it has
+// them, copied otherwise. Copies are made only in the pre-mount, inside its budget and
+// above the /data reserve; one interrupted is finished on a later insert. Returns 0 when
+// the mirror is complete, 1 when it is not (the stick's folder is then bound read-only
+// over it, as before). A cover is the same when its size is: names are content hashes.
+static int same_size(int dir,const char *name,off_t size) {
+    struct stat st;return !fstatat(dir,name,&st,AT_SYMLINK_NOFOLLOW)&&S_ISREG(st.st_mode)&&st.st_size==size;
+}
+static int mirror_copy(int in,int out,int64_t deadline) {
+    char buf[65536];ssize_t n;
+    while((n=read(in,buf,sizeof buf))!=0) {
+        if(n<0){if(errno==EINTR)continue;return -1;}
+        if(budget(deadline))return -1;
+        for(ssize_t pos=0;pos<n;){ssize_t w=write(out,buf+pos,(size_t)(n-pos));if(w<0&&errno==EINTR)continue;if(w<=0){if(!w)errno=EIO;return -1;}pos+=w;}
+    }
+    return 0;
+}
+static int mirror_artwork(int lib,const char *library,const char *source,int64_t deadline) {
+    struct stat st;
+    if(fstatat(lib,"Artwork",&st,AT_SYMLINK_NOFOLLOW)){if(errno!=ENOENT||mkdirat(lib,"Artwork",0700))return 1;}
+    else if(!S_ISDIR(st.st_mode))return 1;
+    int dst=openat(lib,"Artwork",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(dst<0)return 1;
+    int src=open(source,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(src<0){close(dst);return 1;}
+    // Other generations of this stick: cache/<identity>/library-*/Artwork.
+    int sib[4],nsib=0;char root[PATH_MAX];snprintf(root,sizeof root,"%s",library);
+    char *slash=strrchr(root,'/');
+    if(slash){*slash=0;DIR *g=opendir(root);struct dirent *l;
+        while(g&&nsib<4&&(l=readdir(g)))if(seeded_ok(l->d_name)&&strcmp(l->d_name,slash+1)) {
+            char a[PATH_MAX];if(snprintf(a,sizeof a,"%s/%s/Artwork",root,l->d_name)>=(int)sizeof a)continue;
+            int fd=open(a,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd>=0)sib[nsib++]=fd;
+        }
+        if(g)closedir(g);}
+    int dup=fcntl(src,F_DUPFD_CLOEXEC,0);DIR *d=dup<0?NULL:fdopendir(dup);if(!d&&dup>=0)close(dup);
+    int complete=d!=NULL,copied=0;struct dirent *e;
+    while(complete&&(errno=0,e=readdir(d))) {
+        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        if(fstatat(src,e->d_name,&st,AT_SYMLINK_NOFOLLOW)||!S_ISREG(st.st_mode)){complete=0;break;} // only flat covers are mirrored
+        if(same_size(dst,e->d_name,st.st_size))continue;
+        if(budget(deadline)){complete=0;break;}
+        unlinkat(dst,e->d_name,0);
+        int linked=0;
+        for(int i=0;!linked&&i<nsib;i++)linked=same_size(sib[i],e->d_name,st.st_size)&&!linkat(sib[i],e->d_name,dst,e->d_name,0);
+        if(linked)continue;
+        struct statvfs v;
+        if(!private_ns||fstatvfs(dst,&v)||(uint64_t)v.f_bavail*(uint64_t)v.f_frsize<HFS_CACHE_RESERVE+(uint64_t)st.st_size){complete=0;break;}
+        int in=openat(src,e->d_name,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+        unlinkat(dst,".mirror.tmp",0);
+        int out=in<0?-1:openat(dst,".mirror.tmp",O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+        int rc=out<0?-1:mirror_copy(in,out,deadline);
+        if(out>=0&&close(out))rc=-1;
+        if(in>=0)close(in);
+        if(rc||renameat(dst,".mirror.tmp",dst,e->d_name)){unlinkat(dst,".mirror.tmp",0);complete=0;break;}
+        copied=1;
+    }
+    if(d){if(errno&&complete)complete=0;closedir(d);}
+    if(copied)syncfs(dst);
+    for(int i=0;i<nsib;i++)close(sib[i]);
+    close(src);close(dst);return complete?0:1;
+}
 // BH-O55-1: every entry of the stick's own Engine Library except Database2 (the
 // copied metadata), Engine DJ's Music folder above all, shown read-only from the
 // stick inside the cached library's bind. The record lists these binds before
@@ -542,12 +604,17 @@ static int bind_native(struct owned_view *v,const char *backing,const char *libr
         if(budget(deadline)||path_join(source,sizeof source,native,e->d_name)||lstat(source,&st)){rc=-1;break;}
         if(S_ISLNK(st.st_mode)||(!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))){errno=ELOOP;rc=-1;break;}
         if(S_ISDIR(st.st_mode)&&!strcmp(e->d_name,"Database2"))continue;
+        int mirror=0; // a partial Artwork mirror stays under the bind, for a later insert
+        if(S_ISDIR(st.st_mode)&&!strcmp(e->d_name,"Artwork")) {
+            if(!mirror_artwork(lib,library,source,deadline))continue; // the cached library's own, writable
+            struct stat a;mirror=!fstatat(lib,"Artwork",&a,AT_SYMLINK_NOFOLLOW)&&S_ISDIR(a.st_mode);
+        }
         // The view's record keeps "Engine Library/<name>" in NAME_MAX bytes: an entry
         // with a longer name is left out of the view, not the whole stick (BH2-A1-6).
         if(snprintf(name,sizeof name,NESTED "%s",e->d_name)>=(int)sizeof name){note("name too long for the HFS view, left out:",e->d_name,ENAMETOOLONG);continue;}
         if(v->count==MAX_VIEW_ENTRIES){errno=E2BIG;rc=-1;break;}
         if(snprintf(dest,sizeof dest,"%s/view/%s",v->anchor,name)>=(int)sizeof dest){errno=ENAMETOOLONG;rc=-1;break;}
-        if(stand_in(lib,e->d_name,S_ISDIR(st.st_mode))||bind_checked(source,dest,MS_BIND|MS_REC)){rc=-1;break;}
+        if((!mirror&&stand_in(lib,e->d_name,S_ISDIR(st.st_mode)))||bind_checked(source,dest,MS_BIND|MS_REC)){rc=-1;break;}
         snprintf(v->child[v->count++].name,NAME_MAX+1,"%s",name);
         if(mount(NULL,dest,NULL,MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC,NULL)){rc=-1;break;}
     }

@@ -764,12 +764,61 @@ static void test_hfs_view_with_a_long_entry_name(const char *root) {
     struct libmnt_context c={.target=target};assert(!unmount_dispatch(&c,real_unmount));
     puts("REAL PRIVATE NAMESPACE BH2-A1-6: an Engine Library entry whose name does not fit the view record is left out, the stick's view is up: PASS");
 }
+// BH2-A1-4: Engine 5.3.0 and rb-bridge write covers as Engine Library/Artwork/<hash>.jpg.
+// The view bound the stick's Artwork read-only, so no cover could be added on an HFS+ stick.
+static void test_hfs_view_artwork_is_writable(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX];struct stat st;
+    join(disk,root,"artwork-hfs");join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"engine dj export 1");
+    join(p,disk,"Engine Library/Artwork");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Artwork/AAAA.jpg");write_file(p,"cover a");
+    join(p,disk,"Engine Library/Artwork/BBBB.jpg");write_file(p,"cover b");
+    join(target,MEDIA_ROOT,"ARTWORK-HFS");
+    struct libmnt_context c={.target=target};seeded_hint[0]=0;
+    #define VIEW(pre) do{mount_ro(disk,target);private_ns=(pre);assert(!prepare_view(target,"uuid-artwork",deadline_from(now_ms())));private_ns=0;}while(0)
+    // The pre-mount mirrors the stick's covers; the visible mount shows them, writable.
+    VIEW(1);assert(!unmount_dispatch(&c,real_unmount));
+    VIEW(0);
+    join(p,target,"Engine Library/Artwork/AAAA.jpg");expect_file(p,"cover a");
+    join(p,target,"Engine Library/Artwork/deck.jpg");int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+    if(fd<0)fprintf(stderr,"a new cover in the view's Artwork: %s\n",strerror(errno));
+    assert(fd>=0);assert(write(fd,"deck cover",10)==10);close(fd);
+    join(p,disk,"Engine Library/Artwork/deck.jpg");assert(access(p,F_OK)==-1&&errno==ENOENT); // the stick is untouched
+    assert(!unmount_dispatch(&c,real_unmount));
+    // The next insert shows the deck's cover beside the stick's.
+    VIEW(1);assert(!unmount_dispatch(&c,real_unmount));VIEW(0);
+    join(p,target,"Engine Library/Artwork/deck.jpg");expect_file(p,"deck cover");
+    join(p,target,"Engine Library/Artwork/BBBB.jpg");expect_file(p,"cover b");
+    assert(!unmount_dispatch(&c,real_unmount));
+    // A new PC export is a new generation: its mirror is linked from the one before, even
+    // where nothing may be copied (the visible mount).
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"engine dj export 2");
+    VIEW(0);
+    join(p,target,"Engine Library/Artwork/AAAA.jpg");expect_file(p,"cover a");assert(!stat(p,&st)&&st.st_nlink==2);
+    join(p,target,"Engine Library/Artwork/deck2.jpg");write_file(p,"deck cover 2");
+    assert(!unmount_dispatch(&c,real_unmount));
+    // A cover that cannot be mirrored now (added on the PC, no pre-mount): the stick's folder
+    // is shown read-only as before, the view is up and the deck's covers are kept for later.
+    join(p,disk,"Engine Library/Artwork/CCCC.jpg");write_file(p,"cover c");
+    VIEW(0);
+    join(p,target,"Engine Library/Artwork/CCCC.jpg");expect_file(p,"cover c");
+    join(p,target,"Engine Library/Artwork/later.jpg");assert(open(p,O_WRONLY|O_CREAT|O_CLOEXEC,0600)<0&&errno==EROFS);
+    assert(!unmount_dispatch(&c,real_unmount));
+    VIEW(1);assert(!unmount_dispatch(&c,real_unmount));VIEW(0);
+    join(p,target,"Engine Library/Artwork/CCCC.jpg");expect_file(p,"cover c");
+    join(p,target,"Engine Library/Artwork/deck2.jpg");expect_file(p,"deck cover 2");
+    join(p,target,"Engine Library/Artwork/later.jpg");write_file(p,"later");
+    assert(!unmount_dispatch(&c,real_unmount));
+    #undef VIEW
+    puts("REAL PRIVATE NAMESPACE BH2-A1-4: an HFS+ view's Engine Library/Artwork is writable: the stick's covers are mirrored in the pre-mount, linked into a new generation, shown read-only until a mirror is complete: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_monitor_sees_plain_device_mount(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
