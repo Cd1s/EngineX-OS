@@ -1,7 +1,9 @@
 package prolink
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"net"
 	"os"
 	"path/filepath"
@@ -81,3 +83,74 @@ func TestAnnounceLoopUpdatesFirstFlagAndRechecksPDBBeforeClaim(t *testing.T) {
 		t.Fatalf("Exporter claimed player %d despite export.pdb changing before probe timer fired", num)
 	}
 }
+
+func TestEngineBridgeClampsNegativePreRollCuesAndLoops(t *testing.T) {
+	const rate = 44100.0
+	var q bytes.Buffer
+	binary.Write(&q, binary.BigEndian, uint64(8))
+	for slot := 1; slot <= 8; slot++ {
+		name := ""
+		sample := float64(-1)
+		switch slot {
+		case 1:
+			name = "LeadIn"
+			sample = -22050 // -500 ms pre-roll hot cue
+		case 2:
+			name = "Drop"
+			sample = 88200 // 2000 ms hot cue
+		}
+		q.WriteByte(byte(len(name)))
+		q.WriteString(name)
+		binary.Write(&q, binary.BigEndian, sample)
+		q.Write([]byte{255, 255, 0, 0})
+	}
+	// main_cue at -4410 samples (-100 ms pre-roll), adjusted=1, default_cue=-1
+	binary.Write(&q, binary.BigEndian, float64(-4410))
+	q.WriteByte(1)
+	binary.Write(&q, binary.BigEndian, float64(-1))
+
+	cues, err := engineQuickCues(q.Bytes(), rate)
+	if err != nil {
+		t.Fatalf("engineQuickCues rejected negative pre-roll cue: %v", err)
+	}
+	if len(cues) != 3 || cues[0].HotCue != 1 || cues[0].TimeMS != 0 || cues[1].HotCue != 2 || cues[1].TimeMS != 2000 || cues[2].HotCue != 0 || cues[2].TimeMS != 0 {
+		t.Fatalf("unexpected clamped cues: %+v", cues)
+	}
+
+	var lp bytes.Buffer
+	binary.Write(&lp, binary.LittleEndian, uint64(3))
+	writeLoop := func(name string, start, end float64) {
+		lp.WriteByte(byte(len(name)))
+		lp.WriteString(name)
+		binary.Write(&lp, binary.LittleEndian, start)
+		binary.Write(&lp, binary.LittleEndian, end)
+		lp.Write([]byte{1, 1, 255, 0, 255, 0})
+	}
+	// Slot 1: spans pre-roll (-500 ms) into track (+1000 ms) -> clamps to 0..1000 ms and merges with HotCue 1
+	writeLoop("LeadLoop", -22050, 44100)
+	// Slot 2: purely pre-roll (-1000 ms .. -200 ms) -> skipped without failing
+	writeLoop("PurePreRoll", -44100, -8820)
+	// Slot 3: normal loop (4000 ms .. 8000 ms) -> preserved
+	writeLoop("Chorus", 176400, 352800)
+
+	merged, err := engineLoops(lp.Bytes(), rate, cues)
+	if err != nil {
+		t.Fatalf("engineLoops rejected negative pre-roll loop: %v", err)
+	}
+	var gotLead, gotChorus bool
+	for _, c := range merged {
+		if c.Name == "PurePreRoll" {
+			t.Fatalf("purely pre-roll loop was not skipped: %+v", c)
+		}
+		if c.HotCue == 1 && c.Loop && c.TimeMS == 0 && c.EndMS == 1000 {
+			gotLead = true
+		}
+		if c.Name == "Chorus" && c.Loop && c.TimeMS == 4000 && c.EndMS == 8000 {
+			gotChorus = true
+		}
+	}
+	if !gotLead || !gotChorus {
+		t.Fatalf("expected clamped LeadLoop and preserved Chorus loop, got: %+v", merged)
+	}
+}
+
