@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"syscall"
 	"testing"
 	"time"
 
@@ -293,5 +294,55 @@ func TestConvertAtMountReadsOnceAndStartsBudgetAfterRead(t *testing.T) {
 	}
 	if res.Deferred != 0 {
 		t.Fatalf("unexpected deferred tracks on incremental mount: %+v", res)
+	}
+}
+
+func TestCleanEmptyEngineLibraryPreservesHeldLock(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	dir := filepath.Join(root, "Engine Library", "Database2")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(dir, ".rb-bridge.lock")
+	held, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	heldInfo, err := held.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Concurrent ConvertAtMount fails lockVolume ("bridge already syncing") and calls cleanEmptyEngineLibrary:
+	// it must NOT unlink .rb-bridge.lock while held by the active rb-bridge process.
+	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err == nil {
+		t.Fatal("expected ConvertAtMount to fail while .rb-bridge.lock is held")
+	}
+	diskInfo, err := os.Lstat(lockPath)
+	if err != nil {
+		t.Fatalf(".rb-bridge.lock was deleted while held by another rb-bridge: %v", err)
+	}
+	if !os.SameFile(heldInfo, diskInfo) {
+		t.Fatal(".rb-bridge.lock inode changed while held")
+	}
+
+	// Once the holder unlocks, a failed first import still cleans up the empty Engine Library skeleton.
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	_ = held.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := bridge.ConvertAtMount(ctx, root, enginedb.Options{}, false); err == nil {
+		t.Fatal("expected cancelled ConvertAtMount to fail")
+	}
+	if _, err := os.Lstat(filepath.Join(root, "Engine Library")); !os.IsNotExist(err) {
+		t.Fatalf("unlocked empty Engine Library was not cleaned up: %v", err)
 	}
 }

@@ -417,6 +417,32 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 }
 
 func cleanEmptyEngineLibrary(dir string) {
+	// Never remove .rb-bridge.lock or partial state while another rb-bridge holds the lock.
+	lockPath := filepath.Join(dir, ".rb-bridge.lock")
+	var lockFile *os.File
+	if f, err := os.OpenFile(lockPath, os.O_RDWR|syscall.O_NOFOLLOW, 0); err == nil {
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			_ = f.Close()
+			return
+		}
+		st1, e1 := f.Stat()
+		st2, e2 := os.Lstat(lockPath)
+		if e1 != nil || e2 != nil || !os.SameFile(st1, st2) {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
+			return
+		}
+		lockFile = f
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	defer func() {
+		if lockFile != nil {
+			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+			_ = lockFile.Close()
+		}
+	}()
+
 	// Leave no Engine Library for Engine to mistake for one; Remove spares non-empty dirs.
 	// An empty m.db is what an earlier build left behind on a failed import.
 	for _, name := range []string{"m.db", stateName} {
@@ -424,7 +450,9 @@ func cleanEmptyEngineLibrary(dir string) {
 			os.Remove(filepath.Join(dir, name))
 		}
 	}
-	os.Remove(filepath.Join(dir, ".rb-bridge.lock"))
+	if lockFile != nil {
+		os.Remove(lockPath)
+	}
 	os.Remove(dir)
 	os.Remove(filepath.Dir(dir))
 }
