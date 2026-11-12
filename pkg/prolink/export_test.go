@@ -1306,13 +1306,45 @@ func TestExportHandoffAsRealPlayersDo(t *testing.T) {
 	if f, mm, _, _ := look(r); f == 0 || mm != 1 {
 		t.Fatalf("after player 2's answer: F %x Mm %d", f, mm)
 	}
-	// An answer nobody asked for does not take back a master we gave away.
-	r.mu.Lock()
-	r.yielded, r.askUntil = true, time.Time{}
-	r.mu.Unlock()
+	// Review of 9348a32. Only the master agrees to hand it over, and only to a player.
+	ask := func(from byte) bool { // a 0x26 from a player; whether we answered 0x27
+		t.Helper()
+		if _, err := wire.WriteToUDP((&exportRun{player: from}).handoffPacket(0x26, 0x28), r.beat.LocalAddr().(*net.UDPAddr)); err != nil {
+			t.Fatal(err)
+		}
+		wire.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		b := make([]byte, 64)
+		n, _, err := wire.ReadFromUDP(b)
+		return err == nil && n == 0x2c && b[10] == 0x27
+	}
+	for _, from := range []byte{0, 3, 7, 0x21} { // nobody, ourselves, not a player number, a mixer
+		if ask(from) {
+			t.Fatalf("agreed to hand master to %#x", from)
+		}
+	}
+	if f, _, mh, _ := look(r); f == 0 || mh != 0xff {
+		t.Fatalf("after refused requests: F %x Mh %x", f, mh)
+	}
+	// The request above was granted, and its 3 s window was still open. Player 2
+	// takes master back the regular way (asks, we agree, its status claims it);
+	// its earlier answer arriving again, late or repeated, must not take back
+	// the master we gave away.
+	if !ask(2) {
+		t.Fatal("no answer to player 2 asking the master for it")
+	}
+	if f, _, mh, _ := look(r); f == 0 || mh != 2 {
+		t.Fatalf("handing over to 2: F %x Mh %x", f, mh)
+	}
+	heard(r, peerStatus(2, "CDJ-3000", 0xbc, 1, 0xff, 8))
+	if f, _, _, _ := look(r); f != 0 {
+		t.Fatal("still master after player 2 took it")
+	}
 	answer()
 	if f, _, _, _ := look(r); f != 0 {
-		t.Fatal("a stray answer made us master")
+		t.Fatal("a late answer to a settled request took back the master we gave away")
+	}
+	if ask(2) {
+		t.Fatal("agreed to hand over a master we do not hold")
 	}
 	// A master that never answers does not keep our deck from being master for good.
 	if err := e.RequestMaster(cdj); err != nil {
