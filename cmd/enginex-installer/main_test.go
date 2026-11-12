@@ -69,7 +69,7 @@ func fakeELF(machine byte, tag string) []byte {
 type bundleFile struct{ Path, ImagePath, SuitePath, Version string }
 
 // buildBundle runs the real packer.
-func buildBundle(t *testing.T, prefix, version string) bundleFile {
+func buildBundle(t *testing.T, prefix, version string, releaseTag ...string) bundleFile {
 	t.Helper()
 	need(t, "python3")
 	dir := t.TempDir()
@@ -77,16 +77,24 @@ func buildBundle(t *testing.T, prefix, version string) bundleFile {
 	if prefix == "PRIME4G2" || prefix == "SYSTEMONE" {
 		machine = 183
 	}
+	tag := ""
+	if len(releaseTag) > 0 {
+		tag = releaseTag[0]
+	}
 	suite, hook := filepath.Join(dir, "sc5000-suite"), filepath.Join(dir, "libengine-ui-hook.so")
-	os.WriteFile(suite, fakeELF(machine, "suite-"+prefix), 0o755)
-	os.WriteFile(hook, fakeELF(machine, "hook-"+prefix), 0o755)
+	os.WriteFile(suite, fakeELF(machine, "suite-"+prefix+"-"+tag), 0o755)
+	os.WriteFile(hook, fakeELF(machine, "hook-"+prefix+"-"+tag), 0o755)
 	ui := filepath.Join(dir, "packs.tar")
 	if out, err := exec.Command("sh", "-c", "mkdir -p '"+dir+"/ui/packs/a' && echo 'Item {}' > '"+dir+"/ui/packs/a/Main.qml' && tar -C '"+dir+"/ui' -cf '"+ui+"' packs").CombinedOutput(); err != nil {
 		t.Fatalf("ui packs: %v %s", err, out)
 	}
 	out := filepath.Join(dir, "out")
 	script := filepath.Join(repoRoot(t), "tools/az01-packer/build-data-bundle.py")
-	if o, err := exec.Command("python3", "-I", script, version, "--suite", suite, "--hook", hook, "--ui-packs", ui, "--out", out, "--prefix", prefix).CombinedOutput(); err != nil {
+	args := []string{"-I", script, version, "--suite", suite, "--hook", hook, "--ui-packs", ui, "--out", out, "--prefix", prefix}
+	if tag != "" {
+		args = append(args, "--release-tag", tag)
+	}
+	if o, err := exec.Command("python3", args...).CombinedOutput(); err != nil {
 		t.Fatalf("build-data-bundle: %v %s", err, o)
 	}
 	imgs, _ := filepath.Glob(filepath.Join(out, prefix+"-"+version+"-EngineX-OS-*-Update.img"))
@@ -2562,4 +2570,84 @@ func TestGen2UpdateImgEndToEndAllModes(t *testing.T) {
 			t.Errorf("azModel with one local Update.img = %v %v, want PRIME4G2", m, ok)
 		}
 	})
+}
+
+// #218: a same-version re-release (v5.3.0.4-r3) publishes its *-Update.img under the same
+// filename as the first 5.3.0.4 build. Re-running EngineX-Installer in the directory that
+// still holds the earlier 5.3.0.4 package must replace it with r3 instead of reflashing the
+// old bundle and leaving the deck offering v5.3.0.4-r3 after restart.
+func TestGen2SameVersionReReleaseReplacesStaleWorkDirPackage(t *testing.T) {
+	need(t, "python3", "unshare")
+	oldPkg := buildBundle(t, "PRIME4G2", "5.3.0.4", "v5.3.0.4")
+	r3Pkg := buildBundle(t, "PRIME4G2", "5.3.0.4", "v5.3.0.4-r3")
+	imgName := filepath.Base(r3Pkg.ImagePath)
+
+	downloads := 0
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/Cd1s/EngineX-OS/releases/latest":
+			json.NewEncoder(w).Encode(map[string]any{
+				"tag_name": "v5.3.0.4-r3",
+				"assets": []map[string]string{{
+					"name":                 imgName,
+					"browser_download_url": srv.URL + "/dl/" + imgName,
+					"digest":               "sha256:" + sha(t, r3Pkg.ImagePath),
+				}},
+			})
+		case "/dl/" + imgName:
+			downloads++
+			http.ServeFile(w, r, r3Pkg.ImagePath)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	o := testOpts(t)
+	useRelease(o, srv)
+	// Seed WorkDir with the earlier 5.3.0.4 package (same filename, older digest and release-tag).
+	if err := copyFile(oldPkg.ImagePath, filepath.Join(o.WorkDir, imgName)); err != nil {
+		t.Fatal(err)
+	}
+
+	d := startSSHDeck(t, o.SSHPort, "inmusic,jp24\x00inmusic,az04\x00")
+	announceFrom(t, "127.0.0.1", freeUDPFrom(o), airD("prime4g2-lab", "DISCOVERER_HOWDY_", "JP24", "5.3.0", 1))
+	if err := run(ctxT(t), o); err != nil {
+		t.Fatalf("first run: %v\n%s", err, o.Out)
+	}
+	if downloads != 1 {
+		t.Fatalf("downloads = %d, want 1 (stale 5.3.0.4 package in WorkDir was reused instead of fetching r3)", downloads)
+	}
+	custom := filepath.Join(d.Data, "enginex")
+	if got, _ := os.ReadFile(filepath.Join(custom, "bundle/release-tag")); strings.TrimSpace(string(got)) != "v5.3.0.4-r3" {
+		t.Fatalf("installed bundle/release-tag = %q, want v5.3.0.4-r3", got)
+	}
+	if got, want := sha(t, filepath.Join(custom, "bundle/bin/sc5000-suite")), sha(t, r3Pkg.SuitePath); got != want {
+		t.Fatalf("installed suite sha %s, want r3 suite %s", got, want)
+	}
+
+	// Second run in the same WorkDir: local file now matches r3's SHA-256, so it is reused without re-downloading.
+	o2 := testOpts(t)
+	o2.WorkDir = o.WorkDir
+	o2.SSHPort = o.SSHPort
+	useRelease(o2, srv)
+	announceFrom(t, "127.0.0.1", freeUDPFrom(o2), airD("prime4g2-lab", "DISCOVERER_HOWDY_", "JP24", "5.3.0", 1))
+	if err := run(ctxT(t), o2); err != nil {
+		t.Fatalf("second run: %v\n%s", err, o2.Out)
+	}
+	if downloads != 1 {
+		t.Fatalf("second run downloads = %d, want still 1 when WorkDir SHA-256 matches latest release", downloads)
+	}
+
+	// Offline fallback: if GitHub cannot be reached at all, the verified package in WorkDir still installs.
+	srv.Close()
+	o3 := testOpts(t)
+	o3.WorkDir = o.WorkDir
+	o3.SSHPort = o.SSHPort
+	o3.API, o3.HTTP = srv.URL, srv.Client()
+	announceFrom(t, "127.0.0.1", freeUDPFrom(o3), airD("prime4g2-lab", "DISCOVERER_HOWDY_", "JP24", "5.3.0", 1))
+	if err := run(ctxT(t), o3); err != nil {
+		t.Fatalf("offline fallback run: %v\n%s", err, o3.Out)
+	}
 }

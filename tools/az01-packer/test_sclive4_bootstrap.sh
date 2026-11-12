@@ -355,6 +355,7 @@ python3 "$REPO/tools/az01-packer/build-data-bundle.py" 5.3.0.2 \
     --hook "$HOOK" \
     --ui-packs "$TMP/ui-packs.tar.gz" \
     --prefix "$UPDATE_PREFIX" \
+    --release-tag v5.3.0.2-r3 \
     --out "$TMP/bundle_out_5302" >/dev/null
 NEXT_IMG=$(ls "$TMP/bundle_out_5302/$UPDATE_PREFIX-5.3.0.2-EngineX-OS-"*-Update.img)
 BAD_IMG="$TMP/corrupt-$UPDATE_PREFIX-Update.img"
@@ -407,6 +408,7 @@ chroot "$TARGET" /usr/bin/env LD_PRELOAD=/data/enginex/bundle/lib/libengine-ui-h
 grep -q 'engine-ui-hook: intercepted az01_apply_image with an EngineX data bundle image' "$TMP/az01-good.log"
 test "$(tr -d '\r\n' < "$TARGET/data/enginex/version.txt")" = '5.3.0.2'
 test "$(tr -d '\r\n' < "$TARGET/data/enginex/bundle/version.txt")" = '5.3.0.2'
+test "$(tr -d '\r\n' < "$TARGET/data/enginex/bundle/release-tag")" = 'v5.3.0.2-r3'
 test "$(tr -d '\r\n' < "$TARGET/data/enginex/gen2-unlocked")" = '1'
 grep -q '^reboot$' "$TARGET/tmp/systemctl-shim.log"
 EOF
