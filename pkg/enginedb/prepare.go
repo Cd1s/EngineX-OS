@@ -51,6 +51,19 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 		if e := ctx.Err(); e != nil {
 			return nil, e
 		}
+		// A finished track is found under the export's own spelling without a
+		// directory lookup: on a slow stick resolving thousands of finished
+		// tracks used up the time meant for the others.
+		if guess := strings.TrimLeft(path.Clean("/"+t.Path), "/"); done != nil {
+			if fp, ok := done["../"+guess]; ok {
+				if other, ok := paths[guess]; ok {
+					return nil, fmt.Errorf("tracks %d and %d resolve to the same audio path %q", other, t.ID, guess)
+				}
+				paths[guess] = t.ID
+				prepared = append(prepared, preparedTrack{track: t, rel: guess, hash: fp, info: exportFileInfo{size: t.FileSize}})
+				continue
+			}
+		}
 		rel, e := res.Resolve(t.Path)
 		if e != nil {
 			return nil, fmt.Errorf("track %d: %w", t.ID, e)
@@ -68,41 +81,51 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 			continue
 		}
 		ready++
-		full := res.FullPath(rel)
-		st, e := statFile(full)
+		p, e := prepareOne(res, t, rel, cutoff, ready > 1)
 		if e != nil {
 			return nil, e
 		}
-		if !st.Mode().IsRegular() {
-			return nil, fmt.Errorf("audio not regular: %s", rel)
-		}
-		files, art, broken := sourceFiles(res, t)
-		fp := fingerprint{Encoding: performanceEncoding, Record: t.RecordHash + ":" + rekordbox.RecordHash(t), ResolvedPath: rel, Size: st.Size(), MTime: st.ModTime().UnixNano(), Artwork: art}
-		for _, f := range files {
-			fp.Analysis = append(fp.Analysis, analysisFileExport{f.rel, f.size, f.mtime})
-		}
-		var (
-			audio       *compat.AudioInfo
-			audioErr    error
-			uninspected bool
-		)
-		if strings.EqualFold(path.Ext(rel), ".mp3") {
-			if !cutoff.IsZero() && time.Now().After(cutoff) && ready > 1 {
-				uninspected = true
-			} else if info, err := audioHeader(full); err == nil {
-				fp.MP3Offset = info.OffsetClass
-				audio = &info
-			} else {
-				audioErr = err
-			}
-		}
-		prepared = append(prepared, preparedTrack{
-			track: t, rel: rel, hash: digest(fp), info: st,
-			files: files, art: art, audio: audio, audioErr: audioErr,
-			uninspected: uninspected, broken: broken,
-		})
+		prepared = append(prepared, p)
 	}
 	return prepared, nil
+}
+
+// prepareOne stats and fingerprints one track. Past cutoff, when mayDefer, an
+// MP3 is left uninspected instead of its header being read.
+func prepareOne(res *compat.Resolver, t rekordbox.Track, rel string, cutoff time.Time, mayDefer bool) (preparedTrack, error) {
+	full := res.FullPath(rel)
+	st, e := statFile(full)
+	if e != nil {
+		return preparedTrack{}, e
+	}
+	if !st.Mode().IsRegular() {
+		return preparedTrack{}, fmt.Errorf("audio not regular: %s", rel)
+	}
+	files, art, broken := sourceFiles(res, t)
+	fp := fingerprint{Encoding: performanceEncoding, Record: t.RecordHash + ":" + rekordbox.RecordHash(t), ResolvedPath: rel, Size: st.Size(), MTime: st.ModTime().UnixNano(), Artwork: art}
+	for _, f := range files {
+		fp.Analysis = append(fp.Analysis, analysisFileExport{f.rel, f.size, f.mtime})
+	}
+	var (
+		audio       *compat.AudioInfo
+		audioErr    error
+		uninspected bool
+	)
+	if strings.EqualFold(path.Ext(rel), ".mp3") {
+		if mayDefer && !cutoff.IsZero() && time.Now().After(cutoff) {
+			uninspected = true
+		} else if info, err := audioHeader(full); err == nil {
+			fp.MP3Offset = info.OffsetClass
+			audio = &info
+		} else {
+			audioErr = err
+		}
+	}
+	return preparedTrack{
+		track: t, rel: rel, hash: digest(fp), info: st,
+		files: files, art: art, audio: audio, audioErr: audioErr,
+		uninspected: uninspected, broken: broken,
+	}, nil
 }
 
 // exportFileInfo stands in for a stat in fast mode, from what the export recorded.
