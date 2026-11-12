@@ -56,3 +56,35 @@ exercise the Stems service or prove a completed render.
 Physical SC LIVE 4 confirmation is required: Generate Stems must start a render
 instead of opening Settings, finish successfully, and leave pre-rendered Stems
 playback working. This does not claim an end-to-end render on physical hardware.
+
+## Follow-up for 5.3.0.4 r3: Generate Stems did nothing
+
+With r2, discovery passed, so Settings no longer opened, but tapping
+**Generate Stems** on second-generation decks did nothing. Before it spawns the
+processor, the launcher in Engine `5.3.0-sclive4` (`0xc1ffe0`–`0xc20190`)
+checks every `PATH` entry joined with the program path, then the program path
+itself, with `std::filesystem::status()`. If none is a regular file, it writes
+`Error: could not find ... in path` and starts nothing. libstdc++ implements
+`status()` through `stat`: `__stat64_time64@GLIBC_2.34` in the armhf rootfs and
+`stat@GLIBC_2.33` on AZ04. The hook redirected only `statx`, `access`, `open*`
+and exec, so on a read-only root this check failed. First-generation decks have
+the real `/usr/local/bin/stems-processor` and were unaffected.
+
+The hook now applies the same processor fallback to `stat`, `stat64` and
+`__stat64_time64`. Sandbox evidence: in an `unshare -m` chroot of the official
+SCLIVE4 5.3.0 rootfs, with the published r2 data bundle on a scratch `/data`, an
+armhf stand-in named `Engine` (time64 `stat()` → `__stat64_time64`, then
+`execv`, as in the launcher) printed `stat=-1` and "could not find" with the r2
+hook, so the stems-probe child never got a reply. With the new hook it got
+`stat=0`, and stems-probe completed a 3 s render: handshake `ok`, 132300 frames
+in and out, through the bundle wrapper and `sc5000-suite stems-processor`. On
+the AZ04 rootfs, a native stand-in that calls the real
+`std::filesystem::status()` through the stock libstdc++ showed the same result
+with the r2 and new PRIME4G2 hooks. `Config[0x2a7]`
+(`hasStemsProcessorFactoryInstalled`) is not on this path: the Engine only
+stores it and has no native or QML reader. It stays stock on second-generation
+decks.
+
+A full Engine UI run could not be driven in the chroot: Engine `5.3.0-sclive4`
+writes `TestApp` to `/tmp/engine-quit-reason` and exits before QML loads.
+Physical confirmation of a completed render on an SC LIVE 4 is still pending.

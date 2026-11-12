@@ -335,8 +335,10 @@ static void test_stems_processor_fallback(void) {
     hook_test_engine = 1;
     assert(!strcmp(stems_processor_path(stock), stock));
     struct statx stx;
+    struct stat st;
     assert(statx(AT_FDCWD, stock, 0, 0xfffu, &stx) == -1);
     assert(open(stock, O_RDONLY) == -1);
+    assert(stat(stock, &st) == -1);
     const char *paths[] = {stems_bundle_file, stems_bin_file};
     for (unsigned i = 0; i < sizeof paths / sizeof *paths; i++) {
         FILE *f = fopen(paths[i], "w");
@@ -345,18 +347,23 @@ static void test_stems_processor_fallback(void) {
         assert(!strcmp(stems_processor_path(stock), stock));
         assert(statx(AT_FDCWD, stock, 0, 0xfffu, &stx) == -1);
         assert(open(stock, O_RDONLY) == -1);
+        assert(stat(stock, &st) == -1);
         assert(!chmod(paths[i], 0755));
         // Other processes must still see the missing original path.
         hook_test_engine = 0;
         assert(access(stock, X_OK) == -1);
         assert(statx(AT_FDCWD, stock, 0, 0xfffu, &stx) == -1);
         assert(open(stock, O_RDONLY) == -1);
+        assert(stat(stock, &st) == -1);
         hook_test_engine = 1;
         assert(!strcmp(stems_processor_path(stock), paths[i]));
         assert(access(stock, X_OK) == 0);
         memset(&stx, 0, sizeof stx);
         assert(statx(AT_FDCWD, stock, AT_NO_AUTOMOUNT, 0xfffu, &stx) == 0);
         assert(S_ISREG(stx.stx_mode) && stx.stx_size > 0);
+        // Engine's Stems launcher checks the processor with std::filesystem::status() (stat).
+        memset(&st, 0, sizeof st);
+        assert(stat(stock, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0);
         int fd = open(stock, O_RDONLY);
         assert(fd >= 0);
         char bytes[2];
@@ -366,7 +373,7 @@ static void test_stems_processor_fallback(void) {
     assert(!strcmp(stems_processor_path("/bin/sh"), "/bin/sh"));
     hook_test_engine = 0;
     assert(!rmdir(bin) && !rmdir(dir));
-    puts("stems-processor fallback: isolated access/statx/open, missing/non-executable and non-Engine paths: PASS");
+    puts("stems-processor fallback: isolated access/statx/stat/open, missing/non-executable and non-Engine paths: PASS");
 }
 
 
