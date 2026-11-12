@@ -44,7 +44,7 @@ Everything runs right inside the familiar Denon DJ interface — install it and 
 
 ### 3. Pioneer Rekordbox USB Plug & Play & CDJ Link
 - Plug a CDJ-exported Rekordbox USB stick straight into your deck and read playlists, Hot Cues, Memory Cues, Loops, and beat grids in **under 2 seconds** (including legacy rekordbox 5 USB sticks) with no desktop conversion;
-- Works with Windows `FAT32` / `exFAT` / `NTFS` and Mac `HFS+` / `APFS` drives, aligns MP3 encoder start offsets so grids and cues sit right on the beat, repairs drive databases after an accidental unplug, and removes the "improper eject" popup;
+- Works with `FAT32` / `exFAT` / `NTFS` and Mac `HFS+` (`Mac OS Extended`; `APFS` is not supported: format the stick as `exFAT` or `Mac OS Extended`), aligns MP3 encoder start offsets so grids and cues sit right on the beat, repairs drive databases after an accidental unplug, and removes the "improper eject" popup;
 - **Pro DJ Link (Beta)** under `Settings → Services` browses a CDJ's Rekordbox USB stick over LAN / Wi-Fi, shares your deck's library to CDJs, hands `MASTER` back and forth, and displays CDJ waveforms on shadow decks or all-in-one `Line In` channels.
 
 ### 4. Linked 4-Deck & Paired Player Views, Saved Layouts & 3 Languages
