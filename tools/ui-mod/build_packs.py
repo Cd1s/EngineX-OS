@@ -5549,6 +5549,11 @@ def edits(dev: bool):
         v + "BrowserSource/ConnectedSource.qml": [
             ("	currentIndex: -1\n", "	currentIndex: -1\n" + SOURCE_FOOTER),
             ("		height: 108\n		leftPadding", '		height: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(model.name) >= 0 ? 0 : 108\n		visible: ["TIDAL", "Tidal", "SoundCloud", "Beatport LINK"].indexOf(model.name) < 0\n		Component.onCompleted: if (model.name === "TIDAL" || model.name === "Tidal") connectedSource.scTidalRow = this\n		leftPadding'),
+            # Hidden stock streaming rows (e.g. "Tidal" at index 0, height 0) leave a
+            # zero-height first section above "Demo" / "Cloud" sources; ListView then
+            # oscillates currentSection <-> section.delegate.height inside updatePolish()
+            # and spins SceneGraph forever when Demo Tracks or Sampler Content is tapped.
+            ('	section.property: "typeText"\n', '	section.property: ""\n'),
         ],
         v + "ControlCenter/Tabs/ControlCenterTab.qml": [
             ("import QtQuick.Layouts 1.12\n", "import QtQuick.Layouts 1.12\nimport EngineOS.UI.Style 1.0\n"),

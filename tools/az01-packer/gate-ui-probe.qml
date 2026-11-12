@@ -108,6 +108,36 @@ Item {
     property var tabNames: []
     property int tabTry: 0
     property int phase: 0
+    property bool demoConnected: false
+    property bool samplerConnected: false
+    property int demoWait: 0
+
+    Repeater {
+        id: scAvailSources
+        model: Planck.librarianController ? Planck.librarianController.browserSourceControllerPtr().availableSourceModel() : null
+        delegate: Item { property string rowName: String(model.name || "") }
+    }
+    Repeater {
+        id: scConnSources
+        model: Planck.librarianController ? Planck.librarianController.browserSourceControllerPtr().connectedSourceModel() : null
+        delegate: Item {
+            property string rowName: String(model.name || "")
+            property bool isDemo: !!model.isDemoDevice
+            property bool isSampler: !!model.isSamplerDemoDevice
+        }
+    }
+    function selectAvailableMatch(re) {
+        const bsc = Planck.librarianController.browserSourceControllerPtr()
+        const am = bsc.availableSourceModel()
+        for (let i = 0; i < scAvailSources.count; i++) {
+            const it = scAvailSources.itemAt(i)
+            if (it && re.test(it.rowName)) {
+                bsc.select(am.index(i, 0))
+                return true
+            }
+        }
+        return false
+    }
 
     Timer {
         property int step: 0
@@ -125,6 +155,51 @@ Item {
                             stockFaderEcho = 1
                     })
                     console.warn("SCPROBE tile|ControlCenter_StockFaderEcho|" + stockFaderEcho + "|")
+                    Planck.getProperty("/GUI/CloseDialogs").translator.state = true
+                    const ssv = PlanckGUI.views.sourceScreenView
+                    if (!ssv.visible) ssv.onQuickSourceButtonClicked()
+                    if (!ssv.expanded) ssv.onExpandButtonClicked()
+                    selectAvailableMatch(/Demo/i)
+                    probe.demoWait = 0
+                    probe.phase = 2
+                    return
+                }
+                if (probe.phase === 2) {
+                    for (let i = 0; i < scConnSources.count; i++) {
+                        const it = scConnSources.itemAt(i)
+                        if (it && (it.isDemo || /Demo/i.test(it.rowName))) probe.demoConnected = true
+                    }
+                    if (!probe.demoConnected && ++probe.demoWait <= 5) {
+                        selectAvailableMatch(/Demo/i)
+                        return
+                    }
+                    const ssv = PlanckGUI.views.sourceScreenView
+                    if (!ssv.visible) ssv.onQuickSourceButtonClicked()
+                    if (!ssv.expanded) ssv.onExpandButtonClicked()
+                    selectAvailableMatch(/Sample/i)
+                    probe.demoWait = 0
+                    probe.phase = 3
+                    return
+                }
+                if (probe.phase === 3) {
+                    const bsc = Planck.librarianController.browserSourceControllerPtr()
+                    const cm = bsc.connectedSourceModel()
+                    for (let i = 0; i < scConnSources.count; i++) {
+                        const it = scConnSources.itemAt(i)
+                        if (it && (it.isSampler || /Sample/i.test(it.rowName))) probe.samplerConnected = true
+                    }
+                    if (!probe.samplerConnected && ++probe.demoWait <= 5) {
+                        selectAvailableMatch(/Sample/i)
+                        return
+                    }
+                    for (let i = scConnSources.count - 1; i >= 0; i--) {
+                        const it = scConnSources.itemAt(i)
+                        if (it && (it.isDemo || it.isSampler || /Demo|Sample/i.test(it.rowName)))
+                            bsc.detach(cm.index(i, 0))
+                    }
+                    if (PlanckGUI.views.sourceScreenView.visible)
+                        PlanckGUI.views.sourceScreenView.close()
+                    console.warn("SCPROBE demosource|" + (probe.demoConnected ? 1 : 0) + "|" + (probe.samplerConnected ? 1 : 0) + "|")
                     console.warn("SCPROBE done|")
                     running = false
                     return
