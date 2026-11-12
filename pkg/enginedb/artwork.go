@@ -32,6 +32,13 @@ func putArtwork(dir string, sum, data []byte) error {
 		return nil
 	}
 	if isPNG(data) { // Engine's .jpg reader rejects PNG bytes
+		cfg, e := png.DecodeConfig(bytes.NewReader(data))
+		if e != nil {
+			return e
+		}
+		if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > 16<<20 {
+			return errors.New("artwork: PNG dimensions exceed safe limit")
+		}
 		img, e := png.Decode(bytes.NewReader(data))
 		if e != nil {
 			return e
