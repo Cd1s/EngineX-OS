@@ -218,3 +218,33 @@ func TestNASTestAndPlaylists(t *testing.T) {
 		t.Fatalf("expected nil, nil when disabled, got pls=%+v, prov=%+v", dPls, dProv)
 	}
 }
+
+func TestNASConfigAndProbeRejectLoopbackAndLinkLocal(t *testing.T) {
+	orig := nasAllowLoopback
+	nasAllowLoopback = false
+	t.Cleanup(func() { nasAllowLoopback = orig })
+
+	s, _ := newTestServerWithUIDir(t)
+	for _, target := range []string{
+		"http://127.0.0.1:6595",
+		"http://localhost:8080",
+		"http://[::1]:6596",
+		"http://0.0.0.0:8080",
+		"http://169.254.169.254/latest/meta-data",
+	} {
+		body := fmt.Sprintf(`{"protocol":"webdav","url":%q,"enabled":true}`, target)
+		reqSave := httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas", bytes.NewReader([]byte(body)))
+		wSave := httptest.NewRecorder()
+		s.handleNASConfig(wSave, reqSave)
+		if wSave.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 saving %s, got %d: %s", target, wSave.Code, wSave.Body.String())
+		}
+
+		reqTest := httptest.NewRequest(http.MethodPost, "/v1/sc5000/nas/test", bytes.NewReader([]byte(body)))
+		wTest := httptest.NewRecorder()
+		s.handleNASTest(wTest, reqTest)
+		if wTest.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 testing %s, got %d: %s", target, wTest.Code, wTest.Body.String())
+		}
+	}
+}
