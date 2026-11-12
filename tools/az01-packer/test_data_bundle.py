@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 from pathlib import Path
 
@@ -941,6 +942,46 @@ exec REAL "$@"
         for line in lines:
             digest, fname = line.split('  ')
             self.assertEqual(hashlib.sha256((out_dir / fname).read_bytes()).hexdigest(), digest, fname)
+
+    def test_installer_launchers_pass_their_arguments_on(self):
+        """BH-G2-8: the macOS and Windows launchers started the installer without arguments, so
+        `Install-EngineX.command --uninstall` ran an install."""
+        out_dir = self.tmp / 'launchers'
+        out_dir.mkdir()
+        fake_bin = self.tmp / 'launcher-go-bin'
+        fake_bin.mkdir()
+        (fake_bin / 'go').write_text(
+            '#!/bin/sh\nout=""\nwhile [ $# -gt 0 ]; do\n'
+            '  if [ "$1" = "-o" ]; then out="$2"; shift 2; else shift; fi\n'
+            'done\nprintf \'#!/bin/sh\\nprintf "%%s\\\\n" "$@" > "$ARGS_LOG"\\n\' > "$out"\nchmod 755 "$out"\n')
+        (fake_bin / 'go').chmod(0o755)
+        env = {**self.env, 'PATH': f"{fake_bin}:{self.env['PATH']}"}
+        res = subprocess.run(['sh', str(HERE / 'build-installer.sh'), '5.3.0.4', str(out_dir)],
+                             env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        args = ['--uninstall', '--image', 'my deck.img']
+        for t in ('linux-amd64', 'macos-arm64'):
+            with self.subTest(t):
+                d = self.tmp / f'unpacked-{t}'
+                if t.startswith('linux'):
+                    d.mkdir()
+                    with tarfile.open(out_dir / f'EngineX-Installer-5.3.0.4-{t}.tar.gz') as tf:
+                        tf.extractall(d)
+                    launcher = d / 'install-enginex.sh'
+                else:
+                    with zipfile.ZipFile(out_dir / f'EngineX-Installer-5.3.0.4-{t}.zip') as z:
+                        z.extractall(d)
+                    for f in ('Install-EngineX.command', 'enginex-installer'):
+                        (d / f).chmod(0o755)  # extractall drops the mode bits the zip keeps
+                    launcher = d / 'Install-EngineX.command'
+                log = self.tmp / f'args-{t}'
+                res = subprocess.run(['sh', str(launcher), *args], env={**env, 'ARGS_LOG': str(log)},
+                                     input='\n', capture_output=True, text=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual(log.read_text().splitlines(), args)
+        with zipfile.ZipFile(out_dir / 'EngineX-Installer-5.3.0.4-windows-amd64.zip') as z:
+            bat = z.read('Install-EngineX.bat').decode()
+        self.assertIn('\r\nenginex-installer.exe %*\r\n', bat)
 
 if __name__ == '__main__':
     unittest.main()
