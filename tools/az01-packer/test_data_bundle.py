@@ -342,6 +342,53 @@ class DataBundleTest(unittest.TestCase):
         self.assertTrue((dest / 'ui/packs/a/Main.qml').exists())
         self.assertFalse((dest / 'bundle').exists())
 
+    def test_uninstall_removes_the_stand_in_tidal_account_and_both_alsa_files(self):
+        # BH2-A7-11: boot-activate.sh's stand-in TIDAL account stayed in /data/StreamingAccounts.json
+        # (stock Engine then shows TIDAL signed in and every request fails), and so did the ALSA
+        # file in the directory this model does not use (the installer's image carries both).
+        standin = ('"TIDAL": "{\\"provider\\":\\"TIDAL\\",\\"providerType\\":\\"TIDAL\\",'
+                   '\\"accessToken\\":\\"enginex\\",\\"refreshToken\\":\\"enginex\\"}"')
+        other = '"Beatport": "{\\"provider\\":\\"Beatport\\",\\"accessToken\\":\\"real-b\\"}"'
+        third = '"SoundCloud": "{\\"provider\\":\\"SoundCloud\\",\\"accessToken\\":\\"real-s\\"}"'
+        real = standin.replace('enginex', 'a-real-token')
+        cases = {
+            'only': ('{\n    %s\n}\n' % standin, {}),
+            'first': ('{\n    %s,\n    %s\n}\n' % (standin, other), {'Beatport'}),
+            'last': ('{\n    %s,\n    %s\n}\n' % (other, standin), {'Beatport'}),
+            'middle': ('{\n    %s,\n    %s,\n    %s\n}\n' % (other, standin, third), {'Beatport', 'SoundCloud'}),
+            # what boot-activate.sh makes of a one-line file
+            'one-line': ('{\n    %s,%s}\n' % (standin, other), {'Beatport'}),
+            'compact': ('{%s,%s}' % (other, standin.replace('": "', '":"')), {'Beatport'}),
+            'real-login': ('{\n    %s,\n    %s\n}\n' % (real, other), {'TIDAL', 'Beatport'}),
+            'no-tidal': ('{\n    %s\n}\n' % other, {'Beatport'}),
+        }
+        import json
+        src = self.extract(self.build())
+        for name, (text, want) in cases.items():
+            with self.subTest(accounts=name):
+                root = self.tmp / ('data-' + name)
+                dest = root / 'enginex'
+                used = root / 'system/var/overlay/lib/alsa/conf.d'
+                unused = root / 'system/var-lib/alsa/conf.d'
+                self.sh(src / 'install.sh', dest, alsa_dest=used)
+                unused.mkdir(parents=True)
+                shutil.copy(used / '99-sc5000-custom.conf', unused / '99-sc5000-custom.conf')
+                accounts = root / 'StreamingAccounts.json'
+                accounts.write_text(text)
+                env = {**self.env, 'SC5000_CUSTOM': str(dest), 'SC5000_ALSA_OVERLAY': str(used),
+                       'SC5000_STREAMING_ACCOUNTS': str(accounts)}
+                subprocess.run(['sh', str(dest / 'bundle/uninstall.sh')], env=env, capture_output=True, text=True, check=True)
+                left = json.loads(accounts.read_text())
+                self.assertEqual(set(left), set(want), accounts.read_text())
+                if name == 'real-login':
+                    self.assertIn('a-real-token', left['TIDAL'])
+                if name in ('real-login', 'no-tidal'):
+                    self.assertEqual(accounts.read_text(), text)
+                self.assertFalse((used / '99-sc5000-custom.conf').exists())
+                self.assertFalse((unused / '99-sc5000-custom.conf').exists(), 'the ALSA file of the unused directory stayed')
+                self.assertFalse((root / 'StreamingAccounts.json.tmp').exists())
+        self.assertEqual(self.host_commands.read_text(), '')
+
     def test_damaged_bundle_installs_nothing(self):
         src = self.extract(self.build())
         (src / 'bin/sc5000-suite').write_bytes(b'\x7fELF tampered')
