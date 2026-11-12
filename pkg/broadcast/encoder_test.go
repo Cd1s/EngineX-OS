@@ -6,15 +6,78 @@ import (
 	"context"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 )
 
-// Existing tests expect the placeholder MP3 frames; keep them independent of lame/ffmpeg on the host.
+// The tests never depend on lame/ffmpeg on the host: the test binary itself stands in
+// for the MP3 encoder (TestMain), emitting one frame-synced 48 kHz frame per PCM frame read.
 func init() {
+	mp3EncoderFn = func(ctx context.Context, _ int) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0])
+		cmd.Env = append(os.Environ(), "ENGINEX_FAKE_MP3_ENCODER=1")
+		return groupKill(cmd)
+	}
+}
+
+func TestMain(m *testing.M) {
+	if os.Getenv("ENGINEX_FAKE_MP3_ENCODER") == "1" {
+		frame := make([]byte, 144*192000/SampleRate)
+		copy(frame, []byte{0xFF, 0xFB, 0xB4, 0x00}) // MPEG-1 Layer III, 192 kbit/s, 48 kHz
+		pcm := make([]byte, 1152*4)
+		for {
+			if _, err := io.ReadFull(os.Stdin, pcm); err != nil {
+				os.Exit(0)
+			}
+			if _, err := os.Stdout.Write(frame); err != nil {
+				os.Exit(0)
+			}
+		}
+	}
+	os.Exit(m.Run())
+}
+
+// BH-GF4-8: no deck image ships an MP3 encoder. Without one the push must not connect
+// and send hash-filled pseudo frames (the old fallback); it reports what works instead.
+func TestPushWithoutEncoderSendsNothing(t *testing.T) {
+	old := mp3EncoderFn
+	defer func() { mp3EncoderFn = old }()
 	mp3EncoderFn = func(context.Context, int) *exec.Cmd { return nil }
+	for _, format := range []string{"mp3", "ogg"} {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		connected := make(chan struct{}, 1)
+		go func() {
+			if conn, err := ln.Accept(); err == nil {
+				connected <- struct{}{}
+				conn.Close()
+			}
+		}()
+		b := New(newTestGuard())
+		if err := b.Configure(Config{Enabled: true, ServerURL: "http://" + ln.Addr().String(), Password: "x", Format: format}); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for b.Status().LastError == "" && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		st := b.Status()
+		if !strings.Contains(st.LastError, "wav") || !strings.Contains(st.LastError, "/live.wav") || st.Streaming {
+			t.Errorf("%s: status %+v, want a clear error pointing to wav", format, st)
+		}
+		select {
+		case <-connected:
+			t.Errorf("%s: connected to the server without an encoder", format)
+		case <-time.After(200 * time.Millisecond):
+		}
+		b.Close()
+		ln.Close()
+	}
 }
 
 // With an encoder available, the server must receive the encoder's bytes, not placeholder frames.

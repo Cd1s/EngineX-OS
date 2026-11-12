@@ -439,15 +439,15 @@ func (s *Server) liveWAV(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// mp3Encoder finds an external encoder that reads s16le 44.1kHz stereo on stdin and writes MP3 to stdout.
+// mp3Encoder finds an external encoder that reads s16le 48 kHz stereo on stdin and writes MP3 to stdout.
 // shortcut: no MP3 encoder is built into the binary; use lame/ffmpeg when the deck has one, upgrade to a pure-Go encoder if it never does.
 func mp3Encoder(bitrate int) *exec.Cmd {
 	br := strconv.Itoa(bitrate)
 	if p, err := exec.LookPath("lame"); err == nil {
-		return exec.Command(p, "-r", "-s", "44.1", "--signed", "--little-endian", "--bitwidth", "16", "-m", "s", "-b", br, "--silent", "-", "-")
+		return exec.Command(p, "-r", "-s", "48", "--signed", "--little-endian", "--bitwidth", "16", "-m", "s", "-b", br, "--silent", "-", "-")
 	}
 	if p, err := exec.LookPath("ffmpeg"); err == nil {
-		return exec.Command(p, "-loglevel", "quiet", "-fflags", "+nobuffer", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "pipe:0", "-f", "mp3", "-b:a", br+"k", "-flush_packets", "1", "pipe:1")
+		return exec.Command(p, "-loglevel", "quiet", "-fflags", "+nobuffer", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0", "-f", "mp3", "-b:a", br+"k", "-flush_packets", "1", "pipe:1")
 	}
 	return nil
 }
