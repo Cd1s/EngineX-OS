@@ -36,7 +36,7 @@
 | Numark Mixstream Pro | `MIXSTREAMPRO` | NH08 | armhf | PRIME 4 组 | 同上 | 一体机 |
 
 - 文件名：`<前缀>-<版本>-EngineX-OS-<品牌型号>-Update.img`（`build-release.sh`）。
-- "独立播放机"（`playerBoards`：SC5000/5000M/6000/6000M）没有通道推子：4 碟布局只对它们开放。Echo Out（Upfader Echo Out）按最新定稿对它们**也生效**——暂停切歌时释放 2.2 秒回声尾音（旧版本曾对独立播放机隐藏该开关，以发布版为准）。
+- "独立播放机"（`playerBoards`：SC5000/5000M/6000/6000M）没有通道推子：因此仅带混音推子的一体机提供 Echo Out（`回声淡出` / `Fader Echo`），独立播放机隐藏该开关且 96 kHz 主输出完全直通。
 - 官方底包 5.3.0（打包用）；原厂 4.3.x、5.0.x 都能直接刷。
 
 ### 1.2 二代机（8 款，一键解锁后统一 `*-Update.img`，#119 / #215）
@@ -101,7 +101,7 @@
 | 13 | 4-Deck Waveform / 四路波形显示 / 四路波形顯示 | 解锁 Engine 原生 4 碟布局 | 关 | `fourDeckWaveform=0\|1`（屏幕走 `scRestartCall`） | `four_deck_waveform` | 只在 SC5000/SC6000 系列显示（`scPlayer`）；切换重启 Engine；#49 |
 | 14 | 4-Deck Role / 四轨角色 / 四軌角色 | 本机负责哪两台：自动、1+3、2+4、1+2、1、2 | `auto` | `fourDeckRole=auto\|13\|24\|12\|1\|2` | `four_deck_role` | 仅当 #13 开启时显示；重启 Engine。自动按 Engine 的 Player # 奇偶取 13 / 24 |
 | 15 | Live Stream / 直播推流 | 碟机数字内录主输出：电脑免配置直连 `http://<碟机IP>:8080/live.mp3`、`/live.wav`（OBS 媒体源 / VLC / 浏览器）；或向 Shoutcast / Icecast 推流（CPU3 空闲核后台推送并同步歌名） | 关 | `broadcast=0\|1` | 不在 conf，落在 `<DATA>/state/broadcast-config.json` | 直连地址不需任何配置；推流的服务器地址、挂载点和密码在 Web 控制台 `http://<碟机IP>:8080` 的 Live Stream 卡片填。直连地址随下一次发版上线 |
-| 16 | Echo Out / Upfader Echo Out / 拉杆切歌自动回音 / 推桿切歌自動回音 | C 语言 DSP Hook 在 44.1 kHz 主输出挂环形延迟缓冲：一体机快速拉下推子、单机播放器暂停切歌时释放 2.2 秒衰减回声尾音，不被推子归零切断，也不误开原厂 FX 灯 | 关 | `upfaderEcho=0\|1` | `upfader_echo` | **同一开关在 3 处出现**，见 4.2 |
+| 16 | Echo Out / 回声淡出 / 回聲淡出 | 仅带通道推子的一体机可用（独立播放机隐藏并直通），在 96 kHz 音频链上于快速拉下推子时释放平滑衰减回声尾音 | 关 | `upfaderEcho=0\|1` | `upfader_echo` | 控制中心磁贴、`配置 → 播放 → 回声淡出` 与 `设置 → 混音台 → 推子回音` 同步 |
 | 17 | UI Scale / 界面缩放 / 介面縮放 | 整体缩放 Engine 界面（110%、105%、100%、95%、90%、85%、80%、75%），既可放大照顾视力，亦可缩小以容纳更多内容 | `100` | `uiScale=110\|105\|100\|95\|90\|85\|80\|75`（屏幕走 `scCall` 即时生效） | `ui_scale` | 界面 live 缩放，经 `<DATA>/ui-scale.env` 记录 `SC5000_UI_SCALE`（drop-in `engine.service.d/70-ui-scale.conf`）；选回 100% 时删掉 env 文件恢复原厂尺寸；#117、#153 |
 | 18 | Tracklist Waveform / 曲目列表波形 / 曲目列表波形 | 在展开曲库时显示曲目缩略波形；关闭后曲目标题与艺人名横向完整延展占满留白空间 | 开 | `tracklistWaveform=0\|1` | `tracklist_waveform` | #153 |
 
