@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -517,5 +518,55 @@ func TestDjayIntegerSecondsWithThreeHourMixAndWholeSecondCues(t *testing.T) {
 	}
 	if len(short.Loops) != 1 || short.Loops[0].StartMS != 12000 || short.Loops[0].LengthMS != 8000 {
 		t.Fatalf("whole-second loops became ms instead of s*1000: %+v", short.Loops)
+	}
+}
+
+func TestDjayPathHashPercentAndIndexNum(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"plain.mp3", "Track #1.mp3", "100%20Pure.mp3"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(dir, "djay_music_library.db"))}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE tracks (id TEXT PRIMARY KEY, title TEXT, path TEXT, duration REAL)`,
+		`CREATE TABLE cues (track_id TEXT, index_num INTEGER, position_ms REAL, label TEXT, color TEXT)`,
+		`CREATE TABLE loops (track_id TEXT, index_num INTEGER, start_ms REAL, length_ms REAL, label TEXT)`,
+		`INSERT INTO tracks VALUES ('1', 'Plain', 'file://` + filepath.ToSlash(filepath.Join(dir, "plain.mp3")) + `', 180)`,
+		`INSERT INTO tracks VALUES ('2', 'Hash', 'file://` + strings.ReplaceAll(filepath.ToSlash(filepath.Join(dir, "Track #1.mp3")), " ", "%20") + `', 180)`,
+		`INSERT INTO tracks VALUES ('3', 'LiteralPct', 'file://` + filepath.ToSlash(filepath.Join(dir, "100%20Pure.mp3")) + `', 180)`,
+		`INSERT INTO cues VALUES ('1', 2, 1000, 'Drop', '#ff0000'), ('1', 5, 4000, 'Outro', '#00ff00')`,
+		`INSERT INTO loops VALUES ('1', 3, 2000, 1000, 'Loop3')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	libs, err := Discover(dir)
+	if err != nil || len(libs) != 1 {
+		t.Fatalf("Discover: libs=%v err=%v", libs, err)
+	}
+	lib := libs[0]
+	if len(lib.Tracks) != 3 {
+		t.Fatalf("Discovered %d of 3 tracks: %+v", len(lib.Tracks), lib.Tracks)
+	}
+	var plain *Track
+	for i := range lib.Tracks {
+		if lib.Tracks[i].Title == "Plain" {
+			plain = &lib.Tracks[i]
+		}
+	}
+	if plain == nil || len(plain.Cues) != 2 || plain.Cues[0].Index != 2 || plain.Cues[1].Index != 5 {
+		t.Fatalf("index_num cue slots lost: %+v", plain)
+	}
+	if len(plain.Loops) != 1 || plain.Loops[0].Index != 3 {
+		t.Fatalf("index_num loop slot lost: %+v", plain.Loops)
 	}
 }
