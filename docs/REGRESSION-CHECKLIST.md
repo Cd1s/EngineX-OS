@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (59 Rows)
+## Regression Table (60 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -69,6 +69,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 57 | **Spotify OAuth token refresh never holds `Spotify.mu` across network I/O, prefers `RefreshToken` before native credentials, retries once on HTTP `401`, and drains the `liked` goroutine on playlist errors (`BH-GF1-8`)** | `BH-GF1-8` (`#222`) | `pkg/providers::TestSpotifyAuthorizationRefreshLockAnd401Retry`, `TestSpotifyTokenRefreshAndPKCE` | Release workflow Step 2 Go suites |
 | 58 | **Expired or revoked logins on NetEase (`code=301/302`), Beatport, Spotify, and SoundCloud always unwrap to `providers.StatusError(401)` so the streaming menu displays the re-login hint (`BH-GF1-18`)** | `BH-GF1-18` (`#222`) | `pkg/providers::TestExpiredOrRevokedLoginsSurfaceStatusError401` | Release workflow Step 2 Go suites |
 | 59 | **Pro DJ Link Export preserves `ExportDeck` across `Rebind()`, populates active `0x0a` play-state / 4-slot pitch / beat fields for CDJ-3000 `SYNC`, gates and expires `0x26`/`0x27` master handoff on port `50001`, and tracks newer peer firmware (`>= 3.30`) (`BH-GC1-11`)** | `BH-GC1-11` (`#222`) | `pkg/prolink::TestExportRebindPlayingStatusHandoffFirmwareAndDBServerMetadata`, `TestExportDeckMasterAndHandoff`, `TestSimCDJ3000` | Release workflow Step 2 Go suites |
+| 60 | **PRIME GO / Wi-Fi decks pair with a local GPU `enginex-stemsd` worker while idle and across lossy/isolated Wi-Fi + Windows PowerShell (`5.3.0.4` LAN Stems report)**: `relayStatusView` runs rate-limited `stems.ProbeLANState`, `discoverLANServers` binds per-interface UDPv4 sockets with a mid-timeout retry, unicast ARP/Web-Console peer hints, and mDNS `A`-record resolution, and `run-home-worker.ps1` quotes `'-token-file='` and covers Windows `Public` Wi-Fi firewall profiles | `#222` (PRIME GO `5.3.0.4` LAN Stems pairing) | `internal/stems::TestFindLANRetriesLostWiFiBroadcastAndUsesMDNSARecord`; `tools/stems/test_worker.py::WorkerTests.test_windows_runner_quotes_empty_token_file_and_public_firewall`; `pkg/webui::TestUIStatusDigestFollowsTheBody` | Release workflow Step 2 Go & Python suites |
 
 ---
 

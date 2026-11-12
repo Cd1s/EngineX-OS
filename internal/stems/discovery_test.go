@@ -290,3 +290,116 @@ func TestFindLANSkipsBusyResponderForIdlePeer(t *testing.T) {
 		t.Fatalf("FindLAN = (%q, %v), want (%q, true)", endpoint, ok, idleSrv.URL)
 	}
 }
+
+func TestFindLANRetriesLostWiFiBroadcastAndUsesMDNSARecord(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	lanBackend := &Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"}
+	lanSrv := httptest.NewServer(lanBackend) // bound on 127.0.0.1:<port>
+	defer lanSrv.Close()
+	port, _ := strconv.Atoi(lanSrv.URL[strings.LastIndex(lanSrv.URL, ":")+1:])
+
+	// 1. Simulate 802.11 Wi-Fi dropping the initial broadcast probe frame; the retry must pair.
+	pcLossy, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pcLossy.Close()
+	go func() {
+		buf := make([]byte, 1500)
+		seenProbes := 0
+		for {
+			n, from, err := pcLossy.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if string(buf[:n]) == discoverProbe {
+				seenProbes++
+				if seenProbes == 1 {
+					continue // first Wi-Fi broadcast frame lost
+				}
+				reply, _ := json.Marshal(Beacon{Service: beaconService, Version: 2, Port: port, Backend: "htdemucs", Hostname: "gpu-pc"})
+				pcLossy.WriteTo(reply, from)
+				return
+			}
+		}
+	}()
+
+	old, oldMDNS := discoverTargets, mdnsTargets
+	discoverTargets = func() []*net.UDPAddr { return []*net.UDPAddr{pcLossy.LocalAddr().(*net.UDPAddr)} }
+	mdnsTargets = func() []*net.UDPAddr { return nil }
+	t.Cleanup(func() { discoverTargets, mdnsTargets = old, oldMDNS })
+
+	state1 := filepath.Join(t.TempDir(), LANStateName)
+	if endpoint, ok := FindLAN(ctx, state1, 300*time.Millisecond); !ok || endpoint != lanSrv.URL {
+		t.Fatalf("FindLAN after single lost Wi-Fi broadcast = (%q, %v), want (%q, true)", endpoint, ok, lanSrv.URL)
+	}
+
+	// 2. Simulate a reflected or multi-NIC mDNS reply arriving from 127.0.0.2 while the A record
+	// advertises the real GPU listener IP 127.0.0.1 where HTTP is listening.
+	pcReflector, err := net.ListenPacket("udp4", "127.0.0.2:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pcReflector.Close()
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, from, err := pcReflector.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if id, ok := mdnsQuery(buf[:n]); ok {
+				ans := mdnsAnswer(id, true, Beacon{Port: port, Backend: "htdemucs", Hostname: "gpu-pc", Version: 2}, net.IPv4(127, 0, 0, 1))
+				pcReflector.WriteTo(ans, from)
+				return
+			}
+		}
+	}()
+
+	discoverTargets = func() []*net.UDPAddr { return nil }
+	mdnsTargets = func() []*net.UDPAddr { return []*net.UDPAddr{pcReflector.LocalAddr().(*net.UDPAddr)} }
+
+	state2 := filepath.Join(t.TempDir(), LANStateName)
+	if endpoint, ok := FindLAN(ctx, state2, 300*time.Millisecond); !ok || endpoint != lanSrv.URL {
+		t.Fatalf("FindLAN via reflected/multi-NIC mDNS A record = (%q, %v), want (%q, true)", endpoint, ok, lanSrv.URL)
+	}
+
+	// 3. ProbeLANState (called by deck UI / Web Console when idle) pairs immediately and writes stems-lan.json.
+	announceOnLoopback(t, ctx, port)
+	state3 := filepath.Join(t.TempDir(), LANStateName)
+	st := ProbeLANState(ctx, state3, 250*time.Millisecond)
+	if st == nil || !st.Online || st.Endpoint != lanSrv.URL || st.Backend != "htdemucs" {
+		t.Fatalf("ProbeLANState failed to pair idle deck: %+v", st)
+	}
+
+	// 4. ARP table + RememberPeerHint build unicast DiscoveryPort targets for AP-isolated Wi-Fi.
+	arpFile := filepath.Join(t.TempDir(), "arp")
+	arpContent := "IP address       HW type     Flags       HW address            Mask     Device\n" +
+		"192.168.88.42    0x1         0x2         aa:bb:cc:dd:ee:ff     *        wlan0\n" +
+		"192.168.88.99    0x1         0x0         00:00:00:00:00:00     *        wlan0\n"
+	if err := os.WriteFile(arpFile, []byte(arpContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	origARP := arpTablePath
+	arpTablePath = arpFile
+	t.Cleanup(func() {
+		arpTablePath = origARP
+		peerHintsMu.Lock()
+		peerHints = nil
+		peerHintsMu.Unlock()
+	})
+	RememberPeerHint("192.168.88.55:54321")
+	uTargets := unicastPeerTargets()
+	gotIPs := map[string]bool{}
+	for _, ut := range uTargets {
+		if ut.Port == DiscoveryPort {
+			gotIPs[ut.IP.String()] = true
+		}
+	}
+	if !gotIPs["192.168.88.42"] || !gotIPs["192.168.88.55"] || gotIPs["192.168.88.99"] {
+		t.Fatalf("unexpected unicast peer targets from ARP + RememberPeerHint: %+v", gotIPs)
+	}
+}
+
