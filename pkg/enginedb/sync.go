@@ -268,7 +268,7 @@ func sourceFiles(res *compat.Resolver, t rekordbox.Track) ([]analysisFile, *anal
 			if e != nil {
 				return nil, nil, e
 			}
-			s, e := os.Stat(res.FullPath(rel))
+			s, e := statFile(res.FullPath(rel))
 			if e != nil {
 				return nil, nil, e
 			}
@@ -287,7 +287,7 @@ func sourceFiles(res *compat.Resolver, t rekordbox.Track) ([]analysisFile, *anal
 		if e != nil {
 			return nil, nil, e
 		}
-		s, e := os.Stat(res.FullPath(rel))
+		s, e := statFile(res.FullPath(rel))
 		if e != nil {
 			return nil, nil, e
 		}
@@ -318,7 +318,7 @@ func readSources(res *compat.Resolver, p preparedTrack, full string, skipAudio b
 	if p.audioErr != nil {
 		return nil, compat.AudioInfo{}, fmt.Errorf("audio header: %w", p.audioErr)
 	}
-	audio, e := compat.AudioHeader(full)
+	audio, e := audioHeader(full)
 	if e != nil {
 		return nil, compat.AudioInfo{}, fmt.Errorf("audio header: %w", e)
 	}
@@ -363,11 +363,20 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			return result, fmt.Errorf("Smart Match reference track %d not found", opts.CurrentTrack)
 		}
 	}
+	// Preparing (stats, MP3 headers) gets the first half of the time left and
+	// reading the prepared tracks the rest. A Sync that starts in time reads at
+	// least one track, so every mount of a large library makes progress.
+	var cutoff time.Time
+	inTime := opts.Deadline.IsZero() || time.Now().Before(opts.Deadline)
+	if !opts.Deadline.IsZero() {
+		cutoff = time.Now().Add(time.Until(opts.Deadline) / 2)
+	}
+	read := 0
 	var prepared []preparedTrack
 	if opts.Fast {
 		prepared = prepareFast(res, l)
 	} else if !opts.Resume {
-		if prepared, err = prepareTracks(ctx, res, l, opts.Deadline, nil); err != nil {
+		if prepared, err = prepareTracks(ctx, res, l, cutoff, nil); err != nil {
 			return result, err
 		}
 	}
@@ -403,7 +412,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		if e != nil {
 			return result, e
 		}
-		if prepared, err = prepareTracks(ctx, res, l, opts.Deadline, done); err != nil {
+		if prepared, err = prepareTracks(ctx, res, l, cutoff, done); err != nil {
 			return result, err
 		}
 	}
@@ -426,6 +435,12 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		if err = ctx.Err(); err != nil {
 			return result, err
 		}
+		// Time left after the tracks prepared up front: prepare the next one now.
+		if preparedTrack.late && !opts.Deadline.IsZero() && time.Now().Before(opts.Deadline) {
+			if p, e := prepareOne(res, preparedTrack.track, preparedTrack.rel, opts.Deadline, true); e == nil {
+				preparedTrack = p
+			}
+		}
 		original := preparedTrack.track
 		t := original
 		rel, st, files, art, hash := preparedTrack.rel, preparedTrack.info, preparedTrack.files, preparedTrack.art, preparedTrack.hash
@@ -446,10 +461,12 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			}
 		}
 		fast := opts.Fast
-		if !fast && previous != hash && !opts.Deadline.IsZero() && time.Now().After(opts.Deadline) {
+		if !fast && (preparedTrack.late || (previous != hash && !opts.Deadline.IsZero() && time.Now().After(opts.Deadline) && (read > 0 || !inTime))) {
 			// A "fast:" fingerprint makes the next full import read this track.
 			fast, files, art, hash = true, nil, nil, "fast:"+t.RecordHash
 			result.Deferred++
+		} else if !fast && previous != hash {
+			read++
 		}
 		existing := id != 0
 		if !existing {

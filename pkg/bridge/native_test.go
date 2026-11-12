@@ -325,11 +325,20 @@ func TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011(t *testing.T) 
 	if _, e = db.Exec(`INSERT INTO playlist VALUES(2,0,'Added Set',0,2,'');INSERT INTO playlist_content VALUES(2,506,1),(2,507,2),(2,508,3);`); e != nil {
 		t.Fatal(e)
 	}
-	// The deadline stands in for the read budget, which -race on a busy host can use up.
-	r2, e := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{Deadline: time.Now().Add(time.Hour)}, false)
-	// The 505 tracks of the first mount were imported from the export alone;
-	// this mount reads their files too (BH-GC1-2), so they count as updated.
-	if e != nil || r2.Added != 3 || r2.Updated != 505 || r2.Deferred != 0 || !r2.PlaylistsChanged {
+	// A real mount budget (more than the deck's, for -race on a busy host): the
+	// new tracks and playlist land at once; the 505 tracks of the first mount,
+	// imported from the export alone, are read now or on the next mounts.
+	budget := func() enginedb.Options { return enginedb.Options{Deadline: time.Now().Add(15 * time.Second)} }
+	r2, e := bridge.ConvertAtMount(context.Background(), root, budget(), false)
+	if e != nil || r2.Added != 3 || r2.Updated == 0 || r2.Updated+r2.Deferred != 505 || !r2.PlaylistsChanged {
 		t.Fatalf("second mount incremental delta: %+v %v", r2, e)
+	}
+	for mount := 3; r2.Deferred > 0; mount++ {
+		if mount > 10 {
+			t.Fatalf("not finished after %d mounts: %+v", mount, r2)
+		}
+		if r2, e = bridge.ConvertAtMount(context.Background(), root, budget(), false); e != nil || r2.Updated == 0 {
+			t.Fatalf("mount %d: %+v %v", mount, r2, e)
+		}
 	}
 }
