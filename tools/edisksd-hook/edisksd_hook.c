@@ -37,6 +37,9 @@
 #ifndef MEDIA_ROOT
 #define MEDIA_ROOT "/media"
 #endif
+#ifndef UTAB_DIR
+#define UTAB_DIR "/run/mount"
+#endif
 #define HFSPLUS_MAGIC 0x482b
 #define HOOK_BUDGET_MS INT64_C(20000)
 #define MAX_VIEW_ENTRIES 4096
@@ -354,16 +357,17 @@ static int save_record(struct owned_view *v) {
     if(rc){saved=errno;unlink(temp);errno=saved;}
     return rc;
 }
-static void cleanup_view(struct owned_view *v) {
+static void cleanup_anchor(const char *anchor) {
     // The anchor is our own private mount tree, never a media-controlled path.
-    if(safe_path(v->anchor,0))return;
-    if(umount2(v->anchor,MNT_DETACH|UMOUNT_NOFOLLOW)&&errno!=EINVAL&&errno!=ENOENT)return;
-    char path[PATH_MAX];if(!path_join(path,sizeof path,v->anchor,"record"))unlink(path);
-    if(!path_join(path,sizeof path,v->anchor,"record.new"))unlink(path);
+    if(safe_path(anchor,0))return;
+    if(umount2(anchor,MNT_DETACH|UMOUNT_NOFOLLOW)&&errno!=EINVAL&&errno!=ENOENT)return;
+    char path[PATH_MAX];if(!path_join(path,sizeof path,anchor,"record"))unlink(path);
+    if(!path_join(path,sizeof path,anchor,"record.new"))unlink(path);
     const char *names[]={"backing","view","rescue"};
-    for(unsigned i=0;i<3;i++)if(!path_join(path,sizeof path,v->anchor,names[i]))rmdir(path);
-    rmdir(v->anchor);
+    for(unsigned i=0;i<3;i++)if(!path_join(path,sizeof path,anchor,names[i]))rmdir(path);
+    rmdir(anchor);
 }
+static void cleanup_view(struct owned_view *v) { cleanup_anchor(v->anchor); }
 static int add_child(struct owned_view *v,const char *name,const char *source,int isdir) {
     if(v->count==MAX_VIEW_ENTRIES){errno=E2BIG;return -1;}
     char root[PATH_MAX],dest[PATH_MAX];
@@ -416,29 +420,52 @@ static int prepare_view(const char *target,const char *identity,int64_t deadline
     note("writable HFS library ready on",target,0);rc=0;
  done: {int saved=errno;if(rc)cleanup_view(v);free(v);errno=saved;}return rc;
 }
+// The record in one RUN_ROOT/view-* directory, when it is ours, intact and
+// describes a view that is mounted in this namespace now.
+static struct owned_view *live_view(const char *name) {
+    char anchor[PATH_MAX],path[PATH_MAX];
+    if(path_join(anchor,sizeof anchor,RUN_ROOT,name)||safe_path(anchor,0)||path_join(path,sizeof path,anchor,"record")||safe_path(path,0))return NULL;
+    int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return NULL;struct stat st;
+    if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_uid!=geteuid()||(st.st_mode&077)){close(fd);return NULL;}
+    struct owned_view *v=calloc(1,sizeof *v);if(!v){close(fd);return NULL;}
+    ssize_t bytes=0;
+    if(st.st_size>=(off_t)offsetof(struct owned_view,child)&&st.st_size<=(off_t)sizeof *v) {
+        while(bytes<st.st_size){ssize_t n=read(fd,(char *)v+bytes,(size_t)(st.st_size-bytes));if(n<0&&errno==EINTR)continue;if(n<=0){bytes=-1;break;}bytes+=n;}
+    }
+    close(fd);
+    if(bytes>=(ssize_t)offsetof(struct owned_view,child)&&v->magic==VIEW_MAGIC&&v->count<=MAX_VIEW_ENTRIES&&
+       bytes==(ssize_t)(offsetof(struct owned_view,child)+(size_t)v->count*sizeof v->child[0])&&
+       memchr(v->target,0,sizeof v->target)&&memchr(v->anchor,0,sizeof v->anchor)&&memchr(v->identity,0,sizeof v->identity)&&
+       !strcmp(v->anchor,anchor)&&mount_id(v->target)==v->public_id)return v;
+    free(v);return NULL;
+}
 static struct owned_view *find_view(const char *target,const char *identity) {
     if(secure_runtime()||(target&&safe_path(target,0)))return NULL;
     DIR *d=opendir(RUN_ROOT);if(!d)return NULL;struct dirent *e;struct owned_view *found=NULL;
-    while((e=readdir(d))) {
+    while(!found&&(e=readdir(d))) {
         if(strncmp(e->d_name,"view-",5))continue;
-        char anchor[PATH_MAX],path[PATH_MAX];
-        if(path_join(anchor,sizeof anchor,RUN_ROOT,e->d_name)||safe_path(anchor,0)||path_join(path,sizeof path,anchor,"record")||safe_path(path,0))continue;
-        int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)continue;struct stat st;
-        if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_uid!=geteuid()||(st.st_mode&077)){close(fd);continue;}
-        struct owned_view *v=calloc(1,sizeof *v);if(!v){close(fd);break;}
-        ssize_t bytes=0;
-        if(st.st_size>=(off_t)offsetof(struct owned_view,child)&&st.st_size<=(off_t)sizeof *v) {
-            while(bytes<st.st_size){ssize_t n=read(fd,(char *)v+bytes,(size_t)(st.st_size-bytes));if(n<0&&errno==EINTR)continue;if(n<=0){bytes=-1;break;}bytes+=n;}
-        }
-        close(fd);
-        if(bytes>=(ssize_t)offsetof(struct owned_view,child)&&v->magic==VIEW_MAGIC&&v->count<=MAX_VIEW_ENTRIES&&
-           bytes==(ssize_t)(offsetof(struct owned_view,child)+(size_t)v->count*sizeof v->child[0])&&
-           memchr(v->target,0,sizeof v->target)&&memchr(v->anchor,0,sizeof v->anchor)&&memchr(v->identity,0,sizeof v->identity)&&
-           (!target||!strcmp(v->target,target))&&(!identity||!strcmp(v->identity,identity))&&
-           !strcmp(v->anchor,anchor)&&mount_id(v->target)==v->public_id) {found=v;break;}
-        free(v);
+        struct owned_view *v=live_view(e->d_name);
+        if(v&&(!target||!strcmp(v->target,target))&&(!identity||!strcmp(v->identity,identity)))found=v;
+        else free(v);
     }
     closedir(d);return found;
+}
+// A pre-mount child killed at its deadline cannot remove its view: the mounts
+// end with its namespace, the anchor directory and record in RUN_ROOT stay, and
+// a record with a recycled mount id could later pass for a live view. Under
+// view_lock every view of this namespace has a live record, so whatever has none
+// is such a leftover. Only for edisksd's own namespace, never the child's, where
+// the views of the other sticks carry other mount ids.
+static void drop_orphans(void) {
+    if(secure_runtime())return;
+    DIR *d=opendir(RUN_ROOT);if(!d)return;struct dirent *e;
+    while((e=readdir(d))) {
+        if(strncmp(e->d_name,"view-",5))continue;
+        struct owned_view *v=live_view(e->d_name);char anchor[PATH_MAX];
+        if(v)free(v);
+        else if(!path_join(anchor,sizeof anchor,RUN_ROOT,e->d_name))cleanup_anchor(anchor);
+    }
+    closedir(d);
 }
 
 static struct owned_view *load_view(const char *target) { return find_view(target,NULL); }
@@ -559,6 +586,11 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
         seeded_as[0]=0;
         // Nothing mounted here reaches edisksd's (and Engine's) namespace.
         if(unshare(CLONE_NEWNS)||mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL))_exit(0);
+        // libmount writes the mount (edisksd passes uhelper=edisksd) into
+        // /run/mount/utab, a file the mount namespace does not separate, and this
+        // mount ends without libmount. Its record goes to a utab of its own.
+        mkdir(UTAB_DIR,0755);
+        if(mount("edisksd-hook",UTAB_DIR,"tmpfs",MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=64k"))note("no private utab for the pre-mount of",target,errno);
         if(real(ctx)||mnt_context_get_status(ctx)!=1)_exit(0);
         // A stick without a rekordbox export costs one look at its root directory:
         // no statvfs (a FAT32 free-space scan) and no library walk, both of which
@@ -582,7 +614,7 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
             break;
         }
         if(r<0&&errno!=EINTR){result=0;break;}
-        if(now_ms()>=deadline+1000){kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}result=2;break;}
+        if(now_ms()>=deadline+1000){kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}drop_orphans();result=2;break;}
         usleep(20000);
     }
     close(up[0]);return result;
