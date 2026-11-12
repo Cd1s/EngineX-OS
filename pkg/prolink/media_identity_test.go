@@ -261,19 +261,40 @@ func TestDotPioneerAnalysisAndNativeRekordboxExportGuard(t *testing.T) {
 		t.Fatal("SyncEngineToPioneerExport wrote synthetic export.pdb onto RB7 exportLibrary.db stick")
 	}
 
-	// 3. startExport must accept a .PIONEER/rekordbox/export.pdb stick.
+	// 3. startExport must accept a .PIONEER/rekordbox/export.pdb stick with err == nil.
 	dotStick := t.TempDir()
 	testfixture.Export(t, dotStick)
+	if err := os.WriteFile(filepath.Join(dotStick, "PIONEER/rekordbox/export.pdb"), dotPDB, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Rename(filepath.Join(dotStick, "PIONEER"), filepath.Join(dotStick, ".PIONEER")); err != nil {
 		t.Fatal(err)
 	}
-	exp := NewExporter(ExportConfig{
-		Root: dotStick,
-		IP:   net.IPv4(127, 0, 0, 1),
-		MAC:  net.HardwareAddr{0x02, 0, 0, 0, 0, 1},
-	})
+	exp := NewExporter(testExportConfig(dotStick))
 	defer exp.Close()
-	if err := exp.SetEnabled(true); err != nil && strings.Contains(err.Error(), "export.pdb") {
+	if err := exp.SetEnabled(true); err != nil {
 		t.Fatalf("Exporter rejected .PIONEER stick: %v", err)
+	}
+	waitNumber(t, exp, 4, time.Second)
+	if st := exp.Status(); !st.Enabled || st.PortmapPort <= 0 {
+		t.Fatalf("Exporter did not start on .PIONEER stick: %+v", st)
+	}
+
+	// 4. Stage on a .PIONEER stick must write canonical PIONEER/rekordbox/export.pdb
+	// so pkg/bridge/prolink_merge.go discovers and imports the staged library.
+	nfs := &NFSServer{Root: dotStick}
+	if err := nfs.Listen("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	defer nfs.Close()
+	stagedDst := filepath.Join(t.TempDir(), StagedDir, "cdj")
+	client := &NFSClient{IP: net.IPv4(127, 0, 0, 1), Portmap: nfs.PortmapPort()}
+	n, err := Stage(context.Background(), client, "/C/", stagedDst, 1<<30)
+	if err != nil || n == 0 {
+		t.Fatalf("Stage(.PIONEER): n=%d err=%v", n, err)
+	}
+	stagedLib, err := rekordbox.ReadPDB(filepath.Join(stagedDst, "PIONEER", "rekordbox", "export.pdb"))
+	if err != nil || len(stagedLib.Tracks) == 0 {
+		t.Fatalf("staged canonical PIONEER/rekordbox/export.pdb missing or unreadable: %v", err)
 	}
 }
