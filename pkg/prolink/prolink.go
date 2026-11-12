@@ -10,6 +10,7 @@ import (
 	"math"
 	"net"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,97 @@ type Device struct {
 	DurationMS               uint32          `json:"duration_ms,omitempty"`
 	Waveform                 [][3]byte       `json:"waveform,omitempty"`
 	Beats                    []BeatGridPoint `json:"beats,omitempty"`
+	fullBeats                []rekordbox.Beat
+}
+
+func phaseFromGrid(pos float64, count int, timeAt func(int) uint32, bpmAt func(int) float64) (float64, bool) {
+	if count < 2 {
+		return 0, false
+	}
+	t0 := float64(timeAt(0))
+	tLast := float64(timeAt(count - 1))
+	wrap := func(delta, step float64) (float64, bool) {
+		if step <= 0 {
+			return 0, false
+		}
+		p := math.Mod(delta, step) / step
+		if p < 0 {
+			p += 1.0
+		}
+		if p >= 1.0 {
+			p = 0
+		}
+		return p, true
+	}
+	if pos < t0 {
+		step := float64(timeAt(1)) - t0
+		if b0 := bpmAt(0); b0 > 0 && (step <= 0 || step > 1.8*(60000.0/b0)) {
+			step = 60000.0 / b0
+		}
+		return wrap(pos-t0, step)
+	}
+	if pos >= tLast {
+		step := 0.0
+		if bl := bpmAt(count - 1); bl > 0 {
+			step = 60000.0 / bl
+		} else {
+			step = tLast - float64(timeAt(count-2))
+		}
+		return wrap(pos-tLast, step)
+	}
+	i := sort.Search(count, func(idx int) bool {
+		return float64(timeAt(idx)) > pos
+	}) - 1
+	if i < 0 {
+		i = 0
+	}
+	left := float64(timeAt(i))
+	gap := float64(timeAt(i+1)) - left
+	if gap <= 0 {
+		return 0, true
+	}
+	if bi := bpmAt(i); bi > 0 && gap > 1.8*(60000.0/bi) {
+		return wrap(pos-left, 60000.0/bi)
+	}
+	p := (pos - left) / gap
+	if p < 0 {
+		return 0, true
+	}
+	if p >= 1.0 {
+		return 0, true
+	}
+	return p, true
+}
+
+func deviceBeatPhase(d Device) float64 {
+	pos := float64(d.PlayPositionMS)
+	if len(d.fullBeats) >= 2 {
+		if p, ok := phaseFromGrid(pos, len(d.fullBeats), func(i int) uint32 { return d.fullBeats[i].TimeMS }, func(i int) float64 { return d.fullBeats[i].BPM }); ok {
+			return p
+		}
+	}
+	if len(d.Beats) >= 2 {
+		if p, ok := phaseFromGrid(pos, len(d.Beats), func(i int) uint32 { return d.Beats[i].TimeMS }, func(i int) float64 { return d.Beats[i].BPM }); ok {
+			return p
+		}
+	}
+	// PlayPositionMS is in un-pitched track time, so divide by un-pitched BPM first.
+	bpm := d.BPM
+	if bpm <= 0 {
+		bpm = d.EffectiveBPM
+	}
+	if bpm <= 0 {
+		return 0
+	}
+	beatMS := 60000.0 / bpm
+	p := math.Mod(pos, beatMS) / beatMS
+	if p < 0 {
+		p += 1.0
+	}
+	if p >= 1.0 {
+		p = 0
+	}
+	return p
 }
 
 type DeckSyncInfo struct {
@@ -117,6 +209,7 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 				d.BPM = d.EffectiveBPM / (1 + d.Pitch/100)
 			}
 		}
+		d.BeatPhase = deviceBeatPhase(d)
 	case port == 50001 && b[10] == 0x28:
 		if len(b) < 0x60 {
 			return d, fmt.Errorf("prolink: truncated beat packet")
@@ -166,17 +259,7 @@ func ParsePacket(b []byte, port int, remote net.IP) (Device, error) {
 		if d.Beat > 0 && d.BPM > 0 {
 			d.PlayPositionMS = uint32(float64(d.Beat-1) * 60000.0 / d.BPM)
 		}
-		eff := d.EffectiveBPM
-		if eff <= 0 {
-			eff = d.BPM
-		}
-		if eff > 0 {
-			beatMS := 60000.0 / eff
-			d.BeatPhase = math.Mod(float64(d.PlayPositionMS), beatMS) / beatMS
-			if d.BeatPhase < 0 {
-				d.BeatPhase += 1.0
-			}
-		}
+		d.BeatPhase = deviceBeatPhase(d)
 	default:
 		return d, fmt.Errorf("prolink: unsupported packet type/port")
 	}
@@ -297,8 +380,16 @@ func ComputeDeckSync(d, master Device) DeckSyncInfo {
 	}
 	masterBeatMS := 60000.0 / effBPM
 	bpmDelta := d.EffectiveBPM - master.EffectiveBPM
+	dPhase := d.BeatPhase
+	if dPhase == 0 && d.PlayPositionMS > 0 {
+		dPhase = deviceBeatPhase(d)
+	}
+	mPhase := master.BeatPhase
+	if mPhase == 0 && master.PlayPositionMS > 0 {
+		mPhase = deviceBeatPhase(master)
+	}
 
-	phaseOffsetMS := (d.BeatPhase - master.BeatPhase) * masterBeatMS
+	phaseOffsetMS := (dPhase - mPhase) * masterBeatMS
 	for phaseOffsetMS > masterBeatMS/2 {
 		phaseOffsetMS -= masterBeatMS
 	}
@@ -327,17 +418,7 @@ func BuildSnapshot(devices []Device) Snapshot {
 	var masterDev *Device
 	for _, d := range devices {
 		if d.LastSeen.IsZero() || now.Sub(d.LastSeen) <= 10*time.Second {
-			eff := d.EffectiveBPM
-			if eff <= 0 {
-				eff = d.BPM
-			}
-			if eff > 0 {
-				beatMS := 60000.0 / eff
-				d.BeatPhase = math.Mod(float64(d.PlayPositionMS), beatMS) / beatMS
-				if d.BeatPhase < 0 {
-					d.BeatPhase += 1.0
-				}
-			}
+			d.BeatPhase = deviceBeatPhase(d)
 			active = append(active, d)
 			if d.Master && masterDev == nil {
 				dCopy := d
@@ -620,6 +701,9 @@ func (d *Discovery) Observe(device Device) Device {
 			if len(device.Beats) == 0 {
 				device.Beats = old.Beats
 			}
+			if len(device.fullBeats) == 0 {
+				device.fullBeats = old.fullBeats
+			}
 			if device.Title == "" {
 				device.Title = old.Title
 			}
@@ -727,6 +811,9 @@ func (d *Discovery) Observe(device Device) Device {
 			if len(device.Beats) == 0 {
 				device.Beats = cached.beats
 			}
+			if len(device.fullBeats) == 0 && cached.analysis != nil {
+				device.fullBeats = cached.analysis.Beats
+			}
 			if device.DurationMS == 0 {
 				device.DurationMS = cached.durationMS
 			}
@@ -831,6 +918,9 @@ func (d *Discovery) Observe(device Device) Device {
 			if len(device.Beats) == 0 {
 				device.Beats = bts
 			}
+			if len(device.fullBeats) == 0 && anlz != nil {
+				device.fullBeats = anlz.Beats
+			}
 			if device.DurationMS == 0 {
 				device.DurationMS = dur
 			}
@@ -843,9 +933,15 @@ func (d *Discovery) Observe(device Device) Device {
 		}
 	}
 
-	if !device.PrecisePosition && len(device.Beats) > 0 && device.Beat > 0 && int(device.Beat-1) < len(device.Beats) && device.PlayPositionMS == 0 {
-		device.PlayPositionMS = device.Beats[device.Beat-1].TimeMS
+	if !device.PrecisePosition && device.Beat > 0 {
+		idx := int(device.Beat - 1)
+		if idx < len(device.fullBeats) {
+			device.PlayPositionMS = device.fullBeats[idx].TimeMS
+		} else if idx < len(device.Beats) {
+			device.PlayPositionMS = device.Beats[idx].TimeMS
+		}
 	}
+	device.BeatPhase = deviceBeatPhase(device)
 
 	d.devices[key] = device
 	d.mu.Unlock()

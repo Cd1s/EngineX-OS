@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -265,5 +266,104 @@ func TestEngineBridgePreservesChildBeforeParentDuplicateNamesAndFolderTracks(t *
 		t.Fatalf("re-sync changed playlist count: got %d, want %d (%+v)", len(lib2.Playlists), len(lib.Playlists), lib2.Playlists)
 	}
 }
+
+func TestObserveAndBuildSnapshotBeatPhaseWithPitchAndPQTZOffset(t *testing.T) {
+	// 600-beat PQTZ grid starting at 230 ms (500 ms per beat at 120.00 BPM).
+	beats := make([]rekordbox.Beat, 600)
+	for i := range beats {
+		beats[i] = rekordbox.Beat{
+			Number: uint16((i % 4) + 1),
+			BPM:    120.0,
+			TimeMS: uint32(230 + i*500),
+		}
+	}
+
+	disc := NewDiscovery()
+	disc.SetResolver(func(Device) (*rekordbox.Analysis, string, string) {
+		return &rekordbox.Analysis{
+			Beats:     beats,
+			Waveforms: []rekordbox.Waveform{{Tag: "PWV7", EntryBytes: 3, Data: []byte{10, 20, 30}}},
+		}, "Offset Track", "Artist"
+	})
+
+	ip := net.IPv4(192, 168, 1, 21)
+	mkStatus := func(beat uint32) Device {
+		pkt := make([]byte, 0xd0)
+		copy(pkt, "Qspt1WmJOL")
+		pkt[10] = 0x0a
+		copy(pkt[11:], "CDJ-3000")
+		pkt[0x21] = 1
+		pkt[0x28] = 1
+		pkt[0x29] = 3
+		binary.BigEndian.PutUint32(pkt[0x2c:], 9)
+		pkt[0x89] = 0x40 | 0x20
+		binary.BigEndian.PutUint32(pkt[0x8c:], uint32(math.Round(0x100000*1.08))) // +8% pitch -> 129.60 EffectiveBPM
+		binary.BigEndian.PutUint16(pkt[0x92:], 12000)                             // 120.00 BPM
+		binary.BigEndian.PutUint32(pkt[0xa0:], beat)
+		pkt[0xa6] = byte(((beat - 1) % 4) + 1)
+		dev, err := ParsePacket(pkt, 50002, ip)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dev
+	}
+
+	// Beat 2 must resolve to PQTZ[1].TimeMS = 730 ms (even though ParsePacket set coarse 500 ms != 0).
+	obs2 := disc.Observe(mkStatus(2))
+	if obs2.PlayPositionMS != 730 {
+		t.Fatalf("Beat 2 PlayPositionMS = %d, want PQTZ 730 ms", obs2.PlayPositionMS)
+	}
+	if obs2.BeatPhase > 0.01 && obs2.BeatPhase < 0.99 {
+		t.Fatalf("Beat 2 on-beat BeatPhase = %.4f, want ~0.0", obs2.BeatPhase)
+	}
+
+	// Beat 600 (> 512 JSON beat cap) must still resolve to full PQTZ[599].TimeMS = 299730 ms.
+	obs600 := disc.Observe(mkStatus(600))
+	if obs600.PlayPositionMS != 299730 {
+		t.Fatalf("Beat 600 PlayPositionMS = %d, want full PQTZ 299730 ms", obs600.PlayPositionMS)
+	}
+
+	// CDJ-3000 0x0b precise position at 980 ms (exact midpoint between beat 2 at 730 ms and beat 3 at 1230 ms)
+	// while pitched +8% must report BeatPhase = 0.50, not drift by EffectiveBPM.
+	posPkt := make([]byte, 0x3c)
+	copy(posPkt, "Qspt1WmJOL")
+	posPkt[10] = 0x0b
+	copy(posPkt[11:], "CDJ-3000")
+	posPkt[0x1f] = 1
+	posPkt[0x21] = 1
+	binary.BigEndian.PutUint16(posPkt[0x22:], 0x0018)
+	binary.BigEndian.PutUint32(posPkt[0x24:], 310)
+	binary.BigEndian.PutUint32(posPkt[0x28:], 980)  // 980 ms track time
+	binary.BigEndian.PutUint32(posPkt[0x2c:], 800)  // +8.00% pitch
+	binary.BigEndian.PutUint32(posPkt[0x38:], 1296) // 129.6 EffectiveBPM
+	devPos, err := ParsePacket(posPkt, 50001, ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obsMid := disc.Observe(devPos)
+	if math.Abs(obsMid.BeatPhase-0.5) > 0.01 {
+		t.Fatalf("Observe 0x0b midpoint BeatPhase = %.4f, want 0.50", obsMid.BeatPhase)
+	}
+	snap := BuildSnapshot([]Device{obsMid})
+	if math.Abs(snap.Devices[0].BeatPhase-0.5) > 0.01 {
+		t.Fatalf("BuildSnapshot PQTZ midpoint BeatPhase = %.4f, want 0.50", snap.Devices[0].BeatPhase)
+	}
+
+	// Fallback without PQTZ beat grid: track-time PlayPositionMS=5250 ms at 120 BPM pitched +8% (EffectiveBPM=129.6)
+	// is halfway through beat 11 (BeatPhase = 0.50), never divided by EffectiveBPM beat length.
+	noGrid := Device{
+		Number:         2,
+		LastSeen:       time.Now(),
+		BPM:            120.0,
+		Pitch:          8.0,
+		EffectiveBPM:   129.6,
+		PlayPositionMS: 5250,
+	}
+	snapNoGrid := BuildSnapshot([]Device{noGrid})
+	if math.Abs(snapNoGrid.Devices[0].BeatPhase-0.5) > 0.01 {
+		t.Fatalf("BuildSnapshot un-gridded pitched BeatPhase = %.4f, want 0.50", snapNoGrid.Devices[0].BeatPhase)
+	}
+}
+
 
 
