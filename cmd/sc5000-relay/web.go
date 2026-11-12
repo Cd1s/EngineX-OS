@@ -147,8 +147,12 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 		// what the phone entered travels with the session.
 		c := s.cfg.get()
 		hasApp := c.SoundCloudClientID != "" && c.SoundCloudSecret != ""
-		if info.Token == "" && (info.ClientID == "" || info.Secret == "") && !(sess.Trusted && hasApp) {
-			err = errors.New("请填写 Client ID 和 Client Secret，或者 OAuth Token")
+		partialApp := (info.ClientID != "") != (info.Secret != "")
+		hasSubmittedApp := info.ClientID != "" && info.Secret != ""
+		if partialApp {
+			err = errors.New("请同时填写 Client ID 和 Client Secret，或将两项都留空")
+		} else if info.User == "" && info.Token == "" && !hasSubmittedApp && !(sess.Trusted && hasApp) {
+			err = errors.New("请填写 SoundCloud 主页链接 / 用户名、Client ID 和 Client Secret，或者 OAuth Token")
 		}
 		if err == nil {
 			err = doneOK(s.sessions.complete(token, "soundcloud", func(trusted bool) error {
