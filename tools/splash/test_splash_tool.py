@@ -126,6 +126,73 @@ class Presets(unittest.TestCase):
         with self.assertRaises(SystemExit):  # no stale default version
             st.main(["render", "--preset", "enginex", "--stock", "x.bin", "--bin", "y.bin"])
 
+    def test_rotated_stock_orientation_preserved_226(self):
+        # #226: PRIME 4 / PRIME 2 / Mixstream Pro store their 800x1280 splash and
+        # recoverysplash partitions rotated 90 deg CW (180 deg opposite SC5000/SC6000's
+        # 90 deg CCW). Orientation must come from --stock itself, with no model list,
+        # while --png (for UI pack img/SplashScreen.png) stays upright and 90 deg CCW
+        # splashes stay byte-for-byte unchanged.
+        def flip180(buf):
+            out = bytearray(len(buf))
+            for c in range(4):
+                out[c::4] = buf[c::4][::-1]
+            return out
+
+        stock = fake_stock(10)
+        ccw_stock = st.encode_bin(W, H, stock[2])
+        cw_stock = flip180(ccw_stock)
+
+        rec_px = bytearray([0, 0, 0, 255] * (W * H))
+        for x0, y0, x1, y1 in ((590, 265, 690, 405), (440, 522, 840, 538)):
+            for y in range(y0, y1):
+                rec_px[(y * W + x0) * 4:(y * W + x1) * 4] = b"\xff\xff\xff\xff" * (x1 - x0)
+        cw_rec = flip180(st.encode_bin(W, H, rec_px))
+
+        with tempfile.TemporaryDirectory() as d:
+            p = lambda name: os.path.join(d, name)  # noqa: E731
+            st._write(p("ccw.bin"), ccw_stock)
+            st._write(p("cw.bin"), cw_stock)
+            st._write(p("cw-rec.bin"), cw_rec)
+
+            st.main(["render", "--preset", "enginex", "--stock", p("ccw.bin"),
+                     "--version", "5.3.0.4", "--png", p("ccw.png"), "--bin", p("out-ccw.bin")])
+            st.main(["render", "--preset", "enginex", "--stock", p("cw.bin"),
+                     "--version", "5.3.0.4", "--png", p("cw.png"), "--bin", p("out-cw.bin")])
+
+            # UI pack PNG stays upright and identical regardless of panel framebuffer orientation.
+            self.assertEqual(st.read_png(p("cw.png"))[2], st.read_png(p("ccw.png"))[2])
+            # 90 deg CCW group stays byte-for-byte identical.
+            want_ccw = bytes(st.encode_bin(W, H, st.render_splash(stock, "5.3.0.4")))
+            self.assertEqual(st._read(p("out-ccw.bin")), want_ccw)
+            # 90 deg CW group matches its stock panel orientation (exact 180 deg rotation).
+            self.assertEqual(st._read(p("out-cw.bin")), bytes(flip180(want_ccw)))
+
+            # decode --stock normalizes a matching splash (.bin or .payload) to upright and exposes a mis-oriented one.
+            st._write(p("cw.payload"), cw_stock)
+            st.main(["decode", "--input", p("out-cw.bin"), "--stock", p("cw.payload"), "--output", p("dec-ok.png")])
+            self.assertEqual(st.read_png(p("dec-ok.png"))[2], st.read_png(p("ccw.png"))[2])
+            st.main(["decode", "--input", p("out-ccw.bin"), "--stock", p("cw.payload"), "--output", p("dec-bad.png")])
+            self.assertEqual(st.read_png(p("dec-bad.png"))[2], flip180(st.read_png(p("ccw.png"))[2]))
+
+            # encode --stock preserves stock orientation as well.
+            st.main(["encode", "--input", p("ccw.png"), "--stock", p("cw.bin"), "--output", p("enc-cw.bin")])
+            self.assertEqual(st._read(p("enc-cw.bin")), bytes(flip180(want_ccw)))
+
+            # Recovery preset preserves 90 deg CW .bin byte-for-byte and writes upright .png.
+            st.main(["render", "--preset", "enginex-recovery", "--stock", p("cw-rec.bin"),
+                     "--version", "", "--png", p("rec.png"), "--bin", p("out-rec.bin")])
+            self.assertEqual(st._read(p("out-rec.bin")), bytes(cw_rec))
+            self.assertEqual(st.read_png(p("rec.png"))[2], rec_px)
+
+        # build-release.sh must render splash.bin per official image group rather than reusing SC5000's.
+        repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        with open(os.path.join(repo, "tools", "az01-packer", "build-release.sh"), encoding="utf-8") as f:
+            script = f.read()
+        self.assertIn("$FW/$base-$BASE-Update.img", script)
+        self.assertIn("$WORK/$base-splash.bin", script)
+        self.assertNotIn('--splash "$WORK/splash.bin"', script)
+
+
 
 if __name__ == "__main__":
     unittest.main()

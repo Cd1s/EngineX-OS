@@ -663,7 +663,18 @@ type release struct {
 // for prefix into dir and checks GitHub's SHA-256 (#215).
 func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, error) {
 	var rel release
-	if err := getJSON(ctx, o, o.API+"/repos/"+o.Repo+"/releases/latest", &rel); err != nil {
+	err := getJSON(ctx, o, o.API+"/repos/"+o.Repo+"/releases/latest", &rel)
+	if err == nil && rel.Tag == "" && len(rel.Assets) == 0 {
+		err = errors.New("unexpected response (not a GitHub release)")
+	}
+	if err != nil {
+		if ctx.Err() == nil {
+			if local := localBundle(dir, prefix); local != "" {
+				o.say("无法读取 GitHub 最新版本，使用已有的 "+filepath.Base(local),
+					"Cannot check the latest GitHub release; using the package already here: "+filepath.Base(local))
+				return local, nil
+			}
+		}
 		return "", fmt.Errorf("GitHub release: %w", err)
 	}
 	pick := func(match func(string) bool) (name, url, digest string, ok bool) {
@@ -681,9 +692,17 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 	if !ok {
 		return "", fmt.Errorf("release %s has no %s-*-EngineX-OS-*-Update.img or %s-*%s", rel.Tag, prefix, prefix, bundleSuffix)
 	}
-	o.say("下载 "+name+" ("+rel.Tag+")", "Downloading "+name)
 	dest := filepath.Join(dir, filepath.Base(name))
-	if err := download(ctx, o, url, strings.TrimPrefix(digest, "sha256:"), dest); err != nil {
+	wantSHA := strings.TrimPrefix(digest, "sha256:")
+	if strings.HasPrefix(digest, "sha256:") && len(wantSHA) == 64 {
+		if got, err := fileSHA256(dest); err == nil && strings.EqualFold(got, wantSHA) {
+			o.say("使用已有的 "+filepath.Base(dest)+" ("+rel.Tag+")",
+				"Using the package already here: "+filepath.Base(dest)+" ("+rel.Tag+")")
+			return dest, nil
+		}
+	}
+	o.say("下载 "+name+" ("+rel.Tag+")", "Downloading "+name)
+	if err := download(ctx, o, url, wantSHA, dest); err != nil {
 		return "", err
 	}
 	return dest, nil
@@ -767,8 +786,9 @@ func downloadLimit(ctx context.Context, o *options, url, wantSHA, dest string, l
 	return os.Rename(part, dest)
 }
 
-// obtainBundle uses --bundle/--image, else the newest matching *-Update.img or Data-Bundle.tar.gz
-// in the work dir, else the latest release (#215).
+// obtainBundle uses --bundle/--image, else checks the latest release and reuses a local package
+// in the work dir only when its SHA-256 matches the latest asset (or when the latest release cannot
+// be read due to network/HTTP/proxy errors) (#215, #218).
 func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, error) {
 	path := o.Bundle
 	if path != "" {
@@ -776,19 +796,9 @@ func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, 
 			return nil, fmt.Errorf("%s is not a %s image/bundle: wrong model refused", filepath.Base(path), prefix)
 		}
 	} else {
-		local, _ := filepath.Glob(filepath.Join(o.WorkDir, prefix+"-*-EngineX-OS-*-Update.img"))
-		if len(local) == 0 {
-			local, _ = filepath.Glob(filepath.Join(o.WorkDir, prefix+"-*"+bundleSuffix))
-		}
-		sort.Slice(local, func(i, j int) bool { return mtime(local[i]).After(mtime(local[j])) })
-		if len(local) > 0 {
-			path = local[0]
-			o.say("使用已有的 "+filepath.Base(path), "Using the package already here: "+filepath.Base(path))
-		} else {
-			var err error
-			if path, err = fetchBundle(ctx, o, prefix, o.WorkDir); err != nil {
-				return nil, err
-			}
+		var err error
+		if path, err = fetchBundle(ctx, o, prefix, o.WorkDir); err != nil {
+			return nil, err
 		}
 	}
 	b, err := readBundle(path)
@@ -799,6 +809,31 @@ func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, 
 		return nil, fmt.Errorf("%s header is for %s, not %s: wrong model refused", filepath.Base(path), b.HeaderPrefix, prefix)
 	}
 	return b, nil
+}
+
+func localBundle(dir, prefix string) string {
+	local, _ := filepath.Glob(filepath.Join(dir, prefix+"-*-EngineX-OS-*-Update.img"))
+	if len(local) == 0 {
+		local, _ = filepath.Glob(filepath.Join(dir, prefix+"-*"+bundleSuffix))
+	}
+	sort.Slice(local, func(i, j int) bool { return mtime(local[i]).After(mtime(local[j])) })
+	if len(local) > 0 {
+		return local[0]
+	}
+	return ""
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func mtime(p string) time.Time {
@@ -1955,7 +1990,7 @@ func run(ctx context.Context, o *options) error {
 }
 
 func registerFlags(fs *flag.FlagSet, o *options) {
-	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or Data-Bundle.tar.gz to install (default: newest in the current directory, else download)")
+	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or Data-Bundle.tar.gz to install (default: latest release; a package in the folder is reused only when its SHA-256 matches)")
 	fs.StringVar(&o.Bundle, "image", "", "alias for -bundle: *-Update.img to install")
 	fs.StringVar(&o.Backup, "userdata-backup", "", "mode B: a backup image of the deck's data partition to inject into (keeps the user's files; if omitted, a fresh partition is created)")
 	fs.StringVar(&o.Key, "key", "", "mode A: SSH private key (default ~/.ssh/id_*; password denon is also tried)")

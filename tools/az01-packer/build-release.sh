@@ -34,17 +34,21 @@ if [ -z "${QRC:-}" ]; then
     QRC=$WORK/qrc
 fi
 # The EngineX start-up screen, drawn for THIS version from the official splash (stock icon, word
-# and digits): the firmware splash partition (1c) and Engine's own start screen in the UI packs.
+# and digits): Engine's own start screen in the UI packs (1) and each firmware group's splash
+# partition (2, keeping that group's stock framebuffer orientation, #226).
 # A committed picture kept showing "5.3.0.3" on 5.3.0.4. Digits it cannot draw stop the build.
-python3 -I - "$FW/SC5000-$BASE-Update.img" "$WORK/stock-splash.bin" <<'PY'
+extract_stock_splash() {
+    python3 -I - "$1" "$2" <<'PY'
 import sys
 from pathlib import Path
 sys.path.insert(0, 'tools/az01-packer')
 import az01_packer
 Path(sys.argv[2]).write_bytes(az01_packer.Image(Path(sys.argv[1]).read_bytes()).payload('splash'))
 PY
+}
+extract_stock_splash "$FW/SC5000-$BASE-Update.img" "$WORK/stock-splash.bin"
 python3 -I tools/splash/splash_tool.py render --preset enginex --stock "$WORK/stock-splash.bin" --version "$VERSION" \
-    --png "$WORK/splash.png" --bin "$WORK/splash.bin" >/dev/null
+    --png "$WORK/splash.png" >/dev/null
 python3 tools/ui-mod/build_packs.py --release --qrc "$QRC" --splash "$WORK/splash.png" --out "$WORK/packs" >/dev/null
 STAGE=$WORK/overlay
 cp -a rootfs-overlay "$STAGE"
@@ -70,19 +74,23 @@ CROSS64=aarch64-linux-gnu-; [ "$(uname -m)" != aarch64 ] || CROSS64=
 CROSS=$CROSS64 OUT=$WORK/hooks64/libengine-ui-hook.so sh tools/ui-mod/build.sh
 CROSS=$CROSS64 OUT=$WORK/hooks64/libedisksd-hook.so sh tools/edisksd-hook/build.sh
 
-# 1c. EngineX boot splash (#118). The firmware splash partition shows before Linux starts, and every
-# update rewrites it, so an image carrying the stock one puts the stock picture back on the deck.
-# $WORK/splash.bin is rendered for $VERSION in step 1, before the UI packs.
+# 1c. EngineX boot splash (#118, #226). The firmware splash partition shows before Linux starts,
+# and every update rewrites it, so an image carrying the stock one puts the stock picture back on
+# the deck. Each official group renders its own splash.bin from that group's stock splash so panels
+# whose raw framebuffer is rotated 180 degrees (90 deg CW vs 90 deg CCW) stay right-side up.
 
 # 2. One image per official group, copied to every model name of the group.
 mkdir -p "$OUT"
 build() { # <official image prefix> <model prefix> <release name>...
     base=$1; shift
+    extract_stock_splash "$FW/$base-$BASE-Update.img" "$WORK/$base-stock-splash.bin"
+    python3 -I tools/splash/splash_tool.py render --preset enginex --stock "$WORK/$base-stock-splash.bin" \
+        --version "$VERSION" --bin "$WORK/$base-splash.bin" >/dev/null
     python3 tools/az01-packer/az01_packer.py patch-rootfs "$FW/$base-$BASE-Update.img" \
         ${KEYARG:+--ssh-public-key "$KEYARG"} --overlay "$STAGE" --set-version "$VERSION" --output "$WORK/$base.ext2" >/dev/null
     python3 tools/az01-packer/az01_packer.py repack "$FW/$base-$BASE-Update.img" \
-        --rootfs "$WORK/$base.ext2" --splash "$WORK/splash.bin" --output "$WORK/$base.img" >/dev/null
-    rm -f "$WORK/$base.ext2"
+        --rootfs "$WORK/$base.ext2" --splash "$WORK/$base-splash.bin" --output "$WORK/$base.img" >/dev/null
+    rm -f "$WORK/$base.ext2" "$WORK/$base-stock-splash.bin" "$WORK/$base-splash.bin"
     while [ "$#" -ge 2 ]; do
         cmp -s "$FW/$base-$BASE-Update.img" "$FW/$1-$BASE-Update.img" ||
             { echo "$1 is not the same official image as $base" >&2; exit 1; }

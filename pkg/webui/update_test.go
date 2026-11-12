@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -648,4 +649,183 @@ func TestSameVersionReRelease(t *testing.T) {
 			t.Errorf("%s: %+v", c.name, v)
 		}
 	}
+}
+
+// #218: end-to-end 2nd-gen PRIME 4 G2 (AZ04, arm64) re-release flow with real deck path
+// resolution (Config.VersionFile == ""). Covers plain 5.3.0.4 -> v5.3.0.4-r3 apply via both
+// *-Update.img and *-Data-Bundle.tar.gz, restart into a fresh Server, v5.3.0.5 still offered,
+// and missing/unmigrated /data/sc5000-custom alongside /data/enginex.
+func TestGen2EndToEndReReleaseApplyAndCustomDirResolution(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed")
+	}
+	buildRealGen2 := func(version, relTag string) (imgBytes, tarBytes []byte, imgName, tarName string) {
+		t.Helper()
+		dir := t.TempDir()
+		elf := make([]byte, 64)
+		copy(elf, "\x7fELF\x02\x01\x01")
+		elf[16], elf[18] = 2, 183 // ET_EXEC, EM_AARCH64
+		suite := filepath.Join(dir, "sc5000-suite")
+		hook := filepath.Join(dir, "libengine-ui-hook.so")
+		os.WriteFile(suite, append(elf, []byte("suite-"+relTag)...), 0o755)
+		os.WriteFile(hook, append(elf, []byte("hook-"+relTag)...), 0o755)
+		ui := filepath.Join(dir, "packs.tar")
+		os.WriteFile(ui, tarOf(t, map[string]string{"packs/en/Main.qml": "Item {}\n"}), 0o644)
+		outDir := filepath.Join(dir, "out")
+		script := filepath.Join("..", "..", "tools", "az01-packer", "build-data-bundle.py")
+		args := []string{"-I", script, version, "--prefix", "PRIME4G2", "--suite", suite, "--hook", hook, "--ui-packs", ui, "--out", outDir}
+		if relTag != "" {
+			args = append(args, "--release-tag", relTag)
+		}
+		if out, err := exec.Command("python3", args...).CombinedOutput(); err != nil {
+			t.Fatalf("build-data-bundle: %v\n%s", err, out)
+		}
+		imgs, _ := filepath.Glob(filepath.Join(outDir, "PRIME4G2-*-Update.img"))
+		tars, _ := filepath.Glob(filepath.Join(outDir, "PRIME4G2-*"+bundleSuffix))
+		if len(imgs) != 1 || len(tars) != 1 {
+			t.Fatalf("unexpected outputs: imgs=%v tars=%v", imgs, tars)
+		}
+		ib, _ := os.ReadFile(imgs[0])
+		tb, _ := os.ReadFile(tars[0])
+		return ib, tb, filepath.Base(imgs[0]), filepath.Base(tars[0])
+	}
+
+	_, plainTar, _, _ := buildRealGen2("5.3.0.4", "v5.3.0.4")
+	r3Img, r3Tar, r3ImgName, r3TarName := buildRealGen2("5.3.0.4", "v5.3.0.4-r3")
+
+	defer func(vf, ivf, bcd, lbcd, dcp, irtf, prsp string) {
+		versionFile, imageVersionFile = vf, ivf
+		bundleCustomDir, legacyBundleCustomDir = bcd, lbcd
+		deviceCompatiblePath, imageReleaseTagFile, planckRemoteScreenPath = dcp, irtf, prsp
+	}(versionFile, imageVersionFile, bundleCustomDir, legacyBundleCustomDir, deviceCompatiblePath, imageReleaseTagFile, planckRemoteScreenPath)
+
+	for _, viaImg := range []bool{true, false} {
+		mode := "update-img"
+		if !viaImg {
+			mode = "data-bundle"
+		}
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			bundleCustomDir = filepath.Join(root, "enginex")
+			legacyBundleCustomDir = filepath.Join(root, "sc5000-custom")
+			versionFile = filepath.Join(legacyBundleCustomDir, "version.txt")
+			imageVersionFile = filepath.Join(root, "no-etc-version")
+			imageReleaseTagFile = filepath.Join(root, "no-etc-release-tag")
+			planckRemoteScreenPath = filepath.Join(root, "no-planck-remote-screen") // AZ04 has none
+			deviceCompatiblePath = filepath.Join(root, "compatible")
+			os.WriteFile(deviceCompatiblePath, []byte("inmusic,jp24\x00inmusic,az04\x00"), 0o644)
+
+			// Seed initial plain 5.3.0.4 install under /data/enginex + /data/sc5000-custom -> enginex.
+			unpackDir := filepath.Join(root, "seed")
+			top, err := unpackBundleReader(bytes.NewReader(plainTar), unpackDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
+			cmd.Env = append(os.Environ(), "SC5000_CUSTOM="+bundleCustomDir, "SC5000_ALSA_OVERLAY="+filepath.Join(root, "alsa"))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("seed install: %v\n%s", err, out)
+			}
+			if err := os.Symlink("enginex", legacyBundleCustomDir); err != nil {
+				t.Fatal(err)
+			}
+			if !viaImg {
+				os.WriteFile(filepath.Join(bundleCustomDir, "gen2-locked"), []byte("1\n"), 0o644)
+			}
+
+			curTag := "v5.3.0.4-r3"
+			var gh *httptest.Server
+			gh = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/Cd1s/EngineX-OS/releases/latest":
+					fmt.Fprintf(w, `{"tag_name":%q,"html_url":"https://x/r","assets":[
+						{"name":%q,"browser_download_url":%q},
+						{"name":%q,"browser_download_url":%q}]}`,
+						curTag, r3ImgName, gh.URL+"/dl/"+r3ImgName, r3TarName, gh.URL+"/dl/"+r3TarName)
+				case "/dl/" + r3ImgName:
+					w.Write(r3Img)
+				case "/dl/" + r3TarName:
+					w.Write(r3Tar)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer gh.Close()
+
+			newSrv := func() *Server {
+				return New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: filepath.Join(root, "state"), GitHubURL: gh.URL, HTTP: gh.Client()}, nil)
+			}
+
+			// 1. Plain 5.3.0.4 install IS offered v5.3.0.4-r3.
+			s1 := newSrv()
+			u1 := getUpdate(s1, "")
+			if !u1.UpdateAvailable || u1.Current != "5.3.0.4" || u1.Latest != "v5.3.0.4-r3" {
+				t.Fatalf("plain 5.3.0.4 before r3: %+v", u1)
+			}
+			getUpdate(s1, "?apply=1")
+			if done := waitUpdate(t, s1); done.Error != "" || done.Progress != 1 {
+				t.Fatalf("apply r3 (%s): %+v", mode, done)
+			}
+			if got, _ := os.ReadFile(filepath.Join(bundleCustomDir, "bundle", releaseTagName)); string(got) != "v5.3.0.4-r3\n" {
+				t.Fatalf("bundle/release-tag after apply = %q, want v5.3.0.4-r3", got)
+			}
+
+			// 2. Restart into a fresh Server: r3 is NOT offered r3 again, and IS offered v5.3.0.5.
+			s2 := newSrv()
+			if u2 := getUpdate(s2, ""); u2.UpdateAvailable || u2.Current != "5.3.0.4" || u2.Latest != "v5.3.0.4-r3" {
+				t.Fatalf("after restart on r3: %+v", u2)
+			}
+			curTag = "v5.3.0.5"
+			s3 := newSrv()
+			if u3 := getUpdate(s3, ""); !u3.UpdateAvailable || u3.Latest != "v5.3.0.5" {
+				t.Fatalf("r3 offered 5.3.0.5: %+v", u3)
+			}
+		})
+	}
+
+	t.Run("missing-or-unmigrated-sc5000-custom-still-reads-enginex-release-tag", func(t *testing.T) {
+		root := t.TempDir()
+		bundleCustomDir = filepath.Join(root, "enginex")
+		legacyBundleCustomDir = filepath.Join(root, "sc5000-custom")
+		versionFile = filepath.Join(legacyBundleCustomDir, "version.txt")
+		imageVersionFile = filepath.Join(root, "no-etc-version")
+		imageReleaseTagFile = filepath.Join(root, "no-etc-release-tag")
+		deviceCompatiblePath = filepath.Join(root, "compatible")
+		os.WriteFile(deviceCompatiblePath, []byte("inmusic,jp24\x00inmusic,az04\x00"), 0o644)
+
+		top, err := unpackBundleReader(bytes.NewReader(r3Tar), filepath.Join(root, "u"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
+		cmd.Env = append(os.Environ(), "SC5000_CUSTOM="+bundleCustomDir, "SC5000_ALSA_OVERLAY="+filepath.Join(root, "alsa"))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("install r3: %v\n%s", err, out)
+		}
+
+		curTag := "v5.3.0.4-r3"
+		gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, `{"tag_name":%q,"html_url":"https://x/r","assets":[{"name":%q,"browser_download_url":"https://example.invalid/r3.img"}]}`, curTag, r3ImgName)
+		}))
+		defer gh.Close()
+		newSrv := func() *Server {
+			return New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: filepath.Join(root, "state"), GitHubURL: gh.URL}, nil)
+		}
+
+		// Case A: /data/sc5000-custom symlink missing on 2nd-gen deck (no /etc/sc5000/version.txt).
+		if u := getUpdate(newSrv(), ""); u.UpdateAvailable || u.Current != "5.3.0.4" {
+			t.Errorf("missing sc5000-custom symlink: got %+v, want Current=5.3.0.4 UpdateAvailable=false", u)
+		}
+
+		// Case B: leftover real /data/sc5000-custom directory (old 5.3.0.4 without release-tag) alongside /data/enginex (r3).
+		os.MkdirAll(filepath.Join(legacyBundleCustomDir, "bundle"), 0o700)
+		os.WriteFile(filepath.Join(legacyBundleCustomDir, "version.txt"), []byte("5.3.0.4\n"), 0o644)
+		if u := getUpdate(newSrv(), ""); u.UpdateAvailable || u.Current != "5.3.0.4" {
+			t.Errorf("coexisting legacy sc5000-custom dir: got %+v, want Current=5.3.0.4 UpdateAvailable=false", u)
+		}
+		curTag = "v5.3.0.5"
+		if u := getUpdate(newSrv(), ""); !u.UpdateAvailable || u.Latest != "v5.3.0.5" {
+			t.Errorf("coexisting dirs with 5.3.0.5: got %+v, want UpdateAvailable=true", u)
+		}
+	})
 }
