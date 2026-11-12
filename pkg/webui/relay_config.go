@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -214,17 +213,10 @@ func (s *Server) probeRelayStems(relay, password string, saved *stems.LANState) 
 	return st
 }
 
-// validRelayURL refuses to send the password in the clear across the internet.
+// validRelayURL refuses to send the password in the clear across the internet,
+// sharing the exact rule with stems.ValidEndpoint.
 func validRelayURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil {
-		return false
-	}
-	if u.Scheme == "https" {
-		return true
-	}
-	ip := net.ParseIP(u.Hostname())
-	return u.Scheme == "http" && ip != nil && (ip.IsLoopback() || ip.IsPrivate())
+	return stems.ValidEndpoint(raw)
 }
 
 // updateRelayConfig changes the fields given; an empty password clears it.
