@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (68 Rows)
+## Regression Table (69 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -78,6 +78,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 66 | **Switching the USB DAC routing never ends another process** (bug hunt 2, BH2-A3-9: `sc5000-usb-audio route-dac` sent its stop signal to whatever PID its PID file named; `alsaloop` ends when the DAC is unplugged and the number can then belong to any other process. The script now signals the PID only while it is an `alsaloop`, and keeps the file in `/run`) | BH2-A3-9 | `tests/test_rootfs_overlay.sh` "USB DAC routing" (a bystander whose PID is in the file survives `route-dac stop` and `status` calls it stale; its own `alsaloop` is stopped). Real deck with a USB DAC: route, unplug the DAC, `route-dac stop`, Engine keeps running | Release workflow Step 2 `tests/test_rootfs_overlay.sh` |
 | 67 | **A Teleport LAN stream sends datagrams that fit the network MTU** (bug hunt 2, BH2-A3-4: only the RTP mode split audio into sub-MTU packets; a Teleport frame was one UDP datagram of whatever the capture loop handed over, 9 KB normally and up to 48 KB after a pause, which leaves in IP fragments and is lost whole when one fragment is, typically on Wi-Fi) | BH2-A3-4 | `pkg/broadcast::TestLANStreamerTeleportChunksUnderMTU` (no datagram over 1472 bytes, timestamps continuous, audio byte-identical); `TestLANStreamerTeleport`, `TestLANStreamerRTP*` unchanged | Release workflow Step 2 Go suites |
 | 68 | **An IPv6 Icecast/Shoutcast server given without a port connects** (bug hunt 2, BH2-A3-12: `[2001:db8::1]` as server address got the default port and a second pair of brackets, `[[2001:db8::1]]:8000`, and the connection always failed with "too many colons in address") | BH2-A3-12 | `pkg/broadcast::TestParseServerTargetIPv6WithoutPort` (bracketed and bare IPv6, with and without port and scheme, host names and IPv4 unchanged) | Release workflow Step 2 Go suites |
+| 69 | **Windows: the installer can unpack a first-generation image for USB (fastboot) flashing** (bug hunt 2, BH2-A7-1: `az01_packer.py` refused any host path with a backslash as unsafe, which is every path on Windows; `enginex-installer` on Windows therefore stopped at "unsafe host output path" before flashing an SC5000 / SC6000 / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro over USB) | BH2-A7-1 | `tools/az01-packer/test_az01_packer.py::test_cli_unpack_accepts_a_windows_path` (a Windows-shaped output path unpacks; quotes and control characters are still refused there; on POSIX the backslash stays refused). Real Windows PC: `enginex-installer.exe` with a first-generation deck in Firmware Update Mode gets past "unpack" | Release workflow Step 2 packer unit tests |
 
 ---
 

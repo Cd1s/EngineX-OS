@@ -231,12 +231,25 @@ def inflate(payload, output):
     raise SafetyError('incomplete XZ stream')
 
 
+# Windows: the backslash is the path separator there, not a character of a name.
+_WINDOWS = os.name == 'nt'
+
+
+def safe_host_path(path):
+    """A host path that can stand in double quotes on a debugfs command line: no quote, no
+    control character, and no backslash where that is an ordinary file-name character.
+    BH2-A7-1: the backslash was refused everywhere, which is every path on Windows, so the
+    installer could not unpack a first-generation image there."""
+    text = str(path)
+    refused = '"\n\r' if _WINDOWS else '\\"\n\r'
+    return not any(c in text for c in refused) and all(ord(c) >= 32 for c in text)
+
+
 class ExtFS:
     """Offline e2fsprogs access. Never mount or follow guest symlinks."""
     def __init__(self, path):
         self.path = Path(path).resolve()
-        require(not any(c in str(self.path) for c in '\\"\n\r') and
-                all(ord(c) >= 32 for c in str(self.path)), 'unsafe host image path')
+        require(safe_host_path(self.path), 'unsafe host image path')
         require(self.path.is_file(), 'rootfs must be a regular image file')
         require(2048 <= self.path.stat().st_size <= MAX_ROOTFS,
                 'rootfs image outside 2 KiB..2 GiB safety bounds')
@@ -944,8 +957,7 @@ def new_output(path):
     # pointing into a worktree subdirectory must not bypass the binary rule.
     p = p.parent.resolve(strict=True)/p.name
     require(not p.exists() and not p.is_symlink(), 'output exists: '+str(p))
-    require(not any(c in str(p) for c in '\\"\n\r') and
-            all(ord(c) >= 32 for c in str(p)), 'unsafe host output path')
+    require(safe_host_path(p), 'unsafe host output path')
     # Never write firmware into this or any other git worktree.
     require(not any((a/'.git').exists() for a in [p.parent, *p.parent.parents]),
             'binary output must be outside every git worktree')
