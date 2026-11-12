@@ -1,7 +1,7 @@
 package webui
 
 import (
-	"bytes"
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/Cd1s/EngineX-OS/pkg/dbhealer"
+	"github.com/Cd1s/EngineX-OS/pkg/enginedb"
 )
 
 var (
@@ -56,6 +57,9 @@ type hotCuesResponse struct {
 	Cues    []HotCueSlot `json:"cues"`
 	Slots   []HotCueSlot `json:"slots"`
 	Palette []string     `json:"palette"`
+	// Pending: Engine has the drive's library open, so the edit is written to
+	// m.db before Engine next opens it (eject and insert the drive).
+	Pending bool `json:"pending,omitempty"`
 }
 
 type hotCuePostReq struct {
@@ -137,6 +141,8 @@ func readHotCuesFromDB(dbPath string, trackID int64) ([]HotCueSlot, bool) {
 	if err != nil || len(raw) < 8 || binary.BigEndian.Uint64(raw[:8]) != 8 {
 		return nil, false
 	}
+	// Positions are in samples of the track's own rate (BH-GC2-1: 44100 was assumed).
+	rate := enginedb.QuickCueRate(context.Background(), db, trackID)
 
 	slots := defaultHotCueSlots()
 	offset := 8
@@ -167,7 +173,7 @@ func readHotCuesFromDB(dbPath string, trackID int64) ([]HotCueSlot, bool) {
 		}
 		posMS := 0.0
 		if pos >= 0 {
-			posMS = pos * 1000 / 44100
+			posMS = pos * 1000 / rate
 		}
 		slots[i] = HotCueSlot{
 			Index:      i,
@@ -179,83 +185,27 @@ func readHotCuesFromDB(dbPath string, trackID int64) ([]HotCueSlot, bool) {
 	return slots, true
 }
 
-func (s *Server) syncHotCueToDB(driveDir string, trackID int64, slotIndex int, label, colorHex string, posMS *float64) {
+// syncHotCueToDB writes the edit into the drive's m.db, or queues it there when
+// Engine has the library open (no outside writer while Engine does, BH-GC2-1).
+// It reports whether the edit was queued.
+func (s *Server) syncHotCueToDB(driveDir string, trackID int64, slotIndex int, label, colorHex string, posMS *float64) bool {
 	dbPath := filepath.Join(driveDir, "Engine Library", "Database2", "m.db")
 	if st, err := os.Stat(dbPath); err != nil || st.Size() == 0 {
-		return
+		return false
+	}
+	if enginedb.LibraryInUse(driveDir) {
+		err := enginedb.QueuePending(driveDir, func(p *enginedb.Pending) {
+			p.HotCues = append(p.HotCues, enginedb.PendingCue{TrackID: trackID, Index: slotIndex, Label: label, Color: colorHex, PositionMS: posMS})
+		})
+		return err == nil
 	}
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: dbPath}).String()+"?_pragma=busy_timeout(1000)")
 	if err != nil {
-		return
+		return false
 	}
 	defer db.Close()
-
-	var blob []byte
-	err = db.QueryRow("SELECT quickCues FROM PerformanceData WHERE trackId = ?", trackID).Scan(&blob)
-	if err != nil || len(blob) == 0 {
-		return
-	}
-
-	raw, err := dbhealer.DecodeQCompress(blob)
-	if err != nil || len(raw) < 8 || binary.BigEndian.Uint64(raw[:8]) != 8 {
-		return
-	}
-
-	cr, cg, cb, err := parseHexColor(colorHex)
-	if err != nil {
-		return
-	}
-
-	offset := 8
-	var slotOffsets [8]struct {
-		start, labelStart, labelLen, posOffset, end int
-	}
-	for i := 0; i < 8; i++ {
-		if offset >= len(raw) {
-			return
-		}
-		slotOffsets[i].start = offset
-		lLen := int(raw[offset])
-		slotOffsets[i].labelStart = offset + 1
-		slotOffsets[i].labelLen = lLen
-		offset += 1 + lLen
-		if offset+12 > len(raw) {
-			return
-		}
-		slotOffsets[i].posOffset = offset
-		offset += 12
-		slotOffsets[i].end = offset
-	}
-
-	var buf bytes.Buffer
-	buf.Write(raw[:8])
-	for i := 0; i < 8; i++ {
-		sOff := slotOffsets[i]
-		if i == slotIndex {
-			lblBytes := []byte(label)
-			if len(lblBytes) > 255 {
-				lblBytes = lblBytes[:255]
-			}
-			buf.WriteByte(byte(len(lblBytes)))
-			buf.Write(lblBytes)
-			pos := math.Float64frombits(binary.BigEndian.Uint64(raw[sOff.posOffset : sOff.posOffset+8]))
-			if posMS != nil {
-				pos = *posMS * 44100 / 1000
-			}
-			var posBuf [8]byte
-			binary.BigEndian.PutUint64(posBuf[:], math.Float64bits(pos))
-			buf.Write(posBuf[:])
-			buf.Write([]byte{255, cr, cg, cb})
-		} else {
-			buf.Write(raw[sOff.start:sOff.end])
-		}
-	}
-	if offset < len(raw) {
-		buf.Write(raw[offset:])
-	}
-
-	newBlob := dbhealer.EncodeQCompress(buf.Bytes())
-	_, _ = db.Exec("UPDATE PerformanceData SET quickCues = ? WHERE trackId = ?", newBlob, trackID)
+	_ = enginedb.SetQuickCue(context.Background(), db, trackID, slotIndex, label, colorHex, posMS)
+	return false
 }
 
 func (s *Server) handleHotCues(w http.ResponseWriter, r *http.Request) {
@@ -427,7 +377,7 @@ func (s *Server) handleHotCuesPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.syncHotCueToDB(driveDir, trackID, req.Index, req.Label, req.Color, req.PositionMS)
+	pending := s.syncHotCueToDB(driveDir, trackID, req.Index, req.Label, req.Color, req.PositionMS)
 
 	respond(w, hotCuesResponse{
 		Drive:   req.Drive,
@@ -435,5 +385,6 @@ func (s *Server) handleHotCuesPost(w http.ResponseWriter, r *http.Request) {
 		Cues:    slots,
 		Slots:   slots,
 		Palette: HotCuePalette,
+		Pending: pending,
 	})
 }

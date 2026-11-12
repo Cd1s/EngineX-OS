@@ -49,6 +49,9 @@ type RelocateResult struct {
 	Unresolved int    `json:"unresolved"` // missing tracks with no single match
 	Applied    bool   `json:"applied"`
 	Backup     string `json:"backup,omitempty"`
+	// Queued: Engine has the library open, so the moves wait in the library
+	// and are applied before Engine next opens it (eject and insert the drive).
+	Queued bool `json:"queued,omitempty"`
 }
 
 type driveFile struct {
@@ -74,8 +77,9 @@ func Relocate(ctx context.Context, opts RelocateOptions) (RelocateResult, error)
 	if st, err := os.Stat(dbPath); err != nil || st.Size() == 0 {
 		return res, errors.New("no Engine Library on this drive")
 	}
+	inUse := !opts.DryRun && LibraryInUse(opts.Root)
 	mode := "?_pragma=busy_timeout(5000)"
-	if opts.DryRun {
+	if opts.DryRun || inUse {
 		mode = "?mode=ro&_pragma=busy_timeout(5000)"
 	}
 	u := url.URL{Scheme: "file", Path: dbPath}
@@ -103,12 +107,16 @@ func Relocate(ctx context.Context, opts RelocateOptions) (RelocateResult, error)
 	if opts.DryRun || len(res.Moves) == 0 {
 		return res, nil
 	}
-
-	backup := dbPath + ".bak.relocate"
-	if _, err = os.Lstat(backup); err == nil {
-		backup += fmt.Sprintf(".%d", time.Now().UnixNano()) // keep the first backup
+	if inUse {
+		// No write while Engine has m.db open (BH-GC1-3).
+		if err = QueuePending(opts.Root, func(p *Pending) { p.Relocate = append(p.Relocate, res.Moves...) }); err != nil {
+			return res, err
+		}
+		res.Queued = true
+		return res, nil
 	}
-	if _, err = db.ExecContext(ctx, `VACUUM INTO ?`, backup); err != nil {
+	backup, err := relocateBackup(ctx, db, dbPath)
+	if err != nil {
 		return res, fmt.Errorf("backup failed, nothing changed: %w", err)
 	}
 	res.Backup = backup
@@ -132,6 +140,34 @@ func Relocate(ctx context.Context, opts RelocateOptions) (RelocateResult, error)
 	}
 	res.Applied = true
 	return res, nil
+}
+
+// relocateBackup keeps the first backup (m.db.bak.relocate) and the one made
+// before the latest relocation (m.db.bak.relocate.last); every run used to add
+// another full copy of m.db in Database2.
+func relocateBackup(ctx context.Context, db *sql.DB, dbPath string) (string, error) {
+	first := dbPath + ".bak.relocate"
+	if _, err := os.Lstat(first); errors.Is(err, os.ErrNotExist) {
+		_, err = db.ExecContext(ctx, `VACUUM INTO ?`, first)
+		return first, err
+	}
+	last := first + ".last"
+	tmp := fmt.Sprintf("%s.tmp-%d", last, time.Now().UnixNano())
+	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, tmp); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Rename(tmp, last); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	// Timestamped copies older builds left beside it.
+	if old, _ := filepath.Glob(first + ".[0-9]*"); len(old) > 0 {
+		for _, f := range old {
+			os.Remove(f)
+		}
+	}
+	return last, nil
 }
 
 // findMissing returns the local tracks without a file, and the lower-cased paths
