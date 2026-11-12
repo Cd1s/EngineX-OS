@@ -15,6 +15,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -23,7 +24,13 @@
 
 #define SC_TAP_FRAMES 65536u /* power of two; 0.68 s at 96 kHz */
 #define SC_TAP_OUT_RATE 48000u
-#define SC_TAP_CHUNK 2048u   /* output frames converted per write */
+/* Output frames per write: 4096 bytes = PIPE_BUF, so an O_NONBLOCK FIFO write is
+ * atomic (all of it, or EAGAIN) and can never end inside a frame. */
+#ifndef PIPE_BUF
+#define PIPE_BUF 4096 /* Linux */
+#endif
+#define SC_TAP_CHUNK 1024u
+_Static_assert(SC_TAP_CHUNK * 4 <= PIPE_BUF, "a live tap write must be atomic");
 
 struct sc_tap {
     float l[SC_TAP_FRAMES], r[SC_TAP_FRAMES];
@@ -96,8 +103,9 @@ static inline int sc_tap_connect(struct sc_tap *t, const char *path) {
     } else if (!S_ISFIFO(st.st_mode)) {
         return 0;
     }
-    int fd = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    int fd = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return 0; /* ENXIO: no reader yet */
+    if (fstat(fd, &st) || !S_ISFIFO(st.st_mode)) { close(fd); return 0; } /* swapped since lstat */
     t->fd = fd;
     t->rate = 0;
     t->phase = 0;
@@ -159,7 +167,8 @@ static inline uint32_t sc_tap_drain_once(struct sc_tap *t, const char *path) {
             sc_tap_off(t); /* EPIPE: reader gone */
             return written;
         }
-        written += (uint32_t)w / 4; /* a partial write drops the rest of this chunk */
+        if ((size_t)w != (size_t)n * 4) { sc_tap_off(t); return written; } /* never a split frame */
+        written += n;
         if (n < SC_TAP_CHUNK) return written;
     }
 }

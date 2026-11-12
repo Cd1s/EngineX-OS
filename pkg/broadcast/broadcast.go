@@ -383,10 +383,11 @@ func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle)
 	ticker := time.NewTicker(time.Duration(1152) * time.Second / SampleRate)
 	defer ticker.Stop()
 
-	var inputF *os.File
+	var input pcmReader
+	var keepAlive silenceGate
 	defer func() {
-		if inputF != nil {
-			inputF.Close()
+		if input.f != nil {
+			input.f.Close()
 		}
 	}()
 	for {
@@ -400,17 +401,15 @@ func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle)
 				return
 			}
 		}
-		if inputF == nil { // the hook may create the PCM source after the stream is enabled
+		if input.f == nil { // the hook may create the PCM source after the stream is enabled
 			if f, err := os.OpenFile(cfg.InputPath, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
-				inputF = f
+				input = pcmReader{f: f}
 			}
 		}
-		pcm := readPCM(inputF)
-		var sendBytes []byte
-		if pcm == nil {
-			sendBytes = make([]byte, 1152*4) // silence keeps local players connected
-		} else {
-			sendBytes = pcm
+		pcm := input.read()
+		sendBytes, send := keepAlive.next(pcm, time.Now())
+		if !send {
+			continue // a short gap in live PCM: never splice silence into playing audio
 		}
 		b.hub.publish(sendBytes)
 
@@ -428,25 +427,62 @@ func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle)
 	}
 }
 
-// readPCM reads what is available of the PCM feed (up to two frames, so a late tick
-// catches up), looping regular files; nil when nothing is available. A FIFO whose
-// writer is connected but idle must not park the capture loop: the read gives up
-// after a few milliseconds and the caller sends silence.
-func readPCM(f *os.File) []byte {
-	if f == nil {
+// silenceAfter is how long the PCM feed may pause before keep-alive silence is sent.
+// The hook writes about every 10 ms; a single empty 24 ms tick is jitter, and
+// splicing zeros into playing audio clicks and makes the stream drift ahead.
+const silenceAfter = 100 * time.Millisecond
+
+// silenceGate decides what one capture tick publishes.
+type silenceGate struct{ last time.Time }
+
+// next returns the bytes to publish and whether to publish at all: live PCM as is,
+// nothing during a short gap, and one frame of silence once the feed has been quiet
+// for longer than silenceAfter (so local players stay connected while nothing plays).
+func (g *silenceGate) next(pcm []byte, now time.Time) ([]byte, bool) {
+	if pcm != nil {
+		g.last = now
+		return pcm, true
+	}
+	if !g.last.IsZero() && now.Sub(g.last) <= silenceAfter {
+		return nil, false
+	}
+	return make([]byte, 1152*4), true
+}
+
+// pcmReader reads the s16le stereo PCM feed and only ever returns whole 4-byte
+// frames: a read that ends inside a frame keeps the 1-3 extra bytes for the next
+// read, so a channel or byte shift can never reach the listeners. The remainder
+// is dropped when the writer goes away (EOF), since a new writer starts on a frame.
+type pcmReader struct {
+	f     *os.File
+	carry [3]byte
+	n     int
+}
+
+// read returns what is available (up to two MPEG frames' worth, so a late tick
+// catches up), looping regular files; nil when no whole frame is available. A FIFO
+// whose writer is connected but idle must not park the capture loop: the read
+// gives up after a few milliseconds.
+func (p *pcmReader) read() []byte {
+	if p.f == nil {
 		return nil
 	}
-	buf := make([]byte, 2*1152*4)
-	_ = f.SetReadDeadline(time.Now().Add(5 * time.Millisecond)) // no-op error on regular files
-	n, err := f.Read(buf)
+	buf := make([]byte, p.n+2*1152*4)
+	copy(buf, p.carry[:p.n])
+	_ = p.f.SetReadDeadline(time.Now().Add(5 * time.Millisecond)) // no-op error on regular files
+	m, err := p.f.Read(buf[p.n:])
 	if err == io.EOF {
-		_, _ = f.Seek(0, 0)
-		n, _ = f.Read(buf)
+		p.n = 0
+		_, _ = p.f.Seek(0, 0)
+		m, _ = p.f.Read(buf)
 	}
-	if n <= 0 {
+	total := p.n + max(m, 0)
+	whole := total &^ 3
+	p.n = copy(p.carry[:], buf[whole:total])
+	if whole == 0 {
 		return nil
 	}
-	return buf[:n]
+	return buf[:whole]
 }
 
 // pushLoop keeps the external Icecast/Shoutcast connection alive, reconnecting with
