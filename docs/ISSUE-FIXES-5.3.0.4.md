@@ -1,4 +1,4 @@
-# EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11，已发布）
+# EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11 发布；r2、r3 于 2026-11-12 重发）
 
 - **日期**：`2026-11-12`
 - **状态**：已合入 `#210` Spotify `go-librespot` 原生音频解密与零配置双登录（`59e0ec6`）、`#201` 联机视图 `Linked View` 与双碟机配对 2 轨视图（`136ad1b` / `61e4ed5`）及 `#215` 二代机全系 8 款统一 `*-Update.img` + `EngineX-Installer` 一键解锁（`5.3.0.4` / `5.3.0.5` 同时保留 8 个 `*-Data-Bundle.tar.gz` 兼容包，共 28 个发布产物），连同此前全部计划项（`issue176-sclive4-stems` `77c4c9f`、`issue177-sclive4-perf` `66ff35b`、`realdeck-5304-fixes` `ebb985e` / `322839d`、防回归核验表 `REGRESSION-CHECKLIST.md`、紧凑顶栏第 2 行 `header-row2-compact` `207dc55` / `3460bb1`、`#162` `9fa0cff`、一代首次启动 Stems 弹窗抑制 `gen1-stems-prompt` `1cfc6bb`、`#202 / #203` `3649be7`、翻译补全 `323cb15` / `f48150f` / `240b22d` / `i18n-settings-full` `34ed7d4`、播放与效果设置收口 `fx-settings-declutter` `c2d9d74`、`MASTER` 灯恢复原厂暗亮值 `1` 及原厂转盘行为 `led-157-stock` `7f753c2`、影子 `Sync` 相位对齐 `shadow-sync-snap` `4ce7bef`、中国大陆与全球 NTP 同步及断电时区持久化 `time-sync-cn` `d0de27c`、`#140` 断电二次启动与启动屏门禁 `b82197b`、双机沙箱进程作用域隔离 `twin-scoped-kill` `73a060c`、启动安全网 `boot-safety-net` `f047653`、`#178` Rekordbox MP3 编码延迟偏移修正 `caee928`、独立播放机 `Sampler Output` / 原厂 `LinkBeatJumpLoopSize` 解锁 / 移除失效 `Auto-Analyze` 行 `ui-link-autoanalyze` `4a907ee`、`#208` 官方 Mod 静态 Go 运行时 `mods-go-runtime` `71ca3df`、三语菜单路径与文档对齐 `docs-audit-5304` `a31caee`、`#206` 一体机流媒体曲目双向录音 `issue206-stream-record` `f468406`、电脑端 LAN Stems 默认 `htdemucs` / 机上 HQ 提示 / 安装包内置 worker `stems-hq-hint` `aa895e5`）
@@ -259,3 +259,64 @@
   - 旧版本在 `/data/enginex/hfs-lib/<卷名>` 下留的 HFS+ 曲库缓存不再使用（新缓存在 `/data/enginex/hfs-libraries/<卷标识>`）：升级后第一次插 HFS+ 盘会重新转换，只存在旧缓存里的碟机端 Cue 修改不会带过来；
   - 插 rekordbox 盘不再弹数据库选择框；曲库在挂载预算内转不完、或只读盘尚未转换时，用原厂 rekordbox 读盘方式打开；之后某次插入若已转换好，则改用 `Engine Library`；
   - APFS 格式的盘不支持（仅文档说明，无代码改动）。
+
+## 7. `5.3.0.4 r3` 同版本修复重发（2026-11-12）
+
+- **原因**：r2 发布当天的实机与用户报告：左碟 Mac 格式（日志式 HFS+）rekordbox 盘没有歌单、点歌单一直 `Updating`、弹出卡在 `Ejecting az01-internal`；开机画面仍显示 `5.3.0.3`（#218）；控制台二维码给出 `sc5000.lan`，手机打不开（#218）；SC LIVE 4 的 Stems 用不了（#176）；超过 500 首的 rekordbox 曲库没有 Cue、循环和网格；卷标带 `#` 的 U 盘插入后曲库被清空；在 Source 里点 `Demo Tracks` / `Sampler Content` 碟机卡死；直播推流（#50）没有声音，修好声音后又卡顿、延迟越来越大。
+- **范围（`d88890b..612f03e`，除此之外不改）**：
+  - 只读 HFS+：`79b895d`（旧版本留下的 `0755` 缓存目录收紧为 `0700`，而不是拒绝所有 HFS+ 盘）、`afabb35`（edisksd 的挂载监视线程要等视图就绪后才看到盘，且只看到普通设备挂载；`/data` 曲库绑定不再被当成内部盘挂在 U 盘上，弹出不再卡住）；
+  - 开机画面：`6c1aa0d`（`build-release.sh` 按 `<VERSION>` 从官方开机画面现场生成，一代固件开机分区与二代界面包的 `img/SplashScreen.png` 都用它；`splash_tool.py` 补 1、4、7 字形；发版规则加为必做项）；
+  - 卷标带 `#` / `?`：`085904c`（SQLite URI 对路径转义；对照测试中旧代码会清空曲库，报 `no such table: Track`）；同一提交在使用手册写明不支持 APFS；
+  - 二代 Stems：`a4929b4`（合并 `f10867e`：Engine 启动分离进程前用 `std::filesystem::status()` 检查路径，hook 只对包内处理程序重定向 `stat`）；
+  - 直播推流（#50）：`533077f`（推流带上真实主输出，不再输出假的 MP3/Ogg 帧）、`56ad0ac`（端到端整帧立体声，不再拼接静音，hook 恢复 80 KB）、`612f03e`（合并 `f404b4f` 每个收听者的防抖缓冲 `?buffer=`，以及 `0972084`、`0528afa`、`802b8e9`：按碟机系统时钟输出，消除约 +1400 ppm 声卡时钟漂移；默认缓冲 120 ms；文档写明有线优先、Mac 走 Wi-Fi 必须关闭 AWDL）；
+  - 超过 500 首的曲库：`938875a`（首次插盘仍只导入歌单与曲目，之后每次插盘在挂载预算内补读）、`da75e9f`（复核阻断修复 `f525b1d`、`18cf353`：慢盘上每次插盘都有进展）；
+  - 控制台二维码：`3af291e`（#218：二维码与碟机登录提示使用手机可打开的地址，不再是 `sc5000.lan` 或回环地址）；
+  - Source → `Demo Tracks` / `Sampler Content` 卡死：`777dc1b`（合并 `4447f7b`：我们隐藏原厂 Tidal 行后，`ConnectedSource.qml` 的分组头在 `updatePolish()` 里无限振荡；关闭该列表的分组头，Demo 内容保留；门禁新增真实点击探针与 polish 死循环检查）；
+  - 官网与文档：`8f5edac`（r3 标签与说明）。
+- **构建提交**：`612f03e`（`origin/main`）；`RELEASE_TAG=v5.3.0.4-r3`。
+- **第 2 步全量自动化测试**：
+  - `777dc1b` 上全套：`gofmt -l .` 为空，`go vet ./...` 通过，`go test -race ./...` 通过；`bash tests/test_rootfs_overlay.sh` 通过；`test_sclive4_bootstrap.sh`：`SCLIVE4` 与 `PRIME4PLUS`（官方 JC11S rootfs，从 `PRIME4PLUS-5.3.0-Update.img` 的 AZ0x `rootfs` 记录解压）`verification checks PASSED`，`AZ04=1` 通过；`python3 -m unittest discover -s tools/az01-packer`、`tools/stems`、`tools/splash` 通过；`test_dsp_smooth.c`（普通、ASan/UBSan、TSan）、`test_stems_feature.c`（5.0.4 与 5.3.0 的 `Engine`）、`test_az04_hook.c`（SYSTEM ONE 的 `Engine`）、`test_edisksd_hook.c`（armhf 以 nobody 运行，以及 AArch64 在 `unshare -m` 下的 `--mounts`）通过；
+  - 合并推流改动后的 `612f03e`：`gofmt`、`go vet` 通过；`go test -race ./...` 在编译机高负载时 `pkg/bridge` 的 `TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011` 失败一次（第二次插盘 `Updated 260 + Deferred 248 = 508`，断言要求 505：时间预算很紧时新加的 3 首也被延后），单独重跑 3 次均通过；属于测试对时序的假设过严，碟机行为不受影响，已另开任务改成确定性测试，不阻塞 r3；
+  - 推流改动的新测试在旧代码上失败（复核方在编译机实测）：`TestFastAudioClockDoesNotReachTheStream`（+4000 ppm 写入 482320 帧，旧代码 0 帧被校正）、`TestLiveWAVPrefillsRequestedBuffer`、`TestLiveWAVStalledListenerLatencyIsBounded`（卡顿 2.5 s 后积压 2669 ms）；armhf 二进制上重采样 45.8 ns/帧、0 次分配，整步 48.3 ns/帧。
+- **异族复核**：推流改动由 Fable 5.2 实现，Gemini 4 Carbon 复核，结论可发布；4 项低风险发现（关闭直播瞬间的新连接可能挂起、非 HTTP/1.1 回退路径未清除 2 分钟写超时、导出计数字段非原子、回归表行号重复：最后一项合并时已改为第 51 行），前 3 项进 5.3.0.5。Demo / Sample 修复由 Gemini 4 Carbon 实现、Opus 5.5 复核。
+- **构建**：`612f03e`，`build-release.sh` 389 秒，`build-installer.sh` 11 秒；`SHA256SUMS.txt` 28 行，`sha256sum -c` 通过。
+- **第 4 步镜像抽查**：三组一代镜像解包 `"verified": true`，`version.txt` = `5.3.0.4`，`/etc/sc5000/release-tag` = `v5.3.0.4-r3`；`/root/.ssh/authorized_keys` 与官方 `SC5000-5.3.0-Update.img` 里的原厂条目逐字节相同（`cert-authority`，SHA-256 `4d2cd424…`），公开构建没有加入任何公钥；JP07 开机画面解码后右下角为 `5.3.0.4`；同组 SHA-256 相同（SC5000 组 `3a1b6661…`、SC6000 组 `e767312c…`、PRIME 4 组 `21c4cc97…`），三组互不相同。
+- **第 4b 步三组发版门禁（旧镜像 = r2 构建，从 `v5.3.0.4-r2` Release 下载并按其 `SHA256SUMS.txt` 校验；`GATE_RELEASE_TAG=v5.3.0.4-r3`；三组并行）**：SC5000（JP07）**144 PASS / 0 FAIL / 5 INFO**，394 秒；SC6000（JP13）**144 PASS / 0 FAIL / 5 INFO**，378 秒；PRIME 4（JC11）**144 PASS / 0 FAIL / 5 INFO**，455 秒。比 r2 多出的 2 项是新加的 `Source Demo Tracks and Sampler Content connect without freeze`（`new` 与 `boot2` 两个阶段，`SCPROBE demosource|1|1|`），并把 `possible QQuickItem::polish()` 记为 QML 错误。
+- **发布**：`v5.3.0.4-r3`（`--target 612f03e`，Latest），29 个资产的 digest 与 `SHA256SUMS.txt` 一致；`v5.3.0.4` Release 的同名文件换成本次构建并在说明开头注明，`v5.3.0.4-r2` 说明开头注明已被 r3 取代，两者均非 Latest；`releases/latest/download/` 直链抽查返回 200。
+- **产物 SHA-256**：
+
+```text
+21c4cc976fcd323c0db2573a45f1e8f92860f50330b83455a74254545b5d4fce  MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img
+3a461cbf5abe5b52084fcde01fb106482f677ed09caa211c41b60e126ee95c10  MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img
+7411be7594d1b8ad86a09463f848f4c0a04ba4e33657dafc6087aead933123d4  MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img
+21c4cc976fcd323c0db2573a45f1e8f92860f50330b83455a74254545b5d4fce  PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img
+21c4cc976fcd323c0db2573a45f1e8f92860f50330b83455a74254545b5d4fce  PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img
+df6f68ce7d08584abc9f5165ec3e1fe9b83b1797fb5744dd7540ed2fe243eaf3  PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img
+220bb60954797ebcb331aed14cd44bf7420ce4a3e03f3da90caa03d4621707b3  PRIME4PLUS-5.3.0.4-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img
+3a1b66613b5b02e950004fdecb95647cbcd49c290dbe34adcde794b8986dbfdf  PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img
+c54d3f9d364bd81aaed6a3f77812e6a7115a7a1b39c27b7a58eaa30e28ec0c1f  PRIMEGOPLUS-5.3.0.4-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img
+3a1b66613b5b02e950004fdecb95647cbcd49c290dbe34adcde794b8986dbfdf  SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img
+3a1b66613b5b02e950004fdecb95647cbcd49c290dbe34adcde794b8986dbfdf  SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img
+e767312c249cd26e800d6616368a99d1b2ef09694d7f2d853f684983ae46f95a  SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img
+e767312c249cd26e800d6616368a99d1b2ef09694d7f2d853f684983ae46f95a  SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img
+84639b6cd278bdaf4cbf10c59a99096ee320d0fd5d8e89fd8a02f9c0803de756  SCLIVE2-5.3.0.4-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img
+8a257ffddc3755e224a1592521406089ea2d64a9438244f9484b59c7ed35698e  SCLIVE4-5.3.0.4-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img
+4315d7d1dca72633f404f7b8373046002f48cfb35d94c14b66846f4f5932b076  SYSTEMONE-5.3.0.4-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img
+761199423563d60b904a1a04cb6575dd844fe78b845a15e17e1d8f6068688f07  MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+d411283953de73dc15e311c1aa58808fd0ede4b0f2c1b6f08c33583df6e555ff  MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+d2f8e1c12ffe7ea7eb52a898c30540abdf3649880603926a796eff3801fb575b  PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+735eaf68c5d841d9b6831c15da8d0a194f7f87e5f2751507c1a8e929c5f9d7a6  PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+304478468b47b2f065801ec4b213ce7415c0c0f96ab7d991aebbbba5501aa071  PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+11512a112df35a61ba3cbd03229aaa04575dec6e21e8e794e1003ecef678aad8  SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+cca4ee2ee1c88db282e823246803dcf8161a724336f0292fcd4e6981a1805de1  SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+1f8f0f4f55111d846dc4455cc29a91f4aea1e7c0ce9d6c55ff993765c1e075dc  SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz
+0367d30fdd542d4885e46b5aeecffe2bad1795d2372be0c094455396356533b6  EngineX-Installer-5.3.0.4-linux-amd64.tar.gz
+160fcff485914c72663ce0d32455cd42e3b90b5efbe3099bc12e957df6fec296  EngineX-Installer-5.3.0.4-macos-amd64.zip
+6d4887383a4c8561ebff315d46b1dfab8f7d5a59a0576a9780de8a21185e1420  EngineX-Installer-5.3.0.4-macos-arm64.zip
+ea9baf492f35dda012919ce3469f83776f69b6e4d9ade2abec873bb7c48d379c  EngineX-Installer-5.3.0.4-windows-amd64.zip
+```
+
+- **实机**：左碟此前热部署了 r3 的 HFS+ 修复并经维护者实测（插 HFS+ 盘有歌单、可正常弹出）；直播推流的时钟漂移（+1394 ppm、+1475 ppm）、Wi-Fi 停顿（AWDL 开启时最长 1157 ms，关闭后 190 秒无停顿）为 r3 之前从 Mac 侧对实机测得。r3 整包尚未在实机上安装；Demo / Sample 只在沙箱验证。
+- **编译机事故（与产物无关）**：发版过程中编译机 sshd 被改到 2222 端口，原因是 11-08 一个旧版 webui 单元测试把 `-p 2222` 写进了宿主机 `/etc/systemd/system/sshd.service.d/51-port.conf`，今晚有进程在宿主机上执行了 `systemctl restart sshd` 使其生效；已备份后删除该文件、恢复 22 端口。测试隔离的修复（测试中禁止真实系统命令、非碟机环境不动 sshd）进 5.3.0.5。
+- **回滚点**：r2 构建（`d88890b`，tag `v5.3.0.4-r2`）；首轮 `5.3.0.4`（`61e4ed5`）。`v5.3.0.4` Release 上的文件已换成 r3 构建，退回 r2 时用 `v5.3.0.4-r2` Release 上保留的 r2 文件。
+- **实机影响**：已刷 `5.3.0.4`（首轮或 r2）、`5.3.0.3` 及更早版本的碟机在 `设置 → 关于 / 更新` 收到 r3，装完版本号仍为 `5.3.0.4`；直播推流默认缓冲从 300 ms 改为 120 ms（为有线网络调校），Wi-Fi 收听需加 `?buffer=300` 或更大；Source 列表各分组之间原有的 4 像素间隔不再显示。
