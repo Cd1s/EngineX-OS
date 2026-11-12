@@ -2,7 +2,9 @@ import io
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 import numpy as np
+import worker
 from worker import DemucsSeparator, Input, Separator, header_read, resolve_backend, serve
 from render import run
 
@@ -102,5 +104,60 @@ class WorkerTests(unittest.TestCase):
     def test_backend_names(self):
         self.assertEqual(resolve_backend('hpss'),'hpss')
         self.assertIn(resolve_backend('auto'),('hpss','htdemucs'))
+
+    def test_windows_pipe_select_oserror_does_not_crash(self):
+        # On Windows (run-home-worker.ps1), stdin is a pipe (fd 0) and Winsock
+        # select.select([0], [], [], 0) raises OSError [WinError 10038] (BH-GF2-6).
+        x = np.random.default_rng(11).normal(0, .05, (2, 2048)).astype('f4')
+        chunks = [
+            b'numChannels=2\nsampleRate=44100\nmaxBlockSize=1024\n\n'
+            b'action=block\nnumSamples=1024\n\n' + np.ascontiguousarray(x[:, :1024]).tobytes(),
+            b'action=block\nnumSamples=1024\n\n' + np.ascontiguousarray(x[:, 1024:]).tobytes(),
+            b'action=done\n\n',
+            b'',
+        ]
+        idx = 0
+
+        class FakePipe:
+            def fileno(self):
+                return 0
+
+        def fake_read(fd, n):
+            nonlocal idx
+            self.assertEqual(fd, 0)
+            out = chunks[idx]
+            if idx < len(chunks) - 1:
+                idx += 1
+            return out
+
+        def win_select(*_args, **_kwargs):
+            raise OSError(10038, 'An operation was attempted on something that is not a socket')
+
+        out = io.BytesIO()
+        with mock.patch.object(worker.os, 'read', side_effect=fake_read), \
+             mock.patch.object(worker.select, 'select', side_effect=win_select):
+            serve(Input(FakePipe()), out)
+
+        src = io.BytesIO(out.getvalue())
+        audio = []
+        while (f := header_read(src)) is not None:
+            if b'returnFrames' in f:
+                n = int(f[b'returnFrames'])
+                audio.append(np.frombuffer(src.read(n * 8 * 4), '<f4').reshape(4, 2, n))
+        np.testing.assert_allclose(np.concatenate(audio, axis=2).sum(axis=0), x, atol=2e-6)
+
+        # Also verify the Windows PeekNamedPipe fast path avoids Winsock select.
+        fake_msvcrt = type('msvcrt', (), {'get_osfhandle': staticmethod(lambda fd: 1234)})
+
+        def fake_peek(_h, _b, _sz, _rd, avail_ptr, _left):
+            avail_ptr._obj.value = 512
+            return 1
+
+        fake_windll = type('windll', (), {'kernel32': type('k32', (), {'PeekNamedPipe': staticmethod(fake_peek)})})
+        with mock.patch.dict(sys.modules, {'msvcrt': fake_msvcrt}), \
+             mock.patch.object(worker.os, 'name', 'nt'), \
+             mock.patch.object(worker.ctypes, 'windll', fake_windll, create=True), \
+             mock.patch.object(worker.select, 'select', side_effect=win_select):
+            self.assertTrue(Input(FakePipe()).waiting())
 
 if __name__=='__main__':unittest.main()
