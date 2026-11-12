@@ -84,6 +84,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 72 | **Streaming Stems (`stemsSource`) records each stemmed track under `ref.track.Provider` rather than the browser's current `scope()` (`BH2-A8-10`)** | `BH2-A8-10` | `pkg/webui::TestStemsSourceRecordsUnderTrackProviderNotCurrentBrowserScope` | Release workflow Step 2 (`go test -race ./pkg/webui/...`) |
 | 73 | **`deezer.fetchDecrypt` writes to a `.part-*` temp file and renames atomically only after complete decryption and `fsync`, leaving no partial file on interrupted/truncated transfers (`BH2-A8-11`)** | `BH2-A8-11` | `internal/deezer::TestTruncatedCDNLeavesNoDestinationFile` | Release workflow Step 2 (`go test -race ./internal/deezer/...`) |
 | 74 | **`bridge.ConvertAtMount` writes `.rb-bridge-pending` whenever `<= 500`-track exports defer (`result.Deferred > 0`) on slow USB media so the next mount resumes finished tracks (`BH2-A4-5`)** | `BH2-A4-5` | `pkg/bridge::TestSmallLibraryDeferredMountWritesPendingAndResumes` | Release workflow Step 2 (`go test -race ./pkg/bridge/...`) |
+| 75 | **`enginedb.EncodePerformance` clamps end-of-track Hot Cues, main CUE, and loop bounds to `samples` so `ParseDisplayPerformance` never rejects shadow/linked display blobs (`BH2-A4-15`)** | `BH2-A4-15` | `pkg/enginedb::TestEncodePerformanceClampsEndOfTrackCuesAndLoopsForDisplay` | Release workflow Step 2 (`go test -race ./pkg/enginedb/...`) |
 
 ---
 
