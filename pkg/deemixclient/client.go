@@ -22,10 +22,14 @@ import (
 
 const maxTrackedLRU = 512
 
-var queueURLToken = regexp.MustCompile(`(?i)https?://\S+`)
+var (
+	queueURLToken   = regexp.MustCompile(`(?i)https?://\S+`)
+	queueBareSecret = regexp.MustCompile(`\b(?:[0-9a-fA-F]{32,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_.-]+)\b`)
+)
 
 func sanitizeQueueError(msg string) string {
 	msg = queueURLToken.ReplaceAllString(msg, "<url>")
+	msg = queueBareSecret.ReplaceAllString(msg, "<redacted>")
 	msg = strings.Join(strings.Fields(msg), " ")
 	msg = strings.TrimPrefix(msg, "deemix: ")
 	if runes := []rune(msg); len(runes) > 256 {
