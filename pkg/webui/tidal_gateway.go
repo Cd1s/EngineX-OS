@@ -42,7 +42,8 @@ const hintPlaylist = "00000000-0000-5000-8000-000000005000"
 // Engine's single TIDAL client, so the source the user last opened (the UI
 // "scope") decides what this gateway answers. Loaded tracks keep working after
 // a switch because track IDs are global.
-func hintTitle(scope string) string { return "请登录：sc5000.lan:8080" }
+// The deck shows these hints; they name its LAN address, which phones can reach (#218).
+func hintTitle(scope string) string { return "请登录：" + lanHost() + ":8080" }
 
 // sourceFailedTitle stands in for a logged-in source whose playlists failed,
 // so the menu says why instead of being empty. #70: Spotify answers 403 for an
@@ -432,7 +433,7 @@ func (g *tidalGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.mux.ServeHTTP(w, r2)
 }
 func (g *tidalGateway) deviceAuthorization(w http.ResponseWriter, r *http.Request) {
-	respond(w, map[string]any{"deviceCode": "sc5000-local", "userCode": "SC5000", "verificationUri": "sc5000.lan:8080", "verificationUriComplete": "http://sc5000.lan:8080", "expiresIn": 600, "interval": 1})
+	respond(w, map[string]any{"deviceCode": "sc5000-local", "userCode": "SC5000", "verificationUri": lanHost() + ":8080", "verificationUriComplete": "http://" + lanHost() + ":8080", "expiresIn": 600, "interval": 1})
 }
 func (g *tidalGateway) token(w http.ResponseWriter, r *http.Request) {
 	respond(w, map[string]any{"access_token": "sc5000-token", "refresh_token": "sc5000-refresh", "token_type": "Bearer", "expires_in": 86400, "user": map[string]any{"userId": 1, "countryCode": "US"}})
@@ -852,7 +853,7 @@ func (g *tidalGateway) playlists(w http.ResponseWriter, r *http.Request) {
 		g.omniPlaylists(r.Context(), scope, add)
 	}
 	if scope != "deezer" && len(sessions) == 0 {
-		add(playlistJSON(hintPlaylist, hintTitle(scope), "手机打开 http://sc5000.lan:8080 登录后，歌单会出现在这里", 0))
+		add(playlistJSON(hintPlaylist, hintTitle(scope), "手机打开 http://"+lanHost()+":8080 登录后，歌单会出现在这里", 0))
 	}
 	respond(w, page(r, 100, items))
 }
@@ -1207,7 +1208,7 @@ func (g *tidalGateway) playlistTracks(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if v == nil {
-			fail(w, 404, errors.New("login expired; sign in again at sc5000.lan:8080"))
+			fail(w, 404, errors.New("login expired; sign in again at "+lanHost()+":8080"))
 			return
 		}
 		p, guest, session = v.p, v.Guest, v.ID

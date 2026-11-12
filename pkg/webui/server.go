@@ -393,18 +393,39 @@ func LoadAccessToken(dir string) (token string, created bool, err error) {
 	return token, true, nil
 }
 
-func (s *Server) consoleQR(w http.ResponseWriter, r *http.Request) {
-	target := s.cfg.PublicURL
-	if target == "" {
-		target = "http://sc5000.lan:8080"
+// qrTarget keeps an explicitly configured public URL; the built-in sc5000.lan default is not one.
+func (s *Server) qrTarget(r *http.Request) string {
+	if u := s.cfg.PublicURL; u != "" && !strings.Contains(u, "sc5000.lan") {
+		return u
 	}
-	png, err := qrcode.Encode(target, qrcode.Medium, 320)
+	return consoleURL(r)
+}
+
+func (s *Server) consoleQR(w http.ResponseWriter, r *http.Request) {
+	png, err := qrcode.Encode(s.qrTarget(r), qrcode.Medium, 320)
 	if err != nil {
 		fail(w, 400, err)
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
 	w.Write(png)
+}
+
+// consoleURL is the console address a phone on the same network can open: the host
+// this browser reached the console by, unless that only works on this machine. Most
+// routers do not resolve sc5000.lan, so a QR code pointing there opened a blank page (#218).
+func consoleURL(r *http.Request) string {
+	name, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		name = r.Host
+	}
+	if ip := net.ParseIP(name); name == "" || name == "localhost" || name == "sc5000.lan" || (ip != nil && ip.IsLoopback()) {
+		return "http://" + lanHost() + ":8080"
+	}
+	if r.TLS != nil || strings.HasSuffix(name, ".trycloudflare.com") {
+		return "https://" + r.Host
+	}
+	return "http://" + r.Host
 }
 
 // legacyAccessCode matches codes from older releases: providers.RandomID (43 base64url) or 32 hex.
