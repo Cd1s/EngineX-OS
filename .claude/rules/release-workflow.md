@@ -23,6 +23,7 @@
 | `README.md`、`README.zh-CN.md`、`README.zh-TW.md` | 第 3 行 hero 图的 `alt="EngineX OS <VERSION>"`；简介里的 `**EngineX OS <VERSION>**`；性能对比表表头里的 `` `EngineX OS <VERSION>` ``；本版本新特性与使用教程章节；「如何安装与升级」里 4 个平台 `EngineX-Installer-<VERSION>`、8 款一代机 `*-Update.img` 与 8 款二代机主下载 `*-Update.img` 的文件名和下载链接（共 20 条主直链，三份 README 同步更新；`5.3.0.4` / `5.3.0.5` Release 资产中同时保留 8 个 `*-Data-Bundle.tar.gz` 供旧版二代机屏幕 OTA 平滑过渡，`5.3.0.6+` 起彻底退役，#215） |
 | `docs/index.html`、`docs/site/{content.js,app.js,style.css}` | 官网 `https://enginexdj.com`（独立全屏首页 `Home` + 三栏使用文档 `Docs`）：更新三语 `version: "<VERSION>"`、新功能章节与刷机/使用教程、全部 20 条下载链接（4 个安装器 + 16 个 `*-Update.img`：8 款一代 + 8 款二代），并递增 `docs/index.html`（及 `docs/site/content.js` 如有）里的静态资源缓存参数 `?v=N` |
 | `docs/site/assets/shots/*.png`、`docs/assets/screenshots/{zh-CN,zh-TW,en}/*.png` | 凡涉及界面、菜单、控制中心磁贴或版本号变更，必须在编译机上基于 `<VERSION>` 底包通过 `QT_QPA_PLATFORM=eglfs`（`/dev/dri/card0` `virtio-gpu` + Mesa OpenGL，避免 `offscreen` 下 `ColoredImage` 图标空白）重新渲染三语实测截图并同步替换官网与 README 截图（实机硬件专属截图如 `07-bluetooth-audio.png` 保持不变） |
+| `docs/assets/boot-splash-enginex.png`（开机画面，**必做**） | 固件开机画面分区和 Engine 启动画面（界面包 `img/SplashScreen.png`，一代和二代都用）由 `build-release.sh` 按 `<VERSION>` 从官方底包的原厂开机画面现场生成，不再读这张图；版本号里有画不出来的数字（目前只有 0、1、3、4、5、7 和点）时构建直接报错，要先在 `tools/splash/splash_tool.py` 补字形。仓库里这张图只是预览，升版本时在编译机上用 `splash_tool.py render --preset enginex --stock <官方 splash> --version <VERSION> --png docs/assets/boot-splash-enginex.png` 重新生成并提交（教训：5.3.0.4 的开机画面一直显示 5.3.0.3，#218） |
 | `docs/assets/hero-banner*.svg` | 三张 banner 现在不写版本号。大版本换视觉或 banner 里出现版本号时才改，三语一起改 |
 | `tools/az01-packer/README.md` | 示例命令里的版本号（可选，保持示例与现行版本一致） |
 
@@ -98,6 +99,7 @@ REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --
 
 - 三个镜像组各抽一个，`python3 tools/az01-packer/az01_packer.py unpack <img> --output <新目录>` 要输出 `"verified": true`。
 - 在解包出的 `rootfs.ext2` 里用 `debugfs -R "cat <路径>"` 核对：`/etc/sc5000/version.txt` 是 `<VERSION>`，本次修改的文件确实在镜像里。
+- **开机画面（必做）**：`python3 -I tools/splash/splash_tool.py decode --input <解包目录>/splash.payload --output /tmp/splash.png`，打开看右下角版本号是 `<VERSION>`（一代镜像）；二代镜像核对界面包里的 `img/SplashScreen.png` 也是 `<VERSION>`。
 - 同一组的机型 sha256 应相同：
 
 | 镜像组 | 机型（前缀，板号） |

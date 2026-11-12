@@ -7306,6 +7306,7 @@ def main():
     ap.add_argument("--build-tag", default=None, help="override build tag (e.g. 'sbx 085a437')")
     ap.add_argument("--release", action="store_true", help="omit dev/sandbox commit tag from UI")
     ap.add_argument("--print-build-tag", action="store_true", help="print computed build tag and exit")
+    ap.add_argument("--splash", type=Path, help="1280x800 start-up screen PNG rendered for this version (release builds)")
     a = ap.parse_args()
     build_tag = detect_build_tag(a.build_tag, a.release)
     if a.print_build_tag:
@@ -7356,7 +7357,7 @@ def main():
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
         # Engine's start-up screen. Only the 1280x800 one: _16x9 is 1366x768 and would stretch.
-        splash = HERE.parent.parent / "docs/assets/boot-splash-enginex.png"
+        splash = a.splash or HERE.parent.parent / "docs/assets/boot-splash-enginex.png"
         if ROOT == "Skins/Embedded/" and splash.is_file():
             (a.out / lang / ROOT / "img").mkdir(parents=True, exist_ok=True)
             shutil.copyfile(splash, a.out / lang / ROOT / "img/SplashScreen.png")

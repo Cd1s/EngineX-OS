@@ -107,9 +107,24 @@ class Presets(unittest.TestCase):
         stock = fake_stock(0)
         self.assertEqual(st.render_recovery(stock), stock[2])  # stock screen kept as is
 
+    def test_drawn_digits(self):
+        # 5.3.0.4 shipped a splash reading "5.3.0.3": the stock art has no "4".
+        c = st.render_splash(fake_stock(10), "5.3.0.4")
+        at = lambda x, y: c[(y * W + x) * 4]  # noqa: E731
+        lit = [at(x, 762) > 60 for x in range(1000, 1280)]  # the 4's bar row
+        self.assertEqual(sum(a and not b for a, b in zip(lit, [False] + lit)), 7)
+        self.assertEqual(max(i for i, v in enumerate(lit) if v) + 1000, 1257)
+        self.assertGreater(at(1249, 740), 100)              # 4: stem
+        self.assertEqual(at(1238, 735), 10)                 # 4: open left of the diagonal
+        self.assertLessEqual(max(c[(y * W + x) * 4] for x in range(1228, 1258) for y in range(720, 780)), 126)
+        for v in ("5.3.0.1", "5.3.0.7", "5.4.1.7"):
+            st.render_splash(fake_stock(10), v)
+
     def test_unknown_version_glyph(self):
         with self.assertRaises(ValueError):
-            st.render_splash(fake_stock(10), "5.3.1")
+            st.render_splash(fake_stock(10), "5.3.2")
+        with self.assertRaises(SystemExit):  # no stale default version
+            st.main(["render", "--preset", "enginex", "--stock", "x.bin", "--bin", "y.bin"])
 
 
 if __name__ == "__main__":
