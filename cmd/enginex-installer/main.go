@@ -836,7 +836,7 @@ func mtime(p string) time.Time {
 
 // ---- mode A: SSH ------------------------------------------------------------
 
-func dialSSH(o *options, ip string) (*ssh.Client, error) {
+func dialSSH(ctx context.Context, o *options, ip string) (*ssh.Client, error) {
 	var auth []ssh.AuthMethod
 	var signers []ssh.Signer
 	keys := []string{o.Key}
@@ -871,20 +871,93 @@ func dialSSH(o *options, ip string) (*ssh.Client, error) {
 	cfg := &ssh.ClientConfig{User: "root", Auth: auth, Timeout: 5 * time.Second,
 		// shortcut: decks are reflashed and get new host keys, and this is a LAN install; pin keys if this ever runs over a WAN.
 		HostKeyCallback: ssh.InsecureIgnoreHostKey()}
-	return ssh.Dial("tcp", net.JoinHostPort(ip, strconv.Itoa(o.SSHPort)), cfg)
+	addr := net.JoinHostPort(ip, strconv.Itoa(o.SSHPort))
+	conn, err := (&net.Dialer{Timeout: cfg.Timeout}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	// ssh.Dial's Timeout covers only the TCP connect: a deck that accepts and then says
+	// nothing would hold the handshake for ever.
+	conn.SetDeadline(time.Now().Add(4 * cfg.Timeout))
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+	if !stop() || err != nil {
+		conn.Close()
+		if err == nil {
+			err = ctx.Err()
+		}
+		return nil, err
+	}
+	conn.SetDeadline(time.Time{})
+	cl := ssh.NewClient(c, chans, reqs)
+	go keepAlive(cl, sshKeepAlive)
+	return cl, nil
+}
+
+// BH-G2-9: SSH work follows the context (Ctrl+C), a read-only command has a deadline, and a
+// deck that stops answering is dropped. Vars for the tests.
+var (
+	sshKeepAlive   = 15 * time.Second
+	sshReadTimeout = 30 * time.Second
+)
+
+// keepAlive closes the connection after three unanswered keepalives (deck powered off, cable
+// pulled): a TCP connection to a dead peer would otherwise wait for ever.
+func keepAlive(c *ssh.Client, every time.Duration) {
+	for missed := 0; missed < 3; {
+		time.Sleep(every)
+		answered := make(chan error, 1)
+		go func() { _, _, err := c.SendRequest("keepalive@openssh.com", true, nil); answered <- err }()
+		select {
+		case err := <-answered:
+			if err != nil {
+				return // closed
+			}
+			missed = 0
+		case <-time.After(every):
+			missed++
+		}
+	}
+	c.Close()
 }
 
 func isAuthErr(err error) bool { return strings.Contains(err.Error(), "unable to authenticate") }
 
-func sshRun(c *ssh.Client, cmd string, stdin io.Reader) (string, error) {
-	s, err := c.NewSession()
-	if err != nil {
-		return "", err
+// sshRun runs cmd on the deck until it ends or ctx is done. Closing the connection is the only way
+// to give up on a session that does not answer; a command already running on the deck may still
+// finish there.
+func sshRun(ctx context.Context, c *ssh.Client, cmd string, stdin io.Reader) (string, error) {
+	type result struct {
+		out []byte
+		err error
 	}
-	defer s.Close()
-	s.Stdin = stdin
-	out, err := s.CombinedOutput(cmd) // not one Buffer for both pipes: their copiers race on it
-	return string(out), err
+	done := make(chan result, 1)
+	go func() {
+		s, err := c.NewSession()
+		if err != nil {
+			done <- result{nil, err}
+			return
+		}
+		defer s.Close()
+		s.Stdin = stdin
+		out, err := s.CombinedOutput(cmd) // not one Buffer for both pipes: their copiers race on it
+		done <- result{out, err}
+	}()
+	select {
+	case r := <-done:
+		return string(r.out), r.err
+	case <-ctx.Done():
+		c.Close()
+		<-done
+		return "", fmt.Errorf("SSH 连接已中止，碟机上已开始的操作可能仍在进行 / SSH connection abandoned, anything already started on the deck may still be running: %w", ctx.Err())
+	}
+}
+
+// sshRead runs a read-only command with a deadline.
+func sshRead(ctx context.Context, c *ssh.Client, cmd string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, sshReadTimeout)
+	defer cancel()
+	return sshRun(ctx, c, cmd, nil)
 }
 
 // installCmd unpacks the streamed tarball in the deck's temp dir, runs install.sh, and marks gen2-unlocked (#215).
@@ -913,7 +986,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		}
 		return modeAB(ctx, o, d)
 	}
-	cl, err := dialSSH(o, d.IP)
+	cl, err := dialSSH(ctx, o, d.IP)
 	if err != nil {
 		if o.Uninstall {
 			return fmt.Errorf("%s: 卸载需通过 SSH 连接碟机，无法连接 SSH / --uninstall requires SSH access to the deck, cannot connect: %w", label, err)
@@ -924,7 +997,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		return modeAB(ctx, o, d)
 	}
 	defer cl.Close()
-	out, err := sshRun(cl, compatCmd, nil)
+	out, err := sshRead(ctx, cl, compatCmd)
 	if err != nil {
 		return fmt.Errorf("%s: cannot read the board: %w", label, err)
 	}
@@ -943,7 +1016,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		// the real /data/sc5000-custom, and there is no /data/enginex to run uninstall.sh from.
 		uninstallCmd := `d=` + customDirSh + `; [ -f "$d/bundle/uninstall.sh" ] || d=$(dirname "$d")/sc5000-custom; ` +
 			`sh "$d/bundle/uninstall.sh" && (systemctl reboot || reboot || :)`
-		if out, err := sshRun(cl, uninstallCmd, nil); err != nil {
+		if out, err := sshRun(ctx, cl, uninstallCmd, nil); err != nil {
 			return fmt.Errorf("%s: uninstall failed: %w\n%s", label, err, out)
 		}
 		o.say("已从 /data 卸载 EngineX OS，碟机正在重启回到原厂系统",
@@ -971,7 +1044,10 @@ func modeA(ctx context.Context, o *options, d deck) error {
 			return err
 		}
 		cmd := fmt.Sprintf("set -e; cat > /data/az01-update.img; echo '%x  /data/az01-update.img' | sha256sum -c -; /usr/sbin/az01-update --file /data/az01-update.img", h.Sum(nil))
-		out, err := sshRun(cl, cmd, f)
+		// Not cut off by Ctrl+C: closing the session could stop az01-update while it writes the
+		// firmware. A deck that stops answering is still dropped (keepAlive).
+		o.say("正在上传并写入固件，期间无法中断，请勿断电…", "Uploading and writing the firmware; this cannot be interrupted, do not power off the deck...")
+		out, err := sshRun(context.WithoutCancel(ctx), cl, cmd, f)
 		if err != nil {
 			return fmt.Errorf("update failed: %w\n%s", err, out)
 		}
@@ -984,14 +1060,14 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		return err
 	}
 	sayGen2Steps(o, filepath.Base(b.Path))
-	if out, err := sshRun(cl, installCmd(b.Top), bytes.NewReader(b.TarGz)); err != nil {
+	if out, err := sshRun(ctx, cl, installCmd(b.Top), bytes.NewReader(b.TarGz)); err != nil {
 		return fmt.Errorf("%s: install failed: %w\n%s", label, err, out)
 	}
-	got, err := sshRun(cl, "cat "+customDirSh+"/version.txt", nil)
+	got, err := sshRead(ctx, cl, "cat "+customDirSh+"/version.txt")
 	if err != nil || strings.TrimSpace(got) != b.Version {
 		return fmt.Errorf("%s: installed version reads back as %q, expected %s", label, strings.TrimSpace(got), b.Version)
 	}
-	if out, err := sshRun(cl, `sh `+customDirSh+`/bundle/boot-activate.sh`, nil); err != nil {
+	if out, err := sshRun(ctx, cl, `sh `+customDirSh+`/bundle/boot-activate.sh`, nil); err != nil {
 		return fmt.Errorf("%s: activation failed: %w\n%s", label, err, out)
 	}
 	o.say(fmt.Sprintf("完成：%s 已安装 EngineX OS %s，Engine 正在重启。", label, b.Version),
