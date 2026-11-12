@@ -440,7 +440,12 @@ func (s *Server) liveWAV(w http.ResponseWriter, r *http.Request) {
 	}
 	l, cancel := b.SubscribeLive(liveBufferMS(r))
 	defer cancel()
-	liveHeaders(w.Header(), contentType, b.Status())
+	st := b.Status()
+	if !st.Enabled { // turned off between the check above and the subscription
+		http.Error(w, "Live Stream is off: set Live Stream to ON in the deck control centre", http.StatusServiceUnavailable)
+		return
+	}
+	liveHeaders(w.Header(), contentType, st)
 
 	write, done := liveWriter(w)
 	defer done()

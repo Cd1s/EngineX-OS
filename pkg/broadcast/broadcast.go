@@ -276,6 +276,7 @@ func (b *Broadcaster) Close() {
 
 // startLocked starts the worker goroutine on CPU3. Caller must hold b.mu.
 func (b *Broadcaster) startLocked() {
+	b.hub.reopen()
 	ctx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
 	b.wg.Add(1)

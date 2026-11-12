@@ -3,6 +3,7 @@ package broadcast
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 )
 
 // hub fans captured PCM out to local HTTP listeners (/live.mp3, /live.wav).
@@ -11,6 +12,10 @@ type hub struct {
 	subs      map[chan []byte]struct{}
 	listeners map[*Listener]struct{}
 	history   []byte // the most recent MaxBufferMS of published PCM, whole frames
+	// stopped: closeAll ran and no start since. A listener that arrived while
+	// Live Stream was being turned off (after the handler saw it enabled) was
+	// registered after closeAll and stayed parked for good (r3 review).
+	stopped bool
 }
 
 // Live listener cushion (/live.wav ?buffer=): on connect a listener first gets the
@@ -36,16 +41,19 @@ func msBytes(ms int) int { return ms * bytesPerMS }
 
 // Listener is one local live listener with a byte queue the hub can trim.
 type Listener struct {
-	mu     sync.Mutex
-	queue  []byte
-	target int // bytes kept after a trim (BufferMS)
-	limit  int // a queue above this is trimmed (BufferMS + TrimSlackMS)
-	ready  chan struct{}
-	done   chan struct{}
-	closed bool
-	// Dropped counts bytes trimmed from this listener (whole frames).
-	Dropped int64
+	mu      sync.Mutex
+	queue   []byte
+	target  int // bytes kept after a trim (BufferMS)
+	limit   int // a queue above this is trimmed (BufferMS + TrimSlackMS)
+	ready   chan struct{}
+	done    chan struct{}
+	closed  bool
+	dropped atomic.Int64 // bytes trimmed from this listener (whole frames)
 }
+
+// Dropped is the number of bytes trimmed from this listener (whole frames). It
+// is safe to read while audio is published (r3 review: a plain int64 field).
+func (l *Listener) Dropped() int64 { return l.dropped.Load() }
 
 // SubscribeLive registers a listener with a bufferMS cushion (clamped to 0..MaxBufferMS).
 func (b *Broadcaster) SubscribeLive(bufferMS int) (*Listener, func()) {
@@ -57,6 +65,11 @@ func (h *hub) subscribeLive(bufferMS int) (*Listener, func()) {
 	l := &Listener{target: msBytes(bufferMS), limit: msBytes(bufferMS + TrimSlackMS),
 		ready: make(chan struct{}, 1), done: make(chan struct{})}
 	h.mu.Lock()
+	if h.stopped {
+		h.mu.Unlock()
+		l.close()
+		return l, func() {}
+	}
 	if h.listeners == nil {
 		h.listeners = map[*Listener]struct{}{}
 	}
@@ -92,7 +105,7 @@ func (l *Listener) push(pcm []byte) {
 	if len(l.queue) > l.limit {
 		drop := len(l.queue) - l.target
 		drop -= drop % 4 // whole frames only (the queue holds whole frames)
-		l.Dropped += int64(drop)
+		l.dropped.Add(int64(drop))
 		l.queue = append(l.queue[:0:0], l.queue[drop:]...)
 	}
 	l.mu.Unlock()
@@ -135,6 +148,11 @@ func (b *Broadcaster) Subscribe() (<-chan []byte, func()) {
 func (h *hub) subscribe() (<-chan []byte, func()) {
 	ch := make(chan []byte, 160) // about 1.5 s of ~10 ms chunks, as 64 was with 24 ms ones
 	h.mu.Lock()
+	if h.stopped {
+		h.mu.Unlock()
+		close(ch)
+		return ch, func() {}
+	}
 	if h.subs == nil {
 		h.subs = map[chan []byte]struct{}{}
 	}
@@ -186,4 +204,12 @@ func (h *hub) closeAll() {
 		delete(h.listeners, l)
 	}
 	h.history = nil
+	h.stopped = true
+}
+
+// reopen accepts listeners again; the broadcaster calls it when it starts.
+func (h *hub) reopen() {
+	h.mu.Lock()
+	h.stopped = false
+	h.mu.Unlock()
 }
