@@ -67,6 +67,9 @@ type Options struct {
 	// read. A large library otherwise spent its whole read budget re-checking
 	// thousands of finished tracks on every mount (BH-GC1-2).
 	Resume bool `json:"-"`
+	// Now is the clock Deadline is checked against; nil means time.Now. Tests
+	// use it to put the deadline inside a library whatever the host's load.
+	Now func() time.Time `json:"-"`
 }
 type Result struct {
 	Added, Updated, Unchanged int
@@ -366,17 +369,29 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 	// Preparing (stats, MP3 headers) gets the first half of the time left and
 	// reading the prepared tracks the rest. A Sync that starts in time reads at
 	// least one track, so every mount of a large library makes progress.
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
 	var cutoff time.Time
-	inTime := opts.Deadline.IsZero() || time.Now().Before(opts.Deadline)
+	inTime := opts.Deadline.IsZero() || now().Before(opts.Deadline)
 	if !opts.Deadline.IsZero() {
-		cutoff = time.Now().Add(time.Until(opts.Deadline) / 2)
+		start := now()
+		cutoff = start.Add(opts.Deadline.Sub(start) / 2)
 	}
 	read := 0
+	// past reports whether the deadline has passed, reading the clock only
+	// until it has.
+	expired := false
+	past := func() bool {
+		expired = expired || !opts.Deadline.IsZero() && now().After(opts.Deadline)
+		return expired
+	}
 	var prepared []preparedTrack
 	if opts.Fast {
 		prepared = prepareFast(res, l)
 	} else if !opts.Resume {
-		if prepared, err = prepareTracks(ctx, res, l, cutoff, nil); err != nil {
+		if prepared, err = prepareTracks(ctx, res, l, cutoff, now, nil); err != nil {
 			return result, err
 		}
 	}
@@ -412,7 +427,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		if e != nil {
 			return result, e
 		}
-		if prepared, err = prepareTracks(ctx, res, l, cutoff, done); err != nil {
+		if prepared, err = prepareTracks(ctx, res, l, cutoff, now, done); err != nil {
 			return result, err
 		}
 	}
@@ -436,8 +451,8 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			return result, err
 		}
 		// Time left after the tracks prepared up front: prepare the next one now.
-		if preparedTrack.late && !opts.Deadline.IsZero() && time.Now().Before(opts.Deadline) {
-			if p, e := prepareOne(res, preparedTrack.track, preparedTrack.rel, opts.Deadline, true); e == nil {
+		if preparedTrack.late && !opts.Deadline.IsZero() && !past() {
+			if p, e := prepareOne(res, preparedTrack.track, preparedTrack.rel, opts.Deadline, now, true); e == nil {
 				preparedTrack = p
 			}
 		}
@@ -461,7 +476,7 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			}
 		}
 		fast := opts.Fast
-		if !fast && (preparedTrack.late || (previous != hash && !opts.Deadline.IsZero() && time.Now().After(opts.Deadline) && (read > 0 || !inTime))) {
+		if !fast && (preparedTrack.late || (previous != hash && past() && (read > 0 || !inTime))) {
 			// A "fast:" fingerprint makes the next full import read this track.
 			fast, files, art, hash = true, nil, nil, "fast:"+t.RecordHash
 			result.Deferred++
