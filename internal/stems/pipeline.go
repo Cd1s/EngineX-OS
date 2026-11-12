@@ -267,6 +267,9 @@ func (p *pipeline) Write(b []byte) (int, error) {
 func (p *pipeline) Complete() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.err != nil {
+		return p.err
+	}
 	if (p.started || p.done) && !p.final {
 		return fmt.Errorf("stems pipeline: renderer ended before its final reply")
 	}
