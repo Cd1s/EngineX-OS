@@ -3,16 +3,18 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
-static char test_media[PATH_MAX],test_library[PATH_MAX],test_legacy_library[PATH_MAX],test_runtime[PATH_MAX];
+static char test_media[PATH_MAX],test_library[PATH_MAX],test_legacy_library[PATH_MAX],test_runtime[PATH_MAX],test_utab[PATH_MAX];
 #define MEDIA_ROOT test_media
 #define LIB_ROOT test_library
 #define LEGACY_LIB_ROOT test_legacy_library
 #define RUN_ROOT test_runtime
+#define UTAB_DIR test_utab
 // after_mount seams: a bind mount is neither HFS+ nor a block device.
 static char test_hfs_target[PATH_MAX],test_rb_bridge[PATH_MAX];
 static int test_hfs_readonly(const char *target){return *test_hfs_target&&!strcmp(target,test_hfs_target);}
 static int test_volume_identity(const char *source,char out[80]){(void)source;snprintf(out,80,"uuid-hfs-stick");return 0;}
-static const char *test_rb_bridge_path(void){return test_rb_bridge;}
+static int test_bridge_hangs;
+static const char *test_rb_bridge_path(void);
 #define HFS_READONLY test_hfs_readonly
 #define VOLUME_IDENTITY test_volume_identity
 #define RB_BRIDGE_PATH test_rb_bridge_path
@@ -31,9 +33,14 @@ const char *mnt_context_get_target(struct libmnt_context *c){return c->target;}
 const char *mnt_context_get_source(struct libmnt_context *c){return c->source;}
 int mnt_context_get_status(struct libmnt_context *c){return c->status;}
 int mnt_context_set_syscall_status(struct libmnt_context *c,int status){c->status=status;return 0;}
+static const char *test_rb_bridge_path(void){while(test_bridge_hangs)pause();return test_rb_bridge;}
 static char test_disk[PATH_MAX];static int test_disk_ro;
 static int test_real_mount(struct libmnt_context *c) {
     if(mount(c->disk?c->disk:test_disk,c->target,NULL,MS_BIND,NULL))return -errno;
+    // As libmount does for a mount with a userspace option: a line in <UTAB_DIR>/utab.
+    char utab[PATH_MAX+8];snprintf(utab,sizeof utab,"%s/utab",test_utab);
+    int fd=open(utab,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC,0600);
+    if(fd>=0){if(write(fd,c->target,strlen(c->target))<0||write(fd,"\n",1)<0){}close(fd);}
     if(test_disk_ro&&mount(NULL,c->target,NULL,MS_BIND|MS_REMOUNT|MS_RDONLY,NULL))return -errno;
     c->status=1;return 0;
 }
@@ -450,12 +457,38 @@ static void test_hfs_visible_mount_reuses_the_converted_library(const char *root
     assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;test_disk_ro=0;
     puts("REAL PRIVATE NAMESPACE #182: a read-only HFS+ stick with an Engine Library and a rekordbox export is shown the library its private conversion used, without a second read of the stick's database: PASS");
 }
+// #182 review: what the private pre-mount left in edisksd's own namespace. Its
+// libmount record went into the shared /run/mount/utab and was never removed
+// (one stale line per insert), and a pre-mount killed at its deadline left its
+// HFS+ view's directory and record in the runtime directory.
+static void test_private_mount_leaves_nothing_behind(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char data[PATH_MAX],disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],utab[PATH_MAX],line[PATH_MAX+8];
+    join(data,root,"clean-data");join(p,data,"enginex");assert(!make_dirs(p));
+    join(test_library,p,"hfs-libraries");test_legacy_library[0]=0;
+    join(disk,root,"clean-stick");join(p,disk,".PIONEER/rekordbox");assert(!make_dirs(p));
+    join(test_rb_bridge,root,"clean-bridge");write_file(test_rb_bridge,"#!/bin/sh\nexit 0\n");assert(!chmod(test_rb_bridge,0700));
+    join(target,MEDIA_ROOT,"CLEAN");assert(!make_dirs(target));join(utab,test_utab,"utab");unlink(utab);
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
+    struct libmnt_context c={.target=target,.source="/dev/sdv1"};
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    snprintf(line,sizeof line,"%s\n",target);expect_file(utab,line); // the visible mount's record only
+    assert(!umount2(target,UMOUNT_NOFOLLOW));
+    // Read-only HFS+: the pre-mount has its view up when it stops responding and is killed.
+    test_disk_ro=1;snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);
+    unsigned views_before=count_views();
+    test_bridge_hangs=1;c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);test_bridge_hangs=0;
+    assert(count_views()==views_before+1); // the visible mount's view and nothing else
+    assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;test_disk_ro=0;
+    assert(count_views()==views_before);
+    puts("REAL PRIVATE NAMESPACE #182: the private pre-mount leaves no utab record, and a killed one no view directory, in the caller's namespace: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
-    join(test_legacy_library,root,"legacy-libraries");
+    join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
