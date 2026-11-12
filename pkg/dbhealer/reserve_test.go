@@ -160,3 +160,44 @@ func TestNormalizeReserveLeavesOtherFilesAlone(t *testing.T) {
 		t.Fatalf("rebuilt under a hot journal: %v %v", fixed, err)
 	}
 }
+
+// BH-GC1-1: on a stick labelled "USB #1" the unescaped URI ATTACHed an empty file
+// and the empty rebuild replaced m.db, so the whole library was gone.
+func TestNormalizeReserveKeepsLibraryOnLabelWithHashAndQuestionMark(t *testing.T) {
+	for _, label := range []string{"USB #1", "MUSIC?2", "100% DJ"} {
+		t.Run(label, func(t *testing.T) { normalizeUnderLabel(t, label) })
+	}
+}
+
+func normalizeUnderLabel(t *testing.T, label string) {
+	src := reserve12Library(t)
+	dir := filepath.Join(t.TempDir(), label, "Engine Library", "Database2")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "m.db")
+	if err := os.Rename(src, path); err != nil {
+		t.Fatal(err)
+	}
+	count := func() (n int) {
+		db, err := Open(path, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if err := db.QueryRow("SELECT count(*) FROM Track").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	before := count()
+	if before == 0 {
+		t.Fatal("setup: fixture has no tracks")
+	}
+	if fixed, err := NormalizeReserve(path); err != nil || !fixed {
+		t.Fatalf("NormalizeReserve = %v, %v", fixed, err)
+	}
+	if after := count(); after != before {
+		t.Fatalf("tracks %d -> %d", before, after)
+	}
+}
