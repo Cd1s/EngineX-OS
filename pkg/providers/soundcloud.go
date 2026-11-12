@@ -620,10 +620,7 @@ func (s *SoundCloud) playlistPages(ctx context.Context, address, prefix string, 
 // library is where the account's own lists live. A user's token also reaches private
 // ones through /me; otherwise it is the public profile.
 func (s *SoundCloud) library() (string, error) {
-	if s.web() && s.UserID != 0 {
-		return "/users/" + strconv.FormatInt(s.UserID, 10), nil
-	}
-	if s.Token != "" || s.Auth.HasUser() {
+	if s.Token != "" || (!s.web() && s.Auth.HasUser()) {
 		return "/me", nil
 	}
 	if s.UserID != 0 {
@@ -680,6 +677,9 @@ func (s *SoundCloud) Tracks(ctx context.Context, id string) ([]Track, error) {
 		if errors.As(err, &st) && st == 400 {
 			q.Del("access") // some accounts' likes refuse the filter
 			out, err = s.trackPages(ctx, address())
+		}
+		if errors.As(err, &st) && st == 404 && s.web() && root == "/me" && s.UserID != 0 {
+			out, err = s.trackPages(ctx, s.list("/users/"+strconv.FormatInt(s.UserID, 10)+"/track_likes", q))
 		}
 		if errors.As(err, &st) && (st == 400 || st == 401 || st == 403) && !s.web() && s.UserID != 0 {
 			// The login or app token is refused: a public profile's likes still read.

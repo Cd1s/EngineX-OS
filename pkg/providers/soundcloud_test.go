@@ -389,3 +389,48 @@ func TestSoundCloudLikesFallbackConcurrentWithHasGoPlusNoRace(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+func TestSoundCloudWebBrowserTokenQueriesMeForPrivatePlaylists(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.Header.Get("Authorization") != "OAuth browser-token" {
+			t.Errorf("missing browser token on %s", r.URL.Path)
+		}
+		switch r.URL.Path {
+		case "/me":
+			io.WriteString(w, `{"id":42,"username":"dj"}`)
+		case "/me/playlists":
+			io.WriteString(w, `{"collection":[{"id":101,"title":"Secret Set","track_count":5}]}`)
+		case "/me/playlist_likes":
+			io.WriteString(w, `{"collection":[]}`)
+		case "/me/track_likes":
+			io.WriteString(w, `{"collection":[{"id":7,"title":"Private Like","policy":"ALLOW","duration":180000}]}`)
+		default:
+			// /users/42/playlists omits private playlists in web mode.
+			io.WriteString(w, `{"collection":[]}`)
+		}
+	}))
+	defer srv.Close()
+	scWebMu.Lock()
+	scWebIDs[srv.URL] = "0123456789abcdef0123456789abcdef"
+	scWebMu.Unlock()
+	t.Cleanup(func() {
+		scWebMu.Lock()
+		delete(scWebIDs, srv.URL)
+		scWebMu.Unlock()
+	})
+
+	sc := &SoundCloud{WebURL: srv.URL, SiteURL: srv.URL, Token: "browser-token"}
+	if err := sc.Identify(context.Background()); err != nil || sc.UserID != 42 {
+		t.Fatalf("Identify: %v uid=%d", err, sc.UserID)
+	}
+	lists, err := sc.Playlists(context.Background())
+	if err != nil || len(lists) != 2 || lists[1].Title != "Secret Set" {
+		t.Fatalf("Playlists missed private set: lists=%+v err=%v paths=%v", lists, err, paths)
+	}
+	likes, err := sc.Tracks(context.Background(), soundCloudLikesID)
+	if err != nil || len(likes) != 1 || likes[0].Title != "Private Like" {
+		t.Fatalf("Tracks(likes) missed /me likes: likes=%+v err=%v paths=%v", likes, err, paths)
+	}
+}
