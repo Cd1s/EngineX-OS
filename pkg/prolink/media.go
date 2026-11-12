@@ -20,10 +20,24 @@ import (
 const (
 	DefaultMediaCacheDir = "/tmp/sc5000-prolink-media"
 	pdbPath              = "PIONEER/rekordbox/export.pdb"
+	dotPDBPath           = ".PIONEER/rekordbox/export.pdb"
 	maxPDB               = 64 << 20
 	maxANLZ              = 16 << 20
 	mediaFetch           = 4 * time.Second // bounds how long Observe holds the discovery lock
 )
+
+var remotePDBCandidates = []string{pdbPath, dotPDBPath}
+
+func validANLZRel(raw string) (string, bool) {
+	rel := filepath.ToSlash(filepath.Clean(strings.TrimPrefix(raw, "/")))
+	if !filepath.IsLocal(filepath.FromSlash(rel)) {
+		return "", false
+	}
+	if !strings.HasPrefix(rel, "PIONEER/USBANLZ/") && !strings.HasPrefix(rel, ".PIONEER/USBANLZ/") {
+		return "", false
+	}
+	return rel, true
+}
 
 // MediaCache reads a track's Rekordbox metadata and ANLZ waveform straight
 // from the Pioneer player whose USB/SD holds it (#59), so the waveform shows
@@ -64,10 +78,15 @@ func (m *MediaCache) resolve(dev Device, host net.IP) (*rekordbox.Analysis, stri
 	local := filepath.Join(root, pdbPath)
 	probe, ok := m.probes[root]
 	if !ok || time.Since(probe.at) >= 2*time.Second {
-		_, file, err := c.Lookup(ctx, export, "/"+pdbPath)
-		probe = mediaProbe{at: time.Now(), ok: err == nil}
-		if err == nil {
-			probe.stamp = fmt.Sprintf("%d %d", file.Size, file.MTime)
+		probe = mediaProbe{at: time.Now()}
+		for _, cand := range remotePDBCandidates {
+			_, file, err := c.Lookup(ctx, export, "/"+cand)
+			if err == nil {
+				probe.ok = true
+				probe.remotePath = cand
+				probe.stamp = fmt.Sprintf("%s %d %d", cand, file.Size, file.MTime)
+				break
+			}
 		}
 		if m.probes == nil {
 			m.probes = map[string]mediaProbe{}
@@ -79,6 +98,10 @@ func (m *MediaCache) resolve(dev Device, host net.IP) (*rekordbox.Analysis, stri
 	}
 	if !probe.ok {
 		return nil, "", ""
+	}
+	remotePDB := probe.remotePath
+	if remotePDB == "" {
+		remotePDB = pdbPath
 	}
 	stamp := probe.stamp
 	resolvedKey := fmt.Sprintf("%s:%d", root, dev.TrackID)
@@ -98,7 +121,7 @@ func (m *MediaCache) resolve(dev Device, host net.IP) (*rekordbox.Analysis, stri
 	var data []byte
 	var lib *rekordbox.Library
 	if changed {
-		data, _, err = c.Fetch(ctx, export, "/"+pdbPath, maxPDB)
+		data, _, err = c.Fetch(ctx, export, "/"+remotePDB, maxPDB)
 		if err != nil {
 			return nil, "", ""
 		}
@@ -121,8 +144,8 @@ func (m *MediaCache) resolve(dev Device, host net.IP) (*rekordbox.Analysis, stri
 			continue
 		}
 		track = trk
-		rel := filepath.Clean(strings.TrimPrefix(trk.AnalysisPath, "/"))
-		if !filepath.IsLocal(rel) || !strings.HasPrefix(rel, "PIONEER/USBANLZ/") {
+		rel, ok := validANLZRel(trk.AnalysisPath)
+		if !ok {
 			break
 		}
 		base := strings.TrimSuffix(rel, filepath.Ext(rel))
@@ -152,7 +175,7 @@ func (m *MediaCache) resolve(dev Device, host net.IP) (*rekordbox.Analysis, stri
 		}
 		// A disc swapped during the download must never publish the old PDB with
 		// the new disc's analysis. Keep the previous display invalid on failure.
-		if _, current, err := c.Lookup(ctx, export, "/"+pdbPath); err != nil || fmt.Sprintf("%d %d", current.Size, current.MTime) != stamp {
+		if _, current, err := c.Lookup(ctx, export, "/"+remotePDB); err != nil || fmt.Sprintf("%s %d %d", remotePDB, current.Size, current.MTime) != stamp {
 			return nil, "", ""
 		}
 		if err := m.publish(root, host, stamp, data, mediaPublication{files: additions, preserve: !changed}); err != nil {
@@ -171,8 +194,7 @@ func (m *MediaCache) resolve(dev Device, host net.IP) (*rekordbox.Analysis, stri
 	var title, artist string
 	if track != nil {
 		title, artist = track.Title, track.Artist
-		rel := filepath.Clean(strings.TrimPrefix(track.AnalysisPath, "/"))
-		if filepath.IsLocal(rel) && strings.HasPrefix(rel, "PIONEER/USBANLZ/") {
+		if rel, ok := validANLZRel(track.AnalysisPath); ok {
 			base := strings.TrimSuffix(rel, filepath.Ext(rel))
 			for _, ext := range []string{".DAT", ".EXT", ".2EX"} {
 				if a, err := rekordbox.ReadAnalysis(filepath.Join(root, base+ext)); err == nil {
@@ -211,9 +233,10 @@ func SharedMediaCacheDir() string {
 }
 
 type mediaProbe struct {
-	at    time.Time
-	stamp string
-	ok    bool
+	at         time.Time
+	remotePath string
+	stamp      string
+	ok         bool
 }
 
 type mediaResolved struct {
@@ -293,37 +316,40 @@ func (m *MediaCache) publish(root string, host net.IP, stamp string, data []byte
 			// Existing immutable ANLZ files can be linked into the next generation.
 			// Replacing a staged link uses writeFile's rename, preserving old readers.
 			if oldRoot, err := filepath.EvalSymlinks(root); err == nil {
-				source := filepath.Join(oldRoot, "PIONEER/USBANLZ")
-				err = filepath.WalkDir(source, func(path string, d os.DirEntry, err error) error {
-					if os.IsNotExist(err) {
-						return nil
-					}
+				for _, anlzSub := range []string{"PIONEER/USBANLZ", ".PIONEER/USBANLZ"} {
+					source := filepath.Join(oldRoot, anlzSub)
+					err = filepath.WalkDir(source, func(path string, d os.DirEntry, err error) error {
+						if os.IsNotExist(err) {
+							return nil
+						}
+						if err != nil {
+							return err
+						}
+						rel, err := filepath.Rel(oldRoot, path)
+						if err != nil || !filepath.IsLocal(rel) {
+							return fmt.Errorf("media: invalid cached path")
+						}
+						target := filepath.Join(tmp, rel)
+						if d.IsDir() {
+							return os.MkdirAll(target, 0700)
+						}
+						if !d.Type().IsRegular() {
+							return fmt.Errorf("media: non-regular cached analysis")
+						}
+						return os.Link(path, target)
+					})
 					if err != nil {
 						return err
 					}
-					rel, err := filepath.Rel(oldRoot, path)
-					if err != nil || !filepath.IsLocal(rel) {
-						return fmt.Errorf("media: invalid cached path")
-					}
-					target := filepath.Join(tmp, rel)
-					if d.IsDir() {
-						return os.MkdirAll(target, 0700)
-					}
-					if !d.Type().IsRegular() {
-						return fmt.Errorf("media: non-regular cached analysis")
-					}
-					return os.Link(path, target)
-				})
-				if err != nil {
-					return err
 				}
 			}
 		}
 		for rel, data := range addition.files {
-			if !filepath.IsLocal(rel) || !strings.HasPrefix(rel, "PIONEER/USBANLZ/") {
+			normRel, ok := validANLZRel(rel)
+			if !ok {
 				return fmt.Errorf("media: invalid analysis path")
 			}
-			if err := writeFile(filepath.Join(tmp, rel), data); err != nil {
+			if err := writeFile(filepath.Join(tmp, normRel), data); err != nil {
 				return err
 			}
 		}
@@ -410,8 +436,8 @@ func (m *MediaCache) CachedAnalysisVersion(dev Device, host net.IP, version stri
 		if trk.ID != dev.TrackID {
 			continue
 		}
-		rel := filepath.Clean(strings.TrimPrefix(trk.AnalysisPath, "/"))
-		if !filepath.IsLocal(rel) || !strings.HasPrefix(rel, "PIONEER/USBANLZ/") {
+		rel, ok := validANLZRel(trk.AnalysisPath)
+		if !ok {
 			return nil, "", ""
 		}
 		base := strings.TrimSuffix(rel, filepath.Ext(rel))
@@ -544,7 +570,13 @@ func fetchTrackRow(ctx context.Context, c *NFSClient, slot byte, id uint32) (str
 	if err != nil {
 		return "", rekordbox.Track{}, err
 	}
-	pdb, _, err := c.Fetch(ctx, export, "/"+pdbPath, maxPDB)
+	var pdb []byte
+	for _, cand := range remotePDBCandidates {
+		pdb, _, err = c.Fetch(ctx, export, "/"+cand, maxPDB)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return "", rekordbox.Track{}, err
 	}
@@ -568,9 +600,9 @@ func FetchAnalysis(ctx context.Context, c *NFSClient, slot byte, id uint32) (rek
 	if err != nil {
 		return t, nil, err
 	}
-	// The path comes from the remote PDB: only files under PIONEER/USBANLZ.
-	rel := filepath.Clean(strings.TrimPrefix(t.AnalysisPath, "/"))
-	if !filepath.IsLocal(rel) || !strings.HasPrefix(rel, "PIONEER/USBANLZ/") {
+	// The path comes from the remote PDB: only files under PIONEER/USBANLZ or .PIONEER/USBANLZ.
+	rel, ok := validANLZRel(t.AnalysisPath)
+	if !ok {
 		return t, nil, fmt.Errorf("prolink: track %d has no ANLZ path", id)
 	}
 	base := strings.TrimSuffix(rel, filepath.Ext(rel))

@@ -508,6 +508,7 @@ func defaultResolveWithRoot(anlzRoot string, device Device) (*rekordbox.Analysis
 	var title, artist, anlzRelPath string
 	pdbPaths := []string{
 		filepath.Join(anlzRoot, "PIONEER", "rekordbox", "export.pdb"),
+		filepath.Join(anlzRoot, ".PIONEER", "rekordbox", "export.pdb"),
 		filepath.Join(anlzRoot, "rekordbox", "export.pdb"),
 	}
 	for _, pdbPath := range pdbPaths {
@@ -528,6 +529,9 @@ func defaultResolveWithRoot(anlzRoot string, device Device) (*rekordbox.Analysis
 	if anlzRelPath == "" {
 		dbPaths := []string{
 			filepath.Join(anlzRoot, "PIONEER", "rekordbox", "exportLibrary.db"),
+			filepath.Join(anlzRoot, ".PIONEER", "rekordbox", "exportLibrary.db"),
+			filepath.Join(anlzRoot, "PIONEER", "rekordbox", "exportOneLibrary.db"),
+			filepath.Join(anlzRoot, ".PIONEER", "rekordbox", "exportOneLibrary.db"),
 			filepath.Join(anlzRoot, "rekordbox", "exportLibrary.db"),
 		}
 		for _, dbPath := range dbPaths {

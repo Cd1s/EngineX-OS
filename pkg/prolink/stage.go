@@ -55,7 +55,16 @@ func (t *throttled) Write(p []byte) (int, error) {
 }
 
 func Stage(ctx context.Context, c *NFSClient, export, dst string, max int64) (int, error) {
-	pdb, _, err := c.Fetch(ctx, export, "/"+pdbPath, maxPDB)
+	var pdb []byte
+	var err error
+	stagedPDBRel := pdbPath
+	for _, cand := range remotePDBCandidates {
+		pdb, _, err = c.Fetch(ctx, export, "/"+cand, maxPDB)
+		if err == nil {
+			stagedPDBRel = cand
+			break
+		}
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -140,5 +149,5 @@ tracks:
 			return copied, ctx.Err()
 		}
 	}
-	return copied, writeFile(filepath.Join(dst, pdbPath), pdb)
+	return copied, writeFile(filepath.Join(dst, stagedPDBRel), pdb)
 }

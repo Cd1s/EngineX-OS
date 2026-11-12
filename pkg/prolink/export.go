@@ -352,10 +352,10 @@ func MountedExports() []string {
 			continue
 		}
 		root := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\134`, `\`).Replace(fields[1])
-		pdb, pdbErr := os.Stat(filepath.Join(root, "PIONEER", "rekordbox", "export.pdb"))
 		mdb, mdbErr := os.Stat(filepath.Join(root, "Engine Library", "Database2", "m.db"))
-		// A rekordbox export, or an Engine library the bridge exports for CDJs (#63).
-		if pdbErr == nil && pdb.Mode().IsRegular() || mdbErr == nil && mdb.Mode().IsRegular() {
+		hasMDB := mdbErr == nil && mdb.Mode().IsRegular()
+		// A rekordbox export.pdb (PIONEER or .PIONEER), or an Engine library the bridge exports for CDJs (#63).
+		if hasExportPDB(root) || (hasMDB && !hasNativeRekordboxExport(root)) {
 			roots = append(roots, root)
 		}
 	}
@@ -492,16 +492,28 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 		return nil, err
 	}
 	nfs := &NFSServer{Root: root, StreamDirs: StreamDirs}
-	rel := ""
-	for _, part := range []string{"PIONEER", "rekordbox", "export.pdb"} {
-		var status uint32
-		rel, status = nfs.child(rel, part)
-		if status != nfsOK {
-			return nil, errors.New("prolink: invalid export.pdb path")
+	resolveExportPDB := func(pdir string) (string, error) {
+		rel := ""
+		for _, part := range []string{pdir, "rekordbox", "export.pdb"} {
+			var status uint32
+			rel, status = nfs.child(rel, part)
+			if status != nfsOK {
+				return "", errors.New("prolink: invalid export.pdb path")
+			}
+			if _, status = nfs.stat(rel); status != nfsOK {
+				return "", errors.New("prolink: export.pdb must not follow symlinks")
+			}
 		}
-		if _, status = nfs.stat(rel); status != nfsOK {
-			return nil, errors.New("prolink: export.pdb must not follow symlinks")
+		return rel, nil
+	}
+	rel, err := resolveExportPDB("PIONEER")
+	if err != nil {
+		if dotRel, dotErr := resolveExportPDB(".PIONEER"); dotErr == nil {
+			rel, err = dotRel, nil
 		}
+	}
+	if err != nil {
+		return nil, err
 	}
 	pdb := filepath.Join(root, rel)
 	fs, err := os.OpenRoot(root)
