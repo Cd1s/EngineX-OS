@@ -313,8 +313,11 @@ func TestSoundCloudPageNeedsACredentialAndPassesItOn(t *testing.T) {
 		t.Fatalf("without an app there is nothing to redirect to: %d %s", w.Code, w.Body)
 	}
 	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
-	if w := do(h, "POST", "/m/soundcloud?t="+tok, "user=cave", form); w.Code == 200 {
-		t.Fatalf("accepted without a credential: %s", w.Body)
+	if w := do(h, "POST", "/m/soundcloud?t="+tok, "", form); w.Code == 200 {
+		t.Fatalf("accepted empty submission without profile or credential: %s", w.Body)
+	}
+	if w := do(h, "POST", "/m/soundcloud?t="+tok, "clientId=cid", form); w.Code == 200 {
+		t.Fatalf("accepted partial app credential without secret: %s", w.Body)
 	}
 	if w := do(h, "POST", "/m/soundcloud?t="+tok, "user=cave&clientId=cid&clientSecret=shh", form); w.Code != 200 {
 		t.Fatalf("%d %s", w.Code, w.Body)

@@ -71,3 +71,29 @@ func TestDeezerPrivateARLAndQuotaException(t *testing.T) {
 		t.Fatalf("non-existent Deezer user ID should be rejected, got 200")
 	}
 }
+
+func TestSoundCloudPublicProfileLoginWithoutCredentials(t *testing.T) {
+	s := newTestServer(t)
+	h := s.routes()
+	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+
+	// Empty submission and half-filled app credentials must be rejected.
+	tokBad := "scpublicbadtoken0001"
+	if w := do(h, "POST", "/m/soundcloud?t="+tokBad, "", form); w.Code == 200 {
+		t.Fatal("empty SoundCloud submission accepted")
+	}
+	if w := do(h, "POST", "/m/soundcloud?t="+tokBad, "user=https://soundcloud.com/four-tet&clientId=only-id", form); w.Code == 200 {
+		t.Fatal("half-filled ClientID without ClientSecret accepted")
+	}
+
+	// Credential-free public profile URL / username advertised on mobile page must succeed.
+	tokPub := "scpublicoktoken00001"
+	w := do(h, "POST", "/m/soundcloud?t="+tokPub, url.Values{"user": {"https://soundcloud.com/four-tet"}}.Encode(), form)
+	if w.Code != 200 {
+		t.Fatalf("credential-free SoundCloud profile rejected: code=%d body=%s", w.Code, w.Body.String())
+	}
+	poll := do(h, "GET", "/api/relay/session?t="+tokPub, "", nil).Body.String()
+	if !strings.Contains(poll, `"status":"done"`) || !strings.Contains(poll, `"user":"https://soundcloud.com/four-tet"`) {
+		t.Fatalf("unexpected poll response: %s", poll)
+	}
+}
