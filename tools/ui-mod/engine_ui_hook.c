@@ -3301,28 +3301,46 @@ int az01_apply_image(const char *path, int flags) {
 }
 
 // Removes path (a file, a symlink itself, or a directory tree on root_dev) without following symlinks
-// or crossing a mount point.
-static void rm_tree(int parent, const char *name, dev_t root_dev) {
-    if (unlinkat(parent, name, 0) == 0 || errno == ENOENT) return;
+// or crossing a mount point (a mount point is left alone, not a failure). -1 when something could not
+// be removed: the name is logged, never the contents (BH-G2-6).
+static int rm_tree(int parent, const char *name, dev_t root_dev) {
+    if (unlinkat(parent, name, 0) == 0 || errno == ENOENT) return 0;
+    int unlink_err = errno;
     struct stat st;
-    if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) != 0 || st.st_dev != root_dev) return;
+    if (fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) != 0) return errno == ENOENT ? 0 : -1;
+    if (st.st_dev != root_dev) return 0;
+    if (!S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "engine-ui-hook: Factory Reset could not remove %s: %s\n", name, strerror(unlink_err));
+        return -1;
+    }
+    int failed = 0;
     int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd >= 0) {
         if (fstat(fd, &st) == 0 && st.st_dev == root_dev) {
             DIR *d = fdopendir(fd);
             if (d) {
                 struct dirent *e;
-                while ((e = readdir(d)) != NULL)
-                    if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) rm_tree(dirfd(d), e->d_name, root_dev);
+                errno = 0;
+                while ((e = readdir(d)) != NULL) {
+                    if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) failed |= rm_tree(dirfd(d), e->d_name, root_dev);
+                    errno = 0;
+                }
+                if (errno) failed = -1;
                 closedir(d);
             } else {
                 close(fd);
+                failed = -1;
             }
         } else {
             close(fd);
+            return 0;  // became a mount point
         }
     }
-    unlinkat(parent, name, AT_REMOVEDIR);
+    if (unlinkat(parent, name, AT_REMOVEDIR) != 0 && errno != ENOENT) {
+        if (!failed) fprintf(stderr, "engine-ui-hook: Factory Reset could not remove %s: %s\n", name, strerror(errno));
+        return -1;
+    }
+    return failed ? -1 : 0;
 }
 
 // Factory Reset on a /data-bundle deck: wipes the user's data and EngineX's own settings but keeps
@@ -3352,11 +3370,12 @@ int az01_erase_data_partition(void) {
     DIR *d = fdopendir(rootfd);
     if (!d) { close(rootfd); return -1; }
     static const char *const keep[] = {"enginex", "system", "sc5000-custom", "lost+found"};
+    int failed = 0;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
         int skip = !strcmp(e->d_name, ".") || !strcmp(e->d_name, "..");
         for (size_t i = 0; i < sizeof keep / sizeof *keep; i++) skip |= !strcmp(e->d_name, keep[i]);
-        if (!skip) rm_tree(rootfd, e->d_name, root_st.st_dev);
+        if (!skip && rm_tree(rootfd, e->d_name, root_st.st_dev)) failed = -1;
     }
     int ef = openat(rootfd, "enginex", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (ef >= 0) {
@@ -3364,12 +3383,21 @@ int az01_erase_data_partition(void) {
             "state", "mods", "Stream", "shadow-v3", "ui-scale.env", "ssh-config.json", "mounts.json", "automix.json",
             "ui/settings.conf", "ui/views.json", "ui/mods-overlay", "ui/mods-quarantined",
             "ui/safe-mode", "ui/boot-count", "ui/boot-token", "ui/last-crash", "ui/running-sentinel"};
-        for (size_t i = 0; i < sizeof gone / sizeof *gone; i++) rm_tree(ef, gone[i], root_st.st_dev);
-        mkdirat(ef, "state", 0755);
-        mkdirat(ef, "mods", 0755);
+        for (size_t i = 0; i < sizeof gone / sizeof *gone; i++)
+            if (rm_tree(ef, gone[i], root_st.st_dev)) failed = -1;
+        static const char *const fresh[] = {"state", "mods"};
+        for (size_t i = 0; i < sizeof fresh / sizeof *fresh; i++)
+            if (mkdirat(ef, fresh[i], 0755) != 0 && errno != EEXIST) failed = -1;
         close(ef);
     }
     closedir(d);
+    // BH-G2-6: a reset that left user data behind (read-only or failing /data) is reported as failed,
+    // not as success with a reboot; Engine shows the error and the deck keeps running.
+    if (failed) {
+        fprintf(stderr, "engine-ui-hook: Factory Reset failed: user data is still on %s\n", root);
+        sync();
+        return -1;
+    }
     if (!testing) enginex_reboot();
     else sync();
     return 0;

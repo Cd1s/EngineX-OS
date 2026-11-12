@@ -5,6 +5,7 @@
 int hook_test_engine;
 #include "engine_ui_hook.c"
 #include <assert.h>
+#include <sys/mount.h>
 
 static void put(const char *dir, const char *rel, const char *text) {
     char path[PATH_MAX];
@@ -226,10 +227,40 @@ static void test_erase(void) {
     puts("Factory Reset keeps EngineX: PASS");
 }
 
+// BH-G2-6: a /data that cannot be written (read-only or error-remounted) left every user file in place
+// and the reset still returned 0 and rebooted. It must report the failure and skip the reboot.
+static void test_erase_reports_failure(void) {
+    char root[] = "/tmp/gen2-erase-ro-XXXXXX", cmd[PATH_MAX + 16];
+    assert(mkdtemp(root));
+    put(root, "enginex/bundle/install.sh", "x");
+    put(root, "StreamingAccounts.json", "x");
+    put(root, "AppDataUser/x.db", "x");
+    if (access("/usr/share/sc5000-custom/sc5000-suite.xz", F_OK) == 0) { puts("erase failure: SKIP (1st-gen rootfs host)"); return; }
+    fflush(NULL);
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        // Own mount namespace: the read-only bind exists only in this child.
+        if (unshare(CLONE_NEWNS) != 0 || mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) _exit(77);
+        if (mount(root, root, NULL, MS_BIND, NULL) != 0 || mount(NULL, root, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY, NULL) != 0) _exit(77);
+        setenv("ENGINEX_TEST_DATA_ROOT", root, 1);
+        int rc = az01_erase_data_partition();
+        _exit(rc == -1 && exists(root, "StreamingAccounts.json") && exists(root, "AppDataUser/x.db") ? 0 : 1);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child && WIFEXITED(status));
+    snprintf(cmd, sizeof cmd, "rm -rf %s", root);
+    assert(system(cmd) == 0);
+    if (WEXITSTATUS(status) == 77) { puts("erase failure: SKIP (needs root for a private mount namespace)"); return; }
+    assert(WEXITSTATUS(status) == 0);
+    puts("Factory Reset on a /data it cannot write reports failure, keeps the files, does not reboot (BH-G2-6): PASS");
+}
+
 int main(void) {
     test_sha256();
     test_open_verify();
     test_other_model_refused();
     test_erase();
+    test_erase_reports_failure();
     return 0;
 }
