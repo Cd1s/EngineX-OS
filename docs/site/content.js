@@ -5,8 +5,8 @@
 (function () {
   const L = (s, t, e) => ({ s, t, e });
   const V = "5.3.0.4";
-  const VL = "5.3.0.4 r2"; // shown to users; file names keep V
-  const TAG = "v5.3.0.4-r2";
+  const VL = "5.3.0.4 r3"; // shown to users; file names keep V
+  const TAG = "v5.3.0.4-r3";
   const BASE = "https://github.com/Cd1s/EngineX-OS/releases/latest/download/";
 
   // 全系 16 款机型（8 款一代机 + 8 款二代机）统一发布 *-Update.img
@@ -142,9 +142,9 @@
       nav: L("5.3.0.4 更新内容", "5.3.0.4 更新內容", "What's new in 5.3.0.4"),
       blocks: [
         { k: "note", x: L(
-          "5.3.0.4（r2）重发更新：修复 Mac 格式（HFS+）U 盘与 rekordbox 7 导出盘读取问题；已安装 5.3.0.4 的碟机可直接在屏幕收到在线更新，版本号仍为 5.3.0.4。",
-          "5.3.0.4（r2）重發更新：修復 Mac 格式（HFS+）隨身碟與 rekordbox 7 匯出碟讀取問題；已安裝 5.3.0.4 的碟機可直接在螢幕收到線上升級，版本號維持 5.3.0.4。",
-          "5.3.0.4 (r2) re-release: fixes Mac-formatted (HFS+) USB sticks and rekordbox 7 exports; decks already on 5.3.0.4 get it as an on-screen update; the version stays 5.3.0.4.") },
+          "5.3.0.4（r3）重发更新：修复 Mac 格式（HFS+）U 盘没有歌单、弹出卡住；超过 500 首的 rekordbox 曲库补齐 Cue、循环与节拍网格；卷标带 # 的 U 盘曲库被清空；在 Source 里点 Demo Tracks 或 Sampler Content 卡死；二代机 Stems 无法使用；直播推流没有声音；控制台二维码打不开；开机画面版本号。已安装 5.3.0.4 的碟机可直接在屏幕收到在线更新，版本号仍为 5.3.0.4。",
+          "5.3.0.4（r3）重發更新：修復 Mac 格式（HFS+）隨身碟沒有歌單、退出卡住；超過 500 首的 rekordbox 曲庫補齊 Cue、循環與節拍網格；磁碟標籤帶 # 的隨身碟曲庫被清空；在 Source 裡點 Demo Tracks 或 Sampler Content 當機；二代機 Stems 無法使用；直播推流沒有聲音；控制台 QR Code 打不開；開機畫面版本號。已安裝 5.3.0.4 的碟機可直接在螢幕收到線上升級，版本號維持 5.3.0.4。",
+          "5.3.0.4 (r3) re-release: fixes Mac-formatted (HFS+) USB sticks showing no playlists or hanging on eject; rekordbox libraries over 500 tracks now get their cues, loops and beat grids; sticks whose volume label contains # no longer have their library wiped; tapping Demo Tracks or Sampler Content in Source no longer freezes the deck; Stems on 2nd-gen units; live streaming with no sound; the console QR code; the boot screen version. Decks already on 5.3.0.4 get it as an on-screen update; the version stays 5.3.0.4.") },
         { k: "h", id: "whatsnew-5304",
           x: L('<span id="whatsnew-5304"></span><span id="start-whatsnew-5304"></span>5.3.0.4 新功能',
                '<span id="whatsnew-5304"></span><span id="start-whatsnew-5304"></span>5.3.0.4 新功能',
