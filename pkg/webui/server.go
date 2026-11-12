@@ -362,6 +362,7 @@ func (s *Server) Close() {
 	prolinkMu.Lock()
 	delete(postedDevices, s)
 	prolinkMu.Unlock()
+	s.closeBroadcast()
 }
 
 // DefaultStateDir keeps logins on the deck's writable partition; its home is read-only.

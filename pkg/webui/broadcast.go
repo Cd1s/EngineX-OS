@@ -47,6 +47,19 @@ func (s *Server) usbAudioManager() *broadcast.USBAudioManager {
 	return mgr
 }
 
+// closeBroadcast stops this server's Broadcaster (its worker and beacon goroutines and sockets) and
+// drops the server's entries from the package maps, which kept both alive after Close (BH-GC2-16).
+func (s *Server) closeBroadcast() {
+	broadcasterMu.Lock()
+	v, ok := broadcasters.LoadAndDelete(s)
+	broadcasterMu.Unlock()
+	if ok {
+		v.(*broadcast.Broadcaster).Close()
+	}
+	usbAudioManagers.Delete(s)
+	broadcastRoutesRegistered.Delete(s)
+}
+
 // broadcaster returns the lazily initialized Broadcaster for this server.
 func (s *Server) broadcaster() *broadcast.Broadcaster {
 	if v, ok := broadcasters.Load(s); ok {
