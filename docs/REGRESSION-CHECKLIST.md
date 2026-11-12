@@ -78,6 +78,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 66 | **`webui.stemmedPath` filters by `sameTrack` before calling `stat()` outside `stemsMu`, avoiding hundreds of SD/USB `stat()` syscalls per track check (`BH2-A9-14`)** | `BH2-A9-14` | `pkg/webui::TestStemmedPathStatsOnlyMatchingTrack` | Release workflow Step 2 (`go test -race ./pkg/webui/...`) |
 | 67 | **`sc5000-relay` `POST /api/config` `newPassword` requires the current relay password (`checkPassword`) (`BH2-A8-1`)** | `BH2-A8-1` | `cmd/sc5000-relay::TestPasswordChangeRequiresRelayPassword` | Release workflow Step 2 (`go test -race ./cmd/sc5000-relay/...`) |
 | 68 | **Web Console NAS configuration and connection probe validate target URLs and dial targets against loopback, unspecified, and link-local ranges (`BH2-A8-6`)** | `BH2-A8-6` | `pkg/webui::TestNASConfigAndProbeRejectLoopbackAndLinkLocal`, `TestNASTestAndPlaylists` | Release workflow Step 2 (`go test -race ./pkg/webui/...`) |
+| 69 | **OmniSource NAS playlists (`WebDAV` / `Subsonic` / `Plex`) list tracks via `nas\x00` routing and stream audio through `SelfHostedProvider.DownloadTrack` (`BH2-A8-3`)** | `BH2-A8-3` | `pkg/webui::TestOmniSourceNASPlaylistsBrowseAndStream` | Release workflow Step 2 (`go test -race ./pkg/webui/...`) |
 
 ---
 

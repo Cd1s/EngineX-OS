@@ -301,6 +301,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 		jobs.soundcloud = s.ownerSoundCloud
 		jobs.beatport = s.ownerBeatport
 		jobs.spotify = s.ownerSpotify
+		jobs.selfHosted = s.ownerSelfHosted
 		jobs.bpm = cfg.BPM
 		if jobs.p.Deemix != nil {
 			jobs.p.Deemix.PreferMP3 = func() bool { return s.quality() == quality320k }

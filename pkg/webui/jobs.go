@@ -91,6 +91,7 @@ type Jobs struct {
 	soundcloud  func() *providers.SoundCloud
 	beatport    func() *providers.Beatport
 	spotify     func() *providers.Spotify
+	selfHosted  func() *providers.SelfHostedProvider
 	bpm         *providers.BPMStore
 }
 type fetched struct {
@@ -373,6 +374,9 @@ func (j *Jobs) acquire(ctx context.Context, session string, t providers.Track, g
 		return matched, dl, nil
 	case "netease":
 		return j.fromNeteaseMode(ctx, session, t, guest, progress)
+	case "webdav", "subsonic", "plex":
+		dl, err := j.fromSelfHosted(ctx, t)
+		return t, dl, err
 	}
 	return providers.Track{}, nil, fmt.Errorf("%s: no audio source for this service", t.Provider)
 }
@@ -725,6 +729,48 @@ func (j *Jobs) fromNetease(ctx context.Context, n *providers.Netease, t provider
 		return providers.Track{}, nil, err
 	}
 	return t, dl, nil
+}
+
+func (j *Jobs) fromSelfHosted(ctx context.Context, t providers.Track) (*deemixclient.Download, error) {
+	if j.p.Deemix == nil {
+		return nil, errors.New("nas: download cache unavailable")
+	}
+	j.mu.Lock()
+	lookup := j.selfHosted
+	j.mu.Unlock()
+	var sh *providers.SelfHostedProvider
+	if lookup != nil {
+		sh = lookup()
+	}
+	if sh == nil {
+		return nil, fmt.Errorf("%s: NAS server is not enabled", t.Provider)
+	}
+	p, err := sh.DownloadTrack(ctx, t.ID, j.p.Deemix.DownloadDir)
+	if err != nil {
+		return nil, err
+	}
+	ext := strings.ToLower(filepath.Ext(p))
+	if ext == ".m4a" || ext == ".aac" {
+		mp4Path := strings.TrimSuffix(p, filepath.Ext(p)) + ".mp4"
+		if os.Rename(p, mp4Path) == nil {
+			p = mp4Path
+			ext = ".mp4"
+		}
+	}
+	q, ierr := deemixclient.Inspect(p)
+	if ierr != nil {
+		fmtName := strings.TrimPrefix(ext, ".")
+		if fmtName == "" {
+			fmtName = "mp3"
+		}
+		q = deemixclient.Quality{
+			Label:    "[" + strings.ToUpper(fmtName) + "]",
+			Format:   fmtName,
+			Lossless: fmtName == "flac" || fmtName == "wav" || fmtName == "aif" || fmtName == "aiff",
+		}
+	}
+	j.p.Deemix.Trim(p)
+	return &deemixclient.Download{Path: p, Quality: q}, nil
 }
 
 // queueImport analyses and imports a streamed file once per target playlist.
