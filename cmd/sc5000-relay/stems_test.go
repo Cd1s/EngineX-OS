@@ -392,6 +392,7 @@ printf 'returnFrames=0\n\n'
 	defer cancel()
 	in, send := io.Pipe()
 	defer send.Close()
+	go func() { <-ctx.Done(); send.CloseWithError(ctx.Err()) }()
 	out, receive := io.Pipe()
 	done := make(chan error, 1)
 	go func() {

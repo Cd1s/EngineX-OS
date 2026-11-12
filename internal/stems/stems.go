@@ -231,7 +231,10 @@ func (c *idleConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
-var uploadIdleRead = 120 * time.Second
+var (
+	uploadIdleRead  = 120 * time.Second
+	uploadDrainRead = 10 * time.Minute
+)
 
 type idleBody struct {
 	r          io.Reader
@@ -249,7 +252,7 @@ func (b *idleBody) Read(p []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	if b.uploadDone {
-		b.c.SetReadDeadline(time.Time{})
+		b.c.SetReadDeadline(time.Now().Add(uploadDrainRead))
 	} else {
 		b.c.SetReadDeadline(time.Now().Add(uploadIdleRead))
 	}
@@ -259,11 +262,22 @@ func (b *idleBody) Read(p []byte) (int, error) {
 		b.mu.Lock()
 		b.uploadDone = true
 		if !b.stopped {
-			b.c.SetReadDeadline(time.Time{})
+			b.c.SetReadDeadline(time.Now().Add(uploadDrainRead))
 		}
 		b.mu.Unlock()
 	}
 	return n, err
+}
+
+func (b *idleBody) touchDrain() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.uploadDone && !b.stopped {
+		b.c.SetReadDeadline(time.Now().Add(uploadDrainRead))
+	}
 }
 
 func (b *idleBody) stop() {
@@ -283,11 +297,13 @@ type Backend struct {
 	Name   string // separator reported by /healthz: hpss (default) or htdemucs
 }
 type flushWriter struct {
-	w http.ResponseWriter
+	w    http.ResponseWriter
+	body *idleBody
 }
 
 func (f *flushWriter) Write(p []byte) (int, error) {
 	http.NewResponseController(f.w).SetWriteDeadline(time.Now().Add(30 * time.Second))
+	f.body.touchDrain()
 	n, e := f.w.Write(p)
 	if e == nil {
 		e = http.NewResponseController(f.w).Flush()
@@ -387,7 +403,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		done <- err
 	}()
-	var dst io.Writer = &flushWriter{w: w}
+	var dst io.Writer = &flushWriter{w: w, body: body}
 	if framed {
 		dst = frameWriter{dst}
 	}
