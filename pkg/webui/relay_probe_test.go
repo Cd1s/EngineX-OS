@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
@@ -58,5 +60,84 @@ func TestEnsureSpotifyConnectService(t *testing.T) {
 	overlay, err := os.ReadFile("../../rootfs-overlay/etc/avahi/services/spotify-connect.service")
 	if err != nil || string(b) != string(overlay) || !strings.Contains(string(b), "_spotify-connect._tcp") {
 		t.Fatalf("service file differs from the overlay: %v", err)
+	}
+}
+
+func TestUIStatusDiscoversIdleLANStemsRenderer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short")
+	}
+	prev := lanStemsProbe
+	t.Cleanup(func() { lanStemsProbe = prev })
+
+	online := true
+	lanStemsProbe = func(_ context.Context, _ *stems.LANState, _ time.Duration) (stems.LANState, bool) {
+		if !online {
+			return stems.LANState{}, false
+		}
+		return stems.LANState{
+			Endpoint: "http://192.168.1.42:18765",
+			Hostname: "studio-pc",
+			Backend:  "htdemucs",
+		}, true
+	}
+
+	state := t.TempDir()
+	s := New(Config{UIDir: t.TempDir(), StateDir: state}, nil)
+	defer s.Close()
+
+	pollUI := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/ui", nil)
+		req.RemoteAddr = "127.0.0.1:42000"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /v1/sc5000/ui status=%d body=%s", w.Code, w.Body.String())
+		}
+		return w
+	}
+
+	// First idle poll returns immediately without blocking and triggers background LAN discovery.
+	_ = pollUI()
+
+	var body string
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		w := pollUI()
+		body = w.Body.String()
+		if strings.Contains(body, `"hostname":"studio-pc"`) && strings.Contains(body, `"online":true`) {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !strings.Contains(body, `"hostname":"studio-pc"`) || !strings.Contains(body, `"online":true`) {
+		t.Fatalf("idle /v1/sc5000/ui never discovered LAN Stems worker: %s", body)
+	}
+
+	// Digest stays stable across polls while the discovered worker stays unchanged.
+	d1 := pollUI().Header().Get("X-UI-Digest")
+	d2 := pollUI().Header().Get("X-UI-Digest")
+	if d1 == "" || d1 != d2 {
+		t.Fatalf("X-UI-Digest changed across steady polls: %q vs %q", d1, d2)
+	}
+
+	// When the worker turns off and the probe interval elapses, status flips to offline.
+	prevEvery := lanProbeEvery
+	lanProbeEvery = 10 * time.Millisecond
+	t.Cleanup(func() { lanProbeEvery = prevEvery })
+	online = false
+	time.Sleep(20 * time.Millisecond)
+	_ = pollUI()
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		body = pollUI().Body.String()
+		if strings.Contains(body, `"online":false`) {
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if !strings.Contains(body, `"online":false`) {
+		t.Fatalf("offline LAN Stems worker remained reported online: %s", body)
 	}
 }
