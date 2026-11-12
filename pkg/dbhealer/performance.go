@@ -231,7 +231,9 @@ func healQuickCues(blob []byte) ([]byte, bool) {
 		}
 		offset += labelLen
 		pos := beFloat(out[offset : offset+8])
-		if finite(pos) && pos >= 0 && out[offset+8] == 0 && (out[offset+9] != 0 || out[offset+10] != 0 || out[offset+11] != 0) {
+		// Exactly -1 is an unset pad; stock Engine also keeps Hot Cues before sample
+		// zero (AAC/MP3 pre-roll, e.g. -1024), and those are active too (BH2-A1-12).
+		if finite(pos) && pos != -1 && out[offset+8] == 0 && (out[offset+9] != 0 || out[offset+10] != 0 || out[offset+11] != 0) {
 			out[offset+8] = 255
 			changed = true
 		}
