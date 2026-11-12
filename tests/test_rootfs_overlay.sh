@@ -372,6 +372,39 @@ has 'taskset <-pc> <0,3> <109>' "$MOCK_ROOT/log"
 unlink "$TMP/bin/sleep"
 ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
 ok 'late helpers leave the GUI core and the sweeper stops with Engine'
+# BH-GC2-16: the vendor script restarts Engine in its own loop under a new PID. The sweeper kept
+# checking the old one and stopped; it must find the new Engine and keep sweeping its threads.
+rm -f "$MOCK_ROOT/sleep-count" "$MOCK_ROOT/sweeper-done"
+cat > "$TMP/bin/sleep" <<'SLEEP'
+#!/bin/bash
+set -eu
+n=$(cat "$MOCK_ROOT/sleep-count" 2>/dev/null || printf 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$MOCK_ROOT/sleep-count"
+if [[ $n == 2 ]]; then
+    unlink "$SC5000_PROC_ROOT/100/exe"
+    mkdir -p "$SC5000_PROC_ROOT/400/task"
+    ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/400/exe"
+    printf '/usr/Engine/Engine\n' > "$SC5000_PROC_ROOT/400/cmdline"
+    cp -r "$SC5000_PROC_ROOT/100/task/100" "$SC5000_PROC_ROOT/400/task/400"
+    cp -r "$SC5000_PROC_ROOT/100/task/105" "$SC5000_PROC_ROOT/400/task/401"
+    printf 'event_engine\n' > "$SC5000_PROC_ROOT/400/task/401/comm"
+elif [[ $n == 3 ]]; then
+    unlink "$SC5000_PROC_ROOT/400/exe"
+    touch "$MOCK_ROOT/sweeper-done"
+fi
+SLEEP
+chmod +x "$TMP/bin/sleep"
+SC5000_THREAD_DELAYS=0 SC5000_THREAD_INTERVAL=30 sh "$PERF" > "$MOCK_ROOT/output" 2>&1
+for ((attempt=0; attempt<60; attempt++)); do
+    [[ ! -e $MOCK_ROOT/sweeper-done ]] || break
+    /bin/sleep 0.05
+done
+unlink "$TMP/bin/sleep"
+rm -rf "$SC5000_PROC_ROOT/400"
+ln -s /usr/Engine/Engine "$SC5000_PROC_ROOT/100/exe"
+has 'taskset <-pc> <0,3> <401>' "$MOCK_ROOT/log"
+ok 'the thread sweeper follows Engine across an in-loop restart under a new PID (BH-GC2-16)'
 
 # The sweep runs beside playback every 30 s: no process per Engine thread.
 for tool in cat sed awk; do
