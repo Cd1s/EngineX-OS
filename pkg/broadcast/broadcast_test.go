@@ -1182,3 +1182,20 @@ func TestStreamSettingsStayOnTheirHandshakeLine(t *testing.T) {
 		}
 	}
 }
+
+// BH2-A3-12: a bracketed IPv6 server address without a port got a second pair of brackets.
+func TestParseServerTargetIPv6WithoutPort(t *testing.T) {
+	for raw, want := range map[string]string{
+		"[2001:db8::1]":             "[2001:db8::1]:8000",
+		"http://[2001:db8::1]/live": "[2001:db8::1]:8000",
+		"[2001:db8::1]:9000":        "[2001:db8::1]:9000",
+		"2001:db8::1":               "[2001:db8::1]:8000",
+		"radio.example":             "radio.example:8000",
+		"radio.example:8443":        "radio.example:8443",
+		"192.168.1.20":              "192.168.1.20:8000",
+	} {
+		if _, got, err := parseServerTarget(raw); err != nil || got != want {
+			t.Errorf("parseServerTarget(%q) = %q, %v; want %q", raw, got, err, want)
+		}
+	}
+}
