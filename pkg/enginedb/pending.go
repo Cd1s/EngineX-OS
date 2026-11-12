@@ -184,6 +184,9 @@ func SetQuickCue(ctx context.Context, q sqlExecQuerier, trackID int64, index int
 	if index < 0 || index > 7 {
 		return errors.New("hot cue index out of range")
 	}
+	if posMS != nil && (math.IsNaN(*posMS) || math.IsInf(*posMS, 0) || *posMS < 0) {
+		return errors.New("hot cue position must be a finite, non-negative time")
+	}
 	if len(color) != 7 || color[0] != '#' {
 		return errors.New("invalid colour")
 	}

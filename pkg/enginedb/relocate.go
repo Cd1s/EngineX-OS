@@ -54,6 +54,10 @@ type RelocateResult struct {
 	Queued bool `json:"queued,omitempty"`
 }
 
+// relocateScanned, when set (tests), runs after the drive is scanned and before anything is
+// written: where Engine may open the library meanwhile.
+var relocateScanned func()
+
 type driveFile struct {
 	rel  string // from the drive root, slash separated
 	size int64
@@ -77,18 +81,16 @@ func Relocate(ctx context.Context, opts RelocateOptions) (RelocateResult, error)
 	if st, err := os.Stat(dbPath); err != nil || st.Size() == 0 {
 		return res, errors.New("no Engine Library on this drive")
 	}
-	inUse := !opts.DryRun && LibraryInUse(opts.Root)
-	mode := "?_pragma=busy_timeout(5000)"
-	if opts.DryRun || inUse {
-		mode = "?mode=ro&_pragma=busy_timeout(5000)"
-	}
+	// The search only reads: m.db is opened read-only for it, and for writing only once the
+	// moves are known and no other process has the library open at that moment.
 	u := url.URL{Scheme: "file", Path: dbPath}
-	db, err := sql.Open("sqlite", u.String()+mode)
+	ro, err := sql.Open("sqlite", u.String()+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return res, err
 	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
+	defer ro.Close()
+	ro.SetMaxOpenConns(1)
+	db := ro
 
 	missing, taken, err := findMissing(ctx, db, opts.Root)
 	if err != nil {
@@ -102,12 +104,16 @@ func Relocate(ctx context.Context, opts RelocateOptions) (RelocateResult, error)
 	if err != nil {
 		return res, err
 	}
+	if relocateScanned != nil {
+		relocateScanned()
+	}
 	res.Moves = match(missing, files, taken)
 	res.Unresolved = len(missing) - len(res.Moves)
 	if opts.DryRun || len(res.Moves) == 0 {
 		return res, nil
 	}
-	if inUse {
+	// Engine may have opened the drive while it was scanned.
+	if LibraryInUse(opts.Root) {
 		// No write while Engine has m.db open (BH-GC1-3).
 		if err = QueuePending(opts.Root, func(p *Pending) { p.Relocate = append(p.Relocate, res.Moves...) }); err != nil {
 			return res, err
@@ -115,6 +121,12 @@ func Relocate(ctx context.Context, opts RelocateOptions) (RelocateResult, error)
 		res.Queued = true
 		return res, nil
 	}
+	ro.Close()
+	if db, err = sql.Open("sqlite", u.String()+"?_pragma=busy_timeout(5000)"); err != nil {
+		return res, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
 	backup, err := relocateBackup(ctx, db, dbPath)
 	if err != nil {
 		return res, fmt.Errorf("backup failed, nothing changed: %w", err)
