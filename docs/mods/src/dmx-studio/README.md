@@ -82,20 +82,26 @@ Between polls the helper extrapolates continuously; phase errors below half a
 frame of slewing snap at once, while larger steps (nudges, seeks, unsynced
 MASTER handoffs) slew smoothly in at half the tempo without frame jumps. CUE
 held with advancing `TrackPosition` counts as playing. The beat clock is kept
-strictly in memory and **never writes `show.json`** while running. On older
-`5.3.0.4` hosts without `/v1/sc5000/clock`, the helper falls back to
-`/peer/decks` (requires 4-Deck Waveform) and `/v1/sc5000/prolink`.
+strictly in memory and **never writes `show.json`** while running. Note that Pro
+DJ Link CDJ beat phase is approximate (`BeatInBar` + `PlayPositionMS` modulo beat
+duration, without beatgrid offset/pitch adjustment). On older `5.3.0.4` hosts
+without `/v1/sc5000/clock`, the helper caches absence and falls back at 2–4 Hz to
+`/peer/decks` (requires 4-Deck Waveform and reflects the last posted beat
+snapshot) plus `/v1/sc5000/prolink`.
 
 Optional **phrase awareness** (`phraseBeats`, 0–256, default `0` = off; optional
 `phraseScenes` array of scene overrides or built-in 4-color palette rotation)
 switches looks on every `phraseBeats` boundary (for example 16 or 32 beats)
-aligned to the deck beat clock.
+aligned to the deck beat counter starting at helper launch / lock-on (bar-synced
+beat counter, not analyzed musical intro/verse/drop track phrases).
 
 Optional **MIDI clock out** (`midiClock`: `true`, default `false`) opens a
 readable ALSA Sequencer port (`EngineX-DMX-Clock`, `/dev/snd/seq`) and sends 24
 PPQN MIDI Timing Clock (`0xF8`) plus Start / Continue / Stop (`0xFA` / `0xFB` /
-`0xFC`) without bursting on seeks or loops. Requires kernel `/dev/snd/seq` and a
-connected/subscribed MIDI receiver.
+`0xFC`) without bursting on seeks or loops. Uses a 5 ms timer tick (~±5 ms jitter
+at 120 BPM's ~21 ms clock interval), does not emit MIDI Song Position Pointer
+(`0xF2`) on seeks, and requires kernel `/dev/snd/seq` plus an explicit ALSA
+subscriber connection (e.g. `aconnect`).
 
 Pan/tilt center and width/height can be set through `/action` configuration. RGB
 and intensity apply to the generic fixtures. The 2D canvas is a diagnostic

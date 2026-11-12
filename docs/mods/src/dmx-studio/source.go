@@ -3,6 +3,7 @@ package dmxstudio
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -120,6 +121,10 @@ func parseHTTPBase(base string) (addr, prefix string, err error) {
 	return hostPort, prefix, nil
 }
 
+type httpStatusError struct{ status string }
+
+func (e httpStatusError) Error() string { return "HTTP " + e.status }
+
 // fetchJSON uses raw HTTP/1.0 over TCP so the static Go helper does not pull
 // net/http (+~2.5 MB) into every official Mod binary.
 func (f *Feature) fetchJSON(path string, out any) error {
@@ -127,12 +132,12 @@ func (f *Feature) fetchJSON(path string, out any) error {
 	if err != nil {
 		return err
 	}
-	conn, err := net.DialTimeout("tcp", addr, 150*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(150 * time.Millisecond))
+	_ = conn.SetDeadline(time.Now().Add(400 * time.Millisecond))
 	reqPath := prefix + path
 	if _, err := fmt.Fprintf(conn, "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n", reqPath, addr); err != nil {
 		return err
@@ -149,7 +154,7 @@ func (f *Feature) fetchJSON(path string, out any) error {
 		if len(fields) >= 2 {
 			status = fields[1]
 		}
-		return fmt.Errorf("HTTP %s", status)
+		return httpStatusError{status: status}
 	}
 	if _, err := tp.ReadMIMEHeader(); err != nil {
 		return err
@@ -158,16 +163,40 @@ func (f *Feature) fetchJSON(path string, out any) error {
 }
 
 func (f *Feature) fetchDeckSnapshots() ([]deckSnapshot, error) {
-	var clockResp struct {
-		ClockAPI bool           `json:"clockApi"`
-		Now      int64          `json:"now"`
-		Decks    []deckSnapshot `json:"decks"`
-	}
-	if err := f.fetchJSON("/v1/sc5000/clock", &clockResp); err != nil {
-		return nil, err
-	}
-	if clockResp.ClockAPI {
-		return clockResp.Decks, nil
+	decks, _, err := f.fetchDeckSnapshotsMode()
+	return decks, err
+}
+
+func (f *Feature) fetchDeckSnapshotsMode() ([]deckSnapshot, bool, error) {
+	f.mu.Lock()
+	skipClockAPI := time.Now().Before(f.clockAPIAbsentUntil)
+	f.mu.Unlock()
+	if !skipClockAPI {
+		var clockResp struct {
+			ClockAPI bool           `json:"clockApi"`
+			Now      int64          `json:"now"`
+			Decks    []deckSnapshot `json:"decks"`
+		}
+		err := f.fetchJSON("/v1/sc5000/clock", &clockResp)
+		if err == nil {
+			if clockResp.ClockAPI {
+				return clockResp.Decks, false, nil
+			}
+			// 5.3.0.4 gateway catch-all emptyPage answers 200 without clockApi and logs
+			// every unknown /v1/ hit; cache its absence for 60 s to stop log spam.
+			f.mu.Lock()
+			f.clockAPIAbsentUntil = time.Now().Add(60 * time.Second)
+			f.mu.Unlock()
+		} else {
+			var hs httpStatusError
+			if errors.As(err, &hs) && (hs.status == "404" || hs.status == "501") {
+				f.mu.Lock()
+				f.clockAPIAbsentUntil = time.Now().Add(30 * time.Second)
+				f.mu.Unlock()
+			} else {
+				return nil, false, err
+			}
+		}
 	}
 
 	// Fallback for 5.3.0.4 stream-sync builds that expose /peer/decks and /v1/sc5000/prolink
@@ -222,7 +251,8 @@ func (f *Feature) fetchDeckSnapshots() ([]deckSnapshot, error) {
 			if dev.BeatInBar >= 1 && dev.BeatInBar <= 4 {
 				beat = float64(dev.BeatInBar-1) + dev.BeatPhase
 			}
-			cue := dev.PlayState1 == 6
+			// Pioneer CDJ PlayState1 0x07 is CUE Play (holding CUE); 0x06 is paused at CUE.
+			cue := dev.PlayState1 == 7
 			decks = append(decks, deckSnapshot{
 				Deck:       dev.Number,
 				Source:     "prolink",
@@ -239,7 +269,7 @@ func (f *Feature) fetchDeckSnapshots() ([]deckSnapshot, error) {
 			})
 		}
 	}
-	return decks, nil
+	return decks, true, nil
 }
 
 // pollClockOnce fetches deck state from stream-sync and updates beatClock in memory.
@@ -267,7 +297,7 @@ func (f *Feature) pollClockOnce() time.Duration {
 		return 500 * time.Millisecond
 	}
 
-	decks, err := f.fetchDeckSnapshots()
+	decks, fallback, err := f.fetchDeckSnapshotsMode()
 	if err != nil {
 		return 500 * time.Millisecond
 	}
@@ -286,6 +316,9 @@ func (f *Feature) pollClockOnce() time.Duration {
 		if f.pollerActive {
 			f.clock.update(now, now, manual, clockSample{deck: 0})
 			f.pollerActive = false
+		}
+		if fallback {
+			return 500 * time.Millisecond
 		}
 		return 200 * time.Millisecond
 	}
@@ -308,7 +341,13 @@ func (f *Feature) pollClockOnce() time.Duration {
 	})
 	f.pollerActive = true
 	if picked.Playing || picked.Cue {
+		if fallback {
+			return 250 * time.Millisecond
+		}
 		return 100 * time.Millisecond
+	}
+	if fallback {
+		return 500 * time.Millisecond
 	}
 	return 200 * time.Millisecond
 }

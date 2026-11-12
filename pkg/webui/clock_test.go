@@ -38,8 +38,33 @@ func TestOwnForPeerCarriesBeatForward(t *testing.T) {
 	if diff := math.Abs(out[0].Beat - 0.3); diff > 0.05 {
 		t.Fatalf("carried beat = %.4f, want ~0.3", out[0].Beat)
 	}
-	if out[0].At != 0 {
-		t.Fatalf("ownForPeer must keep At == 0, got %d", out[0].At)
+	if out[0].At != 0 || out[0].Stale {
+		t.Fatalf("ownForPeer must keep At == 0 and Stale == false, got At=%d Stale=%v", out[0].At, out[0].Stale)
+	}
+
+	// Paused deck does not advance Beat or PositionMS.
+	s.shadow.mu.Lock()
+	s.shadow.own[0].Playing = false
+	s.shadow.own[0].Beat = 2.25
+	s.shadow.own[0].PositionMS = 9000
+	s.shadow.own[0].At = time.Now().Add(-1500 * time.Millisecond).UnixMilli()
+	s.shadow.ownAt = time.Now()
+	out = s.shadow.ownForPeer(time.Now())
+	s.shadow.mu.Unlock()
+	if out[0].Beat != 2.25 || out[0].PositionMS != 9000 {
+		t.Fatalf("paused ownForPeer moved Beat=%.3f Pos=%.1f", out[0].Beat, out[0].PositionMS)
+	}
+
+	// Deck older than 2 s is marked Stale=true and stops carrying past 2 s.
+	s.shadow.mu.Lock()
+	s.shadow.own[0].Playing = true
+	s.shadow.own[0].Beat = 1.0
+	s.shadow.own[0].At = time.Now().Add(-3 * time.Second).UnixMilli()
+	s.shadow.ownAt = time.Now().Add(-3 * time.Second)
+	out = s.shadow.ownForPeer(time.Now())
+	s.shadow.mu.Unlock()
+	if !out[0].Stale {
+		t.Fatal("ownAt older than 2 s must set Stale=true")
 	}
 }
 
@@ -146,6 +171,90 @@ func TestDeckClockEndpointAndLoopbackGuard(t *testing.T) {
 	if len(snap.Decks) != 1 || snap.Decks[0].Deck != 1 {
 		t.Fatalf("stale clock post overwrote newer deck: %+v", snap.Decks)
 	}
+
+	// Envelope form {"decks":[...]} deduplicates decks (<=4), and invalid JSON returns 400.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/v1/sc5000/clock", strings.NewReader("{bad json"))
+	req.RemoteAddr = "127.0.0.1:4007"
+	s.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("invalid JSON POST /v1/sc5000/clock = %d, want 400", rec.Code)
+	}
+
+	nowMS = time.Now().UnixMilli()
+	envBody := fmt.Sprintf(`{"decks":[{"deck":1,"playing":false,"master":true,"bpm":120,"currentBpm":120,"beat":2.5,"positionMs":5000,"at":%d},{"deck":1,"playing":true,"bpm":130,"beat":0.1,"at":%d},{"deck":5,"playing":true,"bpm":120,"beat":0.1,"at":%d}]}`, nowMS, nowMS, nowMS)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/v1/sc5000/clock", strings.NewReader(envBody))
+	req.RemoteAddr = "127.0.0.1:4008"
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("envelope POST = %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/v1/sc5000/clock", nil)
+	req.RemoteAddr = "127.0.0.1:4009"
+	s.ServeHTTP(rec, req)
+	snap = struct {
+		ClockAPI bool        `json:"clockApi"`
+		Now      int64       `json:"now"`
+		Decks    []clockDeck `json:"decks"`
+	}{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &snap)
+	if len(snap.Decks) != 1 || snap.Decks[0].Playing || snap.Decks[0].Beat != 2.5 || snap.Decks[0].PositionMS != 5000 {
+		t.Fatalf("paused envelope / dedup check failed: %+v", snap.Decks)
+	}
+
+	// Fresh peerDecks are exposed with carried beats; stale peerDecks (>=2s) are skipped.
+	masterTrue := true
+	s.shadow.mu.Lock()
+	s.shadow.peerDecks[3] = peerDeck{
+		deckState: deckState{Deck: 3, Playing: true, Master: &masterTrue, BPM: 120, CurrentBPM: 120, Beat: 1.0, Link: "peerA"},
+		ip:        "192.168.1.21",
+		at:        time.Now().Add(-500 * time.Millisecond),
+	}
+	s.shadow.peerDecks[4] = peerDeck{
+		deckState: deckState{Deck: 4, Playing: true, BPM: 120, CurrentBPM: 120, Beat: 1.0, Link: "peerB"},
+		ip:        "192.168.1.22",
+		at:        time.Now().Add(-3 * time.Second),
+	}
+	s.shadow.mu.Unlock()
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/v1/sc5000/clock", nil)
+	req.RemoteAddr = "127.0.0.1:4010"
+	s.ServeHTTP(rec, req)
+	snap = struct {
+		ClockAPI bool        `json:"clockApi"`
+		Now      int64       `json:"now"`
+		Decks    []clockDeck `json:"decks"`
+	}{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &snap)
+	foundPeer3, foundPeer4 := false, false
+	for _, d := range snap.Decks {
+		if d.Source == "peer" && d.Deck == 3 {
+			foundPeer3 = true
+			if diff := math.Abs(d.Beat - 2.0); diff > 0.15 {
+				t.Fatalf("peer deck 3 carried beat = %.3f, want ~2.0", d.Beat)
+			}
+		}
+		if d.Source == "peer" && d.Deck == 4 {
+			foundPeer4 = true
+		}
+	}
+	if !foundPeer3 || foundPeer4 {
+		t.Fatalf("peer deck filtering mismatch: found3=%v found4=%v decks=%+v", foundPeer3, foundPeer4, snap.Decks)
+	}
+
+	// After 15 s without GET /clock (and dmx-studio disabled), deckClock returns to false/omitted.
+	s.shadow.mu.Lock()
+	s.shadow.clockPolled = time.Now().Add(-16 * time.Second)
+	s.shadow.mu.Unlock()
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+	req.RemoteAddr = "127.0.0.1:4011"
+	s.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), `"deckClock"`) {
+		t.Fatalf("expired clockPolled should omit deckClock: %s", rec.Body.String())
+	}
 }
 
 func TestDeckClockIncludesProlinkAndModEnabledFlag(t *testing.T) {
@@ -198,5 +307,69 @@ func TestDeckClockIncludesProlinkAndModEnabledFlag(t *testing.T) {
 	}
 	if snap.Decks[0].Beat < 2.0 || snap.Decks[0].Beat >= 3.0 {
 		t.Fatalf("expected beat in [2, 3), got %.3f", snap.Decks[0].Beat)
+	}
+}
+
+func TestUIStatusNeverBlocksOnModsManagerLock(t *testing.T) {
+	base := t.TempDir()
+	uiDir := filepath.Join(base, "ui")
+	modDir := filepath.Join(base, "mods", "slow-mod")
+	if err := os.MkdirAll(uiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(modDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	started := filepath.Join(base, "started")
+	release := filepath.Join(base, "release")
+	script := fmt.Sprintf("#!/bin/sh\ntouch %q\nwhile [ ! -f %q ]; do sleep 0.02; done\n", started, release)
+	if err := os.WriteFile(filepath.Join(modDir, "mod.json"), []byte(`{"id":"slow-mod","version":"1.0.0","script":"start.sh"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "start.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uiDir, "mods-state.json"), []byte(`{"mods":{"slow-mod":{"enabled":true},"dmx-studio":{"enabled":true}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(Config{UIDir: uiDir, StateDir: t.TempDir()}, nil)
+	defer s.Close()
+
+	resumeDone := make(chan struct{})
+	go func() {
+		defer close(resumeDone)
+		s.modsResume()
+	}()
+	defer func() {
+		_ = os.WriteFile(release, nil, 0o644)
+		<-resumeDone
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(started); err != nil {
+		t.Fatal("slow mod start script did not acquire manager lock")
+	}
+
+	uiDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/v1/sc5000/ui", nil)
+		req.RemoteAddr = "127.0.0.1:4020"
+		s.ServeHTTP(rec, req)
+		uiDone <- rec.Code
+	}()
+	select {
+	case code := <-uiDone:
+		if code != 200 {
+			t.Fatalf("GET /v1/sc5000/ui = %d, want 200", code)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("GET /v1/sc5000/ui stalled while StartEnabled held managerMu")
 	}
 }
