@@ -4998,5 +4998,109 @@ assert.deepEqual(calls, [["engine", "/media/RB7_SKELETON"]]);
             self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
+class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
+    def test_guard_restores_saved_choice_without_changing_other_state(self):
+        import os
+        from copy import deepcopy
+        enabled = {"state": True, "type": 1}
+        gui = {"childorder": ["Decks", "PadsViewEnabled", "SongListLayoutStyle", "SoundSwitchViewEnabled"],
+               "children": {"SoundSwitchViewEnabled": enabled,
+                            "PadsViewEnabled": enabled,
+                            "SongListLayoutStyle": {"string": "Large", "type": 4},
+                            "Decks": {"childorder": ["Deck"], "children": {"Deck": {"childorder": [], "type": "Node"}}, "type": "Node"}},
+               "type": "Node"}
+        missing = {"childorder": ["Localization"], "children": {"EcoMode": {"state": False, "type": 1}}}
+        empty = {"childorder": [], "children": {}}
+        for initial, on, safe in ((None, False, False), (gui, False, False),
+                                  (gui, True, False), (None, True, False),
+                                  (missing, False, False), (missing, True, False),
+                                  (empty, False, False), (empty, True, False),
+                                  (gui, False, True), (None, False, True)):
+            for compact, busybox in ((False, False), (True, False), (False, True), (True, True)):
+                with self.subTest(initial=initial, on=on, safe=safe, compact=compact, busybox=busybox), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    ui, state = root / "ui", root / "state"
+                    ui.mkdir()
+                    state.mkdir()
+                    path = state / "PlanckGuiState.json"
+                    before = None
+                    if initial is not None:
+                        value = deepcopy(initial)
+                        if on and "SoundSwitchViewEnabled" in value["children"]:
+                            value["children"]["SoundSwitchViewEnabled"] = {"state": False, "type": 1}
+                        before = json.dumps({"data": {"GUI": value, "Other": {"state": True, "type": 1}}}, indent=None if compact else 4)
+                        path.write_text(before)
+                    if on:
+                        (ui / "settings.conf").write_text("engine_lighting=1\n")
+                    if safe:
+                        (ui / "safe-mode").touch()
+                    path_env = os.environ["PATH"]
+                    if busybox:
+                        binary = Path(os.environ.get("SC5000_TEST_BUSYBOX", shutil.which("busybox") or str(LAB / "sclive4-rea61-followup/rootfs/usr/bin/busybox")))
+                        if not binary.is_file():
+                            self.skipTest("stock BusyBox fixture unavailable")
+                        bin_dir = root / "bin"
+                        bin_dir.mkdir()
+                        (bin_dir / "awk").symlink_to(binary)
+                        path_env = str(bin_dir) + ":" + path_env
+                    env = dict(os.environ, PATH=path_env, SC5000_UI_DIR=str(ui), SC5000_PRIMARY_UI_DIR=str(ui),
+                               SC5000_LEGACY_UI_DIR=str(ui), SC5000_STATE_DIR=str(state),
+                               SC5000_STREAMING_ACCOUNTS=str(root / "accounts"),
+                               SC5000_ENGINE_DATA_DIR=str(root / "engine"),
+                               SC5000_ASSIGNMENT_DIR=str(root / "assign"),
+                               SC5000_ASSIGNMENT_PATCHED=str(root / "patched"), SC5000_ENGINE_GUARDIAN="/bin/false")
+                    result = subprocess.run(["sh", str(REPO / "rootfs-overlay/etc/sc5000/engine-ui-guard"), "pre"], env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if safe:
+                        self.assertEqual(path.read_text() if path.exists() else None, before)
+                        continue
+                    self.assertTrue(path.is_file(), "guard did not create PlanckGuiState.json")
+                    result = json.loads(path.read_text())
+                    actual = result["data"]["GUI"]
+                    self.assertEqual(actual["children"].get("SoundSwitchViewEnabled"), {"state": on, "type": 1})
+                    self.assertIn("SoundSwitchViewEnabled", actual["childorder"])
+                    self.assertEqual(actual["childorder"].count("SoundSwitchViewEnabled"), 1)
+                    if initial is not None:
+                        original = json.loads(before)
+                        expected = original["data"]["GUI"]
+                        expected["children"]["SoundSwitchViewEnabled"] = {"state": on, "type": 1}
+                        if "SoundSwitchViewEnabled" not in expected["childorder"]:
+                            expected["childorder"].insert(0, "SoundSwitchViewEnabled")
+                        self.assertEqual(result, original)
+
+    def test_stock_switch_and_non_toggleable_startup_in_all_packs(self):
+        for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
+            qrc = LAB / version / "qrc"
+            self.assertTrue(qrc.is_dir(), str(qrc))
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "packs"
+                result = subprocess.run(["python3", "-I", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for lang in ("en", "zh-Hans", "zh-Hant"):
+                    with self.subTest(version=version, lang=lang):
+                        switch = (out / lang / f"Skins/{skin}/Views/ControlCenter/Tabs/Preferences/Entries/SoundSwitch.qml").read_text()
+                        self.assertIn('Planck.getProperty("/GUI/SoundSwitchViewEnabled")', switch)
+                        self.assertIn('checked: pSoundSwitchEnabled.translator.state', switch)
+                        self.assertIn('const next = !pSoundSwitchEnabled.translator.state', switch)
+                        self.assertIn('pSoundSwitchEnabled.translator.state = next', switch)
+                        self.assertIn('const SoundSwitch = root.scLightingBackend', switch)
+                        self.assertRegex(switch, r'if\s*\(!next\s*&&[\s\S]+?SoundSwitch.stopBackend\(\)')
+                        self.assertIn('typeof SoundSwitch.stopBackend === "function"', switch)
+                        self.assertIn('http://127.0.0.1:8080/v1/sc5000/ui?engineLighting=', switch)
+                        self.assertIn('XMLHttpRequest', switch)
+                        self.assertIn('interval: 1500', switch)
+                        self.assertIn('req.status !== 200', switch)
+                        main = (out / lang / f"Skins/{skin}/EmbeddedMain.qml").read_text()
+                        self.assertIn('Qt.createQmlObject', main)
+                        self.assertIn('qrc:/Skins/Common/Items/', main)
+                        self.assertIn('EngineLightingBackend.qml', main)
+                        self.assertIn('root.scLightingBackend = helper ? helper.backend : null', main)
+                        self.assertIn('Config.integrations.soundSwitch.isLightingIntegrationToggleable === false', main)
+                        self.assertIn('const ssEn = Planck.getProperty("/GUI/SoundSwitchViewEnabled")', main)
+                        self.assertIn('if (ssEn && ssEn.translator) ssEn.translator.state = true', main)
+        self.assertNotIn('engineLighting=', (REPO / "pkg/webui/index.html").read_text())
+        self.assertNotIn('engineLighting=', bp.SERVICES_ENTRIES)
+
+
 if __name__ == "__main__":
     unittest.main()

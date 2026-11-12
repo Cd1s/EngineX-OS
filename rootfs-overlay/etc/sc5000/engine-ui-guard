@@ -222,6 +222,78 @@ pre)
             done
         fi
     fi
+    # The stock GUI saves only on clean poweroff. Restore the independently
+    # persisted stock Lighting choice before every start, including crash restarts.
+    lighting_state=false
+    if grep -qx 'engine_lighting=1' "$UI/settings.conf" 2>/dev/null; then lighting_state=true; fi
+    state_dir=${SC5000_STATE_DIR:-/data/AppDataUser/AIR Music Technology/Engine/State}
+    gui_state="$state_dir/PlanckGuiState.json"
+    mkdir -p "$state_dir" 2>/dev/null || :
+    if [ ! -s "$gui_state" ]; then
+        printf '{"data":{"GUI":{"childorder":["SoundSwitchViewEnabled"],"children":{"SoundSwitchViewEnabled":{"state":%s,"type":1}},"type":"Node"}}}\n' "$lighting_state" > "$gui_state.tmp" && mv "$gui_state.tmp" "$gui_state"
+    elif grep -q '"GUI"[[:space:]]*:[[:space:]]*{' "$gui_state"; then
+        # Token offsets preserve every unrelated byte and scope edits to GUI own
+        # children/childorder (Decks has identically named nested containers).
+        awk -v state="$lighting_state" '
+        function skip(i,    closer) {
+            if (tok[i] != "{" && tok[i] != "[") return i + 1
+            closer = tok[i] == "{" ? "}" : "]"
+            i++
+            while (i <= nt && tok[i] != closer) i = skip(i)
+            return i + 1
+        }
+        function member(i, key,    k) {
+            if (tok[i] != "{") return 0
+            for (k = i + 1; k <= nt && tok[k] != "}";) {
+                if (tok[k] == "\"" key "\"" && tok[k+1] == ":") return k+2
+                k = skip(k+2)
+                if (tok[k] == ",") k++
+            }
+            return 0
+        }
+        { a[NR] = $0 }
+        END {
+            for (line = 1; line <= NR; line++) s = s a[line] "\n"
+            # Lex strings with escapes before punctuation; braces inside strings
+            # cannot change object boundaries. Works with compact JSON as well.
+            for (i = 1; i <= length(s);) {
+                c = substr(s,i,1)
+                if (c ~ /[[:space:]]/) { i++; continue }
+                start = i++
+                if (c == "\"") {
+                    while (i <= length(s)) {
+                        c = substr(s,i++,1)
+                        if (c == "\\") i++
+                        else if (c == "\"") break
+                    }
+                } else if (!index("[]{}:,", c)) {
+                    while (i <= length(s) && substr(s,i,1) !~ /[[:space:]]/ && !index("[]{}:,", substr(s,i,1))) i++
+                }
+                tok[++nt] = substr(s,start,i-start); pos[nt] = start; size[nt] = i-start
+            }
+            gui = member(member(1,"data"),"GUI")
+            order = member(gui,"childorder"); children = member(gui,"children")
+            if (!gui || tok[order] != "[" || tok[children] != "{") exit 1
+            found = 0
+            for (i = order+1; i < skip(order)-1; i++)
+                if (tok[i] == "\"SoundSwitchViewEnabled\"") found = 1
+            if (!found) add[pos[order]+1] = "\"SoundSwitchViewEnabled\"" (tok[order+1] == "]" ? "" : ",")
+            lighting = member(children,"SoundSwitchViewEnabled")
+            if (lighting) {
+                value = member(lighting,"state")
+                if (!value || tok[value] !~ /^(true|false)$/) exit 1
+                add[pos[value]] = state; remove[pos[value]] = size[value]
+            } else {
+                add[pos[children]+1] = "\"SoundSwitchViewEnabled\":{\"state\":" state ",\"type\":1}" (tok[children+1] == "}" ? "" : ",")
+            }
+            for (i = 1; i <= length(s); i++) {
+                if (i in add) printf "%s", add[i]
+                if (i in remove) i += remove[i]-1
+                else printf "%s", substr(s,i,1)
+            }
+        }' "$gui_state" > "$gui_state.tmp" && mv "$gui_state.tmp" "$gui_state"
+        rm -f "$gui_state.tmp"
+    fi
     # Engine 5.3.0 cannot ATTACH anything while its internal m.db reserves page bytes
     # (a `.recover`ed copy did): rebuild it with reserve 0 before Engine opens it.
     guardian=${SC5000_ENGINE_GUARDIAN:-/usr/local/bin/engine-guardian}
