@@ -284,12 +284,19 @@ func (s *Server) handleNASTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) nasPlaylists(ctx context.Context) ([]providers.Playlist, *providers.SelfHostedProvider) {
+func (s *Server) ownerSelfHosted() *providers.SelfHostedProvider {
 	cfg := s.loadNASConfig()
 	if !cfg.Enabled || cfg.Protocol == "" || cfg.URL == "" || validateNASURL(cfg.URL) != nil {
+		return nil
+	}
+	return providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
+}
+
+func (s *Server) nasPlaylists(ctx context.Context) ([]providers.Playlist, *providers.SelfHostedProvider) {
+	p := s.ownerSelfHosted()
+	if p == nil {
 		return nil, nil
 	}
-	p := providers.NewSelfHostedProvider(cfg, s.nasHTTPClient())
 	lists, err := p.Playlists(ctx)
 	if err != nil {
 		return nil, p
