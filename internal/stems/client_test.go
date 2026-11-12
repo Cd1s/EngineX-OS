@@ -123,9 +123,16 @@ func TestResolveClientAcceptsMDNSAndLANHostnames(t *testing.T) {
 		"http://.local:18765",
 		"http://.lan:18765",
 		"http://relay.example:18765",
+		"http://[2001:db8::1%25eth0]:18765",
+		"http://[2606:4700:4700::1111%25eth0]:18765",
+		"http://192.168.1.5%25eth0:18765",
+		"http://[fe80::1%25]:18765",
 	} {
 		if _, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_URL": bad, "SC5000_STEMS_TOKEN": "tok"})); err == nil {
 			t.Fatalf("ResolveClient(%q) accepted non-LAN HTTP host", bad)
 		}
+	}
+	if _, err := ResolveClient(envOf(map[string]string{"SC5000_STEMS_URL": "http://[fe80::1%25eth0]:18765", "SC5000_STEMS_TOKEN": "tok"})); err != nil {
+		t.Fatalf("link-local zoned IPv6 rejected: %v", err)
 	}
 }

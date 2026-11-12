@@ -255,3 +255,31 @@ func TestLANProbeBudgetSurvivesStuckCacheAndSkipsConfiguredRelay(t *testing.T) {
 		t.Errorf("probe context expired after stuck cached endpoint before rediscovery: %s", got1)
 	}
 }
+
+func TestValidRelayURLMatchesStemsValidEndpoint(t *testing.T) {
+	for _, good := range []string{
+		"https://relay.example.com",
+		"http://127.0.0.1:6595",
+		"http://192.168.1.20:6595",
+		"http://100.100.1.2:6595",
+		"http://studio-mac.local:18765",
+		"http://deck-worker.lan:18765",
+		"http://renderbox:18765",
+		"http://[fe80::1%25eth0]:18765",
+	} {
+		if !validRelayURL(good) {
+			t.Errorf("validRelayURL(%q) = false, want true", good)
+		}
+	}
+	for _, bad := range []string{
+		"",
+		"http://relay.example.com",
+		"http://8.8.8.8:6595",
+		"http://[2001:db8::1%25eth0]:6595",
+		"https://user:pass@relay.example.com",
+	} {
+		if validRelayURL(bad) {
+			t.Errorf("validRelayURL(%q) = true, want false", bad)
+		}
+	}
+}
