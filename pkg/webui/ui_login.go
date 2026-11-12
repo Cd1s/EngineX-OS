@@ -296,12 +296,45 @@ func (s *Server) neteaseFor(session string, guest bool) *providers.Netease {
 	return nil
 }
 
+// lanAddr is one private IPv4 address of an interface that is up.
+type lanAddr struct {
+	Name    string
+	IP      string
+	Carrier bool // the link is running (a plugged cable, an associated Wi-Fi)
+}
+
+// lanHost is the deck's address for console links and QR codes: the wired
+// interface when it has a link, so a deck with a cable and Wi-Fi shows the wired
+// address (the Wi-Fi one made a live stream run over Wi-Fi with a cable plugged in).
 func lanHost() string {
-	addrs, err := net.InterfaceAddrs()
-	if err == nil {
+	var found []lanAddr
+	ifaces, _ := net.Interfaces()
+	for _, in := range ifaces {
+		if in.Flags&net.FlagUp == 0 || in.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := in.Addrs()
 		for _, a := range addrs {
 			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && n.IP.IsPrivate() {
-				return n.IP.String()
+				found = append(found, lanAddr{in.Name, n.IP.String(), in.Flags&net.FlagRunning != 0})
+			}
+		}
+	}
+	return pickLANHost(found)
+}
+
+// pickLANHost prefers wired with a link, then anything with a link, then the first
+// address; the order of the system's interface list decides only within a group.
+func pickLANHost(found []lanAddr) string {
+	wired := func(name string) bool { return strings.HasPrefix(name, "eth") || strings.HasPrefix(name, "en") }
+	for _, want := range []func(lanAddr) bool{
+		func(a lanAddr) bool { return a.Carrier && wired(a.Name) },
+		func(a lanAddr) bool { return a.Carrier },
+		func(lanAddr) bool { return true },
+	} {
+		for _, a := range found {
+			if want(a) {
+				return a.IP
 			}
 		}
 	}

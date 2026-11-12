@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -82,6 +83,10 @@ type Status struct {
 	LastError    string `json:"lastError,omitempty"`
 	LANMode      string `json:"lanMode,omitempty"`
 	LANTarget    string `json:"lanTarget,omitempty"`
+	// DriftPPM is the measured rate offset of the Engine feed against the system
+	// clock, in parts per million (positive: the audio clock runs fast). The live
+	// stream is resampled by it; absent until it has been measured.
+	DriftPPM float64 `json:"driftPpm,omitempty"`
 }
 
 // Broadcaster manages background audio streaming to Icecast/Shoutcast on CPU3.
@@ -97,6 +102,9 @@ type Broadcaster struct {
 	lastError    string
 
 	bytesSent atomic.Int64
+	driftPPB  atomic.Int64 // measured feed rate offset, parts per billion; 0 until measured
+	drift     float64      // last measured offset, kept across restarts of the capture loop
+	driftSet  bool
 
 	hub hub
 
@@ -253,6 +261,7 @@ func (b *Broadcaster) Status() Status {
 		LastError:    b.lastError,
 		LANMode:      b.cfg.LANMode,
 		LANTarget:    b.cfg.LANTarget,
+		DriftPPM:     float64(b.driftPPB.Load()) / 1000,
 	}
 }
 
@@ -357,20 +366,32 @@ func sanitizeError(err error, password string) string {
 	return msg
 }
 
-// workerLoop captures PCM every MPEG-frame interval, fans it out to local
-// listeners and, when a ServerURL is set, feeds the external Icecast/Shoutcast pusher.
-func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle) {
+// captureTick is the keep-alive cadence and the longest wait for PCM: 1152 frames
+// (one MPEG frame) at 48 kHz = 24 ms.
+const captureTick = 1152 * time.Second / SampleRate
+
+// workerLoop reads the PCM feed as it arrives, puts it on the system clock (see
+// pacer), fans it out to local listeners and, when a ServerURL is set, feeds the
+// external Icecast/Shoutcast pusher. It is paced by the feed itself, so the guard's
+// cooperative throttle is not used here: its sleeps would only add jitter.
+func (b *Broadcaster) workerLoop(ctx context.Context, _ *resourceguard.Throttle) {
 	b.mu.Lock()
 	cfg := b.cfg
 	b.capturing = true
+	seed, seeded := b.drift, b.driftSet
 	b.mu.Unlock()
+	start := time.Now()
+	p := pacer{base: start, tr: newDriftTracker(seed, seeded)}
 	defer func() {
 		b.mu.Lock()
 		b.capturing = false
+		if p.tr.locked {
+			b.drift, b.driftSet = p.tr.offset, true
+		}
 		b.mu.Unlock()
 	}()
 
-	feed := make(chan []byte, 32)
+	feed := make(chan []byte, 80) // about 0.8 s of ~10 ms chunks, as 32 was with 24 ms ones
 	if cfg.ServerURL != "" {
 		b.wg.Add(1)
 		go func() {
@@ -379,50 +400,59 @@ func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle)
 		}()
 	}
 
-	// 1152 samples per MPEG frame at 48 kHz = 24 ms
-	ticker := time.NewTicker(time.Duration(1152) * time.Second / SampleRate)
-	defer ticker.Stop()
-
 	var input pcmReader
-	var keepAlive silenceGate
 	defer func() {
 		if input.f != nil {
 			input.f.Close()
 		}
 	}()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		if t != nil {
-			if err := t.Tick(); err != nil {
-				return
-			}
-		}
+	for ctx.Err() == nil {
+		pass := time.Now()
 		if input.f == nil { // the hook may create the PCM source after the stream is enabled
 			if f, err := os.OpenFile(cfg.InputPath, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
 				input = pcmReader{f: f}
+				if fi, err := f.Stat(); err == nil && fi.Mode()&os.ModeNamedPipe != 0 {
+					input.fifo = true // the live feed: wait for its writes, correct its drift
+					p.correct = true
+					growPipe(f)
+				}
 			}
 		}
-		pcm := input.read()
-		sendBytes, send := keepAlive.next(pcm, time.Now())
-		if !send {
-			continue // a short gap in live PCM: never splice silence into playing audio
+		wait := idleReadWait
+		if input.fifo {
+			wait = captureTick
 		}
-		b.hub.publish(sendBytes)
+		pcm := input.readFor(wait)
+		if out := p.step(pcm, time.Since(start)); out != nil {
+			b.hub.publish(out)
 
-		b.mu.Lock()
-		ls := b.lanStreamer
-		b.mu.Unlock()
-		if ls != nil {
-			_ = ls.Push(sendBytes)
+			b.mu.Lock()
+			ls := b.lanStreamer
+			b.mu.Unlock()
+			if ls != nil {
+				_ = ls.Push(out)
+			}
+
+			select {
+			case feed <- out:
+			default: // external server is slow or down: drop rather than stall the capture
+			}
 		}
-
-		select {
-		case feed <- pcm:
-		default: // external server is slow or down: drop rather than stall the capture
+		if p.tr.locked {
+			b.driftPPB.Store(int64(math.Round(p.tr.offset * 1e9)))
+		}
+		if pcm != nil && input.fifo {
+			continue // the next write of the feed paces the loop
+		}
+		// Nothing to wait on (no source or no writer yet, or a regular file): one pass per tick.
+		if rest := captureTick - time.Since(pass); rest > 0 {
+			timer := time.NewTimer(rest)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
 		}
 	}
 }
@@ -455,21 +485,29 @@ func (g *silenceGate) next(pcm []byte, now time.Time) ([]byte, bool) {
 // is dropped when the writer goes away (EOF), since a new writer starts on a frame.
 type pcmReader struct {
 	f     *os.File
+	fifo  bool // a FIFO: reads can wait for the writer
 	carry [3]byte
 	n     int
 }
+
+// idleReadWait is how long read waits on an open but idle FIFO writer.
+const idleReadWait = 5 * time.Millisecond
 
 // read returns what is available (up to two MPEG frames' worth, so a late tick
 // catches up), looping regular files; nil when no whole frame is available. A FIFO
 // whose writer is connected but idle must not park the capture loop: the read
 // gives up after a few milliseconds.
-func (p *pcmReader) read() []byte {
+func (p *pcmReader) read() []byte { return p.readFor(idleReadWait) }
+
+// readFor is read with a chosen wait: a FIFO read returns as soon as the writer has
+// written something, or with nothing after wait.
+func (p *pcmReader) readFor(wait time.Duration) []byte {
 	if p.f == nil {
 		return nil
 	}
 	buf := make([]byte, p.n+2*1152*4)
 	copy(buf, p.carry[:p.n])
-	_ = p.f.SetReadDeadline(time.Now().Add(5 * time.Millisecond)) // no-op error on regular files
+	_ = p.f.SetReadDeadline(time.Now().Add(wait)) // no-op error on regular files
 	m, err := p.f.Read(buf[p.n:])
 	if err == io.EOF {
 		p.n = 0

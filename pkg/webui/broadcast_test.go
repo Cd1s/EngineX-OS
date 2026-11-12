@@ -628,3 +628,52 @@ func TestLiveWAVStalledListenerLatencyIsBounded(t *testing.T) {
 		t.Fatalf("stream did not resume: %d bytes in 300 ms", len(more))
 	}
 }
+
+// Without ?buffer= the cushion is the wired default, 120 ms (the first version sent
+// 300 ms for Wi-Fi): the stream no longer drifts, so the cushion only covers the
+// deck's own jitter. ?buffer= still overrides it within 0..2000.
+func TestLiveWAVDefaultBufferIsWiredTuned(t *testing.T) {
+	if broadcast.DefaultBufferMS != 120 {
+		t.Fatalf("default buffer %d ms, want 120", broadcast.DefaultBufferMS)
+	}
+	for query, want := range map[string]int{"": 120, "buffer=0": 0, "buffer=2000": 2000, "buffer=45": 45, "buffer=2001": 120, "buffer=-1": 120, "buffer=x": 120} {
+		if got := liveBufferMS(httptest.NewRequest("GET", "/live.wav?"+query, nil)); got != want {
+			t.Errorf("?%s: buffer %d ms, want %d", query, got, want)
+		}
+	}
+	s, dir := newTestServer(t)
+	enableLiveWithPCM(t, s, dir)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	time.Sleep(700 * time.Millisecond) // let the feed build history
+	conn, _ := openLive(t, srv.URL, "format=pcm")
+	defer conn.Close()
+	got := readFor(t, conn, 60*time.Millisecond)
+	// The cushion at once, then live audio for the 60 ms of the read (plus slack).
+	if lo, hi := 120*192, (120+60+70)*192; len(got) < lo || len(got) > hi {
+		t.Fatalf("first 60 ms brought %d bytes (%.0f ms), want the 120 ms cushion: %d..%d", len(got), float64(len(got))/192, lo, hi)
+	}
+}
+
+// The console address and QR code use the wired address when the deck has a cable
+// and Wi-Fi at once, whatever order the system lists them in (a deck listed wlan0
+// first, and the stream opened from that address ran over Wi-Fi).
+func TestLANHostPrefersWired(t *testing.T) {
+	both := []lanAddr{{"wlan0", "10.0.0.108", true}, {"eth0", "10.0.0.224", true}}
+	if got := pickLANHost(both); got != "10.0.0.224" {
+		t.Fatalf("cable and Wi-Fi: %s, want the wired address", got)
+	}
+	// A cable that is unplugged (no link) must not hide the working Wi-Fi address.
+	if got := pickLANHost([]lanAddr{{"eth0", "10.0.0.224", false}, {"wlan0", "10.0.0.108", true}}); got != "10.0.0.108" {
+		t.Fatalf("unplugged cable: %s, want the Wi-Fi address", got)
+	}
+	if got := pickLANHost([]lanAddr{{"wlan0", "10.0.0.7", true}}); got != "10.0.0.7" {
+		t.Fatalf("Wi-Fi only: %s", got)
+	}
+	if got := pickLANHost([]lanAddr{{"wlan0", "10.0.0.7", false}}); got != "10.0.0.7" {
+		t.Fatalf("no link reported: %s, want the only address", got)
+	}
+	if got := pickLANHost(nil); got != "sc5000.lan" {
+		t.Fatalf("no address: %s, want the name", got)
+	}
+}
