@@ -367,7 +367,11 @@ func TestPDBMangledISRCUnusedSlotsAndSkippedRows(t *testing.T) {
 	isrcBody := append([]byte{0x03}, []byte("GBCFB2000432\x00\x00")...) // 15 bytes (odd)
 	isrcStr := append([]byte{0x90, byte(4 + len(isrcBody)), 0, 0}, isrcBody...)
 	newRow0 = append(newRow0, isrcStr...)
+	titleRel := len(newRow0)
+	titleStr := EncodeDeviceSQLString("七里香") // U+4E03 starts with 0x03 in UTF-16LE
+	newRow0 = append(newRow0, titleStr...)
 	le.PutUint16(newRow0[94+0:], uint16(isrcRel))
+	le.PutUint16(newRow0[94+2*17:], uint16(titleRel))
 	le.PutUint16(newRow0[94+2*5:], 60000) // unused slot out-of-bounds
 
 	copy(p[heapUsed:], newRow0)
@@ -381,5 +385,17 @@ func TestPDBMangledISRCUnusedSlotsAndSkippedRows(t *testing.T) {
 	// Original 5 tracks minus 2 skipped (ID=0 and empty Path) = 3 tracks.
 	if len(lib.Tracks) != 3 {
 		t.Fatalf("tracks = %d, want 3", len(lib.Tracks))
+	}
+	foundQiLiXiang := false
+	for _, tr := range lib.Tracks {
+		if tr.ID == 1 {
+			foundQiLiXiang = tr.Title == "七里香"
+			if tr.Title != "七里香" {
+				t.Fatalf("track 1 title = %q, want %q", tr.Title, "七里香")
+			}
+		}
+	}
+	if !foundQiLiXiang {
+		t.Fatal("track 1 missing after ParsePDB")
 	}
 }
