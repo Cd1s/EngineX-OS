@@ -805,11 +805,12 @@ static int slow_marker(const char *target,char out[PATH_MAX]) {
     return 0;
 }
 // The same for a database too large to heal inside the budget, keyed by the
-// filesystem and the size of m.db.
+// size of the volume and of m.db. Not by f_fsid, the device number on FAT,
+// exFAT and HFS+: the same stick in the other port waited again (BH2-A1-2).
 static int heal_marker(const char *target,char out[PATH_MAX]) {
     struct statvfs v;if(statvfs(target,&v))return -1;
     uint64_t h=UINT64_C(14695981039346656037);
-    h=hash_bytes(h,&v.f_fsid,sizeof v.f_fsid);h=hash_bytes(h,&v.f_blocks,sizeof v.f_blocks);
+    h=hash_bytes(h,&v.f_blocks,sizeof v.f_blocks);
     // Sizes only: Engine and a killed heal both touch m.db's time on every use.
     char p[PATH_MAX];struct stat st;
     if(!path_join(p,sizeof p,target,"Engine Library/Database2/m.db")&&!lstat(p,&st)){int64_t size=(int64_t)st.st_size;h=hash_bytes(h,&size,sizeof size);}
