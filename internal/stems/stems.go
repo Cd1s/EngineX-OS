@@ -247,12 +247,14 @@ func (b *idleBody) stop() {
 
 // Backend serves /v1/engine. An empty Secret serves LAN callers without a
 // credential (a home renderer found by discovery); others are refused.
+// If Render is non-nil, sessions run in-process without spawning Worker.
 type Backend struct {
 	Secret string
 	Worker []string
+	Render func(ctx context.Context, in io.Reader, out io.Writer) error
 	Slot   chan struct{}
 	Log    io.Writer
-	Name   string // separator reported by /healthz: hpss (default) or htdemucs
+	Name   string // separator reported by /healthz: hpss (default), htdemucs, spleeter, etc.
 }
 type flushWriter struct {
 	w http.ResponseWriter
@@ -315,19 +317,49 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Hour)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, b.Worker[0], b.Worker[1:]...)
-	stdin, e := cmd.StdinPipe()
-	if e != nil {
-		http.Error(w, "worker pipe", 500)
-		return
+	var (
+		stdin  io.WriteCloser
+		stdout io.Reader
+		waitFn func() error
+	)
+	if b.Render != nil {
+		inR, inW := io.Pipe()
+		outR, outW := io.Pipe()
+		stdin, stdout = inW, outR
+		renderCh := make(chan error, 1)
+		go func() {
+			err := b.Render(ctx, inR, outW)
+			_ = inR.CloseWithError(err)
+			_ = outW.CloseWithError(err)
+			renderCh <- err
+		}()
+		waitFn = func() error { return <-renderCh }
+	} else {
+		if len(b.Worker) == 0 {
+			http.Error(w, "worker unavailable", 500)
+			return
+		}
+		cmd := exec.CommandContext(ctx, b.Worker[0], b.Worker[1:]...)
+		var e error
+		stdin, e = cmd.StdinPipe()
+		if e != nil {
+			http.Error(w, "worker pipe", 500)
+			return
+		}
+		stdout, e = cmd.StdoutPipe()
+		if e != nil {
+			stdin.Close()
+			http.Error(w, "worker pipe", 500)
+			return
+		}
+		cmd.Stderr = b.Log
+		if e = cmd.Start(); e != nil {
+			stdin.Close()
+			http.Error(w, "worker unavailable", 500)
+			return
+		}
+		waitFn = cmd.Wait
 	}
-	stdout, e := cmd.StdoutPipe()
-	if e != nil {
-		stdin.Close()
-		http.Error(w, "worker pipe", 500)
-		return
-	}
-	cmd.Stderr = b.Log
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Stems-Protocol", Protocol)
 	w.Header().Set("Connection", "close")
@@ -336,11 +368,6 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	framed := framing == "1" || framing == "2"
 	if framed {
 		w.Header().Set(FramingHeader, framing)
-	}
-	if e = cmd.Start(); e != nil {
-		stdin.Close()
-		http.Error(w, "worker unavailable", 500)
-		return
 	}
 	w.WriteHeader(200)
 	http.NewResponseController(w).Flush()
@@ -370,7 +397,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if copyErr != nil {
 		cancel()
 	}
-	e = cmd.Wait()
+	e := waitFn()
 	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
 	status := "failed"
 	if e == nil && copyErr == nil {

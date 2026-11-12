@@ -1,0 +1,60 @@
+//go:build arm64 && !purego
+
+#include "textflag.h"
+
+// func fma4RowNEON(n int, a0, a1, a2, a3 float32, b, c0, c1, c2, c3 *float32)
+TEXT ·fma4RowNEON(SB), NOSPLIT, $0-64
+	MOVD n+0(FP), R0
+	FMOVS a0+8(FP), F0
+	FMOVS a1+12(FP), F1
+	FMOVS a2+16(FP), F2
+	FMOVS a3+20(FP), F3
+	WORD $0x4e040400 // DUP V0.4S, V0.S[0]
+	WORD $0x4e040421 // DUP V1.4S, V1.S[0]
+	WORD $0x4e040442 // DUP V2.4S, V2.S[0]
+	WORD $0x4e040463 // DUP V3.4S, V3.S[0]
+	MOVD b+24(FP), R1
+	MOVD c0+32(FP), R2
+	MOVD c1+40(FP), R3
+	MOVD c2+48(FP), R4
+	MOVD c3+56(FP), R5
+
+loop4:
+	CMP $4, R0
+	BLT tail
+	VLD1.P 16(R1), [V4.S4]
+	VLD1 (R2), [V5.S4]
+	VLD1 (R3), [V6.S4]
+	VLD1 (R4), [V7.S4]
+	VLD1 (R5), [V16.S4]
+	WORD $0x4e20cc85 // FMLA V5.4S, V4.4S, V0.4S
+	WORD $0x4e21cc86 // FMLA V6.4S, V4.4S, V1.4S
+	WORD $0x4e22cc87 // FMLA V7.4S, V4.4S, V2.4S
+	WORD $0x4e23cc90 // FMLA V16.4S, V4.4S, V3.4S
+	VST1.P [V5.S4], 16(R2)
+	VST1.P [V6.S4], 16(R3)
+	VST1.P [V7.S4], 16(R4)
+	VST1.P [V16.S4], 16(R5)
+	SUB $4, R0, R0
+	B loop4
+
+tail:
+	CBZ R0, done
+	FMOVS.P 4(R1), F4
+	FMOVS (R2), F5
+	FMOVS (R3), F6
+	FMOVS (R4), F7
+	FMOVS (R5), F16
+	FMADDS F0, F5, F4, F5
+	FMADDS F1, F6, F4, F6
+	FMADDS F2, F7, F4, F7
+	FMADDS F3, F16, F4, F16
+	FMOVS.P F5, 4(R2)
+	FMOVS.P F6, 4(R3)
+	FMOVS.P F7, 4(R4)
+	FMOVS.P F16, 4(R5)
+	SUB $1, R0, R0
+	B tail
+
+done:
+	RET

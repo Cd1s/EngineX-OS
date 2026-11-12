@@ -2,6 +2,7 @@ package stemsd
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -62,4 +63,44 @@ func defaultBackendOf(env string) string {
 		return env
 	}
 	return "htdemucs"
+}
+
+func TestResolveNativeBackendAndFallbacks(t *testing.T) {
+	ctx := context.Background()
+	emptyModels := t.TempDir()
+	cacheDir := t.TempDir()
+	var log bytes.Buffer
+
+	// Explicit native-hpss succeeds with zero warning logs and runs an Engine greeting cleanly.
+	name, fn, cleanup := resolveNativeBackend(ctx, "native-hpss", emptyModels, cacheDir, 64, false, nil, &log)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if name != "hpss" || fn == nil || log.Len() != 0 {
+		t.Fatalf("native-hpss got name=%q log=%q", name, log.String())
+	}
+	var out bytes.Buffer
+	if err := fn(ctx, strings.NewReader(""), &out); err != nil || !strings.HasPrefix(out.String(), "session=") {
+		t.Fatalf("greeting failed: err=%v out=%q", err, out.String())
+	}
+
+	// Missing neural weights fall back cleanly to in-process hpss without network access.
+	log.Reset()
+	name2, fn2, cleanup2 := resolveNativeBackend(ctx, "spleeter", emptyModels, cacheDir, 64, false, nil, &log)
+	if cleanup2 != nil {
+		defer cleanup2()
+	}
+	if name2 != "hpss" || fn2 == nil || !strings.Contains(log.String(), "falling back to in-process hpss") {
+		t.Fatalf("spleeter fallback got name=%q log=%q", name2, log.String())
+	}
+
+	// Tiered mode with an external HQ worker reports hpss+htdemucs when Spleeter weights are absent.
+	log.Reset()
+	name3, fn3, cleanup3 := resolveNativeBackend(ctx, "tiered", emptyModels, cacheDir, 64, false, []string{"/bin/true"}, &log)
+	if cleanup3 != nil {
+		defer cleanup3()
+	}
+	if name3 != "hpss+htdemucs" || fn3 == nil {
+		t.Fatalf("tiered with pyHQ got name=%q", name3)
+	}
 }

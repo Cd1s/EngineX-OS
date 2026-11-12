@@ -14,7 +14,12 @@ Engine ─stdin/stdout─ stems-processor ══HTTPS══ enginex-relay /v1/en
 The separator in [`tools/stems/worker.py`](../../tools/stems/worker.py) supports
 both a fast causal spectral HPSS / centre-harmonic separator (`--backend hpss`,
 default) and an optional HTDemucs 4-stem neural GPU/CPU separator
-(`--backend demucs|auto`). In both modes the four stems sum back to the input.
+(`--backend demucs|auto`). `enginex-stemsd` also includes a built-in Python-free
+`CGO_ENABLED=0` engine (`-native -backend tiered|spleeter|native-htdemucs|native-hpss`,
+with `-download-models` / `-auto-download-models` for SHA-256-verified MIT
+Spleeter + HTDemucs weights and a content-addressed HQ cache) speaking the
+exact same `/v1/engine` wire protocol. In all modes the four stems sum back to
+the input.
 
 ## Code
 

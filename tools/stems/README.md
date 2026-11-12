@@ -9,6 +9,7 @@ Run this service on a Mac or PC on the same Wi-Fi / LAN as your deck for high-qu
    - **macOS / Linux**: `./stems/run-home-worker.sh`
    - **Windows (PowerShell)**: `powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1`
    - *(Optional lightweight spectral mode without PyTorch)*: pass `hpss` at the end of the command.
+   - *(Python-free single binary: Spleeter instant pass + background HTDemucs HQ cache)*: `./stems/enginex-stemsd -native -backend tiered -auto-download-models` (`.\stems\enginex-stemsd.exe -native -backend tiered -auto-download-models` on Windows).
 
 ---
 
@@ -21,6 +22,7 @@ Run this service on a Mac or PC on the same Wi-Fi / LAN as your deck for high-qu
    - **macOS / Linux**：`./stems/run-home-worker.sh`
    - **Windows（PowerShell）**：`powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1`
    - *（可选轻量频谱模式，免装 PyTorch）*：在命令末尾加 `hpss`。
+   - *（免 Python 单文件模式：Spleeter 秒级分轨 + 后台 HTDemucs 高音质缓存）*：`./stems/enginex-stemsd -native -backend tiered -auto-download-models`（Windows 为 `.\stems\enginex-stemsd.exe -native -backend tiered -auto-download-models`）。
 
 ---
 
@@ -33,3 +35,4 @@ Run this service on a Mac or PC on the same Wi-Fi / LAN as your deck for high-qu
    - **macOS / Linux**：`./stems/run-home-worker.sh`
    - **Windows（PowerShell）**：`powershell -ExecutionPolicy Bypass -File .\stems\run-home-worker.ps1`
    - *（可選輕量頻譜模式，免裝 PyTorch）*：在指令末尾加上 `hpss`。
+   - *（免 Python 單執行檔模式：Spleeter 秒級分軌 + 背景 HTDemucs 高音質快取）*：`./stems/enginex-stemsd -native -backend tiered -auto-download-models`（Windows 為 `.\stems\enginex-stemsd.exe -native -backend tiered -auto-download-models`）。
