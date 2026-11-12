@@ -33,6 +33,52 @@ APPLETS = ('stream-sync', 'rb-bridge', 'sc5000-deemixd', 'stems-processor', 'eng
 
 WRAPPER = '#!/bin/sh\nexec "$(dirname "$0")/sc5000-suite" {} "$@"\n'
 
+SWAP_UNDO = r"""# BH-G2-4: install.sh moves every part it replaces (and copies of the version markers and the
+# ALSA file) into $dest/.install-old, and renames that to .install-done once everything is in
+# place. An .install-old that is still there means an install failed or lost power half-way:
+# put that generation back. Older installers parked a part as <part>.replaced and deleted it on
+# the next run; a part that is missing gets it back instead.
+swap_undo() {
+    # A stage an interrupted install left: a whole bundle copy taking room on /data.
+    for su_stage in "$dest"/.bundle.*; do
+        [ ! -d "$su_stage" ] || [ -L "$su_stage" ] || rm -rf "$su_stage"
+    done
+    su_old="$dest/.install-old"
+    su_have=0
+    [ ! -d "$su_old" ] || [ -L "$su_old" ] || su_have=1
+    for su_part in bundle ui/packs ui/icons; do
+        if [ "$su_have" = 1 ] && [ -e "$su_old/$su_part" ]; then
+            rm -rf "$dest/$su_part.undo"
+            [ ! -e "$dest/$su_part" ] || mv "$dest/$su_part" "$dest/$su_part.undo"
+            mv "$su_old/$su_part" "$dest/$su_part"
+        elif [ "$su_have" = 1 ] && [ -e "$su_old/$su_part.absent" ]; then
+            rm -rf "$dest/$su_part"
+        elif [ ! -e "$dest/$su_part" ] && [ -d "$dest/$su_part.replaced" ] && [ ! -L "$dest/$su_part.replaced" ]; then
+            mv "$dest/$su_part.replaced" "$dest/$su_part"
+        fi
+        rm -rf "$dest/$su_part.undo" "$dest/$su_part.replaced"
+    done
+    if [ "$su_have" = 1 ]; then
+        for su_f in version.txt ui/.pack-version ui/.pack-id gen2-unlocked; do
+            if [ -f "$su_old/files/$su_f" ]; then
+                cp -p "$su_old/files/$su_f" "$dest/$su_f"
+            elif [ -e "$su_old/files/$su_f.absent" ]; then
+                rm -f "$dest/$su_f"
+            fi
+        done
+        if [ -f "$su_old/alsa-path" ]; then
+            su_alsa=$(cat "$su_old/alsa-path")
+            if [ -f "$su_old/files/alsa.conf" ]; then
+                cp -p "$su_old/files/alsa.conf" "$su_alsa"
+            elif [ -e "$su_old/files/alsa.absent" ]; then
+                rm -f "$su_alsa"
+            fi
+        fi
+        rm -rf "$su_old"
+    fi
+    rm -rf "$dest/.install-done"
+}"""
+
 BOOT_ACTIVATE = r'''#!/bin/sh
 # One-shot boot activator for SC LIVE 4 (inmusic,jp21) and read-only root decks (#61).
 set -eu
@@ -43,6 +89,15 @@ bundle_dir="$dest/bundle"
 bin_dir="$bundle_dir/bin"
 lib_hook="$bundle_dir/lib/libengine-ui-hook.so"
 lib_edisksd_hook="$bundle_dir/lib/libedisksd-hook.so"
+
+@SWAP_UNDO@
+# The boot run (no arguments; --restore-tz runs on every Engine start and may overlap an
+# install): a swap that lost power is undone, and the generation put back activates itself.
+if [ "$#" = 0 ] && [ -d "$dest/.install-old" ] && [ ! -L "$dest/.install-old" ]; then
+    swap_undo
+    [ ! -f "$bundle_dir/boot-activate.sh" ] || exec sh "$bundle_dir/boot-activate.sh"
+    exit 0
+fi
 
 check_gen2_tz_newer() {
     tz_file="$dest/state/timezone"
@@ -165,6 +220,29 @@ restore_gen2_timezone() {
     fi
 }
 
+# rekordbox sticks already mounted when the hook was not yet active (present at boot).
+convert_mounted() {
+    [ ! -e "$dest/ui/safe-mode" ] || return 0
+    [ -x "$bin_dir/rb-bridge" ] || return 0
+    for m in "${SC5000_MEDIA_ROOT:-/media}"/*; do
+        if [ -d "$m/PIONEER" ] || [ -d "$m/.PIONEER" ]; then
+            "$bin_dir/rb-bridge" --mount-path "$m" >/dev/null 2>&1 || :
+        fi
+    done
+}
+
+# ExecStartPre=- of the hooked Engine: the stock Engine this boot started with has stopped and the
+# hooked one has not started, so no Engine has the stick open while rb-bridge writes its library,
+# and the DJ cannot load a track in the stock UI that the restart then takes away (BH-F52-6).
+# Once per boot; a later restart finds the sticks converted by the hook at their mount.
+if [ "${1:-}" = "--convert-mounted" ]; then
+    mark=${SC5000_CONVERT_MARK:-/run/sc5000-boot-converted}
+    [ ! -e "$mark" ] || exit 0
+    : > "$mark" 2>/dev/null || :
+    convert_mounted
+    exit 0
+fi
+
 # Invoked by engine.service's ExecStartPre=- after the unhooked Engine stops and before
 # the hooked Engine starts, so Engine.conf is updated without stopping our own cgroup.
 if [ "${1:-}" = "--restore-tz" ]; then
@@ -203,6 +281,7 @@ EnvironmentFile=-/data/sc5000-custom/ui-scale.env
 ExecStartPre=/bin/mkdir -p -m 0700 /tmp/sc5000-engine-home
 ExecStartPre=-$bundle_dir/boot-activate.sh --restore-tz
 ExecStartPre=-$bin_dir/engine-ui-guard pre
+ExecStartPre=-$bundle_dir/boot-activate.sh --convert-mounted
 ExecStartPost=-$bin_dir/engine-ui-guard post
 ExecStopPost=-$bin_dir/engine-ui-guard stop
 EOF
@@ -211,6 +290,8 @@ EOF
 # Engine patch constructor stays inert. Keep that minimal activator for network
 # diagnostics on subsequent fallback boots; inject nothing into stock Engine.
 # Wrap the actual Engine invocation, including retries inside the vendor loop.
+# The stock script also forces Gigabit Ethernet down to 100 Mbps on every Engine
+# start; first-generation images set 1000 (debloat patch), so do these (BH-GC2-6).
 if [ -x "$bin_dir/engine-ui-guard" ] && [ -f /usr/Engine/Scripts/engine ]; then
     script_stage=$(mktemp /run/sc5000-engine-script.XXXXXX)
     sed -E \
@@ -218,6 +299,7 @@ if [ -x "$bin_dir/engine-ui-guard" ] && [ -f /usr/Engine/Scripts/engine ]; then
         -e "s|^([[:space:]]*(exec[[:space:]]+)?)/usr/sbin/az01-update([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\3|" \
         -e "s|^([[:space:]]*(exec[[:space:]]+)?)az01-update([[:space:]]+--erase-data([[:space:]].*)?)\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\3|" \
         -e "s|^([[:space:]]*(exec[[:space:]]+)?)/usr/bin/planck-remote-screen([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/bin/planck-remote-screen\\3|" \
+        -e "s|^([[:space:]]*)/usr/bin/az01-ethernet-speed 100([[:space:]]*)\$|\\1/usr/bin/az01-ethernet-speed 1000\\2|" \
         /usr/Engine/Scripts/engine > "$script_stage"
     chmod 755 "$script_stage"
     if grep -Fq "$bin_dir/engine-ui-guard launch /usr/Engine/Engine" "$script_stage"; then
@@ -385,20 +467,37 @@ fi
 # host-install-userdata.py --ssh-key (#116). The root fs is read-only on these decks, so when the
 # copy fails the key is bind-mounted over the stock /root/.ssh/authorized_keys.
 ssh_key=
-if [ -s "$dest/authorized_keys" ] && [ -x /usr/sbin/sshd ]; then
+sshd_bin=${SC5000_SSHD:-/usr/sbin/sshd}
+if [ -s "$dest/authorized_keys" ] && [ -x "$sshd_bin" ]; then
     ssh_key=1
     chown 0:0 "$dest/authorized_keys" 2>/dev/null || :
     chmod 600 "$dest/authorized_keys"
-    if ! cmp -s "$dest/authorized_keys" /root/.ssh/authorized_keys 2>/dev/null; then
-        { mkdir -p -m 700 /root/.ssh && cp "$dest/authorized_keys" /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys; } 2>/dev/null ||
-            mount --bind "$dest/authorized_keys" /root/.ssh/authorized_keys 2>/dev/null || :
+    root_ssh=${SC5000_ROOT_SSH_DIR:-/root/.ssh} # tests: never the build host's own keys
+    if ! cmp -s "$dest/authorized_keys" "$root_ssh/authorized_keys" 2>/dev/null; then
+        { mkdir -p -m 700 "$root_ssh" && cp "$dest/authorized_keys" "$root_ssh/authorized_keys" && chmod 600 "$root_ssh/authorized_keys"; } 2>/dev/null ||
+            mount --bind "$dest/authorized_keys" "$root_ssh/authorized_keys" 2>/dev/null || :
     fi
+fi
+
+# SSH as set in the Web Console (state/ssh-config.json, BH-GC2-9, BH-GF4-15): "off" keeps
+# sshd off even with a key, "on" with a root password starts it without one, and the port
+# comes back on every boot (the console's drop-in lives in /run, /etc is read-only here).
+# Without that file: as before, sshd only with a key (#46: public images ship none).
+ssh_start=$ssh_key ssh_port=22
+ssh_cfg=$(cat "$dest/state/ssh-config.json" 2>/dev/null | tr -d '[:space:]')
+case $ssh_cfg in *'"enabled":false'*) ssh_start= ;; esac
+case $ssh_cfg in *'"enabled":true'*'"hasPassword":true'*|*'"hasPassword":true'*'"enabled":true'*) [ ! -x "$sshd_bin" ] || ssh_start=1 ;; esac
+p=$(printf '%s' "$ssh_cfg" | sed -n 's/.*"port":\([0-9][0-9]*\).*/\1/p')
+case $p in ''|0*|??????*) ;; *) [ "$p" -gt 65535 ] || ssh_port=$p ;; esac
+ssh_dropin=/run/systemd/system/sshd.service.d/51-port.conf
+if [ -n "$ssh_start" ] && [ "$ssh_port" != 22 ]; then
+    mkdir -p "${ssh_dropin%/*}" && printf '[Service]\nExecStart=\nExecStart=%s -D -e -p %s\n' "$sshd_bin" "$ssh_port" > "$ssh_dropin" || :
 fi
 
 # Seed /data/StreamingAccounts.json with a stored-credential TIDAL entry (#56, #159)
 # so Engine 5.3.0 logs in to the local gateway at boot instead of waiting for Profile SSO.
-accounts=/data/StreamingAccounts.json
-if [ ! -e "$dest/ui/safe-mode" ] && [ -d /data ] && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
+accounts=${SC5000_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
+if [ ! -e "$dest/ui/safe-mode" ] && [ -d "${accounts%/*}" ] && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
     export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\",\"accessToken\":\"enginex\",\"refreshToken\":\"enginex\"}"'
     if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
         awk '{
@@ -427,24 +526,14 @@ if [ ! -e "$dest/ui/safe-mode" ] && grep -qx 'four_deck_waveform=1' "$dest/ui/se
 fi
 
 # Sticks mounted before this ran never went through the edisksd hook.
-convert_mounted() {
-    [ ! -e "$dest/ui/safe-mode" ] || return 0
-    [ -x "$bin_dir/rb-bridge" ] || return 0
-    for m in /media/*; do
-        if [ -d "$m/PIONEER" ] || [ -d "$m/.PIONEER" ]; then
-            "$bin_dir/rb-bridge" --mount-path "$m" >/dev/null 2>&1 || :
-        fi
-    done
-}
-
 # In a chroot systemctl only prints "Running in chroot, ignoring" and exits 0, so require systemd as PID 1.
-if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
+if [ "$(cat "${SC5000_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
     systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service || :
-    [ -z "$ssh_key" ] || systemctl start --no-block sshd.service || :
-    # Blocking, so edisksd is up again before convert_mounted looks at /media.
+    [ -z "$ssh_start" ] || systemctl start --no-block sshd.service || :
+    # Blocking, so edisksd is up again before the hooked start converts what is in /media.
     [ "$edisksd_changed" = 0 ] || systemctl restart edisksd.service || :
     [ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :
-    convert_mounted
+    # The sticks present at boot are converted by the hooked Engine's ExecStartPre (BH-F52-6).
     if check_gen2_tz_newer; then
         : > "${SC5000_TZ_NEWER_MARKER:-/run/sc5000-tz-newer}" 2>/dev/null || :
     fi
@@ -456,8 +545,8 @@ if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/
 else
     restore_gen2_timezone 0 || :
     convert_mounted
-    if [ -n "$ssh_key" ] && ! pgrep -x sshd >/dev/null 2>&1; then
-        mkdir -p /var/run/sshd && /usr/sbin/sshd || :
+    if [ -n "$ssh_start" ] && ! pgrep -x sshd >/dev/null 2>&1; then
+        mkdir -p /var/run/sshd && "$sshd_bin" -p "$ssh_port" || :
     fi
     pkill -x sc5000-suite 2>/dev/null || :
     [ -x "$bin_dir/stream-sync" ] && "$bin_dir/stream-sync" --listen :8080 --cpu 3 >/dev/null 2>&1 &
@@ -481,7 +570,7 @@ ALSA_CONF = r'''hook_func.sc5000_alsa_boot_hook {
 
 INSTALL = r'''#!/bin/sh
 # Installs this bundle under /data/enginex (/data/sc5000-custom stays as a symlink). Checks SHA256SUMS first and
-# replaces each part in one rename, so a failed install leaves the old one.
+# keeps the previous generation until every part is in place, so a failed or interrupted install leaves the old one.
 set -eu
 # <MODEL>-<VERSION>-EngineX-OS-<Name>-Update.img (128-byte header + this bundle's .tar.gz): check the SHA-256
 # in the header, unpack the payload and run its own install.sh.
@@ -519,32 +608,67 @@ else
 fi
 cd "$src"
 sha256sum -c SHA256SUMS >/dev/null || { echo "bundle damaged: SHA256SUMS mismatch" >&2; exit 1; }
-for path in "$dest" "$dest/bundle" "$dest/ui" "$dest/ui/packs" "$dest/ui/icons"; do
+# BH-G2-1: on a deck, only a bundle built for its CPU (the ELF machine of its own Engine, not
+# uname: a 64-bit kernel can run the armhf userland) and, when the bundle names one, its model.
+compat=${SC5000_COMPATIBLE:-/sys/firmware/devicetree/base/compatible}
+boards=$(tr '\000' ' ' 2>/dev/null < "$compat") || boards=
+case " $boards" in *" inmusic,"*)
+    # e_machine's low byte, octal; od -b and sed: the deck's BusyBox od has no -A/-t.
+    elf_machine() { dd if="$1" bs=1 skip=18 count=1 2>/dev/null | od -b | sed -n '1s/^[0-9]* *//p' | tr -d ' '; }
+    want_cpu=$(elf_machine "${SC5000_SYSTEM_ELF:-/usr/Engine/Engine}")
+    got_cpu=$(elf_machine bin/sc5000-suite)
+    [ -n "$want_cpu" ] && [ "$got_cpu" = "$want_cpu" ] ||
+        { echo "bundle is for another CPU (ELF machine ${got_cpu:-?}, this deck ${want_cpu:-?})" >&2; exit 1; }
+    if [ -f model ]; then
+        deck=
+        for b in $boards; do
+            case $b in
+            inmusic,jp21) deck=SCLIVE4 ;; inmusic,jp20) deck=SCLIVE2 ;; inmusic,jc11s) deck=PRIME4PLUS ;;
+            inmusic,jp11s) deck=PRIMEGOPLUS ;; inmusic,nh08s) deck=MIXSTREAMPROPLUS ;; inmusic,nh10) deck=MIXSTREAMPROGO ;;
+            inmusic,jp24) deck=PRIME4G2 ;; inmusic,rmz2) deck=SYSTEMONE ;;
+            esac
+        done
+        [ "$deck" = "$(cat model)" ] ||
+            { echo "bundle is for $(cat model), this deck is ${deck:-not a second-generation model}" >&2; exit 1; }
+    fi ;;
+esac
+for path in "$dest" "$dest/bundle" "$dest/ui" "$dest/ui/packs" "$dest/ui/icons" "$dest/.install-old" "$dest/.install-done"; do
     [ ! -L "$path" ] || { echo "refusing symlink: $path" >&2; exit 1; }
 done
 mkdir -p "$dest/ui"
 chmod 700 "$dest"
 umask 022
+@SWAP_UNDO@
+swap_undo
 stage=$(mktemp -d "$dest/.bundle.XXXXXX")
 trap 'rm -rf "$stage"' 0
 mkdir "$stage/bundle" "$stage/ui"
 cp -R bin lib SHA256SUMS version.txt alsa-dir boot-activate.sh 99-sc5000-custom.conf install.sh uninstall.sh "$stage/bundle/"
 [ ! -f release-tag ] || cp release-tag "$stage/bundle/"
+[ ! -f model ] || cp model "$stage/bundle/"
 tar -C "$stage/ui" -xf ui-packs.tar
 [ -d "$stage/ui/packs" ] || { echo "ui-packs.tar has no packs/" >&2; exit 1; }
-rm -rf "$dest/bundle.replaced"
-[ ! -e "$dest/bundle" ] || mv "$dest/bundle" "$dest/bundle.replaced"
-mv "$stage/bundle" "$dest/bundle"
-rm -rf "$dest/bundle.replaced"
-for name in packs icons; do
-    [ -d "$stage/ui/$name" ] || continue
-    rm -rf "$dest/ui/$name.replaced"
-    [ ! -e "$dest/ui/$name" ] || mv "$dest/ui/$name" "$dest/ui/$name.replaced"
-    mv "$stage/ui/$name" "$dest/ui/$name"
-    rm -rf "$dest/ui/$name.replaced"
+# Keep the whole previous generation until the commit below; any failure before it puts it back.
+trap 'swap_undo; rm -rf "$stage"' 0
+old="$dest/.install-old"
+mkdir -p "$old/ui" "$old/files/ui"
+for f in version.txt ui/.pack-version ui/.pack-id gen2-unlocked; do
+    if [ -f "$dest/$f" ]; then cp -p "$dest/$f" "$old/files/$f"; else : > "$old/files/$f.absent"; fi
+done
+printf '%s\n' "$alsa_dest/99-sc5000-custom.conf" > "$old/alsa-path"
+if [ -f "$alsa_dest/99-sc5000-custom.conf" ]; then
+    cp -p "$alsa_dest/99-sc5000-custom.conf" "$old/files/alsa.conf"
+else
+    : > "$old/files/alsa.absent"
+fi
+for part in bundle ui/packs ui/icons; do
+    [ -d "$stage/$part" ] || continue
+    if [ -e "$dest/$part" ]; then mv "$dest/$part" "$old/$part"; else : > "$old/$part.absent"; fi
+    mv "$stage/$part" "$dest/$part"
 done
 mkdir -p "$alsa_dest"
-cp 99-sc5000-custom.conf "$alsa_dest/99-sc5000-custom.conf"
+cp 99-sc5000-custom.conf "$alsa_dest/.99-sc5000-custom.conf.new"
+mv "$alsa_dest/.99-sc5000-custom.conf.new" "$alsa_dest/99-sc5000-custom.conf"
 # Same-version repairs preserve fallback. A newly installed version gets one try.
 if [ "$(cat "$dest/ui/.pack-version" 2>/dev/null)" != "$(cat version.txt)" ]; then
     rm -f "$dest/ui/safe-mode" "$dest/ui/mods-quarantined" "$dest/ui/boot-count" "$dest/ui/boot-token" "$dest/ui/boot-ready" \
@@ -558,6 +682,9 @@ sha256sum < ui-packs.tar | cut -d' ' -f1 > "$dest/ui/.pack-id"
 cp version.txt "$dest/version.txt"
 # Opens the *-Update.img upgrade path (screen OTA / USB stick); gen2-locked still wins.
 printf '1\n' > "$dest/gen2-unlocked"
+mv "$old" "$dest/.install-done"  # commit: from here the new generation stays
+trap 'rm -rf "$stage"' 0
+rm -rf "$dest/.install-done"
 echo "EngineX OS $(cat version.txt) installed in $dest"
 '''
 
@@ -810,14 +937,15 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
                                   'rootfs-overlay/etc/sc5000/engine-ui-guard').read_bytes(), 0o755)
     files['ui-packs.tar'] = (ui_packs_tar(ui_packs), 0o644)
     files['version.txt'] = (f'{version}\n'.encode(), 0o644)
+    files['model'] = (f'{prefix}\n'.encode(), 0o644)  # install.sh refuses it on another model (BH-G2-1)
     # The release this bundle belongs to (v<version>, or v<version>-rN for a same-version
     # re-release): stream-sync compares a release's tag with it, see installedRelease.
     files['release-tag'] = (f'{release_tag}\n'.encode(), 0o644)
     ntp_dropin = (Path(__file__).resolve().parents[2] / 'rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf').read_text()
-    files['boot-activate.sh'] = (BOOT_ACTIVATE.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).replace('@TIMESYNCD_DROPIN@', ntp_dropin).encode(), 0o755)
+    files['boot-activate.sh'] = (BOOT_ACTIVATE.replace('@SWAP_UNDO@', SWAP_UNDO).replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).replace('@TIMESYNCD_DROPIN@', ntp_dropin).encode(), 0o755)
     files['99-sc5000-custom.conf'] = (ALSA_CONF.encode(), 0o644)
     files['alsa-dir'] = (f'{alsa_dir(prefix)}\n'.encode(), 0o644)
-    files['install.sh'] = (INSTALL.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)
+    files['install.sh'] = (INSTALL.replace('@SWAP_UNDO@', SWAP_UNDO).replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)
     files['uninstall.sh'] = (UNINSTALL.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).encode(), 0o755)
     top = f'{prefix}-{version}-EngineX-OS-Data-Bundle'
     files['README-INSTALL.txt'] = (README_INSTALL.format(version=version, model=MODELS[prefix], top=top, alsa=alsa_dir(prefix),

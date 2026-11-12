@@ -690,6 +690,31 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 }
 
 // fetchImage requires a release-provided digest before handling firmware.
+// gen1Image is the first-generation *-Update.img to install: the one --image/--bundle names (it must
+// be this model's EngineX AZ01 image), else the latest release's (BH-G2-7: both Gen-1 paths always
+// downloaded, so an offline install failed and an online one could flash another build).
+func gen1Image(ctx context.Context, o *options, prefix string) (string, error) {
+	if o.Bundle == "" {
+		return fetchImage(ctx, o, prefix)
+	}
+	base := filepath.Base(o.Bundle)
+	if !strings.HasPrefix(base, prefix+"-") || !strings.Contains(base, "-EngineX-OS-") || !strings.HasSuffix(base, "-Update.img") {
+		return "", fmt.Errorf("%s 不是这台碟机的 EngineX 镜像（应为 %s-*-EngineX-OS-*-Update.img），没有刷写任何东西 / "+
+			"%s is not an EngineX image for this deck (want %s-*-EngineX-OS-*-Update.img); nothing flashed", base, prefix, base, prefix)
+	}
+	f, err := os.Open(o.Bundle)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(f, magic[:]); err != nil || string(magic[:]) != "AZ01" {
+		return "", fmt.Errorf("%s 不是一代机的 AZ01 固件镜像，没有刷写任何东西 / %s is not a first-generation AZ01 firmware image; nothing flashed", base, base)
+	}
+	o.say("使用指定的镜像 "+base, "Using the selected image "+base)
+	return o.Bundle, nil
+}
+
 func fetchImage(ctx context.Context, o *options, prefix string) (string, error) {
 	var rel release
 	if err := getJSON(ctx, o, o.API+"/repos/"+o.Repo+"/releases/latest", &rel); err != nil {
@@ -811,7 +836,7 @@ func mtime(p string) time.Time {
 
 // ---- mode A: SSH ------------------------------------------------------------
 
-func dialSSH(o *options, ip string) (*ssh.Client, error) {
+func dialSSH(ctx context.Context, o *options, ip string) (*ssh.Client, error) {
 	var auth []ssh.AuthMethod
 	var signers []ssh.Signer
 	keys := []string{o.Key}
@@ -846,20 +871,93 @@ func dialSSH(o *options, ip string) (*ssh.Client, error) {
 	cfg := &ssh.ClientConfig{User: "root", Auth: auth, Timeout: 5 * time.Second,
 		// shortcut: decks are reflashed and get new host keys, and this is a LAN install; pin keys if this ever runs over a WAN.
 		HostKeyCallback: ssh.InsecureIgnoreHostKey()}
-	return ssh.Dial("tcp", net.JoinHostPort(ip, strconv.Itoa(o.SSHPort)), cfg)
+	addr := net.JoinHostPort(ip, strconv.Itoa(o.SSHPort))
+	conn, err := (&net.Dialer{Timeout: cfg.Timeout}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	// ssh.Dial's Timeout covers only the TCP connect: a deck that accepts and then says
+	// nothing would hold the handshake for ever.
+	conn.SetDeadline(time.Now().Add(4 * cfg.Timeout))
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+	if !stop() || err != nil {
+		conn.Close()
+		if err == nil {
+			err = ctx.Err()
+		}
+		return nil, err
+	}
+	conn.SetDeadline(time.Time{})
+	cl := ssh.NewClient(c, chans, reqs)
+	go keepAlive(cl, sshKeepAlive)
+	return cl, nil
+}
+
+// BH-G2-9: SSH work follows the context (Ctrl+C), a read-only command has a deadline, and a
+// deck that stops answering is dropped. Vars for the tests.
+var (
+	sshKeepAlive   = 15 * time.Second
+	sshReadTimeout = 30 * time.Second
+)
+
+// keepAlive closes the connection after three unanswered keepalives (deck powered off, cable
+// pulled): a TCP connection to a dead peer would otherwise wait for ever.
+func keepAlive(c *ssh.Client, every time.Duration) {
+	for missed := 0; missed < 3; {
+		time.Sleep(every)
+		answered := make(chan error, 1)
+		go func() { _, _, err := c.SendRequest("keepalive@openssh.com", true, nil); answered <- err }()
+		select {
+		case err := <-answered:
+			if err != nil {
+				return // closed
+			}
+			missed = 0
+		case <-time.After(every):
+			missed++
+		}
+	}
+	c.Close()
 }
 
 func isAuthErr(err error) bool { return strings.Contains(err.Error(), "unable to authenticate") }
 
-func sshRun(c *ssh.Client, cmd string, stdin io.Reader) (string, error) {
-	s, err := c.NewSession()
-	if err != nil {
-		return "", err
+// sshRun runs cmd on the deck until it ends or ctx is done. Closing the connection is the only way
+// to give up on a session that does not answer; a command already running on the deck may still
+// finish there.
+func sshRun(ctx context.Context, c *ssh.Client, cmd string, stdin io.Reader) (string, error) {
+	type result struct {
+		out []byte
+		err error
 	}
-	defer s.Close()
-	s.Stdin = stdin
-	out, err := s.CombinedOutput(cmd) // not one Buffer for both pipes: their copiers race on it
-	return string(out), err
+	done := make(chan result, 1)
+	go func() {
+		s, err := c.NewSession()
+		if err != nil {
+			done <- result{nil, err}
+			return
+		}
+		defer s.Close()
+		s.Stdin = stdin
+		out, err := s.CombinedOutput(cmd) // not one Buffer for both pipes: their copiers race on it
+		done <- result{out, err}
+	}()
+	select {
+	case r := <-done:
+		return string(r.out), r.err
+	case <-ctx.Done():
+		c.Close()
+		<-done
+		return "", fmt.Errorf("SSH 连接已中止，碟机上已开始的操作可能仍在进行 / SSH connection abandoned, anything already started on the deck may still be running: %w", ctx.Err())
+	}
+}
+
+// sshRead runs a read-only command with a deadline.
+func sshRead(ctx context.Context, c *ssh.Client, cmd string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, sshReadTimeout)
+	defer cancel()
+	return sshRun(ctx, c, cmd, nil)
 }
 
 // installCmd unpacks the streamed tarball in the deck's temp dir, runs install.sh, and marks gen2-unlocked (#215).
@@ -888,7 +986,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		}
 		return modeAB(ctx, o, d)
 	}
-	cl, err := dialSSH(o, d.IP)
+	cl, err := dialSSH(ctx, o, d.IP)
 	if err != nil {
 		if o.Uninstall {
 			return fmt.Errorf("%s: 卸载需通过 SSH 连接碟机，无法连接 SSH / --uninstall requires SSH access to the deck, cannot connect: %w", label, err)
@@ -899,7 +997,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		return modeAB(ctx, o, d)
 	}
 	defer cl.Close()
-	out, err := sshRun(cl, compatCmd, nil)
+	out, err := sshRead(ctx, cl, compatCmd)
 	if err != nil {
 		return fmt.Errorf("%s: cannot read the board: %w", label, err)
 	}
@@ -918,7 +1016,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		// the real /data/sc5000-custom, and there is no /data/enginex to run uninstall.sh from.
 		uninstallCmd := `d=` + customDirSh + `; [ -f "$d/bundle/uninstall.sh" ] || d=$(dirname "$d")/sc5000-custom; ` +
 			`sh "$d/bundle/uninstall.sh" && (systemctl reboot || reboot || :)`
-		if out, err := sshRun(cl, uninstallCmd, nil); err != nil {
+		if out, err := sshRun(ctx, cl, uninstallCmd, nil); err != nil {
 			return fmt.Errorf("%s: uninstall failed: %w\n%s", label, err, out)
 		}
 		o.say("已从 /data 卸载 EngineX OS，碟机正在重启回到原厂系统",
@@ -926,7 +1024,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		return nil
 	}
 	if !gen2 {
-		path, err := fetchImage(ctx, o, m.Prefix)
+		path, err := gen1Image(ctx, o, m.Prefix)
 		if err != nil {
 			return err
 		}
@@ -946,7 +1044,10 @@ func modeA(ctx context.Context, o *options, d deck) error {
 			return err
 		}
 		cmd := fmt.Sprintf("set -e; cat > /data/az01-update.img; echo '%x  /data/az01-update.img' | sha256sum -c -; /usr/sbin/az01-update --file /data/az01-update.img", h.Sum(nil))
-		out, err := sshRun(cl, cmd, f)
+		// Not cut off by Ctrl+C: closing the session could stop az01-update while it writes the
+		// firmware. A deck that stops answering is still dropped (keepAlive).
+		o.say("正在上传并写入固件，期间无法中断，请勿断电…", "Uploading and writing the firmware; this cannot be interrupted, do not power off the deck...")
+		out, err := sshRun(context.WithoutCancel(ctx), cl, cmd, f)
 		if err != nil {
 			return fmt.Errorf("update failed: %w\n%s", err, out)
 		}
@@ -959,14 +1060,14 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		return err
 	}
 	sayGen2Steps(o, filepath.Base(b.Path))
-	if out, err := sshRun(cl, installCmd(b.Top), bytes.NewReader(b.TarGz)); err != nil {
+	if out, err := sshRun(ctx, cl, installCmd(b.Top), bytes.NewReader(b.TarGz)); err != nil {
 		return fmt.Errorf("%s: install failed: %w\n%s", label, err, out)
 	}
-	got, err := sshRun(cl, "cat "+customDirSh+"/version.txt", nil)
+	got, err := sshRead(ctx, cl, "cat "+customDirSh+"/version.txt")
 	if err != nil || strings.TrimSpace(got) != b.Version {
 		return fmt.Errorf("%s: installed version reads back as %q, expected %s", label, strings.TrimSpace(got), b.Version)
 	}
-	if out, err := sshRun(cl, `sh `+customDirSh+`/bundle/boot-activate.sh`, nil); err != nil {
+	if out, err := sshRun(ctx, cl, `sh `+customDirSh+`/bundle/boot-activate.sh`, nil); err != nil {
 		return fmt.Errorf("%s: activation failed: %w\n%s", label, err, out)
 	}
 	o.say(fmt.Sprintf("完成：%s 已安装 EngineX OS %s，Engine 正在重启。", label, b.Version),
@@ -1715,7 +1816,7 @@ func sayGen2Unlocked(o *options, b *bundleInfo, prefix string) {
 }
 
 func modeBGen1(ctx context.Context, o *options, m model) error {
-	path, err := fetchImage(ctx, o, m.Prefix)
+	path, err := gen1Image(ctx, o, m.Prefix)
 	if err != nil {
 		return err
 	}
@@ -1795,23 +1896,55 @@ func azUSB(ctx context.Context, o *options) string {
 
 // azModel: the board seen on the LAN (if an AZ04 deck without fastboot), else the --bundle file name, else the USB product name.
 func azModel(o *options, board, line string) (model, bool) {
-	// Only AZ04 decks without fastboot (rmz2 SYSTEM ONE, jp24 PRIME 4 G2) use 1cc5:2027 write-part.
-	// A fastboot deck (e.g. nh08s, jp21) discovered on the LAN must never be passed to modeAZ (#164).
-	if b := boardCode(board); b == "rmz2" || b == "jp24" {
-		if m, gen2, ok := lookupBoard(board); ok && gen2 {
-			return m, true
-		}
+	m, err := azResolve(o, board, line)
+	return m, err == nil
+}
+
+// errAZUnknown: nothing names the deck in Firmware Update Mode.
+var errAZUnknown = errors.New("unknown 1cc5:2027 model")
+
+// azResolve picks the model to flash in mode C. What the hardware reports (the AZ04 board seen on
+// the LAN, the USB product string) wins; a --bundle/--image filename only fills a missing identity
+// and must agree with every identity the hardware gives (BH-G2-2): the header check in obtainBundle
+// compares against this model, so a wrong pick here would let a wrong package through.
+func azResolve(o *options, board, line string) (model, error) {
+	type id struct {
+		m    model
+		from string
 	}
-	if o.Bundle != "" {
-		if m, ok := bundleModel(o.Bundle); ok {
-			return m, true
-		}
+	var ids []id
+	lanGen2 := false
+	if lm, gen2, ok := lookupBoard(board); ok && gen2 {
+		lanGen2 = true
+		ids = append(ids, id{lm, "LAN"})
 	}
 	l := strings.ToLower(line)
 	for _, n := range azNames {
 		if strings.Contains(l, n.name) {
-			return gen2Boards[n.board], true
+			ids = append(ids, id{gen2Boards[n.board], "USB"})
+			break
 		}
+	}
+	if o.Bundle != "" {
+		if bm, ok := bundleModel(o.Bundle); ok {
+			ids = append(ids, id{bm, filepath.Base(o.Bundle)})
+		}
+	}
+	for _, x := range ids[min(1, len(ids)):] {
+		if x.m.Prefix != ids[0].m.Prefix {
+			return model{}, fmt.Errorf("型号不一致：%s 是 %s，%s 却是 %s；没有刷写任何东西 / "+
+				"model mismatch: %s says %s but %s says %s; nothing flashed",
+				ids[0].from, ids[0].m.Name, x.from, x.m.Name, ids[0].from, ids[0].m.Name, x.from, x.m.Name)
+		}
+	}
+	// Only AZ04 decks without fastboot (rmz2 SYSTEM ONE, jp24 PRIME 4 G2) use 1cc5:2027 write-part.
+	// A fastboot deck (e.g. nh08s, jp21) discovered on the LAN must never be passed to modeAZ (#164).
+	if b := boardCode(board); lanGen2 && (b == "rmz2" || b == "jp24") {
+		return ids[0].m, nil
+	}
+	// A fastboot deck's LAN board alone does not pick mode C (#164); next to a USB name or a bundle it only has to agree.
+	if len(ids) > 0 && !(lanGen2 && len(ids) == 1) {
+		return ids[0].m, nil
 	}
 	// Last resort: exactly one 2nd-gen model's *-Update.img or Data-Bundle.tar.gz already in the work directory.
 	if o.Bundle == "" && board == "" {
@@ -1829,10 +1962,10 @@ func azModel(o *options, board, line string) (model, bool) {
 			}
 		}
 		if len(seen) == 1 {
-			return matched, true
+			return matched, nil
 		}
 	}
-	return model{}, false
+	return model{}, errAZUnknown
 }
 
 func bundleModel(path string) (model, bool) {
@@ -1846,8 +1979,11 @@ func bundleModel(path string) (model, bool) {
 }
 
 func modeAZ(ctx context.Context, o *options, board, line string) error {
-	m, ok := azModel(o, board, line)
-	if !ok {
+	m, err := azResolve(o, board, line)
+	if err != nil && !errors.Is(err, errAZUnknown) {
+		return err
+	}
+	if err != nil {
 		return fmt.Errorf("碟机处于 Firmware Update Mode（%s），但认不出型号：请用 --image 或 --bundle 指定该机型的 *-Update.img，没有刷写任何东西 / "+
 			"the deck is in Firmware Update Mode (%s) but its model is unknown: pass --image or --bundle <MODEL>-<VERSION>-EngineX-OS-*-Update.img; nothing flashed", line, line)
 	}

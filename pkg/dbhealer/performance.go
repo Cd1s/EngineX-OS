@@ -268,18 +268,19 @@ func healPerformance(tx *sql.Tx, r *Report) error {
 	// cursor before issuing writes on the same SQLite connection.
 	var last int64 = math.MinInt64
 	for {
-		rows, err := tx.Query("SELECT trackId,substr(trackData,1,33554433),substr(overviewWaveFormData,1,33554433),substr(beatData,1,33554433),substr(quickCues,1,33554433),substr(loops,1,33554433) FROM PerformanceData WHERE trackId>? ORDER BY trackId LIMIT 250", last)
+		rows, err := tx.Query("SELECT p.trackId,substr(p.trackData,1,33554433),substr(p.overviewWaveFormData,1,33554433),substr(p.beatData,1,33554433),substr(p.quickCues,1,33554433),substr(p.loops,1,33554433),COALESCE(t.isAnalyzed,1) FROM PerformanceData p LEFT JOIN Track t ON t.id=p.trackId WHERE p.trackId>? ORDER BY p.trackId LIMIT 250", last)
 		if err != nil {
 			return err
 		}
 		type perf struct {
 			id                                 int64
 			track, overview, beat, cues, loops []byte
+			analyzed                           bool
 		}
 		var page []perf
 		for rows.Next() {
 			var p perf
-			if err = rows.Scan(&p.id, &p.track, &p.overview, &p.beat, &p.cues, &p.loops); err != nil {
+			if err = rows.Scan(&p.id, &p.track, &p.overview, &p.beat, &p.cues, &p.loops, &p.analyzed); err != nil {
 				rows.Close()
 				return err
 			}
@@ -336,7 +337,10 @@ func healPerformance(tx *sql.Tx, r *Report) error {
 				}
 			}
 			overview, e := DecodeQCompress(p.overview)
-			if e != nil || !validOverview(overview) {
+			if len(p.overview) == 0 && !p.analyzed {
+				// Not analyzed yet: Engine writes the waveform when it analyzes the track. A
+				// placeholder would show a flat waveform and bump lastEditTime (BH-GC1-12).
+			} else if e != nil || !validOverview(overview) {
 				replacement := placeholder(length)
 				if _, err = tx.Exec("UPDATE PerformanceData SET overviewWaveFormData=? WHERE trackId=?", replacement, p.id); err != nil {
 					return err

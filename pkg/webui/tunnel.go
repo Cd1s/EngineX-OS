@@ -84,7 +84,7 @@ type TunnelManager struct {
 // NewTunnelManager creates a TunnelManager backed by stateDir.
 func NewTunnelManager(stateDir, localURL string, httpClient *http.Client) *TunnelManager {
 	if localURL == "" {
-		localURL = "http://127.0.0.1:8080"
+		localURL = "http://" + ForwardAddr
 	}
 	m := &TunnelManager{
 		stateDir:   stateDir,
@@ -352,7 +352,7 @@ func (m *TunnelManager) runLoop(ctx context.Context, myGen uint64, token string,
 	m.status = "starting"
 	localURL := m.localURL
 	if localURL == "" {
-		localURL = "http://127.0.0.1:8080"
+		localURL = "http://" + ForwardAddr
 	}
 	m.mu.Unlock()
 
@@ -506,7 +506,7 @@ func (s *Server) TunnelManager() *TunnelManager {
 	if v, ok := tunnelManagers.Load(s); ok {
 		return v.(*TunnelManager)
 	}
-	mgr := NewTunnelManager(s.cfg.StateDir, "http://127.0.0.1:8080", s.cfg.HTTP)
+	mgr := NewTunnelManager(s.cfg.StateDir, "http://"+ForwardAddr, s.cfg.HTTP)
 	tunnelManagers.Store(s, mgr)
 	return mgr
 }

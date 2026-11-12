@@ -54,9 +54,11 @@ it in the web console and update the deck's `deemix-config.json` to match. A
 config still using the old fixed default may log in but gets 403 for
 `?secrets=1` and Stems until the password is changed.
 Ten failed attempts per client (IPv6: per /64) in five minutes cause HTTP 429
-(shared with the Stems routes). `X-Forwarded-For` is trusted from private,
-loopback and tailnet peers; pass `-trusted-proxies <edge proxy IP>` to trust
-only the edge proxy.
+(shared with the Stems routes). `X-Forwarded-For` and `X-Real-IP` are trusted
+only from loopback peers (a proxy or tunnel on the same host); a proxy on
+another host or in a container network must be listed with
+`-trusted-proxies <proxy IP or CIDR>`. Every other client is limited by its
+own address.
 
 ## Stems flags
 

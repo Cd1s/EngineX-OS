@@ -68,8 +68,12 @@ runs `--watch`, so the flag stays accepted.
   rewritten; the database blob remains the fallback source. Dangling albumArtId
   references become NULL, preserving albumArtSourceHash for external artwork.
 - History supports listId/historylistId references and recognized session date
-  columns, with descending ID as a fallback/tiebreaker. It retains 50 sessions
-  by default. Tracks referenced by any independent trackId table, including
+  columns, with descending ID as a fallback/tiebreaker. An explicit full heal
+  retains the newest 50 visible sessions by default (sessions deleted on the
+  deck, `isDeleted`, do not count and are removed); the mount hook's
+  `--data-only` heal never prunes history, as stock Engine keeps every session.
+  The layout matches Engine 5.3.0's `hm.db` (`Historylist.id/startTime`,
+  `HistorylistEntity.listId/trackId`). Tracks referenced by any independent trackId table, including
   playlists/preparation lists, survive with their PerformanceData. Unsupported
   history structures fail before deletions. The supplied reports lack the full
   hm.db DDL, so tests cover explicit supported fixtures rather than claim a
