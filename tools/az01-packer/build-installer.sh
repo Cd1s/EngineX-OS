@@ -29,6 +29,7 @@ for t in linux-amd64 macos-amd64 macos-arm64 windows-amd64; do
 	cp tools/stems/worker.py tools/stems/run-home-worker.sh tools/stems/run-home-worker.ps1 tools/stems/README.md "$d/stems/"
 	chmod 644 "$d/az01_packer.py" "$d/stems/worker.py" "$d/stems/run-home-worker.ps1" "$d/stems/README.md"
 	chmod 755 "$d/$exe" "$d/host-install-userdata.py" "$d/host-install-fastboot.sh" "$d/stems/$stemsd" "$d/stems/run-home-worker.sh"
+	# Every launcher passes its arguments on (--uninstall, --image, --key...: BH-G2-8).
 	case $os in
 	linux)
 		printf '#!/bin/sh\ncd "$(dirname "$0")"\nexec ./enginex-installer "$@"\n' >"$d/install-enginex.sh"
@@ -37,11 +38,11 @@ for t in linux-amd64 macos-amd64 macos-arm64 windows-amd64; do
 		continue
 		;;
 	macos)
-		printf '#!/bin/sh\ncd "$(dirname "$0")"\n./enginex-installer\nprintf "Press Enter to close..."\nread answer\n' >"$d/Install-EngineX.command"
+		printf '#!/bin/sh\ncd "$(dirname "$0")"\n./enginex-installer "$@"\nprintf "Press Enter to close..."\nread answer\n' >"$d/Install-EngineX.command"
 		chmod 755 "$d/Install-EngineX.command"
 		;;
 	windows)
-		printf '@echo off\r\ncd /d "%%~dp0"\r\nenginex-installer.exe\r\npause\r\n' >"$d/Install-EngineX.bat"
+		printf '@echo off\r\ncd /d "%%~dp0"\r\nenginex-installer.exe %%*\r\npause\r\n' >"$d/Install-EngineX.bat"
 		chmod 644 "$d/Install-EngineX.bat"
 		;;
 	esac
