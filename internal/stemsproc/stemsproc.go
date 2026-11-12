@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -59,7 +60,13 @@ func run(ctx context.Context, client stems.Client, findLAN func(context.Context)
 	src := newStdinMux(in)
 	next := func(err error, v *view) bool {
 		v.abandon()
-		return errors.Is(err, stems.ErrUnreachable) || (errors.Is(err, stems.ErrUnavailable) && v.replayable())
+		if errors.Is(err, stems.ErrUnreachable) {
+			return true
+		}
+		if err == nil || !v.replayable() {
+			return false
+		}
+		return errors.Is(err, stems.ErrUnavailable) || strings.HasPrefix(err.Error(), "backend status ") || err.Error() == "backend protocol mismatch"
 	}
 	if client.Endpoint != "" {
 		v := src.view()
