@@ -2848,6 +2848,14 @@ static int raw_access(const char *path, int mode) {
     return real ? real(path, mode) : -1;
 }
 
+// The bundle lives in /data/enginex (#103); /data/sc5000-custom is the compat link to it, or
+// the real directory on a deck the first boot has not migrated yet (BH-GF4-4).
+#ifndef STEMS_ENGINEX_PROCESSOR
+#define STEMS_ENGINEX_PROCESSOR "/data/enginex/bundle/stems-processor"
+#endif
+#ifndef STEMS_ENGINEX_BIN_PROCESSOR
+#define STEMS_ENGINEX_BIN_PROCESSOR "/data/enginex/bundle/bin/stems-processor"
+#endif
 #ifndef STEMS_BUNDLE_PROCESSOR
 #define STEMS_BUNDLE_PROCESSOR "/data/sc5000-custom/bundle/stems-processor"
 #endif
@@ -2861,10 +2869,10 @@ static const char *stems_processor_path(const char *path) {
                  !strcmp(path, "/usr/Engine/stems-processor") ||
                  !strcmp(path, "/secure-media/stems-processor/bin/stems-processor"))) {
         if (raw_access(path, X_OK) != 0) {
-            if (raw_access(STEMS_BUNDLE_PROCESSOR, X_OK) == 0)
-                return STEMS_BUNDLE_PROCESSOR;
-            if (raw_access(STEMS_BUNDLE_BIN_PROCESSOR, X_OK) == 0)
-                return STEMS_BUNDLE_BIN_PROCESSOR;
+            const char *const bundled[] = {STEMS_ENGINEX_PROCESSOR, STEMS_ENGINEX_BIN_PROCESSOR,
+                                           STEMS_BUNDLE_PROCESSOR, STEMS_BUNDLE_BIN_PROCESSOR};
+            for (size_t i = 0; i < sizeof bundled / sizeof *bundled; i++)
+                if (raw_access(bundled[i], X_OK) == 0) return bundled[i];
         }
     }
     return path;

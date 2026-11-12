@@ -5,9 +5,11 @@ int hook_test_engine;
 #define OA_LOADER_MS 0
 #define OA_SHADOW "/tmp/test-oa-replay/shadow-v3"
 #define OA_ENGINE_COPIES "/tmp/test-oa-replay/copies/"
-static char stems_bundle_file[4096], stems_bin_file[4096];
+static char stems_bundle_file[4096], stems_bin_file[4096], stems_enginex_file[4096], stems_enginex_bin_file[4096];
 #define STEMS_BUNDLE_PROCESSOR stems_bundle_file
 #define STEMS_BUNDLE_BIN_PROCESSOR stems_bin_file
+#define STEMS_ENGINEX_PROCESSOR stems_enginex_file
+#define STEMS_ENGINEX_BIN_PROCESSOR stems_enginex_bin_file
 #include "engine_ui_hook.c"
 #include <assert.h>
 #include <sqlite3.h>
@@ -1200,6 +1202,38 @@ static void test_shadow_replay(void) {
     puts("OfflineAnalyzer (#49): <file>.perf is replayed as the stock signals, bad or missing ones fall through: PASS");
 }
 
+// BH-GF4-4: the bundle is in /data/enginex; the processor there is found without
+// the /data/sc5000-custom compat link, and wins over a legacy copy.
+static void test_stems_processor_prefers_enginex(void) {
+    char dir[] = "/tmp/stems-enginex-XXXXXX", p[PATH_MAX];
+    assert(mkdtemp(dir));
+    assert(snprintf(p, sizeof p, "%s/enginex", dir) > 0 && !mkdir(p, 0700));
+    assert(snprintf(p, sizeof p, "%s/enginex/bin", dir) > 0 && !mkdir(p, 0700));
+    assert(snprintf(p, sizeof p, "%s/legacy", dir) > 0 && !mkdir(p, 0700));
+    snprintf(stems_enginex_file, sizeof stems_enginex_file, "%s/enginex/stems-processor", dir);
+    snprintf(stems_enginex_bin_file, sizeof stems_enginex_bin_file, "%s/enginex/bin/stems-processor", dir);
+    snprintf(stems_bundle_file, sizeof stems_bundle_file, "%s/legacy/stems-processor", dir);
+    snprintf(stems_bin_file, sizeof stems_bin_file, "%s/legacy/bin-stems-processor", dir);
+    const char *stock = "/usr/local/bin/stems-processor";
+    assert(raw_access(stock, F_OK) != 0); // Run on the build host, never a deck.
+    hook_test_engine = 1;
+    FILE *f = fopen(stems_enginex_bin_file, "w");
+    assert(f && fputs("#!/bin/sh\nexit 0\n", f) >= 0 && !fclose(f) && !chmod(stems_enginex_bin_file, 0755));
+    assert(!strcmp(stems_processor_path(stock), stems_enginex_bin_file)); // no compat link needed
+    f = fopen(stems_bundle_file, "w");
+    assert(f && fputs("#!/bin/sh\nexit 1\n", f) >= 0 && !fclose(f) && !chmod(stems_bundle_file, 0755));
+    assert(!strcmp(stems_processor_path(stock), stems_enginex_bin_file)); // and it wins over a legacy copy
+    assert(!unlink(stems_enginex_bin_file));
+    assert(!strcmp(stems_processor_path(stock), stems_bundle_file)); // a deck not migrated yet
+    assert(!unlink(stems_bundle_file));
+    hook_test_engine = 0;
+    stems_enginex_file[0] = stems_enginex_bin_file[0] = stems_bundle_file[0] = stems_bin_file[0] = 0;
+    assert(snprintf(p, sizeof p, "%s/enginex/bin", dir) > 0 && !rmdir(p));
+    assert(snprintf(p, sizeof p, "%s/enginex", dir) > 0 && !rmdir(p));
+    assert(snprintf(p, sizeof p, "%s/legacy", dir) > 0 && !rmdir(p) && !rmdir(dir));
+    puts("stems-processor (BH-GF4-4): /data/enginex first, then the legacy /data/sc5000-custom: PASS");
+}
+
 static void test_stems_processor_fallback(void) {
     char dir[] = "/tmp/stems-fallback-XXXXXX", bin[PATH_MAX];
     assert(mkdtemp(dir));
@@ -1376,6 +1410,7 @@ int main(int argc, char **argv) {
     test_offline_analyzer();
     test_shadow_replay();
     test_stems_processor_fallback();
+    test_stems_processor_prefers_enginex();
     test_alsa_boot_hook();
     for (int i = 1; i < argc; i++) { test_patch_files(argv[i]); test_rec_stream(argv[i]); }
     return 0;
