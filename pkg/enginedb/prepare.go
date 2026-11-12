@@ -28,7 +28,9 @@ type preparedTrack struct {
 	broken error
 }
 
-func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, deadline time.Time) ([]preparedTrack, error) {
+// prepareTracks stats and fingerprints every track. A track whose Engine path is
+// in done keeps that fingerprint unread, so the import leaves it unchanged.
+func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Library, deadline time.Time, done map[string]string) ([]preparedTrack, error) {
 	prepared := make([]preparedTrack, 0, len(l.Tracks))
 	paths := map[string]uint32{}
 	for _, t := range l.Tracks {
@@ -43,6 +45,10 @@ func prepareTracks(ctx context.Context, res *compat.Resolver, l *rekordbox.Libra
 			return nil, fmt.Errorf("tracks %d and %d resolve to the same audio path %q", other, t.ID, rel)
 		}
 		paths[rel] = t.ID
+		if fp, ok := done["../"+rel]; ok {
+			prepared = append(prepared, preparedTrack{track: t, rel: rel, hash: fp, info: exportFileInfo{size: t.FileSize}})
+			continue
+		}
 		full := res.FullPath(rel)
 		st, e := os.Stat(full)
 		if e != nil {
