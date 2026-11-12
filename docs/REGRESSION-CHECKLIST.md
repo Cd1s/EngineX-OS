@@ -86,6 +86,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 74 | **`bridge.ConvertAtMount` writes `.rb-bridge-pending` whenever `<= 500`-track exports defer (`result.Deferred > 0`) on slow USB media so the next mount resumes finished tracks (`BH2-A4-5`)** | `BH2-A4-5` | `pkg/bridge::TestSmallLibraryDeferredMountWritesPendingAndResumes` | Release workflow Step 2 (`go test -race ./pkg/bridge/...`) |
 | 75 | **`enginedb.EncodePerformance` clamps end-of-track Hot Cues, main CUE, and loop bounds to `samples` so `ParseDisplayPerformance` never rejects shadow/linked display blobs (`BH2-A4-15`)** | `BH2-A4-15` | `pkg/enginedb::TestEncodePerformanceClampsEndOfTrackCuesAndLoopsForDisplay` | Release workflow Step 2 (`go test -race ./pkg/enginedb/...`) |
 | 76 | **`enginedb.Options` marks `Fast` and `DatabaseDir` `json:"-"` so `playlistHash` does not trigger redundant destructive playlist rebuilds after staged/fast imports (`BH2-A4-10`)** | `BH2-A4-10` | `pkg/enginedb::TestPlaylistHashIgnoresFastAndDatabaseDir` | Release workflow Step 2 (`go test -race ./pkg/enginedb/...`) |
+| 77 | **`enginedb.putArtwork` checks PNG `IHDR` dimensions (`<= 16M` pixels) via `png.DecodeConfig` before allocating pixel buffers (`BH2-A4-18`)** | `BH2-A4-18` | `pkg/enginedb::TestPutArtworkRejectsOversizedPNGDimensions` | Release workflow Step 2 (`go test -race ./pkg/enginedb/...`) |
 
 ---
 
