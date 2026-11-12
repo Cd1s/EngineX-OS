@@ -1054,3 +1054,111 @@ func TestExportStreamingWithoutUSB(t *testing.T) {
 		t.Fatalf("after eviction: %d tracks, lists %q", len(lib.Tracks), lists)
 	}
 }
+
+// #217: a CDJ-3000 compares the firmware in our status with its own and shows
+// "Linked to player with older firmware" for as long as ours is lower. Ours is
+// the newest one a player on the link reported, never below exportFirmware.
+func TestExportFirmwareNotOlderThanPlayers(t *testing.T) {
+	status := func(fw string) []byte {
+		b := make([]byte, 0x200) // a CDJ-3000 status
+		copy(b, magic)
+		b[10], b[0x21] = 0x0a, 4
+		copy(b[11:], "CDJ-3000")
+		copy(b[0x7c:], fw)
+		return b
+	}
+	r := &exportRun{player: 3}
+	ip := net.IPv4(127, 63, 0, 2)
+	for _, c := range []struct{ heard, want string }{
+		{"", "3.30"}, {"1.44", "3.30"}, {"3.41", "3.41"}, {"3.3\x00", "3.41"}, {"x.99", "3.41"}, {"9999", "3.41"}, {"3.30", "3.41"}, {"4.02", "4.02"}, {"1.85", "4.02"},
+	} {
+		if c.heard != "" {
+			r.heardLocked(ip, status(c.heard))
+		}
+		if got := string(r.statusPacket()[0x7c:0x80]); got != c.want {
+			t.Fatalf("after %q: firmware %q, want %q", c.heard, got, c.want)
+		}
+	}
+	// The firmware string is in the status packet only: no other packet we send has one.
+	r.nfs, r.lib = &NFSServer{Root: "/media/usb"}, &rekordbox.Library{}
+	r.mac, r.ip = net.HardwareAddr{2, 0, 0, 0, 0, 1}, net.IPv4(127, 63, 0, 1)
+	for name, b := range map[string][]byte{"keepalive": r.announcement(), "media": r.mediaPacket(), "beat": r.beatPacket(ExportDeck{BPM: 120}, 0, 0), "handoff request": r.handoffPacket(0x26, 0x28), "handoff answer": r.handoffPacket(0x27, 0x2c)} {
+		if bytes.Contains(b[0x20:], []byte("3.30")) || bytes.Contains(b[0x20:], []byte("4.02")) {
+			t.Fatalf("%s carries a firmware string: % x", name, b)
+		}
+	}
+}
+
+// #217 on the wire: a player that has not told us its firmware yet gets no
+// status (the first one would carry the older version), then gets its own.
+func TestExportStatusWaitsForThePlayersFirmware(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	cfg := testExportConfig(root)
+	cfg.ProbeDuration = 80 * time.Millisecond
+	e := NewExporter(cfg)
+	defer e.Close()
+	if err := e.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	cdj, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 63, 0, 2), Port: 50002})
+	if err != nil {
+		t.Skip("status port:", err)
+	}
+	defer cdj.Close()
+	discovery, _ := net.ResolveUDPAddr("udp4", e.Status().DiscoveryAddress)
+	keepalive := make([]byte, 0x36)
+	copy(keepalive, magic)
+	keepalive[10], keepalive[0x24] = 6, 4
+	copy(keepalive[12:], "CDJ-3000")
+	copy(keepalive[0x26:], []byte{2, 0, 0, 0, 0, 99})
+	cdj.WriteToUDP(keepalive, discovery)
+	waitNumber(t, e, 3, 300*time.Millisecond)
+	buf := make([]byte, 2048)
+	read := func(limit time.Duration) []byte {
+		for {
+			cdj.SetReadDeadline(time.Now().Add(limit))
+			n, _, err := cdj.ReadFromUDP(buf)
+			if err != nil {
+				return nil
+			}
+			if n >= 0x80 && buf[10] == 0x0a {
+				return buf[:n]
+			}
+		}
+	}
+	if b := read(300 * time.Millisecond); b != nil {
+		t.Fatalf("status with firmware %q before the player's own was known", b[0x7c:0x80])
+	}
+	own := make([]byte, 0x200)
+	copy(own, magic)
+	own[10], own[0x21] = 0x0a, 4
+	copy(own[11:], "CDJ-3000")
+	copy(own[0x7c:], "3.41")
+	statusAddr, _ := net.ResolveUDPAddr("udp4", e.Status().StatusAddress)
+	cdj.WriteToUDP(own, statusAddr)
+	for i := 0; i < 3; i++ {
+		b := read(time.Second)
+		if b == nil {
+			t.Fatalf("status %d: none", i)
+		}
+		if fw := string(b[0x7c:0x80]); fw != "3.41" {
+			t.Fatalf("status %d: firmware %q, want the player's 3.41", i, fw)
+		}
+	}
+	// A player that never sends status (a mixer, an old player) is not kept waiting for good.
+	e.mu.Lock()
+	r := e.run
+	e.mu.Unlock()
+	r.mu.Lock()
+	for key, p := range r.peers {
+		p.heard = false
+		p.first = time.Now().Add(-firmwareWait)
+		r.peers[key] = p
+	}
+	r.announced = time.Now().Add(-firmwareWait)
+	r.mu.Unlock()
+	if read(time.Second) == nil {
+		t.Fatal("no status for a player that sends none")
+	}
+}
