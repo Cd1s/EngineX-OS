@@ -1,10 +1,21 @@
 // Unit tests run unprivileged; --mounts is used ONLY under unshare -m on IN.
 #define _GNU_SOURCE
 #include <limits.h>
-static char test_media[PATH_MAX],test_library[PATH_MAX],test_runtime[PATH_MAX];
+#include <stdio.h>
+#include <string.h>
+static char test_media[PATH_MAX],test_library[PATH_MAX],test_legacy_library[PATH_MAX],test_runtime[PATH_MAX];
 #define MEDIA_ROOT test_media
 #define LIB_ROOT test_library
+#define LEGACY_LIB_ROOT test_legacy_library
 #define RUN_ROOT test_runtime
+// after_mount seams: a bind mount is neither HFS+ nor a block device.
+static char test_hfs_target[PATH_MAX],test_rb_bridge[PATH_MAX];
+static int test_hfs_readonly(const char *target){return *test_hfs_target&&!strcmp(target,test_hfs_target);}
+static int test_volume_identity(const char *source,char out[80]){(void)source;snprintf(out,80,"uuid-hfs-stick");return 0;}
+static const char *test_rb_bridge_path(void){return test_rb_bridge;}
+#define HFS_READONLY test_hfs_readonly
+#define VOLUME_IDENTITY test_volume_identity
+#define RB_BRIDGE_PATH test_rb_bridge_path
 #include "edisksd_hook.c"
 #include <assert.h>
 struct libmnt_context { const char *target,*source; int status,fail; };
@@ -60,6 +71,44 @@ static void test_paths_and_copy(const char *root) {
     char unsafe[PATH_MAX];join(unsafe,root,"link-parent");assert(!symlink(outside,unsafe));join(p,unsafe,"child");
     assert(make_dirs(p)==-1&&errno==ELOOP);
     puts("#20/#21/#22/#37: missing library, lossless seed/reuse, changed native DB, identity separation, all symlink components: PASS");
+}
+// 5.3.0.3 made /data/sc5000-custom a symlink to enginex (#103). The cache path
+// through it failed with ELOOP, so no read-only HFS+ stick got a view or rb-bridge.
+static void test_compat_symlink_root(const char *root) {
+    char data[PATH_MAX],enginex[PATH_MAX],legacy[PATH_MAX],p[PATH_MAX],seeded[PATH_MAX],volume_path[PATH_MAX];
+    char saved_lib[PATH_MAX],saved_legacy[PATH_MAX];
+    snprintf(saved_lib,sizeof saved_lib,"%s",test_library);snprintf(saved_legacy,sizeof saved_legacy,"%s",test_legacy_library);
+    join(data,root,"data");join(enginex,data,"enginex");assert(!make_dirs(enginex));
+    join(legacy,data,"sc5000-custom");assert(!symlink("enginex",legacy));
+    join(volume_path,MEDIA_ROOT,"HFS-STICK");assert(!make_dirs(volume_path));
+    // The hook's old cache path, through the compat link.
+    join(test_library,legacy,"hfs-libraries");test_legacy_library[0]=0;
+    assert(!seed_library(volume_path,"uuid-a",seeded,deadline_from(now_ms())));
+    join(p,enginex,"hfs-libraries");assert(!strncmp(seeded,p,strlen(p)));
+    struct stat st;assert(!lstat(p,&st)&&S_ISDIR(st.st_mode)&&!(st.st_mode&077));
+    // The default: /data/enginex first, the legacy root only when enginex is missing.
+    join(test_library,enginex,"hfs-libraries");join(test_legacy_library,legacy,"hfs-libraries");
+    char again[PATH_MAX];assert(!seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))&&!strcmp(again,seeded));
+    char old_data[PATH_MAX],old_real[PATH_MAX];join(old_data,root,"old-data");join(old_real,old_data,"sc5000-custom");assert(!make_dirs(old_real));
+    join(test_library,old_data,"enginex/hfs-libraries");join(test_legacy_library,old_real,"hfs-libraries");
+    assert(!seed_library(volume_path,"uuid-a",again,deadline_from(now_ms())));join(p,old_real,"hfs-libraries");assert(!strncmp(again,p,strlen(p)));
+    // Only a plain sibling link to a private directory we own is followed.
+    char outside[PATH_MAX],bad[PATH_MAX];join(outside,root,"outside-cache");assert(!make_dirs(outside));
+    const char *links[]={outside,"../outside-cache",".","enginex-missing"};
+    for(unsigned i=0;i<4;i++) {
+        join(bad,data,"bad-link");unlink(bad);assert(!symlink(links[i],bad));
+        join(test_library,bad,"hfs-libraries");test_legacy_library[0]=0;errno=0;
+        assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&(errno==ELOOP||errno==ENOENT));
+    }
+    char shared[PATH_MAX];join(shared,data,"shared");assert(!make_dirs(shared));assert(!chmod(shared,0777));
+    unlink(bad);assert(!symlink("shared",bad));join(test_library,bad,"hfs-libraries");errno=0;
+    assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&errno==ELOOP);
+    char chained[PATH_MAX];join(chained,data,"chained");assert(!symlink("sc5000-custom",chained));
+    join(test_library,chained,"hfs-libraries");errno=0;
+    assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&errno==ELOOP);
+    join(p,outside,"hfs-libraries");assert(access(p,F_OK)==-1&&errno==ENOENT);
+    snprintf(test_library,sizeof test_library,"%s",saved_lib);snprintf(test_legacy_library,sizeof test_legacy_library,"%s",saved_legacy);
+    puts("#103 HFS: cache root through the /data/sc5000-custom -> enginex compat link, legacy-only deck, foreign links refused: PASS");
 }
 static void test_time(void) {
     struct timespec t={.tv_sec=2147483,.tv_nsec=0};int64_t before=timespec_ms(&t),deadline=deadline_from(before);
@@ -132,11 +181,39 @@ static void test_mounts(const char *root) {
     assert(!umount2(target,UMOUNT_NOFOLLOW));assert(!umount2(outside,UMOUNT_NOFOLLOW));
     puts("REAL PRIVATE NAMESPACE #20/#21/#22/#23/#37: fresh/existing RO volumes, persistent isolation, busy child/root/parent rollback, restart record, outside mount preserved: PASS");
 }
+// The deck's layout end to end: a read-only HFS+ rekordbox stick with a hidden
+// .PIONEER export on a deck whose /data/sc5000-custom is the compat symlink.
+// The view must be prepared and rb-bridge launched on it (#103 regression,
+// found on a rekordbox 7 macOS stick, #216).
+static void test_hfs_mount_runs_bridge(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char data[PATH_MAX],enginex[PATH_MAX],legacy[PATH_MAX],disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],log[PATH_MAX];
+    join(data,root,"deck-data");join(enginex,data,"enginex");assert(!make_dirs(enginex));
+    join(legacy,data,"sc5000-custom");assert(!symlink("enginex",legacy));
+    join(test_library,legacy,"hfs-libraries");test_legacy_library[0]=0;
+    join(disk,root,"hfs-disk");assert(!make_dirs(disk));join(p,disk,".PIONEER/rekordbox");assert(!make_dirs(p));
+    join(p,disk,".PIONEER/rekordbox/exportLibrary.db");write_file(p,"rekordbox 7");
+    join(log,root,"rb-bridge.log");join(test_rb_bridge,root,"rb-bridge");
+    char script[PATH_MAX*2];snprintf(script,sizeof script,"#!/bin/sh\necho \"$*\" > '%s'\n: > \"$2/Engine Library/bridged\"\n",log);
+    write_file(test_rb_bridge,script);assert(!chmod(test_rb_bridge,0700));
+    join(target,MEDIA_ROOT,"vivi");mount_ro(disk,target);uint64_t raw_id=mount_id(target);
+    snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);
+    struct libmnt_context c={.target=target,.source="/dev/sdz1",.status=1};
+    after_mount(&c);
+    assert(mount_id(target)!=raw_id); // the writable view is in place
+    char expect[PATH_MAX+32];snprintf(expect,sizeof expect,"--mount-path %s\n",target);expect_file(log,expect);
+    join(p,target,"Engine Library/bridged");assert(!access(p,F_OK));
+    join(p,disk,"Engine Library");assert(access(p,F_OK)==-1&&errno==ENOENT); // nothing written to the stick
+    join(p,enginex,"hfs-libraries");assert(!access(p,F_OK));
+    assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;
+    puts("REAL PRIVATE NAMESPACE #103: read-only HFS+ .PIONEER stick with the sc5000-custom compat link gets its view and rb-bridge: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
-    assert(!make_dirs(test_media));test_paths_and_copy(root);test_time();
-    if(argc>1&&!strcmp(argv[1],"--mounts"))test_mounts(root);
+    join(test_legacy_library,root,"legacy-libraries");
+    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_hfs_mount_runs_bridge(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;

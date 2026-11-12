@@ -25,7 +25,10 @@
 #include <unistd.h>
 
 #ifndef LIB_ROOT
-#define LIB_ROOT "/data/sc5000-custom/hfs-libraries"
+#define LIB_ROOT "/data/enginex/hfs-libraries"
+#endif
+#ifndef LEGACY_LIB_ROOT
+#define LEGACY_LIB_ROOT "/data/sc5000-custom/hfs-libraries"
 #endif
 #ifndef RUN_ROOT
 #define RUN_ROOT "/run/sc5000-hfs-views"
@@ -109,6 +112,40 @@ static int make_dirs(const char *path) {
         if (lstat(copy,&st) || !S_ISDIR(st.st_mode)) {errno=ENOTDIR;return -1;}
         *p=saved; if (!saved) return 0;
     }
+}
+// The HFS library cache lives in /data/enginex. Since #103 /data/sc5000-custom is
+// a relative symlink to that sibling, and safe_path refuses every symlink, so a
+// cache path through it failed with ELOOP for every read-only HFS+ stick before
+// rb-bridge ran. Use the first configured root whose parent is a real directory,
+// following only that one compat link: a plain sibling name, to a directory we
+// own that nobody else can write. Everything below it is still walked safely.
+static int lib_root(char out[PATH_MAX]) {
+    const char *roots[]={LIB_ROOT,LEGACY_LIB_ROOT};int err=ENOENT;
+    for(unsigned i=0;i<2;i++) {
+        if(!roots[i]||!*roots[i])continue;
+        char parent[PATH_MAX];
+        if(snprintf(parent,sizeof parent,"%s",roots[i])>=(int)sizeof parent){err=ENAMETOOLONG;continue;}
+        char *slash=strrchr(parent,'/');if(!slash||slash==parent||!slash[1]){err=EINVAL;continue;}
+        *slash=0;const char *base=slash+1;
+        struct stat st;
+        if(lstat(parent,&st)){err=errno;continue;}
+        if(S_ISLNK(st.st_mode)) {
+            char link[NAME_MAX+1];ssize_t n=readlink(parent,link,sizeof link-1);
+            if(n<=0||n>=(ssize_t)sizeof link-1){err=ELOOP;continue;}
+            link[n]=0;
+            if(strchr(link,'/')||!strcmp(link,".")||!strcmp(link,"..")){err=ELOOP;continue;}
+            char *dir=strrchr(parent,'/');*dir=0;
+            char sibling[PATH_MAX];
+            if(snprintf(sibling,sizeof sibling,"%s/%s",*parent?parent:"",link)>=(int)sizeof sibling){err=ENAMETOOLONG;continue;}
+            if(safe_path(sibling,0)||lstat(sibling,&st)||!S_ISDIR(st.st_mode)||st.st_uid!=geteuid()||(st.st_mode&022)){err=ELOOP;continue;}
+            if(snprintf(out,PATH_MAX,"%s/%s",sibling,base)>=PATH_MAX){err=ENAMETOOLONG;continue;}
+            return 0;
+        }
+        if(!S_ISDIR(st.st_mode)){err=ENOTDIR;continue;}
+        if(snprintf(out,PATH_MAX,"%s",roots[i])>=PATH_MAX){err=ENAMETOOLONG;continue;}
+        return 0;
+    }
+    errno=err;return -1;
 }
 static uint64_t mount_id(const char *path) {
     struct statx st;
@@ -212,12 +249,12 @@ static void remove_tree(int parent,const char *name) {
     closedir(d);unlinkat(parent,name,AT_REMOVEDIR);
 }
 static int seed_library(const char *target,const char *identity,char library[PATH_MAX],int64_t deadline) {
-    char native[PATH_MAX],root[PATH_MAX],stage[PATH_MAX];struct stat st;
+    char native[PATH_MAX],root[PATH_MAX],stage[PATH_MAX],cache[PATH_MAX];struct stat st;
     if(path_join(native,sizeof native,target,"Engine Library")||safe_path(native,1)||
-       make_dirs(LIB_ROOT))return -1;
+       lib_root(cache)||make_dirs(cache))return -1;
     struct stat cache_stat;
-    if(lstat(LIB_ROOT,&cache_stat)||cache_stat.st_uid!=geteuid()||(cache_stat.st_mode&077)){errno=EACCES;return -1;}
-    if(path_join(root,sizeof root,LIB_ROOT,identity)||make_dirs(root))return -1;
+    if(lstat(cache,&cache_stat)||cache_stat.st_uid!=geteuid()||(cache_stat.st_mode&077)){errno=EACCES;return -1;}
+    if(path_join(root,sizeof root,cache,identity)||make_dirs(root))return -1;
     uint64_t signature=0;int src=-1;
     if(!lstat(native,&st)) {
         if(!S_ISDIR(st.st_mode)){errno=ENOTDIR;return -1;}
@@ -396,6 +433,23 @@ static int run(char *const argv[],int64_t deadline) {
         if(budget(deadline)){kill(-pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}errno=ETIMEDOUT;return -1;}usleep(20000);
     }
 }
+static int hfs_readonly(const char *target) {
+    struct statfs f;struct statvfs v;
+    return !statfs(target,&f)&&f.f_type==HFSPLUS_MAGIC&&!statvfs(target,&v)&&(v.f_flag&ST_RDONLY);
+}
+static const char *rb_bridge_path(void) {
+    return access("/usr/local/bin/rb-bridge",X_OK)?"/data/enginex/bundle/bin/rb-bridge":"/usr/local/bin/rb-bridge";
+}
+// The mount tests replace these; a bind mount is never HFS+ nor a block device.
+#ifndef HFS_READONLY
+#define HFS_READONLY hfs_readonly
+#endif
+#ifndef VOLUME_IDENTITY
+#define VOLUME_IDENTITY volume_identity
+#endif
+#ifndef RB_BRIDGE_PATH
+#define RB_BRIDGE_PATH rb_bridge_path
+#endif
 static void after_mount(struct libmnt_context *ctx) {
     const char *target=mnt_context_get_target(ctx);
     if(!volume(target)||safe_path(target,0))return;
@@ -403,8 +457,7 @@ static void after_mount(struct libmnt_context *ctx) {
     int pioneer=has_export(target);char lib[PATH_MAX];
     if(path_join(lib,sizeof lib,target,"Engine Library")||safe_path(lib,1)) {note("unsafe library path rejected on",target,errno);return;}
     struct stat existing;
-    struct statfs f;struct statvfs v;
-    int hfs_ro=!statfs(target,&f)&&f.f_type==HFSPLUS_MAGIC&&!statvfs(target,&v)&&(v.f_flag&ST_RDONLY);
+    int hfs_ro=HFS_READONLY(target);
     if(!hfs_ro&&!lstat(lib,&existing)) { // an HFS+ view is validated by prepare_view
         int fd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
         if(fd<0)return;
@@ -413,9 +466,9 @@ static void after_mount(struct libmnt_context *ctx) {
     }
     if(hfs_ro) {
         char identity[80];
-        if(volume_identity(mnt_context_get_source(ctx),identity)||prepare_view(target,identity,deadline)){note("HFS view unavailable on",target,errno);return;}
+        if(VOLUME_IDENTITY(mnt_context_get_source(ctx),identity)||prepare_view(target,identity,deadline)){note("HFS view unavailable on",target,errno);return;}
     }
-    if(pioneer){const char *rb=access("/usr/local/bin/rb-bridge",X_OK)?"/data/enginex/bundle/bin/rb-bridge":"/usr/local/bin/rb-bridge";char *const a[]={(char *)rb,"--mount-path",(char *)target,NULL};if(run(a,deadline))note("bridge failed on",target,errno);}
+    if(pioneer){const char *rb=RB_BRIDGE_PATH();char *const a[]={(char *)rb,"--mount-path",(char *)target,NULL};if(run(a,deadline))note("bridge failed on",target,errno);}
     char db[PATH_MAX];
     if(!pioneer&&!path_join(db,sizeof db,lib,"Database2/m.db")&&!safe_path(db,0)) {
         char *const a[]={"/usr/local/bin/engine-guardian","--heal-mount",(char *)target,"--data-only",NULL};if(run(a,deadline))note("guardian failed on",target,errno);
