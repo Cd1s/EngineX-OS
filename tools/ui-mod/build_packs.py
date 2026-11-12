@@ -1248,13 +1248,27 @@ SERVICES_MAIN = """
 				if (!e.unload && remote && ((root.scShadowEngineMask >> Number(remote[1])) & 1) === 0 && root.scShadowVisible(Number(remote[1]))) continue
 				const t = root.scTr(e.path)
 				if (!t) continue
-				t.state = e.step === 1
+				root.scPressWrite(t, e.path, e.step === 1)
 				if (e.step < 2) next.push({path: e.path, step: e.step + 1, unload: e.unload})
 			}
 			root.scPressQueue = next
 			if (next.length) restart()
 		}
 	}
+	// #217: MASTER pressed on a deck that is Engine's master already changes nothing
+	// in Engine, yet on a console it is how the DJ takes the Pro DJ Link master back
+	// from a CDJ (stream-sync asks for it again). RequestMaster is an Action: its
+	// state never reads true and stateChanged stays silent, Engine counts the presses
+	// in stateTrueCount (stock ActionTranslatorStateChangeNotifier reads it too).
+	// The presses we make ourselves do not count.
+	property var scMasterOwn: [0, 0, 0, 0, 0]
+	function scPressWrite(t, path, on) {
+		const before = t.stateTrueCount
+		t.state = on
+		const m = /^[/]Engine[/]Deck([1-4])[/]RequestMaster$/.exec(path)
+		if (m) scMasterOwn[Number(m[1])] += (t.stateTrueCount - before) || 0
+	}
+	function scMasterPresses(d, t) { return (t.stateTrueCount || 0) - scMasterOwn[d] }
 	// Reuse the sampling buffers, translators and HTTP object after warm-up.
 	readonly property var scShadowEmptyArray: []
 	readonly property var scShadowEmptyObject: ({})
@@ -1289,7 +1303,7 @@ SERVICES_MAIN = """
 			["trackName", "/Track/TrackName"], ["artist", "/Track/ArtistName"], ["length", "/Track/TrackLength"],
 			["range", "/SpeedRange"], ["keylock", "/Track/KeyLock"], ["currentKey", "/Track/CurrentKey"],
 			["loop", "/Track/LoopEnableState"], ["keyOffset", "/Track/KeyOffset"], ["stemmed", "/Track/Stemmed"],
-			["slip", "/Track/SlipModeActive"], ["slipPosition", "/Track/SlipModePosition"]])
+			["slip", "/Track/SlipModeActive"], ["slipPosition", "/Track/SlipModePosition"], ["requestMaster", "/RequestMaster"]])
 			p[pair[0]] = root.scTr(prefix + pair[1]) || scShadowEmptyObject
 		p.cues = []
 		for (let i = 1; i <= 8; i++) {
@@ -1520,6 +1534,7 @@ SERVICES_MAIN = """
 			const shift = g.keyOffset.unnormalized || 0 // a key shift: the key's name with it
 			const fresh = o.net !== s.net || !(now - (scShadowTextAt[d] || 0) < 2000) || o.keyOffset !== shift
 			o.deck = d; o.net = s.net; o.cues = s.net ? cc.cues : null; o.cuePos = s.net ? g.cuePosition.value : undefined
+			o.masterPress = scMasterPresses(d, g.requestMaster)
 			o.playing = s.playing; o.cue = s.cue; o.link = link; o.positionMs = s.lineMs; o.at = s.at; o.jumps = s.jumps
 			o.pitch = s.pitch; o.master = s.master || d === lead; o.lead = s.master; o.bpm = s.bpm; o.currentBpm = s.currentBpm
 			o.sync = s.sync; o.beat = g.beat.unnormalized || 0
@@ -1550,7 +1565,7 @@ SERVICES_MAIN = """
 				const expect = sent.positionMs + (o.playing ? (o.at - sent.at) * (1 + o.pitch / 100) : 0)
 				onLine = Math.abs(o.positionMs - expect) <= (o.playing ? 15 : 0.5)
 			}
-			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
+			if (!onLine || sent.cue !== o.cue || sent.master !== o.master || sent.masterPress !== o.masterPress || sent.lead !== o.lead || sent.sync !== o.sync || sent.cuePos !== o.cuePos ||
 				sent.title !== o.title || sent.artist !== o.artist || sent.keyName !== o.keyName || sent.durationMs !== o.durationMs || sent.link !== o.link || sent.bpm !== o.bpm || sent.currentBpm !== o.currentBpm || sent.range !== o.range || sent.keylock !== o.keylock || sent.cuesRev !== cc.rev || sent.active !== o.active ||
 				sent.loop !== o.loop || sent.keyOffset !== o.keyOffset || sent.stems !== o.stems || sent.slip !== o.slip) edge = true // slip's timeline runs on: in full at every heartbeat while it is active
 		}
@@ -1565,7 +1580,7 @@ SERVICES_MAIN = """
 		for (let n = 0; n < own.length; n++) {
 			const o = own[n], sent = scShadowSent[n]
 			sent.deck = o.deck; sent.net = o.net; sent.playing = o.playing; sent.cue = o.cue; sent.jumps = o.jumps; sent.pitch = o.pitch
-			sent.master = o.master; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
+			sent.master = o.master; sent.masterPress = o.masterPress; sent.lead = o.lead; sent.sync = o.sync; sent.cuePos = o.cuePos; sent.title = o.title; sent.artist = o.artist; sent.keyName = o.keyName; sent.durationMs = o.durationMs
 			sent.link = o.link; sent.bpm = o.bpm; sent.currentBpm = o.currentBpm; sent.range = o.range; sent.keylock = o.keylock; sent.loop = o.loop; sent.keyOffset = o.keyOffset; sent.stems = o.stems; sent.slip = o.slip; sent.cuesRev = scShadowCueCache[o.deck].rev; sent.positionMs = o.positionMs; sent.at = o.at; sent.active = o.active
 		}
 		scShadowSent.length = own.length

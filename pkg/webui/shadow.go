@@ -119,6 +119,9 @@ type deckState struct {
 	Jumps int `json:"jumps,omitempty"`
 	// Cue: Playing only because CUE is held (Engine's PlayState stays false).
 	Cue bool `json:"cue,omitempty"`
+	// MasterPress counts the MASTER presses on this deck since Engine started
+	// (the QML's own do not count). Read from the player's own post only, never passed on.
+	MasterPress int `json:"masterPress,omitempty"`
 	// Link is the sender Engine's /Network/NetworkId: the receiver also follows
 	// that Engine's PlayState over Engine Link, which arrives ~80 ms sooner.
 	Link string `json:"link,omitempty"`
@@ -304,39 +307,40 @@ func (c cdjSeen) exact(pitch float64) float64 {
 }
 
 type shadowState struct {
-	fetchCalls    atomic.Uint64
-	fetchCDJCalls atomic.Uint64
-	mu            sync.Mutex
-	precise       map[byte]precisePos
-	cdjPortmap    int              // tests: the players' portmap port; 0 is UDP 111
-	cdj           map[byte]cdjSeen // per CDJ player number: its last edges and jumps
-	own           []deckState
-	ownMaster     bool
-	ownMasterDeck int
-	ownAt         time.Time          // the newest post or alive ping
-	ownExport     prolink.ExportDeck // what the newest post told the Pro DJ Link export
-	ownPostAt     int64              // the QML's clock on the newest post
-	clockDecks    []deckState        // #209: lightweight local deck clock feed when 4-deck shadow is off
-	clockAt       time.Time
-	clockPostAt   int64
-	clockPolled   time.Time
-	peers         map[string]time.Time // EngineX players heard on the beacon
-	peerDecks     map[int]peerDeck
-	peerLocal     map[string]peerLocalFile // by TrackNetworkPath
-	peerSeq       map[string]int64         // newest Seq per peer (Engine Link id, else address)
-	ver           uint64                   // bumped on every new peer update
-	notify        chan struct{}            // closed on the bump: wakes the long polls
-	conn          *net.UDPConn             // the beacon socket while shadowLoop runs
-	files         map[string]string        // track key -> local copy
-	busy          map[string]bool
-	copies        map[string]*shadowCopy // track key -> the copy on its way, or how it failed
-	copyRetry     time.Duration          // after a copy's first failure; doubles up to 15 times this
-	copyTimeout   time.Duration
-	used          map[string]time.Time // when a shadow deck last wanted a copy
-	polled        time.Time
-	running       bool
-	peerPort      int // tests only; 0 is 8080
-	pushPort      int // tests only; 0 is shadowBeaconPort
+	fetchCalls     atomic.Uint64
+	fetchCDJCalls  atomic.Uint64
+	mu             sync.Mutex
+	precise        map[byte]precisePos
+	cdjPortmap     int              // tests: the players' portmap port; 0 is UDP 111
+	cdj            map[byte]cdjSeen // per CDJ player number: its last edges and jumps
+	own            []deckState
+	ownMaster      bool
+	ownMasterDeck  int
+	ownMasterPress int
+	ownAt          time.Time          // the newest post or alive ping
+	ownExport      prolink.ExportDeck // what the newest post told the Pro DJ Link export
+	ownPostAt      int64              // the QML's clock on the newest post
+	clockDecks     []deckState        // #209: lightweight local deck clock feed when 4-deck shadow is off
+	clockAt        time.Time
+	clockPostAt    int64
+	clockPolled    time.Time
+	peers          map[string]time.Time // EngineX players heard on the beacon
+	peerDecks      map[int]peerDeck
+	peerLocal      map[string]peerLocalFile // by TrackNetworkPath
+	peerSeq        map[string]int64         // newest Seq per peer (Engine Link id, else address)
+	ver            uint64                   // bumped on every new peer update
+	notify         chan struct{}            // closed on the bump: wakes the long polls
+	conn           *net.UDPConn             // the beacon socket while shadowLoop runs
+	files          map[string]string        // track key -> local copy
+	busy           map[string]bool
+	copies         map[string]*shadowCopy // track key -> the copy on its way, or how it failed
+	copyRetry      time.Duration          // after a copy's first failure; doubles up to 15 times this
+	copyTimeout    time.Duration
+	used           map[string]time.Time // when a shadow deck last wanted a copy
+	polled         time.Time
+	running        bool
+	peerPort       int // tests only; 0 is 8080
+	pushPort       int // tests only; 0 is shadowBeaconPort
 
 	dataRoot, mediaRoot string
 	beacon              bool
@@ -545,12 +549,13 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	// Pro DJ Link players see these decks in our status: playing, tempo and
 	// master. Taking master asks a CDJ that still holds it to hand it over.
 	ex := prolink.ExportDeck{At: time.Now()}
-	masterDeck := 0
-	for _, d := range own {
+	masterDeck, masterPress := 0, 0
+	for i, d := range own {
 		master := d.Master != nil && *d.Master
 		if master {
-			masterDeck = d.Deck
+			masterDeck, masterPress = d.Deck, d.MasterPress
 		}
+		own[i].MasterPress = 0
 		if master || (d.Playing && !ex.Playing && !ex.Master) {
 			ex.BPM, ex.Pitch, ex.Beat = d.BPM, d.Pitch, d.Beat
 		}
@@ -573,8 +578,11 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	// Master on another of our decks is a claim too (#217): a console's Line In
 	// CDJ has no Engine deck that could take master from ours, so once the CDJ
 	// took the link's master, "none of ours to one of ours" never happened again.
-	claimed := ex.Master && (!s.shadow.ownMaster || masterDeck != s.shadow.ownMasterDeck)
-	s.shadow.ownMaster, s.shadow.ownMasterDeck = ex.Master, masterDeck
+	// So is MASTER pressed again on the deck that has it: with one deck loaded
+	// there is no other deck to press it on. A count that fell is Engine
+	// started again, not a press.
+	claimed := ex.Master && (!s.shadow.ownMaster || masterDeck != s.shadow.ownMasterDeck || masterPress > s.shadow.ownMasterPress)
+	s.shadow.ownMaster, s.shadow.ownMasterDeck, s.shadow.ownMasterPress = ex.Master, masterDeck, masterPress
 	s.shadow.mu.Unlock()
 	if s.prolinkExport != nil {
 		s.prolinkExport.SetDeck(ex)

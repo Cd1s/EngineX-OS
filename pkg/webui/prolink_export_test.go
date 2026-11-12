@@ -294,3 +294,57 @@ func TestLinkMasterTakenBackWhenNobodyHoldsIt(t *testing.T) {
 	post(2)
 	ours(true, "the CDJ is gone and our deck 2 took Engine's master")
 }
+
+// #217 review: a console with one deck loaded. Engine's master never leaves
+// that deck, so after the CDJ took the link's master the only thing the DJ can
+// do is press MASTER on it again; the QML counts those presses (masterPress).
+func TestLinkMasterAskedAgainOnTheSameDeck(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	cfg := Config{UIDir: t.TempDir(), StateDir: t.TempDir(), ProlinkExport: prolink.ExportConfig{Root: root, IP: net.IPv4(127, 64, 0, 7), MAC: net.HardwareAddr{2, 0, 0, 0, 0, 7}, DBAddr: "127.64.0.7:0", PortmapAddr: "127.64.0.7:0", DiscoveryAddr: "127.64.0.7:0", StatusAddr: "127.64.0.7:0", AnnounceAddr: "127.64.0.7:9", ProbeDuration: 20 * time.Millisecond}}
+	s := New(cfg, nil)
+	defer s.Close()
+	cdj, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 64, 0, 8), Port: 50001})
+	if err != nil {
+		t.Skip("beat port:", err)
+	}
+	defer cdj.Close()
+	if err := s.prolinkExport.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	for until := time.Now().Add(2 * time.Second); s.prolinkExport.Status().Number == 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(until) {
+			t.Fatal("no player number")
+		}
+	}
+	prolinkMu.Lock()
+	postedDevices[s] = map[string]prolink.Device{"2": {Number: 2, Name: "CDJ-3000", Address: "127.64.0.8", Master: true, LastSeen: time.Now()}}
+	prolinkMu.Unlock()
+	asked := func(presses int, want bool) {
+		t.Helper()
+		body := fmt.Sprintf(`[{"deck":1,"playing":true,"bpm":120,"master":true,"masterPress":%d}]`, presses)
+		w := httptest.NewRecorder()
+		s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(body)))
+		if w.Code != 200 {
+			t.Fatalf("decks: %d", w.Code)
+		}
+		cdj.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		b := make([]byte, 64)
+		n, _, err := cdj.ReadFromUDP(b)
+		if got := err == nil && n == 0x28 && b[10] == 0x26; got != want {
+			t.Fatalf("MASTER pressed %d times: asked %v (%v), want %v", presses, got, err, want)
+		}
+		s.shadow.mu.Lock()
+		defer s.shadow.mu.Unlock()
+		if len(s.shadow.own) != 1 || s.shadow.own[0].MasterPress != 0 {
+			t.Fatalf("the press count went on to the peers: %+v", s.shadow.own)
+		}
+	}
+	asked(0, true)  // the deck took Engine's master
+	asked(0, false) // nothing changed
+	asked(1, true)  // MASTER pressed again on the same deck
+	asked(1, false)
+	asked(3, true)  // two presses between two posts
+	asked(0, false) // Engine started again: its count starts over, nobody pressed
+	asked(1, true)
+}
