@@ -372,10 +372,10 @@ func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 	if s.nativeLibraryFallback(err) {
 		all, err = s.nativePlaylists(ctx)
 	}
-	if err != nil && len(linked) > 0 {
-		return linked, nil
+	if err != nil {
+		return nil, err
 	}
-	return append(linked, all...), err
+	return append(linked, all...), nil
 }
 
 func (s *Spotify) apiPlaylists(ctx context.Context) ([]Playlist, error) {

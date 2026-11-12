@@ -515,6 +515,10 @@ func (a *AppleMusic) Playlists(ctx context.Context) ([]Playlist, error) {
 	for _, l := range o.Links {
 		p, err := a.linkPlaylist(ctx, l)
 		if err != nil {
+			var st StatusError
+			if errors.As(err, &st) && (st == 401 || st == 403) {
+				return nil, err
+			}
 			firstErr = keepFirst(firstErr, err)
 			continue
 		}
@@ -522,10 +526,10 @@ func (a *AppleMusic) Playlists(ctx context.Context) ([]Playlist, error) {
 	}
 	if o.UserToken != "" {
 		lib, err := a.libraryPlaylists(ctx, 1000)
-		out = append(out, lib...)
 		if err != nil {
-			firstErr = keepFirst(firstErr, err)
+			return nil, err
 		}
+		out = append(out, lib...)
 	}
 	if len(out) == 0 && firstErr != nil {
 		return nil, firstErr
@@ -556,14 +560,14 @@ func (a *AppleMusic) Tracks(ctx context.Context, id string) ([]Track, error) {
 		return nil, errors.New("applemusic: invalid playlist id")
 	}
 	rs, err := a.pages(ctx, path, user, 20000)
+	if err != nil {
+		return nil, err
+	}
 	var out []Track
 	for _, r := range rs {
 		if t, ok := r.track(); ok {
 			out = append(out, t)
 		}
-	}
-	if len(out) == 0 && err != nil {
-		return nil, err
 	}
 	return out, nil
 }

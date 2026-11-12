@@ -697,9 +697,6 @@ func (s *SoundCloud) trackPages(ctx context.Context, address string) ([]Track, e
 			Next       string    `json:"next_href"`
 		}
 		if err := s.get(ctx, address, &r); err != nil {
-			if len(out) > 0 {
-				return out, nil
-			}
 			return nil, err
 		}
 		for _, t := range r.Collection {
@@ -770,13 +767,15 @@ func (s *SoundCloud) webPlaylistTracks(ctx context.Context, id string) ([]Track,
 			missing = append(missing, strconv.FormatInt(t.ID, 10))
 		}
 	}
-	// Preserve the successful prefix if a detail batch fails, as before.
-	got, _ := collectBatches(ctx, soundcloudPages, (len(missing)+49)/50, func(batch int) ([]scTrack, error) {
+	got, err := collectBatches(ctx, soundcloudPages, (len(missing)+49)/50, func(batch int) ([]scTrack, error) {
 		start := batch * 50
 		var tracks []scTrack
 		err := s.get(ctx, s.base()+"/tracks?"+url.Values{"ids": {strings.Join(missing[start:min(start+50, len(missing))], ",")}}.Encode(), &tracks)
 		return tracks, err
 	})
+	if err != nil {
+		return nil, err
+	}
 	for _, t := range got {
 		full[t.ID] = t
 	}
