@@ -586,6 +586,9 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 					s.prolinkExport.RequestMaster(ip)
 				}
 			}
+			if len(asked) == 0 {
+				s.prolinkExport.ClaimMaster() // nobody holds it: nothing to ask, take it
+			}
 		}
 	}
 	s.shadowWake()

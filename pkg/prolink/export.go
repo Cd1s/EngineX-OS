@@ -209,6 +209,21 @@ func (e *Exporter) RequestMaster(ip net.IP) error {
 	return nil
 }
 
+// ClaimMaster takes a tempo master that no player holds: one of our decks
+// took Engine's master and there is nobody to ask. Without it a master we once
+// handed to a player that has since left stayed given away until a restart.
+func (e *Exporter) ClaimMaster() {
+	e.mu.Lock()
+	r := e.run
+	e.mu.Unlock()
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.yielded, r.claimAt, r.askUntil = false, time.Time{}, time.Time{}
+	r.mu.Unlock()
+}
+
 const (
 	masterWait  = time.Second            // our status claims master this long after asking for it at the latest
 	masterAsk   = 3 * time.Second        // how long an unanswered request is repeated
@@ -339,6 +354,7 @@ type exportRun struct {
 	// asked, claimAt, askUntil: see RequestMaster. syncN is our sync counter
 	// (status bytes 84-87), syncMax the largest another player reported.
 	yielded                  bool
+	masters                  map[byte]time.Time // player number -> when its status last claimed master
 	wasMaster                bool
 	asked, claimAt, askUntil time.Time
 	syncN, syncMax           uint32
@@ -822,11 +838,30 @@ func (r *exportRun) heardLocked(ip net.IP, b []byte) {
 		return
 	}
 	r.syncMax = max(r.syncMax, binary.BigEndian.Uint32(b[0x84:]))
-	if b[0x89]&0x20 == 0 || r.player == 0 {
+	number, now := b[0x21], time.Now()
+	if b[0x89]&0x20 == 0 {
+		// A player let go of master. When no other player holds it either, the one
+		// we gave it to (or whoever got it after) has left it vacant, and it is
+		// ours again: Engine's deck led our decks all along.
+		if _, was := r.masters[number]; was {
+			delete(r.masters, number)
+			if r.yielded && !r.peerMasterLocked(now) {
+				r.yielded = false
+			}
+		}
+		return
+	}
+	if r.player == 0 {
 		return
 	}
 	// Another player's status says it is tempo master.
-	switch number, to := b[0x21], b[0x9f]; {
+	if r.masters == nil {
+		r.masters = map[byte]time.Time{}
+	}
+	if len(r.masters) < 16 || !r.masters[number].IsZero() {
+		r.masters[number] = now
+	}
+	switch to := b[0x9f]; {
 	case to == r.player:
 		// It hands master to us: claim it now. The request is settled, so a late
 		// or repeated answer to it changes nothing any more.
@@ -834,11 +869,22 @@ func (r *exportRun) heardLocked(ip net.IP, b []byte) {
 	case r.handoff != 0 && number == r.handoff:
 		r.yielded, r.handoff, r.askUntil = true, 0, time.Time{} // the player we agreed to has taken it
 	case r.deck.Master && !r.yielded && r.handoff == 0 && !bytes.HasPrefix(b[11:], []byte("EngineX")):
-		if now := time.Now(); now.Before(r.askUntil) && now.Sub(r.asked) >= masterAgain {
+		if now.Before(r.askUntil) && now.Sub(r.asked) >= masterAgain {
 			r.asked = now
 			r.sendLocked(r.beatConn(), r.handoffPacket(0x26, 0x28), &net.UDPAddr{IP: ip, Port: 50001})
 		}
 	}
+}
+
+// peerMasterLocked: another player's status claimed tempo master within the
+// last second (they send one every 200 ms). Caller holds r.mu.
+func (r *exportRun) peerMasterLocked(now time.Time) bool {
+	for _, at := range r.masters {
+		if now.Sub(at) < time.Second {
+			return true
+		}
+	}
+	return false
 }
 
 func digit(c byte) bool { return c >= '0' && c <= '9' }
