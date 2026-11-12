@@ -980,3 +980,86 @@ func TestUISettingsFxTimeFileReplacement(t *testing.T) {
 		}
 	}
 }
+
+func TestEngineLightingDefaultOffAndPersistence(t *testing.T) {
+	dir := t.TempDir()
+	restarts := 0
+	s := New(Config{UIDir: dir, StateDir: t.TempDir(), RestartEngine: func() error { restarts++; return nil }}, nil)
+	defer s.Close()
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	check := func(want bool) {
+		t.Helper()
+		s.uiMu.Lock()
+		b, err := json.Marshal(s.loadUI())
+		s.uiMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var loaded map[string]any
+		if err := json.Unmarshal(b, &loaded); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := loaded["engineLighting"]; !ok || got != want {
+			t.Errorf("loadUI engineLighting: got %v (present=%v), want %v", got, ok, want)
+		}
+		resp, err := http.Get(srv.URL + "/v1/sc5000/ui")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var v map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := v["engineLighting"]; !ok || got != want {
+			t.Errorf("GET engineLighting: got %v (present=%v), want %v", got, ok, want)
+		}
+	}
+	check(false)
+	for _, query := range []string{"engineLighting=1", "waveform=rgb"} {
+		if code, _ := uiPost(t, srv.URL, query); code != 200 {
+			t.Fatalf("%s: HTTP %d", query, code)
+		}
+		check(true)
+		b, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(splitLines(b), "engine_lighting=1") {
+			t.Errorf("%s did not preserve engine_lighting=1", query)
+		}
+	}
+	resp, err := http.Post(srv.URL+"/v1/sc5000/ui", "application/json", strings.NewReader(`{"engineLighting":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("JSON Off: HTTP %d", resp.StatusCode)
+	}
+	check(false)
+	b, err := os.ReadFile(filepath.Join(dir, "settings.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "engine_lighting=1") {
+		t.Error("Off left engine_lighting=1")
+	}
+	for _, key := range []string{"engineLighting", "engine_lighting"} {
+		if code, _ := uiPost(t, srv.URL, key+"=invalid"); code != 400 {
+			t.Errorf("invalid %s: HTTP %d, want 400", key, code)
+		}
+		if code, _ := uiPost(t, srv.URL, key+"=true"); code != 200 {
+			t.Errorf("%s=true: HTTP %d", key, code)
+		}
+		check(true)
+		if code, _ := uiPost(t, srv.URL, key+"=0"); code != 200 {
+			t.Errorf("%s=0: HTTP %d", key, code)
+		}
+		check(false)
+	}
+	if restarts != 0 {
+		t.Errorf("lighting caused %d Engine restarts", restarts)
+	}
+}

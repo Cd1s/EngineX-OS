@@ -266,6 +266,7 @@ SH
             check "new: Control Center uses stock Fader Echo tile without duplicate on console $PRODUCT (#52)" bash -c "grep -aqF 'SCPROBE tile|ControlCenter_StockFaderEcho|1|' '$log' && grep -aqF 'SCPROBE tile|ControlCenter_UpfaderEcho|0|' '$log'"
         fi
         check "new: Control Center fills uiContainer at UI Scale 75 % (root.transformed, not defaultScreenSize)" grep -aq 'SCPROBE ccsize|75|[0-9x]*|[0-9x]*|1|' "$log"
+        check "$name: stock Engine Lighting defaults off on toggleable hardware" grep -aq 'SCPROBE lighting|1|0|\|SCPROBE lighting|0|1|' "$log"
         check "new: auto-analyze preference retained, automatic submission unavailable (#55)" grep -aqF 'SCPROBE analyze|boolean|false|' "$log"
         case $PRODUCT in
         JP07|JP08|JP13|JP14) check "new: player $PRODUCT has no recorder (#206 sites not applied)" grep -aqF 'SCPROBE recstream|none|0|' "$log" ;;
@@ -324,6 +325,7 @@ SH
         files=$(sed -n "s|.*packs/$LANG_PACK: \([0-9]*\) files.*|\1|p" "$log" | awk '{s += $1} END {print s + 0}')
         check "boot2: UI hook replaced all $want pack files + the gate probe (got ${files:-0})" test "${files:-0}" -ge $((want + 1)) -a "$want" -gt 0
         check "boot2: render probe ran without errors" bash -c "! grep -aq 'SCPROBE error|' '$log'"
+        check "boot2: stock Engine Lighting defaults off on toggleable hardware" grep -aq 'SCPROBE lighting|1|0|\|SCPROBE lighting|0|1|' "$log"
         check "boot2: boot splash unlocked and dismissed (#140)" grep -aqF 'SCPROBE splash|0|1|' "$log"
         check "boot2: Source Demo Tracks and Sampler Content connect without freeze" grep -aqF 'SCPROBE demosource|1|1|' "$log"
         label=$(grep -ao 'SCPROBE entry|[^|]*|Deezer|1|' "$log" | head -1 | cut -d'|' -f2) || :
