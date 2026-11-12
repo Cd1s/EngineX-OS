@@ -324,6 +324,7 @@ func (s *Server) handleHotCuesGet(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHotCuesPost(w http.ResponseWriter, r *http.Request) {
 	var req hotCuePostReq
+	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyLimit)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, 400, errors.New("invalid json payload"))
 		return
