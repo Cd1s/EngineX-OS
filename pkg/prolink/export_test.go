@@ -1392,6 +1392,15 @@ func TestExportStatusPlayMode(t *testing.T) {
 	if got := mode(); got != [5]byte{1, 3, 0x7a, 9, 0} {
 		t.Fatalf("playing, not master: % x", got)
 	}
+	// Review of 9348a32: a master deck without beat data has no tempo to give.
+	// Its status says so: Mm 2 next to "no BPM" (7fff, ffff). Players use 2 for a
+	// master on a non-rekordbox track, "unable to send tempo and beat information"
+	// (dysentery, vcdj: byte 9e).
+	r.deck = ExportDeck{Master: true, Playing: true}
+	b := r.statusPacket()
+	if b[0x9e] != 2 || b[0x89]&0x20 == 0 || binary.BigEndian.Uint16(b[0x90:]) != 0x7fff || binary.BigEndian.Uint16(b[0x92:]) != 0xffff {
+		t.Fatalf("master without beat data: Mm %d F %x Mv %x BPM %x", b[0x9e], b[0x89], b[0x90:0x92], b[0x92:0x94])
+	}
 }
 
 // #217 review of 9348a32: a master we handed to a CDJ came back to nobody.
