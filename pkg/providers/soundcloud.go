@@ -296,12 +296,14 @@ func (s *SoundCloud) site() string {
 // webClientID finds the public client ID in soundcloud.com's scripts. SoundCloud
 // changes it now and then, so a refused one is looked up again.
 func (s *SoundCloud) webClientID(ctx context.Context, renew bool) (string, error) {
+	site := s.site()
 	scWebMu.Lock()
-	defer scWebMu.Unlock()
-	if id := scWebIDs[s.site()]; id != "" && !renew {
+	if id := scWebIDs[site]; id != "" && !renew {
+		scWebMu.Unlock()
 		return id, nil
 	}
-	page, err := s.text(ctx, s.site()+"/")
+	scWebMu.Unlock()
+	page, err := s.text(ctx, site+"/")
 	if err != nil {
 		return "", err
 	}
@@ -313,7 +315,9 @@ func (s *SoundCloud) webClientID(ctx context.Context, renew bool) (string, error
 			continue
 		}
 		if m := scClientIDRe.FindStringSubmatch(js); m != nil {
-			scWebIDs[s.site()] = m[1]
+			scWebMu.Lock()
+			scWebIDs[site] = m[1]
+			scWebMu.Unlock()
 			return m[1], nil
 		}
 	}
@@ -679,8 +683,14 @@ func (s *SoundCloud) Tracks(ctx context.Context, id string) ([]Track, error) {
 		}
 		if errors.As(err, &st) && (st == 400 || st == 401 || st == 403) && !s.web() && s.UserID != 0 {
 			// The login or app token is refused: a public profile's likes still read.
-			w := *s
-			w.ClientID, w.Secret, w.Token = "", "", ""
+			w := &SoundCloud{
+				BaseURL:  s.BaseURL,
+				HTTP:     s.HTTP,
+				UserID:   s.UserID,
+				Username: s.Username,
+				WebURL:   s.WebURL,
+				SiteURL:  s.SiteURL,
+			}
 			return w.Tracks(ctx, id)
 		}
 		return out, err

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -331,4 +332,60 @@ func TestSoundCloudHasGoPlus(t *testing.T) {
 			t.Fatalf("%s: /me asked %d times, want 1 (cached)", product, hits)
 		}
 	}
+}
+
+func TestSoundCloudLikesFallbackConcurrentWithHasGoPlusNoRace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/me":
+			io.WriteString(w, `{"id":42,"consumer_subscription":{"product":{"id":"high_tier"}}}`)
+		case "/me/likes/tracks":
+			w.WriteHeader(http.StatusForbidden)
+		case "/users/42/track_likes":
+			io.WriteString(w, `{"collection":[{"id":7,"title":"Public Like","access":"playable","duration":180000}]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	scWebMu.Lock()
+	scWebIDs[srv.URL] = "0123456789abcdef0123456789abcdef"
+	scWebMu.Unlock()
+	t.Cleanup(func() {
+		scWebMu.Lock()
+		delete(scWebIDs, srv.URL)
+		scWebMu.Unlock()
+	})
+
+	sc := &SoundCloud{
+		BaseURL:  srv.URL,
+		WebURL:   srv.URL,
+		SiteURL:  srv.URL,
+		ClientID: "cid",
+		Secret:   "sec",
+		Token:    "user-tok",
+		UserID:   42,
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			scGoPlusMu.Lock()
+			sc.goPlusAt = time.Time{}
+			scGoPlusMu.Unlock()
+			_ = sc.HasGoPlus(context.Background())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			tracks, err := sc.Tracks(context.Background(), soundCloudLikesID)
+			if err != nil || len(tracks) != 1 {
+				t.Errorf("Tracks(likes) = %v, %v", tracks, err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }
