@@ -259,6 +259,46 @@ class DataBundleTest(unittest.TestCase):
         return subprocess.run(['sh', str(script)], env=env,
                               capture_output=True, text=True, check=check)
 
+    def test_install_refuses_a_bundle_for_another_cpu_or_model(self):
+        """BH-G2-1: install.sh checked only SHA256SUMS, so an intact SYSTEM ONE (arm64) bundle
+        installed on an SC LIVE 4 (armhf) and replaced working binaries with ones it cannot run."""
+        compat = self.tmp / 'compatible'
+        compat.write_bytes(b'inmusic,jp21\0rockchip,rk3288\0')
+        engine = self.tmp / 'Engine'
+        engine.write_bytes(fake_elf(bdb.EM_ARM, b'engine'))
+        aarch64 = self.tmp / 'suite64'
+        aarch64.write_bytes(fake_elf(bdb.EM_AARCH64, b'suite'))
+        hook64 = self.tmp / 'hook64.so'
+        hook64.write_bytes(fake_elf(bdb.EM_AARCH64, b'hook'))
+        # The deck's BusyBox od knows -b but not GNU's -A/-t: a GNU-only call refused every bundle.
+        shims = self.tmp / 'busybox-shims'
+        shims.mkdir()
+        od = shims / 'od'
+        od.write_text('#!/bin/sh\nfor a; do case $a in -b) ;; -*) echo "od: invalid option $a" >&2; exit 1 ;; esac; done\n'
+                      f'exec {shutil.which("od")} "$@"\n')
+        od.chmod(0o755)
+        deck = {'SC5000_COMPATIBLE': str(compat), 'SC5000_SYSTEM_ELF': str(engine),
+                'PATH': f"{shims}:{self.env.get('PATH', os.environ['PATH'])}"}
+
+        def install(result, name):
+            shutil.rmtree(self.tmp / 'x', ignore_errors=True)
+            self.extract(result)
+            src = next((self.tmp / 'x').iterdir())  # <PREFIX>-<VERSION>-EngineX-OS-Data-Bundle
+            env = {**self.env, **deck, 'SC5000_CUSTOM': str(self.tmp / name), 'SC5000_ALSA_OVERLAY': str(self.tmp / (name + '-alsa'))}
+            return subprocess.run(['sh', str(src / 'install.sh')], env=env, capture_output=True, text=True)
+
+        res = install(self.build(out='sys1', prefix='SYSTEMONE', suite=aarch64, hook=hook64), 'd1')
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn('another CPU', res.stderr)
+        self.assertFalse((self.tmp / 'd1/bundle').exists())
+        res = install(self.build(out='live2', prefix='SCLIVE2'), 'd2')
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn('bundle is for SCLIVE2', res.stderr)
+        self.assertFalse((self.tmp / 'd2/bundle').exists())
+        res = install(self.build(out='live4', prefix='SCLIVE4'), 'd3')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual((self.tmp / 'd3/bundle/model').read_text(), 'SCLIVE4\n')
+
     def test_install_uninstall_does_not_call_host_commands(self):
         src = self.extract(self.build())
         dest = self.tmp / 'custom'

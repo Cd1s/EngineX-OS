@@ -3105,8 +3105,49 @@ static size_t read_full(int fd, uint8_t *buf, size_t count) {
     return total;
 }
 
+// The model prefix this deck's images carry (SC5000, SCLIVE4, ...), from the device tree, or ""
+// when the board is not one of ours. BH-G2-1: the check below compared only the payload digest, so
+// a SYSTEM ONE (arm64) image installed on an SC LIVE 4 (armhf) and the reverse.
+static const char *enginex_compatible_path = "/sys/firmware/devicetree/base/compatible";
+static void enginex_device_prefix(char out[32]) {
+    static const char *const boards[][2] = {
+        {"inmusic,jp07", "SC5000"}, {"inmusic,jp08", "SC5000M"}, {"inmusic,jp11", "PRIMEGO"},
+        {"inmusic,jp13", "SC6000"}, {"inmusic,jp14", "SC6000M"}, {"inmusic,jc11", "PRIME4"},
+        {"inmusic,jc16", "PRIME2"}, {"inmusic,nh08", "MIXSTREAMPRO"}, {"inmusic,jp21", "SCLIVE4"},
+        {"inmusic,jp20", "SCLIVE2"}, {"inmusic,jc11s", "PRIME4PLUS"}, {"inmusic,jp11s", "PRIMEGOPLUS"},
+        {"inmusic,nh08s", "MIXSTREAMPROPLUS"}, {"inmusic,nh10", "MIXSTREAMPROGO"},
+        {"inmusic,jp24", "PRIME4G2"}, {"inmusic,rmz2", "SYSTEMONE"}};
+    char buf[512];
+    out[0] = 0;
+    int fd = open(enginex_compatible_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    size_t n = read_full(fd, (uint8_t *)buf, sizeof buf - 1);
+    close(fd);
+    buf[n] = 0;
+    for (size_t off = 0; off < n; off += strlen(buf + off) + 1)
+        for (size_t i = 0; i < sizeof boards / sizeof *boards; i++)
+            if (!strcmp(buf + off, boards[i][0])) { snprintf(out, 32, "%s", boards[i][1]); return; }
+}
+
+// The header's prefix line (after the digest) names this deck's model.
+static int enginex_img_for_this_deck(const uint8_t head[ENGINEX_IMG_HEADER]) {
+    char device[32], want[32] = "";
+    const char *p = (const char *)head + ENGINEX_IMG_MAGIC_LEN + 65;
+    const char *nl = memchr(p, '\n', (size_t)((const char *)head + ENGINEX_IMG_HEADER - p)); // bounded: the header need not hold a NUL
+    size_t len = nl ? (size_t)(nl - p) : 0;
+    if (len == 0 || len >= sizeof want || memchr(p, 0, len)) return 0;
+    memcpy(want, p, len);
+    enginex_device_prefix(device);
+    if (!*device || strcmp(device, want)) {
+        fprintf(stderr, "engine-ui-hook: refusing an EngineX image for %s on %s\n", want, *device ? device : "an unknown board");
+        return 0;
+    }
+    return 1;
+}
+
 // IMG_NONE: not an EngineX data bundle at all. IMG_BAD: it claims to be one but has no V1 header,
-// is truncated or its payload SHA-256 differs from the header's. IMG_OK: header and payload agree.
+// is truncated, its payload SHA-256 differs from the header's, or it is for another model.
+// IMG_OK: header and payload agree and the image is for this deck.
 static int enginex_img_check(const char *path) {
     uint8_t head[ENGINEX_IMG_HEADER];
     int fd = path ? open(path, O_RDONLY | O_CLOEXEC) : -1;
@@ -3131,7 +3172,8 @@ static int enginex_img_check(const char *path) {
     close(fd);
     if (!ok) return IMG_BAD;
     sha256_final(&c, hex);
-    return strncasecmp(hex, (const char *)head + ENGINEX_IMG_MAGIC_LEN, 64) == 0 ? IMG_OK : IMG_BAD;
+    if (strncasecmp(hex, (const char *)head + ENGINEX_IMG_MAGIC_LEN, 64) != 0) return IMG_BAD;
+    return enginex_img_for_this_deck(head) ? IMG_OK : IMG_BAD;
 }
 
 static int enginex_gen2_locked(void) {

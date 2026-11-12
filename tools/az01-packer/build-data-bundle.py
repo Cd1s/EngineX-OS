@@ -533,6 +533,30 @@ else
 fi
 cd "$src"
 sha256sum -c SHA256SUMS >/dev/null || { echo "bundle damaged: SHA256SUMS mismatch" >&2; exit 1; }
+# BH-G2-1: on a deck, only a bundle built for its CPU (the ELF machine of its own Engine, not
+# uname: a 64-bit kernel can run the armhf userland) and, when the bundle names one, its model.
+compat=${SC5000_COMPATIBLE:-/sys/firmware/devicetree/base/compatible}
+boards=$(tr '\000' ' ' 2>/dev/null < "$compat") || boards=
+case " $boards" in *" inmusic,"*)
+    # e_machine's low byte, octal; od -b and sed: the deck's BusyBox od has no -A/-t.
+    elf_machine() { dd if="$1" bs=1 skip=18 count=1 2>/dev/null | od -b | sed -n '1s/^[0-9]* *//p' | tr -d ' '; }
+    want_cpu=$(elf_machine "${SC5000_SYSTEM_ELF:-/usr/Engine/Engine}")
+    got_cpu=$(elf_machine bin/sc5000-suite)
+    [ -n "$want_cpu" ] && [ "$got_cpu" = "$want_cpu" ] ||
+        { echo "bundle is for another CPU (ELF machine ${got_cpu:-?}, this deck ${want_cpu:-?})" >&2; exit 1; }
+    if [ -f model ]; then
+        deck=
+        for b in $boards; do
+            case $b in
+            inmusic,jp21) deck=SCLIVE4 ;; inmusic,jp20) deck=SCLIVE2 ;; inmusic,jc11s) deck=PRIME4PLUS ;;
+            inmusic,jp11s) deck=PRIMEGOPLUS ;; inmusic,nh08s) deck=MIXSTREAMPROPLUS ;; inmusic,nh10) deck=MIXSTREAMPROGO ;;
+            inmusic,jp24) deck=PRIME4G2 ;; inmusic,rmz2) deck=SYSTEMONE ;;
+            esac
+        done
+        [ "$deck" = "$(cat model)" ] ||
+            { echo "bundle is for $(cat model), this deck is ${deck:-not a second-generation model}" >&2; exit 1; }
+    fi ;;
+esac
 for path in "$dest" "$dest/bundle" "$dest/ui" "$dest/ui/packs" "$dest/ui/icons"; do
     [ ! -L "$path" ] || { echo "refusing symlink: $path" >&2; exit 1; }
 done
@@ -544,6 +568,7 @@ trap 'rm -rf "$stage"' 0
 mkdir "$stage/bundle" "$stage/ui"
 cp -R bin lib SHA256SUMS version.txt alsa-dir boot-activate.sh 99-sc5000-custom.conf install.sh uninstall.sh "$stage/bundle/"
 [ ! -f release-tag ] || cp release-tag "$stage/bundle/"
+[ ! -f model ] || cp model "$stage/bundle/"
 tar -C "$stage/ui" -xf ui-packs.tar
 [ -d "$stage/ui/packs" ] || { echo "ui-packs.tar has no packs/" >&2; exit 1; }
 rm -rf "$dest/bundle.replaced"
@@ -798,6 +823,7 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
                                   'rootfs-overlay/etc/sc5000/engine-ui-guard').read_bytes(), 0o755)
     files['ui-packs.tar'] = (ui_packs_tar(ui_packs), 0o644)
     files['version.txt'] = (f'{version}\n'.encode(), 0o644)
+    files['model'] = (f'{prefix}\n'.encode(), 0o644)  # install.sh refuses it on another model (BH-G2-1)
     # The release this bundle belongs to (v<version>, or v<version>-rN for a same-version
     # re-release): stream-sync compares a release's tag with it, see installedRelease.
     files['release-tag'] = (f'{release_tag}\n'.encode(), 0o644)
