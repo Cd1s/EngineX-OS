@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -95,5 +96,53 @@ func TestSoundCloudPublicProfileLoginWithoutCredentials(t *testing.T) {
 	poll := do(h, "GET", "/api/relay/session?t="+tokPub, "", nil).Body.String()
 	if !strings.Contains(poll, `"status":"done"`) || !strings.Contains(poll, `"user":"https://soundcloud.com/four-tet"`) {
 		t.Fatalf("unexpected poll response: %s", poll)
+	}
+}
+
+func TestMobileFormResubmissionOverwritesCompletedSession(t *testing.T) {
+	bpAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer bp-tok-1" && auth != "Bearer bp-tok-2" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"results":[]}`))
+	}))
+	defer bpAPI.Close()
+
+	s := newTestServer(t)
+	s.beatportURL = bpAPI.URL
+	h := s.routes()
+	form := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+
+	// Trusted SoundCloud session re-submission updates both session and relay config.
+	scTok := "scresubmittoken00001"
+	do(h, "POST", "/api/relay/session", `{"token":"`+scTok+`","provider":"soundcloud"}`, map[string]string{"X-Deemix-Password": defaultPassword})
+	if w := do(h, "POST", "/m/soundcloud?t="+scTok, "user=typo-dj&token=tok-1", form); w.Code != 200 {
+		t.Fatalf("first SoundCloud submit failed: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h, "POST", "/m/soundcloud?t="+scTok, "user=real-dj&token=tok-2", form); w.Code != 200 {
+		t.Fatalf("second SoundCloud submit failed: %d %s", w.Code, w.Body.String())
+	}
+	scPoll := do(h, "GET", "/api/relay/session?t="+scTok, "", nil).Body.String()
+	if !strings.Contains(scPoll, `"user":"real-dj"`) || !strings.Contains(scPoll, `"token":"tok-2"`) {
+		t.Fatalf("SoundCloud re-submission silently dropped: %s", scPoll)
+	}
+	if got := s.cfg.get().SoundCloudToken; got != "tok-2" {
+		t.Fatalf("trusted SoundCloud config token = %q, want tok-2", got)
+	}
+
+	// Beatport session re-submission updates stored Beatport token.
+	bpTok := "bpresubmittoken00001"
+	if w := do(h, "POST", "/m/beatport?t="+bpTok, "token=bp-tok-1", form); w.Code != 200 {
+		t.Fatalf("first Beatport submit failed: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h, "POST", "/m/beatport?t="+bpTok, "token=bp-tok-2", form); w.Code != 200 {
+		t.Fatalf("second Beatport submit failed: %d %s", w.Code, w.Body.String())
+	}
+	bpPoll := do(h, "GET", "/api/relay/session?t="+bpTok, "", nil).Body.String()
+	if !strings.Contains(bpPoll, `"access_token":"bp-tok-2"`) {
+		t.Fatalf("Beatport re-submission silently dropped: %s", bpPoll)
 	}
 }

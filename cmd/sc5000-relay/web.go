@@ -155,7 +155,7 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 			err = errors.New("请填写 SoundCloud 主页链接 / 用户名、Client ID 和 Client Secret，或者 OAuth Token")
 		}
 		if err == nil {
-			err = doneOK(s.sessions.complete(token, "soundcloud", func(trusted bool) error {
+			err = s.sessions.replace(token, "soundcloud", func(trusted bool) error {
 				if !trusted {
 					return nil
 				}
@@ -170,7 +170,7 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 						c.SoundCloudToken = info.Token
 					}
 				})
-			}, func(x *session) { x.SoundCloud = info }))
+			}, func(x *session) { x.SoundCloud = info })
 		}
 		s.mobileResult(w, r, provider, token, 200, err)
 		return
@@ -178,7 +178,7 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 	if provider == "beatport" {
 		tok, err := s.connectBeatport(ctx, strings.TrimSpace(firstOf(v, "user")), firstOf(v, "password"), strings.TrimSpace(firstOf(v, "token")))
 		if err == nil {
-			err = doneOK(s.sessions.complete(token, "beatport", nil, func(x *session) { x.Beatport = &tok }))
+			err = s.sessions.replace(token, "beatport", nil, func(x *session) { x.Beatport = &tok })
 		}
 		s.mobileResult(w, r, provider, token, 200, err)
 		return
@@ -187,7 +187,7 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 		info, arlName, err := s.connectDeezer(ctx, firstOf(v, "user", "link", "url", "userId", "id"), firstOf(v, "arl"))
 		if err == nil {
 			// The 30 s lookup ran without the lock; the session is re-checked here.
-			err = doneOK(s.sessions.complete(token, "deezer", func(trusted bool) error {
+			err = s.sessions.replace(token, "deezer", func(trusted bool) error {
 				if !trusted {
 					return nil
 				}
@@ -197,7 +197,7 @@ func (s *server) handleMobilePost(w http.ResponseWriter, r *http.Request) {
 						c.DeezerARL, c.DeezerARLUserName, c.DeezerARLChecked = info.ARL, arlName, time.Now().UTC()
 					}
 				})
-			}, func(x *session) { x.Deezer = info }))
+			}, func(x *session) { x.Deezer = info })
 		}
 		if err == nil {
 			s.browser.closeToken(token)

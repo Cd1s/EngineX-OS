@@ -320,6 +320,27 @@ func (st *sessionStore) complete(token, provider string, syncConfig func(trusted
 	return nil
 }
 
+// replace commits a manual form submission (or re-submission) while its QR is live
+// and matches provider, overwriting an earlier submission on the same QR token.
+func (st *sessionStore) replace(token, provider string, syncConfig func(trusted bool) error, apply func(*session)) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	s := st.m[token]
+	if s == nil || s.expired(time.Now()) || s.Provider != provider {
+		return errSessionGone
+	}
+	if syncConfig != nil {
+		if err := syncConfig(s.Trusted); err != nil {
+			return err
+		}
+	}
+	apply(s)
+	s.Status = "done"
+	st.saveLocked()
+	st.flushLocked()
+	return nil
+}
+
 // completeDeezer is complete for the Deezer browser login.
 func (st *sessionStore) completeDeezer(token, userID, arl string, syncConfig func(bool) error) error {
 	err := st.complete(token, "deezer", syncConfig, func(s *session) { s.Deezer = &deezerInfo{UserID: userID, ARL: arl} })
