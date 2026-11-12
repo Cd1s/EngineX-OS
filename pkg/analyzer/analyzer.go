@@ -68,6 +68,8 @@ type Result struct {
 
 	// Loudness 是 0–1 的平均响度（RMS 相对满幅）。
 	Loudness float64 `json:"loudness"`
+	// BandPeaks 记录低/中/高三频段归一化前的真实峰值（0–1），供 Engine 5.3.0 trackData 写入。
+	BandPeaks [3]float64 `json:"bandPeaks"`
 
 	Waveform                []WavePoint `json:"-"`
 	WaveformSamplesPerEntry float64     `json:"waveformSamplesPerEntry"`
@@ -217,6 +219,13 @@ func computeWaveforms(a *Audio, res *Result, tick func(int) error) error {
 			rms[i][b] = math.Sqrt(raw[i].sq[b] / n)
 			maxPeak[b] = math.Max(maxPeak[b], raw[i].peak[b])
 			maxRMS[b] = math.Max(maxRMS[b], rms[i][b])
+		}
+	}
+	for b := range 3 {
+		if math.IsNaN(maxPeak[b]) || math.IsInf(maxPeak[b], 0) || maxPeak[b] <= 0 {
+			res.BandPeaks[b] = 0
+		} else {
+			res.BandPeaks[b] = math.Min(1, maxPeak[b])
 		}
 	}
 	commonPeak := max(maxPeak[0], maxPeak[1], maxPeak[2])

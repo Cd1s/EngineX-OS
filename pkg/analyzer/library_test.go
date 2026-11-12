@@ -82,7 +82,7 @@ func TestEngine504AtomicImport(t *testing.T) {
 	tr := uncompress(t, track)
 	ov := uncompress(t, overview)
 	bt := uncompress(t, beats)
-	if len(tr) != 44 || len(ov) != 3099 || len(bt) != 130 {
+	if len(tr) != 68 || len(ov) != 3099 || len(bt) != 130 {
 		t.Fatalf("blob lengths %d %d %d", len(tr), len(ov), len(bt))
 	}
 	if binary.BigEndian.Uint64(tr[8:16]) != uint64(len(song)) || math.Float64frombits(binary.BigEndian.Uint64(tr[:8])) != testaudio.Rate {
@@ -179,14 +179,39 @@ func TestPerformanceBlobsWritesNonZeroBandPeaksAndTrailer(t *testing.T) {
 	}
 	tr := uncompress(t, track)
 	ov := uncompress(t, overview)
-	if len(tr) != 44 || len(ov) != 3099 {
+	if len(tr) != 68 || len(ov) != 3099 {
 		t.Fatalf("unexpected blob sizes: tr=%d ov=%d", len(tr), len(ov))
 	}
 	if bytes.Equal(tr[20:44], make([]byte, 24)) {
 		t.Fatal("trackData low/mid/high peaks are all zero")
 	}
+	if !bytes.Equal(tr[44:68], make([]byte, 24)) {
+		t.Fatal("trackData stem peaks must be zero before stems render")
+	}
 	if bytes.Equal(ov[len(ov)-3:], []byte{0, 0, 0}) {
 		t.Fatal("overviewWaveFormData 3-byte band-max trailer is all zero")
+	}
+
+	// A quiet 80 Hz sine wave stretches Overview.LowValue to 255, but trackData must carry
+	// the actual measured band peaks (~0.35 low, near-zero mid/high) rather than stretched overview estimates.
+	bassSamples := make([]float32, 6*testaudio.Rate)
+	for i := range bassSamples {
+		bassSamples[i] = float32(0.35 * math.Sin(2*math.Pi*80*float64(i)/testaudio.Rate))
+	}
+	bassRes, err := Analyze(&Audio{SampleRate: testaudio.Rate, Channels: 1, Samples: bassSamples}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bassTrack, _, _, err := PerformanceBlobs(bassRes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	btRaw := uncompress(t, bassTrack)
+	lowPeak := math.Float64frombits(binary.BigEndian.Uint64(btRaw[20:28]))
+	midPeak := math.Float64frombits(binary.BigEndian.Uint64(btRaw[28:36]))
+	highPeak := math.Float64frombits(binary.BigEndian.Uint64(btRaw[36:44]))
+	if lowPeak < 0.25 || lowPeak > 0.42 || midPeak > 0.05 || highPeak > 0.01 {
+		t.Fatalf("trackData band peaks derived from stretched overview instead of measured peaks: low=%.4f mid=%.4f high=%.4f", lowPeak, midPeak, highPeak)
 	}
 }
 func TestLibraryRejectsUnknownSchemaAndOffVolume(t *testing.T) {
