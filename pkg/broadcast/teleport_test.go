@@ -367,3 +367,63 @@ func TestLANStreamCountsSentBytes(t *testing.T) {
 		t.Fatalf("a %d-byte packet arrived and the status counts %d bytes sent", n, sent)
 	}
 }
+
+// BH2-A3-4: a Teleport frame was one datagram however much audio it carried: 9 KB
+// from one pass of the capture loop, far above the MTU.
+func TestLANStreamerTeleportChunksUnderMTU(t *testing.T) {
+	ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	// A beacon interval beyond the test: only audio frames arrive after the first beacon.
+	streamer, err := NewLANStreamer(LANConfig{Mode: "teleport", Target: ln.LocalAddr().String(), SampleRate: 48000, Channels: 2, BeaconInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := streamer.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer streamer.Close()
+
+	// Two passes of the capture loop: 2304 frames (9216 B), then 240.
+	first := make([]byte, 2304*4)
+	for i := range first {
+		first[i] = byte(i / 4)
+	}
+	if err := streamer.Push(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := streamer.Push(make([]byte, 240*4)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 65536)
+	var got []byte
+	var next uint64
+	for frames := 0; next < 2304+240; {
+		_ = ln.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, err := ln.ReadFrom(buf)
+		if err != nil {
+			t.Fatalf("after %d frames (%d samples): %v", frames, next, err)
+		}
+		if n > 0 && buf[0] == '{' {
+			continue // the beacon
+		}
+		if n > 1472 {
+			t.Fatalf("a %d-byte datagram does not fit a 1500-byte MTU", n)
+		}
+		f, err := ParseTeleportFrame(buf[:n])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.Timestamp != next || int(f.DataLen) != len(f.Payload) || len(f.Payload)%4 != 0 {
+			t.Fatalf("frame %d: timestamp %d (want %d), dataLen %d, payload %d", frames, f.Timestamp, next, f.DataLen, len(f.Payload))
+		}
+		next += uint64(len(f.Payload) / 4)
+		got = append(got, f.Payload...)
+		frames++
+	}
+	if !bytes.Equal(got[:len(first)], first) || len(got) != len(first)+240*4 {
+		t.Fatalf("the audio of the frames is not what was pushed (%d bytes)", len(got))
+	}
+}
