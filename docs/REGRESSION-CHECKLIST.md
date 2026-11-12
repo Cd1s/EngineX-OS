@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (70 Rows)
+## Regression Table (71 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -80,6 +80,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 68 | **An IPv6 Icecast/Shoutcast server given without a port connects** (bug hunt 2, BH2-A3-12: `[2001:db8::1]` as server address got the default port and a second pair of brackets, `[[2001:db8::1]]:8000`, and the connection always failed with "too many colons in address") | BH2-A3-12 | `pkg/broadcast::TestParseServerTargetIPv6WithoutPort` (bracketed and bare IPv6, with and without port and scheme, host names and IPv4 unchanged) | Release workflow Step 2 Go suites |
 | 69 | **Windows: the installer can unpack a first-generation image for USB (fastboot) flashing** (bug hunt 2, BH2-A7-1: `az01_packer.py` refused any host path with a backslash as unsafe, which is every path on Windows; `enginex-installer` on Windows therefore stopped at "unsafe host output path" before flashing an SC5000 / SC6000 / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro over USB) | BH2-A7-1 | `tools/az01-packer/test_az01_packer.py::test_cli_unpack_accepts_a_windows_path` (a Windows-shaped output path unpacks; quotes and control characters are still refused there; on POSIX the backslash stays refused). Real Windows PC: `enginex-installer.exe` with a first-generation deck in Firmware Update Mode gets past "unpack" | Release workflow Step 2 packer unit tests |
 | 70 | **After an uninstall, stock Engine has no stand-in TIDAL account and no EngineX ALSA file left** (bug hunt 2, BH2-A7-11: `uninstall.sh` left the TIDAL entry `boot-activate.sh` gives Engine (#56) in `/data/StreamingAccounts.json`, so stock Engine showed TIDAL as signed in and every request failed until the user signed out; it also left `99-sc5000-custom.conf` in the ALSA directory the model does not use, which the installer image writes as well. A real TIDAL sign-in is kept) | BH2-A7-11 | `tools/az01-packer/test_data_bundle.py::test_uninstall_removes_the_stand_in_tidal_account_and_both_alsa_files` (stand-in alone, first, last, in the middle, on one line, compact; a real sign-in and a file without TIDAL stay byte-identical; both ALSA files gone). Real second-generation deck: uninstall, then TIDAL shows the sign-in page | Release workflow Step 2 packer unit tests |
+| 71 | **Second-generation deck: an update that lost power does not leave its unpacked copy on `/data`** (bug hunt 2, BH2-A7-8: `install.sh <image>` unpacks the bundle into `/data/enginex/.img-install.XXXXXX` and removes it in an exit trap; after a power cut or a kill the trap never ran and the directory, tens of megabytes, stayed for good, one more per interrupted update) | BH2-A7-8 | `tools/az01-packer/test_data_bundle.py::test_gen2_img_wraps_the_bundle_and_installs_with_unlock` (a stale `.img-install.*` directory is gone after the next image install; a link of that name is not followed) | Release workflow Step 2 packer unit tests |
 
 ---
 
