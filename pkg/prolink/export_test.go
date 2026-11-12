@@ -1393,3 +1393,59 @@ func TestExportStatusPlayMode(t *testing.T) {
 		t.Fatalf("playing, not master: % x", got)
 	}
 }
+
+// #217 review of 9348a32: a master we handed to a CDJ came back to nobody.
+// Engine's deck keeps DeckIsMaster all the while (a console's Line In CDJ has no
+// Engine deck), so nothing ever cleared "given away" until a restart.
+func TestExportTakesVacantMasterBack(t *testing.T) {
+	cdj := net.IPv4(127, 63, 0, 2)
+	r := &exportRun{player: 3, deck: ExportDeck{Master: true, Playing: true, BPM: 128}}
+	master := func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		b := r.statusPacket()
+		return b[0x89]&0x20 != 0 && b[0x9e] != 0
+	}
+	hear := func(number, flags byte) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.heardLocked(cdj, peerStatus(number, "CDJ-3000", flags, flags>>5&1, 0xff, 8))
+	}
+	give := func(to byte) {
+		t.Helper()
+		if !master() {
+			t.Fatal("not master before handing it over")
+		}
+		r.mu.Lock()
+		r.handoff = to // what receiveBeats does on its 0x26
+		r.mu.Unlock()
+		hear(to, 0xbc)
+		if master() {
+			t.Fatalf("still master after player %d took it", to)
+		}
+	}
+	// Player 2 takes it and hands it on to player 4: still theirs.
+	give(2)
+	hear(4, 0xbc)
+	hear(2, 0x9c)
+	if master() {
+		t.Fatal("took master back while player 4 holds it")
+	}
+	// Player 4 lets go and nobody else has it.
+	hear(4, 0x9c)
+	if !master() {
+		t.Fatal("master is vacant and one of our decks leads, but our status does not claim it")
+	}
+	// A player that was never master and says so changes nothing.
+	give(2)
+	hear(4, 0x9c)
+	if master() {
+		t.Fatal("a bystander's status took master back from player 2")
+	}
+	// Player 2 is switched off: no status, nothing to ask. The next claim
+	// (stream-sync: a deck took Engine's master, no live Pioneer master) takes it.
+	(&Exporter{run: r}).ClaimMaster()
+	if !master() {
+		t.Fatal("ClaimMaster left the master given away")
+	}
+}

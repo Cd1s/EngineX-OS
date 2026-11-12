@@ -191,3 +191,106 @@ func TestLinkMasterAskedAgainFromAnotherDeck(t *testing.T) {
 	asked(2, true)  // MASTER on our other deck
 	asked(2, false)
 }
+
+// #217 review: we gave the link's master to a CDJ, the CDJ went away, and the
+// next deck of ours to take Engine's master found nobody to ask. It must take
+// the vacant master; before, our status never claimed it again.
+func TestLinkMasterTakenBackWhenNobodyHoldsIt(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	cfg := Config{UIDir: t.TempDir(), StateDir: t.TempDir(), ProlinkExport: prolink.ExportConfig{Root: root, IP: net.IPv4(127, 64, 0, 5), MAC: net.HardwareAddr{2, 0, 0, 0, 0, 5}, DBAddr: "127.64.0.5:0", PortmapAddr: "127.64.0.5:0", DiscoveryAddr: "127.64.0.5:0", StatusAddr: "127.64.0.5:0", AnnounceAddr: "127.64.0.5:9", ProbeDuration: 20 * time.Millisecond}}
+	s := New(cfg, nil)
+	defer s.Close()
+	beat, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 64, 0, 6), Port: 50001})
+	if err != nil {
+		t.Skip("beat port:", err)
+	}
+	defer beat.Close()
+	status, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 64, 0, 6), Port: 50002})
+	if err != nil {
+		t.Skip("status port:", err)
+	}
+	defer status.Close()
+	if err := s.prolinkExport.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	packet := func(kind byte, size, name int) []byte {
+		b := make([]byte, size)
+		copy(b, "Qspt1WmJOL")
+		b[10] = kind
+		copy(b[name:], "CDJ-3000")
+		return b
+	}
+	st := s.prolinkExport.Status()
+	discovery, _ := net.ResolveUDPAddr("udp4", st.DiscoveryAddress)
+	statusAddr, _ := net.ResolveUDPAddr("udp4", st.StatusAddress)
+	keepalive := packet(6, 0x36, 12)
+	keepalive[0x24] = 2
+	copy(keepalive[0x26:], []byte{2, 0, 0, 0, 0, 6})
+	cdjStatus := func(flags byte) {
+		b := packet(0x0a, 0x200, 11)
+		b[0x21], b[0x89], b[0x9f] = 2, flags, 0xff
+		copy(b[0x7c:], "3.41")
+		status.WriteToUDP(b, statusAddr)
+	}
+	post := func(masterDeck int) {
+		t.Helper()
+		body := fmt.Sprintf(`[{"deck":1,"playing":true,"bpm":120,"master":%v},{"deck":2,"playing":true,"bpm":120,"master":%v}]`, masterDeck == 1, masterDeck == 2)
+		w := httptest.NewRecorder()
+		s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(body)))
+		if w.Code != 200 {
+			t.Fatalf("decks: %d", w.Code)
+		}
+	}
+	// ours is whether our status packets claim master (the newest of those arriving within wait).
+	ours := func(want bool, what string) {
+		t.Helper()
+		got, seen := false, false
+		for until := time.Now().Add(2 * time.Second); time.Now().Before(until); {
+			status.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+			b := make([]byte, 2048)
+			if n, _, err := status.ReadFromUDP(b); err == nil && n >= 0xa0 && b[10] == 0x0a {
+				if got, seen = b[0x89]&0x20 != 0, true; got == want {
+					return
+				}
+			}
+		}
+		t.Fatalf("%s: our status claims master %v (status seen: %v), want %v", what, got, seen, want)
+	}
+	for until := time.Now().Add(2 * time.Second); s.prolinkExport.Status().Number == 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(until) {
+			t.Fatal("no player number")
+		}
+	}
+	beat.WriteToUDP(keepalive, discovery)
+	cdjStatus(0x84)
+	post(1)
+	ours(true, "our deck 1 leads, no other master")
+	// The CDJ asks for master, we agree, it claims it.
+	take := func() {
+		t.Helper()
+		ask := packet(0x26, 0x28, 11)
+		ask[0x1f], ask[0x21], ask[0x23], ask[0x27] = 1, 2, 4, 2
+		beat.WriteToUDP(ask, &net.UDPAddr{IP: net.IPv4(127, 64, 0, 5), Port: 50001})
+		beat.SetReadDeadline(time.Now().Add(time.Second))
+		b := make([]byte, 64)
+		if n, _, err := beat.ReadFromUDP(b); err != nil || n != 0x2c || b[10] != 0x27 {
+			t.Skipf("no answer to the request (beat port of the export in use?): %v", err)
+		}
+		cdjStatus(0xa4)
+		ours(false, "the CDJ took master")
+	}
+	take()
+	// The CDJ lets go of master (its status no longer claims it) and nobody else has it.
+	cdjStatus(0x84)
+	ours(true, "the CDJ released master, our deck still leads")
+	// It takes master again and is switched off; stream-sync has forgotten it
+	// (after 5 s without a packet it is no live master). MASTER on our other deck:
+	// nobody to ask.
+	take()
+	prolinkMu.Lock()
+	delete(postedDevices[s], "2")
+	prolinkMu.Unlock()
+	post(2)
+	ours(true, "the CDJ is gone and our deck 2 took Engine's master")
+}
