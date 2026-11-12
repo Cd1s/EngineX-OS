@@ -416,6 +416,10 @@ var noTrackSkipKeyBoards = map[string]bool{
 // az04Boards run the 64-bit AZ04 Engine (Stems stays stock).
 var az04Boards = map[string]bool{"PRIME4G2": true, "SYSTEMONE": true}
 
+// motorizedBoards use motorized platters (HighSpeedMotorAssignment / timecode) rather
+// than capacitive jog wheels with HighSpeedJogWheelAssignment.invert (#213).
+var motorizedBoards = map[string]bool{"SC5000M": true, "SC6000M": true, "SYSTEMONE": true}
+
 func imagePrefix(compatible []string) string {
 	for _, c := range compatible {
 		if p := imagePrefixes[c]; p != "" {
