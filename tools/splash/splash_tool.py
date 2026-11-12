@@ -4,16 +4,18 @@
 Pure standard library (zlib PNG I/O), so it runs anywhere python3 does.
 
 The firmware splash partitions hold a raw 800x1280 portrait BGRA8888 framebuffer
-(4,096,000 bytes). The 1280x800 landscape picture is rotated 90 degrees
-counter-clockwise into it: x_rot = y_src, y_rot = 1279 - x_src.
+(4,096,000 bytes). The 1280x800 landscape picture is rotated 90 degrees into it
+(90 deg CCW on SC5000/SC6000 panels, or 90 deg CW — 180 degrees opposite — on
+panels mounted the other way round such as PRIME 4 / PRIME 2 / Mixstream Pro).
 
-  splash_tool.py render --preset enginex --stock stock-splash.png --png out.png --bin splash.bin
-  splash_tool.py render --preset enginex-recovery --stock stock-recoverysplash.png --bin recoverysplash.bin
-  splash_tool.py encode --input picture.png --output splash.bin
-  splash_tool.py decode --input splash.bin --output picture.png
+  splash_tool.py render --preset enginex --stock stock-splash.bin --png out.png --bin splash.bin
+  splash_tool.py render --preset enginex-recovery --stock stock-recoverysplash.bin --bin recoverysplash.bin
+  splash_tool.py encode --input picture.png [--stock stock-splash.bin] --output splash.bin
+  splash_tool.py decode --input splash.bin [--stock stock-splash.bin] --output picture.png
 
---stock takes the official picture (PNG, or the raw splash .bin) because the
-engine icon, "engine" lettering and version digits are lifted from it rather than redrawn.
+--stock takes the official picture (PNG, or the raw splash .bin/.payload) because
+the engine icon, "engine" lettering, version digits and panel framebuffer
+orientation are derived directly from it rather than redrawn or listed by model.
 """
 import argparse
 import math
@@ -141,10 +143,46 @@ def _write(path, data):
         f.write(data)
 
 
+def rotate_180(buf):
+    """Rotate a 4-byte-per-pixel buffer (1280x800 RGBA or 800x1280 BGRA) by 180 degrees."""
+    out = bytearray(len(buf))
+    for c in range(4):
+        out[c::4] = buf[c::4][::-1]
+    return out
+
+
+def is_rotated_180(rgba):
+    """Return True when a decode_bin() 1280x800 RGBA stock frame is upside down (90 deg CW panel).
+
+    Stock boot splashes carry the version string in the bottom-right corner while the
+    opposite top-left corner is flat background; stock recovery splashes place the large
+    update icon in the upper half above the single-line caption in the lower half.
+    """
+    red = rgba[0::4]
+    bg = sorted((red[0], red[W - 1], red[(H - 1) * W], red[W * H - 1]))[1]
+    br = sum(abs(red[y * W + x] - bg) for y in range(700, 790) for x in range(1080, 1270))
+    tl = sum(abs(red[y * W + x] - bg) for y in range(10, 100) for x in range(10, 200))
+    if br != tl:
+        return tl > br
+    upper = sum(abs(red[i] - bg) > 20 for i in range(0, W * (H // 2)))
+    lower = sum(abs(red[i] - bg) > 20 for i in range(W * (H // 2), W * H))
+    return lower > upper
+
+
 def load_image(path):
-    if path.endswith(".bin"):
-        return W, H, decode_bin(_read(path))
+    data = _read(path)
+    if data[:8] != b"\x89PNG\r\n\x1a\n" and (path.endswith((".bin", ".payload")) or len(data) == BIN_SIZE):
+        return W, H, decode_bin(data)
     return read_png(path)
+
+
+def load_stock(path):
+    """Load --stock as upright (w, h, rgba) plus whether the stock frame is rotated 180 degrees."""
+    w, h, rgba = load_image(path)
+    rot180 = (w, h) == (W, H) and is_rotated_180(rgba)
+    if rot180:
+        rgba = rotate_180(rgba)
+    return w, h, rgba, rot180
 
 
 # ---------------------------------------------------------------- drawing
@@ -257,23 +295,34 @@ def main(argv=None):
         p = sub.add_parser(name, help=f"{name} PNG {'->' if name == 'encode' else '<-'} splash .bin")
         p.add_argument("--input", required=True)
         p.add_argument("--output", required=True)
+        p.add_argument("--stock", help="official splash (.bin/.payload) to match panel orientation")
     args = ap.parse_args(argv)
 
     if args.cmd == "render":
-        stock = load_image(args.stock)
-        if stock[:2] != (W, H):
+        w, h, px, rot180 = load_stock(args.stock)
+        if (w, h) != (W, H):
             ap.error(f"--stock must be {W}x{H}")
-        canvas = PRESETS[args.preset](stock, args.version)
+        canvas = PRESETS[args.preset]((w, h, px), args.version)
         for p in args.png:
             write_png(p, W, H, canvas)
-        for p in args.bin:
-            _write(p, encode_bin(W, H, canvas))
+        if args.bin:
+            raw = encode_bin(W, H, canvas)
+            if rot180:
+                raw = rotate_180(raw)
+            for p in args.bin:
+                _write(p, raw)
         if not args.png and not args.bin:
             ap.error("give --png and/or --bin")
     elif args.cmd == "encode":
-        _write(args.output, encode_bin(*read_png(args.input)))
+        raw = encode_bin(*read_png(args.input))
+        if args.stock and load_stock(args.stock)[3]:
+            raw = rotate_180(raw)
+        _write(args.output, raw)
     else:
-        write_png(args.output, W, H, decode_bin(_read(args.input)))
+        rgba = decode_bin(_read(args.input))
+        if args.stock and load_stock(args.stock)[3]:
+            rgba = rotate_180(rgba)
+        write_png(args.output, W, H, rgba)
     return 0
 
 
