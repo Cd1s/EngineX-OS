@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math"
 	"net"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -398,6 +397,7 @@ type Discovery struct {
 	resolver   func(Device) (*rekordbox.Analysis, string, string)
 	trackCache map[string]cachedTrack
 	trackKeys  []string
+	resolving  map[string]chan struct{}
 	media      *MediaCache
 	// ignoreLocal drops packets this machine sent itself (rb-bridge next to the
 	// deck's own export would otherwise copy the deck's stick onto itself).
@@ -551,67 +551,25 @@ func defaultResolveWithRoot(anlzRoot string, device Device) (*rekordbox.Analysis
 		}
 	}
 
-	var basePaths []string
-	if anlzRelPath != "" {
-		clean := strings.TrimPrefix(anlzRelPath, "/")
-		clean = strings.TrimSuffix(clean, filepath.Ext(clean))
-		basePaths = append(basePaths, filepath.Join(anlzRoot, clean))
+	if anlzRelPath == "" {
+		return nil, title, artist
 	}
-
-	var foundBases []string
-	anlzDir := filepath.Join(anlzRoot, "PIONEER", "USBANLZ")
-	if _, err := os.Stat(anlzDir); os.IsNotExist(err) {
-		anlzDir = anlzRoot
+	rel := filepath.Clean(strings.TrimPrefix(filepath.FromSlash(anlzRelPath), string(filepath.Separator)))
+	if !filepath.IsLocal(rel) {
+		return nil, title, artist
 	}
-	_ = filepath.WalkDir(anlzDir, func(path string, de os.DirEntry, err error) error {
-		if err != nil || de.IsDir() {
-			return nil
-		}
-		name := strings.ToUpper(de.Name())
-		if strings.HasPrefix(name, "ANLZ") && (strings.HasSuffix(name, ".DAT") || strings.HasSuffix(name, ".EXT") || strings.HasSuffix(name, ".2EX")) {
-			base := path[:len(path)-len(filepath.Ext(path))]
-			foundBases = append(foundBases, base)
-		}
-		return nil
-	})
-
-	trackIDHex := fmt.Sprintf("%04X", device.TrackID)
-	trackIDDec := fmt.Sprintf("%04d", device.TrackID)
-	trackIDDecMinus1 := fmt.Sprintf("%04d", device.TrackID-1)
-	for _, b := range foundBases {
-		ub := strings.ToUpper(b)
-		if strings.Contains(ub, trackIDHex) || strings.Contains(ub, trackIDDec) || strings.Contains(ub, trackIDDecMinus1) {
-			basePaths = append(basePaths, b)
-		}
-	}
-	if len(basePaths) == 0 && len(foundBases) == 1 {
-		basePaths = append(basePaths, foundBases[0])
-	}
-
-	seenBase := make(map[string]bool)
-	var uniqueBases []string
-	for _, b := range basePaths {
-		if !seenBase[b] {
-			seenBase[b] = true
-			uniqueBases = append(uniqueBases, b)
-		}
-	}
+	base := filepath.Join(anlzRoot, strings.TrimSuffix(rel, filepath.Ext(rel)))
 
 	var merged *rekordbox.Analysis
 	exts := []string{".DAT", ".EXT", ".2EX", ".dat", ".ext", ".2ex"}
-	for _, base := range uniqueBases {
-		for _, ext := range exts {
-			filePath := base + ext
-			if a, err := rekordbox.ReadAnalysis(filePath); err == nil && a != nil {
-				if merged == nil {
-					merged = a
-				} else {
-					merged.Merge(a)
-				}
+	for _, ext := range exts {
+		filePath := base + ext
+		if a, err := rekordbox.ReadAnalysis(filePath); err == nil && a != nil {
+			if merged == nil {
+				merged = a
+			} else {
+				merged.Merge(a)
 			}
-		}
-		if merged != nil {
-			break
 		}
 	}
 
@@ -788,66 +746,100 @@ func (d *Discovery) Observe(device Device) Device {
 	}
 
 	if needsResolve {
-		d.mu.Unlock()
-
-		var anlz *rekordbox.Analysis
-		var title, artist string
-		if resolver != nil {
-			anlz, title, artist = resolver(device)
+		flightKey := fmt.Sprintf("%s:%d:%d:%d", host, device.SourcePlayer, device.SourceSlot, device.TrackID)
+		if d.resolving == nil {
+			d.resolving = make(map[string]chan struct{})
+		}
+		if wait, inflight := d.resolving[flightKey]; inflight {
+			d.mu.Unlock()
+			<-wait
+			d.mu.Lock()
+			if media.allowed() {
+				cacheKey = fmt.Sprintf("%s:%d:%d:%d:%s", host, device.SourcePlayer, device.SourceSlot, device.TrackID, media.MediaIdentity(device, host))
+			}
+			if cached, ok := d.trackCache[cacheKey]; ok {
+				if len(device.Waveform) == 0 {
+					device.Waveform = cached.waveform
+				}
+				if len(device.Beats) == 0 {
+					device.Beats = cached.beats
+				}
+				if device.DurationMS == 0 {
+					device.DurationMS = cached.durationMS
+				}
+				if device.Title == "" {
+					device.Title = cached.title
+				}
+				if device.Artist == "" {
+					device.Artist = cached.artist
+				}
+			}
 		} else {
-			if media != nil {
-				anlz, title, artist = media.resolve(device, host)
-			}
-			if anlz == nil && title == "" && anlzRoot != "" {
-				anlz, title, artist = defaultResolveWithRoot(anlzRoot, device)
-			}
-		}
-		var wf [][3]byte
-		var bts []BeatGridPoint
-		var dur uint32
-		if anlz != nil {
-			wf, bts, dur = ExtractANLZ(anlz)
-		}
-		if media.allowed() {
-			cacheKey = fmt.Sprintf("%s:%d:%d:%d:%s", host, device.SourcePlayer, device.SourceSlot, device.TrackID, media.MediaIdentity(device, host))
-		}
-		entry := cachedTrack{
-			analysis:   anlz,
-			title:      title,
-			artist:     artist,
-			waveform:   wf,
-			beats:      bts,
-			durationMS: dur,
-		}
+			wait := make(chan struct{})
+			d.resolving[flightKey] = wait
+			d.mu.Unlock()
 
-		d.mu.Lock()
-		if d.trackCache == nil {
-			d.trackCache = make(map[string]cachedTrack)
-		}
-		if _, exists := d.trackCache[cacheKey]; !exists {
-			if len(d.trackCache) >= 64 && len(d.trackKeys) > 0 {
-				evict := d.trackKeys[0]
-				d.trackKeys = d.trackKeys[1:]
-				delete(d.trackCache, evict)
+			var anlz *rekordbox.Analysis
+			var title, artist string
+			if resolver != nil {
+				anlz, title, artist = resolver(device)
+			} else {
+				if media != nil {
+					anlz, title, artist = media.resolve(device, host)
+				}
+				if anlz == nil && title == "" && anlzRoot != "" {
+					anlz, title, artist = defaultResolveWithRoot(anlzRoot, device)
+				}
+			}
+			var wf [][3]byte
+			var bts []BeatGridPoint
+			var dur uint32
+			if anlz != nil {
+				wf, bts, dur = ExtractANLZ(anlz)
+			}
+			if media.allowed() {
+				cacheKey = fmt.Sprintf("%s:%d:%d:%d:%s", host, device.SourcePlayer, device.SourceSlot, device.TrackID, media.MediaIdentity(device, host))
+			}
+			entry := cachedTrack{
+				analysis:   anlz,
+				title:      title,
+				artist:     artist,
+				waveform:   wf,
+				beats:      bts,
+				durationMS: dur,
+			}
+
+			d.mu.Lock()
+			delete(d.resolving, flightKey)
+			close(wait)
+			if d.trackCache == nil {
+				d.trackCache = make(map[string]cachedTrack)
+			}
+			if _, exists := d.trackCache[cacheKey]; !exists {
+				if len(d.trackCache) >= 64 && len(d.trackKeys) > 0 {
+					evict := d.trackKeys[0]
+					d.trackKeys = d.trackKeys[1:]
+					delete(d.trackCache, evict)
+				}
+				d.trackCache[cacheKey] = entry
+				d.trackKeys = append(d.trackKeys, cacheKey)
 			}
 			d.trackCache[cacheKey] = entry
-			d.trackKeys = append(d.trackKeys, cacheKey)
-		}
-		d.trackCache[cacheKey] = entry
-		if len(device.Waveform) == 0 {
-			device.Waveform = wf
-		}
-		if len(device.Beats) == 0 {
-			device.Beats = bts
-		}
-		if device.DurationMS == 0 {
-			device.DurationMS = dur
-		}
-		if device.Title == "" {
-			device.Title = title
-		}
-		if device.Artist == "" {
-			device.Artist = artist
+			if len(device.Waveform) == 0 {
+				device.Waveform = wf
+			}
+			if len(device.Beats) == 0 {
+				device.Beats = bts
+			}
+			if device.DurationMS == 0 {
+				device.DurationMS = dur
+			}
+			if device.Title == "" {
+				device.Title = title
+			}
+			if device.Artist == "" {
+				device.Artist = artist
+			}
 		}
 	}
 
