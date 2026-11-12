@@ -370,3 +370,16 @@ func TestPipelineCompleteReportsRecordedPipelineError(t *testing.T) {
 		t.Fatalf("Complete masked p.err: got %v", err)
 	}
 }
+
+func TestPackAndPipelineRejectHugeReturnFramesWithout32BitOverflow(t *testing.T) {
+	pw := newPackWriter(io.Discard)
+	if _, err := pw.Write([]byte("numReturnChannels=8\n\nreturnFrames=134217729\n\n")); err == nil {
+		t.Fatalf("packWriter accepted returnFrames=134217729 (want=%d)", pw.want)
+	}
+	p := newPipeline(io.Discard)
+	p.unpacked()
+	p.fromEngine([]byte("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\naction=block\nnumSamples=0\n\n"))
+	if _, err := p.Write([]byte("numReturnChannels=8\n\nreturnFrames=134217729\n\n")); err == nil {
+		t.Fatalf("pipeline.Write accepted returnFrames=134217729 (want=%d)", p.want)
+	}
+}

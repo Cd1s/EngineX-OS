@@ -236,10 +236,11 @@ func (p *pipeline) Write(b []byte) (int, error) {
 			p.write(p.down.raw)
 			return 0, nil
 		}
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 || p.nplanes == 0 || !(p.started || p.done) {
+		n64, err := count(f, "returnFrames", 1<<20)
+		if err != nil || p.nplanes == 0 || !(p.started || p.done) {
 			return 0, fmt.Errorf("stems pipeline: unexpected returnFrames %q", v)
 		}
+		n := int(n64)
 		if p.packed && n > 0 && (len(p.input) != p.nplanes/4 || n > len(p.input[0])/4) {
 			return 0, fmt.Errorf("stems pipeline: %d frames returned beyond the input", n)
 		}
