@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sched.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -450,33 +451,106 @@ static const char *rb_bridge_path(void) {
 #ifndef RB_BRIDGE_PATH
 #define RB_BRIDGE_PATH rb_bridge_path
 #endif
-static void after_mount(struct libmnt_context *ctx) {
+// What after_mount does on a volume. Engine learns of a mount from edisksd's
+// mountinfo monitor (update_mountinfo -> filesystem_mounted -> Mountpoints
+// PropertiesChanged) while edisksd's mount thread is still inside this call, so
+// anything done after the real mount races Engine's first look at the stick
+// (#182: playlists only after a re-insert). The conversion therefore runs first,
+// in a private mount namespace, and the visible mount then finds it done.
+enum { MOUNT_PRE=1, MOUNT_POST=2, MOUNT_FULL=3 };
+#define CONVERTED 1
+#define TIMED_OUT 4
+static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
     const char *target=mnt_context_get_target(ctx);
-    if(!volume(target)||safe_path(target,0))return;
-    int64_t deadline=deadline_from(now_ms());
+    if(!volume(target)||safe_path(target,0))return 0;
     int pioneer=has_export(target);char lib[PATH_MAX];
-    if(path_join(lib,sizeof lib,target,"Engine Library")||safe_path(lib,1)) {note("unsafe library path rejected on",target,errno);return;}
+    if(path_join(lib,sizeof lib,target,"Engine Library")||safe_path(lib,1)) {note("unsafe library path rejected on",target,errno);return 0;}
     struct stat existing;
     int hfs_ro=HFS_READONLY(target);
     if(!hfs_ro&&!lstat(lib,&existing)) { // an HFS+ view is validated by prepare_view
         int fd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
-        if(fd<0)return;
+        if(fd<0)return 0;
         int unsafe=copy_tree(fd,-1,deadline,0);close(fd);
-        if(unsafe){note("unsafe library contents rejected on",target,errno);return;}
+        if(unsafe){note("unsafe library contents rejected on",target,errno);return 0;}
     }
-    if(hfs_ro) {
+    if(hfs_ro&&(pioneer||mode!=MOUNT_PRE)) {
         char identity[80];
-        if(VOLUME_IDENTITY(mnt_context_get_source(ctx),identity)||prepare_view(target,identity,deadline)){note("HFS view unavailable on",target,errno);return;}
+        if(VOLUME_IDENTITY(mnt_context_get_source(ctx),identity)||prepare_view(target,identity,deadline)){note("HFS view unavailable on",target,errno);return 0;}
     }
-    if(pioneer){const char *rb=RB_BRIDGE_PATH();char *const a[]={(char *)rb,"--mount-path",(char *)target,NULL};if(run(a,deadline))note("bridge failed on",target,errno);}
+    int done=0;
+    if(pioneer&&mode!=MOUNT_POST){const char *rb=RB_BRIDGE_PATH();char *const a[]={(char *)rb,"--mount-path",(char *)target,NULL};if(!run(a,deadline))done=CONVERTED;else{if(errno==ETIMEDOUT)done=TIMED_OUT;note("bridge failed on",target,errno);}}
+    if(hfs_ro&&mode==MOUNT_PRE) { // the persistent library stays; the private view goes
+        struct owned_view *v=load_view(target);if(v){umount2(target,MNT_DETACH|UMOUNT_NOFOLLOW);cleanup_view(v);free(v);}
+    }
     char db[PATH_MAX];
-    if(!pioneer&&!path_join(db,sizeof db,lib,"Database2/m.db")&&!safe_path(db,0)) {
+    if(mode!=MOUNT_PRE&&!pioneer&&!path_join(db,sizeof db,lib,"Database2/m.db")&&!safe_path(db,0)) {
         char *const a[]={"/usr/local/bin/engine-guardian","--heal-mount",(char *)target,"--data-only",NULL};if(run(a,deadline))note("guardian failed on",target,errno);
     }
+    return pioneer?done|2:0;
 }
+// A library too large to convert inside the budget would hold every later
+// insert of the same export for the whole budget and still end unconverted.
+// Remember it until reboot, keyed by the filesystem and the export files.
+static int slow_marker(const char *target,char out[PATH_MAX]) {
+    struct statvfs v;if(statvfs(target,&v))return -1;
+    uint64_t h=UINT64_C(14695981039346656037);
+    h=hash_bytes(h,&v.f_fsid,sizeof v.f_fsid);h=hash_bytes(h,&v.f_blocks,sizeof v.f_blocks);
+    const char *files[]={"PIONEER/rekordbox/export.pdb",".PIONEER/rekordbox/export.pdb","PIONEER/rekordbox/exportLibrary.db",".PIONEER/rekordbox/exportLibrary.db"};
+    for(unsigned i=0;i<4;i++) {
+        char p[PATH_MAX];struct stat st;
+        if(path_join(p,sizeof p,target,files[i])||lstat(p,&st))continue;
+        int64_t size=(int64_t)st.st_size,sec=(int64_t)st.st_mtim.tv_sec,ns=st.st_mtim.tv_nsec;
+        h=hash_bytes(h,&i,sizeof i);h=hash_bytes(h,&size,sizeof size);h=hash_bytes(h,&sec,sizeof sec);h=hash_bytes(h,&ns,sizeof ns);
+    }
+    if(snprintf(out,PATH_MAX,"%s/slow-%016llx",RUN_ROOT,(unsigned long long)h)>=PATH_MAX){errno=ENAMETOOLONG;return -1;}
+    return 0;
+}
+// Time kept for the visible mount, the HFS view and the reply to Engine.
+#ifndef POST_RESERVE_MS
+#define POST_RESERVE_MS INT64_C(3000)
+#endif
+// Mount the volume in a private namespace and convert it there. Returns 1 when
+// the stick held a rekordbox export and rb-bridge finished, 2 when it held one
+// but the conversion did not finish (or is known not to), 0 when it held none
+// or this failed.
+static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context *),int64_t deadline) {
+    const char *target=mnt_context_get_target(ctx);
+    if(!volume(target)||safe_path(target,0))return 0;
+    pid_t pid=fork();if(pid<0)return 0;
+    if(!pid) {
+        // Nothing mounted here reaches edisksd's (and Engine's) namespace.
+        if(unshare(CLONE_NEWNS)||mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL))_exit(0);
+        if(real(ctx)||mnt_context_get_status(ctx)!=1)_exit(0);
+        char marker[PATH_MAX];int known=0,r=0;
+        if(!secure_runtime()&&!slow_marker(target,marker))known=!access(marker,F_OK);
+        if(known){note("rekordbox library too large to convert at mount, skipped on",target,0);r=2;}
+        else r=after_mount(ctx,MOUNT_PRE,deadline);
+        if(r&TIMED_OUT&&!slow_marker(target,marker)){int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)close(fd);}
+        umount2(target,UMOUNT_NOFOLLOW); // the namespace ending would also drop it
+        _exit(r&CONVERTED?1:r?2:0);
+    }
+    for(;;) {
+        int status;pid_t r=waitpid(pid,&status,WNOHANG);
+        if(r==pid)return WIFEXITED(status)?WEXITSTATUS(status):0;
+        if(r<0&&errno!=EINTR)return 0;
+        if(now_ms()>=deadline+1000){kill(pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}return 2;}
+        usleep(20000);
+    }
+}
+static int hooked_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_context *)) {
+    int64_t start=now_ms(),deadline=deadline_from(start);
+    pthread_mutex_lock(&view_lock);
+    int pre=premount(ctx,real,deadline-POST_RESERVE_MS);
+    int rc=real(ctx),saved=errno;
+    if(!rc&&mnt_context_get_status(ctx)==1){after_mount(ctx,pre?MOUNT_POST:MOUNT_FULL,deadline);errno=saved;}
+    pthread_mutex_unlock(&view_lock);return rc;
+}
+#ifndef REAL_MNT_CONTEXT_MOUNT
+#define REAL_MNT_CONTEXT_MOUNT() ((int (*)(struct libmnt_context *))dlsym(RTLD_NEXT,"mnt_context_mount"))
+#endif
 int mnt_context_mount(struct libmnt_context *ctx) {
-    int (*real)(struct libmnt_context *)=dlsym(RTLD_NEXT,"mnt_context_mount");if(!real){errno=ENOSYS;return -ENOSYS;}
-    int rc=real(ctx);if(!rc&&mnt_context_get_status(ctx)==1){int saved=errno;pthread_mutex_lock(&view_lock);after_mount(ctx);pthread_mutex_unlock(&view_lock);errno=saved;}return rc;
+    int (*real)(struct libmnt_context *)=REAL_MNT_CONTEXT_MOUNT();if(!real){errno=ENOSYS;return -ENOSYS;}
+    return hooked_mount(ctx,real);
 }
 
 // A rescue tree is cloned BEFORE changing the public view. Normal child

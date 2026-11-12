@@ -94,9 +94,37 @@ func redactLog(message, accessCode string) string {
 	return logQuery.ReplaceAllString(message, "${1}REDACTED")
 }
 
+// Units in a log download. The storage units come first, with their own
+// share of the size limit: a verbose Engine log used to fill the whole
+// download, so the rekordbox conversion and mount messages were missing (#182).
+// rb-bridge runs from the edisksd hook at mount time, so its messages are
+// logged under edisksd.service.
+var (
+	logEngineUnits  = []string{"engine.service", "stream-sync.service", "enginex-stream-sync.service"}
+	logStorageUnits = []string{"edisksd.service", "rb-bridge.service", "enginex-rb-bridge.service", "sc5000-storage@*.service"}
+)
+
+const (
+	logStorageLimit = 512 << 10
+	logStorageLines = "--lines=2000"
+)
+
+func logUnitAllowed(units []string, unit string) bool {
+	for _, u := range units {
+		if u == unit || strings.HasSuffix(u, "@*.service") && strings.HasPrefix(unit, strings.TrimSuffix(u, "*.service")) && strings.HasSuffix(unit, ".service") {
+			return true
+		}
+	}
+	return false
+}
+
 // Read bounded JSON journal entries without exporting fragments of a MESSAGE.
 // Only the resulting redacted plain text reaches the browser.
 func journalText(src io.Reader, accessCode string) ([]byte, bool, error) {
+	return journalUnitsText(src, accessCode, logEngineUnits, logDownloadLimit)
+}
+
+func journalUnitsText(src io.Reader, accessCode string, units []string, limit int) ([]byte, bool, error) {
 	input := &io.LimitedReader{R: src, N: logReadLimit}
 	dec := json.NewDecoder(input)
 	var out bytes.Buffer
@@ -113,7 +141,7 @@ func journalText(src io.Reader, accessCode string) ([]byte, bool, error) {
 		if err != nil {
 			return nil, false, err
 		}
-		if entry.Unit != "engine.service" && entry.Unit != "stream-sync.service" && entry.Unit != "enginex-stream-sync.service" {
+		if !logUnitAllowed(units, entry.Unit) {
 			continue
 		}
 		var message string
@@ -125,7 +153,7 @@ func journalText(src io.Reader, accessCode string) ([]byte, bool, error) {
 			continue
 		}
 		line := fmt.Sprintf("%s %s: %s\n", time.UnixMicro(us).UTC().Format(time.RFC3339Nano), entry.Unit, redactLog(message, accessCode))
-		if out.Len()+len(line) > logDownloadLimit-len(logTruncated) {
+		if out.Len()+len(line) > limit-len(logTruncated) {
 			return out.Bytes(), true, nil
 		}
 		out.WriteString(line)
@@ -140,29 +168,55 @@ func (s *Server) downloadLogs(w http.ResponseWriter, r *http.Request) {
 	defer s.logsMu.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "journalctl", "--no-pager", "--quiet", "--all", "--reverse", "--boot", "--since=-30min", "--until=now", "--lines=5000", "--output=json", "--unit=engine.service", "--unit=stream-sync.service", "--unit=enginex-stream-sync.service")
-	pipe, err := cmd.StdoutPipe()
-	if err == nil {
-		err = cmd.Start()
-	}
+	storage, storageLimited, err := readJournal(ctx, s.cfg.AccessToken, logStorageUnits, logStorageLines, logStorageLimit)
 	if err != nil {
 		fail(w, 500, errors.New("could not read logs"))
 		return
 	}
-	body, limited, readErr := journalText(pipe, s.cfg.AccessToken)
-	// journalText stops at either byte limit; reap the producer in all cases.
-	if limited || readErr != nil {
-		cancel()
+	if storageLimited && len(storage) > 0 {
+		storage = append(storage, logTruncated...)
 	}
-	waitErr := cmd.Wait()
-	if readErr != nil || waitErr != nil && !limited {
+	body, limited, err := readJournal(ctx, s.cfg.AccessToken, logEngineUnits, "--lines=5000", logDownloadLimit-len(storage))
+	if err != nil {
 		fail(w, 500, errors.New("could not read logs"))
 		return
 	}
 	if limited {
 		body = append(body, logTruncated...)
 	}
+	body = append(storage, body...)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="enginex-logs.txt"`)
 	w.Write(body)
+}
+
+// readJournal exports the last 30 minutes of units, newest first, within limit bytes.
+func readJournal(ctx context.Context, accessCode string, units []string, lines string, limit int) ([]byte, bool, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	args := []string{"--no-pager", "--quiet", "--all", "--reverse", "--boot", "--since=-30min", "--until=now", lines, "--output=json"}
+	for _, u := range units {
+		args = append(args, "--unit="+u)
+	}
+	cmd := exec.CommandContext(ctx, "journalctl", args...)
+	pipe, err := cmd.StdoutPipe()
+	if err == nil {
+		err = cmd.Start()
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	body, limited, readErr := journalUnitsText(pipe, accessCode, units, limit)
+	// journalUnitsText stops at either byte limit; reap the producer in all cases.
+	if limited || readErr != nil {
+		cancel()
+	}
+	waitErr := cmd.Wait()
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	if waitErr != nil && !limited {
+		return nil, false, waitErr
+	}
+	return body, limited, nil
 }

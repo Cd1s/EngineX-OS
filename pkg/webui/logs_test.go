@@ -251,3 +251,51 @@ func TestLogDownloadSizeAndBackendFailure(t *testing.T) {
 		t.Fatalf("backend error leaked: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func unitLogEntry(unit, message string) []byte {
+	b, _ := json.Marshal(map[string]string{"MESSAGE": message, "_SYSTEMD_UNIT": unit, "__REALTIME_TIMESTAMP": "1700000000000000"})
+	return append(b, '\n')
+}
+
+// #182: a download of a first-insert problem held 15 s of verbose Engine log
+// and nothing from the mount: the rekordbox conversion and edisksd were absent.
+func TestLogDownloadKeepsStorageUnitsBesideVerboseEngine(t *testing.T) {
+	dir := t.TempDir()
+	storage := filepath.Join(dir, "storage.json")
+	var b []byte
+	b = append(b, unitLogEntry("edisksd.service", "edisksd-hook: writable HFS library ready on /media/STICK")...)
+	b = append(b, unitLogEntry("edisksd.service", `{"Added":1200,"Bypassed":false}`)...)
+	b = append(b, unitLogEntry("sc5000-storage@sda1.service", "sc5000-storage: ready: /dev/sda1 at /media/STICK")...)
+	b = append(b, unitLogEntry("rb-bridge.service", "rb-bridge: listening for Pro DJ Link")...)
+	b = append(b, unitLogEntry("sshd.service", "Accepted publickey")...)
+	if err := os.WriteFile(storage, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	engine := filepath.Join(dir, "engine.json")
+	if err := os.WriteFile(engine, bytes.Repeat(logEntry(strings.Repeat("verbose ", 125)), 6000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in *--unit=edisksd.service*) cat '%s' ;; *) cat '%s' ;; esac\n", storage, engine)
+	if err := os.WriteFile(filepath.Join(dir, "journalctl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	s := New(Config{AccessToken: "console-code", UIDir: t.TempDir(), StateDir: t.TempDir()}, nil)
+	defer s.Close()
+	req := httptest.NewRequest("GET", "/api/logs", nil)
+	req.Header.Set("Authorization", "Bearer console-code")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	body := w.Body.String()
+	if w.Code != 200 || len(body) > logDownloadLimit || !strings.HasSuffix(body, logTruncated) {
+		t.Fatalf("status=%d bytes=%d", w.Code, len(body))
+	}
+	for _, want := range []string{"edisksd.service: edisksd-hook: writable HFS library ready", `edisksd.service: {"Added":1200`, "sc5000-storage@sda1.service: sc5000-storage: ready", "rb-bridge.service: rb-bridge: listening", "engine.service: verbose"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("download lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "sshd.service") || strings.Contains(body, "Accepted publickey") {
+		t.Fatal("unit outside the download list exported")
+	}
+}
