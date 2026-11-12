@@ -75,7 +75,7 @@
 | 设置 → 混音台（Mixer） | Fader Echo（推子回音 / 推桿回音），仅带混音台机型显示（`root.scHasMixer`） |
 | 设置 → 服务 → 流媒体（Services → Streaming） | 7 个流媒体服务开关；原厂 TIDAL / SoundCloud / Beatport LINK 行被隐藏 |
 | 设置 → 关于 / 更新（About / Update） | 版本行（含 Web 控制台地址与访问码）；更新页改查 GitHub |
-| 控制中心（Control Center）磁贴 | Waveform Style、Echo Out（带混音台机型）、Smart Sync |
+| 控制中心（Control Center）磁贴 | Waveform Style、Fader Echo（推子回音 / 推桿回音，仅带混音台机型）、Smart Sync |
 | 音源页（Source）与曲库 | 每个流媒体服务一行 + "扫码登录 / 切换账号"；流媒体曲目左滑 Stems |
 
 > 任务书提到的 Layout Manager、Utility 页：仓库没有往这两处加任何 EngineX 条目，只有 `i18n.tsv` 收录了原厂文案（`Layout`、`Control Center` 等标签页名）。下表不含它们。
@@ -136,7 +136,7 @@
 | 磁贴 | 说明 | 键 |
 |---|---|---|
 | Waveform Style（DENON / RGB / 3BAND） | CDJ-3000 风格三段选择，点一下立即切换，无需重启 | `waveform` |
-| Echo Out（OFF / ON） | 独立播放机隐藏；`直播推流`（`Live Stream`）已移至 `设置 → 服务` | `upfader_echo` |
+| Fader Echo / 推子回音 / 推桿回音（OFF / ON） | 仅带混音台机型显示（`root.scHasMixer`）；`直播推流`（`Live Stream`）已移至 `设置 → 服务` | `upfader_echo` |
 | Smart Sync（Bar / Beat / Tempo，仅 5.3.0） | 写的是 Engine 自己的 `/Client/Preferences/Profile/Application/SyncMode`，**不在 conf**；另有常驻逻辑：开 Sync 后 BPM 跨度超出变速范围就把 Pitch Range 升档，最高 ±100%，只升不降 | Engine 偏好 |
 
 ### 2.8 其他"无入口"的行为开关（原厂条目被补丁改变或放开）
