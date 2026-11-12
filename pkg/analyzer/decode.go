@@ -78,8 +78,7 @@ func decodeFile(path string, ticker Ticker) (audio *Audio, err error) {
 		return DecodeFLAC(br)
 	case len(head) >= 4 && string(head[0:4]) == "OggS":
 		return decodeOggVorbis(br, ticker, MaxDecodedSamples)
-	case len(head) >= 3 && string(head[0:3]) == "ID3",
-		len(head) >= 2 && head[0] == 0xFF && head[1]&0xE0 == 0xE0:
+	case len(head) >= 2 && head[0] == 0xFF && head[1]&0xE0 == 0xE0:
 		return DecodeMP3(br)
 	}
 	return nil, fmt.Errorf("analyzer: unsupported audio format: %s", path)

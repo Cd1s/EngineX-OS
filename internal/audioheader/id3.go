@@ -42,40 +42,108 @@ func checkID3Footer(r io.Reader, h [10]byte) error {
 	return nil
 }
 
+const (
+	maxID3Tags    = 8
+	maxID3Padding = 64 << 10
+)
+
 func SkipID3(r *bufio.Reader) error {
-	prefix, err := r.Peek(3)
-	if err != nil {
-		return err
+	var padded int
+	for count := 0; ; count++ {
+		if count > 0 {
+			for {
+				b, err := r.Peek(1)
+				if err == io.EOF {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				if b[0] != 0 {
+					break
+				}
+				if padded >= maxID3Padding {
+					return errors.New("audio: excessive post-ID3 padding")
+				}
+				_, _ = r.ReadByte()
+				padded++
+			}
+		}
+		prefix, err := r.Peek(3)
+		if err != nil {
+			if count == 0 {
+				return err
+			}
+			if err == io.EOF {
+				if len(prefix) > 0 && bytes.HasPrefix([]byte("ID3"), prefix) {
+					return io.ErrUnexpectedEOF
+				}
+				return nil
+			}
+			return err
+		}
+		if string(prefix) != "ID3" {
+			return nil
+		}
+		if count >= maxID3Tags {
+			return errors.New("audio: too many ID3 headers")
+		}
+		var h [10]byte
+		if _, err = io.ReadFull(r, h[:]); err != nil {
+			return err
+		}
+		n, footer, err := parseID3Header(h)
+		if err != nil {
+			return err
+		}
+		if _, err = io.CopyN(io.Discard, r, n); err != nil {
+			return err
+		}
+		if footer {
+			if err := checkID3Footer(r, h); err != nil {
+				return err
+			}
+		}
 	}
-	if string(prefix) != "ID3" {
-		return nil
-	}
-	var h [10]byte
-	if _, err = io.ReadFull(r, h[:]); err != nil {
-		return err
-	}
-	n, footer, err := parseID3Header(h)
-	if err != nil {
-		return err
-	}
-	if _, err = io.CopyN(io.Discard, r, n); err != nil {
-		return err
-	}
-	if footer {
-		return checkID3Footer(r, h)
-	}
-	return nil
 }
 
-// skipID3Seeker skips zero or more consecutive validated ID3v2 tags at the
-// start of r using Seek so large embedded pictures are never read into memory.
+// skipID3Seeker skips zero or more consecutive validated ID3v2 tags (plus
+// bounded post-tag NUL padding) at the start of r using Seek so large embedded
+// pictures are never read into memory.
 func skipID3Seeker(r io.ReadSeeker, fileSize int64) (int64, error) {
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return 0, err
 	}
 	var off int64
-	const maxTags = 8
+	var padded int
+	var zbuf [512]byte
 	for count := 0; ; count++ {
+		if count > 0 && off < fileSize {
+			for off < fileSize {
+				toRead := int(min(int64(len(zbuf)), fileSize-off))
+				if _, err := r.Seek(off, io.SeekStart); err != nil {
+					return 0, err
+				}
+				if _, err := io.ReadFull(r, zbuf[:toRead]); err != nil {
+					return 0, err
+				}
+				nz := 0
+				for nz < toRead && zbuf[nz] == 0 {
+					nz++
+				}
+				if padded+nz > maxID3Padding {
+					return 0, errors.New("audio: excessive post-ID3 padding")
+				}
+				padded += nz
+				off += int64(nz)
+				if nz < toRead {
+					break
+				}
+			}
+			if _, err := r.Seek(off, io.SeekStart); err != nil {
+				return 0, err
+			}
+		}
 		if fileSize-off < 3 {
 			break
 		}
@@ -90,7 +158,7 @@ func skipID3Seeker(r io.ReadSeeker, fileSize int64) (int64, error) {
 			}
 			break
 		}
-		if count >= maxTags {
+		if count >= maxID3Tags {
 			return 0, errors.New("audio: too many ID3 headers")
 		}
 		if readLen < 10 {
