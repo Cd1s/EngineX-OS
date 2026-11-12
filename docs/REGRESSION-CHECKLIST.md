@@ -72,6 +72,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 60 | **`lanHealth` trims trailing slashes before probing `/healthz`, matching `stems.Proxy` (`BH2-A9-6`)** | `BH2-A9-6` | `internal/stems::TestLANHealthTrimsTrailingSlashEndpoint` | Release workflow Step 2 (`go test -race ./internal/stems/...`) |
 | 61 | **`enginex-stemsd -token-file ""` without `-listen` enables zero-config LAN listening (`0.0.0.0:18765`) and UDP/mDNS discovery (`BH2-A9-7`)** | `BH2-A9-7` | `internal/stemsd::TestEmptyTokenFileFlagEnablesZeroConfigLANListen` | Release workflow Step 2 (`go test -race ./internal/stemsd/...`) |
 | 62 | **Stems protocol parser, pipeline, packer, and `LocalRender` skip stray blank lines (`#38`) while still enforcing `maxHeader` (`BH2-A9-9`)** | `BH2-A9-9` | `internal/stems::TestStrayBlankLinesIgnoredInProtocolPipelineAndLocal` | Release workflow Step 2 (`go test -race ./internal/stems/...`) |
+| 63 | **`stems-processor` allows `1200 ms` per LAN discovery/health step so Wi-Fi-only decks (`PRIME GO`, `Mixstream Pro Go`) do not miss a running home GPU worker across 802.11 DTIM sleep (`BH2-A9-10`)** | `BH2-A9-10` | `internal/stemsproc::TestDefaultFindLANToleratesWiFiHealthLatency`; real-deck check on Wi-Fi (`PRIME GO` / `SC LIVE 4`): trigger Stems over home Wi-Fi and verify GPU worker offload | Release workflow Step 2 (`go test -race ./internal/stemsproc/...`); real-deck Wi-Fi Stems check |
 
 ---
 

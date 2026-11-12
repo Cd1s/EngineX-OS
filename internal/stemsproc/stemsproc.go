@@ -34,9 +34,6 @@ func Main(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	findLAN := func(ctx context.Context) (string, bool) {
-		return stems.FindLAN(ctx, stems.DefaultLANStatePath(), 350*time.Millisecond)
-	}
 	local := func(in io.Reader, out io.Writer) error {
 		// Split on the deck, never at the audio's expense.
 		if _, err := resourceguard.New(resourceguard.DefaultConfig()).ApplyToProcess(0); err != nil {
@@ -44,11 +41,23 @@ func Main(args []string) int {
 		}
 		return stems.LocalRender(in, out)
 	}
-	if err = run(ctx, client, findLAN, local, os.Stdin, os.Stdout); err != nil {
+	if err = run(ctx, client, defaultFindLAN, local, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	return 0
+}
+
+// lanDiscoveryTimeout accommodates 802.11 Wi-Fi DTIM multicast buffering and
+// TCP/HTTP handshake jitter on Wi-Fi-only decks such as PRIME GO and Mixstream Pro Go.
+const lanDiscoveryTimeout = 1200 * time.Millisecond
+
+func defaultFindLAN(ctx context.Context) (string, bool) {
+	return findLANAt(ctx, stems.DefaultLANStatePath())
+}
+
+func findLANAt(ctx context.Context, statePath string) (string, bool) {
+	return stems.FindLAN(ctx, statePath, lanDiscoveryTimeout)
 }
 
 // run tries the configured renderer, then a LAN renderer, then local. It moves
