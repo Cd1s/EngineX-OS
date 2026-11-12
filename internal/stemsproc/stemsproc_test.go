@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -184,5 +185,27 @@ func TestRelayAuthOrStatusFailureFallsBackToLANAndLocal(t *testing.T) {
 			t.Fatalf("status %d skipped LAN fallback", status)
 		}
 		checkSession(t, in, out.Bytes())
+	}
+}
+
+func TestDefaultFindLANToleratesWiFiHealthLatency(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), stems.LANStateName)
+
+	b := &stems.Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			// Simulate 802.11 Wi-Fi power-save / DTIM wake latency (~500 ms) on PRIME GO.
+			time.Sleep(500 * time.Millisecond)
+		}
+		b.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	if err := os.WriteFile(stateFile, []byte(`{"endpoint":"`+srv.URL+`","online":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, ok := findLANAt(context.Background(), stateFile)
+	if !ok || endpoint != srv.URL {
+		t.Fatalf("findLANAt over simulated 500 ms Wi-Fi = (%q, %v), want (%q, true)", endpoint, ok, srv.URL)
 	}
 }
