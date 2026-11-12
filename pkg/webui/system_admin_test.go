@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type mockSystemRunner struct {
@@ -575,5 +576,46 @@ func TestUninstallGen2Endpoint(t *testing.T) {
 	s.handleUninstallGen2(w, req)
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 for GET, got %d", w.Code)
+	}
+}
+
+// BH-GC2-2: on a deck the uninstall ran as a child of stream-sync, and
+// uninstall.sh stops enginex-stream-sync.service: systemd ended the script
+// halfway (engine.service left on the removed bundle) and the reboot never
+// came. It must run in a transient unit of its own that also reboots.
+func TestUninstallGen2RunsOutsideStreamSyncUnit(t *testing.T) {
+	mockRunner := &mockSystemRunner{outputs: make(map[string][]byte)}
+	SetSystemRunner(mockRunner.Run)
+	defer SetSystemRunner(nil)
+	defer func(old func(string) bool) { uninstallOnDeck = old }(uninstallOnDeck)
+	uninstallOnDeck = func(string) bool { return true }
+	compatDir := t.TempDir()
+	defer func(old string) { deviceCompatiblePath = old }(deviceCompatiblePath)
+	deviceCompatiblePath = filepath.Join(compatDir, "compatible")
+	_ = os.WriteFile(deviceCompatiblePath, []byte("inmusic,jp21\x00rockchip,rk3288\x00"), 0o644)
+	stateDir := t.TempDir()
+	script := filepath.Join(stateDir, "bundle", "uninstall.sh")
+	_ = os.MkdirAll(filepath.Dir(script), 0o755)
+	_ = os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	version := filepath.Join(stateDir, "version.txt")
+	_ = os.WriteFile(version, []byte("5.3.0.4\n"), 0o644)
+	s := New(Config{StateDir: stateDir, UIDir: t.TempDir(), VersionFile: version}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/sc5000/uninstall-gen2", nil)
+	req.RemoteAddr = "127.0.0.1:43210"
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"rebooting":true`) {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	time.Sleep(700 * time.Millisecond) // the old code rebooted from a goroutine after 500 ms
+	mockRunner.mu.Lock()
+	defer mockRunner.mu.Unlock()
+	if len(mockRunner.commands) != 1 {
+		t.Fatalf("commands: %q", mockRunner.commands)
+	}
+	cmd := strings.Join(mockRunner.commands[0], " ")
+	if mockRunner.commands[0][0] != "systemd-run" || !strings.Contains(cmd, "--unit=enginex-uninstall-gen2") ||
+		!strings.Contains(cmd, script) || !strings.Contains(cmd, "systemctl reboot") || !strings.Contains(cmd, "--no-block") {
+		t.Fatalf("not a transient unit of its own: %s", cmd)
 	}
 }

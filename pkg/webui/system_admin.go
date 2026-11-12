@@ -189,18 +189,30 @@ func (s *Server) handleUninstallGen2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runner := getSystemRunner()
+	if uninstallOnDeck(customDir) {
+		// uninstall.sh stops enginex-stream-sync.service, this very process's
+		// unit, and systemd then ends every process of that unit: the script
+		// halfway (engine.service left pointing at the removed bundle) and the
+		// reboot after it (BH-GC2-2). It runs in a unit of its own instead,
+		// which reboots the deck when the script succeeds.
+		if out, err := runner(r.Context(), "systemd-run", "--unit=enginex-uninstall-gen2", "--collect", "--no-block", "--quiet",
+			"/bin/sh", "-c", `sh "$0" && { systemctl reboot || reboot; }`, uninstallScript); err != nil {
+			fail(w, http.StatusInternalServerError, fmt.Errorf("uninstall could not start: %w: %s", err, out))
+			return
+		}
+		respond(w, map[string]any{"ok": true, "prefix": prefix, "rebooting": true})
+		return
+	}
+	// Off a deck (a developer machine, a test): run it here and never reboot.
 	if out, err := runner(r.Context(), "sh", uninstallScript); err != nil {
 		fail(w, http.StatusInternalServerError, fmt.Errorf("uninstall failed: %w: %s", err, out))
 		return
 	}
-	if isDeckDataDir(customDir) {
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			_, _ = runner(context.Background(), "sh", "-c", "systemctl reboot || reboot || :")
-		}()
-	}
 	respond(w, map[string]any{"ok": true, "prefix": prefix})
 }
+
+// uninstallOnDeck: the deck's own /data/enginex (or the legacy path).
+var uninstallOnDeck = isDeckDataDir
 
 func (s *Server) handleSSH(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
