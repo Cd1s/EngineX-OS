@@ -341,6 +341,96 @@ func TestLANStreamStartsWhenTheNetworkComesUp(t *testing.T) {
 	}
 }
 
+// BH2-A3-6: with only the LAN stream on, Status said "streaming" as soon as the
+// capture loop ran, whether or not a LAN socket existed, and the console showed
+// "connected" instead of the reason.
+func TestLANOnlyStreamIsNotStreamingWithoutASocket(t *testing.T) {
+	capturing := func(b *Broadcaster) {
+		t.Helper()
+		for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			b.mu.Lock()
+			on := b.capturing
+			b.mu.Unlock()
+			if on {
+				return
+			}
+		}
+		t.Fatal("the capture loop did not start")
+	}
+	pcm := filepath.Join(t.TempDir(), "live.pcm")
+	if err := os.WriteFile(pcm, bytes.Repeat([]byte{1, 2, 3, 4}, 1152), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A target that does not resolve, and LAN streaming on without a target.
+	for target, reason := range map[string]string{"studio-pc": "studio-pc", "": "no target"} {
+		b := New(newTestGuard())
+		if err := b.Configure(Config{Enabled: true, LANMode: "rtp", LANTarget: target, InputPath: pcm}); err != nil {
+			t.Fatal(err)
+		}
+		capturing(b)
+		if st := b.Status(); st.Streaming || !strings.Contains(st.LastError, reason) {
+			t.Errorf("LAN target %q: streaming=%v lastError=%q, want not streaming and the reason", target, st.Streaming, st.LastError)
+		}
+		// Without LAN streaming the deck's own stream is all there is, and it is up.
+		if err := b.Configure(Config{Enabled: true, LANMode: "off", InputPath: pcm}); err != nil {
+			t.Fatal(err)
+		}
+		capturing(b)
+		if st := b.Status(); !st.Streaming || st.LastError != "" {
+			t.Errorf("LAN streaming off: streaming=%v lastError=%q, want the local stream up", st.Streaming, st.LastError)
+		}
+		b.Close()
+	}
+
+	// A deck that boots before it has a route: not streaming until the socket opens.
+	ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var down atomic.Bool
+	down.Store(true)
+	realDial, realRetry := dialUDP, lanRetryEvery
+	t.Cleanup(func() { dialUDP, lanRetryEvery = realDial, realRetry })
+	dialUDP = func(target *net.UDPAddr) (net.Conn, error) {
+		if down.Load() {
+			return nil, &net.OpError{Op: "dial", Net: "udp", Addr: target, Err: syscall.ENETUNREACH}
+		}
+		return realDial(target)
+	}
+	lanRetryEvery = 20 * time.Millisecond
+	b := New(newTestGuard())
+	t.Cleanup(b.Close) // before the dialer is put back
+	if err := b.Configure(Config{Enabled: true, LANMode: "rtp", LANTarget: ln.LocalAddr().String(), InputPath: pcm}); err != nil {
+		t.Fatal(err)
+	}
+	capturing(b)
+	if st := b.Status(); st.Streaming || !strings.Contains(st.LastError, "network is unreachable") {
+		t.Fatalf("no route yet: streaming=%v lastError=%q, want not streaming and the reason", st.Streaming, st.LastError)
+	}
+	down.Store(false)
+	deadline := time.Now().Add(3 * time.Second)
+	for !b.Status().Streaming && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := b.Status(); !st.Streaming || st.LastError != "" {
+		t.Fatalf("the socket is open: streaming=%v lastError=%q", st.Streaming, st.LastError)
+	}
+
+	// An external server that refuses does not take the LAN stream's state with it.
+	if err := b.Configure(Config{Enabled: true, LANMode: "rtp", LANTarget: ln.LocalAddr().String(), InputPath: pcm, ServerURL: "127.0.0.1:1", Password: "pw"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for !strings.Contains(b.Status().LastError, "127.0.0.1:1") && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st := b.Status(); !st.Streaming || !strings.Contains(st.LastError, "127.0.0.1:1") {
+		t.Fatalf("LAN up, server refused: streaming=%v lastError=%q, want streaming and the server's reason", st.Streaming, st.LastError)
+	}
+}
+
 // BH2-A3-10: the sent-bytes figure of the status stayed 0 for a LAN-only stream.
 func TestLANStreamCountsSentBytes(t *testing.T) {
 	ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})

@@ -259,7 +259,12 @@ func (b *Broadcaster) Status() Status {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// The LAN stream counts as streaming while it has a socket, and says why when it has none.
+	// The LAN stream counts as streaming while it has a socket, and says why when it
+	// has none. Capture alone (the deck's own /live stream) counts only when nothing
+	// is meant to be sent anywhere: with LAN streaming on it said "streaming" while
+	// the target did not resolve or the network was not up yet, and the console
+	// hid the reason behind "connected".
+	lanOn := b.cfg.LANMode != "" && b.cfg.LANMode != "off"
 	lanUp, lastError := false, b.lastError
 	lanErr, sent := b.lanErr, b.bytesSent.Load()
 	if b.lanStreamer != nil {
@@ -274,7 +279,7 @@ func (b *Broadcaster) Status() Status {
 	}
 	return Status{
 		Enabled:      b.cfg.Enabled,
-		Streaming:    b.streaming || (b.capturing && (b.cfg.ServerURL == "" || lanUp)),
+		Streaming:    b.streaming || lanUp || (b.capturing && b.cfg.ServerURL == "" && !lanOn),
 		Protocol:     b.cfg.Protocol,
 		ServerURL:    b.cfg.ServerURL,
 		Mountpoint:   b.cfg.Mountpoint,
@@ -309,7 +314,9 @@ func (b *Broadcaster) startLocked() {
 	b.cancel = cancel
 	b.wg.Add(1)
 
-	if b.cfg.LANMode != "" && b.cfg.LANMode != "off" && b.cfg.LANTarget != "" {
+	if b.cfg.LANMode != "" && b.cfg.LANMode != "off" && b.cfg.LANTarget == "" {
+		b.lanErr = "no target set" // on, and nowhere to send: say so instead of "connecting"
+	} else if b.cfg.LANMode != "" && b.cfg.LANMode != "off" {
 		streamer, err := NewLANStreamer(LANConfig{
 			Mode:       b.cfg.LANMode,
 			Target:     b.cfg.LANTarget,
@@ -319,13 +326,12 @@ func (b *Broadcaster) startLocked() {
 		// BH2-A3-6: both errors were dropped, and Status said "streaming" with no
 		// error while nothing was sent. A target that does not resolve is reported;
 		// a socket that cannot be opened yet is reported and retried by Push.
+		// b.streaming is the external server only; the LAN socket is asked in Status.
 		if err != nil {
 			b.lanErr = err.Error()
 		} else {
 			b.lanStreamer = streamer
-			if streamer.Start() == nil {
-				b.streaming = true
-			}
+			_ = streamer.Start() // the reason is kept in streamer.Err()
 		}
 	}
 
