@@ -11,6 +11,11 @@ KEY=${3:?one SSH public key for a private build, or "none" for public releases (
 FSCK=${4:?static ARMv7 fsck.hfsplus}
 OUT=${5:?new output directory outside any git worktree}
 case $VERSION in *[!0-9.]*|'') echo "version must be digits and dots" >&2; exit 2 ;; esac
+# The tag of the GitHub Release this build is for. A same-version re-release keeps <version>
+# and sets RELEASE_TAG=v<version>-rN: decks compare the tag of a release with the one baked
+# in here, so they are offered the re-release once and not again after installing it.
+TAG=${RELEASE_TAG:-v$VERSION}
+case $TAG in "v$VERSION"|"v$VERSION-r"[1-9]|"v$VERSION-r"[1-9][0-9]) ;; *) echo "RELEASE_TAG must be v$VERSION or v$VERSION-rN" >&2; exit 2 ;; esac
 [ ! -e "$OUT" ] || { echo "$OUT exists; refusing to overwrite" >&2; exit 2; }
 ROOT=$(pwd)
 KEYARG=$KEY; [ "$KEY" != none ] || KEYARG=
@@ -32,6 +37,7 @@ python3 tools/ui-mod/build_packs.py --release --qrc "$QRC" --out "$WORK/packs" >
 STAGE=$WORK/overlay
 cp -a rootfs-overlay "$STAGE"
 rm -f "$STAGE/README.md"
+printf '%s\n' "$TAG" > "$STAGE/etc/sc5000/release-tag"
 mkdir -p "$STAGE/usr/share/sc5000-custom" "$STAGE/usr/sbin"
 # BusyBox xzcat on the deck rejects BCJ filters; lc/lp/pb suit 32-bit ARM code.
 # The 8 MiB dictionary keeps the deck's decoder memory as it was with -6.
@@ -92,12 +98,12 @@ for f in "$OUT/"*-Update.img; do
 done
 
 for m in SCLIVE4 SCLIVE2 PRIME4PLUS PRIMEGOPLUS MIXSTREAMPROPLUS MIXSTREAMPROGO; do
-    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --prefix "$m" --suite "$WORK/sc5000-suite" \
+    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/sc5000-suite" \
         --hook "$WORK/hooks32/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
     cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done
 for m in PRIME4G2 SYSTEMONE; do
-    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --prefix "$m" --suite "$WORK/sc5000-suite-arm64" \
+    python3 tools/az01-packer/build-data-bundle.py "$VERSION" --release-tag "$TAG" --prefix "$m" --suite "$WORK/sc5000-suite-arm64" \
         --hook "$WORK/hooks64/libengine-ui-hook.so" --ui-packs "$WORK/packs.tar.gz" --out "$WORK/bundle-$m" >/dev/null
     cp "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-Data-Bundle.tar.gz" "$WORK/bundle-$m/$m-$VERSION-EngineX-OS-"*-Update.img "$OUT/"
 done

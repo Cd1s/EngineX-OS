@@ -523,6 +523,7 @@ stage=$(mktemp -d "$dest/.bundle.XXXXXX")
 trap 'rm -rf "$stage"' 0
 mkdir "$stage/bundle" "$stage/ui"
 cp -R bin lib SHA256SUMS version.txt alsa-dir boot-activate.sh 99-sc5000-custom.conf install.sh uninstall.sh "$stage/bundle/"
+[ ! -f release-tag ] || cp release-tag "$stage/bundle/"
 tar -C "$stage/ui" -xf ui-packs.tar
 [ -d "$stage/ui/packs" ] || { echo "ui-packs.tar has no packs/" >&2; exit 1; }
 rm -rf "$dest/bundle.replaced"
@@ -746,11 +747,14 @@ Removes only what install.sh added; Engine starts stock again.
 '''
 
 
-def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=None):
+def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=None, release_tag=None):
     if prefix not in PREFIXES:
         fail(f'prefix must be one of {PREFIXES}, got {prefix!r}')
     if not VERSION_RE.match(version):
         fail(f'version must be 3 to 5 dot-separated numbers, got {version!r}')
+    release_tag = release_tag or f'v{version}'
+    if not re.fullmatch(re.escape(f'v{version}') + r'(-r[1-9]\d?)?', release_tag):
+        fail(f'release tag must be v{version} or v{version}-rN, got {release_tag!r}')
     if out.exists():
         fail(f'{out} exists; refusing to overwrite')
     files = {}  # path in bundle -> (bytes, mode)
@@ -774,6 +778,9 @@ def build(version, suite, hook, ui_packs, out, prefix='SCLIVE4', edisksd_hook=No
                                   'rootfs-overlay/etc/sc5000/engine-ui-guard').read_bytes(), 0o755)
     files['ui-packs.tar'] = (ui_packs_tar(ui_packs), 0o644)
     files['version.txt'] = (f'{version}\n'.encode(), 0o644)
+    # The release this bundle belongs to (v<version>, or v<version>-rN for a same-version
+    # re-release): stream-sync compares a release's tag with it, see installedRelease.
+    files['release-tag'] = (f'{release_tag}\n'.encode(), 0o644)
     ntp_dropin = (Path(__file__).resolve().parents[2] / 'rootfs-overlay/etc/systemd/timesyncd.conf.d/10-enginex-ntp.conf').read_text()
     files['boot-activate.sh'] = (BOOT_ACTIVATE.replace('@MIGRATE_IF_DEFAULT@', MIGRATE_IF_DEFAULT).replace('@TIMESYNCD_DROPIN@', ntp_dropin).encode(), 0o755)
     files['99-sc5000-custom.conf'] = (ALSA_CONF.encode(), 0o644)
@@ -826,8 +833,9 @@ def main(argv=None):
     p.add_argument('--ui-packs', required=True, type=Path, help='build_packs.py packs.tar(.gz)')
     p.add_argument('--out', required=True, type=Path, help='new output directory')
     p.add_argument('--prefix', default='SCLIVE4', choices=PREFIXES, help='model prefix in the file name')
+    p.add_argument('--release-tag', help='tag of the release, default v<version>; v<version>-rN for a same-version re-release')
     a = p.parse_args(argv)
-    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix, a.edisksd_hook), sys.stdout, indent=2)
+    json.dump(build(a.version, a.suite, a.hook, a.ui_packs, a.out, a.prefix, a.edisksd_hook, a.release_tag), sys.stdout, indent=2)
     print()
 
 

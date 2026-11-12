@@ -267,6 +267,44 @@ class DataBundleTest(unittest.TestCase):
         self.assertFalse((dest / 'bundle').exists())
         self.assertEqual(self.host_commands.read_text(), '')
 
+    def test_release_tag_is_baked_in_and_reaches_the_deck_by_both_install_paths(self):
+        # Same-version re-release: version.txt stays, the tag says which release this build is.
+        src = self.extract(self.build())
+        self.assertEqual((src / 'release-tag').read_text(), 'v5.3.0.1.1\n')
+        r = self.build(out='r2', release_tag='v5.3.0.1.1-r2')
+        with tarfile.open(r['bundle']) as t:
+            names = t.getnames()
+            tag = t.extractfile(f'{TOP}/release-tag').read()
+            sums = t.extractfile(f'{TOP}/SHA256SUMS').read().decode()
+            install = t.extractfile(f'{TOP}/install.sh').read()
+        self.assertEqual(tag, b'v5.3.0.1.1-r2\n')
+        self.assertIn(f'{hashlib.sha256(tag).hexdigest()}  release-tag\n', sums)
+        self.assertIn(f'{TOP}/version.txt', names)
+        for bad in ('v5.3.0.2', '5.3.0.1.1-r2', 'v5.3.0.1.1-r0', 'v5.3.0.1.1-rc1', 'v5.3.0.1.1-r2 '):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                self.build(out='bad', release_tag=bad)
+        # install.sh (on-device, OTA bundle and bundle-carrying *-Update.img)
+        shutil.rmtree(self.tmp / 'x')
+        src = self.extract(r)
+        self.assertEqual((src / 'install.sh').read_bytes(), install)
+        dest = self.tmp / 'data/sc5000-custom'
+        self.sh(src / 'install.sh', dest, alsa_dest=self.tmp / 'data/system/var/overlay/lib/alsa/conf.d')
+        self.assertEqual((dest / 'bundle/release-tag').read_text(), 'v5.3.0.1.1-r2\n')
+        self.assertEqual((dest / 'version.txt').read_text(), '5.3.0.1.1\n')
+        # host-install-userdata.py (EngineX-Installer writing the data partition)
+        for tool in ('debugfs', 'mkfs.ext4'):
+            if subprocess.run(['which', tool], capture_output=True).returncode != 0:
+                self.skipTest(f'{tool} not installed on this host')
+        img = self.tmp / 'userdata.img'
+        subprocess.run(['dd', 'if=/dev/zero', f'of={img}', 'bs=1M', 'count=32'], check=True, capture_output=True)
+        subprocess.run(['mkfs.ext4', '-F', str(img)], check=True, capture_output=True)
+        hspec = importlib.util.spec_from_file_location('host_install_userdata', HERE / 'host-install-userdata.py')
+        hmod = importlib.util.module_from_spec(hspec)
+        hspec.loader.exec_module(hmod)
+        hmod.inject(img, r['bundle'])
+        cat = subprocess.run(['debugfs', '-R', 'cat /enginex/bundle/release-tag', str(img)], capture_output=True, text=True).stdout
+        self.assertEqual(cat, 'v5.3.0.1.1-r2\n')
+
     def test_install_then_uninstall_keeps_user_data(self):
         src = self.extract(self.build())
         dest = self.tmp / 'data/sc5000-custom'

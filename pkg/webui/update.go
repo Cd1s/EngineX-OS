@@ -29,6 +29,9 @@ const (
 	versionFile       = "/data/sc5000-custom/version.txt"
 	// imageVersionFile is written by az01_packer.py patch-rootfs --set-version.
 	imageVersionFile = "/etc/sc5000/version.txt"
+	// releaseTagName holds the tag of the release a build belongs to, e.g. v5.3.0.4-r2.
+	// build-release.sh puts it in the image and build-data-bundle.py in the bundle.
+	releaseTagName   = "release-tag"
 	stagedUpdateFile = "/data/az01-update.img"
 	updateCacheFor   = 10 * time.Minute
 
@@ -351,6 +354,38 @@ func (s *Server) installedVersion() string {
 	return current
 }
 
+// imageReleaseTagFile is the first-generation image's release tag.
+var imageReleaseTagFile = "/etc/sc5000/" + releaseTagName
+
+// installedRelease is what a release tag is compared with: the tag baked into the
+// installed image or bundle, else the installed version. A same-version re-release
+// (v5.3.0.4-r2) is newer than version 5.3.0.4 and must not be offered to itself.
+// A tag of another version (a bundle downgraded by hand) is ignored.
+func (s *Server) installedRelease() string {
+	current := s.installedVersion()
+	release := current
+	for _, f := range []string{imageReleaseTagFile, filepath.Join(s.customDir(), "bundle", releaseTagName)} {
+		if tag := currentVersion(f); tagOfVersion(tag, current) && newerVersion(tag, release) {
+			release = tag
+		}
+	}
+	return release
+}
+
+// tagOfVersion reports whether tag starts with the numbers of version.
+func tagOfVersion(tag, version string) bool {
+	t, v := versionNumberRE.FindAllString(tag, -1), versionNumberRE.FindAllString(version, -1)
+	if len(v) == 0 || len(t) < len(v) {
+		return false
+	}
+	for i := range v {
+		if strings.TrimLeft(t[i], "0") != strings.TrimLeft(v[i], "0") {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 	current := s.installedVersion()
 	v := updateStatus{Repo: repo, Current: current, checked: time.Now()}
@@ -379,7 +414,7 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 		return v
 	}
 	v.Latest, v.URL = rel.Tag, rel.URL
-	v.UpdateAvailable = newerVersion(rel.Tag, v.Current)
+	v.UpdateAvailable = newerVersion(rel.Tag, s.installedRelease())
 	if prefix := imagePrefix(deviceCompatible()); prefix != "" {
 		// Engine's own scan expects <PREFIX>-<version>-...Update.img. The second generation
 		// takes the /data bundle (#86); once unlocked (#119) it prefers the bundle-carrying

@@ -5,6 +5,12 @@
 ## 0. 先确定发哪种
 
 - **同一版本修复重发**（维护者默认做法：版本号固定，例如一直是 5.0.4.1）：不改版本号，跳过第 1 步，第 5 步用 `--clobber` 覆盖同一个 Release，再把 tag 移到新提交。
+- **同一版本、要让已刷该版本的碟机收到的修复重发（`-rN` tag）**：`--clobber` 覆盖同一个 Release 时 tag 不变，已经刷了 `<VERSION>` 的碟机检测不到更新。需要它们收到时：
+  - 版本号、产物文件名、`version.txt` 和关于页都保持 `<VERSION>`，不执行第 1 步；
+  - 新建 Release，tag 为 `v<VERSION>-rN`（N 从 2 开始，每次重发加 1），标题仍是 `EngineX OS <VERSION>`，设为 `--latest`。碟机按 tag 里的数字逐段比较，段数多者更新，所以 `<VERSION>` 及更早版本的碟机都会收到；
+  - 构建时加 `RELEASE_TAG=v<VERSION>-rN`（第 3 步命令前）。`build-release.sh` 把它写进镜像的 `/etc/sc5000/release-tag` 和二代数据包的 `release-tag`，装上这次构建的碟机用它和 Release 的 tag 比较，不会反复提示同一个重发；不设时默认 `v<VERSION>`；
+  - 门禁的旧镜像用同一版本的上一次构建（`release-<VERSION>/`），并加 `GATE_RELEASE_TAG=v<VERSION>-rN`：门禁会验证旧构建收到这个 tag、新镜像不再被提示同一个 tag、以及下一个版本仍会被提示；
+  - `-rN` 和热修复的第五段（`<VERSION>.1`）占用同一段数字，同一个 `<VERSION>` 只用其中一种。
 - **新版本**：只有维护者明确要求才升版本号。按全部步骤做，新建 `v<VERSION>` tag 与 Release。
 - **热修复版本**：在已发布版本后加第五段（`5.3.0.1` → `5.3.0.1.1`，tag `v5.3.0.1.1`，标题 `EngineX OS <VERSION> (Hotfix)`），按「新版本」全部步骤做。碟机的 `newerVersion` 逐段比较，前四段相同时段数多者更新，所以已刷 `5.3.0.1` 的机器能收到推送，也不占用 `5.3.0.2`。`az01_packer.py` 的 `VERSION_RE` 最多接受五段，门禁的 `BASE` 取前三段作为官方底包号。
 

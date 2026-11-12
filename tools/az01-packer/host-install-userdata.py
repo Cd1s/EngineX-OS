@@ -169,6 +169,7 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
             ('install.sh', 0o100755),
             ('uninstall.sh', 0o100755),
             ('version.txt', 0o100644),
+            ('release-tag', 0o100644),
             ('alsa-dir', 0o100644),
             ('SHA256SUMS', 0o100644),
         ]:
