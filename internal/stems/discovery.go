@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -101,6 +102,36 @@ func Announce(ctx context.Context, conn net.PacketConn, b Beacon) error {
 	reply, _ := json.Marshal(b)
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
+	if ua, ok := conn.LocalAddr().(*net.UDPAddr); ok && (ua.Port == DiscoveryPort || ua.Port == mdnsPort) {
+		beaconStop := make(chan struct{})
+		defer close(beaconStop)
+		go func() {
+			emit := func() {
+				if ua.Port == DiscoveryPort {
+					for _, t := range broadcastOnlyTargets() {
+						conn.WriteTo(reply, t)
+					}
+				} else {
+					for _, ifIP := range localLANIPv4s() {
+						conn.WriteTo(mdnsAnswer(0, false, b, ifIP), MDNSGroup)
+					}
+				}
+			}
+			emit()
+			t := time.NewTicker(15 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-beaconStop:
+					return
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					emit()
+				}
+			}
+		}()
+	}
 	buf := make([]byte, 1500)
 	for {
 		n, from, err := conn.ReadFrom(buf)
@@ -127,12 +158,97 @@ func Announce(ctx context.Context, conn net.PacketConn, b Beacon) error {
 	}
 }
 
-// discoverTargets is where probes go; tests point it at loopback.
-var discoverTargets = broadcastTargets
+var (
+	arpTablePath = "/proc/net/arp"
+	peerHintsMu  sync.Mutex
+	peerHints    []net.IP
+)
 
-// broadcastTargets: the limited broadcast plus each IPv4 interface's directed
-// broadcast, so a deck with several interfaces probes every LAN.
-func broadcastTargets() []*net.UDPAddr {
+// RememberPeerHint records a recent LAN client IPv4 address (for example a PC
+// browser opening the deck Web Console) so unicast UDP discovery can reach it
+// even when Wi-Fi AP client isolation drops broadcast and multicast frames.
+func RememberPeerHint(hostOrAddr string) {
+	host := strings.TrimSpace(hostOrAddr)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return
+	}
+	ip = ip.To4()
+	if ip == nil || ip.IsLoopback() || !lanIP(ip) {
+		return
+	}
+	peerHintsMu.Lock()
+	defer peerHintsMu.Unlock()
+	for i, existing := range peerHints {
+		if existing.Equal(ip) {
+			peerHints = append(append(peerHints[:i], peerHints[i+1:]...), ip)
+			return
+		}
+	}
+	if len(peerHints) >= 16 {
+		peerHints = peerHints[1:]
+	}
+	peerHints = append(peerHints, append(net.IP(nil), ip...))
+}
+
+func localLANIPv4s() []net.IP {
+	var out []net.IP
+	ifs, _ := net.Interfaces()
+	for _, i := range ifs {
+		if i.Flags&net.FlagUp == 0 || i.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, _ := i.Addrs()
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && lanIP(n.IP) {
+				out = append(out, n.IP.To4())
+			}
+		}
+	}
+	return out
+}
+
+func unicastPeerTargets() []*net.UDPAddr {
+	localSet := map[string]bool{}
+	for _, ip := range localLANIPv4s() {
+		localSet[ip.String()] = true
+	}
+	seen := map[string]bool{}
+	var out []*net.UDPAddr
+	add := func(ip net.IP) {
+		ip4 := ip.To4()
+		if ip4 == nil || !lanIP(ip4) || localSet[ip4.String()] || seen[ip4.String()] || len(out) >= 32 {
+			return
+		}
+		seen[ip4.String()] = true
+		out = append(out, &net.UDPAddr{IP: append(net.IP(nil), ip4...), Port: DiscoveryPort})
+	}
+	peerHintsMu.Lock()
+	for i := len(peerHints) - 1; i >= 0; i-- {
+		add(peerHints[i])
+	}
+	peerHintsMu.Unlock()
+	if raw, err := os.ReadFile(arpTablePath); err == nil {
+		for idx, line := range strings.Split(string(raw), "\n") {
+			if idx == 0 {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 4 || fields[2] == "0x0" {
+				continue
+			}
+			if ip := net.ParseIP(fields[0]); ip != nil {
+				add(ip)
+			}
+		}
+	}
+	return out
+}
+
+func broadcastOnlyTargets() []*net.UDPAddr {
 	targets := []*net.UDPAddr{{IP: net.IPv4bcast, Port: DiscoveryPort}}
 	ifs, _ := net.Interfaces()
 	for _, i := range ifs {
@@ -158,6 +274,16 @@ func broadcastTargets() []*net.UDPAddr {
 	return targets
 }
 
+// discoverTargets is where probes go; tests point it at loopback.
+var discoverTargets = broadcastTargets
+
+// broadcastTargets: the limited broadcast, each IPv4 interface's directed
+// broadcast, plus known ARP/peer-hint unicast targets so Wi-Fi AP broadcast
+// isolation does not block discovery.
+func broadcastTargets() []*net.UDPAddr {
+	return append(broadcastOnlyTargets(), unicastPeerTargets()...)
+}
+
 // DiscoverLANServer probes the LAN once and returns the base URL of the first
 // renderer that answers within timeout.
 func DiscoverLANServer(ctx context.Context, timeout time.Duration) (string, Beacon, error) {
@@ -174,41 +300,138 @@ func DiscoverLANServer(ctx context.Context, timeout time.Duration) (string, Beac
 }
 
 func discoverLANServers(ctx context.Context, timeout time.Duration, accept func(endpoint string, b Beacon) bool) error {
-	conn, err := net.ListenUDP("udp4", nil)
+	primary, err := net.ListenUDP("udp4", nil)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(timeout))
-	defer context.AfterFunc(ctx, func() { conn.SetDeadline(time.Now()) })()
-	for _, t := range discoverTargets() {
-		conn.WriteToUDP([]byte(discoverProbe), t)
+	conns := []*net.UDPConn{primary}
+	for _, ifIP := range localLANIPv4s() {
+		if len(conns) >= 8 {
+			break
+		}
+		if c, e := net.ListenUDP("udp4", &net.UDPAddr{IP: ifIP, Port: 0}); e == nil {
+			conns = append(conns, c)
+		}
 	}
+	closeAll := func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}
+	defer closeAll()
+	deadline := time.Now().Add(timeout)
+	for _, c := range conns {
+		c.SetDeadline(deadline)
+	}
+	defer context.AfterFunc(ctx, func() {
+		now := time.Now()
+		for _, c := range conns {
+			c.SetDeadline(now)
+		}
+	})()
+
 	query := append([]byte{0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0}, mdnsQuestion()...)
-	for _, t := range mdnsTargets() {
-		conn.WriteToUDP(query, t)
+	dTargets := discoverTargets()
+	mTargets := mdnsTargets()
+	sendProbes := func() {
+		for _, c := range conns {
+			for _, t := range dTargets {
+				c.WriteToUDP([]byte(discoverProbe), t)
+			}
+			for _, t := range mTargets {
+				c.WriteToUDP(query, t)
+			}
+		}
 	}
+	sendProbes()
+
+	retryStop := make(chan struct{})
+	var retryWG sync.WaitGroup
+	defer func() {
+		close(retryStop)
+		retryWG.Wait()
+	}()
+	if timeout >= 40*time.Millisecond {
+		retryWG.Add(1)
+		go func() {
+			defer retryWG.Done()
+			timer := time.NewTimer(timeout / 3)
+			defer timer.Stop()
+			select {
+			case <-retryStop:
+			case <-ctx.Done():
+			case <-timer.C:
+				sendProbes()
+			}
+		}()
+	}
+
+	type rxPkt struct {
+		data []byte
+		from *net.UDPAddr
+	}
+	pktCh := make(chan rxPkt, 16)
+	errCh := make(chan error, len(conns))
+	var wg sync.WaitGroup
+	for _, c := range conns {
+		wg.Add(1)
+		go func(conn *net.UDPConn) {
+			defer wg.Done()
+			buf := make([]byte, 1500)
+			for {
+				n, from, rerr := conn.ReadFromUDP(buf)
+				if rerr != nil {
+					errCh <- rerr
+					return
+				}
+				pkt := make([]byte, n)
+				copy(pkt, buf[:n])
+				select {
+				case pktCh <- rxPkt{data: pkt, from: from}:
+				case <-retryStop:
+					return
+				}
+			}
+		}(c)
+	}
+	doneCh := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(doneCh)
+	}()
+
 	seen := map[string]bool{}
-	buf := make([]byte, 1024)
+	var lastErr error
 	for {
-		n, from, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			return err
-		}
-		var b Beacon
-		if json.Unmarshal(buf[:n], &b) != nil {
-			b, _ = parseMDNS(buf[:n])
-		}
-		if b.Service != beaconService || b.Port < 1 || b.Port > 65535 || !lanIP(from.IP) {
-			continue
-		}
-		endpoint := "http://" + net.JoinHostPort(from.IP.String(), strconv.Itoa(b.Port))
-		if seen[endpoint] {
-			continue
-		}
-		seen[endpoint] = true
-		if accept(endpoint, b) {
-			return nil
+		select {
+		case pkt := <-pktCh:
+			var b Beacon
+			var mdnsIP net.IP
+			if json.Unmarshal(pkt.data, &b) != nil {
+				b, mdnsIP, _ = parseMDNSWithIP(pkt.data)
+			}
+			peerIP := pkt.from.IP
+			if lanIP(mdnsIP) {
+				peerIP = mdnsIP
+			}
+			if b.Service != beaconService || b.Port < 1 || b.Port > 65535 || !lanIP(peerIP) {
+				continue
+			}
+			endpoint := "http://" + net.JoinHostPort(peerIP.String(), strconv.Itoa(b.Port))
+			if seen[endpoint] {
+				continue
+			}
+			seen[endpoint] = true
+			if accept(endpoint, b) {
+				return nil
+			}
+		case <-doneCh:
+			select {
+			case lastErr = <-errCh:
+			default:
+				lastErr = net.ErrClosed
+			}
+			return lastErr
 		}
 	}
 }
@@ -243,10 +466,27 @@ func FindLAN(ctx context.Context, statePath string, timeout time.Duration) (stri
 		st = last // keep the last renderer for the console and the next quick check
 	}
 	st.Online, st.Checked = ok, time.Now().UTC()
-	if b, err := json.Marshal(st); err == nil && os.WriteFile(statePath+".tmp", b, 0o600) == nil {
-		os.Rename(statePath+".tmp", statePath)
+	if ok || st.Endpoint != "" {
+		if b, err := json.Marshal(st); err == nil && os.WriteFile(statePath+".tmp", b, 0o600) == nil {
+			os.Rename(statePath+".tmp", statePath)
+		}
 	}
 	return st.Endpoint, ok
+}
+
+// ProbeLANState discovers or refreshes the LAN Stems renderer for the deck UI
+// and Web Console when no online cloud-relay Stems worker is active.
+func ProbeLANState(ctx context.Context, statePath string, timeout time.Duration) *LANState {
+	FindLAN(ctx, statePath, timeout)
+	b, err := os.ReadFile(statePath)
+	if err != nil {
+		return nil
+	}
+	var st LANState
+	if json.Unmarshal(b, &st) != nil || (st.Endpoint == "" && !st.Online) {
+		return nil
+	}
+	return &st
 }
 
 // lanHealth checks a renderer that needs no credential and has a free slot.

@@ -200,4 +200,12 @@ class WorkerTests(unittest.TestCase):
             self.assertNotEqual(tok_path, '', 'run-home-worker.sh --with-tunnel passed empty -token-file')
             self.assertGreaterEqual(len(Path(tok_path).read_text().strip()), 24)
 
+    def test_windows_runner_quotes_empty_token_file_and_public_firewall(self):
+        ps1 = (Path(__file__).resolve().parent / 'run-home-worker.ps1').read_text()
+        self.assertIn("'-token-file='", ps1,
+                      'PowerShell 5.1 splits unquoted -token-file= and drops the empty value')
+        self.assertNotRegex(ps1, r'(?<![\'"])-token-file=(?![\'"])')
+        self.assertIn('Public', ps1,
+                      'Windows Wi-Fi defaults to Public profile; firewall guidance/rule must cover Public networks')
+
 if __name__=='__main__':unittest.main()

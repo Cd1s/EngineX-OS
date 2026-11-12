@@ -103,29 +103,38 @@ func mdnsAnswer(id uint16, legacy bool, b Beacon, ip net.IP) []byte {
 
 // parseMDNS reads a renderer's beacon out of an mDNS response for our service.
 func parseMDNS(msg []byte) (Beacon, bool) {
+	b, _, ok := parseMDNSWithIP(msg)
+	return b, ok
+}
+
+// parseMDNSWithIP also extracts any IPv4 A record carried in the mDNS response,
+// so reflected or multi-NIC mDNS answers resolve to the advertised listener IP.
+func parseMDNSWithIP(msg []byte) (Beacon, net.IP, bool) {
 	if len(msg) < 12 || msg[2]&0x80 == 0 {
-		return Beacon{}, false
+		return Beacon{}, nil, false
 	}
 	off := 12
 	for q := binary.BigEndian.Uint16(msg[4:]); q > 0; q-- {
 		_, next, ok := readName(msg, off)
 		if !ok {
-			return Beacon{}, false
+			return Beacon{}, nil, false
 		}
 		off = next + 4
 	}
 	var b Beacon
+	var srvTarget string
+	var firstA, targetA net.IP
 	ptr := false
 	records := int(binary.BigEndian.Uint16(msg[6:])) + int(binary.BigEndian.Uint16(msg[8:])) + int(binary.BigEndian.Uint16(msg[10:]))
 	for ; records > 0; records-- {
 		name, next, ok := readName(msg, off)
 		if !ok || next+10 > len(msg) {
-			return Beacon{}, false
+			return Beacon{}, nil, false
 		}
 		typ, size := binary.BigEndian.Uint16(msg[next:]), int(binary.BigEndian.Uint16(msg[next+8:]))
 		data := next + 10
 		if data+size > len(msg) {
-			return Beacon{}, false
+			return Beacon{}, nil, false
 		}
 		rdata := msg[data : data+size]
 		switch {
@@ -133,6 +142,9 @@ func parseMDNS(msg []byte) (Beacon, bool) {
 			ptr = true
 		case typ == typeSRV && size >= 6 && strings.HasSuffix(strings.ToLower(name), "."+mdnsService):
 			b.Port = int(binary.BigEndian.Uint16(rdata[4:]))
+			if target, _, ok := readName(msg, data+6); ok {
+				srvTarget = target
+			}
 		case typ == typeTXT && strings.HasSuffix(strings.ToLower(name), "."+mdnsService):
 			for i := 0; i < len(rdata) && i+1+int(rdata[i]) <= len(rdata); i += 1 + int(rdata[i]) {
 				k, v, _ := strings.Cut(string(rdata[i+1:i+1+int(rdata[i])]), "=")
@@ -145,14 +157,26 @@ func parseMDNS(msg []byte) (Beacon, bool) {
 					b.Version, _ = strconv.Atoi(v)
 				}
 			}
+		case typ == typeA && size == 4:
+			ip := net.IPv4(rdata[0], rdata[1], rdata[2], rdata[3])
+			if firstA == nil {
+				firstA = ip
+			}
+			if srvTarget != "" && strings.EqualFold(name, srvTarget) {
+				targetA = ip
+			}
 		}
 		off = data + size
 	}
 	if !ptr || b.Port == 0 {
-		return Beacon{}, false
+		return Beacon{}, nil, false
 	}
 	b.Service = beaconService
-	return b, true
+	chosenIP := targetA
+	if chosenIP == nil {
+		chosenIP = firstA
+	}
+	return b, chosenIP, true
 }
 
 // readName decodes a possibly compressed name; next is the offset after it
