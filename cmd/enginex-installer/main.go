@@ -690,6 +690,31 @@ func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, e
 }
 
 // fetchImage requires a release-provided digest before handling firmware.
+// gen1Image is the first-generation *-Update.img to install: the one --image/--bundle names (it must
+// be this model's EngineX AZ01 image), else the latest release's (BH-G2-7: both Gen-1 paths always
+// downloaded, so an offline install failed and an online one could flash another build).
+func gen1Image(ctx context.Context, o *options, prefix string) (string, error) {
+	if o.Bundle == "" {
+		return fetchImage(ctx, o, prefix)
+	}
+	base := filepath.Base(o.Bundle)
+	if !strings.HasPrefix(base, prefix+"-") || !strings.Contains(base, "-EngineX-OS-") || !strings.HasSuffix(base, "-Update.img") {
+		return "", fmt.Errorf("%s 不是这台碟机的 EngineX 镜像（应为 %s-*-EngineX-OS-*-Update.img），没有刷写任何东西 / "+
+			"%s is not an EngineX image for this deck (want %s-*-EngineX-OS-*-Update.img); nothing flashed", base, prefix, base, prefix)
+	}
+	f, err := os.Open(o.Bundle)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(f, magic[:]); err != nil || string(magic[:]) != "AZ01" {
+		return "", fmt.Errorf("%s 不是一代机的 AZ01 固件镜像，没有刷写任何东西 / %s is not a first-generation AZ01 firmware image; nothing flashed", base, base)
+	}
+	o.say("使用指定的镜像 "+base, "Using the selected image "+base)
+	return o.Bundle, nil
+}
+
 func fetchImage(ctx context.Context, o *options, prefix string) (string, error) {
 	var rel release
 	if err := getJSON(ctx, o, o.API+"/repos/"+o.Repo+"/releases/latest", &rel); err != nil {
@@ -926,7 +951,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		return nil
 	}
 	if !gen2 {
-		path, err := fetchImage(ctx, o, m.Prefix)
+		path, err := gen1Image(ctx, o, m.Prefix)
 		if err != nil {
 			return err
 		}
@@ -1715,7 +1740,7 @@ func sayGen2Unlocked(o *options, b *bundleInfo, prefix string) {
 }
 
 func modeBGen1(ctx context.Context, o *options, m model) error {
-	path, err := fetchImage(ctx, o, m.Prefix)
+	path, err := gen1Image(ctx, o, m.Prefix)
 	if err != nil {
 		return err
 	}
