@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (54 Rows)
+## Regression Table (55 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -64,6 +64,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 52 | **24-bit WAV/AIFF and high-residual PCM re-encoding to FLAC completes losslessly without 32-bit `int` bit-cost overflow on `armhf` (`BH-GF1-1`)**: `pcmToFLAC` disables `mewkiz/flac`'s 32-bit `int` predictor analysis and selects constant, fixed (`Rice1`/`Rice2`), or verbatim subframes using 64-bit bit-cost accumulation so 24-bit downloads compress below raw PCM size instead of hanging in `WriteUnary` | `BH-GF1-1` (`#222`) | `pkg/deemixclient::TestPCMToFLAC24BitAndHighResidualNo32BitOverflow`, `TestSaveSplitConvertsA24BitAIFFFromAHostWithoutRanges` (under `GOARCH=arm GOARM=7` and `-race`) | Release workflow Step 2 Go suites (`armhf` + `-race`) |
 | 53 | **Pipelined remote Stems never truncates trailing drain frames when the final `action=block` and `action=done` coalesce (`BH-GF2-3`)**: `internal/stems` emits one reply as each block's payload finishes before flushing on `action=done`, so Engine's drain loop never sees a premature `returnFrames=0` and coalesced blocks each receive their reply | `BH-GF2-3` (`#222`) | `internal/stems::TestPipelineCoalescedBlocksAndBlockPlusDone`, `TestPipelineWaitsForTheFinalZero`, `TestPipelinePackedRebuildsMelody` | Release workflow Step 2 Go suites |
 | 54 | **Slow remote Stems renders (`>120 s` CPU `htdemucs`) never time out the idle upload stream after `action=done` (`BH-GF2-4`)**: `stems.UploadTracker` disarms the 120 s upload read deadline in both `enginex-stemsd` (`idleBody`) and `sc5000-relay` (`stemsBody`) once `action=done` is observed while still killing workers immediately if the deck disconnects | `BH-GF2-4` (`#222`) | `internal/stems::TestSlowRenderAfterDoneDoesNotTimeoutIdleUpload`, `TestDisconnectKillsWorkerIgnoringStdin`; `cmd/sc5000-relay::TestStemsRelaySlowRenderAfterDoneDoesNotTimeoutUpload`, `TestStemsRelayDisconnectKillsWorker` | Release workflow Step 2 Go suites |
+| 55 | **Stems relay fallback to LAN / local HPSS is never poisoned by `probeRelayStems` (`BH-GF2-5`)**: `probeRelayStems` marks relay cache entries (`Relay: true`) and `FindLAN` / `lanHealth` require both a LAN address and `"protocol": "engine-5.0.4"` (rejecting `sc5000-relay`'s unauthenticated `/healthz`), so an unreachable/busy relay falls through to a real home `enginex-stemsd` or `LocalRender` instead of failing with `401` | `BH-GF2-5` (`#222`) | `internal/stems::TestFindLANDoesNotUseRelayHealthzOrCachedRelay`, `TestFindLANDiscoversCachesAndFallsBack`; `pkg/webui::TestProbeRelayStemsAnswersAndCaches` | Release workflow Step 2 Go suites |
 
 ---
 

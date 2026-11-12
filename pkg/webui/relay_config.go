@@ -115,7 +115,7 @@ func (s *Server) probeRelayStems(relay, password string, saved *stems.LANState) 
 	if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&h) != nil || !h.OK {
 		return nil
 	}
-	st := &stems.LANState{Endpoint: relay, Hostname: h.Device, Backend: h.Backend, Online: !h.Busy, Checked: time.Now().UTC()}
+	st := &stems.LANState{Endpoint: relay, Hostname: h.Device, Backend: h.Backend, Online: !h.Busy, Relay: true, Checked: time.Now().UTC()}
 	providers.SaveJSON(filepath.Join(s.cfg.StateDir, stems.LANStateName), st) // best effort: the answer is returned anyway
 	return st
 }

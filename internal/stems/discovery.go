@@ -12,8 +12,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -43,7 +46,44 @@ type LANState struct {
 	Hostname string    `json:"hostname,omitempty"`
 	Backend  string    `json:"backend,omitempty"`
 	Online   bool      `json:"online"`
+	Relay    bool      `json:"relay,omitempty"`
 	Checked  time.Time `json:"checked"`
+}
+
+// lanEndpoint reports whether raw is a valid HTTP(S) URL whose host is a LAN
+// address (or .local/.lan mDNS name) suitable for passwordless LAN Stems.
+func lanEndpoint(raw string) bool {
+	if !validEndpoint(raw) {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if ip := net.ParseIP(host); ip != nil {
+		return lanIP(ip)
+	}
+	lh := strings.ToLower(strings.TrimSuffix(host, "."))
+	return lh != "" && (!strings.Contains(lh, ".") || strings.HasSuffix(lh, ".local") || strings.HasSuffix(lh, ".lan"))
+}
+
+func configuredRelayEndpoint(statePath string) string {
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(statePath), "deemix-config.json"))
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		RelayURL string `json:"relayUrl"`
+	}
+	if json.Unmarshal(b, &cfg) != nil {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimSpace(cfg.RelayURL), "/")
+}
+
+func sameEndpoint(a, b string) bool {
+	return strings.EqualFold(strings.TrimRight(strings.TrimSpace(a), "/"), strings.TrimRight(strings.TrimSpace(b), "/"))
 }
 
 // lanIP: addresses a home renderer or deck can have (private, loopback,
@@ -160,16 +200,21 @@ func FindLAN(ctx context.Context, statePath string, timeout time.Duration) (stri
 	if b, err := os.ReadFile(statePath); err == nil {
 		json.Unmarshal(b, &last)
 	}
+	relayCfg := configuredRelayEndpoint(statePath)
+	isRelay := last.Relay || (relayCfg != "" && last.Endpoint != "" && sameEndpoint(last.Endpoint, relayCfg))
 	st, ok := LANState{}, false
-	if last.Endpoint != "" && validEndpoint(last.Endpoint) {
+	if !isRelay && last.Endpoint != "" && lanEndpoint(last.Endpoint) {
 		st, ok = lanHealth(ctx, last.Endpoint, timeout)
 	}
 	if !ok {
-		if endpoint, _, err := DiscoverLANServer(ctx, timeout); err == nil {
+		if endpoint, _, err := DiscoverLANServer(ctx, timeout); err == nil && (relayCfg == "" || !sameEndpoint(endpoint, relayCfg)) {
 			st, ok = lanHealth(ctx, endpoint, timeout)
 		}
 	}
 	if !ok {
+		if isRelay || (last.Endpoint != "" && !lanEndpoint(last.Endpoint)) {
+			return "", false
+		}
 		st = last // keep the last renderer for the console and the next quick check
 	}
 	st.Online, st.Checked = ok, time.Now().UTC()
@@ -181,6 +226,9 @@ func FindLAN(ctx context.Context, statePath string, timeout time.Duration) (stri
 
 // lanHealth checks a renderer that needs no credential and has a free slot.
 func lanHealth(ctx context.Context, endpoint string, timeout time.Duration) (LANState, bool) {
+	if !lanEndpoint(endpoint) {
+		return LANState{}, false
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", endpoint+"/healthz", nil)
@@ -194,12 +242,13 @@ func lanHealth(ctx context.Context, endpoint string, timeout time.Duration) (LAN
 	}
 	defer resp.Body.Close()
 	var h struct {
-		OK      bool   `json:"ok"`
-		Backend string `json:"backend"`
-		Device  string `json:"device"`
-		Busy    bool   `json:"busy"`
+		OK       bool   `json:"ok"`
+		Protocol string `json:"protocol"`
+		Backend  string `json:"backend"`
+		Device   string `json:"device"`
+		Busy     bool   `json:"busy"`
 	}
-	if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&h) != nil || !h.OK || h.Busy {
+	if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&h) != nil || !h.OK || h.Protocol != Protocol || h.Busy {
 		return LANState{}, false
 	}
 	return LANState{Endpoint: endpoint, Hostname: h.Device, Backend: h.Backend}, true

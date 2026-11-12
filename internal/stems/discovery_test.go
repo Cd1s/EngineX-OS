@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -163,5 +164,78 @@ func TestProxyUnreachable(t *testing.T) {
 	err := Proxy(context.Background(), "http://"+addr, "", in, io.Discard)
 	if !errors.Is(err, ErrUnreachable) || in.Len() != len("numChannels=2\n\n") {
 		t.Fatalf("%v, %d bytes left", err, in.Len())
+	}
+}
+
+// A cloud relay cached in stems-lan.json (or answering generic {"ok":true} on
+// /healthz while requiring Bearer auth on /v1/engine) must never be chosen by
+// FindLAN as a passwordless home renderer (BH-GF2-5).
+func TestFindLANDoesNotUseRelayHealthzOrCachedRelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	old, oldMDNS := discoverTargets, mdnsTargets
+	discoverTargets = func() []*net.UDPAddr { return nil }
+	mdnsTargets = func() []*net.UDPAddr { return nil }
+	t.Cleanup(func() { discoverTargets, mdnsTargets = old, oldMDNS })
+
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"ok":true}`))
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer relay.Close()
+
+	dir := t.TempDir()
+	state := filepath.Join(dir, LANStateName)
+	// Simulate pre-5.3.0.5 stems-lan.json written by probeRelayStems (no Relay flag).
+	raw, _ := json.Marshal(LANState{
+		Endpoint: relay.URL,
+		Hostname: "relay-worker",
+		Backend:  "htdemucs",
+		Online:   true,
+		Checked:  time.Now().UTC(),
+	})
+	if err := os.WriteFile(state, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if endpoint, ok := FindLAN(ctx, state, 150*time.Millisecond); ok {
+		err := Proxy(ctx, endpoint, "", strings.NewReader("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\naction=done\n\n"), io.Discard)
+		t.Fatalf("FindLAN chose relay %q as passwordless LAN renderer (Proxy err=%v)", endpoint, err)
+	}
+
+	// Relay:true cached by probeRelayStems is preserved when no LAN renderer answers,
+	// and falls through cleanly to a real LAN enginex-stemsd when one announces.
+	raw, _ = json.Marshal(LANState{
+		Endpoint: relay.URL,
+		Hostname: "relay-worker",
+		Backend:  "htdemucs",
+		Online:   true,
+		Relay:    true,
+		Checked:  time.Now().UTC(),
+	})
+	if err := os.WriteFile(state, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if endpoint, ok := FindLAN(ctx, state, 100*time.Millisecond); ok || endpoint != "" {
+		t.Fatalf("FindLAN with Relay:true and no LAN server = (%q, %v)", endpoint, ok)
+	}
+	if st := readLANState(t, state); !st.Relay || !st.Online || st.Endpoint != relay.URL {
+		t.Fatalf("Relay:true state was clobbered: %+v", st)
+	}
+
+	lanSrv := httptest.NewServer(&Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"})
+	defer lanSrv.Close()
+	port, _ := strconv.Atoi(lanSrv.URL[strings.LastIndex(lanSrv.URL, ":")+1:])
+	announceOnLoopback(t, ctx, port)
+	if endpoint, ok := FindLAN(ctx, state, 250*time.Millisecond); !ok || endpoint != lanSrv.URL {
+		t.Fatalf("FindLAN did not discover real LAN server behind cached relay: (%q, %v), want %q", endpoint, ok, lanSrv.URL)
 	}
 }
