@@ -121,8 +121,18 @@ func validEndpoint(raw string) bool {
 	if u.Scheme == "https" {
 		return true
 	}
-	ip := net.ParseIP(u.Hostname())
-	return u.Scheme == "http" && ip != nil && (ip.IsLoopback() || ip.IsPrivate() || cgnat.Contains(ip))
+	if u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	if ip := net.ParseIP(host); ip != nil {
+		return lanIP(ip)
+	}
+	lh := strings.ToLower(strings.TrimSuffix(host, "."))
+	if lh == "" || strings.HasPrefix(lh, ".") || strings.Contains(lh, "..") {
+		return false
+	}
+	return !strings.Contains(lh, ".") || strings.HasSuffix(lh, ".local") || strings.HasSuffix(lh, ".lan")
 }
 
 var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
