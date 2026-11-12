@@ -247,23 +247,6 @@ int snd_seq_event_output_direct(void *handle, void *ev) {
     return real(handle, ev);
 }
 
-// Engine closes a sequencer handle when its port goes away (a control surface
-// re-enumerates, shutdown). BH2-A2-11: the cached LEDs kept the handle, and the
-// next brightness change replayed them through the freed handle from the poll
-// thread. A replay in progress holds led_mu, so it finishes on the open handle.
-static void *seq_close_cache;
-int snd_seq_close(void *handle) {
-    int (*real)(void *) = next_symbol(&seq_close_cache, "snd_seq_close");
-    if (handle && is_engine()) {
-        pthread_mutex_lock(&led_mu);
-        for (int c = 0; c < 16; c++)
-            for (int i = 0; i < 128; i++)
-                if (led_slots[c][i].handle == handle) led_slots[c][i].handle = NULL;
-        pthread_mutex_unlock(&led_mu);
-    }
-    return real ? real(handle) : -ENOSYS;
-}
-
 // led_brightness= changed: resend cached RGB SysEx LEDs so the deck dims/brightens at once.
 static void led_replay(int pct) {
     int (*direct)(void *, void *) = next_symbol(&seq_direct_cache, "snd_seq_event_output_direct");
