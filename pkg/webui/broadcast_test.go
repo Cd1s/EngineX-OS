@@ -3,13 +3,18 @@ package webui
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/broadcast"
 	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
@@ -523,5 +528,103 @@ func TestBroadcastUsernamePersistsAcrossReload(t *testing.T) {
 	json.NewDecoder(doAuthRequest(t, s, "GET", "/api/broadcast", nil).Body).Decode(&st)
 	if st.Username != "admin2" || !st.PasswordSet || st.ServerURL != saved.ServerURL {
 		t.Fatalf("GET status = %+v", st)
+	}
+}
+
+// readFor reads what arrives within d (whole stream bytes, any size).
+func readFor(t *testing.T, conn net.Conn, d time.Duration) []byte {
+	t.Helper()
+	var got []byte
+	buf := make([]byte, 64<<10)
+	_ = conn.SetReadDeadline(time.Now().Add(d))
+	for {
+		n, err := conn.Read(buf)
+		got = append(got, buf[:n]...)
+		if err != nil {
+			return got
+		}
+	}
+}
+
+// openLive sends a raw GET for /live.wav from a Wi-Fi-like client (MSS 1448, 32 KB
+// receive buffer) and returns the connection after the headers.
+func openLive(t *testing.T, srvURL, query string) (net.Conn, []byte) {
+	t.Helper()
+	u, _ := url.Parse(srvURL)
+	// Loopback's 64 KB MSS exceeds a small receive window and stalls TCP (window
+	// updates are withheld); use a Wi-Fi-like MSS with a 32 KB receive buffer.
+	d := net.Dialer{Control: func(_, _ string, rc syscall.RawConn) error {
+		return rc.Control(func(fd uintptr) {
+			_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_TCP, syscall.TCP_MAXSEG, 1448)
+			_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 32<<10)
+		})
+	}}
+	conn, err := d.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(conn, "GET /live.wav?%s HTTP/1.1\r\nHost: x\r\n\r\n", query); err != nil {
+		t.Fatal(err)
+	}
+	var head []byte
+	one := make([]byte, 1)
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for !bytes.HasSuffix(head, []byte("\r\n\r\n")) {
+		if _, err := conn.Read(one); err != nil {
+			t.Fatalf("headers: %v (%q)", err, head)
+		}
+		head = append(head, one[0])
+	}
+	return conn, head
+}
+
+// ?buffer=300: the player gets 300 ms of recent audio at once (a cushion for Wi-Fi
+// gaps); the old handler sent only live audio, about 19 KB per 100 ms.
+func TestLiveWAVPrefillsRequestedBuffer(t *testing.T) {
+	s, dir := newTestServer(t)
+	enableLiveWithPCM(t, s, dir)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	time.Sleep(700 * time.Millisecond) // let the feed build history
+	conn, head := openLive(t, srv.URL, "format=pcm&buffer=300")
+	defer conn.Close()
+	if !bytes.Contains(head, []byte("200 OK")) || !bytes.Contains(head, []byte("audio/L16;rate=48000;channels=2")) {
+		t.Fatalf("headers: %q", head)
+	}
+	got := readFor(t, conn, 120*time.Millisecond)
+	if len(got) < 300*192 {
+		t.Fatalf("first 120 ms brought %d bytes, want the %d-byte cushion at once", len(got), 300*192)
+	}
+	if !bytes.Equal(got[:4], []byte{1, 2, 3, 4}) || len(got) < 8 || !bytes.Equal(got[len(got)&^3-4:len(got)&^3], []byte{1, 2, 3, 4}) {
+		t.Fatal("cushion is not on frame boundaries")
+	}
+}
+
+// A listener that stalls (Wi-Fi) must not come back to seconds of backlog: what it
+// can read at once stays near buffer+200 ms plus the capped socket buffers. The old
+// handler queued 64 chunks (1.5 s) plus an unbounded kernel send buffer.
+func TestLiveWAVStalledListenerLatencyIsBounded(t *testing.T) {
+	s, dir := newTestServer(t)
+	enableLiveWithPCM(t, s, dir)
+	srv := httptest.NewServer(s)
+	defer srv.Close()
+	conn, _ := openLive(t, srv.URL, "format=pcm&buffer=300")
+	defer conn.Close()
+	time.Sleep(2500 * time.Millisecond) // stalled: nothing read
+	backlog := readFor(t, conn, 150*time.Millisecond)
+	// queue (<= 500 ms = 96000 B) + capped send buffer (kernel doubles it) + 32 KB receive
+	// buffer (doubled) + live during the read + ~100 ms of scheduling/accounting slack.
+	if limit := 96000 + 2*16384 + 64<<10 + 150*192 + 100*192; len(backlog) > limit {
+		t.Fatalf("backlog after a 2.5 s stall: %d bytes (%.0f ms), want <= %d", len(backlog), float64(len(backlog))/192, limit)
+	}
+	more := readFor(t, conn, 300*time.Millisecond)
+	all := append(backlog, more...)
+	for i := 0; i+4 <= len(all)&^3; i += 4 {
+		if !bytes.Equal(all[i:i+4], []byte{1, 2, 3, 4}) {
+			t.Fatalf("frame %d after the stall is misaligned: %v", i/4, all[i:i+4])
+		}
+	}
+	if len(more) < 20*192 {
+		t.Fatalf("stream did not resume: %d bytes in 300 ms", len(more))
 	}
 }
