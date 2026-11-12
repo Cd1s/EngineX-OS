@@ -402,7 +402,7 @@ func liveHeaders(h http.Header, contentType string, st broadcast.Status) {
 // stall backs audio up in the listener queue (which is trimmed) instead of the socket.
 const liveSendBuffer = 16 << 10
 
-// liveBufferMS reads ?buffer=<ms> (0..2000); missing or invalid means the Wi-Fi default.
+// liveBufferMS reads ?buffer=<ms> (0..2000); missing or invalid means the default, tuned for a wired network.
 func liveBufferMS(r *http.Request) int {
 	v, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("buffer")))
 	if err != nil || v < 0 || v > broadcast.MaxBufferMS {
@@ -413,8 +413,8 @@ func liveBufferMS(r *http.Request) int {
 
 // liveWAV streams 48000 Hz 16-bit stereo audio of the deck's live mix.
 // Supports ?format=pcm for raw audio/L16;rate=48000;channels=2 stream with zero header overhead,
-// and ?buffer=<ms> (default 300): the listener starts with that much recent audio as a
-// cushion against Wi-Fi gaps, and is trimmed back to it when it falls further behind.
+// and ?buffer=<ms> (default 120): the listener starts with that much recent audio as a
+// cushion against gaps in delivery, and is trimmed back to it when it falls further behind.
 func (s *Server) liveWAV(w http.ResponseWriter, r *http.Request) {
 	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	contentType := "audio/wav"

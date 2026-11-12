@@ -14,13 +14,19 @@ type hub struct {
 }
 
 // Live listener cushion (/live.wav ?buffer=): on connect a listener first gets the
-// most recent BufferMS of audio, so a player starts with a cushion that rides Wi-Fi
-// gaps; then live audio. A listener more than BufferMS+TrimSlackMS behind (a stalled
-// network) has its oldest queued audio dropped back to BufferMS, so latency stays
-// bounded instead of growing with every stall.
+// most recent BufferMS of audio, so a player starts with a cushion that rides gaps
+// in delivery; then live audio. A listener more than BufferMS+TrimSlackMS behind (a
+// stalled network) has its oldest queued audio dropped back to BufferMS, so latency
+// stays bounded instead of growing with every stall.
+//
+// DefaultBufferMS is tuned for a wired network (or Wi-Fi without AWDL on the
+// receiver), where the network adds almost no jitter: what is left is the deck's own
+// scheduling jitter, measured at 60 ms at most between deliveries, so 120 ms is
+// twice that. The stream leaves the deck on the system clock (see pacer), so the
+// cushion no longer has to absorb drift. Wi-Fi with gaps needs ?buffer=300 or more.
 const (
 	MaxBufferMS     = 2000
-	DefaultBufferMS = 300
+	DefaultBufferMS = 120
 	TrimSlackMS     = 200
 	bytesPerMS      = SampleRate * 4 / 1000 // 192 bytes: s16le stereo at 48 kHz
 )
@@ -127,7 +133,7 @@ func (b *Broadcaster) Subscribe() (<-chan []byte, func()) {
 }
 
 func (h *hub) subscribe() (<-chan []byte, func()) {
-	ch := make(chan []byte, 64)
+	ch := make(chan []byte, 160) // about 1.5 s of ~10 ms chunks, as 64 was with 24 ms ones
 	h.mu.Lock()
 	if h.subs == nil {
 		h.subs = map[chan []byte]struct{}{}
