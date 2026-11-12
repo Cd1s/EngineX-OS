@@ -344,7 +344,11 @@ func (s *Server) handleUSBAudio(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := mgr.Apply(cfg); err != nil {
-			fail(w, 400, err)
+			code := http.StatusInternalServerError // saved or applied only in part (BH-GF3-6)
+			if errors.Is(err, broadcast.ErrInvalidUSBAudioConfig) {
+				code = http.StatusBadRequest
+			}
+			fail(w, code, err)
 			return
 		}
 	} else if r.Method != http.MethodGet {
