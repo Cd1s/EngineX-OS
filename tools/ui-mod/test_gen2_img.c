@@ -62,9 +62,20 @@ static void test_sha256(void) {
     puts("sha256: PASS");
 }
 
+// The device tree of the deck under test (NUL-separated compatible strings).
+static char compat_file[PATH_MAX];
+static void board(const char *dir, const char *compatible) {
+    snprintf(compat_file, sizeof compat_file, "%s/compatible", dir);
+    FILE *f = fopen(compat_file, "wb");
+    assert(f && fwrite(compatible, 1, strlen(compatible) + 1, f) == strlen(compatible) + 1);
+    assert(fwrite("rockchip,rk3288", 1, 16, f) == 16 && !fclose(f));
+    enginex_compatible_path = compat_file;
+}
+
 static void test_open_verify(void) {
     char dir[] = "/tmp/gen2-img-XXXXXX", img[PATH_MAX], cmd[PATH_MAX * 2 + 64];
     assert(mkdtemp(dir));
+    board(dir, "inmusic,jp21"); // an SC LIVE 4: the images below are SCLIVE4 images
     snprintf(img, sizeof img, "%s/ok.img", dir);
     make_img(dir, "ok.img", "payload-bytes-0123456789", NULL, 0);
     void *h = NULL;
@@ -118,6 +129,57 @@ static void test_open_verify(void) {
     puts("open/verify/close/apply checks: PASS");
 }
 
+// BH-G2-1: the native check compared only the payload digest, so an intact image for
+// another model and CPU (SYSTEM ONE, arm64) verified and installed on an SC LIVE 4 (armhf).
+static void with_prefix(const char *dir, const char *name, const char *prefix_line) {
+    char pay[PATH_MAX], cmd[PATH_MAX + 32], hex[65] = {0}, img[PATH_MAX];
+    snprintf(pay, sizeof pay, "%s/payload", dir);
+    FILE *f = fopen(pay, "w"); assert(f && fputs("payload-bytes-0123456789", f) >= 0 && !fclose(f));
+    snprintf(cmd, sizeof cmd, "sha256sum < %s", pay);
+    FILE *p = popen(cmd, "r"); assert(p && fread(hex, 1, 64, p) == 64); pclose(p);
+    uint8_t head[ENGINEX_IMG_HEADER];
+    memset(head, 0, sizeof head);
+    int n = snprintf((char *)head, sizeof head, ENGINEX_IMG_MAGIC "%s\n%s", hex, prefix_line);
+    if (n < (int)sizeof head && !strchr(prefix_line, '\n')) memset(head + n, 'X', sizeof head - (size_t)n); // no newline, no NUL
+    snprintf(img, sizeof img, "%s/%s", dir, name);
+    f = fopen(img, "w"); assert(f);
+    fwrite(head, 1, sizeof head, f);
+    fputs("payload-bytes-0123456789", f);
+    fclose(f);
+}
+
+static void test_other_model_refused(void) {
+    char dir[] = "/tmp/gen2-model-XXXXXX", img[PATH_MAX], cmd[PATH_MAX + 16];
+    assert(mkdtemp(dir));
+    setenv("ENGINEX_TEST_DATA_ROOT", dir, 1);
+    void *h = NULL;
+    with_prefix(dir, "systemone.img", "SYSTEMONE\n5.3.0.5\n");
+    snprintf(img, sizeof img, "%s/systemone.img", dir);
+    board(dir, "inmusic,jp21"); // SC LIVE 4 (armhf) and a SYSTEM ONE (arm64) image
+    assert(enginex_img_check(img) == IMG_BAD);
+    assert(az01_open_image(img, &h) == 0 && az01_verify_image(h, 0) == ENGINEX_ERR_BAD_IMAGE && az01_close_image(h) == 0);
+    assert(az01_apply_image(img, 0) == ENGINEX_ERR_BAD_IMAGE && !exists(dir, "enginex/bundle"));
+    board(dir, "inmusic,rmz2"); // the same image on a SYSTEM ONE
+    assert(enginex_img_check(img) == IMG_OK);
+    with_prefix(dir, "sclive4.img", "SCLIVE4\n5.3.0.5\n");
+    snprintf(img, sizeof img, "%s/sclive4.img", dir);
+    board(dir, "inmusic,jp07"); // a first-generation SC5000 never takes a Gen-2 image
+    assert(enginex_img_check(img) == IMG_BAD);
+    board(dir, "vendor,unknown"); // not a deck we know: refused, never guessed
+    assert(enginex_img_check(img) == IMG_BAD);
+    enginex_compatible_path = "/nonexistent/compatible";
+    assert(enginex_img_check(img) == IMG_BAD);
+    board(dir, "inmusic,jp21");
+    assert(enginex_img_check(img) == IMG_OK);
+    with_prefix(dir, "noline.img", "SCLIVE4"); // prefix line without its newline, header without a NUL
+    snprintf(img, sizeof img, "%s/noline.img", dir);
+    assert(enginex_img_check(img) == IMG_BAD);
+    unsetenv("ENGINEX_TEST_DATA_ROOT");
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    assert(system(cmd) == 0);
+    puts("BH-G2-1: an image for another model or CPU, or on an unknown board, is refused: PASS");
+}
+
 static void test_erase(void) {
     char root[] = "/tmp/gen2-erase-XXXXXX", cmd[PATH_MAX + 16];
     assert(mkdtemp(root));
@@ -167,6 +229,7 @@ static void test_erase(void) {
 int main(void) {
     test_sha256();
     test_open_verify();
+    test_other_model_refused();
     test_erase();
     return 0;
 }
