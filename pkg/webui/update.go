@@ -26,27 +26,32 @@ import (
 
 const (
 	defaultGitHubRepo = "Cd1s/EngineX-OS"
-	versionFile       = "/data/sc5000-custom/version.txt"
-	// imageVersionFile is written by az01_packer.py patch-rootfs --set-version.
-	imageVersionFile = "/etc/sc5000/version.txt"
 	// releaseTagName holds the tag of the release a build belongs to, e.g. v5.3.0.4-r2.
 	// build-release.sh puts it in the image and build-data-bundle.py in the bundle.
 	releaseTagName   = "release-tag"
 	stagedUpdateFile = "/data/az01-update.img"
 	updateCacheFor   = 10 * time.Minute
 
-	bundleSuffix          = "-EngineX-OS-Data-Bundle.tar.gz"
-	bundleCustomDir       = "/data/enginex"
-	legacyBundleCustomDir = "/data/sc5000-custom"
-	bundleMaxDown         = 64 << 20  // compressed download
-	bundleMaxUnpack       = 128 << 20 // all extracted files together
-	gen2ImgPrefix         = "ENGINEX_DATA_BUNDLE"
-	gen2ImgMagic          = "ENGINEX_DATA_BUNDLE_IMG_V1\n"
-	gen2ImgHeader         = 128
+	bundleSuffix        = "-EngineX-OS-Data-Bundle.tar.gz"
+	realDeckCustomDir   = "/data/enginex"
+	realLegacyCustomDir = "/data/sc5000-custom"
+	bundleMaxDown       = 64 << 20  // compressed download
+	bundleMaxUnpack     = 128 << 20 // all extracted files together
+	gen2ImgPrefix       = "ENGINEX_DATA_BUNDLE"
+	gen2ImgMagic        = "ENGINEX_DATA_BUNDLE_IMG_V1\n"
+	gen2ImgHeader       = 128
+)
+
+var (
+	versionFile = "/data/sc5000-custom/version.txt"
+	// imageVersionFile is written by az01_packer.py patch-rootfs --set-version.
+	imageVersionFile      = "/etc/sc5000/version.txt"
+	bundleCustomDir       = realDeckCustomDir
+	legacyBundleCustomDir = realLegacyCustomDir
 )
 
 func isDeckDataDir(dir string) bool {
-	return dir == bundleCustomDir || dir == legacyBundleCustomDir
+	return dir == realDeckCustomDir || dir == realLegacyCustomDir
 }
 
 var (
@@ -341,14 +346,13 @@ func (s *Server) tryApplyGen2Image(part string) bool {
 }
 
 func (s *Server) installedVersion() string {
-	path := s.cfg.VersionFile
-	if path == "" {
-		path = versionFile
+	if s.cfg.VersionFile != "" {
+		return currentVersion(s.cfg.VersionFile)
 	}
-	current := currentVersion(path)
-	if s.cfg.VersionFile == "" {
-		if imgVer := currentVersion(imageVersionFile); current == "dev" || newerVersion(imgVer, current) {
-			current = imgVer // the flashed image's release (#13)
+	current := "dev"
+	for _, p := range []string{filepath.Join(s.customDir(), "version.txt"), versionFile, imageVersionFile} {
+		if v := currentVersion(p); v != "dev" && (current == "dev" || newerVersion(v, current)) {
+			current = v // pick the newest installed runtime or flashed image release (#13, #218)
 		}
 	}
 	return current
@@ -364,7 +368,11 @@ var imageReleaseTagFile = "/etc/sc5000/" + releaseTagName
 func (s *Server) installedRelease() string {
 	current := s.installedVersion()
 	release := current
-	for _, f := range []string{imageReleaseTagFile, filepath.Join(s.customDir(), "bundle", releaseTagName)} {
+	candidates := []string{imageReleaseTagFile, filepath.Join(s.customDir(), "bundle", releaseTagName)}
+	if s.cfg.VersionFile == "" {
+		candidates = append(candidates, filepath.Join(bundleCustomDir, "bundle", releaseTagName))
+	}
+	for _, f := range candidates {
 		if tag := currentVersion(f); tagOfVersion(tag, current) && newerVersion(tag, release) {
 			release = tag
 		}
@@ -537,6 +545,14 @@ func (s *Server) customDir() string {
 	if s.cfg.VersionFile != "" {
 		return filepath.Dir(s.cfg.VersionFile)
 	}
+	if st, err := os.Lstat(bundleCustomDir); err == nil && st.IsDir() {
+		if _, berr := os.Stat(filepath.Join(bundleCustomDir, "bundle")); berr == nil {
+			return bundleCustomDir
+		}
+		if _, verr := os.Stat(filepath.Join(bundleCustomDir, "version.txt")); verr == nil {
+			return bundleCustomDir
+		}
+	}
 	if target, err := filepath.EvalSymlinks(legacyBundleCustomDir); err == nil && target != "" {
 		return target
 	}
@@ -622,9 +638,12 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 	}
 	s.setUpdateProgress(0.90, "", false)
 	cmd := exec.Command("sh", filepath.Join(top, "install.sh"))
-	cmd.Env = append(os.Environ(), "SC5000_CUSTOM="+customDir)
-	if !isDeckDataDir(customDir) { // sandbox / test: no /data to write the ALSA file to
-		cmd.Env = append(cmd.Env, "SC5000_ALSA_OVERLAY="+filepath.Join(customDir, "alsa-conf.d"))
+	cmd.Env = os.Environ()
+	if !isDeckDataDir(customDir) { // sandbox / test: no /data to write the runtime dir or ALSA file to
+		cmd.Env = append(cmd.Env,
+			"SC5000_CUSTOM="+customDir,
+			"SC5000_ALSA_OVERLAY="+filepath.Join(customDir, "alsa-conf.d"),
+		)
 	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -635,6 +654,7 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 		return
 	}
 	os.RemoveAll(work) // before reporting done: a client polling for Done must not see the scratch dir
+	customDir = s.customDir()
 	s.updateMu.Lock()
 	s.updateCache.Current = s.installedVersion()
 	s.updateCache.UpdateAvailable = false
