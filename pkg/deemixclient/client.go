@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,18 @@ import (
 )
 
 const maxTrackedLRU = 512
+
+var queueURLToken = regexp.MustCompile(`(?i)https?://\S+`)
+
+func sanitizeQueueError(msg string) string {
+	msg = queueURLToken.ReplaceAllString(msg, "<url>")
+	msg = strings.Join(strings.Fields(msg), " ")
+	msg = strings.TrimPrefix(msg, "deemix: ")
+	if runes := []rune(msg); len(runes) > 256 {
+		msg = string(runes[:256])
+	}
+	return strings.TrimSpace(msg)
+}
 
 type Client struct {
 	// Mode is "queue" (REST bridge) or "directory" (POST /api/download,
@@ -168,6 +181,12 @@ func (c *Client) Download(ctx context.Context, t providers.Track, progress func(
 	}
 	for {
 		if q.Error != "" {
+			if progress != nil {
+				progress(q)
+			}
+			if detail := sanitizeQueueError(q.Error); detail != "" {
+				return nil, fmt.Errorf("deemix: %s", detail)
+			}
 			return nil, errors.New("deemix: queue reported an error; check CantStream/FLAC availability")
 		}
 		if progress != nil {
@@ -306,6 +325,13 @@ func (c *Client) downloadDirectory(ctx context.Context, t providers.Track, progr
 		Result *bool  `json:"result"`
 	}
 	if json.Unmarshal(raw, &result) == nil && (result.Error != "" || result.ErrID != "" || (result.Result != nil && !*result.Result)) {
+		detail := sanitizeQueueError(result.Error)
+		if detail == "" {
+			detail = sanitizeQueueError(result.ErrID)
+		}
+		if detail != "" {
+			return nil, fmt.Errorf("deemix: submission failed: %s", detail)
+		}
 		return nil, errors.New("deemix: submission failed; check CantStream/FLAC availability")
 	}
 	interval := c.PollInterval
