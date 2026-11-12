@@ -211,6 +211,8 @@ EOF
 # Engine patch constructor stays inert. Keep that minimal activator for network
 # diagnostics on subsequent fallback boots; inject nothing into stock Engine.
 # Wrap the actual Engine invocation, including retries inside the vendor loop.
+# The stock script also forces Gigabit Ethernet down to 100 Mbps on every Engine
+# start; first-generation images set 1000 (debloat patch), so do these (BH-GC2-6).
 if [ -x "$bin_dir/engine-ui-guard" ] && [ -f /usr/Engine/Scripts/engine ]; then
     script_stage=$(mktemp /run/sc5000-engine-script.XXXXXX)
     sed -E \
@@ -218,6 +220,7 @@ if [ -x "$bin_dir/engine-ui-guard" ] && [ -f /usr/Engine/Scripts/engine ]; then
         -e "s|^([[:space:]]*(exec[[:space:]]+)?)/usr/sbin/az01-update([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\3|" \
         -e "s|^([[:space:]]*(exec[[:space:]]+)?)az01-update([[:space:]]+--erase-data([[:space:]].*)?)\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\3|" \
         -e "s|^([[:space:]]*(exec[[:space:]]+)?)/usr/bin/planck-remote-screen([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/bin/planck-remote-screen\\3|" \
+        -e "s|^([[:space:]]*)/usr/bin/az01-ethernet-speed 100([[:space:]]*)\$|\\1/usr/bin/az01-ethernet-speed 1000\\2|" \
         /usr/Engine/Scripts/engine > "$script_stage"
     chmod 755 "$script_stage"
     if grep -Fq "$bin_dir/engine-ui-guard launch /usr/Engine/Engine" "$script_stage"; then
