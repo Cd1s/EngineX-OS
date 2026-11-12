@@ -55,7 +55,12 @@ func (r tickReader) Read(p []byte) (int, error) {
 // Oversized tracks fail explicitly rather than exhausting the player's RAM.
 const MaxDecodedSamples = 32 * 1024 * 1024
 
-func decodeFile(path string, ticker Ticker) (*Audio, error) {
+func decodeFile(path string, ticker Ticker) (audio *Audio, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			audio, err = nil, fmt.Errorf("analyzer: malformed audio: %v", p)
+		}
+	}()
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -89,7 +94,12 @@ const (
 
 // DecodeWAV 解码 PCM 8/16/24/32 bit 与 IEEE float 32/64 bit 的 WAV，
 // 包括 WAVEFORMATEXTENSIBLE 头（子格式 GUID 的前两字节即格式码）。
-func DecodeWAV(r io.Reader) (*Audio, error) {
+func DecodeWAV(r io.Reader) (audio *Audio, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			audio, err = nil, fmt.Errorf("analyzer: wav: malformed stream: %v", p)
+		}
+	}()
 	var riff [12]byte
 	if _, err := io.ReadFull(r, riff[:]); err != nil {
 		return nil, err
@@ -221,7 +231,12 @@ func decodeWAVData(r io.Reader, format, channels, sampleRate, bits int) (*Audio,
 }
 
 // DecodeFLAC 用纯 Go 的 mewkiz/flac 解码。
-func DecodeFLAC(r io.Reader) (*Audio, error) {
+func DecodeFLAC(r io.Reader) (audio *Audio, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			audio, err = nil, fmt.Errorf("analyzer: flac: malformed stream: %v", p)
+		}
+	}()
 	br := bufio.NewReader(r)
 	if err := audioheader.SkipID3(br); err != nil {
 		return nil, err
@@ -287,7 +302,12 @@ func DecodeFLAC(r io.Reader) (*Audio, error) {
 }
 
 // DecodeMP3 用纯 Go 的 go-mp3 解码（Deemix 回退到 MP3 320k 时使用）。
-func DecodeMP3(r io.Reader) (*Audio, error) {
+func DecodeMP3(r io.Reader) (audio *Audio, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			audio, err = nil, fmt.Errorf("analyzer: mp3: malformed stream: %v", p)
+		}
+	}()
 	// go-mp3 不跳过 ID3v2 标签，这里手动跳过。
 	br := bufio.NewReader(r)
 	if err := audioheader.SkipID3(br); err != nil {

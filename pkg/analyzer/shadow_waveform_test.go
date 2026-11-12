@@ -441,6 +441,41 @@ func TestShadowWaveformFileSniffsID3FLACAndDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestShadowWaveformMP3AcceptsAPEv2Footer(t *testing.T) {
+	base, samples := shadowTestMP3(44100)
+	wantBins := (samples*105 + 44100 - 1) / 44100
+
+	// Build a valid APEv2 tag (header + 1 item + footer), plus optional ID3v1 TAG.
+	item := append([]byte{4, 0, 0, 0, 0, 0, 0, 0}, []byte("GAIN\x00test")...)
+	tagSize := uint32(len(item) + 32)
+	var apeHdr [32]byte
+	copy(apeHdr[:8], "APETAGEX")
+	binary.LittleEndian.PutUint32(apeHdr[8:12], 2000)
+	binary.LittleEndian.PutUint32(apeHdr[12:16], tagSize)
+	binary.LittleEndian.PutUint32(apeHdr[16:20], 1)
+	binary.LittleEndian.PutUint32(apeHdr[20:24], 0x80000000|0x20000000)
+	var apeFtr [32]byte
+	copy(apeFtr[:8], "APETAGEX")
+	binary.LittleEndian.PutUint32(apeFtr[8:12], 2000)
+	binary.LittleEndian.PutUint32(apeFtr[12:16], tagSize)
+	binary.LittleEndian.PutUint32(apeFtr[16:20], 1)
+	binary.LittleEndian.PutUint32(apeFtr[20:24], 0x80000000)
+
+	withAPE := append(append(append(bytes.Clone(base), apeHdr[:]...), item...), apeFtr[:]...)
+	e := shadowTestEnvelope(t, withAPE, [3]float64{})
+	if e.SampleRate != 44100 || len(e.Bands) != wantBins*3 {
+		t.Fatalf("APEv2 MP3 envelope mismatch: rate=%d len=%d", e.SampleRate, len(e.Bands))
+	}
+
+	id3v1 := make([]byte, 128)
+	copy(id3v1, "TAG")
+	withAPEAndID3v1 := append(bytes.Clone(withAPE), id3v1...)
+	e2 := shadowTestEnvelope(t, withAPEAndID3v1, [3]float64{})
+	if e2.SampleRate != 44100 || len(e2.Bands) != wantBins*3 {
+		t.Fatalf("APEv2+ID3v1 MP3 envelope mismatch: rate=%d len=%d", e2.SampleRate, len(e2.Bands))
+	}
+}
+
 func FuzzShadowWaveformReader(f *testing.F) {
 	f.Add([]byte("not an audio file"))
 	f.Add(floatWAV(32, 1, []float64{0, .5, -.5}))
