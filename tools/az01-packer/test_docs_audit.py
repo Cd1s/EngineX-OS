@@ -84,6 +84,16 @@ class DocsAuditBH2A10Test(unittest.TestCase):
         self.assertIn("Link Beat Jump / Loop Size Controls", cjs)
         self.assertIn("stock Smart Loops", cjs)
 
+    def test_installation_manual_linux_fastboot_and_firewall_bh2_a10_12(self):
+        manual = (REPO_ROOT / "docs/manual/02-installation-and-ota.md").read_text(encoding="utf-8")
+        self.assertIn("android-tools", manual)
+        self.assertIn("pacman -S android-tools", manual)
+        self.assertIn("11224", manual)
+        self.assertIn("ufw", manual)
+        self.assertIn("fastboot is not installed", manual)
+        self.assertNotIn("处于原厂未解锁状态，需要 fastboot 但没找到", manual)
+
+
 
 
 
