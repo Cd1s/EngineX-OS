@@ -511,6 +511,18 @@ SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre
 rm -f "$SC5000_UI_DIR"/*; SERVICE_RESULT=success sh "$GUARD" stop; sh "$GUARD" pre   # this boot's own clean restart
 [[ ! -e $SC5000_UI_DIR/safe-mode && $(cat "$SC5000_UI_DIR/boot-count") == 1 ]] || fail 'a clean restart after pre must still reset the state'
 ok 'a second-generation boot keeps the last boot crash and power-cut evidence across the stock Engine handover (BH-F52-4)'
+# BH-GF3-6: the UAC2 gadget offers the computer the sample rate chosen in the Web Console (it was
+# always 48000), also when the gadget already exists; an unsupported rate is refused.
+USB_AUDIO=$ROOT/rootfs-overlay/usr/sbin/sc5000-usb-audio
+mkdir -p "$TMP/configfs/usb_gadget" "$TMP/udc/fe800000.usb"
+usb_audio() { SC5000_CONFIGFS=$TMP/configfs SC5000_UDC_CLASS=$TMP/udc sh "$USB_AUDIO" "$@" >/dev/null; }
+srate=$TMP/configfs/usb_gadget/enginex_uac2/functions/uac2.usb0/c_srate
+usb_audio enable-uac2 96000; [[ $(cat "$srate") == 96000 && $(cat "$TMP/configfs/usb_gadget/enginex_uac2/UDC") == fe800000.usb ]] ||
+    fail 'enable-uac2 must set the chosen sample rate and bind the gadget'
+usb_audio enable-uac2 44100; [[ $(cat "$srate") == 44100 ]] || fail 'enable-uac2 must change the rate of an existing gadget'
+usb_audio enable-uac2; [[ $(cat "$srate") == 48000 ]] || fail 'enable-uac2 without a rate keeps the 48000 default'
+! usb_audio enable-uac2 12345 2>/dev/null || fail 'enable-uac2 must refuse an unsupported rate'
+ok 'the USB-B audio gadget offers the sample rate chosen in the Web Console (BH-GF3-6)'
 SERVICE_RESULT=success sh "$GUARD" stop; mkdir -p "$SC5000_ENGINE_DATA_DIR/.cache/qml"; sh "$GUARD" pre
 [[ -d $SC5000_ENGINE_DATA_DIR/.cache/qml ]] || fail 'a clean stop must keep the QML disk cache'
 # #140: the healthy timer leaves the token when Engine is gone, so the next pre counts a crash.
