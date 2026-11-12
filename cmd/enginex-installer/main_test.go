@@ -1347,6 +1347,19 @@ func TestNoDeckPrintsFirstGenGuide(t *testing.T) {
 	if strings.Count(out, "方式 B（USB 线）") != 2 {
 		t.Error("expected the guide both at start-up and when no deck is found")
 	}
+	// BH2-A7-21: the second-generation line named the RANE PERFORMER, a controller without Engine OS
+	// that this tool cannot install to, and left out two models it does install to.
+	for _, want := range []string{"SC LIVE 2/4", "Mixstream Pro+/Go", "PRIME 4+", "PRIME GO+", "PRIME 4 G2", "SYSTEM ONE"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the 2nd-gen list of the guide is missing %q", want)
+		}
+	}
+	if strings.Contains(out, "PERFORMER") {
+		t.Error("the guide lists the RANE PERFORMER, which is not an Engine OS deck")
+	}
+	if len(gen2Boards) != 8 {
+		t.Errorf("gen2Boards has %d models: the 2nd-gen list of the guide names 8", len(gen2Boards))
+	}
 }
 
 // #116: detect Rockchip USB loaders: 2207:350b (RK3588 RMZ2/JP24) and 2207:320a (RK3288).

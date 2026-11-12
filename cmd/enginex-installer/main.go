@@ -187,7 +187,7 @@ const firstGenGuide = `=========================================================
     （进入电脑更新模式，USB ID 15a2:007d），再接 USB-B 线运行本工具。
     First tap Settings -> Update -> Reboot to Computer Update Mode on the deck
     (USB ID 15a2:007d), then connect the USB-B cable and run this tool.
- [二代机 / 2nd-gen: SC LIVE 2/4, Mixstream Pro+/Go, PRIME 4+, RANE PERFORMER, SYSTEM ONE]
+ [二代机 / 2nd-gen: SC LIVE 2/4, Mixstream Pro+/Go, PRIME 4+, PRIME GO+, PRIME 4 G2, SYSTEM ONE]
   碟机正常开机，并与电脑在同一 Wi-Fi / 局域网，本工具会自动发现并一键安装。
   Keep the deck powered on and on the same Wi-Fi / LAN as this computer; it is found and installed automatically.
 ==================================================================`
