@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Cd1s/EngineX-OS/pkg/analyzer"
@@ -670,6 +671,16 @@ func (j *Jobs) fromBeatport(ctx context.Context, t providers.Track) (*deemixclie
 	return j.saveBeatportStream(ctx, b, name, t.ID)
 }
 
+var chmodJobFile = os.Chmod
+
+func chmodStreamPerm(path string, mode os.FileMode) error {
+	err := chmodJobFile(path, mode)
+	if err == nil || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP) || errors.Is(err, syscall.ENOSYS) {
+		return nil
+	}
+	return err
+}
+
 // saveBeatportStream stores the track's stream as name.mp4.
 func (j *Jobs) saveBeatportStream(ctx context.Context, b *providers.Beatport, name, id string) (*deemixclient.Download, error) {
 	dir := j.p.Deemix.DownloadDir
@@ -687,13 +698,16 @@ func (j *Jobs) saveBeatportStream(ctx context.Context, b *providers.Beatport, na
 		err = f.Close()
 	}
 	if err == nil {
-		err = os.Chmod(f.Name(), 0o644)
+		err = chmodStreamPerm(f.Name(), 0o644)
 	}
 	if err == nil {
 		err = os.Rename(f.Name(), final)
 	}
 	if err != nil {
 		return nil, err
+	}
+	for _, ext := range []string{".flac", ".mp3"} {
+		_ = os.Remove(filepath.Join(dir, name+ext))
 	}
 	j.p.Deemix.Trim(final)
 	return &deemixclient.Download{Path: final, Quality: deemixclient.Quality{Label: "[AAC]", Format: "mp4"}}, nil
