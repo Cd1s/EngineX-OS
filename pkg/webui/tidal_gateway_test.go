@@ -118,7 +118,7 @@ func TestTidalGatewayLoginAndHint(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
-		if got := titles(); len(got) != 1 || !strings.Contains(got[0], "sc5000.lan:8080") {
+		if got := titles(); len(got) != 1 || !strings.Contains(got[0], lanHost()+":8080") || strings.Contains(got[0], "sc5000.lan") {
 			t.Fatalf("%s titles=%q", scope, got)
 		}
 	}
@@ -186,7 +186,7 @@ func TestTidalGatewayPlaylistStreamAndImport(t *testing.T) {
 			Item tidalPlaylist `json:"item"`
 		}
 		json.Unmarshal(raw, &p)
-		if p.Item.UUID != p.UUID || strings.Contains(p.Title, "sc5000.lan") {
+		if p.Item.UUID != p.UUID || strings.Contains(p.Title, "请登录") {
 			t.Fatalf("favorite item %s", raw)
 		}
 		if p.Title == "Friend" {
