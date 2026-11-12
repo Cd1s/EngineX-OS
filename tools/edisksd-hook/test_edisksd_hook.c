@@ -18,6 +18,8 @@ static const char *test_rb_bridge_path(void);
 #define HFS_READONLY test_hfs_readonly
 #define VOLUME_IDENTITY test_volume_identity
 #define RB_BRIDGE_PATH test_rb_bridge_path
+static char test_guardian[PATH_MAX];
+#define GUARDIAN_PATH test_guardian
 // The "real" libmount mount: a bind of test_disk onto the target.
 struct libmnt_context;
 static int test_real_mount(struct libmnt_context *c);
@@ -629,12 +631,61 @@ static void test_hfs_view_copies_only_metadata(const char *root) {
     snprintf(test_library,sizeof test_library,"%s",saved_lib);snprintf(test_legacy_library,sizeof test_legacy_library,"%s",saved_legacy);
     puts("REAL PRIVATE NAMESPACE BH-O55-1: an HFS+ view copies only Database2, shows Engine Library/Music read-only from the stick, ejects and rolls back with the nested binds, drops an older build's full copy, keeps two generations per stick and a free-space reserve: PASS");
 }
+// BH-F52-1: engine-guardian healed a plain Engine stick's m.db/hm.db after the
+// visible mount, while Engine opened them (lock contention, a hot journal left
+// on the stick when killed). The heal runs in the private pre-mount now, once.
+static void test_heal_before_visible(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char data[PATH_MAX],disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],log[PATH_MAX],pid[32],script[PATH_MAX*3],expect[PATH_MAX+64];
+    join(data,root,"heal-data");join(p,data,"enginex");assert(!make_dirs(p));
+    join(test_library,p,"hfs-libraries");test_legacy_library[0]=0;
+    join(log,root,"heal-guardian.log");join(test_guardian,root,"heal-guardian");
+    snprintf(pid,sizeof pid,"%d",(int)getpid());assert(!setenv("EDISKSD_TEST_PID",pid,1));
+    snprintf(script,sizeof script,"#!/bin/sh\nif grep -q \" $2 \" /proc/$EDISKSD_TEST_PID/mountinfo; then v=visible; else v=private; fi\n"
+             "echo \"$v $*\" >> '%s'\necho healed > \"$2/Engine Library/Database2/m.db\"\n",log);
+    write_file(test_guardian,script);assert(!chmod(test_guardian,0700));
+    // A writable Engine stick: healed once, before Engine can see it.
+    join(disk,root,"heal-fat");join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"engine library\n");
+    join(target,MEDIA_ROOT,"HEAL");assert(!make_dirs(target));
+    snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
+    struct libmnt_context c={.target=target,.source="/dev/sdu1"};
+    assert(!mnt_context_mount(&c)&&c.status==1);
+    snprintf(expect,sizeof expect,"private --heal-mount %s --data-only\n",target);expect_file(log,expect);
+    join(p,target,"Engine Library/Database2/m.db");expect_file(p,"healed\n");
+    assert(count_mounts(target)==1);assert(!umount2(target,UMOUNT_NOFOLLOW));unlink(log);
+    // A stick without an Engine database is not healed.
+    char plain[PATH_MAX];join(plain,root,"heal-plain");join(p,plain,"Music");assert(!make_dirs(p));
+    snprintf(test_disk,sizeof test_disk,"%s",plain);c.status=0;
+    assert(!mnt_context_mount(&c)&&c.status==1);assert(access(log,F_OK)==-1);assert(!umount2(target,UMOUNT_NOFOLLOW));
+    // Read-only HFS+: the heal works on the view's copy, before the visible mount; the stick is untouched.
+    char hfs[PATH_MAX];join(hfs,root,"heal-hfs");join(p,hfs,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,hfs,"Engine Library/Database2/m.db");write_file(p,"made on the Mac\n");
+    snprintf(test_disk,sizeof test_disk,"%s",hfs);test_disk_ro=1;snprintf(test_hfs_target,sizeof test_hfs_target,"%s",target);c.status=0;
+    unsigned views_before=count_views();
+    assert(!mnt_context_mount(&c)&&c.status==1);expect_file(log,expect);
+    join(p,target,"Engine Library/Database2/m.db");expect_file(p,"healed\n");
+    join(p,hfs,"Engine Library/Database2/m.db");expect_file(p,"made on the Mac\n");
+    assert(count_views()==views_before+1);
+    assert(!unmount_dispatch(&c,real_unmount));test_hfs_target[0]=0;test_disk_ro=0;unlink(log);
+    // A heal that runs out of its whole window: killed once, then skipped, never after the visible mount.
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"$*\" >> '%s'\nsleep 5\n",log);write_file(test_guardian,script);
+    snprintf(test_disk,sizeof test_disk,"%s",disk);
+    snprintf(expect,sizeof expect,"--heal-mount %s --data-only\n",target);
+    for(int i=0;i<2;i++) {
+        int64_t t0=now_ms();c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);
+        assert(now_ms()-t0<(i?1000:3500));expect_file(log,expect);
+        assert(!umount2(target,UMOUNT_NOFOLLOW));
+    }
+    unlink(log);unsetenv("EDISKSD_TEST_PID");
+    puts("REAL PRIVATE NAMESPACE BH-F52-1: an Engine stick's database is healed once in the private pre-mount (FAT and read-only HFS+), never after the visible mount, a stick without one not at all, a too-slow heal skipped on the next insert: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_monitor_sees_plain_device_mount(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
