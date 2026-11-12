@@ -3,8 +3,12 @@ package rekordbox
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -45,5 +49,59 @@ WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<19999) INSE
 	}
 	if cues == 0 {
 		t.Fatal("no cues imported")
+	}
+}
+
+// r2 review: the plaintext copy went to /tmp (RAM tmpfs on the decks), had no
+// space check, and a copy left by a SIGKILLed rb-bridge stayed forever.
+func TestOneLibraryPlaintextCopyGoesToDataAndIsSwept(t *testing.T) {
+	if MaxSQLCipherBytes != 256<<20 {
+		t.Fatalf("MaxSQLCipherBytes = %d", MaxSQLCipherBytes)
+	}
+	dir := filepath.Join(t.TempDir(), "enginex", "tmp")
+	oldDir, oldFree := oneLibraryTempDir, freeBytes
+	t.Cleanup(func() { oneLibraryTempDir, freeBytes = oldDir, oldFree })
+	oneLibraryTempDir = func() string { return dir }
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, fmt.Sprintf("rb-onelibrary-%d-1.db", dead.Process.Pid))
+	live := filepath.Join(dir, "rb-onelibrary-1-2.db") // PID 1 is always alive
+	other := filepath.Join(dir, "unrelated.db")
+	for _, p := range []string{stale, live, other} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := "testdata/sqlcipher4_onelibrary.db"
+	if _, err := ReadSQLite(context.Background(), src, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("stale plaintext copy of a dead rb-bridge not removed")
+	}
+	for _, p := range []string{live, other} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s removed: %v", p, err)
+		}
+	}
+	if st, err := os.Stat(dir); err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("temp dir mode: %v %v", st.Mode(), err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 2 {
+		t.Fatalf("plaintext copy left behind: %v", entries)
+	}
+	// Not enough room on /data for the copy: refuse before writing anything.
+	freeBytes = func(string) (uint64, error) { return 64 << 20, nil }
+	if _, err := ReadSQLite(context.Background(), src, nil); err == nil || !strings.Contains(err.Error(), "needed") {
+		t.Fatalf("decrypted without free space: %v", err)
+	}
+	if entries, _ = os.ReadDir(dir); len(entries) != 2 {
+		t.Fatalf("file written despite the space check: %v", entries)
 	}
 }
