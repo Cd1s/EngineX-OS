@@ -183,3 +183,43 @@ func TestMP3QualityPolicy(t *testing.T) {
 		t.Fatal("explicitly allowed fallback unavailable")
 	}
 }
+
+func TestDownloadTrackUsesFallbackWhenPrimaryTrackTokenEmpty(t *testing.T) {
+	plain := append([]byte("fLaC"), bytes.Repeat([]byte("0123456789abcdef"), 256)...)
+	encrypted := append([]byte(nil), plain...)
+	bf, _ := blowfish.NewCipher(blowfishKey("999999"))
+	for i := 0; i*2048+2048 <= len(encrypted); i++ {
+		if i%3 == 0 {
+			b := encrypted[i*2048 : i*2048+2048]
+			cipher.NewCBCEncrypter(bf, []byte{0, 1, 2, 3, 4, 5, 6, 7}).CryptBlocks(b, b)
+		}
+	}
+	s := &Session{
+		apiToken:     "csrf",
+		licenseToken: "license",
+		Lossless:     true,
+		hc: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			var body string
+			switch r.URL.Host {
+			case "www.deezer.com":
+				body = `{"results":{"SNG_ID":"111111","TRACK_TOKEN":"","FALLBACK":{"SNG_ID":"999999","TRACK_TOKEN":"fallback-token"}}}`
+			case "media.deezer.com":
+				body = `{"data":[{"media":[{"format":"FLAC","sources":[{"url":"https://cdn.deezer.com/audio"}]}]}]}`
+			case "cdn.deezer.com":
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(encrypted)), ContentLength: int64(len(encrypted)), Header: make(http.Header)}, nil
+			default:
+				t.Fatalf("unexpected host: %s", r.URL.Host)
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})},
+	}
+	dst := filepath.Join(t.TempDir(), "fallback.part")
+	format, err := s.DownloadTrack(context.Background(), "111111", dst, DownloadOptions{Bitrate: 9, AllowLossy: true})
+	if err != nil || format != "flac" {
+		t.Fatalf("DownloadTrack failed to use FALLBACK when primary TRACK_TOKEN is empty: format=%q err=%v", format, err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || !bytes.Equal(got, plain) {
+		t.Fatal("fallback track decrypted payload mismatch")
+	}
+}
