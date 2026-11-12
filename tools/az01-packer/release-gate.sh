@@ -343,8 +343,18 @@ SH
         curl -sf http://127.0.0.1:6595/healthz > "$W/boot2-deemixd.json" || :
         check "boot2: sc5000-deemixd /healthz" json "$W/boot2-deemixd.json" "j.get('ok') is True"
     fi
+    if [ "$name" = new ]; then
+        # This image must not be offered the release it was built for (a same-version
+        # re-release has the tag v<version>-rN, which is newer than <version> alone).
+        # Another repository name is another cache entry; the mock answers it with that release.
+        echo 'github_repo=Cd1s/EngineX-OS-installed' >> "$W/data/sc5000-custom/ui/settings.conf"
+        curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/new-update-installed.json" || :
+        sed -i '/^github_repo=Cd1s\/EngineX-OS-installed$/d' "$W/data/sc5000-custom/ui/settings.conf"
+        check "new: the installed release $RELTAG is not offered again" json "$W/new-update-installed.json" \
+            "j.get('currentVersion') == '$NEWV' and j.get('latestVersion') == '$RELTAG' and j.get('updateAvailable') is False"
+    fi
     # The online update, exactly as Settings -> Update does it.
-    local cur=$OLDV tag=v$NEWV asset
+    local cur=$OLDV tag=$RELTAG asset
     [ "$name" = old ] || { cur=$NEWV; tag=v$NEXTV; }
     asset=$(cat "$W/mock/asset-$name")
     curl -sf http://127.0.0.1:8080/v1/sc5000/update > "$W/$name-update.json" || :
@@ -402,6 +412,7 @@ inner() {
 
     local R=$W/new interp f
     check "image: /etc/sc5000/version.txt is $NEWV" grep -qx "$NEWV" "$R/etc/sc5000/version.txt"
+    check "image: /etc/sc5000/release-tag is $RELTAG" grep -qx "$RELTAG" "$R/etc/sc5000/release-tag"
     if python3 -I "$REPO/tools/az01-packer/rootfs_audit.py" "$R" --overlay "$REPO/rootfs-overlay" \
         $(for c in $SUITE_CMDS; do printf -- '--require-cmd %s ' "$c"; done) > "$W/audit.txt" 2>&1
     then pass "image: unit/command/tool audit ($(tail -1 "$W/audit.txt"))"
@@ -472,7 +483,10 @@ PREFIX=${BASH_REMATCH[1]} MODEL=${BASH_REMATCH[2]} PRODUCT=${BASH_REMATCH[3]}
 OLDV=${BASH_REMATCH[1]}
 NEXTV=${NEWV%.*}.$(( ${NEWV##*.} + 1 ))
 COMPAT=inmusic,$(echo "$PRODUCT" | tr 'A-Z' 'a-z')
-export W REPO OLDV NEWV NEXTV PREFIX PRODUCT COMPAT QEMU_INTERP NEW_IMG
+# GATE_RELEASE_TAG: the tag of the release the new image is published under. A same-version
+# re-release (old and new image both <version>) is published as v<version>-rN.
+RELTAG=${GATE_RELEASE_TAG:-v$NEWV}
+export W REPO OLDV NEWV NEXTV RELTAG PREFIX PRODUCT COMPAT QEMU_INTERP NEW_IMG
 export LANG_PACK=${GATE_LANG:-zh-Hans} ENGINE_START=${GATE_ENGINE_START:-300} ENGINE_SECONDS=${GATE_ENGINE_SECONDS:-90}
 export BOOT2_SECONDS=${GATE_BOOT2_SECONDS:-30}
 # #206: all-in-ones also get the 8 recording-with-streaming sites; players (no recorder) do not.
@@ -480,7 +494,7 @@ case $PRODUCT in JP07|JP08|JP13|JP14) applied=20 ;; *) applied=28 ;; esac
 export UPDATE_TIMEOUT=${GATE_UPDATE_TIMEOUT:-900} EXPECT_APPLIED=${GATE_EXPECT_APPLIED:-$applied} EXPECT_DSP=${GATE_EXPECT_DSP:-21}
 mkdir -p "$W/bin" "$W/tls" "$W/mock/assets"
 : > "$W/results.txt"
-echo "gate: $OLD_NAME -> $NEW_NAME (next $NEXTV), work $W"
+echo "gate: $OLD_NAME -> $NEW_NAME as $RELTAG (next $NEXTV), work $W"
 
 for side in old new; do
     img=$OLD_IMG; [ $side = old ] || img=$NEW_IMG
@@ -511,7 +525,7 @@ release() { # <file> <tag> <asset name> <image>: GitHub's releases/latest answer
     printf '{"tag_name":"%s","html_url":"https://github.com/Cd1s/EngineX-OS/releases/tag/%s","assets":[{"name":"%s","browser_download_url":"https://github.com/Cd1s/EngineX-OS/releases/download/%s/%s"}]}\n' \
         "$2" "$2" "$3" "$2" "$3" > "$1"
 }
-release "$W/mock/release-old.json" "v$NEWV" "$NEW_NAME" "$NEW_IMG"
+release "$W/mock/release-old.json" "$RELTAG" "$NEW_NAME" "$NEW_IMG"
 echo "$NEW_NAME" > "$W/mock/asset-old"
 cp "$W/mock/release-old.json" "$W/mock/release.json"
 NEXT_NAME=$PREFIX-$NEXTV-EngineX-OS-$MODEL-$PRODUCT-Update.img
@@ -524,7 +538,8 @@ root = sys.argv[1]
 class H(http.server.BaseHTTPRequestHandler):
     def reply(self, body):
         if self.path.endswith('/releases/latest'):
-            data = open(os.path.join(root, 'release.json'), 'rb').read()
+            installed = '/repos/Cd1s/EngineX-OS-installed/' in self.path  # the release the new image is
+            data = open(os.path.join(root, 'release-old.json' if installed else 'release.json'), 'rb').read()
             self.send_response(200); self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(data))); self.end_headers()
             if body: self.wfile.write(data)

@@ -585,3 +585,67 @@ func TestApplyOnlineUpdateGen2PreloadCompatibility(t *testing.T) {
 		}
 	})
 }
+
+// A same-version re-release keeps version.txt and is tagged v<version>-rN. Decks on the
+// first build of that version, and on older versions, are offered it; a deck that carries
+// its tag is offered only what comes after. The first generation reads the tag from the
+// image, the second from the installed bundle (data bundle or bundle-carrying *-Update.img).
+func TestSameVersionReRelease(t *testing.T) {
+	var tag string
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"tag_name":%q,"html_url":"https://x/r","assets":[
+			{"name":"SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img","browser_download_url":"https://example.invalid/gen1.img"},
+			{"name":"SCLIVE4-5.3.0.4-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img","browser_download_url":"https://example.invalid/gen2.img"},
+			{"name":"SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz","browser_download_url":"https://example.invalid/gen2.tar.gz"}]}`, tag)
+	}))
+	defer gh.Close()
+	defer func(c, i string) { deviceCompatiblePath, imageReleaseTagFile = c, i }(deviceCompatiblePath, imageReleaseTagFile)
+	const gen1, gen2 = "inmusic,jp07", "inmusic,jp21"
+	for _, c := range []struct {
+		name, compatible, version, imageTag, bundleTag string
+		locked                                         bool
+		release                                        string
+		want                                           bool
+		asset                                          string
+	}{
+		{"gen1 5.3.0.3", gen1, "5.3.0.3", "", "", false, "v5.3.0.4-r2", true, "gen1.img"},
+		{"gen1 first 5.3.0.4 build", gen1, "5.3.0.4", "", "", false, "v5.3.0.4-r2", true, "gen1.img"},
+		{"gen1 r2 is not offered r2", gen1, "5.3.0.4", "v5.3.0.4-r2", "", false, "v5.3.0.4-r2", false, ""},
+		{"gen1 r2 is not offered the first build", gen1, "5.3.0.4", "v5.3.0.4-r2", "", false, "v5.3.0.4", false, ""},
+		{"gen1 r2 is offered r3", gen1, "5.3.0.4", "v5.3.0.4-r2", "", false, "v5.3.0.4-r3", true, "gen1.img"},
+		{"gen1 r2 is offered 5.3.0.5", gen1, "5.3.0.4", "v5.3.0.4-r2", "", false, "v5.3.0.5", true, "gen1.img"},
+		{"gen1 plain tag of a new version", gen1, "5.3.0.5", "v5.3.0.5", "", false, "v5.3.0.5", false, ""},
+		{"gen2 5.3.0.3", gen2, "5.3.0.3", "", "", false, "v5.3.0.4-r2", true, "gen2.img"},
+		{"gen2 first 5.3.0.4 build", gen2, "5.3.0.4", "", "", false, "v5.3.0.4-r2", true, "gen2.img"},
+		{"gen2 r2 is not offered r2", gen2, "5.3.0.4", "", "v5.3.0.4-r2", false, "v5.3.0.4-r2", false, ""},
+		{"gen2 r2 is offered r3", gen2, "5.3.0.4", "", "v5.3.0.4-r2", false, "v5.3.0.4-r3", true, "gen2.img"},
+		{"gen2 r2 is offered 5.3.0.5", gen2, "5.3.0.4", "", "v5.3.0.4-r2", false, "v5.3.0.5", true, "gen2.img"},
+		{"gen2 locked r2 is not offered r2", gen2, "5.3.0.4", "", "v5.3.0.4-r2", true, "v5.3.0.4-r2", false, ""},
+		{"gen2 locked r2 takes the r3 bundle", gen2, "5.3.0.4", "", "v5.3.0.4-r2", true, "v5.3.0.4-r3", true, "gen2.tar.gz"},
+		{"a tag left by another version is ignored", gen2, "5.3.0.3", "", "v5.3.0.4-r2", false, "v5.3.0.4-r2", true, "gen2.img"},
+	} {
+		dir := t.TempDir()
+		custom := filepath.Join(dir, "enginex")
+		os.MkdirAll(filepath.Join(custom, "bundle"), 0o700)
+		os.WriteFile(filepath.Join(custom, "version.txt"), []byte(c.version+"\n"), 0o644)
+		deviceCompatiblePath = filepath.Join(dir, "compatible")
+		os.WriteFile(deviceCompatiblePath, []byte(c.compatible+"\x00"), 0o644)
+		imageReleaseTagFile = filepath.Join(dir, "image-release-tag")
+		if c.imageTag != "" {
+			os.WriteFile(imageReleaseTagFile, []byte(c.imageTag+"\n"), 0o644)
+		}
+		if c.bundleTag != "" {
+			os.WriteFile(filepath.Join(custom, "bundle", releaseTagName), []byte(c.bundleTag+"\n"), 0o644)
+		}
+		if c.locked {
+			os.WriteFile(filepath.Join(custom, "gen2-locked"), nil, 0o644)
+		}
+		tag = c.release
+		s := New(Config{AccessToken: "c", UIDir: t.TempDir(), StateDir: dir, GitHubURL: gh.URL, VersionFile: filepath.Join(custom, "version.txt")}, nil)
+		v := getUpdate(s, "")
+		if v.Error != "" || v.Current != c.version || v.Latest != c.release || v.UpdateAvailable != c.want ||
+			(c.want && v.DownloadURL != "https://example.invalid/"+c.asset) {
+			t.Errorf("%s: %+v", c.name, v)
+		}
+	}
+}
