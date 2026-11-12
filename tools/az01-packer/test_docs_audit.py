@@ -72,6 +72,19 @@ class DocsAuditBH2A10Test(unittest.TestCase):
         self.assertIn("visible: root.scHasMixer", active)
         self.assertIn("Fader Echo", active)
 
+    def test_content_js_smart_loops_is_stock_bh2_a10_8(self):
+        cjs = (REPO_ROOT / "docs/site/content.js").read_text(encoding="utf-8")
+        packs = (REPO_ROOT / "tools/ui-mod/build_packs.py").read_text(encoding="utf-8")
+        self.assertNotIn("SmartLoops.qml", packs)
+        self.assertIn("LinkBeatJumpLoopSize.qml", packs)
+        self.assertNotIn("解锁原厂「联动节拍跳跃与 Loop 长度」与智能 Loop", cjs)
+        self.assertNotIn("解鎖原廠「連動節拍跳躍與 Loop 長度」與智慧 Loop", cjs)
+        self.assertNotIn("unlocked stock Link Beat Jump / Loop Size Controls and Smart Loops", cjs)
+        self.assertIn("24-profile-cues-loops.png", cjs)
+        self.assertIn("Link Beat Jump / Loop Size Controls", cjs)
+        self.assertIn("stock Smart Loops", cjs)
+
+
 
 
 if __name__ == "__main__":
