@@ -312,6 +312,7 @@ type shadowState struct {
 	cdj           map[byte]cdjSeen // per CDJ player number: its last edges and jumps
 	own           []deckState
 	ownMaster     bool
+	ownMasterDeck int
 	ownAt         time.Time          // the newest post or alive ping
 	ownExport     prolink.ExportDeck // what the newest post told the Pro DJ Link export
 	ownPostAt     int64              // the QML's clock on the newest post
@@ -544,8 +545,12 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	// Pro DJ Link players see these decks in our status: playing, tempo and
 	// master. Taking master asks a CDJ that still holds it to hand it over.
 	ex := prolink.ExportDeck{At: time.Now()}
+	masterDeck := 0
 	for _, d := range own {
 		master := d.Master != nil && *d.Master
+		if master {
+			masterDeck = d.Deck
+		}
 		if master || (d.Playing && !ex.Playing && !ex.Master) {
 			ex.BPM, ex.Pitch, ex.Beat = d.BPM, d.Pitch, d.Beat
 		}
@@ -565,8 +570,11 @@ func (s *Server) decksPost(w http.ResponseWriter, r *http.Request) {
 	s.shadow.ownPostAt = postAt
 	s.shadow.own, s.shadow.ownAt, s.shadow.ownExport = own, time.Now(), ex
 	s.shadow.dbg.event("post", map[string]any{"decks": slimDecks(own)})
-	claimed := ex.Master && !s.shadow.ownMaster
-	s.shadow.ownMaster = ex.Master
+	// Master on another of our decks is a claim too (#217): a console's Line In
+	// CDJ has no Engine deck that could take master from ours, so once the CDJ
+	// took the link's master, "none of ours to one of ours" never happened again.
+	claimed := ex.Master && (!s.shadow.ownMaster || masterDeck != s.shadow.ownMasterDeck)
+	s.shadow.ownMaster, s.shadow.ownMasterDeck = ex.Master, masterDeck
 	s.shadow.mu.Unlock()
 	if s.prolinkExport != nil {
 		s.prolinkExport.SetDeck(ex)

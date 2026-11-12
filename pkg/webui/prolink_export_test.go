@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -142,4 +143,51 @@ func TestProlinkExportStartsWhenUSBArrives(t *testing.T) {
 	if !ui.prolinkExport.Status().Enabled {
 		t.Fatal("export did not start once the USB was mounted")
 	}
+}
+
+// #217: a console's Line In CDJ has no Engine deck that takes master from ours,
+// so Engine always has one of our decks as master. MASTER pressed on another of
+// our decks asks the CDJ for the link's master again.
+func TestLinkMasterAskedAgainFromAnotherDeck(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	cfg := Config{UIDir: t.TempDir(), StateDir: t.TempDir(), ProlinkExport: prolink.ExportConfig{Root: root, IP: net.IPv4(127, 64, 0, 3), MAC: net.HardwareAddr{2, 0, 0, 0, 0, 3}, DBAddr: "127.64.0.3:0", PortmapAddr: "127.64.0.3:0", DiscoveryAddr: "127.64.0.3:0", StatusAddr: "127.64.0.3:0", AnnounceAddr: "127.64.0.3:9", ProbeDuration: 20 * time.Millisecond}}
+	s := New(cfg, nil)
+	defer s.Close()
+	cdj, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 64, 0, 4), Port: 50001})
+	if err != nil {
+		t.Skip("beat port:", err)
+	}
+	defer cdj.Close()
+	if err := s.prolinkExport.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	for until := time.Now().Add(2 * time.Second); s.prolinkExport.Status().Number == 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(until) {
+			t.Fatal("no player number")
+		}
+	}
+	prolinkMu.Lock()
+	postedDevices[s] = map[string]prolink.Device{"2": {Number: 2, Name: "CDJ-3000", Address: "127.64.0.4", Master: true, LastSeen: time.Now()}}
+	prolinkMu.Unlock()
+	asked := func(masterDeck int, want bool) {
+		t.Helper()
+		body := fmt.Sprintf(`[{"deck":1,"playing":true,"bpm":120,"master":%v},{"deck":2,"playing":true,"bpm":120,"master":%v}]`, masterDeck == 1, masterDeck == 2)
+		w := httptest.NewRecorder()
+		s.decksPost(w, httptest.NewRequest("POST", "/v1/sc5000/decks", strings.NewReader(body)))
+		if w.Code != 200 {
+			t.Fatalf("decks: %d", w.Code)
+		}
+		cdj.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		b := make([]byte, 64)
+		n, _, err := cdj.ReadFromUDP(b)
+		if got := err == nil && n == 0x28 && b[10] == 0x26; got != want {
+			t.Fatalf("master on deck %d: asked %v (%v), want %v", masterDeck, got, err, want)
+		}
+	}
+	asked(0, false)
+	asked(1, true)  // none of ours to one of ours
+	asked(1, false) // nothing changed
+	asked(2, true)  // MASTER on our other deck
+	asked(2, false)
 }
