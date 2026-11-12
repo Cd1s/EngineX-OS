@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -573,9 +574,27 @@ func (s *Server) handleMountsGet(w http.ResponseWriter, r *http.Request) {
 	list := s.loadMounts()
 	views := make([]RemoteMountView, 0, len(list))
 	for _, m := range list {
+		// What is mounted now, not the flag saved when it was: nothing remounts a share after a
+		// reboot, and a mount can drop (BH-GC2-14).
+		m.Mounted = mountedAt(m.MountPoint)
 		views = append(views, toMountView(m))
 	}
 	respond(w, views)
+}
+
+// mountedAt reports whether path is a mount point now. A var for the tests.
+var mountedAt = func(path string) bool {
+	b, err := os.ReadFile("/proc/self/mounts")
+	if err != nil {
+		return false
+	}
+	escaped := strings.NewReplacer(`\`, `\134`, " ", `\040`, "\t", `\011`, "\n", `\012`).Replace(filepath.Clean(path))
+	for _, line := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(line); len(f) > 1 && f[1] == escaped {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
@@ -690,8 +709,17 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 		Options:    strings.TrimSpace(in.Options),
 	}
 
+	// BH-GC2-14: a share switched off is unmounted, a changed one is mounted afresh, and a mount
+	// that fails is reported (the settings are kept) instead of answering 200 with mounted: true.
+	if existingIdx >= 0 && mountedAt(list[existingIdx].MountPoint) {
+		old := list[existingIdx]
+		if err := s.unmountRemote(r.Context(), &old); err != nil && !enabled {
+			log.Printf("webui: unmount %s: %v", old.MountPoint, err)
+		}
+	}
+	var mountErr error
 	if enabled {
-		_ = s.mountRemote(r.Context(), &m)
+		mountErr = s.mountRemote(r.Context(), &m)
 	}
 
 	if existingIdx >= 0 {
@@ -708,6 +736,10 @@ func (s *Server) handleMountsPost(w http.ResponseWriter, r *http.Request) {
 	// Synchronize to OmniSource NAS list
 	s.syncMountToNAS(m)
 
+	if mountErr != nil {
+		fail(w, http.StatusBadGateway, fmt.Errorf("saved, but mounting %s failed: %w", m.Name, mountErr))
+		return
+	}
 	respond(w, toMountView(m))
 }
 
