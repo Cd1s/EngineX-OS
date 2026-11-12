@@ -86,28 +86,12 @@ func (l *Library) Validate() error {
 		}
 	}
 	parents := map[uint32]uint32{}
-	names := map[string]bool{}
 	for i := range l.Playlists {
 		p := &l.Playlists[i]
 		if _, ok := parents[p.ID]; p.ID == 0 || ok {
 			return fmt.Errorf("rekordbox: duplicate/zero playlist id %d", p.ID)
 		}
 		parents[p.ID] = p.ParentID
-		k := fmt.Sprintf("%d/%s", p.ParentID, p.Name)
-		if names[k] {
-			baseName := p.Name
-			for count := 2; ; count++ {
-				cand := fmt.Sprintf("%s (%d)", baseName, count)
-				candKey := fmt.Sprintf("%d/%s", p.ParentID, cand)
-				if !names[candKey] {
-					p.Name = cand
-					names[candKey] = true
-					break
-				}
-			}
-		} else {
-			names[k] = true
-		}
 		validTracks := make([]uint32, 0, len(p.Tracks))
 		for _, id := range p.Tracks {
 			if tracks[id] {
@@ -116,17 +100,40 @@ func (l *Library) Validate() error {
 		}
 		p.Tracks = validTracks
 	}
+	promoted := map[uint32]bool{}
 	for i := range l.Playlists {
 		p := &l.Playlists[i]
 		if p.ParentID != 0 {
 			if _, ok := parents[p.ParentID]; !ok {
 				p.ParentID = 0
+				parents[p.ID] = 0
+				promoted[p.ID] = true
 			}
 		}
 	}
-	parents = map[uint32]uint32{}
-	for _, p := range l.Playlists {
-		parents[p.ID] = p.ParentID
+	names := map[string]bool{}
+	for _, wantPromoted := range []bool{false, true} {
+		for i := range l.Playlists {
+			p := &l.Playlists[i]
+			if promoted[p.ID] != wantPromoted {
+				continue
+			}
+			k := fmt.Sprintf("%d/%s", p.ParentID, p.Name)
+			if names[k] {
+				baseName := p.Name
+				for count := 2; ; count++ {
+					cand := fmt.Sprintf("%s (%d)", baseName, count)
+					candKey := fmt.Sprintf("%d/%s", p.ParentID, cand)
+					if !names[candKey] {
+						p.Name = cand
+						names[candKey] = true
+						break
+					}
+				}
+			} else {
+				names[k] = true
+			}
+		}
 	}
 	for id := range parents {
 		seen := map[uint32]bool{}
