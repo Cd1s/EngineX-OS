@@ -220,7 +220,7 @@ static __attribute__((noinline)) int copy_file_data(int in,int out,int64_t deadl
 
 // No links, special files or traversal are accepted in seeded Engine metadata.
 // O_NOFOLLOW/openat pins each source directory and each copied file.
-static int copy_tree(int src,int dst,int64_t deadline,unsigned depth) {
+static int copy_tree(int src,int dst,int64_t deadline,unsigned depth,uint64_t *bytes) {
     if(depth>64){errno=ELOOP;return -1;}
     int copyfd=openat(src,".",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(copyfd<0)return -1;
     DIR *dir=fdopendir(copyfd);if(!dir){close(copyfd);return -1;}
@@ -241,8 +241,9 @@ static int copy_tree(int src,int dst,int64_t deadline,unsigned depth) {
                 out=openat(dst,e->d_name,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
                 if(out<0){close(in);rc=-1;break;}
             }
-            rc=copy_tree(in,out,deadline,depth+1);if(out>=0)close(out);
-        } else if(dst>=0) {
+            rc=copy_tree(in,out,deadline,depth+1,bytes);if(out>=0)close(out);
+        } else if(bytes)*bytes+=(uint64_t)st.st_size;
+        if(!S_ISDIR(st.st_mode)&&dst>=0) {
             int out=openat(dst,e->d_name,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);
             if(out<0){close(in);rc=-1;break;}
             rc=copy_file_data(in,out,deadline);
@@ -275,6 +276,108 @@ static char seeded_as[32],seeded_hint[32];
 static int seeded_ok(const char *name) {
     return !strncmp(name,"library-",8)&&strlen(name)==24&&strspn(name+8,"0123456789abcdef")==16;
 }
+// BH-O55-1: only Engine's metadata, Database2, is copied to /data. The rest of
+// the stick's Engine Library (Engine DJ puts the audio in Engine Library/Music)
+// is bound read-only from the stick into the view (bind_native). Copying it all
+// wrote every track to /data on each insert, ran out of the budget on a real
+// collection (no view at all) and kept a full copy per PC export.
+#ifndef HFS_CACHE_RESERVE
+#define HFS_CACHE_RESERVE (UINT64_C(512)<<20)
+#endif
+// Set in the pre-mount child: edisksd's views carry other mount ids there, so
+// nothing in the cache may be judged unused (and removed) from inside it.
+static int private_ns;
+// The top level of a stick's Engine Library: no links or special files. *meta
+// is its Database2 directory, -1 when it has none.
+static int library_top(int lib,int *meta) {
+    *meta=-1;
+    int fd=openat(lib,".",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return -1;
+    DIR *d=fdopendir(fd);if(!d){close(fd);return -1;}
+    int rc=0;struct dirent *e;
+    for(;;) {
+        errno=0;e=readdir(d);if(!e){if(errno)rc=-1;break;}
+        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        struct stat st;
+        if(fstatat(lib,e->d_name,&st,AT_SYMLINK_NOFOLLOW)){rc=-1;break;}
+        if(S_ISLNK(st.st_mode)||(!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))){errno=ELOOP;rc=-1;break;}
+    }
+    int saved=errno;closedir(d);errno=saved;if(rc)return -1;
+    *meta=openat(lib,"Database2",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    if(*meta<0&&errno!=ENOENT&&errno!=ENOTDIR)return -1; // a plain file named so is bound like the rest
+    return 0;
+}
+static void touch_library(const char *library){utimensat(AT_FDCWD,library,NULL,AT_SYMLINK_NOFOLLOW);} // last use, for the LRU below
+static int newer(const struct stat *a,const struct stat *b) {
+    return a->st_mtim.tv_sec!=b->st_mtim.tv_sec?a->st_mtim.tv_sec>b->st_mtim.tv_sec:a->st_mtim.tv_nsec>b->st_mtim.tv_nsec;
+}
+static struct owned_view *find_view(const char *,const char *);
+// The least recently used generation in the cache that may go: never `keep`,
+// never one of a stick whose view is up. *total (when asked): the bytes of all
+// that may go.
+static int oldest_generation(const char *cache,const char *keep,uint64_t *total,char id_out[NAME_MAX+1],char name_out[NAME_MAX+1]) {
+    DIR *d=opendir(cache);if(!d)return -1;
+    struct stat best_st={0};struct dirent *e;*id_out=*name_out=0;
+    while((e=readdir(d))) {
+        if(e->d_name[0]=='.')continue;
+        struct owned_view *live=find_view(NULL,e->d_name);if(live){free(live);continue;}
+        int id=openat(dirfd(d),e->d_name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(id<0)continue;
+        DIR *g=fdopendir(id);if(!g){close(id);continue;}struct dirent *l;
+        while((l=readdir(g))) {
+            struct stat st;char path[PATH_MAX];
+            if(!seeded_ok(l->d_name)||fstatat(id,l->d_name,&st,AT_SYMLINK_NOFOLLOW)||!S_ISDIR(st.st_mode))continue;
+            if(snprintf(path,sizeof path,"%s/%s/%s",cache,e->d_name,l->d_name)>=(int)sizeof path||(keep&&!strcmp(path,keep)))continue;
+            if(total){int fd=openat(id,l->d_name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);uint64_t n=0;if(fd>=0){if(!copy_tree(fd,-1,INT64_MAX,0,&n))*total+=n;close(fd);}}
+            if(!*name_out||newer(&best_st,&st)){best_st=st;snprintf(id_out,NAME_MAX+1,"%s",e->d_name);snprintf(name_out,NAME_MAX+1,"%s",l->d_name);}
+        }
+        closedir(g);
+    }
+    closedir(d);return *name_out?0:-1;
+}
+// /data keeps HFS_CACHE_RESERVE free after a seed of `bytes`: Engine's own
+// settings, EngineX state and OTA downloads live there too (BH-G1-6). Unused
+// libraries go, least recently used first, but only when that makes the room.
+static int have_room(const char *cache,const char *keep,uint64_t bytes) {
+    char id[NAME_MAX+1],name[NAME_MAX+1];int checked=0;
+    for(unsigned i=0;i<256;i++) {
+        struct statvfs v;if(statvfs(cache,&v))return 0; // unknown: as before
+        uint64_t avail=(uint64_t)v.f_bavail*(uint64_t)v.f_frsize,need=HFS_CACHE_RESERVE+bytes;
+        if(need<bytes)break;
+        if(avail>=need)return 0;
+        if(private_ns)break;
+        if(!checked){uint64_t total=0;oldest_generation(cache,keep,&total,id,name);if(avail+total<need)break;checked=1;}
+        if(oldest_generation(cache,keep,NULL,id,name))break;
+        int fd=open(cache,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)break;
+        int g=openat(fd,id,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+        if(g>=0){remove_tree(g,name);close(g);unlinkat(fd,id,AT_REMOVEDIR);note("reclaimed an unused HFS library of",id,0);}
+        close(fd);if(g<0)break;
+    }
+    errno=ENOSPC;return -1;
+}
+// Per stick the library in use and the one used before it (cues set on the deck
+// before the last PC export) stay; older generations and stages of a pre-mount
+// killed at its deadline go (BH-O55-2). Only in edisksd's own namespace, under
+// view_lock, after prepare_view found no view of this stick up.
+static void prune_generations(const char *library) {
+    if(private_ns)return;
+    char root[PATH_MAX];snprintf(root,sizeof root,"%s",library);
+    char *slash=strrchr(root,'/');if(!slash)return;*slash=0;const char *keep=slash+1;
+    int fd=open(root,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return;
+    DIR *d=fdopendir(fd);if(!d){close(fd);return;}
+    char previous[NAME_MAX+1]="";struct stat prev_st={0};struct dirent *e;
+    while((e=readdir(d))) {
+        struct stat st;
+        if(!seeded_ok(e->d_name)||!strcmp(e->d_name,keep)||fstatat(fd,e->d_name,&st,AT_SYMLINK_NOFOLLOW)||!S_ISDIR(st.st_mode))continue;
+        if(!*previous||newer(&st,&prev_st)){prev_st=st;snprintf(previous,sizeof previous,"%s",e->d_name);}
+    }
+    rewinddir(d);
+    while((e=readdir(d))) {
+        int stage=!strncmp(e->d_name,".seed-",6);
+        if(!stage&&(!seeded_ok(e->d_name)||!strcmp(e->d_name,keep)||!strcmp(e->d_name,previous)))continue;
+        struct stat st;if(fstatat(fd,e->d_name,&st,AT_SYMLINK_NOFOLLOW)||!S_ISDIR(st.st_mode))continue;
+        remove_tree(fd,e->d_name);
+    }
+    closedir(d);
+}
 static int seed_library(const char *target,const char *identity,char library[PATH_MAX],int64_t deadline) {
     char native[PATH_MAX],root[PATH_MAX],stage[PATH_MAX],cache[PATH_MAX];struct stat st;
     if(path_join(native,sizeof native,target,"Engine Library")||safe_path(native,1)||
@@ -285,17 +388,18 @@ static int seed_library(const char *target,const char *identity,char library[PAT
        (cache_fd=open(cache,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC))>=0){if(fchmod(cache_fd,0700))note("cannot tighten",cache,errno);close(cache_fd);}
     if(lstat(cache,&cache_stat)||cache_stat.st_uid!=geteuid()||(cache_stat.st_mode&077)){errno=EACCES;return -1;}
     if(path_join(root,sizeof root,cache,identity)||make_dirs(root))return -1;
-    uint64_t signature=0;int src=-1,reuse=0;
+    uint64_t signature=0,bytes=0;int src=-1,reuse=0;
     if(seeded_ok(seeded_hint)){char prior[PATH_MAX];reuse=!path_join(prior,sizeof prior,root,seeded_hint)&&!lstat(prior,&st)&&S_ISDIR(st.st_mode);}
     if(reuse){}
     else if(!lstat(native,&st)) {
         if(!S_ISDIR(st.st_mode)){errno=ENOTDIR;return -1;}
-        src=open(native,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(src<0)return -1;
-        if(copy_tree(src,-1,deadline,0)){close(src);return -1;} // validate reused native trees too
+        int lib=open(native,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(lib<0)return -1;
+        int top=library_top(lib,&src);close(lib);if(top)return -1;
+        if(src>=0&&copy_tree(src,-1,deadline,0,&bytes)){close(src);return -1;} // validate reused native trees too
         // A changed PC-authored database gets a separate seed rather than
         // overwriting an older sidecar containing deck-authored cues.
         const char *files[]={"Database2/m.db","Database2/m.db-wal"};
-        for(unsigned i=0;i<2;i++) {
+        for(unsigned i=0;src>=0&&i<2;i++) {
             char db[PATH_MAX];
             if(path_join(db,sizeof db,native,files[i])||safe_path(db,1)){if(errno==ENOENT)continue;close(src);return -1;}
             if(lstat(db,&st)){if(errno==ENOENT)continue;close(src);return -1;}
@@ -324,15 +428,20 @@ static int seed_library(const char *target,const char *identity,char library[PAT
         if(src>=0)close(src);
         if(safe_path(library,0)||!S_ISDIR(st.st_mode)){errno=ELOOP;return -1;}
         int fd=open(library,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return -1;
-        int rc=copy_tree(fd,-1,deadline,0);close(fd);
-        if(!rc)snprintf(seeded_as,sizeof seeded_as,"%s",name);
+        int rc=copy_tree(fd,-1,deadline,0,NULL);close(fd);
+        if(!rc){snprintf(seeded_as,sizeof seeded_as,"%s",name);touch_library(library);}
         return rc;
     }
-    if(errno!=ENOENT){if(src>=0)close(src);return -1;}
+    if(errno!=ENOENT||have_room(cache,library,bytes)){if(src>=0)close(src);return -1;}
     if(snprintf(stage,sizeof stage,"%s/.seed-XXXXXX",root)>=(int)sizeof stage){if(src>=0)close(src);errno=ENAMETOOLONG;return -1;}
     if(!mkdtemp(stage)){if(src>=0)close(src);return -1;}
     int dst=open(stage,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC),rc=dst<0?-1:0;
-    if(!rc&&src>=0)rc=copy_tree(src,dst,deadline,0);
+    if(!rc&&src>=0) {
+        int meta=-1;
+        if(mkdirat(dst,"Database2",0700)||(meta=openat(dst,"Database2",O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC))<0)rc=-1;
+        else rc=copy_tree(src,meta,deadline,0,NULL);
+        if(meta>=0)close(meta);
+    }
     if(!rc&&fsync(dst))rc=-1;
     if(dst>=0)close(dst);
     if(src>=0)close(src);
@@ -389,7 +498,58 @@ static int update_public_ids(struct owned_view *v) {
     }
     return save_record(v);
 }
-static struct owned_view *find_view(const char *,const char *);
+static int empty_dir(int parent,const char *name) {
+    int fd=openat(parent,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)return 0;
+    DIR *d=fdopendir(fd);if(!d){close(fd);return 0;}
+    struct dirent *e;int empty=1;
+    while(empty&&(e=readdir(d)))empty=!strcmp(e->d_name,".")||!strcmp(e->d_name,"..");
+    closedir(d);return empty;
+}
+// An empty directory or file in the cached library for a stick entry to be bound
+// on. What an older build copied there (the stick's own audio) is hidden by that
+// bind for good, so it goes.
+static int stand_in(int lib,const char *name,int isdir) {
+    struct stat st;
+    if(!fstatat(lib,name,&st,AT_SYMLINK_NOFOLLOW)) {
+        if(isdir&&S_ISDIR(st.st_mode)&&empty_dir(lib,name))return 0;
+        if(!isdir&&S_ISREG(st.st_mode)&&!st.st_size)return 0;
+        if(S_ISDIR(st.st_mode))remove_tree(lib,name);else unlinkat(lib,name,0);
+    } else if(errno!=ENOENT)return -1;
+    if(isdir)return mkdirat(lib,name,0700);
+    int fd=openat(lib,name,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)return -1;
+    return close(fd);
+}
+#define NESTED "Engine Library/"
+// BH-O55-1: every entry of the stick's own Engine Library except Database2 (the
+// copied metadata), Engine DJ's Music folder above all, shown read-only from the
+// stick inside the cached library's bind. The record lists these binds before
+// "Engine Library", so an eject removes them first.
+static int bind_native(struct owned_view *v,const char *backing,const char *library,int64_t deadline) {
+    char native[PATH_MAX];struct stat st;unsigned top=v->count-1;
+    if(path_join(native,sizeof native,backing,"Engine Library"))return -1;
+    if(lstat(native,&st))return errno==ENOENT?0:-1;
+    if(!S_ISDIR(st.st_mode)){errno=ENOTDIR;return -1;}
+    int lib=open(library,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(lib<0)return -1;
+    DIR *d=opendir(native);if(!d){int saved=errno;close(lib);errno=saved;return -1;}
+    int rc=0;struct dirent *e;
+    for(;;) {
+        errno=0;e=readdir(d);if(!e){if(errno)rc=-1;break;}
+        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        char source[PATH_MAX],dest[PATH_MAX],name[NAME_MAX+1];
+        if(budget(deadline)||path_join(source,sizeof source,native,e->d_name)||lstat(source,&st)){rc=-1;break;}
+        if(S_ISLNK(st.st_mode)||(!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))){errno=ELOOP;rc=-1;break;}
+        if(S_ISDIR(st.st_mode)&&!strcmp(e->d_name,"Database2"))continue;
+        if(snprintf(name,sizeof name,NESTED "%s",e->d_name)>=(int)sizeof name){errno=ENAMETOOLONG;rc=-1;break;}
+        if(v->count==MAX_VIEW_ENTRIES){errno=E2BIG;rc=-1;break;}
+        if(snprintf(dest,sizeof dest,"%s/view/%s",v->anchor,name)>=(int)sizeof dest){errno=ENAMETOOLONG;rc=-1;break;}
+        if(stand_in(lib,e->d_name,S_ISDIR(st.st_mode))||bind_checked(source,dest,MS_BIND|MS_REC)){rc=-1;break;}
+        snprintf(v->child[v->count++].name,NAME_MAX+1,"%s",name);
+        if(mount(NULL,dest,NULL,MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC,NULL)){rc=-1;break;}
+    }
+    int saved=errno;closedir(d);close(lib);errno=saved;
+    if(!rc&&v->count-1>top){struct view_child c=v->child[top];memmove(&v->child[top],&v->child[top+1],(v->count-1-top)*sizeof c);v->child[v->count-1]=c;}
+    return rc;
+}
 static int prepare_view(const char *target,const char *identity,int64_t deadline) {
     if(secure_runtime()||safe_path(target,0))return -1;
     struct owned_view *active=find_view(NULL,identity);
@@ -414,14 +574,14 @@ static int prepare_view(const char *target,const char *identity,int64_t deadline
         if(budget(deadline)||path_join(source,sizeof source,backing,e->d_name)||lstat(source,&st)||S_ISLNK(st.st_mode)||
            (!S_ISDIR(st.st_mode)&&!S_ISREG(st.st_mode))||add_child(v,e->d_name,source,S_ISDIR(st.st_mode))){if(!errno)errno=ELOOP;scan_error=1;break;}
     }
-    closedir(d);if(scan_error||add_child(v,"Engine Library",library,1))goto done;
+    closedir(d);if(scan_error||add_child(v,"Engine Library",library,1)||bind_native(v,backing,library,deadline))goto done;
     // Make the synthetic root read-only, while the separate library bind stays rw.
     if(mount(NULL,view,"tmpfs",MS_REMOUNT|MS_RDONLY|MS_NODEV|MS_NOSUID|MS_NOEXEC,"mode=0755,size=16m")||
        budget(deadline)||bind_checked(view,target,MS_BIND|MS_REC))goto done;
     if(update_public_ids(v)) {
         int saved=errno;umount2(target,MNT_DETACH|UMOUNT_NOFOLLOW);errno=saved;goto done;
     }
-    note("writable HFS library ready on",target,0);rc=0;
+    note("writable HFS library ready on",target,0);rc=0;prune_generations(library);
  done: {int saved=errno;if(rc)cleanup_view(v);free(v);errno=saved;}return rc;
 }
 // The record in one RUN_ROOT/view-* directory, when it is ours, intact and
@@ -590,7 +750,7 @@ static int after_mount(struct libmnt_context *ctx,int mode,int64_t deadline) {
     if(!hfs_ro&&!(pioneer&&mode==MOUNT_POST)&&!lstat(lib,&existing)) {
         int fd=open(lib,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
         if(fd<0)return 0;
-        int unsafe=copy_tree(fd,-1,deadline,0);close(fd);
+        int unsafe=copy_tree(fd,-1,deadline,0,NULL);close(fd);
         if(unsafe){note("unsafe library contents rejected on",target,errno);return 0;}
     }
     if(hfs_ro&&(pioneer||mode!=MOUNT_PRE)) {
@@ -650,7 +810,7 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
     int up[2]={-1,-1};if(pipe2(up,O_CLOEXEC|O_NONBLOCK))up[0]=up[1]=-1;
     pid_t pid=fork();if(pid<0){close(up[0]);close(up[1]);return 0;}
     if(!pid) {
-        seeded_as[0]=0;
+        seeded_as[0]=0;private_ns=1;
         // Nothing mounted here reaches edisksd's (and Engine's) namespace.
         if(unshare(CLONE_NEWNS)||mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL))_exit(0);
         // libmount writes the mount (edisksd passes uhelper=edisksd) into
@@ -707,6 +867,18 @@ int mnt_context_mount(struct libmnt_context *ctx) {
     return hooked_mount(ctx,real);
 }
 
+// A view entry: a name in the stick's root, or one inside its Engine Library
+// (bind_native) whose parent "Engine Library" is listed after it.
+static int child_name_ok(const char *name) {
+    const char *leaf=strncmp(name,NESTED,strlen(NESTED))?name:name+strlen(NESTED);
+    return *leaf&&!strchr(leaf,'/')&&strcmp(leaf,".")&&strcmp(leaf,"..");
+}
+// A nested entry comes back with its parent when that was removed too.
+static int restored_with_parent(struct owned_view *v,unsigned i,unsigned removed) {
+    if(strncmp(v->child[i].name,NESTED,strlen(NESTED)))return 0;
+    for(unsigned j=i+1;j<removed;j++)if(!strcmp(v->child[j].name,"Engine Library"))return 1;
+    return 0;
+}
 // A rescue tree is cloned BEFORE changing the public view. Normal child
 // unmounts detect open files; rollback moves the already allocated mounts back.
 static int unmount_view(struct libmnt_context *ctx,struct owned_view *v,int (*real)(struct libmnt_context *)) {
@@ -714,7 +886,7 @@ static int unmount_view(struct libmnt_context *ctx,struct owned_view *v,int (*re
     if(path_join(view,sizeof view,v->anchor,"view")||path_join(rescue,sizeof rescue,v->anchor,"rescue")||
        safe_path(v->target,0)||mount_id(v->target)!=v->public_id)return -EINVAL;
     for(unsigned i=0;i<v->count;i++) {
-        if(!memchr(v->child[i].name,0,sizeof v->child[i].name)||strchr(v->child[i].name,'/')||
+        if(!memchr(v->child[i].name,0,sizeof v->child[i].name)||!child_name_ok(v->child[i].name)||
            path_join(pub,sizeof pub,v->target,v->child[i].name)||mount_id(pub)!=v->child[i].mount_id)return -EINVAL;
     }
     if(bind_checked(view,rescue,MS_BIND|MS_REC))return -errno;
@@ -733,6 +905,7 @@ static int unmount_view(struct libmnt_context *ctx,struct owned_view *v,int (*re
     goto failed;
  restore_children:
     for(unsigned i=0;i<removed;i++) {
+        if(restored_with_parent(v,i,removed))continue;
         if(path_join(src,sizeof src,rescue,v->child[i].name)||path_join(pub,sizeof pub,v->target,v->child[i].name)||
            bind_checked(src,pub,MS_MOVE))note("FATAL: restoring HFS child failed on",v->target,errno);
     }

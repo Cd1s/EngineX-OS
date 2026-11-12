@@ -24,7 +24,11 @@ it make the real mount, which Engine sees with the library already in place:
 
 1. read-only HFS+ with `PIONEER/` or `.PIONEER/` gets a writable view on
    `<mount>/Engine Library`, kept in `/data/enginex/hfs-libraries/<volume id>`
-   (only the `/data/sc5000-custom -> enginex` compat link is followed on the way);
+   (only the `/data/sc5000-custom -> enginex` compat link is followed on the way).
+   Only `Engine Library/Database2` is copied there; everything else in the
+   stick's `Engine Library` (Engine DJ's `Music/`) is bound read-only from the
+   stick. Two generations per stick are kept, and a seed leaves 512 MiB free on
+   `/data` (unused libraries of other sticks go first, least recently used);
 2. `rb-bridge --mount-path <mount>` converts the export;
 3. `engine-guardian --heal-mount <mount> --data-only` repairs table data.
 
