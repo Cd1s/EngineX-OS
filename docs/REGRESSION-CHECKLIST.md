@@ -71,6 +71,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 59 | **`DiscoverLANServer` reads up to 4 KiB UDP/mDNS responses without >1024-byte truncation or oversize-datagram abort (`BH2-A9-5`)** | `BH2-A9-5` | `internal/stems::TestDiscoverLANServerHandlesMTU1500MDNSResponse` | Release workflow Step 2 (`go test -race ./internal/stems/...`) |
 | 60 | **`lanHealth` trims trailing slashes before probing `/healthz`, matching `stems.Proxy` (`BH2-A9-6`)** | `BH2-A9-6` | `internal/stems::TestLANHealthTrimsTrailingSlashEndpoint` | Release workflow Step 2 (`go test -race ./internal/stems/...`) |
 | 61 | **`enginex-stemsd -token-file ""` without `-listen` enables zero-config LAN listening (`0.0.0.0:18765`) and UDP/mDNS discovery (`BH2-A9-7`)** | `BH2-A9-7` | `internal/stemsd::TestEmptyTokenFileFlagEnablesZeroConfigLANListen` | Release workflow Step 2 (`go test -race ./internal/stemsd/...`) |
+| 62 | **Stems protocol parser, pipeline, packer, and `LocalRender` skip stray blank lines (`#38`) while still enforcing `maxHeader` (`BH2-A9-9`)** | `BH2-A9-9` | `internal/stems::TestStrayBlankLinesIgnoredInProtocolPipelineAndLocal` | Release workflow Step 2 (`go test -race ./internal/stems/...`) |
 
 ---
 
