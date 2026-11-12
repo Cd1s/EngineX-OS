@@ -341,7 +341,7 @@ static void test_first_insert_converted_before_visible(const char *root) {
     join(p,disk,"PIONEER/rekordbox/export.pdb");write_file(p,"re-exported library");
     struct timespec later[2]={{.tv_sec=2000000000},{.tv_sec=2000000000}};assert(!utimensat(AT_FDCWD,p,later,0));
     c.status=0;assert(!mnt_context_mount(&c)&&c.status==1);assert(!umount2(target,UMOUNT_NOFOLLOW));
-    char twice[PATH_MAX*2+8];snprintf(twice,sizeof twice,"%s%s",expect,expect);expect_file(log,twice); // a new export is tried again
+    char twice[sizeof expect*2];snprintf(twice,sizeof twice,"%s%s",expect,expect);expect_file(log,twice); // a new export is tried again
     unsetenv("EDISKSD_TEST_PID");
     puts("REAL PRIVATE NAMESPACE #182: rekordbox sticks (FAT and read-only HFS+) are converted before the visible mount, plain sticks mounted once, failed conversion not repeated, too-large library skipped until re-exported: PASS");
 }
