@@ -26,8 +26,12 @@ static int test_real_mount(struct libmnt_context *c);
 #include <stdint.h>
 static int64_t test_post_reserve=18500;
 #define POST_RESERVE_MS test_post_reserve
+// Free space kept on the cache filesystem: none, except in the test that sets it.
+static uint64_t test_cache_reserve;
+#define HFS_CACHE_RESERVE test_cache_reserve
 #include "edisksd_hook.c"
 #include <assert.h>
+#include <ftw.h>
 struct libmnt_context { const char *target,*source; int status,fail; const char *disk; };
 const char *mnt_context_get_target(struct libmnt_context *c){return c->target;}
 const char *mnt_context_get_source(struct libmnt_context *c){return c->source;}
@@ -535,12 +539,102 @@ static void test_monitor_sees_plain_device_mount(const char *root) {
     (void)line;
     puts("r2 HFS view: edisksd's monitor sees only the plain device mount, never the bare mount before the view: PASS");
 }
+static void write_bytes(const char *path,size_t n) {
+    int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW|O_CLOEXEC,0600);assert(fd>=0);
+    static char block[65536];memset(block,'a',sizeof block);
+    for(size_t done=0;done<n;){size_t k=n-done<sizeof block?n-done:sizeof block;assert(write(fd,block,k)==(ssize_t)k);done+=k;}
+    assert(!close(fd));
+}
+static uint64_t tree_bytes;
+static int add_size(const char *path,const struct stat *st,int type,struct FTW *ftw){(void)path;(void)ftw;if(type==FTW_F)tree_bytes+=(uint64_t)st->st_size;return 0;}
+static uint64_t tree_size(const char *path){tree_bytes=0;assert(!nftw(path,add_size,16,FTW_PHYS));return tree_bytes;}
+static unsigned count_generations(const char *dir) {
+    DIR *d=opendir(dir);if(!d)return 0;unsigned n=0;struct dirent *e;
+    while((e=readdir(d)))n+=seeded_ok(e->d_name);
+    closedir(d);return n;
+}
+// BH-O55-1 (BH-F52-3, BH-O55-2, BH-G1-6): Engine DJ puts the audio in
+// <stick>/Engine Library/Music. The view copied the whole Engine Library into
+// /data on every insert (a real collection never finished inside the budget),
+// kept one full copy per PC export for good, and had no free-space floor.
+static void test_hfs_view_copies_only_metadata(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char data[PATH_MAX],p[PATH_MAX],disk[PATH_MAX],target[PATH_MAX],cache[PATH_MAX],track[PATH_MAX],db[PATH_MAX];
+    char saved_lib[PATH_MAX],saved_legacy[PATH_MAX];
+    snprintf(saved_lib,sizeof saved_lib,"%s",test_library);snprintf(saved_legacy,sizeof saved_legacy,"%s",test_legacy_library);
+    // A small /data of its own, so the reserve is exact.
+    join(data,root,"small-data");assert(!make_dirs(data));assert(!mount("small-data",data,"tmpfs",0,"mode=0700,size=24m"));
+    join(p,data,"enginex");assert(!make_dirs(p));join(test_library,p,"hfs-libraries");test_legacy_library[0]=0;
+    join(cache,test_library,"uuid-music");
+    join(disk,root,"music-hfs");join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(db,p,"m.db");write_file(db,"engine dj export 1");
+    join(p,disk,"Engine Library/Music/Artist");assert(!make_dirs(p));join(track,p,"track.mp3");write_bytes(track,8u<<20);
+    join(p,disk,"Engine Library/notes.txt");write_file(p,"pc notes");
+    join(target,MEDIA_ROOT,"MUSIC-HFS");mount_ro(disk,target);
+    assert(!prepare_view(target,"uuid-music",deadline_from(now_ms())));
+    // The audio is shown from the stick, read-only; nothing of it is in /data.
+    struct stat st;join(p,target,"Engine Library/Music/Artist/track.mp3");assert(!stat(p,&st)&&st.st_size==(8<<20));
+    assert(open(p,O_WRONLY)<0&&errno==EROFS);
+    join(p,target,"Engine Library/Music/new.mp3");assert(open(p,O_WRONLY|O_CREAT,0600)<0&&errno==EROFS);
+    join(p,target,"Engine Library/notes.txt");expect_file(p,"pc notes");assert(open(p,O_WRONLY)<0&&errno==EROFS);
+    assert(tree_size(cache)<4096);
+    // Engine's metadata is the writable copy, and Engine may add next to it.
+    join(p,target,"Engine Library/Database2/m.db");expect_file(p,"engine dj export 1");write_file(p,"deck cue");
+    join(p,target,"Engine Library/deck-made");write_file(p,"x");
+    // Eject: a busy track, a busy library and a failed real umount all put every bind back.
+    struct libmnt_context c={.target=target};
+    join(p,target,"Engine Library/Music/Artist/track.mp3");int held=open(p,O_RDONLY);assert(held>=0);real_calls=0;
+    assert(unmount_dispatch(&c,real_unmount)!=0&&errno==EBUSY&&real_calls==0);close(held);
+    join(p,target,"Engine Library/Database2/m.db");held=open(p,O_RDONLY);assert(held>=0);
+    assert(unmount_dispatch(&c,real_unmount)!=0&&errno==EBUSY&&real_calls==0);close(held);
+    c.fail=1;assert(unmount_dispatch(&c,real_unmount)!=0&&errno==EBUSY&&real_calls==1);c.fail=0;
+    join(p,target,"Engine Library/Music/Artist/track.mp3");assert(!stat(p,&st)&&st.st_size==(8<<20));
+    join(p,target,"Engine Library/Database2/m.db");expect_file(p,"deck cue");
+    assert(!unmount_dispatch(&c,real_unmount));
+    join(p,disk,"Engine Library/Database2/m.db");expect_file(p,"engine dj export 1");
+    join(p,disk,"Engine Library/deck-made");assert(access(p,F_OK)==-1&&errno==ENOENT);
+    // An older build's full copy in the cached library is replaced by the stick's own folder.
+    char library[PATH_MAX];mount_ro(disk,target);assert(!seed_library(target,"uuid-music",library,deadline_from(now_ms())));
+    join(p,library,"Music/Artist");assert(!make_dirs(p));join(p,library,"Music/Artist/track.mp3");write_bytes(p,8u<<20);
+    seeded_hint[0]=0;assert(!prepare_view(target,"uuid-music",deadline_from(now_ms())));
+    join(p,target,"Engine Library/Database2/m.db");expect_file(p,"deck cue");
+    join(p,target,"Engine Library/Music/Artist/track.mp3");assert(!stat(p,&st)&&st.st_size==(8<<20));
+    assert(tree_size(cache)<4096);
+    assert(!unmount_dispatch(&c,real_unmount));
+    // Every PC export is a new generation: the one in use and the one before it stay.
+    for(int i=2;i<=4;i++) {
+        char text[64];snprintf(text,sizeof text,"engine dj export %d",i);join(p,disk,"Engine Library/Database2/m.db");write_file(p,text);
+        mount_ro(disk,target);assert(!prepare_view(target,"uuid-music",deadline_from(now_ms())));
+        join(p,target,"Engine Library/Database2/m.db");expect_file(p,text);
+        assert(count_generations(cache)==2);assert(!unmount_dispatch(&c,real_unmount));
+    }
+    // The reserve: another stick's unused 6 MiB library goes for a seed that needs
+    // the room, but nothing goes when even that would not make it.
+    char old[PATH_MAX];join(old,test_library,"uuid-gone/library-0123456789abcdef/Database2");assert(!make_dirs(old));
+    join(p,old,"m.db");write_bytes(p,6u<<20);
+    struct timespec long_ago[2]={{.tv_sec=1000000000},{.tv_sec=1000000000}};
+    join(p,test_library,"uuid-gone/library-0123456789abcdef");assert(!utimensat(AT_FDCWD,p,long_ago,0));
+    join(p,disk,"Engine Library/Database2/big.db");write_bytes(p,3u<<20);
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"engine dj export 5");
+    struct statvfs v;assert(!statvfs(test_library,&v));uint64_t avail=(uint64_t)v.f_bavail*v.f_frsize;
+    test_cache_reserve=avail+(64u<<20);mount_ro(disk,target);
+    assert(prepare_view(target,"uuid-music",deadline_from(now_ms()))==-1&&errno==ENOSPC);
+    assert(!access(old,F_OK)&&count_generations(cache)==2);
+    test_cache_reserve=avail-(2u<<20); // 1 MiB short of the 3 MiB seed
+    assert(!prepare_view(target,"uuid-music",deadline_from(now_ms())));
+    join(p,test_library,"uuid-gone");assert(access(p,F_OK)==-1&&errno==ENOENT);
+    join(p,target,"Engine Library/Database2/big.db");assert(!stat(p,&st)&&st.st_size==(3<<20));
+    assert(!unmount_dispatch(&c,real_unmount));test_cache_reserve=0;
+    assert(!umount2(data,MNT_DETACH));
+    snprintf(test_library,sizeof test_library,"%s",saved_lib);snprintf(test_legacy_library,sizeof test_legacy_library,"%s",saved_legacy);
+    puts("REAL PRIVATE NAMESPACE BH-O55-1: an HFS+ view copies only Database2, shows Engine Library/Music read-only from the stick, ejects and rolls back with the nested binds, drops an older build's full copy, keeps two generations per stick and a free-space reserve: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_monitor_sees_plain_device_mount(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
