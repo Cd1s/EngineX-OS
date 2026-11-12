@@ -91,9 +91,26 @@ def parse_header(data):
     }
 
 
+def record_problems(data, records):
+    """What is wrong with the records' payloads: out of the file's bounds or SHA-256 mismatch (BH-G2-10)."""
+    problems = []
+    for rec in records:
+        start, size = rec['offset'], rec['size']
+        if size <= 0 or start < HEADER_SIZE or start + size > len(data):
+            problems.append(f'record {rec["index"]} ({rec["name"] or rec["magic"]}) outside the file: '
+                            f'offset={start:#x} size={size:#x} file={len(data):#x}')
+        elif hashlib.sha256(data[start:start + size]).hexdigest() != rec['sha256']:
+            problems.append(f'record {rec["index"]} ({rec["name"] or rec["magic"]}) SHA-256 mismatch')
+    return problems
+
+
 def info(data):
-    """Return JSON-serializable info dictionary describing the AZ0x container."""
+    """Return JSON-serializable info dictionary describing the AZ0x container.
+
+    `verified` means every record lies in the file and matches its SHA-256 (a header alone is parsed
+    but not verified); the container signature is never checked here (`signature_verified`)."""
     hdr = parse_header(data)
+    problems = record_problems(data, hdr['records'])
     return {
         'magic': hdr['magic'],
         'wire_version': hdr['wire_version'],
@@ -101,7 +118,10 @@ def info(data):
         'sha256': hashlib.sha256(data).hexdigest(),
         'records_count': hdr['records_count'],
         'records': hdr['records'],
-        'verified': True,
+        'record_hashes_verified': not problems,
+        'signature_verified': False,
+        'problems': problems,
+        'verified': not problems,
     }
 
 
@@ -111,12 +131,8 @@ def replace_record(data, magic, name, new_payload, board_mask=None):
             'replacement payload must be non-empty bytes')
     hdr = parse_header(data)
     records = hdr['records']
-    for rec in records:
-        start, size = rec['offset'], rec['size']
-        require(size > 0 and start >= HEADER_SIZE and start + size <= len(data),
-                f'invalid record {rec["index"]} bounds: offset={start:#x} size={size:#x}')
-        require(hashlib.sha256(data[start:start + size]).hexdigest() == rec['sha256'],
-                f'record {rec["index"]} SHA-256 mismatch')
+    problems = record_problems(data, records)
+    require(not problems, '; '.join(problems))
 
     matches = [
         r for r in records
@@ -151,6 +167,9 @@ def replace_splash(data, splash_bytes):
     Returns the updated AZ0x image bytes.
     """
     hdr = parse_header(data)
+    # The untouched BOOT/rootfs records are copied as they are: a damaged original stays damaged.
+    problems = record_problems(data, hdr['records'])
+    require(not problems, '; '.join(problems))
     require(len(splash_bytes) == SPLASH_SIZE,
             f'splash payload must be exactly {SPLASH_SIZE} bytes (got {len(splash_bytes)})')
     splash_records = [r for r in hdr['records'] if r['magic'] == 'PART' and r['name'] == 'splash']
@@ -205,7 +224,7 @@ def main(argv=None):
             data = args.input.read_bytes()
             meta = info(data)
             print(json.dumps(meta, indent=2))
-            return 0
+            return 0 if meta['verified'] else 1
         elif args.command == 'replace-record':
             require(args.original.is_file(), f'original file not found: {args.original}')
             require(args.payload.is_file(), f'payload file not found: {args.payload}')
@@ -226,7 +245,8 @@ def main(argv=None):
             new_img = replace_splash(orig_data, splash_data)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_bytes(new_img)
-            print(json.dumps({'output': str(args.output), 'verified': True}))
+            print(json.dumps({'output': str(args.output), 'record_hashes_verified': True,
+                              'signature_verified': False, 'warning': 'not suitable for flashing'}))
             return 0
     except (SafetyError, OSError) as exc:
         parser.exit(2, f'refused: {exc}\n')
