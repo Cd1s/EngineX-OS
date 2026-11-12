@@ -382,11 +382,13 @@ stop)
     fi
     # The stock script exits 0 after these quit reasons, so Restart=on-failure never
     # brings Engine back and the deck hangs on "Shutting down...". FactoryReset only
-    # gets here without a reboot when az01-update --erase-data failed (not on AC power).
+    # gets here without a reboot when az01-update --erase-data failed (not on AC power);
+    # UpdateFromFile when az01-update --file rejected the image (a corrupt or foreign
+    # .img on a stick): the deck stayed on a black screen until power-cycled (BH-GC2-4).
     reason_file=${SC5000_QUIT_REASON_FILE:-/tmp/engine-quit-reason}
     case $(cat "$reason_file" 2>/dev/null) in
     AnalyticsChange) ;;
-    FactoryReset) [ "$(systemctl is-system-running 2>/dev/null)" != stopping ] || exit 0 ;;
+    FactoryReset|UpdateFromFile) [ "$(systemctl is-system-running 2>/dev/null)" != stopping ] || exit 0 ;;
     *) exit 0 ;;
     esac
     rm -f "$reason_file"

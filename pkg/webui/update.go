@@ -289,7 +289,7 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		_ = os.WriteFile(staged+".url", []byte(downloadURL+"\n"), 0o644)
 	}
 	s.setUpdateProgress(0.97, "", false)
-	cmd := exec.Command("/usr/sbin/az01-update", "--file", staged)
+	cmd := exec.Command(az01UpdateBin, "--file", staged)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
@@ -298,8 +298,20 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		s.setUpdateProgress(0, "az01-update: "+msg, true)
 		return
 	}
+	// az01-update restarts the deck once it has installed the image, so the
+	// deck shows "installing" until then. If the deck is still up after the
+	// grace period nothing will restart it: release the state, or every later
+	// try was refused as "updating" until a power cycle (BH-GC2-4).
 	s.setUpdateProgress(1.0, "", false)
+	time.AfterFunc(updateRebootGrace, func() {
+		s.setUpdateProgress(0, "az01-update finished but the deck did not restart; try again", true)
+	})
 }
+
+var (
+	az01UpdateBin     = "/usr/sbin/az01-update"
+	updateRebootGrace = 3 * time.Minute
+)
 
 // tryApplyGen2Image handles a 2nd-generation *-Update.img (128-byte ENGINEX_DATA_BUNDLE_IMG_V1
 // header + Data-Bundle.tar.gz) when the background download fallback ran instead of Engine's
