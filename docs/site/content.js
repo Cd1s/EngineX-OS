@@ -5,6 +5,8 @@
 (function () {
   const L = (s, t, e) => ({ s, t, e });
   const V = "5.3.0.4";
+  const VL = "5.3.0.4 r2"; // shown to users; file names keep V
+  const TAG = "v5.3.0.4-r2";
   const BASE = "https://github.com/Cd1s/EngineX-OS/releases/latest/download/";
 
   // 全系 16 款机型（8 款一代机 + 8 款二代机）统一发布 *-Update.img
@@ -42,9 +44,9 @@
       nav: L("快速开始与下载", "快速開始與下載", "Quick start & downloads"),
       blocks: [
         { k: "p", x: L(
-          `EngineX OS ${V} 基于官方 Engine OS 5.3.0+ 构建，支持 Denon DJ、Numark 与 Rane 全系 16 款独立设备，界面与操控方式保持原厂一致。`,
-          `EngineX OS ${V} 基於官方 Engine OS 5.3.0+ 打造，支援 Denon DJ、Numark 與 Rane 全系 16 款獨立設備，介面與操控方式維持原廠一致。`,
-          `EngineX OS ${V} is built on official Engine OS 5.3.0+ for all 16 Denon DJ, Numark and Rane standalone units while keeping the stock UI and controls.`) },
+          `EngineX OS ${VL} 基于官方 Engine OS 5.3.0+ 构建，支持 Denon DJ、Numark 与 Rane 全系 16 款独立设备，界面与操控方式保持原厂一致。`,
+          `EngineX OS ${VL} 基於官方 Engine OS 5.3.0+ 打造，支援 Denon DJ、Numark 與 Rane 全系 16 款獨立設備，介面與操控方式維持原廠一致。`,
+          `EngineX OS ${VL} is built on official Engine OS 5.3.0+ for all 16 Denon DJ, Numark and Rane standalone units while keeping the stock UI and controls.`) },
         { k: "h", id: "which", x: L("我的机器该下哪个？", "我的機器該下載哪個？", "Which download is mine?"), nav: L("该下哪个包？", "該下載哪個？", "Which download?") },
         { k: "ul", x: [
           L("**一代机（8 款）**：SC5000 / SC5000M / SC6000 / SC6000M / PRIME 4 / PRIME 2 / PRIME GO / Mixstream Pro → 下载下方对应机型的 `*-Update.img`，放进 U 盘直接刷机。",
@@ -739,14 +741,14 @@
 
   /* ───────────── 首页（Landing）：只写文档里已有的功能，href 指向对应章节 ───────────── */
   const HOME = {
-    badge: L(`基于 Engine OS 5.3.0+ 的定制固件 · v${V}`, `基於 Engine OS 5.3.0+ 的客製韌體 · v${V}`, `Engine OS 5.3.0+ custom firmware · v${V}`),
+    badge: L(`基于 Engine OS 5.3.0+ 的定制固件 · v${VL}`, `基於 Engine OS 5.3.0+ 的客製韌體 · v${VL}`, `Engine OS 5.3.0+ custom firmware · v${VL}`),
     title: L("面向 Denon DJ、Numark 与 Rane 一体机的增强型系统", "面向 Denon DJ、Numark 與 Rane 一體機的增強型系統", "Enhanced System for Denon DJ, Numark & Rane Standalone Hardware"),
     sub: L("基于官方 Engine OS 5.3.0 构建，界面与操作保持原厂。解锁流媒体直连与扫码登录、机内 4 轨 Stems、Rekordbox 直读与 CDJ-3000 互联（测试版）、四轨同屏波形和 21 项实时 DSP 防护，覆盖一代与二代共 16 款设备。",
            "基於官方 Engine OS 5.3.0 打造，介面與操作維持原廠。解鎖串流直連與掃碼登入、機內 4 軌 Stems、Rekordbox 直讀與 CDJ-3000 互聯（測試版）、四軌同屏波形與 21 項即時 DSP 防護，涵蓋一代與二代共 16 款設備。",
            "Built on the official Engine OS 5.3.0 with the stock UI and controls. Adds direct streaming with scan-to-login, on-board 4-stem separation, Rekordbox direct-read and CDJ-3000 linking (beta), a 4-deck waveform view and 21 real-time DSP guards across 16 first- and second-generation units."),
     cta: {
       docs: L("浏览使用文档", "瀏覽使用文件", "Read the Docs"),
-      dl: L(`下载固件与安装器 v${V}`, `下載韌體與安裝器 v${V}`, `Download v${V}`),
+      dl: L(`下载固件与安装器 v${VL}`, `下載韌體與安裝器 v${VL}`, `Download v${VL}`),
       gh: L("GitHub 仓库 ↗", "GitHub 儲存庫 ↗", "GitHub ↗"),
       mods: L("Mod 社区", "Mod 社群", "Mod Hub"),
     },
@@ -786,5 +788,5 @@
     ],
   };
 
-  window.DOCS = { version: V, base: BASE, models: MODELS, installers: INSTALLERS, sections: SECTIONS, home: HOME };
+  window.DOCS = { version: V, label: VL, tag: TAG, base: BASE, models: MODELS, installers: INSTALLERS, sections: SECTIONS, home: HOME };
 })();
