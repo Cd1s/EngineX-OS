@@ -34,13 +34,13 @@ type pipeline struct {
 	cur, in  []byte   // the renderer reply, Engine block being received
 	want     int      // its payload size
 	inWant   int
+	inGot    int
 	upOut    []byte // bytes for the renderer from the current read
 	started  bool
 	done     bool
-	blocks   int  // blocks sent upstream
-	awaiting bool // Engine's current block is still arriving
-	owed     int  // replies due before the renderer said how wide they are
-	replies  int  // renderer replies seen after started
+	blocks   int // blocks sent upstream
+	owed     int // replies due before the renderer said how wide they are
+	replies  int // renderer replies seen after started
 	final    bool
 	err      error
 }
@@ -54,6 +54,7 @@ func newPipeline(out io.Writer) *pipeline {
 		}
 	}
 	p.up.data = func(b []byte) {
+		p.inGot += len(b)
 		if !p.packed {
 			p.upOut = append(p.upOut, b...)
 		} else if p.in = append(p.in, b...); len(p.in) == p.inWant && len(p.input) > 0 {
@@ -63,6 +64,9 @@ func newPipeline(out io.Writer) *pipeline {
 			at, n := len(p.upOut), len(p.in)/2
 			p.upOut = slices.Grow(p.upOut, n)[:at+n]
 			packSamples(p.upOut[at:], p.in)
+		}
+		if p.inWant > 0 && p.inGot == p.inWant {
+			p.finishBlock()
 		}
 	}
 	return p
@@ -140,6 +144,15 @@ func (p *pipeline) reply(n int) {
 	}
 }
 
+// finishBlock emits or records the single reply owed for a completed Engine block.
+func (p *pipeline) finishBlock() {
+	if p.nplanes == 0 {
+		p.owed++
+	} else {
+		p.reply(p.maxBlock)
+	}
+}
+
 // flush sends every queued frame, in maxBlock pieces.
 func (p *pipeline) flush() {
 	for p.queued() > 0 {
@@ -166,6 +179,9 @@ func (p *pipeline) fromEngine(b []byte) ([]byte, error) {
 		}
 		switch f["action"] {
 		case "block":
+			if p.done {
+				return 0, fmt.Errorf("stems protocol: block after done")
+			}
 			if p.eng.Channels <= 0 {
 				return 0, fmt.Errorf("stems pipeline: missing input channels")
 			}
@@ -173,12 +189,15 @@ func (p *pipeline) fromEngine(b []byte) ([]byte, error) {
 			if err != nil {
 				return 0, err
 			}
-			p.started, p.awaiting = true, true
+			p.started = true
 			p.blocks++
 			if p.input == nil && p.packed {
 				p.input = make([][]byte, p.eng.Channels)
 			}
-			p.in, p.inWant = p.in[:0], int(n)*p.eng.Channels*4
+			p.in, p.inGot, p.inWant = p.in[:0], 0, int(n)*p.eng.Channels*4
+			if p.inWant == 0 {
+				p.finishBlock()
+			}
 			return int64(p.inWant), nil
 		case "done":
 			p.done = true
@@ -190,14 +209,6 @@ func (p *pipeline) fromEngine(b []byte) ([]byte, error) {
 	})
 	if e == nil {
 		e = p.eng.Err()
-	}
-	if e == nil && p.awaiting && p.up.skip == 0 {
-		p.awaiting = false
-		if p.nplanes == 0 {
-			p.owed++
-		} else {
-			p.reply(p.maxBlock)
-		}
 	}
 	return p.upOut, cmpErr(e, p.err)
 }
