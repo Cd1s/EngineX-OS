@@ -30,7 +30,9 @@ func copyEncryptedOneLibraryFixture(t *testing.T, dst string) {
 }
 
 func TestExportSelectionMTimeAndFallback(t *testing.T) {
-	t.Run("prefers_onelibrary_when_mtimes_close", func(t *testing.T) {
+	// Both files from one rekordbox 7 export: export.pdb stays first (r2 review),
+	// so drives imported before keep their source, IDs and stamp.
+	t.Run("prefers_export_pdb_when_mtimes_close", func(t *testing.T) {
 		root := t.TempDir()
 		testfixture.Export(t, root)
 		testfixture.Write(t, root, "MUSIC/one.wav", testfixture.WAV(true))
@@ -51,8 +53,8 @@ func TestExportSelectionMTimeAndFallback(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(lib.Tracks) != 3 || lib.Tracks[0].ID != 101 {
-			t.Fatalf("expected OneLibrary tracks when mtime within 5s, got %+v", lib.Tracks)
+		if len(lib.Tracks) != 5 || lib.Tracks[0].ID != 1 {
+			t.Fatalf("expected export.pdb tracks when mtime within 5s, got %+v", lib.Tracks)
 		}
 	})
 
