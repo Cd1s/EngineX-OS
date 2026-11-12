@@ -1,14 +1,14 @@
 # EngineX OS 5.3.0.4 发版与 Issue 修复记录（2026-11-11，已发布）
 
 - **日期**：`2026-11-12`
-- **状态**：最终 RC 已合入全部计划项（含 `issue176-sclive4-stems` `77c4c9f`、`issue177-sclive4-perf` `66ff35b`、`realdeck-5304-fixes` `ebb985e` / `322839d`、防回归核验表 `REGRESSION-CHECKLIST.md`、紧凑顶栏第 2 行 `header-row2-compact` `207dc55` / `3460bb1`、`#162` `9fa0cff`、一代首次启动 Stems 弹窗抑制 `gen1-stems-prompt` `1cfc6bb`、`#202 / #203` `3649be7`、翻译补全 `323cb15` / `f48150f` / `240b22d` / `i18n-settings-full` `34ed7d4`、播放与效果设置收口 `fx-settings-declutter` `c2d9d74`、`MASTER` 灯恢复原厂暗亮值 `1` 及原厂转盘行为 `led-157-stock` `7f753c2`、影子 `Sync` 相位对齐 `shadow-sync-snap` `4ce7bef`、中国大陆与全球 NTP 同步及断电时区持久化 `time-sync-cn` `d0de27c`、`#140` 断电二次启动与启动屏门禁 `b82197b`、双机沙箱进程作用域隔离 `twin-scoped-kill` `73a060c`、启动安全网 `boot-safety-net` `f047653`、`#178` Rekordbox MP3 编码延迟偏移修正 `caee928`、独立播放机 `Sampler Output` / 原厂 `LinkBeatJumpLoopSize` 解锁 / 移除失效 `Auto-Analyze` 行 `ui-link-autoanalyze` `4a907ee`、`#208` 官方 Mod 静态 Go 运行时 `mods-go-runtime` `71ca3df`、三语菜单路径与文档对齐 `docs-audit-5304` `a31caee`、`#206` 一体机流媒体曲目双向录音 `issue206-stream-record` `f468406`、电脑端 LAN Stems 默认 `htdemucs` / 机上 HQ 提示 / 安装包内置 worker `stems-hq-hint` `aa895e5` 与 `#201` 独立碟机双碟机配对 2 轨视图 `issue201-paired-2deck` `136ad1b`；按维护者决定，三组 `release-gate.sh` 门禁已在 `035ae0d` 上全部 `139 PASS, 0 FAIL` 通过，最终 RC 免重复跑门禁，直接上实机验收后发布）
-- **版本范围**：`v5.3.0.3`（tag `cd789f8` / 构建提交 `b941ea4`）→ `v5.3.0.4`（上一轮 RC 构建提交：`5038e5b`，当前滚动整合基准：`9bf4bd8`；最终构建提交、三组门禁与 20 个产物 SHA-256 待正式打包回填）
-- **回滚点**：`v5.3.0.3`（tag `cd789f8`，构建提交 `b941ea4`；同版本更早构建 `37e83ea`、`9616419`）
-- **覆盖机型与产物（共 20 个发布资产 + `SHA256SUMS.txt`）**：
+- **状态**：已合入 `#210` Spotify `go-librespot` 原生音频解密与零配置双登录（`59e0ec6`）、`#201` 联机视图 `Linked View` 与双碟机配对 2 轨视图（`136ad1b` / `61e4ed5`）及 `#215` 二代机全系 8 款统一 `*-Update.img` + `EngineX-Installer` 一键解锁（退役公开 `*-Data-Bundle.tar.gz`），连同此前全部计划项（`issue176-sclive4-stems` `77c4c9f`、`issue177-sclive4-perf` `66ff35b`、`realdeck-5304-fixes` `ebb985e` / `322839d`、防回归核验表 `REGRESSION-CHECKLIST.md`、紧凑顶栏第 2 行 `header-row2-compact` `207dc55` / `3460bb1`、`#162` `9fa0cff`、一代首次启动 Stems 弹窗抑制 `gen1-stems-prompt` `1cfc6bb`、`#202 / #203` `3649be7`、翻译补全 `323cb15` / `f48150f` / `240b22d` / `i18n-settings-full` `34ed7d4`、播放与效果设置收口 `fx-settings-declutter` `c2d9d74`、`MASTER` 灯恢复原厂暗亮值 `1` 及原厂转盘行为 `led-157-stock` `7f753c2`、影子 `Sync` 相位对齐 `shadow-sync-snap` `4ce7bef`、中国大陆与全球 NTP 同步及断电时区持久化 `time-sync-cn` `d0de27c`、`#140` 断电二次启动与启动屏门禁 `b82197b`、双机沙箱进程作用域隔离 `twin-scoped-kill` `73a060c`、启动安全网 `boot-safety-net` `f047653`、`#178` Rekordbox MP3 编码延迟偏移修正 `caee928`、独立播放机 `Sampler Output` / 原厂 `LinkBeatJumpLoopSize` 解锁 / 移除失效 `Auto-Analyze` 行 `ui-link-autoanalyze` `4a907ee`、`#208` 官方 Mod 静态 Go 运行时 `mods-go-runtime` `71ca3df`、三语菜单路径与文档对齐 `docs-audit-5304` `a31caee`、`#206` 一体机流媒体曲目双向录音 `issue206-stream-record` `f468406`、电脑端 LAN Stems 默认 `htdemucs` / 机上 HQ 提示 / 安装包内置 worker `stems-hq-hint` `aa895e5`）
+- **版本范围**：`v5.3.0.3`（tag `c2395e2` / `cd789f8`，构建提交 `b941ea4`）→ `v5.3.0.4`（首轮公开构建提交：`61e4ed5` / tag `b536671`；合入 `#215` 后重发同一 `v5.3.0.4` Release 并更新统一 20 产物 SHA-256）
+- **回滚点**：`v5.3.0.3`（tag `c2395e2` / `cd789f8`，构建提交 `b941ea4`；同版本更早构建 `37e83ea`、`9616419`）
+- **覆盖机型与产物（共 20 个发布资产 + `SHA256SUMS.txt`；`*-Data-Bundle.tar.gz` 已从公开 Release 退役，`#215`）**：
   - **8 款一代机完整固件（`*-Update.img`）**：`SC5000`（JP07）、`SC5000M`（JP08）、`PRIME GO`（JP11）、`SC6000`（JP13）、`SC6000M`（JP14）、`PRIME 4`（JC11）、`PRIME 2`（JC16）、`Mixstream Pro`（NH08）
-  - **8 款二代机 `/data` 数据包（`*-Data-Bundle.tar.gz`，Beta）**：`SC LIVE 4`（JP21）、`SC LIVE 2`（JP20）、`PRIME 4+`（JC11S）、`PRIME GO+`（JP11S）、`Mixstream Pro+`（NH08S）、`Mixstream Pro Go`（NH10）、`PRIME 4 G2`（JP24，64-bit AZ04）、`Rane SYSTEM ONE`（RMZ2，64-bit AZ04）
-  - **4 平台桌面一键安装器（`EngineX-Installer-5.3.0.4-*`）**：Windows 10/11 x64（`.zip`）、macOS Apple Silicon M1–M4（`.zip`）、macOS Intel（`.zip`）、Linux x86_64（`.tar.gz`）
-- **在线文档与着陆页**：`docs/index.html` + `docs/site/{content.js,mods.js,app.js,style.css}`（简中 / 繁中 / English 三语文档站与三份 README 重写为纯 DJ 语言，移除全部模拟示意图与已发布功能的 `tone: "new"` 标记，递增静态缓存参数至 `?v=20`，并基于 `1dfab83` 通过 `eglfs` + `virtio-gpu` 重拍全套三语控制中心、布局 `Linked View`、全部配置与设置子页、采样器输出 `Layer A / B`、双碟机配对 2 轨、双机 4 轨影子同屏及 `:8080` Web 控制台实测截图）
+  - **8 款二代机统一升级镜像（`*-Update.img`，128 字节 `ENGINEX_DATA_BUNDLE_IMG_V1` SHA-256 头部 + `/data` 升级包，`#215`）**：`SC LIVE 4`（JP21）、`SC LIVE 2`（JP20）、`PRIME 4+`（JC11S）、`PRIME GO+`（JP11S）、`Mixstream Pro+`（NH08S）、`Mixstream Pro Go`（NH10）、`PRIME 4 G2`（JP24，64-bit AZ04）、`Rane SYSTEM ONE`（RMZ2，64-bit AZ04）
+  - **4 平台命令行一键安装器（`EngineX-Installer-5.3.0.4-*`）**：Windows 10/11 x64（`.zip`）、macOS Apple Silicon M1–M4（`.zip`）、macOS Intel（`.zip`）、Linux x86_64（`.tar.gz`）
+- **在线文档与着陆页**：`docs/index.html` + `docs/site/{content.js,mods.js,app.js,style.css}`（简中 / 繁中 / English 三语文档站与三份 README 重写为纯 DJ 语言，更新 `#210` Spotify 原生解密与 `#215` 全系 16 款统一 `*-Update.img` 下载链接及两阶段解锁教程，移除全部模拟示意图与已发布功能的 `tone: "new"` 标记，递增静态缓存参数至 `?v=21`，并基于 `1dfab83` 通过 `eglfs` + `virtio-gpu` 重拍全套三语实测截图）
 
 ---
 
@@ -16,6 +16,7 @@
 
 | Issue / PR | 模块 | 原因与修法摘要 | 验证与回归测试 |
 | --- | --- | --- | --- |
+| **#215**（二代机全系 8 款统一 `*-Update.img`、安装器一键两步解锁与公开 `Data-Bundle.tar.gz` 退役） | `tools/az01-packer/build-data-bundle.py`<br>`tools/az01-packer/build-release.sh`<br>`pkg/webui/update.go`<br>`cmd/enginex-installer/`<br>`README*.md` / `docs/site/content.js` | **原因**：此前一代机发布 `*-Update.img` 而二代机单独发布 `*-Data-Bundle.tar.gz`，用户需区分两套产物格式；且二代机仅在 `Engine` 进程注入 `LD_PRELOAD` 时，`az01-update --file`（U 盘刷机）、`planck-remote-screen --update`（全屏 OTA）与 `az01-update --erase-data`（恢复出厂设置）未串联完整预加载链路。<br>**修法**：① `boot-activate.sh` 绑定挂载的 `/usr/Engine/Scripts/engine` 同步为 `/usr/sbin/az01-update --file`、`/usr/bin/planck-remote-screen --update` 与 `az01-update --erase-data` 注入 `LD_PRELOAD=$lib_hook`，已有二代 EngineX 安装在无 `gen2-locked` 时开机自动写入 `gen2-unlocked`，`checkRelease` 全系 16 款统一匹配 `-Update.img`，使已解锁二代机原生支持 U 盘直刷 `*-Update.img`、屏幕在线 OTA 并在 Factory Reset 后保留 `gen2-unlocked`；② `EngineX-Installer` 直接发现并下载 `<PREFIX>-<VERSION>-EngineX-OS-<Model>-Update.img`（`--image`/`--bundle` 支持本地 `*-Update.img` 并校验 128 字节 `ENGINEX_DATA_BUNDLE_IMG_V1` SHA-256 头部，同时保留旧 `.tar.gz` 兼容），在模式 A（SSH）、模式 B（`fastboot`）与模式 C（`1cc5:2027` `usbupdate`）统一展示 `[1/2] Unlocking 2nd-gen .img update chain` → `[2/2] Flashing *-Update.img`；③ 公开 Release 统一打包 16 个 `*-Update.img`（8 一代 + 8 二代）+ 4 个 `EngineX-Installer` + `SHA256SUMS.txt`（退役公开 `*-Data-Bundle.tar.gz`），同步更新三语 README、官网与发版规范。 | `go test -race ./pkg/webui/... ./cmd/enginex-installer/...`、`python3 -m unittest discover -s tools/az01-packer`、`test_sclive4_bootstrap.sh`（SCLIVE4 / PRIME4PLUS / AZ04）、`node --check docs/site/content.js`；二代真机首次一键解锁 + U 盘 `*-Update.img` 升级待实机抽验。 |
 | **#210**（Spotify 原生解密、零配置双登录与纯 Go Ogg 分析） | `pkg/providers/spotify*.go`<br>`pkg/webui/jobs.go` / `ui_login.go`<br>`pkg/analyzer/decode_ogg.go`<br>`pkg/deemixclient/` | **原因**：旧实现请求不存在的 Web API 音频接口，Connect 仅解开外层 blob 而不保存凭据，下载失败转用 Deemix，且分析器不支持 Vorbis。<br>**修法**：接入纯 Go `go-librespot` AP/login5、音频密钥及 AES-CTR 解密，优先 320 kbps Ogg Vorbis（其次 160/96 kbps），严格禁止跨平台回退；Connect 中选择 `EngineX OS` 即可持久保存设备登录，默认二维码直接打开官方 RFC 8628 Device Auth 确认页，优先于旧 Client ID 与 relay；旧 Web API token 明确提示重新配对。纯 Go `.ogg` 解码、质量检查、封面保护与 BPM/调性/波形分析使用同一 `Format: "ogg"` 和实际采样率，导入 Engine `m.db`。 | `TestSpotifyDownloadAnalyzeImportEndToEnd` 验证 44.1 kHz/320 kbps 加密 Vorbis 下载→检查→分析→真实 Engine SQL 入库至 `done`，无 Deemix/目录检索调用；原生协议、双登录、畸形 Ogg 与缓存回归测试；真机 Premium 配对与播放待维护者验收。 |
 | **#140**（启动卡死与崩溃循环的原厂回退安全网，候选） | `engine-ui-guard` / `engine-guardian.service`<br>`pkg/webui/boot*`<br>`tools/ui-mod/build_packs.py` | **现状**：PRIME 4 真机根因尚未确认；原生 ARM 沙箱首次 UI 就绪耗时为 `8.862–14.120 s`，10,000 曲目显式库修复耗时 `7.287 s`。厂商镜像没有 `timeout` 工具，已为 guardian 增加自身截止时间。<br>**修法**：复用现有 guard，在 `180 s` 无 UI 就绪或有效进展、或 `300 s` 内失败 `3` 次后持久回退至无 Engine preload / UI 包的原厂进程，保留网络诊断；脱敏报告只导出到标为可移除的 USB 盘与 SD 卡，固定盘跳过。reserve 修复先持久备份再原子替换，截止时不移走原数据库；FAT/exFAT 备份需要额外空间，超时临时文件留待下次修复清理。详见 [设计与限制](boot-safety-design.md) 和 [三语取报告 FAQ](boot-recovery-faq.md)。 | `boot_test.go`、`boot_report_test.go`、`reserve_test.go`、`test_boot_safety.sh`、`boot-safety-sandbox.sh`、release gate 当前 token 就绪检查；最终镜像与 gen2 门禁由本分支交付报告记录，未声称 PRIME 4 真机已复现或修复根因 |
 | **#49**（影子轨模式、Engine 模式头部/概览镜像、静音影子槽 MASTER 选举排除、超 `+100%` 原生 Sync 跟随、Sync 相位拉入与寻道落地校验、显示模式对齐原厂、独立播放器四轨颜色与行为保留、MASTER 灯原厂暗亮值 `1`） | `pkg/webui/shadow.go`<br>`pkg/webui/shadow_display.go`<br>`pkg/enginedb/display.go`<br>`tools/ui-mod/build_packs.py`<br>`tools/ui-mod/engine_ui_hook.c` | **原因**：① 四轨模式下对端关机/退歌时残留波形，或 `RemoteState` 订阅死锁阻塞流媒体切源，流媒体曲目显示数字缓存文件名；② 影子轨缺乏统一加载策略，拷贝期间跳回 `No Track Loaded`，Engine 模式下影子轨头部读本地静音副本的空白标签/本地分析调性且缺源轨 `Sync`/`LEAD`/`Loop`/`KeyOffset`/`Stems`/`Slip` 状态，本机静音影子槽在 `engineSync` 中可能误参与 `MASTER` 选举，原厂 `Sync` 超过 `+100%` 变速时 `SpeedState` 显示截断在 `+100.0%` 导致影子副本限幅失步，开启 `Sync` 时源轨原生相位拉拽与播放态 seek 落地损耗导致对齐滞后，且空 Engine 槽重复解析快照增加开销；③ 显示模式（CDJ 或回退）头部与波形泳道同原厂存在视觉差异，且原厂 `beatData` 概览整秒截断与负采样点 main cue 会被校验拦截；④ 独立播放器（`SC5000 / SC6000`）开启四轨后原厂将其视作四通道一体机，丢失 `Player #`、`Layer A / B` 双层选色盘、`Enable for Dual Deck` 与 `Browse` 按压直载当前层行为。<br>**修法**：① 对端发送 UDP 告别包并在 350 ms 防抖后执行 `Unload` + `UnSync` + 交还 `MASTER`，移除 `RemoteState` 死锁订阅，从源机 `stm.db` 解析真实 `Artist - Title`；② 新增 `Shadow Deck Mode`（`auto` / `engine` / `cdj`）：默认 `Auto` 下只要对端 EngineX 或 CDJ 曲目可拷贝即由本机 Engine 静音加载，无法拷贝的 CDJ 曲目自动回退显示 rekordbox 波形并提示原因，拷贝期间立即显示源曲目信息与原厂 `ProgressRing` 进度环（限制单曲音频拷贝上限 1 GiB，下载前清理过期缓存防 `ENOSPC`，并修复时钟回拨后 POST 恢复）；③ Engine 模式下影子轨头部镜像源轨真实 `Title`、`Artist`、`Key`、`KeyOffset`、`AutoLoop`、`Stems` 图标、`Sync` 绿 BPM 与仅在源轨显示时点亮的 `LEAD`（`ArtistSong.qml` 同时遵循 `Hide Title/Artist`），概览波形绘制源轨 `Slip` 滑行线，Follower 采用均值线弯音追赶并跟踪源端 `Sync` 原生相位拉拽斜坡、校验播放态 seek 落地（最多补偿 1 次，且释放进行中的弯音，`aff8846` / `4ce7bef`），在 5.3.0 hook 新增 `0x16fbc38` 站点排除本机静音影子槽参与 `MASTER` 选举（`f6b87f8`），当源轨在 `Sync` 下超过 `+100%` 时按真实 BPM 比值上报并通过原厂 `Sync` 驱动影子副本突破推子上限且保持位置闭环（`322839d`），并跳过空 Engine 槽重复快照（`4386093`）；④ 显示数据兼容原厂 `beatData` 概览整秒截断与早于 `0` 的 main cue（`fd9c8d5`），`All CDJ Mode` 与 CDJ 回退下头部与波形层全面对齐原厂；⑤ 独立播放器开启四轨后完整恢复 `Player #`、`Deck Color`（`Layer A / B` 双层选色盘）、`Enable for Dual Deck`、`Browse` 按压直载当前层、远程碟机选择、`Engine Connect` 与 `Touch FX Mute`；⑥ `MASTER` 灯保留四轨独立播放器的本轨主控状态路径，所有机型的非主控灯亮度恢复原厂暗亮值 `1`（`7f753c2`）。 | `go test -race ./pkg/webui/... ./pkg/enginedb/...`、`tools/az01-packer/test_ui_mod.py`（含 `ShadowNativeOverRangeTest`、`ShadowSyncSnapTest`、`ShadowLandingTest`、`ShadowSyncAlignmentGuardTest`、`MasterLedStockTest` 全部 PASS）、`tools/ui-mod/test_shadow_master.c`（144 项原生用例 PASS）；双 SC5000 实机 A1–A11、RC R1–R7、超 `+100%` `sync-over100-322839d.mp4` 与双机沙箱录像 S1–S8 验收通过 |
@@ -101,6 +102,7 @@
   12. **二代数据包 `engine.service` `HOME` 与着色器缓存环境对齐（#177）**：已在 SCLIVE4 / PRIME4PLUS / AZ04 沙箱验证激活与目录权限，二代真机长时间运行下的着色器缓存占用尚未单独在物理硬件上计量。
   13. **轨道顶栏第 2 行最宽定列与固定热标拍数倒数（`207dc55`）**：已通过 `DeckHeaderLayoutTest` 与 `eglfs` 渲染核验，待最终 `5.3.0.4` 镜像在实机全视图预设（`Main` / `GroupedMini` / `SplitMini`）下目视确认。
   14. **PX 延时效果毫秒模式（#162，默认 `Default (Off)`）**：已在原生 armhf/AArch64 DSP 测试与 PRIME 4 选择器沙箱探针验证 `10–4000 ms` 脉冲、交叉淡变及默认关闭逐字节一致；手头无带 Beat FX 的物理真机，PRIME 4 实体旋钮/触控延迟、OLED 显示、实机听感、外部输入路由与多效果并发负载尚未在物理硬件验证。
+  15. **Spotify Premium 原生解密播放（#210）与二代机首次一键解锁 + U 盘 `*-Update.img` 刷入（#215）**：已在端到端单测与 armhf/AZ04 沙箱验证，待维护者在真机验收 Spotify Connect / Device Auth 配对播放及二代真机 U 盘 `*-Update.img` 升级。
 
 ---
 
@@ -145,10 +147,10 @@
 
 ---
 
-## 4. 发布产物与 SHA-256 校验表（已发布 v5.3.0.4）
+## 4. 发布产物与 SHA-256 校验表（v5.3.0.4 统一 20 产物清单）
 
-- **构建提交**：`61e4ed5`（分支 `agent/integration-5304-20261111`；`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）。之后进入发布提交的只有测试文件与文档，镜像内容不变。
-- **产物目录**：编译机上的 `/var/tmp/sc5000-release-5.3.0.4`，`SHA256SUMS.txt` 20 行，`sha256sum -c` 全部 OK。
+- **首轮构建提交**：`61e4ed5`（分支 `agent/integration-5304-20261111`；`build-release.sh` 公钥参数 `none`，公开镜像不含任何内置 SSH 公钥）。合入 `#215` 后，公开产物统一为 **16 个 `*-Update.img`（8 一代 + 8 二代）+ 4 个 `EngineX-Installer` = 20 个产物**（公开 `*-Data-Bundle.tar.gz` 已退役）；下表一代机与安装器暂列 `61e4ed5` 首轮发布值，合入 `#215` 全量重编重发后统一回填最新 20 行 `SHA256SUMS.txt`。
+- **产物目录**：编译机上的 `/var/tmp/sc5000-release-5.3.0.4`，`SHA256SUMS.txt` 20 行（16 个 `*-Update.img` + 4 个 `EngineX-Installer-5.3.0.4-*`）。
 - **回滚点**：`v5.3.0.3`（tag `c2395e2`）。
 
 ### 一代机型完整固件（`*-Update.img`）
@@ -164,18 +166,18 @@
 | PRIME 4 | Denon DJ PRIME 2 | JC16 | `PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img` | `b63c3b584e428c0ba729acf72b63f80b7581614af958f2bf8bcd10e2b238fe63` |
 | PRIME 4 | Numark Mixstream Pro | NH08 | `MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img` | `b63c3b584e428c0ba729acf72b63f80b7581614af958f2bf8bcd10e2b238fe63` |
 
-### 二代机型 `/data` 数据包（`*-Data-Bundle.tar.gz`，Beta）
+### 二代机型统一升级镜像（`*-Update.img`，#215）
 
 | 架构组 | 机型 | 板号 | 文件名 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `84d56b78f913476eccbf47a0bd12e1cb61329cfd5d6e3f096acdcb0c61c4e1f2` |
-| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `21d1680eeb6d8171f284fef3c77170661b3b5fd02d9806d91f8ef6271221d713` |
-| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `84e8c0b5da4db4d8e3f59ffd923eccdbe2584297db974da5d2f6d69e03af0c47` |
-| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `3673e1703e5780ab3a52f843c749713651cdae9abe0b2aa99a8fff4f0fba46f0` |
-| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `87182b5c695cbd58a6af6ff6d3291c4bf78eb46ed43c8e47732ae2b89bbe7417` |
-| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `26e11a68fcc68cfbab9f6c4e53f4703e9e4a2dd70dbf0facef02758298ca2dc2` |
-| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `1bc52632cebc757dc178b14fb0d47cca52011157caaed39781e4564d75abf480` |
-| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz` | `f2050e6fd0ef1f49c6d312e8a721a098e518fc3fc4cdf6b8ef147bcb1abac4f2` |
+| AZ0x (armhf) | Denon DJ SC LIVE 4 | JP21 | `SCLIVE4-5.3.0.4-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img` | `待 #215 统一打包回填` |
+| AZ0x (armhf) | Denon DJ SC LIVE 2 | JP20 | `SCLIVE2-5.3.0.4-EngineX-OS-Denon-SC-LIVE-2-JP20-Update.img` | `待 #215 统一打包回填` |
+| AZ0x (armhf) | Denon DJ PRIME 4+ | JC11S | `PRIME4PLUS-5.3.0.4-EngineX-OS-Denon-PRIME-4-Plus-JC11S-Update.img` | `待 #215 统一打包回填` |
+| AZ0x (armhf) | Denon DJ PRIME GO+ | JP11S | `PRIMEGOPLUS-5.3.0.4-EngineX-OS-Denon-PRIME-GO-Plus-JP11S-Update.img` | `待 #215 统一打包回填` |
+| AZ0x (armhf) | Numark Mixstream Pro+ | NH08S | `MIXSTREAMPROPLUS-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Plus-NH08S-Update.img` | `待 #215 统一打包回填` |
+| AZ0x (armhf) | Numark Mixstream Pro Go | NH10 | `MIXSTREAMPROGO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-Go-NH10-Update.img` | `待 #215 统一打包回填` |
+| AZ04 (aarch64) | Denon DJ PRIME 4 G2 | JP24 | `PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img` | `待 #215 统一打包回填` |
+| AZ04 (aarch64) | Rane SYSTEM ONE | RMZ2 | `SYSTEMONE-5.3.0.4-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img` | `待 #215 统一打包回填` |
 
 ### 跨平台一键安装器（`EngineX-Installer`）
 
@@ -192,6 +194,6 @@
 
 - **发布前实机安装（2026-11-12）**：维护者的两台 SC5000（JP07）在空闲时先备份，再在线安装本次公开 JP07 镜像（`166a5bf5…`）。只读检查两台均通过：`version.txt` 为 `5.3.0.4`、Engine 运行、进入演出界面、无安全模式标记、stream-sync 与 SSH 正常、根分区只读；未发送任何按键或触屏操作。联机视图、Shift + Layer、影子轨模式即时切换等交互项由维护者上机确认。
 
-- **一代机（8 款 `.img`）**：已刷 `5.3.0.3`、`5.3.0.2`、`5.3.0.1.x` 或 `5.0.4.2` 的设备在正式发布后可于 `设置 → 关于 / 更新` 直接收到 `5.3.0.4` 在线升级推送；首次安装可将对应 `.img` 放入 FAT32/exFAT U 盘根目录免电脑直刷，或进入 `Computer Update Mode` 用 `EngineX-Installer-5.3.0.4` 线刷。
-- **二代机（8 款 `Data-Bundle`）**：已安装 `5.3.0.2` / `5.3.0.3` 数据包的二代机可在屏幕 `设置 → 关于 / 更新` 一键在线升级至 `5.3.0.4`；首次安装可使用 `EngineX-Installer-5.3.0.4`（Windows 二代机推荐按文档使用 `WSL 2 + usbipd-win` 以 root 运行 Linux 版安装器）。
-- **配置与数据保留**：升级保留 `/data/enginex`（及 `/data/sc5000-custom` 兼容软链）下的流媒体登录态、歌单缓存、视图预设、已安装 Mod 与 SSH 公钥。回滚时一代机刷回 `v5.3.0.3` 对应 `.img`，二代机重装 `v5.3.0.3` `Data-Bundle.tar.gz`。
+- **一代机（8 款 `*-Update.img`）**：已刷 `5.3.0.3`、`5.3.0.2`、`5.3.0.1.x` 或 `5.0.4.2` 的设备在正式发布后可于 `设置 → 关于 / 更新` 直接收到 `5.3.0.4` 在线升级推送；首次安装可将对应 `*-Update.img` 放入 FAT32/exFAT U 盘根目录免电脑直刷，或进入 `Firmware Update Mode` 用 `EngineX-Installer-5.3.0.4` 线刷。
+- **二代机（8 款 `*-Update.img`，#215）**：原厂未解锁的二代机首次安装只需进入 `Firmware Update Mode` 连 USB 运行一次 `EngineX-Installer-5.3.0.4`（自动执行 `[1/2] 一键解锁 .img 升级链` + `[2/2] 刷入 *-Update.img`；Windows 二代机按文档使用 `WSL 2 + usbipd-win` 以 `wsl -u root` 运行 Linux 版安装器）；此后所有后续更新（以及此前已安装 `5.3.0.2` / `5.3.0.3` 的二代机）均可直接把对应二代机型的 `*-Update.img` 拷入 U 盘插机升级，或在屏幕 `设置 → 关于 / 更新` 一键在线升级至 `5.3.0.4`，全程无需电脑。
+- **配置与数据保留**：升级保留 `/data/enginex`（及 `/data/sc5000-custom` 兼容软链）下的流媒体登录态、歌单缓存、视图预设、已安装 Mod 与 SSH 公钥。回滚时一代机刷回 `v5.3.0.3` 对应 `.img`，二代机可通过 `:8080` 恢复原厂或重装 `v5.3.0.3` 历史包。

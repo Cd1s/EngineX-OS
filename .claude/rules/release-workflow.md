@@ -13,18 +13,17 @@
 | 文件 | 要改的地方 |
 | --- | --- |
 | `rootfs-overlay/etc/sc5000/version.txt` | 整个文件内容就是 `<VERSION>` |
-| `README.md`、`README.zh-CN.md`、`README.zh-TW.md` | 第 3 行 hero 图的 `alt="EngineX OS <VERSION>"`；简介里的 `**EngineX OS <VERSION>**`；性能对比表表头里的 `` `EngineX OS <VERSION>` ``；本版本新特性与使用教程章节；「如何安装与升级」里 4 个平台 `EngineX-Installer-<VERSION>`、8 款一代机 `*-Update.img` 与 8 款二代机 `*-Data-Bundle.tar.gz` 的文件名和下载链接（三份 README 同步更新） |
-| `docs/index.html`、`docs/site/{content.js,app.js,style.css}` | 官网 `https://enginexdj.com`（独立全屏首页 `Home` + 三栏使用文档 `Docs`）：更新三语 `version: "<VERSION>"`、新功能章节与刷机/使用教程、全部 20 条下载链接（4 个安装器 + 8 个 `.img` + 8 个 `Data-Bundle.tar.gz`），并递增 `docs/index.html` 与 `docs/site/content.js` 里的静态资源缓存参数 `?v=N` |
+| `README.md`、`README.zh-CN.md`、`README.zh-TW.md` | 第 3 行 hero 图的 `alt="EngineX OS <VERSION>"`；简介里的 `**EngineX OS <VERSION>**`；性能对比表表头里的 `` `EngineX OS <VERSION>` ``；本版本新特性与使用教程章节；「如何安装与升级」里 4 个平台 `EngineX-Installer-<VERSION>`、8 款一代机 `*-Update.img` 与 8 款二代机 `*-Update.img` 的文件名和下载链接（共 20 条，三份 README 同步更新；`*-Data-Bundle.tar.gz` 已从公开发布退役，#215） |
+| `docs/index.html`、`docs/site/{content.js,app.js,style.css}` | 官网 `https://enginexdj.com`（独立全屏首页 `Home` + 三栏使用文档 `Docs`）：更新三语 `version: "<VERSION>"`、新功能章节与刷机/使用教程、全部 20 条下载链接（4 个安装器 + 16 个 `*-Update.img`：8 款一代 + 8 款二代），并递增 `docs/index.html`（及 `docs/site/content.js` 如有）里的静态资源缓存参数 `?v=N` |
 | `docs/site/assets/shots/*.png`、`docs/assets/screenshots/{zh-CN,zh-TW,en}/*.png` | 凡涉及界面、菜单、控制中心磁贴或版本号变更，必须在编译机上基于 `<VERSION>` 底包通过 `QT_QPA_PLATFORM=eglfs`（`/dev/dri/card0` `virtio-gpu` + Mesa OpenGL，避免 `offscreen` 下 `ColoredImage` 图标空白）重新渲染三语实测截图并同步替换官网与 README 截图（实机硬件专属截图如 `07-bluetooth-audio.png` 保持不变） |
 | `docs/assets/hero-banner*.svg` | 三张 banner 现在不写版本号。大版本换视觉或 banner 里出现版本号时才改，三语一起改 |
 | `tools/az01-packer/README.md` | 示例命令里的版本号（可选，保持示例与现行版本一致） |
 
-下载链接格式（文件名带版本号，所以每次升版本都要改）：
+下载链接格式（文件名带版本号，所以每次升版本都要改；全系 16 款一代与二代机型统一使用 `*-Update.img`）：
 
 ```
 https://github.com/Cd1s/EngineX-OS/releases/latest/download/EngineX-Installer-<VERSION>-<platform>.(zip|tar.gz)
 https://github.com/Cd1s/EngineX-OS/releases/latest/download/<PREFIX>-<VERSION>-EngineX-OS-<Model>-Update.img
-https://github.com/Cd1s/EngineX-OS/releases/latest/download/<PREFIX>-<VERSION>-EngineX-OS-Data-Bundle.tar.gz
 ```
 
 改完检查没有漏掉的旧版本号（测试夹具与历史版本对比章节里的旧版本号不用改）：
@@ -59,7 +58,7 @@ JC11S fixture 是独立的官方 PRIME4PLUS rootfs，不能用 SC LIVE 4 或 PRI
 自建的目录后设置 `JC11S_ROOTFS`；不要写入只读的固定实验材料目录。普通 SC LIVE 4
 单独检查不设置此变量时会明确 WARN 跳过 JC11S，**发版不得跳过**。若要同时回归真实
 发布包的安装器回读，设置 `JC11S_RELEASE_BUNDLE` 为已校验 SHA-256 的 PRIME4PLUS
-Data-Bundle.tar.gz 后运行 Go 测试；该 fixture 测试覆盖新目录与旧 `sc5000-custom` 目录。
+`*-Update.img`（或旧版 `Data-Bundle.tar.gz` 夹具）后运行 Go 测试；该 fixture 测试覆盖新目录与旧 `sc5000-custom` 目录。
 
 涉及 Factory Reset、`az01-update --erase-data`、空白 `/data` 首次启动的改动，只在编译机的 `unshare -m` + chroot 沙箱里用解包出的 rootfs 测，**绝不在实机触发**。
 
@@ -75,16 +74,15 @@ REMOTE_BUILD_HOST=<build host> remote-build --name sc5000-release-<短说明> --
    rm -rf "$OUT"
    sh tools/az01-packer/build-release.sh <VERSION> /root/build/sc5000-lab/fw-5.3.0 none /root/build/sc5000-lab/sbin/fsck.hfsplus "$OUT"
    sh tools/az01-packer/build-installer.sh <VERSION> "$OUT"
-   # only the 8 first-gen images: build-release.sh also writes 8 second-gen *-Update.img that are not published
-   (cd "$OUT" && sha256sum $(for p in SC5000 SC5000M PRIMEGO SC6000 SC6000M PRIME4 PRIME2 MIXSTREAMPRO; do echo "$p-<VERSION>-EngineX-OS-"*-Update.img; done) \
-      *-Data-Bundle.tar.gz EngineX-Installer-<VERSION>-* > SHA256SUMS.txt)'
+   # Unified 20 public release artifacts (#215): all 16 *-Update.img (8 Gen-1 + 8 Gen-2) + 4 EngineX-Installer-* (no *-Data-Bundle.tar.gz uploaded)
+   (cd "$OUT" && rm -f *-Data-Bundle.tar.gz && sha256sum *-Update.img EngineX-Installer-<VERSION>-* > SHA256SUMS.txt)'
 ```
 
 `build-release.sh` 抽 qrc 时用 `qemu-arm -L <rootfs>` 跑 Engine 的静态初始化，编译机装了不带 binfmt 的 `qemu-user`（`--no-install-recommends`）。不要装 `qemu-user-binfmt`：注册了 `qemu-arm` 的 binfmt 会盖过原生执行，门禁会退回软模拟。
 
 第 3 个参数在公开发布时**必须是 `none`**：公开镜像不能内置任何人的 SSH 公钥（#46）。只有维护者自用的私有镜像才传公钥文件，且私有镜像不能上传到 Release。
 
-输出目录必须不存在、且不在任何 git 工作区里。产出 **8 个一代 `*-Update.img`、8 个二代 `*-Data-Bundle.tar.gz`、4 个平台 `EngineX-Installer-<VERSION>-*` 以及汇总 20 个产物的 `SHA256SUMS.txt`**（共 21 个文件）。
+输出目录必须不存在、且不在任何 git 工作区里。产出 **8 个一代 `*-Update.img`、8 个二代 `*-Update.img`、4 个平台 `EngineX-Installer-<VERSION>-*` 以及汇总 20 个产物的 `SHA256SUMS.txt`**（共 21 个文件；`*-Data-Bundle.tar.gz` 不再上传到公开 Release，#215）。
 
 ## 4. 校验镜像
 
@@ -139,7 +137,7 @@ bash tools/az01-packer/release-gate.sh \
 在编译机上直接上传全部 21 个文件（那边 `gh` 已登录 `Cd1s`，不用把 1.3 GB 拉回本机）：
 
 ```sh
-# 资产清单以 SHA256SUMS.txt 为准（20 个）：不要用 *.img，会把不发布的 8 个二代 *-Update.img 一起传上去
+# 资产清单以 SHA256SUMS.txt 为准（20 个：16 个 *-Update.img + 4 个 EngineX-Installer-*，不含已退役的 *-Data-Bundle.tar.gz）
 # 新版本
 gh release create v<VERSION> --repo Cd1s/EngineX-OS --title "EngineX OS <VERSION>" \
   --notes-file notes.md --target <提交> --latest \
@@ -149,7 +147,7 @@ gh release upload v<VERSION> --repo Cd1s/EngineX-OS \
   $(awk '{print $2}' SHA256SUMS.txt) SHA256SUMS.txt --clobber
 ```
 
-- Release Notes 必须包含完整的 **20 个产物 SHA-256 对照表**（8 款一代 `.img`、8 款二代 `Data-Bundle.tar.gz`、4 平台 `EngineX-Installer`），每次重发都要换成新值。
+- Release Notes 必须包含完整的 **20 个产物 SHA-256 对照表**（8 款一代 `*-Update.img`、8 款二代 `*-Update.img`、4 平台 `EngineX-Installer`），每次重发都要换成新值。
 - tag 指向记录这次发布的提交：`git tag -f v<VERSION> <提交> && git push -f origin v<VERSION>`（同一版本重发时移动 tag）。
 - 新版本要设为 `--latest`，README 与官网 `enginexdj.com` 的 `releases/latest/download/...` 链接才会指向它。
 

@@ -58,15 +58,17 @@ PRIME4PLUS data-bundle path when running Go tests. See
 Maintainers follow the checklist in [`.claude/rules/release-workflow.md`](./.claude/rules/release-workflow.md). In short, for version `<VERSION>`:
 
 1. **Version file**: `rootfs-overlay/etc/sc5000/version.txt`.
-2. **Three READMEs** (`README.md`, `README.zh-CN.md`, `README.zh-TW.md`): the hero image `alt`, the version in the intro and the performance table, and all 8 download links in "How to Install & Update":
+2. **Three READMEs** (`README.md`, `README.zh-CN.md`, `README.zh-TW.md`) and **`docs/site/content.js`** (+ `?v=N` in `docs/index.html`): the hero image `alt`, the version in the intro and the performance table, and all **20** download links in "How to Install & Update" (4 `EngineX-Installer-<VERSION>-*` + 8 first-gen `*-Update.img` + 8 second-gen `*-Update.img`; `*-Data-Bundle.tar.gz` is retired from public releases, #215):
    `https://github.com/Cd1s/EngineX-OS/releases/latest/download/<PREFIX>-<VERSION>-EngineX-OS-<Model>-Update.img`
 3. **Hero banners** `docs/assets/hero-banner*.svg`: only if they show a version (they do not today).
-4. **Build** all 8 images and `SHA256SUMS.txt` with `tools/az01-packer/build-release.sh <VERSION> <fw> none ...` from a clean checkout, then spot-check one image per group. Public images never carry an SSH key (`none`).
+4. **Build** all 16 `*-Update.img` images (8 Gen-1 + 8 Gen-2), 4 `EngineX-Installer-<VERSION>-*` archives, and `SHA256SUMS.txt` (20 artifacts total) with `tools/az01-packer/build-release.sh <VERSION> <fw> none ...` and `tools/az01-packer/build-installer.sh <VERSION> <out>` from a clean checkout, then spot-check one image per group. Public images never carry an SSH key (`none`), and `*-Data-Bundle.tar.gz` is not uploaded to public releases.
 5. **Release gate** (mandatory, also for a new vendor base and for same-version re-releases): run `tools/az01-packer/release-gate.sh <previous release .img> <new .img> <VERSION> <new work dir>` as root on the build host, once per image group (JP07, JP13, JC11). It audits the new rootfs (unit dependencies, commands, tool paths, shared libraries), runs the previous release's online update to the new image, and then boots the new rootfs on the same `/data` and checks every core feature: services, UI hook counts, DSP guards, streaming gateway, Stems, Rekordbox, storage and the next online update. No release unless it exits 0.
-6. **Tag and Release** `v<VERSION>`: upload the 8 images and `SHA256SUMS.txt`, and put the SHA-256 table of all 8 models in the release notes.
+6. **Tag and Release** `v<VERSION>`: upload the 20 release artifacts (16 `*-Update.img` + 4 `EngineX-Installer-*`) and `SHA256SUMS.txt`, and put the SHA-256 table of all 20 artifacts in the release notes.
 
-| Image group | Models (prefix, board) |
+| Image / arch group | Models (prefix, board) |
 | --- | --- |
-| SC5000 | `SC5000` JP07, `SC5000M` JP08, `PRIMEGO` JP11 |
-| SC6000 | `SC6000` JP13, `SC6000M` JP14 |
-| PRIME 4 | `PRIME4` JC11, `PRIME2` JC16, `MIXSTREAMPRO` NH08 |
+| Gen-1 · SC5000 | `SC5000` JP07, `SC5000M` JP08, `PRIMEGO` JP11 |
+| Gen-1 · SC6000 | `SC6000` JP13, `SC6000M` JP14 |
+| Gen-1 · PRIME 4 | `PRIME4` JC11, `PRIME2` JC16, `MIXSTREAMPRO` NH08 |
+| Gen-2 · AZ0x (armhf) | `SCLIVE4` JP21, `SCLIVE2` JP20, `PRIME4PLUS` JC11S, `PRIMEGOPLUS` JP11S, `MIXSTREAMPROPLUS` NH08S, `MIXSTREAMPROGO` NH10 |
+| Gen-2 · AZ04 (aarch64) | `PRIME4G2` JP24, `SYSTEMONE` RMZ2 |

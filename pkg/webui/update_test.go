@@ -241,13 +241,17 @@ func TestUpdatePicksGen2ImgWhenUnlocked(t *testing.T) {
 		assets       func(string) string
 		want         string
 	}{
-		{"locked by default", "", both, bundle},
+		{"unlocked by default when gen2-locked is absent", "", both, img},
+		{"explicit gen2-locked falls back to bundle", "gen2-locked", both, bundle},
 		{"unlocked", "gen2-unlocked", both, img},
 		{"unlocked, release has no img", "gen2-unlocked", onlyBundle, bundle},
+		{"default, release has no img", "", onlyBundle, bundle},
 		{"unlocked but gen2-locked wins", "both", both, bundle},
 	} {
 		s, custom := bundleDeck(t, "inmusic,jp21", c.assets, nil)
 		switch c.marker {
+		case "gen2-locked":
+			os.WriteFile(filepath.Join(custom, "gen2-locked"), []byte("1\n"), 0o644)
 		case "gen2-unlocked":
 			os.WriteFile(filepath.Join(custom, "gen2-unlocked"), []byte("1\n"), 0o644)
 		case "both":
@@ -349,9 +353,15 @@ func TestUpdateAppliesTheDataBundle(t *testing.T) {
 		validImg := append(head[:], bundle...)
 
 		s, custom := bundleDeck(t, "inmusic,jp21", imgAssets, validImg)
-		// Initially locked: checkRelease finds no bundle asset, then POST unlock-gen2 invalidates cache and picks .img.
+		// Explicit gen2-locked: checkRelease finds no bundle asset, then POST unlock-gen2 invalidates cache and picks .img.
+		os.WriteFile(filepath.Join(custom, "gen2-locked"), []byte("1\n"), 0o644)
 		if v := getUpdate(s, ""); v.DownloadURL != "" {
 			t.Fatalf("locked deck picked .img: %+v", v)
+		}
+		lockedPart := filepath.Join(custom, "locked.part")
+		os.WriteFile(lockedPart, validImg, 0o644)
+		if !s.tryApplyGen2Image(lockedPart) || s.updateCache.Error != "gen2 .img update is locked" {
+			t.Fatalf("tryApplyGen2Image did not block gen2-locked: %+v", s.updateCache)
 		}
 		s.handleUnlockGen2(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/sc5000/unlock-gen2", nil))
 		if v := getUpdate(s, ""); !strings.HasSuffix(v.DownloadURL, "/dl/"+imgName) {
@@ -362,10 +372,23 @@ func TestUpdateAppliesTheDataBundle(t *testing.T) {
 		if v.Error != "" || v.UpdateAvailable || v.Current != "5.3.0.3" || v.Progress != 1 {
 			t.Fatalf("after Gen-2 .img apply: %+v", v)
 		}
-		for path, want := range map[string]string{"version.txt": "5.3.0.3\n", "bundle/version.txt": "5.3.0.3\n", "ui/packs/a.txt": "5.3.0.3"} {
+		for path, want := range map[string]string{"version.txt": "5.3.0.3\n", "bundle/version.txt": "5.3.0.3\n", "ui/packs/a.txt": "5.3.0.3", "gen2-unlocked": "1\n"} {
 			if b, err := os.ReadFile(filepath.Join(custom, path)); err != nil || string(b) != want {
 				t.Errorf("%s = %q, %v", path, b, err)
 			}
+		}
+
+		// Legacy 5.3.0.3 / early 5.3.0.4 install without gen2-unlocked or gen2-locked also picks and applies .img directly.
+		sDefault, customDefault := bundleDeck(t, "inmusic,jp21", imgAssets, validImg)
+		if v := getUpdate(sDefault, ""); !strings.HasSuffix(v.DownloadURL, "/dl/"+imgName) {
+			t.Fatalf("default Gen-2 deck did not pick .img: %+v", v)
+		}
+		getUpdate(sDefault, "?apply=1")
+		if v := waitUpdate(t, sDefault); v.Error != "" || v.Current != "5.3.0.3" {
+			t.Fatalf("default Gen-2 .img apply failed: %+v", v)
+		}
+		if b, _ := os.ReadFile(filepath.Join(customDefault, "gen2-unlocked")); string(b) != "1\n" {
+			t.Errorf("gen2-unlocked not written after apply: %q", b)
 		}
 
 		// Corrupted payload byte in Gen-2 .img must be rejected by SHA-256 check.
@@ -415,4 +438,150 @@ func TestUnpackBundleRefusesUnsafeArchives(t *testing.T) {
 	if _, err := unpackBundle(pack(file("t/install.sh"), file("t/SHA256SUMS")), filepath.Join(t.TempDir(), "x")); err != nil {
 		t.Errorf("valid archive refused: %v", err)
 	}
+}
+
+func TestApplyOnlineUpdateGen2PreloadCompatibility(t *testing.T) {
+	oldScript, oldPlanck := engineScriptPath, planckRemoteScreenPath
+	oldURLFile, oldReasonFile := updateFileURLPath, engineQuitReasonPath
+	oldAllow, oldQuit := allowUpdateFromURL, quitEngineForUpdate
+	t.Cleanup(func() {
+		engineScriptPath, planckRemoteScreenPath = oldScript, oldPlanck
+		updateFileURLPath, engineQuitReasonPath = oldURLFile, oldReasonFile
+		allowUpdateFromURL, quitEngineForUpdate = oldAllow, oldQuit
+	})
+
+	makeValidGen2Img := func(t *testing.T, prefix, version string) []byte {
+		t.Helper()
+		bundle := testBundle(t, prefix, version, false)
+		sum := sha256.Sum256(bundle)
+		var head [gen2ImgHeader]byte
+		copy(head[:], fmt.Sprintf("%s%x\n%s\n%s\n", gen2ImgMagic, sum, prefix, version))
+		return append(head[:], bundle...)
+	}
+
+	t.Run("Gen-2 without LD_PRELOAD on planck-remote-screen skips UpdateFromUrl and installs via tryApplyGen2Image", func(t *testing.T) {
+		tmp := t.TempDir()
+		engineScriptPath = filepath.Join(tmp, "engine")
+		planckRemoteScreenPath = filepath.Join(tmp, "planck-remote-screen")
+		updateFileURLPath = filepath.Join(tmp, "update-file-url")
+		engineQuitReasonPath = filepath.Join(tmp, "engine-quit-reason")
+		os.WriteFile(planckRemoteScreenPath, []byte("#!/bin/sh\n"), 0o755)
+		// Earlier 5.3.0.4 script: Engine is wrapped with engine-ui-guard, planck-remote-screen is NOT wrapped with LD_PRELOAD.
+		os.WriteFile(engineScriptPath, []byte(
+			"#!/bin/sh\n\t/data/enginex/bundle/bin/engine-ui-guard launch /usr/Engine/Engine -d0\n\t/usr/bin/planck-remote-screen --update \"$UPDATE_FILE\"\n",
+		), 0o755)
+		allowUpdateFromURL = func(string) bool { return true }
+		quitCalls := 0
+		quitEngineForUpdate = func() error { quitCalls++; return nil }
+
+		imgName := "SCLIVE4-5.3.0.3-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img"
+		assets := func(base string) string {
+			return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, imgName, base+"/dl/"+imgName)
+		}
+		s, custom := bundleDeck(t, "inmusic,jp21", assets, makeValidGen2Img(t, "SCLIVE4", "5.3.0.3"))
+		getUpdate(s, "")
+		getUpdate(s, "?apply=1")
+		v := waitUpdate(t, s)
+		if v.Error != "" || v.Current != "5.3.0.3" || v.Progress != 1 {
+			t.Fatalf("fallback apply failed: %+v", v)
+		}
+		if quitCalls != 0 {
+			t.Fatalf("quitEngineForUpdate called %d times on unhooked planck-remote-screen, want 0", quitCalls)
+		}
+		if _, err := os.Stat(engineQuitReasonPath); err == nil {
+			t.Fatal("engine-quit-reason written despite unhooked planck-remote-screen")
+		}
+		if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); string(b) != "5.3.0.3\n" {
+			t.Errorf("version.txt = %q, want 5.3.0.3", b)
+		}
+	})
+
+	t.Run("Gen-2 with LD_PRELOAD on planck-remote-screen takes UpdateFromUrl shortcut", func(t *testing.T) {
+		tmp := t.TempDir()
+		engineScriptPath = filepath.Join(tmp, "engine")
+		planckRemoteScreenPath = filepath.Join(tmp, "planck-remote-screen")
+		updateFileURLPath = filepath.Join(tmp, "update-file-url")
+		engineQuitReasonPath = filepath.Join(tmp, "engine-quit-reason")
+		os.WriteFile(planckRemoteScreenPath, []byte("#!/bin/sh\n"), 0o755)
+		os.WriteFile(engineScriptPath, []byte(
+			"#!/bin/sh\n\t/data/enginex/bundle/bin/engine-ui-guard launch /usr/Engine/Engine -d0\n\tenv LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/bin/planck-remote-screen --update \"$UPDATE_FILE\"\n",
+		), 0o755)
+		allowUpdateFromURL = func(string) bool { return true }
+		quitCalls := 0
+		quitEngineForUpdate = func() error { quitCalls++; return nil }
+
+		imgName := "SCLIVE4-5.3.0.3-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img"
+		assets := func(base string) string {
+			return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, imgName, base+"/dl/"+imgName)
+		}
+		// Serve invalid bytes if downloaded: UpdateFromUrl shortcut must return before HTTP download.
+		s, custom := bundleDeck(t, "inmusic,jp21", assets, []byte("not-downloaded"))
+		u := getUpdate(s, "")
+		getUpdate(s, "?apply=1")
+		v := waitUpdate(t, s)
+		if v.Error != "" || v.Progress != 1 || quitCalls != 1 {
+			t.Fatalf("UpdateFromUrl shortcut failed: %+v (quitCalls=%d)", v, quitCalls)
+		}
+		if got, _ := os.ReadFile(updateFileURLPath); string(got) != u.DownloadURL+"\n" {
+			t.Errorf("update-file-url = %q, want %q", got, u.DownloadURL+"\n")
+		}
+		if got, _ := os.ReadFile(engineQuitReasonPath); string(got) != "UpdateFromUrl\n" {
+			t.Errorf("engine-quit-reason = %q, want UpdateFromUrl", got)
+		}
+		if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); string(b) != "5.3.0.2\n" {
+			t.Errorf("Go fallback unexpectedly modified version.txt: %q", b)
+		}
+	})
+
+	t.Run("AZ04 without planck-remote-screen binary falls back to Go download and tryApplyGen2Image", func(t *testing.T) {
+		tmp := t.TempDir()
+		engineScriptPath = filepath.Join(tmp, "engine")
+		planckRemoteScreenPath = filepath.Join(tmp, "missing-planck-remote-screen")
+		updateFileURLPath = filepath.Join(tmp, "update-file-url")
+		engineQuitReasonPath = filepath.Join(tmp, "engine-quit-reason")
+		os.WriteFile(engineScriptPath, []byte(
+			"#!/bin/sh\n\tenv LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/bin/planck-remote-screen --update \"$UPDATE_FILE\"\n",
+		), 0o755)
+		allowUpdateFromURL = func(string) bool { return true }
+		quitCalls := 0
+		quitEngineForUpdate = func() error { quitCalls++; return nil }
+
+		imgName := "SYSTEMONE-5.3.0.3-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img"
+		assets := func(base string) string {
+			return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, imgName, base+"/dl/"+imgName)
+		}
+		s, custom := bundleDeck(t, "inmusic,rmz2", assets, makeValidGen2Img(t, "SYSTEMONE", "5.3.0.3"))
+		getUpdate(s, "")
+		getUpdate(s, "?apply=1")
+		v := waitUpdate(t, s)
+		if v.Error != "" || v.Current != "5.3.0.3" || quitCalls != 0 {
+			t.Fatalf("AZ04 fallback failed: %+v (quitCalls=%d)", v, quitCalls)
+		}
+		if b, _ := os.ReadFile(filepath.Join(custom, "version.txt")); string(b) != "5.3.0.3\n" {
+			t.Errorf("version.txt = %q, want 5.3.0.3", b)
+		}
+	})
+
+	t.Run("Gen-1 always uses UpdateFromUrl without requiring LD_PRELOAD on planck-remote-screen", func(t *testing.T) {
+		tmp := t.TempDir()
+		engineScriptPath = filepath.Join(tmp, "engine")
+		planckRemoteScreenPath = filepath.Join(tmp, "missing-planck-remote-screen")
+		updateFileURLPath = filepath.Join(tmp, "update-file-url")
+		engineQuitReasonPath = filepath.Join(tmp, "engine-quit-reason")
+		allowUpdateFromURL = func(string) bool { return true }
+		quitCalls := 0
+		quitEngineForUpdate = func() error { quitCalls++; return nil }
+
+		imgName := "SC5000-5.3.0.3-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img"
+		assets := func(base string) string {
+			return fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, imgName, base+"/dl/"+imgName)
+		}
+		s, _ := bundleDeck(t, "inmusic,jp07", assets, []byte("not-downloaded"))
+		getUpdate(s, "")
+		getUpdate(s, "?apply=1")
+		v := waitUpdate(t, s)
+		if v.Error != "" || v.Progress != 1 || quitCalls != 1 {
+			t.Fatalf("Gen-1 UpdateFromUrl failed: %+v (quitCalls=%d)", v, quitCalls)
+		}
+	})
 }

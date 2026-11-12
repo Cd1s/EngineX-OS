@@ -46,6 +46,47 @@ func isDeckDataDir(dir string) bool {
 	return dir == bundleCustomDir || dir == legacyBundleCustomDir
 }
 
+var (
+	engineScriptPath       = "/usr/Engine/Scripts/engine"
+	planckRemoteScreenPath = "/usr/bin/planck-remote-screen"
+	updateFileURLPath      = "/tmp/update-file-url"
+	engineQuitReasonPath   = "/tmp/engine-quit-reason"
+	allowUpdateFromURL     = isDeckDataDir
+	quitEngineForUpdate    = func() error {
+		return exec.Command("pkill", "-TERM", "-f", "^/usr/Engine/Engine( |$)").Run()
+	}
+)
+
+func hasPreloadedPlanckUpdater(scriptPath, updaterPath string) bool {
+	if _, err := os.Stat(updaterPath); err != nil {
+		return false
+	}
+	b, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, "LD_PRELOAD=") && strings.Contains(trimmed, "planck-remote-screen") {
+			return true
+		}
+	}
+	return false
+}
+
+func canUseUpdateFromURL(customDir string) bool {
+	if !allowUpdateFromURL(customDir) {
+		return false
+	}
+	if dataBundleBoards[imagePrefix(deviceCompatible())] {
+		return hasPreloadedPlanckUpdater(engineScriptPath, planckRemoteScreenPath)
+	}
+	return true
+}
+
 var githubRepoRE = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
 
 type updateStatus struct {
@@ -140,19 +181,21 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 	}
 	customDir := s.customDir()
 	// Trigger stock Denon full-screen graphical updater (/usr/bin/planck-remote-screen --update)
-	// via /usr/Engine/Scripts/engine's native UpdateFromUrl quit handler.
-	if isDeckDataDir(customDir) {
-		if err := os.WriteFile("/tmp/update-file-url", []byte(downloadURL+"\n"), 0o644); err == nil {
-			if err := os.WriteFile("/tmp/engine-quit-reason", []byte("UpdateFromUrl\n"), 0o644); err == nil {
+	// via /usr/Engine/Scripts/engine's native UpdateFromUrl quit handler. On Gen-2 boards, only
+	// hand off to UpdateFromUrl when /usr/Engine/Scripts/engine already wraps planck-remote-screen
+	// with LD_PRELOAD (and planck-remote-screen exists); otherwise download and apply in Go (#215).
+	if canUseUpdateFromURL(customDir) {
+		if err := os.WriteFile(updateFileURLPath, []byte(downloadURL+"\n"), 0o644); err == nil {
+			if err := os.WriteFile(engineQuitReasonPath, []byte("UpdateFromUrl\n"), 0o644); err == nil {
 				s.setUpdateProgress(0.10, "", false)
 				time.Sleep(150 * time.Millisecond)
 				// Engine renames itself "EMain", so match the command line, not the name.
-				if exec.Command("pkill", "-TERM", "-f", "^/usr/Engine/Engine( |$)").Run() == nil {
+				if quitEngineForUpdate() == nil {
 					s.setUpdateProgress(1.0, "", true)
 					return
 				}
-				_ = os.Remove("/tmp/engine-quit-reason")
-				_ = os.Remove("/tmp/update-file-url")
+				_ = os.Remove(engineQuitReasonPath)
+				_ = os.Remove(updateFileURLPath)
 			}
 		}
 	}
@@ -270,7 +313,7 @@ func (s *Server) tryApplyGen2Image(part string) bool {
 		return false
 	}
 	_ = os.Remove(part)
-	if !s.isGen2Unlocked() {
+	if s.isGen2Locked() {
 		s.setUpdateProgress(0, "gen2 .img update is locked", true)
 		return true
 	}
@@ -350,7 +393,7 @@ func (s *Server) checkRelease(ctx context.Context, repo string) updateStatus {
 			return ""
 		}
 		if dataBundleBoards[prefix] {
-			if s.isGen2Unlocked() {
+			if !s.isGen2Locked() {
 				v.DownloadURL = find("-Update.img")
 			}
 			if v.DownloadURL == "" {
@@ -464,6 +507,12 @@ func (s *Server) isGen2Unlocked() bool {
 	_, errU := os.Stat(filepath.Join(dir, "gen2-unlocked"))
 	_, errL := os.Stat(filepath.Join(dir, "gen2-locked"))
 	return errU == nil && errL != nil
+}
+
+// isGen2Locked reports whether the *-Update.img path was explicitly disabled via gen2-locked (#215).
+func (s *Server) isGen2Locked() bool {
+	_, err := os.Stat(filepath.Join(s.customDir(), "gen2-locked"))
+	return err == nil
 }
 
 // applyDataBundleUpdate downloads a second-generation /data bundle, unpacks it
