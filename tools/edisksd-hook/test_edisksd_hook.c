@@ -1,4 +1,4 @@
-// Unit tests run unprivileged; --mounts is used ONLY under unshare -m on IN.
+// Unit tests run unprivileged; --mounts is used ONLY under unshare -m on the build host.
 #define _GNU_SOURCE
 #include <limits.h>
 #include <stdio.h>
@@ -104,6 +104,23 @@ static void test_compat_symlink_root(const char *root) {
     char old_data[PATH_MAX],old_real[PATH_MAX];join(old_data,root,"old-data");join(old_real,old_data,"sc5000-custom");assert(!make_dirs(old_real));
     join(test_library,old_data,"enginex/hfs-libraries");join(test_legacy_library,old_real,"hfs-libraries");
     assert(!seed_library(volume_path,"uuid-a",again,deadline_from(now_ms())));join(p,old_real,"hfs-libraries");assert(!strncmp(again,p,strlen(p)));
+    // A blank /data: neither directory exists yet, so the primary one is created 0700.
+    char blank[PATH_MAX];join(blank,root,"blank-data");assert(!make_dirs(blank));
+    join(test_library,blank,"enginex/hfs-libraries");join(test_legacy_library,blank,"sc5000-custom/hfs-libraries");
+    assert(!seed_library(volume_path,"uuid-a",again,deadline_from(now_ms())));
+    join(p,blank,"enginex/hfs-libraries");assert(!strncmp(again,p,strlen(p)));
+    join(p,blank,"enginex");assert(!lstat(p,&st)&&S_ISDIR(st.st_mode)&&(st.st_mode&0777)==0700);
+    join(p,blank,"sc5000-custom");assert(access(p,F_OK)==-1&&errno==ENOENT);
+    // A dangling compat link is not a blank /data.
+    char dangling[PATH_MAX];join(dangling,root,"dangling-data");assert(!make_dirs(dangling));
+    join(p,dangling,"sc5000-custom");assert(!symlink("enginex",p));
+    join(test_library,dangling,"enginex/hfs-libraries");join(test_legacy_library,dangling,"sc5000-custom/hfs-libraries");errno=0;
+    assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&errno==ELOOP);
+    join(p,dangling,"enginex");assert(access(p,F_OK)==-1&&errno==ENOENT);
+    // A real root directory that others can write is refused like a shared link target.
+    char open_data[PATH_MAX];join(open_data,root,"open-data");join(p,open_data,"enginex");assert(!make_dirs(p));assert(!chmod(p,0777));
+    join(test_library,open_data,"enginex/hfs-libraries");test_legacy_library[0]=0;errno=0;
+    assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&errno==EACCES);
     // Only a plain sibling link to a private directory we own is followed.
     char outside[PATH_MAX],bad[PATH_MAX];join(outside,root,"outside-cache");assert(!make_dirs(outside));
     const char *links[]={outside,"../outside-cache",".","enginex-missing"};
@@ -120,7 +137,7 @@ static void test_compat_symlink_root(const char *root) {
     assert(seed_library(volume_path,"uuid-a",again,deadline_from(now_ms()))==-1&&errno==ELOOP);
     join(p,outside,"hfs-libraries");assert(access(p,F_OK)==-1&&errno==ENOENT);
     snprintf(test_library,sizeof test_library,"%s",saved_lib);snprintf(test_legacy_library,sizeof test_legacy_library,"%s",saved_legacy);
-    puts("#103 HFS: cache root through the /data/sc5000-custom -> enginex compat link, legacy-only deck, foreign links refused: PASS");
+    puts("#103 HFS: cache root through the /data/sc5000-custom -> enginex compat link, legacy-only deck, blank /data, dangling link and writable root, foreign links refused: PASS");
 }
 static void test_time(void) {
     struct timespec t={.tv_sec=2147483,.tv_nsec=0};int64_t before=timespec_ms(&t),deadline=deadline_from(before);
@@ -197,6 +214,17 @@ static void test_mounts(const char *root) {
 // .PIONEER export on a deck whose /data/sc5000-custom is the compat symlink.
 // The view must be prepared and rb-bridge launched on it (#103 regression,
 // found on a rekordbox 7 macOS stick, #216).
+static void test_foreign_owned_root(const char *root) {
+    char saved_lib[PATH_MAX],saved_legacy[PATH_MAX],data[PATH_MAX],p[PATH_MAX],volume_path[PATH_MAX],seeded[PATH_MAX];
+    snprintf(saved_lib,sizeof saved_lib,"%s",test_library);snprintf(saved_legacy,sizeof saved_legacy,"%s",test_legacy_library);
+    join(volume_path,MEDIA_ROOT,"HFS-STICK");assert(!make_dirs(volume_path));
+    join(data,root,"foreign-data");join(p,data,"enginex");assert(!make_dirs(p));assert(!chown(p,4242,4242));
+    join(test_library,p,"hfs-libraries");test_legacy_library[0]=0;errno=0;
+    assert(seed_library(volume_path,"uuid-a",seeded,deadline_from(now_ms()))==-1&&errno==EACCES);
+    join(p,data,"enginex/hfs-libraries");assert(access(p,F_OK)==-1&&errno==ENOENT);
+    snprintf(test_library,sizeof test_library,"%s",saved_lib);snprintf(test_legacy_library,sizeof test_legacy_library,"%s",saved_legacy);
+    puts("REAL PRIVATE NAMESPACE #103: a cache root owned by another user is refused: PASS");
+}
 static void test_hfs_mount_runs_bridge(const char *root) {
     assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
     char data[PATH_MAX],enginex[PATH_MAX],legacy[PATH_MAX],disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],log[PATH_MAX];
@@ -297,7 +325,7 @@ int main(int argc,char **argv) {
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
