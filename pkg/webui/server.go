@@ -194,6 +194,7 @@ func New(cfg Config, jobs *Jobs) *Server {
 	})
 	s.mux.HandleFunc("GET /api/boot-report", s.downloadBootReport)
 	s.mux.HandleFunc("GET /api/update", s.update)
+	s.mux.HandleFunc("POST /api/update/upload", s.handleBundleUpload)
 	s.mux.HandleFunc("POST /api/ui", s.uiUpdate)
 	s.mux.HandleFunc("GET /api/console-qr", s.consoleQR)
 	s.mux.HandleFunc("POST /api/sessions", s.createSession)
