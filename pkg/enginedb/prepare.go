@@ -99,7 +99,7 @@ func prepareFast(res *compat.Resolver, l *rekordbox.Library) []preparedTrack {
 	paths := map[string]bool{}
 	for _, t := range l.Tracks {
 		rel := strings.TrimLeft(path.Clean("/"+t.Path), "/")
-		if rel == "" || t.Path == "" || strings.HasPrefix(rel, "PIONEER/") {
+		if rel == "" || t.Path == "" || strings.HasPrefix(rel, "PIONEER/") || strings.HasPrefix(rel, ".PIONEER/") {
 			continue
 		}
 		if resolved, e := res.Resolve(t.Path); e == nil {

@@ -196,8 +196,8 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 			if len(b) < 136 {
 				return nil, fmt.Errorf("pdb: short track row")
 			}
-			ss := make([]string, 21)
-			for i := range ss {
+			var ss [21]string
+			for _, i := range []int{14, 16, 17, 20} {
 				off := int(le.Uint16(b[94+2*i:]))
 				s, err := readDeviceSQLString(b, off)
 				if err != nil {
@@ -205,26 +205,41 @@ func ParsePDB(r io.ReaderAt, size int64) (*Library, error) {
 				}
 				ss[i] = s
 			}
+			trackID := le.Uint32(b[72:])
+			if trackID == 0 || ss[20] == "" {
+				continue
+			}
 			// Row offsets do not encode sizes and the heap may have deleted holes.
 			// Hash through the last referenced string, excluding unrelated padding.
 			end := 136
 			for i := 0; i < 21; i++ {
 				off := int(le.Uint16(b[94+2*i:]))
-				n := int(b[off] >> 1)
-				if b[off]&1 == 0 {
-					n = int(le.Uint16(b[off+1:]))
+				if off < 0 || off >= len(b) {
+					continue
 				}
-				if off+n > end {
+				var n int
+				if b[off]&1 == 1 {
+					n = int(b[off] >> 1)
+				} else {
+					if off+4 > len(b) {
+						continue
+					}
+					n = int(le.Uint16(b[off+1:]))
+					if n < 4 {
+						continue
+					}
+				}
+				if off+n <= len(b) && off+n > end {
 					end = off + n
 				}
 			}
 			hash := sha256.Sum256(b[:end])
 			bpmRaw := le.Uint32(b[56:])
 			var bpm float64
-			if bpmRaw != 0 && bpmRaw != 0xffffffff && bpmRaw <= 100000 {
+			if bpmRaw != 0 && bpmRaw != 0x7fffffff && bpmRaw != 0xffffffff && bpmRaw <= 100000 {
 				bpm = float64(bpmRaw) / 100
 			}
-			t := Track{ID: le.Uint32(b[72:]), Path: ss[20], AnalysisPath: ss[14], Title: ss[17], Comment: ss[16], Artist: artists[le.Uint32(b[68:])], Album: albums[le.Uint32(b[64:])], Genre: genres[le.Uint32(b[60:])], Label: labels[le.Uint32(b[40:])], Composer: artists[le.Uint32(b[12:])], Remixer: artists[le.Uint32(b[44:])], Key: l.Keys[le.Uint32(b[32:])], ArtworkPath: l.Artwork[le.Uint32(b[28:])], SampleRate: int(le.Uint32(b[8:])), FileSize: int64(le.Uint32(b[16:])), Bitrate: int(le.Uint32(b[48:])), BPM: bpm, Year: int(le.Uint16(b[80:])), BitDepth: int(le.Uint16(b[82:])), Duration: float64(le.Uint16(b[84:])), Rating: int(b[89]), RecordHash: hex.EncodeToString(hash[:])}
+			t := Track{ID: trackID, Path: ss[20], AnalysisPath: ss[14], Title: ss[17], Comment: ss[16], Artist: artists[le.Uint32(b[68:])], Album: albums[le.Uint32(b[64:])], Genre: genres[le.Uint32(b[60:])], Label: labels[le.Uint32(b[40:])], Composer: artists[le.Uint32(b[12:])], Remixer: artists[le.Uint32(b[44:])], Key: l.Keys[le.Uint32(b[32:])], ArtworkPath: l.Artwork[le.Uint32(b[28:])], SampleRate: int(le.Uint32(b[8:])), FileSize: int64(le.Uint32(b[16:])), Bitrate: int(le.Uint32(b[48:])), BPM: bpm, Year: int(le.Uint16(b[80:])), BitDepth: int(le.Uint16(b[82:])), Duration: float64(le.Uint16(b[84:])), Rating: int(b[89]), RecordHash: hex.EncodeToString(hash[:])}
 			normalizeParsedAudioMetadata(&t)
 			l.Tracks = append(l.Tracks, t)
 		case 7:
