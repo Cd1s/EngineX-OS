@@ -402,6 +402,16 @@ func (c *Client) Save(ctx context.Context, name, address string) (*Download, err
 	return dl, nil
 }
 
+// resolvedDir is dir with symlinks resolved, or dir itself when it cannot be resolved.
+func resolvedDir(dir string) string {
+	if r, err := filepath.EvalSymlinks(dir); err == nil {
+		if a, err := filepath.Abs(r); err == nil {
+			return a
+		}
+	}
+	return filepath.Clean(dir)
+}
+
 // Trim removes the least recently used downloads while they exceed MaxCache or
 // the volume has less than MinFree left, never the one just saved.
 func (c *Client) Trim(keep string) {
@@ -419,6 +429,12 @@ func (c *Client) Trim(keep string) {
 	if err != nil {
 		return
 	}
+	// keep may be symlink-resolved (SafePath) while DownloadDir is not: on a deck without SD
+	// it is /data/sc5000-custom/Stream, a link to /data/enginex since #103. Compare both resolved.
+	dir := resolvedDir(c.DownloadDir)
+	if keep != "" {
+		keep = filepath.Join(resolvedDir(filepath.Dir(keep)), filepath.Base(keep))
+	}
 	type file struct {
 		path string
 		size int64
@@ -433,7 +449,7 @@ func (c *Client) Trim(keep string) {
 		}
 		total += info.Size()
 		path := filepath.Join(c.DownloadDir, e.Name())
-		if evictable.MatchString(e.Name()) && path != keep {
+		if evictable.MatchString(e.Name()) && filepath.Join(dir, e.Name()) != keep {
 			files = append(files, file{path, info.Size(), info.ModTime()})
 		}
 	}
