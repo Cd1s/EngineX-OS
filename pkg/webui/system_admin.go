@@ -87,6 +87,33 @@ type sshPostRequest struct {
 // sshRunDropInPath is the /run fallback for read-only roots (2nd-gen decks); a var for tests.
 var sshRunDropInPath = "/run/systemd/system/sshd.service.d/51-port.conf"
 
+// First-generation EngineX images run their own key-only sshd unit (az01_packer.py):
+// Conflicts=sshd.service, PasswordAuthentication no, keys in /data/enginex. Starting
+// the stock sshd there stopped it (BH-GC2-9). Second-generation decks keep the stock
+// sshd.service and its read-only /etc.
+const gen1SSHUnit = "sc5000-custom-sshd"
+
+var gen1SSHDropInPath = "/etc/systemd/system/sc5000-custom-sshd.service.d/51-port.conf"
+
+// sshUnit is the SSH unit this deck runs, and whether it takes passwords.
+func sshUnit() (unit string, passwords bool) {
+	if dataBundleBoards[imagePrefix(deviceCompatible())] {
+		return "sshd", true
+	}
+	return gen1SSHUnit, false
+}
+
+// sshRunning: only "active" from systemctl is running; inactive, failed or no
+// systemctl at all is not (an error used to fall back to "enabled", BH-GC2-9).
+func sshRunning(ctx context.Context, runner SystemRunner) bool {
+	if !onDeck() {
+		return false
+	}
+	unit, _ := sshUnit()
+	out, err := runner(ctx, "systemctl", "is-active", unit)
+	return err == nil && strings.TrimSpace(string(out)) == "active"
+}
+
 // sshPersistKeyDir is where authorized_keys survives reboot; falls back to StateDir when absent.
 var sshPersistKeyDir = "/data/enginex"
 
@@ -230,14 +257,7 @@ func (s *Server) handleSSH(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSSHGet(w http.ResponseWriter, r *http.Request) {
 	cfg := s.loadSSHConfig()
-	running := false
-	runner := getSystemRunner()
-	if out, err := runner(r.Context(), "systemctl", "is-active", "sshd"); err == nil {
-		running = strings.TrimSpace(string(out)) == "active"
-	} else if cfg.Enabled {
-		// Fallback in environments without systemctl
-		running = true
-	}
+	running := sshRunning(r.Context(), getSystemRunner())
 
 	respond(w, SSHStatusView{
 		Enabled:          cfg.Enabled,
@@ -287,6 +307,11 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 	// Off a deck (a developer machine, a build host running tests) the settings
 	// are only saved: never a drop-in for that machine's sshd, never a command (r3).
 	deck := onDeck()
+	unit, passwords := sshUnit()
+	if setPassword && deck && !passwords {
+		fail(w, http.StatusBadRequest, errors.New("this deck's SSH takes public keys only: add a public key instead of a password"))
+		return
+	}
 
 	if setKey {
 		store := s.sshKeyStorePath()
@@ -305,7 +330,13 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 	if in.Port != nil {
 		cfg.Port = *in.Port
 	}
-	if in.Port != nil && deck {
+	if in.Port != nil && deck && unit == gen1SSHUnit {
+		// -p overrides the Port of EngineX's own sshd_config.
+		dropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -f /usr/share/sc5000-custom/sshd_config -p %d\n", cfg.Port)
+		_ = os.MkdirAll(filepath.Dir(gen1SSHDropInPath), 0o755)
+		_ = os.WriteFile(gen1SSHDropInPath, []byte(dropIn), 0o644)
+		_, _ = runner(r.Context(), "systemctl", "daemon-reload")
+	} else if in.Port != nil && deck {
 		// Apply port configuration drop-in if directory exists or via runner
 		portDropIn := fmt.Sprintf("[Service]\nExecStart=\nExecStart=/usr/sbin/sshd -D -e -p %d\n", cfg.Port)
 		_ = os.MkdirAll(filepath.Dir(sshPortDropInPath), 0o755)
@@ -331,13 +362,17 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Enabled != nil && deck {
 		if cfg.Enabled {
-			_, _ = runner(r.Context(), "systemctl", "unmask", "sshd")
-			_, _ = runner(r.Context(), "systemctl", "restart", "sshd")
+			_, _ = runner(r.Context(), "systemctl", "unmask", unit)
+			_, _ = runner(r.Context(), "systemctl", "restart", unit)
 		} else {
-			_, _ = runner(r.Context(), "systemctl", "stop", "sshd")
+			_, _ = runner(r.Context(), "systemctl", "stop", unit)
 		}
 	} else if in.Port != nil && cfg.Enabled && deck {
-		_, _ = runner(r.Context(), "systemctl", "restart", "sshd")
+		_, _ = runner(r.Context(), "systemctl", "restart", unit)
+	} else if setKey && cfg.Enabled && deck {
+		// A first key lets the key-only unit start (ConditionFileNotEmpty); it
+		// was saved but SSH never came up until the next boot (BH-GC2-9).
+		_, _ = runner(r.Context(), "systemctl", "start", unit)
 	}
 
 	if err := s.saveSSHConfigLocked(cfg); err != nil {
@@ -350,7 +385,7 @@ func (s *Server) handleSSHPost(w http.ResponseWriter, r *http.Request) {
 		Port:             cfg.Port,
 		HasPassword:      cfg.HasPassword,
 		HasAuthorizedKey: cfg.HasAuthorizedKey,
-		Running:          cfg.Enabled,
+		Running:          sshRunning(r.Context(), runner),
 	})
 }
 
