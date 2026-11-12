@@ -503,6 +503,9 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 			degrade(e)
 			a, audio = &rekordbox.Analysis{}, compat.AudioInfo{}
 		}
+		if !fast && len(t.Cues) > 0 {
+			a.Merge(&rekordbox.Analysis{Cues: t.Cues})
+		}
 		if audio.SampleRate > 0 {
 			if t.SampleRate > 0 && t.SampleRate != audio.SampleRate {
 				log.Printf("rb-bridge: track %d (%s): export sample rate %d Hz differs from file header %d Hz; using file header", t.ID, rel, t.SampleRate, audio.SampleRate)

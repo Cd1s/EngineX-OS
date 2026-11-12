@@ -52,28 +52,115 @@ func readLibrary(ctx context.Context, mount string) (*rekordbox.Library, bool, e
 	return l, stagedOnly, nil
 }
 
+const exportNewerMargin = 5 * time.Second
+
+type exportCandidate struct {
+	rel, full string
+	size      int64
+	mtime     time.Time
+	isPDB     bool
+}
+
+func exportCandidates(r *compat.Resolver, mount string) ([]exportCandidate, error) {
+	resolve := func(p string) (exportCandidate, bool, error) {
+		rel, err := r.Resolve(p)
+		if errors.Is(err, os.ErrNotExist) {
+			return exportCandidate{}, false, nil
+		}
+		if err != nil {
+			return exportCandidate{}, false, err
+		}
+		full := r.FullPath(rel)
+		st, err := os.Stat(full)
+		if errors.Is(err, os.ErrNotExist) {
+			return exportCandidate{}, false, nil
+		}
+		if err != nil {
+			return exportCandidate{}, false, err
+		}
+		return exportCandidate{
+			rel:   rel,
+			full:  full,
+			size:  st.Size(),
+			mtime: st.ModTime(),
+			isPDB: strings.EqualFold(filepath.Ext(rel), ".pdb"),
+		}, true, nil
+	}
+
+	var oneLib []exportCandidate
+	seen := map[string]bool{}
+	for _, p := range []string{"PIONEER/rekordbox/exportLibrary.db", "PIONEER/rekordbox/exportOneLibrary.db"} {
+		c, ok, err := resolve(p)
+		if err != nil {
+			return nil, err
+		}
+		if ok && !seen[c.rel] {
+			seen[c.rel] = true
+			oneLib = append(oneLib, c)
+		}
+	}
+	if len(oneLib) == 2 && oneLib[1].mtime.Sub(oneLib[0].mtime) > exportNewerMargin {
+		oneLib[0], oneLib[1] = oneLib[1], oneLib[0]
+	}
+
+	var pdb *exportCandidate
+	if !prolink.GeneratedExport(mount) {
+		c, ok, err := resolve("PIONEER/rekordbox/export.pdb")
+		if err != nil {
+			return nil, err
+		}
+		if ok && !seen[c.rel] {
+			pdb = &c
+		}
+	}
+
+	switch {
+	case len(oneLib) == 0 && pdb == nil:
+		return nil, nil
+	case len(oneLib) == 0:
+		return []exportCandidate{*pdb}, nil
+	case pdb == nil:
+		return oneLib, nil
+	case pdb.mtime.Sub(oneLib[0].mtime) > exportNewerMargin:
+		return append([]exportCandidate{*pdb}, oneLib...), nil
+	default:
+		return append(oneLib, *pdb), nil
+	}
+}
+
 func readExport(ctx context.Context, mount string) (*rekordbox.Library, error) {
 	r, e := compat.NewResolver(mount)
 	if e != nil {
 		return nil, e
 	}
-	for _, p := range []string{"PIONEER/rekordbox/export.pdb", "PIONEER/rekordbox/exportLibrary.db", "PIONEER/rekordbox/exportOneLibrary.db"} {
-		if p == "PIONEER/rekordbox/export.pdb" && prolink.GeneratedExport(mount) {
-			continue // made from this drive's own Engine library for CDJs (#63): nothing to import
-		}
-		rel, e := r.Resolve(p)
-		if errors.Is(e, os.ErrNotExist) {
-			continue
-		}
-		if e != nil {
-			return nil, e
-		}
-		if strings.EqualFold(filepath.Ext(rel), ".pdb") {
-			return rekordbox.ReadPDB(r.FullPath(rel))
-		}
-		return rekordbox.ReadSQLite(ctx, r.FullPath(rel), nil)
+	candidates, e := exportCandidates(r, mount)
+	if e != nil {
+		return nil, e
 	}
-	return nil, errNoLocalExport
+	if len(candidates) == 0 {
+		return nil, errNoLocalExport
+	}
+	var errs []error
+	for i, c := range candidates {
+		var l *rekordbox.Library
+		var err error
+		if c.isPDB {
+			l, err = rekordbox.ReadPDB(c.full)
+		} else {
+			l, err = rekordbox.ReadSQLite(ctx, c.full, nil)
+		}
+		if err == nil {
+			return l, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", c.rel, err))
+		if i+1 < len(candidates) {
+			log.Printf("rb-bridge: %s unreadable (%v); falling back to %s", c.rel, err, candidates[i+1].rel)
+		}
+	}
+	return nil, errors.Join(errs...)
 }
 
 // ensureWritableEngineLibrary mounts an ext4-backed overlay onto "<mount>/Engine Library"
@@ -213,23 +300,17 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	if err != nil {
 		return enginedb.Result{}, err
 	}
-	var rel string
-	for _, p := range []string{"PIONEER/rekordbox/export.pdb", "PIONEER/rekordbox/exportLibrary.db", "PIONEER/rekordbox/exportOneLibrary.db"} {
-		if p == "PIONEER/rekordbox/export.pdb" && prolink.GeneratedExport(mount) {
-			continue // made from this drive's own Engine library for CDJs (#63): nothing to import
-		}
-		if resolved, e := r.Resolve(p); e == nil {
-			rel = resolved
-			break
-		}
+	candidates, err := exportCandidates(r, mount)
+	if err != nil {
+		return enginedb.Result{}, err
 	}
 	var stamp string
-	if rel != "" {
-		st, err := os.Stat(r.FullPath(rel))
-		if err != nil {
-			return Convert(ctx, mount, opts)
+	if len(candidates) > 0 {
+		parts := make([]string, len(candidates))
+		for i, c := range candidates {
+			parts[i] = fmt.Sprintf("%s %d %d", c.rel, c.size, c.mtime.UnixNano())
 		}
-		stamp = fmt.Sprintf("%s %s %d %d", stampVersion, rel, st.Size(), st.ModTime().UnixNano()) + stagedStamp(mount)
+		stamp = stampVersion + " " + strings.Join(parts, " | ") + stagedStamp(mount)
 	} else {
 		staged := strings.TrimSpace(stagedStamp(mount))
 		if staged == "" {
@@ -250,6 +331,9 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 	if !full && !opts.SmartMatch {
 		l, stagedOnly, err := readLibrary(ctx, mount)
 		if err != nil {
+			if !hasLibrary(dir) {
+				cleanEmptyEngineLibrary(dir)
+			}
 			return result, err
 		}
 		opts.StagedOnly = stagedOnly
@@ -271,16 +355,7 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 			Reconcile(r, l)
 			result, err = stagedImport(ctx, mount, dir, l, opts)
 			if err != nil {
-				// Leave no Engine Library for Engine to mistake for one; Remove spares non-empty dirs.
-				// An empty m.db is what an earlier build left behind on a failed import.
-				for _, name := range []string{"m.db", stateName} {
-					if st, e := os.Stat(filepath.Join(dir, name)); e == nil && st.Size() == 0 {
-						os.Remove(filepath.Join(dir, name))
-					}
-				}
-				os.Remove(filepath.Join(dir, ".rb-bridge.lock"))
-				os.Remove(dir)
-				os.Remove(filepath.Dir(dir))
+				cleanEmptyEngineLibrary(dir)
 			} else if result.Deferred == 0 {
 				writeStamp(dir, stamp)
 			}
@@ -294,6 +369,19 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		writeStamp(dir, stamp)
 	}
 	return result, err
+}
+
+func cleanEmptyEngineLibrary(dir string) {
+	// Leave no Engine Library for Engine to mistake for one; Remove spares non-empty dirs.
+	// An empty m.db is what an earlier build left behind on a failed import.
+	for _, name := range []string{"m.db", stateName} {
+		if st, e := os.Stat(filepath.Join(dir, name)); e == nil && st.Size() == 0 {
+			os.Remove(filepath.Join(dir, name))
+		}
+	}
+	os.Remove(filepath.Join(dir, ".rb-bridge.lock"))
+	os.Remove(dir)
+	os.Remove(filepath.Dir(dir))
 }
 
 func importedStamp(dir string) string {
