@@ -5,6 +5,10 @@ int hook_test_engine;
 static char stems_bundle_file[4096], stems_bin_file[4096];
 #define STEMS_BUNDLE_PROCESSOR stems_bundle_file
 #define STEMS_BUNDLE_BIN_PROCESSOR stems_bin_file
+// Never the build host's /data/enginex (BH-GF4-4 looks there first).
+static char stems_no_enginex[1];
+#define STEMS_ENGINEX_PROCESSOR stems_no_enginex
+#define STEMS_ENGINEX_BIN_PROCESSOR stems_no_enginex
 #include "engine_ui_hook.c"
 #include <assert.h>
 
