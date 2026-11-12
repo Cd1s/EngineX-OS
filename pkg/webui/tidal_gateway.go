@@ -1556,7 +1556,11 @@ func (g *tidalGateway) stemsSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The row joins the Stems list of the service it was stemmed from.
-	if err = g.s.addStemmed(g.s.scope(), stemmedTrack{ref.track, ref.session, ref.guest, p}); err != nil {
+	stemsScope := ref.track.Provider
+	if stemsScope == "" {
+		stemsScope = g.s.scope()
+	}
+	if err = g.s.addStemmed(stemsScope, stemmedTrack{ref.track, ref.session, ref.guest, p}); err != nil {
 		fail(w, 500, err)
 		return
 	}
