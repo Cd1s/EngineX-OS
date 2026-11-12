@@ -715,6 +715,47 @@ func TestModeAUninstallsSecondGenBundle(t *testing.T) {
 	}
 }
 
+// #103: a 2nd-gen deck still on a bundle before 5.3.0.3 has only the real /data/sc5000-custom;
+// --uninstall ran /data/enginex/bundle/uninstall.sh there and failed without removing anything.
+func TestModeAUninstallsALegacySc5000CustomBundle(t *testing.T) {
+	need(t, "unshare")
+	p := freeTCP(t)
+	d := startSSHDeck(t, p, "inmusic,jc11s\x00nxp,imx8mm\x00")
+	legacy := filepath.Join(d.Data, "sc5000-custom", "bundle")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(d.Data, "legacy-uninstalled.marker")
+	if err := os.WriteFile(filepath.Join(legacy, "uninstall.sh"), []byte(fmt.Sprintf("#!/bin/sh\ntouch '%s'\n", marker)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o := testOpts(t)
+	o.Uninstall, o.Yes, o.SSHPort = true, true, p
+	if err := modeA(ctxT(t), o, deck{IP: "127.0.0.1", Name: "prime4plus-lab"}); err != nil {
+		t.Fatalf("modeA uninstall of a legacy bundle: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("the legacy bundle's uninstall.sh did not run")
+	}
+	// With both present the current /data/enginex install wins.
+	current := filepath.Join(d.Data, "enginex", "bundle")
+	if err := os.MkdirAll(current, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker2 := filepath.Join(d.Data, "current-uninstalled.marker")
+	os.WriteFile(filepath.Join(current, "uninstall.sh"), []byte(fmt.Sprintf("#!/bin/sh\ntouch '%s'\n", marker2)), 0o755)
+	os.Remove(marker)
+	if err := modeA(ctxT(t), o, deck{IP: "127.0.0.1", Name: "prime4plus-lab"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker2); err != nil {
+		t.Fatal("the /data/enginex uninstall.sh did not run")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("ran the legacy uninstall.sh although /data/enginex has one")
+	}
+}
+
 // ---- Test 3: mode B against a fastboot shim and real ext4 images ---------------
 
 type fbShim struct{ Bin, Dir string }
