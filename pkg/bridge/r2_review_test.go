@@ -2,6 +2,8 @@ package bridge_test
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,5 +43,80 @@ func TestMountReadsTheExportOnceAndBudgetsAfterIt(t *testing.T) {
 	}
 	if _, err = os.Stat(filepath.Join(root, "Engine Library/Database2/.rb-bridge-stamp")); err != nil {
 		t.Fatal("complete import not stamped", err)
+	}
+}
+
+// r2 review: with export.pdb and exportLibrary.db from the same rekordbox
+// export (mtimes within 5 s), the OneLibrary went first, which changed the
+// source, the Rekordbox IDs and the stamp of drives imported before.
+func TestExportPDBStaysFirstWhenBothFormatsAreFresh(t *testing.T) {
+	cases := []struct {
+		name       string
+		oneLibDiff time.Duration
+		wantPDB    bool
+	}{
+		{"same export", 3 * time.Second, true},
+		{"pdb newer", -time.Minute, true},
+		{"onelibrary newer", 10 * time.Second, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			testfixture.Export(t, root)
+			writePlainOneLibrary(t, root)
+			base := time.Now().Add(-time.Hour)
+			os.Chtimes(filepath.Join(root, "PIONEER/rekordbox/export.pdb"), base, base)
+			ol := base.Add(tc.oneLibDiff)
+			os.Chtimes(filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db"), ol, ol)
+			l, err := bridge.ReadLibrary(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotPDB := len(l.Tracks) == 5; gotPDB != tc.wantPDB {
+				t.Fatalf("export.pdb used=%v, want %v (%d tracks)", gotPDB, tc.wantPDB, len(l.Tracks))
+			}
+		})
+	}
+	// A damaged export.pdb falls back to the OneLibrary.
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	writePlainOneLibrary(t, root)
+	testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", []byte("not a pdb"))
+	if l, err := bridge.ReadLibrary(context.Background(), root); err != nil || len(l.Tracks) != 1 {
+		t.Fatalf("no fallback to the OneLibrary: %v", err)
+	}
+}
+
+// A drive with only export.pdb keeps the stamp format of dc4d52d, so sticks
+// imported by earlier builds are not imported again.
+func TestSingleExportStampUnchanged(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	if _, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(filepath.Join(root, "PIONEER/rekordbox/export.pdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(root, "Engine Library/Database2/.rb-bridge-stamp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("v2 PIONEER/rekordbox/export.pdb %d %d\n", st.Size(), st.ModTime().UnixNano()); string(b) != want {
+		t.Fatalf("stamp %q, want %q", b, want)
+	}
+}
+
+func writePlainOneLibrary(t *testing.T, root string) {
+	t.Helper()
+	p := filepath.Join(root, "PIONEER/rekordbox/exportLibrary.db")
+	db, err := sql.Open("sqlite", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(`CREATE TABLE content(content_id INTEGER PRIMARY KEY, title TEXT, path TEXT); INSERT INTO content VALUES(77,'Only in OneLibrary','/MUSIC/three.wav')`); err != nil {
+		t.Fatal(err)
 	}
 }
