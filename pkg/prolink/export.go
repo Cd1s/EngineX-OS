@@ -301,7 +301,17 @@ type exportPeer struct {
 	name   string
 	seen   time.Time
 	ip     net.IP
+	first  time.Time // its first keepalive
+	heard  bool      // it has sent us a status packet
 }
+
+// exportFirmware is the least firmware version the status packets announce.
+const exportFirmware = "3.30"
+
+// firmwareWait is how long a new player gets no status from us while we have
+// not read its own (it sends one every 200 ms once it has our keepalive).
+const firmwareWait = 500 * time.Millisecond
+
 type exportRun struct {
 	nfs               *NFSServer
 	db                *DBServer
@@ -324,6 +334,8 @@ type exportRun struct {
 	mounted           bool
 	first             bool
 	statusCounter     uint32
+	firmware          string    // the newest firmware a player on the link reported, "" before any
+	announced         time.Time // since when the status loop has a player number
 	floodUntil        time.Time
 	observe           func(Device)
 	observer          *Discovery
@@ -696,7 +708,13 @@ func (r *exportRun) receivePeers() {
 			r.db.closeClients()
 			continue
 		}
-		r.peers[key] = exportPeer{number: d.Number, name: d.Name, seen: time.Now(), ip: append(net.IP(nil), addr.IP...)}
+		p := exportPeer{number: d.Number, name: d.Name, seen: time.Now(), ip: append(net.IP(nil), addr.IP...)}
+		if old, ok := r.peers[key]; ok {
+			p.first, p.heard = old.first, old.heard
+		} else {
+			p.first = p.seen
+		}
+		r.peers[key] = p
 		old := r.player
 		// No disk, menu work, or periodic timer on the collision path.
 		if old == d.Number {
@@ -729,14 +747,43 @@ func (r *exportRun) receiveMedia() {
 				}
 			}
 		}
-		if n < 0x30 || string(b[:10]) != magic || b[10] != 5 {
+		if n < 0x30 || string(b[:10]) != magic {
 			continue
 		}
 		r.mu.Lock()
-		if r.player != 0 && b[0x2b] == r.player && b[0x2f] == 3 {
+		if r.network.Contains(addr.IP) {
+			r.heardLocked(addr.IP, b[:n])
+		}
+		if b[10] == 5 && r.player != 0 && b[0x2b] == r.player && b[0x2f] == 3 {
 			r.sendLocked(r.status, r.mediaPacket(), addr)
 		}
 		r.mu.Unlock()
+	}
+}
+
+// heardLocked notes a packet from a player on the status port: it now knows us,
+// and its status carries its firmware version (bytes 0x7c..0x7f, "1.44"). A
+// CDJ-3000 shows "Linked to player with older firmware" for as long as a player
+// announces a lower version than its own (#217), so ours is never below the
+// newest one on the link. Caller holds r.mu.
+func (r *exportRun) heardLocked(ip net.IP, b []byte) {
+	for key, p := range r.peers {
+		if !p.heard && p.ip.Equal(ip) {
+			p.heard = true
+			r.peers[key] = p
+		}
+	}
+	if len(b) < 0x80 || b[10] != 0x0a {
+		return
+	}
+	fw := b[0x7c:0x80]
+	for i, c := range fw {
+		if digit := c >= '0' && c <= '9'; i == 1 && c != '.' || i != 1 && !digit {
+			return
+		}
+	}
+	if string(fw) > r.firmware {
+		r.firmware = string(fw)
 	}
 }
 
@@ -911,7 +958,7 @@ func (r *exportRun) statusPacket() []byte {
 	b[0x6a], b[0x6b], b[0x6f], b[0x73] = 4, 4, 0, 4             // USB mounted, no SD
 	b[0x75] = 1                                                 // LINK available while the exported USB is mounted
 	binary.BigEndian.PutUint16(b[0x90:], 0x7fff)                // no loaded track / meaningful master BPM
-	copy(b[0x7c:0x80], "3.30")                                  // newer than every Pioneer unit's minimum, no "older firmware" warning
+	copy(b[0x7c:0x80], max(exportFirmware, r.firmware))         // never older than a player on the link (heardLocked)
 	b[0x89], b[0x8b], b[0x9f], b[0xcc] = 0x84, 0x7e, 0xff, 0x0f // idle, no master/sync
 	for _, off := range []int{0x8c, 0x98, 0xc0, 0xc4} {
 		binary.BigEndian.PutUint32(b[off:], 0x00100000)
@@ -945,11 +992,17 @@ func (r *exportRun) statusPacket() []byte {
 	return b
 }
 
-// peerIPsLocked lists the players seen in the last 10 s (at most 6). Caller holds r.mu.
-func (r *exportRun) peerIPsLocked() []net.IP {
+// peerIPsLocked lists the players seen in the last 10 s (at most 6). For
+// status packets (announced: since when we have a player number), only those
+// whose firmware we could have read: a status packet with a lower version than
+// the player's own would raise its warning. Caller holds r.mu.
+func (r *exportRun) peerIPsLocked(announced ...time.Time) []net.IP {
 	peers := make([]net.IP, 0, len(r.peers))
 	seen := make(map[string]bool)
 	for _, p := range r.peers {
+		if len(announced) > 0 && !p.heard && time.Since(p.first) < firmwareWait+max(0, announced[0].Sub(p.first)) {
+			continue
+		}
 		if time.Since(p.seen) <= 10*time.Second && !seen[p.ip.String()] && len(peers) < 6 {
 			peers = append(peers, p.ip)
 			seen[p.ip.String()] = true
@@ -962,10 +1015,14 @@ func (r *exportRun) sendStatus() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.player == 0 {
+		r.announced = time.Time{}
 		return
 	}
+	if r.announced.IsZero() {
+		r.announced = time.Now()
+	}
 	pkt := r.statusPacket() // identical for every peer
-	for _, ip := range r.peerIPsLocked() {
+	for _, ip := range r.peerIPsLocked(r.announced) {
 		r.sendLocked(r.status, pkt, &net.UDPAddr{IP: ip, Port: 50002})
 	}
 }
