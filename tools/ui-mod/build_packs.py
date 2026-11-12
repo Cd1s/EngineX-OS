@@ -388,6 +388,24 @@ def patch(text: str, old: str, new: str, path: str) -> str:
 
 
 SERVICES_MAIN = """
+    property var scLightingBackend: null
+    Item {
+        Component.onCompleted: {
+            // Resolve the native context object outside the SoundSwitch type/namespace.
+            // This URL labels inline source; no extra resource file is loaded.
+            try {
+                const scopeUrl = "qrc:/Skins/Common/Items/" + "EngineLightingBackend.qml"
+                const helper = Qt.createQmlObject('import QtQml 2.12; import SoundSwitchHost 1.0; QtObject { readonly property var backend: SoundSwitch }', root, scopeUrl)
+                root.scLightingBackend = helper ? helper.backend : null
+            } catch (e) {}
+
+            if (typeof Config !== "undefined" && Config && Config.integrations && Config.integrations.soundSwitch && Config.integrations.soundSwitch.isLightingIntegrationToggleable === false) {
+                const ssEn = Planck.getProperty("/GUI/SoundSwitchViewEnabled")
+                if (ssEn && ssEn.translator) ssEn.translator.state = true
+            }
+        }
+    }
+
 	// SC5000 UI mod: settings owned by stream-sync (see pkg/webui/ui_settings.go).
 	property string scVersion: ""
 	property string scLang: "@LANG@"
@@ -5416,6 +5434,31 @@ def edits(dev: bool):
     main = DEV_HARNESS if dev else ""
     services = (SERVICES_MAIN + FX_CONTROLLER).replace("@ICONS@", "Skins/UIKit/Icons" if v53() else "UIKit.1/UIKit/Icons").replace("@RGB_SCALE@", str(OVERVIEW_Y_SCALE_RGB)).replace("@BANDS_SCALE@", str(OVERVIEW_Y_SCALE_BANDS)) + (SMART_SYNC_MAIN if v53() else "")
     out = PatchDict({
+        # The file name shadows the native SoundSwitch context object.
+        prefs + "Entries/SoundSwitch.qml": [(
+            "onClicked: pSoundSwitchEnabled.translator.state = !pSoundSwitchEnabled.translator.state",
+            '''property bool scLightingChoice: false
+        function scSaveLighting(retry) {
+            const next = scLightingChoice
+            const req = new XMLHttpRequest()
+            req.onreadystatechange = function() {
+                if (req.readyState !== 4 || next !== scLightingChoice) return
+                if (req.status !== 200 && !retry) scLightingRetry.restart()
+            }
+            req.open("POST", "http://127.0.0.1:8080/v1/sc5000/ui?engineLighting=" + (next ? "1" : "0"))
+            req.send()
+        }
+        Timer { id: scLightingRetry; interval: 1500; onTriggered: scSaveLighting(true) }
+        onClicked: {
+            const next = !pSoundSwitchEnabled.translator.state
+            pSoundSwitchEnabled.translator.state = next
+            const SoundSwitch = root.scLightingBackend
+            if (!next && typeof SoundSwitch !== "undefined" && SoundSwitch && typeof SoundSwitch.stopBackend === "function")
+                SoundSwitch.stopBackend()
+            scLightingRetry.stop()
+            scLightingChoice = next
+            scSaveLighting(false)
+        }''')],
         # The flag is still cleared, which is what pressing "Ok" would do.
         ROOT + "Items/MessageBoxes/ImproperDeviceEjectMessageBox.qml": [(
             "      let messageObject = {", "      Planck.librarianController.deviceEjectedImproperly = false\n      return\n      let messageObject = {")],
