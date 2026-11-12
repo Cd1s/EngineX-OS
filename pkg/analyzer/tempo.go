@@ -119,9 +119,9 @@ func detectTempo(x []float32, sr int, minBPM, maxBPM float64, tick func(int) err
 	// The comb search may drift past the window edges; the result stays inside (#35).
 	bpm = snapBPM(math.Max(minBPM, math.Min(maxBPM, bpm)))
 	period := 60 / bpm
-	// 包络帧 i 对应窗口 [i*hop, i*hop+N)，谱通量峰值对应起音在窗口中部附近，
-	// 补偿半个窗口长度。
-	first := phase/fps + float64(onsetFFT)/2/float64(sr) - float64(onsetHop)/2/float64(sr)
+	// 包络帧 i 覆盖窗口 [i*hop, i*hop+N)；对数压缩正谱通量在瞬态进入 Hann 窗前半段时达峰，
+	// 补偿窗口前缘到瞬态起点的相位偏移。
+	first := phase/fps + (float64(onsetFFT)-1.3*float64(onsetHop))/float64(sr)
 	first = math.Mod(first, period)
 	if first < 0 {
 		first += period
