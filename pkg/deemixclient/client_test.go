@@ -579,6 +579,49 @@ func TestDownloadReusesTheFileOnDisk(t *testing.T) {
 	}
 }
 
+// #103: without an SD card the download dir is /data/sc5000-custom/Stream, a symlink to
+// /data/enginex/Stream, and a finished download comes back symlink-resolved (SafePath).
+// Trim compared the two spellings and evicted the track it had just saved.
+func TestTrimKeepsTheResolvedDownloadUnderALinkedDir(t *testing.T) {
+	data := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(data, "enginex", "Stream"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("enginex", filepath.Join(data, "sc5000-custom")); err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{DownloadDir: filepath.Join(data, "sc5000-custom", "Stream"), MaxCache: 1 << 40, MinFree: 1 << 62}
+	for i, name := range []string{"1.flac", "2.flac"} {
+		path := filepath.Join(c.DownloadDir, name)
+		os.WriteFile(path, make([]byte, 100), 0o600)
+		os.Chtimes(path, time.Unix(int64(1000+i), 0), time.Unix(int64(1000+i), 0))
+	}
+	real, err := filepath.EvalSymlinks(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keep, err := c.SafePath("2.flac")
+	if err != nil || keep != filepath.Join(real, "enginex", "Stream", "2.flac") {
+		t.Fatalf("SafePath = %q, %v", keep, err)
+	}
+	c.Trim(keep)
+	if _, err := os.Stat(filepath.Join(c.DownloadDir, "1.flac")); err == nil {
+		t.Fatal("kept an older download while space ran short")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("evicted the download just saved: %v", err)
+	}
+	// The unresolved spelling of the same file is kept as well.
+	os.WriteFile(filepath.Join(c.DownloadDir, "3.flac"), make([]byte, 100), 0o600)
+	c.Trim(filepath.Join(c.DownloadDir, "3.flac"))
+	if _, err := os.Stat(filepath.Join(c.DownloadDir, "3.flac")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keep); err == nil {
+		t.Fatal("kept 2.flac although only 3.flac was protected")
+	}
+}
+
 func TestTrimFreesSpaceBelowMinFree(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"1.flac", "2.flac"} {
