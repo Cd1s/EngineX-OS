@@ -398,6 +398,18 @@ func liveHeaders(h http.Header, contentType string, st broadcast.Status) {
 	}
 }
 
+// liveStallTimeout is how long one write to a /live.wav listener may block. A
+// network outage up to this long is ridden out: meanwhile the hub trims the
+// listener's queue back to its cushion, so when the network returns the stream
+// resumes with bounded latency. r3 closed the listener after 10 s; the FIN/RST
+// was lost in the outage, so OBS stayed ESTABLISHED with no data and played
+// silence until the source was restarted.
+const liveStallTimeout = 60 * time.Second
+
+// liveKeepAlive probes an idle /live.wav connection, so a peer that went away
+// for good is noticed and the connection closed.
+var liveKeepAlive = net.KeepAliveConfig{Enable: true, Idle: 15 * time.Second, Interval: 5 * time.Second, Count: 4}
+
 // liveSendBuffer caps the kernel send buffer of a /live.wav connection, so a Wi-Fi
 // stall backs audio up in the listener queue (which is trimmed) instead of the socket.
 const liveSendBuffer = 16 << 10
@@ -449,10 +461,14 @@ func (s *Server) liveWAV(w http.ResponseWriter, r *http.Request) {
 // and headers itself (a close-delimited body, as Icecast-style players expect). Where
 // that is not possible it streams through w as before.
 func liveWriter(w http.ResponseWriter) (write func([]byte) error, done func()) {
-	conn, _, err := http.NewResponseController(w).Hijack()
+	rc := http.NewResponseController(w)
+	conn, _, err := rc.Hijack()
 	if err != nil {
 		fl, _ := w.(http.Flusher)
 		return func(p []byte) error {
+			// Per write, as on the hijacked path: not the server's two-minute
+			// WriteTimeout for the whole response.
+			_ = rc.SetWriteDeadline(time.Now().Add(liveStallTimeout))
 			if _, err := w.Write(p); err != nil {
 				return err
 			}
@@ -464,6 +480,7 @@ func liveWriter(w http.ResponseWriter) (write func([]byte) error, done func()) {
 	}
 	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetWriteBuffer(liveSendBuffer)
+		_ = tc.SetKeepAliveConfig(liveKeepAlive)
 	}
 	h := w.Header().Clone()
 	h.Set("Connection", "close")
@@ -473,7 +490,7 @@ func liveWriter(w http.ResponseWriter) (write func([]byte) error, done func()) {
 	head.WriteString("\r\n")
 	headSent := false
 	return func(p []byte) error {
-		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		_ = conn.SetWriteDeadline(time.Now().Add(liveStallTimeout))
 		if !headSent {
 			headSent = true
 			p = append(head.Bytes(), p...)
