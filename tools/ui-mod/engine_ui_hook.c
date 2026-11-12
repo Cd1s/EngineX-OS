@@ -2858,6 +2858,25 @@ int statx(int dirfd, const char *path, int flags, unsigned int mask, struct stat
     return real(dirfd, path, flags, mask, buf);
 }
 
+// Engine's Stems launcher (5.3.0-sclive4 0xc1ffe0) looks the processor up with
+// std::filesystem::status() before it spawns it, and prints "could not find ... in
+// path" and starts nothing when that fails. libstdc++ runs status() through stat:
+// __stat64_time64 on the deck's armhf time64 ABI, stat on AArch64.
+static int stems_stat(void **cache, const char *name, const char *path, struct stat *buf) {
+    int (*real)(const char *, struct stat *) = next_symbol(cache, name);
+    if (!real) { errno = ENOSYS; return -1; }
+    if (is_engine()) path = stems_processor_path(path);
+    return real(path, buf);
+}
+#define STAT_WRAPPER(fn, name) \
+int fn(const char *path, struct stat *buf) { static void *cache; return stems_stat(&cache, name, path, buf); }
+int hook_stat(const char *, struct stat *) __asm__("stat");
+int hook_stat64(const char *, struct stat *) __asm__("stat64");
+int hook_stat64_time64(const char *, struct stat *) __asm__("__stat64_time64");
+STAT_WRAPPER(hook_stat, "stat")
+STAT_WRAPPER(hook_stat64, "stat64")
+STAT_WRAPPER(hook_stat64_time64, "__stat64_time64")
+
 int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *actions,
                 const posix_spawnattr_t *attr, char *const argv[], char *const envp[]) {
     static void *cache;
