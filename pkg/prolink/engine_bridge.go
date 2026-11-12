@@ -1065,8 +1065,11 @@ func engineBeats(raw []byte) ([]rekordbox.Beat, float64, float64, error) {
 
 func engineCueMS(sample, rate float64) (uint32, bool) {
 	ms := sample * 1000 / rate
-	if !finiteEngine(ms) || ms < 0 || ms > math.MaxUint32 {
+	if !finiteEngine(ms) || ms < -86400*1000 || ms > math.MaxUint32 {
 		return 0, false
+	}
+	if ms < 0 {
+		return 0, true
 	}
 	return uint32(math.Round(ms)), true
 }
@@ -1145,9 +1148,18 @@ func engineLoops(raw []byte, rate float64, cues []rekordbox.Cue) ([]rekordbox.Cu
 		if setStart == 0 || setEnd == 0 {
 			continue
 		}
+		if !finiteEngine(start) || !finiteEngine(end) || end <= start {
+			return bad()
+		}
 		ms, ok := engineCueMS(start, rate)
 		endMS, okEnd := engineCueMS(end, rate)
-		if !ok || !okEnd || endMS <= ms {
+		if !ok || !okEnd {
+			return bad()
+		}
+		if start < 0 && endMS <= ms {
+			continue
+		}
+		if endMS <= ms {
 			return bad()
 		}
 		c := rekordbox.Cue{TimeMS: ms, EndMS: endMS, Loop: true, Name: name, Color: color}
