@@ -3,6 +3,7 @@ package stems
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -199,5 +200,30 @@ func TestLocalRenderRejectsNaNSampleRate(t *testing.T) {
 	in = append(in, []byte("action=done\n\n")...)
 	if err := LocalRender(bytes.NewReader(in), &out); err == nil {
 		t.Fatal("LocalRender accepted sampleRate=NaN without error")
+	}
+}
+
+func TestProxyClassifiesCloudflare530AndStartupTimeoutAsUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(530)
+	}))
+	defer srv.Close()
+	err := Proxy(context.Background(), srv.URL, secret, strings.NewReader("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\n"), io.Discard)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Proxy status 530 err=%v, want ErrUnavailable", err)
+	}
+
+	prev := startupTimeout
+	startupTimeout = 60 * time.Millisecond
+	t.Cleanup(func() { startupTimeout = prev })
+	unblock := make(chan struct{})
+	stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-unblock
+	}))
+	defer stalled.Close()
+	defer close(unblock)
+	err = Proxy(context.Background(), stalled.URL, secret, strings.NewReader("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\n"), io.Discard)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Proxy startup timeout err=%v, want ErrUnavailable", err)
 	}
 }
