@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,7 +31,27 @@ func copyEncryptedOneLibraryFixture(t *testing.T, dst string) {
 }
 
 func TestExportSelectionMTimeAndFallback(t *testing.T) {
-	t.Run("prefers_onelibrary_when_mtimes_close", func(t *testing.T) {
+	t.Run("prefers_pdb_when_mtimes_within_5s_and_preserves_single_candidate_stamps", func(t *testing.T) {
+		// Verify single-candidate stamps stay byte-identical to dc4d52d / 6441ae6.
+		pdbOnlyRoot := t.TempDir()
+		testfixture.Export(t, pdbOnlyRoot)
+		if _, err := bridge.ConvertAtMount(context.Background(), pdbOnlyRoot, enginedb.Options{}, true); err != nil {
+			t.Fatal(err)
+		}
+		pdbSt, err := os.Stat(filepath.Join(pdbOnlyRoot, "PIONEER/rekordbox/export.pdb"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotStamp, err := os.ReadFile(filepath.Join(pdbOnlyRoot, "Engine Library/Database2/.rb-bridge-stamp"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStamp := fmt.Sprintf("v2 PIONEER/rekordbox/export.pdb %d %d\n", pdbSt.Size(), pdbSt.ModTime().UnixNano())
+		if string(gotStamp) != wantStamp {
+			t.Fatalf("single-candidate PDB stamp = %q, want %q", string(gotStamp), wantStamp)
+		}
+
+		// When export.pdb and exportLibrary.db mtimes are within <= 5s, export.pdb comes first.
 		root := t.TempDir()
 		testfixture.Export(t, root)
 		testfixture.Write(t, root, "MUSIC/one.wav", testfixture.WAV(true))
@@ -40,19 +61,21 @@ func TestExportSelectionMTimeAndFallback(t *testing.T) {
 		pdbPath := filepath.Join(root, "PIONEER/rekordbox/export.pdb")
 
 		now := time.Unix(1730000000, 0)
-		if err := os.Chtimes(pdbPath, now, now); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chtimes(dbPath, now.Add(-3*time.Second), now.Add(-3*time.Second)); err != nil {
-			t.Fatal(err)
-		}
-
-		lib, err := bridge.ReadLibrary(context.Background(), root)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(lib.Tracks) != 3 || lib.Tracks[0].ID != 101 {
-			t.Fatalf("expected OneLibrary tracks when mtime within 5s, got %+v", lib.Tracks)
+		for _, delta := range []time.Duration{-4 * time.Second, 0, 4 * time.Second, 5 * time.Second} {
+			if err := os.Chtimes(pdbPath, now, now); err != nil {
+				t.Fatal(err)
+			}
+			dbTime := now.Add(delta)
+			if err := os.Chtimes(dbPath, dbTime, dbTime); err != nil {
+				t.Fatal(err)
+			}
+			lib, err := bridge.ReadLibrary(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(lib.Tracks) != 5 || lib.Tracks[0].ID != 1 {
+				t.Fatalf("delta=%v: expected export.pdb first within <=5s tie-break, got %d tracks (first ID=%d)", delta, len(lib.Tracks), lib.Tracks[0].ID)
+			}
 		}
 	})
 
