@@ -247,6 +247,8 @@ type cdjSeen struct {
 	ms      float64 // the last absolute position (0x0b) and when it came
 	at      time.Time
 	moving  bool
+	hold    float64 // the spot the last still position packets stayed at (within cdjStillMS)
+	still   int
 	jumps   int
 	// The playhead line (see observe): where the deck is at at, as its quickest
 	// packets say, and the rate it runs at.
@@ -255,6 +257,39 @@ type cdjSeen struct {
 	n          int
 	pitch      float64 // from the status packet (0x0a), exact
 	fine       bool
+}
+
+// A CDJ whose last cdjStill position packets (30 ms apart) stayed within
+// cdjStillMS of one spot is not moving: paused, held on the jog wheel or at the
+// track's end. Paused in CDJ jog mode a player repeats one frame, 13 ms.
+const (
+	cdjStill   = 5
+	cdjStillMS = 20.0
+)
+
+// cdjPlayhead is where a CDJ's playhead is at now, and whether it runs on from
+// there (#217). playing is what its status packet says, which is up to 200 ms
+// behind the position packets and waits behind the media lookups: while it
+// still said "playing", a paused deck ran forward between two positions and
+// was put back by the next. So a deck whose position packets stand still does
+// not play, and one that does not play stays on its last absolute position:
+// the status packet's own position is the start of its beat, and taking turns
+// with it moved a paused deck as well. Caller holds sh.mu.
+func (sh *shadowState) cdjPlayhead(dev prolink.Device, playing bool, pitch float64, now time.Time) (float64, bool) {
+	ms, at := float64(dev.PlayPositionMS), dev.LastSeen
+	if p, ok := sh.precise[dev.Number]; ok {
+		fresh := now.Sub(p.at) < time.Second
+		if fresh && sh.cdj[dev.Number].still >= cdjStill {
+			playing = false
+		}
+		if fresh || !playing {
+			ms, at = p.ms, p.at
+		}
+	}
+	if playing {
+		ms += float64(max(int64(0), now.Sub(at).Milliseconds())) * (1 + pitch/100)
+	}
+	return ms, playing
 }
 
 // exact is the CDJ's pitch in percent. Position packets round it to 0.01 %,
@@ -1247,6 +1282,19 @@ func (sh *shadowState) observeAt(d prolink.Device, now time.Time) {
 	switch {
 	case d.PacketType == 0x0b && d.PrecisePosition:
 		ms := float64(d.PlayPositionMS)
+		if !c.at.IsZero() && math.Abs(ms-c.hold) <= cdjStillMS {
+			switch c.still++; c.still {
+			case 1:
+				c.hold = ms // where it stopped, not the last spot it passed
+			case cdjStill:
+				edge = true // it stopped: tell the shadow deck now, not when the status packet does
+			}
+		} else {
+			c.hold, c.still = ms, 0
+		}
+		if c.still >= cdjStill {
+			ms = c.hold
+		}
 		// A jump: hot cue, CUE back to the cue point, beat jump, loop. The packets
 		// come every 30 ms, so a playing deck is off its line by arrival jitter only.
 		jump := false
@@ -1284,6 +1332,9 @@ func (sh *shadowState) observeAt(d prolink.Device, now time.Time) {
 	case d.PacketType == 0x0a:
 		playing := d.Playing || d.PlayState1 == cdjCuePlay
 		edge = playing != c.playing || d.TrackID != c.track
+		if d.TrackID != c.track {
+			delete(sh.precise, d.Number) // the other track's position
+		}
 		c.playing, c.track = playing, d.TrackID
 		c.pitch, c.fine = d.Pitch, true
 	}
@@ -1584,12 +1635,8 @@ func (s *Server) shadowLegacy(role string, now time.Time, all bool, lines ...[]i
 		if len(consoleLines) > 0 {
 			d.LineIn = true
 		}
-		at := dev.LastSeen
-		if p, ok := sh.precise[dev.Number]; ok && now.Sub(p.at) < time.Second {
-			d.PositionMS, at = p.ms, p.at
-		}
-		if d.Playing {
-			d.PositionMS += float64(now.Sub(at).Milliseconds()) * (1 + d.Pitch/100)
+		if d.PositionMS, d.Playing = sh.cdjPlayhead(dev, d.Playing, d.Pitch, now); !d.Playing {
+			d.Cue = false
 		}
 		d.At = now.UnixMilli()
 		if f := exported[dev.TrackID]; f != "" && dev.SourcePlayer == export.Number {

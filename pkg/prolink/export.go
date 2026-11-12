@@ -34,7 +34,7 @@ type ExportConfig struct {
 	Observe    func(Device)
 	MediaCache *MediaCache // optional incoming status enrichment; allocated only while ON
 	// BeatAddr also feeds Observe with CDJ-3000 absolute position packets (0x0b,
-	// every 30 ms) for #49 shadow decks; default 0.0.0.0:50001, shared with rb-bridge.
+	// every 30 ms) for #49 shadow decks; default 0.0.0.0:50001 (see beatAddress).
 	BeatAddr string
 	// Peers lists Pro DJ Link devices seen on the LAN; the export binds to the
 	// interface that reaches them (see exportIdentity).
@@ -619,7 +619,7 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 		r.updates = make(chan Device, 16)
 		r.wg.Add(1)
 		go r.observeLoop()
-		if r.beat, err = listenLinkUDP(address(cfg.BeatAddr, "50001"), true); err != nil {
+		if r.beat, err = listenLinkUDP(beatAddress(cfg, ip), true); err != nil {
 			log.Printf("prolink: no absolute positions on the beat port: %v", err)
 			r.beat, err = nil, nil
 		} else {
@@ -633,6 +633,22 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 	go r.announceLoop(probe)
 	go r.beatLoop()
 	return r, nil
+}
+
+// beatAddress is where the export listens on the beat port. Players broadcast
+// their beat packets and, by the protocol analysis, a CDJ-3000 its absolute
+// positions too; Linux gives a broadcast only to sockets on the wildcard
+// address, never to one on the interface's own (#217: the deck then had the
+// status packets' beat positions only). An explicit loopback identity keeps
+// its own address, so tests stay apart.
+func beatAddress(cfg ExportConfig, ip net.IP) string {
+	if cfg.BeatAddr != "" {
+		return cfg.BeatAddr
+	}
+	if ip.IsLoopback() {
+		return net.JoinHostPort(ip.String(), "50001")
+	}
+	return "0.0.0.0:50001"
 }
 func (r *exportRun) number() byte         { r.mu.Lock(); defer r.mu.Unlock(); return r.player }
 func (r *exportRun) mediaAvailable() bool { r.mu.Lock(); defer r.mu.Unlock(); return r.mounted }
