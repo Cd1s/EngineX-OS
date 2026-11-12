@@ -2302,6 +2302,10 @@ SERVICES_MAIN = """
 	}
 	property string scUpdateText: ""
 	property bool scBroadcastOn: false
+	property bool scAutoTracklist: false
+	property var scAudibleSince: ({})
+	property var scReportedTracks: ({})
+	property bool scLastRecorderActive: false
 	property bool scUpfaderEcho: false
 	property string scLastBroadcastTrack: ""
 	property bool scDualColumn: false
@@ -2844,6 +2848,8 @@ SERVICES_MAIN = """
 		if (!scSameItems(scLoggedIn, v.loggedIn)) scLoggedIn = v.loggedIn
 		scScope = v.scope
 		scBroadcastOn = !!v.broadcastEnabled
+		if (v.autoTracklist !== undefined) scAutoTracklist = !!v.autoTracklist
+		else if (v.auto_tracklist !== undefined) scAutoTracklist = v.auto_tracklist === "1" || v.auto_tracklist === 1 || v.auto_tracklist === true
 		const prevUpfaderEcho = scUpfaderEcho
 		scUpfaderEcho = !!v.upfaderEcho
 		if (scHasMixer && scTransitionFxView && (!scUiLoaded || scUpfaderEcho !== prevUpfaderEcho)) {
@@ -2952,32 +2958,73 @@ SERVICES_MAIN = """
 			else if (key === "fx_time_mode" && line.trim().indexOf("fx_time_mode=") === 0) fxMode = line.trim().slice(13) === "ms" ? "ms" : "beats"
 			else if (key === "fx_time_ms" && line.trim().indexOf("fx_time_ms=") === 0) fxMs = scFxMsInteger(line.trim().slice(11))
 			else if (key === "pioneer_fx") root.scPioneerFx = val || "off"
+			else if (key === "auto_tracklist") root.scAutoTracklist = val === "1" || val === "true"
 		}
 		scFxMsApply(fxMode, fxMs)
 	}
+	function scDeckAudibleOnMaster(d) {
+		if (root.scDeckLocked(d) || root.scShadowHeldBy(d)) return false
+		const play = root.scTr("/Engine/Deck" + d + "/PlayState")
+		if (!(play && play.state)) return false
+		if (!root.scHasMixer) return true
+		const vol = root.scTr("/Engine/Mixer/Channel" + d + "/Volume/Level")
+		if (vol && typeof vol.unnormalized === "number" && vol.unnormalized <= 0.05) return false
+		const postXf = root.scTr("/Engine/Mixer/Channel" + d + "/Crossfader/PostCrossfadeLevel")
+		if (postXf && typeof postXf.unnormalized === "number" && postXf.unnormalized <= 0.05) return false
+		return true
+	}
 	function scSyncBroadcastMeta() {
-		if (!scBroadcastOn) return
-		const decks = (root.activeDecks || []).map(d => parseInt(d)).concat(root.scDeckList())
-		for (const d of decks) {
-			const play = Planck.getProperty("/Engine/Deck" + d + "/PlayState")
-			if (!(play && play.translator && play.translator.state)) continue
-			const pTitle = Planck.getProperty("/Engine/Deck" + d + "/Track/SongName")
-			const pArtist = Planck.getProperty("/Engine/Deck" + d + "/Track/ArtistName")
-			const title = scPlainTitle(pTitle && pTitle.translator ? pTitle.translator.string : "")
-			const artist = pArtist && pArtist.translator ? pArtist.translator.string : ""
-			if (!title && !artist) continue
-			const key = artist + " - " + title
-			if (key === scLastBroadcastTrack) return
-			scLastBroadcastTrack = key
-			const x = new XMLHttpRequest()
-			x.open("POST", "http://127.0.0.1:8080/v1/sc5000/broadcast/metadata?artist=" + encodeURIComponent(artist) + "&title=" + encodeURIComponent(title))
-			x.send()
+		if (root.scHasMixer && root.scAutoTracklist) {
+			const rec = root.scTr("/Engine/Mixer/Recorder/Active")
+			const recOn = !!(rec && rec.state)
+			if (recOn !== root.scLastRecorderActive) {
+				root.scLastRecorderActive = recOn
+				const xr = new XMLHttpRequest()
+				xr.open("POST", "http://127.0.0.1:8080/v1/sc5000/tracklist?recorderActive=" + (recOn ? "1" : "0"))
+				xr.send()
+			}
+		}
+		if (!root.scHasMixer) return
+		if (!scBroadcastOn && !(scAutoTracklist && scLastRecorderActive)) {
+			scAudibleSince = ({})
+			scReportedTracks = ({})
 			return
+		}
+		const now = Date.now()
+		for (let d = 1; d <= 4; d++) {
+			if (!scDeckAudibleOnMaster(d)) {
+				delete scAudibleSince[d]
+				delete scReportedTracks[d]
+				continue
+			}
+			const pTitle = root.scTr("/Engine/Deck" + d + "/Track/SongName")
+			const pArtist = root.scTr("/Engine/Deck" + d + "/Track/ArtistName")
+			const title = scPlainTitle(pTitle ? pTitle.string : "")
+			const artist = pArtist ? pArtist.string : ""
+			if (!title && !artist) continue
+			const sig = artist + "\t" + title
+			if (!scAudibleSince[d] || scAudibleSince[d].sig !== sig)
+				scAudibleSince[d] = {sig: sig, at: now}
+			if (now - scAudibleSince[d].at < 1500 || scReportedTracks[d] === sig) continue
+			scReportedTracks[d] = sig
+			scLastBroadcastTrack = artist + " - " + title
+			const pBpm = root.scTr("/Engine/Deck" + d + "/CurrentBPM") || root.scTr("/Engine/Deck" + d + "/OriginalBPM")
+			const pKey = root.scTr("/Engine/Deck" + d + "/Track/CurrentKey")
+			const pUri = root.scTr("/Engine/Deck" + d + "/Track/TrackUri")
+			const bpm = pBpm && pBpm.unnormalized > 0 ? pBpm.unnormalized : 0
+			const keyName = pKey ? pKey.string || "" : ""
+			const uri = pUri ? pUri.string || "" : ""
+			const isStream = /\\/stream\\/|tidal|deezer|soundcloud|netease|spotify|beatport/i.test(uri) ? "1" : "0"
+			const x = new XMLHttpRequest()
+			x.open("POST", "http://127.0.0.1:8080/v1/sc5000/broadcast/metadata?artist=" + encodeURIComponent(artist) +
+				"&title=" + encodeURIComponent(title) + "&deck=" + d + "&bpm=" + encodeURIComponent(bpm ? bpm.toFixed(2) : "") +
+				"&key=" + encodeURIComponent(keyName) + "&streaming=" + isStream + "&onsetMs=" + scAudibleSince[d].at)
+			x.send()
 		}
 	}
 	Timer {
-		interval: 2000; repeat: true
-		running: root.scBroadcastOn
+		interval: 1000; repeat: true
+		running: root.scHasMixer && (root.scBroadcastOn || root.scAutoTracklist)
 		onTriggered: root.scSyncBroadcastMeta()
 	}
 	// Only a rekordbox USB export's quick-imported overview is low and needs the
@@ -3500,6 +3547,22 @@ SERVICES_ENTRIES = QUALITY_ENTRY + """
 			values: ["Off", "On"]
 			currentValue: values[root.scBroadcastOn ? 1 : 0]
 			onSelected: function(index) { root.scCall("broadcast=" + index) }
+		},
+		Text {
+			visible: !root.scHasMixer
+			Layout.fillWidth: true
+			leftPadding: 24; rightPadding: 24
+			wrapMode: Text.WordWrap
+			color: "#9a9a9a"
+			font.pixelSize: 16
+			text: "No internal mixer: records shared set tracklist across linked players (:8080)"
+		},
+		EntryBase.ListEntry {
+			text: "Auto Tracklist on Record"
+			visible: root.scHasMixer
+			values: ["Off", "On"]
+			currentValue: values[root.scAutoTracklist ? 1 : 0]
+			onSelected: function(index) { root.scCall("autoTracklist=" + index) }
 		},
 		EntryBase.ListEntry {
 			text: "Pro DJ Link Library"

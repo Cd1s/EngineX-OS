@@ -223,6 +223,11 @@ func New(cfg Config, jobs *Jobs) *Server {
 	s.mux.HandleFunc("GET /peer/decks/{n}/audio", s.peerAudioGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/perf", s.peerPerfGet)
 	s.mux.HandleFunc("GET /peer/decks/{n}/display", s.peerDisplayGet)
+	s.mux.HandleFunc("GET /peer/tracklist", s.peerTracklistHandler)
+	s.mux.HandleFunc("POST /peer/tracklist", s.peerTracklistHandler)
+	s.mux.HandleFunc("GET /api/tracklist", s.handleTracklist)
+	s.mux.HandleFunc("POST /api/tracklist", s.handleTracklist)
+	s.mux.HandleFunc("GET /api/tracklist/export", s.handleTracklistExport)
 	s.mux.HandleFunc("POST /api/drop", s.drop)
 	s.mux.HandleFunc("POST /api/relocate", s.relocate)
 	s.mux.HandleFunc("GET /api/bluetooth", s.handleBluetooth)
@@ -359,6 +364,8 @@ func (s *Server) Close() {
 	if s.prolinkExport != nil {
 		s.prolinkExport.Close()
 	}
+	s.closeTracklist()
+	s.closeBroadcaster()
 	prolinkMu.Lock()
 	delete(postedDevices, s)
 	prolinkMu.Unlock()

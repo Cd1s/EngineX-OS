@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,27 +51,33 @@ type Config struct {
 	InputPath  string `json:"inputPath,omitempty"` // optional PCM file/FIFO path (default "/tmp/sc5000-broadcast.pcm")
 	LANMode    string `json:"lanMode,omitempty"`   // "off" (default), "rtp", "teleport"
 	LANTarget  string `json:"lanTarget,omitempty"` // e.g. "239.255.0.1:5004" or "192.168.1.50:9998"
+	RecordMix  bool   `json:"recordMix,omitempty"` // save local WAV mix for Mixcloud upload (#199)
+	RecordDir  string `json:"recordDir,omitempty"` // directory for local WAV mix files
 }
 
 // Status captures real-time state of the broadcaster without revealing secrets.
 type Status struct {
-	Enabled      bool   `json:"enabled"`
-	Streaming    bool   `json:"streaming"`
-	Protocol     string `json:"protocol"`
-	ServerURL    string `json:"serverUrl"`
-	Mountpoint   string `json:"mountpoint"`
-	Username     string `json:"username"`
-	PasswordSet  bool   `json:"passwordSet"`
-	Format       string `json:"format"`
-	Bitrate      int    `json:"bitrate"`
-	StreamName   string `json:"streamName"`
-	CurrentTrack string `json:"currentTrack"`
-	BytesSent    int64  `json:"bytesSent"`
-	Listeners    int    `json:"listeners"` // clients on the local /live.mp3 and /live.wav fan-out
-	ConnectedAt  string `json:"connectedAt,omitempty"`
-	LastError    string `json:"lastError,omitempty"`
-	LANMode      string `json:"lanMode,omitempty"`
-	LANTarget    string `json:"lanTarget,omitempty"`
+	Enabled        bool   `json:"enabled"`
+	Streaming      bool   `json:"streaming"`
+	AudioSupported *bool  `json:"audioSupported,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	Protocol       string `json:"protocol"`
+	ServerURL      string `json:"serverUrl"`
+	Mountpoint     string `json:"mountpoint"`
+	Username       string `json:"username"`
+	PasswordSet    bool   `json:"passwordSet"`
+	Format         string `json:"format"`
+	Bitrate        int    `json:"bitrate"`
+	StreamName     string `json:"streamName"`
+	CurrentTrack   string `json:"currentTrack"`
+	BytesSent      int64  `json:"bytesSent"`
+	Listeners      int    `json:"listeners"` // clients on the local /live.mp3 and /live.wav fan-out
+	ConnectedAt    string `json:"connectedAt,omitempty"`
+	LastError      string `json:"lastError,omitempty"`
+	LANMode        string `json:"lanMode,omitempty"`
+	LANTarget      string `json:"lanTarget,omitempty"`
+	RecordMix      bool   `json:"recordMix,omitempty"`
+	RecordPath     string `json:"recordPath,omitempty"`
 }
 
 // Broadcaster manages background audio streaming to Icecast/Shoutcast on CPU3.
@@ -84,6 +91,7 @@ type Broadcaster struct {
 	capturing    bool // local capture loop is running (works without an external server)
 	connectedAt  string
 	lastError    string
+	recordPath   string
 
 	bytesSent atomic.Int64
 
@@ -242,6 +250,8 @@ func (b *Broadcaster) Status() Status {
 		LastError:    b.lastError,
 		LANMode:      b.cfg.LANMode,
 		LANTarget:    b.cfg.LANTarget,
+		RecordMix:    b.cfg.RecordMix,
+		RecordPath:   b.recordPath,
 	}
 }
 
@@ -378,6 +388,31 @@ func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle)
 			inputF.Close()
 		}
 	}()
+
+	var (
+		recF     *os.File
+		recBytes uint32
+	)
+	if cfg.RecordMix && cfg.RecordDir != "" && os.MkdirAll(cfg.RecordDir, 0o755) == nil {
+		rp := filepath.Join(cfg.RecordDir, "live-set-"+time.Now().UTC().Format("20060102-150405")+".wav")
+		if f, err := os.OpenFile(rp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+			_, _ = f.Write(WAVHeader())
+			recF = f
+			b.mu.Lock()
+			b.recordPath = rp
+			b.mu.Unlock()
+		}
+	}
+	defer func() {
+		if recF != nil {
+			var sz [4]byte
+			binary.LittleEndian.PutUint32(sz[:], 36+recBytes)
+			_, _ = recF.WriteAt(sz[:], 4)
+			binary.LittleEndian.PutUint32(sz[:], recBytes)
+			_, _ = recF.WriteAt(sz[:], 40)
+			_ = recF.Close()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -402,6 +437,11 @@ func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle)
 			sendBytes = pcm
 		}
 		b.hub.publish(sendBytes)
+		if recF != nil {
+			if n, err := recF.Write(sendBytes); err == nil {
+				recBytes += uint32(n)
+			}
+		}
 
 		b.mu.Lock()
 		ls := b.lanStreamer

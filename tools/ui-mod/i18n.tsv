@@ -603,3 +603,6 @@ No paired player	未连接配对碟机	未連接配對碟機
 Linked View	联机视图	聯機視圖
 Single / Dual layer: Shift + Layer, or Layout > PERFORMANCE LAYOUT > Deck Layout	单层 / 双层：Shift + Layer，或 布局 > 演出布局 > 碟机排列	單層 / 雙層：Shift + Layer，或 版面 > 演出配置 > 碟機排列
 Stock	原厂	原廠
+Set Tracklist	歌单记录	歌單記錄
+Auto Tracklist on Record	录音时自动生成歌单	錄音時自動產生歌單
+No internal mixer: records shared set tracklist across linked players (:8080)	独立碟机无内置混音台：开启后自动记录双机合并歌单（在 :8080 查看与导出）	獨立碟機無內建混音器：開啟後自動記錄雙機合併歌單（於 :8080 檢視與匯出）

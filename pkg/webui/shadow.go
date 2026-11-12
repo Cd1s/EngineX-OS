@@ -124,8 +124,9 @@ type deckState struct {
 	Link string `json:"link,omitempty"`
 	// Seq orders one sender's updates (its Unix ns at the post): UDP and the
 	// HTTP fallback can arrive out of order.
-	Seq int64  `json:"seq,omitempty"`
-	Dbg string `json:"dbg,omitempty"` // shortcut: Engine's raw master state, until verified on hardware
+	Seq    int64    `json:"seq,omitempty"`
+	Dbg    string   `json:"dbg,omitempty"`    // shortcut: Engine's raw master state, until verified on hardware
+	ExtVol *float64 `json:"extVol,omitempty"` // standalone player: /Engine/DeckN/ExternalMixerVolume when Engine Connect is active (#199)
 	// CuePos and Cues are the sender's CUE point and hot cues in track samples;
 	// the receiver's QML sets them through Engine's own deck properties. Cues is
 	// null when the sender does not say (a CDJ), [] when the track has none.

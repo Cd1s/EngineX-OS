@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/broadcast"
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
+	"github.com/Cd1s/EngineX-OS/pkg/tracklist"
 )
 
 var (
@@ -71,6 +73,12 @@ func (s *Server) broadcaster() *broadcast.Broadcaster {
 	return b
 }
 
+func (s *Server) closeBroadcaster() {
+	if v, ok := broadcasters.LoadAndDelete(s); ok {
+		v.(*broadcast.Broadcaster).Close()
+	}
+}
+
 func (s *Server) broadcastConfigPath() string {
 	return filepath.Join(s.cfg.StateDir, "broadcast-config.json")
 }
@@ -98,10 +106,29 @@ func broadcastHost(raw string) string {
 	return strings.ToLower(u.Host)
 }
 
+func (s *Server) broadcastStatus() broadcast.Status {
+	st := s.broadcaster().Status()
+	if s.hasInternalMixer() {
+		st.AudioSupported = boolPtr(true)
+		st.Mode = "stream_and_tracklist"
+		return st
+	}
+	_, active := s.TracklistManager().Active()
+	st.Enabled = active
+	st.Streaming = false
+	st.AudioSupported = boolPtr(false)
+	st.Mode = "tracklist_only"
+	if sess, ok := s.TracklistManager().Latest(); ok {
+		if np := tracklist.NowPlayingLine(sess); np != "" {
+			st.CurrentTrack = np
+		}
+	}
+	return st
+}
+
 // broadcastGet handles GET /api/broadcast.
 func (s *Server) broadcastGet(w http.ResponseWriter, r *http.Request) {
-	b := s.broadcaster()
-	respond(w, b.Status())
+	respond(w, s.broadcastStatus())
 }
 
 type broadcastPostInput struct {
@@ -117,13 +144,19 @@ type broadcastPostInput struct {
 	InputPath  *string `json:"inputPath"`
 	LANMode    *string `json:"lanMode"`
 	LANTarget  *string `json:"lanTarget"`
+	RecordMix  *bool   `json:"recordMix"`
 }
 
 // broadcastPost handles POST /api/broadcast.
 func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 	b := s.broadcaster()
 	s.uiMu.Lock()
-	defer s.uiMu.Unlock()
+	unlocked := false
+	defer func() {
+		if !unlocked {
+			s.uiMu.Unlock()
+		}
+	}()
 
 	cfg := s.loadBroadcastConfig()
 
@@ -199,9 +232,39 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 			if in.LANTarget != nil {
 				cfg.LANTarget = *in.LANTarget
 			}
+			if in.RecordMix != nil {
+				cfg.RecordMix = *in.RecordMix
+			}
 		}
 	}
+	if q := r.URL.Query().Get("recordMix"); q != "" {
+		if b, ok := parseBoolParam(q); ok {
+			cfg.RecordMix = b
+		}
+	}
+	if cfg.RecordMix && cfg.RecordDir == "" && s.cfg.StateDir != "" {
+		cfg.RecordDir = filepath.Join(s.cfg.StateDir, "recordings")
+	}
 
+	if !s.hasInternalMixer() {
+		wantOn := cfg.Enabled
+		cfg.Enabled = false
+		if err := b.Configure(cfg); err != nil {
+			fail(w, 400, err)
+			return
+		}
+		if err := providers.SaveJSON(s.broadcastConfigPath(), cfg); err != nil {
+			fail(w, 500, errors.New("could not save broadcast settings"))
+			return
+		}
+		unlocked = true
+		s.uiMu.Unlock()
+		s.applyTracklistToggle(wantOn, cfg.StreamName, "tracklist_only", "")
+		respond(w, s.broadcastStatus())
+		return
+	}
+
+	prevRecPath := b.Status().RecordPath
 	// Validate first: a rejected config must not be persisted and reloaded at next boot.
 	if err := b.Configure(cfg); err != nil {
 		fail(w, 400, err)
@@ -211,23 +274,63 @@ func (s *Server) broadcastPost(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, errors.New("could not save broadcast settings"))
 		return
 	}
-	respond(w, b.Status())
+	recPath := b.Status().RecordPath
+	if !cfg.Enabled && prevRecPath != "" {
+		recPath = prevRecPath
+	}
+	unlocked = true
+	s.uiMu.Unlock()
+	s.applyTracklistToggle(cfg.Enabled, cfg.StreamName, "stream_and_tracklist", recPath)
+	respond(w, s.broadcastStatus())
+}
+
+func (s *Server) applyTracklistToggle(on bool, title, mode, audioFile string) {
+	rt := s.tracklistState()
+	mgr := rt.mgr
+	if on {
+		sess := mgr.Start(time.Now(), title, mode, audioFile)
+		if !s.hasInternalMixer() {
+			s.startStandaloneObserver(rt)
+			s.ObserveStandaloneTracklist(time.Now())
+		}
+		go s.pushTracklistToPeers(tracklist.PeerSyncMessage{Action: "sync", Session: sess})
+		return
+	}
+	s.stopStandaloneObserver(rt)
+	if done, stopped := mgr.Stop(time.Now()); stopped {
+		if audioFile != "" {
+			base := strings.TrimSuffix(filepath.Base(audioFile), filepath.Ext(audioFile))
+			_ = tracklist.WriteSidecars(done, filepath.Dir(audioFile), base, filepath.Base(audioFile))
+		}
+		s.writeMediaSessionSidecars(done)
+		go s.pushTracklistToPeers(tracklist.PeerSyncMessage{Action: "stop", Session: done})
+	}
 }
 
 // broadcastMetadataPost handles POST /api/broadcast/metadata.
 func (s *Server) broadcastMetadataPost(w http.ResponseWriter, r *http.Request) {
 	b := s.broadcaster()
 
-	artist := r.URL.Query().Get("artist")
-	title := r.URL.Query().Get("title")
+	q := r.URL.Query()
+	artist := q.Get("artist")
+	title := q.Get("title")
+	deck, _ := strconv.Atoi(q.Get("deck"))
+	bpm, _ := strconv.ParseFloat(q.Get("bpm"), 64)
+	keyName := q.Get("key")
+	streaming := q.Get("streaming") == "1" || strings.EqualFold(q.Get("streaming"), "true")
+	onsetMS, _ := strconv.ParseInt(q.Get("onsetMs"), 10, 64)
 
 	if r.Body != nil {
 		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 16384))
 		if len(bytes.TrimSpace(bodyBytes)) > 0 {
 			var in struct {
-				Artist string `json:"artist"`
-				Title  string `json:"title"`
-				Deck   int    `json:"deck"`
+				Artist    string  `json:"artist"`
+				Title     string  `json:"title"`
+				Deck      int     `json:"deck"`
+				BPM       float64 `json:"bpm"`
+				Key       string  `json:"key"`
+				Streaming bool    `json:"streaming"`
+				OnsetMS   int64   `json:"onsetMs"`
 			}
 			if err := json.Unmarshal(bodyBytes, &in); err == nil {
 				if in.Artist != "" && artist == "" {
@@ -236,30 +339,92 @@ func (s *Server) broadcastMetadataPost(w http.ResponseWriter, r *http.Request) {
 				if in.Title != "" && title == "" {
 					title = in.Title
 				}
+				if in.Deck != 0 && deck == 0 {
+					deck = in.Deck
+				}
+				if in.BPM > 0 && bpm == 0 {
+					bpm = in.BPM
+				}
+				if in.Key != "" && keyName == "" {
+					keyName = in.Key
+				}
+				if in.Streaming {
+					streaming = true
+				}
+				if in.OnsetMS > 0 && onsetMS == 0 {
+					onsetMS = in.OnsetMS
+				}
 			}
 		}
 	}
 
 	_ = b.UpdateMetadata(artist, title)
-	respond(w, b.Status())
+	var onset time.Time
+	if onsetMS > 0 {
+		onset = time.UnixMilli(onsetMS).UTC()
+	}
+	label := ""
+	if deck > 0 {
+		label = fmt.Sprintf("Deck %d", deck)
+	}
+	if _, added := s.TracklistManager().RecordDirectTrack(time.Now(), tracklist.Entry{
+		StartedAt:   onset,
+		Deck:        deck,
+		Channel:     deck,
+		SourceLabel: label,
+		Artist:      artist,
+		Title:       title,
+		BPM:         bpm,
+		Key:         keyName,
+		Streaming:   streaming,
+	}); added {
+		if sess, ok := s.TracklistManager().Active(); ok {
+			go s.pushTracklistToPeers(tracklist.PeerSyncMessage{Action: "sync", Session: sess})
+		}
+	}
+	respond(w, s.broadcastStatus())
 }
 
-// BroadcastEnabled reports whether broadcast streaming is enabled.
+// BroadcastEnabled reports whether broadcast streaming (or set tracklist on standalone players) is enabled.
 func (s *Server) BroadcastEnabled() bool {
+	if !s.hasInternalMixer() {
+		_, active := s.TracklistManager().Active()
+		return active
+	}
 	return s.broadcaster().Status().Enabled
 }
 
-// SetBroadcastEnabled toggles broadcast streaming and persists the preference.
+// SetBroadcastEnabled toggles broadcast streaming (or standalone set tracklist) and persists the preference.
 func (s *Server) SetBroadcastEnabled(on bool) error {
 	s.uiMu.Lock()
-	defer s.uiMu.Unlock()
-
 	cfg := s.loadBroadcastConfig()
+	if cfg.RecordMix && cfg.RecordDir == "" && s.cfg.StateDir != "" {
+		cfg.RecordDir = filepath.Join(s.cfg.StateDir, "recordings")
+	}
+	if !s.hasInternalMixer() {
+		cfg.Enabled = false
+		_ = providers.SaveJSON(s.broadcastConfigPath(), cfg)
+		s.uiMu.Unlock()
+		s.applyTracklistToggle(on, cfg.StreamName, "tracklist_only", "")
+		return nil
+	}
+	prevRecPath := s.broadcaster().Status().RecordPath
 	cfg.Enabled = on
 	if err := providers.SaveJSON(s.broadcastConfigPath(), cfg); err != nil {
+		s.uiMu.Unlock()
 		return err
 	}
-	return s.broadcaster().SetEnabled(on)
+	err := s.broadcaster().Configure(cfg)
+	s.uiMu.Unlock()
+	if err != nil {
+		return err
+	}
+	recPath := s.broadcaster().Status().RecordPath
+	if !on && prevRecPath != "" {
+		recPath = prevRecPath
+	}
+	s.applyTracklistToggle(on, cfg.StreamName, "stream_and_tracklist", recPath)
+	return nil
 }
 
 // RegisterBroadcastRoutes registers broadcast routes on the server's mux.
@@ -277,6 +442,7 @@ func (s *Server) RegisterBroadcastRoutes() {
 	// Public on purpose (like the phone pages): OBS/VLC/browsers open these without a console cookie.
 	s.mux.HandleFunc("GET /live.mp3", s.liveMP3)
 	s.mux.HandleFunc("GET /live.wav", s.liveWAV)
+	s.mux.HandleFunc("GET /live/nowplaying.txt", s.handleNowPlayingText)
 }
 
 // handleUSBAudio handles GET and POST requests for /v1/sc5000/usb-audio and /api/usb-audio.
@@ -369,6 +535,10 @@ func (s *Server) handleUSBAudio(w http.ResponseWriter, r *http.Request) {
 
 // liveSubscribe starts a local listener, or answers 503 when Live Stream is off.
 func (s *Server) liveSubscribe(w http.ResponseWriter, contentType string) (<-chan []byte, func(), bool) {
+	if !s.hasInternalMixer() {
+		http.Error(w, "Standalone player has no internal master mix: download the shared set tracklist in the web console or stream audio from your external mixer", http.StatusServiceUnavailable)
+		return nil, nil, false
+	}
 	b := s.broadcaster()
 	st := b.Status()
 	if !st.Enabled {

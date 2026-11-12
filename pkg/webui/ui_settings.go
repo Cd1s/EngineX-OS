@@ -172,6 +172,7 @@ type uiSettings struct {
 	ShadowMode       string   `json:"shadowMode"` // which path draws a shadow deck: auto = Engine loads every source whose file this player can have and stock components draw it (EngineX peer; CDJ playing from USB or SD), a CDJ without such a file goes to the display renderer, engine = Engine loads every source, cdj = display renderer for every source
 	ProlinkWaveform  bool     `json:"prolinkWaveform"`
 	BroadcastEnabled bool     `json:"broadcastEnabled"`
+	AutoTracklist    bool     `json:"autoTracklist"`
 	UpfaderEcho      bool     `json:"upfaderEcho"`
 	// PairedView (#201): a standalone player in the 4-deck layout shows Engine's own
 	// 2-deck view instead, this unit's active layer and the other player's active
@@ -359,6 +360,8 @@ func (s *Server) loadUI() uiSettings {
 			v.ProlinkShare = val == "1"
 		case "prolink_export":
 			v.ProlinkExport = val == "1"
+		case "auto_tracklist":
+			v.AutoTracklist = val == "1" || strings.EqualFold(val, "true")
 		case "known":
 			known = strings.Split(val, ",")
 		case "four_deck_role":
@@ -543,6 +546,9 @@ func (s *Server) saveUI(v uiSettings, exportRequested ...bool) (err error) {
 	}
 	if v.ProlinkExport {
 		text += "prolink_export=1\n"
+	}
+	if v.AutoTracklist {
+		text += "auto_tracklist=1\n"
 	}
 	if v.StreamSortRole != "" && v.StreamSortRole != "default" {
 		text += "stream_sort_role=" + v.StreamSortRole + "\n"
@@ -816,6 +822,15 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		v.UpfaderEcho = b
 	}
+	if q.Has("autoTracklist") {
+		b, ok := parseBoolParam(q.Get("autoTracklist"))
+		if !ok {
+			s.uiMu.Unlock()
+			fail(w, 400, errors.New("invalid setting"))
+			return
+		}
+		v.AutoTracklist = b
+	}
 	if q.Has("cueCountdown") {
 		b, ok := parseBoolParam(q.Get("cueCountdown"))
 		if !ok {
@@ -926,8 +941,12 @@ func (s *Server) uiUpdate(w http.ResponseWriter, r *http.Request) {
 		hasBroadcast bool
 		bcastOn      bool
 	)
-	if q.Has("broadcast") {
-		b, ok := parseBoolParam(q.Get("broadcast"))
+	if q.Has("broadcast") || q.Has("broadcastEnabled") {
+		param := q.Get("broadcast")
+		if !q.Has("broadcast") {
+			param = q.Get("broadcastEnabled")
+		}
+		b, ok := parseBoolParam(param)
 		if !ok {
 			s.uiMu.Unlock()
 			fail(w, 400, errors.New("invalid setting"))

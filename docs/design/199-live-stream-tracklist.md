@@ -28,8 +28,8 @@ DJs need two distinct workflows depending on hardware architecture:
 
 ### 4.1 All-in-One Logic (`capabilities.mixer == true`)
 
-- **One-Tap Control Center Tile & Settings Sync**:
-  - Add a one-tap `Live Stream` tile (`objectName: "ControlCenter_OneTapLive"`, `visible: root.scHasMixer`) in `ControlCenterTab.qml` showing `OFF` or `LIVE · MM:SS`, synchronized with `Settings -> Services -> Live Stream` (`ControlCenter_LiveStream`) and `:8080`.
+- **Single-Switch Live Stream & Settings Sync**:
+  - Preserve `Settings -> Services -> Live Stream` (`objectName: "ControlCenter_LiveStream"`, kept out of the top-level Control Center tab so it cannot be tapped by accident mid-set) synchronized with `:8080`.
   - Toggling `Live Stream` on starts `pkg/broadcast` (Icecast/Shoutcast + `/live.mp3` + `/live.wav`, plus optional local set file recording `RecordSet` writing `<set>.wav` and companion `.txt` / `.cue` / `.mixcloud.txt` / `.json` sidecars) **and** opens an automatic timestamped `tracklist.Session`.
   - Add `Auto Tracklist` (`auto_tracklist`, default `0` = Off) in `Settings -> Services` and `:8080`: when enabled on an all-in-one, starting/stopping the stock Engine recorder (`/Engine/Mixer/Recorder/Active`) also automatically opens/closes a timestamped tracklist session aligned to `00:00` of the recording and writes companion export files to `/data/enginex/state/tracklists/` (and alongside writable media `Sessions/` when present).
 - **Audible ("Played") Rule from Engine's Own Mixer State**:
