@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
 	"github.com/Cd1s/EngineX-OS/pkg/bridge"
@@ -298,8 +299,11 @@ func TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011(t *testing.T) 
 	if _, e = db.Exec(`CREATE TABLE content(id INTEGER PRIMARY KEY,title TEXT,file_path TEXT,bpm INTEGER,key_name TEXT);CREATE TABLE playlist(id INTEGER PRIMARY KEY,parent_id INTEGER,name TEXT,attribute INTEGER,seq INTEGER,smart_list TEXT);CREATE TABLE playlist_content(playlist_id INTEGER,content_id INTEGER,track_no INTEGER);INSERT INTO playlist VALUES(1,0,'Main Set',0,1,'');`); e != nil {
 		t.Fatal(e)
 	}
+	// The audio files exist, as on a real stick: a track whose file is gone is left out (Reconcile).
 	for i := 1; i <= 505; i++ {
-		if _, e = db.Exec(`INSERT INTO content VALUES(?,?,?,12800,'8A')`, i, "Track", filepath.ToSlash(filepath.Join("/Contents/track", string(rune('a'+i%26)), "s"+strconv.Itoa(i)+".flac"))); e != nil {
+		p := filepath.ToSlash(filepath.Join("/Contents/track", string(rune('a'+i%26)), "s"+strconv.Itoa(i)+".flac"))
+		testfixture.Write(t, root, p, testfixture.FLAC())
+		if _, e = db.Exec(`INSERT INTO content VALUES(?,?,?,12800,'8A')`, i, "Track", p); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -312,15 +316,20 @@ func TestLargeMountIncrementalSyncAddsNewTracksAndPlaylists_GL011(t *testing.T) 
 	}
 	// Simulate user exporting 3 new tracks and a new playlist in Rekordbox (GL-011).
 	for i := 506; i <= 508; i++ {
-		if _, e = db.Exec(`INSERT INTO content VALUES(?,?,?,13000,'9A')`, i, "New Track", filepath.ToSlash(filepath.Join("/Contents/new", "s"+strconv.Itoa(i)+".flac"))); e != nil {
+		p := filepath.ToSlash(filepath.Join("/Contents/new", "s"+strconv.Itoa(i)+".flac"))
+		testfixture.Write(t, root, p, testfixture.FLAC())
+		if _, e = db.Exec(`INSERT INTO content VALUES(?,?,?,13000,'9A')`, i, "New Track", p); e != nil {
 			t.Fatal(e)
 		}
 	}
 	if _, e = db.Exec(`INSERT INTO playlist VALUES(2,0,'Added Set',0,2,'');INSERT INTO playlist_content VALUES(2,506,1),(2,507,2),(2,508,3);`); e != nil {
 		t.Fatal(e)
 	}
-	r2, e := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)
-	if e != nil || r2.Added != 3 || r2.Unchanged != 505 || !r2.PlaylistsChanged {
+	// The deadline stands in for the read budget, which -race on a busy host can use up.
+	r2, e := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{Deadline: time.Now().Add(time.Hour)}, false)
+	// The 505 tracks of the first mount were imported from the export alone;
+	// this mount reads their files too (BH-GC1-2), so they count as updated.
+	if e != nil || r2.Added != 3 || r2.Updated != 505 || r2.Deferred != 0 || !r2.PlaylistsChanged {
 		t.Fatalf("second mount incremental delta: %+v %v", r2, e)
 	}
 }
