@@ -71,9 +71,9 @@
 
 ### 1.4 音质与缓存
 
-- `设置 → 设备 → 流媒体音质`：**Lossless（无损 FLAC）** 或 **320kbps MP3**。
+- `设置 → 服务 → 流媒体音质`（`Settings → Services → Streaming Quality`）：**Lossless（无损 FLAC）** 或 **320kbps MP3**。
 - SoundCloud 按最高可用音质取：上传者原档（允许下载时，如 320k MP3 / WAV / FLAC）→ 256kbps AAC → 160kbps AAC → 128kbps MP3；没有原档时两档结果相同。
-- 只有网易云有 `网易云下载方式`（Spotify、Deezer、SoundCloud、Beatport 没有这个开关）：`Official（官方直下）` 或 `Deemix 优先`（先走 Deemix，省网易云自己的每月下载额度，失败再回退官方）。
+- 只有网易云有 `设置 → 服务 → 网易云下载方式`（Spotify、Deezer、SoundCloud、Beatport 没有这个开关）：`Official（官方直下）` 或 `Deemix 优先`（先走 Deemix，省网易云自己的每月下载额度，失败再回退官方）。
 - 播放过的曲目缓存在碟机内部存储（`/data/enginex/Stream`），再次加载直接秒开，不会重复下载。
 
 **各平台缓存规则（独立缓存与 Deemix 智能共享）**
@@ -104,7 +104,7 @@
 
 ### 1.6 OmniSource：一次搜索同时查 U 盘和全部流媒体
 
-- 打开：`设置 → 设备 → OmniSource（在流媒体中显示 U 盘/SD）` 选 **On**（默认关闭）。
+- 打开：`配置 → 曲库 → OmniSource（在流媒体中显示 U 盘/SD）`（`Profile → Library → OmniSource (Drives in Streaming)`）选 **On**（默认关闭）。
 - 效果：流媒体浏览器里，U 盘 / SD 卡里**带 Engine 曲库**的歌单和曲目，和已登录服务的歌单并排显示；搜索时同时搜本地盘和各平台。
 - U 盘曲目直接从盘上读取播放，**音质不打折**，不用换音源菜单。
 - 只读：EngineX 只读取这些数据库，不会改写。
@@ -135,19 +135,19 @@
 
 ### 2.2 波形配色：Denon / RGB / 3-Band
 
-- 位置：`设置 → 设备 → 波形样式`，或下拉**控制中心**里的波形颜色磁贴，点一下立即切换，不弹确认。
+- 位置：`配置 → 显示 → 波形样式`（`Profile → Display → Waveform Style`），或下拉**控制中心**里的波形样式磁贴，点一下立即切换，不弹确认。
 - `3-Band` 是先锋风格三频段波形；`RGB` 是高对比度彩色波形；`Denon` 是原厂绿。
 
 ### 2.3 天龙读先锋 CDJ-3000 上的 U 盘
 
 - 前提：碟机和 CDJ 在同一局域网（网线直连或交换机互联，Wi-Fi 也行但更慢）。
-- 打开：`设置 → 设备 → Pro DJ Link 曲库` 选 **On**（默认关闭）。
+- 打开：`设置 → 服务 → Pro DJ Link 曲库`（`Settings → Services → Pro DJ Link Library`）选 **On**（默认关闭）。
 - 之后在音源里出现 `Pro DJ Link 曲库`，可以浏览 CDJ 上 rekordbox U 盘的曲库并加载。
 - **测试版**：开发者没有先锋实体机，主要用自研的 [OpenProLink](https://github.com/Cd1s/OpenProLink) 虚拟 CDJ-3000 联调。接真机表现请大家实测反馈。
 
 ### 2.4 先锋 CDJ-3000 读天龙 U 盘，以及天龙下载的流媒体（`#63` + `#100`）
 
-- 打开：`设置 → 设备 → Pro DJ Link Export to CDJ (Beta)` 选 **On**（默认关闭，实验功能）。
+- 打开：`设置 → 服务 → Pro DJ Link 导出至 CDJ（测试版）`（`Settings → Services → Pro DJ Link Export to CDJ (Beta)`）选 **On**（默认关闭，实验功能）。
 - 开启前先插好含 `PIONEER/rekordbox/export.pdb` 的 U 盘；多个盘时选 `/media` 下按名称排序的第一个。换盘后需要先关再开，才会重新读取曲库。
 - 碟机会向 CDJ 暴露只读的 NFS 和 dbserver，CDJ 就能浏览并加载这张盘。碟机自己占用一个空闲的播放器编号（按 4→3→2→1 选未占用的；四个都被占就不公告）。
 - **`#100`（工作区开发中，本手册写作时尚未合入主干）**：开启后，碟机已下载的**流媒体曲目**会出现在 CDJ 的一个叫 **`EngineX Streaming`** 的文件夹里，CDJ 可以直接浏览并播放，文件显示的平台名（Deezer / SoundCloud / NetEase / Apple Music / Spotify / Beatport / TIDAL）来自下载记录。碟机上没有 U 盘曲库时，流媒体下载也会单独导出给 CDJ。时长对 mp3 / m4a 是估算值，CDJ 上显示的长度可能略有误差。
@@ -164,8 +164,8 @@
 
 ### 3.1 开启 4 轨（SC5000 / SC6000 系列的独立播放机）
 
-1. `设置 → 设备 → 四路波形显示（4-Deck Waveform）` 选 **On**。修改后 Engine 会自动重启一次。
-2. `设置 → 设备 → 四轨角色（4-Deck Role）` 选择这台负责哪两轨：
+1. `布局 → ENGINEX 视图预设 → 联机视图（Layout → ENGINEX VIEW PRESET → Linked View）` 选 **`4 轨（4 Decks）`**。修改后 Engine 会自动重启一次。
+2. `布局 → ENGINEX 视图预设 → 四轨角色（Layout → ENGINEX VIEW PRESET → 4-Deck Role）` 选择这台负责哪两轨：
 
 | 选项 | 含义 |
 | --- | --- |
@@ -196,7 +196,7 @@
 
 > 本节根据工作区里尚未提交的代码编写。合入主干并发布前，请以实际界面为准。
 
-- 位置：下拉控制中心 → **设置 → 布局（Layout）** 页。原厂只有 3 个视图，EngineX 扩成 **View 1 ~ View 5**。
+- 位置：顶部下拉切换至 **`布局（Layout）`** 页。原厂只有 3 个视图，EngineX 扩成 **View 1 ~ View 5**。
 - 每个视图保存一整套布局：碟机样式、碟机数量、波形数量、波形方向、Pad 区是否显示、FX 区是否显示、曲库视图、封面。
 - 在布局管理器里改的设置，会自动记到**当前选中的视图**；也可以点 **「保存视图（Save View）」**立刻保存。
 - **从没保存过的视图**默认：**底部演奏 Pad 区隐藏**；在 4 轨布局下，默认 4 碟机 + 4 条波形。
@@ -229,13 +229,13 @@
 
 ### 4.3 DSP：防爆音、软限幅、自动增益
 
-- 所有选项在 `设置 → 设备`：
+- 主要选项在 `配置 → 播放`（`Profile → Playback`；原厂主输出限幅在 `设置 → 混音台`）：
 
 | 选项 | 默认 | 作用 |
 | --- | --- | --- |
 | `0dB 防破音软限幅`（Master Soft Clipper，`#58`） | 关 | 用平滑曲线把主输出压在 **-0.1 dBFS 以下**；-1.5 dBFS 以下的信号原样不动。零延迟 |
 | `自动增益（0 dB 归一化）`（Auto-Gain，`#64`） | 关 | 把音量偏小的歌平滑提到接近 0 dBFS，最多 +9 dB，-42 dBFS 以下的静音不提升；开了之后一定会经过软限幅，不会爆音 |
-| `拉杆切歌自动回音`（Echo Out，Upfader Echo Out） | 关 | 开启后，一体机（PRIME GO / PRIME 4）快速拉下通道推子，或单机播放器（SC5000 / SC6000）暂停切歌时，自动放出 2.2 秒平滑衰减的回声尾音（原理见下） |
+| `回声淡出`（Echo Out；混音台页为 `推子回音 / Fader Echo`，控制中心另有快捷磁贴） | 关 | 开启后，一体机（PRIME GO / PRIME 4 等带通道推子机型）快速拉下通道推子，或单机播放器（SC5000 / SC6000）暂停切歌时，自动放出 2.2 秒平滑衰减的回声尾音（原理见下） |
 | `原厂主输出限幅 (dB)`（`设置 → 混音台`） | 关 | PRIME GO / Mixstream Pro 放开了原厂的限幅，关 / 0–18 dB，可与软限幅并存 |
 
 - 切换效果器时的「咔嗒」爆音已消除，两轨同时开效果器也有淡入过渡。Flanger 不再让音量下沉（自动补偿，最多 +6 dB）。

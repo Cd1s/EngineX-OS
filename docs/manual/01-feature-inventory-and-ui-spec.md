@@ -144,7 +144,7 @@
 
 | 行为 | 位置 | 说明 |
 |---|---|---|
-| Silent Cue（静音 Cue） | 设置 → 播放 → Censor Button Behavior | 原厂按板子标志隐藏；补丁在 `/Engine/Deck1/SilentCue` 存在时放开 |
+| Silent Cue（静音 Cue） | 配置 → 播放 → Censor 键行为（Profile → Playback → Censor Button Behavior） | 原厂按板子标志隐藏；补丁在 `/Engine/Deck1/SilentCue` 存在时放开 |
 | 波形缩远到 30 秒（#77） | 设置 → 设备 → 旋钮行为 = Waveform Zoom | 一体机原厂 10 秒，钩子写 `Config.ui.waveform.maximumZoomSecs`=30 |
 | Stems List 开关 | 曲库设置 | 强制可见 |
 | "导入 rekordbox 库"提示 | — | 一律走 Ignore；由 rb-bridge 在挂载时转换 |
