@@ -284,6 +284,13 @@ func newTidalGateway(s *Server) *tidalGateway {
 	g.mux.HandleFunc("POST /v1/sc5000/mods/upload", s.handleModsUpload)
 	g.mux.HandleFunc("GET /v1/sc5000/ssh", s.handleSSH)
 	g.mux.HandleFunc("POST /v1/sc5000/ssh", s.handleSSH)
+	// Every /v1/ path reaches this mux only (Server.ServeHTTP): a route
+	// registered on s.mux alone answered with emptyPage (BH-GC2-3).
+	g.mux.HandleFunc("GET /v1/sc5000/unlock-gen2", s.handleUnlockGen2)
+	g.mux.HandleFunc("POST /v1/sc5000/unlock-gen2", s.handleUnlockGen2)
+	g.mux.HandleFunc("POST /v1/sc5000/uninstall-gen2", s.handleUninstallGen2)
+	g.mux.HandleFunc("GET /v1/sc5000/tailscale", s.handleTailscale)
+	g.mux.HandleFunc("POST /v1/sc5000/tailscale", s.handleTailscale)
 	g.mux.HandleFunc("GET /v1/sc5000/mounts", s.handleMounts)
 	g.mux.HandleFunc("POST /v1/sc5000/mounts", s.handleMounts)
 	g.mux.HandleFunc("DELETE /v1/sc5000/mounts", s.handleMounts)
