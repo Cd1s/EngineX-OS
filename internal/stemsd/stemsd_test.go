@@ -63,3 +63,21 @@ func defaultBackendOf(env string) string {
 	}
 	return "htdemucs"
 }
+
+func TestEmptyTokenFileFlagEnablesZeroConfigLANListen(t *testing.T) {
+	var log bytes.Buffer
+	listen, tok := resolveListenAndToken("127.0.0.1:6596", "", map[string]bool{"token-file": true}, &log)
+	if listen != "0.0.0.0:18765" || tok != "" {
+		t.Fatalf("resolveListenAndToken(-token-file \"\") = (%q, %q), want (\"0.0.0.0:18765\", \"\")", listen, tok)
+	}
+	// Explicit -listen is always respected.
+	listen2, tok2 := resolveListenAndToken("127.0.0.1:6596", "", map[string]bool{"listen": true, "token-file": true}, &log)
+	if listen2 != "127.0.0.1:6596" || tok2 != "" {
+		t.Fatalf("resolveListenAndToken(-listen 127.0.0.1:6596 -token-file \"\") = (%q, %q)", listen2, tok2)
+	}
+	// Explicit non-empty -token-file without -listen stays on loopback for relay mode.
+	listen3, tok3 := resolveListenAndToken("127.0.0.1:6596", "/tmp/tok", map[string]bool{"token-file": true}, &log)
+	if listen3 != "127.0.0.1:6596" || tok3 != "/tmp/tok" {
+		t.Fatalf("resolveListenAndToken(-token-file /tmp/tok) = (%q, %q)", listen3, tok3)
+	}
+}
