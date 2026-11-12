@@ -178,6 +178,10 @@ if [ "${1:-}" = "--restore-tz" ]; then
     exit 0
 fi
 
+if [ -d "$dest" ] && [ ! -L "$dest/gen2-unlocked" ]; then
+    [ -e "$dest/gen2-locked" ] || [ -e "$dest/gen2-unlocked" ] || printf '1\n' > "$dest/gen2-unlocked" 2>/dev/null || :
+fi
+
 mkdir -p /run/systemd/system/engine.service.d
 
 # No KillMode=process: engine.service is Type=forking with the Scripts/engine shell as main PID, so it would
@@ -209,7 +213,11 @@ EOF
 # Wrap the actual Engine invocation, including retries inside the vendor loop.
 if [ -x "$bin_dir/engine-ui-guard" ] && [ -f /usr/Engine/Scripts/engine ]; then
     script_stage=$(mktemp /run/sc5000-engine-script.XXXXXX)
-    sed -E "s|^([[:space:]]*)/usr/Engine/Engine([[:space:]])|\\1$bin_dir/engine-ui-guard launch /usr/Engine/Engine\\2|" \
+    sed -E \
+        -e "s|^([[:space:]]*)/usr/Engine/Engine([[:space:]])|\\1$bin_dir/engine-ui-guard launch /usr/Engine/Engine\\2|" \
+        -e "s|^([[:space:]]*)/usr/sbin/az01-update([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\2|" \
+        -e "s|^([[:space:]]*)az01-update([[:space:]]+--erase-data([[:space:]].*)?)\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/sbin/az01-update\\2|" \
+        -e "s|^([[:space:]]*)/usr/bin/planck-remote-screen([[:space:]].*)?\$|\\1env LD_PRELOAD=\"$lib_hook\" /usr/bin/planck-remote-screen\\2|" \
         /usr/Engine/Scripts/engine > "$script_stage"
     chmod 755 "$script_stage"
     if grep -Fq "$bin_dir/engine-ui-guard launch /usr/Engine/Engine" "$script_stage"; then

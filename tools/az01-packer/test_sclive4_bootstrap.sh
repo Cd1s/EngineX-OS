@@ -184,12 +184,17 @@ grep -q 'SC5000_UI_HOOK=/data/enginex/bundle/lib/libengine-ui-hook.so' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'UnsetEnvironment=LD_PRELOAD' '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'engine-ui-guard launch /usr/Engine/Engine' '$TARGET/usr/Engine/Scripts/engine'
+grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/sbin/az01-update --file' '$TARGET/usr/Engine/Scripts/engine'
+grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/bin/planck-remote-screen --update' '$TARGET/usr/Engine/Scripts/engine'
+grep -Fq 'env LD_PRELOAD=\"/data/enginex/bundle/lib/libengine-ui-hook.so\" /usr/sbin/az01-update --erase-data' '$TARGET/usr/Engine/Scripts/engine'
 grep -q 'engine-ui-guard service /usr/Engine/Scripts/runengine' '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
-# Repeated activation in one boot must not truncate its own bound input.
+# Repeated activation in one boot must not truncate its own bound input, and restores gen2-unlocked if absent.
+rm -f '$TARGET/data/enginex/gen2-unlocked'
 before=\$(sha256sum '$TARGET/usr/Engine/Scripts/engine' | cut -d' ' -f1)
 chroot '$TARGET' /bin/sh /data/enginex/bundle/boot-activate.sh >/dev/null 2>&1
 test -s '$TARGET/usr/Engine/Scripts/engine'
 test \"\$before\" = \"\$(sha256sum '$TARGET/usr/Engine/Scripts/engine' | cut -d' ' -f1)\"
+test \"\$(cat '$TARGET/data/enginex/gen2-unlocked' | tr -d '\r\n')\" = '1'
 grep -q 'Environment=HOME=/tmp/sc5000-engine-home MESA_SHADER_CACHE_MAX_SIZE=32M' \
     '$TARGET/run/systemd/system/engine.service.d/99-sc5000.conf'
 grep -q 'Environment=QML_DISABLE_DISK_CACHE=1' \
@@ -338,6 +343,74 @@ test \"\$(cat '$TARGET/data/sc5000-custom/authorized_keys')\" = ssh-key
 test -f '$TARGET/data/sc5000-custom/bundle/boot-activate.sh'
 "
 echo "  Legacy directory upgrade: PASS"
+
+# 5c. #215: Gen-2 *-Update.img applied through real preloaded /usr/sbin/az01-update
+UPDATE_PREFIX="$PREFIX"
+if [ "$AZ04" = 1 ]; then
+    UPDATE_PREFIX=SYSTEMONE
+fi
+echo "[5c] Testing Gen-2 *-Update.img via preloaded /usr/sbin/az01-update ($UPDATE_PREFIX)..."
+python3 "$REPO/tools/az01-packer/build-data-bundle.py" 5.3.0.2 \
+    --suite "$SUITE" \
+    --hook "$HOOK" \
+    --ui-packs "$TMP/ui-packs.tar.gz" \
+    --prefix "$UPDATE_PREFIX" \
+    --out "$TMP/bundle_out_5302" >/dev/null
+NEXT_IMG=$(ls "$TMP/bundle_out_5302/$UPDATE_PREFIX-5.3.0.2-EngineX-OS-"*-Update.img)
+BAD_IMG="$TMP/corrupt-$UPDATE_PREFIX-Update.img"
+python3 -c '
+import pathlib, sys
+raw = bytearray(pathlib.Path(sys.argv[1]).read_bytes())
+raw[-1] ^= 1
+pathlib.Path(sys.argv[2]).write_bytes(raw)
+' "$NEXT_IMG" "$BAD_IMG"
+
+unshare -m -n -p -f bash -s -- "$ROOTFS" "$TARGET" "$IMG" "$VARLIB" "$TMP" "$BAD_IMG" "$NEXT_IMG" <<'EOF'
+set -euo pipefail
+ROOTFS=$1; TARGET=$2; IMG=$3; VARLIB=$4; TMP=$5; BAD_IMG=$6; NEXT_IMG=$7
+mount --bind "$ROOTFS" "$TARGET"
+mount -o remount,ro,bind "$TARGET"
+mount -o loop "$IMG" "$TARGET/data"
+mount --bind "$TARGET/$VARLIB" "$TARGET/var/lib"
+mount -t tmpfs tmpfs "$TARGET/run"
+mount -t tmpfs tmpfs "$TARGET/tmp"
+mount --bind /dev "$TARGET/dev"
+mount -t proc proc "$TARGET/proc"
+mount -t sysfs sysfs "$TARGET/sys"
+
+printf '#!/bin/sh\necho "$*" >> /tmp/systemctl-shim.log\nexit 0\n' > "$TARGET/tmp/systemctl-shim"
+chmod 755 "$TARGET/tmp/systemctl-shim"
+for sctl in /bin/systemctl /usr/bin/systemctl; do
+    if [ -e "$TARGET$sctl" ]; then
+        mount --bind "$TARGET/tmp/systemctl-shim" "$TARGET$sctl"
+    fi
+done
+
+cp "$BAD_IMG" "$TARGET/tmp/bad-Update.img"
+if chroot "$TARGET" /usr/bin/env LD_PRELOAD=/data/enginex/bundle/lib/libengine-ui-hook.so \
+    /usr/sbin/az01-update --file /tmp/bad-Update.img > "$TMP/az01-bad.log" 2>&1; then
+    echo 'FAIL: corrupted Gen-2 Update.img succeeded' >&2
+    exit 1
+fi
+if grep -q 'intercepted az01_apply_image' "$TMP/az01-bad.log"; then
+    echo 'FAIL: corrupted Gen-2 Update.img passed SHA-256 check' >&2
+    exit 1
+fi
+test "$(tr -d '\r\n' < "$TARGET/data/enginex/version.txt")" = '5.3.0.1.1'
+test ! -s "$TARGET/tmp/systemctl-shim.log"
+
+IMG_BASE=$(basename "$NEXT_IMG")
+cp "$NEXT_IMG" "$TARGET/tmp/$IMG_BASE"
+chroot "$TARGET" /usr/bin/env LD_PRELOAD=/data/enginex/bundle/lib/libengine-ui-hook.so \
+    /usr/sbin/az01-update --file "/tmp/$IMG_BASE" > "$TMP/az01-good.log" 2>&1 || true
+
+grep -q 'engine-ui-hook: intercepted az01_apply_image with an EngineX data bundle image' "$TMP/az01-good.log"
+test "$(tr -d '\r\n' < "$TARGET/data/enginex/version.txt")" = '5.3.0.2'
+test "$(tr -d '\r\n' < "$TARGET/data/enginex/bundle/version.txt")" = '5.3.0.2'
+test "$(tr -d '\r\n' < "$TARGET/data/enginex/gen2-unlocked")" = '1'
+grep -q '^reboot$' "$TARGET/tmp/systemctl-shim.log"
+EOF
+echo "  Gen-2 *-Update.img preload apply ($UPDATE_PREFIX): PASS"
 
 echo ""
 echo "=== All $PREFIX verification checks PASSED ==="

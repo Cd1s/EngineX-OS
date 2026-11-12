@@ -45,12 +45,29 @@ def image_kind(img, rel):
     return m.group(1) if m else None
 
 
-def generate_debugfs_script(files_to_write, dirs_to_create, links=()):
+def unwrap_bundle_or_img(bundle: Path) -> bytes:
+    data = bundle.read_bytes()
+    if data[:19] == b'ENGINEX_DATA_BUNDLE':
+        magic = b'ENGINEX_DATA_BUNDLE_IMG_V1\n'
+        if len(data) <= 128 or data[:len(magic)] != magic or data[len(magic) + 64:len(magic) + 65] != b'\n':
+            fail(f'{bundle}: invalid or truncated ENGINEX_DATA_BUNDLE_IMG_V1 header')
+        want = data[len(magic):len(magic) + 64].decode('ascii', errors='replace').lower()
+        got = hashlib.sha256(data[128:]).hexdigest()
+        if got != want:
+            fail(f'{bundle}: payload SHA-256 mismatch (got {got}, header says {want})')
+        return data[128:]
+    return data
+
+
+def generate_debugfs_script(files_to_write, dirs_to_create, links=(), removes=()):
     lines = []
     # Create directories in hierarchical order
     for d in sorted(dirs_to_create, key=lambda x: (len(x.parts), x)):
         target = '/' + str(d).replace('\\', '/').strip('/')
         lines.append(f'mkdir {target}')
+    for rel in removes:
+        target = '/' + str(rel).replace('\\', '/').strip('/')
+        lines.append(f'rm {target}')
     # Write files
     for src_path, target_rel, mode in files_to_write:
         target = '/' + str(target_rel).replace('\\', '/').strip('/')
@@ -75,7 +92,7 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
     with tempfile.TemporaryDirectory(prefix='host-install-') as tmpdir:
         tmp = Path(tmpdir)
         filter_kw = {'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}
-        with tarfile.open(bundle) as tar:
+        with tarfile.open(fileobj=io.BytesIO(unwrap_bundle_or_img(bundle))) as tar:
             tar.extractall(tmp, **filter_kw)
 
         bundle_roots = [p for p in tmp.iterdir() if p.is_dir() and 'EngineX-OS-Data-Bundle' in p.name]
@@ -201,7 +218,7 @@ def inject(img_path, bundle_tar, check=True, ssh_key=None):
                 if str(parent) != '.':
                     all_dirs.add(parent)
 
-        script = generate_debugfs_script(files, all_dirs, links)
+        script = generate_debugfs_script(files, all_dirs, links, removes=(Path(root) / 'gen2-locked',))
         script_file = tmp / 'debugfs_script.txt'
         script_file.write_text(script)
 

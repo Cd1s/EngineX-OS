@@ -377,6 +377,19 @@ class DataBundleTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 hmod.inject(img64, r64['bundle'], ssh_key=bad)
 
+        # #215: host-install-userdata.py also accepts *-Update.img directly, clears gen2-locked, and rejects corrupt payload.
+        subprocess.run(['debugfs', '-w', '-R', 'write /etc/hosts /enginex/gen2-locked', str(img64)], check=True, capture_output=True)
+        hmod.inject(img64, r64['image'])
+        self.assertNotIn('Type: regular', subprocess.run(['debugfs', '-R', 'stat /enginex/gen2-locked', str(img64)],
+                                                         capture_output=True, text=True).stdout)
+        self.assertIn('Type: regular', subprocess.run(['debugfs', '-R', 'stat /enginex/gen2-unlocked', str(img64)],
+                                                      capture_output=True, text=True).stdout)
+        raw_img = Path(r64['image']).read_bytes()
+        bad_img = self.tmp / 'corrupt-update.img'
+        bad_img.write_bytes(raw_img[:-1] + bytes([raw_img[-1] ^ 1]))
+        with self.assertRaises(SystemExit):
+            hmod.inject(img64, bad_img)
+
     def test_host_install_keeps_a_legacy_dir_for_the_first_boot_to_rename(self):
         for tool in ('debugfs', 'mkfs.ext4'):
             if subprocess.run(['which', tool], capture_output=True).returncode != 0:
@@ -527,6 +540,121 @@ class DataBundleTest(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=UTC\n')
         self.assertFalse(marker.exists())
+
+    def test_boot_activate_wraps_engine_and_updaters_and_marks_gen2_unlocked(self):
+        r = self.build()
+        src = self.extract(r)
+        ba_text = (src / 'boot-activate.sh').read_text()
+
+        root = self.tmp / 'gen2-preload'
+        dest = root / 'enginex'
+        (dest / 'bundle/bin').mkdir(parents=True)
+        shutil.copy2(src / 'bin/engine-ui-guard', dest / 'bundle/bin/engine-ui-guard')
+        run_dir = self.tmp / 'run-preload'
+        (run_dir / 'systemd/system').mkdir(parents=True)
+        engine_script = self.tmp / 'vendor-engine-script'
+        stock_script = (
+            '#!/bin/sh\n'
+            'while [ 1 ]\n'
+            'do\n'
+            '\t/usr/Engine/Engine -d0 -loggerOptions "Type, Message, Thread, Category, SplitLongLines"\n'
+            '\t\t/usr/sbin/az01-update --file "$UPDATE_FILE"\n'
+            '\t\t/usr/bin/planck-remote-screen --update "$UPDATE_FILE"\n'
+            '\t\taz01-update --erase-data\n'
+            'done\n'
+        )
+        engine_script.write_text(stock_script)
+        engine_script.chmod(0o755)
+
+        ba_reloc = self.tmp / 'boot-activate-preload.sh'
+        ba_reloc.write_text(
+            ba_text.replace('/run/', str(run_dir) + '/')
+                   .replace('/usr/Engine/Scripts/engine', str(engine_script))
+        )
+        ba_reloc.chmod(0o755)
+        env = dict(self.env,
+                   SC5000_CUSTOM=str(dest),
+                   SC5000_TIMESTAMP_FILE=str(self.tmp / 'no-ts'),
+                   SC5000_CONFIG_DIR=str(root / '.config'))
+
+        # 1. Explicit gen2-locked must prevent boot-activate.sh from creating gen2-unlocked.
+        (dest / 'gen2-locked').write_text('1\n')
+        res = subprocess.run(['sh', str(ba_reloc)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse((dest / 'gen2-unlocked').exists())
+        self.host_commands.write_text('')
+
+        stage = run_dir / 'sc5000-engine-script'
+        rewritten = stage.read_text()
+        lib_hook = f'{dest}/bundle/lib/libengine-ui-hook.so'
+        self.assertIn(f'\t{dest}/bundle/bin/engine-ui-guard launch /usr/Engine/Engine -d0', rewritten)
+        self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/sbin/az01-update --file "$UPDATE_FILE"\n', rewritten)
+        self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/bin/planck-remote-screen --update "$UPDATE_FILE"\n', rewritten)
+        self.assertIn(f'\t\tenv LD_PRELOAD="{lib_hook}" /usr/sbin/az01-update --erase-data\n', rewritten)
+
+        # 2. Removing gen2-locked lets boot-activate.sh mark gen2-unlocked; re-running on bound script is idempotent.
+        (dest / 'gen2-locked').unlink()
+        engine_script.write_text(rewritten)
+        res = subprocess.run(['sh', str(ba_reloc)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual((dest / 'gen2-unlocked').read_text(), '1\n')
+        self.assertEqual(engine_script.read_text(), rewritten)
+        self.assertNotIn('mount --bind', self.host_commands.read_text())
+        self.host_commands.write_text('')
+
+        # 3. Live upgrade from an earlier 5.3.0.4 script (Engine wrapped, updaters still unwrapped) wraps updaters cleanly.
+        legacy_5304 = stock_script.replace(
+            '/usr/Engine/Engine ',
+            f'{dest}/bundle/bin/engine-ui-guard launch /usr/Engine/Engine ',
+        )
+        engine_script.write_text(legacy_5304)
+        res = subprocess.run(['sh', str(ba_reloc)], env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(stage.read_text(), rewritten)
+        self.host_commands.write_text('')
+
+    def test_release_scripts_emit_16_update_imgs_and_20_line_sha256sums(self):
+        rel_sh = (HERE / 'build-release.sh').read_text()
+        self.assertNotIn('-Data-Bundle.tar.gz"', rel_sh)
+        self.assertIn('sha256sum *-Update.img > SHA256SUMS.txt', rel_sh)
+
+        out_dir = self.tmp / 'release-out'
+        out_dir.mkdir()
+        gen1 = (
+            ('SC5000', 'Denon-SC5000-Prime-JP07'),
+            ('SC5000M', 'Denon-SC5000M-Prime-JP08'),
+            ('PRIMEGO', 'Denon-PRIME-GO-JP11'),
+            ('SC6000', 'Denon-SC6000-Prime-JP13'),
+            ('SC6000M', 'Denon-SC6000M-Prime-JP14'),
+            ('PRIME4', 'Denon-PRIME-4-JC11'),
+            ('PRIME2', 'Denon-PRIME-2-JC16'),
+            ('MIXSTREAMPRO', 'Numark-Mixstream-Pro-NH08'),
+        )
+        for pfx, model in gen1:
+            (out_dir / f'{pfx}-5.3.0.4-EngineX-OS-{model}-Update.img').write_bytes(f'gen1-{pfx}'.encode())
+        for pfx, model in bdb.MODEL_NAMES.items():
+            (out_dir / f'{pfx}-5.3.0.4-EngineX-OS-{model}-Update.img').write_bytes(f'gen2-{pfx}'.encode())
+
+        fake_bin = self.tmp / 'fake-go-bin'
+        fake_bin.mkdir()
+        fake_go = fake_bin / 'go'
+        fake_go.write_text(
+            '#!/bin/sh\nout=""\nwhile [ $# -gt 0 ]; do\n'
+            '  if [ "$1" = "-o" ]; then out="$2"; shift 2; else shift; fi\n'
+            'done\nprintf "#!/bin/sh\\nexit 0\\n" > "$out"\nchmod 755 "$out"\n'
+        )
+        fake_go.chmod(0o755)
+        env = {**self.env, 'PATH': f"{fake_bin}:{self.env['PATH']}"}
+        res = subprocess.run(['sh', str(HERE / 'build-installer.sh'), '5.3.0.4', str(out_dir)],
+                             env=env, capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(list(out_dir.glob('*-Data-Bundle.tar.gz')), [])
+        self.assertEqual(len(list(out_dir.glob('*-Update.img'))), 16)
+        lines = (out_dir / 'SHA256SUMS.txt').read_text().splitlines()
+        self.assertEqual(len(lines), 20, lines)
+        for line in lines:
+            digest, fname = line.split('  ')
+            self.assertEqual(hashlib.sha256((out_dir / fname).read_bytes()).hexdigest(), digest, fname)
 
 if __name__ == '__main__':
     unittest.main()

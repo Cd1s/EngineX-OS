@@ -42,6 +42,9 @@ const (
 	bundleSuffix    = "-EngineX-OS-Data-Bundle.tar.gz"
 	bundleMaxDown   = 64 << 20  // compressed, as the deck's own updater allows
 	bundleMaxUnpack = 256 << 20 // all files together
+	gen2ImgPrefix   = "ENGINEX_DATA_BUNDLE"
+	gen2ImgMagic    = "ENGINEX_DATA_BUNDLE_IMG_V1\n"
+	gen2ImgHeader   = 128
 	compatCmd       = "cat /sys/firmware/devicetree/base/compatible"
 	// install.sh's own default; the variable is only set by tests.
 	customDirSh = `"${SC5000_CUSTOM:-/data/enginex}"`
@@ -504,24 +507,86 @@ func discover(ctx context.Context, o *options) []deck {
 
 type bundleInfo struct {
 	Path, Top, Version string
+	HeaderPrefix       string // model prefix in the 128-byte V1 header when Path is *-Update.img
+	IsImage            bool
+	TarGz              []byte // verified inner Data-Bundle.tar.gz payload
 	HostScript         []byte // host-install-userdata.py, shipped inside the bundle
 	USBScript          []byte // host-install-usbupdate.py (mode C), in bundles since #116
 }
 
-var topRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var (
+	topRE   = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	hex64RE = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+)
 
-// readBundle walks the tarball once: one top directory, and every file matches SHA256SUMS.
+func isGen2UpdateImgName(name, prefix string) bool {
+	return strings.HasPrefix(name, prefix+"-") && strings.Contains(name, "-EngineX-OS-") && strings.HasSuffix(name, "-Update.img")
+}
+
+func isGen2BundleName(name, prefix string) bool {
+	return strings.HasPrefix(name, prefix+"-") && strings.HasSuffix(name, bundleSuffix)
+}
+
+// unwrapGen2ImageOrBundle verifies and strips the 128-byte ENGINEX_DATA_BUNDLE_IMG_V1 header
+// from a 2nd-generation *-Update.img, or returns a raw .tar.gz bundle unchanged (#215).
+func unwrapGen2ImageOrBundle(data []byte) ([]byte, error) {
+	payload, _, _, err := parseGen2ImageOrBundle(data)
+	return payload, err
+}
+
+func parseGen2ImageOrBundle(data []byte) (tarGz []byte, headerPrefix string, isImage bool, err error) {
+	if bytes.HasPrefix(data, []byte(gen2ImgPrefix)) {
+		if len(data) <= gen2ImgHeader || string(data[:len(gen2ImgMagic)]) != gen2ImgMagic || data[len(gen2ImgMagic)+64] != '\n' {
+			return nil, "", true, errors.New("damaged Gen-2 Update.img: truncated or invalid ENGINEX_DATA_BUNDLE_IMG_V1 header")
+		}
+		hdr := string(bytes.TrimRight(data[:gen2ImgHeader], "\x00"))
+		if !strings.HasSuffix(hdr, "\n") {
+			return nil, "", true, errors.New("damaged Gen-2 Update.img: invalid ENGINEX_DATA_BUNDLE_IMG_V1 header")
+		}
+		lines := strings.Split(strings.TrimSuffix(hdr, "\n"), "\n")
+		if len(lines) != 4 || lines[0] != "ENGINEX_DATA_BUNDLE_IMG_V1" || !hex64RE.MatchString(lines[1]) || lines[2] == "" || lines[3] == "" {
+			return nil, "", true, errors.New("damaged Gen-2 Update.img: invalid ENGINEX_DATA_BUNDLE_IMG_V1 header fields")
+		}
+		sum := sha256.Sum256(data[gen2ImgHeader:])
+		got := hex.EncodeToString(sum[:])
+		want := strings.ToLower(lines[1])
+		if got != want {
+			return nil, "", true, fmt.Errorf("damaged Gen-2 Update.img: payload SHA-256 mismatch (got %s, header says %s)", got, want)
+		}
+		return data[gen2ImgHeader:], lines[2], true, nil
+	}
+	if len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+		return data, "", false, nil
+	}
+	return nil, "", false, errors.New("unrecognized Gen-2 image or bundle format (expected ENGINEX_DATA_BUNDLE_IMG_V1 or .tar.gz)")
+}
+
+// readBundle walks the Gen-2 *-Update.img or .tar.gz once: header SHA-256 (if .img), one top directory,
+// and every file inside matches SHA256SUMS.
 func readBundle(path string) (*bundleInfo, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	gz, err := gzip.NewReader(f)
+	const maxRead = bundleMaxDown + gen2ImgHeader
+	raw, err := io.ReadAll(io.LimitReader(f, maxRead+1))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
 	}
-	b := &bundleInfo{Path: path}
+	if int64(len(raw)) > maxRead {
+		return nil, fmt.Errorf("%s: exceeds size limit", filepath.Base(path))
+	}
+	tarGz, hdrPrefix, isImg, err := parseGen2ImageOrBundle(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(tarGz))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
+	}
+	defer gz.Close()
+	b := &bundleInfo{Path: path, HeaderPrefix: hdrPrefix, IsImage: isImg, TarGz: tarGz}
 	sums := map[string]string{}
 	var listed, version []byte
 	var total int64
@@ -594,24 +659,34 @@ type release struct {
 	} `json:"assets"`
 }
 
-// fetchBundle downloads the latest release's bundle for prefix into dir and checks GitHub's SHA-256.
+// fetchBundle downloads the latest release's Gen-2 *-Update.img (or legacy Data-Bundle.tar.gz fallback)
+// for prefix into dir and checks GitHub's SHA-256 (#215).
 func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, error) {
 	var rel release
 	if err := getJSON(ctx, o, o.API+"/repos/"+o.Repo+"/releases/latest", &rel); err != nil {
 		return "", fmt.Errorf("GitHub release: %w", err)
 	}
-	for _, a := range rel.Assets {
-		if !strings.HasPrefix(a.Name, prefix+"-") || !strings.HasSuffix(a.Name, bundleSuffix) || !strings.HasPrefix(a.URL, "https://") {
-			continue
+	pick := func(match func(string) bool) (name, url, digest string, ok bool) {
+		for _, a := range rel.Assets {
+			if match(a.Name) && strings.HasPrefix(a.URL, "https://") {
+				return a.Name, a.URL, a.Digest, true
+			}
 		}
-		o.say("下载 "+a.Name+" ("+rel.Tag+")", "Downloading "+a.Name)
-		dest := filepath.Join(dir, filepath.Base(a.Name))
-		if err := download(ctx, o, a.URL, strings.TrimPrefix(a.Digest, "sha256:"), dest); err != nil {
-			return "", err
-		}
-		return dest, nil
+		return "", "", "", false
 	}
-	return "", fmt.Errorf("release %s has no %s-*%s", rel.Tag, prefix, bundleSuffix)
+	name, url, digest, ok := pick(func(n string) bool { return isGen2UpdateImgName(n, prefix) })
+	if !ok {
+		name, url, digest, ok = pick(func(n string) bool { return isGen2BundleName(n, prefix) })
+	}
+	if !ok {
+		return "", fmt.Errorf("release %s has no %s-*-EngineX-OS-*-Update.img or %s-*%s", rel.Tag, prefix, prefix, bundleSuffix)
+	}
+	o.say("下载 "+name+" ("+rel.Tag+")", "Downloading "+name)
+	dest := filepath.Join(dir, filepath.Base(name))
+	if err := download(ctx, o, url, strings.TrimPrefix(digest, "sha256:"), dest); err != nil {
+		return "", err
+	}
+	return dest, nil
 }
 
 // fetchImage requires a release-provided digest before handling firmware.
@@ -653,7 +728,7 @@ func getJSON(ctx context.Context, o *options, url string, v any) error {
 }
 
 func download(ctx context.Context, o *options, url, wantSHA, dest string) error {
-	return downloadLimit(ctx, o, url, wantSHA, dest, bundleMaxDown)
+	return downloadLimit(ctx, o, url, wantSHA, dest, bundleMaxDown+gen2ImgHeader)
 }
 
 func downloadLimit(ctx context.Context, o *options, url, wantSHA, dest string, limit int64) error {
@@ -692,19 +767,23 @@ func downloadLimit(ctx context.Context, o *options, url, wantSHA, dest string, l
 	return os.Rename(part, dest)
 }
 
-// obtainBundle uses --bundle, else the newest matching file in the work dir, else the latest release.
+// obtainBundle uses --bundle/--image, else the newest matching *-Update.img or Data-Bundle.tar.gz
+// in the work dir, else the latest release (#215).
 func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, error) {
 	path := o.Bundle
 	if path != "" {
 		if !strings.HasPrefix(filepath.Base(path), prefix+"-") {
-			return nil, fmt.Errorf("%s is not a %s bundle: wrong model refused", filepath.Base(path), prefix)
+			return nil, fmt.Errorf("%s is not a %s image/bundle: wrong model refused", filepath.Base(path), prefix)
 		}
 	} else {
-		local, _ := filepath.Glob(filepath.Join(o.WorkDir, prefix+"-*"+bundleSuffix))
+		local, _ := filepath.Glob(filepath.Join(o.WorkDir, prefix+"-*-EngineX-OS-*-Update.img"))
+		if len(local) == 0 {
+			local, _ = filepath.Glob(filepath.Join(o.WorkDir, prefix+"-*"+bundleSuffix))
+		}
 		sort.Slice(local, func(i, j int) bool { return mtime(local[i]).After(mtime(local[j])) })
 		if len(local) > 0 {
 			path = local[0]
-			o.say("使用已有的 "+filepath.Base(path), "Using the bundle already here: "+filepath.Base(path))
+			o.say("使用已有的 "+filepath.Base(path), "Using the package already here: "+filepath.Base(path))
 		} else {
 			var err error
 			if path, err = fetchBundle(ctx, o, prefix, o.WorkDir); err != nil {
@@ -712,7 +791,14 @@ func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, 
 			}
 		}
 	}
-	return readBundle(path)
+	b, err := readBundle(path)
+	if err != nil {
+		return nil, err
+	}
+	if b.HeaderPrefix != "" && b.HeaderPrefix != prefix {
+		return nil, fmt.Errorf("%s header is for %s, not %s: wrong model refused", filepath.Base(path), b.HeaderPrefix, prefix)
+	}
+	return b, nil
 }
 
 func mtime(p string) time.Time {
@@ -776,9 +862,9 @@ func sshRun(c *ssh.Client, cmd string, stdin io.Reader) (string, error) {
 	return string(out), err
 }
 
-// installCmd unpacks the streamed tarball in the deck's temp dir and runs install.sh.
+// installCmd unpacks the streamed tarball in the deck's temp dir, runs install.sh, and marks gen2-unlocked (#215).
 func installCmd(top string) string {
-	return fmt.Sprintf(`set -e; cd "${TMPDIR:-/tmp}"; trap 'rm -rf %[1]s' EXIT; rm -rf %[1]s; tar -xzf -; sh %[1]s/install.sh`, top)
+	return fmt.Sprintf(`set -e; cd "${TMPDIR:-/tmp}"; trap 'rm -rf %[1]s' EXIT; rm -rf %[1]s; tar -xzf -; sh %[1]s/install.sh; printf '1\n' > %[2]s/gen2-unlocked; rm -f %[2]s/gen2-locked`, top, customDirSh)
 }
 
 func parseCompatible(out string) (code string, m model, gen2, ok bool) {
@@ -869,12 +955,8 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.Open(b.Path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if out, err := sshRun(cl, installCmd(b.Top), f); err != nil {
+	sayGen2Steps(o, filepath.Base(b.Path))
+	if out, err := sshRun(cl, installCmd(b.Top), bytes.NewReader(b.TarGz)); err != nil {
 		return fmt.Errorf("%s: install failed: %w\n%s", label, err, out)
 	}
 	got, err := sshRun(cl, "cat "+customDirSh+"/version.txt", nil)
@@ -886,7 +968,7 @@ func modeA(ctx context.Context, o *options, d deck) error {
 	}
 	o.say(fmt.Sprintf("完成：%s 已安装 EngineX OS %s，Engine 正在重启。", label, b.Version),
 		fmt.Sprintf("Done: EngineX OS %s installed on %s; Engine is restarting.", b.Version, label))
-	sayGen2Unlocked(o, b)
+	sayGen2Unlocked(o, b, m.Prefix)
 	return nil
 }
 
@@ -1345,12 +1427,18 @@ func verifyJC11SImage(ctx context.Context, img string, b *bundleInfo, size int64
 			return fmt.Errorf("JC11S: %s does not read back as %s; nothing flashed", path, b.Version)
 		}
 	}
-	f, err := os.Open(b.Path)
-	if err != nil {
-		return err
+	tarData := b.TarGz
+	if len(tarData) == 0 {
+		raw, err := os.ReadFile(b.Path)
+		if err != nil {
+			return err
+		}
+		tarData, err = unwrapGen2ImageOrBundle(raw)
+		if err != nil {
+			return err
+		}
 	}
-	defer f.Close()
-	gz, err := gzip.NewReader(f)
+	gz, err := gzip.NewReader(bytes.NewReader(tarData))
 	if err != nil {
 		return err
 	}
@@ -1453,7 +1541,14 @@ func buildImage(ctx context.Context, o *options, b *bundleInfo, size int64, name
 	if py == "" {
 		return "", false, errors.New("需要 python3 和 e2fsprogs (debugfs, mke2fs)；Windows 请在 WSL 里运行 / needs python3 and e2fsprogs; on Windows use WSL")
 	}
-	args := []string{"-I", script, img, "--bundle", b.Path}
+	bundleArg := b.Path
+	if b.IsImage && len(b.TarGz) > 0 {
+		bundleArg = filepath.Join(filepath.Dir(script), b.Top+".tar.gz")
+		if err := os.WriteFile(bundleArg, b.TarGz, 0o600); err != nil {
+			return "", false, err
+		}
+	}
+	args := []string{"-I", script, img, "--bundle", bundleArg}
 	if pub := sshPublicKey(o); pub != "" && bytes.Contains(b.HostScript, []byte("--ssh-key")) { // older bundles do not know the flag
 		args = append(args, "--ssh-key", pub)
 	}
@@ -1569,6 +1664,7 @@ func modeB(ctx context.Context, o *options) error {
 	if err != nil {
 		return err
 	}
+	sayGen2Steps(o, filepath.Base(b.Path))
 	var sizeStr string
 	if fi, err := os.Stat(img); err == nil && fi.Size() > 0 {
 		sizeStr = " (" + formatBytes(fi.Size()) + ")"
@@ -1585,21 +1681,32 @@ func modeB(ctx context.Context, o *options) error {
 	if boardCode(board) == "jc11s" {
 		o.say("USB 写入完成；重启后的激活尚未验证。请在 Settings → About 确认显示 EngineX OS，并检查 EngineX 页面。若仍为原厂 5.3.0，请保留日志并报告 #169；不要重复清空 data 或恢复出厂。",
 			"USB write complete; activation after reboot is not verified. Confirm EngineX OS in Settings → About and open the EngineX page. If it still shows stock 5.3.0, keep this log and report #169; do not repeatedly erase data or factory-reset.")
+		sayGen2Unlocked(o, b, m.Prefix)
 		return nil
 	}
 	o.say(fmt.Sprintf("完成：EngineX OS %s 已刷入 %s，碟机正在重启，首次启动后自动激活。", b.Version, m.Name),
 		fmt.Sprintf("Done: EngineX OS %s flashed to %s; the deck reboots and activates itself.", b.Version, m.Name))
-	sayGen2Unlocked(o, b)
+	sayGen2Unlocked(o, b, m.Prefix)
 	return nil
 }
 
-// sayGen2Unlocked: bundles from #119 on switch the deck's *-Update.img upgrade path on while installing.
-func sayGen2Unlocked(o *options, b *bundleInfo) {
+func sayGen2Steps(o *options, filename string) {
+	o.say("[1/2] 正在一键解锁二代机 .img 升级链路（gen2-unlocked + 更新器预加载）…",
+		"[1/2] Unlocking 2nd-generation .img update chain (gen2-unlocked + updater preload)...")
+	o.say("[2/2] 正在刷入 "+filename+"…",
+		"[2/2] Flashing "+filename+"...")
+}
+
+// sayGen2Unlocked tells the user that the 2nd-generation deck is unlocked and flashed (#119, #215).
+func sayGen2Unlocked(o *options, b *bundleInfo, prefix string) {
 	if !bytes.Contains(b.HostScript, []byte("gen2-unlocked")) {
 		return
 	}
-	o.say("已自动开启二代机 .img 升级解锁：以后可直接在碟机屏幕上在线更新，或用 U 盘刷入 *-Update.img；恢复出厂设置不会丢失 EngineX OS。",
-		"Gen-2 .img upgrade is unlocked automatically: later updates can come from the deck's screen (OTA) or an *-Update.img on a USB stick, and Factory Reset keeps EngineX OS.")
+	imgPattern := fmt.Sprintf("%s-%s-EngineX-OS-*-Update.img", prefix, b.Version)
+	o.say(
+		fmt.Sprintf("碟机已完成一键解锁与刷入：今后升级无需电脑，可直接把 %s 拷入 U 盘插上碟机升级，或在碟机屏幕点击 Settings -> About / Update 在线更新；恢复出厂设置不会丢失 EngineX OS。", imgPattern),
+		fmt.Sprintf("Deck is unlocked and flashed: future updates can flash %s directly from a USB drive or on-deck Settings -> About / Update without a computer, and Factory Reset keeps EngineX OS.", imgPattern),
+	)
 }
 
 func modeBGen1(ctx context.Context, o *options, m model) error {
@@ -1701,10 +1808,23 @@ func azModel(o *options, board, line string) (model, bool) {
 			return gen2Boards[n.board], true
 		}
 	}
-	// Last resort: exactly one 2nd-gen bundle already in the work directory.
+	// Last resort: exactly one 2nd-gen model's *-Update.img or Data-Bundle.tar.gz already in the work directory.
 	if o.Bundle == "" && board == "" {
-		if local, _ := filepath.Glob(filepath.Join(o.WorkDir, "*"+bundleSuffix)); len(local) == 1 {
-			return bundleModel(local[0])
+		var matched model
+		seen := map[string]bool{}
+		entries, _ := os.ReadDir(o.WorkDir)
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			n := e.Name()
+			if m, ok := bundleModel(n); ok && (isGen2UpdateImgName(n, m.Prefix) || isGen2BundleName(n, m.Prefix)) {
+				matched = m
+				seen[m.Prefix] = true
+			}
+		}
+		if len(seen) == 1 {
+			return matched, true
 		}
 	}
 	return model{}, false
@@ -1723,8 +1843,8 @@ func bundleModel(path string) (model, bool) {
 func modeAZ(ctx context.Context, o *options, board, line string) error {
 	m, ok := azModel(o, board, line)
 	if !ok {
-		return fmt.Errorf("碟机处于 Firmware Update Mode（%s），但认不出型号：请用 --bundle 指定该机型的 Data-Bundle.tar.gz，没有刷写任何东西 / "+
-			"the deck is in Firmware Update Mode (%s) but its model is unknown: pass --bundle <MODEL>-<VERSION>-EngineX-OS-Data-Bundle.tar.gz; nothing flashed", line, line)
+		return fmt.Errorf("碟机处于 Firmware Update Mode（%s），但认不出型号：请用 --image 或 --bundle 指定该机型的 *-Update.img，没有刷写任何东西 / "+
+			"the deck is in Firmware Update Mode (%s) but its model is unknown: pass --image or --bundle <MODEL>-<VERSION>-EngineX-OS-*-Update.img; nothing flashed", line, line)
 	}
 	o.say("USB Firmware Update Mode（"+azID+"）识别到 "+m.Name, "Firmware Update Mode ("+azID+") found "+m.Name)
 	b, err := obtainBundle(ctx, o, m.Prefix)
@@ -1747,6 +1867,7 @@ func modeAZ(ctx context.Context, o *options, board, line string) error {
 	if err != nil {
 		return err
 	}
+	sayGen2Steps(o, filepath.Base(b.Path))
 	o.say("正在通过 USB 写入 data 分区，请勿断开连接或关闭电源…", "Writing the data partition over USB. Do not disconnect USB or power off the deck...")
 	if err := o.USBFlash(ctx, o, b.USBScript, img); err != nil {
 		return fmt.Errorf("USB %s write-part: %w", azID, err)
@@ -1754,7 +1875,7 @@ func modeAZ(ctx context.Context, o *options, board, line string) error {
 	// 1cc5:2027 has no reboot command over USB.
 	o.say(fmt.Sprintf("完成：EngineX OS %s 已写入 %s。请按电源键关机再开机（或拔插电源），开机后自动激活。", b.Version, m.Name),
 		fmt.Sprintf("Done: EngineX OS %s written to %s. Press the power button to turn it off and on again (or replug power); it activates on boot.", b.Version, m.Name))
-	sayGen2Unlocked(o, b)
+	sayGen2Unlocked(o, b, m.Prefix)
 	return nil
 }
 
@@ -1828,15 +1949,20 @@ func run(ctx context.Context, o *options) error {
 	return errors.Join(errs...)
 }
 
+func registerFlags(fs *flag.FlagSet, o *options) {
+	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or Data-Bundle.tar.gz to install (default: newest in the current directory, else download)")
+	fs.StringVar(&o.Bundle, "image", "", "alias for -bundle: *-Update.img to install")
+	fs.StringVar(&o.Backup, "userdata-backup", "", "mode B: a backup image of the deck's data partition to inject into (keeps the user's files; if omitted, a fresh partition is created)")
+	fs.StringVar(&o.Key, "key", "", "mode A: SSH private key (default ~/.ssh/id_*; password denon is also tried)")
+	fs.StringVar(&o.Password, "password", "", "mode A: SSH password for root")
+	fs.StringVar(&o.Repo, "repo", "Cd1s/EngineX-OS", "GitHub repository to download from")
+	fs.BoolVar(&o.Yes, "yes", false, "do not ask before flashing")
+	fs.BoolVar(&o.Uninstall, "uninstall", false, "remove the EngineX data bundle from a 2nd-generation deck over SSH and return to stock")
+}
+
 func main() {
 	o := &options{}
-	flag.StringVar(&o.Bundle, "bundle", "", "Data-Bundle.tar.gz to install (default: newest in the current directory, else download)")
-	flag.StringVar(&o.Backup, "userdata-backup", "", "mode B: a backup image of the deck's data partition to inject into (keeps the user's files; if omitted, a fresh partition is created)")
-	flag.StringVar(&o.Key, "key", "", "mode A: SSH private key (default ~/.ssh/id_*; password denon is also tried)")
-	flag.StringVar(&o.Password, "password", "", "mode A: SSH password for root")
-	flag.StringVar(&o.Repo, "repo", "Cd1s/EngineX-OS", "GitHub repository to download from")
-	flag.BoolVar(&o.Yes, "yes", false, "do not ask before flashing")
-	flag.BoolVar(&o.Uninstall, "uninstall", false, "remove the EngineX data bundle from a 2nd-generation deck over SSH and return to stock")
+	registerFlags(flag.CommandLine, o)
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

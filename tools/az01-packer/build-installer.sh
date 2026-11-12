@@ -60,4 +60,13 @@ with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
                 z.writestr(info, f.read())
 EOF
 done
+(
+	cd "$OUT"
+	set -- *-Update.img
+	if [ -e "$1" ]; then
+		sha256sum *-Update.img EngineX-Installer-"$V"-* > SHA256SUMS.txt
+	else
+		sha256sum EngineX-Installer-"$V"-* > SHA256SUMS.txt
+	fi
+)
 ls -l "$OUT"/EngineX-Installer-"$V"-*

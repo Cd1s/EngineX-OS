@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -65,7 +66,7 @@ func fakeELF(machine byte, tag string) []byte {
 	return append(b, []byte(tag)...)
 }
 
-type bundleFile struct{ Path, SuitePath, Version string }
+type bundleFile struct{ Path, ImagePath, SuitePath, Version string }
 
 // buildBundle runs the real packer.
 func buildBundle(t *testing.T, prefix, version string) bundleFile {
@@ -88,7 +89,11 @@ func buildBundle(t *testing.T, prefix, version string) bundleFile {
 	if o, err := exec.Command("python3", "-I", script, version, "--suite", suite, "--hook", hook, "--ui-packs", ui, "--out", out, "--prefix", prefix).CombinedOutput(); err != nil {
 		t.Fatalf("build-data-bundle: %v %s", err, o)
 	}
-	return bundleFile{filepath.Join(out, prefix+"-"+version+"-EngineX-OS-Data-Bundle.tar.gz"), suite, version}
+	imgs, _ := filepath.Glob(filepath.Join(out, prefix+"-"+version+"-EngineX-OS-*-Update.img"))
+	if len(imgs) != 1 {
+		t.Fatalf("expected 1 Gen-2 Update.img in %s, got %v", out, imgs)
+	}
+	return bundleFile{filepath.Join(out, prefix+"-"+version+"-EngineX-OS-Data-Bundle.tar.gz"), imgs[0], suite, version}
 }
 
 // corrupt rewrites the bundle with one SHA256SUMS digest altered.
@@ -108,7 +113,7 @@ func corrupt(t *testing.T, b bundleFile) bundleFile {
 	if o, err := exec.Command("tar", "-czf", out, "-C", x, top).CombinedOutput(); err != nil {
 		t.Fatalf("tar: %v %s", err, o)
 	}
-	return bundleFile{out, b.SuitePath, b.Version}
+	return bundleFile{out, b.ImagePath, b.SuitePath, b.Version}
 }
 
 func sha(t *testing.T, path string) string {
@@ -2154,4 +2159,366 @@ func TestIsDeckUIRecognisesTheLoginPage(t *testing.T) {
 		}
 		srv.Close()
 	}
+}
+
+// ---- #215: Unified Gen-2 *-Update.img discovery, unwrapping, and 3-mode installation ----
+
+func gen2ImageReleaseServer(t *testing.T, imgPath string, alsoBundlePath string, downloads *int) *httptest.Server {
+	t.Helper()
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	imgName := filepath.Base(imgPath)
+	imgDigest := "sha256:" + sha(t, imgPath)
+	mux.HandleFunc("/repos/Cd1s/EngineX-OS/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		var assets []map[string]string
+		assets = append(assets, map[string]string{
+			"name":                 "SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img",
+			"browser_download_url": srv.URL + "/dl/gen1",
+			"digest":               "sha256:" + strings.Repeat("00", 32),
+		})
+		if alsoBundlePath != "" {
+			bName := filepath.Base(alsoBundlePath)
+			assets = append(assets, map[string]string{
+				"name":                 bName,
+				"browser_download_url": srv.URL + "/dl/" + bName,
+				"digest":               "sha256:" + sha(t, alsoBundlePath),
+			})
+		}
+		assets = append(assets, map[string]string{
+			"name":                 imgName,
+			"browser_download_url": srv.URL + "/dl/" + imgName,
+			"digest":               imgDigest,
+		})
+		json.NewEncoder(w).Encode(map[string]any{"tag_name": "v5.3.0.4", "assets": assets})
+	})
+	mux.HandleFunc("/dl/", func(w http.ResponseWriter, r *http.Request) {
+		if downloads != nil {
+			*downloads++
+		}
+		base := filepath.Base(r.URL.Path)
+		switch {
+		case base == imgName:
+			http.ServeFile(w, r, imgPath)
+		case alsoBundlePath != "" && base == filepath.Base(alsoBundlePath):
+			http.ServeFile(w, r, alsoBundlePath)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	srv = httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func corruptGen2ImagePayload(t *testing.T, imgPath string) string {
+	t.Helper()
+	raw, err := os.ReadFile(imgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := append([]byte(nil), raw...)
+	bad[len(bad)-1] ^= 1
+	out := filepath.Join(t.TempDir(), filepath.Base(imgPath))
+	if err := os.WriteFile(out, bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestImageFlagAliasAndUnwrapGen2ImageOrBundle(t *testing.T) {
+	need(t, "python3")
+	for _, args := range [][]string{
+		{"-image", "SCLIVE4-5.3.0.4-EngineX-OS-Denon-SC-LIVE-4-JP21-Update.img"},
+		{"--image", "PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img"},
+		{"-bundle", "SCLIVE4-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz"},
+		{"--bundle=SYSTEMONE-5.3.0.4-EngineX-OS-Rane-SYSTEM-ONE-RMZ2-Update.img"},
+	} {
+		o := &options{}
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		registerFlags(fs, o)
+		if err := fs.Parse(args); err != nil {
+			t.Fatalf("parse %v: %v", args, err)
+		}
+		want := args[len(args)-1]
+		if idx := strings.IndexByte(want, '='); idx >= 0 {
+			want = want[idx+1:]
+		}
+		if o.Bundle != want {
+			t.Errorf("args %v -> o.Bundle = %q, want %q", args, o.Bundle, want)
+		}
+	}
+
+	b := buildBundle(t, "SCLIVE4", "5.3.0.4")
+	imgBytes, err := os.ReadFile(b.ImagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tarBytes, err := os.ReadFile(b.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := unwrapGen2ImageOrBundle(imgBytes)
+	if err != nil || !bytes.Equal(got, tarBytes) {
+		t.Fatalf("unwrapGen2ImageOrBundle(valid .img) err=%v, equal=%v", err, bytes.Equal(got, tarBytes))
+	}
+	gotTar, err := unwrapGen2ImageOrBundle(tarBytes)
+	if err != nil || !bytes.Equal(gotTar, tarBytes) {
+		t.Fatalf("unwrapGen2ImageOrBundle(.tar.gz) err=%v", err)
+	}
+
+	flipped := append([]byte(nil), imgBytes...)
+	flipped[len(flipped)-1] ^= 1
+	if _, err := unwrapGen2ImageOrBundle(flipped); err == nil || !strings.Contains(err.Error(), "SHA-256") {
+		t.Errorf("flipped payload accepted: %v", err)
+	}
+	for name, bad := range map[string][]byte{
+		"truncated header":  imgBytes[:100],
+		"header only":       imgBytes[:128],
+		"truncated payload": imgBytes[:len(imgBytes)-1],
+		"legacy no v1":      append([]byte("ENGINEX_DATA_BUNDLE_OLD\n"), make([]byte, 200)...),
+		"az01 gen1":         append([]byte("AZ01"), make([]byte, 200)...),
+	} {
+		if _, err := unwrapGen2ImageOrBundle(bad); err == nil {
+			t.Errorf("%s accepted without error", name)
+		}
+	}
+}
+
+func TestFetchBundlePrefersGen2UpdateImgForAllPrefixes(t *testing.T) {
+	allPrefixes := []string{
+		"SCLIVE4", "SCLIVE2", "PRIME4PLUS", "PRIMEGOPLUS",
+		"MIXSTREAMPROPLUS", "MIXSTREAMPROGO", "PRIME4G2", "SYSTEMONE",
+	}
+	for _, prefix := range allPrefixes {
+		t.Run(prefix, func(t *testing.T) {
+			imgName := prefix + "-5.3.0.4-EngineX-OS-Model-Update.img"
+			bundleName := prefix + "-5.3.0.4-EngineX-OS-Data-Bundle.tar.gz"
+			imgPayload := []byte("img-for-" + prefix)
+			bundlePayload := []byte("bundle-for-" + prefix)
+			imgSum := sha256.Sum256(imgPayload)
+			bundleSum := sha256.Sum256(bundlePayload)
+
+			// 1. Release with ONLY *-Update.img (no .tar.gz)
+			var srvOnlyImg *httptest.Server
+			srvOnlyImg = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/dl/"+imgName {
+					w.Write(imgPayload)
+					return
+				}
+				json.NewEncoder(w).Encode(map[string]any{
+					"tag_name": "v5.3.0.4",
+					"assets": []map[string]string{{
+						"name":                 imgName,
+						"browser_download_url": srvOnlyImg.URL + "/dl/" + imgName,
+						"digest":               "sha256:" + hex.EncodeToString(imgSum[:]),
+					}},
+				})
+			}))
+			defer srvOnlyImg.Close()
+
+			o1 := testOpts(t)
+			o1.defaults()
+			useRelease(o1, srvOnlyImg)
+			got1, err := fetchBundle(ctxT(t), o1, prefix, t.TempDir())
+			if err != nil || filepath.Base(got1) != imgName {
+				t.Fatalf("only-img release: got %q, err %v", got1, err)
+			}
+
+			// 2. Release with BOTH .tar.gz (listed first) and *-Update.img (listed second) -> still picks *-Update.img
+			var srvBoth *httptest.Server
+			srvBoth = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/dl/" + imgName:
+					w.Write(imgPayload)
+				case "/dl/" + bundleName:
+					w.Write(bundlePayload)
+				default:
+					json.NewEncoder(w).Encode(map[string]any{
+						"tag_name": "v5.3.0.4",
+						"assets": []map[string]string{
+							{"name": bundleName, "browser_download_url": srvBoth.URL + "/dl/" + bundleName, "digest": "sha256:" + hex.EncodeToString(bundleSum[:])},
+							{"name": imgName, "browser_download_url": srvBoth.URL + "/dl/" + imgName, "digest": "sha256:" + hex.EncodeToString(imgSum[:])},
+						},
+					})
+				}
+			}))
+			defer srvBoth.Close()
+
+			o2 := testOpts(t)
+			o2.defaults()
+			useRelease(o2, srvBoth)
+			got2, err := fetchBundle(ctxT(t), o2, prefix, t.TempDir())
+			if err != nil || filepath.Base(got2) != imgName {
+				t.Fatalf("both-assets release: got %q, err %v", got2, err)
+			}
+		})
+	}
+}
+
+func TestGen2UpdateImgEndToEndAllModes(t *testing.T) {
+	t.Run("ModeA_SSH", func(t *testing.T) {
+		need(t, "python3", "unshare")
+		b := buildBundle(t, "SCLIVE4", "5.3.0.4")
+
+		// Corrupted *-Update.img (header SHA-256 mismatch) must be rejected before touching SSH deck.
+		badImg := corruptGen2ImagePayload(t, b.ImagePath)
+		oBad := testOpts(t)
+		useRelease(oBad, gen2ImageReleaseServer(t, badImg, "", nil))
+		deckBad := startSSHDeck(t, oBad.SSHPort, "inmusic,jp21\x00rockchip,rk3288\x00")
+		announceFrom(t, "127.0.0.1", freeUDPFrom(oBad), airD("sclive4-lab", "DISCOVERER_HOWDY_", "JP21", "5.3.0", 1))
+		if err := run(ctxT(t), oBad); err == nil || !strings.Contains(err.Error(), "SHA-256") {
+			t.Fatalf("corrupted Update.img err = %v, want SHA-256 mismatch", err)
+		}
+		if entries, _ := os.ReadDir(deckBad.Data); len(entries) != 0 {
+			t.Fatalf("corrupted Update.img touched SSH deck data: %v", entries)
+		}
+
+		// Valid *-Update.img (no .tar.gz in release) unlocks gen2-locked, installs, and activates.
+		downloads := 0
+		o := testOpts(t)
+		useRelease(o, gen2ImageReleaseServer(t, b.ImagePath, "", &downloads))
+		d := startSSHDeck(t, o.SSHPort, "inmusic,jp21\x00rockchip,rk3288\x00")
+		custom := filepath.Join(d.Data, "enginex")
+		if err := os.MkdirAll(custom, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(custom, "gen2-locked"), []byte("1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		announceFrom(t, "127.0.0.1", freeUDPFrom(o), airD("sclive4-lab", "DISCOVERER_HOWDY_", "JP21", "5.3.0", 1))
+		if err := run(ctxT(t), o); err != nil {
+			t.Fatalf("Mode A with Update.img failed: %v\n%s", err, o.Out)
+		}
+		if downloads != 1 {
+			t.Errorf("downloads = %d, want 1", downloads)
+		}
+		if _, err := os.Stat(filepath.Join(custom, "gen2-locked")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("gen2-locked was not removed: %v", err)
+		}
+		if got, _ := os.ReadFile(filepath.Join(custom, "gen2-unlocked")); string(got) != "1\n" {
+			t.Errorf("gen2-unlocked = %q, want 1", got)
+		}
+		if got, _ := os.ReadFile(filepath.Join(custom, "version.txt")); strings.TrimSpace(string(got)) != "5.3.0.4" {
+			t.Errorf("version.txt = %q, want 5.3.0.4", got)
+		}
+		out := o.Out.(*bytes.Buffer).String()
+		for _, want := range []string{
+			"[1/2] Unlocking 2nd-generation .img update chain (gen2-unlocked + updater preload)...",
+			"[2/2] Flashing " + filepath.Base(b.ImagePath) + "...",
+			"SCLIVE4-5.3.0.4-EngineX-OS-*-Update.img",
+			"Settings -> About / Update",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("Mode A output missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("ModeB_Fastboot", func(t *testing.T) {
+		need(t, "python3", "mke2fs", "debugfs", "e2fsck", "dumpe2fs")
+		b := buildBundle(t, "PRIME4PLUS", "5.3.0.4")
+
+		// Corrupted *-Update.img rejected with zero fastboot flash calls.
+		badImg := corruptGen2ImagePayload(t, b.ImagePath)
+		fbBad := newFastboot(t, "JC11S", true)
+		oBad := testOpts(t)
+		oBad.Fastboot = fbBad.Bin
+		useRelease(oBad, gen2ImageReleaseServer(t, badImg, "", nil))
+		if err := run(ctxT(t), oBad); err == nil || !strings.Contains(err.Error(), "SHA-256") {
+			t.Fatalf("Mode B corrupted Update.img err = %v, want SHA-256 mismatch", err)
+		}
+		if f := fbBad.Flashed(); len(f) != 0 {
+			t.Fatalf("Mode B flashed corrupted Update.img: %v", f)
+		}
+
+		// Valid *-Update.img (no .tar.gz in release) builds, verifies JC11S activation, and flashes.
+		fb := newFastboot(t, "JC11S", true)
+		o := testOpts(t)
+		o.Fastboot = fb.Bin
+		useRelease(o, gen2ImageReleaseServer(t, b.ImagePath, "", nil))
+		if err := run(ctxT(t), o); err != nil {
+			t.Fatalf("Mode B Update.img failed: %v\n%s", err, o.Out)
+		}
+		flashed := fb.Flashed()
+		if len(flashed) != 1 || !strings.HasPrefix(flashed[0], "flash data ") {
+			t.Fatalf("flash calls = %v", flashed)
+		}
+		flashedImg := filepath.Join(fb.Dir, "flashed-data.img")
+		checkImage(t, flashedImg, b.SuitePath)
+		if st := sh(t, "debugfs", "-R", "stat /enginex/gen2-unlocked", flashedImg); !strings.Contains(st, "Type: regular") {
+			t.Errorf("/enginex/gen2-unlocked missing in flashed image:\n%s", st)
+		}
+		out := o.Out.(*bytes.Buffer).String()
+		for _, want := range []string{
+			"[1/2] Unlocking 2nd-generation .img update chain (gen2-unlocked + updater preload)...",
+			"[2/2] Flashing " + filepath.Base(b.ImagePath) + "...",
+			"PRIME4PLUS-5.3.0.4-EngineX-OS-*-Update.img",
+			"Settings -> About / Update",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("Mode B output missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("ModeC_USBUpdate_1cc5_2027", func(t *testing.T) {
+		need(t, "python3", "mke2fs", "debugfs", "e2fsck", "dumpe2fs")
+		b := buildBundle(t, "SYSTEMONE", "5.3.0.4")
+
+		// Corrupted *-Update.img rejected with zero USBFlash calls.
+		badImg := corruptGen2ImagePayload(t, b.ImagePath)
+		oBad := testOpts(t)
+		useRelease(oBad, gen2ImageReleaseServer(t, badImg, "", nil))
+		oBad.ListUSB = func(context.Context) string { return "1cc5:2027 inMusic SYSTEM ONE\n" }
+		badCalls := 0
+		oBad.USBFlash = func(context.Context, *options, []byte, string) error { badCalls++; return nil }
+		if err := run(ctxT(t), oBad); err == nil || !strings.Contains(err.Error(), "SHA-256") {
+			t.Fatalf("Mode C corrupted Update.img err = %v, want SHA-256 mismatch", err)
+		}
+		if badCalls != 0 {
+			t.Fatalf("Mode C flashed corrupted Update.img (%d calls)", badCalls)
+		}
+
+		// Valid *-Update.img (no .tar.gz in release) builds 64 MiB ext4 image and flashes over 1cc5:2027.
+		o := testOpts(t)
+		useRelease(o, gen2ImageReleaseServer(t, b.ImagePath, "", nil))
+		o.ListUSB = func(context.Context) string { return "1cc5:2027 inMusic SYSTEM ONE\n" }
+		shim := &usbShim{}
+		o.USBFlash = func(_ context.Context, o *options, script []byte, img string) error {
+			shim.calls++
+			shim.script = script
+			shim.img = filepath.Join(t.TempDir(), "flashed-az04.img")
+			return copyFile(img, shim.img)
+		}
+		if err := run(ctxT(t), o); err != nil {
+			t.Fatalf("Mode C Update.img failed: %v\n%s", err, o.Out)
+		}
+		if shim.calls != 1 {
+			t.Fatalf("USBFlash calls = %d, want 1", shim.calls)
+		}
+		sh(t, "e2fsck", "-fn", shim.img)
+		if st := sh(t, "debugfs", "-R", "stat /enginex/gen2-unlocked", shim.img); !strings.Contains(st, "Type: regular") {
+			t.Errorf("/enginex/gen2-unlocked missing in Mode C image:\n%s", st)
+		}
+		out := o.Out.(*bytes.Buffer).String()
+		for _, want := range []string{
+			"[1/2] Unlocking 2nd-generation .img update chain (gen2-unlocked + updater preload)...",
+			"[2/2] Flashing " + filepath.Base(b.ImagePath) + "...",
+			"SYSTEMONE-5.3.0.4-EngineX-OS-*-Update.img",
+			"Settings -> About / Update",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("Mode C output missing %q:\n%s", want, out)
+			}
+		}
+
+		// azModel also recognizes a single local *-Update.img in WorkDir when USB string is generic.
+		localDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(localDir, "PRIME4G2-5.3.0.4-EngineX-OS-Denon-PRIME-4-G2-JP24-Update.img"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if m, ok := azModel(&options{WorkDir: localDir}, "", "1cc5:2027"); !ok || m.Prefix != "PRIME4G2" {
+			t.Errorf("azModel with one local Update.img = %v %v, want PRIME4G2", m, ok)
+		}
+	})
 }
