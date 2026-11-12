@@ -180,6 +180,18 @@ def blit(canvas, img, box, dx, dy=0):
 
 # stock 5.3.0 splash, bottom-right "5.3.0": glyph column spans, rows 700-800, 8 px gaps
 VERSION_GLYPHS = {"5": (1122, 1151), ".": (1158, 1166), "3": (1174, 1204), "0": (1228, 1258)}
+# Straight-stroke digits the stock art lacks, drawn to the stock metrics: 30 px wide,
+# rows 727-774, ~6 px strokes, grey 126 (5.3.0.4 shipped "5.3.0.3" for want of a "4").
+DIGIT_W, DIGIT_TOP, DIGIT_BOT, DIGIT_GREY = 30, 727, 775, 126
+DRAWN_GLYPHS = {
+    "4": [[(18, 727), (24, 727), (24, 775), (18, 775)],             # stem
+          [(0, 759), (30, 759), (30, 765), (0, 765)],               # bar
+          [(18, 727), (24, 727), (6.5, 759), (0, 759)]],            # diagonal
+    "1": [[(17, 727), (23, 727), (23, 775), (17, 775)],
+          [(17, 727), (21, 731), (7, 741), (5, 736)]],
+    "7": [[(0, 727), (30, 727), (30, 733), (0, 733)],
+          [(23, 733), (30, 733), (14, 775), (7, 775)]],
+}
 
 
 def render_splash(stock, version):
@@ -202,15 +214,20 @@ def render_splash(stock, version):
 
     if version:
         # shortcut: only the glyphs the stock "5.3.0" has; other digits need another stock source
-        bad = set(version) - set(VERSION_GLYPHS)
+        bad = set(version) - set(VERSION_GLYPHS) - set(DRAWN_GLYPHS)
         if bad:
             raise ValueError(f"version glyphs not in stock art: {sorted(bad)}")
-        width = sum(VERSION_GLYPHS[c][1] - VERSION_GLYPHS[c][0] for c in version) + 8 * (len(version) - 1)
+        adv = lambda c: VERSION_GLYPHS[c][1] - VERSION_GLYPHS[c][0] if c in VERSION_GLYPHS else DIGIT_W
+        width = sum(adv(c) for c in version) + 8 * (len(version) - 1)
         pen = 1258 - width
         for c in version:
-            a, b = VERSION_GLYPHS[c]
-            blit(canvas, stock, (a, 700, b, 800), pen - a)
-            pen += b - a + 8
+            if c in VERSION_GLYPHS:
+                a, b = VERSION_GLYPHS[c]
+                blit(canvas, stock, (a, 700, b, 800), pen - a)
+            else:
+                for poly in DRAWN_GLYPHS[c]:
+                    polygon(canvas, [(pen + x, y) for x, y in poly], DIGIT_GREY)
+            pen += adv(c) + 8
     return canvas
 
 
@@ -233,7 +250,7 @@ def main(argv=None):
     r = sub.add_parser("render", help="generate a preset splash")
     r.add_argument("--preset", choices=sorted(PRESETS), required=True)
     r.add_argument("--stock", required=True, help="official splash of the same kind (PNG or raw .bin)")
-    r.add_argument("--version", default="5.3.0.3", help="bottom-right version text (splash only; '' hides it)")
+    r.add_argument("--version", required=True, help="bottom-right version text (splash only; '' hides it)")
     r.add_argument("--png", action="append", default=[], help="PNG preview path (repeatable)")
     r.add_argument("--bin", action="append", default=[], help="raw BGRA framebuffer path (repeatable)")
     for name in ("encode", "decode"):

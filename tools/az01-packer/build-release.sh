@@ -33,7 +33,19 @@ if [ -z "${QRC:-}" ]; then
     python3 -I tools/ui-mod/extract_qrc.py --image "$FW/SC5000-$BASE-Update.img" --preload "$WORK/qrc_dump.so" --out "$WORK/qrc" >/dev/null
     QRC=$WORK/qrc
 fi
-python3 tools/ui-mod/build_packs.py --release --qrc "$QRC" --out "$WORK/packs" >/dev/null
+# The EngineX start-up screen, drawn for THIS version from the official splash (stock icon, word
+# and digits): the firmware splash partition (1c) and Engine's own start screen in the UI packs.
+# A committed picture kept showing "5.3.0.3" on 5.3.0.4. Digits it cannot draw stop the build.
+python3 -I - "$FW/SC5000-$BASE-Update.img" "$WORK/stock-splash.bin" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, 'tools/az01-packer')
+import az01_packer
+Path(sys.argv[2]).write_bytes(az01_packer.Image(Path(sys.argv[1]).read_bytes()).payload('splash'))
+PY
+python3 -I tools/splash/splash_tool.py render --preset enginex --stock "$WORK/stock-splash.bin" --version "$VERSION" \
+    --png "$WORK/splash.png" --bin "$WORK/splash.bin" >/dev/null
+python3 tools/ui-mod/build_packs.py --release --qrc "$QRC" --splash "$WORK/splash.png" --out "$WORK/packs" >/dev/null
 STAGE=$WORK/overlay
 cp -a rootfs-overlay "$STAGE"
 rm -f "$STAGE/README.md"
@@ -60,7 +72,7 @@ CROSS=$CROSS64 OUT=$WORK/hooks64/libedisksd-hook.so sh tools/edisksd-hook/build.
 
 # 1c. EngineX boot splash (#118). The firmware splash partition shows before Linux starts, and every
 # update rewrites it, so an image carrying the stock one puts the stock picture back on the deck.
-python3 -I tools/splash/splash_tool.py encode --input docs/assets/boot-splash-enginex.png --output "$WORK/splash.bin" >/dev/null
+# $WORK/splash.bin is rendered for $VERSION in step 1, before the UI packs.
 
 # 2. One image per official group, copied to every model name of the group.
 mkdir -p "$OUT"
