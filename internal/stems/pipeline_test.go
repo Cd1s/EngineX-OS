@@ -383,3 +383,11 @@ func TestPackAndPipelineRejectHugeReturnFramesWithout32BitOverflow(t *testing.T)
 		t.Fatalf("pipeline.Write accepted returnFrames=134217729 (want=%d)", p.want)
 	}
 }
+
+func TestSessionFeedOutRejectsNonMultipleOf4ReturnChannels(t *testing.T) {
+	s := &Session{Packed: true}
+	s.FeedOut([]byte("numReturnChannels=6\n\n"))
+	if err := s.Err(); err == nil {
+		t.Fatal("Session.FeedOut accepted numReturnChannels=6")
+	}
+}

@@ -163,7 +163,7 @@ func (s *Session) FeedOut(p []byte) {
 	s.err = s.out.feed(p, func(f map[string]string) (int64, error) {
 		if v, ok := f["numReturnChannels"]; ok {
 			n, err := strconv.Atoi(v)
-			if err != nil || n <= 0 || n > 64 {
+			if err != nil || n <= 0 || n > 64 || n%4 != 0 {
 				return 0, errors.New("stems protocol: bad numReturnChannels")
 			}
 			s.ReturnChannels = n
