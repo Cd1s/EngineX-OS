@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -377,7 +378,12 @@ func (s *Server) liveSubscribe(w http.ResponseWriter, contentType string) (<-cha
 	}
 	// The server-wide WriteTimeout would cut a live stream after two minutes.
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
-	h := w.Header()
+	liveHeaders(w.Header(), contentType, st)
+	ch, cancel := b.Subscribe()
+	return ch, cancel, true
+}
+
+func liveHeaders(h http.Header, contentType string, st broadcast.Status) {
 	h.Set("Content-Type", contentType)
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Audio-Format", "48000Hz-16bit-2ch-PCM")
@@ -390,53 +396,91 @@ func (s *Server) liveSubscribe(w http.ResponseWriter, contentType string) (<-cha
 			return r
 		}, st.CurrentTrack))
 	}
-	ch, cancel := b.Subscribe()
-	return ch, cancel, true
 }
 
-// liveWAV streams a 48000Hz 16-bit stereo audio of the deck's live mix.
-// Supports ?format=pcm for raw audio/L16;rate=48000;channels=2 stream with zero header overhead.
+// liveSendBuffer caps the kernel send buffer of a /live.wav connection, so a Wi-Fi
+// stall backs audio up in the listener queue (which is trimmed) instead of the socket.
+const liveSendBuffer = 16 << 10
+
+// liveBufferMS reads ?buffer=<ms> (0..2000); missing or invalid means the default, tuned for a wired network.
+func liveBufferMS(r *http.Request) int {
+	v, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("buffer")))
+	if err != nil || v < 0 || v > broadcast.MaxBufferMS {
+		return broadcast.DefaultBufferMS
+	}
+	return v
+}
+
+// liveWAV streams 48000 Hz 16-bit stereo audio of the deck's live mix.
+// Supports ?format=pcm for raw audio/L16;rate=48000;channels=2 stream with zero header overhead,
+// and ?buffer=<ms> (default 120): the listener starts with that much recent audio as a
+// cushion against gaps in delivery, and is trimmed back to it when it falls further behind.
 func (s *Server) liveWAV(w http.ResponseWriter, r *http.Request) {
 	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	contentType := "audio/wav"
 	if format == "pcm" {
 		contentType = "audio/L16;rate=48000;channels=2"
 	}
-
-	ch, cancel, ok := s.liveSubscribe(w, contentType)
-	if !ok {
+	b := s.broadcaster()
+	if !b.Status().Enabled {
+		http.Error(w, "Live Stream is off: set Live Stream to ON in the deck control centre", http.StatusServiceUnavailable)
 		return
 	}
+	l, cancel := b.SubscribeLive(liveBufferMS(r))
 	defer cancel()
+	liveHeaders(w.Header(), contentType, b.Status())
 
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Audio-Format", "48000Hz-16bit-2ch-PCM")
-
-	fl, _ := w.(http.Flusher)
+	write, done := liveWriter(w)
+	defer done()
 	if format != "pcm" {
-		if _, err := w.Write(broadcast.WAVHeader()); err != nil {
+		if write(broadcast.WAVHeader()) != nil {
 			return
-		}
-		if fl != nil {
-			fl.Flush()
 		}
 	}
 	for {
-		select {
-		case <-r.Context().Done():
+		pcm, ok := l.Next(r.Context())
+		if !ok || write(pcm) != nil {
 			return
-		case pcm, open := <-ch:
-			if !open {
-				return
-			}
-			if _, err := w.Write(pcm); err != nil {
-				return
+		}
+	}
+}
+
+// liveWriter takes over the connection to cap its send buffer, sending the status
+// and headers itself (a close-delimited body, as Icecast-style players expect). Where
+// that is not possible it streams through w as before.
+func liveWriter(w http.ResponseWriter) (write func([]byte) error, done func()) {
+	conn, _, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		fl, _ := w.(http.Flusher)
+		return func(p []byte) error {
+			if _, err := w.Write(p); err != nil {
+				return err
 			}
 			if fl != nil {
 				fl.Flush()
 			}
-		}
+			return nil
+		}, func() {}
 	}
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetWriteBuffer(liveSendBuffer)
+	}
+	h := w.Header().Clone()
+	h.Set("Connection", "close")
+	var head bytes.Buffer
+	head.WriteString("HTTP/1.1 200 OK\r\n")
+	_ = h.Write(&head)
+	head.WriteString("\r\n")
+	headSent := false
+	return func(p []byte) error {
+		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if !headSent {
+			headSent = true
+			p = append(head.Bytes(), p...)
+		}
+		_, err := conn.Write(p)
+		return err
+	}, func() { _ = conn.Close() }
 }
 
 // mp3Encoder finds an external encoder that reads s16le 48 kHz stereo on stdin and writes MP3 to stdout.
