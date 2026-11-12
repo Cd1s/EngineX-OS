@@ -434,9 +434,9 @@ CDJ 不通过 Pro DJ Link 报告 Hot Cue。跟另一台 EngineX 碟机时有。
 
 **37a. 电脑刷机工具看不到 PRIME GO / SC5000 / 其他一代机？（`#104`）**
 
-> **推荐：免电脑 U 盘直接刷。** 一代机（SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2）不用连电脑：把 `*-Update.img` 放进 FAT32 / exFAT U 盘**根目录**，插到碟机上，进入 `Settings → Update → Reboot` 即可更新或恢复固件。
+> **推荐：免电脑 U 盘直接刷。** 一代机（SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2）不用连电脑：把 `*-Update.img` 放进 FAT32 / exFAT U 盘**根目录**，插到碟机上，进入 `设置 → 关于 / 更新 → 固件更新模式 → 选项`（`Settings → About / Update → Firmware Update Mode → Options`）并选 **`USB/SD`** 即可更新或恢复固件。
 >
-> **电脑 USB 线刷模式：** 正常开机打碟时，电脑**绝对看不到**刷机设备！必须先在碟机屏幕点 **`Settings → Update → Reboot to Computer Update Mode`**（重启进入蓝屏电脑图标的 Fastboot 模式），再用 USB-B 线连电脑运行刷机工具。
+> **电脑 USB 线刷模式：** 正常开机打碟时，电脑**绝对看不到**刷机设备！必须先在碟机屏幕打开 **`设置 → 关于 / 更新 → 固件更新模式 → 选项`**（`Settings → About / Update → Firmware Update Mode → Options`，若有提示选 **`PC`**，重启进入蓝屏电脑图标的 Fastboot / 固件更新模式），再用 USB-B 线连电脑运行刷机工具。
 
 **38. 万一出问题，怎么恢复？**
 卸载二代机数据包：`sh /data/enginex/bundle/uninstall.sh && reboot`（旧路径同样可用）。一代机用官方固件重新刷即可。**不要在实机上执行 Factory Reset 来测试功能**，它会清空设置。
