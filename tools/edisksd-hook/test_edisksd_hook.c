@@ -148,6 +148,21 @@ static void test_compat_symlink_root(const char *root) {
     snprintf(test_library,sizeof test_library,"%s",saved_lib);snprintf(test_legacy_library,sizeof test_legacy_library,"%s",saved_legacy);
     puts("#103 HFS: cache root through the /data/sc5000-custom -> enginex compat link, legacy-only deck, blank /data, dangling link and writable root, foreign links refused: PASS");
 }
+// #182 review: the "too large, skip until re-exported" record is keyed by the
+// export files. exportOneLibrary.db, which rb-bridge also converts from, was not
+// among them: a stick skipped once stayed skipped after a new export to that file.
+static void test_slow_marker_follows_every_export_file(const char *root) {
+    const char *names[]={"export.pdb","exportLibrary.db","exportOneLibrary.db"};
+    for(unsigned hidden=0;hidden<2;hidden++)for(unsigned i=0;i<3;i++) {
+        char stick[PATH_MAX],dir[PATH_MAX],p[PATH_MAX],before[PATH_MAX],after[PATH_MAX],name[32];
+        snprintf(name,sizeof name,"marker-%u-%u",hidden,i);join(stick,root,name);
+        join(dir,stick,hidden?".PIONEER/rekordbox":"PIONEER/rekordbox");assert(!make_dirs(dir));
+        join(p,dir,names[i]);write_file(p,"first export");assert(!slow_marker(stick,before));
+        write_file(p,"exported again, larger");assert(!slow_marker(stick,after));
+        assert(strcmp(before,after));
+    }
+    puts("slow-library record changes with export.pdb, exportLibrary.db and exportOneLibrary.db, plain and hidden: PASS");
+}
 static void test_time(void) {
     struct timespec t={.tv_sec=2147483,.tv_nsec=0};int64_t before=timespec_ms(&t),deadline=deadline_from(before);
     t.tv_nsec=100000000;assert(timespec_ms(&t)<deadline&&deadline==INT64_C(2147503000));
@@ -487,7 +502,7 @@ int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
-    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();
+    assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);
     if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
