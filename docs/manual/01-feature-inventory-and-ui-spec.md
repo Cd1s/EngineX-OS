@@ -36,7 +36,7 @@
 | Numark Mixstream Pro | `MIXSTREAMPRO` | NH08 | armhf | PRIME 4 组 | 同上 | 一体机 |
 
 - 文件名：`<前缀>-<版本>-EngineX-OS-<品牌型号>-Update.img`（`build-release.sh`）。
-- "独立播放机"（`playerBoards`：SC5000/5000M/6000/6000M）没有通道推子：4 碟布局只对它们开放。Echo Out（Upfader Echo Out）按最新定稿对它们**也生效**——暂停切歌时释放 2.2 秒回声尾音（旧版本曾对独立播放机隐藏该开关，以发布版为准）。
+- "独立播放机"（`playerBoards`：SC5000/5000M/6000/6000M）没有通道推子：因此仅带混音推子的一体机提供 Echo Out（`回声淡出` / `Fader Echo`），独立播放机隐藏该开关且 96 kHz 主输出完全直通。
 - 官方底包 5.3.0（打包用）；原厂 4.3.x、5.0.x 都能直接刷。
 
 ### 1.2 二代机（8 款，一键解锁后统一 `*-Update.img`，#119 / #215）
@@ -123,8 +123,8 @@
 
 | 条目 | 来源 | 说明 |
 |---|---|---|
-| Upfader Echo Out | EngineX | 与设备页同一开关；补丁**没有 `visible: !root.scPlayer`**，独立播放机上若有混音台页会显示一个无意义的开关，待实机核实 |
-| Master Limiter / 原厂主输出限幅 (dB) | 原厂，EngineX 放开 | PRIME GO、Mixstream Pro 原厂隐藏，补丁让 `Config.audio.hasLimiter` 的板子显示；关 / 0–18 dB。与第 8 项并存 |
+| `Fader Echo` / 推子回音 / 推桿回音 | EngineX | 插在 `Calibrate Crossfader` 之前，可选 `Off` / `All Faders` / `Upfader Only`；带 `visible: root.scHasMixer` 守卫（独立播放机隐藏并直通），与 `Profile → Playback → Echo Out` 及控制中心磁贴同步 |
+| Master Limiter / 原厂主输出限幅 (dB) | 原厂，EngineX 放开 | PRIME GO、Mixstream Pro 原厂隐藏，补丁让 `Config.audio.hasLimiter` 的板子显示；关 / 0–18 dB。与 `Master Soft Clipper` 并存 |
 
 ### 2.4 设置 → 服务 → 流媒体
 
