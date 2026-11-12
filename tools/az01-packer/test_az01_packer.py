@@ -679,6 +679,114 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual(im.payload('splash'), b'S' * 4096000)
         self.assertEqual(im.payload('recoverysplash'), b'R' * 4096000)
 
+    def test_prime4_inverted_splash_repack(self):
+        # #226: PRIME 4 (JC11) / PRIME 2 (JC16) / MIXSTREAM PRO (NH08) require 180-deg rotated splash
+        import array
+        original = self.root / 'orig_p4.img'
+        original.write_bytes(fixture(lzma.compress(self.disk.read_bytes())))
+        splash_std = self.root / 'splash_std.bin'
+        splash_rot = self.root / 'splash_rot.bin'
+        std_bytes = bytes((i % 256) for i in range(4096000))
+        splash_std.write_bytes(std_bytes)
+        arr = array.array('I')
+        arr.frombytes(std_bytes)
+        arr.reverse()
+        rot_bytes = arr.tobytes()
+        splash_rot.write_bytes(rot_bytes)
+
+        output = self.root / 'repacked_p4.img'
+        ret = az.main(['repack', str(original), '--rootfs', str(self.disk),
+                       '--splash', str(splash_rot),
+                       '--output', str(output)])
+        self.assertEqual(ret, 0)
+        im = az.Image(output.read_bytes())
+        self.assertEqual(im.payload('splash'), rot_bytes)
+        self.assertNotEqual(im.payload('splash'), std_bytes)
+
+    def test_build_release_splash_selection_per_group(self):
+        # #226: build-release.sh build() assigns splash-rot180.bin for PRIME4, splash.bin for SC5000/SC6000
+        import re
+        script = Path(__file__).resolve().parent / 'build-release.sh'
+        self.assertTrue(script.is_file())
+        content = script.read_text()
+        self.assertIn('--bin-rot180 "$WORK/splash-rot180.bin"', content)
+
+        m_fn = re.search(r'(?ms)^build\(\)\s*\{.*?^\}', content)
+        self.assertIsNotNone(m_fn, 'build() function not found in build-release.sh')
+        m_calls = re.findall(r'(?m)^build\s+\S+.*$', content)
+        self.assertEqual(len(m_calls), 3, m_calls)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            fake_bin = td / 'bin'
+            fake_bin.mkdir()
+            work = td / 'work'
+            fw = td / 'fw'
+            out = td / 'out'
+            work.mkdir()
+            fw.mkdir()
+            out.mkdir()
+            log = td / 'repack.log'
+
+            (work / 'splash.bin').write_bytes(b'std')
+            (work / 'splash-rot180.bin').write_bytes(b'rot180')
+            for prefix in ('SC5000', 'SC5000M', 'PRIMEGO', 'SC6000', 'SC6000M', 'PRIME4', 'PRIME2', 'MIXSTREAMPRO'):
+                (fw / f'{prefix}-5.3.0-Update.img').write_bytes(b'dummy')
+
+            py_stub = fake_bin / 'python3'
+            py_stub.write_text(f'''#!/bin/sh
+if [ "$2" = "repack" ]; then
+    base=$(basename "$3")
+    splash=""
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--splash" ]; then splash="$2"; shift 2; continue; fi
+        if [ "$1" = "--output" ]; then : > "$2"; shift 2; continue; fi
+        shift
+    done
+    printf '%s\\t%s\\n' "$base" "$splash" >> "{log}"
+elif [ "$2" = "patch-rootfs" ]; then
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--output" ]; then : > "$2"; shift 2; continue; fi
+        shift
+    done
+fi
+''')
+            py_stub.chmod(0o755)
+
+            harness = td / 'run.sh'
+            harness.write_text('\n'.join([
+                '#!/bin/sh',
+                'set -eu',
+                f'PATH="{fake_bin}:$PATH"',
+                f'WORK="{work}"',
+                f'FW="{fw}"',
+                f'OUT="{out}"',
+                'BASE=5.3.0',
+                'VERSION=5.3.0.4',
+                'KEYARG=',
+                'STAGE=stage',
+                m_fn.group(0),
+                *m_calls,
+                'wait',
+            ]) + '\n')
+            subprocess.run(['sh', str(harness)], check=True)
+
+            recorded = dict(line.split('\t') for line in log.read_text().splitlines())
+            self.assertEqual(recorded['SC5000-5.3.0-Update.img'], str(work / 'splash.bin'))
+            self.assertEqual(recorded['SC6000-5.3.0-Update.img'], str(work / 'splash.bin'))
+            self.assertEqual(recorded['PRIME4-5.3.0-Update.img'], str(work / 'splash-rot180.bin'))
+            for name in (
+                'SC5000-5.3.0.4-EngineX-OS-Denon-SC5000-Prime-JP07-Update.img',
+                'SC5000M-5.3.0.4-EngineX-OS-Denon-SC5000M-Prime-JP08-Update.img',
+                'PRIMEGO-5.3.0.4-EngineX-OS-Denon-PRIME-GO-JP11-Update.img',
+                'SC6000-5.3.0.4-EngineX-OS-Denon-SC6000-Prime-JP13-Update.img',
+                'SC6000M-5.3.0.4-EngineX-OS-Denon-SC6000M-Prime-JP14-Update.img',
+                'PRIME4-5.3.0.4-EngineX-OS-Denon-PRIME-4-JC11-Update.img',
+                'PRIME2-5.3.0.4-EngineX-OS-Denon-PRIME-2-JC16-Update.img',
+                'MIXSTREAMPRO-5.3.0.4-EngineX-OS-Numark-Mixstream-Pro-NH08-Update.img',
+            ):
+                self.assertTrue((out / name).is_file(), f'missing output {name}')
+
     @unittest.skipUnless(shutil.which('resize2fs'), 'resize2fs required for resize attack fixture')
     def test_repack_refuses_rootfs_growth_before_publishing(self):
         original = self.root/'original.img'

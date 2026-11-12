@@ -44,7 +44,7 @@ import az01_packer
 Path(sys.argv[2]).write_bytes(az01_packer.Image(Path(sys.argv[1]).read_bytes()).payload('splash'))
 PY
 python3 -I tools/splash/splash_tool.py render --preset enginex --stock "$WORK/stock-splash.bin" --version "$VERSION" \
-    --png "$WORK/splash.png" --bin "$WORK/splash.bin" >/dev/null
+    --png "$WORK/splash.png" --bin "$WORK/splash.bin" --bin-rot180 "$WORK/splash-rot180.bin" >/dev/null
 python3 tools/ui-mod/build_packs.py --release --qrc "$QRC" --splash "$WORK/splash.png" --out "$WORK/packs" >/dev/null
 STAGE=$WORK/overlay
 cp -a rootfs-overlay "$STAGE"
@@ -70,18 +70,24 @@ CROSS64=aarch64-linux-gnu-; [ "$(uname -m)" != aarch64 ] || CROSS64=
 CROSS=$CROSS64 OUT=$WORK/hooks64/libengine-ui-hook.so sh tools/ui-mod/build.sh
 CROSS=$CROSS64 OUT=$WORK/hooks64/libedisksd-hook.so sh tools/edisksd-hook/build.sh
 
-# 1c. EngineX boot splash (#118). The firmware splash partition shows before Linux starts, and every
+# 1c. EngineX boot splash (#118, #226). The firmware splash partition shows before Linux starts, and every
 # update rewrites it, so an image carrying the stock one puts the stock picture back on the deck.
-# $WORK/splash.bin is rendered for $VERSION in step 1, before the UI packs.
+# $WORK/splash.bin is rendered for $VERSION in step 1, before the UI packs. PRIME 4 / PRIME 2 / MIXSTREAM PRO
+# mount their LCD panels physically rotated 180 degrees, so their images take $WORK/splash-rot180.bin (#226).
 
 # 2. One image per official group, copied to every model name of the group.
 mkdir -p "$OUT"
 build() { # <official image prefix> <model prefix> <release name>...
     base=$1; shift
+    case $base in
+        PRIME4) splash_bin="$WORK/splash-rot180.bin" ;;
+        SC5000|SC6000) splash_bin="$WORK/splash.bin" ;;
+        *) echo "unknown splash orientation for image group: $base" >&2; exit 2 ;;
+    esac
     python3 tools/az01-packer/az01_packer.py patch-rootfs "$FW/$base-$BASE-Update.img" \
         ${KEYARG:+--ssh-public-key "$KEYARG"} --overlay "$STAGE" --set-version "$VERSION" --output "$WORK/$base.ext2" >/dev/null
     python3 tools/az01-packer/az01_packer.py repack "$FW/$base-$BASE-Update.img" \
-        --rootfs "$WORK/$base.ext2" --splash "$WORK/splash.bin" --output "$WORK/$base.img" >/dev/null
+        --rootfs "$WORK/$base.ext2" --splash "$splash_bin" --output "$WORK/$base.img" >/dev/null
     rm -f "$WORK/$base.ext2"
     while [ "$#" -ge 2 ]; do
         cmp -s "$FW/$base-$BASE-Update.img" "$FW/$1-$BASE-Update.img" ||
