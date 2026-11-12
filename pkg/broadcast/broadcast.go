@@ -840,7 +840,10 @@ func (b *Broadcaster) handshakeShoutcast(conn net.Conn, cfg Config) error {
 	}
 
 	respStr := string(buf[:n])
-	if !strings.Contains(respStr, "OK2") {
+	// A Shoutcast v2 (and Icecast's v1 compatibility) answers "OK2", a Shoutcast v1 server "OK"
+	// (BH-GF4-7); anything else, e.g. "invalid password", is a refusal.
+	first, _, _ := strings.Cut(strings.TrimLeft(respStr, "\r\n"), "\n")
+	if first = strings.TrimSpace(first); first != "OK" && !strings.HasPrefix(first, "OK2") {
 		return fmt.Errorf("shoutcast authentication failed: %s", strings.TrimSpace(respStr))
 	}
 
