@@ -44,7 +44,7 @@
 
 ### 3. 先锋 Rekordbox U 盘即插即用与 CDJ 互联
 - 给先锋 CDJ 导出的 Rekordbox U 盘直接插上碟机，**2 秒内**读取全部歌单、Hot Cue、Memory Cue、Loop 与拍线（含旧版 rekordbox 5 导出的 U 盘），无需再用电脑端 Engine DJ 重新转换；
-- 兼容 Windows `FAT32` / `exFAT` / `NTFS` 与 Mac `HFS+` / `APFS` 全格式存储，自动补偿 MP3 编码起始延迟让拍线与 Cue 精准落在鼓点上，自动修复异常拔盘造成的数据库损坏并去掉“未安全弹出”弹窗；
+- 兼容 `FAT32` / `exFAT` / `NTFS` 与 Mac `HFS+`（`Mac OS 扩展`；不支持 `APFS`，请将 U 盘格式化为 `exFAT` 或 `Mac OS 扩展`），自动补偿 MP3 编码起始延迟让拍线与 Cue 精准落在鼓点上，自动修复异常拔盘造成的数据库损坏并去掉“未安全弹出”弹窗；
 - **Pro DJ Link（测试版，位于 `设置 → 服务`）** 支持跨网线 / Wi-Fi 浏览 CDJ 上的 Rekordbox U 盘、向 CDJ 共享本机曲库、双向交接 `MASTER`，并在影子轨或一体机 `线路输入`（`Line In`）通道实时显示 CDJ 波形。
 
 ### 4. 四轨联机与双碟机配对视图、5 组保存布局与三语界面
