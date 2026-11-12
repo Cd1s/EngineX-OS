@@ -12,6 +12,7 @@ import (
 	"crypto/sha512"
 	"database/sql"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -78,9 +79,9 @@ func encryptSQLCipher4ForTest(t *testing.T, plain []byte, passphrase []byte) []b
 	return out
 }
 
-func listTempOneLibraryFiles(t *testing.T) map[string]bool {
+func listTempOneLibraryFiles(t *testing.T, dir string) map[string]bool {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "rb-onelibrary-*.db"))
+	matches, err := filepath.Glob(filepath.Join(dir, "rb-onelibrary-*.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +93,11 @@ func listTempOneLibraryFiles(t *testing.T) map[string]bool {
 }
 
 func TestSQLCipher4ByteExactAgainstCSQLCipher(t *testing.T) {
+	isolatedTmp := filepath.Join(t.TempDir(), "rb-tmp")
+	prevOverride := sqlcipherTempDirOverride
+	sqlcipherTempDirOverride = isolatedTmp
+	t.Cleanup(func() { sqlcipherTempDirOverride = prevOverride })
+
 	encBytes, err := os.ReadFile(filepath.Join("testdata", "sqlcipher4_onelibrary.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -117,25 +123,26 @@ func TestSQLCipher4ByteExactAgainstCSQLCipher(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tmpPath, err := decryptSQLCipher4ToTemp(context.Background(), dbPath, []byte(oneLibraryPassphrase))
+	tmpPath, cleanup, err := decryptSQLCipher4ToTemp(context.Background(), dbPath, []byte(oneLibraryPassphrase))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Dir(tmpPath) == usbDir {
-		_ = os.Remove(tmpPath)
-		t.Fatalf("temp file %s created inside source USB directory %s", tmpPath, usbDir)
+	if filepath.Dir(tmpPath) != isolatedTmp || filepath.Dir(tmpPath) == usbDir {
+		cleanup()
+		t.Fatalf("temp file %s not placed in %s", tmpPath, isolatedTmp)
 	}
 	st, err := os.Stat(tmpPath)
 	if err != nil {
+		cleanup()
 		t.Fatal(err)
 	}
 	if perm := st.Mode().Perm(); perm != 0o600 {
-		_ = os.Remove(tmpPath)
+		cleanup()
 		t.Fatalf("temp file permissions = %04o, want 0600", perm)
 	}
-	_ = os.Remove(tmpPath)
+	cleanup()
 
-	tempsBefore := listTempOneLibraryFiles(t)
+	tempsBefore := listTempOneLibraryFiles(t, isolatedTmp)
 	usbEntriesBefore, err := os.ReadDir(usbDir)
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +157,7 @@ func TestSQLCipher4ByteExactAgainstCSQLCipher(t *testing.T) {
 	if err != nil || len(usbEntriesAfter) != len(usbEntriesBefore) {
 		t.Fatalf("source USB directory modified: %v vs %v (err=%v)", usbEntriesBefore, usbEntriesAfter, err)
 	}
-	for p := range listTempOneLibraryFiles(t) {
+	for p := range listTempOneLibraryFiles(t, isolatedTmp) {
 		if !tempsBefore[p] {
 			t.Fatalf("ReadSQLite leaked temporary decrypted file %s", p)
 		}
@@ -488,5 +495,108 @@ func TestCueImportStreamingMemoryBudget(t *testing.T) {
 	const maxAllowedAlloc = 24 << 20 // 24 MiB ceiling (readSQLRows map[string]string allocated > 50 MiB)
 	if totalAlloc > maxAllowedAlloc {
 		t.Fatalf("OneLibraryAdapter.Read allocated %d MiB (%d bytes) > %d MiB ceiling", totalAlloc>>20, totalAlloc, maxAllowedAlloc>>20)
+	}
+}
+
+func TestSQLCipher4DeckTempDirFreeSpaceAndStaleSweep(t *testing.T) {
+	if MaxSQLCipherBytes != 256<<20 {
+		t.Fatalf("MaxSQLCipherBytes = %d, want 256 MiB", MaxSQLCipherBytes)
+	}
+
+	fakeData := filepath.Join(t.TempDir(), "data")
+	if err := os.MkdirAll(filepath.Join(fakeData, "enginex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prevDataRoot := deckDataRoot
+	prevOverride := sqlcipherTempDirOverride
+	prevAvailFn := availableBytesFn
+	deckDataRoot = fakeData
+	sqlcipherTempDirOverride = ""
+	t.Cleanup(func() {
+		deckDataRoot = prevDataRoot
+		sqlcipherTempDirOverride = prevOverride
+		availableBytesFn = prevAvailFn
+	})
+
+	encBytes, err := os.ReadFile(filepath.Join("testdata", "sqlcipher4_onelibrary.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usbDir := t.TempDir()
+	dbPath := filepath.Join(usbDir, "exportLibrary.db")
+	if err := os.WriteFile(dbPath, encBytes, 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	wantTmpDir := filepath.Join(fakeData, "enginex", "tmp")
+	tmpPath, cleanup, err := decryptSQLCipher4ToTemp(context.Background(), dbPath, []byte(oneLibraryPassphrase))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(tmpPath) != wantTmpDir {
+		cleanup()
+		t.Fatalf("decrypted temp path %s not under %s", tmpPath, wantTmpDir)
+	}
+	dirInfo, err := os.Lstat(wantTmpDir)
+	if err != nil {
+		cleanup()
+		t.Fatal(err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0o700 {
+		cleanup()
+		t.Fatalf("temp dir mode = %04o, want 0700", perm)
+	}
+	pid, hasPID := parseOneLibraryTempPID(filepath.Base(tmpPath))
+	if !hasPID || pid != os.Getpid() {
+		cleanup()
+		t.Fatalf("expected current PID %d in temp filename %s", os.Getpid(), filepath.Base(tmpPath))
+	}
+	cleanup()
+
+	// Refuse when free space < 2*size + 64 MiB; accept at exact threshold.
+	need := uint64(len(encBytes))*2 + (64 << 20)
+	availableBytesFn = func(string) (uint64, error) { return need - 1, nil }
+	if _, err := ReadSQLite(context.Background(), dbPath, nil); err == nil || !strings.Contains(err.Error(), "insufficient free space") {
+		t.Fatalf("expected insufficient free space error, got %v", err)
+	}
+	availableBytesFn = func(string) (uint64, error) { return need, nil }
+	if _, err := ReadSQLite(context.Background(), dbPath, nil); err != nil {
+		t.Fatalf("unexpected error at exact free-space threshold: %v", err)
+	}
+	availableBytesFn = prevAvailFn
+
+	// Stale SIGKILL leftovers (dead PID + legacy unlocked) are swept, while live PID
+	// and flock-held files from concurrent rb-bridge instances are preserved.
+	staleDeadPID := filepath.Join(wantTmpDir, "rb-onelibrary-99999999-stale.db")
+	staleLegacy := filepath.Join(wantTmpDir, "rb-onelibrary-legacy.db")
+	liveOwnPID := filepath.Join(wantTmpDir, fmt.Sprintf("rb-onelibrary-%d-live.db", os.Getpid()))
+	lockedOther := filepath.Join(wantTmpDir, "rb-onelibrary-99999998-locked.db")
+	for _, f := range []string{staleDeadPID, staleLegacy, liveOwnPID, lockedOther} {
+		if err := os.WriteFile(f, []byte("temp"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lockedFile, err := os.OpenFile(lockedOther, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockedFile.Close()
+	if err := platformLockTempFile(lockedFile); err != nil {
+		t.Fatal(err)
+	}
+	defer platformUnlockTempFile(lockedFile)
+
+	if _, err := ReadSQLite(context.Background(), dbPath, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{staleDeadPID, staleLegacy} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Fatalf("stale temp file %s was not swept (err=%v)", gone, err)
+		}
+	}
+	for _, kept := range []string{liveOwnPID, lockedOther} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Fatalf("active temp file %s was erroneously deleted: %v", kept, err)
+		}
 	}
 }

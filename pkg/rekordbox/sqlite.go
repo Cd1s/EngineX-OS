@@ -48,6 +48,7 @@ func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Libra
 	if e != nil {
 		return nil, e
 	}
+	sweepExistingSQLCipherTempDir()
 	// mode=ro alone can still create/write a WAL shared-memory sidecar. Export
 	// files must be clean snapshots: immutable avoids all source locks/writes,
 	// and refusing journals prevents silently ignoring uncheckpointed changes.
@@ -66,11 +67,11 @@ func ReadSQLite(ctx context.Context, path string, adapter SQLiteAdapter) (*Libra
 		return nil, e
 	}
 	if encrypted {
-		tmpPath, err := decryptSQLCipher4ToTemp(ctx, abs, []byte(oneLibraryPassphrase))
+		tmpPath, cleanup, err := decryptSQLCipher4ToTemp(ctx, abs, []byte(oneLibraryPassphrase))
 		if err != nil {
 			return nil, fmt.Errorf("OneLibrary SQLCipher: %w", err)
 		}
-		defer os.Remove(tmpPath)
+		defer cleanup()
 		openPath = tmpPath
 	}
 	u := url.URL{Scheme: "file", Path: openPath}
