@@ -85,6 +85,24 @@ func (d ExportDeck) beatAt(now time.Time) (beat int, frac float64, ok bool) {
 	return int(whole) % 4, pos - whole, true
 }
 
+// statusBeatAt reports the 1-based beat number and 0-based beat-in-bar (0..3)
+// for outgoing 0x0a status packets, including non-master playing or cued decks
+// so CDJ-3000 SYNC can lock onto this player's beat grid.
+func (d ExportDeck) statusBeatAt(now time.Time) (beatNum uint32, inBar int, ok bool) {
+	if d.At.IsZero() || d.Beat < 0 || now.Sub(d.At) > 2*time.Second || (!d.Playing && !d.Master && d.BPM <= 0) {
+		return 0, 0, false
+	}
+	pos := d.Beat
+	if bpm := d.BPM * (1 + d.Pitch/100); d.Playing && bpm > 0 {
+		pos += now.Sub(d.At).Seconds() * bpm / 60
+	}
+	whole := int(math.Floor(pos))
+	if whole < 0 {
+		whole = 0
+	}
+	return uint32(whole + 1), whole % 4, true
+}
+
 // Carried is d read again at now: the beat moved on with the tempo, so a deck
 // that has not changed since At keeps its beat packets (beatAt gives up after 2 s).
 func (d ExportDeck) Carried(now time.Time) ExportDeck {
@@ -169,6 +187,7 @@ func (e *Exporter) SetDeck(d ExportDeck) {
 		e.run.deck = d
 		if !d.Master {
 			e.run.handoff = 0
+			e.run.handoffUntil = time.Time{}
 		}
 		e.run.mu.Unlock()
 	}
@@ -234,13 +253,10 @@ func (e *Exporter) SetEnabled(on bool) error {
 	if e.run != nil {
 		return nil
 	}
-	r, err := startExport(e.cfg)
+	r, err := startExport(e.cfg, e.deck)
 	if err != nil {
 		return err
 	}
-	r.mu.Lock()
-	r.deck = e.deck
-	r.mu.Unlock()
 	e.run = r
 	return nil
 }
@@ -259,7 +275,7 @@ func (e *Exporter) Rebind() error {
 	}
 	e.run.close()
 	e.run = nil
-	r, err := startExport(e.cfg)
+	r, err := startExport(e.cfg, e.deck)
 	if err != nil {
 		return err
 	}
@@ -311,6 +327,8 @@ type exportRun struct {
 	beat              *net.UDPConn // nil without Observe or when the port is taken
 	deck              ExportDeck
 	handoff           byte // the player we agreed to hand master to
+	handoffUntil      time.Time
+	peerFirmware      string
 	ip                net.IP
 	mac               net.HardwareAddr
 	announce          *net.UDPAddr
@@ -468,7 +486,7 @@ func exportIdentity(cfg ExportConfig) (net.IP, net.HardwareAddr, net.IP, *net.IP
 	return nil, nil, nil, nil, errors.New("prolink: no IPv4 interface for export")
 }
 
-func startExport(cfg ExportConfig) (*exportRun, error) {
+func startExport(cfg ExportConfig, deck ExportDeck) (*exportRun, error) {
 	root := cfg.Root
 	if root == "" {
 		roots := MountedExports()
@@ -562,7 +580,7 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 		}
 		return net.JoinHostPort(ip.String(), port)
 	}
-	r := &exportRun{network: network, observe: cfg.Observe, nfs: nfs, ip: ip, mac: mac, lib: lib, pdb: pdb, pdbInfo: st, peers: make(map[string]exportPeer), mounted: true, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	r := &exportRun{network: network, observe: cfg.Observe, nfs: nfs, deck: deck, ip: ip, mac: mac, lib: lib, pdb: pdb, pdbInfo: st, peers: make(map[string]exportPeer), mounted: true, done: make(chan struct{}), wake: make(chan struct{}, 1)}
 	var disk syscall.Statfs_t
 	if syscall.Statfs(root, &disk) == nil {
 		r.capacity = uint64(disk.Blocks) * uint64(disk.Bsize)
@@ -621,13 +639,13 @@ func startExport(cfg ExportConfig) (*exportRun, error) {
 		r.updates = make(chan Device, 16)
 		r.wg.Add(1)
 		go r.observeLoop()
-		if r.beat, err = listenLinkUDP(address(cfg.BeatAddr, "50001"), true); err != nil {
-			log.Printf("prolink: no absolute positions on the beat port: %v", err)
-			r.beat, err = nil, nil
-		} else {
-			r.wg.Add(1)
-			go r.receiveBeats()
-		}
+	}
+	if r.beat, err = listenLinkUDP(address(cfg.BeatAddr, "50001"), true); err != nil {
+		log.Printf("prolink: no beat/handoff listener on port 50001: %v", err)
+		r.beat, err = nil, nil
+	} else {
+		r.wg.Add(1)
+		go r.receiveBeats()
 	}
 	r.wg.Add(4)
 	go r.receivePeers()
@@ -736,11 +754,26 @@ func (r *exportRun) receiveMedia() {
 		if err != nil {
 			return
 		}
-		if r.observe != nil {
-			if d, err := ParsePacket(b[:n], 50002, addr.IP); err == nil && d.Number >= 1 && d.Number <= 6 && r.network.Contains(addr.IP) {
-				select {
-				case r.updates <- d:
-				default:
+		if n >= 0xcc && string(b[:10]) == magic && b[10] == 0x0a && r.network.Contains(addr.IP) {
+			fw := string(b[0x7c:0x80])
+			validFW := len(fw) == 4 && fw[0] >= '0' && fw[0] <= '9' && fw[1] == '.' && fw[2] >= '0' && fw[2] <= '9' && fw[3] >= '0' && fw[3] <= '9' && fw > "3.30"
+			if d, err := ParsePacket(b[:n], 50002, addr.IP); err == nil && d.Number >= 1 && d.Number <= 6 {
+				if validFW || d.Master {
+					r.mu.Lock()
+					if validFW && fw > r.peerFirmware {
+						r.peerFirmware = fw
+					}
+					if d.Master && (r.player == 0 || d.Number != r.player) {
+						r.handoff = 0
+						r.handoffUntil = time.Time{}
+					}
+					r.mu.Unlock()
+				}
+				if r.observe != nil && r.updates != nil {
+					select {
+					case r.updates <- d:
+					default:
+					}
 				}
 			}
 		}
@@ -767,18 +800,27 @@ func (r *exportRun) receiveBeats() {
 			return
 		}
 		if n >= 0x28 && string(b[:10]) == magic && b[10] == 0x26 && r.network.Contains(addr.IP) {
-			// Another player asks for master: agree, and name it in our status
-			// until Engine moves master to its shadow deck (SetDeck).
+			peer := b[0x21]
+			// Another player asks for master: agree only when we currently hold master,
+			// and name it in our status until Engine moves master or the handoff expires.
 			r.mu.Lock()
-			if r.player != 0 {
+			if r.player != 0 && peer >= 1 && peer <= 6 && peer != r.player && r.deck.Master {
 				r.sendLocked(r.beat, r.handoffPacket(0x27, 0x2c), &net.UDPAddr{IP: addr.IP, Port: 50001})
-				r.handoff = b[0x21]
+				r.handoff = peer
+				r.handoffUntil = time.Now().Add(3 * time.Second)
 			}
 			r.mu.Unlock()
 			continue
 		}
-		if d, err := ParsePacket(b[:n], 50001, addr.IP); err == nil && d.PacketType == 0x0b && d.Number >= 1 && d.Number <= 6 && r.network.Contains(addr.IP) {
-			r.observe(d)
+		if d, err := ParsePacket(b[:n], 50001, addr.IP); err == nil && d.Number >= 1 && d.Number <= 6 && r.network.Contains(addr.IP) {
+			if d.PacketType == 0x0b && r.observe != nil {
+				r.observe(d)
+			} else if d.PacketType == 0x28 && r.updates != nil {
+				select {
+				case r.updates <- d:
+				default:
+				}
+			}
 		}
 	}
 }
@@ -928,16 +970,28 @@ func (r *exportRun) statusPacket() []byte {
 	b[0x6a], b[0x6b], b[0x6f], b[0x73] = 4, 4, 0, 4             // USB mounted, no SD
 	b[0x75] = 1                                                 // LINK available while the exported USB is mounted
 	binary.BigEndian.PutUint16(b[0x90:], 0x7fff)                // no loaded track / meaningful master BPM
-	copy(b[0x7c:0x80], "3.30")                                  // newer than every Pioneer unit's minimum, no "older firmware" warning
+	fw := "3.30"
+	if r.peerFirmware > fw {
+		fw = r.peerFirmware
+	}
+	copy(b[0x7c:0x80], fw)                                      // match or exceed every peer's firmware to avoid "older firmware" warning
 	b[0x89], b[0x8b], b[0x9f], b[0xcc] = 0x84, 0x7e, 0xff, 0x0f // idle, no master/sync
 	for _, off := range []int{0x8c, 0x98, 0xc0, 0xc4} {
 		binary.BigEndian.PutUint32(b[off:], 0x00100000)
 	}
 	binary.BigEndian.PutUint16(b[0x92:], 0xffff)
 	binary.BigEndian.PutUint32(b[0xa0:], 0xffffffff)
-	if d := r.deck; d.Master || d.Playing {
+	now := time.Now()
+	if d := r.deck; d.Master || d.Playing || d.BPM > 0 {
 		if d.Playing {
+			b[0x27] = 1
+			b[0x7b] = 3
 			b[0x89] |= 0x40
+			b[0x8b] = 0x7a
+			b[0x9d] = 9
+		} else if d.BPM > 0 {
+			b[0x7b] = 6
+			b[0x9d] = 1
 		}
 		if d.Master {
 			b[0x89] |= 0x20
@@ -947,15 +1001,23 @@ func (r *exportRun) statusPacket() []byte {
 			binary.BigEndian.PutUint16(b[0x92:], uint16(math.Round(d.BPM*100)))
 		}
 		if f := 1 + d.Pitch/100; f > 0 {
-			binary.BigEndian.PutUint32(b[0x8c:], uint32(math.Round(0x100000*f)))
-			binary.BigEndian.PutUint32(b[0x98:], uint32(math.Round(0x100000*f)))
+			rawPitch := uint32(math.Round(0x100000 * f))
+			for _, off := range []int{0x8c, 0x98, 0xc0, 0xc4} {
+				binary.BigEndian.PutUint32(b[off:], rawPitch)
+			}
 		}
 	}
 	if r.handoff != 0 {
-		b[0x9f] = r.handoff
+		if !r.handoffUntil.IsZero() && !now.Before(r.handoffUntil) {
+			r.handoff = 0
+			r.handoffUntil = time.Time{}
+		} else {
+			b[0x9f] = r.handoff
+		}
 	}
-	if beat, _, ok := r.deck.beatAt(time.Now()); ok {
-		b[0xa6] = byte(beat + 1)
+	if beatNum, inBar, ok := r.deck.statusBeatAt(now); ok {
+		binary.BigEndian.PutUint32(b[0xa0:], beatNum)
+		b[0xa6] = byte(inBar + 1)
 	}
 	r.statusCounter++
 	binary.BigEndian.PutUint32(b[0xc8:], r.statusCounter)

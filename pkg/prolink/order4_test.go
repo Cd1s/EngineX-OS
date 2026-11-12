@@ -365,5 +365,157 @@ func TestObserveAndBuildSnapshotBeatPhaseWithPitchAndPQTZOffset(t *testing.T) {
 	}
 }
 
+func TestExportRebindPlayingStatusHandoffFirmwareAndDBServerMetadata(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+
+	curIP := net.IPv4(127, 63, 0, 11)
+	cfg := testExportConfig(root)
+	cfg.IP = curIP
+	cfg.BeatAddr = "127.63.0.11:0"
+	// Observe intentionally nil: beat socket must still open for 0x26/0x27 master handoff.
+	e := NewExporter(cfg)
+	defer e.Close()
+
+	now := time.Now()
+	e.SetDeck(ExportDeck{Playing: true, Master: false, BPM: 125.0, Pitch: -4.0, Beat: 2.25, At: now})
+	if err := e.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	waitNumber(t, e, 4, 300*time.Millisecond)
+
+	e.mu.Lock()
+	r1 := e.run
+	e.mu.Unlock()
+	r1.mu.Lock()
+	beatConn := r1.beat
+	stPkt := r1.statusPacket()
+	r1.mu.Unlock()
+
+	if beatConn == nil {
+		t.Fatal("r.beat was not opened when Observe == nil")
+	}
+	wantPitch := uint32(math.Round(0x100000 * 0.96))
+	if stPkt[0x27] != 1 || stPkt[0x7b] != 3 || stPkt[0x8b] != 0x7a {
+		t.Fatalf("playing status left idle play-state bytes: 0x27=%d 0x7b=%d 0x8b=%#x", stPkt[0x27], stPkt[0x7b], stPkt[0x8b])
+	}
+	for _, off := range []int{0x8c, 0x98, 0xc0, 0xc4} {
+		if got := binary.BigEndian.Uint32(stPkt[off:]); got != wantPitch {
+			t.Fatalf("pitch at %#x = %#x, want %#x", off, got, wantPitch)
+		}
+	}
+	if binary.BigEndian.Uint32(stPkt[0xa0:]) != 3 || stPkt[0xa6] != 3 {
+		t.Fatalf("non-master playing deck missing beat/in-bar: beat=%#x inBar=%d", binary.BigEndian.Uint32(stPkt[0xa0:]), stPkt[0xa6])
+	}
+
+	// Non-master deck must NOT grant 0x26 master handoff.
+	peerUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 63, 0, 12)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peerUDP.Close()
+	ask := (&exportRun{player: 2}).handoffPacket(0x26, 0x28)
+	_, _ = peerUDP.WriteToUDP(ask, beatConn.LocalAddr().(*net.UDPAddr))
+	time.Sleep(30 * time.Millisecond)
+	r1.mu.Lock()
+	nonMasterHandoff := r1.handoff
+	r1.mu.Unlock()
+	if nonMasterHandoff != 0 {
+		t.Fatalf("non-master deck granted handoff to %d", nonMasterHandoff)
+	}
+
+	// Promote to Master, trigger Rebind onto a new IP, and confirm ExportDeck survives Rebind.
+	e.SetDeck(ExportDeck{Playing: true, Master: true, BPM: 128.0, Pitch: 2.5, Beat: 1.5, At: time.Now()})
+	e.mu.Lock()
+	e.cfg.IP = net.IPv4(127, 63, 0, 13)
+	e.cfg.BeatAddr = "127.63.0.13:0"
+	e.mu.Unlock()
+	if err := e.Rebind(); err != nil {
+		t.Fatalf("Rebind: %v", err)
+	}
+	waitNumber(t, e, 4, 300*time.Millisecond)
+
+	e.mu.Lock()
+	r2 := e.run
+	e.mu.Unlock()
+	r2.mu.Lock()
+	reboundPkt := r2.statusPacket()
+	statusAddr := r2.status.LocalAddr().(*net.UDPAddr)
+	beatAddr := r2.beat.LocalAddr().(*net.UDPAddr)
+	r2.mu.Unlock()
+	if reboundPkt[0x89]&(0x40|0x20) != (0x40|0x20) || binary.BigEndian.Uint16(reboundPkt[0x92:]) != 12800 {
+		t.Fatalf("Rebind lost ExportDeck state: % x", reboundPkt[0x89:0x96])
+	}
+
+	// Grant handoff as Master, then send a peer CDJ-3000 0x0a packet with Master=true and firmware "3.41":
+	// sticky handoff must clear and outgoing firmware must match "3.41".
+	_, _ = peerUDP.WriteToUDP(ask, beatAddr)
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		r2.mu.Lock()
+		h := r2.handoff
+		r2.mu.Unlock()
+		if h == 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	peerStatus := make([]byte, 0x11c)
+	copy(peerStatus, magic)
+	peerStatus[10] = 0x0a
+	copy(peerStatus[11:], "CDJ-3000")
+	peerStatus[0x21] = 2
+	copy(peerStatus[0x7c:0x80], "3.41")
+	peerStatus[0x89] = 0x40 | 0x20 // Playing + Master
+	binary.BigEndian.PutUint32(peerStatus[0x8c:], 0x100000)
+	binary.BigEndian.PutUint16(peerStatus[0x92:], 12800)
+	_, _ = peerUDP.WriteToUDP(peerStatus, statusAddr)
+
+	clearedAndUpgraded := false
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		r2.mu.Lock()
+		pkt := r2.statusPacket()
+		r2.mu.Unlock()
+		if pkt[0x9f] == 0xff && string(pkt[0x7c:0x80]) == "3.41" {
+			clearedAndUpgraded = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !clearedAndUpgraded {
+		r2.mu.Lock()
+		pkt := r2.statusPacket()
+		r2.mu.Unlock()
+		t.Fatalf("expected handoff cleared (0xff) and firmware upgraded to 3.41, got handoff=%#x fw=%q", pkt[0x9f], pkt[0x7c:0x80])
+	}
+
+	// DBServer 0x2002 metadata rounding: BPM=127.9999 -> 12800, Duration=239.9 -> 240.
+	dbs := &DBServer{
+		Library: &rekordbox.Library{
+			Tracks: []rekordbox.Track{{ID: 1, Path: "/Music/t.mp3", Title: "T", BPM: 127.9999, Duration: 239.9}},
+		},
+		Number: func() byte { return 4 },
+	}
+	dbs.tracks = map[uint32]rekordbox.Track{1: dbs.Library.Tracks[0]}
+	metaItems, err := dbs.query(dbMessage{kind: 0x2002, args: []dbField{dbNumber(0x01010301), dbNumber(1)}})
+	if err != nil {
+		t.Fatalf("DBServer 0x2002 query: %v", err)
+	}
+	var gotDur, gotBPM uint32
+	for _, it := range metaItems {
+		if it.kind == 0xb {
+			gotDur = it.id
+		}
+		if it.kind == 0xd {
+			gotBPM = it.id
+		}
+	}
+	if gotDur != 240 || gotBPM != 12800 {
+		t.Fatalf("DBServer 0x2002 truncated float metadata: dur=%d (want 240) bpm=%d (want 12800)", gotDur, gotBPM)
+	}
+}
+
+
 
 
