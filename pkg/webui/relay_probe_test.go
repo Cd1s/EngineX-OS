@@ -14,6 +14,12 @@ import (
 	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
 
+func init() {
+	// Disable background UDP 17891 LAN probes during unrelated webui unit tests;
+	// LAN probe tests install their own lanStemsProbe hook.
+	lanStemsProbe = nil
+}
+
 func TestProbeRelayStemsAnswersAndCaches(t *testing.T) {
 	hits := 0
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,5 +145,113 @@ func TestUIStatusDiscoversIdleLANStemsRenderer(t *testing.T) {
 	}
 	if !strings.Contains(body, `"online":false`) {
 		t.Fatalf("offline LAN Stems worker remained reported online: %s", body)
+	}
+}
+
+func TestLANProbeBudgetSurvivesStuckCacheAndSkipsConfiguredRelay(t *testing.T) {
+	prevProbe := lanStemsProbe
+	prevEvery := lanProbeEvery
+	lanProbeEvery = 5 * time.Millisecond
+	t.Cleanup(func() {
+		lanStemsProbe = prevProbe
+		lanProbeEvery = prevEvery
+	})
+
+	poll := func(srv *Server) string {
+		req := httptest.NewRequest(http.MethodGet, "/v1/sc5000/ui", nil)
+		req.RemoteAddr = "127.0.0.1:42000"
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		return w.Body.String()
+	}
+
+	// (b) A configured cloud relay whose /healthz answers {"ok":true} without auth while
+	// /healthz/stems reports busy:true must NEVER be handed to ProbeLAN as a cached LAN worker.
+	busyRelay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			w.Write([]byte(`{"ok":true}`))
+		case "/healthz/stems":
+			w.Write([]byte(`{"ok":true,"device":"Claw-ai","backend":"htdemucs","busy":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer busyRelay.Close()
+
+	var passedLast *stems.LANState
+	called := make(chan struct{}, 4)
+	lanStemsProbe = func(ctx context.Context, last *stems.LANState, step time.Duration) (stems.LANState, bool) {
+		passedLast = last
+		if last != nil && last.Endpoint != "" {
+			st, ok := stems.ProbeLAN(ctx, last, step)
+			called <- struct{}{}
+			return st, ok
+		}
+		called <- struct{}{}
+		return stems.LANState{}, false
+	}
+
+	uiDir2, state2 := t.TempDir(), t.TempDir()
+	s2 := New(Config{UIDir: uiDir2, StateDir: state2}, nil)
+	defer s2.Close()
+	relayURL, relayPW := busyRelay.URL, "secret-pw"
+	if err := s2.updateRelayConfig(&relayURL, &relayPW); err != nil {
+		t.Fatal(err)
+	}
+	_ = poll(s2)
+	time.Sleep(10 * time.Millisecond)
+	_ = poll(s2)
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("background LAN probe was not triggered when cloud relay was busy")
+	}
+	if passedLast != nil && strings.TrimRight(passedLast.Endpoint, "/") == strings.TrimRight(busyRelay.URL, "/") {
+		t.Errorf("configured relay endpoint %q was passed to ProbeLAN", passedLast.Endpoint)
+	}
+	time.Sleep(25 * time.Millisecond)
+	body2 := poll(s2)
+	if strings.Contains(body2, `"online":true`) {
+		t.Errorf("busy cloud relay was overwritten as online via /healthz: %s", body2)
+	}
+
+	// (a) A stuck cached LAN endpoint consumes one full step timeout; scheduleLANStemsProbe
+	// must give ProbeLAN a 3*step context budget so rediscovery still completes.
+	lanStemsProbe = func(ctx context.Context, last *stems.LANState, step time.Duration) (stems.LANState, bool) {
+		dl, ok := ctx.Deadline()
+		if !ok || time.Until(dl) < 2*step {
+			// Simulate single-step cached endpoint timeout exhausting a 1*step context budget.
+			stepCtx, cancel := context.WithTimeout(ctx, step)
+			<-stepCtx.Done()
+			cancel()
+		}
+		if ctx.Err() != nil {
+			return stems.LANState{}, false
+		}
+		return stems.LANState{
+			Endpoint: "http://192.168.1.88:18765",
+			Hostname: "recovered-pc",
+			Backend:  "htdemucs",
+		}, true
+	}
+
+	state1 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(state1, stems.LANStateName), []byte(`{"endpoint":"http://192.168.1.9:18765","hostname":"stale-pc","backend":"htdemucs","online":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s1 := New(Config{UIDir: t.TempDir(), StateDir: state1}, nil)
+	defer s1.Close()
+
+	_ = poll(s1)
+	var got1 string
+	for deadline := time.Now().Add(2500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(25 * time.Millisecond) {
+		got1 = poll(s1)
+		if strings.Contains(got1, `"hostname":"recovered-pc"`) && strings.Contains(got1, `"online":true`) {
+			break
+		}
+	}
+	if !strings.Contains(got1, `"hostname":"recovered-pc"`) || !strings.Contains(got1, `"online":true`) {
+		t.Errorf("probe context expired after stuck cached endpoint before rediscovery: %s", got1)
 	}
 }

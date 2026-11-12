@@ -53,7 +53,7 @@ func Main(args []string) int {
 const lanDiscoveryTimeout = 1200 * time.Millisecond
 
 func defaultFindLAN(ctx context.Context) (string, bool) {
-	return findLANAt(ctx, stems.DefaultLANStatePath())
+	return findLANAt(ctx, stems.DefaultLANState)
 }
 
 func findLANAt(ctx context.Context, statePath string) (string, bool) {

@@ -369,9 +369,6 @@ func (s *Server) Close() {
 
 // DefaultStateDir keeps logins on the deck's writable partition; its home is read-only.
 func DefaultStateDir(home string) string {
-	if _, err := os.Stat("/data/enginex"); err == nil {
-		return "/data/enginex/state"
-	}
 	if _, err := os.Stat("/data/sc5000-custom"); err == nil {
 		return "/data/sc5000-custom/state"
 	}
