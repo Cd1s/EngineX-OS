@@ -774,6 +774,18 @@ func (m *Manager) IsSafeModeQuarantined() bool {
 	return m.isSafeModeQuarantinedLocked(state)
 }
 
+// IsModEnabled reports whether id is enabled and not quarantined without scanning media drives.
+func (m *Manager) IsModEnabled(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state := m.loadStateLocked()
+	if m.isSafeModeQuarantinedLocked(state) {
+		return false
+	}
+	ms := state.Mods[id]
+	return ms.Enabled && !ms.Quarantined
+}
+
 func (m *Manager) isSafeModeQuarantinedLocked(state State) bool {
 	if state.SafeModeQuarantined {
 		return true
