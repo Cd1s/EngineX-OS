@@ -242,3 +242,15 @@ func TestPackedUploadRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestPipelineRejectsMissingNumChannelsWithoutPanic(t *testing.T) {
+	p := newPipeline(io.Discard)
+	_, err := p.fromEngine([]byte("maxBlockSize=1\n\naction=block\nnumSamples=0\n\n"))
+	if err == nil {
+		// Even if fromEngine had accepted it, Write must never panic on empty p.input.
+		_, err = p.Write([]byte("numReturnChannels=8\n\nreturnFrames=1\n\n"))
+	}
+	if err == nil {
+		t.Fatal("expected error on missing numChannels, got nil")
+	}
+}
