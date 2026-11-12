@@ -4604,6 +4604,77 @@ assert.equal(scLanStemsLine({{online: true, hostname: 'studio-mac', backend: 'hp
                     sh_mode = (zf.getinfo("stems/run-home-worker.sh").external_attr >> 16) & 0o777
                     self.assertEqual(sh_mode & 0o111, 0o111)
 
+    def test_deck_clock_feed_for_dmx_without_panel(self):
+        m = bp.SERVICES_MAIN
+        self.assertIn("running: root.scDeckClock && root.scFourDeckRole === \"\"", m)
+        self.assertIn("scDeckClock = !!v.deckClock", m)
+        fn = m.split("function scDeckClockDeckProps(", 1)[1].split("\t// 25 Hz around every edge", 1)[0]
+        self.assertNotIn("Planck.getProperty", fn)
+        self.assertNotRegex(fn, r'\.string\b')
+        self.assertIn('http://127.0.0.1:8080/v1/sc5000/clock', fn)
+        if shutil.which("node"):
+            tr_fn = m.split("function scTr(path) {", 1)[1].split("// #151:", 1)[0]
+            script = r'''
+const assert = require('node:assert/strict');
+const root = globalThis;
+var scPropCache = {}, scDeckClock = true, scFourDeckRole = "", scShadowEmptyObject = {},
+    scDeckClockRequest = null, scDeckClockProps = {}, scDeckClockProbeAt = {},
+    scDeckClockPrevPos = {}, scDeckClockPrevCue = {}, scDeckClockPrevLoaded = {},
+    scDeckClockPrevLen = {}, scDeckClockOut = [],
+    scDeckClockPostAt = 0, scDeckClockSig = "";
+const scDeckClockTimer = { interval: 100 };
+let lookups = 0, posts = [];
+const props = {
+    "/Engine/Deck1/PlayState": { state: false },
+    "/Engine/Deck1/Track/SongLoaded": { state: true },
+    "/Engine/Deck1/Track/TrackLength": { unnormalized: 8820000 },
+    "/Engine/Deck1/Track/CueLEDState": { state: true },
+    "/Engine/Deck1/DeckIsMaster": { state: true },
+    "/Engine/Deck1/OriginalBPM": { unnormalized: 120 },
+    "/Engine/Deck1/CurrentBPM": { unnormalized: 124.8 },
+    "/Engine/Deck1/BeatNumber": { unnormalized: 2.25 },
+    "/Engine/Deck1/Track/TrackPosition": { unnormalized: 44100 },
+    "/Engine/Deck1/Track/SampleRate": { value: 44100 },
+    "/Engine/Deck2/PlayState": { state: false },
+};
+const Planck = { getProperty(p) { lookups++; return props[p] ? { translator: props[p] } : null; } };
+class XMLHttpRequest {
+    constructor() { this.readyState = 0; }
+    open(m, u) { this.readyState = 1; this.method = m; this.url = u; }
+    send(body) { this.readyState = 4; posts.push(JSON.parse(body)); }
+    abort() { this.readyState = 0; }
+}
+function scTr(path) {''' + tr_fn + "\nfunction scDeckClockDeckProps(" + fn + r'''
+root.scTr = scTr;
+scDeckClockTick();
+assert.equal(posts.length, 1);
+assert.equal(posts[0].length, 2);
+assert.equal(posts[0][0].deck, 1);
+assert.equal(posts[0][0].master, true);
+assert.equal(posts[0][0].currentBpm, 124.8);
+assert.equal(posts[0][0].beat, 2.25);
+assert.equal(posts[0][0].playing, false);
+// CUE held on same track: PlayState false, CueLEDState true, TrackPosition advances -> playing: true
+props["/Engine/Deck1/Track/TrackPosition"].unnormalized = 48510;
+scDeckClockTick();
+assert.equal(posts.length, 2);
+assert.equal(posts[1][0].cue, true);
+assert.equal(posts[1][0].playing, true);
+assert.equal(scDeckClockTimer.interval, 100);
+// Loading a different track with a higher TrackPosition must NOT false-trigger CUE.
+props["/Engine/Deck1/Track/TrackLength"].unnormalized = 9990000;
+props["/Engine/Deck1/Track/TrackPosition"].unnormalized = 66150;
+scDeckClockTick();
+assert.equal(posts[posts.length - 1][0].cue, false);
+assert.equal(posts[posts.length - 1][0].playing, false);
+// Missing decks 3 & 4 are cached negatively for 3 s (no lookup storm).
+const beforeLookups = lookups;
+scDeckClockTick();
+assert.equal(lookups, beforeLookups);
+'''
+            res = subprocess.run(["node"], input=script, text=True, capture_output=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
