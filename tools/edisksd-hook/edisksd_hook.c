@@ -121,15 +121,16 @@ static int make_dirs(const char *path) {
 // following only that one compat link: a plain sibling name, to a directory we
 // own that nobody else can write. Everything below it is still walked safely.
 static int lib_root(char out[PATH_MAX]) {
-    const char *roots[]={LIB_ROOT,LEGACY_LIB_ROOT};int err=ENOENT;
+    const char *roots[]={LIB_ROOT,LEGACY_LIB_ROOT};int err=ENOENT,absent=0,tried=0;
     for(unsigned i=0;i<2;i++) {
         if(!roots[i]||!*roots[i])continue;
+        tried++;
         char parent[PATH_MAX];
         if(snprintf(parent,sizeof parent,"%s",roots[i])>=(int)sizeof parent){err=ENAMETOOLONG;continue;}
         char *slash=strrchr(parent,'/');if(!slash||slash==parent||!slash[1]){err=EINVAL;continue;}
         *slash=0;const char *base=slash+1;
         struct stat st;
-        if(lstat(parent,&st)){err=errno;continue;}
+        if(lstat(parent,&st)){err=errno;if(errno==ENOENT)absent++;continue;}
         if(S_ISLNK(st.st_mode)) {
             char link[NAME_MAX+1];ssize_t n=readlink(parent,link,sizeof link-1);
             if(n<=0||n>=(ssize_t)sizeof link-1){err=ELOOP;continue;}
@@ -143,7 +144,15 @@ static int lib_root(char out[PATH_MAX]) {
             return 0;
         }
         if(!S_ISDIR(st.st_mode)){err=ENOTDIR;continue;}
+        if(safe_path(parent,0)||st.st_uid!=geteuid()||(st.st_mode&022)){err=EACCES;continue;}
         if(snprintf(out,PATH_MAX,"%s",roots[i])>=PATH_MAX){err=ENAMETOOLONG;continue;}
+        return 0;
+    }
+    // A blank /data (first boot, or edisksd started before the prepare unit):
+    // neither directory exists yet, so make_dirs creates the primary one 0700,
+    // as the hook did before. A dangling or foreign link is not "absent".
+    if(tried&&absent==tried&&roots[0]&&*roots[0]) {
+        if(snprintf(out,PATH_MAX,"%s",roots[0])>=PATH_MAX){errno=ENAMETOOLONG;return -1;}
         return 0;
     }
     errno=err;return -1;
@@ -165,6 +174,7 @@ static uint64_t hash_bytes(uint64_t h,const void *data,size_t n) {
     const unsigned char *p=data;
     while(n--) {h^=*p++;h*=UINT64_C(1099511628211);} return h;
 }
+#ifndef VOLUME_IDENTITY
 static int volume_identity(const char *source,char out[80]) {
     char device[PATH_MAX]; struct stat st;
     if (!source || !realpath(source,device) || strncmp(device,"/dev/",5) ||
@@ -186,6 +196,8 @@ static int volume_identity(const char *source,char out[80]) {
     h=hash_bytes(h,header,(size_t)n);
     snprintf(out,80,"signature-%016llx",(unsigned long long)h);return 0;
 }
+#define VOLUME_IDENTITY volume_identity
+#endif
 
 // Keep the I/O buffer out of recursive directory-walk frames.
 static __attribute__((noinline)) int copy_file_data(int in,int out,int64_t deadline) {
@@ -434,21 +446,18 @@ static int run(char *const argv[],int64_t deadline) {
         if(budget(deadline)){kill(-pid,SIGKILL);while(waitpid(pid,&status,0)<0&&errno==EINTR){}errno=ETIMEDOUT;return -1;}usleep(20000);
     }
 }
+// The mount tests replace these; a bind mount is never HFS+ nor a block device.
+#ifndef HFS_READONLY
 static int hfs_readonly(const char *target) {
     struct statfs f;struct statvfs v;
     return !statfs(target,&f)&&f.f_type==HFSPLUS_MAGIC&&!statvfs(target,&v)&&(v.f_flag&ST_RDONLY);
 }
+#define HFS_READONLY hfs_readonly
+#endif
+#ifndef RB_BRIDGE_PATH
 static const char *rb_bridge_path(void) {
     return access("/usr/local/bin/rb-bridge",X_OK)?"/data/enginex/bundle/bin/rb-bridge":"/usr/local/bin/rb-bridge";
 }
-// The mount tests replace these; a bind mount is never HFS+ nor a block device.
-#ifndef HFS_READONLY
-#define HFS_READONLY hfs_readonly
-#endif
-#ifndef VOLUME_IDENTITY
-#define VOLUME_IDENTITY volume_identity
-#endif
-#ifndef RB_BRIDGE_PATH
 #define RB_BRIDGE_PATH rb_bridge_path
 #endif
 // What after_mount does on a volume. Engine learns of a mount from edisksd's

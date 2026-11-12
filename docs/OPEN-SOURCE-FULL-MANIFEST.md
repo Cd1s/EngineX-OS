@@ -31,7 +31,7 @@
 | **Engine 内部 SQLite I/O 引擎** | 默认 `synchronous=FULL`、临时表落盘，每次写历史/改 Cue 在 FAT32/exFAT 上频繁创建/删除 `-journal` 并同步 `fsync` 阻塞主线程 | `libengine-ui-hook.so` 拦截静态编译的 `sqlite3_open` / `sqlite3_open_v2`，自动对所有业务库注入 `PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-8000;`，临时表与 8MB 页缓存全进 RAM |
 | **官方遥测、Sentry 与冻结探针** | 每次触摸/按键写 `/data/.../analytics/posthog.db` 与 `events.db`；后台常驻 `crashpad_handler` 与 4 个 `J:I:Takingfreez` 探针线程 | `posthog.db` / `events.db` 在 SQLite 层直接重定向为 `":memory:"`（文件层兜底至 `/tmp` tmpfs）；`crashpad_handler` 派生在 `posix_spawn`/`execve` 层直接短路返回 `ENOENT`；探针线程降为 `SCHED_IDLE` + `CPU3`；`/etc/hosts` 与 `dnsmasq` 屏蔽遥测域名（保留 `ipv4.connman.inmusicbrands.com` 在线检测） |
 | **Engine 内部后台分析与封面解码线程** | `Analysis Queue`、`QQuickPixmapRea`、`FileInfoThread`、`Dropbox*`、`Beatport*` 与实时音频混跑，大图解码易打断 `CPU0` 音频中断 | 拦截 `pthread_setname_np`、Qt6 `prctl`/`__prctl_time64(PR_SET_NAME)` 与 `pthread_setschedparam`：分析/云服务/探针线程强制锁 `CPU3` (`SCHED_IDLE` + `IOPRIO_CLASS_IDLE`)；封面解码 `QQuickPixmapRea` 与 `FileInfoThread` 强制锁 `CPU1-3` (`nice 10`)，严禁踏入 `CPU0` |
-| **文件系统与只读盘支持** | HFS+ 被错误改写为不存在的 `ufsd` 驱动导致挂载失败；只读盘挂载后被 `handleReadOnlyDeviceEjected` 自动弹出 | 解锁原生 `hfsplus` 驱动与未知文件系统支持位；禁止只读盘自动弹出；对只读 HFS+ Rekordbox 盘自动在 `/data/sc5000-custom/hfs-lib/<vol>` 挂载 `overlayfs` 可写 `Engine Library` 层，退盘时自动 `MNT_DETACH` |
+| **文件系统与只读盘支持** | HFS+ 被错误改写为不存在的 `ufsd` 驱动导致挂载失败；只读盘挂载后被 `handleReadOnlyDeviceEjected` 自动弹出 | 解锁原生 `hfsplus` 驱动与未知文件系统支持位；禁止只读盘自动弹出；对只读 HFS+ Rekordbox 盘自动把 `/data/enginex/hfs-libraries/<卷 ID>` 绑定为可写 `Engine Library` 视图，退盘时自动 `MNT_DETACH` |
 | **Linux 内核与硬件实时调优** | CPU 最低频 126MHz（落入 408MHz 区间易发生 ALSA XRUN）；GPU 锁最高频发热；USB/SATA 启用自动休眠 | CPU `ondemand` 保底 **1.2 GHz**（`up_threshold=50`, `sampling_down_factor=10`，实测 ~72°C 不降频）；GPU `simple_ondemand` 低频让出热设计功耗；ALSA `ffb20000` 硬中断锁 `CPU0` (`FIFO 99`)；内核 `workqueue/cpumask=6` 移出 `CPU0`；USB/SATA/JMicron 禁用休眠 (`autosuspend=-1`)；千兆网卡协商 + Wi-Fi 禁用省电与漫游 |
 
 ---
@@ -59,11 +59,11 @@
 | `posix_spawn` / `execve` / `execv` | 启动 `/usr/Engine/crashpad_handler` | 匹配 `crashpad_handler` 直接返回 `ENOENT` | 砍掉后台常驻崩溃上传守护进程，节省内存与文件锁 |
 
 ### 2. `/usr/libexec/edisksd` 挂载拦截器（`libedisksd-hook.so`）
-Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会导致 SQLite 锁冲突与删库。因此我们通过 `LD_PRELOAD=/etc/sc5000/libedisksd-hook.so` 拦截 `edisksd` 的 `mnt_context_mount` 与 `mnt_context_umount`，**在 `edisksd` 向 Engine 返回 D-Bus 挂载成功信号之前的 20 秒窗口内**完成全部预处理：
-1. 若检测到只读 HFS+ 盘且含 `PIONEER` / `.PIONEER`，自动在 `<mount>/Engine Library` 上挂载以 `/data/sc5000-custom/hfs-lib/<vol>` 为上层的可写 `overlayfs`；
+Engine 打开外接存储后，任何外部进程写其 `m.db` / `hm.db` 都会导致 SQLite 锁冲突与删库。因此我们通过 `LD_PRELOAD=/etc/sc5000/libedisksd-hook.so` 拦截 `edisksd` 的 `mnt_context_mount` 与 `mnt_context_umount`，在 20 秒预算内完成预处理；rekordbox 盘先在私有 mount 命名空间里挂载并转换，之后才做 Engine 能看到的真正挂载（edisksd 的挂载表监视器一见到挂载就会通知 Engine，#182）：
+1. 若检测到只读 HFS+ 盘且含 `PIONEER` / `.PIONEER`，自动在 `<mount>/Engine Library` 上绑定 `/data/enginex/hfs-libraries/<卷 ID>` 作为可写视图（只跟随 `/data/sc5000-custom -> enginex` 这一条兼容软链）；
 2. 若含先锋导出库，同步调用 `/usr/local/bin/rb-bridge --mount-path <mount>` 完成秒级转换；
 3. 若为原生 Engine U 盘（含 `Engine Library/Database2/m.db`），同步调用 `/usr/local/bin/engine-guardian --heal-mount <mount> --data-only` 完成链表与数据自愈；
-4. 退盘（`mnt_context_umount`）前自动对 `overlayfs` 子挂载点执行 `umount2(..., MNT_DETACH)`，杜绝退盘报 `EBUSY`。
+4. 退盘（`mnt_context_umount`）前自动卸下 HFS+ 视图的子挂载点（失败时恢复原视图），杜绝退盘报 `EBUSY`。
 
 ### 3. 闭源 C++ DSP 实时平滑与参数守卫（`tools/ui-mod/dsp_smooth.h`）✅
 纯 C11 头文件：零 `malloc`、零锁，共享状态只经 `__atomic` 读写，可在 96 kHz `SCHED_RR 49` 音频回调中调用。单元测试 `tools/ui-mod/test_dsp_smooth.c`（`-Wall -Wextra -Werror`，另以 `-ffast-math` + ASan/UBSan 与 `arm-linux-gnueabihf-gcc` 验证）。**状态（2026-11-04）：`libengine-ui-hook.so` 共 19 个闭源 C++ 实时音频 / 控制入口跳板全部已部署并实机验证（下表 ✅）。** 通过 ARM 交叉编译 / QEMU 测试与 SC5000 实机加载验证。实机部署的 hook SHA-256 为 `e4f30a854c06d7cc344981cb1ccf9672e2bfd9e962fa92d63bfdde29132ee9ba`，重启 Engine 后 19 个跳板全部打入，ALSA `card2/pcm0p/sub0` 稳定 `RUNNING`（`avail_max` 不超过 450 帧单周期）、`NRestarts=0`、0 XRUN。
