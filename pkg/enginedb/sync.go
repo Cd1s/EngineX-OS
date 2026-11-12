@@ -435,6 +435,12 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 		if err = ctx.Err(); err != nil {
 			return result, err
 		}
+		// Time left after the tracks prepared up front: prepare the next one now.
+		if preparedTrack.late && !opts.Deadline.IsZero() && time.Now().Before(opts.Deadline) {
+			if p, e := prepareOne(res, preparedTrack.track, preparedTrack.rel, opts.Deadline, true); e == nil {
+				preparedTrack = p
+			}
+		}
 		original := preparedTrack.track
 		t := original
 		rel, st, files, art, hash := preparedTrack.rel, preparedTrack.info, preparedTrack.files, preparedTrack.art, preparedTrack.hash
