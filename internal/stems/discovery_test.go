@@ -239,3 +239,54 @@ func TestFindLANDoesNotUseRelayHealthzOrCachedRelay(t *testing.T) {
 		t.Fatalf("FindLAN did not discover real LAN server behind cached relay: (%q, %v), want %q", endpoint, ok, lanSrv.URL)
 	}
 }
+
+func TestFindLANSkipsBusyResponderForIdlePeer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	busyBackend := &Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"}
+	busyBackend.Slot <- struct{}{}
+	busySrv := httptest.NewServer(busyBackend)
+	defer busySrv.Close()
+	busyPort, _ := strconv.Atoi(busySrv.URL[strings.LastIndex(busySrv.URL, ":")+1:])
+
+	idleBackend := &Backend{Slot: make(chan struct{}, 1), Name: "htdemucs"}
+	idleSrv := httptest.NewServer(idleBackend)
+	defer idleSrv.Close()
+	idlePort, _ := strconv.Atoi(idleSrv.URL[strings.LastIndex(idleSrv.URL, ":")+1:])
+
+	pcBusy, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go Announce(ctx, pcBusy, Beacon{Port: busyPort, Backend: "htdemucs", Hostname: "busy-pc"})
+
+	pcIdle, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		defer pcIdle.Close()
+		buf := make([]byte, 1500)
+		n, from, err := pcIdle.ReadFrom(buf)
+		if err != nil || string(buf[:n]) != discoverProbe {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+		reply, _ := json.Marshal(Beacon{Service: beaconService, Version: 2, Port: idlePort, Backend: "htdemucs", Hostname: "idle-pc"})
+		pcIdle.WriteTo(reply, from)
+	}()
+
+	old, oldMDNS := discoverTargets, mdnsTargets
+	discoverTargets = func() []*net.UDPAddr {
+		return []*net.UDPAddr{pcBusy.LocalAddr().(*net.UDPAddr), pcIdle.LocalAddr().(*net.UDPAddr)}
+	}
+	mdnsTargets = func() []*net.UDPAddr { return nil }
+	t.Cleanup(func() { discoverTargets, mdnsTargets = old, oldMDNS })
+
+	state := filepath.Join(t.TempDir(), LANStateName)
+	endpoint, ok := FindLAN(ctx, state, 300*time.Millisecond)
+	if !ok || endpoint != idleSrv.URL {
+		t.Fatalf("FindLAN = (%q, %v), want (%q, true)", endpoint, ok, idleSrv.URL)
+	}
+}
