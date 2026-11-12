@@ -263,8 +263,12 @@ func (s *server) connectDeezer(ctx context.Context, user, arl string) (*deezerIn
 	} else {
 		info.UserID = arlUser
 	}
-	if err := s.deezer.userPlaylistsOK(ctx, info.UserID); err != nil {
-		return nil, "", fmt.Errorf("Deezer 用户 %s 的歌单无法访问：%v", info.UserID, err)
+	// When an ARL cookie is validated via deezer.getUserData, private accounts
+	// need no public playlists and must not hit api.deezer.com quota limits.
+	if info.ARL == "" {
+		if err := s.deezer.userPlaylistsOK(ctx, info.UserID); err != nil {
+			return nil, "", fmt.Errorf("Deezer 用户 %s 的歌单无法访问：%v", info.UserID, err)
+		}
 	}
 	log.Printf("deezer: connected user %s (arl: %v)", info.UserID, info.ARL != "")
 	return info, arlName, nil

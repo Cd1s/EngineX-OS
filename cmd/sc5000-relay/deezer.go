@@ -50,6 +50,8 @@ func newDeezerClient() *deezerClient {
 	return &deezerClient{hc: &http.Client{Timeout: 20 * time.Second}}
 }
 
+var errDeezerQuota = errors.New("deezer api: quota exceeded")
+
 func (d *deezerClient) getJSON(ctx context.Context, u string, out any) error {
 	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
 	req.Header.Set("User-Agent", userAgent)
@@ -64,11 +66,15 @@ func (d *deezerClient) getJSON(ctx context.Context, u string, out any) error {
 	}
 	var e struct {
 		Error *struct {
+			Type    string `json:"type"`
 			Message string `json:"message"`
 			Code    int    `json:"code"`
 		} `json:"error"`
 	}
 	if json.Unmarshal(b, &e) == nil && e.Error != nil {
+		if e.Error.Code == 4 || strings.EqualFold(e.Error.Type, "QuotaException") {
+			return fmt.Errorf("%w: %s", errDeezerQuota, e.Error.Message)
+		}
 		return fmt.Errorf("deezer api: %s", e.Error.Message)
 	}
 	if resp.StatusCode != 200 {
@@ -81,7 +87,10 @@ func (d *deezerClient) userPlaylistsOK(ctx context.Context, userID string) error
 	var r struct {
 		Data []json.RawMessage `json:"data"`
 	}
-	return d.getJSON(ctx, deezerAPI+"/user/"+userID+"/playlists?limit=1", &r)
+	if err := d.getJSON(ctx, deezerAPI+"/user/"+userID+"/playlists?limit=1", &r); err != nil && !errors.Is(err, errDeezerQuota) {
+		return err
+	}
+	return nil
 }
 
 func isDeezerHost(h string) bool {
