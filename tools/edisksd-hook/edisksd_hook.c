@@ -314,21 +314,22 @@ static int newer(const struct stat *a,const struct stat *b) {
     return a->st_mtim.tv_sec!=b->st_mtim.tv_sec?a->st_mtim.tv_sec>b->st_mtim.tv_sec:a->st_mtim.tv_nsec>b->st_mtim.tv_nsec;
 }
 static struct owned_view *find_view(const char *,const char *);
-// The least recently used generation in the cache that may go: never `keep`,
-// never one of a stick whose view is up. *total (when asked): the bytes of all
-// that may go.
-static int oldest_generation(const char *cache,const char *keep,uint64_t *total,char id_out[NAME_MAX+1],char name_out[NAME_MAX+1]) {
+// The least recently used generation in the cache that may go: never one of the
+// stick being seeded (`identity`: its own previous generation holds the cues set
+// on the deck; prune_generations keeps two once its view is up), never one of a
+// stick whose view is up. *total (when asked): the bytes of all that may go.
+static int oldest_generation(const char *cache,const char *identity,uint64_t *total,char id_out[NAME_MAX+1],char name_out[NAME_MAX+1]) {
     DIR *d=opendir(cache);if(!d)return -1;
     struct stat best_st={0};struct dirent *e;*id_out=*name_out=0;
     while((e=readdir(d))) {
-        if(e->d_name[0]=='.')continue;
+        if(e->d_name[0]=='.'||!strcmp(e->d_name,identity))continue;
         struct owned_view *live=find_view(NULL,e->d_name);if(live){free(live);continue;}
         int id=openat(dirfd(d),e->d_name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(id<0)continue;
         DIR *g=fdopendir(id);if(!g){close(id);continue;}struct dirent *l;
         while((l=readdir(g))) {
             struct stat st;char path[PATH_MAX];
             if(!seeded_ok(l->d_name)||fstatat(id,l->d_name,&st,AT_SYMLINK_NOFOLLOW)||!S_ISDIR(st.st_mode))continue;
-            if(snprintf(path,sizeof path,"%s/%s/%s",cache,e->d_name,l->d_name)>=(int)sizeof path||(keep&&!strcmp(path,keep)))continue;
+            if(snprintf(path,sizeof path,"%s/%s/%s",cache,e->d_name,l->d_name)>=(int)sizeof path)continue;
             if(total){int fd=openat(id,l->d_name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);uint64_t n=0;if(fd>=0){if(!copy_tree(fd,-1,INT64_MAX,0,&n))*total+=n;close(fd);}}
             if(!*name_out||newer(&best_st,&st)){best_st=st;snprintf(id_out,NAME_MAX+1,"%s",e->d_name);snprintf(name_out,NAME_MAX+1,"%s",l->d_name);}
         }
@@ -339,7 +340,7 @@ static int oldest_generation(const char *cache,const char *keep,uint64_t *total,
 // /data keeps HFS_CACHE_RESERVE free after a seed of `bytes`: Engine's own
 // settings, EngineX state and OTA downloads live there too (BH-G1-6). Unused
 // libraries go, least recently used first, but only when that makes the room.
-static int have_room(const char *cache,const char *keep,uint64_t bytes) {
+static int have_room(const char *cache,const char *identity,uint64_t bytes) {
     char id[NAME_MAX+1],name[NAME_MAX+1];int checked=0;
     for(unsigned i=0;i<256;i++) {
         struct statvfs v;if(statvfs(cache,&v))return 0; // unknown: as before
@@ -347,8 +348,8 @@ static int have_room(const char *cache,const char *keep,uint64_t bytes) {
         if(need<bytes)break;
         if(avail>=need)return 0;
         if(private_ns)break;
-        if(!checked){uint64_t total=0;oldest_generation(cache,keep,&total,id,name);if(avail+total<need)break;checked=1;}
-        if(oldest_generation(cache,keep,NULL,id,name))break;
+        if(!checked){uint64_t total=0;oldest_generation(cache,identity,&total,id,name);if(avail+total<need)break;checked=1;}
+        if(oldest_generation(cache,identity,NULL,id,name))break;
         int fd=open(cache,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)break;
         int g=openat(fd,id,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
         if(g>=0){remove_tree(g,name);close(g);unlinkat(fd,id,AT_REMOVEDIR);note("reclaimed an unused HFS library of",id,0);}
@@ -435,7 +436,7 @@ static int seed_library(const char *target,const char *identity,char library[PAT
         if(!rc){snprintf(seeded_as,sizeof seeded_as,"%s",name);touch_library(library);}
         return rc;
     }
-    if(errno!=ENOENT||have_room(cache,library,bytes)){if(src>=0)close(src);return -1;}
+    if(errno!=ENOENT||have_room(cache,identity,bytes)){if(src>=0)close(src);return -1;}
     if(snprintf(stage,sizeof stage,"%s/.seed-XXXXXX",root)>=(int)sizeof stage){if(src>=0)close(src);errno=ENAMETOOLONG;return -1;}
     if(!mkdtemp(stage)){if(src>=0)close(src);return -1;}
     int dst=open(stage,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC),rc=dst<0?-1:0;
@@ -490,7 +491,9 @@ static int add_child(struct owned_view *v,const char *name,const char *source,in
     if(path_join(root,sizeof root,v->anchor,"view")||path_join(dest,sizeof dest,root,name))return -1;
     if(isdir){if(mkdir(dest,0700))return -1;}
     else {int fd=open(dest,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd<0)return -1;close(fd);}
-    if(bind_checked(source,dest,MS_BIND|MS_REC))return -1;
+    // A bind of a shared mount (systemd makes /data MS_SHARED) is that mount's peer:
+    // bind_native's binds inside it would propagate into /data. Private first.
+    if(bind_checked(source,dest,MS_BIND|MS_REC)||mount(NULL,dest,NULL,MS_PRIVATE|MS_REC,NULL))return -1;
     snprintf(v->child[v->count++].name,NAME_MAX+1,"%s",name);return 0;
 }
 static int update_public_ids(struct owned_view *v) {
@@ -614,7 +617,7 @@ static int bind_native(struct owned_view *v,const char *backing,const char *libr
         if(snprintf(name,sizeof name,NESTED "%s",e->d_name)>=(int)sizeof name){note("name too long for the HFS view, left out:",e->d_name,ENAMETOOLONG);continue;}
         if(v->count==MAX_VIEW_ENTRIES){errno=E2BIG;rc=-1;break;}
         if(snprintf(dest,sizeof dest,"%s/view/%s",v->anchor,name)>=(int)sizeof dest){errno=ENAMETOOLONG;rc=-1;break;}
-        if((!mirror&&stand_in(lib,e->d_name,S_ISDIR(st.st_mode)))||bind_checked(source,dest,MS_BIND|MS_REC)){rc=-1;break;}
+        if((!mirror&&stand_in(lib,e->d_name,S_ISDIR(st.st_mode)))||bind_checked(source,dest,MS_BIND|MS_REC)||mount(NULL,dest,NULL,MS_PRIVATE|MS_REC,NULL)){rc=-1;break;}
         snprintf(v->child[v->count++].name,NAME_MAX+1,"%s",name);
         if(mount(NULL,dest,NULL,MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC,NULL)){rc=-1;break;}
     }

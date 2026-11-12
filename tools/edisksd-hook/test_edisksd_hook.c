@@ -813,12 +813,68 @@ static void test_hfs_view_artwork_is_writable(const char *root) {
     #undef VIEW
     puts("REAL PRIVATE NAMESPACE BH2-A1-4: an HFS+ view's Engine Library/Artwork is writable: the stick's covers are mirrored in the pre-mount, linked into a new generation, shown read-only until a mirror is complete: PASS");
 }
+// Review of bdbbda4: seed_library passed the new library's path, which does not exist yet, as
+// the one to keep, so making room for a new PC export could delete this stick's own previous
+// generation (the cues set on the deck) before the newer unused library of another stick.
+static void test_seed_keeps_its_own_previous_generation(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char data[PATH_MAX],p[PATH_MAX],disk[PATH_MAX],target[PATH_MAX],own[PATH_MAX],other[PATH_MAX],saved_lib[PATH_MAX];
+    snprintf(saved_lib,sizeof saved_lib,"%s",test_library);
+    join(data,root,"keep-data");assert(!make_dirs(data));assert(!mount("keep-data",data,"tmpfs",0,"mode=0700,size=24m"));
+    join(p,data,"enginex");assert(!make_dirs(p));join(test_library,p,"hfs-libraries");assert(!make_dirs(test_library));assert(!chmod(test_library,0700));
+    // This stick's previous generation, the least recently used, and another stick's newer one.
+    join(own,test_library,"uuid-own/library-00000000000000aa/Database2");assert(!make_dirs(own));join(p,own,"m.db");write_bytes(p,2u<<20);
+    join(other,test_library,"uuid-other/library-00000000000000bb/Database2");assert(!make_dirs(other));join(p,other,"m.db");write_bytes(p,2u<<20);
+    struct timespec older[2]={{.tv_sec=1000000000},{.tv_sec=1000000000}},newer[2]={{.tv_sec=1100000000},{.tv_sec=1100000000}};
+    join(p,test_library,"uuid-own/library-00000000000000aa");assert(!utimensat(AT_FDCWD,p,older,0));
+    join(p,test_library,"uuid-other/library-00000000000000bb");assert(!utimensat(AT_FDCWD,p,newer,0));
+    join(disk,root,"keep-hfs");join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/m.db");write_bytes(p,1u<<20);
+    join(target,MEDIA_ROOT,"KEEP-HFS");mount_ro(disk,target);
+    struct statvfs v;assert(!statvfs(test_library,&v));uint64_t avail=(uint64_t)v.f_bavail*v.f_frsize;
+    test_cache_reserve=avail-(1u<<19); // one 2 MiB library must go for the 1 MiB seed
+    seeded_hint[0]=0;assert(!prepare_view(target,"uuid-own",deadline_from(now_ms())));test_cache_reserve=0;
+    if(access(own,F_OK))fprintf(stderr,"the stick's own previous generation was deleted for its new seed\n");
+    assert(!access(own,F_OK));
+    join(p,test_library,"uuid-other");assert(access(p,F_OK)==-1&&errno==ENOENT);
+    struct libmnt_context c={.target=target};assert(!unmount_dispatch(&c,real_unmount));
+    assert(!umount2(data,MNT_DETACH));snprintf(test_library,sizeof test_library,"%s",saved_lib);
+    puts("REAL PRIVATE NAMESPACE review bdbbda4: a new seed makes room from other sticks' unused libraries, never from its own previous generation: PASS");
+}
+static unsigned mounts_below(const char *dir) {
+    FILE *f=fopen("/proc/self/mountinfo","r");assert(f);char line[4096];unsigned n=0;size_t len=strlen(dir);
+    while(fgets(line,sizeof line,f)){char mp[PATH_MAX];if(sscanf(line,"%*s %*s %*s %*s %4095s",mp)==1&&!strncmp(mp,dir,len)&&mp[len]=='/')n++;}
+    fclose(f);return n;
+}
+// Review of bdbbda4: systemd makes /data MS_SHARED. The view's "Engine Library" bind of the
+// cached library was then a peer of /data, and the binds inside it (Engine Library/Music, ...)
+// propagated into /data/enginex/hfs-libraries.
+static void test_view_binds_stay_out_of_a_shared_data(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char data[PATH_MAX],p[PATH_MAX],disk[PATH_MAX],target[PATH_MAX],saved_lib[PATH_MAX];
+    snprintf(saved_lib,sizeof saved_lib,"%s",test_library);
+    join(data,root,"shared-data");assert(!make_dirs(data));assert(!mount("shared-data",data,"tmpfs",0,"mode=0700,size=8m"));
+    assert(!mount(NULL,data,NULL,MS_SHARED,NULL));
+    join(test_library,data,"hfs-libraries");
+    join(disk,root,"shared-hfs");join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"engine dj export");
+    join(p,disk,"Engine Library/Music");assert(!make_dirs(p));join(p,disk,"Engine Library/Music/a.mp3");write_file(p,"audio");
+    join(target,MEDIA_ROOT,"SHARED-HFS");mount_ro(disk,target);
+    seeded_hint[0]=0;assert(!prepare_view(target,"uuid-shared",deadline_from(now_ms())));
+    join(p,target,"Engine Library/Music/a.mp3");expect_file(p,"audio");
+    unsigned leaked=mounts_below(data);
+    if(leaked)fprintf(stderr,"%u view mounts propagated into the shared /data\n",leaked);
+    assert(!leaked);
+    struct libmnt_context c={.target=target};assert(!unmount_dispatch(&c,real_unmount));
+    assert(!umount2(data,MNT_DETACH));snprintf(test_library,sizeof test_library,"%s",saved_lib);
+    puts("REAL PRIVATE NAMESPACE review bdbbda4: the HFS+ view's binds stay out of a shared /data: PASS");
+}
 int main(int argc,char **argv) {
     char root[]="/tmp/sc5000-edisks-tests-XXXXXX";assert(mkdtemp(root));
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_monitor_sees_plain_device_mount(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_hfs_view_copies_only_metadata(root);test_heal_before_visible(root);test_eject_while_another_stick_converts(root);test_eject_of_a_pulled_stick(root);test_heal_marker_survives_another_port(root);test_hfs_view_with_a_long_entry_name(root);test_hfs_view_artwork_is_writable(root);test_seed_keeps_its_own_previous_generation(root);test_view_binds_stay_out_of_a_shared_data(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
