@@ -658,8 +658,14 @@ func (m *Manager) upgradeLocked(old Mod, staged, id string) (*Mod, error) {
 			log.Printf("mods: upgrade %s: ignoring failed stop of the old version: %v", id, err) // a broken old script must not block its own fix
 		}
 	}
-	backup := old.Dir + ".old"
-	_ = os.RemoveAll(backup)
+	// The previous version waits in a directory of its own (".install-" names are never
+	// discovered as mods): a name derived from the mod ID could be another installed mod's.
+	backupRoot, err := os.MkdirTemp(filepath.Dir(old.Dir), ".install-backup-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(backupRoot)
+	backup := filepath.Join(backupRoot, "previous")
 	if err := os.Rename(old.Dir, backup); err != nil {
 		return nil, err
 	}
@@ -667,7 +673,6 @@ func (m *Manager) upgradeLocked(old Mod, staged, id string) (*Mod, error) {
 		_ = os.Rename(backup, old.Dir)
 		return nil, err
 	}
-	_ = os.RemoveAll(backup)
 	list, err := m.discoverLocked()
 	if err != nil {
 		return nil, err
