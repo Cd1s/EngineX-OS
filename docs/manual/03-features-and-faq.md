@@ -121,7 +121,7 @@
 - **不需要**在电脑上用 Engine DJ 重新转换。
 - 首次插盘 **2 秒内**读取，同一张盘再次插入约 **0.03 秒**（按 `export.pdb` 的大小和修改时间判断没变就直接跳过）。
 - 自动转换的内容：歌单（含嵌套文件夹）、**Hot Cue（保留颜色）**、Memory Cue、Loop、拍线（BeatGrid）、封面，以及 rekordbox 里的三频段 / RGB 波形数据。
-- 文件系统：Windows 的 `FAT32` / `exFAT` / `NTFS`，Mac 的 `HFS+` / `APFS` 都能插上直读。
+- 文件系统：Windows 的 `FAT32` / `exFAT` / `NTFS`，Mac 的 `HFS+`（`Mac OS 扩展`）都能插上直读。不支持 `APFS`：Mac 上请把 U 盘格式化为 `exFAT` 或 `Mac OS 扩展`。
 - 异常拔盘造成的数据库损坏会自动修复，也去掉了「未安全弹出」的报错弹窗。
 - rekordbox 6.8.5 导出的 U 盘即使有个别文件损坏也能导入，那几首在加载时再分析。
 

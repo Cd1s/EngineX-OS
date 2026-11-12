@@ -251,7 +251,7 @@
 | 在线升级 | 一代机下载 `*-Update.img`，校验 AZ01 头尾，调用原厂 `az01-update --net`；二代机下载带 128 字节 `ENGINEX_DATA_BUNDLE_IMG_V1` 头的 `*-Update.img`（未挂载预加载更新器链路或无 `planck-remote-screen` 的 AZ04 机型由 Go 校验载荷 SHA-256 与 `SHA256SUMS` 后就地替换 `<DATA>`，64 MiB 下载上限、128 MiB 解包上限、只接受普通文件） |
 | 发版门禁 | `release-gate.sh`（上一版在线升级 → 新版开机全功能验收），不属于运行时功能 |
 
-APFS 备注：README 写"Mac 的 APFS 插上直读"。仓库里 `kernel-modules/` 会构建 `apfs.ko`，但 `rootfs-overlay/etc/modules-load.d/sc5000-filesystems.conf` 只列了 `hfsplus` 和 `overlay`；`docs/RB-BRIDGE.md` 也说"APFS 驱动在本工具范围外"。**APFS 是否真能直读，待实机核实**。
+APFS 备注：不支持。固件只加载 `hfsplus` 和 `overlay`（`rootfs-overlay/etc/modules-load.d/sc5000-filesystems.conf`），`kernel-modules/` 里构建的 `apfs.ko` 没有装进镜像；README、官网和用户手册都写明不支持 `APFS`，请用 `exFAT` 或 `Mac OS 扩展`。
 
 ### 4.4 辅助工具（不进固件）
 

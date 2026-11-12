@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,14 +150,19 @@ func NormalizeDatabase2(dir string) (fixed []string, err error) {
 	return fixed, err
 }
 
+// fileURI keeps '#', '?' and '%' in a stick label part of the path for SQLite.
+func fileURI(p string) string { return "file:" + (&url.URL{Path: filepath.ToSlash(p)}).EscapedPath() }
+
 func rebuildPlain(src, dst string) error {
-	db, err := sql.Open("sqlite", dst)
+	db, err := sql.Open("sqlite", fileURI(dst))
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec("ATTACH DATABASE ? AS old", "file:"+filepath.ToSlash(src)+"?mode=ro&immutable=1"); err != nil {
+	// Escaped: a stick label with '#' or '?' cut the URI there, ATTACHed an empty
+	// file and the empty rebuild replaced the library (BH-GC1-1).
+	if _, err = db.Exec("ATTACH DATABASE ? AS old", fileURI(src)+"?mode=ro&immutable=1"); err != nil {
 		return err
 	}
 	// Properties that must survive; page_size and auto_vacuum have to be set first.
@@ -187,6 +193,9 @@ func rebuildPlain(src, dst string) error {
 	}
 	if err = rows.Close(); err != nil {
 		return err
+	}
+	if len(objects) == 0 {
+		return errors.New("source has no schema; refusing to replace it with an empty database")
 	}
 	tx, err := db.Begin()
 	if err != nil {
