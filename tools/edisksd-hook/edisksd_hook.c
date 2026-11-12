@@ -522,13 +522,21 @@ static int slow_marker(const char *target,char out[PATH_MAX]) {
 #ifndef POST_RESERVE_MS
 #define POST_RESERVE_MS INT64_C(3000)
 #endif
+// A mount that waited longer than this for view_lock (another stick was being
+// converted) did not get its whole conversion window.
+#define LOCK_WAIT_SLACK_MS INT64_C(1000)
 // Mount the volume in a private namespace and convert it there. Returns 1 when
 // the stick held a rekordbox export and rb-bridge finished, 2 when it held one
-// but the conversion did not finish (or is known not to), 0 when it held none
-// or this failed.
-static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context *),int64_t deadline) {
+// but the conversion did not finish (or is known not to) or no time was left to
+// look, 0 when it held none or this failed. whole_window: the budget was not cut
+// short by the wait for view_lock, so running out of it says the library is too
+// large; only then is the stick remembered as such.
+static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context *),int64_t deadline,int whole_window) {
     const char *target=mnt_context_get_target(ctx);
     if(!volume(target)||safe_path(target,0))return 0;
+    // Two sticks inserted together: the second one's wait used its window up. It is
+    // mounted as it is and converted on its next insert, never after Engine sees it.
+    if(budget(deadline)){note("no time left to convert before the mount on",target,0);return 2;}
     pid_t pid=fork();if(pid<0)return 0;
     if(!pid) {
         // Nothing mounted here reaches edisksd's (and Engine's) namespace.
@@ -542,7 +550,7 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
         if(!secure_runtime()&&!slow_marker(target,marker))known=!access(marker,F_OK);
         if(known){note("rekordbox library too large to convert at mount, skipped on",target,0);r=2;}
         else r=after_mount(ctx,MOUNT_PRE,deadline);
-        if(r&TIMED_OUT&&!slow_marker(target,marker)){int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)close(fd);}
+        if(r&TIMED_OUT&&whole_window&&!slow_marker(target,marker)){int fd=open(marker,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fd>=0)close(fd);}
         umount2(target,UMOUNT_NOFOLLOW); // the namespace ending would also drop it
         _exit(r&CONVERTED?1:r?2:0);
     }
@@ -557,7 +565,7 @@ static int premount(struct libmnt_context *ctx,int (*real)(struct libmnt_context
 static int hooked_mount(struct libmnt_context *ctx,int (*real)(struct libmnt_context *)) {
     int64_t start=now_ms(),deadline=deadline_from(start);
     pthread_mutex_lock(&view_lock);
-    int pre=premount(ctx,real,deadline-POST_RESERVE_MS);
+    int pre=premount(ctx,real,deadline-POST_RESERVE_MS,now_ms()-start<LOCK_WAIT_SLACK_MS);
     int rc=real(ctx),saved=errno;
     if(!rc&&mnt_context_get_status(ctx)==1){after_mount(ctx,pre?MOUNT_POST:MOUNT_FULL,deadline);errno=saved;}
     pthread_mutex_unlock(&view_lock);return rc;
