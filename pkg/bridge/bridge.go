@@ -410,6 +410,49 @@ func hasLibrary(dir string) bool {
 	return db.QueryRow(`SELECT count(*) FROM Track`).Scan(&n) != nil || n > 0
 }
 
+// HasPopulatedLibrary reports whether mount carries a readable Engine Library
+// database (Engine Library/Database2/m.db) with a valid Information row and at
+// least one Track row. Stock Engine creates an empty ~80–160 KB m.db skeleton on
+// writable media before asking QML to choose a database; unlike hasLibrary
+// (which treats unreadable files as present so ConvertAtMount never overwrites
+// them), any missing, symlinked, unreadable, or 0-track database returns false
+// here so the UI falls back to stock OneLibrary reading.
+func HasPopulatedLibrary(mount string) bool {
+	if mount == "" || !filepath.IsAbs(mount) {
+		return false
+	}
+	engDir := filepath.Join(mount, "Engine Library")
+	dbDir := filepath.Join(engDir, "Database2")
+	p := filepath.Join(dbDir, "m.db")
+	for _, sub := range []string{engDir, dbDir, p} {
+		lst, err := os.Lstat(sub)
+		if err != nil || lst.Mode()&os.ModeSymlink != 0 {
+			return false
+		}
+	}
+	st, err := os.Stat(p)
+	if err != nil || !st.Mode().IsRegular() || st.Size() == 0 {
+		return false
+	}
+	u := url.URL{
+		Scheme:   "file",
+		Path:     p,
+		RawQuery: "mode=ro&_pragma=busy_timeout(1500)&_pragma=query_only(1)",
+	}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var ok int
+	err = db.QueryRow(
+		`SELECT CASE WHEN EXISTS(SELECT 1 FROM Information WHERE id=1 AND trim(COALESCE(uuid,''))<>'')` +
+			` AND EXISTS(SELECT 1 FROM Track) THEN 1 ELSE 0 END`,
+	).Scan(&ok)
+	return err == nil && ok == 1
+}
+
 func writeStamp(dir, stamp string) {
 	if err := os.WriteFile(filepath.Join(dir, stampName), []byte(stamp+"\n"), 0o644); err != nil {
 		log.Printf("rb-bridge: could not record the import: %v", err)
