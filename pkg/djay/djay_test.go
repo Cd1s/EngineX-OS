@@ -465,3 +465,57 @@ func TestDjayLongMixDurationLargeGridOffsetAndSubSecondMsCueLoop(t *testing.T) {
 		t.Fatalf("Loops corrupted: %+v", tr.Loops)
 	}
 }
+
+func TestDjayIntegerSecondsWithThreeHourMixAndWholeSecondCues(t *testing.T) {
+	mount := t.TempDir()
+	createDummyAudio(t, filepath.Join(mount, "Music", "Short.mp3"))
+	createDummyAudio(t, filepath.Join(mount, "Music", "LongSet.mp3"))
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(mount, "djay_music_library.db"))}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{
+		`CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT, path TEXT, duration INTEGER, beatgrid_offset INTEGER)`,
+		`CREATE TABLE cues (track_id INTEGER, slot INTEGER, position REAL, label TEXT)`,
+		`CREATE TABLE loops (track_id INTEGER, slot INTEGER, start REAL, length REAL, label TEXT)`,
+		// Integer-seconds library containing normal tracks plus a 3-hour (10800 s) recorded set:
+		`INSERT INTO tracks VALUES (1, 'Club Cut', 'Music/Short.mp3', 215, 1)`,
+		`INSERT INTO tracks VALUES (2, '3h Set', 'Music/LongSet.mp3', 10800, 2)`,
+		// Whole-second cue/loop positions without _sec/_ms suffix: 12 s must become 12000 ms, not 12 ms.
+		`INSERT INTO cues VALUES (1, 0, 12, 'Intro'), (1, 1, 64, 'Drop')`,
+		`INSERT INTO loops VALUES (1, 0, 12, 8, '8s Loop')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	libs, err := Discover(mount)
+	if err != nil || len(libs) != 1 || len(libs[0].Tracks) != 2 {
+		t.Fatalf("Discover: %v %+v", err, libs)
+	}
+	var short, longSet *Track
+	for i := range libs[0].Tracks {
+		switch libs[0].Tracks[i].ID {
+		case "1":
+			short = &libs[0].Tracks[i]
+		case "2":
+			longSet = &libs[0].Tracks[i]
+		}
+	}
+	if short == nil || short.DurationSec != 215 || short.BeatGridOffset != 1 {
+		t.Fatalf("short track corrupted by integer 10800s mix: %+v", short)
+	}
+	if longSet == nil || longSet.DurationSec != 10800 || longSet.BeatGridOffset != 2 {
+		t.Fatalf("long set corrupted: %+v", longSet)
+	}
+	if len(short.Cues) != 2 || short.Cues[0].PositionMS != 12000 || short.Cues[1].PositionMS != 64000 {
+		t.Fatalf("whole-second cues became ms instead of s*1000: %+v", short.Cues)
+	}
+	if len(short.Loops) != 1 || short.Loops[0].StartMS != 12000 || short.Loops[0].LengthMS != 8000 {
+		t.Fatalf("whole-second loops became ms instead of s*1000: %+v", short.Loops)
+	}
+}

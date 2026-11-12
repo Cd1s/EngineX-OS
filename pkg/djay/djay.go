@@ -257,7 +257,6 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 	tracksByID := make(map[string]*Track)
 	var allTracks []Track
 	var posDurs []float64
-	durHasFrac := false
 
 	for tRows.Next() {
 		var idVal any
@@ -286,9 +285,6 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 
 		if durVal.Float64 > 0 {
 			posDurs = append(posDurs, durVal.Float64)
-			if math.Abs(durVal.Float64-math.Trunc(durVal.Float64)) > 1e-6 && durVal.Float64 < 21600 {
-				durHasFrac = true
-			}
 		}
 
 		t := &Track{
@@ -319,9 +315,7 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 		if len(posDurs) > 0 {
 			sorted := append([]float64(nil), posDurs...)
 			sort.Float64s(sorted)
-			median := sorted[len(sorted)/2]
-			isIntCol := strings.Contains(colTypeOf(trTypes, durCol), "INT")
-			if median > 21600 || (isIntCol && !durHasFrac && sorted[len(sorted)-1] >= 10000) {
+			if sorted[len(sorted)/2] > 21600 {
 				durIsMS = true
 			}
 		}
@@ -361,44 +355,60 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 		}
 	}
 
-	// chooseSubTrackScale returns 1000.0 if a cue/loop table column stores seconds, else 1.0 (ms).
-	chooseSubTrackScale := func(quotedCol string, trackIDs []string, vals []float64) float64 {
-		switch colUnit(quotedCol) {
-		case "sec":
-			return 1000.0
-		case "ms":
-			return 1.0
+	// Classify a cue/loop column from column name, track-duration bounds, and fractional values.
+	// Columns whose values are all whole numbers <= DurationSec without a _sec/_ms suffix are
+	// resolved from sibling/table unit evidence rather than arbitrary magnitude cutoffs.
+	subTrackEvidence := func(quotedCol string, trackIDs []string, vals []float64, endVals []float64) string {
+		if u := colUnit(quotedCol); u != "" {
+			return u
 		}
-		hasNonZero, hasFrac := false, false
+		hasFrac := false
 		for i, v := range vals {
 			av := math.Abs(v)
 			if av == 0 {
 				continue
 			}
-			hasNonZero = true
-			if av >= 1000 {
-				return 1.0
+			if av > 21600 {
+				return "ms"
 			}
-			if tr, ok := tracksByID[trackIDs[i]]; ok && tr.DurationSec > 0 && av > tr.DurationSec {
-				return 1.0
+			if tr, ok := tracksByID[trackIDs[i]]; ok && tr.DurationSec > 0 {
+				if av > tr.DurationSec*1.005 {
+					return "ms"
+				}
+				if i < len(endVals) && endVals[i] > tr.DurationSec*1.005 {
+					return "ms"
+				}
 			}
 			if math.Abs(av-math.Trunc(av)) > 1e-6 {
 				hasFrac = true
 			}
 		}
-		if hasNonZero && hasFrac {
-			return 1000.0
+		if hasFrac {
+			return "sec"
 		}
-		return 1.0
+		return ""
 	}
+
+	type rawCue struct {
+		trID  string
+		slot  int
+		pos   float64
+		label string
+		color string
+	}
+	var rawCues []rawCue
+	var cueTrackIDs []string
+	var cueVals []float64
+	var cPosCol, cuePosType string
 
 	// Parse Cues
 	cuesByTrack := make(map[string][]CuePoint)
 	if cueTable != "" {
-		cueCols, _ := getCols(cueTable)
+		cueCols, cueTypes := getCols(cueTable)
 		cTrackIdCol := findCol(cueCols, "track_id", "media_item_id", "media_item_uuid", "track_uuid", "item_id")
 		cSlotCol := findCol(cueCols, "slot", "index", "cue_index", "hot_cue", "number")
-		cPosCol := findCol(cueCols, "position_ms", "time_ms", "timestamp_ms", "position", "time_sec", "time", "position_sec")
+		cPosCol = findCol(cueCols, "position_ms", "time_ms", "timestamp_ms", "position", "time_sec", "time", "position_sec")
+		cuePosType = colTypeOf(cueTypes, cPosCol)
 		cLabelCol := findCol(cueCols, "label", "name", "title")
 		cColorCol := findCol(cueCols, "color", "color_hex", "colorhex")
 
@@ -417,16 +427,6 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 			cRows, err := db.QueryContext(ctx, cueQuery)
 			if err == nil {
 				defer cRows.Close()
-				type rawCue struct {
-					trID  string
-					slot  int
-					pos   float64
-					label string
-					color string
-				}
-				var rawCues []rawCue
-				var cueTrackIDs []string
-				var cueVals []float64
 				for cRows.Next() {
 					var trIDVal, slotVal any
 					var posVal sql.NullFloat64
@@ -448,27 +448,32 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 					}
 				}
 				cRows.Close()
-				posScale := chooseSubTrackScale(cPosCol, cueTrackIDs, cueVals)
-				for _, rc := range rawCues {
-					cuesByTrack[rc.trID] = append(cuesByTrack[rc.trID], CuePoint{
-						Index:      rc.slot,
-						PositionMS: rc.pos * posScale,
-						Label:      rc.label,
-						ColorHex:   rc.color,
-					})
-				}
 			}
 		}
 	}
 
+	type rawLoop struct {
+		trID   string
+		slot   int
+		start  float64
+		length float64
+		label  string
+	}
+	var rawLoops []rawLoop
+	var loopTrackIDs []string
+	var startVals, lenVals, endVals []float64
+	var lStartCol, lLenCol, loopStartType, loopLenType string
+
 	// Parse Loops
 	loopsByTrack := make(map[string][]SavedLoop)
 	if loopTable != "" {
-		loopCols, _ := getCols(loopTable)
+		loopCols, loopTypes := getCols(loopTable)
 		lTrackIdCol := findCol(loopCols, "track_id", "media_item_id", "media_item_uuid", "track_uuid", "item_id")
 		lSlotCol := findCol(loopCols, "slot", "index", "loop_index", "number")
-		lStartCol := findCol(loopCols, "start_ms", "start_time", "start_time_ms", "start_sec", "start")
-		lLenCol := findCol(loopCols, "length_ms", "length_time", "duration_ms", "length_sec", "length")
+		lStartCol = findCol(loopCols, "start_ms", "start_time", "start_time_ms", "start_sec", "start")
+		lLenCol = findCol(loopCols, "length_ms", "length_time", "duration_ms", "length_sec", "length")
+		loopStartType = colTypeOf(loopTypes, lStartCol)
+		loopLenType = colTypeOf(loopTypes, lLenCol)
 		lLabelCol := findCol(loopCols, "label", "name", "title")
 
 		if lTrackIdCol != "" && lStartCol != "" && lLenCol != "" {
@@ -486,16 +491,6 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 			lRows, err := db.QueryContext(ctx, loopQuery)
 			if err == nil {
 				defer lRows.Close()
-				type rawLoop struct {
-					trID   string
-					slot   int
-					start  float64
-					length float64
-					label  string
-				}
-				var rawLoops []rawLoop
-				var loopTrackIDs []string
-				var startVals, lenVals []float64
 				for lRows.Next() {
 					var trIDVal, slotVal any
 					var startVal, lenVal sql.NullFloat64
@@ -514,21 +509,69 @@ func readSQLiteLibrary(mountRoot, dbPath string) (*Library, error) {
 						loopTrackIDs = append(loopTrackIDs, trID)
 						startVals = append(startVals, startVal.Float64)
 						lenVals = append(lenVals, lenVal.Float64)
+						endVals = append(endVals, math.Max(0, startVal.Float64)+math.Max(0, lenVal.Float64))
 					}
 				}
 				lRows.Close()
-				startScale := chooseSubTrackScale(lStartCol, loopTrackIDs, startVals)
-				lenScale := chooseSubTrackScale(lLenCol, loopTrackIDs, lenVals)
-				for _, rl := range rawLoops {
-					loopsByTrack[rl.trID] = append(loopsByTrack[rl.trID], SavedLoop{
-						Index:    rl.slot,
-						StartMS:  rl.start * startScale,
-						LengthMS: rl.length * lenScale,
-						Label:    rl.label,
-					})
-				}
 			}
 		}
+	}
+
+	cueEv := subTrackEvidence(cPosCol, cueTrackIDs, cueVals, nil)
+	startEv := subTrackEvidence(lStartCol, loopTrackIDs, startVals, endVals)
+	lenEv := subTrackEvidence(lLenCol, loopTrackIDs, lenVals, endVals)
+
+	unlabeledSubMS := (colUnit(cPosCol) == "" && cueEv == "ms") ||
+		(colUnit(lStartCol) == "" && startEv == "ms") ||
+		(colUnit(lLenCol) == "" && lenEv == "ms")
+	unlabeledSubSec := (colUnit(cPosCol) == "" && cueEv == "sec") ||
+		(colUnit(lStartCol) == "" && startEv == "sec") ||
+		(colUnit(lLenCol) == "" && lenEv == "sec")
+
+	scaleFromEvidence := func(ev, declType string) float64 {
+		switch ev {
+		case "sec":
+			return 1000.0
+		case "ms":
+			return 1.0
+		}
+		if unlabeledSubMS && !unlabeledSubSec {
+			return 1.0
+		}
+		if unlabeledSubSec && !unlabeledSubMS {
+			return 1000.0
+		}
+		if len(posDurs) > 0 {
+			if durIsMS || offsetIsMS {
+				return 1.0
+			}
+			return 1000.0
+		}
+		if strings.Contains(declType, "INT") {
+			return 1.0
+		}
+		return 1000.0
+	}
+
+	posScale := scaleFromEvidence(cueEv, cuePosType)
+	for _, rc := range rawCues {
+		cuesByTrack[rc.trID] = append(cuesByTrack[rc.trID], CuePoint{
+			Index:      rc.slot,
+			PositionMS: rc.pos * posScale,
+			Label:      rc.label,
+			ColorHex:   rc.color,
+		})
+	}
+
+	startScale := scaleFromEvidence(startEv, loopStartType)
+	lenScale := scaleFromEvidence(lenEv, loopLenType)
+	for _, rl := range rawLoops {
+		loopsByTrack[rl.trID] = append(loopsByTrack[rl.trID], SavedLoop{
+			Index:    rl.slot,
+			StartMS:  rl.start * startScale,
+			LengthMS: rl.length * lenScale,
+			Label:    rl.label,
+		})
 	}
 
 	// Attach Cues and Loops to Tracks
