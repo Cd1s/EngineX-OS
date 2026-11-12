@@ -19,7 +19,7 @@ import (
 	"github.com/Cd1s/EngineX-OS/pkg/providers"
 )
 
-const maxActiveDecks = 4
+const maxTrackedLRU = 512
 
 type Client struct {
 	// Mode is "queue" (REST bridge) or "directory" (POST /api/download,
@@ -42,9 +42,8 @@ type Client struct {
 	// MinFree also evicts while the volume has less free space (needs MaxCache).
 	MinFree int64
 
-	mu     sync.Mutex
-	active []string
-	pinned map[string]int
+	mu       sync.Mutex
+	lastUsed map[string]time.Time
 }
 type QueueStatus struct {
 	ID       string  `json:"id"`
