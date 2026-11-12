@@ -34,7 +34,7 @@ func Main(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	findLAN := func(ctx context.Context) (string, bool) {
-		return stems.FindLAN(ctx, stems.DefaultLANState, 350*time.Millisecond)
+		return stems.FindLAN(ctx, stems.DefaultLANStatePath(), 350*time.Millisecond)
 	}
 	local := func(in io.Reader, out io.Writer) error {
 		// Split on the deck, never at the audio's expense.

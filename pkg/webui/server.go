@@ -94,6 +94,7 @@ type Server struct {
 	prolinkExport *prolink.Exporter
 	closed        chan struct{}
 	closeOnce     sync.Once
+	lanProbeWG    sync.WaitGroup
 
 	updateMu    sync.Mutex
 	updateCache updateStatus
@@ -342,6 +343,7 @@ func (s *Server) tryExport() {
 // Close releases optional network exports, including active dbserver clients.
 func (s *Server) Close() {
 	s.closeOnce.Do(func() { close(s.closed) })
+	s.lanProbeWG.Wait()
 	s.mu.Lock()
 	var closers []interface{ Close() }
 	for _, v := range s.sessions {
@@ -366,6 +368,9 @@ func (s *Server) Close() {
 
 // DefaultStateDir keeps logins on the deck's writable partition; its home is read-only.
 func DefaultStateDir(home string) string {
+	if _, err := os.Stat("/data/enginex"); err == nil {
+		return "/data/enginex/state"
+	}
 	if _, err := os.Stat("/data/sc5000-custom"); err == nil {
 		return "/data/sc5000-custom/state"
 	}
