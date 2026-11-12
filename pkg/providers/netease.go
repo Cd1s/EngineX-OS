@@ -148,25 +148,30 @@ func (n *Netease) PollQR(ctx context.Context, key string) (int, error) {
 		if r.Cookie == "" {
 			return 0, errors.New("netease: login returned no cookie")
 		}
-		n.mu.Lock()
-		n.Cookie = r.Cookie
-		n.mu.Unlock()
+		probe := &Netease{BaseURL: n.BaseURL, WebURL: n.WebURL, HTTP: n.HTTP, Cookie: r.Cookie}
 		var status struct {
 			Data struct {
-				Profile struct {
+				Profile *struct {
 					UserID int64 `json:"userId"`
-				}
+				} `json:"profile"`
 			}
 		}
-		if err := n.get(ctx, "/login/status", nil, &status); err != nil {
+		if err := probe.get(ctx, "/login/status", nil, &status); err != nil {
 			return 0, err
 		}
+		if status.Data.Profile == nil || status.Data.Profile.UserID <= 0 {
+			return 0, errors.New("netease: login returned no user profile")
+		}
+		uid := status.Data.Profile.UserID
 		n.mu.Lock()
-		n.UserID = status.Data.Profile.UserID
 		err := SaveJSON(n.CookiePath, struct {
 			Cookie string
 			UserID int64
-		}{n.Cookie, n.UserID})
+		}{r.Cookie, uid})
+		if err == nil {
+			n.Cookie = r.Cookie
+			n.UserID = uid
+		}
 		n.mu.Unlock()
 		if err != nil {
 			return 0, err
