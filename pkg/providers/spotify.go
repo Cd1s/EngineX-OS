@@ -31,6 +31,7 @@ type Token struct {
 type Spotify struct {
 	BaseURL, AccountsURL, ClientID, TokenPath string
 	CredsPath, DeviceID                       string
+	limit                                     spotifyLimit // Web API rate limit (spotify_limit.go)
 	nativeMu                                  sync.Mutex
 	native                                    spotifyNative
 	nativeClosed                              bool
@@ -340,7 +341,7 @@ func (s *Spotify) CompletePKCE(ctx context.Context, code, verifier, redirect str
 	}
 	return s.ExchangeOAuthCredentials(ctx)
 }
-func (s *Spotify) get(ctx context.Context, path string, out any) error {
+func (s *Spotify) getOnce(ctx context.Context, path string, out any) error {
 	h, err := s.authorization(ctx)
 	if err != nil {
 		return err

@@ -718,7 +718,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
-                 "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack",
+                 "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack", "scPressWrite", "scMasterPresses",
                  "scLayerPath", "scPairedLanes", "scPairedFollow", "scShadowHeldBy", "scShadowEngineHeld")
         functions = []
         for name in names:
@@ -739,7 +739,7 @@ Object.assign(globalThis, {
     scFourDeckRole: '13', scPlayer: true, scShadowDisplayOnly: true, scShadowEngineMask: 0, scShadowLineMask: 0,
     scShadowExpiryMs: 3000, scShadowAt: {}, scShadowDisplay: {}, scShadowEmptyArray: [],
     scShadowDisplayRequests: {}, scShadowDisplayText: {}, scShadowGridCache: {}, scShadowLiveCueCache: {},
-    scShadowCdjMaster: false, scPressQueue: [], scShadowEmptyObject: {}, scShadowHead: {},
+    scShadowCdjMaster: false, scPressQueue: [], scMasterOwn: [0, 0, 0, 0, 0], scShadowEmptyObject: {}, scShadowHead: {},
     scShadowMineRole: "?", scShadowMine: [], scShadowSampleSpare: {}, scShadowDeckProperties: {}, scShadowOwn: [],
     scShadowPostRequest: null, scShadowPollRequest: null, scShadowResponseVersion: "", scShadowPostPending: false,
     scShadowLinkId: '', scShadowLinkAt: -Infinity, scShadowTextAt: {},
@@ -3573,6 +3573,42 @@ for (const board of [...players, 'JP11', 'JC11', 'JC16', 'NH08', 'NH08S', 'NH10'
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class MasterPressTest(unittest.TestCase):
+    """#217 review: MASTER pressed on the deck that is Engine's master already (a console with one deck
+    loaded) must reach stream-sync, which asks the CDJ for the Pro DJ Link master again."""
+
+    def test_user_presses_count_and_our_own_do_not(self):
+        # As measured in Engine 5.3.0 (twin sandbox): RequestMaster is an "Action" translator, writing
+        # state = true leaves state false, fires no stateChanged and adds one to stateTrueCount.
+        ShadowDisplayTest.js(self, r"""
+const action = () => ({stateTrueCount: 0, get state() { return false }, set state(on) { if (on) this.stateTrueCount++ }});
+const t1 = action(), t3 = action();
+assert.equal(scMasterPresses(1, t1), 0);
+t1.state = true; // the control surface (ActionOutput): true on the press, nothing on the release
+assert.equal(scMasterPresses(1, t1), 1);
+scPressWrite(t1, '/Engine/Deck1/RequestMaster', true); scPressWrite(t1, '/Engine/Deck1/RequestMaster', false); // our own press
+assert.deepEqual([t1.stateTrueCount, scMasterPresses(1, t1)], [2, 1]);
+scPressWrite(t3, '/Engine/Deck3/RequestMaster', true); // ours on another deck is not this deck's
+t1.state = true;
+assert.deepEqual([scMasterPresses(1, t1), scMasterPresses(3, t3)], [2, 0]);
+const sync = action();
+scPressWrite(sync, '/Engine/Deck1/Sync', true); // another button of the deck
+assert.deepEqual([sync.stateTrueCount, scMasterPresses(1, t1)], [1, 2]);
+assert.equal(scMasterPresses(2, {}), 0); // no such property on this model
+""")
+
+    def test_the_count_is_read_and_posted(self):
+        main = bp.SERVICES_MAIN
+        # Every press we make goes through the one writer that keeps ours apart.
+        self.assertIn("\t\t\t\troot.scPressWrite(t, e.path, e.step === 1)\n", main)
+        self.assertEqual(main.count("t.state = e.step === 1"), 0)
+        self.assertIn('["requestMaster", "/RequestMaster"]', main)
+        # The count goes out with the deck, and a new press alone makes a full post.
+        self.assertIn("o.masterPress = scMasterPresses(d, g.requestMaster)\n", main)
+        self.assertIn("sent.masterPress !== o.masterPress", main)
+        self.assertIn("sent.masterPress = o.masterPress;", main)
+
+
 class ShadowMasterBackTest(unittest.TestCase):
     """Engine Link: the master pauses, its copy on the peer plays on for the trip and is left master (i8b, 42aa60a)."""
 
@@ -4960,6 +4996,110 @@ assert.deepEqual(calls, [["engine", "/media/RB7_SKELETON"]]);
 """
             proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+class EngineLightingDefaultOffAndPersistTest(unittest.TestCase):
+    def test_guard_restores_saved_choice_without_changing_other_state(self):
+        import os
+        from copy import deepcopy
+        enabled = {"state": True, "type": 1}
+        gui = {"childorder": ["Decks", "PadsViewEnabled", "SongListLayoutStyle", "SoundSwitchViewEnabled"],
+               "children": {"SoundSwitchViewEnabled": enabled,
+                            "PadsViewEnabled": enabled,
+                            "SongListLayoutStyle": {"string": "Large", "type": 4},
+                            "Decks": {"childorder": ["Deck"], "children": {"Deck": {"childorder": [], "type": "Node"}}, "type": "Node"}},
+               "type": "Node"}
+        missing = {"childorder": ["Localization"], "children": {"EcoMode": {"state": False, "type": 1}}}
+        empty = {"childorder": [], "children": {}}
+        for initial, on, safe in ((None, False, False), (gui, False, False),
+                                  (gui, True, False), (None, True, False),
+                                  (missing, False, False), (missing, True, False),
+                                  (empty, False, False), (empty, True, False),
+                                  (gui, False, True), (None, False, True)):
+            for compact, busybox in ((False, False), (True, False), (False, True), (True, True)):
+                with self.subTest(initial=initial, on=on, safe=safe, compact=compact, busybox=busybox), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    ui, state = root / "ui", root / "state"
+                    ui.mkdir()
+                    state.mkdir()
+                    path = state / "PlanckGuiState.json"
+                    before = None
+                    if initial is not None:
+                        value = deepcopy(initial)
+                        if on and "SoundSwitchViewEnabled" in value["children"]:
+                            value["children"]["SoundSwitchViewEnabled"] = {"state": False, "type": 1}
+                        before = json.dumps({"data": {"GUI": value, "Other": {"state": True, "type": 1}}}, indent=None if compact else 4)
+                        path.write_text(before)
+                    if on:
+                        (ui / "settings.conf").write_text("engine_lighting=1\n")
+                    if safe:
+                        (ui / "safe-mode").touch()
+                    path_env = os.environ["PATH"]
+                    if busybox:
+                        binary = Path(os.environ.get("SC5000_TEST_BUSYBOX", shutil.which("busybox") or str(LAB / "sclive4-rea61-followup/rootfs/usr/bin/busybox")))
+                        if not binary.is_file():
+                            self.skipTest("stock BusyBox fixture unavailable")
+                        bin_dir = root / "bin"
+                        bin_dir.mkdir()
+                        (bin_dir / "awk").symlink_to(binary)
+                        path_env = str(bin_dir) + ":" + path_env
+                    env = dict(os.environ, PATH=path_env, SC5000_UI_DIR=str(ui), SC5000_PRIMARY_UI_DIR=str(ui),
+                               SC5000_LEGACY_UI_DIR=str(ui), SC5000_STATE_DIR=str(state),
+                               SC5000_STREAMING_ACCOUNTS=str(root / "accounts"),
+                               SC5000_ENGINE_DATA_DIR=str(root / "engine"),
+                               SC5000_ASSIGNMENT_DIR=str(root / "assign"),
+                               SC5000_ASSIGNMENT_PATCHED=str(root / "patched"), SC5000_ENGINE_GUARDIAN="/bin/false")
+                    result = subprocess.run(["sh", str(REPO / "rootfs-overlay/etc/sc5000/engine-ui-guard"), "pre"], env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if safe:
+                        self.assertEqual(path.read_text() if path.exists() else None, before)
+                        continue
+                    self.assertTrue(path.is_file(), "guard did not create PlanckGuiState.json")
+                    result = json.loads(path.read_text())
+                    actual = result["data"]["GUI"]
+                    self.assertEqual(actual["children"].get("SoundSwitchViewEnabled"), {"state": on, "type": 1})
+                    self.assertIn("SoundSwitchViewEnabled", actual["childorder"])
+                    self.assertEqual(actual["childorder"].count("SoundSwitchViewEnabled"), 1)
+                    if initial is not None:
+                        original = json.loads(before)
+                        expected = original["data"]["GUI"]
+                        expected["children"]["SoundSwitchViewEnabled"] = {"state": on, "type": 1}
+                        if "SoundSwitchViewEnabled" not in expected["childorder"]:
+                            expected["childorder"].insert(0, "SoundSwitchViewEnabled")
+                        self.assertEqual(result, original)
+
+    def test_stock_switch_and_non_toggleable_startup_in_all_packs(self):
+        for version, skin in (("5.0.4", "EmbeddedCommon"), ("5.3.0", "Embedded")):
+            qrc = LAB / version / "qrc"
+            self.assertTrue(qrc.is_dir(), str(qrc))
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "packs"
+                result = subprocess.run(["python3", "-I", str(BUILD_PACKS), "--qrc", str(qrc), "--out", str(out)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for lang in ("en", "zh-Hans", "zh-Hant"):
+                    with self.subTest(version=version, lang=lang):
+                        switch = (out / lang / f"Skins/{skin}/Views/ControlCenter/Tabs/Preferences/Entries/SoundSwitch.qml").read_text()
+                        self.assertIn('Planck.getProperty("/GUI/SoundSwitchViewEnabled")', switch)
+                        self.assertIn('checked: pSoundSwitchEnabled.translator.state', switch)
+                        self.assertIn('const next = !pSoundSwitchEnabled.translator.state', switch)
+                        self.assertIn('pSoundSwitchEnabled.translator.state = next', switch)
+                        self.assertIn('const SoundSwitch = root.scLightingBackend', switch)
+                        self.assertRegex(switch, r'if\s*\(!next\s*&&[\s\S]+?SoundSwitch.stopBackend\(\)')
+                        self.assertIn('typeof SoundSwitch.stopBackend === "function"', switch)
+                        self.assertIn('http://127.0.0.1:8080/v1/sc5000/ui?engineLighting=', switch)
+                        self.assertIn('XMLHttpRequest', switch)
+                        self.assertIn('interval: 1500', switch)
+                        self.assertIn('req.status !== 200', switch)
+                        main = (out / lang / f"Skins/{skin}/EmbeddedMain.qml").read_text()
+                        self.assertIn('Qt.createQmlObject', main)
+                        self.assertIn('qrc:/Skins/Common/Items/', main)
+                        self.assertIn('EngineLightingBackend.qml', main)
+                        self.assertIn('root.scLightingBackend = helper ? helper.backend : null', main)
+                        self.assertIn('Config.integrations.soundSwitch.isLightingIntegrationToggleable === false', main)
+                        self.assertIn('const ssEn = Planck.getProperty("/GUI/SoundSwitchViewEnabled")', main)
+                        self.assertIn('if (ssEn && ssEn.translator) ssEn.translator.state = true', main)
+        self.assertNotIn('engineLighting=', (REPO / "pkg/webui/index.html").read_text())
+        self.assertNotIn('engineLighting=', bp.SERVICES_ENTRIES)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,10 @@ Item {
         return !!(sc && sc.viewModel && sc.viewModel.isUnlocked)
     }
     function report() {
+        const lighting = Planck.getProperty("/GUI/SoundSwitchViewEnabled")
+        const toggleable = !!(typeof Config !== "undefined" && Config && Config.integrations && Config.integrations.soundSwitch && Config.integrations.soundSwitch.isLightingIntegrationToggleable)
+        console.warn("SCPROBE lighting|" + (toggleable ? 1 : 0) + "|" +
+            (lighting && lighting.translator ? (lighting.translator.state ? 1 : 0) : -1) + "|")
         let main = null // EmbeddedMain's root, which carries the pack's settings
         let tabView = null
         let splashLoader = null

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -80,6 +81,9 @@ func JSON(ctx context.Context, c *http.Client, method, endpoint string, body io.
 		return fmt.Errorf("provider: HTTP transport failed: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return &RateLimited{RetryAfter: retryAfter(resp.Header.Get("Retry-After"), time.Now())}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return StatusError(resp.StatusCode)
 	}
@@ -100,6 +104,35 @@ func JSON(ctx context.Context, c *http.Client, method, endpoint string, body io.
 type StatusError int
 
 func (e StatusError) Error() string { return fmt.Sprintf("provider: HTTP %d", int(e)) }
+
+// RateLimited is a 429 with the wait its Retry-After header asked for (0: none
+// given). It reads and matches as StatusError(429), so older checks still hold.
+type RateLimited struct{ RetryAfter time.Duration }
+
+func (e *RateLimited) Error() string { return StatusError(http.StatusTooManyRequests).Error() }
+func (e *RateLimited) Is(target error) bool {
+	return target == StatusError(http.StatusTooManyRequests)
+}
+func (e *RateLimited) As(target any) bool {
+	t, ok := target.(*StatusError)
+	if ok {
+		*t = http.StatusTooManyRequests
+	}
+	return ok
+}
+
+// retryAfter reads Retry-After as seconds or as an HTTP date. A missing,
+// malformed or past value is 0; a day is the most any caller is told to wait.
+func retryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	var d time.Duration
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		d = time.Duration(min(max(n, 0), 86400)) * time.Second
+	} else if t, err := http.ParseTime(v); err == nil {
+		d = t.Sub(now)
+	}
+	return min(max(d, 0), 24*time.Hour)
+}
 
 func endpoint(base, path string, q url.Values) string {
 	s := strings.TrimRight(base, "/") + path
