@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (63 Rows)
+## Regression Table (64 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -73,6 +73,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 61 | **A rekordbox stick already found too large to convert at mount is not waited for again in another USB port** (bug hunt 2, BH2-A1-2: the "too large, skip until re-exported" record was keyed by `statvfs.f_fsid`, on FAT32/exFAT/HFS+ the device number; the same stick in another port or behind another stick got a new device number and held the mount for the whole conversion budget, about 17 s, once more) | BH2-A1-2 | `tools/edisksd-hook/test_edisksd_hook.c --mounts` `test_slow_marker_survives_another_port` (one export under two filesystem ids gives one record; a new export a new one); `test_slow_marker_follows_every_export_file` unchanged | Release workflow Step 2 C hook tests (`unshare -m ... --mounts`) |
 | 62 | **The LAN audio stream (RTP / Teleport) starts by itself once the network is up, and says why when it cannot send** (bug hunt 2, BH2-A3-6: a deck that boots with Live Stream on opened the UDP socket before it had an address; the "network is unreachable" error was dropped and never retried, and a LAN target that does not resolve was dropped the same way, while `/api/broadcast` kept saying `streaming: true` with an empty `lastError`) | BH2-A3-6 | `pkg/broadcast::TestLANStreamBadTargetIsReported` (reason in `lastError`, next to an external server error, gone when LAN streaming is off; not `streaming` when neither stream is up) and `TestLANStreamStartsWhenTheNetworkComesUp` (no socket, then audio within a retry); `TestLANModeBroadcaster`, `TestLANStreamer*` unchanged | Release workflow Step 2 Go suites |
 | 63 | **The sent-bytes figure of the Live Stream status counts the LAN stream** (bug hunt 2, BH2-A3-10: `bytesSent` in `/api/broadcast` counted only what went to an external Icecast/Shoutcast server and stayed 0 for an RTP / Teleport stream) | BH2-A3-10 | `pkg/broadcast::TestLANStreamCountsSentBytes` | Release workflow Step 2 Go suites |
+| 64 | **A `/live.mp3` listener that vanished is dropped within a minute, with its encoder** (bug hunt 2, BH2-A3-2: `/live.mp3` had no write deadline; a listener that went away without closing the connection, e.g. Wi-Fi gone or a sleeping laptop, kept its handler, its `lame`/`ffmpeg` process and its place in the listener count until TCP gave up after about fifteen minutes) | BH2-A3-2 | `pkg/webui::TestLiveMP3DropsAListenerThatStoppedReading` (a client that stops reading: listener count back to 0 and the encoder process gone; fails with the limit switched off); `TestLiveMP3UsesExternalEncoder` unchanged | Release workflow Step 2 Go suites |
 
 ---
 
