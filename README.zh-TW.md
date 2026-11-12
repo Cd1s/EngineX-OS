@@ -44,7 +44,7 @@
 
 ### 3. 先鋒 Rekordbox 隨身碟隨插即用與 CDJ 互聯
 - 給先鋒 CDJ 匯出的 Rekordbox 隨身碟直接插上播放機，**2 秒內**讀取全部歌單、Hot Cue、Memory Cue、Loop 與拍線（含舊版 rekordbox 5 匯出的隨身碟），不必再用電腦版 Engine DJ 重新轉庫；
-- 相容 Windows `FAT32` / `exFAT` / `NTFS` 與 Mac `HFS+` / `APFS` 全格式儲存，自動補償 MP3 編碼起始延遲讓拍線與 Cue 精準落在鼓點上，自動修復異常拔碟造成的資料庫損毀並移除「未安全退出」彈窗；
+- 相容 `FAT32` / `exFAT` / `NTFS` 與 Mac `HFS+`（`Mac OS 擴充格式`；不支援 `APFS`，請將隨身碟格式化為 `exFAT` 或 `Mac OS 擴充格式`），自動補償 MP3 編碼起始延遲讓拍線與 Cue 精準落在鼓點上，自動修復異常拔碟造成的資料庫損毀並移除「未安全退出」彈窗；
 - **Pro DJ Link（測試版，位於 `設定 → 服務`）** 支援跨網路線 / Wi-Fi 瀏覽 CDJ 上的 Rekordbox 隨身碟、向 CDJ 分享本機曲庫、雙向交接 `MASTER`，並在影子軌或一體機 `線路輸入`（`Line In`）通道即時顯示 CDJ 波形。
 
 ### 4. 四軌聯機與雙碟機配對視圖、5 組儲存版面與三語介面
