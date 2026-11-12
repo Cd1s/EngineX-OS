@@ -54,6 +54,14 @@ func (c *Client) accept(path string) (*Download, error) {
 
 // Cached returns an earlier Save under name, so a restart does not fetch it again.
 func (c *Client) Cached(name string) *Download {
+	dl := c.cachedLookup(name)
+	if dl != nil {
+		c.rememberActive(dl.Path)
+	}
+	return dl
+}
+
+func (c *Client) cachedLookup(name string) *Download {
 	if strings.HasPrefix(name, "spotify-") {
 		return c.cachedOgg(name)
 	}
@@ -138,6 +146,7 @@ func (c *Client) SaveParts(ctx context.Context, name, ext string, urls []string)
 	if err = os.Rename(f.Name(), dl.Path); err != nil {
 		return nil, err
 	}
+	c.rememberActive(dl.Path)
 	c.Trim(dl.Path)
 	return dl, nil
 }
@@ -335,6 +344,7 @@ func (c *Client) SaveSplit(ctx context.Context, name, address string) (*Download
 			os.Remove(other)
 		}
 	}
+	c.rememberActive(final)
 	c.Trim(final)
 	return &Download{Path: final, Quality: q}, nil
 }
@@ -398,6 +408,7 @@ func (c *Client) Save(ctx context.Context, name, address string) (*Download, err
 		return nil, err
 	}
 	dl.Path = final
+	c.rememberActive(final)
 	c.Trim(final)
 	return dl, nil
 }
@@ -412,9 +423,87 @@ func resolvedDir(dir string) string {
 	return filepath.Clean(dir)
 }
 
+func canonicalCachePath(path string) string {
+	if path == "" {
+		return ""
+	}
+	return filepath.Join(resolvedDir(filepath.Dir(path)), filepath.Base(path))
+}
+
+func (c *Client) rememberActive(path string) {
+	if path == "" {
+		return
+	}
+	now := time.Now()
+	_ = os.Chtimes(path, now, now)
+	canon := canonicalCachePath(path)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	filtered := c.active[:0]
+	for _, p := range c.active {
+		if p != canon {
+			filtered = append(filtered, p)
+		}
+	}
+	filtered = append(filtered, canon)
+	if len(filtered) > maxActiveDecks {
+		filtered = append([]string(nil), filtered[len(filtered)-maxActiveDecks:]...)
+	}
+	c.active = filtered
+}
+
+// Pin protects path from eviction in Trim until a matching Unpin call.
+func (c *Client) Pin(path string) {
+	canon := canonicalCachePath(path)
+	if canon == "" {
+		return
+	}
+	c.mu.Lock()
+	if c.pinned == nil {
+		c.pinned = make(map[string]int)
+	}
+	c.pinned[canon]++
+	c.mu.Unlock()
+}
+
+// Unpin releases one Pin hold on path.
+func (c *Client) Unpin(path string) {
+	canon := canonicalCachePath(path)
+	if canon == "" {
+		return
+	}
+	c.mu.Lock()
+	if n := c.pinned[canon]; n <= 1 {
+		delete(c.pinned, canon)
+	} else {
+		c.pinned[canon] = n - 1
+	}
+	c.mu.Unlock()
+}
+
+func openFilesInDir(dir string) map[string]bool {
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return nil
+	}
+	prefix := dir + string(filepath.Separator)
+	var out map[string]bool
+	for _, fd := range fds {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", fd.Name()))
+		if err != nil || !strings.HasPrefix(target, prefix) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]bool)
+		}
+		out[target] = true
+	}
+	return out
+}
+
 // Trim removes the least recently used downloads while they exceed MaxCache or
-// the volume has less than MinFree left, never the one just saved.
-func (c *Client) Trim(keep string) {
+// the volume has less than MinFree left, never evicting protected/active tracks.
+func (c *Client) Trim(keep ...string) {
 	if c.MaxCache <= 0 {
 		return
 	}
@@ -432,31 +521,59 @@ func (c *Client) Trim(keep string) {
 	// keep may be symlink-resolved (SafePath) while DownloadDir is not: on a deck without SD
 	// it is /data/sc5000-custom/Stream, a link to /data/enginex since #103. Compare both resolved.
 	dir := resolvedDir(c.DownloadDir)
-	if keep != "" {
-		keep = filepath.Join(resolvedDir(filepath.Dir(keep)), filepath.Base(keep))
+	hardProtected := openFilesInDir(dir)
+	if hardProtected == nil {
+		hardProtected = make(map[string]bool)
 	}
+	for _, k := range keep {
+		if canon := canonicalCachePath(k); canon != "" {
+			hardProtected[canon] = true
+		}
+	}
+	activeSet := make(map[string]bool)
+	c.mu.Lock()
+	for p, count := range c.pinned {
+		if count > 0 {
+			hardProtected[p] = true
+		}
+	}
+	for _, p := range c.active {
+		activeSet[p] = true
+	}
+	c.mu.Unlock()
+
 	type file struct {
-		path string
-		size int64
-		mod  time.Time
+		path  string
+		canon string
+		size  int64
+		mod   time.Time
 	}
 	var files []file
-	var total int64
+	var total, activeBytes int64
 	for _, e := range entries {
 		info, err := e.Info()
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
 		total += info.Size()
+		canon := filepath.Join(dir, e.Name())
+		if activeSet[canon] {
+			activeBytes += info.Size()
+		}
 		path := filepath.Join(c.DownloadDir, e.Name())
-		if evictable.MatchString(e.Name()) && filepath.Join(dir, e.Name()) != keep {
-			files = append(files, file{path, info.Size(), info.ModTime()})
+		if evictable.MatchString(e.Name()) && !hardProtected[canon] {
+			files = append(files, file{path, canon, info.Size(), info.ModTime()})
 		}
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
 	for _, f := range files {
 		if total <= c.MaxCache && !short() {
 			return
+		}
+		// Protect active deck tracks against /data MinFree wipes whenever total
+		// cache stays within MaxCache (or active tracks fit within half MaxCache).
+		if activeSet[f.canon] && (total <= c.MaxCache || activeBytes <= c.MaxCache/2) {
+			continue
 		}
 		if os.Remove(f.path) == nil {
 			total -= f.size
