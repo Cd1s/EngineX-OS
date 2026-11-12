@@ -58,15 +58,23 @@ func (s *Server) stemmed(scope string) []stemmedTrack {
 	return s.loadStemmed()[scope]
 }
 
+var statStemmedPath = os.Stat
+
 // stemmedPath is the stemmed local copy of t, if it is still on disk.
 func (s *Server) stemmedPath(t providers.Track) string {
 	s.stemsMu.Lock()
-	defer s.stemsMu.Unlock()
+	var candidates []string
 	for _, list := range s.loadStemmed() {
 		for _, e := range list {
-			if st, err := os.Stat(e.Path); sameTrack(e.Track, t) && err == nil && st.Mode().IsRegular() {
-				return e.Path
+			if sameTrack(e.Track, t) {
+				candidates = append(candidates, e.Path)
 			}
+		}
+	}
+	s.stemsMu.Unlock()
+	for _, p := range candidates {
+		if st, err := statStemmedPath(p); err == nil && st.Mode().IsRegular() {
+			return p
 		}
 	}
 	return ""
