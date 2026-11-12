@@ -18,6 +18,10 @@ static const char *test_rb_bridge_path(void);
 #define HFS_READONLY test_hfs_readonly
 #define VOLUME_IDENTITY test_volume_identity
 #define RB_BRIDGE_PATH test_rb_bridge_path
+// Where engine-guardian is looked for: empty (none, nothing of the host's is run) until a test places one.
+static char test_guardian_system[PATH_MAX],test_guardian_bundle[PATH_MAX];
+#define GUARDIAN_SYSTEM test_guardian_system
+#define GUARDIAN_BUNDLE test_guardian_bundle
 // The "real" libmount mount: a bind of test_disk onto the target.
 struct libmnt_context;
 static int test_real_mount(struct libmnt_context *c);
@@ -506,6 +510,29 @@ static void test_private_mount_leaves_nothing_behind(const char *root) {
 // r2 left deck: edisksd announced the bare read-only HFS+ mount before the view
 // covered it, Engine chose OneLibrary and its migration failed EROFS. The
 // monitor's mountinfo must show a view as the plain device mount, nothing else.
+// BH2-A1-1: a second-generation deck keeps the vendor's rootfs and has
+// engine-guardian only in the data bundle; the hook asked for /usr/local/bin
+// alone, so an Engine stick was never healed at mount on those decks.
+static void test_guardian_from_the_data_bundle(const char *root) {
+    assert(!mount(NULL,"/",NULL,MS_REC|MS_PRIVATE,NULL));
+    char disk[PATH_MAX],target[PATH_MAX],p[PATH_MAX],log[PATH_MAX],script[PATH_MAX*2],want[PATH_MAX*2];
+    join(disk,root,"heal-native");join(p,disk,"Engine Library/Database2");assert(!make_dirs(p));
+    join(p,disk,"Engine Library/Database2/m.db");write_file(p,"native library");
+    join(target,MEDIA_ROOT,"HEAL");assert(!make_dirs(target));join(log,root,"heal.log");
+    join(test_guardian_system,root,"heal-system-guardian");join(test_guardian_bundle,root,"heal-bundle-guardian");
+    snprintf(script,sizeof script,"#!/bin/sh\necho \"bundle $*\" >> '%s'\n",log);write_file(test_guardian_bundle,script);assert(!chmod(test_guardian_bundle,0700));
+    for(int rootfs=0;rootfs<2;rootfs++) { // the bundle's alone, then next to the rootfs's own, which is preferred
+        if(rootfs){snprintf(script,sizeof script,"#!/bin/sh\necho \"system $*\" >> '%s'\n",log);write_file(test_guardian_system,script);assert(!chmod(test_guardian_system,0700));}
+        snprintf(test_disk,sizeof test_disk,"%s",disk);test_disk_ro=0;
+        struct libmnt_context c={.target=target,.source="/dev/sdx1"};
+        assert(!mnt_context_mount(&c)&&c.status==1);
+        snprintf(want,sizeof want,"%s --heal-mount %s --data-only\n",rootfs?"system":"bundle",target);
+        expect_file(log,want);assert(!unlink(log));
+        assert(!umount2(target,UMOUNT_NOFOLLOW));
+    }
+    test_guardian_system[0]=test_guardian_bundle[0]=0;
+    puts("REAL PRIVATE NAMESPACE BH2-A1-1: an Engine stick is healed by the data bundle's engine-guardian where the rootfs has none, by the rootfs's where it has: PASS");
+}
 static void test_monitor_sees_plain_device_mount(const char *root) {
     char path[PATH_MAX],line[4096],out[16384];join(path,root,"mountinfo");
     FILE *f=fopen(path,"w");assert(f);
@@ -540,7 +567,7 @@ int main(int argc,char **argv) {
     join(test_media,root,"media");join(test_library,root,"libraries");join(test_runtime,root,"runtime");
     join(test_legacy_library,root,"legacy-libraries");join(test_utab,root,"utab");assert(!make_dirs(test_utab));
     assert(!make_dirs(test_media));test_paths_and_copy(root);test_compat_symlink_root(root);test_time();test_slow_marker_follows_every_export_file(root);test_monitor_sees_plain_device_mount(root);
-    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);}
+    if(argc>1&&!strcmp(argv[1],"--mounts")){test_mounts(root);test_foreign_owned_root(root);test_hfs_mount_runs_bridge(root);test_first_insert_converted_before_visible(root);test_library_is_walked_once(root);test_two_sticks_at_once(root);test_hfs_visible_mount_reuses_the_converted_library(root);test_private_mount_leaves_nothing_behind(root);test_guardian_from_the_data_bundle(root);}
     // Mount tests have removed all namespace mounts before deleting fixtures.
     int tmp=open("/tmp",O_RDONLY|O_DIRECTORY);assert(tmp>=0);remove_tree(tmp,strrchr(root,'/')+1);close(tmp);
     puts("edisksd-hook: all requested tests passed");return 0;
