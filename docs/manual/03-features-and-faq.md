@@ -162,7 +162,7 @@
 
 ## 3. 4 轨视图、影子轨道与 View 1~5
 
-### 3.1 开启 4 轨（SC5000 / SC6000 系列的独立播放机）
+### 3.1 开启 4 轨（SC5000 / SC6000 系列及 4 通道一体机）
 
 1. `布局 → ENGINEX 视图预设 → 联机视图（Layout → ENGINEX VIEW PRESET → Linked View）` 选 **`4 轨（4 Decks）`**。修改后 Engine 会自动重启一次。
 2. `布局 → ENGINEX 视图预设 → 四轨角色（Layout → ENGINEX VIEW PRESET → 4-Deck Role）` 选择这台负责哪两轨：
@@ -175,9 +175,9 @@
 | `1+2` | 负责第 1、2 轨 |
 | `1` / `2` | 只负责单轨 |
 
-- 声卡仍然只出 2 路声音（你自己负责的那两轨）。其余轨是**不出声的影子轨道**。
+- 独立播放机声卡仍然只出 2 路声音（你自己负责的那两轨），其余轨是**不出声的影子轨道**；4 通道一体机（PRIME 4 / PRIME 4+ / SC LIVE 4 / PRIME 4 G2）默认保留本机 1、2 轨，3、4 轨可显示对端影子波形（无对端时仍可本机使用）。
 - 屏幕上滑动加载时，只会加载到你负责的轨道，其余被锁定（避免误加载到别人的轨）。
-- 二代机（SC LIVE、PRIME 4+、PRIME 4 G2 等）当前没有 4 轨解锁，64 位 AZ04 Engine（PRIME 4 G2 / SYSTEM ONE）已对齐（#149：16 处补丁、DSP 防护、软限幅、自动增益、SQLite 调优）。
+- 双通道一体机（PRIME 2、PRIME GO / GO+、SC LIVE 2、Mixstream 系列、Rane SYSTEM ONE）保持双轨视图，不提供 4 轨模式；64 位 AZ04 Engine（PRIME 4 G2 / SYSTEM ONE）已对齐 16 处补丁、DSP 防护、软限幅、自动增益与 SQLite 调优（#149）。
 
 ### 3.2 影子波形怎么跟随对端
 
