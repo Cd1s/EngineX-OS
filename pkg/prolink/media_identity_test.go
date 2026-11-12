@@ -220,3 +220,60 @@ func TestMediaProbeFailureBackoff(t *testing.T) {
 		t.Fatal("failed probe retried before backoff expired")
 	}
 }
+
+func TestDotPioneerAnalysisAndNativeRekordboxExportGuard(t *testing.T) {
+	// 1. MediaCache must accept .PIONEER/USBANLZ/... analysis paths from macOS HFS+ sticks.
+	m, dev, host, _ := localMedia(t)
+	dev.SourcePlayer = 3
+	root := m.root(dev, host)
+	lib, err := rekordbox.ParsePDB(bytes.NewReader(testfixture.PDB()), int64(len(testfixture.PDB())))
+	if err != nil || len(lib.Tracks) == 0 {
+		t.Fatalf("parse fixture pdb: %v", err)
+	}
+	for i := range lib.Tracks {
+		lib.Tracks[i].AnalysisPath = strings.Replace(lib.Tracks[i].AnalysisPath, "/PIONEER/", "/.PIONEER/", 1)
+	}
+	dotPDB, err := buildPDB(lib.Tracks, lib.Playlists)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dotRel := strings.TrimPrefix(lib.Tracks[0].AnalysisPath, "/")
+	dotBase := strings.TrimSuffix(dotRel, filepath.Ext(dotRel))
+	files := map[string][]byte{
+		dotBase + ".DAT": testfixture.DAT(),
+		dotBase + ".EXT": testfixture.EXT(),
+	}
+	if err := m.publish(root, host, "dot-disc", dotPDB, mediaPublication{files: files}); err != nil {
+		t.Fatalf("publish .PIONEER analysis failed: %v", err)
+	}
+	if a, _, _ := m.CachedAnalysis(dev, host); a == nil || len(a.Waveforms) == 0 {
+		t.Fatal("CachedAnalysis rejected .PIONEER/USBANLZ path")
+	}
+
+	// 2. SyncEngineToPioneerExport must leave Rekordbox 7 (exportLibrary.db) and .PIONEER sticks untouched.
+	rb7Stick := t.TempDir()
+	testfixture.Write(t, rb7Stick, "PIONEER/rekordbox/exportLibrary.db", []byte("SQLite format 3\x00"))
+	testfixture.Write(t, rb7Stick, "Engine Library/Database2/m.db", []byte("not-opened-if-guarded"))
+	if err := SyncEngineToPioneerExport(rb7Stick); err != nil {
+		t.Fatalf("SyncEngineToPioneerExport on RB7 stick errored: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rb7Stick, "PIONEER/rekordbox/export.pdb")); !os.IsNotExist(err) {
+		t.Fatal("SyncEngineToPioneerExport wrote synthetic export.pdb onto RB7 exportLibrary.db stick")
+	}
+
+	// 3. startExport must accept a .PIONEER/rekordbox/export.pdb stick.
+	dotStick := t.TempDir()
+	testfixture.Export(t, dotStick)
+	if err := os.Rename(filepath.Join(dotStick, "PIONEER"), filepath.Join(dotStick, ".PIONEER")); err != nil {
+		t.Fatal(err)
+	}
+	exp := NewExporter(ExportConfig{
+		Root: dotStick,
+		IP:   net.IPv4(127, 0, 0, 1),
+		MAC:  net.HardwareAddr{0x02, 0, 0, 0, 0, 1},
+	})
+	defer exp.Close()
+	if err := exp.SetEnabled(true); err != nil && strings.Contains(err.Error(), "export.pdb") {
+		t.Fatalf("Exporter rejected .PIONEER stick: %v", err)
+	}
+}
