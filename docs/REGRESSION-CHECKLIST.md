@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (66 Rows)
+## Regression Table (67 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -76,6 +76,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 64 | **A `/live.mp3` listener that vanished is dropped within a minute, with its encoder** (bug hunt 2, BH2-A3-2: `/live.mp3` had no write deadline; a listener that went away without closing the connection, e.g. Wi-Fi gone or a sleeping laptop, kept its handler, its `lame`/`ffmpeg` process and its place in the listener count until TCP gave up after about fifteen minutes) | BH2-A3-2 | `pkg/webui::TestLiveMP3DropsAListenerThatStoppedReading` (a client that stops reading: listener count back to 0 and the encoder process gone; fails with the limit switched off); `TestLiveMP3UsesExternalEncoder` unchanged | Release workflow Step 2 Go suites |
 | 65 | **Live Stream settings pasted with a line break or other control characters still connect** (bug hunt 2, BH2-A3-7: mount point, user name, password and stream name were written onto the Icecast/Shoutcast handshake lines as entered; a value with a line break in it, typically a password pasted with its trailing newline, broke the handshake) | BH2-A3-7 | `pkg/broadcast::TestStreamSettingsStayOnTheirHandshakeLine` (Icecast and Shoutcast: the handshake is byte-identical to the one of the clean values); `TestConfigNormalizationAndDefaults`, `TestCustomUsernameNormalized` unchanged | Release workflow Step 2 Go suites |
 | 66 | **Switching the USB DAC routing never ends another process** (bug hunt 2, BH2-A3-9: `sc5000-usb-audio route-dac` sent its stop signal to whatever PID its PID file named; `alsaloop` ends when the DAC is unplugged and the number can then belong to any other process. The script now signals the PID only while it is an `alsaloop`, and keeps the file in `/run`) | BH2-A3-9 | `tests/test_rootfs_overlay.sh` "USB DAC routing" (a bystander whose PID is in the file survives `route-dac stop` and `status` calls it stale; its own `alsaloop` is stopped). Real deck with a USB DAC: route, unplug the DAC, `route-dac stop`, Engine keeps running | Release workflow Step 2 `tests/test_rootfs_overlay.sh` |
+| 67 | **A Teleport LAN stream sends datagrams that fit the network MTU** (bug hunt 2, BH2-A3-4: only the RTP mode split audio into sub-MTU packets; a Teleport frame was one UDP datagram of whatever the capture loop handed over, 9 KB normally and up to 48 KB after a pause, which leaves in IP fragments and is lost whole when one fragment is, typically on Wi-Fi) | BH2-A3-4 | `pkg/broadcast::TestLANStreamerTeleportChunksUnderMTU` (no datagram over 1472 bytes, timestamps continuous, audio byte-identical); `TestLANStreamerTeleport`, `TestLANStreamerRTP*` unchanged | Release workflow Step 2 Go suites |
 
 ---
 
