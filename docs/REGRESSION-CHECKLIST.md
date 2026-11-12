@@ -82,6 +82,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 70 | **`docs/release-notes-5.3.0.4-draft.md` references top-level `Layout → ENGINEX VIEW PRESET → Linked View` instead of `Control Center → Layout` (`BH2-A10-2`)** | `BH2-A10-2` | `tools/az01-packer/test_docs_audit.py::DocsAuditBH2A10Test::test_release_notes_draft_uses_top_level_layout_tab_bh2_a10_2` | Release workflow Step 2 (`python3 -m unittest discover -s tools/az01-packer`) |
 | 71 | **`saveBeatportStream` tolerates FAT32/exFAT `EPERM`/`EOPNOTSUPP` on `chmod` when the temp file is already readable (`0444`), matching `deemixd` (`BH2-A8-7`)** | `BH2-A8-7` | `pkg/webui::TestSaveBeatportStreamToleratesFATChmodEPERM` | Release workflow Step 2 (`go test -race ./pkg/webui/...`) |
 | 72 | **Streaming Stems (`stemsSource`) records each stemmed track under `ref.track.Provider` rather than the browser's current `scope()` (`BH2-A8-10`)** | `BH2-A8-10` | `pkg/webui::TestStemsSourceRecordsUnderTrackProviderNotCurrentBrowserScope` | Release workflow Step 2 (`go test -race ./pkg/webui/...`) |
+| 73 | **`deezer.fetchDecrypt` writes to a `.part-*` temp file and renames atomically only after complete decryption and `fsync`, leaving no partial file on interrupted/truncated transfers (`BH2-A8-11`)** | `BH2-A8-11` | `internal/deezer::TestTruncatedCDNLeavesNoDestinationFile` | Release workflow Step 2 (`go test -race ./internal/deezer/...`) |
 
 ---
 
