@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,8 @@ const Protocol = "engine-5.0.4"
 const FramingHeader = "X-Stems-Framing"
 
 const maxFrame = 1 << 20
+
+var startupTimeout = 30 * time.Second
 
 // ErrUnreachable: Proxy could not connect and read nothing from Engine, so
 // the caller may still serve the session another way.
@@ -64,6 +67,7 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 	if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
 		return errors.New("invalid backend URL")
 	}
+	callerCtx := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	sess := &Session{}
@@ -86,9 +90,13 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 			return nil, err
 		}
 		return &idleConn{Conn: c}, nil
-	}, Proxy: nil, ForceAttemptHTTP2: false, ResponseHeaderTimeout: 30 * time.Second, DisableCompression: true}
+	}, Proxy: nil, ForceAttemptHTTP2: false, ResponseHeaderTimeout: startupTimeout, DisableCompression: true}
 	defer tr.CloseIdleConnections()
-	startup := time.AfterFunc(30*time.Second, cancel)
+	var startupFired atomic.Bool
+	startup := time.AfterFunc(startupTimeout, func() {
+		startupFired.Store(true)
+		cancel()
+	})
 	resp, e := tr.RoundTrip(req)
 	startup.Stop()
 	if e != nil {
@@ -96,13 +104,16 @@ func Proxy(ctx context.Context, endpoint, secret string, in io.Reader, out io.Wr
 		if op := (*net.OpError)(nil); errors.As(e, &op) && op.Op == "dial" {
 			return fmt.Errorf("%w: %v", ErrUnreachable, e)
 		}
+		var ne net.Error
+		if callerCtx.Err() == nil && (startupFired.Load() || (errors.As(e, &ne) && ne.Timeout())) {
+			return fmt.Errorf("%w: %v", ErrUnavailable, e)
+		}
 		return fmt.Errorf("backend connection: %w", e)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		switch resp.StatusCode {
-		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			// Busy renderer or relay without one: nothing reached Engine yet (#41).
+		if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout || (resp.StatusCode >= 520 && resp.StatusCode <= 530) {
+			// Busy renderer, relay without one, or offline Cloudflare tunnel: nothing reached Engine yet (#41, BH-GF2-7).
 			return fmt.Errorf("%w: backend status %d", ErrUnavailable, resp.StatusCode)
 		}
 		return fmt.Errorf("backend status %d", resp.StatusCode)
