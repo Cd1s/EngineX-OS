@@ -914,7 +914,10 @@ func modeA(ctx context.Context, o *options, d deck) error {
 		if err := confirm(o, fmt.Sprintf("确认从 %s 卸载 EngineX OS 并恢复原厂系统？", label), fmt.Sprintf("Uninstall EngineX OS from %s and revert to stock firmware?", label)); err != nil {
 			return err
 		}
-		uninstallCmd := `sh ` + customDirSh + `/bundle/uninstall.sh && (systemctl reboot || reboot || :)`
+		// A deck whose bundle predates 5.3.0.3 never ran the #103 migration: its install is still
+		// the real /data/sc5000-custom, and there is no /data/enginex to run uninstall.sh from.
+		uninstallCmd := `d=` + customDirSh + `; [ -f "$d/bundle/uninstall.sh" ] || d=$(dirname "$d")/sc5000-custom; ` +
+			`sh "$d/bundle/uninstall.sh" && (systemctl reboot || reboot || :)`
 		if out, err := sshRun(cl, uninstallCmd, nil); err != nil {
 			return fmt.Errorf("%s: uninstall failed: %w\n%s", label, err, out)
 		}

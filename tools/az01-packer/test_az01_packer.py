@@ -4,6 +4,7 @@ import hashlib
 import io
 import lzma
 import os
+import re
 from pathlib import Path
 import shutil
 import struct
@@ -818,6 +819,61 @@ class FilesystemTests(unittest.TestCase):
         r = subprocess.run(['sh', '-s'], input=prep_script, env=env, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('TZEnvVar=UTC\n', conf.read_text())
+
+
+class OverlayOrderingTests(unittest.TestCase):
+    OVERLAY = Path(__file__).resolve().parents[2]/'rootfs-overlay'
+
+    def runtime_units(self):
+        """Overlay services that write the runtime dir: they start the suite (sc5000-suite-exec
+        unpacks into /data/sc5000-custom/bin), run the guard or name the dir themselves."""
+        bindir = self.OVERLAY/'usr/local/bin'
+        suite = {'/usr/local/bin/'+p.name for p in bindir.iterdir()
+                 if p.is_file() and p.name != 'sc5000-suite-exec' and b'sc5000-suite-exec' in p.read_bytes()}
+        self.assertTrue({'/usr/local/bin/rb-bridge', '/usr/local/bin/sc5000-deemixd',
+                         '/usr/local/bin/stream-sync'} <= suite, suite)
+        units = {}
+        for unit in sorted((self.OVERLAY/'etc/systemd/system').glob('*.service')):
+            text = unit.read_text() + ''.join(p.read_text() for p in sorted(unit.parent.glob(unit.name+'.d/*.conf')))
+            progs = {re.sub(r'^[-+@!:]*', '', line.split('=', 1)[1]).split(' ')[0]
+                     for line in text.splitlines() if re.match(r'Exec\w*=\S', line)}
+            if progs & (suite | {'/etc/sc5000/engine-ui-guard'}) or re.search(r'/data/(sc5000-custom|enginex)\b', text):
+                units[unit.name] = text
+        return units
+
+    def test_runtime_dir_writers_start_after_prepare_migrated_it(self):
+        # #103: prepare renames /data/sc5000-custom to /data/enginex and then links the old name.
+        # rb-bridge and sc5000-deemixd started beside it on a blank /data or the first boot after
+        # an update: sc5000-suite-exec's mkdir -p /data/sc5000-custom/bin between the two steps
+        # left a real old dir, so the UI hook's /data/sc5000-custom/ui was gone for that boot and
+        # the next boot's merge set its writes aside.
+        prepare = az.UNITS['sc5000-custom-prepare.service']
+        before = set(re.search(r'^Before=(.*)$', prepare, re.M).group(1).split())
+        units = self.runtime_units()
+        self.assertTrue({'rb-bridge.service', 'sc5000-deemixd.service', 'stream-sync.service',
+                         'engine-guardian.service'} <= set(units), sorted(units))
+        for name, text in units.items():
+            after = {u for line in re.findall(r'^After=(.*)$', text, re.M) for u in line.split()}
+            with self.subTest(unit=name):
+                self.assertTrue(name in before or 'sc5000-custom-prepare.service' in after,
+                                name+' is not ordered after sc5000-custom-prepare.service')
+        # Ordering only: prepare itself must not wait for any of them (no cycle).
+        prepare_after = {u for line in re.findall(r'^After=(.*)$', prepare, re.M) for u in line.split()}
+        self.assertFalse(prepare_after & set(units), prepare_after & set(units))
+        for name in ('rb-bridge.service', 'sc5000-deemixd.service'):
+            self.assertNotRegex(units[name], r'(?m)^(Requires|BindsTo|Requisite)=')
+
+    def test_edisksd_hook_spawns_rb_bridge_only_after_prepare(self):
+        # The edisksd hook runs the suite's rb-bridge for a rekordbox stick, and a stick
+        # plugged in at power-on is mounted while prepare may be moving the runtime dir.
+        hook = (self.OVERLAY.parent/'tools/edisksd-hook/edisksd_hook.c').read_text()
+        self.assertIn('"/usr/local/bin/rb-bridge"', hook)
+        dropin = (self.OVERLAY/'etc/systemd/system/edisksd.service.d/50-sc5000-hook.conf').read_text()
+        self.assertRegex(dropin, r'(?m)^After=.*\bsc5000-custom-prepare\.service\b')
+        # edisksd is a vendor unit: ordering only (CONTRIBUTING), and still preloads the hook.
+        self.assertNotRegex(dropin, r'(?m)^(Requires|BindsTo|Requisite|Wants)=')
+        self.assertIn('Environment=LD_PRELOAD=/etc/sc5000/libedisksd-hook.so', dropin)
+
 
 if __name__ == '__main__':
     unittest.main()
