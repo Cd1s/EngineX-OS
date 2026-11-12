@@ -718,7 +718,7 @@ class ShadowDisplayTest(unittest.TestCase):
                  "scShadowApply", "scShadowEmpty", "scShadowSpeed", "scShadowCues", "scShadowBeat",
                  "scShadowLoad", "scShadowWrong", "scShadowHolds", "scShadowEndGap", "scShadowEnd",
                  "scShadowSeek", "scShadowLink", "scShadowLinkEdge", "scPress", "scGcCheck", "scShadowWake", "scShadowAnyPlaying",
-                 "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack",
+                 "scShadowLine", "scShadowLandingSeek", "scShadowLandingTick", "scShadowBend", "scShadowBendEnd", "scShadowMasterBack", "scPressWrite", "scMasterPresses",
                  "scLayerPath", "scPairedLanes", "scPairedFollow", "scShadowHeldBy", "scShadowEngineHeld")
         functions = []
         for name in names:
@@ -739,7 +739,7 @@ Object.assign(globalThis, {
     scFourDeckRole: '13', scPlayer: true, scShadowDisplayOnly: true, scShadowEngineMask: 0, scShadowLineMask: 0,
     scShadowExpiryMs: 3000, scShadowAt: {}, scShadowDisplay: {}, scShadowEmptyArray: [],
     scShadowDisplayRequests: {}, scShadowDisplayText: {}, scShadowGridCache: {}, scShadowLiveCueCache: {},
-    scShadowCdjMaster: false, scPressQueue: [], scShadowEmptyObject: {}, scShadowHead: {},
+    scShadowCdjMaster: false, scPressQueue: [], scMasterOwn: [0, 0, 0, 0, 0], scShadowEmptyObject: {}, scShadowHead: {},
     scShadowMineRole: "?", scShadowMine: [], scShadowSampleSpare: {}, scShadowDeckProperties: {}, scShadowOwn: [],
     scShadowPostRequest: null, scShadowPollRequest: null, scShadowResponseVersion: "", scShadowPostPending: false,
     scShadowLinkId: '', scShadowLinkAt: -Infinity, scShadowTextAt: {},
@@ -3571,6 +3571,42 @@ for (const board of [...players, 'JP11', 'JC11', 'JC16', 'NH08', 'NH08S', 'NH10'
 """
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class MasterPressTest(unittest.TestCase):
+    """#217 review: MASTER pressed on the deck that is Engine's master already (a console with one deck
+    loaded) must reach stream-sync, which asks the CDJ for the Pro DJ Link master again."""
+
+    def test_user_presses_count_and_our_own_do_not(self):
+        # As measured in Engine 5.3.0 (twin sandbox): RequestMaster is an "Action" translator, writing
+        # state = true leaves state false, fires no stateChanged and adds one to stateTrueCount.
+        ShadowDisplayTest.js(self, r"""
+const action = () => ({stateTrueCount: 0, get state() { return false }, set state(on) { if (on) this.stateTrueCount++ }});
+const t1 = action(), t3 = action();
+assert.equal(scMasterPresses(1, t1), 0);
+t1.state = true; // the control surface (ActionOutput): true on the press, nothing on the release
+assert.equal(scMasterPresses(1, t1), 1);
+scPressWrite(t1, '/Engine/Deck1/RequestMaster', true); scPressWrite(t1, '/Engine/Deck1/RequestMaster', false); // our own press
+assert.deepEqual([t1.stateTrueCount, scMasterPresses(1, t1)], [2, 1]);
+scPressWrite(t3, '/Engine/Deck3/RequestMaster', true); // ours on another deck is not this deck's
+t1.state = true;
+assert.deepEqual([scMasterPresses(1, t1), scMasterPresses(3, t3)], [2, 0]);
+const sync = action();
+scPressWrite(sync, '/Engine/Deck1/Sync', true); // another button of the deck
+assert.deepEqual([sync.stateTrueCount, scMasterPresses(1, t1)], [1, 2]);
+assert.equal(scMasterPresses(2, {}), 0); // no such property on this model
+""")
+
+    def test_the_count_is_read_and_posted(self):
+        main = bp.SERVICES_MAIN
+        # Every press we make goes through the one writer that keeps ours apart.
+        self.assertIn("\t\t\t\troot.scPressWrite(t, e.path, e.step === 1)\n", main)
+        self.assertEqual(main.count("t.state = e.step === 1"), 0)
+        self.assertIn('["requestMaster", "/RequestMaster"]', main)
+        # The count goes out with the deck, and a new press alone makes a full post.
+        self.assertIn("o.masterPress = scMasterPresses(d, g.requestMaster)\n", main)
+        self.assertIn("sent.masterPress !== o.masterPress", main)
+        self.assertIn("sent.masterPress = o.masterPress;", main)
 
 
 class ShadowMasterBackTest(unittest.TestCase):
