@@ -431,54 +431,27 @@ func canonicalCachePath(path string) string {
 }
 
 func (c *Client) rememberActive(path string) {
-	if path == "" {
+	canon := canonicalCachePath(path)
+	if canon == "" {
 		return
 	}
 	now := time.Now()
-	_ = os.Chtimes(path, now, now)
-	canon := canonicalCachePath(path)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	filtered := c.active[:0]
-	for _, p := range c.active {
-		if p != canon {
-			filtered = append(filtered, p)
+	if c.lastUsed == nil {
+		c.lastUsed = make(map[string]time.Time)
+	}
+	c.lastUsed[canon] = now
+	if len(c.lastUsed) > maxTrackedLRU {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, t := range c.lastUsed {
+			if oldestKey == "" || t.Before(oldestTime) {
+				oldestKey, oldestTime = k, t
+			}
 		}
+		delete(c.lastUsed, oldestKey)
 	}
-	filtered = append(filtered, canon)
-	if len(filtered) > maxActiveDecks {
-		filtered = append([]string(nil), filtered[len(filtered)-maxActiveDecks:]...)
-	}
-	c.active = filtered
-}
-
-// Pin protects path from eviction in Trim until a matching Unpin call.
-func (c *Client) Pin(path string) {
-	canon := canonicalCachePath(path)
-	if canon == "" {
-		return
-	}
-	c.mu.Lock()
-	if c.pinned == nil {
-		c.pinned = make(map[string]int)
-	}
-	c.pinned[canon]++
-	c.mu.Unlock()
-}
-
-// Unpin releases one Pin hold on path.
-func (c *Client) Unpin(path string) {
-	canon := canonicalCachePath(path)
-	if canon == "" {
-		return
-	}
-	c.mu.Lock()
-	if n := c.pinned[canon]; n <= 1 {
-		delete(c.pinned, canon)
-	} else {
-		c.pinned[canon] = n - 1
-	}
-	c.mu.Unlock()
 }
 
 func openFilesInDir(dir string) map[string]bool {
@@ -502,7 +475,7 @@ func openFilesInDir(dir string) map[string]bool {
 }
 
 // Trim removes the least recently used downloads while they exceed MaxCache or
-// the volume has less than MinFree left, never evicting protected/active tracks.
+// the volume has less than MinFree left, never evicting open or kept files.
 func (c *Client) Trim(keep ...string) {
 	if c.MaxCache <= 0 {
 		return
@@ -530,15 +503,11 @@ func (c *Client) Trim(keep ...string) {
 			hardProtected[canon] = true
 		}
 	}
-	activeSet := make(map[string]bool)
+
 	c.mu.Lock()
-	for p, count := range c.pinned {
-		if count > 0 {
-			hardProtected[p] = true
-		}
-	}
-	for _, p := range c.active {
-		activeSet[p] = true
+	usedSnapshot := make(map[string]time.Time, len(c.lastUsed))
+	for k, t := range c.lastUsed {
+		usedSnapshot[k] = t
 	}
 	c.mu.Unlock()
 
@@ -546,10 +515,10 @@ func (c *Client) Trim(keep ...string) {
 		path  string
 		canon string
 		size  int64
-		mod   time.Time
+		used  time.Time
 	}
 	var files []file
-	var total, activeBytes int64
+	var total int64
 	for _, e := range entries {
 		info, err := e.Info()
 		if err != nil || !info.Mode().IsRegular() {
@@ -557,26 +526,25 @@ func (c *Client) Trim(keep ...string) {
 		}
 		total += info.Size()
 		canon := filepath.Join(dir, e.Name())
-		if activeSet[canon] {
-			activeBytes += info.Size()
-		}
 		path := filepath.Join(c.DownloadDir, e.Name())
 		if evictable.MatchString(e.Name()) && !hardProtected[canon] {
-			files = append(files, file{path, canon, info.Size(), info.ModTime()})
+			used := info.ModTime()
+			if t := usedSnapshot[canon]; t.After(used) {
+				used = t
+			}
+			files = append(files, file{path, canon, info.Size(), used})
 		}
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
+	sort.Slice(files, func(i, j int) bool { return files[i].used.Before(files[j].used) })
 	for _, f := range files {
 		if total <= c.MaxCache && !short() {
 			return
 		}
-		// Protect active deck tracks against /data MinFree wipes whenever total
-		// cache stays within MaxCache (or active tracks fit within half MaxCache).
-		if activeSet[f.canon] && (total <= c.MaxCache || activeBytes <= c.MaxCache/2) {
-			continue
-		}
 		if os.Remove(f.path) == nil {
 			total -= f.size
+			c.mu.Lock()
+			delete(c.lastUsed, f.canon)
+			c.mu.Unlock()
 		}
 	}
 }
