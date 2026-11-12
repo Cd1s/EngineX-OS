@@ -525,7 +525,7 @@ echo "$*" >> "$GUARD_LOG"
 MOCK
 chmod +x "$TMP/guard-bin/systemctl"
 export SC5000_QUIT_REASON_FILE=$TMP/quit-reason GUARD_LOG=$TMP/guard-log
-for case in 'FactoryReset running 1' 'FactoryReset degraded 1' 'FactoryReset stopping 0' 'AnalyticsChange stopping 1' 'Poweroff running 0' ' running 0'; do
+for case in 'FactoryReset running 1' 'FactoryReset degraded 1' 'FactoryReset stopping 0' 'UpdateFromFile running 1' 'UpdateFromFile stopping 0' 'UpdateFromUrl running 0' 'AnalyticsChange stopping 1' 'Poweroff running 0' ' running 0'; do
     set -- $case; [[ $# == 3 ]] || set -- '' "$@"
     [[ -z $1 ]] && rm -f "$SC5000_QUIT_REASON_FILE" || echo "$1" > "$SC5000_QUIT_REASON_FILE"
     : > "$GUARD_LOG"
@@ -605,7 +605,7 @@ has 'SC5000_BOOT_TIMEOUT:-180' "$GUARD"
 has 'SC5000_BOOT_CRASH_LIMIT:-3' "$GUARD"
 has 'SC5000_BOOT_CRASH_WINDOW:-300' "$GUARD"
 unset SC5000_UI_DIR
-ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode, failed FactoryReset restarts Engine'
+ok 'UI guard: deliberate restarts reset the boot count, crashes still reach safe-mode, failed FactoryReset and UpdateFromFile restart Engine'
 
 lacks '"/GUI/Scripted/ZoomIn"' "$ROOT/tools/ui-mod/build_packs.py"
 lacks 'BrowseEncoder.qml' "$ROOT/tools/ui-mod/build_packs.py"
