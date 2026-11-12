@@ -663,11 +663,15 @@ type release struct {
 // for prefix into dir and checks GitHub's SHA-256 (#215).
 func fetchBundle(ctx context.Context, o *options, prefix, dir string) (string, error) {
 	var rel release
-	if err := getJSON(ctx, o, o.API+"/repos/"+o.Repo+"/releases/latest", &rel); err != nil {
-		if ctx.Err() == nil && !strings.HasPrefix(err.Error(), "HTTP ") {
+	err := getJSON(ctx, o, o.API+"/repos/"+o.Repo+"/releases/latest", &rel)
+	if err == nil && rel.Tag == "" && len(rel.Assets) == 0 {
+		err = errors.New("unexpected response (not a GitHub release)")
+	}
+	if err != nil {
+		if ctx.Err() == nil {
 			if local := localBundle(dir, prefix); local != "" {
-				o.say("无法连接 GitHub，使用已有的 "+filepath.Base(local),
-					"Cannot reach GitHub; using the package already here: "+filepath.Base(local))
+				o.say("无法读取 GitHub 最新版本，使用已有的 "+filepath.Base(local),
+					"Cannot check the latest GitHub release; using the package already here: "+filepath.Base(local))
 				return local, nil
 			}
 		}
@@ -783,7 +787,8 @@ func downloadLimit(ctx context.Context, o *options, url, wantSHA, dest string, l
 }
 
 // obtainBundle uses --bundle/--image, else checks the latest release and reuses a local package
-// in the work dir only when its SHA-256 matches the latest asset (or when offline) (#215, #218).
+// in the work dir only when its SHA-256 matches the latest asset (or when the latest release cannot
+// be read due to network/HTTP/proxy errors) (#215, #218).
 func obtainBundle(ctx context.Context, o *options, prefix string) (*bundleInfo, error) {
 	path := o.Bundle
 	if path != "" {
@@ -1985,7 +1990,7 @@ func run(ctx context.Context, o *options) error {
 }
 
 func registerFlags(fs *flag.FlagSet, o *options) {
-	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or Data-Bundle.tar.gz to install (default: newest in the current directory, else download)")
+	fs.StringVar(&o.Bundle, "bundle", "", "*-Update.img or Data-Bundle.tar.gz to install (default: latest release; a package in the folder is reused only when its SHA-256 matches)")
 	fs.StringVar(&o.Bundle, "image", "", "alias for -bundle: *-Update.img to install")
 	fs.StringVar(&o.Backup, "userdata-backup", "", "mode B: a backup image of the deck's data partition to inject into (keeps the user's files; if omitted, a fresh partition is created)")
 	fs.StringVar(&o.Key, "key", "", "mode A: SSH private key (default ~/.ssh/id_*; password denon is also tried)")

@@ -2651,3 +2651,92 @@ func TestGen2SameVersionReReleaseReplacesStaleWorkDirPackage(t *testing.T) {
 		t.Fatalf("offline fallback run: %v\n%s", err, o3.Out)
 	}
 }
+
+// #218 review: when GitHub returns HTTP 403, 429 (anonymous rate limit), 5xx (502), or a proxy/portal
+// page, a matching package already in WorkDir must still install instead of aborting with HTTP status;
+// an empty WorkDir still surfaces the HTTP error, explicit -bundle bypasses GitHub, and -bundle help
+// documents the SHA-256 reuse rule.
+func TestGen2LocalBundleFallbackOnGitHubHTTPErrorsAndProxy(t *testing.T) {
+	need(t, "python3", "unshare")
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	registerFlags(fs, &options{})
+	if f := fs.Lookup("bundle"); f == nil || !strings.Contains(f.Usage, "default: latest release; a package in the folder is reused only when its SHA-256 matches") {
+		t.Errorf("-bundle usage = %v, want SHA-256 reuse wording", f)
+	}
+
+	pkg := buildBundle(t, "PRIME4G2", "5.3.0.4", "v5.3.0.4-r3")
+	imgName := filepath.Base(pkg.ImagePath)
+
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"http-403", http.StatusForbidden, `{"message":"API rate limit exceeded"}`},
+		{"http-429", http.StatusTooManyRequests, `{"message":"Too Many Requests"}`},
+		{"http-502", http.StatusBadGateway, `<html>502 Bad Gateway</html>`},
+		{"proxy-html-200", http.StatusOK, `<html><body>Captive Portal</body></html>`},
+		{"proxy-json-200", http.StatusOK, `{"error":"blocked by proxy"}`},
+	}
+
+	var curStatus int
+	var curBody string
+	ghHits := 0
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ghHits++
+		w.WriteHeader(curStatus)
+		w.Write([]byte(curBody))
+	}))
+	defer srv.Close()
+
+	workWithPkg := t.TempDir()
+	if err := copyFile(pkg.ImagePath, filepath.Join(workWithPkg, imgName)); err != nil {
+		t.Fatal(err)
+	}
+	o0 := testOpts(t)
+	d := startSSHDeck(t, o0.SSHPort, "inmusic,jp24\x00inmusic,az04\x00")
+
+	for _, tc := range cases {
+		curStatus, curBody = tc.status, tc.body
+
+		// With local package present in WorkDir: end-to-end install succeeds via fallback.
+		o := testOpts(t)
+		o.WorkDir = workWithPkg
+		o.SSHPort = o0.SSHPort
+		useRelease(o, srv)
+		announceFrom(t, "127.0.0.1", freeUDPFrom(o), airD("prime4g2-lab", "DISCOVERER_HOWDY_", "JP24", "5.3.0", 1))
+		if err := run(ctxT(t), o); err != nil {
+			t.Errorf("%s with local package failed: %v\n%s", tc.name, err, o.Out)
+			continue
+		}
+		if got, _ := os.ReadFile(filepath.Join(d.Data, "enginex/bundle/release-tag")); strings.TrimSpace(string(got)) != "v5.3.0.4-r3" {
+			t.Errorf("%s installed release-tag = %q, want v5.3.0.4-r3", tc.name, got)
+		}
+
+		// With empty WorkDir: HTTP status error is still reported cleanly.
+		if tc.status != http.StatusOK {
+			oEmpty := testOpts(t)
+			oEmpty.defaults()
+			useRelease(oEmpty, srv)
+			if _, err := fetchBundle(ctxT(t), oEmpty, "PRIME4G2", t.TempDir()); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("HTTP %d", tc.status)) {
+				t.Errorf("%s with empty WorkDir: err = %v, want HTTP %d", tc.name, err, tc.status)
+			}
+		}
+	}
+
+	// Explicit -bundle path installs without querying GitHub even when GitHub returns 403.
+	curStatus, curBody = http.StatusForbidden, `{"message":"forbidden"}`
+	beforeHits := ghHits
+	oExplicit := testOpts(t)
+	oExplicit.Bundle = pkg.ImagePath
+	oExplicit.SSHPort = o0.SSHPort
+	useRelease(oExplicit, srv)
+	announceFrom(t, "127.0.0.1", freeUDPFrom(oExplicit), airD("prime4g2-lab", "DISCOVERER_HOWDY_", "JP24", "5.3.0", 1))
+	if err := run(ctxT(t), oExplicit); err != nil {
+		t.Fatalf("explicit -bundle with 403 GitHub: %v\n%s", err, oExplicit.Out)
+	}
+	if ghHits != beforeHits {
+		t.Fatalf("explicit -bundle queried GitHub %d times, want 0", ghHits-beforeHits)
+	}
+}
