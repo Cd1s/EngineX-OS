@@ -314,12 +314,15 @@ func (c *Client) fetchSplit(ctx context.Context, f io.Writer, address string) er
 	if _, err := fmt.Sscanf(resp.Header.Get("Content-Range"), "bytes %d-%d/%d", &from, &to, &total); err != nil || from != 0 || to < 0 || to >= total || total > maxMediaBytes {
 		return errors.New("audio: unexpected byte range")
 	}
-	first, err := io.ReadAll(io.LimitReader(resp.Body, splitBytes+1))
-	if err != nil || int64(len(first)) != to+1 {
+	n, err := io.Copy(f, io.LimitReader(resp.Body, to+2))
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return errors.New("audio: transfer interrupted")
 	}
-	if _, err := f.Write(first); err != nil {
-		return err
+	if n != to+1 {
+		return errors.New("audio: transfer interrupted")
 	}
 	var parts []part
 	for at := to + 1; at < total; at += splitBytes {

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -175,5 +177,54 @@ func TestMatchAcceptsISRCEditionSuffixesAndOriginalMix(t *testing.T) {
 		if got, err := Match(bpExt, []providers.Track{bad}); err == nil {
 			t.Fatalf("matched conflicting edition %q: %+v", badTitle, got)
 		}
+	}
+}
+
+func TestFetchSplitAcceptsLargerInitialChunkThanSplitBytes(t *testing.T) {
+	frames := mp3Frames(14, 6000) // ~6.2 MiB (> 2 * splitBytes)
+	largeInitial := 2*splitBytes + 12345
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rng := r.Header.Get("Range")
+		if strings.HasPrefix(rng, "bytes=0-") {
+			end := largeInitial - 1
+			if r.URL.Path == "/whole206" {
+				end = len(frames) - 1
+			}
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", end, len(frames)))
+			w.Header().Set("Content-Length", strconv.Itoa(end+1))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(frames[:end+1])
+			return
+		}
+		var from, to int
+		if _, err := fmt.Sscanf(rng, "bytes=%d-%d", &from, &to); err != nil || from < 0 || to >= len(frames) || from > to {
+			http.Error(w, "bad range", http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, to, len(frames)))
+		w.Header().Set("Content-Length", strconv.Itoa(to-from+1))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(frames[from : to+1])
+	}))
+	defer srv.Close()
+
+	c := &Client{DownloadDir: t.TempDir(), AllowLossy: true}
+	dl, err := c.SaveSplit(context.Background(), "soundcloud-206a", srv.URL+"/coalesced")
+	if err != nil {
+		t.Fatalf("SaveSplit coalesced 206 failed: %v", err)
+	}
+	got, err := os.ReadFile(dl.Path)
+	if err != nil || !bytes.Equal(got, frames) {
+		t.Fatalf("coalesced 206 payload mismatch: len=%d want=%d err=%v", len(got), len(frames), err)
+	}
+
+	dlWhole, err := c.SaveSplit(context.Background(), "soundcloud-206b", srv.URL+"/whole206")
+	if err != nil {
+		t.Fatalf("SaveSplit full-body 206 failed: %v", err)
+	}
+	gotWhole, err := os.ReadFile(dlWhole.Path)
+	if err != nil || !bytes.Equal(gotWhole, frames) {
+		t.Fatalf("full-body 206 payload mismatch: len=%d want=%d err=%v", len(gotWhole), len(frames), err)
 	}
 }
