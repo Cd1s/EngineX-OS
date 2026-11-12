@@ -18,9 +18,9 @@ logs the result. It does not write databases.
 `build.sh` in `tools/edisksd-hook`). edisksd answers Engine's Mount call only
 after `mnt_context_mount()` returns, so the hook finishes within that call:
 
-1. read-only HFS+ with `PIONEER/` or `.PIONEER/` gets a writable overlay on
-   `<mount>/Engine Library`, with its upper layer in
-   `/data/sc5000-custom/hfs-lib/<volume>`;
+1. read-only HFS+ with `PIONEER/` or `.PIONEER/` gets a writable view on
+   `<mount>/Engine Library`, kept in `/data/enginex/hfs-libraries/<volume id>`
+   (only the `/data/sc5000-custom -> enginex` compat link is followed on the way);
 2. `rb-bridge --mount-path <mount>` converts the export;
 3. `engine-guardian --heal-mount <mount> --data-only` repairs table data.
 
