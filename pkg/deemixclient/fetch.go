@@ -34,6 +34,32 @@ var defaultMedia = func() *http.Client {
 	return &http.Client{Transport: t}
 }()
 
+var chmodFile = os.Chmod
+
+func chmodPerm(path string, mode os.FileMode) error {
+	err := chmodFile(path, mode)
+	if err == nil || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP) || errors.Is(err, syscall.ENOSYS) {
+		return nil
+	}
+	return err
+}
+
+// removeOtherFormats keeps only keep among name's audio extensions so Cached always finds the latest download.
+func (c *Client) removeOtherFormats(name, keep string) {
+	for _, ext := range []string{".flac", ".mp3", ".mp4", ".ogg"} {
+		other := filepath.Join(c.DownloadDir, name+ext)
+		if other == keep {
+			continue
+		}
+		if os.Remove(other) == nil {
+			canon := canonicalCachePath(other)
+			c.mu.Lock()
+			delete(c.lastUsed, canon)
+			c.mu.Unlock()
+		}
+	}
+}
+
 func (c *Client) media() *http.Client {
 	if c.Media != nil {
 		return c.Media
@@ -140,12 +166,13 @@ func (c *Client) SaveParts(ctx context.Context, name, ext string, urls []string)
 		dl = &Download{Quality: q}
 	}
 	dl.Path = filepath.Join(c.DownloadDir, name+"."+ext)
-	if err = os.Chmod(f.Name(), 0o644); err != nil {
+	if err = chmodPerm(f.Name(), 0o644); err != nil {
 		return nil, err
 	}
 	if err = os.Rename(f.Name(), dl.Path); err != nil {
 		return nil, err
 	}
+	c.removeOtherFormats(name, dl.Path)
 	c.rememberActive(dl.Path)
 	c.Trim(dl.Path)
 	return dl, nil
@@ -332,18 +359,13 @@ func (c *Client) SaveSplit(ctx context.Context, name, address string) (*Download
 		return nil, err
 	}
 	final := filepath.Join(c.DownloadDir, name+"."+q.Format)
-	if err = os.Chmod(path, 0o644); err != nil {
+	if err = chmodPerm(path, 0o644); err != nil {
 		return nil, err
 	}
 	if err = os.Rename(path, final); err != nil {
 		return nil, err
 	}
-	// Only one of name's formats is kept, so Cached finds the one just saved.
-	for _, ext := range []string{".flac", ".mp3", ".mp4"} {
-		if other := filepath.Join(c.DownloadDir, name+ext); other != final {
-			os.Remove(other)
-		}
-	}
+	c.removeOtherFormats(name, final)
 	c.rememberActive(final)
 	c.Trim(final)
 	return &Download{Path: final, Quality: q}, nil
@@ -401,13 +423,14 @@ func (c *Client) Save(ctx context.Context, name, address string) (*Download, err
 		return nil, err
 	}
 	final := filepath.Join(c.DownloadDir, name+"."+dl.Quality.Format)
-	if err = os.Chmod(f.Name(), 0o644); err != nil {
+	if err = chmodPerm(f.Name(), 0o644); err != nil {
 		return nil, err
 	}
 	if err = os.Rename(f.Name(), final); err != nil {
 		return nil, err
 	}
 	dl.Path = final
+	c.removeOtherFormats(name, final)
 	c.rememberActive(final)
 	c.Trim(final)
 	return dl, nil

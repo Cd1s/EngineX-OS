@@ -262,12 +262,7 @@ func (c *Client) LinkAs(src *Download, name string) (*Download, error) {
 		os.Remove(tmp)
 		return nil, err
 	}
-	// Only one of name's formats is kept, so Cached finds the one just saved.
-	for _, ext := range []string{".flac", ".mp3", ".mp4"} {
-		if other := filepath.Join(c.DownloadDir, name+ext); other != dst {
-			os.Remove(other)
-		}
-	}
+	c.removeOtherFormats(name, dst)
 	c.rememberActive(src.Path)
 	c.rememberActive(dst)
 	c.Trim(dst, src.Path)
