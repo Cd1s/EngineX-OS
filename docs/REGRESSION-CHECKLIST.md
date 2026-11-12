@@ -83,6 +83,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 71 | **`saveBeatportStream` tolerates FAT32/exFAT `EPERM`/`EOPNOTSUPP` on `chmod` when the temp file is already readable (`0444`), matching `deemixd` (`BH2-A8-7`)** | `BH2-A8-7` | `pkg/webui::TestSaveBeatportStreamToleratesFATChmodEPERM` | Release workflow Step 2 (`go test -race ./pkg/webui/...`) |
 | 72 | **Streaming Stems (`stemsSource`) records each stemmed track under `ref.track.Provider` rather than the browser's current `scope()` (`BH2-A8-10`)** | `BH2-A8-10` | `pkg/webui::TestStemsSourceRecordsUnderTrackProviderNotCurrentBrowserScope` | Release workflow Step 2 (`go test -race ./pkg/webui/...`) |
 | 73 | **`deezer.fetchDecrypt` writes to a `.part-*` temp file and renames atomically only after complete decryption and `fsync`, leaving no partial file on interrupted/truncated transfers (`BH2-A8-11`)** | `BH2-A8-11` | `internal/deezer::TestTruncatedCDNLeavesNoDestinationFile` | Release workflow Step 2 (`go test -race ./internal/deezer/...`) |
+| 74 | **`bridge.ConvertAtMount` writes `.rb-bridge-pending` whenever `<= 500`-track exports defer (`result.Deferred > 0`) on slow USB media so the next mount resumes finished tracks (`BH2-A4-5`)** | `BH2-A4-5` | `pkg/bridge::TestSmallLibraryDeferredMountWritesPendingAndResumes` | Release workflow Step 2 (`go test -race ./pkg/bridge/...`) |
 
 ---
 
