@@ -1118,3 +1118,67 @@ collect:
 		}
 	}
 }
+
+// BH2-A3-7: mount point, login and stream name go onto the lines of the server
+// handshake as they are; each must stay on its own line.
+func TestStreamSettingsStayOnTheirHandshakeLine(t *testing.T) {
+	handshake := func(protocol string, cfg Config) string {
+		t.Helper()
+		cfg.Protocol = protocol
+		if err := normalizeConfig(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		deck, server := net.Pipe()
+		defer deck.Close()
+		got := make(chan string, 1)
+		go func() {
+			defer server.Close()
+			r := bufio.NewReader(server)
+			var all string
+			if protocol == "shoutcast" { // the login line, then the answer, then the headers
+				line, _ := r.ReadString('\n')
+				all = line
+				_, _ = io.WriteString(server, "OK2\r\n")
+			}
+			for {
+				line, err := r.ReadString('\n')
+				all += line
+				if err != nil || line == "\r\n" {
+					break
+				}
+			}
+			got <- all
+			if protocol == "icecast" { // Shoutcast waits for no answer to its headers
+				_, _ = io.WriteString(server, "HTTP/1.0 200 OK\r\n\r\n")
+			}
+		}()
+		b := New(newTestGuard())
+		defer b.Close()
+		_ = deck.SetDeadline(time.Now().Add(3 * time.Second))
+		_ = server.SetDeadline(time.Now().Add(3 * time.Second))
+		var err error
+		if protocol == "shoutcast" {
+			err = b.handshakeShoutcast(deck, cfg)
+		} else {
+			err = b.handshakeIcecast(deck, cfg)
+		}
+		if err != nil {
+			t.Fatalf("%s handshake: %v", protocol, err)
+		}
+		select {
+		case all := <-got:
+			return all
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s: the server never saw the end of the handshake", protocol)
+			return ""
+		}
+	}
+	plain := Config{Mountpoint: "/live", Username: "source", Password: "pw", StreamName: "Friday Night Mix"}
+	pasted := Config{Mountpoint: "/li\r\nve", Username: "sou\nrce", Password: "pw\r\n", StreamName: "Friday\r\n Night\x00 Mix\n"}
+	for _, protocol := range []string{"icecast", "shoutcast"} {
+		want, got := handshake(protocol, plain), handshake(protocol, pasted)
+		if got != want {
+			t.Errorf("%s: settings pasted with line breaks changed the handshake:\n got %q\nwant %q", protocol, got, want)
+		}
+	}
+}

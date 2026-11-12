@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/Cd1s/EngineX-OS/pkg/resourceguard"
 )
@@ -140,8 +141,22 @@ func New(guard *resourceguard.Guard) *Broadcaster {
 	}
 }
 
+// oneLine drops control characters. Mount point, login and stream name are
+// written as they are onto lines of the Icecast/Shoutcast handshake, so each has
+// to stay on its line: a pasted value that brought a line break along cut the
+// handshake in two (BH2-A3-7).
+func oneLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // normalizeConfig validates and applies defaults to a Config.
 func normalizeConfig(cfg *Config) error {
+	cfg.Mountpoint, cfg.Username, cfg.Password, cfg.StreamName = oneLine(cfg.Mountpoint), oneLine(cfg.Username), oneLine(cfg.Password), oneLine(cfg.StreamName)
 	cfg.Protocol = strings.ToLower(strings.TrimSpace(cfg.Protocol))
 	if cfg.Protocol == "" {
 		cfg.Protocol = DefaultProtocol
