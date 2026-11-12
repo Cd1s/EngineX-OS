@@ -357,3 +357,16 @@ func TestPipelineCoalescedBlocksAndBlockPlusDone(t *testing.T) {
 		}
 	})
 }
+
+func TestPipelineCompleteReportsRecordedPipelineError(t *testing.T) {
+	p := newPipeline(io.Discard)
+	if _, err := p.fromEngine([]byte("numChannels=2\nsampleRate=44100\nmaxBlockSize=4\n\naction=block\nnumSamples=0\n\naction=done\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	p.unpacked()
+	p.Write([]byte("numReturnChannels=8\n\nreturnFrames=0\n\nreturnFrames=0\n\n"))
+	err := p.Complete()
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("cannot unpack")) {
+		t.Fatalf("Complete masked p.err: got %v", err)
+	}
+}
