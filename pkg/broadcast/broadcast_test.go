@@ -2,7 +2,9 @@ package broadcast
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -600,36 +603,18 @@ func TestWAVAndOggStreaming(t *testing.T) {
 		t.Fatal("timeout waiting for WAV stream header")
 	}
 
-	// Test OGG container page
+	// Ogg: no Vorbis/Opus encoder on any deck. The old code sent an "OggS" page that
+	// wrapped raw PCM bytes (undecodable); now nothing is sent and the status says why.
 	lnOgg, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen error: %v", err)
 	}
 	defer lnOgg.Close()
-
-	doneOgg := make(chan struct{})
+	oggConnected := make(chan struct{}, 1)
 	go func() {
-		conn, err := lnOgg.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		reader := bufio.NewReader(conn)
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil || strings.TrimSpace(line) == "" {
-				break
-			}
-		}
-		_, _ = io.WriteString(conn, "HTTP/1.0 200 OK\r\n\r\n")
-
-		pageBuf := make([]byte, 128)
-		n, err := conn.Read(pageBuf)
-		if err == nil && n >= 4 {
-			if string(pageBuf[0:4]) == "OggS" {
-				close(doneOgg)
-			}
+		if conn, err := lnOgg.Accept(); err == nil {
+			oggConnected <- struct{}{}
+			conn.Close()
 		}
 	}()
 
@@ -645,11 +630,17 @@ func TestWAVAndOggStreaming(t *testing.T) {
 	if err := bOgg.Configure(cfgOgg); err != nil {
 		t.Fatalf("failed to configure ogg: %v", err)
 	}
-
+	deadline := time.Now().Add(3 * time.Second)
+	for bOgg.Status().LastError == "" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if st := bOgg.Status(); !strings.Contains(st.LastError, "Ogg") || st.Streaming {
+		t.Fatalf("ogg: status %+v, want a clear Ogg encoder error", st)
+	}
 	select {
-	case <-doneOgg:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timeout waiting for Ogg stream page")
+	case <-oggConnected:
+		t.Fatal("ogg: connected to the server without an encoder")
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
@@ -918,5 +909,54 @@ func TestCustomUsernameNormalized(t *testing.T) {
 	}
 	if st := b.Status(); st.Username != DefaultUsername {
 		t.Fatalf("empty username should default to source, got %q", st.Username)
+	}
+}
+
+// #50: the feed is 48 kHz (the hook resamples the master bus to it), so the WAV
+// header must say 48000 Hz like X-Audio-Format and the LAN path. It said 44100.
+func TestWAVHeaderMatchesFeedRate(t *testing.T) {
+	hdr := WAVHeader()
+	if rate := binary.LittleEndian.Uint32(hdr[24:28]); rate != 48000 || SampleRate != 48000 {
+		t.Fatalf("WAV header rate %d, SampleRate %d, want 48000", rate, SampleRate)
+	}
+	if byteRate := binary.LittleEndian.Uint32(hdr[28:32]); byteRate != 48000*4 {
+		t.Fatalf("WAV byte rate %d, want %d", byteRate, 48000*4)
+	}
+}
+
+// #50: the Engine hook keeps the FIFO open between audio blocks. An open but idle
+// writer must not park the capture loop (local listeners then get no silence at
+// all); data written by the hook is read as soon as it is there.
+func TestReadPCMFromIdleFIFOWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feed.pcm")
+	if err := syscall.Mkfifo(path, 0o644); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	r, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	w, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	got := make(chan []byte, 1)
+	go func() { got <- readPCM(r) }()
+	select {
+	case pcm := <-got:
+		if pcm != nil {
+			t.Fatalf("idle writer: got %d bytes, want none", len(pcm))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("readPCM blocked on an idle FIFO writer")
+	}
+	frame := bytes.Repeat([]byte{1, 2, 3, 4}, 1152)
+	if _, err := w.Write(frame); err != nil {
+		t.Fatal(err)
+	}
+	if pcm := readPCM(r); !bytes.Equal(pcm, frame) {
+		t.Fatalf("got %d bytes, want the written frame", len(pcm))
 	}
 }

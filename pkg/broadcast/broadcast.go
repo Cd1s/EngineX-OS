@@ -3,7 +3,6 @@ package broadcast
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
@@ -35,6 +34,18 @@ const (
 	DefaultStreamName = "EngineX OS Live Mix"
 	DefaultInputPath  = "/tmp/sc5000-broadcast.pcm"
 )
+
+// No deck image ships an MP3 or Ogg encoder (no lame, no ffmpeg binary; the stock
+// libavcodec has no MP3 encoder). Pushing such a stream would send garbage, so the
+// session fails with a status that says what works instead.
+var (
+	ErrNoMP3Encoder = errors.New("MP3 needs lame or ffmpeg and this deck has neither: set the format to wav, or listen on /live.wav")
+	ErrNoOggEncoder = errors.New("Ogg needs a Vorbis/Opus encoder and this deck has none: set the format to wav, or listen on /live.wav")
+)
+
+// SampleRate is the rate of the PCM feed: the Engine hook (#50) resamples the
+// master bus to 48 kHz s16le stereo, matching X-Audio-Format and the LAN path.
+const SampleRate = 48000
 
 // Config specifies live stream parameters.
 type Config struct {
@@ -368,8 +379,8 @@ func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle)
 		}()
 	}
 
-	// 1152 samples per MPEG frame at 44.1kHz = ~26.122ms
-	ticker := time.NewTicker(time.Duration(1152) * time.Second / 44100)
+	// 1152 samples per MPEG frame at 48 kHz = 24 ms
+	ticker := time.NewTicker(time.Duration(1152) * time.Second / SampleRate)
 	defer ticker.Stop()
 
 	var inputF *os.File
@@ -417,12 +428,16 @@ func (b *Broadcaster) workerLoop(ctx context.Context, t *resourceguard.Throttle)
 	}
 }
 
-// readPCM reads up to one frame of PCM from f, looping regular files; nil when nothing is available.
+// readPCM reads what is available of the PCM feed (up to two frames, so a late tick
+// catches up), looping regular files; nil when nothing is available. A FIFO whose
+// writer is connected but idle must not park the capture loop: the read gives up
+// after a few milliseconds and the caller sends silence.
 func readPCM(f *os.File) []byte {
 	if f == nil {
 		return nil
 	}
-	buf := make([]byte, 1152*4)
+	buf := make([]byte, 2*1152*4)
+	_ = f.SetReadDeadline(time.Now().Add(5 * time.Millisecond)) // no-op error on regular files
 	n, err := f.Read(buf)
 	if err == io.EOF {
 		_, _ = f.Seek(0, 0)
@@ -475,6 +490,15 @@ func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []
 	if err != nil {
 		return false, err
 	}
+	var encoder *exec.Cmd
+	switch cfg.Format {
+	case "mp3":
+		if encoder = mp3EncoderFn(ctx, cfg.Bitrate); encoder == nil {
+			return false, ErrNoMP3Encoder
+		}
+	case "ogg":
+		return false, ErrNoOggEncoder
+	}
 
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	var conn net.Conn
@@ -524,7 +548,7 @@ func (b *Broadcaster) streamOnce(ctx context.Context, cfg Config, feed <-chan []
 	b.lastError = ""
 	b.mu.Unlock()
 
-	return true, b.streamFrames(ctx, conn, cfg, feed)
+	return true, b.streamFrames(ctx, conn, cfg, feed, encoder)
 }
 
 // writeConn writes with a 5s deadline so a stalled server cannot block the session forever.
@@ -534,21 +558,14 @@ func writeConn(conn net.Conn, p []byte) error {
 	return err
 }
 
-// streamFrames sends the container header and then frames until ctx ends or a write fails.
-func (b *Broadcaster) streamFrames(ctx context.Context, conn net.Conn, cfg Config, feed <-chan []byte) error {
-	// Send initial container header if required
-	if cfg.Format == "wav" {
+// streamFrames sends a WAV stream, or the external MP3 encoder's output, until ctx ends or a write fails.
+func (b *Broadcaster) streamFrames(ctx context.Context, conn net.Conn, cfg Config, feed <-chan []byte, encoder *exec.Cmd) error {
+	if encoder == nil {
 		hdr := makeWAVHeader()
 		if err := writeConn(conn, hdr); err != nil {
 			return err
 		}
 		b.bytesSent.Add(int64(len(hdr)))
-	} else if cfg.Format == "ogg" {
-		bos := makeOggPage(0x02, 0, 0x12345678, 0, []byte("EngineX-OS-Audio-BOS"))
-		if err := writeConn(conn, bos); err != nil {
-			return err
-		}
-		b.bytesSent.Add(int64(len(bos)))
 	}
 
 	// Drop PCM queued while we were connecting so the stream starts live.
@@ -560,15 +577,9 @@ func (b *Broadcaster) streamFrames(ctx context.Context, conn net.Conn, cfg Confi
 		}
 	}
 
-	if cfg.Format == "mp3" {
-		if cmd := mp3EncoderFn(ctx, cfg.Bitrate); cmd != nil {
-			return b.streamEncodedMP3(ctx, conn, cmd, feed)
-		}
+	if encoder != nil {
+		return b.streamEncodedMP3(ctx, conn, encoder, feed)
 	}
-
-	var oggSeq uint32 = 1
-	var oggGranule uint64 = 1152
-
 	for {
 		var pcm []byte
 		select {
@@ -576,17 +587,7 @@ func (b *Broadcaster) streamFrames(ctx context.Context, conn net.Conn, cfg Confi
 			return ctx.Err()
 		case pcm = <-feed:
 		}
-
-		var frame []byte
-		switch cfg.Format {
-		case "wav":
-			frame = nextWAVFrame(pcm)
-		case "ogg":
-			frame = nextOggFrame(pcm, &oggSeq, &oggGranule)
-		default:
-			frame = nextMP3Frame(cfg, pcm)
-		}
-
+		frame := nextWAVFrame(pcm)
 		if err := writeConn(conn, frame); err != nil {
 			return err
 		}
@@ -597,16 +598,16 @@ func (b *Broadcaster) streamFrames(ctx context.Context, conn net.Conn, cfg Confi
 // mp3EncoderFn builds the external MP3 encoder command; tests replace it.
 var mp3EncoderFn = newMP3Encoder
 
-// newMP3Encoder returns lame or ffmpeg reading s16le 44.1kHz stereo on stdin and writing MP3
-// to stdout, or nil when neither is on PATH (callers then fall back to nextMP3Frame placeholders).
+// newMP3Encoder returns lame or ffmpeg reading s16le 48 kHz stereo on stdin and writing MP3
+// to stdout, or nil when neither is on PATH (streamOnce then fails with ErrNoMP3Encoder).
 // The command is killed with its whole process group when ctx ends.
 func newMP3Encoder(ctx context.Context, bitrate int) *exec.Cmd {
 	br := strconv.Itoa(bitrate)
 	var cmd *exec.Cmd
 	if p, err := exec.LookPath("lame"); err == nil {
-		cmd = exec.CommandContext(ctx, p, "-r", "-s", "44.1", "--signed", "--little-endian", "--bitwidth", "16", "-m", "s", "-b", br, "--silent", "-", "-")
+		cmd = exec.CommandContext(ctx, p, "-r", "-s", "48", "--signed", "--little-endian", "--bitwidth", "16", "-m", "s", "-b", br, "--silent", "-", "-")
 	} else if p, err := exec.LookPath("ffmpeg"); err == nil {
-		cmd = exec.CommandContext(ctx, p, "-loglevel", "quiet", "-fflags", "+nobuffer", "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "pipe:0", "-f", "mp3", "-b:a", br+"k", "-flush_packets", "1", "pipe:1")
+		cmd = exec.CommandContext(ctx, p, "-loglevel", "quiet", "-fflags", "+nobuffer", "-f", "s16le", "-ar", strconv.Itoa(SampleRate), "-ac", "2", "-i", "pipe:0", "-f", "mp3", "-b:a", br+"k", "-flush_packets", "1", "pipe:1")
 	} else {
 		return nil
 	}
@@ -691,7 +692,7 @@ func (b *Broadcaster) handshakeIcecast(conn net.Conn, cfg Config) error {
 			"Content-Type: %s\r\n"+
 			"Ice-Name: %s\r\n"+
 			"Ice-Bitrate: %d\r\n"+
-			"Ice-Audio-Info: ice-samplerate=44100;ice-bitrate=%d;ice-channels=2\r\n"+
+			"Ice-Audio-Info: ice-samplerate=48000;ice-bitrate=%d;ice-channels=2\r\n"+
 			"\r\n",
 		cfg.Mountpoint, auth, contentType, cfg.StreamName, cfg.Bitrate, cfg.Bitrate,
 	)
@@ -783,68 +784,12 @@ func (b *Broadcaster) handshakeShoutcast(conn net.Conn, cfg Config) error {
 	return nil
 }
 
-// nextMP3Frame generates a valid MPEG-1 Layer III 44.1kHz stereo audio frame.
-func nextMP3Frame(cfg Config, pcm []byte) []byte {
-	// Frame size = 144 * Bitrate / SampleRate
-	frameLen := (144 * cfg.Bitrate * 1000) / 44100
-	if frameLen < 4 {
-		frameLen = 626
-	}
-	frame := make([]byte, frameLen)
-
-	// MPEG-1 Layer III 44.1kHz Stereo Header
-	frame[0] = 0xFF
-	frame[1] = 0xFB // Sync (11 bits) + Version 1 (2 bits) + Layer III (2 bits) + No CRC (1 bit)
-
-	var brIdx byte
-	switch cfg.Bitrate {
-	case 128:
-		brIdx = 0x9
-	case 192:
-		brIdx = 0xB
-	case 256:
-		brIdx = 0xD
-	case 320:
-		brIdx = 0xE
-	default:
-		brIdx = 0xB
-	}
-
-	frame[2] = (brIdx << 4) // 44.1kHz (00), Padding (0), Private (0)
-	frame[3] = 0x00         // Stereo (00), Mode Ext (00), Copy (0), Original (0), Emphasis (00)
-
-	// Bytes 4..35: Side info (zeros for empty/silent granule data)
-	// Bytes 36..frameLen: Ancillary PCM digest
-	if len(pcm) > 0 {
-		digest := sha256.Sum256(pcm)
-		copy(frame[36:], digest[:])
-	} else {
-		copy(frame[36:], []byte("EngineX-OS-MP3-Silence-Frame"))
-	}
-	return frame
-}
-
 // nextWAVFrame returns the captured PCM, or 1152 samples of silence.
 func nextWAVFrame(pcm []byte) []byte {
 	if len(pcm) > 0 {
 		return pcm
 	}
 	return make([]byte, 1152*4) // 1152 samples * 2 channels * 2 bytes/sample
-}
-
-// nextOggFrame creates a valid Ogg page containing audio payload.
-func nextOggFrame(pcm []byte, seq *uint32, granule *uint64) []byte {
-	payload := make([]byte, 128)
-	if len(pcm) > 0 {
-		payload = pcm[:min(len(pcm), len(payload))]
-	} else {
-		copy(payload, []byte("EngineX-OS-Ogg-Audio-Data"))
-	}
-
-	page := makeOggPage(0x00, *granule, 0x12345678, *seq, payload)
-	*seq++
-	*granule += 1152
-	return page
 }
 
 // UpdateMetadata pushes track metadata changes to the Icecast/Shoutcast server.
@@ -934,7 +879,7 @@ func (b *Broadcaster) UpdateMetadata(artist, title string) error {
 	return nil
 }
 
-// WAVHeader is the streaming WAV header (44.1kHz, stereo, 16-bit) that precedes raw PCM on /live.wav.
+// WAVHeader is the streaming WAV header (48 kHz, stereo, 16-bit) that precedes raw PCM on /live.wav.
 func WAVHeader() []byte { return makeWAVHeader() }
 
 // makeWAVHeader builds a standard 44-byte RIFF/WAVE header for streaming.
@@ -944,60 +889,14 @@ func makeWAVHeader() []byte {
 	binary.LittleEndian.PutUint32(hdr[4:8], 0x7FFFFFFF) // stream/unknown size
 	copy(hdr[8:12], "WAVE")
 	copy(hdr[12:16], "fmt ")
-	binary.LittleEndian.PutUint32(hdr[16:20], 16)      // PCM header size
-	binary.LittleEndian.PutUint16(hdr[20:22], 1)       // PCM
-	binary.LittleEndian.PutUint16(hdr[22:24], 2)       // 2 channels
-	binary.LittleEndian.PutUint32(hdr[24:28], 44100)   // 44.1kHz
-	binary.LittleEndian.PutUint32(hdr[28:32], 44100*4) // byte rate
-	binary.LittleEndian.PutUint16(hdr[32:34], 4)       // block align
-	binary.LittleEndian.PutUint16(hdr[34:36], 16)      // 16 bits
+	binary.LittleEndian.PutUint32(hdr[16:20], 16)           // PCM header size
+	binary.LittleEndian.PutUint16(hdr[20:22], 1)            // PCM
+	binary.LittleEndian.PutUint16(hdr[22:24], 2)            // 2 channels
+	binary.LittleEndian.PutUint32(hdr[24:28], SampleRate)   // 48 kHz
+	binary.LittleEndian.PutUint32(hdr[28:32], SampleRate*4) // byte rate
+	binary.LittleEndian.PutUint16(hdr[32:34], 4)            // block align
+	binary.LittleEndian.PutUint16(hdr[34:36], 16)           // 16 bits
 	copy(hdr[36:40], "data")
 	binary.LittleEndian.PutUint32(hdr[40:44], 0x7FFFFFFF) // stream size
 	return hdr
-}
-
-// Ogg CRC-32 lookup table (polynomial 0x04c11db7).
-var oggCRCTable [256]uint32
-
-func init() {
-	for i := 0; i < 256; i++ {
-		curr := uint32(i) << 24
-		for j := 0; j < 8; j++ {
-			if (curr & 0x80000000) != 0 {
-				curr = (curr << 1) ^ 0x04c11db7
-			} else {
-				curr <<= 1
-			}
-		}
-		oggCRCTable[i] = curr
-	}
-}
-
-func oggChecksum(buf []byte) uint32 {
-	var crc uint32
-	for _, b := range buf {
-		crc = (crc << 8) ^ oggCRCTable[byte(crc>>24)^b]
-	}
-	return crc
-}
-
-// makeOggPage constructs a valid Ogg bitstream page with calculated CRC.
-func makeOggPage(headerType byte, granule uint64, serial uint32, seq uint32, payload []byte) []byte {
-	if len(payload) > 255 {
-		payload = payload[:255]
-	}
-	page := make([]byte, 27+1+len(payload))
-	copy(page[0:4], "OggS")
-	page[4] = 0 // structure version
-	page[5] = headerType
-	binary.LittleEndian.PutUint64(page[6:14], granule)
-	binary.LittleEndian.PutUint32(page[14:18], serial)
-	binary.LittleEndian.PutUint32(page[18:22], seq)
-	page[26] = 1 // 1 segment
-	page[27] = byte(len(payload))
-	copy(page[28:], payload)
-
-	crc := oggChecksum(page)
-	binary.LittleEndian.PutUint32(page[22:26], crc)
-	return page
 }

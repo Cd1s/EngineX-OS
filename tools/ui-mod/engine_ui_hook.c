@@ -16,6 +16,7 @@
 #include <netdb.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -36,6 +37,11 @@
 #include "echo_out.h"
 #include "pioneer_master.h"
 #include "pioneer_ms.h"
+#include "live_tap.h"
+#ifndef SC_TAP_PATH
+#define SC_TAP_PATH "/tmp/sc5000-broadcast.pcm" // pkg/broadcast DefaultInputPath
+#endif
+static struct sc_tap live_tap = {.fd = -1}; // #50, every Engine build
 #if !defined(__aarch64__)
 #include "pioneer_fx.h"
 #include "fx_selector.h"
@@ -402,7 +408,22 @@ static void *lim_poll(void *arg) {
     return NULL;
 }
 
-static void lim_start_poll(void) {
+// #50: drains the live tap off the audio thread. SIGPIPE is blocked here so a
+// listener that goes away makes write() fail with EPIPE instead of killing Engine.
+static void *live_tap_drain(void *arg) {
+    (void)arg;
+    sigset_t pipe_set;
+    sigemptyset(&pipe_set);
+    sigaddset(&pipe_set, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipe_set, NULL);
+    for (;;) {
+        sc_tap_drain_once(&live_tap, SC_TAP_PATH);
+        usleep(live_tap.fd < 0 ? 500000 : 10000);
+    }
+    return NULL;
+}
+
+static void start_thread(void *(*fn)(void *)) {
     pthread_attr_t attr;
     struct sched_param param = {.sched_priority = 0};
     pthread_t thread;
@@ -412,9 +433,11 @@ static void lim_start_poll(void) {
     pthread_attr_setschedpolicy(&attr, SCHED_OTHER);
     pthread_attr_setschedparam(&attr, &param);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    pthread_create(&thread, &attr, lim_poll, NULL);
+    pthread_create(&thread, &attr, fn, NULL);
     pthread_attr_destroy(&attr);
 }
+
+static void lim_start_poll(void) { start_thread(lim_poll); start_thread(live_tap_drain); }
 
 static int official_update_host(const char *node) {
     static const char host[] = "autoupdate.airmusictech.com";
@@ -910,6 +933,9 @@ static uint32_t hook_master_output(void *host, void *context, int in_channels, c
             if (gain) sc_gain_planar(&master_gain[ch / 2], out[ch], r, (unsigned)frames);
             sc_lim_planar(&master_lim[ch / 2], out[ch], r, (unsigned)frames);
         }
+    // #50 Live Stream: the first pair as it goes to the DAC; one relaxed load when nobody listens.
+    if (out && frames > 0 && out_channels > 0)
+        sc_tap_push(&live_tap, out[0], out_channels > 1 ? out[1] : NULL, (uint32_t)frames);
     return rc;
 }
 
