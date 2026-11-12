@@ -38,13 +38,13 @@ func TestDownloadSurfacesQueueErrorDetail(t *testing.T) {
 		json.NewEncoder(w).Encode(QueueStatus{
 			ID:    "job-url",
 			State: "error",
-			Error: "cdn failure on https://cdns-proxy.dzcdn.net/mobile/1/secret-token",
+			Error: "cdn failure on https://cdns-proxy.dzcdn.net/mobile/1/secret-token arl=0123456789abcdef0123456789abcdef0123456789abcdef",
 		})
 	}))
 	defer leakSrv.Close()
 	_, err = (&Client{BaseURL: leakSrv.URL, PollInterval: time.Millisecond}).Download(context.Background(), providers.Track{ID: "42", Provider: "deezer"}, nil)
-	if err == nil || strings.Contains(err.Error(), "secret-token") || !strings.Contains(err.Error(), "cdn failure") {
-		t.Fatalf("expected URL redaction with preserved error summary, got: %v", err)
+	if err == nil || strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "0123456789abcdef0123456789abcdef") || !strings.Contains(err.Error(), "cdn failure") {
+		t.Fatalf("expected URL and bare-token redaction with preserved error summary, got: %v", err)
 	}
 
 	dirSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
