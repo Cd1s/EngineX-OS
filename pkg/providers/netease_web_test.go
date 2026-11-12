@@ -56,6 +56,34 @@ func TestNeteaseDirectQRLogin(t *testing.T) {
 	}
 }
 
+func TestNeteasePollQRRejectsNullProfileWithoutOverwritingLogin(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/weapi/login/qrcode/client/login":
+			http.SetCookie(w, &http.Cookie{Name: "MUSIC_U", Value: "unverified-cookie"})
+			json.NewEncoder(w).Encode(map[string]any{"code": 803})
+		case "/weapi/w/nuser/account/get":
+			json.NewEncoder(w).Encode(map[string]any{"code": 200, "profile": nil})
+		default:
+			t.Errorf("unexpected %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	cookiePath := t.TempDir() + "/owner.json"
+	n := &Netease{WebURL: srv.URL, CookiePath: cookiePath, Cookie: "MUSIC_U=existing", UserID: 99}
+	code, err := n.PollQR(context.Background(), "K2")
+	if err == nil || code == 803 {
+		t.Fatalf("PollQR accepted null profile: code=%d err=%v LoggedIn=%v", code, err, n.LoggedIn())
+	}
+	if !n.LoggedIn() || n.UserID != 99 || n.Cookie != "MUSIC_U=existing" {
+		t.Fatalf("failed PollQR clobbered prior login: Cookie=%q UserID=%d", n.Cookie, n.UserID)
+	}
+	if _, statErr := os.Stat(cookiePath); !os.IsNotExist(statErr) {
+		t.Fatalf("failed PollQR wrote CookiePath: %v", statErr)
+	}
+}
+
 func TestWeapiEncryptionMatchesTheFormat(t *testing.T) {
 	cipherText, err := weapiAES([]byte("hello"), weapiNonce)
 	if err != nil {
