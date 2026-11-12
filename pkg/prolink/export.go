@@ -1096,6 +1096,9 @@ func (r *exportRun) statusPacket() []byte {
 		if master {
 			b[0x89] |= 0x20
 			b[0x9e] = 1 // Mm: a master's status has it next to the flag (Sync-Master capture)
+			if d.BPM <= 0 {
+				b[0x9e] = 2 // master that cannot send tempo and beat (a player's non-rekordbox track): our deck has no beat data
+			}
 		}
 		if d.BPM > 0 {
 			binary.BigEndian.PutUint16(b[0x90:], 0x8000)
