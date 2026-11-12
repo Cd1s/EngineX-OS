@@ -6,7 +6,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 
 ---
 
-## Regression Table (87 Rows)
+## Regression Table (88 Rows)
 
 | # | Behaviour that must keep working | Issue / commit that fixed it | How it is checked (automated test name, or exact real-deck / sandbox step) | Release gate / deck acceptance / recording coverage |
 | --- | --- | --- | --- | --- |
@@ -97,6 +97,7 @@ Rows marked **`[NO AUTOMATED TEST]`** in the verification column do not yet have
 | 85 | **Remote Mounts tell the truth** (5.3.0.4 bug hunt BH-GC2-14, Remote Mounts part: a mount whose command failed, e.g. `sshfs` missing on the stock rootfs, still answered 200; the saved `mounted: true` was shown after a reboot that remounts nothing; switching a share off left it mounted): a failed mount answers 502 with the reason (the settings are kept); `mounted` in the list comes from the live mount table; a share switched off is unmounted, and a changed one is unmounted before it is mounted again | BH-GC2-14 (`#222`) | `pkg/webui/mounts_truth_test.go` (`TestRemoteMountsReportTheTruth`), `TestRemoteMountsManagementAndOmniSourceSync`; deck: add an SFTP share: the console shows the mount error instead of a mounted share | Web Console Remote Mounts |
 | 86 | **Closing the web server stops its live-stream broadcaster, and the first-generation thread sweeper follows a restarted Engine** (5.3.0.4 bug hunt BH-GC2-16: `Server.Close` left the Broadcaster's goroutines and sockets running and the server in the package maps; `sc5000-perf-tune`'s periodic sweeper checked the Engine PID of its previous scan, so an Engine restarted by the vendor script under a new PID ended the sweeping and late Engine threads stayed on the GUI cores): `Close` stops the Broadcaster and drops the server's entries; the sweeper rescans before it decides Engine is gone | BH-GC2-16 (`#222`) | `pkg/webui/broadcast_close_test.go` (`TestServerCloseStopsItsBroadcaster`); `tests/test_rootfs_overlay.sh` (`the thread sweeper follows Engine across an in-loop restart under a new PID`) | Live stream / first-generation performance |
 | 87 | **An Engine stick too large to heal at the mount is remembered whatever port it is in** (bug hunt BH2-A1-2, Engine-library half: the "too large to heal" record (`slowheal-*` in the hook runtime) was keyed by `statvfs` `f_fsid`, which on FAT, exFAT and HFS+ is the device number, so the same stick in another port or inserted after another stick (`sdb1` instead of `sda1`) was held for the whole pre-mount heal budget again): the record is keyed by the size of the volume and of `m.db` only, as the rekordbox record is | BH2-A1-2 | `tools/edisksd-hook/test_edisksd_hook.c` (`test_heal_marker_survives_another_port`, `--mounts`: two tmpfs mounts with different `f_fsid`) | USB / Engine stick mount |
+| 88 | **An HFS+ stick whose Engine Library holds an entry with a very long name still gets its view** (bug hunt BH2-A1-6: the view record keeps `Engine Library/<name>` in `NAME_MAX` bytes, so one valid entry name over 240 bytes made `bind_native` fail with `ENAMETOOLONG` and the whole stick had no HFS+ view): that one entry is left out of the view with a note in the log; everything else is shown as before | BH2-A1-6 | `tools/edisksd-hook/test_edisksd_hook.c` (`test_hfs_view_with_a_long_entry_name`, `--mounts`) | USB / HFS+ stick view |
 
 ---
 
