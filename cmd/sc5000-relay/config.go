@@ -319,25 +319,24 @@ func clientIP(r *http.Request) string {
 	if ip != nil && trustedProxy(ip) {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
-			return strings.TrimSpace(parts[len(parts)-1])
-		}
-		if v := r.Header.Get("X-Real-IP"); v != "" {
-			return v
+			if fwd := net.ParseIP(strings.TrimSpace(parts[len(parts)-1])); fwd != nil {
+				return fwd.String()
+			}
+		} else if fwd := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); fwd != nil {
+			return fwd.String()
 		}
 	}
 	return host
 }
 
-var _, cgnat, _ = net.ParseCIDR("100.64.0.0/10")
-
-// trustedProxies is set by -trusted-proxies; nil keeps the old default of every
-// private, loopback and tailnet peer. Set it to the edge proxy's address so
-// other LAN hosts cannot choose their own limiter key (#11).
+// trustedProxies is set by -trusted-proxies; nil trusts loopback peers only (a
+// proxy or tunnel on the same host). Any other host uses its own socket
+// address, so a LAN client cannot choose its own limiter key (#11).
 var trustedProxies []*net.IPNet
 
 func trustedProxy(ip net.IP) bool {
 	if trustedProxies == nil {
-		return ip.IsPrivate() || ip.IsLoopback() || cgnat.Contains(ip)
+		return ip.IsLoopback()
 	}
 	for _, n := range trustedProxies {
 		if n.Contains(ip) {
