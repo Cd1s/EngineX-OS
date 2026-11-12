@@ -457,6 +457,7 @@ func (r *shadowMP3Frames) frame() error {
 }
 
 func shadowEnvelopeMP3(r *bufio.Reader, peaks [3]float64, ticker Ticker) (*ShadowEnvelope, error) {
+	startTrim := int64(audioheader.PeekMP3StartOffset(r))
 	frames := &shadowMP3Frames{r: r}
 	dec, err := mp3.NewDecoder(frames)
 	if frames.terminal != nil && frames.terminal != io.EOF {
@@ -473,6 +474,7 @@ func shadowEnvelopeMP3(r *bufio.Reader, peaks [3]float64, ticker Ticker) (*Shado
 		return nil, errors.New("analyzer: shadow MP3: decoder rate differs from frame header")
 	}
 	var buf [4 * shadowEnvelopeChunk]byte // Decoder output is always stereo s16le.
+	var trimmed int64
 	for {
 		if err := e.tick(); err != nil {
 			return nil, err
@@ -485,6 +487,10 @@ func shadowEnvelopeMP3(r *bufio.Reader, peaks [3]float64, ticker Ticker) (*Shado
 			return nil, errors.New("analyzer: shadow MP3: truncated PCM frame")
 		}
 		for i := 0; i < n; i += 4 {
+			if trimmed < startTrim {
+				trimmed++
+				continue
+			}
 			l := int16(binary.LittleEndian.Uint16(buf[i:]))
 			rr := int16(binary.LittleEndian.Uint16(buf[i+2:]))
 			if err := e.add((float64(l) + float64(rr)) / 65536); err != nil {
@@ -498,7 +504,7 @@ func shadowEnvelopeMP3(r *bufio.Reader, peaks [3]float64, ticker Ticker) (*Shado
 			return nil, fmt.Errorf("analyzer: shadow MP3: %w", err)
 		}
 	}
-	if e.samples != frames.samples || frames.off != frames.n {
+	if e.samples+trimmed != frames.samples || frames.off != frames.n {
 		return nil, errors.New("analyzer: shadow MP3: incomplete decoded frame")
 	}
 	return e.finish()

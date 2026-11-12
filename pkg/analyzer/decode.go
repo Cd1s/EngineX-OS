@@ -308,10 +308,11 @@ func DecodeMP3(r io.Reader) (audio *Audio, err error) {
 		}
 	}()
 	// go-mp3 不跳过 ID3v2 标签，这里手动跳过。
-	br := bufio.NewReader(r)
+	br := bufio.NewReaderSize(r, 8192)
 	if err := audioheader.SkipID3(br); err != nil {
 		return nil, err
 	}
+	startTrim := audioheader.PeekMP3StartOffset(br)
 	dec, err := mp3.NewDecoder(br)
 	if err != nil {
 		return nil, fmt.Errorf("analyzer: mp3: %w", err)
@@ -322,13 +323,18 @@ func DecodeMP3(r io.Reader) (audio *Audio, err error) {
 	}
 	a := &Audio{SampleRate: sampleRate, Channels: 2, BitsPerSample: 16, Format: "mp3"}
 	buf := make([]byte, 4*4096)
+	trimmed := 0
 	for {
 		n, err := io.ReadFull(dec, buf)
-		if len(a.Samples)+n/4 > MaxDecodedSamples {
-			return nil, errors.New("analyzer: PCM memory limit exceeded")
-		}
 		n -= n % 4
 		for off := 0; off < n; off += 4 {
+			if trimmed < startTrim {
+				trimmed++
+				continue
+			}
+			if len(a.Samples)+1 > MaxDecodedSamples {
+				return nil, errors.New("analyzer: PCM memory limit exceeded")
+			}
 			l := int16(binary.LittleEndian.Uint16(buf[off:]))
 			rr := int16(binary.LittleEndian.Uint16(buf[off+2:]))
 			a.Samples = append(a.Samples, float32((float64(l)+float64(rr))/65536))
