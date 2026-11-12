@@ -56,7 +56,7 @@
 
 - 前置条件：先升到官方 Engine OS 5.3.0。首次经 `EngineX-Installer` 解锁装好后，后续版本既可把对应 `*-Update.img` 拷入 FAT32/exFAT U 盘插机直刷，也可在碟机屏幕 设置 → 关于 / 更新 → 更新 一键完成（下载 `*-Update.img`、校验 128 字节头 SHA-256 与包内 `SHA256SUMS`、更新 `<DATA>` 并重启服务，#119 / #215）。
 - 卸载：`sh <DATA>/bundle/uninstall.sh && reboot`。
-- **AZ04（PRIME 4 G2 / SYSTEM ONE）能力**（`build-data-bundle.py` 的 `AZ04_NOTE`，README 同，#149）：UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和各服务之外，已带 16 处 Engine 补丁（含原厂 Apple Music 解锁）、14 处 DSP 防护、0dB 软限幅、自动增益、Echo Out、SQLite 调优和 64 位 `OfflineAnalyzer` 的 `.perf` 直注；4 碟解锁仅限单机播放器；Stems 保持官方原样；沙箱里没看到实际界面（需要 OP-TEE），待实机核实。
+- **AZ04（PRIME 4 G2 / SYSTEM ONE）能力**（`build-data-bundle.py` 的 `AZ04_NOTE`，README 同，#149）：UI 包、流媒体网关（Deezer、SoundCloud、Beatport）和各服务之外，已带 16 处 Engine 补丁（含原厂 Apple Music 解锁）、14 处 DSP 防护、0dB 软限幅、自动增益、Echo Out、SQLite 调优和 64 位 `OfflineAnalyzer` 的 `.perf` 直注；PRIME 4 G2 原生即为 4 通道机型并支持四轨联机视图（SYSTEM ONE 为双通道机型保持双轨）；Stems 保持官方原样。
 - 6 款 armhf 二代机共用 SC LIVE 4 的 Engine 构建（同 BuildID），功能面与一代机基本一致，但没有实机验证（README 明说）。
 
 ### 1.3 EngineX-Installer（`cmd/enginex-installer`，#88/#89/#215）
