@@ -46,23 +46,8 @@ func TestReserveDeadlineCannotRemoveLiveDatabase(t *testing.T) {
 // the file is still one empty page, so SQLite lays out every later page with it.
 func reserve12Library(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "m.db")
+	path := reserve12Seed(t, "m.db")
 	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustExec(t, db, "PRAGMA user_version=4194305")
-	db.Close()
-	raw, err := os.ReadFile(path)
-	if err != nil || len(raw) != 4096 {
-		t.Fatalf("seed file: %d %v", len(raw), err)
-	}
-	raw[20] = 12
-	raw[105], raw[106] = 0x0f, 0xf4 // empty page 1: cell content must start inside the usable 4084 bytes
-	if err = os.WriteFile(path, raw, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	db, err = sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +66,71 @@ func reserve12Library(t *testing.T) string {
 	// AUTOINCREMENT counter ahead of max(id) must survive too.
 	mustExec(t, db, "UPDATE sqlite_sequence SET seq=900 WHERE name='Track'")
 	return path
+}
+
+// reserve12Seed is an empty database file whose pages reserve 12 bytes.
+func reserve12Seed(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, db, "PRAGMA user_version=4194305")
+	db.Close()
+	raw, err := os.ReadFile(path)
+	if err != nil || len(raw) != 4096 {
+		t.Fatalf("seed file: %d %v", len(raw), err)
+	}
+	raw[20] = 12
+	raw[105], raw[106] = 0x0f, 0xf4 // empty page 1: cell content must start inside the usable 4084 bytes
+	if err = os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A file that once held an AUTOINCREMENT table still has sqlite_sequence after the
+// table is gone; the rebuilt file has none, and the rebuild must not stop there (BH2-A1-5).
+func TestNormalizeReserveRebuildsLibraryWithLeftoverSequenceTable(t *testing.T) {
+	path := reserve12Seed(t, "hm.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	mustExec(t, db, "CREATE TABLE Gone(id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)")
+	mustExec(t, db, "INSERT INTO Gone(v) VALUES('x')")
+	mustExec(t, db, "DROP TABLE Gone")
+	mustExec(t, db, "CREATE TABLE Kept(id INTEGER PRIMARY KEY, v TEXT)")
+	mustExec(t, db, "INSERT INTO Kept(id,v) VALUES(7,'seven'),(40,'forty')")
+	var seq int
+	if err = db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='sqlite_sequence'").Scan(&seq); err != nil || seq != 1 {
+		t.Fatalf("setup: sqlite_sequence present=%d err=%v", seq, err)
+	}
+	db.Close()
+	if r, ok, err := Reserve(path); err != nil || !ok || r != 12 {
+		t.Fatalf("setup: reserve %d ok=%v err=%v", r, ok, err)
+	}
+	fixed, err := NormalizeReserve(path)
+	if err != nil || !fixed {
+		t.Fatalf("fixed=%v err=%v", fixed, err)
+	}
+	if r, _, _ := Reserve(path); r != 0 {
+		t.Fatalf("reserve after repair = %d", r)
+	}
+	out, err := Open(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	var rows, check string
+	if err = out.QueryRow("SELECT group_concat(id||v,',') FROM (SELECT id,v FROM Kept ORDER BY id)").Scan(&rows); err != nil || rows != "7seven,40forty" {
+		t.Fatalf("rows %q err=%v", rows, err)
+	}
+	if err = out.QueryRow("PRAGMA integrity_check").Scan(&check); err != nil || check != "ok" {
+		t.Fatalf("integrity %q err=%v", check, err)
+	}
 }
 
 func TestNormalizeReserveRebuildsLibraryWithReserve12(t *testing.T) {
