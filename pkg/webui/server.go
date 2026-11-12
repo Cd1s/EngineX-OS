@@ -9,6 +9,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -47,6 +48,7 @@ type pending struct {
 }
 type Config struct {
 	AccessToken                                                           string
+	Listen                                                                string // listen address, e.g. ":8080"
 	PublicURL                                                             string
 	SpotifyRedirectURL                                                    string
 	SpotifyClientID, SpotifyTokenPath, SpotifyBaseURL, SpotifyAccountsURL string
@@ -393,11 +395,111 @@ func LoadAccessToken(dir string) (token string, created bool, err error) {
 	return token, true, nil
 }
 
-func (s *Server) consoleQR(w http.ResponseWriter, r *http.Request) {
-	target := s.cfg.PublicURL
-	if target == "" {
-		target = "http://sc5000.lan:8080"
+func isLoopbackHost(h string) bool {
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
 	}
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isLoopbackOrLocal(h string) bool {
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
+	}
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+	if h == "" || h == "localhost" || h == "sc5000.lan" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+}
+
+func escapeZone(h string) string {
+	return strings.ReplaceAll(h, "%", "%25")
+}
+
+func formatHostPort(scheme, host, port string) string {
+	h := strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	hEsc := escapeZone(h)
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		if strings.Contains(hEsc, ":") {
+			return fmt.Sprintf("%s://[%s]", scheme, hEsc)
+		}
+		return fmt.Sprintf("%s://%s", scheme, hEsc)
+	}
+	if strings.Contains(hEsc, ":") {
+		return fmt.Sprintf("%s://[%s]:%s", scheme, hEsc, port)
+	}
+	return fmt.Sprintf("%s://%s:%s", scheme, hEsc, port)
+}
+
+func (s *Server) port() string {
+	if s.cfg.Listen != "" {
+		if _, p, err := net.SplitHostPort(s.cfg.Listen); err == nil && p != "" {
+			return p
+		}
+	}
+	return "8080"
+}
+
+func (s *Server) consoleTarget(r *http.Request) string {
+	if s.cfg.PublicURL != "" && s.cfg.PublicURL != "http://sc5000.lan:8080" {
+		return s.cfg.PublicURL
+	}
+	if r != nil && r.Host != "" && !isLoopbackOrLocal(r.Host) {
+		h := r.Host
+		port := ""
+		if host, p, err := net.SplitHostPort(r.Host); err == nil {
+			h, port = host, p
+		}
+		h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+		scheme := "http"
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			scheme = "https"
+		}
+		if port != "" {
+			return formatHostPort(scheme, h, port)
+		}
+		if strings.Contains(h, ":") {
+			return fmt.Sprintf("%s://[%s]", scheme, escapeZone(h))
+		}
+		return fmt.Sprintf("%s://%s", scheme, h)
+	}
+	port := s.port()
+	// If Listen was explicitly bound to loopback only (e.g. 127.0.0.1:9090 or [::1]:9090), LAN clients
+	// cannot reach it; use PublicTunnelURL if active, or format the local address.
+	if s.cfg.Listen != "" {
+		if h, _, err := net.SplitHostPort(s.cfg.Listen); err == nil && isLoopbackHost(h) {
+			if pub := s.PublicTunnelURL(); pub != "" {
+				return pub
+			}
+			return formatHostPort("http", h, port)
+		}
+	}
+	// If Listen was bound to a specific non-loopback host (e.g. 10.0.0.5:9090), prioritize it.
+	// The deck's listener is plaintext HTTP, so the direct IP URL is always http.
+	if s.cfg.Listen != "" {
+		if h, _, err := net.SplitHostPort(s.cfg.Listen); err == nil && h != "" && !isLoopbackOrLocal(h) {
+			return formatHostPort("http", h, port)
+		}
+	}
+	lan := lanHost()
+	if lan != "" && lan != "sc5000.lan" {
+		return formatHostPort("http", lan, port)
+	}
+	if pub := s.PublicTunnelURL(); pub != "" {
+		return pub
+	}
+	return formatHostPort("http", "sc5000.lan", port)
+}
+
+func (s *Server) consoleQR(w http.ResponseWriter, r *http.Request) {
+	target := s.consoleTarget(r)
 	png, err := qrcode.Encode(target, qrcode.Medium, 320)
 	if err != nil {
 		fail(w, 400, err)

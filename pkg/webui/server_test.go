@@ -3,8 +3,10 @@ package webui
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -367,5 +369,209 @@ func TestLoginAccessCodeInputAndLockout(t *testing.T) {
 	}
 	if code := login("K7M9-P4X2", "192.0.2.3"); code != http.StatusSeeOther {
 		t.Fatalf("other client: %d", code)
+	}
+}
+
+func TestConsoleQRTarget(t *testing.T) {
+	oldLanAddrs := lanAddrs
+	defer func() { lanAddrs = oldLanAddrs }()
+
+	// Inject a known private IP: 192.168.1.50
+	ip, mockNet, _ := net.ParseCIDR("192.168.1.50/24")
+	mockNet.IP = ip
+	lanAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{mockNet}, nil
+	}
+
+	// Case 1: Caller accessed via LAN IP / custom host (e.g. 192.168.1.100:8080)
+	ui := New(Config{StateDir: t.TempDir()}, nil)
+	r := httptest.NewRequest("GET", "/api/console-qr", nil)
+	r.Host = "192.168.1.100:8080"
+	target := ui.consoleTarget(r)
+	if target != "http://192.168.1.100:8080" {
+		t.Fatalf("target = %q, want http://192.168.1.100:8080", target)
+	}
+
+	// Case 2: Caller accessed via HTTPS proxy / forwarded header (with or without explicit port)
+	r = httptest.NewRequest("GET", "/api/console-qr", nil)
+	r.Host = "deck.local:8080"
+	r.Header.Set("X-Forwarded-Proto", "https")
+	if got := ui.consoleTarget(r); got != "https://deck.local:8080" {
+		t.Fatalf("target = %q, want https://deck.local:8080", got)
+	}
+
+	r = httptest.NewRequest("GET", "/api/console-qr", nil)
+	r.Host = "deck.example"
+	if got := ui.consoleTarget(r); got != "http://deck.example" {
+		t.Fatalf("target = %q, want http://deck.example", got)
+	}
+
+	// Case 2b: Non-loopback IPv6 host preserves brackets
+	r = httptest.NewRequest("GET", "/api/console-qr", nil)
+	r.Host = "[2001:db8::1]:8080"
+	if got := ui.consoleTarget(r); got != "http://[2001:db8::1]:8080" {
+		t.Fatalf("target = %q, want http://[2001:db8::1]:8080", got)
+	}
+
+	// Case 2c: Reverse proxy accessing loopback via HTTPS still generates http:// for the LAN device IP
+	rProxy := httptest.NewRequest("GET", "/api/console-qr", nil)
+	rProxy.Host = "localhost:8080"
+	rProxy.Header.Set("X-Forwarded-Proto", "https")
+	if got := ui.consoleTarget(rProxy); got != "http://192.168.1.50:8080" {
+		t.Fatalf("proxied loopback target = %q, want http://192.168.1.50:8080", got)
+	}
+
+	// Case 2d: Direct non-loopback IP accessed with X-Forwarded-Proto: https honors HTTPS scheme
+	rIPHTTPS := httptest.NewRequest("GET", "/api/console-qr", nil)
+	rIPHTTPS.Host = "10.0.0.5:9090"
+	rIPHTTPS.Header.Set("X-Forwarded-Proto", "https")
+	if got := ui.consoleTarget(rIPHTTPS); got != "https://10.0.0.5:9090" {
+		t.Fatalf("ip https target = %q, want https://10.0.0.5:9090", got)
+	}
+
+	// Case 2e: IPv6 with zone identifier (e.g. fe80::1%eth0) produces valid RFC 6874 URL with %25 and honors HTTPS
+	rZoneHTTPS := httptest.NewRequest("GET", "/api/console-qr", nil)
+	rZoneHTTPS.Host = "[fe80::1%eth0]:8080"
+	rZoneHTTPS.Header.Set("X-Forwarded-Proto", "https")
+	if got := ui.consoleTarget(rZoneHTTPS); got != "https://[fe80::1%25eth0]:8080" {
+		t.Fatalf("zone ipv6 https target = %q, want https://[fe80::1%%25eth0]:8080", got)
+	}
+
+	// Case 2f: IPv6 zone literal starting with 25 (e.g. fe80::1%25eth0) encodes as %2525eth0
+	rZone25 := httptest.NewRequest("GET", "/api/console-qr", nil)
+	rZone25.Host = "[fe80::1%25eth0]:8080"
+	if got := ui.consoleTarget(rZone25); got != "http://[fe80::1%2525eth0]:8080" {
+		t.Fatalf("zone starting with 25 target = %q, want http://[fe80::1%%2525eth0]:8080", got)
+	}
+
+	// Case 2g: Direct non-loopback IP accessed with actual TLS connection (r.TLS != nil, no X-Forwarded-Proto)
+	rDirectTLS := httptest.NewRequest("GET", "/api/console-qr", nil)
+	rDirectTLS.Host = "10.0.0.5:9090"
+	rDirectTLS.TLS = &tls.ConnectionState{}
+	if got := ui.consoleTarget(rDirectTLS); got != "https://10.0.0.5:9090" {
+		t.Fatalf("direct tls target = %q, want https://10.0.0.5:9090", got)
+	}
+
+	// Case 3: Caller accessed via loopback / SSH port forwarding (e.g. localhost:18080)
+	// Must point to device LAN IP and server's listening port (8080), NOT the client's forwarded port (18080).
+	r = httptest.NewRequest("GET", "/api/console-qr", nil)
+	r.Host = "localhost:18080"
+	if got := ui.consoleTarget(r); got != "http://192.168.1.50:8080" {
+		t.Fatalf("port forward target = %q, want http://192.168.1.50:8080", got)
+	}
+
+	// Case 3b: Loopback with custom server listening port
+	uiCustomListen := New(Config{Listen: ":9090", StateDir: t.TempDir()}, nil)
+	r = httptest.NewRequest("GET", "/api/console-qr", nil)
+	r.Host = "localhost:18080"
+	if got := uiCustomListen.consoleTarget(r); got != "http://192.168.1.50:9090" {
+		t.Fatalf("custom listen port target = %q, want http://192.168.1.50:9090", got)
+	}
+
+	// Case 3c: Explicit non-loopback Listen host binding (e.g. 10.0.0.5:9090) takes precedence over generic interface discovery
+	uiBound := New(Config{Listen: "10.0.0.5:9090", StateDir: t.TempDir()}, nil)
+	r = httptest.NewRequest("GET", "/api/console-qr", nil)
+	r.Host = "localhost:18080"
+	if got := uiBound.consoleTarget(r); got != "http://10.0.0.5:9090" {
+		t.Fatalf("bound host target = %q, want http://10.0.0.5:9090", got)
+	}
+
+	// Case 3d: Wildcard Listen addresses (0.0.0.0:9090 or [::]:9090) fall through to LAN IP rather than emitting unroutable wildcards
+	for _, wildcardListen := range []string{"0.0.0.0:9090", "[::]:9090"} {
+		uiWild := New(Config{Listen: wildcardListen, StateDir: t.TempDir()}, nil)
+		r = httptest.NewRequest("GET", "/api/console-qr", nil)
+		r.Host = "localhost:18080"
+		if got := uiWild.consoleTarget(r); got != "http://192.168.1.50:9090" {
+			t.Fatalf("wildcard %q target = %q, want http://192.168.1.50:9090", wildcardListen, got)
+		}
+	}
+
+	// Case 3e: Loopback-only Listen binding (e.g. 127.0.0.1:9090 or [::1]:9090) cannot be reached from LAN; does not falsely advertise LAN IP
+	uiLoopOnly := New(Config{Listen: "127.0.0.1:9090", StateDir: t.TempDir()}, nil)
+	r = httptest.NewRequest("GET", "/api/console-qr", nil)
+	r.Host = "localhost:8080"
+	if got := uiLoopOnly.consoleTarget(r); got != "http://127.0.0.1:9090" {
+		t.Fatalf("loopback-only listen target = %q, want http://127.0.0.1:9090", got)
+	}
+
+	uiLoopIPv6 := New(Config{Listen: "[::1]:9090", StateDir: t.TempDir()}, nil)
+	if got := uiLoopIPv6.consoleTarget(r); got != "http://[::1]:9090" {
+		t.Fatalf("ipv6 loopback-only listen target = %q, want http://[::1]:9090", got)
+	}
+
+	// Case 3f: IPv6 on default ports (80 for http, 443 for https) preserves square brackets
+	uiLoopIPv6Default := New(Config{Listen: "[::1]:80", StateDir: t.TempDir()}, nil)
+	if got := uiLoopIPv6Default.consoleTarget(r); got != "http://[::1]" {
+		t.Fatalf("ipv6 loopback default port target = %q, want http://[::1]", got)
+	}
+
+	uiBoundIPv6Default := New(Config{Listen: "[2001:db8::1]:80", StateDir: t.TempDir()}, nil)
+	if got := uiBoundIPv6Default.consoleTarget(r); got != "http://[2001:db8::1]" {
+		t.Fatalf("ipv6 non-loopback default port target = %q, want http://[2001:db8::1]", got)
+	}
+
+	uiBoundIPv6HTTPS := New(Config{Listen: "[2001:db8::1]:443", StateDir: t.TempDir()}, nil)
+	rHTTPS := httptest.NewRequest("GET", "/api/console-qr", nil)
+	rHTTPS.Header.Set("X-Forwarded-Proto", "https")
+	rHTTPS.Host = "localhost:8080"
+	if got := uiBoundIPv6HTTPS.consoleTarget(rHTTPS); got != "http://[2001:db8::1]:443" {
+		t.Fatalf("ipv6 listen direct ip target = %q, want http://[2001:db8::1]:443", got)
+	}
+
+	// When accessed with a public domain over HTTPS on port 443, standard port is omitted:
+	rDomain := httptest.NewRequest("GET", "/api/console-qr", nil)
+	rDomain.Host = "deck.example:443"
+	rDomain.Header.Set("X-Forwarded-Proto", "https")
+	if got := ui.consoleTarget(rDomain); got != "https://deck.example" {
+		t.Fatalf("https public domain target = %q, want https://deck.example", got)
+	}
+
+	for _, loopHost := range []string{"localhost:8080", "localhost", "127.0.0.1:8080", "127.0.0.1", "[::1]:8080", "[::1]", "sc5000.lan:8080", "sc5000.lan"} {
+		r = httptest.NewRequest("GET", "/api/console-qr", nil)
+		r.Host = loopHost
+		targetLoopback := ui.consoleTarget(r)
+		if targetLoopback != "http://192.168.1.50:8080" {
+			t.Fatalf("loopback/placeholder %q got %q, want http://192.168.1.50:8080", loopHost, targetLoopback)
+		}
+	}
+
+	// Case 4: Explicit custom PublicURL (e.g. https://mydeck.example.com)
+	uiCustom := New(Config{PublicURL: "https://mydeck.example.com", StateDir: t.TempDir()}, nil)
+	if got := uiCustom.consoleTarget(r); got != "https://mydeck.example.com" {
+		t.Fatalf("target = %q, want https://mydeck.example.com", got)
+	}
+
+	// Case 5: Default PublicURL (http://sc5000.lan:8080) is replaced by caller host
+	uiDefault := New(Config{PublicURL: "http://sc5000.lan:8080", StateDir: t.TempDir()}, nil)
+	r = httptest.NewRequest("GET", "/api/console-qr", nil)
+	r.Host = "10.0.0.42:8080"
+	if got := uiDefault.consoleTarget(r); got != "http://10.0.0.42:8080" {
+		t.Fatalf("target = %q, want http://10.0.0.42:8080", got)
+	}
+
+	// Case 6: Isolated environment with NO network addresses (falls back to sc5000.lan with configured port)
+	lanAddrs = func() ([]net.Addr, error) { return nil, nil }
+	r = httptest.NewRequest("GET", "/api/console-qr", nil)
+	r.Host = "localhost:8080"
+	if got := ui.consoleTarget(r); got != "http://sc5000.lan:8080" {
+		t.Fatalf("isolated target = %q, want http://sc5000.lan:8080", got)
+	}
+	uiCustomPort := New(Config{Listen: ":9090", StateDir: t.TempDir()}, nil)
+	if got := uiCustomPort.consoleTarget(r); got != "http://sc5000.lan:9090" {
+		t.Fatalf("isolated custom port target = %q, want http://sc5000.lan:9090", got)
+	}
+
+	// Case 7: Verify /api/console-qr endpoint produces valid PNG
+	w := httptest.NewRecorder()
+	r.AddCookie(&http.Cookie{Name: "stream_sync", Value: ui.AccessToken()})
+	ui.ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("console-qr status: %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("content-type = %q, want image/png", ct)
+	}
+	if !bytes.HasPrefix(w.Body.Bytes(), []byte("\x89PNG")) {
+		t.Fatalf("console-qr response is not a valid PNG")
 	}
 }

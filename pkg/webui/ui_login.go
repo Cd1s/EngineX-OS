@@ -296,11 +296,18 @@ func (s *Server) neteaseFor(session string, guest bool) *providers.Netease {
 	return nil
 }
 
+var lanAddrs = net.InterfaceAddrs
+
 func lanHost() string {
-	addrs, err := net.InterfaceAddrs()
+	addrs, err := lanAddrs()
 	if err == nil {
 		for _, a := range addrs {
 			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && n.IP.IsPrivate() {
+				return n.IP.String()
+			}
+		}
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() {
 				return n.IP.String()
 			}
 		}

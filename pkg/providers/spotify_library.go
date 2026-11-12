@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	librespot "github.com/devgianlu/go-librespot"
+	connectpb "github.com/devgianlu/go-librespot/proto/spotify/connectstate"
 	extpb "github.com/devgianlu/go-librespot/proto/spotify/extendedmetadata"
 	metapb "github.com/devgianlu/go-librespot/proto/spotify/metadata"
 	"github.com/devgianlu/go-librespot/spclient"
@@ -27,7 +28,7 @@ type spotifyBatchedMetadataFunc func(context.Context, *extpb.BatchedEntityReques
 
 func (s *Spotify) nativeLibraryFallback(err error) bool {
 	var status StatusError
-	return err != nil && errors.As(err, &status) && (status == 401 || status == 403) && s.HasStoredCredentials()
+	return err != nil && errors.As(err, &status) && (status == 401 || status == 403 || status == 429) && s.HasStoredCredentials()
 }
 func (s *Spotify) nativePlaylists(ctx context.Context) (out []Playlist, err error) {
 	err = s.withNative(ctx, func(n spotifyNative) error {
@@ -94,6 +95,11 @@ func spotifyLibraryID(uri string, typ librespot.SpotifyIdType) (*librespot.Spoti
 	}
 	return librespot.SpotifyIdFromUri(uri)
 }
+
+type spotifyContextPageResolver interface {
+	Page(context.Context, int) ([]*connectpb.ContextTrack, error)
+}
+
 func (n *spotifyProtocol) LibraryTracks(ctx context.Context, id string) ([]Track, error) {
 	if id != SpotifyLikedID && !spotifyTrackIDRe.MatchString(id) {
 		return nil, errors.New("spotify: invalid playlist ID")
@@ -112,14 +118,27 @@ func (n *spotifyProtocol) LibraryTracks(ctx context.Context, id string) ([]Track
 	if err != nil {
 		return nil, err
 	}
+	return collectSpotifyContextTracks(ctx, pages, n.sp.ExtendedMetadata)
+}
+
+func collectSpotifyContextTracks(ctx context.Context, pages spotifyContextPageResolver, request spotifyBatchedMetadataFunc) ([]Track, error) {
 	var ids []librespot.SpotifyId
-	for page := 0; page < 2000 && len(ids) < maxNativeLibraryTracks; page++ {
+	for page := 0; ; page++ {
 		tracks, err := pages.Page(ctx, page)
-		if errors.Is(err, io.EOF) {
+		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			if err.Error() == "invalid empty page without url" {
+				if page >= 2000 {
+					return nil, errors.New("spotify: native playlist exceeds maximum page limit")
+				}
+				continue
+			}
 			return nil, err
+		}
+		if page >= 2000 {
+			return nil, errors.New("spotify: native playlist exceeds maximum page limit")
 		}
 		for _, track := range tracks {
 			spotID, err := spotifyLibraryID(track.GetUri(), librespot.SpotifyIdTypeTrack)
@@ -127,12 +146,12 @@ func (n *spotifyProtocol) LibraryTracks(ctx context.Context, id string) ([]Track
 				continue
 			}
 			ids = append(ids, *spotID)
-			if len(ids) >= maxNativeLibraryTracks {
-				break
+			if len(ids) > maxNativeLibraryTracks {
+				return nil, errors.New("spotify: native playlist exceeds maximum track limit")
 			}
 		}
 	}
-	return resolveSpotifyLibraryTracks(ctx, ids, n.sp.ExtendedMetadata)
+	return resolveSpotifyLibraryTracks(ctx, ids, request)
 }
 
 func resolveSpotifyLibraryTracks(ctx context.Context, ids []librespot.SpotifyId, request spotifyBatchedMetadataFunc) ([]Track, error) {

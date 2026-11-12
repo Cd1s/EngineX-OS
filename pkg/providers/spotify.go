@@ -258,23 +258,65 @@ func (s *Spotify) Playlists(ctx context.Context) ([]Playlist, error) {
 	}
 	all, err := s.apiPlaylists(ctx)
 	if s.nativeLibraryFallback(err) {
-		all, err = s.nativePlaylists(ctx)
+		native, nerr := s.nativePlaylists(ctx)
+		if nerr == nil {
+			all, err = s.mergePlaylists(all, native), nil
+		} else {
+			err = nerr
+		}
 	}
-	if err != nil && len(linked) > 0 {
-		return linked, nil
+	if err != nil {
+		if len(linked) > 0 {
+			return linked, nil
+		}
+		return nil, err
 	}
-	return append(linked, all...), err
+	return append(linked, all...), nil
+}
+
+func (s *Spotify) mergePlaylists(web, native []Playlist) []Playlist {
+	if len(web) == 0 {
+		return native
+	}
+	if len(native) == 0 {
+		return web
+	}
+	seen := make(map[string]bool, len(web)+len(native))
+	out := make([]Playlist, 0, len(web)+len(native))
+	for _, p := range web {
+		if !seen[p.ID] {
+			seen[p.ID] = true
+			out = append(out, p)
+		}
+	}
+	for _, p := range native {
+		if !seen[p.ID] {
+			seen[p.ID] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func (s *Spotify) apiPlaylists(ctx context.Context) ([]Playlist, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// An older login may lack the library scope; its playlists still work.
-	liked := make(chan Playlist, 1)
+	type likedResult struct {
+		item Playlist
+		err  error
+	}
+	liked := make(chan likedResult, 1)
 	go func() {
 		var r struct {
 			Total int `json:"total"`
 		}
-		if s.get(ctx, "/me/tracks?limit=1&offset=0", &r) == nil {
-			liked <- Playlist{SpotifyLikedID, "已點讚的歌曲 (Liked Songs)", r.Total}
+		err := s.get(ctx, "/me/tracks?limit=1&offset=0", &r)
+		if err == nil {
+			liked <- likedResult{item: Playlist{SpotifyLikedID, "已點讚的歌曲 (Liked Songs)", r.Total}}
+		} else {
+			liked <- likedResult{err: err}
 		}
 		close(liked)
 	}()
@@ -301,10 +343,14 @@ func (s *Spotify) apiPlaylists(ctx context.Context) ([]Playlist, error) {
 		return out, err
 	})
 	if err != nil {
-		return nil, err
+		cancel()
+		return all, err
 	}
-	if p, ok := <-liked; ok {
-		all = append([]Playlist{p}, all...)
+	lr := <-liked
+	if lr.err == nil {
+		all = append([]Playlist{lr.item}, all...)
+	} else if s.HasStoredCredentials() {
+		all = append([]Playlist{{SpotifyLikedID, "已點讚的歌曲 (Liked Songs)", 0}}, all...)
 	}
 	return all, nil
 }
