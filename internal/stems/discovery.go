@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -187,6 +188,7 @@ func FindLAN(ctx context.Context, statePath string, timeout time.Duration) (stri
 
 // lanHealth checks a renderer that needs no credential and has a free slot.
 func lanHealth(ctx context.Context, endpoint string, timeout time.Duration) (LANState, bool) {
+	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", endpoint+"/healthz", nil)
