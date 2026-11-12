@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -118,5 +119,41 @@ func writePlainOneLibrary(t *testing.T, root string) {
 	defer db.Close()
 	if _, err = db.Exec(`CREATE TABLE content(content_id INTEGER PRIMARY KEY, title TEXT, path TEXT); INSERT INTO content VALUES(77,'Only in OneLibrary','/MUSIC/three.wav')`); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// r2 review: a failed mount removed .rb-bridge.lock even while another
+// rb-bridge held it, so a third one could lock a new file and run beside it.
+func TestCleanupKeepsALockHeldByAnotherBridge(t *testing.T) {
+	for _, held := range []bool{true, false} {
+		root := t.TempDir()
+		testfixture.Write(t, root, "PIONEER/rekordbox/export.pdb", []byte("not a pdb"))
+		dir := filepath.Join(root, "Engine Library/Database2")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		lock := filepath.Join(dir, ".rb-bridge.lock")
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if held {
+			if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err = bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false); err == nil {
+			t.Fatal("damaged export.pdb imported")
+		}
+		_, err = os.Stat(lock)
+		f.Close()
+		if held && err != nil {
+			t.Fatalf("held lock removed: %v", err)
+		}
+		if !held {
+			if _, err = os.Stat(filepath.Join(root, "Engine Library")); !os.IsNotExist(err) {
+				t.Fatalf("free lock and empty Engine Library left behind: %v", err)
+			}
+		}
 	}
 }
