@@ -551,8 +551,10 @@ static int slow_marker(const char *target,char out[PATH_MAX]) {
     struct statvfs v;if(statvfs(target,&v))return -1;
     uint64_t h=UINT64_C(14695981039346656037);
     h=hash_bytes(h,&v.f_fsid,sizeof v.f_fsid);h=hash_bytes(h,&v.f_blocks,sizeof v.f_blocks);
-    const char *files[]={"PIONEER/rekordbox/export.pdb",".PIONEER/rekordbox/export.pdb","PIONEER/rekordbox/exportLibrary.db",".PIONEER/rekordbox/exportLibrary.db"};
-    for(unsigned i=0;i<4;i++) {
+    // Every export file rb-bridge may convert from (pkg/bridge).
+    const char *files[]={"PIONEER/rekordbox/export.pdb",".PIONEER/rekordbox/export.pdb","PIONEER/rekordbox/exportLibrary.db",".PIONEER/rekordbox/exportLibrary.db",
+                         "PIONEER/rekordbox/exportOneLibrary.db",".PIONEER/rekordbox/exportOneLibrary.db"};
+    for(unsigned i=0;i<sizeof files/sizeof *files;i++) {
         char p[PATH_MAX];struct stat st;
         if(path_join(p,sizeof p,target,files[i])||lstat(p,&st))continue;
         int64_t size=(int64_t)st.st_size,sec=(int64_t)st.st_mtim.tv_sec,ns=st.st_mtim.tv_nsec;
