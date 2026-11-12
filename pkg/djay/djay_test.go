@@ -570,3 +570,34 @@ func TestDjayPathHashPercentAndIndexNum(t *testing.T) {
 		t.Fatalf("index_num loop slot lost: %+v", plain.Loops)
 	}
 }
+
+func TestDjayMixedExplicitAndUnlabeledLoopUnitColumns(t *testing.T) {
+	dir := t.TempDir()
+	createDummyAudio(t, filepath.Join(dir, "Music", "Track.mp3"))
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(dir, "djay_music_library.db"))}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE tracks (id INTEGER PRIMARY KEY, title TEXT, path TEXT, duration INTEGER)`,
+		`CREATE TABLE loops (track_id INTEGER, slot INTEGER, start_ms REAL, length REAL, label TEXT)`,
+		// Track is 180 s; start_ms is explicitly in ms (12000 ms = 12 s) while unlabeled length is in whole seconds (8 s = 8000 ms).
+		`INSERT INTO tracks VALUES (1, 'MixedLoopUnits', 'Music/Track.mp3', 180)`,
+		`INSERT INTO loops VALUES (1, 0, 12000, 8, '8s Loop')`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	libs, err := Discover(dir)
+	if err != nil || len(libs) != 1 || len(libs[0].Tracks) != 1 {
+		t.Fatalf("Discover: libs=%v err=%v", libs, err)
+	}
+	loops := libs[0].Tracks[0].Loops
+	if len(loops) != 1 || loops[0].StartMS != 12000 || loops[0].LengthMS != 8000 {
+		t.Fatalf("mixed loop columns misread: got %+v, want StartMS=12000 LengthMS=8000", loops)
+	}
+}
