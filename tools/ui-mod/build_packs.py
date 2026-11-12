@@ -6489,11 +6489,24 @@ def edits(dev: bool):
         # The shadow header feeds the stock formatter its own tempo; stock users keep stock defaults.
         scaled[ROOT + "Items/Bpm.qml"] = [
             ("    property alias fractionColor: fractionText.color\n",
-             "    property alias fractionColor: fractionText.color\n    readonly property real displayWidth: implicitWidth + fractionText.implicitWidth\n"),
+             "    property alias fractionColor: fractionText.color\n    readonly property real displayWidth: implicitWidth + fractionText.implicitWidth\n"
+             '    readonly property var scSpeed: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/SpeedState".arg(deckIndex)) : null\n'
+             '    readonly property real scPitch: bpmPropertyName === "CurrentBPM" && scSpeed && scSpeed.translator ? (parseFloat(scSpeed.translator.string) || scSpeed.translator.unnormalized || 0) : 0\n'),
             ("    readonly property bool currentBPMSplitValid:",
              "    property real bpmValue: pCurrentBPM && pCurrentBPM.translator ? pCurrentBPM.translator.unnormalized : 0\n\n    readonly property bool currentBPMSplitValid:"),
             ("if (songAnalyzed && pCurrentBPM && pCurrentBPM.translator)", "if (songAnalyzed)"),
-            ("pCurrentBPM.translator.unnormalized.toFixed(bpm.decimalPlaces)", "bpmValue.toFixed(bpm.decimalPlaces)"),
+            ("pCurrentBPM.translator.unnormalized.toFixed(bpm.decimalPlaces)", "return bpmValue.toFixed(bpm.decimalPlaces)"),
+            ("        } else if (hasMetaDataBpm) {\n            metaDataBpm.split(\".\")\n",
+             "        } else if (hasMetaDataBpm) {\n"
+             "            const base = parseFloat(metaDataBpm)\n"
+             "            if (base > 0 && scPitch !== 0 && Math.abs(bpmValue - base) < 0.001)\n"
+             '                return (base * (1 + scPitch / 100)).toFixed(bpm.decimalPlaces).split(".")\n'
+             "            else if (bpmValue > 0 && Math.abs(bpmValue - base) >= 0.001)\n"
+             '                return bpmValue.toFixed(bpm.decimalPlaces).split(".")\n'
+             "            else\n"
+             '                return metaDataBpm.split(".")\n'),
+            ('        } else {\n            ;("")\n',
+             '        } else {\n            return []\n'),
         ]
         # Two decimals, and nothing else: the stock Row, colours and tap stay, and whatever stock
         # shows without an analysed tempo ("-", an unanalysed track) is stock's own text.
@@ -6542,8 +6555,24 @@ def edits(dev: bool):
              "    Layout.minimumWidth: implicitWidth\n    property bool tappable: true\n"
              '    readonly property var scBpm: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/CurrentBPM".arg(deckIndex)) : null\n'
              '    readonly property var scAnalyzed: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/Track/SongAnalyzed".arg(deckIndex)) : null\n'
-             "    readonly property var scBpm2: bpmInfoView && bpmInfoView.bpmFractionalText && scAnalyzed && scAnalyzed.translator && scAnalyzed.translator.state\n"
-             "        && scBpm && scBpm.translator && scBpm.translator.unnormalized > 0 ? scBpm.translator.unnormalized.toFixed(2).split(\".\") : null\n"),
+             '    readonly property var scSpeed: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/SpeedState".arg(deckIndex)) : null\n'
+             '    readonly property var scMetaBpm: deckIndex > 0 ? Planck.getProperty("/Engine/Deck%1/Track/MetaDataBPM".arg(deckIndex)) : null\n'
+             "    readonly property var scBpm2: {\n"
+             "        if (!bpmInfoView || !bpmInfoView.bpmFractionalText) return null\n"
+             "        if (scAnalyzed && scAnalyzed.translator && scAnalyzed.translator.state\n"
+             "            && scBpm && scBpm.translator && scBpm.translator.unnormalized > 0)\n"
+             '            return scBpm.translator.unnormalized.toFixed(2).split(".")\n'
+             "        const cur = scBpm && scBpm.translator ? scBpm.translator.unnormalized : 0\n"
+             "        const pitch = scSpeed && scSpeed.translator ? (parseFloat(scSpeed.translator.string) || scSpeed.translator.unnormalized || 0) : 0\n"
+             "        const meta = scMetaBpm && scMetaBpm.translator ? parseFloat(scMetaBpm.translator.string) : 0\n"
+             '        const textVal = bpmInfoView.bpmText && bpmInfoView.bpmText !== "-" ? parseFloat(bpmInfoView.bpmText + (bpmInfoView.bpmFractionalText || "")) : 0\n'
+             "        const base = (meta > 0 ? meta : 0) || (cur > 0 ? cur : 0) || (textVal > 0 ? textVal : 0)\n"
+             '        if (base <= 0) return (cur > 0) ? cur.toFixed(2).split(".") : null\n'
+             "        if (pitch !== 0 && Math.abs(cur - base) < 0.001)\n"
+             '            return (base * (1 + pitch / 100)).toFixed(2).split(".")\n'
+             "        const live = (cur > 0) ? cur : (base * (1 + pitch / 100))\n"
+             '        return live.toFixed(2).split(".")\n'
+             "    }\n"),
             ("                text: bpmInfoView && bpmInfoView.bpmText\n",
              "                text: bpmInfo.scBpm2 ? bpmInfo.scBpm2[0] : bpmInfoView && bpmInfoView.bpmText\n"),
             ("                text: bpmInfoView && bpmInfoView.bpmFractionalText\n",
