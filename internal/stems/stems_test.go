@@ -192,3 +192,12 @@ printf 'returnFrames=0\n\n'
 		t.Fatalf("Proxy killed slow render after action=done: %v", err)
 	}
 }
+
+func TestLocalRenderRejectsNaNSampleRate(t *testing.T) {
+	var out bytes.Buffer
+	in := append([]byte("numChannels=2\nsampleRate=NaN\nmaxBlockSize=4\n\naction=block\nnumSamples=1\n\n"), make([]byte, 8)...)
+	in = append(in, []byte("action=done\n\n")...)
+	if err := LocalRender(bytes.NewReader(in), &out); err == nil {
+		t.Fatal("LocalRender accepted sampleRate=NaN without error")
+	}
+}
