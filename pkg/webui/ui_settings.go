@@ -1119,5 +1119,8 @@ func (s *Server) restartEngine() error {
 	if s.cfg.RestartEngine != nil {
 		return s.cfg.RestartEngine()
 	}
+	if err := guardHostCommand("systemctl"); err != nil {
+		return err
+	}
 	return exec.Command("systemctl", "restart", "--no-block", "engine.service").Run()
 }

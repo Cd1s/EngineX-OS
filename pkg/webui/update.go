@@ -56,6 +56,9 @@ var (
 	engineQuitReasonPath   = "/tmp/engine-quit-reason"
 	allowUpdateFromURL     = isDeckDataDir
 	quitEngineForUpdate    = func() error {
+		if err := guardHostCommand("pkill"); err != nil {
+			return err
+		}
 		return exec.Command("pkill", "-TERM", "-f", "^/usr/Engine/Engine( |$)").Run()
 	}
 )
@@ -289,6 +292,10 @@ func (s *Server) applyOnlineUpdate(downloadURL string) {
 		_ = os.WriteFile(staged+".url", []byte(downloadURL+"\n"), 0o644)
 	}
 	s.setUpdateProgress(0.97, "", false)
+	if err := guardHostCommand(az01UpdateBin); err != nil {
+		s.setUpdateProgress(0, err.Error(), true)
+		return
+	}
 	cmd := exec.Command(az01UpdateBin, "--file", staged)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -656,7 +663,9 @@ func (s *Server) installDataBundleReader(r io.Reader, work string) {
 		// stream-sync does not terminate the activation script along with stream-sync's cgroup.
 		script := `sleep 2; pkill -f '[s]c5000-suite (stream-sync|rb-bridge|sc5000-deemixd)'; sleep 1; exec sh ` + customDir + `/bundle/boot-activate.sh`
 		launched := false
-		if _, err := exec.LookPath("systemd-run"); err == nil {
+		if guardHostCommand("systemd-run") != nil {
+			log.Printf("stream-sync: %v", guardHostCommand("systemd-run"))
+		} else if _, err := exec.LookPath("systemd-run"); err == nil {
 			// systemd-run submits the transient unit to PID 1 and returns immediately.
 			if out, err := exec.Command("systemd-run", "--description=EngineX OTA Activation", "sh", "-c", script).CombinedOutput(); err == nil {
 				launched = true
