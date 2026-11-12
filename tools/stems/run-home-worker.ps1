@@ -32,14 +32,21 @@ if (-not (Test-Path $py)) {
 }
 & $py -c 'import numpy, scipy' 2>$null
 if ($LASTEXITCODE) { Invoke-Checked $py -m pip install -q numpy scipy }
-if ($Backend -in 'demucs', 'htdemucs') {
+if ($Backend -in 'auto', 'demucs', 'htdemucs') {
     & $py -c 'import demucs' 2>$null
     if ($LASTEXITCODE) {
-        # pip's default Windows torch is CPU-only; an NVIDIA card wants the CUDA build.
-        if (Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue) {
-            Invoke-Checked $py -m pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+        if ($Backend -eq 'auto') {
+            if (Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue) {
+                & $py -m pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+            }
+            & $py -m pip install -q demucs
+        } else {
+            # pip's default Windows torch is CPU-only; an NVIDIA card wants the CUDA build.
+            if (Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue) {
+                Invoke-Checked $py -m pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+            }
+            Invoke-Checked $py -m pip install -q demucs
         }
-        Invoke-Checked $py -m pip install -q demucs
     }
 }
 $worker = Join-Path $here 'worker.py'
