@@ -53,11 +53,14 @@ func (l AppleMusicLink) URL() string {
 }
 
 var (
-	amLinkRE = regexp.MustCompile(`^https?://(?:geo\.|beta\.)?music\.apple\.com/(?:([a-z]{2})/)?(playlist|album)/(?:[^/?#]+/)?((?:pl\.[A-Za-z0-9._-]+)|[0-9]+)`)
-	amStore  = regexp.MustCompile(`^[a-z]{2}$`)
-	amScript = regexp.MustCompile(`/assets/index[^"'\s]*\.js`)
-	amJWT    = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}`)
+	amLinkRE    = regexp.MustCompile(`^https?://(?:geo\.|beta\.)?music\.apple\.com/(?:([a-z]{2})/)?(playlist|album)/(?:[^/?#]+/)?((?:pl\.[A-Za-z0-9._-]+)|[0-9]+)`)
+	amStore     = regexp.MustCompile(`^[a-z]{2}$`)
+	amScriptTag = regexp.MustCompile(`(?i)<(?:script|link)\b[^>]*\b(?:src|href)=["']([^"']+\.js(?:\?[^"'\s>]*)?)["']`)
+	amAssetPath = regexp.MustCompile(`/assets/[^"'\s<>]+\.js(?:\?[^"'\s<>]*)?`)
+	amJWT       = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}`)
 )
+
+const maxAppleMusicScripts = 8
 
 // ParseAppleMusicLinks finds every playlist or album link in pasted text, as
 // Share → Copy Link gives them. Unknown text is ignored.
@@ -196,17 +199,36 @@ func (a *AppleMusic) developerToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("applemusic: web player: %w", err)
 	}
-	script := amScript.Find(page)
-	if script == nil {
-		return "", errors.New("applemusic: web player script not found")
-	}
-	js, err := a.fetch(ctx, a.webURL()+string(script), 32<<20)
-	if err != nil {
-		return "", fmt.Errorf("applemusic: web player script: %w", err)
-	}
-	token := findDeveloperToken(js)
+	token := findDeveloperToken(page)
 	if token == "" {
-		return "", errors.New("applemusic: no developer token in the web player")
+		if unescaped, uerr := url.QueryUnescape(string(page)); uerr == nil {
+			token = findDeveloperToken([]byte(unescaped))
+		}
+	}
+	if token == "" {
+		scripts := a.webPlayerScripts(page)
+		if len(scripts) == 0 {
+			return "", errors.New("applemusic: web player script not found")
+		}
+		var lastErr error
+		fetchedAny := false
+		for _, scriptURL := range scripts {
+			js, ferr := a.fetch(ctx, scriptURL, 32<<20)
+			if ferr != nil {
+				lastErr = ferr
+				continue
+			}
+			fetchedAny = true
+			if token = findDeveloperToken(js); token != "" {
+				break
+			}
+		}
+		if token == "" {
+			if !fetchedAny && lastErr != nil {
+				return "", fmt.Errorf("applemusic: web player script: %w", lastErr)
+			}
+			return "", errors.New("applemusic: no developer token in the web player")
+		}
 	}
 	until := time.Now().Add(12 * time.Hour)
 	if exp := jwtExpiry(token); !exp.IsZero() {
@@ -216,6 +238,53 @@ func (a *AppleMusic) developerToken(ctx context.Context) (string, error) {
 	a.web, a.webAt = token, until
 	a.mu.Unlock()
 	return token, nil
+}
+
+func (a *AppleMusic) webPlayerScripts(page []byte) []string {
+	baseURL, err := url.Parse(a.webURL())
+	if err != nil || baseURL.Host == "" {
+		return nil
+	}
+	allowHost := func(host string) bool {
+		if strings.EqualFold(host, baseURL.Host) {
+			return true
+		}
+		if a.WebURL != "" {
+			return false
+		}
+		h := strings.ToLower(strings.Split(host, ":")[0])
+		return h == "music.apple.com" || strings.HasSuffix(h, ".music.apple.com")
+	}
+
+	var priority, others []string
+	seen := map[string]bool{}
+	add := func(raw string) {
+		u, uerr := baseURL.Parse(strings.TrimSpace(raw))
+		if uerr != nil || (u.Scheme != "http" && u.Scheme != "https") || !allowHost(u.Host) {
+			return
+		}
+		resolved := u.String()
+		if seen[resolved] {
+			return
+		}
+		seen[resolved] = true
+		if strings.Contains(u.Path, "/assets/index") {
+			priority = append(priority, resolved)
+		} else {
+			others = append(others, resolved)
+		}
+	}
+	for _, m := range amScriptTag.FindAllSubmatch(page, -1) {
+		add(string(m[1]))
+	}
+	for _, m := range amAssetPath.FindAll(page, -1) {
+		add(string(m))
+	}
+	all := append(priority, others...)
+	if len(all) > maxAppleMusicScripts {
+		all = all[:maxAppleMusicScripts]
+	}
+	return all
 }
 
 type amJWTHeader struct {
