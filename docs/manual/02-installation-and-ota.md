@@ -177,14 +177,14 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 
 > ⚠️ **为什么电脑刷机工具看不到 PRIME GO / SC5000？（`#104`） / Why can't the computer tool see my PRIME GO / SC5000? / 為什麼電腦刷機工具看不到 PRIME GO / SC5000？**
 >
-> - **推荐：免电脑 U 盘直接刷。/ Recommended: USB stick, no computer. / 推薦：免電腦隨身碟直接刷。** 一代机（SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2）无需连接电脑，把 `*-Update.img` 放进 FAT32 / exFAT U 盘根目录插到碟机，进入 `Settings → Update → Reboot` 即可更新或恢复固件。/ First-generation units need no computer: put the `*-Update.img` in the root of a FAT32 / exFAT stick, plug it in and go to `Settings → Update → Reboot` to update or recover. / 一代機無需連接電腦，把 `*-Update.img` 放進 FAT32 / exFAT 隨身碟根目錄插到碟機，進入 `Settings → Update → Reboot` 即可更新或還原韌體。
-> - **电脑 USB 线刷模式 / Computer USB flashing mode / 電腦 USB 線刷模式：** 正常开机打碟时，电脑**绝对看不到**刷机设备！必须先在碟机屏幕点 **`Settings → Update → Reboot to Computer Update Mode`**（重启进入蓝屏电脑图标的 Fastboot 模式），再用 USB-B 线连电脑运行刷机工具。/ While the deck runs normally the computer **never** sees a flashing device. First tap **`Settings → Update → Reboot to Computer Update Mode`** on the deck (it reboots into Fastboot mode with the blue-screen computer icon), then connect a USB-B cable and run the tool. / 正常開機打碟時，電腦**絕對看不到**刷機裝置！必須先在碟機螢幕點 **`Settings → Update → Reboot to Computer Update Mode`**（重啟進入藍屏電腦圖示的 Fastboot 模式），再以 USB-B 線連接電腦執行刷機工具。
+> - **推荐：免电脑 U 盘直接刷。/ Recommended: USB stick, no computer. / 推薦：免電腦隨身碟直接刷。** 一代机（SC5000 / SC6000 / PRIME GO / PRIME 4 / PRIME 2）无需连接电脑，把 `*-Update.img` 放进 FAT32 / exFAT U 盘根目录插到碟机，进入 `Settings → About / Update → Firmware Update Mode → Options → USB/SD` 即可更新或恢复固件。/ First-generation units need no computer: put the `*-Update.img` in the root of a FAT32 / exFAT stick, plug it in and go to `Settings → About / Update → Firmware Update Mode → Options → USB/SD` to update or recover. / 一代機無需連接電腦，把 `*-Update.img` 放進 FAT32 / exFAT 隨身碟根目錄插到碟機，進入 `Settings → About / Update → Firmware Update Mode → Options → USB/SD` 即可更新或還原韌體。
+> - **电脑 USB 线刷模式 / Computer USB flashing mode / 電腦 USB 線刷模式：** 正常开机打碟时，电脑**绝对看不到**刷机设备！必须先在碟机屏幕打开 **`Settings → About / Update → Firmware Update Mode → Options`**（若有提示选 **`PC`**，重启进入蓝屏电脑图标的 Fastboot / 固件更新模式），再用 USB-B 线连电脑运行刷机工具。/ While the deck runs normally the computer **never** sees a flashing device. First open **`Settings → About / Update → Firmware Update Mode → Options`** on the deck (choose **`PC`** if asked; it reboots into Fastboot / Firmware Update Mode with the blue-screen computer icon), then connect a USB-B cable and run the tool. / 正常開機打碟時，電腦**絕對看不到**刷機裝置！必須先在碟機螢幕開啟 **`Settings → About / Update → Firmware Update Mode → Options`**（若有提示選 **`PC`**，重啟進入藍屏電腦圖示的 Fastboot / 韌體更新模式），再以 USB-B 線連接電腦執行刷機工具。
 
 **进入 Fastboot / Enter Fastboot / 進入 Fastboot**
 
 **简体中文**：每款机型的统一做法是在碟机屏幕上进入固件升级模式，再接 USB：
 
-1. 在碟机上点 **Settings → Update → Reboot to Computer Update Mode**（旧版菜单：Settings → About / Update → Firmware Update Mode）；
+1. 在碟机上打开 **Settings → About / Update → Firmware Update Mode → Options**（若有提示选 **PC**；中文界面：**设置 → 关于 / 更新 → 固件更新模式 → 选项**）；
 2. 碟机重启进入蓝屏电脑图标的 Fastboot 模式后，用 USB-B 线连接电脑；
 3. 启动安装器，它会自动轮询 `fastboot devices` 等待连接（最长 10 分钟）。
 
@@ -192,7 +192,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 
 **English**: The same on-screen route works for every model, then connect USB:
 
-1. On the deck tap **Settings → Update → Reboot to Computer Update Mode** (older menus: Settings → About / Update → Firmware Update Mode);
+1. On the deck open **Settings → About / Update → Firmware Update Mode → Options** (choose **PC** if asked);
 2. once it has rebooted into Fastboot mode (blue-screen computer icon), connect a USB-B cable to the computer;
 3. start the installer; it polls `fastboot devices` and waits for up to 10 minutes.
 
@@ -200,7 +200,7 @@ Deck powered on, same router as the computer, and root SSH is available (or Engi
 
 **繁體中文**：各機型統一在碟機螢幕上進入韌體升級模式，再接 USB：
 
-1. 在碟機上點 **Settings → Update → Reboot to Computer Update Mode**（舊版選單：Settings → About / Update → Firmware Update Mode）；
+1. 在碟機上開啟 **Settings → About / Update → Firmware Update Mode → Options**（若有提示選 **PC**；繁體介面：**設定 → 關於 / 更新 → 韌體更新模式 → 選項**）；
 2. 碟機重啟進入藍屏電腦圖示的 Fastboot 模式後，以 USB-B 線連接電腦；
 3. 啟動安裝器，它會自動輪詢 `fastboot devices` 等待連線（最長 10 分鐘）。
 
