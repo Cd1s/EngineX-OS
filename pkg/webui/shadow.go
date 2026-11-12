@@ -1219,7 +1219,7 @@ func savePerf(local string, perf []byte) {
 
 func fetchPerf(ctx context.Context, url string) []byte {
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := peerFileClient.Do(req)
 	if err != nil {
 		return nil
 	}
@@ -1765,7 +1765,7 @@ func (s *Server) shadowFetchPeer(key string, p peerDeck) {
 	local := filepath.Join(dir, name)
 	s.shadowFetch(key, func(ctx context.Context, cp *shadowCopy) (string, error) {
 		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := peerFileClient.Do(req)
 		if err != nil {
 			return "", err
 		}
@@ -2066,7 +2066,14 @@ func isLocalIP(ip net.IP) bool {
 	return ip.IsLoopback()
 }
 
-var peerClient = &http.Client{Timeout: 400 * time.Millisecond}
+// Peer requests go to the peer and nowhere else: its answer is used as it is, a redirect is not
+// followed. peerFileClient has no timeout of its own: copies are bounded by their context.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+var (
+	peerClient     = &http.Client{Timeout: 400 * time.Millisecond, CheckRedirect: noRedirect}
+	peerFileClient = &http.Client{CheckRedirect: noRedirect}
+)
 
 // shadowPollPeers reads the other EngineX players' decks.
 func (s *Server) shadowPollPeers() {
