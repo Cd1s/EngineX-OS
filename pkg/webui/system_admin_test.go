@@ -59,7 +59,7 @@ func (m *mockSystemRunner) hasCommand(prefix ...string) bool {
 }
 
 func TestSSHManagement(t *testing.T) {
-	asDeck(t, "inmusic,jp07") // the SSH settings act only on a deck (r3)
+	asDeck(t, "inmusic,jp21") // stock sshd with a root password: a second-generation deck; the SSH settings act only on a deck (r3)
 	mockRunner := &mockSystemRunner{outputs: make(map[string][]byte)}
 	SetSystemRunner(mockRunner.Run)
 	defer SetSystemRunner(nil)

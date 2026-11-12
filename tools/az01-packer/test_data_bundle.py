@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -536,7 +537,10 @@ class DataBundleTest(unittest.TestCase):
                    SC5000_CONFIG_DIR=str(root / '.config'),
                    SC5000_ZONEINFO_DIR=str(zdir),
                    SC5000_PRODUCT_CODE_FILE=str(pcode),
-                   SC5000_TZ_NEWER_MARKER=str(marker))
+                   SC5000_TZ_NEWER_MARKER=str(marker),
+                   # The host's PID 1 and /data stay out of it (a sandbox has neither).
+                   SC5000_PID1_COMM=str(self.pid1_systemd()),
+                   SC5000_STREAMING_ACCOUNTS=str(self.tmp / 'StreamingAccounts.json'))
 
         # 1. Missing lib_dir must NOT be created; ExecStartPre (--restore-tz) writes America/New_York.
         res = subprocess.run(['sh', str(ba_relocated)], env=env, capture_output=True)
@@ -578,6 +582,68 @@ class DataBundleTest(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(conf.read_text(), '[TimeDateSettings]\nTZEnvVar=UTC\n')
         self.assertFalse(marker.exists())
+
+    def pid1_systemd(self):
+        comm = self.tmp / 'pid1-comm'
+        comm.write_text('systemd\n')
+        return comm
+
+    def test_boot_activate_follows_console_ssh_settings(self):
+        """BH-GC2-9 / BH-GF4-15: boot-activate.sh started sshd whenever a key was stored, even
+        after the console turned SSH off, never without a key (a root password set in the
+        console did not survive a reboot), and always on port 22 (the console's port drop-in
+        lives in /run)."""
+        src = self.extract(self.build())
+        root = self.tmp / 'gen2-ssh'
+        dest = root / 'enginex'
+        (dest / 'state').mkdir(parents=True)
+        run_dir = self.tmp / 'run-ssh'
+        ba = self.tmp / 'boot-activate-ssh.sh'
+        ba.write_text((src / 'boot-activate.sh').read_text().replace('/run/', str(run_dir) + '/'))
+        sshd = self.tmp / 'fake-sshd'
+        sshd.write_text('#!/bin/sh\nexit 0\n')
+        sshd.chmod(0o755)
+        env = dict(self.env, SC5000_CUSTOM=str(dest), SC5000_SSHD=str(sshd),
+                   SC5000_PID1_COMM=str(self.pid1_systemd()),
+                   SC5000_ROOT_SSH_DIR=str(root / 'root-ssh'),
+                   SC5000_STREAMING_ACCOUNTS=str(root / 'StreamingAccounts.json'),
+                   SC5000_CONFIG_DIR=str(root / '.config'),
+                   SC5000_TIMESYNC_LIB_DIR=str(root / 'timesync'),
+                   SC5000_PRODUCT_CODE_FILE=str(self.tmp / 'no-product-code'),
+                   SC5000_TZ_NEWER_MARKER=str(run_dir / 'tz-newer'))
+        dropin = run_dir / 'systemd/system/sshd.service.d/51-port.conf'
+        cfg = dest / 'state/ssh-config.json'
+        key = dest / 'authorized_keys'
+
+        def boot(key_text, config):
+            if key_text:
+                key.write_text(key_text)
+            elif key.exists():
+                key.unlink()
+            if config is None:
+                cfg.unlink(missing_ok=True)
+            else:
+                cfg.write_text(json.dumps(config, indent=2))
+            if dropin.exists():
+                dropin.unlink()
+            self.host_commands.write_text('')
+            res = subprocess.run(['sh', str(ba)], env=env, capture_output=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            started = 'start --no-block sshd.service' in self.host_commands.read_text()
+            self.host_commands.write_text('')
+            return started
+
+        k = 'ssh-ed25519 AAAA test\n'
+        self.assertTrue(boot(k, None))  # #116: a key alone, no console settings: as before
+        self.assertFalse(dropin.exists())
+        self.assertFalse(boot(None, None))  # #46: no key, no SSH
+        self.assertFalse(boot(k, {'enabled': False, 'port': 22}))  # turned off in the console
+        self.assertTrue(boot(k, {'enabled': True, 'port': 2222}))
+        self.assertIn('-p 2222', dropin.read_text())
+        self.assertTrue(boot(None, {'enabled': True, 'port': 22, 'hasPassword': True}))
+        self.assertFalse(boot(None, {'enabled': True, 'port': 2222, 'hasPassword': False}))
+        self.assertFalse(dropin.exists())
+        self.assertEqual((root / 'root-ssh/authorized_keys').read_text(), k)
 
     def test_boot_activate_wraps_engine_and_updaters_and_marks_gen2_unlocked(self):
         r = self.build()

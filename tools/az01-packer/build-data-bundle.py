@@ -385,20 +385,37 @@ fi
 # host-install-userdata.py --ssh-key (#116). The root fs is read-only on these decks, so when the
 # copy fails the key is bind-mounted over the stock /root/.ssh/authorized_keys.
 ssh_key=
-if [ -s "$dest/authorized_keys" ] && [ -x /usr/sbin/sshd ]; then
+sshd_bin=${SC5000_SSHD:-/usr/sbin/sshd}
+if [ -s "$dest/authorized_keys" ] && [ -x "$sshd_bin" ]; then
     ssh_key=1
     chown 0:0 "$dest/authorized_keys" 2>/dev/null || :
     chmod 600 "$dest/authorized_keys"
-    if ! cmp -s "$dest/authorized_keys" /root/.ssh/authorized_keys 2>/dev/null; then
-        { mkdir -p -m 700 /root/.ssh && cp "$dest/authorized_keys" /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys; } 2>/dev/null ||
-            mount --bind "$dest/authorized_keys" /root/.ssh/authorized_keys 2>/dev/null || :
+    root_ssh=${SC5000_ROOT_SSH_DIR:-/root/.ssh} # tests: never the build host's own keys
+    if ! cmp -s "$dest/authorized_keys" "$root_ssh/authorized_keys" 2>/dev/null; then
+        { mkdir -p -m 700 "$root_ssh" && cp "$dest/authorized_keys" "$root_ssh/authorized_keys" && chmod 600 "$root_ssh/authorized_keys"; } 2>/dev/null ||
+            mount --bind "$dest/authorized_keys" "$root_ssh/authorized_keys" 2>/dev/null || :
     fi
+fi
+
+# SSH as set in the Web Console (state/ssh-config.json, BH-GC2-9, BH-GF4-15): "off" keeps
+# sshd off even with a key, "on" with a root password starts it without one, and the port
+# comes back on every boot (the console's drop-in lives in /run, /etc is read-only here).
+# Without that file: as before, sshd only with a key (#46: public images ship none).
+ssh_start=$ssh_key ssh_port=22
+ssh_cfg=$(cat "$dest/state/ssh-config.json" 2>/dev/null | tr -d '[:space:]')
+case $ssh_cfg in *'"enabled":false'*) ssh_start= ;; esac
+case $ssh_cfg in *'"enabled":true'*'"hasPassword":true'*|*'"hasPassword":true'*'"enabled":true'*) [ ! -x "$sshd_bin" ] || ssh_start=1 ;; esac
+p=$(printf '%s' "$ssh_cfg" | sed -n 's/.*"port":\([0-9][0-9]*\).*/\1/p')
+case $p in ''|0*|??????*) ;; *) [ "$p" -gt 65535 ] || ssh_port=$p ;; esac
+ssh_dropin=/run/systemd/system/sshd.service.d/51-port.conf
+if [ -n "$ssh_start" ] && [ "$ssh_port" != 22 ]; then
+    mkdir -p "${ssh_dropin%/*}" && printf '[Service]\nExecStart=\nExecStart=%s -D -e -p %s\n' "$sshd_bin" "$ssh_port" > "$ssh_dropin" || :
 fi
 
 # Seed /data/StreamingAccounts.json with a stored-credential TIDAL entry (#56, #159)
 # so Engine 5.3.0 logs in to the local gateway at boot instead of waiting for Profile SSO.
-accounts=/data/StreamingAccounts.json
-if [ ! -e "$dest/ui/safe-mode" ] && [ -d /data ] && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
+accounts=${SC5000_STREAMING_ACCOUNTS:-/data/StreamingAccounts.json}
+if [ ! -e "$dest/ui/safe-mode" ] && [ -d "${accounts%/*}" ] && ! grep -qx 'scope=tidal' "$dest/ui/settings.conf" 2>/dev/null; then
     export T='"TIDAL": "{\"provider\":\"TIDAL\",\"providerType\":\"TIDAL\",\"accessToken\":\"enginex\",\"refreshToken\":\"enginex\"}"'
     if grep -Eq '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null && ! grep -E '"TIDAL"[[:space:]]*:' "$accounts" 2>/dev/null | grep -q 'accessToken'; then
         awk '{
@@ -438,9 +455,9 @@ convert_mounted() {
 }
 
 # In a chroot systemctl only prints "Running in chroot, ignoring" and exits 0, so require systemd as PID 1.
-if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
+if [ "$(cat "${SC5000_PID1_COMM:-/proc/1/comm}" 2>/dev/null)" = systemd ] && systemctl daemon-reload >/dev/null 2>&1; then
     systemctl restart --no-block enginex-stream-sync.service enginex-rb-bridge.service enginex-sc5000-deemixd.service engine-guardian.service || :
-    [ -z "$ssh_key" ] || systemctl start --no-block sshd.service || :
+    [ -z "$ssh_start" ] || systemctl start --no-block sshd.service || :
     # Blocking, so edisksd is up again before convert_mounted looks at /media.
     [ "$edisksd_changed" = 0 ] || systemctl restart edisksd.service || :
     [ "$timesyncd_changed" = 0 ] || systemctl restart --no-block systemd-timesyncd.service || :
@@ -456,8 +473,8 @@ if [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ] && systemctl daemon-reload >/
 else
     restore_gen2_timezone 0 || :
     convert_mounted
-    if [ -n "$ssh_key" ] && ! pgrep -x sshd >/dev/null 2>&1; then
-        mkdir -p /var/run/sshd && /usr/sbin/sshd || :
+    if [ -n "$ssh_start" ] && ! pgrep -x sshd >/dev/null 2>&1; then
+        mkdir -p /var/run/sshd && "$sshd_bin" -p "$ssh_port" || :
     fi
     pkill -x sc5000-suite 2>/dev/null || :
     [ -x "$bin_dir/stream-sync" ] && "$bin_dir/stream-sync" --listen :8080 --cpu 3 >/dev/null 2>&1 &

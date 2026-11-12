@@ -21,6 +21,7 @@ func TestMain(m *testing.M) {
 	uiScaleEnvPath = at("data", "sc5000-custom", "ui-scale.env")
 	sshPortDropInPath = at("etc", "systemd", "system", "sshd.service.d", "51-port.conf")
 	sshRunDropInPath = at("run", "systemd", "system", "sshd.service.d", "51-port.conf")
+	gen1SSHDropInPath = at("etc", "systemd", "system", "sc5000-custom-sshd.service.d", "51-port.conf")
 	sshPersistKeyDir = at("data", "enginex-absent")
 	deviceCompatiblePath = at("sys", "compatible-absent")
 	updateFileURLPath = at("tmp", "update-file-url")
