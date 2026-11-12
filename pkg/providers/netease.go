@@ -326,9 +326,6 @@ func (n *Netease) radioTracks(ctx context.Context, id string) ([]Track, error) {
 			More bool
 		}
 		if err := n.get(ctx, "/dj/program", url.Values{"id": {id}, "limit": {"100"}, "offset": {strconv.Itoa(offset)}}, &r); err != nil {
-			if len(all) > 0 {
-				return all, nil
-			}
 			return nil, err
 		}
 		for _, p := range r.Programs {

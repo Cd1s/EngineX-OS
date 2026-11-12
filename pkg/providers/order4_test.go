@@ -121,3 +121,69 @@ func TestExpiredOrRevokedLoginsSurfaceStatusError401(t *testing.T) {
 		t.Fatalf("SoundCloud revoked refresh error = %v, want StatusError(401)", err)
 	}
 }
+
+func TestProvidersSurfacePage2AndFallbackMaskedAuthErrors(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Spotify.Playlists must not mask a 401/403 API error just because LinksPath has a public link.
+	embedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `<html><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"state":{"data":{"entity":{"name":"Public Mix","trackList":[{"uri":"spotify:track:abc","title":"T","subtitle":"A","duration":1000}]}}}}}}</script></html>`)
+	}))
+	defer embedSrv.Close()
+	spAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer spAPI.Close()
+	sp := &Spotify{
+		BaseURL:   spAPI.URL,
+		EmbedURL:  embedSrv.URL,
+		LinksPath: filepath.Join(t.TempDir(), "links.json"),
+		CredsPath: filepath.Join(t.TempDir(), "no-creds.json"),
+		Token:     Token{AccessToken: "forbidden-tok", Expiry: time.Now().Add(time.Hour)},
+	}
+	if _, err := sp.SetLinks(ctx, "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sp.Playlists(ctx); !errors.Is(err, StatusError(403)) {
+		t.Fatalf("Spotify.Playlists masked 403 behind linkedPlaylists: err=%v", err)
+	}
+
+	// 2. Beatport.Tracks must not drop page 2+ errors, and Beatport.Playlists must not mask /my/playlists 403 behind public charts.
+	bpAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/my/playlists/":
+			w.WriteHeader(http.StatusForbidden)
+		case "/catalog/charts/":
+			io.WriteString(w, `{"next":null,"results":[{"id":7,"name":"Top 10","track_count":10}]}`)
+		case "/my/playlists/11/tracks/":
+			if r.URL.Query().Get("page") == "1" {
+				io.WriteString(w, `{"next":"p2","count":150,"results":[{"id":1,"track":{"id":501,"name":"One"}}]}`)
+				return
+			}
+			w.WriteHeader(http.StatusTooManyRequests)
+		}
+	}))
+	defer bpAPI.Close()
+	bp := &Beatport{BaseURL: bpAPI.URL, loaded: true, tok: BeatportToken{Access: "tok", Expiry: time.Now().Add(time.Hour)}}
+	if _, err := bp.Playlists(ctx); !errors.Is(err, StatusError(403)) {
+		t.Fatalf("Beatport.Playlists masked /my/playlists 403 behind charts: err=%v", err)
+	}
+	if _, err := bp.Tracks(ctx, "11"); !errors.Is(err, StatusError(429)) {
+		t.Fatalf("Beatport.Tracks dropped page 2 HTTP 429: err=%v", err)
+	}
+
+	// 3. SoundCloud.Tracks must not drop page 2+ errors when page 1 returned tracks.
+	var scSrv *httptest.Server
+	scSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("page") == "2" {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		io.WriteString(w, `{"collection":[{"id":1,"title":"Page1Track","access":"playable"}],"next_href":"`+scSrv.URL+`/playlists/55/tracks?page=2"}`)
+	}))
+	defer scSrv.Close()
+	sc := &SoundCloud{BaseURL: scSrv.URL, ClientID: "cid", Secret: "sec", Token: "tok"}
+	if _, err := sc.Tracks(ctx, "55"); !errors.Is(err, StatusError(502)) {
+		t.Fatalf("SoundCloud.Tracks dropped page 2 HTTP 502: err=%v", err)
+	}
+}

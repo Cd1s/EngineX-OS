@@ -299,13 +299,13 @@ func beatportPages[T any](ctx context.Context, b *Beatport, path string, q url.V
 		err := b.get(ctx, path, query, &r)
 		return listPage[T]{items: r.Results, more: r.Next != nil && *r.Next != "" && len(r.Results) > 0, total: r.Count}, err
 	})
+	if err != nil && !errors.Is(err, errPageLimit) {
+		return err
+	}
 	for _, v := range items {
 		add(v)
 	}
-	if len(items) > 0 || errors.Is(err, errPageLimit) {
-		return nil
-	}
-	return err
+	return nil
 }
 
 type bpImage struct {
@@ -382,11 +382,14 @@ func (b *Beatport) Playlists(ctx context.Context) ([]Playlist, error) {
 	mine := beatportPages(ctx, b, "/my/playlists/", url.Values{}, 50, beatportListLimit, func(p bpList) {
 		out = append(out, Playlist{strconv.FormatInt(p.ID, 10), p.Name, p.Count})
 	})
+	if mine != nil {
+		return nil, mine
+	}
 	charts := beatportPages(ctx, b, "/catalog/charts/", url.Values{"order_by": {"-publish_date"}}, 30, 30, func(p bpList) {
 		out = append(out, Playlist{beatportChartPrefix + strconv.FormatInt(p.ID, 10), "【榜单】" + p.Name, p.Count})
 	})
-	if mine != nil && charts != nil {
-		return nil, mine
+	if charts != nil && len(out) == 0 {
+		return nil, charts
 	}
 	return out, nil
 }
