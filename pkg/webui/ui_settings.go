@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Cd1s/EngineX-OS/internal/stems"
 )
@@ -214,6 +215,7 @@ type uiSettings struct {
 	// The role engine-ui-guard applied at Engine's last start (auto resolved).
 	FourDeckRoleActive string `json:"fourDeckRoleActive,omitempty"`
 	TimeZone           string `json:"timezone,omitempty"`
+	DeckClock          bool   `json:"deckClock,omitempty"`
 }
 
 // uiFourDeckRoles are the decks a player plays in the 4-deck layout (#49/#160), RCA A then B.
@@ -653,6 +655,18 @@ func (s *Server) migratePioneerFX() error {
 	return os.Rename(f.Name(), path)
 }
 
+func (s *Server) deckClockWanted(now time.Time) bool {
+	if s.shadow != nil {
+		s.shadow.mu.Lock()
+		polled := s.shadow.clockPolled
+		s.shadow.mu.Unlock()
+		if !polled.IsZero() && now.Sub(polled) < 15*time.Second {
+			return true
+		}
+	}
+	return s.modsManager().IsModEnabled("dmx-studio")
+}
+
 // scope is the service the deck's native browser currently shows.
 func (s *Server) scope() string {
 	s.uiMu.Lock()
@@ -691,6 +705,7 @@ func (s *Server) uiStatus(w http.ResponseWriter, r *http.Request) {
 	v.Capabilities = boardCapabilities(board)
 	v.FourDeckRoleActive = s.activeRole(v)
 	v.TimeZone = s.savedTimeZone()
+	v.DeckClock = s.deckClockWanted(time.Now())
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/sc5000/ui" {
 		body, err := json.Marshal(struct {
 			uiSettings

@@ -1094,6 +1094,96 @@ SERVICES_MAIN = """
 		return p
 	}
 	property var scShadowCueCache: ({})
+	// #209: lightweight local deck beat clock when 4-deck shadow mode is off.
+	// Active only while stream-sync reports deckClock=true; zero work otherwise.
+	property bool scDeckClock: false
+	property var scDeckClockRequest: null
+	property var scDeckClockProps: ({})
+	property var scDeckClockProbeAt: ({})
+	property var scDeckClockPrevPos: ({})
+	property var scDeckClockPrevCue: ({})
+	property var scDeckClockPrevLoaded: ({})
+	property var scDeckClockPrevLen: ({})
+	property var scDeckClockOut: []
+	property real scDeckClockPostAt: 0
+	property string scDeckClockSig: ""
+	Timer {
+		id: scDeckClockTimer
+		interval: 100; repeat: true
+		running: root.scDeckClock && root.scFourDeckRole === ""
+		onTriggered: root.scDeckClockTick()
+	}
+	function scDeckClockDeckProps(d, now) {
+		let g = scDeckClockProps[d]
+		if (g) return g
+		if (now - (scDeckClockProbeAt[d] || 0) < 3000) return null
+		scDeckClockProbeAt[d] = now
+		const play = root.scTr("/Engine/Deck" + d + "/PlayState")
+		if (!play) return null
+		const prefix = "/Engine/Deck" + d
+		g = {
+			play: play,
+			loaded: root.scTr(prefix + "/Track/SongLoaded") || scShadowEmptyObject,
+			length: root.scTr(prefix + "/Track/TrackLength") || scShadowEmptyObject,
+			cueLED: root.scTr(prefix + "/Track/CueLEDState") || scShadowEmptyObject,
+			master: root.scTr(prefix + "/DeckIsMaster") || scShadowEmptyObject,
+			original: root.scTr(prefix + "/OriginalBPM") || scShadowEmptyObject,
+			current: root.scTr(prefix + "/CurrentBPM") || scShadowEmptyObject,
+			beat: root.scTr(prefix + "/BeatNumber") || scShadowEmptyObject,
+			position: root.scTr(prefix + "/Track/TrackPosition") || scShadowEmptyObject,
+			rate: root.scTr(prefix + "/Track/SampleRate") || scShadowEmptyObject
+		}
+		scDeckClockProps[d] = g
+		return g
+	}
+	function scDeckClockTick() {
+		const now = Date.now()
+		let x = scDeckClockRequest
+		if (!x) { x = new XMLHttpRequest(); scDeckClockRequest = x }
+		if (x.readyState > 0 && x.readyState < 4) {
+			if (now - scDeckClockPostAt < 2000) return
+			x.abort()
+		}
+		const out = scDeckClockOut
+		let count = 0, anyPlaying = false
+		let sig = ""
+		for (let d = 1; d <= 4; d++) {
+			const g = scDeckClockDeckProps(d, now)
+			if (!g) continue
+			const ps = !!g.play.state
+			const loaded = !!g.loaded.state
+			const trackLen = loaded ? (g.length.unnormalized || 0) : 0
+			const sameTrack = loaded && scDeckClockPrevLoaded[d] === true && scDeckClockPrevLen[d] === trackLen
+			const sr = g.rate.value || 0
+			const posMs = loaded && sr > 0 ? (g.position.unnormalized || 0) / sr * 1000 : 0
+			const prevPos = scDeckClockPrevPos[d]
+			const prevCue = !!scDeckClockPrevCue[d]
+			const cue = !ps && sameTrack && !!g.cueLED.state && prevPos !== undefined && (posMs > prevPos + 0.5 || prevCue)
+			scDeckClockPrevLoaded[d] = loaded
+			scDeckClockPrevLen[d] = trackLen
+			scDeckClockPrevPos[d] = posMs
+			scDeckClockPrevCue[d] = cue
+			const playing = ps || cue
+			if (playing) anyPlaying = true
+			const master = !!g.master.state
+			const bpm = g.original.unnormalized || 0
+			const currentBpm = g.current.unnormalized || 0
+			const beat = g.beat.unnormalized || 0
+			const o = out[count] || (out[count] = {})
+			o.deck = d; o.playing = playing; o.cue = cue; o.master = master; o.lead = master
+			o.bpm = bpm; o.currentBpm = currentBpm; o.beat = beat; o.positionMs = posMs; o.at = now
+			count++
+			sig += d + ":" + (playing ? 1 : 0) + ":" + (master ? 1 : 0) + ":" + Math.round(currentBpm * 100) + ":" + Math.round(beat * 1000) + ";"
+		}
+		out.length = count
+		const rate = anyPlaying ? 100 : 500
+		if (scDeckClockTimer.interval !== rate) scDeckClockTimer.interval = rate
+		if (!anyPlaying && sig === scDeckClockSig && now - scDeckClockPostAt < 1000) return
+		scDeckClockSig = sig
+		scDeckClockPostAt = now
+		x.open("POST", "http://127.0.0.1:8080/v1/sc5000/clock")
+		x.send(JSON.stringify(out))
+	}
 	// 25 Hz around every edge and a CUE preview, 12.5 Hz in steady playback (the
 	// sender posts the filtered line twice a second anyway), 5 Hz while all own
 	// decks rest. Each tick reads ~20 Engine properties, and every read allocates
@@ -2834,6 +2924,7 @@ SERVICES_MAIN = """
 		scProlinkShare = !!v.prolinkShare
 		scProlinkExport = !!v.prolinkExport
 		scPlayer = !!v.player
+		scDeckClock = !!v.deckClock
 		scFourDeckRole = v.fourDeckWaveform ? (v.fourDeckRoleActive || "") : ""
 		scFourDeckOn = !!v.fourDeckWaveform
 		scPairedSetting = !!v.fourDeckWaveform && !!v.pairedView

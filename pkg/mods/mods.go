@@ -774,7 +774,26 @@ func (m *Manager) IsSafeModeQuarantined() bool {
 	return m.isSafeModeQuarantinedLocked(state)
 }
 
+// IsModEnabled reports whether id is enabled and not quarantined without taking
+// managerMu or scanning media drives. Safe for concurrent reads from /v1/sc5000/ui
+// because saveStateLocked writes mods-state.json atomically via temp file + rename.
+func (m *Manager) IsModEnabled(id string) bool {
+	if m == nil || id == "" {
+		return false
+	}
+	state := m.loadStateFile()
+	if m.isSafeModeQuarantinedState(state) {
+		return false
+	}
+	ms := state.Mods[id]
+	return ms.Enabled && !ms.Quarantined
+}
+
 func (m *Manager) isSafeModeQuarantinedLocked(state State) bool {
+	return m.isSafeModeQuarantinedState(state)
+}
+
+func (m *Manager) isSafeModeQuarantinedState(state State) bool {
 	if state.SafeModeQuarantined {
 		return true
 	}
@@ -792,6 +811,10 @@ func (m *Manager) stateFile() string {
 }
 
 func (m *Manager) loadStateLocked() State {
+	return m.loadStateFile()
+}
+
+func (m *Manager) loadStateFile() State {
 	s := State{Mods: make(map[string]ModState)}
 	b, err := os.ReadFile(m.stateFile())
 	if err != nil {

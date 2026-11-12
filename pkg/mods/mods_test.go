@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testArchive(t *testing.T, files map[string]string, link string) []byte {
@@ -729,5 +730,65 @@ func TestNewerModVersion(t *testing.T) {
 		if got := newerModVersion(c.a, c.b); got != c.want {
 			t.Errorf("newerModVersion(%q, %q) = %v", c.a, c.b, got)
 		}
+	}
+}
+
+func TestIsModEnabledWithoutScanningMedia(t *testing.T) {
+	base := t.TempDir()
+	uiDir := filepath.Join(base, "ui")
+	modDir := filepath.Join(base, "mods", "dmx-studio")
+	if err := os.MkdirAll(modDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "mod.json"), []byte(`{"id":"dmx-studio","version":"1.2.0","script":"start.sh"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "start.sh"), []byte("exit 0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Missing mediaRoot must not break or block IsModEnabled.
+	mgr := NewManager(filepath.Join(base, "nonexistent-media"), uiDir)
+	mgr.runScript = func(Mod, string) error { return nil }
+	if mgr.IsModEnabled("dmx-studio") {
+		t.Fatal("disabled mod must report false")
+	}
+	if err := mgr.SetModEnabled("dmx-studio", true); err != nil {
+		t.Fatal(err)
+	}
+	if !mgr.IsModEnabled("dmx-studio") {
+		t.Fatal("enabled mod must report true")
+	}
+	// Hold managerMu (as StartEnabled/Discover do during slow USB/NAS mounts or mod
+	// start scripts): IsModEnabled must still return at once without stalling.
+	mgr.mu.Lock()
+	done := make(chan bool, 1)
+	go func() {
+		done <- mgr.IsModEnabled("dmx-studio")
+	}()
+	select {
+	case got := <-done:
+		if !got {
+			mgr.mu.Unlock()
+			t.Fatal("IsModEnabled under held managerMu = false, want true")
+		}
+	case <-time.After(200 * time.Millisecond):
+		mgr.mu.Unlock()
+		t.Fatal("IsModEnabled blocked on managerMu")
+	}
+	mgr.mu.Unlock()
+
+	if err := os.WriteFile(filepath.Join(uiDir, "safe-mode"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if mgr.IsModEnabled("dmx-studio") {
+		t.Fatal("safe-mode marker must force IsModEnabled=false")
+	}
+	_ = os.Remove(filepath.Join(uiDir, "safe-mode"))
+
+	if err := mgr.QuarantineAll(); err != nil {
+		t.Fatal(err)
+	}
+	if mgr.IsModEnabled("dmx-studio") {
+		t.Fatal("quarantined mod must report false")
 	}
 }

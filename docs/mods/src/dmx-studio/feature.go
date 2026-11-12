@@ -33,7 +33,7 @@ var Profiles = map[string][]string{
 var bounds = []struct {
 	key       string
 	low, high float64
-}{{"bpm", 20, 300}, {"speed", 1, 64}, {"pan", 0, 65535}, {"tilt", 0, 65535}, {"width", 0, 32767}, {"height", 0, 32767},
+}{{"bpm", 20, 300}, {"speed", 1, 64}, {"phraseBeats", 0, 256}, {"pan", 0, 65535}, {"tilt", 0, 65535}, {"width", 0, 32767}, {"height", 0, 32767},
 	{"intensity", 0, 255}, {"red", 0, 255}, {"green", 0, 255}, {"blue", 0, 255}, {"smokeLevel", 0, 255},
 	{"smokeInterval", 1, 3600}, {"smokeDuration", 0, 60}}
 
@@ -44,20 +44,32 @@ type route struct {
 
 // Feature is the DMX console state; exported fields are for tests.
 type Feature struct {
-	state      string
-	Config     map[string]any
-	FlashUntil float64
-	Running    bool
-	Error      string
-	sequence   byte
-	cid        []byte
-	Routes     []route
-	frames     map[int][]byte
-	mu         sync.Mutex
-	stop       chan struct{}
-	done       chan struct{}
-	start      time.Time
-	looping    bool
+	state               string
+	Config              map[string]any
+	FlashUntil          float64
+	Running             bool
+	Error               string
+	sequence            byte
+	cid                 []byte
+	Routes              []route
+	frames              map[int][]byte
+	mu                  sync.Mutex
+	stop                chan struct{}
+	done                chan struct{}
+	clockDone           chan struct{}
+	start               time.Time
+	looping             bool
+	clock               beatClock
+	webUIURL            string
+	pollerActive        bool
+	lastExternalClock   float64
+	clockAPIAbsentUntil time.Time
+	midiMu              sync.Mutex
+	midiRunning         bool
+	midiStop            chan struct{}
+	midiDone            chan struct{}
+	midiErr             string
+	openMIDISink        func() (midiSink, error)
 }
 
 // New returns the DMX Studio feature with its 30 Hz render/output loop running.
@@ -68,16 +80,32 @@ func New(env modkit.Env) (modkit.Feature, error) {
 	}
 	f.looping = true
 	go f.loop()
+	go f.clockLoop()
+	f.syncMIDIClock(false)
 	return f, nil
 }
 
 // NewFeature loads show.json without starting the output loop.
 func NewFeature(state string) (*Feature, error) {
-	f := &Feature{state: state, Config: map[string]any{"outputs": []any{}, "patch": []any{}, "bpm": 120.0, "effect": "Circle", "speed": 4.0,
-		"pan": 32768.0, "tilt": 32768.0, "width": 16000.0, "height": 16000.0,
-		"intensity": 0.0, "red": 255.0, "green": 255.0, "blue": 255.0,
-		"smokeLevel": 0.0, "smokeInterval": 30.0, "smokeDuration": 2.0, "smokeArmed": false},
-		frames: map[int][]byte{}, stop: make(chan struct{}), done: make(chan struct{}), start: time.Now()}
+	f := &Feature{
+		state: state,
+		Config: map[string]any{
+			"outputs": []any{}, "patch": []any{}, "bpm": 120.0, "effect": "Circle", "speed": 4.0,
+			"followDeck": true, "phraseBeats": 0.0, "phraseScenes": []any{}, "midiClock": false,
+			"pan": 32768.0, "tilt": 32768.0, "width": 16000.0, "height": 16000.0,
+			"intensity": 0.0, "red": 255.0, "green": 255.0, "blue": 255.0,
+			"smokeLevel": 0.0, "smokeInterval": 30.0, "smokeDuration": 2.0, "smokeArmed": false,
+		},
+		frames:            map[int][]byte{},
+		stop:              make(chan struct{}),
+		done:              make(chan struct{}),
+		clockDone:         make(chan struct{}),
+		start:             time.Now(),
+		clock:             newBeatClock(),
+		webUIURL:          envWebUIURL(),
+		lastExternalClock: -1e9,
+		openMIDISink:      openALSAMIDISink,
+	}
 	show := filepath.Join(state, "show.json")
 	if _, err := os.Stat(show); err == nil {
 		var saved map[string]any
@@ -145,6 +173,17 @@ func (f *Feature) Validated(config map[string]any) (map[string]any, error) {
 		}
 		c[b.key] = n
 	}
+	if _, ok := c["followDeck"].(bool); !ok {
+		return nil, modkit.Bad("followDeck must be boolean")
+	}
+	if _, ok := c["midiClock"].(bool); !ok {
+		return nil, modkit.Bad("midiClock must be boolean")
+	}
+	scenes, err := validatePhraseScenes(c["phraseScenes"])
+	if err != nil {
+		return nil, err
+	}
+	c["phraseScenes"] = scenes
 	if c["smokeDuration"].(float64) > c["smokeInterval"].(float64) {
 		return nil, modkit.Bad("smoke duration cannot exceed interval")
 	}
@@ -302,9 +341,12 @@ func num(v any) float64 {
 // Render computes every universe's 512 channels at monotonic time now.
 func (f *Feature) Render(now float64) map[int][]byte {
 	c := f.Config
-	phase := now * c["bpm"].(float64) / 60 / c["speed"].(float64) * 2 * math.Pi
+	totalBeats := f.clock.beats(now, c["bpm"].(float64))
+	eff := applyPhrase(c, totalBeats)
+	// Without a deck clock this is the old wall-clock phase: now * bpm / 60 beats.
+	phase := totalBeats / eff["speed"].(float64) * 2 * math.Pi
 	x, y := 0.0, 0.0
-	switch c["effect"] {
+	switch eff["effect"] {
 	case "Circle":
 		x, y = math.Sin(phase), math.Cos(phase)
 	case "8-Figure":
@@ -312,13 +354,13 @@ func (f *Feature) Render(now float64) map[int][]byte {
 	case "Pan-Tilt Sweep":
 		x, y = 2/math.Pi*math.Asin(math.Sin(phase)), math.Sin(phase/2)
 	}
-	pan := int(math.Max(0, math.Min(65535, c["pan"].(float64)+x*c["width"].(float64))))
-	tilt := int(math.Max(0, math.Min(65535, c["tilt"].(float64)+y*c["height"].(float64))))
+	pan := int(math.Max(0, math.Min(65535, c["pan"].(float64)+x*eff["width"].(float64))))
+	tilt := int(math.Max(0, math.Min(65535, c["tilt"].(float64)+y*eff["height"].(float64))))
 	armed, _ := c["smokeArmed"].(bool)
 	smoke := armed && (now < f.FlashUntil || math.Mod(now, c["smokeInterval"].(float64)) < c["smokeDuration"].(float64))
 	values := map[string]int{"pan": pan >> 8, "panFine": pan & 255, "tilt": tilt >> 8, "tiltFine": tilt & 255,
-		"dimmer": int(c["intensity"].(float64)), "red": int(c["red"].(float64)), "green": int(c["green"].(float64)),
-		"blue": int(c["blue"].(float64)), "smoke": 0}
+		"dimmer": int(eff["intensity"].(float64)), "red": int(eff["red"].(float64)), "green": int(eff["green"].(float64)),
+		"blue": int(eff["blue"].(float64)), "smoke": 0}
 	if smoke {
 		values["smoke"] = int(c["smokeLevel"].(float64))
 	}
@@ -432,6 +474,16 @@ func (f *Feature) Status() (any, error) {
 	return f.statusLocked(), nil
 }
 
+func (f *Feature) clockStatusLocked(now float64) map[string]any {
+	st := f.clock.status(now, f.Config["bpm"].(float64), f.Config["phraseBeats"].(float64))
+	follow, _ := f.Config["followDeck"].(bool)
+	st["followDeck"] = follow
+	if f.midiErr != "" {
+		st["midiClockError"] = f.midiErr
+	}
+	return st
+}
+
 func (f *Feature) statusLocked() map[string]any {
 	frames := map[string][]int{}
 	for k, v := range f.frames {
@@ -445,10 +497,17 @@ func (f *Feature) statusLocked() map[string]any {
 	for k, v := range f.Config {
 		config[k] = v
 	}
-	return map[string]any{"config": config, "profiles": Profiles, "running": f.Running, "error": f.Error, "frames": frames}
+	return map[string]any{"config": config, "profiles": Profiles, "running": f.Running, "error": f.Error, "frames": frames,
+		"clock": f.clockStatusLocked(f.now())}
 }
 
 func (f *Feature) Action(req map[string]any) (any, error) {
+	syncMIDI := false
+	defer func() {
+		if syncMIDI {
+			f.syncMIDIClock(false)
+		}
+	}()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	action, err := get(req, "action")
@@ -481,6 +540,12 @@ func (f *Feature) Action(req map[string]any) (any, error) {
 			return nil, err
 		}
 		f.Config = config
+		if follow, _ := f.Config["followDeck"].(bool); !follow && f.clock.deck != 0 {
+			f.clock.toManual(f.now(), f.Config["bpm"].(float64))
+			f.pollerActive = false
+			f.lastExternalClock = -1e9
+		}
+		syncMIDI = true
 	case "start":
 		if !f.Running {
 			outputs, _ := objects(f.Config["outputs"])
@@ -512,6 +577,25 @@ func (f *Feature) Action(req map[string]any) (any, error) {
 		}
 	case "stop":
 		f.Blackout()
+	case "clock":
+		// Memory only, a small reply (never writes show.json).
+		return f.clockAction(req, f.now(), wallMillis())
+	case "follow":
+		en, err := get(req, "enabled")
+		if err != nil {
+			return nil, err
+		}
+		on, ok := en.(bool)
+		if !ok {
+			return nil, modkit.Bad("enabled must be boolean")
+		}
+		f.Config["followDeck"] = on
+		if !on {
+			f.clock.toManual(f.now(), f.Config["bpm"].(float64))
+			f.pollerActive = false
+			f.lastExternalClock = -1e9
+		}
+		return map[string]any{"clock": f.clockStatusLocked(f.now())}, nil
 	case "flash":
 		if held, _ := req["held"].(bool); held && f.Running {
 			f.FlashUntil = f.now() + 0.5
@@ -536,8 +620,13 @@ func (f *Feature) Close() {
 		case <-f.done:
 		case <-time.After(2 * time.Second):
 		}
+		select {
+		case <-f.clockDone:
+		case <-time.After(2 * time.Second):
+		}
 	}
+	f.syncMIDIClock(true)
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.Blackout()
+	f.mu.Unlock()
 }

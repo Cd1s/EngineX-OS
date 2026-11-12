@@ -1,9 +1,10 @@
-# DMX Studio 1.1.0
+# DMX Studio 1.2.0
 
 Official, source-included Mod for EngineX OS. MIT licensed. Community requests:
 [#134](https://github.com/Cd1s/EngineX-OS/issues/134),
-[#137](https://github.com/Cd1s/EngineX-OS/issues/137), and
-[#208](https://github.com/Cd1s/EngineX-OS/issues/208).
+[#137](https://github.com/Cd1s/EngineX-OS/issues/137),
+[#208](https://github.com/Cd1s/EngineX-OS/issues/208), and
+[#209](https://github.com/Cd1s/EngineX-OS/issues/209).
 
 ## Runtime
 
@@ -13,15 +14,15 @@ or network interface. The bundled helper is a static Go binary
 (`bin/enginex-mod-helper-armv7` for `linux/arm` `GOARM=7` on all gen-1 and
 gen-2 armhf decks, and `bin/enginex-mod-helper-arm64` for PRIME 4 G2 / SYSTEM
 ONE), selected in `start.sh` via `uname -m`. No dependencies are installed.
-Uploading 1.1.0 in the web console replaces an installed 1.0.0 in place (keeps
-its enabled state and settings).
+Uploading 1.2.0 in the web console replaces an installed 1.0.0 or 1.1.0 in
+place (keeps its enabled state and settings).
 The loader invokes `sh start.sh start` / `sh start.sh stop`. Start detaches a
 `nohup` helper and checks readiness; stop verifies the saved PID's command line
 before sending SIGTERM. Manual foreground use: `sh start.sh serve`.
-The QML panel connects only to `127.0.0.1:17834`; it is not a remote web server.
-The host UI must load `EngineXMods/dmx-studio/Panel.qml` from the Mod overlay.
-State: `/data/enginex/mods-state/dmx-studio/show.json` (override the state parent
-with `ENGINEX_MOD_STATE`). Restarts always stop outputs and disarm smoke.
+The helper HTTP control API listens only on `127.0.0.1:17834`; it is not a
+remote web server. State: `/data/enginex/mods-state/dmx-studio/show.json`
+(override the state parent with `ENGINEX_MOD_STATE`). Restarts always stop
+outputs and disarm smoke.
 
 ## Patch and output
 
@@ -62,11 +63,50 @@ Fixtures are generic templates, **not verified vendor personalities**. The
 strobe, smoke, gobo or beam channel semantics. Patch overlap and channel overflow
 are rejected. Stop output before changing routes or patch.
 
-Circle, 8-Figure and Pan-Tilt Sweep use a manually entered BPM and beats/cycle
-(`speed`, default 4). There is no automatic deck beat-clock binding. Pan/tilt
-center and width/height can be set through `/action` configuration. RGB and
-intensity apply to the generic fixtures. The 2D canvas is a diagnostic preview,
-not a calibrated beam simulation; the monitor shows all 512 values per universe.
+## Beat Sync, Phrase Scenes, and MIDI Clock (#209)
+
+Circle, 8-Figure and Pan-Tilt Sweep move `speed` beats per cycle (default 4).
+With `followDeck` enabled (default `true`), the helper automatically obtains the
+MASTER deck's beat phase (`BeatNumber`), played tempo (`CurrentBPM`), and play
+state from `stream-sync` on `http://127.0.0.1:8080/v1/sc5000/clock` (no deck
+Mod panel is required; overrides via `ENGINEX_WEBUI_URL` for tests). It selects
+in priority order:
+
+1. Playing MASTER / LEAD deck (`local` > paired `peer` > Pro DJ Link `prolink`)
+2. Any playing deck (`local` > `peer` > `prolink`)
+3. Paused MASTER / LEAD deck (holds the look steady)
+4. Manual BPM fallback (`deck: 0`) when no deck plays, no track BPM is available
+   (`bpm <= 0`), or updates stop for 2 s
+
+Between polls the helper extrapolates continuously; phase errors below half a
+frame of slewing snap at once, while larger steps (nudges, seeks, unsynced
+MASTER handoffs) slew smoothly in at half the tempo without frame jumps. CUE
+held with advancing `TrackPosition` counts as playing. The beat clock is kept
+strictly in memory and **never writes `show.json`** while running. Note that Pro
+DJ Link CDJ beat phase is approximate (`BeatInBar` + `PlayPositionMS` modulo beat
+duration, without beatgrid offset/pitch adjustment). On older `5.3.0.4` hosts
+without `/v1/sc5000/clock`, the helper caches absence and falls back at 2–4 Hz to
+`/peer/decks` (requires 4-Deck Waveform and reflects the last posted beat
+snapshot) plus `/v1/sc5000/prolink`.
+
+Optional **phrase awareness** (`phraseBeats`, 0–256, default `0` = off; optional
+`phraseScenes` array of scene overrides or built-in 4-color palette rotation)
+switches looks on every `phraseBeats` boundary (for example 16 or 32 beats)
+aligned to the deck beat counter starting at helper launch / lock-on (bar-synced
+beat counter, not analyzed musical intro/verse/drop track phrases).
+
+Optional **MIDI clock out** (`midiClock`: `true`, default `false`) opens a
+readable ALSA Sequencer port (`EngineX-DMX-Clock`, `/dev/snd/seq`) and sends 24
+PPQN MIDI Timing Clock (`0xF8`) plus Start / Continue / Stop (`0xFA` / `0xFB` /
+`0xFC`) without bursting on seeks or loops. Uses a 5 ms timer tick (~±5 ms jitter
+at 120 BPM's ~21 ms clock interval), does not emit MIDI Song Position Pointer
+(`0xF2`) on seeks, and requires kernel `/dev/snd/seq` plus an explicit ALSA
+subscriber connection (e.g. `aconnect`).
+
+Pan/tilt center and width/height can be set through `/action` configuration. RGB
+and intensity apply to the generic fixtures. The 2D canvas is a diagnostic
+preview, not a calibrated beam simulation; the monitor shows all 512 values per
+universe.
 
 Smoke requires an explicit Smoke fixture, arming and an applied output level.
 Interval/duration use seconds; duration 0 disables scheduled smoke while leaving
@@ -79,13 +119,17 @@ and disarm smoke. Hardware behavior after cable loss is fixture-specific.
 
 Local `GET /status`; `POST /action` with JSON:
 `{"action":"configure","config":{...}}`, `{"action":"start"}`,
-`{"action":"stop"}`, `{"action":"flash","held":true}`.
+`{"action":"stop"}`, `{"action":"flash","held":true}`,
+`{"action":"follow","enabled":true|false}`, and non-persisting
+`{"action":"clock","deck":0..4,"playing":bool,"beat":n,"bpm":n,"position":n,"at":unixMs}`.
 Only local Host headers / QML origins are accepted. No shell evaluation.
 
 Packet layout references (independent implementation, no upstream code copied):
 [Art-Net implementation](https://github.com/OpenLightingProject/ola/blob/master/plugins/artnet/ArtNetNode.cpp),
 [ETC E1.31 layout](https://github.com/ETCLabs/sACN/blob/main/src/sacn/private/pdu.h).
 FTDI/OpenDMX output was validated on a Mixstream Pro+ NH08S in #208 (~38 Hz, no
-audio impact); uDMX, Art-Net/sACN fixtures and all remaining model variants
-remain **unverified on hardware**. Do not infer full hardware validation from
-manifest validation or registry model targeting.
+audio impact); uDMX, Art-Net/sACN fixtures, live beat-synced fixture output,
+phrase scene cycling, ALSA MIDI clock out, and all remaining model variants
+remain **unverified on real lighting / MIDI hardware**. Do not infer full
+hardware validation from manifest validation, unit tests, or registry model
+targeting.

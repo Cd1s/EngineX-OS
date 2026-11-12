@@ -11,6 +11,20 @@ Rectangle {
     property string message: "Start this Mod's start.sh helper to connect."
     property int universe: 1
     property bool initialized: false
+    // #209 beat clock: the Go helper polls stream-sync directly (no deck Panel
+    // required). Toggling the panel switch sends `follow` without writing show.json.
+    property bool followDeck: true
+    property string clockText: "Beat: manual BPM"
+    function formatClock(c) {
+        if (!c) return "Beat: manual BPM"
+        if (c.source === "deck") {
+            var origin = c.sourceOrigin ? " (" + c.sourceOrigin + ")" : ""
+            var st = c.playing ? "" : " (paused, holding)"
+            var ph = c.phrase ? " · phrase " + c.phrase : ""
+            return "Beat: Deck " + c.deck + origin + st + " · " + Number(c.bpm || 0).toFixed(1) + " BPM · beat " + (Math.floor(c.beat || 0) + 1) + ph
+        }
+        return "Beat: manual " + (c.bpm || 120) + " BPM" + (c.phrase ? " · phrase " + c.phrase : "")
+    }
     function request(body) {
         var xhr = new XMLHttpRequest()
         xhr.open(body ? "POST" : "GET", "http://127.0.0.1:17834/" + (body ? "action" : "status"))
@@ -19,6 +33,11 @@ Rectangle {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
             if (xhr.status !== 200) { root.message = xhr.responseText || "Helper unavailable. Run start.sh on the player."; return }
             var value = JSON.parse(xhr.responseText)
+            if (value.clock) {
+                root.clockText = root.formatClock(value.clock)
+                if (value.clock.followDeck !== undefined) root.followDeck = !!value.clock.followDeck
+            }
+            if (!value.config) return
             var changed = xhr.responseText !== root.lastText
             root.lastText = xhr.responseText
             root.state = value
@@ -27,6 +46,7 @@ Rectangle {
                 root.config = value.config
                 outputs.text = JSON.stringify(value.config.outputs, null, 2)
                 patch.text = JSON.stringify(value.config.patch, null, 2)
+                root.followDeck = value.config.followDeck !== false
                 root.initialized = true
             }
             if (changed) stage.requestPaint()
@@ -37,6 +57,9 @@ Rectangle {
         try {
             config.outputs = JSON.parse(outputs.text); config.patch = JSON.parse(patch.text)
             config.bpm = bpm.value; config.effect = effect.currentText
+            config.followDeck = root.followDeck
+            config.phraseBeats = phraseBeats.value
+            config.midiClock = midiClock.checked
             config.intensity = intensity.value; config.red = red.value; config.green = green.value; config.blue = blue.value
             config.smokeLevel = smoke.value; config.smokeInterval = interval.value; config.smokeDuration = duration.value
             config.smokeArmed = armed.checked
@@ -104,7 +127,13 @@ Rectangle {
                         Label { text: "BPM"; color: "white" }
                         SpinBox { id: bpm; from: 20; to: 300; value: root.config.bpm || 120 }
                         ComboBox { id: effect; model: ["Circle", "8-Figure", "Pan-Tilt Sweep", "Static"] }
-                        Label { text: "BPM is manually set; no automatic deck-clock binding."; color: "#abb9cc" }
+                        CheckBox { text: "Follow MASTER deck beat"; checked: root.followDeck; onToggled: { root.followDeck = checked; root.request({action:"follow", enabled:checked}) } }
+                        Label { text: root.followDeck ? root.clockText : "BPM is manually set."; color: "#abb9cc" }
+                    }
+                    RowLayout {
+                        Label { text: "Phrase beats (0=off)"; color: "white" }
+                        SpinBox { id: phraseBeats; from: 0; to: 256; value: root.config.phraseBeats || 0 }
+                        CheckBox { id: midiClock; text: "MIDI clock out (24 PPQN)"; checked: !!root.config.midiClock }
                     }
                     Label { text: "Master intensity"; color: "white" }
                     Slider { id: intensity; from: 0; to: 255; stepSize: 1; value: root.config.intensity || 0; Layout.fillWidth: true }
