@@ -1,10 +1,17 @@
 package rekordbox
 
 import (
+	"context"
+	"database/sql"
 	"encoding/binary"
+	"fmt"
+	"net/url"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/Cd1s/EngineX-OS/internal/testfixture"
+	_ "modernc.org/sqlite"
 )
 
 func TestAnalysisSkipsPadsIPAndDisabledCueSlots(t *testing.T) {
@@ -77,3 +84,59 @@ func TestAnalysisSkipsPadsIPAndDisabledCueSlots(t *testing.T) {
 		t.Fatalf("Library.Validate failed after parsing ANLZ cues: %v", err)
 	}
 }
+
+func TestOneLibraryAdapterStreamsProjectedColumnsWithoutMaterializingUnusedBlobs(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "exportLibrary.db")
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(dbPath)}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for _, stmt := range []string{
+		`CREATE TABLE artist (id INTEGER PRIMARY KEY, name TEXT, unused_bio BLOB)`,
+		`CREATE TABLE content (id INTEGER PRIMARY KEY, title TEXT, artist_id INTEGER, file_path TEXT, bpmx100 INTEGER, length INTEGER, unused_waveform BLOB)`,
+		`CREATE TABLE playlist (id INTEGER PRIMARY KEY, playlist_id_parent INTEGER, sequenceNo INTEGER, name TEXT, is_folder INTEGER, unused_meta BLOB)`,
+		`CREATE TABLE playlist_content (playlist_id INTEGER, content_id INTEGER, sequenceNo INTEGER, unused_sync BLOB)`,
+		`INSERT INTO artist VALUES (1, 'Artist One', zeroblob(1048576))`,
+		`INSERT INTO playlist VALUES (10, 0, 1, 'Main Set', 0, zeroblob(1048576))`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 1; i <= 32; i++ {
+		if _, err := db.Exec(`INSERT INTO content VALUES (?, ?, 1, ?, 12800, 240, zeroblob(1048576))`,
+			i, fmt.Sprintf("Track %d", i), fmt.Sprintf("/Contents/track_%d.flac", i)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO playlist_content VALUES (10, ?, ?, zeroblob(262144))`, i, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	lib, err := (OneLibraryAdapter{}).Read(context.Background(), db)
+	if err != nil {
+		t.Fatalf("OneLibraryAdapter.Read: %v", err)
+	}
+	runtime.ReadMemStats(&after)
+	allocDelta := after.TotalAlloc - before.TotalAlloc
+
+	if len(lib.Tracks) != 32 || len(lib.Playlists) != 1 || len(lib.Playlists[0].Tracks) != 32 {
+		t.Fatalf("unexpected library counts: tracks=%d playlists=%+v", len(lib.Tracks), lib.Playlists)
+	}
+	if lib.Tracks[0].Artist != "Artist One" || lib.Tracks[0].BPM != 128 || lib.Tracks[0].Duration != 240 {
+		t.Fatalf("unexpected track metadata: %+v", lib.Tracks[0])
+	}
+	// With SELECT * (readSQLRows), unused zeroblobs allocate >40 MiB in Go heap strings;
+	// projected streaming via eachSQLRow stays well under 8 MiB even under -race.
+	if allocDelta > 8<<20 {
+		t.Fatalf("OneLibraryAdapter.Read allocated %d bytes (>8 MiB); unused columns were materialized via SELECT *", allocDelta)
+	}
+}
+
