@@ -61,6 +61,12 @@ type Options struct {
 	// tracks left are imported as Fast imports them and counted in Deferred, so
 	// the playlists still land while the mount waits (#48).
 	Deadline time.Time `json:"-"`
+	// Resume continues an import of the same export that left tracks without
+	// their files read: tracks already imported with them are kept as they are,
+	// without a stat, audio header or analysis read, and only the others are
+	// read. A large library otherwise spent its whole read budget re-checking
+	// thousands of finished tracks on every mount (BH-GC1-2).
+	Resume bool `json:"-"`
 }
 type Result struct {
 	Added, Updated, Unchanged int
@@ -360,8 +366,10 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 	var prepared []preparedTrack
 	if opts.Fast {
 		prepared = prepareFast(res, l)
-	} else if prepared, err = prepareTracks(ctx, res, l, opts.Deadline); err != nil {
-		return result, err
+	} else if !opts.Resume {
+		if prepared, err = prepareTracks(ctx, res, l, opts.Deadline, nil); err != nil {
+			return result, err
+		}
 	}
 	dir := opts.DatabaseDir
 	if dir == "" {
@@ -390,6 +398,15 @@ func Sync(ctx context.Context, mount string, l *rekordbox.Library, opts Options)
 	defer tx.Rollback()
 	q := newStmtCache(tx)
 	defer q.Close()
+	if opts.Resume && !opts.Fast {
+		done, e := finishedFingerprints(ctx, tx)
+		if e != nil {
+			return result, e
+		}
+		if prepared, err = prepareTracks(ctx, res, l, opts.Deadline, done); err != nil {
+			return result, err
+		}
+	}
 	var databaseUUID string
 	if err = q.QueryRowContext(ctx, `SELECT uuid FROM Information`).Scan(&databaseUUID); err != nil {
 		return result, err
@@ -870,4 +887,23 @@ func writeEntities(ctx context.Context, q sqlExecer, list int64, tracks []uint32
 		previous = entity
 	}
 	return nil
+}
+
+// finishedFingerprints maps the Engine path of every bridge-owned track that
+// was imported with its files to its fingerprint.
+func finishedFingerprints(ctx context.Context, tx *sql.Tx) (map[string]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT path,fingerprint FROM BridgeState WHERE fingerprint<>'' AND fingerprint NOT LIKE 'fast:%'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	done := map[string]string{}
+	for rows.Next() {
+		var p, fp string
+		if err = rows.Scan(&p, &fp); err != nil {
+			return nil, err
+		}
+		done[p] = fp
+	}
+	return done, rows.Err()
 }

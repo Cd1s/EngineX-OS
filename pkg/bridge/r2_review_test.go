@@ -29,7 +29,8 @@ func TestMountReadsTheExportOnceAndBudgetsAfterIt(t *testing.T) {
 	if _, err = enginedb.Sync(context.Background(), root, l, enginedb.Options{Fast: true}); err != nil {
 		t.Fatal(err)
 	}
-	restore := bridge.SlowExportReadForTest(300*time.Millisecond, 250*time.Millisecond)
+	// The read outlasts the budget; the 5 tracks after it fit in it even under -race on a busy host.
+	restore := bridge.SlowExportReadForTest(3*time.Second, 2500*time.Millisecond)
 	defer restore()
 	before := bridge.ExportReadsForTest()
 	r, err := bridge.ConvertAtMount(context.Background(), root, enginedb.Options{}, false)

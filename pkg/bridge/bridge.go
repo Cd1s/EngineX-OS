@@ -308,11 +308,15 @@ func Reconcile(r *compat.Resolver, l *rekordbox.Library) {
 }
 
 const (
-	stampName    = ".rb-bridge-stamp"
+	stampName = ".rb-bridge-stamp"
+	// pendingName holds the stamp of an export whose import left tracks without
+	// their files read; the next mount of the same export resumes it.
+	pendingName  = ".rb-bridge-pending"
 	stampVersion = "v2" // v2 checks per-track MP3 start-offset classes (#178)
 	stateName    = ".rb-bridge-state.db"
 	// Past this, a first import cannot finish while the mount waits: reading every
-	// file took 8 minutes for 6000 tracks on a USB stick.
+	// file took 8 minutes for 6000 tracks on a USB stick. Later mounts read the
+	// files a budget at a time.
 	fastImportTracks = 500
 )
 
@@ -357,16 +361,19 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 		stamp = stampVersion + " " + staged
 	}
 	dir := filepath.Join(mount, "Engine Library", "Database2")
+	resume := false
 	if !full && !opts.SmartMatch && importedStamp(dir) == stamp {
-		if writable(mount) { // drives imported by an earlier build still get their covers
-			_, _ = enginedb.MigrateArtwork(ctx, mount)
+		// Earlier builds stamped a large library imported from the export alone
+		// (BH-GC1-2); it still has tracks without their files read.
+		if resume = hasFastTracks(dir); !resume {
+			if writable(mount) { // drives imported by an earlier build still get their covers
+				_, _ = enginedb.MigrateArtwork(ctx, mount)
+			}
+			return enginedb.Result{Bypassed: true}, nil
 		}
-		return enginedb.Result{Bypassed: true}, nil
 	}
 	var result enginedb.Result
 	var pre *preread
-	// GL-011: Always use fast tmpfs delta import at mount when a library exceeds
-	// fastImportTracks, even if .rb-bridge-state.db already exists from an earlier mount.
 	if !full && !opts.SmartMatch {
 		l, stagedOnly, err := readLibrary(ctx, mount)
 		if err != nil {
@@ -381,11 +388,24 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 			budget = 0
 		}
 		opts.StagedOnly = stagedOnly
-		if len(l.Tracks) > fastImportTracks {
+		// A large library's first import takes only what the export holds, built
+		// aside and published in one go, so its playlists are there when Engine
+		// first sees the stick (#182). Its cues, loops, beat grids, waveforms and
+		// MP3 offsets are read on the next inserts, a read budget at a time, in
+		// the in-place import below: no stamp until no track is left without them.
+		// Before, the stamp was written here and they were never read.
+		if len(l.Tracks) > fastImportTracks && !hasLibrary(dir) {
+			if !writable(mount) {
+				return enginedb.Result{Bypassed: true}, nil
+			}
+			Reconcile(r, l)
 			opts.Fast = true
 			result, err = stagedImport(ctx, mount, dir, l, opts)
-			if err == nil {
-				writeStamp(dir, stamp)
+			if err != nil {
+				cleanEmptyEngineLibrary(dir)
+			} else {
+				writeMark(dir, pendingName, stamp)
+				log.Printf("rb-bridge: %d tracks imported without cues; the next mounts read them", len(l.Tracks))
 			}
 			return result, err
 		}
@@ -406,11 +426,16 @@ func ConvertAtMount(ctx context.Context, mount string, opts enginedb.Options, fu
 			return result, err
 		}
 	}
+	// The same export as a mount that left tracks without their files: read
+	// only those, the others are known to be imported with theirs.
+	opts.Resume = resume || (!full && !opts.SmartMatch && readMark(dir, pendingName) == stamp)
 	result, err = convert(ctx, mount, opts, pre, budget)
 	if err == nil && result.Deferred > 0 {
+		writeMark(dir, pendingName, stamp)
 		log.Printf("rb-bridge: %d tracks imported without cues; the next mount reads them", result.Deferred)
 	} else if err == nil && !result.Bypassed {
 		writeStamp(dir, stamp)
+		os.Remove(filepath.Join(dir, pendingName))
 	}
 	return result, err
 }
@@ -438,6 +463,23 @@ func cleanEmptyEngineLibrary(dir string) {
 	}
 	os.Remove(dir)
 	os.Remove(filepath.Dir(dir))
+}
+
+// hasFastTracks reports whether the bridge state holds tracks imported without
+// their files read.
+func hasFastTracks(dir string) bool {
+	p := filepath.Join(dir, stateName)
+	if _, err := os.Stat(p); err != nil {
+		return false
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String())
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+	var fast int
+	err = db.QueryRow(`SELECT EXISTS(SELECT 1 FROM BridgeState WHERE fingerprint LIKE 'fast:%')`).Scan(&fast)
+	return err == nil && fast == 1
 }
 
 func importedStamp(dir string) string {
@@ -509,10 +551,20 @@ func HasPopulatedLibrary(mount string) bool {
 	return err == nil && ok == 1
 }
 
-func writeStamp(dir, stamp string) {
-	if err := os.WriteFile(filepath.Join(dir, stampName), []byte(stamp+"\n"), 0o644); err != nil {
+func writeStamp(dir, stamp string) { writeMark(dir, stampName, stamp) }
+
+func writeMark(dir, name, stamp string) {
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(stamp+"\n"), 0o644); err != nil {
 		log.Printf("rb-bridge: could not record the import: %v", err)
 	}
+}
+
+func readMark(dir, name string) string {
+	b, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // stagedImport syncs a copy of the volume's database in a temporary directory
