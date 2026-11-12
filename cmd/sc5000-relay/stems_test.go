@@ -366,3 +366,49 @@ func TestDefaultStemsTokenFile(t *testing.T) {
 		t.Errorf("with credential: %s", got)
 	}
 }
+
+func TestStemsRelaySlowRenderAfterDoneDoesNotTimeoutUpload(t *testing.T) {
+	prev := stemsIdleRead
+	stemsIdleRead = 80 * time.Millisecond
+	t.Cleanup(func() { stemsIdleRead = prev })
+
+	slowWorker := []string{"/bin/sh", "-c", `
+printf 'session=FFFFFFFFFFFFFFFF\n\n'
+while IFS= read -r l && [ -n "$l" ]; do :; done
+printf 'preparing=ready\n\npreparing=ready\nnumReturnChannels=8\n\n'
+while IFS= read -r l && [ -n "$l" ]; do :; done
+dd bs=32 count=1 >/dev/null 2>&1
+while IFS= read -r l; do
+  [ "$l" = "action=done" ] && break
+done
+while IFS= read -r l && [ -n "$l" ]; do :; done
+sleep 0.25
+printf 'returnFrames=4\n\n'
+dd if=/dev/zero bs=128 count=1 2>/dev/null
+printf 'returnFrames=0\n\n'
+`}
+	f := newStemsFixture(t, slowWorker)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	in, send := io.Pipe()
+	defer send.Close()
+	out, receive := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		err := stems.Proxy(ctx, f.relay.URL, defaultPassword, in, receive)
+		receive.CloseWithError(err)
+		done <- err
+	}()
+	greeting := make([]byte, len(testGreeting))
+	if _, err := io.ReadFull(out, greeting); err != nil {
+		t.Fatalf("greeting: %v", err)
+	}
+	blk := append([]byte("numChannels=2\nsampleRate=44100\nmaxBlockSize=1024\n\naction=block\nnumSamples=4\n\n"), make([]byte, 4*2*4)...)
+	send.Write(append(blk, []byte("action=done\n\n")...))
+	// Upload stays open without EOF while the worker renders past stemsIdleRead.
+	_, _ = io.ReadAll(out)
+	if err := <-done; err != nil {
+		t.Fatalf("relay timed out open upload after action=done: %v", err)
+	}
+	waitSlotFree(t, f.backend)
+}

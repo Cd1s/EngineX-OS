@@ -150,3 +150,45 @@ func TestDisconnectKillsWorkerIgnoringStdin(t *testing.T) {
 		t.Fatal("worker ignoring stdin was not killed")
 	}
 }
+
+func TestSlowRenderAfterDoneDoesNotTimeoutIdleUpload(t *testing.T) {
+	prev := uploadIdleRead
+	uploadIdleRead = 80 * time.Millisecond
+	t.Cleanup(func() { uploadIdleRead = prev })
+
+	// Worker reads init + 1 non-empty block + action=done, then takes 250ms
+	// (> uploadIdleRead) to finish draining while Engine keeps its upload open.
+	worker := []string{"/bin/sh", "-c", `
+printf 'session=FFFFFFFFFFFFFFFF\n\n'
+while IFS= read -r l && [ -n "$l" ]; do :; done
+printf 'preparing=ready\n\npreparing=ready\nnumReturnChannels=4\n\n'
+while IFS= read -r l && [ -n "$l" ]; do :; done
+dd bs=16 count=1 >/dev/null 2>&1
+while IFS= read -r l; do
+  [ "$l" = "action=done" ] && break
+done
+while IFS= read -r l && [ -n "$l" ]; do :; done
+sleep 0.25
+printf 'returnFrames=4\n\n'
+dd if=/dev/zero bs=64 count=1 2>/dev/null
+printf 'returnFrames=0\n\n'
+`}
+	b := &Backend{Secret: secret, Worker: worker, Slot: make(chan struct{}, 1)}
+	s := httptest.NewServer(b)
+	defer s.Close()
+
+	in, send := io.Pipe()
+	defer send.Close()
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { done <- Proxy(ctx, s.URL, secret, in, &out) }()
+
+	blk := append([]byte("numChannels=1\nsampleRate=44100\nmaxBlockSize=4\n\naction=block\nnumSamples=4\n\n"), make([]byte, 4*4)...)
+	send.Write(append(blk, []byte("action=done\n\n")...))
+	// Deliberately leave send open (no EOF), matching Engine waiting on child stdout.
+	if err := <-done; err != nil {
+		t.Fatalf("Proxy killed slow render after action=done: %v", err)
+	}
+}

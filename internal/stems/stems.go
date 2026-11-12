@@ -212,7 +212,7 @@ func (f frameWriter) Write(p []byte) (int, error) {
 type idleConn struct{ net.Conn }
 
 func (c *idleConn) Read(p []byte) (int, error) {
-	c.SetReadDeadline(time.Now().Add(120 * time.Second))
+	c.SetReadDeadline(time.Now().Add(10 * time.Minute))
 	return c.Conn.Read(p)
 }
 func (c *idleConn) Write(p []byte) (int, error) {
@@ -220,11 +220,15 @@ func (c *idleConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
+var uploadIdleRead = 120 * time.Second
+
 type idleBody struct {
-	r       io.Reader
-	c       *http.ResponseController
-	mu      sync.Mutex
-	stopped bool
+	r          io.Reader
+	c          *http.ResponseController
+	tracker    UploadTracker
+	mu         sync.Mutex
+	uploadDone bool
+	stopped    bool
 }
 
 func (b *idleBody) Read(p []byte) (int, error) {
@@ -233,9 +237,22 @@ func (b *idleBody) Read(p []byte) (int, error) {
 		b.mu.Unlock()
 		return 0, io.ErrClosedPipe
 	}
-	b.c.SetReadDeadline(time.Now().Add(120 * time.Second))
+	if b.uploadDone {
+		b.c.SetReadDeadline(time.Time{})
+	} else {
+		b.c.SetReadDeadline(time.Now().Add(uploadIdleRead))
+	}
 	b.mu.Unlock()
-	return b.r.Read(p)
+	n, err := b.r.Read(p)
+	if n > 0 && b.tracker.Feed(p[:n]) {
+		b.mu.Lock()
+		b.uploadDone = true
+		if !b.stopped {
+			b.c.SetReadDeadline(time.Time{})
+		}
+		b.mu.Unlock()
+	}
+	return n, err
 }
 
 func (b *idleBody) stop() {
@@ -346,7 +363,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NewResponseController(w).Flush()
 	// A body error must terminate the worker; a normal EOF is how Engine ends a session.
 	done := make(chan error, 1)
-	body := &idleBody{r: r.Body, c: http.NewResponseController(w)}
+	body := &idleBody{r: r.Body, c: http.NewResponseController(w), tracker: UploadTracker{Packed: framing == "2"}}
 	go func() {
 		var dst io.Writer = stdin
 		if framing == "2" {

@@ -223,3 +223,57 @@ func (s *Session) Err() error {
 	defer s.mu.Unlock()
 	return s.err
 }
+
+// UploadTracker observes an Engine upload stream (unpacked float32 or
+// X-Stems-Framing=2 packed int16) and reports when the terminal action=done
+// header has arrived, allowing HTTP servers to disarm upload idle deadlines
+// while a slow render finishes with stdin still held open.
+type UploadTracker struct {
+	Packed   bool
+	s        stream
+	init     bool
+	channels int
+	done     bool
+	bad      bool
+}
+
+// Feed advances the tracker with upload wire bytes and returns true once
+// action=done has been observed.
+func (u *UploadTracker) Feed(p []byte) bool {
+	if u.done || u.bad {
+		return u.done
+	}
+	err := u.s.feed(p, func(f map[string]string) (int64, error) {
+		if !u.init {
+			if len(f) == 0 {
+				return 0, nil
+			}
+			c, err := count(f, "numChannels", 8)
+			if err != nil || c == 0 {
+				return 0, errors.New("bad init")
+			}
+			u.init, u.channels = true, int(c)
+			return 0, nil
+		}
+		switch f["action"] {
+		case "block":
+			n, err := count(f, "numSamples", 1<<20)
+			if err != nil {
+				return 0, err
+			}
+			bps := int64(4)
+			if u.Packed {
+				bps = 2
+			}
+			return n * int64(u.channels) * bps, nil
+		case "done":
+			u.done = true
+			return 0, nil
+		}
+		return 0, errors.New("bad action")
+	})
+	if err != nil {
+		u.bad = true
+	}
+	return u.done
+}
