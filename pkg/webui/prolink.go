@@ -78,6 +78,7 @@ func mergeDevice(old, updated prolink.Device) prolink.Device {
 	}
 	if updated.PacketType != 0x0b { // absolute position packets carry no play/master/sync flags
 		res.Playing = updated.Playing
+		res.PlayState1 = updated.PlayState1 // CUE held is play mode 7, without the play flag (#217)
 		res.OnAir = updated.OnAir
 		res.Master = updated.Master
 		res.Sync = updated.Sync

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -819,7 +820,7 @@ func TestExportDeckMasterAndHandoff(t *testing.T) {
 	if b[0x89] != 0x84|0x40|0x20 || binary.BigEndian.Uint16(b[0x92:]) != 12600 || binary.BigEndian.Uint32(b[0x8c:]) != uint32(math.Round(0x100000*1.02)) || b[0x9f] != 2 {
 		t.Fatalf("master: % x", b[0x89:0xa0])
 	}
-	if req := r.handoffPacket(0x26, 0x28); len(req) != 0x28 || req[10] != 0x26 || req[0x1f] != 1 || req[0x21] != 3 || binary.BigEndian.Uint16(req[0x22:]) != 8 || req[0x27] != 3 {
+	if req := r.handoffPacket(0x26, 0x28); len(req) != 0x28 || req[10] != 0x26 || req[0x1f] != 1 || req[0x21] != 3 || binary.BigEndian.Uint16(req[0x22:]) != 4 || req[0x27] != 3 {
 		t.Fatalf("request: % x", req)
 	}
 
@@ -1052,5 +1053,408 @@ func TestExportStreamingWithoutUSB(t *testing.T) {
 	}
 	if len(lib.Tracks) != 1 || lib.Tracks[0].ID != cl.ID || strings.Join(lists, "|") != "EngineX Streaming|All Streaming|SoundCloud" {
 		t.Fatalf("after eviction: %d tracks, lists %q", len(lib.Tracks), lists)
+	}
+}
+
+// #217: a CDJ-3000 compares the firmware in our status with its own and shows
+// "Linked to player with older firmware" for as long as ours is lower. Ours is
+// the newest one a player on the link reported, never below exportFirmware.
+func TestExportFirmwareNotOlderThanPlayers(t *testing.T) {
+	status := func(fw string) []byte {
+		b := make([]byte, 0x200) // a CDJ-3000 status
+		copy(b, magic)
+		b[10], b[0x21] = 0x0a, 4
+		copy(b[11:], "CDJ-3000")
+		copy(b[0x7c:], fw)
+		return b
+	}
+	r := &exportRun{player: 3}
+	ip := net.IPv4(127, 63, 0, 2)
+	for _, c := range []struct{ heard, want string }{
+		{"", "3.30"}, {"1.44", "3.30"}, {"3.41", "3.41"}, {"3.3\x00", "3.41"}, {"x.99", "3.41"}, {"9999", "3.41"}, {"3.30", "3.41"}, {"4.02", "4.02"}, {"1.85", "4.02"},
+	} {
+		if c.heard != "" {
+			r.heardLocked(ip, status(c.heard))
+		}
+		if got := string(r.statusPacket()[0x7c:0x80]); got != c.want {
+			t.Fatalf("after %q: firmware %q, want %q", c.heard, got, c.want)
+		}
+	}
+	// The firmware string is in the status packet only: no other packet we send has one.
+	r.nfs, r.lib = &NFSServer{Root: "/media/usb"}, &rekordbox.Library{}
+	r.mac, r.ip = net.HardwareAddr{2, 0, 0, 0, 0, 1}, net.IPv4(127, 63, 0, 1)
+	for name, b := range map[string][]byte{"keepalive": r.announcement(), "media": r.mediaPacket(), "beat": r.beatPacket(ExportDeck{BPM: 120}, 0, 0), "handoff request": r.handoffPacket(0x26, 0x28), "handoff answer": r.handoffPacket(0x27, 0x2c)} {
+		if bytes.Contains(b[0x20:], []byte("3.30")) || bytes.Contains(b[0x20:], []byte("4.02")) {
+			t.Fatalf("%s carries a firmware string: % x", name, b)
+		}
+	}
+}
+
+// #217 on the wire: a player that has not told us its firmware yet gets no
+// status (the first one would carry the older version), then gets its own.
+func TestExportStatusWaitsForThePlayersFirmware(t *testing.T) {
+	root := t.TempDir()
+	testfixture.Export(t, root)
+	cfg := testExportConfig(root)
+	cfg.ProbeDuration = 80 * time.Millisecond
+	e := NewExporter(cfg)
+	defer e.Close()
+	if err := e.SetEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	cdj, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 63, 0, 2), Port: 50002})
+	if err != nil {
+		t.Skip("status port:", err)
+	}
+	defer cdj.Close()
+	discovery, _ := net.ResolveUDPAddr("udp4", e.Status().DiscoveryAddress)
+	keepalive := make([]byte, 0x36)
+	copy(keepalive, magic)
+	keepalive[10], keepalive[0x24] = 6, 4
+	copy(keepalive[12:], "CDJ-3000")
+	copy(keepalive[0x26:], []byte{2, 0, 0, 0, 0, 99})
+	cdj.WriteToUDP(keepalive, discovery)
+	waitNumber(t, e, 3, 300*time.Millisecond)
+	buf := make([]byte, 2048)
+	read := func(limit time.Duration) []byte {
+		for {
+			cdj.SetReadDeadline(time.Now().Add(limit))
+			n, _, err := cdj.ReadFromUDP(buf)
+			if err != nil {
+				return nil
+			}
+			if n >= 0x80 && buf[10] == 0x0a {
+				return buf[:n]
+			}
+		}
+	}
+	if b := read(300 * time.Millisecond); b != nil {
+		t.Fatalf("status with firmware %q before the player's own was known", b[0x7c:0x80])
+	}
+	own := make([]byte, 0x200)
+	copy(own, magic)
+	own[10], own[0x21] = 0x0a, 4
+	copy(own[11:], "CDJ-3000")
+	copy(own[0x7c:], "3.41")
+	statusAddr, _ := net.ResolveUDPAddr("udp4", e.Status().StatusAddress)
+	cdj.WriteToUDP(own, statusAddr)
+	for i := 0; i < 3; i++ {
+		b := read(time.Second)
+		if b == nil {
+			t.Fatalf("status %d: none", i)
+		}
+		if fw := string(b[0x7c:0x80]); fw != "3.41" {
+			t.Fatalf("status %d: firmware %q, want the player's 3.41", i, fw)
+		}
+	}
+	// A player that never sends status (a mixer, an old player) is not kept waiting for good.
+	e.mu.Lock()
+	r := e.run
+	e.mu.Unlock()
+	r.mu.Lock()
+	for key, p := range r.peers {
+		p.heard = false
+		p.first = time.Now().Add(-firmwareWait)
+		r.peers[key] = p
+	}
+	r.announced = time.Now().Add(-firmwareWait)
+	r.mu.Unlock()
+	if read(time.Second) == nil {
+		t.Fatal("no status for a player that sends none")
+	}
+}
+
+// #217: players broadcast on the beat port (beats, and a CDJ-3000's absolute
+// positions), and a socket bound to the interface's own address gets no
+// broadcast. Checked on Linux in a network namespace: a datagram to
+// 10.99.0.255:50001 reached the socket on 0.0.0.0:50001 only, not the one on
+// 10.99.0.1:50001.
+func TestExportBeatPortTakesBroadcasts(t *testing.T) {
+	for _, c := range []struct {
+		cfg  ExportConfig
+		ip   net.IP
+		want string
+	}{
+		{ExportConfig{}, net.IPv4(192, 168, 1, 20), "0.0.0.0:50001"},
+		{ExportConfig{}, net.IPv4(169, 254, 20, 3), "0.0.0.0:50001"},
+		{ExportConfig{BeatAddr: "127.63.0.1:0"}, net.IPv4(192, 168, 1, 20), "127.63.0.1:0"},
+		{ExportConfig{}, net.IPv4(127, 63, 0, 1), "127.63.0.1:50001"}, // isolated loopback tests
+	} {
+		if got := beatAddress(c.cfg, c.ip); got != c.want {
+			t.Fatalf("beat port for %v: %s, want %s", c.ip, got, c.want)
+		}
+	}
+}
+
+// peerStatus is another player's status packet as far as the handoff reads it.
+func peerStatus(number byte, name string, flags, mm, mh byte, syncN uint32) []byte {
+	b := make([]byte, 0x11c)
+	copy(b, magic)
+	b[10], b[0x21] = 0x0a, number
+	copy(b[11:], name)
+	copy(b[0x7c:], "1.40")
+	binary.BigEndian.PutUint32(b[0x84:], syncN)
+	b[0x89], b[0x9e], b[0x9f] = flags, mm, mh
+	return b
+}
+
+// #217: SYNC with a real CDJ worked in neither direction. What two
+// CDJ-2000nexus and a DJM-2000nexus send during a handoff is in dysentery's
+// Sync-Master capture (doc/assets/Sync-Master.pcapng, 7.98 s to 8.06 s):
+//
+//	player 2 -> 3, port 50001: type 26  01 00 02 00 04 00 00 00 02
+//	player 3 -> 2, port 50001: type 27  01 00 03 00 08 00 00 00 03 00 00 00 01
+//	player 3 status: F=ac Mm=02 Mh=02 Sync=7   (still master, names player 2)
+//	player 2 status: F=bc Mm=01 Mh=ff Sync=8   (master)
+//	player 3 status: F=8c Mm=00 Mh=ff Sync=9   (gave it up: the largest counter + 1)
+//
+// We sent the request with length 8, never set Mm, kept the counter at 0, and
+// stayed "master, handing over" for as long as Engine's own deck led.
+func TestExportHandoffAsRealPlayersDo(t *testing.T) {
+	from := func(b []byte) string { return fmt.Sprintf("% x", b[0x1f:]) }
+	if got := from((&exportRun{player: 2}).handoffPacket(0x26, 0x28)); got != "01 00 02 00 04 00 00 00 02" {
+		t.Fatalf("request: %s", got)
+	}
+	if got := from((&exportRun{player: 3}).handoffPacket(0x27, 0x2c)); got != "01 00 03 00 08 00 00 00 03 00 00 00 01" {
+		t.Fatalf("response: %s", got)
+	}
+	cdj := net.IPv4(127, 63, 0, 2)
+	look := func(r *exportRun) (flags, mm, mh byte, syncN uint32) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		b := r.statusPacket()
+		return b[0x89] & 0x20, b[0x9e], b[0x9f], binary.BigEndian.Uint32(b[0x84:])
+	}
+	heard := func(r *exportRun, b []byte) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.heardLocked(cdj, b)
+	}
+
+	// We are player 3 and master; player 2 asks for it (receiveBeats sets handoff).
+	r := &exportRun{player: 3, deck: ExportDeck{Master: true, Playing: true, BPM: 128}}
+	heard(r, peerStatus(2, "CDJ-3000", 0x8c, 0, 0xff, 8))
+	if f, mm, mh, n := look(r); f == 0 || mm != 1 || mh != 0xff || n != 1 {
+		t.Fatalf("master: F %x Mm %d Mh %x Sync %d", f, mm, mh, n)
+	}
+	r.handoff = 2
+	if f, mm, mh, _ := look(r); f == 0 || mm != 1 || mh != 2 {
+		t.Fatalf("handing over: F %x Mm %d Mh %x", f, mm, mh)
+	}
+	heard(r, peerStatus(2, "CDJ-3000", 0xbc, 1, 0xff, 8))
+	for i := 0; i < 3; i++ { // Engine's own deck still leads our decks: that is not the link's master
+		if f, mm, mh, n := look(r); f != 0 || mm != 0 || mh != 0xff || n != 9 {
+			t.Fatalf("gave it up, status %d: F %x Mm %d Mh %x Sync %d", i, f, mm, mh, n)
+		}
+	}
+	// A stopped master that sees us playing names us ("unsolicited handoff"): we take it.
+	heard(r, peerStatus(2, "CDJ-3000", 0xac, 1, 3, 8))
+	if f, mm, _, _ := look(r); f == 0 || mm != 1 {
+		t.Fatalf("named by the master: F %x Mm %d", f, mm)
+	}
+
+	// The other way: player 2 is master and one of our decks takes it.
+	e := &Exporter{}
+	r = &exportRun{player: 3, deck: ExportDeck{Master: true, Playing: true, BPM: 128}, observe: func(Device) {}}
+	e.run = r
+	wire, err := net.ListenUDP("udp4", &net.UDPAddr{IP: cdj, Port: 50001})
+	if err != nil {
+		t.Skip("beat port:", err)
+	}
+	defer wire.Close()
+	if r.beat, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 63, 0, 1)}); err != nil {
+		t.Fatal(err)
+	}
+	_, r.network, _ = net.ParseCIDR("127.0.0.0/8")
+	r.wg.Add(1)
+	go r.receiveBeats()
+	defer func() { r.beat.Close(); r.wg.Wait() }()
+	request := func(want bool) {
+		t.Helper()
+		wire.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		b := make([]byte, 64)
+		n, _, err := wire.ReadFromUDP(b)
+		if got := err == nil && n == 0x28 && b[10] == 0x26 && from(b[:n]) == "01 00 03 00 04 00 00 00 03"; got != want {
+			t.Fatalf("request on the wire: %v (%v % x), want %v", got, err, b[:max(n, 0)], want)
+		}
+	}
+	answer := func() { // player 2's 0x27, as in the capture
+		t.Helper()
+		if _, err := wire.WriteToUDP((&exportRun{player: 2}).handoffPacket(0x27, 0x2c), r.beat.LocalAddr().(*net.UDPAddr)); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	master := peerStatus(2, "CDJ-3000", 0xac, 1, 0xff, 8)
+	heard(r, master)
+	request(false) // nobody asked us to take it
+	if err := e.RequestMaster(cdj); err != nil {
+		t.Fatal(err)
+	}
+	request(true)
+	if f, mm, _, _ := look(r); f != 0 || mm != 0 {
+		t.Fatalf("two masters: ours claimed before player 2 answered (F %x Mm %d)", f, mm)
+	}
+	heard(r, master)
+	request(false) // not again at once
+	r.mu.Lock()
+	r.asked = r.asked.Add(-masterAgain)
+	r.heardLocked(cdj, master) // still master, has not named us: the request was lost
+	r.mu.Unlock()
+	request(true)
+	answer()
+	if f, mm, _, _ := look(r); f == 0 || mm != 1 {
+		t.Fatalf("after player 2's answer: F %x Mm %d", f, mm)
+	}
+	// Review of 9348a32. Only the master agrees to hand it over, and only to a player.
+	ask := func(from byte) bool { // a 0x26 from a player; whether we answered 0x27
+		t.Helper()
+		if _, err := wire.WriteToUDP((&exportRun{player: from}).handoffPacket(0x26, 0x28), r.beat.LocalAddr().(*net.UDPAddr)); err != nil {
+			t.Fatal(err)
+		}
+		wire.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		b := make([]byte, 64)
+		n, _, err := wire.ReadFromUDP(b)
+		return err == nil && n == 0x2c && b[10] == 0x27
+	}
+	for _, from := range []byte{0, 3, 7, 0x21} { // nobody, ourselves, not a player number, a mixer
+		if ask(from) {
+			t.Fatalf("agreed to hand master to %#x", from)
+		}
+	}
+	if f, _, mh, _ := look(r); f == 0 || mh != 0xff {
+		t.Fatalf("after refused requests: F %x Mh %x", f, mh)
+	}
+	// The request above was granted, and its 3 s window was still open. Player 2
+	// takes master back the regular way (asks, we agree, its status claims it);
+	// its earlier answer arriving again, late or repeated, must not take back
+	// the master we gave away.
+	if !ask(2) {
+		t.Fatal("no answer to player 2 asking the master for it")
+	}
+	if f, _, mh, _ := look(r); f == 0 || mh != 2 {
+		t.Fatalf("handing over to 2: F %x Mh %x", f, mh)
+	}
+	heard(r, peerStatus(2, "CDJ-3000", 0xbc, 1, 0xff, 8))
+	if f, _, _, _ := look(r); f != 0 {
+		t.Fatal("still master after player 2 took it")
+	}
+	answer()
+	if f, _, _, _ := look(r); f != 0 {
+		t.Fatal("a late answer to a settled request took back the master we gave away")
+	}
+	if ask(2) {
+		t.Fatal("agreed to hand over a master we do not hold")
+	}
+	// A master that never answers does not keep our deck from being master for good.
+	if err := e.RequestMaster(cdj); err != nil {
+		t.Fatal(err)
+	}
+	request(true)
+	if f, _, _, _ := look(r); f != 0 {
+		t.Fatal("claimed at once")
+	}
+	r.mu.Lock()
+	r.claimAt = time.Now().Add(-time.Millisecond)
+	r.mu.Unlock()
+	if f, mm, _, _ := look(r); f == 0 || mm != 1 {
+		t.Fatalf("no answer for %v: F %x Mm %d", masterWait, f, mm)
+	}
+	// Another EngineX deck is not asked again over Pro DJ Link: its master goes through Engine.
+	r.mu.Lock()
+	r.asked = r.asked.Add(-masterAgain)
+	r.heardLocked(cdj, peerStatus(4, "EngineX Export Beta", 0xac, 1, 0xff, 8))
+	r.mu.Unlock()
+	request(false)
+}
+
+// #217: the play mode bytes of our status, as Beat Link's virtual CDJ sends them
+// (the one players are known to follow as tempo master) and as the players in
+// the Sync-Master capture do when paused (P1 05, P3 01).
+func TestExportStatusPlayMode(t *testing.T) {
+	r := &exportRun{player: 3}
+	mode := func() [5]byte {
+		b := r.statusPacket()
+		return [5]byte{b[0x27], b[0x7b], b[0x8b], b[0x9d], b[0x9e]}
+	}
+	if got := mode(); got != [5]byte{0, 0, 0x7e, 0, 0} {
+		t.Fatalf("no deck: % x", got)
+	}
+	r.deck = ExportDeck{Master: true, Playing: true, BPM: 126}
+	if got := mode(); got != [5]byte{1, 3, 0x7a, 9, 1} {
+		t.Fatalf("playing master: % x", got)
+	}
+	r.deck = ExportDeck{Master: true, BPM: 126}
+	if got := mode(); got != [5]byte{0, 5, 0x7e, 1, 1} {
+		t.Fatalf("paused master: % x", got)
+	}
+	r.deck = ExportDeck{Playing: true, BPM: 126}
+	if got := mode(); got != [5]byte{1, 3, 0x7a, 9, 0} {
+		t.Fatalf("playing, not master: % x", got)
+	}
+	// Review of 9348a32: a master deck without beat data has no tempo to give.
+	// Its status says so: Mm 2 next to "no BPM" (7fff, ffff). Players use 2 for a
+	// master on a non-rekordbox track, "unable to send tempo and beat information"
+	// (dysentery, vcdj: byte 9e).
+	r.deck = ExportDeck{Master: true, Playing: true}
+	b := r.statusPacket()
+	if b[0x9e] != 2 || b[0x89]&0x20 == 0 || binary.BigEndian.Uint16(b[0x90:]) != 0x7fff || binary.BigEndian.Uint16(b[0x92:]) != 0xffff {
+		t.Fatalf("master without beat data: Mm %d F %x Mv %x BPM %x", b[0x9e], b[0x89], b[0x90:0x92], b[0x92:0x94])
+	}
+}
+
+// #217 review of 9348a32: a master we handed to a CDJ came back to nobody.
+// Engine's deck keeps DeckIsMaster all the while (a console's Line In CDJ has no
+// Engine deck), so nothing ever cleared "given away" until a restart.
+func TestExportTakesVacantMasterBack(t *testing.T) {
+	cdj := net.IPv4(127, 63, 0, 2)
+	r := &exportRun{player: 3, deck: ExportDeck{Master: true, Playing: true, BPM: 128}}
+	master := func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		b := r.statusPacket()
+		return b[0x89]&0x20 != 0 && b[0x9e] != 0
+	}
+	hear := func(number, flags byte) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.heardLocked(cdj, peerStatus(number, "CDJ-3000", flags, flags>>5&1, 0xff, 8))
+	}
+	give := func(to byte) {
+		t.Helper()
+		if !master() {
+			t.Fatal("not master before handing it over")
+		}
+		r.mu.Lock()
+		r.handoff = to // what receiveBeats does on its 0x26
+		r.mu.Unlock()
+		hear(to, 0xbc)
+		if master() {
+			t.Fatalf("still master after player %d took it", to)
+		}
+	}
+	// Player 2 takes it and hands it on to player 4: still theirs.
+	give(2)
+	hear(4, 0xbc)
+	hear(2, 0x9c)
+	if master() {
+		t.Fatal("took master back while player 4 holds it")
+	}
+	// Player 4 lets go and nobody else has it.
+	hear(4, 0x9c)
+	if !master() {
+		t.Fatal("master is vacant and one of our decks leads, but our status does not claim it")
+	}
+	// A player that was never master and says so changes nothing.
+	give(2)
+	hear(4, 0x9c)
+	if master() {
+		t.Fatal("a bystander's status took master back from player 2")
+	}
+	// Player 2 is switched off: no status, nothing to ask. The next claim
+	// (stream-sync: a deck took Engine's master, no live Pioneer master) takes it.
+	(&Exporter{run: r}).ClaimMaster()
+	if !master() {
+		t.Fatal("ClaimMaster left the master given away")
 	}
 }
