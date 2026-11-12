@@ -161,9 +161,22 @@ func broadcastTargets() []*net.UDPAddr {
 // DiscoverLANServer probes the LAN once and returns the base URL of the first
 // renderer that answers within timeout.
 func DiscoverLANServer(ctx context.Context, timeout time.Duration) (string, Beacon, error) {
-	conn, err := net.ListenUDP("udp4", nil)
+	var gotEndpoint string
+	var gotBeacon Beacon
+	err := discoverLANServers(ctx, timeout, func(endpoint string, b Beacon) bool {
+		gotEndpoint, gotBeacon = endpoint, b
+		return true
+	})
 	if err != nil {
 		return "", Beacon{}, err
+	}
+	return gotEndpoint, gotBeacon, nil
+}
+
+func discoverLANServers(ctx context.Context, timeout time.Duration, accept func(endpoint string, b Beacon) bool) error {
+	conn, err := net.ListenUDP("udp4", nil)
+	if err != nil {
+		return err
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(timeout))
@@ -175,11 +188,12 @@ func DiscoverLANServer(ctx context.Context, timeout time.Duration) (string, Beac
 	for _, t := range mdnsTargets() {
 		conn.WriteToUDP(query, t)
 	}
+	seen := map[string]bool{}
 	buf := make([]byte, 1024)
 	for {
 		n, from, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			return "", Beacon{}, err
+			return err
 		}
 		var b Beacon
 		if json.Unmarshal(buf[:n], &b) != nil {
@@ -188,7 +202,14 @@ func DiscoverLANServer(ctx context.Context, timeout time.Duration) (string, Beac
 		if b.Service != beaconService || b.Port < 1 || b.Port > 65535 || !lanIP(from.IP) {
 			continue
 		}
-		return "http://" + net.JoinHostPort(from.IP.String(), strconv.Itoa(b.Port)), b, nil
+		endpoint := "http://" + net.JoinHostPort(from.IP.String(), strconv.Itoa(b.Port))
+		if seen[endpoint] {
+			continue
+		}
+		seen[endpoint] = true
+		if accept(endpoint, b) {
+			return nil
+		}
 	}
 }
 
@@ -207,9 +228,13 @@ func FindLAN(ctx context.Context, statePath string, timeout time.Duration) (stri
 		st, ok = lanHealth(ctx, last.Endpoint, timeout)
 	}
 	if !ok {
-		if endpoint, _, err := DiscoverLANServer(ctx, timeout); err == nil && (relayCfg == "" || !sameEndpoint(endpoint, relayCfg)) {
+		_ = discoverLANServers(ctx, timeout, func(endpoint string, _ Beacon) bool {
+			if relayCfg != "" && sameEndpoint(endpoint, relayCfg) {
+				return false
+			}
 			st, ok = lanHealth(ctx, endpoint, timeout)
-		}
+			return ok
+		})
 	}
 	if !ok {
 		if isRelay || (last.Endpoint != "" && !lanEndpoint(last.Endpoint)) {
